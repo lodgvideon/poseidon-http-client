@@ -108,7 +108,7 @@ var huffmanCodes = [257]huffmanCode{
 	{0x7ffd, 15},      // sym 96 '`'
 	{0x3, 5},          // sym 97 'a'
 	{0x23, 6},         // sym 98 'b'
-	{0x4, 6},          // sym 99 'c'
+	{0x4, 5},          // sym 99 'c'
 	{0x24, 6},         // sym 100 'd'
 	{0x5, 5},          // sym 101 'e'
 	{0x25, 6},         // sym 102 'f'
