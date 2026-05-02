@@ -1,0 +1,31 @@
+run:
+  timeout: 5m
+  go: '1.24'
+
+linters:
+  disable-all: true
+  enable:
+    - errcheck
+    - govet
+    - staticcheck
+    - revive
+    - gosec
+    - unconvert
+    - misspell
+    - gocyclo
+    - gosimple
+    - unused
+    - prealloc
+    - ineffassign
+    - typecheck
+
+linters-settings:
+  gocyclo:
+    min-complexity: 15
+  govet:
+    enable-all: true
+
+issues:
+  exclude-use-default: false
+  max-issues-per-linter: 0
+  max-same-issues: 0
