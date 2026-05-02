@@ -159,3 +159,122 @@ func (d *Decoder) parseLiteral(src []byte, namePrefixBits uint8) (name, value []
 	value = d.scratch[valueStart:]
 	return name, value, consumed, nil
 }
+
+// Begin starts a streaming decode session.
+func (d *Decoder) Begin() {
+	d.streaming = true
+	d.pending = d.pending[:0]
+	d.scratch = d.scratch[:0]
+}
+
+// Feed appends fragment, then decodes and emits as many complete
+// representations as possible. Truncated tail remains buffered.
+func (d *Decoder) Feed(fragment []byte, visit FieldVisitor) error {
+	if !d.streaming {
+		return ErrInvalidPrefix
+	}
+	d.pending = append(d.pending, fragment...)
+	consumed, err := d.decodePartial(d.pending, visit)
+	if err != nil {
+		return err
+	}
+	d.pending = append(d.pending[:0], d.pending[consumed:]...)
+	return nil
+}
+
+// Finish validates that the streaming buffer is drained and resets state.
+func (d *Decoder) Finish() error {
+	if !d.streaming {
+		return ErrInvalidPrefix
+	}
+	defer func() {
+		d.streaming = false
+		d.pending = d.pending[:0]
+	}()
+	if len(d.pending) > 0 {
+		return ErrTruncated
+	}
+	return nil
+}
+
+// decodePartial consumes as many complete representations as fit in src.
+// Truncation in the middle of a representation is NOT an error.
+func (d *Decoder) decodePartial(src []byte, visit FieldVisitor) (int, error) {
+	consumed := 0
+	for consumed < len(src) {
+		scratchSnap := len(d.scratch)
+		n, err := d.decodeOne(src[consumed:], visit)
+		if err == ErrTruncated {
+			d.scratch = d.scratch[:scratchSnap]
+			return consumed, nil
+		}
+		if err != nil {
+			return consumed, err
+		}
+		consumed += n
+	}
+	return consumed, nil
+}
+
+// decodeOne decodes a single representation; returns bytes consumed.
+func (d *Decoder) decodeOne(src []byte, visit FieldVisitor) (int, error) {
+	if len(src) == 0 {
+		return 0, ErrTruncated
+	}
+	b := src[0]
+	switch {
+	case b&0x80 != 0:
+		idx, n, err := DecodeInteger(src, 7)
+		if err != nil {
+			return 0, err
+		}
+		name, value, err := d.lookup(idx)
+		if err != nil {
+			return 0, err
+		}
+		if err := visit(HeaderField{Name: name, Value: value}); err != nil {
+			return 0, err
+		}
+		return n, nil
+	case b&0xc0 == 0x40:
+		name, value, n, err := d.parseLiteral(src, 6)
+		if err != nil {
+			return 0, err
+		}
+		d.dt.add(name, value)
+		if err := visit(HeaderField{Name: name, Value: value}); err != nil {
+			return 0, err
+		}
+		return n, nil
+	case b&0xe0 == 0x20:
+		nval, consumed, err := DecodeInteger(src, 5)
+		if err != nil {
+			return 0, err
+		}
+		if uint32(nval) > d.maxLocal {
+			return 0, ErrTableSizeUpdate
+		}
+		d.dt.setMaxSize(uint32(nval))
+		return consumed, nil
+	case b&0xf0 == 0x10:
+		name, value, n, err := d.parseLiteral(src, 4)
+		if err != nil {
+			return 0, err
+		}
+		if err := visit(HeaderField{Name: name, Value: value, Sensitive: true}); err != nil {
+			return 0, err
+		}
+		return n, nil
+	case b&0xf0 == 0x00:
+		name, value, n, err := d.parseLiteral(src, 4)
+		if err != nil {
+			return 0, err
+		}
+		if err := visit(HeaderField{Name: name, Value: value}); err != nil {
+			return 0, err
+		}
+		return n, nil
+	default:
+		return 0, ErrInvalidPrefix
+	}
+}

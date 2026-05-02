@@ -77,3 +77,38 @@ func BenchmarkDecoder_DecodeBlock_3req_static(b *testing.B) {
 		_ = d.DecodeBlock(block, func(f HeaderField) error { return nil })
 	}
 }
+
+func TestDecoder_Streaming_SplitMidField(t *testing.T) {
+	full, _ := hex.DecodeString("400a637573746f6d2d6b65790d637573746f6d2d686561646572")
+	for splitAt := 1; splitAt < len(full); splitAt++ {
+		d := NewDecoder()
+		d.Begin()
+		var got []HeaderField
+		visit := func(f HeaderField) error {
+			got = append(got, HeaderField{
+				Name:  append([]byte{}, f.Name...),
+				Value: append([]byte{}, f.Value...),
+			})
+			return nil
+		}
+		if err := d.Feed(full[:splitAt], visit); err != nil {
+			t.Fatalf("split=%d feed1: %v", splitAt, err)
+		}
+		if err := d.Feed(full[splitAt:], visit); err != nil {
+			t.Fatalf("split=%d feed2: %v", splitAt, err)
+		}
+		if err := d.Finish(); err != nil {
+			t.Fatalf("split=%d finish: %v", splitAt, err)
+		}
+		if len(got) != 1 || string(got[0].Name) != "custom-key" || string(got[0].Value) != "custom-header" {
+			t.Fatalf("split=%d got %+v", splitAt, got)
+		}
+	}
+}
+
+func TestDecoder_Streaming_FinishWithoutBegin(t *testing.T) {
+	d := NewDecoder()
+	if err := d.Finish(); err == nil {
+		t.Fatalf("Finish without Begin should error")
+	}
+}
