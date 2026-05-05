@@ -59,10 +59,11 @@ type Stream struct {
 	w      streamWriter
 	events chan StreamEvent
 
-	mu          sync.Mutex
-	localEnded  bool // we sent END_STREAM
-	remoteEnded bool // peer sent END_STREAM (or RST)
-	closed      bool // RST or graceful close
+	mu           sync.Mutex
+	localEnded   bool // we sent END_STREAM
+	remoteEnded  bool // peer sent END_STREAM (or RST)
+	closed       bool // RST or graceful close
+	inflightDone bool // inflight slot already returned to the pool
 }
 
 func newStream(id uint32, eventBuf int, w streamWriter) *Stream {

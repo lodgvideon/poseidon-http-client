@@ -168,18 +168,8 @@ func (c *Conn) writeRSTStream(streamID uint32, code frame.ErrCode) error {
 		return err
 	}
 	c.bumpFramesSent()
-	c.smu.Lock()
-	if s, ok := c.streams[streamID]; ok && !s.closedFlag() {
-		c.inflight--
-	}
-	c.smu.Unlock()
+	c.releaseInflight(streamID)
 	return nil
-}
-
-func (s *Stream) closedFlag() bool {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.closed
 }
 
 func (c *Conn) bumpFramesSent() {
@@ -220,17 +210,45 @@ func (c *Conn) shutdownStreams(reason error) {
 }
 
 // markStreamDone is called by the connHandler when a stream's response
-// side closes (END_STREAM observed or RST received). It decrements the
-// inflight count and, in B.1, frees the slot for the next NewStream.
+// side closes (END_STREAM observed or RST received), and from local
+// SendHeaders/SendData when END_STREAM goes out. It releases the
+// stream's slot in the inflight pool exactly once.
 func (c *Conn) markStreamDone(id uint32) {
 	c.smu.Lock()
 	defer c.smu.Unlock()
-	if s, ok := c.streams[id]; ok {
-		s.mu.Lock()
-		ended := s.localEnded && s.remoteEnded
-		s.mu.Unlock()
-		if ended && c.inflight > 0 {
-			c.inflight--
-		}
+	s, ok := c.streams[id]
+	if !ok {
+		return
+	}
+	s.mu.Lock()
+	ended := s.localEnded && s.remoteEnded
+	released := s.inflightDone
+	if ended && !released {
+		s.inflightDone = true
+	}
+	s.mu.Unlock()
+	if ended && !released && c.inflight > 0 {
+		c.inflight--
+	}
+}
+
+// releaseInflight is called when an RST_STREAM is sent to the peer. RST
+// closes the stream regardless of whether either end observed END_STREAM,
+// so the inflight slot must be returned. Idempotent via Stream.inflightDone.
+func (c *Conn) releaseInflight(id uint32) {
+	c.smu.Lock()
+	defer c.smu.Unlock()
+	s, ok := c.streams[id]
+	if !ok {
+		return
+	}
+	s.mu.Lock()
+	released := s.inflightDone
+	if !released {
+		s.inflightDone = true
+	}
+	s.mu.Unlock()
+	if !released && c.inflight > 0 {
+		c.inflight--
 	}
 }
