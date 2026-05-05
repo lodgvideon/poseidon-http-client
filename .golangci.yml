@@ -27,6 +27,13 @@ linters-settings:
     disable:
       - fieldalignment
       - shadow
+  revive:
+    rules:
+      - name: unused-parameter
+        disabled: true
+      - name: exported
+        arguments:
+          - disableStutteringCheck
 
 issues:
   exclude-use-default: false

@@ -11,11 +11,13 @@ import (
 // StreamEventType discriminates the StreamEvent variants.
 type StreamEventType uint8
 
+// StreamEventType values. Use Type to dispatch which fields of
+// StreamEvent are populated.
 const (
-	EventHeaders  StreamEventType = iota + 1
-	EventData
-	EventTrailers
-	EventReset
+	EventHeaders  StreamEventType = iota + 1 // Headers populated
+	EventData                                  // Data populated
+	EventTrailers                              // Headers populated, trailers
+	EventReset                                 // RSTCode populated
 )
 
 func (t StreamEventType) String() string {
@@ -74,6 +76,7 @@ func newStream(id uint32, eventBuf int, w streamWriter) *Stream {
 	}
 }
 
+// ID returns the HTTP/2 stream identifier.
 func (s *Stream) ID() uint32 { return s.id }
 
 // markRemoteEnd is called by the connection-level frame.Handler when
