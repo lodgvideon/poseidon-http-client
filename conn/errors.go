@@ -26,6 +26,7 @@ type ConnError struct {
 	Last   uint32 // last-stream-id from the GOAWAY (0 if originated locally)
 }
 
+// Error returns a string describing the connection-fatal error.
 func (e *ConnError) Error() string {
 	return fmt.Sprintf("conn: connection error code=%v last=%d reason=%q",
 		e.Code, e.Last, e.Reason)
@@ -37,6 +38,7 @@ type StreamError struct {
 	Code     frame.ErrCode
 }
 
+// Error returns a string describing the stream reset.
 func (e *StreamError) Error() string {
 	return fmt.Sprintf("conn: stream %d reset code=%v", e.StreamID, e.Code)
 }

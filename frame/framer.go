@@ -49,6 +49,8 @@ type Framer struct {
 	smallBuf [16]byte
 }
 
+// NewFramer constructs a Framer over the given writer and reader.
+// Either side may be nil if only the other is needed.
 func NewFramer(w io.Writer, r io.Reader) *Framer {
 	rb := bytesx.GetReadBuf(int(defaultMaxFrameSize) + FrameHeaderSize)
 	return &Framer{
@@ -59,8 +61,11 @@ func NewFramer(w io.Writer, r io.Reader) *Framer {
 	}
 }
 
+// SetMaxReadFrameSize sets the read-side cap on a single frame payload.
 func (f *Framer) SetMaxReadFrameSize(n uint32)  { f.maxReadFrameSize = n }
+// SetMaxHeaderListSize sets the read-side cap on a header block.
 func (f *Framer) SetMaxHeaderListSize(n uint32) { f.maxHeaderListSize = n }
+// SetReadBuffer overrides the internal read buffer (useful for pooling).
 func (f *Framer) SetReadBuffer(buf []byte)      { f.readBuf = buf }
 
 // paddingZeros provides a constant zero buffer for padded writes.
@@ -107,6 +112,7 @@ func (f *Framer) WriteData(streamID uint32, endStream bool, data []byte) error {
 	return f.writeFrame(FrameHeader{Length: uint32(len(data)), Type: FrameData, Flags: flags, StreamID: streamID}, data)
 }
 
+// WriteDataPadded writes a DATA frame with the given padding length.
 func (f *Framer) WriteDataPadded(streamID uint32, endStream bool, data []byte, padLen uint8) error {
 	if streamID == 0 {
 		return ErrInvalidStreamID
@@ -137,6 +143,7 @@ func (f *Framer) WriteDataPadded(streamID uint32, endStream bool, data []byte, p
 	return nil
 }
 
+// WriteHeaders writes a HEADERS frame per the parameters in p.
 func (f *Framer) WriteHeaders(p WriteHeadersParams) error {
 	if p.StreamID == 0 {
 		return ErrInvalidStreamID
@@ -195,6 +202,7 @@ func (f *Framer) WriteHeaders(p WriteHeadersParams) error {
 	return nil
 }
 
+// WriteContinuation writes a CONTINUATION frame for the given stream.
 func (f *Framer) WriteContinuation(streamID uint32, endHeaders bool, blockFragment []byte) error {
 	if streamID == 0 {
 		return ErrInvalidStreamID
@@ -206,6 +214,7 @@ func (f *Framer) WriteContinuation(streamID uint32, endHeaders bool, blockFragme
 	return f.writeFrame(FrameHeader{Length: uint32(len(blockFragment)), Type: FrameContinuation, Flags: flags, StreamID: streamID}, blockFragment)
 }
 
+// WritePriority writes a PRIORITY frame.
 func (f *Framer) WritePriority(streamID uint32, p Priority) error {
 	if streamID == 0 {
 		return ErrInvalidStreamID
@@ -222,6 +231,7 @@ func (f *Framer) WritePriority(streamID uint32, p Priority) error {
 	return f.writeFrame(FrameHeader{Length: 5, Type: FramePriority, StreamID: streamID}, f.smallBuf[:5])
 }
 
+// WriteRSTStream writes an RST_STREAM frame with the given error code.
 func (f *Framer) WriteRSTStream(streamID uint32, code ErrCode) error {
 	if streamID == 0 {
 		return ErrInvalidStreamID
@@ -233,6 +243,7 @@ func (f *Framer) WriteRSTStream(streamID uint32, code ErrCode) error {
 	return f.writeFrame(FrameHeader{Length: 4, Type: FrameRSTStream, StreamID: streamID}, f.smallBuf[:4])
 }
 
+// WriteSettings writes a SETTINGS frame carrying s.
 func (f *Framer) WriteSettings(s SettingsParams) error {
 	if s.N > 16 {
 		return ErrSettingsLength
@@ -247,10 +258,12 @@ func (f *Framer) WriteSettings(s SettingsParams) error {
 	return f.writeFrame(FrameHeader{Length: uint32(len(payload)), Type: FrameSettings, StreamID: 0}, payload)
 }
 
+// WriteSettingsAck writes an empty SETTINGS frame with the ACK flag.
 func (f *Framer) WriteSettingsAck() error {
 	return f.writeFrame(FrameHeader{Length: 0, Type: FrameSettings, Flags: FlagSettingsAck, StreamID: 0}, nil)
 }
 
+// WritePushPromise writes a PUSH_PROMISE frame.
 func (f *Framer) WritePushPromise(streamID, promisedID uint32, blockFragment []byte, endHeaders bool, padLen uint8) error {
 	if streamID == 0 {
 		return ErrInvalidStreamID
@@ -294,6 +307,7 @@ func (f *Framer) WritePushPromise(streamID, promisedID uint32, blockFragment []b
 	return nil
 }
 
+// WritePing writes a PING frame, optionally with the ACK flag.
 func (f *Framer) WritePing(ack bool, data [8]byte) error {
 	flags := Flags(0)
 	if ack {
@@ -302,6 +316,7 @@ func (f *Framer) WritePing(ack bool, data [8]byte) error {
 	return f.writeFrame(FrameHeader{Length: 8, Type: FramePing, Flags: flags, StreamID: 0}, data[:])
 }
 
+// WriteGoAway writes a GOAWAY frame.
 func (f *Framer) WriteGoAway(lastStreamID uint32, code ErrCode, debug []byte) error {
 	totalLen := uint32(8 + len(debug))
 	payload := make([]byte, totalLen)
@@ -318,6 +333,7 @@ func (f *Framer) WriteGoAway(lastStreamID uint32, code ErrCode, debug []byte) er
 	return f.writeFrame(FrameHeader{Length: totalLen, Type: FrameGoAway, StreamID: 0}, payload)
 }
 
+// WriteWindowUpdate writes a WINDOW_UPDATE frame.
 func (f *Framer) WriteWindowUpdate(streamID uint32, increment uint32) error {
 	if increment == 0 {
 		return ErrZeroIncrement

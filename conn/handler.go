@@ -39,6 +39,7 @@ func newConnHandler(streams streamLookup, dec *hpack.Decoder) *connHandler {
 	}
 }
 
+// OnData implements frame.Handler.
 func (h *connHandler) OnData(fh frame.FrameHeader, p []byte, _ uint8) error {
 	s := h.streams.lookupStream(fh.StreamID)
 	if s == nil {
@@ -56,6 +57,7 @@ func (h *connHandler) OnData(fh frame.FrameHeader, p []byte, _ uint8) error {
 	return nil
 }
 
+// OnHeaders implements frame.Handler.
 func (h *connHandler) OnHeaders(fh frame.FrameHeader, hb frame.HeaderBlock, _ *frame.Priority, _ uint8) error {
 	s := h.streams.lookupStream(fh.StreamID)
 	if s == nil {
@@ -75,6 +77,7 @@ func (h *connHandler) OnHeaders(fh frame.FrameHeader, hb frame.HeaderBlock, _ *f
 	return h.emitHeaderBlock(s, hb, end, false)
 }
 
+// OnContinuation implements frame.Handler.
 func (h *connHandler) OnContinuation(fh frame.FrameHeader, hb frame.HeaderBlock) error {
 	s := h.streams.lookupStream(fh.StreamID)
 	if s == nil || h.pendingStreamID != fh.StreamID {
@@ -122,6 +125,7 @@ func (h *connHandler) OnPriority(_ frame.FrameHeader, _ frame.Priority) error {
 	return nil // deprecated by RFC 9113; ignored
 }
 
+// OnRSTStream implements frame.Handler.
 func (h *connHandler) OnRSTStream(fh frame.FrameHeader, code frame.ErrCode) error {
 	s := h.streams.lookupStream(fh.StreamID)
 	if s == nil {
@@ -135,10 +139,12 @@ func (h *connHandler) OnRSTStream(fh frame.FrameHeader, code frame.ErrCode) erro
 	return nil
 }
 
+// OnSettings implements frame.Handler.
 func (h *connHandler) OnSettings(_ frame.FrameHeader, _ frame.SettingsParams) error {
 	return nil // handled by handshakeSettings (Task 7) and conn.go control loop
 }
 
+// OnPushPromise implements frame.Handler.
 func (h *connHandler) OnPushPromise(_ frame.FrameHeader, _ uint32, _ frame.HeaderBlock, _ uint8) error {
 	return &ConnError{
 		Code:   frame.ErrCodeProtocolError,
@@ -146,14 +152,17 @@ func (h *connHandler) OnPushPromise(_ frame.FrameHeader, _ uint32, _ frame.Heade
 	}
 }
 
+// OnPing implements frame.Handler.
 func (h *connHandler) OnPing(_ frame.FrameHeader, _ [8]byte) error {
 	return nil // PING ACK is sent by conn.go (Task 9), not from here
 }
 
+// OnGoAway implements frame.Handler.
 func (h *connHandler) OnGoAway(_ frame.FrameHeader, _ uint32, _ frame.ErrCode, _ []byte) error {
 	return nil // surfaced by conn.go control loop
 }
 
+// OnWindowUpdate implements frame.Handler.
 func (h *connHandler) OnWindowUpdate(_ frame.FrameHeader, _ uint32) error {
 	return nil // B.1 does not manage flow-control windows; B.2 will
 }

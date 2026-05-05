@@ -74,12 +74,17 @@ type settingsRecorder struct {
 	ackSeen  bool
 }
 
+// OnData implements frame.Handler.
 func (r *settingsRecorder) OnData(frame.FrameHeader, []byte, uint8) error { return nil }
+// OnHeaders implements frame.Handler.
 func (r *settingsRecorder) OnHeaders(frame.FrameHeader, frame.HeaderBlock, *frame.Priority, uint8) error {
 	return nil
 }
+// OnPriority implements frame.Handler.
 func (r *settingsRecorder) OnPriority(frame.FrameHeader, frame.Priority) error { return nil }
+// OnRSTStream implements frame.Handler.
 func (r *settingsRecorder) OnRSTStream(frame.FrameHeader, frame.ErrCode) error { return nil }
+// OnSettings implements frame.Handler.
 func (r *settingsRecorder) OnSettings(fh frame.FrameHeader, s frame.SettingsParams) error {
 	if fh.Flags&frame.FlagSettingsAck != 0 {
 		r.ackSeen = true
@@ -89,12 +94,17 @@ func (r *settingsRecorder) OnSettings(fh frame.FrameHeader, s frame.SettingsPara
 	r.peerSeen = true
 	return nil
 }
+// OnPushPromise implements frame.Handler.
 func (r *settingsRecorder) OnPushPromise(frame.FrameHeader, uint32, frame.HeaderBlock, uint8) error {
 	return &ConnError{Code: frame.ErrCodeProtocolError, Reason: "PUSH_PROMISE during handshake"}
 }
+// OnPing implements frame.Handler.
 func (r *settingsRecorder) OnPing(frame.FrameHeader, [8]byte) error                         { return nil }
+// OnGoAway implements frame.Handler.
 func (r *settingsRecorder) OnGoAway(frame.FrameHeader, uint32, frame.ErrCode, []byte) error { return nil }
+// OnWindowUpdate implements frame.Handler.
 func (r *settingsRecorder) OnWindowUpdate(frame.FrameHeader, uint32) error                  { return nil }
+// OnContinuation implements frame.Handler.
 func (r *settingsRecorder) OnContinuation(frame.FrameHeader, frame.HeaderBlock) error       { return nil }
 
 var _ frame.Handler = (*settingsRecorder)(nil)

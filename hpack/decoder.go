@@ -11,6 +11,8 @@ type Decoder struct {
 	pending     []byte
 }
 
+// NewDecoder returns a fresh HPACK decoder with the default dynamic
+// table size of 4096 octets (RFC 7541).
 func NewDecoder() *Decoder {
 	return &Decoder{
 		dt:       newDynamicTable(defaultMaxDynamicTableSize),
@@ -19,6 +21,7 @@ func NewDecoder() *Decoder {
 	}
 }
 
+// SetMaxDynamicTableSize updates the local SETTINGS_HEADER_TABLE_SIZE.
 func (d *Decoder) SetMaxDynamicTableSize(n uint32) {
 	d.maxLocal = n
 	d.dt.setMaxSize(n)

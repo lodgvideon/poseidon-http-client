@@ -20,6 +20,7 @@ const (
 	EventReset                                 // RSTCode populated
 )
 
+// String returns the lowercase name of t.
 func (t StreamEventType) String() string {
 	switch t {
 	case EventHeaders:
