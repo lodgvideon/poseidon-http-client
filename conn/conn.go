@@ -7,6 +7,7 @@ import (
 	"net"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/lodgvideon/poseidon-http-client/frame"
 	"github.com/lodgvideon/poseidon-http-client/hpack"
@@ -99,7 +100,12 @@ func (c *Conn) Close() error {
 	if !c.closed.CompareAndSwap(false, true) {
 		return nil
 	}
-	// Best-effort GOAWAY (NO_ERROR).
+	// Best-effort GOAWAY (NO_ERROR). Bound the write so an unresponsive
+	// peer cannot wedge Close indefinitely (e.g. net.Pipe with no
+	// active reader, or a real TCP peer that has stopped reading).
+	if dl, ok := c.transport.(interface{ SetWriteDeadline(time.Time) error }); ok {
+		_ = dl.SetWriteDeadline(time.Now().Add(closeGoAwayDeadline))
+	}
 	c.wmu.Lock()
 	_ = c.fr.WriteGoAway(c.lastClientStreamID(), frame.ErrCodeNoError, nil)
 	c.wmu.Unlock()
@@ -107,6 +113,10 @@ func (c *Conn) Close() error {
 	<-c.readerDone
 	return nil
 }
+
+// closeGoAwayDeadline bounds the GOAWAY write during Close so an
+// unresponsive peer cannot block shutdown.
+const closeGoAwayDeadline = 200 * time.Millisecond
 
 func (c *Conn) lastClientStreamID() uint32 {
 	c.smu.Lock()
