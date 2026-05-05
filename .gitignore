@@ -1,0 +1,23 @@
+# Binaries
+*.exe
+*.test
+*.out
+
+# Coverage
+coverage.txt
+cover.out
+
+# Bench artifacts
+head.txt
+base.txt
+diff.txt
+
+# Fuzz cache (Go default)
+testdata/fuzz/*/
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
