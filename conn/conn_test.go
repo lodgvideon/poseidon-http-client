@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"net"
+	"sync"
 	"testing"
 	"time"
 
@@ -246,3 +247,38 @@ func (h captureHandler) OnPing(frame.FrameHeader, [8]byte) error                
 func (h captureHandler) OnGoAway(frame.FrameHeader, uint32, frame.ErrCode, []byte) error { return nil }
 func (h captureHandler) OnWindowUpdate(frame.FrameHeader, uint32) error                  { return nil }
 func (h captureHandler) OnContinuation(frame.FrameHeader, frame.HeaderBlock) error       { return nil }
+
+func TestConn_Close_IsIdempotent(t *testing.T) {
+	cli, srv := net.Pipe()
+	go pipeServer(t, srv, nil)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	c, err := NewClientConn(ctx, cli, ConnOptions{}.defaulted())
+	if err != nil {
+		t.Fatalf("NewClientConn: %v", err)
+	}
+	if err := c.Close(); err != nil {
+		t.Fatalf("Close 1: %v", err)
+	}
+	if err := c.Close(); err != nil {
+		t.Fatalf("Close 2: %v", err)
+	}
+}
+
+func TestConn_Close_RacedFromTwoGoroutines(t *testing.T) {
+	cli, srv := net.Pipe()
+	go pipeServer(t, srv, nil)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	c, err := NewClientConn(ctx, cli, ConnOptions{}.defaulted())
+	if err != nil {
+		t.Fatalf("NewClientConn: %v", err)
+	}
+	var wg sync.WaitGroup
+	for i := 0; i < 4; i++ {
+		wg.Add(1)
+		go func() { defer wg.Done(); _ = c.Close() }()
+	}
+	wg.Wait()
+}
+
