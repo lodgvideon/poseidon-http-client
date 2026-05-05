@@ -112,6 +112,9 @@ func (s *Stream) SendHeaders(ctx context.Context, fields []hpack.HeaderField, en
 		s.mu.Lock()
 		s.localEnded = true
 		s.mu.Unlock()
+		if c, ok := s.w.(*Conn); ok {
+			c.markStreamDone(s.id)
+		}
 	}
 	return nil
 }
@@ -130,6 +133,9 @@ func (s *Stream) SendData(ctx context.Context, p []byte, endStream bool) error {
 		s.mu.Lock()
 		s.localEnded = true
 		s.mu.Unlock()
+		if c, ok := s.w.(*Conn); ok {
+			c.markStreamDone(s.id)
+		}
 	}
 	return nil
 }

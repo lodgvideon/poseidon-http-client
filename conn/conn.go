@@ -218,3 +218,19 @@ func (c *Conn) shutdownStreams(reason error) {
 		return
 	}
 }
+
+// markStreamDone is called by the connHandler when a stream's response
+// side closes (END_STREAM observed or RST received). It decrements the
+// inflight count and, in B.1, frees the slot for the next NewStream.
+func (c *Conn) markStreamDone(id uint32) {
+	c.smu.Lock()
+	defer c.smu.Unlock()
+	if s, ok := c.streams[id]; ok {
+		s.mu.Lock()
+		ended := s.localEnded && s.remoteEnded
+		s.mu.Unlock()
+		if ended && c.inflight > 0 {
+			c.inflight--
+		}
+	}
+}

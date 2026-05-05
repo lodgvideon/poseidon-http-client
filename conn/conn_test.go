@@ -150,6 +150,82 @@ func TestConn_StreamSendHeaders_AndPeerEcho(t *testing.T) {
 	}
 }
 
+func TestConn_TwoSequentialStreams(t *testing.T) {
+	cli, srv := net.Pipe()
+	go pipeServer(t, srv, func(srvFr *frame.Framer) {
+		enc := hpack.NewEncoder()
+		respond := func(streamID uint32) {
+			_, _ = srvFr.ReadFrame(context.Background(), &nilHandler{})
+			block := enc.EncodeBlock(nil, []hpack.HeaderField{
+				{Name: []byte(":status"), Value: []byte("204")},
+			})
+			writeDone := make(chan error, 1)
+			go func() {
+				writeDone <- srvFr.WriteHeaders(frame.WriteHeadersParams{
+					StreamID:      streamID,
+					BlockFragment: block,
+					EndHeaders:    true,
+					EndStream:     true,
+				})
+			}()
+			<-writeDone
+		}
+		respond(1)
+		respond(3)
+	})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	c, err := NewClientConn(ctx, cli, ConnOptions{}.defaulted())
+	if err != nil {
+		t.Fatalf("NewClientConn: %v", err)
+	}
+	defer c.Close()
+
+	for i := 0; i < 2; i++ {
+		s, err := c.NewStream(ctx)
+		if err != nil {
+			t.Fatalf("NewStream %d: %v", i, err)
+		}
+		if err := s.SendHeaders(ctx, []hpack.HeaderField{
+			{Name: []byte(":method"), Value: []byte("GET")},
+			{Name: []byte(":scheme"), Value: []byte("http")},
+			{Name: []byte(":authority"), Value: []byte("x")},
+			{Name: []byte(":path"), Value: []byte("/")},
+		}, true); err != nil {
+			t.Fatalf("SendHeaders %d: %v", i, err)
+		}
+		ev, err := s.Recv(ctx)
+		if err != nil {
+			t.Fatalf("Recv %d: %v", i, err)
+		}
+		if !ev.EndStream {
+			t.Fatalf("event %d not end-of-stream: %+v", i, ev)
+		}
+		_ = s.Close()
+	}
+}
+
+func TestConn_NewStream_AfterClose_ReturnsErrConnClosed(t *testing.T) {
+	cli, srv := net.Pipe()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		pipeServer(t, srv, nil)
+	}()
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	c, err := NewClientConn(ctx, cli, ConnOptions{}.defaulted())
+	if err != nil {
+		t.Fatalf("NewClientConn: %v", err)
+	}
+	_ = c.Close()
+	if _, err := c.NewStream(ctx); err != ErrConnClosed {
+		t.Fatalf("err = %v, want ErrConnClosed", err)
+	}
+	<-done
+}
+
 // captureHandler records the fragment of a single HEADERS frame.
 type captureHandler struct {
 	block *bytes.Buffer
