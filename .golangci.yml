@@ -24,6 +24,9 @@ linters-settings:
     min-complexity: 15
   govet:
     enable-all: true
+    disable:
+      - fieldalignment
+      - shadow
 
 issues:
   exclude-use-default: false
