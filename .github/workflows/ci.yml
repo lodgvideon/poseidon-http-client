@@ -36,3 +36,16 @@ jobs:
         with:
           go-version: '1.24'
       - run: go test -run=Fuzz -count=1 ./...
+
+  coverage:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.24'
+          cache: true
+      - name: Run tests with coverage
+        run: go test -cover -count=1 ./... | tee cov.txt
+      - name: Per-package coverage gate (Phase A floor = 70)
+        run: ./scripts/coverage-gate.sh cov.txt 70
