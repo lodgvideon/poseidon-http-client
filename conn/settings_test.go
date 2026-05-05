@@ -1,7 +1,6 @@
 package conn
 
 import (
-	"bytes"
 	"context"
 	"net"
 	"testing"
@@ -18,9 +17,6 @@ func pipePeer(t *testing.T, srv net.Conn) {
 	t.Helper()
 	defer srv.Close()
 	preface := make([]byte, 24)
-	if _, err := bytes.NewReader([]byte{0}).Read(preface); err != nil && err.Error() != "EOF" {
-		// not fatal — only ensures the slice is allocated
-	}
 	if _, err := readN(srv, preface); err != nil {
 		t.Logf("peer read preface: %v", err)
 		return

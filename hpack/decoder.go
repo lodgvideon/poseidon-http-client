@@ -24,8 +24,11 @@ func (d *Decoder) SetMaxDynamicTableSize(n uint32) {
 	d.dt.setMaxSize(n)
 }
 
+// SetMaxHeaderListSize sets the local SETTINGS_MAX_HEADER_LIST_SIZE
+// announced to the peer.
 func (d *Decoder) SetMaxHeaderListSize(n uint32) { d.maxListSize = n }
 
+// Reset clears the dynamic table and any streaming-decode state.
 func (d *Decoder) Reset() {
 	d.dt.clear()
 	d.scratch = d.scratch[:0]

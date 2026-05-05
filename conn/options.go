@@ -27,6 +27,7 @@ func (s AdvertisedSettings) defaulted() AdvertisedSettings {
 	return s
 }
 
+// ConnOptions tunes a Conn. The zero value is sensible.
 type ConnOptions struct {
 	Dialer            Dialer
 	Settings          AdvertisedSettings

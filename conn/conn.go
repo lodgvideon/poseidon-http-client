@@ -76,6 +76,9 @@ func (c *Conn) lookupStream(id uint32) *Stream {
 	return c.streams[id]
 }
 
+// NewStream allocates a new stream. B.1 enforces at most one in-flight
+// stream per Conn; subsequent calls return ErrTooManyStreams until the
+// active stream completes.
 func (c *Conn) NewStream(ctx context.Context) (*Stream, error) {
 	if c.closed.Load() {
 		return nil, ErrConnClosed

@@ -17,6 +17,9 @@ type TLSDialer struct {
 	Config *tls.Config
 }
 
+// Dial dials addr over TCP, runs the TLS handshake with NextProtos
+// containing "h2", and returns the negotiated *tls.Conn. Returns
+// ErrALPNFailed if the peer did not select "h2".
 func (d *TLSDialer) Dial(ctx context.Context, addr string) (net.Conn, error) {
 	cfg := d.Config
 	if cfg == nil {

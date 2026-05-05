@@ -12,6 +12,8 @@ type Encoder struct {
 	hasPendingUpdate  bool
 }
 
+// NewEncoder returns a fresh HPACK encoder with the default dynamic
+// table size of 4096 octets (RFC 7541).
 func NewEncoder() *Encoder {
 	return &Encoder{
 		dt:          newDynamicTable(defaultMaxDynamicTableSize),
