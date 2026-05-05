@@ -55,7 +55,7 @@ func TestConnOptions_Defaulted_FillsAllFields(t *testing.T) {
 }
 
 func TestTLSDialer_NegotiatesH2_AgainstHttptest(t *testing.T) {
-	srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(204)
 	}))
 	srv.EnableHTTP2 = true
@@ -96,7 +96,7 @@ func TestTLSDialer_NegotiatesH2_AgainstHttptest(t *testing.T) {
 }
 
 func TestDial_AgainstHttptestServer(t *testing.T) {
-	srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(204)
 	}))
 	srv.EnableHTTP2 = true

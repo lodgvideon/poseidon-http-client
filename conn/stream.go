@@ -99,6 +99,9 @@ func (s *Stream) push(e StreamEvent) {
 	}
 }
 
+// SendHeaders sends a HEADERS frame with the given fields. Always emits
+// END_HEADERS=true (B.1 does not split into CONTINUATION). When endStream
+// is true the request side is half-closed.
 func (s *Stream) SendHeaders(ctx context.Context, fields []hpack.HeaderField, endStream bool) error {
 	s.mu.Lock()
 	if s.closed || s.localEnded {
@@ -120,6 +123,9 @@ func (s *Stream) SendHeaders(ctx context.Context, fields []hpack.HeaderField, en
 	return nil
 }
 
+// SendData sends a single DATA frame. The caller is responsible for
+// chunking p to fit the peer's MaxFrameSize. When endStream is true the
+// request side is half-closed.
 func (s *Stream) SendData(ctx context.Context, p []byte, endStream bool) error {
 	s.mu.Lock()
 	if s.closed || s.localEnded {
@@ -141,6 +147,8 @@ func (s *Stream) SendData(ctx context.Context, p []byte, endStream bool) error {
 	return nil
 }
 
+// Recv blocks until the next event for this stream is ready, the stream
+// terminates, or ctx is cancelled.
 func (s *Stream) Recv(ctx context.Context) (StreamEvent, error) {
 	select {
 	case e, ok := <-s.events:
@@ -153,6 +161,8 @@ func (s *Stream) Recv(ctx context.Context) (StreamEvent, error) {
 	}
 }
 
+// Close cancels the stream. If neither side has reached END_STREAM, sends
+// RST_STREAM(CANCEL). Idempotent.
 func (s *Stream) Close() error {
 	s.mu.Lock()
 	already := s.closed

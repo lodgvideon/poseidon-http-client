@@ -89,8 +89,8 @@ func (d *dynamicTable) evictOldest() {
 		return
 	}
 	e := d.entries[d.head]
-	d.size -= uint32(e.nameLen) + uint32(e.valueLen) + 32
-	d.used -= uint32(e.nameLen) + uint32(e.valueLen)
+	d.size -= e.nameLen + e.valueLen + 32
+	d.used -= e.nameLen + e.valueLen
 	d.head = (d.head + 1) % len(d.entries)
 	d.count--
 	if d.count == 0 {

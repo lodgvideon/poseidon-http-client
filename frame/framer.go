@@ -111,7 +111,7 @@ func (f *Framer) WriteDataPadded(streamID uint32, endStream bool, data []byte, p
 	if streamID == 0 {
 		return ErrInvalidStreamID
 	}
-	flags := Flags(FlagDataPadded)
+	flags := FlagDataPadded
 	if endStream {
 		flags |= FlagDataEndStream
 	}

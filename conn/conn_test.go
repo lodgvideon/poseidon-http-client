@@ -119,7 +119,7 @@ func TestConn_StreamSendHeaders_AndPeerEcho(t *testing.T) {
 				EndStream:     true,
 			})
 		}()
-		_ = <-writeDone // ensure write completes before goroutine returns
+		<-writeDone // ensure write completes before goroutine returns
 	})
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)

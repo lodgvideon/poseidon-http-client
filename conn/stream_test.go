@@ -49,19 +49,19 @@ type fakeStreamWriter struct {
 	lastRSTCode frame.ErrCode
 }
 
-func (w *fakeStreamWriter) writeHeaders(streamID uint32, fields []hpack.HeaderField, endStream bool) error {
+func (w *fakeStreamWriter) writeHeaders(_ uint32, _ []hpack.HeaderField, _ bool) error {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	w.headerCalls++
 	return nil
 }
-func (w *fakeStreamWriter) writeData(streamID uint32, p []byte, endStream bool) error {
+func (w *fakeStreamWriter) writeData(_ uint32, _ []byte, _ bool) error {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	w.dataCalls++
 	return nil
 }
-func (w *fakeStreamWriter) writeRSTStream(streamID uint32, code frame.ErrCode) error {
+func (w *fakeStreamWriter) writeRSTStream(_ uint32, code frame.ErrCode) error {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	w.rstCalls++

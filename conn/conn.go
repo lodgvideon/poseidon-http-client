@@ -96,6 +96,9 @@ func (c *Conn) NewStream(ctx context.Context) (*Stream, error) {
 	return s, nil
 }
 
+// Close sends a best-effort GOAWAY(NO_ERROR), closes the transport, and
+// waits for the reader goroutine to drain. Idempotent under concurrent
+// callers.
 func (c *Conn) Close() error {
 	if !c.closed.CompareAndSwap(false, true) {
 		return nil
@@ -127,6 +130,7 @@ func (c *Conn) lastClientStreamID() uint32 {
 	return c.nextID - 2
 }
 
+// Stats returns a point-in-time snapshot of connection counters.
 func (c *Conn) Stats() ConnStats {
 	c.statsMu.Lock()
 	defer c.statsMu.Unlock()
