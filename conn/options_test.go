@@ -1,6 +1,15 @@
 package conn
 
-import "testing"
+import (
+	"context"
+	"crypto/tls"
+	"crypto/x509"
+	"net"
+	"net/http"
+	"net/http/httptest"
+	"testing"
+	"time"
+)
 
 func TestAdvertisedSettings_Defaulted_FillsRFCDefaults(t *testing.T) {
 	s := AdvertisedSettings{}.defaulted()
@@ -43,4 +52,45 @@ func TestConnOptions_Defaulted_FillsAllFields(t *testing.T) {
 	if o.Dialer == nil {
 		t.Fatalf("Dialer not defaulted")
 	}
+}
+
+func TestTLSDialer_NegotiatesH2_AgainstHttptest(t *testing.T) {
+	srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(204)
+	}))
+	srv.EnableHTTP2 = true
+	srv.StartTLS()
+	defer srv.Close()
+
+	pool := x509.NewCertPool()
+	for _, c := range srv.TLS.Certificates {
+		for _, certDER := range c.Certificate {
+			cert, err := x509.ParseCertificate(certDER)
+			if err == nil {
+				pool.AddCert(cert)
+			}
+		}
+	}
+
+	d := &TLSDialer{Config: &tls.Config{
+		RootCAs:    pool,
+		ServerName: "example.com",
+	}}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	addr := srv.Listener.Addr().String()
+	c, err := d.Dial(ctx, addr)
+	if err != nil {
+		t.Fatalf("Dial: %v", err)
+	}
+	tc, ok := c.(*tls.Conn)
+	if !ok {
+		t.Fatalf("conn type = %T", c)
+	}
+	if got := tc.ConnectionState().NegotiatedProtocol; got != "h2" {
+		t.Fatalf("ALPN = %q, want h2", got)
+	}
+	_ = c.Close()
+	_ = net.IPv4zero // keep net import live if reformatted
 }
