@@ -101,6 +101,8 @@ func (f *Framer) writeFrame(h FrameHeader, payload []byte) error {
 
 // === Write side ===
 
+// WriteData writes a DATA frame for streamID with the END_STREAM flag
+// set when endStream is true.
 func (f *Framer) WriteData(streamID uint32, endStream bool, data []byte) error {
 	if streamID == 0 {
 		return ErrInvalidStreamID
@@ -348,6 +350,8 @@ func (f *Framer) WriteWindowUpdate(streamID uint32, increment uint32) error {
 
 // === Read side ===
 
+// ReadFrame reads one frame from the underlying reader and dispatches
+// it through h. Honors ctx for cancellation between frames.
 func (f *Framer) ReadFrame(ctx context.Context, h Handler) (FrameHeader, error) {
 	if f.r == nil {
 		return FrameHeader{}, errors.New("poseidon/frame: Framer has no reader")
