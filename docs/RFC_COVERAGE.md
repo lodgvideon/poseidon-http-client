@@ -35,6 +35,21 @@ and round-trip through ReadFrame. The conformance row is what the
 | §6.10   | Conformance | TestConformance_RFC7540_Sec610_ContinuationFrame |
 | §6.10   | Roundtrip   | TestFramer_Continuation_RoundTrip |
 
+### B.1 connection-layer integration
+
+Phase B.1 added a `conn/` package on top of the codec. Its tests
+exercise the wire-level surface end-to-end against a `net/http2`
+reference peer. Rows below cite tests in the `conn` package.
+
+| Section | Type        | Test |
+|---------|-------------|------|
+| §3.5    | Conformance | TestConformance_RFC7540_Sec3_ClientPreface_OnTheWire (conn) |
+| §3.5    | Integration | TestIntegration_EmptyGET (handshake + preface byte sequence on the wire) |
+| §6.5    | Integration | TestConn_HandshakeAndIdle, TestHandshakeSettings_RoundTripsAgainstPipePeer (handshake + ack roundtrip) |
+| §5.1    | Integration | TestIntegration_EmptyGET, TestIntegration_POST_1KB_Echo (single-stream end-to-end) |
+| §6.4    | Integration | TestIntegration_ContextCancel_TearsDownStream (context-cancel surfaces RST_STREAM(CANCEL)) |
+| §6.6    | Negative    | TestHandler_OnPushPromise_ReturnsConnError (PUSH_PROMISE rejected with PROTOCOL_ERROR while ENABLE_PUSH=0) |
+
 ## RFC 7541 — HPACK
 
 | Section  | Type        | Test |
