@@ -15,9 +15,9 @@ jobs:
           git checkout ${{ github.base_ref }}
           go test -bench=. -benchmem -benchtime=2s -count=5 -run=^$ ./... | tee base.txt
           git checkout -
-      - name: benchstat
+      - name: benchstat (informational)
         run: |
           go install golang.org/x/perf/cmd/benchstat@latest
           benchstat -alpha 0.05 base.txt head.txt | tee diff.txt
-      - name: Gate
-        run: ./scripts/bench-gate.sh diff.txt
+      - name: Absolute zero-alloc gate
+        run: ./scripts/bench-gate.sh head.txt
