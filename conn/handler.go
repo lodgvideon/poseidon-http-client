@@ -48,13 +48,11 @@ func (h *connHandler) OnData(fh frame.FrameHeader, p []byte, _ uint8) error {
 	dataCopy := append([]byte(nil), p...) // see B.2 TODO: pool
 	if end {
 		s.markRemoteEnd()
-	}
-	s.push(StreamEvent{Type: EventData, Data: dataCopy, EndStream: end})
-	if end {
 		if c, ok := h.streams.(*Conn); ok {
 			c.markStreamDone(fh.StreamID)
 		}
 	}
+	s.push(StreamEvent{Type: EventData, Data: dataCopy, EndStream: end})
 	return nil
 }
 
@@ -105,17 +103,15 @@ func (h *connHandler) emitHeaderBlock(s *Stream, hb []byte, endStream, isTrailer
 	}
 	if endStream {
 		s.markRemoteEnd()
+		if c, ok := h.streams.(*Conn); ok {
+			c.markStreamDone(s.id)
+		}
 	}
 	s.push(StreamEvent{
 		Type:      evType,
 		Headers:   h.scratch,
 		EndStream: endStream,
 	})
-	if endStream {
-		if c, ok := h.streams.(*Conn); ok {
-			c.markStreamDone(s.id)
-		}
-	}
 	return nil
 }
 
@@ -132,10 +128,10 @@ func (h *connHandler) OnRSTStream(fh frame.FrameHeader, code frame.ErrCode) erro
 		return nil
 	}
 	s.markRemoteEnd()
-	s.push(StreamEvent{Type: EventReset, RSTCode: code, EndStream: true})
 	if c, ok := h.streams.(*Conn); ok {
 		c.markStreamDone(fh.StreamID)
 	}
+	s.push(StreamEvent{Type: EventReset, RSTCode: code, EndStream: true})
 	return nil
 }
 
