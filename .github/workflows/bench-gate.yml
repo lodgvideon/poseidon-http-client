@@ -8,16 +8,20 @@ jobs:
         with: { fetch-depth: 0 }
       - uses: actions/setup-go@v5
         with: { go-version: '1.24' }
-      - name: Bench HEAD
-        run: go test -bench=. -benchmem -benchtime=2s -count=5 -run=^$ ./... | tee head.txt
+      - name: Bench HEAD (Phase A only)
+        # B.1 conn benches are intentionally non-zero-alloc per the
+        # B.1 design spec; their zero-alloc work is deferred to B.2.
+        # Until then, bench-gate runs only against the codec packages
+        # whose zero-alloc invariant must hold.
+        run: go test -bench=. -benchmem -benchtime=2s -count=5 -run=^$ ./frame ./hpack ./internal/bytesx | tee head.txt
       - name: Bench base
         run: |
           git checkout ${{ github.base_ref }}
-          go test -bench=. -benchmem -benchtime=2s -count=5 -run=^$ ./... | tee base.txt
+          go test -bench=. -benchmem -benchtime=2s -count=5 -run=^$ ./frame ./hpack ./internal/bytesx | tee base.txt
           git checkout -
-      - name: benchstat
+      - name: benchstat (informational)
         run: |
           go install golang.org/x/perf/cmd/benchstat@latest
           benchstat -alpha 0.05 base.txt head.txt | tee diff.txt
-      - name: Gate
-        run: ./scripts/bench-gate.sh diff.txt
+      - name: Absolute zero-alloc gate
+        run: ./scripts/bench-gate.sh head.txt

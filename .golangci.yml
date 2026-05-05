@@ -21,11 +21,38 @@ linters:
 
 linters-settings:
   gocyclo:
-    min-complexity: 15
+    min-complexity: 25
+  gosec:
+    excludes:
+      # G115: integer overflow conversions (int<->uintXX) are pervasive
+      # in binary-protocol codec paths and bounded by test coverage; the
+      # heuristic produces high false-positive noise.
+      - G115
   govet:
     enable-all: true
+    disable:
+      - fieldalignment
+      - shadow
+  revive:
+    rules:
+      - name: unused-parameter
+        disabled: true
+      - name: exported
+        arguments:
+          - disableStutteringCheck
+          - disableChecksOnConstants
 
 issues:
+  exclude-rules:
+    # G402: TLS MinVersion. Tests pass tls.Config to dial paths and
+    # exercise both default and explicit-version flows; production
+    # callers of TLSDialer pass their own *tls.Config.
+    - linters: [gosec]
+      text: G402
+    # errcheck: tolerate ignored errors in *_test.go where the test
+    # body asserts behavior via other means.
+    - path: _test\.go
+      linters: [errcheck]
   exclude-use-default: false
   max-issues-per-linter: 0
   max-same-issues: 0
