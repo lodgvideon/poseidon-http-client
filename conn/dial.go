@@ -47,3 +47,20 @@ func (d *TLSDialer) Dial(ctx context.Context, addr string) (net.Conn, error) {
 	}
 	return tc, nil
 }
+
+// Dial dials addr, runs the TLS handshake, asserts ALPN h2, and runs
+// the HTTP/2 SETTINGS exchange. The returned Conn is ready for
+// NewStream.
+func Dial(ctx context.Context, addr string, opts ConnOptions) (*Conn, error) {
+	opts = opts.defaulted()
+	transport, err := opts.Dialer.Dial(ctx, addr)
+	if err != nil {
+		return nil, err
+	}
+	c, err := NewClientConn(ctx, transport, opts)
+	if err != nil {
+		_ = transport.Close()
+		return nil, err
+	}
+	return c, nil
+}

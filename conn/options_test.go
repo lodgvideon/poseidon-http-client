@@ -94,3 +94,37 @@ func TestTLSDialer_NegotiatesH2_AgainstHttptest(t *testing.T) {
 	_ = c.Close()
 	_ = net.IPv4zero // keep net import live if reformatted
 }
+
+func TestDial_AgainstHttptestServer(t *testing.T) {
+	srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(204)
+	}))
+	srv.EnableHTTP2 = true
+	srv.StartTLS()
+	defer srv.Close()
+
+	pool := x509.NewCertPool()
+	for _, c := range srv.TLS.Certificates {
+		for _, certDER := range c.Certificate {
+			cert, err := x509.ParseCertificate(certDER)
+			if err == nil {
+				pool.AddCert(cert)
+			}
+		}
+	}
+	addr := srv.Listener.Addr().String()
+
+	opts := ConnOptions{
+		Dialer: &TLSDialer{Config: &tls.Config{
+			RootCAs:    pool,
+			ServerName: "example.com",
+		}},
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	c, err := Dial(ctx, addr, opts)
+	if err != nil {
+		t.Fatalf("Dial: %v", err)
+	}
+	defer c.Close()
+}
