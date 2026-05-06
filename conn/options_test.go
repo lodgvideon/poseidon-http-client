@@ -16,8 +16,8 @@ func TestAdvertisedSettings_Defaulted_FillsRFCDefaults(t *testing.T) {
 	if s.HeaderTableSize != 4096 {
 		t.Fatalf("HeaderTableSize = %d, want 4096", s.HeaderTableSize)
 	}
-	if s.MaxConcurrentStreams != 1 {
-		t.Fatalf("MaxConcurrentStreams = %d, want 1 (B.1 cap)", s.MaxConcurrentStreams)
+	if s.MaxConcurrentStreams != 100 {
+		t.Fatalf("MaxConcurrentStreams = %d, want 100 (B.2 default)", s.MaxConcurrentStreams)
 	}
 	if s.InitialWindowSize != 65535 {
 		t.Fatalf("InitialWindowSize = %d, want 65535", s.InitialWindowSize)
@@ -34,10 +34,10 @@ func TestAdvertisedSettings_Defaulted_PreservesNonZero(t *testing.T) {
 	}
 }
 
-func TestAdvertisedSettings_Defaulted_AlwaysCapsConcurrent(t *testing.T) {
+func TestAdvertisedSettings_Defaulted_PreservesCallerConcurrent(t *testing.T) {
 	s := AdvertisedSettings{MaxConcurrentStreams: 1000}.defaulted()
-	if s.MaxConcurrentStreams != 1 {
-		t.Fatalf("B.1 must cap to 1 even if caller asks for more, got %d", s.MaxConcurrentStreams)
+	if s.MaxConcurrentStreams != 1000 {
+		t.Fatalf("caller value lost: got %d, want 1000", s.MaxConcurrentStreams)
 	}
 }
 
@@ -46,8 +46,8 @@ func TestConnOptions_Defaulted_FillsAllFields(t *testing.T) {
 	if o.StreamEventBuffer != 8 {
 		t.Fatalf("StreamEventBuffer = %d, want 8", o.StreamEventBuffer)
 	}
-	if o.Settings.MaxConcurrentStreams != 1 {
-		t.Fatalf("nested settings cap not applied")
+	if o.Settings.MaxConcurrentStreams != 100 {
+		t.Fatalf("nested settings default not applied: %d", o.Settings.MaxConcurrentStreams)
 	}
 	if o.Dialer == nil {
 		t.Fatalf("Dialer not defaulted")

@@ -40,13 +40,22 @@ func newConnHandler(streams streamLookup, dec *hpack.Decoder) *connHandler {
 }
 
 // OnData implements frame.Handler.
+// OnData implements frame.Handler. It debits flow-control windows
+// (RFC 7540 §6.9.1), surfaces an EventData event to the stream, and
+// emits batched WINDOW_UPDATE refunds via the owning Conn. Returns a
+// typed StreamError or ConnError when the peer overruns either window.
 func (h *connHandler) OnData(fh frame.FrameHeader, p []byte, _ uint8) error {
 	s := h.streams.lookupStream(fh.StreamID)
 	if s == nil {
-		return nil // unknown stream — peer chatter, ignored in B.1
+		return nil // unknown stream — peer chatter, ignored
+	}
+	if c, ok := h.streams.(*Conn); ok {
+		if err := c.onDataReceived(s, fh.Length); err != nil {
+			return err
+		}
 	}
 	end := fh.Flags&frame.FlagDataEndStream != 0
-	dataCopy := append([]byte(nil), p...) // see B.2 TODO: pool
+	dataCopy := append([]byte(nil), p...)
 	if end {
 		s.markRemoteEnd()
 		if c, ok := h.streams.(*Conn); ok {

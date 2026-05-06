@@ -49,19 +49,19 @@ type fakeStreamWriter struct {
 	lastRSTCode frame.ErrCode
 }
 
-func (w *fakeStreamWriter) writeHeaders(_ uint32, _ []hpack.HeaderField, _ bool) error {
+func (w *fakeStreamWriter) writeHeaders(_ *Stream, _ []hpack.HeaderField, _ bool) error {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	w.headerCalls++
 	return nil
 }
-func (w *fakeStreamWriter) writeData(_ uint32, _ []byte, _ bool) error {
+func (w *fakeStreamWriter) writeData(_ *Stream, _ []byte, _ bool) error {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	w.dataCalls++
 	return nil
 }
-func (w *fakeStreamWriter) writeRSTStream(_ uint32, code frame.ErrCode) error {
+func (w *fakeStreamWriter) writeRSTStream(_ *Stream, code frame.ErrCode) error {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	w.rstCalls++
@@ -71,7 +71,7 @@ func (w *fakeStreamWriter) writeRSTStream(_ uint32, code frame.ErrCode) error {
 
 func newTestStream(buf int) (*Stream, *fakeStreamWriter) {
 	w := &fakeStreamWriter{}
-	s := newStream(1, buf, w)
+	s := newStream(1, buf, w, 65535)
 	return s, w
 }
 

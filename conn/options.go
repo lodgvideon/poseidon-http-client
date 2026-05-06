@@ -3,8 +3,8 @@ package conn
 import "time"
 
 // AdvertisedSettings is what we send to the peer in our SETTINGS frame.
-// Zero values are replaced by RFC 7540 defaults except MaxConcurrentStreams,
-// which is always capped to 1 in B.1.
+// Zero values are replaced by RFC 7540 defaults; MaxConcurrentStreams
+// defaults to 100 (B.2).
 type AdvertisedSettings struct {
 	HeaderTableSize      uint32
 	MaxConcurrentStreams uint32
@@ -17,7 +17,9 @@ func (s AdvertisedSettings) defaulted() AdvertisedSettings {
 	if s.HeaderTableSize == 0 {
 		s.HeaderTableSize = 4096
 	}
-	s.MaxConcurrentStreams = 1
+	if s.MaxConcurrentStreams == 0 {
+		s.MaxConcurrentStreams = 100
+	}
 	if s.InitialWindowSize == 0 {
 		s.InitialWindowSize = 65535
 	}

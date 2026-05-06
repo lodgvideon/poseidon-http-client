@@ -33,7 +33,7 @@ func newFakeStreamMap() *fakeStreamMap {
 }
 
 func (m *fakeStreamMap) addStream(id uint32) *Stream {
-	s := newStream(id, m.bufSize, m.w)
+	s := newStream(id, m.bufSize, m.w, 65535)
 	m.mu.Lock()
 	m.streams[id] = s
 	m.mu.Unlock()

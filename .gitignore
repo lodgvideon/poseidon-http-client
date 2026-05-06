@@ -19,5 +19,9 @@ testdata/fuzz/*/
 .vscode/
 .idea/
 
+# Local tooling caches (LSP indexes, hook state)
+.serena/
+.claude/tdd-guard/data/
+
 # OS
 .DS_Store
