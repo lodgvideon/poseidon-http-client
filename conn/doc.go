@@ -16,8 +16,12 @@
 // peer-advertised send windows have credit; OnWindowUpdate
 // replenishes those windows and Broadcasts the writer cond, with
 // 2^31-1 overflow returning a typed StreamError or ConnError.
-// Dynamic SETTINGS, peer-advertised MAX_CONCURRENT_STREAMS
-// enforcement, and GOAWAY-received drain remain B.2.4-B.2.6 work.
+// Phase B.2.4 wires dynamic SETTINGS: connHandler.OnSettings merges
+// non-ACK frames into c.peerSettings, applies side effects
+// (HPACK encoder resize, retroactive INITIAL_WINDOW_SIZE delta on
+// every open stream — RFC §6.9.2), and emits a SETTINGS ACK.
+// Peer-advertised MAX_CONCURRENT_STREAMS enforcement and
+// GOAWAY-received drain remain B.2.5-B.2.6 work.
 //
 // *Conn is goroutine-safe across Send/Recv/Close. *Stream methods may
 // be called from one goroutine at a time; the package serializes writes

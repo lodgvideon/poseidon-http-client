@@ -4,10 +4,11 @@ A low-level, zero-allocation HTTP/2 client for Go, designed for load
 generators. Implements RFC 7540 (HTTP/2) and RFC 7541 (HPACK) from
 scratch without `net/http` or `golang.org/x/net/http2`.
 
-**Status:** Phase B.2.3 — TLS+ALPN connection, multi-stream
-(configurable `MaxConcurrentStreams`, default 100), receive- and
-send-side flow control with chunked DATA writes and WINDOW_UPDATE
-refunds. See
+**Status:** Phase B.2.4 — TLS+ALPN connection, multi-stream
+(configurable `MaxConcurrentStreams`, default 100), bidirectional flow
+control with chunked DATA writes and batched WINDOW_UPDATE refunds,
+dynamic SETTINGS apply + ACK with retroactive
+`INITIAL_WINDOW_SIZE` resize. See
 [design](docs/superpowers/specs/2026-05-05-poseidon-conn-layer-b1-design.md).
 
 ## Phases
@@ -22,13 +23,18 @@ refunds. See
 - **B.2.2 — Flow control IN** *(released)*: per-stream + connection
   recv windows, batched WINDOW_UPDATE refunds at 32 KiB threshold,
   typed `FLOW_CONTROL_ERROR` on peer overrun (RFC 7540 §6.9.1).
-- **B.2.3 — Flow control OUT** *(this release)*: chunked DATA writes
+- **B.2.3 — Flow control OUT** *(released)*: chunked DATA writes
   at `min(peer MAX_FRAME_SIZE, our advertised MAX_FRAME_SIZE)`,
   blocking `acquireSendCredits` until per-stream + connection
   send-window credit, `OnWindowUpdate` replenishment, 2^31-1
   overflow as typed `StreamError` / `ConnError`.
-- **B.2.4-B.2.6 — Dynamic SETTINGS, peer-advertised
-  MAX_CONCURRENT_STREAMS, GOAWAY drain** *(planned)*.
+- **B.2.4 — Dynamic SETTINGS** *(this release)*:
+  `connHandler.OnSettings` merges non-ACK frames into
+  `c.peerSettings`, applies side effects (HPACK encoder resize,
+  retroactive `INITIAL_WINDOW_SIZE` delta on every open stream — RFC
+  §6.9.2), and emits a SETTINGS ACK (RFC §6.5.3).
+- **B.2.5-B.2.6 — peer-advertised `MAX_CONCURRENT_STREAMS`,
+  GOAWAY drain** *(planned)*.
 - **C — Client + pool + discovery + stats** *(planned)*: public API for
   load generators.
 

@@ -22,6 +22,10 @@ type Conn struct {
 	opts      ConnOptions
 
 	// peerSettings is the most recently observed server SETTINGS.
+	// Guarded by psMu: written by handshake / connHandler.OnSettings,
+	// read by writeData (chunking decision) and writeHeaders (initial
+	// per-stream send-window seed).
+	psMu         sync.RWMutex
 	peerSettings frame.SettingsParams
 
 	wmu sync.Mutex // serializes all writes to fr
@@ -84,7 +88,13 @@ func NewClientConn(ctx context.Context, transport net.Conn, opts ConnOptions) (*
 		_ = transport.Close()
 		return nil, err
 	}
+	c.psMu.Lock()
 	c.peerSettings = peer
+	c.psMu.Unlock()
+	// Apply the initial peer SETTINGS to encoder / streams (no streams
+	// exist yet, so this just propagates HEADER_TABLE_SIZE to the
+	// HPACK encoder when the peer advertised one).
+	c.applyInitialPeerSettings(peer)
 	go c.readerLoop()
 	return c, nil
 }
@@ -216,8 +226,11 @@ func (c *Conn) writeHeaders(_ context.Context, s *Stream, fields []hpack.HeaderF
 		// Seed the per-stream outbound flow-control window from the
 		// peer's most recently observed SETTINGS_INITIAL_WINDOW_SIZE
 		// (RFC 7540 §6.9.2; default 65535).
+		c.psMu.RLock()
+		initial := settingValue(c.peerSettings, frame.SettingInitialWindowSize, connInitialRecvWindow)
+		c.psMu.RUnlock()
 		s.mu.Lock()
-		s.sendWindow = int32(settingValue(c.peerSettings, frame.SettingInitialWindowSize, connInitialRecvWindow))
+		s.sendWindow = int32(initial)
 		s.mu.Unlock()
 	}
 	block := c.enc.EncodeBlock(nil, fields)
@@ -244,7 +257,9 @@ func (c *Conn) writeData(ctx context.Context, s *Stream, p []byte, endStream boo
 	}
 	// Chunk at the minimum of peer's advertised MAX_FRAME_SIZE and our
 	// own (the framer's outgoing cap matches our advertised value).
+	c.psMu.RLock()
 	peerMax := settingValue(c.peerSettings, frame.SettingMaxFrameSize, 16384)
+	c.psMu.RUnlock()
 	ourMax := c.opts.Settings.MaxFrameSize
 	maxFrame := int(peerMax)
 	if int(ourMax) < maxFrame {
@@ -478,6 +493,110 @@ func (c *Conn) onWindowUpdate(streamID uint32, increment uint32) error {
 	c.fcOutMu.Lock()
 	c.fcOutCond.Broadcast()
 	c.fcOutMu.Unlock()
+	return nil
+}
+
+// applyInitialPeerSettings is called once after the handshake returns
+// the peer's first SETTINGS frame. There are no open streams yet, so
+// only the connection-scoped knobs (HPACK table size) need to be
+// propagated; the per-stream INITIAL_WINDOW_SIZE will be picked up
+// when the first stream calls writeHeaders.
+func (c *Conn) applyInitialPeerSettings(peer frame.SettingsParams) {
+	for i := 0; i < peer.N; i++ {
+		p := peer.Pairs[i]
+		if p.ID == frame.SettingHeaderTableSize {
+			c.enc.SetMaxDynamicTableSize(p.Value)
+		}
+	}
+}
+
+// applyPeerSettings handles a non-ACK SETTINGS frame received after
+// the handshake. It merges each pair into c.peerSettings, applies the
+// side effects (HPACK encoder resize, retroactive INITIAL_WINDOW_SIZE
+// delta on every open stream, updated MAX_FRAME_SIZE picked up by the
+// next writeData call), and returns a typed ConnError if the
+// INITIAL_WINDOW_SIZE delta would push any stream's send window past
+// 2^31-1 (RFC 7540 §6.9.2).
+func (c *Conn) applyPeerSettings(s frame.SettingsParams) error {
+	const maxWindow = int64(1<<31 - 1)
+
+	c.psMu.Lock()
+	oldInitial := settingValue(c.peerSettings, frame.SettingInitialWindowSize, connInitialRecvWindow)
+	for i := 0; i < s.N; i++ {
+		p := s.Pairs[i]
+		setPeerSetting(&c.peerSettings, p.ID, p.Value)
+	}
+	newInitial := settingValue(c.peerSettings, frame.SettingInitialWindowSize, connInitialRecvWindow)
+	c.psMu.Unlock()
+
+	for i := 0; i < s.N; i++ {
+		p := s.Pairs[i]
+		switch p.ID {
+		case frame.SettingHeaderTableSize:
+			c.enc.SetMaxDynamicTableSize(p.Value)
+		case frame.SettingInitialWindowSize:
+			// retroactively re-apply to all streams below
+		}
+	}
+
+	if newInitial != oldInitial {
+		delta := int64(newInitial) - int64(oldInitial)
+		c.smu.Lock()
+		victims := make([]*Stream, 0, len(c.streams))
+		for _, st := range c.streams {
+			victims = append(victims, st)
+		}
+		c.smu.Unlock()
+
+		for _, st := range victims {
+			st.mu.Lock()
+			newWin := int64(st.sendWindow) + delta
+			if newWin > maxWindow {
+				st.mu.Unlock()
+				return &ConnError{Code: frame.ErrCodeFlowControlError, Reason: "SETTINGS_INITIAL_WINDOW_SIZE delta overflowed a stream send window"}
+			}
+			st.sendWindow = int32(newWin)
+			st.mu.Unlock()
+		}
+
+		// Wake any writers blocked on send credit — the delta may
+		// have just unblocked them.
+		c.fcOutMu.Lock()
+		c.fcOutCond.Broadcast()
+		c.fcOutMu.Unlock()
+	}
+	return nil
+}
+
+// setPeerSetting merges a single SETTINGS pair into params, replacing
+// any prior value for the same ID. The 16-pair array is large enough
+// for every defined setting in RFC 7540 §6.5.2 (IDs 0x1..0x6).
+func setPeerSetting(params *frame.SettingsParams, id frame.SettingID, val uint32) {
+	for i := 0; i < params.N; i++ {
+		if params.Pairs[i].ID == id {
+			params.Pairs[i].Value = val
+			return
+		}
+	}
+	if params.N < len(params.Pairs) {
+		params.Pairs[params.N] = frame.SettingPair{ID: id, Value: val}
+		params.N++
+	}
+}
+
+// writeSettingsAck emits a SETTINGS frame with ACK=1 in response to a
+// peer SETTINGS frame (RFC 7540 §6.5.3). Called from the reader loop;
+// takes wmu briefly.
+func (c *Conn) writeSettingsAck() error {
+	if c.closed.Load() {
+		return ErrConnClosed
+	}
+	c.wmu.Lock()
+	defer c.wmu.Unlock()
+	if err := c.fr.WriteSettingsAck(); err != nil {
+		return err
+	}
+	c.bumpFramesSent()
 	return nil
 }
 

@@ -149,8 +149,23 @@ func (h *connHandler) OnRSTStream(fh frame.FrameHeader, code frame.ErrCode) erro
 }
 
 // OnSettings implements frame.Handler.
-func (h *connHandler) OnSettings(_ frame.FrameHeader, _ frame.SettingsParams) error {
-	return nil // handled by handshakeSettings (Task 7) and conn.go control loop
+// OnSettings implements frame.Handler. ACK frames are accepted
+// silently. Non-ACK SETTINGS are merged into Conn.peerSettings, side
+// effects applied (HPACK encoder resize, retroactive
+// INITIAL_WINDOW_SIZE delta on open streams), and a SETTINGS ACK is
+// written back per RFC 7540 §6.5.3.
+func (h *connHandler) OnSettings(fh frame.FrameHeader, s frame.SettingsParams) error {
+	if fh.Flags&frame.FlagSettingsAck != 0 {
+		return nil
+	}
+	c, ok := h.streams.(*Conn)
+	if !ok {
+		return nil
+	}
+	if err := c.applyPeerSettings(s); err != nil {
+		return err
+	}
+	return c.writeSettingsAck()
 }
 
 // OnPushPromise implements frame.Handler.
