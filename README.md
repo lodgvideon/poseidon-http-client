@@ -4,18 +4,20 @@ A low-level, zero-allocation HTTP/2 client for Go, designed for load
 generators. Implements RFC 7540 (HTTP/2) and RFC 7541 (HPACK) from
 scratch without `net/http` or `golang.org/x/net/http2`.
 
-**Status:** Phase B.1 — TLS+ALPN connection, single in-flight stream.
-See [design](docs/superpowers/specs/2026-05-05-poseidon-conn-layer-b1-design.md).
+**Status:** Phase B.2.1 — TLS+ALPN connection, multi-stream (configurable
+`MaxConcurrentStreams`, default 100). See
+[design](docs/superpowers/specs/2026-05-05-poseidon-conn-layer-b1-design.md).
 
 ## Phases
 
 - **A — Frame layer + HPACK** *(released)*: codec only, no networking.
-- **B.1 — Connection layer (single stream)** *(this release)*: TLS+ALPN
-  dial, SETTINGS handshake, one in-flight stream end-to-end against
+- **B.1 — Connection layer (single stream)** *(released)*: TLS+ALPN dial,
+  SETTINGS handshake, one in-flight stream end-to-end against
   net/http2.Server.
-- **B.2 — Multiplex + flow control** *(planned)*: full RFC 7540 §5.1
-  state machine, per-stream and per-conn flow control,
-  GOAWAY/keep-alive.
+- **B.2.1 — Multi-stream foundation** *(this release)*: lifted single-stream
+  cap, configurable `MaxConcurrentStreams`, deferred stream-id allocation
+  under writer mutex (RFC 7540 §5.1.1 monotonic ordering).
+- **B.2.2-B.2.6 — Flow control + dynamic SETTINGS + GOAWAY drain** *(planned)*.
 - **C — Client + pool + discovery + stats** *(planned)*: public API for
   load generators.
 
@@ -87,9 +89,9 @@ import (
 
 - `conn.Conn` is goroutine-safe across `NewStream` / `Close`. `Stream`
   methods may be called from one goroutine at a time.
-- B.1 enforces **one in-flight stream per Conn** (returns
-  `ErrTooManyStreams` if exceeded). Sequential streams on the same
-  Conn are allowed.
+- B.2.1 enforces a **locally advertised `MaxConcurrentStreams`** cap
+  per Conn (default 100; returns `ErrTooManyStreams` if exceeded).
+  Peer-advertised limit enforcement is B.2.5.
 - `frame.Framer`, `hpack.Encoder`, `hpack.Decoder` are NOT
   goroutine-safe — `conn.Conn` owns one of each per connection and
   serializes access internally.

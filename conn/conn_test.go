@@ -67,32 +67,31 @@ func TestConn_HandshakeAndIdle(t *testing.T) {
 	<-done
 }
 
-func TestConn_NewStream_RespectsConcurrencyOne(t *testing.T) {
+func TestConn_NewStream_RespectsAdvertisedLimit(t *testing.T) {
 	cli, srv := net.Pipe()
 	go pipeServer(t, srv, func(srvFr *frame.Framer) {
-		// Idle the server side; client will open one stream then try a
-		// second, which must fail.
+		// Idle: client opens MaxConcurrentStreams streams then a final
+		// allocation must fail before any frames go out.
 		_, _ = srvFr.ReadFrame(context.Background(), &nilHandler{})
 	})
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
-	c, err := NewClientConn(ctx, cli, ConnOptions{}.defaulted())
+	opts := ConnOptions{Settings: AdvertisedSettings{MaxConcurrentStreams: 2}}.defaulted()
+	c, err := NewClientConn(ctx, cli, opts)
 	if err != nil {
 		t.Fatalf("NewClientConn: %v", err)
 	}
 	defer c.Close()
 
-	s1, err := c.NewStream(ctx)
-	if err != nil {
+	if _, err := c.NewStream(ctx); err != nil {
 		t.Fatalf("NewStream 1: %v", err)
 	}
-	if s1.ID() != 1 {
-		t.Fatalf("first stream id = %d, want 1", s1.ID())
+	if _, err := c.NewStream(ctx); err != nil {
+		t.Fatalf("NewStream 2: %v", err)
 	}
-
 	if _, err := c.NewStream(ctx); err != ErrTooManyStreams {
-		t.Fatalf("NewStream 2 err = %v, want ErrTooManyStreams", err)
+		t.Fatalf("NewStream 3 err = %v, want ErrTooManyStreams", err)
 	}
 }
 

@@ -51,9 +51,9 @@ type StreamEvent struct {
 // streamWriter is the narrow surface a *Stream needs from its owner Conn.
 // Tests fake this out; production code wires it to *Conn.
 type streamWriter interface {
-	writeHeaders(streamID uint32, fields []hpack.HeaderField, endStream bool) error
-	writeData(streamID uint32, p []byte, endStream bool) error
-	writeRSTStream(streamID uint32, code frame.ErrCode) error
+	writeHeaders(s *Stream, fields []hpack.HeaderField, endStream bool) error
+	writeData(s *Stream, p []byte, endStream bool) error
+	writeRSTStream(s *Stream, code frame.ErrCode) error
 }
 
 // Stream is one in-flight HTTP/2 stream.
@@ -96,7 +96,7 @@ func (s *Stream) push(e StreamEvent) {
 	default:
 		// Channel full -- drop and reset to protect the reader. Callers
 		// who care must drain Recv promptly.
-		_ = s.w.writeRSTStream(s.id, frame.ErrCodeRefusedStream)
+		_ = s.w.writeRSTStream(s, frame.ErrCodeRefusedStream)
 		s.mu.Lock()
 		s.closed = true
 		s.mu.Unlock()
@@ -106,6 +106,12 @@ func (s *Stream) push(e StreamEvent) {
 // SendHeaders sends a HEADERS frame with the given fields. Always emits
 // END_HEADERS=true (B.1 does not split into CONTINUATION). When endStream
 // is true the request side is half-closed.
+// SendHeaders sends a HEADERS frame with the given fields. When called
+// for the first time on a Stream, the connection assigns the stream ID
+// under the writer mutex, ensuring the on-wire ID order matches RFC
+// 7540 §5.1.1's monotonic-id rule. Always emits END_HEADERS=true (B.1
+// does not split into CONTINUATION). When endStream is true the request
+// side is half-closed.
 func (s *Stream) SendHeaders(ctx context.Context, fields []hpack.HeaderField, endStream bool) error {
 	s.mu.Lock()
 	if s.closed || s.localEnded {
@@ -113,7 +119,7 @@ func (s *Stream) SendHeaders(ctx context.Context, fields []hpack.HeaderField, en
 		return ErrStreamClosed
 	}
 	s.mu.Unlock()
-	if err := s.w.writeHeaders(s.id, fields, endStream); err != nil {
+	if err := s.w.writeHeaders(s, fields, endStream); err != nil {
 		return err
 	}
 	if endStream {
@@ -130,6 +136,8 @@ func (s *Stream) SendHeaders(ctx context.Context, fields []hpack.HeaderField, en
 // SendData sends a single DATA frame. The caller is responsible for
 // chunking p to fit the peer's MaxFrameSize. When endStream is true the
 // request side is half-closed.
+// SendData sends a single DATA frame. The caller must call SendHeaders
+// first; the request side is half-closed when endStream is true.
 func (s *Stream) SendData(ctx context.Context, p []byte, endStream bool) error {
 	s.mu.Lock()
 	if s.closed || s.localEnded {
@@ -137,7 +145,7 @@ func (s *Stream) SendData(ctx context.Context, p []byte, endStream bool) error {
 		return ErrStreamClosed
 	}
 	s.mu.Unlock()
-	if err := s.w.writeData(s.id, p, endStream); err != nil {
+	if err := s.w.writeData(s, p, endStream); err != nil {
 		return err
 	}
 	if endStream {
@@ -176,5 +184,5 @@ func (s *Stream) Close() error {
 	if already || bothEnded {
 		return nil
 	}
-	return s.w.writeRSTStream(s.id, frame.ErrCodeCancel)
+	return s.w.writeRSTStream(s, frame.ErrCodeCancel)
 }

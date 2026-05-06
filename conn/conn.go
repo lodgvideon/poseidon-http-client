@@ -79,19 +79,33 @@ func (c *Conn) lookupStream(id uint32) *Stream {
 // NewStream allocates a new stream. B.1 enforces at most one in-flight
 // stream per Conn; subsequent calls return ErrTooManyStreams until the
 // active stream completes.
+// NewStream allocates a new outbound stream. Returns ErrTooManyStreams
+// when the in-flight count has reached the locally advertised
+// MaxConcurrentStreams (peer-advertised enforcement is B.2.5).
+// NewStream allocates an in-flight slot for a new outbound stream. The
+// stream's HTTP/2 ID is assigned later, when SendHeaders writes the
+// first HEADERS frame under the writer mutex; this preserves the
+// monotonic-id ordering required by RFC 7540 §5.1.1 even with many
+// concurrent NewStream callers. Returns ErrTooManyStreams when the
+// in-flight count has reached the locally advertised
+// MaxConcurrentStreams (peer-advertised enforcement is B.2.5).
+// NewStream allocates an in-flight slot for a new outbound stream. The
+// stream's HTTP/2 ID is assigned later, when SendHeaders writes the
+// first HEADERS frame under the writer mutex; this preserves the
+// monotonic-id ordering required by RFC 7540 §5.1.1 even with many
+// concurrent NewStream callers. Returns ErrTooManyStreams when the
+// in-flight count has reached the locally advertised
+// MaxConcurrentStreams (peer-advertised enforcement is B.2.5).
 func (c *Conn) NewStream(ctx context.Context) (*Stream, error) {
 	if c.closed.Load() {
 		return nil, ErrConnClosed
 	}
 	c.smu.Lock()
 	defer c.smu.Unlock()
-	if c.inflight >= 1 { // B.1 cap
+	if c.inflight >= c.opts.Settings.MaxConcurrentStreams {
 		return nil, ErrTooManyStreams
 	}
-	id := c.nextID
-	c.nextID += 2 // odd-only client stream IDs
-	s := newStream(id, c.opts.StreamEventBuffer, c)
-	c.streams[id] = s
+	s := newStream(0, c.opts.StreamEventBuffer, c)
 	c.inflight++
 	c.statsMu.Lock()
 	c.stats.StreamsOpened++
@@ -142,15 +156,22 @@ func (c *Conn) Stats() ConnStats {
 
 // --- streamWriter implementation (called from *Stream).
 
-func (c *Conn) writeHeaders(streamID uint32, fields []hpack.HeaderField, endStream bool) error {
+func (c *Conn) writeHeaders(s *Stream, fields []hpack.HeaderField, endStream bool) error {
 	if c.closed.Load() {
 		return ErrConnClosed
 	}
 	c.wmu.Lock()
 	defer c.wmu.Unlock()
+	if s.id == 0 {
+		c.smu.Lock()
+		s.id = c.nextID
+		c.nextID += 2
+		c.streams[s.id] = s
+		c.smu.Unlock()
+	}
 	block := c.enc.EncodeBlock(nil, fields)
 	err := c.fr.WriteHeaders(frame.WriteHeadersParams{
-		StreamID:      streamID,
+		StreamID:      s.id,
 		BlockFragment: block,
 		EndHeaders:    true,
 		EndStream:     endStream,
@@ -162,30 +183,39 @@ func (c *Conn) writeHeaders(streamID uint32, fields []hpack.HeaderField, endStre
 	return nil
 }
 
-func (c *Conn) writeData(streamID uint32, p []byte, endStream bool) error {
+func (c *Conn) writeData(s *Stream, p []byte, endStream bool) error {
 	if c.closed.Load() {
 		return ErrConnClosed
 	}
+	if s.id == 0 {
+		// SendHeaders has not run; the stream has no on-wire identity.
+		return ErrStreamClosed
+	}
 	c.wmu.Lock()
 	defer c.wmu.Unlock()
-	if err := c.fr.WriteData(streamID, endStream, p); err != nil {
+	if err := c.fr.WriteData(s.id, endStream, p); err != nil {
 		return err
 	}
 	c.bumpFramesSent()
 	return nil
 }
 
-func (c *Conn) writeRSTStream(streamID uint32, code frame.ErrCode) error {
+func (c *Conn) writeRSTStream(s *Stream, code frame.ErrCode) error {
+	if s.id == 0 {
+		// Stream never reached the wire; no peer state to reset.
+		c.releaseUnassignedInflight(s)
+		return nil
+	}
 	if c.closed.Load() {
 		return ErrConnClosed
 	}
 	c.wmu.Lock()
 	defer c.wmu.Unlock()
-	if err := c.fr.WriteRSTStream(streamID, code); err != nil {
+	if err := c.fr.WriteRSTStream(s.id, code); err != nil {
 		return err
 	}
 	c.bumpFramesSent()
-	c.releaseInflight(streamID)
+	c.releaseInflight(s.id)
 	return nil
 }
 
@@ -230,6 +260,11 @@ func (c *Conn) shutdownStreams(reason error) {
 // side closes (END_STREAM observed or RST received), and from local
 // SendHeaders/SendData when END_STREAM goes out. It releases the
 // stream's slot in the inflight pool exactly once.
+// markStreamDone is called by the connHandler when a stream's response
+// side closes (END_STREAM observed or RST received), and from local
+// SendHeaders/SendData when END_STREAM goes out. It releases the
+// stream's slot in the inflight pool exactly once and evicts the
+// stream from the registry once both ends have closed.
 func (c *Conn) markStreamDone(id uint32) {
 	c.smu.Lock()
 	defer c.smu.Unlock()
@@ -244,14 +279,21 @@ func (c *Conn) markStreamDone(id uint32) {
 		s.inflightDone = true
 	}
 	s.mu.Unlock()
-	if ended && !released && c.inflight > 0 {
-		c.inflight--
+	if ended && !released {
+		if c.inflight > 0 {
+			c.inflight--
+		}
+		delete(c.streams, id)
 	}
 }
 
 // releaseInflight is called when an RST_STREAM is sent to the peer. RST
 // closes the stream regardless of whether either end observed END_STREAM,
 // so the inflight slot must be returned. Idempotent via Stream.inflightDone.
+// releaseInflight is called when an RST_STREAM is sent to the peer. RST
+// closes the stream regardless of whether either end observed END_STREAM,
+// so the inflight slot must be returned and the stream evicted from the
+// registry. Idempotent via Stream.inflightDone.
 func (c *Conn) releaseInflight(id uint32) {
 	c.smu.Lock()
 	defer c.smu.Unlock()
@@ -259,6 +301,26 @@ func (c *Conn) releaseInflight(id uint32) {
 	if !ok {
 		return
 	}
+	s.mu.Lock()
+	released := s.inflightDone
+	if !released {
+		s.inflightDone = true
+	}
+	s.mu.Unlock()
+	if !released {
+		if c.inflight > 0 {
+			c.inflight--
+		}
+		delete(c.streams, id)
+	}
+}
+
+// releaseUnassignedInflight returns the slot for a Stream that was
+// allocated via NewStream but never wrote a HEADERS frame, so it is not
+// in c.streams and has no on-wire ID. Idempotent via inflightDone.
+func (c *Conn) releaseUnassignedInflight(s *Stream) {
+	c.smu.Lock()
+	defer c.smu.Unlock()
 	s.mu.Lock()
 	released := s.inflightDone
 	if !released {
