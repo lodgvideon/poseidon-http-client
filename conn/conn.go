@@ -51,6 +51,12 @@ type Conn struct {
 	fcOutCond           *sync.Cond
 	peerConnSendWindow  int32
 
+	// goAwayReceived flags that the peer has sent GOAWAY (RFC 7540
+	// §6.8). New NewStream calls return ErrGoAway; existing streams
+	// whose id is ≤ goAwayLastStreamID continue.
+	goAwayReceived     atomic.Bool
+	goAwayLastStreamID atomic.Uint32
+
 	closed     atomic.Bool
 	readerDone chan struct{}
 
@@ -135,6 +141,9 @@ func (c *Conn) lookupStream(id uint32) *Stream {
 func (c *Conn) NewStream(ctx context.Context) (*Stream, error) {
 	if c.closed.Load() {
 		return nil, ErrConnClosed
+	}
+	if c.goAwayReceived.Load() {
+		return nil, ErrGoAway
 	}
 	c.smu.Lock()
 	defer c.smu.Unlock()
@@ -606,6 +615,61 @@ func (c *Conn) writeSettingsAck() error {
 	c.wmu.Lock()
 	defer c.wmu.Unlock()
 	if err := c.fr.WriteSettingsAck(); err != nil {
+		return err
+	}
+	c.bumpFramesSent()
+	return nil
+}
+
+// onGoAwayReceived stores the peer's GOAWAY state and resets every
+// stream whose id is strictly greater than lastStreamID — those
+// streams the peer never accepted (RFC 7540 §6.8). Streams with id
+// ≤ lastStreamID continue. Wakes writers blocked on send credit so
+// they observe the GOAWAY-induced flow termination via subsequent
+// SendData calls (which still go through, until the peer closes the
+// transport).
+func (c *Conn) onGoAwayReceived(lastStreamID uint32, _ frame.ErrCode) {
+	c.goAwayLastStreamID.Store(lastStreamID)
+	c.goAwayReceived.Store(true)
+
+	c.smu.Lock()
+	victims := make([]*Stream, 0)
+	for id, s := range c.streams {
+		if id > lastStreamID {
+			victims = append(victims, s)
+		}
+	}
+	c.smu.Unlock()
+
+	for _, s := range victims {
+		// Surface the cancellation as REFUSED_STREAM — the peer never
+		// processed our HEADERS, so it is safe for the caller to retry
+		// on a fresh connection.
+		select {
+		case s.events <- StreamEvent{Type: EventReset, RSTCode: frame.ErrCodeRefusedStream, EndStream: true}:
+		default:
+		}
+		s.markRemoteEnd()
+		s.mu.Lock()
+		s.localEnded = true
+		s.mu.Unlock()
+		c.markStreamDone(s.id)
+	}
+
+	c.fcOutMu.Lock()
+	c.fcOutCond.Broadcast()
+	c.fcOutMu.Unlock()
+}
+
+// writePingAck emits a PING frame with ACK=1 and the peer's payload
+// echoed back (RFC 7540 §6.7).
+func (c *Conn) writePingAck(payload [8]byte) error {
+	if c.closed.Load() {
+		return ErrConnClosed
+	}
+	c.wmu.Lock()
+	defer c.wmu.Unlock()
+	if err := c.fr.WritePing(true, payload); err != nil {
 		return err
 	}
 	c.bumpFramesSent()

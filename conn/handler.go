@@ -177,13 +177,33 @@ func (h *connHandler) OnPushPromise(_ frame.FrameHeader, _ uint32, _ frame.Heade
 }
 
 // OnPing implements frame.Handler.
-func (h *connHandler) OnPing(_ frame.FrameHeader, _ [8]byte) error {
-	return nil // PING ACK is sent by conn.go (Task 9), not from here
+// OnPing implements frame.Handler. Non-ACK PING frames are echoed
+// back with ACK=1 and the same opaque 8-byte payload (RFC 7540 §6.7).
+// ACK frames are silently accepted — B.2.6 does not initiate active
+// PINGs, so we never expect ACKs of our own.
+func (h *connHandler) OnPing(fh frame.FrameHeader, payload [8]byte) error {
+	if fh.Flags&frame.FlagPingAck != 0 {
+		return nil
+	}
+	c, ok := h.streams.(*Conn)
+	if !ok {
+		return nil
+	}
+	return c.writePingAck(payload)
 }
 
 // OnGoAway implements frame.Handler.
-func (h *connHandler) OnGoAway(_ frame.FrameHeader, _ uint32, _ frame.ErrCode, _ []byte) error {
-	return nil // surfaced by conn.go control loop
+// OnGoAway implements frame.Handler. Records the peer's GOAWAY state
+// on the *Conn so future NewStream calls return ErrGoAway, drains any
+// streams whose id exceeds lastStreamID with EventReset(REFUSED_STREAM)
+// per RFC 7540 §6.8, and wakes writers blocked on send credit.
+func (h *connHandler) OnGoAway(_ frame.FrameHeader, lastStreamID uint32, code frame.ErrCode, _ []byte) error {
+	c, ok := h.streams.(*Conn)
+	if !ok {
+		return nil
+	}
+	c.onGoAwayReceived(lastStreamID, code)
+	return nil
 }
 
 // OnWindowUpdate implements frame.Handler.
