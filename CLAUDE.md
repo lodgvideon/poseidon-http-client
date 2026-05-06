@@ -133,12 +133,56 @@ section's behavior.
 
 ## Tooling notes
 
-- The `tdd-guard@latest` npm hook (PreToolUse on Edit/Write) currently
-  errors out against the `z.ai` Anthropic-compatible endpoint
-  (`Failed to ... is not valid JSON`). When that happens, edits via
-  the `Edit` / `Write` tools are blocked. **Fallback:** use the
-  `mcp__serena__*` tools — `replace_symbol_body`, `insert_after_symbol`,
-  `create_text_file`. They go through a different matcher and succeed.
+### Serena — primary code editor (always prefer over Edit/Write)
+
+Serena is an LSP-backed semantic MCP. Use it for **all Go edits** in
+this repo. Two reasons: (1) symbol-aware — understands Go structure,
+not just text; (2) bypasses `tdd-guard` PreToolUse hook that fires on
+`Edit`/`Write` and currently errors out against the `z.ai` endpoint.
+
+**Session start**: call `mcp__serena__initial_instructions` once, then
+activate project:
+```
+mcp__plugin_serena_serena__activate_project  projectPath=/Users/ivanprikhodko/work/source/poseidon-http-client
+```
+`create_text_file` requires the project to be active.
+
+**Go `name_path` patterns** (pass to `find_symbol`, `replace_symbol_body`, etc.):
+
+| Target | name_path |
+|---|---|
+| Top-level func/var/const | `FunctionName` |
+| Method | `TypeName/MethodName` |
+| Nested struct field | `TypeName/FieldName` |
+| nth overload | `TypeName/MethodName[1]` |
+| Interface method | `InterfaceName/MethodName` |
+
+Pass `relative_path` to restrict search to one file (e.g. `conn/conn.go`).
+
+**Core tools** (prefix `mcp__serena__` or `mcp__plugin_serena_serena__`):
+
+| Tool | When to use |
+|---|---|
+| `get_symbols_overview` | Orient before editing a file |
+| `find_symbol` | Locate a specific func/type by name_path |
+| `replace_symbol_body` | Replace a function/method body in place |
+| `insert_after_symbol` | Add new func/method after named symbol |
+| `insert_before_symbol` | Add before named symbol |
+| `rename_symbol` | Rename across whole codebase (LSP refactor) |
+| `safe_delete_symbol` | Delete only if no references remain |
+| `find_referencing_symbols` | All call-sites / uses of a symbol |
+| `find_implementations` | Concrete types satisfying an interface |
+| `get_diagnostics_for_file` | LSP errors/warnings after an edit |
+| `create_text_file` | Create or fully overwrite a file |
+| `search_for_pattern` | Regex/literal search across files |
+| `find_file` | Locate file by name glob |
+
+**Known caveat**: `replace_symbol_body` on a `var (...)` sentinel block
+strips the `var()` wrapper and produces invalid syntax. Workaround:
+rewrite the whole file with `create_text_file`.
+
+### Other notes
+
 - `commit-commands` plugin enforces a 50-char subject line and rejects
   AI co-author trailers — keep commit subjects short and don't add
   `Co-Authored-By` lines.
