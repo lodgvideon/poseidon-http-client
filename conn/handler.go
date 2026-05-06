@@ -172,8 +172,17 @@ func (h *connHandler) OnGoAway(_ frame.FrameHeader, _ uint32, _ frame.ErrCode, _
 }
 
 // OnWindowUpdate implements frame.Handler.
-func (h *connHandler) OnWindowUpdate(_ frame.FrameHeader, _ uint32) error {
-	return nil // B.1 does not manage flow-control windows; B.2 will
+// OnWindowUpdate implements frame.Handler. It replenishes the
+// connection-level (streamID==0) or per-stream outbound send window
+// and wakes any writers blocked in acquireSendCredits. Returns a
+// typed error when the increment would overflow the window
+// (RFC 7540 §6.9.1: 2^31-1).
+func (h *connHandler) OnWindowUpdate(fh frame.FrameHeader, increment uint32) error {
+	c, ok := h.streams.(*Conn)
+	if !ok {
+		return nil
+	}
+	return c.onWindowUpdate(fh.StreamID, increment)
 }
 
 // Compile-time check that *connHandler satisfies frame.Handler.
