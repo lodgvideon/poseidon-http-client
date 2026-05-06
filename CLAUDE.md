@@ -181,6 +181,24 @@ Pass `relative_path` to restrict search to one file (e.g. `conn/conn.go`).
 strips the `var()` wrapper and produces invalid syntax. Workaround:
 rewrite the whole file with `create_text_file`.
 
+**Serena memory** — project-scoped notes that persist across sessions.
+Stored inside the serena project, not in Claude's own memory system.
+Use for codebase facts that would otherwise be re-derived every session
+(e.g. lock ordering, invariants, API decisions).
+
+| Tool | When to use |
+|---|---|
+| `write_memory` | Save a new note (key + body) |
+| `read_memory` | Read a specific note by key |
+| `list_memories` | List all stored keys |
+| `edit_memory` | Update existing note body |
+| `rename_memory` | Rename a key |
+| `delete_memory` | Remove a note |
+
+Notes survive MCP restarts; they are **not** git-tracked. Keep them
+complementary to CLAUDE.md: CLAUDE.md for team-visible conventions,
+serena memory for session-derived insights not worth a commit.
+
 ### Other notes
 
 - `commit-commands` plugin enforces a 50-char subject line and rejects
