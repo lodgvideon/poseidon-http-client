@@ -4,12 +4,12 @@ A low-level, zero-allocation HTTP/2 client for Go, designed for load
 generators. Implements RFC 7540 (HTTP/2) and RFC 7541 (HPACK) from
 scratch without `net/http` or `golang.org/x/net/http2`.
 
-**Status:** Phase B.2.5 — TLS+ALPN connection, multi-stream
-(configurable `MaxConcurrentStreams`, default 100, gated on
-`min(local, peer-advertised)`), bidirectional flow control with
-chunked DATA writes and batched WINDOW_UPDATE refunds, dynamic
-SETTINGS apply + ACK with retroactive `INITIAL_WINDOW_SIZE` resize.
-See
+**Status:** Phase B.2.6 (B.2 complete) — TLS+ALPN connection,
+multi-stream (configurable `MaxConcurrentStreams`, default 100,
+gated on `min(local, peer-advertised)`), bidirectional flow control,
+dynamic SETTINGS apply + ACK with retroactive `INITIAL_WINDOW_SIZE`
+resize, GOAWAY drain (`ErrGoAway` on new streams; `REFUSED_STREAM`
+on streams above `lastStreamID`), PING ACK echo. See
 [design](docs/superpowers/specs/2026-05-05-poseidon-conn-layer-b1-design.md).
 
 ## Phases
@@ -34,11 +34,16 @@ See
   `c.peerSettings`, applies side effects (HPACK encoder resize,
   retroactive `INITIAL_WINDOW_SIZE` delta on every open stream — RFC
   §6.9.2), and emits a SETTINGS ACK (RFC §6.5.3).
-- **B.2.5 — Peer-advertised `MAX_CONCURRENT_STREAMS`** *(this
-  release)*: `NewStream` gates inflight on
+- **B.2.5 — Peer-advertised `MAX_CONCURRENT_STREAMS`** *(released)*:
+  `NewStream` gates inflight on
   `min(local advertised, peer-advertised)`; dynamic shrinks refuse
   new streams without disturbing open ones (RFC §6.5.2).
-- **B.2.6 — GOAWAY drain + PING ACK** *(planned)*.
+- **B.2.6 — GOAWAY drain + PING ACK** *(this release)*: peer GOAWAY
+  records state on `*Conn`, drains streams above `lastStreamID` with
+  `EventReset(REFUSED_STREAM)`, blocks new `NewStream` with
+  `ErrGoAway`, wakes writers stuck on send credit (RFC §6.8); inbound
+  non-ACK PING echoes back with `ACK=1` and the same 8-byte payload
+  (RFC §6.7).
 - **C — Client + pool + discovery + stats** *(planned)*: public API for
   load generators.
 
