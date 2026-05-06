@@ -10,12 +10,30 @@ import (
 // Sentinel errors. All are stable across releases; callers may use
 // errors.Is to identify them.
 var (
-	ErrALPNFailed            = errors.New("conn: ALPN did not negotiate h2")
-	ErrTooManyStreams        = errors.New("conn: B.1 supports one in-flight stream per Conn")
-	ErrConnClosed            = errors.New("conn: connection closed")
-	ErrStreamClosed          = errors.New("conn: stream already closed")
-	ErrFlowControlExhausted  = errors.New("conn: send window too small for payload")
+	// ErrALPNFailed is returned when the TLS handshake completed but
+	// the negotiated ALPN protocol is not "h2".
+	ErrALPNFailed = errors.New("conn: ALPN did not negotiate h2")
+	// ErrTooManyStreams is returned by NewStream when the in-flight
+	// count already equals min(local advertised, peer-advertised)
+	// MaxConcurrentStreams.
+	ErrTooManyStreams = errors.New("conn: in-flight stream cap reached")
+	// ErrConnClosed is returned by every public method once the *Conn
+	// has been Close'd or its reader loop has exited.
+	ErrConnClosed = errors.New("conn: connection closed")
+	// ErrStreamClosed is returned by SendHeaders / SendData / Recv
+	// once the stream has been reset locally or by the peer.
+	ErrStreamClosed = errors.New("conn: stream already closed")
+	// ErrFlowControlExhausted is reserved for future explicit
+	// non-blocking write paths; B.2.3 always blocks instead.
+	ErrFlowControlExhausted = errors.New("conn: send window too small for payload")
+	// ErrUnexpectedPushPromise is surfaced when the peer sends a
+	// PUSH_PROMISE despite our handshake advertising ENABLE_PUSH=0.
 	ErrUnexpectedPushPromise = errors.New("conn: peer sent PUSH_PROMISE while ENABLE_PUSH=0")
+	// ErrGoAway is returned by NewStream once the peer has sent a
+	// GOAWAY frame: existing streams whose ID is ≤ the GOAWAY's
+	// last-stream-id continue, but no new streams may be opened on
+	// this connection (RFC 7540 §6.8).
+	ErrGoAway = errors.New("conn: peer sent GOAWAY; no new streams")
 )
 
 // ConnError is connection-fatal. After it is returned the Conn is dead
