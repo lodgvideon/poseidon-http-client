@@ -35,7 +35,7 @@ and round-trip through ReadFrame. The conformance row is what the
 | §6.10   | Conformance | TestConformance_RFC7540_Sec610_ContinuationFrame |
 | §6.10   | Roundtrip   | TestFramer_Continuation_RoundTrip |
 
-### B.1 / B.2.1 / B.2.2 / B.2.3 connection-layer integration
+### B.1 / B.2.1 / B.2.2 / B.2.3 / B.2.4 connection-layer integration
 
 Phase B.1 added a `conn/` package on top of the codec. Phase B.2.1
 lifts the single-stream cap to a configurable
@@ -52,8 +52,12 @@ adds outbound flow control: `writeData` chunks at
 in `acquireSendCredits` until both per-stream and connection-level
 peer-advertised send windows have credit; `OnWindowUpdate` bumps
 those windows and broadcasts the writer cond; 2^31-1 overflow on
-either scope returns a typed `StreamError` / `ConnError`. Rows below
-cite tests in the `conn` package.
+either scope returns a typed `StreamError` / `ConnError`. Phase B.2.4
+adds dynamic SETTINGS handling: `connHandler.OnSettings` merges
+non-ACK frames into `c.peerSettings`, applies side effects
+(HPACK encoder resize, retroactive `INITIAL_WINDOW_SIZE` delta on
+every open stream — RFC §6.9.2), and emits a SETTINGS ACK
+(RFC §6.5.3). Rows below cite tests in the `conn` package.
 
 | Section | Type        | Test |
 |---------|-------------|------|
@@ -71,6 +75,10 @@ cite tests in the `conn` package.
 | §6.9.1  | Integration | TestIntegration_LargePOST_RespectsPeerSendWindow (200 KiB upload completes via WINDOW_UPDATE-driven send credit) |
 | §6.9.1  | Unit        | TestConn_AcquireSendCredits_BlocksUntilWindowUpdate, TestConn_AcquireSendCredits_HonorsCtxCancel, TestConn_WriteData_ChunksByPeerMaxFrameSize |
 | §6.9.1  | Negative    | TestConn_OnWindowUpdate_OverflowsConn_ReturnsConnError, TestConn_OnWindowUpdate_OverflowsStream_ReturnsStreamError |
+| §6.5.3  | Unit        | TestOnSettings_AckFlag_IsNoop, TestOnSettings_NonAck_WritesAckFrame |
+| §6.9.2  | Unit        | TestApplyPeerSettings_InitialWindowSizeDelta_AppliesToAllStreams, TestApplyPeerSettings_NegativeDelta_AllowsNegativeWindow |
+| §6.9.2  | Negative    | TestApplyPeerSettings_OverflowDelta_ReturnsConnError |
+| §6.5.2  | Unit        | TestSetPeerSetting_MergesAndReplaces, TestApplyPeerSettings_HeaderTableSize_PropagatesToEncoder |
 
 ## RFC 7541 — HPACK
 
