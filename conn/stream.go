@@ -67,13 +67,25 @@ type Stream struct {
 	remoteEnded  bool // peer sent END_STREAM (or RST)
 	closed       bool // RST or graceful close
 	inflightDone bool // inflight slot already returned to the pool
+
+	// recvWindow is the number of payload bytes the peer can still
+	// send to *this* stream before we must refill it via WINDOW_UPDATE
+	// (RFC 7540 §6.9.1). Initialized from our advertised
+	// SETTINGS_INITIAL_WINDOW_SIZE; debited by every received DATA
+	// frame's full payload length, including padding.
+	recvWindow int32
+	// recvRefundPending is the number of bytes we have already debited
+	// but not yet returned to the peer via a WINDOW_UPDATE. Reset when
+	// the connection emits a WINDOW_UPDATE for this stream.
+	recvRefundPending uint32
 }
 
-func newStream(id uint32, eventBuf int, w streamWriter) *Stream {
+func newStream(id uint32, eventBuf int, w streamWriter, recvWindow int32) *Stream {
 	return &Stream{
-		id:     id,
-		w:      w,
-		events: make(chan StreamEvent, eventBuf),
+		id:         id,
+		w:          w,
+		events:     make(chan StreamEvent, eventBuf),
+		recvWindow: recvWindow,
 	}
 }
 

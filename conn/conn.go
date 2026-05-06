@@ -31,6 +31,12 @@ type Conn struct {
 	streams  map[uint32]*Stream
 	inflight uint32
 
+	// fcMu guards the connection-level recv window. The corresponding
+	// per-stream window lives on Stream and is guarded by Stream.mu.
+	fcMu              sync.Mutex
+	connRecvWindow    int32  // bytes the peer can still send to us at the conn level (RFC 7540 §6.9.1)
+	connRefundPending uint32 // bytes consumed but not yet returned via WINDOW_UPDATE(stream=0)
+
 	closed     atomic.Bool
 	readerDone chan struct{}
 
@@ -51,14 +57,15 @@ type ConnStats struct {
 func NewClientConn(ctx context.Context, transport net.Conn, opts ConnOptions) (*Conn, error) {
 	opts = opts.defaulted()
 	c := &Conn{
-		transport:  transport,
-		fr:         frame.NewFramer(transport, transport),
-		enc:        hpack.NewEncoder(),
-		dec:        hpack.NewDecoder(),
-		opts:       opts,
-		nextID:     1,
-		streams:    map[uint32]*Stream{},
-		readerDone: make(chan struct{}),
+		transport:      transport,
+		fr:             frame.NewFramer(transport, transport),
+		enc:            hpack.NewEncoder(),
+		dec:            hpack.NewDecoder(),
+		opts:           opts,
+		nextID:         1,
+		streams:        map[uint32]*Stream{},
+		readerDone:     make(chan struct{}),
+		connRecvWindow: int32(connInitialRecvWindow),
 	}
 	peer, err := handshakeSettings(ctx, c.fr, opts.Settings)
 	if err != nil {
@@ -96,6 +103,13 @@ func (c *Conn) lookupStream(id uint32) *Stream {
 // concurrent NewStream callers. Returns ErrTooManyStreams when the
 // in-flight count has reached the locally advertised
 // MaxConcurrentStreams (peer-advertised enforcement is B.2.5).
+// NewStream allocates an in-flight slot for a new outbound stream. The
+// stream's HTTP/2 ID is assigned later, when SendHeaders writes the
+// first HEADERS frame under the writer mutex; this preserves the
+// monotonic-id ordering required by RFC 7540 §5.1.1 even with many
+// concurrent NewStream callers. Returns ErrTooManyStreams when the
+// in-flight count has reached the locally advertised
+// MaxConcurrentStreams (peer-advertised enforcement is B.2.5).
 func (c *Conn) NewStream(ctx context.Context) (*Stream, error) {
 	if c.closed.Load() {
 		return nil, ErrConnClosed
@@ -105,7 +119,7 @@ func (c *Conn) NewStream(ctx context.Context) (*Stream, error) {
 	if c.inflight >= c.opts.Settings.MaxConcurrentStreams {
 		return nil, ErrTooManyStreams
 	}
-	s := newStream(0, c.opts.StreamEventBuffer, c)
+	s := newStream(0, c.opts.StreamEventBuffer, c, int32(c.opts.Settings.InitialWindowSize))
 	c.inflight++
 	c.statsMu.Lock()
 	c.stats.StreamsOpened++
@@ -137,6 +151,18 @@ func (c *Conn) Close() error {
 // closeGoAwayDeadline bounds the GOAWAY write during Close so an
 // unresponsive peer cannot block shutdown.
 const closeGoAwayDeadline = 200 * time.Millisecond
+
+// connInitialRecvWindow is the connection-level recv window size. RFC
+// 7540 §6.9.2 fixes this at 65535 octets at handshake; the
+// SETTINGS_INITIAL_WINDOW_SIZE we advertise affects per-stream windows
+// only, never the connection window.
+const connInitialRecvWindow = 65535
+
+// recvWindowRefundThreshold is the minimum number of bytes accumulated
+// before we batch a WINDOW_UPDATE refund. Half of the default window
+// keeps refund frames at one per ~32 KiB of data and bounds peer-side
+// stalls to at most that much in-flight without a window credit.
+const recvWindowRefundThreshold = 32768
 
 func (c *Conn) lastClientStreamID() uint32 {
 	c.smu.Lock()
@@ -216,6 +242,84 @@ func (c *Conn) writeRSTStream(s *Stream, code frame.ErrCode) error {
 	}
 	c.bumpFramesSent()
 	c.releaseInflight(s.id)
+	return nil
+}
+
+// onDataReceived debits both the stream-level and connection-level
+// recv windows for a DATA frame whose total payload is `length` bytes
+// (RFC 7540 §6.9.1: includes the data, the pad-length octet, and the
+// padding). Returns an error to abort the connection (peer
+// FLOW_CONTROL_ERROR) or the stream when its window is exceeded. On
+// success it eagerly accumulates a refund counter and, once the
+// per-stream or connection counter crosses recvWindowRefundThreshold,
+// emits a WINDOW_UPDATE for that scope.
+// onDataReceived debits both the stream-level and connection-level
+// recv windows for a DATA frame whose total payload is `length` bytes
+// (RFC 7540 §6.9.1: includes the data, the pad-length octet, and the
+// padding). Returns an error to abort the connection (peer
+// FLOW_CONTROL_ERROR) or the stream when its window is exceeded. On
+// success it eagerly accumulates a refund counter and, once the
+// per-stream or connection counter crosses recvWindowRefundThreshold,
+// emits a WINDOW_UPDATE for that scope.
+func (c *Conn) onDataReceived(s *Stream, length uint32) error {
+	debit := int32(length)
+
+	s.mu.Lock()
+	s.recvWindow -= debit
+	if s.recvWindow < 0 {
+		s.mu.Unlock()
+		return &StreamError{StreamID: s.id, Code: frame.ErrCodeFlowControlError}
+	}
+	s.recvRefundPending += length
+	streamRefund := uint32(0)
+	if s.recvRefundPending >= recvWindowRefundThreshold {
+		streamRefund = s.recvRefundPending
+		s.recvRefundPending = 0
+		s.recvWindow += int32(streamRefund)
+	}
+	s.mu.Unlock()
+
+	c.fcMu.Lock()
+	c.connRecvWindow -= debit
+	if c.connRecvWindow < 0 {
+		c.fcMu.Unlock()
+		return &ConnError{Code: frame.ErrCodeFlowControlError, Reason: "peer overflowed connection recv window"}
+	}
+	c.connRefundPending += length
+	connRefund := uint32(0)
+	if c.connRefundPending >= recvWindowRefundThreshold {
+		connRefund = c.connRefundPending
+		c.connRefundPending = 0
+		c.connRecvWindow += int32(connRefund)
+	}
+	c.fcMu.Unlock()
+
+	if streamRefund > 0 {
+		if err := c.writeWindowUpdate(s.id, streamRefund); err != nil {
+			return err
+		}
+	}
+	if connRefund > 0 {
+		if err := c.writeWindowUpdate(0, connRefund); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// writeWindowUpdate emits a WINDOW_UPDATE frame for the given scope
+// (streamID==0 means connection-level). Called from the reader loop
+// after a refund threshold trip; takes wmu briefly.
+func (c *Conn) writeWindowUpdate(streamID uint32, increment uint32) error {
+	if c.closed.Load() {
+		return ErrConnClosed
+	}
+	c.wmu.Lock()
+	defer c.wmu.Unlock()
+	if err := c.fr.WriteWindowUpdate(streamID, increment); err != nil {
+		return err
+	}
+	c.bumpFramesSent()
 	return nil
 }
 

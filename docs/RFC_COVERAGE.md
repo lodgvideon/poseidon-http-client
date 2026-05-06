@@ -35,15 +35,19 @@ and round-trip through ReadFrame. The conformance row is what the
 | §6.10   | Conformance | TestConformance_RFC7540_Sec610_ContinuationFrame |
 | §6.10   | Roundtrip   | TestFramer_Continuation_RoundTrip |
 
-### B.1 / B.2.1 connection-layer integration
+### B.1 / B.2.1 / B.2.2 connection-layer integration
 
 Phase B.1 added a `conn/` package on top of the codec. Phase B.2.1
 lifts the single-stream cap to a configurable
 `AdvertisedSettings.MaxConcurrentStreams` (default 100) and assigns
 stream IDs at first-HEADERS write time under the writer mutex,
 preserving the RFC 7540 §5.1.1 monotonic-id ordering across
-concurrent `NewStream` callers. Rows below cite tests in the
-`conn` package.
+concurrent `NewStream` callers. Phase B.2.2 wires receive-side
+flow control: per-stream and connection recv windows debited on each
+inbound DATA frame (RFC 7540 §6.9.1); WINDOW_UPDATE refunds batched
+once an accumulated counter crosses 32 KiB; peer overruns surface as
+typed `StreamError` / `ConnError(FLOW_CONTROL_ERROR)`. Rows below
+cite tests in the `conn` package.
 
 | Section | Type        | Test |
 |---------|-------------|------|
@@ -55,6 +59,9 @@ concurrent `NewStream` callers. Rows below cite tests in the
 | §5.1.1  | Unit        | TestConn_NewStream_RespectsAdvertisedLimit, TestConn_NewStream_ConcurrentAllocation_RespectsCap |
 | §6.4    | Integration | TestIntegration_ContextCancel_TearsDownStream (context-cancel surfaces RST_STREAM(CANCEL)) |
 | §6.6    | Negative    | TestHandler_OnPushPromise_ReturnsConnError (PUSH_PROMISE rejected with PROTOCOL_ERROR while ENABLE_PUSH=0) |
+| §6.9.1  | Integration | TestIntegration_LargeBody_RefundsRecvWindow_NoStall (>65535-byte body completes only when WINDOW_UPDATE is emitted) |
+| §6.9.1  | Unit        | TestConn_OnData_EmitsWindowUpdate_OnceThresholdReached (per-stream + conn refund frames) |
+| §6.9.1  | Negative    | TestConn_OnData_PeerOverflowsConnWindow_ReturnsConnError, TestConn_OnData_PeerOverflowsStreamWindow_ReturnsStreamError |
 
 ## RFC 7541 — HPACK
 

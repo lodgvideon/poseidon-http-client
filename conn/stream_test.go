@@ -71,7 +71,7 @@ func (w *fakeStreamWriter) writeRSTStream(_ *Stream, code frame.ErrCode) error {
 
 func newTestStream(buf int) (*Stream, *fakeStreamWriter) {
 	w := &fakeStreamWriter{}
-	s := newStream(1, buf, w)
+	s := newStream(1, buf, w, 65535)
 	return s, w
 }
 

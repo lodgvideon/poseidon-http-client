@@ -4,8 +4,9 @@ A low-level, zero-allocation HTTP/2 client for Go, designed for load
 generators. Implements RFC 7540 (HTTP/2) and RFC 7541 (HPACK) from
 scratch without `net/http` or `golang.org/x/net/http2`.
 
-**Status:** Phase B.2.1 — TLS+ALPN connection, multi-stream (configurable
-`MaxConcurrentStreams`, default 100). See
+**Status:** Phase B.2.2 — TLS+ALPN connection, multi-stream
+(configurable `MaxConcurrentStreams`, default 100), receive-side flow
+control with batched WINDOW_UPDATE refunds. See
 [design](docs/superpowers/specs/2026-05-05-poseidon-conn-layer-b1-design.md).
 
 ## Phases
@@ -14,10 +15,14 @@ scratch without `net/http` or `golang.org/x/net/http2`.
 - **B.1 — Connection layer (single stream)** *(released)*: TLS+ALPN dial,
   SETTINGS handshake, one in-flight stream end-to-end against
   net/http2.Server.
-- **B.2.1 — Multi-stream foundation** *(this release)*: lifted single-stream
-  cap, configurable `MaxConcurrentStreams`, deferred stream-id allocation
-  under writer mutex (RFC 7540 §5.1.1 monotonic ordering).
-- **B.2.2-B.2.6 — Flow control + dynamic SETTINGS + GOAWAY drain** *(planned)*.
+- **B.2.1 — Multi-stream foundation** *(released)*: configurable
+  `MaxConcurrentStreams`, deferred stream-id allocation under the writer
+  mutex (RFC 7540 §5.1.1 monotonic ordering).
+- **B.2.2 — Flow control IN** *(this release)*: per-stream + connection
+  recv windows, batched WINDOW_UPDATE refunds at 32 KiB threshold,
+  typed `FLOW_CONTROL_ERROR` on peer overrun (RFC 7540 §6.9.1).
+- **B.2.3-B.2.6 — Flow control OUT, dynamic SETTINGS, GOAWAY drain**
+  *(planned)*.
 - **C — Client + pool + discovery + stats** *(planned)*: public API for
   load generators.
 
