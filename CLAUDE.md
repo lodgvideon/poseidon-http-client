@@ -204,3 +204,19 @@ serena memory for session-derived insights not worth a commit.
 - `commit-commands` plugin enforces a 50-char subject line and rejects
   AI co-author trailers — keep commit subjects short and don't add
   `Co-Authored-By` lines.
+
+## Workflow & reasoning
+
+**Code review / refactoring / complex tasks**: invoke the `karpathy-guidelines`
+skill before starting. It enforces simplicity, avoids premature abstraction,
+and keeps changes minimal — critical for a zero-alloc codec codebase where
+every layer of indirection has a cost.
+
+**Problem analysis (bugs, regressions, unexpected behaviour)**: apply
+**5 Whys** — ask "why did this happen?" five times to reach the root cause
+before proposing a fix. Document the chain in the PR description.
+
+**Deep reasoning (protocol edge-cases, concurrency invariants, API design)**:
+use **sequential thinking** — break the problem into ordered steps, reason
+through each one explicitly before writing code. Prevents confident wrong
+answers on tricky RFC corner-cases.
