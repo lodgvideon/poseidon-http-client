@@ -65,6 +65,18 @@ func encodeAdvertised(a AdvertisedSettings) frame.SettingsParams {
 	return p
 }
 
+// settingValue returns the value of `id` from `s` or `def` when the
+// peer did not advertise it. The peer SETTINGS array is small (<=16
+// pairs in practice) so a linear scan is fine and zero-alloc.
+func settingValue(s frame.SettingsParams, id frame.SettingID, def uint32) uint32 {
+	for i := 0; i < s.N; i++ {
+		if s.Pairs[i].ID == id {
+			return s.Pairs[i].Value
+		}
+	}
+	return def
+}
+
 // settingsRecorder records the peer's first SETTINGS and notes when our
 // SETTINGS gets ACKed. Other frames during the handshake are ignored
 // (B.1 does not expect them; if they appear we proceed regardless).

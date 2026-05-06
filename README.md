@@ -4,9 +4,10 @@ A low-level, zero-allocation HTTP/2 client for Go, designed for load
 generators. Implements RFC 7540 (HTTP/2) and RFC 7541 (HPACK) from
 scratch without `net/http` or `golang.org/x/net/http2`.
 
-**Status:** Phase B.2.2 — TLS+ALPN connection, multi-stream
-(configurable `MaxConcurrentStreams`, default 100), receive-side flow
-control with batched WINDOW_UPDATE refunds. See
+**Status:** Phase B.2.3 — TLS+ALPN connection, multi-stream
+(configurable `MaxConcurrentStreams`, default 100), receive- and
+send-side flow control with chunked DATA writes and WINDOW_UPDATE
+refunds. See
 [design](docs/superpowers/specs/2026-05-05-poseidon-conn-layer-b1-design.md).
 
 ## Phases
@@ -18,11 +19,16 @@ control with batched WINDOW_UPDATE refunds. See
 - **B.2.1 — Multi-stream foundation** *(released)*: configurable
   `MaxConcurrentStreams`, deferred stream-id allocation under the writer
   mutex (RFC 7540 §5.1.1 monotonic ordering).
-- **B.2.2 — Flow control IN** *(this release)*: per-stream + connection
+- **B.2.2 — Flow control IN** *(released)*: per-stream + connection
   recv windows, batched WINDOW_UPDATE refunds at 32 KiB threshold,
   typed `FLOW_CONTROL_ERROR` on peer overrun (RFC 7540 §6.9.1).
-- **B.2.3-B.2.6 — Flow control OUT, dynamic SETTINGS, GOAWAY drain**
-  *(planned)*.
+- **B.2.3 — Flow control OUT** *(this release)*: chunked DATA writes
+  at `min(peer MAX_FRAME_SIZE, our advertised MAX_FRAME_SIZE)`,
+  blocking `acquireSendCredits` until per-stream + connection
+  send-window credit, `OnWindowUpdate` replenishment, 2^31-1
+  overflow as typed `StreamError` / `ConnError`.
+- **B.2.4-B.2.6 — Dynamic SETTINGS, peer-advertised
+  MAX_CONCURRENT_STREAMS, GOAWAY drain** *(planned)*.
 - **C — Client + pool + discovery + stats** *(planned)*: public API for
   load generators.
 

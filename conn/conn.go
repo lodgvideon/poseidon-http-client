@@ -37,6 +37,16 @@ type Conn struct {
 	connRecvWindow    int32  // bytes the peer can still send to us at the conn level (RFC 7540 §6.9.1)
 	connRefundPending uint32 // bytes consumed but not yet returned via WINDOW_UPDATE(stream=0)
 
+	// fcOutMu guards the outbound (peer-advertised) connection-level
+	// send window and is the locker for fcOutCond. peerConnSendWindow
+	// starts at 65535 (RFC §6.9.2 fixes this at handshake regardless
+	// of SETTINGS_INITIAL_WINDOW_SIZE) and is replenished by inbound
+	// WINDOW_UPDATE(stream=0). fcOutCond.Broadcast wakes writers
+	// blocked in acquireSendCredits.
+	fcOutMu             sync.Mutex
+	fcOutCond           *sync.Cond
+	peerConnSendWindow  int32
+
 	closed     atomic.Bool
 	readerDone chan struct{}
 
@@ -57,16 +67,18 @@ type ConnStats struct {
 func NewClientConn(ctx context.Context, transport net.Conn, opts ConnOptions) (*Conn, error) {
 	opts = opts.defaulted()
 	c := &Conn{
-		transport:      transport,
-		fr:             frame.NewFramer(transport, transport),
-		enc:            hpack.NewEncoder(),
-		dec:            hpack.NewDecoder(),
-		opts:           opts,
-		nextID:         1,
-		streams:        map[uint32]*Stream{},
-		readerDone:     make(chan struct{}),
-		connRecvWindow: int32(connInitialRecvWindow),
+		transport:          transport,
+		fr:                 frame.NewFramer(transport, transport),
+		enc:                hpack.NewEncoder(),
+		dec:                hpack.NewDecoder(),
+		opts:               opts,
+		nextID:             1,
+		streams:            map[uint32]*Stream{},
+		readerDone:         make(chan struct{}),
+		connRecvWindow:     int32(connInitialRecvWindow),
+		peerConnSendWindow: int32(connInitialRecvWindow),
 	}
+	c.fcOutCond = sync.NewCond(&c.fcOutMu)
 	peer, err := handshakeSettings(ctx, c.fr, opts.Settings)
 	if err != nil {
 		_ = transport.Close()
@@ -134,6 +146,13 @@ func (c *Conn) Close() error {
 	if !c.closed.CompareAndSwap(false, true) {
 		return nil
 	}
+	// Wake any writers blocked in acquireSendCredits so they observe
+	// the closed flag and bail out.
+	c.fcOutMu.Lock()
+	if c.fcOutCond != nil {
+		c.fcOutCond.Broadcast()
+	}
+	c.fcOutMu.Unlock()
 	// Best-effort GOAWAY (NO_ERROR). Bound the write so an unresponsive
 	// peer cannot wedge Close indefinitely (e.g. net.Pipe with no
 	// active reader, or a real TCP peer that has stopped reading).
@@ -182,7 +201,7 @@ func (c *Conn) Stats() ConnStats {
 
 // --- streamWriter implementation (called from *Stream).
 
-func (c *Conn) writeHeaders(s *Stream, fields []hpack.HeaderField, endStream bool) error {
+func (c *Conn) writeHeaders(_ context.Context, s *Stream, fields []hpack.HeaderField, endStream bool) error {
 	if c.closed.Load() {
 		return ErrConnClosed
 	}
@@ -194,6 +213,12 @@ func (c *Conn) writeHeaders(s *Stream, fields []hpack.HeaderField, endStream boo
 		c.nextID += 2
 		c.streams[s.id] = s
 		c.smu.Unlock()
+		// Seed the per-stream outbound flow-control window from the
+		// peer's most recently observed SETTINGS_INITIAL_WINDOW_SIZE
+		// (RFC 7540 §6.9.2; default 65535).
+		s.mu.Lock()
+		s.sendWindow = int32(settingValue(c.peerSettings, frame.SettingInitialWindowSize, connInitialRecvWindow))
+		s.mu.Unlock()
 	}
 	block := c.enc.EncodeBlock(nil, fields)
 	err := c.fr.WriteHeaders(frame.WriteHeadersParams{
@@ -209,7 +234,7 @@ func (c *Conn) writeHeaders(s *Stream, fields []hpack.HeaderField, endStream boo
 	return nil
 }
 
-func (c *Conn) writeData(s *Stream, p []byte, endStream bool) error {
+func (c *Conn) writeData(ctx context.Context, s *Stream, p []byte, endStream bool) error {
 	if c.closed.Load() {
 		return ErrConnClosed
 	}
@@ -217,12 +242,53 @@ func (c *Conn) writeData(s *Stream, p []byte, endStream bool) error {
 		// SendHeaders has not run; the stream has no on-wire identity.
 		return ErrStreamClosed
 	}
-	c.wmu.Lock()
-	defer c.wmu.Unlock()
-	if err := c.fr.WriteData(s.id, endStream, p); err != nil {
-		return err
+	// Chunk at the minimum of peer's advertised MAX_FRAME_SIZE and our
+	// own (the framer's outgoing cap matches our advertised value).
+	peerMax := settingValue(c.peerSettings, frame.SettingMaxFrameSize, 16384)
+	ourMax := c.opts.Settings.MaxFrameSize
+	maxFrame := int(peerMax)
+	if int(ourMax) < maxFrame {
+		maxFrame = int(ourMax)
 	}
-	c.bumpFramesSent()
+	if maxFrame <= 0 {
+		maxFrame = 16384
+	}
+	// Empty DATA with END_STREAM is allowed and consumes no credit.
+	if len(p) == 0 {
+		if !endStream {
+			return nil
+		}
+		c.wmu.Lock()
+		defer c.wmu.Unlock()
+		if err := c.fr.WriteData(s.id, true, nil); err != nil {
+			return err
+		}
+		c.bumpFramesSent()
+		return nil
+	}
+	for len(p) > 0 {
+		want := len(p)
+		if want > maxFrame {
+			want = maxFrame
+		}
+		n, err := c.acquireSendCredits(ctx, s, want)
+		if err != nil {
+			return err
+		}
+		last := endStream && n == len(p)
+		c.wmu.Lock()
+		if c.closed.Load() {
+			c.wmu.Unlock()
+			return ErrConnClosed
+		}
+		if werr := c.fr.WriteData(s.id, last, p[:n]); werr != nil {
+			c.wmu.Unlock()
+			return werr
+		}
+		c.bumpFramesSent()
+		c.wmu.Unlock()
+		p = p[n:]
+	}
 	return nil
 }
 
@@ -320,6 +386,98 @@ func (c *Conn) writeWindowUpdate(streamID uint32, increment uint32) error {
 		return err
 	}
 	c.bumpFramesSent()
+	return nil
+}
+
+// acquireSendCredits blocks until both the per-stream and the
+// connection-level outbound send windows have at least one byte of
+// credit, then atomically deducts up to `want` bytes from each and
+// returns the number actually granted. Returns ctx.Err() if cancelled
+// or ErrConnClosed if the connection drops while waiting.
+func (c *Conn) acquireSendCredits(ctx context.Context, s *Stream, want int) (int, error) {
+	if want <= 0 {
+		return 0, nil
+	}
+	// Spawn a watchdog that broadcasts when ctx is cancelled, so the
+	// cond.Wait below wakes up even though no WINDOW_UPDATE arrived.
+	watchdog := make(chan struct{})
+	defer close(watchdog)
+	go func() {
+		select {
+		case <-ctx.Done():
+			c.fcOutMu.Lock()
+			c.fcOutCond.Broadcast()
+			c.fcOutMu.Unlock()
+		case <-watchdog:
+		}
+	}()
+
+	c.fcOutMu.Lock()
+	defer c.fcOutMu.Unlock()
+	for {
+		if c.closed.Load() {
+			return 0, ErrConnClosed
+		}
+		if err := ctx.Err(); err != nil {
+			return 0, err
+		}
+		s.mu.Lock()
+		streamWin := s.sendWindow
+		s.mu.Unlock()
+		connWin := c.peerConnSendWindow
+		avail := streamWin
+		if connWin < avail {
+			avail = connWin
+		}
+		if avail > 0 {
+			n := int32(want)
+			if n > avail {
+				n = avail
+			}
+			c.peerConnSendWindow -= n
+			s.mu.Lock()
+			s.sendWindow -= n
+			s.mu.Unlock()
+			return int(n), nil
+		}
+		c.fcOutCond.Wait()
+	}
+}
+
+// onWindowUpdate replenishes the appropriate outbound send window and
+// wakes any writers blocked in acquireSendCredits. RFC 7540 §6.9.1
+// says a flow-control window must not exceed 2^31-1; if the increment
+// would push us past that, the stream is RST'd or the connection is
+// closed with FLOW_CONTROL_ERROR depending on scope.
+func (c *Conn) onWindowUpdate(streamID uint32, increment uint32) error {
+	const maxWindow = int32(1<<31 - 1)
+	if streamID == 0 {
+		c.fcOutMu.Lock()
+		newVal := int64(c.peerConnSendWindow) + int64(increment)
+		if newVal > int64(maxWindow) {
+			c.fcOutMu.Unlock()
+			return &ConnError{Code: frame.ErrCodeFlowControlError, Reason: "WINDOW_UPDATE overflowed connection send window"}
+		}
+		c.peerConnSendWindow = int32(newVal)
+		c.fcOutCond.Broadcast()
+		c.fcOutMu.Unlock()
+		return nil
+	}
+	s := c.lookupStream(streamID)
+	if s == nil {
+		return nil // unknown / closed stream — peer chatter
+	}
+	s.mu.Lock()
+	newVal := int64(s.sendWindow) + int64(increment)
+	if newVal > int64(maxWindow) {
+		s.mu.Unlock()
+		return &StreamError{StreamID: streamID, Code: frame.ErrCodeFlowControlError}
+	}
+	s.sendWindow = int32(newVal)
+	s.mu.Unlock()
+	c.fcOutMu.Lock()
+	c.fcOutCond.Broadcast()
+	c.fcOutMu.Unlock()
 	return nil
 }
 

@@ -51,8 +51,8 @@ type StreamEvent struct {
 // streamWriter is the narrow surface a *Stream needs from its owner Conn.
 // Tests fake this out; production code wires it to *Conn.
 type streamWriter interface {
-	writeHeaders(s *Stream, fields []hpack.HeaderField, endStream bool) error
-	writeData(s *Stream, p []byte, endStream bool) error
+	writeHeaders(ctx context.Context, s *Stream, fields []hpack.HeaderField, endStream bool) error
+	writeData(ctx context.Context, s *Stream, p []byte, endStream bool) error
 	writeRSTStream(s *Stream, code frame.ErrCode) error
 }
 
@@ -78,6 +78,14 @@ type Stream struct {
 	// but not yet returned to the peer via a WINDOW_UPDATE. Reset when
 	// the connection emits a WINDOW_UPDATE for this stream.
 	recvRefundPending uint32
+
+	// sendWindow is the number of payload bytes we may still send on
+	// *this* stream without WINDOW_UPDATE credit from the peer (RFC
+	// 7540 §6.9.1, peer's per-stream view). Initialized from the
+	// peer's SETTINGS_INITIAL_WINDOW_SIZE at first HEADERS write;
+	// debited by writeData and replenished by OnWindowUpdate. Guarded
+	// by Stream.mu.
+	sendWindow int32
 }
 
 func newStream(id uint32, eventBuf int, w streamWriter, recvWindow int32) *Stream {
@@ -124,6 +132,12 @@ func (s *Stream) push(e StreamEvent) {
 // 7540 §5.1.1's monotonic-id rule. Always emits END_HEADERS=true (B.1
 // does not split into CONTINUATION). When endStream is true the request
 // side is half-closed.
+// SendHeaders sends a HEADERS frame with the given fields. When called
+// for the first time on a Stream, the connection assigns the stream ID
+// under the writer mutex, ensuring the on-wire ID order matches RFC
+// 7540 §5.1.1's monotonic-id rule. Always emits END_HEADERS=true (B.1
+// does not split into CONTINUATION). When endStream is true the request
+// side is half-closed.
 func (s *Stream) SendHeaders(ctx context.Context, fields []hpack.HeaderField, endStream bool) error {
 	s.mu.Lock()
 	if s.closed || s.localEnded {
@@ -131,7 +145,7 @@ func (s *Stream) SendHeaders(ctx context.Context, fields []hpack.HeaderField, en
 		return ErrStreamClosed
 	}
 	s.mu.Unlock()
-	if err := s.w.writeHeaders(s, fields, endStream); err != nil {
+	if err := s.w.writeHeaders(ctx, s, fields, endStream); err != nil {
 		return err
 	}
 	if endStream {
@@ -150,6 +164,11 @@ func (s *Stream) SendHeaders(ctx context.Context, fields []hpack.HeaderField, en
 // request side is half-closed.
 // SendData sends a single DATA frame. The caller must call SendHeaders
 // first; the request side is half-closed when endStream is true.
+// SendData sends a DATA frame, automatically chunking the payload to
+// the peer's MAX_FRAME_SIZE and respecting both per-stream and
+// connection-level outbound flow control (RFC 7540 §6.9). Blocks until
+// enough send-window credit is available, the context is cancelled, or
+// the connection closes. The caller must call SendHeaders first.
 func (s *Stream) SendData(ctx context.Context, p []byte, endStream bool) error {
 	s.mu.Lock()
 	if s.closed || s.localEnded {
@@ -157,7 +176,7 @@ func (s *Stream) SendData(ctx context.Context, p []byte, endStream bool) error {
 		return ErrStreamClosed
 	}
 	s.mu.Unlock()
-	if err := s.w.writeData(s, p, endStream); err != nil {
+	if err := s.w.writeData(ctx, s, p, endStream); err != nil {
 		return err
 	}
 	if endStream {
