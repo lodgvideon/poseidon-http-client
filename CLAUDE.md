@@ -42,10 +42,12 @@ writes via `wmu`.
 ## Phase status
 
 Read [README.md §Phases](README.md) and [conn/doc.go](conn/doc.go) for
-the current milestone. As of this commit: **B.2.2 done** (multi-stream
-+ recv flow control). Roadmap: B.2.3 outbound flow control →
-B.2.4 dynamic SETTINGS+ACK → B.2.5 peer MAX_CONCURRENT_STREAMS →
-B.2.6 GOAWAY drain + PING ACK → C client/pool/discovery.
+the current milestone. **Phase B complete** (B.2.6 merged or in PR
+stack #5/#6/#7): multi-stream, full bidirectional flow control,
+dynamic SETTINGS + ACK with retroactive `INITIAL_WINDOW_SIZE` resize,
+peer `MAX_CONCURRENT_STREAMS` gate, GOAWAY drain, PING ACK echo.
+Next: **Phase C** — public client + connection pool + service
+discovery.
 
 ## Code-style gates (golangci-lint v1.64, see `.golangci.yml`)
 
@@ -83,6 +85,29 @@ section's behavior.
   refund.
 - `connRecvWindow = 65535` is RFC-mandated at handshake; only
   per-stream window is governed by `SETTINGS_INITIAL_WINDOW_SIZE`.
+- Outbound flow control (B.2.3): `writeData` chunks at
+  `min(peer MAX_FRAME_SIZE, our advertised MAX_FRAME_SIZE)` and
+  blocks in `acquireSendCredits` on `fcOutCond` until per-stream +
+  conn send windows have credit. Ctx cancel wakes the cond via a
+  short-lived watchdog goroutine. `Conn.Close` also broadcasts so
+  in-flight writers bail with `ErrConnClosed`.
+- `peerSettings` is guarded by `psMu sync.RWMutex` (B.2.4). Only the
+  reader goroutine (`connHandler.OnSettings`) writes; `writeData` /
+  `writeHeaders` take RLock. Don't read directly without the lock.
+- Mid-conn `SETTINGS_INITIAL_WINDOW_SIZE` change applies retroactively
+  to all open streams (RFC §6.9.2 delta). Overflow past 2^31-1 →
+  typed `ConnError(FLOW_CONTROL_ERROR)`.
+- `NewStream` gates inflight on `min(local advertised,
+  peer-advertised)` `MAX_CONCURRENT_STREAMS` (B.2.5). Returns
+  `ErrTooManyStreams`. `lookupPeerSetting` distinguishes
+  "absent" (fall through to local cap) from "explicit zero"
+  (refuse all new streams).
+- After peer GOAWAY (B.2.6): `NewStream` returns `ErrGoAway`. Streams
+  whose id > `lastStreamID` receive `EventReset(REFUSED_STREAM)` and
+  are evicted from the registry; ≤ `lastStreamID` continue normally
+  (RFC §6.8). `fcOutCond` is broadcast so blocked writers re-check.
+- Inbound non-ACK PING is auto-echoed with `ACK=1` and same payload
+  (RFC §6.7). We don't initiate active PINGs; ACK frames are dropped.
 - `net.Pipe` in unit tests is **unbuffered + synchronous**. Tests that
   write more than one frame in a row from the peer goroutine while
   the client is also writing will deadlock. Use `httptest`+h2 (real
@@ -91,15 +116,20 @@ section's behavior.
 ## Testing patterns
 
 - Integration suite: `conn/integration_test.go` + `conn/multistream_test.go`
-  + `conn/flowcontrol_test.go` use `httptest.NewUnstartedServer` with
-  `EnableHTTP2 = true` against a real `net/http2.Server` peer.
+  + `conn/flowcontrol_test.go` + `conn/sendflow_test.go` use
+  `httptest.NewUnstartedServer` with `EnableHTTP2 = true` against a
+  real `net/http2.Server` peer.
 - Unit suite: `pipeServer` helper in `conn/conn_test.go` drives a
   `net.Pipe` peer for handshake-level checks. Symmetric read/write —
   every server-side write needs a goroutine, every client-side write
-  needs a server reader running concurrently.
+  needs a server reader running concurrently. For wire-byte assertions
+  on a single Conn method (e.g. `parseFrameHeaders` /
+  `parseDataFrames` / `parseWindowUpdates`), wire `c.fr` to a
+  `bytes.Buffer` writer and assert the produced bytes directly.
 - Naming: `TestConformance_RFC7540_SecXX_Behavior` (gate-tracked),
   `TestIntegration_*`, `TestConn_*`, `TestStream_*`, `TestFramer_*`,
-  `TestHandler_*`.
+  `TestHandler_*`, `TestApplyPeerSettings_*`, `TestOnGoAway_*`,
+  `TestOnPing_*`.
 
 ## Tooling notes
 
