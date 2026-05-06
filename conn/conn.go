@@ -138,7 +138,19 @@ func (c *Conn) NewStream(ctx context.Context) (*Stream, error) {
 	}
 	c.smu.Lock()
 	defer c.smu.Unlock()
-	if c.inflight >= c.opts.Settings.MaxConcurrentStreams {
+	limit := c.opts.Settings.MaxConcurrentStreams
+	// Peer-advertised SETTINGS_MAX_CONCURRENT_STREAMS (RFC 7540 §6.5.2)
+	// further constrains us when smaller than our local cap. The
+	// setting is absent by default (no peer-imposed limit); zero is
+	// allowed as "the peer accepts no new streams" (also a real value
+	// — not unlimited).
+	c.psMu.RLock()
+	peerLimit, peerHas := lookupPeerSetting(c.peerSettings, frame.SettingMaxConcurrentStreams)
+	c.psMu.RUnlock()
+	if peerHas && peerLimit < limit {
+		limit = peerLimit
+	}
+	if c.inflight >= limit {
 		return nil, ErrTooManyStreams
 	}
 	s := newStream(0, c.opts.StreamEventBuffer, c, int32(c.opts.Settings.InitialWindowSize))

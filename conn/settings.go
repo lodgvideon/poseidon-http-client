@@ -77,6 +77,18 @@ func settingValue(s frame.SettingsParams, id frame.SettingID, def uint32) uint32
 	return def
 }
 
+// lookupPeerSetting reports whether `id` is present in `s` and, if
+// so, returns its value. Distinct from settingValue so callers can
+// tell "peer advertised zero" from "peer never advertised this".
+func lookupPeerSetting(s frame.SettingsParams, id frame.SettingID) (uint32, bool) {
+	for i := 0; i < s.N; i++ {
+		if s.Pairs[i].ID == id {
+			return s.Pairs[i].Value, true
+		}
+	}
+	return 0, false
+}
+
 // settingsRecorder records the peer's first SETTINGS and notes when our
 // SETTINGS gets ACKed. Other frames during the handshake are ignored
 // (B.1 does not expect them; if they appear we proceed regardless).
