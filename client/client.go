@@ -37,8 +37,8 @@ type Client struct {
 // NewClient validates opts and constructs a Client. It does NOT dial;
 // the first Do or DoStream call triggers a lazy connection establish.
 func NewClient(opts ClientOptions) (*Client, error) {
-	if strings.TrimSpace(opts.Addr) == "" {
-		return nil, fmt.Errorf("client: ClientOptions.Addr is required")
+	if opts.Addr == "" || containsAnyWhitespace(opts.Addr) {
+		return nil, fmt.Errorf("client: ClientOptions.Addr must be a non-empty host:port without whitespace")
 	}
 	if opts.ConnOpts.Dialer == nil {
 		return nil, fmt.Errorf("client: ClientOptions.ConnOpts.Dialer is required")

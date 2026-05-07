@@ -442,6 +442,18 @@ func TestNewClient_RejectsEmptyAddr(t *testing.T) {
 	}
 }
 
+func TestNewClient_RejectsWhitespaceAddr(t *testing.T) {
+	for _, addr := range []string{"  ", "fake :0", "\tfake:0"} {
+		_, err := NewClient(ClientOptions{
+			Addr:     addr,
+			ConnOpts: conn.ConnOptions{Dialer: &fakeDialer{}},
+		})
+		if err == nil {
+			t.Fatalf("expected error for addr=%q", addr)
+		}
+	}
+}
+
 func TestNewClient_RejectsNilDialer(t *testing.T) {
 	_, err := NewClient(ClientOptions{Addr: "fake:0"})
 	if err == nil {

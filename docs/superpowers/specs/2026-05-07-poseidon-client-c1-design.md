@@ -107,8 +107,12 @@ type Request struct {
 
 Validation (in order, on the front-end of `Do`/`DoStream`):
 
-1. `req.Method` non-empty → else `ErrInvalidRequest`.
-2. `req.Path` non-empty → else `ErrInvalidRequest`.
+1. `req.Method` non-empty AND contains no Unicode whitespace
+   (`unicode.IsSpace`) → else `ErrInvalidRequest`. Per RFC 7230 §3.2.6
+   the HTTP method is a token: leading, trailing, and internal
+   whitespace are all rejected.
+2. `req.Path` non-empty AND contains no Unicode whitespace → else
+   `ErrInvalidRequest`. Same rationale.
 3. Each `req.Headers[i].Name` MUST NOT start with `':'` → else
    `ErrInvalidRequest`.
 
