@@ -364,3 +364,33 @@ func TestSingleConn_Close_BlocksNewAcquires(t *testing.T) {
 		t.Fatalf("expected ErrClosed, got %v", err)
 	}
 }
+
+func TestNewClient_RejectsEmptyAddr(t *testing.T) {
+	_, err := NewClient(ClientOptions{ConnOpts: conn.ConnOptions{Dialer: &fakeDialer{}}})
+	if err == nil {
+		t.Fatal("expected error on empty addr")
+	}
+}
+
+func TestNewClient_RejectsNilDialer(t *testing.T) {
+	_, err := NewClient(ClientOptions{Addr: "fake:0"})
+	if err == nil {
+		t.Fatal("expected error on nil dialer")
+	}
+}
+
+func TestClient_Close_Idempotent(t *testing.T) {
+	c, err := NewClient(ClientOptions{
+		Addr:     "fake:0",
+		ConnOpts: conn.ConnOptions{Dialer: &fakeDialer{}},
+	})
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+	if err := c.Close(); err != nil {
+		t.Fatalf("first Close: %v", err)
+	}
+	if err := c.Close(); err != nil {
+		t.Fatalf("second Close: %v", err)
+	}
+}
