@@ -1,58 +1,66 @@
+version: "2"
+
 run:
-  timeout: 5m
-  go: '1.24'
+  go: "1.24"
 
 linters:
-  disable-all: true
+  default: none
   enable:
     - errcheck
-    - govet
-    - staticcheck
-    - revive
-    - gosec
-    - unconvert
-    - misspell
     - gocyclo
-    - gosimple
-    - unused
-    - prealloc
+    - gosec
+    - govet
     - ineffassign
-    - typecheck
-
-linters-settings:
-  gocyclo:
-    min-complexity: 25
-  gosec:
-    excludes:
-      # G115: integer overflow conversions (int<->uintXX) are pervasive
-      # in binary-protocol codec paths and bounded by test coverage; the
-      # heuristic produces high false-positive noise.
-      - G115
-  govet:
-    enable-all: true
-    disable:
-      - fieldalignment
-      - shadow
-  revive:
+    - misspell
+    - prealloc
+    - revive
+    - staticcheck
+    - unconvert
+    - unused
+  settings:
+    gocyclo:
+      min-complexity: 25
+    gosec:
+      excludes:
+        # G115: integer overflow conversions (int<->uintXX) are pervasive
+        # in binary-protocol codec paths and bounded by test coverage.
+        - G115
+        # G402: TLS MinVersion/InsecureSkipVerify. Tests exercise both
+        # default and explicit-version flows; production callers of
+        # TLSDialer supply their own *tls.Config.
+        - G402
+    govet:
+      disable:
+        - fieldalignment
+        - shadow
+      enable-all: true
+    revive:
+      rules:
+        - name: unused-parameter
+          disabled: true
+        - name: exported
+          arguments:
+            - disableStutteringCheck
+            - disableChecksOnConstants
+  exclusions:
+    generated: lax
     rules:
-      - name: unused-parameter
-        disabled: true
-      - name: exported
-        arguments:
-          - disableStutteringCheck
-          - disableChecksOnConstants
+      # errcheck: tolerate ignored errors in test files where behavior is
+      # asserted via other means.
+      - linters:
+          - errcheck
+        path: _test\.go
+      # revive redefines-builtin-id: intentional shadowing of builtins
+      # in a few narrow helper contexts (pool min param, cap constant).
+      - linters:
+          - revive
+        text: redefines-builtin-id
+      # revive package-comments: generated/hand-derived file.
+      - linters:
+          - revive
+        text: package-comments
+        path: huffman_table\.go
 
 issues:
-  exclude-rules:
-    # G402: TLS MinVersion. Tests pass tls.Config to dial paths and
-    # exercise both default and explicit-version flows; production
-    # callers of TLSDialer pass their own *tls.Config.
-    - linters: [gosec]
-      text: G402
-    # errcheck: tolerate ignored errors in *_test.go where the test
-    # body asserts behavior via other means.
-    - path: _test\.go
-      linters: [errcheck]
-  exclude-use-default: false
   max-issues-per-linter: 0
   max-same-issues: 0
