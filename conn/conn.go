@@ -114,56 +114,37 @@ func (c *Conn) lookupStream(id uint32) *Stream {
 // NewStream allocates a new stream. B.1 enforces at most one in-flight
 // stream per Conn; subsequent calls return ErrTooManyStreams until the
 // active stream completes.
-// NewStream allocates a new outbound stream. Returns ErrTooManyStreams
-// when the in-flight count has reached the locally advertised
-// MaxConcurrentStreams (peer-advertised enforcement is B.2.5).
 // NewStream allocates an in-flight slot for a new outbound stream. The
 // stream's HTTP/2 ID is assigned later, when SendHeaders writes the
 // first HEADERS frame under the writer mutex; this preserves the
 // monotonic-id ordering required by RFC 7540 §5.1.1 even with many
 // concurrent NewStream callers. Returns ErrTooManyStreams when the
-// in-flight count has reached the locally advertised
-// MaxConcurrentStreams (peer-advertised enforcement is B.2.5).
-// NewStream allocates an in-flight slot for a new outbound stream. The
-// stream's HTTP/2 ID is assigned later, when SendHeaders writes the
-// first HEADERS frame under the writer mutex; this preserves the
-// monotonic-id ordering required by RFC 7540 §5.1.1 even with many
-// concurrent NewStream callers. Returns ErrTooManyStreams when the
-// in-flight count has reached the locally advertised
-// MaxConcurrentStreams (peer-advertised enforcement is B.2.5).
-// NewStream allocates an in-flight slot for a new outbound stream. The
-// stream's HTTP/2 ID is assigned later, when SendHeaders writes the
-// first HEADERS frame under the writer mutex; this preserves the
-// monotonic-id ordering required by RFC 7540 §5.1.1 even with many
-// concurrent NewStream callers. Returns ErrTooManyStreams when the
-// in-flight count has reached the locally advertised
-// MaxConcurrentStreams (peer-advertised enforcement is B.2.5).
-func (c *Conn) NewStream(ctx context.Context) (*Stream, error) {
+// in-flight count has reached min(local MaxConcurrentStreams,
+// peer-advertised SETTINGS_MAX_CONCURRENT_STREAMS).
+func (c *Conn) NewStream(_ context.Context) (*Stream, error) {
 	if c.closed.Load() {
 		return nil, ErrConnClosed
 	}
 	if c.goAwayReceived.Load() {
 		return nil, ErrGoAway
 	}
-	c.smu.Lock()
-	defer c.smu.Unlock()
-	limit := c.opts.Settings.MaxConcurrentStreams
-	// Peer-advertised SETTINGS_MAX_CONCURRENT_STREAMS (RFC 7540 §6.5.2)
-	// further constrains us when smaller than our local cap. The
-	// setting is absent by default (no peer-imposed limit); zero is
-	// allowed as "the peer accepts no new streams" (also a real value
-	// — not unlimited).
+	// Read peer setting OUTSIDE smu (lock order: psMu before smu in
+	// applyPeerSettings, so we must not invert here).
 	c.psMu.RLock()
 	peerLimit, peerHas := lookupPeerSetting(c.peerSettings, frame.SettingMaxConcurrentStreams)
 	c.psMu.RUnlock()
+	limit := c.opts.Settings.MaxConcurrentStreams
 	if peerHas && peerLimit < limit {
 		limit = peerLimit
 	}
+	c.smu.Lock()
 	if c.inflight >= limit {
+		c.smu.Unlock()
 		return nil, ErrTooManyStreams
 	}
 	s := newStream(0, c.opts.StreamEventBuffer, c, int32(c.opts.Settings.InitialWindowSize))
 	c.inflight++
+	c.smu.Unlock()
 	c.statsMu.Lock()
 	c.stats.StreamsOpened++
 	c.statsMu.Unlock()
@@ -691,12 +672,16 @@ func (c *Conn) bumpFramesSent() {
 }
 
 // readerLoop owns frame.ReadFrame for the lifetime of the connection.
+// On a typed *ConnError, emits GOAWAY with the error code before
+// shutting down streams (RFC 7540 §5.4.1). I/O errors and EOF skip
+// GOAWAY (transport already gone).
 func (c *Conn) readerLoop() {
 	defer close(c.readerDone)
 	h := newConnHandler(c, c.dec)
 	for {
 		_, err := c.fr.ReadFrame(context.Background(), h)
 		if err != nil {
+			c.emitConnGoAwayIfTyped(err)
 			c.shutdownStreams(err)
 			return
 		}
@@ -704,6 +689,23 @@ func (c *Conn) readerLoop() {
 		c.stats.FramesReceived++
 		c.statsMu.Unlock()
 	}
+}
+
+// emitConnGoAwayIfTyped writes a best-effort GOAWAY when the reader
+// loop terminates via a *ConnError so the peer learns the diagnosis
+// (RFC 7540 §5.4.1). Bounded write deadline avoids wedging on an
+// unresponsive transport.
+func (c *Conn) emitConnGoAwayIfTyped(err error) {
+	var ce *ConnError
+	if !errors.As(err, &ce) {
+		return
+	}
+	if dl, ok := c.transport.(interface{ SetWriteDeadline(time.Time) error }); ok {
+		_ = dl.SetWriteDeadline(time.Now().Add(closeGoAwayDeadline))
+	}
+	c.wmu.Lock()
+	_ = c.fr.WriteGoAway(c.lastClientStreamID(), ce.Code, nil)
+	c.wmu.Unlock()
 }
 
 func (c *Conn) shutdownStreams(reason error) {

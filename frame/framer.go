@@ -351,10 +351,17 @@ func (f *Framer) WriteWindowUpdate(streamID uint32, increment uint32) error {
 // === Read side ===
 
 // ReadFrame reads one frame from the underlying reader and dispatches
-// it through h. Honors ctx for cancellation between frames.
+// it through h. Honors ctx.Err() at entry — a pre-cancelled ctx returns
+// immediately. Cancellation that races a blocked read is the caller's
+// responsibility to drive via the underlying transport (e.g. by
+// closing the net.Conn or setting a read deadline) — Framer does not
+// own the transport's deadline.
 func (f *Framer) ReadFrame(ctx context.Context, h Handler) (FrameHeader, error) {
 	if f.r == nil {
 		return FrameHeader{}, errors.New("poseidon/frame: Framer has no reader")
+	}
+	if err := ctx.Err(); err != nil {
+		return FrameHeader{}, err
 	}
 	if cap(f.readBuf) < FrameHeaderSize {
 		f.readBuf = make([]byte, FrameHeaderSize)
@@ -402,7 +409,10 @@ func (f *Framer) ReadFrame(ctx context.Context, h Handler) (FrameHeader, error) 
 	case FrameContinuation:
 		return fh, f.dispatchContinuation(fh, payload, h)
 	default:
-		return fh, ErrUnknownFrameType
+		// RFC 7540 §5.5: implementations MUST ignore frames they do not
+		// understand and continue. Drain the payload (already read) and
+		// return without error.
+		return fh, nil
 	}
 }
 
