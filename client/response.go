@@ -60,13 +60,13 @@ func (t EventType) String() string {
 	}
 }
 
-// StreamEvent is one chunk of a streaming response. Data slice aliases
-// internal scratch buffers and is valid only until the next Recv on
-// the same StreamResponse — copy if retained.
+// StreamEvent is one chunk of a streaming response. Data and Trailers
+// are deep-copied by the connection layer per event, so they are owned
+// by the receiver and safe to retain after the next Recv.
 type StreamEvent struct {
 	// Type discriminates which other fields are populated.
 	Type EventType
-	// Data is the DATA payload for EventData. Aliases scratch.
+	// Data is the DATA payload for EventData. Owned by the event.
 	Data []byte
 	// Trailers is populated for EventTrailers.
 	Trailers []hpack.HeaderField

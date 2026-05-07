@@ -37,9 +37,9 @@ func (t StreamEventType) String() string {
 }
 
 // StreamEvent is one observation about an in-flight stream. The Type
-// field tells the caller which other fields are populated. Slices alias
-// internal pool buffers and are valid only until the next call to
-// (*Stream).Recv or (*Stream).Close on the same stream.
+// field tells the caller which other fields are populated. The Headers
+// and Data slices are deep-copied per event by the connection reader,
+// so they are owned by the receiver and safe to retain.
 type StreamEvent struct {
 	Type      StreamEventType
 	Headers   []hpack.HeaderField // EventHeaders / EventTrailers
@@ -71,9 +71,8 @@ type Stream struct {
 	// headersReceived is set after the first non-trailer HEADERS block
 	// for this stream is delivered. The reader goroutine consults it to
 	// classify subsequent HEADERS frames as trailers (RFC 7540 §8.1).
-	// Only the reader goroutine writes; readers (the same goroutine, in
-	// the next OnHeaders call) see the value via channel-send/receive
-	// happens-before, so a plain bool is sufficient.
+	// Single-goroutine access — only the reader goroutine reads and
+	// writes this field — so no synchronization is required.
 	headersReceived bool
 
 	// recvWindow is the number of payload bytes the peer can still
