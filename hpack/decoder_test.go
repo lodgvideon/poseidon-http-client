@@ -132,6 +132,37 @@ func TestDecoder_MaxHeaderListSize_RejectsOversize(t *testing.T) {
 	}
 }
 
+func TestDecoder_Reset_ClearsState(t *testing.T) {
+	d := NewDecoder()
+	d.Begin()
+	d.SetMaxDynamicTableSize(2048)
+	d.Reset()
+	if d.streaming {
+		t.Fatal("Reset must clear streaming flag")
+	}
+	if d.dt.len() != 0 {
+		t.Fatal("Reset must clear dynamic table")
+	}
+}
+
+func TestDecoder_SetMaxDynamicTableSize_AppliesEviction(t *testing.T) {
+	d := NewDecoder()
+	enc := NewEncoder()
+	block := enc.EncodeBlock(nil, []HeaderField{
+		{Name: []byte("custom-key"), Value: []byte("custom-header")},
+	})
+	if err := d.DecodeBlock(block, func(HeaderField) error { return nil }); err != nil {
+		t.Fatalf("DecodeBlock: %v", err)
+	}
+	if d.dt.len() != 1 {
+		t.Fatal("precondition: 1 entry in dynamic table")
+	}
+	d.SetMaxDynamicTableSize(0)
+	if d.dt.len() != 0 {
+		t.Fatal("SetMaxDynamicTableSize(0) must evict all entries")
+	}
+}
+
 func TestDecoder_MaxHeaderListSize_ZeroDisablesGate(t *testing.T) {
 	d := NewDecoder()
 	enc := NewEncoder()

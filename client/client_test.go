@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"strings"
 	"net"
 	"sync"
 	"sync/atomic"
@@ -493,6 +494,66 @@ func TestClient_Do_AfterClose_ReturnsErrClosed(t *testing.T) {
 	}
 	if _, err := c.DoStream(ctx, &Request{Method: "GET", Path: "/"}); !errors.Is(err, ErrClosed) {
 		t.Fatalf("DoStream after Close = %v, want ErrClosed", err)
+	}
+}
+
+func TestStreamResetError_Error_Format(t *testing.T) {
+	e := &StreamResetError{Code: frame.ErrCodeRefusedStream}
+	if !strings.Contains(e.Error(), "stream reset") {
+		t.Fatalf("error message = %q", e.Error())
+	}
+}
+
+func TestDialError_ErrorAndUnwrap(t *testing.T) {
+	inner := errors.New("boom")
+	e := &DialError{Addr: "fake:0", Err: inner}
+	if !strings.Contains(e.Error(), "fake:0") {
+		t.Fatalf("error missing addr: %q", e.Error())
+	}
+	if e.Unwrap() != inner {
+		t.Fatalf("Unwrap = %v, want %v", e.Unwrap(), inner)
+	}
+	if !errors.Is(e, inner) {
+		t.Fatal("errors.Is must walk through DialError.Unwrap")
+	}
+}
+
+func TestStreamResponse_RecvAfterDrain_ReturnsErrStreamEnded(t *testing.T) {
+	d := &fakeDialer{srvAfter: minimalGETServer()}
+	c, err := NewClient(ClientOptions{
+		Addr:     "fake:0",
+		ConnOpts: conn.ConnOptions{Dialer: d},
+	})
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+	defer c.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	sr, err := c.DoStream(ctx, &Request{Method: "GET", Path: "/"})
+	if err != nil {
+		t.Fatalf("DoStream: %v", err)
+	}
+	defer sr.Close()
+	// Server returned status=200 + END_STREAM in initial HEADERS, so
+	// drained==true. Recv must return ErrStreamEnded.
+	if _, err := sr.Recv(ctx); !errors.Is(err, ErrStreamEnded) {
+		t.Fatalf("Recv after drain = %v, want ErrStreamEnded", err)
+	}
+}
+
+func TestEventType_String(t *testing.T) {
+	cases := map[EventType]string{
+		EventData:     "data",
+		EventTrailers: "trailers",
+		EventReset:    "reset",
+		EventType(0):  "unknown",
+	}
+	for et, want := range cases {
+		if got := et.String(); got != want {
+			t.Errorf("EventType(%d).String() = %q, want %q", et, got, want)
+		}
 	}
 }
 

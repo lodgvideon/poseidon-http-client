@@ -69,3 +69,32 @@ func TestDynamicTable_SetMaxSizeShrinks(t *testing.T) {
 		t.Fatalf("len after shrink = %d, want 1", dt.len())
 	}
 }
+
+func TestDynamicTable_CompactArena_TriggersOnGrowth(t *testing.T) {
+	// Add and immediately evict to grow arena beyond used*2, triggering
+	// compactArena. Entry size 34 (1+1+32). Cap 70 keeps 2 entries; many
+	// adds churn the arena.
+	dt := newDynamicTable(70)
+	for i := 0; i < 200; i++ {
+		dt.add([]byte{byte('a' + i%26)}, []byte{byte('0' + i%10)})
+	}
+	if dt.len() != 2 {
+		t.Fatalf("len = %d, want 2 after churn", dt.len())
+	}
+	// Most-recently-added entry must still resolve correctly.
+	n, v := dt.at(1)
+	last := 199
+	if n[0] != byte('a'+last%26) || v[0] != byte('0'+last%10) {
+		t.Fatalf("at(1) = %s=%s, want %s=%s",
+			n, v, []byte{byte('a' + last%26)}, []byte{byte('0' + last%10)})
+	}
+}
+
+func TestDynamicTable_Clear(t *testing.T) {
+	dt := newDynamicTable(200)
+	dt.add([]byte("a"), []byte("1"))
+	dt.clear()
+	if dt.len() != 0 || dt.byteSize() != 0 {
+		t.Fatalf("after clear len=%d size=%d, want 0/0", dt.len(), dt.byteSize())
+	}
+}
