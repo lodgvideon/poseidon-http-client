@@ -279,7 +279,7 @@ func drainResponse(ctx context.Context, s *conn.Stream, req *Request) (*Response
 // (https). Handles IPv6 literals via net.SplitHostPort.
 func deriveAuthority(addr string) string {
 	host, port, err := net.SplitHostPort(addr)
-	if err != nil {
+	if err != nil || host == "" {
 		return addr
 	}
 	if port == "80" || port == "443" {

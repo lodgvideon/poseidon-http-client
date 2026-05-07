@@ -3,7 +3,7 @@ package client
 import (
 	"fmt"
 	"io"
-	"strings"
+	"unicode"
 
 	"github.com/lodgvideon/poseidon-http-client/hpack"
 )
@@ -45,11 +45,11 @@ func validateRequest(r *Request) error {
 	if r == nil {
 		return fmt.Errorf("%w: nil request", ErrInvalidRequest)
 	}
-	if r.Method == "" || r.Method != strings.TrimSpace(r.Method) {
-		return fmt.Errorf("%w: method must be non-empty without surrounding whitespace", ErrInvalidRequest)
+	if r.Method == "" || containsAnyWhitespace(r.Method) {
+		return fmt.Errorf("%w: method must be a non-empty token (no whitespace)", ErrInvalidRequest)
 	}
-	if r.Path == "" || r.Path != strings.TrimSpace(r.Path) {
-		return fmt.Errorf("%w: path must be non-empty without surrounding whitespace", ErrInvalidRequest)
+	if r.Path == "" || containsAnyWhitespace(r.Path) {
+		return fmt.Errorf("%w: path must be non-empty without whitespace", ErrInvalidRequest)
 	}
 	for i := range r.Headers {
 		if len(r.Headers[i].Name) > 0 && r.Headers[i].Name[0] == ':' {
@@ -58,4 +58,16 @@ func validateRequest(r *Request) error {
 		}
 	}
 	return nil
+}
+
+// containsAnyWhitespace reports whether s contains any Unicode
+// whitespace character. RFC 7230 §3.2.6 defines HTTP method and
+// path-target tokens as having no whitespace at all (not just edges).
+func containsAnyWhitespace(s string) bool {
+	for _, r := range s {
+		if unicode.IsSpace(r) {
+			return true
+		}
+	}
+	return false
 }
