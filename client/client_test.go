@@ -685,3 +685,144 @@ func TestClient_Do_POST_BodyReader(t *testing.T) {
 		t.Fatalf("echoed body length %d, want %d", len(res.Body), len(want))
 	}
 }
+
+func TestClient_Do_WantBody_False_DiscardsButCounts(t *testing.T) {
+	want := []byte("0123456789abcdef")
+	d := &fakeDialer{srvAfter: func(srvFr *frame.Framer) {
+		capH := newCaptureHandler()
+		for {
+			if _, err := srvFr.ReadFrame(context.Background(), capH); err != nil {
+				return
+			}
+			sid, ok := capH.firstHeadersStreamID()
+			if !ok {
+				continue
+			}
+			enc := hpack.NewEncoder()
+			block := enc.EncodeBlock(nil, []hpack.HeaderField{
+				{Name: []byte(":status"), Value: []byte("200")},
+			})
+			_ = srvFr.WriteHeaders(frame.WriteHeadersParams{
+				StreamID:      sid,
+				BlockFragment: block,
+				EndHeaders:    true,
+			})
+			_ = srvFr.WriteData(sid, true, want)
+			return
+		}
+	}}
+	c, err := NewClient(ClientOptions{
+		Addr:     "fake:0",
+		ConnOpts: conn.ConnOptions{Dialer: d},
+	})
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+	defer c.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	res, err := c.Do(ctx, &Request{Method: "GET", Path: "/"})
+	if err != nil {
+		t.Fatalf("Do: %v", err)
+	}
+	if res.Body != nil {
+		t.Fatalf("Body should be nil with WantBody=false, got %v", res.Body)
+	}
+	if res.BytesReceived != int64(len(want)) {
+		t.Fatalf("BytesReceived = %d, want %d", res.BytesReceived, len(want))
+	}
+}
+
+func TestClient_Do_WantTrailers_CapturesTrailers(t *testing.T) {
+	d := &fakeDialer{srvAfter: func(srvFr *frame.Framer) {
+		capH := newCaptureHandler()
+		for {
+			if _, err := srvFr.ReadFrame(context.Background(), capH); err != nil {
+				return
+			}
+			sid, ok := capH.firstHeadersStreamID()
+			if !ok {
+				continue
+			}
+			enc := hpack.NewEncoder()
+			respBlock := enc.EncodeBlock(nil, []hpack.HeaderField{
+				{Name: []byte(":status"), Value: []byte("200")},
+			})
+			_ = srvFr.WriteHeaders(frame.WriteHeadersParams{
+				StreamID:      sid,
+				BlockFragment: respBlock,
+				EndHeaders:    true,
+			})
+			_ = srvFr.WriteData(sid, false, []byte("body"))
+			tEnc := hpack.NewEncoder()
+			trailerBlock := tEnc.EncodeBlock(nil, []hpack.HeaderField{
+				{Name: []byte("grpc-status"), Value: []byte("0")},
+			})
+			_ = srvFr.WriteHeaders(frame.WriteHeadersParams{
+				StreamID:      sid,
+				BlockFragment: trailerBlock,
+				EndHeaders:    true,
+				EndStream:     true,
+			})
+			return
+		}
+	}}
+	c, err := NewClient(ClientOptions{
+		Addr:     "fake:0",
+		ConnOpts: conn.ConnOptions{Dialer: d},
+	})
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+	defer c.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	res, err := c.Do(ctx, &Request{
+		Method: "GET", Path: "/",
+		WantTrailers: true,
+	})
+	if err != nil {
+		t.Fatalf("Do: %v", err)
+	}
+	if len(res.Trailers) != 1 || string(res.Trailers[0].Name) != "grpc-status" {
+		t.Fatalf("trailers = %+v", res.Trailers)
+	}
+}
+
+func TestClient_Do_StreamReset_ReturnsTypedError(t *testing.T) {
+	d := &fakeDialer{srvAfter: func(srvFr *frame.Framer) {
+		capH := newCaptureHandler()
+		for {
+			if _, err := srvFr.ReadFrame(context.Background(), capH); err != nil {
+				return
+			}
+			sid, ok := capH.firstHeadersStreamID()
+			if !ok {
+				continue
+			}
+			_ = srvFr.WriteRSTStream(sid, frame.ErrCodeRefusedStream)
+			return
+		}
+	}}
+	c, err := NewClient(ClientOptions{
+		Addr:     "fake:0",
+		ConnOpts: conn.ConnOptions{Dialer: d},
+	})
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+	defer c.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	_, err = c.Do(ctx, &Request{Method: "GET", Path: "/"})
+	var rs *StreamResetError
+	if !errors.As(err, &rs) {
+		t.Fatalf("expected *StreamResetError, got %v", err)
+	}
+	if rs.Code != frame.ErrCodeRefusedStream {
+		t.Fatalf("code = %v, want REFUSED_STREAM", rs.Code)
+	}
+}

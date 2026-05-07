@@ -167,13 +167,22 @@ func drainResponse(ctx context.Context, s *conn.Stream, req *Request) (*Response
 		switch ev.Type {
 		case conn.EventHeaders:
 			if !gotHeaders {
-				status, regular, perr := parseStatus(ev.Headers)
+				// Copy first to defend against the conn-package
+				// scratch buffer being overwritten by the reader
+				// goroutine processing the next frame.
+				copied := copyHeaderFields(ev.Headers)
+				status, regular, perr := parseStatus(copied)
 				if perr != nil {
 					return nil, perr
 				}
 				resp.Status = status
-				resp.Headers = copyHeaderFields(regular)
+				resp.Headers = regular
 				gotHeaders = true
+			} else if req.WantTrailers {
+				// The conn package emits trailers as a second
+				// EventHeaders rather than EventTrailers; recognize
+				// it here.
+				resp.Trailers = copyHeaderFields(ev.Headers)
 			}
 			if ev.EndStream {
 				return &resp, nil
