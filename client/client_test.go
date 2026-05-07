@@ -39,6 +39,27 @@ func TestValidateRequest_NoPath(t *testing.T) {
 	}
 }
 
+func TestValidateRequest_WhitespacePaddedMethodRejected(t *testing.T) {
+	req := &Request{Method: " GET ", Path: "/"}
+	if err := validateRequest(req); !errors.Is(err, ErrInvalidRequest) {
+		t.Fatalf("expected ErrInvalidRequest, got %v", err)
+	}
+}
+
+func TestValidateRequest_WhitespacePaddedPathRejected(t *testing.T) {
+	req := &Request{Method: "GET", Path: " / "}
+	if err := validateRequest(req); !errors.Is(err, ErrInvalidRequest) {
+		t.Fatalf("expected ErrInvalidRequest, got %v", err)
+	}
+}
+
+func TestValidateRequest_WhitespaceOnlyMethodRejected(t *testing.T) {
+	req := &Request{Method: "   ", Path: "/"}
+	if err := validateRequest(req); !errors.Is(err, ErrInvalidRequest) {
+		t.Fatalf("expected ErrInvalidRequest, got %v", err)
+	}
+}
+
 func TestValidateRequest_PseudoHeaderInRegular(t *testing.T) {
 	req := &Request{
 		Method: "GET", Path: "/",
@@ -445,6 +466,10 @@ func TestDeriveAuthority(t *testing.T) {
 		{"example.com:8080", "example.com:8080"},
 		{"example.com", "example.com"},
 		{"127.0.0.1:9090", "127.0.0.1:9090"},
+		{"[::1]:443", "[::1]"},
+		{"[::1]:80", "[::1]"},
+		{"[::1]:8080", "[::1]:8080"},
+		{"[2001:db8::1]:443", "[2001:db8::1]"},
 	}
 	for _, tc := range cases {
 		got := deriveAuthority(tc.addr)
