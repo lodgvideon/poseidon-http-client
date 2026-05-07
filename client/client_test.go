@@ -1,6 +1,7 @@
 package client
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"io"
@@ -569,5 +570,118 @@ func TestClient_Do_GET_NoBody_ReturnsStatus200(t *testing.T) {
 	}
 	if res.Status != 200 {
 		t.Fatalf("Status = %d, want 200", res.Status)
+	}
+}
+
+// echoPOSTServer reads HEADERS + DATA frames until END_STREAM, then
+// writes back HEADERS(:status=200) + DATA(echo) with END_STREAM.
+// captured (if non-nil) is filled with the request body the server saw.
+func echoPOSTServer(captured *[]byte) func(srvFr *frame.Framer) {
+	return func(srvFr *frame.Framer) {
+		capH := newCaptureHandler()
+		var streamID uint32
+		for {
+			if _, err := srvFr.ReadFrame(context.Background(), capH); err != nil {
+				return
+			}
+			if streamID == 0 {
+				if sid, ok := capH.firstHeadersStreamID(); ok {
+					streamID = sid
+				}
+			}
+			if streamID == 0 {
+				continue
+			}
+			body, ended := capH.bodyEnded(streamID)
+			if !ended {
+				continue
+			}
+			if captured != nil {
+				*captured = append((*captured)[:0], body...)
+			}
+			enc := hpack.NewEncoder()
+			block := enc.EncodeBlock(nil, []hpack.HeaderField{
+				{Name: []byte(":status"), Value: []byte("200")},
+			})
+			_ = srvFr.WriteHeaders(frame.WriteHeadersParams{
+				StreamID:      streamID,
+				BlockFragment: block,
+				EndHeaders:    true,
+			})
+			_ = srvFr.WriteData(streamID, true, body)
+			return
+		}
+	}
+}
+
+func TestClient_Do_POST_BodyBytes(t *testing.T) {
+	var captured []byte
+	d := &fakeDialer{srvAfter: echoPOSTServer(&captured)}
+	c, err := NewClient(ClientOptions{
+		Addr:     "fake:0",
+		ConnOpts: conn.ConnOptions{Dialer: d},
+	})
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+	defer c.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	body := []byte("hello world")
+	res, err := c.Do(ctx, &Request{
+		Method: "POST", Path: "/echo",
+		Body:     body,
+		WantBody: true,
+	})
+	if err != nil {
+		t.Fatalf("Do: %v", err)
+	}
+	if res.Status != 200 {
+		t.Fatalf("status = %d", res.Status)
+	}
+	if string(res.Body) != string(body) {
+		t.Fatalf("echoed body = %q, want %q", res.Body, body)
+	}
+	if string(captured) != string(body) {
+		t.Fatalf("server saw %q, want %q", captured, body)
+	}
+}
+
+// TestClient_Do_POST_BodyReader uses a small body to stay within a
+// single frame; net.Pipe is unbuffered + synchronous and chokes on
+// multi-frame uploads. The integration suite covers chunked uploads
+// against a real net/http2.Server (Task 20).
+func TestClient_Do_POST_BodyReader(t *testing.T) {
+	want := bytes.Repeat([]byte("ab"), 100) // 200 B, single frame
+	var captured []byte
+	d := &fakeDialer{srvAfter: echoPOSTServer(&captured)}
+	c, err := NewClient(ClientOptions{
+		Addr:     "fake:0",
+		ConnOpts: conn.ConnOptions{Dialer: d},
+	})
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+	defer c.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	res, err := c.Do(ctx, &Request{
+		Method: "POST", Path: "/echo",
+		BodyReader: bytes.NewReader(want),
+		WantBody:   true,
+	})
+	if err != nil {
+		t.Fatalf("Do: %v", err)
+	}
+	if res.Status != 200 {
+		t.Fatalf("status = %d", res.Status)
+	}
+	if !bytes.Equal(captured, want) {
+		t.Fatalf("server captured %d bytes, want %d", len(captured), len(want))
+	}
+	if !bytes.Equal(res.Body, want) {
+		t.Fatalf("echoed body length %d, want %d", len(res.Body), len(want))
 	}
 }
