@@ -119,9 +119,18 @@ func (h *connHandler) emitHeaderBlock(s *Stream, hb []byte, endStream, isTrailer
 			c.markStreamDone(s.id)
 		}
 	}
+	// Copy header fields into per-event memory so the channel
+	// buffer cannot expose a slice that the next emitHeaderBlock
+	// call has overwritten in scratch.
+	copied := make([]hpack.HeaderField, len(h.scratch))
+	for i := range h.scratch {
+		nm := append([]byte(nil), h.scratch[i].Name...)
+		vl := append([]byte(nil), h.scratch[i].Value...)
+		copied[i] = hpack.HeaderField{Name: nm, Value: vl, Sensitive: h.scratch[i].Sensitive}
+	}
 	s.push(StreamEvent{
 		Type:      evType,
-		Headers:   h.scratch,
+		Headers:   copied,
 		EndStream: endStream,
 	})
 	return nil
