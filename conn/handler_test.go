@@ -23,6 +23,16 @@ func (m *fakeStreamMap) lookupStream(id uint32) *Stream {
 	return m.streams[id]
 }
 
+// connOps no-op satisfaction so the wider production interface is met
+// in tests that only exercise stream lookup behaviour.
+func (*fakeStreamMap) onDataReceived(*Stream, uint32) error                 { return nil }
+func (*fakeStreamMap) markStreamDone(uint32)                                {}
+func (*fakeStreamMap) onWindowUpdate(uint32, uint32) error                  { return nil }
+func (*fakeStreamMap) applyPeerSettings(frame.SettingsParams) error         { return nil }
+func (*fakeStreamMap) writeSettingsAck() error                              { return nil }
+func (*fakeStreamMap) writePingAck([8]byte) error                           { return nil }
+func (*fakeStreamMap) onGoAwayReceived(uint32, frame.ErrCode)               {}
+
 func newFakeStreamMap() *fakeStreamMap {
 	w := &fakeStreamWriter{}
 	return &fakeStreamMap{
