@@ -897,3 +897,71 @@ func TestClient_DoStream_RecvDataChunks(t *testing.T) {
 		}
 	}
 }
+
+func TestClient_DoStream_CloseBeforeEnd_SendsRSTCancel(t *testing.T) {
+	gotRST := make(chan frame.ErrCode, 1)
+	d := &fakeDialer{srvAfter: func(srvFr *frame.Framer) {
+		capH := newCaptureHandler()
+		var sid uint32
+		var sentResponse bool
+		for {
+			if _, err := srvFr.ReadFrame(context.Background(), capH); err != nil {
+				return
+			}
+			if sid == 0 {
+				if v, ok := capH.firstHeadersStreamID(); ok {
+					sid = v
+				}
+			}
+			if sid == 0 {
+				continue
+			}
+			if !sentResponse {
+				enc := hpack.NewEncoder()
+				block := enc.EncodeBlock(nil, []hpack.HeaderField{
+					{Name: []byte(":status"), Value: []byte("200")},
+				})
+				_ = srvFr.WriteHeaders(frame.WriteHeadersParams{
+					StreamID:      sid,
+					BlockFragment: block,
+					EndHeaders:    true,
+				})
+				_ = srvFr.WriteData(sid, false, []byte("partial"))
+				sentResponse = true
+			}
+			if code, ok := capH.firstRST(sid); ok {
+				gotRST <- code
+				return
+			}
+		}
+	}}
+	c, err := NewClient(ClientOptions{
+		Addr:     "fake:0",
+		ConnOpts: conn.ConnOptions{Dialer: d},
+	})
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+	defer c.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	sr, err := c.DoStream(ctx, &Request{Method: "GET", Path: "/"})
+	if err != nil {
+		t.Fatalf("DoStream: %v", err)
+	}
+	if _, err := sr.Recv(ctx); err != nil {
+		t.Fatalf("first Recv: %v", err)
+	}
+	if err := sr.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	select {
+	case code := <-gotRST:
+		if code != frame.ErrCodeCancel {
+			t.Fatalf("RST code = %v, want CANCEL", code)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("server did not see RST_STREAM(CANCEL)")
+	}
+}
