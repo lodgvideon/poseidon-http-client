@@ -3,6 +3,7 @@ package client
 import (
 	"fmt"
 	"io"
+	"strings"
 
 	"github.com/lodgvideon/poseidon-http-client/hpack"
 )
@@ -44,10 +45,10 @@ func validateRequest(r *Request) error {
 	if r == nil {
 		return fmt.Errorf("%w: nil request", ErrInvalidRequest)
 	}
-	if r.Method == "" {
+	if strings.TrimSpace(r.Method) == "" {
 		return fmt.Errorf("%w: method is required", ErrInvalidRequest)
 	}
-	if r.Path == "" {
+	if strings.TrimSpace(r.Path) == "" {
 		return fmt.Errorf("%w: path is required", ErrInvalidRequest)
 	}
 	for i := range r.Headers {

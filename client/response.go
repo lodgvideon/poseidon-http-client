@@ -107,19 +107,9 @@ func (sr *StreamResponse) Recv(ctx context.Context) (StreamEvent, error) {
 		}
 		switch ev.Type {
 		case conn.EventHeaders:
-			// The conn package emits trailers as a second EventHeaders
-			// rather than EventTrailers. DoStream already consumed the
-			// initial HEADERS before handing us the stream, so any
-			// HEADERS we see here is trailers.
-			out := StreamEvent{
-				Type:      EventTrailers,
-				Trailers:  ev.Headers,
-				EndStream: ev.EndStream,
-			}
-			if ev.EndStream {
-				sr.drained = true
-			}
-			return out, nil
+			// Spurious post-initial HEADERS without trailer detection —
+			// protocol oddity from peer. Skip and keep pumping.
+			continue
 		case conn.EventData:
 			out := StreamEvent{
 				Type:      EventData,
@@ -176,9 +166,9 @@ func parseStatus(in []hpack.HeaderField) (status int, regular []hpack.HeaderFiel
 	for i := range in {
 		if string(in[i].Name) == ":status" {
 			n, perr := strconv.Atoi(string(in[i].Value))
-			if perr != nil {
-				return 0, nil, fmt.Errorf("%w: :status %q not numeric",
-					ErrEmptyResponse, in[i].Value)
+			if perr != nil || n < 0 {
+				return 0, nil, fmt.Errorf("%w: %q",
+					ErrInvalidStatus, in[i].Value)
 			}
 			regular = make([]hpack.HeaderField, 0, len(in)-1)
 			regular = append(regular, in[:i]...)

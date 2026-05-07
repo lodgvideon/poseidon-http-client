@@ -22,8 +22,13 @@ var (
 	ErrRedialBackoff = errors.New("client: redial in backoff window")
 
 	// ErrEmptyResponse is returned when the response HEADERS frame
-	// did not contain a parseable :status pseudo-header.
+	// did not contain a :status pseudo-header at all.
 	ErrEmptyResponse = errors.New("client: response missing :status")
+
+	// ErrInvalidStatus is returned when the :status pseudo-header is
+	// present but does not parse as a non-negative integer. Distinct
+	// from ErrEmptyResponse so retry logic can treat the two separately.
+	ErrInvalidStatus = errors.New("client: response :status is not a valid integer")
 )
 
 // StreamResetError is returned from Do (or surfaced via DoStream's

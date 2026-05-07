@@ -86,7 +86,11 @@ func (c *Client) Do(ctx context.Context, req *Request) (*Response, error) {
 		}
 	}
 
-	return drainResponse(ctx, s, req)
+	resp, err := drainResponse(ctx, s, req)
+	if err != nil {
+		_ = s.Close()
+	}
+	return resp, err
 }
 
 // DoStream issues a request and returns once the initial HEADERS frame
@@ -134,8 +138,7 @@ func (c *Client) DoStream(ctx context.Context, req *Request) (*StreamResponse, e
 		release()
 		return nil, fmt.Errorf("client: expected initial HEADERS, got %s", ev.Type)
 	}
-	copied := copyHeaderFields(ev.Headers)
-	status, regular, perr := parseStatus(copied)
+	status, regular, perr := parseStatus(ev.Headers)
 	if perr != nil {
 		_ = s.Close()
 		release()
@@ -230,24 +233,23 @@ func drainResponse(ctx context.Context, s *conn.Stream, req *Request) (*Response
 		}
 		switch ev.Type {
 		case conn.EventHeaders:
-			if !gotHeaders {
-				// Copy first to defend against the conn-package
-				// scratch buffer being overwritten by the reader
-				// goroutine processing the next frame.
-				copied := copyHeaderFields(ev.Headers)
-				status, regular, perr := parseStatus(copied)
-				if perr != nil {
-					return nil, perr
+			// The conn package now copies header fields per-event, so
+			// ev.Headers is owned by the event and safe to retain.
+			if gotHeaders {
+				// Spurious second HEADERS without trailer flag — peer
+				// protocol oddity. Skip.
+				if ev.EndStream {
+					return &resp, nil
 				}
-				resp.Status = status
-				resp.Headers = regular
-				gotHeaders = true
-			} else if req.WantTrailers {
-				// The conn package emits trailers as a second
-				// EventHeaders rather than EventTrailers; recognize
-				// it here.
-				resp.Trailers = copyHeaderFields(ev.Headers)
+				continue
 			}
+			status, regular, perr := parseStatus(ev.Headers)
+			if perr != nil {
+				return nil, perr
+			}
+			resp.Status = status
+			resp.Headers = regular
+			gotHeaders = true
 			if ev.EndStream {
 				return &resp, nil
 			}
@@ -261,7 +263,7 @@ func drainResponse(ctx context.Context, s *conn.Stream, req *Request) (*Response
 			}
 		case conn.EventTrailers:
 			if req.WantTrailers {
-				resp.Trailers = copyHeaderFields(ev.Headers)
+				resp.Trailers = ev.Headers
 			}
 			if ev.EndStream {
 				return &resp, nil
@@ -270,23 +272,6 @@ func drainResponse(ctx context.Context, s *conn.Stream, req *Request) (*Response
 			return nil, &StreamResetError{Code: ev.RSTCode}
 		}
 	}
-}
-
-// copyHeaderFields deep-copies a header slice (including its byte
-// slices) so the result is safe to retain across Recv / Close.
-func copyHeaderFields(in []hpack.HeaderField) []hpack.HeaderField {
-	if len(in) == 0 {
-		return nil
-	}
-	out := make([]hpack.HeaderField, len(in))
-	for i := range in {
-		nm := make([]byte, len(in[i].Name))
-		copy(nm, in[i].Name)
-		vl := make([]byte, len(in[i].Value))
-		copy(vl, in[i].Value)
-		out[i] = hpack.HeaderField{Name: nm, Value: vl}
-	}
-	return out
 }
 
 // deriveAuthority strips the port if it equals 80 (http) or 443 (https).

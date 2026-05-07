@@ -2,6 +2,7 @@ package client
 
 import (
 	"context"
+	"fmt"
 	"sync"
 	"time"
 
@@ -57,7 +58,10 @@ func (s *singleConn) acquire(ctx context.Context) (*conn.Conn, func(), error) {
 			time.Since(s.lastDialAt) < s.backoff {
 			err := s.dialErr
 			s.mu.Unlock()
-			return nil, nil, &DialError{Addr: s.addr, Err: err}
+			return nil, nil, &DialError{
+				Addr: s.addr,
+				Err:  fmt.Errorf("%w: %w", ErrRedialBackoff, err),
+			}
 		}
 		// Become the dialer; release the lock for the long dial.
 		s.dialing = make(chan struct{})
