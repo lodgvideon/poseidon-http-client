@@ -44,13 +44,19 @@ type Framer struct {
 	maxReadFrameSize  uint32
 	maxHeaderListSize uint32
 
-	readBuf  []byte
-	hdrBuf   [FrameHeaderSize]byte
-	smallBuf [16]byte
+	readBuf    []byte
+	readBufPtr *[]byte // pool handle (nil after Close)
+	hdrBuf     [FrameHeaderSize]byte
+	smallBuf   [16]byte
 }
 
 // NewFramer constructs a Framer over the given writer and reader.
 // Either side may be nil if only the other is needed.
+//
+// The internal read buffer comes from a shared sync.Pool. Call Close
+// when done to return it; otherwise the buffer is GC'd via the pool's
+// finalization (slower than reuse). Connection layers SHOULD call
+// Close as part of their own shutdown.
 func NewFramer(w io.Writer, r io.Reader) *Framer {
 	rb := bytesx.GetReadBuf(int(defaultMaxFrameSize) + FrameHeaderSize)
 	return &Framer{
@@ -58,11 +64,29 @@ func NewFramer(w io.Writer, r io.Reader) *Framer {
 		r:                r,
 		maxReadFrameSize: defaultMaxFrameSize,
 		readBuf:          *rb,
+		readBufPtr:       rb,
 	}
 }
 
-// SetMaxReadFrameSize sets the read-side cap on a single frame payload.
-func (f *Framer) SetMaxReadFrameSize(n uint32)  { f.maxReadFrameSize = n }
+// Close returns the internal read buffer to the shared pool. Subsequent
+// ReadFrame calls will allocate or fetch a fresh buffer if needed.
+// Idempotent.
+func (f *Framer) Close() {
+	if f.readBufPtr == nil {
+		return
+	}
+	*f.readBufPtr = f.readBuf
+	bytesx.PutReadBuf(f.readBufPtr)
+	f.readBufPtr = nil
+	f.readBuf = nil
+}
+
+// SetMaxReadFrameSize sets the maximum frame payload length the Framer
+// will accept on read AND emit on write. Per RFC 7540 §6.5.2 the
+// receiver advertises this via SETTINGS_MAX_FRAME_SIZE; the SENDER
+// must independently respect the PEER's advertised value, which lives
+// outside the framer (callers track peer settings separately).
+func (f *Framer) SetMaxReadFrameSize(n uint32) { f.maxReadFrameSize = n }
 // SetMaxHeaderListSize sets the read-side cap on a header block.
 func (f *Framer) SetMaxHeaderListSize(n uint32) { f.maxHeaderListSize = n }
 // SetReadBuffer overrides the internal read buffer (useful for pooling).
@@ -170,6 +194,9 @@ func (f *Framer) WriteHeaders(p WriteHeadersParams) error {
 	if p.Priority != nil {
 		totalLen += 5
 	}
+	if totalLen > f.maxReadFrameSize {
+		return ErrFrameTooLarge
+	}
 	if err := f.writeHeader(FrameHeader{Length: totalLen, Type: FrameHeaders, Flags: flags, StreamID: p.StreamID}); err != nil {
 		return err
 	}
@@ -245,18 +272,27 @@ func (f *Framer) WriteRSTStream(streamID uint32, code ErrCode) error {
 	return f.writeFrame(FrameHeader{Length: 4, Type: FrameRSTStream, StreamID: streamID}, f.smallBuf[:4])
 }
 
-// WriteSettings writes a SETTINGS frame carrying s.
+// WriteSettings writes a SETTINGS frame carrying s. Zero allocations:
+// pairs are encoded into a stack-resident scratch buffer (max 16 × 6
+// bytes = 96 bytes — fits comfortably below the heap-escape threshold
+// for a same-package call).
 func (f *Framer) WriteSettings(s SettingsParams) error {
 	if s.N > 16 {
 		return ErrSettingsLength
 	}
-	payload := make([]byte, 0, s.N*6)
+	var scratch [96]byte
+	off := 0
 	for i := 0; i < s.N; i++ {
 		p := s.Pairs[i]
-		payload = append(payload,
-			byte(p.ID>>8), byte(p.ID),
-			byte(p.Value>>24), byte(p.Value>>16), byte(p.Value>>8), byte(p.Value))
+		scratch[off] = byte(p.ID >> 8)
+		scratch[off+1] = byte(p.ID)
+		scratch[off+2] = byte(p.Value >> 24)
+		scratch[off+3] = byte(p.Value >> 16)
+		scratch[off+4] = byte(p.Value >> 8)
+		scratch[off+5] = byte(p.Value)
+		off += 6
 	}
+	payload := scratch[:off]
 	return f.writeFrame(FrameHeader{Length: uint32(len(payload)), Type: FrameSettings, StreamID: 0}, payload)
 }
 
@@ -280,6 +316,9 @@ func (f *Framer) WritePushPromise(streamID, promisedID uint32, blockFragment []b
 	totalLen := uint32(4 + len(blockFragment) + int(padLen))
 	if padLen > 0 {
 		totalLen++
+	}
+	if totalLen > f.maxReadFrameSize {
+		return ErrFrameTooLarge
 	}
 	if err := f.writeHeader(FrameHeader{Length: totalLen, Type: FramePushPromise, Flags: flags, StreamID: streamID}); err != nil {
 		return err
@@ -318,21 +357,35 @@ func (f *Framer) WritePing(ack bool, data [8]byte) error {
 	return f.writeFrame(FrameHeader{Length: 8, Type: FramePing, Flags: flags, StreamID: 0}, data[:])
 }
 
-// WriteGoAway writes a GOAWAY frame.
+// WriteGoAway writes a GOAWAY frame. Zero allocations when debug is
+// empty (the 8-byte fixed prefix lives in smallBuf); otherwise debug
+// is written directly via the underlying io.Writer without copying.
 func (f *Framer) WriteGoAway(lastStreamID uint32, code ErrCode, debug []byte) error {
 	totalLen := uint32(8 + len(debug))
-	payload := make([]byte, totalLen)
+	if totalLen > f.maxReadFrameSize {
+		return ErrFrameTooLarge
+	}
 	last := lastStreamID & 0x7fffffff
-	payload[0] = byte(last >> 24)
-	payload[1] = byte(last >> 16)
-	payload[2] = byte(last >> 8)
-	payload[3] = byte(last)
-	payload[4] = byte(code >> 24)
-	payload[5] = byte(code >> 16)
-	payload[6] = byte(code >> 8)
-	payload[7] = byte(code)
-	copy(payload[8:], debug)
-	return f.writeFrame(FrameHeader{Length: totalLen, Type: FrameGoAway, StreamID: 0}, payload)
+	f.smallBuf[0] = byte(last >> 24)
+	f.smallBuf[1] = byte(last >> 16)
+	f.smallBuf[2] = byte(last >> 8)
+	f.smallBuf[3] = byte(last)
+	f.smallBuf[4] = byte(code >> 24)
+	f.smallBuf[5] = byte(code >> 16)
+	f.smallBuf[6] = byte(code >> 8)
+	f.smallBuf[7] = byte(code)
+	if err := f.writeHeader(FrameHeader{Length: totalLen, Type: FrameGoAway, StreamID: 0}); err != nil {
+		return err
+	}
+	if _, err := f.w.Write(f.smallBuf[:8]); err != nil {
+		return err
+	}
+	if len(debug) > 0 {
+		if _, err := f.w.Write(debug); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // WriteWindowUpdate writes a WINDOW_UPDATE frame.
@@ -351,10 +404,17 @@ func (f *Framer) WriteWindowUpdate(streamID uint32, increment uint32) error {
 // === Read side ===
 
 // ReadFrame reads one frame from the underlying reader and dispatches
-// it through h. Honors ctx for cancellation between frames.
+// it through h. Honors ctx.Err() at entry — a pre-cancelled ctx returns
+// immediately. Cancellation that races a blocked read is the caller's
+// responsibility to drive via the underlying transport (e.g. by
+// closing the net.Conn or setting a read deadline) — Framer does not
+// own the transport's deadline.
 func (f *Framer) ReadFrame(ctx context.Context, h Handler) (FrameHeader, error) {
 	if f.r == nil {
 		return FrameHeader{}, errors.New("poseidon/frame: Framer has no reader")
+	}
+	if err := ctx.Err(); err != nil {
+		return FrameHeader{}, err
 	}
 	if cap(f.readBuf) < FrameHeaderSize {
 		f.readBuf = make([]byte, FrameHeaderSize)
@@ -402,7 +462,10 @@ func (f *Framer) ReadFrame(ctx context.Context, h Handler) (FrameHeader, error) 
 	case FrameContinuation:
 		return fh, f.dispatchContinuation(fh, payload, h)
 	default:
-		return fh, ErrUnknownFrameType
+		// RFC 7540 §5.5: implementations MUST ignore frames they do not
+		// understand and continue. Drain the payload (already read) and
+		// return without error.
+		return fh, nil
 	}
 }
 
@@ -492,8 +555,11 @@ func (f *Framer) dispatchSettings(fh FrameHeader, payload []byte, h Handler) err
 	if fh.Length%6 != 0 {
 		return ErrSettingsLength
 	}
+	if len(payload)/6 > len(SettingsParams{}.Pairs) {
+		return ErrSettingsLength
+	}
 	var s SettingsParams
-	for i := 0; i+6 <= len(payload) && s.N < len(s.Pairs); i += 6 {
+	for i := 0; i+6 <= len(payload); i += 6 {
 		s.Pairs[s.N] = SettingPair{
 			ID:    SettingID(uint16(payload[i])<<8 | uint16(payload[i+1])),
 			Value: uint32(payload[i+2])<<24 | uint32(payload[i+3])<<16 | uint32(payload[i+4])<<8 | uint32(payload[i+5]),

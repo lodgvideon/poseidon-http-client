@@ -1,11 +1,14 @@
 package hpack
 
+import "bytes"
+
 // Encoder encodes HPACK header blocks. Holds a dynamic table per HTTP/2
 // connection. NOT goroutine-safe.
 type Encoder struct {
 	dt          *dynamicTable
-	peerMaxSize uint32
-	localLimit  uint32
+	peerMaxSize uint32 // most recent SETTINGS_HEADER_TABLE_SIZE from peer
+	callerLimit uint32 // caller-configured cap (SetMaxDynamicTableSizeLimit)
+	localLimit  uint32 // effective limit = min(peerMaxSize, callerLimit)
 	// pendingSizeUpdate, if set, makes the next encode emit a
 	// "Dynamic Table Size Update" representation (RFC §6.3) at the head.
 	pendingSizeUpdate uint32
@@ -18,39 +21,50 @@ func NewEncoder() *Encoder {
 	return &Encoder{
 		dt:          newDynamicTable(defaultMaxDynamicTableSize),
 		peerMaxSize: defaultMaxDynamicTableSize,
+		callerLimit: defaultMaxDynamicTableSize,
 		localLimit:  defaultMaxDynamicTableSize,
 	}
 }
 
 // SetMaxDynamicTableSize handles a peer SETTINGS_HEADER_TABLE_SIZE update.
-// The encoder MUST emit a Size Update on the next block (RFC §4.2).
+// The encoder recomputes the effective local limit as min(peer, caller)
+// and emits a Size Update on the next block (RFC §4.2). Peer increases
+// are honored — earlier versions silently capped at the first observed
+// peer value, leaving compression ratio degraded for the connection's
+// lifetime.
 func (e *Encoder) SetMaxDynamicTableSize(n uint32) {
 	e.peerMaxSize = n
-	if n < e.localLimit {
-		e.localLimit = n
-	}
-	e.pendingSizeUpdate = e.localLimit
-	e.hasPendingUpdate = true
-	e.dt.setMaxSize(e.localLimit)
+	e.recomputeLocalLimit()
 }
 
-// SetMaxDynamicTableSizeLimit caps the local table size below the peer limit.
+// SetMaxDynamicTableSizeLimit caps the local table size below the peer
+// limit. The effective local limit is min(peer, caller).
 func (e *Encoder) SetMaxDynamicTableSizeLimit(n uint32) {
-	if n > e.peerMaxSize {
-		n = e.peerMaxSize
+	e.callerLimit = n
+	e.recomputeLocalLimit()
+}
+
+// recomputeLocalLimit applies localLimit = min(peerMaxSize, callerLimit)
+// and schedules a SETTINGS-update emit if it changed.
+func (e *Encoder) recomputeLocalLimit() {
+	newLimit := e.peerMaxSize
+	if e.callerLimit < newLimit {
+		newLimit = e.callerLimit
 	}
-	if n != e.localLimit {
-		e.localLimit = n
-		e.pendingSizeUpdate = n
-		e.hasPendingUpdate = true
-		e.dt.setMaxSize(n)
+	if newLimit == e.localLimit {
+		return
 	}
+	e.localLimit = newLimit
+	e.pendingSizeUpdate = newLimit
+	e.hasPendingUpdate = true
+	e.dt.setMaxSize(newLimit)
 }
 
 // Reset clears the dynamic table and pending size update.
 func (e *Encoder) Reset() {
 	e.dt.clear()
 	e.peerMaxSize = defaultMaxDynamicTableSize
+	e.callerLimit = defaultMaxDynamicTableSize
 	e.localLimit = defaultMaxDynamicTableSize
 	e.pendingSizeUpdate = 0
 	e.hasPendingUpdate = false
@@ -118,10 +132,10 @@ func (e *Encoder) dynamicLookup(name, value []byte) (uint64, bool) {
 	var nameOnly uint64
 	for i := 1; i <= e.dt.len(); i++ {
 		n, v := e.dt.at(i)
-		if !bytesEqual(n, name) {
+		if !bytes.Equal(n, name) {
 			continue
 		}
-		if bytesEqual(v, value) {
+		if bytes.Equal(v, value) {
 			return uint64(i), true
 		}
 		if nameOnly == 0 {

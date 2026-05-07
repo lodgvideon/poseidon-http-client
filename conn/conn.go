@@ -47,9 +47,9 @@ type Conn struct {
 	// of SETTINGS_INITIAL_WINDOW_SIZE) and is replenished by inbound
 	// WINDOW_UPDATE(stream=0). fcOutCond.Broadcast wakes writers
 	// blocked in acquireSendCredits.
-	fcOutMu             sync.Mutex
-	fcOutCond           *sync.Cond
-	peerConnSendWindow  int32
+	fcOutMu            sync.Mutex
+	fcOutCond          *sync.Cond
+	peerConnSendWindow int32
 
 	// goAwayReceived flags that the peer has sent GOAWAY (RFC 7540
 	// §6.8). New NewStream calls return ErrGoAway; existing streams
@@ -60,8 +60,13 @@ type Conn struct {
 	closed     atomic.Bool
 	readerDone chan struct{}
 
-	statsMu sync.Mutex
-	stats   ConnStats
+	// Stats counters: atomics for lock-free updates on the hot write
+	// and read paths. Snapshot via Stats() which loads each.
+	atomicBytesSent      atomic.Int64
+	atomicBytesReceived  atomic.Int64
+	atomicFramesSent     atomic.Int64
+	atomicFramesReceived atomic.Int64
+	atomicStreamsOpened  atomic.Uint32
 }
 
 // ConnStats is a point-in-time counter snapshot.
@@ -114,59 +119,38 @@ func (c *Conn) lookupStream(id uint32) *Stream {
 // NewStream allocates a new stream. B.1 enforces at most one in-flight
 // stream per Conn; subsequent calls return ErrTooManyStreams until the
 // active stream completes.
-// NewStream allocates a new outbound stream. Returns ErrTooManyStreams
-// when the in-flight count has reached the locally advertised
-// MaxConcurrentStreams (peer-advertised enforcement is B.2.5).
 // NewStream allocates an in-flight slot for a new outbound stream. The
 // stream's HTTP/2 ID is assigned later, when SendHeaders writes the
 // first HEADERS frame under the writer mutex; this preserves the
 // monotonic-id ordering required by RFC 7540 §5.1.1 even with many
 // concurrent NewStream callers. Returns ErrTooManyStreams when the
-// in-flight count has reached the locally advertised
-// MaxConcurrentStreams (peer-advertised enforcement is B.2.5).
-// NewStream allocates an in-flight slot for a new outbound stream. The
-// stream's HTTP/2 ID is assigned later, when SendHeaders writes the
-// first HEADERS frame under the writer mutex; this preserves the
-// monotonic-id ordering required by RFC 7540 §5.1.1 even with many
-// concurrent NewStream callers. Returns ErrTooManyStreams when the
-// in-flight count has reached the locally advertised
-// MaxConcurrentStreams (peer-advertised enforcement is B.2.5).
-// NewStream allocates an in-flight slot for a new outbound stream. The
-// stream's HTTP/2 ID is assigned later, when SendHeaders writes the
-// first HEADERS frame under the writer mutex; this preserves the
-// monotonic-id ordering required by RFC 7540 §5.1.1 even with many
-// concurrent NewStream callers. Returns ErrTooManyStreams when the
-// in-flight count has reached the locally advertised
-// MaxConcurrentStreams (peer-advertised enforcement is B.2.5).
-func (c *Conn) NewStream(ctx context.Context) (*Stream, error) {
+// in-flight count has reached min(local MaxConcurrentStreams,
+// peer-advertised SETTINGS_MAX_CONCURRENT_STREAMS).
+func (c *Conn) NewStream(_ context.Context) (*Stream, error) {
 	if c.closed.Load() {
 		return nil, ErrConnClosed
 	}
 	if c.goAwayReceived.Load() {
 		return nil, ErrGoAway
 	}
-	c.smu.Lock()
-	defer c.smu.Unlock()
-	limit := c.opts.Settings.MaxConcurrentStreams
-	// Peer-advertised SETTINGS_MAX_CONCURRENT_STREAMS (RFC 7540 §6.5.2)
-	// further constrains us when smaller than our local cap. The
-	// setting is absent by default (no peer-imposed limit); zero is
-	// allowed as "the peer accepts no new streams" (also a real value
-	// — not unlimited).
+	// Read peer setting OUTSIDE smu (lock order: psMu before smu in
+	// applyPeerSettings, so we must not invert here).
 	c.psMu.RLock()
 	peerLimit, peerHas := lookupPeerSetting(c.peerSettings, frame.SettingMaxConcurrentStreams)
 	c.psMu.RUnlock()
+	limit := c.opts.Settings.MaxConcurrentStreams
 	if peerHas && peerLimit < limit {
 		limit = peerLimit
 	}
+	c.smu.Lock()
 	if c.inflight >= limit {
+		c.smu.Unlock()
 		return nil, ErrTooManyStreams
 	}
 	s := newStream(0, c.opts.StreamEventBuffer, c, int32(c.opts.Settings.InitialWindowSize))
 	c.inflight++
-	c.statsMu.Lock()
-	c.stats.StreamsOpened++
-	c.statsMu.Unlock()
+	c.smu.Unlock()
+	c.atomicStreamsOpened.Add(1)
 	return s, nil
 }
 
@@ -195,6 +179,7 @@ func (c *Conn) Close() error {
 	c.wmu.Unlock()
 	_ = c.transport.Close()
 	<-c.readerDone
+	c.fr.Close()
 	return nil
 }
 
@@ -224,10 +209,25 @@ func (c *Conn) lastClientStreamID() uint32 {
 }
 
 // Stats returns a point-in-time snapshot of connection counters.
+// Each field is loaded atomically; the snapshot is consistent
+// per-field but not across fields (a high-throughput conn may produce
+// counters that don't sum cleanly across the snapshot boundary).
 func (c *Conn) Stats() ConnStats {
-	c.statsMu.Lock()
-	defer c.statsMu.Unlock()
-	return c.stats
+	return ConnStats{
+		BytesSent:      c.atomicBytesSent.Load(),
+		BytesReceived:  c.atomicBytesReceived.Load(),
+		FramesSent:     c.atomicFramesSent.Load(),
+		FramesReceived: c.atomicFramesReceived.Load(),
+		StreamsOpened:  c.atomicStreamsOpened.Load(),
+	}
+}
+
+// IsAlive reports whether the connection has neither been Closed nor
+// received a GOAWAY frame from the peer. It is a cheap atomic check
+// suitable for transport pools that need to decide whether to reuse
+// or redial.
+func (c *Conn) IsAlive() bool {
+	return !c.closed.Load() && !c.goAwayReceived.Load()
 }
 
 // --- streamWriter implementation (called from *Stream).
@@ -347,14 +347,6 @@ func (c *Conn) writeRSTStream(s *Stream, code frame.ErrCode) error {
 	return nil
 }
 
-// onDataReceived debits both the stream-level and connection-level
-// recv windows for a DATA frame whose total payload is `length` bytes
-// (RFC 7540 §6.9.1: includes the data, the pad-length octet, and the
-// padding). Returns an error to abort the connection (peer
-// FLOW_CONTROL_ERROR) or the stream when its window is exceeded. On
-// success it eagerly accumulates a refund counter and, once the
-// per-stream or connection counter crosses recvWindowRefundThreshold,
-// emits a WINDOW_UPDATE for that scope.
 // onDataReceived debits both the stream-level and connection-level
 // recv windows for a DATA frame whose total payload is `length` bytes
 // (RFC 7540 §6.9.1: includes the data, the pad-length octet, and the
@@ -633,7 +625,7 @@ func (c *Conn) onGoAwayReceived(lastStreamID uint32, _ frame.ErrCode) {
 	c.goAwayReceived.Store(true)
 
 	c.smu.Lock()
-	victims := make([]*Stream, 0)
+	victims := make([]*Stream, 0, len(c.streams))
 	for id, s := range c.streams {
 		if id > lastStreamID {
 			victims = append(victims, s)
@@ -676,26 +668,41 @@ func (c *Conn) writePingAck(payload [8]byte) error {
 	return nil
 }
 
-func (c *Conn) bumpFramesSent() {
-	c.statsMu.Lock()
-	c.stats.FramesSent++
-	c.statsMu.Unlock()
-}
+func (c *Conn) bumpFramesSent() { c.atomicFramesSent.Add(1) }
 
 // readerLoop owns frame.ReadFrame for the lifetime of the connection.
+// On a typed *ConnError, emits GOAWAY with the error code before
+// shutting down streams (RFC 7540 §5.4.1). I/O errors and EOF skip
+// GOAWAY (transport already gone).
 func (c *Conn) readerLoop() {
 	defer close(c.readerDone)
 	h := newConnHandler(c, c.dec)
 	for {
 		_, err := c.fr.ReadFrame(context.Background(), h)
 		if err != nil {
+			c.emitConnGoAwayIfTyped(err)
 			c.shutdownStreams(err)
 			return
 		}
-		c.statsMu.Lock()
-		c.stats.FramesReceived++
-		c.statsMu.Unlock()
+		c.atomicFramesReceived.Add(1)
 	}
+}
+
+// emitConnGoAwayIfTyped writes a best-effort GOAWAY when the reader
+// loop terminates via a *ConnError so the peer learns the diagnosis
+// (RFC 7540 §5.4.1). Bounded write deadline avoids wedging on an
+// unresponsive transport.
+func (c *Conn) emitConnGoAwayIfTyped(err error) {
+	var ce *ConnError
+	if !errors.As(err, &ce) {
+		return
+	}
+	if dl, ok := c.transport.(interface{ SetWriteDeadline(time.Time) error }); ok {
+		_ = dl.SetWriteDeadline(time.Now().Add(closeGoAwayDeadline))
+	}
+	c.wmu.Lock()
+	_ = c.fr.WriteGoAway(c.lastClientStreamID(), ce.Code, nil)
+	c.wmu.Unlock()
 }
 
 func (c *Conn) shutdownStreams(reason error) {
@@ -713,10 +720,6 @@ func (c *Conn) shutdownStreams(reason error) {
 	}
 }
 
-// markStreamDone is called by the connHandler when a stream's response
-// side closes (END_STREAM observed or RST received), and from local
-// SendHeaders/SendData when END_STREAM goes out. It releases the
-// stream's slot in the inflight pool exactly once.
 // markStreamDone is called by the connHandler when a stream's response
 // side closes (END_STREAM observed or RST received), and from local
 // SendHeaders/SendData when END_STREAM goes out. It releases the
@@ -744,9 +747,6 @@ func (c *Conn) markStreamDone(id uint32) {
 	}
 }
 
-// releaseInflight is called when an RST_STREAM is sent to the peer. RST
-// closes the stream regardless of whether either end observed END_STREAM,
-// so the inflight slot must be returned. Idempotent via Stream.inflightDone.
 // releaseInflight is called when an RST_STREAM is sent to the peer. RST
 // closes the stream regardless of whether either end observed END_STREAM,
 // so the inflight slot must be returned and the stream evicted from the

@@ -1,0 +1,294 @@
+package client
+
+import (
+	"context"
+	"fmt"
+	"io"
+	"net"
+	"strings"
+	"time"
+
+	"github.com/lodgvideon/poseidon-http-client/conn"
+	"github.com/lodgvideon/poseidon-http-client/hpack"
+)
+
+// ClientOptions tunes a Client. Addr and ConnOpts.Dialer are required.
+type ClientOptions struct {
+	// Addr is the "host:port" target used both as the dial target and
+	// as the default :authority for requests that don't set one.
+	Addr string
+
+	// ConnOpts is forwarded verbatim to conn.Dial. ConnOpts.Dialer
+	// must be non-nil.
+	ConnOpts conn.ConnOptions
+
+	// DialBackoff suppresses repeated dial attempts within this window
+	// after a failed dial. Zero disables suppression (immediate retry).
+	DialBackoff time.Duration
+}
+
+// Client is a high-level HTTP/2 client wrapping a single connection.
+// It is safe for concurrent use by multiple goroutines.
+type Client struct {
+	tr        transport
+	authority string
+}
+
+// NewClient validates opts and constructs a Client. It does NOT dial;
+// the first Do or DoStream call triggers a lazy connection establish.
+func NewClient(opts ClientOptions) (*Client, error) {
+	if opts.Addr == "" || containsAnyWhitespace(opts.Addr) {
+		return nil, fmt.Errorf("client: ClientOptions.Addr must be a non-empty host:port without whitespace")
+	}
+	if opts.ConnOpts.Dialer == nil {
+		return nil, fmt.Errorf("client: ClientOptions.ConnOpts.Dialer is required")
+	}
+	tr := &singleConn{
+		addr:     opts.Addr,
+		connOpts: opts.ConnOpts,
+		backoff:  opts.DialBackoff,
+	}
+	return &Client{tr: tr, authority: deriveAuthority(opts.Addr)}, nil
+}
+
+// Close releases the underlying transport. Subsequent Do/DoStream
+// calls return ErrClosed. Idempotent.
+func (c *Client) Close() error {
+	return c.tr.close()
+}
+
+// Do issues a synchronous request and returns a fully-buffered Response.
+func (c *Client) Do(ctx context.Context, req *Request) (*Response, error) {
+	if err := validateRequest(req); err != nil {
+		return nil, err
+	}
+	cn, release, err := c.tr.acquire(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer release()
+
+	s, err := cn.NewStream(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	hdrs := buildHeaders(req, c.authority)
+	endStream := len(req.Body) == 0 && req.BodyReader == nil
+	if err := s.SendHeaders(ctx, hdrs, endStream); err != nil {
+		_ = s.Close()
+		return nil, err
+	}
+
+	if !endStream {
+		if err := writeRequestBody(ctx, s, req); err != nil {
+			_ = s.Close()
+			return nil, err
+		}
+	}
+
+	resp, err := drainResponse(ctx, s, req)
+	if err != nil {
+		_ = s.Close()
+	}
+	return resp, err
+}
+
+// DoStream issues a request and returns once the initial HEADERS frame
+// has arrived. The caller pumps StreamResponse.Recv for subsequent
+// DATA / trailers / reset events. The caller MUST call
+// StreamResponse.Close if it does not drain the stream.
+func (c *Client) DoStream(ctx context.Context, req *Request) (*StreamResponse, error) {
+	if err := validateRequest(req); err != nil {
+		return nil, err
+	}
+	cn, release, err := c.tr.acquire(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	s, err := cn.NewStream(ctx)
+	if err != nil {
+		release()
+		return nil, err
+	}
+
+	hdrs := buildHeaders(req, c.authority)
+	endStream := len(req.Body) == 0 && req.BodyReader == nil
+	if err := s.SendHeaders(ctx, hdrs, endStream); err != nil {
+		_ = s.Close()
+		release()
+		return nil, err
+	}
+	if !endStream {
+		if err := writeRequestBody(ctx, s, req); err != nil {
+			_ = s.Close()
+			release()
+			return nil, err
+		}
+	}
+
+	ev, err := s.Recv(ctx)
+	if err != nil {
+		_ = s.Close()
+		release()
+		return nil, err
+	}
+	if ev.Type != conn.EventHeaders {
+		_ = s.Close()
+		release()
+		return nil, fmt.Errorf("client: expected initial HEADERS, got %s", ev.Type)
+	}
+	status, regular, perr := parseStatus(ev.Headers)
+	if perr != nil {
+		_ = s.Close()
+		release()
+		return nil, perr
+	}
+	sr := &StreamResponse{
+		Status:  status,
+		Headers: regular,
+		stream:  s,
+		release: release,
+	}
+	if ev.EndStream {
+		sr.drained = true
+	}
+	return sr, nil
+}
+
+// buildHeaders assembles the on-wire HEADERS slice with pseudo-headers
+// first. The returned slice is a fresh allocation; caller-supplied
+// req.Headers entries are referenced by value.
+func buildHeaders(req *Request, defaultAuthority string) []hpack.HeaderField {
+	scheme := req.Scheme
+	if scheme == "" {
+		scheme = "https"
+	}
+	authority := req.Authority
+	if authority == "" {
+		authority = defaultAuthority
+	}
+	out := make([]hpack.HeaderField, 0, 4+len(req.Headers))
+	out = append(out,
+		hpack.HeaderField{Name: []byte(":method"), Value: []byte(req.Method)},
+		hpack.HeaderField{Name: []byte(":scheme"), Value: []byte(scheme)},
+		hpack.HeaderField{Name: []byte(":authority"), Value: []byte(authority)},
+		hpack.HeaderField{Name: []byte(":path"), Value: []byte(req.Path)},
+	)
+	out = append(out, req.Headers...)
+	return out
+}
+
+// writeRequestBody writes Body or BodyReader as DATA frames, ending
+// the request side on the final write. The caller has already issued
+// SendHeaders with endStream=false.
+func writeRequestBody(ctx context.Context, s *conn.Stream, req *Request) error {
+	if req.BodyReader != nil {
+		return writeBodyReader(ctx, s, req.BodyReader)
+	}
+	return s.SendData(ctx, req.Body, true)
+}
+
+// readChunkSize is the per-Read buffer for streaming uploads. The
+// underlying conn layer further chunks at the peer's MAX_FRAME_SIZE
+// and respects flow control.
+const readChunkSize = 16 * 1024
+
+// writeBodyReader streams an io.Reader into DATA frames, half-closing
+// the stream at EOF. On read error it sends RST_STREAM(CANCEL) via
+// Stream.Close and wraps the error.
+func writeBodyReader(ctx context.Context, s *conn.Stream, r io.Reader) error {
+	buf := make([]byte, readChunkSize)
+	for {
+		n, rerr := r.Read(buf)
+		if n > 0 {
+			final := rerr == io.EOF
+			if werr := s.SendData(ctx, buf[:n], final); werr != nil {
+				return werr
+			}
+			if final {
+				return nil
+			}
+		}
+		if rerr == io.EOF {
+			return s.SendData(ctx, nil, true)
+		}
+		if rerr != nil {
+			return fmt.Errorf("client: read request body: %w", rerr)
+		}
+	}
+}
+
+// drainResponse pumps stream events until the response side ends or
+// the stream resets.
+func drainResponse(ctx context.Context, s *conn.Stream, req *Request) (*Response, error) {
+	var (
+		gotHeaders bool
+		resp       Response
+	)
+	for {
+		ev, err := s.Recv(ctx)
+		if err != nil {
+			return nil, err
+		}
+		switch ev.Type {
+		case conn.EventHeaders:
+			// The conn package now copies header fields per-event, so
+			// ev.Headers is owned by the event and safe to retain.
+			if gotHeaders {
+				// Spurious second HEADERS without trailer flag — peer
+				// protocol oddity. Skip.
+				if ev.EndStream {
+					return &resp, nil
+				}
+				continue
+			}
+			status, regular, perr := parseStatus(ev.Headers)
+			if perr != nil {
+				return nil, perr
+			}
+			resp.Status = status
+			resp.Headers = regular
+			gotHeaders = true
+			if ev.EndStream {
+				return &resp, nil
+			}
+		case conn.EventData:
+			resp.BytesReceived += int64(len(ev.Data))
+			if req.WantBody && len(ev.Data) > 0 {
+				resp.Body = append(resp.Body, ev.Data...)
+			}
+			if ev.EndStream {
+				return &resp, nil
+			}
+		case conn.EventTrailers:
+			if req.WantTrailers {
+				resp.Trailers = ev.Headers
+			}
+			if ev.EndStream {
+				return &resp, nil
+			}
+		case conn.EventReset:
+			return nil, &StreamResetError{Code: ev.RSTCode}
+		}
+	}
+}
+
+// deriveAuthority strips the port if it equals 80 (http) or 443
+// (https). Handles IPv6 literals via net.SplitHostPort.
+func deriveAuthority(addr string) string {
+	host, port, err := net.SplitHostPort(addr)
+	if err != nil || host == "" {
+		return addr
+	}
+	if port == "80" || port == "443" {
+		// Re-bracket IPv6 literals so the result is a valid :authority
+		// host (RFC 3986 §3.2.2).
+		if strings.Contains(host, ":") {
+			return "[" + host + "]"
+		}
+		return host
+	}
+	return addr
+}

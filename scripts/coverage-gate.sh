@@ -1,42 +1,58 @@
 #!/usr/bin/env bash
-# Per-package coverage gate.
+# coverage-gate.sh — fail CI if any package or the overall total
+# statement coverage drops below the supplied threshold.
 #
-# Usage: coverage-gate.sh <test-output> [threshold]
+# Usage: ./scripts/coverage-gate.sh [MIN_PERCENT]
+#   MIN_PERCENT defaults to 80.
 #
-# Parses lines like
-#   ok  pkg/path  1.5s  coverage: 79.0% of statements
-# from `go test -cover ./...` output and fails if any package falls below
-# the threshold (default 70 — the current Phase A floor; spec §11 calls
-# for ≥ 90 per package, see docs/COVERAGE.md for the ratchet plan).
+# Reads cover.out (produced by `go test -coverprofile=cover.out
+# ./...`) and uses `go tool cover -func` for both the total figure
+# and the per-package aggregation.
+
 set -euo pipefail
 
-OUT="${1:?path to go-test output required}"
-THRESH="${2:-70}"
+MIN="${1:-80}"
+PROFILE="${COVER_PROFILE:-cover.out}"
 
-if [ ! -s "$OUT" ]; then
-  echo "coverage file empty or missing: $OUT"
-  exit 1
+if [[ ! -f "$PROFILE" ]]; then
+  echo "coverage-gate: $PROFILE not found — run 'go test -coverprofile=$PROFILE ./...' first" >&2
+  exit 2
 fi
 
-violations=$(awk -v th="$THRESH" '
-  /coverage:/ {
-    for (i = 1; i <= NF; i++) {
-      if ($i == "coverage:") {
-        cov = $(i+1)
-        gsub("%", "", cov)
-        if (cov + 0 < th + 0) {
-          # Find package name (second field for "ok" / "FAIL" lines).
-          printf "%s\t%s%% < %s%%\n", $2, cov, th
-        }
-      }
-    }
+# Per-package coverage table from `go test -cover` is the simplest
+# authoritative source; we re-run it (cached when nothing changed) so
+# we don't need to parse cover.out blocks.
+PKG_TABLE=$(go test -cover ./... 2>&1 | grep -E '\bcoverage:' || true)
+
+if [[ -z "$PKG_TABLE" ]]; then
+  echo "coverage-gate: 'go test -cover ./...' produced no coverage rows" >&2
+  exit 2
+fi
+
+OVERALL=$(go tool cover -func="$PROFILE" | awk '/^total:/ {print $3}' | tr -d '%')
+echo "coverage-gate: total = ${OVERALL}% (threshold ${MIN}%)"
+
+FAIL=0
+while IFS= read -r line; do
+  # Extract package path and coverage percentage.
+  pkg=$(echo "$line" | awk '{print $2}')
+  pct=$(echo "$line" | grep -oE 'coverage: [0-9]+\.?[0-9]*%' | grep -oE '[0-9]+\.?[0-9]*')
+  if [[ -z "$pct" ]]; then
+    continue
+  fi
+  echo "coverage-gate: $pkg = ${pct}%"
+  awk -v p="$pct" -v m="$MIN" 'BEGIN { if (p+0 < m+0) exit 1 }' || {
+    echo "coverage-gate: FAIL $pkg coverage ${pct}% < ${MIN}%" >&2
+    FAIL=1
   }
-' "$OUT")
+done <<< "$PKG_TABLE"
 
-if [ -n "$violations" ]; then
-  echo "Coverage gate FAILED — packages below ${THRESH}%:"
-  echo "$violations"
+awk -v p="$OVERALL" -v m="$MIN" 'BEGIN { if (p+0 < m+0) exit 1 }' || {
+  echo "coverage-gate: FAIL total coverage ${OVERALL}% < ${MIN}%" >&2
+  FAIL=1
+}
+
+if [[ "$FAIL" -ne 0 ]]; then
   exit 1
 fi
-
-echo "Coverage gate OK — all packages ≥ ${THRESH}%"
+echo "coverage-gate: all packages and total ≥ ${MIN}%."

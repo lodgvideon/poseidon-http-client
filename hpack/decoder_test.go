@@ -112,3 +112,64 @@ func TestDecoder_Streaming_FinishWithoutBegin(t *testing.T) {
 		t.Fatalf("Finish without Begin should error")
 	}
 }
+
+func TestDecoder_MaxHeaderListSize_RejectsOversize(t *testing.T) {
+	// Encode 4 fields (custom-key, custom-header) — RFC §C.2.1 layout
+	// produces 26 bytes per. Each field's HeaderField.Size() is
+	// len(name)+len(value)+32 = 10+13+32 = 55. Total 4 fields = 220.
+	d := NewDecoder()
+	d.SetMaxHeaderListSize(100) // less than 4 × 55
+	enc := NewEncoder()
+	var buf []byte
+	for i := 0; i < 4; i++ {
+		buf = enc.EncodeBlock(buf, []HeaderField{
+			{Name: []byte("custom-key"), Value: []byte("custom-header")},
+		})
+	}
+	err := d.DecodeBlock(buf, func(HeaderField) error { return nil })
+	if err != ErrHeaderListTooLarge {
+		t.Fatalf("err = %v, want ErrHeaderListTooLarge", err)
+	}
+}
+
+func TestDecoder_Reset_ClearsState(t *testing.T) {
+	d := NewDecoder()
+	d.Begin()
+	d.SetMaxDynamicTableSize(2048)
+	d.Reset()
+	if d.streaming {
+		t.Fatal("Reset must clear streaming flag")
+	}
+	if d.dt.len() != 0 {
+		t.Fatal("Reset must clear dynamic table")
+	}
+}
+
+func TestDecoder_SetMaxDynamicTableSize_AppliesEviction(t *testing.T) {
+	d := NewDecoder()
+	enc := NewEncoder()
+	block := enc.EncodeBlock(nil, []HeaderField{
+		{Name: []byte("custom-key"), Value: []byte("custom-header")},
+	})
+	if err := d.DecodeBlock(block, func(HeaderField) error { return nil }); err != nil {
+		t.Fatalf("DecodeBlock: %v", err)
+	}
+	if d.dt.len() != 1 {
+		t.Fatal("precondition: 1 entry in dynamic table")
+	}
+	d.SetMaxDynamicTableSize(0)
+	if d.dt.len() != 0 {
+		t.Fatal("SetMaxDynamicTableSize(0) must evict all entries")
+	}
+}
+
+func TestDecoder_MaxHeaderListSize_ZeroDisablesGate(t *testing.T) {
+	d := NewDecoder()
+	enc := NewEncoder()
+	buf := enc.EncodeBlock(nil, []HeaderField{
+		{Name: []byte("k"), Value: []byte("v")},
+	})
+	if err := d.DecodeBlock(buf, func(HeaderField) error { return nil }); err != nil {
+		t.Fatalf("DecodeBlock with maxListSize=0 should pass: %v", err)
+	}
+}

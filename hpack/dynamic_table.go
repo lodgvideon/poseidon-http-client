@@ -115,23 +115,33 @@ func (d *dynamicTable) setMaxSize(n uint32) {
 }
 
 // compactArena rewrites d.arena so that all live entries are densely packed
-// at the front, then updates entry offsets. Amortised O(n).
+// at the front. Updates entry offsets in place. Amortised O(n).
+//
+// As of W2, also compacts d.entries: live entries are moved to slots
+// [0..count-1] and head is reset to 0. Otherwise long-lived connections
+// (many adds + evictions but bounded by maxSize) accumulate dead slots
+// in d.entries, leaking ~16 bytes per evicted header indefinitely.
 func (d *dynamicTable) compactArena() {
 	if d.count == 0 {
 		d.arena = d.arena[:0]
 		d.used = 0
+		d.entries = d.entries[:0]
+		d.head = 0
 		return
 	}
 	newArena := make([]byte, 0, d.used*2)
-	for i := 1; i <= d.count; i++ {
-		pos := (d.head + i - 1) % len(d.entries)
+	newEntries := d.entries[:d.count] // reuse backing array
+	for i := 0; i < d.count; i++ {
+		pos := (d.head + i) % len(d.entries)
 		e := d.entries[pos]
 		nameOff := uint32(len(newArena))
 		newArena = append(newArena, d.arena[e.nameOff:e.nameOff+e.nameLen]...)
 		valueOff := uint32(len(newArena))
 		newArena = append(newArena, d.arena[e.valueOff:e.valueOff+e.valueLen]...)
-		d.entries[pos] = dynEntry{nameOff, e.nameLen, valueOff, e.valueLen}
+		newEntries[i] = dynEntry{nameOff, e.nameLen, valueOff, e.valueLen}
 	}
 	d.arena = newArena
 	d.used = uint32(len(newArena))
+	d.entries = newEntries
+	d.head = 0
 }

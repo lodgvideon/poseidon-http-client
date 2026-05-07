@@ -5,11 +5,24 @@ import (
 	"github.com/lodgvideon/poseidon-http-client/hpack"
 )
 
-// streamLookup is the narrow contract handler.go needs from its owner.
-// In production it's *Conn; in tests it's fakeStreamMap.
-type streamLookup interface {
+// connOps is the contract handler.go needs from its owner. In
+// production it's *Conn; tests can supply a fake. Widening this beyond
+// lookupStream removes 8 unsafe *Conn type-assertions in the dispatch
+// path (DIP fix from W4 review).
+type connOps interface {
 	lookupStream(id uint32) *Stream
+	onDataReceived(s *Stream, length uint32) error
+	markStreamDone(id uint32)
+	onWindowUpdate(streamID, increment uint32) error
+	applyPeerSettings(s frame.SettingsParams) error
+	writeSettingsAck() error
+	writePingAck(payload [8]byte) error
+	onGoAwayReceived(lastStreamID uint32, code frame.ErrCode)
 }
+
+// streamLookup is retained as the legacy alias for tests that only
+// fake the lookup behavior; production wiring uses connOps.
+type streamLookup = connOps
 
 // connHandler bridges Phase A's frame.Handler interface into per-stream
 // StreamEvent pushes.
@@ -39,7 +52,6 @@ func newConnHandler(streams streamLookup, dec *hpack.Decoder) *connHandler {
 	}
 }
 
-// OnData implements frame.Handler.
 // OnData implements frame.Handler. It debits flow-control windows
 // (RFC 7540 §6.9.1), surfaces an EventData event to the stream, and
 // emits batched WINDOW_UPDATE refunds via the owning Conn. Returns a
@@ -49,18 +61,14 @@ func (h *connHandler) OnData(fh frame.FrameHeader, p []byte, _ uint8) error {
 	if s == nil {
 		return nil // unknown stream — peer chatter, ignored
 	}
-	if c, ok := h.streams.(*Conn); ok {
-		if err := c.onDataReceived(s, fh.Length); err != nil {
-			return err
-		}
+	if err := h.streams.onDataReceived(s, fh.Length); err != nil {
+		return err
 	}
 	end := fh.Flags&frame.FlagDataEndStream != 0
 	dataCopy := append([]byte(nil), p...)
 	if end {
 		s.markRemoteEnd()
-		if c, ok := h.streams.(*Conn); ok {
-			c.markStreamDone(fh.StreamID)
-		}
+		h.streams.markStreamDone(fh.StreamID)
 	}
 	s.push(StreamEvent{Type: EventData, Data: dataCopy, EndStream: end})
 	return nil
@@ -74,16 +82,22 @@ func (h *connHandler) OnHeaders(fh frame.FrameHeader, hb frame.HeaderBlock, _ *f
 	}
 	end := fh.Flags&frame.FlagHeadersEndStream != 0
 	endHeaders := fh.Flags&frame.FlagHeadersEndHeaders != 0
+	// A second HEADERS block on the same stream after the response
+	// headers have been delivered is a trailers frame (RFC 7540 §8.1).
+	isTrailer := s.headersReceived
 
 	if !endHeaders {
 		// Buffer until CONTINUATION completes the block.
 		h.pendingStreamID = fh.StreamID
 		h.pendingBuf = append(h.pendingBuf[:0], hb...)
 		h.pendingEndStream = end
-		h.pendingTrailer = false
+		h.pendingTrailer = isTrailer
 		return nil
 	}
-	return h.emitHeaderBlock(s, hb, end, false)
+	if !isTrailer {
+		s.headersReceived = true
+	}
+	return h.emitHeaderBlock(s, hb, end, isTrailer)
 }
 
 // OnContinuation implements frame.Handler.
@@ -97,6 +111,9 @@ func (h *connHandler) OnContinuation(fh frame.FrameHeader, hb frame.HeaderBlock)
 		return nil
 	}
 	end := h.pendingEndStream
+	if !h.pendingTrailer {
+		s.headersReceived = true
+	}
 	return h.emitHeaderBlock(s, h.pendingBuf, end, h.pendingTrailer)
 }
 
@@ -115,13 +132,20 @@ func (h *connHandler) emitHeaderBlock(s *Stream, hb []byte, endStream, isTrailer
 	}
 	if endStream {
 		s.markRemoteEnd()
-		if c, ok := h.streams.(*Conn); ok {
-			c.markStreamDone(s.id)
-		}
+		h.streams.markStreamDone(s.id)
+	}
+	// Copy header fields into per-event memory so the channel
+	// buffer cannot expose a slice that the next emitHeaderBlock
+	// call has overwritten in scratch.
+	copied := make([]hpack.HeaderField, len(h.scratch))
+	for i := range h.scratch {
+		nm := append([]byte(nil), h.scratch[i].Name...)
+		vl := append([]byte(nil), h.scratch[i].Value...)
+		copied[i] = hpack.HeaderField{Name: nm, Value: vl, Sensitive: h.scratch[i].Sensitive}
 	}
 	s.push(StreamEvent{
 		Type:      evType,
-		Headers:   h.scratch,
+		Headers:   copied,
 		EndStream: endStream,
 	})
 	return nil
@@ -141,9 +165,7 @@ func (h *connHandler) OnRSTStream(fh frame.FrameHeader, code frame.ErrCode) erro
 		return nil
 	}
 	s.markRemoteEnd()
-	if c, ok := h.streams.(*Conn); ok {
-		c.markStreamDone(fh.StreamID)
-	}
+	h.streams.markStreamDone(fh.StreamID)
 	s.push(StreamEvent{Type: EventReset, RSTCode: code, EndStream: true})
 	return nil
 }
@@ -158,14 +180,10 @@ func (h *connHandler) OnSettings(fh frame.FrameHeader, s frame.SettingsParams) e
 	if fh.Flags&frame.FlagSettingsAck != 0 {
 		return nil
 	}
-	c, ok := h.streams.(*Conn)
-	if !ok {
-		return nil
-	}
-	if err := c.applyPeerSettings(s); err != nil {
+	if err := h.streams.applyPeerSettings(s); err != nil {
 		return err
 	}
-	return c.writeSettingsAck()
+	return h.streams.writeSettingsAck()
 }
 
 // OnPushPromise implements frame.Handler.
@@ -185,11 +203,7 @@ func (h *connHandler) OnPing(fh frame.FrameHeader, payload [8]byte) error {
 	if fh.Flags&frame.FlagPingAck != 0 {
 		return nil
 	}
-	c, ok := h.streams.(*Conn)
-	if !ok {
-		return nil
-	}
-	return c.writePingAck(payload)
+	return h.streams.writePingAck(payload)
 }
 
 // OnGoAway implements frame.Handler.
@@ -198,11 +212,7 @@ func (h *connHandler) OnPing(fh frame.FrameHeader, payload [8]byte) error {
 // streams whose id exceeds lastStreamID with EventReset(REFUSED_STREAM)
 // per RFC 7540 §6.8, and wakes writers blocked on send credit.
 func (h *connHandler) OnGoAway(_ frame.FrameHeader, lastStreamID uint32, code frame.ErrCode, _ []byte) error {
-	c, ok := h.streams.(*Conn)
-	if !ok {
-		return nil
-	}
-	c.onGoAwayReceived(lastStreamID, code)
+	h.streams.onGoAwayReceived(lastStreamID, code)
 	return nil
 }
 
@@ -213,11 +223,7 @@ func (h *connHandler) OnGoAway(_ frame.FrameHeader, lastStreamID uint32, code fr
 // typed error when the increment would overflow the window
 // (RFC 7540 §6.9.1: 2^31-1).
 func (h *connHandler) OnWindowUpdate(fh frame.FrameHeader, increment uint32) error {
-	c, ok := h.streams.(*Conn)
-	if !ok {
-		return nil
-	}
-	return c.onWindowUpdate(fh.StreamID, increment)
+	return h.streams.onWindowUpdate(fh.StreamID, increment)
 }
 
 // Compile-time check that *connHandler satisfies frame.Handler.

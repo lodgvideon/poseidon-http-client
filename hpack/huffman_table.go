@@ -1,5 +1,8 @@
 // Code derived from RFC 7541 Appendix B; values are normative.
-// DO NOT EDIT without consulting RFC 7541.
+// DO NOT EDIT without consulting RFC 7541. The 4-bit FSM lookup
+// (hpack/huffman_fsm.go) is built at init time from this table.
+//
+//go:generate echo "huffman_table.go is hand-derived from RFC 7541 Appendix B; no generator script."
 package hpack
 
 type huffmanCode struct {

@@ -37,9 +37,9 @@ func (t StreamEventType) String() string {
 }
 
 // StreamEvent is one observation about an in-flight stream. The Type
-// field tells the caller which other fields are populated. Slices alias
-// internal pool buffers and are valid only until the next call to
-// (*Stream).Recv or (*Stream).Close on the same stream.
+// field tells the caller which other fields are populated. The Headers
+// and Data slices are deep-copied per event by the connection reader,
+// so they are owned by the receiver and safe to retain.
 type StreamEvent struct {
 	Type      StreamEventType
 	Headers   []hpack.HeaderField // EventHeaders / EventTrailers
@@ -67,6 +67,13 @@ type Stream struct {
 	remoteEnded  bool // peer sent END_STREAM (or RST)
 	closed       bool // RST or graceful close
 	inflightDone bool // inflight slot already returned to the pool
+
+	// headersReceived is set after the first non-trailer HEADERS block
+	// for this stream is delivered. The reader goroutine consults it to
+	// classify subsequent HEADERS frames as trailers (RFC 7540 §8.1).
+	// Single-goroutine access — only the reader goroutine reads and
+	// writes this field — so no synchronization is required.
+	headersReceived bool
 
 	// recvWindow is the number of payload bytes the peer can still
 	// send to *this* stream before we must refill it via WINDOW_UPDATE
@@ -110,16 +117,35 @@ func (s *Stream) markRemoteEnd() {
 
 // push delivers an event from the reader goroutine. Non-blocking under
 // the channel's capacity; documented as part of the public contract.
+// On overflow: marks stream closed, dispatches the RST send to a
+// background goroutine (so the reader is never blocked on wmu), and
+// best-effort delivers a synthetic EventReset so a blocked Recv
+// unblocks instead of waiting until the parent context expires.
 func (s *Stream) push(e StreamEvent) {
 	select {
 	case s.events <- e:
+		return
 	default:
-		// Channel full -- drop and reset to protect the reader. Callers
-		// who care must drain Recv promptly.
+	}
+	s.mu.Lock()
+	already := s.closed
+	s.closed = true
+	s.mu.Unlock()
+	if already {
+		return
+	}
+	go func() {
 		_ = s.w.writeRSTStream(s, frame.ErrCodeRefusedStream)
-		s.mu.Lock()
-		s.closed = true
-		s.mu.Unlock()
+	}()
+	// Best-effort EventReset delivery; if the channel is still full we
+	// rely on consumers waking via context or Close.
+	select {
+	case s.events <- StreamEvent{
+		Type:      EventReset,
+		RSTCode:   frame.ErrCodeRefusedStream,
+		EndStream: true,
+	}:
+	default:
 	}
 }
 

@@ -34,4 +34,7 @@
 // *Conn is goroutine-safe across Send/Recv/Close. *Stream methods may
 // be called from one goroutine at a time; the package serializes writes
 // to the underlying transport internally.
+//
+// For a higher-level request/response API, see the client package
+// (Phase C.1), which builds Do and DoStream on top of *Conn.
 package conn

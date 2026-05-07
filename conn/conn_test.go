@@ -281,3 +281,72 @@ func TestConn_Close_RacedFromTwoGoroutines(t *testing.T) {
 	wg.Wait()
 }
 
+func TestConn_IsAlive_FreshConnTrue(t *testing.T) {
+	cli, srv := net.Pipe()
+	stopSrv := make(chan struct{})
+	srvDone := make(chan struct{})
+	go func() {
+		defer close(srvDone)
+		pipeServer(t, srv, func(srvFr *frame.Framer) {
+			<-stopSrv
+		})
+	}()
+	t.Cleanup(func() {
+		close(stopSrv)
+		<-srvDone
+	})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	c, err := NewClientConn(ctx, cli, ConnOptions{})
+	if err != nil {
+		t.Fatalf("NewClientConn: %v", err)
+	}
+	defer c.Close()
+
+	if !c.IsAlive() {
+		t.Fatal("fresh conn must be alive")
+	}
+}
+
+func TestConn_IsAlive_AfterCloseFalse(t *testing.T) {
+	cli, srv := net.Pipe()
+	go pipeServer(t, srv, nil)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	c, err := NewClientConn(ctx, cli, ConnOptions{})
+	if err != nil {
+		t.Fatalf("NewClientConn: %v", err)
+	}
+	_ = c.Close()
+	if c.IsAlive() {
+		t.Fatal("closed conn must not be alive")
+	}
+}
+
+func TestConn_IsAlive_AfterPeerGoAwayFalse(t *testing.T) {
+	cli, srv := net.Pipe()
+	go pipeServer(t, srv, func(srvFr *frame.Framer) {
+		_ = srvFr.WriteGoAway(0, frame.ErrCodeNoError, nil)
+	})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	c, err := NewClientConn(ctx, cli, ConnOptions{})
+	if err != nil {
+		t.Fatalf("NewClientConn: %v", err)
+	}
+	defer c.Close()
+
+	// Wait for the reader to observe GOAWAY.
+	deadline := time.Now().Add(1 * time.Second)
+	for time.Now().Before(deadline) {
+		if !c.IsAlive() {
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatal("conn still alive after peer GOAWAY")
+}
+

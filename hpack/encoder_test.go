@@ -55,6 +55,60 @@ func TestEncoder_EncodeBlock_MultipleFields(t *testing.T) {
 	}
 }
 
+func TestEncoder_Reset_ClearsState(t *testing.T) {
+	enc := NewEncoder()
+	enc.SetMaxDynamicTableSizeLimit(1024)
+	_ = enc.WriteField(nil, []byte("custom-key"), []byte("v"), false)
+	if enc.dt.len() == 0 {
+		t.Fatal("precondition: dynamic table should have an entry")
+	}
+	enc.Reset()
+	if enc.dt.len() != 0 {
+		t.Fatal("Reset must empty dynamic table")
+	}
+	if enc.localLimit != defaultMaxDynamicTableSize {
+		t.Fatalf("localLimit after Reset = %d, want %d", enc.localLimit, defaultMaxDynamicTableSize)
+	}
+	if enc.hasPendingUpdate {
+		t.Fatal("Reset must clear pending size update")
+	}
+}
+
+func TestEncoder_PendingSizeUpdateEmitted(t *testing.T) {
+	enc := NewEncoder()
+	enc.SetMaxDynamicTableSizeLimit(512)
+	dst := enc.WriteField(nil, []byte(":method"), []byte("GET"), false)
+	// First byte must be a Dynamic Table Size Update (prefix 001x_xxxx).
+	if dst[0]&0xe0 != 0x20 {
+		t.Fatalf("expected size update prefix 0x20, got %#x", dst[0])
+	}
+	// After emit, pending must be cleared.
+	if enc.hasPendingUpdate {
+		t.Fatal("pending size update flag must clear after emit")
+	}
+}
+
+func TestEncoder_SetMaxDynamicTableSize_PeerIncreaseHonored(t *testing.T) {
+	enc := NewEncoder()
+	enc.SetMaxDynamicTableSize(1000)
+	if enc.localLimit != 1000 {
+		t.Fatalf("after peer 1000, localLimit = %d, want 1000", enc.localLimit)
+	}
+	enc.SetMaxDynamicTableSize(4096)
+	if enc.localLimit != 4096 {
+		t.Fatalf("after peer 4096, localLimit = %d, want 4096 (peer increase must lift cap)", enc.localLimit)
+	}
+}
+
+func TestEncoder_SetMaxDynamicTableSize_CallerLimitWins(t *testing.T) {
+	enc := NewEncoder()
+	enc.SetMaxDynamicTableSizeLimit(512)
+	enc.SetMaxDynamicTableSize(8192)
+	if enc.localLimit != 512 {
+		t.Fatalf("localLimit = %d, want 512 (caller cap below peer)", enc.localLimit)
+	}
+}
+
 func BenchmarkEncoder_EncodeBlock_3req_static(b *testing.B) {
 	enc := NewEncoder()
 	fields := []HeaderField{

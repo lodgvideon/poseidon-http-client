@@ -4,13 +4,13 @@ A low-level, zero-allocation HTTP/2 client for Go, designed for load
 generators. Implements RFC 7540 (HTTP/2) and RFC 7541 (HPACK) from
 scratch without `net/http` or `golang.org/x/net/http2`.
 
-**Status:** Phase B.2.6 (B.2 complete) — TLS+ALPN connection,
-multi-stream (configurable `MaxConcurrentStreams`, default 100,
-gated on `min(local, peer-advertised)`), bidirectional flow control,
-dynamic SETTINGS apply + ACK with retroactive `INITIAL_WINDOW_SIZE`
-resize, GOAWAY drain (`ErrGoAway` on new streams; `REFUSED_STREAM`
-on streams above `lastStreamID`), PING ACK echo. See
-[design](docs/superpowers/specs/2026-05-05-poseidon-conn-layer-b1-design.md).
+**Status:** Phase C.1 — public `client` package ships sync `Do` and
+streaming `DoStream` over a single-connection lazy-dial transport,
+with conn-only auto-redial and `(*conn.Conn).IsAlive` for transport
+reuse decisions. Conn-level features through B.2.6 (multi-stream,
+bidirectional flow control, dynamic SETTINGS, peer GOAWAY drain,
+PING ACK echo) remain in place. See
+[design](docs/superpowers/specs/2026-05-07-poseidon-client-c1-design.md).
 
 ## Phases
 
@@ -44,8 +44,12 @@ on streams above `lastStreamID`), PING ACK echo. See
   `ErrGoAway`, wakes writers stuck on send credit (RFC §6.8); inbound
   non-ACK PING echoes back with `ACK=1` and the same 8-byte payload
   (RFC §6.7).
-- **C — Client + pool + discovery + stats** *(planned)*: public API for
-  load generators.
+- **C.1 — Public client API** *(this release)*: `client.Client`,
+  `Request`, `Response`, sync `Do` and streaming `DoStream`,
+  single-connection transport with conn-level auto-redial,
+  `(*conn.Conn).IsAlive` helper for transport reuse decisions.
+- **C.2 / C.3 / C.4 — pool, discovery, stats** *(planned)*: per-host
+  connection pool, service-discovery resolver, metrics callbacks.
 
 ## Quick start
 
@@ -57,47 +61,32 @@ import (
 	"crypto/tls"
 	"fmt"
 
+	"github.com/lodgvideon/poseidon-http-client/client"
 	"github.com/lodgvideon/poseidon-http-client/conn"
-	"github.com/lodgvideon/poseidon-http-client/hpack"
 )
 
 func get(ctx context.Context, addr string) error {
-	c, err := conn.Dial(ctx, addr, conn.ConnOptions{
-		Dialer: &conn.TLSDialer{Config: &tls.Config{ServerName: "example.com"}},
+	c, err := client.NewClient(client.ClientOptions{
+		Addr: addr,
+		ConnOpts: conn.ConnOptions{
+			Dialer: &conn.TLSDialer{Config: &tls.Config{ServerName: "example.com"}},
+		},
 	})
 	if err != nil {
 		return err
 	}
 	defer c.Close()
 
-	s, err := c.NewStream(ctx)
+	res, err := c.Do(ctx, &client.Request{
+		Method:   "GET",
+		Path:     "/",
+		WantBody: true,
+	})
 	if err != nil {
 		return err
 	}
-	if err := s.SendHeaders(ctx, []hpack.HeaderField{
-		{Name: []byte(":method"), Value: []byte("GET")},
-		{Name: []byte(":scheme"), Value: []byte("https")},
-		{Name: []byte(":authority"), Value: []byte("example.com")},
-		{Name: []byte(":path"), Value: []byte("/")},
-	}, true); err != nil {
-		return err
-	}
-	for {
-		ev, err := s.Recv(ctx)
-		if err != nil {
-			return err
-		}
-		if ev.Type == conn.EventHeaders {
-			for _, f := range ev.Headers {
-				if string(f.Name) == ":status" {
-					fmt.Println("status:", string(f.Value))
-				}
-			}
-		}
-		if ev.EndStream {
-			return nil
-		}
-	}
+	fmt.Println("status:", res.Status, "bytes:", res.BytesReceived)
+	return nil
 }
 ```
 

@@ -1,5 +1,7 @@
 package hpack
 
+import "bytes"
+
 // staticEntry holds one row of the HPACK static table (RFC 7541 App. A).
 // Names and values are []byte to avoid string conversions on the hot path.
 type staticEntry struct {
@@ -85,10 +87,10 @@ func staticIndex(name, value []byte) (uint64, bool) {
 	var nameOnly uint64
 	for i := 1; i <= staticTableLen; i++ {
 		e := staticTable[i]
-		if !bytesEqual(e.name, name) {
+		if !bytes.Equal(e.name, name) {
 			continue
 		}
-		if bytesEqual(e.value, value) {
+		if bytes.Equal(e.value, value) {
 			return uint64(i), true
 		}
 		if nameOnly == 0 {
@@ -98,15 +100,4 @@ func staticIndex(name, value []byte) (uint64, bool) {
 	return nameOnly, false
 }
 
-// bytesEqual is a local copy of bytes.Equal to avoid pulling in bytes.
-func bytesEqual(a, b []byte) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	for i := range a {
-		if a[i] != b[i] {
-			return false
-		}
-	}
-	return true
-}
+
