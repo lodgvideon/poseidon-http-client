@@ -74,16 +74,22 @@ func (h *connHandler) OnHeaders(fh frame.FrameHeader, hb frame.HeaderBlock, _ *f
 	}
 	end := fh.Flags&frame.FlagHeadersEndStream != 0
 	endHeaders := fh.Flags&frame.FlagHeadersEndHeaders != 0
+	// A second HEADERS block on the same stream after the response
+	// headers have been delivered is a trailers frame (RFC 7540 §8.1).
+	isTrailer := s.headersReceived
 
 	if !endHeaders {
 		// Buffer until CONTINUATION completes the block.
 		h.pendingStreamID = fh.StreamID
 		h.pendingBuf = append(h.pendingBuf[:0], hb...)
 		h.pendingEndStream = end
-		h.pendingTrailer = false
+		h.pendingTrailer = isTrailer
 		return nil
 	}
-	return h.emitHeaderBlock(s, hb, end, false)
+	if !isTrailer {
+		s.headersReceived = true
+	}
+	return h.emitHeaderBlock(s, hb, end, isTrailer)
 }
 
 // OnContinuation implements frame.Handler.
@@ -97,6 +103,9 @@ func (h *connHandler) OnContinuation(fh frame.FrameHeader, hb frame.HeaderBlock)
 		return nil
 	}
 	end := h.pendingEndStream
+	if !h.pendingTrailer {
+		s.headersReceived = true
+	}
 	return h.emitHeaderBlock(s, h.pendingBuf, end, h.pendingTrailer)
 }
 

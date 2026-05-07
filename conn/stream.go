@@ -68,6 +68,14 @@ type Stream struct {
 	closed       bool // RST or graceful close
 	inflightDone bool // inflight slot already returned to the pool
 
+	// headersReceived is set after the first non-trailer HEADERS block
+	// for this stream is delivered. The reader goroutine consults it to
+	// classify subsequent HEADERS frames as trailers (RFC 7540 §8.1).
+	// Only the reader goroutine writes; readers (the same goroutine, in
+	// the next OnHeaders call) see the value via channel-send/receive
+	// happens-before, so a plain bool is sufficient.
+	headersReceived bool
+
 	// recvWindow is the number of payload bytes the peer can still
 	// send to *this* stream before we must refill it via WINDOW_UPDATE
 	// (RFC 7540 §6.9.1). Initialized from our advertised
