@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"net"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -392,5 +393,181 @@ func TestClient_Close_Idempotent(t *testing.T) {
 	}
 	if err := c.Close(); err != nil {
 		t.Fatalf("second Close: %v", err)
+	}
+}
+
+// captureHandler is a frame.Handler that records HEADERS, DATA, and
+// RST_STREAM observations under a mutex so test scenarios can poll
+// for arrivals between ReadFrame calls.
+type captureHandler struct {
+	mu       sync.Mutex
+	headers  []capturedHeaders
+	data     []capturedData
+	rsts     []capturedRST
+}
+
+type capturedHeaders struct {
+	streamID  uint32
+	block     []byte
+	endStream bool
+}
+
+type capturedData struct {
+	streamID  uint32
+	payload   []byte
+	endStream bool
+}
+
+type capturedRST struct {
+	streamID uint32
+	code     frame.ErrCode
+}
+
+func newCaptureHandler() *captureHandler { return &captureHandler{} }
+
+func (h *captureHandler) firstHeadersStreamID() (uint32, bool) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if len(h.headers) == 0 {
+		return 0, false
+	}
+	return h.headers[0].streamID, true
+}
+
+func (h *captureHandler) bodyEnded(streamID uint32) ([]byte, bool) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	var buf []byte
+	ended := false
+	for _, d := range h.data {
+		if d.streamID != streamID {
+			continue
+		}
+		buf = append(buf, d.payload...)
+		if d.endStream {
+			ended = true
+		}
+	}
+	if !ended {
+		return nil, false
+	}
+	return buf, true
+}
+
+func (h *captureHandler) firstRST(streamID uint32) (frame.ErrCode, bool) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	for _, r := range h.rsts {
+		if r.streamID == streamID {
+			return r.code, true
+		}
+	}
+	return 0, false
+}
+
+func (h *captureHandler) headerBlock(streamID uint32) ([]byte, bool) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	for _, hd := range h.headers {
+		if hd.streamID == streamID {
+			return hd.block, true
+		}
+	}
+	return nil, false
+}
+
+func (h *captureHandler) OnData(fh frame.FrameHeader, payload []byte, _ uint8) error {
+	h.mu.Lock()
+	cp := append([]byte(nil), payload...)
+	h.data = append(h.data, capturedData{
+		streamID:  fh.StreamID,
+		payload:   cp,
+		endStream: fh.Flags&frame.FlagDataEndStream != 0,
+	})
+	h.mu.Unlock()
+	return nil
+}
+
+func (h *captureHandler) OnHeaders(fh frame.FrameHeader, hb frame.HeaderBlock, _ *frame.Priority, _ uint8) error {
+	h.mu.Lock()
+	cp := append([]byte(nil), hb...)
+	h.headers = append(h.headers, capturedHeaders{
+		streamID:  fh.StreamID,
+		block:     cp,
+		endStream: fh.Flags&frame.FlagHeadersEndStream != 0,
+	})
+	h.mu.Unlock()
+	return nil
+}
+
+func (h *captureHandler) OnPriority(frame.FrameHeader, frame.Priority) error { return nil }
+
+func (h *captureHandler) OnRSTStream(fh frame.FrameHeader, code frame.ErrCode) error {
+	h.mu.Lock()
+	h.rsts = append(h.rsts, capturedRST{streamID: fh.StreamID, code: code})
+	h.mu.Unlock()
+	return nil
+}
+
+func (h *captureHandler) OnSettings(frame.FrameHeader, frame.SettingsParams) error {
+	return nil
+}
+
+func (h *captureHandler) OnPushPromise(frame.FrameHeader, uint32, frame.HeaderBlock, uint8) error {
+	return nil
+}
+
+func (h *captureHandler) OnPing(frame.FrameHeader, [8]byte) error                      { return nil }
+func (h *captureHandler) OnGoAway(frame.FrameHeader, uint32, frame.ErrCode, []byte) error { return nil }
+func (h *captureHandler) OnWindowUpdate(frame.FrameHeader, uint32) error               { return nil }
+func (h *captureHandler) OnContinuation(frame.FrameHeader, frame.HeaderBlock) error    { return nil }
+
+// minimalGETServer replies to the first incoming HEADERS frame with
+// :status=200 and END_STREAM. Any subsequent frames are ignored.
+func minimalGETServer() func(srvFr *frame.Framer) {
+	return func(srvFr *frame.Framer) {
+		capH := newCaptureHandler()
+		for {
+			if _, err := srvFr.ReadFrame(context.Background(), capH); err != nil {
+				return
+			}
+			sid, ok := capH.firstHeadersStreamID()
+			if !ok {
+				continue
+			}
+			enc := hpack.NewEncoder()
+			block := enc.EncodeBlock(nil, []hpack.HeaderField{
+				{Name: []byte(":status"), Value: []byte("200")},
+			})
+			_ = srvFr.WriteHeaders(frame.WriteHeadersParams{
+				StreamID:      sid,
+				BlockFragment: block,
+				EndHeaders:    true,
+				EndStream:     true,
+			})
+			return
+		}
+	}
+}
+
+func TestClient_Do_GET_NoBody_ReturnsStatus200(t *testing.T) {
+	d := &fakeDialer{srvAfter: minimalGETServer()}
+	c, err := NewClient(ClientOptions{
+		Addr:     "fake:0",
+		ConnOpts: conn.ConnOptions{Dialer: d},
+	})
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+	defer c.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	res, err := c.Do(ctx, &Request{Method: "GET", Path: "/"})
+	if err != nil {
+		t.Fatalf("Do: %v", err)
+	}
+	if res.Status != 200 {
+		t.Fatalf("Status = %d, want 200", res.Status)
 	}
 }
