@@ -34,7 +34,7 @@ type StreamResetError struct {
 
 // Error implements the error interface.
 func (e *StreamResetError) Error() string {
-	return fmt.Sprintf("client: stream reset by peer: %s", e.Code)
+	return fmt.Sprintf("client: stream reset by peer: %v", e.Code)
 }
 
 // DialError wraps the underlying dial error and the address that
