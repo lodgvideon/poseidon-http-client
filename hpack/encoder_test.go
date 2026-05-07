@@ -55,6 +55,27 @@ func TestEncoder_EncodeBlock_MultipleFields(t *testing.T) {
 	}
 }
 
+func TestEncoder_SetMaxDynamicTableSize_PeerIncreaseHonored(t *testing.T) {
+	enc := NewEncoder()
+	enc.SetMaxDynamicTableSize(1000)
+	if enc.localLimit != 1000 {
+		t.Fatalf("after peer 1000, localLimit = %d, want 1000", enc.localLimit)
+	}
+	enc.SetMaxDynamicTableSize(4096)
+	if enc.localLimit != 4096 {
+		t.Fatalf("after peer 4096, localLimit = %d, want 4096 (peer increase must lift cap)", enc.localLimit)
+	}
+}
+
+func TestEncoder_SetMaxDynamicTableSize_CallerLimitWins(t *testing.T) {
+	enc := NewEncoder()
+	enc.SetMaxDynamicTableSizeLimit(512)
+	enc.SetMaxDynamicTableSize(8192)
+	if enc.localLimit != 512 {
+		t.Fatalf("localLimit = %d, want 512 (caller cap below peer)", enc.localLimit)
+	}
+}
+
 func BenchmarkEncoder_EncodeBlock_3req_static(b *testing.B) {
 	enc := NewEncoder()
 	fields := []HeaderField{

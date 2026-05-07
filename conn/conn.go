@@ -176,6 +176,7 @@ func (c *Conn) Close() error {
 	c.wmu.Unlock()
 	_ = c.transport.Close()
 	<-c.readerDone
+	c.fr.Close()
 	return nil
 }
 
