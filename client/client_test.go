@@ -826,3 +826,74 @@ func TestClient_Do_StreamReset_ReturnsTypedError(t *testing.T) {
 		t.Fatalf("code = %v, want REFUSED_STREAM", rs.Code)
 	}
 }
+
+func TestClient_DoStream_RecvDataChunks(t *testing.T) {
+	chunks := [][]byte{[]byte("first"), []byte("second"), []byte("third")}
+	d := &fakeDialer{srvAfter: func(srvFr *frame.Framer) {
+		capH := newCaptureHandler()
+		for {
+			if _, err := srvFr.ReadFrame(context.Background(), capH); err != nil {
+				return
+			}
+			sid, ok := capH.firstHeadersStreamID()
+			if !ok {
+				continue
+			}
+			enc := hpack.NewEncoder()
+			block := enc.EncodeBlock(nil, []hpack.HeaderField{
+				{Name: []byte(":status"), Value: []byte("200")},
+			})
+			_ = srvFr.WriteHeaders(frame.WriteHeadersParams{
+				StreamID:      sid,
+				BlockFragment: block,
+				EndHeaders:    true,
+			})
+			for i, ck := range chunks {
+				_ = srvFr.WriteData(sid, i == len(chunks)-1, ck)
+			}
+			return
+		}
+	}}
+	c, err := NewClient(ClientOptions{
+		Addr:     "fake:0",
+		ConnOpts: conn.ConnOptions{Dialer: d},
+	})
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+	defer c.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	sr, err := c.DoStream(ctx, &Request{Method: "GET", Path: "/"})
+	if err != nil {
+		t.Fatalf("DoStream: %v", err)
+	}
+	defer sr.Close()
+	if sr.Status != 200 {
+		t.Fatalf("status = %d", sr.Status)
+	}
+	var got [][]byte
+	for {
+		ev, err := sr.Recv(ctx)
+		if err != nil {
+			t.Fatalf("Recv: %v", err)
+		}
+		if ev.Type == EventData {
+			cp := make([]byte, len(ev.Data))
+			copy(cp, ev.Data)
+			got = append(got, cp)
+		}
+		if ev.EndStream {
+			break
+		}
+	}
+	if len(got) != 3 {
+		t.Fatalf("got %d chunks, want 3", len(got))
+	}
+	for i, want := range chunks {
+		if !bytes.Equal(got[i], want) {
+			t.Fatalf("chunk %d = %q, want %q", i, got[i], want)
+		}
+	}
+}

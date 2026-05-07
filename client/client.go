@@ -89,6 +89,70 @@ func (c *Client) Do(ctx context.Context, req *Request) (*Response, error) {
 	return drainResponse(ctx, s, req)
 }
 
+// DoStream issues a request and returns once the initial HEADERS frame
+// has arrived. The caller pumps StreamResponse.Recv for subsequent
+// DATA / trailers / reset events. The caller MUST call
+// StreamResponse.Close if it does not drain the stream.
+func (c *Client) DoStream(ctx context.Context, req *Request) (*StreamResponse, error) {
+	if err := validateRequest(req); err != nil {
+		return nil, err
+	}
+	cn, release, err := c.tr.acquire(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	s, err := cn.NewStream(ctx)
+	if err != nil {
+		release()
+		return nil, err
+	}
+
+	hdrs := buildHeaders(req, c.authority)
+	endStream := len(req.Body) == 0 && req.BodyReader == nil
+	if err := s.SendHeaders(ctx, hdrs, endStream); err != nil {
+		_ = s.Close()
+		release()
+		return nil, err
+	}
+	if !endStream {
+		if err := writeRequestBody(ctx, s, req); err != nil {
+			_ = s.Close()
+			release()
+			return nil, err
+		}
+	}
+
+	ev, err := s.Recv(ctx)
+	if err != nil {
+		_ = s.Close()
+		release()
+		return nil, err
+	}
+	if ev.Type != conn.EventHeaders {
+		_ = s.Close()
+		release()
+		return nil, fmt.Errorf("client: expected initial HEADERS, got %s", ev.Type)
+	}
+	copied := copyHeaderFields(ev.Headers)
+	status, regular, perr := parseStatus(copied)
+	if perr != nil {
+		_ = s.Close()
+		release()
+		return nil, perr
+	}
+	sr := &StreamResponse{
+		Status:  status,
+		Headers: regular,
+		stream:  s,
+		release: release,
+	}
+	if ev.EndStream {
+		sr.drained = true
+	}
+	return sr, nil
+}
+
 // buildHeaders assembles the on-wire HEADERS slice with pseudo-headers
 // first. The returned slice is a fresh allocation; caller-supplied
 // req.Headers entries are referenced by value.

@@ -107,8 +107,19 @@ func (sr *StreamResponse) Recv(ctx context.Context) (StreamEvent, error) {
 		}
 		switch ev.Type {
 		case conn.EventHeaders:
-			// Spurious second HEADERS — protocol-level oddity. Skip.
-			continue
+			// The conn package emits trailers as a second EventHeaders
+			// rather than EventTrailers. DoStream already consumed the
+			// initial HEADERS before handing us the stream, so any
+			// HEADERS we see here is trailers.
+			out := StreamEvent{
+				Type:      EventTrailers,
+				Trailers:  ev.Headers,
+				EndStream: ev.EndStream,
+			}
+			if ev.EndStream {
+				sr.drained = true
+			}
+			return out, nil
 		case conn.EventData:
 			out := StreamEvent{
 				Type:      EventData,
