@@ -205,3 +205,72 @@ func TestSingleConn_Acquire_LazyDial(t *testing.T) {
 		t.Fatal("acquired conn must be alive")
 	}
 }
+
+func TestSingleConn_Acquire_ReusesAliveConn(t *testing.T) {
+	d := &fakeDialer{srvAfter: func(srvFr *frame.Framer) {
+		time.Sleep(2 * time.Second)
+	}}
+	sc := &singleConn{addr: "fake:0", connOpts: conn.ConnOptions{Dialer: d}}
+	defer sc.close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	c1, rel1, err := sc.acquire(ctx)
+	if err != nil {
+		t.Fatalf("first acquire: %v", err)
+	}
+	rel1()
+	c2, rel2, err := sc.acquire(ctx)
+	if err != nil {
+		t.Fatalf("second acquire: %v", err)
+	}
+	defer rel2()
+
+	if c1 != c2 {
+		t.Fatal("expected reuse of the same conn")
+	}
+	if d.dialCount.Load() != 1 {
+		t.Fatalf("dial count = %d, want 1", d.dialCount.Load())
+	}
+}
+
+func TestSingleConn_Acquire_GoAwayTriggersRedial(t *testing.T) {
+	var dialIdx atomic.Int32
+	d := &fakeDialer{srvAfter: func(srvFr *frame.Framer) {
+		// First dialed peer sends GOAWAY immediately to drain the conn.
+		if dialIdx.Add(1) == 1 {
+			_ = srvFr.WriteGoAway(0, frame.ErrCodeNoError, nil)
+		}
+		time.Sleep(2 * time.Second)
+	}}
+	sc := &singleConn{addr: "fake:0", connOpts: conn.ConnOptions{Dialer: d}}
+	defer sc.close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	c1, rel1, err := sc.acquire(ctx)
+	if err != nil {
+		t.Fatalf("first acquire: %v", err)
+	}
+	rel1()
+	// Wait for reader to mark goAwayReceived on c1.
+	deadline := time.Now().Add(1 * time.Second)
+	for time.Now().Before(deadline) {
+		if !c1.IsAlive() {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	c2, rel2, err := sc.acquire(ctx)
+	if err != nil {
+		t.Fatalf("second acquire: %v", err)
+	}
+	defer rel2()
+	if c1 == c2 {
+		t.Fatal("expected a fresh conn after GOAWAY")
+	}
+	if d.dialCount.Load() != 2 {
+		t.Fatalf("dial count = %d, want 2", d.dialCount.Load())
+	}
+}
