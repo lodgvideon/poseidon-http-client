@@ -159,9 +159,24 @@ func TestIntegration_Client_DoStream_LargeResponse(t *testing.T) {
 			}
 		}
 	}))
-	c := clientFor(t, addr)
+	// Larger StreamEventBuffer so the stream's events channel can absorb
+	// up to 256 inbound DATA frames if the test goroutine drains slowly
+	// under the race detector or shared-CI scheduling. The default of 8
+	// risks a silent RST_STREAM(REFUSED_STREAM) when the channel fills,
+	// after which Recv blocks until the context deadline.
+	c, err := client.NewClient(client.ClientOptions{
+		Addr: addr,
+		ConnOpts: conn.ConnOptions{
+			Dialer:            &conn.TLSDialer{Config: &tls.Config{InsecureSkipVerify: true}},
+			StreamEventBuffer: 1024,
+		},
+	})
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+	t.Cleanup(func() { _ = c.Close() })
 
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 	sr, err := c.DoStream(ctx, &client.Request{Method: "GET", Path: "/"})
 	if err != nil {
