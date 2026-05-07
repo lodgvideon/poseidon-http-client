@@ -45,7 +45,7 @@ jobs:
         with:
           go-version: '1.24'
           cache: true
-      - name: Run tests with coverage
-        run: go test -cover -count=1 ./... | tee cov.txt
-      - name: Per-package coverage gate (Phase A floor = 70)
-        run: ./scripts/coverage-gate.sh cov.txt 70
+      - name: Run tests with coverage profile
+        run: go test -race -count=1 -coverprofile=cover.out ./...
+      - name: Per-package + total coverage gate (floor = 80)
+        run: ./scripts/coverage-gate.sh 80
