@@ -25,6 +25,9 @@ can drop in a pool implementation without changing the public surface.
 - Automatic request retries on application-level errors (5xx, RST). The
   caller orchestrates request retries; the client only redials a dead
   connection between requests.
+- Path templating, path-parameter substitution, query-string builders,
+  or automatic percent-encoding. `Request.Path` is the raw `:path` value
+  emitted on the wire; the caller formats it.
 - Zero-allocation hot path for `client` package itself. The codec
   (`frame`/`hpack`) holds the existing `0 B/op` gate; `client` allocates
   per request by design (request/response structs, response body
@@ -84,7 +87,8 @@ type Request struct {
     Method    string  // required, e.g. "GET", "POST"
     Scheme    string  // "https" or "http"; "" defaults to "https"
     Authority string  // ":authority"; "" derives from Client.addrAuthority
-    Path      string  // required, e.g. "/api/v1/users"
+    Path      string  // required; raw request-target including query string,
+                      // e.g. "/api/v1/users/123?fields=id,name"
 
     // Regular headers. Caller owns slice (zero-copy until SendHeaders).
     // MUST NOT include pseudo-headers; validated up front.
@@ -111,6 +115,14 @@ Validation (in order, on the front-end of `Do`/`DoStream`):
 `Authority` defaults: if empty, fall back to a value derived from
 `ClientOptions.Addr` (host portion + port unless 80/443).
 `Scheme` defaults to `"https"` when the dialer is TLS-backed.
+
+**Path is raw.** `Path` is the literal `:path` request-target (RFC 7540
+§8.1.2.3). It includes any query string. No templating, no path-param
+substitution, no automatic percent-encoding. Callers are responsible
+for building the final path (e.g. `fmt.Sprintf("/users/%d", id)`) and
+encoding it. This is a deliberate non-feature: path templating
+allocates and is hot-loop-hostile in load generators. Callers that
+need templating layer a helper above `client`.
 
 Body chunk size for `BodyReader`: **16 KiB read window**, then handed
 to `Stream.WriteData` which chunks again at peer `MAX_FRAME_SIZE` and
