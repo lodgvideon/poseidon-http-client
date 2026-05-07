@@ -21,51 +21,73 @@ type singleConn struct {
 	dialErr    error
 	lastDialAt time.Time
 	closed     bool
+	// dialing is non-nil while a dial is in flight; waiters block on
+	// receiving from it (closed when the dial completes) so that only
+	// one goroutine dials at a time.
+	dialing chan struct{}
 }
 
 // acquire implements transport.acquire.
 func (s *singleConn) acquire(ctx context.Context) (*conn.Conn, func(), error) {
-	s.mu.Lock()
-	if s.closed {
+	for {
+		s.mu.Lock()
+		if s.closed {
+			s.mu.Unlock()
+			return nil, nil, ErrClosed
+		}
+		if s.cur != nil && s.cur.IsAlive() {
+			c := s.cur
+			s.mu.Unlock()
+			return c, func() {}, nil
+		}
+		s.cur = nil
+		// If a dial is already in flight, wait for it and retry.
+		if s.dialing != nil {
+			ch := s.dialing
+			s.mu.Unlock()
+			select {
+			case <-ch:
+				continue
+			case <-ctx.Done():
+				return nil, nil, ctx.Err()
+			}
+		}
+		// Backoff suppression after a recent failed dial.
+		if s.backoff > 0 && s.dialErr != nil &&
+			time.Since(s.lastDialAt) < s.backoff {
+			err := s.dialErr
+			s.mu.Unlock()
+			return nil, nil, &DialError{Addr: s.addr, Err: err}
+		}
+		// Become the dialer; release the lock for the long dial.
+		s.dialing = make(chan struct{})
+		ch := s.dialing
 		s.mu.Unlock()
-		return nil, nil, ErrClosed
-	}
-	if s.cur != nil && s.cur.IsAlive() {
+
+		dialed, dialErr := conn.Dial(ctx, s.addr, s.connOpts)
+
+		s.mu.Lock()
+		s.lastDialAt = time.Now()
+		s.dialing = nil
+		close(ch)
+		if s.closed {
+			if dialed != nil {
+				_ = dialed.Close()
+			}
+			s.mu.Unlock()
+			return nil, nil, ErrClosed
+		}
+		if dialErr != nil {
+			s.dialErr = dialErr
+			s.mu.Unlock()
+			return nil, nil, &DialError{Addr: s.addr, Err: dialErr}
+		}
+		s.cur = dialed
+		s.dialErr = nil
 		c := s.cur
 		s.mu.Unlock()
 		return c, func() {}, nil
 	}
-	s.cur = nil
-	if s.backoff > 0 && s.dialErr != nil &&
-		time.Since(s.lastDialAt) < s.backoff {
-		err := s.dialErr
-		s.mu.Unlock()
-		return nil, nil, &DialError{Addr: s.addr, Err: err}
-	}
-	s.mu.Unlock()
-
-	dialed, dialErr := conn.Dial(ctx, s.addr, s.connOpts)
-
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.lastDialAt = time.Now()
-	if s.closed {
-		if dialed != nil {
-			_ = dialed.Close()
-		}
-		return nil, nil, ErrClosed
-	}
-	if dialErr != nil {
-		s.dialErr = dialErr
-		return nil, nil, &DialError{Addr: s.addr, Err: dialErr}
-	}
-	if s.cur != nil && s.cur.IsAlive() {
-		_ = dialed.Close()
-		return s.cur, func() {}, nil
-	}
-	s.cur = dialed
-	s.dialErr = nil
-	return s.cur, func() {}, nil
 }
 
 // close implements transport.close. Idempotent.

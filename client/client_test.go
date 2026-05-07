@@ -274,3 +274,72 @@ func TestSingleConn_Acquire_GoAwayTriggersRedial(t *testing.T) {
 		t.Fatalf("dial count = %d, want 2", d.dialCount.Load())
 	}
 }
+
+// failingDialer always errors.
+type failingDialer struct {
+	err       error
+	dialCount atomic.Int32
+}
+
+func (d *failingDialer) Dial(_ context.Context, _ string) (net.Conn, error) {
+	d.dialCount.Add(1)
+	return nil, d.err
+}
+
+func TestSingleConn_Backoff_RefusesWithinWindow(t *testing.T) {
+	d := &failingDialer{err: errors.New("boom")}
+	sc := &singleConn{
+		addr:     "fake:0",
+		connOpts: conn.ConnOptions{Dialer: d},
+		backoff:  500 * time.Millisecond,
+	}
+	defer sc.close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if _, _, err := sc.acquire(ctx); err == nil {
+		t.Fatal("first acquire must fail")
+	}
+	if _, _, err := sc.acquire(ctx); err == nil {
+		t.Fatal("second acquire must fail")
+	}
+	if got := d.dialCount.Load(); got != 1 {
+		t.Fatalf("dial count = %d, want 1 (backoff suppressed second)", got)
+	}
+}
+
+func TestSingleConn_Acquire_ConcurrentDial_OnlyOneDials(t *testing.T) {
+	d := &fakeDialer{srvAfter: func(srvFr *frame.Framer) {
+		time.Sleep(2 * time.Second)
+	}}
+	sc := &singleConn{addr: "fake:0", connOpts: conn.ConnOptions{Dialer: d}}
+	defer sc.close()
+
+	const N = 16
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	results := make(chan *conn.Conn, N)
+	for i := 0; i < N; i++ {
+		go func() {
+			c, _, err := sc.acquire(ctx)
+			if err != nil {
+				results <- nil
+				return
+			}
+			results <- c
+		}()
+	}
+	first := <-results
+	if first == nil {
+		t.Fatal("first acquire returned nil conn")
+	}
+	for i := 1; i < N; i++ {
+		got := <-results
+		if got != first {
+			t.Fatalf("goroutine %d got different conn", i)
+		}
+	}
+	if got := d.dialCount.Load(); got > 2 {
+		t.Fatalf("dial count = %d, want 1 or 2 (race-loser permitted)", got)
+	}
+}
