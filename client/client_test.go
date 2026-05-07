@@ -1,9 +1,16 @@
 package client
 
 import (
+	"context"
 	"errors"
+	"io"
+	"net"
+	"sync/atomic"
 	"testing"
+	"time"
 
+	"github.com/lodgvideon/poseidon-http-client/conn"
+	"github.com/lodgvideon/poseidon-http-client/frame"
 	"github.com/lodgvideon/poseidon-http-client/hpack"
 )
 
@@ -84,5 +91,117 @@ func TestParseStatus_NotNumeric(t *testing.T) {
 	_, _, err := parseStatus(in)
 	if !errors.Is(err, ErrEmptyResponse) {
 		t.Fatalf("expected ErrEmptyResponse, got %v", err)
+	}
+}
+
+// --- Test helpers (singleConn / Do / DoStream) ---
+
+// nopHandler is a frame.Handler with no-op methods, used to skip frames
+// during fake-server handshake while ReadFrame's contract is satisfied.
+type nopHandler struct{}
+
+func (nopHandler) OnData(frame.FrameHeader, []byte, uint8) error { return nil }
+func (nopHandler) OnHeaders(frame.FrameHeader, frame.HeaderBlock, *frame.Priority, uint8) error {
+	return nil
+}
+func (nopHandler) OnPriority(frame.FrameHeader, frame.Priority) error { return nil }
+func (nopHandler) OnRSTStream(frame.FrameHeader, frame.ErrCode) error { return nil }
+func (nopHandler) OnSettings(frame.FrameHeader, frame.SettingsParams) error {
+	return nil
+}
+func (nopHandler) OnPushPromise(frame.FrameHeader, uint32, frame.HeaderBlock, uint8) error {
+	return nil
+}
+func (nopHandler) OnPing(frame.FrameHeader, [8]byte) error                      { return nil }
+func (nopHandler) OnGoAway(frame.FrameHeader, uint32, frame.ErrCode, []byte) error { return nil }
+func (nopHandler) OnWindowUpdate(frame.FrameHeader, uint32) error               { return nil }
+func (nopHandler) OnContinuation(frame.FrameHeader, frame.HeaderBlock) error    { return nil }
+
+// readFull reads len(buf) bytes from r, retrying on short reads.
+func readFull(r io.Reader, buf []byte) (int, error) {
+	n := 0
+	for n < len(buf) {
+		x, err := r.Read(buf[n:])
+		if x > 0 {
+			n += x
+		}
+		if err != nil {
+			return n, err
+		}
+	}
+	return n, nil
+}
+
+// runFakeH2Server does the HTTP/2 handshake on srv (server side of a
+// net.Pipe), then invokes after with the server's *frame.Framer for
+// per-test frame interactions. If after blocks, it must return when
+// signaled by the test (typically by closing the pipe via c.Close()).
+func runFakeH2Server(srv net.Conn, after func(srvFr *frame.Framer)) {
+	defer srv.Close()
+	preface := make([]byte, 24)
+	if _, err := readFull(srv, preface); err != nil {
+		return
+	}
+	srvFr := frame.NewFramer(srv, srv)
+	writeDone := make(chan error, 1)
+	go func() { writeDone <- srvFr.WriteSettings(frame.SettingsParams{}) }()
+	if _, err := srvFr.ReadFrame(context.Background(), nopHandler{}); err != nil {
+		return
+	}
+	if err := <-writeDone; err != nil {
+		return
+	}
+	go func() { writeDone <- srvFr.WriteSettingsAck() }()
+	if _, err := srvFr.ReadFrame(context.Background(), nopHandler{}); err != nil {
+		return
+	}
+	if err := <-writeDone; err != nil {
+		return
+	}
+	if after != nil {
+		after(srvFr)
+	}
+}
+
+// fakeDialer returns the client end of a net.Pipe. Each Dial spins up
+// a fresh in-memory pipe pair and a goroutine running runFakeH2Server.
+type fakeDialer struct {
+	dialCount atomic.Int32
+	srvAfter  func(srvFr *frame.Framer)
+}
+
+// Dial implements conn.Dialer.
+func (d *fakeDialer) Dial(_ context.Context, _ string) (net.Conn, error) {
+	d.dialCount.Add(1)
+	cli, srv := net.Pipe()
+	go runFakeH2Server(srv, d.srvAfter)
+	return cli, nil
+}
+
+func TestSingleConn_Acquire_LazyDial(t *testing.T) {
+	d := &fakeDialer{srvAfter: func(srvFr *frame.Framer) {
+		// Hold the connection alive until the test cleans up.
+		time.Sleep(2 * time.Second)
+	}}
+	sc := &singleConn{addr: "fake:0", connOpts: conn.ConnOptions{Dialer: d}}
+	defer sc.close()
+
+	if d.dialCount.Load() != 0 {
+		t.Fatalf("dial happened in constructor; count=%d", d.dialCount.Load())
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	c, release, err := sc.acquire(ctx)
+	if err != nil {
+		t.Fatalf("acquire: %v", err)
+	}
+	defer release()
+
+	if d.dialCount.Load() != 1 {
+		t.Fatalf("dial count = %d, want 1", d.dialCount.Load())
+	}
+	if !c.IsAlive() {
+		t.Fatal("acquired conn must be alive")
 	}
 }
