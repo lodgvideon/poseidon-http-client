@@ -170,6 +170,9 @@ func (f *Framer) WriteHeaders(p WriteHeadersParams) error {
 	if p.Priority != nil {
 		totalLen += 5
 	}
+	if totalLen > f.maxReadFrameSize {
+		return ErrFrameTooLarge
+	}
 	if err := f.writeHeader(FrameHeader{Length: totalLen, Type: FrameHeaders, Flags: flags, StreamID: p.StreamID}); err != nil {
 		return err
 	}
@@ -280,6 +283,9 @@ func (f *Framer) WritePushPromise(streamID, promisedID uint32, blockFragment []b
 	totalLen := uint32(4 + len(blockFragment) + int(padLen))
 	if padLen > 0 {
 		totalLen++
+	}
+	if totalLen > f.maxReadFrameSize {
+		return ErrFrameTooLarge
 	}
 	if err := f.writeHeader(FrameHeader{Length: totalLen, Type: FramePushPromise, Flags: flags, StreamID: streamID}); err != nil {
 		return err

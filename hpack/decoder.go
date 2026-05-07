@@ -7,6 +7,7 @@ type Decoder struct {
 	maxLocal    uint32
 	scratch     []byte
 	maxListSize uint32
+	listTotal   uint64 // running header-list size for the active block
 	streaming   bool
 	pending     []byte
 }
@@ -37,14 +38,38 @@ func (d *Decoder) Reset() {
 	d.scratch = d.scratch[:0]
 	d.streaming = false
 	d.pending = d.pending[:0]
+	d.listTotal = 0
 }
 
 // DecodeBlock parses a complete header block fragment and emits one call per
 // field via visit. Field slices alias d.scratch and are valid only for the
-// duration of the visit call.
+// duration of the visit call. When SetMaxHeaderListSize was called with
+// a non-zero value, the running cumulative HeaderField.Size() is checked
+// per visit and ErrHeaderListTooLarge is returned if exceeded
+// (RFC 7541 §6.5.2 / RFC 7540 §6.5.2 — DoS gate).
 func (d *Decoder) DecodeBlock(block []byte, visit FieldVisitor) error {
 	d.scratch = d.scratch[:0]
-	return d.decodeFragment(block, visit)
+	d.listTotal = 0
+	return d.decodeFragment(block, d.guardedVisitor(visit))
+}
+
+// guardedVisitor wraps visit with a running-total check against
+// maxListSize. If maxListSize == 0 the original visit is returned
+// unwrapped (no overhead). The running total is held on the Decoder
+// itself (d.listTotal) so streaming Feed calls accumulate across
+// fragments within a single Begin/Finish session.
+func (d *Decoder) guardedVisitor(visit FieldVisitor) FieldVisitor {
+	if d.maxListSize == 0 {
+		return visit
+	}
+	limit := uint64(d.maxListSize)
+	return func(f HeaderField) error {
+		d.listTotal += uint64(f.Size())
+		if d.listTotal > limit {
+			return ErrHeaderListTooLarge
+		}
+		return visit(f)
+	}
 }
 
 func (d *Decoder) decodeFragment(src []byte, visit FieldVisitor) error {
@@ -171,6 +196,7 @@ func (d *Decoder) Begin() {
 	d.streaming = true
 	d.pending = d.pending[:0]
 	d.scratch = d.scratch[:0]
+	d.listTotal = 0
 }
 
 // Feed appends fragment, then decodes and emits as many complete
@@ -180,7 +206,7 @@ func (d *Decoder) Feed(fragment []byte, visit FieldVisitor) error {
 		return ErrInvalidPrefix
 	}
 	d.pending = append(d.pending, fragment...)
-	consumed, err := d.decodePartial(d.pending, visit)
+	consumed, err := d.decodePartial(d.pending, d.guardedVisitor(visit))
 	if err != nil {
 		return err
 	}

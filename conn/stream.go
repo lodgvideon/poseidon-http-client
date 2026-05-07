@@ -117,16 +117,35 @@ func (s *Stream) markRemoteEnd() {
 
 // push delivers an event from the reader goroutine. Non-blocking under
 // the channel's capacity; documented as part of the public contract.
+// On overflow: marks stream closed, dispatches the RST send to a
+// background goroutine (so the reader is never blocked on wmu), and
+// best-effort delivers a synthetic EventReset so a blocked Recv
+// unblocks instead of waiting until the parent context expires.
 func (s *Stream) push(e StreamEvent) {
 	select {
 	case s.events <- e:
+		return
 	default:
-		// Channel full -- drop and reset to protect the reader. Callers
-		// who care must drain Recv promptly.
+	}
+	s.mu.Lock()
+	already := s.closed
+	s.closed = true
+	s.mu.Unlock()
+	if already {
+		return
+	}
+	go func() {
 		_ = s.w.writeRSTStream(s, frame.ErrCodeRefusedStream)
-		s.mu.Lock()
-		s.closed = true
-		s.mu.Unlock()
+	}()
+	// Best-effort EventReset delivery; if the channel is still full we
+	// rely on consumers waking via context or Close.
+	select {
+	case s.events <- StreamEvent{
+		Type:      EventReset,
+		RSTCode:   frame.ErrCodeRefusedStream,
+		EndStream: true,
+	}:
+	default:
 	}
 }
 
