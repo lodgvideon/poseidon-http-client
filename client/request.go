@@ -45,11 +45,11 @@ func validateRequest(r *Request) error {
 	if r == nil {
 		return fmt.Errorf("%w: nil request", ErrInvalidRequest)
 	}
-	if strings.TrimSpace(r.Method) == "" {
-		return fmt.Errorf("%w: method is required", ErrInvalidRequest)
+	if r.Method == "" || r.Method != strings.TrimSpace(r.Method) {
+		return fmt.Errorf("%w: method must be non-empty without surrounding whitespace", ErrInvalidRequest)
 	}
-	if strings.TrimSpace(r.Path) == "" {
-		return fmt.Errorf("%w: path is required", ErrInvalidRequest)
+	if r.Path == "" || r.Path != strings.TrimSpace(r.Path) {
+		return fmt.Errorf("%w: path must be non-empty without surrounding whitespace", ErrInvalidRequest)
 	}
 	for i := range r.Headers {
 		if len(r.Headers[i].Name) > 0 && r.Headers[i].Name[0] == ':' {

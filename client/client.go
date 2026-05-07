@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"net"
 	"strings"
 	"time"
 
@@ -274,13 +275,19 @@ func drainResponse(ctx context.Context, s *conn.Stream, req *Request) (*Response
 	}
 }
 
-// deriveAuthority strips the port if it equals 80 (http) or 443 (https).
+// deriveAuthority strips the port if it equals 80 (http) or 443
+// (https). Handles IPv6 literals via net.SplitHostPort.
 func deriveAuthority(addr string) string {
-	host, port, ok := strings.Cut(addr, ":")
-	if !ok {
+	host, port, err := net.SplitHostPort(addr)
+	if err != nil {
 		return addr
 	}
 	if port == "80" || port == "443" {
+		// Re-bracket IPv6 literals so the result is a valid :authority
+		// host (RFC 3986 §3.2.2).
+		if strings.Contains(host, ":") {
+			return "[" + host + "]"
+		}
 		return host
 	}
 	return addr
