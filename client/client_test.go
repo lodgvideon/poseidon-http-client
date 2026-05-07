@@ -965,3 +965,77 @@ func TestClient_DoStream_CloseBeforeEnd_SendsRSTCancel(t *testing.T) {
 		t.Fatal("server did not see RST_STREAM(CANCEL)")
 	}
 }
+
+// TestConformance_RFC7540_Sec8_1_2_1_PseudoHeadersFirst asserts that
+// the client emits all pseudo-headers (names starting with ':') before
+// any regular header in the on-wire HEADERS block (RFC 7540 §8.1.2.1).
+func TestConformance_RFC7540_Sec8_1_2_1_PseudoHeadersFirst(t *testing.T) {
+	captured := make(chan []hpack.HeaderField, 1)
+	d := &fakeDialer{srvAfter: func(srvFr *frame.Framer) {
+		capH := newCaptureHandler()
+		for {
+			if _, err := srvFr.ReadFrame(context.Background(), capH); err != nil {
+				return
+			}
+			sid, ok := capH.firstHeadersStreamID()
+			if !ok {
+				continue
+			}
+			block, ok := capH.headerBlock(sid)
+			if !ok {
+				continue
+			}
+			dec := hpack.NewDecoder()
+			var fields []hpack.HeaderField
+			_ = dec.DecodeBlock(block, func(f hpack.HeaderField) error {
+				nm := append([]byte(nil), f.Name...)
+				vl := append([]byte(nil), f.Value...)
+				fields = append(fields, hpack.HeaderField{Name: nm, Value: vl})
+				return nil
+			})
+			captured <- fields
+			enc := hpack.NewEncoder()
+			respBlock := enc.EncodeBlock(nil, []hpack.HeaderField{
+				{Name: []byte(":status"), Value: []byte("200")},
+			})
+			_ = srvFr.WriteHeaders(frame.WriteHeadersParams{
+				StreamID:      sid,
+				BlockFragment: respBlock,
+				EndHeaders:    true,
+				EndStream:     true,
+			})
+			return
+		}
+	}}
+	c, err := NewClient(ClientOptions{
+		Addr:     "fake:0",
+		ConnOpts: conn.ConnOptions{Dialer: d},
+	})
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+	defer c.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	_, err = c.Do(ctx, &Request{
+		Method: "GET", Path: "/",
+		Headers: []hpack.HeaderField{
+			{Name: []byte("x-trace-id"), Value: []byte("abc")},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Do: %v", err)
+	}
+	fields := <-captured
+	seenRegular := false
+	for _, f := range fields {
+		isPseudo := len(f.Name) > 0 && f.Name[0] == ':'
+		if isPseudo && seenRegular {
+			t.Fatalf("pseudo-header %q after regular: %+v", f.Name, fields)
+		}
+		if !isPseudo {
+			seenRegular = true
+		}
+	}
+}
