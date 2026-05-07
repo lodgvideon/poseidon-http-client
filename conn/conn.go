@@ -47,9 +47,9 @@ type Conn struct {
 	// of SETTINGS_INITIAL_WINDOW_SIZE) and is replenished by inbound
 	// WINDOW_UPDATE(stream=0). fcOutCond.Broadcast wakes writers
 	// blocked in acquireSendCredits.
-	fcOutMu             sync.Mutex
-	fcOutCond           *sync.Cond
-	peerConnSendWindow  int32
+	fcOutMu            sync.Mutex
+	fcOutCond          *sync.Cond
+	peerConnSendWindow int32
 
 	// goAwayReceived flags that the peer has sent GOAWAY (RFC 7540
 	// §6.8). New NewStream calls return ErrGoAway; existing streams
@@ -228,6 +228,14 @@ func (c *Conn) Stats() ConnStats {
 	c.statsMu.Lock()
 	defer c.statsMu.Unlock()
 	return c.stats
+}
+
+// IsAlive reports whether the connection has neither been Closed nor
+// received a GOAWAY frame from the peer. It is a cheap atomic check
+// suitable for transport pools that need to decide whether to reuse
+// or redial.
+func (c *Conn) IsAlive() bool {
+	return !c.closed.Load() && !c.goAwayReceived.Load()
 }
 
 // --- streamWriter implementation (called from *Stream).
