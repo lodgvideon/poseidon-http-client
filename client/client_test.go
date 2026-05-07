@@ -343,3 +343,24 @@ func TestSingleConn_Acquire_ConcurrentDial_OnlyOneDials(t *testing.T) {
 		t.Fatalf("dial count = %d, want 1 or 2 (race-loser permitted)", got)
 	}
 }
+
+func TestSingleConn_Close_BlocksNewAcquires(t *testing.T) {
+	d := &fakeDialer{srvAfter: func(srvFr *frame.Framer) {
+		time.Sleep(2 * time.Second)
+	}}
+	sc := &singleConn{addr: "fake:0", connOpts: conn.ConnOptions{Dialer: d}}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	c, _, err := sc.acquire(ctx)
+	if err != nil {
+		t.Fatalf("acquire: %v", err)
+	}
+	_ = sc.close()
+	if c.IsAlive() {
+		t.Fatal("close must close underlying conn")
+	}
+	if _, _, err := sc.acquire(ctx); !errors.Is(err, ErrClosed) {
+		t.Fatalf("expected ErrClosed, got %v", err)
+	}
+}
