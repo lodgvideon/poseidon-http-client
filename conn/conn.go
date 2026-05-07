@@ -355,14 +355,6 @@ func (c *Conn) writeRSTStream(s *Stream, code frame.ErrCode) error {
 // success it eagerly accumulates a refund counter and, once the
 // per-stream or connection counter crosses recvWindowRefundThreshold,
 // emits a WINDOW_UPDATE for that scope.
-// onDataReceived debits both the stream-level and connection-level
-// recv windows for a DATA frame whose total payload is `length` bytes
-// (RFC 7540 §6.9.1: includes the data, the pad-length octet, and the
-// padding). Returns an error to abort the connection (peer
-// FLOW_CONTROL_ERROR) or the stream when its window is exceeded. On
-// success it eagerly accumulates a refund counter and, once the
-// per-stream or connection counter crosses recvWindowRefundThreshold,
-// emits a WINDOW_UPDATE for that scope.
 func (c *Conn) onDataReceived(s *Stream, length uint32) error {
 	debit := int32(length)
 
@@ -633,7 +625,7 @@ func (c *Conn) onGoAwayReceived(lastStreamID uint32, _ frame.ErrCode) {
 	c.goAwayReceived.Store(true)
 
 	c.smu.Lock()
-	victims := make([]*Stream, 0)
+	victims := make([]*Stream, 0, len(c.streams))
 	for id, s := range c.streams {
 		if id > lastStreamID {
 			victims = append(victims, s)
@@ -731,10 +723,6 @@ func (c *Conn) shutdownStreams(reason error) {
 // markStreamDone is called by the connHandler when a stream's response
 // side closes (END_STREAM observed or RST received), and from local
 // SendHeaders/SendData when END_STREAM goes out. It releases the
-// stream's slot in the inflight pool exactly once.
-// markStreamDone is called by the connHandler when a stream's response
-// side closes (END_STREAM observed or RST received), and from local
-// SendHeaders/SendData when END_STREAM goes out. It releases the
 // stream's slot in the inflight pool exactly once and evicts the
 // stream from the registry once both ends have closed.
 func (c *Conn) markStreamDone(id uint32) {
@@ -759,9 +747,6 @@ func (c *Conn) markStreamDone(id uint32) {
 	}
 }
 
-// releaseInflight is called when an RST_STREAM is sent to the peer. RST
-// closes the stream regardless of whether either end observed END_STREAM,
-// so the inflight slot must be returned. Idempotent via Stream.inflightDone.
 // releaseInflight is called when an RST_STREAM is sent to the peer. RST
 // closes the stream regardless of whether either end observed END_STREAM,
 // so the inflight slot must be returned and the stream evicted from the

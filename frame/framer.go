@@ -81,8 +81,12 @@ func (f *Framer) Close() {
 	f.readBuf = nil
 }
 
-// SetMaxReadFrameSize sets the read-side cap on a single frame payload.
-func (f *Framer) SetMaxReadFrameSize(n uint32)  { f.maxReadFrameSize = n }
+// SetMaxReadFrameSize sets the maximum frame payload length the Framer
+// will accept on read AND emit on write. Per RFC 7540 §6.5.2 the
+// receiver advertises this via SETTINGS_MAX_FRAME_SIZE; the SENDER
+// must independently respect the PEER's advertised value, which lives
+// outside the framer (callers track peer settings separately).
+func (f *Framer) SetMaxReadFrameSize(n uint32) { f.maxReadFrameSize = n }
 // SetMaxHeaderListSize sets the read-side cap on a header block.
 func (f *Framer) SetMaxHeaderListSize(n uint32) { f.maxHeaderListSize = n }
 // SetReadBuffer overrides the internal read buffer (useful for pooling).

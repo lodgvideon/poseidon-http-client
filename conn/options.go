@@ -1,7 +1,5 @@
 package conn
 
-import "time"
-
 // AdvertisedSettings is what we send to the peer in our SETTINGS frame.
 // Zero values are replaced by RFC 7540 defaults; MaxConcurrentStreams
 // defaults to 100 (B.2).
@@ -33,7 +31,6 @@ func (s AdvertisedSettings) defaulted() AdvertisedSettings {
 type ConnOptions struct {
 	Dialer            Dialer
 	Settings          AdvertisedSettings
-	StreamDeadline    time.Duration
 	StreamEventBuffer int
 }
 

@@ -1,5 +1,7 @@
 package hpack
 
+import "bytes"
+
 // Encoder encodes HPACK header blocks. Holds a dynamic table per HTTP/2
 // connection. NOT goroutine-safe.
 type Encoder struct {
@@ -130,10 +132,10 @@ func (e *Encoder) dynamicLookup(name, value []byte) (uint64, bool) {
 	var nameOnly uint64
 	for i := 1; i <= e.dt.len(); i++ {
 		n, v := e.dt.at(i)
-		if !bytesEqual(n, name) {
+		if !bytes.Equal(n, name) {
 			continue
 		}
-		if bytesEqual(v, value) {
+		if bytes.Equal(v, value) {
 			return uint64(i), true
 		}
 		if nameOnly == 0 {
