@@ -283,14 +283,18 @@ func TestConn_Close_RacedFromTwoGoroutines(t *testing.T) {
 
 func TestConn_IsAlive_FreshConnTrue(t *testing.T) {
 	cli, srv := net.Pipe()
-	done := make(chan struct{})
+	stopSrv := make(chan struct{})
+	srvDone := make(chan struct{})
 	go func() {
-		defer close(done)
+		defer close(srvDone)
 		pipeServer(t, srv, func(srvFr *frame.Framer) {
-			// Hold the connection until the test finishes.
-			<-done
+			<-stopSrv
 		})
 	}()
+	t.Cleanup(func() {
+		close(stopSrv)
+		<-srvDone
+	})
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
