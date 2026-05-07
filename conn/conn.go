@@ -60,8 +60,13 @@ type Conn struct {
 	closed     atomic.Bool
 	readerDone chan struct{}
 
-	statsMu sync.Mutex
-	stats   ConnStats
+	// Stats counters: atomics for lock-free updates on the hot write
+	// and read paths. Snapshot via Stats() which loads each.
+	atomicBytesSent      atomic.Int64
+	atomicBytesReceived  atomic.Int64
+	atomicFramesSent     atomic.Int64
+	atomicFramesReceived atomic.Int64
+	atomicStreamsOpened  atomic.Uint32
 }
 
 // ConnStats is a point-in-time counter snapshot.
@@ -145,9 +150,7 @@ func (c *Conn) NewStream(_ context.Context) (*Stream, error) {
 	s := newStream(0, c.opts.StreamEventBuffer, c, int32(c.opts.Settings.InitialWindowSize))
 	c.inflight++
 	c.smu.Unlock()
-	c.statsMu.Lock()
-	c.stats.StreamsOpened++
-	c.statsMu.Unlock()
+	c.atomicStreamsOpened.Add(1)
 	return s, nil
 }
 
@@ -206,10 +209,17 @@ func (c *Conn) lastClientStreamID() uint32 {
 }
 
 // Stats returns a point-in-time snapshot of connection counters.
+// Each field is loaded atomically; the snapshot is consistent
+// per-field but not across fields (a high-throughput conn may produce
+// counters that don't sum cleanly across the snapshot boundary).
 func (c *Conn) Stats() ConnStats {
-	c.statsMu.Lock()
-	defer c.statsMu.Unlock()
-	return c.stats
+	return ConnStats{
+		BytesSent:      c.atomicBytesSent.Load(),
+		BytesReceived:  c.atomicBytesReceived.Load(),
+		FramesSent:     c.atomicFramesSent.Load(),
+		FramesReceived: c.atomicFramesReceived.Load(),
+		StreamsOpened:  c.atomicStreamsOpened.Load(),
+	}
 }
 
 // IsAlive reports whether the connection has neither been Closed nor
@@ -666,11 +676,7 @@ func (c *Conn) writePingAck(payload [8]byte) error {
 	return nil
 }
 
-func (c *Conn) bumpFramesSent() {
-	c.statsMu.Lock()
-	c.stats.FramesSent++
-	c.statsMu.Unlock()
-}
+func (c *Conn) bumpFramesSent() { c.atomicFramesSent.Add(1) }
 
 // readerLoop owns frame.ReadFrame for the lifetime of the connection.
 // On a typed *ConnError, emits GOAWAY with the error code before
@@ -686,9 +692,7 @@ func (c *Conn) readerLoop() {
 			c.shutdownStreams(err)
 			return
 		}
-		c.statsMu.Lock()
-		c.stats.FramesReceived++
-		c.statsMu.Unlock()
+		c.atomicFramesReceived.Add(1)
 	}
 }
 
