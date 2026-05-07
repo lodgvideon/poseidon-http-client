@@ -39,7 +39,6 @@ func newConnHandler(streams streamLookup, dec *hpack.Decoder) *connHandler {
 	}
 }
 
-// OnData implements frame.Handler.
 // OnData implements frame.Handler. It debits flow-control windows
 // (RFC 7540 §6.9.1), surfaces an EventData event to the stream, and
 // emits batched WINDOW_UPDATE refunds via the owning Conn. Returns a

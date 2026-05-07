@@ -60,6 +60,34 @@ func TestValidateRequest_WhitespaceOnlyMethodRejected(t *testing.T) {
 	}
 }
 
+func TestValidateRequest_WhitespaceOnlyPathRejected(t *testing.T) {
+	req := &Request{Method: "GET", Path: "   "}
+	if err := validateRequest(req); !errors.Is(err, ErrInvalidRequest) {
+		t.Fatalf("expected ErrInvalidRequest, got %v", err)
+	}
+}
+
+func TestValidateRequest_InternalWhitespaceMethodRejected(t *testing.T) {
+	req := &Request{Method: "GET POST", Path: "/"}
+	if err := validateRequest(req); !errors.Is(err, ErrInvalidRequest) {
+		t.Fatalf("expected ErrInvalidRequest, got %v", err)
+	}
+}
+
+func TestValidateRequest_InternalWhitespacePathRejected(t *testing.T) {
+	req := &Request{Method: "GET", Path: "/foo bar"}
+	if err := validateRequest(req); !errors.Is(err, ErrInvalidRequest) {
+		t.Fatalf("expected ErrInvalidRequest, got %v", err)
+	}
+}
+
+func TestValidateRequest_TabInMethodRejected(t *testing.T) {
+	req := &Request{Method: "GET\t", Path: "/"}
+	if err := validateRequest(req); !errors.Is(err, ErrInvalidRequest) {
+		t.Fatalf("expected ErrInvalidRequest, got %v", err)
+	}
+}
+
 func TestValidateRequest_PseudoHeaderInRegular(t *testing.T) {
 	req := &Request{
 		Method: "GET", Path: "/",
@@ -470,6 +498,9 @@ func TestDeriveAuthority(t *testing.T) {
 		{"[::1]:80", "[::1]"},
 		{"[::1]:8080", "[::1]:8080"},
 		{"[2001:db8::1]:443", "[2001:db8::1]"},
+		// Edge cases that must fall through to the raw addr unchanged.
+		{":443", ":443"},
+		{":8080", ":8080"},
 	}
 	for _, tc := range cases {
 		got := deriveAuthority(tc.addr)
