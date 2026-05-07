@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/tls"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -133,7 +134,7 @@ func TestIntegration_Client_ConcurrentRequests_OneClient(t *testing.T) {
 				return
 			}
 			if res.Status != 200 {
-				errCh <- err
+				errCh <- fmt.Errorf("status=%d", res.Status)
 			}
 		}()
 	}

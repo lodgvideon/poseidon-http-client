@@ -91,8 +91,18 @@ func TestParseStatus_NotNumeric(t *testing.T) {
 		{Name: []byte(":status"), Value: []byte("OK")},
 	}
 	_, _, err := parseStatus(in)
-	if !errors.Is(err, ErrEmptyResponse) {
-		t.Fatalf("expected ErrEmptyResponse, got %v", err)
+	if !errors.Is(err, ErrInvalidStatus) {
+		t.Fatalf("expected ErrInvalidStatus, got %v", err)
+	}
+}
+
+func TestParseStatus_Negative(t *testing.T) {
+	in := []hpack.HeaderField{
+		{Name: []byte(":status"), Value: []byte("-1")},
+	}
+	_, _, err := parseStatus(in)
+	if !errors.Is(err, ErrInvalidStatus) {
+		t.Fatalf("expected ErrInvalidStatus, got %v", err)
 	}
 }
 
@@ -181,9 +191,10 @@ func (d *fakeDialer) Dial(_ context.Context, _ string) (net.Conn, error) {
 }
 
 func TestSingleConn_Acquire_LazyDial(t *testing.T) {
+	stopSrv := make(chan struct{})
+	t.Cleanup(func() { close(stopSrv) })
 	d := &fakeDialer{srvAfter: func(srvFr *frame.Framer) {
-		// Hold the connection alive until the test cleans up.
-		time.Sleep(2 * time.Second)
+		<-stopSrv
 	}}
 	sc := &singleConn{addr: "fake:0", connOpts: conn.ConnOptions{Dialer: d}}
 	defer sc.close()
@@ -209,8 +220,10 @@ func TestSingleConn_Acquire_LazyDial(t *testing.T) {
 }
 
 func TestSingleConn_Acquire_ReusesAliveConn(t *testing.T) {
+	stopSrv := make(chan struct{})
+	t.Cleanup(func() { close(stopSrv) })
 	d := &fakeDialer{srvAfter: func(srvFr *frame.Framer) {
-		time.Sleep(2 * time.Second)
+		<-stopSrv
 	}}
 	sc := &singleConn{addr: "fake:0", connOpts: conn.ConnOptions{Dialer: d}}
 	defer sc.close()
@@ -237,13 +250,15 @@ func TestSingleConn_Acquire_ReusesAliveConn(t *testing.T) {
 }
 
 func TestSingleConn_Acquire_GoAwayTriggersRedial(t *testing.T) {
+	stopSrv := make(chan struct{})
+	t.Cleanup(func() { close(stopSrv) })
 	var dialIdx atomic.Int32
 	d := &fakeDialer{srvAfter: func(srvFr *frame.Framer) {
 		// First dialed peer sends GOAWAY immediately to drain the conn.
 		if dialIdx.Add(1) == 1 {
 			_ = srvFr.WriteGoAway(0, frame.ErrCodeNoError, nil)
 		}
-		time.Sleep(2 * time.Second)
+		<-stopSrv
 	}}
 	sc := &singleConn{addr: "fake:0", connOpts: conn.ConnOptions{Dialer: d}}
 	defer sc.close()
@@ -311,8 +326,10 @@ func TestSingleConn_Backoff_RefusesWithinWindow(t *testing.T) {
 }
 
 func TestSingleConn_Acquire_ConcurrentDial_OnlyOneDials(t *testing.T) {
+	stopSrv := make(chan struct{})
+	t.Cleanup(func() { close(stopSrv) })
 	d := &fakeDialer{srvAfter: func(srvFr *frame.Framer) {
-		time.Sleep(2 * time.Second)
+		<-stopSrv
 	}}
 	sc := &singleConn{addr: "fake:0", connOpts: conn.ConnOptions{Dialer: d}}
 	defer sc.close()
@@ -341,14 +358,16 @@ func TestSingleConn_Acquire_ConcurrentDial_OnlyOneDials(t *testing.T) {
 			t.Fatalf("goroutine %d got different conn", i)
 		}
 	}
-	if got := d.dialCount.Load(); got > 2 {
-		t.Fatalf("dial count = %d, want 1 or 2 (race-loser permitted)", got)
+	if got := d.dialCount.Load(); got != 1 {
+		t.Fatalf("dial count = %d, want exactly 1 (singleflight)", got)
 	}
 }
 
 func TestSingleConn_Close_BlocksNewAcquires(t *testing.T) {
+	stopSrv := make(chan struct{})
+	t.Cleanup(func() { close(stopSrv) })
 	d := &fakeDialer{srvAfter: func(srvFr *frame.Framer) {
-		time.Sleep(2 * time.Second)
+		<-stopSrv
 	}}
 	sc := &singleConn{addr: "fake:0", connOpts: conn.ConnOptions{Dialer: d}}
 
@@ -394,6 +413,44 @@ func TestClient_Close_Idempotent(t *testing.T) {
 	}
 	if err := c.Close(); err != nil {
 		t.Fatalf("second Close: %v", err)
+	}
+}
+
+func TestClient_Do_AfterClose_ReturnsErrClosed(t *testing.T) {
+	c, err := NewClient(ClientOptions{
+		Addr:     "fake:0",
+		ConnOpts: conn.ConnOptions{Dialer: &fakeDialer{}},
+	})
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+	_ = c.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
+	defer cancel()
+	if _, err := c.Do(ctx, &Request{Method: "GET", Path: "/"}); !errors.Is(err, ErrClosed) {
+		t.Fatalf("Do after Close = %v, want ErrClosed", err)
+	}
+	if _, err := c.DoStream(ctx, &Request{Method: "GET", Path: "/"}); !errors.Is(err, ErrClosed) {
+		t.Fatalf("DoStream after Close = %v, want ErrClosed", err)
+	}
+}
+
+func TestDeriveAuthority(t *testing.T) {
+	cases := []struct {
+		addr string
+		want string
+	}{
+		{"example.com:80", "example.com"},
+		{"example.com:443", "example.com"},
+		{"example.com:8080", "example.com:8080"},
+		{"example.com", "example.com"},
+		{"127.0.0.1:9090", "127.0.0.1:9090"},
+	}
+	for _, tc := range cases {
+		got := deriveAuthority(tc.addr)
+		if got != tc.want {
+			t.Errorf("deriveAuthority(%q) = %q, want %q", tc.addr, got, tc.want)
+		}
 	}
 }
 
