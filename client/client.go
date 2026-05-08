@@ -23,9 +23,15 @@ const (
 	// TransportPool routes requests through *Pool. PoolOptions
 	// must be non-nil.
 	TransportPool
+
+	// TransportManaged routes requests through a managedPool driven by
+	// a Resolver and Selector. Requires ClientOptions.Resolver != nil.
+	TransportManaged
 )
 
-// ClientOptions tunes a Client. Addr and ConnOpts.Dialer are required.
+// ClientOptions tunes a Client. ConnOpts.Dialer is always required.
+// Addr is required for TransportSingleConn and TransportPool; it must
+// be empty for TransportManaged (the Resolver owns addressing).
 type ClientOptions struct {
 	// Addr is the "host:port" target used both as the dial target and
 	// as the default :authority for requests that don't set one.
@@ -47,6 +53,19 @@ type ClientOptions struct {
 	// Pool is required iff Transport == TransportPool. Otherwise it
 	// MUST be nil; non-nil with TransportSingleConn is rejected.
 	Pool *PoolOptions
+
+	// Resolver is required when Transport == TransportManaged.
+	// It discovers backend addresses; the managedPool fans Acquire
+	// across per-address sub-pools.
+	Resolver Resolver
+
+	// Selector overrides the per-request address selection strategy for
+	// TransportManaged. nil → RoundRobin().
+	Selector Selector
+
+	// DrainMode governs sub-pool lifecycle when the Resolver removes
+	// an address. Zero value = DrainGraceful.
+	DrainMode DrainMode
 }
 
 // Client is a high-level HTTP/2 client wrapping a single connection.
@@ -59,8 +78,10 @@ type Client struct {
 // NewClient validates opts and constructs a Client. It does NOT dial;
 // the first Do or DoStream call triggers a lazy connection establish.
 func NewClient(opts ClientOptions) (*Client, error) {
-	if opts.Addr == "" || containsAnyWhitespace(opts.Addr) {
-		return nil, fmt.Errorf("client: ClientOptions.Addr must be a non-empty host:port without whitespace")
+	if opts.Transport != TransportManaged {
+		if opts.Addr == "" || containsAnyWhitespace(opts.Addr) {
+			return nil, fmt.Errorf("client: ClientOptions.Addr must be a non-empty host:port without whitespace")
+		}
 	}
 	if opts.ConnOpts.Dialer == nil {
 		return nil, fmt.Errorf("client: ClientOptions.ConnOpts.Dialer is required")
@@ -73,6 +94,13 @@ func NewClient(opts ClientOptions) (*Client, error) {
 	case TransportPool:
 		if opts.Pool == nil {
 			return nil, fmt.Errorf("%w: Pool is required for TransportPool", ErrInvalidPoolOptions)
+		}
+	case TransportManaged:
+		if opts.Resolver == nil {
+			return nil, fmt.Errorf("%w: Resolver is required for TransportManaged", ErrInvalidOptions)
+		}
+		if opts.Addr != "" {
+			return nil, fmt.Errorf("%w: Addr must be empty for TransportManaged (Resolver owns addressing)", ErrInvalidOptions)
 		}
 	default:
 		return nil, fmt.Errorf("%w: %d", ErrInvalidTransportKind, int(opts.Transport))
@@ -87,6 +115,16 @@ func NewClient(opts ClientOptions) (*Client, error) {
 		}
 	case TransportPool:
 		tr = newPoolTransport(opts.Addr, opts.ConnOpts, *opts.Pool)
+	case TransportManaged:
+		po := PoolOptions{}
+		if opts.Pool != nil {
+			po = *opts.Pool
+		}
+		mp, err := newManagedPool(opts.Resolver, opts.Selector, opts.DrainMode, opts.ConnOpts, po)
+		if err != nil {
+			return nil, err
+		}
+		tr = &managedTransport{mp: mp}
 	}
 	return &Client{tr: tr, authority: deriveAuthority(opts.Addr)}, nil
 }
@@ -99,13 +137,16 @@ func (c *Client) Close() error {
 
 // PoolStats returns a snapshot of the underlying pool's state. It
 // returns the zero Stats when the transport is not a *poolTransport
-// (e.g. TransportSingleConn) or the pool is already closed.
+// or *managedTransport (e.g. TransportSingleConn) or the pool is
+// already closed.
 func (c *Client) PoolStats() Stats {
-	pt, ok := c.tr.(*poolTransport)
-	if !ok {
-		return Stats{}
+	switch t := c.tr.(type) {
+	case *poolTransport:
+		return t.p.Stats()
+	case *managedTransport:
+		return t.mp.stats()
 	}
-	return pt.p.Stats()
+	return Stats{}
 }
 
 // Do issues a synchronous request and returns a fully-buffered Response.

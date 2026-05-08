@@ -63,10 +63,13 @@ type PoolOptions struct {
 
 // Stats is a snapshot of pool state.
 type Stats struct {
-	ActiveConns     int
+	ActiveConns    int
 	InFlightStreams int
-	Waiters         int
-	InFlightDials   int
+	Waiters        int
+	InFlightDials  int
+	// Populated by managedPool.Stats(); zero for single-address pools.
+	Addresses        int // number of addresses in the current resolved set
+	DrainingSubpools int // sub-pools currently draining (removed from resolver set)
 }
 
 // managedConn is the actor's per-conn record. NEVER touched outside
@@ -264,6 +267,11 @@ func (p *Pool) run() {
 			waiters = p.serveWaiters(conns, waiters)
 
 		case respCh := <-p.statsCh:
+			// Evict dead conns before reporting so ActiveConns reflects reality.
+			// Without this, a conn that died after its last release (e.g. GOAWAY
+			// arrived after the response was read) would linger until the next
+			// HealthCheckPeriod tick.
+			conns = p.evictDead(conns)
 			respCh <- Stats{
 				ActiveConns:     len(conns),
 				InFlightStreams: sumActive(conns),
