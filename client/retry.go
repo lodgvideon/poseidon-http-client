@@ -98,10 +98,8 @@ type retryDoer interface {
 
 // Retryer wraps a transport with bounded automatic retry.
 type Retryer struct {
-	d     retryDoer
-	opts  RetryOptions
-	rng   *rand.Rand
-	rngMu sync.Mutex
+	d    retryDoer
+	opts RetryOptions
 }
 
 // NewRetryer constructs a Retryer wrapping c. Zero-value fields in
@@ -116,13 +114,16 @@ func NewRetryer(c *Client, opts RetryOptions) *Retryer {
 		rng = rand.New(rand.NewSource(time.Now().UnixNano()))
 	}
 	if opts.Backoff == nil {
-		// Capture rng so the user can swap their own backoff without
-		// pulling our jitter source.
+		// rng is not goroutine-safe; serialize access from concurrent
+		// retry-path callers via a closure-captured mutex.
+		var mu sync.Mutex
 		opts.Backoff = func(attempt int) time.Duration {
+			mu.Lock()
+			defer mu.Unlock()
 			return defaultBackoff(attempt, rng)
 		}
 	}
-	return &Retryer{d: c, opts: opts, rng: rng}
+	return &Retryer{d: c, opts: opts}
 }
 
 // canRetry reports whether the Retryer should attempt more than one

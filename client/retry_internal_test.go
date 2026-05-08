@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"math/rand"
+	"sync"
 	"testing"
 	"time"
 
@@ -98,8 +99,10 @@ func TestNewRetryer_Defaults(t *testing.T) {
 	if r.opts.Backoff == nil {
 		t.Error("Backoff default = nil, want non-nil")
 	}
-	if r.rng == nil {
-		t.Error("rng = nil after NewRetryer")
+	// Smoke-test the default backoff returns a non-zero duration for
+	// attempt >= 1; this exercises the rng path that NewRetryer wires up.
+	if d := r.opts.Backoff(1); d <= 0 {
+		t.Errorf("Backoff(1) = %v, want > 0", d)
 	}
 }
 
@@ -468,4 +471,24 @@ func TestRetryer_DoStream_Success_NoIsRetryableCall(t *testing.T) {
 	if called {
 		t.Error("IsRetryable invoked for successful DoStream — must not be (caller owns stream)")
 	}
+}
+
+// TestNewRetryer_DefaultBackoff_GoroutineSafe pins the goroutine-
+// safety contract advertised by NewRetryer's doc-comment. Without
+// the closure-internal mutex, the default backoff's rng.Int63n call
+// would race under -race when called from multiple goroutines.
+func TestNewRetryer_DefaultBackoff_GoroutineSafe(t *testing.T) {
+	t.Parallel()
+	r := NewRetryer(&Client{}, RetryOptions{MaxAttempts: 3})
+	var wg sync.WaitGroup
+	for i := 0; i < 50; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for j := 1; j < 5; j++ {
+				_ = r.opts.Backoff(j)
+			}
+		}()
+	}
+	wg.Wait()
 }
