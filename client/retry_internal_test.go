@@ -335,3 +335,52 @@ func TestRetryer_Do_IsRetryable_NonBuiltinError_Retries(t *testing.T) {
 		t.Errorf("calls = %d, want 2", f.calls)
 	}
 }
+
+func TestRetryer_Do_CtxCanceled_StopsImmediately(t *testing.T) {
+	t.Parallel()
+	f := &fakeDoer{results: []doResult{
+		{nil, &StreamResetError{Code: frame.ErrCodeRefusedStream}},
+		{nil, &StreamResetError{Code: frame.ErrCodeRefusedStream}},
+		{nil, &StreamResetError{Code: frame.ErrCodeRefusedStream}},
+	}}
+	// Backoff long enough that ctx cancel must take the select.
+	r := NewRetryer(&Client{}, RetryOptions{
+		MaxAttempts: 3,
+		Backoff:     func(int) time.Duration { return 5 * time.Second },
+	})
+	r.d = f
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		time.Sleep(50 * time.Millisecond)
+		cancel()
+	}()
+	start := time.Now()
+	_, err := r.Do(ctx, &Request{Method: "GET", Path: "/"})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("err = %v, want context.Canceled", err)
+	}
+	if elapsed := time.Since(start); elapsed > 1*time.Second {
+		t.Errorf("returned in %v, want <1s (ctx cancel must wake the backoff sleep)", elapsed)
+	}
+}
+
+func TestRetryer_Do_HardStop_PoolClosed_NoRetry(t *testing.T) {
+	t.Parallel()
+	f := &fakeDoer{results: []doResult{
+		{nil, ErrPoolClosed},
+		{&Response{Status: 200}, nil},
+	}}
+	r := NewRetryer(&Client{}, RetryOptions{
+		MaxAttempts: 3,
+		Backoff:     func(int) time.Duration { return 0 },
+		IsRetryable: func(error, *Response) bool { return true }, // even with this, stop
+	})
+	r.d = f
+	_, err := r.Do(context.Background(), &Request{Method: "GET", Path: "/"})
+	if !errors.Is(err, ErrPoolClosed) {
+		t.Fatalf("err = %v, want ErrPoolClosed", err)
+	}
+	if f.calls != 1 {
+		t.Errorf("calls = %d, want 1 (hard stop must not retry)", f.calls)
+	}
+}
