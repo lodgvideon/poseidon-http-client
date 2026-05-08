@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"runtime"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -57,17 +58,15 @@ func startH2Servers(t *testing.T, n int) ([]Address, []*atomic.Int32, func()) {
 
 func splitHostPortInt(t *testing.T, hp string) (string, int) {
 	t.Helper()
-	for i := len(hp) - 1; i >= 0; i-- {
-		if hp[i] == ':' {
-			port := 0
-			for _, c := range hp[i+1:] {
-				port = port*10 + int(c-'0')
-			}
-			return hp[:i], port
-		}
+	host, portStr, err := net.SplitHostPort(hp)
+	if err != nil {
+		t.Fatalf("SplitHostPort(%q): %v", hp, err)
 	}
-	t.Fatalf("malformed host:port %q", hp)
-	return "", 0
+	port, err := strconv.Atoi(portStr)
+	if err != nil {
+		t.Fatalf("Atoi(%q): %v", portStr, err)
+	}
+	return host, port
 }
 
 func newConnOpts() conn.ConnOptions {
