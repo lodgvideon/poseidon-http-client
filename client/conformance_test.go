@@ -76,9 +76,103 @@ func TestConformance_RFC7540_Sec5_1_2_PoolGatesOnPeerMaxStreams(t *testing.T) {
 	}
 }
 
-// TestConformance_RFC7540_Sec6_8_PoolDrainsOnGoAway verifies that the
-// connection pool drains all connections after the peer sends GOAWAY,
-// honoring RFC 7540 §6.8.
+// TestConformance_RFC7540_Sec6_8_PoolEjectsDeadConnOnRelease verifies that
+// when the peer sends GOAWAY while a stream is in-flight, the pool evicts
+// the dead conn via the release path (BUG-1 fix) — not via the background
+// HealthCheckPeriod tick.
+//
+// RFC 7540 §6.8: the conn-layer guarantee that streams ≤ lastStreamID
+// continue normally is separately verified by TestOnGoAway_StreamsAtOrBelowLastID_Survive
+// in the conn package. Here we focus on the pool-level eviction contract.
+func TestConformance_RFC7540_Sec6_8_PoolEjectsDeadConnOnRelease(t *testing.T) {
+	started := make(chan struct{}) // closed when handler goroutine starts
+	proceed := make(chan struct{}) // closed when test allows handler to respond
+
+	srv, addr := newTLSH2Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		close(started) // stream is in-flight
+		<-proceed
+		w.WriteHeader(200)
+	}))
+
+	c, err := client.NewClient(client.ClientOptions{
+		Addr: addr,
+		ConnOpts: conn.ConnOptions{
+			Dialer: &conn.TLSDialer{Config: &tls.Config{InsecureSkipVerify: true}},
+		},
+		Transport: client.TransportPool,
+		Pool: &client.PoolOptions{
+			MaxConnsPerHost:   2,
+			MaxStreamsPerConn: 4,
+			// Long health-check period so eviction can ONLY happen via the
+			// release path (BUG-1 fix), not the background tick.
+			HealthCheckPeriod: 60 * time.Second,
+			DialBackoff:       10 * time.Millisecond,
+		},
+	})
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+	defer c.Close()
+
+	// Launch request in background; it will be in-flight while we trigger GOAWAY.
+	requestDone := make(chan error, 1)
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_, err := c.Do(ctx, &client.Request{Method: "GET", Path: "/"})
+		requestDone <- err
+	}()
+
+	// Wait for stream to reach the server handler (in-flight).
+	select {
+	case <-started:
+	case <-time.After(3 * time.Second):
+		close(proceed)
+		t.Fatal("request did not reach server handler")
+	}
+
+	// Trigger graceful shutdown: server sends GOAWAY and waits for handlers
+	// to complete, then closes the connection. Whether GOAWAY arrives before
+	// or after the response, the conn is dead by the time Shutdown returns.
+	shutdownDone := make(chan struct{})
+	go func() {
+		defer close(shutdownDone)
+		shCtx, shCancel := context.WithTimeout(context.Background(), 4*time.Second)
+		defer shCancel()
+		_ = srv.Config.Shutdown(shCtx)
+	}()
+
+	// Allow handler to respond and Shutdown to complete.
+	close(proceed)
+	<-shutdownDone
+
+	// The request may succeed (200) or fail with a connection error if the
+	// connection was closed before the response frame arrived — both are
+	// acceptable outcomes. What matters at the pool level is eviction.
+	select {
+	case err := <-requestDone:
+		if err != nil {
+			t.Logf("request result after GOAWAY: %v (expected, conn may close before response)", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("request goroutine did not complete")
+	}
+
+	// KEY ASSERTION (RFC §6.8 pool contract): the dead conn must be evicted
+	// via the release path — not via the background health-check tick (which
+	// we set to 60s). Window of 5s is generous enough to absorb scheduler
+	// latency between Do() returning and the readerLoop processing EOF, while
+	// still proving the tick (60s) cannot be responsible.
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if c.PoolStats().ActiveConns == 0 {
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatalf("pool did not evict GOAWAY'd conn via release path; ActiveConns = %d (HealthCheckPeriod = 60s, so tick cannot be the cause)", c.PoolStats().ActiveConns)
+}
+
 func TestConformance_RFC7540_Sec6_8_PoolDrainsOnGoAway(t *testing.T) {
 	srv, addr := newTLSH2Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(200)
