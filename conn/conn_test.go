@@ -350,3 +350,22 @@ func TestConn_IsAlive_AfterPeerGoAwayFalse(t *testing.T) {
 	t.Fatal("conn still alive after peer GOAWAY")
 }
 
+func TestConn_PeerMaxConcurrentStreams_Default(t *testing.T) {
+	t.Parallel()
+	c := &Conn{}
+	if got := c.PeerMaxConcurrentStreams(); got != 0 {
+		t.Fatalf("PeerMaxConcurrentStreams empty peerSettings = %d, want 0", got)
+	}
+}
+
+func TestConn_PeerMaxConcurrentStreams_AfterSettings(t *testing.T) {
+	t.Parallel()
+	c := &Conn{}
+	c.psMu.Lock()
+	setPeerSetting(&c.peerSettings, frame.SettingMaxConcurrentStreams, 250)
+	c.psMu.Unlock()
+	if got := c.PeerMaxConcurrentStreams(); got != 250 {
+		t.Fatalf("PeerMaxConcurrentStreams after SETTINGS = %d, want 250", got)
+	}
+}
+

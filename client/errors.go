@@ -56,3 +56,31 @@ func (e *DialError) Error() string {
 
 // Unwrap exposes the underlying error for errors.Is / errors.As.
 func (e *DialError) Unwrap() error { return e.Err }
+
+// Pool-related errors. Used by the TransportPool transport.
+var (
+	// ErrPoolClosed is returned by Pool operations after Close.
+	ErrPoolClosed = errors.New("client: pool closed")
+
+	// ErrPoolExhausted is returned when MaxConnsPerHost is reached
+	// AND every conn is at its effective stream cap AND the caller
+	// declines to wait. Reserved for a future non-blocking acquire;
+	// today acquires always queue and ctx / AcquireTimeout governs.
+	ErrPoolExhausted = errors.New("client: pool exhausted")
+
+	// ErrAcquireTimeout is returned when PoolOptions.AcquireTimeout
+	// elapses before capacity becomes available.
+	ErrAcquireTimeout = errors.New("client: acquire timeout")
+
+	// ErrDialBackoff is returned when a recent dial failure on the
+	// pool is still within the DialBackoff window.
+	ErrDialBackoff = errors.New("client: dial backoff active")
+
+	// ErrInvalidPoolOptions is returned by NewClient when Transport
+	// and Pool are inconsistent.
+	ErrInvalidPoolOptions = errors.New("client: invalid pool options")
+
+	// ErrInvalidTransportKind is returned by NewClient when
+	// ClientOptions.Transport is not a defined TransportKind.
+	ErrInvalidTransportKind = errors.New("client: invalid transport kind")
+)

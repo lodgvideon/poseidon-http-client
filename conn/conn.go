@@ -230,6 +230,21 @@ func (c *Conn) IsAlive() bool {
 	return !c.closed.Load() && !c.goAwayReceived.Load()
 }
 
+// PeerMaxConcurrentStreams returns the peer-advertised
+// SETTINGS_MAX_CONCURRENT_STREAMS, or 0 if the peer has not
+// advertised a value. Callers that intend to gate stream
+// allocation should treat 0 as "no peer cap" and fall back to
+// their own local limit.
+func (c *Conn) PeerMaxConcurrentStreams() int {
+	c.psMu.RLock()
+	defer c.psMu.RUnlock()
+	v, ok := lookupPeerSetting(c.peerSettings, frame.SettingMaxConcurrentStreams)
+	if !ok {
+		return 0
+	}
+	return int(v)
+}
+
 // --- streamWriter implementation (called from *Stream).
 
 func (c *Conn) writeHeaders(_ context.Context, s *Stream, fields []hpack.HeaderField, endStream bool) error {

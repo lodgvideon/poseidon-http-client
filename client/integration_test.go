@@ -147,6 +147,146 @@ func TestIntegration_Client_ConcurrentRequests_OneClient(t *testing.T) {
 	}
 }
 
+func TestIntegration_ClientPool_ConcurrentRequests_MultipleConns(t *testing.T) {
+	_, addr := newTLSH2Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		time.Sleep(50 * time.Millisecond)
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	c, err := client.NewClient(client.ClientOptions{
+		Addr: addr,
+		ConnOpts: conn.ConnOptions{
+			Dialer: &conn.TLSDialer{Config: &tls.Config{InsecureSkipVerify: true}},
+		},
+		Transport: client.TransportPool,
+		Pool: &client.PoolOptions{
+			MaxConnsPerHost:   3,
+			MaxStreamsPerConn: 4,
+			HealthCheckPeriod: time.Second,
+			DialBackoff:       50 * time.Millisecond,
+		},
+	})
+	if err != nil {
+		t.Fatalf("NewClient = %v", err)
+	}
+	defer c.Close()
+
+	const N = 24
+	var wg sync.WaitGroup
+	wg.Add(N)
+	errs := make(chan error, N)
+	for i := 0; i < N; i++ {
+		go func() {
+			defer wg.Done()
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			res, err := c.Do(ctx, &client.Request{Method: "GET", Path: "/"})
+			if err != nil {
+				errs <- err
+				return
+			}
+			if res.Status != 200 {
+				errs <- fmt.Errorf("status = %d", res.Status)
+			}
+		}()
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		t.Errorf("request err: %v", err)
+	}
+
+	s := c.PoolStats()
+	if s.ActiveConns < 2 {
+		t.Fatalf("ActiveConns = %d, want >= 2 (load did not spread)", s.ActiveConns)
+	}
+}
+
+func TestIntegration_ClientPool_IdleEviction(t *testing.T) {
+	srv, addr := newTLSH2Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(200)
+	}))
+	defer srv.Close()
+
+	c, err := client.NewClient(client.ClientOptions{
+		Addr: addr,
+		ConnOpts: conn.ConnOptions{
+			Dialer: &conn.TLSDialer{Config: &tls.Config{InsecureSkipVerify: true}},
+		},
+		Transport: client.TransportPool,
+		Pool: &client.PoolOptions{
+			MaxConnsPerHost:   2,
+			MaxStreamsPerConn: 4,
+			IdleTimeout:       150 * time.Millisecond,
+			HealthCheckPeriod: 50 * time.Millisecond,
+			DialBackoff:       10 * time.Millisecond,
+		},
+	})
+	if err != nil {
+		t.Fatalf("NewClient = %v", err)
+	}
+	defer c.Close()
+
+	if _, err := c.Do(context.Background(), &client.Request{Method: "GET", Path: "/"}); err != nil {
+		t.Fatalf("first Do = %v", err)
+	}
+	if got := c.PoolStats().ActiveConns; got != 1 {
+		t.Fatalf("after first req ActiveConns = %d, want 1", got)
+	}
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if c.PoolStats().ActiveConns == 0 {
+			return
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	t.Fatalf("idle eviction did not run; ActiveConns = %d", c.PoolStats().ActiveConns)
+}
+
+func TestIntegration_ClientPool_GoAwayMidFlight_Replaces(t *testing.T) {
+	srv, addr := newTLSH2Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(200)
+	}))
+
+	c, err := client.NewClient(client.ClientOptions{
+		Addr: addr,
+		ConnOpts: conn.ConnOptions{
+			Dialer: &conn.TLSDialer{Config: &tls.Config{InsecureSkipVerify: true}},
+		},
+		Transport: client.TransportPool,
+		Pool: &client.PoolOptions{
+			MaxConnsPerHost:   2,
+			MaxStreamsPerConn: 4,
+			HealthCheckPeriod: 50 * time.Millisecond,
+			DialBackoff:       10 * time.Millisecond,
+		},
+	})
+	if err != nil {
+		t.Fatalf("NewClient = %v", err)
+	}
+	defer c.Close()
+
+	if _, err := c.Do(context.Background(), &client.Request{Method: "GET", Path: "/"}); err != nil {
+		t.Fatalf("first Do = %v", err)
+	}
+
+	shCtx, shCancel := context.WithTimeout(context.Background(), 2*time.Second)
+	if err := srv.Config.Shutdown(shCtx); err != nil {
+		t.Logf("Shutdown returned %v (continuing)", err)
+	}
+	shCancel()
+
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		if c.PoolStats().ActiveConns == 0 {
+			return
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	t.Fatalf("ActiveConns = %d, want 0 after server shutdown", c.PoolStats().ActiveConns)
+}
+
 func TestIntegration_Client_DoStream_LargeResponse(t *testing.T) {
 	const total = 1 << 20 // 1 MiB
 	chunk := []byte(strings.Repeat("x", 4096))

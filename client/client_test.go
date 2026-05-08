@@ -1225,3 +1225,58 @@ func TestConformance_RFC7540_Sec8_1_2_1_PseudoHeadersFirst(t *testing.T) {
 		}
 	}
 }
+
+func TestClient_NewClient_Pool_RequiresPoolOptions(t *testing.T) {
+	t.Parallel()
+	_, err := NewClient(ClientOptions{
+		Addr:      "example.com:443",
+		ConnOpts:  conn.ConnOptions{Dialer: &conn.TLSDialer{}},
+		Transport: TransportPool,
+	})
+	if !errors.Is(err, ErrInvalidPoolOptions) {
+		t.Fatalf("err = %v, want ErrInvalidPoolOptions", err)
+	}
+}
+
+func TestClient_NewClient_SingleConn_RejectsPoolOptions(t *testing.T) {
+	t.Parallel()
+	_, err := NewClient(ClientOptions{
+		Addr:      "example.com:443",
+		ConnOpts:  conn.ConnOptions{Dialer: &conn.TLSDialer{}},
+		Transport: TransportSingleConn,
+		Pool:      &PoolOptions{MaxConnsPerHost: 4},
+	})
+	if !errors.Is(err, ErrInvalidPoolOptions) {
+		t.Fatalf("err = %v, want ErrInvalidPoolOptions", err)
+	}
+}
+
+func TestClient_NewClient_InvalidTransportKind(t *testing.T) {
+	t.Parallel()
+	_, err := NewClient(ClientOptions{
+		Addr:      "example.com:443",
+		ConnOpts:  conn.ConnOptions{Dialer: &conn.TLSDialer{}},
+		Transport: TransportKind(42),
+	})
+	if !errors.Is(err, ErrInvalidTransportKind) {
+		t.Fatalf("err = %v, want ErrInvalidTransportKind", err)
+	}
+}
+
+func TestClient_NewClient_Pool_Constructs(t *testing.T) {
+	t.Parallel()
+	c, err := NewClient(ClientOptions{
+		Addr:      "example.com:443",
+		ConnOpts:  conn.ConnOptions{Dialer: &conn.TLSDialer{}},
+		Transport: TransportPool,
+		Pool:      &PoolOptions{MaxConnsPerHost: 2},
+	})
+	if err != nil {
+		t.Fatalf("NewClient = %v", err)
+	}
+	t.Cleanup(func() { _ = c.Close() })
+
+	if _, ok := c.tr.(*poolTransport); !ok {
+		t.Fatalf("tr type = %T, want *poolTransport", c.tr)
+	}
+}
