@@ -9,6 +9,13 @@ import (
 	"github.com/lodgvideon/poseidon-http-client/conn"
 )
 
+// replyPool recycles buffered reply channels to avoid a heap allocation
+// on every acquire call. Channels are drained before being returned so
+// the next caller always starts with an empty channel.
+var replyPool = sync.Pool{
+	New: func() any { return make(chan acquireResp, 1) },
+}
+
 // PoolOptions configures the per-host connection pool. Zero values
 // are replaced with sensible defaults at NewClient.
 type PoolOptions struct {
@@ -271,7 +278,7 @@ func (p *Pool) pickLeastLoaded(conns []*managedConn) *managedConn {
 		if !mc.c.IsAlive() {
 			continue
 		}
-		streamCap := effectiveStreamCap(p.opts, mc.c)
+		streamCap := effectiveStreamCap(p.opts.MaxStreamsPerConn, mc.c.PeerMaxConcurrentStreams())
 		if mc.active >= streamCap {
 			continue
 		}
@@ -433,35 +440,72 @@ func pruneExpiredWaiters(ws []acquireReq) []acquireReq {
 // active count has already been incremented by the actor. Caller MUST
 // eventually call p.release(mc, requestErr).
 func (p *Pool) acquire(ctx context.Context) (*managedConn, error) {
-	reply := make(chan acquireResp, 1)
+	// Merge AcquireTimeout into ctx so that req.ctx.Done() fires on ALL
+	// abandonment paths, including AcquireTimeout. This is required for
+	// the sync.Pool channel optimisation: replyAcquire checks req.ctx.Done
+	// before sending, so once ctx is cancelled the actor will not send on
+	// reply. The drain in the defer is then guaranteed to see an empty
+	// channel (or one already-buffered message from the rare race window),
+	// making it safe to return the channel to replyPool.
+	acquireTimeoutActive := false
+	if p.opts.AcquireTimeout > 0 {
+		deadline := time.Now().Add(p.opts.AcquireTimeout)
+		// context.WithDeadline picks the earlier of parent deadline and ours.
+		parentDl, hasParent := ctx.Deadline()
+		if !hasParent || deadline.Before(parentDl) {
+			acquireTimeoutActive = true
+		}
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithDeadline(ctx, deadline)
+		defer cancel()
+	}
+
+	reply := replyPool.Get().(chan acquireResp)
+	defer func() {
+		// Drain any message left by the actor before returning to pool.
+		// After acquire() exits, one of three states is guaranteed:
+		//   (a) We already read the response (happy path) — channel empty.
+		//   (b) Actor sent, caller abandoned — channel has one message.
+		//   (c) Actor took ctx.Done arm in replyAcquire — channel empty.
+		// In all cases a non-blocking drain leaves the channel clean.
+		select {
+		case <-reply:
+		default:
+		}
+		replyPool.Put(reply)
+	}()
+
 	req := acquireReq{ctx: ctx, reply: reply}
 
-	// Send the request.
+	// Send the request to the actor.
 	select {
 	case p.acquireCh <- req:
 	case <-ctx.Done():
-		return nil, ctx.Err()
+		return nil, mapAcquireErr(ctx, acquireTimeoutActive)
 	case <-p.closedCh:
 		return nil, ErrPoolClosed
 	}
 
-	// Wait for the reply or a timeout.
-	var timeoutCh <-chan time.Time
-	if p.opts.AcquireTimeout > 0 {
-		t := time.NewTimer(p.opts.AcquireTimeout)
-		defer t.Stop()
-		timeoutCh = t.C
-	}
+	// Wait for the actor's reply.
 	select {
 	case resp := <-reply:
 		return resp.mc, resp.err
 	case <-ctx.Done():
-		return nil, ctx.Err()
-	case <-timeoutCh:
-		return nil, ErrAcquireTimeout
+		return nil, mapAcquireErr(ctx, acquireTimeoutActive)
 	case <-p.closedCh:
 		return nil, ErrPoolClosed
 	}
+}
+
+// mapAcquireErr converts ctx.Err() to the right sentinel. If the
+// deadline was introduced by AcquireTimeout (not the caller's own ctx),
+// we return ErrAcquireTimeout to distinguish it from context.Canceled or
+// a caller-supplied context.DeadlineExceeded.
+func mapAcquireErr(ctx context.Context, acquireTimeoutActive bool) error {
+	if acquireTimeoutActive && ctx.Err() == context.DeadlineExceeded {
+		return ErrAcquireTimeout
+	}
+	return ctx.Err()
 }
 
 // release returns mc to the actor with an optional request error.
@@ -477,25 +521,21 @@ func (p *Pool) release(mc *managedConn, reqErr error) {
 	}
 }
 
-// close is the transport-interface form of Close.
-func (p *Pool) close() error { return p.Close() }
 
-// effectiveStreamCap computes min(opts.MaxStreamsPerConn, peer cap).
-// Returns 100 if both are unbounded.
-func effectiveStreamCap(opts PoolOptions, c *conn.Conn) int {
-	peerCap := c.PeerMaxConcurrentStreams()
-	local := opts.MaxStreamsPerConn
-	if local <= 0 && peerCap <= 0 {
+// effectiveStreamCap computes min(localCap, peerCap). Either may be
+// zero meaning "unbounded". Returns 100 if both are unbounded.
+func effectiveStreamCap(localCap, peerCap int) int {
+	if localCap <= 0 && peerCap <= 0 {
 		return 100
 	}
-	if local <= 0 {
+	if localCap <= 0 {
 		return peerCap
 	}
 	if peerCap <= 0 {
-		return local
+		return localCap
 	}
-	if peerCap < local {
+	if peerCap < localCap {
 		return peerCap
 	}
-	return local
+	return localCap
 }

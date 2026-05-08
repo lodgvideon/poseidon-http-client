@@ -42,5 +42,5 @@ func (pt *poolTransport) acquire(ctx context.Context) (*conn.Conn, func(), error
 
 // close implements transport.close. Idempotent.
 func (pt *poolTransport) close() error {
-	return pt.p.close()
+	return pt.p.Close()
 }

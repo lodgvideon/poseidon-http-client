@@ -62,12 +62,6 @@ var (
 	// ErrPoolClosed is returned by Pool operations after Close.
 	ErrPoolClosed = errors.New("client: pool closed")
 
-	// ErrPoolExhausted is returned when MaxConnsPerHost is reached
-	// AND every conn is at its effective stream cap AND the caller
-	// declines to wait. Reserved for a future non-blocking acquire;
-	// today acquires always queue and ctx / AcquireTimeout governs.
-	ErrPoolExhausted = errors.New("client: pool exhausted")
-
 	// ErrAcquireTimeout is returned when PoolOptions.AcquireTimeout
 	// elapses before capacity becomes available.
 	ErrAcquireTimeout = errors.New("client: acquire timeout")

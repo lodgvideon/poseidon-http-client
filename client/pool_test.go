@@ -72,22 +72,36 @@ func TestPool_StatsAfterClose_ReturnsZero(t *testing.T) {
 
 func TestEffectiveStreamCap_BothUnbounded(t *testing.T) {
 	t.Parallel()
-	// Zero-value *conn.Conn has empty peerSettings → PeerMaxConcurrentStreams() == 0.
-	// local == 0 too, so both unbounded → fallback 100.
-	opts := PoolOptions{}
-	got := effectiveStreamCap(opts, &conn.Conn{})
-	if got != 100 {
-		t.Fatalf("effectiveStreamCap = %d, want 100", got)
+	if got := effectiveStreamCap(0, 0); got != 100 {
+		t.Fatalf("effectiveStreamCap(0,0) = %d, want 100", got)
 	}
 }
 
 func TestEffectiveStreamCap_LocalOnly(t *testing.T) {
 	t.Parallel()
-	// local > 0, peer == 0 → return local.
-	opts := PoolOptions{MaxStreamsPerConn: 50}
-	got := effectiveStreamCap(opts, &conn.Conn{})
-	if got != 50 {
-		t.Fatalf("effectiveStreamCap = %d, want 50", got)
+	if got := effectiveStreamCap(50, 0); got != 50 {
+		t.Fatalf("effectiveStreamCap(50,0) = %d, want 50", got)
+	}
+}
+
+func TestEffectiveStreamCap_PeerOnly(t *testing.T) {
+	t.Parallel()
+	if got := effectiveStreamCap(0, 30); got != 30 {
+		t.Fatalf("effectiveStreamCap(0,30) = %d, want 30", got)
+	}
+}
+
+func TestEffectiveStreamCap_PeerLower(t *testing.T) {
+	t.Parallel()
+	if got := effectiveStreamCap(100, 2); got != 2 {
+		t.Fatalf("effectiveStreamCap(100,2) = %d, want 2 (peer cap)", got)
+	}
+}
+
+func TestEffectiveStreamCap_LocalLower(t *testing.T) {
+	t.Parallel()
+	if got := effectiveStreamCap(10, 100); got != 10 {
+		t.Fatalf("effectiveStreamCap(10,100) = %d, want 10 (local cap)", got)
 	}
 }
 
