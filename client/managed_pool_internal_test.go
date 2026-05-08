@@ -6,6 +6,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"runtime"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -436,4 +437,37 @@ func TestManagedPool_StatsAggregation_SumsAcrossSubPools(t *testing.T) {
 	for _, rel := range holds {
 		rel()
 	}
+}
+
+func TestManagedPool_Close_NoGoroutineLeak(t *testing.T) {
+	t.Parallel()
+	addrs, _, cleanup := startH2Servers(t, 1)
+	defer cleanup()
+
+	before := runtime.NumGoroutine()
+	mp, err := newManagedPool(StaticResolver(addrs...), RoundRobin(), DrainGraceful, newConnOpts(),
+		PoolOptions{MaxConnsPerHost: 1, MaxStreamsPerConn: 4, HealthCheckPeriod: time.Second})
+	if err != nil {
+		t.Fatalf("newManagedPool: %v", err)
+	}
+	// Acquire once to force sub-pool creation and its background goroutines.
+	_, rel, err := mp.acquire(context.Background())
+	if err != nil {
+		t.Fatalf("acquire: %v", err)
+	}
+	rel()
+
+	mp.close()
+
+	// Allow goroutines up to 500 ms to wind down after close.
+	deadline := time.Now().Add(500 * time.Millisecond)
+	var after int
+	for time.Now().Before(deadline) {
+		after = runtime.NumGoroutine()
+		if after <= before+2 { // +2: tolerance for test runner scheduler
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Errorf("goroutine leak: before=%d after=%d (want <= %d)", before, after, before+2)
 }
