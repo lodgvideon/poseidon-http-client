@@ -156,6 +156,57 @@ func (r *Retryer) Do(ctx context.Context, req *Request) (*Response, error) {
 
 // doLoop is the actual retry loop. Pre: canRetry(req) == true.
 func (r *Retryer) doLoop(ctx context.Context, req *Request) (*Response, error) {
-	// Stub for now — Task 4 implements the loop body.
-	return r.d.Do(ctx, req)
+	var (
+		resp *Response
+		err  error
+	)
+	for attempt := 0; attempt < r.opts.MaxAttempts; attempt++ {
+		if attempt > 0 {
+			wait := r.opts.Backoff(attempt)
+			if wait > 0 {
+				select {
+				case <-time.After(wait):
+				case <-ctx.Done():
+					return nil, ctx.Err()
+				}
+			}
+		}
+		resp, err = r.d.Do(ctx, req)
+		if err == nil {
+			if !r.userIsRetryable(nil, resp) {
+				return resp, nil
+			}
+			continue
+		}
+		if isHardStop(err) {
+			return nil, err
+		}
+		if builtinShouldRetry(err) {
+			continue
+		}
+		if r.userIsRetryable(err, nil) {
+			continue
+		}
+		return nil, err
+	}
+	return resp, err
+}
+
+// userIsRetryable consults the optional user predicate; nil predicate
+// returns false (i.e., do NOT retry).
+func (r *Retryer) userIsRetryable(err error, resp *Response) bool {
+	if r.opts.IsRetryable == nil {
+		return false
+	}
+	return r.opts.IsRetryable(err, resp)
+}
+
+// isHardStop returns true for errors that must never be retried,
+// even by a user-supplied IsRetryable.
+func isHardStop(err error) bool {
+	return errors.Is(err, context.Canceled) ||
+		errors.Is(err, context.DeadlineExceeded) ||
+		errors.Is(err, ErrPoolClosed) ||
+		errors.Is(err, ErrClosed) ||
+		errors.Is(err, ErrInvalidRequest)
 }

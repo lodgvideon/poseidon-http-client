@@ -202,3 +202,85 @@ func TestRetryer_Do_MaxAttemptsOne_NoRetry(t *testing.T) {
 type errReader struct{}
 
 func (errReader) Read([]byte) (int, error) { return 0, errors.New("not read") }
+
+func TestRetryer_Do_RefusedStream_Retries(t *testing.T) {
+	t.Parallel()
+	f := &fakeDoer{results: []doResult{
+		{nil, &StreamResetError{Code: frame.ErrCodeRefusedStream}},
+		{nil, &StreamResetError{Code: frame.ErrCodeRefusedStream}},
+		{&Response{Status: 200}, nil},
+	}}
+	r := NewRetryer(&Client{}, RetryOptions{
+		MaxAttempts: 3,
+		Backoff:     func(int) time.Duration { return 0 },
+	})
+	r.d = f
+	resp, err := r.Do(context.Background(), &Request{Method: "GET", Path: "/"})
+	if err != nil {
+		t.Fatalf("Do err = %v, want nil after retry", err)
+	}
+	if resp.Status != 200 {
+		t.Errorf("Status = %d, want 200", resp.Status)
+	}
+	if f.calls != 3 {
+		t.Errorf("calls = %d, want 3", f.calls)
+	}
+}
+
+func TestRetryer_Do_GoAway_Retries(t *testing.T) {
+	t.Parallel()
+	f := &fakeDoer{results: []doResult{
+		{nil, conn.ErrGoAway},
+		{&Response{Status: 200}, nil},
+	}}
+	r := NewRetryer(&Client{}, RetryOptions{
+		MaxAttempts: 3,
+		Backoff:     func(int) time.Duration { return 0 },
+	})
+	r.d = f
+	resp, err := r.Do(context.Background(), &Request{Method: "GET", Path: "/"})
+	if err != nil || resp.Status != 200 {
+		t.Fatalf("Do = %v, %v; want 200, nil", resp, err)
+	}
+	if f.calls != 2 {
+		t.Errorf("calls = %d, want 2", f.calls)
+	}
+}
+
+func TestRetryer_Do_DialError_Retries(t *testing.T) {
+	t.Parallel()
+	f := &fakeDoer{results: []doResult{
+		{nil, &DialError{Addr: "x:1", Err: errors.New("boom")}},
+		{&Response{Status: 200}, nil},
+	}}
+	r := NewRetryer(&Client{}, RetryOptions{
+		MaxAttempts: 3,
+		Backoff:     func(int) time.Duration { return 0 },
+	})
+	r.d = f
+	_, err := r.Do(context.Background(), &Request{Method: "GET", Path: "/"})
+	if err != nil {
+		t.Fatalf("Do err = %v, want nil after dial retry", err)
+	}
+	if f.calls != 2 {
+		t.Errorf("calls = %d, want 2", f.calls)
+	}
+}
+
+func TestRetryer_Do_NonRetryableError_Stops(t *testing.T) {
+	t.Parallel()
+	other := errors.New("application error")
+	f := &fakeDoer{results: []doResult{{nil, other}}}
+	r := NewRetryer(&Client{}, RetryOptions{
+		MaxAttempts: 3,
+		Backoff:     func(int) time.Duration { return 0 },
+	})
+	r.d = f
+	_, err := r.Do(context.Background(), &Request{Method: "GET", Path: "/"})
+	if !errors.Is(err, other) {
+		t.Fatalf("err = %v, want %v", err, other)
+	}
+	if f.calls != 1 {
+		t.Errorf("calls = %d, want 1 (non-retryable error must stop)", f.calls)
+	}
+}
