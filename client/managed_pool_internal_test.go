@@ -457,7 +457,7 @@ func TestManagedPool_Close_NoGoroutineLeak(t *testing.T) {
 	}
 	rel()
 
-	mp.close()
+	_ = mp.close()
 
 	// Allow goroutines up to 500 ms to wind down after close.
 	deadline := time.Now().Add(500 * time.Millisecond)
