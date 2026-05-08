@@ -36,6 +36,11 @@ type Request struct {
 	// WantTrailers opts trailer capture in. When false, response
 	// trailers are ignored.
 	WantTrailers bool
+
+	// Idempotent overrides automatic idempotency classification based
+	// on Method. nil → classify by Method (GET, HEAD, OPTIONS, PUT,
+	// DELETE, TRACE are idempotent; POST, PATCH are not).
+	Idempotent *bool
 }
 
 // validateRequest enforces the up-front rules documented on Request.
