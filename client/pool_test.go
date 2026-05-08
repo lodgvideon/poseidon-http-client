@@ -105,37 +105,33 @@ func TestEffectiveStreamCap_LocalLower(t *testing.T) {
 	}
 }
 
-// --- canDial ---
+// --- inDialBackoff ---
 
-func TestCanDial_WithinBackoffWindow(t *testing.T) {
+func TestInDialBackoff_WithinWindow(t *testing.T) {
 	t.Parallel()
-	p := newPool("ignored:0", conn.ConnOptions{}, PoolOptions{
-		MaxConnsPerHost: 4,
-		DialBackoff:     1 * time.Second,
-	})
-	t.Cleanup(func() { _ = p.Close() })
-
-	// Simulate a recent dial error: lastErrAt = now.
-	recentErr := time.Now()
-	got := p.canDial(0, 0, recentErr)
-	if got {
-		t.Fatal("canDial should return false within backoff window")
+	if !inDialBackoff(time.Now(), 1*time.Second) {
+		t.Fatal("inDialBackoff should return true for fresh error within window")
 	}
 }
 
-func TestCanDial_AfterBackoffExpired(t *testing.T) {
+func TestInDialBackoff_AfterWindow(t *testing.T) {
 	t.Parallel()
-	p := newPool("ignored:0", conn.ConnOptions{}, PoolOptions{
-		MaxConnsPerHost: 4,
-		DialBackoff:     1 * time.Millisecond,
-	})
-	t.Cleanup(func() { _ = p.Close() })
+	if inDialBackoff(time.Now().Add(-10*time.Second), 1*time.Millisecond) {
+		t.Fatal("inDialBackoff should return false after window expired")
+	}
+}
 
-	// lastErrAt far in the past → backoff expired → can dial.
-	pastErr := time.Now().Add(-10 * time.Second)
-	got := p.canDial(0, 0, pastErr)
-	if !got {
-		t.Fatal("canDial should return true after backoff expired")
+func TestInDialBackoff_ZeroLastErr(t *testing.T) {
+	t.Parallel()
+	if inDialBackoff(time.Time{}, 1*time.Second) {
+		t.Fatal("inDialBackoff should return false when lastErrAt is zero")
+	}
+}
+
+func TestInDialBackoff_ZeroWindow(t *testing.T) {
+	t.Parallel()
+	if inDialBackoff(time.Now(), 0) {
+		t.Fatal("inDialBackoff should return false when window is 0")
 	}
 }
 

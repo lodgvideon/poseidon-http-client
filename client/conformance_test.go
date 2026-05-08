@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -18,14 +19,38 @@ import (
 // TestConformance_RFC7540_Sec5_1_2_PoolGatesOnPeerMaxStreams verifies that the
 // connection pool opens additional connections when the peer advertises a small
 // MAX_CONCURRENT_STREAMS value, honoring RFC 7540 §5.1.2.
+//
+// The test forces N concurrent requests to all be in-flight simultaneously
+// via a server-side barrier. While they are blocked in the handler, it
+// snapshots PoolStats and asserts that ActiveConns >= ceil(N / peerCap),
+// proving the pool actually opened additional conns to absorb the load
+// rather than queueing. Snapshotting AFTER load (the previous design) was
+// TOCTOU-fragile: if conns were evicted between request completion and the
+// stats read, the assertion could pass on a buggy pool that never opened
+// more than one conn.
 func TestConformance_RFC7540_Sec5_1_2_PoolGatesOnPeerMaxStreams(t *testing.T) {
-	// Server caps concurrent streams to 2, forcing the pool to open multiple
-	// connections to serve more than 2 concurrent requests.
+	const (
+		N            = 8
+		peerCap      = 2
+		expectedMin  = (N + peerCap - 1) / peerCap // ceil(N/peerCap) = 4
+		serverMaxStr = peerCap
+	)
+
+	// Barrier coordination: each handler increments inflight and signals
+	// `allInflight` when N have arrived. Test snapshots stats after that
+	// signal, then closes `release` to let handlers respond.
+	var inflight atomic.Int32
+	allInflight := make(chan struct{})
+	release := make(chan struct{})
+
 	srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		time.Sleep(100 * time.Millisecond)
+		if inflight.Add(1) == int32(N) {
+			close(allInflight)
+		}
+		<-release
 		w.WriteHeader(200)
 	}))
-	if err := http2.ConfigureServer(srv.Config, &http2.Server{MaxConcurrentStreams: 2}); err != nil {
+	if err := http2.ConfigureServer(srv.Config, &http2.Server{MaxConcurrentStreams: serverMaxStr}); err != nil {
 		t.Fatalf("ConfigureServer: %v", err)
 	}
 	srv.EnableHTTP2 = true
@@ -40,7 +65,7 @@ func TestConformance_RFC7540_Sec5_1_2_PoolGatesOnPeerMaxStreams(t *testing.T) {
 		},
 		Transport: client.TransportPool,
 		Pool: &client.PoolOptions{
-			MaxConnsPerHost:   4,
+			MaxConnsPerHost:   expectedMin,
 			MaxStreamsPerConn: 0, // unbounded local — peer cap governs
 			HealthCheckPeriod: time.Second,
 		},
@@ -50,7 +75,6 @@ func TestConformance_RFC7540_Sec5_1_2_PoolGatesOnPeerMaxStreams(t *testing.T) {
 	}
 	defer c.Close()
 
-	const N = 8
 	var wg sync.WaitGroup
 	wg.Add(N)
 	errs := make(chan error, N)
@@ -64,15 +88,29 @@ func TestConformance_RFC7540_Sec5_1_2_PoolGatesOnPeerMaxStreams(t *testing.T) {
 			}
 		}()
 	}
+
+	// Wait until all N requests are simultaneously in-flight at the server.
+	// If the pool gates correctly on peer MAX_CONCURRENT_STREAMS, this
+	// requires opening >=expectedMin conns; otherwise the barrier never closes.
+	select {
+	case <-allInflight:
+	case <-time.After(5 * time.Second):
+		close(release)
+		t.Fatalf("only %d/%d requests reached server within 5s — pool may be queueing instead of opening more conns", inflight.Load(), N)
+	}
+
+	// Snapshot stats while load is still pinned in handlers.
+	s := c.PoolStats()
+	if s.ActiveConns < expectedMin {
+		close(release)
+		t.Fatalf("ActiveConns = %d, want >= %d during %d-way load with peer MAX_CONCURRENT_STREAMS=%d", s.ActiveConns, expectedMin, N, peerCap)
+	}
+
+	close(release)
 	wg.Wait()
 	close(errs)
 	for err := range errs {
 		t.Errorf("Do: %v", err)
-	}
-
-	s := c.PoolStats()
-	if s.ActiveConns < 2 {
-		t.Fatalf("ActiveConns = %d, want >= 2 (peer MAX_CONCURRENT_STREAMS=2 not honored)", s.ActiveConns)
 	}
 }
 
