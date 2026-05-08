@@ -6,6 +6,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -344,6 +345,95 @@ func TestManagedPool_DrainLazy_RemovedAddress_RetainsSubPool(t *testing.T) {
 		if err != nil {
 			t.Fatalf("post-drain acquire %d: %v", i, err)
 		}
+		rel()
+	}
+}
+
+// noWatchResolver satisfies Resolver with working Resolve but
+// Watch always returns ErrWatchUnsupported.
+type noWatchResolver struct {
+	mu    sync.Mutex
+	addrs []Address
+}
+
+func (r *noWatchResolver) Resolve(_ context.Context) ([]Address, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	out := make([]Address, len(r.addrs))
+	copy(out, r.addrs)
+	return out, nil
+}
+
+func (r *noWatchResolver) Watch(_ context.Context) (<-chan []Address, error) {
+	return nil, ErrWatchUnsupported
+}
+
+func (r *noWatchResolver) set(addrs []Address) {
+	r.mu.Lock()
+	r.addrs = addrs
+	r.mu.Unlock()
+}
+
+func TestManagedPool_WatchUnsupported_FallsBackToTicker(t *testing.T) {
+	t.Parallel()
+	addrs, _, cleanup := startH2Servers(t, 2)
+	defer cleanup()
+
+	res := &noWatchResolver{}
+	res.set([]Address{addrs[0]})
+	// Use buildManagedPool so we can set the test seam before the
+	// background goroutine starts reading tickerPeriod.
+	mp, err := buildManagedPool(res, RoundRobin(), DrainGraceful, newConnOpts(),
+		PoolOptions{MaxConnsPerHost: 1, MaxStreamsPerConn: 4, HealthCheckPeriod: time.Second})
+	if err != nil {
+		t.Fatalf("buildManagedPool: %v", err)
+	}
+	mp.tickerPeriod.Store(int64(25 * time.Millisecond)) // test seam set before run
+	go mp.run()
+	defer mp.close()
+
+	res.set(addrs) // expand set
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if len(mp.snapshotActive()) == 2 {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Errorf("ticker mode never picked up the new address; active = %d", len(mp.snapshotActive()))
+}
+
+func TestManagedPool_StatsAggregation_SumsAcrossSubPools(t *testing.T) {
+	t.Parallel()
+	addrs, _, cleanup := startH2Servers(t, 3)
+	defer cleanup()
+
+	mp, err := newManagedPool(StaticResolver(addrs...), RoundRobin(), DrainGraceful, newConnOpts(),
+		PoolOptions{MaxConnsPerHost: 1, MaxStreamsPerConn: 4, HealthCheckPeriod: time.Second})
+	if err != nil {
+		t.Fatalf("newManagedPool: %v", err)
+	}
+	defer mp.close()
+
+	// Seed each sub-pool with one conn.
+	holds := make([]func(), 0, 3)
+	for i := 0; i < 3; i++ {
+		_, rel, err := mp.acquire(context.Background())
+		if err != nil {
+			t.Fatalf("acquire %d: %v", i, err)
+		}
+		holds = append(holds, rel)
+	}
+
+	st := mp.stats()
+	if st.ActiveConns != 3 {
+		t.Errorf("ActiveConns = %d, want 3", st.ActiveConns)
+	}
+	if st.Addresses != 3 {
+		t.Errorf("Addresses = %d, want 3", st.Addresses)
+	}
+	for _, rel := range holds {
 		rel()
 	}
 }

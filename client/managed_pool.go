@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/lodgvideon/poseidon-http-client/conn"
@@ -53,13 +54,27 @@ type managedPool struct {
 
 	closeOnce    sync.Once
 	closed       chan struct{}
-	tickerPeriod time.Duration // 0 → defaultManagedPoolTickerPeriod; test seam
+	tickerPeriod atomic.Int64 // nanoseconds; 0 → defaultManagedPoolTickerPeriod; test seam
 }
 
-// newManagedPool constructs a managedPool. It performs an initial
-// Resolve to surface hard errors early; if Resolve returns 0 addrs
-// the pool starts empty (Acquire returns ErrNoAddresses).
+// newManagedPool constructs a managedPool and starts its Watch/ticker
+// goroutine. It performs an initial Resolve to surface hard errors
+// early; if Resolve returns 0 addrs the pool starts empty (Acquire
+// returns ErrNoAddresses).
 func newManagedPool(r Resolver, s Selector, dm DrainMode, co conn.ConnOptions, po PoolOptions) (*managedPool, error) {
+	mp, err := buildManagedPool(r, s, dm, co, po)
+	if err != nil {
+		return nil, err
+	}
+	go mp.run()
+	return mp, nil
+}
+
+// buildManagedPool constructs and initialises a managedPool without
+// starting its background goroutine. Tests that need to configure
+// fields (e.g. tickerPeriod) before the goroutine reads them call
+// this and start the goroutine themselves via go mp.run().
+func buildManagedPool(r Resolver, s Selector, dm DrainMode, co conn.ConnOptions, po PoolOptions) (*managedPool, error) {
 	if s == nil {
 		s = RoundRobin()
 	}
@@ -79,7 +94,6 @@ func newManagedPool(r Resolver, s Selector, dm DrainMode, co conn.ConnOptions, p
 		return nil, err
 	}
 	mp.addrs = addrs
-	go mp.run()
 	return mp, nil
 }
 
@@ -219,9 +233,53 @@ func (mp *managedPool) run() {
 	}
 }
 
-// runTicker is a placeholder until Task 10. Blocks until ctx.Done.
+// runTicker polls Resolver.Resolve at tickerPeriod cadence and
+// applies the result as if it were a Watch update. Used when the
+// Resolver returns ErrWatchUnsupported or when the Watch channel
+// closes unexpectedly.
 func (mp *managedPool) runTicker(ctx context.Context) {
-	<-ctx.Done()
+	for {
+		period := time.Duration(mp.tickerPeriod.Load())
+		if period <= 0 {
+			period = defaultManagedPoolTickerPeriod
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(period):
+		}
+		next, err := mp.resolver.Resolve(ctx)
+		if err != nil && len(next) == 0 {
+			continue // soft fail
+		}
+		mp.applySet(next)
+	}
+}
+
+// stats aggregates Stats across all sub-pools (active and draining)
+// and returns the combined snapshot.
+func (mp *managedPool) stats() Stats {
+	mp.mu.RLock()
+	subs := make([]*subPoolState, 0, len(mp.subPools))
+	for _, s := range mp.subPools {
+		subs = append(subs, s)
+	}
+	addrCount := len(mp.addrs)
+	mp.mu.RUnlock()
+
+	var out Stats
+	out.Addresses = addrCount
+	for _, s := range subs {
+		st := s.p.Stats()
+		out.ActiveConns += st.ActiveConns
+		out.InFlightStreams += st.InFlightStreams
+		out.Waiters += st.Waiters
+		out.InFlightDials += st.InFlightDials
+		if s.draining {
+			out.DrainingSubpools++
+		}
+	}
+	return out
 }
 
 // applySet diffs old vs new active address set. Additions are no-ops

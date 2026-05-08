@@ -63,10 +63,13 @@ type PoolOptions struct {
 
 // Stats is a snapshot of pool state.
 type Stats struct {
-	ActiveConns     int
+	ActiveConns    int
 	InFlightStreams int
-	Waiters         int
-	InFlightDials   int
+	Waiters        int
+	InFlightDials  int
+	// C.3 additions: populated by managedPool.stats(), zero in sub-pool Stats().
+	Addresses        int // current resolved set size (active only)
+	DrainingSubpools int // sub-pools currently in drain state
 }
 
 // managedConn is the actor's per-conn record. NEVER touched outside
