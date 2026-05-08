@@ -4,13 +4,12 @@ A low-level, zero-allocation HTTP/2 client for Go, designed for load
 generators. Implements RFC 7540 (HTTP/2) and RFC 7541 (HPACK) from
 scratch without `net/http` or `golang.org/x/net/http2`.
 
-**Status:** Phase C.1 — public `client` package ships sync `Do` and
-streaming `DoStream` over a single-connection lazy-dial transport,
-with conn-only auto-redial and `(*conn.Conn).IsAlive` for transport
-reuse decisions. Conn-level features through B.2.6 (multi-stream,
-bidirectional flow control, dynamic SETTINGS, peer GOAWAY drain,
-PING ACK echo) remain in place. See
-[design](docs/superpowers/specs/2026-05-07-poseidon-client-c1-design.md).
+**Status:** Phase C.2 — per-host connection pool with lazy-grow,
+least-loaded stream selection, idle eviction, GOAWAY-aware draining,
+and dial-backoff. Single-conn transport from C.1 remains default;
+opt in via `TransportPool`. See
+[C.1 design](docs/superpowers/specs/2026-05-07-poseidon-client-c1-design.md),
+[C.2 design](docs/superpowers/specs/2026-05-08-poseidon-client-c2-pool-design.md).
 
 ## Phases
 
@@ -48,8 +47,13 @@ PING ACK echo) remain in place. See
   `Request`, `Response`, sync `Do` and streaming `DoStream`,
   single-connection transport with conn-level auto-redial,
   `(*conn.Conn).IsAlive` helper for transport reuse decisions.
-- **C.2 / C.3 / C.4 — pool, discovery, stats** *(planned)*: per-host
-  connection pool, service-discovery resolver, metrics callbacks.
+- **C.2 — connection pool** *(this release)*: per-host `Pool` with
+  lazy-grow, least-loaded stream selection, idle-timeout eviction,
+  GOAWAY-aware drain, dial backoff, and `MAX_CONCURRENT_STREAMS`
+  enforcement (RFC 7540 §5.1.2, §6.8). Enable via
+  `ClientOptions{Transport: client.TransportPool}`.
+- **C.3 / C.4 — discovery, stats** *(planned)*: service-discovery
+  resolver, metrics callbacks.
 
 ## Quick start
 
@@ -70,6 +74,52 @@ func get(ctx context.Context, addr string) error {
 		Addr: addr,
 		ConnOpts: conn.ConnOptions{
 			Dialer: &conn.TLSDialer{Config: &tls.Config{ServerName: "example.com"}},
+		},
+	})
+	if err != nil {
+		return err
+	}
+	defer c.Close()
+
+	res, err := c.Do(ctx, &client.Request{
+		Method:   "GET",
+		Path:     "/",
+		WantBody: true,
+	})
+	if err != nil {
+		return err
+	}
+	fmt.Println("status:", res.Status, "bytes:", res.BytesReceived)
+	return nil
+}
+```
+
+### Pool transport
+
+```go
+package main
+
+import (
+	"context"
+	"crypto/tls"
+	"fmt"
+	"time"
+
+	"github.com/lodgvideon/poseidon-http-client/client"
+	"github.com/lodgvideon/poseidon-http-client/conn"
+)
+
+func poolGet(ctx context.Context, addr string) error {
+	c, err := client.NewClient(client.ClientOptions{
+		Addr: addr,
+		ConnOpts: conn.ConnOptions{
+			Dialer: &conn.TLSDialer{Config: &tls.Config{ServerName: "example.com"}},
+		},
+		Transport: client.TransportPool,
+		Pool: &client.PoolOptions{
+			MaxConnsPerHost:   4,
+			MaxStreamsPerConn: 100,
+			IdleTimeout:       30 * time.Second,
 		},
 	})
 	if err != nil {
