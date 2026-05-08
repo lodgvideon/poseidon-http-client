@@ -240,15 +240,17 @@ func (mp *managedPool) run() {
 // Resolver returns ErrWatchUnsupported or when the Watch channel
 // closes unexpectedly.
 func (mp *managedPool) runTicker(ctx context.Context) {
+	period := time.Duration(mp.tickerPeriod.Load())
+	if period <= 0 {
+		period = defaultManagedPoolTickerPeriod
+	}
+	tick := time.NewTicker(period)
+	defer tick.Stop()
 	for {
-		period := time.Duration(mp.tickerPeriod.Load())
-		if period <= 0 {
-			period = defaultManagedPoolTickerPeriod
-		}
 		select {
 		case <-ctx.Done():
 			return
-		case <-time.After(period):
+		case <-tick.C:
 		}
 		next, err := mp.resolver.Resolve(ctx)
 		if err != nil && len(next) == 0 {
