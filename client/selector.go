@@ -76,6 +76,9 @@ type hashSel struct {
 // len(set). keyFn returning "" → ErrNoAddresses (caller hint
 // insufficient for deterministic selection).
 func Hash(keyFn func(PickContext) string) Selector {
+	if keyFn == nil {
+		panic("client: Hash selector requires a non-nil keyFn")
+	}
 	return &hashSel{keyFn: keyFn}
 }
 

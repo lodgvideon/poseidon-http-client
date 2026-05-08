@@ -116,3 +116,13 @@ func TestHash_EmptyKey_ErrNoAddresses(t *testing.T) {
 		t.Errorf("Pick err = %v, want ErrNoAddresses on empty key", err)
 	}
 }
+
+func TestHash_NilKeyFn_Panics(t *testing.T) {
+	t.Parallel()
+	defer func() {
+		if r := recover(); r == nil {
+			t.Error("Hash(nil) did not panic")
+		}
+	}()
+	Hash(nil)
+}

@@ -6,6 +6,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"sync/atomic"
 	"testing"
 
@@ -32,10 +33,7 @@ func startCountedTLSServer(t *testing.T) (*httptest.Server, client.Address, *ato
 	srv.StartTLS()
 	t.Cleanup(srv.Close)
 	host, portStr, _ := net.SplitHostPort(srv.Listener.Addr().String())
-	port := 0
-	for _, b := range []byte(portStr) {
-		port = port*10 + int(b-'0')
-	}
+	port, _ := strconv.Atoi(portStr)
 	return srv, client.Address{Host: host, Port: port}, &count
 }
 

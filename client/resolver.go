@@ -17,9 +17,9 @@ type Address struct {
 	// Attributes carries optional metadata for user Selectors
 	// (zone, weight, etc.). Built-in selectors ignore it.
 	//
-	// Note: Attributes must remain nil if the Address is used as a
-	// map key (managedPool's sub-pool registry). Built-in resolvers
-	// never set it.
+	// Note: Attributes is not comparable (contains a map); Address
+	// values with non-nil Attributes cannot be used as Go map keys
+	// or compared with ==.
 	Attributes map[string]string
 }
 
