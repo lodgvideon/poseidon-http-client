@@ -88,21 +88,30 @@ func newManagedPool(r Resolver, s Selector, dm DrainMode, co conn.ConnOptions, p
 func (mp *managedPool) snapshotActive() []Address {
 	mp.mu.RLock()
 	defer mp.mu.RUnlock()
-	out := make([]Address, len(mp.addrs))
-	copy(out, mp.addrs)
+	out := make([]Address, 0, len(mp.addrs))
+	for _, a := range mp.addrs {
+		if s, ok := mp.subPools[a.String()]; ok && s.draining {
+			continue
+		}
+		out = append(out, a)
+	}
 	return out
 }
 
 // getOrCreateSubPool returns the sub-pool for addr, creating it lazily
-// under the write lock if absent. Returns nil if the pool is closed.
+// under the write lock if absent. Returns nil if the pool is closed or
+// the sub-pool is draining (TOCTOU guard for acquire failover).
 func (mp *managedPool) getOrCreateSubPool(addr Address) *subPoolState {
 	key := addr.String()
 	mp.mu.RLock()
-	if s, ok := mp.subPools[key]; ok {
-		mp.mu.RUnlock()
+	s, ok := mp.subPools[key]
+	mp.mu.RUnlock()
+	if ok && !s.draining {
 		return s
 	}
-	mp.mu.RUnlock()
+	if ok && s.draining {
+		return nil // caller's snapshotActive shouldn't have given us this; TOCTOU guard
+	}
 
 	mp.mu.Lock()
 	defer mp.mu.Unlock()
@@ -112,9 +121,12 @@ func (mp *managedPool) getOrCreateSubPool(addr Address) *subPoolState {
 	default:
 	}
 	if s, ok := mp.subPools[key]; ok {
-		return s // raced
+		if s.draining {
+			return nil
+		}
+		return s
 	}
-	s := &subPoolState{
+	s = &subPoolState{
 		p:    newPool(key, mp.connOpts, mp.poolOpts),
 		addr: addr,
 	}
@@ -151,7 +163,8 @@ func (mp *managedPool) acquire(ctx context.Context) (*conn.Conn, func(), error) 
 		}
 		sub := mp.getOrCreateSubPool(addr)
 		if sub == nil {
-			return nil, nil, ErrPoolClosed
+			tried[addr.String()] = struct{}{}
+			continue
 		}
 		mc, err := sub.p.acquire(ctx)
 		if err == nil {
@@ -213,11 +226,9 @@ func (mp *managedPool) runTicker(ctx context.Context) {
 
 // applySet diffs old vs new active address set. Additions are no-ops
 // (sub-pools dial lazily on Acquire). Removals mark sub-pools as
-// draining; drain dispatch happens in Task 8/9.
+// draining and dispatch drain logic.
 func (mp *managedPool) applySet(next []Address) {
 	mp.mu.Lock()
-	defer mp.mu.Unlock()
-
 	prev := make(map[string]struct{}, len(mp.addrs))
 	for _, a := range mp.addrs {
 		prev[a.String()] = struct{}{}
@@ -226,18 +237,62 @@ func (mp *managedPool) applySet(next []Address) {
 	for _, a := range next {
 		nextSet[a.String()] = struct{}{}
 	}
-
-	// Mark removed addresses as draining.
+	var toDrain []*subPoolState
 	for key := range prev {
 		if _, ok := nextSet[key]; ok {
 			continue
 		}
-		if s, ok := mp.subPools[key]; ok {
+		if s, ok := mp.subPools[key]; ok && !s.draining {
 			s.draining = true
+			toDrain = append(toDrain, s)
 		}
 	}
-
 	mp.addrs = append(mp.addrs[:0:0], next...)
+	mp.mu.Unlock()
+
+	for _, s := range toDrain {
+		mp.beginDrain(s)
+	}
+}
+
+// beginDrain dispatches per-mode drain logic for a removed sub-pool.
+func (mp *managedPool) beginDrain(s *subPoolState) {
+	switch mp.drainMode {
+	case DrainHard:
+		mp.dropSubPool(s, true)
+	case DrainLazy:
+		// No-op: draining=true blocks new Acquires; idle eviction closes conns.
+	default: // DrainGraceful
+		go mp.watchDrain(s)
+	}
+}
+
+// watchDrain polls the sub-pool's Stats; once InFlightStreams == 0,
+// closes and removes it from the registry.
+func (mp *managedPool) watchDrain(s *subPoolState) {
+	t := time.NewTicker(20 * time.Millisecond)
+	defer t.Stop()
+	for {
+		select {
+		case <-mp.closed:
+			return
+		case <-t.C:
+		}
+		if s.p.Stats().InFlightStreams == 0 {
+			mp.dropSubPool(s, true)
+			return
+		}
+	}
+}
+
+// dropSubPool removes s from the registry and optionally closes it.
+func (mp *managedPool) dropSubPool(s *subPoolState, doClose bool) {
+	mp.mu.Lock()
+	delete(mp.subPools, s.addr.String())
+	mp.mu.Unlock()
+	if doClose {
+		_ = s.p.Close()
+	}
 }
 
 // close stops the managedPool and closes every sub-pool. Idempotent.

@@ -200,3 +200,63 @@ func TestManagedPool_Watch_AddedAddress_PickedUp(t *testing.T) {
 	}
 	t.Errorf("active set never grew to 3; got %d", len(mp.snapshotActive()))
 }
+
+func TestManagedPool_DrainGraceful_RemovedAddress_KeepsInFlight(t *testing.T) {
+	t.Parallel()
+	addrs, _, cleanup := startH2Servers(t, 2)
+	defer cleanup()
+
+	res := newScriptedResolver(addrs)
+	mp, err := newManagedPool(res, RoundRobin(), DrainGraceful, newConnOpts(),
+		PoolOptions{MaxConnsPerHost: 1, MaxStreamsPerConn: 4, HealthCheckPeriod: time.Second})
+	if err != nil {
+		t.Fatalf("newManagedPool: %v", err)
+	}
+	defer mp.close()
+
+	// Acquire a conn for addr[0].
+	c0, rel0, err := mp.acquire(context.Background())
+	if err != nil {
+		t.Fatalf("acquire 0: %v", err)
+	}
+	if !c0.IsAlive() {
+		t.Fatal("conn 0 not alive")
+	}
+
+	// Remove addr[0] from the resolver set.
+	res.push([]Address{addrs[1]})
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if len(mp.snapshotActive()) == 1 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	// In-flight conn must still be alive (graceful).
+	if !c0.IsAlive() {
+		t.Error("conn 0 closed during graceful drain — expected alive until release")
+	}
+
+	// New acquire must pick addr[1] only.
+	c1, rel1, err := mp.acquire(context.Background())
+	if err != nil {
+		t.Fatalf("acquire after remove: %v", err)
+	}
+	defer rel1()
+	_ = c1
+
+	// Release in-flight conn → sub-pool should drain and be removed.
+	rel0()
+	deadline = time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		mp.mu.RLock()
+		_, present := mp.subPools[addrs[0].String()]
+		mp.mu.RUnlock()
+		if !present {
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Error("sub-pool for drained address still present after release; expected close+evict")
+}
