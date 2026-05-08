@@ -28,6 +28,11 @@ linters-settings:
       # in binary-protocol codec paths and bounded by test coverage; the
       # heuristic produces high false-positive noise.
       - G115
+      # G404: weak RNG. The retry layer uses math/rand for backoff
+      # jitter — the goal is anti-thundering-herd desynchronization, not
+      # cryptographic unpredictability. crypto/rand would be overkill and
+      # add allocation cost on the retry path.
+      - G404
   govet:
     enable-all: true
     disable:
