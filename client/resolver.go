@@ -156,7 +156,57 @@ func (r *dnsResolver) Resolve(ctx context.Context) ([]Address, error) {
 	return addrs, nil
 }
 
-// Watch is implemented in Task 4. Returns ErrWatchUnsupported until then.
-func (r *dnsResolver) Watch(_ context.Context) (<-chan []Address, error) {
-	return nil, ErrWatchUnsupported
+// Watch emits the initial address set immediately, then re-resolves
+// every TTL. Emits only when the set changes (order-sensitive string
+// comparison). The channel is closed when ctx is cancelled.
+func (r *dnsResolver) Watch(ctx context.Context) (<-chan []Address, error) {
+	out := make(chan []Address, 1)
+	first, err := r.Resolve(ctx)
+	if err != nil && len(first) == 0 {
+		close(out)
+		return nil, err
+	}
+	out <- first
+	go func() {
+		defer close(out)
+		t := time.NewTicker(r.opts.TTL)
+		defer t.Stop()
+		prev := first
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-t.C:
+			}
+			next, err := r.Resolve(ctx)
+			if err != nil && len(next) == 0 {
+				continue // soft fail, retain prev
+			}
+			if addrSetEqual(prev, next) {
+				continue
+			}
+			select {
+			case out <- next:
+			case <-ctx.Done():
+				return
+			}
+			prev = next
+		}
+	}()
+	return out, nil
+}
+
+// addrSetEqual returns true when a and b contain the same Address
+// values in the same order. Compares Host and Port only; DNSResolver
+// never sets Attributes, so ignoring maps is safe.
+func addrSetEqual(a, b []Address) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i].Host != b[i].Host || a[i].Port != b[i].Port {
+			return false
+		}
+	}
+	return true
 }

@@ -159,3 +159,81 @@ func TestDNSResolver_Resolve_PreferIPv4_FiltersV6(t *testing.T) {
 		t.Errorf("Resolve = %v, want [10.0.0.1:80] only", got)
 	}
 }
+
+// mustReceiveSet reads one address-set from ch within d, fatally
+// failing if nothing arrives.
+func mustReceiveSet(t *testing.T, ch <-chan []Address, d time.Duration) []Address {
+	t.Helper()
+	select {
+	case s, ok := <-ch:
+		if !ok {
+			t.Fatal("Watch channel closed before sending set")
+		}
+		return s
+	case <-time.After(d):
+		t.Fatal("Watch did not emit within timeout")
+		return nil
+	}
+}
+
+func TestDNSResolver_Watch_TickerEmitsInitialAndUpdate(t *testing.T) {
+	t.Parallel()
+	var phase atomic.Int32
+	fl := &fakeLookup{fn: func(_ string) ([]net.IPAddr, error) {
+		switch phase.Load() {
+		case 0:
+			return []net.IPAddr{{IP: net.ParseIP("10.0.0.1")}}, nil
+		default:
+			return []net.IPAddr{
+				{IP: net.ParseIP("10.0.0.1")},
+				{IP: net.ParseIP("10.0.0.2")},
+			}, nil
+		}
+	}}
+	r := newDNSResolverWithLookup("svc.local", 80, DNSOptions{TTL: 25 * time.Millisecond}, fl)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	ch, err := r.Watch(ctx)
+	if err != nil {
+		t.Fatalf("Watch err = %v", err)
+	}
+	first := mustReceiveSet(t, ch, time.Second)
+	if len(first) != 1 || first[0].Host != "10.0.0.1" {
+		t.Errorf("first set = %v, want [10.0.0.1:80]", first)
+	}
+	phase.Store(1)
+	second := mustReceiveSet(t, ch, time.Second)
+	if len(second) != 2 || second[1].Host != "10.0.0.2" {
+		t.Errorf("second set = %v, want [10.0.0.1:80 10.0.0.2:80]", second)
+	}
+	cancel()
+	// Channel must close after ctx cancel.
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		_, ok := <-ch
+		if !ok {
+			return
+		}
+	}
+	t.Error("Watch channel did not close after ctx cancel")
+}
+
+func TestDNSResolver_Watch_NoEmitOnUnchangedSet(t *testing.T) {
+	t.Parallel()
+	fl := &fakeLookup{fn: func(_ string) ([]net.IPAddr, error) {
+		return []net.IPAddr{{IP: net.ParseIP("10.0.0.1")}}, nil
+	}}
+	r := newDNSResolverWithLookup("svc.local", 80, DNSOptions{TTL: 25 * time.Millisecond}, fl)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	ch, err := r.Watch(ctx)
+	if err != nil {
+		t.Fatalf("Watch err = %v", err)
+	}
+	_ = mustReceiveSet(t, ch, time.Second) // consume initial
+	select {
+	case got := <-ch:
+		t.Errorf("unexpected second emit on unchanged set: %v", got)
+	case <-time.After(80 * time.Millisecond): // > 3 ticks at 25ms
+	}
+}
