@@ -4,6 +4,8 @@ import (
 	"context"
 	"net"
 	"strconv"
+	"sync"
+	"time"
 )
 
 // Address is one resolved backend endpoint.
@@ -69,4 +71,92 @@ func (r *staticResolver) Watch(_ context.Context) (<-chan []Address, error) {
 	ch <- r.addrs
 	close(ch)
 	return ch, nil
+}
+
+// DNSOptions configures DNSResolver.
+type DNSOptions struct {
+	// TTL governs both cache lifetime returned by Resolve AND the
+	// Watch ticker period. Zero → 30s default.
+	TTL time.Duration
+	// Resolver is the underlying *net.Resolver; nil → net.DefaultResolver.
+	Resolver *net.Resolver
+	// PreferIPv4 filters AAAA results when both families resolve.
+	PreferIPv4 bool
+}
+
+// dnsLookup is the seam DNSResolver depends on. *net.Resolver
+// satisfies it. Tests inject a fake.
+type dnsLookup interface {
+	LookupIPAddr(ctx context.Context, host string) ([]net.IPAddr, error)
+}
+
+// dnsResolver implements Resolver via DNS A/AAAA lookups with TTL
+// caching. Concurrent Resolve callers serialize on first-fetch via
+// rmu to avoid thundering-herd dispatch to net.Resolver.
+type dnsResolver struct {
+	host string
+	port int
+	opts DNSOptions
+	rsv  dnsLookup
+
+	rmu      sync.Mutex
+	cached   []Address
+	cachedAt time.Time
+}
+
+// DNSResolver constructs a DNS-backed Resolver for the given host:port.
+func DNSResolver(host string, port int, opts DNSOptions) Resolver {
+	var rsv dnsLookup = net.DefaultResolver
+	if opts.Resolver != nil {
+		rsv = opts.Resolver
+	}
+	return newDNSResolverWithLookup(host, port, opts, rsv)
+}
+
+// newDNSResolverWithLookup is the internal constructor that accepts an
+// explicit dnsLookup seam (for tests). TTL default is applied here.
+func newDNSResolverWithLookup(host string, port int, opts DNSOptions, rsv dnsLookup) *dnsResolver {
+	if opts.TTL <= 0 {
+		opts.TTL = 30 * time.Second
+	}
+	return &dnsResolver{host: host, port: port, opts: opts, rsv: rsv}
+}
+
+// Resolve returns the cached address set if within TTL. Otherwise
+// refreshes via dnsLookup. On lookup failure with a non-empty cache,
+// returns (cache, error) — the cache wins, the error is a soft warning.
+func (r *dnsResolver) Resolve(ctx context.Context) ([]Address, error) {
+	r.rmu.Lock()
+	defer r.rmu.Unlock()
+	if r.cached != nil && time.Since(r.cachedAt) < r.opts.TTL {
+		return r.cached, nil
+	}
+	ips, err := r.rsv.LookupIPAddr(ctx, r.host)
+	if err != nil {
+		if r.cached != nil {
+			return r.cached, err
+		}
+		return nil, err
+	}
+	addrs := make([]Address, 0, len(ips))
+	for _, ip := range ips {
+		if r.opts.PreferIPv4 && ip.IP.To4() == nil {
+			continue
+		}
+		addrs = append(addrs, Address{Host: ip.IP.String(), Port: r.port})
+	}
+	if len(addrs) == 0 {
+		if r.cached != nil {
+			return r.cached, ErrNoAddresses
+		}
+		return nil, ErrNoAddresses
+	}
+	r.cached = addrs
+	r.cachedAt = time.Now()
+	return addrs, nil
+}
+
+// Watch is implemented in Task 4. Returns ErrWatchUnsupported until then.
+func (r *dnsResolver) Watch(_ context.Context) (<-chan []Address, error) {
+	return nil, ErrWatchUnsupported
 }

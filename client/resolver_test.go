@@ -2,7 +2,11 @@ package client
 
 import (
 	"context"
+	"errors"
+	"net"
+	"sync/atomic"
 	"testing"
+	"time"
 )
 
 func TestAddress_String_HostPort(t *testing.T) {
@@ -63,5 +67,95 @@ func TestStaticResolver_Watch_SendsThenCloses(t *testing.T) {
 	}
 	if _, ok := <-ch; ok {
 		t.Error("Watch channel should be closed after initial set; got another value")
+	}
+}
+
+// fakeLookup implements dnsLookup for tests.
+type fakeLookup struct {
+	calls atomic.Int32
+	fn    func(host string) ([]net.IPAddr, error)
+}
+
+func (f *fakeLookup) LookupIPAddr(_ context.Context, host string) ([]net.IPAddr, error) {
+	f.calls.Add(1)
+	return f.fn(host)
+}
+
+func TestDNSResolver_Resolve_HappyPath(t *testing.T) {
+	t.Parallel()
+	fl := &fakeLookup{fn: func(_ string) ([]net.IPAddr, error) {
+		return []net.IPAddr{
+			{IP: net.ParseIP("10.0.0.1")},
+			{IP: net.ParseIP("10.0.0.2")},
+		}, nil
+	}}
+	r := newDNSResolverWithLookup("svc.local", 8080, DNSOptions{}, fl)
+	got, err := r.Resolve(context.Background())
+	if err != nil {
+		t.Fatalf("Resolve err = %v, want nil", err)
+	}
+	if len(got) != 2 || got[0].Host != "10.0.0.1" || got[1].Host != "10.0.0.2" {
+		t.Errorf("Resolve = %v, want [10.0.0.1:8080 10.0.0.2:8080]", got)
+	}
+	if got[0].Port != 8080 {
+		t.Errorf("Port = %d, want 8080", got[0].Port)
+	}
+}
+
+func TestDNSResolver_Resolve_TTLCache(t *testing.T) {
+	t.Parallel()
+	fl := &fakeLookup{fn: func(_ string) ([]net.IPAddr, error) {
+		return []net.IPAddr{{IP: net.ParseIP("10.0.0.1")}}, nil
+	}}
+	r := newDNSResolverWithLookup("svc.local", 80, DNSOptions{TTL: time.Hour}, fl)
+	if _, err := r.Resolve(context.Background()); err != nil {
+		t.Fatalf("first Resolve err = %v", err)
+	}
+	if _, err := r.Resolve(context.Background()); err != nil {
+		t.Fatalf("second Resolve err = %v", err)
+	}
+	if c := fl.calls.Load(); c != 1 {
+		t.Errorf("LookupIPAddr calls = %d, want 1 (second call must hit cache)", c)
+	}
+}
+
+func TestDNSResolver_Resolve_StaleOnError(t *testing.T) {
+	t.Parallel()
+	var attempt atomic.Int32
+	fl := &fakeLookup{fn: func(_ string) ([]net.IPAddr, error) {
+		if attempt.Add(1) == 1 {
+			return []net.IPAddr{{IP: net.ParseIP("10.0.0.1")}}, nil
+		}
+		return nil, errors.New("dns: connection refused")
+	}}
+	r := newDNSResolverWithLookup("svc.local", 80, DNSOptions{TTL: time.Nanosecond}, fl)
+	if _, err := r.Resolve(context.Background()); err != nil {
+		t.Fatalf("first Resolve err = %v", err)
+	}
+	// TTL=ns ensures the second call goes through to the lookup (which now errors).
+	got, err := r.Resolve(context.Background())
+	if err == nil {
+		t.Errorf("second Resolve err = nil, want non-nil (soft warning)")
+	}
+	if len(got) != 1 || got[0].Host != "10.0.0.1" {
+		t.Errorf("Resolve = %v, want cached [10.0.0.1:80]", got)
+	}
+}
+
+func TestDNSResolver_Resolve_PreferIPv4_FiltersV6(t *testing.T) {
+	t.Parallel()
+	fl := &fakeLookup{fn: func(_ string) ([]net.IPAddr, error) {
+		return []net.IPAddr{
+			{IP: net.ParseIP("10.0.0.1")},
+			{IP: net.ParseIP("2001:db8::1")},
+		}, nil
+	}}
+	r := newDNSResolverWithLookup("svc.local", 80, DNSOptions{PreferIPv4: true}, fl)
+	got, err := r.Resolve(context.Background())
+	if err != nil {
+		t.Fatalf("Resolve err = %v", err)
+	}
+	if len(got) != 1 || got[0].Host != "10.0.0.1" {
+		t.Errorf("Resolve = %v, want [10.0.0.1:80] only", got)
 	}
 }
