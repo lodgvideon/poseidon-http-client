@@ -364,6 +364,57 @@ func sumActive(conns []*managedConn) int {
 	return n
 }
 
+// acquire requests a managedConn from the actor. The returned mc's
+// active count has already been incremented by the actor. Caller MUST
+// eventually call p.release(mc, requestErr).
+func (p *Pool) acquire(ctx context.Context) (*managedConn, error) {
+	reply := make(chan acquireResp, 1)
+	req := acquireReq{ctx: ctx, reply: reply}
+	if p.opts.AcquireTimeout > 0 {
+		req.deadline = time.Now().Add(p.opts.AcquireTimeout)
+	}
+
+	// Send the request.
+	select {
+	case p.acquireCh <- req:
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	case <-p.closedCh:
+		return nil, ErrPoolClosed
+	}
+
+	// Wait for the reply or a timeout.
+	var timeoutCh <-chan time.Time
+	if p.opts.AcquireTimeout > 0 {
+		t := time.NewTimer(p.opts.AcquireTimeout)
+		defer t.Stop()
+		timeoutCh = t.C
+	}
+	select {
+	case resp := <-reply:
+		return resp.mc, resp.err
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	case <-timeoutCh:
+		return nil, ErrAcquireTimeout
+	case <-p.closedCh:
+		return nil, ErrPoolClosed
+	}
+}
+
+// release returns mc to the actor with an optional request error.
+// Non-nil reqErr causes the actor to re-check IsAlive and evict on
+// failure.
+func (p *Pool) release(mc *managedConn, reqErr error) {
+	if mc == nil {
+		return
+	}
+	select {
+	case p.releaseCh <- releaseMsg{mc: mc, err: reqErr}:
+	case <-p.closedCh:
+	}
+}
+
 // effectiveStreamCap computes min(opts.MaxStreamsPerConn, peer cap).
 // Returns 100 if both are unbounded.
 func effectiveStreamCap(opts PoolOptions, c *conn.Conn) int {
