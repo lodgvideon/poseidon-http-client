@@ -1262,3 +1262,21 @@ func TestClient_NewClient_InvalidTransportKind(t *testing.T) {
 		t.Fatalf("err = %v, want ErrInvalidTransportKind", err)
 	}
 }
+
+func TestClient_NewClient_Pool_Constructs(t *testing.T) {
+	t.Parallel()
+	c, err := NewClient(ClientOptions{
+		Addr:      "example.com:443",
+		ConnOpts:  conn.ConnOptions{Dialer: &conn.TLSDialer{}},
+		Transport: TransportPool,
+		Pool:      &PoolOptions{MaxConnsPerHost: 2},
+	})
+	if err != nil {
+		t.Fatalf("NewClient = %v", err)
+	}
+	t.Cleanup(func() { _ = c.Close() })
+
+	if _, ok := c.tr.(*poolTransport); !ok {
+		t.Fatalf("tr type = %T, want *poolTransport", c.tr)
+	}
+}

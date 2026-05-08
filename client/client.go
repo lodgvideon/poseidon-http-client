@@ -77,10 +77,16 @@ func NewClient(opts ClientOptions) (*Client, error) {
 	default:
 		return nil, fmt.Errorf("%w: %d", ErrInvalidTransportKind, int(opts.Transport))
 	}
-	tr := &singleConn{
-		addr:     opts.Addr,
-		connOpts: opts.ConnOpts,
-		backoff:  opts.DialBackoff,
+	var tr transport
+	switch opts.Transport {
+	case TransportSingleConn:
+		tr = &singleConn{
+			addr:     opts.Addr,
+			connOpts: opts.ConnOpts,
+			backoff:  opts.DialBackoff,
+		}
+	case TransportPool:
+		tr = newPoolTransport(opts.Addr, opts.ConnOpts, *opts.Pool)
 	}
 	return &Client{tr: tr, authority: deriveAuthority(opts.Addr)}, nil
 }
