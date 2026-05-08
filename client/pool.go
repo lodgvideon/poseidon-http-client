@@ -415,6 +415,9 @@ func (p *Pool) release(mc *managedConn, reqErr error) {
 	}
 }
 
+// close is the transport-interface form of Close.
+func (p *Pool) close() error { return p.Close() }
+
 // effectiveStreamCap computes min(opts.MaxStreamsPerConn, peer cap).
 // Returns 100 if both are unbounded.
 func effectiveStreamCap(opts PoolOptions, c *conn.Conn) int {
