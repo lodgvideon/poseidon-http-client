@@ -67,9 +67,9 @@ type Stats struct {
 	InFlightStreams int
 	Waiters        int
 	InFlightDials  int
-	// C.3 additions: populated by managedPool.stats(), zero in sub-pool Stats().
-	Addresses        int // current resolved set size (active only)
-	DrainingSubpools int // sub-pools currently in drain state
+	// Populated by managedPool.Stats(); zero for single-address pools.
+	Addresses        int // number of addresses in the current resolved set
+	DrainingSubpools int // sub-pools currently draining (removed from resolver set)
 }
 
 // managedConn is the actor's per-conn record. NEVER touched outside
