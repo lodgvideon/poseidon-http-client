@@ -130,3 +130,73 @@ func TestManagedPool_NoAddresses_ReturnsErrNoAddresses(t *testing.T) {
 		t.Errorf("acquire err = %v, want ErrNoAddresses", err)
 	}
 }
+
+// scriptedResolver: a Resolver whose Watch channel is driven by the test.
+type scriptedResolver struct {
+	initial []Address
+	updates chan []Address
+}
+
+func newScriptedResolver(initial []Address) *scriptedResolver {
+	return &scriptedResolver{
+		initial: initial,
+		updates: make(chan []Address, 8),
+	}
+}
+
+func (s *scriptedResolver) Resolve(_ context.Context) ([]Address, error) {
+	return s.initial, nil
+}
+
+func (s *scriptedResolver) Watch(ctx context.Context) (<-chan []Address, error) {
+	out := make(chan []Address, 1)
+	out <- s.initial
+	go func() {
+		defer close(out)
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case set, ok := <-s.updates:
+				if !ok {
+					return
+				}
+				select {
+				case out <- set:
+				case <-ctx.Done():
+					return
+				}
+			}
+		}
+	}()
+	return out, nil
+}
+
+func (s *scriptedResolver) push(set []Address) { s.updates <- set }
+
+func TestManagedPool_Watch_AddedAddress_PickedUp(t *testing.T) {
+	t.Parallel()
+	addrs, _, cleanup := startH2Servers(t, 3)
+	defer cleanup()
+
+	res := newScriptedResolver([]Address{addrs[0]})
+	mp, err := newManagedPool(res, RoundRobin(), DrainGraceful, newConnOpts(),
+		PoolOptions{MaxConnsPerHost: 1, MaxStreamsPerConn: 4, HealthCheckPeriod: time.Second})
+	if err != nil {
+		t.Fatalf("newManagedPool: %v", err)
+	}
+	defer mp.close()
+
+	// Push expanded set; managedPool's Watch consumer must pick it up.
+	res.push([]Address{addrs[0], addrs[1], addrs[2]})
+
+	// Wait briefly for the Watch goroutine to apply the update.
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if len(mp.snapshotActive()) == 3 {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Errorf("active set never grew to 3; got %d", len(mp.snapshotActive()))
+}

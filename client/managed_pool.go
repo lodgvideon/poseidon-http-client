@@ -6,9 +6,14 @@ import (
 	"context"
 	"errors"
 	"sync"
+	"time"
 
 	"github.com/lodgvideon/poseidon-http-client/conn"
 )
+
+// defaultManagedPoolTickerPeriod is the fallback poll period when the
+// Resolver does not support Watch (returns ErrWatchUnsupported).
+const defaultManagedPoolTickerPeriod = 30 * time.Second
 
 // DrainMode governs sub-pool lifecycle when an address is removed
 // from the resolver's set.
@@ -46,8 +51,9 @@ type managedPool struct {
 	addrs    []Address
 	subPools map[string]*subPoolState // keyed by Address.String()
 
-	closeOnce sync.Once
-	closed    chan struct{}
+	closeOnce    sync.Once
+	closed       chan struct{}
+	tickerPeriod time.Duration // 0 → defaultManagedPoolTickerPeriod; test seam
 }
 
 // newManagedPool constructs a managedPool. It performs an initial
@@ -73,6 +79,7 @@ func newManagedPool(r Resolver, s Selector, dm DrainMode, co conn.ConnOptions, p
 		return nil, err
 	}
 	mp.addrs = addrs
+	go mp.run()
 	return mp, nil
 }
 
@@ -167,6 +174,70 @@ func isDialOnlyErr(err error) bool {
 	}
 	var de *DialError
 	return errors.As(err, &de)
+}
+
+// run is the Watch consumer goroutine. Subscribes to Resolver.Watch
+// and applies address-set updates until the managedPool is closed. If
+// Watch returns ErrWatchUnsupported, switches to ticker mode.
+func (mp *managedPool) run() {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() {
+		<-mp.closed
+		cancel()
+	}()
+
+	ch, err := mp.resolver.Watch(ctx)
+	if err != nil {
+		mp.runTicker(ctx)
+		return
+	}
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case set, ok := <-ch:
+			if !ok {
+				mp.runTicker(ctx)
+				return
+			}
+			mp.applySet(set)
+		}
+	}
+}
+
+// runTicker is a placeholder until Task 10. Blocks until ctx.Done.
+func (mp *managedPool) runTicker(ctx context.Context) {
+	<-ctx.Done()
+}
+
+// applySet diffs old vs new active address set. Additions are no-ops
+// (sub-pools dial lazily on Acquire). Removals mark sub-pools as
+// draining; drain dispatch happens in Task 8/9.
+func (mp *managedPool) applySet(next []Address) {
+	mp.mu.Lock()
+	defer mp.mu.Unlock()
+
+	prev := make(map[string]struct{}, len(mp.addrs))
+	for _, a := range mp.addrs {
+		prev[a.String()] = struct{}{}
+	}
+	nextSet := make(map[string]struct{}, len(next))
+	for _, a := range next {
+		nextSet[a.String()] = struct{}{}
+	}
+
+	// Mark removed addresses as draining.
+	for key := range prev {
+		if _, ok := nextSet[key]; ok {
+			continue
+		}
+		if s, ok := mp.subPools[key]; ok {
+			s.draining = true
+		}
+	}
+
+	mp.addrs = append(mp.addrs[:0:0], next...)
 }
 
 // close stops the managedPool and closes every sub-pool. Idempotent.
