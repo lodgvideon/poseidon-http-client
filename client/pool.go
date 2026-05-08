@@ -38,6 +38,12 @@ type PoolOptions struct {
 	// AcquireTimeout bounds how long Acquire waits for capacity.
 	// 0 → governed by ctx only.
 	AcquireTimeout time.Duration
+
+	// DialTimeout bounds how long a single dial attempt may block in
+	// conn.Dial. Without this bound a dial against a black-hole host
+	// hangs the dialOne goroutine indefinitely, leaking it across
+	// pool.Close. 0 → 30 * time.Second default.
+	DialTimeout time.Duration
 }
 
 // Stats is a snapshot of pool state.
@@ -59,9 +65,8 @@ type managedConn struct {
 
 // acquireReq is sent on Pool.acquireCh. The actor replies on reply.
 type acquireReq struct {
-	ctx      context.Context
-	reply    chan acquireResp
-	deadline time.Time // zero = no AcquireTimeout
+	ctx   context.Context
+	reply chan acquireResp
 }
 
 // acquireResp carries the reply from the actor for an acquireReq.
@@ -112,6 +117,9 @@ func newPool(addr string, connOpts conn.ConnOptions, opts PoolOptions) *Pool {
 	}
 	if opts.DialBackoff <= 0 {
 		opts.DialBackoff = 1 * time.Second
+	}
+	if opts.DialTimeout <= 0 {
+		opts.DialTimeout = 30 * time.Second
 	}
 	p := &Pool{
 		opts:       opts,
@@ -171,15 +179,18 @@ func (p *Pool) run() {
 				p.replyAcquire(req, mc, nil)
 				continue
 			}
-			// No live capacity. Maybe dial.
-			if p.canDial(len(conns), inFlightDials, lastDialErrAt) {
+			// No live capacity. Maybe dial. Count only LIVE conns so a dead
+			// conn that hasn't been evicted yet doesn't block a replacement
+			// dial (BUG-1 regression guard).
+			liveConns := countLive(conns)
+			if p.canDial(liveConns, inFlightDials, lastDialErrAt) {
 				inFlightDials++
 				go p.dialOne()
 				waiters = append(waiters, req)
 				continue
 			}
 			// Backoff window: refuse with ErrDialBackoff if no live conn and within window.
-			if !lastDialErrAt.IsZero() && time.Since(lastDialErrAt) < p.opts.DialBackoff && len(conns) == 0 && inFlightDials == 0 {
+			if !lastDialErrAt.IsZero() && time.Since(lastDialErrAt) < p.opts.DialBackoff && liveConns == 0 && inFlightDials == 0 {
 				p.replyAcquire(req, nil, ErrDialBackoff)
 				continue
 			}
@@ -189,7 +200,12 @@ func (p *Pool) run() {
 		case msg := <-p.releaseCh:
 			msg.mc.active--
 			msg.mc.lastUsed = time.Now()
-			if msg.err != nil && !msg.mc.c.IsAlive() {
+			// Always evict dead conns regardless of msg.err. The transport
+			// adapter passes nil err today, so a conn that died mid-request
+			// (e.g. peer GOAWAY) would otherwise linger in the pool, blocking
+			// canDial via len(conns) and forcing a wait until the next
+			// HealthCheckPeriod tick (default 30s).
+			if !msg.mc.c.IsAlive() {
 				conns = p.evict(conns, msg.mc)
 			}
 			waiters = p.serveWaiters(conns, waiters)
@@ -219,6 +235,7 @@ func (p *Pool) run() {
 		case <-tick.C:
 			conns = p.evictIdle(conns)
 			conns = p.evictDead(conns)
+			waiters = pruneExpiredWaiters(waiters)
 
 		case <-p.closeCh:
 			for _, w := range waiters {
@@ -278,9 +295,28 @@ func (p *Pool) canDial(connCount, inFlight int, lastErrAt time.Time) bool {
 
 // dialOne is the dial helper goroutine. It dials with a fresh
 // background context so a cancelled waiter doesn't tear down a useful
-// in-flight dial.
+// in-flight dial. A DialTimeout bound prevents the goroutine from
+// leaking on a hung TCP connect, and a watchdog cancels the dial early
+// if the pool is closed mid-dial.
 func (p *Pool) dialOne() {
-	c, err := conn.Dial(context.Background(), p.addr, p.connOpts)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	if p.opts.DialTimeout > 0 {
+		var dlCancel context.CancelFunc
+		ctx, dlCancel = context.WithTimeout(ctx, p.opts.DialTimeout)
+		defer dlCancel()
+	}
+	stopWatch := make(chan struct{})
+	go func() {
+		select {
+		case <-p.closedCh:
+			cancel()
+		case <-stopWatch:
+		}
+	}()
+	defer close(stopWatch)
+
+	c, err := conn.Dial(ctx, p.addr, p.connOpts)
 	if err != nil {
 		select {
 		case p.dialDoneCh <- dialResult{err: err}:
@@ -364,15 +400,41 @@ func sumActive(conns []*managedConn) int {
 	return n
 }
 
+// countLive returns the number of conns whose underlying *conn.Conn
+// reports IsAlive(). Used by the actor to gate canDial on live capacity
+// only, not on stale dead-but-not-yet-evicted entries.
+func countLive(conns []*managedConn) int {
+	n := 0
+	for _, mc := range conns {
+		if mc.c.IsAlive() {
+			n++
+		}
+	}
+	return n
+}
+
+// pruneExpiredWaiters drops waiters whose ctx is already done. Reuses
+// the slice's backing array to avoid allocation churn.
+func pruneExpiredWaiters(ws []acquireReq) []acquireReq {
+	out := ws[:0]
+	for _, w := range ws {
+		select {
+		case <-w.ctx.Done():
+			// Caller abandoned. Drop the waiter; no reply needed since
+			// the caller has already returned ctx.Err() from acquire().
+		default:
+			out = append(out, w)
+		}
+	}
+	return out
+}
+
 // acquire requests a managedConn from the actor. The returned mc's
 // active count has already been incremented by the actor. Caller MUST
 // eventually call p.release(mc, requestErr).
 func (p *Pool) acquire(ctx context.Context) (*managedConn, error) {
 	reply := make(chan acquireResp, 1)
 	req := acquireReq{ctx: ctx, reply: reply}
-	if p.opts.AcquireTimeout > 0 {
-		req.deadline = time.Now().Add(p.opts.AcquireTimeout)
-	}
 
 	// Send the request.
 	select {

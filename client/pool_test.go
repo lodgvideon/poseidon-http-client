@@ -171,18 +171,159 @@ func TestPool_AcquireTimeout(t *testing.T) {
 	defer cancel()
 
 	// First acquire: dial is attempted, actor returns dial error via replyAcquire.
+	// The dialer wraps with conn.Dial wrapping → expect non-nil error,
+	// not necessarily a known sentinel.
 	_, err1 := p.acquire(ctx)
-	// Second acquire: within DialBackoff → ErrDialBackoff; no reply arrives within
-	// AcquireTimeout → ErrAcquireTimeout is also acceptable.
-	_, err2 := p.acquire(ctx)
-
-	// Both must be non-nil errors.
 	if err1 == nil {
 		t.Fatalf("first acquire should fail, got nil")
 	}
-	if err2 == nil {
-		t.Fatalf("second acquire should fail, got nil")
+	// Second acquire: within DialBackoff window with no live conns →
+	// ErrDialBackoff; if scheduling delays the reply past AcquireTimeout
+	// the actor's reply path loses the race and the caller observes
+	// ErrAcquireTimeout. Both are valid.
+	_, err2 := p.acquire(ctx)
+	if !errors.Is(err2, ErrDialBackoff) && !errors.Is(err2, ErrAcquireTimeout) {
+		t.Fatalf("second acquire = %v, want ErrDialBackoff or ErrAcquireTimeout", err2)
 	}
+}
+
+// --- BUG-3 regression: pruneExpiredWaiters ---
+
+func TestPruneExpiredWaiters_DropsCancelledKeepsLive(t *testing.T) {
+	t.Parallel()
+	live := context.Background()
+	dead, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	in := []acquireReq{
+		{ctx: live},
+		{ctx: dead},
+		{ctx: live},
+		{ctx: dead},
+	}
+	out := pruneExpiredWaiters(in)
+	if len(out) != 2 {
+		t.Fatalf("len(out) = %d, want 2", len(out))
+	}
+	for i, w := range out {
+		select {
+		case <-w.ctx.Done():
+			t.Fatalf("out[%d] ctx unexpectedly done", i)
+		default:
+		}
+	}
+}
+
+func TestPruneExpiredWaiters_EmptyAndAllLive(t *testing.T) {
+	t.Parallel()
+	if got := pruneExpiredWaiters(nil); len(got) != 0 {
+		t.Fatalf("nil → len %d, want 0", len(got))
+	}
+	live := context.Background()
+	in := []acquireReq{{ctx: live}, {ctx: live}}
+	out := pruneExpiredWaiters(in)
+	if len(out) != 2 {
+		t.Fatalf("all-live len = %d, want 2", len(out))
+	}
+}
+
+// --- BUG-2 regression: DialTimeout bounds dialOne ---
+
+// hangingDialer blocks Dial until either (a) ctx is cancelled or
+// (b) release is closed. Used to verify DialTimeout fires.
+type hangingDialer struct {
+	release chan struct{}
+}
+
+func (d *hangingDialer) Dial(ctx context.Context, _ string) (net.Conn, error) {
+	select {
+	case <-d.release:
+		return nil, errors.New("hangingDialer: released without conn")
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+}
+
+func TestPool_DialTimeout_FiresOnHangingDial(t *testing.T) {
+	t.Parallel()
+	hd := &hangingDialer{release: make(chan struct{})}
+	p := newPool("fake:0", conn.ConnOptions{Dialer: hd}, PoolOptions{
+		MaxConnsPerHost: 1,
+		DialTimeout:     50 * time.Millisecond,
+		DialBackoff:     1 * time.Millisecond,
+	})
+	t.Cleanup(func() {
+		close(hd.release)
+		_ = p.Close()
+	})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	start := time.Now()
+	_, err := p.acquire(ctx)
+	elapsed := time.Since(start)
+	if err == nil {
+		t.Fatal("expected dial-timeout error, got nil")
+	}
+	// Bound elapsed by an order of magnitude over DialTimeout to detect a
+	// regression that bypasses the timeout (e.g. background ctx without
+	// deadline).
+	if elapsed > 500*time.Millisecond {
+		t.Fatalf("acquire took %v with DialTimeout=50ms — bound not enforced", elapsed)
+	}
+}
+
+func TestPool_DialTimeout_DefaultedTo30s(t *testing.T) {
+	t.Parallel()
+	p := newPool("ignored:0", conn.ConnOptions{}, PoolOptions{MaxConnsPerHost: 1})
+	t.Cleanup(func() { _ = p.Close() })
+	if p.opts.DialTimeout != 30*time.Second {
+		t.Fatalf("default DialTimeout = %v, want 30s", p.opts.DialTimeout)
+	}
+}
+
+// --- BUG-2 regression: dialOne aborts when pool closes mid-dial ---
+
+func TestPool_DialOne_PoolCloseCancelsHangingDial(t *testing.T) {
+	t.Parallel()
+	hd := &hangingDialer{release: make(chan struct{})}
+	p := newPool("fake:0", conn.ConnOptions{Dialer: hd}, PoolOptions{
+		MaxConnsPerHost: 1,
+		// Long DialTimeout so we know cancellation came from Close,
+		// not the timeout.
+		DialTimeout: 30 * time.Second,
+	})
+
+	// Trigger a dial via acquire in a goroutine so the actor calls dialOne.
+	acqErr := make(chan error, 1)
+	go func() {
+		ctx := context.Background()
+		_, err := p.acquire(ctx)
+		acqErr <- err
+	}()
+	// Give the actor a moment to schedule dialOne.
+	time.Sleep(20 * time.Millisecond)
+
+	closeStart := time.Now()
+	_ = p.Close()
+	closeElapsed := time.Since(closeStart)
+
+	// Close itself returns once actor exits — should be fast even with
+	// a dial in flight (watchdog cancels dial ctx → conn.Dial returns).
+	if closeElapsed > 1*time.Second {
+		t.Fatalf("Close took %v with hanging dial — watchdog not wired up", closeElapsed)
+	}
+	// acquire must complete with an error (pool closed or dial cancelled).
+	select {
+	case err := <-acqErr:
+		if err == nil {
+			t.Fatal("acquire returned nil error after Close")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("acquire did not return after Close")
+	}
+	close(hd.release) // unblock any straggler dialer goroutine
 }
 
 // --- release nil mc (no-op) ---
