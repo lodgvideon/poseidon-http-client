@@ -384,3 +384,25 @@ func TestRetryer_Do_HardStop_PoolClosed_NoRetry(t *testing.T) {
 		t.Errorf("calls = %d, want 1 (hard stop must not retry)", f.calls)
 	}
 }
+
+func TestRetryer_Do_MaxAttempts_Exhausted(t *testing.T) {
+	t.Parallel()
+	last := &StreamResetError{Code: frame.ErrCodeRefusedStream}
+	f := &fakeDoer{results: []doResult{
+		{nil, &StreamResetError{Code: frame.ErrCodeRefusedStream}},
+		{nil, &StreamResetError{Code: frame.ErrCodeRefusedStream}},
+		{nil, last},
+	}}
+	r := NewRetryer(&Client{}, RetryOptions{
+		MaxAttempts: 3,
+		Backoff:     func(int) time.Duration { return 0 },
+	})
+	r.d = f
+	_, err := r.Do(context.Background(), &Request{Method: "GET", Path: "/"})
+	if err != last {
+		t.Fatalf("err = %v, want last (%v)", err, last)
+	}
+	if f.calls != 3 {
+		t.Errorf("calls = %d, want 3", f.calls)
+	}
+}
