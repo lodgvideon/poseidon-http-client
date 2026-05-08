@@ -119,12 +119,13 @@ func (mp *managedPool) getOrCreateSubPool(addr Address) *subPoolState {
 	key := addr.String()
 	mp.mu.RLock()
 	s, ok := mp.subPools[key]
+	isDraining := ok && s.draining
 	mp.mu.RUnlock()
-	if ok && !s.draining {
+	if ok && !isDraining {
 		return s
 	}
-	if ok && s.draining {
-		return nil // caller's snapshotActive shouldn't have given us this; TOCTOU guard
+	if isDraining {
+		return nil
 	}
 
 	mp.mu.Lock()
@@ -193,10 +194,11 @@ func (mp *managedPool) acquire(ctx context.Context) (*conn.Conn, func(), error) 
 	}
 }
 
-// isDialOnlyErr returns true for transient dial failures that warrant
-// address-level failover: DialError and ErrDialBackoff.
+// isDialOnlyErr returns true for transient per-address failures that warrant
+// address-level failover: DialError, ErrDialBackoff, and ErrPoolClosed (the
+// last can occur when a DrainHard eviction races with an in-flight acquire).
 func isDialOnlyErr(err error) bool {
-	if errors.Is(err, ErrDialBackoff) {
+	if errors.Is(err, ErrDialBackoff) || errors.Is(err, ErrPoolClosed) {
 		return true
 	}
 	var de *DialError
@@ -260,24 +262,26 @@ func (mp *managedPool) runTicker(ctx context.Context) {
 // and returns the combined snapshot.
 func (mp *managedPool) stats() Stats {
 	mp.mu.RLock()
-	subs := make([]*subPoolState, 0, len(mp.subPools))
+	pools := make([]*Pool, 0, len(mp.subPools))
+	var drainingCount int
 	for _, s := range mp.subPools {
-		subs = append(subs, s)
+		pools = append(pools, s.p)
+		if s.draining {
+			drainingCount++
+		}
 	}
 	addrCount := len(mp.addrs)
 	mp.mu.RUnlock()
 
 	var out Stats
 	out.Addresses = addrCount
-	for _, s := range subs {
-		st := s.p.Stats()
+	out.DrainingSubpools = drainingCount
+	for _, p := range pools {
+		st := p.Stats()
 		out.ActiveConns += st.ActiveConns
 		out.InFlightStreams += st.InFlightStreams
 		out.Waiters += st.Waiters
 		out.InFlightDials += st.InFlightDials
-		if s.draining {
-			out.DrainingSubpools++
-		}
 	}
 	return out
 }
