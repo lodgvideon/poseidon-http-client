@@ -406,3 +406,66 @@ func TestRetryer_Do_MaxAttempts_Exhausted(t *testing.T) {
 		t.Errorf("calls = %d, want 3", f.calls)
 	}
 }
+
+func TestRetryer_DoStream_RetriesBeforeHeaders(t *testing.T) {
+	t.Parallel()
+	f := &fakeDoer{stream: []streamResult{
+		{nil, &StreamResetError{Code: frame.ErrCodeRefusedStream}},
+		{&StreamResponse{}, nil},
+	}}
+	r := NewRetryer(&Client{}, RetryOptions{
+		MaxAttempts: 3,
+		Backoff:     func(int) time.Duration { return 0 },
+	})
+	r.d = f
+	resp, err := r.DoStream(context.Background(), &Request{Method: "GET", Path: "/"})
+	if err != nil {
+		t.Fatalf("DoStream err = %v, want nil", err)
+	}
+	if resp == nil {
+		t.Fatal("DoStream returned nil StreamResponse")
+	}
+	if f.streams != 2 {
+		t.Errorf("streams = %d, want 2", f.streams)
+	}
+}
+
+func TestRetryer_DoStream_NonIdempotent_NoRetry(t *testing.T) {
+	t.Parallel()
+	f := &fakeDoer{stream: []streamResult{
+		{nil, &StreamResetError{Code: frame.ErrCodeRefusedStream}},
+		{&StreamResponse{}, nil},
+	}}
+	r := NewRetryer(&Client{}, RetryOptions{MaxAttempts: 3})
+	r.d = f
+	_, err := r.DoStream(context.Background(), &Request{Method: "POST", Path: "/"})
+	if err == nil {
+		t.Fatal("expected err on POST + RST, got nil")
+	}
+	if f.streams != 1 {
+		t.Errorf("streams = %d, want 1", f.streams)
+	}
+}
+
+func TestRetryer_DoStream_Success_NoIsRetryableCall(t *testing.T) {
+	t.Parallel()
+	called := false
+	f := &fakeDoer{stream: []streamResult{
+		{&StreamResponse{}, nil},
+	}}
+	r := NewRetryer(&Client{}, RetryOptions{
+		MaxAttempts: 3,
+		Backoff:     func(int) time.Duration { return 0 },
+		IsRetryable: func(error, *Response) bool {
+			called = true
+			return true
+		},
+	})
+	r.d = f
+	if _, err := r.DoStream(context.Background(), &Request{Method: "GET", Path: "/"}); err != nil {
+		t.Fatalf("DoStream err = %v", err)
+	}
+	if called {
+		t.Error("IsRetryable invoked for successful DoStream — must not be (caller owns stream)")
+	}
+}

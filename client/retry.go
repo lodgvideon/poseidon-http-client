@@ -201,6 +201,50 @@ func (r *Retryer) userIsRetryable(err error, resp *Response) bool {
 	return r.opts.IsRetryable(err, resp)
 }
 
+// DoStream issues a streaming request with retries that apply ONLY
+// before the first HEADERS frame is delivered. A successful return
+// from the underlying transport hands ownership of the stream to the
+// caller, after which no further retry is possible.
+func (r *Retryer) DoStream(ctx context.Context, req *Request) (*StreamResponse, error) {
+	if req == nil {
+		return r.d.DoStream(ctx, req)
+	}
+	if !r.canRetry(req) {
+		return r.d.DoStream(ctx, req)
+	}
+	var (
+		resp *StreamResponse
+		err  error
+	)
+	for attempt := 0; attempt < r.opts.MaxAttempts; attempt++ {
+		if attempt > 0 {
+			wait := r.opts.Backoff(attempt)
+			if wait > 0 {
+				select {
+				case <-time.After(wait):
+				case <-ctx.Done():
+					return nil, ctx.Err()
+				}
+			}
+		}
+		resp, err = r.d.DoStream(ctx, req)
+		if err == nil {
+			return resp, nil
+		}
+		if isHardStop(err) {
+			return nil, err
+		}
+		if builtinShouldRetry(err) {
+			continue
+		}
+		if r.userIsRetryable(err, nil) {
+			continue
+		}
+		return nil, err
+	}
+	return resp, err
+}
+
 // isHardStop returns true for errors that must never be retried,
 // even by a user-supplied IsRetryable.
 func isHardStop(err error) bool {
