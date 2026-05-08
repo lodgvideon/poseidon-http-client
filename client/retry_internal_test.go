@@ -86,3 +86,31 @@ func TestDefaultBackoff_Bounds(t *testing.T) {
 		}
 	}
 }
+
+func TestNewRetryer_Defaults(t *testing.T) {
+	t.Parallel()
+	c := &Client{} // zero Client; we only inspect the Retryer fields here
+	r := NewRetryer(c, RetryOptions{})
+	if r.opts.MaxAttempts != 3 {
+		t.Errorf("MaxAttempts default = %d, want 3", r.opts.MaxAttempts)
+	}
+	if r.opts.Backoff == nil {
+		t.Error("Backoff default = nil, want non-nil")
+	}
+	if r.rng == nil {
+		t.Error("rng = nil after NewRetryer")
+	}
+}
+
+func TestNewRetryer_PreservesNonZero(t *testing.T) {
+	t.Parallel()
+	c := &Client{}
+	custom := func(int) time.Duration { return 0 }
+	r := NewRetryer(c, RetryOptions{MaxAttempts: 7, Backoff: custom})
+	if r.opts.MaxAttempts != 7 {
+		t.Errorf("MaxAttempts = %d, want 7", r.opts.MaxAttempts)
+	}
+	if r.opts.Backoff == nil {
+		t.Error("Backoff was overwritten")
+	}
+}

@@ -2,8 +2,10 @@
 package client
 
 import (
+	"context"
 	"errors"
 	"math/rand"
+	"sync"
 	"time"
 
 	"github.com/lodgvideon/poseidon-http-client/conn"
@@ -65,4 +67,60 @@ func defaultBackoff(attempt int, rng *rand.Rand) time.Duration {
 	}
 	delta := time.Duration(rng.Int63n(int64(d/2))) - d/4
 	return d + delta
+}
+
+// RetryOptions configures the Retryer.
+type RetryOptions struct {
+	// MaxAttempts is the maximum total attempts (1 = no retry).
+	// Zero → 3 default.
+	MaxAttempts int
+
+	// Backoff returns the wait before attempt i (0-indexed; 0 must
+	// return 0). nil → defaultBackoff (100ms…5s + ±25% jitter).
+	Backoff func(attempt int) time.Duration
+
+	// IsRetryable supplements the built-in classification. Called for
+	// any err / resp not auto-retried. nil → only built-ins retry.
+	IsRetryable func(err error, resp *Response) bool
+
+	// Rand seeds the jitter source for the default backoff. nil →
+	// time-seeded *rand.Rand owned by the Retryer.
+	Rand *rand.Rand
+}
+
+// retryDoer is the unexported seam Retryer drives. *Client satisfies
+// it implicitly. Tests inject a fake to drive the loop without a real
+// transport.
+type retryDoer interface {
+	Do(ctx context.Context, req *Request) (*Response, error)
+	DoStream(ctx context.Context, req *Request) (*StreamResponse, error)
+}
+
+// Retryer wraps a transport with bounded automatic retry.
+type Retryer struct {
+	d     retryDoer
+	opts  RetryOptions
+	rng   *rand.Rand
+	rngMu sync.Mutex
+}
+
+// NewRetryer constructs a Retryer wrapping c. Zero-value fields in
+// opts are filled with defaults; non-zero values are preserved
+// verbatim. The returned *Retryer is goroutine-safe.
+func NewRetryer(c *Client, opts RetryOptions) *Retryer {
+	if opts.MaxAttempts <= 0 {
+		opts.MaxAttempts = 3
+	}
+	rng := opts.Rand
+	if rng == nil {
+		rng = rand.New(rand.NewSource(time.Now().UnixNano()))
+	}
+	if opts.Backoff == nil {
+		// Capture rng so the user can swap their own backoff without
+		// pulling our jitter source.
+		opts.Backoff = func(attempt int) time.Duration {
+			return defaultBackoff(attempt, rng)
+		}
+	}
+	return &Retryer{d: c, opts: opts, rng: rng}
 }
