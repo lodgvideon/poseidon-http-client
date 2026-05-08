@@ -29,7 +29,9 @@ const (
 	TransportManaged
 )
 
-// ClientOptions tunes a Client. Addr and ConnOpts.Dialer are required.
+// ClientOptions tunes a Client. ConnOpts.Dialer is always required.
+// Addr is required for TransportSingleConn and TransportPool; it must
+// be empty for TransportManaged (the Resolver owns addressing).
 type ClientOptions struct {
 	// Addr is the "host:port" target used both as the dial target and
 	// as the default :authority for requests that don't set one.
