@@ -97,6 +97,17 @@ func (c *Client) Close() error {
 	return c.tr.close()
 }
 
+// PoolStats returns a snapshot of the underlying pool's state. It
+// returns the zero Stats when the transport is not a *poolTransport
+// (e.g. TransportSingleConn) or the pool is already closed.
+func (c *Client) PoolStats() Stats {
+	pt, ok := c.tr.(*poolTransport)
+	if !ok {
+		return Stats{}
+	}
+	return pt.p.Stats()
+}
+
 // Do issues a synchronous request and returns a fully-buffered Response.
 func (c *Client) Do(ctx context.Context, req *Request) (*Response, error) {
 	if err := validateRequest(req); err != nil {
