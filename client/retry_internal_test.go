@@ -284,3 +284,54 @@ func TestRetryer_Do_NonRetryableError_Stops(t *testing.T) {
 		t.Errorf("calls = %d, want 1 (non-retryable error must stop)", f.calls)
 	}
 }
+
+func TestRetryer_Do_IsRetryable_Custom5xx_Retries(t *testing.T) {
+	t.Parallel()
+	f := &fakeDoer{results: []doResult{
+		{&Response{Status: 503}, nil},
+		{&Response{Status: 503}, nil},
+		{&Response{Status: 200}, nil},
+	}}
+	r := NewRetryer(&Client{}, RetryOptions{
+		MaxAttempts: 3,
+		Backoff:     func(int) time.Duration { return 0 },
+		IsRetryable: func(err error, resp *Response) bool {
+			return resp != nil && resp.Status >= 500
+		},
+	})
+	r.d = f
+	resp, err := r.Do(context.Background(), &Request{Method: "GET", Path: "/"})
+	if err != nil {
+		t.Fatalf("err = %v, want nil", err)
+	}
+	if resp.Status != 200 {
+		t.Errorf("Status = %d, want 200", resp.Status)
+	}
+	if f.calls != 3 {
+		t.Errorf("calls = %d, want 3", f.calls)
+	}
+}
+
+func TestRetryer_Do_IsRetryable_NonBuiltinError_Retries(t *testing.T) {
+	t.Parallel()
+	custom := errors.New("custom transient")
+	f := &fakeDoer{results: []doResult{
+		{nil, custom},
+		{&Response{Status: 200}, nil},
+	}}
+	r := NewRetryer(&Client{}, RetryOptions{
+		MaxAttempts: 3,
+		Backoff:     func(int) time.Duration { return 0 },
+		IsRetryable: func(err error, _ *Response) bool {
+			return errors.Is(err, custom)
+		},
+	})
+	r.d = f
+	_, err := r.Do(context.Background(), &Request{Method: "GET", Path: "/"})
+	if err != nil {
+		t.Fatalf("err = %v, want nil after IsRetryable retry", err)
+	}
+	if f.calls != 2 {
+		t.Errorf("calls = %d, want 2", f.calls)
+	}
+}
