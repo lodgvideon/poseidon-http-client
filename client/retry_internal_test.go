@@ -120,7 +120,10 @@ func TestNewRetryer_PreservesNonZero(t *testing.T) {
 }
 
 // fakeDoer is a scriptable retryDoer used by retry-loop tests.
+// Bounds-checks every call; unexpected extra calls fail the test
+// immediately rather than panicking with index-out-of-range.
 type fakeDoer struct {
+	t       testing.TB
 	results []doResult
 	stream  []streamResult
 	calls   int
@@ -137,12 +140,18 @@ type streamResult struct {
 }
 
 func (f *fakeDoer) Do(_ context.Context, _ *Request) (*Response, error) {
+	if f.calls >= len(f.results) {
+		f.t.Fatalf("unexpected Do call #%d (only %d results scripted)", f.calls, len(f.results))
+	}
 	r := f.results[f.calls]
 	f.calls++
 	return r.resp, r.err
 }
 
 func (f *fakeDoer) DoStream(_ context.Context, _ *Request) (*StreamResponse, error) {
+	if f.streams >= len(f.stream) {
+		f.t.Fatalf("unexpected DoStream call #%d (only %d results scripted)", f.streams, len(f.stream))
+	}
 	r := f.stream[f.streams]
 	f.streams++
 	return r.resp, r.err
@@ -150,7 +159,7 @@ func (f *fakeDoer) DoStream(_ context.Context, _ *Request) (*StreamResponse, err
 
 func TestRetryer_Do_NonIdempotent_NoRetry(t *testing.T) {
 	t.Parallel()
-	f := &fakeDoer{results: []doResult{
+	f := &fakeDoer{t: t, results: []doResult{
 		{nil, &StreamResetError{Code: frame.ErrCodeRefusedStream}},
 		{&Response{Status: 200}, nil}, // never reached
 	}}
@@ -167,7 +176,7 @@ func TestRetryer_Do_NonIdempotent_NoRetry(t *testing.T) {
 
 func TestRetryer_Do_BodyReader_NoRetry(t *testing.T) {
 	t.Parallel()
-	f := &fakeDoer{results: []doResult{
+	f := &fakeDoer{t: t, results: []doResult{
 		{nil, &StreamResetError{Code: frame.ErrCodeRefusedStream}},
 		{&Response{Status: 200}, nil},
 	}}
@@ -188,7 +197,7 @@ func TestRetryer_Do_BodyReader_NoRetry(t *testing.T) {
 
 func TestRetryer_Do_MaxAttemptsOne_NoRetry(t *testing.T) {
 	t.Parallel()
-	f := &fakeDoer{results: []doResult{
+	f := &fakeDoer{t: t, results: []doResult{
 		{nil, &StreamResetError{Code: frame.ErrCodeRefusedStream}},
 		{&Response{Status: 200}, nil},
 	}}
@@ -208,7 +217,7 @@ func (errReader) Read([]byte) (int, error) { return 0, errors.New("not read") }
 
 func TestRetryer_Do_RefusedStream_Retries(t *testing.T) {
 	t.Parallel()
-	f := &fakeDoer{results: []doResult{
+	f := &fakeDoer{t: t, results: []doResult{
 		{nil, &StreamResetError{Code: frame.ErrCodeRefusedStream}},
 		{nil, &StreamResetError{Code: frame.ErrCodeRefusedStream}},
 		{&Response{Status: 200}, nil},
@@ -232,7 +241,7 @@ func TestRetryer_Do_RefusedStream_Retries(t *testing.T) {
 
 func TestRetryer_Do_GoAway_Retries(t *testing.T) {
 	t.Parallel()
-	f := &fakeDoer{results: []doResult{
+	f := &fakeDoer{t: t, results: []doResult{
 		{nil, conn.ErrGoAway},
 		{&Response{Status: 200}, nil},
 	}}
@@ -252,7 +261,7 @@ func TestRetryer_Do_GoAway_Retries(t *testing.T) {
 
 func TestRetryer_Do_DialError_Retries(t *testing.T) {
 	t.Parallel()
-	f := &fakeDoer{results: []doResult{
+	f := &fakeDoer{t: t, results: []doResult{
 		{nil, &DialError{Addr: "x:1", Err: errors.New("boom")}},
 		{&Response{Status: 200}, nil},
 	}}
@@ -270,10 +279,30 @@ func TestRetryer_Do_DialError_Retries(t *testing.T) {
 	}
 }
 
+func TestRetryer_Do_ErrDialBackoff_Retries(t *testing.T) {
+	t.Parallel()
+	f := &fakeDoer{t: t, results: []doResult{
+		{nil, ErrDialBackoff},
+		{&Response{Status: 200}, nil},
+	}}
+	r := NewRetryer(&Client{}, RetryOptions{
+		MaxAttempts: 3,
+		Backoff:     func(int) time.Duration { return 0 },
+	})
+	r.d = f
+	_, err := r.Do(context.Background(), &Request{Method: "GET", Path: "/"})
+	if err != nil {
+		t.Fatalf("Do err = %v, want nil after ErrDialBackoff retry", err)
+	}
+	if f.calls != 2 {
+		t.Errorf("calls = %d, want 2", f.calls)
+	}
+}
+
 func TestRetryer_Do_NonRetryableError_Stops(t *testing.T) {
 	t.Parallel()
 	other := errors.New("application error")
-	f := &fakeDoer{results: []doResult{{nil, other}}}
+	f := &fakeDoer{t: t, results: []doResult{{nil, other}}}
 	r := NewRetryer(&Client{}, RetryOptions{
 		MaxAttempts: 3,
 		Backoff:     func(int) time.Duration { return 0 },
@@ -290,7 +319,7 @@ func TestRetryer_Do_NonRetryableError_Stops(t *testing.T) {
 
 func TestRetryer_Do_IsRetryable_Custom5xx_Retries(t *testing.T) {
 	t.Parallel()
-	f := &fakeDoer{results: []doResult{
+	f := &fakeDoer{t: t, results: []doResult{
 		{&Response{Status: 503}, nil},
 		{&Response{Status: 503}, nil},
 		{&Response{Status: 200}, nil},
@@ -318,7 +347,7 @@ func TestRetryer_Do_IsRetryable_Custom5xx_Retries(t *testing.T) {
 func TestRetryer_Do_IsRetryable_NonBuiltinError_Retries(t *testing.T) {
 	t.Parallel()
 	custom := errors.New("custom transient")
-	f := &fakeDoer{results: []doResult{
+	f := &fakeDoer{t: t, results: []doResult{
 		{nil, custom},
 		{&Response{Status: 200}, nil},
 	}}
@@ -341,7 +370,7 @@ func TestRetryer_Do_IsRetryable_NonBuiltinError_Retries(t *testing.T) {
 
 func TestRetryer_Do_CtxCanceled_StopsImmediately(t *testing.T) {
 	t.Parallel()
-	f := &fakeDoer{results: []doResult{
+	f := &fakeDoer{t: t, results: []doResult{
 		{nil, &StreamResetError{Code: frame.ErrCodeRefusedStream}},
 		{nil, &StreamResetError{Code: frame.ErrCodeRefusedStream}},
 		{nil, &StreamResetError{Code: frame.ErrCodeRefusedStream}},
@@ -369,7 +398,7 @@ func TestRetryer_Do_CtxCanceled_StopsImmediately(t *testing.T) {
 
 func TestRetryer_Do_HardStop_PoolClosed_NoRetry(t *testing.T) {
 	t.Parallel()
-	f := &fakeDoer{results: []doResult{
+	f := &fakeDoer{t: t, results: []doResult{
 		{nil, ErrPoolClosed},
 		{&Response{Status: 200}, nil},
 	}}
@@ -391,7 +420,7 @@ func TestRetryer_Do_HardStop_PoolClosed_NoRetry(t *testing.T) {
 func TestRetryer_Do_MaxAttempts_Exhausted(t *testing.T) {
 	t.Parallel()
 	last := &StreamResetError{Code: frame.ErrCodeRefusedStream}
-	f := &fakeDoer{results: []doResult{
+	f := &fakeDoer{t: t, results: []doResult{
 		{nil, &StreamResetError{Code: frame.ErrCodeRefusedStream}},
 		{nil, &StreamResetError{Code: frame.ErrCodeRefusedStream}},
 		{nil, last},
@@ -412,7 +441,7 @@ func TestRetryer_Do_MaxAttempts_Exhausted(t *testing.T) {
 
 func TestRetryer_DoStream_RetriesBeforeHeaders(t *testing.T) {
 	t.Parallel()
-	f := &fakeDoer{stream: []streamResult{
+	f := &fakeDoer{t: t, stream: []streamResult{
 		{nil, &StreamResetError{Code: frame.ErrCodeRefusedStream}},
 		{&StreamResponse{}, nil},
 	}}
@@ -435,7 +464,7 @@ func TestRetryer_DoStream_RetriesBeforeHeaders(t *testing.T) {
 
 func TestRetryer_DoStream_NonIdempotent_NoRetry(t *testing.T) {
 	t.Parallel()
-	f := &fakeDoer{stream: []streamResult{
+	f := &fakeDoer{t: t, stream: []streamResult{
 		{nil, &StreamResetError{Code: frame.ErrCodeRefusedStream}},
 		{&StreamResponse{}, nil},
 	}}
@@ -453,7 +482,7 @@ func TestRetryer_DoStream_NonIdempotent_NoRetry(t *testing.T) {
 func TestRetryer_DoStream_Success_NoIsRetryableCall(t *testing.T) {
 	t.Parallel()
 	called := false
-	f := &fakeDoer{stream: []streamResult{
+	f := &fakeDoer{t: t, stream: []streamResult{
 		{&StreamResponse{}, nil},
 	}}
 	r := NewRetryer(&Client{}, RetryOptions{

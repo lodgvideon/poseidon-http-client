@@ -58,12 +58,13 @@ func defaultBackoff(attempt int, rng *rand.Rand) time.Duration {
 		return 0
 	}
 	const (
-		base = 100 * time.Millisecond
-		max  = 5 * time.Second
+		base       = 100 * time.Millisecond
+		maxBackoff = 5 * time.Second
 	)
 	d := base << uint(attempt-1)
-	if d > max || d <= 0 {
-		d = max
+	// d wraps to 0 or negative on bit-shift overflow for large attempts.
+	if d > maxBackoff || d <= 0 {
+		d = maxBackoff
 	}
 	delta := time.Duration(rng.Int63n(int64(d/2))) - d/4
 	return d + delta
@@ -80,11 +81,17 @@ type RetryOptions struct {
 	Backoff func(attempt int) time.Duration
 
 	// IsRetryable supplements the built-in classification. Called for
-	// any err / resp not auto-retried. nil → only built-ins retry.
+	// any err / resp not auto-retried by built-ins. nil → only built-ins
+	// retry.
+	//
+	// Nil-arg convention: when called for an error, resp is nil; when
+	// called for a successful response, err is nil. Always guard
+	// resp != nil before dereferencing.
 	IsRetryable func(err error, resp *Response) bool
 
-	// Rand seeds the jitter source for the default backoff. nil →
-	// time-seeded *rand.Rand owned by the Retryer.
+	// Rand seeds the jitter source for the default backoff.
+	// nil → time-seeded *rand.Rand owned by the Retryer.
+	// Ignored when Backoff is non-nil.
 	Rand *rand.Rand
 }
 
@@ -109,11 +116,11 @@ func NewRetryer(c *Client, opts RetryOptions) *Retryer {
 	if opts.MaxAttempts <= 0 {
 		opts.MaxAttempts = 3
 	}
-	rng := opts.Rand
-	if rng == nil {
-		rng = rand.New(rand.NewSource(time.Now().UnixNano()))
-	}
 	if opts.Backoff == nil {
+		rng := opts.Rand
+		if rng == nil {
+			rng = rand.New(rand.NewSource(time.Now().UnixNano()))
+		}
 		// rng is not goroutine-safe; serialize access from concurrent
 		// retry-path callers via a closure-captured mutex.
 		var mu sync.Mutex
@@ -142,20 +149,45 @@ func (r *Retryer) canRetry(req *Request) bool {
 	return true
 }
 
+// waitBackoff sleeps for the backoff duration before attempt i,
+// returning ctx.Err() if the context is cancelled first.
+// Returns nil immediately when backoff returns 0.
+func (r *Retryer) waitBackoff(ctx context.Context, attempt int) error {
+	wait := r.opts.Backoff(attempt)
+	if wait <= 0 {
+		return nil
+	}
+	t := time.NewTimer(wait)
+	select {
+	case <-t.C:
+		return nil
+	case <-ctx.Done():
+		t.Stop()
+		return ctx.Err()
+	}
+}
+
+// shouldRetryErr reports whether err warrants a subsequent attempt.
+// Hard-stop errors always return false. Built-in transport errors and
+// user-supplied IsRetryable return true.
+func (r *Retryer) shouldRetryErr(err error) bool {
+	if isHardStop(err) {
+		return false
+	}
+	return builtinShouldRetry(err) || r.userIsRetryable(err, nil)
+}
+
 // Do issues req with retries on transient failures. Falls through to
 // a single Client.Do call when retry is disabled by configuration or
 // the request itself (non-idempotent / BodyReader / MaxAttempts<=1).
 func (r *Retryer) Do(ctx context.Context, req *Request) (*Response, error) {
-	if req == nil {
-		return r.d.Do(ctx, req) // surface ErrInvalidRequest from validate
-	}
-	if !r.canRetry(req) {
+	if req == nil || !r.canRetry(req) {
 		return r.d.Do(ctx, req)
 	}
 	return r.doLoop(ctx, req)
 }
 
-// doLoop is the actual retry loop. Pre: canRetry(req) == true.
+// doLoop is the actual retry loop for Do. Pre: canRetry(req) == true.
 func (r *Retryer) doLoop(ctx context.Context, req *Request) (*Response, error) {
 	var (
 		resp *Response
@@ -163,13 +195,8 @@ func (r *Retryer) doLoop(ctx context.Context, req *Request) (*Response, error) {
 	)
 	for attempt := 0; attempt < r.opts.MaxAttempts; attempt++ {
 		if attempt > 0 {
-			wait := r.opts.Backoff(attempt)
-			if wait > 0 {
-				select {
-				case <-time.After(wait):
-				case <-ctx.Done():
-					return nil, ctx.Err()
-				}
+			if err = r.waitBackoff(ctx, attempt); err != nil {
+				return nil, err
 			}
 		}
 		resp, err = r.d.Do(ctx, req)
@@ -179,16 +206,9 @@ func (r *Retryer) doLoop(ctx context.Context, req *Request) (*Response, error) {
 			}
 			continue
 		}
-		if isHardStop(err) {
+		if !r.shouldRetryErr(err) {
 			return nil, err
 		}
-		if builtinShouldRetry(err) {
-			continue
-		}
-		if r.userIsRetryable(err, nil) {
-			continue
-		}
-		return nil, err
 	}
 	return resp, err
 }
@@ -205,12 +225,10 @@ func (r *Retryer) userIsRetryable(err error, resp *Response) bool {
 // DoStream issues a streaming request with retries that apply ONLY
 // before the first HEADERS frame is delivered. A successful return
 // from the underlying transport hands ownership of the stream to the
-// caller, after which no further retry is possible.
+// caller; IsRetryable is not consulted on success — subsequent
+// response classification is the caller's concern.
 func (r *Retryer) DoStream(ctx context.Context, req *Request) (*StreamResponse, error) {
-	if req == nil {
-		return r.d.DoStream(ctx, req)
-	}
-	if !r.canRetry(req) {
+	if req == nil || !r.canRetry(req) {
 		return r.d.DoStream(ctx, req)
 	}
 	var (
@@ -219,29 +237,17 @@ func (r *Retryer) DoStream(ctx context.Context, req *Request) (*StreamResponse, 
 	)
 	for attempt := 0; attempt < r.opts.MaxAttempts; attempt++ {
 		if attempt > 0 {
-			wait := r.opts.Backoff(attempt)
-			if wait > 0 {
-				select {
-				case <-time.After(wait):
-				case <-ctx.Done():
-					return nil, ctx.Err()
-				}
+			if err = r.waitBackoff(ctx, attempt); err != nil {
+				return nil, err
 			}
 		}
 		resp, err = r.d.DoStream(ctx, req)
 		if err == nil {
 			return resp, nil
 		}
-		if isHardStop(err) {
+		if !r.shouldRetryErr(err) {
 			return nil, err
 		}
-		if builtinShouldRetry(err) {
-			continue
-		}
-		if r.userIsRetryable(err, nil) {
-			continue
-		}
-		return nil, err
 	}
 	return resp, err
 }
