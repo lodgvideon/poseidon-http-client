@@ -124,3 +124,38 @@ func NewRetryer(c *Client, opts RetryOptions) *Retryer {
 	}
 	return &Retryer{d: c, opts: opts, rng: rng}
 }
+
+// canRetry reports whether the Retryer should attempt more than one
+// call. It does NOT include classification of any specific error —
+// that happens inside the loop on each attempt.
+func (r *Retryer) canRetry(req *Request) bool {
+	if r.opts.MaxAttempts <= 1 {
+		return false
+	}
+	if !isIdempotent(req) {
+		return false
+	}
+	if req.BodyReader != nil {
+		return false
+	}
+	return true
+}
+
+// Do issues req with retries on transient failures. Falls through to
+// a single Client.Do call when retry is disabled by configuration or
+// the request itself (non-idempotent / BodyReader / MaxAttempts<=1).
+func (r *Retryer) Do(ctx context.Context, req *Request) (*Response, error) {
+	if req == nil {
+		return r.d.Do(ctx, req) // surface ErrInvalidRequest from validate
+	}
+	if !r.canRetry(req) {
+		return r.d.Do(ctx, req)
+	}
+	return r.doLoop(ctx, req)
+}
+
+// doLoop is the actual retry loop. Pre: canRetry(req) == true.
+func (r *Retryer) doLoop(ctx context.Context, req *Request) (*Response, error) {
+	// Stub for now — Task 4 implements the loop body.
+	return r.d.Do(ctx, req)
+}

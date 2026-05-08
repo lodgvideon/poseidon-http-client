@@ -1,6 +1,7 @@
 package client
 
 import (
+	"context"
 	"errors"
 	"math/rand"
 	"testing"
@@ -114,3 +115,90 @@ func TestNewRetryer_PreservesNonZero(t *testing.T) {
 		t.Error("Backoff was overwritten")
 	}
 }
+
+// fakeDoer is a scriptable retryDoer used by retry-loop tests.
+type fakeDoer struct {
+	results []doResult
+	stream  []streamResult
+	calls   int
+	streams int
+}
+
+type doResult struct {
+	resp *Response
+	err  error
+}
+type streamResult struct {
+	resp *StreamResponse
+	err  error
+}
+
+func (f *fakeDoer) Do(_ context.Context, _ *Request) (*Response, error) {
+	r := f.results[f.calls]
+	f.calls++
+	return r.resp, r.err
+}
+
+func (f *fakeDoer) DoStream(_ context.Context, _ *Request) (*StreamResponse, error) {
+	r := f.stream[f.streams]
+	f.streams++
+	return r.resp, r.err
+}
+
+func TestRetryer_Do_NonIdempotent_NoRetry(t *testing.T) {
+	t.Parallel()
+	f := &fakeDoer{results: []doResult{
+		{nil, &StreamResetError{Code: frame.ErrCodeRefusedStream}},
+		{&Response{Status: 200}, nil}, // never reached
+	}}
+	r := NewRetryer(&Client{}, RetryOptions{MaxAttempts: 3})
+	r.d = f
+	_, err := r.Do(context.Background(), &Request{Method: "POST", Path: "/"})
+	if err == nil {
+		t.Fatal("expected error on POST + RST, got nil")
+	}
+	if f.calls != 1 {
+		t.Errorf("calls = %d, want 1 (non-idempotent must not retry)", f.calls)
+	}
+}
+
+func TestRetryer_Do_BodyReader_NoRetry(t *testing.T) {
+	t.Parallel()
+	f := &fakeDoer{results: []doResult{
+		{nil, &StreamResetError{Code: frame.ErrCodeRefusedStream}},
+		{&Response{Status: 200}, nil},
+	}}
+	r := NewRetryer(&Client{}, RetryOptions{MaxAttempts: 3})
+	r.d = f
+	_, err := r.Do(context.Background(), &Request{
+		Method:     "GET",
+		Path:       "/",
+		BodyReader: errReader{},
+	})
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	if f.calls != 1 {
+		t.Errorf("calls = %d, want 1 (BodyReader must disable retry)", f.calls)
+	}
+}
+
+func TestRetryer_Do_MaxAttemptsOne_NoRetry(t *testing.T) {
+	t.Parallel()
+	f := &fakeDoer{results: []doResult{
+		{nil, &StreamResetError{Code: frame.ErrCodeRefusedStream}},
+		{&Response{Status: 200}, nil},
+	}}
+	r := NewRetryer(&Client{}, RetryOptions{MaxAttempts: 1})
+	r.d = f
+	_, _ = r.Do(context.Background(), &Request{Method: "GET", Path: "/"})
+	if f.calls != 1 {
+		t.Errorf("calls = %d, want 1 (MaxAttempts=1 disables retry)", f.calls)
+	}
+}
+
+// errReader is a placeholder io.Reader for BodyReader tests; never
+// actually read because retry skips before issuing the request.
+type errReader struct{}
+
+func (errReader) Read([]byte) (int, error) { return 0, errors.New("not read") }
