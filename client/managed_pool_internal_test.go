@@ -260,3 +260,90 @@ func TestManagedPool_DrainGraceful_RemovedAddress_KeepsInFlight(t *testing.T) {
 	}
 	t.Error("sub-pool for drained address still present after release; expected close+evict")
 }
+
+func TestManagedPool_DrainHard_RemovedAddress_ClosesImmediately(t *testing.T) {
+	t.Parallel()
+	addrs, _, cleanup := startH2Servers(t, 2)
+	defer cleanup()
+
+	res := newScriptedResolver(addrs)
+	mp, err := newManagedPool(res, RoundRobin(), DrainHard, newConnOpts(),
+		PoolOptions{MaxConnsPerHost: 1, MaxStreamsPerConn: 4, HealthCheckPeriod: time.Second})
+	if err != nil {
+		t.Fatalf("newManagedPool: %v", err)
+	}
+	defer mp.close()
+
+	c0, rel0, err := mp.acquire(context.Background())
+	if err != nil {
+		t.Fatalf("acquire 0: %v", err)
+	}
+
+	res.push([]Address{addrs[1]})
+
+	// DrainHard closes the sub-pool synchronously inside applySet/beginDrain.
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if !c0.IsAlive() {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if c0.IsAlive() {
+		t.Error("conn 0 still alive after DrainHard removal")
+	}
+	rel0()
+}
+
+func TestManagedPool_DrainLazy_RemovedAddress_RetainsSubPool(t *testing.T) {
+	t.Parallel()
+	addrs, _, cleanup := startH2Servers(t, 2)
+	defer cleanup()
+
+	res := newScriptedResolver(addrs)
+	mp, err := newManagedPool(res, RoundRobin(), DrainLazy, newConnOpts(),
+		PoolOptions{MaxConnsPerHost: 1, MaxStreamsPerConn: 4, HealthCheckPeriod: 100 * time.Millisecond})
+	if err != nil {
+		t.Fatalf("newManagedPool: %v", err)
+	}
+	defer mp.close()
+
+	// Seed both sub-pools by acquiring one conn each.
+	for i := 0; i < 2; i++ {
+		_, rel, err := mp.acquire(context.Background())
+		if err != nil {
+			t.Fatalf("seed acquire %d: %v", i, err)
+		}
+		rel()
+	}
+
+	res.push([]Address{addrs[1]})
+
+	// Wait for applySet to run.
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if len(mp.snapshotActive()) == 1 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	// DrainLazy: sub-pool must still be in map (not dropped immediately).
+	mp.mu.RLock()
+	_, present := mp.subPools[addrs[0].String()]
+	mp.mu.RUnlock()
+	if !present {
+		t.Error("DrainLazy: sub-pool dropped immediately, expected retained")
+	}
+
+	// New acquires pick addr[1] only.
+	for i := 0; i < 4; i++ {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		_, rel, err := mp.acquire(ctx)
+		cancel()
+		if err != nil {
+			t.Fatalf("post-drain acquire %d: %v", i, err)
+		}
+		rel()
+	}
+}
