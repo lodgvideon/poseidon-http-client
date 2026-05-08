@@ -94,7 +94,7 @@ non-ACK PING frames with `ACK=1` and the original 8-byte payload
 | §8.1.2.1 | Conformance | TestConformance_RFC7540_Sec8_1_2_1_PseudoHeadersFirst (client/) |
 | §5.1.2   | Conformance | TestConformance_RFC7540_Sec5_1_2_PoolGatesOnPeerMaxStreams (client/) |
 | §6.8     | Conformance | TestConformance_RFC7540_Sec6_8_PoolDrainsOnGoAway (client/) |
-| §6.8     | Conformance | TestConformance_RFC7540_Sec6_8_InFlightStreamSurvivesGoAway (client/) — pool evicts dead conn via release path, not health-check tick |
+| §6.8     | Conformance | TestConformance_RFC7540_Sec6_8_PoolEjectsDeadConnOnRelease (client/) — pool evicts dead conn via release path, not health-check tick |
 
 ## RFC 7541 — HPACK
 
