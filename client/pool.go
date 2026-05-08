@@ -16,6 +16,14 @@ var replyPool = sync.Pool{
 	New: func() any { return make(chan acquireResp, 1) },
 }
 
+// statsReplyPool recycles buffered Stats reply channels for the same
+// reason as replyPool. Stats() is on the observability path; not
+// hot-hot, but a sync.Pool here keeps the alloc count flat under load
+// scrapes from metrics endpoints.
+var statsReplyPool = sync.Pool{
+	New: func() any { return make(chan Stats, 1) },
+}
+
 // PoolOptions configures the per-host connection pool. Zero values
 // are replaced with sensible defaults at NewClient.
 type PoolOptions struct {
@@ -68,6 +76,12 @@ type managedConn struct {
 	active   int
 	lastUsed time.Time
 	dialedAt time.Time
+	// streamCap caches effectiveStreamCap(local, peer). Computed when the
+	// dial completes and refreshed on every health-check tick so peer
+	// SETTINGS_MAX_CONCURRENT_STREAMS changes are picked up. Without this
+	// cache, pickLeastLoaded would take c.psMu.RLock() for every conn on
+	// every acquire.
+	streamCap int
 }
 
 // acquireReq is sent on Pool.acquireCh. The actor replies on reply.
@@ -152,14 +166,27 @@ func (p *Pool) Close() error {
 
 // Stats returns a coherent snapshot of pool state. Safe to call
 // concurrently. Returns the zero Stats if the pool is closed.
+//
+// Reply channel is sourced from statsReplyPool to keep this allocation-
+// free. Recycling is safe because: (a) on the happy path we read the
+// reply before returning, leaving the channel empty; (b) on closedCh
+// the actor never received our reply chan so it cannot send on it.
 func (p *Pool) Stats() Stats {
-	reply := make(chan Stats, 1)
+	reply := statsReplyPool.Get().(chan Stats)
+	var stats Stats
 	select {
 	case p.statsCh <- reply:
-		return <-reply
+		stats = <-reply
 	case <-p.closedCh:
-		return Stats{}
 	}
+	// Defensive drain in case something landed in the buffer between
+	// recv and Put. Cheap insurance; expected to be a no-op.
+	select {
+	case <-reply:
+	default:
+	}
+	statsReplyPool.Put(reply)
+	return stats
 }
 
 // run is the actor loop. Owns p.conns, p.waiters, p.inFlightDials,
@@ -186,22 +213,26 @@ func (p *Pool) run() {
 				p.replyAcquire(req, mc, nil)
 				continue
 			}
-			// No live capacity. Maybe dial. Count only LIVE conns so a dead
-			// conn that hasn't been evicted yet doesn't block a replacement
-			// dial (BUG-1 regression guard).
+			// No live capacity. Decide between dial / waiter / immediate ErrDialBackoff.
+			// Count only LIVE conns so a dead conn that hasn't been evicted yet
+			// doesn't block a replacement dial (BUG-1 regression guard).
 			liveConns := countLive(conns)
-			if p.canDial(liveConns, inFlightDials, lastDialErrAt) {
+			atCap := liveConns+inFlightDials >= p.opts.MaxConnsPerHost
+			inBackoff := inDialBackoff(lastDialErrAt, p.opts.DialBackoff)
+
+			if !atCap && !inBackoff {
 				inFlightDials++
 				go p.dialOne()
 				waiters = append(waiters, req)
 				continue
 			}
-			// Backoff window: refuse with ErrDialBackoff if no live conn and within window.
-			if !lastDialErrAt.IsZero() && time.Since(lastDialErrAt) < p.opts.DialBackoff && liveConns == 0 && inFlightDials == 0 {
+			// At cap or in backoff: if backoff is the sole reason and there is
+			// nothing already in flight, refuse fast so callers don't block on
+			// a stalled pool. Otherwise queue and wait for capacity to free.
+			if inBackoff && liveConns == 0 && inFlightDials == 0 {
 				p.replyAcquire(req, nil, ErrDialBackoff)
 				continue
 			}
-			// At cap and saturated; queue waiter.
 			waiters = append(waiters, req)
 
 		case msg := <-p.releaseCh:
@@ -228,6 +259,7 @@ func (p *Pool) run() {
 				}
 				continue
 			}
+			p.refreshStreamCap(dr.mc)
 			conns = append(conns, dr.mc)
 			waiters = p.serveWaiters(conns, waiters)
 
@@ -242,6 +274,9 @@ func (p *Pool) run() {
 		case <-tick.C:
 			conns = p.evictIdle(conns)
 			conns = p.evictDead(conns)
+			for _, mc := range conns {
+				p.refreshStreamCap(mc)
+			}
 			waiters = pruneExpiredWaiters(waiters)
 
 		case <-p.closeCh:
@@ -272,14 +307,16 @@ func (p *Pool) replyAcquire(req acquireReq, mc *managedConn, err error) {
 
 // pickLeastLoaded returns the live, under-cap mc with smallest active
 // count, or nil if none qualifies.
+//
+// Reads mc.streamCap (cached) instead of taking c.psMu.RLock() per call.
+// The cache is refreshed in the dialDoneCh handler and on every tick.
 func (p *Pool) pickLeastLoaded(conns []*managedConn) *managedConn {
 	var best *managedConn
 	for _, mc := range conns {
 		if !mc.c.IsAlive() {
 			continue
 		}
-		streamCap := effectiveStreamCap(p.opts.MaxStreamsPerConn, mc.c.PeerMaxConcurrentStreams())
-		if mc.active >= streamCap {
+		if mc.active >= mc.streamCap {
 			continue
 		}
 		if best == nil || mc.active < best.active {
@@ -289,15 +326,11 @@ func (p *Pool) pickLeastLoaded(conns []*managedConn) *managedConn {
 	return best
 }
 
-// canDial reports whether the actor may start a new dial right now.
-func (p *Pool) canDial(connCount, inFlight int, lastErrAt time.Time) bool {
-	if connCount+inFlight >= p.opts.MaxConnsPerHost {
-		return false
-	}
-	if !lastErrAt.IsZero() && time.Since(lastErrAt) < p.opts.DialBackoff {
-		return false
-	}
-	return true
+// refreshStreamCap recomputes mc.streamCap from the conn's current peer
+// SETTINGS_MAX_CONCURRENT_STREAMS. Called by the actor on dial completion
+// and on each tick.
+func (p *Pool) refreshStreamCap(mc *managedConn) {
+	mc.streamCap = effectiveStreamCap(p.opts.MaxStreamsPerConn, mc.c.PeerMaxConcurrentStreams())
 }
 
 // dialOne is the dial helper goroutine. It dials with a fresh
@@ -521,6 +554,16 @@ func (p *Pool) release(mc *managedConn, reqErr error) {
 	}
 }
 
+
+// inDialBackoff reports whether a previous dial error is still within
+// the configured DialBackoff window. Returns false if no previous error
+// or if window <= 0.
+func inDialBackoff(lastErrAt time.Time, window time.Duration) bool {
+	if lastErrAt.IsZero() || window <= 0 {
+		return false
+	}
+	return time.Since(lastErrAt) < window
+}
 
 // effectiveStreamCap computes min(localCap, peerCap). Either may be
 // zero meaning "unbounded". Returns 100 if both are unbounded.
