@@ -12,6 +12,19 @@ import (
 	"github.com/lodgvideon/poseidon-http-client/hpack"
 )
 
+// TransportKind selects which transport strategy a Client uses.
+type TransportKind int
+
+const (
+	// TransportSingleConn is the C.1 default: at most one *conn.Conn
+	// per Client, lazy dial, conn-only auto-redial.
+	TransportSingleConn TransportKind = iota
+
+	// TransportPool routes requests through *Pool. PoolOptions
+	// must be non-nil.
+	TransportPool
+)
+
 // ClientOptions tunes a Client. Addr and ConnOpts.Dialer are required.
 type ClientOptions struct {
 	// Addr is the "host:port" target used both as the dial target and
@@ -24,7 +37,16 @@ type ClientOptions struct {
 
 	// DialBackoff suppresses repeated dial attempts within this window
 	// after a failed dial. Zero disables suppression (immediate retry).
+	// Used by TransportSingleConn. For TransportPool see PoolOptions.DialBackoff.
 	DialBackoff time.Duration
+
+	// Transport selects the transport strategy. Zero value =
+	// TransportSingleConn.
+	Transport TransportKind
+
+	// Pool is required iff Transport == TransportPool. Otherwise it
+	// MUST be nil; non-nil with TransportSingleConn is rejected.
+	Pool *PoolOptions
 }
 
 // Client is a high-level HTTP/2 client wrapping a single connection.
@@ -42,6 +64,18 @@ func NewClient(opts ClientOptions) (*Client, error) {
 	}
 	if opts.ConnOpts.Dialer == nil {
 		return nil, fmt.Errorf("client: ClientOptions.ConnOpts.Dialer is required")
+	}
+	switch opts.Transport {
+	case TransportSingleConn:
+		if opts.Pool != nil {
+			return nil, fmt.Errorf("%w: Pool must be nil for TransportSingleConn", ErrInvalidPoolOptions)
+		}
+	case TransportPool:
+		if opts.Pool == nil {
+			return nil, fmt.Errorf("%w: Pool is required for TransportPool", ErrInvalidPoolOptions)
+		}
+	default:
+		return nil, fmt.Errorf("%w: %d", ErrInvalidTransportKind, int(opts.Transport))
 	}
 	tr := &singleConn{
 		addr:     opts.Addr,
