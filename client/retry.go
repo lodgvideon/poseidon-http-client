@@ -6,6 +6,7 @@ import (
 	"errors"
 	"math/rand"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/lodgvideon/poseidon-http-client/conn"
@@ -105,8 +106,10 @@ type retryDoer interface {
 
 // Retryer wraps a transport with bounded automatic retry.
 type Retryer struct {
-	d    retryDoer
-	opts RetryOptions
+	d        retryDoer
+	opts     RetryOptions
+	hooksRef *atomic.Pointer[Hooks]
+	metrics  *Metrics
 }
 
 // NewRetryer constructs a Retryer wrapping c. Zero-value fields in
@@ -130,7 +133,7 @@ func NewRetryer(c *Client, opts RetryOptions) *Retryer {
 			return defaultBackoff(attempt, rng)
 		}
 	}
-	return &Retryer{d: c, opts: opts}
+	return &Retryer{d: c, opts: opts, hooksRef: &c.hooks, metrics: c.metrics}
 }
 
 // canRetry reports whether the Retryer should attempt more than one
@@ -149,11 +152,10 @@ func (r *Retryer) canRetry(req *Request) bool {
 	return true
 }
 
-// waitBackoff sleeps for the backoff duration before attempt i,
-// returning ctx.Err() if the context is cancelled first.
-// Returns nil immediately when backoff returns 0.
-func (r *Retryer) waitBackoff(ctx context.Context, attempt int) error {
-	wait := r.opts.Backoff(attempt)
+// sleepBackoff sleeps for wait before the next attempt, returning
+// ctx.Err() if the context is cancelled first. Returns nil immediately
+// when wait <= 0.
+func (r *Retryer) sleepBackoff(ctx context.Context, wait time.Duration) error {
 	if wait <= 0 {
 		return nil
 	}
@@ -164,6 +166,25 @@ func (r *Retryer) waitBackoff(ctx context.Context, attempt int) error {
 	case <-ctx.Done():
 		t.Stop()
 		return ctx.Err()
+	}
+}
+
+// fireRetry fires the OnRetry hook (if set) and increments the retry
+// counter. Called before the backoff sleep on every attempt > 0.
+func (r *Retryer) fireRetry(req *Request, attempt int, err error, backoff time.Duration) {
+	if r.hooksRef != nil {
+		if h := r.hooksRef.Load(); h != nil && h.OnRetry != nil {
+			h.OnRetry(RetryEvent{
+				Method:  req.Method,
+				Path:    req.Path,
+				Attempt: attempt,
+				Err:     err,
+				Backoff: backoff,
+			})
+		}
+	}
+	if r.metrics != nil {
+		r.metrics.Counters.Retries.Add(1)
 	}
 }
 
@@ -195,7 +216,9 @@ func (r *Retryer) doLoop(ctx context.Context, req *Request) (*Response, error) {
 	)
 	for attempt := 0; attempt < r.opts.MaxAttempts; attempt++ {
 		if attempt > 0 {
-			if err = r.waitBackoff(ctx, attempt); err != nil {
+			backoff := r.opts.Backoff(attempt)
+			r.fireRetry(req, attempt, err, backoff)
+			if err = r.sleepBackoff(ctx, backoff); err != nil {
 				return nil, err
 			}
 		}
@@ -237,7 +260,9 @@ func (r *Retryer) DoStream(ctx context.Context, req *Request) (*StreamResponse, 
 	)
 	for attempt := 0; attempt < r.opts.MaxAttempts; attempt++ {
 		if attempt > 0 {
-			if err = r.waitBackoff(ctx, attempt); err != nil {
+			backoff := r.opts.Backoff(attempt)
+			r.fireRetry(req, attempt, err, backoff)
+			if err = r.sleepBackoff(ctx, backoff); err != nil {
 				return nil, err
 			}
 		}

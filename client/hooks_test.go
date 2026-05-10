@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/lodgvideon/poseidon-http-client/client"
 	"github.com/lodgvideon/poseidon-http-client/conn"
@@ -144,5 +145,58 @@ func TestHooks_DoStream_OnRequestStartAndComplete(t *testing.T) {
 	}
 	if completeN.Load() != 1 {
 		t.Errorf("OnRequestComplete fired %d times, want 1", completeN.Load())
+	}
+}
+
+func TestHooks_OnRetry(t *testing.T) {
+	t.Parallel()
+	// Server: first request 503, subsequent 200.
+	var attempts atomic.Int32
+	srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		if attempts.Add(1) == 1 {
+			w.WriteHeader(503)
+			return
+		}
+		w.WriteHeader(200)
+	}))
+	srv.EnableHTTP2 = true
+	srv.StartTLS()
+	t.Cleanup(srv.Close)
+	addr := srv.Listener.Addr().String()
+
+	var retryN atomic.Int32
+	hooks := &client.Hooks{
+		OnRetry: func(e client.RetryEvent) {
+			retryN.Add(1)
+			if e.Attempt < 1 {
+				t.Errorf("retry attempt = %d, want >= 1", e.Attempt)
+			}
+		},
+	}
+
+	c, err := client.NewClient(client.ClientOptions{
+		Addr:     addr,
+		ConnOpts: conn.ConnOptions{Dialer: &conn.TLSDialer{Config: &tls.Config{InsecureSkipVerify: true}}},
+		Hooks:    hooks,
+	})
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+	defer c.Close()
+
+	r := client.NewRetryer(c, client.RetryOptions{
+		MaxAttempts: 3,
+		Backoff:     func(int) time.Duration { return 10 * time.Millisecond },
+		IsRetryable: func(_ error, resp *client.Response) bool { return resp != nil && resp.Status == 503 },
+	})
+	resp, err := r.Do(context.Background(), &client.Request{Method: "GET", Path: "/"})
+	if err != nil {
+		t.Fatalf("Retryer.Do: %v", err)
+	}
+	if resp.Status != 200 {
+		t.Errorf("status = %d, want 200", resp.Status)
+	}
+	if retryN.Load() != 1 {
+		t.Errorf("OnRetry fired %d times, want 1", retryN.Load())
 	}
 }
