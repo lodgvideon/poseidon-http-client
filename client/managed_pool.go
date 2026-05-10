@@ -298,7 +298,8 @@ func (mp *managedPool) stats() Stats {
 
 // applySet diffs old vs new active address set. Additions are no-ops
 // (sub-pools dial lazily on Acquire). Removals mark sub-pools as
-// draining and dispatch drain logic.
+// draining and dispatch drain logic. Fires OnResolverUpdate hook when
+// the set changes.
 func (mp *managedPool) applySet(next []Address) {
 	mp.mu.Lock()
 	prev := make(map[string]struct{}, len(mp.addrs))
@@ -309,21 +310,41 @@ func (mp *managedPool) applySet(next []Address) {
 	for _, a := range next {
 		nextSet[a.String()] = struct{}{}
 	}
-	var toDrain []*subPoolState
-	for key := range prev {
-		if _, ok := nextSet[key]; ok {
+	var (
+		toDrain []*subPoolState
+		added   []Address
+		removed []Address
+	)
+	for _, a := range next {
+		if _, ok := prev[a.String()]; !ok {
+			added = append(added, a)
+		}
+	}
+	for _, a := range mp.addrs {
+		if _, ok := nextSet[a.String()]; ok {
 			continue
 		}
-		if s, ok := mp.subPools[key]; ok && !s.draining {
+		removed = append(removed, a)
+		if s, ok := mp.subPools[a.String()]; ok && !s.draining {
 			s.draining = true
 			toDrain = append(toDrain, s)
 		}
 	}
 	mp.addrs = append(mp.addrs[:0:0], next...)
+	total := len(next)
 	mp.mu.Unlock()
 
 	for _, s := range toDrain {
 		mp.beginDrain(s)
+	}
+	if len(added) > 0 || len(removed) > 0 {
+		if hr := mp.hooksRef; hr != nil {
+			if h := hr.Load(); h != nil && h.OnResolverUpdate != nil {
+				h.OnResolverUpdate(ResolverUpdateEvent{
+					Added: added, Removed: removed, Total: total,
+				})
+			}
+		}
 	}
 }
 
