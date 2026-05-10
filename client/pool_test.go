@@ -435,7 +435,7 @@ func TestPool_Evict_RemovesTarget(t *testing.T) {
 	mc2 := &managedConn{c: c} // same underlying conn — just testing slice logic
 
 	conns := []*managedConn{mc1, mc2}
-	result := p.evict(conns, mc1)
+	result := p.evict(conns, mc1, CloseDead)
 	if len(result) != 1 {
 		t.Fatalf("evict result len = %d, want 1", len(result))
 	}
