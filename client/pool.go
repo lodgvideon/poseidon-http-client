@@ -258,7 +258,12 @@ func (p *Pool) run() {
 			// canDial via len(conns) and forcing a wait until the next
 			// HealthCheckPeriod tick (default 30s).
 			if !msg.mc.c.IsAlive() {
-				conns = p.evict(conns, msg.mc)
+				reason := CloseDead
+				if msg.mc.c.GoAwayReceived() {
+					reason = CloseGoAway
+					p.metrics.Counters.GoAwaysReceived.Add(1)
+				}
+				conns = p.evict(conns, msg.mc, reason)
 			}
 			waiters = p.serveWaiters(conns, waiters)
 
@@ -304,6 +309,7 @@ func (p *Pool) run() {
 			}
 			waiters = nil
 			for _, mc := range conns {
+				p.notifyClose(CloseManual)
 				_ = mc.c.Close()
 			}
 			return
@@ -419,11 +425,22 @@ func (p *Pool) serveWaiters(conns []*managedConn, waiters []acquireReq) []acquir
 	return waiters
 }
 
-// evict removes target from conns and closes its underlying conn.
-func (p *Pool) evict(conns []*managedConn, target *managedConn) []*managedConn {
+// notifyClose increments ConnsClosed and fires OnConnClose.
+func (p *Pool) notifyClose(reason CloseReason) {
+	p.metrics.Counters.ConnsClosed.Add(1)
+	if hr := p.hooksRef; hr != nil {
+		if h := hr.Load(); h != nil && h.OnConnClose != nil {
+			h.OnConnClose(ConnCloseEvent{Addr: p.addr, Reason: reason})
+		}
+	}
+}
+
+// evict removes target from conns, notifies close, and closes the conn.
+func (p *Pool) evict(conns []*managedConn, target *managedConn, reason CloseReason) []*managedConn {
 	out := conns[:0]
 	for _, mc := range conns {
 		if mc == target {
+			p.notifyClose(reason)
 			_ = mc.c.Close()
 			continue
 		}
@@ -441,6 +458,7 @@ func (p *Pool) evictIdle(conns []*managedConn) []*managedConn {
 	out := conns[:0]
 	for _, mc := range conns {
 		if mc.active == 0 && now.Sub(mc.lastUsed) > p.opts.IdleTimeout {
+			p.notifyClose(CloseIdle)
 			_ = mc.c.Close()
 			continue
 		}
@@ -454,6 +472,12 @@ func (p *Pool) evictDead(conns []*managedConn) []*managedConn {
 	out := conns[:0]
 	for _, mc := range conns {
 		if !mc.c.IsAlive() {
+			reason := CloseDead
+			if mc.c.GoAwayReceived() {
+				reason = CloseGoAway
+				p.metrics.Counters.GoAwaysReceived.Add(1)
+			}
+			p.notifyClose(reason)
 			_ = mc.c.Close()
 			continue
 		}

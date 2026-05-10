@@ -5,6 +5,7 @@ import (
 	"crypto/tls"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -238,5 +239,60 @@ func TestHooks_OnDial(t *testing.T) {
 	}
 	if dialN.Load() != 1 {
 		t.Errorf("OnDial fired %d times, want 1", dialN.Load())
+	}
+}
+
+func TestHooks_OnConnClose_Idle(t *testing.T) {
+	t.Parallel()
+	_, addr := newH2TestServer(t)
+
+	var mu sync.Mutex
+	var closeEvents []client.ConnCloseEvent
+	hooks := &client.Hooks{
+		OnConnClose: func(e client.ConnCloseEvent) {
+			mu.Lock()
+			closeEvents = append(closeEvents, e)
+			mu.Unlock()
+		},
+	}
+
+	c, err := client.NewClient(client.ClientOptions{
+		Addr:      addr,
+		ConnOpts:  conn.ConnOptions{Dialer: &conn.TLSDialer{Config: &tls.Config{InsecureSkipVerify: true}}},
+		Hooks:     hooks,
+		Transport: client.TransportPool,
+		Pool: &client.PoolOptions{
+			MaxConnsPerHost:   2,
+			IdleTimeout:       50 * time.Millisecond,
+			HealthCheckPeriod: 25 * time.Millisecond,
+		},
+	})
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+	defer c.Close()
+	if _, err := c.Do(context.Background(), &client.Request{Method: "GET", Path: "/"}); err != nil {
+		t.Fatalf("Do: %v", err)
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		mu.Lock()
+		n := len(closeEvents)
+		mu.Unlock()
+		if n >= 1 {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(closeEvents) == 0 {
+		t.Fatalf("OnConnClose never fired; expected at least 1 (idle eviction)")
+	}
+	if closeEvents[0].Reason != client.CloseIdle {
+		t.Errorf("close reason = %v, want CloseIdle", closeEvents[0].Reason)
+	}
+	if closeEvents[0].Addr != addr {
+		t.Errorf("close addr = %q, want %q", closeEvents[0].Addr, addr)
 	}
 }
