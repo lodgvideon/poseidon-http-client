@@ -174,6 +174,46 @@ func (c *Client) Do(ctx context.Context, req *Request) (*Response, error) {
 	if err := validateRequest(req); err != nil {
 		return nil, err
 	}
+	start := time.Now()
+	authority := req.Authority
+	if authority == "" {
+		authority = c.authority
+	}
+	if h := c.hooks.Load(); h != nil && h.OnRequestStart != nil {
+		h.OnRequestStart(RequestStartEvent{
+			Method: req.Method, Path: req.Path, Authority: authority, Attempt: 0,
+		})
+	}
+	c.metrics.Counters.RequestsStarted.Add(1)
+
+	resp, err := c.do(ctx, req)
+
+	latency := time.Since(start)
+	c.metrics.Latency.Request.Observe(latency)
+	var status int
+	var bytesRecv int64
+	if resp != nil {
+		status = resp.Status
+		bytesRecv = resp.BytesReceived
+	}
+	if err == nil {
+		c.metrics.Counters.RequestsSucceeded.Add(1)
+	} else {
+		c.metrics.Counters.RequestsErrored.Add(1)
+	}
+	if h := c.hooks.Load(); h != nil && h.OnRequestComplete != nil {
+		h.OnRequestComplete(RequestCompleteEvent{
+			Method: req.Method, Path: req.Path, Authority: authority,
+			Status: status, Err: err, Latency: latency,
+			BytesSent: int64(len(req.Body)), BytesRecv: bytesRecv,
+			Attempt: 0,
+		})
+	}
+	return resp, err
+}
+
+// do is the inner request transport, without hook/metric wrapping.
+func (c *Client) do(ctx context.Context, req *Request) (*Response, error) {
 	cn, release, err := c.tr.acquire(ctx)
 	if err != nil {
 		return nil, err
@@ -214,6 +254,44 @@ func (c *Client) DoStream(ctx context.Context, req *Request) (*StreamResponse, e
 	if err := validateRequest(req); err != nil {
 		return nil, err
 	}
+	start := time.Now()
+	authority := req.Authority
+	if authority == "" {
+		authority = c.authority
+	}
+	if h := c.hooks.Load(); h != nil && h.OnRequestStart != nil {
+		h.OnRequestStart(RequestStartEvent{
+			Method: req.Method, Path: req.Path, Authority: authority, Attempt: 0,
+		})
+	}
+	c.metrics.Counters.RequestsStarted.Add(1)
+
+	sr, err := c.doStream(ctx, req)
+
+	latency := time.Since(start)
+	c.metrics.Latency.Request.Observe(latency)
+	var status int
+	if sr != nil {
+		status = sr.Status
+	}
+	if err == nil {
+		c.metrics.Counters.RequestsSucceeded.Add(1)
+	} else {
+		c.metrics.Counters.RequestsErrored.Add(1)
+	}
+	if h := c.hooks.Load(); h != nil && h.OnRequestComplete != nil {
+		h.OnRequestComplete(RequestCompleteEvent{
+			Method: req.Method, Path: req.Path, Authority: authority,
+			Status: status, Err: err, Latency: latency,
+			BytesSent: int64(len(req.Body)),
+			Attempt:   0,
+		})
+	}
+	return sr, err
+}
+
+// doStream is the inner streaming transport, without hook/metric wrapping.
+func (c *Client) doStream(ctx context.Context, req *Request) (*StreamResponse, error) {
 	cn, release, err := c.tr.acquire(ctx)
 	if err != nil {
 		return nil, err

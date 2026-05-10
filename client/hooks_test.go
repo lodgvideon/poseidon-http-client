@@ -1,0 +1,148 @@
+package client_test
+
+import (
+	"context"
+	"crypto/tls"
+	"net/http"
+	"net/http/httptest"
+	"sync/atomic"
+	"testing"
+
+	"github.com/lodgvideon/poseidon-http-client/client"
+	"github.com/lodgvideon/poseidon-http-client/conn"
+)
+
+func newH2TestServer(t *testing.T) (*httptest.Server, string) {
+	t.Helper()
+	srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(200)
+	}))
+	srv.EnableHTTP2 = true
+	srv.StartTLS()
+	t.Cleanup(srv.Close)
+	return srv, srv.Listener.Addr().String()
+}
+
+func TestHooks_OnRequestStartAndComplete(t *testing.T) {
+	t.Parallel()
+	_, addr := newH2TestServer(t)
+
+	var startN, completeN atomic.Int32
+	var lastStatus atomic.Int32
+	hooks := &client.Hooks{
+		OnRequestStart: func(e client.RequestStartEvent) {
+			startN.Add(1)
+			if e.Method != "GET" || e.Path != "/x" {
+				t.Errorf("RequestStartEvent = %+v", e)
+			}
+		},
+		OnRequestComplete: func(e client.RequestCompleteEvent) {
+			completeN.Add(1)
+			lastStatus.Store(int32(e.Status))
+			if e.Latency <= 0 {
+				t.Errorf("Latency = %v, want > 0", e.Latency)
+			}
+		},
+	}
+
+	c, err := client.NewClient(client.ClientOptions{
+		Addr:     addr,
+		ConnOpts: conn.ConnOptions{Dialer: &conn.TLSDialer{Config: &tls.Config{InsecureSkipVerify: true}}},
+		Hooks:    hooks,
+	})
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+	defer c.Close()
+
+	resp, err := c.Do(context.Background(), &client.Request{Method: "GET", Path: "/x"})
+	if err != nil {
+		t.Fatalf("Do: %v", err)
+	}
+	if resp.Status != 200 {
+		t.Errorf("status = %d, want 200", resp.Status)
+	}
+	if startN.Load() != 1 {
+		t.Errorf("OnRequestStart fired %d times, want 1", startN.Load())
+	}
+	if completeN.Load() != 1 {
+		t.Errorf("OnRequestComplete fired %d times, want 1", completeN.Load())
+	}
+	if lastStatus.Load() != 200 {
+		t.Errorf("complete event status = %d, want 200", lastStatus.Load())
+	}
+}
+
+func TestHooks_NilSafe(t *testing.T) {
+	t.Parallel()
+	_, addr := newH2TestServer(t)
+	c, err := client.NewClient(client.ClientOptions{
+		Addr:     addr,
+		ConnOpts: conn.ConnOptions{Dialer: &conn.TLSDialer{Config: &tls.Config{InsecureSkipVerify: true}}},
+		// Hooks intentionally nil.
+	})
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+	defer c.Close()
+	if _, err := c.Do(context.Background(), &client.Request{Method: "GET", Path: "/"}); err != nil {
+		t.Fatalf("Do (nil hooks): %v", err)
+	}
+}
+
+func TestHooks_SetHooksAfterNewClient(t *testing.T) {
+	t.Parallel()
+	_, addr := newH2TestServer(t)
+	c, err := client.NewClient(client.ClientOptions{
+		Addr:     addr,
+		ConnOpts: conn.ConnOptions{Dialer: &conn.TLSDialer{Config: &tls.Config{InsecureSkipVerify: true}}},
+	})
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+	defer c.Close()
+
+	var n atomic.Int32
+	c.SetHooks(&client.Hooks{
+		OnRequestComplete: func(client.RequestCompleteEvent) { n.Add(1) },
+	})
+	if _, err := c.Do(context.Background(), &client.Request{Method: "GET", Path: "/"}); err != nil {
+		t.Fatalf("Do: %v", err)
+	}
+	if n.Load() != 1 {
+		t.Errorf("OnRequestComplete after SetHooks fired %d times, want 1", n.Load())
+	}
+}
+
+func TestHooks_DoStream_OnRequestStartAndComplete(t *testing.T) {
+	t.Parallel()
+	_, addr := newH2TestServer(t)
+
+	var startN, completeN atomic.Int32
+	hooks := &client.Hooks{
+		OnRequestStart:    func(client.RequestStartEvent) { startN.Add(1) },
+		OnRequestComplete: func(client.RequestCompleteEvent) { completeN.Add(1) },
+	}
+
+	c, err := client.NewClient(client.ClientOptions{
+		Addr:     addr,
+		ConnOpts: conn.ConnOptions{Dialer: &conn.TLSDialer{Config: &tls.Config{InsecureSkipVerify: true}}},
+		Hooks:    hooks,
+	})
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+	defer c.Close()
+
+	sr, err := c.DoStream(context.Background(), &client.Request{Method: "GET", Path: "/"})
+	if err != nil {
+		t.Fatalf("DoStream: %v", err)
+	}
+	_ = sr.Close()
+	if startN.Load() != 1 {
+		t.Errorf("OnRequestStart fired %d times, want 1", startN.Load())
+	}
+	if completeN.Load() != 1 {
+		t.Errorf("OnRequestComplete fired %d times, want 1", completeN.Load())
+	}
+}
