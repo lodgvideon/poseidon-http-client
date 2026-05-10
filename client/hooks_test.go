@@ -200,3 +200,43 @@ func TestHooks_OnRetry(t *testing.T) {
 		t.Errorf("OnRetry fired %d times, want 1", retryN.Load())
 	}
 }
+
+func TestHooks_OnDial(t *testing.T) {
+	t.Parallel()
+	_, addr := newH2TestServer(t)
+
+	var dialN atomic.Int32
+	hooks := &client.Hooks{
+		OnDial: func(e client.DialEvent) {
+			dialN.Add(1)
+			if e.Addr != addr {
+				t.Errorf("DialEvent.Addr = %q, want %q", e.Addr, addr)
+			}
+			if e.Duration <= 0 {
+				t.Errorf("Duration = %v, want > 0", e.Duration)
+			}
+			if e.Err != nil {
+				t.Errorf("Err = %v, want nil", e.Err)
+			}
+		},
+	}
+
+	c, err := client.NewClient(client.ClientOptions{
+		Addr:      addr,
+		ConnOpts:  conn.ConnOptions{Dialer: &conn.TLSDialer{Config: &tls.Config{InsecureSkipVerify: true}}},
+		Hooks:     hooks,
+		Transport: client.TransportPool,
+		Pool:      &client.PoolOptions{MaxConnsPerHost: 2},
+	})
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+	defer c.Close()
+
+	if _, err := c.Do(context.Background(), &client.Request{Method: "GET", Path: "/"}); err != nil {
+		t.Fatalf("Do: %v", err)
+	}
+	if dialN.Load() != 1 {
+		t.Errorf("OnDial fired %d times, want 1", dialN.Load())
+	}
+}

@@ -375,7 +375,19 @@ func (p *Pool) dialOne() {
 	}()
 	defer close(stopWatch)
 
+	dialStart := time.Now()
+	p.metrics.Counters.DialsAttempted.Add(1)
 	c, err := conn.Dial(ctx, p.addr, p.connOpts)
+	dur := time.Since(dialStart)
+	p.metrics.Latency.Dial.Observe(dur)
+	if err != nil {
+		p.metrics.Counters.DialsFailed.Add(1)
+	}
+	if hr := p.hooksRef; hr != nil {
+		if h := hr.Load(); h != nil && h.OnDial != nil {
+			h.OnDial(DialEvent{Addr: p.addr, Err: err, Duration: dur})
+		}
+	}
 	if err != nil {
 		select {
 		case p.dialDoneCh <- dialResult{err: err}:
