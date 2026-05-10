@@ -296,3 +296,71 @@ func TestHooks_OnConnClose_Idle(t *testing.T) {
 		t.Errorf("close addr = %q, want %q", closeEvents[0].Addr, addr)
 	}
 }
+
+func TestHooks_AllHooks_EndToEnd(t *testing.T) {
+	t.Parallel()
+	_, addr := newH2TestServer(t)
+
+	var (
+		startN, completeN, dialN, closeN atomic.Int32
+	)
+	hooks := &client.Hooks{
+		OnRequestStart:    func(client.RequestStartEvent)    { startN.Add(1) },
+		OnRequestComplete: func(client.RequestCompleteEvent) { completeN.Add(1) },
+		OnDial:            func(client.DialEvent)            { dialN.Add(1) },
+		OnConnClose:       func(client.ConnCloseEvent)       { closeN.Add(1) },
+	}
+
+	c, err := client.NewClient(client.ClientOptions{
+		Addr:      addr,
+		ConnOpts:  conn.ConnOptions{Dialer: &conn.TLSDialer{Config: &tls.Config{InsecureSkipVerify: true}}},
+		Hooks:     hooks,
+		Transport: client.TransportPool,
+		Pool:      &client.PoolOptions{MaxConnsPerHost: 1, MaxStreamsPerConn: 4, HealthCheckPeriod: time.Second},
+	})
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+
+	for i := 0; i < 5; i++ {
+		if _, err := c.Do(context.Background(), &client.Request{Method: "GET", Path: "/"}); err != nil {
+			t.Fatalf("Do[%d]: %v", i, err)
+		}
+	}
+	_ = c.Close()
+
+	if got := startN.Load(); got != 5 {
+		t.Errorf("OnRequestStart fired %d times, want 5", got)
+	}
+	if got := completeN.Load(); got != 5 {
+		t.Errorf("OnRequestComplete fired %d times, want 5", got)
+	}
+	if dialN.Load() != 1 {
+		t.Errorf("OnDial fired %d times, want 1", dialN.Load())
+	}
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) && closeN.Load() == 0 {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if closeN.Load() != 1 {
+		t.Errorf("OnConnClose fired %d times, want 1 (manual close)", closeN.Load())
+	}
+
+	// Verify counters.
+	snap := c.MetricsSnapshot()
+	if snap.Counters.RequestsStarted != 5 {
+		t.Errorf("RequestsStarted = %d, want 5", snap.Counters.RequestsStarted)
+	}
+	if snap.Counters.RequestsSucceeded != 5 {
+		t.Errorf("RequestsSucceeded = %d, want 5", snap.Counters.RequestsSucceeded)
+	}
+	if snap.Counters.DialsAttempted != 1 {
+		t.Errorf("DialsAttempted = %d, want 1", snap.Counters.DialsAttempted)
+	}
+	if snap.Counters.ConnsClosed != 1 {
+		t.Errorf("ConnsClosed = %d, want 1", snap.Counters.ConnsClosed)
+	}
+	if snap.Latency.Request.Count != 5 {
+		t.Errorf("Latency.Request.Count = %d, want 5", snap.Latency.Request.Count)
+	}
+}
