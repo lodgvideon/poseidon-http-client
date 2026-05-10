@@ -2,6 +2,7 @@
 package client
 
 import (
+	"math"
 	"math/bits"
 	"sync/atomic"
 	"time"
@@ -83,6 +84,8 @@ type HistogramSnapshot struct {
 }
 
 // Snapshot copies the current bucket counts, sum, and count.
+// Field-to-field consistency is best-effort; a concurrent Observe may
+// update sum and count between individual atomic Loads.
 func (h *Histogram) Snapshot() HistogramSnapshot {
 	var s HistogramSnapshot
 	for i := range h.buckets {
@@ -123,6 +126,11 @@ func (s HistogramSnapshot) Quantile(q float64) time.Duration {
 		cum += n
 		if cum >= target {
 			// Upper edge of bucket i is 2^(i+1) - 1 ns.
+			if i >= 63 {
+				// Bucket 63 is unreachable via Observe (max int64 maps to bucket 62),
+				// but guard against int64(1)<<64 overflow.
+				return time.Duration(math.MaxInt64)
+			}
 			return time.Duration((int64(1) << (i + 1)) - 1)
 		}
 	}
