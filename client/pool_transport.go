@@ -2,6 +2,7 @@ package client
 
 import (
 	"context"
+	"sync/atomic"
 
 	"github.com/lodgvideon/poseidon-http-client/conn"
 )
@@ -14,8 +15,8 @@ type poolTransport struct {
 
 // newPoolTransport constructs a poolTransport. Internal: callers go
 // through NewClient with Transport=TransportPool.
-func newPoolTransport(addr string, connOpts conn.ConnOptions, opts PoolOptions) *poolTransport {
-	return &poolTransport{p: newPool(addr, connOpts, opts)}
+func newPoolTransport(addr string, connOpts conn.ConnOptions, opts PoolOptions, hooksRef *atomic.Pointer[Hooks], metrics *Metrics) *poolTransport {
+	return &poolTransport{p: newPool(addr, connOpts, opts, hooksRef, metrics)}
 }
 
 // newPoolTransportFromPool wraps an existing *Pool. Used by tests.

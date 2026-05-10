@@ -48,6 +48,9 @@ type managedPool struct {
 	connOpts  conn.ConnOptions
 	poolOpts  PoolOptions
 
+	hooksRef *atomic.Pointer[Hooks]
+	metrics  *Metrics
+
 	mu       sync.RWMutex
 	addrs    []Address
 	subPools map[string]*subPoolState // keyed by Address.String()
@@ -61,8 +64,8 @@ type managedPool struct {
 // goroutine. It performs an initial Resolve to surface hard errors
 // early; if Resolve returns 0 addrs the pool starts empty (Acquire
 // returns ErrNoAddresses).
-func newManagedPool(r Resolver, s Selector, dm DrainMode, co conn.ConnOptions, po PoolOptions) (*managedPool, error) {
-	mp, err := buildManagedPool(r, s, dm, co, po)
+func newManagedPool(r Resolver, s Selector, dm DrainMode, co conn.ConnOptions, po PoolOptions, hooksRef *atomic.Pointer[Hooks], metrics *Metrics) (*managedPool, error) {
+	mp, err := buildManagedPool(r, s, dm, co, po, hooksRef, metrics)
 	if err != nil {
 		return nil, err
 	}
@@ -74,9 +77,12 @@ func newManagedPool(r Resolver, s Selector, dm DrainMode, co conn.ConnOptions, p
 // starting its background goroutine. Tests that need to configure
 // fields (e.g. tickerPeriod) before the goroutine reads them call
 // this and start the goroutine themselves via go mp.run().
-func buildManagedPool(r Resolver, s Selector, dm DrainMode, co conn.ConnOptions, po PoolOptions) (*managedPool, error) {
+func buildManagedPool(r Resolver, s Selector, dm DrainMode, co conn.ConnOptions, po PoolOptions, hooksRef *atomic.Pointer[Hooks], metrics *Metrics) (*managedPool, error) {
 	if s == nil {
 		s = RoundRobin()
+	}
+	if metrics == nil {
+		metrics = &Metrics{}
 	}
 	mp := &managedPool{
 		resolver:  r,
@@ -84,6 +90,8 @@ func buildManagedPool(r Resolver, s Selector, dm DrainMode, co conn.ConnOptions,
 		drainMode: dm,
 		connOpts:  co,
 		poolOpts:  po,
+		hooksRef:  hooksRef,
+		metrics:   metrics,
 		subPools:  make(map[string]*subPoolState),
 		closed:    make(chan struct{}),
 	}
@@ -142,7 +150,7 @@ func (mp *managedPool) getOrCreateSubPool(addr Address) *subPoolState {
 		return s
 	}
 	s = &subPoolState{
-		p:    newPool(key, mp.connOpts, mp.poolOpts),
+		p:    newPool(key, mp.connOpts, mp.poolOpts, mp.hooksRef, mp.metrics),
 		addr: addr,
 	}
 	mp.subPools[key] = s

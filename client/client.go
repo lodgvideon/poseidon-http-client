@@ -6,6 +6,7 @@ import (
 	"io"
 	"net"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/lodgvideon/poseidon-http-client/conn"
@@ -66,6 +67,10 @@ type ClientOptions struct {
 	// DrainMode governs sub-pool lifecycle when the Resolver removes
 	// an address. Zero value = DrainGraceful.
 	DrainMode DrainMode
+
+	// Hooks is an optional set of lifecycle callbacks. nil → no hooks
+	// fire. May be replaced at runtime via Client.SetHooks.
+	Hooks *Hooks
 }
 
 // Client is a high-level HTTP/2 client wrapping a single connection.
@@ -73,6 +78,8 @@ type ClientOptions struct {
 type Client struct {
 	tr        transport
 	authority string
+	hooks     atomic.Pointer[Hooks]
+	metrics   *Metrics
 }
 
 // NewClient validates opts and constructs a Client. It does NOT dial;
@@ -105,6 +112,7 @@ func NewClient(opts ClientOptions) (*Client, error) {
 	default:
 		return nil, fmt.Errorf("%w: %d", ErrInvalidTransportKind, int(opts.Transport))
 	}
+	metrics := &Metrics{}
 	var tr transport
 	switch opts.Transport {
 	case TransportSingleConn:
@@ -112,21 +120,33 @@ func NewClient(opts ClientOptions) (*Client, error) {
 			addr:     opts.Addr,
 			connOpts: opts.ConnOpts,
 			backoff:  opts.DialBackoff,
+			metrics:  metrics,
 		}
 	case TransportPool:
-		tr = newPoolTransport(opts.Addr, opts.ConnOpts, *opts.Pool)
+		tr = newPoolTransport(opts.Addr, opts.ConnOpts, *opts.Pool, nil, metrics)
 	case TransportManaged:
 		po := PoolOptions{}
 		if opts.Pool != nil {
 			po = *opts.Pool
 		}
-		mp, err := newManagedPool(opts.Resolver, opts.Selector, opts.DrainMode, opts.ConnOpts, po)
+		mp, err := newManagedPool(opts.Resolver, opts.Selector, opts.DrainMode, opts.ConnOpts, po, nil, metrics)
 		if err != nil {
 			return nil, err
 		}
 		tr = &managedTransport{mp: mp}
 	}
-	return &Client{tr: tr, authority: deriveAuthority(opts.Addr)}, nil
+	c := &Client{tr: tr, authority: deriveAuthority(opts.Addr), metrics: metrics}
+	c.hooks.Store(opts.Hooks)
+	// Backfill the hooks pointer into transports that cache it.
+	switch t := tr.(type) {
+	case *singleConn:
+		t.hooksRef = &c.hooks
+	case *poolTransport:
+		t.p.hooksRef = &c.hooks
+	case *managedTransport:
+		t.mp.hooksRef = &c.hooks
+	}
+	return c, nil
 }
 
 // Close releases the underlying transport. Subsequent Do/DoStream
@@ -247,6 +267,24 @@ func (c *Client) DoStream(ctx context.Context, req *Request) (*StreamResponse, e
 		sr.drained = true
 	}
 	return sr, nil
+}
+
+// SetHooks atomically replaces the active hook set. Pass nil to
+// disable hooks. Safe to call concurrently with Do/DoStream.
+func (c *Client) SetHooks(h *Hooks) {
+	c.hooks.Store(h)
+}
+
+// Metrics returns the live metrics struct. The returned pointer is
+// stable for the lifetime of the Client; do not value-copy.
+// Use MetricsSnapshot for a value-safe view.
+func (c *Client) Metrics() *Metrics {
+	return c.metrics
+}
+
+// MetricsSnapshot returns a frozen, value-copyable view of metrics.
+func (c *Client) MetricsSnapshot() MetricsSnapshot {
+	return c.metrics.Snapshot()
 }
 
 // buildHeaders assembles the on-wire HEADERS slice with pseudo-headers

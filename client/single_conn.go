@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/lodgvideon/poseidon-http-client/conn"
@@ -16,6 +17,10 @@ type singleConn struct {
 	addr     string
 	connOpts conn.ConnOptions
 	backoff  time.Duration
+
+	// hooksRef points at Client.hooks; metrics is shared with Client.
+	hooksRef *atomic.Pointer[Hooks]
+	metrics  *Metrics
 
 	mu         sync.Mutex
 	cur        *conn.Conn

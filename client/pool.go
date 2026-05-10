@@ -4,6 +4,7 @@ package client
 import (
 	"context"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/lodgvideon/poseidon-http-client/conn"
@@ -128,11 +129,16 @@ type Pool struct {
 
 	// closeOnce guards closeCh from double-close.
 	closeOnce sync.Once
+
+	// hooksRef points at Client.hooks; nil-safe via Load. metrics is
+	// shared with Client and other pools (managed sub-pools).
+	hooksRef *atomic.Pointer[Hooks]
+	metrics  *Metrics
 }
 
 // newPool constructs a Pool and starts its actor goroutine. Internal:
 // callers go through NewClient.
-func newPool(addr string, connOpts conn.ConnOptions, opts PoolOptions) *Pool {
+func newPool(addr string, connOpts conn.ConnOptions, opts PoolOptions, hooksRef *atomic.Pointer[Hooks], metrics *Metrics) *Pool {
 	if opts.MaxConnsPerHost <= 0 {
 		opts.MaxConnsPerHost = 1
 	}
@@ -145,6 +151,9 @@ func newPool(addr string, connOpts conn.ConnOptions, opts PoolOptions) *Pool {
 	if opts.DialTimeout <= 0 {
 		opts.DialTimeout = 30 * time.Second
 	}
+	if metrics == nil {
+		metrics = &Metrics{}
+	}
 	p := &Pool{
 		opts:       opts,
 		connOpts:   connOpts,
@@ -155,6 +164,8 @@ func newPool(addr string, connOpts conn.ConnOptions, opts PoolOptions) *Pool {
 		statsCh:    make(chan chan Stats),
 		closeCh:    make(chan struct{}),
 		closedCh:   make(chan struct{}),
+		hooksRef:   hooksRef,
+		metrics:    metrics,
 	}
 	go p.run()
 	return p
