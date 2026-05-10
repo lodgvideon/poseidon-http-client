@@ -21,8 +21,8 @@ type Hooks struct {
 	// returns its initial StreamResponse (or an error).
 	OnRequestComplete func(RequestCompleteEvent)
 
-	// OnRetry fires inside the Retryer between attempts after the
-	// backoff sleep returns nil.
+	// OnRetry fires inside the Retryer between attempts, before the
+	// backoff sleep. The event carries the computed backoff duration.
 	OnRetry func(RetryEvent)
 
 	// OnDial fires after a transport dial completes (success or error).

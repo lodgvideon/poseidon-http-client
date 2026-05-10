@@ -74,16 +74,12 @@ func (s *singleConn) acquire(ctx context.Context) (*conn.Conn, func(), error) {
 		s.mu.Unlock()
 
 		dialStart := time.Now()
-		if s.metrics != nil {
-			s.metrics.Counters.DialsAttempted.Add(1)
-		}
+		s.metrics.Counters.DialsAttempted.Add(1)
 		dialed, dialErr := conn.Dial(ctx, s.addr, s.connOpts)
 		dur := time.Since(dialStart)
-		if s.metrics != nil {
-			s.metrics.Latency.Dial.Observe(dur)
-			if dialErr != nil {
-				s.metrics.Counters.DialsFailed.Add(1)
-			}
+		s.metrics.Latency.Dial.Observe(dur)
+		if dialErr != nil {
+			s.metrics.Counters.DialsFailed.Add(1)
 		}
 		if hr := s.hooksRef; hr != nil {
 			if h := hr.Load(); h != nil && h.OnDial != nil {

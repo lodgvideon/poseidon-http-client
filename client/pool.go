@@ -311,8 +311,13 @@ func (p *Pool) run() {
 			}
 			waiters = nil
 			for _, mc := range conns {
-				p.notifyClose(CloseManual)
+				reason := CloseManual
+				if mc.c.GoAwayReceived() {
+					reason = CloseGoAway
+					p.metrics.Counters.GoAwaysReceived.Add(1)
+				}
 				_ = mc.c.Close()
+				p.notifyClose(reason)
 			}
 			return
 		}
@@ -442,8 +447,8 @@ func (p *Pool) evict(conns []*managedConn, target *managedConn, reason CloseReas
 	out := conns[:0]
 	for _, mc := range conns {
 		if mc == target {
-			p.notifyClose(reason)
 			_ = mc.c.Close()
+			p.notifyClose(reason)
 			continue
 		}
 		out = append(out, mc)
@@ -460,8 +465,8 @@ func (p *Pool) evictIdle(conns []*managedConn) []*managedConn {
 	out := conns[:0]
 	for _, mc := range conns {
 		if mc.active == 0 && now.Sub(mc.lastUsed) > p.opts.IdleTimeout {
-			p.notifyClose(CloseIdle)
 			_ = mc.c.Close()
+			p.notifyClose(CloseIdle)
 			continue
 		}
 		out = append(out, mc)
@@ -479,8 +484,8 @@ func (p *Pool) evictDead(conns []*managedConn) []*managedConn {
 				reason = CloseGoAway
 				p.metrics.Counters.GoAwaysReceived.Add(1)
 			}
-			p.notifyClose(reason)
 			_ = mc.c.Close()
+			p.notifyClose(reason)
 			continue
 		}
 		out = append(out, mc)
