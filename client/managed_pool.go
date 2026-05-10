@@ -310,11 +310,9 @@ func (mp *managedPool) applySet(next []Address) {
 	for _, a := range next {
 		nextSet[a.String()] = struct{}{}
 	}
-	var (
-		toDrain []*subPoolState
-		added   []Address
-		removed []Address
-	)
+	var toDrain []*subPoolState
+	added := make([]Address, 0, len(next))
+	removed := make([]Address, 0, len(mp.addrs))
 	for _, a := range next {
 		if _, ok := prev[a.String()]; !ok {
 			added = append(added, a)
