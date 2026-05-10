@@ -78,7 +78,7 @@ type ClientOptions struct {
 type Client struct {
 	tr        transport
 	authority string
-	hooks     atomic.Pointer[Hooks]
+	hooksPtr  *atomic.Pointer[Hooks]
 	metrics   *Metrics
 }
 
@@ -113,6 +113,8 @@ func NewClient(opts ClientOptions) (*Client, error) {
 		return nil, fmt.Errorf("%w: %d", ErrInvalidTransportKind, int(opts.Transport))
 	}
 	metrics := &Metrics{}
+	hooksPtr := new(atomic.Pointer[Hooks])
+	hooksPtr.Store(opts.Hooks)
 	var tr transport
 	switch opts.Transport {
 	case TransportSingleConn:
@@ -120,32 +122,23 @@ func NewClient(opts ClientOptions) (*Client, error) {
 			addr:     opts.Addr,
 			connOpts: opts.ConnOpts,
 			backoff:  opts.DialBackoff,
+			hooksRef: hooksPtr,
 			metrics:  metrics,
 		}
 	case TransportPool:
-		tr = newPoolTransport(opts.Addr, opts.ConnOpts, *opts.Pool, nil, metrics)
+		tr = newPoolTransport(opts.Addr, opts.ConnOpts, *opts.Pool, hooksPtr, metrics)
 	case TransportManaged:
 		po := PoolOptions{}
 		if opts.Pool != nil {
 			po = *opts.Pool
 		}
-		mp, err := newManagedPool(opts.Resolver, opts.Selector, opts.DrainMode, opts.ConnOpts, po, nil, metrics)
+		mp, err := newManagedPool(opts.Resolver, opts.Selector, opts.DrainMode, opts.ConnOpts, po, hooksPtr, metrics)
 		if err != nil {
 			return nil, err
 		}
 		tr = &managedTransport{mp: mp}
 	}
-	c := &Client{tr: tr, authority: deriveAuthority(opts.Addr), metrics: metrics}
-	c.hooks.Store(opts.Hooks)
-	// Backfill the hooks pointer into transports that cache it.
-	switch t := tr.(type) {
-	case *singleConn:
-		t.hooksRef = &c.hooks
-	case *poolTransport:
-		t.p.hooksRef = &c.hooks
-	case *managedTransport:
-		t.mp.hooksRef = &c.hooks
-	}
+	c := &Client{tr: tr, authority: deriveAuthority(opts.Addr), hooksPtr: hooksPtr, metrics: metrics}
 	return c, nil
 }
 
@@ -179,7 +172,7 @@ func (c *Client) Do(ctx context.Context, req *Request) (*Response, error) {
 	if authority == "" {
 		authority = c.authority
 	}
-	if h := c.hooks.Load(); h != nil && h.OnRequestStart != nil {
+	if h := c.hooksPtr.Load(); h != nil && h.OnRequestStart != nil {
 		h.OnRequestStart(RequestStartEvent{
 			Method: req.Method, Path: req.Path, Authority: authority, Attempt: 0,
 		})
@@ -201,7 +194,7 @@ func (c *Client) Do(ctx context.Context, req *Request) (*Response, error) {
 	} else {
 		c.metrics.Counters.RequestsErrored.Add(1)
 	}
-	if h := c.hooks.Load(); h != nil && h.OnRequestComplete != nil {
+	if h := c.hooksPtr.Load(); h != nil && h.OnRequestComplete != nil {
 		h.OnRequestComplete(RequestCompleteEvent{
 			Method: req.Method, Path: req.Path, Authority: authority,
 			Status: status, Err: err, Latency: latency,
@@ -259,7 +252,7 @@ func (c *Client) DoStream(ctx context.Context, req *Request) (*StreamResponse, e
 	if authority == "" {
 		authority = c.authority
 	}
-	if h := c.hooks.Load(); h != nil && h.OnRequestStart != nil {
+	if h := c.hooksPtr.Load(); h != nil && h.OnRequestStart != nil {
 		h.OnRequestStart(RequestStartEvent{
 			Method: req.Method, Path: req.Path, Authority: authority, Attempt: 0,
 		})
@@ -279,7 +272,7 @@ func (c *Client) DoStream(ctx context.Context, req *Request) (*StreamResponse, e
 	} else {
 		c.metrics.Counters.RequestsErrored.Add(1)
 	}
-	if h := c.hooks.Load(); h != nil && h.OnRequestComplete != nil {
+	if h := c.hooksPtr.Load(); h != nil && h.OnRequestComplete != nil {
 		h.OnRequestComplete(RequestCompleteEvent{
 			Method: req.Method, Path: req.Path, Authority: authority,
 			Status: status, Err: err, Latency: latency,
@@ -350,7 +343,7 @@ func (c *Client) doStream(ctx context.Context, req *Request) (*StreamResponse, e
 // SetHooks atomically replaces the active hook set. Pass nil to
 // disable hooks. Safe to call concurrently with Do/DoStream.
 func (c *Client) SetHooks(h *Hooks) {
-	c.hooks.Store(h)
+	c.hooksPtr.Store(h)
 }
 
 // Metrics returns the live metrics struct. The returned pointer is

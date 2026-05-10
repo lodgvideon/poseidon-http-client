@@ -287,7 +287,9 @@ func (p *Pool) run() {
 			// Without this, a conn that died after its last release (e.g. GOAWAY
 			// arrived after the response was read) would linger until the next
 			// HealthCheckPeriod tick.
-			conns = p.evictDead(conns)
+			// Use evictDeadSilent here to avoid firing OnConnClose hooks or
+			// bumping ConnsClosed on every metrics scrape (Stats is read-only).
+			conns = p.evictDeadSilent(conns)
 			respCh <- Stats{
 				ActiveConns:     len(conns),
 				InFlightStreams: sumActive(conns),
@@ -478,6 +480,21 @@ func (p *Pool) evictDead(conns []*managedConn) []*managedConn {
 				p.metrics.Counters.GoAwaysReceived.Add(1)
 			}
 			p.notifyClose(reason)
+			_ = mc.c.Close()
+			continue
+		}
+		out = append(out, mc)
+	}
+	return out
+}
+
+// evictDeadSilent removes conns whose IsAlive returns false without firing
+// hooks or updating counters. Used from the Stats path where eviction is
+// purely a bookkeeping cleanup, not a lifecycle event.
+func (p *Pool) evictDeadSilent(conns []*managedConn) []*managedConn {
+	out := conns[:0]
+	for _, mc := range conns {
+		if !mc.c.IsAlive() {
 			_ = mc.c.Close()
 			continue
 		}

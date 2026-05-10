@@ -133,7 +133,7 @@ func NewRetryer(c *Client, opts RetryOptions) *Retryer {
 			return defaultBackoff(attempt, rng)
 		}
 	}
-	return &Retryer{d: c, opts: opts, hooksRef: &c.hooks, metrics: c.metrics}
+	return &Retryer{d: c, opts: opts, hooksRef: c.hooksPtr, metrics: c.metrics}
 }
 
 // canRetry reports whether the Retryer should attempt more than one
