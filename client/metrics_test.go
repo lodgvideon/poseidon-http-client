@@ -132,3 +132,12 @@ func TestHistogram_QuantileEmpty(t *testing.T) {
 		t.Errorf("Mean on empty = %v, want 0", got)
 	}
 }
+
+func TestMetrics_AcquireLatencyRecorded(t *testing.T) {
+	// Tested via integration in Task 12's full-flow test; here just
+	// confirm the histogram exists and is zero by default.
+	var m Metrics
+	if m.Latency.Acquire.Snapshot().Count != 0 {
+		t.Error("acquire histogram not zero on init")
+	}
+}

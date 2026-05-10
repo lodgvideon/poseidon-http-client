@@ -528,6 +528,7 @@ func pruneExpiredWaiters(ws []acquireReq) []acquireReq {
 // active count has already been incremented by the actor. Caller MUST
 // eventually call p.release(mc, requestErr).
 func (p *Pool) acquire(ctx context.Context) (*managedConn, error) {
+	start := time.Now()
 	// Merge AcquireTimeout into ctx so that req.ctx.Done() fires on ALL
 	// abandonment paths, including AcquireTimeout. This is required for
 	// the sync.Pool channel optimisation: replyAcquire checks req.ctx.Done
@@ -577,6 +578,9 @@ func (p *Pool) acquire(ctx context.Context) (*managedConn, error) {
 	// Wait for the actor's reply.
 	select {
 	case resp := <-reply:
+		if resp.err == nil {
+			p.metrics.Latency.Acquire.Observe(time.Since(start))
+		}
 		return resp.mc, resp.err
 	case <-ctx.Done():
 		return nil, mapAcquireErr(ctx, acquireTimeoutActive)
