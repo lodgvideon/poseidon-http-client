@@ -1,9 +1,10 @@
+version: "2"
+
 run:
   timeout: 5m
-  go: '1.24'
 
 linters:
-  disable-all: true
+  default: none
   enable:
     - errcheck
     - govet
@@ -13,51 +14,47 @@ linters:
     - unconvert
     - misspell
     - gocyclo
-    - gosimple
     - unused
     - prealloc
     - ineffassign
-    - typecheck
-
-linters-settings:
-  gocyclo:
-    min-complexity: 25
-  gosec:
-    excludes:
-      # G115: integer overflow conversions (int<->uintXX) are pervasive
-      # in binary-protocol codec paths and bounded by test coverage; the
-      # heuristic produces high false-positive noise.
-      - G115
-      # G404: weak RNG. The retry layer uses math/rand for backoff
-      # jitter — the goal is anti-thundering-herd desynchronization, not
-      # cryptographic unpredictability. crypto/rand would be overkill and
-      # add allocation cost on the retry path.
-      - G404
-  govet:
-    enable-all: true
-    disable:
-      - fieldalignment
-      - shadow
-  revive:
+  settings:
+    gocyclo:
+      min-complexity: 25
+    gosec:
+      excludes:
+        # G115: integer overflow conversions (int<->uintXX) are pervasive
+        # in binary-protocol codec paths and bounded by test coverage; the
+        # heuristic produces high false-positive noise.
+        - G115
+        # G402: TLS MinVersion. Tests use default TLS config against
+        # httptest servers; production callers of TLSDialer supply their
+        # own *tls.Config. The default Go TLS floor is acceptable.
+        - G402
+        # G404: weak RNG. The retry layer uses math/rand for backoff
+        # jitter — the goal is anti-thundering-herd desynchronization, not
+        # cryptographic unpredictability. crypto/rand would be overkill and
+        # add allocation cost on the retry path.
+        - G404
+    govet:
+      enable-all: true
+      disable:
+        - fieldalignment
+        - shadow
+    revive:
+      rules:
+        - name: unused-parameter
+          disabled: true
+        - name: exported
+          arguments:
+            - disableStutteringCheck
+            - disableChecksOnConstants
+  exclusions:
     rules:
-      - name: unused-parameter
-        disabled: true
-      - name: exported
-        arguments:
-          - disableStutteringCheck
-          - disableChecksOnConstants
+      # errcheck: tolerate ignored errors in *_test.go where the test
+      # body asserts behavior via other means.
+      - path: _test\.go$
+        linters: [errcheck]
 
 issues:
-  exclude-rules:
-    # G402: TLS MinVersion. Tests pass tls.Config to dial paths and
-    # exercise both default and explicit-version flows; production
-    # callers of TLSDialer pass their own *tls.Config.
-    - linters: [gosec]
-      text: G402
-    # errcheck: tolerate ignored errors in *_test.go where the test
-    # body asserts behavior via other means.
-    - path: _test\.go
-      linters: [errcheck]
-  exclude-use-default: false
   max-issues-per-linter: 0
   max-same-issues: 0
