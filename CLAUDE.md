@@ -9,7 +9,7 @@ streams, flow control, pooling.
 
 ```bash
 make tidy        # go mod tidy
-make lint        # golangci-lint v1.64
+make lint        # golangci-lint v2.5
 make test-race   # go test -race ./... (default verification)
 make bench       # benches with bench-gate (0 B/op, 0 allocs/op enforced on frame + hpack)
 ```
@@ -49,7 +49,7 @@ peer `MAX_CONCURRENT_STREAMS` gate, GOAWAY drain, PING ACK echo.
 Next: **Phase C** — public client + connection pool + service
 discovery.
 
-## Code-style gates (golangci-lint v1.64, see `.golangci.yml`)
+## Code-style gates (golangci-lint v2.5, see `.golangci.yml`)
 
 - `revive` requires doc comments on every exported type, method,
   function, constant.
