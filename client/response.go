@@ -12,10 +12,18 @@ import (
 	"github.com/lodgvideon/poseidon-http-client/hpack"
 )
 
-// Response is the synchronous result of Client.Do. Body and Trailers
-// are nil when the corresponding Request.WantBody / WantTrailers was
-// false. Headers, Body, and Trailers are deep copies and are safe to
-// retain after Do returns.
+// Response is the synchronous result of Client.Do.
+//
+// Headers, Body, and Trailers backing bytes are valid until Reset() is
+// called; do not retain slices past that point. Callers should allocate
+// one Response per goroutine and reuse it across Do calls:
+//
+//	var resp client.Response
+//	for {
+//	    resp.Reset()
+//	    if err := c.Do(ctx, req, &resp); err != nil { ... }
+//	    use(resp.Status, resp.Headers)
+//	}
 type Response struct {
 	// Status is the integer value parsed from the :status pseudo-header.
 	Status int
@@ -29,6 +37,27 @@ type Response struct {
 	// BytesReceived is the total DATA payload received, even when
 	// Request.WantBody was false.
 	BytesReceived int64
+
+	// slabs holds pooled slab pointers that back Headers and Trailers
+	// field bytes. Storing *[]byte (not []byte) avoids heap escape when
+	// returning to conn.HeaderSlabPool via Put. Returned on Reset().
+	slabs []*[]byte
+}
+
+// Reset clears all exported fields for reuse, retaining backing arrays.
+// Any references to Headers[i].Name / .Value / Body / Trailers bytes
+// must not be used after Reset returns.
+func (r *Response) Reset() {
+	for _, sp := range r.slabs {
+		*sp = (*sp)[:0]
+		conn.HeaderSlabPool.Put(sp)
+	}
+	r.slabs = r.slabs[:0]
+	r.Status = 0
+	r.Headers = r.Headers[:0]
+	r.Body = r.Body[:0]
+	r.Trailers = r.Trailers[:0]
+	r.BytesReceived = 0
 }
 
 // EventType discriminates StreamEvent variants returned from
@@ -80,17 +109,37 @@ type StreamEvent struct {
 // HEADERS frame arrives. The caller pumps Recv for subsequent events.
 // Close MUST be called if the caller does not drain to EndStream;
 // it is idempotent and sends RST_STREAM(CANCEL) when needed.
+//
+// Callers may allocate StreamResponse once and reuse across DoStream calls;
+// sr.Close() handles slab cleanup automatically.
 type StreamResponse struct {
 	// Status is the integer value parsed from :status.
 	Status int
 	// Headers is the regular response header fields received with
-	// the initial HEADERS frame.
+	// the initial HEADERS frame. Valid until Close() is called.
 	Headers []hpack.HeaderField
 
 	stream    *conn.Stream
 	release   func()
 	closeOnce sync.Once
 	drained   bool
+
+	// slabs holds pooled slab pointers that back Headers field bytes.
+	// Storing *[]byte avoids heap escape on return to HeaderSlabPool.
+	slabs []*[]byte
+}
+
+// reset zeroes the private fields before DoStream reuses the struct.
+// The exported Headers slice backing array is retained for reuse.
+func (sr *StreamResponse) reset() {
+	sr.Status = 0
+	sr.Headers = sr.Headers[:0]
+	sr.stream = nil
+	sr.release = nil
+	sr.closeOnce = sync.Once{}
+	sr.drained = false
+	// slabs are cleaned up in Close(); reset() is only called for a
+	// struct that has been properly closed already.
 }
 
 // Recv blocks until the next event is available, the stream
@@ -141,11 +190,16 @@ func (sr *StreamResponse) Recv(ctx context.Context) (StreamEvent, error) {
 	}
 }
 
-// Close releases the stream. If neither side reached END_STREAM, the
-// underlying conn.Stream sends RST_STREAM(CANCEL). Idempotent.
+// Close releases the stream and returns any pooled header slabs.
+// If neither side reached END_STREAM, RST_STREAM(CANCEL) is sent. Idempotent.
 func (sr *StreamResponse) Close() error {
 	var closeErr error
 	sr.closeOnce.Do(func() {
+		for _, sp := range sr.slabs {
+			*sp = (*sp)[:0]
+			conn.HeaderSlabPool.Put(sp)
+		}
+		sr.slabs = sr.slabs[:0]
 		closeErr = sr.stream.Close()
 		if sr.release != nil {
 			sr.release()
@@ -159,22 +213,22 @@ func (sr *StreamResponse) Close() error {
 var ErrStreamEnded = errors.New("client: stream ended")
 
 // parseStatus extracts the integer value of the :status pseudo-header
-// from a HEADERS payload. Returns ErrEmptyResponse if absent or
-// unparseable. The returned regular slice is the input with :status
-// removed.
-func parseStatus(in []hpack.HeaderField) (status int, regular []hpack.HeaderField, err error) {
+// and appends all non-pseudo headers into *dst. Returns ErrEmptyResponse
+// if :status is absent or unparseable.
+func parseStatus(in []hpack.HeaderField, dst *[]hpack.HeaderField) (int, error) {
 	for i := range in {
 		if string(in[i].Name) == ":status" {
 			n, perr := strconv.Atoi(string(in[i].Value))
 			if perr != nil || n < 0 {
-				return 0, nil, fmt.Errorf("%w: %q",
-					ErrInvalidStatus, in[i].Value)
+				return 0, fmt.Errorf("%w: %q", ErrInvalidStatus, in[i].Value)
 			}
-			regular = make([]hpack.HeaderField, 0, len(in)-1)
-			regular = append(regular, in[:i]...)
-			regular = append(regular, in[i+1:]...)
-			return n, regular, nil
+			for j := range in {
+				if j != i {
+					*dst = append(*dst, in[j])
+				}
+			}
+			return n, nil
 		}
 	}
-	return 0, nil, ErrEmptyResponse
+	return 0, ErrEmptyResponse
 }
