@@ -57,8 +57,8 @@ func TestHooks_OnRequestStartAndComplete(t *testing.T) {
 	}
 	defer c.Close()
 
-	resp, err := c.Do(context.Background(), &client.Request{Method: "GET", Path: "/x"})
-	if err != nil {
+	var resp client.Response
+	if err := c.Do(context.Background(), &client.Request{Method: "GET", Path: "/x"}, &resp); err != nil {
 		t.Fatalf("Do: %v", err)
 	}
 	if resp.Status != 200 {
@@ -87,7 +87,8 @@ func TestHooks_NilSafe(t *testing.T) {
 		t.Fatalf("NewClient: %v", err)
 	}
 	defer c.Close()
-	if _, err := c.Do(context.Background(), &client.Request{Method: "GET", Path: "/"}); err != nil {
+	var _hookRes client.Response
+	if err := c.Do(context.Background(), &client.Request{Method: "GET", Path: "/"}, &_hookRes); err != nil {
 		t.Fatalf("Do (nil hooks): %v", err)
 	}
 }
@@ -108,7 +109,8 @@ func TestHooks_SetHooksAfterNewClient(t *testing.T) {
 	c.SetHooks(&client.Hooks{
 		OnRequestComplete: func(client.RequestCompleteEvent) { n.Add(1) },
 	})
-	if _, err := c.Do(context.Background(), &client.Request{Method: "GET", Path: "/"}); err != nil {
+	var _hookRes client.Response
+	if err := c.Do(context.Background(), &client.Request{Method: "GET", Path: "/"}, &_hookRes); err != nil {
 		t.Fatalf("Do: %v", err)
 	}
 	if n.Load() != 1 {
@@ -136,8 +138,8 @@ func TestHooks_DoStream_OnRequestStartAndComplete(t *testing.T) {
 	}
 	defer c.Close()
 
-	sr, err := c.DoStream(context.Background(), &client.Request{Method: "GET", Path: "/"})
-	if err != nil {
+	var sr client.StreamResponse
+	if err := c.DoStream(context.Background(), &client.Request{Method: "GET", Path: "/"}, &sr); err != nil {
 		t.Fatalf("DoStream: %v", err)
 	}
 	_ = sr.Close()
@@ -190,8 +192,8 @@ func TestHooks_OnRetry(t *testing.T) {
 		Backoff:     func(int) time.Duration { return 10 * time.Millisecond },
 		IsRetryable: func(_ error, resp *client.Response) bool { return resp != nil && resp.Status == 503 },
 	})
-	resp, err := r.Do(context.Background(), &client.Request{Method: "GET", Path: "/"})
-	if err != nil {
+	var resp client.Response
+	if err := r.Do(context.Background(), &client.Request{Method: "GET", Path: "/"}, &resp); err != nil {
 		t.Fatalf("Retryer.Do: %v", err)
 	}
 	if resp.Status != 200 {
@@ -234,7 +236,8 @@ func TestHooks_OnDial(t *testing.T) {
 	}
 	defer c.Close()
 
-	if _, err := c.Do(context.Background(), &client.Request{Method: "GET", Path: "/"}); err != nil {
+	var _hookRes client.Response
+	if err := c.Do(context.Background(), &client.Request{Method: "GET", Path: "/"}, &_hookRes); err != nil {
 		t.Fatalf("Do: %v", err)
 	}
 	if dialN.Load() != 1 {
@@ -271,7 +274,8 @@ func TestHooks_OnConnClose_Idle(t *testing.T) {
 		t.Fatalf("NewClient: %v", err)
 	}
 	defer c.Close()
-	if _, err := c.Do(context.Background(), &client.Request{Method: "GET", Path: "/"}); err != nil {
+	var _hookRes client.Response
+	if err := c.Do(context.Background(), &client.Request{Method: "GET", Path: "/"}, &_hookRes); err != nil {
 		t.Fatalf("Do: %v", err)
 	}
 	deadline := time.Now().Add(2 * time.Second)
@@ -323,7 +327,8 @@ func TestHooks_AllHooks_EndToEnd(t *testing.T) {
 	}
 
 	for i := 0; i < 5; i++ {
-		if _, err := c.Do(context.Background(), &client.Request{Method: "GET", Path: "/"}); err != nil {
+		var _hookRes client.Response
+	if err := c.Do(context.Background(), &client.Request{Method: "GET", Path: "/"}, &_hookRes); err != nil {
 			t.Fatalf("Do[%d]: %v", i, err)
 		}
 	}

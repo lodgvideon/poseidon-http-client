@@ -46,8 +46,8 @@ func TestRetryer_Integration_5xxRetriesViaIsRetryable(t *testing.T) {
 		},
 	})
 
-	resp, err := r.Do(context.Background(), &client.Request{Method: "GET", Path: "/"})
-	if err != nil {
+	var resp client.Response
+	if err := r.Do(context.Background(), &client.Request{Method: "GET", Path: "/"}, &resp); err != nil {
 		t.Fatalf("Do err = %v", err)
 	}
 	if resp.Status != 200 {

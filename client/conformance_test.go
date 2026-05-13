@@ -83,7 +83,8 @@ func TestConformance_RFC7540_Sec5_1_2_PoolGatesOnPeerMaxStreams(t *testing.T) {
 			defer wg.Done()
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancel()
-			if _, err := c.Do(ctx, &client.Request{Method: "GET", Path: "/"}); err != nil {
+			var _res client.Response
+			if err := c.Do(ctx, &client.Request{Method: "GET", Path: "/"}, &_res); err != nil {
 				errs <- err
 			}
 		}()
@@ -157,7 +158,8 @@ func TestConformance_RFC7540_Sec6_8_PoolEjectsDeadConnOnRelease(t *testing.T) {
 	go func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		_, err := c.Do(ctx, &client.Request{Method: "GET", Path: "/"})
+		var _res client.Response
+		err := c.Do(ctx, &client.Request{Method: "GET", Path: "/"}, &_res)
 		requestDone <- err
 	}()
 
@@ -234,7 +236,8 @@ func TestConformance_RFC7540_Sec6_8_PoolDrainsOnGoAway(t *testing.T) {
 	}
 	defer c.Close()
 
-	if _, err := c.Do(context.Background(), &client.Request{Method: "GET", Path: "/"}); err != nil {
+	var _res client.Response
+	if err := c.Do(context.Background(), &client.Request{Method: "GET", Path: "/"}, &_res); err != nil {
 		t.Fatalf("first Do = %v", err)
 	}
 

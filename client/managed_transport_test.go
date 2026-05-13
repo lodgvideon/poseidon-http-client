@@ -42,11 +42,11 @@ func TestNewClient_TransportManaged_Smoke(t *testing.T) {
 	}
 	defer c.Close()
 
-	resp, err := c.Do(context.Background(), &client.Request{
+	var resp client.Response
+	if err := c.Do(context.Background(), &client.Request{
 		Method: "GET",
 		Path:   "/",
-	})
-	if err != nil {
+	}, &resp); err != nil {
 		t.Fatalf("Do: %v", err)
 	}
 	if resp.Status != 200 {
@@ -68,8 +68,8 @@ func TestNewClient_TransportManaged_PoolStats(t *testing.T) {
 	}
 	defer c.Close()
 
-	_, err = c.Do(context.Background(), &client.Request{Method: "GET", Path: "/"})
-	if err != nil {
+	var _res client.Response
+	if err = c.Do(context.Background(), &client.Request{Method: "GET", Path: "/"}, &_res); err != nil {
 		t.Fatalf("Do: %v", err)
 	}
 	st := c.PoolStats()

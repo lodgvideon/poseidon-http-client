@@ -33,22 +33,25 @@ func benchSetup(b *testing.B, hooks *client.Hooks) (*client.Client, func()) {
 }
 
 // BenchmarkDo_NoHooks measures Do overhead with no hooks set.
+// Gate: ≤ 10 allocs/op (D.1 target). Run: make bench.
 func BenchmarkDo_NoHooks(b *testing.B) {
 	c, cleanup := benchSetup(b, nil)
 	defer cleanup()
 	req := &client.Request{Method: "GET", Path: "/"}
 	ctx := context.Background()
+	var resp client.Response
 	b.ResetTimer()
 	b.ReportAllocs()
 	for i := 0; i < b.N; i++ {
-		_, err := c.Do(ctx, req)
-		if err != nil {
+		resp.Reset()
+		if err := c.Do(ctx, req, &resp); err != nil {
 			b.Fatal(err)
 		}
 	}
 }
 
 // BenchmarkDo_WithHooks measures Do overhead with all request hooks set.
+// Gate: ≤ 10 allocs/op (D.1 target). Run: make bench.
 func BenchmarkDo_WithHooks(b *testing.B) {
 	hooks := &client.Hooks{
 		OnRequestStart:    func(client.RequestStartEvent) {},
@@ -58,11 +61,12 @@ func BenchmarkDo_WithHooks(b *testing.B) {
 	defer cleanup()
 	req := &client.Request{Method: "GET", Path: "/"}
 	ctx := context.Background()
+	var resp client.Response
 	b.ResetTimer()
 	b.ReportAllocs()
 	for i := 0; i < b.N; i++ {
-		_, err := c.Do(ctx, req)
-		if err != nil {
+		resp.Reset()
+		if err := c.Do(ctx, req, &resp); err != nil {
 			b.Fatal(err)
 		}
 	}

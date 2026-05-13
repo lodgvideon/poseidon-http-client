@@ -68,8 +68,8 @@ func TestTransportManaged_RoundRobin_DistributesDials(t *testing.T) {
 	defer c.Close()
 
 	for i := 0; i < 9; i++ {
-		resp, err := c.Do(context.Background(), &client.Request{Method: "GET", Path: "/"})
-		if err != nil {
+		var resp client.Response
+		if err := c.Do(context.Background(), &client.Request{Method: "GET", Path: "/"}, &resp); err != nil {
 			t.Fatalf("Do(%d): %v", i, err)
 		}
 		if resp.Status != 200 {
@@ -113,8 +113,8 @@ func TestTransportManaged_MultiServer_AllReachable(t *testing.T) {
 	defer c.Close()
 
 	for i := 0; i < 4; i++ {
-		resp, err := c.Do(context.Background(), &client.Request{Method: "GET", Path: "/"})
-		if err != nil {
+		var resp client.Response
+		if err := c.Do(context.Background(), &client.Request{Method: "GET", Path: "/"}, &resp); err != nil {
 			t.Fatalf("Do(%d): %v", i, err)
 		}
 		if resp.Status != 200 {
@@ -185,8 +185,8 @@ func TestTransportManaged_PoolStats_AddressCount(t *testing.T) {
 	}
 	defer c.Close()
 
-	_, err = c.Do(context.Background(), &client.Request{Method: "GET", Path: "/"})
-	if err != nil {
+	var _res client.Response
+	if err = c.Do(context.Background(), &client.Request{Method: "GET", Path: "/"}, &_res); err != nil {
 		t.Fatalf("Do: %v", err)
 	}
 
