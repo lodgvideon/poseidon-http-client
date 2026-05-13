@@ -11,7 +11,7 @@ import (
 
 func TestPoolTransport_AcquireAfterClose_ReturnsErrPoolClosed(t *testing.T) {
 	t.Parallel()
-	pt := newPoolTransport("ignored:0", conn.ConnOptions{}, PoolOptions{MaxConnsPerHost: 1})
+	pt := newPoolTransport("ignored:0", conn.ConnOptions{}, PoolOptions{MaxConnsPerHost: 1}, nil, nil)
 	if err := pt.close(); err != nil {
 		t.Fatalf("close = %v", err)
 	}

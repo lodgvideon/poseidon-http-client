@@ -14,7 +14,7 @@ import (
 
 func TestPool_Stats_Empty(t *testing.T) {
 	t.Parallel()
-	p := newPool("ignored:0", conn.ConnOptions{}, PoolOptions{MaxConnsPerHost: 2})
+	p := newPool("ignored:0", conn.ConnOptions{}, PoolOptions{MaxConnsPerHost: 2}, nil, nil)
 	t.Cleanup(func() { _ = p.Close() })
 
 	s := p.Stats()
@@ -25,7 +25,7 @@ func TestPool_Stats_Empty(t *testing.T) {
 
 func TestPool_Close_Idempotent(t *testing.T) {
 	t.Parallel()
-	p := newPool("ignored:0", conn.ConnOptions{}, PoolOptions{MaxConnsPerHost: 1})
+	p := newPool("ignored:0", conn.ConnOptions{}, PoolOptions{MaxConnsPerHost: 1}, nil, nil)
 	if err := p.Close(); err != nil {
 		t.Fatalf("first Close = %v", err)
 	}
@@ -36,7 +36,7 @@ func TestPool_Close_Idempotent(t *testing.T) {
 
 func TestPool_Stats_Concurrent(t *testing.T) {
 	t.Parallel()
-	p := newPool("ignored:0", conn.ConnOptions{}, PoolOptions{MaxConnsPerHost: 4})
+	p := newPool("ignored:0", conn.ConnOptions{}, PoolOptions{MaxConnsPerHost: 4}, nil, nil)
 	t.Cleanup(func() { _ = p.Close() })
 
 	const N = 64
@@ -53,7 +53,7 @@ func TestPool_Stats_Concurrent(t *testing.T) {
 
 func TestPool_StatsAfterClose_ReturnsZero(t *testing.T) {
 	t.Parallel()
-	p := newPool("ignored:0", conn.ConnOptions{}, PoolOptions{MaxConnsPerHost: 1})
+	p := newPool("ignored:0", conn.ConnOptions{}, PoolOptions{MaxConnsPerHost: 1}, nil, nil)
 	_ = p.Close()
 	s := p.Stats()
 	if s != (Stats{}) {
@@ -139,7 +139,7 @@ func TestInDialBackoff_ZeroWindow(t *testing.T) {
 
 func TestPool_AcquireCtxCanceledBeforeSend(t *testing.T) {
 	t.Parallel()
-	p := newPool("ignored:0", conn.ConnOptions{}, PoolOptions{MaxConnsPerHost: 1})
+	p := newPool("ignored:0", conn.ConnOptions{}, PoolOptions{MaxConnsPerHost: 1}, nil, nil)
 	t.Cleanup(func() { _ = p.Close() })
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -153,7 +153,7 @@ func TestPool_AcquireCtxCanceledBeforeSend(t *testing.T) {
 
 func TestPool_AcquireClosedChBeforeSend(t *testing.T) {
 	t.Parallel()
-	p := newPool("ignored:0", conn.ConnOptions{}, PoolOptions{MaxConnsPerHost: 1})
+	p := newPool("ignored:0", conn.ConnOptions{}, PoolOptions{MaxConnsPerHost: 1}, nil, nil)
 	// Close the pool before acquire so closedCh fires.
 	_ = p.Close()
 
@@ -174,7 +174,7 @@ func TestPool_AcquireTimeout(t *testing.T) {
 		MaxConnsPerHost: 1,
 		AcquireTimeout:  20 * time.Millisecond,
 		DialBackoff:     10 * time.Millisecond,
-	})
+	}, nil, nil)
 	t.Cleanup(func() { _ = p.Close() })
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -261,7 +261,7 @@ func TestPool_DialTimeout_FiresOnHangingDial(t *testing.T) {
 		MaxConnsPerHost: 1,
 		DialTimeout:     50 * time.Millisecond,
 		DialBackoff:     1 * time.Millisecond,
-	})
+	}, nil, nil)
 	t.Cleanup(func() {
 		close(hd.release)
 		_ = p.Close()
@@ -286,7 +286,7 @@ func TestPool_DialTimeout_FiresOnHangingDial(t *testing.T) {
 
 func TestPool_DialTimeout_DefaultedTo30s(t *testing.T) {
 	t.Parallel()
-	p := newPool("ignored:0", conn.ConnOptions{}, PoolOptions{MaxConnsPerHost: 1})
+	p := newPool("ignored:0", conn.ConnOptions{}, PoolOptions{MaxConnsPerHost: 1}, nil, nil)
 	t.Cleanup(func() { _ = p.Close() })
 	if p.opts.DialTimeout != 30*time.Second {
 		t.Fatalf("default DialTimeout = %v, want 30s", p.opts.DialTimeout)
@@ -303,7 +303,7 @@ func TestPool_DialOne_PoolCloseCancelsHangingDial(t *testing.T) {
 		// Long DialTimeout so we know cancellation came from Close,
 		// not the timeout.
 		DialTimeout: 30 * time.Second,
-	})
+	}, nil, nil)
 
 	// Trigger a dial via acquire in a goroutine so the actor calls dialOne.
 	acqErr := make(chan error, 1)
@@ -340,7 +340,7 @@ func TestPool_DialOne_PoolCloseCancelsHangingDial(t *testing.T) {
 
 func TestPool_Release_NilMC_NoOp(t *testing.T) {
 	t.Parallel()
-	p := newPool("ignored:0", conn.ConnOptions{}, PoolOptions{MaxConnsPerHost: 1})
+	p := newPool("ignored:0", conn.ConnOptions{}, PoolOptions{MaxConnsPerHost: 1}, nil, nil)
 	t.Cleanup(func() { _ = p.Close() })
 
 	// Must not panic or block.
@@ -351,7 +351,7 @@ func TestPool_Release_NilMC_NoOp(t *testing.T) {
 
 func TestPool_Release_PoolClosed_NoDeadlock(t *testing.T) {
 	t.Parallel()
-	p := newPool("ignored:0", conn.ConnOptions{}, PoolOptions{MaxConnsPerHost: 1})
+	p := newPool("ignored:0", conn.ConnOptions{}, PoolOptions{MaxConnsPerHost: 1}, nil, nil)
 	_ = p.Close()
 
 	// Synthesise a managedConn with a real *conn.Conn placeholder (nil).
@@ -383,7 +383,7 @@ func TestPool_DialOne_PoolClosedBeforeResult(t *testing.T) {
 	// dialDoneCh but must fall through to the closedCh select arm instead.
 	stopSrv := make(chan struct{})
 	d := &fakeDialer{srvAfter: func(*frame.Framer) { <-stopSrv }}
-	p := newPool("fake:0", conn.ConnOptions{Dialer: d}, PoolOptions{MaxConnsPerHost: 2})
+	p := newPool("fake:0", conn.ConnOptions{Dialer: d}, PoolOptions{MaxConnsPerHost: 2}, nil, nil)
 
 	// Close the pool immediately so closedCh is closed.
 	_ = p.Close()
@@ -428,14 +428,14 @@ func TestPool_Evict_RemovesTarget(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = c.Close() })
 
-	p := newPool("ignored:0", conn.ConnOptions{}, PoolOptions{MaxConnsPerHost: 2})
+	p := newPool("ignored:0", conn.ConnOptions{}, PoolOptions{MaxConnsPerHost: 2}, nil, nil)
 	t.Cleanup(func() { _ = p.Close() })
 
 	mc1 := &managedConn{c: c}
 	mc2 := &managedConn{c: c} // same underlying conn — just testing slice logic
 
 	conns := []*managedConn{mc1, mc2}
-	result := p.evict(conns, mc1)
+	result := p.evict(conns, mc1, CloseDead)
 	if len(result) != 1 {
 		t.Fatalf("evict result len = %d, want 1", len(result))
 	}
@@ -448,7 +448,7 @@ func TestPool_Evict_RemovesTarget(t *testing.T) {
 
 func TestPool_ReplyAcquire_CtxCancelledReturnsCredit(t *testing.T) {
 	t.Parallel()
-	p := newPool("ignored:0", conn.ConnOptions{}, PoolOptions{MaxConnsPerHost: 1})
+	p := newPool("ignored:0", conn.ConnOptions{}, PoolOptions{MaxConnsPerHost: 1}, nil, nil)
 	t.Cleanup(func() { _ = p.Close() })
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -477,7 +477,7 @@ func TestPool_DialFailure_NoWaiters_SetsBackoff(t *testing.T) {
 	p := newPool("fake:0", conn.ConnOptions{Dialer: fd}, PoolOptions{
 		MaxConnsPerHost: 1,
 		DialBackoff:     500 * time.Millisecond,
-	})
+	}, nil, nil)
 	t.Cleanup(func() { _ = p.Close() })
 
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)

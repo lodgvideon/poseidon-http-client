@@ -48,6 +48,9 @@ type managedPool struct {
 	connOpts  conn.ConnOptions
 	poolOpts  PoolOptions
 
+	hooksRef *atomic.Pointer[Hooks]
+	metrics  *Metrics
+
 	mu       sync.RWMutex
 	addrs    []Address
 	subPools map[string]*subPoolState // keyed by Address.String()
@@ -61,8 +64,8 @@ type managedPool struct {
 // goroutine. It performs an initial Resolve to surface hard errors
 // early; if Resolve returns 0 addrs the pool starts empty (Acquire
 // returns ErrNoAddresses).
-func newManagedPool(r Resolver, s Selector, dm DrainMode, co conn.ConnOptions, po PoolOptions) (*managedPool, error) {
-	mp, err := buildManagedPool(r, s, dm, co, po)
+func newManagedPool(r Resolver, s Selector, dm DrainMode, co conn.ConnOptions, po PoolOptions, hooksRef *atomic.Pointer[Hooks], metrics *Metrics) (*managedPool, error) {
+	mp, err := buildManagedPool(r, s, dm, co, po, hooksRef, metrics)
 	if err != nil {
 		return nil, err
 	}
@@ -74,9 +77,12 @@ func newManagedPool(r Resolver, s Selector, dm DrainMode, co conn.ConnOptions, p
 // starting its background goroutine. Tests that need to configure
 // fields (e.g. tickerPeriod) before the goroutine reads them call
 // this and start the goroutine themselves via go mp.run().
-func buildManagedPool(r Resolver, s Selector, dm DrainMode, co conn.ConnOptions, po PoolOptions) (*managedPool, error) {
+func buildManagedPool(r Resolver, s Selector, dm DrainMode, co conn.ConnOptions, po PoolOptions, hooksRef *atomic.Pointer[Hooks], metrics *Metrics) (*managedPool, error) {
 	if s == nil {
 		s = RoundRobin()
+	}
+	if metrics == nil {
+		metrics = &Metrics{}
 	}
 	mp := &managedPool{
 		resolver:  r,
@@ -84,6 +90,8 @@ func buildManagedPool(r Resolver, s Selector, dm DrainMode, co conn.ConnOptions,
 		drainMode: dm,
 		connOpts:  co,
 		poolOpts:  po,
+		hooksRef:  hooksRef,
+		metrics:   metrics,
 		subPools:  make(map[string]*subPoolState),
 		closed:    make(chan struct{}),
 	}
@@ -142,7 +150,7 @@ func (mp *managedPool) getOrCreateSubPool(addr Address) *subPoolState {
 		return s
 	}
 	s = &subPoolState{
-		p:    newPool(key, mp.connOpts, mp.poolOpts),
+		p:    newPool(key, mp.connOpts, mp.poolOpts, mp.hooksRef, mp.metrics),
 		addr: addr,
 	}
 	mp.subPools[key] = s
@@ -290,7 +298,8 @@ func (mp *managedPool) stats() Stats {
 
 // applySet diffs old vs new active address set. Additions are no-ops
 // (sub-pools dial lazily on Acquire). Removals mark sub-pools as
-// draining and dispatch drain logic.
+// draining and dispatch drain logic. Fires OnResolverUpdate hook when
+// the set changes.
 func (mp *managedPool) applySet(next []Address) {
 	mp.mu.Lock()
 	prev := make(map[string]struct{}, len(mp.addrs))
@@ -302,20 +311,38 @@ func (mp *managedPool) applySet(next []Address) {
 		nextSet[a.String()] = struct{}{}
 	}
 	var toDrain []*subPoolState
-	for key := range prev {
-		if _, ok := nextSet[key]; ok {
+	added := make([]Address, 0, len(next))
+	removed := make([]Address, 0, len(mp.addrs))
+	for _, a := range next {
+		if _, ok := prev[a.String()]; !ok {
+			added = append(added, a)
+		}
+	}
+	for _, a := range mp.addrs {
+		if _, ok := nextSet[a.String()]; ok {
 			continue
 		}
-		if s, ok := mp.subPools[key]; ok && !s.draining {
+		removed = append(removed, a)
+		if s, ok := mp.subPools[a.String()]; ok && !s.draining {
 			s.draining = true
 			toDrain = append(toDrain, s)
 		}
 	}
 	mp.addrs = append(mp.addrs[:0:0], next...)
+	total := len(next)
 	mp.mu.Unlock()
 
 	for _, s := range toDrain {
 		mp.beginDrain(s)
+	}
+	if len(added) > 0 || len(removed) > 0 {
+		if hr := mp.hooksRef; hr != nil {
+			if h := hr.Load(); h != nil && h.OnResolverUpdate != nil {
+				h.OnResolverUpdate(ResolverUpdateEvent{
+					Added: added, Removed: removed, Total: total,
+				})
+			}
+		}
 	}
 }
 

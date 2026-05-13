@@ -4,6 +4,7 @@ package client
 import (
 	"context"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/lodgvideon/poseidon-http-client/conn"
@@ -128,11 +129,16 @@ type Pool struct {
 
 	// closeOnce guards closeCh from double-close.
 	closeOnce sync.Once
+
+	// hooksRef points at Client.hooks; nil-safe via Load. metrics is
+	// shared with Client and other pools (managed sub-pools).
+	hooksRef *atomic.Pointer[Hooks]
+	metrics  *Metrics
 }
 
 // newPool constructs a Pool and starts its actor goroutine. Internal:
 // callers go through NewClient.
-func newPool(addr string, connOpts conn.ConnOptions, opts PoolOptions) *Pool {
+func newPool(addr string, connOpts conn.ConnOptions, opts PoolOptions, hooksRef *atomic.Pointer[Hooks], metrics *Metrics) *Pool {
 	if opts.MaxConnsPerHost <= 0 {
 		opts.MaxConnsPerHost = 1
 	}
@@ -145,6 +151,9 @@ func newPool(addr string, connOpts conn.ConnOptions, opts PoolOptions) *Pool {
 	if opts.DialTimeout <= 0 {
 		opts.DialTimeout = 30 * time.Second
 	}
+	if metrics == nil {
+		metrics = &Metrics{}
+	}
 	p := &Pool{
 		opts:       opts,
 		connOpts:   connOpts,
@@ -155,6 +164,8 @@ func newPool(addr string, connOpts conn.ConnOptions, opts PoolOptions) *Pool {
 		statsCh:    make(chan chan Stats),
 		closeCh:    make(chan struct{}),
 		closedCh:   make(chan struct{}),
+		hooksRef:   hooksRef,
+		metrics:    metrics,
 	}
 	go p.run()
 	return p
@@ -247,7 +258,12 @@ func (p *Pool) run() {
 			// canDial via len(conns) and forcing a wait until the next
 			// HealthCheckPeriod tick (default 30s).
 			if !msg.mc.c.IsAlive() {
-				conns = p.evict(conns, msg.mc)
+				reason := CloseDead
+				if msg.mc.c.GoAwayReceived() {
+					reason = CloseGoAway
+					p.metrics.Counters.GoAwaysReceived.Add(1)
+				}
+				conns = p.evict(conns, msg.mc, reason)
 			}
 			waiters = p.serveWaiters(conns, waiters)
 
@@ -271,7 +287,9 @@ func (p *Pool) run() {
 			// Without this, a conn that died after its last release (e.g. GOAWAY
 			// arrived after the response was read) would linger until the next
 			// HealthCheckPeriod tick.
-			conns = p.evictDead(conns)
+			// Use evictDeadSilent here to avoid firing OnConnClose hooks or
+			// bumping ConnsClosed on every metrics scrape (Stats is read-only).
+			conns = p.evictDeadSilent(conns)
 			respCh <- Stats{
 				ActiveConns:     len(conns),
 				InFlightStreams: sumActive(conns),
@@ -293,7 +311,13 @@ func (p *Pool) run() {
 			}
 			waiters = nil
 			for _, mc := range conns {
+				reason := CloseManual
+				if mc.c.GoAwayReceived() {
+					reason = CloseGoAway
+					p.metrics.Counters.GoAwaysReceived.Add(1)
+				}
 				_ = mc.c.Close()
+				p.notifyClose(reason)
 			}
 			return
 		}
@@ -364,7 +388,19 @@ func (p *Pool) dialOne() {
 	}()
 	defer close(stopWatch)
 
+	dialStart := time.Now()
+	p.metrics.Counters.DialsAttempted.Add(1)
 	c, err := conn.Dial(ctx, p.addr, p.connOpts)
+	dur := time.Since(dialStart)
+	p.metrics.Latency.Dial.Observe(dur)
+	if err != nil {
+		p.metrics.Counters.DialsFailed.Add(1)
+	}
+	if hr := p.hooksRef; hr != nil {
+		if h := hr.Load(); h != nil && h.OnDial != nil {
+			h.OnDial(DialEvent{Addr: p.addr, Err: err, Duration: dur})
+		}
+	}
 	if err != nil {
 		select {
 		case p.dialDoneCh <- dialResult{err: err}:
@@ -396,12 +432,23 @@ func (p *Pool) serveWaiters(conns []*managedConn, waiters []acquireReq) []acquir
 	return waiters
 }
 
-// evict removes target from conns and closes its underlying conn.
-func (p *Pool) evict(conns []*managedConn, target *managedConn) []*managedConn {
+// notifyClose increments ConnsClosed and fires OnConnClose.
+func (p *Pool) notifyClose(reason CloseReason) {
+	p.metrics.Counters.ConnsClosed.Add(1)
+	if hr := p.hooksRef; hr != nil {
+		if h := hr.Load(); h != nil && h.OnConnClose != nil {
+			h.OnConnClose(ConnCloseEvent{Addr: p.addr, Reason: reason})
+		}
+	}
+}
+
+// evict removes target from conns, notifies close, and closes the conn.
+func (p *Pool) evict(conns []*managedConn, target *managedConn, reason CloseReason) []*managedConn {
 	out := conns[:0]
 	for _, mc := range conns {
 		if mc == target {
 			_ = mc.c.Close()
+			p.notifyClose(reason)
 			continue
 		}
 		out = append(out, mc)
@@ -419,6 +466,7 @@ func (p *Pool) evictIdle(conns []*managedConn) []*managedConn {
 	for _, mc := range conns {
 		if mc.active == 0 && now.Sub(mc.lastUsed) > p.opts.IdleTimeout {
 			_ = mc.c.Close()
+			p.notifyClose(CloseIdle)
 			continue
 		}
 		out = append(out, mc)
@@ -428,6 +476,27 @@ func (p *Pool) evictIdle(conns []*managedConn) []*managedConn {
 
 // evictDead removes conns whose IsAlive returns false.
 func (p *Pool) evictDead(conns []*managedConn) []*managedConn {
+	out := conns[:0]
+	for _, mc := range conns {
+		if !mc.c.IsAlive() {
+			reason := CloseDead
+			if mc.c.GoAwayReceived() {
+				reason = CloseGoAway
+				p.metrics.Counters.GoAwaysReceived.Add(1)
+			}
+			_ = mc.c.Close()
+			p.notifyClose(reason)
+			continue
+		}
+		out = append(out, mc)
+	}
+	return out
+}
+
+// evictDeadSilent removes conns whose IsAlive returns false without firing
+// hooks or updating counters. Used from the Stats path where eviction is
+// purely a bookkeeping cleanup, not a lifecycle event.
+func (p *Pool) evictDeadSilent(conns []*managedConn) []*managedConn {
 	out := conns[:0]
 	for _, mc := range conns {
 		if !mc.c.IsAlive() {
@@ -481,6 +550,7 @@ func pruneExpiredWaiters(ws []acquireReq) []acquireReq {
 // active count has already been incremented by the actor. Caller MUST
 // eventually call p.release(mc, requestErr).
 func (p *Pool) acquire(ctx context.Context) (*managedConn, error) {
+	start := time.Now()
 	// Merge AcquireTimeout into ctx so that req.ctx.Done() fires on ALL
 	// abandonment paths, including AcquireTimeout. This is required for
 	// the sync.Pool channel optimisation: replyAcquire checks req.ctx.Done
@@ -530,6 +600,9 @@ func (p *Pool) acquire(ctx context.Context) (*managedConn, error) {
 	// Wait for the actor's reply.
 	select {
 	case resp := <-reply:
+		if resp.err == nil {
+			p.metrics.Latency.Acquire.Observe(time.Since(start))
+		}
 		return resp.mc, resp.err
 	case <-ctx.Done():
 		return nil, mapAcquireErr(ctx, acquireTimeoutActive)

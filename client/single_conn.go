@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/lodgvideon/poseidon-http-client/conn"
@@ -16,6 +17,10 @@ type singleConn struct {
 	addr     string
 	connOpts conn.ConnOptions
 	backoff  time.Duration
+
+	// hooksRef points at Client.hooks; metrics is shared with Client.
+	hooksRef *atomic.Pointer[Hooks]
+	metrics  *Metrics
 
 	mu         sync.Mutex
 	cur        *conn.Conn
@@ -68,7 +73,19 @@ func (s *singleConn) acquire(ctx context.Context) (*conn.Conn, func(), error) {
 		ch := s.dialing
 		s.mu.Unlock()
 
+		dialStart := time.Now()
+		s.metrics.Counters.DialsAttempted.Add(1)
 		dialed, dialErr := conn.Dial(ctx, s.addr, s.connOpts)
+		dur := time.Since(dialStart)
+		s.metrics.Latency.Dial.Observe(dur)
+		if dialErr != nil {
+			s.metrics.Counters.DialsFailed.Add(1)
+		}
+		if hr := s.hooksRef; hr != nil {
+			if h := hr.Load(); h != nil && h.OnDial != nil {
+				h.OnDial(DialEvent{Addr: s.addr, Err: dialErr, Duration: dur})
+			}
+		}
 
 		s.mu.Lock()
 		s.lastDialAt = time.Now()

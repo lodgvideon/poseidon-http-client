@@ -4,12 +4,14 @@ A low-level, zero-allocation HTTP/2 client for Go, designed for load
 generators. Implements RFC 7540 (HTTP/2) and RFC 7541 (HPACK) from
 scratch without `net/http` or `golang.org/x/net/http2`.
 
-**Status:** Phase C.2 — per-host connection pool with lazy-grow,
-least-loaded stream selection, idle eviction, GOAWAY-aware draining,
-and dial-backoff. Single-conn transport from C.1 remains default;
-opt in via `TransportPool`. See
+**Status:** Phase C.4 — metrics & observability. Lifecycle Hooks
+(`OnRequestStart`, `OnRequestComplete`, `OnRetry`, `OnDial`, `OnConnClose`,
+`OnResolverUpdate`), lock-free counters, and log-bucket latency histograms
+via `(*Client).Metrics()` and `(*Client).MetricsSnapshot()`. Zero overhead
+when hooks disabled. See
 [C.1 design](docs/superpowers/specs/2026-05-07-poseidon-client-c1-design.md),
-[C.2 design](docs/superpowers/specs/2026-05-08-poseidon-client-c2-pool-design.md).
+[C.2 design](docs/superpowers/specs/2026-05-08-poseidon-client-c2-pool-design.md),
+[C.3/C.4 design](docs/superpowers/specs/2026-05-09-poseidon-client-c3-c4-design.md).
 
 ## Phases
 
@@ -52,8 +54,16 @@ opt in via `TransportPool`. See
   GOAWAY-aware drain, dial backoff, and `MAX_CONCURRENT_STREAMS`
   enforcement (RFC 7540 §5.1.2, §6.8). Enable via
   `ClientOptions{Transport: client.TransportPool}`.
-- **C.3 / C.4 — discovery, stats** *(planned)*: service-discovery
-  resolver, metrics callbacks.
+- **C.3 — service discovery** *(this release)*: per-address sub-pool
+  fan-out via `Resolver` + `Selector`. Built-in `StaticResolver`,
+  `DNSResolver` with TTL cache + Watch, and `RoundRobin` / `Random` /
+  `Hash` selectors. DrainGraceful / DrainHard / DrainLazy modes.
+- **C.4 — metrics & hooks** *(this release)*: lifecycle `Hooks`
+  (`OnRequestStart`, `OnRequestComplete`, `OnRetry`, `OnDial`,
+  `OnConnClose`, `OnResolverUpdate`); lock-free counters and log-bucket
+  latency histograms exposed via `(*Client).Metrics()` and
+  `(*Client).MetricsSnapshot()`. Zero hot-path overhead when
+  `ClientOptions.Hooks == nil`.
 
 ## Quick start
 

@@ -26,3 +26,20 @@ All hot-path benchmarks: **0 B/op, 0 allocs/op**. Bench gate enforces this.
 
 - `BenchmarkHuffmanDecode_path` uses bit-by-bit linear walk over the canonical 257-entry table. RFC 7541 App. B FSM (4-bit nibbles) is a known optimisation deferred to a follow-up; the absolute ns/op target from the spec (~80 ns) is not yet met for this bench. The 0-allocs gate, the relative-regression gate, and all RFC vectors pass — correctness is unaffected.
 - GitHub Actions ubuntu-24.04 runners are noisier than this baseline; the bench-gate workflow uses **relative** comparison (benchstat alpha=0.05) against `main` to avoid false-positive flakes.
+
+## C.4 — observability path
+
+Benchmarks against an httptest h2 server (latency dominated by socket I/O,
+not by hook overhead).
+
+| Bench                  | ns/op | B/op | allocs/op |
+|------------------------|------:|-----:|----------:|
+| BenchmarkDo_NoHooks    | 111669 | 3588 | 49 |
+| BenchmarkDo_WithHooks  | 99026 | 3589 | 49 |
+
+Gate: `BenchmarkDo_NoHooks` and `BenchmarkDo_WithHooks` establish the C.4 
+baseline for the observability path. The nil-hook path vs. hook-instrumented 
+path show the hook overhead (one atomic.Load + optional two function calls for 
+OnRequestStart and OnRequestComplete). Both allocations are dominated by 
+request/response handling and HTTP/2 codec operations, not by hook dispatch 
+(which adds negligible overhead on the instrumented path).

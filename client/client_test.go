@@ -246,7 +246,7 @@ func TestSingleConn_Acquire_LazyDial(t *testing.T) {
 	d := &fakeDialer{srvAfter: func(srvFr *frame.Framer) {
 		<-stopSrv
 	}}
-	sc := &singleConn{addr: "fake:0", connOpts: conn.ConnOptions{Dialer: d}}
+	sc := &singleConn{addr: "fake:0", connOpts: conn.ConnOptions{Dialer: d}, metrics: &Metrics{}}
 	defer sc.close()
 
 	if d.dialCount.Load() != 0 {
@@ -275,7 +275,7 @@ func TestSingleConn_Acquire_ReusesAliveConn(t *testing.T) {
 	d := &fakeDialer{srvAfter: func(srvFr *frame.Framer) {
 		<-stopSrv
 	}}
-	sc := &singleConn{addr: "fake:0", connOpts: conn.ConnOptions{Dialer: d}}
+	sc := &singleConn{addr: "fake:0", connOpts: conn.ConnOptions{Dialer: d}, metrics: &Metrics{}}
 	defer sc.close()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
@@ -310,7 +310,7 @@ func TestSingleConn_Acquire_GoAwayTriggersRedial(t *testing.T) {
 		}
 		<-stopSrv
 	}}
-	sc := &singleConn{addr: "fake:0", connOpts: conn.ConnOptions{Dialer: d}}
+	sc := &singleConn{addr: "fake:0", connOpts: conn.ConnOptions{Dialer: d}, metrics: &Metrics{}}
 	defer sc.close()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
@@ -359,6 +359,7 @@ func TestSingleConn_Backoff_RefusesWithinWindow(t *testing.T) {
 		addr:     "fake:0",
 		connOpts: conn.ConnOptions{Dialer: d},
 		backoff:  500 * time.Millisecond,
+		metrics:  &Metrics{},
 	}
 	defer sc.close()
 
@@ -381,7 +382,7 @@ func TestSingleConn_Acquire_ConcurrentDial_OnlyOneDials(t *testing.T) {
 	d := &fakeDialer{srvAfter: func(srvFr *frame.Framer) {
 		<-stopSrv
 	}}
-	sc := &singleConn{addr: "fake:0", connOpts: conn.ConnOptions{Dialer: d}}
+	sc := &singleConn{addr: "fake:0", connOpts: conn.ConnOptions{Dialer: d}, metrics: &Metrics{}}
 	defer sc.close()
 
 	const N = 16
@@ -419,7 +420,7 @@ func TestSingleConn_Close_BlocksNewAcquires(t *testing.T) {
 	d := &fakeDialer{srvAfter: func(srvFr *frame.Framer) {
 		<-stopSrv
 	}}
-	sc := &singleConn{addr: "fake:0", connOpts: conn.ConnOptions{Dialer: d}}
+	sc := &singleConn{addr: "fake:0", connOpts: conn.ConnOptions{Dialer: d}, metrics: &Metrics{}}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()

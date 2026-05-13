@@ -6,6 +6,7 @@ import (
 	"io"
 	"net"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/lodgvideon/poseidon-http-client/conn"
@@ -66,6 +67,10 @@ type ClientOptions struct {
 	// DrainMode governs sub-pool lifecycle when the Resolver removes
 	// an address. Zero value = DrainGraceful.
 	DrainMode DrainMode
+
+	// Hooks is an optional set of lifecycle callbacks. nil → no hooks
+	// fire. May be replaced at runtime via Client.SetHooks.
+	Hooks *Hooks
 }
 
 // Client is a high-level HTTP/2 client wrapping a single connection.
@@ -73,6 +78,8 @@ type ClientOptions struct {
 type Client struct {
 	tr        transport
 	authority string
+	hooksPtr  *atomic.Pointer[Hooks]
+	metrics   *Metrics
 }
 
 // NewClient validates opts and constructs a Client. It does NOT dial;
@@ -105,6 +112,9 @@ func NewClient(opts ClientOptions) (*Client, error) {
 	default:
 		return nil, fmt.Errorf("%w: %d", ErrInvalidTransportKind, int(opts.Transport))
 	}
+	metrics := &Metrics{}
+	hooksPtr := new(atomic.Pointer[Hooks])
+	hooksPtr.Store(opts.Hooks)
 	var tr transport
 	switch opts.Transport {
 	case TransportSingleConn:
@@ -112,21 +122,24 @@ func NewClient(opts ClientOptions) (*Client, error) {
 			addr:     opts.Addr,
 			connOpts: opts.ConnOpts,
 			backoff:  opts.DialBackoff,
+			hooksRef: hooksPtr,
+			metrics:  metrics,
 		}
 	case TransportPool:
-		tr = newPoolTransport(opts.Addr, opts.ConnOpts, *opts.Pool)
+		tr = newPoolTransport(opts.Addr, opts.ConnOpts, *opts.Pool, hooksPtr, metrics)
 	case TransportManaged:
 		po := PoolOptions{}
 		if opts.Pool != nil {
 			po = *opts.Pool
 		}
-		mp, err := newManagedPool(opts.Resolver, opts.Selector, opts.DrainMode, opts.ConnOpts, po)
+		mp, err := newManagedPool(opts.Resolver, opts.Selector, opts.DrainMode, opts.ConnOpts, po, hooksPtr, metrics)
 		if err != nil {
 			return nil, err
 		}
 		tr = &managedTransport{mp: mp}
 	}
-	return &Client{tr: tr, authority: deriveAuthority(opts.Addr)}, nil
+	c := &Client{tr: tr, authority: deriveAuthority(opts.Addr), hooksPtr: hooksPtr, metrics: metrics}
+	return c, nil
 }
 
 // Close releases the underlying transport. Subsequent Do/DoStream
@@ -154,6 +167,46 @@ func (c *Client) Do(ctx context.Context, req *Request) (*Response, error) {
 	if err := validateRequest(req); err != nil {
 		return nil, err
 	}
+	start := time.Now()
+	authority := req.Authority
+	if authority == "" {
+		authority = c.authority
+	}
+	if h := c.hooksPtr.Load(); h != nil && h.OnRequestStart != nil {
+		h.OnRequestStart(RequestStartEvent{
+			Method: req.Method, Path: req.Path, Authority: authority, Attempt: 0,
+		})
+	}
+	c.metrics.Counters.RequestsStarted.Add(1)
+
+	resp, err := c.do(ctx, req)
+
+	latency := time.Since(start)
+	c.metrics.Latency.Request.Observe(latency)
+	var status int
+	var bytesRecv int64
+	if resp != nil {
+		status = resp.Status
+		bytesRecv = resp.BytesReceived
+	}
+	if err == nil {
+		c.metrics.Counters.RequestsSucceeded.Add(1)
+	} else {
+		c.metrics.Counters.RequestsErrored.Add(1)
+	}
+	if h := c.hooksPtr.Load(); h != nil && h.OnRequestComplete != nil {
+		h.OnRequestComplete(RequestCompleteEvent{
+			Method: req.Method, Path: req.Path, Authority: authority,
+			Status: status, Err: err, Latency: latency,
+			BytesSent: int64(len(req.Body)), BytesRecv: bytesRecv,
+			Attempt: 0,
+		})
+	}
+	return resp, err
+}
+
+// do is the inner request transport, without hook/metric wrapping.
+func (c *Client) do(ctx context.Context, req *Request) (*Response, error) {
 	cn, release, err := c.tr.acquire(ctx)
 	if err != nil {
 		return nil, err
@@ -194,6 +247,44 @@ func (c *Client) DoStream(ctx context.Context, req *Request) (*StreamResponse, e
 	if err := validateRequest(req); err != nil {
 		return nil, err
 	}
+	start := time.Now()
+	authority := req.Authority
+	if authority == "" {
+		authority = c.authority
+	}
+	if h := c.hooksPtr.Load(); h != nil && h.OnRequestStart != nil {
+		h.OnRequestStart(RequestStartEvent{
+			Method: req.Method, Path: req.Path, Authority: authority, Attempt: 0,
+		})
+	}
+	c.metrics.Counters.RequestsStarted.Add(1)
+
+	sr, err := c.doStream(ctx, req)
+
+	latency := time.Since(start)
+	c.metrics.Latency.Request.Observe(latency)
+	var status int
+	if sr != nil {
+		status = sr.Status
+	}
+	if err == nil {
+		c.metrics.Counters.RequestsSucceeded.Add(1)
+	} else {
+		c.metrics.Counters.RequestsErrored.Add(1)
+	}
+	if h := c.hooksPtr.Load(); h != nil && h.OnRequestComplete != nil {
+		h.OnRequestComplete(RequestCompleteEvent{
+			Method: req.Method, Path: req.Path, Authority: authority,
+			Status: status, Err: err, Latency: latency,
+			BytesSent: int64(len(req.Body)),
+			Attempt:   0,
+		})
+	}
+	return sr, err
+}
+
+// doStream is the inner streaming transport, without hook/metric wrapping.
+func (c *Client) doStream(ctx context.Context, req *Request) (*StreamResponse, error) {
 	cn, release, err := c.tr.acquire(ctx)
 	if err != nil {
 		return nil, err
@@ -247,6 +338,24 @@ func (c *Client) DoStream(ctx context.Context, req *Request) (*StreamResponse, e
 		sr.drained = true
 	}
 	return sr, nil
+}
+
+// SetHooks atomically replaces the active hook set. Pass nil to
+// disable hooks. Safe to call concurrently with Do/DoStream.
+func (c *Client) SetHooks(h *Hooks) {
+	c.hooksPtr.Store(h)
+}
+
+// Metrics returns the live metrics struct. The returned pointer is
+// stable for the lifetime of the Client; do not value-copy.
+// Use MetricsSnapshot for a value-safe view.
+func (c *Client) Metrics() *Metrics {
+	return c.metrics
+}
+
+// MetricsSnapshot returns a frozen, value-copyable view of metrics.
+func (c *Client) MetricsSnapshot() MetricsSnapshot {
+	return c.metrics.Snapshot()
 }
 
 // buildHeaders assembles the on-wire HEADERS slice with pseudo-headers

@@ -84,6 +84,7 @@ func TestManagedPool_StaticResolver_RoundRobin_DistributesDials(t *testing.T) {
 		DrainGraceful,
 		newConnOpts(),
 		PoolOptions{MaxConnsPerHost: 1, MaxStreamsPerConn: 4, HealthCheckPeriod: time.Second},
+		nil, nil,
 	)
 	if err != nil {
 		t.Fatalf("newManagedPool: %v", err)
@@ -118,6 +119,7 @@ func TestManagedPool_NoAddresses_ReturnsErrNoAddresses(t *testing.T) {
 		DrainGraceful,
 		newConnOpts(),
 		PoolOptions{MaxConnsPerHost: 1},
+		nil, nil,
 	)
 	if err != nil {
 		t.Fatalf("newManagedPool: %v", err)
@@ -182,7 +184,7 @@ func TestManagedPool_Watch_AddedAddress_PickedUp(t *testing.T) {
 
 	res := newScriptedResolver([]Address{addrs[0]})
 	mp, err := newManagedPool(res, RoundRobin(), DrainGraceful, newConnOpts(),
-		PoolOptions{MaxConnsPerHost: 1, MaxStreamsPerConn: 4, HealthCheckPeriod: time.Second})
+		PoolOptions{MaxConnsPerHost: 1, MaxStreamsPerConn: 4, HealthCheckPeriod: time.Second}, nil, nil)
 	if err != nil {
 		t.Fatalf("newManagedPool: %v", err)
 	}
@@ -209,7 +211,7 @@ func TestManagedPool_DrainGraceful_RemovedAddress_KeepsInFlight(t *testing.T) {
 
 	res := newScriptedResolver(addrs)
 	mp, err := newManagedPool(res, RoundRobin(), DrainGraceful, newConnOpts(),
-		PoolOptions{MaxConnsPerHost: 1, MaxStreamsPerConn: 4, HealthCheckPeriod: time.Second})
+		PoolOptions{MaxConnsPerHost: 1, MaxStreamsPerConn: 4, HealthCheckPeriod: time.Second}, nil, nil)
 	if err != nil {
 		t.Fatalf("newManagedPool: %v", err)
 	}
@@ -269,7 +271,7 @@ func TestManagedPool_DrainHard_RemovedAddress_ClosesImmediately(t *testing.T) {
 
 	res := newScriptedResolver(addrs)
 	mp, err := newManagedPool(res, RoundRobin(), DrainHard, newConnOpts(),
-		PoolOptions{MaxConnsPerHost: 1, MaxStreamsPerConn: 4, HealthCheckPeriod: time.Second})
+		PoolOptions{MaxConnsPerHost: 1, MaxStreamsPerConn: 4, HealthCheckPeriod: time.Second}, nil, nil)
 	if err != nil {
 		t.Fatalf("newManagedPool: %v", err)
 	}
@@ -303,7 +305,7 @@ func TestManagedPool_DrainLazy_RemovedAddress_RetainsSubPool(t *testing.T) {
 
 	res := newScriptedResolver(addrs)
 	mp, err := newManagedPool(res, RoundRobin(), DrainLazy, newConnOpts(),
-		PoolOptions{MaxConnsPerHost: 1, MaxStreamsPerConn: 4, HealthCheckPeriod: 100 * time.Millisecond})
+		PoolOptions{MaxConnsPerHost: 1, MaxStreamsPerConn: 4, HealthCheckPeriod: 100 * time.Millisecond}, nil, nil)
 	if err != nil {
 		t.Fatalf("newManagedPool: %v", err)
 	}
@@ -384,7 +386,7 @@ func TestManagedPool_WatchUnsupported_FallsBackToTicker(t *testing.T) {
 	// Use buildManagedPool so we can set the test seam before the
 	// background goroutine starts reading tickerPeriod.
 	mp, err := buildManagedPool(res, RoundRobin(), DrainGraceful, newConnOpts(),
-		PoolOptions{MaxConnsPerHost: 1, MaxStreamsPerConn: 4, HealthCheckPeriod: time.Second})
+		PoolOptions{MaxConnsPerHost: 1, MaxStreamsPerConn: 4, HealthCheckPeriod: time.Second}, nil, nil)
 	if err != nil {
 		t.Fatalf("buildManagedPool: %v", err)
 	}
@@ -410,7 +412,7 @@ func TestManagedPool_StatsAggregation_SumsAcrossSubPools(t *testing.T) {
 	defer cleanup()
 
 	mp, err := newManagedPool(StaticResolver(addrs...), RoundRobin(), DrainGraceful, newConnOpts(),
-		PoolOptions{MaxConnsPerHost: 1, MaxStreamsPerConn: 4, HealthCheckPeriod: time.Second})
+		PoolOptions{MaxConnsPerHost: 1, MaxStreamsPerConn: 4, HealthCheckPeriod: time.Second}, nil, nil)
 	if err != nil {
 		t.Fatalf("newManagedPool: %v", err)
 	}
@@ -445,7 +447,7 @@ func TestManagedPool_Close_NoGoroutineLeak(t *testing.T) {
 
 	before := runtime.NumGoroutine()
 	mp, err := newManagedPool(StaticResolver(addrs...), RoundRobin(), DrainGraceful, newConnOpts(),
-		PoolOptions{MaxConnsPerHost: 1, MaxStreamsPerConn: 4, HealthCheckPeriod: time.Second})
+		PoolOptions{MaxConnsPerHost: 1, MaxStreamsPerConn: 4, HealthCheckPeriod: time.Second}, nil, nil)
 	if err != nil {
 		t.Fatalf("newManagedPool: %v", err)
 	}

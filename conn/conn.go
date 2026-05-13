@@ -230,6 +230,12 @@ func (c *Conn) IsAlive() bool {
 	return !c.closed.Load() && !c.goAwayReceived.Load()
 }
 
+// GoAwayReceived reports whether the peer has sent a GOAWAY frame.
+// Used by upstream pools to distinguish CloseGoAway from CloseDead.
+func (c *Conn) GoAwayReceived() bool {
+	return c.goAwayReceived.Load()
+}
+
 // PeerMaxConcurrentStreams returns the peer-advertised
 // SETTINGS_MAX_CONCURRENT_STREAMS, or 0 if the peer has not
 // advertised a value. Callers that intend to gate stream
