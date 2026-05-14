@@ -6,6 +6,7 @@ import (
 	"io"
 	"net"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -162,10 +163,12 @@ func (c *Client) PoolStats() Stats {
 	return Stats{}
 }
 
-// Do issues a synchronous request and returns a fully-buffered Response.
-func (c *Client) Do(ctx context.Context, req *Request) (*Response, error) {
+// Do issues a synchronous request and writes the result into resp.
+// The caller must allocate resp once and call resp.Reset() before each reuse.
+// On error, resp fields are undefined; call resp.Reset() before reuse regardless.
+func (c *Client) Do(ctx context.Context, req *Request, resp *Response) error {
 	if err := validateRequest(req); err != nil {
-		return nil, err
+		return err
 	}
 	start := time.Now()
 	authority := req.Authority
@@ -179,13 +182,13 @@ func (c *Client) Do(ctx context.Context, req *Request) (*Response, error) {
 	}
 	c.metrics.Counters.RequestsStarted.Add(1)
 
-	resp, err := c.do(ctx, req)
+	err := c.do(ctx, req, resp)
 
 	latency := time.Since(start)
 	c.metrics.Latency.Request.Observe(latency)
 	var status int
 	var bytesRecv int64
-	if resp != nil {
+	if err == nil {
 		status = resp.Status
 		bytesRecv = resp.BytesReceived
 	}
@@ -202,51 +205,55 @@ func (c *Client) Do(ctx context.Context, req *Request) (*Response, error) {
 			Attempt: 0,
 		})
 	}
-	return resp, err
+	return err
 }
 
 // do is the inner request transport, without hook/metric wrapping.
-func (c *Client) do(ctx context.Context, req *Request) (*Response, error) {
+func (c *Client) do(ctx context.Context, req *Request, resp *Response) error {
 	cn, release, err := c.tr.acquire(ctx)
 	if err != nil {
-		return nil, err
+		return err
 	}
 	defer release()
 
 	s, err := cn.NewStream(ctx)
 	if err != nil {
-		return nil, err
+		return err
 	}
 
-	hdrs := buildHeaders(req, c.authority)
+	hdrs, putHdrs := buildHeaders(req, c.authority)
 	endStream := len(req.Body) == 0 && req.BodyReader == nil
 	if err := s.SendHeaders(ctx, hdrs, endStream); err != nil {
+		putHdrs()
 		_ = s.Close()
-		return nil, err
+		return err
 	}
+	putHdrs()
 
 	if !endStream {
 		if err := writeRequestBody(ctx, s, req); err != nil {
 			_ = s.Close()
-			return nil, err
+			return err
 		}
 	}
 
-	resp, err := drainResponse(ctx, s, req)
-	if err != nil {
-		_ = s.Close()
-	}
-	return resp, err
+	err = drainResponse(ctx, s, req, resp)
+	_ = s.Close() // recycles stream when both sides ended
+	return err
 }
 
 // DoStream issues a request and returns once the initial HEADERS frame
 // has arrived. The caller pumps StreamResponse.Recv for subsequent
 // DATA / trailers / reset events. The caller MUST call
 // StreamResponse.Close if it does not drain the stream.
-func (c *Client) DoStream(ctx context.Context, req *Request) (*StreamResponse, error) {
+//
+// The caller may allocate StreamResponse once and reuse it across calls;
+// DoStream calls sr.reset() internally before populating fields.
+func (c *Client) DoStream(ctx context.Context, req *Request, sr *StreamResponse) error {
 	if err := validateRequest(req); err != nil {
-		return nil, err
+		return err
 	}
+	sr.reset()
 	start := time.Now()
 	authority := req.Authority
 	if authority == "" {
@@ -259,12 +266,12 @@ func (c *Client) DoStream(ctx context.Context, req *Request) (*StreamResponse, e
 	}
 	c.metrics.Counters.RequestsStarted.Add(1)
 
-	sr, err := c.doStream(ctx, req)
+	err := c.doStream(ctx, req, sr)
 
 	latency := time.Since(start)
 	c.metrics.Latency.Request.Observe(latency)
 	var status int
-	if sr != nil {
+	if err == nil {
 		status = sr.Status
 	}
 	if err == nil {
@@ -280,34 +287,37 @@ func (c *Client) DoStream(ctx context.Context, req *Request) (*StreamResponse, e
 			Attempt:   0,
 		})
 	}
-	return sr, err
+	return err
 }
 
 // doStream is the inner streaming transport, without hook/metric wrapping.
-func (c *Client) doStream(ctx context.Context, req *Request) (*StreamResponse, error) {
+func (c *Client) doStream(ctx context.Context, req *Request, sr *StreamResponse) error {
 	cn, release, err := c.tr.acquire(ctx)
 	if err != nil {
-		return nil, err
+		return err
 	}
 
 	s, err := cn.NewStream(ctx)
 	if err != nil {
 		release()
-		return nil, err
+		return err
 	}
 
-	hdrs := buildHeaders(req, c.authority)
+	hdrs, putHdrs := buildHeaders(req, c.authority)
 	endStream := len(req.Body) == 0 && req.BodyReader == nil
 	if err := s.SendHeaders(ctx, hdrs, endStream); err != nil {
+		putHdrs()
 		_ = s.Close()
 		release()
-		return nil, err
+		return err
 	}
+	putHdrs()
+
 	if !endStream {
 		if err := writeRequestBody(ctx, s, req); err != nil {
 			_ = s.Close()
 			release()
-			return nil, err
+			return err
 		}
 	}
 
@@ -315,29 +325,29 @@ func (c *Client) doStream(ctx context.Context, req *Request) (*StreamResponse, e
 	if err != nil {
 		_ = s.Close()
 		release()
-		return nil, err
+		return err
 	}
 	if ev.Type != conn.EventHeaders {
 		_ = s.Close()
 		release()
-		return nil, fmt.Errorf("client: expected initial HEADERS, got %s", ev.Type)
+		return fmt.Errorf("client: expected initial HEADERS, got %s", ev.Type)
 	}
-	status, regular, perr := parseStatus(ev.Headers)
+	n, perr := parseStatus(ev.Headers, &sr.Headers)
 	if perr != nil {
 		_ = s.Close()
 		release()
-		return nil, perr
+		return perr
 	}
-	sr := &StreamResponse{
-		Status:  status,
-		Headers: regular,
-		stream:  s,
-		release: release,
+	sr.Status = n
+	if ev.Slab != nil {
+		sr.slabs = append(sr.slabs, ev.Slab) // transfer slab ownership
 	}
+	sr.stream = s
+	sr.release = release
 	if ev.EndStream {
 		sr.drained = true
 	}
-	return sr, nil
+	return nil
 }
 
 // SetHooks atomically replaces the active hook set. Pass nil to
@@ -358,10 +368,29 @@ func (c *Client) MetricsSnapshot() MetricsSnapshot {
 	return c.metrics.Snapshot()
 }
 
+// Pseudo-header name bytes. The HPACK encoder reads these but never
+// mutates them, so sharing across concurrent callers is safe.
+var (
+	hdrMethod    = []byte(":method")
+	hdrScheme    = []byte(":scheme")
+	hdrAuthority = []byte(":authority")
+	hdrPath      = []byte(":path")
+)
+
+// hdrSlicePool recycles the []hpack.HeaderField backing array used by
+// buildHeaders. EncodeBlock is synchronous, so the slice is safe to
+// return immediately after SendHeaders returns.
+var hdrSlicePool = sync.Pool{
+	New: func() any {
+		s := make([]hpack.HeaderField, 0, 8)
+		return &s
+	},
+}
+
 // buildHeaders assembles the on-wire HEADERS slice with pseudo-headers
-// first. The returned slice is a fresh allocation; caller-supplied
-// req.Headers entries are referenced by value.
-func buildHeaders(req *Request, defaultAuthority string) []hpack.HeaderField {
+// first. Returns the slice and a put function; caller MUST call put()
+// after SendHeaders returns to return the slice to the pool.
+func buildHeaders(req *Request, defaultAuthority string) ([]hpack.HeaderField, func()) {
 	scheme := req.Scheme
 	if scheme == "" {
 		scheme = "https"
@@ -370,15 +399,19 @@ func buildHeaders(req *Request, defaultAuthority string) []hpack.HeaderField {
 	if authority == "" {
 		authority = defaultAuthority
 	}
-	out := make([]hpack.HeaderField, 0, 4+len(req.Headers))
-	out = append(out,
-		hpack.HeaderField{Name: []byte(":method"), Value: []byte(req.Method)},
-		hpack.HeaderField{Name: []byte(":scheme"), Value: []byte(scheme)},
-		hpack.HeaderField{Name: []byte(":authority"), Value: []byte(authority)},
-		hpack.HeaderField{Name: []byte(":path"), Value: []byte(req.Path)},
+	sp := hdrSlicePool.Get().(*[]hpack.HeaderField)
+	*sp = (*sp)[:0]
+	*sp = append(*sp,
+		hpack.HeaderField{Name: hdrMethod, Value: []byte(req.Method)},
+		hpack.HeaderField{Name: hdrScheme, Value: []byte(scheme)},
+		hpack.HeaderField{Name: hdrAuthority, Value: []byte(authority)},
+		hpack.HeaderField{Name: hdrPath, Value: []byte(req.Path)},
 	)
-	out = append(out, req.Headers...)
-	return out
+	*sp = append(*sp, req.Headers...)
+	return *sp, func() {
+		*sp = (*sp)[:0]
+		hdrSlicePool.Put(sp)
+	}
 }
 
 // writeRequestBody writes Body or BodyReader as DATA frames, ending
@@ -422,38 +455,33 @@ func writeBodyReader(ctx context.Context, s *conn.Stream, r io.Reader) error {
 }
 
 // drainResponse pumps stream events until the response side ends or
-// the stream resets.
-func drainResponse(ctx context.Context, s *conn.Stream, req *Request) (*Response, error) {
-	var (
-		gotHeaders bool
-		resp       Response
-	)
+// the stream resets, writing into resp in place.
+func drainResponse(ctx context.Context, s *conn.Stream, req *Request, resp *Response) error {
+	var gotHeaders bool
 	for {
 		ev, err := s.Recv(ctx)
 		if err != nil {
-			return nil, err
+			return err
 		}
 		switch ev.Type {
 		case conn.EventHeaders:
-			// The conn package now copies header fields per-event, so
-			// ev.Headers is owned by the event and safe to retain.
 			if gotHeaders {
-				// Spurious second HEADERS without trailer flag — peer
-				// protocol oddity. Skip.
 				if ev.EndStream {
-					return &resp, nil
+					return nil
 				}
 				continue
 			}
-			status, regular, perr := parseStatus(ev.Headers)
+			n, perr := parseStatus(ev.Headers, &resp.Headers)
 			if perr != nil {
-				return nil, perr
+				return perr
 			}
-			resp.Status = status
-			resp.Headers = regular
+			resp.Status = n
+			if ev.Slab != nil {
+				resp.slabs = append(resp.slabs, ev.Slab)
+			}
 			gotHeaders = true
 			if ev.EndStream {
-				return &resp, nil
+				return nil
 			}
 		case conn.EventData:
 			resp.BytesReceived += int64(len(ev.Data))
@@ -461,17 +489,20 @@ func drainResponse(ctx context.Context, s *conn.Stream, req *Request) (*Response
 				resp.Body = append(resp.Body, ev.Data...)
 			}
 			if ev.EndStream {
-				return &resp, nil
+				return nil
 			}
 		case conn.EventTrailers:
 			if req.WantTrailers {
-				resp.Trailers = ev.Headers
+				resp.Trailers = append(resp.Trailers, ev.Headers...)
+				if ev.Slab != nil {
+					resp.slabs = append(resp.slabs, ev.Slab)
+				}
 			}
 			if ev.EndStream {
-				return &resp, nil
+				return nil
 			}
 		case conn.EventReset:
-			return nil, &StreamResetError{Code: ev.RSTCode}
+			return &StreamResetError{Code: ev.RSTCode}
 		}
 	}
 }

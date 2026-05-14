@@ -37,15 +37,23 @@ func (t StreamEventType) String() string {
 }
 
 // StreamEvent is one observation about an in-flight stream. The Type
-// field tells the caller which other fields are populated. The Headers
-// and Data slices are deep-copied per event by the connection reader,
-// so they are owned by the receiver and safe to retain.
+// field tells the caller which other fields are populated.
+//
+// When Slab is non-nil, all Headers[i].Name and .Value byte slices are
+// sub-slices of *Slab. Ownership transfers to the client layer, which
+// returns the pointer to conn.HeaderSlabPool in Response.Reset / sr.Close.
 type StreamEvent struct {
 	Type      StreamEventType
 	Headers   []hpack.HeaderField // EventHeaders / EventTrailers
 	Data      []byte              // EventData
 	EndStream bool                // any event closing the response side
 	RSTCode   frame.ErrCode       // EventReset
+
+	// Slab is the pooled backing buffer pointer for all Headers[i].Name
+	// and .Value slices. nil for non-headers events and when the pool is
+	// cold (first request). The client layer must return this pointer to
+	// conn.HeaderSlabPool, not the slice value, to avoid heap escape.
+	Slab *[]byte
 }
 
 // streamWriter is the narrow surface a *Stream needs from its owner Conn.
@@ -102,6 +110,25 @@ func newStream(id uint32, eventBuf int, w streamWriter, recvWindow int32) *Strea
 		events:     make(chan StreamEvent, eventBuf),
 		recvWindow: recvWindow,
 	}
+}
+
+// recycleStream drains any buffered events, zeroes all fields, and
+// returns s to pool. Only call when the stream is fully done (both
+// sides ended or RST sent/received) and no goroutine holds a reference.
+func recycleStream(pool *sync.Pool, s *Stream) {
+	for len(s.events) > 0 {
+		<-s.events // drop; any slab in the event is GC'd
+	}
+	s.id = 0
+	s.w = nil
+	s.localEnded = false
+	s.remoteEnded = false
+	s.closed = false
+	s.inflightDone = false
+	s.headersReceived = false
+	s.recvRefundPending = 0
+	s.sendWindow = 0
+	pool.Put(s)
 }
 
 // ID returns the HTTP/2 stream identifier.
@@ -238,7 +265,14 @@ func (s *Stream) Close() error {
 	bothEnded := s.localEnded && s.remoteEnded
 	s.closed = true
 	s.mu.Unlock()
-	if already || bothEnded {
+	if already {
+		return nil
+	}
+	if bothEnded {
+		// Both sides ended normally; recycle without sending RST.
+		if c, ok := s.w.(*Conn); ok {
+			recycleStream(&c.streamPool, s)
+		}
 		return nil
 	}
 	return s.w.writeRSTStream(s, frame.ErrCodeCancel)

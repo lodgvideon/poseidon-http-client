@@ -114,7 +114,8 @@ func TestParseStatus_Found(t *testing.T) {
 		{Name: []byte(":status"), Value: []byte("200")},
 		{Name: []byte("content-type"), Value: []byte("application/json")},
 	}
-	st, rest, err := parseStatus(in)
+	var rest []hpack.HeaderField
+	st, err := parseStatus(in, &rest)
 	if err != nil {
 		t.Fatalf("unexpected err: %v", err)
 	}
@@ -130,8 +131,8 @@ func TestParseStatus_Missing(t *testing.T) {
 	in := []hpack.HeaderField{
 		{Name: []byte("content-type"), Value: []byte("application/json")},
 	}
-	_, _, err := parseStatus(in)
-	if !errors.Is(err, ErrEmptyResponse) {
+	var dst []hpack.HeaderField
+	if _, err := parseStatus(in, &dst); !errors.Is(err, ErrEmptyResponse) {
 		t.Fatalf("expected ErrEmptyResponse, got %v", err)
 	}
 }
@@ -140,8 +141,8 @@ func TestParseStatus_NotNumeric(t *testing.T) {
 	in := []hpack.HeaderField{
 		{Name: []byte(":status"), Value: []byte("OK")},
 	}
-	_, _, err := parseStatus(in)
-	if !errors.Is(err, ErrInvalidStatus) {
+	var dst []hpack.HeaderField
+	if _, err := parseStatus(in, &dst); !errors.Is(err, ErrInvalidStatus) {
 		t.Fatalf("expected ErrInvalidStatus, got %v", err)
 	}
 }
@@ -150,8 +151,8 @@ func TestParseStatus_Negative(t *testing.T) {
 	in := []hpack.HeaderField{
 		{Name: []byte(":status"), Value: []byte("-1")},
 	}
-	_, _, err := parseStatus(in)
-	if !errors.Is(err, ErrInvalidStatus) {
+	var dst []hpack.HeaderField
+	if _, err := parseStatus(in, &dst); !errors.Is(err, ErrInvalidStatus) {
 		t.Fatalf("expected ErrInvalidStatus, got %v", err)
 	}
 }
@@ -490,10 +491,12 @@ func TestClient_Do_AfterClose_ReturnsErrClosed(t *testing.T) {
 	_ = c.Close()
 	ctx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
 	defer cancel()
-	if _, err := c.Do(ctx, &Request{Method: "GET", Path: "/"}); !errors.Is(err, ErrClosed) {
+	var _res Response
+	if err := c.Do(ctx, &Request{Method: "GET", Path: "/"}, &_res); !errors.Is(err, ErrClosed) {
 		t.Fatalf("Do after Close = %v, want ErrClosed", err)
 	}
-	if _, err := c.DoStream(ctx, &Request{Method: "GET", Path: "/"}); !errors.Is(err, ErrClosed) {
+	var _sr StreamResponse
+	if err := c.DoStream(ctx, &Request{Method: "GET", Path: "/"}, &_sr); !errors.Is(err, ErrClosed) {
 		t.Fatalf("DoStream after Close = %v, want ErrClosed", err)
 	}
 }
@@ -532,8 +535,8 @@ func TestStreamResponse_RecvAfterDrain_ReturnsErrStreamEnded(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
-	sr, err := c.DoStream(ctx, &Request{Method: "GET", Path: "/"})
-	if err != nil {
+	var sr StreamResponse
+	if err := c.DoStream(ctx, &Request{Method: "GET", Path: "/"}, &sr); err != nil {
 		t.Fatalf("DoStream: %v", err)
 	}
 	defer sr.Close()
@@ -751,8 +754,8 @@ func TestClient_Do_GET_NoBody_ReturnsStatus200(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
-	res, err := c.Do(ctx, &Request{Method: "GET", Path: "/"})
-	if err != nil {
+	var res Response
+	if err := c.Do(ctx, &Request{Method: "GET", Path: "/"}, &res); err != nil {
 		t.Fatalf("Do: %v", err)
 	}
 	if res.Status != 200 {
@@ -816,12 +819,12 @@ func TestClient_Do_POST_BodyBytes(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 	body := []byte("hello world")
-	res, err := c.Do(ctx, &Request{
+	var res Response
+	if err := c.Do(ctx, &Request{
 		Method: "POST", Path: "/echo",
 		Body:     body,
 		WantBody: true,
-	})
-	if err != nil {
+	}, &res); err != nil {
 		t.Fatalf("Do: %v", err)
 	}
 	if res.Status != 200 {
@@ -854,12 +857,12 @@ func TestClient_Do_POST_BodyReader(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	res, err := c.Do(ctx, &Request{
+	var res Response
+	if err := c.Do(ctx, &Request{
 		Method: "POST", Path: "/echo",
 		BodyReader: bytes.NewReader(want),
 		WantBody:   true,
-	})
-	if err != nil {
+	}, &res); err != nil {
 		t.Fatalf("Do: %v", err)
 	}
 	if res.Status != 200 {
@@ -909,8 +912,8 @@ func TestClient_Do_WantBody_False_DiscardsButCounts(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
-	res, err := c.Do(ctx, &Request{Method: "GET", Path: "/"})
-	if err != nil {
+	var res Response
+	if err := c.Do(ctx, &Request{Method: "GET", Path: "/"}, &res); err != nil {
 		t.Fatalf("Do: %v", err)
 	}
 	if res.Body != nil {
@@ -966,11 +969,11 @@ func TestClient_Do_WantTrailers_CapturesTrailers(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
-	res, err := c.Do(ctx, &Request{
+	var res Response
+	if err := c.Do(ctx, &Request{
 		Method: "GET", Path: "/",
 		WantTrailers: true,
-	})
-	if err != nil {
+	}, &res); err != nil {
 		t.Fatalf("Do: %v", err)
 	}
 	if len(res.Trailers) != 1 || string(res.Trailers[0].Name) != "grpc-status" {
@@ -1004,7 +1007,8 @@ func TestClient_Do_StreamReset_ReturnsTypedError(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
-	_, err = c.Do(ctx, &Request{Method: "GET", Path: "/"})
+	var _res Response
+	err = c.Do(ctx, &Request{Method: "GET", Path: "/"}, &_res)
 	var rs *StreamResetError
 	if !errors.As(err, &rs) {
 		t.Fatalf("expected *StreamResetError, got %v", err)
@@ -1052,8 +1056,8 @@ func TestClient_DoStream_RecvDataChunks(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
-	sr, err := c.DoStream(ctx, &Request{Method: "GET", Path: "/"})
-	if err != nil {
+	var sr StreamResponse
+	if err := c.DoStream(ctx, &Request{Method: "GET", Path: "/"}, &sr); err != nil {
 		t.Fatalf("DoStream: %v", err)
 	}
 	defer sr.Close()
@@ -1133,8 +1137,8 @@ func TestClient_DoStream_CloseBeforeEnd_SendsRSTCancel(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
-	sr, err := c.DoStream(ctx, &Request{Method: "GET", Path: "/"})
-	if err != nil {
+	var sr StreamResponse
+	if err := c.DoStream(ctx, &Request{Method: "GET", Path: "/"}, &sr); err != nil {
 		t.Fatalf("DoStream: %v", err)
 	}
 	if _, err := sr.Recv(ctx); err != nil {
@@ -1205,13 +1209,13 @@ func TestConformance_RFC7540_Sec8_1_2_1_PseudoHeadersFirst(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
-	_, err = c.Do(ctx, &Request{
+	var _res2 Response
+	if err := c.Do(ctx, &Request{
 		Method: "GET", Path: "/",
 		Headers: []hpack.HeaderField{
 			{Name: []byte("x-trace-id"), Value: []byte("abc")},
 		},
-	})
-	if err != nil {
+	}, &_res2); err != nil {
 		t.Fatalf("Do: %v", err)
 	}
 	fields := <-captured

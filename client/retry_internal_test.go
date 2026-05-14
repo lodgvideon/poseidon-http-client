@@ -139,22 +139,30 @@ type streamResult struct {
 	err  error
 }
 
-func (f *fakeDoer) Do(_ context.Context, _ *Request) (*Response, error) {
+func (f *fakeDoer) Do(_ context.Context, _ *Request, resp *Response) error {
 	if f.calls >= len(f.results) {
 		f.t.Fatalf("unexpected Do call #%d (only %d results scripted)", f.calls, len(f.results))
 	}
 	r := f.results[f.calls]
 	f.calls++
-	return r.resp, r.err
+	if r.resp != nil {
+		*resp = *r.resp
+	}
+	return r.err
 }
 
-func (f *fakeDoer) DoStream(_ context.Context, _ *Request) (*StreamResponse, error) {
+func (f *fakeDoer) DoStream(_ context.Context, _ *Request, sr *StreamResponse) error {
 	if f.streams >= len(f.stream) {
 		f.t.Fatalf("unexpected DoStream call #%d (only %d results scripted)", f.streams, len(f.stream))
 	}
 	r := f.stream[f.streams]
 	f.streams++
-	return r.resp, r.err
+	if r.resp != nil {
+		// Copy only exported fields — StreamResponse contains sync.Once (noCopy).
+		sr.Status = r.resp.Status
+		sr.Headers = r.resp.Headers
+	}
+	return r.err
 }
 
 func TestRetryer_Do_NonIdempotent_NoRetry(t *testing.T) {
@@ -165,7 +173,8 @@ func TestRetryer_Do_NonIdempotent_NoRetry(t *testing.T) {
 	}}
 	r := NewRetryer(&Client{}, RetryOptions{MaxAttempts: 3})
 	r.d = f
-	_, err := r.Do(context.Background(), &Request{Method: "POST", Path: "/"})
+	var _res Response
+	err := r.Do(context.Background(), &Request{Method: "POST", Path: "/"}, &_res)
 	if err == nil {
 		t.Fatal("expected error on POST + RST, got nil")
 	}
@@ -182,11 +191,12 @@ func TestRetryer_Do_BodyReader_NoRetry(t *testing.T) {
 	}}
 	r := NewRetryer(&Client{}, RetryOptions{MaxAttempts: 3})
 	r.d = f
-	_, err := r.Do(context.Background(), &Request{
+	var _res Response
+	err := r.Do(context.Background(), &Request{
 		Method:     "GET",
 		Path:       "/",
 		BodyReader: errReader{},
-	})
+	}, &_res)
 	if err == nil {
 		t.Fatal("expected error, got nil")
 	}
@@ -203,7 +213,8 @@ func TestRetryer_Do_MaxAttemptsOne_NoRetry(t *testing.T) {
 	}}
 	r := NewRetryer(&Client{}, RetryOptions{MaxAttempts: 1})
 	r.d = f
-	_, _ = r.Do(context.Background(), &Request{Method: "GET", Path: "/"})
+	var _res Response
+	_ = r.Do(context.Background(), &Request{Method: "GET", Path: "/"}, &_res)
 	if f.calls != 1 {
 		t.Errorf("calls = %d, want 1 (MaxAttempts=1 disables retry)", f.calls)
 	}
@@ -227,8 +238,8 @@ func TestRetryer_Do_RefusedStream_Retries(t *testing.T) {
 		Backoff:     func(int) time.Duration { return 0 },
 	})
 	r.d = f
-	resp, err := r.Do(context.Background(), &Request{Method: "GET", Path: "/"})
-	if err != nil {
+	var resp Response
+	if err := r.Do(context.Background(), &Request{Method: "GET", Path: "/"}, &resp); err != nil {
 		t.Fatalf("Do err = %v, want nil after retry", err)
 	}
 	if resp.Status != 200 {
@@ -250,7 +261,8 @@ func TestRetryer_Do_GoAway_Retries(t *testing.T) {
 		Backoff:     func(int) time.Duration { return 0 },
 	})
 	r.d = f
-	resp, err := r.Do(context.Background(), &Request{Method: "GET", Path: "/"})
+	var resp Response
+	err := r.Do(context.Background(), &Request{Method: "GET", Path: "/"}, &resp)
 	if err != nil || resp.Status != 200 {
 		t.Fatalf("Do = %v, %v; want 200, nil", resp, err)
 	}
@@ -270,8 +282,8 @@ func TestRetryer_Do_DialError_Retries(t *testing.T) {
 		Backoff:     func(int) time.Duration { return 0 },
 	})
 	r.d = f
-	_, err := r.Do(context.Background(), &Request{Method: "GET", Path: "/"})
-	if err != nil {
+	var _res Response
+	if err := r.Do(context.Background(), &Request{Method: "GET", Path: "/"}, &_res); err != nil {
 		t.Fatalf("Do err = %v, want nil after dial retry", err)
 	}
 	if f.calls != 2 {
@@ -290,8 +302,8 @@ func TestRetryer_Do_ErrDialBackoff_Retries(t *testing.T) {
 		Backoff:     func(int) time.Duration { return 0 },
 	})
 	r.d = f
-	_, err := r.Do(context.Background(), &Request{Method: "GET", Path: "/"})
-	if err != nil {
+	var _res Response
+	if err := r.Do(context.Background(), &Request{Method: "GET", Path: "/"}, &_res); err != nil {
 		t.Fatalf("Do err = %v, want nil after ErrDialBackoff retry", err)
 	}
 	if f.calls != 2 {
@@ -308,7 +320,8 @@ func TestRetryer_Do_NonRetryableError_Stops(t *testing.T) {
 		Backoff:     func(int) time.Duration { return 0 },
 	})
 	r.d = f
-	_, err := r.Do(context.Background(), &Request{Method: "GET", Path: "/"})
+	var _res Response
+	err := r.Do(context.Background(), &Request{Method: "GET", Path: "/"}, &_res)
 	if !errors.Is(err, other) {
 		t.Fatalf("err = %v, want %v", err, other)
 	}
@@ -332,8 +345,8 @@ func TestRetryer_Do_IsRetryable_Custom5xx_Retries(t *testing.T) {
 		},
 	})
 	r.d = f
-	resp, err := r.Do(context.Background(), &Request{Method: "GET", Path: "/"})
-	if err != nil {
+	var resp Response
+	if err := r.Do(context.Background(), &Request{Method: "GET", Path: "/"}, &resp); err != nil {
 		t.Fatalf("err = %v, want nil", err)
 	}
 	if resp.Status != 200 {
@@ -359,8 +372,8 @@ func TestRetryer_Do_IsRetryable_NonBuiltinError_Retries(t *testing.T) {
 		},
 	})
 	r.d = f
-	_, err := r.Do(context.Background(), &Request{Method: "GET", Path: "/"})
-	if err != nil {
+	var _res Response
+	if err := r.Do(context.Background(), &Request{Method: "GET", Path: "/"}, &_res); err != nil {
 		t.Fatalf("err = %v, want nil after IsRetryable retry", err)
 	}
 	if f.calls != 2 {
@@ -387,7 +400,8 @@ func TestRetryer_Do_CtxCanceled_StopsImmediately(t *testing.T) {
 		cancel()
 	}()
 	start := time.Now()
-	_, err := r.Do(ctx, &Request{Method: "GET", Path: "/"})
+	var _res Response
+	err := r.Do(ctx, &Request{Method: "GET", Path: "/"}, &_res)
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("err = %v, want context.Canceled", err)
 	}
@@ -408,7 +422,8 @@ func TestRetryer_Do_HardStop_PoolClosed_NoRetry(t *testing.T) {
 		IsRetryable: func(error, *Response) bool { return true }, // even with this, stop
 	})
 	r.d = f
-	_, err := r.Do(context.Background(), &Request{Method: "GET", Path: "/"})
+	var _res Response
+	err := r.Do(context.Background(), &Request{Method: "GET", Path: "/"}, &_res)
 	if !errors.Is(err, ErrPoolClosed) {
 		t.Fatalf("err = %v, want ErrPoolClosed", err)
 	}
@@ -430,7 +445,8 @@ func TestRetryer_Do_MaxAttempts_Exhausted(t *testing.T) {
 		Backoff:     func(int) time.Duration { return 0 },
 	})
 	r.d = f
-	_, err := r.Do(context.Background(), &Request{Method: "GET", Path: "/"})
+	var _res Response
+	err := r.Do(context.Background(), &Request{Method: "GET", Path: "/"}, &_res)
 	if err != last {
 		t.Fatalf("err = %v, want last (%v)", err, last)
 	}
@@ -450,12 +466,9 @@ func TestRetryer_DoStream_RetriesBeforeHeaders(t *testing.T) {
 		Backoff:     func(int) time.Duration { return 0 },
 	})
 	r.d = f
-	resp, err := r.DoStream(context.Background(), &Request{Method: "GET", Path: "/"})
-	if err != nil {
+	var sr StreamResponse
+	if err := r.DoStream(context.Background(), &Request{Method: "GET", Path: "/"}, &sr); err != nil {
 		t.Fatalf("DoStream err = %v, want nil", err)
-	}
-	if resp == nil {
-		t.Fatal("DoStream returned nil StreamResponse")
 	}
 	if f.streams != 2 {
 		t.Errorf("streams = %d, want 2", f.streams)
@@ -470,7 +483,8 @@ func TestRetryer_DoStream_NonIdempotent_NoRetry(t *testing.T) {
 	}}
 	r := NewRetryer(&Client{}, RetryOptions{MaxAttempts: 3})
 	r.d = f
-	_, err := r.DoStream(context.Background(), &Request{Method: "POST", Path: "/"})
+	var _sr StreamResponse
+	err := r.DoStream(context.Background(), &Request{Method: "POST", Path: "/"}, &_sr)
 	if err == nil {
 		t.Fatal("expected err on POST + RST, got nil")
 	}
@@ -494,7 +508,8 @@ func TestRetryer_DoStream_Success_NoIsRetryableCall(t *testing.T) {
 		},
 	})
 	r.d = f
-	if _, err := r.DoStream(context.Background(), &Request{Method: "GET", Path: "/"}); err != nil {
+	var _sr StreamResponse
+	if err := r.DoStream(context.Background(), &Request{Method: "GET", Path: "/"}, &_sr); err != nil {
 		t.Fatalf("DoStream err = %v", err)
 	}
 	if called {

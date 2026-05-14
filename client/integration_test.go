@@ -50,7 +50,8 @@ func TestIntegration_Client_GET_Status200(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	res, err := c.Do(ctx, &client.Request{Method: "GET", Path: "/"})
+	var res client.Response
+	err := c.Do(ctx, &client.Request{Method: "GET", Path: "/"}, &res)
 	if err != nil {
 		t.Fatalf("Do: %v", err)
 	}
@@ -70,11 +71,12 @@ func TestIntegration_Client_POST_EchoBody(t *testing.T) {
 	want := []byte("hello integration")
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	res, err := c.Do(ctx, &client.Request{
+	var res client.Response
+	err := c.Do(ctx, &client.Request{
 		Method: "POST", Path: "/echo",
 		Body:     want,
 		WantBody: true,
-	})
+	}, &res)
 	if err != nil {
 		t.Fatalf("Do: %v", err)
 	}
@@ -97,11 +99,12 @@ func TestIntegration_Client_POST_LargeBody_ChunkedUpload(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	res, err := c.Do(ctx, &client.Request{
+	var res client.Response
+	err := c.Do(ctx, &client.Request{
 		Method: "POST", Path: "/echo",
 		BodyReader: bytes.NewReader(want),
 		WantBody:   true,
-	})
+	}, &res)
 	if err != nil {
 		t.Fatalf("Do: %v", err)
 	}
@@ -128,8 +131,8 @@ func TestIntegration_Client_ConcurrentRequests_OneClient(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			res, err := c.Do(ctx, &client.Request{Method: "GET", Path: "/"})
-			if err != nil {
+			var res client.Response
+			if err := c.Do(ctx, &client.Request{Method: "GET", Path: "/"}, &res); err != nil {
 				errCh <- err
 				return
 			}
@@ -180,8 +183,8 @@ func TestIntegration_ClientPool_ConcurrentRequests_MultipleConns(t *testing.T) {
 			defer wg.Done()
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancel()
-			res, err := c.Do(ctx, &client.Request{Method: "GET", Path: "/"})
-			if err != nil {
+			var res client.Response
+			if err := c.Do(ctx, &client.Request{Method: "GET", Path: "/"}, &res); err != nil {
 				errs <- err
 				return
 			}
@@ -227,7 +230,8 @@ func TestIntegration_ClientPool_IdleEviction(t *testing.T) {
 	}
 	defer c.Close()
 
-	if _, err := c.Do(context.Background(), &client.Request{Method: "GET", Path: "/"}); err != nil {
+	var _res1 client.Response
+	if err := c.Do(context.Background(), &client.Request{Method: "GET", Path: "/"}, &_res1); err != nil {
 		t.Fatalf("first Do = %v", err)
 	}
 	if got := c.PoolStats().ActiveConns; got != 1 {
@@ -267,7 +271,8 @@ func TestIntegration_ClientPool_GoAwayMidFlight_Replaces(t *testing.T) {
 	}
 	defer c.Close()
 
-	if _, err := c.Do(context.Background(), &client.Request{Method: "GET", Path: "/"}); err != nil {
+	var _res2 client.Response
+	if err := c.Do(context.Background(), &client.Request{Method: "GET", Path: "/"}, &_res2); err != nil {
 		t.Fatalf("first Do = %v", err)
 	}
 
@@ -319,8 +324,8 @@ func TestIntegration_Client_DoStream_LargeResponse(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
-	sr, err := c.DoStream(ctx, &client.Request{Method: "GET", Path: "/"})
-	if err != nil {
+	var sr client.StreamResponse
+	if err := c.DoStream(ctx, &client.Request{Method: "GET", Path: "/"}, &sr); err != nil {
 		t.Fatalf("DoStream: %v", err)
 	}
 	defer sr.Close()
@@ -342,5 +347,75 @@ func TestIntegration_Client_DoStream_LargeResponse(t *testing.T) {
 	}
 	if got != total {
 		t.Fatalf("read %d, want %d", got, total)
+	}
+}
+
+func TestDo_ResponseReuse(t *testing.T) {
+	t.Parallel()
+	srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("x-test", "value")
+		w.WriteHeader(200)
+	}))
+	srv.EnableHTTP2 = true
+	srv.StartTLS()
+	defer srv.Close()
+
+	c, err := client.NewClient(client.ClientOptions{
+		Addr:     srv.Listener.Addr().String(),
+		ConnOpts: conn.ConnOptions{Dialer: &conn.TLSDialer{Config: &tls.Config{InsecureSkipVerify: true}}},
+	})
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+	defer c.Close()
+
+	var resp client.Response
+	const N = 5
+	var prevHdrCap int
+	for i := 0; i < N; i++ {
+		resp.Reset()
+		if err := c.Do(context.Background(), &client.Request{Method: "GET", Path: "/"}, &resp); err != nil {
+			t.Fatalf("Do[%d]: %v", i, err)
+		}
+		if resp.Status != 200 {
+			t.Fatalf("Do[%d]: status %d", i, resp.Status)
+		}
+		if i > 0 && cap(resp.Headers) < prevHdrCap {
+			t.Errorf("Headers backing array reallocated at iteration %d (cap went %d→%d)",
+				i, prevHdrCap, cap(resp.Headers))
+		}
+		prevHdrCap = cap(resp.Headers)
+	}
+}
+
+func TestDoStream_SRReuse(t *testing.T) {
+	t.Parallel()
+	srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(200)
+	}))
+	srv.EnableHTTP2 = true
+	srv.StartTLS()
+	defer srv.Close()
+
+	c, err := client.NewClient(client.ClientOptions{
+		Addr:     srv.Listener.Addr().String(),
+		ConnOpts: conn.ConnOptions{Dialer: &conn.TLSDialer{Config: &tls.Config{InsecureSkipVerify: true}}},
+	})
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+	defer c.Close()
+
+	var sr client.StreamResponse
+	for i := 0; i < 5; i++ {
+		if err := c.DoStream(context.Background(), &client.Request{Method: "GET", Path: "/"}, &sr); err != nil {
+			t.Fatalf("DoStream[%d]: %v", i, err)
+		}
+		if sr.Status != 200 {
+			t.Fatalf("DoStream[%d]: status %d", i, sr.Status)
+		}
+		if err := sr.Close(); err != nil {
+			t.Fatalf("Close[%d]: %v", i, err)
+		}
 	}
 }

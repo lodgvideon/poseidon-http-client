@@ -13,6 +13,16 @@ import (
 	"github.com/lodgvideon/poseidon-http-client/hpack"
 )
 
+// encBufPool recycles the HPACK block-fragment buffer used by writeHeaders.
+// The buffer is returned immediately after Framer.WriteHeaders — the call
+// is synchronous under wmu, so no concurrent access is possible.
+var encBufPool = sync.Pool{
+	New: func() any {
+		b := make([]byte, 0, 256)
+		return &b
+	},
+}
+
 // Conn is one HTTP/2 connection.
 type Conn struct {
 	transport net.Conn
@@ -59,6 +69,11 @@ type Conn struct {
 
 	closed     atomic.Bool
 	readerDone chan struct{}
+
+	// streamPool recycles *Stream structs (struct + channel) to eliminate
+	// 2 allocs per request after warmup. Only streams whose channel cap
+	// equals opts.StreamEventBuffer are recycled; mis-sized ones are discarded.
+	streamPool sync.Pool
 
 	// Stats counters: atomics for lock-free updates on the hot write
 	// and read paths. Snapshot via Stats() which loads each.
@@ -147,11 +162,26 @@ func (c *Conn) NewStream(_ context.Context) (*Stream, error) {
 		c.smu.Unlock()
 		return nil, ErrTooManyStreams
 	}
-	s := newStream(0, c.opts.StreamEventBuffer, c, int32(c.opts.Settings.InitialWindowSize))
+	s := c.allocStream(c.opts.StreamEventBuffer, int32(c.opts.Settings.InitialWindowSize))
 	c.inflight++
 	c.smu.Unlock()
 	c.atomicStreamsOpened.Add(1)
 	return s, nil
+}
+
+// allocStream returns a recycled *Stream if one with matching channel
+// capacity is available, otherwise allocates fresh.
+func (c *Conn) allocStream(eventBuf int, recvWindow int32) *Stream {
+	if v := c.streamPool.Get(); v != nil {
+		s := v.(*Stream)
+		if cap(s.events) == eventBuf {
+			s.w = c
+			s.recvWindow = recvWindow
+			return s
+		}
+		// Wrong capacity — discard; fall through to fresh allocation.
+	}
+	return newStream(0, eventBuf, c, recvWindow)
 }
 
 // Close sends a best-effort GOAWAY(NO_ERROR), closes the transport, and
@@ -275,13 +305,17 @@ func (c *Conn) writeHeaders(_ context.Context, s *Stream, fields []hpack.HeaderF
 		s.sendWindow = int32(initial)
 		s.mu.Unlock()
 	}
-	block := c.enc.EncodeBlock(nil, fields)
+	buf := encBufPool.Get().(*[]byte)
+	*buf = (*buf)[:0]
+	block := c.enc.EncodeBlock(*buf, fields)
 	err := c.fr.WriteHeaders(frame.WriteHeadersParams{
 		StreamID:      s.id,
 		BlockFragment: block,
 		EndHeaders:    true,
 		EndStream:     endStream,
 	})
+	*buf = block[:0]
+	encBufPool.Put(buf)
 	if err != nil {
 		return err
 	}

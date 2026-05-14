@@ -100,8 +100,8 @@ type RetryOptions struct {
 // it implicitly. Tests inject a fake to drive the loop without a real
 // transport.
 type retryDoer interface {
-	Do(ctx context.Context, req *Request) (*Response, error)
-	DoStream(ctx context.Context, req *Request) (*StreamResponse, error)
+	Do(ctx context.Context, req *Request, resp *Response) error
+	DoStream(ctx context.Context, req *Request, sr *StreamResponse) error
 }
 
 // Retryer wraps a transport with bounded automatic retry.
@@ -201,39 +201,37 @@ func (r *Retryer) shouldRetryErr(err error) bool {
 // Do issues req with retries on transient failures. Falls through to
 // a single Client.Do call when retry is disabled by configuration or
 // the request itself (non-idempotent / BodyReader / MaxAttempts<=1).
-func (r *Retryer) Do(ctx context.Context, req *Request) (*Response, error) {
+func (r *Retryer) Do(ctx context.Context, req *Request, resp *Response) error {
 	if req == nil || !r.canRetry(req) {
-		return r.d.Do(ctx, req)
+		return r.d.Do(ctx, req, resp)
 	}
-	return r.doLoop(ctx, req)
+	return r.doLoop(ctx, req, resp)
 }
 
 // doLoop is the actual retry loop for Do. Pre: canRetry(req) == true.
-func (r *Retryer) doLoop(ctx context.Context, req *Request) (*Response, error) {
-	var (
-		resp *Response
-		err  error
-	)
+func (r *Retryer) doLoop(ctx context.Context, req *Request, resp *Response) error {
+	var err error
 	for attempt := 0; attempt < r.opts.MaxAttempts; attempt++ {
 		if attempt > 0 {
 			backoff := r.opts.Backoff(attempt)
 			r.fireRetry(req, attempt, err, backoff)
 			if err = r.sleepBackoff(ctx, backoff); err != nil {
-				return nil, err
+				return err
 			}
+			resp.Reset()
 		}
-		resp, err = r.d.Do(ctx, req)
+		err = r.d.Do(ctx, req, resp)
 		if err == nil {
 			if !r.userIsRetryable(nil, resp) {
-				return resp, nil
+				return nil
 			}
 			continue
 		}
 		if !r.shouldRetryErr(err) {
-			return nil, err
+			return err
 		}
 	}
-	return resp, err
+	return err
 }
 
 // userIsRetryable consults the optional user predicate; nil predicate
@@ -250,31 +248,29 @@ func (r *Retryer) userIsRetryable(err error, resp *Response) bool {
 // from the underlying transport hands ownership of the stream to the
 // caller; IsRetryable is not consulted on success — subsequent
 // response classification is the caller's concern.
-func (r *Retryer) DoStream(ctx context.Context, req *Request) (*StreamResponse, error) {
+func (r *Retryer) DoStream(ctx context.Context, req *Request, sr *StreamResponse) error {
 	if req == nil || !r.canRetry(req) {
-		return r.d.DoStream(ctx, req)
+		return r.d.DoStream(ctx, req, sr)
 	}
-	var (
-		resp *StreamResponse
-		err  error
-	)
+	var err error
 	for attempt := 0; attempt < r.opts.MaxAttempts; attempt++ {
 		if attempt > 0 {
 			backoff := r.opts.Backoff(attempt)
 			r.fireRetry(req, attempt, err, backoff)
 			if err = r.sleepBackoff(ctx, backoff); err != nil {
-				return nil, err
+				return err
 			}
+			sr.reset()
 		}
-		resp, err = r.d.DoStream(ctx, req)
+		err = r.d.DoStream(ctx, req, sr)
 		if err == nil {
-			return resp, nil
+			return nil
 		}
 		if !r.shouldRetryErr(err) {
-			return nil, err
+			return err
 		}
 	}
-	return resp, err
+	return err
 }
 
 // isHardStop returns true for errors that must never be retried,

@@ -1,9 +1,21 @@
 package conn
 
 import (
+	"sync"
+
 	"github.com/lodgvideon/poseidon-http-client/frame"
 	"github.com/lodgvideon/poseidon-http-client/hpack"
 )
+
+// HeaderSlabPool recycles the byte backing for HPACK-decoded header
+// fields. The client layer transfers slab ownership via StreamEvent.Slab
+// and returns slabs here in Response.Reset / StreamResponse.Close.
+var HeaderSlabPool = &sync.Pool{
+	New: func() any {
+		b := make([]byte, 0, 512)
+		return &b
+	},
+}
 
 // connOps is the contract handler.go needs from its owner. In
 // production it's *Conn; tests can supply a fake. Widening this beyond
@@ -134,18 +146,28 @@ func (h *connHandler) emitHeaderBlock(s *Stream, hb []byte, endStream, isTrailer
 		s.markRemoteEnd()
 		h.streams.markStreamDone(s.id)
 	}
-	// Copy header fields into per-event memory so the channel
-	// buffer cannot expose a slice that the next emitHeaderBlock
-	// call has overwritten in scratch.
+	// Build one slab for all header bytes, one slice for all fields.
+	// Ownership of the slab transfers to the client via StreamEvent.Slab;
+	// the client returns it to HeaderSlabPool in Response.Reset / sr.Close.
+	slabPtr := HeaderSlabPool.Get().(*[]byte)
+	*slabPtr = (*slabPtr)[:0]
 	copied := make([]hpack.HeaderField, len(h.scratch))
-	for i := range h.scratch {
-		nm := append([]byte(nil), h.scratch[i].Name...)
-		vl := append([]byte(nil), h.scratch[i].Value...)
-		copied[i] = hpack.HeaderField{Name: nm, Value: vl, Sensitive: h.scratch[i].Sensitive}
+	for i, f := range h.scratch {
+		nameOff := len(*slabPtr)
+		*slabPtr = append(*slabPtr, f.Name...)
+		valOff := len(*slabPtr)
+		*slabPtr = append(*slabPtr, f.Value...)
+		endOff := len(*slabPtr)
+		copied[i] = hpack.HeaderField{
+			Name:      (*slabPtr)[nameOff:valOff:valOff],
+			Value:     (*slabPtr)[valOff:endOff:endOff],
+			Sensitive: f.Sensitive,
+		}
 	}
 	s.push(StreamEvent{
 		Type:      evType,
 		Headers:   copied,
+		Slab:      slabPtr,
 		EndStream: endStream,
 	})
 	return nil
