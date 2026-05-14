@@ -4,14 +4,14 @@ A low-level, zero-allocation HTTP/2 client for Go, designed for load
 generators. Implements RFC 7540 (HTTP/2) and RFC 7541 (HPACK) from
 scratch without `net/http` or `golang.org/x/net/http2`.
 
-**Status:** Phase C.4 — metrics & observability. Lifecycle Hooks
-(`OnRequestStart`, `OnRequestComplete`, `OnRetry`, `OnDial`, `OnConnClose`,
-`OnResolverUpdate`), lock-free counters, and log-bucket latency histograms
-via `(*Client).Metrics()` and `(*Client).MetricsSnapshot()`. Zero overhead
-when hooks disabled. See
+**Status:** Phase D.1 — zero-alloc request path. `Do`/`DoStream` take
+caller-provided `*Response`/`*StreamResponse`; slab allocator +
+`sync.Pool` recycling for streams, header bytes, and encode buffers.
+33 allocs/op (down from 49). See
 [C.1 design](docs/superpowers/specs/2026-05-07-poseidon-client-c1-design.md),
 [C.2 design](docs/superpowers/specs/2026-05-08-poseidon-client-c2-pool-design.md),
-[C.3/C.4 design](docs/superpowers/specs/2026-05-09-poseidon-client-c3-c4-design.md).
+[C.3/C.4 design](docs/superpowers/specs/2026-05-09-poseidon-client-c3-c4-design.md),
+[D.1 design](docs/superpowers/specs/2026-05-13-d1-zero-alloc-request-path-design.md).
 
 ## Phases
 
@@ -58,12 +58,18 @@ when hooks disabled. See
   fan-out via `Resolver` + `Selector`. Built-in `StaticResolver`,
   `DNSResolver` with TTL cache + Watch, and `RoundRobin` / `Random` /
   `Hash` selectors. DrainGraceful / DrainHard / DrainLazy modes.
-- **C.4 — metrics & hooks** *(this release)*: lifecycle `Hooks`
+- **C.4 — metrics & hooks** *(released)*: lifecycle `Hooks`
   (`OnRequestStart`, `OnRequestComplete`, `OnRetry`, `OnDial`,
   `OnConnClose`, `OnResolverUpdate`); lock-free counters and log-bucket
   latency histograms exposed via `(*Client).Metrics()` and
   `(*Client).MetricsSnapshot()`. Zero hot-path overhead when
   `ClientOptions.Hooks == nil`.
+- **D.1 — zero-alloc request path** *(this release)*: caller-provided
+  `*Response`/`*StreamResponse` eliminates per-call heap alloc;
+  `conn.HeaderSlabPool` slab allocator for HPACK header bytes;
+  per-`Conn` stream `sync.Pool`; `encBufPool` for HPACK encode buffers;
+  `hdrSlicePool` + const name bytes in `buildHeaders`. 33 allocs/op,
+  down from 49 (−33%).
 
 ## Quick start
 
