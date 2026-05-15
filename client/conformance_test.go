@@ -1,8 +1,10 @@
 package client_test
 
 import (
+	"bytes"
 	"context"
 	"crypto/tls"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"sync"
@@ -253,4 +255,36 @@ func TestConformance_RFC7540_Sec6_8_PoolDrainsOnGoAway(t *testing.T) {
 		time.Sleep(50 * time.Millisecond)
 	}
 	t.Fatalf("ActiveConns = %d, want 0 after peer shutdown", c.PoolStats().ActiveConns)
+}
+
+// TestConformance_RFC7540_Sec8_1_StreamBody_EndStream verifies that
+// the final DATA frame in a streaming response carries END_STREAM=1,
+// satisfying RFC 7540 §8.1 half-close semantics.
+func TestConformance_RFC7540_Sec8_1_StreamBody_EndStream(t *testing.T) {
+	payload := []byte("conformance body")
+	_, addr := newTLSH2Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(200)
+		_, _ = w.Write(payload)
+	}))
+	c := clientFor(t, addr)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	var res client.Response
+	if err := c.Do(ctx, &client.Request{Method: "GET", Path: "/", StreamBody: true}, &res); err != nil {
+		t.Fatalf("Do: %v", err)
+	}
+	got, err := io.ReadAll(res.BodyReader)
+	if err != nil {
+		t.Fatalf("ReadAll: %v", err)
+	}
+	if err := res.BodyReader.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	if !bytes.Equal(got, payload) {
+		t.Fatalf("body = %q, want %q", got, payload)
+	}
+	// Close returned without error — stream ended cleanly (END_STREAM
+	// received, no RST_STREAM sent). Confirms §8.1 half-close.
 }

@@ -96,6 +96,8 @@ non-ACK PING frames with `ACK=1` and the original 8-byte payload
 | §6.8     | Conformance | TestConformance_RFC7540_Sec6_8_PoolDrainsOnGoAway (client/) |
 | §6.8     | Conformance | TestConformance_RFC7540_Sec6_8_PoolEjectsDeadConnOnRelease (client/) — pool evicts dead conn via release path, not health-check tick |
 | §8.1.4   | Conformance | TestRetryer_Do_RefusedStream_Retries (client/) — retry layer retries on REFUSED_STREAM (RFC 7540 §8.1.4 — request not processed) |
+| §8.1    | Conformance | TestConformance_RFC7540_Sec8_1_StreamBody_EndStream (client/) |
+| §8.1    | Integration | TestIntegration_Client_StreamBody_Small, TestIntegration_Client_StreamBody_Large, TestIntegration_Client_StreamBody_CloseEarly (client/) |
 
 ## RFC 7541 — HPACK
 
