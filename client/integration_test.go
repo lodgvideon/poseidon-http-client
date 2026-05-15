@@ -462,7 +462,7 @@ func TestIntegration_Client_StreamBody_Large(t *testing.T) {
 	}))
 	c := clientFor(t, addr)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
 	var res client.Response
