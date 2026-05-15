@@ -51,6 +51,17 @@ func (d *TLSDialer) Dial(ctx context.Context, addr string) (net.Conn, error) {
 	return tc, nil
 }
 
+// PlaintextDialer dials addr over TCP for H2C prior-knowledge connections
+// (RFC 7540 §3.4). No TLS handshake or ALPN negotiation is performed.
+// NewClientConn sends the HTTP/2 connection preface automatically.
+type PlaintextDialer struct{}
+
+// Dial dials addr over TCP and returns the raw connection.
+func (d *PlaintextDialer) Dial(ctx context.Context, addr string) (net.Conn, error) {
+	var nd net.Dialer
+	return nd.DialContext(ctx, "tcp", addr)
+}
+
 // Dial dials addr, runs the TLS handshake, asserts ALPN h2, and runs
 // the HTTP/2 SETTINGS exchange. The returned Conn is ready for
 // NewStream.
