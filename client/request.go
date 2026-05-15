@@ -43,6 +43,12 @@ type Request struct {
 	// trailers are ignored.
 	WantTrailers bool
 
+	// StreamBody, when true, causes Do to return after the response HEADERS
+	// frame arrives. The body is available via Response.BodyReader.
+	// Caller MUST call Response.BodyReader.Close() (or Response.Reset())
+	// before the next Do call. WantBody is ignored when StreamBody is true.
+	StreamBody bool
+
 	// Idempotent overrides automatic idempotency classification based
 	// on Method. nil → classify by Method (GET, HEAD, OPTIONS, PUT,
 	// DELETE, TRACE are idempotent; POST, PATCH are not).

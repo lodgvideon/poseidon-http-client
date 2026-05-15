@@ -215,10 +215,12 @@ func (c *Client) do(ctx context.Context, req *Request, resp *Response) error {
 	if err != nil {
 		return err
 	}
-	defer release()
+	// No defer release() — managed explicitly so StreamBody can defer
+	// it into BodyReader.Close().
 
 	s, err := cn.NewStream(ctx)
 	if err != nil {
+		release()
 		return err
 	}
 
@@ -227,6 +229,7 @@ func (c *Client) do(ctx context.Context, req *Request, resp *Response) error {
 	if err := s.SendHeaders(ctx, hdrs, endStream); err != nil {
 		putHdrs()
 		_ = s.Close()
+		release()
 		return err
 	}
 	putHdrs()
@@ -234,12 +237,45 @@ func (c *Client) do(ctx context.Context, req *Request, resp *Response) error {
 	if !endStream {
 		if err := writeRequestBody(ctx, s, req); err != nil {
 			_ = s.Close()
+			release()
 			return err
 		}
 	}
 
+	if req.StreamBody {
+		ev, err := s.Recv(ctx)
+		if err != nil {
+			_ = s.Close()
+			release()
+			return err
+		}
+		if ev.Type != conn.EventHeaders {
+			_ = s.Close()
+			release()
+			return fmt.Errorf("client: expected initial HEADERS, got %s", ev.Type)
+		}
+		n, perr := parseStatus(ev.Headers, &resp.Headers)
+		if perr != nil {
+			_ = s.Close()
+			release()
+			return perr
+		}
+		resp.Status = n
+		if ev.Slab != nil {
+			resp.slabs = append(resp.slabs, ev.Slab)
+		}
+		resp.BodyReader = &responseBodyReader{
+			ctx:     ctx,
+			stream:  s,
+			release: release,
+			resp:    resp,
+		}
+		return nil // release deferred to resp.BodyReader.Close()
+	}
+
 	err = drainResponse(ctx, s, req, resp)
 	_ = s.Close() // recycles stream when both sides ended
+	release()
 	return err
 }
 

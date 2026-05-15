@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"strconv"
 	"sync"
 
@@ -38,6 +39,12 @@ type Response struct {
 	// Request.WantBody was false.
 	BytesReceived int64
 
+	// BodyReader is non-nil when the request had StreamBody=true.
+	// Caller reads body bytes then calls Close(). Trailers (if any) are
+	// written into Response.Trailers just before Close returns io.EOF.
+	// Reset() calls Close() automatically when BodyReader is non-nil.
+	BodyReader io.ReadCloser
+
 	// slabs holds pooled slab pointers that back Headers and Trailers
 	// field bytes. Storing *[]byte (not []byte) avoids heap escape when
 	// returning to conn.HeaderSlabPool via Put. Returned on Reset().
@@ -48,6 +55,10 @@ type Response struct {
 // Any references to Headers[i].Name / .Value / Body / Trailers bytes
 // must not be used after Reset returns.
 func (r *Response) Reset() {
+	if r.BodyReader != nil {
+		_ = r.BodyReader.Close()
+		r.BodyReader = nil
+	}
 	for _, sp := range r.slabs {
 		*sp = (*sp)[:0]
 		conn.HeaderSlabPool.Put(sp)
