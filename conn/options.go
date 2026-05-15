@@ -1,5 +1,7 @@
 package conn
 
+import "time"
+
 // AdvertisedSettings is what we send to the peer in our SETTINGS frame.
 // Zero values are replaced by RFC 7540 defaults; MaxConcurrentStreams
 // defaults to 100 (B.2).
@@ -32,6 +34,11 @@ type ConnOptions struct {
 	Dialer            Dialer
 	Settings          AdvertisedSettings
 	StreamEventBuffer int
+	// KeepaliveInterval, when non-zero, enables a background keepalive
+	// loop. The loop sends a PING every interval; if no ACK arrives
+	// within the same interval the connection is closed. Zero disables
+	// keepalive.
+	KeepaliveInterval time.Duration
 }
 
 func (o ConnOptions) defaulted() ConnOptions {

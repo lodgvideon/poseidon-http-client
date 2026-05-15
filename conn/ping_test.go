@@ -133,3 +133,35 @@ func TestConn_Ping_AfterClose(t *testing.T) {
 		t.Fatalf("Ping after Close = %v, want ErrConnClosed", err)
 	}
 }
+
+func TestConn_Keepalive_HealthyConn(t *testing.T) {
+	srv, cfg := startPingServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+	defer srv.Close()
+	// KeepaliveInterval set; server responds to PINGs normally.
+	c := dialPingServer(t, srv, cfg, ConnOptions{KeepaliveInterval: 30 * time.Millisecond})
+
+	// Wait 3 keepalive intervals; conn must remain alive.
+	time.Sleep(100 * time.Millisecond)
+	if !c.IsAlive() {
+		t.Fatal("keepalive closed a healthy connection")
+	}
+}
+
+func TestConn_Keepalive_ClosesDeadConn(t *testing.T) {
+	srv, cfg := startPingServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+	c := dialPingServer(t, srv, cfg, ConnOptions{KeepaliveInterval: 50 * time.Millisecond})
+
+	// Close server: kills the TCP connection. The keepalive loop's next
+	// Ping will fail (ErrConnClosed from readerDone or write error) and
+	// c.Close() will be called. Allow 3× interval.
+	srv.Close()
+
+	deadline := time.Now().Add(200 * time.Millisecond)
+	for time.Now().Before(deadline) {
+		if !c.IsAlive() {
+			return // test passes
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatal("conn still alive 200ms after server closed — keepalive did not detect dead conn")
+}

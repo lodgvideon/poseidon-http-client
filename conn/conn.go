@@ -129,6 +129,9 @@ func NewClientConn(ctx context.Context, transport net.Conn, opts ConnOptions) (*
 	// HPACK encoder when the peer advertised one).
 	c.applyInitialPeerSettings(peer)
 	go c.readerLoop()
+	if opts.KeepaliveInterval > 0 {
+		go c.keepaliveLoop(opts.KeepaliveInterval)
+	}
 	return c, nil
 }
 
@@ -790,6 +793,31 @@ func (c *Conn) Ping(ctx context.Context) (time.Duration, error) {
 		delete(c.pingWaiters, payload)
 		c.pingMu.Unlock()
 		return 0, ErrConnClosed
+	}
+}
+
+// keepaliveLoop sends a PING every interval. If the ACK does not
+// arrive within the same interval the connection is closed.
+// The loop exits when the connection closes (readerDone is closed).
+func (c *Conn) keepaliveLoop(interval time.Duration) {
+	t := time.NewTicker(interval)
+	defer t.Stop()
+	for {
+		select {
+		case <-t.C:
+			ctx, cancel := context.WithTimeout(context.Background(), interval)
+			_, err := c.Ping(ctx)
+			cancel()
+			if err != nil {
+				_ = c.Close()
+				return
+			}
+		case <-c.readerDone:
+			// Reader exited due to a transport error or remote close.
+			// Ensure IsAlive() reflects the dead connection.
+			_ = c.Close()
+			return
+		}
 	}
 }
 
