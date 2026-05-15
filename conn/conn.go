@@ -805,7 +805,14 @@ func (c *Conn) keepaliveLoop(interval time.Duration) {
 	for {
 		select {
 		case <-t.C:
-			ctx, cancel := context.WithTimeout(context.Background(), interval)
+			if c.goAwayReceived.Load() {
+				return
+			}
+			pingTimeout := interval
+			if pingTimeout < time.Second {
+				pingTimeout = time.Second
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), pingTimeout)
 			_, err := c.Ping(ctx)
 			cancel()
 			if err != nil {
@@ -813,8 +820,8 @@ func (c *Conn) keepaliveLoop(interval time.Duration) {
 				return
 			}
 		case <-c.readerDone:
-			// Reader exited due to a transport error or remote close.
-			// Ensure IsAlive() reflects the dead connection.
+			// Reader exited due to transport error or remote close; mark the
+			// connection closed so IsAlive() returns false.
 			_ = c.Close()
 			return
 		}

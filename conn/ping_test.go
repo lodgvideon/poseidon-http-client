@@ -151,9 +151,9 @@ func TestConn_Keepalive_ClosesDeadConn(t *testing.T) {
 	srv, cfg := startPingServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
 	c := dialPingServer(t, srv, cfg, ConnOptions{KeepaliveInterval: 50 * time.Millisecond})
 
-	// Close server: kills the TCP connection. The keepalive loop's next
-	// Ping will fail (ErrConnClosed from readerDone or write error) and
-	// c.Close() will be called. Allow 3× interval.
+	// Close server: kills the TCP connection. The TCP FIN causes
+	// readerLoop to exit (closing readerDone), which wakes the
+	// keepaliveLoop's readerDone case, calling c.Close(). Allow 3× interval.
 	srv.Close()
 
 	deadline := time.Now().Add(200 * time.Millisecond)
