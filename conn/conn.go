@@ -751,6 +751,7 @@ func (c *Conn) deliverPingAck(payload [8]byte) {
 // returning the round-trip time. Returns ErrConnClosed if the
 // connection is already closed or closes before the ACK arrives.
 // Returns ctx.Err() if the context expires or is cancelled first.
+// Any other error indicates a write failure on the underlying transport.
 func (c *Conn) Ping(ctx context.Context) (time.Duration, error) {
 	if c.closed.Load() {
 		return 0, ErrConnClosed
@@ -815,9 +816,12 @@ func (c *Conn) keepaliveLoop(interval time.Duration) {
 			if c.goAwayReceived.Load() {
 				return
 			}
-			pingTimeout := interval * 5
-			if pingTimeout < 5*time.Second {
-				pingTimeout = 5 * time.Second
+			pingTimeout := c.opts.KeepaliveTimeout
+			if pingTimeout == 0 {
+				pingTimeout = interval * 5
+				if pingTimeout < 5*time.Second {
+					pingTimeout = 5 * time.Second
+				}
 			}
 			ctx, cancel := context.WithTimeout(context.Background(), pingTimeout)
 			_, err := c.Ping(ctx)

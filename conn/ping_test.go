@@ -5,11 +5,15 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"errors"
+	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/lodgvideon/poseidon-http-client/frame"
 )
 
 // startPingServer is identical to startH2TestServer in integration_test.go.
@@ -165,3 +169,137 @@ func TestConn_Keepalive_ClosesDeadConn(t *testing.T) {
 	}
 	t.Fatal("conn still alive 200ms after server closed — keepalive did not detect dead conn")
 }
+
+func TestConn_Keepalive_PingTimeout(t *testing.T) {
+	addr := startDeafH2Server(t)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	c, err := Dial(ctx, addr, ConnOptions{
+		Dialer:            &PlaintextDialer{},
+		KeepaliveInterval: 50 * time.Millisecond,
+		KeepaliveTimeout:  150 * time.Millisecond,
+	})
+	if err != nil {
+		t.Fatalf("Dial: %v", err)
+	}
+	t.Cleanup(func() { _ = c.Close() })
+
+	// Server completes H2 handshake but never echoes PINGs.
+	// keepalive must close the connection within ~interval+timeout.
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		if !c.IsAlive() {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatal("conn still alive 1s after start — keepalive did not detect ping timeout")
+}
+
+func TestConn_DeliverPingAck_UnsolicitedIsNoop(t *testing.T) {
+	srv, cfg := startPingServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+	defer srv.Close()
+	c := dialPingServer(t, srv, cfg, ConnOptions{})
+
+	// deliverPingAck with a payload no Ping call is waiting for must not
+	// panic or corrupt state; a subsequent real Ping must still succeed.
+	c.deliverPingAck([8]byte{0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	rtt, err := c.Ping(ctx)
+	if err != nil {
+		t.Fatalf("Ping after unsolicited ACK delivery: %v", err)
+	}
+	if rtt <= 0 {
+		t.Errorf("RTT = %v, want > 0", rtt)
+	}
+}
+
+// startDeafH2Server starts a minimal plaintext HTTP/2 server that completes
+// the SETTINGS handshake but silently drops all PING frames without echoing
+// them. Used to exercise the keepalive PING-timeout detection path.
+func startDeafH2Server(t *testing.T) string {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+
+	go func() {
+		conn, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+
+		fr := frame.NewFramer(conn, conn)
+		// Server preface: send our SETTINGS first so the client can proceed.
+		if err := fr.WriteSettings(frame.SettingsParams{}); err != nil {
+			return
+		}
+		// Consume the 24-byte HTTP/2 client connection preface magic before
+		// the Framer starts reading frames.
+		var prefaceBuf [24]byte
+		if _, err := io.ReadFull(conn, prefaceBuf[:]); err != nil {
+			return
+		}
+		dh := &deafHandler{}
+		for !dh.settingsSeen {
+			if _, err := fr.ReadFrame(context.Background(), dh); err != nil {
+				return
+			}
+		}
+		if err := fr.WriteSettingsAck(); err != nil {
+			return
+		}
+		for !dh.ackSeen {
+			if _, err := fr.ReadFrame(context.Background(), dh); err != nil {
+				return
+			}
+		}
+		// Handshake done. Read and discard all frames — PINGs are not echoed.
+		for {
+			if _, err := fr.ReadFrame(context.Background(), dh); err != nil {
+				return
+			}
+		}
+	}()
+
+	return ln.Addr().String()
+}
+
+// deafHandler implements frame.Handler by discarding every frame type.
+// settingsSeen/ackSeen track the SETTINGS exchange during handshake.
+type deafHandler struct {
+	settingsSeen bool
+	ackSeen      bool
+}
+
+func (d *deafHandler) OnData(frame.FrameHeader, []byte, uint8) error { return nil }
+func (d *deafHandler) OnHeaders(frame.FrameHeader, frame.HeaderBlock, *frame.Priority, uint8) error {
+	return nil
+}
+func (d *deafHandler) OnPriority(frame.FrameHeader, frame.Priority) error { return nil }
+func (d *deafHandler) OnRSTStream(frame.FrameHeader, frame.ErrCode) error { return nil }
+func (d *deafHandler) OnSettings(fh frame.FrameHeader, _ frame.SettingsParams) error {
+	if fh.Flags&frame.FlagSettingsAck != 0 {
+		d.ackSeen = true
+	} else {
+		d.settingsSeen = true
+	}
+	return nil
+}
+func (d *deafHandler) OnPushPromise(frame.FrameHeader, uint32, frame.HeaderBlock, uint8) error {
+	return nil
+}
+func (d *deafHandler) OnPing(frame.FrameHeader, [8]byte) error              { return nil }
+func (d *deafHandler) OnGoAway(frame.FrameHeader, uint32, frame.ErrCode, []byte) error {
+	return nil
+}
+func (d *deafHandler) OnWindowUpdate(frame.FrameHeader, uint32) error      { return nil }
+func (d *deafHandler) OnContinuation(frame.FrameHeader, frame.HeaderBlock) error { return nil }
+
+var _ frame.Handler = (*deafHandler)(nil)
