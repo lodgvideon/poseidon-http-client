@@ -22,6 +22,7 @@ testdata/fuzz/*/
 # Local tooling caches (LSP indexes, hook state)
 .serena/
 .claude/tdd-guard/data/
+.claude/worktrees/
 
 # OS
 .DS_Store
