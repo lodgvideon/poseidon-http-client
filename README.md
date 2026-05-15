@@ -4,14 +4,15 @@ A low-level, zero-allocation HTTP/2 client for Go, designed for load
 generators. Implements RFC 7540 (HTTP/2) and RFC 7541 (HPACK) from
 scratch without `net/http` or `golang.org/x/net/http2`.
 
-**Status:** Phase D.1 — zero-alloc request path. `Do`/`DoStream` take
-caller-provided `*Response`/`*StreamResponse`; slab allocator +
-`sync.Pool` recycling for streams, header bytes, and encode buffers.
-33 allocs/op (down from 49). See
+**Status:** Phase D.2 — request/response body streaming. `Request.ContentLength`
+emits `content-length` header; `Request.StreamBody` + `Response.BodyReader
+io.ReadCloser` stream response bodies without buffering; pooled upload buffer
+(`uploadBufPool`). See
 [C.1 design](docs/superpowers/specs/2026-05-07-poseidon-client-c1-design.md),
 [C.2 design](docs/superpowers/specs/2026-05-08-poseidon-client-c2-pool-design.md),
 [C.3/C.4 design](docs/superpowers/specs/2026-05-09-poseidon-client-c3-c4-design.md),
-[D.1 design](docs/superpowers/specs/2026-05-13-d1-zero-alloc-request-path-design.md).
+[D.1 design](docs/superpowers/specs/2026-05-13-d1-zero-alloc-request-path-design.md),
+[D.2 design](docs/superpowers/specs/2026-05-15-d2-request-response-body-streaming-design.md).
 
 ## Phases
 
@@ -64,12 +65,18 @@ caller-provided `*Response`/`*StreamResponse`; slab allocator +
   latency histograms exposed via `(*Client).Metrics()` and
   `(*Client).MetricsSnapshot()`. Zero hot-path overhead when
   `ClientOptions.Hooks == nil`.
-- **D.1 — zero-alloc request path** *(this release)*: caller-provided
+- **D.1 — zero-alloc request path** *(released)*: caller-provided
   `*Response`/`*StreamResponse` eliminates per-call heap alloc;
   `conn.HeaderSlabPool` slab allocator for HPACK header bytes;
   per-`Conn` stream `sync.Pool`; `encBufPool` for HPACK encode buffers;
   `hdrSlicePool` + const name bytes in `buildHeaders`. 33 allocs/op,
   down from 49 (−33%).
+- **D.2 — request/response body streaming** *(this release)*:
+  `Request.ContentLength int64` emits `content-length` header;
+  `Request.StreamBody bool` + `Response.BodyReader io.ReadCloser` stream
+  response bodies without buffering (caller drains + `Close()`);
+  `uploadBufPool` recycles upload read buffers; `Response.Reset()` closes
+  `BodyReader` automatically. RFC 7540 §8.1 conformance test added.
 
 ## Quick start
 
