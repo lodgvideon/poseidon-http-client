@@ -6,6 +6,7 @@ import (
 	"crypto/tls"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -15,6 +16,8 @@ import (
 
 	"github.com/lodgvideon/poseidon-http-client/client"
 	"github.com/lodgvideon/poseidon-http-client/conn"
+	xhttp2 "golang.org/x/net/http2"
+	"golang.org/x/net/http2/h2c"
 )
 
 func newTLSH2Server(t *testing.T, h http.Handler) (*httptest.Server, string) {
@@ -547,5 +550,53 @@ func TestIntegration_Client_POST_ContentLength_Header(t *testing.T) {
 	}
 	if gotCL != "5" {
 		t.Fatalf("content-length = %q, want %q", gotCL, "5")
+	}
+}
+
+// newH2CServer starts an H2C (cleartext HTTP/2) server on a random
+// port and returns the "host:port" address.
+func newH2CServer(t *testing.T, h http.Handler) string {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	srv := &http.Server{
+		Handler:           h2c.NewHandler(h, &xhttp2.Server{}),
+		ReadHeaderTimeout: 5 * time.Second,
+	}
+	go func() { _ = srv.Serve(ln) }()
+	t.Cleanup(func() { _ = srv.Close() })
+	return ln.Addr().String()
+}
+
+func TestIntegration_Client_H2C_Do(t *testing.T) {
+	addr := newH2CServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(200)
+		_, _ = io.WriteString(w, "h2c ok")
+	}))
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	c, err := client.NewClient(client.ClientOptions{
+		Addr: addr,
+		ConnOpts: conn.ConnOptions{
+			Dialer: &conn.PlaintextDialer{},
+		},
+		DefaultScheme: "http",
+	})
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+	t.Cleanup(func() { _ = c.Close() })
+
+	var res client.Response
+	err = c.Do(ctx, &client.Request{Method: "GET", Path: "/", WantBody: true}, &res)
+	if err != nil {
+		t.Fatalf("Do: %v", err)
+	}
+	if res.Status != 200 {
+		t.Fatalf("status = %d, want 200", res.Status)
 	}
 }

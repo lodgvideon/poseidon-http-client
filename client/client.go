@@ -73,15 +73,20 @@ type ClientOptions struct {
 	// Hooks is an optional set of lifecycle callbacks. nil → no hooks
 	// fire. May be replaced at runtime via Client.SetHooks.
 	Hooks *Hooks
+
+	// DefaultScheme is used as the :scheme pseudo-header when Request.Scheme
+	// is empty. Defaults to "https" when zero. Set to "http" for H2C targets.
+	DefaultScheme string
 }
 
 // Client is a high-level HTTP/2 client wrapping a single connection.
 // It is safe for concurrent use by multiple goroutines.
 type Client struct {
-	tr        transport
-	authority string
-	hooksPtr  *atomic.Pointer[Hooks]
-	metrics   *Metrics
+	tr            transport
+	authority     string
+	defaultScheme string
+	hooksPtr      *atomic.Pointer[Hooks]
+	metrics       *Metrics
 }
 
 // NewClient validates opts and constructs a Client. It does NOT dial;
@@ -140,7 +145,17 @@ func NewClient(opts ClientOptions) (*Client, error) {
 		}
 		tr = &managedTransport{mp: mp}
 	}
-	c := &Client{tr: tr, authority: deriveAuthority(opts.Addr), hooksPtr: hooksPtr, metrics: metrics}
+	scheme := opts.DefaultScheme
+	if scheme == "" {
+		scheme = "https"
+	}
+	c := &Client{
+		tr:            tr,
+		authority:     deriveAuthority(opts.Addr),
+		defaultScheme: scheme,
+		hooksPtr:      hooksPtr,
+		metrics:       metrics,
+	}
 	return c, nil
 }
 
@@ -224,7 +239,7 @@ func (c *Client) do(ctx context.Context, req *Request, resp *Response) error {
 		return err
 	}
 
-	hdrs, putHdrs := buildHeaders(req, c.authority)
+	hdrs, putHdrs := buildHeaders(req, c.authority, c.defaultScheme)
 	endStream := len(req.Body) == 0 && req.BodyReader == nil
 	if err := s.SendHeaders(ctx, hdrs, endStream); err != nil {
 		putHdrs()
@@ -340,7 +355,7 @@ func (c *Client) doStream(ctx context.Context, req *Request, sr *StreamResponse)
 		return err
 	}
 
-	hdrs, putHdrs := buildHeaders(req, c.authority)
+	hdrs, putHdrs := buildHeaders(req, c.authority, c.defaultScheme)
 	endStream := len(req.Body) == 0 && req.BodyReader == nil
 	if err := s.SendHeaders(ctx, hdrs, endStream); err != nil {
 		putHdrs()
@@ -428,10 +443,10 @@ var hdrSlicePool = sync.Pool{
 // buildHeaders assembles the on-wire HEADERS slice with pseudo-headers
 // first. Returns the slice and a put function; caller MUST call put()
 // after SendHeaders returns to return the slice to the pool.
-func buildHeaders(req *Request, defaultAuthority string) ([]hpack.HeaderField, func()) {
+func buildHeaders(req *Request, defaultAuthority, defaultScheme string) ([]hpack.HeaderField, func()) {
 	scheme := req.Scheme
 	if scheme == "" {
-		scheme = "https"
+		scheme = defaultScheme
 	}
 	authority := req.Authority
 	if authority == "" {
