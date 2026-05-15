@@ -766,6 +766,13 @@ func (c *Conn) Ping(ctx context.Context) (time.Duration, error) {
 	c.pingMu.Unlock()
 
 	c.wmu.Lock()
+	if c.closed.Load() {
+		c.wmu.Unlock()
+		c.pingMu.Lock()
+		delete(c.pingWaiters, payload)
+		c.pingMu.Unlock()
+		return 0, ErrConnClosed
+	}
 	start := time.Now()
 	err := c.fr.WritePing(false, payload)
 	if err == nil {
@@ -808,9 +815,9 @@ func (c *Conn) keepaliveLoop(interval time.Duration) {
 			if c.goAwayReceived.Load() {
 				return
 			}
-			pingTimeout := interval
-			if pingTimeout < time.Second {
-				pingTimeout = time.Second
+			pingTimeout := interval * 5
+			if pingTimeout < 5*time.Second {
+				pingTimeout = 5 * time.Second
 			}
 			ctx, cancel := context.WithTimeout(context.Background(), pingTimeout)
 			_, err := c.Ping(ctx)
