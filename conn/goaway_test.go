@@ -99,7 +99,8 @@ func TestOnGoAway_WakesAcquireSendCredits(t *testing.T) {
 }
 
 // TestOnPing_AckFrame_IsNoop confirms an inbound PING with ACK=1 is
-// silently dropped (we never initiate active PINGs in B.2.6).
+// routed to deliverPingAck (D.4). With no waiter registered the call
+// is a no-op: no echo frame is written back to the peer.
 func TestOnPing_AckFrame_IsNoop(t *testing.T) {
 	var buf bytes.Buffer
 	fr := frame.NewFramer(&buf, bytes.NewReader([]byte{}))
@@ -155,6 +156,7 @@ func newGoAwayConn() *Conn {
 		}.defaulted(),
 		streams:            map[uint32]*Stream{},
 		readerDone:         make(chan struct{}),
+		pingWaiters:        make(map[[8]byte]chan struct{}),
 		peerConnSendWindow: 65535,
 	}
 	c.fcOutCond = sync.NewCond(&c.fcOutMu)

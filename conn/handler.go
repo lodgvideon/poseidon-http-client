@@ -29,6 +29,7 @@ type connOps interface {
 	applyPeerSettings(s frame.SettingsParams) error
 	writeSettingsAck() error
 	writePingAck(payload [8]byte) error
+	deliverPingAck(payload [8]byte)
 	onGoAwayReceived(lastStreamID uint32, code frame.ErrCode)
 }
 
@@ -216,13 +217,12 @@ func (h *connHandler) OnPushPromise(_ frame.FrameHeader, _ uint32, _ frame.Heade
 	}
 }
 
-// OnPing implements frame.Handler.
 // OnPing implements frame.Handler. Non-ACK PING frames are echoed
 // back with ACK=1 and the same opaque 8-byte payload (RFC 7540 §6.7).
-// ACK frames are silently accepted — B.2.6 does not initiate active
-// PINGs, so we never expect ACKs of our own.
+// ACK frames are delivered to any Ping call waiting for that payload.
 func (h *connHandler) OnPing(fh frame.FrameHeader, payload [8]byte) error {
 	if fh.Flags&frame.FlagPingAck != 0 {
+		h.streams.deliverPingAck(payload)
 		return nil
 	}
 	return h.streams.writePingAck(payload)
