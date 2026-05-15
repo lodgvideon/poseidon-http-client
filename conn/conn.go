@@ -762,8 +762,8 @@ func (c *Conn) Ping(ctx context.Context) (time.Duration, error) {
 	c.pingWaiters[payload] = ch
 	c.pingMu.Unlock()
 
-	start := time.Now()
 	c.wmu.Lock()
+	start := time.Now()
 	err := c.fr.WritePing(false, payload)
 	if err == nil {
 		c.bumpFramesSent()
@@ -786,6 +786,9 @@ func (c *Conn) Ping(ctx context.Context) (time.Duration, error) {
 		c.pingMu.Unlock()
 		return 0, ctx.Err()
 	case <-c.readerDone:
+		c.pingMu.Lock()
+		delete(c.pingWaiters, payload)
+		c.pingMu.Unlock()
 		return 0, ErrConnClosed
 	}
 }

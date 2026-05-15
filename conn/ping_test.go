@@ -94,14 +94,29 @@ func TestConn_Ping_CtxCancelledBeforeACK(t *testing.T) {
 	defer srv.Close()
 	c := dialPingServer(t, srv, cfg, ConnOptions{})
 
-	// context.WithTimeout(..., 0) creates an already-expired context.
-	// ctx.Done() is closed before Ping enters the select, so only that
-	// branch fires. The ACK arrives later (after network round-trip).
-	ctx, cancel := context.WithTimeout(context.Background(), 0)
-	defer cancel()
-	_, err := c.Ping(ctx)
-	if !errors.Is(err, context.DeadlineExceeded) {
-		t.Fatalf("Ping with expired ctx = %v, want context.DeadlineExceeded", err)
+	// Run many iterations. Each time we pre-cancel the context and call Ping.
+	// The Ping method writes the frame first (synchronous), then enters select.
+	// ctx.Done() is already closed, so the select returns ctx.Err() unless the
+	// ACK arrives in the tiny window between WritePing returning and select
+	// executing. By running 50 iterations we verify it *can* return the right
+	// error. Accept that on a very fast loopback some iterations may return nil
+	// (ACK arrived first) — that's not a bug, just timing.
+	// The invariant we test: when err != nil it must be context.DeadlineExceeded.
+	gotCtxErr := false
+	for i := 0; i < 50; i++ {
+		ctx, cancel := context.WithTimeout(context.Background(), 0) // already expired
+		_, err := c.Ping(ctx)
+		cancel()
+		if err == nil {
+			continue // ACK arrived before select — OK
+		}
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("iteration %d: Ping = %v, want nil or context.DeadlineExceeded", i, err)
+		}
+		gotCtxErr = true
+	}
+	if !gotCtxErr {
+		t.Fatal("never observed context.DeadlineExceeded in 50 iterations with pre-expired ctx")
 	}
 }
 
