@@ -31,6 +31,7 @@ func (*fakeStreamMap) onWindowUpdate(uint32, uint32) error                  { re
 func (*fakeStreamMap) applyPeerSettings(frame.SettingsParams) error         { return nil }
 func (*fakeStreamMap) writeSettingsAck() error                              { return nil }
 func (*fakeStreamMap) writePingAck([8]byte) error                           { return nil }
+func (*fakeStreamMap) deliverPingAck([8]byte)                               {}
 func (*fakeStreamMap) onGoAwayReceived(uint32, frame.ErrCode)               {}
 
 func newFakeStreamMap() *fakeStreamMap {

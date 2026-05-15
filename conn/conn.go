@@ -2,6 +2,7 @@ package conn
 
 import (
 	"context"
+	"encoding/binary"
 	"errors"
 	"io"
 	"net"
@@ -70,6 +71,11 @@ type Conn struct {
 	closed     atomic.Bool
 	readerDone chan struct{}
 
+	// pingMu guards pingWaiters. pingCounter produces unique payloads.
+	pingMu      sync.Mutex
+	pingWaiters map[[8]byte]chan struct{}
+	pingCounter atomic.Uint64
+
 	// streamPool recycles *Stream structs (struct + channel) to eliminate
 	// 2 allocs per request after warmup. Only streams whose channel cap
 	// equals opts.StreamEventBuffer are recycled; mis-sized ones are discarded.
@@ -105,6 +111,7 @@ func NewClientConn(ctx context.Context, transport net.Conn, opts ConnOptions) (*
 		nextID:             1,
 		streams:            map[uint32]*Stream{},
 		readerDone:         make(chan struct{}),
+		pingWaiters:        make(map[[8]byte]chan struct{}),
 		connRecvWindow:     int32(connInitialRecvWindow),
 		peerConnSendWindow: int32(connInitialRecvWindow),
 	}
@@ -721,6 +728,66 @@ func (c *Conn) writePingAck(payload [8]byte) error {
 	}
 	c.bumpFramesSent()
 	return nil
+}
+
+// deliverPingAck signals any Ping call waiting for payload.
+// Unsolicited ACKs (no matching waiter) are silently ignored.
+func (c *Conn) deliverPingAck(payload [8]byte) {
+	c.pingMu.Lock()
+	ch, ok := c.pingWaiters[payload]
+	if ok {
+		delete(c.pingWaiters, payload)
+	}
+	c.pingMu.Unlock()
+	if ok {
+		close(ch)
+	}
+}
+
+// Ping sends a PING frame and blocks until the peer's ACK arrives,
+// returning the round-trip time. Returns ErrConnClosed if the
+// connection is already closed or closes before the ACK arrives.
+// Returns ctx.Err() if the context expires or is cancelled first.
+func (c *Conn) Ping(ctx context.Context) (time.Duration, error) {
+	if c.closed.Load() {
+		return 0, ErrConnClosed
+	}
+
+	n := c.pingCounter.Add(1)
+	var payload [8]byte
+	binary.BigEndian.PutUint64(payload[:], n)
+
+	ch := make(chan struct{})
+	c.pingMu.Lock()
+	c.pingWaiters[payload] = ch
+	c.pingMu.Unlock()
+
+	start := time.Now()
+	c.wmu.Lock()
+	err := c.fr.WritePing(false, payload)
+	if err == nil {
+		c.bumpFramesSent()
+	}
+	c.wmu.Unlock()
+
+	if err != nil {
+		c.pingMu.Lock()
+		delete(c.pingWaiters, payload)
+		c.pingMu.Unlock()
+		return 0, err
+	}
+
+	select {
+	case <-ch:
+		return time.Since(start), nil
+	case <-ctx.Done():
+		c.pingMu.Lock()
+		delete(c.pingWaiters, payload)
+		c.pingMu.Unlock()
+		return 0, ctx.Err()
+	case <-c.readerDone:
+		return 0, ErrConnClosed
+	}
 }
 
 func (c *Conn) bumpFramesSent() { c.atomicFramesSent.Add(1) }

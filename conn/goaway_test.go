@@ -155,6 +155,7 @@ func newGoAwayConn() *Conn {
 		}.defaulted(),
 		streams:            map[uint32]*Stream{},
 		readerDone:         make(chan struct{}),
+		pingWaiters:        make(map[[8]byte]chan struct{}),
 		peerConnSendWindow: 65535,
 	}
 	c.fcOutCond = sync.NewCond(&c.fcOutMu)
