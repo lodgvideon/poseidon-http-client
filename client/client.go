@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -371,10 +372,11 @@ func (c *Client) MetricsSnapshot() MetricsSnapshot {
 // Pseudo-header name bytes. The HPACK encoder reads these but never
 // mutates them, so sharing across concurrent callers is safe.
 var (
-	hdrMethod    = []byte(":method")
-	hdrScheme    = []byte(":scheme")
-	hdrAuthority = []byte(":authority")
-	hdrPath      = []byte(":path")
+	hdrMethod        = []byte(":method")
+	hdrScheme        = []byte(":scheme")
+	hdrAuthority     = []byte(":authority")
+	hdrPath          = []byte(":path")
+	hdrContentLength = []byte("content-length")
 )
 
 // hdrSlicePool recycles the []hpack.HeaderField backing array used by
@@ -408,6 +410,12 @@ func buildHeaders(req *Request, defaultAuthority string) ([]hpack.HeaderField, f
 		hpack.HeaderField{Name: hdrPath, Value: []byte(req.Path)},
 	)
 	*sp = append(*sp, req.Headers...)
+	if req.BodyReader != nil && req.ContentLength > 0 {
+		*sp = append(*sp, hpack.HeaderField{
+			Name:  hdrContentLength,
+			Value: []byte(strconv.FormatInt(req.ContentLength, 10)),
+		})
+	}
 	return *sp, func() {
 		*sp = (*sp)[:0]
 		hdrSlicePool.Put(sp)
@@ -429,11 +437,21 @@ func writeRequestBody(ctx context.Context, s *conn.Stream, req *Request) error {
 // and respects flow control.
 const readChunkSize = 16 * 1024
 
+// uploadBufPool recycles the per-call read buffer used by writeBodyReader.
+var uploadBufPool = sync.Pool{
+	New: func() any {
+		b := make([]byte, readChunkSize)
+		return &b
+	},
+}
+
 // writeBodyReader streams an io.Reader into DATA frames, half-closing
 // the stream at EOF. On read error it sends RST_STREAM(CANCEL) via
 // Stream.Close and wraps the error.
 func writeBodyReader(ctx context.Context, s *conn.Stream, r io.Reader) error {
-	buf := make([]byte, readChunkSize)
+	bufp := uploadBufPool.Get().(*[]byte)
+	defer uploadBufPool.Put(bufp)
+	buf := *bufp
 	for {
 		n, rerr := r.Read(buf)
 		if n > 0 {

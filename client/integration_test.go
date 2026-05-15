@@ -419,3 +419,29 @@ func TestDoStream_SRReuse(t *testing.T) {
 		}
 	}
 }
+
+func TestIntegration_Client_POST_ContentLength_Header(t *testing.T) {
+	var gotCL string
+	_, addr := newTLSH2Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotCL = r.Header.Get("Content-Length")
+		w.WriteHeader(200)
+	}))
+	c := clientFor(t, addr)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	var res client.Response
+	body := strings.NewReader("hello")
+	err := c.Do(ctx, &client.Request{
+		Method:        "POST",
+		Path:          "/",
+		BodyReader:    body,
+		ContentLength: 5,
+	}, &res)
+	if err != nil {
+		t.Fatalf("Do: %v", err)
+	}
+	if gotCL != "5" {
+		t.Fatalf("content-length = %q, want %q", gotCL, "5")
+	}
+}
