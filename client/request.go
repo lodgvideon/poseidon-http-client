@@ -29,6 +29,12 @@ type Request struct {
 	// BodyReader streams the request body in DATA frames when non-nil.
 	BodyReader io.Reader
 
+	// ContentLength is the body byte count. When > 0 and BodyReader is
+	// non-nil, a content-length header is emitted in the HEADERS frame.
+	// Zero or negative: no content-length header. For Body []byte the
+	// length is derived automatically; this field is ignored in that case.
+	ContentLength int64
+
 	// WantBody opts the response body buffer in. When false, response
 	// DATA frames are consumed (so flow-control refunds run) and the
 	// payload is dropped before Do returns.
@@ -36,6 +42,12 @@ type Request struct {
 	// WantTrailers opts trailer capture in. When false, response
 	// trailers are ignored.
 	WantTrailers bool
+
+	// StreamBody, when true, causes Do to return after the response HEADERS
+	// frame arrives. The body is available via Response.BodyReader.
+	// Caller MUST call Response.BodyReader.Close() (or Response.Reset())
+	// before the next Do call. WantBody is ignored when StreamBody is true.
+	StreamBody bool
 
 	// Idempotent overrides automatic idempotency classification based
 	// on Method. nil → classify by Method (GET, HEAD, OPTIONS, PUT,
