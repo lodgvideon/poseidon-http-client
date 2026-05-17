@@ -240,7 +240,8 @@ func (c *Client) do(ctx context.Context, req *Request, resp *Response) error {
 	}
 
 	hdrs, putHdrs := buildHeaders(req, c.authority, c.defaultScheme)
-	endStream := len(req.Body) == 0 && req.BodyReader == nil
+	trailers := hasTrailers(req)
+	endStream := len(req.Body) == 0 && req.BodyReader == nil && !trailers
 	if err := s.SendHeaders(ctx, hdrs, endStream); err != nil {
 		putHdrs()
 		_ = s.Close()
@@ -249,11 +250,18 @@ func (c *Client) do(ctx context.Context, req *Request, resp *Response) error {
 	}
 	putHdrs()
 
-	if !endStream {
-		if err := writeRequestBody(ctx, s, req); err != nil {
+	if !endStream || trailers {
+		if err := writeRequestBody(ctx, s, req, !trailers); err != nil {
 			_ = s.Close()
 			release()
 			return err
+		}
+		if trailers {
+			if err := writeRequestTrailers(ctx, s, req); err != nil {
+				_ = s.Close()
+				release()
+				return err
+			}
 		}
 	}
 
@@ -356,7 +364,8 @@ func (c *Client) doStream(ctx context.Context, req *Request, sr *StreamResponse)
 	}
 
 	hdrs, putHdrs := buildHeaders(req, c.authority, c.defaultScheme)
-	endStream := len(req.Body) == 0 && req.BodyReader == nil
+	trailers := hasTrailers(req)
+	endStream := len(req.Body) == 0 && req.BodyReader == nil && !trailers
 	if err := s.SendHeaders(ctx, hdrs, endStream); err != nil {
 		putHdrs()
 		_ = s.Close()
@@ -365,11 +374,18 @@ func (c *Client) doStream(ctx context.Context, req *Request, sr *StreamResponse)
 	}
 	putHdrs()
 
-	if !endStream {
-		if err := writeRequestBody(ctx, s, req); err != nil {
+	if !endStream || trailers {
+		if err := writeRequestBody(ctx, s, req, !trailers); err != nil {
 			_ = s.Close()
 			release()
 			return err
+		}
+		if trailers {
+			if err := writeRequestTrailers(ctx, s, req); err != nil {
+				_ = s.Close()
+				release()
+				return err
+			}
 		}
 	}
 
@@ -428,6 +444,7 @@ var (
 	hdrAuthority     = []byte(":authority")
 	hdrPath          = []byte(":path")
 	hdrContentLength = []byte("content-length")
+	hdrTrailer       = []byte("trailer")
 )
 
 // hdrSlicePool recycles the []hpack.HeaderField backing array used by
@@ -467,20 +484,91 @@ func buildHeaders(req *Request, defaultAuthority, defaultScheme string) ([]hpack
 			Value: []byte(strconv.FormatInt(req.ContentLength, 10)),
 		})
 	}
+	// Announce trailers in the initial HEADERS frame so the peer can
+	// allocate a Trailer map before the body arrives (required by the
+	// Go net/http HTTP/2 server and recommended by RFC 7230 §4.4).
+	if tv := trailerAnnouncement(req); len(tv) > 0 {
+		*sp = append(*sp, hpack.HeaderField{Name: hdrTrailer, Value: tv})
+	}
 	return *sp, func() {
 		*sp = (*sp)[:0]
 		hdrSlicePool.Put(sp)
 	}
 }
 
-// writeRequestBody writes Body or BodyReader as DATA frames, ending
-// the request side on the final write. The caller has already issued
-// SendHeaders with endStream=false.
-func writeRequestBody(ctx context.Context, s *conn.Stream, req *Request) error {
-	if req.BodyReader != nil {
-		return writeBodyReader(ctx, s, req.BodyReader)
+// trailerAnnouncement returns a comma-separated list of lowercase trailer
+// field names for the "trailer" request header, or nil when no trailers
+// will be sent. When TrailerFunc is set it is called to discover the
+// keys (TrailerFunc is required to be idempotent per Request docs).
+func trailerAnnouncement(req *Request) []byte {
+	fields := req.Trailers
+	if req.TrailerFunc != nil {
+		if result := req.TrailerFunc(); result != nil {
+			fields = result
+		}
 	}
-	return s.SendData(ctx, req.Body, true)
+	if len(fields) == 0 {
+		return nil
+	}
+	var b strings.Builder
+	for i, f := range fields {
+		if i > 0 {
+			b.WriteByte(',')
+		}
+		b.Write(f.Name)
+	}
+	return []byte(b.String())
+}
+
+// hasTrailers reports whether req will send a trailer HEADERS frame.
+func hasTrailers(req *Request) bool {
+	return len(req.Trailers) > 0 || req.TrailerFunc != nil
+}
+
+// resolveTrailers returns the trailer fields to send. TrailerFunc wins;
+// falls back to Trailers when TrailerFunc returns nil.
+// Returns error if resolved fields contain pseudo-headers.
+func resolveTrailers(req *Request) ([]hpack.HeaderField, error) {
+	fields := req.Trailers
+	if req.TrailerFunc != nil {
+		if result := req.TrailerFunc(); result != nil {
+			fields = result
+		}
+	}
+	for i := range fields {
+		if len(fields[i].Name) > 0 && fields[i].Name[0] == ':' {
+			return nil, fmt.Errorf("%w: pseudo-header %q in trailer",
+				ErrInvalidRequest, fields[i].Name)
+		}
+	}
+	return fields, nil
+}
+
+// writeRequestTrailers resolves and sends the trailer HEADERS frame.
+func writeRequestTrailers(ctx context.Context, s *conn.Stream, req *Request) error {
+	fields, err := resolveTrailers(req)
+	if err != nil {
+		return err
+	}
+	return s.SendHeaders(ctx, fields, true)
+}
+
+// writeRequestBody writes Body or BodyReader as DATA frames.
+// endStream controls whether the final DATA frame sets END_STREAM.
+// Pass false when a trailer HEADERS frame will follow.
+func writeRequestBody(ctx context.Context, s *conn.Stream, req *Request, endStream bool) error {
+	if req.BodyReader != nil {
+		return writeBodyReader(ctx, s, req.BodyReader, endStream)
+	}
+	if len(req.Body) == 0 {
+		// No body content; skip DATA entirely when trailers follow
+		// (endStream=false). The caller sends END_STREAM via HEADERS.
+		if !endStream {
+			return nil
+		}
+		return s.SendData(ctx, nil, true)
+	}
+	return s.SendData(ctx, req.Body, endStream)
 }
 
 // readChunkSize is the per-Read buffer for streaming uploads. The
@@ -496,26 +584,28 @@ var uploadBufPool = sync.Pool{
 	},
 }
 
-// writeBodyReader streams an io.Reader into DATA frames, half-closing
-// the stream at EOF. On read error it sends RST_STREAM(CANCEL) via
-// Stream.Close and wraps the error.
-func writeBodyReader(ctx context.Context, s *conn.Stream, r io.Reader) error {
+// writeBodyReader streams an io.Reader into DATA frames.
+// endStream controls whether the final DATA frame sets END_STREAM.
+func writeBodyReader(ctx context.Context, s *conn.Stream, r io.Reader, endStream bool) error {
 	bufp := uploadBufPool.Get().(*[]byte)
 	defer uploadBufPool.Put(bufp)
 	buf := *bufp
 	for {
 		n, rerr := r.Read(buf)
 		if n > 0 {
-			final := rerr == io.EOF
+			final := rerr == io.EOF && endStream
 			if werr := s.SendData(ctx, buf[:n], final); werr != nil {
 				return werr
 			}
-			if final {
+			if rerr == io.EOF {
 				return nil
 			}
 		}
 		if rerr == io.EOF {
-			return s.SendData(ctx, nil, true)
+			if endStream {
+				return s.SendData(ctx, nil, true)
+			}
+			return nil // trailers follow; caller sends END_STREAM via HEADERS
 		}
 		if rerr != nil {
 			return fmt.Errorf("client: read request body: %w", rerr)
