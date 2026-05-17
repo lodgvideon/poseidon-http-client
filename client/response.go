@@ -134,6 +134,7 @@ type StreamResponse struct {
 	release   func()
 	closeOnce sync.Once
 	drained   bool
+	trailers  []hpack.HeaderField // cached when Recv delivers EventTrailers
 
 	// slabs holds pooled slab pointers that back Headers field bytes.
 	// Storing *[]byte avoids heap escape on return to HeaderSlabPool.
@@ -149,6 +150,7 @@ func (sr *StreamResponse) reset() {
 	sr.release = nil
 	sr.closeOnce = sync.Once{}
 	sr.drained = false
+	sr.trailers = nil
 	// slabs are cleaned up in Close(); reset() is only called for a
 	// struct that has been properly closed already.
 }
@@ -186,6 +188,7 @@ func (sr *StreamResponse) Recv(ctx context.Context) (StreamEvent, error) {
 				Trailers:  ev.Headers,
 				EndStream: ev.EndStream,
 			}
+			sr.trailers = out.Trailers // cache for WaitTrailers
 			if ev.EndStream {
 				sr.drained = true
 			}
@@ -197,6 +200,36 @@ func (sr *StreamResponse) Recv(ctx context.Context) (StreamEvent, error) {
 				ResetCode: ev.RSTCode,
 				EndStream: true,
 			}, nil
+		}
+	}
+}
+
+// WaitTrailers pumps Recv, discarding any remaining EventData events,
+// until EventTrailers arrives or the stream ends. Returns the trailer
+// fields and nil on success. Returns nil, nil when the server sent no
+// trailers. Returns nil, ctx.Err() when the context is cancelled.
+//
+// If Recv already delivered EventTrailers, the cached result is
+// returned immediately without further network I/O.
+func (sr *StreamResponse) WaitTrailers(ctx context.Context) ([]hpack.HeaderField, error) {
+	if sr.trailers != nil {
+		return sr.trailers, nil
+	}
+	for {
+		ev, err := sr.Recv(ctx)
+		if err == ErrStreamEnded {
+			return nil, nil
+		}
+		if err != nil {
+			return nil, err
+		}
+		switch ev.Type {
+		case EventData:
+			continue
+		case EventTrailers:
+			return ev.Trailers, nil // also cached in sr.trailers by Recv
+		case EventReset:
+			return nil, nil
 		}
 	}
 }
