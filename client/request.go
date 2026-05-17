@@ -43,6 +43,17 @@ type Request struct {
 	// trailers are ignored.
 	WantTrailers bool
 
+	// Trailers are sent as a HEADERS+END_STREAM frame after the request
+	// body. Ignored when TrailerFunc is non-nil and returns non-nil.
+	// MUST NOT contain pseudo-headers (names starting with ':').
+	Trailers []hpack.HeaderField
+
+	// TrailerFunc, when non-nil, is called after the full body is sent.
+	// Its return value replaces Trailers; if it returns nil, Trailers is
+	// used as fallback. Must be idempotent: the retry layer may call Do
+	// multiple times. MUST NOT return pseudo-headers.
+	TrailerFunc func() []hpack.HeaderField
+
 	// StreamBody, when true, causes Do to return after the response HEADERS
 	// frame arrives. The body is available via Response.BodyReader.
 	// Caller MUST call Response.BodyReader.Close() (or Response.Reset())
@@ -72,6 +83,12 @@ func validateRequest(r *Request) error {
 		if len(r.Headers[i].Name) > 0 && r.Headers[i].Name[0] == ':' {
 			return fmt.Errorf("%w: pseudo-header %q in regular Headers slice",
 				ErrInvalidRequest, r.Headers[i].Name)
+		}
+	}
+	for i := range r.Trailers {
+		if len(r.Trailers[i].Name) > 0 && r.Trailers[i].Name[0] == ':' {
+			return fmt.Errorf("%w: pseudo-header %q in Trailers slice",
+				ErrInvalidRequest, r.Trailers[i].Name)
 		}
 	}
 	return nil
