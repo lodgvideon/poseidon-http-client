@@ -444,6 +444,7 @@ var (
 	hdrAuthority     = []byte(":authority")
 	hdrPath          = []byte(":path")
 	hdrContentLength = []byte("content-length")
+	hdrTrailer       = []byte("trailer")
 )
 
 // hdrSlicePool recycles the []hpack.HeaderField backing array used by
@@ -483,10 +484,40 @@ func buildHeaders(req *Request, defaultAuthority, defaultScheme string) ([]hpack
 			Value: []byte(strconv.FormatInt(req.ContentLength, 10)),
 		})
 	}
+	// Announce trailers in the initial HEADERS frame so the peer can
+	// allocate a Trailer map before the body arrives (required by the
+	// Go net/http HTTP/2 server and recommended by RFC 7230 §4.4).
+	if tv := trailerAnnouncement(req); len(tv) > 0 {
+		*sp = append(*sp, hpack.HeaderField{Name: hdrTrailer, Value: tv})
+	}
 	return *sp, func() {
 		*sp = (*sp)[:0]
 		hdrSlicePool.Put(sp)
 	}
+}
+
+// trailerAnnouncement returns a comma-separated list of lowercase trailer
+// field names for the "trailer" request header, or nil when no trailers
+// will be sent. When TrailerFunc is set it is called to discover the
+// keys (TrailerFunc is required to be idempotent per Request docs).
+func trailerAnnouncement(req *Request) []byte {
+	fields := req.Trailers
+	if req.TrailerFunc != nil {
+		if result := req.TrailerFunc(); result != nil {
+			fields = result
+		}
+	}
+	if len(fields) == 0 {
+		return nil
+	}
+	var b strings.Builder
+	for i, f := range fields {
+		if i > 0 {
+			b.WriteByte(',')
+		}
+		b.Write(f.Name)
+	}
+	return []byte(b.String())
 }
 
 // hasTrailers reports whether req will send a trailer HEADERS frame.
