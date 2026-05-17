@@ -50,8 +50,11 @@ type Request struct {
 
 	// TrailerFunc, when non-nil, is called after the full body is sent.
 	// Its return value replaces Trailers; if it returns nil, Trailers is
-	// used as fallback. Must be idempotent: the retry layer may call Do
-	// multiple times. MUST NOT return pseudo-headers.
+	// used as fallback. Must be idempotent: it is called twice per Do
+	// invocation (once to announce trailer keys in the initial HEADERS
+	// frame, once to send the actual values after the body), and may be
+	// called again on retry. Both calls must return the same set of keys.
+	// MUST NOT return pseudo-headers — validated before sending.
 	TrailerFunc func() []hpack.HeaderField
 
 	// StreamBody, when true, causes Do to return after the response HEADERS
