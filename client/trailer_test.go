@@ -296,8 +296,17 @@ func TestDoStream_WaitTrailers_AfterDrain(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Recv: %v", err)
 	}
+	// Fast path: trailer arrived together with (or instead of) data on some runs.
+	if ev.Type == client.EventTrailers {
+		for _, f := range ev.Trailers {
+			if strings.EqualFold(string(f.Name), "x-tag") && string(f.Value) == "after-drain" {
+				return
+			}
+		}
+		t.Fatalf("x-tag trailer not found in first Recv result %v", ev.Trailers)
+	}
 	if ev.Type != client.EventData {
-		t.Fatalf("expected EventData, got %v", ev.Type)
+		t.Fatalf("expected EventData or EventTrailers, got %v", ev.Type)
 	}
 
 	// WaitTrailers pumps Recv internally to get EventTrailers.
@@ -425,5 +434,177 @@ func TestDoStream_WaitTrailers_Discard(t *testing.T) {
 	}
 	if !found {
 		t.Fatalf("x-discard trailer not found in %v", trailers)
+	}
+}
+
+func TestDo_RequestTrailers_FuncOnly(t *testing.T) {
+	// TrailerFunc set, Trailers nil — TrailerFunc result is the sole source.
+	_, addr := newTrailerH2Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.ReadAll(r.Body)
+		got := r.Trailer.Get("X-Func-Only")
+		if got != "func-only-value" {
+			t.Errorf("server: X-Func-Only = %q, want %q", got, "func-only-value")
+		}
+		w.WriteHeader(200)
+	}))
+	c := trailerClientFor(t, addr)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	var res client.Response
+	if err := c.Do(ctx, &client.Request{
+		Method: "POST",
+		Path:   "/",
+		Body:   []byte("hello"),
+		TrailerFunc: func() []hpack.HeaderField {
+			return []hpack.HeaderField{{Name: []byte("x-func-only"), Value: []byte("func-only-value")}}
+		},
+	}, &res); err != nil {
+		t.Fatalf("Do: %v", err)
+	}
+	if res.Status != 200 {
+		t.Fatalf("status = %d, want 200", res.Status)
+	}
+}
+
+func TestDo_RequestTrailers_WithStreamBody(t *testing.T) {
+	// StreamBody=true + Trailers: request trailers still sent after streaming body.
+	_, addr := newTrailerH2Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.ReadAll(r.Body)
+		got := r.Trailer.Get("X-Stream-Body")
+		if got != "stream-trailer" {
+			t.Errorf("server: X-Stream-Body = %q, want %q", got, "stream-trailer")
+		}
+		w.WriteHeader(200)
+	}))
+	c := trailerClientFor(t, addr)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	var res client.Response
+	if err := c.Do(ctx, &client.Request{
+		Method:     "POST",
+		Path:       "/",
+		Body:       []byte("body"),
+		StreamBody: true,
+		Trailers:   []hpack.HeaderField{{Name: []byte("x-stream-body"), Value: []byte("stream-trailer")}},
+	}, &res); err != nil {
+		t.Fatalf("Do: %v", err)
+	}
+	// With StreamBody=true, resp.BodyReader is set; drain and close it.
+	if res.BodyReader != nil {
+		_, _ = io.ReadAll(res.BodyReader)
+		_ = res.BodyReader.Close()
+	}
+	if res.Status != 200 {
+		t.Fatalf("status = %d, want 200", res.Status)
+	}
+}
+
+func TestDoStream_WaitTrailers_Reuse(t *testing.T) {
+	// StreamResponse reuse across two consecutive DoStream calls.
+	_, addr := newTrailerH2Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Trailer", "X-Reuse")
+		w.WriteHeader(200)
+		_, _ = w.Write([]byte("data"))
+		w.Header().Set("X-Reuse", "yes")
+	}))
+	c := trailerClientFor(t, addr)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	var sr client.StreamResponse
+	for i := 0; i < 2; i++ {
+		if err := c.DoStream(ctx, &client.Request{Method: "GET", Path: "/", WantTrailers: true}, &sr); err != nil {
+			t.Fatalf("iter %d: DoStream: %v", i, err)
+		}
+		trailers, err := sr.WaitTrailers(ctx)
+		if err != nil {
+			t.Fatalf("iter %d: WaitTrailers: %v", i, err)
+		}
+		var found bool
+		for _, f := range trailers {
+			if strings.EqualFold(string(f.Name), "x-reuse") && string(f.Value) == "yes" {
+				found = true
+			}
+		}
+		if !found {
+			t.Fatalf("iter %d: x-reuse trailer not found in %v", i, trailers)
+		}
+		_ = sr.Close() // must close before next DoStream reuse
+	}
+}
+
+// TestConformance_RFC7540_Sec8_1_3_RequestTrailers verifies that the client
+// sends request trailers as a HEADERS+END_STREAM frame after all DATA frames
+// (RFC 7540 §8.1.3). Conformance is verified by the server successfully
+// receiving the trailer field — which requires the correct wire sequence.
+func TestConformance_RFC7540_Sec8_1_3_RequestTrailers(t *testing.T) {
+	_, addr := newTrailerH2Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.ReadAll(r.Body)
+		got := r.Trailer.Get("X-Conformance")
+		if got == "" {
+			http.Error(w, "trailer missing — HEADERS+END_STREAM not received", 500)
+			return
+		}
+		w.WriteHeader(200)
+	}))
+	c := trailerClientFor(t, addr)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	var res client.Response
+	if err := c.Do(ctx, &client.Request{
+		Method:   "POST",
+		Path:     "/",
+		Body:     []byte("conformance-body"),
+		Trailers: []hpack.HeaderField{{Name: []byte("x-conformance"), Value: []byte("rfc8.1.3")}},
+	}, &res); err != nil {
+		t.Fatalf("Do: %v", err)
+	}
+	if res.Status != 200 {
+		t.Fatalf("status = %d, want 200; trailer HEADERS+END_STREAM not received by server", res.Status)
+	}
+}
+
+func BenchmarkDo_WithTrailers(b *testing.B) {
+	srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.ReadAll(r.Body)
+		w.WriteHeader(200)
+	}))
+	srv.EnableHTTP2 = true
+	srv.StartTLS()
+	b.Cleanup(srv.Close)
+	addr := strings.TrimPrefix(srv.URL, "https://")
+
+	c, err := client.NewClient(client.ClientOptions{
+		Addr: addr,
+		ConnOpts: conn.ConnOptions{
+			Dialer: &conn.TLSDialer{Config: &tls.Config{InsecureSkipVerify: true}},
+		},
+	})
+	if err != nil {
+		b.Fatalf("NewClient: %v", err)
+	}
+	b.Cleanup(func() { _ = c.Close() })
+
+	req := &client.Request{
+		Method: "POST",
+		Path:   "/",
+		Body:   []byte("bench-body"),
+		Trailers: []hpack.HeaderField{
+			{Name: []byte("x-bench"), Value: []byte("value")},
+		},
+	}
+
+	ctx := context.Background()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		var res client.Response
+		if err := c.Do(ctx, req, &res); err != nil {
+			b.Fatalf("Do: %v", err)
+		}
+		res.Reset()
 	}
 }

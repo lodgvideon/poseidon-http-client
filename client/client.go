@@ -452,7 +452,7 @@ var (
 // return immediately after SendHeaders returns.
 var hdrSlicePool = sync.Pool{
 	New: func() any {
-		s := make([]hpack.HeaderField, 0, 8)
+		s := make([]hpack.HeaderField, 0, 10)
 		return &s
 	},
 }
@@ -496,28 +496,37 @@ func buildHeaders(req *Request, defaultAuthority, defaultScheme string) ([]hpack
 	}
 }
 
-// trailerAnnouncement returns a comma-separated list of lowercase trailer
-// field names for the "trailer" request header, or nil when no trailers
-// will be sent. When TrailerFunc is set it is called to discover the
-// keys (TrailerFunc is required to be idempotent per Request docs).
-func trailerAnnouncement(req *Request) []byte {
-	fields := req.Trailers
+// resolveTrailerFields returns the effective trailer fields for req.
+// TrailerFunc wins; falls back to Trailers when TrailerFunc returns nil.
+func resolveTrailerFields(req *Request) []hpack.HeaderField {
 	if req.TrailerFunc != nil {
 		if result := req.TrailerFunc(); result != nil {
-			fields = result
+			return result
 		}
 	}
+	return req.Trailers
+}
+
+// trailerAnnouncement returns a comma-separated list of lowercase trailer
+// field names for the "trailer" request header, or nil when no trailers
+// will be sent. Pseudo-headers are silently skipped — they are invalid in
+// trailers and are caught (with error) by resolveTrailers at send time.
+func trailerAnnouncement(req *Request) []byte {
+	fields := resolveTrailerFields(req)
 	if len(fields) == 0 {
 		return nil
 	}
-	var b strings.Builder
-	for i, f := range fields {
-		if i > 0 {
-			b.WriteByte(',')
+	var b []byte
+	for _, f := range fields {
+		if len(f.Name) > 0 && f.Name[0] == ':' {
+			continue // pseudo-headers are invalid in trailers; skip announcement
 		}
-		b.Write(f.Name)
+		if len(b) > 0 {
+			b = append(b, ',')
+		}
+		b = append(b, f.Name...)
 	}
-	return []byte(b.String())
+	return b
 }
 
 // hasTrailers reports whether req will send a trailer HEADERS frame.
@@ -529,12 +538,7 @@ func hasTrailers(req *Request) bool {
 // falls back to Trailers when TrailerFunc returns nil.
 // Returns error if resolved fields contain pseudo-headers.
 func resolveTrailers(req *Request) ([]hpack.HeaderField, error) {
-	fields := req.Trailers
-	if req.TrailerFunc != nil {
-		if result := req.TrailerFunc(); result != nil {
-			fields = result
-		}
-	}
+	fields := resolveTrailerFields(req)
 	for i := range fields {
 		if len(fields[i].Name) > 0 && fields[i].Name[0] == ':' {
 			return nil, fmt.Errorf("%w: pseudo-header %q in trailer",
@@ -608,6 +612,7 @@ func writeBodyReader(ctx context.Context, s *conn.Stream, r io.Reader, endStream
 			return nil // trailers follow; caller sends END_STREAM via HEADERS
 		}
 		if rerr != nil {
+			// On read error other than io.EOF, abort the upload.
 			return fmt.Errorf("client: read request body: %w", rerr)
 		}
 	}

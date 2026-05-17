@@ -53,7 +53,10 @@ type Request struct {
 	// used as fallback. Must be idempotent: it is called twice per Do
 	// invocation (once to announce trailer keys in the initial HEADERS
 	// frame, once to send the actual values after the body), and may be
-	// called again on retry. Both calls must return the same set of keys.
+	// called again on retry. The two calls must return the same set of
+	// keys, though values may differ — the first call reads only keys
+	// (for the Trailer: announcement), the second sends both keys and
+	// values (e.g. checksums computed after body flush).
 	// MUST NOT return pseudo-headers — validated before sending.
 	TrailerFunc func() []hpack.HeaderField
 

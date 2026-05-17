@@ -189,6 +189,9 @@ func (sr *StreamResponse) Recv(ctx context.Context) (StreamEvent, error) {
 				EndStream: ev.EndStream,
 			}
 			sr.trailers = out.Trailers // cache for WaitTrailers
+			if sr.trailers == nil {
+				sr.trailers = []hpack.HeaderField{} // sentinel: EventTrailers received but empty
+			}
 			if ev.EndStream {
 				sr.drained = true
 			}
@@ -209,6 +212,11 @@ func (sr *StreamResponse) Recv(ctx context.Context) (StreamEvent, error) {
 // fields and nil on success. Returns nil, nil when the server sent no
 // trailers or the stream was reset — use Recv directly to distinguish
 // these cases. Returns nil, ctx.Err() when the context is cancelled.
+//
+// When the server sends an empty trailer block (EventTrailers with no
+// header fields), WaitTrailers returns a non-nil empty slice; callers
+// can distinguish "trailers received" (non-nil) from "no trailers"
+// (nil).
 //
 // If Recv already delivered EventTrailers, the cached result is
 // returned immediately without further network I/O.

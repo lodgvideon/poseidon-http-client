@@ -49,7 +49,10 @@ type RequestCompleteEvent struct {
 	Status                  int // 0 if no headers received
 	Err                     error
 	Latency                 time.Duration
-	BytesSent, BytesRecv    int64
+	// BytesSent is the request body payload size in bytes (len(req.Body)).
+	// It excludes HTTP/2 frame overhead and any trailer HEADERS frame.
+	// BytesRecv is the total DATA payload received.
+	BytesSent, BytesRecv int64
 	Attempt                 int
 }
 
