@@ -207,7 +207,8 @@ func (sr *StreamResponse) Recv(ctx context.Context) (StreamEvent, error) {
 // WaitTrailers pumps Recv, discarding any remaining EventData events,
 // until EventTrailers arrives or the stream ends. Returns the trailer
 // fields and nil on success. Returns nil, nil when the server sent no
-// trailers. Returns nil, ctx.Err() when the context is cancelled.
+// trailers or the stream was reset — use Recv directly to distinguish
+// these cases. Returns nil, ctx.Err() when the context is cancelled.
 //
 // If Recv already delivered EventTrailers, the cached result is
 // returned immediately without further network I/O.
@@ -217,7 +218,7 @@ func (sr *StreamResponse) WaitTrailers(ctx context.Context) ([]hpack.HeaderField
 	}
 	for {
 		ev, err := sr.Recv(ctx)
-		if err == ErrStreamEnded {
+		if errors.Is(err, ErrStreamEnded) {
 			return nil, nil
 		}
 		if err != nil {
