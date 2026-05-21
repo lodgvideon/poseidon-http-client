@@ -4,15 +4,18 @@ A low-level, zero-allocation HTTP/2 client for Go, designed for load
 generators. Implements RFC 7540 (HTTP/2) and RFC 7541 (HPACK) from
 scratch without `net/http` or `golang.org/x/net/http2`.
 
-**Status:** Phase D.2 — request/response body streaming. `Request.ContentLength`
-emits `content-length` header; `Request.StreamBody` + `Response.BodyReader
-io.ReadCloser` stream response bodies without buffering; pooled upload buffer
-(`uploadBufPool`). See
+**Status:** Phase D.5 — HTTP request trailers. `Request.Trailers` /
+`Request.TrailerFunc` send trailer HEADERS+END_STREAM after body DATA frames
+(RFC 7540 §8.1.3); `StreamResponse.WaitTrailers` convenience method for
+response trailer polling. See
 [C.1 design](docs/superpowers/specs/2026-05-07-poseidon-client-c1-design.md),
 [C.2 design](docs/superpowers/specs/2026-05-08-poseidon-client-c2-pool-design.md),
 [C.3/C.4 design](docs/superpowers/specs/2026-05-09-poseidon-client-c3-c4-design.md),
 [D.1 design](docs/superpowers/specs/2026-05-13-d1-zero-alloc-request-path-design.md),
-[D.2 design](docs/superpowers/specs/2026-05-15-d2-request-response-body-streaming-design.md).
+[D.2 design](docs/superpowers/specs/2026-05-15-d2-request-response-body-streaming-design.md),
+[D.3 design](docs/superpowers/specs/2026-05-15-d3-h2c-design.md),
+[D.4 design](docs/superpowers/specs/2026-05-15-d4-ping-keepalive-design.md),
+[D.5 design](docs/superpowers/specs/2026-05-15-d5-trailers-design.md).
 
 ## Phases
 
@@ -40,25 +43,24 @@ io.ReadCloser` stream response bodies without buffering; pooled upload buffer
   `NewStream` gates inflight on
   `min(local advertised, peer-advertised)`; dynamic shrinks refuse
   new streams without disturbing open ones (RFC §6.5.2).
-- **B.2.6 — GOAWAY drain + PING ACK** *(this release)*: peer GOAWAY
-  records state on `*Conn`, drains streams above `lastStreamID` with
-  `EventReset(REFUSED_STREAM)`, blocks new `NewStream` with
-  `ErrGoAway`, wakes writers stuck on send credit (RFC §6.8); inbound
-  non-ACK PING echoes back with `ACK=1` and the same 8-byte payload
-  (RFC §6.7).
-- **C.1 — Public client API** *(this release)*: `client.Client`,
-  `Request`, `Response`, sync `Do` and streaming `DoStream`,
-  single-connection transport with conn-level auto-redial,
-  `(*conn.Conn).IsAlive` helper for transport reuse decisions.
-- **C.2 — connection pool** *(this release)*: per-host `Pool` with
-  lazy-grow, least-loaded stream selection, idle-timeout eviction,
-  GOAWAY-aware drain, dial backoff, and `MAX_CONCURRENT_STREAMS`
-  enforcement (RFC 7540 §5.1.2, §6.8). Enable via
+- **B.2.6 — GOAWAY drain + PING ACK** *(released)*: peer GOAWAY records
+  state on `*Conn`, drains streams above `lastStreamID` with
+  `EventReset(REFUSED_STREAM)`, blocks new `NewStream` with `ErrGoAway`,
+  wakes writers stuck on send credit (RFC §6.8); inbound non-ACK PING
+  echoes back with `ACK=1` and the same 8-byte payload (RFC §6.7).
+- **C.1 — Public client API** *(released)*: `client.Client`, `Request`,
+  `Response`, sync `Do` and streaming `DoStream`, single-connection
+  transport with conn-level auto-redial, `(*conn.Conn).IsAlive` helper
+  for transport reuse decisions.
+- **C.2 — connection pool** *(released)*: per-host `Pool` with lazy-grow,
+  least-loaded stream selection, idle-timeout eviction, GOAWAY-aware
+  drain, dial backoff, and `MAX_CONCURRENT_STREAMS` enforcement
+  (RFC 7540 §5.1.2, §6.8). Enable via
   `ClientOptions{Transport: client.TransportPool}`.
-- **C.3 — service discovery** *(this release)*: per-address sub-pool
-  fan-out via `Resolver` + `Selector`. Built-in `StaticResolver`,
-  `DNSResolver` with TTL cache + Watch, and `RoundRobin` / `Random` /
-  `Hash` selectors. DrainGraceful / DrainHard / DrainLazy modes.
+- **C.3 — service discovery** *(released)*: per-address sub-pool fan-out
+  via `Resolver` + `Selector`. Built-in `StaticResolver`, `DNSResolver`
+  with TTL cache + Watch, and `RoundRobin` / `Random` / `Hash` selectors.
+  DrainGraceful / DrainHard / DrainLazy modes.
 - **C.4 — metrics & hooks** *(released)*: lifecycle `Hooks`
   (`OnRequestStart`, `OnRequestComplete`, `OnRetry`, `OnDial`,
   `OnConnClose`, `OnResolverUpdate`); lock-free counters and log-bucket
@@ -71,12 +73,25 @@ io.ReadCloser` stream response bodies without buffering; pooled upload buffer
   per-`Conn` stream `sync.Pool`; `encBufPool` for HPACK encode buffers;
   `hdrSlicePool` + const name bytes in `buildHeaders`. 33 allocs/op,
   down from 49 (−33%).
-- **D.2 — request/response body streaming** *(this release)*:
+- **D.2 — request/response body streaming** *(released)*:
   `Request.ContentLength int64` emits `content-length` header;
   `Request.StreamBody bool` + `Response.BodyReader io.ReadCloser` stream
   response bodies without buffering (caller drains + `Close()`);
   `uploadBufPool` recycles upload read buffers; `Response.Reset()` closes
   `BodyReader` automatically. RFC 7540 §8.1 conformance test added.
+- **D.3 — H2C (plaintext HTTP/2)** *(released)*: `conn.PlaintextDialer`
+  for unencrypted TCP; H2C prior-knowledge handshake (RFC 7540 §3.4).
+  Set `ClientOptions.DefaultScheme = "http"` for H2C targets.
+- **D.4 — PING / keepalive** *(released)*: `(*conn.Conn).Ping(ctx)`
+  measures round-trip time; background keepalive loop with
+  `ConnOptions.KeepaliveInterval` + `KeepaliveTimeout` closes dead
+  connections automatically (RFC 7540 §6.7).
+- **D.5 — HTTP request trailers** *(released)*: `Request.Trailers
+  []hpack.HeaderField` and `Request.TrailerFunc` send trailer
+  HEADERS+END_STREAM after body DATA frames (RFC 7540 §8.1.3);
+  `StreamResponse.WaitTrailers(ctx)` pumps events until trailers arrive
+  or stream ends; `trailerAnnouncement` emits `Trailer:` header for
+  Go net/http server compatibility.
 
 ## Quick start
 
@@ -104,12 +119,12 @@ func get(ctx context.Context, addr string) error {
 	}
 	defer c.Close()
 
-	res, err := c.Do(ctx, &client.Request{
+	var res client.Response
+	if err := c.Do(ctx, &client.Request{
 		Method:   "GET",
 		Path:     "/",
 		WantBody: true,
-	})
-	if err != nil {
+	}, &res); err != nil {
 		return err
 	}
 	fmt.Println("status:", res.Status, "bytes:", res.BytesReceived)
@@ -150,12 +165,12 @@ func poolGet(ctx context.Context, addr string) error {
 	}
 	defer c.Close()
 
-	res, err := c.Do(ctx, &client.Request{
+	var res client.Response
+	if err := c.Do(ctx, &client.Request{
 		Method:   "GET",
 		Path:     "/",
 		WantBody: true,
-	})
-	if err != nil {
+	}, &res); err != nil {
 		return err
 	}
 	fmt.Println("status:", res.Status, "bytes:", res.BytesReceived)
@@ -186,9 +201,8 @@ import (
 - Decoder / `StreamEvent` slice fields alias internal scratch buffers
   and are valid only until the next `Recv`/`Close` on the same stream.
   Copy if you must retain.
-- Codec hot path: `0 B/op` and `0 allocs/op` (Phase A bench gate
-  enforced in CI). `conn` steady state currently allocates per
-  request — zero-alloc work is deferred to B.2.
+- Codec hot path: `0 B/op` and `0 allocs/op` (bench gate enforced in
+  CI). `client` steady state: D.1 reduced to 33 allocs/op (−33%).
 
 ## Local development
 
