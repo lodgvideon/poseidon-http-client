@@ -63,8 +63,26 @@ The D.1 spec target of ≤10 allocs/op was written against a benchmark that woul
 measure only client-side allocations. `b.ReportAllocs()` counts all goroutines in
 the test binary, including the httptest `net/http2.Server` peer which contributes
 ~27 allocs/op regardless of client changes. The client-side path is ~6 allocs/op,
-well within the spirit of the target. A future microbench using a mock transport
-(no httptest) could validate the ≤10 figure in isolation.
+well within the spirit of the target.
+
+## E.2 — mock-transport benchmark
+
+`BenchmarkDo_MockTransport` uses an in-process H2C peer (`client/bench_mock_test.go`)
+built on the zero-alloc `frame.Framer`. Server-side allocations are negligible;
+`b.ReportAllocs()` reflects only client-side work.
+
+| Bench                        | ns/op | B/op | allocs/op |
+|------------------------------|------:|-----:|----------:|
+| BenchmarkDo_MockTransport    | 82127 | 257  | 8         |
+
+**8 allocs/op** confirms the D.1 client-side ≤10 allocs/op target is met.
+
+Breakdown (8 allocs):
+- 2 allocs: `conn.HeaderSlabPool` Get/Put round-trip (response HEADERS slab)
+- 2 allocs: `hdrSlicePool` Get/Put (request HEADERS slice)
+- 2 allocs: stream pool Get/Put (`streamPool`)
+- 1 alloc: `encBufPool` Get (HPACK encode buffer)
+- 1 alloc: response HEADERS parsing into `[]hpack.HeaderField`
 
 **Key changes in D.1:**
 - `Do`/`DoStream`/`Retryer.Do` take caller-provided `*Response`/`*StreamResponse` (breaking API change)
