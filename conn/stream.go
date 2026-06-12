@@ -148,10 +148,10 @@ func (s *Stream) markRemoteEnd() {
 // background goroutine (so the reader is never blocked on wmu), and
 // best-effort delivers a synthetic EventReset so a blocked Recv
 // unblocks instead of waiting until the parent context expires.
-func (s *Stream) push(e StreamEvent) {
+func (s *Stream) push(e StreamEvent) bool {
 	select {
 	case s.events <- e:
-		return
+		return true
 	default:
 	}
 	s.mu.Lock()
@@ -159,7 +159,7 @@ func (s *Stream) push(e StreamEvent) {
 	s.closed = true
 	s.mu.Unlock()
 	if already {
-		return
+		return false
 	}
 	go func() {
 		_ = s.w.writeRSTStream(s, frame.ErrCodeRefusedStream)
@@ -174,6 +174,7 @@ func (s *Stream) push(e StreamEvent) {
 	}:
 	default:
 	}
+	return false
 }
 
 // SendHeaders sends a HEADERS frame with the given fields. Always emits

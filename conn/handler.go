@@ -165,12 +165,16 @@ func (h *connHandler) emitHeaderBlock(s *Stream, hb []byte, endStream, isTrailer
 			Sensitive: f.Sensitive,
 		}
 	}
-	s.push(StreamEvent{
+	if !s.push(StreamEvent{
 		Type:      evType,
 		Headers:   copied,
 		Slab:      slabPtr,
 		EndStream: endStream,
-	})
+	}) {
+		// push dropped the event (channel overflow); return slab to pool.
+		*slabPtr = (*slabPtr)[:0]
+		HeaderSlabPool.Put(slabPtr)
+	}
 	return nil
 }
 

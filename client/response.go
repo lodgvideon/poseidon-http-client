@@ -5,7 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"strconv"
+	"bytes"
 	"sync"
 
 	"github.com/lodgvideon/poseidon-http-client/conn"
@@ -270,18 +270,34 @@ var ErrStreamEnded = errors.New("client: stream ended")
 // if :status is absent or unparseable.
 func parseStatus(in []hpack.HeaderField, dst *[]hpack.HeaderField) (int, error) {
 	for i := range in {
-		if string(in[i].Name) == ":status" {
-			n, perr := strconv.Atoi(string(in[i].Value))
-			if perr != nil || n < 0 {
-				return 0, fmt.Errorf("%w: %q", ErrInvalidStatus, in[i].Value)
-			}
-			for j := range in {
-				if j != i {
-					*dst = append(*dst, in[j])
-				}
-			}
-			return n, nil
+		if !bytes.Equal(in[i].Name, hdrStatus) {
+			continue
 		}
+		n, perr := parseThreeDigitInt(in[i].Value)
+		if perr != nil {
+			return 0, fmt.Errorf("%w: %q", ErrInvalidStatus, in[i].Value)
+		}
+		for j := range in {
+			if j != i {
+				*dst = append(*dst, in[j])
+			}
+		}
+		return n, nil
 	}
 	return 0, ErrEmptyResponse
+}
+
+// parseThreeDigitInt parses a 3-digit decimal number from b without allocating.
+// HTTP/2 status codes are always exactly 3 ASCII digits (RFC 7540 §8.1.2.1).
+func parseThreeDigitInt(b []byte) (int, error) {
+	if len(b) != 3 {
+		return 0, fmt.Errorf("invalid status: expected 3 digits, got %d", len(b))
+	}
+	d0 := int(b[0] - '0')
+	d1 := int(b[1] - '0')
+	d2 := int(b[2] - '0')
+	if d0 < 0 || d0 > 9 || d1 < 0 || d1 > 9 || d2 < 0 || d2 > 9 {
+		return 0, fmt.Errorf("invalid status: non-digit character")
+	}
+	return d0*100 + d1*10 + d2, nil
 }

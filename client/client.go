@@ -225,18 +225,27 @@ func (c *Client) Do(ctx context.Context, req *Request, resp *Response) error {
 }
 
 // do is the inner request transport, without hook/metric wrapping.
-func (c *Client) do(ctx context.Context, req *Request, resp *Response) error {
+// sentRequest holds the state after a request has been fully written to the
+// wire: the conn.Stream ready for response reading, plus the transport release
+// callback. The caller is responsible for calling release() and s.Close().
+type sentRequest struct {
+	s       *conn.Stream
+	release func()
+}
+
+// sendRequest acquires a connection, opens a stream, builds and sends headers,
+// writes the body and trailers, and returns the stream ready for response
+// reading. On error the transport is released and no cleanup is needed.
+func (c *Client) sendRequest(ctx context.Context, req *Request) (*sentRequest, error) {
 	cn, release, err := c.tr.acquire(ctx)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	// No defer release() — managed explicitly so StreamBody can defer
-	// it into BodyReader.Close().
 
 	s, err := cn.NewStream(ctx)
 	if err != nil {
 		release()
-		return err
+		return nil, err
 	}
 
 	hdrs, putHdrs := buildHeaders(req, c.authority, c.defaultScheme)
@@ -246,7 +255,7 @@ func (c *Client) do(ctx context.Context, req *Request, resp *Response) error {
 		putHdrs()
 		_ = s.Close()
 		release()
-		return err
+		return nil, err
 	}
 	putHdrs()
 
@@ -254,16 +263,26 @@ func (c *Client) do(ctx context.Context, req *Request, resp *Response) error {
 		if err := writeRequestBody(ctx, s, req, !trailers); err != nil {
 			_ = s.Close()
 			release()
-			return err
+			return nil, err
 		}
 		if trailers {
 			if err := writeRequestTrailers(ctx, s, req); err != nil {
 				_ = s.Close()
 				release()
-				return err
+				return nil, err
 			}
 		}
 	}
+
+	return &sentRequest{s: s, release: release}, nil
+}
+
+func (c *Client) do(ctx context.Context, req *Request, resp *Response) error {
+	sr, err := c.sendRequest(ctx, req)
+	if err != nil {
+		return err
+	}
+	s, release := sr.s, sr.release
 
 	if req.StreamBody {
 		// StreamBody requires a non-nil Response to populate BodyReader.
@@ -358,42 +377,11 @@ func (c *Client) DoStream(ctx context.Context, req *Request, sr *StreamResponse)
 
 // doStream is the inner streaming transport, without hook/metric wrapping.
 func (c *Client) doStream(ctx context.Context, req *Request, sr *StreamResponse) error {
-	cn, release, err := c.tr.acquire(ctx)
+	sent, err := c.sendRequest(ctx, req)
 	if err != nil {
 		return err
 	}
-
-	s, err := cn.NewStream(ctx)
-	if err != nil {
-		release()
-		return err
-	}
-
-	hdrs, putHdrs := buildHeaders(req, c.authority, c.defaultScheme)
-	trailers := hasTrailers(req)
-	endStream := len(req.Body) == 0 && req.BodyReader == nil && !trailers
-	if err := s.SendHeaders(ctx, hdrs, endStream); err != nil {
-		putHdrs()
-		_ = s.Close()
-		release()
-		return err
-	}
-	putHdrs()
-
-	if !endStream || trailers {
-		if err := writeRequestBody(ctx, s, req, !trailers); err != nil {
-			_ = s.Close()
-			release()
-			return err
-		}
-		if trailers {
-			if err := writeRequestTrailers(ctx, s, req); err != nil {
-				_ = s.Close()
-				release()
-				return err
-			}
-		}
-	}
+	s, release := sent.s, sent.release
 
 	ev, err := s.Recv(ctx)
 	if err != nil {
@@ -451,6 +439,7 @@ var (
 	hdrPath          = []byte(":path")
 	hdrContentLength = []byte("content-length")
 	hdrTrailer       = []byte("trailer")
+	hdrStatus        = []byte(":status")
 )
 
 // hdrSlicePool recycles the []hpack.HeaderField backing array used by
