@@ -204,7 +204,7 @@ func (c *Client) Do(ctx context.Context, req *Request, resp *Response) error {
 	c.metrics.Latency.Request.Observe(latency)
 	var status int
 	var bytesRecv int64
-	if err == nil {
+	if err == nil && resp != nil {
 		status = resp.Status
 		bytesRecv = resp.BytesReceived
 	}
@@ -266,6 +266,12 @@ func (c *Client) do(ctx context.Context, req *Request, resp *Response) error {
 	}
 
 	if req.StreamBody {
+		// StreamBody requires a non-nil Response to populate BodyReader.
+		if resp == nil {
+			_ = s.Close()
+			release()
+			return fmt.Errorf("client: StreamBody requires a non-nil *Response")
+		}
 		ev, err := s.Recv(ctx)
 		if err != nil {
 			_ = s.Close()
