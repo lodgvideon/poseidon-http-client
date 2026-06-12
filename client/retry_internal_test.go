@@ -340,7 +340,7 @@ func TestRetryer_Do_IsRetryable_Custom5xx_Retries(t *testing.T) {
 	r := NewRetryer(&Client{}, RetryOptions{
 		MaxAttempts: 3,
 		Backoff:     func(int) time.Duration { return 0 },
-		IsRetryable: func(err error, resp *Response) bool {
+		IsRetryable: func(_ error, resp *Response) bool {
 			return resp != nil && resp.Status >= 500
 		},
 	})

@@ -29,7 +29,7 @@ func FuzzFramerReadFrame(f *testing.F) {
 	// DATA 1 byte
 	f.Add([]byte{0x00, 0x00, 0x01, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0xff})
 
-	f.Fuzz(func(t *testing.T, data []byte) {
+	f.Fuzz(func(_ *testing.T, data []byte) {
 		fr := NewFramer(nil, bytes.NewReader(data))
 		var h dropHandler
 		for i := 0; i < 100; i++ {

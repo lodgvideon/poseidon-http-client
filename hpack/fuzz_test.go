@@ -18,7 +18,7 @@ func FuzzHPACKDecode(f *testing.F) {
 		seed, _ := hex.DecodeString(hexStr)
 		f.Add(seed)
 	}
-	f.Fuzz(func(t *testing.T, data []byte) {
+	f.Fuzz(func(_ *testing.T, data []byte) {
 		d := NewDecoder()
 		_ = d.DecodeBlock(data, func(_ HeaderField) error { return nil })
 		// Invariant: no panic. Errors are fine.

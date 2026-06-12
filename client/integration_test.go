@@ -46,7 +46,7 @@ func clientFor(t *testing.T, addr string) *client.Client {
 }
 
 func TestIntegration_Client_GET_Status200(t *testing.T) {
-	_, addr := newTLSH2Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	_, addr := newTLSH2Server(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(200)
 	}))
 	c := clientFor(t, addr)
@@ -120,7 +120,7 @@ func TestIntegration_Client_POST_LargeBody_ChunkedUpload(t *testing.T) {
 }
 
 func TestIntegration_Client_ConcurrentRequests_OneClient(t *testing.T) {
-	_, addr := newTLSH2Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	_, addr := newTLSH2Server(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(200)
 	}))
 	c := clientFor(t, addr)
@@ -154,7 +154,7 @@ func TestIntegration_Client_ConcurrentRequests_OneClient(t *testing.T) {
 }
 
 func TestIntegration_ClientPool_ConcurrentRequests_MultipleConns(t *testing.T) {
-	_, addr := newTLSH2Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	_, addr := newTLSH2Server(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		time.Sleep(50 * time.Millisecond)
 		w.WriteHeader(http.StatusOK)
 	}))
@@ -209,7 +209,7 @@ func TestIntegration_ClientPool_ConcurrentRequests_MultipleConns(t *testing.T) {
 }
 
 func TestIntegration_ClientPool_IdleEviction(t *testing.T) {
-	srv, addr := newTLSH2Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv, addr := newTLSH2Server(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(200)
 	}))
 	defer srv.Close()
@@ -252,7 +252,7 @@ func TestIntegration_ClientPool_IdleEviction(t *testing.T) {
 }
 
 func TestIntegration_ClientPool_GoAwayMidFlight_Replaces(t *testing.T) {
-	srv, addr := newTLSH2Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv, addr := newTLSH2Server(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(200)
 	}))
 
@@ -298,7 +298,7 @@ func TestIntegration_ClientPool_GoAwayMidFlight_Replaces(t *testing.T) {
 func TestIntegration_Client_DoStream_LargeResponse(t *testing.T) {
 	const total = 1 << 20 // 1 MiB
 	chunk := []byte(strings.Repeat("x", 4096))
-	_, addr := newTLSH2Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	_, addr := newTLSH2Server(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(200)
 		flusher, _ := w.(http.Flusher)
 		for written := 0; written < total; written += len(chunk) {
@@ -425,7 +425,7 @@ func TestDoStream_SRReuse(t *testing.T) {
 
 func TestIntegration_Client_StreamBody_Small(t *testing.T) {
 	want := []byte("hello stream")
-	_, addr := newTLSH2Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	_, addr := newTLSH2Server(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(200)
 		_, _ = w.Write(want)
 	}))
@@ -459,7 +459,7 @@ func TestIntegration_Client_StreamBody_Small(t *testing.T) {
 
 func TestIntegration_Client_StreamBody_Large(t *testing.T) {
 	want := bytes.Repeat([]byte("x"), 1<<20) // 1 MiB
-	_, addr := newTLSH2Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	_, addr := newTLSH2Server(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(200)
 		_, _ = w.Write(want)
 	}))
@@ -486,7 +486,7 @@ func TestIntegration_Client_StreamBody_Large(t *testing.T) {
 }
 
 func TestIntegration_Client_StreamBody_CloseEarly(t *testing.T) {
-	_, addr := newTLSH2Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	_, addr := newTLSH2Server(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(200)
 		_, _ = w.Write(bytes.Repeat([]byte("z"), 64*1024))
 	}))
@@ -510,7 +510,7 @@ func TestIntegration_Client_StreamBody_CloseEarly(t *testing.T) {
 }
 
 func TestIntegration_Client_StreamBody_ResetForgot(t *testing.T) {
-	_, addr := newTLSH2Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	_, addr := newTLSH2Server(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(200)
 		_, _ = w.Write([]byte("abc"))
 	}))
@@ -571,7 +571,7 @@ func newH2CServer(t *testing.T, h http.Handler) string {
 }
 
 func TestIntegration_Client_H2C_Do(t *testing.T) {
-	addr := newH2CServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	addr := newH2CServer(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(200)
 		_, _ = io.WriteString(w, "h2c ok")
 	}))

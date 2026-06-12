@@ -46,7 +46,7 @@ func dialServer(t *testing.T, srv *httptest.Server, cfg *tls.Config) *Conn {
 }
 
 func TestIntegration_EmptyGET(t *testing.T) {
-	srv, cfg := startH2TestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv, cfg := startH2TestServer(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(204)
 	}))
 	defer srv.Close()
@@ -146,7 +146,7 @@ func TestIntegration_POST_1KB_Echo(t *testing.T) {
 }
 
 func TestIntegration_ContextCancel_TearsDownStream(t *testing.T) {
-	srv, cfg := startH2TestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv, cfg := startH2TestServer(t, http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
 		// Block until client cancels — the request context is cancelled
 		// when the underlying stream is reset.
 		<-r.Context().Done()

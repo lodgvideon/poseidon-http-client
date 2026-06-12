@@ -156,7 +156,7 @@ func TestDo_RequestTrailers_NoBody(t *testing.T) {
 }
 
 func TestDo_RequestTrailers_PseudoHeader(t *testing.T) {
-	_, addr := newTrailerH2Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	_, addr := newTrailerH2Server(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(200)
 	}))
 	c := trailerClientFor(t, addr)
@@ -176,7 +176,7 @@ func TestDo_RequestTrailers_PseudoHeader(t *testing.T) {
 }
 
 func TestDo_RequestTrailers_FuncPseudoHeader(t *testing.T) {
-	_, addr := newTrailerH2Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	_, addr := newTrailerH2Server(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(200)
 	}))
 	c := trailerClientFor(t, addr)
@@ -242,7 +242,7 @@ func TestDoStream_RequestTrailers(t *testing.T) {
 // --- Response trailer receiving ---
 
 func TestDo_ResponseTrailers(t *testing.T) {
-	_, addr := newTrailerH2Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	_, addr := newTrailerH2Server(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Trailer", "X-Checksum")
 		w.WriteHeader(200)
 		_, _ = w.Write([]byte("hello"))
@@ -275,7 +275,7 @@ func TestDo_ResponseTrailers(t *testing.T) {
 func TestDoStream_WaitTrailers_AfterDrain(t *testing.T) {
 	// Server sends body + trailers. Client drains EventData via Recv,
 	// then calls WaitTrailers which pumps Recv internally for EventTrailers.
-	_, addr := newTrailerH2Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	_, addr := newTrailerH2Server(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Trailer", "X-Tag")
 		w.WriteHeader(200)
 		_, _ = w.Write([]byte("data"))
@@ -328,7 +328,7 @@ func TestDoStream_WaitTrailers_AfterDrain(t *testing.T) {
 func TestDoStream_WaitTrailers_CachedFromRecv(t *testing.T) {
 	// Server sends body + trailers. Client calls Recv twice (EventData,
 	// EventTrailers), which caches sr.trailers. WaitTrailers returns from cache.
-	_, addr := newTrailerH2Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	_, addr := newTrailerH2Server(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Trailer", "X-Cached")
 		w.WriteHeader(200)
 		_, _ = w.Write([]byte("data"))
@@ -380,7 +380,7 @@ func TestDoStream_WaitTrailers_CachedFromRecv(t *testing.T) {
 
 func TestDoStream_WaitTrailers_None(t *testing.T) {
 	// Server sends no trailers; WaitTrailers returns nil, nil.
-	_, addr := newTrailerH2Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	_, addr := newTrailerH2Server(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(204) // no body, no trailers
 	}))
 	c := trailerClientFor(t, addr)
@@ -405,7 +405,7 @@ func TestDoStream_WaitTrailers_None(t *testing.T) {
 func TestDoStream_WaitTrailers_Discard(t *testing.T) {
 	// WaitTrailers called before body is drained. EventData is discarded
 	// internally; trailers are still returned.
-	_, addr := newTrailerH2Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	_, addr := newTrailerH2Server(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Trailer", "X-Discard")
 		w.WriteHeader(200)
 		_, _ = w.Write([]byte("body-to-discard"))
@@ -503,7 +503,7 @@ func TestDo_RequestTrailers_WithStreamBody(t *testing.T) {
 
 func TestDoStream_WaitTrailers_Reuse(t *testing.T) {
 	// StreamResponse reuse across two consecutive DoStream calls.
-	_, addr := newTrailerH2Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	_, addr := newTrailerH2Server(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Trailer", "X-Reuse")
 		w.WriteHeader(200)
 		_, _ = w.Write([]byte("data"))

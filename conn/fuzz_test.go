@@ -31,7 +31,7 @@ func FuzzConnReader(f *testing.F) {
 	hdr[8] = 1
 	f.Add(append(hdr, block...))
 
-	f.Fuzz(func(t *testing.T, blob []byte) {
+	f.Fuzz(func(_ *testing.T, blob []byte) {
 		cli, srv := net.Pipe()
 		defer cli.Close()
 		defer srv.Close()

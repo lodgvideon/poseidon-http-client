@@ -48,7 +48,7 @@ func dialPingServer(t *testing.T, srv *httptest.Server, cfg *tls.Config, opts Co
 }
 
 func TestConn_Ping_RTT(t *testing.T) {
-	srv, cfg := startPingServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+	srv, cfg := startPingServer(t, http.HandlerFunc(func(_ http.ResponseWriter, _ *http.Request) {}))
 	defer srv.Close()
 	c := dialPingServer(t, srv, cfg, ConnOptions{})
 
@@ -67,7 +67,7 @@ func TestConn_Ping_RTT(t *testing.T) {
 }
 
 func TestConn_Ping_ConcurrentSafe(t *testing.T) {
-	srv, cfg := startPingServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+	srv, cfg := startPingServer(t, http.HandlerFunc(func(_ http.ResponseWriter, _ *http.Request) {}))
 	defer srv.Close()
 	c := dialPingServer(t, srv, cfg, ConnOptions{})
 
@@ -94,7 +94,7 @@ func TestConn_Ping_ConcurrentSafe(t *testing.T) {
 }
 
 func TestConn_Ping_CtxCancelledBeforeACK(t *testing.T) {
-	srv, cfg := startPingServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+	srv, cfg := startPingServer(t, http.HandlerFunc(func(_ http.ResponseWriter, _ *http.Request) {}))
 	defer srv.Close()
 	c := dialPingServer(t, srv, cfg, ConnOptions{})
 
@@ -125,7 +125,7 @@ func TestConn_Ping_CtxCancelledBeforeACK(t *testing.T) {
 }
 
 func TestConn_Ping_AfterClose(t *testing.T) {
-	srv, cfg := startPingServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+	srv, cfg := startPingServer(t, http.HandlerFunc(func(_ http.ResponseWriter, _ *http.Request) {}))
 	defer srv.Close()
 	c := dialPingServer(t, srv, cfg, ConnOptions{})
 	_ = c.Close()
@@ -139,7 +139,7 @@ func TestConn_Ping_AfterClose(t *testing.T) {
 }
 
 func TestConn_Keepalive_HealthyConn(t *testing.T) {
-	srv, cfg := startPingServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+	srv, cfg := startPingServer(t, http.HandlerFunc(func(_ http.ResponseWriter, _ *http.Request) {}))
 	defer srv.Close()
 	// KeepaliveInterval set; server responds to PINGs normally.
 	c := dialPingServer(t, srv, cfg, ConnOptions{KeepaliveInterval: 30 * time.Millisecond})
@@ -152,7 +152,7 @@ func TestConn_Keepalive_HealthyConn(t *testing.T) {
 }
 
 func TestConn_Keepalive_ClosesDeadConn(t *testing.T) {
-	srv, cfg := startPingServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+	srv, cfg := startPingServer(t, http.HandlerFunc(func(_ http.ResponseWriter, _ *http.Request) {}))
 	c := dialPingServer(t, srv, cfg, ConnOptions{KeepaliveInterval: 50 * time.Millisecond})
 
 	// Close server: kills the TCP connection. The TCP FIN causes
@@ -198,7 +198,7 @@ func TestConn_Keepalive_PingTimeout(t *testing.T) {
 }
 
 func TestConn_DeliverPingAck_UnsolicitedIsNoop(t *testing.T) {
-	srv, cfg := startPingServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+	srv, cfg := startPingServer(t, http.HandlerFunc(func(_ http.ResponseWriter, _ *http.Request) {}))
 	defer srv.Close()
 	c := dialPingServer(t, srv, cfg, ConnOptions{})
 

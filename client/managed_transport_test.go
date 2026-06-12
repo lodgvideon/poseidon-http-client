@@ -18,7 +18,7 @@ func newTLSDialer(srv *httptest.Server) conn.Dialer {
 
 func startOneTLSServer(t *testing.T) (*httptest.Server, client.Address) {
 	t.Helper()
-	srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(200)
 	}))
 	srv.EnableHTTP2 = true

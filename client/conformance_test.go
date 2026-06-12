@@ -45,7 +45,7 @@ func TestConformance_RFC7540_Sec5_1_2_PoolGatesOnPeerMaxStreams(t *testing.T) {
 	allInflight := make(chan struct{})
 	release := make(chan struct{})
 
-	srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		if inflight.Add(1) == int32(N) {
 			close(allInflight)
 		}
@@ -129,7 +129,7 @@ func TestConformance_RFC7540_Sec6_8_PoolEjectsDeadConnOnRelease(t *testing.T) {
 	started := make(chan struct{}) // closed when handler goroutine starts
 	proceed := make(chan struct{}) // closed when test allows handler to respond
 
-	srv, addr := newTLSH2Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv, addr := newTLSH2Server(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		close(started) // stream is in-flight
 		<-proceed
 		w.WriteHeader(200)
@@ -216,7 +216,7 @@ func TestConformance_RFC7540_Sec6_8_PoolEjectsDeadConnOnRelease(t *testing.T) {
 }
 
 func TestConformance_RFC7540_Sec6_8_PoolDrainsOnGoAway(t *testing.T) {
-	srv, addr := newTLSH2Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv, addr := newTLSH2Server(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(200)
 	}))
 
@@ -262,7 +262,7 @@ func TestConformance_RFC7540_Sec6_8_PoolDrainsOnGoAway(t *testing.T) {
 // satisfying RFC 7540 §8.1 half-close semantics.
 func TestConformance_RFC7540_Sec8_1_StreamBody_EndStream(t *testing.T) {
 	payload := []byte("conformance body")
-	_, addr := newTLSH2Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	_, addr := newTLSH2Server(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(200)
 		_, _ = w.Write(payload)
 	}))

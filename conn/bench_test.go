@@ -14,7 +14,7 @@ import (
 
 func benchSetup(b *testing.B) (*Conn, func()) {
 	b.Helper()
-	srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(204)
 	}))
 	srv.EnableHTTP2 = true

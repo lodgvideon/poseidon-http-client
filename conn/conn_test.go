@@ -287,7 +287,7 @@ func TestConn_IsAlive_FreshConnTrue(t *testing.T) {
 	srvDone := make(chan struct{})
 	go func() {
 		defer close(srvDone)
-		pipeServer(t, srv, func(srvFr *frame.Framer) {
+		pipeServer(t, srv, func(_ *frame.Framer) {
 			<-stopSrv
 		})
 	}()

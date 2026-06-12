@@ -244,7 +244,7 @@ func (d *fakeDialer) Dial(_ context.Context, _ string) (net.Conn, error) {
 func TestSingleConn_Acquire_LazyDial(t *testing.T) {
 	stopSrv := make(chan struct{})
 	t.Cleanup(func() { close(stopSrv) })
-	d := &fakeDialer{srvAfter: func(srvFr *frame.Framer) {
+	d := &fakeDialer{srvAfter: func(_ *frame.Framer) {
 		<-stopSrv
 	}}
 	sc := &singleConn{addr: "fake:0", connOpts: conn.ConnOptions{Dialer: d}, metrics: &Metrics{}}
@@ -273,7 +273,7 @@ func TestSingleConn_Acquire_LazyDial(t *testing.T) {
 func TestSingleConn_Acquire_ReusesAliveConn(t *testing.T) {
 	stopSrv := make(chan struct{})
 	t.Cleanup(func() { close(stopSrv) })
-	d := &fakeDialer{srvAfter: func(srvFr *frame.Framer) {
+	d := &fakeDialer{srvAfter: func(_ *frame.Framer) {
 		<-stopSrv
 	}}
 	sc := &singleConn{addr: "fake:0", connOpts: conn.ConnOptions{Dialer: d}, metrics: &Metrics{}}
@@ -380,7 +380,7 @@ func TestSingleConn_Backoff_RefusesWithinWindow(t *testing.T) {
 func TestSingleConn_Acquire_ConcurrentDial_OnlyOneDials(t *testing.T) {
 	stopSrv := make(chan struct{})
 	t.Cleanup(func() { close(stopSrv) })
-	d := &fakeDialer{srvAfter: func(srvFr *frame.Framer) {
+	d := &fakeDialer{srvAfter: func(_ *frame.Framer) {
 		<-stopSrv
 	}}
 	sc := &singleConn{addr: "fake:0", connOpts: conn.ConnOptions{Dialer: d}, metrics: &Metrics{}}
@@ -418,7 +418,7 @@ func TestSingleConn_Acquire_ConcurrentDial_OnlyOneDials(t *testing.T) {
 func TestSingleConn_Close_BlocksNewAcquires(t *testing.T) {
 	stopSrv := make(chan struct{})
 	t.Cleanup(func() { close(stopSrv) })
-	d := &fakeDialer{srvAfter: func(srvFr *frame.Framer) {
+	d := &fakeDialer{srvAfter: func(_ *frame.Framer) {
 		<-stopSrv
 	}}
 	sc := &singleConn{addr: "fake:0", connOpts: conn.ConnOptions{Dialer: d}, metrics: &Metrics{}}

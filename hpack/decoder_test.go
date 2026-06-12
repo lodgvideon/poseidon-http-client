@@ -74,7 +74,7 @@ func BenchmarkDecoder_DecodeBlock_3req_static(b *testing.B) {
 	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		_ = d.DecodeBlock(block, func(f HeaderField) error { return nil })
+		_ = d.DecodeBlock(block, func(_ HeaderField) error { return nil })
 	}
 }
 

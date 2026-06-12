@@ -242,7 +242,7 @@ func TestDNSResolver_Resolve_AllFilteredReturnsErrNoAddresses(t *testing.T) {
 func TestResponseBodyReader_Read_EventReset(t *testing.T) {
 	t.Parallel()
 	// Server sends 200 then resets the stream mid-body.
-	_, addr := newTLSH2Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	_, addr := newTLSH2Server(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		// Write headers, flush, then hijack and reset by closing conn abruptly.
 		w.WriteHeader(200)
 		if f, ok := w.(http.Flusher); ok {
@@ -320,7 +320,7 @@ func TestResponseBodyReader_Read_BodyBufferDrain(t *testing.T) {
 
 func TestStreamResponse_Recv_EventReset(t *testing.T) {
 	t.Parallel()
-	_, addr := newTLSH2Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	_, addr := newTLSH2Server(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(200)
 		if f, ok := w.(http.Flusher); ok {
 			f.Flush()
@@ -492,7 +492,7 @@ func TestClient_Do_WriteBodyReader_ReadError_AfterBytes(t *testing.T) {
 func TestClient_Do_DrainResponse_StreamReset(t *testing.T) {
 	t.Parallel()
 	// Server resets the stream before fully sending a response.
-	_, addr := newTLSH2Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	_, addr := newTLSH2Server(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(200)
 		if f, ok := w.(http.Flusher); ok {
 			f.Flush()
@@ -851,7 +851,7 @@ func TestStreamResponse_Recv_AfterDrained(t *testing.T) {
 
 func TestClient_Do_DrainResponse_WithTrailers(t *testing.T) {
 	t.Parallel()
-	_, addr := newTLSH2Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	_, addr := newTLSH2Server(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Trailer", "x-trailer")
 		w.WriteHeader(200)
 		_, _ = w.Write([]byte("body"))
@@ -934,7 +934,7 @@ func TestPool_MapAcquireErr_AcquireTimeout(t *testing.T) {
 
 func TestStreamResponse_WaitTrailers_EventReset(t *testing.T) {
 	t.Parallel()
-	_, addr := newTLSH2Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	_, addr := newTLSH2Server(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(200)
 		if f, ok := w.(http.Flusher); ok {
 			f.Flush()
@@ -1013,7 +1013,7 @@ func TestSingleConn_Do_AfterClose_ErrClosed(t *testing.T) {
 
 func TestResponseBodyReader_Read_EventReset_ViaStreamBody(t *testing.T) {
 	t.Parallel()
-	_, addr := newTLSH2Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	_, addr := newTLSH2Server(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("content-type", "text/plain")
 		w.WriteHeader(200)
 		if f, ok := w.(http.Flusher); ok {
@@ -1134,7 +1134,7 @@ func TestClient_Do_StreamBody_SmallBody(t *testing.T) {
 
 func TestStreamResponse_Recv_EventTrailers_EmptyTrailers(t *testing.T) {
 	t.Parallel()
-	_, addr := newTLSH2Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	_, addr := newTLSH2Server(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		// Announce a trailer, then send empty trailer block.
 		w.Header().Set("Trailer", "x-empty")
 		w.WriteHeader(200)

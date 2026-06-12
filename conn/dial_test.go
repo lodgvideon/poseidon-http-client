@@ -32,7 +32,7 @@ func startH2CServer(t *testing.T, handler http.Handler) string {
 }
 
 func TestPlaintextDialer_H2C(t *testing.T) {
-	addr := startH2CServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	addr := startH2CServer(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(200)
 	}))
 

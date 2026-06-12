@@ -17,7 +17,7 @@ import (
 // two attempts and 200 on the third; IsRetryable opts retries in.
 func TestRetryer_Integration_5xxRetriesViaIsRetryable(t *testing.T) {
 	var attempt atomic.Int32
-	srv, addr := newTLSH2Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv, addr := newTLSH2Server(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		n := attempt.Add(1)
 		if n < 3 {
 			w.WriteHeader(503)

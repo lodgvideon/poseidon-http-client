@@ -198,7 +198,8 @@ func TestConn_ShutdownStreams_EOF_ChannelClosed(t *testing.T) {
 
 	done := make(chan struct{})
 	go func() {
-		for range s.events {
+		for ev := range s.events {
+			_ = ev // drain
 		}
 		close(done)
 	}()
