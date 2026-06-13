@@ -46,6 +46,10 @@ type ConnOptions struct {
 	// tolerate write-queue latency under heavy load. Has no effect
 	// when KeepaliveInterval is zero.
 	KeepaliveTimeout time.Duration
+
+	// Padding controls outbound frame padding (RFC 7540 §4.2).
+	// The zero value disables padding. See PaddingStrategy for details.
+	Padding PaddingStrategy
 }
 
 func (o ConnOptions) defaulted() ConnOptions {

@@ -323,6 +323,7 @@ func (c *Conn) writeHeaders(_ context.Context, s *Stream, fields []hpack.HeaderF
 		BlockFragment: block,
 		EndHeaders:    true,
 		EndStream:     endStream,
+		PadLength:     c.opts.Padding.ForHeaders(),
 	})
 	*buf = block[:0]
 	encBufPool.Put(buf)
@@ -354,6 +355,18 @@ func (c *Conn) writeData(ctx context.Context, s *Stream, p []byte, endStream boo
 	if maxFrame <= 0 {
 		maxFrame = 16384
 	}
+	// Pre-compute per-frame padding. When padding is disabled (padLen=0),
+	// use WriteData (no padding overhead). When enabled, use WriteDataPadded
+	// and account for the pad-length byte + padding bytes in frame size.
+	padLen := c.opts.Padding.ForData()
+	padOverhead := 0
+	if padLen > 0 {
+		padOverhead = 1 + int(padLen) // pad-length byte + padding bytes
+	}
+	effectiveMaxFrame := maxFrame
+	if padOverhead > 0 && padOverhead < effectiveMaxFrame {
+		effectiveMaxFrame -= padOverhead
+	}
 	// Empty DATA with END_STREAM is allowed and consumes no credit.
 	if len(p) == 0 {
 		if !endStream {
@@ -361,16 +374,22 @@ func (c *Conn) writeData(ctx context.Context, s *Stream, p []byte, endStream boo
 		}
 		c.wmu.Lock()
 		defer c.wmu.Unlock()
-		if err := c.fr.WriteData(s.id, true, nil); err != nil {
-			return err
+		if padLen > 0 {
+			if err := c.fr.WriteDataPadded(s.id, true, nil, padLen); err != nil {
+				return err
+			}
+		} else {
+			if err := c.fr.WriteData(s.id, true, nil); err != nil {
+				return err
+			}
 		}
 		c.bumpFramesSent()
 		return nil
 	}
 	for len(p) > 0 {
 		want := len(p)
-		if want > maxFrame {
-			want = maxFrame
+		if want > effectiveMaxFrame {
+			want = effectiveMaxFrame
 		}
 		n, err := c.acquireSendCredits(ctx, s, want)
 		if err != nil {
@@ -382,9 +401,16 @@ func (c *Conn) writeData(ctx context.Context, s *Stream, p []byte, endStream boo
 			c.wmu.Unlock()
 			return ErrConnClosed
 		}
-		if werr := c.fr.WriteData(s.id, last, p[:n]); werr != nil {
-			c.wmu.Unlock()
-			return werr
+		if padLen > 0 {
+			if werr := c.fr.WriteDataPadded(s.id, last, p[:n], padLen); werr != nil {
+				c.wmu.Unlock()
+				return werr
+			}
+		} else {
+			if werr := c.fr.WriteData(s.id, last, p[:n]); werr != nil {
+				c.wmu.Unlock()
+				return werr
+			}
 		}
 		c.bumpFramesSent()
 		c.wmu.Unlock()
