@@ -4,7 +4,7 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/lodgvideon/poseidon-http-client/frame"
+	"github.com/lodgvideon/poseidon-http-client/conn"
 )
 
 // Sentinel errors returned (or wrapped via %w) from the client.
@@ -34,7 +34,7 @@ var (
 // StreamResetError is returned from Do (or surfaced via DoStream's
 // EventReset) when the peer sends RST_STREAM mid-response.
 type StreamResetError struct {
-	Code frame.ErrCode
+	Code conn.ErrCode
 }
 
 // Error implements the error interface.

@@ -10,7 +10,6 @@ import (
 	"time"
 
 	"github.com/lodgvideon/poseidon-http-client/conn"
-	"github.com/lodgvideon/poseidon-http-client/frame"
 )
 
 // isIdempotent reports whether req may be retried after a transport
@@ -35,7 +34,7 @@ func builtinShouldRetry(err error) bool {
 		return false
 	}
 	var sre *StreamResetError
-	if errors.As(err, &sre) && sre.Code == frame.ErrCodeRefusedStream {
+	if errors.As(err, &sre) && sre.Code == conn.ErrCodeRefusedStream {
 		return true
 	}
 	if errors.Is(err, conn.ErrGoAway) {

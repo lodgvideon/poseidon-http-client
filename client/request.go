@@ -5,7 +5,7 @@ import (
 	"io"
 	"unicode"
 
-	"github.com/lodgvideon/poseidon-http-client/hpack"
+	"github.com/lodgvideon/poseidon-http-client/conn"
 )
 
 // Request describes one HTTP/2 request. Required fields: Method, Path.
@@ -21,7 +21,7 @@ type Request struct {
 	// Headers carries regular request headers. The slice is read once
 	// during request build; the caller retains ownership. MUST NOT
 	// include any name starting with ':' (validated up front).
-	Headers []hpack.HeaderField
+	Headers []conn.HeaderField
 
 	// Body is the request body. At most one of Body / BodyReader is
 	// honored; BodyReader takes precedence when non-nil.
@@ -46,7 +46,7 @@ type Request struct {
 	// Trailers are sent as a HEADERS+END_STREAM frame after the request
 	// body. Ignored when TrailerFunc is non-nil and returns non-nil.
 	// MUST NOT contain pseudo-headers (names starting with ':').
-	Trailers []hpack.HeaderField
+	Trailers []conn.HeaderField
 
 	// TrailerFunc, when non-nil, is called after the full body is sent.
 	// Its return value replaces Trailers; if it returns nil, Trailers is
@@ -58,7 +58,7 @@ type Request struct {
 	// (for the Trailer: announcement), the second sends both keys and
 	// values (e.g. checksums computed after body flush).
 	// MUST NOT return pseudo-headers — validated before sending.
-	TrailerFunc func() []hpack.HeaderField
+	TrailerFunc func() []conn.HeaderField
 
 	// StreamBody, when true, causes Do to return after the response HEADERS
 	// frame arrives. The body is available via Response.BodyReader.

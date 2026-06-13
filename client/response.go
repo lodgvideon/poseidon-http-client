@@ -9,8 +9,6 @@ import (
 	"sync"
 
 	"github.com/lodgvideon/poseidon-http-client/conn"
-	"github.com/lodgvideon/poseidon-http-client/frame"
-	"github.com/lodgvideon/poseidon-http-client/hpack"
 )
 
 // Response is the synchronous result of Client.Do.
@@ -29,12 +27,12 @@ type Response struct {
 	// Status is the integer value parsed from the :status pseudo-header.
 	Status int
 	// Headers is the regular response header fields (no pseudo-headers).
-	Headers []hpack.HeaderField
+	Headers []conn.HeaderField
 	// Body is nil unless Request.WantBody is true.
 	Body []byte
 	// Trailers is nil unless Request.WantTrailers is true and the peer
 	// sent a trailers frame.
-	Trailers []hpack.HeaderField
+	Trailers []conn.HeaderField
 	// BytesReceived is the total DATA payload received, even when
 	// Request.WantBody was false.
 	BytesReceived int64
@@ -47,7 +45,7 @@ type Response struct {
 
 	// slabs holds pooled slab pointers that back Headers and Trailers
 	// field bytes. Storing *[]byte (not []byte) avoids heap escape when
-	// returning to conn.HeaderSlabPool via Put. Returned on Reset().
+	// returning to conn.GetHeaderSlabPool() via Put. Returned on Reset().
 	slabs []*[]byte
 }
 
@@ -61,7 +59,7 @@ func (r *Response) Reset() {
 	}
 	for _, sp := range r.slabs {
 		*sp = (*sp)[:0]
-		conn.HeaderSlabPool.Put(sp)
+		conn.GetHeaderSlabPool().Put(sp)
 	}
 	r.slabs = r.slabs[:0]
 	r.Status = 0
@@ -109,9 +107,9 @@ type StreamEvent struct {
 	// Data is the DATA payload for EventData. Owned by the event.
 	Data []byte
 	// Trailers is populated for EventTrailers.
-	Trailers []hpack.HeaderField
+	Trailers []conn.HeaderField
 	// ResetCode is populated for EventReset.
-	ResetCode frame.ErrCode
+	ResetCode conn.ErrCode
 	// EndStream is true on the final event of a stream.
 	EndStream bool
 }
@@ -128,13 +126,13 @@ type StreamResponse struct {
 	Status int
 	// Headers is the regular response header fields received with
 	// the initial HEADERS frame. Valid until Close() is called.
-	Headers []hpack.HeaderField
+	Headers []conn.HeaderField
 
 	stream    *conn.Stream
 	release   func()
 	closeOnce sync.Once
 	drained   bool
-	trailers  []hpack.HeaderField // cached when Recv delivers EventTrailers
+	trailers  []conn.HeaderField // cached when Recv delivers EventTrailers
 
 	// slabs holds pooled slab pointers that back Headers field bytes.
 	// Storing *[]byte avoids heap escape on return to HeaderSlabPool.
@@ -190,7 +188,7 @@ func (sr *StreamResponse) Recv(ctx context.Context) (StreamEvent, error) {
 			}
 			sr.trailers = out.Trailers // cache for WaitTrailers
 			if sr.trailers == nil {
-				sr.trailers = []hpack.HeaderField{} // sentinel: EventTrailers received but empty
+				sr.trailers = []conn.HeaderField{} // sentinel: EventTrailers received but empty
 			}
 			if ev.EndStream {
 				sr.drained = true
@@ -220,7 +218,7 @@ func (sr *StreamResponse) Recv(ctx context.Context) (StreamEvent, error) {
 //
 // If Recv already delivered EventTrailers, the cached result is
 // returned immediately without further network I/O.
-func (sr *StreamResponse) WaitTrailers(ctx context.Context) ([]hpack.HeaderField, error) {
+func (sr *StreamResponse) WaitTrailers(ctx context.Context) ([]conn.HeaderField, error) {
 	if sr.trailers != nil {
 		return sr.trailers, nil
 	}
@@ -250,7 +248,7 @@ func (sr *StreamResponse) Close() error {
 	sr.closeOnce.Do(func() {
 		for _, sp := range sr.slabs {
 			*sp = (*sp)[:0]
-			conn.HeaderSlabPool.Put(sp)
+			conn.GetHeaderSlabPool().Put(sp)
 		}
 		sr.slabs = sr.slabs[:0]
 		closeErr = sr.stream.Close()
@@ -268,7 +266,7 @@ var ErrStreamEnded = errors.New("client: stream ended")
 // parseStatus extracts the integer value of the :status pseudo-header
 // and appends all non-pseudo headers into *dst. Returns ErrEmptyResponse
 // if :status is absent or unparseable.
-func parseStatus(in []hpack.HeaderField, dst *[]hpack.HeaderField) (int, error) {
+func parseStatus(in []conn.HeaderField, dst *[]conn.HeaderField) (int, error) {
 	for i := range in {
 		if !bytes.Equal(in[i].Name, hdrStatus) {
 			continue

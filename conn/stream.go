@@ -41,7 +41,7 @@ func (t StreamEventType) String() string {
 //
 // When Slab is non-nil, all Headers[i].Name and .Value byte slices are
 // sub-slices of *Slab. Ownership transfers to the client layer, which
-// returns the pointer to conn.HeaderSlabPool in Response.Reset / sr.Close.
+// returns the pointer to conn.GetHeaderSlabPool() in Response.Reset / sr.Close.
 type StreamEvent struct {
 	Type      StreamEventType
 	Headers   []hpack.HeaderField // EventHeaders / EventTrailers
@@ -52,7 +52,7 @@ type StreamEvent struct {
 	// Slab is the pooled backing buffer pointer for all Headers[i].Name
 	// and .Value slices. nil for non-headers events and when the pool is
 	// cold (first request). The client layer must return this pointer to
-	// conn.HeaderSlabPool, not the slice value, to avoid heap escape.
+	// conn.GetHeaderSlabPool(), not the slice value, to avoid heap escape.
 	Slab *[]byte
 }
 

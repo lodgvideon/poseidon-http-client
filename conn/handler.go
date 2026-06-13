@@ -7,15 +7,20 @@ import (
 	"github.com/lodgvideon/poseidon-http-client/hpack"
 )
 
-// HeaderSlabPool recycles the byte backing for HPACK-decoded header
+// headerSlabPool recycles the byte backing for HPACK-decoded header
 // fields. The client layer transfers slab ownership via StreamEvent.Slab
-// and returns slabs here in Response.Reset / StreamResponse.Close.
-var HeaderSlabPool = &sync.Pool{
+// and returns slabs here via GetHeaderSlabPool().Put in Response.Reset /
+// StreamResponse.Close.
+var headerSlabPool = sync.Pool{
 	New: func() any {
 		b := make([]byte, 0, 512)
 		return &b
 	},
 }
+
+// GetHeaderSlabPool returns the shared pool for header-slab byte buffers.
+// The client package calls this to return slabs after use.
+func GetHeaderSlabPool() *sync.Pool { return &headerSlabPool }
 
 // connOps is the contract handler.go needs from its owner. In
 // production it's *Conn; tests can supply a fake. Widening this beyond
@@ -149,8 +154,8 @@ func (h *connHandler) emitHeaderBlock(s *Stream, hb []byte, endStream, isTrailer
 	}
 	// Build one slab for all header bytes, one slice for all fields.
 	// Ownership of the slab transfers to the client via StreamEvent.Slab;
-	// the client returns it to HeaderSlabPool in Response.Reset / sr.Close.
-	slabPtr := HeaderSlabPool.Get().(*[]byte)
+	// the client returns it to headerSlabPool in Response.Reset / sr.Close.
+	slabPtr := headerSlabPool.Get().(*[]byte)
 	*slabPtr = (*slabPtr)[:0]
 	copied := make([]hpack.HeaderField, len(h.scratch))
 	for i, f := range h.scratch {
@@ -173,7 +178,7 @@ func (h *connHandler) emitHeaderBlock(s *Stream, hb []byte, endStream, isTrailer
 	}) {
 		// push dropped the event (channel overflow); return slab to pool.
 		*slabPtr = (*slabPtr)[:0]
-		HeaderSlabPool.Put(slabPtr)
+		headerSlabPool.Put(slabPtr)
 	}
 	return nil
 }

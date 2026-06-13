@@ -8,11 +8,11 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"unsafe"
 	"sync/atomic"
 	"time"
 
 	"github.com/lodgvideon/poseidon-http-client/conn"
-	"github.com/lodgvideon/poseidon-http-client/hpack"
 )
 
 // TransportKind selects which transport strategy a Client uses.
@@ -433,12 +433,19 @@ var (
 	hdrStatus        = []byte(":status")
 )
 
-// hdrSlicePool recycles the []hpack.HeaderField backing array used by
+// unsafeStringToBytes returns a []byte backed by the same memory as s.
+// The caller must not mutate the returned slice. This avoids the
+// allocation of []byte(string) in the hot header-building path.
+func unsafeStringToBytes(s string) []byte {
+	return unsafe.Slice(unsafe.StringData(s), len(s))
+}
+
+// hdrSlicePool recycles the []conn.HeaderField backing array used by
 // buildHeaders. EncodeBlock is synchronous, so the slice is safe to
 // return immediately after SendHeaders returns.
 var hdrSlicePool = sync.Pool{
 	New: func() any {
-		s := make([]hpack.HeaderField, 0, 10)
+		s := make([]conn.HeaderField, 0, 10)
 		return &s
 	},
 }
@@ -446,7 +453,7 @@ var hdrSlicePool = sync.Pool{
 // buildHeaders assembles the on-wire HEADERS slice with pseudo-headers
 // first. Returns the slice and a put function; caller MUST call put()
 // after SendHeaders returns to return the slice to the pool.
-func buildHeaders(req *Request, defaultAuthority, defaultScheme string) ([]hpack.HeaderField, func()) {
+func buildHeaders(req *Request, defaultAuthority, defaultScheme string) ([]conn.HeaderField, func()) {
 	scheme := req.Scheme
 	if scheme == "" {
 		scheme = defaultScheme
@@ -455,17 +462,17 @@ func buildHeaders(req *Request, defaultAuthority, defaultScheme string) ([]hpack
 	if authority == "" {
 		authority = defaultAuthority
 	}
-	sp := hdrSlicePool.Get().(*[]hpack.HeaderField)
+	sp := hdrSlicePool.Get().(*[]conn.HeaderField)
 	*sp = (*sp)[:0]
 	*sp = append(*sp,
-		hpack.HeaderField{Name: hdrMethod, Value: []byte(req.Method)},
-		hpack.HeaderField{Name: hdrScheme, Value: []byte(scheme)},
-		hpack.HeaderField{Name: hdrAuthority, Value: []byte(authority)},
-		hpack.HeaderField{Name: hdrPath, Value: []byte(req.Path)},
+		conn.HeaderField{Name: hdrMethod, Value: unsafeStringToBytes(req.Method)},
+		conn.HeaderField{Name: hdrScheme, Value: unsafeStringToBytes(scheme)},
+		conn.HeaderField{Name: hdrAuthority, Value: unsafeStringToBytes(authority)},
+		conn.HeaderField{Name: hdrPath, Value: unsafeStringToBytes(req.Path)},
 	)
 	*sp = append(*sp, req.Headers...)
 	if req.BodyReader != nil && req.ContentLength > 0 {
-		*sp = append(*sp, hpack.HeaderField{
+		*sp = append(*sp, conn.HeaderField{
 			Name:  hdrContentLength,
 			Value: []byte(strconv.FormatInt(req.ContentLength, 10)),
 		})
@@ -474,7 +481,7 @@ func buildHeaders(req *Request, defaultAuthority, defaultScheme string) ([]hpack
 	// allocate a Trailer map before the body arrives (required by the
 	// Go net/http HTTP/2 server and recommended by RFC 7230 §4.4).
 	if tv := trailerAnnouncement(req); len(tv) > 0 {
-		*sp = append(*sp, hpack.HeaderField{Name: hdrTrailer, Value: tv})
+		*sp = append(*sp, conn.HeaderField{Name: hdrTrailer, Value: tv})
 	}
 	return *sp, func() {
 		*sp = (*sp)[:0]
@@ -484,7 +491,7 @@ func buildHeaders(req *Request, defaultAuthority, defaultScheme string) ([]hpack
 
 // resolveTrailerFields returns the effective trailer fields for req.
 // TrailerFunc wins; falls back to Trailers when TrailerFunc returns nil.
-func resolveTrailerFields(req *Request) []hpack.HeaderField {
+func resolveTrailerFields(req *Request) []conn.HeaderField {
 	if req.TrailerFunc != nil {
 		if result := req.TrailerFunc(); result != nil {
 			return result
@@ -523,7 +530,7 @@ func hasTrailers(req *Request) bool {
 // resolveTrailers returns the trailer fields to send. TrailerFunc wins;
 // falls back to Trailers when TrailerFunc returns nil.
 // Returns error if resolved fields contain pseudo-headers.
-func resolveTrailers(req *Request) ([]hpack.HeaderField, error) {
+func resolveTrailers(req *Request) ([]conn.HeaderField, error) {
 	fields := resolveTrailerFields(req)
 	for i := range fields {
 		if len(fields[i].Name) > 0 && fields[i].Name[0] == ':' {
