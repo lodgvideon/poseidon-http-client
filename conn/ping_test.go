@@ -301,5 +301,6 @@ func (d *deafHandler) OnGoAway(frame.FrameHeader, uint32, frame.ErrCode, []byte)
 }
 func (d *deafHandler) OnWindowUpdate(frame.FrameHeader, uint32) error      { return nil }
 func (d *deafHandler) OnContinuation(frame.FrameHeader, frame.HeaderBlock) error { return nil }
+func (d *deafHandler) OnOrigin(frame.FrameHeader, []string) error                 { return nil }
 
 var _ frame.Handler = (*deafHandler)(nil)

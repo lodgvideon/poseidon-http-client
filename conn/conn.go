@@ -76,6 +76,11 @@ type Conn struct {
 	pingWaiters map[[8]byte]chan struct{}
 	pingCounter atomic.Uint64
 
+	// originsMu guards origins, populated from an ORIGIN frame
+	// (RFC 8336 §3). Used for connection coalescing decisions.
+	originsMu sync.RWMutex
+	origins   []string
+
 	// streamPool recycles *Stream structs (struct + channel) to eliminate
 	// 2 allocs per request after warmup. Only streams whose channel cap
 	// equals opts.StreamEventBuffer are recycled; mis-sized ones are discarded.
@@ -789,6 +794,43 @@ func (c *Conn) onGoAwayReceived(lastStreamID uint32, _ frame.ErrCode) {
 	c.fcOutMu.Lock()
 	c.fcOutCond.Broadcast()
 	c.fcOutMu.Unlock()
+}
+
+// storeOrigins saves origins received via an ORIGIN frame (RFC 8336 §3).
+func (c *Conn) storeOrigins(origins []string) {
+	c.originsMu.Lock()
+	c.origins = origins
+	c.originsMu.Unlock()
+}
+
+// Origins returns the server's advertised origin list from the ORIGIN
+// frame (RFC 8336 §3). Returns nil if no ORIGIN frame was received.
+// The returned slice is a copy; callers may modify it freely.
+func (c *Conn) Origins() []string {
+	c.originsMu.RLock()
+	defer c.originsMu.RUnlock()
+	if len(c.origins) == 0 {
+		return nil
+	}
+	dup := make([]string, len(c.origins))
+	copy(dup, c.origins)
+	return dup
+}
+
+// CanCoalesce reports whether the server has advertised (via ORIGIN
+// frame, RFC 8336) that it is authoritative for the given origin.
+// The origin must be in "scheme://host[:port]" form (e.g.
+// "https://example.com" or "https://example.com:8443").
+// If no ORIGIN frame was received, CanCoalesce returns false.
+func (c *Conn) CanCoalesce(origin string) bool {
+	c.originsMu.RLock()
+	defer c.originsMu.RUnlock()
+	for _, o := range c.origins {
+		if o == origin {
+			return true
+		}
+	}
+	return false
 }
 
 // writePingAck emits a PING frame with ACK=1 and the peer's payload

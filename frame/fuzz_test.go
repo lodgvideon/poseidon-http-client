@@ -18,6 +18,7 @@ func (dropHandler) OnPing(FrameHeader, [8]byte) error                           
 func (dropHandler) OnGoAway(FrameHeader, uint32, ErrCode, []byte) error          { return nil }
 func (dropHandler) OnWindowUpdate(FrameHeader, uint32) error                     { return nil }
 func (dropHandler) OnContinuation(FrameHeader, HeaderBlock) error                { return nil }
+func (dropHandler) OnOrigin(FrameHeader, []string) error                          { return nil }
 
 func FuzzFramerReadFrame(f *testing.F) {
 	// SETTINGS empty

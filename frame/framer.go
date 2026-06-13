@@ -23,6 +23,7 @@ type Handler interface {
 	OnGoAway(h FrameHeader, lastStreamID uint32, code ErrCode, debug []byte) error
 	OnWindowUpdate(h FrameHeader, increment uint32) error
 	OnContinuation(h FrameHeader, hb HeaderBlock) error
+	OnOrigin(h FrameHeader, origins []string) error
 }
 
 // WriteHeadersParams bundles the optional fields of a HEADERS frame.
@@ -461,6 +462,8 @@ func (f *Framer) ReadFrame(ctx context.Context, h Handler) (FrameHeader, error) 
 		return fh, f.dispatchWindowUpdate(fh, payload, h)
 	case FrameContinuation:
 		return fh, f.dispatchContinuation(fh, payload, h)
+	case FrameOrigin:
+		return fh, f.dispatchOrigin(fh, payload, h)
 	default:
 		// RFC 7540 §5.5: implementations MUST ignore frames they do not
 		// understand and continue. Drain the payload (already read) and
@@ -632,4 +635,28 @@ func (f *Framer) dispatchContinuation(fh FrameHeader, payload []byte, h Handler)
 		return ErrInvalidStreamID
 	}
 	return h.OnContinuation(fh, HeaderBlock(payload))
+}
+
+// dispatchOrigin parses an ORIGIN frame (RFC 8336 §3) and calls OnOrigin.
+// ORIGIN frames MUST be sent on stream 0; non-zero stream ID is a
+// PROTOCOL_ERROR. Each origin entry is a 2-byte big-endian length
+// prefix followed by the origin ASCII string (scheme://host[:port]).
+func (f *Framer) dispatchOrigin(fh FrameHeader, payload []byte, h Handler) error {
+	if fh.StreamID != 0 {
+		return ErrProtocolError
+	}
+	var origins []string
+	for len(payload) >= 2 {
+		n := int(payload[0])<<8 | int(payload[1])
+		payload = payload[2:]
+		if n > len(payload) {
+			return ErrProtocolError
+		}
+		origins = append(origins, string(payload[:n]))
+		payload = payload[n:]
+	}
+	if len(payload) > 0 {
+		return ErrProtocolError // trailing bytes — malformed
+	}
+	return h.OnOrigin(fh, origins)
 }

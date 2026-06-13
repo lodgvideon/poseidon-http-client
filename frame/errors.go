@@ -36,4 +36,5 @@ var (
 	ErrSettingsLength      = errors.New("poseidon/frame: SETTINGS frame length not multiple of 6")
 	ErrShortRead           = errors.New("poseidon/frame: short read on header or payload")
 	ErrZeroIncrement       = errors.New("poseidon/frame: WINDOW_UPDATE with zero increment")
+	ErrProtocolError       = errors.New("poseidon/frame: protocol error")
 )

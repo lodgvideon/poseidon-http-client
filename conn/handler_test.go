@@ -15,6 +15,7 @@ type fakeStreamMap struct {
 	streams map[uint32]*Stream
 	w       *fakeStreamWriter
 	bufSize int
+	origins []string
 }
 
 func (m *fakeStreamMap) lookupStream(id uint32) *Stream {
@@ -38,6 +39,7 @@ func (*fakeStreamMap) registerPushedStream(uint32) *Stream                  { re
 func (*fakeStreamMap) initialRecvWindow() int32                             { return 65535 }
 func (*fakeStreamMap) peerSettingsRLocked(func(frame.SettingsParams))       {}
 func (*fakeStreamMap) rstStream(uint32, frame.ErrCode) error                { return nil }
+func (m *fakeStreamMap) storeOrigins(origins []string)                                { m.origins = origins }
 
 func newFakeStreamMap() *fakeStreamMap {
 	w := &fakeStreamWriter{}

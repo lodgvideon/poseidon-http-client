@@ -14,6 +14,9 @@ const (
 	FrameGoAway       FrameType = 0x7
 	FrameWindowUpdate FrameType = 0x8
 	FrameContinuation FrameType = 0x9
+
+	// Extension frame types (RFC 8336, RFC 9218).
+	FrameOrigin FrameType = 0x0c // ORIGIN, RFC 8336 §3
 )
 
 // Flags is a bitmask whose semantics depend on FrameType.

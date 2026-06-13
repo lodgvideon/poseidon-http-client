@@ -53,6 +53,9 @@ type connOps interface {
 
 	// rstStream sends RST_STREAM for the given stream ID.
 	rstStream(id uint32, code frame.ErrCode) error
+
+	// storeOrigins saves the origin list from an ORIGIN frame.
+	storeOrigins(origins []string)
 }
 
 // streamLookup is retained as the legacy alias for tests that only
@@ -310,6 +313,15 @@ func (h *connHandler) OnPing(fh frame.FrameHeader, payload [8]byte) error {
 // per RFC 7540 §6.8, and wakes writers blocked on send credit.
 func (h *connHandler) OnGoAway(_ frame.FrameHeader, lastStreamID uint32, code frame.ErrCode, _ []byte) error {
 	h.streams.onGoAwayReceived(lastStreamID, code)
+	return nil
+}
+
+// OnOrigin implements frame.Handler. It stores the server's advertised
+// origin list (RFC 8336 §3) for connection coalescing decisions.
+func (h *connHandler) OnOrigin(_ frame.FrameHeader, origins []string) error {
+	dup := make([]string, len(origins))
+	copy(dup, origins)
+	h.streams.storeOrigins(dup)
 	return nil
 }
 
