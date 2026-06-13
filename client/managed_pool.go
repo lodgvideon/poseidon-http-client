@@ -358,10 +358,17 @@ func (mp *managedPool) beginDrain(s *subPoolState) {
 	}
 }
 
-// watchDrain polls the sub-pool's Stats; once InFlightStreams == 0,
-// closes and removes it from the registry.
+// watchDrain polls the sub-pool's Stats with exponential back-off.
+// Once InFlightStreams == 0 it closes and removes the sub-pool from
+// the registry. The initial interval is 20 ms and doubles on each
+// idle poll up to drainPollMax.
 func (mp *managedPool) watchDrain(s *subPoolState) {
-	t := time.NewTicker(20 * time.Millisecond)
+	const (
+		drainPollInit = 20 * time.Millisecond
+		drainPollMax  = 5 * time.Second
+	)
+	interval := drainPollInit
+	t := time.NewTimer(interval)
 	defer t.Stop()
 	for {
 		select {
@@ -373,6 +380,12 @@ func (mp *managedPool) watchDrain(s *subPoolState) {
 			mp.dropSubPool(s, true)
 			return
 		}
+		// Back off: double the interval, cap at drainPollMax.
+		interval *= 2
+		if interval > drainPollMax {
+			interval = drainPollMax
+		}
+		t.Reset(interval)
 	}
 }
 

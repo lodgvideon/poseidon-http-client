@@ -212,122 +212,138 @@ func (p *Pool) Stats() Stats {
 
 // run is the actor loop. Owns p.conns, p.waiters, p.inFlightDials,
 // p.lastDialErrAt. Never touched from outside.
+// runState holds the mutable loop-local state of Pool.run. Kept in a
+// struct so extracted handlers can receive it without the caller
+// unpacking/packing individual variables on every iteration.
+type runState struct {
+	conns         []*managedConn
+	waiters       []acquireReq
+	inFlightDials int
+	lastDialErrAt time.Time
+}
+
 func (p *Pool) run() {
 	defer close(p.closedCh)
-
-	var (
-		conns         []*managedConn
-		waiters       []acquireReq
-		inFlightDials int
-		lastDialErrAt time.Time
-	)
+	rs := &runState{}
 	tick := time.NewTicker(p.opts.HealthCheckPeriod)
 	defer tick.Stop()
 
 	for {
 		select {
 		case req := <-p.acquireCh:
-			mc := p.pickLeastLoaded(conns)
-			if mc != nil {
-				mc.active++
-				mc.lastUsed = time.Now()
-				p.replyAcquire(req, mc, nil)
-				continue
-			}
-			// No live capacity. Decide between dial / waiter / immediate ErrDialBackoff.
-			// Count only LIVE conns so a dead conn that hasn't been evicted yet
-			// doesn't block a replacement dial (BUG-1 regression guard).
-			liveConns := countLive(conns)
-			atCap := liveConns+inFlightDials >= p.opts.MaxConnsPerHost
-			inBackoff := inDialBackoff(lastDialErrAt, p.opts.DialBackoff)
-
-			if !atCap && !inBackoff {
-				inFlightDials++
-				go p.dialOne()
-				waiters = append(waiters, req)
-				continue
-			}
-			// At cap or in backoff: if backoff is the sole reason and there is
-			// nothing already in flight, refuse fast so callers don't block on
-			// a stalled pool. Otherwise queue and wait for capacity to free.
-			if inBackoff && liveConns == 0 && inFlightDials == 0 {
-				p.replyAcquire(req, nil, ErrDialBackoff)
-				continue
-			}
-			waiters = append(waiters, req)
-
+			p.handleAcquire(rs, req)
 		case msg := <-p.releaseCh:
-			msg.mc.active--
-			msg.mc.lastUsed = time.Now()
-			// Always evict dead conns regardless of msg.err. The transport
-			// adapter passes nil err today, so a conn that died mid-request
-			// (e.g. peer GOAWAY) would otherwise linger in the pool, blocking
-			// canDial via len(conns) and forcing a wait until the next
-			// HealthCheckPeriod tick (default 30s).
-			if !msg.mc.c.IsAlive() {
-				reason := CloseDead
-				if msg.mc.c.GoAwayReceived() {
-					reason = CloseGoAway
-					p.metrics.Counters.GoAwaysReceived.Add(1)
-				}
-				conns = p.evict(conns, msg.mc, reason)
-			}
-			waiters = p.serveWaiters(conns, waiters)
-
+			p.handleRelease(rs, msg)
 		case dr := <-p.dialDoneCh:
-			inFlightDials--
-			if dr.err != nil {
-				lastDialErrAt = time.Now()
-				if len(waiters) > 0 {
-					req := waiters[0]
-					waiters = waiters[1:]
-					p.replyAcquire(req, nil, dr.err)
-				}
-				continue
-			}
-			p.refreshStreamCap(dr.mc)
-			conns = append(conns, dr.mc)
-			waiters = p.serveWaiters(conns, waiters)
-
+			p.handleDialDone(rs, dr)
 		case respCh := <-p.statsCh:
-			// Evict dead conns before reporting so ActiveConns reflects reality.
-			// Without this, a conn that died after its last release (e.g. GOAWAY
-			// arrived after the response was read) would linger until the next
-			// HealthCheckPeriod tick.
-			// Use evictDeadSilent here to avoid firing OnConnClose hooks or
-			// bumping ConnsClosed on every metrics scrape (Stats is read-only).
-			conns = p.evictDeadSilent(conns)
-			respCh <- Stats{
-				ActiveConns:     len(conns),
-				InFlightStreams: sumActive(conns),
-				Waiters:         len(waiters),
-				InFlightDials:   inFlightDials,
-			}
-
+			p.handleStats(rs, respCh)
 		case <-tick.C:
-			conns = p.evictIdle(conns)
-			conns = p.evictDead(conns)
-			for _, mc := range conns {
-				p.refreshStreamCap(mc)
-			}
-			waiters = pruneExpiredWaiters(waiters)
-
+			p.handleTick(rs)
 		case <-p.closeCh:
-			for _, w := range waiters {
-				p.replyAcquire(w, nil, ErrPoolClosed)
-			}
-			waiters = nil
-			for _, mc := range conns {
-				reason := CloseManual
-				if mc.c.GoAwayReceived() {
-					reason = CloseGoAway
-					p.metrics.Counters.GoAwaysReceived.Add(1)
-				}
-				_ = mc.c.Close()
-				p.notifyClose(reason)
-			}
+			p.handleClose(rs)
 			return
 		}
+	}
+}
+
+// handleAcquire tries to serve the request from an existing conn.
+// If no live capacity exists it decides between dial / queue / fast-refuse.
+func (p *Pool) handleAcquire(rs *runState, req acquireReq) {
+	mc := p.pickLeastLoaded(rs.conns)
+	if mc != nil {
+		mc.active++
+		mc.lastUsed = time.Now()
+		p.replyAcquire(req, mc, nil)
+		return
+	}
+	liveConns := countLive(rs.conns)
+	atCap := liveConns+rs.inFlightDials >= p.opts.MaxConnsPerHost
+	inBackoff := inDialBackoff(rs.lastDialErrAt, p.opts.DialBackoff)
+
+	if !atCap && !inBackoff {
+		rs.inFlightDials++
+		go p.dialOne()
+		rs.waiters = append(rs.waiters, req)
+		return
+	}
+	if inBackoff && liveConns == 0 && rs.inFlightDials == 0 {
+		p.replyAcquire(req, nil, ErrDialBackoff)
+		return
+	}
+	rs.waiters = append(rs.waiters, req)
+}
+
+// handleRelease decrements the conn's active count and evicts it
+// if the underlying connection is no longer alive.
+func (p *Pool) handleRelease(rs *runState, msg releaseMsg) {
+	msg.mc.active--
+	msg.mc.lastUsed = time.Now()
+	if !msg.mc.c.IsAlive() {
+		reason := CloseDead
+		if msg.mc.c.GoAwayReceived() {
+			reason = CloseGoAway
+			p.metrics.Counters.GoAwaysReceived.Add(1)
+		}
+		rs.conns = p.evict(rs.conns, msg.mc, reason)
+	}
+	rs.waiters = p.serveWaiters(rs.conns, rs.waiters)
+}
+
+// handleDialDone processes a completed dial: on success the conn
+// enters the pool; on failure the first waiter receives the error.
+func (p *Pool) handleDialDone(rs *runState, dr dialResult) {
+	rs.inFlightDials--
+	if dr.err != nil {
+		rs.lastDialErrAt = time.Now()
+		if len(rs.waiters) > 0 {
+			req := rs.waiters[0]
+			rs.waiters = rs.waiters[1:]
+			p.replyAcquire(req, nil, dr.err)
+		}
+		return
+	}
+	p.refreshStreamCap(dr.mc)
+	rs.conns = append(rs.conns, dr.mc)
+	rs.waiters = p.serveWaiters(rs.conns, rs.waiters)
+}
+
+// handleStats evicts dead conns silently and reports a snapshot.
+func (p *Pool) handleStats(rs *runState, respCh chan<- Stats) {
+	rs.conns = p.evictDeadSilent(rs.conns)
+	respCh <- Stats{
+		ActiveConns:     len(rs.conns),
+		InFlightStreams: sumActive(rs.conns),
+		Waiters:         len(rs.waiters),
+		InFlightDials:   rs.inFlightDials,
+	}
+}
+
+// handleTick runs periodic maintenance: idle eviction, dead
+// eviction, stream-cap refresh, and waiter expiry.
+func (p *Pool) handleTick(rs *runState) {
+	rs.conns = p.evictIdle(rs.conns)
+	rs.conns = p.evictDead(rs.conns)
+	for _, mc := range rs.conns {
+		p.refreshStreamCap(mc)
+	}
+	rs.waiters = pruneExpiredWaiters(rs.waiters)
+}
+
+// handleClose drains waiters and shuts down all connections.
+func (p *Pool) handleClose(rs *runState) {
+	for _, w := range rs.waiters {
+		p.replyAcquire(w, nil, ErrPoolClosed)
+	}
+	rs.waiters = nil
+	for _, mc := range rs.conns {
+		reason := CloseManual
+		if mc.c.GoAwayReceived() {
+			reason = CloseGoAway
+			p.metrics.Counters.GoAwaysReceived.Add(1)
+		}
+		_ = mc.c.Close()
+		p.notifyClose(reason)
 	}
 }
 

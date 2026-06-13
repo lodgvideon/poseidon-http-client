@@ -182,32 +182,20 @@ func (c *Client) PoolStats() Stats {
 // Do issues a synchronous request and writes the result into resp.
 // The caller must allocate resp once and call resp.Reset() before each reuse.
 // On error, resp fields are undefined; call resp.Reset() before reuse regardless.
-func (c *Client) Do(ctx context.Context, req *Request, resp *Response) error {
-	if err := validateRequest(req); err != nil {
-		return err
-	}
-	start := time.Now()
-	authority := req.Authority
-	if authority == "" {
-		authority = c.authority
-	}
+// observeStart fires the OnRequestStart hook and increments RequestsStarted.
+func (c *Client) observeStart(req *Request, authority string) {
 	if h := c.hooksPtr.Load(); h != nil && h.OnRequestStart != nil {
 		h.OnRequestStart(RequestStartEvent{
 			Method: req.Method, Path: req.Path, Authority: authority, Attempt: 0,
 		})
 	}
 	c.metrics.Counters.RequestsStarted.Add(1)
+}
 
-	err := c.do(ctx, req, resp)
-
-	latency := time.Since(start)
+// observeDone records latency, success/error counters, and fires
+// the OnRequestComplete hook.
+func (c *Client) observeDone(req *Request, authority string, status int, bytesSent, bytesRecv int64, err error, latency time.Duration) {
 	c.metrics.Latency.Request.Observe(latency)
-	var status int
-	var bytesRecv int64
-	if err == nil && resp != nil {
-		status = resp.Status
-		bytesRecv = resp.BytesReceived
-	}
 	if err == nil {
 		c.metrics.Counters.RequestsSucceeded.Add(1)
 	} else {
@@ -217,10 +205,32 @@ func (c *Client) Do(ctx context.Context, req *Request, resp *Response) error {
 		h.OnRequestComplete(RequestCompleteEvent{
 			Method: req.Method, Path: req.Path, Authority: authority,
 			Status: status, Err: err, Latency: latency,
-			BytesSent: int64(len(req.Body)), BytesRecv: bytesRecv,
+			BytesSent: bytesSent, BytesRecv: bytesRecv,
 			Attempt: 0,
 		})
 	}
+}
+
+func (c *Client) Do(ctx context.Context, req *Request, resp *Response) error {
+	if err := validateRequest(req); err != nil {
+		return err
+	}
+	authority := req.Authority
+	if authority == "" {
+		authority = c.authority
+	}
+	c.observeStart(req, authority)
+	start := time.Now()
+
+	err := c.do(ctx, req, resp)
+
+	var status int
+	var bytesRecv int64
+	if err == nil && resp != nil {
+		status = resp.Status
+		bytesRecv = resp.BytesReceived
+	}
+	c.observeDone(req, authority, status, int64(len(req.Body)), bytesRecv, err, time.Since(start))
 	return err
 }
 
@@ -339,39 +349,20 @@ func (c *Client) DoStream(ctx context.Context, req *Request, sr *StreamResponse)
 		return err
 	}
 	sr.reset()
-	start := time.Now()
 	authority := req.Authority
 	if authority == "" {
 		authority = c.authority
 	}
-	if h := c.hooksPtr.Load(); h != nil && h.OnRequestStart != nil {
-		h.OnRequestStart(RequestStartEvent{
-			Method: req.Method, Path: req.Path, Authority: authority, Attempt: 0,
-		})
-	}
-	c.metrics.Counters.RequestsStarted.Add(1)
+	c.observeStart(req, authority)
+	start := time.Now()
 
 	err := c.doStream(ctx, req, sr)
 
-	latency := time.Since(start)
-	c.metrics.Latency.Request.Observe(latency)
 	var status int
 	if err == nil {
 		status = sr.Status
 	}
-	if err == nil {
-		c.metrics.Counters.RequestsSucceeded.Add(1)
-	} else {
-		c.metrics.Counters.RequestsErrored.Add(1)
-	}
-	if h := c.hooksPtr.Load(); h != nil && h.OnRequestComplete != nil {
-		h.OnRequestComplete(RequestCompleteEvent{
-			Method: req.Method, Path: req.Path, Authority: authority,
-			Status: status, Err: err, Latency: latency,
-			BytesSent: int64(len(req.Body)),
-			Attempt:   0,
-		})
-	}
+	c.observeDone(req, authority, status, int64(len(req.Body)), 0, err, time.Since(start))
 	return err
 }
 
