@@ -76,8 +76,30 @@ type ClientOptions struct {
 
 	// DefaultScheme is used as the :scheme pseudo-header when Request.Scheme
 	// is empty. Defaults to "https" when zero. Set to "http" for H2C targets.
+	// PushHandler is invoked when the server sends a PUSH_PROMISE frame
+	// (RFC 7540 §8.2). When non-nil, ConnOpts.EnablePush is automatically
+	// set to true at client construction so the peer knows push is allowed.
+	//
+	// The handler runs in a dedicated goroutine. promisedHeaders are the
+	// request headers the server promises to fulfil (decoded from
+	// PUSH_PROMISE). resp is the fully drained pushed response — Body is
+	// always populated regardless of WantBody. err is non-nil if the push
+	// failed (reset, connection closed, etc.).
+	//
+	// When PushHandler is nil, server push is disabled and PUSH_PROMISE
+	// frames trigger PROTOCOL_ERROR at the conn layer.
+	PushHandler PushHandler
+
+	// DefaultScheme is used as the :scheme pseudo-header when Request.Scheme
+	// is empty. Defaults to "https" when zero. Set to "http" for H2C targets.
 	DefaultScheme string
 }
+
+// PushHandler is invoked when the server pushes a resource in response
+// to a client request. The client automatically drains the pushed stream
+// into resp before calling the handler. If the push fails (RST_STREAM,
+// connection error), err is non-nil and resp may be partially populated.
+type PushHandler func(ctx context.Context, promisedHeaders []conn.HeaderField, resp *Response, err error)
 
 // Client is a high-level HTTP/2 client wrapping a single connection.
 // It is safe for concurrent use by multiple goroutines.
@@ -87,6 +109,7 @@ type Client struct {
 	defaultScheme string
 	hooksPtr      *atomic.Pointer[Hooks]
 	metrics       *Metrics
+	pushHandler   PushHandler
 }
 
 // NewClient validates opts and constructs a Client. It does NOT dial;
@@ -99,6 +122,9 @@ func NewClient(opts ClientOptions) (*Client, error) {
 	}
 	if opts.ConnOpts.Dialer == nil {
 		return nil, fmt.Errorf("client: ClientOptions.ConnOpts.Dialer is required")
+	}
+	if opts.PushHandler != nil {
+		opts.ConnOpts.EnablePush = true
 	}
 	switch opts.Transport {
 	case TransportSingleConn:
@@ -155,6 +181,7 @@ func NewClient(opts ClientOptions) (*Client, error) {
 		defaultScheme: scheme,
 		hooksPtr:      hooksPtr,
 		metrics:       metrics,
+		pushHandler:   opts.PushHandler,
 	}
 	return c, nil
 }
@@ -240,6 +267,7 @@ func (c *Client) Do(ctx context.Context, req *Request, resp *Response) error {
 // callback. The caller is responsible for calling release() and s.Close().
 type sentRequest struct {
 	s       *conn.Stream
+	cn      *conn.Conn
 	release func()
 }
 
@@ -284,7 +312,7 @@ func (c *Client) sendRequest(ctx context.Context, req *Request) (*sentRequest, e
 		}
 	}
 
-	return &sentRequest{s: s, release: release}, nil
+	return &sentRequest{s: s, cn: cn, release: release}, nil
 }
 
 func (c *Client) do(ctx context.Context, req *Request, resp *Response) error {
@@ -331,7 +359,7 @@ func (c *Client) do(ctx context.Context, req *Request, resp *Response) error {
 		return nil // release deferred to resp.BodyReader.Close()
 	}
 
-	err = drainResponse(ctx, s, req, resp)
+	err = drainResponse(ctx, sr.cn, s, req, resp, c.pushHandler)
 	_ = s.Close() // recycles stream when both sides ended
 	release()
 	return err
@@ -613,7 +641,7 @@ func writeBodyReader(ctx context.Context, s *conn.Stream, r io.Reader, endStream
 
 // drainResponse pumps stream events until the response side ends or
 // the stream resets, writing into resp in place.
-func drainResponse(ctx context.Context, s *conn.Stream, req *Request, resp *Response) error {
+func drainResponse(ctx context.Context, cn *conn.Conn, s *conn.Stream, req *Request, resp *Response, h PushHandler) error {
 	var gotHeaders bool
 	for {
 		ev, err := s.Recv(ctx)
@@ -660,8 +688,42 @@ func drainResponse(ctx context.Context, s *conn.Stream, req *Request, resp *Resp
 			}
 		case conn.EventReset:
 			return &StreamResetError{Code: ev.RSTCode}
+		case conn.EventPushPromise:
+			if h != nil && ev.PushStreamID > 0 {
+				ps, ok := cn.LookupStream(ev.PushStreamID)
+				if ok {
+					// Copy promised headers to decouple from the slab
+					// lifetime (slab is returned when parent resp is Reset).
+					hdrs := copyHeaders(ev.Headers)
+					go drainPushedStream(ctx, cn, h, hdrs, ps)
+				}
+			}
 		}
 	}
+}
+
+// drainPushedStream reads the pushed stream's response and invokes the
+// push handler with the result. Handles nested PUSH_PROMISE recursively.
+func drainPushedStream(ctx context.Context, cn *conn.Conn, h PushHandler, promisedHeaders []conn.HeaderField, s *conn.Stream) {
+	pr := &Response{}
+	derr := drainResponse(ctx, cn, s, &Request{WantBody: true}, pr, h)
+	_ = s.Close()
+	h(ctx, promisedHeaders, pr, derr)
+}
+
+// copyHeaders returns a deep copy of the header fields, duplicating the
+// Name and Value byte slices so the result does not alias slab memory.
+func copyHeaders(in []conn.HeaderField) []conn.HeaderField {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make([]conn.HeaderField, len(in))
+	for i := range in {
+		out[i].Name = append([]byte(nil), in[i].Name...)
+		out[i].Value = append([]byte(nil), in[i].Value...)
+		out[i].Sensitive = in[i].Sensitive
+	}
+	return out
 }
 
 // deriveAuthority strips the port if it equals 80 (http) or 443

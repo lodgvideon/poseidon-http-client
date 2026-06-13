@@ -188,6 +188,16 @@ func (c *Conn) rstStream(id uint32, code frame.ErrCode) error {
 // concurrent NewStream callers. Returns ErrTooManyStreams when the
 // in-flight count has reached min(local MaxConcurrentStreams,
 // peer-advertised SETTINGS_MAX_CONCURRENT_STREAMS).
+// LookupStream returns the stream with the given ID, or (nil, false) if
+// no such stream exists. This is primarily used to access server-pushed
+// streams after receiving an EventPushPromise on the parent stream.
+func (c *Conn) LookupStream(id uint32) (*Stream, bool) {
+	c.smu.Lock()
+	defer c.smu.Unlock()
+	s, ok := c.streams[id]
+	return s, ok
+}
+
 func (c *Conn) NewStream(_ context.Context) (*Stream, error) {
 	if c.closed.Load() {
 		return nil, ErrConnClosed
