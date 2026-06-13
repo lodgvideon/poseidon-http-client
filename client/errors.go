@@ -42,6 +42,10 @@ func (e *StreamResetError) Error() string {
 	return fmt.Sprintf("client: stream reset by peer: %v", e.Code)
 }
 
+// Unwrap returns nil. Provided for structural consistency with [DialError]
+// so error-handling code can uniformly call errors.Is/As on client errors.
+func (e *StreamResetError) Unwrap() error { return nil }
+
 // DialError wraps the underlying dial error and the address that
 // failed. Returned from Do/DoStream when the lazy dial fails.
 type DialError struct {

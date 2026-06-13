@@ -1,6 +1,7 @@
 package client
 
 import (
+	"hash"
 	"hash/fnv"
 	"math/rand"
 	"sync"
@@ -70,6 +71,7 @@ func (r *randomSel) Pick(set []Address, _ PickContext) (Address, error) {
 // hashSel picks deterministically by hash(keyFn(pc)).
 type hashSel struct {
 	keyFn func(PickContext) string
+	hash  hash.Hash64
 }
 
 // Hash returns a Selector that picks by FNV-1a hash of keyFn(pc) %
@@ -79,7 +81,7 @@ func Hash(keyFn func(PickContext) string) Selector {
 	if keyFn == nil {
 		panic("client: Hash selector requires a non-nil keyFn")
 	}
-	return &hashSel{keyFn: keyFn}
+	return &hashSel{keyFn: keyFn, hash: fnv.New64a()}
 }
 
 func (h *hashSel) Pick(set []Address, pc PickContext) (Address, error) {
@@ -90,8 +92,8 @@ func (h *hashSel) Pick(set []Address, pc PickContext) (Address, error) {
 	if k == "" {
 		return Address{}, ErrNoAddresses
 	}
-	sum := fnv.New64a()
-	_, _ = sum.Write([]byte(k))
-	idx := int(sum.Sum64() % uint64(len(set)))
+	h.hash.Reset()
+	_, _ = h.hash.Write([]byte(k))
+	idx := int(h.hash.Sum64() % uint64(len(set)))
 	return set[idx], nil
 }

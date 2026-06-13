@@ -10,6 +10,13 @@ import (
 	"github.com/lodgvideon/poseidon-http-client/conn"
 )
 
+// defaultMaxConcurrentStreams is the effective concurrent-stream cap when
+// neither the local config nor the peer advertises a limit. RFC 7540
+// §6.5.2 recommends servers advertise this value; the default mirrors
+// common server behaviour so the pool can make progress without an
+// explicit SETTINGS frame.
+const defaultMaxConcurrentStreams = 100
+
 // replyPool recycles buffered reply channels to avoid a heap allocation
 // on every acquire call. Channels are drained before being returned so
 // the next caller always starts with an empty channel.
@@ -36,7 +43,7 @@ type PoolOptions struct {
 	// pool will assign to one connection. Effective cap is
 	// min(this, peer SETTINGS_MAX_CONCURRENT_STREAMS) where the
 	// peer value is observed via (*conn.Conn).PeerMaxConcurrentStreams.
-	// 0 → use peer value (or local default 100 if peer unbounded).
+	// 0 → use peer value (or local defaultMaxConcurrentStreams if peer unbounded).
 	MaxStreamsPerConn int
 
 	// IdleTimeout closes a conn that has been idle (active==0)
@@ -647,10 +654,11 @@ func inDialBackoff(lastErrAt time.Time, window time.Duration) bool {
 }
 
 // effectiveStreamCap computes min(localCap, peerCap). Either may be
-// zero meaning "unbounded". Returns 100 if both are unbounded.
+// zero meaning "unbounded". Returns defaultMaxConcurrentStreams if both
+// are unbounded.
 func effectiveStreamCap(localCap, peerCap int) int {
 	if localCap <= 0 && peerCap <= 0 {
-		return 100
+		return defaultMaxConcurrentStreams
 	}
 	if localCap <= 0 {
 		return peerCap
