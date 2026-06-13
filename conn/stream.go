@@ -14,10 +14,11 @@ type StreamEventType uint8
 // StreamEventType values. Use Type to dispatch which fields of
 // StreamEvent are populated.
 const (
-	EventHeaders  StreamEventType = iota + 1 // Headers populated
-	EventData                                  // Data populated
-	EventTrailers                              // Headers populated, trailers
-	EventReset                                 // RSTCode populated
+	EventHeaders     StreamEventType = iota + 1 // Headers populated
+	EventData                                     // Data populated
+	EventTrailers                                 // Headers populated, trailers
+	EventReset                                    // RSTCode populated
+	EventPushPromise                              // Headers populated (promised), PushStreamID set
 )
 
 // String returns the lowercase name of t.
@@ -31,6 +32,8 @@ func (t StreamEventType) String() string {
 		return "trailers"
 	case EventReset:
 		return "reset"
+	case EventPushPromise:
+		return "push_promise"
 	default:
 		return "unknown"
 	}
@@ -48,6 +51,9 @@ type StreamEvent struct {
 	Data      []byte              // EventData
 	EndStream bool                // any event closing the response side
 	RSTCode   frame.ErrCode       // EventReset
+
+	// PushStreamID is the promised (even) stream ID for EventPushPromise.
+	PushStreamID uint32 // EventPushPromise
 
 	// Slab is the pooled backing buffer pointer for all Headers[i].Name
 	// and .Value slices. nil for non-headers events and when the pool is

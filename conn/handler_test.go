@@ -33,6 +33,11 @@ func (*fakeStreamMap) writeSettingsAck() error                              { re
 func (*fakeStreamMap) writePingAck([8]byte) error                           { return nil }
 func (*fakeStreamMap) deliverPingAck([8]byte)                               {}
 func (*fakeStreamMap) onGoAwayReceived(uint32, frame.ErrCode)               {}
+func (*fakeStreamMap) pushSupport() (bool, int)                             { return false, 8 }
+func (*fakeStreamMap) registerPushedStream(uint32) *Stream                  { return nil }
+func (*fakeStreamMap) initialRecvWindow() int32                             { return 65535 }
+func (*fakeStreamMap) peerSettingsRLocked(func(frame.SettingsParams))       {}
+func (*fakeStreamMap) rstStream(uint32, frame.ErrCode) error                { return nil }
 
 func newFakeStreamMap() *fakeStreamMap {
 	w := &fakeStreamWriter{}

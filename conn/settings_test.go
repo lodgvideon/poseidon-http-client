@@ -88,7 +88,7 @@ func TestHandshakeSettings_RoundTripsAgainstPipePeer(t *testing.T) {
 	fr := frame.NewFramer(cli, cli)
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
-	peer, err := handshakeSettings(ctx, fr, AdvertisedSettings{}.defaulted())
+	peer, err := handshakeSettings(ctx, fr, AdvertisedSettings{}.defaulted(), false)
 	if err != nil {
 		t.Fatalf("handshake: %v", err)
 	}

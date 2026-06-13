@@ -50,6 +50,13 @@ type ConnOptions struct {
 	// Padding controls outbound frame padding (RFC 7540 §4.2).
 	// The zero value disables padding. See PaddingStrategy for details.
 	Padding PaddingStrategy
+
+	// EnablePush controls whether the server may send PUSH_PROMISE frames
+	// (RFC 7540 §8.2). When false (default), the client advertises
+	// SETTINGS_ENABLE_PUSH=0 and treats any PUSH_PROMISE as a PROTOCOL_ERROR.
+	// When true, pushed streams are created automatically and delivered via
+	// EventPushPromise on the parent stream's Recv channel.
+	EnablePush bool
 }
 
 func (o ConnOptions) defaulted() ConnOptions {

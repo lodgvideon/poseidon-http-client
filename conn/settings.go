@@ -17,11 +17,11 @@ import (
 //  5. ReadFrame loop until our own SETTINGS is ACKed.
 //
 // Returns the peer's SETTINGS as observed in step 3.
-func handshakeSettings(ctx context.Context, fr *frame.Framer, advertised AdvertisedSettings) (frame.SettingsParams, error) {
+func handshakeSettings(ctx context.Context, fr *frame.Framer, advertised AdvertisedSettings, enablePush bool) (frame.SettingsParams, error) {
 	if err := fr.WriteClientPreface(); err != nil {
 		return frame.SettingsParams{}, err
 	}
-	myParams := encodeAdvertised(advertised)
+	myParams := encodeAdvertised(advertised, enablePush)
 	if err := fr.WriteSettings(myParams); err != nil {
 		return frame.SettingsParams{}, err
 	}
@@ -48,14 +48,18 @@ func readOne(ctx context.Context, fr *frame.Framer, h frame.Handler) error {
 	return err
 }
 
-func encodeAdvertised(a AdvertisedSettings) frame.SettingsParams {
+func encodeAdvertised(a AdvertisedSettings, enablePush bool) frame.SettingsParams {
 	var p frame.SettingsParams
 	add := func(id frame.SettingID, v uint32) {
 		p.Pairs[p.N] = frame.SettingPair{ID: id, Value: v}
 		p.N++
 	}
 	add(frame.SettingHeaderTableSize, a.HeaderTableSize)
-	add(frame.SettingEnablePush, 0) // hard-coded — B.1 never accepts push
+	if enablePush {
+		add(frame.SettingEnablePush, 1)
+	} else {
+		add(frame.SettingEnablePush, 0)
+	}
 	add(frame.SettingMaxConcurrentStreams, a.MaxConcurrentStreams)
 	add(frame.SettingInitialWindowSize, a.InitialWindowSize)
 	add(frame.SettingMaxFrameSize, a.MaxFrameSize)

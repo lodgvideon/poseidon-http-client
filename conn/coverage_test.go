@@ -565,7 +565,7 @@ func TestSettingsRecorder_UnexpectedFramesDuringHandshake(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	_, err := handshakeSettings(ctx, fr, AdvertisedSettings{}.defaulted())
+	_, err := handshakeSettings(ctx, fr, AdvertisedSettings{}.defaulted(), false)
 	if err != nil {
 		t.Fatalf("handshakeSettings with unusual frames before SETTINGS: %v", err)
 	}

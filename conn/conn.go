@@ -116,7 +116,7 @@ func NewClientConn(ctx context.Context, transport net.Conn, opts ConnOptions) (*
 		peerConnSendWindow: int32(connInitialRecvWindow),
 	}
 	c.fcOutCond = sync.NewCond(&c.fcOutMu)
-	peer, err := handshakeSettings(ctx, c.fr, opts.Settings)
+	peer, err := handshakeSettings(ctx, c.fr, opts.Settings, opts.EnablePush)
 	if err != nil {
 		_ = transport.Close()
 		return nil, err
@@ -139,6 +139,43 @@ func (c *Conn) lookupStream(id uint32) *Stream {
 	c.smu.Lock()
 	defer c.smu.Unlock()
 	return c.streams[id]
+}
+
+// pushSupport reports whether server push is enabled and returns the
+// stream-event buffer size for new pushed streams.
+func (c *Conn) pushSupport() (enabled bool, eventBuf int) {
+	return c.opts.EnablePush, c.opts.StreamEventBuffer
+}
+
+// registerPushedStream creates and registers a server-initiated stream
+// with the given even ID.
+func (c *Conn) registerPushedStream(id uint32) *Stream {
+	s := c.allocStream(c.opts.StreamEventBuffer, int32(c.connRecvWindow))
+	s.id = id
+	c.smu.Lock()
+	c.streams[id] = s
+	c.smu.Unlock()
+	return s
+}
+
+// initialRecvWindow returns the peer's INITIAL_WINDOW_SIZE setting.
+func (c *Conn) initialRecvWindow() int32 {
+	c.psMu.RLock()
+	initial := settingValue(c.peerSettings, frame.SettingInitialWindowSize, connInitialRecvWindow)
+	c.psMu.RUnlock()
+	return int32(initial)
+}
+
+// peerSettingsRLocked calls f with the peer settings under RLock.
+func (c *Conn) peerSettingsRLocked(f func(s frame.SettingsParams)) {
+	c.psMu.RLock()
+	defer c.psMu.RUnlock()
+	f(c.peerSettings)
+}
+
+// rstStream sends a RST_STREAM frame for the given stream ID.
+func (c *Conn) rstStream(id uint32, code frame.ErrCode) error {
+	return c.writeRSTStream(&Stream{id: id}, code)
 }
 
 // NewStream allocates a new stream. B.1 enforces at most one in-flight

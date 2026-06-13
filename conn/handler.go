@@ -36,6 +36,23 @@ type connOps interface {
 	writePingAck(payload [8]byte) error
 	deliverPingAck(payload [8]byte)
 	onGoAwayReceived(lastStreamID uint32, code frame.ErrCode)
+
+	// pushSupport returns whether server push is enabled and the
+	// stream-event buffer size for new (pushed) streams.
+	pushSupport() (enabled bool, eventBuf int)
+
+	// registerPushedStream creates a server-initiated stream with the
+	// given even ID and returns it.
+	registerPushedStream(id uint32) *Stream
+
+	// initialRecvWindow returns the peer's INITIAL_WINDOW_SIZE.
+	initialRecvWindow() int32
+
+	// peerSettingsRLocked calls f with peerSettings under RLock.
+	peerSettingsRLocked(f func(s frame.SettingsParams))
+
+	// rstStream sends RST_STREAM for the given stream ID.
+	rstStream(id uint32, code frame.ErrCode) error
 }
 
 // streamLookup is retained as the legacy alias for tests that only
@@ -219,11 +236,60 @@ func (h *connHandler) OnSettings(fh frame.FrameHeader, s frame.SettingsParams) e
 }
 
 // OnPushPromise implements frame.Handler.
-func (h *connHandler) OnPushPromise(_ frame.FrameHeader, _ uint32, _ frame.HeaderBlock, _ uint8) error {
-	return &ConnError{
-		Code:   frame.ErrCodeProtocolError,
-		Reason: ErrUnexpectedPushPromise.Error(),
+// When EnablePush is false, returns PROTOCOL_ERROR per RFC 7540 §8.2.
+// When true, registers the promised (even-ID) stream and delivers an
+// EventPushPromise on the parent stream's Recv channel.
+func (h *connHandler) OnPushPromise(fh frame.FrameHeader, promisedStreamID uint32, hb frame.HeaderBlock, _ uint8) error {
+	enabled, _ := h.streams.pushSupport()
+	if !enabled {
+		return &ConnError{
+			Code:   frame.ErrCodeProtocolError,
+			Reason: ErrUnexpectedPushPromise.Error(),
+		}
 	}
+
+	// Look up the parent stream.
+	parent := h.streams.lookupStream(fh.StreamID)
+	if parent == nil {
+		// Parent gone; reset the promised stream to be safe.
+		_ = h.streams.rstStream(promisedStreamID, frame.ErrCodeCancel)
+		return nil
+	}
+
+	// Decode the promised pseudo-headers.
+	h.scratch = h.scratch[:0]
+	if err := h.dec.DecodeBlock(hb, func(f hpack.HeaderField) error {
+		h.scratch = append(h.scratch, f)
+		return nil
+	}); err != nil {
+		return &ConnError{Code: frame.ErrCodeCompressionError, Reason: err.Error()}
+	}
+
+	// Register the pushed (server-initiated, even) stream.
+	pushed := h.streams.registerPushedStream(promisedStreamID)
+
+	// Build slab-backed header fields (same pattern as emitHeaderBlock).
+	slabPtr := headerSlabPool.Get().(*[]byte)
+	*slabPtr = (*slabPtr)[:0]
+	copied := make([]hpack.HeaderField, len(h.scratch))
+	for i, f := range h.scratch {
+		off := len(*slabPtr)
+		*slabPtr = append(*slabPtr, f.Name...)
+		copied[i].Name = (*slabPtr)[off : off+len(f.Name)]
+		off = len(*slabPtr)
+		*slabPtr = append(*slabPtr, f.Value...)
+		copied[i].Value = (*slabPtr)[off : off+len(f.Value)]
+	}
+
+	// Deliver push event on the parent stream.
+	parent.push(StreamEvent{
+		Type:         EventPushPromise,
+		Headers:      copied,
+		PushStreamID: promisedStreamID,
+		Slab:         slabPtr,
+	})
+	_ = pushed // stream registered; subsequent HEADERS/DATA frames find it
+	return nil
 }
 
 // OnPing implements frame.Handler. Non-ACK PING frames are echoed
