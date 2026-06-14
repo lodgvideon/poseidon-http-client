@@ -18,6 +18,12 @@ type Request struct {
 	Authority string
 	Path      string
 
+	// Protocol is the :protocol pseudo-header for extended CONNECT
+	// (RFC 8441 §4). When non-empty, Method MUST be "CONNECT" and
+	// the server MUST have advertised SETTINGS_ENABLE_CONNECT_PROTOCOL=1.
+	// Example: "websocket" for WebSockets over HTTP/2.
+	Protocol string
+
 	// Headers carries regular request headers. The slice is read once
 	// during request build; the caller retains ownership. MUST NOT
 	// include any name starting with ':' (validated up front).

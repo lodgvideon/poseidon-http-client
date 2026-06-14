@@ -833,6 +833,16 @@ func (c *Conn) CanCoalesce(origin string) bool {
 	return false
 }
 
+// ConnectProtocolSupported reports whether the server advertised
+// SETTINGS_ENABLE_CONNECT_PROTOCOL=1 (RFC 8441 §3), allowing the
+// client to send extended-CONNECT requests with a :protocol
+// pseudo-header (e.g. for WebSockets over HTTP/2).
+func (c *Conn) ConnectProtocolSupported() bool {
+	c.psMu.RLock()
+	defer c.psMu.RUnlock()
+	return settingValue(c.peerSettings, frame.SettingEnableConnectProtocol, 0) == 1
+}
+
 // writePingAck emits a PING frame with ACK=1 and the peer's payload
 // echoed back (RFC 7540 §6.7).
 func (c *Conn) writePingAck(payload [8]byte) error {

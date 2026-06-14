@@ -456,6 +456,7 @@ var (
 	hdrScheme        = []byte(":scheme")
 	hdrAuthority     = []byte(":authority")
 	hdrPath          = []byte(":path")
+	hdrProtocol      = []byte(":protocol")
 	hdrContentLength = []byte("content-length")
 	hdrTrailer       = []byte("trailer")
 	hdrStatus        = []byte(":status")
@@ -498,6 +499,9 @@ func buildHeaders(req *Request, defaultAuthority, defaultScheme string) ([]conn.
 		conn.HeaderField{Name: hdrAuthority, Value: unsafeStringToBytes(authority)},
 		conn.HeaderField{Name: hdrPath, Value: unsafeStringToBytes(req.Path)},
 	)
+	if req.Protocol != "" {
+		*sp = append(*sp, conn.HeaderField{Name: hdrProtocol, Value: unsafeStringToBytes(req.Protocol)})
+	}
 	*sp = append(*sp, req.Headers...)
 	if req.BodyReader != nil && req.ContentLength > 0 {
 		*sp = append(*sp, conn.HeaderField{

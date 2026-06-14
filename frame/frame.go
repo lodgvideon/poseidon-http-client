@@ -61,6 +61,10 @@ const (
 	SettingInitialWindowSize    SettingID = 0x4
 	SettingMaxFrameSize         SettingID = 0x5
 	SettingMaxHeaderListSize    SettingID = 0x6
+
+	// SettingEnableConnectProtocol (RFC 8441 §3) allows the client
+	// to send extended-CONNECT requests (:protocol pseudo-header).
+	SettingEnableConnectProtocol SettingID = 0x8
 )
 
 // SettingPair holds one SETTINGS entry.
