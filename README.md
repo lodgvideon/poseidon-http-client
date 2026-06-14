@@ -4,10 +4,9 @@ A low-level, zero-allocation HTTP/2 client for Go, designed for load
 generators. Implements RFC 7540 (HTTP/2) and RFC 7541 (HPACK) from
 scratch without `net/http` or `golang.org/x/net/http2`.
 
-**Status:** Phase D.5 — HTTP request trailers. `Request.Trailers` /
-`Request.TrailerFunc` send trailer HEADERS+END_STREAM after body DATA frames
-(RFC 7540 §8.1.3); `StreamResponse.WaitTrailers` convenience method for
-response trailer polling. See
+**Status:** v0.2.0 — load-testing extensions (proxy, padding, server push,
+connection coalescing, extended CONNECT). All phases A–D.5 released.
+See [CHANGELOG.md](CHANGELOG.md) for details. See
 [C.1 design](docs/superpowers/specs/2026-05-07-poseidon-client-c1-design.md),
 [C.2 design](docs/superpowers/specs/2026-05-08-poseidon-client-c2-pool-design.md),
 [C.3/C.4 design](docs/superpowers/specs/2026-05-09-poseidon-client-c3-c4-design.md),
