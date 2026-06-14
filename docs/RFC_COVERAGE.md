@@ -119,6 +119,17 @@ non-ACK PING frames with `ACK=1` and the original 8-byte payload
 | §2.1   | Negative    | TestDispatchOrigin_LengthOverflow (frame/) — origin-string length overflow |
 | §2.1   | Negative    | TestDispatchOrigin_Empty (frame/) — empty ORIGIN frame accepted |
 
+## RFC 7838 — HTTP Alternative Services (ALTSVC)
+
+| Section | Type        | Test |
+|---------|-------------|------|
+| §4     | Roundtrip   | TestFramer_AltSvc_RoundTrip (frame/) — server-wide ALTSVC: origin + alt-value TLV encode/decode |
+| §4     | Roundtrip   | TestFramer_AltSvc_PerStream_RoundTrip (frame/) — per-stream ALTSVC: empty origin, non-zero stream |
+| §4     | Roundtrip   | TestFramer_AltSvc_EmptyClears (frame/) — empty entries = clear all alt-svc |
+| §4     | Negative    | TestDispatchAltSvc_MalformedTrailingBytes (frame/) — trailing bytes after last entry |
+| §4     | Negative    | TestDispatchAltSvc_OriginOverflow (frame/) — origin-length exceeds payload |
+| §4     | Negative    | TestDispatchAltSvc_AltValueOverflow (frame/) — alt-value-length exceeds payload |
+
 ## RFC 8441 — Bootstrapping WebSockets with HTTP/2
 
 | Section | Type        | Test |

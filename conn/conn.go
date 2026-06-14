@@ -81,6 +81,11 @@ type Conn struct {
 	originsMu sync.RWMutex
 	origins   []string
 
+	// altSvcMu guards altSvcEntries, populated from an ALTSVC frame
+	// (RFC 7838 §4). Used for alternative-service routing.
+	altSvcMu      sync.RWMutex
+	altSvcEntries []frame.AltSvcEntry
+
 	// streamPool recycles *Stream structs (struct + channel) to eliminate
 	// 2 allocs per request after warmup. Only streams whose channel cap
 	// equals opts.StreamEventBuffer are recycled; mis-sized ones are discarded.
@@ -801,6 +806,27 @@ func (c *Conn) storeOrigins(origins []string) {
 	c.originsMu.Lock()
 	c.origins = origins
 	c.originsMu.Unlock()
+}
+
+// storeAltSvc saves ALTSVC entries received via an ALTSVC frame (RFC 7838 §4).
+func (c *Conn) storeAltSvc(entries []frame.AltSvcEntry) {
+	c.altSvcMu.Lock()
+	c.altSvcEntries = entries
+	c.altSvcMu.Unlock()
+}
+
+// AltSvcEntries returns the server's advertised alternative-service
+// entries from the most recent ALTSVC frame (RFC 7838 §4). Returns
+// nil if no ALTSVC frame was received. The returned slice is a copy.
+func (c *Conn) AltSvcEntries() []frame.AltSvcEntry {
+	c.altSvcMu.RLock()
+	defer c.altSvcMu.RUnlock()
+	if len(c.altSvcEntries) == 0 {
+		return nil
+	}
+	dup := make([]frame.AltSvcEntry, len(c.altSvcEntries))
+	copy(dup, c.altSvcEntries)
+	return dup
 }
 
 // Origins returns the server's advertised origin list from the ORIGIN

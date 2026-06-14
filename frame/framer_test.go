@@ -90,6 +90,7 @@ func (h *recordingHandler) OnContinuation(fh FrameHeader, hb HeaderBlock) error 
 	return nil
 }
 func (h *recordingHandler) OnOrigin(fh FrameHeader, origins []string) error { return nil }
+func (h *recordingHandler) OnAltSvc(fh FrameHeader, entries []AltSvcEntry) error { return nil }
 
 func newFramerWithBuffer() (*Framer, *bytes.Buffer) {
 	var buf bytes.Buffer

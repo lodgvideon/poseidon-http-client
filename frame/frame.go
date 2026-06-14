@@ -15,7 +15,8 @@ const (
 	FrameWindowUpdate FrameType = 0x8
 	FrameContinuation FrameType = 0x9
 
-	// Extension frame types (RFC 8336, RFC 9218).
+	// Extension frame types (RFC 7838, RFC 8336).
+	FrameAltSvc FrameType = 0x0a // ALTSVC, RFC 7838 §4
 	FrameOrigin FrameType = 0x0c // ORIGIN, RFC 8336 §3
 )
 
@@ -82,3 +83,14 @@ type SettingsParams struct {
 // HeaderBlock is an opaque view over a HEADERS / PUSH_PROMISE / CONTINUATION
 // header block fragment. Decode via hpack.Decoder.DecodeBlock(hb, visitor).
 type HeaderBlock []byte
+
+// AltSvcEntry represents one entry in an ALTSVC frame (RFC 7838 §4).
+// Origin is the ASCII serialization of an origin (scheme://host[:port]).
+// It MUST be non-empty on stream-0 frames and empty on non-zero-stream
+// frames. AltValue is the alternative-service value (e.g.
+// `h2="alt.example.com:443"`); an empty AltValue with empty Origin
+// signals clearing of all alternative services for the stream.
+type AltSvcEntry struct {
+	Origin   string
+	AltValue string
+}

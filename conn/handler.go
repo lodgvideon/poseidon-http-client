@@ -56,6 +56,9 @@ type connOps interface {
 
 	// storeOrigins saves the origin list from an ORIGIN frame.
 	storeOrigins(origins []string)
+
+	// storeAltSvc saves ALTSVC entries from an ALTSVC frame.
+	storeAltSvc(entries []frame.AltSvcEntry)
 }
 
 // streamLookup is retained as the legacy alias for tests that only
@@ -322,6 +325,15 @@ func (h *connHandler) OnOrigin(_ frame.FrameHeader, origins []string) error {
 	dup := make([]string, len(origins))
 	copy(dup, origins)
 	h.streams.storeOrigins(dup)
+	return nil
+}
+
+// OnAltSvc implements frame.Handler. It parses ALTSVC entries (RFC 7838
+// §4) and stores them for alternative-service routing decisions.
+func (h *connHandler) OnAltSvc(_ frame.FrameHeader, entries []frame.AltSvcEntry) error {
+	dup := make([]frame.AltSvcEntry, len(entries))
+	copy(dup, entries)
+	h.streams.storeAltSvc(dup)
 	return nil
 }
 

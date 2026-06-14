@@ -116,6 +116,8 @@ func (h *originRecordingHandler) OnPing(FrameHeader, [8]byte) error             
 func (h *originRecordingHandler) OnGoAway(FrameHeader, uint32, ErrCode, []byte) error { return nil }
 func (h *originRecordingHandler) OnWindowUpdate(FrameHeader, uint32) error            { return nil }
 func (h *originRecordingHandler) OnContinuation(FrameHeader, HeaderBlock) error       { return nil }
+func (h *originRecordingHandler) OnAltSvc(_ FrameHeader, entries []AltSvcEntry) error { return nil }
+
 func (h *originRecordingHandler) OnOrigin(_ FrameHeader, origins []string) error {
 	h.origins = origins
 	return nil

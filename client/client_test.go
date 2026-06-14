@@ -179,6 +179,7 @@ func (nopHandler) OnPing(frame.FrameHeader, [8]byte) error                      
 func (nopHandler) OnGoAway(frame.FrameHeader, uint32, frame.ErrCode, []byte) error { return nil }
 func (nopHandler) OnWindowUpdate(frame.FrameHeader, uint32) error               { return nil }
 func (nopHandler) OnContinuation(frame.FrameHeader, frame.HeaderBlock) error    { return nil }
+func (nopHandler) OnAltSvc(frame.FrameHeader, []frame.AltSvcEntry) error { return nil }
 func (nopHandler) OnOrigin(frame.FrameHeader, []string) error                    { return nil }
 
 // readFull reads len(buf) bytes from r, retrying on short reads.
@@ -713,6 +714,7 @@ func (h *captureHandler) OnPing(frame.FrameHeader, [8]byte) error               
 func (h *captureHandler) OnGoAway(frame.FrameHeader, uint32, frame.ErrCode, []byte) error { return nil }
 func (h *captureHandler) OnWindowUpdate(frame.FrameHeader, uint32) error               { return nil }
 func (h *captureHandler) OnContinuation(frame.FrameHeader, frame.HeaderBlock) error    { return nil }
+func (h *captureHandler) OnAltSvc(frame.FrameHeader, []frame.AltSvcEntry) error { return nil }
 func (h *captureHandler) OnOrigin(frame.FrameHeader, []string) error                    { return nil }
 
 // minimalGETServer replies to the first incoming HEADERS frame with

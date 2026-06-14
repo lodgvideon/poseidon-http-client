@@ -134,6 +134,7 @@ func (r *settingsRecorder) OnGoAway(frame.FrameHeader, uint32, frame.ErrCode, []
 func (r *settingsRecorder) OnWindowUpdate(frame.FrameHeader, uint32) error                  { return nil }
 // OnContinuation implements frame.Handler.
 func (r *settingsRecorder) OnContinuation(frame.FrameHeader, frame.HeaderBlock) error       { return nil }
+func (r *settingsRecorder) OnAltSvc(frame.FrameHeader, []frame.AltSvcEntry) error                       { return nil }
 func (r *settingsRecorder) OnOrigin(frame.FrameHeader, []string) error                       { return nil }
 
 var _ frame.Handler = (*settingsRecorder)(nil)

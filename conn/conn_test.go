@@ -246,6 +246,7 @@ func (h captureHandler) OnPing(frame.FrameHeader, [8]byte) error                
 func (h captureHandler) OnGoAway(frame.FrameHeader, uint32, frame.ErrCode, []byte) error { return nil }
 func (h captureHandler) OnWindowUpdate(frame.FrameHeader, uint32) error                  { return nil }
 func (h captureHandler) OnContinuation(frame.FrameHeader, frame.HeaderBlock) error       { return nil }
+func (h captureHandler) OnAltSvc(frame.FrameHeader, []frame.AltSvcEntry) error                       { return nil }
 func (h captureHandler) OnOrigin(frame.FrameHeader, []string) error                       { return nil }
 
 func TestConn_Close_IsIdempotent(t *testing.T) {

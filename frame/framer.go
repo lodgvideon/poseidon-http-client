@@ -24,6 +24,7 @@ type Handler interface {
 	OnWindowUpdate(h FrameHeader, increment uint32) error
 	OnContinuation(h FrameHeader, hb HeaderBlock) error
 	OnOrigin(h FrameHeader, origins []string) error
+	OnAltSvc(h FrameHeader, entries []AltSvcEntry) error
 }
 
 // WriteHeadersParams bundles the optional fields of a HEADERS frame.
@@ -389,6 +390,34 @@ func (f *Framer) WriteGoAway(lastStreamID uint32, code ErrCode, debug []byte) er
 	return nil
 }
 
+// WriteAltSvc writes an ALTSVC frame (RFC 7838 §4). streamID=0 sends
+// server-wide alternative services (entries MUST have non-empty Origin);
+// non-zero streamID sends per-request alternatives (entries MUST have
+// empty Origin). An empty entries slice clears all alternative services.
+func (f *Framer) WriteAltSvc(streamID uint32, entries []AltSvcEntry) error {
+	streamID &= 0x7fffffff
+	if len(entries) == 0 {
+		return f.writeFrame(FrameHeader{Length: 0, Type: FrameAltSvc, StreamID: streamID}, nil)
+	}
+	var buf []byte
+	for _, e := range entries {
+		if len(e.Origin) > 0xFFFF {
+			return ErrFrameTooLarge
+		}
+		if len(e.AltValue) > 0xFFFFFF {
+			return ErrFrameTooLarge
+		}
+		buf = append(buf, byte(len(e.Origin)>>8), byte(len(e.Origin)))
+		buf = append(buf, e.Origin...)
+		buf = append(buf, byte(len(e.AltValue)>>16), byte(len(e.AltValue)>>8), byte(len(e.AltValue)))
+		buf = append(buf, e.AltValue...)
+	}
+	if uint32(len(buf)) > f.maxReadFrameSize {
+		return ErrFrameTooLarge
+	}
+	return f.writeFrame(FrameHeader{Length: uint32(len(buf)), Type: FrameAltSvc, StreamID: streamID}, buf)
+}
+
 // WriteWindowUpdate writes a WINDOW_UPDATE frame.
 func (f *Framer) WriteWindowUpdate(streamID uint32, increment uint32) error {
 	if increment == 0 {
@@ -464,6 +493,8 @@ func (f *Framer) ReadFrame(ctx context.Context, h Handler) (FrameHeader, error) 
 		return fh, f.dispatchContinuation(fh, payload, h)
 	case FrameOrigin:
 		return fh, f.dispatchOrigin(fh, payload, h)
+	case FrameAltSvc:
+		return fh, f.dispatchAltSvc(fh, payload, h)
 	default:
 		// RFC 7540 §5.5: implementations MUST ignore frames they do not
 		// understand and continue. Drain the payload (already read) and
@@ -659,4 +690,39 @@ func (f *Framer) dispatchOrigin(fh FrameHeader, payload []byte, h Handler) error
 		return ErrProtocolError // trailing bytes — malformed
 	}
 	return h.OnOrigin(fh, origins)
+}
+
+// dispatchAltSvc parses an ALTSVC frame (RFC 7838 §4) and calls OnAltSvc.
+// Each entry is: uint16 Origin-Len, Origin bytes, uint24 Alt-Value-Len,
+// Alt-Value bytes. An empty payload signals clearing all alternative
+// services. Stream-0 frames MUST have non-empty Origin in each entry;
+// non-zero-stream frames MUST have empty Origin.
+func (f *Framer) dispatchAltSvc(fh FrameHeader, payload []byte, h Handler) error {
+	// Empty payload = clear all alt-svc entries (RFC 7838 §4).
+	if len(payload) == 0 {
+		return h.OnAltSvc(fh, nil)
+	}
+	var entries []AltSvcEntry
+	for len(payload) >= 5 { // minimum: 2 + 0 + 3 + 0
+		originLen := int(payload[0])<<8 | int(payload[1])
+		if 2+originLen > len(payload) {
+			return ErrProtocolError
+		}
+		origin := string(payload[2 : 2+originLen])
+		rest := payload[2+originLen:]
+		if len(rest) < 3 {
+			return ErrProtocolError
+		}
+		altLen := int(rest[0])<<16 | int(rest[1])<<8 | int(rest[2])
+		if 3+altLen > len(rest) {
+			return ErrProtocolError
+		}
+		altValue := string(rest[3 : 3+altLen])
+		entries = append(entries, AltSvcEntry{Origin: origin, AltValue: altValue})
+		payload = rest[3+altLen:]
+	}
+	if len(payload) > 0 {
+		return ErrProtocolError // trailing bytes
+	}
+	return h.OnAltSvc(fh, entries)
 }
