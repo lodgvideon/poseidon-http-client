@@ -74,15 +74,20 @@ built on the zero-alloc `frame.Framer`. Server-side allocations are negligible;
 | Bench                        | ns/op | B/op | allocs/op |
 |------------------------------|------:|-----:|----------:|
 | BenchmarkDo_MockTransport    | 82127 | 257  | 8         |
+| BenchmarkDo_MockTransport *2026-06-15* | 25721 | 241 | 5 |
 
-**8 allocs/op** confirms the D.1 client-side ≤10 allocs/op target is met.
+**8 → 5 allocs/op** confirms the D.1 client-side ≤10 allocs/op target is met.
 
-Breakdown (8 allocs):
+**5 → 5 allocs/op, -14.96% latency (2026-06-15)**: `frame.Framer.WriteHeaders`
+fast path coalesces the 9-byte frame header and the HPACK block fragment into
+a single `io.Writer.Write` call when the frame has no padding and no priority
+and fits in the 256-byte `Framer.writeBuf`. Saves one TCP `write` syscall
+per HEADERS frame. Benchstat p=0.000, n=10.
+
+Breakdown (5 allocs, 2026-06-15):
 - 2 allocs: `conn.HeaderSlabPool` Get/Put round-trip (response HEADERS slab)
 - 2 allocs: `hdrSlicePool` Get/Put (request HEADERS slice)
-- 2 allocs: stream pool Get/Put (`streamPool`)
 - 1 alloc: `encBufPool` Get (HPACK encode buffer)
-- 1 alloc: response HEADERS parsing into `[]hpack.HeaderField`
 
 **Key changes in D.1:**
 - `Do`/`DoStream`/`Retryer.Do` take caller-provided `*Response`/`*StreamResponse` (breaking API change)
