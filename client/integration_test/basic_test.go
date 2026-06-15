@@ -94,16 +94,13 @@ func TestIT_GoHTTP_LargeBody(t *testing.T) {
 	srv := requireServer(t, ServerGoHTTP)
 	c := newTestClient(t, srv)
 
-	// 32 KiB — fits within initial flow-control window (65535).
-	// TODO: investigate flow-control refund path for bodies >64KB
-	// without inter-chunk delays. See /chunked (passes, has delays).
-	const sz = 32 * 1024
-	status, body := doGET(t, c, "/large?bytes="+strconv.Itoa(sz), true)
+	// 1 MiB — previously hung. With StreamEventBuffer=1024 it should work.
+	status, body := doGET(t, c, "/large?bytes=1048576", true)
 	if status != 200 {
 		t.Fatalf("status: got %d, want 200", status)
 	}
-	if len(body) != sz {
-		t.Fatalf("body length: got %d, want %d", len(body), sz)
+	if len(body) != 1048576 {
+		t.Fatalf("body length: got %d, want 1048576", len(body))
 	}
 }
 

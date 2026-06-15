@@ -212,7 +212,8 @@ func newTestClient(t *testing.T, srv *TestServer) *client.Client {
 		Addr:          addr,
 		DefaultScheme: scheme,
 		ConnOpts: conn.ConnOptions{
-			Dialer: dialer,
+			Dialer:            dialer,
+			StreamEventBuffer: 1024, // avoid event-channel overflow on large bodies
 		},
 	})
 	if err != nil {
