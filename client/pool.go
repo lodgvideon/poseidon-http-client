@@ -687,3 +687,29 @@ func effectiveStreamCap(localCap, peerCap int) int {
 	}
 	return localCap
 }
+
+// warmup pre-dials up to n conns in the background. Idempotent.
+// n is capped at MaxConnsPerHost. Returns immediately; dial errors
+// are surfaced via the OnDial hook.
+func (p *Pool) warmup(n int) {
+	if n <= 0 {
+		return
+	}
+	stats := p.Stats()
+	target := n
+	if target > p.opts.MaxConnsPerHost {
+		target = p.opts.MaxConnsPerHost
+	}
+	need := target - stats.ActiveConns - stats.InFlightDials
+	if need <= 0 {
+		return
+	}
+	for i := 0; i < need; i++ {
+		// Submit a short-lived acquire that triggers a dial,
+		// then releases immediately. The dial continues in
+		// dialOne's goroutine even after the waiter times out.
+		ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+		_, _ = p.acquire(ctx)
+		cancel()
+	}
+}

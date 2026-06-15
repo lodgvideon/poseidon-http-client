@@ -145,3 +145,22 @@ func (s *singleConn) shutdown(gracefulTimeout time.Duration) error {
 	}
 	return nil
 }
+
+// warmup implements transport.warmup. For single-conn, n is capped
+// at 1. Triggers a lazy dial in the background; the actual conn is
+// established on the next call to acquire.
+func (s *singleConn) warmup(n int) {
+	if n <= 0 {
+		return
+	}
+	if n > 1 {
+		n = 1
+	}
+	// Use a fresh context with a generous timeout so the dial
+	// runs even if the caller's ctx is short-lived.
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		_, _, _ = s.acquire(ctx)
+	}()
+}

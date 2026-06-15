@@ -26,4 +26,11 @@ type transport interface {
 	// the underlying conn(s) within the given timeout. After the
 	// timeout, any remaining streams are force-closed. Idempotent.
 	shutdown(gracefulTimeout time.Duration) error
+
+	// warmup opens up to n connections in the background, returning
+	// immediately. Errors during dial are surfaced through the
+	// Client's metrics.OnDial hook; the method itself does not
+	// block on per-dial success. n is capped at the underlying
+	// transport's MaxConnsPerHost.
+	warmup(n int)
 }

@@ -29,3 +29,9 @@ func (mt *managedTransport) shutdown(gracefulTimeout time.Duration) error {
 	_ = gracefulTimeout
 	return mt.mp.close()
 }
+
+// warmup implements transport.warmup. Fans out pre-dial across
+// the current set of resolved addresses.
+func (mt *managedTransport) warmup(n int) {
+	mt.mp.warmup(n)
+}

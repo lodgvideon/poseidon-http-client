@@ -413,3 +413,24 @@ func (mp *managedPool) close() error {
 	})
 	return nil
 }
+
+// warmup pre-dials up to n conns distributed across the current
+// set of resolved addresses. n is capped at MaxConnsPerHost.
+func (mp *managedPool) warmup(n int) {
+	if n <= 0 {
+		return
+	}
+	mp.mu.Lock()
+	subs := make([]*subPoolState, 0, len(mp.subPools))
+	for _, s := range mp.subPools {
+		subs = append(subs, s)
+	}
+	mp.mu.Unlock()
+	if len(subs) == 0 {
+		return
+	}
+	per := (n + len(subs) - 1) / len(subs)
+	for _, s := range subs {
+		s.p.warmup(per)
+	}
+}

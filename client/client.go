@@ -203,6 +203,16 @@ func (c *Client) Shutdown(gracefulTimeout time.Duration) error {
 	return c.tr.shutdown(gracefulTimeout)
 }
 
+// Warmup pre-dials up to n connections in the background, returning
+// immediately. n is capped at the underlying transport's MaxConnsPerHost
+// (1 for TransportSingleConn). Use this before a workload burst to
+// avoid paying TLS handshake + HTTP/2 setup on the first request.
+// Dial errors are surfaced via the OnDial hook. Idempotent — calling
+// Warmup on an already-warm client is a no-op.
+func (c *Client) Warmup(n int) {
+	c.tr.warmup(n)
+}
+
 // PoolStats returns a snapshot of the underlying pool's state. It
 // returns the zero Stats when the transport is not a *poolTransport
 // or *managedTransport (e.g. TransportSingleConn) or the pool is

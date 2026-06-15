@@ -54,3 +54,9 @@ func (pt *poolTransport) shutdown(gracefulTimeout time.Duration) error {
 	_ = gracefulTimeout
 	return pt.p.Close()
 }
+
+// warmup implements transport.warmup. Pre-dials up to n conns into
+// the pool. Errors are recorded via the pool's OnDial hook.
+func (pt *poolTransport) warmup(n int) {
+	pt.p.warmup(n)
+}
