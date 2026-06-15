@@ -93,6 +93,14 @@ type ClientOptions struct {
 	// DefaultScheme is used as the :scheme pseudo-header when Request.Scheme
 	// is empty. Defaults to "https" when zero. Set to "http" for H2C targets.
 	DefaultScheme string
+
+	// RateLimitPerSecond caps the client's outgoing request rate
+	// using a token-bucket algorithm. Zero disables rate limiting.
+	// Burst capacity is implicitly equal to the rate (1 second of
+	// accumulated tokens). When the limit is reached, Do/DoStream
+	// blocks until a token is available or ctx is cancelled.
+	// Useful for load generators enforcing a strict QPS budget.
+	RateLimitPerSecond float64
 }
 
 // PushHandler is invoked when the server pushes a resource in response
@@ -110,6 +118,7 @@ type Client struct {
 	hooksPtr      *atomic.Pointer[Hooks]
 	metrics       *Metrics
 	pushHandler   PushHandler
+	rateLimiter   *rateLimiter // nil when RateLimitPerSecond is 0
 }
 
 // NewClient validates opts and constructs a Client. It does NOT dial;
@@ -175,6 +184,10 @@ func NewClient(opts ClientOptions) (*Client, error) {
 	if scheme == "" {
 		scheme = "https"
 	}
+	var rl *rateLimiter
+	if opts.RateLimitPerSecond > 0 {
+		rl = newRateLimiter(opts.RateLimitPerSecond, opts.RateLimitPerSecond)
+	}
 	c := &Client{
 		tr:            tr,
 		authority:     deriveAuthority(opts.Addr),
@@ -182,6 +195,7 @@ func NewClient(opts ClientOptions) (*Client, error) {
 		hooksPtr:      hooksPtr,
 		metrics:       metrics,
 		pushHandler:   opts.PushHandler,
+		rateLimiter:   rl,
 	}
 	return c, nil
 }
@@ -262,6 +276,16 @@ func (c *Client) observeDone(req *Request, authority string, status int, bytesSe
 func (c *Client) Do(ctx context.Context, req *Request, resp *Response) error {
 	if err := validateRequest(req); err != nil {
 		return err
+	}
+	if c.rateLimiter != nil {
+		if err := c.rateLimiter.Take(ctx); err != nil {
+			return err
+		}
+	}
+	if req.Timeout > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, req.Timeout)
+		defer cancel()
 	}
 	authority := req.Authority
 	if authority == "" {
@@ -409,6 +433,16 @@ func (c *Client) do(ctx context.Context, req *Request, resp *Response) error {
 func (c *Client) DoStream(ctx context.Context, req *Request, sr *StreamResponse) error {
 	if err := validateRequest(req); err != nil {
 		return err
+	}
+	if c.rateLimiter != nil {
+		if err := c.rateLimiter.Take(ctx); err != nil {
+			return err
+		}
+	}
+	if req.Timeout > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, req.Timeout)
+		defer cancel()
 	}
 	sr.reset()
 	authority := req.Authority

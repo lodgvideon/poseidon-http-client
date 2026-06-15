@@ -3,6 +3,7 @@ package client
 import (
 	"fmt"
 	"io"
+	"time"
 	"unicode"
 
 	"github.com/lodgvideon/poseidon-http-client/conn"
@@ -93,6 +94,14 @@ type Request struct {
 	// must be 1..256 (RFC 7540 §5.3.4). Use Exclusive=true to make
 	// this stream the sole dependent of its parent.
 	Priority *frame.Priority
+
+	// Timeout is the per-request deadline. When > 0, the client
+	// derives a sub-context from ctx with this timeout. When the
+	// timeout fires, the request fails with context.DeadlineExceeded
+	// and the in-flight stream is reset with RST_STREAM(CANCEL).
+	// Zero uses the parent ctx's deadline (or no deadline if ctx
+	// has none). Per-request timeout is independent of ctx.
+	Timeout time.Duration
 }
 
 // validateRequest enforces the up-front rules documented on Request.

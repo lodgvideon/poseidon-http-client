@@ -59,6 +59,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `markStreamDone` closes a wake-up channel when inflight hits zero.
   4 conn tests + 3 client tests. (`current`)
 
+- **Client.Warmup(n)** — pre-dial up to n conns in the background to
+  avoid TLS handshake + HTTP/2 setup on the first request. n is
+  capped at MaxConnsPerHost (1 for single-conn). Pool transport
+  fan-outs across the live set. Idempotent. 4 tests.
+  (`current`)
+
+- **Client-side rate limiting** (token-bucket) —
+  `ClientOptions.RateLimitPerSecond` (float) gates Do/DoStream via
+  an internal token bucket. Burst capacity = rate. Take respects
+  ctx cancellation. 5 tests (4 unit + 1 integration).
+  (`current`)
+
+- **Per-request timeout** — `Request.Timeout time.Duration` derives
+  a sub-context from the parent ctx with the given deadline. When
+  the timeout fires the request fails with
+  `context.DeadlineExceeded` and the in-flight stream is reset.
+  Applies to both Do and DoStream. Zero = use parent ctx. 4 tests.
+  (`current`)
+
 - **Automatic response body decompression** (gzip/deflate) — `Request.DisableDecompression`
   opt-out, auto-injected `accept-encoding: gzip` (preserved when caller
   supplies one), `decompressFully` for batch path, `decompressingReader`
