@@ -38,6 +38,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   malformed-frame detection. `Conn.Origins()` and `Conn.CanCoalesce(origin)`
   public API. 5 frame tests + 5 conn tests. (`e65cb3a`)
 
+- **ALTSVC frame** (RFC 7838) — `FrameAltSvc` (type 0x0a)
+  with TLV parsing, `AltSvcEntry` struct (Origin + AltValue),
+  `Framer.WriteAltSvc`, `Conn.AltSvcEntries()`. Server-wide and
+  per-stream variants. Empty payload clears all alt-svc entries.
+  6 tests (3 roundtrip + 3 negative). (`a65c5a7`)
+
 - **Extended CONNECT protocol** (RFC 8441) —
   `SettingEnableConnectProtocol` (0x8) setting ID.
   `Conn.ConnectProtocolSupported()` checks peer advertisement.
@@ -59,7 +65,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Diff
 
-39 files changed, +3,666 / −275 lines.
+44 files changed, +4,109 / −283 lines.
 
 ---
 
