@@ -854,6 +854,7 @@ func (c *Conn) onGoAwayReceived(lastStreamID uint32, _ frame.ErrCode) {
 		select {
 		case s.events <- StreamEvent{Type: EventReset, RSTCode: frame.ErrCodeRefusedStream, EndStream: true}:
 		default:
+			s.signalReset(frame.ErrCodeRefusedStream)
 		}
 		s.markRemoteEnd()
 		s.mu.Lock()
@@ -1100,6 +1101,7 @@ func (c *Conn) shutdownStreams(reason error) {
 		select {
 		case s.events <- StreamEvent{Type: EventReset, RSTCode: frame.ErrCodeInternalError, EndStream: true}:
 		default:
+			s.signalReset(frame.ErrCodeInternalError)
 		}
 		close(s.events)
 	}

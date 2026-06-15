@@ -3,6 +3,7 @@ package conn
 import (
 	"context"
 	"sync"
+	"sync/atomic"
 
 	"github.com/lodgvideon/poseidon-http-client/frame"
 	"github.com/lodgvideon/poseidon-http-client/hpack"
@@ -108,14 +109,36 @@ type Stream struct {
 	// debited by writeData and replenished by OnWindowUpdate. Guarded
 	// by Stream.mu.
 	sendWindow int32
+
+	// resetSignal is closed when the stream is forcibly reset (event
+	// channel overflow, GOAWAY drain, or connection shutdown). Recv()
+	// selects on it so a blocked consumer unblocks immediately even
+	// when the events channel is full — no silent hang. Replaced with
+	// a fresh channel in recycleStream.
+	resetSignal chan struct{}
+
+	// resetCode stores the ErrCode delivered with the forced reset.
+	// 0 means no reset has been signalled. Written via CAS in
+	// signalReset to guarantee exactly one close(resetSignal).
+	resetCode atomic.Uint32
 }
 
 func newStream(id uint32, eventBuf int, w streamWriter, recvWindow int32) *Stream {
 	return &Stream{
-		id:         id,
-		w:          w,
-		events:     make(chan StreamEvent, eventBuf),
-		recvWindow: recvWindow,
+		id:          id,
+		w:           w,
+		events:      make(chan StreamEvent, eventBuf),
+		recvWindow:  recvWindow,
+		resetSignal: make(chan struct{}),
+	}
+}
+
+// signalReset marks the stream as forcibly reset and closes resetSignal
+// so any Recv() blocked on a full events channel unblocks immediately.
+// The CAS ensures only the first caller closes resetSignal (idempotent).
+func (s *Stream) signalReset(code frame.ErrCode) {
+	if s.resetCode.CompareAndSwap(0, uint32(code)) {
+		close(s.resetSignal)
 	}
 }
 
@@ -135,6 +158,8 @@ func recycleStream(pool *sync.Pool, s *Stream) {
 	s.headersReceived = false
 	s.recvRefundPending = 0
 	s.sendWindow = 0
+	s.resetSignal = make(chan struct{})
+	s.resetCode.Store(0)
 	pool.Put(s)
 }
 
@@ -153,8 +178,7 @@ func (s *Stream) markRemoteEnd() {
 // the channel's capacity; documented as part of the public contract.
 // On overflow: marks stream closed, dispatches the RST send to a
 // background goroutine (so the reader is never blocked on wmu), and
-// best-effort delivers a synthetic EventReset so a blocked Recv
-// unblocks instead of waiting until the parent context expires.
+// signals via resetSignal so a blocked Recv unblocks immediately.
 func (s *Stream) push(e StreamEvent) bool {
 	select {
 	case s.events <- e:
@@ -171,8 +195,7 @@ func (s *Stream) push(e StreamEvent) bool {
 	go func() {
 		_ = s.w.writeRSTStream(s, frame.ErrCodeRefusedStream)
 	}()
-	// Best-effort EventReset delivery; if the channel is still full we
-	// rely on consumers waking via context or Close.
+	// Try to deliver EventReset via channel; if full, signal via resetSignal.
 	select {
 	case s.events <- StreamEvent{
 		Type:      EventReset,
@@ -180,6 +203,7 @@ func (s *Stream) push(e StreamEvent) bool {
 		EndStream: true,
 	}:
 	default:
+		s.signalReset(frame.ErrCodeRefusedStream)
 	}
 	return false
 }
@@ -270,6 +294,9 @@ func (s *Stream) Recv(ctx context.Context) (StreamEvent, error) {
 			return StreamEvent{}, ErrStreamClosed
 		}
 		return e, nil
+	case <-s.resetSignal:
+		code := frame.ErrCode(s.resetCode.Load())
+		return StreamEvent{Type: EventReset, RSTCode: code, EndStream: true}, nil
 	case <-ctx.Done():
 		return StreamEvent{}, ctx.Err()
 	}
