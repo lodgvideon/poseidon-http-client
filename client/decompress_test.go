@@ -247,7 +247,7 @@ func TestDecompressFully_Gzip(t *testing.T) {
 	gw.Write(raw)
 	gw.Close()
 
-	out, err := decompressFully(EncodingGzip, buf.Bytes())
+	out, err := decompressFully(EncodingGzip, buf.Bytes(), DefaultMaxDecompressedSize)
 	if err != nil {
 		t.Fatalf("decompressFully: %v", err)
 	}
@@ -263,7 +263,7 @@ func TestDecompressFully_Deflate(t *testing.T) {
 	zw.Write(raw)
 	zw.Close()
 
-	out, err := decompressFully(EncodingDeflate, buf.Bytes())
+	out, err := decompressFully(EncodingDeflate, buf.Bytes(), DefaultMaxDecompressedSize)
 	if err != nil {
 		t.Fatalf("decompressFully: %v", err)
 	}
@@ -274,7 +274,7 @@ func TestDecompressFully_Deflate(t *testing.T) {
 
 func TestDecompressFully_Identity(t *testing.T) {
 	raw := []byte("uncompressed")
-	out, err := decompressFully(EncodingIdentity, raw)
+	out, err := decompressFully(EncodingIdentity, raw, DefaultMaxDecompressedSize)
 	if err != nil {
 		t.Fatalf("decompressFully: %v", err)
 	}

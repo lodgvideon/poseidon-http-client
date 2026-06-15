@@ -27,7 +27,6 @@ const (
 	ServerGoHTTP ServerKind = iota
 	ServerNginx
 	ServerUndertow
-	ServerNghttp2
 )
 
 func (k ServerKind) String() string {
@@ -38,8 +37,6 @@ func (k ServerKind) String() string {
 		return "nginx"
 	case ServerUndertow:
 		return "undertow"
-	case ServerNghttp2:
-		return "nghttp2"
 	default:
 		return "unknown"
 	}
@@ -119,7 +116,6 @@ func discoverRemoteServers() {
 	defs := []srvDef{
 		{ServerNginx, envOr("POSEIDON_IT_NGINX_TLS", "127.0.0.1:18080"), ""},
 		{ServerUndertow, envOr("POSEIDON_IT_UNDERTOW_TLS", "127.0.0.1:18081"), envOr("POSEIDON_IT_UNDERTOW_H2C", "127.0.0.1:18082")},
-		{ServerNghttp2, envOr("POSEIDON_IT_NGHTTP2_TLS", "127.0.0.1:18083"), envOr("POSEIDON_IT_NGHTTP2_H2C", "127.0.0.1:18084")},
 	}
 
 	var mu sync.Mutex

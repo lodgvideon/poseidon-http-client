@@ -32,6 +32,15 @@ const (
 	TransportManaged
 )
 
+// DefaultMaxDecompressedSize is the default maximum decompressed body
+// size (10 MiB) applied when ClientOptions.MaxDecompressedSize is zero.
+const DefaultMaxDecompressedSize int64 = 10 << 20
+
+// DefaultMaxResponseBodySize is the default maximum raw (pre-decompression)
+// response body size (32 MiB) applied when ClientOptions.MaxResponseBodySize
+// is zero.
+const DefaultMaxResponseBodySize int64 = 32 << 20
+
 // ClientOptions tunes a Client. ConnOpts.Dialer is always required.
 // Addr is required for TransportSingleConn and TransportPool; it must
 // be empty for TransportManaged (the Resolver owns addressing).
@@ -110,6 +119,19 @@ type ClientOptions struct {
 	// traffic spikes at the cost of worse steady-state QPS
 	// enforcement.
 	RateLimitBurst float64
+
+	// MaxDecompressedSize caps the decompressed response body size to
+	// guard against gzip/zlib bombs (decompression ratio attacks).
+	// Zero → DefaultMaxDecompressedSize (10 MiB). When the decompressed
+	// payload exceeds this limit, drainResponse returns ErrBodyTooLarge.
+	MaxDecompressedSize int64
+
+	// MaxResponseBodySize caps the total raw bytes received on a single
+	// response (pre-decompression, summed across all DATA frames).
+	// Zero → DefaultMaxResponseBodySize (32 MiB). Exceeding this limit
+	// causes drainResponse to return ErrBodyTooLarge without reading
+	// further frames.
+	MaxResponseBodySize int64
 }
 
 // PushHandler is invoked when the server pushes a resource in response
@@ -121,13 +143,15 @@ type PushHandler func(ctx context.Context, promisedHeaders []conn.HeaderField, r
 // Client is a high-level HTTP/2 client wrapping a single connection.
 // It is safe for concurrent use by multiple goroutines.
 type Client struct {
-	tr            transport
-	authority     string
-	defaultScheme string
-	hooksPtr      *atomic.Pointer[Hooks]
-	metrics       *Metrics
-	pushHandler   PushHandler
-	rateLimiter   *rateLimiter // nil when RateLimitPerSecond is 0
+	tr                  transport
+	authority           string
+	defaultScheme       string
+	hooksPtr            *atomic.Pointer[Hooks]
+	metrics             *Metrics
+	pushHandler         PushHandler
+	rateLimiter         *rateLimiter // nil when RateLimitPerSecond is 0
+	maxDecompressedSize int64
+	maxResponseBodySize int64
 }
 
 // NewClient validates opts and constructs a Client. It does NOT dial;
@@ -201,14 +225,24 @@ func NewClient(opts ClientOptions) (*Client, error) {
 		}
 		rl = newRateLimiter(opts.RateLimitPerSecond, burst)
 	}
+	maxDecompressed := opts.MaxDecompressedSize
+	if maxDecompressed <= 0 {
+		maxDecompressed = DefaultMaxDecompressedSize
+	}
+	maxBody := opts.MaxResponseBodySize
+	if maxBody <= 0 {
+		maxBody = DefaultMaxResponseBodySize
+	}
 	c := &Client{
-		tr:            tr,
-		authority:     deriveAuthority(opts.Addr),
-		defaultScheme: scheme,
-		hooksPtr:      hooksPtr,
-		metrics:       metrics,
-		pushHandler:   opts.PushHandler,
-		rateLimiter:   rl,
+		tr:                  tr,
+		authority:           deriveAuthority(opts.Addr),
+		defaultScheme:       scheme,
+		hooksPtr:            hooksPtr,
+		metrics:             metrics,
+		pushHandler:         opts.PushHandler,
+		rateLimiter:         rl,
+		maxDecompressedSize: maxDecompressed,
+		maxResponseBodySize: maxBody,
 	}
 	return c, nil
 }
@@ -436,7 +470,7 @@ func (c *Client) do(ctx context.Context, req *Request, resp *Response) error {
 		return nil // release deferred to resp.BodyReader.Close()
 	}
 
-	err = drainResponse(ctx, cn, s, req, resp, c.pushHandler)
+	err = drainResponse(ctx, cn, s, req, resp, c.pushHandler, c.maxDecompressedSize, c.maxResponseBodySize)
 	_ = s.Close() // recycles stream when both sides ended
 	release()
 	return err
@@ -734,7 +768,7 @@ func writeBodyReader(ctx context.Context, s *conn.Stream, r io.Reader, endStream
 
 // drainResponse pumps stream events until the response side ends or
 // the stream resets, writing into resp in place.
-func drainResponse(ctx context.Context, cn *conn.Conn, s *conn.Stream, req *Request, resp *Response, h PushHandler) error {
+func drainResponse(ctx context.Context, cn *conn.Conn, s *conn.Stream, req *Request, resp *Response, h PushHandler, maxDecompressed, maxBody int64) error {
 	var gotHeaders bool
 	var enc ContentEncoding
 	for {
@@ -767,12 +801,15 @@ func drainResponse(ctx context.Context, cn *conn.Conn, s *conn.Stream, req *Requ
 			}
 		case conn.EventData:
 			resp.BytesReceived += int64(len(ev.Data))
+			if resp.BytesReceived > maxBody {
+				return fmt.Errorf("%w: received %d bytes, limit %d", ErrBodyTooLarge, resp.BytesReceived, maxBody)
+			}
 			if req.WantBody && len(ev.Data) > 0 {
 				resp.Body = append(resp.Body, ev.Data...)
 			}
 			if ev.EndStream {
 				if req.WantBody && enc != EncodingIdentity {
-					decoded, derr := decompressFully(enc, resp.Body)
+					decoded, derr := decompressFully(enc, resp.Body, maxDecompressed)
 					if derr != nil {
 						return derr
 					}
@@ -799,7 +836,7 @@ func drainResponse(ctx context.Context, cn *conn.Conn, s *conn.Stream, req *Requ
 					// Copy promised headers to decouple from the slab
 					// lifetime (slab is returned when parent resp is Reset).
 					hdrs := copyHeaders(ev.Headers)
-					go drainPushedStream(ctx, cn, h, hdrs, ps)
+					go drainPushedStream(ctx, cn, h, hdrs, ps, maxDecompressed, maxBody)
 				}
 			}
 		}
@@ -808,9 +845,9 @@ func drainResponse(ctx context.Context, cn *conn.Conn, s *conn.Stream, req *Requ
 
 // drainPushedStream reads the pushed stream's response and invokes the
 // push handler with the result. Handles nested PUSH_PROMISE recursively.
-func drainPushedStream(ctx context.Context, cn *conn.Conn, h PushHandler, promisedHeaders []conn.HeaderField, s *conn.Stream) {
+func drainPushedStream(ctx context.Context, cn *conn.Conn, h PushHandler, promisedHeaders []conn.HeaderField, s *conn.Stream, maxDecompressed, maxBody int64) {
 	pr := &Response{}
-	derr := drainResponse(ctx, cn, s, &Request{WantBody: true}, pr, h)
+	derr := drainResponse(ctx, cn, s, &Request{WantBody: true}, pr, h, maxDecompressed, maxBody)
 	_ = s.Close()
 	h(ctx, promisedHeaders, pr, derr)
 }

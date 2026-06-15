@@ -72,6 +72,7 @@ func (r *randomSel) Pick(set []Address, _ PickContext) (Address, error) {
 type hashSel struct {
 	keyFn func(PickContext) string
 	hash  hash.Hash64
+	mu    sync.Mutex
 }
 
 // Hash returns a Selector that picks by FNV-1a hash of keyFn(pc) %
@@ -92,8 +93,10 @@ func (h *hashSel) Pick(set []Address, pc PickContext) (Address, error) {
 	if k == "" {
 		return Address{}, ErrNoAddresses
 	}
+	h.mu.Lock()
 	h.hash.Reset()
 	_, _ = h.hash.Write([]byte(k))
 	idx := int(h.hash.Sum64() % uint64(len(set)))
+	h.mu.Unlock()
 	return set[idx], nil
 }

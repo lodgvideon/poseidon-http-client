@@ -150,7 +150,7 @@ func newDecompressingReader(enc ContentEncoding, src io.ReadCloser) (io.ReadClos
 
 // decompressFully reads all decompressed bytes from src into dst.
 // Used by drainResponse for the non-streaming path (WantBody).
-func decompressFully(enc ContentEncoding, compressed []byte) ([]byte, error) {
+func decompressFully(enc ContentEncoding, compressed []byte, maxBytes int64) ([]byte, error) {
 	if enc == EncodingIdentity || len(compressed) == 0 {
 		return compressed, nil
 	}
@@ -161,9 +161,18 @@ func decompressFully(enc ContentEncoding, compressed []byte) ([]byte, error) {
 		if err := gz.Reset(bytes.NewReader(compressed)); err != nil {
 			return nil, fmt.Errorf("client: gzip decode: %w", err)
 		}
+		// LimitReader returns io.EOF after maxBytes+1 bytes. We read one
+		// extra byte to distinguish a truncated-but-okay payload from an
+		// over-limit one: if Copy reads exactly maxBytes and then hits
+		// EOF we accept; if it reads maxBytes+1 we reject as too large.
+		lr := io.LimitReader(gz, maxBytes+1)
 		var buf bytes.Buffer
-		if _, err := io.Copy(&buf, gz); err != nil {
+		n, err := io.Copy(&buf, lr)
+		if err != nil {
 			return nil, fmt.Errorf("client: gzip read: %w", err)
+		}
+		if n > maxBytes {
+			return nil, fmt.Errorf("%w: decompressed %d bytes, limit %d", ErrBodyTooLarge, n, maxBytes)
 		}
 		return buf.Bytes(), nil
 	case EncodingDeflate:
@@ -172,9 +181,14 @@ func decompressFully(enc ContentEncoding, compressed []byte) ([]byte, error) {
 			return nil, fmt.Errorf("client: zlib decode: %w", err)
 		}
 		defer zr.Close()
+		lr := io.LimitReader(zr, maxBytes+1)
 		var buf bytes.Buffer
-		if _, err := io.Copy(&buf, zr); err != nil {
+		n, err := io.Copy(&buf, lr)
+		if err != nil {
 			return nil, fmt.Errorf("client: zlib read: %w", err)
+		}
+		if n > maxBytes {
+			return nil, fmt.Errorf("%w: decompressed %d bytes, limit %d", ErrBodyTooLarge, n, maxBytes)
 		}
 		return buf.Bytes(), nil
 	default:

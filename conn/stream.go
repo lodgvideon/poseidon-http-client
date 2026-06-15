@@ -146,9 +146,16 @@ func (s *Stream) signalReset(code frame.ErrCode) {
 // returns s to pool. Only call when the stream is fully done (both
 // sides ended or RST sent/received) and no goroutine holds a reference.
 func recycleStream(pool *sync.Pool, s *Stream) {
+	// Drop any events still buffered on the old channel so slab memory
+	// is released before we discard the reference.
 	for len(s.events) > 0 {
 		<-s.events // drop; any slab in the event is GC'd
 	}
+	// Recreate the events channel with the same capacity. Any stale
+	// reference held by a goroutine from the previous stream lifetime
+	// (e.g. a deferred push/RST send) now writes to the orphaned old
+	// channel, preventing cross-stream event contamination.
+	s.events = make(chan StreamEvent, cap(s.events))
 	s.id = 0
 	s.w = nil
 	s.localEnded = false

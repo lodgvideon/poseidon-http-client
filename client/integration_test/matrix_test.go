@@ -20,7 +20,7 @@ import (
 func allReadyServers(t *testing.T) []*TestServer {
 	t.Helper()
 	var out []*TestServer
-	for k := ServerGoHTTP; k <= ServerNghttp2; k++ {
+	for k := ServerGoHTTP; k <= ServerUndertow; k++ {
 		if srv, ok := allServers[k]; ok && srv.Ready {
 			out = append(out, srv)
 		}

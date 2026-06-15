@@ -23,9 +23,12 @@ type TLSDialer struct {
 func (d *TLSDialer) Dial(ctx context.Context, addr string) (net.Conn, error) {
 	cfg := d.Config
 	if cfg == nil {
-		cfg = &tls.Config{}
+		cfg = &tls.Config{MinVersion: tls.VersionTLS12}
 	} else {
 		cfg = cfg.Clone()
+		if cfg.MinVersion == 0 {
+			cfg.MinVersion = tls.VersionTLS12
+		}
 	}
 	hasH2 := false
 	for _, p := range cfg.NextProtos {

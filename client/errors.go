@@ -95,4 +95,9 @@ var (
 	// ErrInvalidOptions is returned by NewClient when ClientOptions are
 	// internally inconsistent (e.g. both Addr and Resolver supplied).
 	ErrInvalidOptions = errors.New("client: invalid ClientOptions")
+
+	// ErrBodyTooLarge is returned when the response body (compressed or
+	// decompressed) exceeds the configured maximum size, preventing
+	// memory-exhaustion attacks such as gzip bombs.
+	ErrBodyTooLarge = errors.New("client: response body exceeds maximum size")
 )
