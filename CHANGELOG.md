@@ -7,6 +7,89 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [v0.3.0] — 2026-06-15
+
+### Added
+
+- **Automatic response body decompression** (gzip/deflate) — `Request.DisableDecompression`
+  opt-out, auto-injected `accept-encoding: gzip` (preserved when caller
+  supplies one), `decompressFully` for batch path, `decompressingReader`
+  for streaming path, `gzipReaderPool` for reader reuse.
+  `Response.BytesReceived` = wire bytes; `Response.Body` = decompressed.
+  10 tests. (`a3338da`)
+
+- **Priority hints** (RFC 7540 §5.3) — `Request.Priority *frame.Priority`
+  embeds a 5-byte priority block (E + StreamDep + Weight) in the first
+  HEADERS frame. `Stream.SendHeadersWithPriority` carries the PRIORITY
+  flag. Backward compatible: nil priority → original SendHeaders
+  behavior. 4 frame tests + 3 client tests. (`6dd5148`)
+
+- **Graceful shutdown** (RFC 7540 §6.8) — `Conn.Shutdown(gracefulTimeout)`
+  sends GOAWAY(lastClientStreamID, NO_ERROR), marks the conn as
+  draining (NewStream returns `ErrConnDraining`), then waits up to
+  the timeout for in-flight streams to drain. `Client.Shutdown(timeout)`
+  proxies the request down to the underlying *conn.Conn (single-conn
+  transport). Pool transports close all conns in parallel.
+  `markStreamDone` closes a wake-up channel when inflight hits zero.
+  4 conn tests + 3 client tests. (`9a5c1f8`)
+
+- **Client.Warmup(n)** — pre-dial up to n conns in the background to
+  avoid TLS handshake + HTTP/2 setup on the first request. n is
+  capped at MaxConnsPerHost (1 for single-conn). Pool transport
+  fan-outs across the live set. Idempotent. 4 tests.
+  (`24be6f8`)
+
+- **Client-side rate limiting** (token-bucket) —
+  `ClientOptions.RateLimitPerSecond` (float) gates Do/DoStream via
+  an internal token bucket. Take respects ctx cancellation. 5 tests
+  (4 unit + 1 integration). (`0fb9dd5`)
+
+- **Per-request timeout** — `Request.Timeout time.Duration` derives
+  a sub-context from the parent ctx with the given deadline. When
+  the timeout fires the request fails with
+  `context.DeadlineExceeded` and the in-flight stream is reset.
+  Applies to both Do and DoStream. Zero = use parent ctx. 4 tests.
+  (`0fb9dd5`)
+
+- **ClientOptions.RateLimitBurst** — separate burst capacity
+  decoupled from steady-state RPS. Zero (default) falls back to
+  `RateLimitPerSecond` for backward compatibility. (`809533c`)
+
+### Fixed
+
+- **TestWarmup_Pool_CappedByMaxConns** asserted `ActiveConns <= 2`
+  only, which is also satisfied by a no-op warmup. Test now wires
+  `countingDialer` and asserts `dialCount >= 1` (warmup actually
+  ran) plus `dialCount <= MaxConnsPerHost` (cap honored). (`462c179`)
+
+- **`rateLimiter` doc comment claimed "lock-free on the hot path"**
+  while `Take` actually takes `rl.mu.Lock()` on the first line.
+  Replaced with "goroutine-safe (sync.Mutex + Cond)". No code change.
+  (`462c179`)
+
+- **Goroutine leak in `singleConn.warmup`** — the 30s background
+  dial context was created and `defer cancel()`-ed inside the
+  goroutine, with no external handle. `Warmup(1) → Close()` left
+  the goroutine alive for the full timeout. Fix caches
+  `warmupCancel` on `singleConn`; `close()` and `shutdown()` call
+  it. Repeated `warmup()` calls reuse the in-flight context. (`462c179`)
+
+- **`TestClient_RateLimit_BlocksExcess` and warmup tests** had
+  magic-number deadlines (`400ms`, `2s`, `3s`) chosen "by feel".
+  Replaced with derived values: `expectedMin = (need-burst)/rps - slack`
+  and `maxConns * dialPerBudget + slack`. Tweak parameters, not
+  wall-clock guesses. (`809533c`)
+
+### Docs
+
+- **Self-review action plan** — post-sprint audit found 3 fake-green
+  / false-claim / leak defects in v0.3.0 sprint tests. 7 items
+  tracked in `docs/SELF_REVIEW_2026-06-15.md`. (`878e8d4`)
+
+- **Self-review close** — all 7 items resolved; validation table
+  documents the gate (`make test-fast`, count=20 stress, lint
+  baseline unchanged). (`a3b4938`)
+
 ## [v0.2.0] — 2026-06-14
 
 ### Added
@@ -43,47 +126,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `Framer.WriteAltSvc`, `Conn.AltSvcEntries()`. Server-wide and
   per-stream variants. Empty payload clears all alt-svc entries.
   6 tests (3 roundtrip + 3 negative). (`a65c5a7`)
-
-- **Priority hints** (RFC 7540 §5.3) — `Request.Priority *frame.Priority`
-  embeds a 5-byte priority block (E + StreamDep + Weight) in the first
-  HEADERS frame. `Stream.SendHeadersWithPriority` carries the PRIORITY
-  flag. Backward compatible: nil priority → original SendHeaders
-  behavior. 4 frame tests + 3 client tests. (`current`)
-
-- **Graceful shutdown** (RFC 7540 §6.8) — `Conn.Shutdown(gracefulTimeout)`
-  sends GOAWAY(lastClientStreamID, NO_ERROR), marks the conn as
-  draining (NewStream returns `ErrConnDraining`), then waits up to
-  the timeout for in-flight streams to drain. `Client.Shutdown(timeout)`
-  proxies the request down to the underlying *conn.Conn (single-conn
-  transport). Pool transports close all conns in parallel.
-  `markStreamDone` closes a wake-up channel when inflight hits zero.
-  4 conn tests + 3 client tests. (`current`)
-
-- **Client.Warmup(n)** — pre-dial up to n conns in the background to
-  avoid TLS handshake + HTTP/2 setup on the first request. n is
-  capped at MaxConnsPerHost (1 for single-conn). Pool transport
-  fan-outs across the live set. Idempotent. 4 tests.
-  (`current`)
-
-- **Client-side rate limiting** (token-bucket) —
-  `ClientOptions.RateLimitPerSecond` (float) gates Do/DoStream via
-  an internal token bucket. Burst capacity = rate. Take respects
-  ctx cancellation. 5 tests (4 unit + 1 integration).
-  (`current`)
-
-- **Per-request timeout** — `Request.Timeout time.Duration` derives
-  a sub-context from the parent ctx with the given deadline. When
-  the timeout fires the request fails with
-  `context.DeadlineExceeded` and the in-flight stream is reset.
-  Applies to both Do and DoStream. Zero = use parent ctx. 4 tests.
-  (`current`)
-
-- **Automatic response body decompression** (gzip/deflate) — `Request.DisableDecompression`
-  opt-out, auto-injected `accept-encoding: gzip` (preserved when caller
-  supplies one), `decompressFully` for batch path, `decompressingReader`
-  for streaming path, `gzipReaderPool` for reader reuse.
-  `Response.BytesReceived` = wire bytes; `Response.Body` = decompressed.
-  10 tests. (`current`)
 
 - **Extended CONNECT protocol** (RFC 8441) —
   `SettingEnableConnectProtocol` (0x8) setting ID.
