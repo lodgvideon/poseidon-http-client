@@ -173,6 +173,12 @@ var _ frame.Handler = (*mockPeerHandler)(nil)
 // BenchmarkDo_MockTransport benchmarks a GET round-trip against a minimal
 // in-process H2C peer. Server-side allocations are negligible (zero-alloc
 // frame codec); b.ReportAllocs() reflects client-side allocations only.
+//
+// The Response is declared once outside the loop to match the production
+// pattern documented on Response: callers should allocate one Response
+// per goroutine and reuse it across Do calls (call Reset between them).
+// This avoids charging the bench with Response-struct-init allocs that
+// a real caller does NOT pay.
 func BenchmarkDo_MockTransport(b *testing.B) {
 	peer := newMockH2Peer(b)
 
@@ -191,13 +197,15 @@ func BenchmarkDo_MockTransport(b *testing.B) {
 	req := &client.Request{Method: "GET", Path: "/"}
 	ctx := context.Background()
 
+	var res client.Response
+	res.Reset() // preallocate Headers/Trailers/slabs backing
+
 	b.ResetTimer()
 	b.ReportAllocs()
 	for i := 0; i < b.N; i++ {
-		var res client.Response
+		res.Reset()
 		if err := c.Do(ctx, req, &res); err != nil {
 			b.Fatalf("Do: %v", err)
 		}
-		res.Reset()
 	}
 }

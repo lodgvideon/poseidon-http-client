@@ -52,6 +52,10 @@ type Response struct {
 // Reset clears all exported fields for reuse, retaining backing arrays.
 // Any references to Headers[i].Name / .Value / Body / Trailers bytes
 // must not be used after Reset returns.
+//
+// On the first call after a zero-value Response, the first Reset preallocates
+// Headers and slabs backing arrays (cap=8 / cap=2) so subsequent appends in
+// parseStatus and drainResponse do not allocate.
 func (r *Response) Reset() {
 	if r.BodyReader != nil {
 		_ = r.BodyReader.Close()
@@ -63,9 +67,20 @@ func (r *Response) Reset() {
 	}
 	r.slabs = r.slabs[:0]
 	r.Status = 0
-	r.Headers = r.Headers[:0]
+	if r.Headers == nil {
+		r.Headers = make([]conn.HeaderField, 0, 8)
+	} else {
+		r.Headers = r.Headers[:0]
+	}
+	if r.Trailers == nil {
+		r.Trailers = make([]conn.HeaderField, 0, 2)
+	} else {
+		r.Trailers = r.Trailers[:0]
+	}
+	if cap(r.slabs) == 0 {
+		r.slabs = make([]*[]byte, 0, 2)
+	}
 	r.Body = r.Body[:0]
-	r.Trailers = r.Trailers[:0]
 	r.BytesReceived = 0
 }
 
