@@ -10,9 +10,9 @@ import (
 // at a fixed rate up to a maximum burst. Use Take(ctx) to acquire one
 // token; blocks until a token is available or ctx is cancelled.
 //
-// The implementation is goroutine-safe and lock-free on the hot path
-// of Take. A monotonic clock is used to track elapsed time, so
-// wall-clock adjustments do not affect rate.
+// The implementation is goroutine-safe (sync.Mutex + Cond). A
+// monotonic clock is used to track elapsed time, so wall-clock
+// adjustments do not affect rate.
 type rateLimiter struct {
 	mu         sync.Mutex
 	cond       *sync.Cond

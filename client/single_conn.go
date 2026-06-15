@@ -31,6 +31,11 @@ type singleConn struct {
 	// receiving from it (closed when the dial completes) so that only
 	// one goroutine dials at a time.
 	dialing chan struct{}
+	// warmupCancel cancels the background warmup dial context. Set
+	// on first successful warmup; cleared in close/shutdown. Required
+	// so that Warmup(1) → Close() does not leave the background
+	// goroutine alive for the full warmup timeout.
+	warmupCancel context.CancelFunc
 }
 
 // acquire implements transport.acquire.
@@ -114,15 +119,23 @@ func (s *singleConn) acquire(ctx context.Context) (*conn.Conn, func(), error) {
 // close implements transport.close. Idempotent.
 func (s *singleConn) close() error {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	if s.closed {
+		s.mu.Unlock()
 		return nil
 	}
 	s.closed = true
-	if s.cur != nil {
-		err := s.cur.Close()
-		s.cur = nil
-		return err
+	cancel := s.warmupCancel
+	s.warmupCancel = nil
+	s.mu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
+	s.mu.Lock()
+	cur := s.cur
+	s.cur = nil
+	s.mu.Unlock()
+	if cur != nil {
+		return cur.Close()
 	}
 	return nil
 }
@@ -137,9 +150,14 @@ func (s *singleConn) shutdown(gracefulTimeout time.Duration) error {
 		return nil
 	}
 	s.closed = true
+	cancel := s.warmupCancel
+	s.warmupCancel = nil
 	cur := s.cur
 	s.cur = nil
 	s.mu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
 	if cur != nil {
 		return cur.Shutdown(gracefulTimeout)
 	}
@@ -148,19 +166,32 @@ func (s *singleConn) shutdown(gracefulTimeout time.Duration) error {
 
 // warmup implements transport.warmup. For single-conn, n is capped
 // at 1. Triggers a lazy dial in the background; the actual conn is
-// established on the next call to acquire.
+// established on the next call to acquire. The background dial
+// context is cached so close()/shutdown() can cancel it promptly
+// rather than waiting for the 30s timeout.
 func (s *singleConn) warmup(n int) {
 	if n <= 0 {
 		return
 	}
-	if n > 1 {
-		n = 1
+	// single-conn ignores n>1: at most one underlying conn is ever
+	// dialled. Skip if already closed or if a warmup is already in
+	// flight.
+	s.mu.Lock()
+	if s.closed {
+		s.mu.Unlock()
+		return
+	}
+	if s.warmupCancel != nil {
+		s.mu.Unlock()
+		return
 	}
 	// Use a fresh context with a generous timeout so the dial
-	// runs even if the caller's ctx is short-lived.
+	// runs even if the caller's ctx is short-lived. The cancel
+	// is stashed so close()/shutdown() can interrupt promptly.
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	s.warmupCancel = cancel
+	s.mu.Unlock()
 	go func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-		defer cancel()
 		_, _, _ = s.acquire(ctx)
 	}()
 }
