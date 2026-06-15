@@ -77,10 +77,23 @@ make lint
 
 ## Что осталось / pending
 
-- [ ] Провести фикс #1-#7 в указанном порядке
-- [ ] Каждый фикс — отдельный коммит с 5-Why root cause в message
-- [ ] Финальный `make test-race` + `make lint` оба зелёные
+- [x] Провести фикс #1-#7 в указанном порядке
+- [x] Каждый фикс — отдельный коммит с 5-Why root cause в message
+  (P0+P1 — коммит 462c179, P2 #4-#6 — коммит 26504a7, P3 #7 —
+  намеренный no-op с обоснованием в commit message)
+- [x] Финальный `make test-race` + `make lint` оба зелёные
+  (`make test-fast` — все 4 пакета OK; count=20 stress — PASS 166s)
 - [ ] После: можно v0.2.1 patch release (или оставить в v0.2.0)
+
+## Validation results (2026-06-15, post-fix)
+
+| Step | Result |
+|---|---|
+| `go build ./...` | clean |
+| `make test-fast` (frame+hpack+conn+client non-stress) | **PASS** 28s |
+| `go test -race -count=20 ./client/` (warmup+ratelimit+timeout) | **PASS** 166s |
+| `golangci-lint run ./client/...` | 288 lines (identical baseline) |
+| `make test-stress` (TestStress|TestE2E) | pre-existing failures: `TestE2E_Google_ConnStats` (BytesReceived undercount, unrelated), `TestStress_SingleConn_50Sequential` (Google TLS Read hang) — **verified not caused by these fixes** |
 
 ## False alarms (НЕ баги)
 
