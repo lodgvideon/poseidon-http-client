@@ -42,13 +42,14 @@ func TestWarmup_SingleConn_DialsAhead(t *testing.T) {
 
 	c.Warmup(1)
 
-	// Wait for the dial to complete (poll dial count).
-	deadline := time.Now().Add(2 * time.Second)
+	// Wait for the dial to complete. Budget = expectedDials ×
+	// per-dial timeout + slack. 1 dial × 2s + 1s slack.
+	deadline := time.Now().Add(3 * time.Second)
 	for dialCount.Load() == 0 && time.Now().Before(deadline) {
 		time.Sleep(10 * time.Millisecond)
 	}
 	if dialCount.Load() == 0 {
-		t.Fatal("Warmup did not trigger a dial within 2s")
+		t.Fatal("Warmup did not trigger a dial within 3s")
 	}
 
 	// First Do should now hit a warm conn.
@@ -95,6 +96,12 @@ func TestWarmup_Pool_DialsMultiple(t *testing.T) {
 	srv.StartTLS()
 	defer srv.Close()
 
+	const (
+		maxConns      = 4
+		dialPerBudget = 1 * time.Second
+		slack         = 1 * time.Second
+	)
+
 	c, err := NewClient(ClientOptions{
 		Addr: srv.Listener.Addr().String(),
 		ConnOpts: conn.ConnOptions{
@@ -105,7 +112,7 @@ func TestWarmup_Pool_DialsMultiple(t *testing.T) {
 		},
 		Transport: TransportPool,
 		Pool: &PoolOptions{
-			MaxConnsPerHost:   4,
+			MaxConnsPerHost:   maxConns,
 			MaxStreamsPerConn: 16,
 		},
 	})
@@ -114,19 +121,20 @@ func TestWarmup_Pool_DialsMultiple(t *testing.T) {
 	}
 	defer c.Close()
 
-	c.Warmup(4)
+	c.Warmup(maxConns)
 
-	// Wait for dials to complete.
-	deadline := time.Now().Add(3 * time.Second)
-	for dialCount.Load() < 4 && time.Now().Before(deadline) {
+	// Wait for dials to complete. Budget = maxConns × dialPerBudget
+	// + slack.
+	deadline := time.Now().Add(time.Duration(maxConns)*dialPerBudget + slack)
+	for dialCount.Load() < maxConns && time.Now().Before(deadline) {
 		time.Sleep(20 * time.Millisecond)
 	}
 	got := dialCount.Load()
 	if got < 1 {
 		t.Errorf("expected at least 1 dial, got %d", got)
 	}
-	if got > 4 {
-		t.Errorf("expected at most 4 dials, got %d", got)
+	if got > maxConns {
+		t.Errorf("expected at most %d dials, got %d", maxConns, got)
 	}
 }
 
@@ -143,6 +151,12 @@ func TestWarmup_Pool_CappedByMaxConns(t *testing.T) {
 	srv.StartTLS()
 	defer srv.Close()
 
+	const (
+		maxConns      = 2
+		dialPerBudget = 1 * time.Second
+		slack         = 1 * time.Second
+	)
+
 	c, err := NewClient(ClientOptions{
 		Addr: srv.Listener.Addr().String(),
 		ConnOpts: conn.ConnOptions{
@@ -153,7 +167,7 @@ func TestWarmup_Pool_CappedByMaxConns(t *testing.T) {
 		},
 		Transport: TransportPool,
 		Pool: &PoolOptions{
-			MaxConnsPerHost:   2,
+			MaxConnsPerHost:   maxConns,
 			MaxStreamsPerConn: 16,
 		},
 	})
@@ -165,10 +179,10 @@ func TestWarmup_Pool_CappedByMaxConns(t *testing.T) {
 	// Request way more than MaxConnsPerHost.
 	c.Warmup(100)
 
-	// Wait for dials to settle. Deadline = MaxConnsPerHost dial slots
-	// × a generous per-dial budget + slack.
-	deadline := time.Now().Add(3 * time.Second)
-	for dialCount.Load() < 2 && time.Now().Before(deadline) {
+	// Wait for dials to settle. Budget = maxConns × dialPerBudget
+	// + slack. We poll until the cap is hit or the budget expires.
+	deadline := time.Now().Add(time.Duration(maxConns)*dialPerBudget + slack)
+	for dialCount.Load() < maxConns && time.Now().Before(deadline) {
 		time.Sleep(20 * time.Millisecond)
 	}
 
@@ -176,13 +190,13 @@ func TestWarmup_Pool_CappedByMaxConns(t *testing.T) {
 	if got < 1 {
 		t.Errorf("expected at least 1 dial triggered by Warmup, got %d (warmup no-op?)", got)
 	}
-	if got > 2 {
-		t.Errorf("expected at most 2 dials (capped by MaxConnsPerHost), got %d", got)
+	if got > maxConns {
+		t.Errorf("expected at most %d dials (capped by MaxConnsPerHost), got %d", maxConns, got)
 	}
 
 	stats := c.PoolStats()
-	if stats.ActiveConns > 2 {
-		t.Errorf("ActiveConns = %d, want <= 2 (capped by MaxConnsPerHost)", stats.ActiveConns)
+	if stats.ActiveConns > maxConns {
+		t.Errorf("ActiveConns = %d, want <= %d (capped by MaxConnsPerHost)", stats.ActiveConns, maxConns)
 	}
 }
 

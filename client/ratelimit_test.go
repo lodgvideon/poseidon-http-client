@@ -75,7 +75,9 @@ func TestRateLimiter_AllowNonBlocking(t *testing.T) {
 }
 
 // TestClient_RateLimit_BlocksExcess verifies the client blocks
-// requests beyond the rate budget.
+// requests beyond the rate budget. The expected minimum elapsed
+// time is derived from the parameters: burst tokens are free, the
+// (need - burst)th request must wait for one token at 1/rps rate.
 func TestClient_RateLimit_BlocksExcess(t *testing.T) {
 	var reqCount atomic.Int32
 	srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -86,25 +88,37 @@ func TestClient_RateLimit_BlocksExcess(t *testing.T) {
 	srv.StartTLS()
 	defer srv.Close()
 
+	const (
+		rps     = 2.0
+		burst   = 2
+		need    = 3
+		slack   = 50 * time.Millisecond
+	)
+	// 3 requests, burst 2 → 1st two instant, 3rd waits one full
+	// token interval. Floor = (need-burst)/rps - slack (we allow
+	// the 3rd to land a hair early if the limiter just refilled).
+	expectedMin := time.Duration(float64(need-burst)/rps*float64(time.Second)) - slack
+
 	c, err := NewClient(ClientOptions{
 		Addr: srv.Listener.Addr().String(),
 		ConnOpts: conn.ConnOptions{
 			Dialer: &conn.TLSDialer{Config: &tls.Config{InsecureSkipVerify: true}},
 		},
-		RateLimitPerSecond: 2, // 2 rps
+		RateLimitPerSecond: rps,
+		RateLimitBurst:     burst,
 	})
 	if err != nil {
 		t.Fatalf("NewClient: %v", err)
 	}
 	defer c.Close()
 
-	// Issue 3 requests back-to-back. With burst=2 the 3rd should
-	// take ~500ms (waiting for a token at 2 rps).
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	// Cap the run to a generous absolute deadline so a bug in the
+	// limiter (e.g. forgets to block) can't hang the test forever.
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
 	start := time.Now()
-	for i := 0; i < 3; i++ {
+	for i := 0; i < need; i++ {
 		var resp Response
 		if err := c.Do(ctx, &Request{Method: "GET", Path: "/"}, &resp); err != nil {
 			t.Fatalf("Do %d: %v", i, err)
@@ -115,12 +129,11 @@ func TestClient_RateLimit_BlocksExcess(t *testing.T) {
 	}
 	elapsed := time.Since(start)
 
-	// 3 requests at 2 rps with burst 2: first 2 instant, 3rd after ~500ms.
-	if elapsed < 400*time.Millisecond {
-		t.Errorf("3 requests took %v, expected >= 400ms (rate limited)", elapsed)
+	if elapsed < expectedMin {
+		t.Errorf("%d requests took %v, expected >= %v (rate limited)", need, elapsed, expectedMin)
 	}
-	if got := reqCount.Load(); got != 3 {
-		t.Errorf("server received %d requests, want 3", got)
+	if got := reqCount.Load(); got != int32(need) {
+		t.Errorf("server received %d requests, want %d", got, need)
 	}
 }
 

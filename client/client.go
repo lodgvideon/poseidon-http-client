@@ -96,11 +96,20 @@ type ClientOptions struct {
 
 	// RateLimitPerSecond caps the client's outgoing request rate
 	// using a token-bucket algorithm. Zero disables rate limiting.
-	// Burst capacity is implicitly equal to the rate (1 second of
-	// accumulated tokens). When the limit is reached, Do/DoStream
-	// blocks until a token is available or ctx is cancelled.
-	// Useful for load generators enforcing a strict QPS budget.
+	// Burst capacity is controlled by RateLimitBurst; when the
+	// limit is reached, Do/DoStream blocks until a token is
+	// available or ctx is cancelled. Useful for load generators
+	// enforcing a strict QPS budget.
 	RateLimitPerSecond float64
+
+	// RateLimitBurst is the maximum number of tokens that can be
+	// consumed back-to-back without replenishment. Zero (the
+	// default) means burst equals RateLimitPerSecond — i.e. one
+	// second of accumulated tokens. Only meaningful when
+	// RateLimitPerSecond > 0. Larger bursts smooth over short
+	// traffic spikes at the cost of worse steady-state QPS
+	// enforcement.
+	RateLimitBurst float64
 }
 
 // PushHandler is invoked when the server pushes a resource in response
@@ -186,7 +195,11 @@ func NewClient(opts ClientOptions) (*Client, error) {
 	}
 	var rl *rateLimiter
 	if opts.RateLimitPerSecond > 0 {
-		rl = newRateLimiter(opts.RateLimitPerSecond, opts.RateLimitPerSecond)
+		burst := opts.RateLimitBurst
+		if burst <= 0 {
+			burst = opts.RateLimitPerSecond
+		}
+		rl = newRateLimiter(opts.RateLimitPerSecond, burst)
 	}
 	c := &Client{
 		tr:            tr,
