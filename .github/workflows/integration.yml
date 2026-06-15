@@ -1,0 +1,52 @@
+name: integration
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  docker-it:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.24'
+          cache: true
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build Undertow image
+        uses: docker/build-push-action@v5
+        with:
+          context: test/integration
+          file: test/integration/Dockerfile.undertow
+          tags: poseidon-it/undertow:local
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          load: true
+
+      - name: Generate test certs
+        run: cd test/integration && ./scripts/gen-certs.sh
+
+      - name: docker compose up
+        run: docker compose -f test/integration/docker-compose.yml up -d --wait
+
+      - name: Integration tests
+        run: |
+          go test -tags=integration -race -count=1 \
+            -timeout=300s -v ./client/integration_test/...
+
+      - name: Dump logs on failure
+        if: failure()
+        run: docker compose -f test/integration/docker-compose.yml logs
+        continue-on-error: true
+
+      - name: docker compose down
+        if: always()
+        run: docker compose -f test/integration/docker-compose.yml down -v

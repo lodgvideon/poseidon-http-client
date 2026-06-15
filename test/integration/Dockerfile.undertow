@@ -1,0 +1,23 @@
+# Build stage: compile standalone Undertow fat-jar
+FROM eclipse-temurin:21-jdk-jammy AS build
+
+WORKDIR /src
+COPY undertow-server/pom.xml .
+COPY undertow-server/src ./src
+
+RUN apt-get update && apt-get install -y --no-install-recommends maven && \
+    rm -rf /var/lib/apt/lists/* && \
+    mvn -B -ntp -DskipTests package && \
+    cp target/undertow-server-1.0.0.jar /app.jar
+
+# Runtime stage: only JRE
+FROM eclipse-temurin:21-jre-jammy
+
+COPY --from=build /app.jar /app/undertow.jar
+COPY fixtures/certs /app/certs
+
+EXPOSE 8443 8080
+
+ENV JAVA_OPTS="-XX:+UseG1GC -Xmx512m"
+
+ENTRYPOINT ["sh", "-c", "exec java $JAVA_OPTS -jar /app/undertow.jar"]

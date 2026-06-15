@@ -1,4 +1,5 @@
 .PHONY: lint test test-race bench bench-gate fuzz-replay coverage coverage-gate tidy
+.PHONY: it-up it-down it-logs it-test it-test-fast it-certs
 
 # Minimum overall and per-package statement coverage. CI fails below this.
 COVERAGE_MIN ?= 80
@@ -49,3 +50,33 @@ bench:
 
 bench-gate:
 	./scripts/bench-gate.sh
+
+# ── Docker integration test infra ────────────────────────────────
+DOCKER_COMPOSE ?= docker compose
+COMPOSE_FILE   ?= test/integration/docker-compose.yml
+IT_DIR          = test/integration
+IT_TIMEOUT     ?= 300s
+IT_TAGS        = -tags=integration
+IT_PKG         = ./client/integration_test/...
+
+it-certs:
+	cd $(IT_DIR) && ./scripts/gen-certs.sh
+
+it-up: it-certs
+	$(DOCKER_COMPOSE) -f $(COMPOSE_FILE) up -d --wait
+
+it-down:
+	$(DOCKER_COMPOSE) -f $(COMPOSE_FILE) down -v
+
+it-logs:
+	$(DOCKER_COMPOSE) -f $(COMPOSE_FILE) logs -f
+
+# Full integration test: bring up Docker, run tests, tear down.
+it-test:
+	@trap '$(MAKE) -s it-down 2>/dev/null' EXIT; \
+	$(MAKE) it-up && \
+	$(GO) test $(IT_TAGS) -race -count=1 -timeout=$(IT_TIMEOUT) -v $(IT_PKG)
+
+# Fast path: only Go in-process reference server (no Docker needed).
+it-test-fast:
+	POSEIDON_IT_SKIP_REMOTE=true $(GO) test $(IT_TAGS) -race -count=1 -timeout=60s -v $(IT_PKG)

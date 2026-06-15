@@ -1,0 +1,93 @@
+name: poseidon-it
+
+networks:
+  h2net:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.30.0.0/24
+
+volumes:
+  nginx-certs:
+  nginx-conf:
+  undertow-certs:
+  nghttp2-certs:
+
+services:
+  # ── nginx — production C-impl, h2 over TLS ──────────────────────
+  nginx:
+    image: nginx:1.27.4-alpine
+    container_name: poseidon-it-nginx
+    hostname: nginx
+    networks:
+      h2net:
+        ipv4_address: 172.30.0.10
+    ports:
+      - "127.0.0.1:18080:8443"
+    volumes:
+      - ./fixtures/nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./fixtures/nginx/default.conf:/etc/nginx/conf.d/default.conf:ro
+      - ./fixtures/certs:/etc/nginx/certs:ro
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://127.0.0.1:8080/healthz"]
+      interval: 1s
+      timeout: 2s
+      retries: 30
+      start_period: 3s
+    restart: "no"
+
+  # ── Undertow — JVM h2 server, h2 + h2c ──────────────────────────
+  undertow:
+    build:
+      context: .
+      dockerfile: Dockerfile.undertow
+    image: poseidon-it/undertow:local
+    container_name: poseidon-it-undertow
+    hostname: undertow
+    networks:
+      h2net:
+        ipv4_address: 172.30.0.11
+    ports:
+      - "127.0.0.1:18081:8443"
+      - "127.0.0.1:18082:8080"
+    volumes:
+      - ./fixtures/certs:/app/certs:ro
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://127.0.0.1:8080/healthz"]
+      interval: 1s
+      timeout: 2s
+      retries: 60
+      start_period: 10s
+    environment:
+      - JAVA_OPTS=-XX:+UseG1GC -Xmx512m
+    restart: "no"
+
+  # ── nghttpx — RFC reference implementation, h2 + h2c ────────────
+  nghttp2:
+    image: nghttp2/nghttp2:1.64.0
+    container_name: poseidon-it-nghttp2
+    hostname: nghttp2
+    networks:
+      h2net:
+        ipv4_address: 172.30.0.12
+    ports:
+      - "127.0.0.1:18083:8443"
+      - "127.0.0.1:18084:8080"
+    volumes:
+      - ./fixtures/certs:/etc/nghttp2/certs:ro
+      - ./fixtures/nghttpx.conf:/etc/nghttpx/nghttpx.conf:ro
+    command:
+      - nghttpx
+      - --conf=/etc/nghttp2/nghttpx.conf
+      - --no-ocsp
+      - /etc/nghttp2/certs/server.pem
+      - /etc/nghttp2/certs/server.key
+      - 0.0.0.0:8443
+      - 0.0.0.0:8080
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://127.0.0.1:8080/healthz"]
+      interval: 1s
+      timeout: 2s
+      retries: 30
+      start_period: 3s
+    restart: "no"
