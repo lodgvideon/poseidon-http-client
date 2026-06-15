@@ -76,6 +76,13 @@ type Request struct {
 	// on Method. nil → classify by Method (GET, HEAD, OPTIONS, PUT,
 	// DELETE, TRACE are idempotent; POST, PATCH are not).
 	Idempotent *bool
+
+	// DisableDecompression, when true, prevents automatic gzip/deflate
+	// decompression of the response body. When false (default), the
+	// client sends accept-encoding: gzip and transparently decodes
+	// content-encoding: gzip/deflate responses. Response.BytesReceived
+	// reflects wire bytes; Response.Body contains decompressed bytes.
+	DisableDecompression bool
 }
 
 // validateRequest enforces the up-front rules documented on Request.

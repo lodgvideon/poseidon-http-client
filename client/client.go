@@ -356,6 +356,19 @@ func (c *Client) do(ctx context.Context, req *Request, resp *Response) error {
 			release: release,
 			resp:    resp,
 		}
+		// Wrap with decompressor when content-encoding is present.
+		if !req.DisableDecompression {
+			enc := detectEncoding(resp.Headers)
+			if enc != EncodingIdentity {
+				dr, derr := newDecompressingReader(enc, resp.BodyReader)
+				if derr != nil {
+					_ = s.Close()
+					release()
+					return derr
+				}
+				resp.BodyReader = dr
+			}
+		}
 		return nil // release deferred to resp.BodyReader.Close()
 	}
 
@@ -503,6 +516,9 @@ func buildHeaders(req *Request, defaultAuthority, defaultScheme string) ([]conn.
 		*sp = append(*sp, conn.HeaderField{Name: hdrProtocol, Value: unsafeStringToBytes(req.Protocol)})
 	}
 	*sp = append(*sp, req.Headers...)
+	if !req.DisableDecompression && shouldSendAcceptEncoding(req) {
+		*sp = append(*sp, conn.HeaderField{Name: hdrAcceptEncoding, Value: encGzip})
+	}
 	if req.BodyReader != nil && req.ContentLength > 0 {
 		*sp = append(*sp, conn.HeaderField{
 			Name:  hdrContentLength,
@@ -647,6 +663,7 @@ func writeBodyReader(ctx context.Context, s *conn.Stream, r io.Reader, endStream
 // the stream resets, writing into resp in place.
 func drainResponse(ctx context.Context, cn *conn.Conn, s *conn.Stream, req *Request, resp *Response, h PushHandler) error {
 	var gotHeaders bool
+	var enc ContentEncoding
 	for {
 		ev, err := s.Recv(ctx)
 		if err != nil {
@@ -668,6 +685,9 @@ func drainResponse(ctx context.Context, cn *conn.Conn, s *conn.Stream, req *Requ
 			if ev.Slab != nil {
 				resp.slabs = append(resp.slabs, ev.Slab)
 			}
+			if !req.DisableDecompression {
+				enc = detectEncoding(resp.Headers)
+			}
 			gotHeaders = true
 			if ev.EndStream {
 				return nil
@@ -678,6 +698,13 @@ func drainResponse(ctx context.Context, cn *conn.Conn, s *conn.Stream, req *Requ
 				resp.Body = append(resp.Body, ev.Data...)
 			}
 			if ev.EndStream {
+				if req.WantBody && enc != EncodingIdentity {
+					decoded, derr := decompressFully(enc, resp.Body)
+					if derr != nil {
+						return derr
+					}
+					resp.Body = decoded
+				}
 				return nil
 			}
 		case conn.EventTrailers:
