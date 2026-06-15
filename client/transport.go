@@ -2,6 +2,7 @@ package client
 
 import (
 	"context"
+	"time"
 
 	"github.com/lodgvideon/poseidon-http-client/conn"
 )
@@ -20,4 +21,9 @@ type transport interface {
 	// close prevents further acquires and closes any underlying conn.
 	// Idempotent.
 	close() error
+
+	// shutdown gracefully drains all in-flight requests and closes
+	// the underlying conn(s) within the given timeout. After the
+	// timeout, any remaining streams are force-closed. Idempotent.
+	shutdown(gracefulTimeout time.Duration) error
 }

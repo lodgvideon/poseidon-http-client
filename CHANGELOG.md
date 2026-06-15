@@ -50,6 +50,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   flag. Backward compatible: nil priority → original SendHeaders
   behavior. 4 frame tests + 3 client tests. (`current`)
 
+- **Graceful shutdown** (RFC 7540 §6.8) — `Conn.Shutdown(gracefulTimeout)`
+  sends GOAWAY(lastClientStreamID, NO_ERROR), marks the conn as
+  draining (NewStream returns `ErrConnDraining`), then waits up to
+  the timeout for in-flight streams to drain. `Client.Shutdown(timeout)`
+  proxies the request down to the underlying *conn.Conn (single-conn
+  transport). Pool transports close all conns in parallel.
+  `markStreamDone` closes a wake-up channel when inflight hits zero.
+  4 conn tests + 3 client tests. (`current`)
+
 - **Automatic response body decompression** (gzip/deflate) — `Request.DisableDecompression`
   opt-out, auto-injected `accept-encoding: gzip` (preserved when caller
   supplies one), `decompressFully` for batch path, `decompressingReader`

@@ -71,6 +71,13 @@ type Conn struct {
 	closed     atomic.Bool
 	readerDone chan struct{}
 
+	// draining is set by Shutdown to mark the conn as draining. New
+	// NewStream calls return ErrConnDraining (RFC 7540 §6.8 graceful
+	// shutdown pattern). drainDone is closed when the inflight count
+	// reaches zero, allowing Shutdown to wake up.
+	draining  atomic.Bool
+	drainDone chan struct{}
+
 	// pingMu guards pingWaiters. pingCounter produces unique payloads.
 	pingMu      sync.Mutex
 	pingWaiters map[[8]byte]chan struct{}
@@ -121,6 +128,7 @@ func NewClientConn(ctx context.Context, transport net.Conn, opts ConnOptions) (*
 		nextID:             1,
 		streams:            map[uint32]*Stream{},
 		readerDone:         make(chan struct{}),
+		drainDone:          make(chan struct{}),
 		pingWaiters:        make(map[[8]byte]chan struct{}),
 		connRecvWindow:     int32(connInitialRecvWindow),
 		peerConnSendWindow: int32(connInitialRecvWindow),
@@ -212,6 +220,9 @@ func (c *Conn) NewStream(_ context.Context) (*Stream, error) {
 	if c.closed.Load() {
 		return nil, ErrConnClosed
 	}
+	if c.draining.Load() {
+		return nil, ErrConnDraining
+	}
 	if c.goAwayReceived.Load() {
 		return nil, ErrGoAway
 	}
@@ -283,6 +294,56 @@ func (c *Conn) Close() error {
 // closeGoAwayDeadline bounds the GOAWAY write during Close so an
 // unresponsive peer cannot block shutdown.
 const closeGoAwayDeadline = 200 * time.Millisecond
+
+// Shutdown performs a graceful connection close (RFC 7540 §6.8).
+// It sends GOAWAY(lastClientStreamID, NO_ERROR) to inform the peer
+// that no new streams will be opened, marks the conn as draining
+// (so NewStream returns ErrConnDraining), and waits up to gracefulTimeout
+// for all in-flight streams to complete naturally. After the timeout
+// (or immediately if there are no in-flight streams), it falls through
+// to the same logic as Close. Idempotent — calling Shutdown on an
+// already-closed conn returns nil without side effects.
+func (c *Conn) Shutdown(gracefulTimeout time.Duration) error {
+	if c.closed.Load() {
+		return nil
+	}
+	if !c.draining.CompareAndSwap(false, true) {
+		// Already draining. Wait for the existing drain to finish,
+		// then fall through to Close.
+		select {
+		case <-c.drainDone:
+		case <-time.After(gracefulTimeout):
+		}
+		return c.Close()
+	}
+	// Send GOAWAY with our last issued client stream ID. The peer
+	// will see this and stop opening new streams; existing streams
+	// keep flowing.
+	if dl, ok := c.transport.(interface{ SetWriteDeadline(time.Time) error }); ok {
+		_ = dl.SetWriteDeadline(time.Now().Add(closeGoAwayDeadline))
+	}
+	c.wmu.Lock()
+	_ = c.fr.WriteGoAway(c.lastClientStreamID(), frame.ErrCodeNoError, nil)
+	c.wmu.Unlock()
+	// Wake any writers blocked in acquireSendCredits so they observe
+	// the draining flag and surface ErrConnDraining to their callers.
+	c.fcOutMu.Lock()
+	if c.fcOutCond != nil {
+		c.fcOutCond.Broadcast()
+	}
+	c.fcOutMu.Unlock()
+	// If no in-flight streams, close immediately. Otherwise wait.
+	if c.inflight == 0 {
+		return c.Close()
+	}
+	timer := time.NewTimer(gracefulTimeout)
+	defer timer.Stop()
+	select {
+	case <-c.drainDone:
+	case <-timer.C:
+	}
+	return c.Close()
+}
 
 // connInitialRecvWindow is the connection-level recv window size. RFC
 // 7540 §6.9.2 fixes this at 65535 octets at handshake; the
@@ -1071,6 +1132,15 @@ func (c *Conn) markStreamDone(id uint32) {
 			c.inflight--
 		}
 		delete(c.streams, id)
+	}
+	// Wake Shutdown when the conn is fully drained.
+	if c.draining.Load() && c.inflight == 0 {
+		select {
+		case <-c.drainDone:
+			// already closed
+		default:
+			close(c.drainDone)
+		}
 	}
 }
 

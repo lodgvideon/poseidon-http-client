@@ -192,6 +192,17 @@ func (c *Client) Close() error {
 	return c.tr.close()
 }
 
+// Shutdown performs a graceful close. New requests receive
+// ErrConnDraining. The transport is given gracefulTimeout to complete
+// in-flight requests; after that it is force-closed. Idempotent.
+// For a single-conn transport, Shutdown sends GOAWAY and waits
+// for the inflight count to reach zero on the underlying *conn.Conn.
+// For pool transports, all conns are closed in parallel (no
+// per-conn draining is exposed at the pool level).
+func (c *Client) Shutdown(gracefulTimeout time.Duration) error {
+	return c.tr.shutdown(gracefulTimeout)
+}
+
 // PoolStats returns a snapshot of the underlying pool's state. It
 // returns the zero Stats when the transport is not a *poolTransport
 // or *managedTransport (e.g. TransportSingleConn) or the pool is

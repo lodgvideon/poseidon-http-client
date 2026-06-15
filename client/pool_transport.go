@@ -3,6 +3,7 @@ package client
 import (
 	"context"
 	"sync/atomic"
+	"time"
 
 	"github.com/lodgvideon/poseidon-http-client/conn"
 )
@@ -43,5 +44,13 @@ func (pt *poolTransport) acquire(ctx context.Context) (*conn.Conn, func(), error
 
 // close implements transport.close. Idempotent.
 func (pt *poolTransport) close() error {
+	return pt.p.Close()
+}
+
+// shutdown implements transport.shutdown. Calls Close on the
+// underlying pool which closes all conns. Use *Pool directly when
+// you need per-conn Shutdown.
+func (pt *poolTransport) shutdown(gracefulTimeout time.Duration) error {
+	_ = gracefulTimeout
 	return pt.p.Close()
 }

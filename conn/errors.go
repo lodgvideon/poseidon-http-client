@@ -34,6 +34,11 @@ var (
 	// last-stream-id continue, but no new streams may be opened on
 	// this connection (RFC 7540 §6.8).
 	ErrGoAway = errors.New("conn: peer sent GOAWAY; no new streams")
+	// ErrConnDraining is returned by NewStream once Shutdown has
+	// been called locally. Existing streams continue, but no new
+	// streams may be opened. Mirrors ErrGoAway semantics for the
+	// outbound (client-initiated) shutdown path.
+	ErrConnDraining = errors.New("conn: connection draining; no new streams")
 )
 
 // ConnError is connection-fatal. After it is returned the Conn is dead

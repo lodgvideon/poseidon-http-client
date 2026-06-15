@@ -126,3 +126,22 @@ func (s *singleConn) close() error {
 	}
 	return nil
 }
+
+// shutdown implements transport.shutdown. Marks the transport as
+// closed, then calls Shutdown on the cached conn (which sends GOAWAY
+// and waits for in-flight streams within the timeout).
+func (s *singleConn) shutdown(gracefulTimeout time.Duration) error {
+	s.mu.Lock()
+	if s.closed {
+		s.mu.Unlock()
+		return nil
+	}
+	s.closed = true
+	cur := s.cur
+	s.cur = nil
+	s.mu.Unlock()
+	if cur != nil {
+		return cur.Shutdown(gracefulTimeout)
+	}
+	return nil
+}

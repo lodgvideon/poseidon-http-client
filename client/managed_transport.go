@@ -2,6 +2,7 @@ package client
 
 import (
 	"context"
+	"time"
 
 	"github.com/lodgvideon/poseidon-http-client/conn"
 )
@@ -19,5 +20,12 @@ func (mt *managedTransport) acquire(ctx context.Context) (*conn.Conn, func(), er
 
 // close implements transport.close. Idempotent.
 func (mt *managedTransport) close() error {
+	return mt.mp.close()
+}
+
+// shutdown implements transport.shutdown. Calls close on the
+// underlying managed pool which closes all sub-pools.
+func (mt *managedTransport) shutdown(gracefulTimeout time.Duration) error {
+	_ = gracefulTimeout
 	return mt.mp.close()
 }
