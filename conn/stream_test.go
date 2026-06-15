@@ -49,7 +49,10 @@ type fakeStreamWriter struct {
 	lastRSTCode frame.ErrCode
 }
 
-func (w *fakeStreamWriter) writeHeaders(_ context.Context, _ *Stream, _ []hpack.HeaderField, _ bool) error {
+func (w *fakeStreamWriter) writeHeaders(ctx context.Context, s *Stream, fields []hpack.HeaderField, endStream bool) error {
+	return w.writeHeadersWithPriority(ctx, s, fields, endStream, nil)
+}
+func (w *fakeStreamWriter) writeHeadersWithPriority(_ context.Context, _ *Stream, _ []hpack.HeaderField, _ bool, _ *frame.Priority) error {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	w.headerCalls++

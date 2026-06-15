@@ -6,6 +6,7 @@ import (
 	"unicode"
 
 	"github.com/lodgvideon/poseidon-http-client/conn"
+	"github.com/lodgvideon/poseidon-http-client/frame"
 )
 
 // Request describes one HTTP/2 request. Required fields: Method, Path.
@@ -83,6 +84,15 @@ type Request struct {
 	// content-encoding: gzip/deflate responses. Response.BytesReceived
 	// reflects wire bytes; Response.Body contains decompressed bytes.
 	DisableDecompression bool
+
+	// Priority embeds an RFC 7540 §5.3 priority hint into the
+	// HEADERS frame. When non-nil the HEADERS frame carries the
+	// PRIORITY flag and a 5-byte priority payload. The server may
+	// use this to weight response delivery (e.g. deliver CSS before
+	// images). StreamDep=0 means root stream (no parent). Weight
+	// must be 1..256 (RFC 7540 §5.3.4). Use Exclusive=true to make
+	// this stream the sole dependent of its parent.
+	Priority *frame.Priority
 }
 
 // validateRequest enforces the up-front rules documented on Request.

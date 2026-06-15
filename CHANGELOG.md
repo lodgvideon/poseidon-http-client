@@ -44,6 +44,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   per-stream variants. Empty payload clears all alt-svc entries.
   6 tests (3 roundtrip + 3 negative). (`a65c5a7`)
 
+- **Priority hints** (RFC 7540 §5.3) — `Request.Priority *frame.Priority`
+  embeds a 5-byte priority block (E + StreamDep + Weight) in the first
+  HEADERS frame. `Stream.SendHeadersWithPriority` carries the PRIORITY
+  flag. Backward compatible: nil priority → original SendHeaders
+  behavior. 4 frame tests + 3 client tests. (`current`)
+
+- **Automatic response body decompression** (gzip/deflate) — `Request.DisableDecompression`
+  opt-out, auto-injected `accept-encoding: gzip` (preserved when caller
+  supplies one), `decompressFully` for batch path, `decompressingReader`
+  for streaming path, `gzipReaderPool` for reader reuse.
+  `Response.BytesReceived` = wire bytes; `Response.Body` = decompressed.
+  10 tests. (`current`)
+
 - **Extended CONNECT protocol** (RFC 8441) —
   `SettingEnableConnectProtocol` (0x8) setting ID.
   `Conn.ConnectProtocolSupported()` checks peer advertisement.

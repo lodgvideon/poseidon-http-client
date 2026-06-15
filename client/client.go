@@ -289,7 +289,7 @@ func (c *Client) sendRequest(ctx context.Context, req *Request) (*sentRequest, e
 	hdrs, putHdrs := buildHeaders(req, c.authority, c.defaultScheme)
 	trailers := hasTrailers(req)
 	endStream := len(req.Body) == 0 && req.BodyReader == nil && !trailers
-	if err := s.SendHeaders(ctx, hdrs, endStream); err != nil {
+	if err := s.SendHeadersWithPriority(ctx, hdrs, endStream, req.Priority); err != nil {
 		putHdrs()
 		_ = s.Close()
 		release()

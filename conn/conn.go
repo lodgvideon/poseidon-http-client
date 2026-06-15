@@ -350,7 +350,11 @@ func (c *Conn) PeerMaxConcurrentStreams() int {
 
 // --- streamWriter implementation (called from *Stream).
 
-func (c *Conn) writeHeaders(_ context.Context, s *Stream, fields []hpack.HeaderField, endStream bool) error {
+func (c *Conn) writeHeaders(ctx context.Context, s *Stream, fields []hpack.HeaderField, endStream bool) error {
+	return c.writeHeadersWithPriority(ctx, s, fields, endStream, nil)
+}
+
+func (c *Conn) writeHeadersWithPriority(_ context.Context, s *Stream, fields []hpack.HeaderField, endStream bool, prio *frame.Priority) error {
 	if c.closed.Load() {
 		return ErrConnClosed
 	}
@@ -381,6 +385,7 @@ func (c *Conn) writeHeaders(_ context.Context, s *Stream, fields []hpack.HeaderF
 		EndHeaders:    true,
 		EndStream:     endStream,
 		PadLength:     c.opts.Padding.ForHeaders(),
+		Priority:      prio,
 	})
 	*buf = block[:0]
 	encBufPool.Put(buf)

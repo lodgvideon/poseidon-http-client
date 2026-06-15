@@ -66,6 +66,7 @@ type StreamEvent struct {
 // Tests fake this out; production code wires it to *Conn.
 type streamWriter interface {
 	writeHeaders(ctx context.Context, s *Stream, fields []hpack.HeaderField, endStream bool) error
+	writeHeadersWithPriority(ctx context.Context, s *Stream, fields []hpack.HeaderField, endStream bool, prio *frame.Priority) error
 	writeData(ctx context.Context, s *Stream, p []byte, endStream bool) error
 	writeRSTStream(s *Stream, code frame.ErrCode) error
 }
@@ -199,13 +200,23 @@ func (s *Stream) push(e StreamEvent) bool {
 // does not split into CONTINUATION). When endStream is true the request
 // side is half-closed.
 func (s *Stream) SendHeaders(ctx context.Context, fields []hpack.HeaderField, endStream bool) error {
+	return s.SendHeadersWithPriority(ctx, fields, endStream, nil)
+}
+
+// SendHeadersWithPriority sends a HEADERS frame with optional
+// PRIORITY fields embedded (RFC 7540 §6.3). When prio is non-nil
+// the HEADERS frame carries the PRIORITY flag plus a 5-byte
+// priority payload. StreamID 0 in prio means root stream (no
+// parent). When prio is nil the frame is emitted identically to
+// SendHeaders.
+func (s *Stream) SendHeadersWithPriority(ctx context.Context, fields []hpack.HeaderField, endStream bool, prio *frame.Priority) error {
 	s.mu.Lock()
 	if s.closed || s.localEnded {
 		s.mu.Unlock()
 		return ErrStreamClosed
 	}
 	s.mu.Unlock()
-	if err := s.w.writeHeaders(ctx, s, fields, endStream); err != nil {
+	if err := s.w.writeHeadersWithPriority(ctx, s, fields, endStream, prio); err != nil {
 		return err
 	}
 	if endStream {
