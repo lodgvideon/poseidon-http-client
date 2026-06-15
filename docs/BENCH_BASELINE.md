@@ -76,8 +76,9 @@ built on the zero-alloc `frame.Framer`. Server-side allocations are negligible;
 | BenchmarkDo_MockTransport    | 82127 | 257  | 8         |
 | BenchmarkDo_MockTransport *2026-06-15 coalesce* | 25721 | 241 | 5 |
 | BenchmarkDo_MockTransport *2026-06-15 sentRequest* | 24010 | 216 | 4 |
+| BenchmarkDo_MockTransport *2026-06-15 buildHeaders* | 23980 | 201 | 3 |
 
-**8 → 4 allocs/op, -20.78% latency (2026-06-15)**.
+**8 → 3 allocs/op, -20.89% latency (2026-06-15)**.
 
 **Coalesce (-14.96% latency, 5 allocs)**: `frame.Framer.WriteHeaders`
 fast path coalesces the 9-byte frame header and the HPACK block fragment
@@ -91,10 +92,25 @@ return `(s, cn, release, err)` — all four values fit in registers and the
 implied struct that would have been created on the heap is no longer needed.
 The `sentRequest` named struct is removed. Benchstat p=0.000, n=10.
 
-Breakdown (5 allocs, 2026-06-15):
-- 2 allocs: `conn.HeaderSlabPool` Get/Put round-trip (response HEADERS slab)
-- 2 allocs: `hdrSlicePool` Get/Put (request HEADERS slice)
+**buildHeaders closure removal (-1 alloc/op, -15 B/op)**: `buildHeaders`
+returned `(slice, put-closure)` and the put-closure captured `*sp` from the
+pool. The closure escaped to the heap on every call (pprof -alloc_objects
+flagged `client.go:604: 2.16M / 2.85M alloc_space = 76%` of all
+allocations). Caller (sendRequest) now does Get/Put inline; `buildHeaders`
+takes `*[]conn.HeaderField` as a parameter. Initial naive attempt (2026-06-15
+first round) was reverted because the `*sp` parameter appeared to escape
+when read in isolation; a minimal standalone reproduction later showed the
+parameter stays on the stack as long as the function is small enough to
+inline (which it is). Benchstat p=0.000, n=10.
+
+Breakdown (3 allocs, 2026-06-15):
+- 1 alloc: `conn.HeaderSlabPool` Get (response HEADERS slab)
+- 1 alloc: `hdrSlicePool` Get (request HEADERS slice)
 - 1 alloc: `encBufPool` Get (HPACK encode buffer)
+
+Put on each pair amortizes to 0.5/op on a hot path with steady
+sync.Pool reuse; the bench rounds to 3 allocs/op because the Get
+alloc is the dominant cost.
 
 **Key changes in D.1:**
 - `Do`/`DoStream`/`Retryer.Do` take caller-provided `*Response`/`*StreamResponse` (breaking API change)

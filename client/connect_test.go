@@ -16,8 +16,9 @@ func TestBuildHeaders_ProtocolExtendedConnect(t *testing.T) {
 		Path:     "/chat",
 		Protocol: "websocket",
 	}
-	hdrs, put := buildHeaders(req, "default.example.com", "https")
-	defer put()
+	sp := hdrSlicePool.Get().(*[]conn.HeaderField)
+	hdrs := buildHeaders(req, "default.example.com", "https", sp)
+	defer func() { *sp = (*sp)[:0]; hdrSlicePool.Put(sp) }()
 
 	var foundProtocol bool
 	for _, h := range hdrs {
@@ -42,8 +43,9 @@ func TestBuildHeaders_NoProtocolWhenEmpty(t *testing.T) {
 		Authority: "example.com",
 		Path:      "/",
 	}
-	hdrs, put := buildHeaders(req, "default.example.com", "https")
-	defer put()
+	sp := hdrSlicePool.Get().(*[]conn.HeaderField)
+	hdrs := buildHeaders(req, "default.example.com", "https", sp)
+	defer func() { *sp = (*sp)[:0]; hdrSlicePool.Put(sp) }()
 
 	for _, h := range hdrs {
 		if string(h.Name) == ":protocol" {
@@ -65,8 +67,9 @@ func TestBuildHeaders_ProtocolOrdering(t *testing.T) {
 			{Name: []byte("sec-websocket-key"), Value: []byte("dGhlIHNhbXBsZSBub25jZQ==")},
 		},
 	}
-	hdrs, put := buildHeaders(req, "default.example.com", "https")
-	defer put()
+	sp := hdrSlicePool.Get().(*[]conn.HeaderField)
+	hdrs := buildHeaders(req, "default.example.com", "https", sp)
+	defer func() { *sp = (*sp)[:0]; hdrSlicePool.Put(sp) }()
 
 	// :protocol must appear after :path but before regular headers
 	protoIdx := -1

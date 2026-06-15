@@ -345,16 +345,19 @@ func (c *Client) sendRequest(ctx context.Context, req *Request) (s *conn.Stream,
 		return nil, nil, nil, err
 	}
 
-	hdrs, putHdrs := buildHeaders(req, c.authority, c.defaultScheme)
+	sp := hdrSlicePool.Get().(*[]conn.HeaderField)
+	hdrs := buildHeaders(req, c.authority, c.defaultScheme, sp)
 	trailers := hasTrailers(req)
 	endStream := len(req.Body) == 0 && req.BodyReader == nil && !trailers
 	if err = s.SendHeadersWithPriority(ctx, hdrs, endStream, req.Priority); err != nil {
-		putHdrs()
+		*sp = (*sp)[:0]
+		hdrSlicePool.Put(sp)
 		_ = s.Close()
 		release()
 		return nil, nil, nil, err
 	}
-	putHdrs()
+	*sp = (*sp)[:0]
+	hdrSlicePool.Put(sp)
 
 	if !endStream || trailers {
 		if err = writeRequestBody(ctx, s, req, !trailers); err != nil {
@@ -554,7 +557,9 @@ func unsafeStringToBytes(s string) []byte {
 
 // hdrSlicePool recycles the []conn.HeaderField backing array used by
 // buildHeaders. EncodeBlock is synchronous, so the slice is safe to
-// return immediately after SendHeaders returns.
+// return immediately after SendHeaders returns. The buildHeaders
+// caller (sendRequest) does the Get/Put directly so that no
+// put-closure escapes to the heap.
 var hdrSlicePool = sync.Pool{
 	New: func() any {
 		s := make([]conn.HeaderField, 0, 10)
@@ -563,9 +568,11 @@ var hdrSlicePool = sync.Pool{
 }
 
 // buildHeaders assembles the on-wire HEADERS slice with pseudo-headers
-// first. Returns the slice and a put function; caller MUST call put()
-// after SendHeaders returns to return the slice to the pool.
-func buildHeaders(req *Request, defaultAuthority, defaultScheme string) ([]conn.HeaderField, func()) {
+// first. sp is the pooled backing array (caller obtains from
+// hdrSlicePool.Get and is responsible for Put after SendHeaders).
+// Returns the populated slice. No put-closure is returned — callers
+// do \`*sp = (*sp)[:0]; hdrSlicePool.Put(sp)\` inline.
+func buildHeaders(req *Request, defaultAuthority, defaultScheme string, sp *[]conn.HeaderField) []conn.HeaderField {
 	scheme := req.Scheme
 	if scheme == "" {
 		scheme = defaultScheme
@@ -574,7 +581,6 @@ func buildHeaders(req *Request, defaultAuthority, defaultScheme string) ([]conn.
 	if authority == "" {
 		authority = defaultAuthority
 	}
-	sp := hdrSlicePool.Get().(*[]conn.HeaderField)
 	*sp = (*sp)[:0]
 	*sp = append(*sp,
 		conn.HeaderField{Name: hdrMethod, Value: unsafeStringToBytes(req.Method)},
@@ -601,10 +607,7 @@ func buildHeaders(req *Request, defaultAuthority, defaultScheme string) ([]conn.
 	if tv := trailerAnnouncement(req); len(tv) > 0 {
 		*sp = append(*sp, conn.HeaderField{Name: hdrTrailer, Value: tv})
 	}
-	return *sp, func() {
-		*sp = (*sp)[:0]
-		hdrSlicePool.Put(sp)
-	}
+	return *sp
 }
 
 // resolveTrailerFields returns the effective trailer fields for req.
