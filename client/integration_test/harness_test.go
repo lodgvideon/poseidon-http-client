@@ -12,6 +12,12 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"golang.org/x/net/http2"
+	"golang.org/x/net/http2/h2c"
+
+	"github.com/lodgvideon/poseidon-http-client/client"
+	"github.com/lodgvideon/poseidon-http-client/conn"
 )
 
 // ServerKind identifies which HTTP/2 server implementation is under test.
@@ -75,10 +81,13 @@ func TestMain(m *testing.M) {
 	os.Exit(code)
 }
 
-// startGoReference launches an in-process HTTP/2 server with all test fixtures.
+// startGoReference launches an in-process h2c (HTTP/2 cleartext) server.
 func startGoReference() {
 	mux := http.NewServeMux()
 	registerFixtures(mux)
+
+	h2s := &http2.Server{}
+	h := h2c.NewHandler(mux, h2s)
 
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -86,18 +95,11 @@ func startGoReference() {
 	}
 
 	goRefServer = &http.Server{
-		Handler:     mux,
+		Handler:     h,
 		IdleTimeout: 60 * time.Second,
 	}
-	// Enable HTTP/2 (using crypto/tls with self-signed cert is complex here;
-	// for h2c we use the plaintext HTTP/2 prior-knowledge path).
-	// For now, we register as an h2c reference via the client's PlaintextDialer.
 	goRefURL = "http://" + ln.Addr().String()
 
-	// Use golang.org/x/net/http2/h2c for cleartext h2.
-	// We avoid the import here and let the client's PlaintextDialer do h2c.
-	// The Go server runs plain HTTP/1.1; the h2c layer is added in the
-	// full harness (commit 2). For commit 1 (infra), we just need it to boot.
 	go func() { _ = goRefServer.Serve(ln) }()
 
 	allServers[ServerGoHTTP] = &TestServer{
@@ -189,8 +191,60 @@ func shutdownGoReference() {
 	}
 }
 
+// newTestClient creates a poseidon *client.Client connected to srv.
+// Uses PlaintextDialer for h2c, TLSDialer (InsecureSkipVerify) for h2.
+// The client is automatically closed via t.Cleanup.
+func newTestClient(t *testing.T, srv *TestServer) *client.Client {
+	t.Helper()
+
+	addr := srv.H2CAddr
+	scheme := "http"
+	var dialer conn.Dialer = &conn.PlaintextDialer{}
+
+	if addr == "" {
+		// TLS mode
+		addr = srv.TLSAddr
+		scheme = "https"
+		dialer = &conn.TLSDialer{Config: tlsConfig()}
+	}
+
+	c, err := client.NewClient(client.ClientOptions{
+		Addr:          addr,
+		DefaultScheme: scheme,
+		ConnOpts: conn.ConnOptions{
+			Dialer: dialer,
+		},
+	})
+	if err != nil {
+		t.Fatalf("NewClient(%s): %v", srv.Kind, err)
+	}
+
+	t.Cleanup(func() {
+		_ = c.Close()
+	})
+	return c
+}
+
+// doGET is a convenience wrapper: sends GET, returns status + body.
+func doGET(t *testing.T, c *client.Client, path string, wantBody bool) (int, []byte) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	var resp client.Response
+	resp.Reset()
+	err := c.Do(ctx, &client.Request{
+		Method:   "GET",
+		Path:     path,
+		WantBody: wantBody,
+	}, &resp)
+	if err != nil {
+		t.Fatalf("Do GET %s: %v", path, err)
+	}
+	return resp.Status, resp.Body
+}
+
 // tlsConfig returns a TLS config that skips cert verification (self-signed).
-// This is intentional: we test HTTP/2 protocol behavior, not PKI.
 func tlsConfig() *tls.Config {
 	return &tls.Config{
 		InsecureSkipVerify: true, //nolint:gosec // test-only, self-signed certs
