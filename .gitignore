@@ -32,6 +32,12 @@ test/integration/fixtures/certs/
 
 # Maven build output
 test/integration/undertow-server/target/
+test/integration/undertow-server/bin/
+
+# Eclipse project metadata (Maven users don't need .project/.classpath)
+test/integration/undertow-server/.project
+test/integration/undertow-server/.classpath
+test/integration/undertow-server/.settings/
 
 # Codesearch index
 .codesearch.db/
