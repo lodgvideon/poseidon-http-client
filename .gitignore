@@ -41,3 +41,6 @@ test/integration/undertow-server/.settings/
 
 # Codesearch index
 .codesearch.db/
+
+# Runtime logs
+.logs/
