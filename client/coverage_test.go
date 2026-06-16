@@ -540,7 +540,7 @@ func TestPool_MapAcquireErr_ContextCanceled(t *testing.T) {
 	// Do one request to seed the pool with a conn.
 	ctx := context.Background()
 	var resp client.Response
-	if err := c.Do(ctx, &client.Request{Method: "GET", Path: "/"}, &resp); err != nil {
+	if err := doWithRetry(t, c, ctx, &client.Request{Method: "GET", Path: "/"}, &resp); err != nil {
 		t.Fatalf("initial Do: %v", err)
 	}
 

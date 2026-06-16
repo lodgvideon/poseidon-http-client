@@ -50,7 +50,9 @@ func TestBuiltinShouldRetry(t *testing.T) {
 	}{
 		{"REFUSED_STREAM", &StreamResetError{Code: frame.ErrCodeRefusedStream}, true},
 		{"RST CANCEL", &StreamResetError{Code: frame.ErrCodeCancel}, false},
-		{"RST INTERNAL_ERROR", &StreamResetError{Code: frame.ErrCodeInternalError}, false},
+		{"RST INTERNAL_ERROR", &StreamResetError{Code: frame.ErrCodeInternalError}, true},
+		{"RST ENHANCE_YOUR_CALM", &StreamResetError{Code: frame.ErrCodeEnhanceYourCalm}, true},
+		{"RST PROTOCOL_ERROR", &StreamResetError{Code: frame.ErrCodeProtocolError}, false},
 		{"conn.ErrGoAway", conn.ErrGoAway, true},
 		{"DialError", &DialError{Addr: "x", Err: errors.New("boom")}, true},
 		{"ErrDialBackoff", ErrDialBackoff, true},

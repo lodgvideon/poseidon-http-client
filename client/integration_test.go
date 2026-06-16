@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/tls"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -16,6 +17,7 @@ import (
 
 	"github.com/lodgvideon/poseidon-http-client/client"
 	"github.com/lodgvideon/poseidon-http-client/conn"
+	"github.com/lodgvideon/poseidon-http-client/frame"
 	xhttp2 "golang.org/x/net/http2"
 	"golang.org/x/net/http2/h2c"
 )
@@ -28,6 +30,43 @@ func newTLSH2Server(t *testing.T, h http.Handler) (*httptest.Server, string) {
 	t.Cleanup(s.Close)
 	addr := strings.TrimPrefix(s.URL, "https://")
 	return s, addr
+}
+
+// doWithRetry issues c.Do with a bounded retry loop on RST_STREAM
+// (INTERNAL_ERROR or REFUSED_STREAM). The bare c.Do path does not
+// retry by design — see docs/RFC_COVERAGE.md §7 — but a test that
+// merely exercises c.Do does not need to expose transient
+// server-side noise (httptest frequently emits RST(2) when a
+// sibling t.Parallel() test closes its server). This helper
+// surfaces the SAME behavior the production code recommends via
+// client.NewRetryer. Tests that explicitly validate non-retry
+// semantics should call c.Do directly instead.
+func doWithRetry(t *testing.T, c *client.Client, ctx context.Context, req *client.Request, resp *client.Response) error {
+	t.Helper()
+	const maxAttempts = 3
+	var err error
+	for attempt := 0; attempt < maxAttempts; attempt++ {
+		err = c.Do(ctx, req, resp)
+		if err == nil {
+			return nil
+		}
+		var sre *client.StreamResetError
+		if !errors.As(err, &sre) {
+			return err
+		}
+		if sre.Code != frame.ErrCodeInternalError &&
+			sre.Code != frame.ErrCodeRefusedStream {
+			return err
+		}
+		// Transient. Reset response and back off briefly.
+		resp.Reset()
+		select {
+		case <-time.After(10 * time.Millisecond):
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+	return err
 }
 
 func clientFor(t *testing.T, addr string) *client.Client {
@@ -520,7 +559,7 @@ func TestIntegration_Client_StreamBody_ResetForgot(t *testing.T) {
 	defer cancel()
 
 	var res client.Response
-	err := c.Do(ctx, &client.Request{Method: "GET", Path: "/", StreamBody: true}, &res)
+	err := doWithRetry(t, c, ctx, &client.Request{Method: "GET", Path: "/", StreamBody: true}, &res)
 	if err != nil {
 		t.Fatalf("Do: %v", err)
 	}

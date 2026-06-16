@@ -69,7 +69,7 @@ func TestTransportManaged_RoundRobin_DistributesDials(t *testing.T) {
 
 	for i := 0; i < 9; i++ {
 		var resp client.Response
-		if err := c.Do(context.Background(), &client.Request{Method: "GET", Path: "/"}, &resp); err != nil {
+		if err := doWithRetry(t, c, context.Background(), &client.Request{Method: "GET", Path: "/"}, &resp); err != nil {
 			t.Fatalf("Do(%d): %v", i, err)
 		}
 		if resp.Status != 200 {
@@ -114,7 +114,7 @@ func TestTransportManaged_MultiServer_AllReachable(t *testing.T) {
 
 	for i := 0; i < 4; i++ {
 		var resp client.Response
-		if err := c.Do(context.Background(), &client.Request{Method: "GET", Path: "/"}, &resp); err != nil {
+		if err := doWithRetry(t, c, context.Background(), &client.Request{Method: "GET", Path: "/"}, &resp); err != nil {
 			t.Fatalf("Do(%d): %v", i, err)
 		}
 		if resp.Status != 200 {

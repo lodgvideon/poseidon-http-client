@@ -96,6 +96,14 @@ non-ACK PING frames with `ACK=1` and the original 8-byte payload
 | §8.1    | Conformance | TestConformance_RFC7540_Sec8_1_StreamBody_EndStream (client/) |
 | §8.1    | Integration | TestIntegration_Client_StreamBody_Small, TestIntegration_Client_StreamBody_Large, TestIntegration_Client_StreamBody_CloseEarly (client/) |
 | §8.1.2.1 | Conformance | TestConformance_RFC7540_Sec8_1_2_1_PseudoHeadersFirst (client/) |
+| §8.1.2.2 | Negative    | TestValidateRequest_PseudoHeaderInRegular (client/) — request validator rejects pseudo-header (':authority') in regular Headers slice |
+| §8.1.2.3 | Negative    | TestConformance_RFC7540_Sec8_1_2_3_ForbidsConnection, _ForbidsKeepAlive, _ForbidsProxyConnection, _ForbidsTransferEncoding, _ForbidsUpgrade (client/) — request validator rejects RFC 7540 §8.1.2.3 connection-specific headers as request-smuggling vectors |
+| §8.1.2.3 | Negative    | TestConformance_RFC7540_Sec8_1_2_3_TEOnlyTrailers (client/) — TE header allowed ONLY with value "trailers"; any other value rejected |
+| §8.1.2.6 | Negative    | TestConformance_RFC7540_Sec8_1_2_6_... (client/) — pseudo-header values conform to token grammar (method / path / scheme / authority / status) |
+| RFC 8441 §4 | Negative | TestConformance_RFC8441_Sec4_ProtocolRequiresConnectMethod (client/) — :protocol pseudo-header MUST NOT appear unless Method=CONNECT |
+| RFC 8441 §4 | Conformance | TestConformance_RFC8441_Sec4_Protocol_EmptyOnConnect_OK, _NonEmptyOnConnect_OK (client/) — CONNECT with/without :protocol is allowed; :protocol emission controlled by Protocol field |
+| §7     | Negative    | TestConformance_RFC7540_Sec7_RetryOnInternalError, _RetryOnEnhanceYourCalm, _NoRetryOnProtocolError, _NoRetryOnCancel (client/) — builtinShouldRetry classifies RST codes: REFUSED_STREAM/INTERNAL_ERROR/ENHANCE_YOUR_CALM → retry; PROTOCOL_ERROR/CANCEL → no retry |
+| §6.8   | Conformance | TestConformance_RFC7540_Sec6_8_RetryGoAway_StillRetries (client/) — GOAWAY continues to be retried (regression check) |
 | §5.1.2   | Conformance | TestConformance_RFC7540_Sec5_1_2_PoolGatesOnPeerMaxStreams (client/) |
 | §6.8     | Conformance | TestConformance_RFC7540_Sec6_8_PoolDrainsOnGoAway (client/) |
 | §6.8     | Conformance | TestConformance_RFC7540_Sec6_8_PoolEjectsDeadConnOnRelease (client/) — pool evicts dead conn via release path, not health-check tick |
@@ -105,9 +113,11 @@ non-ACK PING frames with `ACK=1` and the original 8-byte payload
 | §6.1.1   | Roundtrip   | TestFramer_DataPadded_Roundtrip (frame/) — padded DATA frame encode/decode |
 | §6.2.2   | Roundtrip   | TestFramer_HeadersPadded_RoundTrip (frame/) — padded HEADERS frame encode/decode |
 | §8.2     | Integration | TestConn_PushPromise_DeliveredToParentStream (conn/) — EventPushPromise with PushStreamID; pushed stream registered and headers decoded |
+| §8.2     | Integration | TestIntegration_Push_HandlerInvoked, _Disabled (client/) — server push end-to-end; handler invocation and PROTOCOL_ERROR when push disabled |
+| §8.2     | Integration | TestIntegration_Push_HandlerReceivesNon2xx, _MultipleConcurrent (client/) — pushed stream with non-2xx status reaches handler; 4 concurrent PUSH_PROMISE frames all delivered |
 | §8.2     | Negative    | TestConn_PushPromise_DisabledReturnsProtocolError (conn/) — PUSH_PROMISE rejected with PROTOCOL_ERROR when EnablePush=false |
-| §8.2     | Integration | TestIntegration_Push_HandlerInvoked (client/) — PushHandler callback receives fully drained pushed Response |
-| §8.2     | Negative    | TestIntegration_Push_Disabled (client/) — push disabled when PushHandler=nil; server push rejected |
+| §5.2     | Negative    | TestConformance_RFC7541_C5_2_HuffmanDecode_InvalidCode, _PrefixOfEos, _EmptyInput (hpack/) — malformed Huffman input returns ErrInvalidHuffman; empty input is valid |
+| §5.2     | Roundtrip   | TestConformance_RFC7541_C5_2_HuffmanDecode_LongString_RoundTrip (hpack/) — 1024-byte ASCII string round-trips through Huffman encode/decode |
 
 ## RFC 8336 — ORIGIN Frame
 

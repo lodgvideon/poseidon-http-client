@@ -102,6 +102,13 @@ type dnsResolver struct {
 	rmu      sync.Mutex
 	cached   []Address
 	cachedAt time.Time
+
+	// now is overridable for tests so the TTL boundary can be
+	// pinned without relying on the host's time.Now() resolution
+	// (which is not guaranteed to advance monotonically by even
+	// one nanosecond between two calls in the same goroutine —
+	// see https://github.com/golang/go/issues/50929).
+	now func() time.Time
 }
 
 // DNSResolver constructs a DNS-backed Resolver for the given host:port.
@@ -119,16 +126,31 @@ func newDNSResolverWithLookup(host string, port int, opts DNSOptions, rsv dnsLoo
 	if opts.TTL <= 0 {
 		opts.TTL = 30 * time.Second
 	}
-	return &dnsResolver{host: host, port: port, opts: opts, rsv: rsv}
+	return &dnsResolver{
+		host: host, port: port, opts: opts, rsv: rsv,
+		now: time.Now,
+	}
+}
+
+// setNow overrides the clock used by the cache-TTL check. Tests use
+// this to pin the TTL boundary without relying on host time.Now()
+// resolution; nil restores time.Now. Not safe to call concurrently
+// with Resolve — tests must serialize.
+func (r *dnsResolver) setNow(now func() time.Time) {
+	if now == nil {
+		now = time.Now
+	}
+	r.now = now
 }
 
 // Resolve returns the cached address set if within TTL. Otherwise
 // refreshes via dnsLookup. On lookup failure with a non-empty cache,
 // returns (cache, error) — the cache wins, the error is a soft warning.
 func (r *dnsResolver) Resolve(ctx context.Context) ([]Address, error) {
+	now := r.now()
 	r.rmu.Lock()
 	defer r.rmu.Unlock()
-	if r.cached != nil && time.Since(r.cachedAt) < r.opts.TTL {
+	if r.cached != nil && now.Sub(r.cachedAt) < r.opts.TTL {
 		return r.cached, nil
 	}
 	ips, err := r.rsv.LookupIPAddr(ctx, r.host)
@@ -152,7 +174,7 @@ func (r *dnsResolver) Resolve(ctx context.Context) ([]Address, error) {
 		return nil, ErrNoAddresses
 	}
 	r.cached = addrs
-	r.cachedAt = time.Now()
+	r.cachedAt = r.now()
 	return addrs, nil
 }
 

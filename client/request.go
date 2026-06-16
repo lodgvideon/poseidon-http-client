@@ -3,6 +3,7 @@ package client
 import (
 	"fmt"
 	"io"
+	"strings"
 	"time"
 	"unicode"
 
@@ -104,6 +105,24 @@ type Request struct {
 	Timeout time.Duration
 }
 
+// forbiddenRequestHeader reports whether name (already lower-cased ASCII)
+// is one of the connection-specific headers that RFC 7540 §8.1.2.3
+// forbids endpoints from generating. The TE header is handled
+// separately because it is allowed only when its value is exactly
+// "trailers".
+func forbiddenRequestHeader(name string) bool {
+	switch name {
+	case "connection", "keep-alive", "proxy-connection",
+		"transfer-encoding", "upgrade":
+		return true
+	}
+	return false
+}
+
+// isTEHeader reports whether name is "te" (RFC 7540 §8.1.2.3 allows
+// TE only with the value "trailers"; any other value is forbidden).
+func isTEHeader(name string) bool { return name == "te" }
+
 // validateRequest enforces the up-front rules documented on Request.
 // Returns an error wrapping ErrInvalidRequest with a human-readable
 // detail.
@@ -117,10 +136,32 @@ func validateRequest(r *Request) error {
 	if r.Path == "" || containsAnyWhitespace(r.Path) {
 		return fmt.Errorf("%w: path must be non-empty without whitespace", ErrInvalidRequest)
 	}
+	// RFC 8441 §4: the :protocol pseudo-header MAY appear ONLY when
+	// Method is "CONNECT". Sending :protocol on any other method is
+	// a protocol violation. The server-side check
+	// (SETTINGS_ENABLE_CONNECT_PROTOCOL=1) is the server's
+	// responsibility, not the client's.
+	if r.Protocol != "" && r.Method != "CONNECT" {
+		return fmt.Errorf("%w: :protocol pseudo-header requires Method=CONNECT (RFC 8441 §4), got %q",
+			ErrInvalidRequest, r.Method)
+	}
+	// RFC 7540 §8.1.2.3: connection-specific headers MUST NOT appear
+	// in HTTP/2 requests. Sending any of them is a request-smuggling
+	// vector through HTTP/1.1 downgrading intermediaries.
 	for i := range r.Headers {
-		if len(r.Headers[i].Name) > 0 && r.Headers[i].Name[0] == ':' {
+		hf := r.Headers[i]
+		if len(hf.Name) > 0 && hf.Name[0] == ':' {
 			return fmt.Errorf("%w: pseudo-header %q in regular Headers slice",
-				ErrInvalidRequest, r.Headers[i].Name)
+				ErrInvalidRequest, hf.Name)
+		}
+		name := strings.ToLower(string(hf.Name))
+		if forbiddenRequestHeader(name) {
+			return fmt.Errorf("%w: %q header is forbidden in HTTP/2 requests (RFC 7540 §8.1.2.3)",
+				ErrInvalidRequest, hf.Name)
+		}
+		if isTEHeader(name) && !strings.EqualFold(string(hf.Value), "trailers") {
+			return fmt.Errorf("%w: TE header value %q forbidden; only %q is allowed (RFC 7540 §8.1.2.3)",
+				ErrInvalidRequest, hf.Value, "trailers")
 		}
 	}
 	for i := range r.Trailers {

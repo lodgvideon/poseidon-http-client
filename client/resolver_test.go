@@ -129,16 +129,59 @@ func TestDNSResolver_Resolve_StaleOnError(t *testing.T) {
 		return nil, errors.New("dns: connection refused")
 	}}
 	r := newDNSResolverWithLookup("svc.local", 80, DNSOptions{TTL: time.Nanosecond}, fl)
+	// Pin the clock so the TTL boundary is deterministic on every
+	// host. Without this, time.Now() resolution varies by OS and
+	// kernel and the second Resolve may incorrectly hit the cache
+	// (see https://github.com/golang/go/issues/50929). The fake
+	// clock advances by 2 ns per call, exceeding the 1 ns TTL.
+	tick := 0
+	clock := time.Unix(1_700_000_000, 0)
+	r.setNow(func() time.Time {
+		tick++
+		return clock.Add(time.Duration(tick) * 2 * time.Nanosecond)
+	})
 	if _, err := r.Resolve(context.Background()); err != nil {
 		t.Fatalf("first Resolve err = %v", err)
 	}
-	// TTL=ns ensures the second call goes through to the lookup (which now errors).
+	// Second call: cache is now stale (clock advanced 4 ns, TTL is 1 ns),
+	// lookup fails, but cache is non-empty so we get (cache, err).
 	got, err := r.Resolve(context.Background())
 	if err == nil {
 		t.Errorf("second Resolve err = nil, want non-nil (soft warning)")
 	}
 	if len(got) != 1 || got[0].Host != "10.0.0.1" {
 		t.Errorf("Resolve = %v, want cached [10.0.0.1:80]", got)
+	}
+}
+
+// TestDNSResolver_Resolve_StaleOnError_AlsoPassesWithFreshCache confirms
+// the negative branch: when the cache is still fresh, lookup is NOT
+// called and no error is returned. The test pins the clock so TTL
+// never elapses, even across two Resolve calls.
+func TestDNSResolver_Resolve_StaleOnError_AlsoPassesWithFreshCache(t *testing.T) {
+	t.Parallel()
+	var attempt atomic.Int32
+	fl := &fakeLookup{fn: func(_ string) ([]net.IPAddr, error) {
+		attempt.Add(1)
+		return []net.IPAddr{{IP: net.ParseIP("10.0.0.1")}}, nil
+	}}
+	r := newDNSResolverWithLookup("svc.local", 80, DNSOptions{TTL: time.Hour}, fl)
+	// Frozen clock: TTL never elapses.
+	clock := time.Unix(1_700_000_000, 0)
+	r.setNow(func() time.Time { return clock })
+
+	if _, err := r.Resolve(context.Background()); err != nil {
+		t.Fatalf("first Resolve err = %v", err)
+	}
+	got, err := r.Resolve(context.Background())
+	if err != nil {
+		t.Fatalf("second Resolve err = %v, want nil (cache hit, no lookup)", err)
+	}
+	if len(got) != 1 || got[0].Host != "10.0.0.1" {
+		t.Errorf("Resolve = %v, want [10.0.0.1:80]", got)
+	}
+	if c := attempt.Load(); c != 1 {
+		t.Errorf("LookupIPAddr calls = %d, want 1 (second call must hit cache)", c)
 	}
 }
 

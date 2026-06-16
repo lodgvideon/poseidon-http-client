@@ -1,3 +1,13 @@
+//go:build e2e_remote
+
+// e2e_stress_test.go hits a real public HTTP/2 endpoint
+// (www.google.com:443) to exercise the client end-to-end. These tests
+// are inherently flaky because the remote server can RST_STREAM,
+// GOAWAY, rate-limit, or re-route at any time — none of which
+// indicate a client bug. The reproduction of one such flake is in
+// repro_rst7_test.go (always-on).
+//
+// Run with:  go test -tags=e2e_remote ./client/...
 package client_test
 
 import (

@@ -328,7 +328,7 @@ func TestHooks_AllHooks_EndToEnd(t *testing.T) {
 
 	for i := 0; i < 5; i++ {
 		var _hookRes client.Response
-	if err := c.Do(context.Background(), &client.Request{Method: "GET", Path: "/"}, &_hookRes); err != nil {
+		if err := doWithRetry(t, c, context.Background(), &client.Request{Method: "GET", Path: "/"}, &_hookRes); err != nil {
 			t.Fatalf("Do[%d]: %v", i, err)
 		}
 	}

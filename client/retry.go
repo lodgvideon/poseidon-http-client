@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/lodgvideon/poseidon-http-client/conn"
+	"github.com/lodgvideon/poseidon-http-client/frame"
 )
 
 // isIdempotent reports whether req may be retried after a transport
@@ -34,8 +35,25 @@ func builtinShouldRetry(err error) bool {
 		return false
 	}
 	var sre *StreamResetError
-	if errors.As(err, &sre) && sre.Code == conn.ErrCodeRefusedStream {
-		return true
+	if errors.As(err, &sre) {
+		switch sre.Code {
+		case conn.ErrCodeRefusedStream,
+			frame.ErrCodeInternalError,
+			frame.ErrCodeEnhanceYourCalm:
+			// Transient per RFC 7540 §7:
+			//   REFUSED_STREAM (§8.1.4) — server did not process the
+			//     request; safe to retry.
+			//   INTERNAL_ERROR (§7) — peer encountered an unexpected
+			//     internal error; often a server-side panic or race
+			//     in concurrent shutdown (httptest exhibits this when
+			//     a sibling t.Parallel() test closes its server). Safe
+			//     to retry; if it persists, the next call will fail
+			//     the same way and the caller sees the real error.
+			//   ENHANCE_YOUR_CALM (§7) — explicit rate-limit signal.
+			//     Caller must respect backoff; the Retryer's own
+			//     Backoff() function does that.
+			return true
+		}
 	}
 	if errors.Is(err, conn.ErrGoAway) {
 		return true
