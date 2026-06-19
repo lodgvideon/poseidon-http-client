@@ -1125,7 +1125,8 @@ func (c *Conn) keepaliveLoop(interval time.Duration) {
 	}
 }
 
-func (c *Conn) bumpFramesSent() { c.atomicFramesSent.Add(1) }
+func (c *Conn) bumpFramesSent()     { c.atomicFramesSent.Add(1) }
+func (c *Conn) bumpFramesReceived() { c.atomicFramesReceived.Add(1) }
 
 // readerLoop owns frame.ReadFrame for the lifetime of the connection.
 // On a typed *ConnError, emits GOAWAY with the error code before
@@ -1141,7 +1142,6 @@ func (c *Conn) readerLoop() {
 			c.shutdownStreams(err)
 			return
 		}
-		c.atomicFramesReceived.Add(1)
 	}
 }
 
