@@ -50,10 +50,11 @@ linters:
             - disableChecksOnConstants
   exclusions:
     rules:
-      # errcheck: tolerate ignored errors in *_test.go where the test
-      # body asserts behavior via other means.
+      # errcheck + gosec: tolerate ignored errors in *_test.go where the
+      # test body asserts behavior via other means; G104 false-positives
+      # (e.g. w.Write in handler funcs, gzip.Writer.Close in setup code).
       - path: _test\.go$
-        linters: [errcheck]
+        linters: [errcheck, gosec]
 
 issues:
   max-issues-per-linter: 0

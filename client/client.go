@@ -320,6 +320,7 @@ func (c *Client) observeDone(req *Request, authority string, status int, bytesSe
 	}
 }
 
+// Do executes a synchronous HTTP/2 request, populating resp on success.
 func (c *Client) Do(ctx context.Context, req *Request, resp *Response) error {
 	if err := validateRequest(req); err != nil {
 		return err
@@ -586,7 +587,7 @@ var (
 // The caller must not mutate the returned slice. This avoids the
 // allocation of []byte(string) in the hot header-building path.
 func unsafeStringToBytes(s string) []byte {
-	return unsafe.Slice(unsafe.StringData(s), len(s))
+	return unsafe.Slice(unsafe.StringData(s), len(s)) //nolint:gosec
 }
 
 // hdrSlicePool recycles the []conn.HeaderField backing array used by
@@ -778,43 +779,19 @@ func drainResponse(ctx context.Context, cn *conn.Conn, s *conn.Stream, req *Requ
 		}
 		switch ev.Type {
 		case conn.EventHeaders:
-			if gotHeaders {
-				if ev.EndStream {
-					return nil
-				}
-				continue
-			}
-			n, perr := parseStatus(ev.Headers, &resp.Headers)
+			done, perr := handleHeadersEvent(ev, req, resp, &gotHeaders, &enc)
 			if perr != nil {
 				return perr
 			}
-			resp.Status = n
-			if ev.Slab != nil {
-				resp.slabs = append(resp.slabs, ev.Slab)
-			}
-			if !req.DisableDecompression {
-				enc = detectEncoding(resp.Headers)
-			}
-			gotHeaders = true
-			if ev.EndStream {
+			if done {
 				return nil
 			}
 		case conn.EventData:
-			resp.BytesReceived += int64(len(ev.Data))
-			if resp.BytesReceived > maxBody {
-				return fmt.Errorf("%w: received %d bytes, limit %d", ErrBodyTooLarge, resp.BytesReceived, maxBody)
+			done, derr := handleDataEvent(ev, req, resp, enc, maxBody, maxDecompressed)
+			if derr != nil {
+				return derr
 			}
-			if req.WantBody && len(ev.Data) > 0 {
-				resp.Body = append(resp.Body, ev.Data...)
-			}
-			if ev.EndStream {
-				if req.WantBody && enc != EncodingIdentity {
-					decoded, derr := decompressFully(enc, resp.Body, maxDecompressed)
-					if derr != nil {
-						return derr
-					}
-					resp.Body = decoded
-				}
+			if done {
 				return nil
 			}
 		case conn.EventTrailers:
@@ -841,6 +818,50 @@ func drainResponse(ctx context.Context, cn *conn.Conn, s *conn.Stream, req *Requ
 			}
 		}
 	}
+}
+
+// handleHeadersEvent processes a single EventHeaders from drainResponse.
+// Returns (done=true, nil) when the stream is complete.
+func handleHeadersEvent(ev conn.StreamEvent, req *Request, resp *Response, gotHeaders *bool, enc *ContentEncoding) (done bool, err error) {
+	if *gotHeaders {
+		return ev.EndStream, nil
+	}
+	n, perr := parseStatus(ev.Headers, &resp.Headers)
+	if perr != nil {
+		return false, perr
+	}
+	resp.Status = n
+	if ev.Slab != nil {
+		resp.slabs = append(resp.slabs, ev.Slab)
+	}
+	if !req.DisableDecompression {
+		*enc = detectEncoding(resp.Headers)
+	}
+	*gotHeaders = true
+	return ev.EndStream, nil
+}
+
+// handleDataEvent processes a single EventData from drainResponse.
+// Returns (done=true, nil) when the stream is complete.
+func handleDataEvent(ev conn.StreamEvent, req *Request, resp *Response, enc ContentEncoding, maxBody, maxDecompressed int64) (done bool, err error) {
+	resp.BytesReceived += int64(len(ev.Data))
+	if resp.BytesReceived > maxBody {
+		return false, fmt.Errorf("%w: received %d bytes, limit %d", ErrBodyTooLarge, resp.BytesReceived, maxBody)
+	}
+	if req.WantBody && len(ev.Data) > 0 {
+		resp.Body = append(resp.Body, ev.Data...)
+	}
+	if ev.EndStream {
+		if req.WantBody && enc != EncodingIdentity {
+			decoded, derr := decompressFully(enc, resp.Body, maxDecompressed)
+			if derr != nil {
+				return false, derr
+			}
+			resp.Body = decoded
+		}
+		return true, nil
+	}
+	return false, nil
 }
 
 // drainPushedStream reads the pushed stream's response and invokes the

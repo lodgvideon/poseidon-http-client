@@ -168,7 +168,7 @@ func (c *Conn) pushSupport() (enabled bool, eventBuf int) {
 // registerPushedStream creates and registers a server-initiated stream
 // with the given even ID.
 func (c *Conn) registerPushedStream(id uint32) *Stream {
-	s := c.allocStream(c.opts.StreamEventBuffer, int32(c.connRecvWindow))
+	s := c.allocStream(c.opts.StreamEventBuffer, c.connRecvWindow)
 	s.id = id
 	c.smu.Lock()
 	c.streams[id] = s
@@ -196,16 +196,6 @@ func (c *Conn) rstStream(id uint32, code frame.ErrCode) error {
 	return c.writeRSTStream(&Stream{id: id}, code)
 }
 
-// NewStream allocates a new stream. B.1 enforces at most one in-flight
-// stream per Conn; subsequent calls return ErrTooManyStreams until the
-// active stream completes.
-// NewStream allocates an in-flight slot for a new outbound stream. The
-// stream's HTTP/2 ID is assigned later, when SendHeaders writes the
-// first HEADERS frame under the writer mutex; this preserves the
-// monotonic-id ordering required by RFC 7540 §5.1.1 even with many
-// concurrent NewStream callers. Returns ErrTooManyStreams when the
-// in-flight count has reached min(local MaxConcurrentStreams,
-// peer-advertised SETTINGS_MAX_CONCURRENT_STREAMS).
 // LookupStream returns the stream with the given ID, or (nil, false) if
 // no such stream exists. This is primarily used to access server-pushed
 // streams after receiving an EventPushPromise on the parent stream.
@@ -216,6 +206,13 @@ func (c *Conn) LookupStream(id uint32) (*Stream, bool) {
 	return s, ok
 }
 
+// NewStream allocates an in-flight slot for a new outbound stream. The
+// stream's HTTP/2 ID is assigned later, when SendHeaders writes the
+// first HEADERS frame under the writer mutex; this preserves the
+// monotonic-id ordering required by RFC 7540 §5.1.1 even with many
+// concurrent NewStream callers. Returns ErrTooManyStreams when the
+// in-flight count has reached min(local MaxConcurrentStreams,
+// peer-advertised SETTINGS_MAX_CONCURRENT_STREAMS).
 func (c *Conn) NewStream(_ context.Context) (*Stream, error) {
 	if c.closed.Load() {
 		return nil, ErrConnClosed

@@ -35,27 +35,9 @@ var encGzip = []byte("gzip")
 // encDeflate means deflate content-encoding.
 var encDeflate = []byte("deflate")
 
-// encIdentity means identity (no compression).
-var encIdentity = []byte("identity")
-
 // gzipReaderPool recycles *gzip.Reader instances across requests.
 var gzipReaderPool = sync.Pool{
 	New: func() any { return new(gzip.Reader) },
-}
-
-// zlibReaderPool recycles io.ReadCloser (zlib readers) across requests.
-// zlib doesn't expose a resettable reader like gzip, so we wrap.
-type pooledZlibReader struct {
-	r   io.ReadCloser
-	src io.Reader
-}
-
-func (z *pooledZlibReader) Read(p []byte) (int, error) {
-	return z.r.Read(p)
-}
-
-func (z *pooledZlibReader) Close() error {
-	return z.r.Close()
 }
 
 // detectEncoding scans response headers for content-encoding.
@@ -81,11 +63,9 @@ func detectEncoding(headers []conn.HeaderField) ContentEncoding {
 // decompresses gzip or deflate content. Close() closes both the
 // decompressor and the underlying source.
 type decompressingReader struct {
-	dec     io.ReadCloser
-	source  io.ReadCloser
-	gz      *gzip.Reader // non-nil when gzip; returned to pool on Close
-	enc     ContentEncoding
-	closeFn func() // cleanup for pooled reader
+	dec    io.ReadCloser
+	source io.ReadCloser
+	gz     *gzip.Reader // non-nil when gzip; returned to pool on Close
 }
 
 // Read implements io.Reader.
@@ -180,7 +160,7 @@ func decompressFully(enc ContentEncoding, compressed []byte, maxBytes int64) ([]
 		if err != nil {
 			return nil, fmt.Errorf("client: zlib decode: %w", err)
 		}
-		defer zr.Close()
+		defer func() { _ = zr.Close() }()
 		lr := io.LimitReader(zr, maxBytes+1)
 		var buf bytes.Buffer
 		n, err := io.Copy(&buf, lr)

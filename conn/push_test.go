@@ -18,23 +18,6 @@ func asyncWrite(fn func() error) chan error {
 	return done
 }
 
-// drainResponse reads events until END_STREAM or connection close.
-func drainResponse(t *testing.T, s *Stream, ctx context.Context) {
-	t.Helper()
-	for {
-		ev, err := s.Recv(ctx)
-		if err != nil {
-			return // connection closed
-		}
-		if ev.Slab != nil {
-			GetHeaderSlabPool().Put(ev.Slab)
-		}
-		if ev.EndStream {
-			return
-		}
-	}
-}
-
 // TestConn_PushPromise_DeliveredToParentStream verifies that when
 // EnablePush is true, a PUSH_PROMISE frame from the server creates a
 // pushed stream and delivers an EventPushPromise on the parent stream.

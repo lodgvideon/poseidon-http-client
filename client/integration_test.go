@@ -502,19 +502,31 @@ func TestIntegration_Client_StreamBody_Large(t *testing.T) {
 		w.WriteHeader(200)
 		_, _ = w.Write(want)
 	}))
-	c := clientFor(t, addr)
+	// Large StreamEventBuffer prevents RST_STREAM(REFUSED_STREAM) on slow
+	// CI runners where the server sends many DATA frames before the body
+	// reader goroutine is scheduled. 1 MiB / 16 KiB frames = ~64 events max.
+	c, err := client.NewClient(client.ClientOptions{
+		Addr: addr,
+		ConnOpts: conn.ConnOptions{
+			Dialer:            &conn.TLSDialer{Config: &tls.Config{InsecureSkipVerify: true}}, //nolint:gosec
+			StreamEventBuffer: 128,
+		},
+	})
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+	t.Cleanup(func() { _ = c.Close() })
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
 	var res client.Response
-	err := c.Do(ctx, &client.Request{Method: "GET", Path: "/", StreamBody: true}, &res)
-	if err != nil {
+	if err := c.Do(ctx, &client.Request{Method: "GET", Path: "/", StreamBody: true}, &res); err != nil {
 		t.Fatalf("Do: %v", err)
 	}
-	n, err := io.Copy(io.Discard, res.BodyReader)
-	if err != nil {
-		t.Fatalf("Copy: %v", err)
+	n, cerr := io.Copy(io.Discard, res.BodyReader)
+	if cerr != nil {
+		t.Fatalf("Copy: %v", cerr)
 	}
 	if err := res.BodyReader.Close(); err != nil {
 		t.Fatalf("Close: %v", err)
