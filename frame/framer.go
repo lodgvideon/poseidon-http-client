@@ -222,8 +222,8 @@ func (f *Framer) WriteHeaders(p WriteHeadersParams) error {
 	if totalLen > f.maxReadFrameSize {
 		return ErrFrameTooLarge
 	}
-	// Fast path: no padding, no priority, fits in f.writeBuf.
-	if p.PadLength == 0 && p.Priority == nil && totalLen <= uint32(len(f.writeBuf)) {
+	// Fast path: no padding, no priority, header+payload fit in f.writeBuf.
+	if p.PadLength == 0 && p.Priority == nil && 9+totalLen <= uint32(len(f.writeBuf)) {
 		h := FrameHeader{Length: totalLen, Type: FrameHeaders, Flags: flags, StreamID: p.StreamID}
 		WriteFrameHeader(f.hdrBuf[:], h)
 		copy(f.writeBuf[:9], f.hdrBuf[:9])
