@@ -3,7 +3,11 @@ package conn
 import (
 	"bytes"
 	"context"
+	"net/http"
+	"strconv"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/lodgvideon/poseidon-http-client/frame"
 	"github.com/lodgvideon/poseidon-http-client/hpack"
@@ -186,4 +190,60 @@ func TestConn_WriteHeaders_BlockFits_SingleFrame(t *testing.T) {
 // fixedPadding returns a PaddingStrategy that always pads HEADERS by n.
 func fixedPadding(n uint8) PaddingStrategy {
 	return PaddingStrategy{Min: n, Max: n}
+}
+
+// TestIntegration_LargeHeaders_SplitAcrossContinuation drives a real
+// net/http2.Server with a request whose header block exceeds one 16384-byte
+// frame, proving the HEADERS+CONTINUATION split reassembles end-to-end
+// (RFC 7540 §6.2 / §6.10).
+func TestIntegration_LargeHeaders_SplitAcrossContinuation(t *testing.T) {
+	srv, cfg := startH2TestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		count := 0
+		for name := range r.Header {
+			if strings.HasPrefix(strings.ToLower(name), "x-big-") {
+				count++
+			}
+		}
+		w.Header().Set("X-Recv-Count", strconv.Itoa(count))
+		w.WriteHeader(200)
+	}))
+	defer srv.Close()
+	c := dialServer(t, srv, cfg)
+	defer c.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	s, err := c.NewStream(ctx)
+	if err != nil {
+		t.Fatalf("NewStream: %v", err)
+	}
+
+	// ~40 headers of ~600 bytes each → block well over one 16384 frame.
+	fields := bigFields(40, 600)
+	if err := s.SendHeaders(ctx, fields, true); err != nil {
+		t.Fatalf("SendHeaders: %v", err)
+	}
+
+	ev, err := s.Recv(ctx)
+	if err != nil {
+		t.Fatalf("Recv: %v", err)
+	}
+	if ev.Type != EventHeaders {
+		t.Fatalf("event type = %v, want EventHeaders", ev.Type)
+	}
+	var status, recv string
+	for _, f := range ev.Headers {
+		switch string(f.Name) {
+		case ":status":
+			status = string(f.Value)
+		case "x-recv-count":
+			recv = string(f.Value)
+		}
+	}
+	if status != "200" {
+		t.Fatalf("status = %q, want 200 (CONTINUATION reassembly failed?)", status)
+	}
+	if recv != "40" {
+		t.Fatalf("server received x-recv-count=%q big headers, want 40", recv)
+	}
 }
