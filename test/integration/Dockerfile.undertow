@@ -14,7 +14,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends maven && \
 FROM eclipse-temurin:21-jre-jammy
 
 COPY --from=build /app.jar /app/undertow.jar
-COPY fixtures/certs /app/certs
 
 EXPOSE 8443 8080
 
