@@ -403,3 +403,30 @@ func BenchmarkFramer_ReadFrame_DATA_1KB(b *testing.B) {
 		_, _ = fr.ReadFrame(context.Background(), h)
 	}
 }
+
+// TestFramer_WriteHeaders_PayloadNearBufBoundary guards the WriteHeaders
+// fast-path: the 9-byte frame header plus the block fragment must fit in
+// the 256-byte writeBuf. Blocks of 248..256 bytes (no padding/priority)
+// previously satisfied the guard but overflowed writeBuf and panicked.
+func TestFramer_WriteHeaders_PayloadNearBufBoundary(t *testing.T) {
+	for _, blockLen := range []int{247, 248, 256, 257} {
+		fr, _ := newFramerWithBuffer()
+		block := bytes.Repeat([]byte{0x00}, blockLen)
+		if err := fr.WriteHeaders(WriteHeadersParams{
+			StreamID: 1, BlockFragment: block, EndStream: true, EndHeaders: true,
+		}); err != nil {
+			t.Fatalf("blockLen=%d: write: %v", blockLen, err)
+		}
+		h := &recordingHandler{}
+		fh, err := fr.ReadFrame(context.Background(), h)
+		if err != nil {
+			t.Fatalf("blockLen=%d: read: %v", blockLen, err)
+		}
+		if fh.Type != FrameHeaders {
+			t.Fatalf("blockLen=%d: type=%v", blockLen, fh.Type)
+		}
+		if len(h.hb) != blockLen {
+			t.Fatalf("blockLen=%d: round-tripped %d bytes, want %d", blockLen, len(h.hb), blockLen)
+		}
+	}
+}

@@ -440,20 +440,91 @@ func (c *Conn) writeHeadersWithPriority(_ context.Context, s *Stream, fields []h
 	buf := encBufPool.Get().(*[]byte)
 	*buf = (*buf)[:0]
 	block := c.enc.EncodeBlock(*buf, fields)
-	err := c.fr.WriteHeaders(frame.WriteHeadersParams{
-		StreamID:      s.id,
-		BlockFragment: block,
-		EndHeaders:    true,
-		EndStream:     endStream,
-		PadLength:     c.opts.Padding.ForHeaders(),
-		Priority:      prio,
-	})
+
+	err := c.writeHeaderBlock(s.id, block, endStream, prio)
+
 	*buf = block[:0]
 	encBufPool.Put(buf)
 	if err != nil {
 		return err
 	}
 	c.bumpFramesSent()
+	return nil
+}
+
+// maxOutFrameSize returns the largest frame payload we may emit: the
+// minimum of the peer's advertised SETTINGS_MAX_FRAME_SIZE and our own,
+// floored at the RFC default (16384). Mirrors the bound used by writeData.
+// Caller may hold c.wmu; this takes c.psMu (the established wmu→psMu order).
+func (c *Conn) maxOutFrameSize() int {
+	c.psMu.RLock()
+	peerMax := settingValue(c.peerSettings, frame.SettingMaxFrameSize, 16384)
+	c.psMu.RUnlock()
+	maxFrame := int(peerMax)
+	if ourMax := int(c.opts.Settings.MaxFrameSize); ourMax < maxFrame {
+		maxFrame = ourMax
+	}
+	if maxFrame <= 0 {
+		maxFrame = 16384
+	}
+	return maxFrame
+}
+
+// writeHeaderBlock emits the encoded HPACK block as a HEADERS frame
+// followed by zero or more CONTINUATION frames when it exceeds one frame's
+// payload budget (RFC 7540 §6.2 / §6.10). The caller MUST hold c.wmu so the
+// HEADERS+CONTINUATION run is contiguous (RFC §6.10: no interleaving).
+// END_STREAM and padding/priority ride the HEADERS frame only; END_HEADERS
+// rides the final frame.
+func (c *Conn) writeHeaderBlock(streamID uint32, block []byte, endStream bool, prio *frame.Priority) error {
+	maxFrame := c.maxOutFrameSize()
+	padLen := c.opts.Padding.ForHeaders()
+
+	budget0 := maxFrame
+	if padLen > 0 {
+		budget0 -= 1 + int(padLen)
+	}
+	if prio != nil {
+		budget0 -= 5
+	}
+	if budget0 <= 0 {
+		budget0 = 1
+	}
+
+	if len(block) <= budget0 {
+		return c.fr.WriteHeaders(frame.WriteHeadersParams{
+			StreamID:      streamID,
+			BlockFragment: block,
+			EndHeaders:    true,
+			EndStream:     endStream,
+			PadLength:     padLen,
+			Priority:      prio,
+		})
+	}
+
+	if err := c.fr.WriteHeaders(frame.WriteHeadersParams{
+		StreamID:      streamID,
+		BlockFragment: block[:budget0],
+		EndHeaders:    false,
+		EndStream:     endStream,
+		PadLength:     padLen,
+		Priority:      prio,
+	}); err != nil {
+		return err
+	}
+
+	rest := block[budget0:]
+	for len(rest) > 0 {
+		n := len(rest)
+		if n > maxFrame {
+			n = maxFrame
+		}
+		last := n == len(rest)
+		if err := c.fr.WriteContinuation(streamID, last, rest[:n]); err != nil {
+			return err
+		}
+		rest = rest[n:]
+	}
 	return nil
 }
 
