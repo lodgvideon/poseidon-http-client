@@ -20,6 +20,8 @@ func TestStreamEventType_String(t *testing.T) {
 		{EventData, "data"},
 		{EventTrailers, "trailers"},
 		{EventReset, "reset"},
+		{EventPushPromise, "push_promise"},
+		{StreamEventType(99), "unknown"},
 	}
 	for _, c := range cases {
 		if got := c.t.String(); got != c.want {
@@ -49,9 +51,6 @@ type fakeStreamWriter struct {
 	lastRSTCode frame.ErrCode
 }
 
-func (w *fakeStreamWriter) writeHeaders(ctx context.Context, s *Stream, fields []hpack.HeaderField, endStream bool) error {
-	return w.writeHeadersWithPriority(ctx, s, fields, endStream, nil)
-}
 func (w *fakeStreamWriter) writeHeadersWithPriority(_ context.Context, _ *Stream, _ []hpack.HeaderField, _ bool, _ *frame.Priority) error {
 	w.mu.Lock()
 	defer w.mu.Unlock()

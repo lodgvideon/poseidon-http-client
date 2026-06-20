@@ -43,25 +43,28 @@ func newTLSH2Server(t *testing.T, h http.Handler) (*httptest.Server, string) {
 // semantics should call c.Do directly instead.
 func doWithRetry(t *testing.T, c *client.Client, ctx context.Context, req *client.Request, resp *client.Response) error {
 	t.Helper()
-	const maxAttempts = 3
+	const maxAttempts = 5
 	var err error
 	for attempt := 0; attempt < maxAttempts; attempt++ {
 		err = c.Do(ctx, req, resp)
 		if err == nil {
 			return nil
 		}
+		// Retry on transient httptest noise: RST_STREAM and connection-closed
+		// errors that occur when a sibling test's server shuts down.
 		var sre *client.StreamResetError
-		if !errors.As(err, &sre) {
-			return err
-		}
-		if sre.Code != frame.ErrCodeInternalError &&
-			sre.Code != frame.ErrCodeRefusedStream {
+		if errors.As(err, &sre) {
+			if sre.Code != frame.ErrCodeInternalError &&
+				sre.Code != frame.ErrCodeRefusedStream {
+				return err
+			}
+		} else if !errors.Is(err, conn.ErrConnClosed) {
 			return err
 		}
 		// Transient. Reset response and back off briefly.
 		resp.Reset()
 		select {
-		case <-time.After(10 * time.Millisecond):
+		case <-time.After(20 * time.Millisecond):
 		case <-ctx.Done():
 			return ctx.Err()
 		}

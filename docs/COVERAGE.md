@@ -8,10 +8,10 @@ Per-package statement coverage gate is **90%**, enforced by
 | Package                 | Current | Floor |
 |-------------------------|--------:|------:|
 | `internal/bytesx`       |   96.9% |   70% |
-| `frame`                 |   93.3% |   90% |
-| `hpack`                 |   95.7% |   90% |
-| `conn`                  |   91.4% |   90% |
-| `client`                |   90.1% |   90% |
+| `frame`                 |   92.8% |   90% |
+| `hpack`                 |   95.9% |   90% |
+| `conn`                  |   90.1% |   90% |
+| `client`                |   90.0% |   90% |
 
 All packages at or above the ≥90% `v0.1.0` acceptance criterion.
 

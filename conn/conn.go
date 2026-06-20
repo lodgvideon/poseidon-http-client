@@ -176,21 +176,6 @@ func (c *Conn) registerPushedStream(id uint32) *Stream {
 	return s
 }
 
-// initialRecvWindow returns the peer's INITIAL_WINDOW_SIZE setting.
-func (c *Conn) initialRecvWindow() int32 {
-	c.psMu.RLock()
-	initial := settingValue(c.peerSettings, frame.SettingInitialWindowSize, connInitialRecvWindow)
-	c.psMu.RUnlock()
-	return int32(initial)
-}
-
-// peerSettingsRLocked calls f with the peer settings under RLock.
-func (c *Conn) peerSettingsRLocked(f func(s frame.SettingsParams)) {
-	c.psMu.RLock()
-	defer c.psMu.RUnlock()
-	f(c.peerSettings)
-}
-
 // rstStream sends a RST_STREAM frame for the given stream ID.
 func (c *Conn) rstStream(id uint32, code frame.ErrCode) error {
 	return c.writeRSTStream(&Stream{id: id}, code)
@@ -407,10 +392,6 @@ func (c *Conn) PeerMaxConcurrentStreams() int {
 }
 
 // --- streamWriter implementation (called from *Stream).
-
-func (c *Conn) writeHeaders(ctx context.Context, s *Stream, fields []hpack.HeaderField, endStream bool) error {
-	return c.writeHeadersWithPriority(ctx, s, fields, endStream, nil)
-}
 
 func (c *Conn) writeHeadersWithPriority(_ context.Context, s *Stream, fields []hpack.HeaderField, endStream bool, prio *frame.Priority) error {
 	if c.closed.Load() {

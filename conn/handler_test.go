@@ -37,8 +37,6 @@ func (*fakeStreamMap) deliverPingAck([8]byte)                               {}
 func (*fakeStreamMap) onGoAwayReceived(uint32, frame.ErrCode)               {}
 func (*fakeStreamMap) pushSupport() (bool, int)                             { return false, 8 }
 func (*fakeStreamMap) registerPushedStream(uint32) *Stream                  { return nil }
-func (*fakeStreamMap) initialRecvWindow() int32                             { return 65535 }
-func (*fakeStreamMap) peerSettingsRLocked(func(frame.SettingsParams))       {}
 func (*fakeStreamMap) rstStream(uint32, frame.ErrCode) error                { return nil }
 func (m *fakeStreamMap) storeOrigins(origins []string)            { m.origins = origins }
 func (m *fakeStreamMap) storeAltSvc(entries []frame.AltSvcEntry)  { m.altSvc = entries }
@@ -155,5 +153,31 @@ func TestHandler_OnPushPromise_ReturnsConnError(t *testing.T) {
 	}
 	if ce.Code != frame.ErrCodeProtocolError {
 		t.Fatalf("code = %v", ce.Code)
+	}
+}
+
+func TestHandler_OnOrigin_StoresOrigins(t *testing.T) {
+	m := newFakeStreamMap()
+	h := newConnHandler(m, hpack.NewDecoder())
+	origins := []string{"https://example.com", "https://cdn.example.com"}
+	if err := h.OnOrigin(frame.FrameHeader{}, origins); err != nil {
+		t.Fatalf("OnOrigin: %v", err)
+	}
+	if len(m.origins) != 2 || m.origins[0] != "https://example.com" {
+		t.Fatalf("origins = %v", m.origins)
+	}
+}
+
+func TestHandler_OnAltSvc_StoresEntries(t *testing.T) {
+	m := newFakeStreamMap()
+	h := newConnHandler(m, hpack.NewDecoder())
+	entries := []frame.AltSvcEntry{
+		{Origin: "https://example.com", AltValue: `h2=":8080"`},
+	}
+	if err := h.OnAltSvc(frame.FrameHeader{}, entries); err != nil {
+		t.Fatalf("OnAltSvc: %v", err)
+	}
+	if len(m.altSvc) != 1 || m.altSvc[0].Origin != "https://example.com" {
+		t.Fatalf("altSvc = %v", m.altSvc)
 	}
 }

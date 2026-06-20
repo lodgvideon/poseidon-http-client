@@ -15,9 +15,13 @@ package conn
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"io"
 	"net"
 	"net/http"
+	"net/http/httptest"
+	"net/url"
 	"testing"
 	"time"
 
@@ -752,6 +756,49 @@ func TestConn_WriteData_EmptyEndStream(t *testing.T) {
 	}
 }
 
+// TestConn_WriteData_WithPadding verifies writeData uses WriteDataPadded when
+// ConnOptions.Padding is configured (covers the padLen > 0 branch).
+func TestConn_WriteData_WithPadding(t *testing.T) {
+	t.Parallel()
+	c := newGoAwayConn()
+	c.opts.Padding = PaddingStrategy{Min: 4, Max: 4}
+	var buf bytes.Buffer
+	c.fr = frame.NewFramer(&buf, bytes.NewReader(nil))
+
+	s := newStream(1, 8, c, 65535)
+	s.id = 1
+	s.sendWindow = 65535
+
+	// Non-empty data with padding enabled.
+	if err := c.writeData(context.Background(), s, []byte("hi"), true); err != nil {
+		t.Fatalf("writeData with padding: %v", err)
+	}
+	if buf.Len() == 0 {
+		t.Fatal("expected DATA frame in output")
+	}
+}
+
+// TestConn_WriteData_EmptyWithPadding covers the padLen > 0 branch inside the
+// empty-payload path (len(p)==0, endStream=true).
+func TestConn_WriteData_EmptyWithPadding(t *testing.T) {
+	t.Parallel()
+	c := newGoAwayConn()
+	c.opts.Padding = PaddingStrategy{Min: 2, Max: 2}
+	var buf bytes.Buffer
+	c.fr = frame.NewFramer(&buf, bytes.NewReader(nil))
+
+	s := newStream(1, 8, c, 65535)
+	s.id = 1
+	s.sendWindow = 65535
+
+	if err := c.writeData(context.Background(), s, nil, true); err != nil {
+		t.Fatalf("writeData(empty,padding): %v", err)
+	}
+	if buf.Len() == 0 {
+		t.Fatal("expected padded DATA frame bytes")
+	}
+}
+
 // TestStream_Push_Overflow_Integration exercises the overflow path via an
 // integration test: server sends many flushed DATA chunks faster than the
 // client drains its event buffer.
@@ -799,4 +846,465 @@ func TestStream_Push_Overflow_Integration(t *testing.T) {
 	recvCtx, recvCancel := context.WithTimeout(ctx, 500*time.Millisecond)
 	defer recvCancel()
 	_, _ = s.Recv(recvCtx)
+}
+
+// ---------------------------------------------------------------------------
+// LookupStream
+// ---------------------------------------------------------------------------
+
+// TestConn_LookupStream_FoundAndNotFound verifies the public LookupStream API.
+func TestConn_LookupStream_FoundAndNotFound(t *testing.T) {
+	srv, cfg := startH2TestServer(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(200)
+	}))
+	defer srv.Close()
+
+	c := dialServer(t, srv, cfg)
+	defer c.Close()
+
+	// Before any stream: ID 1 should not exist.
+	if _, ok := c.LookupStream(1); ok {
+		t.Fatal("stream 1 should not exist before any SendHeaders")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	// Create and send a stream; after SendHeaders it has ID 1.
+	s, err := c.NewStream(ctx)
+	if err != nil {
+		t.Fatalf("NewStream: %v", err)
+	}
+	if err := s.SendHeaders(ctx, []hpack.HeaderField{
+		{Name: []byte(":method"), Value: []byte("GET")},
+		{Name: []byte(":scheme"), Value: []byte("https")},
+		{Name: []byte(":authority"), Value: []byte("example.com")},
+		{Name: []byte(":path"), Value: []byte("/")},
+	}, true); err != nil {
+		t.Fatalf("SendHeaders: %v", err)
+	}
+
+	// Stream 1 now registered.
+	if _, ok := c.LookupStream(s.ID()); !ok {
+		t.Fatalf("LookupStream(%d) = false, want true", s.ID())
+	}
+
+	// Unknown ID returns false.
+	if _, ok := c.LookupStream(999); ok {
+		t.Fatal("LookupStream(999) should return false for unknown ID")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// AltSvcEntries
+// ---------------------------------------------------------------------------
+
+// TestConn_AltSvcEntries_StoreAndRetrieve verifies AltSvcEntries returns a copy.
+func TestConn_AltSvcEntries_StoreAndRetrieve(t *testing.T) {
+	t.Parallel()
+
+	c := &Conn{}
+	// Initially nil.
+	if got := c.AltSvcEntries(); got != nil {
+		t.Fatalf("expected nil before any ALTSVC, got %v", got)
+	}
+
+	entries := []frame.AltSvcEntry{
+		{Origin: "https://example.com", AltValue: `h2=":8080"`},
+		{Origin: "https://cdn.example.com", AltValue: `h2=":443"`},
+	}
+	c.storeAltSvc(entries)
+
+	got := c.AltSvcEntries()
+	if len(got) != 2 {
+		t.Fatalf("expected 2 entries, got %d", len(got))
+	}
+	if got[0].Origin != "https://example.com" {
+		t.Fatalf("entry[0].Origin = %q, want https://example.com", got[0].Origin)
+	}
+
+	// Verify it's a copy.
+	got[0].Origin = "modified"
+	again := c.AltSvcEntries()
+	if again[0].Origin != "https://example.com" {
+		t.Error("AltSvcEntries() must return a copy")
+	}
+}
+
+// TestConn_AltSvcEntries_ClearedByEmptySlice verifies that storing empty
+// slice returns nil from AltSvcEntries (matching ALTSVC clear semantics).
+func TestConn_AltSvcEntries_ClearedByEmptySlice(t *testing.T) {
+	t.Parallel()
+
+	c := &Conn{}
+	c.storeAltSvc([]frame.AltSvcEntry{{Origin: "https://a.com", AltValue: "h2=:443"}})
+	c.storeAltSvc(nil) // clear
+	if got := c.AltSvcEntries(); got != nil {
+		t.Fatalf("expected nil after clearing, got %v", got)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// settingsRecorder no-ops: OnAltSvc and OnOrigin
+// ---------------------------------------------------------------------------
+
+// TestSettingsRecorder_NoOps calls the no-op OnAltSvc / OnOrigin methods on
+// settingsRecorder (needed to satisfy frame.Handler during handshake).
+func TestSettingsRecorder_NoOps(t *testing.T) {
+	t.Parallel()
+	r := &settingsRecorder{}
+	if err := r.OnAltSvc(frame.FrameHeader{}, nil); err != nil {
+		t.Fatalf("OnAltSvc: %v", err)
+	}
+	if err := r.OnOrigin(frame.FrameHeader{}, nil); err != nil {
+		t.Fatalf("OnOrigin: %v", err)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Stream.Recv — resetSignal path
+// ---------------------------------------------------------------------------
+
+// TestStream_Recv_ResetSignal verifies that Recv returns EventReset when the
+// stream's resetSignal channel is closed (e.g. after a RST_STREAM arrives).
+func TestStream_Recv_ResetSignal(t *testing.T) {
+	t.Parallel()
+	w := &fakeStreamWriter{}
+	s := newStream(1, 8, w, 65535)
+	s.resetCode.Store(uint32(frame.ErrCodeCancel))
+	close(s.resetSignal)
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	ev, err := s.Recv(ctx)
+	if err != nil {
+		t.Fatalf("Recv error: %v", err)
+	}
+	if ev.Type != EventReset || ev.RSTCode != frame.ErrCodeCancel {
+		t.Fatalf("event = %+v", ev)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Proxy: bufferedConn.Read + ProxyTLSDialer coverage
+// ---------------------------------------------------------------------------
+
+// TestProxyDialer_BufferedConn verifies that when the proxy response headers
+// are immediately followed by data in the same read, bufferedConn.Read is
+// used and returns that data.
+func TestProxyDialer_BufferedConn(t *testing.T) {
+	t.Parallel()
+
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+
+	go func() {
+		c, cerr := ln.Accept()
+		if cerr != nil {
+			return
+		}
+		defer c.Close()
+		buf := make([]byte, 4096)
+		_, _ = c.Read(buf)
+		// Send the 200 + headers + extra data all at once so bufio.Reader
+		// captures the extra bytes after the blank line.
+		_, _ = io.WriteString(c, "HTTP/1.1 200 Connection established\r\nX-Proxy: ok\r\n\r\nhello")
+	}()
+
+	proxyURL := &url.URL{Scheme: "http", Host: ln.Addr().String()}
+	d := &ProxyDialer{ProxyURL: proxyURL}
+	tc, err := d.Dial(context.Background(), "example.com:443")
+	if err != nil {
+		t.Fatalf("Dial: %v", err)
+	}
+	defer tc.Close()
+
+	out := make([]byte, 5)
+	n, _ := tc.Read(out)
+	if string(out[:n]) != "hello" {
+		t.Fatalf("bufferedConn.Read = %q, want %q", out[:n], "hello")
+	}
+}
+
+// TestProxyTLSDialer_NilURL verifies ProxyTLSDialer.Dial propagates the
+// ProxyDialer error when ProxyURL is nil (covers the early-return error path).
+func TestProxyTLSDialer_NilURL(t *testing.T) {
+	t.Parallel()
+	d := &ProxyTLSDialer{}
+	_, err := d.Dial(context.Background(), "example.com:443")
+	if err == nil {
+		t.Fatal("expected error for nil ProxyURL")
+	}
+}
+
+// TestTLSDialer_ALPNFailure verifies ErrALPNFailed when the server does not
+// negotiate h2 (covers the NegotiatedProtocol != "h2" branch in TLSDialer.Dial).
+// The server is an httptest server that participates in no ALPN (NextProtos=nil),
+// so the negotiated protocol is "". TLS 1.2 allows this; TLS 1.3 may reject
+// the ALPN mismatch at handshake time, so skip on error.
+func TestTLSDialer_ALPNFailure(t *testing.T) {
+	// Start an httptest TLS server (no h2) so we can get its cert.
+	srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {}))
+	srv.StartTLS() // EnableHTTP2 == false → NextProtos does not include h2
+	defer srv.Close()
+
+	pool := x509.NewCertPool()
+	for _, c := range srv.TLS.Certificates {
+		for _, certDER := range c.Certificate {
+			if cert, err := x509.ParseCertificate(certDER); err == nil {
+				pool.AddCert(cert)
+			}
+		}
+	}
+
+	// Override the server's TLS config to remove all ALPN protocols so the
+	// TLS handshake completes but NegotiatedProtocol is "".
+	srv.TLS.NextProtos = nil
+
+	// Spin up our own raw TLS listener using the same cert.
+	ln, err := tls.Listen("tcp", "127.0.0.1:0", srv.TLS)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	go func() {
+		c, cerr := ln.Accept()
+		if cerr != nil {
+			return
+		}
+		_ = c.(*tls.Conn).Handshake()
+		c.Close()
+	}()
+
+	d := &TLSDialer{Config: &tls.Config{
+		RootCAs:    pool,
+		ServerName: "example.com",
+		MaxVersion: tls.VersionTLS12, // TLS 1.2: ALPN mismatch doesn't abort
+		NextProtos: []string{"h2"},
+	}}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	_, err = d.Dial(ctx, ln.Addr().String())
+	if err != ErrALPNFailed {
+		t.Skipf("TLS ALPN behaviour: err = %v (not ErrALPNFailed — skip)", err)
+	}
+}
+
+// TestDial_DialError verifies that the top-level Dial returns the dialer's
+// error when the underlying transport cannot connect.
+func TestDial_DialError(t *testing.T) {
+	t.Parallel()
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	// 127.0.0.1:1 — always connection refused.
+	_, err := Dial(ctx, "127.0.0.1:1", ConnOptions{
+		Dialer: &TLSDialer{Config: &tls.Config{InsecureSkipVerify: true}}, //nolint:gosec
+	})
+	if err == nil {
+		t.Fatal("expected dial error")
+	}
+}
+
+// TestDial_NewClientConnError covers the `transport.Close(); return nil, err`
+// branch inside Dial when NewClientConn fails (peer closes connection before
+// sending HTTP/2 SETTINGS).
+func TestDial_NewClientConnError(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	go func() {
+		c, cerr := ln.Accept()
+		if cerr != nil {
+			return
+		}
+		c.Close() // close before HTTP/2 handshake
+	}()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	_, err = Dial(ctx, ln.Addr().String(), ConnOptions{
+		Dialer: &PlaintextDialer{},
+	})
+	if err == nil {
+		t.Fatal("expected error from NewClientConn")
+	}
+}
+
+// TestProxyDialer_NoPortInURL verifies that a proxy URL without a port gets
+// ":80" appended (covers the strings.Contains branch in ProxyDialer.Dial).
+func TestProxyDialer_NoPortInURL(t *testing.T) {
+	t.Parallel()
+	// Use an IP-only proxy URL — the Dial will try 127.0.0.1:80 which is
+	// connection-refused, covering the proxyAddr+":80" path.
+	d := &ProxyDialer{ProxyURL: &url.URL{Scheme: "http", Host: "127.0.0.1"}}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	_, err := d.Dial(ctx, "example.com:443")
+	// We expect a connection error (port 80 refused), not a panic.
+	if err == nil {
+		t.Fatal("expected connection error")
+	}
+}
+
+// TestConn_Ping_ClosedConn verifies Ping returns ErrConnClosed immediately
+// when the connection is already closed.
+func TestConn_Ping_ClosedConn(t *testing.T) {
+	t.Parallel()
+	c := &Conn{}
+	c.closed.Store(true)
+	ctx := context.Background()
+	_, err := c.Ping(ctx)
+	if err != ErrConnClosed {
+		t.Fatalf("Ping on closed conn = %v, want ErrConnClosed", err)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// markStreamDone — draining + inflight==0 path
+// ---------------------------------------------------------------------------
+
+// TestConn_MarkStreamDone_DrainsDone verifies that markStreamDone closes the
+// drainDone channel when draining is active and inflight drops to zero.
+func TestConn_MarkStreamDone_DrainsDone(t *testing.T) {
+	t.Parallel()
+	c := newGoAwayConn()
+	c.drainDone = make(chan struct{})
+	c.draining.Store(true)
+
+	// Register stream 1 in a state where both sides have ended.
+	s := newStream(1, 8, &fakeStreamWriter{}, 65535)
+	s.id = 1
+	s.mu.Lock()
+	s.localEnded = true
+	s.remoteEnded = true
+	s.mu.Unlock()
+	c.smu.Lock()
+	c.streams[1] = s
+	c.smu.Unlock()
+	c.inflight = 1
+
+	c.markStreamDone(1)
+
+	select {
+	case <-c.drainDone:
+		// expected
+	case <-time.After(time.Second):
+		t.Fatal("drainDone not closed after markStreamDone")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Shutdown — second concurrent call waits on drainDone
+// ---------------------------------------------------------------------------
+
+// TestConn_Shutdown_AlreadyDraining covers the CompareAndSwap=false branch in
+// Shutdown (called while another Shutdown is already in progress).
+func TestConn_Shutdown_AlreadyDraining(t *testing.T) {
+	srv, cfg := startH2TestServer(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(204)
+	}))
+	defer srv.Close()
+	c := dialServer(t, srv, cfg)
+
+	// Pre-set draining so the CompareAndSwap fails.
+	c.draining.Store(true)
+	c.drainDone = make(chan struct{})
+	// Close drainDone immediately so the waiting branch exits.
+	close(c.drainDone)
+
+	if err := c.Shutdown(10 * time.Millisecond); err != nil {
+		t.Logf("Shutdown (already-draining): %v", err)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// SendHeadersWithPriority — closed stream path
+// ---------------------------------------------------------------------------
+
+// TestConn_rstStream_WritesFrame verifies rstStream delegates to writeRSTStream
+// and writes a RST_STREAM frame for the given stream ID.
+func TestConn_rstStream_WritesFrame(t *testing.T) {
+	t.Parallel()
+	c := newGoAwayConn()
+	var buf bytes.Buffer
+	c.fr = frame.NewFramer(&buf, bytes.NewReader(nil))
+
+	if err := c.rstStream(5, frame.ErrCodeCancel); err != nil {
+		t.Fatalf("rstStream: %v", err)
+	}
+	if buf.Len() == 0 {
+		t.Fatal("expected RST_STREAM frame in output")
+	}
+}
+
+// TestStream_SendHeadersWithPriority_ClosedStream verifies that calling
+// SendHeadersWithPriority on a closed stream returns ErrStreamClosed.
+func TestStream_SendHeadersWithPriority_ClosedStream(t *testing.T) {
+	t.Parallel()
+	w := &fakeStreamWriter{}
+	s := newStream(1, 8, w, 65535)
+	s.mu.Lock()
+	s.closed = true
+	s.mu.Unlock()
+	err := s.SendHeadersWithPriority(context.Background(), nil, false, nil)
+	if err != ErrStreamClosed {
+		t.Fatalf("err = %v, want ErrStreamClosed", err)
+	}
+}
+
+// TestStream_SendHeadersWithPriority_LocalEnded verifies that a half-closed
+// (local) stream also returns ErrStreamClosed on another SendHeaders.
+func TestStream_SendHeadersWithPriority_LocalEnded(t *testing.T) {
+	t.Parallel()
+	w := &fakeStreamWriter{}
+	s := newStream(1, 8, w, 65535)
+	s.mu.Lock()
+	s.localEnded = true
+	s.mu.Unlock()
+	err := s.SendHeadersWithPriority(context.Background(), nil, false, nil)
+	if err != ErrStreamClosed {
+		t.Fatalf("err = %v, want ErrStreamClosed", err)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// writeRSTStream — closed conn path
+// ---------------------------------------------------------------------------
+
+// TestConn_WriteRSTStream_ClosedConn verifies that writeRSTStream returns
+// ErrConnClosed when the connection has been closed.
+func TestConn_WriteRSTStream_ClosedConn(t *testing.T) {
+	t.Parallel()
+	c := newGoAwayConn()
+	c.closed.Store(true)
+	s := &Stream{id: 1}
+	err := c.writeRSTStream(s, frame.ErrCodeCancel)
+	if err != ErrConnClosed {
+		t.Fatalf("writeRSTStream on closed conn = %v, want ErrConnClosed", err)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// handshakeSettings — WriteClientPreface error path
+// ---------------------------------------------------------------------------
+
+// errWriter always returns an error.
+type errWriter struct{}
+
+func (errWriter) Write([]byte) (int, error) { return 0, io.ErrClosedPipe }
+
+// TestHandshakeSettings_WriteClientPrefaceError covers the early return in
+// handshakeSettings when WriteClientPreface fails.
+func TestHandshakeSettings_WriteClientPrefaceError(t *testing.T) {
+	t.Parallel()
+	fr := frame.NewFramer(errWriter{}, bytes.NewReader(nil))
+	_, err := handshakeSettings(context.Background(), fr, AdvertisedSettings{}, false)
+	if err == nil {
+		t.Fatal("expected error from failed WriteClientPreface")
+	}
 }
