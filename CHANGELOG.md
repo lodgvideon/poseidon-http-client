@@ -7,6 +7,98 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [v0.4.0] — 2026-06-20
+
+### Added
+
+- **CONTINUATION write path** (RFC 7540 §6.2/§6.10) — `writeHeadersWithPriority`
+  splits HPACK blocks exceeding `SETTINGS_MAX_FRAME_SIZE` into one HEADERS
+  frame (END_HEADERS=0) plus N CONTINUATION frames; padding and priority only
+  on the HEADERS frame; the final CONTINUATION sets END_HEADERS=1. Zero
+  additional allocations. Applies to both request and trailer HEADERS.
+  3 unit conformance tests + 1 integration test (50-header ~50 KiB block).
+  (`15a5425`, `e24be99`)
+
+- **Retry layer** — `client.NewRetryer(c, RetryOptions)` wraps `*Client` with
+  an automatic retry loop for idempotent requests. Built-in retry on
+  `REFUSED_STREAM` (RFC §8.1.4), GOAWAY, and dial errors. `IsRetryable`
+  callback for caller-defined 5xx/etc. policy. `Request.Idempotent *bool`
+  overrides method-based classification. Truncated-exponential backoff with
+  ±25% jitter, configurable `MaxAttempts`. `DoStream` retries only before
+  the first HEADERS frame arrives. 16 tests. (`7fe1552`)
+
+- **Docker integration test infrastructure** — OpenResty (nginx + Lua) and
+  Undertow (Java) servers in Docker Compose; `gen-certs.sh` auto-generates
+  TLS certs; `client/integration_test/matrix_test.go` cross-server test suite
+  (healthz, root, status codes, echo POST, connection reuse, concurrency,
+  chunked body, large body, delay, context cancel, headers, metrics). CI
+  `docker-it` workflow runs the full matrix on every PR. (`7dcac0d`, `33af9c1`)
+
+- **Request validation** — `validateRequest` rejects missing Method, empty
+  Path, BodyReader + Body conflict, Trailers + method conflict early (returns
+  `ErrInvalidRequest`), before any conn is touched. (`7fe1552`)
+
+### Fixed
+
+- **`FramesReceived` Stats race** — counter was incremented in the read loop
+  after `ReadFrame` returned, after events were dispatched. Test reading
+  `Stats()` right after `Recv` could observe `FramesReceived = 0`. Fix:
+  `bumpFramesReceived()` added to `connOps` interface, called at the start
+  of each `On*` handler so the counter is visible as soon as the frame is
+  dispatched. (`b5488dd`)
+
+- **Undertow `/status/:code` 500** — `PathHandler` strips the `/status`
+  prefix; `getRelativePath()` returns `/301` (not `/status/301`).
+  `substring("/status/".length())` on a 4-char string → `StringIndexOutOfBoundsException`.
+  Fixed to `substring(1)`. (`b5488dd`)
+
+- **nginx `/echo` returns empty body** — `echo_duplicate 1 $request_body`
+  requires the echo module to buffer the body first; under OpenResty with
+  HTTP/2 the variable stays empty. Replaced with a Lua block that calls
+  `ngx.req.read_body()` before printing. (`e45e524`)
+
+- **Silent consumer hang on stream event-channel overflow** — when the
+  8-slot `Stream.events` channel filled (fast server, slow consumer), `push`
+  silently dropped the event and sent `RST_STREAM(REFUSED_STREAM)`. Consumer
+  blocked in `Recv` forever. Fixed by non-blocking send + RST + close channel.
+  (`2389f55`)
+
+- **Flow-control hang on large body** — `TestIntegration_Client_StreamBody_Large`
+  raced: server filled the default 8-slot event buffer before the consumer
+  goroutine started, triggering the overflow path above. Fixed by using
+  `StreamEventBuffer: 128` for that test. (`ebbfa4a`)
+
+- **55 lint issues** — golangci-lint v2.5 clean: removed dead code
+  (`encIdentity`, `pooledZlibReader`, `drainResponse` in push_test), fixed
+  unchecked `Close()` returns in proxy.go, added doc comments, removed
+  redundant `int32()` cast, extracted `handleHeadersEvent`/`handleDataEvent`
+  to reduce `drainResponse` cyclomatic complexity, added `gosec` to
+  test-file exclusion (eliminates G104 false-positives). (`ebbfa4a`)
+
+- **Dockerfile.undertow baked-in certs** — `COPY fixtures/certs /app/certs`
+  ran at image build time (before `gen-certs.sh`), causing CI failures.
+  Removed; docker-compose already mounts `./fixtures/certs:/app/certs:ro`.
+  (`1960ca2`)
+
+- **Security — P0/P1 pre-production audit** — closed all P0 and P1 findings
+  from the pre-production security review. (`e705532`)
+
+### Performance
+
+- **WriteHeaders single syscall** — coalesced the previously split header
+  write into one `Write` call, removing a system-call boundary. −15% latency
+  on `BenchmarkClient_DoParallel`. (`f32a062`)
+
+- **−2 allocs/op on request path** — removed buildHeaders closure escape
+  (−1 alloc) and replaced `*sentRequest` return with multi-value return
+  (−1 alloc). (`9618fa7`, `f0b769a`)
+
+### Diff
+
+26 commits since v0.3.0. 19 files changed in PRs #31 and #32.
+
+---
+
 ## [v0.3.0] — 2026-06-15
 
 ### Added

@@ -4,10 +4,11 @@ A low-level, zero-allocation HTTP/2 client for Go, designed for load
 generators. Implements RFC 7540 (HTTP/2) and RFC 7541 (HPACK) from
 scratch without `net/http` or `golang.org/x/net/http2`.
 
-**Status:** v0.3.0 — client hardening (graceful shutdown, body
-decompression, priority hints, request timeout, client rate
-limiting, connection warmup, RateLimitBurst option, warmup
-lifecycle fix). See [CHANGELOG.md](CHANGELOG.md) for details. See
+**Status:** v0.4.0 — CONTINUATION write path (RFC §6.2/§6.10),
+automatic retry layer (`client.Retryer`), Docker cross-server
+integration tests (nginx + Undertow), security fixes (P0/P1),
+−15% latency + −2 allocs/op, CI fully green.
+See [CHANGELOG.md](CHANGELOG.md) for details. See
 [C.1 design](docs/superpowers/specs/2026-05-07-poseidon-client-c1-design.md),
 [C.2 design](docs/superpowers/specs/2026-05-08-poseidon-client-c2-pool-design.md),
 [C.3/C.4 design](docs/superpowers/specs/2026-05-09-c3-c4-design.md),
@@ -92,6 +93,15 @@ lifecycle fix). See [CHANGELOG.md](CHANGELOG.md) for details. See
   `StreamResponse.WaitTrailers(ctx)` pumps events until trailers arrive
   or stream ends; `trailerAnnouncement` emits `Trailer:` header for
   Go net/http server compatibility.
+- **E.1 — CONTINUATION write path** *(released)*: `writeHeadersWithPriority`
+  splits oversized HPACK blocks into HEADERS+CONTINUATION frame sequences
+  (RFC 7540 §6.2/§6.10). Large bearer tokens, cookies, gRPC metadata over
+  16 KiB transmit correctly. Zero additional allocations.
+- **E.2 — Automatic retry layer** *(released)*: `client.NewRetryer(c,
+  RetryOptions)` retries idempotent requests on `REFUSED_STREAM` (RFC §8.1.4),
+  GOAWAY, and dial errors. Truncated-exponential backoff with ±25% jitter.
+  `Request.Idempotent *bool` for per-request override. `IsRetryable` callback
+  for 5xx and custom policies.
 
 ## Quick start
 

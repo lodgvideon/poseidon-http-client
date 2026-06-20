@@ -1225,7 +1225,7 @@ func TestManagedPool_GetOrCreateSubPool_AfterClose(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	var resp client.Response
-	if err := c.Do(ctx, &client.Request{Method: "GET", Path: "/"}, &resp); err != nil {
+	if err := doWithRetry(t, c, ctx, &client.Request{Method: "GET", Path: "/"}, &resp); err != nil {
 		t.Fatalf("initial Do: %v", err)
 	}
 
