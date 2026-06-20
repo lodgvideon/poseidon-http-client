@@ -59,6 +59,11 @@ type connOps interface {
 
 	// storeAltSvc saves ALTSVC entries from an ALTSVC frame.
 	storeAltSvc(entries []frame.AltSvcEntry)
+
+	// bumpFramesReceived increments the connection's received-frame counter.
+	// Called at the start of each On* handler so the counter reflects the
+	// frame as soon as it is dispatched, before Recv can observe it.
+	bumpFramesReceived()
 }
 
 // streamLookup is retained as the legacy alias for tests that only
@@ -98,6 +103,7 @@ func newConnHandler(streams streamLookup, dec *hpack.Decoder) *connHandler {
 // emits batched WINDOW_UPDATE refunds via the owning Conn. Returns a
 // typed StreamError or ConnError when the peer overruns either window.
 func (h *connHandler) OnData(fh frame.FrameHeader, p []byte, _ uint8) error {
+	h.streams.bumpFramesReceived()
 	s := h.streams.lookupStream(fh.StreamID)
 	if s == nil {
 		return nil // unknown stream — peer chatter, ignored
@@ -117,6 +123,7 @@ func (h *connHandler) OnData(fh frame.FrameHeader, p []byte, _ uint8) error {
 
 // OnHeaders implements frame.Handler.
 func (h *connHandler) OnHeaders(fh frame.FrameHeader, hb frame.HeaderBlock, _ *frame.Priority, _ uint8) error {
+	h.streams.bumpFramesReceived()
 	s := h.streams.lookupStream(fh.StreamID)
 	if s == nil {
 		return nil
@@ -143,6 +150,7 @@ func (h *connHandler) OnHeaders(fh frame.FrameHeader, hb frame.HeaderBlock, _ *f
 
 // OnContinuation implements frame.Handler.
 func (h *connHandler) OnContinuation(fh frame.FrameHeader, hb frame.HeaderBlock) error {
+	h.streams.bumpFramesReceived()
 	s := h.streams.lookupStream(fh.StreamID)
 	if s == nil || h.pendingStreamID != fh.StreamID {
 		return nil
@@ -210,11 +218,13 @@ func (h *connHandler) emitHeaderBlock(s *Stream, hb []byte, endStream, isTrailer
 // to the spec but does not surface them as caller-visible events.
 
 func (h *connHandler) OnPriority(_ frame.FrameHeader, _ frame.Priority) error {
+	h.streams.bumpFramesReceived()
 	return nil // deprecated by RFC 9113; ignored
 }
 
 // OnRSTStream implements frame.Handler.
 func (h *connHandler) OnRSTStream(fh frame.FrameHeader, code frame.ErrCode) error {
+	h.streams.bumpFramesReceived()
 	s := h.streams.lookupStream(fh.StreamID)
 	if s == nil {
 		return nil
@@ -232,6 +242,7 @@ func (h *connHandler) OnRSTStream(fh frame.FrameHeader, code frame.ErrCode) erro
 // INITIAL_WINDOW_SIZE delta on open streams), and a SETTINGS ACK is
 // written back per RFC 7540 §6.5.3.
 func (h *connHandler) OnSettings(fh frame.FrameHeader, s frame.SettingsParams) error {
+	h.streams.bumpFramesReceived()
 	if fh.Flags&frame.FlagSettingsAck != 0 {
 		return nil
 	}
@@ -246,6 +257,7 @@ func (h *connHandler) OnSettings(fh frame.FrameHeader, s frame.SettingsParams) e
 // When true, registers the promised (even-ID) stream and delivers an
 // EventPushPromise on the parent stream's Recv channel.
 func (h *connHandler) OnPushPromise(fh frame.FrameHeader, promisedStreamID uint32, hb frame.HeaderBlock, _ uint8) error {
+	h.streams.bumpFramesReceived()
 	enabled, _ := h.streams.pushSupport()
 	if !enabled {
 		return &ConnError{
@@ -302,6 +314,7 @@ func (h *connHandler) OnPushPromise(fh frame.FrameHeader, promisedStreamID uint3
 // back with ACK=1 and the same opaque 8-byte payload (RFC 7540 §6.7).
 // ACK frames are delivered to any Ping call waiting for that payload.
 func (h *connHandler) OnPing(fh frame.FrameHeader, payload [8]byte) error {
+	h.streams.bumpFramesReceived()
 	if fh.Flags&frame.FlagPingAck != 0 {
 		h.streams.deliverPingAck(payload)
 		return nil
@@ -315,6 +328,7 @@ func (h *connHandler) OnPing(fh frame.FrameHeader, payload [8]byte) error {
 // streams whose id exceeds lastStreamID with EventReset(REFUSED_STREAM)
 // per RFC 7540 §6.8, and wakes writers blocked on send credit.
 func (h *connHandler) OnGoAway(_ frame.FrameHeader, lastStreamID uint32, code frame.ErrCode, _ []byte) error {
+	h.streams.bumpFramesReceived()
 	h.streams.onGoAwayReceived(lastStreamID, code)
 	return nil
 }
@@ -322,6 +336,7 @@ func (h *connHandler) OnGoAway(_ frame.FrameHeader, lastStreamID uint32, code fr
 // OnOrigin implements frame.Handler. It stores the server's advertised
 // origin list (RFC 8336 §3) for connection coalescing decisions.
 func (h *connHandler) OnOrigin(_ frame.FrameHeader, origins []string) error {
+	h.streams.bumpFramesReceived()
 	dup := make([]string, len(origins))
 	copy(dup, origins)
 	h.streams.storeOrigins(dup)
@@ -331,6 +346,7 @@ func (h *connHandler) OnOrigin(_ frame.FrameHeader, origins []string) error {
 // OnAltSvc implements frame.Handler. It parses ALTSVC entries (RFC 7838
 // §4) and stores them for alternative-service routing decisions.
 func (h *connHandler) OnAltSvc(_ frame.FrameHeader, entries []frame.AltSvcEntry) error {
+	h.streams.bumpFramesReceived()
 	dup := make([]frame.AltSvcEntry, len(entries))
 	copy(dup, entries)
 	h.streams.storeAltSvc(dup)
@@ -344,6 +360,7 @@ func (h *connHandler) OnAltSvc(_ frame.FrameHeader, entries []frame.AltSvcEntry)
 // typed error when the increment would overflow the window
 // (RFC 7540 §6.9.1: 2^31-1).
 func (h *connHandler) OnWindowUpdate(fh frame.FrameHeader, increment uint32) error {
+	h.streams.bumpFramesReceived()
 	return h.streams.onWindowUpdate(fh.StreamID, increment)
 }
 

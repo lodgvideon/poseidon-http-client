@@ -90,7 +90,7 @@ func (d *ProxyDialer) Dial(ctx context.Context, addr string) (net.Conn, error) {
 	connectReq += "\r\n"
 
 	if _, err := io.WriteString(proxyConn, connectReq); err != nil {
-		proxyConn.Close()
+		_ = proxyConn.Close()
 		return nil, fmt.Errorf("conn: proxy write CONNECT: %w", err)
 	}
 
@@ -98,14 +98,14 @@ func (d *ProxyDialer) Dial(ctx context.Context, addr string) (net.Conn, error) {
 	br := bufio.NewReader(proxyConn)
 	line, err := br.ReadString('\n')
 	if err != nil {
-		proxyConn.Close()
+		_ = proxyConn.Close()
 		return nil, fmt.Errorf("conn: proxy read CONNECT response: %w", err)
 	}
 
 	// Parse "HTTP/1.x 200".
 	parts := strings.SplitN(strings.TrimSpace(line), " ", 3)
 	if len(parts) < 2 || parts[1] != "200" {
-		proxyConn.Close()
+		_ = proxyConn.Close()
 		return nil, fmt.Errorf("conn: proxy CONNECT %s: %s", addr, strings.TrimSpace(line))
 	}
 
@@ -113,7 +113,7 @@ func (d *ProxyDialer) Dial(ctx context.Context, addr string) (net.Conn, error) {
 	for {
 		hdr, err := br.ReadString('\n')
 		if err != nil {
-			proxyConn.Close()
+			_ = proxyConn.Close()
 			return nil, fmt.Errorf("conn: proxy read CONNECT headers: %w", err)
 		}
 		if strings.TrimSpace(hdr) == "" {
@@ -195,11 +195,11 @@ func (d *ProxyTLSDialer) Dial(ctx context.Context, addr string) (net.Conn, error
 
 	tc := tls.Client(tunnel, cfg)
 	if err := tc.HandshakeContext(ctx); err != nil {
-		tunnel.Close()
+		_ = tunnel.Close()
 		return nil, fmt.Errorf("conn: proxy tls handshake: %w", err)
 	}
 	if tc.ConnectionState().NegotiatedProtocol != "h2" {
-		tc.Close()
+		_ = tc.Close()
 		return nil, ErrALPNFailed
 	}
 	return tc, nil

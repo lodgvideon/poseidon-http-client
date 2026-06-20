@@ -433,7 +433,7 @@ func (f *Framer) WriteAltSvc(streamID uint32, entries []AltSvcEntry) error {
 	if len(entries) == 0 {
 		return f.writeFrame(FrameHeader{Length: 0, Type: FrameAltSvc, StreamID: streamID}, nil)
 	}
-	var buf []byte
+	buf := make([]byte, 0, len(entries)*32)
 	for _, e := range entries {
 		if len(e.Origin) > 0xFFFF {
 			return ErrFrameTooLarge

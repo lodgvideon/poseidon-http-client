@@ -170,7 +170,7 @@ public final class Main {
     }
 
     private static void status(HttpServerExchange ex) {
-        String path = ex.getRelativePath().substring("/status/".length());
+        String path = ex.getRelativePath().substring(1); // strip leading '/' from relative path after prefix match
         int code = Integer.parseInt(path);
         ex.setStatusCode(code);
         ex.getResponseHeaders().put(Headers.CONTENT_TYPE, "text/plain");
