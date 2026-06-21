@@ -258,7 +258,7 @@ func TestSingleConn_Acquire_LazyDial(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
-	c, release, err := sc.acquire(ctx)
+	c, release, err := sc.acquireConn(ctx)
 	if err != nil {
 		t.Fatalf("acquire: %v", err)
 	}
@@ -283,12 +283,12 @@ func TestSingleConn_Acquire_ReusesAliveConn(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
-	c1, rel1, err := sc.acquire(ctx)
+	c1, rel1, err := sc.acquireConn(ctx)
 	if err != nil {
 		t.Fatalf("first acquire: %v", err)
 	}
 	rel1()
-	c2, rel2, err := sc.acquire(ctx)
+	c2, rel2, err := sc.acquireConn(ctx)
 	if err != nil {
 		t.Fatalf("second acquire: %v", err)
 	}
@@ -318,7 +318,7 @@ func TestSingleConn_Acquire_GoAwayTriggersRedial(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
-	c1, rel1, err := sc.acquire(ctx)
+	c1, rel1, err := sc.acquireConn(ctx)
 	if err != nil {
 		t.Fatalf("first acquire: %v", err)
 	}
@@ -332,7 +332,7 @@ func TestSingleConn_Acquire_GoAwayTriggersRedial(t *testing.T) {
 		time.Sleep(5 * time.Millisecond)
 	}
 
-	c2, rel2, err := sc.acquire(ctx)
+	c2, rel2, err := sc.acquireConn(ctx)
 	if err != nil {
 		t.Fatalf("second acquire: %v", err)
 	}
@@ -368,10 +368,10 @@ func TestSingleConn_Backoff_RefusesWithinWindow(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
-	if _, _, err := sc.acquire(ctx); err == nil {
+	if _, _, err := sc.acquireConn(ctx); err == nil {
 		t.Fatal("first acquire must fail")
 	}
-	if _, _, err := sc.acquire(ctx); err == nil {
+	if _, _, err := sc.acquireConn(ctx); err == nil {
 		t.Fatal("second acquire must fail")
 	}
 	if got := d.dialCount.Load(); got != 1 {
@@ -394,7 +394,7 @@ func TestSingleConn_Acquire_ConcurrentDial_OnlyOneDials(t *testing.T) {
 	results := make(chan *conn.Conn, N)
 	for i := 0; i < N; i++ {
 		go func() {
-			c, _, err := sc.acquire(ctx)
+			c, _, err := sc.acquireConn(ctx)
 			if err != nil {
 				results <- nil
 				return
@@ -427,7 +427,7 @@ func TestSingleConn_Close_BlocksNewAcquires(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
-	c, _, err := sc.acquire(ctx)
+	c, _, err := sc.acquireConn(ctx)
 	if err != nil {
 		t.Fatalf("acquire: %v", err)
 	}
@@ -435,7 +435,7 @@ func TestSingleConn_Close_BlocksNewAcquires(t *testing.T) {
 	if c.IsAlive() {
 		t.Fatal("close must close underlying conn")
 	}
-	if _, _, err := sc.acquire(ctx); !errors.Is(err, ErrClosed) {
+	if _, _, err := sc.acquireConn(ctx); !errors.Is(err, ErrClosed) {
 		t.Fatalf("expected ErrClosed, got %v", err)
 	}
 }

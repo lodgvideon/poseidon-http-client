@@ -38,8 +38,23 @@ type singleConn struct {
 	warmupCancel context.CancelFunc
 }
 
-// acquire implements transport.acquire.
-func (s *singleConn) acquire(ctx context.Context) (*conn.Conn, func(), error) {
+// openExchange implements transport.openExchange.
+func (s *singleConn) openExchange(ctx context.Context) (protoStream, func(uint32) (*conn.Stream, bool), func(), error) {
+	cn, release, err := s.acquireConn(ctx)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	stream, serr := cn.NewStream(ctx)
+	if serr != nil {
+		release()
+		return nil, nil, nil, serr
+	}
+	return stream, cn.LookupStream, release, nil
+}
+
+// acquireConn returns a healthy *conn.Conn and a no-op release func.
+// It handles lazy dial, in-flight dedup, and backoff suppression.
+func (s *singleConn) acquireConn(ctx context.Context) (*conn.Conn, func(), error) {
 	for {
 		s.mu.Lock()
 		if s.closed {
@@ -192,6 +207,6 @@ func (s *singleConn) warmup(n int) {
 	s.warmupCancel = cancel
 	s.mu.Unlock()
 	go func() {
-		_, _, _ = s.acquire(ctx)
+		_, _, _ = s.acquireConn(ctx)
 	}()
 }

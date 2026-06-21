@@ -6,6 +6,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -198,6 +199,98 @@ func TestWarmup_Pool_CappedByMaxConns(t *testing.T) {
 	if stats.ActiveConns > maxConns {
 		t.Errorf("ActiveConns = %d, want <= %d (capped by MaxConnsPerHost)", stats.ActiveConns, maxConns)
 	}
+}
+
+// TestSingleConn_Warmup_WhenClosed verifies that calling Warmup on a closed
+// singleConn transport is a no-op (covers the `if s.closed { return }` path).
+func TestSingleConn_Warmup_WhenClosed(t *testing.T) {
+	srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(200)
+	}))
+	srv.EnableHTTP2 = true
+	srv.StartTLS()
+	defer srv.Close()
+
+	c, err := NewClient(ClientOptions{
+		Addr: srv.Listener.Addr().String(),
+		ConnOpts: conn.ConnOptions{
+			Dialer: &conn.TLSDialer{Config: &tls.Config{InsecureSkipVerify: true}},
+		},
+	})
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+
+	// Close the client first — this sets s.closed = true on the underlying
+	// singleConn transport.
+	_ = c.Close()
+
+	// Warmup on a closed transport must be a no-op and must not panic.
+	c.Warmup(1)
+}
+
+// TestSingleConn_Warmup_AlreadyInFlight verifies that a second Warmup call
+// while a background dial is still in progress is a no-op
+// (covers the `if s.warmupCancel != nil { return }` path).
+func TestSingleConn_Warmup_AlreadyInFlight(t *testing.T) {
+	// Use a slow dialer so the background warmup goroutine is still in flight
+	// when we call Warmup a second time.
+	var dialStarted = make(chan struct{})
+	slow := &slowDialerWarmup{
+		inner:   &conn.TLSDialer{Config: &tls.Config{InsecureSkipVerify: true}},
+		started: dialStarted,
+		delay:   300 * time.Millisecond,
+	}
+
+	srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(200)
+	}))
+	srv.EnableHTTP2 = true
+	srv.StartTLS()
+	defer srv.Close()
+
+	c, err := NewClient(ClientOptions{
+		Addr: srv.Listener.Addr().String(),
+		ConnOpts: conn.ConnOptions{
+			Dialer: slow,
+		},
+	})
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+	defer c.Close()
+
+	// First Warmup: starts a background dial that will block for 300ms.
+	c.Warmup(1)
+
+	// Wait until the dial goroutine has actually started (i.e. warmupCancel != nil).
+	select {
+	case <-dialStarted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("background warmup dial did not start within 2s")
+	}
+
+	// Second Warmup: warmupCancel is non-nil → hits the `if s.warmupCancel != nil` path.
+	c.Warmup(1) // must not panic or block
+}
+
+// slowDialerWarmup wraps a Dialer adding a delay; it signals the started
+// channel when the dial begins so the test can synchronise.
+type slowDialerWarmup struct {
+	inner   conn.Dialer
+	started chan struct{}
+	delay   time.Duration
+	once    sync.Once
+}
+
+func (d *slowDialerWarmup) Dial(ctx context.Context, addr string) (net.Conn, error) {
+	d.once.Do(func() { close(d.started) })
+	select {
+	case <-time.After(d.delay):
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+	return d.inner.Dial(ctx, addr)
 }
 
 // countingDialer wraps a Dialer and increments a counter on every Dial.

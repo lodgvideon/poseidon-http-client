@@ -62,7 +62,7 @@ func TestPool_StatsAfterClose_ReturnsZero(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
 	defer cancel()
-	_, _, err := newPoolTransportFromPool(p).acquire(ctx)
+	_, _, _, err := newPoolTransportFromPool(p).openExchange(ctx)
 	if !errors.Is(err, ErrPoolClosed) {
 		t.Fatalf("acquire after Close = %v, want ErrPoolClosed", err)
 	}

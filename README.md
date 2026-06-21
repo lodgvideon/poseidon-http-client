@@ -102,6 +102,14 @@ See [CHANGELOG.md](CHANGELOG.md) for details. See
   GOAWAY, and dial errors. Truncated-exponential backoff with ±25% jitter.
   `Request.Idempotent *bool` for per-request override. `IsRetryable` callback
   for 5xx and custom policies.
+- **F.1 — HTTP/1.1 fallback + ALPN-aware transport** *(released)*:
+  new `http1/` package implements HTTP/1.1 wire protocol from scratch (no
+  `net/http`) with `net.Buffers` (writev syscall) for scatter-gather writes.
+  `TransportH1SingleConn` for explicit H1.1; `TransportALPN` dials with
+  `conn.FlexDialer` (offers `h2` + `http/1.1`) and permanently routes to H2
+  or H1.1 based on the ALPN-negotiated protocol. The `protoStream` interface
+  lets `Client.sendRequest` and `drainResponse` drive either protocol
+  without branching. See [docs/USAGE.md](docs/USAGE.md) for examples.
 
 ## Quick start
 

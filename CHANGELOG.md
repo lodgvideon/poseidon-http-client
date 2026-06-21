@@ -7,6 +7,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **Pool reply-channel poisoning race** — the global `replyPool` recycled a
+  buffered reply channel even when the pool actor could still send a late
+  reply (caller abandoned via `ctx`/`closedCh` after the actor took the
+  request). The recycled channel was then handed to a different `Pool`,
+  which read the stale reply — surfacing as a spurious `ErrPoolClosed` or a
+  cross-pool conn (`stream reset by peer`) under concurrent load. The reply
+  channel is now recycled only when the actor can no longer send on it.
+  Regression test: `TestPool_ReplyChannelNotPoisonedUnderAbandonment`.
+
+## [v0.5.0] — 2026-06-21
+
+### Added
+
+- **HTTP/1.1 fallback** (`http1/` package) — zero-dependency HTTP/1.1 wire
+  protocol from scratch (no `net/http`). Uses `net.Buffers` (writev) for
+  scatter-gather writes. Both `Content-Length` and `Transfer-Encoding: chunked`
+  for request/response bodies. Automatic 1xx skip. Keep-alive from `Connection:`
+  header. `HEAD`/`204`/`304` no-body fast paths. Chunk-extension stripping.
+
+- **`TransportH1SingleConn`** — explicit H1.1 single-connection transport.
+  Serializes exchanges via in-flight mutex. Dial backoff, keep-alive reuse.
+
+- **`TransportALPN`** — ALPN-aware transport. Dials once with `conn.FlexDialer`
+  (offers `h2` + `http/1.1`) and permanently routes to H2 or H1.1 based on
+  negotiated protocol.
+
+- **`conn.FlexDialer`** — TLS dialer prepending `h2` and `http/1.1` to
+  `NextProtos`; returns `ErrALPNFailed` if neither is negotiated.
+
+- **`conn.NegotiatedProtocol`** — returns ALPN protocol string from `*tls.Conn`;
+  `""` for plain-TCP connections (H2C).
+
+- **`protoStream` interface** — protocol-agnostic abstraction over
+  `*conn.Stream` (H2) and `*h1Exchange` (H1.1), enabling `Client.sendRequest`
+  and `drainResponse` to drive either protocol uniformly.
+
+- **`docs/USAGE.md`** — 21-section usage guide covering all client features.
+
 ## [v0.4.0] — 2026-06-20
 
 ### Added

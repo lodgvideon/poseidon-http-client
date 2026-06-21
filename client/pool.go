@@ -595,41 +595,52 @@ func (p *Pool) acquire(ctx context.Context) (*managedConn, error) {
 	}
 
 	reply := replyPool.Get().(chan acquireResp)
-	defer func() {
-		// Drain any message left by the actor before returning to pool.
-		// After acquire() exits, one of three states is guaranteed:
-		//   (a) We already read the response (happy path) — channel empty.
-		//   (b) Actor sent, caller abandoned — channel has one message.
-		//   (c) Actor took ctx.Done arm in replyAcquire — channel empty.
-		// In all cases a non-blocking drain leaves the channel clean.
+	// recycle returns the reply channel to replyPool. It is ONLY safe to
+	// call when the actor can no longer send on reply — otherwise a late
+	// send from the actor would poison the channel for its next user
+	// (a different Pool), surfacing as a spurious ErrPoolClosed or a
+	// cross-pool conn ("stream reset by peer"). Two states are safe:
+	//   (a) the actor never received req (first-select abandonment), or
+	//   (b) we consumed the actor's single reply (happy path).
+	// On second-select abandonment (ctx.Done / closedCh after the actor
+	// took req) the actor may still call replyAcquire; we drop the channel
+	// to GC rather than recycle. replyAcquire's send is buffered (cap 1)
+	// so the late send never blocks and no goroutine leaks.
+	recycle := func() {
 		select {
 		case <-reply:
 		default:
 		}
 		replyPool.Put(reply)
-	}()
+	}
 
 	req := acquireReq{ctx: ctx, reply: reply}
 
 	// Send the request to the actor.
 	select {
 	case p.acquireCh <- req:
+		// Actor owns req now; fall through to await its reply.
 	case <-ctx.Done():
+		recycle() // actor never received req — safe to recycle
 		return nil, mapAcquireErr(ctx, acquireTimeoutActive)
 	case <-p.closedCh:
+		recycle() // actor never received req — safe to recycle
 		return nil, ErrPoolClosed
 	}
 
 	// Wait for the actor's reply.
 	select {
 	case resp := <-reply:
+		recycle() // consumed the actor's single send — safe to recycle
 		if resp.err == nil {
 			p.metrics.Latency.Acquire.Observe(time.Since(start))
 		}
 		return resp.mc, resp.err
 	case <-ctx.Done():
+		// Actor may still send on reply later — do NOT recycle.
 		return nil, mapAcquireErr(ctx, acquireTimeoutActive)
 	case <-p.closedCh:
+		// Actor may still send on reply later — do NOT recycle.
 		return nil, ErrPoolClosed
 	}
 }
