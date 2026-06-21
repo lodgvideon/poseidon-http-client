@@ -2,9 +2,11 @@ package client_test
 
 import (
 	"context"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/lodgvideon/poseidon-http-client/client"
 	"github.com/lodgvideon/poseidon-http-client/conn"
@@ -129,6 +131,270 @@ func TestNewClient_H1SingleConn_POST_Body(t *testing.T) {
 	}
 	if string(resp.Body) != string(payload) {
 		t.Errorf("echo body = %q, want %q", resp.Body, payload)
+	}
+}
+
+// TestNewClient_ALPN_PlaintextFallsBackToH1 verifies that when the ALPN
+// transport dials a plain-TCP server (no TLS, NegotiatedProtocol==""),
+// it falls back to H1.1 and makes a successful request.
+func TestNewClient_ALPN_PlaintextFallsBackToH1(t *testing.T) {
+	t.Parallel()
+	srv := startH1Server(t) // plain HTTP/1.1
+
+	c, err := client.NewClient(client.ClientOptions{
+		Transport: client.TransportALPN,
+		Addr:      srv.Listener.Addr().String(),
+		ConnOpts:  conn.ConnOptions{Dialer: &conn.PlaintextDialer{}},
+	})
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+	defer c.Close()
+
+	var resp client.Response
+	resp.Reset()
+	if err := c.Do(context.Background(), &client.Request{
+		Method:   "GET",
+		Path:     "/",
+		WantBody: true,
+	}, &resp); err != nil {
+		t.Fatalf("Do: %v", err)
+	}
+	if resp.Status != 200 {
+		t.Errorf("status = %d, want 200", resp.Status)
+	}
+	if string(resp.Body) != "ok" {
+		t.Errorf("body = %q, want %q", resp.Body, "ok")
+	}
+
+	// Second request uses the cached H1.1 delegate (covers fast-path).
+	resp.Reset()
+	if err := c.Do(context.Background(), &client.Request{
+		Method:   "GET",
+		Path:     "/",
+		WantBody: true,
+	}, &resp); err != nil {
+		t.Fatalf("Do (2nd): %v", err)
+	}
+	if resp.Status != 200 {
+		t.Errorf("2nd status = %d, want 200", resp.Status)
+	}
+}
+
+// TestNewClient_H1SingleConn_Warmup verifies Warmup pre-dials and the
+// subsequent request reuses the warmed connection.
+func TestNewClient_H1SingleConn_Warmup(t *testing.T) {
+	t.Parallel()
+	srv := startH1Server(t)
+
+	c, err := client.NewClient(client.ClientOptions{
+		Transport: client.TransportH1SingleConn,
+		Addr:      srv.Listener.Addr().String(),
+		ConnOpts:  conn.ConnOptions{Dialer: &conn.PlaintextDialer{}},
+	})
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+	defer c.Close()
+
+	c.Warmup(1) // pre-dial; should not block
+
+	var resp client.Response
+	resp.Reset()
+	if err := c.Do(context.Background(), &client.Request{
+		Method:   "GET",
+		Path:     "/",
+		WantBody: true,
+	}, &resp); err != nil {
+		t.Fatalf("Do: %v", err)
+	}
+	if resp.Status != 200 {
+		t.Errorf("status = %d, want 200", resp.Status)
+	}
+}
+
+// TestNewClient_H1SingleConn_Shutdown verifies Shutdown closes the transport.
+func TestNewClient_H1SingleConn_Shutdown(t *testing.T) {
+	t.Parallel()
+	srv := startH1Server(t)
+
+	c, err := client.NewClient(client.ClientOptions{
+		Transport: client.TransportH1SingleConn,
+		Addr:      srv.Listener.Addr().String(),
+		ConnOpts:  conn.ConnOptions{Dialer: &conn.PlaintextDialer{}},
+	})
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+
+	// Make one request so a conn is established.
+	var resp client.Response
+	resp.Reset()
+	if err := c.Do(context.Background(), &client.Request{
+		Method: "GET", Path: "/",
+	}, &resp); err != nil {
+		t.Fatalf("Do: %v", err)
+	}
+
+	if err := c.Shutdown(100 * time.Millisecond); err != nil {
+		t.Fatalf("Shutdown: %v", err)
+	}
+}
+
+// TestNewClient_ALPN_Shutdown_BeforeRequest covers shutdown before any
+// request has been made (delegate is nil).
+func TestNewClient_ALPN_Shutdown_BeforeRequest(t *testing.T) {
+	t.Parallel()
+	srv := startH1Server(t)
+
+	c, err := client.NewClient(client.ClientOptions{
+		Transport: client.TransportALPN,
+		Addr:      srv.Listener.Addr().String(),
+		ConnOpts:  conn.ConnOptions{Dialer: &conn.PlaintextDialer{}},
+	})
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+
+	// Warmup is a no-op (protocol not yet detected).
+	c.Warmup(1)
+
+	// Shutdown before any request: delegate is nil, should be safe.
+	if err := c.Shutdown(100 * time.Millisecond); err != nil {
+		t.Fatalf("Shutdown: %v", err)
+	}
+}
+
+// TestNewClient_ALPN_Shutdown_AfterRequest covers shutdown after the
+// delegate is established via a real request.
+func TestNewClient_ALPN_Shutdown_AfterRequest(t *testing.T) {
+	t.Parallel()
+	srv := startH1Server(t)
+
+	c, err := client.NewClient(client.ClientOptions{
+		Transport: client.TransportALPN,
+		Addr:      srv.Listener.Addr().String(),
+		ConnOpts:  conn.ConnOptions{Dialer: &conn.PlaintextDialer{}},
+	})
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+
+	var resp client.Response
+	resp.Reset()
+	if err := c.Do(context.Background(), &client.Request{
+		Method: "GET", Path: "/",
+	}, &resp); err != nil {
+		t.Fatalf("Do: %v", err)
+	}
+
+	// Warmup after protocol is known delegates to h1singleConn.warmup.
+	c.Warmup(1)
+
+	if err := c.Shutdown(100 * time.Millisecond); err != nil {
+		t.Fatalf("Shutdown: %v", err)
+	}
+}
+
+// TestNewClient_H1SingleConn_MidBodyError verifies that closing a server
+// connection mid-chunk is handled gracefully and covers the
+// h1Exchange.Close(done=false) code path via the defer in sendRequest.
+func TestNewClient_H1SingleConn_MidBodyError(t *testing.T) {
+	t.Parallel()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+
+	go func() {
+		nc, aerr := ln.Accept()
+		if aerr != nil {
+			return
+		}
+		defer func() { _ = nc.Close() }()
+		_, _ = nc.Read(make([]byte, 4096))
+		// Send a chunked response but close mid-chunk so the client gets EOF
+		// while reading chunk data.
+		_, _ = nc.Write([]byte(
+			"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n" +
+				"a\r\nhell", // 10-byte chunk; send only 4 bytes then close
+		))
+	}()
+
+	c, err := client.NewClient(client.ClientOptions{
+		Transport: client.TransportH1SingleConn,
+		Addr:      ln.Addr().String(),
+		ConnOpts:  conn.ConnOptions{Dialer: &conn.PlaintextDialer{}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+
+	var resp client.Response
+	resp.Reset()
+	if err := c.Do(context.Background(), &client.Request{
+		Method:   "GET",
+		Path:     "/",
+		WantBody: true,
+	}, &resp); err == nil {
+		t.Error("expected error for mid-chunk connection close, got nil")
+	}
+}
+
+// TestNewClient_H1SingleConn_DoStream_Error verifies DoStream returns an
+// error for H1.1 transports (streaming not supported).
+func TestNewClient_H1SingleConn_DoStream_Error(t *testing.T) {
+	t.Parallel()
+	srv := startH1Server(t)
+
+	c, err := client.NewClient(client.ClientOptions{
+		Transport: client.TransportH1SingleConn,
+		Addr:      srv.Listener.Addr().String(),
+		ConnOpts:  conn.ConnOptions{Dialer: &conn.PlaintextDialer{}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+
+	var sr client.StreamResponse
+	if err := c.DoStream(context.Background(), &client.Request{
+		Method: "GET",
+		Path:   "/",
+	}, &sr); err == nil {
+		_ = sr.Close()
+		t.Error("expected error calling DoStream on H1.1 client, got nil")
+	}
+}
+
+// TestNewClient_H1SingleConn_StreamBody_Error verifies that Do with
+// StreamBody=true returns an error for HTTP/1.1 connections (no streaming).
+func TestNewClient_H1SingleConn_StreamBody_Error(t *testing.T) {
+	t.Parallel()
+	srv := startH1Server(t)
+
+	c, err := client.NewClient(client.ClientOptions{
+		Transport: client.TransportH1SingleConn,
+		Addr:      srv.Listener.Addr().String(),
+		ConnOpts:  conn.ConnOptions{Dialer: &conn.PlaintextDialer{}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+
+	var resp client.Response
+	if err := c.Do(context.Background(), &client.Request{
+		Method:     "GET",
+		Path:       "/",
+		StreamBody: true,
+	}, &resp); err == nil {
+		if resp.BodyReader != nil {
+			_ = resp.BodyReader.Close()
+		}
+		t.Error("expected error calling Do(StreamBody=true) on H1.1 client, got nil")
 	}
 }
 
