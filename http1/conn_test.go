@@ -3,11 +3,14 @@ package http1_test
 import (
 	"bufio"
 	"context"
+	"fmt"
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/lodgvideon/poseidon-http-client/hpack"
 	"github.com/lodgvideon/poseidon-http-client/http1"
@@ -286,4 +289,487 @@ func TestHTTP1_ParseStatus(t *testing.T) {
 		t.Fatalf("status header value = %q, want 201", headers[0].Value)
 	}
 	_ = bufio.NewReader(nil) // ensure bufio import used (it's in roundTrip)
+}
+
+func TestHTTP1_IsAlive(t *testing.T) {
+	t.Parallel()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+	t.Cleanup(srv.Close)
+
+	nc, err := net.Dial("tcp", srv.Listener.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	c := http1.NewConn(nc)
+	if !c.IsAlive() {
+		t.Fatal("expected IsAlive=true before close")
+	}
+	_ = c.Close()
+	if c.IsAlive() {
+		t.Fatal("expected IsAlive=false after close")
+	}
+}
+
+func TestHTTP1_204_NoBody(t *testing.T) {
+	t.Parallel()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(204)
+	}))
+	t.Cleanup(srv.Close)
+
+	status, body := roundTrip(t, srv, "DELETE", "/item", "")
+	if status != 204 {
+		t.Fatalf("status = %d, want 204", status)
+	}
+	if body != "" {
+		t.Errorf("204 body = %q, want empty", body)
+	}
+}
+
+// TestHTTP1_POST_EndStream verifies that WriteRequest adds "Content-Length: 0"
+// for POST/PUT/PATCH when endStream=true (no body follows).
+func TestHTTP1_POST_EndStream(t *testing.T) {
+	t.Parallel()
+	for _, method := range []string{"POST", "PUT", "PATCH"} {
+		method := method
+		t.Run(method, func(t *testing.T) {
+			t.Parallel()
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.ContentLength != 0 {
+					w.WriteHeader(400)
+					_, _ = fmt.Fprintf(w, "bad content-length: %d", r.ContentLength)
+					return
+				}
+				w.WriteHeader(200)
+			}))
+			t.Cleanup(srv.Close)
+
+			nc, err := net.Dial("tcp", srv.Listener.Addr().String())
+			if err != nil {
+				t.Fatal(err)
+			}
+			c := http1.NewConn(nc)
+			defer func() { _ = c.Close() }()
+
+			ctx := context.Background()
+			ex := c.NewExchange()
+			fields := []hpack.HeaderField{
+				{Name: []byte(":method"), Value: []byte(method)},
+				{Name: []byte(":path"), Value: []byte("/")},
+				{Name: []byte(":authority"), Value: []byte(srv.Listener.Addr().String())},
+				{Name: []byte(":scheme"), Value: []byte("http")},
+			}
+			if err := ex.WriteRequest(ctx, fields, true); err != nil {
+				t.Fatalf("WriteRequest: %v", err)
+			}
+			status, _, err := ex.ReadResponse(ctx)
+			if err != nil {
+				t.Fatalf("ReadResponse: %v", err)
+			}
+			if status != 200 {
+				t.Fatalf("status = %d, want 200 (missing Content-Length: 0 for %s)", status, method)
+			}
+		})
+	}
+}
+
+// TestHTTP1_WriteBody_NonChunked sends a body using Content-Length (not chunked).
+func TestHTTP1_WriteBody_NonChunked(t *testing.T) {
+	t.Parallel()
+	payload := "hello"
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		buf := make([]byte, 64)
+		n, _ := r.Body.Read(buf)
+		_, _ = w.Write(buf[:n])
+	}))
+	t.Cleanup(srv.Close)
+
+	nc, err := net.Dial("tcp", srv.Listener.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	c := http1.NewConn(nc)
+	defer func() { _ = c.Close() }()
+
+	ctx := context.Background()
+	ex := c.NewExchange()
+	fields := []hpack.HeaderField{
+		{Name: []byte(":method"), Value: []byte("POST")},
+		{Name: []byte(":path"), Value: []byte("/")},
+		{Name: []byte(":authority"), Value: []byte(srv.Listener.Addr().String())},
+		{Name: []byte(":scheme"), Value: []byte("http")},
+		{Name: []byte("content-length"), Value: []byte(strconv.Itoa(len(payload)))},
+	}
+	// endStream=false + content-length present → non-chunked body
+	if err := ex.WriteRequest(ctx, fields, false); err != nil {
+		t.Fatalf("WriteRequest: %v", err)
+	}
+	if err := ex.WriteBody(ctx, []byte(payload), false); err != nil {
+		t.Fatalf("WriteBody: %v", err)
+	}
+
+	status, _, err := ex.ReadResponse(ctx)
+	if err != nil {
+		t.Fatalf("ReadResponse: %v", err)
+	}
+	if status != 200 {
+		t.Fatalf("status = %d, want 200", status)
+	}
+	var got strings.Builder
+	buf := make([]byte, 64)
+	for {
+		n, done, rerr := ex.ReadBodyChunk(buf)
+		got.Write(buf[:n])
+		if done || rerr != nil {
+			break
+		}
+	}
+	if got.String() != payload {
+		t.Errorf("echo = %q, want %q", got.String(), payload)
+	}
+}
+
+// TestHTTP1_WriteBody_EmptyChunkNonFinal verifies WriteBody is a no-op when
+// len(p)==0 and fin==false on a chunked exchange.
+func TestHTTP1_WriteBody_EmptyChunkNonFinal(t *testing.T) {
+	t.Parallel()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		buf := make([]byte, 64)
+		n, _ := r.Body.Read(buf)
+		_, _ = w.Write(buf[:n])
+	}))
+	t.Cleanup(srv.Close)
+
+	nc, err := net.Dial("tcp", srv.Listener.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	c := http1.NewConn(nc)
+	defer func() { _ = c.Close() }()
+
+	ctx := context.Background()
+	ex := c.NewExchange()
+	fields := []hpack.HeaderField{
+		{Name: []byte(":method"), Value: []byte("POST")},
+		{Name: []byte(":path"), Value: []byte("/")},
+		{Name: []byte(":authority"), Value: []byte(srv.Listener.Addr().String())},
+		{Name: []byte(":scheme"), Value: []byte("http")},
+		// No content-length → chunked
+	}
+	if err := ex.WriteRequest(ctx, fields, false); err != nil {
+		t.Fatalf("WriteRequest: %v", err)
+	}
+	// Empty non-final chunk — should be a no-op.
+	if err := ex.WriteBody(ctx, nil, false); err != nil {
+		t.Fatalf("WriteBody empty non-final: %v", err)
+	}
+	// Now send real data and finish.
+	if err := ex.WriteBody(ctx, []byte("ping"), true); err != nil {
+		t.Fatalf("WriteBody fin: %v", err)
+	}
+
+	status, _, err := ex.ReadResponse(ctx)
+	if err != nil {
+		t.Fatalf("ReadResponse: %v", err)
+	}
+	if status != 200 {
+		t.Fatalf("status = %d, want 200", status)
+	}
+}
+
+// TestHTTP1_1xx_Response verifies that ReadResponse skips 100 Continue.
+func TestHTTP1_1xx_Response(t *testing.T) {
+	t.Parallel()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+
+	go func() {
+		conn, aerr := ln.Accept()
+		if aerr != nil {
+			return
+		}
+		defer func() { _ = conn.Close() }()
+		_, _ = conn.Read(make([]byte, 4096)) // drain request
+		_, _ = conn.Write([]byte(
+			"HTTP/1.1 100 Continue\r\n\r\n" +
+				"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok",
+		))
+	}()
+
+	nc, err := net.Dial("tcp", ln.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	c := http1.NewConn(nc)
+	defer func() { _ = c.Close() }()
+
+	ctx := context.Background()
+	ex := c.NewExchange()
+	fields := []hpack.HeaderField{
+		{Name: []byte(":method"), Value: []byte("GET")},
+		{Name: []byte(":path"), Value: []byte("/")},
+		{Name: []byte(":authority"), Value: []byte(ln.Addr().String())},
+		{Name: []byte(":scheme"), Value: []byte("http")},
+	}
+	if err := ex.WriteRequest(ctx, fields, true); err != nil {
+		t.Fatalf("WriteRequest: %v", err)
+	}
+	status, _, err := ex.ReadResponse(ctx)
+	if err != nil {
+		t.Fatalf("ReadResponse: %v", err)
+	}
+	if status != 200 {
+		t.Fatalf("status = %d, want 200 (100 not skipped)", status)
+	}
+}
+
+// TestHTTP1_MalformedStatusLine verifies ReadResponse returns error on bad response.
+func TestHTTP1_MalformedStatusLine(t *testing.T) {
+	t.Parallel()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+
+	go func() {
+		conn, aerr := ln.Accept()
+		if aerr != nil {
+			return
+		}
+		defer func() { _ = conn.Close() }()
+		_, _ = conn.Read(make([]byte, 4096))
+		_, _ = conn.Write([]byte("BOGUS not-http\r\n\r\n"))
+	}()
+
+	nc, err := net.Dial("tcp", ln.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	c := http1.NewConn(nc)
+	defer func() { _ = c.Close() }()
+
+	ctx := context.Background()
+	ex := c.NewExchange()
+	fields := []hpack.HeaderField{
+		{Name: []byte(":method"), Value: []byte("GET")},
+		{Name: []byte(":path"), Value: []byte("/")},
+		{Name: []byte(":authority"), Value: []byte(ln.Addr().String())},
+		{Name: []byte(":scheme"), Value: []byte("http")},
+	}
+	_ = ex.WriteRequest(ctx, fields, true)
+	_, _, err = ex.ReadResponse(ctx)
+	if err == nil {
+		t.Fatal("expected error for malformed status line, got nil")
+	}
+}
+
+// TestHTTP1_ConnectionClose verifies read-until-close body path (contentLen==-1).
+func TestHTTP1_ConnectionClose(t *testing.T) {
+	t.Parallel()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+
+	go func() {
+		conn, aerr := ln.Accept()
+		if aerr != nil {
+			return
+		}
+		_, _ = conn.Read(make([]byte, 4096))
+		// HTTP/1.0 response: no Content-Length, connection closes when done.
+		_, _ = conn.Write([]byte(
+			"HTTP/1.0 200 OK\r\nConnection: close\r\n\r\nhello",
+		))
+		_ = conn.Close()
+	}()
+
+	nc, err := net.Dial("tcp", ln.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	c := http1.NewConn(nc)
+	defer func() { _ = c.Close() }()
+
+	ctx := context.Background()
+	ex := c.NewExchange()
+	fields := []hpack.HeaderField{
+		{Name: []byte(":method"), Value: []byte("GET")},
+		{Name: []byte(":path"), Value: []byte("/")},
+		{Name: []byte(":authority"), Value: []byte(ln.Addr().String())},
+		{Name: []byte(":scheme"), Value: []byte("http")},
+	}
+	if err := ex.WriteRequest(ctx, fields, true); err != nil {
+		t.Fatalf("WriteRequest: %v", err)
+	}
+	status, _, err := ex.ReadResponse(ctx)
+	if err != nil {
+		t.Fatalf("ReadResponse: %v", err)
+	}
+	if status != 200 {
+		t.Fatalf("status = %d, want 200", status)
+	}
+	var got strings.Builder
+	buf := make([]byte, 32)
+	for {
+		n, done, rerr := ex.ReadBodyChunk(buf)
+		got.Write(buf[:n])
+		if done || rerr != nil {
+			break
+		}
+	}
+	if got.String() != "hello" {
+		t.Errorf("body = %q, want %q", got.String(), "hello")
+	}
+	if ex.KeepAlive() {
+		t.Error("expected KeepAlive=false after connection-close body")
+	}
+}
+
+// TestHTTP1_WriteRequest_Deadline exercises the deadline context branch.
+func TestHTTP1_WriteRequest_Deadline(t *testing.T) {
+	t.Parallel()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte("ok"))
+	}))
+	t.Cleanup(srv.Close)
+
+	nc, err := net.Dial("tcp", srv.Listener.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	c := http1.NewConn(nc)
+	defer func() { _ = c.Close() }()
+
+	ctx, cancel := context.WithDeadline(context.Background(), time.Now().Add(5*time.Second))
+	defer cancel()
+
+	ex := c.NewExchange()
+	fields := []hpack.HeaderField{
+		{Name: []byte(":method"), Value: []byte("GET")},
+		{Name: []byte(":path"), Value: []byte("/")},
+		{Name: []byte(":authority"), Value: []byte(srv.Listener.Addr().String())},
+		{Name: []byte(":scheme"), Value: []byte("http")},
+	}
+	if err := ex.WriteRequest(ctx, fields, true); err != nil {
+		t.Fatalf("WriteRequest: %v", err)
+	}
+	status, _, err := ex.ReadResponse(ctx)
+	if err != nil {
+		t.Fatalf("ReadResponse: %v", err)
+	}
+	if status != 200 {
+		t.Fatalf("status = %d, want 200", status)
+	}
+}
+
+// TestHTTP1_WriteBody_Deadline exercises the deadline context branch in WriteBody.
+func TestHTTP1_WriteBody_Deadline(t *testing.T) {
+	t.Parallel()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		buf := make([]byte, 64)
+		n, _ := r.Body.Read(buf)
+		_, _ = w.Write(buf[:n])
+	}))
+	t.Cleanup(srv.Close)
+
+	nc, err := net.Dial("tcp", srv.Listener.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	c := http1.NewConn(nc)
+	defer func() { _ = c.Close() }()
+
+	ctx, cancel := context.WithDeadline(context.Background(), time.Now().Add(5*time.Second))
+	defer cancel()
+
+	ex := c.NewExchange()
+	fields := []hpack.HeaderField{
+		{Name: []byte(":method"), Value: []byte("POST")},
+		{Name: []byte(":path"), Value: []byte("/")},
+		{Name: []byte(":authority"), Value: []byte(srv.Listener.Addr().String())},
+		{Name: []byte(":scheme"), Value: []byte("http")},
+		// No content-length → chunked
+	}
+	if err := ex.WriteRequest(ctx, fields, false); err != nil {
+		t.Fatalf("WriteRequest: %v", err)
+	}
+	if err := ex.WriteBody(ctx, []byte("data"), true); err != nil {
+		t.Fatalf("WriteBody: %v", err)
+	}
+	status, _, err := ex.ReadResponse(ctx)
+	if err != nil {
+		t.Fatalf("ReadResponse: %v", err)
+	}
+	if status != 200 {
+		t.Fatalf("status = %d, want 200", status)
+	}
+}
+
+// TestHTTP1_ChunkExtensions verifies chunk-extension stripping (e.g. "a;ext=foo").
+func TestHTTP1_ChunkExtensions(t *testing.T) {
+	t.Parallel()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+
+	go func() {
+		conn, aerr := ln.Accept()
+		if aerr != nil {
+			return
+		}
+		defer func() { _ = conn.Close() }()
+		_, _ = conn.Read(make([]byte, 4096))
+		// Chunked response with extensions.
+		_, _ = conn.Write([]byte(
+			"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n" +
+				"5;ext=ignored\r\nhello\r\n" +
+				"0\r\n\r\n",
+		))
+	}()
+
+	nc, err := net.Dial("tcp", ln.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	c := http1.NewConn(nc)
+	defer func() { _ = c.Close() }()
+
+	ctx := context.Background()
+	ex := c.NewExchange()
+	fields := []hpack.HeaderField{
+		{Name: []byte(":method"), Value: []byte("GET")},
+		{Name: []byte(":path"), Value: []byte("/")},
+		{Name: []byte(":authority"), Value: []byte(ln.Addr().String())},
+		{Name: []byte(":scheme"), Value: []byte("http")},
+	}
+	if err := ex.WriteRequest(ctx, fields, true); err != nil {
+		t.Fatalf("WriteRequest: %v", err)
+	}
+	status, _, err := ex.ReadResponse(ctx)
+	if err != nil {
+		t.Fatalf("ReadResponse: %v", err)
+	}
+	if status != 200 {
+		t.Fatalf("status = %d, want 200", status)
+	}
+	var got strings.Builder
+	buf := make([]byte, 32)
+	for {
+		n, done, rerr := ex.ReadBodyChunk(buf)
+		got.Write(buf[:n])
+		if done || rerr != nil {
+			break
+		}
+	}
+	if got.String() != "hello" {
+		t.Errorf("body = %q, want %q", got.String(), "hello")
+	}
 }
