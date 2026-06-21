@@ -122,6 +122,20 @@ non-ACK PING frames with `ACK=1` and the original 8-byte payload
 | §5.2     | Negative    | TestConformance_RFC7541_C5_2_HuffmanDecode_InvalidCode, _PrefixOfEos, _EmptyInput (hpack/) — malformed Huffman input returns ErrInvalidHuffman; empty input is valid |
 | §5.2     | Roundtrip   | TestConformance_RFC7541_C5_2_HuffmanDecode_LongString_RoundTrip (hpack/) — 1024-byte ASCII string round-trips through Huffman encode/decode |
 
+## RFC 2616 — HTTP/1.1 (http1/ package)
+
+| Section | Type        | Test |
+|---------|-------------|------|
+| §3.6.1  | Conformance | TestConformance_RFC2616_Sec3_6_1_MultipleChunks — multi-chunk body reassembled across ReadBodyChunk calls |
+| §3.6.1  | Conformance | TestConformance_RFC2616_Sec3_6_1_EmptyChunkedBody — terminal 0-chunk produces empty body immediately |
+| §4.4 R3 | Conformance | TestConformance_RFC2616_Sec4_4_Rule3_ChunkedWinsContentLengthFirst — Transfer-Encoding beats Content-Length (CL first) |
+| §4.4 R3 | Conformance | TestConformance_RFC2616_Sec4_4_Rule3_ChunkedWinsTransferEncodingFirst — Transfer-Encoding beats Content-Length (TE first) |
+| §6.1    | Conformance | TestConformance_RFC2616_Sec6_1_HTTP10StatusLineParsed — HTTP/1.0 status line accepted by parser |
+| §8.1    | Conformance | TestConformance_RFC2616_Sec8_1_HTTP10DefaultClose — HTTP/1.0 without Connection header → KeepAlive() false |
+| §8.1    | Conformance | TestConformance_RFC2616_Sec8_1_HTTP10KeepAliveHeader — HTTP/1.0 + Connection: keep-alive → KeepAlive() true |
+| §10.3.5 | Conformance | TestConformance_RFC2616_Sec10_3_5_304NoBody — 304 body skipped even when Content-Length present |
+| §14.23  | Conformance | TestConformance_RFC2616_Sec14_23_HostHeaderInRequest — request wire includes Host derived from :authority |
+
 ## RFC 8336 — ORIGIN Frame
 
 | Section | Type        | Test |

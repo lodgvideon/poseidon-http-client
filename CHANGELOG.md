@@ -5,7 +5,7 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [v0.5.1] — 2026-06-21
 
 ### Fixed
 
@@ -17,6 +17,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   cross-pool conn (`stream reset by peer`) under concurrent load. The reply
   channel is now recycled only when the actor can no longer send on it.
   Regression test: `TestPool_ReplyChannelNotPoisonedUnderAbandonment`.
+
+- **HTTP/1.1 request trailers no longer corrupt the connection** — sending a
+  request with `Trailers`/`TrailerFunc` over an H1.1 transport (explicit
+  `TransportH1SingleConn` or an ALPN-negotiated H1.1 connection) previously
+  re-invoked `WriteRequest`, emitting a second request line onto the live
+  connection. The H1.1 transport now rejects such requests up front with the
+  new `ErrTrailersUnsupportedH1` and discards the connection.
+  Test: `TestNewClient_H1SingleConn_TrailersRejected`.
+
+### Changed
+
+- All packages now at ≥ 90% statement coverage (spec acceptance bar).
 
 ## [v0.5.0] — 2026-06-21
 

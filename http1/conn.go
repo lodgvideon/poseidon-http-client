@@ -207,6 +207,7 @@ func (ex *Exchange) ReadResponse(ctx context.Context) (statusCode int, headers [
 		_ = ex.c.nc.SetReadDeadline(dl)
 	}
 
+	var proto string
 	for {
 		// Status line: "HTTP/1.x NNN Reason\r\n"
 		line, rerr := ex.c.br.ReadString('\n')
@@ -219,6 +220,7 @@ func (ex *Exchange) ReadResponse(ctx context.Context) (statusCode int, headers [
 		if len(parts) < 2 || !strings.HasPrefix(parts[0], "HTTP/1") {
 			return 0, nil, fmt.Errorf("http1: malformed status line: %q", line)
 		}
+		proto = parts[0]
 		code, perr := strconv.Atoi(parts[1])
 		if perr != nil {
 			return 0, nil, fmt.Errorf("http1: invalid status code: %q", parts[1])
@@ -235,8 +237,8 @@ func (ex *Exchange) ReadResponse(ctx context.Context) (statusCode int, headers [
 	}
 
 	ex.statusCode = statusCode
-	// HTTP/1.1 defaults to keep-alive; HTTP/1.0 defaults to close.
-	ex.keepAlive = true // refined by Connection header below
+	// RFC 2616 §8.1: HTTP/1.1 defaults to persistent; HTTP/1.0 defaults to close.
+	ex.keepAlive = proto == "HTTP/1.1"
 	ex.contentLen = -1
 
 	headers = make([]hpack.HeaderField, 0, 12)
@@ -275,7 +277,8 @@ func (ex *Exchange) consumeHeaders(out *[]hpack.HeaderField, parseBody bool) err
 		if parseBody {
 			switch name {
 			case "content-length":
-				if n, perr := strconv.ParseInt(value, 10, 64); perr == nil && ex.contentLen < 0 {
+				// RFC 2616 §4.4 Rule 3: Transfer-Encoding wins; ignore CL when chunked.
+				if n, perr := strconv.ParseInt(value, 10, 64); perr == nil && !ex.respChunked && ex.contentLen < 0 {
 					ex.contentLen = n
 				}
 			case "transfer-encoding":
