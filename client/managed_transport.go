@@ -12,10 +12,19 @@ type managedTransport struct {
 	mp *managedPool
 }
 
-// acquire implements transport.acquire. Delegates to managedPool.acquire
-// which fans across per-address sub-pools via Selector.
-func (mt *managedTransport) acquire(ctx context.Context) (*conn.Conn, func(), error) {
-	return mt.mp.acquire(ctx)
+// openExchange implements transport.openExchange. Delegates to managedPool.acquire
+// which fans across per-address sub-pools via Selector, then opens an H2 stream.
+func (mt *managedTransport) openExchange(ctx context.Context) (protoStream, func(uint32) (*conn.Stream, bool), func(), error) {
+	cn, release, err := mt.mp.acquire(ctx)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	stream, serr := cn.NewStream(ctx)
+	if serr != nil {
+		release()
+		return nil, nil, nil, serr
+	}
+	return stream, cn.LookupStream, release, nil
 }
 
 // close implements transport.close. Idempotent.

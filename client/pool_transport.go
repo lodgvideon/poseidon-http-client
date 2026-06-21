@@ -25,7 +25,7 @@ func newPoolTransportFromPool(p *Pool) *poolTransport {
 	return &poolTransport{p: p}
 }
 
-// acquire implements transport.acquire.
+// openExchange implements transport.openExchange.
 //
 // release reports nil reqErr because the transport interface does not
 // surface per-request errors. Dead-conn eviction is driven by the
@@ -33,13 +33,19 @@ func newPoolTransportFromPool(p *Pool) *poolTransport {
 // PoolOptions.HealthCheckPeriod (default 30s). Newly arriving acquires
 // also skip dead conns via pickLeastLoaded's IsAlive() guard, so a
 // transient dead conn won't be picked between ticks.
-func (pt *poolTransport) acquire(ctx context.Context) (*conn.Conn, func(), error) {
+func (pt *poolTransport) openExchange(ctx context.Context) (protoStream, func(uint32) (*conn.Stream, bool), func(), error) {
 	mc, err := pt.p.acquire(ctx)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
+	}
+	cn := mc.c
+	stream, serr := cn.NewStream(ctx)
+	if serr != nil {
+		pt.p.release(mc, serr)
+		return nil, nil, nil, serr
 	}
 	release := func() { pt.p.release(mc, nil) }
-	return mc.c, release, nil
+	return stream, cn.LookupStream, release, nil
 }
 
 // close implements transport.close. Idempotent.

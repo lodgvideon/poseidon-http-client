@@ -8,18 +8,25 @@ import (
 )
 
 // transport is the seam between Client and the underlying connection
-// supply. C.1 ships exactly one impl (singleConn); a future C.2
-// connection pool will implement the same interface.
+// supply. openExchange acquires a connection and opens a protocol-level
+// exchange (H2 stream or H1.1 request slot) in one step.
 type transport interface {
-	// acquire returns a healthy *conn.Conn together with a release
-	// function that the caller MUST call exactly once when the
-	// associated request is fully drained or has errored. release is
-	// safe to call from any goroutine. Errors include ErrClosed,
-	// ErrRedialBackoff, *DialError, and ctx errors.
-	acquire(ctx context.Context) (c *conn.Conn, release func(), err error)
+	// openExchange acquires a healthy connection, opens a new
+	// request/response exchange on it, and returns the exchange ready
+	// for SendHeaders. release MUST be called exactly once when the
+	// exchange is fully drained or has errored. release is safe to call
+	// from any goroutine.
+	//
+	// For H2 transports: s is a *conn.Stream and pushLookup is
+	// conn.Conn.LookupStream, enabling server-push handling.
+	// For H1.1 transports: s is a *h1Exchange and pushLookup is nil
+	// (H1.1 has no server push).
+	//
+	// Errors include ErrClosed, ErrRedialBackoff, *DialError, and ctx errors.
+	openExchange(ctx context.Context) (s protoStream, pushLookup func(uint32) (*conn.Stream, bool), release func(), err error)
 
-	// close prevents further acquires and closes any underlying conn.
-	// Idempotent.
+	// close prevents further exchange opens and closes any underlying
+	// conn(s). Idempotent.
 	close() error
 
 	// shutdown gracefully drains all in-flight requests and closes

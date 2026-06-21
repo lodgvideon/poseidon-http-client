@@ -30,6 +30,19 @@ const (
 	// TransportManaged routes requests through a managedPool driven by
 	// a Resolver and Selector. Requires ClientOptions.Resolver != nil.
 	TransportManaged
+
+	// TransportH1SingleConn is the HTTP/1.1 analogue of TransportSingleConn:
+	// at most one *http1.Conn per Client. Requests are serialized (no
+	// pipelining). ConnOpts.Dialer must NOT assert ALPN "h2" — use a plain
+	// TCP dialer or a TLS dialer with NextProtos containing only "http/1.1".
+	TransportH1SingleConn
+
+	// TransportALPN dials with conn.FlexDialer (offers "h2" and "http/1.1")
+	// and permanently routes to the protocol negotiated on the first
+	// connection. For servers that speak H2 the behavior is identical to
+	// TransportSingleConn; for servers that only speak HTTP/1.1 it falls
+	// back automatically. ConnOpts.Dialer should be *conn.FlexDialer.
+	TransportALPN
 )
 
 // DefaultMaxDecompressedSize is the default maximum decompressed body
@@ -169,9 +182,9 @@ func NewClient(opts ClientOptions) (*Client, error) {
 		opts.ConnOpts.EnablePush = true
 	}
 	switch opts.Transport {
-	case TransportSingleConn:
+	case TransportSingleConn, TransportH1SingleConn, TransportALPN:
 		if opts.Pool != nil {
-			return nil, fmt.Errorf("%w: Pool must be nil for TransportSingleConn", ErrInvalidPoolOptions)
+			return nil, fmt.Errorf("%w: Pool must be nil for this transport kind", ErrInvalidPoolOptions)
 		}
 	case TransportPool:
 		if opts.Pool == nil {
@@ -212,6 +225,22 @@ func NewClient(opts ClientOptions) (*Client, error) {
 			return nil, err
 		}
 		tr = &managedTransport{mp: mp}
+	case TransportH1SingleConn:
+		tr = &h1singleConn{
+			addr:     opts.Addr,
+			dialer:   opts.ConnOpts.Dialer,
+			backoff:  opts.DialBackoff,
+			hooksRef: hooksPtr,
+			metrics:  metrics,
+		}
+	case TransportALPN:
+		tr = &alpnSingleConn{
+			addr:     opts.Addr,
+			connOpts: opts.ConnOpts,
+			backoff:  opts.DialBackoff,
+			hooksRef: hooksPtr,
+			metrics:  metrics,
+		}
 	}
 	scheme := opts.DefaultScheme
 	if scheme == "" {
@@ -359,24 +388,19 @@ func (c *Client) Do(ctx context.Context, req *Request, resp *Response) error {
 // by value; the caller unpacks them and is responsible for calling
 // release() and s.Close().
 
-// sendRequest acquires a connection, opens a stream, builds and sends headers,
-// writes the body and trailers, and returns the stream ready for response
+// sendRequest opens a protocol exchange, builds and sends request headers,
+// writes the body and trailers, and returns the exchange ready for response
 // reading. On error the transport is released and no cleanup is needed.
 //
-// Returns (s, cn, release, err) by value to avoid heap-escaping the
-// implicit struct that would be created by returning a *sentRequest.
-// Escape analysis confirmed via -gcflags=-m: the previous
-// `return &sentRequest{...}` form added 1 alloc/op on the hot path
-// (verified 2026-06-15).
-func (c *Client) sendRequest(ctx context.Context, req *Request) (s *conn.Stream, cn *conn.Conn, release func(), err error) {
-	cn, release, err = c.tr.acquire(ctx)
+// Returns (s, pushLookup, release, err). pushLookup is non-nil only for H2
+// transports and is passed to drainResponse to handle server push.
+//
+// Avoids heap-escaping the implicit struct: escape analysis confirmed via
+// -gcflags=-m that returning fields by value keeps them on the stack
+// (verified 2026-06-15 for the H2 hot path).
+func (c *Client) sendRequest(ctx context.Context, req *Request) (s protoStream, pushLookup func(uint32) (*conn.Stream, bool), release func(), err error) {
+	s, pushLookup, release, err = c.tr.openExchange(ctx)
 	if err != nil {
-		return nil, nil, nil, err
-	}
-
-	s, err = cn.NewStream(ctx)
-	if err != nil {
-		release()
 		return nil, nil, nil, err
 	}
 
@@ -409,20 +433,16 @@ func (c *Client) sendRequest(ctx context.Context, req *Request) (s *conn.Stream,
 		}
 	}
 
-	return s, cn, release, nil
+	return s, pushLookup, release, nil
 }
 
 func (c *Client) do(ctx context.Context, req *Request, resp *Response) error {
-	s, cnOrZero, release, err := c.sendRequest(ctx, req)
+	s, pushLookup, release, err := c.sendRequest(ctx, req)
 	if err != nil {
 		return err
 	}
-	cn := cnOrZero
 
 	if req.StreamBody {
-		// StreamBody does not need *Conn on the response path (the
-		// responseBodyReader holds the *Stream, not the *Conn).
-		_ = cn
 		if resp == nil {
 			_ = s.Close()
 			release()
@@ -449,13 +469,21 @@ func (c *Client) do(ctx context.Context, req *Request, resp *Response) error {
 		if ev.Slab != nil {
 			resp.slabs = append(resp.slabs, ev.Slab)
 		}
+		// StreamBody requires a *conn.Stream for responseBodyReader.
+		// H1.1 does not support StreamBody; the protoStream is always
+		// a *conn.Stream here for that feature.
+		cs, ok := s.(*conn.Stream)
+		if !ok {
+			_ = s.Close()
+			release()
+			return fmt.Errorf("client: StreamBody not supported for HTTP/1.1 connections")
+		}
 		resp.BodyReader = &responseBodyReader{
 			ctx:     ctx,
-			stream:  s,
+			stream:  cs,
 			release: release,
 			resp:    resp,
 		}
-		// Wrap with decompressor when content-encoding is present.
 		if !req.DisableDecompression {
 			enc := detectEncoding(resp.Headers)
 			if enc != EncodingIdentity {
@@ -471,8 +499,8 @@ func (c *Client) do(ctx context.Context, req *Request, resp *Response) error {
 		return nil // release deferred to resp.BodyReader.Close()
 	}
 
-	err = drainResponse(ctx, cn, s, req, resp, c.pushHandler, c.maxDecompressedSize, c.maxResponseBodySize)
-	_ = s.Close() // recycles stream when both sides ended
+	err = drainResponse(ctx, pushLookup, s, req, resp, c.pushHandler, c.maxDecompressedSize, c.maxResponseBodySize)
+	_ = s.Close()
 	release()
 	return err
 }
@@ -544,7 +572,14 @@ func (c *Client) doStream(ctx context.Context, req *Request, sr *StreamResponse)
 	if ev.Slab != nil {
 		sr.slabs = append(sr.slabs, ev.Slab) // transfer slab ownership
 	}
-	sr.stream = s
+	// DoStream requires a *conn.Stream; H1.1 connections do not support it.
+	cs, ok := s.(*conn.Stream)
+	if !ok {
+		_ = s.Close()
+		release()
+		return fmt.Errorf("client: DoStream not supported for HTTP/1.1 connections")
+	}
+	sr.stream = cs
 	sr.release = release
 	if ev.EndStream {
 		sr.drained = true
@@ -698,7 +733,7 @@ func resolveTrailers(req *Request) ([]conn.HeaderField, error) {
 }
 
 // writeRequestTrailers resolves and sends the trailer HEADERS frame.
-func writeRequestTrailers(ctx context.Context, s *conn.Stream, req *Request) error {
+func writeRequestTrailers(ctx context.Context, s protoStream, req *Request) error {
 	fields, err := resolveTrailers(req)
 	if err != nil {
 		return err
@@ -709,7 +744,7 @@ func writeRequestTrailers(ctx context.Context, s *conn.Stream, req *Request) err
 // writeRequestBody writes Body or BodyReader as DATA frames.
 // endStream controls whether the final DATA frame sets END_STREAM.
 // Pass false when a trailer HEADERS frame will follow.
-func writeRequestBody(ctx context.Context, s *conn.Stream, req *Request, endStream bool) error {
+func writeRequestBody(ctx context.Context, s protoStream, req *Request, endStream bool) error {
 	if req.BodyReader != nil {
 		return writeBodyReader(ctx, s, req.BodyReader, endStream)
 	}
@@ -739,7 +774,7 @@ var uploadBufPool = sync.Pool{
 
 // writeBodyReader streams an io.Reader into DATA frames.
 // endStream controls whether the final DATA frame sets END_STREAM.
-func writeBodyReader(ctx context.Context, s *conn.Stream, r io.Reader, endStream bool) error {
+func writeBodyReader(ctx context.Context, s protoStream, r io.Reader, endStream bool) error {
 	bufp := uploadBufPool.Get().(*[]byte)
 	defer uploadBufPool.Put(bufp)
 	buf := *bufp
@@ -769,7 +804,9 @@ func writeBodyReader(ctx context.Context, s *conn.Stream, r io.Reader, endStream
 
 // drainResponse pumps stream events until the response side ends or
 // the stream resets, writing into resp in place.
-func drainResponse(ctx context.Context, cn *conn.Conn, s *conn.Stream, req *Request, resp *Response, h PushHandler, maxDecompressed, maxBody int64) error {
+// pushLookup is non-nil for H2 connections and resolves push-promised stream IDs;
+// it is nil for H1.1 (which has no server push).
+func drainResponse(ctx context.Context, pushLookup func(uint32) (*conn.Stream, bool), s protoStream, req *Request, resp *Response, h PushHandler, maxDecompressed, maxBody int64) error {
 	var gotHeaders bool
 	var enc ContentEncoding
 	for {
@@ -807,13 +844,12 @@ func drainResponse(ctx context.Context, cn *conn.Conn, s *conn.Stream, req *Requ
 		case conn.EventReset:
 			return &StreamResetError{Code: ev.RSTCode}
 		case conn.EventPushPromise:
-			if h != nil && ev.PushStreamID > 0 {
-				ps, ok := cn.LookupStream(ev.PushStreamID)
-				if ok {
+			if h != nil && pushLookup != nil && ev.PushStreamID > 0 {
+				if ps, ok := pushLookup(ev.PushStreamID); ok {
 					// Copy promised headers to decouple from the slab
 					// lifetime (slab is returned when parent resp is Reset).
 					hdrs := copyHeaders(ev.Headers)
-					go drainPushedStream(ctx, cn, h, hdrs, ps, maxDecompressed, maxBody)
+					go drainPushedStream(ctx, pushLookup, h, hdrs, ps, maxDecompressed, maxBody)
 				}
 			}
 		}
@@ -866,9 +902,9 @@ func handleDataEvent(ev conn.StreamEvent, req *Request, resp *Response, enc Cont
 
 // drainPushedStream reads the pushed stream's response and invokes the
 // push handler with the result. Handles nested PUSH_PROMISE recursively.
-func drainPushedStream(ctx context.Context, cn *conn.Conn, h PushHandler, promisedHeaders []conn.HeaderField, s *conn.Stream, maxDecompressed, maxBody int64) {
+func drainPushedStream(ctx context.Context, pushLookup func(uint32) (*conn.Stream, bool), h PushHandler, promisedHeaders []conn.HeaderField, s *conn.Stream, maxDecompressed, maxBody int64) {
 	pr := &Response{}
-	derr := drainResponse(ctx, cn, s, &Request{WantBody: true}, pr, h, maxDecompressed, maxBody)
+	derr := drainResponse(ctx, pushLookup, s, &Request{WantBody: true}, pr, h, maxDecompressed, maxBody)
 	_ = s.Close()
 	h(ctx, promisedHeaders, pr, derr)
 }
