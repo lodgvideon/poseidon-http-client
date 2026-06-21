@@ -854,7 +854,12 @@ func TestStream_Push_Overflow_Integration(t *testing.T) {
 
 // TestConn_LookupStream_FoundAndNotFound verifies the public LookupStream API.
 func TestConn_LookupStream_FoundAndNotFound(t *testing.T) {
+	// Gate prevents the server from replying until we've checked LookupStream.
+	// Without it, a fast server response causes markStreamDone to evict the
+	// stream from c.streams before our LookupStream call.
+	gate := make(chan struct{})
 	srv, cfg := startH2TestServer(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		<-gate
 		w.WriteHeader(200)
 	}))
 	defer srv.Close()
@@ -884,10 +889,12 @@ func TestConn_LookupStream_FoundAndNotFound(t *testing.T) {
 		t.Fatalf("SendHeaders: %v", err)
 	}
 
-	// Stream 1 now registered.
+	// Stream 1 now registered — server is still blocked on gate so no eviction.
 	if _, ok := c.LookupStream(s.ID()); !ok {
+		close(gate) // unblock server before fatalf so defer srv.Close() doesn't hang
 		t.Fatalf("LookupStream(%d) = false, want true", s.ID())
 	}
+	close(gate) // unblock server
 
 	// Unknown ID returns false.
 	if _, ok := c.LookupStream(999); ok {
