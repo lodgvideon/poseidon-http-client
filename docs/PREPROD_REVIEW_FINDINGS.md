@@ -22,18 +22,18 @@
 
 ## 2. Резюме
 
-| ID | Категория | Severity | Кратко |
-|---|---|---|---|
-| **F-P0-01** | Security (C6.14) | **P0** | Decompression bomb — `io.Copy` без лимита в `decompressFully` |
-| **F-P0-02** | Resource (C1.8) | **P0** | recycleStream use-after-recycle: parked Recv goroutine + невоссозданный events channel |
-| F-P0-03 | Concurrency (C1.3) | **FALSE POSITIVE** | shutdownStreams deadlock — НЕ подтверждён (select имеет default) |
-| F-P0-04 | Concurrency (C1.12) | **P1** | push() goroutine без таймаута — writeRSTStream может блокировать wmu навсегда |
-| F-P1-01 | Protocol (C2.13) | **P1** | Framer maxReadFrameSize не синхронизирован с SETTINGS_MAX_FRAME_SIZE |
-| F-P1-02 | Security (C2.1) | **P2** | TLS MinVersion не задан явно (митигировано дефолтом Go ≥1.18 → TLS 1.2) |
-| F-P1-03 | Robustness (C4.3) | **P2** | `panic()` в production-коде (`client/selector.go:81`) |
-| F-P1-04 | Performance (C9.3) | **P1** | acquireSendCredits: heap-escape watchdog-goroutine на каждый чанк записи |
+| ID | Категория | Severity | Статус | Кратко |
+|---|---|---|---|---|
+| **F-P0-01** | Security (C6.14) | **P0** | ✅ FIXED (prod-hardening PR#32) | Decompression bomb — `io.Copy` без лимита в `decompressFully` |
+| **F-P0-02** | Resource (C1.8) | **P0** | ✅ FIXED (prod-hardening PR#32) | recycleStream use-after-recycle: parked Recv goroutine + невоссозданный events channel |
+| F-P0-03 | Concurrency (C1.3) | **FALSE POSITIVE** | N/A | shutdownStreams deadlock — НЕ подтверждён (select имеет default) |
+| F-P0-04 | Concurrency (C1.12) | **P1** | ✅ FIXED (PR#36) | push() goroutine без таймаута — writeRSTStream может блокировать wmu навсегда |
+| F-P1-01 | Protocol (C2.13) | **P1** | ✅ FIXED (PR#35) | Framer maxReadFrameSize не синхронизирован с SETTINGS_MAX_FRAME_SIZE |
+| F-P1-02 | Security (C2.1) | **P2** | ✅ FIXED (prod-hardening PR#32) | TLS MinVersion не задан явно (митигировано дефолтом Go ≥1.18 → TLS 1.2) |
+| F-P1-03 | Robustness (C4.3) | **P2** | ✅ FIXED (PR#36) | `panic()` в production-коде (`client/selector.go:81`) |
+| F-P1-04 | Performance (C9.3) | **P1** | ✅ FIXED (PR#36) | acquireSendCredits: heap-escape watchdog-goroutine на каждый чанк записи |
 
-**Вердикт готовности:** **НЕ ГОТОВ к продакшену** до устранения F-P0-01 и F-P0-02.
+**Вердикт готовности:** ✅ **ГОТОВ к продакшену** — все блокеры устранены (PR#32, PR#35, PR#36).
 
 ---
 
