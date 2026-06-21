@@ -1333,8 +1333,11 @@ func TestHashSelector_Pick_EmptyKey(t *testing.T) {
 		{Host: "10.0.0.2", Port: 80},
 	}
 	// keyFn that returns empty string → ErrNoAddresses.
-	h := client.Hash(func(_ client.PickContext) string { return "" })
-	_, err := h.Pick(addrs, client.PickContext{})
+	h, err := client.Hash(func(_ client.PickContext) string { return "" })
+	if err != nil {
+		t.Fatalf("Hash: %v", err)
+	}
+	_, err = h.Pick(addrs, client.PickContext{})
 	if !errors.Is(err, client.ErrNoAddresses) {
 		t.Errorf("Pick with empty key = %v, want ErrNoAddresses", err)
 	}
@@ -1346,7 +1349,10 @@ func TestHashSelector_Pick_NonEmptyKey(t *testing.T) {
 		{Host: "10.0.0.1", Port: 80},
 		{Host: "10.0.0.2", Port: 80},
 	}
-	h := client.Hash(func(_ client.PickContext) string { return "session-123" })
+	h, err := client.Hash(func(_ client.PickContext) string { return "session-123" })
+	if err != nil {
+		t.Fatalf("Hash: %v", err)
+	}
 	got, err := h.Pick(addrs, client.PickContext{})
 	if err != nil {
 		t.Fatalf("Pick: %v", err)

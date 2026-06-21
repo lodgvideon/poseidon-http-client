@@ -614,6 +614,36 @@ func (c *Conn) writeRSTStream(s *Stream, code frame.ErrCode) error {
 	return nil
 }
 
+// writeRSTStreamBestEffort sends RST_STREAM under a short write deadline so
+// the fire-and-forget goroutine spawned by Stream.push on event-channel
+// overflow cannot block indefinitely on a stuck transport (F-P0-04). Write
+// errors are silently ignored: RST_STREAM is best-effort per RFC 7540 §8.1.
+// The write deadline is cleared after the write so subsequent normal writes
+// on this connection are not affected.
+func (c *Conn) writeRSTStreamBestEffort(s *Stream, code frame.ErrCode) {
+	const rstTimeout = 5 * time.Second
+	if s.id == 0 {
+		c.releaseUnassignedInflight(s)
+		return
+	}
+	if c.closed.Load() {
+		return
+	}
+	type deadliner interface{ SetWriteDeadline(time.Time) error }
+	c.wmu.Lock()
+	if dl, ok := c.transport.(deadliner); ok {
+		_ = dl.SetWriteDeadline(time.Now().Add(rstTimeout))
+	}
+	if err := c.fr.WriteRSTStream(s.id, code); err == nil {
+		c.bumpFramesSent()
+	}
+	if dl, ok := c.transport.(deadliner); ok {
+		_ = dl.SetWriteDeadline(time.Time{})
+	}
+	c.wmu.Unlock()
+	c.releaseInflight(s.id)
+}
+
 // onDataReceived debits both the stream-level and connection-level
 // recv windows for a DATA frame whose total payload is `length` bytes
 // (RFC 7540 §6.9.1: includes the data, the pad-length octet, and the
@@ -689,26 +719,22 @@ func (c *Conn) writeWindowUpdate(streamID uint32, increment uint32) error {
 // credit, then atomically deducts up to `want` bytes from each and
 // returns the number actually granted. Returns ctx.Err() if cancelled
 // or ErrConnClosed if the connection drops while waiting.
+//
+// A context-cancellation watcher (context.AfterFunc) is registered only
+// when we actually need to block in cond.Wait, not on every call. This
+// avoids a goroutine + channel allocation per write chunk (F-P1-04).
 func (c *Conn) acquireSendCredits(ctx context.Context, s *Stream, want int) (int, error) {
 	if want <= 0 {
 		return 0, nil
 	}
-	// Spawn a watchdog that broadcasts when ctx is cancelled, so the
-	// cond.Wait below wakes up even though no WINDOW_UPDATE arrived.
-	watchdog := make(chan struct{})
-	defer close(watchdog)
-	go func() {
-		select {
-		case <-ctx.Done():
-			c.fcOutMu.Lock()
-			c.fcOutCond.Broadcast()
-			c.fcOutMu.Unlock()
-		case <-watchdog:
-		}
-	}()
-
 	c.fcOutMu.Lock()
 	defer c.fcOutMu.Unlock()
+	var stopWatcher func() bool
+	defer func() {
+		if stopWatcher != nil {
+			stopWatcher()
+		}
+	}()
 	for {
 		if c.closed.Load() {
 			return 0, ErrConnClosed
@@ -734,6 +760,15 @@ func (c *Conn) acquireSendCredits(ctx context.Context, s *Stream, want int) (int
 			s.sendWindow -= n
 			s.mu.Unlock()
 			return int(n), nil
+		}
+		// Register the context watcher only on the first actual block so
+		// the common fast-path (window has credit) pays no allocation cost.
+		if stopWatcher == nil {
+			stopWatcher = context.AfterFunc(ctx, func() {
+				c.fcOutMu.Lock()
+				c.fcOutCond.Broadcast()
+				c.fcOutMu.Unlock()
+			})
 		}
 		c.fcOutCond.Wait()
 	}

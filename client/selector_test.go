@@ -98,9 +98,12 @@ func TestRandom_EmptySet_ErrNoAddresses(t *testing.T) {
 func TestHash_Deterministic(t *testing.T) {
 	t.Parallel()
 	set := []Address{{Host: "a"}, {Host: "b"}, {Host: "c"}}
-	s := Hash(func(pc PickContext) string {
+	s, err := Hash(func(pc PickContext) string {
 		return pc.Request.Path
 	})
+	if err != nil {
+		t.Fatalf("Hash: %v", err)
+	}
 	first, _ := s.Pick(set, PickContext{Request: &Request{Path: "/x"}})
 	second, _ := s.Pick(set, PickContext{Request: &Request{Path: "/x"}})
 	if first.Host != second.Host {
@@ -111,18 +114,18 @@ func TestHash_Deterministic(t *testing.T) {
 func TestHash_EmptyKey_ErrNoAddresses(t *testing.T) {
 	t.Parallel()
 	set := []Address{{Host: "a"}}
-	s := Hash(func(_ PickContext) string { return "" })
+	s, err := Hash(func(_ PickContext) string { return "" })
+	if err != nil {
+		t.Fatalf("Hash: %v", err)
+	}
 	if _, err := s.Pick(set, PickContext{}); err != ErrNoAddresses {
 		t.Errorf("Pick err = %v, want ErrNoAddresses on empty key", err)
 	}
 }
 
-func TestHash_NilKeyFn_Panics(t *testing.T) {
+func TestHash_NilKeyFn_ReturnsError(t *testing.T) {
 	t.Parallel()
-	defer func() {
-		if r := recover(); r == nil {
-			t.Error("Hash(nil) did not panic")
-		}
-	}()
-	Hash(nil)
+	if _, err := Hash(nil); err != ErrNilKeyFn {
+		t.Errorf("Hash(nil) err = %v, want ErrNilKeyFn", err)
+	}
 }

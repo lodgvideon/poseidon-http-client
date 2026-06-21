@@ -13,7 +13,10 @@ import (
 )
 
 func newTLSDialer(srv *httptest.Server) conn.Dialer {
-	return &conn.TLSDialer{Config: srv.Client().Transport.(*http.Transport).TLSClientConfig}
+	// Clone so we own an independent copy: srv.Close() writes to the server's
+	// Transport.TLSClientConfig via http2configureTransports, which would race
+	// with our TLSDialer.Dial() reading the same pointer.
+	return &conn.TLSDialer{Config: srv.Client().Transport.(*http.Transport).TLSClientConfig.Clone()}
 }
 
 func startOneTLSServer(t *testing.T) (*httptest.Server, client.Address) {

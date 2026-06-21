@@ -199,7 +199,13 @@ func (s *Stream) push(e StreamEvent) bool {
 		return false
 	}
 	go func() {
-		_ = s.w.writeRSTStream(s, frame.ErrCodeRefusedStream)
+		// Use best-effort write with a 5-second deadline so the goroutine
+		// cannot hang indefinitely on a stuck transport (F-P0-04).
+		if c, ok := s.w.(*Conn); ok {
+			c.writeRSTStreamBestEffort(s, frame.ErrCodeRefusedStream)
+		} else {
+			_ = s.w.writeRSTStream(s, frame.ErrCodeRefusedStream)
+		}
 	}()
 	// Try to deliver EventReset via channel; if full, signal via resetSignal.
 	select {
