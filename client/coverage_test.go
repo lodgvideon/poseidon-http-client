@@ -3,6 +3,8 @@ package client_test
 
 import (
 	"bytes"
+	"compress/gzip"
+	"compress/zlib"
 	"context"
 	"crypto/tls"
 	"errors"
@@ -1128,6 +1130,51 @@ func TestClient_Do_StreamBody_SmallBody(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
+// body.go: responseBodyReader.Read — partial-read path (buf spill-over)
+// ---------------------------------------------------------------------------
+
+// TestResponseBodyReader_Read_PartialRead verifies that when the caller
+// supplies a buffer smaller than the DATA frame, the surplus is buffered
+// and returned on the next Read call.
+func TestResponseBodyReader_Read_PartialRead(t *testing.T) {
+	t.Parallel()
+	payload := []byte("ABCDE") // 5 bytes
+	_, addr := newTLSH2Server(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(200)
+		_, _ = w.Write(payload)
+	}))
+	c := covClientFor(t, addr)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	var resp client.Response
+	if err := c.Do(ctx, &client.Request{Method: "GET", Path: "/", StreamBody: true}, &resp); err != nil {
+		t.Fatalf("Do: %v", err)
+	}
+	if resp.BodyReader == nil {
+		t.Fatal("BodyReader is nil")
+	}
+	defer func() { _ = resp.BodyReader.Close() }()
+
+	// Read with a 2-byte buffer — forces spill-over in body.go's Read.
+	buf := make([]byte, 2)
+	var got []byte
+	for {
+		n, err := resp.BodyReader.Read(buf)
+		got = append(got, buf[:n]...)
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			t.Fatalf("Read: %v", err)
+		}
+	}
+	if !bytes.Equal(got, payload) {
+		t.Errorf("got %q, want %q", got, payload)
+	}
+}
+
+// ---------------------------------------------------------------------------
 // response.go: Recv — EventTrailers path where trailers field is nil
 // (empty trailer frame triggers sentinel path).
 // ---------------------------------------------------------------------------
@@ -1524,5 +1571,316 @@ func TestStreamResponse_WaitTrailers_AlreadyDrained(t *testing.T) {
 	}
 	if trailers != nil {
 		t.Logf("trailers = %v (may be empty slice from EventTrailers)", trailers)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// poolTransport: shutdown path
+// ---------------------------------------------------------------------------
+
+// TestPoolTransport_Shutdown verifies Client.Shutdown on a pool transport
+// closes all underlying conns.
+func TestPoolTransport_Shutdown(t *testing.T) {
+	t.Parallel()
+	_, addr := newTLSH2Server(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(200)
+	}))
+	c, err := client.NewClient(client.ClientOptions{
+		Addr:      addr,
+		Transport: client.TransportPool,
+		ConnOpts: conn.ConnOptions{
+			Dialer: &conn.TLSDialer{Config: &tls.Config{InsecureSkipVerify: true}},
+		},
+		Pool: &client.PoolOptions{MaxConnsPerHost: 1},
+	})
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	var resp client.Response
+	if err := doWithRetry(t, c, ctx, &client.Request{Method: "GET", Path: "/"}, &resp); err != nil {
+		t.Fatalf("Do: %v", err)
+	}
+
+	if err := c.Shutdown(500 * time.Millisecond); err != nil {
+		t.Fatalf("Shutdown: %v", err)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// managedTransport: shutdown and warmup paths
+// ---------------------------------------------------------------------------
+
+// TestManagedTransport_Shutdown verifies Client.Shutdown on a managed
+// transport closes the underlying pool gracefully.
+func TestManagedTransport_Shutdown(t *testing.T) {
+	t.Parallel()
+	_, addr := newTLSH2Server(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(200)
+	}))
+	host, portStr, _ := net.SplitHostPort(addr)
+	port, err := strconv.Atoi(portStr)
+	if err != nil {
+		t.Fatalf("Atoi: %v", err)
+	}
+
+	r := client.StaticResolver(client.Address{Host: host, Port: port})
+	c, err := client.NewClient(client.ClientOptions{
+		Transport: client.TransportManaged,
+		Resolver:  r,
+		ConnOpts: conn.ConnOptions{
+			Dialer: &conn.TLSDialer{Config: &tls.Config{InsecureSkipVerify: true}},
+		},
+	})
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+
+	// Do one request so a sub-pool is created.
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	var resp client.Response
+	if err := doWithRetry(t, c, ctx, &client.Request{Method: "GET", Path: "/"}, &resp); err != nil {
+		t.Fatalf("Do: %v", err)
+	}
+
+	// Shutdown should complete without error.
+	if err := c.Shutdown(500 * time.Millisecond); err != nil {
+		t.Fatalf("Shutdown: %v", err)
+	}
+}
+
+// TestManagedTransport_Warmup verifies Client.Warmup on a managed transport
+// fans out pre-dial across resolved addresses.
+func TestManagedTransport_Warmup(t *testing.T) {
+	t.Parallel()
+	_, addr := newTLSH2Server(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(200)
+	}))
+	host, portStr, _ := net.SplitHostPort(addr)
+	port, err := strconv.Atoi(portStr)
+	if err != nil {
+		t.Fatalf("Atoi: %v", err)
+	}
+
+	r := client.StaticResolver(client.Address{Host: host, Port: port})
+	c, err := client.NewClient(client.ClientOptions{
+		Transport: client.TransportManaged,
+		Resolver:  r,
+		ConnOpts: conn.ConnOptions{
+			Dialer: &conn.TLSDialer{Config: &tls.Config{InsecureSkipVerify: true}},
+		},
+	})
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+	defer c.Close()
+
+	// Warmup should not panic or error — it fires background dials.
+	c.Warmup(2)
+
+	// Give warmup goroutines a moment to complete.
+	time.Sleep(200 * time.Millisecond)
+
+	// A subsequent request should succeed (conns already warmed).
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	var resp client.Response
+	if err := doWithRetry(t, c, ctx, &client.Request{Method: "GET", Path: "/"}, &resp); err != nil {
+		t.Fatalf("Do after warmup: %v", err)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// client.go: do() — StreamBody with nil resp returns error immediately
+// ---------------------------------------------------------------------------
+
+// TestClient_Do_StreamBody_NilResp covers the "StreamBody requires a
+// non-nil *Response" guard inside do() (conn.go:do line 426).
+func TestClient_Do_StreamBody_NilResp(t *testing.T) {
+	_, addr := newTLSH2Server(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(200)
+	}))
+	c := covClientFor(t, addr)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	err := c.Do(ctx, &client.Request{Method: "GET", Path: "/", StreamBody: true}, nil)
+	if err == nil {
+		t.Fatal("expected error for StreamBody with nil *Response")
+	}
+	if !strings.Contains(err.Error(), "StreamBody") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// client.go: do() — gzip-compressed response triggers decompressor
+// ---------------------------------------------------------------------------
+
+// TestClient_Do_GzipResponse covers the decompression path inside do()
+// (enc != EncodingIdentity branch) using a server that sends gzip body.
+func TestClient_Do_GzipResponse(t *testing.T) {
+	_, addr := newTLSH2Server(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Encoding", "gzip")
+		w.WriteHeader(200)
+		gz := gzip.NewWriter(w)
+		_, _ = gz.Write([]byte("hello compressed"))
+		_ = gz.Close()
+	}))
+	c := covClientFor(t, addr)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	var resp client.Response
+	err := c.Do(ctx, &client.Request{
+		Method:   "GET",
+		Path:     "/",
+		WantBody: true,
+	}, &resp)
+	if err != nil {
+		t.Fatalf("Do: %v", err)
+	}
+	if resp.Status != 200 {
+		t.Errorf("Status = %d, want 200", resp.Status)
+	}
+}
+
+// TestClient_Do_GzipStreamBody covers the StreamBody decompression path.
+func TestClient_Do_GzipStreamBody(t *testing.T) {
+	_, addr := newTLSH2Server(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Encoding", "gzip")
+		w.WriteHeader(200)
+		gz := gzip.NewWriter(w)
+		_, _ = gz.Write([]byte("streaming compressed body"))
+		_ = gz.Close()
+	}))
+	c := covClientFor(t, addr)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	var resp client.Response
+	err := c.Do(ctx, &client.Request{
+		Method:     "GET",
+		Path:       "/",
+		StreamBody: true,
+	}, &resp)
+	if err != nil {
+		t.Fatalf("Do StreamBody gzip: %v", err)
+	}
+	if resp.BodyReader == nil {
+		t.Fatal("expected BodyReader")
+	}
+	body, _ := io.ReadAll(resp.BodyReader)
+	_ = resp.BodyReader.Close()
+	if string(body) != "streaming compressed body" {
+		t.Fatalf("body = %q, want %q", body, "streaming compressed body")
+	}
+}
+
+// TestClient_Do_DeflateResponse covers the EncodingDeflate path in
+// newDecompressingReader and decompressFully.
+func TestClient_Do_DeflateResponse(t *testing.T) {
+	_, addr := newTLSH2Server(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Encoding", "deflate")
+		w.WriteHeader(200)
+		zw := zlib.NewWriter(w)
+		_, _ = zw.Write([]byte("deflate compressed body"))
+		_ = zw.Close()
+	}))
+	c := covClientFor(t, addr)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	var resp client.Response
+	err := c.Do(ctx, &client.Request{
+		Method:   "GET",
+		Path:     "/",
+		WantBody: true,
+	}, &resp)
+	if err != nil {
+		t.Fatalf("Do deflate: %v", err)
+	}
+	if resp.Status != 200 {
+		t.Errorf("Status = %d, want 200", resp.Status)
+	}
+}
+
+// TestDecompressingReader_Read_AfterClose covers the d.dec==nil path in Read().
+// After Close() sets dec to nil, subsequent Read calls must return io.EOF.
+func TestDecompressingReader_Read_AfterClose(t *testing.T) {
+	_, addr := newTLSH2Server(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Encoding", "gzip")
+		w.WriteHeader(200)
+		gz := gzip.NewWriter(w)
+		_, _ = gz.Write([]byte("data"))
+		_ = gz.Close()
+	}))
+	c := covClientFor(t, addr)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	var resp client.Response
+	if err := c.Do(ctx, &client.Request{Method: "GET", Path: "/", StreamBody: true}, &resp); err != nil {
+		t.Fatalf("Do: %v", err)
+	}
+	if resp.BodyReader == nil {
+		t.Fatal("expected BodyReader")
+	}
+	_, _ = io.ReadAll(resp.BodyReader)
+	_ = resp.BodyReader.Close()
+	// dec is nil after Close; this hits the nil-dec path → io.EOF
+	n, err := resp.BodyReader.Read(make([]byte, 8))
+	if n != 0 || err != io.EOF {
+		t.Errorf("Read after Close = (%d, %v), want (0, io.EOF)", n, err)
+	}
+}
+
+// TestClient_Do_StreamBody_RecvTimeout covers the s.Recv() error path in do()
+// when the context times out before the server sends response headers.
+func TestClient_Do_StreamBody_RecvTimeout(t *testing.T) {
+	_, addr := newTLSH2Server(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		// Never send headers — forces client context to time out.
+		time.Sleep(10 * time.Second)
+	}))
+	c := covClientFor(t, addr)
+	// Very short deadline so s.Recv returns context.DeadlineExceeded quickly.
+	ctx, cancel := context.WithTimeout(context.Background(), 80*time.Millisecond)
+	defer cancel()
+	var resp client.Response
+	err := c.Do(ctx, &client.Request{Method: "GET", Path: "/", StreamBody: true}, &resp)
+	if err == nil {
+		t.Fatal("expected timeout error from StreamBody with unresponsive server")
+	}
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Logf("got %v (expected DeadlineExceeded; other timeout variants are acceptable)", err)
+	}
+}
+
+// TestClient_Do_DeflateStreamBody covers the EncodingDeflate path via StreamBody.
+func TestClient_Do_DeflateStreamBody(t *testing.T) {
+	_, addr := newTLSH2Server(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Encoding", "deflate")
+		w.WriteHeader(200)
+		zw := zlib.NewWriter(w)
+		_, _ = zw.Write([]byte("deflate stream body"))
+		_ = zw.Close()
+	}))
+	c := covClientFor(t, addr)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	var resp client.Response
+	err := c.Do(ctx, &client.Request{
+		Method:     "GET",
+		Path:       "/",
+		StreamBody: true,
+	}, &resp)
+	if err != nil {
+		t.Fatalf("Do DeflateStreamBody: %v", err)
+	}
+	if resp.BodyReader == nil {
+		t.Fatal("expected BodyReader")
+	}
+	body, _ := io.ReadAll(resp.BodyReader)
+	_ = resp.BodyReader.Close()
+	if string(body) != "deflate stream body" {
+		t.Fatalf("body = %q, want %q", body, "deflate stream body")
 	}
 }

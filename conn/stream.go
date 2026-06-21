@@ -66,7 +66,6 @@ type StreamEvent struct {
 // streamWriter is the narrow surface a *Stream needs from its owner Conn.
 // Tests fake this out; production code wires it to *Conn.
 type streamWriter interface {
-	writeHeaders(ctx context.Context, s *Stream, fields []hpack.HeaderField, endStream bool) error
 	writeHeadersWithPriority(ctx context.Context, s *Stream, fields []hpack.HeaderField, endStream bool, prio *frame.Priority) error
 	writeData(ctx context.Context, s *Stream, p []byte, endStream bool) error
 	writeRSTStream(s *Stream, code frame.ErrCode) error

@@ -45,12 +45,6 @@ type connOps interface {
 	// given even ID and returns it.
 	registerPushedStream(id uint32) *Stream
 
-	// initialRecvWindow returns the peer's INITIAL_WINDOW_SIZE.
-	initialRecvWindow() int32
-
-	// peerSettingsRLocked calls f with peerSettings under RLock.
-	peerSettingsRLocked(f func(s frame.SettingsParams))
-
 	// rstStream sends RST_STREAM for the given stream ID.
 	rstStream(id uint32, code frame.ErrCode) error
 
