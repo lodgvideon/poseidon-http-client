@@ -100,4 +100,7 @@ var (
 	// decompressed) exceeds the configured maximum size, preventing
 	// memory-exhaustion attacks such as gzip bombs.
 	ErrBodyTooLarge = errors.New("client: response body exceeds maximum size")
+
+	// ErrNilKeyFn is returned by Hash when keyFn is nil.
+	ErrNilKeyFn = errors.New("client: Hash selector requires a non-nil keyFn")
 )

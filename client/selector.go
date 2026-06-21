@@ -76,13 +76,14 @@ type hashSel struct {
 }
 
 // Hash returns a Selector that picks by FNV-1a hash of keyFn(pc) %
-// len(set). keyFn returning "" → ErrNoAddresses (caller hint
-// insufficient for deterministic selection).
-func Hash(keyFn func(PickContext) string) Selector {
+// len(set). keyFn returning "" returns ErrNoAddresses (caller hint
+// insufficient for deterministic selection). A nil keyFn returns an
+// error; library callers should check it.
+func Hash(keyFn func(PickContext) string) (Selector, error) {
 	if keyFn == nil {
-		panic("client: Hash selector requires a non-nil keyFn")
+		return nil, ErrNilKeyFn
 	}
-	return &hashSel{keyFn: keyFn, hash: fnv.New64a()}
+	return &hashSel{keyFn: keyFn, hash: fnv.New64a()}, nil
 }
 
 func (h *hashSel) Pick(set []Address, pc PickContext) (Address, error) {

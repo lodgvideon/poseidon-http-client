@@ -244,9 +244,9 @@ func TestPruneExpiredWaiters_EmptyAndAllLive(t *testing.T) {
 // dialStarted is closed on the first Dial call so tests can wait
 // until the dial is actually in progress before triggering Close.
 type hangingDialer struct {
-	release     chan struct{}
-	dialStarted chan struct{}
-	startOnce   sync.Once
+	release      chan struct{}
+	dialStarted  chan struct{}
+	startOnce    sync.Once
 }
 
 func (d *hangingDialer) Dial(ctx context.Context, _ string) (net.Conn, error) {
