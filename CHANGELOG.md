@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **Pool reply-channel poisoning race** — the global `replyPool` recycled a
+  buffered reply channel even when the pool actor could still send a late
+  reply (caller abandoned via `ctx`/`closedCh` after the actor took the
+  request). The recycled channel was then handed to a different `Pool`,
+  which read the stale reply — surfacing as a spurious `ErrPoolClosed` or a
+  cross-pool conn (`stream reset by peer`) under concurrent load. The reply
+  channel is now recycled only when the actor can no longer send on it.
+  Regression test: `TestPool_ReplyChannelNotPoisonedUnderAbandonment`.
+
 ## [v0.5.0] — 2026-06-21
 
 ### Added
