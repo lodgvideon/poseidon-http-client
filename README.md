@@ -4,10 +4,9 @@ A low-level, zero-allocation HTTP/2 client for Go, designed for load
 generators. Implements RFC 7540 (HTTP/2) and RFC 7541 (HPACK) from
 scratch without `net/http` or `golang.org/x/net/http2`.
 
-**Status:** v0.4.0 — CONTINUATION write path (RFC §6.2/§6.10),
-automatic retry layer (`client.Retryer`), Docker cross-server
-integration tests (nginx + Undertow), security fixes (P0/P1),
-−15% latency + −2 allocs/op, CI fully green.
+**Status:** v0.5.1 — HTTP/1.1 fallback + ALPN-aware transport (`http1/`
+package), pool reply-channel race fix, all packages ≥ 90% coverage,
+CI fully green.
 See [CHANGELOG.md](CHANGELOG.md) for details. See
 [C.1 design](docs/superpowers/specs/2026-05-07-poseidon-client-c1-design.md),
 [C.2 design](docs/superpowers/specs/2026-05-08-poseidon-client-c2-pool-design.md),
