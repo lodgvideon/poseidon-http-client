@@ -134,6 +134,10 @@ func NewClientConn(ctx context.Context, transport net.Conn, opts ConnOptions) (*
 		peerConnSendWindow: int32(connInitialRecvWindow),
 	}
 	c.fcOutCond = sync.NewCond(&c.fcOutMu)
+	// Sync Framer read limit to our advertised MaxFrameSize. Default Framer
+	// cap is 16384; peers honouring our SETTINGS may send frames up to the
+	// advertised value, which would be rejected as ErrFrameTooLarge otherwise.
+	c.fr.SetMaxReadFrameSize(opts.Settings.MaxFrameSize)
 	peer, err := handshakeSettings(ctx, c.fr, opts.Settings, opts.EnablePush)
 	if err != nil {
 		_ = transport.Close()
