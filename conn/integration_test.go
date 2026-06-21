@@ -198,3 +198,62 @@ func TestConformance_RFC7540_Sec3_ClientPreface_OnTheWire(t *testing.T) {
 		t.Fatalf("self-check broken")
 	}
 }
+
+// TestConformance_RFC7540_Sec6_5_2_MaxFrameSize_FramerReadLimit verifies that
+// when the client advertises SETTINGS_MAX_FRAME_SIZE > 16384, the Framer's
+// read limit is raised to match, so the peer can send DATA frames up to the
+// advertised size without triggering ErrFrameTooLarge (RFC §6.5.2).
+func TestConformance_RFC7540_Sec6_5_2_MaxFrameSize_FramerReadLimit(t *testing.T) {
+	const bodySize = 20480 // 20 KiB — between default 16384 and advertised 32768
+
+	srv, tlsCfg := startH2TestServer(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		payload := make([]byte, bodySize)
+		for i := range payload {
+			payload[i] = byte(i)
+		}
+		_, _ = w.Write(payload)
+	}))
+	defer srv.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	c, err := Dial(ctx, srv.Listener.Addr().String(), ConnOptions{
+		Dialer:   &TLSDialer{Config: tlsCfg},
+		Settings: AdvertisedSettings{MaxFrameSize: 32768},
+	})
+	if err != nil {
+		t.Fatalf("Dial: %v", err)
+	}
+	defer c.Close()
+
+	s, err := c.NewStream(ctx)
+	if err != nil {
+		t.Fatalf("NewStream: %v", err)
+	}
+	if err := s.SendHeaders(ctx, []hpack.HeaderField{
+		{Name: []byte(":method"), Value: []byte("GET")},
+		{Name: []byte(":scheme"), Value: []byte("https")},
+		{Name: []byte(":authority"), Value: []byte("example.com")},
+		{Name: []byte(":path"), Value: []byte("/large")},
+	}, true); err != nil {
+		t.Fatalf("SendHeaders: %v", err)
+	}
+
+	var received int
+	for {
+		ev, err := s.Recv(ctx)
+		if err != nil {
+			t.Fatalf("Recv: %v", err)
+		}
+		if ev.Type == EventData {
+			received += len(ev.Data)
+		}
+		if ev.EndStream {
+			break
+		}
+	}
+	if received != bodySize {
+		t.Fatalf("received %d bytes, want %d", received, bodySize)
+	}
+}

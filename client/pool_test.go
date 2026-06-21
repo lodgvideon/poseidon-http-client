@@ -241,11 +241,18 @@ func TestPruneExpiredWaiters_EmptyAndAllLive(t *testing.T) {
 
 // hangingDialer blocks Dial until either (a) ctx is cancelled or
 // (b) release is closed. Used to verify DialTimeout fires.
+// dialStarted is closed on the first Dial call so tests can wait
+// until the dial is actually in progress before triggering Close.
 type hangingDialer struct {
-	release chan struct{}
+	release     chan struct{}
+	dialStarted chan struct{}
+	startOnce   sync.Once
 }
 
 func (d *hangingDialer) Dial(ctx context.Context, _ string) (net.Conn, error) {
+	if d.dialStarted != nil {
+		d.startOnce.Do(func() { close(d.dialStarted) })
+	}
 	select {
 	case <-d.release:
 		return nil, errors.New("hangingDialer: released without conn")
@@ -297,7 +304,10 @@ func TestPool_DialTimeout_DefaultedTo30s(t *testing.T) {
 
 func TestPool_DialOne_PoolCloseCancelsHangingDial(t *testing.T) {
 	t.Parallel()
-	hd := &hangingDialer{release: make(chan struct{})}
+	hd := &hangingDialer{
+		release:     make(chan struct{}),
+		dialStarted: make(chan struct{}),
+	}
 	p := newPool("fake:0", conn.ConnOptions{Dialer: hd}, PoolOptions{
 		MaxConnsPerHost: 1,
 		// Long DialTimeout so we know cancellation came from Close,
@@ -312,8 +322,13 @@ func TestPool_DialOne_PoolCloseCancelsHangingDial(t *testing.T) {
 		_, err := p.acquire(ctx)
 		acqErr <- err
 	}()
-	// Give the actor a moment to schedule dialOne.
-	time.Sleep(20 * time.Millisecond)
+	// Wait until the dial is actually in progress before closing the pool.
+	select {
+	case <-hd.dialStarted:
+	case <-time.After(5 * time.Second):
+		close(hd.release)
+		t.Fatal("dialOne never started within 5s")
+	}
 
 	closeStart := time.Now()
 	_ = p.Close()
