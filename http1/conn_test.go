@@ -87,6 +87,61 @@ func TestHTTP1_GET_200(t *testing.T) {
 	}
 }
 
+// TestHTTP1_WriteRequest_SkipsHopByHopHeaders verifies that hop-by-hop and
+// H2-forbidden headers (connection, te, keep-alive, etc.) supplied by the
+// caller are dropped from the H1.1 wire request, while ordinary headers pass
+// through. Covers the forbidden-header skip branch in WriteRequest.
+func TestHTTP1_WriteRequest_SkipsHopByHopHeaders(t *testing.T) {
+	t.Parallel()
+	gotConnection := make(chan string, 1)
+	gotCustom := make(chan string, 1)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotConnection <- r.Header.Get("Connection")
+		gotCustom <- r.Header.Get("X-Custom")
+		w.WriteHeader(200)
+	}))
+	t.Cleanup(srv.Close)
+
+	nc, err := net.Dial("tcp", srv.Listener.Addr().String())
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	c := http1.NewConn(nc)
+	defer func() { _ = c.Close() }()
+
+	ctx := context.Background()
+	ex := c.NewExchange()
+	host := srv.Listener.Addr().String()
+	fields := []hpack.HeaderField{
+		{Name: []byte(":method"), Value: []byte("GET")},
+		{Name: []byte(":path"), Value: []byte("/")},
+		{Name: []byte(":authority"), Value: []byte(host)},
+		{Name: []byte(":scheme"), Value: []byte("http")},
+		// Forbidden / hop-by-hop — must be skipped by WriteRequest.
+		{Name: []byte("connection"), Value: []byte("close")},
+		{Name: []byte("te"), Value: []byte("trailers")},
+		{Name: []byte("keep-alive"), Value: []byte("timeout=5")},
+		// Ordinary header — must pass through.
+		{Name: []byte("x-custom"), Value: []byte("present")},
+	}
+	if err := ex.WriteRequest(ctx, fields, true); err != nil {
+		t.Fatalf("WriteRequest: %v", err)
+	}
+	if _, _, err := ex.ReadResponse(ctx); err != nil {
+		t.Fatalf("ReadResponse: %v", err)
+	}
+
+	// The caller-supplied "connection: close" must not reach the server as a
+	// client-set close (Go's server only reports an explicit close token; our
+	// request omits it, so net/http manages keep-alive itself).
+	if v := <-gotConnection; strings.Contains(strings.ToLower(v), "close") {
+		t.Errorf("Connection header leaked through: %q", v)
+	}
+	if v := <-gotCustom; v != "present" {
+		t.Errorf("X-Custom = %q, want %q (ordinary header dropped)", v, "present")
+	}
+}
+
 func TestHTTP1_POST_Echo(t *testing.T) {
 	t.Parallel()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
