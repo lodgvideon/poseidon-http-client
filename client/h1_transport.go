@@ -36,8 +36,14 @@ type h1Exchange struct {
 	buf [16 * 1024]byte //nolint:structcheck
 }
 
-func (e *h1Exchange) SendHeaders(ctx context.Context, fields []conn.HeaderField, endStream bool) error {
-	return e.ex.WriteRequest(ctx, fields, endStream)
+// SendHeaders on an HTTP/1.1 exchange is only ever reached via the request
+// trailer path (initial headers go through SendHeadersWithPriority). HTTP/1.1
+// request trailers are not supported by this fallback transport, so the
+// request is rejected with ErrTrailersUnsupportedH1 rather than re-issuing
+// WriteRequest, which would emit a second request line and corrupt the
+// connection.
+func (e *h1Exchange) SendHeaders(_ context.Context, _ []conn.HeaderField, _ bool) error {
+	return ErrTrailersUnsupportedH1
 }
 
 func (e *h1Exchange) SendHeadersWithPriority(ctx context.Context, fields []conn.HeaderField, endStream bool, _ *frame.Priority) error {

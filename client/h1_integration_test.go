@@ -2,6 +2,8 @@ package client_test
 
 import (
 	"context"
+	"errors"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -509,5 +511,39 @@ func TestNewClient_ALPN_NegotiatesH2(t *testing.T) {
 	}
 	if resp.Status != 200 {
 		t.Errorf("status = %d, want 200", resp.Status)
+	}
+}
+
+// TestNewClient_H1SingleConn_TrailersRejected verifies that a request carrying
+// trailers over HTTP/1.1 is rejected with ErrTrailersUnsupportedH1 rather than
+// corrupting the connection by emitting a second request line.
+func TestNewClient_H1SingleConn_TrailersRejected(t *testing.T) {
+	t.Parallel()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.Copy(io.Discard, r.Body)
+		w.WriteHeader(200)
+	}))
+	t.Cleanup(srv.Close)
+
+	c, err := client.NewClient(client.ClientOptions{
+		Transport: client.TransportH1SingleConn,
+		Addr:      srv.Listener.Addr().String(),
+		ConnOpts:  conn.ConnOptions{Dialer: &conn.PlaintextDialer{}},
+	})
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+	defer c.Close()
+
+	var resp client.Response
+	resp.Reset()
+	err = c.Do(context.Background(), &client.Request{
+		Method:   "POST",
+		Path:     "/",
+		Body:     []byte("payload"),
+		Trailers: []conn.HeaderField{{Name: []byte("x-checksum"), Value: []byte("abc123")}},
+	}, &resp)
+	if !errors.Is(err, client.ErrTrailersUnsupportedH1) {
+		t.Fatalf("Do err = %v, want ErrTrailersUnsupportedH1", err)
 	}
 }

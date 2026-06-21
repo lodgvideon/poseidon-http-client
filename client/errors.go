@@ -103,4 +103,11 @@ var (
 
 	// ErrNilKeyFn is returned by Hash when keyFn is nil.
 	ErrNilKeyFn = errors.New("client: Hash selector requires a non-nil keyFn")
+
+	// ErrTrailersUnsupportedH1 is returned when a request carrying trailers
+	// is sent over an HTTP/1.1 connection. HTTP/1.1 request trailers require
+	// chunked transfer-coding with a trailer section, which this fallback
+	// transport does not implement; the request is rejected rather than
+	// corrupting the connection with a second request line.
+	ErrTrailersUnsupportedH1 = errors.New("client: HTTP/1.1 does not support request trailers")
 )
