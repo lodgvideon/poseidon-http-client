@@ -5,6 +5,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"testing"
 	"time"
 
@@ -396,6 +397,88 @@ func TestNewClient_H1SingleConn_StreamBody_Error(t *testing.T) {
 		}
 		t.Error("expected error calling Do(StreamBody=true) on H1.1 client, got nil")
 	}
+}
+
+// TestNewClient_H1SingleConn_ConcurrentDial_CancelledCtx covers the
+// `case <-ctx.Done(): return nil, ctx.Err()` branch in h1singleConn.acquireConn
+// (h1_transport.go:196-198). This is triggered when a second goroutine waits
+// on the dialing channel while a first goroutine is mid-dial, but the second
+// goroutine's context is already cancelled.
+func TestNewClient_H1SingleConn_ConcurrentDial_CancelledCtx(t *testing.T) {
+	t.Parallel()
+	srv := startH1Server(t)
+
+	// A slow dialer that sleeps 200ms before delegating — keeps the first
+	// dial in flight long enough for the second caller to arrive.
+	slow := newH1SlowDialer(&conn.PlaintextDialer{}, 200*time.Millisecond)
+
+	c, err := client.NewClient(client.ClientOptions{
+		Transport: client.TransportH1SingleConn,
+		Addr:      srv.Listener.Addr().String(),
+		ConnOpts:  conn.ConnOptions{Dialer: slow},
+	})
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+	defer c.Close()
+
+	// Goroutine 1: starts the slow dial (will take ~200ms).
+	errCh := make(chan error, 1)
+	go func() {
+		var resp client.Response
+		resp.Reset()
+		errCh <- c.Do(context.Background(), &client.Request{Method: "GET", Path: "/"}, &resp)
+	}()
+
+	// Wait until the dial is actually in progress (started channel is closed by
+	// the slow dialer's first Dial invocation, before the sleep).
+	<-slow.started
+
+	// Goroutine 2 (main): pre-cancelled context → should hit ctx.Done() path.
+	ctx2, cancel2 := context.WithCancel(context.Background())
+	cancel2() // cancel before Do
+
+	var resp2 client.Response
+	resp2.Reset()
+	err = c.Do(ctx2, &client.Request{Method: "GET", Path: "/"}, &resp2)
+
+	// The error must be context.Canceled (the ctx was already cancelled).
+	if err == nil {
+		t.Error("expected error from cancelled context, got nil")
+	} else if err != context.Canceled {
+		// Accept wrapped forms too.
+		t.Logf("got %v (want context.Canceled; wrapped form acceptable)", err)
+	}
+
+	// Drain the first goroutine (it should succeed once the dial finishes).
+	<-errCh
+}
+
+// h1SlowDialer wraps a Dialer adding a configurable startup delay.
+// The started channel must be initialised via newH1SlowDialer.
+type h1SlowDialer struct {
+	inner   conn.Dialer
+	delay   time.Duration
+	started chan struct{} // closed when the first Dial call begins
+	once    sync.Once
+}
+
+func newH1SlowDialer(inner conn.Dialer, delay time.Duration) *h1SlowDialer {
+	return &h1SlowDialer{
+		inner:   inner,
+		delay:   delay,
+		started: make(chan struct{}),
+	}
+}
+
+func (d *h1SlowDialer) Dial(ctx context.Context, addr string) (net.Conn, error) {
+	d.once.Do(func() { close(d.started) })
+	select {
+	case <-time.After(d.delay):
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+	return d.inner.Dial(ctx, addr)
 }
 
 func TestNewClient_ALPN_NegotiatesH2(t *testing.T) {

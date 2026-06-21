@@ -1890,3 +1890,101 @@ func TestClient_Do_DeflateStreamBody(t *testing.T) {
 		t.Fatalf("body = %q, want %q", body, "deflate stream body")
 	}
 }
+
+// ---------------------------------------------------------------------------
+// managed_pool.go: warmup — loop body `s.p.warmup(per)` (managed_pool.go:434)
+// Only executes when sub-pools exist. We create a sub-pool via one request,
+// then call Warmup so the for-range body is covered.
+// ---------------------------------------------------------------------------
+
+func TestManagedPool_Warmup_AfterFirstRequest(t *testing.T) {
+	t.Parallel()
+	_, addr := newTLSH2Server(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(200)
+	}))
+	host, portStr, _ := net.SplitHostPort(addr)
+	port, err := strconv.Atoi(portStr)
+	if err != nil {
+		t.Fatalf("Atoi(%q): %v", portStr, err)
+	}
+
+	r := client.StaticResolver(client.Address{Host: host, Port: port})
+	c, err := client.NewClient(client.ClientOptions{
+		Transport: client.TransportManaged,
+		Resolver:  r,
+		ConnOpts: conn.ConnOptions{
+			Dialer: &conn.TLSDialer{Config: &tls.Config{InsecureSkipVerify: true}},
+		},
+		Pool: &client.PoolOptions{
+			MaxConnsPerHost:   2,
+			MaxStreamsPerConn: 10,
+		},
+	})
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+	defer c.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	// Make one request to force creation of the sub-pool.
+	var resp client.Response
+	if err := doWithRetry(t, c, ctx, &client.Request{Method: "GET", Path: "/"}, &resp); err != nil {
+		t.Fatalf("initial Do: %v", err)
+	}
+
+	// Now call Warmup — subs is non-empty so the loop body runs (s.p.warmup(per)).
+	c.Warmup(2)
+
+	// Give warmup goroutines a moment to start.
+	time.Sleep(50 * time.Millisecond)
+}
+
+// ---------------------------------------------------------------------------
+// pool.go: handleClose — GoAway path (pool.go:341-343)
+// Triggered when the pool is closed and a conn has received a peer GOAWAY.
+// ---------------------------------------------------------------------------
+
+func TestPool_HandleClose_GoAwayConn(t *testing.T) {
+	t.Parallel()
+	srv, addr := newTLSH2Server(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(200)
+	}))
+
+	c, err := client.NewClient(client.ClientOptions{
+		Addr:      addr,
+		Transport: client.TransportPool,
+		ConnOpts: conn.ConnOptions{
+			Dialer: &conn.TLSDialer{Config: &tls.Config{InsecureSkipVerify: true}},
+		},
+		Pool: &client.PoolOptions{
+			MaxConnsPerHost:   1,
+			MaxStreamsPerConn: 10,
+		},
+	})
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	// Seed the pool with an active conn.
+	var resp client.Response
+	if err := doWithRetry(t, c, ctx, &client.Request{Method: "GET", Path: "/"}, &resp); err != nil {
+		t.Fatalf("seeding Do: %v", err)
+	}
+
+	// Close the httptest server — this causes the server to send GOAWAY.
+	srv.Close()
+
+	// Give the GOAWAY frame time to propagate to the client conn.
+	time.Sleep(100 * time.Millisecond)
+
+	// Close the client — pool.handleClose iterates conns, GoAwayReceived()
+	// returns true, so reason = CloseGoAway is set (the uncovered 2 stmts).
+	if err := c.Close(); err != nil {
+		t.Logf("Close: %v (error acceptable after server shutdown)", err)
+	}
+}

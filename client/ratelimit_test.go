@@ -137,6 +137,36 @@ func TestClient_RateLimit_BlocksExcess(t *testing.T) {
 	}
 }
 
+// TestRateLimiter_NoDoneContext covers the no-Done-channel slow path in Take:
+// when ctx.Done() == nil (context.Background()) tokens are exhausted,
+// the limiter falls back to a blocking time.Sleep loop until tokens refill.
+// Uses a very high rps (10000) so the wait is ~0.1ms — essentially instant.
+func TestRateLimiter_NoDoneContext(t *testing.T) {
+	// 10000 rps, burst 1.  First Take drains the single token (fast path).
+	// Second Take finds tokens < 1, ctx.Done() == nil → slow sleep loop.
+	rl := newRateLimiter(10000, 1)
+
+	if err := rl.Take(context.Background()); err != nil {
+		t.Fatalf("Take 1: %v", err)
+	}
+
+	// At 10000 rps each token takes 0.1ms; add a small deadline so the
+	// test cannot hang if the implementation loops unexpectedly.
+	done := make(chan error, 1)
+	go func() {
+		done <- rl.Take(context.Background())
+	}()
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Errorf("Take 2 (no-Done path): %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Take 2 (no-Done path) blocked for > 2s")
+	}
+}
+
 // TestClient_NoRateLimit verifies default (zero) doesn't rate-limit.
 func TestClient_NoRateLimit(t *testing.T) {
 	srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
