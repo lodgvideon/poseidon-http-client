@@ -891,6 +891,10 @@ func handleDataEvent(ev conn.StreamEvent, req *Request, resp *Response, enc Cont
 	if req.WantBody && len(ev.Data) > 0 {
 		resp.Body = append(resp.Body, ev.Data...)
 	}
+	// Payload copied out (or unwanted): return the pooled buffer immediately.
+	if ev.DataSlab != nil {
+		conn.GetDataBufPool().Put(ev.DataSlab)
+	}
 	if ev.EndStream {
 		if req.WantBody && enc != EncodingIdentity {
 			decoded, derr := decompressFully(enc, resp.Body, maxDecompressed)

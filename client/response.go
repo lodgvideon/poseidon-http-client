@@ -152,6 +152,19 @@ type StreamResponse struct {
 	// slabs holds pooled slab pointers that back Headers field bytes.
 	// Storing *[]byte avoids heap escape on return to HeaderSlabPool.
 	slabs []*[]byte
+
+	// curData is the pooled buffer backing the Data of the most recently
+	// delivered EventData. Recycled on the next Recv (Data is valid only
+	// until then per the StreamEvent contract) and on Close.
+	curData *[]byte
+}
+
+// recycleData returns the last delivered EventData's pooled buffer to the pool.
+func (sr *StreamResponse) recycleData() {
+	if sr.curData != nil {
+		conn.GetDataBufPool().Put(sr.curData)
+		sr.curData = nil
+	}
 }
 
 // reset zeroes the private fields before DoStream reuses the struct.
@@ -175,6 +188,9 @@ func (sr *StreamResponse) Recv(ctx context.Context) (StreamEvent, error) {
 	if sr.drained {
 		return StreamEvent{}, ErrStreamEnded
 	}
+	// The previously delivered EventData.Data is invalid once Recv is called
+	// again; recycle its pooled buffer now.
+	sr.recycleData()
 	for {
 		ev, err := sr.stream.Recv(ctx)
 		if err != nil {
@@ -191,6 +207,7 @@ func (sr *StreamResponse) Recv(ctx context.Context) (StreamEvent, error) {
 				Data:      ev.Data,
 				EndStream: ev.EndStream,
 			}
+			sr.curData = ev.DataSlab
 			if ev.EndStream {
 				sr.drained = true
 			}
@@ -266,6 +283,7 @@ func (sr *StreamResponse) Close() error {
 			conn.GetHeaderSlabPool().Put(sp)
 		}
 		sr.slabs = sr.slabs[:0]
+		sr.recycleData()
 		closeErr = sr.stream.Close()
 		if sr.release != nil {
 			sr.release()

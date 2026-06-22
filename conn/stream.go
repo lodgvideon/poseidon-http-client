@@ -61,6 +61,13 @@ type StreamEvent struct {
 	// cold (first request). The client layer must return this pointer to
 	// conn.GetHeaderSlabPool(), not the slice value, to avoid heap escape.
 	Slab *[]byte
+
+	// DataSlab is the pooled buffer backing Data (EventData). nil for
+	// non-data events and when the pool is cold. The client returns it to
+	// conn.GetDataBufPool() once Data is consumed — incrementally on the
+	// streaming paths (Data is valid until the next Recv), immediately on
+	// the buffered path. Return the pointer, not the slice, to avoid escape.
+	DataSlab *[]byte
 }
 
 // streamWriter is the narrow surface a *Stream needs from its owner Conn.

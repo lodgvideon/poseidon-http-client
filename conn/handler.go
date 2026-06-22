@@ -22,6 +22,22 @@ var headerSlabPool = sync.Pool{
 // The client package calls this to return slabs after use.
 func GetHeaderSlabPool() *sync.Pool { return &headerSlabPool }
 
+// dataBufPool recycles the per-DATA-frame payload copy. OnData copies the
+// framer's reused read buffer into a pooled buffer rather than a fresh heap
+// allocation; the client transfers ownership via StreamEvent.DataSlab and
+// returns it here once the payload is consumed.
+var dataBufPool = sync.Pool{
+	New: func() any {
+		b := make([]byte, 0, 1024)
+		return &b
+	},
+}
+
+// GetDataBufPool returns the shared pool for DATA-frame payload buffers. The
+// client package returns a StreamEvent.DataSlab pointer here after the payload
+// has been consumed (copied out or fully read).
+func GetDataBufPool() *sync.Pool { return &dataBufPool }
+
 // connOps is the contract handler.go needs from its owner. In
 // production it's *Conn; tests can supply a fake. Widening this beyond
 // lookupStream removes 8 unsafe *Conn type-assertions in the dispatch
@@ -138,12 +154,16 @@ func (h *connHandler) OnData(fh frame.FrameHeader, p []byte, _ uint8) error {
 		return err
 	}
 	end := fh.Flags&frame.FlagDataEndStream != 0
-	dataCopy := append([]byte(nil), p...)
+	// Pooled copy of the framer's reused read buffer; ownership transfers to the
+	// client via StreamEvent.DataSlab, returned to dataBufPool once Data is
+	// consumed (eliminates a per-DATA-frame heap allocation).
+	bufPtr := dataBufPool.Get().(*[]byte)
+	*bufPtr = append((*bufPtr)[:0], p...)
 	if end {
 		s.markRemoteEnd()
 		h.streams.markStreamDone(fh.StreamID)
 	}
-	s.push(StreamEvent{Type: EventData, Data: dataCopy, EndStream: end})
+	s.push(StreamEvent{Type: EventData, Data: *bufPtr, DataSlab: bufPtr, EndStream: end})
 	return nil
 }
 
