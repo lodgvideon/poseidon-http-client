@@ -1,8 +1,11 @@
 package conn
 
 import (
+	"context"
 	"errors"
+	"net"
 	"testing"
+	"time"
 
 	"github.com/lodgvideon/poseidon-http-client/frame"
 	"github.com/lodgvideon/poseidon-http-client/hpack"
@@ -90,5 +93,84 @@ func TestOnContinuation_FloodCapped(t *testing.T) {
 	var ce *ConnError
 	if !errors.As(got, &ce) || ce.Code != frame.ErrCodeEnhanceYourCalm {
 		t.Fatalf("OnContinuation flood = %v (bufLen=%d), want *ConnError ENHANCE_YOUR_CALM", got, len(h.pendingBuf))
+	}
+}
+
+// TestReaderLoop_StreamErrorResetsOnlyThatStream is a regression test: a
+// per-stream flow-control overrun surfaces as a *StreamError from the frame
+// dispatch. The reader loop used to treat every error as connection-fatal,
+// killing all streams. It must now reset only the offending stream and keep
+// the connection — and other in-flight streams — alive (RFC 7540 §5.4.2).
+func TestReaderLoop_StreamErrorResetsOnlyThatStream(t *testing.T) {
+	cli, srv := net.Pipe()
+
+	go pipeServer(t, srv, func(srvFr *frame.Framer) {
+		ctx := context.Background()
+		// Drain the two client HEADERS frames (streams 1 and 3).
+		if _, err := srvFr.ReadFrame(ctx, &nilHandler{}); err != nil {
+			return
+		}
+		if _, err := srvFr.ReadFrame(ctx, &nilHandler{}); err != nil {
+			return
+		}
+		// 50-byte DATA on stream 1 overruns its 10-byte recv window -> *StreamError.
+		_ = srvFr.WriteData(1, false, make([]byte, 50))
+		time.Sleep(500 * time.Millisecond)
+	})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	opts := ConnOptions{Settings: AdvertisedSettings{InitialWindowSize: 10}}.defaulted()
+	c, err := NewClientConn(ctx, cli, opts)
+	if err != nil {
+		t.Fatalf("NewClientConn: %v", err)
+	}
+	defer c.Close()
+
+	hdrs := []hpack.HeaderField{
+		{Name: []byte(":method"), Value: []byte("GET")},
+		{Name: []byte(":scheme"), Value: []byte("https")},
+		{Name: []byte(":authority"), Value: []byte("example.com")},
+		{Name: []byte(":path"), Value: []byte("/")},
+	}
+	a, err := c.NewStream(ctx)
+	if err != nil {
+		t.Fatalf("NewStream A: %v", err)
+	}
+	b, err := c.NewStream(ctx)
+	if err != nil {
+		t.Fatalf("NewStream B: %v", err)
+	}
+	if err := a.SendHeaders(ctx, hdrs, false); err != nil {
+		t.Fatalf("A.SendHeaders: %v", err)
+	}
+	if err := b.SendHeaders(ctx, hdrs, false); err != nil {
+		t.Fatalf("B.SendHeaders: %v", err)
+	}
+
+	// Stream A receives the per-stream reset.
+	aCtx, aCancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer aCancel()
+	ev, err := a.Recv(aCtx)
+	if err != nil || ev.Type != EventReset {
+		t.Fatalf("A.Recv = (%+v, %v), want EventReset", ev, err)
+	}
+
+	// The connection must stay alive — the reader loop must not have exited.
+	select {
+	case <-c.readerDone:
+		t.Fatalf("reader loop exited; a per-stream error must not kill the connection")
+	default:
+	}
+	if !c.IsAlive() {
+		t.Fatalf("IsAlive() = false; connection killed by a per-stream error")
+	}
+
+	// Stream B is untouched: Recv times out (no reset), proving B survived.
+	bCtx, bCancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+	defer bCancel()
+	if ev, err := b.Recv(bCtx); err != context.DeadlineExceeded {
+		t.Fatalf("B.Recv = (%+v, %v), want DeadlineExceeded (B must be unaffected)", ev, err)
 	}
 }

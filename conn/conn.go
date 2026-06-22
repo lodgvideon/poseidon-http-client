@@ -1177,6 +1177,20 @@ func (c *Conn) readerLoop() {
 	for {
 		_, err := c.fr.ReadFrame(context.Background(), h)
 		if err != nil {
+			// A *StreamError is non-fatal (RFC 7540 §5.4.2): reset only the
+			// offending stream and keep the connection — and every other
+			// in-flight stream — alive. onDataReceived / onWindowUpdate
+			// return this on a single stream's flow-control overrun. Only
+			// *ConnError and I/O errors tear the whole connection down.
+			var se *StreamError
+			if errors.As(err, &se) {
+				if s := c.lookupStream(se.StreamID); s != nil {
+					s.push(StreamEvent{Type: EventReset, RSTCode: se.Code, EndStream: true})
+				}
+				_ = c.rstStream(se.StreamID, se.Code)
+				c.releaseInflight(se.StreamID)
+				continue
+			}
 			c.emitConnGoAwayIfTyped(err)
 			c.shutdownStreams(err)
 			return
