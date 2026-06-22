@@ -2,6 +2,7 @@ package client
 
 import (
 	"context"
+	"errors"
 	"net"
 	"strconv"
 	"sync"
@@ -168,9 +169,14 @@ func (r *dnsResolver) Resolve(ctx context.Context) ([]Address, error) {
 		addrs = append(addrs, Address{Host: ip.IP.String(), Port: r.port})
 	}
 	if len(addrs) == 0 {
-		if r.cached != nil {
-			return r.cached, ErrNoAddresses
-		}
+		// A SUCCESSFUL lookup returning zero addresses is authoritative: every
+		// endpoint was deregistered (or all were filtered out). Clear the cache
+		// so the now-empty result propagates and dead backends are drained —
+		// unlike a lookup ERROR (handled above), which keeps the stale set as a
+		// soft warning. Serving the stale set here would route to dead backends
+		// forever with no recovery path. (cachedAt is irrelevant while cached
+		// is nil: the TTL check short-circuits and the next Resolve re-looks-up.)
+		r.cached = nil
 		return nil, ErrNoAddresses
 	}
 	r.cached = addrs
@@ -184,7 +190,10 @@ func (r *dnsResolver) Resolve(ctx context.Context) ([]Address, error) {
 func (r *dnsResolver) Watch(ctx context.Context) (<-chan []Address, error) {
 	out := make(chan []Address, 1)
 	first, err := r.Resolve(ctx)
-	if err != nil && len(first) == 0 {
+	// Only a transient lookup failure aborts the watch; an authoritative-empty
+	// first result (ErrNoAddresses) emits the empty set and keeps Watch mode,
+	// consistent with the re-resolve loop below.
+	if err != nil && !errors.Is(err, ErrNoAddresses) {
 		close(out)
 		return nil, err
 	}
@@ -201,8 +210,8 @@ func (r *dnsResolver) Watch(ctx context.Context) (<-chan []Address, error) {
 			case <-t.C:
 			}
 			next, err := r.Resolve(ctx)
-			if err != nil && len(next) == 0 {
-				continue // soft fail, retain prev
+			if err != nil && !errors.Is(err, ErrNoAddresses) {
+				continue // transient soft fail — retain prev set
 			}
 			if addrSetEqual(prev, next) {
 				continue

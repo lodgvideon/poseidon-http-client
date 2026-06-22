@@ -71,10 +71,10 @@ type PoolOptions struct {
 
 // Stats is a snapshot of pool state.
 type Stats struct {
-	ActiveConns    int
+	ActiveConns     int
 	InFlightStreams int
-	Waiters        int
-	InFlightDials  int
+	Waiters         int
+	InFlightDials   int
 	// Populated by managedPool.Stats(); zero for single-address pools.
 	Addresses        int // number of addresses in the current resolved set
 	DrainingSubpools int // sub-pools currently draining (removed from resolver set)
@@ -178,7 +178,11 @@ func newPool(addr string, connOpts conn.ConnOptions, opts PoolOptions, hooksRef 
 	return p
 }
 
-// Close stops the actor and closes all conns. Idempotent.
+// Close stops the actor and closes all pooled conns. Idempotent. Returns once
+// the actor has exited; a dial still in flight at Close is drained and its conn
+// closed by a short-lived background goroutine, so that conn (and any
+// OnConnClose hook for it) may complete shortly after Close returns. This keeps
+// Close prompt even against a hung dial, whose ctx is cancelled on close.
 func (p *Pool) Close() error {
 	p.closeOnce.Do(func() { close(p.closeCh) })
 	<-p.closedCh
@@ -336,6 +340,22 @@ func (p *Pool) handleClose(rs *runState) {
 		p.replyAcquire(w, nil, ErrPoolClosed)
 	}
 	rs.waiters = nil
+	// Drain every in-flight dial asynchronously so Close returns promptly even
+	// with a hung dial (the watchdog cancels it once closedCh closes, right
+	// after this returns). Each outstanding dialOne delivers exactly one
+	// result; Closing any completed conn here keeps it from being orphaned in
+	// the buffered dialDoneCh (a conn + reader-goroutine + fd leak).
+	if n := rs.inFlightDials; n > 0 {
+		rs.inFlightDials = 0
+		go func() {
+			for i := 0; i < n; i++ {
+				if dr := <-p.dialDoneCh; dr.mc != nil {
+					_ = dr.mc.c.Close()
+					p.notifyClose(CloseManual)
+				}
+			}
+		}()
+	}
 	for _, mc := range rs.conns {
 		reason := CloseManual
 		if mc.c.GoAwayReceived() {
@@ -425,18 +445,17 @@ func (p *Pool) dialOne() {
 		}
 	}
 	if err != nil {
-		select {
-		case p.dialDoneCh <- dialResult{err: err}:
-		case <-p.closedCh:
-		}
+		// Always deliver the result. Pool.Close drains every in-flight dial,
+		// so this send never blocks forever, and the watchdog above already
+		// cancels a hung dial's context when the pool closes.
+		p.dialDoneCh <- dialResult{err: err}
 		return
 	}
 	mc := &managedConn{c: c, dialedAt: time.Now(), lastUsed: time.Now()}
-	select {
-	case p.dialDoneCh <- dialResult{mc: mc}:
-	case <-p.closedCh:
-		_ = c.Close()
-	}
+	// Always deliver; handleClose's drainer receives this and Closes the conn
+	// if the pool shut down before the conn could be pooled, so it is never
+	// orphaned in the buffered dialDoneCh.
+	p.dialDoneCh <- dialResult{mc: mc}
 }
 
 // serveWaiters hands as many waiters as possible a live mc.
@@ -666,9 +685,14 @@ func (p *Pool) release(mc *managedConn, reqErr error) {
 	select {
 	case p.releaseCh <- releaseMsg{mc: mc, err: reqErr}:
 	case <-p.closedCh:
+		// Pool already closed: the actor is gone and won't process this
+		// release, so close the conn directly rather than dropping it (a leak).
+		// conn.Close is idempotent if handleClose already closed it.
+		if mc.c != nil {
+			_ = mc.c.Close()
+		}
 	}
 }
-
 
 // inDialBackoff reports whether a previous dial error is still within
 // the configured DialBackoff window. Returns false if no previous error
@@ -716,11 +740,17 @@ func (p *Pool) warmup(n int) {
 		return
 	}
 	for i := 0; i < need; i++ {
-		// Submit a short-lived acquire that triggers a dial,
-		// then releases immediately. The dial continues in
-		// dialOne's goroutine even after the waiter times out.
+		// Submit a short-lived acquire that triggers a dial. If it resolves to
+		// a conn within the window, release it immediately — acquire increments
+		// the conn's active-stream count on success and the caller MUST release
+		// it, or warmup leaks a phantom in-flight stream that blocks idle
+		// eviction and graceful drain. If it times out, the dial continues in
+		// dialOne's goroutine and the conn joins the pool later.
 		ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
-		_, _ = p.acquire(ctx)
+		mc, err := p.acquire(ctx)
 		cancel()
+		if err == nil {
+			p.release(mc, nil)
+		}
 	}
 }

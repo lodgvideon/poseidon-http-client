@@ -241,6 +241,7 @@ func (c *Conn) allocStream(eventBuf int, recvWindow int32) *Stream {
 		if cap(s.events) == eventBuf {
 			s.w = c
 			s.recvWindow = recvWindow
+			s.released.Store(false) // new lifetime: re-arm Close idempotency guard
 			return s
 		}
 		// Wrong capacity — discard; fall through to fresh allocation.
@@ -404,20 +405,25 @@ func (c *Conn) writeHeadersWithPriority(_ context.Context, s *Stream, fields []h
 	c.wmu.Lock()
 	defer c.wmu.Unlock()
 	if s.id == 0 {
+		// Seed the per-stream outbound flow-control window from the peer's
+		// most recently observed SETTINGS_INITIAL_WINDOW_SIZE and register
+		// the stream atomically under psMu (lock order psMu->smu->s.mu, per
+		// NewStream's documented convention). Holding psMu across the seed +
+		// insert makes it mutually exclusive with applyPeerSettings' merge +
+		// retroactive delta, so this stream is never BOTH seeded at the new
+		// value AND credited the delta — the previous split-lock window
+		// over-credited the send window (RFC 7540 §6.9.2).
+		c.psMu.RLock()
+		initial := settingValue(c.peerSettings, frame.SettingInitialWindowSize, connInitialRecvWindow)
 		c.smu.Lock()
 		s.id = c.nextID
 		c.nextID += 2
 		c.streams[s.id] = s
-		c.smu.Unlock()
-		// Seed the per-stream outbound flow-control window from the
-		// peer's most recently observed SETTINGS_INITIAL_WINDOW_SIZE
-		// (RFC 7540 §6.9.2; default 65535).
-		c.psMu.RLock()
-		initial := settingValue(c.peerSettings, frame.SettingInitialWindowSize, connInitialRecvWindow)
-		c.psMu.RUnlock()
 		s.mu.Lock()
 		s.sendWindow = int32(initial)
 		s.mu.Unlock()
+		c.smu.Unlock()
+		c.psMu.RUnlock()
 	}
 	buf := encBufPool.Get().(*[]byte)
 	*buf = (*buf)[:0]
@@ -644,31 +650,18 @@ func (c *Conn) writeRSTStreamBestEffort(s *Stream, code frame.ErrCode) {
 	c.releaseInflight(s.id)
 }
 
-// onDataReceived debits both the stream-level and connection-level
-// recv windows for a DATA frame whose total payload is `length` bytes
-// (RFC 7540 §6.9.1: includes the data, the pad-length octet, and the
-// padding). Returns an error to abort the connection (peer
-// FLOW_CONTROL_ERROR) or the stream when its window is exceeded. On
-// success it eagerly accumulates a refund counter and, once the
-// per-stream or connection counter crosses recvWindowRefundThreshold,
-// emits a WINDOW_UPDATE for that scope.
+// onDataReceived debits both the connection-level and stream-level recv
+// windows for a DATA frame whose total payload is `length` bytes (RFC 7540
+// §6.9.1: includes the data, the pad-length octet, and the padding). The
+// connection window is accounted FIRST and unconditionally — every received
+// DATA frame counts against it regardless of the per-stream outcome, so a
+// stream reset does not leak the peer's connection send window. Returns a
+// *ConnError to abort the connection (peer overflowed the connection window)
+// or a non-fatal *StreamError to reset just the offending stream. On success
+// it accumulates a refund counter per scope and emits a WINDOW_UPDATE once a
+// counter crosses recvWindowRefundThreshold.
 func (c *Conn) onDataReceived(s *Stream, length uint32) error {
 	debit := int32(length)
-
-	s.mu.Lock()
-	s.recvWindow -= debit
-	if s.recvWindow < 0 {
-		s.mu.Unlock()
-		return &StreamError{StreamID: s.id, Code: frame.ErrCodeFlowControlError}
-	}
-	s.recvRefundPending += length
-	streamRefund := uint32(0)
-	if s.recvRefundPending >= recvWindowRefundThreshold {
-		streamRefund = s.recvRefundPending
-		s.recvRefundPending = 0
-		s.recvWindow += int32(streamRefund)
-	}
-	s.mu.Unlock()
 
 	c.fcMu.Lock()
 	c.connRecvWindow -= debit
@@ -684,6 +677,33 @@ func (c *Conn) onDataReceived(s *Stream, length uint32) error {
 		c.connRecvWindow += int32(connRefund)
 	}
 	c.fcMu.Unlock()
+
+	s.mu.Lock()
+	s.recvWindow -= debit
+	streamOverrun := s.recvWindow < 0
+	streamRefund := uint32(0)
+	if !streamOverrun {
+		s.recvRefundPending += length
+		if s.recvRefundPending >= recvWindowRefundThreshold {
+			streamRefund = s.recvRefundPending
+			s.recvRefundPending = 0
+			s.recvWindow += int32(streamRefund)
+		}
+	}
+	s.mu.Unlock()
+
+	if streamOverrun {
+		// Reset only this stream; the connection — already accounted above —
+		// survives (readerLoop turns this *StreamError into an RST_STREAM).
+		// Still flush any pending connection refund so the peer's connection
+		// window is replenished.
+		if connRefund > 0 {
+			if err := c.writeWindowUpdate(0, connRefund); err != nil {
+				return err
+			}
+		}
+		return &StreamError{StreamID: s.id, Code: frame.ErrCodeFlowControlError}
+	}
 
 	if streamRefund > 0 {
 		if err := c.writeWindowUpdate(s.id, streamRefund); err != nil {
@@ -835,47 +855,69 @@ func (c *Conn) applyInitialPeerSettings(peer frame.SettingsParams) {
 func (c *Conn) applyPeerSettings(s frame.SettingsParams) error {
 	const maxWindow = int64(1<<31 - 1)
 
+	// Merge the settings AND apply the retroactive INITIAL_WINDOW_SIZE delta to
+	// existing streams atomically under psMu (lock order psMu->smu->s.mu),
+	// making the seed/delta mutually exclusive with writeHeadersWithPriority so
+	// a freshly opened stream is seeded EITHER old+delta OR new-and-skipped,
+	// never both (RFC 7540 §6.9.2). In the same pass reject an out-of-range
+	// INITIAL_WINDOW_SIZE as FLOW_CONTROL_ERROR (§6.5.2) before it is stored (it
+	// would later seed a negative int32 send window). The HPACK encoder resize
+	// is captured here but applied below under wmu (not psMu) — the same mutex
+	// EncodeBlock takes — so it cannot race an in-flight header encode.
+	var newTableSize uint32
+	var haveTableSize bool
 	c.psMu.Lock()
 	oldInitial := settingValue(c.peerSettings, frame.SettingInitialWindowSize, connInitialRecvWindow)
 	for i := 0; i < s.N; i++ {
 		p := s.Pairs[i]
+		switch p.ID {
+		case frame.SettingInitialWindowSize:
+			if int64(p.Value) > maxWindow {
+				c.psMu.Unlock()
+				return &ConnError{Code: frame.ErrCodeFlowControlError, Reason: "SETTINGS_INITIAL_WINDOW_SIZE exceeds 2^31-1"}
+			}
+		case frame.SettingHeaderTableSize:
+			newTableSize, haveTableSize = p.Value, true
+		}
 		setPeerSetting(&c.peerSettings, p.ID, p.Value)
 	}
 	newInitial := settingValue(c.peerSettings, frame.SettingInitialWindowSize, connInitialRecvWindow)
-	c.psMu.Unlock()
+	changed := newInitial != oldInitial
 
-	for i := 0; i < s.N; i++ {
-		p := s.Pairs[i]
-		switch p.ID {
-		case frame.SettingHeaderTableSize:
-			c.enc.SetMaxDynamicTableSize(p.Value)
-		case frame.SettingInitialWindowSize:
-			// retroactively re-apply to all streams below
-		}
-	}
-
-	if newInitial != oldInitial {
+	var overflow bool
+	if changed {
 		delta := int64(newInitial) - int64(oldInitial)
 		c.smu.Lock()
-		victims := make([]*Stream, 0, len(c.streams))
 		for _, st := range c.streams {
-			victims = append(victims, st)
-		}
-		c.smu.Unlock()
-
-		for _, st := range victims {
 			st.mu.Lock()
 			newWin := int64(st.sendWindow) + delta
 			if newWin > maxWindow {
 				st.mu.Unlock()
-				return &ConnError{Code: frame.ErrCodeFlowControlError, Reason: "SETTINGS_INITIAL_WINDOW_SIZE delta overflowed a stream send window"}
+				overflow = true
+				break
 			}
 			st.sendWindow = int32(newWin)
 			st.mu.Unlock()
 		}
+		c.smu.Unlock()
+	}
+	c.psMu.Unlock()
 
-		// Wake any writers blocked on send credit — the delta may
-		// have just unblocked them.
+	if overflow {
+		return &ConnError{Code: frame.ErrCodeFlowControlError, Reason: "SETTINGS_INITIAL_WINDOW_SIZE delta overflowed a stream send window"}
+	}
+	// Apply the HPACK encoder dynamic-table resize under wmu (shared with
+	// EncodeBlock) so it cannot race an in-flight header encode and emit a torn
+	// dynamic-table-size update or desync from the peer decoder (which the peer
+	// would reject as a fatal COMPRESSION_ERROR).
+	if haveTableSize {
+		c.wmu.Lock()
+		c.enc.SetMaxDynamicTableSize(newTableSize)
+		c.wmu.Unlock()
+	}
+	if changed {
+		// Wake any writers blocked on send credit — the delta may have just
+		// unblocked them.
 		c.fcOutMu.Lock()
 		c.fcOutCond.Broadcast()
 		c.fcOutMu.Unlock()
@@ -1155,9 +1197,27 @@ func (c *Conn) bumpFramesReceived() { c.atomicFramesReceived.Add(1) }
 func (c *Conn) readerLoop() {
 	defer close(c.readerDone)
 	h := newConnHandler(c, c.dec)
+	h.raiseMaxHeaderBytes(c.opts.Settings.MaxHeaderListSize)
 	for {
 		_, err := c.fr.ReadFrame(context.Background(), h)
 		if err != nil {
+			// A *StreamError is non-fatal (RFC 7540 §5.4.2): reset only the
+			// offending stream and keep the connection — and every other
+			// in-flight stream — alive. onDataReceived / onWindowUpdate
+			// return this on a single stream's flow-control overrun. Only
+			// *ConnError and I/O errors tear the whole connection down.
+			var se *StreamError
+			if errors.As(err, &se) {
+				// push() delivers EventReset to the caller; on events-channel
+				// overflow it already fires a best-effort RST_STREAM and releases
+				// the slot (returns false), so send our own RST only when push
+				// enqueued cleanly, avoiding a duplicate frame. rstStream
+				// releases the inflight slot via writeRSTStream.
+				if s := c.lookupStream(se.StreamID); s == nil || s.push(StreamEvent{Type: EventReset, RSTCode: se.Code, EndStream: true}) {
+					_ = c.rstStream(se.StreamID, se.Code)
+				}
+				continue
+			}
 			c.emitConnGoAwayIfTyped(err)
 			c.shutdownStreams(err)
 			return

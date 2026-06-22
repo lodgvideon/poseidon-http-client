@@ -338,9 +338,19 @@ func (ex *Exchange) ReadBodyChunk(buf []byte) (n int, done bool, err error) {
 		n, err = ex.c.br.Read(buf)
 		ex.bodyRead += int64(n)
 		done = ex.bodyRead >= ex.contentLen
-		if err == io.EOF && !done {
-			// Premature EOF before Content-Length satisfied.
-			return n, true, fmt.Errorf("http1: premature EOF: got %d of %d bytes", ex.bodyRead, ex.contentLen)
+		if err == io.EOF {
+			if !done {
+				// Premature EOF before Content-Length satisfied.
+				return n, true, fmt.Errorf("http1: premature EOF: got %d of %d bytes", ex.bodyRead, ex.contentLen)
+			}
+			// Final body bytes arrived coalesced with io.EOF in a single
+			// Read (bufio passes through the underlying (n, io.EOF) when
+			// the caller buffer is >= bufio's buffer). The body is now
+			// complete, so surface the bytes with a nil error instead of
+			// discarding n. The EOF means the peer closed the socket, so the
+			// connection is no longer reusable — do not let it be pooled.
+			ex.keepAlive = false
+			err = nil
 		}
 		return n, done, err
 	}
@@ -375,6 +385,15 @@ func (ex *Exchange) readChunkedChunk(buf []byte) (n int, done bool, err error) {
 		size, perr := strconv.ParseInt(line, 16, 64)
 		if perr != nil {
 			return 0, false, fmt.Errorf("http1: invalid chunk size %q: %w", line, perr)
+		}
+		if size < 0 {
+			// chunk-size is 1*HEXDIG (unsigned) per RFC 7230 §4.1;
+			// ParseInt accepts a leading '-', so reject it explicitly
+			// before it becomes a negative slice bound below. The chunked
+			// framing is now corrupt and the stream position indeterminate,
+			// so the connection must not be pooled.
+			ex.keepAlive = false
+			return 0, false, fmt.Errorf("http1: invalid chunk size %q: negative", line)
 		}
 		if size == 0 {
 			// Terminal chunk. Consume optional trailers.

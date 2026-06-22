@@ -120,6 +120,14 @@ type Stream struct {
 	// 0 means no reset has been signalled. Written via CAS in
 	// signalReset to guarantee exactly one close(resetSignal).
 	resetCode atomic.Uint32
+
+	// released guards Close() idempotency independently of the operational
+	// `closed` flag. recycleStream resets `closed` (for pool reuse) but must
+	// NOT reset `released`, so a repeat Close() while the struct is still
+	// pooled is a no-op instead of dereferencing the nil-ed w. allocStream
+	// re-arms it for the next lifetime (so a stale reference to a re-allocated
+	// struct is not protected — callers must not retain across Close).
+	released atomic.Bool
 }
 
 func newStream(id uint32, eventBuf int, w streamWriter, recvWindow int32) *Stream {
@@ -315,22 +323,34 @@ func (s *Stream) Recv(ctx context.Context) (StreamEvent, error) {
 }
 
 // Close cancels the stream. If neither side has reached END_STREAM, sends
-// RST_STREAM(CANCEL). Idempotent.
+// RST_STREAM(CANCEL). Idempotent for the common case: a repeat Close() is a
+// no-op while the recycled struct still sits in the pool. Callers must not
+// retain a *Stream past Close — allocStream re-arms the guard for the next
+// lifetime, so a Close on a stale reference to a re-allocated struct is not
+// protected (no in-tree caller does this).
 func (s *Stream) Close() error {
+	// released is the idempotency guard. It survives recycleStream (which
+	// resets closed/w/... for pool reuse), so a repeat Close while the struct
+	// is still pooled returns here instead of dereferencing the nil-ed w.
+	if !s.released.CompareAndSwap(false, true) {
+		return nil
+	}
 	s.mu.Lock()
-	already := s.closed
+	already := s.closed // e.g. push() set this on event-channel overflow
 	bothEnded := s.localEnded && s.remoteEnded
 	s.closed = true
+	w := s.w
 	s.mu.Unlock()
 	if already {
+		// Already closed (RST already sent by push overflow); don't double-RST.
 		return nil
 	}
 	if bothEnded {
 		// Both sides ended normally; recycle without sending RST.
-		if c, ok := s.w.(*Conn); ok {
+		if c, ok := w.(*Conn); ok {
 			recycleStream(&c.streamPool, s)
 		}
 		return nil
 	}
-	return s.w.writeRSTStream(s, frame.ErrCodeCancel)
+	return w.writeRSTStream(s, frame.ErrCodeCancel)
 }

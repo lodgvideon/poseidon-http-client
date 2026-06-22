@@ -261,8 +261,8 @@ func (mp *managedPool) runTicker(ctx context.Context) {
 		case <-tick.C:
 		}
 		next, err := mp.resolver.Resolve(ctx)
-		if err != nil && len(next) == 0 {
-			continue // soft fail
+		if err != nil && !errors.Is(err, ErrNoAddresses) {
+			continue // transient soft fail — keep the current set
 		}
 		mp.applySet(next)
 	}

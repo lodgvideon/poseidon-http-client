@@ -82,13 +82,45 @@ type connHandler struct {
 	pendingBuf       []byte
 	pendingEndStream bool
 	pendingTrailer   bool // true if buffered HEADERS is a trailers frame
+
+	// maxHeaderBytes caps the total bytes accumulated across a
+	// HEADERS+CONTINUATION sequence before END_HEADERS arrives. Without it a
+	// peer can stream unbounded CONTINUATION frames (none setting END_HEADERS)
+	// and exhaust memory (RFC 7540 §6.10 / §10.5.1, CVE-2024-27316). Raised
+	// to the advertised SETTINGS_MAX_HEADER_LIST_SIZE when that is larger.
+	maxHeaderBytes int
 }
+
+// defaultMaxHeaderBytes is the fallback ceiling on accumulated (compressed)
+// header-block bytes when no larger SETTINGS_MAX_HEADER_LIST_SIZE is
+// advertised. Generous for legitimate headers; bounds CONTINUATION floods.
+const defaultMaxHeaderBytes = 8 << 20 // 8 MiB
 
 func newConnHandler(streams streamLookup, dec *hpack.Decoder) *connHandler {
 	return &connHandler{
-		streams: streams,
-		dec:     dec,
-		scratch: make([]hpack.HeaderField, 0, 16),
+		streams:        streams,
+		dec:            dec,
+		scratch:        make([]hpack.HeaderField, 0, 16),
+		maxHeaderBytes: defaultMaxHeaderBytes,
+	}
+}
+
+// maxInt is the platform int ceiling (32- or 64-bit).
+const maxInt = int(^uint(0) >> 1)
+
+// raiseMaxHeaderBytes lifts the header-block accumulation cap to honor a larger
+// advertised SETTINGS_MAX_HEADER_LIST_SIZE, so we never reject a block we told
+// the peer we would accept. The default ceiling still bounds CONTINUATION
+// floods otherwise. int64 + clamp avoid a 32-bit wrap of the uint32 setting;
+// using the uncompressed limit as a compressed-bytes ceiling is conservative
+// (compressed <= uncompressed).
+func (h *connHandler) raiseMaxHeaderBytes(advertised uint32) {
+	adv := int64(advertised)
+	if adv > int64(maxInt) {
+		adv = int64(maxInt)
+	}
+	if int(adv) > h.maxHeaderBytes {
+		h.maxHeaderBytes = int(adv)
 	}
 }
 
@@ -129,7 +161,9 @@ func (h *connHandler) OnHeaders(fh frame.FrameHeader, hb frame.HeaderBlock, _ *f
 	isTrailer := s.headersReceived
 
 	if !endHeaders {
-		// Buffer until CONTINUATION completes the block.
+		// Buffer until CONTINUATION completes the block. A single HEADERS frame
+		// is already bounded by MAX_FRAME_SIZE; the unbounded vector is the
+		// CONTINUATION stream, capped in OnContinuation.
 		h.pendingStreamID = fh.StreamID
 		h.pendingBuf = append(h.pendingBuf[:0], hb...)
 		h.pendingEndStream = end
@@ -150,6 +184,10 @@ func (h *connHandler) OnContinuation(fh frame.FrameHeader, hb frame.HeaderBlock)
 		return nil
 	}
 	h.pendingBuf = append(h.pendingBuf, hb...)
+	if len(h.pendingBuf) > h.maxHeaderBytes {
+		// CONTINUATION-flood guard (RFC 7540 §6.10 / §10.5.1, CVE-2024-27316).
+		return &ConnError{Code: frame.ErrCodeEnhanceYourCalm, Reason: "header block exceeds accumulation limit (CONTINUATION flood)"}
+	}
 	if fh.Flags&frame.FlagContinuationEndHeaders == 0 {
 		return nil
 	}

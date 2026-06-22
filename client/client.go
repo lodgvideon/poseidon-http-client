@@ -489,8 +489,12 @@ func (c *Client) do(ctx context.Context, req *Request, resp *Response) error {
 			if enc != EncodingIdentity {
 				dr, derr := newDecompressingReader(enc, resp.BodyReader)
 				if derr != nil {
-					_ = s.Close()
-					release()
+					// Release via the responseBodyReader: its closeOnce makes
+					// the single stream.Close()+release() idempotent against the
+					// caller's later resp.Reset(). Clearing BodyReader drops the
+					// now-dead reference.
+					_ = resp.BodyReader.Close()
+					resp.BodyReader = nil
 					return derr
 				}
 				resp.BodyReader = dr
