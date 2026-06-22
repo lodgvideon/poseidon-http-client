@@ -2,6 +2,7 @@ package client
 
 import (
 	"context"
+	"errors"
 	"net"
 	"strconv"
 	"sync"
@@ -168,9 +169,15 @@ func (r *dnsResolver) Resolve(ctx context.Context) ([]Address, error) {
 		addrs = append(addrs, Address{Host: ip.IP.String(), Port: r.port})
 	}
 	if len(addrs) == 0 {
-		if r.cached != nil {
-			return r.cached, ErrNoAddresses
-		}
+		// A SUCCESSFUL lookup returning zero addresses is authoritative:
+		// every endpoint was deregistered (or all were filtered out). Clear
+		// the cache and advance cachedAt so the now-empty result propagates
+		// and dead backends are drained — unlike a lookup ERROR (handled
+		// above), which keeps the stale set as a soft warning. Serving the
+		// stale set here would route to dead backends forever with no
+		// recovery path.
+		r.cached = nil
+		r.cachedAt = r.now()
 		return nil, ErrNoAddresses
 	}
 	r.cached = addrs
@@ -201,8 +208,8 @@ func (r *dnsResolver) Watch(ctx context.Context) (<-chan []Address, error) {
 			case <-t.C:
 			}
 			next, err := r.Resolve(ctx)
-			if err != nil && len(next) == 0 {
-				continue // soft fail, retain prev
+			if err != nil && !errors.Is(err, ErrNoAddresses) {
+				continue // transient soft fail — retain prev set
 			}
 			if addrSetEqual(prev, next) {
 				continue
