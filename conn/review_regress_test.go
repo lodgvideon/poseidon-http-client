@@ -3,7 +3,9 @@ package conn
 import (
 	"context"
 	"errors"
+	"io"
 	"net"
+	"sync"
 	"testing"
 	"time"
 
@@ -174,3 +176,97 @@ func TestReaderLoop_StreamErrorResetsOnlyThatStream(t *testing.T) {
 		t.Fatalf("B.Recv = (%+v, %v), want DeadlineExceeded (B must be unaffected)", ev, err)
 	}
 }
+
+// TestApplyPeerSettings_InitWindowDelta_NoDoubleApply is a regression test for
+// a flow-control over-credit race: applyPeerSettings (merge + retroactive
+// delta) and writeHeadersWithPriority (insert + seed) coordinated the per-stream
+// send window across separate critical sections, so a freshly opened stream
+// could be BOTH seeded at the new INITIAL_WINDOW_SIZE AND credited the delta,
+// yielding newInitial+delta instead of newInitial. Now both run mutually
+// exclusively under psMu, so the window is always exactly newInitial.
+func TestApplyPeerSettings_InitWindowDelta_NoDoubleApply(t *testing.T) {
+	const (
+		oldInitial = 65535
+		newInitial = 131070
+		doubled    = newInitial + (newInitial - oldInitial)
+		iters      = 2000
+	)
+	hdr := []hpack.HeaderField{
+		{Name: []byte(":method"), Value: []byte("GET")},
+		{Name: []byte(":scheme"), Value: []byte("http")},
+		{Name: []byte(":authority"), Value: []byte("x")},
+		{Name: []byte(":path"), Value: []byte("/")},
+	}
+
+	for it := 0; it < iters; it++ {
+		rw := dblApplyRW{done: make(chan struct{})}
+		opts := ConnOptions{}.defaulted()
+		c := &Conn{
+			transport:          dblApplyConn{rw: rw},
+			fr:                 frame.NewFramer(rw, rw),
+			enc:                hpack.NewEncoder(),
+			dec:                hpack.NewDecoder(),
+			opts:               opts,
+			nextID:             1,
+			streams:            map[uint32]*Stream{},
+			readerDone:         make(chan struct{}),
+			drainDone:          make(chan struct{}),
+			pingWaiters:        make(map[[8]byte]chan struct{}),
+			connRecvWindow:     int32(connInitialRecvWindow),
+			peerConnSendWindow: int32(connInitialRecvWindow),
+		}
+		c.fcOutCond = sync.NewCond(&c.fcOutMu)
+		setPeerSetting(&c.peerSettings, frame.SettingInitialWindowSize, oldInitial)
+
+		s := newStream(0, c.opts.StreamEventBuffer, c, int32(connInitialRecvWindow))
+
+		var wg sync.WaitGroup
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			var sp frame.SettingsParams
+			setPeerSetting(&sp, frame.SettingInitialWindowSize, newInitial)
+			_ = c.applyPeerSettings(sp)
+		}()
+		go func() {
+			defer wg.Done()
+			_ = c.writeHeadersWithPriority(context.Background(), s, hdr, true, nil)
+		}()
+		wg.Wait()
+
+		s.mu.Lock()
+		got := s.sendWindow
+		s.mu.Unlock()
+		close(rw.done)
+
+		switch got {
+		case newInitial:
+			// correct
+		case doubled:
+			t.Fatalf("iter %d: double-apply — sendWindow=%d, want %d", it, got, newInitial)
+		default:
+			t.Fatalf("iter %d: sendWindow=%d, want %d", it, got, newInitial)
+		}
+	}
+}
+
+// dblApplyRW discards writes and blocks reads until done is closed.
+type dblApplyRW struct{ done chan struct{} }
+
+func (b dblApplyRW) Write(p []byte) (int, error) { return len(p), nil }
+func (b dblApplyRW) Read(p []byte) (int, error) {
+	<-b.done
+	return 0, io.EOF
+}
+
+// dblApplyConn adapts an io.ReadWriter to net.Conn for Conn construction.
+type dblApplyConn struct{ rw io.ReadWriter }
+
+func (n dblApplyConn) Read(p []byte) (int, error)       { return n.rw.Read(p) }
+func (n dblApplyConn) Write(p []byte) (int, error)      { return n.rw.Write(p) }
+func (n dblApplyConn) Close() error                     { return nil }
+func (n dblApplyConn) LocalAddr() net.Addr              { return nil }
+func (n dblApplyConn) RemoteAddr() net.Addr             { return nil }
+func (n dblApplyConn) SetDeadline(time.Time) error      { return nil }
+func (n dblApplyConn) SetReadDeadline(time.Time) error  { return nil }
+func (n dblApplyConn) SetWriteDeadline(time.Time) error { return nil }

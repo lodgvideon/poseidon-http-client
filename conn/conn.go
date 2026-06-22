@@ -405,20 +405,25 @@ func (c *Conn) writeHeadersWithPriority(_ context.Context, s *Stream, fields []h
 	c.wmu.Lock()
 	defer c.wmu.Unlock()
 	if s.id == 0 {
+		// Seed the per-stream outbound flow-control window from the peer's
+		// most recently observed SETTINGS_INITIAL_WINDOW_SIZE and register
+		// the stream atomically under psMu (lock order psMu->smu->s.mu, per
+		// NewStream's documented convention). Holding psMu across the seed +
+		// insert makes it mutually exclusive with applyPeerSettings' merge +
+		// retroactive delta, so this stream is never BOTH seeded at the new
+		// value AND credited the delta — the previous split-lock window
+		// over-credited the send window (RFC 7540 §6.9.2).
+		c.psMu.RLock()
+		initial := settingValue(c.peerSettings, frame.SettingInitialWindowSize, connInitialRecvWindow)
 		c.smu.Lock()
 		s.id = c.nextID
 		c.nextID += 2
 		c.streams[s.id] = s
-		c.smu.Unlock()
-		// Seed the per-stream outbound flow-control window from the
-		// peer's most recently observed SETTINGS_INITIAL_WINDOW_SIZE
-		// (RFC 7540 §6.9.2; default 65535).
-		c.psMu.RLock()
-		initial := settingValue(c.peerSettings, frame.SettingInitialWindowSize, connInitialRecvWindow)
-		c.psMu.RUnlock()
 		s.mu.Lock()
 		s.sendWindow = int32(initial)
 		s.mu.Unlock()
+		c.smu.Unlock()
+		c.psMu.RUnlock()
 	}
 	buf := encBufPool.Get().(*[]byte)
 	*buf = (*buf)[:0]
@@ -848,47 +853,52 @@ func (c *Conn) applyPeerSettings(s frame.SettingsParams) error {
 		}
 	}
 
+	// HPACK encoder dynamic-table resize. Reads the incoming frame only, so
+	// it needs no connection lock; done before psMu to keep that section tight.
+	for i := 0; i < s.N; i++ {
+		if s.Pairs[i].ID == frame.SettingHeaderTableSize {
+			c.enc.SetMaxDynamicTableSize(s.Pairs[i].Value)
+		}
+	}
+
+	// Merge the settings AND apply the retroactive INITIAL_WINDOW_SIZE delta
+	// to existing streams atomically under psMu (lock order psMu->smu->s.mu).
+	// Holding psMu across the delta section makes it mutually exclusive with
+	// writeHeadersWithPriority's seed: a freshly opened stream is EITHER
+	// seeded at the old value and then credited the delta, OR seeded at the
+	// new value and skipped — never both (RFC 7540 §6.9.2).
 	c.psMu.Lock()
 	oldInitial := settingValue(c.peerSettings, frame.SettingInitialWindowSize, connInitialRecvWindow)
 	for i := 0; i < s.N; i++ {
-		p := s.Pairs[i]
-		setPeerSetting(&c.peerSettings, p.ID, p.Value)
+		setPeerSetting(&c.peerSettings, s.Pairs[i].ID, s.Pairs[i].Value)
 	}
 	newInitial := settingValue(c.peerSettings, frame.SettingInitialWindowSize, connInitialRecvWindow)
-	c.psMu.Unlock()
 
-	for i := 0; i < s.N; i++ {
-		p := s.Pairs[i]
-		switch p.ID {
-		case frame.SettingHeaderTableSize:
-			c.enc.SetMaxDynamicTableSize(p.Value)
-		case frame.SettingInitialWindowSize:
-			// retroactively re-apply to all streams below
-		}
-	}
-
+	var overflow bool
 	if newInitial != oldInitial {
 		delta := int64(newInitial) - int64(oldInitial)
 		c.smu.Lock()
-		victims := make([]*Stream, 0, len(c.streams))
 		for _, st := range c.streams {
-			victims = append(victims, st)
-		}
-		c.smu.Unlock()
-
-		for _, st := range victims {
 			st.mu.Lock()
 			newWin := int64(st.sendWindow) + delta
 			if newWin > maxWindow {
 				st.mu.Unlock()
-				return &ConnError{Code: frame.ErrCodeFlowControlError, Reason: "SETTINGS_INITIAL_WINDOW_SIZE delta overflowed a stream send window"}
+				overflow = true
+				break
 			}
 			st.sendWindow = int32(newWin)
 			st.mu.Unlock()
 		}
+		c.smu.Unlock()
+	}
+	c.psMu.Unlock()
 
-		// Wake any writers blocked on send credit — the delta may
-		// have just unblocked them.
+	if overflow {
+		return &ConnError{Code: frame.ErrCodeFlowControlError, Reason: "SETTINGS_INITIAL_WINDOW_SIZE delta overflowed a stream send window"}
+	}
+	if newInitial != oldInitial {
+		// Wake any writers blocked on send credit — the delta may have just
+		// unblocked them.
 		c.fcOutMu.Lock()
 		c.fcOutCond.Broadcast()
 		c.fcOutMu.Unlock()
