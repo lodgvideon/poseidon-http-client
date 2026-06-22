@@ -1188,14 +1188,7 @@ func (c *Conn) bumpFramesReceived() { c.atomicFramesReceived.Add(1) }
 func (c *Conn) readerLoop() {
 	defer close(c.readerDone)
 	h := newConnHandler(c, c.dec)
-	// Honor a larger advertised MAX_HEADER_LIST_SIZE so we never reject a block
-	// we promised to accept (the default ceiling still bounds CONTINUATION
-	// floods otherwise). int64 avoids a 32-bit wrap of the uint32 setting; using
-	// the uncompressed limit as a compressed-bytes ceiling is conservative
-	// (compressed <= uncompressed).
-	if adv := int64(c.opts.Settings.MaxHeaderListSize); adv > int64(h.maxHeaderBytes) {
-		h.maxHeaderBytes = int(adv)
-	}
+	h.raiseMaxHeaderBytes(c.opts.Settings.MaxHeaderListSize)
 	for {
 		_, err := c.fr.ReadFrame(context.Background(), h)
 		if err != nil {
@@ -1209,8 +1202,9 @@ func (c *Conn) readerLoop() {
 				if s := c.lookupStream(se.StreamID); s != nil {
 					s.push(StreamEvent{Type: EventReset, RSTCode: se.Code, EndStream: true})
 				}
+				// rstStream already releases the inflight slot and evicts the
+				// stream (via writeRSTStream) — no extra release needed here.
 				_ = c.rstStream(se.StreamID, se.Code)
-				c.releaseInflight(se.StreamID)
 				continue
 			}
 			c.emitConnGoAwayIfTyped(err)

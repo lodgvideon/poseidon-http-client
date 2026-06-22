@@ -105,6 +105,25 @@ func newConnHandler(streams streamLookup, dec *hpack.Decoder) *connHandler {
 	}
 }
 
+// maxInt is the platform int ceiling (32- or 64-bit).
+const maxInt = int(^uint(0) >> 1)
+
+// raiseMaxHeaderBytes lifts the header-block accumulation cap to honor a larger
+// advertised SETTINGS_MAX_HEADER_LIST_SIZE, so we never reject a block we told
+// the peer we would accept. The default ceiling still bounds CONTINUATION
+// floods otherwise. int64 + clamp avoid a 32-bit wrap of the uint32 setting;
+// using the uncompressed limit as a compressed-bytes ceiling is conservative
+// (compressed <= uncompressed).
+func (h *connHandler) raiseMaxHeaderBytes(advertised uint32) {
+	adv := int64(advertised)
+	if adv > int64(maxInt) {
+		adv = int64(maxInt)
+	}
+	if int(adv) > h.maxHeaderBytes {
+		h.maxHeaderBytes = int(adv)
+	}
+}
+
 // OnData implements frame.Handler. It debits flow-control windows
 // (RFC 7540 §6.9.1), surfaces an EventData event to the stream, and
 // emits batched WINDOW_UPDATE refunds via the owning Conn. Returns a
