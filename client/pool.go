@@ -71,10 +71,10 @@ type PoolOptions struct {
 
 // Stats is a snapshot of pool state.
 type Stats struct {
-	ActiveConns    int
+	ActiveConns     int
 	InFlightStreams int
-	Waiters        int
-	InFlightDials  int
+	Waiters         int
+	InFlightDials   int
 	// Populated by managedPool.Stats(); zero for single-address pools.
 	Addresses        int // number of addresses in the current resolved set
 	DrainingSubpools int // sub-pools currently draining (removed from resolver set)
@@ -684,7 +684,6 @@ func (p *Pool) release(mc *managedConn, reqErr error) {
 	}
 }
 
-
 // inDialBackoff reports whether a previous dial error is still within
 // the configured DialBackoff window. Returns false if no previous error
 // or if window <= 0.
@@ -740,8 +739,8 @@ func (p *Pool) warmup(n int) {
 		ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
 		mc, err := p.acquire(ctx)
 		cancel()
-		if err == nil && mc != nil {
-			p.release(mc, nil)
+		if err == nil {
+			p.release(mc, nil) // release already no-ops on a nil mc
 		}
 	}
 }

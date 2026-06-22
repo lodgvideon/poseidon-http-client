@@ -141,13 +141,19 @@ func (d *rgTrackingDialer) Dial(ctx context.Context, addr string) (net.Conn, err
 // Pool.Close used to be orphaned in the buffered dialDoneCh (never Closed),
 // leaking the conn, its reader goroutine, and its fd. handleClose now drains
 // every in-flight dial, so every dialed conn is eventually Closed.
+//
+// The leak surfaces only on a probabilistic interleaving (dial result buffered,
+// actor selects closeCh before draining it), so this is a stress test — the
+// high iteration count drives the per-run false-negative toward zero. The fix's
+// correctness does not depend on the race: handleClose drains exactly the
+// captured in-flight-dial count regardless of timing.
 func TestPoolClose_NoDialDoneLeak(t *testing.T) {
 	addr := h2TestServer(t, func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(200) })
 	inner := &conn.TLSDialer{Config: &tls.Config{InsecureSkipVerify: true}} //nolint:gosec
 
 	var dialedCt, closedCt atomic.Int32
 
-	for i := 0; i < 100; i++ {
+	for i := 0; i < 1000; i++ {
 		td := &rgTrackingDialer{inner: inner, dialedCt: &dialedCt, closedCt: &closedCt}
 		p := newPool(addr, conn.ConnOptions{Dialer: td}, PoolOptions{
 			MaxConnsPerHost:   1,
@@ -216,11 +222,12 @@ func TestStreamBody_DecompressFail_NoDoubleRelease(t *testing.T) {
 	}
 	resp.Reset()
 
-	// Exactly one net release. Poll a full settle window asserting the active
-	// count NEVER goes negative (the pre-fix double-release drives it to -1),
-	// then require it to end at exactly 0. A transient 0 is not accepted as
-	// proof — on the buggy path the actor can momentarily read 0 between the
-	// two releases.
+	// Exactly one net release. Poll a settle window asserting the active count
+	// NEVER goes negative (a double-release drives it to -1), then require it to
+	// end at exactly 0 — a transient 0 is not accepted as proof. Note: against
+	// the fully-unfixed code resp.Reset() above instead nil-deref-panics (the
+	// stream-Close-after-recycle bug, fixed separately); this poll guards the
+	// residual pool double-release once that panic is gone.
 	settle := time.Now().Add(1 * time.Second)
 	for time.Now().Before(settle) {
 		if n := c.PoolStats().InFlightStreams; n < 0 {

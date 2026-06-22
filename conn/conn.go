@@ -855,32 +855,28 @@ func (c *Conn) applyInitialPeerSettings(peer frame.SettingsParams) {
 func (c *Conn) applyPeerSettings(s frame.SettingsParams) error {
 	const maxWindow = int64(1<<31 - 1)
 
-	// Pre-merge pass over the incoming pairs (lock-free; reads the frame only):
-	// reject an out-of-range INITIAL_WINDOW_SIZE as a FLOW_CONTROL_ERROR
-	// (RFC 7540 §6.5.2) before it can be stored and later seed a negative
-	// int32 send window, and apply the HPACK encoder dynamic-table resize.
+	// Merge the settings AND apply the retroactive INITIAL_WINDOW_SIZE delta to
+	// existing streams atomically under psMu (lock order psMu->smu->s.mu),
+	// making the seed/delta mutually exclusive with writeHeadersWithPriority so
+	// a freshly opened stream is seeded EITHER old+delta OR new-and-skipped,
+	// never both (RFC 7540 §6.9.2). In the same pass: reject an out-of-range
+	// INITIAL_WINDOW_SIZE as FLOW_CONTROL_ERROR (§6.5.2) before it is stored (it
+	// would later seed a negative int32 send window), and apply the HPACK
+	// encoder dynamic-table resize.
+	c.psMu.Lock()
+	oldInitial := settingValue(c.peerSettings, frame.SettingInitialWindowSize, connInitialRecvWindow)
 	for i := 0; i < s.N; i++ {
 		p := s.Pairs[i]
 		switch p.ID {
 		case frame.SettingInitialWindowSize:
 			if int64(p.Value) > maxWindow {
+				c.psMu.Unlock()
 				return &ConnError{Code: frame.ErrCodeFlowControlError, Reason: "SETTINGS_INITIAL_WINDOW_SIZE exceeds 2^31-1"}
 			}
 		case frame.SettingHeaderTableSize:
 			c.enc.SetMaxDynamicTableSize(p.Value)
 		}
-	}
-
-	// Merge the settings AND apply the retroactive INITIAL_WINDOW_SIZE delta
-	// to existing streams atomically under psMu (lock order psMu->smu->s.mu).
-	// Holding psMu across the delta section makes it mutually exclusive with
-	// writeHeadersWithPriority's seed: a freshly opened stream is EITHER
-	// seeded at the old value and then credited the delta, OR seeded at the
-	// new value and skipped — never both (RFC 7540 §6.9.2).
-	c.psMu.Lock()
-	oldInitial := settingValue(c.peerSettings, frame.SettingInitialWindowSize, connInitialRecvWindow)
-	for i := 0; i < s.N; i++ {
-		setPeerSetting(&c.peerSettings, s.Pairs[i].ID, s.Pairs[i].Value)
+		setPeerSetting(&c.peerSettings, p.ID, p.Value)
 	}
 	newInitial := settingValue(c.peerSettings, frame.SettingInitialWindowSize, connInitialRecvWindow)
 
@@ -1199,12 +1195,14 @@ func (c *Conn) readerLoop() {
 			// *ConnError and I/O errors tear the whole connection down.
 			var se *StreamError
 			if errors.As(err, &se) {
-				if s := c.lookupStream(se.StreamID); s != nil {
-					s.push(StreamEvent{Type: EventReset, RSTCode: se.Code, EndStream: true})
+				// push() delivers EventReset to the caller; on events-channel
+				// overflow it already fires a best-effort RST_STREAM and releases
+				// the slot (returns false), so send our own RST only when push
+				// enqueued cleanly, avoiding a duplicate frame. rstStream
+				// releases the inflight slot via writeRSTStream.
+				if s := c.lookupStream(se.StreamID); s == nil || s.push(StreamEvent{Type: EventReset, RSTCode: se.Code, EndStream: true}) {
+					_ = c.rstStream(se.StreamID, se.Code)
 				}
-				// rstStream already releases the inflight slot and evicts the
-				// stream (via writeRSTStream) — no extra release needed here.
-				_ = c.rstStream(se.StreamID, se.Code)
 				continue
 			}
 			c.emitConnGoAwayIfTyped(err)
