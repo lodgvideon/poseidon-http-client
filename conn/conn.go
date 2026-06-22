@@ -841,23 +841,19 @@ func (c *Conn) applyInitialPeerSettings(peer frame.SettingsParams) {
 func (c *Conn) applyPeerSettings(s frame.SettingsParams) error {
 	const maxWindow = int64(1<<31 - 1)
 
-	// RFC 7540 §6.5.2: an INITIAL_WINDOW_SIZE above 2^31-1 MUST be treated as
-	// a connection error of type FLOW_CONTROL_ERROR. Validate the absolute
-	// value BEFORE merging — the retroactive delta check below only runs for
-	// already-open streams, so an oversized value delivered before any stream
-	// exists would otherwise be stored verbatim and later seed a negative
-	// int32 send window, wedging every subsequent SendData forever.
+	// Pre-merge pass over the incoming pairs (lock-free; reads the frame only):
+	// reject an out-of-range INITIAL_WINDOW_SIZE as a FLOW_CONTROL_ERROR
+	// (RFC 7540 §6.5.2) before it can be stored and later seed a negative
+	// int32 send window, and apply the HPACK encoder dynamic-table resize.
 	for i := 0; i < s.N; i++ {
-		if p := s.Pairs[i]; p.ID == frame.SettingInitialWindowSize && int64(p.Value) > maxWindow {
-			return &ConnError{Code: frame.ErrCodeFlowControlError, Reason: "SETTINGS_INITIAL_WINDOW_SIZE exceeds 2^31-1"}
-		}
-	}
-
-	// HPACK encoder dynamic-table resize. Reads the incoming frame only, so
-	// it needs no connection lock; done before psMu to keep that section tight.
-	for i := 0; i < s.N; i++ {
-		if s.Pairs[i].ID == frame.SettingHeaderTableSize {
-			c.enc.SetMaxDynamicTableSize(s.Pairs[i].Value)
+		p := s.Pairs[i]
+		switch p.ID {
+		case frame.SettingInitialWindowSize:
+			if int64(p.Value) > maxWindow {
+				return &ConnError{Code: frame.ErrCodeFlowControlError, Reason: "SETTINGS_INITIAL_WINDOW_SIZE exceeds 2^31-1"}
+			}
+		case frame.SettingHeaderTableSize:
+			c.enc.SetMaxDynamicTableSize(p.Value)
 		}
 	}
 
@@ -1181,8 +1177,12 @@ func (c *Conn) readerLoop() {
 	// Honor a larger advertised MAX_HEADER_LIST_SIZE so we never reject a
 	// header block we told the peer we would accept; the default ceiling
 	// still bounds CONTINUATION floods when none (or a smaller one) is set.
-	if adv := int(c.opts.Settings.MaxHeaderListSize); adv > h.maxHeaderBytes {
-		h.maxHeaderBytes = adv
+	// int64 to avoid a 32-bit wrap of the uint32 setting. The advertised limit
+	// is the uncompressed header-list size; using it as the compressed-bytes
+	// ceiling is intentionally conservative (compressed <= uncompressed), so we
+	// never reject a block we told the peer we would accept.
+	if adv := int64(c.opts.Settings.MaxHeaderListSize); adv > int64(h.maxHeaderBytes) {
+		h.maxHeaderBytes = int(adv)
 	}
 	for {
 		_, err := c.fr.ReadFrame(context.Background(), h)

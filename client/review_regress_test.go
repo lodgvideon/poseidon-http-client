@@ -7,6 +7,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -78,10 +79,22 @@ func TestWarmup_NoActiveLeak(t *testing.T) {
 
 	p.warmup(2)
 
-	deadline := time.Now().Add(2 * time.Second)
+	// First require warmup to actually establish conns — otherwise a run where
+	// every 50ms acquire timed out would pass trivially without exercising the
+	// release path (it would also pass on the buggy pre-fix code).
+	deadline := time.Now().Add(3 * time.Second)
+	for p.Stats().ActiveConns == 0 && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if p.Stats().ActiveConns == 0 {
+		t.Fatal("warmup established no conns within 3s — cannot exercise the leak path")
+	}
+
+	// With conns established and no outstanding request, the active-stream
+	// count must settle to 0; the leak left it permanently > 0.
 	for time.Now().Before(deadline) {
 		if p.Stats().InFlightStreams == 0 {
-			return // settled — fix works
+			return
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
@@ -148,8 +161,8 @@ func TestPoolClose_NoDialDoneLeak(t *testing.T) {
 		_ = p.Close()
 	}
 
-	// Pool.Close drains in-flight dials synchronously, so every dialed conn is
-	// Closed by the time Close returns. Allow a brief settle for any straggler.
+	// handleClose drains in-flight dials in a background goroutine, so a dialed
+	// conn may be Closed shortly after Close returns — allow a brief settle.
 	deadline := time.Now().Add(3 * time.Second)
 	for closedCt.Load() < dialedCt.Load() && time.Now().Before(deadline) {
 		time.Sleep(20 * time.Millisecond)
@@ -190,19 +203,26 @@ func TestStreamBody_DecompressFail_NoDoubleRelease(t *testing.T) {
 	if derr == nil {
 		t.Fatalf("Do = nil, want a decompression error")
 	}
+	// Must be the decompression failure, not an unrelated dial/handshake error,
+	// so the test truly exercises the fixed newDecompressingReader error path.
+	if !strings.Contains(derr.Error(), "gzip") {
+		t.Fatalf("Do error = %q, want a gzip decompression failure", derr)
+	}
 	resp.Reset()
 
-	// Exactly one release: active count settles at 0 and never goes negative.
-	deadline := time.Now().Add(3 * time.Second)
-	for time.Now().Before(deadline) {
-		s := c.PoolStats()
-		if s.InFlightStreams < 0 {
-			t.Fatalf("double-release: InFlightStreams went negative (%d)", s.InFlightStreams)
-		}
-		if s.InFlightStreams == 0 {
-			return // balanced — fix works
+	// Exactly one net release. Poll a full settle window asserting the active
+	// count NEVER goes negative (the pre-fix double-release drives it to -1),
+	// then require it to end at exactly 0. A transient 0 is not accepted as
+	// proof — on the buggy path the actor can momentarily read 0 between the
+	// two releases.
+	settle := time.Now().Add(1 * time.Second)
+	for time.Now().Before(settle) {
+		if n := c.PoolStats().InFlightStreams; n < 0 {
+			t.Fatalf("double-release: InFlightStreams went negative (%d)", n)
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
-	t.Fatalf("InFlightStreams never settled to 0: %+v", c.PoolStats())
+	if n := c.PoolStats().InFlightStreams; n != 0 {
+		t.Fatalf("InFlightStreams settled at %d, want 0", n)
+	}
 }

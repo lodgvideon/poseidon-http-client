@@ -123,10 +123,10 @@ type Stream struct {
 
 	// released guards Close() idempotency independently of the operational
 	// `closed` flag. recycleStream resets `closed` (for pool reuse) but must
-	// NOT reset `released`, so a second Close() on a caller-held reference
-	// after recycle is a safe no-op instead of dereferencing the nil-ed w.
-	// allocStream re-arms it when the struct is taken from the pool for a
-	// new stream lifetime.
+	// NOT reset `released`, so a repeat Close() while the struct is still
+	// pooled is a no-op instead of dereferencing the nil-ed w. allocStream
+	// re-arms it for the next lifetime (so a stale reference to a re-allocated
+	// struct is not protected — callers must not retain across Close).
 	released atomic.Bool
 }
 
@@ -323,13 +323,15 @@ func (s *Stream) Recv(ctx context.Context) (StreamEvent, error) {
 }
 
 // Close cancels the stream. If neither side has reached END_STREAM, sends
-// RST_STREAM(CANCEL). Idempotent: a second Close() on the same reference is a
-// safe no-op even after the first Close recycled the stream back to the pool.
+// RST_STREAM(CANCEL). Idempotent for the common case: a repeat Close() is a
+// no-op while the recycled struct still sits in the pool. Callers must not
+// retain a *Stream past Close — allocStream re-arms the guard for the next
+// lifetime, so a Close on a stale reference to a re-allocated struct is not
+// protected (no in-tree caller does this).
 func (s *Stream) Close() error {
 	// released is the idempotency guard. It survives recycleStream (which
-	// resets closed/w/... for pool reuse), so a repeat Close after recycle
-	// returns here instead of falling through to s.w.writeRSTStream with a
-	// nil-ed w (panic) or RST-ing an unrelated reused stream.
+	// resets closed/w/... for pool reuse), so a repeat Close while the struct
+	// is still pooled returns here instead of dereferencing the nil-ed w.
 	if !s.released.CompareAndSwap(false, true) {
 		return nil
 	}

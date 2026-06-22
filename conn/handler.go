@@ -142,14 +142,13 @@ func (h *connHandler) OnHeaders(fh frame.FrameHeader, hb frame.HeaderBlock, _ *f
 	isTrailer := s.headersReceived
 
 	if !endHeaders {
-		// Buffer until CONTINUATION completes the block.
+		// Buffer until CONTINUATION completes the block. A single HEADERS frame
+		// is already bounded by MAX_FRAME_SIZE; the unbounded vector is the
+		// CONTINUATION stream, capped in OnContinuation.
 		h.pendingStreamID = fh.StreamID
 		h.pendingBuf = append(h.pendingBuf[:0], hb...)
 		h.pendingEndStream = end
 		h.pendingTrailer = isTrailer
-		if len(h.pendingBuf) > h.maxHeaderBytes {
-			return &ConnError{Code: frame.ErrCodeEnhanceYourCalm, Reason: "header block exceeds accumulation limit"}
-		}
 		return nil
 	}
 	if !isTrailer {

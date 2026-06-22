@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"net"
+	"runtime"
 	"sync"
 	"testing"
 	"time"
@@ -185,6 +186,13 @@ func TestReaderLoop_StreamErrorResetsOnlyThatStream(t *testing.T) {
 // yielding newInitial+delta instead of newInitial. Now both run mutually
 // exclusively under psMu, so the window is always exactly newInitial.
 func TestApplyPeerSettings_InitWindowDelta_NoDoubleApply(t *testing.T) {
+	// The double-apply interleaving needs real parallelism to be a meaningful
+	// discriminator; force >=2 Ps. Run under -race in CI to also catch the
+	// data race directly.
+	if runtime.GOMAXPROCS(0) < 2 {
+		prev := runtime.GOMAXPROCS(2)
+		defer runtime.GOMAXPROCS(prev)
+	}
 	const (
 		oldInitial = 65535
 		newInitial = 131070
