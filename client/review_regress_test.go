@@ -220,7 +220,16 @@ func TestStreamBody_DecompressFail_NoDoubleRelease(t *testing.T) {
 	if !strings.Contains(derr.Error(), "gzip") {
 		t.Fatalf("Do error = %q, want a gzip decompression failure", derr)
 	}
-	resp.Reset()
+	// Translate a nil-deref panic (the unfixed stream-Close-after-recycle bug)
+	// into a clean failure so it cannot abort the whole package test binary.
+	func() {
+		defer func() {
+			if r := recover(); r != nil {
+				t.Fatalf("resp.Reset() panicked (stream Close-after-recycle): %v", r)
+			}
+		}()
+		resp.Reset()
+	}()
 
 	// Exactly one net release. Poll a settle window asserting the active count
 	// NEVER goes negative (a double-release drives it to -1), then require it to

@@ -178,7 +178,11 @@ func newPool(addr string, connOpts conn.ConnOptions, opts PoolOptions, hooksRef 
 	return p
 }
 
-// Close stops the actor and closes all conns. Idempotent.
+// Close stops the actor and closes all pooled conns. Idempotent. Returns once
+// the actor has exited; a dial still in flight at Close is drained and its conn
+// closed by a short-lived background goroutine, so that conn (and any
+// OnConnClose hook for it) may complete shortly after Close returns. This keeps
+// Close prompt even against a hung dial, whose ctx is cancelled on close.
 func (p *Pool) Close() error {
 	p.closeOnce.Do(func() { close(p.closeCh) })
 	<-p.closedCh
@@ -681,6 +685,12 @@ func (p *Pool) release(mc *managedConn, reqErr error) {
 	select {
 	case p.releaseCh <- releaseMsg{mc: mc, err: reqErr}:
 	case <-p.closedCh:
+		// Pool already closed: the actor is gone and won't process this
+		// release, so close the conn directly rather than dropping it (a leak).
+		// conn.Close is idempotent if handleClose already closed it.
+		if mc.c != nil {
+			_ = mc.c.Close()
+		}
 	}
 }
 

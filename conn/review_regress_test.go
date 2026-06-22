@@ -107,19 +107,29 @@ func TestOnContinuation_FloodCapped(t *testing.T) {
 func TestReaderLoop_StreamErrorResetsOnlyThatStream(t *testing.T) {
 	cli, srv := net.Pipe()
 
-	go pipeServer(t, srv, func(srvFr *frame.Framer) {
-		ctx := context.Background()
-		// Drain the two client HEADERS frames (streams 1 and 3).
-		if _, err := srvFr.ReadFrame(ctx, &nilHandler{}); err != nil {
-			return
-		}
-		if _, err := srvFr.ReadFrame(ctx, &nilHandler{}); err != nil {
-			return
-		}
-		// 50-byte DATA on stream 1 overruns its 10-byte recv window -> *StreamError.
-		_ = srvFr.WriteData(1, false, make([]byte, 50))
-		time.Sleep(500 * time.Millisecond)
-	})
+	srvDone := make(chan struct{})
+	go func() {
+		defer close(srvDone)
+		pipeServer(t, srv, func(srvFr *frame.Framer) {
+			ctx := context.Background()
+			// Drain the two client HEADERS frames (streams 1 and 3).
+			if _, err := srvFr.ReadFrame(ctx, &nilHandler{}); err != nil {
+				return
+			}
+			if _, err := srvFr.ReadFrame(ctx, &nilHandler{}); err != nil {
+				return
+			}
+			// 50-byte DATA on stream 1 overruns its 10-byte recv window -> *StreamError.
+			_ = srvFr.WriteData(1, false, make([]byte, 50))
+			// Stay alive until the client closes the pipe, so this goroutine
+			// exits deterministically instead of on a fixed timer.
+			for {
+				if _, err := srvFr.ReadFrame(ctx, &nilHandler{}); err != nil {
+					return
+				}
+			}
+		})
+	}()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -130,6 +140,9 @@ func TestReaderLoop_StreamErrorResetsOnlyThatStream(t *testing.T) {
 		t.Fatalf("NewClientConn: %v", err)
 	}
 	defer c.Close()
+	// defer c.Close() (above) closes the pipe so the server goroutine's read
+	// loop errors and returns; wait for it here so it cannot outlive the test.
+	t.Cleanup(func() { <-srvDone })
 
 	hdrs := []hpack.HeaderField{
 		{Name: []byte(":method"), Value: []byte("GET")},

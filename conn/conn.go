@@ -859,10 +859,13 @@ func (c *Conn) applyPeerSettings(s frame.SettingsParams) error {
 	// existing streams atomically under psMu (lock order psMu->smu->s.mu),
 	// making the seed/delta mutually exclusive with writeHeadersWithPriority so
 	// a freshly opened stream is seeded EITHER old+delta OR new-and-skipped,
-	// never both (RFC 7540 §6.9.2). In the same pass: reject an out-of-range
+	// never both (RFC 7540 §6.9.2). In the same pass reject an out-of-range
 	// INITIAL_WINDOW_SIZE as FLOW_CONTROL_ERROR (§6.5.2) before it is stored (it
-	// would later seed a negative int32 send window), and apply the HPACK
-	// encoder dynamic-table resize.
+	// would later seed a negative int32 send window). The HPACK encoder resize
+	// is captured here but applied below under wmu (not psMu) — the same mutex
+	// EncodeBlock takes — so it cannot race an in-flight header encode.
+	var newTableSize uint32
+	var haveTableSize bool
 	c.psMu.Lock()
 	oldInitial := settingValue(c.peerSettings, frame.SettingInitialWindowSize, connInitialRecvWindow)
 	for i := 0; i < s.N; i++ {
@@ -874,14 +877,15 @@ func (c *Conn) applyPeerSettings(s frame.SettingsParams) error {
 				return &ConnError{Code: frame.ErrCodeFlowControlError, Reason: "SETTINGS_INITIAL_WINDOW_SIZE exceeds 2^31-1"}
 			}
 		case frame.SettingHeaderTableSize:
-			c.enc.SetMaxDynamicTableSize(p.Value)
+			newTableSize, haveTableSize = p.Value, true
 		}
 		setPeerSetting(&c.peerSettings, p.ID, p.Value)
 	}
 	newInitial := settingValue(c.peerSettings, frame.SettingInitialWindowSize, connInitialRecvWindow)
+	changed := newInitial != oldInitial
 
 	var overflow bool
-	if newInitial != oldInitial {
+	if changed {
 		delta := int64(newInitial) - int64(oldInitial)
 		c.smu.Lock()
 		for _, st := range c.streams {
@@ -902,7 +906,16 @@ func (c *Conn) applyPeerSettings(s frame.SettingsParams) error {
 	if overflow {
 		return &ConnError{Code: frame.ErrCodeFlowControlError, Reason: "SETTINGS_INITIAL_WINDOW_SIZE delta overflowed a stream send window"}
 	}
-	if newInitial != oldInitial {
+	// Apply the HPACK encoder dynamic-table resize under wmu (shared with
+	// EncodeBlock) so it cannot race an in-flight header encode and emit a torn
+	// dynamic-table-size update or desync from the peer decoder (which the peer
+	// would reject as a fatal COMPRESSION_ERROR).
+	if haveTableSize {
+		c.wmu.Lock()
+		c.enc.SetMaxDynamicTableSize(newTableSize)
+		c.wmu.Unlock()
+	}
+	if changed {
 		// Wake any writers blocked on send credit — the delta may have just
 		// unblocked them.
 		c.fcOutMu.Lock()
