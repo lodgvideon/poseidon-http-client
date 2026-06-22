@@ -67,6 +67,8 @@ type StreamEvent struct {
 	// conn.GetDataBufPool() once Data is consumed — incrementally on the
 	// streaming paths (Data is valid until the next Recv), immediately on
 	// the buffered path. Return the pointer, not the slice, to avoid escape.
+	// Buffers of events still queued at stream/connection teardown are
+	// dropped to GC rather than pooled (see recycleStream).
 	DataSlab *[]byte
 }
 
@@ -160,12 +162,15 @@ func (s *Stream) signalReset(code frame.ErrCode) {
 // returns s to pool. Only call when the stream is fully done (both
 // sides ended or RST sent/received) and no goroutine holds a reference.
 func recycleStream(pool *sync.Pool, s *Stream) {
-	// Drop any events still buffered on the old channel so slab memory
-	// is released before we discard the reference.
+	// Drop any events still buffered on the old channel. Their pooled DATA
+	// buffers (DataSlab) are abandoned to GC here, matching shutdownStreams
+	// and the header-slab teardown path: sync.Pool tolerates buffers that are
+	// never Put back. These events were never delivered to a consumer, so
+	// dropping them keeps exactly one return site per buffer — the consumer on
+	// the next Recv/Close for delivered frames, or OnData itself for frames
+	// dropped at push() under backpressure — and rules out a double-Put.
 	for len(s.events) > 0 {
-		if ev := <-s.events; ev.DataSlab != nil {
-			dataBufPool.Put(ev.DataSlab) // return the pooled DATA buffer of dropped events
-		}
+		<-s.events
 	}
 	// Recreate the events channel with the same capacity. Any stale
 	// reference held by a goroutine from the previous stream lifetime

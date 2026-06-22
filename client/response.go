@@ -183,6 +183,7 @@ func (sr *StreamResponse) reset() {
 	sr.closeOnce = sync.Once{}
 	sr.drained = false
 	sr.trailers = nil
+	sr.curData = nil // Close() already recycled it; clear defensively, do not Put.
 	// slabs are cleaned up in Close(); reset() is only called for a
 	// struct that has been properly closed already.
 }
