@@ -389,7 +389,10 @@ func (ex *Exchange) readChunkedChunk(buf []byte) (n int, done bool, err error) {
 		if size < 0 {
 			// chunk-size is 1*HEXDIG (unsigned) per RFC 7230 §4.1;
 			// ParseInt accepts a leading '-', so reject it explicitly
-			// before it becomes a negative slice bound below.
+			// before it becomes a negative slice bound below. The chunked
+			// framing is now corrupt and the stream position indeterminate,
+			// so the connection must not be pooled.
+			ex.keepAlive = false
 			return 0, false, fmt.Errorf("http1: invalid chunk size %q: negative", line)
 		}
 		if size == 0 {

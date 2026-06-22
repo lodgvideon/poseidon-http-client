@@ -190,7 +190,10 @@ func (r *dnsResolver) Resolve(ctx context.Context) ([]Address, error) {
 func (r *dnsResolver) Watch(ctx context.Context) (<-chan []Address, error) {
 	out := make(chan []Address, 1)
 	first, err := r.Resolve(ctx)
-	if err != nil && len(first) == 0 {
+	// Only a transient lookup failure aborts the watch; an authoritative-empty
+	// first result (ErrNoAddresses) emits the empty set and keeps Watch mode,
+	// consistent with the re-resolve loop below.
+	if err != nil && !errors.Is(err, ErrNoAddresses) {
 		close(out)
 		return nil, err
 	}

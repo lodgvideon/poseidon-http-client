@@ -750,7 +750,7 @@ func (p *Pool) warmup(n int) {
 		mc, err := p.acquire(ctx)
 		cancel()
 		if err == nil {
-			p.release(mc, nil) // release already no-ops on a nil mc
+			p.release(mc, nil)
 		}
 	}
 }
