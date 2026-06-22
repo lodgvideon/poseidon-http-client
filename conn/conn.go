@@ -650,31 +650,18 @@ func (c *Conn) writeRSTStreamBestEffort(s *Stream, code frame.ErrCode) {
 	c.releaseInflight(s.id)
 }
 
-// onDataReceived debits both the stream-level and connection-level
-// recv windows for a DATA frame whose total payload is `length` bytes
-// (RFC 7540 §6.9.1: includes the data, the pad-length octet, and the
-// padding). Returns an error to abort the connection (peer
-// FLOW_CONTROL_ERROR) or the stream when its window is exceeded. On
-// success it eagerly accumulates a refund counter and, once the
-// per-stream or connection counter crosses recvWindowRefundThreshold,
-// emits a WINDOW_UPDATE for that scope.
+// onDataReceived debits both the connection-level and stream-level recv
+// windows for a DATA frame whose total payload is `length` bytes (RFC 7540
+// §6.9.1: includes the data, the pad-length octet, and the padding). The
+// connection window is accounted FIRST and unconditionally — every received
+// DATA frame counts against it regardless of the per-stream outcome, so a
+// stream reset does not leak the peer's connection send window. Returns a
+// *ConnError to abort the connection (peer overflowed the connection window)
+// or a non-fatal *StreamError to reset just the offending stream. On success
+// it accumulates a refund counter per scope and emits a WINDOW_UPDATE once a
+// counter crosses recvWindowRefundThreshold.
 func (c *Conn) onDataReceived(s *Stream, length uint32) error {
 	debit := int32(length)
-
-	s.mu.Lock()
-	s.recvWindow -= debit
-	if s.recvWindow < 0 {
-		s.mu.Unlock()
-		return &StreamError{StreamID: s.id, Code: frame.ErrCodeFlowControlError}
-	}
-	s.recvRefundPending += length
-	streamRefund := uint32(0)
-	if s.recvRefundPending >= recvWindowRefundThreshold {
-		streamRefund = s.recvRefundPending
-		s.recvRefundPending = 0
-		s.recvWindow += int32(streamRefund)
-	}
-	s.mu.Unlock()
 
 	c.fcMu.Lock()
 	c.connRecvWindow -= debit
@@ -690,6 +677,33 @@ func (c *Conn) onDataReceived(s *Stream, length uint32) error {
 		c.connRecvWindow += int32(connRefund)
 	}
 	c.fcMu.Unlock()
+
+	s.mu.Lock()
+	s.recvWindow -= debit
+	streamOverrun := s.recvWindow < 0
+	streamRefund := uint32(0)
+	if !streamOverrun {
+		s.recvRefundPending += length
+		if s.recvRefundPending >= recvWindowRefundThreshold {
+			streamRefund = s.recvRefundPending
+			s.recvRefundPending = 0
+			s.recvWindow += int32(streamRefund)
+		}
+	}
+	s.mu.Unlock()
+
+	if streamOverrun {
+		// Reset only this stream; the connection — already accounted above —
+		// survives (readerLoop turns this *StreamError into an RST_STREAM).
+		// Still flush any pending connection refund so the peer's connection
+		// window is replenished.
+		if connRefund > 0 {
+			if err := c.writeWindowUpdate(0, connRefund); err != nil {
+				return err
+			}
+		}
+		return &StreamError{StreamID: s.id, Code: frame.ErrCodeFlowControlError}
+	}
 
 	if streamRefund > 0 {
 		if err := c.writeWindowUpdate(s.id, streamRefund); err != nil {
@@ -1174,13 +1188,11 @@ func (c *Conn) bumpFramesReceived() { c.atomicFramesReceived.Add(1) }
 func (c *Conn) readerLoop() {
 	defer close(c.readerDone)
 	h := newConnHandler(c, c.dec)
-	// Honor a larger advertised MAX_HEADER_LIST_SIZE so we never reject a
-	// header block we told the peer we would accept; the default ceiling
-	// still bounds CONTINUATION floods when none (or a smaller one) is set.
-	// int64 to avoid a 32-bit wrap of the uint32 setting. The advertised limit
-	// is the uncompressed header-list size; using it as the compressed-bytes
-	// ceiling is intentionally conservative (compressed <= uncompressed), so we
-	// never reject a block we told the peer we would accept.
+	// Honor a larger advertised MAX_HEADER_LIST_SIZE so we never reject a block
+	// we promised to accept (the default ceiling still bounds CONTINUATION
+	// floods otherwise). int64 avoids a 32-bit wrap of the uint32 setting; using
+	// the uncompressed limit as a compressed-bytes ceiling is conservative
+	// (compressed <= uncompressed).
 	if adv := int64(c.opts.Settings.MaxHeaderListSize); adv > int64(h.maxHeaderBytes) {
 		h.maxHeaderBytes = int(adv)
 	}

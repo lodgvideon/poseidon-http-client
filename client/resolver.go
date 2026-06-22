@@ -169,15 +169,14 @@ func (r *dnsResolver) Resolve(ctx context.Context) ([]Address, error) {
 		addrs = append(addrs, Address{Host: ip.IP.String(), Port: r.port})
 	}
 	if len(addrs) == 0 {
-		// A SUCCESSFUL lookup returning zero addresses is authoritative:
-		// every endpoint was deregistered (or all were filtered out). Clear
-		// the cache and advance cachedAt so the now-empty result propagates
-		// and dead backends are drained — unlike a lookup ERROR (handled
-		// above), which keeps the stale set as a soft warning. Serving the
-		// stale set here would route to dead backends forever with no
-		// recovery path.
+		// A SUCCESSFUL lookup returning zero addresses is authoritative: every
+		// endpoint was deregistered (or all were filtered out). Clear the cache
+		// so the now-empty result propagates and dead backends are drained —
+		// unlike a lookup ERROR (handled above), which keeps the stale set as a
+		// soft warning. Serving the stale set here would route to dead backends
+		// forever with no recovery path. (cachedAt is irrelevant while cached
+		// is nil: the TTL check short-circuits and the next Resolve re-looks-up.)
 		r.cached = nil
-		r.cachedAt = r.now()
 		return nil, ErrNoAddresses
 	}
 	r.cached = addrs

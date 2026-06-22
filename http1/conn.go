@@ -346,8 +346,10 @@ func (ex *Exchange) ReadBodyChunk(buf []byte) (n int, done bool, err error) {
 			// Final body bytes arrived coalesced with io.EOF in a single
 			// Read (bufio passes through the underlying (n, io.EOF) when
 			// the caller buffer is >= bufio's buffer). The body is now
-			// complete, so the EOF is benign: surface the bytes with a nil
-			// error so the caller delivers them instead of discarding n.
+			// complete, so surface the bytes with a nil error instead of
+			// discarding n. The EOF means the peer closed the socket, so the
+			// connection is no longer reusable — do not let it be pooled.
+			ex.keepAlive = false
 			err = nil
 		}
 		return n, done, err

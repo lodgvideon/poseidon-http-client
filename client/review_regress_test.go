@@ -4,6 +4,8 @@ import (
 	"context"
 	"crypto/tls"
 	"errors"
+	"io"
+	"log"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -20,6 +22,7 @@ func h2TestServer(t *testing.T, h http.HandlerFunc) string {
 	t.Helper()
 	srv := httptest.NewUnstartedServer(h)
 	srv.EnableHTTP2 = true
+	srv.Config.ErrorLog = log.New(io.Discard, "", 0) // silence benign mid-handshake abort spam
 	srv.StartTLS()
 	t.Cleanup(srv.Close)
 	return srv.Listener.Addr().String()
@@ -77,21 +80,24 @@ func TestWarmup_NoActiveLeak(t *testing.T) {
 	}, nil, nil)
 	defer p.Close()
 
+	// Seed one live conn and release it, so warmup's acquire hits this existing
+	// conn instantly (returns it, active++) instead of racing a sub-50ms dial.
+	// This deterministically exercises the release path the fix added — a
+	// timed-out acquire would leave nothing to leak and pass on buggy code too.
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	mc, err := p.acquire(ctx)
+	cancel()
+	if err != nil {
+		t.Fatalf("seed acquire: %v", err)
+	}
+	p.release(mc, nil)
+
 	p.warmup(2)
 
-	// First require warmup to actually establish conns — otherwise a run where
-	// every 50ms acquire timed out would pass trivially without exercising the
-	// release path (it would also pass on the buggy pre-fix code).
+	// With a conn already established and no outstanding request, the active
+	// stream count must settle to 0; the leak (acquire without release) left it
+	// permanently > 0.
 	deadline := time.Now().Add(3 * time.Second)
-	for p.Stats().ActiveConns == 0 && time.Now().Before(deadline) {
-		time.Sleep(10 * time.Millisecond)
-	}
-	if p.Stats().ActiveConns == 0 {
-		t.Fatal("warmup established no conns within 3s — cannot exercise the leak path")
-	}
-
-	// With conns established and no outstanding request, the active-stream
-	// count must settle to 0; the leak left it permanently > 0.
 	for time.Now().Before(deadline) {
 		if p.Stats().InFlightStreams == 0 {
 			return

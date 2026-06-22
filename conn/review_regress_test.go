@@ -258,6 +258,29 @@ func TestApplyPeerSettings_InitWindowDelta_NoDoubleApply(t *testing.T) {
 	}
 }
 
+// TestOnDataReceived_StreamOverrun_CreditsConnWindow is a regression test: when
+// a per-stream recv-window overrun resets the stream (a non-fatal *StreamError),
+// the DATA payload must still be debited against the CONNECTION window so the
+// peer's connection send credit is not leaked (RFC 7540 §6.9.1). Before the fix,
+// onDataReceived returned the *StreamError before touching the connection window.
+func TestOnDataReceived_StreamOverrun_CreditsConnWindow(t *testing.T) {
+	const connStart = 1 << 20
+	c := &Conn{connRecvWindow: connStart}
+	s := newStream(1, 8, c, 10) // tiny per-stream recv window
+	s.id = 1
+
+	const length = 50 // > stream window (10), < refund threshold (no WINDOW_UPDATE)
+	err := c.onDataReceived(s, length)
+
+	var se *StreamError
+	if !errors.As(err, &se) || se.Code != frame.ErrCodeFlowControlError {
+		t.Fatalf("onDataReceived = %v, want *StreamError FLOW_CONTROL_ERROR", err)
+	}
+	if got := c.connRecvWindow; got != connStart-length {
+		t.Fatalf("connRecvWindow = %d, want %d (overrun bytes must still be debited at conn scope)", got, connStart-length)
+	}
+}
+
 // dblApplyRW discards writes and blocks reads until done is closed.
 type dblApplyRW struct{ done chan struct{} }
 

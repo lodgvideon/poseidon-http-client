@@ -20,6 +20,11 @@ import (
 // and fail the request. The fix treats EOF coinciding with body completion as
 // a clean end, delivering the bytes with a nil error.
 func TestH1_ContentLength_DataEOFCoalesced(t *testing.T) {
+	// 16384 == http1's bufio.NewReaderSize (http1/conn.go) and the h1 adapter's
+	// scratch buffer (client/h1_transport.go), so the final Read fills the
+	// buffer and bufio's direct-read path passes the underlying (n, io.EOF)
+	// through unchanged — the coalesced condition under test. If either buffer
+	// size changes this must change in lockstep or the test stops exercising it.
 	const bodyLen = 16384
 
 	body := make([]byte, bodyLen)
