@@ -1,11 +1,11 @@
 package client
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
 	"io"
-	"bytes"
 	"sync"
 
 	"github.com/lodgvideon/poseidon-http-client/conn"
@@ -90,7 +90,8 @@ type EventType uint8
 
 // EventType values.
 const (
-	// EventData carries a chunk of DATA payload in StreamEvent.Data.
+	// EventData carries a chunk of DATA payload in StreamEvent.Data (valid only
+	// until the next Recv/Close; see StreamEvent — copy to retain).
 	EventData EventType = iota + 1
 	// EventTrailers carries response trailers in StreamEvent.Trailers.
 	EventTrailers
@@ -113,15 +114,20 @@ func (t EventType) String() string {
 	}
 }
 
-// StreamEvent is one chunk of a streaming response. Data and Trailers
-// are deep-copied by the connection layer per event, so they are owned
-// by the receiver and safe to retain after the next Recv.
+// StreamEvent is one chunk of a streaming response.
+//
+// Data aliases a pooled connection-layer buffer that is recycled on the next
+// Recv or Close; Trailers alias the response's header-slab buffer, valid until
+// Close. Copy these slices if you need to retain the bytes past then — do NOT
+// hold them across a Recv/Close.
 type StreamEvent struct {
 	// Type discriminates which other fields are populated.
 	Type EventType
-	// Data is the DATA payload for EventData. Owned by the event.
+	// Data is the DATA payload for EventData. It aliases a pooled buffer that is
+	// recycled on the next Recv/Close; copy it to retain the bytes past then.
 	Data []byte
-	// Trailers is populated for EventTrailers.
+	// Trailers is populated for EventTrailers; aliases header-slab memory that
+	// is valid until Close.
 	Trailers []conn.HeaderField
 	// ResetCode is populated for EventReset.
 	ResetCode conn.ErrCode
@@ -185,12 +191,13 @@ func (sr *StreamResponse) reset() {
 // terminates, or ctx is cancelled. After the event whose EndStream is
 // true, subsequent calls return ErrStreamEnded.
 func (sr *StreamResponse) Recv(ctx context.Context) (StreamEvent, error) {
+	// The previously delivered EventData.Data is invalid once Recv is called
+	// again; recycle its pooled buffer now (also returns the final frame's
+	// buffer when a fully-drained caller calls Recv past EndStream).
+	sr.recycleData()
 	if sr.drained {
 		return StreamEvent{}, ErrStreamEnded
 	}
-	// The previously delivered EventData.Data is invalid once Recv is called
-	// again; recycle its pooled buffer now.
-	sr.recycleData()
 	for {
 		ev, err := sr.stream.Recv(ctx)
 		if err != nil {

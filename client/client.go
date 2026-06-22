@@ -8,9 +8,9 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	"unsafe"
 	"sync/atomic"
 	"time"
+	"unsafe"
 
 	"github.com/lodgvideon/poseidon-http-client/conn"
 )
@@ -885,15 +885,17 @@ func handleHeadersEvent(ev conn.StreamEvent, req *Request, resp *Response, gotHe
 // Returns (done=true, nil) when the stream is complete.
 func handleDataEvent(ev conn.StreamEvent, req *Request, resp *Response, enc ContentEncoding, maxBody, maxDecompressed int64) (done bool, err error) {
 	resp.BytesReceived += int64(len(ev.Data))
-	if resp.BytesReceived > maxBody {
-		return false, fmt.Errorf("%w: received %d bytes, limit %d", ErrBodyTooLarge, resp.BytesReceived, maxBody)
-	}
-	if req.WantBody && len(ev.Data) > 0 {
+	over := resp.BytesReceived > maxBody
+	if req.WantBody && len(ev.Data) > 0 && !over {
 		resp.Body = append(resp.Body, ev.Data...)
 	}
-	// Payload copied out (or unwanted): return the pooled buffer immediately.
+	// Payload consumed (copied out, unwanted, or over-limit): return the pooled
+	// buffer on every exit path.
 	if ev.DataSlab != nil {
 		conn.GetDataBufPool().Put(ev.DataSlab)
+	}
+	if over {
+		return false, fmt.Errorf("%w: received %d bytes, limit %d", ErrBodyTooLarge, resp.BytesReceived, maxBody)
 	}
 	if ev.EndStream {
 		if req.WantBody && enc != EncodingIdentity {

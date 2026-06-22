@@ -16,10 +16,10 @@ type StreamEventType uint8
 // StreamEvent are populated.
 const (
 	EventHeaders     StreamEventType = iota + 1 // Headers populated
-	EventData                                     // Data populated
-	EventTrailers                                 // Headers populated, trailers
-	EventReset                                    // RSTCode populated
-	EventPushPromise                              // Headers populated (promised), PushStreamID set
+	EventData                                   // Data populated
+	EventTrailers                               // Headers populated, trailers
+	EventReset                                  // RSTCode populated
+	EventPushPromise                            // Headers populated (promised), PushStreamID set
 )
 
 // String returns the lowercase name of t.
@@ -163,7 +163,9 @@ func recycleStream(pool *sync.Pool, s *Stream) {
 	// Drop any events still buffered on the old channel so slab memory
 	// is released before we discard the reference.
 	for len(s.events) > 0 {
-		<-s.events // drop; any slab in the event is GC'd
+		if ev := <-s.events; ev.DataSlab != nil {
+			dataBufPool.Put(ev.DataSlab) // return the pooled DATA buffer of dropped events
+		}
 	}
 	// Recreate the events channel with the same capacity. Any stale
 	// reference held by a goroutine from the previous stream lifetime

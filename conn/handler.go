@@ -28,7 +28,9 @@ func GetHeaderSlabPool() *sync.Pool { return &headerSlabPool }
 // returns it here once the payload is consumed.
 var dataBufPool = sync.Pool{
 	New: func() any {
-		b := make([]byte, 0, 1024)
+		// Sized to the default SETTINGS_MAX_FRAME_SIZE so a typical DATA frame
+		// never forces a warm-up regrow before the buffer settles in the pool.
+		b := make([]byte, 0, 16384)
 		return &b
 	},
 }
@@ -163,7 +165,11 @@ func (h *connHandler) OnData(fh frame.FrameHeader, p []byte, _ uint8) error {
 		s.markRemoteEnd()
 		h.streams.markStreamDone(fh.StreamID)
 	}
-	s.push(StreamEvent{Type: EventData, Data: *bufPtr, DataSlab: bufPtr, EndStream: end})
+	if !s.push(StreamEvent{Type: EventData, Data: *bufPtr, DataSlab: bufPtr, EndStream: end}) {
+		// Event dropped on channel overflow (push reset the stream); return the
+		// pooled buffer rather than leaking it to GC under backpressure.
+		dataBufPool.Put(bufPtr)
+	}
 	return nil
 }
 
