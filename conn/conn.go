@@ -241,6 +241,7 @@ func (c *Conn) allocStream(eventBuf int, recvWindow int32) *Stream {
 		if cap(s.events) == eventBuf {
 			s.w = c
 			s.recvWindow = recvWindow
+			s.released.Store(false) // new lifetime: re-arm Close idempotency guard
 			return s
 		}
 		// Wrong capacity — discard; fall through to fresh allocation.
@@ -835,6 +836,18 @@ func (c *Conn) applyInitialPeerSettings(peer frame.SettingsParams) {
 func (c *Conn) applyPeerSettings(s frame.SettingsParams) error {
 	const maxWindow = int64(1<<31 - 1)
 
+	// RFC 7540 §6.5.2: an INITIAL_WINDOW_SIZE above 2^31-1 MUST be treated as
+	// a connection error of type FLOW_CONTROL_ERROR. Validate the absolute
+	// value BEFORE merging — the retroactive delta check below only runs for
+	// already-open streams, so an oversized value delivered before any stream
+	// exists would otherwise be stored verbatim and later seed a negative
+	// int32 send window, wedging every subsequent SendData forever.
+	for i := 0; i < s.N; i++ {
+		if p := s.Pairs[i]; p.ID == frame.SettingInitialWindowSize && int64(p.Value) > maxWindow {
+			return &ConnError{Code: frame.ErrCodeFlowControlError, Reason: "SETTINGS_INITIAL_WINDOW_SIZE exceeds 2^31-1"}
+		}
+	}
+
 	c.psMu.Lock()
 	oldInitial := settingValue(c.peerSettings, frame.SettingInitialWindowSize, connInitialRecvWindow)
 	for i := 0; i < s.N; i++ {
@@ -1155,6 +1168,12 @@ func (c *Conn) bumpFramesReceived() { c.atomicFramesReceived.Add(1) }
 func (c *Conn) readerLoop() {
 	defer close(c.readerDone)
 	h := newConnHandler(c, c.dec)
+	// Honor a larger advertised MAX_HEADER_LIST_SIZE so we never reject a
+	// header block we told the peer we would accept; the default ceiling
+	// still bounds CONTINUATION floods when none (or a smaller one) is set.
+	if adv := int(c.opts.Settings.MaxHeaderListSize); adv > h.maxHeaderBytes {
+		h.maxHeaderBytes = adv
+	}
 	for {
 		_, err := c.fr.ReadFrame(context.Background(), h)
 		if err != nil {

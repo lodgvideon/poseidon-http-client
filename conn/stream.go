@@ -120,6 +120,14 @@ type Stream struct {
 	// 0 means no reset has been signalled. Written via CAS in
 	// signalReset to guarantee exactly one close(resetSignal).
 	resetCode atomic.Uint32
+
+	// released guards Close() idempotency independently of the operational
+	// `closed` flag. recycleStream resets `closed` (for pool reuse) but must
+	// NOT reset `released`, so a second Close() on a caller-held reference
+	// after recycle is a safe no-op instead of dereferencing the nil-ed w.
+	// allocStream re-arms it when the struct is taken from the pool for a
+	// new stream lifetime.
+	released atomic.Bool
 }
 
 func newStream(id uint32, eventBuf int, w streamWriter, recvWindow int32) *Stream {
@@ -315,22 +323,32 @@ func (s *Stream) Recv(ctx context.Context) (StreamEvent, error) {
 }
 
 // Close cancels the stream. If neither side has reached END_STREAM, sends
-// RST_STREAM(CANCEL). Idempotent.
+// RST_STREAM(CANCEL). Idempotent: a second Close() on the same reference is a
+// safe no-op even after the first Close recycled the stream back to the pool.
 func (s *Stream) Close() error {
+	// released is the idempotency guard. It survives recycleStream (which
+	// resets closed/w/... for pool reuse), so a repeat Close after recycle
+	// returns here instead of falling through to s.w.writeRSTStream with a
+	// nil-ed w (panic) or RST-ing an unrelated reused stream.
+	if !s.released.CompareAndSwap(false, true) {
+		return nil
+	}
 	s.mu.Lock()
-	already := s.closed
+	already := s.closed // e.g. push() set this on event-channel overflow
 	bothEnded := s.localEnded && s.remoteEnded
 	s.closed = true
+	w := s.w
 	s.mu.Unlock()
 	if already {
+		// Already closed (RST already sent by push overflow); don't double-RST.
 		return nil
 	}
 	if bothEnded {
 		// Both sides ended normally; recycle without sending RST.
-		if c, ok := s.w.(*Conn); ok {
+		if c, ok := w.(*Conn); ok {
 			recycleStream(&c.streamPool, s)
 		}
 		return nil
 	}
-	return s.w.writeRSTStream(s, frame.ErrCodeCancel)
+	return w.writeRSTStream(s, frame.ErrCodeCancel)
 }
