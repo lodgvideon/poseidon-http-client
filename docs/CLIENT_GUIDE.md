@@ -103,6 +103,39 @@ A `Client` is safe for concurrent use by multiple goroutines. Whatever transport
 
 > **Required-call contract:** you MUST call `Close` (or `Shutdown`) on every `Client` you construct, or you leak the underlying connection(s), reader goroutines, and the pool actor goroutine.
 
+### Focused constructors (the easy path)
+
+`ClientOptions` is one flat struct with a cross-field validity matrix (`Addr` is required for single-conn/pool but must be empty for managed; `Pool` is required iff `TransportPool`; `Resolver` is required iff managed). For the common setups, prefer the focused constructors — each encodes a valid transport + required-field combination in its signature, so invalid combinations are unrepresentable:
+
+```go
+// Single connection (the default transport), with auto-redial.
+c, err := client.NewSingleConnClient("api.example.com:443", dialer)
+
+// Pool of up to N connections to one backend.
+c, err := client.NewPoolClient("api.example.com:443", dialer,
+    client.PoolOptions{MaxConnsPerHost: 4, MaxStreamsPerConn: 100})
+
+// Managed multi-backend: a Resolver discovers addresses, a Selector picks one.
+c, err := client.NewManagedClient(resolver, dialer,
+    client.WithSelector(client.RoundRobin()))
+```
+
+`dialer` is any `conn.Dialer` (e.g. `&conn.TLSDialer{Config: tlsCfg}`). Tune everything else with functional `Option`s, applied in order after the base fields:
+
+```go
+c, err := client.NewSingleConnClient(addr, dialer,
+    client.WithDefaultScheme("http"),           // H2C
+    client.WithRateLimit(1000, 1000),           // 1000 QPS, burst 1000
+    client.WithHooks(hooks),
+    client.WithMaxResponseBodySize(64<<20),
+    client.WithConnOptions(func(co *conn.ConnOptions) {
+        co.KeepaliveInterval = 30 * time.Second
+    }),
+)
+```
+
+Available options: `WithHooks`, `WithPushHandler`, `WithDefaultScheme`, `WithRateLimit`, `WithMaxResponseBodySize`, `WithMaxDecompressedSize`, `WithDialBackoff`, `WithSelector` (managed), `WithDrainMode` (managed), and `WithConnOptions` (escape hatch to mutate the underlying `conn.ConnOptions`). Drop to `NewClient(ClientOptions{...})` when you need full control — the sections below document every field it accepts.
+
 ### `ClientOptions` — every field
 
 ```go
@@ -875,10 +908,14 @@ Note that `Idempotent` is only one of three gates the `Retryer` checks (see "Wha
 
 ### Retryer
 
-`Retryer` wraps a `*Client` and adds bounded automatic retry on transient transport failures. It is goroutine-safe and is constructed with `NewRetryer`:
+`Retryer` wraps a `*Client` and adds bounded automatic retry on transient transport failures. It is goroutine-safe and is constructed with `NewRetryer` — or, equivalently and more discoverably, with the `Client.Retryer` method:
 
 ```go
 func NewRetryer(c *Client, opts RetryOptions) *Retryer
+func (c *Client) Retryer(opts RetryOptions) *Retryer // == NewRetryer(c, opts)
+
+r := c.Retryer(client.RetryOptions{MaxAttempts: 5})
+err := r.Do(ctx, req, &resp)
 ```
 
 `NewRetryer` fills zero-value fields in `opts` with defaults and preserves any non-zero values verbatim. The two methods mirror `Client`:
@@ -1731,8 +1768,10 @@ fields with `.Load()`, or call `Snapshot()` for a value-copyable
 ```go
 type Counters struct {
 	RequestsStarted   atomic.Int64
-	RequestsSucceeded atomic.Int64 // a status code was received (any)
-	RequestsErrored   atomic.Int64 // Do returned non-nil err
+	RequestsSucceeded atomic.Int64 // a response was received — ANY status
+	RequestsErrored   atomic.Int64 // Do returned non-nil err (transport/protocol)
+	Responses2xx      atomic.Int64 // completed with a 2xx status
+	ResponsesNon2xx   atomic.Int64 // completed with a non-2xx status (1xx/3xx/4xx/5xx)
 	Retries           atomic.Int64
 	DialsAttempted    atomic.Int64
 	DialsFailed       atomic.Int64
@@ -1740,6 +1779,11 @@ type Counters struct {
 	GoAwaysReceived   atomic.Int64
 }
 ```
+
+> For a load generator, measure real success rate with `Responses2xx` /
+> (`Responses2xx`+`ResponsesNon2xx`). `RequestsSucceeded` only means "a response
+> arrived" — it counts 4xx/5xx as well, so it conflates "got a response" with
+> "got a good one". `Responses2xx + ResponsesNon2xx == RequestsSucceeded`.
 
 `Histogram` is a lock-free log2-bucket latency histogram (64 buckets spanning
 `[1ns, 2^63 ns)`). `Observe(d time.Duration)` is allocation-free. `Snapshot()`
@@ -2196,6 +2240,12 @@ idempotent.
   the current data buffer and sends `RST_STREAM(CANCEL)` when neither side
   reached END_STREAM. `defer sr.Close()` is the safe idiom; it is harmless after
   a full drain. (The `Client.Stream` convenience helper does this for you.)
+
+> **Catching a missing Close in dev.** Build/test with `-tags poseidondebug`
+> (or run `make test-debug`) to compile in a finalizer-based leak detector: a
+> `StreamResponse` or `Response.BodyReader` garbage-collected without `Close()`
+> logs a loud, attributable warning. It is compiled out — zero cost — in normal
+> builds, so it is a development/CI aid, not a production mechanism.
 
 ## Errors
 
