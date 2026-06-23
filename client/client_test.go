@@ -551,10 +551,11 @@ func TestStreamResponse_RecvAfterDrain_ReturnsErrStreamEnded(t *testing.T) {
 
 func TestEventType_String(t *testing.T) {
 	cases := map[EventType]string{
+		EventNone:     "none",
 		EventData:     "data",
 		EventTrailers: "trailers",
 		EventReset:    "reset",
-		EventType(0):  "unknown",
+		EventType(99): "unknown",
 	}
 	for et, want := range cases {
 		if got := et.String(); got != want {

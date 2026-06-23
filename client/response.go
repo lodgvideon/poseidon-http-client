@@ -90,19 +90,25 @@ type EventType uint8
 
 // EventType values.
 const (
+	// EventNone is the zero value of EventType. Recv never delivers it; it
+	// names the uninitialized/zero StreamEvent so callers can compare against
+	// a constant instead of a bare 0 (and a switch can default safely).
+	EventNone EventType = iota // 0
 	// EventData carries a chunk of DATA payload in StreamEvent.Data (valid only
 	// until the next Recv/Close; see StreamEvent — copy to retain).
-	EventData EventType = iota + 1
+	EventData // 1
 	// EventTrailers carries response trailers in StreamEvent.Trailers.
-	EventTrailers
+	EventTrailers // 2
 	// EventReset signals that the peer sent RST_STREAM; the code is
 	// in StreamEvent.ResetCode and EndStream is always true.
-	EventReset
+	EventReset // 3
 )
 
 // String returns the lowercase event-type name.
 func (t EventType) String() string {
 	switch t {
+	case EventNone:
+		return "none"
 	case EventData:
 		return "data"
 	case EventTrailers:
