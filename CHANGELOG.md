@@ -5,6 +5,63 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [v0.6.0] — 2026-06-23
+
+### Added
+
+- **Opt-in ergonomic layer** (`client/sugar.go`): `client.H(name, value)`
+  header helper (lowercases names per RFC 7540 §8.1.2) + a `client.HeaderField`
+  alias so callers need not import `conn` for the common type; `NewRequest` /
+  `GET` / `POST` constructors that default `WantBody=true` (the obvious path now
+  captures the body instead of silently dropping it); `Request.WithHeaders`
+  chaining; `Response.Header` / `HeaderString` (allocation-free reads);
+  `Response.CopyBody` / `Response.Clone` / `StreamEvent.DataCopy` to safely
+  retain bytes past the next `Recv`/`Reset`/`Close`; and
+  `Client.Stream(ctx, req, fn)`, which pumps a streaming response and **always**
+  `Close`s it so callers cannot leak the pooled stream slot.
+- **Focused constructors** + functional options: `NewSingleConnClient`,
+  `NewPoolClient`, `NewManagedClient` encode a valid transport + required-field
+  combination in their signatures (invalid combinations are unrepresentable);
+  options `WithHooks`, `WithPushHandler`, `WithDefaultScheme`, `WithRateLimit`,
+  `WithMaxResponseBodySize`, `WithMaxDecompressedSize`, `WithDialBackoff`,
+  `WithSelector`, `WithDrainMode`, `WithConnOptions`. `NewClient(ClientOptions{})`
+  remains for full control.
+- **`Client.Retryer(opts)`** — discoverable method form of `NewRetryer(c, opts)`.
+- **Status-class metrics** — `Counters.Responses2xx` / `Counters.ResponsesNon2xx`
+  split `RequestsSucceeded` by status class, so a load generator can measure
+  real success rate rather than "a response arrived".
+- **`EventNone`** — names the zero value of `EventType`.
+- **Debug-gated leak detector** (`-tags poseidondebug`) — reports a
+  `StreamResponse` or `Response.BodyReader` garbage-collected without `Close()`.
+  Zero cost in normal builds; CI compile-checks the tag and `make test-debug`
+  runs its finalizer tests.
+- **`docs/CLIENT_GUIDE.md`** — full client usage guide with verified examples.
+- **Examples** — 24 compile-tested godoc `Example` functions covering every
+  feature (`client/example_*_test.go`, rendered on pkg.go.dev), plus a runnable
+  `examples/loadgen` load generator (pooled client, rate limit, hooks, worker
+  pool, metrics snapshot).
+
+### Changed
+
+- **BREAKING:** `Request.Idempotent *bool` → `Request.Idempotency`
+  (`IdempotencyMode` enum). The zero value `IdempotencyAuto` classifies by HTTP
+  method (same as the old `nil`); `ForceIdempotent` / `ForceNotIdempotent`
+  override (same as the old `&true` / `&false`). Removes the
+  addr-of-a-local-`*bool` dance.
+
+### Performance
+
+- **Zero-allocation receive hot path** — the per-DATA-frame copy buffer is now
+  pooled (`conn.dataBufPool`); steady-state receive allocates nothing per frame.
+  Ownership transfers to the client via `StreamEvent.DataSlab` and is returned
+  on consume.
+- **Buffered transport reader** — `NewClientConn` wraps the transport reader in
+  a 16 KiB buffer, collapsing the per-frame 2× `ReadFull` into far fewer
+  `read(2)` syscalls when frames arrive together (notably h2c). Strictly
+  no-op-or-better; smaller win over TLS where the record layer already buffers.
+- Realistic warm HPACK allocation benchmarks added; steady-state encode/decode
+  is **0 alloc/op** even under Huffman-forcing custom-header traffic.
+
 ## [v0.5.1] — 2026-06-21
 
 ### Fixed
