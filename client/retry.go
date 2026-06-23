@@ -14,16 +14,20 @@ import (
 )
 
 // isIdempotent reports whether req may be retried after a transport
-// failure. The Idempotent field overrides the Method-based default.
+// failure. Request.Idempotency overrides the Method-based default.
 func isIdempotent(req *Request) bool {
-	if req.Idempotent != nil {
-		return *req.Idempotent
-	}
-	switch req.Method {
-	case "GET", "HEAD", "OPTIONS", "PUT", "DELETE", "TRACE":
+	switch req.Idempotency {
+	case ForceIdempotent:
 		return true
+	case ForceNotIdempotent:
+		return false
+	default: // IdempotencyAuto — classify by Method.
+		switch req.Method {
+		case "GET", "HEAD", "OPTIONS", "PUT", "DELETE", "TRACE":
+			return true
+		}
+		return false
 	}
-	return false
 }
 
 // builtinShouldRetry returns true for transport errors RFC 7540 or

@@ -14,7 +14,6 @@ import (
 
 func TestIsIdempotent_Methods(t *testing.T) {
 	t.Parallel()
-	tt := func(b bool) *bool { return &b }
 	cases := []struct {
 		name string
 		req  *Request
@@ -29,8 +28,8 @@ func TestIsIdempotent_Methods(t *testing.T) {
 		{"POST", &Request{Method: "POST"}, false},
 		{"PATCH", &Request{Method: "PATCH"}, false},
 		{"empty", &Request{Method: ""}, false},
-		{"override true on POST", &Request{Method: "POST", Idempotent: tt(true)}, true},
-		{"override false on GET", &Request{Method: "GET", Idempotent: tt(false)}, false},
+		{"force idempotent on POST", &Request{Method: "POST", Idempotency: ForceIdempotent}, true},
+		{"force not-idempotent on GET", &Request{Method: "GET", Idempotency: ForceNotIdempotent}, false},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
