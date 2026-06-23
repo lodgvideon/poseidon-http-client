@@ -22,7 +22,9 @@ fi
 # Per-package coverage table from `go test -cover` is the simplest
 # authoritative source; we re-run it (cached when nothing changed) so
 # we don't need to parse cover.out blocks.
-PKG_TABLE=$(go test -cover ./... 2>&1 | grep -E '\bcoverage:' || true)
+# Exclude examples/ (runnable demos with no tests — doc artifacts, not library
+# code) so they don't trip the per-package floor at 0%.
+PKG_TABLE=$(go test -cover ./... 2>&1 | grep -E '\bcoverage:' | grep -v '/examples/' || true)
 
 if [[ -z "$PKG_TABLE" ]]; then
   echo "coverage-gate: 'go test -cover ./...' produced no coverage rows" >&2
