@@ -169,6 +169,10 @@ type StreamResponse struct {
 	// delivered EventData. Recycled on the next Recv (Data is valid only
 	// until then per the StreamEvent contract) and on Close.
 	curData *[]byte
+
+	// lg reports a leak if this StreamResponse is garbage-collected without
+	// Close (debug builds only; nil and no-op in normal builds).
+	lg *leakGuard
 }
 
 // recycleData returns the last delivered EventData's pooled buffer to the pool.
@@ -292,6 +296,7 @@ func (sr *StreamResponse) WaitTrailers(ctx context.Context) ([]conn.HeaderField,
 func (sr *StreamResponse) Close() error {
 	var closeErr error
 	sr.closeOnce.Do(func() {
+		sr.lg.disarm()
 		for _, sp := range sr.slabs {
 			*sp = (*sp)[:0]
 			conn.GetHeaderSlabPool().Put(sp)
