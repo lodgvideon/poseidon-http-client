@@ -1,11 +1,11 @@
 package client
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
 	"io"
-	"bytes"
 	"sync"
 
 	"github.com/lodgvideon/poseidon-http-client/conn"
@@ -90,7 +90,8 @@ type EventType uint8
 
 // EventType values.
 const (
-	// EventData carries a chunk of DATA payload in StreamEvent.Data.
+	// EventData carries a chunk of DATA payload in StreamEvent.Data (valid only
+	// until the next Recv/Close; see StreamEvent — copy to retain).
 	EventData EventType = iota + 1
 	// EventTrailers carries response trailers in StreamEvent.Trailers.
 	EventTrailers
@@ -113,15 +114,20 @@ func (t EventType) String() string {
 	}
 }
 
-// StreamEvent is one chunk of a streaming response. Data and Trailers
-// are deep-copied by the connection layer per event, so they are owned
-// by the receiver and safe to retain after the next Recv.
+// StreamEvent is one chunk of a streaming response.
+//
+// Data aliases a pooled connection-layer buffer that is recycled on the next
+// Recv or Close; Trailers alias the response's header-slab buffer, valid until
+// Close. Copy these slices if you need to retain the bytes past then — do NOT
+// hold them across a Recv/Close.
 type StreamEvent struct {
 	// Type discriminates which other fields are populated.
 	Type EventType
-	// Data is the DATA payload for EventData. Owned by the event.
+	// Data is the DATA payload for EventData. It aliases a pooled buffer that is
+	// recycled on the next Recv/Close; copy it to retain the bytes past then.
 	Data []byte
-	// Trailers is populated for EventTrailers.
+	// Trailers is populated for EventTrailers; aliases header-slab memory that
+	// is valid until Close.
 	Trailers []conn.HeaderField
 	// ResetCode is populated for EventReset.
 	ResetCode conn.ErrCode
@@ -152,6 +158,19 @@ type StreamResponse struct {
 	// slabs holds pooled slab pointers that back Headers field bytes.
 	// Storing *[]byte avoids heap escape on return to HeaderSlabPool.
 	slabs []*[]byte
+
+	// curData is the pooled buffer backing the Data of the most recently
+	// delivered EventData. Recycled on the next Recv (Data is valid only
+	// until then per the StreamEvent contract) and on Close.
+	curData *[]byte
+}
+
+// recycleData returns the last delivered EventData's pooled buffer to the pool.
+func (sr *StreamResponse) recycleData() {
+	if sr.curData != nil {
+		conn.GetDataBufPool().Put(sr.curData)
+		sr.curData = nil
+	}
 }
 
 // reset zeroes the private fields before DoStream reuses the struct.
@@ -164,6 +183,7 @@ func (sr *StreamResponse) reset() {
 	sr.closeOnce = sync.Once{}
 	sr.drained = false
 	sr.trailers = nil
+	sr.curData = nil // Close() already recycled it; clear defensively, do not Put.
 	// slabs are cleaned up in Close(); reset() is only called for a
 	// struct that has been properly closed already.
 }
@@ -172,6 +192,10 @@ func (sr *StreamResponse) reset() {
 // terminates, or ctx is cancelled. After the event whose EndStream is
 // true, subsequent calls return ErrStreamEnded.
 func (sr *StreamResponse) Recv(ctx context.Context) (StreamEvent, error) {
+	// The previously delivered EventData.Data is invalid once Recv is called
+	// again; recycle its pooled buffer now (also returns the final frame's
+	// buffer when a fully-drained caller calls Recv past EndStream).
+	sr.recycleData()
 	if sr.drained {
 		return StreamEvent{}, ErrStreamEnded
 	}
@@ -191,6 +215,7 @@ func (sr *StreamResponse) Recv(ctx context.Context) (StreamEvent, error) {
 				Data:      ev.Data,
 				EndStream: ev.EndStream,
 			}
+			sr.curData = ev.DataSlab
 			if ev.EndStream {
 				sr.drained = true
 			}
@@ -266,6 +291,7 @@ func (sr *StreamResponse) Close() error {
 			conn.GetHeaderSlabPool().Put(sp)
 		}
 		sr.slabs = sr.slabs[:0]
+		sr.recycleData()
 		closeErr = sr.stream.Close()
 		if sr.release != nil {
 			sr.release()
