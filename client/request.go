@@ -75,10 +75,11 @@ type Request struct {
 	// before the next Do call. WantBody is ignored when StreamBody is true.
 	StreamBody bool
 
-	// Idempotent overrides automatic idempotency classification based
-	// on Method. nil → classify by Method (GET, HEAD, OPTIONS, PUT,
-	// DELETE, TRACE are idempotent; POST, PATCH are not).
-	Idempotent *bool
+	// Idempotency overrides automatic idempotency classification (which
+	// governs transport-level retry eligibility). The zero value,
+	// IdempotencyAuto, classifies by Method; ForceIdempotent / ForceNotIdempotent
+	// override it. Replaces the former *bool, dropping the addr-of-a-local dance.
+	Idempotency IdempotencyMode
 
 	// DisableDecompression, when true, prevents automatic gzip/deflate
 	// decompression of the response body. When false (default), the
@@ -104,6 +105,22 @@ type Request struct {
 	// has none). Per-request timeout is independent of ctx.
 	Timeout time.Duration
 }
+
+// IdempotencyMode overrides how a request is classified for transport-level
+// retry. The zero value classifies by HTTP method.
+type IdempotencyMode uint8
+
+const (
+	// IdempotencyAuto (zero value) classifies by Method: GET, HEAD, OPTIONS,
+	// PUT, DELETE, TRACE are idempotent (retriable); POST, PATCH and others are
+	// not.
+	IdempotencyAuto IdempotencyMode = iota
+	// ForceIdempotent marks the request retriable regardless of Method — e.g. a
+	// POST guarded by an idempotency key.
+	ForceIdempotent
+	// ForceNotIdempotent marks the request non-retriable regardless of Method.
+	ForceNotIdempotent
+)
 
 // forbiddenRequestHeader reports whether name (already lower-cased ASCII)
 // is one of the connection-specific headers that RFC 7540 §8.1.2.3

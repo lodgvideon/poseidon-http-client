@@ -99,7 +99,7 @@ See [CHANGELOG.md](CHANGELOG.md) for details. See
 - **E.2 — Automatic retry layer** *(released)*: `client.NewRetryer(c,
   RetryOptions)` retries idempotent requests on `REFUSED_STREAM` (RFC §8.1.4),
   GOAWAY, and dial errors. Truncated-exponential backoff with ±25% jitter.
-  `Request.Idempotent *bool` for per-request override. `IsRetryable` callback
+  `Request.Idempotency` (IdempotencyMode) for per-request override. `IsRetryable` callback
   for 5xx and custom policies.
 - **F.1 — HTTP/1.1 fallback + ALPN-aware transport** *(released)*:
   new `http1/` package implements HTTP/1.1 wire protocol from scratch (no
