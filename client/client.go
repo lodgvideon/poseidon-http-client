@@ -486,6 +486,7 @@ func (c *Client) do(ctx context.Context, req *Request, resp *Response) error {
 			stream:  cs,
 			release: release,
 			resp:    resp,
+			lg:      armLeakGuard("Response.BodyReader"),
 		}
 		if !req.DisableDecompression {
 			enc := detectEncoding(resp.Headers)
@@ -588,6 +589,7 @@ func (c *Client) doStream(ctx context.Context, req *Request, sr *StreamResponse)
 	}
 	sr.stream = cs
 	sr.release = release
+	sr.lg = armLeakGuard("StreamResponse")
 	if ev.EndStream {
 		sr.drained = true
 	}

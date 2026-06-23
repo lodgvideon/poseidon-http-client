@@ -20,6 +20,7 @@ type responseBodyReader struct {
 	curData   *[]byte   // pooled buffer backing buf/last event; recycled on next event/Close
 	closeOnce sync.Once
 	done      bool
+	lg        *leakGuard // reports a leak if GC'd without Close (debug builds only)
 }
 
 // recycleData returns the current pooled DATA buffer to the pool. Safe only
@@ -89,6 +90,7 @@ func (r *responseBodyReader) Read(p []byte) (int, error) {
 func (r *responseBodyReader) Close() error {
 	var err error
 	r.closeOnce.Do(func() {
+		r.lg.disarm()
 		err = r.stream.Close()
 		r.recycleData()
 		r.release()
