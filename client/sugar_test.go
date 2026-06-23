@@ -73,6 +73,12 @@ func TestCopyBodyAndClone_DetachFromReset(t *testing.T) {
 		Body:          append([]byte(nil), "payload"...),
 		BytesReceived: 7,
 	}
+	// Capture the source's backing bytes before Clone/Reset so we can prove
+	// the clone does not alias them (Reset truncates but does not zero, so
+	// these arrays keep their original bytes).
+	srcVal := r.Headers[0].Value
+	srcBody := r.Body
+
 	cb := r.CopyBody()
 	cl := r.Clone()
 	r.Reset() // recycle/zero the source
@@ -86,9 +92,14 @@ func TestCopyBodyAndClone_DetachFromReset(t *testing.T) {
 	if len(cl.Headers) != 1 || string(cl.Headers[0].Value) != "abc" {
 		t.Errorf("Clone headers = %+v", cl.Headers)
 	}
-	// Clone must own its memory: mutating the clone must not be visible
-	// through any shared backing array (there is none).
+	// Deep-copy proof: mutating the clone must NOT change the source's
+	// backing bytes. A shallow clone aliasing r's arrays would leak the
+	// mutation through srcVal/srcBody (still readable after Reset).
 	cl.Headers[0].Value[0] = 'X'
+	cl.Body[0] = 'Z'
+	if srcVal[0] != 'a' || srcBody[0] != 'p' {
+		t.Errorf("Clone is shallow: mutation leaked to source (val=%c body=%c)", srcVal[0], srcBody[0])
+	}
 }
 
 func TestDataCopy(t *testing.T) {
