@@ -1,6 +1,7 @@
 package conn
 
 import (
+	"bufio"
 	"context"
 	"encoding/binary"
 	"errors"
@@ -13,6 +14,18 @@ import (
 	"github.com/lodgvideon/poseidon-http-client/frame"
 	"github.com/lodgvideon/poseidon-http-client/hpack"
 )
+
+// readBufferSize is the size of the buffered reader wrapping the transport on
+// the receive path. The Framer reads each frame as a 9-byte header read plus a
+// payload read; over an unbuffered transport those are two read(2) syscalls per
+// frame. A buffered reader lets one socket read drain many frames, which is the
+// dominant syscall on the response-receive hot path for h2c/plaintext links.
+// (Over TLS, crypto/tls already buffers a whole record per syscall, so the win
+// there is smaller.) 16 KiB matches the default max frame size: it batches the
+// per-frame header reads and small control/response frames, while payloads at
+// or above this size pass through bufio's direct-read fast path without an
+// extra copy.
+const readBufferSize = 16 * 1024
 
 // encBufPool recycles the HPACK block-fragment buffer used by writeHeaders.
 // The buffer is returned immediately after Framer.WriteHeaders — the call
@@ -121,7 +134,7 @@ func NewClientConn(ctx context.Context, transport net.Conn, opts ConnOptions) (*
 	opts = opts.defaulted()
 	c := &Conn{
 		transport:          transport,
-		fr:                 frame.NewFramer(transport, transport),
+		fr:                 frame.NewFramer(transport, bufio.NewReaderSize(transport, readBufferSize)),
 		enc:                hpack.NewEncoder(),
 		dec:                hpack.NewDecoder(),
 		opts:               opts,
