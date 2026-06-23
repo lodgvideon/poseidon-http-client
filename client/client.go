@@ -96,8 +96,6 @@ type ClientOptions struct {
 	// fire. May be replaced at runtime via Client.SetHooks.
 	Hooks *Hooks
 
-	// DefaultScheme is used as the :scheme pseudo-header when Request.Scheme
-	// is empty. Defaults to "https" when zero. Set to "http" for H2C targets.
 	// PushHandler is invoked when the server sends a PUSH_PROMISE frame
 	// (RFC 7540 §8.2). When non-nil, ConnOpts.EnablePush is automatically
 	// set to true at client construction so the peer knows push is allowed.
