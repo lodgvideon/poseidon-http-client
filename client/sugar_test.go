@@ -143,4 +143,17 @@ func TestStream_AutoCloses(t *testing.T) {
 	if !bytes.Equal(got, pattern) {
 		t.Fatalf("Stream body mismatch: got %d bytes, want %d", len(got), total)
 	}
+	// The whole point of Stream is that it auto-Closes the StreamResponse,
+	// releasing the pooled stream slot. Verifying only the bytes is too weak —
+	// they arrive even if Close is forgotten. Assert the slot is actually
+	// released: with Close, the pool actor drops InFlightStreams back to 0;
+	// without it, the slot leaks and stays at 1. Release is processed
+	// asynchronously by the pool actor, so poll with a bounded deadline.
+	deadline := time.Now().Add(3 * time.Second)
+	for c.PoolStats().InFlightStreams != 0 && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	if n := c.PoolStats().InFlightStreams; n != 0 {
+		t.Fatalf("Stream leaked a pooled stream slot: InFlightStreams=%d, want 0 (auto-Close missing?)", n)
+	}
 }
