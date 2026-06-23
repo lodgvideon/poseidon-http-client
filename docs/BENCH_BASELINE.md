@@ -119,3 +119,33 @@ alloc is the dominant cost.
 - Per-`Conn` `streamPool sync.Pool` — stream structs recycled on clean close
 - `encBufPool sync.Pool` — HPACK encode buffer reused across `writeHeaders` calls
 - `hdrSlicePool sync.Pool` + const name byte slices in `buildHeaders`
+
+## HPACK real-traffic allocations (2026-06-23)
+
+The gated `*_3req_static` benches only exercise indexed representations, which
+are 0-alloc by construction. `hpack/realalloc_test.go` measures a realistic
+~12-field browser request (custom user-agent / cookie / path values that force
+Huffman string literals + dynamic-table inserts on first touch).
+
+| Scenario | ns/op | B/op | allocs/op |
+|----------|------:|-----:|----------:|
+| Encode warm (primed dyn table) | ~886 | 0 | 0 |
+| Decode warm | ~117 | 0 | 0 |
+| Roundtrip warm (per-request, live conn) | ~1459 | 0 | 0 |
+| Encode cold (fresh Encoder) | ~1528 | 4608 | 2 |
+| Decode cold (fresh Decoder) | ~1741 | 8784 | 4 |
+| Roundtrip cold (per-connection, one-time) | ~3724 | 13392 | 6 |
+
+**Steady state is 0 alloc / 0 B per request** even under Huffman-forcing
+traffic: encode appends into a reused `dst`; decode writes into a reused
+scratch arena and the visited `Name`/`Value` slices alias that scratch (no
+copy). The entire heap cost is **per-connection codec construction** — the
+encoder's `make([]dynEntry,0,32)` + `make([]byte,0,4096)` arena and the
+decoder's scratch + dynamic-table arenas — amortized over the connection
+lifetime, NOT a per-request cost. Only the warm (0-alloc) benches are committed
+and gated; the cold numbers are recorded here because they are legitimately
+non-zero one-time construction and would be a false positive under the gate.
+
+Note: warm encode (~886 ns) is dominated by the O(n) linear `dynamicLookup`
+(`bytes.Equal` scan over dynamic-table entries), not by string work — a CPU
+(not allocation) consideration for very large dynamic tables.
