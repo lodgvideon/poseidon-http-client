@@ -1,4 +1,4 @@
-.PHONY: lint test test-race bench bench-gate fuzz-replay coverage coverage-gate tidy
+.PHONY: lint test test-race test-debug bench bench-gate fuzz-replay coverage coverage-gate tidy
 .PHONY: it-up it-down it-logs it-test it-test-fast it-certs
 
 # Minimum overall and per-package statement coverage. CI fails below this.
@@ -27,6 +27,13 @@ test:
 
 test-race:
 	$(GO) test -race -count=1 -timeout=$(TEST_TIMEOUT) ./...
+
+# Exercise the opt-in debug build (-tags poseidondebug): the leak detector and
+# its finalizer-based tests. Kept out of the default `test` because the GC/
+# finalizer timing is non-deterministic; run it locally when touching the
+# debug tooling. CI compile-checks the tag separately (deterministic).
+test-debug:
+	$(GO) test -tags poseidondebug -count=1 -timeout=60s ./client/
 
 # Fast path: unit + integration tests only, no stress/E2E/network.
 test-fast:
