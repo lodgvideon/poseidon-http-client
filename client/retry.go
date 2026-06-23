@@ -129,6 +129,16 @@ type Retryer struct {
 	metrics  *Metrics
 }
 
+// Retryer returns a Retryer wrapping c with automatic retries per opts.
+// Equivalent to NewRetryer(c, opts), exposed as a method so retries are
+// discoverable from the Client rather than only via the package function:
+//
+//	r := c.Retryer(client.RetryOptions{MaxAttempts: 5})
+//	err := r.Do(ctx, req, &resp)
+func (c *Client) Retryer(opts RetryOptions) *Retryer {
+	return NewRetryer(c, opts)
+}
+
 // NewRetryer constructs a Retryer wrapping c. Zero-value fields in
 // opts are filled with defaults; non-zero values are preserved
 // verbatim. The returned *Retryer is goroutine-safe.

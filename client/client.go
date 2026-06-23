@@ -334,6 +334,11 @@ func (c *Client) observeDone(req *Request, authority string, status int, bytesSe
 	c.metrics.Latency.Request.Observe(latency)
 	if err == nil {
 		c.metrics.Counters.RequestsSucceeded.Add(1)
+		if status >= 200 && status < 300 {
+			c.metrics.Counters.Responses2xx.Add(1)
+		} else {
+			c.metrics.Counters.ResponsesNon2xx.Add(1)
+		}
 	} else {
 		c.metrics.Counters.RequestsErrored.Add(1)
 	}

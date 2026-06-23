@@ -15,9 +15,15 @@ import (
 // when you need a consistent view.
 type Counters struct {
 	RequestsStarted   atomic.Int64
-	RequestsSucceeded atomic.Int64 // status code received (any)
-	RequestsErrored   atomic.Int64 // Do returned non-nil err
-	Retries           atomic.Int64
+	RequestsSucceeded atomic.Int64 // a response was received — ANY status (see Responses2xx for the good subset)
+	RequestsErrored   atomic.Int64 // Do returned non-nil err (transport/protocol failure, not HTTP status)
+	// Responses2xx / ResponsesNon2xx split RequestsSucceeded by status class,
+	// so a load generator can measure real success rate rather than conflating
+	// "got a response" with "got a good response". Their sum equals
+	// RequestsSucceeded.
+	Responses2xx    atomic.Int64 // completed with a 2xx status
+	ResponsesNon2xx atomic.Int64 // completed with a non-2xx status (1xx/3xx/4xx/5xx)
+	Retries         atomic.Int64
 	DialsAttempted    atomic.Int64
 	DialsFailed       atomic.Int64
 	ConnsClosed       atomic.Int64 // sum across all CloseReason values
@@ -30,6 +36,8 @@ type CountersSnapshot struct {
 	RequestsStarted   int64
 	RequestsSucceeded int64
 	RequestsErrored   int64
+	Responses2xx      int64
+	ResponsesNon2xx   int64
 	Retries           int64
 	DialsAttempted    int64
 	DialsFailed       int64
@@ -45,6 +53,8 @@ func (c *Counters) Snapshot() CountersSnapshot {
 		RequestsStarted:   c.RequestsStarted.Load(),
 		RequestsSucceeded: c.RequestsSucceeded.Load(),
 		RequestsErrored:   c.RequestsErrored.Load(),
+		Responses2xx:      c.Responses2xx.Load(),
+		ResponsesNon2xx:   c.ResponsesNon2xx.Load(),
 		Retries:           c.Retries.Load(),
 		DialsAttempted:    c.DialsAttempted.Load(),
 		DialsFailed:       c.DialsFailed.Load(),
