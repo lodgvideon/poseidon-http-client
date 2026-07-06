@@ -89,10 +89,10 @@ func TestClient_RateLimit_BlocksExcess(t *testing.T) {
 	defer srv.Close()
 
 	const (
-		rps     = 2.0
-		burst   = 2
-		need    = 3
-		slack   = 50 * time.Millisecond
+		rps   = 2.0
+		burst = 2
+		need  = 3
+		slack = 50 * time.Millisecond
 	)
 	// 3 requests, burst 2 → 1st two instant, 3rd waits one full
 	// token interval. Floor = (need-burst)/rps - slack (we allow

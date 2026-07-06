@@ -5,6 +5,24 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [v0.7.0] — 2026-06-23
+
+### Changed
+
+- **BREAKING:** `Request.WantBody bool` and `Request.StreamBody bool` are
+  replaced by a single `Request.BodyMode` (`BodyMode` enum). The zero value
+  `BodyDiscard` drops the body (same as the old `WantBody:false` /
+  `StreamBody:false` default); `BodyBuffer` accumulates it into `Response.Body`
+  (old `WantBody:true`); `BodyStream` returns `Response.BodyReader` for
+  incremental reads (old `StreamBody:true`). This removes the invalid-but-
+  representable `WantBody:true, StreamBody:true` state and the "StreamBody wins"
+  precedence rule — matching the `IdempotencyMode` enum introduced in v0.6.0.
+
+  Migration: `WantBody: true` → `BodyMode: client.BodyBuffer`;
+  `StreamBody: true` → `BodyMode: client.BodyStream`; leave the field unset for
+  the discard default. The `GET`/`POST`/`NewRequest` helpers set `BodyBuffer`
+  for you, so code using those is unaffected.
+
 ## [v0.6.0] — 2026-06-23
 
 ### Added

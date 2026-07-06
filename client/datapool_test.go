@@ -94,12 +94,12 @@ func assertPattern(t *testing.T, got, want []byte) {
 	t.Fatalf("streamed body corrupted: got %d bytes, want %d, first mismatch at index %d", len(got), len(want), mismatch)
 }
 
-// TestStreamBody_MultiFrame_NoCorruption guards the responseBodyReader
-// (StreamBody=true) pooled path. It reads through a 7-byte buffer so the
+// TestBodyStream_MultiFrame_NoCorruption guards the responseBodyReader
+// (BodyMode=BodyStream) pooled path. It reads through a 7-byte buffer so the
 // surplus path — r.buf aliasing the pooled buffer across many Reads before the
 // next frame's Recv recycles it — is exercised on every frame. A wrong recycle,
 // pointer, or surplus slice corrupts the reassembled non-repeating pattern.
-func TestStreamBody_MultiFrame_NoCorruption(t *testing.T) {
+func TestBodyStream_MultiFrame_NoCorruption(t *testing.T) {
 	pattern := nonRepeatingPattern(poolTotal)
 	addr := streamPatternServer(t, pattern, poolChunk)
 	c := poolTestClient(t, addr)
@@ -109,7 +109,7 @@ func TestStreamBody_MultiFrame_NoCorruption(t *testing.T) {
 	defer cancel()
 
 	var resp Response
-	if err := c.Do(ctx, &Request{Method: "GET", Path: "/", StreamBody: true}, &resp); err != nil {
+	if err := c.Do(ctx, &Request{Method: "GET", Path: "/", BodyMode: BodyStream}, &resp); err != nil {
 		t.Fatalf("Do: %v", err)
 	}
 	defer resp.BodyReader.Close()

@@ -44,10 +44,12 @@ type Request struct {
 	// length is derived automatically; this field is ignored in that case.
 	ContentLength int64
 
-	// WantBody opts the response body buffer in. When false, response
-	// DATA frames are consumed (so flow-control refunds run) and the
-	// payload is dropped before Do returns.
-	WantBody bool
+	// BodyMode controls how the response body is handled. The zero value,
+	// BodyDiscard, drops the body (DATA frames are still consumed so
+	// flow-control refunds run); BodyBuffer accumulates it into
+	// Response.Body; BodyStream returns it via Response.BodyReader for
+	// incremental reads (Do returns after the HEADERS frame).
+	BodyMode BodyMode
 	// WantTrailers opts trailer capture in. When false, response
 	// trailers are ignored.
 	WantTrailers bool
@@ -68,12 +70,6 @@ type Request struct {
 	// values (e.g. checksums computed after body flush).
 	// MUST NOT return pseudo-headers — validated before sending.
 	TrailerFunc func() []conn.HeaderField
-
-	// StreamBody, when true, causes Do to return after the response HEADERS
-	// frame arrives. The body is available via Response.BodyReader.
-	// Caller MUST call Response.BodyReader.Close() (or Response.Reset())
-	// before the next Do call. WantBody is ignored when StreamBody is true.
-	StreamBody bool
 
 	// Idempotency overrides automatic idempotency classification (which
 	// governs transport-level retry eligibility). The zero value,
@@ -105,6 +101,23 @@ type Request struct {
 	// has none). Per-request timeout is independent of ctx.
 	Timeout time.Duration
 }
+
+// BodyMode controls how Do handles the response body.
+type BodyMode uint8
+
+const (
+	// BodyDiscard (the zero value) drops the response body — DATA frames are
+	// still consumed so flow-control refunds run, but the payload is not
+	// retained. The default; fits a load generator that does not need bodies.
+	BodyDiscard BodyMode = iota
+	// BodyBuffer accumulates the full response body into Response.Body.
+	BodyBuffer
+	// BodyStream makes Do return after the response HEADERS frame, with the
+	// body available via Response.BodyReader (an io.ReadCloser) for incremental
+	// reads. The caller MUST Close it (or call Response.Reset) before the next
+	// Do. Not supported on HTTP/1.1 connections.
+	BodyStream
+)
 
 // IdempotencyMode overrides how a request is classified for transport-level
 // retry. The zero value classifies by HTTP method.

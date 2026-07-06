@@ -7,9 +7,10 @@
 //
 //   - Client.Do is synchronous: it issues a request and returns a
 //     fully-buffered Response. Response body and trailers are
-//     opt-in via Request.WantBody and Request.WantTrailers; when
-//     either is false the corresponding frames are still consumed
-//     (so flow control refunds run) but the bytes are dropped.
+//     opt-in via Request.BodyMode (BodyBuffer) and Request.WantTrailers;
+//     when the body mode is BodyDiscard or WantTrailers is false the
+//     corresponding frames are still consumed (so flow control refunds
+//     run) but the bytes are dropped.
 //
 //   - Client.DoStream returns a StreamResponse once the initial
 //     HEADERS frame has arrived. The caller pumps StreamResponse.Recv

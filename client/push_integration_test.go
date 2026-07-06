@@ -36,12 +36,12 @@ func TestIntegration_Push_HandlerInvoked(t *testing.T) {
 	}))
 
 	var (
-		mu        sync.Mutex
-		gotPush   bool
-		pushPath  string
-		pushBody  []byte
+		mu         sync.Mutex
+		gotPush    bool
+		pushPath   string
+		pushBody   []byte
 		pushStatus int
-		pushErr   error
+		pushErr    error
 	)
 
 	c, err := client.NewClient(client.ClientOptions{
@@ -74,7 +74,7 @@ func TestIntegration_Push_HandlerInvoked(t *testing.T) {
 	defer cancel()
 
 	var res client.Response
-	err = c.Do(ctx, &client.Request{Method: "GET", Path: "/", WantBody: true}, &res)
+	err = c.Do(ctx, &client.Request{Method: "GET", Path: "/", BodyMode: client.BodyBuffer}, &res)
 	if err != nil {
 		t.Fatalf("Do: %v", err)
 	}
@@ -206,7 +206,7 @@ func TestIntegration_Push_HandlerReceivesNon2xx(t *testing.T) {
 	defer cancel()
 
 	var res client.Response
-	if err := c.Do(ctx, &client.Request{Method: "GET", Path: "/", WantBody: true}, &res); err != nil {
+	if err := c.Do(ctx, &client.Request{Method: "GET", Path: "/", BodyMode: client.BodyBuffer}, &res); err != nil {
 		t.Fatalf("Do: %v", err)
 	}
 	if res.Status != 200 {
@@ -293,7 +293,7 @@ func TestIntegration_Push_MultipleConcurrent(t *testing.T) {
 	defer cancel()
 
 	var res client.Response
-	if err := c.Do(ctx, &client.Request{Method: "GET", Path: "/", WantBody: true}, &res); err != nil {
+	if err := c.Do(ctx, &client.Request{Method: "GET", Path: "/", BodyMode: client.BodyBuffer}, &res); err != nil {
 		t.Fatalf("Do: %v", err)
 	}
 	if res.Status != 200 {

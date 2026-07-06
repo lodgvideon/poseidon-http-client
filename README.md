@@ -75,8 +75,8 @@ See [CHANGELOG.md](CHANGELOG.md) for details. See
   down from 49 (−33%).
 - **D.2 — request/response body streaming** *(released)*:
   `Request.ContentLength int64` emits `content-length` header;
-  `Request.StreamBody bool` + `Response.BodyReader io.ReadCloser` stream
-  response bodies without buffering (caller drains + `Close()`);
+  `Request.BodyMode = client.BodyStream` + `Response.BodyReader io.ReadCloser`
+  stream response bodies without buffering (caller drains + `Close()`);
   `uploadBufPool` recycles upload read buffers; `Response.Reset()` closes
   `BodyReader` automatically. RFC 7540 §8.1 conformance test added.
 - **D.3 — H2C (plaintext HTTP/2)** *(released)*: `conn.PlaintextDialer`
@@ -140,7 +140,7 @@ func get(ctx context.Context, addr string) error {
 	if err := c.Do(ctx, &client.Request{
 		Method:   "GET",
 		Path:     "/",
-		WantBody: true,
+		BodyMode: client.BodyBuffer,
 	}, &res); err != nil {
 		return err
 	}
@@ -186,7 +186,7 @@ func poolGet(ctx context.Context, addr string) error {
 	if err := c.Do(ctx, &client.Request{
 		Method:   "GET",
 		Path:     "/",
-		WantBody: true,
+		BodyMode: client.BodyBuffer,
 	}, &res); err != nil {
 		return err
 	}

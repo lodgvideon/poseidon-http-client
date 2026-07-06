@@ -120,7 +120,7 @@ func TestIntegration_Client_POST_EchoBody(t *testing.T) {
 	err := c.Do(ctx, &client.Request{
 		Method: "POST", Path: "/echo",
 		Body:     want,
-		WantBody: true,
+		BodyMode: client.BodyBuffer,
 	}, &res)
 	if err != nil {
 		t.Fatalf("Do: %v", err)
@@ -148,7 +148,7 @@ func TestIntegration_Client_POST_LargeBody_ChunkedUpload(t *testing.T) {
 	err := c.Do(ctx, &client.Request{
 		Method: "POST", Path: "/echo",
 		BodyReader: bytes.NewReader(want),
-		WantBody:   true,
+		BodyMode:   client.BodyBuffer,
 	}, &res)
 	if err != nil {
 		t.Fatalf("Do: %v", err)
@@ -465,7 +465,7 @@ func TestDoStream_SRReuse(t *testing.T) {
 	}
 }
 
-func TestIntegration_Client_StreamBody_Small(t *testing.T) {
+func TestIntegration_Client_BodyStream_Small(t *testing.T) {
 	want := []byte("hello stream")
 	_, addr := newTLSH2Server(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(200)
@@ -477,7 +477,7 @@ func TestIntegration_Client_StreamBody_Small(t *testing.T) {
 	defer cancel()
 
 	var res client.Response
-	err := c.Do(ctx, &client.Request{Method: "GET", Path: "/", StreamBody: true}, &res)
+	err := c.Do(ctx, &client.Request{Method: "GET", Path: "/", BodyMode: client.BodyStream}, &res)
 	if err != nil {
 		t.Fatalf("Do: %v", err)
 	}
@@ -499,7 +499,7 @@ func TestIntegration_Client_StreamBody_Small(t *testing.T) {
 	}
 }
 
-func TestIntegration_Client_StreamBody_Large(t *testing.T) {
+func TestIntegration_Client_BodyStream_Large(t *testing.T) {
 	want := bytes.Repeat([]byte("x"), 1<<20) // 1 MiB
 	_, addr := newTLSH2Server(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(200)
@@ -524,7 +524,7 @@ func TestIntegration_Client_StreamBody_Large(t *testing.T) {
 	defer cancel()
 
 	var res client.Response
-	if err := c.Do(ctx, &client.Request{Method: "GET", Path: "/", StreamBody: true}, &res); err != nil {
+	if err := c.Do(ctx, &client.Request{Method: "GET", Path: "/", BodyMode: client.BodyStream}, &res); err != nil {
 		t.Fatalf("Do: %v", err)
 	}
 	n, cerr := io.Copy(io.Discard, res.BodyReader)
@@ -539,7 +539,7 @@ func TestIntegration_Client_StreamBody_Large(t *testing.T) {
 	}
 }
 
-func TestIntegration_Client_StreamBody_CloseEarly(t *testing.T) {
+func TestIntegration_Client_BodyStream_CloseEarly(t *testing.T) {
 	_, addr := newTLSH2Server(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(200)
 		_, _ = w.Write(bytes.Repeat([]byte("z"), 64*1024))
@@ -550,7 +550,7 @@ func TestIntegration_Client_StreamBody_CloseEarly(t *testing.T) {
 	defer cancel()
 
 	var res client.Response
-	err := c.Do(ctx, &client.Request{Method: "GET", Path: "/", StreamBody: true}, &res)
+	err := c.Do(ctx, &client.Request{Method: "GET", Path: "/", BodyMode: client.BodyStream}, &res)
 	if err != nil {
 		t.Fatalf("Do: %v", err)
 	}
@@ -563,7 +563,7 @@ func TestIntegration_Client_StreamBody_CloseEarly(t *testing.T) {
 	}
 }
 
-func TestIntegration_Client_StreamBody_ResetForgot(t *testing.T) {
+func TestIntegration_Client_BodyStream_ResetForgot(t *testing.T) {
 	_, addr := newTLSH2Server(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(200)
 		_, _ = w.Write([]byte("abc"))
@@ -574,7 +574,7 @@ func TestIntegration_Client_StreamBody_ResetForgot(t *testing.T) {
 	defer cancel()
 
 	var res client.Response
-	err := doWithRetry(t, c, ctx, &client.Request{Method: "GET", Path: "/", StreamBody: true}, &res)
+	err := doWithRetry(t, c, ctx, &client.Request{Method: "GET", Path: "/", BodyMode: client.BodyStream}, &res)
 	if err != nil {
 		t.Fatalf("Do: %v", err)
 	}
@@ -646,7 +646,7 @@ func TestIntegration_Client_H2C_Do(t *testing.T) {
 	t.Cleanup(func() { _ = c.Close() })
 
 	var res client.Response
-	err = c.Do(ctx, &client.Request{Method: "GET", Path: "/", WantBody: true}, &res)
+	err = c.Do(ctx, &client.Request{Method: "GET", Path: "/", BodyMode: client.BodyBuffer}, &res)
 	if err != nil {
 		t.Fatalf("Do: %v", err)
 	}

@@ -113,7 +113,7 @@ func TestPriority_ExclusiveWithDep(t *testing.T) {
 		Priority: &frame.Priority{
 			StreamDep: 0,    // root (no parent)
 			Exclusive: true, // would push out siblings if there were any
-			Weight:    255, // max uint8 weight
+			Weight:    255,  // max uint8 weight
 		},
 	}, &resp); err != nil {
 		t.Fatalf("Do: %v", err)

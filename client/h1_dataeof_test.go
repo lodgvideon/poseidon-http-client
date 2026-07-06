@@ -52,7 +52,7 @@ func TestH1_ContentLength_DataEOFCoalesced(t *testing.T) {
 
 	var resp client.Response
 	resp.Reset()
-	derr := c.Do(ctx, &client.Request{Method: "GET", Path: "/", WantBody: true}, &resp)
+	derr := c.Do(ctx, &client.Request{Method: "GET", Path: "/", BodyMode: client.BodyBuffer}, &resp)
 
 	if !mc.eofRidden() {
 		t.Fatalf("test premise not exercised: server did not deliver final bytes coalesced with io.EOF")

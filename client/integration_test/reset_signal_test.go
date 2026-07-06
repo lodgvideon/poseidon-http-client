@@ -44,7 +44,7 @@ func TestIT_ResetSignal_OverflowNoHang(t *testing.T) {
 	err = c.Do(ctx, &client.Request{
 		Method:   "GET",
 		Path:     "/large?bytes=262144", // 256 KB — overflows buffer=1
-		WantBody: true,
+		BodyMode: client.BodyBuffer,
 	}, &resp)
 	elapsed := time.Since(start)
 

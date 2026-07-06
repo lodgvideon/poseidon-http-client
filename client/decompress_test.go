@@ -52,7 +52,7 @@ func TestDecompress_Gzip_Do(t *testing.T) {
 	if err := c.Do(context.Background(), &Request{
 		Method:   "GET",
 		Path:     "/",
-		WantBody: true,
+		BodyMode: BodyBuffer,
 	}, &resp); err != nil {
 		t.Fatalf("Do: %v", err)
 	}
@@ -83,7 +83,7 @@ func TestDecompress_Deflate_Do(t *testing.T) {
 	if err := c.Do(context.Background(), &Request{
 		Method:   "GET",
 		Path:     "/",
-		WantBody: true,
+		BodyMode: BodyBuffer,
 	}, &resp); err != nil {
 		t.Fatalf("Do: %v", err)
 	}
@@ -105,7 +105,7 @@ func TestDecompress_Disabled(t *testing.T) {
 	if err := c.Do(context.Background(), &Request{
 		Method:               "GET",
 		Path:                 "/",
-		WantBody:             true,
+		BodyMode:             BodyBuffer,
 		DisableDecompression: true,
 	}, &resp); err != nil {
 		t.Fatalf("Do: %v", err)
@@ -128,7 +128,7 @@ func TestDecompress_Identity_NoEncoding(t *testing.T) {
 	if err := c.Do(context.Background(), &Request{
 		Method:   "GET",
 		Path:     "/",
-		WantBody: true,
+		BodyMode: BodyBuffer,
 	}, &resp); err != nil {
 		t.Fatalf("Do: %v", err)
 	}
@@ -138,7 +138,7 @@ func TestDecompress_Identity_NoEncoding(t *testing.T) {
 	}
 }
 
-func TestDecompress_StreamBody_Gzip(t *testing.T) {
+func TestDecompress_BodyStream_Gzip(t *testing.T) {
 	raw := bytes.Repeat([]byte("stream-gzip "), 200) // 2400 bytes
 	var gzBuf bytes.Buffer
 	gw := gzip.NewWriter(&gzBuf)
@@ -154,10 +154,9 @@ func TestDecompress_StreamBody_Gzip(t *testing.T) {
 
 	var resp Response
 	if err := c.Do(context.Background(), &Request{
-		Method:     "GET",
-		Path:       "/",
-		WantBody:   true,
-		StreamBody: true,
+		Method:   "GET",
+		Path:     "/",
+		BodyMode: BodyStream,
 	}, &resp); err != nil {
 		t.Fatalf("Do: %v", err)
 	}
@@ -185,7 +184,7 @@ func TestDecompress_AcceptEncodingSent(t *testing.T) {
 	_ = c.Do(context.Background(), &Request{
 		Method:   "GET",
 		Path:     "/",
-		WantBody: true,
+		BodyMode: BodyBuffer,
 	}, &resp)
 
 	if gotAcceptEncoding != "gzip" {
@@ -206,7 +205,7 @@ func TestDecompress_CustomAcceptEncodingPreserved(t *testing.T) {
 	_ = c.Do(context.Background(), &Request{
 		Method:   "GET",
 		Path:     "/",
-		WantBody: true,
+		BodyMode: BodyBuffer,
 		Headers: []conn.HeaderField{
 			{Name: []byte("accept-encoding"), Value: []byte("br, gzip;q=0.8")},
 		},

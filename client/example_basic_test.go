@@ -26,7 +26,7 @@ func ExampleClient_Do() {
 	defer func() { _ = c.Close() }()
 
 	ctx := context.Background()
-	req := &client.Request{Method: "GET", Path: "/v1/health", WantBody: true}
+	req := &client.Request{Method: "GET", Path: "/v1/health", BodyMode: client.BodyBuffer}
 
 	// Allocate the Response once and Reset() it before every reuse so the
 	// backing Headers/Body arrays are recycled instead of reallocated.
@@ -139,7 +139,7 @@ func ExampleH() {
 		Method:   "GET",
 		Path:     "/v1/things",
 		Headers:  headers,
-		WantBody: true,
+		BodyMode: client.BodyBuffer,
 	}
 
 	ctx := context.Background()

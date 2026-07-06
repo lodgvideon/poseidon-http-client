@@ -167,7 +167,7 @@ func TestManagedPool_AllSubPoolsFail_LastErrReturned(t *testing.T) {
 	addr := client.Address{Host: "127.0.0.1", Port: 1} // port 1 always refused
 	r := client.StaticResolver(addr)
 	c, err := client.NewClient(client.ClientOptions{
-		Resolver: r,
+		Resolver:  r,
 		Transport: client.TransportManaged,
 		ConnOpts: conn.ConnOptions{
 			Dialer: &conn.TLSDialer{Config: &tls.Config{InsecureSkipVerify: true}},
@@ -238,7 +238,7 @@ func TestDNSResolver_Resolve_AllFilteredReturnsErrNoAddresses(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// body.go: responseBodyReader.Read — error and reset paths via StreamBody
+// body.go: responseBodyReader.Read — error and reset paths via BodyStream
 // ---------------------------------------------------------------------------
 
 func TestResponseBodyReader_Read_EventReset(t *testing.T) {
@@ -261,14 +261,14 @@ func TestResponseBodyReader_Read_EventReset(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	var resp client.Response
-	err := c.Do(ctx, &client.Request{Method: "GET", Path: "/", StreamBody: true}, &resp)
+	err := c.Do(ctx, &client.Request{Method: "GET", Path: "/", BodyMode: client.BodyStream}, &resp)
 	if err != nil {
 		// It is acceptable to get an error on the initial headers path too.
 		t.Logf("Do returned error on RST test: %v", err)
 		return
 	}
 	if resp.BodyReader == nil {
-		t.Fatal("expected BodyReader on StreamBody request")
+		t.Fatal("expected BodyReader on BodyStream request")
 	}
 	// Reading must eventually return an error (RST or io.EOF).
 	buf := make([]byte, 64)
@@ -292,7 +292,7 @@ func TestResponseBodyReader_Read_BodyBufferDrain(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	var resp client.Response
-	err := c.Do(ctx, &client.Request{Method: "GET", Path: "/", StreamBody: true}, &resp)
+	err := c.Do(ctx, &client.Request{Method: "GET", Path: "/", BodyMode: client.BodyStream}, &resp)
 	if err != nil {
 		t.Fatalf("Do: %v", err)
 	}
@@ -846,7 +846,7 @@ func TestStreamResponse_Recv_AfterDrained(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// client.go: do() StreamBody path where initial Recv returns unexpected event.
+// client.go: do() BodyStream path where initial Recv returns unexpected event.
 // This is hard to trigger against httptest, so cover the adjacent code path
 // where drainResponse processes EventTrailers.
 // ---------------------------------------------------------------------------
@@ -867,7 +867,7 @@ func TestClient_Do_DrainResponse_WithTrailers(t *testing.T) {
 	err := c.Do(ctx, &client.Request{
 		Method:       "GET",
 		Path:         "/",
-		WantBody:     true,
+		BodyMode:     client.BodyBuffer,
 		WantTrailers: true,
 	}, &resp)
 	if err != nil {
@@ -900,7 +900,7 @@ func TestPool_MapAcquireErr_AcquireTimeout(t *testing.T) {
 		Pool: &client.PoolOptions{
 			MaxConnsPerHost:   1,
 			MaxStreamsPerConn: 1,
-			AcquireTimeout:   1 * time.Millisecond,
+			AcquireTimeout:    1 * time.Millisecond,
 		},
 	})
 	if err != nil {
@@ -1010,10 +1010,10 @@ func TestSingleConn_Do_AfterClose_ErrClosed(t *testing.T) {
 
 // ---------------------------------------------------------------------------
 // body.go: Read — EventReset path via RST_STREAM after initial HEADERS
-// using StreamBody=true so we get a BodyReader.
+// using BodyStream=true so we get a BodyReader.
 // ---------------------------------------------------------------------------
 
-func TestResponseBodyReader_Read_EventReset_ViaStreamBody(t *testing.T) {
+func TestResponseBodyReader_Read_EventReset_ViaBodyStream(t *testing.T) {
 	t.Parallel()
 	_, addr := newTLSH2Server(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("content-type", "text/plain")
@@ -1034,7 +1034,7 @@ func TestResponseBodyReader_Read_EventReset_ViaStreamBody(t *testing.T) {
 	defer cancel()
 
 	var resp client.Response
-	err := c.Do(ctx, &client.Request{Method: "GET", Path: "/", StreamBody: true}, &resp)
+	err := c.Do(ctx, &client.Request{Method: "GET", Path: "/", BodyMode: client.BodyStream}, &resp)
 	if err != nil {
 		// doStream may fail if the hijack races with header parsing.
 		t.Logf("DoStream returned err (expected): %v", err)
@@ -1068,7 +1068,7 @@ func TestResponseBodyReader_Read_LargeBody_BufReuse(t *testing.T) {
 	defer cancel()
 
 	var resp client.Response
-	err := c.Do(ctx, &client.Request{Method: "GET", Path: "/", StreamBody: true}, &resp)
+	err := c.Do(ctx, &client.Request{Method: "GET", Path: "/", BodyMode: client.BodyStream}, &resp)
 	if err != nil {
 		t.Fatalf("Do: %v", err)
 	}
@@ -1093,11 +1093,11 @@ func TestResponseBodyReader_Read_LargeBody_BufReuse(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// client.go: do() — StreamBody path with small body (exercises the
+// client.go: do() — BodyStream path with small body (exercises the
 // full streaming body path via BodyReader).
 // ---------------------------------------------------------------------------
 
-func TestClient_Do_StreamBody_SmallBody(t *testing.T) {
+func TestClient_Do_BodyStream_SmallBody(t *testing.T) {
 	t.Parallel()
 	want := []byte("hello")
 	_, addr := newTLSH2Server(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -1109,9 +1109,9 @@ func TestClient_Do_StreamBody_SmallBody(t *testing.T) {
 	defer cancel()
 
 	var resp client.Response
-	err := c.Do(ctx, &client.Request{Method: "GET", Path: "/", StreamBody: true}, &resp)
+	err := c.Do(ctx, &client.Request{Method: "GET", Path: "/", BodyMode: client.BodyStream}, &resp)
 	if err != nil {
-		t.Fatalf("Do with StreamBody: %v", err)
+		t.Fatalf("Do with BodyStream: %v", err)
 	}
 	if resp.BodyReader == nil {
 		t.Fatal("BodyReader is nil")
@@ -1148,7 +1148,7 @@ func TestResponseBodyReader_Read_PartialRead(t *testing.T) {
 	defer cancel()
 
 	var resp client.Response
-	if err := c.Do(ctx, &client.Request{Method: "GET", Path: "/", StreamBody: true}, &resp); err != nil {
+	if err := c.Do(ctx, &client.Request{Method: "GET", Path: "/", BodyMode: client.BodyStream}, &resp); err != nil {
 		t.Fatalf("Do: %v", err)
 	}
 	if resp.BodyReader == nil {
@@ -1480,7 +1480,7 @@ func TestManagedPool_Acquire_NonDialOnlyErr_ImmediateReturn(t *testing.T) {
 		Pool: &client.PoolOptions{
 			MaxConnsPerHost:   1,
 			MaxStreamsPerConn: 1,
-			AcquireTimeout:   1 * time.Millisecond, // very short → ErrAcquireTimeout
+			AcquireTimeout:    1 * time.Millisecond, // very short → ErrAcquireTimeout
 		},
 	})
 	if err != nil {
@@ -1700,23 +1700,23 @@ func TestManagedTransport_Warmup(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// client.go: do() — StreamBody with nil resp returns error immediately
+// client.go: do() — BodyStream with nil resp returns error immediately
 // ---------------------------------------------------------------------------
 
-// TestClient_Do_StreamBody_NilResp covers the "StreamBody requires a
+// TestClient_Do_BodyStream_NilResp covers the "BodyStream requires a
 // non-nil *Response" guard inside do() (conn.go:do line 426).
-func TestClient_Do_StreamBody_NilResp(t *testing.T) {
+func TestClient_Do_BodyStream_NilResp(t *testing.T) {
 	_, addr := newTLSH2Server(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(200)
 	}))
 	c := covClientFor(t, addr)
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	err := c.Do(ctx, &client.Request{Method: "GET", Path: "/", StreamBody: true}, nil)
+	err := c.Do(ctx, &client.Request{Method: "GET", Path: "/", BodyMode: client.BodyStream}, nil)
 	if err == nil {
-		t.Fatal("expected error for StreamBody with nil *Response")
+		t.Fatal("expected error for BodyStream with nil *Response")
 	}
-	if !strings.Contains(err.Error(), "StreamBody") {
+	if !strings.Contains(err.Error(), "BodyStream") {
 		t.Fatalf("unexpected error: %v", err)
 	}
 }
@@ -1742,7 +1742,7 @@ func TestClient_Do_GzipResponse(t *testing.T) {
 	err := c.Do(ctx, &client.Request{
 		Method:   "GET",
 		Path:     "/",
-		WantBody: true,
+		BodyMode: client.BodyBuffer,
 	}, &resp)
 	if err != nil {
 		t.Fatalf("Do: %v", err)
@@ -1752,8 +1752,8 @@ func TestClient_Do_GzipResponse(t *testing.T) {
 	}
 }
 
-// TestClient_Do_GzipStreamBody covers the StreamBody decompression path.
-func TestClient_Do_GzipStreamBody(t *testing.T) {
+// TestClient_Do_GzipBodyStream covers the BodyStream decompression path.
+func TestClient_Do_GzipBodyStream(t *testing.T) {
 	_, addr := newTLSH2Server(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Encoding", "gzip")
 		w.WriteHeader(200)
@@ -1766,12 +1766,12 @@ func TestClient_Do_GzipStreamBody(t *testing.T) {
 	defer cancel()
 	var resp client.Response
 	err := c.Do(ctx, &client.Request{
-		Method:     "GET",
-		Path:       "/",
-		StreamBody: true,
+		Method:   "GET",
+		Path:     "/",
+		BodyMode: client.BodyStream,
 	}, &resp)
 	if err != nil {
-		t.Fatalf("Do StreamBody gzip: %v", err)
+		t.Fatalf("Do BodyStream gzip: %v", err)
 	}
 	if resp.BodyReader == nil {
 		t.Fatal("expected BodyReader")
@@ -1800,7 +1800,7 @@ func TestClient_Do_DeflateResponse(t *testing.T) {
 	err := c.Do(ctx, &client.Request{
 		Method:   "GET",
 		Path:     "/",
-		WantBody: true,
+		BodyMode: client.BodyBuffer,
 	}, &resp)
 	if err != nil {
 		t.Fatalf("Do deflate: %v", err)
@@ -1824,7 +1824,7 @@ func TestDecompressingReader_Read_AfterClose(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	var resp client.Response
-	if err := c.Do(ctx, &client.Request{Method: "GET", Path: "/", StreamBody: true}, &resp); err != nil {
+	if err := c.Do(ctx, &client.Request{Method: "GET", Path: "/", BodyMode: client.BodyStream}, &resp); err != nil {
 		t.Fatalf("Do: %v", err)
 	}
 	if resp.BodyReader == nil {
@@ -1839,9 +1839,9 @@ func TestDecompressingReader_Read_AfterClose(t *testing.T) {
 	}
 }
 
-// TestClient_Do_StreamBody_RecvTimeout covers the s.Recv() error path in do()
+// TestClient_Do_BodyStream_RecvTimeout covers the s.Recv() error path in do()
 // when the context times out before the server sends response headers.
-func TestClient_Do_StreamBody_RecvTimeout(t *testing.T) {
+func TestClient_Do_BodyStream_RecvTimeout(t *testing.T) {
 	_, addr := newTLSH2Server(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		// Never send headers — forces client context to time out.
 		time.Sleep(10 * time.Second)
@@ -1851,17 +1851,17 @@ func TestClient_Do_StreamBody_RecvTimeout(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 80*time.Millisecond)
 	defer cancel()
 	var resp client.Response
-	err := c.Do(ctx, &client.Request{Method: "GET", Path: "/", StreamBody: true}, &resp)
+	err := c.Do(ctx, &client.Request{Method: "GET", Path: "/", BodyMode: client.BodyStream}, &resp)
 	if err == nil {
-		t.Fatal("expected timeout error from StreamBody with unresponsive server")
+		t.Fatal("expected timeout error from BodyStream with unresponsive server")
 	}
 	if !errors.Is(err, context.DeadlineExceeded) {
 		t.Logf("got %v (expected DeadlineExceeded; other timeout variants are acceptable)", err)
 	}
 }
 
-// TestClient_Do_DeflateStreamBody covers the EncodingDeflate path via StreamBody.
-func TestClient_Do_DeflateStreamBody(t *testing.T) {
+// TestClient_Do_DeflateBodyStream covers the EncodingDeflate path via BodyStream.
+func TestClient_Do_DeflateBodyStream(t *testing.T) {
 	_, addr := newTLSH2Server(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Encoding", "deflate")
 		w.WriteHeader(200)
@@ -1874,12 +1874,12 @@ func TestClient_Do_DeflateStreamBody(t *testing.T) {
 	defer cancel()
 	var resp client.Response
 	err := c.Do(ctx, &client.Request{
-		Method:     "GET",
-		Path:       "/",
-		StreamBody: true,
+		Method:   "GET",
+		Path:     "/",
+		BodyMode: client.BodyStream,
 	}, &resp)
 	if err != nil {
-		t.Fatalf("Do DeflateStreamBody: %v", err)
+		t.Fatalf("Do DeflateBodyStream: %v", err)
 	}
 	if resp.BodyReader == nil {
 		t.Fatal("expected BodyReader")

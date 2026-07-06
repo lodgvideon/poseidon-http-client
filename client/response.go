@@ -28,16 +28,16 @@ type Response struct {
 	Status int
 	// Headers is the regular response header fields (no pseudo-headers).
 	Headers []conn.HeaderField
-	// Body is nil unless Request.WantBody is true.
+	// Body is nil unless Request.BodyMode is BodyBuffer.
 	Body []byte
 	// Trailers is nil unless Request.WantTrailers is true and the peer
 	// sent a trailers frame.
 	Trailers []conn.HeaderField
 	// BytesReceived is the total DATA payload received, even when
-	// Request.WantBody was false.
+	// Request.BodyMode was BodyDiscard.
 	BytesReceived int64
 
-	// BodyReader is non-nil when the request had StreamBody=true.
+	// BodyReader is non-nil when the request had BodyMode=BodyStream.
 	// Caller reads body bytes then calls Close(). Trailers (if any) are
 	// written into Response.Trailers just before Close returns io.EOF.
 	// Reset() calls Close() automatically when BodyReader is non-nil.

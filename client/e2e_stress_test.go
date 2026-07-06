@@ -26,6 +26,7 @@ import (
 	"github.com/lodgvideon/poseidon-http-client/client"
 	"github.com/lodgvideon/poseidon-http-client/conn"
 )
+
 // ============================================================
 // STRESS TESTS: 10+ runs to prove iron-clad stability
 // ============================================================
@@ -72,7 +73,7 @@ func TestStress_Pool_50ConcurrentRequests(t *testing.T) {
 					Method:   "GET",
 					Path:     "/",
 					Headers:  ua(),
-					WantBody: true,
+					BodyMode: client.BodyBuffer,
 				}, &resp)
 				if err != nil {
 					fail.Add(1)
@@ -122,7 +123,7 @@ func TestStress_SingleConn_50Sequential(t *testing.T) {
 			Method:   "GET",
 			Path:     "/",
 			Headers:  ua(),
-			WantBody: true,
+			BodyMode: client.BodyBuffer,
 		}, &resp)
 		if err != nil {
 			t.Fatalf("request %d: %v", i, err)
@@ -145,7 +146,7 @@ func TestStress_SingleConn_50Sequential(t *testing.T) {
 	}
 }
 
-// ---------- Stress 3: Mixed Do + DoStream + StreamBody interleaved ----------
+// ---------- Stress 3: Mixed Do + DoStream + BodyStream interleaved ----------
 
 func TestStress_MixedAPI_30Requests(t *testing.T) {
 	c := e2eClient(t, "www.google.com")
@@ -161,7 +162,7 @@ func TestStress_MixedAPI_30Requests(t *testing.T) {
 		go func(idx int) {
 			switch idx % 3 {
 			case 0:
-				// Do with WantBody
+				// Do with BodyBuffer
 				resp, err := doGET(c, ctx, "/", true)
 				if err != nil {
 					errCh <- fmt.Errorf("[%d] Do: %w", idx, err)
@@ -174,31 +175,31 @@ func TestStress_MixedAPI_30Requests(t *testing.T) {
 				errCh <- nil
 
 			case 1:
-				// StreamBody — requires non-nil Response.
+				// BodyStream — requires non-nil Response.
 				var resp client.Response
 				err := c.Do(ctx, &client.Request{
-					Method:     "GET",
-					Path:       "/",
-					Headers:    ua(),
-					StreamBody: true,
+					Method:   "GET",
+					Path:     "/",
+					Headers:  ua(),
+					BodyMode: client.BodyStream,
 				}, &resp)
 				if err != nil {
-					errCh <- fmt.Errorf("[%d] StreamBody: %w", idx, err)
+					errCh <- fmt.Errorf("[%d] BodyStream: %w", idx, err)
 					return
 				}
 				if resp.BodyReader == nil {
-					errCh <- fmt.Errorf("[%d] StreamBody: BodyReader is nil", idx)
+					errCh <- fmt.Errorf("[%d] BodyStream: BodyReader is nil", idx)
 					return
 				}
 				// Drain the body.
 				n, err := io.Copy(io.Discard, resp.BodyReader)
 				resp.BodyReader.Close()
 				if err != nil {
-					errCh <- fmt.Errorf("[%d] StreamBody drain: %w (read %d)", idx, err, n)
+					errCh <- fmt.Errorf("[%d] BodyStream drain: %w (read %d)", idx, err, n)
 					return
 				}
 				if n == 0 {
-					errCh <- fmt.Errorf("[%d] StreamBody: drained 0 bytes", idx)
+					errCh <- fmt.Errorf("[%d] BodyStream: drained 0 bytes", idx)
 					return
 				}
 				errCh <- nil
@@ -250,9 +251,9 @@ func TestStress_MixedAPI_30Requests(t *testing.T) {
 	}
 }
 
-// ---------- Stress 4: StreamBody — read body via io.ReadAll ----------
+// ---------- Stress 4: BodyStream — read body via io.ReadAll ----------
 
-func TestStress_StreamBody_ReadAll(t *testing.T) {
+func TestStress_BodyStream_ReadAll(t *testing.T) {
 	c := e2iClient(t, "www.google.com")
 	defer c.Close()
 
@@ -261,16 +262,16 @@ func TestStress_StreamBody_ReadAll(t *testing.T) {
 
 	var resp client.Response
 	err := c.Do(ctx, &client.Request{
-		Method:     "GET",
-		Path:       "/",
-		Headers:    ua(),
-		StreamBody: true,
+		Method:   "GET",
+		Path:     "/",
+		Headers:  ua(),
+		BodyMode: client.BodyStream,
 	}, &resp)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if resp.BodyReader == nil {
-		t.Fatal("expected BodyReader to be set with StreamBody=true")
+		t.Fatal("expected BodyReader to be set with BodyStream=true")
 	}
 
 	body, err := io.ReadAll(resp.BodyReader)
@@ -283,7 +284,7 @@ func TestStress_StreamBody_ReadAll(t *testing.T) {
 	if len(body) == 0 {
 		t.Fatal("read 0 bytes from BodyReader")
 	}
-	t.Logf("✓ StreamBody ReadAll: %d bytes via io.ReadAll", len(body))
+	t.Logf("✓ BodyStream ReadAll: %d bytes via io.ReadAll", len(body))
 }
 
 // ---------- Stress 5: Rapid open/close cycles ----------
@@ -298,7 +299,7 @@ func TestStress_RapidOpenClose(t *testing.T) {
 			Method:   "GET",
 			Path:     "/",
 			Headers:  ua(),
-			WantBody: true,
+			BodyMode: client.BodyBuffer,
 		}, &resp)
 		cancel()
 		c.Close()
@@ -310,9 +311,9 @@ func TestStress_RapidOpenClose(t *testing.T) {
 	t.Log("✓ 5 rapid open/close cycles passed")
 }
 
-// ---------- Stress 6: 20 concurrent StreamBody reads ----------
+// ---------- Stress 6: 20 concurrent BodyStream reads ----------
 
-func TestStress_ConcurrentStreamBody(t *testing.T) {
+func TestStress_ConcurrentBodyStream(t *testing.T) {
 	c, err := client.NewClient(client.ClientOptions{
 		Addr: net.JoinHostPort("www.google.com", "443"),
 		ConnOpts: conn.ConnOptions{
@@ -344,10 +345,10 @@ func TestStress_ConcurrentStreamBody(t *testing.T) {
 		go func(idx int) {
 			var resp client.Response
 			err := c.Do(ctx, &client.Request{
-				Method:     "GET",
-				Path:       "/",
-				Headers:    ua(),
-				StreamBody: true,
+				Method:   "GET",
+				Path:     "/",
+				Headers:  ua(),
+				BodyMode: client.BodyStream,
 			}, &resp)
 			if err != nil {
 				errCh <- fmt.Errorf("[%d] Do: %w", idx, err)
@@ -371,7 +372,7 @@ func TestStress_ConcurrentStreamBody(t *testing.T) {
 	}
 
 	snap := c.MetricsSnapshot()
-	t.Logf("✓ concurrent StreamBody: n=%d fail=%d dials=%d succeeded=%d errored=%d",
+	t.Logf("✓ concurrent BodyStream: n=%d fail=%d dials=%d succeeded=%d errored=%d",
 		n, failCount, snap.Counters.DialsAttempted,
 		snap.Counters.RequestsSucceeded, snap.Counters.RequestsErrored)
 	if failCount > n/10 {
@@ -405,7 +406,7 @@ func TestStress_MetricsConsistency(t *testing.T) {
 			Method:   "GET",
 			Path:     "/",
 			Headers:  ua(),
-			WantBody: true,
+			BodyMode: client.BodyBuffer,
 		}, &resp)
 		if err != nil {
 			t.Fatalf("request %d: %v", i, err)
@@ -472,7 +473,7 @@ func TestStress_Pool_AllConnsUsed(t *testing.T) {
 				Method:   "GET",
 				Path:     "/",
 				Headers:  ua(),
-				WantBody: true,
+				BodyMode: client.BodyBuffer,
 			}, &resp)
 			if err == nil && resp.Status >= 200 && resp.Status <= 399 {
 				ok.Add(1)
@@ -510,7 +511,7 @@ func TestStress_BodyContentValidation(t *testing.T) {
 			Method:   "GET",
 			Path:     "/robots.txt",
 			Headers:  ua(),
-			WantBody: true,
+			BodyMode: client.BodyBuffer,
 		}, &resp)
 		if err != nil {
 			t.Fatalf("request %d: %v", i, err)
@@ -540,29 +541,29 @@ func TestStress_BodyContentValidation(t *testing.T) {
 	t.Logf("✓ body content: 5 requests, sizes=%v, contains 'User-agent'", sizes)
 }
 
-// ---------- Stress 11: StreamBody nil Response returns error ----------
+// ---------- Stress 11: BodyStream nil Response returns error ----------
 
-func TestStress_StreamBody_NilResponseError(t *testing.T) {
+func TestStress_BodyStream_NilResponseError(t *testing.T) {
 	c := e2iClient(t, "www.google.com")
 	defer c.Close()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	// StreamBody with nil Response should return an error, not panic.
+	// BodyStream with nil Response should return an error, not panic.
 	err := c.Do(ctx, &client.Request{
-		Method:     "GET",
-		Path:       "/",
-		Headers:    ua(),
-		StreamBody: true,
+		Method:   "GET",
+		Path:     "/",
+		Headers:  ua(),
+		BodyMode: client.BodyStream,
 	}, nil)
 	if err == nil {
-		t.Fatal("expected error when StreamBody=true with nil Response")
+		t.Fatal("expected error when BodyStream=true with nil Response")
 	}
-	t.Logf("✓ StreamBody nil Response: got expected error: %v", err)
+	t.Logf("✓ BodyStream nil Response: got expected error: %v", err)
 }
 
-// e2iClient creates a single-conn client that returns Response with StreamBody support.
+// e2iClient creates a single-conn client that returns Response with BodyStream support.
 func e2iClient(t *testing.T, host string) *client.Client {
 	t.Helper()
 	c, err := client.NewClient(client.ClientOptions{

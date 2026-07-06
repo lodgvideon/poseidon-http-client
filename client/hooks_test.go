@@ -309,10 +309,10 @@ func TestHooks_AllHooks_EndToEnd(t *testing.T) {
 		startN, completeN, dialN, closeN atomic.Int32
 	)
 	hooks := &client.Hooks{
-		OnRequestStart:    func(client.RequestStartEvent)    { startN.Add(1) },
+		OnRequestStart:    func(client.RequestStartEvent) { startN.Add(1) },
 		OnRequestComplete: func(client.RequestCompleteEvent) { completeN.Add(1) },
-		OnDial:            func(client.DialEvent)            { dialN.Add(1) },
-		OnConnClose:       func(client.ConnCloseEvent)       { closeN.Add(1) },
+		OnDial:            func(client.DialEvent) { dialN.Add(1) },
+		OnConnClose:       func(client.ConnCloseEvent) { closeN.Add(1) },
 	}
 
 	c, err := client.NewClient(client.ClientOptions{

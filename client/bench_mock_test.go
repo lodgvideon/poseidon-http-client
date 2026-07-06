@@ -99,8 +99,8 @@ func (p *mockH2Peer) serveConn(tc net.Conn) {
 
 // mockPeerHandler processes frames on the mock H2C peer.
 type mockPeerHandler struct {
-	fr           *frame.Framer
-	settingsSeen bool
+	fr            *frame.Framer
+	settingsSeen  bool
 	clientAckSeen bool
 	serving       bool
 	// pendingStreamID tracks a stream that received HEADERS without END_STREAM
@@ -150,7 +150,7 @@ func (h *mockPeerHandler) OnSettings(fh frame.FrameHeader, _ frame.SettingsParam
 }
 
 func (h *mockPeerHandler) OnPriority(frame.FrameHeader, frame.Priority) error { return nil }
-func (h *mockPeerHandler) OnRSTStream(frame.FrameHeader, frame.ErrCode) error  { return nil }
+func (h *mockPeerHandler) OnRSTStream(frame.FrameHeader, frame.ErrCode) error { return nil }
 func (h *mockPeerHandler) OnPushPromise(frame.FrameHeader, uint32, frame.HeaderBlock, uint8) error {
 	return nil
 }
@@ -163,10 +163,10 @@ func (h *mockPeerHandler) OnPing(fh frame.FrameHeader, data [8]byte) error {
 func (h *mockPeerHandler) OnGoAway(frame.FrameHeader, uint32, frame.ErrCode, []byte) error {
 	return nil
 }
-func (h *mockPeerHandler) OnWindowUpdate(frame.FrameHeader, uint32) error      { return nil }
+func (h *mockPeerHandler) OnWindowUpdate(frame.FrameHeader, uint32) error            { return nil }
 func (h *mockPeerHandler) OnContinuation(frame.FrameHeader, frame.HeaderBlock) error { return nil }
-func (h *mockPeerHandler) OnAltSvc(frame.FrameHeader, []frame.AltSvcEntry) error { return nil }
-func (h *mockPeerHandler) OnOrigin(frame.FrameHeader, []string) error                 { return nil }
+func (h *mockPeerHandler) OnAltSvc(frame.FrameHeader, []frame.AltSvcEntry) error     { return nil }
+func (h *mockPeerHandler) OnOrigin(frame.FrameHeader, []string) error                { return nil }
 
 var _ frame.Handler = (*mockPeerHandler)(nil)
 

@@ -129,7 +129,7 @@ func newDecompressingReader(enc ContentEncoding, src io.ReadCloser) (io.ReadClos
 }
 
 // decompressFully reads all decompressed bytes from src into dst.
-// Used by drainResponse for the non-streaming path (WantBody).
+// Used by drainResponse for the non-streaming path (BodyBuffer).
 func decompressFully(enc ContentEncoding, compressed []byte, maxBytes int64) ([]byte, error) {
 	if enc == EncodingIdentity || len(compressed) == 0 {
 		return compressed, nil
