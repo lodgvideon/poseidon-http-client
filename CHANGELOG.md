@@ -23,6 +23,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the discard default. The `GET`/`POST`/`NewRequest` helpers set `BodyBuffer`
   for you, so code using those is unaffected.
 
+### Docs
+
+- Retired `docs/USAGE.md` (superseded by `docs/CLIENT_GUIDE.md`, the single
+  canonical guide). It is now a redirect stub; README links to CLIENT_GUIDE.md.
+  Keeping one guide avoids the drift that left USAGE.md with stale examples.
+
 ## [v0.6.0] — 2026-06-23
 
 ### Added

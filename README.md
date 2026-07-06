@@ -108,7 +108,7 @@ See [CHANGELOG.md](CHANGELOG.md) for details. See
   `conn.FlexDialer` (offers `h2` + `http/1.1`) and permanently routes to H2
   or H1.1 based on the ALPN-negotiated protocol. The `protoStream` interface
   lets `Client.sendRequest` and `drainResponse` drive either protocol
-  without branching. See [docs/USAGE.md](docs/USAGE.md) for examples.
+  without branching. See [docs/CLIENT_GUIDE.md](docs/CLIENT_GUIDE.md) for the full guide and examples.
 
 ## Quick start
 
