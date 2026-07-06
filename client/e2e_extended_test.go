@@ -19,13 +19,13 @@ import (
 )
 
 // ============================================================
-// Extended E2E tests: StreamBody, DoStream, Pool, cross-server,
+// Extended E2E tests: BodyStream, DoStream, Pool, cross-server,
 // POST, context cancel, concurrent mixed workloads.
 // ============================================================
 
-// ---------- StreamBody (io.ReadCloser) ----------
+// ---------- BodyStream (io.ReadCloser) ----------
 
-func TestE2E_Google_StreamBody_GET(t *testing.T) {
+func TestE2E_Google_BodyStream_GET(t *testing.T) {
 	t.Skip("E2E test against external service — disabled in local/CI environments without network access")
 	c := e2eClient(t, "www.google.com")
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
@@ -33,24 +33,24 @@ func TestE2E_Google_StreamBody_GET(t *testing.T) {
 
 	var resp client.Response
 	err := c.Do(ctx, &client.Request{
-		Method:     "GET",
-		Path:       "/",
-		Headers:    ua(),
-		StreamBody: true,
+		Method:   "GET",
+		Path:     "/",
+		Headers:  ua(),
+		BodyMode: client.BodyStream,
 	}, &resp)
 	if err != nil {
-		t.Fatalf("Do(StreamBody): %v", err)
+		t.Fatalf("Do(BodyStream): %v", err)
 	}
 
 	if resp.Status < 200 || resp.Status > 399 {
 		t.Fatalf("expected 200, got %d", resp.Status)
 	}
 	if resp.BodyReader == nil {
-		t.Fatal("expected BodyReader to be non-nil for StreamBody=true")
+		t.Fatal("expected BodyReader to be non-nil for BodyMode=BodyStream")
 	}
-	// resp.Body should be empty (StreamBody bypasses buffered body).
+	// resp.Body should be empty (BodyStream bypasses buffered body).
 	if len(resp.Body) != 0 {
-		t.Fatalf("expected empty resp.Body for StreamBody, got %d bytes", len(resp.Body))
+		t.Fatalf("expected empty resp.Body for BodyStream, got %d bytes", len(resp.Body))
 	}
 
 	// Read body via io.ReadCloser.
@@ -71,10 +71,10 @@ func TestE2E_Google_StreamBody_GET(t *testing.T) {
 		t.Logf("second Close: %v (ok)", err)
 	}
 
-	t.Logf("✓ StreamBody: streamed %d bytes via io.ReadCloser", n)
+	t.Logf("✓ BodyStream: streamed %d bytes via io.ReadCloser", n)
 }
 
-func TestE2E_Google_StreamBody_Concurrent(t *testing.T) {
+func TestE2E_Google_BodyStream_Concurrent(t *testing.T) {
 	t.Skip("E2E test against external service — disabled in local/CI environments without network access")
 	c := e2eClient(t, "www.google.com")
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -88,10 +88,10 @@ func TestE2E_Google_StreamBody_Concurrent(t *testing.T) {
 		go func() {
 			var resp client.Response
 			err := c.Do(ctx, &client.Request{
-				Method:     "GET",
-				Path:       "/",
-				Headers:    ua(),
-				StreamBody: true,
+				Method:   "GET",
+				Path:     "/",
+				Headers:  ua(),
+				BodyMode: client.BodyStream,
 			}, &resp)
 			if err != nil {
 				errCh <- fmt.Errorf("Do: %w", err)
@@ -120,7 +120,7 @@ func TestE2E_Google_StreamBody_Concurrent(t *testing.T) {
 			t.Errorf("goroutine %d: %v", i, err)
 		}
 	}
-	t.Logf("✓ %d concurrent StreamBody reads: total=%d bytes", n, atomic.LoadInt64(&totalBytes))
+	t.Logf("✓ %d concurrent BodyStream reads: total=%d bytes", n, atomic.LoadInt64(&totalBytes))
 }
 
 // ---------- DoStream (StreamResponse.Recv) ----------
@@ -411,7 +411,7 @@ func TestE2E_GitHub_API_JSON(t *testing.T) {
 			{Name: []byte("user-agent"), Value: []byte("poseidon-e2e-test/1.0")},
 			{Name: []byte("accept"), Value: []byte("application/vnd.github.v3+json")},
 		},
-		WantBody: true,
+		BodyMode: client.BodyBuffer,
 	}, &resp)
 	if err != nil {
 		t.Fatalf("Do: %v", err)
@@ -436,7 +436,7 @@ func TestE2E_GitHub_API_JSON(t *testing.T) {
 	t.Logf("✓ api.github.com: status=%d, body=%d bytes, headers=%d", resp.Status, len(resp.Body), len(resp.Headers))
 }
 
-func TestE2E_GitHub_API_StreamBody(t *testing.T) {
+func TestE2E_GitHub_API_BodyStream(t *testing.T) {
 	t.Skip("E2E test against external service — disabled in local/CI environments without network access")
 	c := e2eClient(t, "api.github.com")
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
@@ -450,10 +450,10 @@ func TestE2E_GitHub_API_StreamBody(t *testing.T) {
 			{Name: []byte("user-agent"), Value: []byte("poseidon-e2e-test/1.0")},
 			{Name: []byte("accept"), Value: []byte("application/vnd.github.v3+json")},
 		},
-		StreamBody: true,
+		BodyMode: client.BodyStream,
 	}, &resp)
 	if err != nil {
-		t.Fatalf("Do(StreamBody): %v", err)
+		t.Fatalf("Do(BodyStream): %v", err)
 	}
 	if resp.BodyReader == nil {
 		t.Fatal("expected BodyReader")
@@ -468,7 +468,7 @@ func TestE2E_GitHub_API_StreamBody(t *testing.T) {
 	if !bytes.Contains(buf.Bytes(), []byte("current_user_url")) {
 		t.Fatal("streamed GitHub response missing 'current_user_url'")
 	}
-	t.Logf("✓ GitHub StreamBody: %d bytes streamed", n)
+	t.Logf("✓ GitHub BodyStream: %d bytes streamed", n)
 }
 
 // ---------- POST with body ----------
@@ -486,7 +486,7 @@ func TestE2E_Google_POST_WithBody(t *testing.T) {
 		Path:     "/",
 		Headers:  ua(),
 		Body:     body,
-		WantBody: true,
+		BodyMode: client.BodyBuffer,
 	}, &resp)
 	if err != nil {
 		t.Fatalf("Do(POST): %v", err)
@@ -538,9 +538,9 @@ func TestE2E_Google_ContextTimeout(t *testing.T) {
 	t.Logf("✓ context timeout: %v", err)
 }
 
-// ---------- Large body via StreamBody (chunked read) ----------
+// ---------- Large body via BodyStream (chunked read) ----------
 
-func TestE2E_Google_StreamBody_LargeBody(t *testing.T) {
+func TestE2E_Google_BodyStream_LargeBody(t *testing.T) {
 	t.Skip("E2E test against external service — disabled in local/CI environments without network access")
 	c := e2eClient(t, "www.google.com")
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
@@ -548,10 +548,10 @@ func TestE2E_Google_StreamBody_LargeBody(t *testing.T) {
 
 	var resp client.Response
 	err := c.Do(ctx, &client.Request{
-		Method:     "GET",
-		Path:       "/",
-		Headers:    ua(),
-		StreamBody: true,
+		Method:   "GET",
+		Path:     "/",
+		Headers:  ua(),
+		BodyMode: client.BodyStream,
 	}, &resp)
 	if err != nil {
 		t.Fatalf("Do: %v", err)
@@ -576,9 +576,9 @@ func TestE2E_Google_StreamBody_LargeBody(t *testing.T) {
 	resp.BodyReader.Close()
 
 	if total == 0 {
-		t.Fatal("expected non-zero body via StreamBody")
+		t.Fatal("expected non-zero body via BodyStream")
 	}
-	t.Logf("✓ StreamBody chunked read: %d bytes (512-byte reads)", total)
+	t.Logf("✓ BodyStream chunked read: %d bytes (512-byte reads)", total)
 }
 
 // ---------- Cross-server: nghttp2.org (reference HTTP/2) ----------
@@ -650,7 +650,7 @@ func TestE2E_Google_ConnStats(t *testing.T) {
 		t.Fatalf("Do: %v", err)
 	}
 
-	// BytesReceived should match body length (WantBody=true → body buffered).
+	// BytesReceived should match body length (BodyMode=BodyBuffer → body buffered).
 	if resp.BytesReceived == 0 {
 		t.Fatal("expected BytesReceived > 0")
 	}
@@ -714,7 +714,7 @@ func TestE2E_Google_ResponseReuse(t *testing.T) {
 			Method:   "GET",
 			Path:     "/",
 			Headers:  ua(),
-			WantBody: true,
+			BodyMode: client.BodyBuffer,
 		}, &resp)
 		if err != nil {
 			t.Fatalf("request %d: %v", i, err)
@@ -738,9 +738,9 @@ func TestE2E_Google_VariousPaths(t *testing.T) {
 	defer cancel()
 
 	paths := []struct {
-		path       string
-		wantMin    int
-		wantMax    int
+		path    string
+		wantMin int
+		wantMax int
 	}{
 		{"/", 200, 399},
 		{"/search?q=poseidon", 200, 399},

@@ -228,12 +228,16 @@ func doGET(t *testing.T, c *client.Client, path string, wantBody bool) (int, []b
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 
+	mode := client.BodyDiscard
+	if wantBody {
+		mode = client.BodyBuffer
+	}
 	var resp client.Response
 	resp.Reset()
 	err := c.Do(ctx, &client.Request{
 		Method:   "GET",
 		Path:     path,
-		WantBody: wantBody,
+		BodyMode: mode,
 	}, &resp)
 	if err != nil {
 		t.Fatalf("Do GET %s: %v", path, err)

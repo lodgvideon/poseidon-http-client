@@ -10,11 +10,11 @@ func TestBuildHeaders_ProtocolExtendedConnect(t *testing.T) {
 	t.Parallel()
 
 	req := &Request{
-		Method:   "CONNECT",
-		Scheme:   "https",
+		Method:    "CONNECT",
+		Scheme:    "https",
 		Authority: "example.com",
-		Path:     "/chat",
-		Protocol: "websocket",
+		Path:      "/chat",
+		Protocol:  "websocket",
 	}
 	sp := hdrSlicePool.Get().(*[]conn.HeaderField)
 	hdrs := buildHeaders(req, "default.example.com", "https", sp)

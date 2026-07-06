@@ -44,7 +44,7 @@ func TestNewClient_H1SingleConn_Smoke(t *testing.T) {
 	if err := c.Do(context.Background(), &client.Request{
 		Method:   "GET",
 		Path:     "/",
-		WantBody: true,
+		BodyMode: client.BodyBuffer,
 	}, &resp); err != nil {
 		t.Fatalf("Do: %v", err)
 	}
@@ -81,7 +81,7 @@ func TestNewClient_H1SingleConn_MultipleRequests(t *testing.T) {
 		if err := c.Do(context.Background(), &client.Request{
 			Method:   "GET",
 			Path:     "/",
-			WantBody: true,
+			BodyMode: client.BodyBuffer,
 		}, &resp); err != nil {
 			t.Fatalf("request %d: %v", i, err)
 		}
@@ -125,7 +125,7 @@ func TestNewClient_H1SingleConn_POST_Body(t *testing.T) {
 		Method:   "POST",
 		Path:     "/",
 		Body:     payload,
-		WantBody: true,
+		BodyMode: client.BodyBuffer,
 	}, &resp); err != nil {
 		t.Fatalf("Do: %v", err)
 	}
@@ -159,7 +159,7 @@ func TestNewClient_ALPN_PlaintextFallsBackToH1(t *testing.T) {
 	if err := c.Do(context.Background(), &client.Request{
 		Method:   "GET",
 		Path:     "/",
-		WantBody: true,
+		BodyMode: client.BodyBuffer,
 	}, &resp); err != nil {
 		t.Fatalf("Do: %v", err)
 	}
@@ -175,7 +175,7 @@ func TestNewClient_ALPN_PlaintextFallsBackToH1(t *testing.T) {
 	if err := c.Do(context.Background(), &client.Request{
 		Method:   "GET",
 		Path:     "/",
-		WantBody: true,
+		BodyMode: client.BodyBuffer,
 	}, &resp); err != nil {
 		t.Fatalf("Do (2nd): %v", err)
 	}
@@ -207,7 +207,7 @@ func TestNewClient_H1SingleConn_Warmup(t *testing.T) {
 	if err := c.Do(context.Background(), &client.Request{
 		Method:   "GET",
 		Path:     "/",
-		WantBody: true,
+		BodyMode: client.BodyBuffer,
 	}, &resp); err != nil {
 		t.Fatalf("Do: %v", err)
 	}
@@ -340,7 +340,7 @@ func TestNewClient_H1SingleConn_MidBodyError(t *testing.T) {
 	if err := c.Do(context.Background(), &client.Request{
 		Method:   "GET",
 		Path:     "/",
-		WantBody: true,
+		BodyMode: client.BodyBuffer,
 	}, &resp); err == nil {
 		t.Error("expected error for mid-chunk connection close, got nil")
 	}
@@ -372,9 +372,9 @@ func TestNewClient_H1SingleConn_DoStream_Error(t *testing.T) {
 	}
 }
 
-// TestNewClient_H1SingleConn_StreamBody_Error verifies that Do with
-// StreamBody=true returns an error for HTTP/1.1 connections (no streaming).
-func TestNewClient_H1SingleConn_StreamBody_Error(t *testing.T) {
+// TestNewClient_H1SingleConn_BodyStream_Error verifies that Do with
+// BodyStream=true returns an error for HTTP/1.1 connections (no streaming).
+func TestNewClient_H1SingleConn_BodyStream_Error(t *testing.T) {
 	t.Parallel()
 	srv := startH1Server(t)
 
@@ -390,14 +390,14 @@ func TestNewClient_H1SingleConn_StreamBody_Error(t *testing.T) {
 
 	var resp client.Response
 	if err := c.Do(context.Background(), &client.Request{
-		Method:     "GET",
-		Path:       "/",
-		StreamBody: true,
+		Method:   "GET",
+		Path:     "/",
+		BodyMode: client.BodyStream,
 	}, &resp); err == nil {
 		if resp.BodyReader != nil {
 			_ = resp.BodyReader.Close()
 		}
-		t.Error("expected error calling Do(StreamBody=true) on H1.1 client, got nil")
+		t.Error("expected error calling Do(BodyStream=true) on H1.1 client, got nil")
 	}
 }
 

@@ -75,7 +75,7 @@ func TestIT_GoHTTP_Echo(t *testing.T) {
 		Method:   "POST",
 		Path:     "/echo",
 		Body:     payload,
-		WantBody: true,
+		BodyMode: client.BodyBuffer,
 	}, &resp)
 	if err != nil {
 		t.Fatalf("Do POST /echo: %v", err)
@@ -144,9 +144,8 @@ func TestIT_GoHTTP_ContextCancel(t *testing.T) {
 	var resp client.Response
 	resp.Reset()
 	err := c.Do(ctx, &client.Request{
-		Method:   "GET",
-		Path:     "/delay?ms=5000",
-		WantBody: false,
+		Method: "GET",
+		Path:   "/delay?ms=5000",
 	}, &resp)
 	if err == nil {
 		t.Fatal("expected timeout error, got nil")
@@ -189,7 +188,7 @@ func TestIT_GoHTTP_Concurrent(t *testing.T) {
 			if err := c.Do(ctx, &client.Request{
 				Method:   "GET",
 				Path:     "/healthz",
-				WantBody: true,
+				BodyMode: client.BodyBuffer,
 			}, &resp); err != nil {
 				errs <- err
 				return
@@ -222,7 +221,7 @@ func TestIT_GoHTTP_ResponseHeaders(t *testing.T) {
 	err := c.Do(ctx, &client.Request{
 		Method:   "GET",
 		Path:     "/healthz",
-		WantBody: true,
+		BodyMode: client.BodyBuffer,
 	}, &resp)
 	if err != nil {
 		t.Fatalf("Do: %v", err)
@@ -256,7 +255,6 @@ func TestIT_GoHTTP_RequestHeaders(t *testing.T) {
 		Headers: []conn.HeaderField{
 			{Name: []byte("x-test-header"), Value: []byte("poseidon-integration")},
 		},
-		WantBody: false,
 	}, &resp)
 	if err != nil {
 		t.Fatalf("Do: %v", err)
@@ -345,7 +343,7 @@ func TestIT_GoHTTP_Metrics(t *testing.T) {
 	err := c.Do(ctx, &client.Request{
 		Method:   "GET",
 		Path:     "/large?bytes=8192",
-		WantBody: true,
+		BodyMode: client.BodyBuffer,
 	}, &resp)
 	if err != nil {
 		t.Fatalf("Do: %v", err)
@@ -359,4 +357,3 @@ func TestIT_GoHTTP_Metrics(t *testing.T) {
 		t.Fatalf("BytesReceived: got %d, want >= 8192", resp.BytesReceived)
 	}
 }
-

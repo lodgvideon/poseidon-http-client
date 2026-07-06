@@ -98,7 +98,7 @@ func TestMatrix_Echo(t *testing.T) {
 				Method:   "POST",
 				Path:     "/echo",
 				Body:     payload,
-				WantBody: true,
+				BodyMode: client.BodyBuffer,
 			}, &resp)
 			if err != nil {
 				t.Fatalf("Do POST /echo: %v", err)
@@ -152,7 +152,7 @@ func TestMatrix_Concurrent(t *testing.T) {
 					if err := c.Do(ctx, &client.Request{
 						Method:   "GET",
 						Path:     "/healthz",
-						WantBody: true,
+						BodyMode: client.BodyBuffer,
 					}, &resp); err != nil {
 						errs <- fmt.Errorf("Do: %w", err)
 						return
@@ -260,7 +260,7 @@ func TestMatrix_ResponseHeaders(t *testing.T) {
 			err := c.Do(ctx, &client.Request{
 				Method:   "GET",
 				Path:     "/healthz",
-				WantBody: true,
+				BodyMode: client.BodyBuffer,
 			}, &resp)
 			if err != nil {
 				t.Fatalf("Do: %v", err)
@@ -319,7 +319,7 @@ func TestMatrix_Metrics(t *testing.T) {
 			err := c.Do(ctx, &client.Request{
 				Method:   "GET",
 				Path:     fmt.Sprintf("/large?bytes=%d", sz),
-				WantBody: true,
+				BodyMode: client.BodyBuffer,
 			}, &resp)
 			if err != nil {
 				t.Fatalf("Do: %v", err)

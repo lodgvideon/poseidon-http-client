@@ -5,8 +5,8 @@ import (
 	"context"
 	"errors"
 	"io"
-	"strings"
 	"net"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -175,12 +175,12 @@ func (nopHandler) OnSettings(frame.FrameHeader, frame.SettingsParams) error {
 func (nopHandler) OnPushPromise(frame.FrameHeader, uint32, frame.HeaderBlock, uint8) error {
 	return nil
 }
-func (nopHandler) OnPing(frame.FrameHeader, [8]byte) error                      { return nil }
+func (nopHandler) OnPing(frame.FrameHeader, [8]byte) error                         { return nil }
 func (nopHandler) OnGoAway(frame.FrameHeader, uint32, frame.ErrCode, []byte) error { return nil }
-func (nopHandler) OnWindowUpdate(frame.FrameHeader, uint32) error               { return nil }
-func (nopHandler) OnContinuation(frame.FrameHeader, frame.HeaderBlock) error    { return nil }
-func (nopHandler) OnAltSvc(frame.FrameHeader, []frame.AltSvcEntry) error { return nil }
-func (nopHandler) OnOrigin(frame.FrameHeader, []string) error                    { return nil }
+func (nopHandler) OnWindowUpdate(frame.FrameHeader, uint32) error                  { return nil }
+func (nopHandler) OnContinuation(frame.FrameHeader, frame.HeaderBlock) error       { return nil }
+func (nopHandler) OnAltSvc(frame.FrameHeader, []frame.AltSvcEntry) error           { return nil }
+func (nopHandler) OnOrigin(frame.FrameHeader, []string) error                      { return nil }
 
 // readFull reads len(buf) bytes from r, retrying on short reads.
 func readFull(r io.Reader, buf []byte) (int, error) {
@@ -594,10 +594,10 @@ func TestDeriveAuthority(t *testing.T) {
 // RST_STREAM observations under a mutex so test scenarios can poll
 // for arrivals between ReadFrame calls.
 type captureHandler struct {
-	mu       sync.Mutex
-	headers  []capturedHeaders
-	data     []capturedData
-	rsts     []capturedRST
+	mu      sync.Mutex
+	headers []capturedHeaders
+	data    []capturedData
+	rsts    []capturedRST
 }
 
 type capturedHeaders struct {
@@ -711,12 +711,12 @@ func (h *captureHandler) OnPushPromise(frame.FrameHeader, uint32, frame.HeaderBl
 	return nil
 }
 
-func (h *captureHandler) OnPing(frame.FrameHeader, [8]byte) error                      { return nil }
+func (h *captureHandler) OnPing(frame.FrameHeader, [8]byte) error                         { return nil }
 func (h *captureHandler) OnGoAway(frame.FrameHeader, uint32, frame.ErrCode, []byte) error { return nil }
-func (h *captureHandler) OnWindowUpdate(frame.FrameHeader, uint32) error               { return nil }
-func (h *captureHandler) OnContinuation(frame.FrameHeader, frame.HeaderBlock) error    { return nil }
-func (h *captureHandler) OnAltSvc(frame.FrameHeader, []frame.AltSvcEntry) error { return nil }
-func (h *captureHandler) OnOrigin(frame.FrameHeader, []string) error                    { return nil }
+func (h *captureHandler) OnWindowUpdate(frame.FrameHeader, uint32) error                  { return nil }
+func (h *captureHandler) OnContinuation(frame.FrameHeader, frame.HeaderBlock) error       { return nil }
+func (h *captureHandler) OnAltSvc(frame.FrameHeader, []frame.AltSvcEntry) error           { return nil }
+func (h *captureHandler) OnOrigin(frame.FrameHeader, []string) error                      { return nil }
 
 // minimalGETServer replies to the first incoming HEADERS frame with
 // :status=200 and END_STREAM. Any subsequent frames are ignored.
@@ -828,7 +828,7 @@ func TestClient_Do_POST_BodyBytes(t *testing.T) {
 	if err := c.Do(ctx, &Request{
 		Method: "POST", Path: "/echo",
 		Body:     body,
-		WantBody: true,
+		BodyMode: BodyBuffer,
 	}, &res); err != nil {
 		t.Fatalf("Do: %v", err)
 	}
@@ -866,7 +866,7 @@ func TestClient_Do_POST_BodyReader(t *testing.T) {
 	if err := c.Do(ctx, &Request{
 		Method: "POST", Path: "/echo",
 		BodyReader: bytes.NewReader(want),
-		WantBody:   true,
+		BodyMode:   BodyBuffer,
 	}, &res); err != nil {
 		t.Fatalf("Do: %v", err)
 	}
@@ -881,7 +881,7 @@ func TestClient_Do_POST_BodyReader(t *testing.T) {
 	}
 }
 
-func TestClient_Do_WantBody_False_DiscardsButCounts(t *testing.T) {
+func TestClient_Do_BodyDiscard_DiscardsButCounts(t *testing.T) {
 	want := []byte("0123456789abcdef")
 	d := &fakeDialer{srvAfter: func(srvFr *frame.Framer) {
 		capH := newCaptureHandler()
@@ -922,7 +922,7 @@ func TestClient_Do_WantBody_False_DiscardsButCounts(t *testing.T) {
 		t.Fatalf("Do: %v", err)
 	}
 	if res.Body != nil {
-		t.Fatalf("Body should be nil with WantBody=false, got %v", res.Body)
+		t.Fatalf("Body should be nil with BodyDiscard, got %v", res.Body)
 	}
 	if res.BytesReceived != int64(len(want)) {
 		t.Fatalf("BytesReceived = %d, want %d", res.BytesReceived, len(want))

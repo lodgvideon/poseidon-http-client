@@ -115,10 +115,10 @@ func TestDo_RequestTrailers_FuncNilFallback(t *testing.T) {
 	defer cancel()
 	var res client.Response
 	if err := c.Do(ctx, &client.Request{
-		Method:   "POST",
-		Path:     "/",
-		Body:     []byte("hello"),
-		Trailers: []hpack.HeaderField{{Name: []byte("x-fallback"), Value: []byte("fallback-value")}},
+		Method:      "POST",
+		Path:        "/",
+		Body:        []byte("hello"),
+		Trailers:    []hpack.HeaderField{{Name: []byte("x-fallback"), Value: []byte("fallback-value")}},
 		TrailerFunc: func() []hpack.HeaderField { return nil }, // nil → fallback to Trailers
 	}, &res); err != nil {
 		t.Fatalf("Do: %v", err)
@@ -255,7 +255,7 @@ func TestDo_ResponseTrailers(t *testing.T) {
 	var res client.Response
 	if err := c.Do(ctx, &client.Request{
 		Method: "GET", Path: "/",
-		WantBody: true, WantTrailers: true,
+		BodyMode: client.BodyBuffer, WantTrailers: true,
 	}, &res); err != nil {
 		t.Fatalf("Do: %v", err)
 	}
@@ -467,8 +467,8 @@ func TestDo_RequestTrailers_FuncOnly(t *testing.T) {
 	}
 }
 
-func TestDo_RequestTrailers_WithStreamBody(t *testing.T) {
-	// StreamBody=true + Trailers: request trailers still sent after streaming body.
+func TestDo_RequestTrailers_WithBodyStream(t *testing.T) {
+	// BodyStream=true + Trailers: request trailers still sent after streaming body.
 	_, addr := newTrailerH2Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_, _ = io.ReadAll(r.Body)
 		got := r.Trailer.Get("X-Stream-Body")
@@ -483,15 +483,15 @@ func TestDo_RequestTrailers_WithStreamBody(t *testing.T) {
 	defer cancel()
 	var res client.Response
 	if err := c.Do(ctx, &client.Request{
-		Method:     "POST",
-		Path:       "/",
-		Body:       []byte("body"),
-		StreamBody: true,
-		Trailers:   []hpack.HeaderField{{Name: []byte("x-stream-body"), Value: []byte("stream-trailer")}},
+		Method:   "POST",
+		Path:     "/",
+		Body:     []byte("body"),
+		BodyMode: client.BodyStream,
+		Trailers: []hpack.HeaderField{{Name: []byte("x-stream-body"), Value: []byte("stream-trailer")}},
 	}, &res); err != nil {
 		t.Fatalf("Do: %v", err)
 	}
-	// With StreamBody=true, resp.BodyReader is set; drain and close it.
+	// With BodyStream=true, resp.BodyReader is set; drain and close it.
 	if res.BodyReader != nil {
 		_, _ = io.ReadAll(res.BodyReader)
 		_ = res.BodyReader.Close()

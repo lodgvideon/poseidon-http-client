@@ -9,7 +9,7 @@ import (
 )
 
 // responseBodyReader streams response DATA frames as an io.ReadCloser.
-// Constructed by do() when Request.StreamBody is true; ownership
+// Constructed by do() when Request.BodyMode is BodyStream; ownership
 // transfers to Response.BodyReader.
 type responseBodyReader struct {
 	ctx       context.Context

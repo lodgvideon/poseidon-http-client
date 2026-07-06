@@ -103,8 +103,8 @@ type ClientOptions struct {
 	// The handler runs in a dedicated goroutine. promisedHeaders are the
 	// request headers the server promises to fulfil (decoded from
 	// PUSH_PROMISE). resp is the fully drained pushed response — Body is
-	// always populated regardless of WantBody. err is non-nil if the push
-	// failed (reset, connection closed, etc.).
+	// always populated regardless of Request.BodyMode. err is non-nil if the
+	// push failed (reset, connection closed, etc.).
 	//
 	// When PushHandler is nil, server push is disabled and PUSH_PROMISE
 	// frames trigger PROTOCOL_ERROR at the conn layer.
@@ -445,11 +445,11 @@ func (c *Client) do(ctx context.Context, req *Request, resp *Response) error {
 		return err
 	}
 
-	if req.StreamBody {
+	if req.BodyMode == BodyStream {
 		if resp == nil {
 			_ = s.Close()
 			release()
-			return fmt.Errorf("client: StreamBody requires a non-nil *Response")
+			return fmt.Errorf("client: BodyStream requires a non-nil *Response")
 		}
 		ev, err := s.Recv(ctx)
 		if err != nil {
@@ -472,14 +472,14 @@ func (c *Client) do(ctx context.Context, req *Request, resp *Response) error {
 		if ev.Slab != nil {
 			resp.slabs = append(resp.slabs, ev.Slab)
 		}
-		// StreamBody requires a *conn.Stream for responseBodyReader.
-		// H1.1 does not support StreamBody; the protoStream is always
+		// BodyStream requires a *conn.Stream for responseBodyReader.
+		// H1.1 does not support BodyStream; the protoStream is always
 		// a *conn.Stream here for that feature.
 		cs, ok := s.(*conn.Stream)
 		if !ok {
 			_ = s.Close()
 			release()
-			return fmt.Errorf("client: StreamBody not supported for HTTP/1.1 connections")
+			return fmt.Errorf("client: BodyStream not supported for HTTP/1.1 connections")
 		}
 		resp.BodyReader = &responseBodyReader{
 			ctx:     ctx,
@@ -891,7 +891,7 @@ func handleHeadersEvent(ev conn.StreamEvent, req *Request, resp *Response, gotHe
 func handleDataEvent(ev conn.StreamEvent, req *Request, resp *Response, enc ContentEncoding, maxBody, maxDecompressed int64) (done bool, err error) {
 	resp.BytesReceived += int64(len(ev.Data))
 	over := resp.BytesReceived > maxBody
-	if req.WantBody && len(ev.Data) > 0 && !over {
+	if req.BodyMode == BodyBuffer && len(ev.Data) > 0 && !over {
 		resp.Body = append(resp.Body, ev.Data...)
 	}
 	// Payload consumed (copied out, unwanted, or over-limit): return the pooled
@@ -903,7 +903,7 @@ func handleDataEvent(ev conn.StreamEvent, req *Request, resp *Response, enc Cont
 		return false, fmt.Errorf("%w: received %d bytes, limit %d", ErrBodyTooLarge, resp.BytesReceived, maxBody)
 	}
 	if ev.EndStream {
-		if req.WantBody && enc != EncodingIdentity {
+		if req.BodyMode == BodyBuffer && enc != EncodingIdentity {
 			decoded, derr := decompressFully(enc, resp.Body, maxDecompressed)
 			if derr != nil {
 				return false, derr
@@ -919,7 +919,7 @@ func handleDataEvent(ev conn.StreamEvent, req *Request, resp *Response, enc Cont
 // push handler with the result. Handles nested PUSH_PROMISE recursively.
 func drainPushedStream(ctx context.Context, pushLookup func(uint32) (*conn.Stream, bool), h PushHandler, promisedHeaders []conn.HeaderField, s *conn.Stream, maxDecompressed, maxBody int64) {
 	pr := &Response{}
-	derr := drainResponse(ctx, pushLookup, s, &Request{WantBody: true}, pr, h, maxDecompressed, maxBody)
+	derr := drainResponse(ctx, pushLookup, s, &Request{BodyMode: BodyBuffer}, pr, h, maxDecompressed, maxBody)
 	_ = s.Close()
 	h(ctx, promisedHeaders, pr, derr)
 }

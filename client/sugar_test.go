@@ -20,13 +20,13 @@ func TestH_LowercasesName(t *testing.T) {
 
 func TestGETPOST_DefaultsCaptureBody(t *testing.T) {
 	g := GET("/x")
-	if g.Method != "GET" || g.Path != "/x" || !g.WantBody {
-		t.Errorf("GET = %+v, want GET /x WantBody=true", g)
+	if g.Method != "GET" || g.Path != "/x" || g.BodyMode != BodyBuffer {
+		t.Errorf("GET = %+v, want GET /x BodyMode=BodyBuffer", g)
 	}
 	body := []byte("hi")
 	p := POST("/y", body)
-	if p.Method != "POST" || p.Path != "/y" || !p.WantBody || !bytes.Equal(p.Body, body) {
-		t.Errorf("POST = %+v, want POST /y WantBody=true body=hi", p)
+	if p.Method != "POST" || p.Path != "/y" || p.BodyMode != BodyBuffer || !bytes.Equal(p.Body, body) {
+		t.Errorf("POST = %+v, want POST /y BodyMode=BodyBuffer body=hi", p)
 	}
 }
 

@@ -184,12 +184,12 @@ func TestPoolClose_NoDialDoneLeak(t *testing.T) {
 	}
 }
 
-// TestStreamBody_DecompressFail_NoDoubleRelease is a regression test: when the
-// StreamBody decompression reader failed to initialize, do() released the conn
+// TestBodyStream_DecompressFail_NoDoubleRelease is a regression test: when the
+// BodyStream decompression reader failed to initialize, do() released the conn
 // directly while leaving resp.BodyReader set, so the caller's resp.Reset()
 // released it a SECOND time, driving the pool's active count negative. Exactly
 // one release must occur.
-func TestStreamBody_DecompressFail_NoDoubleRelease(t *testing.T) {
+func TestBodyStream_DecompressFail_NoDoubleRelease(t *testing.T) {
 	addr := h2TestServer(t, func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Encoding", "gzip")
 		w.WriteHeader(200)
@@ -211,7 +211,7 @@ func TestStreamBody_DecompressFail_NoDoubleRelease(t *testing.T) {
 	defer cancel()
 
 	var resp Response
-	derr := c.Do(ctx, &Request{Method: "GET", Path: "/", StreamBody: true}, &resp)
+	derr := c.Do(ctx, &Request{Method: "GET", Path: "/", BodyMode: BodyStream}, &resp)
 	if derr == nil {
 		t.Fatalf("Do = nil, want a decompression error")
 	}

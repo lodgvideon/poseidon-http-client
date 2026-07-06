@@ -50,7 +50,7 @@ func main() {
 	}
 	defer c.Close() // REQUIRED — leaks the conn + reader goroutine otherwise.
 
-	req := &client.Request{Method: "GET", Path: "/metrics", WantBody: true}
+	req := &client.Request{Method: "GET", Path: "/metrics", BodyMode: client.BodyBuffer}
 
 	var resp client.Response // one per goroutine; reuse across calls.
 	for {
@@ -195,7 +195,7 @@ const (
 
 **`TransportManaged`.** Multi-address fan-out: a `Resolver` discovers backends, a `Selector` picks one per acquire, and the managed pool keeps a per-address sub-`Pool` (each configured by the optional shared `PoolOptions`). `Addr` MUST be empty. On a *dial-only* failure (`*DialError`, `ErrDialBackoff`, `ErrPoolClosed`) it fails over to the next address; non-dial errors propagate. When the Resolver drops an address, `DrainMode` governs the sub-pool's teardown. `NewClient` does an eager initial `Resolve` (surfaces hard errors immediately). Use for: load generators hitting a service with several backends / DNS-discovered endpoints.
 
-**`TransportH1SingleConn`.** HTTP/1.1 analogue of single-conn: at most one `*http1.Conn`, requests **serialized** (one in-flight exchange at a time, no pipelining). `ConnOpts.Dialer` must NOT assert ALPN `h2` — use `PlaintextDialer` or a TLS dialer whose `NextProtos` is `http/1.1`-only. `DoStream`/`StreamBody` and request trailers are **not** supported (the latter returns `ErrTrailersUnsupportedH1`). Use for: an HTTP/1.1-only origin you must talk to with the same `Request`/`Response` API.
+**`TransportH1SingleConn`.** HTTP/1.1 analogue of single-conn: at most one `*http1.Conn`, requests **serialized** (one in-flight exchange at a time, no pipelining). `ConnOpts.Dialer` must NOT assert ALPN `h2` — use `PlaintextDialer` or a TLS dialer whose `NextProtos` is `http/1.1`-only. `DoStream`/`BodyMode: client.BodyStream` and request trailers are **not** supported (the latter returns `ErrTrailersUnsupportedH1`). Use for: an HTTP/1.1-only origin you must talk to with the same `Request`/`Response` API.
 
 **`TransportALPN`.** Dials once with a `FlexDialer` (offers `h2` + `http/1.1`), detects the negotiated protocol, and permanently delegates to a single-conn (H2) or H1 single-conn (H1.1). Identical to `TransportSingleConn` against H2 servers; falls back to HTTP/1.1 automatically. `ConnOpts.Dialer` should be `*conn.FlexDialer`. Use for: a target whose protocol you don't know in advance.
 
@@ -258,7 +258,7 @@ c, err := client.NewClient(client.ClientOptions{
         Dialer: &conn.PlaintextDialer{}, // NOT a TLSDialer (which asserts ALPN h2)
     },
 })
-// Requests serialized; DoStream / Request.StreamBody / trailers unsupported.
+// Requests serialized; DoStream / Request.BodyMode=BodyStream / trailers unsupported.
 ```
 
 ### Auto-negotiating origin (`TransportALPN`)
@@ -324,7 +324,7 @@ func main() {
 
     c.Warmup(8) // pre-dial the whole pool before the burst; returns immediately
 
-    req := &client.Request{Method: "GET", Path: "/health", WantBody: true}
+    req := &client.Request{Method: "GET", Path: "/health", BodyMode: client.BodyBuffer}
     var resp client.Response
     for i := 0; i < 100000; i++ {
         resp.Reset()
@@ -438,7 +438,7 @@ req := &client.Request{
 		{Name: []byte("accept"), Value: []byte("application/json")},
 		{Name: []byte("user-agent"), Value: []byte("poseidon-loadgen/1.0")},
 	},
-	WantBody: true, // opt the response body buffer in
+	BodyMode: client.BodyBuffer, // opt the response body buffer in
 }
 ```
 
@@ -451,7 +451,7 @@ Useful optional `Request` fields for unary calls:
   the client emits a `content-length` header.
 - `ContentLength int64` — body byte count; only emitted as a header when
   `BodyReader` is non-nil and the value is `> 0`.
-- `WantBody bool` — see below.
+- `BodyMode BodyMode` — see below (`BodyDiscard` / `BodyBuffer` / `BodyStream`).
 - `WantTrailers bool` — see below.
 - `DisableDecompression bool` — when false (default) the client auto-adds
   `accept-encoding: gzip` (unless you already set an `accept-encoding` header)
@@ -472,10 +472,10 @@ allocate one `Response` and call `Reset()` before each reuse:
 type Response struct {
 	Status        int                // parsed from :status
 	Headers       []conn.HeaderField // regular response headers (no pseudo-headers)
-	Body          []byte             // nil unless Request.WantBody == true
+	Body          []byte             // nil unless Request.BodyMode == BodyBuffer
 	Trailers      []conn.HeaderField // nil unless WantTrailers and peer sent trailers
-	BytesReceived int64              // total DATA payload received, even when WantBody == false
-	BodyReader    io.ReadCloser      // non-nil only for Request.StreamBody (not covered here)
+	BytesReceived int64              // total DATA payload received, even when BodyMode == BodyDiscard
+	BodyReader    io.ReadCloser      // non-nil only for Request.BodyMode == BodyStream (not covered here)
 	// unexported slab pointers backing Headers/Trailers bytes
 }
 ```
@@ -492,20 +492,22 @@ Contract:
 - On error from `Do`, the `Response` fields are undefined; call `Reset()` before
   reuse regardless.
 
-#### `WantBody` / `WantTrailers` opt-in flags
+#### `BodyMode` / `WantTrailers` opt-in flags
 
 The response body and trailers are **opt-in** to keep the zero-body path
 allocation-free:
 
-- `WantBody`: when false, response DATA frames are still consumed (so HTTP/2
-  flow-control refunds run) but the payload is dropped before `Do` returns and
-  `Response.Body` stays nil. When true, the body is buffered into
-  `Response.Body`.
+- `BodyMode`: the zero value `BodyDiscard` drops the body — response DATA frames
+  are still consumed (so HTTP/2 flow-control refunds run) but the payload is
+  dropped before `Do` returns and `Response.Body` stays nil. `BodyBuffer` buffers
+  the body into `Response.Body`. `BodyStream` returns from `Do` after the HEADERS
+  frame and exposes the body via `Response.BodyReader` (covered in the streaming
+  section below).
 - `WantTrailers`: when false, response trailers are ignored. When true and the
   peer sends a trailers frame, they are captured into `Response.Trailers`.
 
 `BytesReceived` reflects the raw on-the-wire DATA byte count and is populated
-**regardless of `WantBody`**. When decompression is active, `BytesReceived` is
+**regardless of `BodyMode`**. When decompression is active, `BytesReceived` is
 the compressed wire size while `Response.Body` holds the decompressed bytes.
 
 ### POST with a body, reading status, headers, body, and trailers
@@ -518,9 +520,9 @@ func postJSON(ctx context.Context, c *client.Client, payload []byte) error {
 		Headers: []conn.HeaderField{
 			{Name: []byte("content-type"), Value: []byte("application/json")},
 		},
-		Body:         payload, // content-length derived automatically
-		WantBody:     true,    // buffer the response body
-		WantTrailers: true,    // capture grpc-style trailers if the peer sends them
+		Body:         payload,             // content-length derived automatically
+		BodyMode:     client.BodyBuffer,   // buffer the response body
+		WantTrailers: true,                // capture grpc-style trailers if the peer sends them
 		Timeout:      5 * time.Second,
 	}
 
@@ -553,8 +555,8 @@ func postJSON(ctx context.Context, c *client.Client, payload []byte) error {
 }
 ```
 
-To stream the body instead of buffering it (`Request.StreamBody`), or to send a
-streaming `BodyReader`, the body is read via `Response.BodyReader`
+To stream the body instead of buffering it (`Request.BodyMode = client.BodyStream`),
+or to send a streaming `BodyReader`, the body is read via `Response.BodyReader`
 (`io.ReadCloser`) which the caller must `Close()` — covered in the next section.
 
 ### Errors
@@ -581,7 +583,7 @@ The synchronous `Client.Do` buffers the entire response body in memory (`Respons
 | Approach | Entry point | Body surface | Reuse object |
 |---|---|---|---|
 | Event loop | `Client.DoStream` | `StreamResponse.Recv` → `StreamEvent` | `*StreamResponse` |
-| io.Reader  | `Client.Do` with `Request.StreamBody = true` | `Response.BodyReader` (`io.ReadCloser`) | `*Response` |
+| io.Reader  | `Client.Do` with `Request.BodyMode = client.BodyStream` | `Response.BodyReader` (`io.ReadCloser`) | `*Response` |
 
 Both return *after the initial HEADERS frame arrives* (status + headers are available immediately) and defer DATA-frame reception to the caller. Both require an HTTP/2 connection — they are **not supported on the HTTP/1.1 fallback transports** (`TransportH1SingleConn`, or `TransportALPN` after negotiating `http/1.1`); attempting either returns an error from `Do`/`DoStream`.
 
@@ -734,18 +736,18 @@ func fetchTrailers(ctx context.Context, c *client.Client, path string) ([]conn.H
 }
 ```
 
-### `io.ReadCloser` streaming: `Request.StreamBody` + `Response.BodyReader`
+### `io.ReadCloser` streaming: `Request.BodyMode = client.BodyStream` + `Response.BodyReader`
 
-Set `Request.StreamBody = true` and call the ordinary `Client.Do`. `Do` returns as soon as the response HEADERS frame arrives; `Response.Status` and `Response.Headers` are populated, and the body is exposed as an `io.ReadCloser`:
+Set `Request.BodyMode = client.BodyStream` and call the ordinary `Client.Do`. `Do` returns as soon as the response HEADERS frame arrives; `Response.Status` and `Response.Headers` are populated, and the body is exposed as an `io.ReadCloser`:
 
 ```go
 // On Response:
-BodyReader io.ReadCloser // non-nil when the request had StreamBody=true
+BodyReader io.ReadCloser // non-nil when the request had BodyMode=BodyStream
 ```
 
 Behavior:
 
-- `WantBody` is **ignored** when `StreamBody` is true (the body is not buffered into `Response.Body`).
+- `BodyStream` supersedes buffering: the body is streamed via `Response.BodyReader` rather than accumulated into `Response.Body`.
 - The reader streams DATA frames; `Read` returns `io.EOF` when END_STREAM or a trailers frame is observed.
 - If the peer sends trailers, they are written into `Response.Trailers` just before `Read` returns `io.EOF`.
 - If the peer resets the stream mid-body, `Read` returns a `*client.StreamResetError{Code: ...}`.
@@ -766,7 +768,7 @@ func downloadReader(ctx context.Context, c *client.Client, path, dst string) err
 	req := &client.Request{
 		Method:     "GET",
 		Path:       path,
-		StreamBody: true, // Do returns after HEADERS; body via Response.BodyReader
+		BodyMode:   client.BodyStream, // Do returns after HEADERS; body via Response.BodyReader
 	}
 
 	var resp client.Response
@@ -836,8 +838,8 @@ func upload(ctx context.Context, c *client.Client, path, src string) error {
 		Headers: []conn.HeaderField{
 			{Name: []byte("content-type"), Value: []byte("application/octet-stream")},
 		},
-		WantBody: true,                 // buffer the (small) response body
-		Timeout:  30 * time.Second,     // per-request deadline
+		BodyMode: client.BodyBuffer,     // buffer the (small) response body
+		Timeout:  30 * time.Second,      // per-request deadline
 	}
 
 	var resp client.Response
@@ -864,13 +866,13 @@ req := &client.Request{
 }
 ```
 
-You can also combine a streaming request body with a **streaming response** by setting both `BodyReader` and `StreamBody` on the same `Request` — the upload streams out while you `Read` the response back through `Response.BodyReader`.
+You can also combine a streaming request body with a **streaming response** by setting both `BodyReader` and `BodyMode = client.BodyStream` on the same `Request` — the upload streams out while you `Read` the response back through `Response.BodyReader`.
 
 ### Quick contract checklist
 
 - `DoStream`: always `defer sr.Close()`. `sr` is reusable across calls.
 - `Recv`: copy `ev.Data` / `ev.Trailers` before the next `Recv`/`Close` if retaining; stop on `ErrStreamEnded` or `ev.EndStream`.
-- `StreamBody`: always `Response.Reset()` (or `BodyReader.Close()`) before the next `Do`; not supported over HTTP/1.1.
+- `BodyMode=BodyStream`: always `Response.Reset()` (or `BodyReader.Close()`) before the next `Do`; not supported over HTTP/1.1.
 - Upload: `BodyReader` beats `Body`; set `ContentLength > 0` only when known and you want a `content-length` header.
 
 ## Retry, idempotency, rate limiting, and timeouts
@@ -899,7 +901,7 @@ req := &client.Request{
 	},
 	Body:        []byte(`{"amount":100}`),
 	Idempotency: client.ForceIdempotent,
-	WantBody:    true,
+	BodyMode:    client.BodyBuffer,
 }
 ```
 
@@ -1016,7 +1018,7 @@ func main() {
 		Method:    "GET", // idempotent → eligible for retry
 		Path:      "/v1/status",
 		Authority: "api.example.com",
-		WantBody:  true,
+		BodyMode:  client.BodyBuffer,
 	}
 
 	var resp client.Response
@@ -1119,7 +1121,7 @@ func main() {
 				Method:    "GET",
 				Path:      "/v1/ping",
 				Authority: "api.example.com",
-				WantBody:  true,
+				BodyMode:  client.BodyBuffer,
 			}
 			for ctx.Err() == nil {
 				resp.Reset() // mandatory before each reuse
@@ -1151,7 +1153,7 @@ req := &client.Request{
 	Method:    "GET",
 	Path:      "/v1/slow",
 	Authority: "api.example.com",
-	WantBody:  true,
+	BodyMode:  client.BodyBuffer,
 	Timeout:   2 * time.Second, // independent per-request deadline
 }
 
@@ -1242,7 +1244,7 @@ func sendOne(ctx context.Context, c *client.Client) error {
 	req := &client.Request{
 		Method:   "GET",
 		Path:     "/healthz",
-		WantBody: true,
+		BodyMode: client.BodyBuffer,
 		Headers: []conn.HeaderField{
 			{Name: []byte("accept"), Value: []byte("application/json")},
 		},
@@ -1588,7 +1590,7 @@ func staticFleet(ctx context.Context) error {
 	req := &client.Request{
 		Method:   "GET",
 		Path:     "/v1/ping",
-		WantBody: true,
+		BodyMode: client.BodyBuffer,
 	}
 	var resp client.Response
 	for i := 0; i < 100; i++ {
@@ -1893,7 +1895,7 @@ The handler runs in a **dedicated goroutine**. `promisedHeaders` are the request
 headers the server promised to fulfil (decoded from the `PUSH_PROMISE` frame and
 deep-copied, so they are safe to retain past the call). `resp` is the
 **fully drained** pushed response — its `Body` is always populated regardless of
-`Request.WantBody`. `err` is non-nil if the push failed (RST_STREAM, connection
+`Request.BodyMode`. `err` is non-nil if the push failed (RST_STREAM, connection
 closed, etc.), in which case `resp` may be partially populated.
 
 Under the hood the client uses `conn.Conn.LookupStream(id uint32) (*conn.Stream, bool)`
@@ -1929,7 +1931,7 @@ if err != nil {
 }
 defer c.Close()
 
-req := &client.Request{Method: "GET", Path: "/index.html", WantBody: true}
+req := &client.Request{Method: "GET", Path: "/index.html", BodyMode: client.BodyBuffer}
 var resp client.Response
 resp.Reset()
 if err := c.Do(context.Background(), req, &resp); err != nil {
@@ -1961,7 +1963,7 @@ the sole dependent of its parent.
 req := &client.Request{
 	Method: "GET",
 	Path:   "/style.css",
-	WantBody: true,
+	BodyMode: client.BodyBuffer,
 	Priority: &frame.Priority{
 		StreamDep: 0,
 		Exclusive: false,
@@ -2075,7 +2077,7 @@ req2 := &client.Request{
 }
 
 // To read response trailers, opt in with WantTrailers; they land in resp.Trailers.
-respReq := &client.Request{Method: "GET", Path: "/data", WantBody: true, WantTrailers: true}
+respReq := &client.Request{Method: "GET", Path: "/data", BodyMode: client.BodyBuffer, WantTrailers: true}
 var resp client.Response
 resp.Reset()
 _ = c.Do(context.Background(), respReq, &resp)
@@ -2106,7 +2108,7 @@ either yields `ErrBodyTooLarge` (gzip-bomb protection).
 req := &client.Request{
 	Method:               "GET",
 	Path:                 "/already-compressed.gz",
-	WantBody:             true,
+	BodyMode:             client.BodyBuffer,
 	DisableDecompression: true, // deliver raw bytes; no accept-encoding sent
 }
 var resp client.Response
@@ -2229,7 +2231,7 @@ idempotent.
   buffers backing `Headers`/`Body`/`Trailers`; those bytes are valid only until
   the next `Reset()`, so copy anything you retain.
 
-- **`Response.BodyReader.Close()`** (the `StreamBody` path) — you MUST call it
+- **`Response.BodyReader.Close()`** (the `BodyMode=BodyStream` path) — you MUST call it
   (or `Response.Reset()`, which calls it for you when `BodyReader != nil`)
   before the next `Do` on that `Response`. It returns the connection to the
   pool and sends `RST_STREAM(CANCEL)` if the body was not fully drained.
@@ -2316,7 +2318,7 @@ caller-owned `Response`.
 - `func H(name, value string) HeaderField` — builds a regular header; the name
   is lower-cased (RFC 7540 §8.1.2 requires lowercase field names).
 - `func NewRequest(method, path string) *Request` — returns a `*Request` with
-  `WantBody` enabled. `func GET(path string) *Request` and
+  `BodyMode` set to `BodyBuffer`. `func GET(path string) *Request` and
   `func POST(path string, body []byte) *Request` are shorthands (`POST`
   references `body`, does not copy it).
 - `func (r *Request) WithHeaders(h ...HeaderField) *Request` — sets `r.Headers`

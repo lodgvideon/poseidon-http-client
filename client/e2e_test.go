@@ -41,12 +41,16 @@ func ua() []hpack.HeaderField {
 
 // doGET is a helper: runs GET, returns response. Caller inspects resp fields.
 func doGET(c *client.Client, ctx context.Context, path string, wantBody bool) (client.Response, error) {
+	mode := client.BodyDiscard
+	if wantBody {
+		mode = client.BodyBuffer
+	}
 	var resp client.Response
 	err := c.Do(ctx, &client.Request{
 		Method:   "GET",
 		Path:     path,
 		Headers:  ua(),
-		WantBody: wantBody,
+		BodyMode: mode,
 	}, &resp)
 	return resp, err
 }
@@ -105,7 +109,7 @@ func TestE2E_Google_HEAD(t *testing.T) {
 		Method:   "HEAD",
 		Path:     "/",
 		Headers:  ua(),
-		WantBody: true,
+		BodyMode: client.BodyBuffer,
 	}, &resp); err != nil {
 		t.Fatalf("Do: %v", err)
 	}

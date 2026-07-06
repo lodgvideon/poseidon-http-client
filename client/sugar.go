@@ -36,19 +36,19 @@ func H(name, value string) HeaderField {
 	}
 }
 
-// NewRequest returns a *Request for method and path with WantBody enabled, so
-// the obvious path captures the response body instead of silently dropping it.
-// Mirrors net/http.NewRequest's shape. The returned Request escapes to the
-// heap; in a zero-allocation hot loop, reuse a Request literal instead and set
-// WantBody yourself.
+// NewRequest returns a *Request for method and path with BodyMode set to
+// BodyBuffer, so the obvious path captures the response body instead of
+// silently dropping it. Mirrors net/http.NewRequest's shape. The returned
+// Request escapes to the heap; in a zero-allocation hot loop, reuse a Request
+// literal instead and set BodyMode yourself.
 func NewRequest(method, path string) *Request {
-	return &Request{Method: method, Path: path, WantBody: true}
+	return &Request{Method: method, Path: path, BodyMode: BodyBuffer}
 }
 
 // GET is shorthand for NewRequest("GET", path).
 func GET(path string) *Request { return NewRequest("GET", path) }
 
-// POST is shorthand for a body-carrying POST with WantBody enabled. body is
+// POST is shorthand for a body-carrying POST with BodyMode=BodyBuffer. body is
 // referenced, not copied; it must stay valid until Do returns.
 func POST(path string, body []byte) *Request {
 	r := NewRequest("POST", path)

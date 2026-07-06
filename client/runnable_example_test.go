@@ -95,7 +95,7 @@ func Example_postJSON() {
 	req := client.POST("/echo", []byte(`{"name":"widget"}`)).WithHeaders(
 		client.H("content-type", "application/json"),
 	)
-	req.WantBody = true
+	req.BodyMode = client.BodyBuffer
 
 	var resp client.Response
 	resp.Reset()
