@@ -569,7 +569,7 @@ func TestSettingsRecorder_UnexpectedFramesDuringHandshake(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	_, err := handshakeSettings(ctx, fr, AdvertisedSettings{}.defaulted(), false)
+	_, err := handshakeSettings(ctx, fr, func() error { return nil }, AdvertisedSettings{}.defaulted(), false)
 	if err != nil {
 		t.Fatalf("handshakeSettings with unusual frames before SETTINGS: %v", err)
 	}
@@ -818,7 +818,7 @@ func TestStream_Push_Overflow_Integration(t *testing.T) {
 	defer cancel()
 
 	opts := ConnOptions{
-		Dialer:          &TLSDialer{Config: cfg},
+		Dialer:            &TLSDialer{Config: cfg},
 		StreamEventBuffer: 1,
 	}
 	c, err := Dial(ctx, srv.Listener.Addr().String(), opts)
@@ -1310,7 +1310,7 @@ func (errWriter) Write([]byte) (int, error) { return 0, io.ErrClosedPipe }
 func TestHandshakeSettings_WriteClientPrefaceError(t *testing.T) {
 	t.Parallel()
 	fr := frame.NewFramer(errWriter{}, bytes.NewReader(nil))
-	_, err := handshakeSettings(context.Background(), fr, AdvertisedSettings{}, false)
+	_, err := handshakeSettings(context.Background(), fr, func() error { return nil }, AdvertisedSettings{}, false)
 	if err == nil {
 		t.Fatal("expected error from failed WriteClientPreface")
 	}

@@ -27,6 +27,19 @@ import (
 // extra copy.
 const readBufferSize = 16 * 1024
 
+// writeBufferSize is the size of the buffered writer wrapping the transport on
+// the send path. The Framer emits each DATA/HEADERS frame as a 9-byte header
+// Write followed by a separate payload Write; over an unbuffered transport (and
+// especially over TLS, where each Write becomes its own record + syscall) that
+// is two syscalls per frame. Wrapping the transport writer in a bufio.Writer
+// lets the header and payload coalesce into one flush — one syscall per frame.
+// The buffer is flushed under wmu before releasing the write lock in every
+// frame-writing method, so a buffered frame is always on the wire before the
+// writer blocks (avoiding a deadlock where the peer never sees the frame). The
+// buffer is not goroutine-safe; wmu already serializes all writers to it.
+// 16 KiB matches the default max frame size.
+const writeBufferSize = 16 * 1024
+
 // encBufPool recycles the HPACK block-fragment buffer used by writeHeaders.
 // The buffer is returned immediately after Framer.WriteHeaders — the call
 // is synchronous under wmu, so no concurrent access is possible.
@@ -41,9 +54,13 @@ var encBufPool = sync.Pool{
 type Conn struct {
 	transport net.Conn
 	fr        *frame.Framer
-	enc       *hpack.Encoder
-	dec       *hpack.Decoder
-	opts      ConnOptions
+	// wb is the buffered writer wrapping the transport that fr writes into.
+	// Flushed under wmu before every wmu release in a frame-writing method.
+	// Not goroutine-safe; wmu serializes all access.
+	wb   *bufio.Writer
+	enc  *hpack.Encoder
+	dec  *hpack.Decoder
+	opts ConnOptions
 
 	// peerSettings is the most recently observed server SETTINGS.
 	// Guarded by psMu: written by handshake / connHandler.OnSettings,
@@ -132,9 +149,11 @@ type ConnStats struct {
 // NewClientConn wraps an already-handshaken transport.
 func NewClientConn(ctx context.Context, transport net.Conn, opts ConnOptions) (*Conn, error) {
 	opts = opts.defaulted()
+	wb := bufio.NewWriterSize(transport, writeBufferSize)
 	c := &Conn{
 		transport:          transport,
-		fr:                 frame.NewFramer(transport, bufio.NewReaderSize(transport, readBufferSize)),
+		wb:                 wb,
+		fr:                 frame.NewFramer(wb, bufio.NewReaderSize(transport, readBufferSize)),
 		enc:                hpack.NewEncoder(),
 		dec:                hpack.NewDecoder(),
 		opts:               opts,
@@ -151,7 +170,7 @@ func NewClientConn(ctx context.Context, transport net.Conn, opts ConnOptions) (*
 	// cap is 16384; peers honouring our SETTINGS may send frames up to the
 	// advertised value, which would be rejected as ErrFrameTooLarge otherwise.
 	c.fr.SetMaxReadFrameSize(opts.Settings.MaxFrameSize)
-	peer, err := handshakeSettings(ctx, c.fr, opts.Settings, opts.EnablePush)
+	peer, err := handshakeSettings(ctx, c.fr, c.flushWrite, opts.Settings, opts.EnablePush)
 	if err != nil {
 		_ = transport.Close()
 		return nil, err
@@ -168,6 +187,22 @@ func NewClientConn(ctx context.Context, transport net.Conn, opts ConnOptions) (*
 		go c.keepaliveLoop(opts.KeepaliveInterval)
 	}
 	return c, nil
+}
+
+// flushWrite flushes the buffered writer to the transport. MUST be called
+// while holding c.wmu (the buffered writer is not goroutine-safe; wmu
+// serializes every writer that touches it). Callers flush before releasing
+// wmu in every frame-writing method so a buffered frame is guaranteed on the
+// wire before the writer blocks — a missed flush would deadlock (the peer
+// never sees the frame, so never replies with the WINDOW_UPDATE / response
+// the writer is waiting for).
+func (c *Conn) flushWrite() error {
+	if c.wb == nil {
+		// Hand-constructed Conns (unit tests wiring fr straight to a buffer)
+		// have no buffered writer; there is nothing to flush.
+		return nil
+	}
+	return c.wb.Flush()
 }
 
 func (c *Conn) lookupStream(id uint32) *Stream {
@@ -284,6 +319,7 @@ func (c *Conn) Close() error {
 	}
 	c.wmu.Lock()
 	_ = c.fr.WriteGoAway(c.lastClientStreamID(), frame.ErrCodeNoError, nil)
+	_ = c.flushWrite()
 	c.wmu.Unlock()
 	_ = c.transport.Close()
 	<-c.readerDone
@@ -324,6 +360,7 @@ func (c *Conn) Shutdown(gracefulTimeout time.Duration) error {
 	}
 	c.wmu.Lock()
 	_ = c.fr.WriteGoAway(c.lastClientStreamID(), frame.ErrCodeNoError, nil)
+	_ = c.flushWrite()
 	c.wmu.Unlock()
 	// Wake any writers blocked in acquireSendCredits so they observe
 	// the draining flag and surface ErrConnDraining to their callers.
@@ -450,7 +487,9 @@ func (c *Conn) writeHeadersWithPriority(_ context.Context, s *Stream, fields []h
 		return err
 	}
 	c.bumpFramesSent()
-	return nil
+	// Flush the buffered HEADERS (+ any CONTINUATION) to the wire before
+	// releasing wmu; the deferred Unlock runs after this returns.
+	return c.flushWrite()
 }
 
 // maxOutFrameSize returns the largest frame payload we may emit: the
@@ -579,9 +618,28 @@ func (c *Conn) writeData(ctx context.Context, s *Stream, p []byte, endStream boo
 			}
 		}
 		c.bumpFramesSent()
-		return nil
+		// Flush before the deferred Unlock so the empty END_STREAM DATA
+		// reaches the peer.
+		return c.flushWrite()
 	}
 	for len(p) > 0 {
+		// Flush any DATA still buffered from a previous iteration to the wire
+		// before we block in acquireSendCredits waiting on the peer's
+		// WINDOW_UPDATE. A frame left in the buffer here would deadlock: the
+		// peer never sees it, so never sends the credit we are about to wait
+		// for. (Flush is a no-op when the buffer is already empty, which it is
+		// whenever wmu was last released after a flush.)
+		c.wmu.Lock()
+		if c.closed.Load() {
+			c.wmu.Unlock()
+			return ErrConnClosed
+		}
+		if ferr := c.flushWrite(); ferr != nil {
+			c.wmu.Unlock()
+			return ferr
+		}
+		c.wmu.Unlock()
+
 		want := len(p)
 		if want > effectiveMaxFrame {
 			want = effectiveMaxFrame
@@ -608,6 +666,12 @@ func (c *Conn) writeData(ctx context.Context, s *Stream, p []byte, endStream boo
 			}
 		}
 		c.bumpFramesSent()
+		// Flush this DATA frame before releasing wmu so it is on the wire
+		// before the next iteration blocks on send credit.
+		if ferr := c.flushWrite(); ferr != nil {
+			c.wmu.Unlock()
+			return ferr
+		}
 		c.wmu.Unlock()
 		p = p[n:]
 	}
@@ -630,7 +694,8 @@ func (c *Conn) writeRSTStream(s *Stream, code frame.ErrCode) error {
 	}
 	c.bumpFramesSent()
 	c.releaseInflight(s.id)
-	return nil
+	// Flush the RST_STREAM before the deferred Unlock releases wmu.
+	return c.flushWrite()
 }
 
 // writeRSTStreamBestEffort sends RST_STREAM under a short write deadline so
@@ -654,6 +719,8 @@ func (c *Conn) writeRSTStreamBestEffort(s *Stream, code frame.ErrCode) {
 		_ = dl.SetWriteDeadline(time.Now().Add(rstTimeout))
 	}
 	if err := c.fr.WriteRSTStream(s.id, code); err == nil {
+		// Best-effort: flush under the same deadline; ignore the error.
+		_ = c.flushWrite()
 		c.bumpFramesSent()
 	}
 	if dl, ok := c.transport.(deadliner); ok {
@@ -744,7 +811,9 @@ func (c *Conn) writeWindowUpdate(streamID uint32, increment uint32) error {
 		return err
 	}
 	c.bumpFramesSent()
-	return nil
+	// Flush the WINDOW_UPDATE before the deferred Unlock so the peer's send
+	// window is replenished promptly.
+	return c.flushWrite()
 }
 
 // acquireSendCredits blocks until both the per-stream and the
@@ -967,7 +1036,8 @@ func (c *Conn) writeSettingsAck() error {
 		return err
 	}
 	c.bumpFramesSent()
-	return nil
+	// Flush the SETTINGS ACK before the deferred Unlock releases wmu.
+	return c.flushWrite()
 }
 
 // onGoAwayReceived stores the peer's GOAWAY state and resets every
@@ -1091,7 +1161,8 @@ func (c *Conn) writePingAck(payload [8]byte) error {
 		return err
 	}
 	c.bumpFramesSent()
-	return nil
+	// Flush the PING ACK before the deferred Unlock releases wmu.
+	return c.flushWrite()
 }
 
 // deliverPingAck signals any Ping call waiting for payload.
@@ -1138,7 +1209,14 @@ func (c *Conn) Ping(ctx context.Context) (time.Duration, error) {
 	start := time.Now()
 	err := c.fr.WritePing(false, payload)
 	if err == nil {
-		c.bumpFramesSent()
+		// Flush the PING to the wire before releasing wmu — we are about to
+		// block waiting for its ACK, which never arrives if the frame is left
+		// buffered.
+		if ferr := c.flushWrite(); ferr != nil {
+			err = ferr
+		} else {
+			c.bumpFramesSent()
+		}
 	}
 	c.wmu.Unlock()
 
@@ -1252,6 +1330,7 @@ func (c *Conn) emitConnGoAwayIfTyped(err error) {
 	}
 	c.wmu.Lock()
 	_ = c.fr.WriteGoAway(c.lastClientStreamID(), ce.Code, nil)
+	_ = c.flushWrite()
 	c.wmu.Unlock()
 }
 
