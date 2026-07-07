@@ -52,6 +52,32 @@ reachable window between registry-eviction (`markStreamDone`) and the `push`.
   i.e. an unreproducible cross-stream corruption bug under peak load, which for a
   load generator poisons the very measurements it exists to produce.
 
+## Target-load CPU + GC profile (the deciding measurement)
+
+The alloc-count numbers above are from a loopback micro-benchmark. To settle
+whether allocations matter *at all*, we took a **CPU profile with `gctrace`**
+under sustained concurrent load (`-benchtime=5s`, `RunParallel` over one TLS
+conn). This is the measurement the revisit-rule actually gates on.
+
+| CPU consumer | share | note |
+|---|---|---|
+| socket write **syscall** (`syscall.SyscallN` → `runtime.cgocall` → `WSASend`) | **~50%** | inherent — you must call the OS to put bytes on the wire |
+| **TLS crypto** (`crypto/.../aes/gcm.Seal`) | **~1.4%** | AES-NI hardware-accelerated; `crypto/tls.Conn.Write`'s 48% cum is ~47% the syscall it calls, not encryption |
+| **GC** (`mallocgc` + concurrent mark) | **~1–3%** | `gctrace` reports a GC CPU fraction of **0–1%** every cycle; heap stays 3–5 MB; the few % includes the in-process `net/http2` test server |
+| our codec (HPACK `EncodeBlock` + frame `WriteHeaders`, flat) | **~1%** | already tiny; the large *cumulative* % is the TLS write / syscall it feeds |
+
+**The client is syscall-bound.** Both the alloc-count profile and the
+target-load CPU+GC profile agree: TLS is not a hot spot (≈1% of allocations,
+≈1.4% of CPU), GC costs ≈1% of CPU, and our encode path is already lean. The
+dominant cost is the socket syscall, which is inherent; the only lever to reduce
+it is batching writes into fewer syscalls — the write-queue design, already
+investigated and rejected (RTT-bound at real network load + blocker-level
+concurrency races; see `docs/WRITE_QUEUE_INVESTIGATION.md`).
+
+**"Zero-alloc TLS" is doubly moot:** TLS barely allocates (~1%) *and* its crypto
+is a rounding error (~1.4%, AES-NI). There is nothing in our code to make
+zero-alloc that would move throughput, tail latency, or GC.
+
 ## Decision
 
 **Do not optimize the receive-path allocations.** The channel re-make is a good
