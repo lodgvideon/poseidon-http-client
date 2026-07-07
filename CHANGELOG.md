@@ -5,6 +5,21 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [v0.7.1] — 2026-07-07
+
+### Performance
+
+- **Buffered connection writer** — the transport writer is now wrapped in a
+  reused 16 KiB `bufio.Writer`, so a DATA frame's 9-byte header and its payload
+  coalesce into a single flush = **1 write syscall per frame instead of 2**.
+  A target-load CPU profile showed the client is syscall-bound (~50% CPU in the
+  socket write); this halves the DATA-frame write syscalls (measured: a
+  7-DATA-frame body dropped from ~16 write syscalls to 8) with no per-frame
+  allocation. The buffer is flushed under `wmu` before every lock release and
+  before every flow-control (`acquireSendCredits`) wait, so no buffered frame is
+  ever stranded behind a WINDOW_UPDATE the peer hasn't been asked for.
+  Regression guard: `TestWriteBuffer_MultiChunkUpload_NoDeadlock`.
+
 ## [v0.7.0] — 2026-06-23
 
 ### Changed
