@@ -79,8 +79,8 @@ func (nilHandler) OnPing(frame.FrameHeader, [8]byte) error                      
 func (nilHandler) OnGoAway(frame.FrameHeader, uint32, frame.ErrCode, []byte) error { return nil }
 func (nilHandler) OnWindowUpdate(frame.FrameHeader, uint32) error                  { return nil }
 func (nilHandler) OnContinuation(frame.FrameHeader, frame.HeaderBlock) error       { return nil }
-func (nilHandler) OnAltSvc(frame.FrameHeader, []frame.AltSvcEntry) error                       { return nil }
-func (nilHandler) OnOrigin(frame.FrameHeader, []string) error                       { return nil }
+func (nilHandler) OnAltSvc(frame.FrameHeader, []frame.AltSvcEntry) error           { return nil }
+func (nilHandler) OnOrigin(frame.FrameHeader, []string) error                      { return nil }
 
 func TestHandshakeSettings_RoundTripsAgainstPipePeer(t *testing.T) {
 	cli, srv := net.Pipe()
@@ -90,7 +90,7 @@ func TestHandshakeSettings_RoundTripsAgainstPipePeer(t *testing.T) {
 	fr := frame.NewFramer(cli, cli)
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
-	peer, err := handshakeSettings(ctx, fr, AdvertisedSettings{}.defaulted(), false)
+	peer, err := handshakeSettings(ctx, fr, func() error { return nil }, AdvertisedSettings{}.defaulted(), false)
 	if err != nil {
 		t.Fatalf("handshake: %v", err)
 	}

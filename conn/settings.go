@@ -17,12 +17,23 @@ import (
 //  5. ReadFrame loop until our own SETTINGS is ACKed.
 //
 // Returns the peer's SETTINGS as observed in step 3.
-func handshakeSettings(ctx context.Context, fr *frame.Framer, advertised AdvertisedSettings, enablePush bool) (frame.SettingsParams, error) {
+// The flush callback drains the buffered writer wrapping the transport (see
+// Conn.flushWrite). It MUST be invoked after the preface+SETTINGS are written
+// and before we block reading the server's SETTINGS — otherwise the preface
+// sits in the buffer and a peer that waits for the client preface before
+// responding would deadlock. It is invoked again after our SETTINGS ACK so
+// the peer observes it promptly.
+func handshakeSettings(ctx context.Context, fr *frame.Framer, flush func() error, advertised AdvertisedSettings, enablePush bool) (frame.SettingsParams, error) {
 	if err := fr.WriteClientPreface(); err != nil {
 		return frame.SettingsParams{}, err
 	}
 	myParams := encodeAdvertised(advertised, enablePush)
 	if err := fr.WriteSettings(myParams); err != nil {
+		return frame.SettingsParams{}, err
+	}
+	// Flush the preface + our SETTINGS to the wire before blocking on the
+	// server's SETTINGS below.
+	if err := flush(); err != nil {
 		return frame.SettingsParams{}, err
 	}
 
@@ -33,6 +44,10 @@ func handshakeSettings(ctx context.Context, fr *frame.Framer, advertised Adverti
 		}
 	}
 	if err := fr.WriteSettingsAck(); err != nil {
+		return frame.SettingsParams{}, err
+	}
+	// Flush our SETTINGS ACK so the peer sees it promptly.
+	if err := flush(); err != nil {
 		return frame.SettingsParams{}, err
 	}
 	for !rec.ackSeen {
@@ -104,14 +119,18 @@ type settingsRecorder struct {
 
 // OnData implements frame.Handler.
 func (r *settingsRecorder) OnData(frame.FrameHeader, []byte, uint8) error { return nil }
+
 // OnHeaders implements frame.Handler.
 func (r *settingsRecorder) OnHeaders(frame.FrameHeader, frame.HeaderBlock, *frame.Priority, uint8) error {
 	return nil
 }
+
 // OnPriority implements frame.Handler.
 func (r *settingsRecorder) OnPriority(frame.FrameHeader, frame.Priority) error { return nil }
+
 // OnRSTStream implements frame.Handler.
 func (r *settingsRecorder) OnRSTStream(frame.FrameHeader, frame.ErrCode) error { return nil }
+
 // OnSettings implements frame.Handler.
 func (r *settingsRecorder) OnSettings(fh frame.FrameHeader, s frame.SettingsParams) error {
 	if fh.Flags&frame.FlagSettingsAck != 0 {
@@ -122,19 +141,26 @@ func (r *settingsRecorder) OnSettings(fh frame.FrameHeader, s frame.SettingsPara
 	r.peerSeen = true
 	return nil
 }
+
 // OnPushPromise implements frame.Handler.
 func (r *settingsRecorder) OnPushPromise(frame.FrameHeader, uint32, frame.HeaderBlock, uint8) error {
 	return &ConnError{Code: frame.ErrCodeProtocolError, Reason: "PUSH_PROMISE during handshake"}
 }
+
 // OnPing implements frame.Handler.
-func (r *settingsRecorder) OnPing(frame.FrameHeader, [8]byte) error                         { return nil }
+func (r *settingsRecorder) OnPing(frame.FrameHeader, [8]byte) error { return nil }
+
 // OnGoAway implements frame.Handler.
-func (r *settingsRecorder) OnGoAway(frame.FrameHeader, uint32, frame.ErrCode, []byte) error { return nil }
+func (r *settingsRecorder) OnGoAway(frame.FrameHeader, uint32, frame.ErrCode, []byte) error {
+	return nil
+}
+
 // OnWindowUpdate implements frame.Handler.
-func (r *settingsRecorder) OnWindowUpdate(frame.FrameHeader, uint32) error                  { return nil }
+func (r *settingsRecorder) OnWindowUpdate(frame.FrameHeader, uint32) error { return nil }
+
 // OnContinuation implements frame.Handler.
-func (r *settingsRecorder) OnContinuation(frame.FrameHeader, frame.HeaderBlock) error       { return nil }
-func (r *settingsRecorder) OnAltSvc(frame.FrameHeader, []frame.AltSvcEntry) error                       { return nil }
-func (r *settingsRecorder) OnOrigin(frame.FrameHeader, []string) error                       { return nil }
+func (r *settingsRecorder) OnContinuation(frame.FrameHeader, frame.HeaderBlock) error { return nil }
+func (r *settingsRecorder) OnAltSvc(frame.FrameHeader, []frame.AltSvcEntry) error     { return nil }
+func (r *settingsRecorder) OnOrigin(frame.FrameHeader, []string) error                { return nil }
 
 var _ frame.Handler = (*settingsRecorder)(nil)
