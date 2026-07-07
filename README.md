@@ -1,155 +1,57 @@
 # poseidon-http-client
 
-A low-level, zero-allocation HTTP/2 client for Go, designed for load
-generators. Implements RFC 7540 (HTTP/2) and RFC 7541 (HPACK) from
-scratch without `net/http` or `golang.org/x/net/http2`.
+[![Go Reference](https://pkg.go.dev/badge/github.com/lodgvideon/poseidon-http-client.svg)](https://pkg.go.dev/github.com/lodgvideon/poseidon-http-client)
+[![CI](https://github.com/lodgvideon/poseidon-http-client/actions/workflows/ci.yml/badge.svg)](https://github.com/lodgvideon/poseidon-http-client/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/lodgvideon/poseidon-http-client?sort=semver)](https://github.com/lodgvideon/poseidon-http-client/releases)
+[![Go 1.24](https://img.shields.io/badge/go-1.24-00ADD8)](go.mod)
+[![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 
-**Status:** v0.5.1 — HTTP/1.1 fallback + ALPN-aware transport (`http1/`
-package), pool reply-channel race fix, all packages ≥ 90% coverage,
-CI fully green.
-See [CHANGELOG.md](CHANGELOG.md) for details. See
-[C.1 design](docs/superpowers/specs/2026-05-07-poseidon-client-c1-design.md),
-[C.2 design](docs/superpowers/specs/2026-05-08-poseidon-client-c2-pool-design.md),
-[C.3/C.4 design](docs/superpowers/specs/2026-05-09-c3-c4-design.md),
-[D.1 design](docs/superpowers/specs/2026-05-13-d1-zero-alloc-request-path-design.md),
-[D.2 design](docs/superpowers/specs/2026-05-15-d2-request-response-body-streaming-design.md),
-[D.3 design](docs/superpowers/specs/2026-05-15-d3-h2c-design.md),
-[D.4 design](docs/superpowers/specs/2026-05-15-d4-ping-keepalive-design.md),
-[D.5 design](docs/superpowers/specs/2026-05-15-d5-trailers-design.md).
+A **zero-allocation HTTP/2 client for Go, built for load generators.**
+It implements RFC 7540 (HTTP/2) and RFC 7541 (HPACK) — plus an HTTP/1.1
+fallback — **from scratch**, with no `net/http` and no
+`golang.org/x/net/http2`. You get fine-grained control over connections,
+streams, flow control, and pooling, wrapped in an ergonomic API that stays
+out of the hot path.
 
-## Phases
+```go
+c, _ := client.NewSingleConnClient("example.com:443",
+    &conn.TLSDialer{Config: &tls.Config{ServerName: "example.com"}})
+defer c.Close()
 
-- **A — Frame layer + HPACK** *(released)*: codec only, no networking.
-- **B.1 — Connection layer (single stream)** *(released)*: TLS+ALPN dial,
-  SETTINGS handshake, one in-flight stream end-to-end against
-  net/http2.Server.
-- **B.2.1 — Multi-stream foundation** *(released)*: configurable
-  `MaxConcurrentStreams`, deferred stream-id allocation under the writer
-  mutex (RFC 7540 §5.1.1 monotonic ordering).
-- **B.2.2 — Flow control IN** *(released)*: per-stream + connection
-  recv windows, batched WINDOW_UPDATE refunds at 32 KiB threshold,
-  typed `FLOW_CONTROL_ERROR` on peer overrun (RFC 7540 §6.9.1).
-- **B.2.3 — Flow control OUT** *(released)*: chunked DATA writes
-  at `min(peer MAX_FRAME_SIZE, our advertised MAX_FRAME_SIZE)`,
-  blocking `acquireSendCredits` until per-stream + connection
-  send-window credit, `OnWindowUpdate` replenishment, 2^31-1
-  overflow as typed `StreamError` / `ConnError`.
-- **B.2.4 — Dynamic SETTINGS** *(released)*:
-  `connHandler.OnSettings` merges non-ACK frames into
-  `c.peerSettings`, applies side effects (HPACK encoder resize,
-  retroactive `INITIAL_WINDOW_SIZE` delta on every open stream — RFC
-  §6.9.2), and emits a SETTINGS ACK (RFC §6.5.3).
-- **B.2.5 — Peer-advertised `MAX_CONCURRENT_STREAMS`** *(released)*:
-  `NewStream` gates inflight on
-  `min(local advertised, peer-advertised)`; dynamic shrinks refuse
-  new streams without disturbing open ones (RFC §6.5.2).
-- **B.2.6 — GOAWAY drain + PING ACK** *(released)*: peer GOAWAY records
-  state on `*Conn`, drains streams above `lastStreamID` with
-  `EventReset(REFUSED_STREAM)`, blocks new `NewStream` with `ErrGoAway`,
-  wakes writers stuck on send credit (RFC §6.8); inbound non-ACK PING
-  echoes back with `ACK=1` and the same 8-byte payload (RFC §6.7).
-- **C.1 — Public client API** *(released)*: `client.Client`, `Request`,
-  `Response`, sync `Do` and streaming `DoStream`, single-connection
-  transport with conn-level auto-redial, `(*conn.Conn).IsAlive` helper
-  for transport reuse decisions.
-- **C.2 — connection pool** *(released)*: per-host `Pool` with lazy-grow,
-  least-loaded stream selection, idle-timeout eviction, GOAWAY-aware
-  drain, dial backoff, and `MAX_CONCURRENT_STREAMS` enforcement
-  (RFC 7540 §5.1.2, §6.8). Enable via
-  `ClientOptions{Transport: client.TransportPool}`.
-- **C.3 — service discovery** *(released)*: per-address sub-pool fan-out
-  via `Resolver` + `Selector`. Built-in `StaticResolver`, `DNSResolver`
-  with TTL cache + Watch, and `RoundRobin` / `Random` / `Hash` selectors.
-  DrainGraceful / DrainHard / DrainLazy modes.
-- **C.4 — metrics & hooks** *(released)*: lifecycle `Hooks`
-  (`OnRequestStart`, `OnRequestComplete`, `OnRetry`, `OnDial`,
-  `OnConnClose`, `OnResolverUpdate`); lock-free counters and log-bucket
-  latency histograms exposed via `(*Client).Metrics()` and
-  `(*Client).MetricsSnapshot()`. Zero hot-path overhead when
-  `ClientOptions.Hooks == nil`.
-- **D.1 — zero-alloc request path** *(released)*: caller-provided
-  `*Response`/`*StreamResponse` eliminates per-call heap alloc;
-  `conn.HeaderSlabPool` slab allocator for HPACK header bytes;
-  per-`Conn` stream `sync.Pool`; `encBufPool` for HPACK encode buffers;
-  `hdrSlicePool` + const name bytes in `buildHeaders`. 33 allocs/op,
-  down from 49 (−33%).
-- **D.2 — request/response body streaming** *(released)*:
-  `Request.ContentLength int64` emits `content-length` header;
-  `Request.BodyMode = client.BodyStream` + `Response.BodyReader io.ReadCloser`
-  stream response bodies without buffering (caller drains + `Close()`);
-  `uploadBufPool` recycles upload read buffers; `Response.Reset()` closes
-  `BodyReader` automatically. RFC 7540 §8.1 conformance test added.
-- **D.3 — H2C (plaintext HTTP/2)** *(released)*: `conn.PlaintextDialer`
-  for unencrypted TCP; H2C prior-knowledge handshake (RFC 7540 §3.4).
-  Set `ClientOptions.DefaultScheme = "http"` for H2C targets.
-- **D.4 — PING / keepalive** *(released)*: `(*conn.Conn).Ping(ctx)`
-  measures round-trip time; background keepalive loop with
-  `ConnOptions.KeepaliveInterval` + `KeepaliveTimeout` closes dead
-  connections automatically (RFC 7540 §6.7).
-- **D.5 — HTTP request trailers** *(released)*: `Request.Trailers
-  []hpack.HeaderField` and `Request.TrailerFunc` send trailer
-  HEADERS+END_STREAM after body DATA frames (RFC 7540 §8.1.3);
-  `StreamResponse.WaitTrailers(ctx)` pumps events until trailers arrive
-  or stream ends; `trailerAnnouncement` emits `Trailer:` header for
-  Go net/http server compatibility.
-- **E.1 — CONTINUATION write path** *(released)*: `writeHeadersWithPriority`
-  splits oversized HPACK blocks into HEADERS+CONTINUATION frame sequences
-  (RFC 7540 §6.2/§6.10). Large bearer tokens, cookies, gRPC metadata over
-  16 KiB transmit correctly. Zero additional allocations.
-- **E.2 — Automatic retry layer** *(released)*: `client.NewRetryer(c,
-  RetryOptions)` retries idempotent requests on `REFUSED_STREAM` (RFC §8.1.4),
-  GOAWAY, and dial errors. Truncated-exponential backoff with ±25% jitter.
-  `Request.Idempotency` (IdempotencyMode) for per-request override. `IsRetryable` callback
-  for 5xx and custom policies.
-- **F.1 — HTTP/1.1 fallback + ALPN-aware transport** *(released)*:
-  new `http1/` package implements HTTP/1.1 wire protocol from scratch (no
-  `net/http`) with `net.Buffers` (writev syscall) for scatter-gather writes.
-  `TransportH1SingleConn` for explicit H1.1; `TransportALPN` dials with
-  `conn.FlexDialer` (offers `h2` + `http/1.1`) and permanently routes to H2
-  or H1.1 based on the ALPN-negotiated protocol. The `protoStream` interface
-  lets `Client.sendRequest` and `drainResponse` drive either protocol
-  without branching. See [docs/CLIENT_GUIDE.md](docs/CLIENT_GUIDE.md) for the full guide and examples.
+var resp client.Response
+_ = c.Do(context.Background(), client.GET("/"), &resp)
+fmt.Println(resp.Status, len(resp.Body)) // 200 1256
+```
+
+## Why poseidon?
+
+- **Zero-alloc hot path.** The frame + HPACK codec is `0 B/op`, `0 allocs/op`
+  — enforced by a bench gate in CI. The request/response path pools receive
+  buffers, header slabs, and `Stream` structs, and reuses a caller-owned
+  `Response`, so steady-state load allocates almost nothing.
+- **Nothing hidden.** Framing, HPACK, flow control, and even the HTTP/1.1
+  wire protocol are implemented directly. No surprise `net/http` behavior,
+  no reflection, no interface soup between you and the socket.
+- **Load-generator ergonomics.** Connection pooling, DNS-based service
+  discovery, rate limiting, opt-in retries, per-request metrics, and
+  lifecycle hooks — each with **zero overhead when unused** (nil hooks and
+  disabled rate limits are branch-free on the fast path).
+- **Syscall-lean.** A buffered reader and writer coalesce frame I/O so a DATA
+  frame's header and payload become one `write` syscall, not two. Profiling
+  shows the client is bound by the socket syscall itself — not by our code.
+
+## Install
+
+```bash
+go get github.com/lodgvideon/poseidon-http-client@latest
+```
+
+Requires **Go 1.24+**. Public packages: `client` (high-level), `conn`
+(connections/streams), `frame` and `hpack` (standalone codec).
 
 ## Quick start
 
-```go
-package main
-
-import (
-	"context"
-	"crypto/tls"
-	"fmt"
-
-	"github.com/lodgvideon/poseidon-http-client/client"
-	"github.com/lodgvideon/poseidon-http-client/conn"
-)
-
-func get(ctx context.Context, addr string) error {
-	c, err := client.NewClient(client.ClientOptions{
-		Addr: addr,
-		ConnOpts: conn.ConnOptions{
-			Dialer: &conn.TLSDialer{Config: &tls.Config{ServerName: "example.com"}},
-		},
-	})
-	if err != nil {
-		return err
-	}
-	defer c.Close()
-
-	var res client.Response
-	if err := c.Do(ctx, &client.Request{
-		Method:   "GET",
-		Path:     "/",
-		BodyMode: client.BodyBuffer,
-	}, &res); err != nil {
-		return err
-	}
-	fmt.Println("status:", res.Status, "bytes:", res.BytesReceived)
-	return nil
-}
-```
-
-### Pool transport
+The easy path — a focused constructor plus a request helper:
 
 ```go
 package main
@@ -158,78 +60,155 @@ import (
 	"context"
 	"crypto/tls"
 	"fmt"
-	"time"
+	"log"
 
 	"github.com/lodgvideon/poseidon-http-client/client"
 	"github.com/lodgvideon/poseidon-http-client/conn"
 )
 
-func poolGet(ctx context.Context, addr string) error {
-	c, err := client.NewClient(client.ClientOptions{
-		Addr: addr,
-		ConnOpts: conn.ConnOptions{
-			Dialer: &conn.TLSDialer{Config: &tls.Config{ServerName: "example.com"}},
-		},
-		Transport: client.TransportPool,
-		Pool: &client.PoolOptions{
-			MaxConnsPerHost:   4,
-			MaxStreamsPerConn: 100,
-			IdleTimeout:       30 * time.Second,
-		},
-	})
+func main() {
+	c, err := client.NewSingleConnClient("example.com:443",
+		&conn.TLSDialer{Config: &tls.Config{ServerName: "example.com"}})
 	if err != nil {
-		return err
+		log.Fatal(err)
 	}
-	defer c.Close()
+	defer c.Close() // REQUIRED — leaks the conn + reader goroutine otherwise.
 
-	var res client.Response
-	if err := c.Do(ctx, &client.Request{
-		Method:   "GET",
-		Path:     "/",
-		BodyMode: client.BodyBuffer,
-	}, &res); err != nil {
-		return err
+	var resp client.Response
+	if err := c.Do(context.Background(), client.GET("/"), &resp); err != nil {
+		log.Fatal(err)
 	}
-	fmt.Println("status:", res.Status, "bytes:", res.BytesReceived)
-	return nil
+	fmt.Println("status:", resp.Status, "bytes:", resp.BytesReceived)
 }
 ```
 
-For codec-only usage (no networking), the `frame` and `hpack`
-packages remain importable directly:
+The steady-state load loop reuses one `Response` — call `Reset()` before every
+`Do`, and treat the result's slices as valid only until the next `Reset()`:
+
+```go
+var resp client.Response // one per goroutine
+for {
+	resp.Reset() // MUST reset before every (re)use, including after an error.
+	if err := c.Do(ctx, client.GET("/metrics"), &resp); err != nil {
+		log.Fatal(err)
+	}
+	_ = resp.Status  // e.g. 200
+	_ = resp.Headers // valid until next Reset()
+	_ = resp.Body    // valid until next Reset()
+}
+```
+
+### Pick a transport
+
+One constructor per strategy — an invalid transport/field combination is
+unrepresentable:
+
+```go
+// 1. Single connection, auto-redial (the default).
+c, _ := client.NewSingleConnClient(addr, dialer)
+
+// 2. Pool of up to N connections to one backend.
+c, _ := client.NewPoolClient(addr, dialer,
+	client.PoolOptions{MaxConnsPerHost: 4, MaxStreamsPerConn: 100})
+
+// 3. Managed multi-backend: a Resolver discovers addresses, a Selector picks one.
+c, _ := client.NewManagedClient(resolver, dialer,
+	client.WithSelector(client.RoundRobin()))
+```
+
+Tune anything with functional options — `WithRateLimit`, `WithHooks`,
+`WithPushHandler`, `WithDefaultScheme` (H2C), `WithMaxResponseBodySize`,
+`WithConnOptions` (keepalive, SETTINGS, push), and more. Drop to
+`client.NewClient(client.ClientOptions{...})` for full control.
+
+### Codec-only usage
+
+The `frame` and `hpack` packages have no networking dependency and are
+importable on their own for anyone building their own HTTP/2 stack:
 
 ```go
 import (
-    "github.com/lodgvideon/poseidon-http-client/frame"
-    "github.com/lodgvideon/poseidon-http-client/hpack"
+	"github.com/lodgvideon/poseidon-http-client/frame"
+	"github.com/lodgvideon/poseidon-http-client/hpack"
 )
 ```
 
-## Limits and contracts
+## Features
 
-- `conn.Conn` is goroutine-safe across `NewStream` / `Close`. `Stream`
-  methods may be called from one goroutine at a time.
-- B.2.1 enforces a **locally advertised `MaxConcurrentStreams`** cap
-  per Conn (default 100; returns `ErrTooManyStreams` if exceeded).
-  Peer-advertised limit enforcement is B.2.5.
-- `frame.Framer`, `hpack.Encoder`, `hpack.Decoder` are NOT
-  goroutine-safe — `conn.Conn` owns one of each per connection and
-  serializes access internally.
-- Decoder / `StreamEvent` slice fields alias internal scratch buffers
-  and are valid only until the next `Recv`/`Close` on the same stream.
-  Copy if you must retain.
-- Codec hot path: `0 B/op` and `0 allocs/op` (bench gate enforced in
-  CI). `client` steady state: D.1 reduced to 33 allocs/op (−33%).
+| Area | What you get |
+|---|---|
+| **Protocol** | HTTP/2 (RFC 7540) framing + HPACK (RFC 7541) from scratch; HTTP/1.1 fallback; ALPN auto-negotiation (`h2` / `http/1.1`); H2C plaintext prior-knowledge |
+| **Requests** | Unary `Do` with a reusable `Response`; `content-length` upload; gzip/deflate response decompression with a decompression-bomb guard |
+| **Streaming** | Event-driven `DoStream` + `StreamResponse`; `io.ReadCloser` body streaming (`BodyStream`); streaming request-body upload; request trailers |
+| **Connections** | Single-conn with auto-redial; per-host pool (least-loaded stream pick, idle eviction, dial backoff); HTTP `CONNECT` proxy dialers (with Basic auth); full bidirectional flow control; dynamic SETTINGS; `MAX_CONCURRENT_STREAMS` gating; GOAWAY drain; PING keepalive |
+| **Service discovery** | `Resolver` (`StaticResolver`, `DNSResolver` with TTL cache + Watch) + `Selector` (`RoundRobin`, `Random`, `Hash`); graceful / hard / lazy drain modes |
+| **Resilience** | Opt-in `Retryer` wrapper: bounded retries of idempotent requests (`REFUSED_STREAM`, GOAWAY, dial errors) with truncated-exponential backoff + jitter; per-request idempotency override; token-bucket rate limiting; per-request timeouts |
+| **Observability** | Lifecycle `Hooks` (request start/complete, retry, dial, conn close, resolver update); lock-free counters + log-bucket latency histograms; status-class metrics; `PoolStats()` |
+| **Advanced protocol** | Server push (`PUSH_PROMISE`); request priority (§5.3); extended CONNECT (RFC 8441 — WebSockets over HTTP/2); large header blocks via `CONTINUATION` |
+| **Performance** | Zero-alloc codec (bench-gated); pooled buffers/slabs/streams; caller-owned `Response` reuse; buffered writer coalescing DATA syscalls |
 
-## Local development
+## Documentation
 
-Requirements: Go 1.24, `golangci-lint` v1.62 (optional).
+- **[docs/CLIENT_GUIDE.md](docs/CLIENT_GUIDE.md)** — the canonical client
+  guide. Every feature above with verified, copy-pasteable examples:
+  construction and the five transports, unary and streaming requests, retry /
+  idempotency / rate limiting, pooling and service discovery, observability,
+  required-call contracts, and the error model.
+- **[Go Reference (pkg.go.dev)](https://pkg.go.dev/github.com/lodgvideon/poseidon-http-client/client)**
+  — full API docs and 30+ runnable / compile-tested examples.
+- **[examples/loadgen](examples/loadgen)** — a runnable load generator: pooled
+  client, rate limiting, hooks, a worker pool, and a metrics snapshot.
+- **[CHANGELOG.md](CHANGELOG.md)** — release history (v0.1.0 → **v0.7.1**).
+
+### Where each feature is documented
+
+| I want to… | Guide section | Example |
+|---|---|---|
+| Pick a transport (single / pool / managed / ALPN) | [The five transport kinds](docs/CLIENT_GUIDE.md#the-five-transport-kinds) | `ExampleNewSingleConnClient`, `ExampleNewPoolClient`, `ExampleNewManagedClient`, `Example_alpnTransport` |
+| Speak H2C (plaintext HTTP/2) | [H2C](docs/CLIENT_GUIDE.md#h2c-plaintext-prior-knowledge) | `Example_h2c` |
+| Dial through a `CONNECT` proxy | [Dialers](docs/CLIENT_GUIDE.md#dialers-connoptsdialer) | `ExampleProxyTLSDialer` |
+| Make a GET / POST | [Unary requests](docs/CLIENT_GUIDE.md#unary-requests-do) | `ExampleGET`, `ExamplePOST`, `Example_postJSON` |
+| Reuse a `Response` under load | [The `Response` reuse contract](docs/CLIENT_GUIDE.md#the-response-struct-and-the-reset-reuse-contract) | `Example_reuseResponse` |
+| Stream a response body | [Streaming responses](docs/CLIENT_GUIDE.md#streaming-responses--body-upload) | `Example_streamBodyReader`, `Example_streamingDownload` |
+| Upload a request body | [Streaming the request body](docs/CLIENT_GUIDE.md#streaming-the-request-body-upload) | `Example_uploadBody` |
+| Get the raw (compressed) body | [Disabling decompression](docs/CLIENT_GUIDE.md#7-disabling-response-decompression) | `ExampleRequest_disableDecompression` |
+| Retry idempotent requests | [Retryer](docs/CLIENT_GUIDE.md#retryer) | `ExampleClient_Retryer`, `Example_retryOnRefusedStream`, `Example_idempotencyOverride` |
+| Rate-limit requests | [Rate limiting](docs/CLIENT_GUIDE.md#rate-limiting) | `Example_rateLimit` |
+| Time out a request | [Per-request timeout](docs/CLIENT_GUIDE.md#per-request-timeout) | `Example_requestTimeout` |
+| Pool + warm up + drain connections | [Pooling](docs/CLIENT_GUIDE.md#connection-pooling--service-discovery), [Lifecycle](docs/CLIENT_GUIDE.md#2-lifecycle-close-shutdown-warmup), [Pool stats](docs/CLIENT_GUIDE.md#3-pool-statistics--stats-and-poolstats) | `ExampleNewPoolClient`, `Example_poolLifecycle` |
+| Discover backends via DNS | [Resolvers](docs/CLIENT_GUIDE.md#5-resolvers--resolver-staticresolver-dnsresolver) | `ExampleDNSResolver`, `ExampleStaticResolver` |
+| Balance across backends | [Selectors](docs/CLIENT_GUIDE.md#6-selectors--selector-roundrobin-random-hash-pickcontext) | `ExampleHash`, `ExampleRandom` |
+| Collect metrics / hooks | [Hooks](docs/CLIENT_GUIDE.md#1-hooks), [Metrics](docs/CLIENT_GUIDE.md#2-metrics) | `ExampleHooks`, `ExampleClient_MetricsSnapshot`, `Example_successRate` |
+| Handle server push | [Server push](docs/CLIENT_GUIDE.md#3-server-push-push_promise) | `Example_serverPush` |
+| Set request priority | [Request priority](docs/CLIENT_GUIDE.md#4-request-priority-rfc-7540-53) | `Example_requestPriority` |
+| Tunnel WebSockets (extended CONNECT) | [Extended CONNECT](docs/CLIENT_GUIDE.md#5-extended-connect-rfc-8441--websockets-over-http2) | `Example_extendedConnect` |
+| Send / read trailers | [Request trailers](docs/CLIENT_GUIDE.md#6-request-trailers) | `Example_requestTrailers`, `ExampleStreamResponse_WaitTrailers` |
+| Use the ergonomic helpers | [Convenience helpers](docs/CLIENT_GUIDE.md#convenience-helpers) | `ExampleH`, `ExampleResponse_Header`, `ExampleClient_Stream` |
+| Match errors | [Error model](docs/CLIENT_GUIDE.md#8-error-model) | `Example_errorsIs` |
+
+## Contracts
+
+A few invariants worth internalizing before you build on the API — the full
+list lives in [the guide's Required-call contracts](docs/CLIENT_GUIDE.md#required-call-contracts):
+
+- **Always `Close`** (or `Shutdown`) every `Client` you construct — otherwise
+  you leak connections, reader goroutines, and the pool actor goroutine.
+- **`Response.Reset()` before every reuse.** `Response.Headers` / `Body` and
+  `StreamEvent` slices alias internal scratch buffers, valid only until the
+  next `Reset()` / `Recv` / `Close`. Copy (`Response.CopyBody`) to retain.
+- **A `Client` is goroutine-safe;** a single `Response` / `StreamResponse` is
+  owned by one goroutine at a time. The `frame`/`hpack` codecs are not
+  goroutine-safe — `conn.Conn` owns one of each and serializes access.
+
+## Development
+
+Requirements: **Go 1.24**, `golangci-lint` **v2.5** (optional, for `make lint`).
 
 ```bash
-make tidy
-make lint
-make test-race
-make bench
+make tidy       # go mod tidy
+make lint       # golangci-lint v2.5
+make test-race  # go test -race ./...  (default verification)
+make bench      # benches with the 0 B/op · 0 allocs/op gate on frame + hpack
 ```
 
 Optional pre-commit hook:
@@ -238,8 +217,9 @@ Optional pre-commit hook:
 git config core.hooksPath .githooks
 ```
 
-See [docs/BENCH_BASELINE.md](docs/BENCH_BASELINE.md) for reference
-numbers and [docs/COVERAGE.md](docs/COVERAGE.md) for coverage policy.
+See [docs/BENCH_BASELINE.md](docs/BENCH_BASELINE.md) for reference numbers and
+[docs/COVERAGE.md](docs/COVERAGE.md) for the coverage policy. Architecture and
+current milestone: [conn/doc.go](conn/doc.go).
 
 ## License
 
