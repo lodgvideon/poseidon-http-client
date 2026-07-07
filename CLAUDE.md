@@ -41,7 +41,7 @@ writes via `wmu`.
 
 ## Phase status
 
-Read [README.md §Phases](README.md) and [conn/doc.go](conn/doc.go) for
+Read [CHANGELOG.md](CHANGELOG.md) and [conn/doc.go](conn/doc.go) for
 current milestone. **Phase B complete** (B.2.6 merged or in PR
 stack #5/#6/#7): multi-stream, full bidirectional flow control,
 dynamic SETTINGS + ACK with retroactive `INITIAL_WINDOW_SIZE` resize,

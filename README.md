@@ -33,7 +33,7 @@ fmt.Println(resp.Status, len(resp.Body)) // 200 1256
   wire protocol are implemented directly. No surprise `net/http` behavior,
   no reflection, no interface soup between you and the socket.
 - **Load-generator ergonomics.** Connection pooling, DNS-based service
-  discovery, rate limiting, automatic retries, per-request metrics, and
+  discovery, rate limiting, opt-in retries, per-request metrics, and
   lifecycle hooks — each with **zero overhead when unused** (nil hooks and
   disabled rate limits are branch-free on the fast path).
 - **Syscall-lean.** A buffered reader and writer coalesce frame I/O so a DATA
@@ -118,7 +118,7 @@ c, _ := client.NewManagedClient(resolver, dialer,
 
 Tune anything with functional options — `WithRateLimit`, `WithHooks`,
 `WithPushHandler`, `WithDefaultScheme` (H2C), `WithMaxResponseBodySize`,
-`WithConnOptions` (keepalive, buffers), and more. Drop to
+`WithConnOptions` (keepalive, SETTINGS, push), and more. Drop to
 `client.NewClient(client.ClientOptions{...})` for full control.
 
 ### Codec-only usage
@@ -138,11 +138,11 @@ import (
 | Area | What you get |
 |---|---|
 | **Protocol** | HTTP/2 (RFC 7540) framing + HPACK (RFC 7541) from scratch; HTTP/1.1 fallback; ALPN auto-negotiation (`h2` / `http/1.1`); H2C plaintext prior-knowledge |
-| **Requests** | Unary `Do` with a reusable `Response`; `content-length` upload; gzip response decompression with a decompression-bomb guard |
+| **Requests** | Unary `Do` with a reusable `Response`; `content-length` upload; gzip/deflate response decompression with a decompression-bomb guard |
 | **Streaming** | Event-driven `DoStream` + `StreamResponse`; `io.ReadCloser` body streaming (`BodyStream`); streaming request-body upload; request trailers |
-| **Connections** | Single-conn with auto-redial; per-host pool (least-loaded stream pick, idle eviction, dial backoff); full bidirectional flow control; dynamic SETTINGS; `MAX_CONCURRENT_STREAMS` gating; GOAWAY drain; PING keepalive |
+| **Connections** | Single-conn with auto-redial; per-host pool (least-loaded stream pick, idle eviction, dial backoff); HTTP `CONNECT` proxy dialers (with Basic auth); full bidirectional flow control; dynamic SETTINGS; `MAX_CONCURRENT_STREAMS` gating; GOAWAY drain; PING keepalive |
 | **Service discovery** | `Resolver` (`StaticResolver`, `DNSResolver` with TTL cache + Watch) + `Selector` (`RoundRobin`, `Random`, `Hash`); graceful / hard / lazy drain modes |
-| **Resilience** | Automatic retry of idempotent requests (`REFUSED_STREAM`, GOAWAY, dial errors) with truncated-exponential backoff + jitter; per-request idempotency override; token-bucket rate limiting; per-request timeouts |
+| **Resilience** | Opt-in `Retryer` wrapper: bounded retries of idempotent requests (`REFUSED_STREAM`, GOAWAY, dial errors) with truncated-exponential backoff + jitter; per-request idempotency override; token-bucket rate limiting; per-request timeouts |
 | **Observability** | Lifecycle `Hooks` (request start/complete, retry, dial, conn close, resolver update); lock-free counters + log-bucket latency histograms; status-class metrics; `PoolStats()` |
 | **Advanced protocol** | Server push (`PUSH_PROMISE`); request priority (§5.3); extended CONNECT (RFC 8441 — WebSockets over HTTP/2); large header blocks via `CONTINUATION` |
 | **Performance** | Zero-alloc codec (bench-gated); pooled buffers/slabs/streams; caller-owned `Response` reuse; buffered writer coalescing DATA syscalls |
@@ -158,24 +158,32 @@ import (
   — full API docs and 30+ runnable / compile-tested examples.
 - **[examples/loadgen](examples/loadgen)** — a runnable load generator: pooled
   client, rate limiting, hooks, a worker pool, and a metrics snapshot.
-- **[CHANGELOG.md](CHANGELOG.md)** — release history (currently **v0.7.1**;
-  every phase A–F released).
+- **[CHANGELOG.md](CHANGELOG.md)** — release history (v0.1.0 → **v0.7.1**).
 
 ### Where each feature is documented
 
-| I want to… | Guide section | Runnable example |
+| I want to… | Guide section | Example |
 |---|---|---|
+| Pick a transport (single / pool / managed / ALPN) | [The five transport kinds](docs/CLIENT_GUIDE.md#the-five-transport-kinds) | `ExampleNewSingleConnClient`, `ExampleNewPoolClient`, `ExampleNewManagedClient`, `Example_alpnTransport` |
+| Speak H2C (plaintext HTTP/2) | [H2C](docs/CLIENT_GUIDE.md#h2c-plaintext-prior-knowledge) | `Example_h2c` |
+| Dial through a `CONNECT` proxy | [Dialers](docs/CLIENT_GUIDE.md#dialers-connoptsdialer) | `ExampleProxyTLSDialer` |
 | Make a GET / POST | [Unary requests](docs/CLIENT_GUIDE.md#unary-requests-do) | `ExampleGET`, `ExamplePOST`, `Example_postJSON` |
 | Reuse a `Response` under load | [The `Response` reuse contract](docs/CLIENT_GUIDE.md#the-response-struct-and-the-reset-reuse-contract) | `Example_reuseResponse` |
 | Stream a response body | [Streaming responses](docs/CLIENT_GUIDE.md#streaming-responses--body-upload) | `Example_streamBodyReader`, `Example_streamingDownload` |
 | Upload a request body | [Streaming the request body](docs/CLIENT_GUIDE.md#streaming-the-request-body-upload) | `Example_uploadBody` |
-| Retry idempotent requests | [Retryer](docs/CLIENT_GUIDE.md#retryer) | `ExampleClient_Retryer`, `Example_retryOnRefusedStream` |
-| Rate-limit / time out requests | [Rate limiting](docs/CLIENT_GUIDE.md#rate-limiting) | `Example_rateLimit`, `Example_requestTimeout` |
-| Pool connections | [Connection pooling](docs/CLIENT_GUIDE.md#connection-pooling--service-discovery) | `ExampleNewPoolClient` |
-| Discover backends via DNS | [Managed pool + resolvers](docs/CLIENT_GUIDE.md#4-managed-pool--transportmanaged--drainmode) | `ExampleNewManagedClient`, `ExampleStaticResolver` |
-| Collect metrics / hooks | [Observability](docs/CLIENT_GUIDE.md#observability--advanced-protocol) | `ExampleHooks`, `ExampleClient_MetricsSnapshot`, `Example_successRate` |
+| Get the raw (compressed) body | [Disabling decompression](docs/CLIENT_GUIDE.md#7-disabling-response-decompression) | `ExampleRequest_disableDecompression` |
+| Retry idempotent requests | [Retryer](docs/CLIENT_GUIDE.md#retryer) | `ExampleClient_Retryer`, `Example_retryOnRefusedStream`, `Example_idempotencyOverride` |
+| Rate-limit requests | [Rate limiting](docs/CLIENT_GUIDE.md#rate-limiting) | `Example_rateLimit` |
+| Time out a request | [Per-request timeout](docs/CLIENT_GUIDE.md#per-request-timeout) | `Example_requestTimeout` |
+| Pool + warm up + drain connections | [Pooling](docs/CLIENT_GUIDE.md#connection-pooling--service-discovery), [Lifecycle](docs/CLIENT_GUIDE.md#2-lifecycle-close-shutdown-warmup), [Pool stats](docs/CLIENT_GUIDE.md#3-pool-statistics--stats-and-poolstats) | `ExampleNewPoolClient`, `Example_poolLifecycle` |
+| Discover backends via DNS | [Resolvers](docs/CLIENT_GUIDE.md#5-resolvers--resolver-staticresolver-dnsresolver) | `ExampleDNSResolver`, `ExampleStaticResolver` |
+| Balance across backends | [Selectors](docs/CLIENT_GUIDE.md#6-selectors--selector-roundrobin-random-hash-pickcontext) | `ExampleHash`, `ExampleRandom` |
+| Collect metrics / hooks | [Hooks](docs/CLIENT_GUIDE.md#1-hooks), [Metrics](docs/CLIENT_GUIDE.md#2-metrics) | `ExampleHooks`, `ExampleClient_MetricsSnapshot`, `Example_successRate` |
 | Handle server push | [Server push](docs/CLIENT_GUIDE.md#3-server-push-push_promise) | `Example_serverPush` |
-| Send trailers | [Request trailers](docs/CLIENT_GUIDE.md#6-request-trailers) | `Example_requestTrailers` |
+| Set request priority | [Request priority](docs/CLIENT_GUIDE.md#4-request-priority-rfc-7540-53) | `Example_requestPriority` |
+| Tunnel WebSockets (extended CONNECT) | [Extended CONNECT](docs/CLIENT_GUIDE.md#5-extended-connect-rfc-8441--websockets-over-http2) | `Example_extendedConnect` |
+| Send / read trailers | [Request trailers](docs/CLIENT_GUIDE.md#6-request-trailers) | `Example_requestTrailers`, `ExampleStreamResponse_WaitTrailers` |
+| Use the ergonomic helpers | [Convenience helpers](docs/CLIENT_GUIDE.md#convenience-helpers) | `ExampleH`, `ExampleResponse_Header`, `ExampleClient_Stream` |
 | Match errors | [Error model](docs/CLIENT_GUIDE.md#8-error-model) | `Example_errorsIs` |
 
 ## Contracts

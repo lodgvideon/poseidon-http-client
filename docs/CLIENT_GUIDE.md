@@ -170,12 +170,16 @@ The `:authority` for requests defaults to a port-stripped form of `Addr` (`deriv
 
 ### Dialers (`ConnOpts.Dialer`)
 
-`ConnOpts.Dialer` is always required. The `conn` package ships four:
+`ConnOpts.Dialer` is always required. The `conn` package ships these:
 
 - `&conn.TLSDialer{Config: *tls.Config}` — TCP + TLS, asserts ALPN `h2` (default; `Config` nil → TLS 1.2+ with `NextProtos=["h2"]`). Returns `conn.ErrALPNFailed` if the peer does not select `h2`.
 - `&conn.PlaintextDialer{}` — raw TCP for H2C prior-knowledge (no TLS/ALPN). Pair with `DefaultScheme: "http"`.
 - `&conn.FlexDialer{Config: *tls.Config}` — TCP + TLS offering both `h2` and `http/1.1`; use with `TransportALPN`.
+- `&conn.ProxyTLSDialer{ProxyURL, ProxyTLS, TLSConfig}` — dials through an HTTP `CONNECT` proxy, then TLS + ALPN `h2` to the target over the tunnel. `ProxyURL` is `http://…` (plaintext to proxy) or `https://…` (TLS to proxy first); embed `user:pass@` for `Proxy-Authorization: Basic`. `TLSConfig` is the *target* TLS config (`ServerName` = target host). Drop-in for `TLSDialer` — see `ExampleProxyTLSDialer`.
+- `&conn.ProxyDialer{ProxyURL, ProxyTLS}` — the raw `CONNECT` tunnel only (returns the plaintext `net.Conn`); use when you want to layer your own TLS, or for H2C through a proxy.
 - A plain-TCP or `http/1.1`-only TLS dialer for `TransportH1SingleConn`.
+
+Any type implementing `conn.Dialer` (`Dial(ctx, addr) (net.Conn, error)`) works, so you can wrap these or supply your own.
 
 ### The five transport kinds
 
