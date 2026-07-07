@@ -199,8 +199,9 @@ func ExampleRequest_disableDecompression() {
 
 // Example_extendedConnect opens an RFC 8441 extended-CONNECT tunnel (e.g.
 // WebSocket) over a single HTTP/2 stream. Method MUST be CONNECT and the
-// server MUST have advertised SETTINGS_ENABLE_CONNECT_PROTOCOL=1; stream the
-// body both ways via BodyStream.
+// server MUST have advertised SETTINGS_ENABLE_CONNECT_PROTOCOL=1. Read the
+// downstream via the StreamResponse; attach a Request.BodyReader to send
+// bytes upstream.
 func Example_extendedConnect() {
 	dialer := &conn.TLSDialer{Config: &tls.Config{ServerName: "example.com"}}
 	c, err := client.NewSingleConnClient("example.com:443", dialer)
