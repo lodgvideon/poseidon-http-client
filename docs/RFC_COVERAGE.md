@@ -226,6 +226,8 @@ protection (RFC 9001) and the connection engine are later phases.
 | §13.2 / §19.3 | Unit  | TestAckTracker_RoundTrip, TestAckTracker_PendingAndLargest (received PNs → ACK ranges → decode back to the exact set) |
 | §7.1 / §14.1 | Unit   | TestConn_SendInitialFlight (Conn drives the handshake to a ClientHello and sends one padded Initial datagram that decrypts back to it) |
 | §7 / RFC 9001 §4 | Integration | TestConn_Establish_InMemory (**full QUIC v1 + TLS 1.3 handshake** completes between the client Conn and an in-memory server over a datagram pipe: Initial + Handshake flights, key installs, handshake done) |
+| §2.2    | Conformance | TestConformance_RFC9000_Sec2_StreamReassembly (out-of-order STREAM frames reassembled to correct byte stream; complete only once FIN + all preceding bytes present) |
+| §2.1    | Unit        | TestConn_OpenStream_IDs (client bidi stream IDs 0, 4, 8, …), TestConn_OnStream_DeliversToOpenStream (inbound STREAM routed to opened stream) |
 
 ## RFC 9001 — Using TLS to Secure QUIC (Phase G — HTTP/3)
 

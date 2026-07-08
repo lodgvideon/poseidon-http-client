@@ -59,6 +59,9 @@ type Conn struct {
 	closed            bool
 	handshakeComplete bool
 	sendBuf           []byte
+
+	nextBidiStreamID uint64             // next client-initiated bidi stream ID (0, 4, 8, …)
+	streams          map[uint64]*Stream // open streams by ID
 }
 
 // NewConn creates a client QUIC connection over pc. tlsConfig must set
