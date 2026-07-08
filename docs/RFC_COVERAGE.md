@@ -223,16 +223,22 @@ protection (RFC 9001) and the connection engine are later phases.
 
 ## RFC 9001 — Using TLS to Secure QUIC (Phase G — HTTP/3)
 
-G.5a lands the QUIC key schedule: HKDF-Expand-Label (RFC 8446 §7.1, `tls13 `
-prefix) and Initial-secret derivation from the client Destination Connection ID
-(§5.2), producing the packet-protection key / iv / hp per direction (§5.1). All
-pure stdlib (`crypto/hkdf`, Go 1.24). AEAD packet protection + header protection
-+ the `crypto/tls.QUICConn` handshake are the following sub-phases.
+G.5a lands the QUIC key schedule (HKDF-Expand-Label + Initial secrets, §5.1–5.2);
+G.5b adds AEAD packet protection (§5.3) and header protection (§5.4) — `Sealer` /
+`Opener` over AES-128-GCM + AES-ECB, plus packet-number reconstruction
+(RFC 9000 §A.3). All pure stdlib (`crypto/hkdf`, `crypto/aes`, `crypto/cipher`;
+Go 1.24). The `crypto/tls.QUICConn` handshake loop is the next sub-phase; the
+full Appendix A.2 packet known-answer test lands with G.8 real-server interop.
 
 | Section | Type        | Test |
 |---------|-------------|------|
 | §5.1–5.2 | Conformance | TestConformance_RFC9001_AppA1_InitialKeys (client+server key/iv/hp vs Appendix A.1 vectors) |
 | §5.1    | Conformance | TestConformance_RFC9001_Sec51_ExpandLabel (client_initial_secret vs Appendix A.1) |
+| §5.3    | Conformance | TestConformance_RFC9001_Sec53_Nonce (IV XOR packet number vs A.1-derived values) |
+| §5.3    | Roundtrip   | TestPacketProtection_RoundTrip (seal → open recovers pn + payload) |
+| §5.3    | Negative    | TestPacketProtection_AuthFailure (tampered / wrong-key → ErrCryptoDecrypt) |
+| §5.4    | Roundtrip   | TestHeaderProtection_Reversible, TestPacketProtection_ShortSample |
+| §A.3    | Conformance | TestDecodePacketNumber (packet-number reconstruction, §A.3 example) |
 
 ## RFC 9204 — QPACK (Phase G — HTTP/3)
 

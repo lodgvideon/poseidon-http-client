@@ -36,3 +36,15 @@ var ErrFrameEncoding = errors.New("quic: frame encoding error")
 // too short or malformed: a truncated header, a connection ID length above 20,
 // or a Length field that runs past the datagram (RFC 9000 §17).
 var ErrPacketEncoding = errors.New("quic: packet encoding error")
+
+// ErrCryptoKey is returned when packet-protection keys are the wrong size.
+var ErrCryptoKey = errors.New("quic: invalid packet-protection key")
+
+// ErrCryptoSample is returned when a packet is too short to sample header
+// protection (RFC 9001 §5.4.2 requires 4 bytes of packet number plus a 16-byte
+// sample of the protected payload).
+var ErrCryptoSample = errors.New("quic: packet too short for header protection sample")
+
+// ErrCryptoDecrypt is returned when AEAD authentication of a received packet
+// fails (RFC 9001 §5.3) — a forged, corrupted, or wrong-key packet.
+var ErrCryptoDecrypt = errors.New("quic: packet decryption failed")
