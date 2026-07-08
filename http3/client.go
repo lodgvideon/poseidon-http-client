@@ -101,9 +101,16 @@ func (c *Client) Do(req *Request) (*Response, []byte, error) {
 	if err != nil {
 		return nil, nil, err
 	}
-	// The request carries no body: the HEADERS frame is sent with FIN.
-	if err := sendAll(c.conn, stream, frame, true); err != nil {
+	// Send HEADERS, ending the stream now only if there is no body; otherwise
+	// the body follows in a DATA frame that carries the FIN (RFC 9114 §4.1).
+	hasBody := len(req.Body) > 0
+	if err := sendAll(c.conn, stream, frame, !hasBody); err != nil {
 		return nil, nil, err
+	}
+	if hasBody {
+		if err := sendAll(c.conn, stream, AppendData(nil, req.Body), true); err != nil {
+			return nil, nil, err
+		}
 	}
 
 	var fr FrameReader

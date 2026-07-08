@@ -16,6 +16,7 @@ services:
     networks: [h3net]
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - ./srv:/srv:ro
     healthcheck:
       test: ["CMD", "curl", "-kfsS", "-o", "/dev/null", "https://localhost/"]
       interval: 1s
@@ -37,5 +38,5 @@ services:
       H3_INTEROP_ADDR: h3caddy:443
       GOFLAGS: -count=1
     command: >
-      go test ./http3/ -tags interop -run TestInterop_GET -v -timeout 60s
+      go test ./http3/ -tags interop -run TestInterop -v -timeout 90s
     restart: "no"
