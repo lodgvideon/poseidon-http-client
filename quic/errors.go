@@ -31,3 +31,8 @@ const (
 // the remaining bytes, or an unknown frame type. It maps to the
 // FRAME_ENCODING_ERROR (0x07) transport error (RFC 9000 §12.4).
 var ErrFrameEncoding = errors.New("quic: frame encoding error")
+
+// ErrPacketEncoding is returned by the packet-header parser when the input is
+// too short or malformed: a truncated header, a connection ID length above 20,
+// or a Length field that runs past the datagram (RFC 9000 §17).
+var ErrPacketEncoding = errors.New("quic: packet encoding error")
