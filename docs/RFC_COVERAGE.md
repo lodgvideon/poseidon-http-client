@@ -295,7 +295,11 @@ arrives in pieces and yields whole frames), the unidirectional stream-type codec
 encoded pseudo-headers-first and QPACK-compressed into a HEADERS frame, and a
 response field section is decoded into a status + validated headers, rejecting
 malformed messages (bad :status, misordered/forbidden pseudo-headers, invalid
-field names/values, connection-specific fields). Live stream wiring follows.
+field names/values, connection-specific fields). G.7d wires it to QUIC: a
+`Client` over an established `quic.Conn` opens the control stream (SETTINGS
+first), sends a request on a bidi stream, and reads the response by polling the
+connection — validated against a fake QUIC transport (real-transport interop is
+deferred to the Docker-peer phase).
 
 | Section | Type        | Test |
 |---------|-------------|------|
@@ -309,6 +313,8 @@ field names/values, connection-specific fields). Live stream wiring follows.
 | §4.2    | Negative    | TestConformance_RFC9114_Sec42_RequestValidation (missing pseudo-header / uppercase / connection-specific / CR-LF value → ErrH3Message; client never emits a malformed request) |
 | §4.1.2 / §4.3.2 | Conformance | TestConformance_RFC9114_Sec412_ResponseDecode (:status + regular headers decoded) |
 | §4.1.2  | Negative    | TestConformance_RFC9114_Sec412_MalformedResponse (missing/duplicate/out-of-range :status, pseudo-after-regular, non-:status pseudo, uppercase/space name, CR-LF value, connection-specific / te≠trailers → ErrH3Message) |
+| §6.2.1 / §4 | Integration | TestClient_RequestResponse (client opens control stream + SETTINGS, sends a request, decodes response HEADERS + DATA over a Poll loop), TestClient_SendDrainsUnderFlowControl (partial Send is drained so the request/SETTINGS are never truncated) |
+| §4.1    | Negative    | TestClient_DataBeforeHeaders (DATA before HEADERS on a request stream → ErrH3FrameUnexpected = H3_FRAME_UNEXPECTED) |
 
 ## Gate
 
