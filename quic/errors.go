@@ -70,3 +70,8 @@ var ErrTooManyStreams = errors.New("quic: too many streams")
 // ErrNotEstablished is returned by Stream.Send before the 1-RTT keys are
 // installed — application data may only be sent after the handshake completes.
 var ErrNotEstablished = errors.New("quic: connection not established")
+
+// ErrHandshakeClosed is returned by Establish when the peer closes the
+// connection (e.g. a CONNECTION_CLOSE for a TLS alert) before the handshake
+// completes.
+var ErrHandshakeClosed = errors.New("quic: connection closed during handshake")

@@ -1,5 +1,5 @@
 .PHONY: lint test test-race test-debug bench bench-gate fuzz-replay coverage coverage-gate tidy
-.PHONY: it-up it-down it-logs it-test it-test-fast it-certs h3-interop
+.PHONY: it-up it-down it-logs it-test it-test-fast it-certs h3-interop h3-interop-loss
 
 # Minimum overall and per-package statement coverage. CI fails below this.
 COVERAGE_MIN ?= 80
@@ -95,3 +95,10 @@ H3_COMPOSE = test/integration/http3/docker-compose.yml
 h3-interop:
 	@trap '$(DOCKER_COMPOSE) -f $(H3_COMPOSE) down -v 2>/dev/null' EXIT; \
 	$(DOCKER_COMPOSE) -f $(H3_COMPOSE) up --abort-on-container-exit --exit-code-from runner
+
+# Same interop suite, but the client dials through a UDP relay that drops ~10%
+# of datagrams each way — passes only if loss recovery (RFC 9002) works.
+H3_LOSS_COMPOSE = test/integration/http3/docker-compose.loss.yml
+h3-interop-loss:
+	@trap '$(DOCKER_COMPOSE) -f $(H3_LOSS_COMPOSE) down -v 2>/dev/null' EXIT; \
+	$(DOCKER_COMPOSE) -f $(H3_LOSS_COMPOSE) up --abort-on-container-exit --exit-code-from runner

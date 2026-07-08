@@ -291,6 +291,7 @@ deferred.
 | §6.1 / §13.3 | Unit | TestConn_Retransmit_CryptoResendsBytesAtOffset (lost CRYPTO resent at its offset; retransmit Initial datagram padded to 1200, RFC 9000 §14.1), TestConn_Retransmit_StreamResendsBytesAtOffsetAndFin (lost STREAM resent at offset+FIN, accounting not re-advanced), TestConn_Retransmit_AckedPacketNotResent, TestConn_AckOnlyPacketNotRetransmittable |
 | §6.2.1  | Unit        | TestConn_PTOPeriod (PTO = srtt + max(4·rttvar, granularity) + max_ack_delay, doubled per backoff; 2·kInitialRtt pre-sample), TestConn_PTOCount_ResetOnAck (backoff reset on a newly-acked ack-eliciting packet) |
 | §6.2.4  | Unit        | TestConn_OnPTO_QueuesProbe (probe resends the oldest unacked packet + backs off), TestConn_ReadWithPTO_ProbesOnTimeout (a read timeout with data in flight sends a probe and retries) |
+| §6 (whole) | Interop | `make h3-interop-loss` — the GET/POST/16 KiB interop suite run against live Caddy through a UDP relay that drops ~10% of datagrams each way; passing proves the handshake, request, and response recover via retransmission and the probe timeout (verified up to 20% loss). |
 
 ## RFC 9204 — QPACK (Phase G — HTTP/3)
 
