@@ -252,12 +252,15 @@ G.5b adds AEAD packet protection (§5.3) and header protection (§5.4) — `Seal
 (RFC 9000 §A.3). G.5c adds the `crypto/tls.QUICConn` handshake driver
 (`TLSHandshake` + `KeysFromSecret`, §4), verified by a full in-memory TLS 1.3
 QUIC handshake. All pure stdlib (`crypto/hkdf`, `crypto/aes`, `crypto/cipher`,
-`crypto/tls`; Go 1.24). The full Appendix A.2 packet known-answer test lands
-with G.8 real-server interop.
+`crypto/tls`; Go 1.24). The full Appendix A.2 (client Initial seal) and A.3
+(server Initial open) packet known-answer tests reproduce the RFC's protected
+bytes exactly, and the client interoperates with a live Caddy HTTP/3 server.
 
 | Section | Type        | Test |
 |---------|-------------|------|
 | §5.1–5.2 | Conformance | TestConformance_RFC9001_AppA1_InitialKeys (client+server key/iv/hp vs Appendix A.1 vectors) |
+| App. A.2 | Conformance | TestConformance_RFC9001_AppA2_ClientInitial (building the client Initial reproduces the RFC's protected packet byte-for-byte: keys + CRYPTO framing + PADDING + AEAD + header protection) |
+| App. A.3 | Conformance | TestConformance_RFC9001_AppA3_ServerInitial (opening the server's protected Initial recovers packet number 1 and the exact payload: HP removal + PN recovery + AEAD decrypt) |
 | §5.1    | Conformance | TestConformance_RFC9001_Sec51_ExpandLabel (client_initial_secret vs Appendix A.1) |
 | §5.3    | Conformance | TestConformance_RFC9001_Sec53_Nonce (IV XOR packet number vs A.1-derived values) |
 | §5.3    | Roundtrip   | TestPacketProtection_RoundTrip (seal → open recovers pn + payload) |
