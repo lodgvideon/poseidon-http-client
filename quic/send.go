@@ -63,9 +63,15 @@ func (s *Stream) Send(data []byte, fin bool) (int, error) {
 }
 
 // writeStreamFrame emits one STREAM frame carrying chunk at the current send
-// offset, setting FIN when fin is true, then advances the send accounting.
+// offset, setting FIN when fin is true, then advances the send accounting. The
+// chunk is retained (as a copy) so the frame can be retransmitted at this same
+// offset if the packet is lost; a resend does not re-advance the accounting.
 func (s *Stream) writeStreamFrame(chunk []byte, fin bool) error {
-	if err := s.conn.writeAppFrames(AppendStream(nil, s.id, s.sendOffset, fin, chunk)); err != nil {
+	rf := retransFrame{
+		kind: retransStream, streamID: s.id, offset: s.sendOffset, fin: fin,
+		data: append([]byte(nil), chunk...),
+	}
+	if err := s.conn.writeAppFrames(AppendStream(nil, s.id, s.sendOffset, fin, chunk), []retransFrame{rf}); err != nil {
 		return err
 	}
 	s.sendOffset += uint64(len(chunk))
@@ -124,21 +130,23 @@ func (s *Stream) emitBlocked(kind blockKind) {
 		if !s.sdBlockedSet || s.sdBlockedLimit != s.sendMax {
 			s.sdBlockedSet = true
 			s.sdBlockedLimit = s.sendMax
-			_ = s.conn.writeAppFrames(AppendStreamDataBlocked(nil, s.id, s.sendMax))
+			_ = s.conn.writeAppFrames(AppendStreamDataBlocked(nil, s.id, s.sendMax), nil)
 		}
 	case blockConn:
 		if !s.conn.dataBlockedSet || s.conn.dataBlockedLimit != s.conn.connMax {
 			s.conn.dataBlockedSet = true
 			s.conn.dataBlockedLimit = s.conn.connMax
-			_ = s.conn.writeAppFrames(AppendDataBlocked(nil, s.conn.connMax))
+			_ = s.conn.writeAppFrames(AppendDataBlocked(nil, s.conn.connMax), nil)
 		}
 	}
 }
 
 // writeAppFrames seals frames into a 1-RTT packet and writes the datagram. The
-// STREAM and *_BLOCKED frames it carries are ack-eliciting.
-func (c *Conn) writeAppFrames(frames []byte) error {
-	pkt, err := c.sealPacket(spaceApp, frames, true)
+// STREAM and *_BLOCKED frames it carries are ack-eliciting; retrans names the
+// frames to resend if the packet is lost (nil for the informational *_BLOCKED
+// frames, which are not retransmitted this phase).
+func (c *Conn) writeAppFrames(frames []byte, retrans []retransFrame) error {
+	pkt, err := c.sealPacket(spaceApp, frames, true, retrans)
 	if err != nil {
 		return err
 	}
