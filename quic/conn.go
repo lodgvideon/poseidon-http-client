@@ -49,7 +49,14 @@ type Conn struct {
 	pendingCrypto [numSpaces][]byte // handshake bytes to send per space
 	cryptoOffset  [numSpaces]uint64 // CRYPTO stream offset sent per space
 
+	acks        [numSpaces]ackTracker
+	recvCrypto  [numSpaces][]byte // reassembled inbound CRYPTO per space
+	largestRecv [numSpaces]uint64 // largest received packet number per space
+	haveRecv    [numSpaces]bool
+
 	peerParams        []byte
+	gotServerCID      bool // the server's SCID has been adopted as our DCID
+	closed            bool
 	handshakeComplete bool
 	sendBuf           []byte
 }
