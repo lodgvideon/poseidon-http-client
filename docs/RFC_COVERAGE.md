@@ -220,6 +220,7 @@ protection (RFC 9001) and the connection engine are later phases.
 | §12.2   | Conformance | TestParseHeader_Coalesced (coalesced-packet walk via PacketLen) |
 | §17     | Roundtrip   | TestPacketHeader_RoundTrip |
 | §17     | Negative    | TestParseHeader_Malformed (malformed header → ErrPacketEncoding) |
+| §14.1   | Conformance | TestConformance_RFC9000_Sec141_InitialFlight (real ClientHello → padded ≥1200 Initial → protect → parse+decrypt round-trip) |
 
 ## RFC 9001 — Using TLS to Secure QUIC (Phase G — HTTP/3)
 
