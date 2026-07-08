@@ -189,9 +189,22 @@ non-ACK PING frames with `ACK=1` and the original 8-byte payload
 | §C.4.1   | Conformance | TestConformance_RFC7541_C4_1_FirstRequestHuffman |
 | §C.3 / sequence | Roundtrip | TestConformance_RFC7541_RoundTrip_C3_FirstRequest, TestConformance_RFC7541_RoundTrip_RequestSequence |
 
+## RFC 9000 — QUIC transport (Phase G — HTTP/3)
+
+Phase G builds a from-scratch HTTP/3 stack (see
+[HTTP3_DESIGN.md](HTTP3_DESIGN.md)). G.2 lands the QUIC variable-length
+integer codec (`internal/bytesx`), the primitive under every QUIC/H3 length,
+offset, stream ID, frame type, and transport-parameter value.
+
+| Section | Type        | Test |
+|---------|-------------|------|
+| §16     | Conformance | TestConformance_RFC9000_Sec16_VarintRoundTrip, TestConformance_RFC9000_Sec16_NonMinimalDecode, TestConformance_RFC9000_Sec16_IncompleteInput |
+| §16     | Roundtrip   | TestVarint_ExhaustiveRoundTrip |
+
 ## Gate
 
 `scripts/rfc-coverage-gate.sh` requires at least one passing
-`TestConformance_RFC7540_*` AND `TestConformance_RFC7541_*` test, and fails
-on any conformance-test failure. It is wired to the `conformance-gate` job
-in `.github/workflows/conformance-gate.yml`.
+`TestConformance_RFC7540_*`, `TestConformance_RFC7541_*`, AND
+`TestConformance_RFC9000_*` test, and fails on any conformance-test failure.
+It is wired to the `conformance-gate` job in
+`.github/workflows/conformance-gate.yml`.
