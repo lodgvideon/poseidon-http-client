@@ -201,8 +201,14 @@ func (h *connFrameHandler) OnCrypto(_ uint64, data []byte) error {
 
 func (h *connFrameHandler) OnPing() error { h.ackEliciting = true; return nil }
 
-func (h *connFrameHandler) OnStream(uint64, uint64, bool, []byte) error {
+func (h *connFrameHandler) OnStream(id, offset uint64, fin bool, data []byte) error {
 	h.ackEliciting = true
+	// The server's response arrives on the client-initiated bidirectional
+	// stream the request opened; deliver it there. Frames for unknown streams
+	// are ignored until stream acceptance is implemented.
+	if s := h.c.streams[id]; s != nil {
+		s.recv.receive(offset, data, fin)
+	}
 	return nil
 }
 
