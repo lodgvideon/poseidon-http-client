@@ -270,6 +270,18 @@ bytes exactly, and the client interoperates with a live Caddy HTTP/3 server.
 | §4      | Integration | TestTLSHandshake_InMemory (full TLS 1.3 QUIC handshake client↔server via crypto/tls.QUICConn; secrets match, keys derive, ALPN h3) |
 | §4.1    | Unit        | TestKeysFromSecret_UnsupportedSuite (ChaCha20 → ErrCryptoSuite, deferred) |
 
+## RFC 9002 — QUIC Loss Detection and Congestion Control (Phase G — HTTP/3)
+
+G.6h-1 lands the acknowledgement-processing foundation: the client tracks the
+packets it sends per space, processes inbound ACK frames (§19.3 range walk), and
+maintains the RTT estimates (§5). Loss detection, retransmission, and the probe
+timeout build on this next. Congestion control (§7) is deferred.
+
+| Section | Type        | Test |
+|---------|-------------|------|
+| §5.2–5.3 | Unit       | TestRTTStats_FirstSample, TestRTTStats_Subsequent, TestRTTStats_AckDelay (smoothed_rtt / rttvar / min_rtt update; ack-delay subtraction floored at min_rtt) |
+| §5.1 / §19.3 | Unit   | TestSentSpace_Ack, TestConnFrameHandler_OnAck_UpdatesRTT, TestConnFrameHandler_OnAckRange_Gap (sent-packet tracking; ACK range walk removes acked packets and samples RTT from the largest; gaps leave packets in flight) |
+
 ## RFC 9204 — QPACK (Phase G — HTTP/3)
 
 G.3 lands the `qpack/` static-table codec: a static-table-only encoder and a
