@@ -62,7 +62,9 @@ type Conn struct {
 
 	nextBidiStreamID uint64             // next client-initiated bidi stream ID (0, 4, 8, …)
 	openedBidi       uint64             // count of client bidi streams opened (RFC 9000 §4.6 gate)
+	openedUni        uint64             // count of client uni streams opened (§4.6 gate; ID = 2+4n)
 	streams          map[uint64]*Stream // open streams by ID
+	pollBuf          []byte             // reused datagram buffer for Poll
 
 	connSent         uint64 // cumulative bytes sent in STREAM frames across all streams (§4.1)
 	connMax          uint64 // absolute connection-level send ceiling; init = peer.InitialMaxData
