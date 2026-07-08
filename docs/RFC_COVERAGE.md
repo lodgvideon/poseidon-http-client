@@ -221,6 +221,8 @@ protection (RFC 9001) and the connection engine are later phases.
 | §17     | Roundtrip   | TestPacketHeader_RoundTrip |
 | §17     | Negative    | TestParseHeader_Malformed (malformed header → ErrPacketEncoding) |
 | §14.1   | Conformance | TestConformance_RFC9000_Sec141_InitialFlight (real ClientHello → padded ≥1200 Initial → protect → parse+decrypt round-trip) |
+| §12.2   | Unit        | TestProcessDatagram_ServerInitial, TestProcessDatagram_Coalesced (split coalesced packets, decrypt per level, dispatch frames) |
+| §12.2   | Negative    | TestProcessDatagram_SkipNoKeys, TestProcessDatagram_AuthFailure, TestProcessDatagram_Retry, TestProcessDatagram_Malformed |
 
 ## RFC 9001 — Using TLS to Secure QUIC (Phase G — HTTP/3)
 
