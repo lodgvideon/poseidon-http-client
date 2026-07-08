@@ -77,6 +77,10 @@ type Conn struct {
 	connMax          uint64 // absolute connection-level send ceiling; init = peer.InitialMaxData
 	dataBlockedLimit uint64 // last connMax a DATA_BLOCKED was emitted for (emit once per limit)
 	dataBlockedSet   bool   // whether a DATA_BLOCKED has been emitted yet
+
+	connRecvConsumed uint64 // total bytes the app has read across all streams (receive FC)
+	connRecvMax      uint64 // connection-level receive limit we advertise; raised via MAX_DATA
+	pendingCtrl      []byte // app-space control frames to send (MAX_DATA/MAX_STREAM_DATA)
 }
 
 // NewConn creates a client QUIC connection over pc. tlsConfig must set
@@ -104,6 +108,7 @@ func NewConn(pc PacketConn, tlsConfig *tls.Config, transportParams []byte) (*Con
 		dcid:          dcid,
 		initialSealer: is,
 		now:           time.Now,
+		connRecvMax:   DefaultConnRecvWindow,
 	}
 	c.keys.Initial = io
 	return c, nil

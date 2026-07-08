@@ -9,6 +9,10 @@ import (
 	"github.com/lodgvideon/poseidon-http-client/quic"
 )
 
+// udpSocketBuffer is the kernel receive-buffer size requested on the UDP socket
+// so a server's send burst is buffered rather than dropped between reads.
+const udpSocketBuffer = 4 << 20
+
 // udpConn adapts a connected *net.UDPConn to quic.PacketConn. Read/Write operate
 // on the connected socket, so datagrams only flow to and from the dialed server.
 // SetReadDeadline lets the QUIC engine bound each read by the probe timeout
@@ -33,9 +37,9 @@ var defaultSettings = []Setting{
 // localTransportParams are the limits the client advertises so the server has
 // credit to send the response and open its control/QPACK streams.
 var localTransportParams = quic.LocalTransportParams{
-	InitialMaxData:                1 << 20,
-	InitialMaxStreamDataBidiLocal: 256 << 10,
-	InitialMaxStreamDataUni:       256 << 10,
+	InitialMaxData:                quic.DefaultConnRecvWindow,
+	InitialMaxStreamDataBidiLocal: quic.DefaultStreamRecvWindow,
+	InitialMaxStreamDataUni:       quic.DefaultStreamRecvWindow,
 	InitialMaxStreamsUni:          3,
 }
 
@@ -51,6 +55,10 @@ func Dial(ctx context.Context, addr string, tlsConfig *tls.Config) (*Client, err
 	if err != nil {
 		return nil, err
 	}
+	// Enlarge the kernel receive buffer so a fast server burst is held rather
+	// than dropped while the single-goroutine receive loop drains it one
+	// datagram at a time (best-effort).
+	_ = uc.SetReadBuffer(udpSocketBuffer)
 	return dialConn(ctx, &udpConn{c: uc}, h3TLSConfig(tlsConfig))
 }
 
