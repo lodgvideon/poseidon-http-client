@@ -221,6 +221,19 @@ protection (RFC 9001) and the connection engine are later phases.
 | §17     | Roundtrip   | TestPacketHeader_RoundTrip |
 | §17     | Negative    | TestParseHeader_Malformed (malformed header → ErrPacketEncoding) |
 
+## RFC 9001 — Using TLS to Secure QUIC (Phase G — HTTP/3)
+
+G.5a lands the QUIC key schedule: HKDF-Expand-Label (RFC 8446 §7.1, `tls13 `
+prefix) and Initial-secret derivation from the client Destination Connection ID
+(§5.2), producing the packet-protection key / iv / hp per direction (§5.1). All
+pure stdlib (`crypto/hkdf`, Go 1.24). AEAD packet protection + header protection
++ the `crypto/tls.QUICConn` handshake are the following sub-phases.
+
+| Section | Type        | Test |
+|---------|-------------|------|
+| §5.1–5.2 | Conformance | TestConformance_RFC9001_AppA1_InitialKeys (client+server key/iv/hp vs Appendix A.1 vectors) |
+| §5.1    | Conformance | TestConformance_RFC9001_Sec51_ExpandLabel (client_initial_secret vs Appendix A.1) |
+
 ## RFC 9204 — QPACK (Phase G — HTTP/3)
 
 G.3 lands the `qpack/` static-table codec: a static-table-only encoder and a
@@ -242,6 +255,7 @@ instruction streams are deferred (a client advertising
 
 `scripts/rfc-coverage-gate.sh` requires at least one passing
 `TestConformance_RFC7540_*`, `TestConformance_RFC7541_*`,
-`TestConformance_RFC9000_*`, AND `TestConformance_RFC9204_*` test, and fails on
-any conformance-test failure. It is wired to the `conformance-gate` job in
+`TestConformance_RFC9000_*`, `TestConformance_RFC9001_*`, AND
+`TestConformance_RFC9204_*` test, and fails on any conformance-test failure. It
+is wired to the `conformance-gate` job in
 `.github/workflows/conformance-gate.yml`.
