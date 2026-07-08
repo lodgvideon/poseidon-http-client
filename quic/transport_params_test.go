@@ -1,6 +1,7 @@
 package quic
 
 import (
+	"bytes"
 	"testing"
 
 	"github.com/lodgvideon/poseidon-http-client/internal/bytesx"
@@ -120,6 +121,60 @@ func TestTransportParams_UnknownAndGREASEIgnored(t *testing.T) {
 	}
 	if tp.InitialMaxData != 42 {
 		t.Fatalf("InitialMaxData = %d, want 42", tp.InitialMaxData)
+	}
+}
+
+// TestConformance_RFC9000_Sec18_TransportParamsEncode checks the client's
+// transport-parameter encoder: every advertised parameter is present with the
+// right value, and the peer's own decoder (ParseTransportParams) accepts the
+// encoding — including the raw-bytes initial_source_connection_id (§7.3).
+func TestConformance_RFC9000_Sec18_TransportParamsEncode(t *testing.T) {
+	p := LocalTransportParams{
+		InitialMaxData:                1 << 20,
+		InitialMaxStreamDataBidiLocal: 1 << 16,
+		InitialMaxStreamDataUni:       1 << 14,
+		InitialMaxStreamsUni:          3,
+		SourceConnectionID:            []byte{0xaa, 0xbb, 0xcc},
+	}
+	enc := AppendTransportParams(nil, p)
+
+	// Walk the encoding into id -> raw value.
+	got := map[uint64][]byte{}
+	for rest := enc; len(rest) > 0; {
+		id, n := bytesx.ReadVarint(rest)
+		rest = rest[n:]
+		length, n := bytesx.ReadVarint(rest)
+		rest = rest[n:]
+		got[id] = rest[:length]
+		rest = rest[length:]
+	}
+	for id, want := range map[uint64]uint64{
+		tpInitialMaxData:                1 << 20,
+		tpInitialMaxStreamDataBidiLocal: 1 << 16,
+		tpInitialMaxStreamDataUni:       1 << 14,
+		tpInitialMaxStreamsUni:          3,
+	} {
+		v, ok := tpReadUint(got[id])
+		if !ok || v != want {
+			t.Errorf("param %#x = %d (ok=%v), want %d", id, v, ok, want)
+		}
+	}
+	if !bytes.Equal(got[tpInitialSourceConnectionID], []byte{0xaa, 0xbb, 0xcc}) {
+		t.Errorf("initial_source_connection_id = %x, want aabbcc", got[tpInitialSourceConnectionID])
+	}
+
+	// The peer's decoder accepts our encoding and reads back the send limits.
+	tp, err := ParseTransportParams(enc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tp.InitialMaxData != 1<<20 || tp.InitialMaxStreamDataUni != 1<<14 || tp.InitialMaxStreamsUni != 3 {
+		t.Fatalf("round-trip parsed = %+v", tp)
+	}
+
+	// Zero-value params (incl. a zero-length source CID) must still encode and parse.
+	if _, err := ParseTransportParams(AppendTransportParams(nil, LocalTransportParams{})); err != nil {
+		t.Fatalf("zero-value params must parse: %v", err)
 	}
 }
 

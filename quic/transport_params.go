@@ -29,11 +29,13 @@ type TransportParams struct {
 const (
 	tpMaxUDPPayloadSize              uint64 = 0x03
 	tpInitialMaxData                 uint64 = 0x04
+	tpInitialMaxStreamDataBidiLocal  uint64 = 0x05
 	tpInitialMaxStreamDataBidiRemote uint64 = 0x06
 	tpInitialMaxStreamDataUni        uint64 = 0x07
 	tpInitialMaxStreamsBidi          uint64 = 0x08
 	tpInitialMaxStreamsUni           uint64 = 0x09
 	tpActiveConnectionIDLimit        uint64 = 0x0e
+	tpInitialSourceConnectionID      uint64 = 0x0f
 )
 
 // ParseTransportParams decodes the peer's transport parameters (RFC 9000 §18).
@@ -130,4 +132,46 @@ func tpReadUint(value []byte) (uint64, bool) {
 		return 0, false
 	}
 	return v, true
+}
+
+// LocalTransportParams are the transport parameters a client advertises to the
+// server (RFC 9000 §18.2, client role). They tell the server the limits within
+// which it may send — most importantly the credit for the response, which
+// arrives on a client-initiated bidirectional stream and so is governed by the
+// client's own initial_max_stream_data_bidi_local (0x05).
+type LocalTransportParams struct {
+	// InitialMaxData is the connection-level receive limit (0x04).
+	InitialMaxData uint64
+	// InitialMaxStreamDataBidiLocal is the per-stream receive limit for streams
+	// the client opens — the response body arrives here (0x05).
+	InitialMaxStreamDataBidiLocal uint64
+	// InitialMaxStreamDataUni is the per-stream receive limit for server-opened
+	// unidirectional streams — the server control and QPACK streams (0x07).
+	InitialMaxStreamDataUni uint64
+	// InitialMaxStreamsUni is how many unidirectional streams the server may
+	// open (0x09); HTTP/3 needs at least three (control + QPACK encoder/decoder).
+	InitialMaxStreamsUni uint64
+	// SourceConnectionID is the client's chosen source connection ID (0x0f),
+	// which the server verifies (§7.3). It may be zero-length.
+	SourceConnectionID []byte
+}
+
+// AppendTransportParams encodes the client's transport parameters (RFC 9000 §18)
+// into the wire form carried in the TLS quic_transport_parameters extension.
+func AppendTransportParams(dst []byte, p LocalTransportParams) []byte {
+	dst = appendTPInt(dst, tpInitialMaxData, p.InitialMaxData)
+	dst = appendTPInt(dst, tpInitialMaxStreamDataBidiLocal, p.InitialMaxStreamDataBidiLocal)
+	dst = appendTPInt(dst, tpInitialMaxStreamDataUni, p.InitialMaxStreamDataUni)
+	dst = appendTPInt(dst, tpInitialMaxStreamsUni, p.InitialMaxStreamsUni)
+	// initial_source_connection_id carries raw CID bytes, not a varint.
+	dst = appendV(dst, tpInitialSourceConnectionID)
+	dst = appendV(dst, uint64(len(p.SourceConnectionID)))
+	return append(dst, p.SourceConnectionID...)
+}
+
+// appendTPInt encodes one integer transport parameter (id, length, varint value).
+func appendTPInt(dst []byte, id, v uint64) []byte {
+	dst = appendV(dst, id)
+	dst = appendV(dst, uint64(bytesx.VarintLen(v)))
+	return appendV(dst, v)
 }
