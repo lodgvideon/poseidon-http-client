@@ -299,8 +299,10 @@ malformed messages (bad :status, misordered/forbidden pseudo-headers, invalid
 field names/values, connection-specific fields). G.7d wires it to QUIC: a
 `Client` over an established `quic.Conn` opens the control stream (SETTINGS
 first), sends a request on a bidi stream, and reads the response by polling the
-connection — validated against a fake QUIC transport (real-transport interop is
-deferred to the Docker-peer phase).
+connection — validated against a fake QUIC transport. `http3.Dial` wires this
+over a real `net.UDPConn` (with the "h3" ALPN and the client's transport-
+parameter encoding), giving a caller `Dial` → `Do`; a live-server handshake is
+exercised in the Docker-peer interop phase.
 
 | Section | Type        | Test |
 |---------|-------------|------|
@@ -316,6 +318,7 @@ deferred to the Docker-peer phase).
 | §4.1.2  | Negative    | TestConformance_RFC9114_Sec412_MalformedResponse (missing/duplicate/out-of-range :status, pseudo-after-regular, non-:status pseudo, uppercase/space name, CR-LF value, connection-specific / te≠trailers → ErrH3Message) |
 | §6.2.1 / §4 | Integration | TestClient_RequestResponse (client opens control stream + SETTINGS, sends a request, decodes response HEADERS + DATA over a Poll loop), TestClient_SendDrainsUnderFlowControl (partial Send is drained so the request/SETTINGS are never truncated) |
 | §4.1    | Negative    | TestClient_DataBeforeHeaders (DATA before HEADERS on a request stream → ErrH3FrameUnexpected = H3_FRAME_UNEXPECTED) |
+| §3.1    | Unit        | TestH3TLSConfig (Dial applies the "h3" ALPN token and a TLS 1.3 floor), TestUDPConn_Loopback / TestUDPConn_ReadDeadline (UDP PacketConn adapter), TestDialConn_EstablishError (dial closes the transport on handshake failure) |
 
 ## Gate
 
