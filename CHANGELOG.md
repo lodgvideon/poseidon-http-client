@@ -5,6 +5,25 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [v0.8.0] — 2026-07-08
+
+### Added
+
+- **`ConnOptions.GroupCommit` — opt-in write batching (group-commit).** When a
+  HEADERS writer finds another writer queued on the write lock, it defers its
+  flush so the next holder batches both frames into a single `tls.Conn.Write` —
+  fewer TLS record encrypts + socket writes under high per-connection stream
+  concurrency. It is **synchronous** (the deferring writer waits for the convoy
+  flush and returns its error, so per-frame write-error semantics are preserved
+  — no async contract change), **adaptive** (a strict no-op with no contention;
+  a lone request is never delayed), and **off by default**. Measured on one TLS
+  h2 conn at 64 concurrent streams: 1.73 frames/flush, ≈−42% write syscalls,
+  ≈+26% req/s; the win survives poseidon's dense-multiplexing pool (≈+30–35% at
+  1–8 conns). Motivated by a review of ozontech/framer; see
+  [docs/WRITE_BATCHING_INVESTIGATION.md](docs/WRITE_BATCHING_INVESTIGATION.md).
+  Note: framer's `net.Buffers`/writev mechanism gives zero benefit through
+  `crypto/tls.Conn`; plaintext frame coalescing is the only TLS-viable lever.
+
 ## [v0.7.1] — 2026-07-07
 
 ### Performance
