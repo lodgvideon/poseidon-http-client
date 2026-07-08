@@ -290,7 +290,11 @@ payload codec. The header/settings writers and the header parser are zero-alloc
 (bench-gated). G.7b adds the streaming `FrameReader` (buffers a stream that
 arrives in pieces and yields whole frames), the unidirectional stream-type codec
 (§6.2), and client control-stream construction (type 0x00 + first SETTINGS,
-§6.2.1). Request/response mapping and QPACK wiring follow in later phases.
+§6.2.1). G.7c adds the request/response header mapping (§4): a request is
+encoded pseudo-headers-first and QPACK-compressed into a HEADERS frame, and a
+response field section is decoded into a status + validated headers, rejecting
+malformed messages (bad :status, misordered/forbidden pseudo-headers, invalid
+field names/values, connection-specific fields). Live stream wiring follows.
 
 | Section | Type        | Test |
 |---------|-------------|------|
@@ -300,6 +304,10 @@ arrives in pieces and yields whole frames), the unidirectional stream-type codec
 | §7.2.4  | Negative    | TestParseSettings_Truncated (identifier without value → ErrH3Settings) |
 | §6.2 / §6.2.1 | Conformance | TestConformance_RFC9114_Sec62_ControlStream (client control stream = type 0x00 + first SETTINGS frame; peeled + read back) |
 | §7.1    | Unit        | TestFrameReader_MultipleFrames, TestFrameReader_SplitAcrossFeeds, TestFrameReader_HugeLength (streaming frame reader: back-to-back frames, frame split across feeds, huge length stays ErrNeedMore without overflow), TestReadStreamType |
+| §4.3.1  | Conformance | TestConformance_RFC9114_Sec431_RequestPseudoHeadersFirst (request pseudo-headers precede regular headers; QPACK round-trip in a HEADERS frame), TestRequest_OmitsEmptyAuthority |
+| §4.2    | Negative    | TestConformance_RFC9114_Sec42_RequestValidation (missing pseudo-header / uppercase / connection-specific / CR-LF value → ErrH3Message; client never emits a malformed request) |
+| §4.1.2 / §4.3.2 | Conformance | TestConformance_RFC9114_Sec412_ResponseDecode (:status + regular headers decoded) |
+| §4.1.2  | Negative    | TestConformance_RFC9114_Sec412_MalformedResponse (missing/duplicate/out-of-range :status, pseudo-after-regular, non-:status pseudo, uppercase/space name, CR-LF value, connection-specific / te≠trailers → ErrH3Message) |
 
 ## Gate
 
