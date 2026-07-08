@@ -212,6 +212,22 @@ func (h *connFrameHandler) OnStream(id, offset uint64, fin bool, data []byte) er
 	return nil
 }
 
+func (h *connFrameHandler) OnMaxData(maximum uint64) error {
+	h.ackEliciting = true
+	if maximum > h.c.connMax { // absolute ceiling; ignore non-increasing (§4.1)
+		h.c.connMax = maximum
+	}
+	return nil
+}
+
+func (h *connFrameHandler) OnMaxStreamData(streamID, maximum uint64) error {
+	h.ackEliciting = true
+	if s := h.c.streams[streamID]; s != nil && maximum > s.sendMax {
+		s.sendMax = maximum
+	}
+	return nil
+}
+
 func (h *connFrameHandler) OnHandshakeDone() error {
 	h.c.handshakeComplete = true
 	h.ackEliciting = true

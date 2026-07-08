@@ -159,7 +159,11 @@ func runServerHandshake(t *testing.T, pc PacketConn, cert tls.Certificate, tp []
 // Handshake/1-RTT keys, and its TLS handshake completes.
 func TestConn_Establish_InMemory(t *testing.T) {
 	cert, pool := genServerCert(t)
-	tp := []byte{0x01, 0x02, 0x03}
+	tp := concat(
+		tpInt(tpInitialMaxData, 1<<20),
+		tpInt(tpInitialMaxStreamDataBidiRemote, 1<<20),
+		tpInt(tpInitialMaxStreamsBidi, 16),
+	)
 
 	toServer := make(chan []byte, 16)
 	fromServer := make(chan []byte, 16)
