@@ -17,6 +17,12 @@ type TransportParams struct {
 	// InitialMaxStreamsBidi is the maximum number of bidirectional streams the
 	// client is permitted to open (0x08).
 	InitialMaxStreamsBidi uint64
+	// InitialMaxStreamDataUni is the per-stream send limit for unidirectional
+	// streams the client opens — the HTTP/3 control and QPACK streams (0x07).
+	InitialMaxStreamDataUni uint64
+	// InitialMaxStreamsUni is the maximum number of unidirectional streams the
+	// client is permitted to open (0x09).
+	InitialMaxStreamsUni uint64
 }
 
 // Transport-parameter identifiers the parser dispatches on (RFC 9000 §18.2).
@@ -24,7 +30,9 @@ const (
 	tpMaxUDPPayloadSize              uint64 = 0x03
 	tpInitialMaxData                 uint64 = 0x04
 	tpInitialMaxStreamDataBidiRemote uint64 = 0x06
+	tpInitialMaxStreamDataUni        uint64 = 0x07
 	tpInitialMaxStreamsBidi          uint64 = 0x08
+	tpInitialMaxStreamsUni           uint64 = 0x09
 	tpActiveConnectionIDLimit        uint64 = 0x0e
 )
 
@@ -87,6 +95,18 @@ func (tp *TransportParams) set(id uint64, value []byte) error {
 			return ErrTransportParameter
 		}
 		tp.InitialMaxStreamsBidi = v
+	case tpInitialMaxStreamDataUni:
+		v, ok := tpReadUint(value)
+		if !ok {
+			return ErrTransportParameter
+		}
+		tp.InitialMaxStreamDataUni = v
+	case tpInitialMaxStreamsUni:
+		v, ok := tpReadUint(value)
+		if !ok {
+			return ErrTransportParameter
+		}
+		tp.InitialMaxStreamsUni = v
 	case tpMaxUDPPayloadSize:
 		v, ok := tpReadUint(value)
 		if !ok || v < 1200 {

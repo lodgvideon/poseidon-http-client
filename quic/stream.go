@@ -39,6 +39,34 @@ func (c *Conn) OpenStream() (*Stream, error) {
 	return s, nil
 }
 
+// OpenUniStream opens the next client-initiated unidirectional stream (RFC 9000
+// §2.1: IDs 2, 6, 10, …) — the HTTP/3 control and QPACK streams, which are
+// send-only from the opener. It returns ErrTooManyStreams if opening another
+// would exceed the peer's advertised initial_max_streams_uni limit (§4.6).
+func (c *Conn) OpenUniStream() (*Stream, error) {
+	if c.openedUni >= c.peer.InitialMaxStreamsUni {
+		return nil, ErrTooManyStreams
+	}
+	id := 2 + c.openedUni*4
+	c.openedUni++
+	s := &Stream{id: id, conn: c, sendMax: c.peer.InitialMaxStreamDataUni}
+	if c.streams == nil {
+		c.streams = map[uint64]*Stream{}
+	}
+	c.streams[id] = s
+	return s, nil
+}
+
+// Recv returns the stream bytes that have become contiguous since the previous
+// Recv call (the newly available prefix of the received data), for reading a
+// response. It returns an empty slice when nothing new is available. The result
+// aliases the stream's buffer and should be consumed before the next Recv.
+func (s *Stream) Recv() []byte { return s.recv.read() }
+
+// Finished reports whether the peer has finished the stream: the FIN has arrived
+// and every byte up to the final size is contiguous (RFC 9000 §2.2).
+func (s *Stream) Finished() bool { return s.recv.complete() }
+
 // streamChunk is a run of received stream bytes buffered until the bytes before
 // it arrive.
 type streamChunk struct {
@@ -53,6 +81,7 @@ type streamChunk struct {
 type recvStream struct {
 	data      []byte        // contiguous bytes received from offset 0
 	pending   []streamChunk // buffered chunks beyond len(data), sorted by offset
+	readOff   int           // bytes of data already returned by read
 	fin       bool
 	finalSize uint64
 }
@@ -100,6 +129,14 @@ func (r *recvStream) absorb() {
 
 // bytes returns the contiguous received prefix (offset 0 onward).
 func (r *recvStream) bytes() []byte { return r.data }
+
+// read returns the contiguous bytes not yet returned by a prior read, advancing
+// the read cursor to the end of the contiguous prefix.
+func (r *recvStream) read() []byte {
+	d := r.data[r.readOff:]
+	r.readOff = len(r.data)
+	return d
+}
 
 // complete reports whether the whole stream has been received: the FIN has
 // arrived and every byte up to the final size is contiguous.

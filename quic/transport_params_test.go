@@ -123,6 +123,20 @@ func TestTransportParams_UnknownAndGREASEIgnored(t *testing.T) {
 	}
 }
 
+func TestTransportParams_UniLimits(t *testing.T) {
+	raw := concat(tpInt(tpInitialMaxStreamDataUni, 8000), tpInt(tpInitialMaxStreamsUni, 3))
+	tp, err := ParseTransportParams(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tp.InitialMaxStreamDataUni != 8000 {
+		t.Errorf("InitialMaxStreamDataUni = %d, want 8000", tp.InitialMaxStreamDataUni)
+	}
+	if tp.InitialMaxStreamsUni != 3 {
+		t.Errorf("InitialMaxStreamsUni = %d, want 3", tp.InitialMaxStreamsUni)
+	}
+}
+
 func TestTransportParams_AbsentDefaults(t *testing.T) {
 	tp, err := ParseTransportParams(nil)
 	if err != nil {

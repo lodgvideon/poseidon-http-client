@@ -128,6 +128,60 @@ func TestConn_OnStream_DeliversToOpenStream(t *testing.T) {
 	}
 }
 
+func TestConn_OpenUniStream_IDs(t *testing.T) {
+	c := &Conn{peer: TransportParams{InitialMaxStreamsUni: 3, InitialMaxStreamDataUni: 5000}}
+	for _, want := range []uint64{2, 6, 10} {
+		s, err := c.OpenUniStream()
+		if err != nil {
+			t.Fatalf("OpenUniStream: %v", err)
+		}
+		if s.ID() != want {
+			t.Fatalf("uni stream ID = %d, want %d", s.ID(), want)
+		}
+		if s.sendMax != 5000 {
+			t.Fatalf("uni sendMax = %d, want 5000 (initial_max_stream_data_uni)", s.sendMax)
+		}
+	}
+	if _, err := c.OpenUniStream(); err != ErrTooManyStreams {
+		t.Fatalf("4th uni stream err = %v, want ErrTooManyStreams", err)
+	}
+}
+
+// TestStream_RecvAndFinished feeds a stream in two chunks (the second with FIN)
+// and checks Recv returns only the newly contiguous bytes each call, and
+// Finished flips once the FIN and all bytes are present.
+func TestStream_RecvAndFinished(t *testing.T) {
+	c := &Conn{peer: TransportParams{InitialMaxStreamsBidi: 1}}
+	s, err := c.OpenStream()
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := &connFrameHandler{c: c}
+
+	if err := h.OnStream(s.ID(), 0, false, []byte("hello ")); err != nil {
+		t.Fatal(err)
+	}
+	if got := string(s.Recv()); got != "hello " {
+		t.Fatalf("Recv 1 = %q, want %q", got, "hello ")
+	}
+	if got := string(s.Recv()); got != "" {
+		t.Fatalf("Recv with nothing new = %q, want empty", got)
+	}
+	if s.Finished() {
+		t.Fatal("stream must not be finished before FIN")
+	}
+
+	if err := h.OnStream(s.ID(), 6, true, []byte("world")); err != nil {
+		t.Fatal(err)
+	}
+	if got := string(s.Recv()); got != "world" {
+		t.Fatalf("Recv 2 = %q, want %q", got, "world")
+	}
+	if !s.Finished() {
+		t.Fatal("stream should be finished after FIN with all bytes present")
+	}
+}
+
 func TestConn_OpenStream_IDs(t *testing.T) {
 	c := &Conn{peer: TransportParams{InitialMaxStreamsBidi: 4}}
 	for want := uint64(0); want < 16; want += 4 {

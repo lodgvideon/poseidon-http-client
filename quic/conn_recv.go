@@ -30,6 +30,24 @@ func (c *Conn) Establish(ctx context.Context) error {
 	return nil
 }
 
+// Poll reads one datagram and processes it — dispatching frames to open streams
+// and sending acknowledgements — for driving receive after the handshake
+// completes (RFC 9000 §13). The caller sets a read deadline on the PacketConn to
+// bound the wait.
+func (c *Conn) Poll() error {
+	if c.pollBuf == nil {
+		c.pollBuf = make([]byte, 2048)
+	}
+	n, err := c.pc.Read(c.pollBuf)
+	if err != nil {
+		return err
+	}
+	if err := c.recvDatagram(c.pollBuf[:n]); err != nil {
+		return err
+	}
+	return c.flush()
+}
+
 // recvDatagram processes every packet coalesced in a datagram: decrypt with the
 // space's Opener, dispatch frames, record the packet number, then feed any
 // reassembled CRYPTO to the TLS handshake and pump the resulting events.
@@ -69,15 +87,22 @@ func (c *Conn) recvDatagram(datagram []byte) error {
 			c.haveRecv[sp] = true
 		}
 	}
+	fedCrypto := false
 	for sp := 0; sp < numSpaces; sp++ {
 		if len(c.recvCrypto[sp]) > 0 {
 			if err := c.hs.HandleCrypto(spaceLevel(sp), c.recvCrypto[sp]); err != nil {
 				return err
 			}
 			c.recvCrypto[sp] = c.recvCrypto[sp][:0]
+			fedCrypto = true
 		}
 	}
-	return c.hs.Pump(c)
+	// Drive TLS only while the handshake runs or when new CRYPTO arrived
+	// (e.g. a post-handshake session ticket); otherwise there is nothing to do.
+	if fedCrypto || !c.handshakeComplete {
+		return c.hs.Pump(c)
+	}
+	return nil
 }
 
 // flush sends, for every space that owes CRYPTO or an ACK, one packet carrying
