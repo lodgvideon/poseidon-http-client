@@ -13,7 +13,9 @@ jobs:
         # B.1 design spec; their zero-alloc work is deferred to B.2.
         # Until then, bench-gate runs only against the codec packages
         # whose zero-alloc invariant must hold.
-        run: go test -bench=. -benchmem -benchtime=2s -count=5 -run=^$ ./frame ./hpack ./internal/bytesx | tee head.txt
+        # ./qpack is HEAD-only here until it exists on the base branch; the
+        # absolute zero-alloc gate below runs on head.txt, which enforces it.
+        run: go test -bench=. -benchmem -benchtime=2s -count=5 -run=^$ ./frame ./hpack ./internal/bytesx ./qpack | tee head.txt
       - name: Bench base
         run: |
           git checkout ${{ github.base_ref }}
