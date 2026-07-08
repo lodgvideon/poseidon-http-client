@@ -201,10 +201,27 @@ offset, stream ID, frame type, and transport-parameter value.
 | §16     | Conformance | TestConformance_RFC9000_Sec16_VarintRoundTrip, TestConformance_RFC9000_Sec16_NonMinimalDecode, TestConformance_RFC9000_Sec16_IncompleteInput |
 | §16     | Roundtrip   | TestVarint_ExhaustiveRoundTrip |
 
+## RFC 9204 — QPACK (Phase G — HTTP/3)
+
+G.3 lands the `qpack/` static-table codec: a static-table-only encoder and a
+decoder for the static + literal representations, reusing the `hpack`
+prefixed-integer + Huffman codecs. The dynamic table and the encoder/decoder
+instruction streams are deferred (a client advertising
+`SETTINGS_QPACK_MAX_TABLE_CAPACITY=0` forbids the peer from using them).
+
+| Section | Type        | Test |
+|---------|-------------|------|
+| App. A  | Roundtrip   | TestStaticTable_Shape (99-entry 0-based static table) |
+| §4.5.1–2 | Conformance | TestConformance_RFC9204_Sec45_StaticIndexedEncode (section prefix + Indexed Field Line) |
+| §4.5.4  | Conformance | TestConformance_RFC9204_Sec454_LiteralNameRefDecode |
+| §4.5.6  | Conformance | TestConformance_RFC9204_Sec456_LiteralNameDecode |
+| §4.5    | Conformance | TestConformance_RFC9204_Sec45_DecodeErrors (dynamic-ref / malformed → QPACK_DECOMPRESSION_FAILED) |
+| §4.5    | Roundtrip   | TestQPACK_RoundTrip, TestQPACK_EmptySection |
+
 ## Gate
 
 `scripts/rfc-coverage-gate.sh` requires at least one passing
-`TestConformance_RFC7540_*`, `TestConformance_RFC7541_*`, AND
-`TestConformance_RFC9000_*` test, and fails on any conformance-test failure.
-It is wired to the `conformance-gate` job in
+`TestConformance_RFC7540_*`, `TestConformance_RFC7541_*`,
+`TestConformance_RFC9000_*`, AND `TestConformance_RFC9204_*` test, and fails on
+any conformance-test failure. It is wired to the `conformance-gate` job in
 `.github/workflows/conformance-gate.yml`.
