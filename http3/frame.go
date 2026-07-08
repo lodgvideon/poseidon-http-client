@@ -100,10 +100,10 @@ func AppendSettings(dst []byte, settings []Setting) []byte {
 // ParseFrameHeader reads an HTTP/3 frame header from b — the Type and Length
 // varints (RFC 9114 §7.1) — returning the type, the payload length, and the
 // number of header bytes consumed. If the header is not fully present it returns
-// io.ErrUnexpectedEOF (a benign "need more bytes" signal, distinct from the
-// fatal ErrH3Frame), and a stream reader buffers more bytes and retries. It does
-// not validate length against the available payload bytes: the caller must
-// bound-check (and cap to a maximum frame size) before slicing the payload.
+// io.ErrUnexpectedEOF (a benign "need more bytes" signal), and a stream reader
+// buffers more bytes and retries. It does not validate length against the
+// available payload bytes: the caller must bound-check (and cap to a maximum
+// frame size) before slicing the payload.
 func ParseFrameHeader(b []byte) (typ, length uint64, n int, err error) {
 	typ, tn := bytesx.ReadVarint(b)
 	if tn == 0 {

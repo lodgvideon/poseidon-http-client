@@ -287,8 +287,10 @@ G.7a lands the `http3/` frame codec (§7.2): the Type+Length framing common to
 every HTTP/3 frame, typed writers for the frames a client emits (DATA, HEADERS,
 SETTINGS, GOAWAY, MAX_PUSH_ID, CANCEL_PUSH), a `ParseFrameHeader`, and a SETTINGS
 payload codec. The header/settings writers and the header parser are zero-alloc
-(bench-gated). The control stream, request/response mapping, and QPACK wiring
-follow in later phases.
+(bench-gated). G.7b adds the streaming `FrameReader` (buffers a stream that
+arrives in pieces and yields whole frames), the unidirectional stream-type codec
+(§6.2), and client control-stream construction (type 0x00 + first SETTINGS,
+§6.2.1). Request/response mapping and QPACK wiring follow in later phases.
 
 | Section | Type        | Test |
 |---------|-------------|------|
@@ -296,6 +298,8 @@ follow in later phases.
 | §7.2.4  | Conformance | TestConformance_RFC9114_Sec724_SettingsRoundTrip, TestConformance_RFC9114_Sec724_DuplicateSetting (SETTINGS round-trip; repeated id → H3_SETTINGS_ERROR) |
 | §7.1    | Negative    | TestParseFrameHeader_Incomplete (truncated Type/Length varint → ErrH3Frame) |
 | §7.2.4  | Negative    | TestParseSettings_Truncated (identifier without value → ErrH3Settings) |
+| §6.2 / §6.2.1 | Conformance | TestConformance_RFC9114_Sec62_ControlStream (client control stream = type 0x00 + first SETTINGS frame; peeled + read back) |
+| §7.1    | Unit        | TestFrameReader_MultipleFrames, TestFrameReader_SplitAcrossFeeds, TestFrameReader_HugeLength (streaming frame reader: back-to-back frames, frame split across feeds, huge length stays ErrNeedMore without overflow), TestReadStreamType |
 
 ## Gate
 
