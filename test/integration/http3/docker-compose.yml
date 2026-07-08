@@ -10,10 +10,30 @@ networks:
     driver: bridge
 
 services:
+  # Generate the 1 MiB throughput fixture (/srv/huge.txt) as an exact repeat of
+  # the 16-byte pattern the HugeResponse test checks — no newlines, so it matches
+  # strings.Repeat("0123456789abcdef", 65536) byte-for-byte. Kept out of git (see
+  # .gitignore) so the 1 MiB blob is not committed.
+  fixtures:
+    image: busybox
+    volumes:
+      - ./srv:/srv
+    command:
+      - sh
+      - -c
+      - |
+        printf '0123456789abcdef%.0s' $$(seq 1024) > /tmp/b
+        : > /srv/huge.txt
+        i=0; while [ $$i -lt 64 ]; do cat /tmp/b >> /srv/huge.txt; i=$$((i+1)); done
+    restart: "no"
+
   caddy:
     image: caddy:2
     hostname: h3caddy
     networks: [h3net]
+    depends_on:
+      fixtures:
+        condition: service_completed_successfully
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
       - ./srv:/srv:ro

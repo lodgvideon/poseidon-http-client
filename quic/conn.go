@@ -43,8 +43,9 @@ type Conn struct {
 
 	initialSealer   *Sealer
 	handshakeSealer *Sealer
-	oneRTTSealer    *Sealer
-	keys            KeySet // receive Openers per level
+	oneRTTSealer    *Sealer    // current-generation 1-RTT send Sealer (ratcheted on key update)
+	keys            KeySet     // receive Openers per level (OneRTT = current 1-RTT read gen)
+	ku              *keyUpdate // RFC 9001 §6 key-update state (nil until app keys installed)
 
 	sendPN        [numSpaces]uint64 // next packet number to send per space
 	pendingCrypto [numSpaces][]byte // handshake bytes to send per space
@@ -61,11 +62,12 @@ type Conn struct {
 	retransQueue [numSpaces][]retransFrame // frames of lost packets awaiting resend
 	ptoCount     uint                      // consecutive probe timeouts (backoff, RFC 9002 §6.2.1)
 
-	peer              TransportParams // parsed peer transport parameters (send limits)
-	gotServerCID      bool            // the server's SCID has been adopted as our DCID
-	closed            bool
-	handshakeComplete bool
-	sendBuf           []byte
+	peer               TransportParams // parsed peer transport parameters (send limits)
+	gotServerCID       bool            // the server's SCID has been adopted as our DCID
+	closed             bool
+	handshakeComplete  bool // TLS handshake finished (drives Establish + TLS pump)
+	handshakeConfirmed bool // QUIC HANDSHAKE_DONE received (RFC 9001 §4.1.2; gates key update §6.1)
+	sendBuf            []byte
 
 	nextBidiStreamID uint64             // next client-initiated bidi stream ID (0, 4, 8, …)
 	openedBidi       uint64             // count of client bidi streams opened (RFC 9000 §4.6 gate)
@@ -171,6 +173,9 @@ func (c *Conn) SetReadKeys(level tls.QUICEncryptionLevel, suite uint16, secret [
 		c.keys.Handshake = op
 	case spaceApp:
 		c.keys.OneRTT = op
+		// Retain the 1-RTT read secret + HP key and pre-derive the next
+		// generation so a peer key update (RFC 9001 §6) can be decrypted.
+		return c.initAppReadKU(suite, secret, op.hp)
 	}
 	return nil
 }
@@ -190,6 +195,9 @@ func (c *Conn) SetWriteKeys(level tls.QUICEncryptionLevel, suite uint16, secret 
 		c.handshakeSealer = s
 	case spaceApp:
 		c.oneRTTSealer = s
+		// Retain the 1-RTT write secret + HP key and pre-derive the next
+		// generation so the client can flip its own send phase (RFC 9001 §6.2).
+		return c.initAppWriteKU(suite, secret, s.hp)
 	}
 	return nil
 }

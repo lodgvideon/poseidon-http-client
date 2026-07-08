@@ -56,6 +56,7 @@ func (c *Conn) Poll() error {
 	if err := c.recvDatagram(c.pollBuf[:n]); err != nil {
 		return err
 	}
+	c.discardStaleKeys() // drop a superseded key-update generation past its window (§6.3)
 	// Drain datagrams already buffered in the socket without blocking, so a
 	// server's response burst is processed and acknowledged as one batch rather
 	// than one datagram per Poll — one-at-a-time is too slow for a bulk transfer,
@@ -119,13 +120,26 @@ func (c *Conn) recvDatagram(datagram []byte) error {
 			c.gotServerCID = true
 		}
 		sp := packetSpace(hdr.Type)
-		op := c.openerFor(sp)
-		if op == nil {
-			continue // keys for this level not yet installed
-		}
-		pn, _, payload, err := op.Open(pkt, hdr.PNOffset, c.largestRecv[sp])
-		if err != nil {
-			continue // authentication failed; skip
+		var pn uint64
+		var payload []byte
+		if sp == spaceApp {
+			// The application space may carry a key update (RFC 9001 §6), so it
+			// needs the key-phase-aware open path.
+			var ok bool
+			pn, payload, ok = c.openApp(pkt, hdr.PNOffset)
+			if !ok {
+				continue // no keys yet, or authentication failed; skip
+			}
+		} else {
+			op := c.openerFor(sp)
+			if op == nil {
+				continue // keys for this level not yet installed
+			}
+			var err error
+			pn, _, payload, err = op.Open(pkt, hdr.PNOffset, c.largestRecv[sp])
+			if err != nil {
+				continue // authentication failed; skip
+			}
 		}
 		fh := connFrameHandler{c: c, space: sp}
 		if err := ParseFrames(payload, &fh); err != nil {
@@ -158,6 +172,68 @@ func (c *Conn) recvDatagram(datagram []byte) error {
 	}
 	return nil
 }
+
+// openApp removes protection from a received application (1-RTT) packet,
+// handling RFC 9001 §6 key updates. It unprotects the header once with the shared
+// (non-rotated) header-protection key, reads the Key Phase bit, then makes exactly
+// one AEAD attempt against the matching key generation. A packet whose phase
+// differs from the current one is either a reordered previous-generation packet
+// (packet number below the generation boundary) or a peer-initiated update, which
+// is trial-decrypted with the pre-derived next generation and committed on success
+// (§6.2). ok is false for a keyless or undecryptable packet — never fatal, so a
+// forged Key Phase bit costs one AEAD open and is dropped (§6.4).
+func (c *Conn) openApp(pkt []byte, pnOffset int) (pn uint64, payload []byte, ok bool) {
+	op := c.keys.OneRTT
+	if op == nil {
+		return 0, nil, false // 1-RTT keys not installed yet
+	}
+	if c.ku == nil {
+		// No key-update state (e.g. a hand-built test Conn): plain 1-RTT open.
+		p, _, pl, err := op.Open(pkt, pnOffset, c.largestRecv[spaceApp])
+		if err != nil {
+			return 0, nil, false
+		}
+		return p, pl, true
+	}
+	pn, pnLen, keyPhase, err := op.unprotectHeader(pkt, pnOffset, c.largestRecv[spaceApp])
+	if err != nil {
+		return 0, nil, false // too short to sample / malformed
+	}
+	if keyPhase == c.ku.phase {
+		payload, err = op.openAEAD(pkt, pnOffset, pnLen, pn)
+		if err != nil {
+			return 0, nil, false
+		}
+		return pn, payload, true
+	}
+	// Flipped Key Phase: a reordered previous-generation packet (below the
+	// boundary, within the retention window) decrypts with the retained prev keys.
+	if c.ku.prev != nil && c.ku.haveBoundary && pn < c.ku.boundary && c.clock().Before(c.ku.prevUntil) {
+		payload, err = c.ku.prev.openAEAD(pkt, pnOffset, pnLen, pn)
+		if err != nil {
+			return 0, nil, false
+		}
+		return pn, payload, true
+	}
+	// Otherwise trial-decrypt with the next generation (RFC 9001 §6.2).
+	payload, err = c.ku.next.openAEAD(pkt, pnOffset, pnLen, pn)
+	if err != nil {
+		return 0, nil, false
+	}
+	if !c.handshakeConfirmed {
+		return 0, nil, false // MUST NOT accept a key update before the handshake is confirmed (§6.1)
+	}
+	c.commitKeyUpdate(pn) // peer initiated an update — ratchet forward and flip our send phase
+	return pn, payload, true
+}
+
+// NOTE (RFC 9001 §6.6, deferred): this client is a pure responder — it never
+// initiates its own key update, so it does not enforce the AEAD confidentiality
+// limit (2^23 packets under one AES-GCM key). Reaching it requires ~10 GB on a
+// single connection with a peer that never updates; real peers (quic-go) do
+// initiate. Self-initiated key update + the send-packet counter are a follow-up
+// phase (they need separate read/write key phases, since an initiator flips its
+// write phase before its read phase).
 
 // flush sends, for every space that owes a retransmission, CRYPTO, or an ACK:
 // first one packet per queued retransmit frame (retransmit takes priority,
@@ -249,7 +325,7 @@ func (c *Conn) sealPacket(sp int, frames []byte, ackEliciting bool, retrans []re
 	case spaceHandshake:
 		hdr, pnOffset = AppendLongHeader(nil, PacketHandshake, QUICVersion1, c.dcid, c.scid, nil, pnLen, length)
 	default:
-		hdr, pnOffset = AppendShortHeader(nil, c.dcid, pnLen, false)
+		hdr, pnOffset = AppendShortHeader(nil, c.dcid, pnLen, c.appSendPhase())
 	}
 	for i := pnLen - 1; i >= 0; i-- {
 		hdr = append(hdr, byte(pn>>(8*uint(i))))
@@ -373,6 +449,10 @@ func (h *connFrameHandler) OnMaxStreamData(streamID, maximum uint64) error {
 
 func (h *connFrameHandler) OnHandshakeDone() error {
 	h.c.handshakeComplete = true
+	// HANDSHAKE_DONE confirms the handshake for a client (RFC 9001 §4.1.2), which
+	// is the precondition for accepting a key update (§6.1) — distinct from TLS
+	// completion, which fires earlier.
+	h.c.handshakeConfirmed = true
 	h.ackEliciting = true
 	return nil
 }
