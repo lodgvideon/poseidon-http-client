@@ -196,8 +196,10 @@ Phase G builds a from-scratch HTTP/3 stack (see
 integer codec (`internal/bytesx`), the primitive under every QUIC/H3 length,
 offset, stream ID, frame type, and transport-parameter value. G.4 lands the
 `quic/` frame codec: parse + serialize the RFC 9000 §19 frames a client sends
-and receives, dispatched through a `FrameHandler` visitor (packet protection
-and the connection engine are later phases).
+and receives, dispatched through a `FrameHandler` visitor. G.4b adds the
+packet-header codec (§17): parse/write long, short, Retry, and Version
+Negotiation headers, locating the protected packet-number offset. Packet
+protection (RFC 9001) and the connection engine are later phases.
 
 | Section | Type        | Test |
 |---------|-------------|------|
@@ -211,6 +213,13 @@ and the connection engine are later phases).
 | §19.1   | Conformance | TestConformance_RFC9000_Sec191_Padding |
 | §19 (all frames) | Roundtrip | TestFrames_RoundTrip |
 | §12.4   | Negative    | TestParseFrames_Malformed, TestParseFrames_MoreMalformed (malformed → ErrFrameEncoding) |
+| §17.2.2 | Conformance | TestConformance_RFC9000_Sec172_InitialHeader |
+| §17.2.5 | Conformance | TestConformance_RFC9000_Sec1725_RetryHeader |
+| §17.2.1 | Conformance | TestConformance_RFC9000_Sec171_VersionNegotiation |
+| §17.3   | Conformance | TestConformance_RFC9000_Sec173_ShortHeader |
+| §12.2   | Conformance | TestParseHeader_Coalesced (coalesced-packet walk via PacketLen) |
+| §17     | Roundtrip   | TestPacketHeader_RoundTrip |
+| §17     | Negative    | TestParseHeader_Malformed (malformed header → ErrPacketEncoding) |
 
 ## RFC 9204 — QPACK (Phase G — HTTP/3)
 
