@@ -17,7 +17,7 @@ func (c *Conn) Establish(ctx context.Context) error {
 	}
 	buf := make([]byte, 2048)
 	for !c.handshakeComplete && !c.closed {
-		n, err := c.pc.Read(buf)
+		n, err := c.readWithPTO(buf)
 		if err != nil {
 			return err
 		}
@@ -39,7 +39,7 @@ func (c *Conn) Poll() error {
 	if c.pollBuf == nil {
 		c.pollBuf = make([]byte, 2048)
 	}
-	n, err := c.pc.Read(c.pollBuf)
+	n, err := c.readWithPTO(c.pollBuf)
 	if err != nil {
 		return err
 	}

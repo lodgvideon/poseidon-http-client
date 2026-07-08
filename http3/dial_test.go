@@ -23,7 +23,7 @@ func TestUDPConn_Loopback(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer client.Close()
-	uc := &udpConn{c: client, readTimeout: time.Second}
+	uc := &udpConn{c: client}
 
 	if _, err := uc.Write([]byte("ping")); err != nil {
 		t.Fatal(err)
@@ -65,7 +65,10 @@ func TestUDPConn_ReadDeadline(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer client.Close()
-	uc := &udpConn{c: client, readTimeout: 50 * time.Millisecond}
+	uc := &udpConn{c: client}
+	if err := uc.SetReadDeadline(time.Now().Add(50 * time.Millisecond)); err != nil {
+		t.Fatal(err)
+	}
 
 	if _, err := uc.Read(make([]byte, 64)); err == nil {
 		t.Fatal("expected a read timeout error")
