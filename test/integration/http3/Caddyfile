@@ -6,7 +6,7 @@
 
 # A named site so Caddy issues an internal cert matching the SNI the client
 # sends, and serves HTTP/3 on :443 (UDP).
-h3caddy:443, localhost:443 {
+h3caddy:443, localhost:443, lossproxy:443 {
 	tls internal
 	root * /srv
 

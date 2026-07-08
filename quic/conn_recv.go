@@ -28,6 +28,9 @@ func (c *Conn) Establish(ctx context.Context) error {
 			return err
 		}
 	}
+	if !c.handshakeComplete {
+		return ErrHandshakeClosed // loop exited on c.closed before completing
+	}
 	return nil
 }
 

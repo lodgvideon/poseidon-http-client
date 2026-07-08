@@ -1,0 +1,57 @@
+name: poseidon-h3-it-loss
+
+# HTTP/3 interop UNDER PACKET LOSS: the client dials through a UDP relay that
+# drops ~10% of datagrams each way, so the GET/POST/large-body tests pass only
+# if QUIC loss detection + retransmission + the probe timeout actually recover.
+
+networks:
+  h3net:
+    driver: bridge
+
+services:
+  caddy:
+    image: caddy:2
+    hostname: h3caddy
+    networks: [h3net]
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - ./srv:/srv:ro
+    healthcheck:
+      test: ["CMD", "curl", "-kfsS", "-o", "/dev/null", "https://localhost/"]
+      interval: 1s
+      timeout: 2s
+      retries: 30
+      start_period: 2s
+    restart: "no"
+
+  lossproxy:
+    image: golang:1.24
+    hostname: lossproxy
+    depends_on:
+      caddy:
+        condition: service_healthy
+    networks: [h3net]
+    working_dir: /src
+    volumes:
+      - ../../..:/src
+    environment:
+      UPSTREAM: h3caddy:443
+      LOSS_PCT: "${LOSS_PCT:-10}"
+    command: go run test/integration/http3/lossproxy.go
+    restart: "no"
+
+  runner:
+    image: golang:1.24
+    depends_on:
+      lossproxy:
+        condition: service_started
+    networks: [h3net]
+    working_dir: /src
+    volumes:
+      - ../../..:/src
+    environment:
+      H3_INTEROP_ADDR: lossproxy:443
+      GOFLAGS: -count=1
+    command: >
+      go test ./http3/ -tags interop -run TestInterop -v -timeout 120s
+    restart: "no"
