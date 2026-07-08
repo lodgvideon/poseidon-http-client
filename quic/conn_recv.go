@@ -42,6 +42,13 @@ func (c *Conn) Poll() error {
 	if c.pollBuf == nil {
 		c.pollBuf = make([]byte, 2048)
 	}
+	// Flush any output queued since the last read — notably MAX_STREAM_DATA /
+	// MAX_DATA credit grants from the application consuming a response — before
+	// blocking, or a flow-control-blocked peer would never send the data that
+	// would unblock the read (a deadlock until the idle timeout).
+	if err := c.flush(); err != nil {
+		return err
+	}
 	n, err := c.readWithPTO(c.pollBuf)
 	if err != nil {
 		return err
@@ -118,7 +125,9 @@ func (c *Conn) recvDatagram(datagram []byte) error {
 // RFC 9000 §13.3), then one packet with any pending ACK and new CRYPTO.
 func (c *Conn) flush() error {
 	for sp := 0; sp < numSpaces; sp++ {
-		nothing := len(c.pendingCrypto[sp]) == 0 && !c.acks[sp].ackPending() && len(c.retransQueue[sp]) == 0
+		hasCtrl := sp == spaceApp && len(c.pendingCtrl) > 0
+		nothing := len(c.pendingCrypto[sp]) == 0 && !c.acks[sp].ackPending() &&
+			len(c.retransQueue[sp]) == 0 && !hasCtrl
 		if nothing || c.sealerFor(sp) == nil {
 			continue // idle, or keys not yet available
 		}
@@ -135,12 +144,18 @@ func (c *Conn) flush() error {
 				return err
 			}
 		}
-		if len(c.pendingCrypto[sp]) == 0 && !c.acks[sp].ackPending() {
+		if len(c.pendingCrypto[sp]) == 0 && !c.acks[sp].ackPending() && !hasCtrl {
 			continue
 		}
 		var frames []byte
 		if c.acks[sp].ackPending() {
 			frames = c.acks[sp].appendACK(frames, 0)
+		}
+		if hasCtrl {
+			// MAX_DATA / MAX_STREAM_DATA credit grants (§4.1). Not retransmitted:
+			// a later grant supersedes a lost one, so recovery is self-healing.
+			frames = append(frames, c.pendingCtrl...)
+			c.pendingCtrl = c.pendingCtrl[:0]
 		}
 		var retrans []retransFrame
 		hasCrypto := len(c.pendingCrypto[sp]) > 0
@@ -152,8 +167,8 @@ func (c *Conn) flush() error {
 			c.pendingCrypto[sp] = c.pendingCrypto[sp][:0]
 			retrans = []retransFrame{{kind: retransCrypto, offset: off, data: data}}
 		}
-		// A packet carrying CRYPTO is ack-eliciting; an ACK-only packet is not.
-		pkt, err := c.sealPacket(sp, frames, hasCrypto, retrans)
+		// A packet carrying CRYPTO or a credit grant is ack-eliciting.
+		pkt, err := c.sealPacket(sp, frames, hasCrypto || hasCtrl, retrans)
 		if err != nil {
 			return err
 		}

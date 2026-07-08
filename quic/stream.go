@@ -14,6 +14,7 @@ type Stream struct {
 	sdBlockedLimit uint64 // last sendMax a STREAM_DATA_BLOCKED was emitted for
 	sdBlockedSet   bool   // whether a STREAM_DATA_BLOCKED has been emitted yet
 	finSent        bool   // FIN latch (§4.5): the final size is fixed once set
+	recvMax        uint64 // per-stream receive limit we advertise; raised via MAX_STREAM_DATA
 }
 
 // ID returns the stream's QUIC stream identifier.
@@ -31,7 +32,7 @@ func (c *Conn) OpenStream() (*Stream, error) {
 	id := c.nextBidiStreamID
 	c.nextBidiStreamID += 4
 	c.openedBidi++
-	s := &Stream{id: id, conn: c, sendMax: c.peer.InitialMaxStreamDataBidiRemote}
+	s := &Stream{id: id, conn: c, sendMax: c.peer.InitialMaxStreamDataBidiRemote, recvMax: DefaultStreamRecvWindow}
 	if c.streams == nil {
 		c.streams = map[uint64]*Stream{}
 	}
@@ -49,7 +50,7 @@ func (c *Conn) OpenUniStream() (*Stream, error) {
 	}
 	id := 2 + c.openedUni*4
 	c.openedUni++
-	s := &Stream{id: id, conn: c, sendMax: c.peer.InitialMaxStreamDataUni}
+	s := &Stream{id: id, conn: c, sendMax: c.peer.InitialMaxStreamDataUni, recvMax: DefaultStreamRecvWindow}
 	if c.streams == nil {
 		c.streams = map[uint64]*Stream{}
 	}
@@ -61,7 +62,15 @@ func (c *Conn) OpenUniStream() (*Stream, error) {
 // Recv call (the newly available prefix of the received data), for reading a
 // response. It returns an empty slice when nothing new is available. The result
 // aliases the stream's buffer and should be consumed before the next Recv.
-func (s *Stream) Recv() []byte { return s.recv.read() }
+// Consuming bytes frees receive-flow-control window, which may queue
+// MAX_STREAM_DATA / MAX_DATA to grant the peer more credit (RFC 9000 §4.1).
+func (s *Stream) Recv() []byte {
+	data := s.recv.read()
+	if len(data) > 0 {
+		s.conn.onStreamConsumed(s, uint64(len(data)))
+	}
+	return data
+}
 
 // Finished reports whether the peer has finished the stream: the FIN has arrived
 // and every byte up to the final size is contiguous (RFC 9000 §2.2).
