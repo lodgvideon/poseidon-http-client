@@ -1,5 +1,5 @@
 .PHONY: lint test test-race test-debug bench bench-gate fuzz-replay coverage coverage-gate tidy
-.PHONY: it-up it-down it-logs it-test it-test-fast it-certs
+.PHONY: it-up it-down it-logs it-test it-test-fast it-certs h3-interop
 
 # Minimum overall and per-package statement coverage. CI fails below this.
 COVERAGE_MIN ?= 80
@@ -87,3 +87,11 @@ it-test:
 # Fast path: only Go in-process reference server (no Docker needed).
 it-test-fast:
 	POSEIDON_IT_SKIP_REMOTE=true $(GO) test $(IT_TAGS) -race -count=1 -timeout=60s -v $(IT_PKG)
+
+# HTTP/3 interop: a real Caddy HTTP/3 server + the client run in-container on a
+# shared network (Docker Desktop on Windows does not forward host UDP). The
+# runner exits with the test result; teardown always runs.
+H3_COMPOSE = test/integration/http3/docker-compose.yml
+h3-interop:
+	@trap '$(DOCKER_COMPOSE) -f $(H3_COMPOSE) down -v 2>/dev/null' EXIT; \
+	$(DOCKER_COMPOSE) -f $(H3_COMPOSE) up --abort-on-container-exit --exit-code-from runner

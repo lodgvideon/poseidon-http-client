@@ -226,6 +226,7 @@ protection (RFC 9001) and the connection engine are later phases.
 | §13.2 / §19.3 | Unit  | TestAckTracker_RoundTrip, TestAckTracker_PendingAndLargest (received PNs → ACK ranges → decode back to the exact set) |
 | §7.1 / §14.1 | Unit   | TestConn_SendInitialFlight (Conn drives the handshake to a ClientHello and sends one padded Initial datagram that decrypts back to it) |
 | §7 / RFC 9001 §4 | Integration | TestConn_Establish_InMemory (**full QUIC v1 + TLS 1.3 handshake** completes between the client Conn and an in-memory server over a datagram pipe: Initial + Handshake flights, key installs, handshake done) |
+| §19.6   | Unit        | TestConnFrameHandler_OnCrypto_ReassemblesByOffset (out-of-order CRYPTO frames reassembled by offset before feeding TLS — a real server's certificate flight spans many frames) |
 | §2.2    | Conformance | TestConformance_RFC9000_Sec2_StreamReassembly (out-of-order STREAM frames reassembled to correct byte stream; complete only once FIN + all preceding bytes present) |
 | §2.1    | Unit        | TestConn_OpenStream_IDs (client bidi stream IDs 0, 4, 8, …), TestConn_OnStream_DeliversToOpenStream (inbound STREAM routed to opened stream), TestConn_OpenUniStream_IDs (client uni stream IDs 2, 6, 10 + initial_max_streams_uni gate) |
 | §2.2 / §13 | Unit     | TestStream_RecvAndFinished (Recv returns newly-contiguous bytes; Finished flips on FIN), TestConn_Poll_DeliversStreamData (post-handshake Poll decrypts a 1-RTT packet and delivers STREAM data to the open stream) |
@@ -319,6 +320,7 @@ exercised in the Docker-peer interop phase.
 | §6.2.1 / §4 | Integration | TestClient_RequestResponse (client opens control stream + SETTINGS, sends a request, decodes response HEADERS + DATA over a Poll loop), TestClient_SendDrainsUnderFlowControl (partial Send is drained so the request/SETTINGS are never truncated) |
 | §4.1    | Negative    | TestClient_DataBeforeHeaders (DATA before HEADERS on a request stream → ErrH3FrameUnexpected = H3_FRAME_UNEXPECTED) |
 | §3.1    | Unit        | TestH3TLSConfig (Dial applies the "h3" ALPN token and a TLS 1.3 floor), TestUDPConn_Loopback / TestUDPConn_ReadDeadline (UDP PacketConn adapter), TestDialConn_EstablishError (dial closes the transport on handshake failure) |
+| Whole stack | Interop | TestInterop_GET (build tag `interop`) — the client completes a real HTTP/3 GET against a live Caddy (quic-go) server over UDP, asserting 200. Harness: `make h3-interop` (test/integration/http3). Validates the full path end-to-end against an independent implementation. |
 
 ## Gate
 

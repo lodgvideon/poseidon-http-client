@@ -1,0 +1,12 @@
+{
+	# Use Caddy's internal CA (no public ACME); the client skips verification.
+	local_certs
+	auto_https disable_redirects
+}
+
+# A named site so Caddy issues an internal cert matching the SNI the client
+# sends, and serves HTTP/3 on :443 (UDP).
+h3caddy:443, localhost:443 {
+	tls internal
+	respond "hello from http3" 200
+}

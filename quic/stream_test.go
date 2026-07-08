@@ -128,6 +128,31 @@ func TestConn_OnStream_DeliversToOpenStream(t *testing.T) {
 	}
 }
 
+// TestConnFrameHandler_OnCrypto_ReassemblesByOffset pins the fix for the real
+// bug that broke live interop: a server's handshake CRYPTO stream spans many
+// frames that can arrive out of order, and must be reassembled by offset before
+// being fed to TLS (RFC 9000 §19.6). Appending in arrival order garbled the
+// server's ServerHello/Certificate flight.
+func TestConnFrameHandler_OnCrypto_ReassemblesByOffset(t *testing.T) {
+	c := &Conn{}
+	h := &connFrameHandler{c: c, space: spaceInitial}
+
+	// A later CRYPTO frame arrives before the bytes preceding it.
+	if err := h.OnCrypto(6, []byte("world")); err != nil {
+		t.Fatal(err)
+	}
+	if got := c.cryptoRecv[spaceInitial].read(); len(got) != 0 {
+		t.Fatalf("gapped CRYPTO must not be readable yet, got %q", got)
+	}
+	// The gap fills; the whole prefix becomes available in order.
+	if err := h.OnCrypto(0, []byte("hello ")); err != nil {
+		t.Fatal(err)
+	}
+	if got := string(c.cryptoRecv[spaceInitial].read()); got != "hello world" {
+		t.Fatalf("reassembled CRYPTO = %q, want %q", got, "hello world")
+	}
+}
+
 func TestConn_OpenUniStream_IDs(t *testing.T) {
 	c := &Conn{peer: TransportParams{InitialMaxStreamsUni: 3, InitialMaxStreamDataUni: 5000}}
 	for _, want := range []uint64{2, 6, 10} {

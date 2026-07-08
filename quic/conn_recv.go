@@ -89,11 +89,10 @@ func (c *Conn) recvDatagram(datagram []byte) error {
 	}
 	fedCrypto := false
 	for sp := 0; sp < numSpaces; sp++ {
-		if len(c.recvCrypto[sp]) > 0 {
-			if err := c.hs.HandleCrypto(spaceLevel(sp), c.recvCrypto[sp]); err != nil {
+		if data := c.cryptoRecv[sp].read(); len(data) > 0 {
+			if err := c.hs.HandleCrypto(spaceLevel(sp), data); err != nil {
 				return err
 			}
-			c.recvCrypto[sp] = c.recvCrypto[sp][:0]
 			fedCrypto = true
 		}
 	}
@@ -216,10 +215,11 @@ type connFrameHandler struct {
 	ackEliciting bool
 }
 
-func (h *connFrameHandler) OnCrypto(_ uint64, data []byte) error {
-	// The handshake CRYPTO stream is delivered in order on a reliable path;
-	// reassembly of out-of-order offsets is a later refinement.
-	h.c.recvCrypto[h.space] = append(h.c.recvCrypto[h.space], data...)
+func (h *connFrameHandler) OnCrypto(offset uint64, data []byte) error {
+	// The handshake CRYPTO stream spans many frames and packets (a server's
+	// certificate flight is several KB); reassemble it by offset so out-of-order
+	// or gapped delivery still yields the TLS messages in order.
+	h.c.cryptoRecv[h.space].receive(offset, data, false)
 	h.ackEliciting = true
 	return nil
 }
