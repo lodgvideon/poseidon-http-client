@@ -226,9 +226,11 @@ protection (RFC 9001) and the connection engine are later phases.
 G.5a lands the QUIC key schedule (HKDF-Expand-Label + Initial secrets, §5.1–5.2);
 G.5b adds AEAD packet protection (§5.3) and header protection (§5.4) — `Sealer` /
 `Opener` over AES-128-GCM + AES-ECB, plus packet-number reconstruction
-(RFC 9000 §A.3). All pure stdlib (`crypto/hkdf`, `crypto/aes`, `crypto/cipher`;
-Go 1.24). The `crypto/tls.QUICConn` handshake loop is the next sub-phase; the
-full Appendix A.2 packet known-answer test lands with G.8 real-server interop.
+(RFC 9000 §A.3). G.5c adds the `crypto/tls.QUICConn` handshake driver
+(`TLSHandshake` + `KeysFromSecret`, §4), verified by a full in-memory TLS 1.3
+QUIC handshake. All pure stdlib (`crypto/hkdf`, `crypto/aes`, `crypto/cipher`,
+`crypto/tls`; Go 1.24). The full Appendix A.2 packet known-answer test lands
+with G.8 real-server interop.
 
 | Section | Type        | Test |
 |---------|-------------|------|
@@ -239,6 +241,8 @@ full Appendix A.2 packet known-answer test lands with G.8 real-server interop.
 | §5.3    | Negative    | TestPacketProtection_AuthFailure (tampered / wrong-key → ErrCryptoDecrypt) |
 | §5.4    | Roundtrip   | TestHeaderProtection_Reversible, TestPacketProtection_ShortSample |
 | §A.3    | Conformance | TestDecodePacketNumber (packet-number reconstruction, §A.3 example) |
+| §4      | Integration | TestTLSHandshake_InMemory (full TLS 1.3 QUIC handshake client↔server via crypto/tls.QUICConn; secrets match, keys derive, ALPN h3) |
+| §4.1    | Unit        | TestKeysFromSecret_UnsupportedSuite (ChaCha20 → ErrCryptoSuite, deferred) |
 
 ## RFC 9204 — QPACK (Phase G — HTTP/3)
 

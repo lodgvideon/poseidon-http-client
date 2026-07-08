@@ -48,3 +48,8 @@ var ErrCryptoSample = errors.New("quic: packet too short for header protection s
 // ErrCryptoDecrypt is returned when AEAD authentication of a received packet
 // fails (RFC 9001 §5.3) — a forged, corrupted, or wrong-key packet.
 var ErrCryptoDecrypt = errors.New("quic: packet decryption failed")
+
+// ErrCryptoSuite is returned when a negotiated TLS cipher suite is not yet
+// supported for packet protection. The AES-GCM suites are supported;
+// ChaCha20-Poly1305 header protection is deferred to a later phase.
+var ErrCryptoSuite = errors.New("quic: unsupported cipher suite")
