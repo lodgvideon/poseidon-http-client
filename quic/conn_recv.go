@@ -3,6 +3,7 @@ package quic
 import (
 	"context"
 	"crypto/tls"
+	"time"
 )
 
 // Establish sends the client's Initial flight, then reads datagrams and drives
@@ -118,12 +119,14 @@ func (c *Conn) flush() error {
 		if c.acks[sp].ackPending() {
 			frames = c.acks[sp].appendACK(frames, 0)
 		}
-		if len(c.pendingCrypto[sp]) > 0 {
+		hasCrypto := len(c.pendingCrypto[sp]) > 0
+		if hasCrypto {
 			frames = AppendCrypto(frames, c.cryptoOffset[sp], c.pendingCrypto[sp])
 			c.cryptoOffset[sp] += uint64(len(c.pendingCrypto[sp]))
 			c.pendingCrypto[sp] = c.pendingCrypto[sp][:0]
 		}
-		pkt, err := c.sealPacket(sp, frames)
+		// A packet carrying CRYPTO is ack-eliciting; an ACK-only packet is not.
+		pkt, err := c.sealPacket(sp, frames, hasCrypto)
 		if err != nil {
 			return err
 		}
@@ -137,7 +140,7 @@ func (c *Conn) flush() error {
 // sealPacket builds and protects a packet for a space carrying frames. Frames
 // are padded to keep the packet long enough for the header-protection sample
 // (RFC 9001 §5.4.2).
-func (c *Conn) sealPacket(sp int, frames []byte) ([]byte, error) {
+func (c *Conn) sealPacket(sp int, frames []byte, ackEliciting bool) ([]byte, error) {
 	const minFrames = 20 // ensures payload+tag reaches the 16-byte HP sample
 	if len(frames) < minFrames {
 		frames = append(frames, make([]byte, minFrames-len(frames))...) // PADDING
@@ -145,6 +148,7 @@ func (c *Conn) sealPacket(sp int, frames []byte) ([]byte, error) {
 	pnLen := 4
 	pn := c.sendPN[sp]
 	c.sendPN[sp]++
+	c.sent[sp].onSent(pn, c.clock(), ackEliciting)
 	length := uint64(pnLen + len(frames) + 16)
 
 	var hdr []byte
@@ -213,6 +217,28 @@ type connFrameHandler struct {
 	c            *Conn
 	space        int
 	ackEliciting bool
+	ackLow       uint64 // smallest packet number of the ACK range being decoded
+}
+
+// OnAck processes the first (largest) range of an ACK frame: it acknowledges
+// [largest-firstRange, largest] and samples the RTT from the largest packet
+// (RFC 9000 §19.3, RFC 9002 §5). ACK frames are not themselves ack-eliciting.
+func (h *connFrameHandler) OnAck(largest, ackDelay, firstRange uint64) error {
+	delay := time.Duration(ackDelay<<ackDelayExponent) * time.Microsecond
+	low := largest - firstRange
+	h.c.onAckRange(h.space, low, largest, delay)
+	h.ackLow = low
+	return nil
+}
+
+// OnAckRange processes an additional ACK range below the previous one: a gap of
+// gap+1 unacknowledged packets, then length+1 acknowledged (RFC 9000 §19.3).
+func (h *connFrameHandler) OnAckRange(gap, length uint64) error {
+	high := h.ackLow - gap - 2
+	low := high - length
+	h.c.onAckRange(h.space, low, high, 0) // only the first range carries the largest
+	h.ackLow = low
+	return nil
 }
 
 func (h *connFrameHandler) OnCrypto(offset uint64, data []byte) error {

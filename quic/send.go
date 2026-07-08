@@ -135,9 +135,10 @@ func (s *Stream) emitBlocked(kind blockKind) {
 	}
 }
 
-// writeAppFrames seals frames into a 1-RTT packet and writes the datagram.
+// writeAppFrames seals frames into a 1-RTT packet and writes the datagram. The
+// STREAM and *_BLOCKED frames it carries are ack-eliciting.
 func (c *Conn) writeAppFrames(frames []byte) error {
-	pkt, err := c.sealPacket(spaceApp, frames)
+	pkt, err := c.sealPacket(spaceApp, frames, true)
 	if err != nil {
 		return err
 	}

@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"crypto/tls"
 	"errors"
+	"time"
 )
 
 // Packet-number spaces (RFC 9000 §12.3): Initial, Handshake, and Application
@@ -54,6 +55,10 @@ type Conn struct {
 	largestRecv [numSpaces]uint64     // largest received packet number per space
 	haveRecv    [numSpaces]bool
 
+	sent [numSpaces]sentSpace // packets we sent, per space (ACK/RTT/loss)
+	rtt  rttStats             // round-trip-time estimates (RFC 9002 §5)
+	now  func() time.Time     // clock (time.Now; overridable in tests)
+
 	peer              TransportParams // parsed peer transport parameters (send limits)
 	gotServerCID      bool            // the server's SCID has been adopted as our DCID
 	closed            bool
@@ -96,9 +101,29 @@ func NewConn(pc PacketConn, tlsConfig *tls.Config, transportParams []byte) (*Con
 		hs:            NewClientHandshake(tlsConfig, transportParams),
 		dcid:          dcid,
 		initialSealer: is,
+		now:           time.Now,
 	}
 	c.keys.Initial = io
 	return c, nil
+}
+
+// clock returns the current time, defaulting to time.Now when no clock was
+// injected (tests may set c.now to a fake).
+func (c *Conn) clock() time.Time {
+	if c.now == nil {
+		return time.Now()
+	}
+	return c.now()
+}
+
+// onAckRange acknowledges the packet-number range [low, high] in space sp,
+// updating the RTT estimate from the largest newly-acknowledged packet
+// (RFC 9002 §5). ackDelay is the peer's decoded ACK delay (zero for ranges that
+// cannot carry the largest acked).
+func (c *Conn) onAckRange(sp int, low, high uint64, ackDelay time.Duration) {
+	if sendTime, ok := c.sent[sp].ack(low, high); ok {
+		c.rtt.update(c.clock().Sub(sendTime), ackDelay)
+	}
 }
 
 // levelSpace maps a TLS encryption level to a packet-number space.
@@ -193,11 +218,13 @@ func (c *Conn) sendInitialFlight(ctx context.Context) error {
 	if len(ch) == 0 {
 		return ErrNoClientHello
 	}
+	pn := c.sendPN[spaceInitial]
 	pkt, err := BuildInitialPacket(c.sendBuf[:0], c.initialSealer, c.dcid, c.scid, nil,
-		c.sendPN[spaceInitial], 4, c.cryptoOffset[spaceInitial], ch, InitialDatagramMinSize)
+		pn, 4, c.cryptoOffset[spaceInitial], ch, InitialDatagramMinSize)
 	if err != nil {
 		return err
 	}
+	c.sent[spaceInitial].onSent(pn, c.clock(), true) // Initial carries CRYPTO (ack-eliciting)
 	c.cryptoOffset[spaceInitial] += uint64(len(ch))
 	c.pendingCrypto[spaceInitial] = c.pendingCrypto[spaceInitial][:0]
 	c.sendPN[spaceInitial]++
