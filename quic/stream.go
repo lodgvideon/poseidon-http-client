@@ -6,24 +6,37 @@ import "sort"
 // client-initiated bidirectional streams (one request/response exchange each).
 type Stream struct {
 	id   uint64
+	conn *Conn
 	recv recvStream
+
+	sendOffset     uint64 // next byte offset to send = bytes already sent on this stream
+	sendMax        uint64 // absolute per-stream send ceiling (§4.1); init = peer bidi_remote
+	sdBlockedLimit uint64 // last sendMax a STREAM_DATA_BLOCKED was emitted for
+	sdBlockedSet   bool   // whether a STREAM_DATA_BLOCKED has been emitted yet
+	finSent        bool   // FIN latch (§4.5): the final size is fixed once set
 }
 
 // ID returns the stream's QUIC stream identifier.
 func (s *Stream) ID() uint64 { return s.id }
 
 // OpenStream opens the next client-initiated bidirectional stream (RFC 9000
-// §2.1: IDs 0, 4, 8, … — the low two bits are zero). It does not send anything
+// §2.1: IDs 0, 4, 8, … — the low two bits are zero). It returns
+// ErrTooManyStreams if opening another stream would exceed the peer's
+// advertised initial_max_streams_bidi limit (§4.6). It does not send anything
 // until the caller writes to the stream.
-func (c *Conn) OpenStream() *Stream {
+func (c *Conn) OpenStream() (*Stream, error) {
+	if c.openedBidi >= c.peer.InitialMaxStreamsBidi {
+		return nil, ErrTooManyStreams
+	}
 	id := c.nextBidiStreamID
 	c.nextBidiStreamID += 4
-	s := &Stream{id: id}
+	c.openedBidi++
+	s := &Stream{id: id, conn: c, sendMax: c.peer.InitialMaxStreamDataBidiRemote}
 	if c.streams == nil {
 		c.streams = map[uint64]*Stream{}
 	}
 	c.streams[id] = s
-	return s
+	return s, nil
 }
 
 // streamChunk is a run of received stream bytes buffered until the bytes before

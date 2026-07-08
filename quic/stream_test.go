@@ -104,8 +104,11 @@ func TestRecvStream_MultipleBufferedChunks(t *testing.T) {
 }
 
 func TestConn_OnStream_DeliversToOpenStream(t *testing.T) {
-	c := &Conn{}
-	s := c.OpenStream() // stream 0
+	c := &Conn{peer: TransportParams{InitialMaxStreamsBidi: 4}}
+	s, err := c.OpenStream() // stream 0
+	if err != nil {
+		t.Fatal(err)
+	}
 	h := &connFrameHandler{c: c}
 	if err := h.OnStream(s.ID(), 0, true, []byte("response body")); err != nil {
 		t.Fatal(err)
@@ -126,14 +129,40 @@ func TestConn_OnStream_DeliversToOpenStream(t *testing.T) {
 }
 
 func TestConn_OpenStream_IDs(t *testing.T) {
-	c := &Conn{}
+	c := &Conn{peer: TransportParams{InitialMaxStreamsBidi: 4}}
 	for want := uint64(0); want < 16; want += 4 {
-		s := c.OpenStream()
+		s, err := c.OpenStream()
+		if err != nil {
+			t.Fatalf("OpenStream: %v", err)
+		}
 		if s.ID() != want {
 			t.Fatalf("stream ID = %d, want %d", s.ID(), want)
 		}
 		if c.streams[want] != s {
 			t.Fatalf("stream %d not registered", want)
 		}
+	}
+}
+
+// TestConformance_RFC9000_Sec46_StreamLimit verifies that OpenStream refuses to
+// open more bidirectional streams than the peer's advertised
+// initial_max_streams_bidi limit (RFC 9000 §4.6): the (limit+1)th open returns
+// ErrTooManyStreams.
+func TestConformance_RFC9000_Sec46_StreamLimit(t *testing.T) {
+	c := &Conn{peer: TransportParams{InitialMaxStreamsBidi: 2}}
+	if _, err := c.OpenStream(); err != nil {
+		t.Fatalf("stream 1: %v", err)
+	}
+	if _, err := c.OpenStream(); err != nil {
+		t.Fatalf("stream 2: %v", err)
+	}
+	if _, err := c.OpenStream(); err != ErrTooManyStreams {
+		t.Fatalf("stream 3 err = %v, want ErrTooManyStreams", err)
+	}
+
+	// A peer that advertises no bidi streams forbids even the first (§18.2).
+	zero := &Conn{peer: TransportParams{InitialMaxStreamsBidi: 0}}
+	if _, err := zero.OpenStream(); err != ErrTooManyStreams {
+		t.Fatalf("zero-limit err = %v, want ErrTooManyStreams", err)
 	}
 }

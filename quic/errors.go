@@ -53,3 +53,20 @@ var ErrCryptoDecrypt = errors.New("quic: packet decryption failed")
 // supported for packet protection. The AES-GCM suites are supported;
 // ChaCha20-Poly1305 header protection is deferred to a later phase.
 var ErrCryptoSuite = errors.New("quic: unsupported cipher suite")
+
+// ErrTransportParameter is returned when the peer's transport parameters are
+// malformed, contain a duplicate identifier, or carry an invalid value. It maps
+// to the TRANSPORT_PARAMETER_ERROR (0x08) transport error (RFC 9000 §7.4).
+var ErrTransportParameter = errors.New("quic: transport parameter error")
+
+// ErrStreamFinished is returned by Stream.Send once the stream's FIN has been
+// sent; the final size is fixed and no further data may be sent (RFC 9000 §4.5).
+var ErrStreamFinished = errors.New("quic: stream already finished")
+
+// ErrTooManyStreams is returned by OpenStream when opening another stream would
+// exceed the peer's advertised stream limit (RFC 9000 §4.6).
+var ErrTooManyStreams = errors.New("quic: too many streams")
+
+// ErrNotEstablished is returned by Stream.Send before the 1-RTT keys are
+// installed — application data may only be sent after the handshake completes.
+var ErrNotEstablished = errors.New("quic: connection not established")

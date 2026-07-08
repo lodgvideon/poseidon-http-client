@@ -54,14 +54,20 @@ type Conn struct {
 	largestRecv [numSpaces]uint64 // largest received packet number per space
 	haveRecv    [numSpaces]bool
 
-	peerParams        []byte
-	gotServerCID      bool // the server's SCID has been adopted as our DCID
+	peer              TransportParams // parsed peer transport parameters (send limits)
+	gotServerCID      bool            // the server's SCID has been adopted as our DCID
 	closed            bool
 	handshakeComplete bool
 	sendBuf           []byte
 
 	nextBidiStreamID uint64             // next client-initiated bidi stream ID (0, 4, 8, …)
+	openedBidi       uint64             // count of client bidi streams opened (RFC 9000 §4.6 gate)
 	streams          map[uint64]*Stream // open streams by ID
+
+	connSent         uint64 // cumulative bytes sent in STREAM frames across all streams (§4.1)
+	connMax          uint64 // absolute connection-level send ceiling; init = peer.InitialMaxData
+	dataBlockedLimit uint64 // last connMax a DATA_BLOCKED was emitted for (emit once per limit)
+	dataBlockedSet   bool   // whether a DATA_BLOCKED has been emitted yet
 }
 
 // NewConn creates a client QUIC connection over pc. tlsConfig must set
@@ -153,10 +159,16 @@ func (c *Conn) SetWriteKeys(level tls.QUICEncryptionLevel, suite uint16, secret 
 	return nil
 }
 
-// PeerTransportParameters records the peer's raw transport parameters
-// (HandshakeSink).
+// PeerTransportParameters parses the peer's transport parameters and seeds the
+// connection-level send limit (HandshakeSink). A malformed or invalid parameter
+// set aborts the handshake as a TRANSPORT_PARAMETER_ERROR (RFC 9000 §7.4).
 func (c *Conn) PeerTransportParameters(params []byte) error {
-	c.peerParams = append(c.peerParams[:0], params...)
+	tp, err := ParseTransportParams(params)
+	if err != nil {
+		return err
+	}
+	c.peer = tp
+	c.connMax = tp.InitialMaxData
 	return nil
 }
 
