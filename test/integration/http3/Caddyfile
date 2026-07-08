@@ -8,5 +8,15 @@
 # sends, and serves HTTP/3 on :443 (UDP).
 h3caddy:443, localhost:443 {
 	tls internal
-	respond "hello from http3" 200
+	root * /srv
+
+	# "/" (and a POST to it) get a small canned response; other paths are served
+	# from /srv (e.g. /big.txt, a 16 KiB body for the large-response test).
+	@root path /
+	handle @root {
+		respond "hello from http3" 200
+	}
+	handle {
+		file_server
+	}
 }

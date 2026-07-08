@@ -111,6 +111,41 @@ func TestClient_RequestResponse(t *testing.T) {
 	}
 }
 
+// TestClient_RequestWithBody verifies a request body is sent as a DATA frame
+// after the HEADERS frame, with the FIN on the DATA (RFC 9114 §4.1).
+func TestClient_RequestWithBody(t *testing.T) {
+	headersFrame := AppendHeaders(nil, encodeSection(hf(":status", "200")))
+	conn := &fakeConn{req: &fakeStream{recvChunks: [][]byte{headersFrame}, fin: true}}
+	client, err := NewClientFake(conn, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := []byte("field=value&x=1")
+	resp, _, err := client.Do(&Request{Method: "POST", Scheme: "https", Authority: "h", Path: "/", Body: body})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.Status != 200 {
+		t.Fatalf("status = %d, want 200", resp.Status)
+	}
+	if !conn.req.finSent {
+		t.Fatal("FIN must be sent on the DATA frame")
+	}
+	// The request stream carried a HEADERS frame then a DATA frame with the body.
+	htyp, hlen, hn, err := ParseFrameHeader(conn.req.sent)
+	if err != nil || htyp != FrameHeaders {
+		t.Fatalf("first frame = (%#x, %v), want HEADERS", htyp, err)
+	}
+	rest := conn.req.sent[hn+int(hlen):]
+	dtyp, dlen, dn, err := ParseFrameHeader(rest)
+	if err != nil || dtyp != FrameData {
+		t.Fatalf("second frame = (%#x, %v), want DATA", dtyp, err)
+	}
+	if got := rest[dn : dn+int(dlen)]; !bytes.Equal(got, body) {
+		t.Fatalf("DATA payload = %q, want %q", got, body)
+	}
+}
+
 // TestClient_SendDrainsUnderFlowControl forces both the control and request
 // streams to accept only a few bytes per Send, verifying the client drains the
 // whole SETTINGS and HEADERS frames (and the FIN) instead of truncating them —

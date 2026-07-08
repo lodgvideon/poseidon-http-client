@@ -15,6 +15,7 @@ type Request struct {
 	Authority string // omitted from the field section when empty
 	Path      string
 	Headers   []hpack.HeaderField
+	Body      []byte // optional request body, sent in a DATA frame after HEADERS
 }
 
 // EncodeHeaders QPACK-encodes the request's field section — the request pseudo-
