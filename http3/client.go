@@ -1,0 +1,150 @@
+package http3
+
+import (
+	"github.com/lodgvideon/poseidon-http-client/qpack"
+	"github.com/lodgvideon/poseidon-http-client/quic"
+)
+
+// quicStream is the QUIC stream surface the client uses. *quic.Stream satisfies
+// it; tests supply a fake.
+type quicStream interface {
+	Send(data []byte, fin bool) (int, error)
+	Recv() []byte
+	Finished() bool
+}
+
+// quicConn is the QUIC connection surface the client uses. A connAdapter over
+// *quic.Conn satisfies it; tests supply a fake.
+type quicConn interface {
+	OpenStream() (quicStream, error)
+	OpenUniStream() (quicStream, error)
+	Poll() error
+}
+
+// connAdapter lets a concrete *quic.Conn satisfy quicConn — the interface methods
+// return quicStream where *quic.Conn returns the concrete *quic.Stream.
+type connAdapter struct{ *quic.Conn }
+
+func (a connAdapter) OpenStream() (quicStream, error) {
+	s, err := a.Conn.OpenStream()
+	if err != nil {
+		return nil, err // avoid returning a non-nil interface wrapping a nil *Stream
+	}
+	return s, nil
+}
+
+func (a connAdapter) OpenUniStream() (quicStream, error) {
+	s, err := a.Conn.OpenUniStream()
+	if err != nil {
+		return nil, err
+	}
+	return s, nil
+}
+
+// Client is a minimal HTTP/3 client over an established QUIC connection. It owns
+// the connection's control stream and QPACK codecs. Not safe for concurrent use.
+type Client struct {
+	conn quicConn
+	enc  qpack.Encoder
+	dec  qpack.Decoder
+}
+
+// NewClient wraps an established QUIC connection: it opens the client's control
+// stream and sends the mandatory first SETTINGS frame (RFC 9114 §6.2.1). The
+// connection's handshake must already have completed.
+func NewClient(conn *quic.Conn, settings []Setting) (*Client, error) {
+	return newClient(connAdapter{conn}, settings)
+}
+
+func newClient(conn quicConn, settings []Setting) (*Client, error) {
+	control, err := conn.OpenUniStream()
+	if err != nil {
+		return nil, err
+	}
+	if err := sendAll(conn, control, AppendClientControlStream(nil, settings), false); err != nil {
+		return nil, err
+	}
+	return &Client{conn: conn}, nil
+}
+
+// sendAll writes the whole of data on stream. Stream.Send consumes only a
+// prefix when flow-control-blocked, so this advances past each partial send and
+// polls to recover credit (a MAX_STREAM_DATA / MAX_DATA frame) until every byte
+// — and the FIN, which rides the final byte — is on the wire.
+func sendAll(conn quicConn, stream quicStream, data []byte, fin bool) error {
+	sent := 0
+	for {
+		n, err := stream.Send(data[sent:], fin)
+		if err != nil {
+			return err
+		}
+		sent += n
+		if sent >= len(data) {
+			return nil
+		}
+		if err := conn.Poll(); err != nil {
+			return err
+		}
+	}
+}
+
+// Do sends req on a new request stream and reads the response, driving the QUIC
+// connection's receive loop until the response stream finishes. It returns the
+// response head and the fully-buffered body. The request carries no body: the
+// HEADERS frame is sent with FIN.
+func (c *Client) Do(req *Request) (*Response, []byte, error) {
+	stream, err := c.conn.OpenStream()
+	if err != nil {
+		return nil, nil, err
+	}
+	frame, err := req.EncodeHeaders(&c.enc, nil)
+	if err != nil {
+		return nil, nil, err
+	}
+	// The request carries no body: the HEADERS frame is sent with FIN.
+	if err := sendAll(c.conn, stream, frame, true); err != nil {
+		return nil, nil, err
+	}
+
+	var fr FrameReader
+	var resp *Response
+	var body []byte
+	for {
+		if data := stream.Recv(); len(data) > 0 {
+			fr.Feed(data)
+		}
+		for {
+			typ, payload, rerr := fr.ReadFrame()
+			if rerr != nil {
+				break // ErrNeedMore: wait for more stream bytes
+			}
+			switch typ {
+			case FrameHeaders:
+				if resp == nil {
+					if resp, err = DecodeResponseHeaders(&c.dec, payload); err != nil {
+						return nil, nil, err
+					}
+				}
+				// A later HEADERS frame is a trailer or 1xx interim section;
+				// handling those is deferred to a later phase.
+			case FrameData:
+				if resp == nil {
+					return nil, nil, ErrH3FrameUnexpected // DATA before HEADERS (§4.1)
+				}
+				body = append(body, payload...)
+			}
+			// Illegal frame types on a request stream (SETTINGS, etc., §7.2.8)
+			// are validated in a later phase.
+		}
+		if stream.Finished() {
+			break
+		}
+		if err := c.conn.Poll(); err != nil {
+			return nil, nil, err
+		}
+	}
+	if resp == nil {
+		return nil, nil, ErrH3Message // response had no HEADERS frame
+	}
+	return resp, body, nil
+}
