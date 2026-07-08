@@ -94,5 +94,13 @@ func h3TLSConfig(base *tls.Config) *tls.Config {
 	if cfg.MinVersion < tls.VersionTLS13 {
 		cfg.MinVersion = tls.VersionTLS13
 	}
+	// Keep the ClientHello inside one Initial packet. Go 1.24 offers the
+	// post-quantum X25519MLKEM768 key share by default (~1200 bytes), which
+	// pushes the ClientHello past a single ~1200-byte Initial datagram — and
+	// this client does not yet split a CRYPTO stream across Initial packets, so
+	// the oversized datagram would be fragmented and dropped by the peer.
+	if cfg.CurvePreferences == nil {
+		cfg.CurvePreferences = []tls.CurveID{tls.X25519, tls.CurveP256}
+	}
 	return cfg
 }

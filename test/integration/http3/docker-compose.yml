@@ -1,0 +1,41 @@
+name: poseidon-h3-it
+
+# HTTP/3 interop: a real Caddy HTTP/3 server and an in-container test runner on a
+# shared bridge network. The runner runs the client in a container (not on the
+# host) because Docker Desktop on Windows does not forward host UDP to a
+# published container port — container-to-container UDP works everywhere.
+
+networks:
+  h3net:
+    driver: bridge
+
+services:
+  caddy:
+    image: caddy:2
+    hostname: h3caddy
+    networks: [h3net]
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+    healthcheck:
+      test: ["CMD", "curl", "-kfsS", "-o", "/dev/null", "https://localhost/"]
+      interval: 1s
+      timeout: 2s
+      retries: 30
+      start_period: 2s
+    restart: "no"
+
+  runner:
+    image: golang:1.24
+    depends_on:
+      caddy:
+        condition: service_healthy
+    networks: [h3net]
+    working_dir: /src
+    volumes:
+      - ../../..:/src
+    environment:
+      H3_INTEROP_ADDR: h3caddy:443
+      GOFLAGS: -count=1
+    command: >
+      go test ./http3/ -tags interop -run TestInterop_GET -v -timeout 60s
+    restart: "no"
