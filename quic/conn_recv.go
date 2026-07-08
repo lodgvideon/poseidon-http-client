@@ -56,7 +56,46 @@ func (c *Conn) Poll() error {
 	if err := c.recvDatagram(c.pollBuf[:n]); err != nil {
 		return err
 	}
+	// Drain datagrams already buffered in the socket without blocking, so a
+	// server's response burst is processed and acknowledged as one batch rather
+	// than one datagram per Poll — one-at-a-time is too slow for a bulk transfer,
+	// the kernel receive buffer overflows, and the peer treats the resulting gaps
+	// as loss and collapses its congestion window (RFC 9002 §7).
+	if err := c.drainBuffered(); err != nil {
+		return err
+	}
 	return c.flush()
+}
+
+// maxDrainBurst bounds how many extra datagrams a single Poll drains after its
+// blocking read, so the acknowledgement flush is not starved by a peer sending
+// as fast as we read. A full receive-window burst fits well under this; the cap
+// is only a runaway guard.
+const maxDrainBurst = 512
+
+// drainBuffered reads and processes datagrams already waiting in the socket
+// without blocking, using a read deadline in the past so an empty socket returns
+// immediately. It is a no-op on transports that cannot set a read deadline (they
+// have no non-blocking read), preserving their one-datagram-per-Poll behavior.
+func (c *Conn) drainBuffered() error {
+	dl, ok := c.pc.(interface{ SetReadDeadline(time.Time) error })
+	if !ok {
+		return nil
+	}
+	for i := 0; i < maxDrainBurst; i++ {
+		_ = dl.SetReadDeadline(c.clock().Add(-time.Nanosecond))
+		n, err := c.pc.Read(c.pollBuf)
+		if err != nil {
+			if isTimeout(err) {
+				return nil // socket drained
+			}
+			return err
+		}
+		if err := c.recvDatagram(c.pollBuf[:n]); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // recvDatagram processes every packet coalesced in a datagram: decrypt with the
