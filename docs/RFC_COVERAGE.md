@@ -281,11 +281,27 @@ instruction streams are deferred (a client advertising
 | §4.5    | Conformance | TestConformance_RFC9204_Sec45_DecodeErrors (dynamic-ref / malformed → QPACK_DECOMPRESSION_FAILED) |
 | §4.5    | Roundtrip   | TestQPACK_RoundTrip, TestQPACK_EmptySection |
 
+## RFC 9114 — HTTP/3 (Phase G)
+
+G.7a lands the `http3/` frame codec (§7.2): the Type+Length framing common to
+every HTTP/3 frame, typed writers for the frames a client emits (DATA, HEADERS,
+SETTINGS, GOAWAY, MAX_PUSH_ID, CANCEL_PUSH), a `ParseFrameHeader`, and a SETTINGS
+payload codec. The header/settings writers and the header parser are zero-alloc
+(bench-gated). The control stream, request/response mapping, and QPACK wiring
+follow in later phases.
+
+| Section | Type        | Test |
+|---------|-------------|------|
+| §7.2    | Conformance | TestConformance_RFC9114_Sec72_FrameRoundTrip (DATA/HEADERS/GOAWAY/MAX_PUSH_ID/CANCEL_PUSH write → header parse → payload) |
+| §7.2.4  | Conformance | TestConformance_RFC9114_Sec724_SettingsRoundTrip, TestConformance_RFC9114_Sec724_DuplicateSetting (SETTINGS round-trip; repeated id → H3_SETTINGS_ERROR) |
+| §7.1    | Negative    | TestParseFrameHeader_Incomplete (truncated Type/Length varint → ErrH3Frame) |
+| §7.2.4  | Negative    | TestParseSettings_Truncated (identifier without value → ErrH3Settings) |
+
 ## Gate
 
 `scripts/rfc-coverage-gate.sh` requires at least one passing
 `TestConformance_RFC7540_*`, `TestConformance_RFC7541_*`,
-`TestConformance_RFC9000_*`, `TestConformance_RFC9001_*`, AND
-`TestConformance_RFC9204_*` test, and fails on any conformance-test failure. It
-is wired to the `conformance-gate` job in
+`TestConformance_RFC9000_*`, `TestConformance_RFC9001_*`,
+`TestConformance_RFC9204_*`, AND `TestConformance_RFC9114_*` test, and fails on
+any conformance-test failure. It is wired to the `conformance-gate` job in
 `.github/workflows/conformance-gate.yml`.
