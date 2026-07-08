@@ -57,6 +57,16 @@ type ConnOptions struct {
 	// When true, pushed streams are created automatically and delivered via
 	// EventPushPromise on the parent stream's Recv channel.
 	EnablePush bool
+
+	// GroupCommit enables group-commit write batching (opt-in, default off).
+	// When a HEADERS writer finds another writer queued on the write lock, it
+	// defers its flush so the next holder batches both frames into a single
+	// tls.Conn.Write — fewer TLS record encrypts + socket writes under high
+	// per-connection stream concurrency. It is a strict no-op when there is no
+	// contention (a lone request is never delayed) and preserves per-frame
+	// write-error semantics. Trades a bounded amount of client-side batching
+	// for throughput; leave off for latency-fidelity-critical measurements.
+	GroupCommit bool
 }
 
 func (o ConnOptions) defaulted() ConnOptions {
