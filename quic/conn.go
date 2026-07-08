@@ -59,6 +59,7 @@ type Conn struct {
 	rtt          rttStats                  // round-trip-time estimates (RFC 9002 §5)
 	now          func() time.Time          // clock (time.Now; overridable in tests)
 	retransQueue [numSpaces][]retransFrame // frames of lost packets awaiting resend
+	ptoCount     uint                      // consecutive probe timeouts (backoff, RFC 9002 §6.2.1)
 
 	peer              TransportParams // parsed peer transport parameters (send limits)
 	gotServerCID      bool            // the server's SCID has been adopted as our DCID
@@ -124,6 +125,7 @@ func (c *Conn) clock() time.Time {
 func (c *Conn) onAckRange(sp int, low, high uint64, ackDelay time.Duration) {
 	if sendTime, ok := c.sent[sp].ack(low, high); ok {
 		c.rtt.update(c.clock().Sub(sendTime), ackDelay)
+		c.ptoCount = 0 // §6.2.1: a newly-acked ack-eliciting packet resets the backoff
 	}
 }
 

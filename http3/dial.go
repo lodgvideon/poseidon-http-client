@@ -9,26 +9,18 @@ import (
 	"github.com/lodgvideon/poseidon-http-client/quic"
 )
 
-// udpReadTimeout bounds each datagram read so a stalled or dead server surfaces
-// an error instead of blocking a handshake or response forever.
-const udpReadTimeout = 10 * time.Second
-
-// udpConn adapts a connected *net.UDPConn to quic.PacketConn. Each Read applies
-// a deadline; Write and Read operate on the connected socket, so datagrams only
-// flow to and from the dialed server.
+// udpConn adapts a connected *net.UDPConn to quic.PacketConn. Read/Write operate
+// on the connected socket, so datagrams only flow to and from the dialed server.
+// SetReadDeadline lets the QUIC engine bound each read by the probe timeout
+// (RFC 9002 §6.2) rather than a fixed interval.
 type udpConn struct {
-	c           *net.UDPConn
-	readTimeout time.Duration
+	c *net.UDPConn
 }
 
-func (u *udpConn) Read(b []byte) (int, error) {
-	if u.readTimeout > 0 {
-		_ = u.c.SetReadDeadline(time.Now().Add(u.readTimeout))
-	}
-	return u.c.Read(b)
-}
-func (u *udpConn) Write(b []byte) (int, error) { return u.c.Write(b) }
-func (u *udpConn) Close() error                { return u.c.Close() }
+func (u *udpConn) Read(b []byte) (int, error)        { return u.c.Read(b) }
+func (u *udpConn) Write(b []byte) (int, error)       { return u.c.Write(b) }
+func (u *udpConn) Close() error                      { return u.c.Close() }
+func (u *udpConn) SetReadDeadline(t time.Time) error { return u.c.SetReadDeadline(t) }
 
 // defaultSettings are the HTTP/3 SETTINGS a client advertises: the QPACK dynamic
 // table is disabled (static-table-only codec), so its capacity and blocked
@@ -59,7 +51,7 @@ func Dial(ctx context.Context, addr string, tlsConfig *tls.Config) (*Client, err
 	if err != nil {
 		return nil, err
 	}
-	return dialConn(ctx, &udpConn{c: uc, readTimeout: udpReadTimeout}, h3TLSConfig(tlsConfig))
+	return dialConn(ctx, &udpConn{c: uc}, h3TLSConfig(tlsConfig))
 }
 
 // dialConn establishes a QUIC connection over pc, wires the client transport

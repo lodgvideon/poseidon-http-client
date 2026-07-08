@@ -276,9 +276,11 @@ G.6h-1 lands the acknowledgement-processing foundation: the client tracks the
 packets it sends per space, processes inbound ACK frames (§19.3 range walk), and
 maintains the RTT estimates (§5). G.6h-2 adds ACK-driven loss detection (§6.1
 packet + time thresholds) and frame-level retransmission (§13.3) of lost CRYPTO
-and STREAM data. The probe timeout (§6.2, for a fully lost tail with no ACK to
-trigger detection) and congestion control (§7) are deferred; until the PTO
-lands, the caller's read deadline bounds a stalled connection.
+and STREAM data. G.6h-3 adds the probe timeout (§6.2): the receive loop bounds
+each read by the PTO when data is in flight and, on expiry, resends the oldest
+unacknowledged packet as a probe (with exponential backoff), recovering a fully
+lost tail that no ACK would otherwise detect. Congestion control (§7) is
+deferred.
 
 | Section | Type        | Test |
 |---------|-------------|------|
@@ -287,6 +289,8 @@ lands, the caller's read deadline bounds a stalled connection.
 | §6.1.1  | Conformance | TestConformance_RFC9002_Sec611_PacketThresholdLoss (a packet ≥ kPacketThreshold=3 numbers below the largest acknowledged is declared lost) |
 | §6.1.2  | Conformance | TestConformance_RFC9002_Sec612_TimeThresholdLoss (a packet sent before now − 9/8·max(srtt,latest) is declared lost), TestRTTStats_LossDelay, TestConn_DetectLost_NoLossWithinThresholds |
 | §6.1 / §13.3 | Unit | TestConn_Retransmit_CryptoResendsBytesAtOffset (lost CRYPTO resent at its offset; retransmit Initial datagram padded to 1200, RFC 9000 §14.1), TestConn_Retransmit_StreamResendsBytesAtOffsetAndFin (lost STREAM resent at offset+FIN, accounting not re-advanced), TestConn_Retransmit_AckedPacketNotResent, TestConn_AckOnlyPacketNotRetransmittable |
+| §6.2.1  | Unit        | TestConn_PTOPeriod (PTO = srtt + max(4·rttvar, granularity) + max_ack_delay, doubled per backoff; 2·kInitialRtt pre-sample), TestConn_PTOCount_ResetOnAck (backoff reset on a newly-acked ack-eliciting packet) |
+| §6.2.4  | Unit        | TestConn_OnPTO_QueuesProbe (probe resends the oldest unacked packet + backs off), TestConn_ReadWithPTO_ProbesOnTimeout (a read timeout with data in flight sends a probe and retries) |
 
 ## RFC 9204 — QPACK (Phase G — HTTP/3)
 
