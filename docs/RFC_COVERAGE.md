@@ -270,6 +270,11 @@ bytes exactly, and the client interoperates with a live Caddy HTTP/3 server.
 | §A.3    | Conformance | TestDecodePacketNumber (packet-number reconstruction, §A.3 example) |
 | §4      | Integration | TestTLSHandshake_InMemory (full TLS 1.3 QUIC handshake client↔server via crypto/tls.QUICConn; secrets match, keys derive, ALPN h3) |
 | §4.1    | Unit        | TestKeysFromSecret_UnsupportedSuite (ChaCha20 → ErrCryptoSuite, deferred) |
+| §6.1    | Conformance | TestKeyUpdate_QuicKuVector (next-generation secret = HKDF-Expand-Label(secret, "quic ku", "", Hash.length)) |
+| §6.1    | Conformance | TestConformance_RFC9001_Sec61_UpdateBeforeConfirmed (a key update is dropped until the handshake is confirmed via HANDSHAKE_DONE, not merely TLS-complete) |
+| §6.2    | Conformance | TestConformance_RFC9001_Sec62_KeyUpdateResponder (a peer-initiated Key Phase 0→1 update is trial-decrypted with the pre-derived next generation, committed, and the client flips its own send phase; HP key not rotated) |
+| §6.3    | Conformance | TestConformance_RFC9001_Sec63_PrevKeysReordered (reordered previous-generation packet below the boundary decrypts with retained prev keys; prev discarded after 3×PTO) |
+| §6.4    | Conformance | TestConformance_RFC9001_Sec64_ForgedPhaseBitBounded (a forged Key Phase bit costs exactly one AEAD attempt and never commits an update) |
 
 ## RFC 9002 — QUIC Loss Detection and Congestion Control (Phase G — HTTP/3)
 

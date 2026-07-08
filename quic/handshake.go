@@ -5,7 +5,23 @@ import (
 	"crypto/sha256"
 	"crypto/sha512"
 	"crypto/tls"
+	"hash"
 )
+
+// hashForSuite returns the KDF hash constructor and AEAD key length for a cipher
+// suite (RFC 9001 §5.1). AES-GCM suites are supported; others (ChaCha20-Poly1305)
+// return ErrCryptoSuite. It is the single source of truth for the suite→hash/len
+// mapping used by both key derivation and the "quic ku" key-update ratchet.
+func hashForSuite(suite uint16) (func() hash.Hash, int, error) {
+	switch suite {
+	case tls.TLS_AES_128_GCM_SHA256:
+		return sha256.New, 16, nil
+	case tls.TLS_AES_256_GCM_SHA384:
+		return sha512.New384, 32, nil
+	default:
+		return nil, 0, ErrCryptoSuite
+	}
+}
 
 // KeysFromSecret derives packet-protection keys (key/iv/hp) from a TLS traffic
 // secret and the negotiated cipher suite (RFC 9001 §5.1). The suite selects the
@@ -13,14 +29,11 @@ import (
 // deferred (its header protection needs a non-stdlib primitive) and returns
 // ErrCryptoSuite.
 func KeysFromSecret(suite uint16, secret []byte) (PacketKeys, error) {
-	switch suite {
-	case tls.TLS_AES_128_GCM_SHA256:
-		return deriveKeys(sha256.New, secret, 16), nil
-	case tls.TLS_AES_256_GCM_SHA384:
-		return deriveKeys(sha512.New384, secret, 32), nil
-	default:
-		return PacketKeys{}, ErrCryptoSuite
+	h, keyLen, err := hashForSuite(suite)
+	if err != nil {
+		return PacketKeys{}, err
 	}
+	return deriveKeys(h, secret, keyLen), nil
 }
 
 // HandshakeSink receives TLS handshake progress from a TLSHandshake pump. The

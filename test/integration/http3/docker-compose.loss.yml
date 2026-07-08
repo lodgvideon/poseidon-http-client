@@ -52,6 +52,9 @@ services:
     environment:
       H3_INTEROP_ADDR: lossproxy:443
       GOFLAGS: -count=1
+    # Exclude HugeResponse: it is a clean-path throughput test (batch drain), not
+    # a loss-recovery test — 1 MiB through 10% loss would only add flakiness.
     command: >
-      go test ./http3/ -tags interop -run TestInterop -v -timeout 120s
+      go test ./http3/ -tags interop
+      -run 'TestInterop_GET|TestInterop_POST|TestInterop_LargeResponse' -v -timeout 120s
     restart: "no"

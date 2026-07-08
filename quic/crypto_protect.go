@@ -97,23 +97,50 @@ func (s *Sealer) Seal(dst, hdr []byte, pnOffset, pnLen int, pn uint64, payload [
 // (for reconstruction, RFC 9000 §A.3). It returns the full packet number, the
 // packet-number length, and the decrypted payload, or an error.
 func (o *Opener) Open(pkt []byte, pnOffset int, largestAcked uint64) (pn uint64, pnLen int, payload []byte, err error) {
-	pnLen, err = removeHeaderProtection(o.hp, pkt, pnOffset)
+	pn, pnLen, _, err = o.unprotectHeader(pkt, pnOffset, largestAcked)
 	if err != nil {
 		return 0, 0, nil, err
+	}
+	payload, err = o.openAEAD(pkt, pnOffset, pnLen, pn)
+	if err != nil {
+		return 0, 0, nil, err
+	}
+	return pn, pnLen, payload, nil
+}
+
+// unprotectHeader removes header protection in place and reconstructs the packet
+// number, returning it, its length, and the short-header Key Phase bit
+// (RFC 9001 §6). The header-protection key is not rotated on a key update
+// (RFC 9001 §6.1), so any generation's Opener unprotects the header identically;
+// the caller then chooses the AEAD generation for openAEAD. It must be called at
+// most once per packet (it mutates the header in place).
+func (o *Opener) unprotectHeader(pkt []byte, pnOffset int, largestAcked uint64) (pn uint64, pnLen int, keyPhase bool, err error) {
+	pnLen, err = removeHeaderProtection(o.hp, pkt, pnOffset)
+	if err != nil {
+		return 0, 0, false, err
 	}
 	var truncated uint64
 	for i := 0; i < pnLen; i++ {
 		truncated = truncated<<8 | uint64(pkt[pnOffset+i])
 	}
 	pn = decodePacketNumber(largestAcked, truncated, pnLen)
+	keyPhase = pkt[0]&0x04 != 0
+	return pn, pnLen, keyPhase, nil
+}
+
+// openAEAD AEAD-decrypts, in place, a packet whose header protection has already
+// been removed by unprotectHeader and whose packet number is known. Attempting it
+// more than once on the same packet corrupts the buffer (GCM writes into the
+// ciphertext), so the caller picks exactly one key generation per packet.
+func (o *Opener) openAEAD(pkt []byte, pnOffset, pnLen int, pn uint64) ([]byte, error) {
 	nonce := makeNonce(o.iv, pn)
 	hdr := pkt[:pnOffset+pnLen]
 	ct := pkt[pnOffset+pnLen:]
-	payload, err = o.aead.Open(ct[:0], nonce[:], ct, hdr)
+	payload, err := o.aead.Open(ct[:0], nonce[:], ct, hdr)
 	if err != nil {
-		return 0, 0, nil, ErrCryptoDecrypt
+		return nil, ErrCryptoDecrypt
 	}
-	return pn, pnLen, payload, nil
+	return payload, nil
 }
 
 // applyHeaderProtection masks the first byte and packet number using a sample of
