@@ -15,7 +15,7 @@ jobs:
         # whose zero-alloc invariant must hold.
         # ./qpack is HEAD-only here until it exists on the base branch; the
         # absolute zero-alloc gate below runs on head.txt, which enforces it.
-        run: go test -bench=. -benchmem -benchtime=2s -count=5 -run=^$ ./frame ./hpack ./internal/bytesx ./qpack | tee head.txt
+        run: go test -bench=. -benchmem -benchtime=2s -count=5 -run=^$ ./frame ./hpack ./internal/bytesx ./qpack ./quic | tee head.txt
       - name: Bench base
         run: |
           git checkout ${{ github.base_ref }}

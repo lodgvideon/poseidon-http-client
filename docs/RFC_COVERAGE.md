@@ -194,12 +194,23 @@ non-ACK PING frames with `ACK=1` and the original 8-byte payload
 Phase G builds a from-scratch HTTP/3 stack (see
 [HTTP3_DESIGN.md](HTTP3_DESIGN.md)). G.2 lands the QUIC variable-length
 integer codec (`internal/bytesx`), the primitive under every QUIC/H3 length,
-offset, stream ID, frame type, and transport-parameter value.
+offset, stream ID, frame type, and transport-parameter value. G.4 lands the
+`quic/` frame codec: parse + serialize the RFC 9000 §19 frames a client sends
+and receives, dispatched through a `FrameHandler` visitor (packet protection
+and the connection engine are later phases).
 
 | Section | Type        | Test |
 |---------|-------------|------|
 | §16     | Conformance | TestConformance_RFC9000_Sec16_VarintRoundTrip, TestConformance_RFC9000_Sec16_NonMinimalDecode, TestConformance_RFC9000_Sec16_IncompleteInput |
 | §16     | Roundtrip   | TestVarint_ExhaustiveRoundTrip |
+| §19.3   | Conformance | TestConformance_RFC9000_Sec193_AckFrame, TestConformance_RFC9000_Sec193_AckECN |
+| §19.8   | Conformance | TestConformance_RFC9000_Sec19_StreamFrame, TestParseStream_NoLength |
+| §19.15  | Conformance | TestConformance_RFC9000_Sec1915_NewConnectionID |
+| §19.17  | Conformance | TestConformance_RFC9000_Sec1917_PathChallenge |
+| §19.19  | Conformance | TestConformance_RFC9000_Sec1919_ConnectionClose |
+| §19.1   | Conformance | TestConformance_RFC9000_Sec191_Padding |
+| §19 (all frames) | Roundtrip | TestFrames_RoundTrip |
+| §12.4   | Negative    | TestParseFrames_Malformed, TestParseFrames_MoreMalformed (malformed → ErrFrameEncoding) |
 
 ## RFC 9204 — QPACK (Phase G — HTTP/3)
 
