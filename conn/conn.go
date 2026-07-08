@@ -71,6 +71,15 @@ type Conn struct {
 
 	wmu sync.Mutex // serializes all writes to fr
 
+	// groupCommit (EXPERIMENT, unexported, off by default) enables
+	// group-commit under wmu: when a writer holds wmu and another writer is
+	// already queued (writeWaiters>0), the holder skips its flush so the next
+	// holder batches its frame into the same tls.Conn.Write. Under crypto/tls,
+	// fewer flushes == fewer record encrypts + socket writes. writeWaiters is
+	// incremented right before wmu.Lock and decremented right after acquiring.
+	groupCommit  bool
+	writeWaiters atomic.Int32
+
 	smu      sync.Mutex // guards next stream id and streams map
 	nextID   uint32
 	streams  map[uint32]*Stream
@@ -452,7 +461,9 @@ func (c *Conn) writeHeadersWithPriority(_ context.Context, s *Stream, fields []h
 	if c.closed.Load() {
 		return ErrConnClosed
 	}
+	c.writeWaiters.Add(1)
 	c.wmu.Lock()
+	c.writeWaiters.Add(-1)
 	defer c.wmu.Unlock()
 	if s.id == 0 {
 		// Seed the per-stream outbound flow-control window from the peer's
@@ -488,7 +499,21 @@ func (c *Conn) writeHeadersWithPriority(_ context.Context, s *Stream, fields []h
 	}
 	c.bumpFramesSent()
 	// Flush the buffered HEADERS (+ any CONTINUATION) to the wire before
-	// releasing wmu; the deferred Unlock runs after this returns.
+	// releasing wmu; the deferred Unlock runs after this returns. Under the
+	// group-commit experiment this may defer to the next queued writer.
+	return c.maybeGroupFlush()
+}
+
+// maybeGroupFlush flushes the buffered writer, unless the group-commit
+// experiment is on AND another writer is already queued on wmu — in which
+// case the buffered frame is left for that next holder to batch into one
+// tls.Conn.Write (the queued writer will itself flush, or hand off again, so
+// the frame always reaches the wire when the burst of waiters drains; bufio
+// also auto-flushes at writeBufferSize). MUST hold c.wmu.
+func (c *Conn) maybeGroupFlush() error {
+	if c.groupCommit && c.writeWaiters.Load() > 0 {
+		return nil
+	}
 	return c.flushWrite()
 }
 

@@ -70,9 +70,13 @@ conn). This is the measurement the revisit-rule actually gates on.
 target-load CPU+GC profile agree: TLS is not a hot spot (≈1% of allocations,
 ≈1.4% of CPU), GC costs ≈1% of CPU, and our encode path is already lean. The
 dominant cost is the socket syscall, which is inherent; the only lever to reduce
-it is batching writes into fewer syscalls — the write-queue design, already
-investigated and rejected (RTT-bound at real network load + blocker-level
-concurrency races; see `docs/WRITE_QUEUE_INVESTIGATION.md`).
+it is batching writes into fewer syscalls. **Note (correction):** the
+`docs/WRITE_QUEUE_INVESTIGATION.md` NO-GO rejected the **async writer**
+(decouple the syscall from `wmu`) on a *lock-contention* discriminator — it did
+**not** measure cross-frame **batching**, which is a separate question.
+Cross-frame group-commit has since been measured and is a GO at high
+single-conn concurrency (k up to 1.73 frames/flush, +26% req/s); see
+`docs/WRITE_BATCHING_INVESTIGATION.md`.
 
 **"Zero-alloc TLS" is doubly moot:** TLS barely allocates (~1%) *and* its crypto
 is a rounding error (~1.4%, AES-NI). There is nothing in our code to make
