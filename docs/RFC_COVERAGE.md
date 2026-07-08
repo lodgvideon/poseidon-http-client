@@ -274,13 +274,19 @@ bytes exactly, and the client interoperates with a live Caddy HTTP/3 server.
 
 G.6h-1 lands the acknowledgement-processing foundation: the client tracks the
 packets it sends per space, processes inbound ACK frames (§19.3 range walk), and
-maintains the RTT estimates (§5). Loss detection, retransmission, and the probe
-timeout build on this next. Congestion control (§7) is deferred.
+maintains the RTT estimates (§5). G.6h-2 adds ACK-driven loss detection (§6.1
+packet + time thresholds) and frame-level retransmission (§13.3) of lost CRYPTO
+and STREAM data. The probe timeout (§6.2, for a fully lost tail with no ACK to
+trigger detection) and congestion control (§7) are deferred; until the PTO
+lands, the caller's read deadline bounds a stalled connection.
 
 | Section | Type        | Test |
 |---------|-------------|------|
 | §5.2–5.3 | Unit       | TestRTTStats_FirstSample, TestRTTStats_Subsequent, TestRTTStats_AckDelay (smoothed_rtt / rttvar / min_rtt update; ack-delay subtraction floored at min_rtt) |
 | §5.1 / §19.3 | Unit   | TestSentSpace_Ack, TestConnFrameHandler_OnAck_UpdatesRTT, TestConnFrameHandler_OnAckRange_Gap (sent-packet tracking; ACK range walk removes acked packets and samples RTT from the largest; gaps leave packets in flight) |
+| §6.1.1  | Conformance | TestConformance_RFC9002_Sec611_PacketThresholdLoss (a packet ≥ kPacketThreshold=3 numbers below the largest acknowledged is declared lost) |
+| §6.1.2  | Conformance | TestConformance_RFC9002_Sec612_TimeThresholdLoss (a packet sent before now − 9/8·max(srtt,latest) is declared lost), TestRTTStats_LossDelay, TestConn_DetectLost_NoLossWithinThresholds |
+| §6.1 / §13.3 | Unit | TestConn_Retransmit_CryptoResendsBytesAtOffset (lost CRYPTO resent at its offset; retransmit Initial datagram padded to 1200, RFC 9000 §14.1), TestConn_Retransmit_StreamResendsBytesAtOffsetAndFin (lost STREAM resent at offset+FIN, accounting not re-advanced), TestConn_Retransmit_AckedPacketNotResent, TestConn_AckOnlyPacketNotRetransmittable |
 
 ## RFC 9204 — QPACK (Phase G — HTTP/3)
 
@@ -342,6 +348,7 @@ exercised in the Docker-peer interop phase.
 `scripts/rfc-coverage-gate.sh` requires at least one passing
 `TestConformance_RFC7540_*`, `TestConformance_RFC7541_*`,
 `TestConformance_RFC9000_*`, `TestConformance_RFC9001_*`,
-`TestConformance_RFC9204_*`, AND `TestConformance_RFC9114_*` test, and fails on
-any conformance-test failure. It is wired to the `conformance-gate` job in
+`TestConformance_RFC9002_*`, `TestConformance_RFC9204_*`, AND
+`TestConformance_RFC9114_*` test, and fails on any conformance-test failure. It
+is wired to the `conformance-gate` job in
 `.github/workflows/conformance-gate.yml`.

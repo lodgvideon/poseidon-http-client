@@ -46,8 +46,8 @@ func TestRTTStats_AckDelay(t *testing.T) {
 func TestSentSpace_Ack(t *testing.T) {
 	base := time.Unix(100, 0)
 	var s sentSpace
-	s.onSent(5, base, true)
-	s.onSent(6, base.Add(10*ms), true)
+	s.onSent(5, base, true, nil)
+	s.onSent(6, base.Add(10*ms), true, nil)
 
 	sendTime, ok := s.ack(5, 6)
 	if !ok || !sendTime.Equal(base.Add(10*ms)) {
@@ -57,7 +57,7 @@ func TestSentSpace_Ack(t *testing.T) {
 		t.Fatalf("acked packets not removed: %d left", len(s.packets))
 	}
 	// A duplicate ACK of an already-largest packet yields no new RTT sample.
-	s.onSent(6, base.Add(10*ms), true)
+	s.onSent(6, base.Add(10*ms), true, nil)
 	if _, ok := s.ack(6, 6); ok {
 		t.Fatal("duplicate largest ack must not resample RTT")
 	}
@@ -70,8 +70,8 @@ func TestConnFrameHandler_OnAck_UpdatesRTT(t *testing.T) {
 	base := time.Unix(200, 0)
 	tm := base
 	c := &Conn{now: func() time.Time { return tm }}
-	c.sent[spaceApp].onSent(10, base, true)
-	c.sent[spaceApp].onSent(11, base, true)
+	c.sent[spaceApp].onSent(10, base, true, nil)
+	c.sent[spaceApp].onSent(11, base, true, nil)
 
 	tm = base.Add(30 * ms)
 	h := &connFrameHandler{c: c, space: spaceApp}
@@ -92,7 +92,7 @@ func TestConnFrameHandler_OnAckRange_Gap(t *testing.T) {
 	base := time.Unix(300, 0)
 	c := &Conn{now: func() time.Time { return base }}
 	for pn := uint64(8); pn <= 11; pn++ {
-		c.sent[spaceApp].onSent(pn, base, true)
+		c.sent[spaceApp].onSent(pn, base, true, nil)
 	}
 	h := &connFrameHandler{c: c, space: spaceApp}
 	// Largest 11, first range 0 (just 11); then gap 0 (skip 10), length 1 (8..9).

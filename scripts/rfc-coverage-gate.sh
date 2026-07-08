@@ -3,7 +3,7 @@ set -euo pipefail
 RFC="${1:?rfc.txt}"
 
 fail=0
-for tag in RFC7540 RFC7541 RFC9000 RFC9001 RFC9204 RFC9114; do
+for tag in RFC7540 RFC7541 RFC9000 RFC9001 RFC9002 RFC9204 RFC9114; do
   if ! grep -E "^--- PASS: TestConformance_${tag}" "$RFC" >/dev/null; then
     echo "No ${tag} conformance tests passed"
     fail=1

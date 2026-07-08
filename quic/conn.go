@@ -55,9 +55,10 @@ type Conn struct {
 	largestRecv [numSpaces]uint64     // largest received packet number per space
 	haveRecv    [numSpaces]bool
 
-	sent [numSpaces]sentSpace // packets we sent, per space (ACK/RTT/loss)
-	rtt  rttStats             // round-trip-time estimates (RFC 9002 §5)
-	now  func() time.Time     // clock (time.Now; overridable in tests)
+	sent         [numSpaces]sentSpace      // packets we sent, per space (ACK/RTT/loss)
+	rtt          rttStats                  // round-trip-time estimates (RFC 9002 §5)
+	now          func() time.Time          // clock (time.Now; overridable in tests)
+	retransQueue [numSpaces][]retransFrame // frames of lost packets awaiting resend
 
 	peer              TransportParams // parsed peer transport parameters (send limits)
 	gotServerCID      bool            // the server's SCID has been adopted as our DCID
@@ -224,7 +225,11 @@ func (c *Conn) sendInitialFlight(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	c.sent[spaceInitial].onSent(pn, c.clock(), true) // Initial carries CRYPTO (ack-eliciting)
+	// Record the Initial as ack-eliciting and retransmittable: its CRYPTO bytes
+	// (a private copy) at their offset, so a lost ClientHello can be resent.
+	c.sent[spaceInitial].onSent(pn, c.clock(), true, []retransFrame{{
+		kind: retransCrypto, offset: c.cryptoOffset[spaceInitial], data: append([]byte(nil), ch...),
+	}})
 	c.cryptoOffset[spaceInitial] += uint64(len(ch))
 	c.pendingCrypto[spaceInitial] = c.pendingCrypto[spaceInitial][:0]
 	c.sendPN[spaceInitial]++

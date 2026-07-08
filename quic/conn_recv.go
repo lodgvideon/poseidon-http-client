@@ -87,6 +87,11 @@ func (c *Conn) recvDatagram(datagram []byte) error {
 			c.largestRecv[sp] = pn
 			c.haveRecv[sp] = true
 		}
+		// An ACK removed acknowledged packets and updated the RTT during parsing;
+		// now run loss detection with the fresh RTT (RFC 9002 §6.1, §A.7 order).
+		if fh.sawAck {
+			c.detectLost(sp)
+		}
 	}
 	fedCrypto := false
 	for sp := 0; sp < numSpaces; sp++ {
@@ -105,28 +110,47 @@ func (c *Conn) recvDatagram(datagram []byte) error {
 	return nil
 }
 
-// flush sends, for every space that owes CRYPTO or an ACK, one packet carrying
-// an ACK frame (if pending) followed by any buffered CRYPTO.
+// flush sends, for every space that owes a retransmission, CRYPTO, or an ACK:
+// first one packet per queued retransmit frame (retransmit takes priority,
+// RFC 9000 §13.3), then one packet with any pending ACK and new CRYPTO.
 func (c *Conn) flush() error {
 	for sp := 0; sp < numSpaces; sp++ {
+		nothing := len(c.pendingCrypto[sp]) == 0 && !c.acks[sp].ackPending() && len(c.retransQueue[sp]) == 0
+		if nothing || c.sealerFor(sp) == nil {
+			continue // idle, or keys not yet available
+		}
+		// Resend lost frames, one per packet, each as a new (retransmittable)
+		// ack-eliciting packet with a fresh packet number.
+		for len(c.retransQueue[sp]) > 0 {
+			rf := c.retransQueue[sp][0]
+			c.retransQueue[sp] = c.retransQueue[sp][1:]
+			pkt, err := c.sealPacket(sp, rf.encode(nil), true, []retransFrame{rf})
+			if err != nil {
+				return err
+			}
+			if _, err := c.pc.Write(pkt); err != nil {
+				return err
+			}
+		}
 		if len(c.pendingCrypto[sp]) == 0 && !c.acks[sp].ackPending() {
 			continue
-		}
-		if c.sealerFor(sp) == nil {
-			continue // keys not yet available
 		}
 		var frames []byte
 		if c.acks[sp].ackPending() {
 			frames = c.acks[sp].appendACK(frames, 0)
 		}
+		var retrans []retransFrame
 		hasCrypto := len(c.pendingCrypto[sp]) > 0
 		if hasCrypto {
-			frames = AppendCrypto(frames, c.cryptoOffset[sp], c.pendingCrypto[sp])
+			off := c.cryptoOffset[sp]
+			data := append([]byte(nil), c.pendingCrypto[sp]...) // copy retained for resend
+			frames = AppendCrypto(frames, off, c.pendingCrypto[sp])
 			c.cryptoOffset[sp] += uint64(len(c.pendingCrypto[sp]))
 			c.pendingCrypto[sp] = c.pendingCrypto[sp][:0]
+			retrans = []retransFrame{{kind: retransCrypto, offset: off, data: data}}
 		}
 		// A packet carrying CRYPTO is ack-eliciting; an ACK-only packet is not.
-		pkt, err := c.sealPacket(sp, frames, hasCrypto)
+		pkt, err := c.sealPacket(sp, frames, hasCrypto, retrans)
 		if err != nil {
 			return err
 		}
@@ -140,15 +164,24 @@ func (c *Conn) flush() error {
 // sealPacket builds and protects a packet for a space carrying frames. Frames
 // are padded to keep the packet long enough for the header-protection sample
 // (RFC 9001 §5.4.2).
-func (c *Conn) sealPacket(sp int, frames []byte, ackEliciting bool) ([]byte, error) {
-	const minFrames = 20 // ensures payload+tag reaches the 16-byte HP sample
+func (c *Conn) sealPacket(sp int, frames []byte, ackEliciting bool, retrans []retransFrame) ([]byte, error) {
+	minFrames := 20 // ensures payload+tag reaches the 16-byte HP sample
+	if sp == spaceInitial {
+		// RFC 9000 §14.1: a datagram carrying an Initial packet MUST be at least
+		// 1200 bytes or the server discards it. Pad the frames so the whole
+		// datagram (header + pn + frames + 16-byte tag) reaches that minimum.
+		hdr := 1 + 4 + 1 + len(c.dcid) + 1 + len(c.scid) + 1 + 2 // +token len 0, +2-byte length
+		if need := InitialDatagramMinSize - hdr - 4 - 16; need > minFrames {
+			minFrames = need
+		}
+	}
 	if len(frames) < minFrames {
 		frames = append(frames, make([]byte, minFrames-len(frames))...) // PADDING
 	}
 	pnLen := 4
 	pn := c.sendPN[sp]
 	c.sendPN[sp]++
-	c.sent[sp].onSent(pn, c.clock(), ackEliciting)
+	c.sent[sp].onSent(pn, c.clock(), ackEliciting, retrans)
 	length := uint64(pnLen + len(frames) + 16)
 
 	var hdr []byte
@@ -217,6 +250,7 @@ type connFrameHandler struct {
 	c            *Conn
 	space        int
 	ackEliciting bool
+	sawAck       bool   // an ACK frame was seen (run loss detection after parsing)
 	ackLow       uint64 // smallest packet number of the ACK range being decoded
 }
 
@@ -224,6 +258,7 @@ type connFrameHandler struct {
 // [largest-firstRange, largest] and samples the RTT from the largest packet
 // (RFC 9000 §19.3, RFC 9002 §5). ACK frames are not themselves ack-eliciting.
 func (h *connFrameHandler) OnAck(largest, ackDelay, firstRange uint64) error {
+	h.sawAck = true
 	delay := time.Duration(ackDelay<<ackDelayExponent) * time.Microsecond
 	low := largest - firstRange
 	h.c.onAckRange(h.space, low, largest, delay)

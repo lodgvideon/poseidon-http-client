@@ -6,6 +6,26 @@ import "time"
 // ACK Delay field is decoded by shifting left this many bits, in microseconds.
 const ackDelayExponent = 3
 
+// Loss-detection constants (RFC 9002 §6.1).
+const (
+	kPacketThreshold uint64        = 3                // §6.1.1
+	kGranularity     time.Duration = time.Millisecond // §6.1.2 timer granularity floor
+)
+
+// lossDelay is the time-threshold window for declaring a packet lost (RFC 9002
+// §6.1.2): 9/8 of the larger of the smoothed and latest RTT, floored at the
+// timer granularity. Before the first RTT sample it is the 1 ms floor.
+func (r rttStats) lossDelay() time.Duration {
+	rtt := r.smoothedRTT
+	if r.latestRTT > rtt {
+		rtt = r.latestRTT
+	}
+	if d := rtt * 9 / 8; d > kGranularity {
+		return d
+	}
+	return kGranularity
+}
+
 // rttStats maintains the round-trip-time estimates derived from acknowledgements
 // (RFC 9002 §5). They feed loss detection and the probe timeout.
 type rttStats struct {
@@ -47,10 +67,11 @@ func absDuration(d time.Duration) time.Duration {
 }
 
 // sentPacket records a packet the client sent, for acknowledgement, RTT
-// sampling, and (later) loss detection.
+// sampling, and loss detection.
 type sentPacket struct {
 	timeSent     time.Time
 	ackEliciting bool
+	frames       []retransFrame // retransmittable frames carried (nil = nothing to resend)
 }
 
 // sentSpace tracks the unacknowledged packets sent in one packet-number space.
@@ -60,12 +81,13 @@ type sentSpace struct {
 	haveLargestAcked bool
 }
 
-// onSent records that packet pn was sent at t.
-func (s *sentSpace) onSent(pn uint64, t time.Time, ackEliciting bool) {
+// onSent records that packet pn was sent at t carrying the given
+// retransmittable frames.
+func (s *sentSpace) onSent(pn uint64, t time.Time, ackEliciting bool, frames []retransFrame) {
 	if s.packets == nil {
 		s.packets = map[uint64]sentPacket{}
 	}
-	s.packets[pn] = sentPacket{timeSent: t, ackEliciting: ackEliciting}
+	s.packets[pn] = sentPacket{timeSent: t, ackEliciting: ackEliciting, frames: frames}
 }
 
 // ack processes an acknowledgement of the packet-number range [low, high],
