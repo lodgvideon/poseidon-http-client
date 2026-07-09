@@ -58,6 +58,7 @@ const (
 	H3MissingSettings      uint64 = 0x010a // H3_MISSING_SETTINGS
 	H3RequestRejected      uint64 = 0x010b // H3_REQUEST_REJECTED
 	H3RequestCancelled     uint64 = 0x010c // H3_REQUEST_CANCELLED
+	H3MessageError         uint64 = 0x010e // H3_MESSAGE_ERROR
 )
 
 // StreamResetError reports that the server abruptly aborted the request stream
@@ -205,9 +206,15 @@ func (c *Client) Do(ctx context.Context, req *Request) (*Response, []byte, error
 	}
 	resp, body, err := c.roundTrip(ctx, stream, req)
 	if err != nil {
-		// Best-effort abort of the abandoned exchange.
-		_ = stream.StopSending(H3RequestCancelled)
-		_ = stream.Reset(H3RequestCancelled)
+		// Best-effort abort of the abandoned exchange. A malformed response is a
+		// stream error of type H3_MESSAGE_ERROR (RFC 9114 §4.1.2); anything else
+		// (a context cancel, a decode abort) is signalled H3_REQUEST_CANCELLED.
+		code := H3RequestCancelled
+		if errors.Is(err, ErrH3Message) {
+			code = H3MessageError
+		}
+		_ = stream.StopSending(code)
+		_ = stream.Reset(code)
 	}
 	return resp, body, err
 }
@@ -313,8 +320,23 @@ func (c *Client) roundTrip(ctx context.Context, stream quicStream, req *Request)
 			return nil, nil, err
 		}
 	}
+	return finalizeResponse(resp, body, req, interim)
+}
+
+// finalizeResponse validates a fully received response and returns it, or
+// ErrH3Message if it is malformed: there was no final (non-1xx) response, or a
+// response that can carry content declared a Content-Length that does not equal
+// the sum of the DATA frame payloads received (RFC 9114 §4.1.2). Responses that
+// never have content (204, 304, a HEAD response) may carry an anticipatory
+// Content-Length that does not match the absent body.
+func finalizeResponse(resp *Response, body []byte, req *Request, interim []*Response) (*Response, []byte, error) {
 	if resp == nil {
-		return nil, nil, ErrH3Message // no final (non-1xx) response
+		return nil, nil, ErrH3Message
+	}
+	if canHaveContent(resp.Status, req.Method) {
+		if n, present, valid := responseContentLength(resp.Headers); present && (!valid || n != int64(len(body))) {
+			return nil, nil, ErrH3Message
+		}
 	}
 	resp.Interim = interim
 	return resp, body, nil

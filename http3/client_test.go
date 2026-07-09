@@ -355,6 +355,81 @@ func TestClient_RequestReset_NonRetryable(t *testing.T) {
 	}
 }
 
+// TestConformance_RFC9114_Sec412_ContentLengthMismatch checks that a response
+// whose Content-Length does not equal the sum of DATA payloads is malformed
+// (ErrH3Message) and the stream is aborted with H3_MESSAGE_ERROR.
+func TestConformance_RFC9114_Sec412_ContentLengthMismatch(t *testing.T) {
+	headers := AppendHeaders(nil, encodeSection(hf(":status", "200"), hf("content-length", "5")))
+	data := AppendData(nil, []byte("abc")) // 3 bytes ≠ declared 5
+	conn := &fakeConn{req: &fakeStream{recvChunks: [][]byte{append(headers, data...)}, fin: true}}
+	client, _ := NewClientFake(conn, nil)
+	if _, _, err := client.Do(context.Background(), &Request{Method: "GET", Scheme: "https", Authority: "h", Path: "/"}); err != ErrH3Message {
+		t.Fatalf("err = %v, want ErrH3Message", err)
+	}
+	if conn.req.resetCode != H3MessageError {
+		t.Fatalf("abort code = %#x, want H3_MESSAGE_ERROR", conn.req.resetCode)
+	}
+}
+
+// TestConformance_RFC9114_Sec412_ContentLengthMatch checks that a Content-Length
+// equal to the received body is accepted.
+func TestConformance_RFC9114_Sec412_ContentLengthMatch(t *testing.T) {
+	headers := AppendHeaders(nil, encodeSection(hf(":status", "200"), hf("content-length", "3")))
+	data := AppendData(nil, []byte("abc"))
+	conn := &fakeConn{req: &fakeStream{recvChunks: [][]byte{append(headers, data...)}, fin: true}}
+	client, _ := NewClientFake(conn, nil)
+	resp, body, err := client.Do(context.Background(), &Request{Method: "GET", Scheme: "https", Authority: "h", Path: "/"})
+	if err != nil {
+		t.Fatalf("Do: %v", err)
+	}
+	if resp.Status != 200 || string(body) != "abc" {
+		t.Fatalf("status=%d body=%q", resp.Status, body)
+	}
+}
+
+// TestClient_ContentLength_NoContentStatusExempt checks that a 204 with a
+// non-zero Content-Length and no DATA is not malformed — the anticipatory
+// Content-Length exception (RFC 9114 §4.1.2).
+func TestClient_ContentLength_NoContentStatusExempt(t *testing.T) {
+	headers := AppendHeaders(nil, encodeSection(hf(":status", "204"), hf("content-length", "100")))
+	conn := &fakeConn{req: &fakeStream{recvChunks: [][]byte{headers}, fin: true}}
+	client, _ := NewClientFake(conn, nil)
+	resp, _, err := client.Do(context.Background(), &Request{Method: "GET", Scheme: "https", Authority: "h", Path: "/"})
+	if err != nil {
+		t.Fatalf("204 with anticipatory content-length must not be malformed: %v", err)
+	}
+	if resp.Status != 204 {
+		t.Fatalf("status = %d, want 204", resp.Status)
+	}
+}
+
+// TestClient_ContentLength_OverflowMalformed checks that a Content-Length value
+// past the int64 range does not wrap to a small number that spuriously matches
+// the body — it is rejected as malformed.
+func TestClient_ContentLength_OverflowMalformed(t *testing.T) {
+	// 2^64 + 3 — a valid digit string that, if parsed with a post-multiply guard,
+	// would wrap to 3 and falsely match a 3-byte body.
+	headers := AppendHeaders(nil, encodeSection(hf(":status", "200"), hf("content-length", "18446744073709551619")))
+	data := AppendData(nil, []byte("abc"))
+	conn := &fakeConn{req: &fakeStream{recvChunks: [][]byte{append(headers, data...)}, fin: true}}
+	client, _ := NewClientFake(conn, nil)
+	if _, _, err := client.Do(context.Background(), &Request{Method: "GET", Scheme: "https", Authority: "h", Path: "/"}); err != ErrH3Message {
+		t.Fatalf("overflowing content-length: err = %v, want ErrH3Message", err)
+	}
+}
+
+// TestClient_ContentLength_ConflictingMalformed checks that two Content-Length
+// fields with different values are malformed (RFC 9110 §8.6).
+func TestClient_ContentLength_ConflictingMalformed(t *testing.T) {
+	headers := AppendHeaders(nil, encodeSection(hf(":status", "200"), hf("content-length", "3"), hf("content-length", "5")))
+	data := AppendData(nil, []byte("abc"))
+	conn := &fakeConn{req: &fakeStream{recvChunks: [][]byte{append(headers, data...)}, fin: true}}
+	client, _ := NewClientFake(conn, nil)
+	if _, _, err := client.Do(context.Background(), &Request{Method: "GET", Scheme: "https", Authority: "h", Path: "/"}); err != ErrH3Message {
+		t.Fatalf("conflicting content-length: err = %v, want ErrH3Message", err)
+	}
+}
+
 // TestClient_Close checks that Close sends an application CONNECTION_CLOSE with
 // H3_NO_ERROR (RFC 9114 §8.1) through the QUIC connection.
 func TestClient_Close(t *testing.T) {

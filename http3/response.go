@@ -93,6 +93,57 @@ func DecodeTrailers(dec *qpack.Decoder, fieldSection []byte) ([]hpack.HeaderFiel
 	return fields, nil
 }
 
+// canHaveContent reports whether a final response with this status, for a request
+// using this method, is defined as able to carry content — so its Content-Length
+// must match the received DATA (RFC 9114 §4.1.2). A response that never has
+// content (204, 304, or any response to a HEAD request; 1xx are handled as
+// interim) may carry an anticipatory Content-Length that the DATA does not match.
+func canHaveContent(status int, method string) bool {
+	if method == "HEAD" {
+		return false
+	}
+	return status != 204 && status != 304
+}
+
+// responseContentLength scans a response's header fields for Content-Length. It
+// reports the value, whether the field was present, and whether it is valid — a
+// single non-negative integer, or repeated fields that all agree (RFC 9110 §8.6);
+// a non-numeric value or conflicting repeats make it invalid, which the caller
+// treats as a malformed message.
+func responseContentLength(headers []hpack.HeaderField) (n int64, present, valid bool) {
+	for _, h := range headers {
+		if string(h.Name) != "content-length" {
+			continue
+		}
+		v, ok := parseDecimal(h.Value)
+		if !ok || (present && v != n) {
+			return 0, true, false
+		}
+		n, present = v, true
+	}
+	return n, present, present
+}
+
+// parseDecimal parses a non-empty run of ASCII digits into a non-negative int64,
+// rejecting an empty or non-digit value and any absurdly large length (past 2^62)
+// that could not be a real body.
+func parseDecimal(v []byte) (int64, bool) {
+	if len(v) == 0 {
+		return 0, false
+	}
+	var n int64
+	for _, c := range v {
+		if c < '0' || c > '9' {
+			return 0, false
+		}
+		if n > ((1<<62)-9)/10 {
+			return 0, false // guard before the multiply so n cannot overflow int64
+		}
+		n = n*10 + int64(c-'0')
+	}
+	return n, true
+}
+
 // parseStatus parses a :status value: exactly three ASCII digits in the valid
 // range 100–599 (RFC 9110 §15). Anything else is a malformed pseudo-header.
 func parseStatus(v []byte) (int, bool) {
