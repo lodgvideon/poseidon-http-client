@@ -22,6 +22,14 @@ func tpInt(id, val uint64) []byte {
 	return append(out, value...)
 }
 
+// tpBytes encodes one transport parameter whose value is raw bytes, e.g. a
+// connection ID (id + length + bytes).
+func tpBytes(id uint64, value []byte) []byte {
+	out := putVarint(id)
+	out = append(out, putVarint(uint64(len(value)))...)
+	return append(out, value...)
+}
+
 func concat(chunks ...[]byte) []byte {
 	var out []byte
 	for _, c := range chunks {

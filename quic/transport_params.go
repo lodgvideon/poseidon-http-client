@@ -23,6 +23,13 @@ type TransportParams struct {
 	// InitialMaxStreamsUni is the maximum number of unidirectional streams the
 	// client is permitted to open (0x09).
 	InitialMaxStreamsUni uint64
+	// InitialSourceConnectionID is the server's source connection ID as echoed in
+	// its transport parameters (0x0f). The client authenticates it against the
+	// server's actual SCID (§7.3). HaveInitialSourceConnectionID records whether
+	// the parameter was present, so an absent one (a §7.3 error) is distinguished
+	// from a zero-length connection ID.
+	InitialSourceConnectionID     []byte
+	HaveInitialSourceConnectionID bool
 }
 
 // Transport-parameter identifiers the parser dispatches on (RFC 9000 §18.2).
@@ -119,6 +126,10 @@ func (tp *TransportParams) set(id uint64, value []byte) error {
 		if !ok || v < 2 {
 			return ErrTransportParameter // §7.4: values below 2 are invalid
 		}
+	case tpInitialSourceConnectionID:
+		// Raw connection-ID bytes (not a varint), authenticated in §7.3.
+		tp.InitialSourceConnectionID = append([]byte(nil), value...)
+		tp.HaveInitialSourceConnectionID = true
 	}
 	return nil
 }

@@ -84,7 +84,7 @@ func sealServerPacket(t *testing.T, s *Sealer, typ PacketType, dcid, scid []byte
 // runServerHandshake reads the client's Initial, drives a TLS server, and sends
 // the server's Initial (ServerHello) and Handshake (EncryptedExtensions ..
 // Finished) flights in separate datagrams — enough for the client to complete.
-func runServerHandshake(t *testing.T, pc PacketConn, cert tls.Certificate, tp []byte, done chan<- struct{}) {
+func runServerHandshake(t *testing.T, pc PacketConn, cert tls.Certificate, tp, scid []byte, done chan<- struct{}) {
 	defer close(done)
 	buf := make([]byte, 2048)
 	n, err := pc.Read(buf)
@@ -137,7 +137,6 @@ func runServerHandshake(t *testing.T, pc PacketConn, cert tls.Certificate, tp []
 		return
 	}
 
-	scid := []byte{0xab, 0xcd, 0xef}
 	if len(ss.crypto[spaceInitial]) > 0 {
 		f := AppendCrypto(nil, 0, ss.crypto[spaceInitial])
 		if _, err := pc.Write(sealServerPacket(t, serverInitial, PacketInitial, nil, scid, 0, f)); err != nil {
@@ -159,24 +158,30 @@ func runServerHandshake(t *testing.T, pc PacketConn, cert tls.Certificate, tp []
 // Handshake/1-RTT keys, and its TLS handshake completes.
 func TestConn_Establish_InMemory(t *testing.T) {
 	cert, pool := genServerCert(t)
-	tp := concat(
+	clientTP := concat(
 		tpInt(tpInitialMaxData, 1<<20),
 		tpInt(tpInitialMaxStreamDataBidiRemote, 1<<20),
 		tpInt(tpInitialMaxStreamsBidi, 16),
 	)
+	// The server seals its packets with this Source Connection ID; the client
+	// adopts it as its destination CID and authenticates the server's
+	// initial_source_connection_id against it (RFC 9000 §7.3), so the server's
+	// transport parameters must carry the same value.
+	serverSCID := []byte{0xab, 0xcd, 0xef}
+	serverTP := concat(clientTP, tpBytes(tpInitialSourceConnectionID, serverSCID))
 
 	toServer := make(chan []byte, 16)
 	fromServer := make(chan []byte, 16)
 	clientPC := &chanPC{rx: fromServer, tx: toServer}
 	serverPC := &chanPC{rx: toServer, tx: fromServer}
 
-	client, err := NewConn(clientPC, &tls.Config{ServerName: "example.com", RootCAs: pool}, tp)
+	client, err := NewConn(clientPC, &tls.Config{ServerName: "example.com", RootCAs: pool}, clientTP)
 	if err != nil {
 		t.Fatal(err)
 	}
 
 	done := make(chan struct{})
-	go runServerHandshake(t, serverPC, cert, tp, done)
+	go runServerHandshake(t, serverPC, cert, serverTP, serverSCID, done)
 
 	if err := client.Establish(context.Background()); err != nil {
 		t.Fatalf("client Establish: %v", err)

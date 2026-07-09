@@ -1,6 +1,7 @@
 package quic
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"crypto/tls"
@@ -303,6 +304,13 @@ func (c *Conn) PeerTransportParameters(params []byte) error {
 	}
 	c.peer = tp
 	c.connMax = tp.InitialMaxData
+	// Authenticate the server's connection ID (RFC 9000 §7.3): its
+	// initial_source_connection_id MUST be present and equal the Source Connection
+	// ID of the server's first Initial packet, which the client adopted as its
+	// destination CID. An absent or mismatched value signals a spoofed handshake.
+	if !tp.HaveInitialSourceConnectionID || !bytes.Equal(tp.InitialSourceConnectionID, c.dcid) {
+		return ErrTransportParameter
+	}
 	return nil
 }
 
