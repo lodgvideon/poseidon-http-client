@@ -15,6 +15,7 @@ type quicStream interface {
 	Send(data []byte, fin bool) (int, error)
 	Recv() []byte
 	Finished() bool
+	ResetReceived() bool
 	Reset(errCode uint64) error
 	StopSending(errCode uint64) error
 }
@@ -274,6 +275,13 @@ func (c *Client) roundTrip(ctx context.Context, stream quicStream, req *Request)
 			}
 		}
 		if stream.Finished() {
+			if fr.Buffered() > 0 && !stream.ResetReceived() {
+				// The stream ended cleanly in the middle of a frame — the last frame
+				// was truncated by the clean end of the stream (RFC 9114 §7.1): a
+				// connection error H3_FRAME_ERROR. A RESET_STREAM (an abrupt end) may
+				// fall mid-frame and is not a frame error — the request was aborted.
+				return nil, nil, c.connError(H3FrameError)
+			}
 			break
 		}
 		if err := c.poll(ctx); err != nil {

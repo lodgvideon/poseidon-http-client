@@ -80,6 +80,11 @@ func (s *Stream) Recv() []byte {
 // stream with RESET_STREAM (§3.5).
 func (s *Stream) Finished() bool { return s.recvReset || s.recv.complete() }
 
+// ResetReceived reports whether the peer aborted its send side with RESET_STREAM
+// (RFC 9000 §3.5) — an abrupt end that, unlike a clean FIN, may fall in the
+// middle of a frame. Callers distinguish it from a clean, complete receive.
+func (s *Stream) ResetReceived() bool { return s.recvReset }
+
 // maybeRetire drops a stream from the routing map once both directions have
 // reached a terminal state — the FIN has been sent and the receive side is
 // finished (fully received or reset) — so a long-lived connection carrying many
