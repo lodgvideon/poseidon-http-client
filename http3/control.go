@@ -148,6 +148,15 @@ func (c *Client) readControl() error {
 				return c.connError(H3IDError)
 			}
 			c.goawayID, c.haveGoaway = id, true
+		case FrameCancelPush:
+			// The client never sends MAX_PUSH_ID, so the maximum push ID is unset
+			// and every push ID is out of range: a CANCEL_PUSH referencing any push
+			// ID is a connection error (RFC 9114 §7.2.3, §4.6). A malformed payload
+			// (not a single push-ID varint) is a frame error (§7.1).
+			if _, n := bytesx.ReadVarint(payload); n == 0 || n != len(payload) {
+				return c.connError(H3FrameError)
+			}
+			return c.connError(H3IDError)
 		case FrameData, FrameHeaders, FramePushPromise, FrameMaxPushID, 0x02, 0x06, 0x08, 0x09:
 			// These frames MUST NOT appear on the control stream (DATA §7.2.1,
 			// HEADERS §7.2.2, PUSH_PROMISE §7.2.5, MAX_PUSH_ID at a client §7.2.7,
@@ -155,8 +164,7 @@ func (c *Client) readControl() error {
 			return c.connError(H3FrameUnexpected)
 		default:
 			// GREASE (0x1f·N+0x21) and other genuinely-unknown types MUST be
-			// ignored (§9); CANCEL_PUSH (0x03) is legal here and harmless to a
-			// client that never enables push.
+			// ignored (§9).
 		}
 	}
 	return nil
