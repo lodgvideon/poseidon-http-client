@@ -137,7 +137,13 @@ func (c *Conn) recvDatagram(datagram []byte) error {
 			var ok bool
 			pn, payload, ok = c.openApp(pkt, hdr.PNOffset)
 			if !ok {
-				continue // no keys yet, or authentication failed; skip
+				// Too many packets failed authentication across all keys — the peer
+				// (or an attacker) is exhausting the AEAD integrity limit, so the
+				// connection MUST be closed immediately (RFC 9001 §6.6).
+				if c.authFailures > aeadIntegrityLimit {
+					return ErrAEADLimit
+				}
+				continue // no keys yet, or authentication failed; skip this packet
 			}
 		} else {
 			op := c.openerFor(sp)
@@ -200,6 +206,7 @@ func (c *Conn) openApp(pkt []byte, pnOffset int) (pn uint64, payload []byte, ok 
 		// No key-update state (e.g. a hand-built test Conn): plain 1-RTT open.
 		p, _, pl, err := op.Open(pkt, pnOffset, c.largestRecv[spaceApp])
 		if err != nil {
+			c.authFailures++ // a decryption failure counts toward the integrity limit (§6.6)
 			return 0, nil, false
 		}
 		return p, pl, true
@@ -211,6 +218,7 @@ func (c *Conn) openApp(pkt []byte, pnOffset int) (pn uint64, payload []byte, ok 
 	if keyPhase == c.ku.phase {
 		payload, err = op.openAEAD(pkt, pnOffset, pnLen, pn)
 		if err != nil {
+			c.authFailures++
 			return 0, nil, false
 		}
 		return pn, payload, true
@@ -220,6 +228,7 @@ func (c *Conn) openApp(pkt []byte, pnOffset int) (pn uint64, payload []byte, ok 
 	if c.ku.prev != nil && c.ku.haveBoundary && pn < c.ku.boundary && c.clock().Before(c.ku.prevUntil) {
 		payload, err = c.ku.prev.openAEAD(pkt, pnOffset, pnLen, pn)
 		if err != nil {
+			c.authFailures++
 			return 0, nil, false
 		}
 		return pn, payload, true
@@ -227,6 +236,7 @@ func (c *Conn) openApp(pkt []byte, pnOffset int) (pn uint64, payload []byte, ok 
 	// Otherwise trial-decrypt with the next generation (RFC 9001 §6.2).
 	payload, err = c.ku.next.openAEAD(pkt, pnOffset, pnLen, pn)
 	if err != nil {
+		c.authFailures++
 		return 0, nil, false
 	}
 	if !c.handshakeConfirmed {
@@ -236,13 +246,14 @@ func (c *Conn) openApp(pkt []byte, pnOffset int) (pn uint64, payload []byte, ok 
 	return pn, payload, true
 }
 
-// NOTE (RFC 9001 §6.6, deferred): this client is a pure responder — it never
-// initiates its own key update, so it does not enforce the AEAD confidentiality
-// limit (2^23 packets under one AES-GCM key). Reaching it requires ~10 GB on a
-// single connection with a peer that never updates; real peers (quic-go) do
-// initiate. Self-initiated key update + the send-packet counter are a follow-up
-// phase (they need separate read/write key phases, since an initiator flips its
-// write phase before its read phase).
+// NOTE (RFC 9001 §6.6): the AEAD usage limits ARE enforced — sealPacket counts
+// 1-RTT packets under the current key (appSendCount) and closes with
+// AEAD_LIMIT_REACHED at the confidentiality limit, and openApp counts failed
+// authentications (authFailures) toward the integrity limit. What remains
+// deferred is SELF-INITIATED key update: this client is a pure responder, so at
+// the confidentiality limit it closes rather than rotating its own keys. A peer
+// that updates regularly (quic-go does) resets appSendCount before the limit is
+// reached, so the close only fires against a peer that never updates.
 
 // flush sends, for every space that owes a retransmission, CRYPTO, or an ACK:
 // first one packet per queued retransmit frame (retransmit takes priority,
@@ -314,6 +325,14 @@ func (c *Conn) flush() error {
 // are padded to keep the packet long enough for the header-protection sample
 // (RFC 9001 §5.4.2).
 func (c *Conn) sealPacket(sp int, frames []byte, ackEliciting bool, retrans []retransFrame) ([]byte, error) {
+	// AEAD confidentiality limit (RFC 9001 §6.6): this client cannot initiate its
+	// own key update, so once it has sealed the limit of 1-RTT packets under the
+	// current key it must stop and close with AEAD_LIMIT_REACHED rather than seal
+	// another. The !c.closed guard lets the CONNECTION_CLOSE packet itself seal.
+	if sp == spaceApp && !c.closed && c.appSendCount >= aeadConfidentialityLimit {
+		_ = c.CloseWithError(false, ErrCodeAEADLimitReached, "")
+		return nil, ErrAEADLimit
+	}
 	minFrames := 20 // ensures payload+tag reaches the 16-byte HP sample
 	if sp == spaceInitial {
 		// RFC 9000 §14.1: a datagram carrying an Initial packet MUST be at least
@@ -351,6 +370,9 @@ func (c *Conn) sealPacket(sp int, frames []byte, ackEliciting bool, retrans []re
 		return nil, err
 	}
 	c.onPacketSent(sp, pn, ackEliciting, len(pkt)) // congestion accounting (RFC 9002 §7)
+	if sp == spaceApp {
+		c.appSendCount++ // toward the AEAD confidentiality limit (§6.6)
+	}
 	return pkt, nil
 }
 

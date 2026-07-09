@@ -6,6 +6,15 @@ import (
 	"time"
 )
 
+// AEAD usage limits for the AES-GCM suites (RFC 9001 §6.6). The confidentiality
+// limit bounds packets sealed under one key; the integrity limit bounds packets
+// that fail authentication across all keys. (ChaCha20-Poly1305 has different
+// limits, but this client only supports AES-GCM.)
+const (
+	aeadConfidentialityLimit = uint64(1) << 23
+	aeadIntegrityLimit       = uint64(1) << 52
+)
+
 // keyUpdate holds RFC 9001 §6 key-update state for the application (1-RTT) space.
 // The current-generation read Opener and write Sealer live on the Conn
 // (c.keys.OneRTT and c.oneRTTSealer); this type owns everything needed to ratchet
@@ -125,6 +134,7 @@ func (c *Conn) commitKeyUpdate(pn uint64) {
 	// Promote the pre-derived next generation to current (read + write).
 	c.keys.OneRTT = ku.next
 	c.oneRTTSealer = ku.nextSealer
+	c.appSendCount = 0 // a fresh write key resets the confidentiality counter (§6.6)
 	ku.readSecret = ku.nextReadSecret
 	ku.writeSecret = ku.nextWriteSecret
 	ku.phase = !ku.phase

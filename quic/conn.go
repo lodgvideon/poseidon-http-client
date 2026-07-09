@@ -94,6 +94,12 @@ type Conn struct {
 	connRecvTotal    uint64 // sum of the highest received offset over all streams (receive FC, §4.1)
 	connRecvMax      uint64 // connection-level receive limit we advertise; raised via MAX_DATA
 	pendingCtrl      []byte // app-space control frames to send (MAX_DATA/MAX_STREAM_DATA)
+
+	// AEAD usage limits (RFC 9001 §6.6). This client supports only AES-GCM and is
+	// a pure key-update responder, so on reaching a limit it must close with
+	// AEAD_LIMIT_REACHED rather than rotate keys itself.
+	appSendCount uint64 // 1-RTT packets sealed under the current write key (confidentiality)
+	authFailures uint64 // 1-RTT packets that failed authentication, across all keys (integrity)
 }
 
 // NewConn creates a client QUIC connection over pc. tlsConfig must set

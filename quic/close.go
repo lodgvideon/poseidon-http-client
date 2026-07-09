@@ -18,6 +18,8 @@ func closeCodeFor(err error) (uint64, bool) {
 		return ErrCodeFinalSizeError, true
 	case errors.Is(err, ErrTooManyUniStreams), errors.Is(err, ErrServerBidiStream):
 		return ErrCodeStreamLimitError, true
+	case errors.Is(err, ErrAEADLimit):
+		return ErrCodeAEADLimitReached, true
 	default:
 		return 0, false
 	}
