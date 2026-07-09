@@ -59,6 +59,9 @@ const (
 	H3RequestRejected      uint64 = 0x010b // H3_REQUEST_REJECTED
 	H3RequestCancelled     uint64 = 0x010c // H3_REQUEST_CANCELLED
 	H3MessageError         uint64 = 0x010e // H3_MESSAGE_ERROR
+
+	// QPACK error codes (RFC 9204 §6), carried in the same HTTP/3 CONNECTION_CLOSE.
+	H3QpackDecompressionFailed uint64 = 0x0200 // QPACK_DECOMPRESSION_FAILED
 )
 
 // StreamResetError reports that the server abruptly aborted the request stream
@@ -262,7 +265,7 @@ func (c *Client) roundTrip(ctx context.Context, stream quicStream, req *Request)
 				if resp == nil {
 					r, derr := DecodeResponseHeaders(&c.dec, payload)
 					if derr != nil {
-						return nil, nil, derr
+						return c.decodeError(derr)
 					}
 					if r.Status < 200 {
 						interim = append(interim, r) // informational 1xx; keep reading
@@ -272,7 +275,7 @@ func (c *Client) roundTrip(ctx context.Context, stream quicStream, req *Request)
 				} else {
 					tr, derr := DecodeTrailers(&c.dec, payload)
 					if derr != nil {
-						return nil, nil, derr
+						return c.decodeError(derr)
 					}
 					resp.Trailers = tr
 					trailersSeen = true
@@ -340,4 +343,16 @@ func finalizeResponse(resp *Response, body []byte, req *Request, interim []*Resp
 	}
 	resp.Interim = interim
 	return resp, body, nil
+}
+
+// decodeError maps a header field-section decode failure to the right scope: a
+// QPACK decompression failure is a connection error (RFC 9204 §2.2, §6 —
+// QPACK_DECOMPRESSION_FAILED), so it closes the connection, while a message-rule
+// violation (ErrH3Message) stays a stream error the caller aborts the request
+// with.
+func (c *Client) decodeError(err error) (*Response, []byte, error) {
+	if errors.Is(err, qpack.ErrDecompressionFailed) {
+		return nil, nil, c.connError(H3QpackDecompressionFailed)
+	}
+	return nil, nil, err
 }
