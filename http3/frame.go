@@ -32,11 +32,6 @@ const (
 // error code (RFC 9114 §7.2.4).
 var ErrH3Settings = errors.New("http3: malformed settings")
 
-// ErrH3FrameUnexpected is returned when a frame appears where it is not allowed —
-// e.g. a DATA frame before the response HEADERS on a request stream (RFC 9114
-// §4.1). It maps to the H3_FRAME_UNEXPECTED error code (§8.1).
-var ErrH3FrameUnexpected = errors.New("http3: unexpected frame")
-
 // appendV appends v as a QUIC varint (RFC 9000 §16) without allocating. v must
 // be <= bytesx.MaxVarint (2^62-1); larger values would collide with the varint
 // length prefix. Stream and push IDs and frame lengths are always in range.

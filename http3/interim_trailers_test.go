@@ -56,6 +56,7 @@ func TestClient_InterimAndTrailers(t *testing.T) {
 
 // TestClient_MessageOrderErrors checks the §4.1 ordering rules: DATA cannot
 // precede the final response or a 1xx body, and nothing may follow the trailers.
+// An invalid frame sequence is a connection error of type H3_FRAME_UNEXPECTED.
 func TestClient_MessageOrderErrors(t *testing.T) {
 	final := AppendHeaders(nil, encodeSection(hf(":status", "200")))
 	data := AppendData(nil, []byte("x"))
@@ -78,8 +79,11 @@ func TestClient_MessageOrderErrors(t *testing.T) {
 			t.Fatal(err)
 		}
 		_, _, err = client.Do(context.Background(), &Request{Method: "GET", Scheme: "https", Authority: "e.com", Path: "/"})
-		if err != ErrH3FrameUnexpected {
-			t.Fatalf("%s: err = %v, want ErrH3FrameUnexpected", tc.name, err)
+		if err != ErrH3Control {
+			t.Fatalf("%s: err = %v, want ErrH3Control (connection error)", tc.name, err)
+		}
+		if conn.closeCode != H3FrameUnexpected {
+			t.Fatalf("%s: close code = %#x, want H3_FRAME_UNEXPECTED", tc.name, conn.closeCode)
 		}
 	}
 }

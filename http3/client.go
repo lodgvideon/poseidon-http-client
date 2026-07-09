@@ -258,9 +258,10 @@ func (c *Client) roundTrip(ctx context.Context, stream quicStream, req *Request)
 			switch typ {
 			case FrameHeaders:
 				// Message order (RFC 9114 §4.1): (1xx HEADERS)* final HEADERS
-				// DATA* trailer-HEADERS?. Nothing may follow the trailers.
+				// DATA* trailer-HEADERS?. A HEADERS after the trailers is an invalid
+				// frame sequence — a connection error, not a stream error.
 				if trailersSeen {
-					return nil, nil, ErrH3FrameUnexpected
+					return nil, nil, c.connError(H3FrameUnexpected)
 				}
 				if resp == nil {
 					r, derr := DecodeResponseHeaders(&c.dec, payload)
@@ -282,9 +283,10 @@ func (c *Client) roundTrip(ctx context.Context, stream quicStream, req *Request)
 				}
 			case FrameData:
 				if resp == nil || trailersSeen {
-					// DATA before the final response, after a 1xx (which has no
-					// body), or after the trailers (§4.1).
-					return nil, nil, ErrH3FrameUnexpected
+					// DATA before the final response, after a 1xx (which has no body),
+					// or after the trailers is an invalid frame sequence (RFC 9114
+					// §4.1) — a connection error, not a stream error.
+					return nil, nil, c.connError(H3FrameUnexpected)
 				}
 				body = append(body, payload...)
 			case FrameSettings, FrameCancelPush, FrameGoaway, FrameMaxPushID, 0x02, 0x06, 0x08, 0x09:
