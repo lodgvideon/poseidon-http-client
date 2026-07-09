@@ -1,5 +1,7 @@
 package quic
 
+import "time"
+
 // retransKind identifies the type of a retransmittable frame.
 type retransKind uint8
 
@@ -45,6 +47,8 @@ func (c *Conn) detectLost(sp int) {
 		return
 	}
 	lostSendTime := c.clock().Add(-c.rtt.lossDelay())
+	var newestLost time.Time
+	anyLost := false
 	for pn, p := range s.packets {
 		if pn > s.largestAckedPN {
 			continue // only packets before an acknowledged one are eligible
@@ -55,6 +59,15 @@ func (c *Conn) detectLost(sp int) {
 			continue
 		}
 		c.retransQueue[sp] = append(c.retransQueue[sp], p.frames...)
+		if p.ackEliciting { // congestion accounting (RFC 9002 §7.3.1)
+			c.removeInFlight(p.size)
+			if !anyLost || p.timeSent.After(newestLost) {
+				newestLost, anyLost = p.timeSent, true
+			}
+		}
 		delete(s.packets, pn) // safe to delete during range in Go
+	}
+	if anyLost {
+		c.onCongestionEvent(newestLost) // halve cwnd once for this loss episode
 	}
 }

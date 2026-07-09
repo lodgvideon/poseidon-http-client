@@ -71,6 +71,7 @@ func absDuration(d time.Duration) time.Duration {
 type sentPacket struct {
 	timeSent     time.Time
 	ackEliciting bool
+	size         int            // on-wire packet length in bytes, for congestion control (RFC 9002 §7)
 	frames       []retransFrame // retransmittable frames carried (nil = nothing to resend)
 }
 

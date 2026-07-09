@@ -62,6 +62,14 @@ type Conn struct {
 	retransQueue [numSpaces][]retransFrame // frames of lost packets awaiting resend
 	ptoCount     uint                      // consecutive probe timeouts (backoff, RFC 9002 §6.2.1)
 
+	// NewReno congestion control (RFC 9002 §7), connection-wide across spaces.
+	// cwnd == 0 disables it (the sentinel for hand-built test connections).
+	cwnd          uint64    // congestion window in bytes
+	bytesInFlight uint64    // ack-eliciting bytes sent but not acked/lost
+	ssthresh      uint64    // slow-start threshold (^uint64(0) = infinite)
+	ccBytesAcked  uint64    // bytes acked toward the next cwnd increase (avoidance)
+	recoveryStart time.Time // start of the current recovery episode (§7.3.1)
+
 	peer               TransportParams // parsed peer transport parameters (send limits)
 	gotServerCID       bool            // the server's SCID has been adopted as our DCID
 	closed             bool
@@ -111,6 +119,8 @@ func NewConn(pc PacketConn, tlsConfig *tls.Config, transportParams []byte) (*Con
 		initialSealer: is,
 		now:           time.Now,
 		connRecvMax:   DefaultConnRecvWindow,
+		cwnd:          kInitialWindow, // arm NewReno (RFC 9002 §7.2)
+		ssthresh:      ^uint64(0),     // "infinite" until the first loss
 	}
 	c.keys.Initial = io
 	return c, nil
@@ -130,6 +140,14 @@ func (c *Conn) clock() time.Time {
 // (RFC 9002 §5). ackDelay is the peer's decoded ACK delay (zero for ranges that
 // cannot carry the largest acked).
 func (c *Conn) onAckRange(sp int, low, high uint64, ackDelay time.Duration) {
+	// Credit the congestion controller for each newly acknowledged ack-eliciting
+	// packet before ack() removes it (RFC 9002 §7.3). Iterate our own sent packets
+	// rather than the ACK range, so a malformed huge range cannot make this costly.
+	for pn, p := range c.sent[sp].packets {
+		if pn >= low && pn <= high && p.ackEliciting {
+			c.onPacketAcked(p)
+		}
+	}
 	if sendTime, ok := c.sent[sp].ack(low, high); ok {
 		c.rtt.update(c.clock().Sub(sendTime), ackDelay)
 		c.ptoCount = 0 // §6.2.1: a newly-acked ack-eliciting packet resets the backoff
@@ -193,6 +211,9 @@ func (c *Conn) SetWriteKeys(level tls.QUICEncryptionLevel, suite uint16, secret 
 	switch levelSpace(level) {
 	case spaceHandshake:
 		c.handshakeSealer = s
+		// Installing Handshake write keys means the client is about to send
+		// Handshake packets, so it discards Initial keys (RFC 9001 §4.9.1).
+		c.discardSpace(spaceInitial)
 	case spaceApp:
 		c.oneRTTSealer = s
 		// Retain the 1-RTT write secret + HP key and pre-derive the next
@@ -200,6 +221,32 @@ func (c *Conn) SetWriteKeys(level tls.QUICEncryptionLevel, suite uint16, secret 
 		return c.initAppWriteKU(suite, secret, s.hp)
 	}
 	return nil
+}
+
+// discardSpace drops all state for a packet-number space when its keys are
+// discarded (RFC 9001 §4.9): it un-counts the space's in-flight bytes from the
+// congestion controller (RFC 9002 §6.4) and clears its sent, ACK, retransmit,
+// inbound-CRYPTO, and pending state and its keys, so nothing further is sent or
+// processed there. Idempotent — discarding an already-empty space is a no-op.
+func (c *Conn) discardSpace(sp int) {
+	for _, p := range c.sent[sp].packets {
+		if p.ackEliciting {
+			c.removeInFlight(p.size)
+		}
+	}
+	c.sent[sp] = sentSpace{}
+	c.acks[sp] = ackTracker{}
+	c.cryptoRecv[sp] = recvStream{}
+	c.pendingCrypto[sp] = nil
+	c.retransQueue[sp] = nil
+	switch sp {
+	case spaceInitial:
+		c.keys.Initial = nil
+		c.initialSealer = nil
+	case spaceHandshake:
+		c.keys.Handshake = nil
+		c.handshakeSealer = nil
+	}
 }
 
 // PeerTransportParameters parses the peer's transport parameters and seeds the
@@ -245,6 +292,7 @@ func (c *Conn) sendInitialFlight(ctx context.Context) error {
 	c.sent[spaceInitial].onSent(pn, c.clock(), true, []retransFrame{{
 		kind: retransCrypto, offset: c.cryptoOffset[spaceInitial], data: append([]byte(nil), ch...),
 	}})
+	c.onPacketSent(spaceInitial, pn, true, len(pkt)) // count toward bytes_in_flight (RFC 9002 §7)
 	c.cryptoOffset[spaceInitial] += uint64(len(ch))
 	c.pendingCrypto[spaceInitial] = c.pendingCrypto[spaceInitial][:0]
 	c.sendPN[spaceInitial]++

@@ -75,6 +75,7 @@ func (c *Conn) queueOldestProbe(sp int) {
 		return
 	}
 	c.retransQueue[sp] = append(c.retransQueue[sp], oldest.frames...)
+	c.removeInFlight(oldest.size) // abandoned packet leaves flight; the resend re-counts (RFC 9002 §7)
 	delete(c.sent[sp].packets, oldestPN)
 }
 
