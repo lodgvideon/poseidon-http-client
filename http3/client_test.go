@@ -430,6 +430,27 @@ func TestClient_ContentLength_ConflictingMalformed(t *testing.T) {
 	}
 }
 
+// TestConformance_RFC9204_Sec22_DecompressionFailedClosesConn checks that a QPACK
+// field section the decoder cannot decode — here a reference to the dynamic table,
+// which the static-only decoder does not support — is a QPACK_DECOMPRESSION_FAILED
+// connection error, not a per-stream reset (RFC 9204 §2.2, §6).
+func TestConformance_RFC9204_Sec22_DecompressionFailedClosesConn(t *testing.T) {
+	// Field-section prefix (Required Insert Count 0, Base 0) then an Indexed Field
+	// Line referencing the dynamic table (T=0, byte 0x80) — unresolvable at cap 0.
+	headers := AppendHeaders(nil, []byte{0x00, 0x00, 0x80})
+	conn := &fakeConn{req: &fakeStream{recvChunks: [][]byte{headers}, fin: true}}
+	client, _ := NewClientFake(conn, nil)
+	if _, _, err := client.Do(context.Background(), &Request{Method: "GET", Scheme: "https", Authority: "h", Path: "/"}); err != ErrH3Control {
+		t.Fatalf("err = %v, want ErrH3Control (connection closed)", err)
+	}
+	if conn.closeCode != H3QpackDecompressionFailed {
+		t.Fatalf("close code = %#x, want QPACK_DECOMPRESSION_FAILED %#x", conn.closeCode, H3QpackDecompressionFailed)
+	}
+	if !conn.closeApp {
+		t.Fatal("a QPACK error is an application-layer (HTTP/3) CONNECTION_CLOSE")
+	}
+}
+
 // TestClient_Close checks that Close sends an application CONNECTION_CLOSE with
 // H3_NO_ERROR (RFC 9114 §8.1) through the QUIC connection.
 func TestClient_Close(t *testing.T) {
