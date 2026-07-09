@@ -2,6 +2,7 @@ package quic
 
 import (
 	"bytes"
+	"context"
 	"crypto/tls"
 	"io"
 	"testing"
@@ -186,7 +187,7 @@ func TestConn_Poll_MalformedFrame_SendsConnectionClose(t *testing.T) {
 	}
 	c.keys.OneRTT = clientOpener
 
-	if err := c.Poll(); err != ErrFrameEncoding {
+	if err := c.Poll(context.Background()); err != ErrFrameEncoding {
 		t.Fatalf("Poll = %v, want ErrFrameEncoding", err)
 	}
 	if !pc.closed {
@@ -207,7 +208,7 @@ func TestConn_Poll_MalformedHeader_Discarded(t *testing.T) {
 	// Short-header first byte with the fixed bit clear → ParseHeader rejects it.
 	pc := &oneShotPC{pkt: []byte{0x00, 0x01, 0x02, 0x03}}
 	c := &Conn{pc: pc, dcid: []byte("closetst"), handshakeComplete: true, handshakeConfirmed: true}
-	if err := c.Poll(); err != nil {
+	if err := c.Poll(context.Background()); err != nil {
 		t.Fatalf("Poll on a malformed header = %v, want nil (packet discarded)", err)
 	}
 	if pc.closed {

@@ -17,7 +17,7 @@ func (c *Conn) Establish(ctx context.Context) error {
 	}
 	buf := make([]byte, 2048)
 	for !c.handshakeComplete && !c.closed {
-		n, err := c.readWithPTO(buf)
+		n, err := c.readWithPTO(ctx, buf)
 		if err != nil {
 			return err
 		}
@@ -38,7 +38,10 @@ func (c *Conn) Establish(ctx context.Context) error {
 // and sending acknowledgements — for driving receive after the handshake
 // completes (RFC 9000 §13). The caller sets a read deadline on the PacketConn to
 // bound the wait.
-func (c *Conn) Poll() error {
+func (c *Conn) Poll(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	if c.pollBuf == nil {
 		c.pollBuf = make([]byte, 2048)
 	}
@@ -49,7 +52,7 @@ func (c *Conn) Poll() error {
 	if err := c.flush(); err != nil {
 		return err
 	}
-	n, err := c.readWithPTO(c.pollBuf)
+	n, err := c.readWithPTO(ctx, c.pollBuf)
 	if err != nil {
 		return err
 	}

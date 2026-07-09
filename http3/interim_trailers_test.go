@@ -1,6 +1,7 @@
 package http3
 
 import (
+	"context"
 	"testing"
 
 	"github.com/lodgvideon/poseidon-http-client/qpack"
@@ -35,7 +36,7 @@ func TestClient_InterimAndTrailers(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	resp, body, err := client.Do(&Request{Method: "GET", Scheme: "https", Authority: "e.com", Path: "/"})
+	resp, body, err := client.Do(context.Background(), &Request{Method: "GET", Scheme: "https", Authority: "e.com", Path: "/"})
 	if err != nil {
 		t.Fatalf("Do: %v", err)
 	}
@@ -76,7 +77,7 @@ func TestClient_MessageOrderErrors(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		_, _, err = client.Do(&Request{Method: "GET", Scheme: "https", Authority: "e.com", Path: "/"})
+		_, _, err = client.Do(context.Background(), &Request{Method: "GET", Scheme: "https", Authority: "e.com", Path: "/"})
 		if err != ErrH3FrameUnexpected {
 			t.Fatalf("%s: err = %v, want ErrH3FrameUnexpected", tc.name, err)
 		}
@@ -92,7 +93,7 @@ func TestClient_InterimWithoutFinal(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := client.Do(&Request{Method: "GET", Scheme: "https", Authority: "e.com", Path: "/"}); err != ErrH3Message {
+	if _, _, err := client.Do(context.Background(), &Request{Method: "GET", Scheme: "https", Authority: "e.com", Path: "/"}); err != ErrH3Message {
 		t.Fatalf("1xx without final: err = %v, want ErrH3Message", err)
 	}
 }

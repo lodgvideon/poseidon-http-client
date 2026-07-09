@@ -2,6 +2,7 @@ package http3
 
 import (
 	"bytes"
+	"context"
 	"testing"
 )
 
@@ -44,8 +45,9 @@ type fakeConn struct {
 	control    *fakeStream
 	req        *fakeStream
 	polls      int
-	uniSendCap int  // send cap applied to the control stream
-	closeApp   bool // captured CloseWithError arguments
+	uniSendCap int                         // send cap applied to the control stream
+	pollHook   func(context.Context) error // overrides Poll when set (for ctx tests)
+	closeApp   bool                        // captured CloseWithError arguments
 	closeCode  uint64
 	closed     bool
 }
@@ -55,7 +57,13 @@ func (c *fakeConn) OpenUniStream() (quicStream, error) {
 	return c.control, nil
 }
 func (c *fakeConn) OpenStream() (quicStream, error) { return c.req, nil }
-func (c *fakeConn) Poll() error                     { c.polls++; return nil }
+func (c *fakeConn) Poll(ctx context.Context) error {
+	if c.pollHook != nil {
+		return c.pollHook(ctx)
+	}
+	c.polls++
+	return nil
+}
 func (c *fakeConn) CloseWithError(app bool, code uint64, _ string) error {
 	c.closed, c.closeApp, c.closeCode = true, app, code
 	return nil
@@ -88,7 +96,7 @@ func TestClient_RequestResponse(t *testing.T) {
 	}
 
 	req := &Request{Method: "GET", Scheme: "https", Authority: "example.com", Path: "/"}
-	resp, body, err := client.Do(req)
+	resp, body, err := client.Do(context.Background(), req)
 	if err != nil {
 		t.Fatalf("Do: %v", err)
 	}
@@ -128,7 +136,7 @@ func TestClient_RequestWithBody(t *testing.T) {
 		t.Fatal(err)
 	}
 	body := []byte("field=value&x=1")
-	resp, _, err := client.Do(&Request{Method: "POST", Scheme: "https", Authority: "h", Path: "/", Body: body})
+	resp, _, err := client.Do(context.Background(), &Request{Method: "POST", Scheme: "https", Authority: "h", Path: "/", Body: body})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -173,7 +181,7 @@ func TestClient_SendDrainsUnderFlowControl(t *testing.T) {
 		t.Fatalf("control stream truncated: got %d bytes, want %d", len(conn.control.sent), len(want))
 	}
 
-	resp, _, err := client.Do(&Request{Method: "GET", Scheme: "https", Authority: "h", Path: "/"})
+	resp, _, err := client.Do(context.Background(), &Request{Method: "GET", Scheme: "https", Authority: "h", Path: "/"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -198,7 +206,7 @@ func TestClient_DataBeforeHeaders(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := client.Do(&Request{Method: "GET", Scheme: "https", Authority: "h", Path: "/"}); err != ErrH3FrameUnexpected {
+	if _, _, err := client.Do(context.Background(), &Request{Method: "GET", Scheme: "https", Authority: "h", Path: "/"}); err != ErrH3FrameUnexpected {
 		t.Fatalf("err = %v, want ErrH3FrameUnexpected", err)
 	}
 }
@@ -223,5 +231,5 @@ func TestClient_Close(t *testing.T) {
 // NewClientFake constructs a Client over a fake quicConn (test-only shim around
 // the unexported newClient).
 func NewClientFake(conn quicConn, settings []Setting) (*Client, error) {
-	return newClient(conn, settings)
+	return newClient(context.Background(), conn, settings)
 }
