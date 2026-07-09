@@ -209,6 +209,7 @@ protection (RFC 9001) and the connection engine are later phases.
 | §19.8   | Conformance | TestConformance_RFC9000_Sec19_StreamFrame, TestParseStream_NoLength |
 | §19.15  | Conformance | TestConformance_RFC9000_Sec1915_NewConnectionID |
 | §19.17  | Conformance | TestConformance_RFC9000_Sec1917_PathChallenge |
+| §8.2.2  | Conformance | TestConformance_RFC9000_Sec822_PathChallengeEchoed (a received PATH_CHALLENGE queues a PATH_RESPONSE echoing its 8 bytes), TestConn_PathChallenge_SentByFlush (the PATH_RESPONSE is written on the next flush with the echoed data) |
 | §19.19  | Conformance | TestConformance_RFC9000_Sec1919_ConnectionClose |
 | §19.1   | Conformance | TestConformance_RFC9000_Sec191_Padding |
 | §19 (all frames) | Roundtrip | TestFrames_RoundTrip |

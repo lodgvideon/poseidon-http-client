@@ -592,6 +592,31 @@ func (h *connFrameHandler) OnMaxStreams(uni bool, maximum uint64) error {
 	return nil
 }
 
+// maxPendingCtrl bounds the app-space control-frame buffer so a peer-driven
+// PATH_RESPONSE echo (RFC 9000 §8.2.2) cannot grow it without limit: without the
+// cap, a burst of PATH_CHALLENGE frames across a drain of many datagrams could
+// inflate the buffer to hundreds of KB, and flush would then attempt to write a
+// single oversized datagram and fail. A conformant peer sends one challenge, and
+// validating the path needs only one matching response, so dropping the excess
+// under a flood is safe. (Bounding the whole flushed datagram to the path MTU —
+// the cap leaves headroom for a co-resident ACK, but the ACK itself is not yet
+// size-bounded — is a separate concern tracked for a follow-up.)
+const maxPendingCtrl = 900
+
+// OnPathChallenge answers a PATH_CHALLENGE by echoing its 8 bytes in a
+// PATH_RESPONSE (RFC 9000 §8.2.2): an endpoint MUST respond so the peer can
+// validate the path — e.g. after a NAT rebinding on a long-lived connection. The
+// response is queued on the self-healing app-space control path and sent by the
+// next flush (within the same Poll cycle, so it is not unduly delayed, §8.2.2);
+// it is not retransmitted, since a lost response simply prompts a new challenge.
+func (h *connFrameHandler) OnPathChallenge(data *[8]byte) error {
+	h.ackEliciting = true
+	if len(h.c.pendingCtrl) < maxPendingCtrl {
+		h.c.pendingCtrl = AppendPathResponse(h.c.pendingCtrl, *data)
+	}
+	return nil
+}
+
 func (h *connFrameHandler) OnHandshakeDone() error {
 	h.c.handshakeComplete = true
 	// HANDSHAKE_DONE confirms the handshake for a client (RFC 9001 §4.1.2), which
