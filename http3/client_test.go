@@ -44,7 +44,10 @@ type fakeConn struct {
 	control    *fakeStream
 	req        *fakeStream
 	polls      int
-	uniSendCap int // send cap applied to the control stream
+	uniSendCap int  // send cap applied to the control stream
+	closeApp   bool // captured CloseWithError arguments
+	closeCode  uint64
+	closed     bool
 }
 
 func (c *fakeConn) OpenUniStream() (quicStream, error) {
@@ -53,6 +56,10 @@ func (c *fakeConn) OpenUniStream() (quicStream, error) {
 }
 func (c *fakeConn) OpenStream() (quicStream, error) { return c.req, nil }
 func (c *fakeConn) Poll() error                     { c.polls++; return nil }
+func (c *fakeConn) CloseWithError(app bool, code uint64, _ string) error {
+	c.closed, c.closeApp, c.closeCode = true, app, code
+	return nil
+}
 
 // TestClient_RequestResponse drives a full request/response through the HTTP/3
 // client against a fake QUIC transport: the control stream gets SETTINGS first,
@@ -193,6 +200,23 @@ func TestClient_DataBeforeHeaders(t *testing.T) {
 	}
 	if _, _, err := client.Do(&Request{Method: "GET", Scheme: "https", Authority: "h", Path: "/"}); err != ErrH3FrameUnexpected {
 		t.Fatalf("err = %v, want ErrH3FrameUnexpected", err)
+	}
+}
+
+// TestClient_Close checks that Close sends an application CONNECTION_CLOSE with
+// H3_NO_ERROR (RFC 9114 §8.1) through the QUIC connection.
+func TestClient_Close(t *testing.T) {
+	conn := &fakeConn{req: &fakeStream{}}
+	client, err := NewClientFake(conn, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := client.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	if !conn.closed || !conn.closeApp || conn.closeCode != H3NoError {
+		t.Fatalf("Close: closed=%v app=%v code=%#x, want true/true/%#x",
+			conn.closed, conn.closeApp, conn.closeCode, H3NoError)
 	}
 }
 

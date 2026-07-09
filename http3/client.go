@@ -19,7 +19,15 @@ type quicConn interface {
 	OpenStream() (quicStream, error)
 	OpenUniStream() (quicStream, error)
 	Poll() error
+	CloseWithError(app bool, code uint64, reason string) error
 }
+
+// HTTP/3 error codes (RFC 9114 §8.1), carried in the QUIC application
+// CONNECTION_CLOSE frame.
+const (
+	H3NoError       uint64 = 0x0100 // H3_NO_ERROR
+	H3InternalError uint64 = 0x0102 // H3_INTERNAL_ERROR
+)
 
 // connAdapter lets a concrete *quic.Conn satisfy quicConn — the interface methods
 // return quicStream where *quic.Conn returns the concrete *quic.Stream.
@@ -65,6 +73,14 @@ func newClient(conn quicConn, settings []Setting) (*Client, error) {
 		return nil, err
 	}
 	return &Client{conn: conn}, nil
+}
+
+// Close terminates the HTTP/3 connection, sending a CONNECTION_CLOSE with
+// H3_NO_ERROR (RFC 9114 §8.1) so the server can release the connection
+// immediately rather than waiting for its idle timeout, then closing the
+// transport. It is idempotent.
+func (c *Client) Close() error {
+	return c.conn.CloseWithError(true, H3NoError, "")
 }
 
 // sendAll writes the whole of data on stream. Stream.Send consumes only a

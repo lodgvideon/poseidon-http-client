@@ -38,6 +38,9 @@ func dialInterop(t *testing.T) (*Client, string) {
 	if err != nil {
 		t.Fatalf("Dial(%s): %v", addr, err)
 	}
+	// Exercise the graceful CONNECTION_CLOSE (RFC 9114 §8.1 H3_NO_ERROR) against
+	// the live server at the end of every interop test.
+	t.Cleanup(func() { _ = client.Close() })
 	return client, host
 }
 
