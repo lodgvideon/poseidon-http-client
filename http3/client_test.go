@@ -224,7 +224,8 @@ func TestClient_SendDrainsUnderFlowControl(t *testing.T) {
 }
 
 // TestClient_DataBeforeHeaders rejects a response that sends DATA before any
-// HEADERS frame (RFC 9114 §4.1 → H3_FRAME_UNEXPECTED).
+// HEADERS frame — an invalid frame sequence, so a H3_FRAME_UNEXPECTED connection
+// error (RFC 9114 §4.1).
 func TestClient_DataBeforeHeaders(t *testing.T) {
 	dataFrame := AppendData(nil, []byte("body"))
 	conn := &fakeConn{req: &fakeStream{recvChunks: [][]byte{dataFrame}, fin: true}}
@@ -232,8 +233,11 @@ func TestClient_DataBeforeHeaders(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := client.Do(context.Background(), &Request{Method: "GET", Scheme: "https", Authority: "h", Path: "/"}); err != ErrH3FrameUnexpected {
-		t.Fatalf("err = %v, want ErrH3FrameUnexpected", err)
+	if _, _, err := client.Do(context.Background(), &Request{Method: "GET", Scheme: "https", Authority: "h", Path: "/"}); err != ErrH3Control {
+		t.Fatalf("err = %v, want ErrH3Control (connection error)", err)
+	}
+	if conn.closeCode != H3FrameUnexpected {
+		t.Fatalf("close code = %#x, want H3_FRAME_UNEXPECTED", conn.closeCode)
 	}
 }
 
