@@ -93,7 +93,9 @@ type Client struct {
 	pendingUni    []*uniStream // accepted server uni streams whose type isn't peeled yet
 	control       quicStream   // the server control stream, once identified
 	controlReader FrameReader
-	settingsRead  bool   // the mandatory first SETTINGS frame has been read
+	qpackEnc      quicStream // the server QPACK encoder stream (RFC 9204 §4.2)
+	qpackDec      quicStream // the server QPACK decoder stream (RFC 9204 §4.2)
+	settingsRead  bool       // the mandatory first SETTINGS frame has been read
 	goawayID      uint64 // the largest request stream id the server will process
 	haveGoaway    bool
 }

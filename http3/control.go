@@ -43,7 +43,24 @@ func (c *Client) serviceControl() error {
 		}
 	}
 	c.pendingUni = kept
-	return c.readControl()
+	if err := c.readControl(); err != nil {
+		return err
+	}
+	return c.checkCriticalStreams()
+}
+
+// checkCriticalStreams reports a connection error if the server has closed any
+// critical stream — its control stream (RFC 9114 §6.2.1) or either QPACK stream
+// (RFC 9204 §4.2). Those streams MUST stay open for the life of the connection;
+// a FIN or a reset on any of them (both surface as Finished) is
+// H3_CLOSED_CRITICAL_STREAM.
+func (c *Client) checkCriticalStreams() error {
+	for _, s := range []quicStream{c.control, c.qpackEnc, c.qpackDec} {
+		if s != nil && s.Finished() {
+			return c.controlError(H3ClosedCriticalStream)
+		}
+	}
+	return nil
 }
 
 // routeUni dispatches a server uni stream by its type (RFC 9114 §6.2). rest is
@@ -58,9 +75,19 @@ func (c *Client) routeUni(typ uint64, s quicStream, rest []byte) error {
 		c.control = s
 		c.controlReader.SetMaxFrameLen(maxControlFrameLen)
 		c.controlReader.Feed(rest)
-	case StreamTypeQPACKEncoder, StreamTypeQPACKDecoder:
-		// We advertise a zero-capacity QPACK dynamic table, so these carry no
-		// instructions; drop the stream (it is not re-queued and not read again).
+	case StreamTypeQPACKEncoder:
+		// We advertise a zero-capacity QPACK dynamic table, so the encoder stream
+		// carries no instructions to process — but it is a critical stream, so its
+		// reference is retained to detect the server closing it (RFC 9204 §4.2).
+		if c.qpackEnc != nil {
+			return c.controlError(H3StreamCreationError) // only one encoder stream (§4.2)
+		}
+		c.qpackEnc = s
+	case StreamTypeQPACKDecoder:
+		if c.qpackDec != nil {
+			return c.controlError(H3StreamCreationError) // only one decoder stream (§4.2)
+		}
+		c.qpackDec = s
 	case StreamTypePush:
 		// We never send MAX_PUSH_ID, so the server MUST NOT open a push stream
 		// (§6.2.5, §7.2.5).

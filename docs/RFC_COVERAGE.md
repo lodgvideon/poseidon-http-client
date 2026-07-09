@@ -331,6 +331,7 @@ instruction streams are deferred (a client advertising
 | §4.5.6  | Conformance | TestConformance_RFC9204_Sec456_LiteralNameDecode |
 | §4.5    | Conformance | TestConformance_RFC9204_Sec45_DecodeErrors (dynamic-ref / malformed → QPACK_DECOMPRESSION_FAILED) |
 | §4.5    | Roundtrip   | TestQPACK_RoundTrip, TestQPACK_EmptySection |
+| §4.2    | Conformance | TestConformance_RFC9204_Sec42_QPACKStreamClosed (server closing its QPACK encoder stream → H3_CLOSED_CRITICAL_STREAM), TestConformance_RFC9204_Sec42_DuplicateQPACKStream (a second QPACK encoder stream → H3_STREAM_CREATION_ERROR) |
 
 ## RFC 9114 — HTTP/3 (Phase G)
 
@@ -368,7 +369,7 @@ exercised in the Docker-peer interop phase.
 | §6.2.1 / §4 | Integration | TestClient_RequestResponse (client opens control stream + SETTINGS, sends a request, decodes response HEADERS + DATA over a Poll loop), TestClient_SendDrainsUnderFlowControl (partial Send is drained so the request/SETTINGS are never truncated) |
 | §4.1    | Negative    | TestClient_DataBeforeHeaders (DATA before HEADERS on a request stream → ErrH3FrameUnexpected = H3_FRAME_UNEXPECTED) |
 | §8.1    | Unit        | TestClient_Close (Client.Close sends an application CONNECTION_CLOSE with H3_NO_ERROR through the QUIC connection) |
-| §6.2.1  | Conformance | TestConformance_RFC9114_Sec621_ReadsServerSettings (the server control stream is accepted and its first SETTINGS read), TestConformance_RFC9114_Sec621_MissingSettings (a non-SETTINGS first frame → H3_MISSING_SETTINGS) |
+| §6.2.1  | Conformance | TestConformance_RFC9114_Sec621_ReadsServerSettings (the server control stream is accepted and its first SETTINGS read), TestConformance_RFC9114_Sec621_MissingSettings (a non-SETTINGS first frame → H3_MISSING_SETTINGS), TestConformance_RFC9114_Sec621_ControlStreamClosed (the server closing its control stream → H3_CLOSED_CRITICAL_STREAM) |
 | §7.2.8  | Negative    | TestConformance_RFC9114_Sec728_ForbiddenControlFrame (a HEADERS/DATA/PUSH_PROMISE/reserved frame on the control stream → H3_FRAME_UNEXPECTED) |
 | §5.2    | Conformance | TestConformance_RFC9114_Sec52_GoAwayGatesRequests (after GOAWAY a request on a stream ≥ the id → ErrGoAway), TestConformance_RFC9114_Sec52_GoAwayMustNotIncrease (an increasing GOAWAY id → H3_ID_ERROR) |
 | §6.2.5  | Negative    | TestConformance_RFC9114_Sec625_PushStreamRejected (a server push stream without MAX_PUSH_ID → H3_ID_ERROR) |
