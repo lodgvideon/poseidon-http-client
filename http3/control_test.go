@@ -122,6 +122,51 @@ func TestClient_ControlFrameTooLarge(t *testing.T) {
 	}
 }
 
+// TestConformance_RFC9114_Sec621_ControlStreamClosed checks that the server
+// closing its control stream (FIN after a valid SETTINGS) is a
+// H3_CLOSED_CRITICAL_STREAM connection error.
+func TestConformance_RFC9114_Sec621_ControlStreamClosed(t *testing.T) {
+	server := &fakeStream{id: 3, recvChunks: [][]byte{serverControl([]Setting{{SettingMaxFieldSectionSize, 16384}})}, fin: true}
+	conn := &fakeConn{req: &fakeStream{}, acceptQ: []quicStream{server}}
+	client, _ := NewClientFake(conn, nil)
+	if err := client.serviceControl(); err != ErrH3Control {
+		t.Fatalf("serviceControl = %v, want ErrH3Control", err)
+	}
+	if conn.closeCode != H3ClosedCriticalStream {
+		t.Fatalf("close code = %#x, want H3_CLOSED_CRITICAL_STREAM", conn.closeCode)
+	}
+}
+
+// TestConformance_RFC9204_Sec42_QPACKStreamClosed checks that the server closing
+// its QPACK encoder stream is a H3_CLOSED_CRITICAL_STREAM connection error, even
+// though the client processes no instructions on it.
+func TestConformance_RFC9204_Sec42_QPACKStreamClosed(t *testing.T) {
+	enc := &fakeStream{id: 7, recvChunks: [][]byte{appendV(nil, StreamTypeQPACKEncoder)}, fin: true}
+	conn := &fakeConn{req: &fakeStream{}, acceptQ: []quicStream{enc}}
+	client, _ := NewClientFake(conn, nil)
+	if err := client.serviceControl(); err != ErrH3Control {
+		t.Fatalf("serviceControl = %v, want ErrH3Control", err)
+	}
+	if conn.closeCode != H3ClosedCriticalStream {
+		t.Fatalf("close code = %#x, want H3_CLOSED_CRITICAL_STREAM", conn.closeCode)
+	}
+}
+
+// TestConformance_RFC9204_Sec42_DuplicateQPACKStream checks that a second QPACK
+// encoder stream is a H3_STREAM_CREATION_ERROR connection error.
+func TestConformance_RFC9204_Sec42_DuplicateQPACKStream(t *testing.T) {
+	s1 := &fakeStream{id: 7, recvChunks: [][]byte{appendV(nil, StreamTypeQPACKEncoder)}}
+	s2 := &fakeStream{id: 11, recvChunks: [][]byte{appendV(nil, StreamTypeQPACKEncoder)}}
+	conn := &fakeConn{req: &fakeStream{}, acceptQ: []quicStream{s1, s2}}
+	client, _ := NewClientFake(conn, nil)
+	if err := client.serviceControl(); err != ErrH3Control {
+		t.Fatalf("serviceControl = %v, want ErrH3Control", err)
+	}
+	if conn.closeCode != H3StreamCreationError {
+		t.Fatalf("close code = %#x, want H3_STREAM_CREATION_ERROR", conn.closeCode)
+	}
+}
+
 // TestClient_UniStream_PartialType checks that a stream whose leading type varint
 // is not yet buffered stays pending and is typed on a later service call.
 func TestClient_UniStream_PartialType(t *testing.T) {
