@@ -66,6 +66,31 @@ func TestConformance_RFC9000_Sec45_ResetFinalSizePastLimit(t *testing.T) {
 	}
 }
 
+// TestConformance_RFC9000_Sec35_ResetAfterCompleteIgnored checks that a
+// RESET_STREAM for a stream that has already been fully received (a clean FIN
+// with all data) has no effect (RFC 9000 §3.5): the receive side stays complete,
+// not reset, so a valid response is not discarded.
+func TestConformance_RFC9000_Sec35_ResetAfterCompleteIgnored(t *testing.T) {
+	c := &Conn{peer: TransportParams{InitialMaxStreamsBidi: 1}, connRecvMax: DefaultConnRecvWindow}
+	s, _ := c.OpenStream()
+	h := &connFrameHandler{c: c}
+	if err := h.OnStream(s.ID(), 0, true, []byte("hello")); err != nil { // FIN → complete, final size 5
+		t.Fatal(err)
+	}
+	if !s.recv.complete() {
+		t.Fatal("stream should be complete after the FIN")
+	}
+	if err := h.OnResetStream(s.ID(), 42, 5); err != nil { // a late reset, code 42
+		t.Fatal(err)
+	}
+	if s.recvReset {
+		t.Fatal("a RESET_STREAM after a complete receive must be ignored (§3.5)")
+	}
+	if s.ResetCode() != 0 {
+		t.Fatalf("reset code = %d, want 0 (reset ignored)", s.ResetCode())
+	}
+}
+
 // TestConn_ResetFinalSize_CreditsConn checks that a RESET_STREAM's final size is
 // credited to the connection receive accounting (RFC 9000 §4.5).
 func TestConn_ResetFinalSize_CreditsConn(t *testing.T) {
