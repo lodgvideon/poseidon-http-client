@@ -14,7 +14,9 @@ type Stream struct {
 	sdBlockedLimit uint64 // last sendMax a STREAM_DATA_BLOCKED was emitted for
 	sdBlockedSet   bool   // whether a STREAM_DATA_BLOCKED has been emitted yet
 	finSent        bool   // FIN latch (§4.5): the final size is fixed once set
+	sendReset      bool   // RESET_STREAM sent — the send side is aborted (§3.2)
 	recvMax        uint64 // per-stream receive limit we advertise; raised via MAX_STREAM_DATA
+	recvReset      bool   // peer sent RESET_STREAM — the receive side is aborted (§3.5)
 }
 
 // ID returns the stream's QUIC stream identifier.
@@ -72,9 +74,45 @@ func (s *Stream) Recv() []byte {
 	return data
 }
 
-// Finished reports whether the peer has finished the stream: the FIN has arrived
-// and every byte up to the final size is contiguous (RFC 9000 §2.2).
-func (s *Stream) Finished() bool { return s.recv.complete() }
+// Finished reports whether the receive side is complete — either the FIN has
+// arrived with every byte contiguous (RFC 9000 §2.2), or the peer aborted the
+// stream with RESET_STREAM (§3.5).
+func (s *Stream) Finished() bool { return s.recvReset || s.recv.complete() }
+
+// Reset abruptly terminates the send side of the stream with an application error
+// code, sending a RESET_STREAM frame (RFC 9000 §3.2, §19.4). No further data may
+// be sent (Send returns ErrStreamReset). It is idempotent and a no-op once the
+// stream's FIN has been sent — the peer already has the whole request.
+func (s *Stream) Reset(errCode uint64) error {
+	if s.finSent || s.sendReset {
+		return nil
+	}
+	if s.conn.oneRTTSealer == nil {
+		return ErrNotEstablished
+	}
+	s.sendReset = true
+	// finalSize is the number of bytes already sent (§19.4). Retransmitted until
+	// acknowledged (§13.3) via the retrans descriptor.
+	rf := retransFrame{kind: retransReset, streamID: s.id, errCode: errCode, offset: s.sendOffset}
+	return s.conn.writeAppFrames(AppendResetStream(nil, s.id, errCode, s.sendOffset), []retransFrame{rf})
+}
+
+// StopSending requests that the peer abort the send side of the stream (its data
+// flow toward us) with an application error code, sending a STOP_SENDING frame
+// (RFC 9000 §3.5, §19.5). Used to abandon a response the caller no longer wants,
+// so the peer stops filling our receive buffer. Idempotent.
+func (s *Stream) StopSending(errCode uint64) error {
+	if s.recvReset {
+		return nil
+	}
+	if s.conn.oneRTTSealer == nil {
+		return ErrNotEstablished
+	}
+	s.recvReset = true
+	// Retransmitted until acknowledged (§13.3): it has no self-healing successor.
+	rf := retransFrame{kind: retransStopSending, streamID: s.id, errCode: errCode}
+	return s.conn.writeAppFrames(AppendStopSending(nil, s.id, errCode), []retransFrame{rf})
+}
 
 // streamChunk is a run of received stream bytes buffered until the bytes before
 // it arrive.

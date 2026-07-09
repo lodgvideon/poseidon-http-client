@@ -28,6 +28,9 @@ const (
 // flow-control credit, so it is never blocked. Send after the FIN returns
 // ErrStreamFinished.
 func (s *Stream) Send(data []byte, fin bool) (int, error) {
+	if s.sendReset {
+		return 0, ErrStreamReset
+	}
 	if s.finSent {
 		return 0, ErrStreamFinished
 	}

@@ -63,6 +63,10 @@ var ErrTransportParameter = errors.New("quic: transport parameter error")
 // sent; the final size is fixed and no further data may be sent (RFC 9000 §4.5).
 var ErrStreamFinished = errors.New("quic: stream already finished")
 
+// ErrStreamReset is returned by Stream.Send after the send side has been reset
+// with RESET_STREAM; no further data may be sent (RFC 9000 §3.2).
+var ErrStreamReset = errors.New("quic: stream reset")
+
 // ErrTooManyStreams is returned by OpenStream when opening another stream would
 // exceed the peer's advertised stream limit (RFC 9000 §4.6).
 var ErrTooManyStreams = errors.New("quic: too many streams")
