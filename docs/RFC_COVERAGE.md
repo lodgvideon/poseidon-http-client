@@ -235,6 +235,8 @@ protection (RFC 9001) and the connection engine are later phases.
 | §18.2   | Unit        | TestTransportParams_UnknownAndGREASEIgnored, TestTransportParams_AbsentDefaults (unknown/GREASE skipped; absent flow-control params default to 0) |
 | §7.4    | Negative    | TestConformance_RFC9000_Sec74_DuplicateParam, TestConformance_RFC9000_Sec74_MalformedParam, TestConformance_RFC9000_Sec74_InvalidValue (duplicate / malformed encoding / invalid value → ErrTransportParameter = TRANSPORT_PARAMETER_ERROR) |
 | §4.6    | Conformance | TestConformance_RFC9000_Sec46_StreamLimit (OpenStream past peer initial_max_streams_bidi → ErrTooManyStreams; zero limit forbids the first) |
+| §2.1    | Conformance | TestConformance_RFC9000_Sec21_AcceptServerUniStream (a server-initiated uni stream, id&3==3, is accepted, reassembled, and queued once for AcceptUniStream), TestConformance_RFC9000_Sec21_ServerBidiRejected (a server-initiated bidi stream → ErrServerBidiStream / STREAM_LIMIT_ERROR), TestConn_AcceptUniStream_Order |
+| §4.6    | Conformance | TestConformance_RFC9000_Sec46_UniStreamLimit (a server uni stream beyond the advertised initial_max_streams_uni → ErrTooManyUniStreams / STREAM_LIMIT_ERROR) |
 | §4.1    | Conformance | TestConformance_RFC9000_Sec41_SendClampsToMinLimit (send never exceeds min(stream, conn) credit) |
 | §4.1    | Unit        | TestConn_ReceiveFlowControl_GrantsCredit, TestConn_ReceiveFlowControl_NoGrantBelowThreshold (as the app consumes a response the client raises its advertised limits, queueing MAX_STREAM_DATA / MAX_DATA, batched at half a window) |
 | §19.8   | Conformance | TestConformance_RFC9000_Sec198_StreamSendChunking (body larger than one datagram → multiple STREAM frames, monotonic offsets, LEN set, FIN on last) |

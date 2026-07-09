@@ -443,12 +443,22 @@ func (h *connFrameHandler) OnPing() error { h.ackEliciting = true; return nil }
 
 func (h *connFrameHandler) OnStream(id, offset uint64, fin bool, data []byte) error {
 	h.ackEliciting = true
-	// The server's response arrives on the client-initiated bidirectional
-	// stream the request opened; deliver it there. Frames for unknown streams
-	// are ignored until stream acceptance is implemented.
-	if s := h.c.streams[id]; s != nil {
-		s.recv.receive(offset, data, fin)
+	s := h.c.streams[id]
+	if s == nil {
+		// An id we did not open. Classify by its low two bits (RFC 9000 §2.1).
+		switch id & 0x03 {
+		case 0x03: // server-initiated unidirectional (control, QPACK) — accept it
+			var err error
+			if s, err = h.c.acceptPeerUniStream(id); err != nil {
+				return err // STREAM_LIMIT_ERROR → CONNECTION_CLOSE
+			}
+		case 0x01: // server-initiated bidirectional — never permitted for a client
+			return ErrServerBidiStream
+		default: // a client-initiated stream we never opened — ignore
+			return nil
+		}
 	}
+	s.recv.receive(offset, data, fin)
 	return nil
 }
 

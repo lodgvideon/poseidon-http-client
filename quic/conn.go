@@ -77,11 +77,13 @@ type Conn struct {
 	handshakeConfirmed bool // QUIC HANDSHAKE_DONE received (RFC 9001 §4.1.2; gates key update §6.1)
 	sendBuf            []byte
 
-	nextBidiStreamID uint64             // next client-initiated bidi stream ID (0, 4, 8, …)
-	openedBidi       uint64             // count of client bidi streams opened (RFC 9000 §4.6 gate)
-	openedUni        uint64             // count of client uni streams opened (§4.6 gate; ID = 2+4n)
-	streams          map[uint64]*Stream // open streams by ID
-	pollBuf          []byte             // reused datagram buffer for Poll
+	nextBidiStreamID   uint64             // next client-initiated bidi stream ID (0, 4, 8, …)
+	openedBidi         uint64             // count of client bidi streams opened (RFC 9000 §4.6 gate)
+	openedUni          uint64             // count of client uni streams opened (§4.6 gate; ID = 2+4n)
+	streams            map[uint64]*Stream // open streams by ID
+	localMaxStreamsUni uint64             // uni streams the peer may open toward us (we advertised, §4.6)
+	acceptedUni        []*Stream          // accepted server-initiated uni streams awaiting AcceptUniStream
+	pollBuf            []byte             // reused datagram buffer for Poll
 
 	connSent         uint64 // cumulative bytes sent in STREAM frames across all streams (§4.1)
 	connMax          uint64 // absolute connection-level send ceiling; init = peer.InitialMaxData
@@ -123,7 +125,42 @@ func NewConn(pc PacketConn, tlsConfig *tls.Config, transportParams []byte) (*Con
 		ssthresh:      ^uint64(0),     // "infinite" until the first loss
 	}
 	c.keys.Initial = io
+	// Retain the unidirectional-stream limit we advertise, so inbound
+	// server-initiated uni streams can be gated against it (RFC 9000 §4.6).
+	if tp, err := ParseTransportParams(transportParams); err == nil {
+		c.localMaxStreamsUni = tp.InitialMaxStreamsUni
+	}
 	return c, nil
+}
+
+// acceptPeerUniStream accepts a server-initiated unidirectional stream (RFC 9000
+// §2.1, id&0x3==3), gating on the unidirectional-stream limit we advertised
+// (§4.6). The stream is receive-only; it is registered so reassembly and
+// RESET_STREAM/STOP_SENDING/MAX_STREAM_DATA handling apply, and queued for
+// AcceptUniStream.
+func (c *Conn) acceptPeerUniStream(id uint64) (*Stream, error) {
+	if id>>2 >= c.localMaxStreamsUni {
+		return nil, ErrTooManyUniStreams
+	}
+	s := &Stream{id: id, conn: c, recvMax: DefaultStreamRecvWindow}
+	if c.streams == nil {
+		c.streams = map[uint64]*Stream{}
+	}
+	c.streams[id] = s
+	c.acceptedUni = append(c.acceptedUni, s)
+	return s, nil
+}
+
+// AcceptUniStream returns the next accepted server-initiated unidirectional
+// stream, or nil if none is pending. It does not block; the caller drives the
+// connection with Poll and drains newly accepted streams between polls.
+func (c *Conn) AcceptUniStream() *Stream {
+	if len(c.acceptedUni) == 0 {
+		return nil
+	}
+	s := c.acceptedUni[0]
+	c.acceptedUni = c.acceptedUni[1:]
+	return s
 }
 
 // clock returns the current time, defaulting to time.Now when no clock was

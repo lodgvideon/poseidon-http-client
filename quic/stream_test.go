@@ -122,9 +122,11 @@ func TestConn_OnStream_DeliversToOpenStream(t *testing.T) {
 	if !s.recv.complete() {
 		t.Fatal("stream should be complete after FIN")
 	}
-	// A frame for an unknown stream is ignored, not an error.
-	if err := h.OnStream(999, 0, false, []byte("x")); err != nil {
-		t.Fatalf("unknown stream: %v", err)
+	// A frame for an unopened client-initiated stream (id&3==0, we never opened
+	// stream 8) is ignored, not an error. Server-initiated streams are classified
+	// and accepted or rejected separately (see accept_uni_test.go).
+	if err := h.OnStream(8, 0, false, []byte("x")); err != nil {
+		t.Fatalf("unopened client stream: %v", err)
 	}
 }
 

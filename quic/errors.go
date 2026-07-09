@@ -71,6 +71,15 @@ var ErrStreamReset = errors.New("quic: stream reset")
 // exceed the peer's advertised stream limit (RFC 9000 §4.6).
 var ErrTooManyStreams = errors.New("quic: too many streams")
 
+// ErrTooManyUniStreams is a connection error: the peer opened a unidirectional
+// stream beyond the limit we advertised (STREAM_LIMIT_ERROR, RFC 9000 §4.6).
+var ErrTooManyUniStreams = errors.New("quic: peer exceeded unidirectional stream limit")
+
+// ErrServerBidiStream is a connection error: the server opened a bidirectional
+// stream, which an HTTP/3 client never permits (STREAM_LIMIT_ERROR, RFC 9000
+// §4.6 — the client advertises no bidirectional stream credit to the server).
+var ErrServerBidiStream = errors.New("quic: server opened a bidirectional stream")
+
 // ErrNotEstablished is returned by Stream.Send before the 1-RTT keys are
 // installed — application data may only be sent after the handshake completes.
 var ErrNotEstablished = errors.New("quic: connection not established")
