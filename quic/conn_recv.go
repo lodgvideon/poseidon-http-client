@@ -434,7 +434,7 @@ func (h *connFrameHandler) OnCrypto(offset uint64, data []byte) error {
 	// The handshake CRYPTO stream spans many frames and packets (a server's
 	// certificate flight is several KB); reassemble it by offset so out-of-order
 	// or gapped delivery still yields the TLS messages in order.
-	h.c.cryptoRecv[h.space].receive(offset, data, false)
+	_ = h.c.cryptoRecv[h.space].receive(offset, data, false) // never FIN, so never a final-size error
 	h.ackEliciting = true
 	return nil
 }
@@ -458,18 +458,54 @@ func (h *connFrameHandler) OnStream(id, offset uint64, fin bool, data []byte) er
 			return nil
 		}
 	}
-	s.recv.receive(offset, data, fin)
-	return nil
+	// Receive flow control (RFC 9000 §4.1): the peer must not send past the
+	// per-stream or connection receive limit we advertised. connRecvMax == 0 is
+	// the disabled sentinel used by hand-built test connections.
+	if h.c.connRecvMax != 0 {
+		end := offset + uint64(len(data))
+		if end > s.recvMax {
+			return ErrFlowControl // per-stream limit exceeded
+		}
+		if end > s.recvHighest {
+			delta := end - s.recvHighest
+			if h.c.connRecvTotal+delta > h.c.connRecvMax {
+				return ErrFlowControl // connection limit exceeded
+			}
+			h.c.connRecvTotal += delta
+			s.recvHighest = end
+		}
+	}
+	return s.recv.receive(offset, data, fin) // §4.5 final-size checks
 }
 
 // OnResetStream records that the peer abruptly ended its send side of a stream
 // (RFC 9000 §3.5): the receive side is now finished (abnormally). Whatever was
 // received contiguously before the reset remains readable.
-func (h *connFrameHandler) OnResetStream(id, _, _ uint64) error {
+func (h *connFrameHandler) OnResetStream(id, _, finalSize uint64) error {
 	h.ackEliciting = true
-	if s := h.c.streams[id]; s != nil {
-		s.recvReset = true
+	s := h.c.streams[id]
+	if s == nil {
+		return nil
 	}
+	// The final size accounts for every byte the peer sent on the stream (RFC 9000
+	// §4.5): it may not fall below data already received, may not exceed the
+	// per-stream or connection limit (§4.1), and its increment counts against the
+	// connection receiver. Gated on the FC-enabled sentinel like OnStream.
+	if h.c.connRecvMax != 0 {
+		if finalSize < s.recvHighest {
+			return ErrFinalSize
+		}
+		if finalSize > s.recvMax {
+			return ErrFlowControl
+		}
+		delta := finalSize - s.recvHighest
+		if h.c.connRecvTotal+delta > h.c.connRecvMax {
+			return ErrFlowControl
+		}
+		h.c.connRecvTotal += delta
+		s.recvHighest = finalSize
+	}
+	s.recvReset = true
 	return nil
 }
 

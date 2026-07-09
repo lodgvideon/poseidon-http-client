@@ -91,6 +91,7 @@ type Conn struct {
 	dataBlockedSet   bool   // whether a DATA_BLOCKED has been emitted yet
 
 	connRecvConsumed uint64 // total bytes the app has read across all streams (receive FC)
+	connRecvTotal    uint64 // sum of the highest received offset over all streams (receive FC, §4.1)
 	connRecvMax      uint64 // connection-level receive limit we advertise; raised via MAX_DATA
 	pendingCtrl      []byte // app-space control frames to send (MAX_DATA/MAX_STREAM_DATA)
 }
