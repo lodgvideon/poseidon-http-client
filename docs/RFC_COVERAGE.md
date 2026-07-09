@@ -371,6 +371,8 @@ exercised in the Docker-peer interop phase.
 | §8.1    | Unit        | TestClient_Close (Client.Close sends an application CONNECTION_CLOSE with H3_NO_ERROR through the QUIC connection) |
 | §6.2.1  | Conformance | TestConformance_RFC9114_Sec621_ReadsServerSettings (the server control stream is accepted and its first SETTINGS read), TestConformance_RFC9114_Sec621_MissingSettings (a non-SETTINGS first frame → H3_MISSING_SETTINGS), TestConformance_RFC9114_Sec621_ControlStreamClosed (the server closing its control stream → H3_CLOSED_CRITICAL_STREAM) |
 | §7.2.8  | Negative    | TestConformance_RFC9114_Sec728_ForbiddenControlFrame (a HEADERS/DATA/PUSH_PROMISE/reserved frame on the control stream → H3_FRAME_UNEXPECTED) |
+| §7.2.4 / §7.2.8 | Conformance | TestConformance_RFC9114_Sec724_SettingsOnRequestStream, TestConformance_RFC9114_Sec728_ReservedFrameOnRequestStream (a control-only or reserved HTTP/2-carryover frame on a request stream → H3_FRAME_UNEXPECTED connection error) |
+| §7.2.5 / §4.6 | Conformance | TestConformance_RFC9114_Sec725_PushPromiseOnRequestStream (a PUSH_PROMISE without MAX_PUSH_ID → H3_ID_ERROR) |
 | §5.2    | Conformance | TestConformance_RFC9114_Sec52_GoAwayGatesRequests (after GOAWAY a request on a stream ≥ the id → ErrGoAway), TestConformance_RFC9114_Sec52_GoAwayMustNotIncrease (an increasing GOAWAY id → H3_ID_ERROR) |
 | §6.2.5  | Negative    | TestConformance_RFC9114_Sec625_PushStreamRejected (a server push stream without MAX_PUSH_ID → H3_ID_ERROR) |
 | §7.1    | Unit        | TestClient_ControlFrameTooLarge (an oversized control frame → H3_EXCESSIVE_LOAD), TestClient_UniStream_PartialType (a stream-type varint split across reads is carried until complete) |

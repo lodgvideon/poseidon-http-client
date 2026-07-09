@@ -57,7 +57,7 @@ func (c *Client) serviceControl() error {
 func (c *Client) checkCriticalStreams() error {
 	for _, s := range []quicStream{c.control, c.qpackEnc, c.qpackDec} {
 		if s != nil && s.Finished() {
-			return c.controlError(H3ClosedCriticalStream)
+			return c.connError(H3ClosedCriticalStream)
 		}
 	}
 	return nil
@@ -70,7 +70,7 @@ func (c *Client) routeUni(typ uint64, s quicStream, rest []byte) error {
 	case StreamTypeControl:
 		if c.control != nil {
 			// Only one control stream is permitted (§6.2.1).
-			return c.controlError(H3StreamCreationError)
+			return c.connError(H3StreamCreationError)
 		}
 		c.control = s
 		c.controlReader.SetMaxFrameLen(maxControlFrameLen)
@@ -80,18 +80,18 @@ func (c *Client) routeUni(typ uint64, s quicStream, rest []byte) error {
 		// carries no instructions to process — but it is a critical stream, so its
 		// reference is retained to detect the server closing it (RFC 9204 §4.2).
 		if c.qpackEnc != nil {
-			return c.controlError(H3StreamCreationError) // only one encoder stream (§4.2)
+			return c.connError(H3StreamCreationError) // only one encoder stream (§4.2)
 		}
 		c.qpackEnc = s
 	case StreamTypeQPACKDecoder:
 		if c.qpackDec != nil {
-			return c.controlError(H3StreamCreationError) // only one decoder stream (§4.2)
+			return c.connError(H3StreamCreationError) // only one decoder stream (§4.2)
 		}
 		c.qpackDec = s
 	case StreamTypePush:
 		// We never send MAX_PUSH_ID, so the server MUST NOT open a push stream
 		// (§6.2.5, §7.2.5).
-		return c.controlError(H3IDError)
+		return c.connError(H3IDError)
 	default:
 		// An unknown stream type is aborted rather than buffered (§6.2, GREASE).
 		_ = s.StopSending(H3StreamCreationError)
@@ -112,41 +112,41 @@ func (c *Client) readControl() error {
 	for {
 		typ, payload, err := c.controlReader.ReadFrame()
 		if err == ErrH3FrameTooLarge {
-			return c.controlError(H3ExcessiveLoad)
+			return c.connError(H3ExcessiveLoad)
 		}
 		if err != nil {
 			break // ErrNeedMore
 		}
 		if !c.settingsRead {
 			if typ != FrameSettings {
-				return c.controlError(H3MissingSettings) // §6.2.1: SETTINGS must be first
+				return c.connError(H3MissingSettings) // §6.2.1: SETTINGS must be first
 			}
 			if _, perr := ParseSettings(payload); perr != nil {
-				return c.controlError(H3SettingsErrorCode)
+				return c.connError(H3SettingsErrorCode)
 			}
 			c.settingsRead = true
 			continue
 		}
 		switch typ {
 		case FrameSettings:
-			return c.controlError(H3FrameUnexpected) // a second SETTINGS (§7.2.4)
+			return c.connError(H3FrameUnexpected) // a second SETTINGS (§7.2.4)
 		case FrameGoaway:
 			id, n := bytesx.ReadVarint(payload)
 			if n == 0 || n != len(payload) {
-				return c.controlError(H3FrameError)
+				return c.connError(H3FrameError)
 			}
 			// A GOAWAY id MUST NOT be greater than any previously received
 			// (RFC 9114 §5.2); a larger one is a connection error. An equal or
 			// smaller id lowers (or re-confirms) the drain boundary.
 			if c.haveGoaway && id > c.goawayID {
-				return c.controlError(H3IDError)
+				return c.connError(H3IDError)
 			}
 			c.goawayID, c.haveGoaway = id, true
 		case FrameData, FrameHeaders, FramePushPromise, FrameMaxPushID, 0x02, 0x06, 0x08, 0x09:
 			// These frames MUST NOT appear on the control stream (DATA §7.2.1,
 			// HEADERS §7.2.2, PUSH_PROMISE §7.2.5, MAX_PUSH_ID at a client §7.2.7,
 			// reserved HTTP/2-carryover types §7.2.8): H3_FRAME_UNEXPECTED.
-			return c.controlError(H3FrameUnexpected)
+			return c.connError(H3FrameUnexpected)
 		default:
 			// GREASE (0x1f·N+0x21) and other genuinely-unknown types MUST be
 			// ignored (§9); CANCEL_PUSH (0x03) is legal here and harmless to a
@@ -156,9 +156,11 @@ func (c *Client) readControl() error {
 	return nil
 }
 
-// controlError sends a CONNECTION_CLOSE with a HTTP/3 error code for a control
-// stream violation and returns ErrH3Control.
-func (c *Client) controlError(code uint64) error {
+// connError sends a CONNECTION_CLOSE with an HTTP/3 error code for a connection
+// error detected while servicing a stream — a control-stream violation (§6.2.1,
+// §5.2) or a frame that may not appear on a request stream (§7.2) — and returns
+// ErrH3Control.
+func (c *Client) connError(code uint64) error {
 	_ = c.conn.CloseWithError(true, code, "")
 	return ErrH3Control
 }

@@ -33,10 +33,12 @@ type quicConn interface {
 // would use a stream the server will not process (RFC 9114 §5.2).
 var ErrGoAway = errors.New("http3: server is going away")
 
-// ErrH3Control reports a fatal error on the server control stream (a missing or
-// duplicate SETTINGS, a forbidden push, or an oversized frame); a CONNECTION_CLOSE
-// with the specific HTTP/3 error code has already been sent.
-var ErrH3Control = errors.New("http3: control stream error")
+// ErrH3Control reports a fatal HTTP/3 connection error — a control-stream
+// violation (a missing or duplicate SETTINGS, a forbidden push, an oversized
+// frame, a closed critical stream) or a frame that may not appear on a request
+// stream (§7.2); a CONNECTION_CLOSE with the specific HTTP/3 error code has
+// already been sent.
+var ErrH3Control = errors.New("http3: connection error")
 
 // HTTP/3 error codes (RFC 9114 §8.1), carried in the QUIC application
 // CONNECTION_CLOSE frame.
@@ -256,9 +258,20 @@ func (c *Client) roundTrip(ctx context.Context, stream quicStream, req *Request)
 					return nil, nil, ErrH3FrameUnexpected
 				}
 				body = append(body, payload...)
+			case FrameSettings, FrameCancelPush, FrameGoaway, FrameMaxPushID, 0x02, 0x06, 0x08, 0x09:
+				// Control-stream-only and reserved HTTP/2-carryover frame types
+				// MUST NOT appear on a request stream (SETTINGS §7.2.4, CANCEL_PUSH
+				// §7.2.3, GOAWAY §7.2.6, MAX_PUSH_ID §7.2.7, reserved §7.2.8): a
+				// connection error, so close the connection rather than the stream.
+				return nil, nil, c.connError(H3FrameUnexpected)
+			case FramePushPromise:
+				// Server push is disabled — the client never sends MAX_PUSH_ID — so
+				// a PUSH_PROMISE is invalid (RFC 9114 §4.6, §7.2.5): a connection error.
+				return nil, nil, c.connError(H3IDError)
+			default:
+				// GREASE (0x1f·N+0x21) and other genuinely-unknown frame types on a
+				// request stream MUST be ignored (§9, §7.2.8).
 			}
-			// Illegal frame types on a request stream (SETTINGS, etc., §7.2.8)
-			// are validated in a later phase.
 		}
 		if stream.Finished() {
 			break
