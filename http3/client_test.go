@@ -231,6 +231,50 @@ func TestClient_DataBeforeHeaders(t *testing.T) {
 	}
 }
 
+// TestConformance_RFC9114_Sec724_SettingsOnRequestStream checks that a SETTINGS
+// frame on a request stream is a H3_FRAME_UNEXPECTED connection error (§7.2.4).
+func TestConformance_RFC9114_Sec724_SettingsOnRequestStream(t *testing.T) {
+	settings := AppendFrameHeader(nil, FrameSettings, 0) // empty SETTINGS
+	conn := &fakeConn{req: &fakeStream{recvChunks: [][]byte{settings}, fin: true}}
+	client, _ := NewClientFake(conn, nil)
+	if _, _, err := client.Do(context.Background(), &Request{Method: "GET", Scheme: "https", Authority: "h", Path: "/"}); err != ErrH3Control {
+		t.Fatalf("err = %v, want ErrH3Control", err)
+	}
+	if conn.closeCode != H3FrameUnexpected {
+		t.Fatalf("close code = %#x, want H3_FRAME_UNEXPECTED", conn.closeCode)
+	}
+}
+
+// TestConformance_RFC9114_Sec728_ReservedFrameOnRequestStream checks that a
+// reserved HTTP/2-carryover frame type (0x02) on a request stream is a
+// H3_FRAME_UNEXPECTED connection error (§7.2.8).
+func TestConformance_RFC9114_Sec728_ReservedFrameOnRequestStream(t *testing.T) {
+	reserved := AppendFrameHeader(nil, 0x02, 0)
+	conn := &fakeConn{req: &fakeStream{recvChunks: [][]byte{reserved}, fin: true}}
+	client, _ := NewClientFake(conn, nil)
+	if _, _, err := client.Do(context.Background(), &Request{Method: "GET", Scheme: "https", Authority: "h", Path: "/"}); err != ErrH3Control {
+		t.Fatalf("err = %v, want ErrH3Control", err)
+	}
+	if conn.closeCode != H3FrameUnexpected {
+		t.Fatalf("close code = %#x, want H3_FRAME_UNEXPECTED", conn.closeCode)
+	}
+}
+
+// TestConformance_RFC9114_Sec725_PushPromiseOnRequestStream checks that a
+// PUSH_PROMISE on a request stream, when the client never sent MAX_PUSH_ID, is a
+// H3_ID_ERROR connection error (§4.6, §7.2.5).
+func TestConformance_RFC9114_Sec725_PushPromiseOnRequestStream(t *testing.T) {
+	pp := AppendFrameHeader(nil, FramePushPromise, 0)
+	conn := &fakeConn{req: &fakeStream{recvChunks: [][]byte{pp}, fin: true}}
+	client, _ := NewClientFake(conn, nil)
+	if _, _, err := client.Do(context.Background(), &Request{Method: "GET", Scheme: "https", Authority: "h", Path: "/"}); err != ErrH3Control {
+		t.Fatalf("err = %v, want ErrH3Control", err)
+	}
+	if conn.closeCode != H3IDError {
+		t.Fatalf("close code = %#x, want H3_ID_ERROR", conn.closeCode)
+	}
+}
+
 // TestClient_Close checks that Close sends an application CONNECTION_CLOSE with
 // H3_NO_ERROR (RFC 9114 §8.1) through the QUIC connection.
 func TestClient_Close(t *testing.T) {
