@@ -107,6 +107,7 @@ func TestConformance_RFC9204_Sec45_DecodeErrors(t *testing.T) {
 		in   []byte
 	}{
 		{"required_insert_count_nonzero", []byte{0x01, 0x00}},
+		{"base_sign_bit_set", []byte{0x00, 0x80}}, // §4.5.1.2: Sign=1 with RIC 0 → negative Base
 		{"indexed_dynamic_T0", []byte{0x00, 0x00, 0x80}},
 		{"name_ref_dynamic_T0", []byte{0x00, 0x00, 0x40}},
 		{"indexed_post_base", []byte{0x00, 0x00, 0x10}},
