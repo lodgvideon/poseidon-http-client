@@ -366,6 +366,11 @@ exercised in the Docker-peer interop phase.
 | §6.2.1 / §4 | Integration | TestClient_RequestResponse (client opens control stream + SETTINGS, sends a request, decodes response HEADERS + DATA over a Poll loop), TestClient_SendDrainsUnderFlowControl (partial Send is drained so the request/SETTINGS are never truncated) |
 | §4.1    | Negative    | TestClient_DataBeforeHeaders (DATA before HEADERS on a request stream → ErrH3FrameUnexpected = H3_FRAME_UNEXPECTED) |
 | §8.1    | Unit        | TestClient_Close (Client.Close sends an application CONNECTION_CLOSE with H3_NO_ERROR through the QUIC connection) |
+| §6.2.1  | Conformance | TestConformance_RFC9114_Sec621_ReadsServerSettings (the server control stream is accepted and its first SETTINGS read), TestConformance_RFC9114_Sec621_MissingSettings (a non-SETTINGS first frame → H3_MISSING_SETTINGS) |
+| §7.2.8  | Negative    | TestConformance_RFC9114_Sec728_ForbiddenControlFrame (a HEADERS/DATA/PUSH_PROMISE/reserved frame on the control stream → H3_FRAME_UNEXPECTED) |
+| §5.2    | Conformance | TestConformance_RFC9114_Sec52_GoAwayGatesRequests (after GOAWAY a request on a stream ≥ the id → ErrGoAway), TestConformance_RFC9114_Sec52_GoAwayMustNotIncrease (an increasing GOAWAY id → H3_ID_ERROR) |
+| §6.2.5  | Negative    | TestConformance_RFC9114_Sec625_PushStreamRejected (a server push stream without MAX_PUSH_ID → H3_ID_ERROR) |
+| §7.1    | Unit        | TestClient_ControlFrameTooLarge (an oversized control frame → H3_EXCESSIVE_LOAD), TestClient_UniStream_PartialType (a stream-type varint split across reads is carried until complete) |
 | §4.1    | Conformance | TestClient_InterimAndTrailers (the full response sequence: 1xx informational → final response → DATA → trailers, decoded into Response.Interim/Trailers), TestClient_InterimWithoutFinal (a 1xx with no final response → ErrH3Message) |
 | §4.1    | Negative    | TestClient_MessageOrderErrors (DATA before the final response, DATA after a 1xx, and any frame after the trailers → ErrH3FrameUnexpected), TestDecodeTrailers (a trailer section rejects pseudo-headers) |
 | §3.1    | Unit        | TestH3TLSConfig (Dial applies the "h3" ALPN token and a TLS 1.3 floor), TestUDPConn_Loopback / TestUDPConn_ReadDeadline (UDP PacketConn adapter), TestDialConn_EstablishError (dial closes the transport on handshake failure) |
