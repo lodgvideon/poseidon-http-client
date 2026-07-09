@@ -266,38 +266,46 @@ func (c *Conn) openApp(pkt []byte, pnOffset int) (pn uint64, payload []byte, ok 
 // that updates regularly (quic-go does) resets appSendCount before the limit is
 // reached, so the close only fires against a peer that never updates.
 
+// flushRetransmits resends each queued lost frame for space sp, one per packet,
+// as a new ack-eliciting packet with a fresh packet number (retransmit takes
+// priority, RFC 9000 §13.3). A STREAM frame for a stream whose send side has
+// been reset is dropped (§13.3: its data is not retransmitted).
+func (c *Conn) flushRetransmits(sp int) error {
+	for len(c.retransQueue[sp]) > 0 {
+		rf := c.retransQueue[sp][0]
+		c.retransQueue[sp] = c.retransQueue[sp][1:]
+		if rf.kind == retransStream {
+			if s := c.streams[rf.streamID]; s != nil && s.sendReset {
+				continue
+			}
+		}
+		pkt, err := c.sealPacket(sp, rf.encode(nil), true, []retransFrame{rf})
+		if err != nil {
+			return err
+		}
+		if _, err := c.pc.Write(pkt); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // flush sends, for every space that owes a retransmission, CRYPTO, or an ACK:
 // first one packet per queued retransmit frame (retransmit takes priority,
 // RFC 9000 §13.3), then one packet with any pending ACK and new CRYPTO.
 func (c *Conn) flush() error {
 	for sp := 0; sp < numSpaces; sp++ {
 		hasCtrl := sp == spaceApp && len(c.pendingCtrl) > 0
+		hasProbe := sp == spaceApp && c.probePending
 		nothing := len(c.pendingCrypto[sp]) == 0 && !c.acks[sp].ackPending() &&
-			len(c.retransQueue[sp]) == 0 && !hasCtrl
+			len(c.retransQueue[sp]) == 0 && !hasCtrl && !hasProbe
 		if nothing || c.sealerFor(sp) == nil {
 			continue // idle, or keys not yet available
 		}
-		// Resend lost frames, one per packet, each as a new (retransmittable)
-		// ack-eliciting packet with a fresh packet number.
-		for len(c.retransQueue[sp]) > 0 {
-			rf := c.retransQueue[sp][0]
-			c.retransQueue[sp] = c.retransQueue[sp][1:]
-			// RFC 9000 §13.3: once RESET_STREAM has been sent for a stream, its
-			// STREAM data is not retransmitted. Drop stale queued STREAM frames.
-			if rf.kind == retransStream {
-				if s := c.streams[rf.streamID]; s != nil && s.sendReset {
-					continue
-				}
-			}
-			pkt, err := c.sealPacket(sp, rf.encode(nil), true, []retransFrame{rf})
-			if err != nil {
-				return err
-			}
-			if _, err := c.pc.Write(pkt); err != nil {
-				return err
-			}
+		if err := c.flushRetransmits(sp); err != nil {
+			return err
 		}
-		if len(c.pendingCrypto[sp]) == 0 && !c.acks[sp].ackPending() && !hasCtrl {
+		if len(c.pendingCrypto[sp]) == 0 && !c.acks[sp].ackPending() && !hasCtrl && !hasProbe {
 			continue
 		}
 		var frames []byte
@@ -310,6 +318,12 @@ func (c *Conn) flush() error {
 			frames = append(frames, c.pendingCtrl...)
 			c.pendingCtrl = c.pendingCtrl[:0]
 		}
+		if hasProbe {
+			// A PTO probe with nothing else to resend (RFC 9002 §6.2.4): a bare PING
+			// to elicit an ACK. Not retransmitted — a later PTO re-probes.
+			frames = AppendPing(frames)
+			c.probePending = false
+		}
 		var retrans []retransFrame
 		hasCrypto := len(c.pendingCrypto[sp]) > 0
 		if hasCrypto {
@@ -320,8 +334,8 @@ func (c *Conn) flush() error {
 			c.pendingCrypto[sp] = c.pendingCrypto[sp][:0]
 			retrans = []retransFrame{{kind: retransCrypto, offset: off, data: data}}
 		}
-		// A packet carrying CRYPTO or a credit grant is ack-eliciting.
-		pkt, err := c.sealPacket(sp, frames, hasCrypto || hasCtrl, retrans)
+		// A packet carrying CRYPTO, a credit grant, or a PING probe is ack-eliciting.
+		pkt, err := c.sealPacket(sp, frames, hasCrypto || hasCtrl || hasProbe, retrans)
 		if err != nil {
 			return err
 		}

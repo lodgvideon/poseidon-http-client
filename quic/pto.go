@@ -55,8 +55,19 @@ func (c *Conn) hasInFlight() bool {
 // (which elicits an ACK and, once one arrives, drives loss detection), and backs
 // off the timer.
 func (c *Conn) onPTO() {
+	queued := false
 	for sp := 0; sp < numSpaces; sp++ {
-		c.queueOldestProbe(sp)
+		if c.queueOldestProbe(sp) {
+			queued = true
+		}
+	}
+	// A PTO MUST send at least one ack-eliciting packet (RFC 9002 §6.2.4). If no
+	// space had retransmittable frames to resend — the only in-flight ack-eliciting
+	// data is a lone *_BLOCKED or PING, which carry no retransmit descriptor — send
+	// a fresh PING so the probe still elicits an ACK, rather than backing off
+	// without probing.
+	if !queued && c.hasInFlight() {
+		c.probePending = true
 	}
 	if c.ptoCount < maxPTOBackoff {
 		c.ptoCount++
@@ -65,8 +76,9 @@ func (c *Conn) onPTO() {
 
 // queueOldestProbe re-queues the frames of the oldest unacknowledged
 // ack-eliciting packet in space sp for resend, and drops that packet from the
-// in-flight set (the data is now tracked under the retransmit's new number).
-func (c *Conn) queueOldestProbe(sp int) {
+// in-flight set (the data is now tracked under the retransmit's new number). It
+// reports whether it queued a probe.
+func (c *Conn) queueOldestProbe(sp int) bool {
 	var oldestPN uint64
 	var oldest sentPacket
 	found := false
@@ -79,11 +91,12 @@ func (c *Conn) queueOldestProbe(sp int) {
 		}
 	}
 	if !found {
-		return
+		return false
 	}
 	c.retransQueue[sp] = append(c.retransQueue[sp], oldest.frames...)
 	c.removeInFlight(oldest.size) // abandoned packet leaves flight; the resend re-counts (RFC 9002 §7)
 	delete(c.sent[sp].packets, oldestPN)
+	return true
 }
 
 // isTimeout reports whether err is a deadline-exceeded (timeout) error, without
