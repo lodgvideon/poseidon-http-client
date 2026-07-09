@@ -545,6 +545,31 @@ func (h *connFrameHandler) OnMaxStreamData(streamID, maximum uint64) error {
 	return nil
 }
 
+// maxStreamsLimit is the largest legal MAX_STREAMS value: a larger cumulative
+// stream count would imply a stream ID past the 2^62 varint space (RFC 9000
+// §4.6, §19.11).
+const maxStreamsLimit = uint64(1) << 60
+
+// OnMaxStreams raises the cumulative number of streams the client may open,
+// honoring the peer's MAX_STREAMS grant (RFC 9000 §4.6). A value above 2^60 is a
+// FRAME_ENCODING_ERROR (§19.11); a value that does not increase the current
+// limit is ignored. Without this the client would stay pinned to the peer's
+// initial_max_streams limit for the life of the connection.
+func (h *connFrameHandler) OnMaxStreams(uni bool, maximum uint64) error {
+	h.ackEliciting = true
+	if maximum > maxStreamsLimit {
+		return ErrFrameEncoding
+	}
+	if uni {
+		if maximum > h.c.peer.InitialMaxStreamsUni {
+			h.c.peer.InitialMaxStreamsUni = maximum
+		}
+	} else if maximum > h.c.peer.InitialMaxStreamsBidi {
+		h.c.peer.InitialMaxStreamsBidi = maximum
+	}
+	return nil
+}
+
 func (h *connFrameHandler) OnHandshakeDone() error {
 	h.c.handshakeComplete = true
 	// HANDSHAKE_DONE confirms the handshake for a client (RFC 9001 §4.1.2), which
