@@ -218,6 +218,7 @@ protection (RFC 9001) and the connection engine are later phases.
 | §17.2.5 | Conformance | TestConformance_RFC9000_Sec1725_RetryHeader |
 | §17.2.1 | Conformance | TestConformance_RFC9000_Sec171_VersionNegotiation |
 | §17.3   | Conformance | TestConformance_RFC9000_Sec173_ShortHeader |
+| §17.2 / §17.3.1 | Conformance | TestConformance_RFC9000_Sec1731_ReservedBitsProtocolViolation (short-header reserved bits nonzero → PROTOCOL_VIOLATION), TestConformance_RFC9000_Sec172_LongHeaderReservedBits (long-header), TestConn_ReservedBitsZero_Accepted (a valid packet with zero reserved bits is not rejected) |
 | §12.2   | Conformance | TestParseHeader_Coalesced (coalesced-packet walk via PacketLen) |
 | §17     | Roundtrip   | TestPacketHeader_RoundTrip |
 | §17     | Negative    | TestParseHeader_Malformed (malformed header → ErrPacketEncoding) |
