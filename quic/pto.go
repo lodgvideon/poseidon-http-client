@@ -12,7 +12,6 @@ var pastDeadline = time.Unix(1, 0)
 // Probe-timeout constants (RFC 9002 §6.2).
 const (
 	kInitialRtt   = 333 * time.Millisecond // §6.2.2 initial RTT before any sample
-	maxAckDelay   = 25 * time.Millisecond  // assumed peer max_ack_delay (application space)
 	maxPTOBackoff = 8                      // give up after this many doublings
 	idleTimeout   = 10 * time.Second       // give-up bound when nothing is in flight to probe
 )
@@ -31,7 +30,7 @@ func (c *Conn) ptoPeriod() time.Duration {
 		}
 		base = c.rtt.smoothedRTT + v
 		if c.handshakeComplete {
-			base += maxAckDelay // only the application space carries ack delay
+			base += c.peer.MaxAckDelay // only the application space carries ack delay
 		}
 	}
 	return base << c.ptoCount

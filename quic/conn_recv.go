@@ -460,11 +460,42 @@ type connFrameHandler struct {
 // (RFC 9000 §19.3, RFC 9002 §5). ACK frames are not themselves ack-eliciting.
 func (h *connFrameHandler) OnAck(largest, ackDelay, firstRange uint64) error {
 	h.sawAck = true
-	delay := time.Duration(ackDelay<<ackDelayExponent) * time.Microsecond
+	// Decode the ACK Delay (RFC 9000 §19.3). The negotiated ack_delay_exponent
+	// applies only to the Application space; the Initial and Handshake spaces use a
+	// fixed exponent of 3 (the transport parameters are not yet available there).
+	exp := defaultAckDelayExponent
+	if h.space == spaceApp {
+		exp = h.c.peer.AckDelayExponent
+	}
+	delay := decodeAckDelay(ackDelay, exp)
+	// Once the handshake is confirmed, clamp the Application-space ack delay to the
+	// peer's max_ack_delay (RFC 9002 §5.3) so an overstated delay cannot deflate
+	// the RTT estimate.
+	if h.space == spaceApp && h.c.handshakeConfirmed && delay > h.c.peer.MaxAckDelay {
+		delay = h.c.peer.MaxAckDelay
+	}
 	low := largest - firstRange
 	h.c.onAckRange(h.space, low, largest, delay)
 	h.ackLow = low
 	return nil
+}
+
+// maxAckDelayMicros bounds a decoded ACK Delay (in microseconds) so that shifting
+// a peer-controlled varint by the exponent, and converting the result to a
+// Duration in nanoseconds, cannot overflow int64 into a negative or wrapped
+// value. The cap (~2^53 µs ≈ 285 years) is far above any real delay, so a
+// conformant peer is unaffected; an oversized value is harmless — it is clamped
+// to max_ack_delay for the Application space and rejected by rtt.update's min_rtt
+// guard for the handshake spaces.
+const maxAckDelayMicros uint64 = 1 << 53
+
+// decodeAckDelay converts an ACK Delay field value and its exponent to a
+// duration, saturating at maxAckDelayMicros rather than overflowing.
+func decodeAckDelay(ackDelay, exp uint64) time.Duration {
+	if exp >= 64 || ackDelay > maxAckDelayMicros>>exp {
+		return time.Duration(maxAckDelayMicros) * time.Microsecond
+	}
+	return time.Duration(ackDelay<<exp) * time.Microsecond
 }
 
 // OnAckRange processes an additional ACK range below the previous one: a gap of

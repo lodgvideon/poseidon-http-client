@@ -1,6 +1,17 @@
 package quic
 
-import "github.com/lodgvideon/poseidon-http-client/internal/bytesx"
+import (
+	"time"
+
+	"github.com/lodgvideon/poseidon-http-client/internal/bytesx"
+)
+
+// Transport-parameter defaults (RFC 9000 §18.2) for values absent from the
+// peer's parameters.
+const (
+	defaultAckDelayExponent uint64        = 3
+	defaultMaxAckDelay      time.Duration = 25 * time.Millisecond
+)
 
 // TransportParams holds the peer's QUIC transport parameters that a client needs
 // to bound its own sending (RFC 9000 §18.2). Only the parameters the send path
@@ -30,6 +41,13 @@ type TransportParams struct {
 	// from a zero-length connection ID.
 	InitialSourceConnectionID     []byte
 	HaveInitialSourceConnectionID bool
+	// AckDelayExponent is the peer's ack_delay_exponent (0x0a): the ACK Delay
+	// field the peer sends is scaled by 2^AckDelayExponent microseconds. Default 3.
+	AckDelayExponent uint64
+	// MaxAckDelay is the peer's max_ack_delay (0x0b): the longest it will delay an
+	// acknowledgement. It bounds the ack delay used in RTT estimation and feeds the
+	// PTO. Default 25 ms.
+	MaxAckDelay time.Duration
 }
 
 // Transport-parameter identifiers the parser dispatches on (RFC 9000 §18.2).
@@ -41,6 +59,8 @@ const (
 	tpInitialMaxStreamDataUni        uint64 = 0x07
 	tpInitialMaxStreamsBidi          uint64 = 0x08
 	tpInitialMaxStreamsUni           uint64 = 0x09
+	tpAckDelayExponent               uint64 = 0x0a
+	tpMaxAckDelay                    uint64 = 0x0b
 	tpActiveConnectionIDLimit        uint64 = 0x0e
 	tpInitialSourceConnectionID      uint64 = 0x0f
 )
@@ -53,7 +73,7 @@ const (
 // TRANSPORT_PARAMETER_ERROR (§7.4). Unknown identifiers (including GREASE) are
 // ignored.
 func ParseTransportParams(raw []byte) (TransportParams, error) {
-	var tp TransportParams
+	tp := TransportParams{AckDelayExponent: defaultAckDelayExponent, MaxAckDelay: defaultMaxAckDelay}
 	seen := make(map[uint64]struct{})
 	p := 0
 	for p < len(raw) {
@@ -126,6 +146,18 @@ func (tp *TransportParams) set(id uint64, value []byte) error {
 		if !ok || v < 2 {
 			return ErrTransportParameter // §7.4: values below 2 are invalid
 		}
+	case tpAckDelayExponent:
+		v, ok := tpReadUint(value)
+		if !ok || v > 20 {
+			return ErrTransportParameter // §18.2: values above 20 are invalid
+		}
+		tp.AckDelayExponent = v
+	case tpMaxAckDelay:
+		v, ok := tpReadUint(value)
+		if !ok || v >= 1<<14 {
+			return ErrTransportParameter // §18.2: values of 2^14 ms or greater are invalid
+		}
+		tp.MaxAckDelay = time.Duration(v) * time.Millisecond
 	case tpInitialSourceConnectionID:
 		// Raw connection-ID bytes (not a varint), authenticated in §7.3.
 		tp.InitialSourceConnectionID = append([]byte(nil), value...)

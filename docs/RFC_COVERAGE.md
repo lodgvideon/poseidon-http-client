@@ -235,6 +235,7 @@ protection (RFC 9001) and the connection engine are later phases.
 | §18 / §18.2 | Conformance | TestConformance_RFC9000_Sec18_TransportParamsParse, TestConformance_RFC9000_Sec182_BidiRemoteBoundsClientStream (server params parsed to send limits; a request stream is bounded by initial_max_stream_data_bidi_remote 0x06, not _local) |
 | §18 / §7.3 | Conformance | TestConformance_RFC9000_Sec18_TransportParamsEncode (client encodes the params it advertises — receive credit via initial_max_stream_data_bidi_local 0x05, server-uni limits, initial_source_connection_id — and the decoder accepts them) |
 | §18.2   | Unit        | TestTransportParams_UnknownAndGREASEIgnored, TestTransportParams_AbsentDefaults (unknown/GREASE skipped; absent flow-control params default to 0) |
+| §18.2   | Conformance | TestConformance_RFC9000_Sec182_AckDelayParams (ack_delay_exponent 0x0a + max_ack_delay 0x0b parsed, default to 3 / 25 ms when absent, rejected out of range — exponent > 20, max_ack_delay ≥ 2^14 ms → TRANSPORT_PARAMETER_ERROR) |
 | §7.4    | Negative    | TestConformance_RFC9000_Sec74_DuplicateParam, TestConformance_RFC9000_Sec74_MalformedParam, TestConformance_RFC9000_Sec74_InvalidValue (duplicate / malformed encoding / invalid value → ErrTransportParameter = TRANSPORT_PARAMETER_ERROR) |
 | §7.3    | Conformance | TestConformance_RFC9000_Sec73_InitialSCIDAuthenticated (the server's initial_source_connection_id is authenticated against the SCID the client adopted; a mismatch or an absent parameter → TRANSPORT_PARAMETER_ERROR) |
 | §4.6    | Conformance | TestConformance_RFC9000_Sec46_StreamLimit (OpenStream past peer initial_max_streams_bidi → ErrTooManyStreams; zero limit forbids the first) |
@@ -310,6 +311,7 @@ in cc.go).
 | Section | Type        | Test |
 |---------|-------------|------|
 | §5.2–5.3 | Unit       | TestRTTStats_FirstSample, TestRTTStats_Subsequent, TestRTTStats_AckDelay (smoothed_rtt / rttvar / min_rtt update; ack-delay subtraction floored at min_rtt) |
+| §5.3    | Conformance | TestConformance_RFC9002_Sec53_AckDelayExponentDecode (ACK Delay decoded with the peer's ack_delay_exponent), TestConformance_RFC9002_Sec53_InitialSpaceFixedExponent (Initial/Handshake use the fixed exponent 3), TestConformance_RFC9002_Sec53_AckDelayClampedToMax (once confirmed, ack delay is clamped to max_ack_delay), TestConn_AckDelay_OverflowBounded (an overflowing ACK Delay is saturated, not wrapped negative) |
 | §5.1 / §19.3 | Unit   | TestSentSpace_Ack, TestConnFrameHandler_OnAck_UpdatesRTT, TestConnFrameHandler_OnAckRange_Gap (sent-packet tracking; ACK range walk removes acked packets and samples RTT from the largest; gaps leave packets in flight) |
 | §6.1.1  | Conformance | TestConformance_RFC9002_Sec611_PacketThresholdLoss (a packet ≥ kPacketThreshold=3 numbers below the largest acknowledged is declared lost) |
 | §6.1.2  | Conformance | TestConformance_RFC9002_Sec612_TimeThresholdLoss (a packet sent before now − 9/8·max(srtt,latest) is declared lost), TestRTTStats_LossDelay, TestConn_DetectLost_NoLossWithinThresholds |
