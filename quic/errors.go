@@ -93,6 +93,13 @@ var ErrServerBidiStream = errors.New("quic: server opened a bidirectional stream
 // installed — application data may only be sent after the handshake completes.
 var ErrNotEstablished = errors.New("quic: connection not established")
 
+// ErrAEADLimit is returned when an AEAD usage limit is reached (RFC 9001 §6.6):
+// the confidentiality limit on packets sealed with one key, or the integrity
+// limit on packets that failed authentication. Because this client cannot
+// initiate its own key update, it maps to a CONNECTION_CLOSE with the
+// AEAD_LIMIT_REACHED (0x0f) transport error.
+var ErrAEADLimit = errors.New("quic: AEAD usage limit reached")
+
 // ErrHandshakeClosed is returned by Establish when the peer closes the
 // connection (e.g. a CONNECTION_CLOSE for a TLS alert) before the handshake
 // completes.
