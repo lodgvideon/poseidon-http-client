@@ -135,6 +135,12 @@ func (c *Client) readControl() error {
 			if n == 0 || n != len(payload) {
 				return c.connError(H3FrameError)
 			}
+			// A GOAWAY a client receives carries a client-initiated bidirectional
+			// (request) stream id, whose low two bits are zero (RFC 9000 §2.1). A
+			// stream id of any other type is a connection error (RFC 9114 §7.2.6).
+			if id&0x3 != 0 {
+				return c.connError(H3IDError)
+			}
 			// A GOAWAY id MUST NOT be greater than any previously received
 			// (RFC 9114 §5.2); a larger one is a connection error. An equal or
 			// smaller id lowers (or re-confirms) the drain boundary.

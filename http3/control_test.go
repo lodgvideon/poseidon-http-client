@@ -93,6 +93,24 @@ func TestConformance_RFC9114_Sec52_GoAwayMustNotIncrease(t *testing.T) {
 	}
 }
 
+// TestConformance_RFC9114_Sec726_GoAwayNonRequestStreamID checks that a GOAWAY
+// carrying a stream id that is not a client-initiated bidirectional (request)
+// stream is a H3_ID_ERROR connection error (RFC 9114 §7.2.6).
+func TestConformance_RFC9114_Sec726_GoAwayNonRequestStreamID(t *testing.T) {
+	for _, badID := range []uint64{1, 2, 3, 5, 7} { // server-bidi, client-uni, server-uni, …
+		ctrl := serverControl(nil, AppendGoaway(nil, badID)...)
+		server := &fakeStream{id: 3, recvChunks: [][]byte{ctrl}}
+		conn := &fakeConn{req: &fakeStream{}, acceptQ: []quicStream{server}}
+		client, _ := NewClientFake(conn, nil)
+		if err := client.serviceControl(); err != ErrH3Control {
+			t.Fatalf("GOAWAY(%d): serviceControl = %v, want ErrH3Control", badID, err)
+		}
+		if conn.closeCode != H3IDError {
+			t.Fatalf("GOAWAY(%d): close code = %#x, want H3_ID_ERROR", badID, conn.closeCode)
+		}
+	}
+}
+
 // TestConformance_RFC9114_Sec625_PushStreamRejected checks that a server push
 // stream (we sent no MAX_PUSH_ID) is a H3_ID_ERROR connection error.
 func TestConformance_RFC9114_Sec625_PushStreamRejected(t *testing.T) {
