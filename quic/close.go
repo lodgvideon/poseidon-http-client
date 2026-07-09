@@ -1,12 +1,21 @@
 package quic
 
-import "errors"
+import (
+	"crypto/tls"
+	"errors"
+)
 
 // closeCodeFor maps a local protocol-violation error to the transport error code
 // to signal in a CONNECTION_CLOSE (RFC 9000 §10.2, §20.1). The bool is false for
 // errors that are not connection errors to signal — I/O failures, read timeouts,
 // or a peer-initiated close.
 func closeCodeFor(err error) (uint64, bool) {
+	// A TLS handshake failure surfaces as a tls.AlertError; RFC 9001 §4.8 turns it
+	// into a CRYPTO_ERROR whose code is 0x0100 plus the one-byte alert description.
+	var alert tls.AlertError
+	if errors.As(err, &alert) {
+		return ErrCodeCryptoBase + uint64(alert), true
+	}
 	switch {
 	case errors.Is(err, ErrFrameEncoding):
 		return ErrCodeFrameEncodingError, true
