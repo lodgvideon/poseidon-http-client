@@ -14,6 +14,7 @@ const (
 	blockNone blockKind = iota
 	blockStream
 	blockConn
+	blockCong // congestion window full (RFC 9002 §7); not signalled with a frame
 )
 
 // Send writes data on the stream as one or more STREAM frames over the 1-RTT
@@ -100,6 +101,15 @@ func (s *Stream) grantable(remaining int) (int, blockKind) {
 		default:
 			return 0, blockNone
 		}
+	}
+	// Congestion control (RFC 9002 §7): clamp to the space left in the congestion
+	// window; a full window stalls the send with no frame (unlike flow control),
+	// and the caller's send loop resumes as acknowledgements free the window.
+	if s.conn.cwnd > 0 {
+		if s.conn.bytesInFlight >= s.conn.cwnd {
+			return 0, blockCong
+		}
+		credit = min(credit, s.conn.cwnd-s.conn.bytesInFlight)
 	}
 	return int(min(credit, uint64(remaining), uint64(s.maxChunk()))), blockNone
 }

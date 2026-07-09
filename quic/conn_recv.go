@@ -330,7 +330,12 @@ func (c *Conn) sealPacket(sp int, frames []byte, ackEliciting bool, retrans []re
 	for i := pnLen - 1; i >= 0; i-- {
 		hdr = append(hdr, byte(pn>>(8*uint(i))))
 	}
-	return c.sealerFor(sp).Seal(nil, hdr, pnOffset, pnLen, pn, frames)
+	pkt, err := c.sealerFor(sp).Seal(nil, hdr, pnOffset, pnLen, pn, frames)
+	if err != nil {
+		return nil, err
+	}
+	c.onPacketSent(sp, pn, ackEliciting, len(pkt)) // congestion accounting (RFC 9002 §7)
+	return pkt, nil
 }
 
 func (c *Conn) openerFor(sp int) *Opener {
@@ -453,6 +458,9 @@ func (h *connFrameHandler) OnHandshakeDone() error {
 	// is the precondition for accepting a key update (§6.1) — distinct from TLS
 	// completion, which fires earlier.
 	h.c.handshakeConfirmed = true
+	// The confirmed handshake discards Handshake keys (RFC 9001 §4.9.2), releasing
+	// any of their still-unacknowledged bytes from the congestion controller.
+	h.c.discardSpace(spaceHandshake)
 	h.ackEliciting = true
 	return nil
 }

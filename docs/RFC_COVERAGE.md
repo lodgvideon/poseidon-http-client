@@ -285,8 +285,11 @@ packet + time thresholds) and frame-level retransmission (§13.3) of lost CRYPTO
 and STREAM data. G.6h-3 adds the probe timeout (§6.2): the receive loop bounds
 each read by the PTO when data is in flight and, on expiry, resends the oldest
 unacknowledged packet as a probe (with exponential backoff), recovering a fully
-lost tail that no ACK would otherwise detect. Congestion control (§7) is
-deferred.
+lost tail that no ACK would otherwise detect. G.6l adds NewReno congestion
+control (§7): the client tracks bytes in flight, grows the window in slow start
+and congestion avoidance, halves it once per loss episode, and gates its own
+data sends on the window. Persistent congestion (§7.6) is deferred (documented
+in cc.go).
 
 | Section | Type        | Test |
 |---------|-------------|------|
@@ -298,6 +301,9 @@ deferred.
 | §6.2.1  | Unit        | TestConn_PTOPeriod (PTO = srtt + max(4·rttvar, granularity) + max_ack_delay, doubled per backoff; 2·kInitialRtt pre-sample), TestConn_PTOCount_ResetOnAck (backoff reset on a newly-acked ack-eliciting packet) |
 | §6.2.4  | Unit        | TestConn_OnPTO_QueuesProbe (probe resends the oldest unacked packet + backs off), TestConn_ReadWithPTO_ProbesOnTimeout (a read timeout with data in flight sends a probe and retries) |
 | §6 (whole) | Interop | `make h3-interop-loss` — the GET/POST/16 KiB interop suite run against live Caddy through a UDP relay that drops ~10% of datagrams each way; passing proves the handshake, request, and response recover via retransmission and the probe timeout (verified up to 20% loss). |
+| §7.3.1  | Conformance | TestConformance_RFC9002_Sec731_SlowStart (an ack in slow start grows cwnd by the acked bytes and frees them from bytes_in_flight), TestConformance_RFC9002_Sec731_HalveOncePerRecovery (a loss halves cwnd once per recovery episode; same-episode losses do not re-halve) |
+| §7.3.3  | Conformance | TestConformance_RFC9002_Sec733_CongestionAvoidance (byte-accumulator growth of one max_datagram_size per window acked; does not freeze at a large window) |
+| §7 (gate) | Unit      | TestCC_GateClampedByWindow (grantable clamps to the remaining window and reports blockCong — no frame — when full), TestCC_PureAckNotCounted (pure-ACK packets are not in flight), TestCC_DisabledSentinel (cwnd==0 leaves the send path unthrottled) |
 
 ## RFC 9204 — QPACK (Phase G — HTTP/3)
 
