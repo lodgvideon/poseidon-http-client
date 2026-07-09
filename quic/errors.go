@@ -93,6 +93,12 @@ var ErrServerBidiStream = errors.New("quic: server opened a bidirectional stream
 // installed — application data may only be sent after the handshake completes.
 var ErrNotEstablished = errors.New("quic: connection not established")
 
+// ErrProtocolViolation is a connection error for a peer that violates the
+// protocol in a way with no more specific code — here, a packet whose header
+// reserved bits are non-zero after protection is removed (RFC 9000 §17.2,
+// §17.3.1). It maps to PROTOCOL_VIOLATION (0x0a).
+var ErrProtocolViolation = errors.New("quic: protocol violation")
+
 // ErrAEADLimit is returned when an AEAD usage limit is reached (RFC 9001 §6.6):
 // the confidentiality limit on packets sealed with one key, or the integrity
 // limit on packets that failed authentication. Because this client cannot

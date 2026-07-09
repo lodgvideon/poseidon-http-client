@@ -29,6 +29,8 @@ func closeCodeFor(err error) (uint64, bool) {
 		return ErrCodeStreamLimitError, true
 	case errors.Is(err, ErrAEADLimit):
 		return ErrCodeAEADLimitReached, true
+	case errors.Is(err, ErrProtocolViolation):
+		return ErrCodeProtocolViolation, true
 	default:
 		return 0, false
 	}

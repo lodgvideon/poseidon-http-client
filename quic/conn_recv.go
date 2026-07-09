@@ -156,6 +156,17 @@ func (c *Conn) recvDatagram(datagram []byte) error {
 				continue // authentication failed; skip
 			}
 		}
+		// The header's reserved bits MUST be zero once protection is removed from
+		// an authenticated packet (RFC 9000 §17.2 long header, §17.3.1 short
+		// header); a non-zero value is a PROTOCOL_VIOLATION. pkt[0] was unmasked by
+		// the open path above, and the AEAD success authenticated it.
+		reserved := byte(0x0c) // long header (Initial/Handshake)
+		if sp == spaceApp {
+			reserved = 0x18 // short header (1-RTT)
+		}
+		if pkt[0]&reserved != 0 {
+			return ErrProtocolViolation
+		}
 		fh := connFrameHandler{c: c, space: sp}
 		if err := ParseFrames(payload, &fh); err != nil {
 			return err
