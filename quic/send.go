@@ -82,6 +82,7 @@ func (s *Stream) writeStreamFrame(chunk []byte, fin bool) error {
 	s.conn.connSent += uint64(len(chunk))
 	if fin {
 		s.finSent = true
+		s.conn.maybeRetire(s) // if the response already arrived, both sides are now done
 	}
 	return nil
 }
