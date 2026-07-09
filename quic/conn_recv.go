@@ -475,7 +475,11 @@ func (h *connFrameHandler) OnStream(id, offset uint64, fin bool, data []byte) er
 			s.recvHighest = end
 		}
 	}
-	return s.recv.receive(offset, data, fin) // §4.5 final-size checks
+	if err := s.recv.receive(offset, data, fin); err != nil { // §4.5 final-size checks
+		return err
+	}
+	h.c.maybeRetire(s) // fully received + our FIN sent → drop from the routing map
+	return nil
 }
 
 // OnResetStream records that the peer abruptly ended its send side of a stream
@@ -506,6 +510,7 @@ func (h *connFrameHandler) OnResetStream(id, _, finalSize uint64) error {
 		s.recvHighest = finalSize
 	}
 	s.recvReset = true
+	h.c.maybeRetire(s) // receive side terminal (reset) + our FIN sent → drop from the map
 	return nil
 }
 

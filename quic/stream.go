@@ -80,6 +80,21 @@ func (s *Stream) Recv() []byte {
 // stream with RESET_STREAM (§3.5).
 func (s *Stream) Finished() bool { return s.recvReset || s.recv.complete() }
 
+// maybeRetire drops a stream from the routing map once both directions have
+// reached a terminal state — the FIN has been sent and the receive side is
+// finished (fully received or reset) — so a long-lived connection carrying many
+// requests does not accumulate finished streams. finSent is mutually exclusive
+// with sendReset (Reset is a no-op once the FIN is sent), so a retired stream is
+// never one whose STREAM data the retransmitter must suppress (§13.3), and its
+// received bytes stay counted in connection flow control. The map only routes
+// inbound frames; the caller's *Stream and its buffered data are unaffected, and
+// a late retransmit for the id is ignored as a stream we never opened.
+func (c *Conn) maybeRetire(s *Stream) {
+	if s.finSent && (s.recvReset || s.recv.complete()) {
+		delete(c.streams, s.id)
+	}
+}
+
 // Reset abruptly terminates the send side of the stream with an application error
 // code, sending a RESET_STREAM frame (RFC 9000 §3.2, §19.4). No further data may
 // be sent (Send returns ErrStreamReset). It is idempotent and a no-op once the
@@ -110,6 +125,7 @@ func (s *Stream) StopSending(errCode uint64) error {
 		return ErrNotEstablished
 	}
 	s.recvReset = true
+	s.conn.maybeRetire(s) // receive side terminal; if our FIN is also sent, drop from the map
 	// Retransmitted until acknowledged (§13.3): it has no self-healing successor.
 	rf := retransFrame{kind: retransStopSending, streamID: s.id, errCode: errCode}
 	return s.conn.writeAppFrames(AppendStopSending(nil, s.id, errCode), []retransFrame{rf})
