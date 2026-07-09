@@ -44,6 +44,16 @@ type Conn struct {
 	retryToken   []byte // address-validation token from a Retry, echoed in later Initials (§8.1.2)
 	handledRetry bool   // a Retry has been processed (at most one accepted, §17.2.5.2)
 
+	// Server-issued destination connection IDs (RFC 9000 §5.1). serverCIDs holds
+	// the active (not-yet-retired) ones by sequence number — sequence 0 is the
+	// server SCID adopted at the handshake, higher ones arrive in
+	// NEW_CONNECTION_ID. curCIDSeq is the sequence of the CID in use (c.dcid);
+	// retirePriorTo is the highest Retire Prior To seen.
+	serverCIDs    map[uint64][]byte
+	retiredCIDs   map[uint64]bool // sequences already scheduled for RETIRE_CONNECTION_ID (dedup)
+	curCIDSeq     uint64
+	retirePriorTo uint64
+
 	initialSealer   *Sealer
 	handshakeSealer *Sealer
 	oneRTTSealer    *Sealer    // current-generation 1-RTT send Sealer (ratcheted on key update)

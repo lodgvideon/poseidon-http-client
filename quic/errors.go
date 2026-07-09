@@ -93,6 +93,11 @@ var ErrServerBidiStream = errors.New("quic: server opened a bidirectional stream
 // installed — application data may only be sent after the handshake completes.
 var ErrNotEstablished = errors.New("quic: connection not established")
 
+// ErrConnectionIDLimit is a connection error: the peer provided more active
+// connection IDs than the active_connection_id_limit we advertised (RFC 9000
+// §5.1.1). It maps to CONNECTION_ID_LIMIT_ERROR (0x09).
+var ErrConnectionIDLimit = errors.New("quic: peer exceeded the active connection ID limit")
+
 // ErrProtocolViolation is a connection error for a peer that violates the
 // protocol in a way with no more specific code — here, a packet whose header
 // reserved bits are non-zero after protection is removed (RFC 9000 §17.2,
