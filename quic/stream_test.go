@@ -10,7 +10,7 @@ import (
 func feed(frames ...streamFrameInput) *recvStream {
 	r := &recvStream{}
 	for _, f := range frames {
-		r.receive(f.offset, f.data, f.fin)
+		_ = r.receive(f.offset, f.data, f.fin)
 	}
 	return r
 }
@@ -68,7 +68,7 @@ func TestRecvStream_GapNotComplete(t *testing.T) {
 		t.Fatalf("bytes = %q, want %q", got, "AB")
 	}
 	// Fill the gap; now the buffered tail should fold in and complete.
-	r.receive(2, []byte("CD"), false)
+	_ = r.receive(2, []byte("CD"), false)
 	if got := r.bytes(); !bytes.Equal(got, []byte("ABCDEF")) {
 		t.Fatalf("bytes = %q, want %q", got, "ABCDEF")
 	}

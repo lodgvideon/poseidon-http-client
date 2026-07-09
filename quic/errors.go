@@ -71,6 +71,15 @@ var ErrStreamReset = errors.New("quic: stream reset")
 // exceed the peer's advertised stream limit (RFC 9000 §4.6).
 var ErrTooManyStreams = errors.New("quic: too many streams")
 
+// ErrFlowControl is a connection error: the peer sent stream data past a
+// receive limit we advertised (FLOW_CONTROL_ERROR, RFC 9000 §4.1).
+var ErrFlowControl = errors.New("quic: peer exceeded a receive flow-control limit")
+
+// ErrFinalSize is a connection error: a stream's final size changed, or data was
+// received past a declared final size, or a final size fell below data already
+// received (FINAL_SIZE_ERROR, RFC 9000 §4.5).
+var ErrFinalSize = errors.New("quic: stream final size error")
+
 // ErrTooManyUniStreams is a connection error: the peer opened a unidirectional
 // stream beyond the limit we advertised (STREAM_LIMIT_ERROR, RFC 9000 §4.6).
 var ErrTooManyUniStreams = errors.New("quic: peer exceeded unidirectional stream limit")

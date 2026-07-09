@@ -16,6 +16,7 @@ type Stream struct {
 	finSent        bool   // FIN latch (§4.5): the final size is fixed once set
 	sendReset      bool   // RESET_STREAM sent — the send side is aborted (§3.2)
 	recvMax        uint64 // per-stream receive limit we advertise; raised via MAX_STREAM_DATA
+	recvHighest    uint64 // highest byte offset received on this stream (flow control, §4.1)
 	recvReset      bool   // peer sent RESET_STREAM — the receive side is aborted (§3.5)
 }
 
@@ -129,18 +130,32 @@ type recvStream struct {
 	data      []byte        // contiguous bytes received from offset 0
 	pending   []streamChunk // buffered chunks beyond len(data), sorted by offset
 	readOff   int           // bytes of data already returned by read
+	highest   uint64        // highest byte offset received (offset+len), for §4.5 checks
 	fin       bool
 	finalSize uint64
 }
 
 // receive incorporates a STREAM frame's data at the given stream offset. fin
-// marks that this frame carries the last byte (the final size is offset+len).
-func (r *recvStream) receive(offset uint64, data []byte, fin bool) {
+// marks that this frame carries the last byte (the final size is offset+len). It
+// returns ErrFinalSize if the frame violates the stream's final size (RFC 9000
+// §4.5): data past a declared final size, a conflicting FIN, or a FIN below data
+// already received.
+func (r *recvStream) receive(offset uint64, data []byte, fin bool) error {
+	end := offset + uint64(len(data))
+	if r.fin && (end > r.finalSize || (fin && end != r.finalSize)) {
+		return ErrFinalSize // beyond, or inconsistent with, a fixed final size
+	}
 	if fin {
-		r.fin = true
-		r.finalSize = offset + uint64(len(data))
+		if end < r.highest {
+			return ErrFinalSize // a FIN below data already received
+		}
+		r.fin, r.finalSize = true, end
+	}
+	if end > r.highest {
+		r.highest = end
 	}
 	r.insert(offset, data)
+	return nil
 }
 
 func (r *recvStream) insert(offset uint64, data []byte) {
