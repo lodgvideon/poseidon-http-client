@@ -13,6 +13,8 @@ type quicStream interface {
 	Send(data []byte, fin bool) (int, error)
 	Recv() []byte
 	Finished() bool
+	Reset(errCode uint64) error
+	StopSending(errCode uint64) error
 }
 
 // quicConn is the QUIC connection surface the client uses. A connAdapter over
@@ -27,8 +29,9 @@ type quicConn interface {
 // HTTP/3 error codes (RFC 9114 §8.1), carried in the QUIC application
 // CONNECTION_CLOSE frame.
 const (
-	H3NoError       uint64 = 0x0100 // H3_NO_ERROR
-	H3InternalError uint64 = 0x0102 // H3_INTERNAL_ERROR
+	H3NoError          uint64 = 0x0100 // H3_NO_ERROR
+	H3InternalError    uint64 = 0x0102 // H3_INTERNAL_ERROR
+	H3RequestCancelled uint64 = 0x010c // H3_REQUEST_CANCELLED
 )
 
 // connAdapter lets a concrete *quic.Conn satisfy quicConn — the interface methods
@@ -112,9 +115,9 @@ func sendAll(ctx context.Context, conn quicConn, stream quicStream, data []byte,
 // HEADERS frame is sent with FIN.
 //
 // ctx bounds the whole exchange: a cancel or deadline unblocks the receive loop
-// and Do returns ctx.Err(). Because stream reset is not yet implemented, a
-// context error leaves the request stream orphaned — the Client must be Closed
-// and not reused after a cancelled Do.
+// and Do returns ctx.Err(). On any error (a context cancel, or a malformed
+// response) the request stream is aborted with STOP_SENDING and RESET_STREAM so
+// the server frees it and stops sending (RFC 9000 §3.5, RFC 9114 §4.1).
 func (c *Client) Do(ctx context.Context, req *Request) (*Response, []byte, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, nil, err
@@ -123,6 +126,18 @@ func (c *Client) Do(ctx context.Context, req *Request) (*Response, []byte, error
 	if err != nil {
 		return nil, nil, err
 	}
+	resp, body, err := c.roundTrip(ctx, stream, req)
+	if err != nil {
+		// Best-effort abort of the abandoned exchange.
+		_ = stream.StopSending(H3RequestCancelled)
+		_ = stream.Reset(H3RequestCancelled)
+	}
+	return resp, body, err
+}
+
+// roundTrip sends the request on stream and reads the response. Its caller aborts
+// the stream on a non-nil error.
+func (c *Client) roundTrip(ctx context.Context, stream quicStream, req *Request) (*Response, []byte, error) {
 	frame, err := req.EncodeHeaders(&c.enc, nil)
 	if err != nil {
 		return nil, nil, err

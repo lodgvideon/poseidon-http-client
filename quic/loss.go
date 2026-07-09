@@ -8,6 +8,8 @@ type retransKind uint8
 const (
 	retransCrypto retransKind = iota
 	retransStream
+	retransReset       // RESET_STREAM
+	retransStopSending // STOP_SENDING
 )
 
 // retransFrame is the information needed to re-send a lost frame's data as a new
@@ -16,18 +18,25 @@ const (
 // original send buffer cannot corrupt a later retransmission.
 type retransFrame struct {
 	kind     retransKind
-	streamID uint64 // retransStream only
+	streamID uint64 // stream frames; offset doubles as the final size for retransReset
 	offset   uint64
-	fin      bool // retransStream only
+	fin      bool   // retransStream only
+	errCode  uint64 // retransReset / retransStopSending only
 	data     []byte
 }
 
-// encode appends the frame to dst at its original offset.
+// encode appends the frame to dst (STREAM/CRYPTO at their original offset).
 func (rf retransFrame) encode(dst []byte) []byte {
-	if rf.kind == retransStream {
+	switch rf.kind {
+	case retransStream:
 		return AppendStream(dst, rf.streamID, rf.offset, rf.fin, rf.data)
+	case retransReset:
+		return AppendResetStream(dst, rf.streamID, rf.errCode, rf.offset)
+	case retransStopSending:
+		return AppendStopSending(dst, rf.streamID, rf.errCode)
+	default:
+		return AppendCrypto(dst, rf.offset, rf.data)
 	}
-	return AppendCrypto(dst, rf.offset, rf.data)
 }
 
 // detectLost declares packets in space sp lost and queues their retransmittable

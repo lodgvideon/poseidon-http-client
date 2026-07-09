@@ -13,7 +13,11 @@ type fakeStream struct {
 	finSent    bool
 	recvChunks [][]byte
 	fin        bool
-	sendCap    int // max bytes accepted per Send (0 = unlimited); models flow control
+	sendCap    int  // max bytes accepted per Send (0 = unlimited); models flow control
+	reset      bool // Reset was called
+	stopped    bool // StopSending was called
+	resetCode  uint64
+	stopCode   uint64
 }
 
 func (s *fakeStream) Send(data []byte, fin bool) (int, error) {
@@ -40,6 +44,9 @@ func (s *fakeStream) Recv() []byte {
 // Finished reports end-of-stream once the FIN is set and every queued chunk has
 // been handed out.
 func (s *fakeStream) Finished() bool { return s.fin && len(s.recvChunks) == 0 }
+
+func (s *fakeStream) Reset(code uint64) error       { s.resetCode = code; s.reset = true; return nil }
+func (s *fakeStream) StopSending(code uint64) error { s.stopCode = code; s.stopped = true; return nil }
 
 type fakeConn struct {
 	control    *fakeStream

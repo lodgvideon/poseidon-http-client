@@ -260,6 +260,13 @@ func (c *Conn) flush() error {
 		for len(c.retransQueue[sp]) > 0 {
 			rf := c.retransQueue[sp][0]
 			c.retransQueue[sp] = c.retransQueue[sp][1:]
+			// RFC 9000 §13.3: once RESET_STREAM has been sent for a stream, its
+			// STREAM data is not retransmitted. Drop stale queued STREAM frames.
+			if rf.kind == retransStream {
+				if s := c.streams[rf.streamID]; s != nil && s.sendReset {
+					continue
+				}
+			}
 			pkt, err := c.sealPacket(sp, rf.encode(nil), true, []retransFrame{rf})
 			if err != nil {
 				return err
@@ -441,6 +448,28 @@ func (h *connFrameHandler) OnStream(id, offset uint64, fin bool, data []byte) er
 	// are ignored until stream acceptance is implemented.
 	if s := h.c.streams[id]; s != nil {
 		s.recv.receive(offset, data, fin)
+	}
+	return nil
+}
+
+// OnResetStream records that the peer abruptly ended its send side of a stream
+// (RFC 9000 §3.5): the receive side is now finished (abnormally). Whatever was
+// received contiguously before the reset remains readable.
+func (h *connFrameHandler) OnResetStream(id, _, _ uint64) error {
+	h.ackEliciting = true
+	if s := h.c.streams[id]; s != nil {
+		s.recvReset = true
+	}
+	return nil
+}
+
+// OnStopSending handles the peer asking us to stop sending on a stream (RFC 9000
+// §3.5): the endpoint SHOULD respond by resetting its send side with the same
+// application error code.
+func (h *connFrameHandler) OnStopSending(id, errCode uint64) error {
+	h.ackEliciting = true
+	if s := h.c.streams[id]; s != nil {
+		_ = s.Reset(errCode)
 	}
 	return nil
 }

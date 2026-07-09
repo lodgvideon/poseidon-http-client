@@ -45,4 +45,11 @@ func TestClientDo_ContextCancelMidRequest(t *testing.T) {
 	if _, _, err := client.Do(ctx, req); err != context.Canceled {
 		t.Fatalf("Do cancelled mid-request = %v, want context.Canceled", err)
 	}
+	// The abandoned request stream is aborted so the server frees it.
+	if !conn.req.stopped || !conn.req.reset {
+		t.Fatalf("cancelled Do must abort the stream: stopped=%v reset=%v", conn.req.stopped, conn.req.reset)
+	}
+	if conn.req.stopCode != H3RequestCancelled || conn.req.resetCode != H3RequestCancelled {
+		t.Fatalf("abort codes = stop %#x reset %#x, want H3_REQUEST_CANCELLED", conn.req.stopCode, conn.req.resetCode)
+	}
 }
