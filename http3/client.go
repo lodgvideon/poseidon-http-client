@@ -131,7 +131,9 @@ func (c *Client) Do(req *Request) (*Response, []byte, error) {
 
 	var fr FrameReader
 	var resp *Response
+	var interim []*Response
 	var body []byte
+	var trailersSeen bool
 	for {
 		if data := stream.Recv(); len(data) > 0 {
 			fr.Feed(data)
@@ -143,16 +145,34 @@ func (c *Client) Do(req *Request) (*Response, []byte, error) {
 			}
 			switch typ {
 			case FrameHeaders:
-				if resp == nil {
-					if resp, err = DecodeResponseHeaders(&c.dec, payload); err != nil {
-						return nil, nil, err
-					}
+				// Message order (RFC 9114 §4.1): (1xx HEADERS)* final HEADERS
+				// DATA* trailer-HEADERS?. Nothing may follow the trailers.
+				if trailersSeen {
+					return nil, nil, ErrH3FrameUnexpected
 				}
-				// A later HEADERS frame is a trailer or 1xx interim section;
-				// handling those is deferred to a later phase.
-			case FrameData:
 				if resp == nil {
-					return nil, nil, ErrH3FrameUnexpected // DATA before HEADERS (§4.1)
+					r, derr := DecodeResponseHeaders(&c.dec, payload)
+					if derr != nil {
+						return nil, nil, derr
+					}
+					if r.Status < 200 {
+						interim = append(interim, r) // informational 1xx; keep reading
+					} else {
+						resp = r
+					}
+				} else {
+					tr, derr := DecodeTrailers(&c.dec, payload)
+					if derr != nil {
+						return nil, nil, derr
+					}
+					resp.Trailers = tr
+					trailersSeen = true
+				}
+			case FrameData:
+				if resp == nil || trailersSeen {
+					// DATA before the final response, after a 1xx (which has no
+					// body), or after the trailers (§4.1).
+					return nil, nil, ErrH3FrameUnexpected
 				}
 				body = append(body, payload...)
 			}
@@ -167,7 +187,8 @@ func (c *Client) Do(req *Request) (*Response, []byte, error) {
 		}
 	}
 	if resp == nil {
-		return nil, nil, ErrH3Message // response had no HEADERS frame
+		return nil, nil, ErrH3Message // no final (non-1xx) response
 	}
+	resp.Interim = interim
 	return resp, body, nil
 }
