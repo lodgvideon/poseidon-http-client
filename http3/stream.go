@@ -20,6 +20,11 @@ const (
 // a protocol error.
 var ErrNeedMore = errors.New("http3: need more bytes")
 
+// ErrH3FrameTooLarge reports that a frame's declared length exceeds the reader's
+// configured cap (RFC 9114 §7.1 / H3_EXCESSIVE_LOAD). It is a fatal protocol
+// error, not a benign need-more signal.
+var ErrH3FrameTooLarge = errors.New("http3: frame length exceeds cap")
+
 // ReadStreamType reads the leading stream-type varint of a unidirectional stream
 // (RFC 9114 §6.2), returning the type and the bytes consumed. It returns
 // ErrNeedMore if the varint is not yet fully present.
@@ -37,23 +42,30 @@ func ReadStreamType(b []byte) (typ uint64, n int, err error) {
 // bounded-frame streams; large DATA bodies are streamed by a later phase rather
 // than buffered whole.
 type FrameReader struct {
-	buf []byte
+	buf    []byte
+	maxLen uint64 // reject a declared frame length above this (0 = unlimited)
 }
+
+// SetMaxFrameLen bounds the declared length of a frame the reader will buffer, so
+// a peer cannot force unbounded buffering by declaring a huge length. Zero (the
+// default) is unlimited; the control-stream reader sets a small cap.
+func (r *FrameReader) SetMaxFrameLen(max uint64) { r.maxLen = max }
 
 // Feed appends received stream bytes to the reader's buffer.
 func (r *FrameReader) Feed(b []byte) { r.buf = append(r.buf, b...) }
 
 // ReadFrame returns the next complete frame's type and payload, or ErrNeedMore
-// if it is not yet fully buffered. The returned payload aliases the reader's
-// buffer and is valid only until the next Feed or ReadFrame call.
+// if it is not yet fully buffered. It returns ErrH3FrameTooLarge if the frame's
+// declared length exceeds the reader's cap. The returned payload aliases the
+// reader's buffer and is valid only until the next Feed or ReadFrame call.
 func (r *FrameReader) ReadFrame() (typ uint64, payload []byte, err error) {
 	typ, length, n, herr := ParseFrameHeader(r.buf)
 	if herr != nil {
 		return 0, nil, ErrNeedMore
 	}
-	// TODO(flow-control): cap length against a max frame size before buffering,
-	// once receive-side flow control lands — a huge declared length otherwise
-	// forces unbounded buffering.
+	if r.maxLen != 0 && length > r.maxLen {
+		return 0, nil, ErrH3FrameTooLarge // do not buffer an oversized frame
+	}
 	if uint64(len(r.buf)-n) < length { // payload not fully buffered yet
 		return 0, nil, ErrNeedMore
 	}

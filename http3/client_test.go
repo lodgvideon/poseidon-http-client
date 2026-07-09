@@ -9,6 +9,7 @@ import (
 // fakeStream records what the client sends and hands back queued response chunks
 // (one per Recv), modeling stream data arriving across several Poll calls.
 type fakeStream struct {
+	id         uint64
 	sent       []byte
 	finSent    bool
 	recvChunks [][]byte
@@ -19,6 +20,8 @@ type fakeStream struct {
 	resetCode  uint64
 	stopCode   uint64
 }
+
+func (s *fakeStream) ID() uint64 { return s.id }
 
 func (s *fakeStream) Send(data []byte, fin bool) (int, error) {
 	n := len(data)
@@ -54,9 +57,19 @@ type fakeConn struct {
 	polls      int
 	uniSendCap int                         // send cap applied to the control stream
 	pollHook   func(context.Context) error // overrides Poll when set (for ctx tests)
+	acceptQ    []quicStream                // server uni streams handed out by AcceptUniStream
 	closeApp   bool                        // captured CloseWithError arguments
 	closeCode  uint64
 	closed     bool
+}
+
+func (c *fakeConn) AcceptUniStream() quicStream {
+	if len(c.acceptQ) == 0 {
+		return nil
+	}
+	s := c.acceptQ[0]
+	c.acceptQ = c.acceptQ[1:]
+	return s
 }
 
 func (c *fakeConn) OpenUniStream() (quicStream, error) {
