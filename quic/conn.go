@@ -284,6 +284,10 @@ func (c *Conn) discardSpace(sp int) {
 	c.cryptoRecv[sp] = recvStream{}
 	c.pendingCrypto[sp] = nil
 	c.retransQueue[sp] = nil
+	// Discarding a packet-number space is forward progress, so the PTO backoff is
+	// reset (RFC 9002 §6.2.2, App. A.4); otherwise a Handshake-space backoff would
+	// carry into the Application space and inflate its first probe timeout.
+	c.ptoCount = 0
 	switch sp {
 	case spaceInitial:
 		c.keys.Initial = nil

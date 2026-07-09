@@ -56,6 +56,17 @@ func TestConn_PTOCount_ResetOnAck(t *testing.T) {
 	}
 }
 
+// TestConformance_RFC9002_Sec622_PTOCountResetOnKeyDiscard checks that discarding
+// a packet-number space (Initial or Handshake keys) resets the PTO backoff count,
+// since the discard is forward progress (RFC 9002 §6.2.2, App. A.4).
+func TestConformance_RFC9002_Sec622_PTOCountResetOnKeyDiscard(t *testing.T) {
+	c := &Conn{ptoCount: 3}
+	c.discardSpace(spaceHandshake)
+	if c.ptoCount != 0 {
+		t.Fatalf("ptoCount = %d after discarding Handshake keys, want 0", c.ptoCount)
+	}
+}
+
 // deadlinePC times out on the first read (a simulated PTO expiry) then returns a
 // canned datagram, recording writes (probes) and that a deadline was set.
 type deadlinePC struct {
