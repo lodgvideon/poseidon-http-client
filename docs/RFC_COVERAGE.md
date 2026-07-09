@@ -243,6 +243,7 @@ protection (RFC 9001) and the connection engine are later phases.
 | §19.12  | Conformance | TestConformance_RFC9000_Sec1912_DataBlocked (zero conn credit → DATA_BLOCKED) |
 | §19.13  | Conformance | TestConformance_RFC9000_Sec1913_StreamDataBlocked (zero stream credit → STREAM_DATA_BLOCKED, once per limit) |
 | §4.5    | Conformance | TestConformance_RFC9000_Sec45_FinBypassesFlowControl (a FIN consumes no credit — bare FIN sent at zero credit), TestConformance_RFC9000_Sec45_FinalSizeLatch (Send after FIN → ErrStreamFinished) |
+| §10.2   | Unit        | TestConn_CloseWithError_SendsAppConnectionClose (CloseWithError emits one CONNECTION_CLOSE on the 1-RTT space and closes the transport), TestConn_Close_Idempotent (a second Close sends nothing more), TestConn_CloseWithError_DowngradesAppBeforeOneRTT (§10.2.3: an application close before 1-RTT is sent as a transport CONNECTION_CLOSE with APPLICATION_ERROR) |
 | §4.1    | Unit        | TestConn_SendStream_Wire (client Send → decrypt → STREAM bytes match), TestStream_Grantable_Unit (credit-clamp accounting), TestStream_Send_NotEstablished (Send before 1-RTT keys → ErrNotEstablished) |
 
 ## RFC 9001 — Using TLS to Secure QUIC (Phase G — HTTP/3)
@@ -357,6 +358,7 @@ exercised in the Docker-peer interop phase.
 | §4.1.2  | Negative    | TestConformance_RFC9114_Sec412_MalformedResponse (missing/duplicate/out-of-range :status, pseudo-after-regular, non-:status pseudo, uppercase/space name, CR-LF value, connection-specific / te≠trailers → ErrH3Message) |
 | §6.2.1 / §4 | Integration | TestClient_RequestResponse (client opens control stream + SETTINGS, sends a request, decodes response HEADERS + DATA over a Poll loop), TestClient_SendDrainsUnderFlowControl (partial Send is drained so the request/SETTINGS are never truncated) |
 | §4.1    | Negative    | TestClient_DataBeforeHeaders (DATA before HEADERS on a request stream → ErrH3FrameUnexpected = H3_FRAME_UNEXPECTED) |
+| §8.1    | Unit        | TestClient_Close (Client.Close sends an application CONNECTION_CLOSE with H3_NO_ERROR through the QUIC connection) |
 | §3.1    | Unit        | TestH3TLSConfig (Dial applies the "h3" ALPN token and a TLS 1.3 floor), TestUDPConn_Loopback / TestUDPConn_ReadDeadline (UDP PacketConn adapter), TestDialConn_EstablishError (dial closes the transport on handshake failure) |
 | Whole stack | Interop | TestInterop_GET / _POST / _LargeResponse (build tag `interop`) — against a live Caddy (quic-go) server over UDP: a GET → 200, a POST with a body (DATA frame) → 200, and a 16 KiB response reassembled correctly (many DATA/STREAM frames across datagrams). Harness: `make h3-interop` (test/integration/http3). Validates the full path end-to-end against an independent implementation. |
 
