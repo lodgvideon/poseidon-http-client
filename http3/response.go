@@ -6,10 +6,14 @@ import (
 )
 
 // Response is the parsed head of an HTTP/3 response: the :status pseudo-header
-// and the regular response header fields.
+// and the regular response header fields. Interim holds any informational (1xx)
+// responses that preceded the final one, and Trailers the trailing field section
+// that followed the body, both in receive order (RFC 9114 §4.1).
 type Response struct {
-	Status  int
-	Headers []hpack.HeaderField
+	Status   int
+	Headers  []hpack.HeaderField
+	Interim  []*Response
+	Trailers []hpack.HeaderField
 }
 
 // DecodeResponseHeaders QPACK-decodes a HEADERS field section into a Response,
@@ -60,6 +64,33 @@ func DecodeResponseHeaders(dec *qpack.Decoder, fieldSection []byte) (*Response, 
 		return nil, ErrH3Message
 	}
 	return resp, nil
+}
+
+// DecodeTrailers QPACK-decodes a trailing HEADERS field section into its regular
+// header fields (RFC 9114 §4.1). A trailer section carries no pseudo-headers, so
+// any field name beginning with ':' (or an empty name) is a malformed message;
+// regular names/values are validated exactly as in a header section (§4.2, §5.5).
+// It returns ErrH3Message for a rule violation, or qpack.ErrDecompressionFailed
+// if the field section itself is malformed.
+func DecodeTrailers(dec *qpack.Decoder, fieldSection []byte) ([]hpack.HeaderField, error) {
+	var fields []hpack.HeaderField
+	err := dec.DecodeFieldSection(fieldSection, func(name, value []byte) error {
+		if len(name) == 0 || name[0] == ':' {
+			return ErrH3Message // trailers carry no pseudo-headers (§4.3)
+		}
+		if !validFieldName(name) || !validFieldValue(value) || forbiddenField(name, value) {
+			return ErrH3Message
+		}
+		fields = append(fields, hpack.HeaderField{
+			Name:  append([]byte(nil), name...),
+			Value: append([]byte(nil), value...),
+		})
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return fields, nil
 }
 
 // parseStatus parses a :status value: exactly three ASCII digits in the valid
