@@ -1,5 +1,33 @@
 package quic
 
+import "errors"
+
+// closeCodeFor maps a local protocol-violation error to the transport error code
+// to signal in a CONNECTION_CLOSE (RFC 9000 §10.2, §20.1). The bool is false for
+// errors that are not connection errors to signal — I/O failures, read timeouts,
+// or a peer-initiated close.
+func closeCodeFor(err error) (uint64, bool) {
+	switch {
+	case errors.Is(err, ErrFrameEncoding):
+		return ErrCodeFrameEncodingError, true
+	case errors.Is(err, ErrTransportParameter):
+		return ErrCodeTransportParameterError, true
+	default:
+		return 0, false
+	}
+}
+
+// fail handles a local error from the receive path: if it is a protocol violation
+// (closeCodeFor), the connection sends a CONNECTION_CLOSE with the matching
+// transport error code (RFC 9000 §10.2) so the peer learns why, then the error is
+// returned unchanged. Non-protocol errors pass through without sending anything.
+func (c *Conn) fail(err error) error {
+	if code, ok := closeCodeFor(err); ok {
+		_ = c.CloseWithError(false, code, "")
+	}
+	return err
+}
+
 // CloseWithError terminates the connection by sending a single CONNECTION_CLOSE
 // frame (RFC 9000 §10.2) and closing the underlying transport. app selects the
 // application-error variant (0x1d) over the transport variant (0x1c); code is the
