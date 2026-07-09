@@ -111,6 +111,36 @@ func TestConformance_RFC9114_Sec726_GoAwayNonRequestStreamID(t *testing.T) {
 	}
 }
 
+// TestConformance_RFC9114_Sec723_CancelPushRejected checks that a CANCEL_PUSH on
+// the control stream — the client never sent MAX_PUSH_ID, so any push ID is out
+// of range — is a H3_ID_ERROR connection error (RFC 9114 §7.2.3).
+func TestConformance_RFC9114_Sec723_CancelPushRejected(t *testing.T) {
+	server := &fakeStream{id: 3, recvChunks: [][]byte{serverControl(nil, AppendCancelPush(nil, 0)...)}}
+	conn := &fakeConn{req: &fakeStream{}, acceptQ: []quicStream{server}}
+	client, _ := NewClientFake(conn, nil)
+	if err := client.serviceControl(); err != ErrH3Control {
+		t.Fatalf("serviceControl = %v, want ErrH3Control", err)
+	}
+	if conn.closeCode != H3IDError {
+		t.Fatalf("close code = %#x, want H3_ID_ERROR", conn.closeCode)
+	}
+}
+
+// TestConformance_RFC9114_Sec71_CancelPushMalformed checks that a CANCEL_PUSH with
+// no push-ID varint (empty payload) is a H3_FRAME_ERROR connection error (§7.1).
+func TestConformance_RFC9114_Sec71_CancelPushMalformed(t *testing.T) {
+	bad := AppendFrameHeader(nil, FrameCancelPush, 0) // empty payload — no push ID
+	server := &fakeStream{id: 3, recvChunks: [][]byte{serverControl(nil, bad...)}}
+	conn := &fakeConn{req: &fakeStream{}, acceptQ: []quicStream{server}}
+	client, _ := NewClientFake(conn, nil)
+	if err := client.serviceControl(); err != ErrH3Control {
+		t.Fatalf("serviceControl = %v, want ErrH3Control", err)
+	}
+	if conn.closeCode != H3FrameError {
+		t.Fatalf("close code = %#x, want H3_FRAME_ERROR", conn.closeCode)
+	}
+}
+
 // TestConformance_RFC9114_Sec625_PushStreamRejected checks that a server push
 // stream (we sent no MAX_PUSH_ID) is a H3_ID_ERROR connection error.
 func TestConformance_RFC9114_Sec625_PushStreamRejected(t *testing.T) {
