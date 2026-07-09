@@ -2,10 +2,6 @@ package quic
 
 import "time"
 
-// ackDelayExponent is the default peer ack_delay_exponent (RFC 9000 §18.2): the
-// ACK Delay field is decoded by shifting left this many bits, in microseconds.
-const ackDelayExponent = 3
-
 // Loss-detection constants (RFC 9002 §6.1).
 const (
 	kPacketThreshold uint64        = 3                // §6.1.1
