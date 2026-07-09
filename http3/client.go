@@ -3,6 +3,7 @@ package http3
 import (
 	"context"
 	"errors"
+	"fmt"
 
 	"github.com/lodgvideon/poseidon-http-client/qpack"
 	"github.com/lodgvideon/poseidon-http-client/quic"
@@ -16,6 +17,7 @@ type quicStream interface {
 	Recv() []byte
 	Finished() bool
 	ResetReceived() bool
+	ResetCode() uint64
 	Reset(errCode uint64) error
 	StopSending(errCode uint64) error
 }
@@ -54,8 +56,24 @@ const (
 	H3IDError              uint64 = 0x0108 // H3_ID_ERROR
 	H3SettingsErrorCode    uint64 = 0x0109 // H3_SETTINGS_ERROR
 	H3MissingSettings      uint64 = 0x010a // H3_MISSING_SETTINGS
+	H3RequestRejected      uint64 = 0x010b // H3_REQUEST_REJECTED
 	H3RequestCancelled     uint64 = 0x010c // H3_REQUEST_CANCELLED
 )
+
+// StreamResetError reports that the server abruptly aborted the request stream
+// with RESET_STREAM (RFC 9000 §3.5) before the response finished. Code is the
+// HTTP/3 application error code the server signalled (RFC 9114 §8.1).
+type StreamResetError struct{ Code uint64 }
+
+// Error implements error.
+func (e *StreamResetError) Error() string {
+	return fmt.Sprintf("http3: server reset the request stream (error %#x)", e.Code)
+}
+
+// Retryable reports whether the reset means the request received no application
+// processing and is safe to retry on a new connection — the server signalled
+// H3_REQUEST_REJECTED (RFC 9114 §4.1.1).
+func (e *StreamResetError) Retryable() bool { return e.Code == H3RequestRejected }
 
 // connAdapter lets a concrete *quic.Conn satisfy quicConn — the interface methods
 // return quicStream where *quic.Conn returns the concrete *quic.Stream.
@@ -275,11 +293,18 @@ func (c *Client) roundTrip(ctx context.Context, stream quicStream, req *Request)
 			}
 		}
 		if stream.Finished() {
-			if fr.Buffered() > 0 && !stream.ResetReceived() {
+			if stream.ResetReceived() {
+				// The server aborted the response with RESET_STREAM (RFC 9000 §3.5).
+				// Surface the application error code so the caller can distinguish a
+				// rejected (retryable) request from a completed one (RFC 9114 §4.1.1),
+				// rather than returning a truncated body as a success. A reset is an
+				// abrupt end, so its mid-frame position is not an §7.1 frame error.
+				return nil, nil, &StreamResetError{Code: stream.ResetCode()}
+			}
+			if fr.Buffered() > 0 {
 				// The stream ended cleanly in the middle of a frame — the last frame
 				// was truncated by the clean end of the stream (RFC 9114 §7.1): a
-				// connection error H3_FRAME_ERROR. A RESET_STREAM (an abrupt end) may
-				// fall mid-frame and is not a frame error — the request was aborted.
+				// connection error H3_FRAME_ERROR.
 				return nil, nil, c.connError(H3FrameError)
 			}
 			break

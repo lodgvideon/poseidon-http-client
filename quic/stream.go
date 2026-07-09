@@ -18,6 +18,7 @@ type Stream struct {
 	recvMax        uint64 // per-stream receive limit we advertise; raised via MAX_STREAM_DATA
 	recvHighest    uint64 // highest byte offset received on this stream (flow control, §4.1)
 	recvReset      bool   // peer sent RESET_STREAM — the receive side is aborted (§3.5)
+	recvResetCode  uint64 // the application error code carried by that RESET_STREAM (§19.4)
 }
 
 // ID returns the stream's QUIC stream identifier.
@@ -84,6 +85,11 @@ func (s *Stream) Finished() bool { return s.recvReset || s.recv.complete() }
 // (RFC 9000 §3.5) — an abrupt end that, unlike a clean FIN, may fall in the
 // middle of a frame. Callers distinguish it from a clean, complete receive.
 func (s *Stream) ResetReceived() bool { return s.recvReset }
+
+// ResetCode returns the application error code the peer carried in its
+// RESET_STREAM (RFC 9000 §19.4); it is meaningful only when ResetReceived is
+// true. An HTTP/3 caller maps it to a request-level error (RFC 9114 §8.1).
+func (s *Stream) ResetCode() uint64 { return s.recvResetCode }
 
 // maybeRetire drops a stream from the routing map once both directions have
 // reached a terminal state — the FIN has been sent and the receive side is

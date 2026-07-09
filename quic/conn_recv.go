@@ -485,11 +485,14 @@ func (h *connFrameHandler) OnStream(id, offset uint64, fin bool, data []byte) er
 // OnResetStream records that the peer abruptly ended its send side of a stream
 // (RFC 9000 §3.5): the receive side is now finished (abnormally). Whatever was
 // received contiguously before the reset remains readable.
-func (h *connFrameHandler) OnResetStream(id, _, finalSize uint64) error {
+func (h *connFrameHandler) OnResetStream(id, errCode, finalSize uint64) error {
 	h.ackEliciting = true
 	s := h.c.streams[id]
 	if s == nil {
 		return nil
+	}
+	if s.recv.complete() {
+		return nil // the whole stream was already received; a later reset has no effect (§3.5)
 	}
 	// The final size accounts for every byte the peer sent on the stream (RFC 9000
 	// §4.5): it may not fall below data already received, may not exceed the
@@ -510,7 +513,8 @@ func (h *connFrameHandler) OnResetStream(id, _, finalSize uint64) error {
 		s.recvHighest = finalSize
 	}
 	s.recvReset = true
-	h.c.maybeRetire(s) // receive side terminal (reset) + our FIN sent → drop from the map
+	s.recvResetCode = errCode // surfaced to the application (RFC 9114 §8.1 request error)
+	h.c.maybeRetire(s)        // receive side terminal (reset) + our FIN sent → drop from the map
 	return nil
 }
 

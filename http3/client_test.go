@@ -3,6 +3,7 @@ package http3
 import (
 	"bytes"
 	"context"
+	"errors"
 	"testing"
 )
 
@@ -12,10 +13,11 @@ type fakeStream struct {
 	id         uint64
 	sent       []byte
 	finSent    bool
-	recvChunks [][]byte
-	fin        bool
-	recvReset  bool // the peer reset its send side (RESET_STREAM received)
-	sendCap    int  // max bytes accepted per Send (0 = unlimited); models flow control
+	recvChunks    [][]byte
+	fin           bool
+	recvReset     bool   // the peer reset its send side (RESET_STREAM received)
+	recvResetCode uint64 // the application error code carried by that RESET_STREAM
+	sendCap       int    // max bytes accepted per Send (0 = unlimited); models flow control
 	reset      bool // Reset was called
 	stopped    bool // StopSending was called
 	resetCode  uint64
@@ -50,6 +52,7 @@ func (s *fakeStream) Recv() []byte {
 func (s *fakeStream) Finished() bool { return s.recvReset || (s.fin && len(s.recvChunks) == 0) }
 
 func (s *fakeStream) ResetReceived() bool { return s.recvReset }
+func (s *fakeStream) ResetCode() uint64   { return s.recvResetCode }
 
 func (s *fakeStream) Reset(code uint64) error       { s.resetCode = code; s.reset = true; return nil }
 func (s *fakeStream) StopSending(code uint64) error { s.stopCode = code; s.stopped = true; return nil }
@@ -310,20 +313,45 @@ func TestConformance_RFC9114_Sec71_TruncatedHeaderAtStreamEnd(t *testing.T) {
 	}
 }
 
-// TestClient_RequestStreamReset_NoFrameError checks that a server RESET_STREAM
-// that falls mid-frame is an abrupt end (a per-request abort), not the clean-FIN
-// truncation of §7.1 — the connection is not torn down with H3_FRAME_ERROR.
-func TestClient_RequestStreamReset_NoFrameError(t *testing.T) {
+// TestConformance_RFC9114_Sec411_RequestReset checks that a server RESET_STREAM
+// aborting the response surfaces as a StreamResetError carrying the application
+// error code — not the §7.1 truncation frame error and not a truncated-body
+// success — and that H3_REQUEST_REJECTED is reported retryable (§4.1.1). The
+// connection is not torn down.
+func TestConformance_RFC9114_Sec411_RequestReset(t *testing.T) {
 	headers := AppendHeaders(nil, encodeSection(hf(":status", "200")))
 	partial := AppendFrameHeader(nil, FrameData, 10) // declares 10 bytes
 	partial = append(partial, []byte("abc")...)      // only 3 arrive, then a reset
-	conn := &fakeConn{req: &fakeStream{recvChunks: [][]byte{append(headers, partial...)}, recvReset: true}}
+	conn := &fakeConn{req: &fakeStream{recvChunks: [][]byte{append(headers, partial...)}, recvReset: true, recvResetCode: H3RequestRejected}}
 	client, _ := NewClientFake(conn, nil)
-	if _, _, err := client.Do(context.Background(), &Request{Method: "GET", Scheme: "https", Authority: "h", Path: "/"}); err == ErrH3Control {
-		t.Fatal("a RESET_STREAM must not be treated as a §7.1 clean-FIN truncation")
+	_, _, err := client.Do(context.Background(), &Request{Method: "GET", Scheme: "https", Authority: "h", Path: "/"})
+	var rst *StreamResetError
+	if !errors.As(err, &rst) {
+		t.Fatalf("err = %v, want *StreamResetError", err)
+	}
+	if rst.Code != H3RequestRejected {
+		t.Fatalf("reset code = %#x, want H3_REQUEST_REJECTED", rst.Code)
+	}
+	if !rst.Retryable() {
+		t.Fatal("H3_REQUEST_REJECTED should be reported retryable")
 	}
 	if conn.closeCode == H3FrameError {
-		t.Fatalf("connection closed with H3_FRAME_ERROR on a RESET_STREAM (%#x)", conn.closeCode)
+		t.Fatalf("connection torn down with H3_FRAME_ERROR on a reset (%#x)", conn.closeCode)
+	}
+}
+
+// TestClient_RequestReset_NonRetryable checks that a reset with a code other than
+// H3_REQUEST_REJECTED is surfaced but not reported retryable.
+func TestClient_RequestReset_NonRetryable(t *testing.T) {
+	conn := &fakeConn{req: &fakeStream{recvReset: true, recvResetCode: H3RequestCancelled}}
+	client, _ := NewClientFake(conn, nil)
+	_, _, err := client.Do(context.Background(), &Request{Method: "GET", Scheme: "https", Authority: "h", Path: "/"})
+	var rst *StreamResetError
+	if !errors.As(err, &rst) || rst.Code != H3RequestCancelled {
+		t.Fatalf("err = %v, want *StreamResetError{H3_REQUEST_CANCELLED}", err)
+	}
+	if rst.Retryable() {
+		t.Fatal("H3_REQUEST_CANCELLED must not be reported retryable")
 	}
 }
 
