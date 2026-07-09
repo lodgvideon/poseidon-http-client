@@ -366,6 +366,7 @@ exercised in the Docker-peer interop phase.
 | §4.2    | Negative    | TestConformance_RFC9114_Sec42_RequestValidation (missing pseudo-header / uppercase / connection-specific / CR-LF value → ErrH3Message; client never emits a malformed request) |
 | §4.1.2 / §4.3.2 | Conformance | TestConformance_RFC9114_Sec412_ResponseDecode (:status + regular headers decoded) |
 | §4.1.2  | Negative    | TestConformance_RFC9114_Sec412_MalformedResponse (missing/duplicate/out-of-range :status, pseudo-after-regular, non-:status pseudo, uppercase/space name, CR-LF value, connection-specific / te≠trailers → ErrH3Message) |
+| §4.1.2  | Conformance | TestConformance_RFC9114_Sec412_ContentLengthMismatch (Content-Length ≠ Σ DATA payloads → malformed, stream aborted H3_MESSAGE_ERROR), TestConformance_RFC9114_Sec412_ContentLengthMatch, TestClient_ContentLength_NoContentStatusExempt (204/304 anticipatory length exempt), TestClient_ContentLength_ConflictingMalformed (conflicting Content-Length → malformed) |
 | §6.2.1 / §4 | Integration | TestClient_RequestResponse (client opens control stream + SETTINGS, sends a request, decodes response HEADERS + DATA over a Poll loop), TestClient_SendDrainsUnderFlowControl (partial Send is drained so the request/SETTINGS are never truncated) |
 | §4.1    | Negative    | TestClient_DataBeforeHeaders (DATA before HEADERS on a request stream → ErrH3FrameUnexpected = H3_FRAME_UNEXPECTED) |
 | §8.1    | Unit        | TestClient_Close (Client.Close sends an application CONNECTION_CLOSE with H3_NO_ERROR through the QUIC connection) |
