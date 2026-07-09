@@ -12,6 +12,8 @@ func closeCodeFor(err error) (uint64, bool) {
 		return ErrCodeFrameEncodingError, true
 	case errors.Is(err, ErrTransportParameter):
 		return ErrCodeTransportParameterError, true
+	case errors.Is(err, ErrTooManyUniStreams), errors.Is(err, ErrServerBidiStream):
+		return ErrCodeStreamLimitError, true
 	default:
 		return 0, false
 	}
