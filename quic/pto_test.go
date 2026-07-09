@@ -1,6 +1,7 @@
 package quic
 
 import (
+	"context"
 	"testing"
 	"time"
 )
@@ -95,7 +96,7 @@ func TestConn_ReadWithPTO_ProbesOnTimeout(t *testing.T) {
 	c.sent[spaceApp].onSent(0, base, true, streamFrame(0, 0, "req")) // in flight, probeable
 
 	buf := make([]byte, 64)
-	n, err := c.readWithPTO(buf)
+	n, err := c.readWithPTO(context.Background(), buf)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -1,6 +1,7 @@
 package quic
 
 import (
+	"context"
 	"testing"
 	"time"
 )
@@ -60,7 +61,7 @@ func TestConn_Poll_DeliversStreamData(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := c.Poll(); err != nil {
+	if err := c.Poll(context.Background()); err != nil {
 		t.Fatalf("Poll: %v", err)
 	}
 	if got := string(s.Recv()); got != "response body" {
@@ -142,7 +143,7 @@ func TestConn_Poll_DrainsBufferedBurst(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := c.Poll(); err != nil {
+	if err := c.Poll(context.Background()); err != nil {
 		t.Fatalf("Poll: %v", err)
 	}
 	if got, want := string(s.Recv()), "aaaabbbbccccdddd"; got != want {

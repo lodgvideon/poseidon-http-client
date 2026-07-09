@@ -1,6 +1,13 @@
 package quic
 
-import "time"
+import (
+	"context"
+	"time"
+)
+
+// pastDeadline is a fixed instant in the past. Setting it as the read deadline
+// unblocks an in-flight Read immediately (used to interrupt on context cancel).
+var pastDeadline = time.Unix(1, 0)
 
 // Probe-timeout constants (RFC 9002 §6.2).
 const (
@@ -90,19 +97,52 @@ func isTimeout(err error) bool {
 // the transport exposes SetReadDeadline. On a PTO expiry with data in flight it
 // sends a probe, backs off, and retries; otherwise a timeout is returned to the
 // caller. It preserves the plain-Read behavior for transports without deadlines.
-func (c *Conn) readWithPTO(buf []byte) (int, error) {
+func (c *Conn) readWithPTO(ctx context.Context, buf []byte) (int, error) {
+	if err := ctx.Err(); err != nil {
+		return 0, err
+	}
 	dl, hasDeadline := c.pc.(interface{ SetReadDeadline(time.Time) error })
+	if hasDeadline && ctx.Done() != nil {
+		// Watchdog: on context cancel or deadline, poke the read deadline into the
+		// past to unblock the in-flight Read. SetReadDeadline is safe to call
+		// concurrently with Read (net.Conn contract), and the goroutine touches no
+		// other Conn state, so it does not race the single-goroutine engine. It is
+		// torn down on every return via the deferred close(stop).
+		stop := make(chan struct{})
+		defer close(stop)
+		go func() {
+			select {
+			case <-ctx.Done():
+				_ = dl.SetReadDeadline(pastDeadline)
+			case <-stop:
+			}
+		}()
+	}
 	for {
 		if hasDeadline {
 			wait := idleTimeout
 			if c.hasInFlight() {
 				wait = c.ptoPeriod()
 			}
-			_ = dl.SetReadDeadline(c.clock().Add(wait))
+			deadline := c.clock().Add(wait)
+			if d, ok := ctx.Deadline(); ok && d.Before(deadline) {
+				deadline = d // honor a nearer context deadline
+			}
+			_ = dl.SetReadDeadline(deadline)
+		}
+		// Re-check after arming: a cancel between arming and Read would otherwise
+		// be masked by the freshly-armed future deadline (deadline-clobber race).
+		if err := ctx.Err(); err != nil {
+			return 0, err
 		}
 		n, err := c.pc.Read(buf)
 		if err == nil {
 			return n, nil
+		}
+		// A context cancel/deadline is a terminal exit — never a PTO retry, which
+		// would re-arm a future deadline and block again (the watchdog fires once).
+		if e := ctx.Err(); e != nil {
+			return 0, e
 		}
 		if !hasDeadline || !isTimeout(err) || !c.hasInFlight() || c.ptoCount >= maxPTOBackoff {
 			return 0, err // real error, unprobeable, nothing to probe, or gave up

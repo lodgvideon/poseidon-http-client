@@ -1,6 +1,8 @@
 package http3
 
 import (
+	"context"
+
 	"github.com/lodgvideon/poseidon-http-client/qpack"
 	"github.com/lodgvideon/poseidon-http-client/quic"
 )
@@ -18,7 +20,7 @@ type quicStream interface {
 type quicConn interface {
 	OpenStream() (quicStream, error)
 	OpenUniStream() (quicStream, error)
-	Poll() error
+	Poll(ctx context.Context) error
 	CloseWithError(app bool, code uint64, reason string) error
 }
 
@@ -61,15 +63,15 @@ type Client struct {
 // stream and sends the mandatory first SETTINGS frame (RFC 9114 §6.2.1). The
 // connection's handshake must already have completed.
 func NewClient(conn *quic.Conn, settings []Setting) (*Client, error) {
-	return newClient(connAdapter{conn}, settings)
+	return newClient(context.Background(), connAdapter{conn}, settings)
 }
 
-func newClient(conn quicConn, settings []Setting) (*Client, error) {
+func newClient(ctx context.Context, conn quicConn, settings []Setting) (*Client, error) {
 	control, err := conn.OpenUniStream()
 	if err != nil {
 		return nil, err
 	}
-	if err := sendAll(conn, control, AppendClientControlStream(nil, settings), false); err != nil {
+	if err := sendAll(ctx, conn, control, AppendClientControlStream(nil, settings), false); err != nil {
 		return nil, err
 	}
 	return &Client{conn: conn}, nil
@@ -87,7 +89,7 @@ func (c *Client) Close() error {
 // prefix when flow-control-blocked, so this advances past each partial send and
 // polls to recover credit (a MAX_STREAM_DATA / MAX_DATA frame) until every byte
 // — and the FIN, which rides the final byte — is on the wire.
-func sendAll(conn quicConn, stream quicStream, data []byte, fin bool) error {
+func sendAll(ctx context.Context, conn quicConn, stream quicStream, data []byte, fin bool) error {
 	sent := 0
 	for {
 		n, err := stream.Send(data[sent:], fin)
@@ -98,7 +100,7 @@ func sendAll(conn quicConn, stream quicStream, data []byte, fin bool) error {
 		if sent >= len(data) {
 			return nil
 		}
-		if err := conn.Poll(); err != nil {
+		if err := conn.Poll(ctx); err != nil {
 			return err
 		}
 	}
@@ -108,7 +110,15 @@ func sendAll(conn quicConn, stream quicStream, data []byte, fin bool) error {
 // connection's receive loop until the response stream finishes. It returns the
 // response head and the fully-buffered body. The request carries no body: the
 // HEADERS frame is sent with FIN.
-func (c *Client) Do(req *Request) (*Response, []byte, error) {
+//
+// ctx bounds the whole exchange: a cancel or deadline unblocks the receive loop
+// and Do returns ctx.Err(). Because stream reset is not yet implemented, a
+// context error leaves the request stream orphaned — the Client must be Closed
+// and not reused after a cancelled Do.
+func (c *Client) Do(ctx context.Context, req *Request) (*Response, []byte, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, nil, err
+	}
 	stream, err := c.conn.OpenStream()
 	if err != nil {
 		return nil, nil, err
@@ -120,11 +130,11 @@ func (c *Client) Do(req *Request) (*Response, []byte, error) {
 	// Send HEADERS, ending the stream now only if there is no body; otherwise
 	// the body follows in a DATA frame that carries the FIN (RFC 9114 §4.1).
 	hasBody := len(req.Body) > 0
-	if err := sendAll(c.conn, stream, frame, !hasBody); err != nil {
+	if err := sendAll(ctx, c.conn, stream, frame, !hasBody); err != nil {
 		return nil, nil, err
 	}
 	if hasBody {
-		if err := sendAll(c.conn, stream, AppendData(nil, req.Body), true); err != nil {
+		if err := sendAll(ctx, c.conn, stream, AppendData(nil, req.Body), true); err != nil {
 			return nil, nil, err
 		}
 	}
@@ -182,7 +192,7 @@ func (c *Client) Do(req *Request) (*Response, []byte, error) {
 		if stream.Finished() {
 			break
 		}
-		if err := c.conn.Poll(); err != nil {
+		if err := c.conn.Poll(ctx); err != nil {
 			return nil, nil, err
 		}
 	}
