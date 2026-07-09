@@ -14,6 +14,7 @@ type fakeStream struct {
 	finSent    bool
 	recvChunks [][]byte
 	fin        bool
+	recvReset  bool // the peer reset its send side (RESET_STREAM received)
 	sendCap    int  // max bytes accepted per Send (0 = unlimited); models flow control
 	reset      bool // Reset was called
 	stopped    bool // StopSending was called
@@ -45,8 +46,10 @@ func (s *fakeStream) Recv() []byte {
 }
 
 // Finished reports end-of-stream once the FIN is set and every queued chunk has
-// been handed out.
-func (s *fakeStream) Finished() bool { return s.fin && len(s.recvChunks) == 0 }
+// been handed out, or once the peer has reset the stream.
+func (s *fakeStream) Finished() bool { return s.recvReset || (s.fin && len(s.recvChunks) == 0) }
+
+func (s *fakeStream) ResetReceived() bool { return s.recvReset }
 
 func (s *fakeStream) Reset(code uint64) error       { s.resetCode = code; s.reset = true; return nil }
 func (s *fakeStream) StopSending(code uint64) error { s.stopCode = code; s.stopped = true; return nil }
@@ -272,6 +275,55 @@ func TestConformance_RFC9114_Sec725_PushPromiseOnRequestStream(t *testing.T) {
 	}
 	if conn.closeCode != H3IDError {
 		t.Fatalf("close code = %#x, want H3_ID_ERROR", conn.closeCode)
+	}
+}
+
+// TestConformance_RFC9114_Sec71_TruncatedFrameAtStreamEnd checks that a stream
+// ending in the middle of a frame payload (a truncated final frame after a valid
+// response) is a H3_FRAME_ERROR connection error.
+func TestConformance_RFC9114_Sec71_TruncatedFrameAtStreamEnd(t *testing.T) {
+	headers := AppendHeaders(nil, encodeSection(hf(":status", "200")))
+	truncated := AppendFrameHeader(nil, FrameData, 10)      // declares 10 payload bytes
+	truncated = append(truncated, []byte("abc")...)         // but only 3 arrive, then FIN
+	conn := &fakeConn{req: &fakeStream{recvChunks: [][]byte{append(headers, truncated...)}, fin: true}}
+	client, _ := NewClientFake(conn, nil)
+	if _, _, err := client.Do(context.Background(), &Request{Method: "GET", Scheme: "https", Authority: "h", Path: "/"}); err != ErrH3Control {
+		t.Fatalf("err = %v, want ErrH3Control", err)
+	}
+	if conn.closeCode != H3FrameError {
+		t.Fatalf("close code = %#x, want H3_FRAME_ERROR", conn.closeCode)
+	}
+}
+
+// TestConformance_RFC9114_Sec71_TruncatedHeaderAtStreamEnd checks that a stream
+// ending in the middle of a frame header (an incomplete frame) is a H3_FRAME_ERROR
+// connection error.
+func TestConformance_RFC9114_Sec71_TruncatedHeaderAtStreamEnd(t *testing.T) {
+	// One byte: a frame type (HEADERS) with no length varint, then FIN.
+	conn := &fakeConn{req: &fakeStream{recvChunks: [][]byte{{byte(FrameHeaders)}}, fin: true}}
+	client, _ := NewClientFake(conn, nil)
+	if _, _, err := client.Do(context.Background(), &Request{Method: "GET", Scheme: "https", Authority: "h", Path: "/"}); err != ErrH3Control {
+		t.Fatalf("err = %v, want ErrH3Control", err)
+	}
+	if conn.closeCode != H3FrameError {
+		t.Fatalf("close code = %#x, want H3_FRAME_ERROR", conn.closeCode)
+	}
+}
+
+// TestClient_RequestStreamReset_NoFrameError checks that a server RESET_STREAM
+// that falls mid-frame is an abrupt end (a per-request abort), not the clean-FIN
+// truncation of §7.1 — the connection is not torn down with H3_FRAME_ERROR.
+func TestClient_RequestStreamReset_NoFrameError(t *testing.T) {
+	headers := AppendHeaders(nil, encodeSection(hf(":status", "200")))
+	partial := AppendFrameHeader(nil, FrameData, 10) // declares 10 bytes
+	partial = append(partial, []byte("abc")...)      // only 3 arrive, then a reset
+	conn := &fakeConn{req: &fakeStream{recvChunks: [][]byte{append(headers, partial...)}, recvReset: true}}
+	client, _ := NewClientFake(conn, nil)
+	if _, _, err := client.Do(context.Background(), &Request{Method: "GET", Scheme: "https", Authority: "h", Path: "/"}); err == ErrH3Control {
+		t.Fatal("a RESET_STREAM must not be treated as a §7.1 clean-FIN truncation")
+	}
+	if conn.closeCode == H3FrameError {
+		t.Fatalf("connection closed with H3_FRAME_ERROR on a RESET_STREAM (%#x)", conn.closeCode)
 	}
 }
 
