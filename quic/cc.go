@@ -10,6 +10,9 @@ const (
 	kInitialWindow uint64 = 12000
 	// kMinimumWindow is the floor a reduced congestion window cannot go below.
 	kMinimumWindow uint64 = 2 * maxDatagramSize
+	// kPersistentCongestionThreshold multiplies the base PTO to give the span of
+	// unbroken loss that establishes persistent congestion (RFC 9002 §7.6.1).
+	kPersistentCongestionThreshold uint64 = 3
 )
 
 // onPacketSent adds an ack-eliciting packet of size bytes to the in-flight total
@@ -65,14 +68,6 @@ func (c *Conn) onPacketAcked(p sentPacket) {
 // episode (RFC 9002 §7.3.1). sentTime is the send time of the newest lost packet;
 // a loss whose newest packet was sent at or before the current recovery start is
 // part of an episode already handled, so cwnd is reduced at most once per episode.
-//
-// NOTE (RFC 9002 §7.6, deferred): persistent congestion — collapsing cwnd to
-// kMinimumWindow when every packet across a period longer than
-// kPersistentCongestionThreshold·PTO is lost — is not implemented. This client
-// mostly receives (its send flight is a small request), the probe timeout already
-// recovers a fully lost tail, and the omission only forgoes a faster collapse in
-// a total outage. Recording earliest/latest lost send times in detectLost would
-// add it.
 func (c *Conn) onCongestionEvent(sentTime time.Time) {
 	if c.cwnd == 0 {
 		return // congestion control disabled (test sentinel)
@@ -87,6 +82,35 @@ func (c *Conn) onCongestionEvent(sentTime time.Time) {
 		c.cwnd = kMinimumWindow
 	}
 	c.ccBytesAcked = 0
+}
+
+// persistentCongestionDuration is the span of unbroken loss that establishes
+// persistent congestion (RFC 9002 §7.6.2): the base (un-backed-off) PTO times
+// kPersistentCongestionThreshold. Unlike the §6.2 PTO, this duration includes
+// max_ack_delay irrespective of the packet-number space, so it is added here for
+// the spaces where ptoBase omits it (before the handshake completes).
+func (c *Conn) persistentCongestionDuration() time.Duration {
+	base := c.ptoBase()
+	if !c.handshakeComplete {
+		base += c.peer.MaxAckDelay
+	}
+	return base * time.Duration(kPersistentCongestionThreshold)
+}
+
+// onPersistentCongestion collapses the congestion window to kMinimumWindow when
+// every ack-eliciting packet sent across a span longer than the persistent
+// congestion duration is lost (RFC 9002 §7.6.1). Recovery start is cleared so the
+// next acknowledgement restarts slow start from the floor, and min_rtt is reset on
+// the next RTT sample (§5.2) so an obsolete low estimate cannot keep loss
+// detection over-aggressive after the path has changed.
+func (c *Conn) onPersistentCongestion() {
+	if c.cwnd == 0 {
+		return // congestion control disabled (test sentinel)
+	}
+	c.cwnd = kMinimumWindow
+	c.recoveryStart = time.Time{} // §7.6.1: congestion_recovery_start_time = 0
+	c.ccBytesAcked = 0
+	c.rtt.resetMin = true
 }
 
 // removeInFlight subtracts a packet's size from the in-flight total, guarding

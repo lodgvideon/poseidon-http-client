@@ -16,24 +16,29 @@ const (
 	idleTimeout   = 10 * time.Second       // give-up bound when nothing is in flight to probe
 )
 
-// ptoPeriod is the current probe timeout (RFC 9002 §6.2.1): smoothed_rtt +
-// max(4*rttvar, granularity) + max_ack_delay, doubled per prior probe. Before
-// any RTT sample it is 2*kInitialRtt (§6.2.2).
-func (c *Conn) ptoPeriod() time.Duration {
-	var base time.Duration
+// ptoBase is the un-backed-off probe timeout (RFC 9002 §6.2.1): smoothed_rtt +
+// max(4*rttvar, granularity) + max_ack_delay. Before any RTT sample it is
+// 2*kInitialRtt (§6.2.2). ptoPeriod applies the exponential backoff; the
+// persistent-congestion duration (§7.6.2) multiplies this base by a threshold.
+func (c *Conn) ptoBase() time.Duration {
 	if !c.rtt.haveSample {
-		base = 2 * kInitialRtt
-	} else {
-		v := 4 * c.rtt.rttvar
-		if v < kGranularity {
-			v = kGranularity
-		}
-		base = c.rtt.smoothedRTT + v
-		if c.handshakeComplete {
-			base += c.peer.MaxAckDelay // only the application space carries ack delay
-		}
+		return 2 * kInitialRtt
 	}
-	return base << c.ptoCount
+	v := 4 * c.rtt.rttvar
+	if v < kGranularity {
+		v = kGranularity
+	}
+	base := c.rtt.smoothedRTT + v
+	if c.handshakeComplete {
+		base += c.peer.MaxAckDelay // only the application space carries ack delay
+	}
+	return base
+}
+
+// ptoPeriod is the current probe timeout: the base PTO doubled per prior probe
+// (RFC 9002 §6.2.1).
+func (c *Conn) ptoPeriod() time.Duration {
+	return c.ptoBase() << c.ptoCount
 }
 
 // hasInFlight reports whether any ack-eliciting packet is unacknowledged in any
