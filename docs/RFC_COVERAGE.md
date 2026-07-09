@@ -288,6 +288,7 @@ bytes exactly, and the client interoperates with a live Caddy HTTP/3 server.
 | §6.3    | Conformance | TestConformance_RFC9001_Sec63_PrevKeysReordered (reordered previous-generation packet below the boundary decrypts with retained prev keys; prev discarded after 3×PTO) |
 | §6.4    | Conformance | TestConformance_RFC9001_Sec64_ForgedPhaseBitBounded (a forged Key Phase bit costs exactly one AEAD attempt and never commits an update) |
 | §6.6    | Conformance | TestConformance_RFC9001_Sec66_ConfidentialityLimitCloses (at the AES-GCM confidentiality limit the client — a pure key-update responder — closes with AEAD_LIMIT_REACHED), TestConn_AEADConfidentiality_CounterIncrements, TestConn_AEADConfidentiality_ResetOnKeyUpdate (a key update resets the send counter), TestConn_AEADIntegrity_CountsAuthFailures (a failed authentication counts toward the integrity limit) |
+| §4.8    | Conformance | TestConformance_RFC9001_Sec48_TLSAlertToCryptoError (a TLS alert maps to a CRYPTO_ERROR code 0x0100 + the alert description, through a wrapping error), TestConn_Fail_TLSAlert_SendsCryptoErrorClose (a handshake alert sends a transport CONNECTION_CLOSE with that code) |
 
 ## RFC 9002 — QUIC Loss Detection and Congestion Control (Phase G — HTTP/3)
 
