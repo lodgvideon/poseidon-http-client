@@ -1,0 +1,98 @@
+package quic
+
+// activeCIDLimit is the active_connection_id_limit the client honors: it never
+// advertises the parameter, so the RFC 9000 §18.2 default of 2 applies — the
+// server may keep at most this many of the client's destination connection IDs
+// active at once.
+const activeCIDLimit uint64 = 2
+
+// OnNewConnectionID records a destination connection ID the server issued
+// (RFC 9000 §5.1.1, §19.15). It retires connection IDs below the frame's Retire
+// Prior To (switching the one in use if it is retired), rejects a reused
+// sequence number with a different ID (PROTOCOL_VIOLATION), and closes with
+// CONNECTION_ID_LIMIT_ERROR if more than active_connection_id_limit IDs would be
+// active. The stateless reset token is not retained (this client does not detect
+// stateless resets).
+func (h *connFrameHandler) OnNewConnectionID(seq, retirePriorTo uint64, cid []byte, _ *[16]byte) error {
+	h.ackEliciting = true
+	c := h.c
+	if c.serverCIDs == nil {
+		// Seed sequence 0 with the server SCID already in use (adopted at handshake).
+		c.serverCIDs = map[uint64][]byte{0: append([]byte(nil), c.dcid...)}
+	}
+	// A connection ID at or below the retire boundary is already retired: retire
+	// it at once and do not store it (§19.15).
+	if seq < c.retirePriorTo {
+		c.queueRetire(seq)
+		return nil
+	}
+	if existing, ok := c.serverCIDs[seq]; ok {
+		if !bytesEqual(existing, cid) {
+			return ErrProtocolViolation // same sequence, different connection ID (§19.15)
+		}
+		return nil // a duplicate retransmission
+	}
+	c.serverCIDs[seq] = append([]byte(nil), cid...)
+
+	// An increased Retire Prior To retires every lower-sequence connection ID
+	// (§5.1.2). The frame guarantees retirePriorTo <= seq, so the ID just stored is
+	// never itself retired here.
+	if retirePriorTo > c.retirePriorTo {
+		c.retirePriorTo = retirePriorTo
+		for s := range c.serverCIDs {
+			if s < retirePriorTo {
+				c.queueRetire(s)
+				delete(c.serverCIDs, s)
+			}
+		}
+		if c.curCIDSeq < retirePriorTo {
+			c.switchToActiveCID() // the ID in use was retired; adopt a remaining one
+		}
+	}
+
+	// Enforce the active_connection_id_limit after retirement (§5.1.1).
+	if uint64(len(c.serverCIDs)) > activeCIDLimit {
+		return ErrConnectionIDLimit
+	}
+	return nil
+}
+
+// OnRetireConnectionID handles a RETIRE_CONNECTION_ID from the server. This
+// client provides a zero-length source connection ID, so it has issued nothing
+// the server could retire: any RETIRE_CONNECTION_ID is a PROTOCOL_VIOLATION
+// (RFC 9000 §19.16).
+func (h *connFrameHandler) OnRetireConnectionID(uint64) error {
+	return ErrProtocolViolation
+}
+
+// queueRetire schedules a RETIRE_CONNECTION_ID for a connection ID the client no
+// longer uses (RFC 9000 §19.16). It goes on the retransmit queue so a lost frame
+// is resent (§13.3), and is sent at most once per sequence — so a peer that
+// re-offers an already-retired ID cannot make the queue grow without bound.
+func (c *Conn) queueRetire(seq uint64) {
+	if c.retiredCIDs == nil {
+		c.retiredCIDs = map[uint64]bool{}
+	}
+	if c.retiredCIDs[seq] {
+		return
+	}
+	c.retiredCIDs[seq] = true
+	c.retransQueue[spaceApp] = append(c.retransQueue[spaceApp], retransFrame{kind: retransRetire, offset: seq})
+}
+
+// switchToActiveCID moves the connection to a remaining active connection ID
+// after the one in use has been retired, choosing the lowest remaining sequence
+// deterministically. A NEW_CONNECTION_ID's sequence is at least its Retire Prior
+// To, so at least the just-stored ID always remains.
+func (c *Conn) switchToActiveCID() {
+	best, found := uint64(0), false
+	for s := range c.serverCIDs {
+		if !found || s < best {
+			best, found = s, true
+		}
+	}
+	if found {
+		c.dcid = append(c.dcid[:0], c.serverCIDs[best]...)
+		c.curCIDSeq = best
+	}
+}

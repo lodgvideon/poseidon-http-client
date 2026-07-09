@@ -10,6 +10,7 @@ const (
 	retransStream
 	retransReset       // RESET_STREAM
 	retransStopSending // STOP_SENDING
+	retransRetire      // RETIRE_CONNECTION_ID (offset carries the sequence number)
 )
 
 // retransFrame is the information needed to re-send a lost frame's data as a new
@@ -34,6 +35,8 @@ func (rf retransFrame) encode(dst []byte) []byte {
 		return AppendResetStream(dst, rf.streamID, rf.errCode, rf.offset)
 	case retransStopSending:
 		return AppendStopSending(dst, rf.streamID, rf.errCode)
+	case retransRetire:
+		return AppendRetireConnectionID(dst, rf.offset)
 	default:
 		return AppendCrypto(dst, rf.offset, rf.data)
 	}
