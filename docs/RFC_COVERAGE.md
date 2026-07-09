@@ -337,7 +337,7 @@ instruction streams are deferred (a client advertising
 | §4.5.1–2 | Conformance | TestConformance_RFC9204_Sec45_StaticIndexedEncode (section prefix + Indexed Field Line) |
 | §4.5.4  | Conformance | TestConformance_RFC9204_Sec454_LiteralNameRefDecode |
 | §4.5.6  | Conformance | TestConformance_RFC9204_Sec456_LiteralNameDecode |
-| §4.5    | Conformance | TestConformance_RFC9204_Sec45_DecodeErrors (dynamic-ref / malformed → QPACK_DECOMPRESSION_FAILED) |
+| §4.5 / §4.5.1.2 | Conformance | TestConformance_RFC9204_Sec45_DecodeErrors (dynamic-ref / malformed / a field-section prefix with the Base Sign bit set — negative Base with the forced-zero Required Insert Count — → QPACK_DECOMPRESSION_FAILED) |
 | §2.2 / §6 | Conformance | TestConformance_RFC9204_Sec22_DecompressionFailedClosesConn (a field section the static-only decoder cannot decode → QPACK_DECOMPRESSION_FAILED, an application-layer CONNECTION_CLOSE, not a per-stream reset) |
 | §4.5    | Roundtrip   | TestQPACK_RoundTrip, TestQPACK_EmptySection |
 | §4.2    | Conformance | TestConformance_RFC9204_Sec42_QPACKStreamClosed (server closing its QPACK encoder stream → H3_CLOSED_CRITICAL_STREAM), TestConformance_RFC9204_Sec42_DuplicateQPACKStream (a second QPACK encoder stream → H3_STREAM_CREATION_ERROR) |

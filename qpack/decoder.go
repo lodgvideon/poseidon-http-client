@@ -101,7 +101,13 @@ func parsePrefix(src []byte) (int, error) {
 	if p >= len(src) {
 		return 0, ErrDecompressionFailed // the Base byte must be present
 	}
-	_, m, err := hpack.DecodeInteger(src[p:], 7) // sign bit (bit 7) ignored
+	// The Delta Base byte's bit 7 is the Sign. With the Required Insert Count
+	// forced to 0, Base = RIC - DeltaBase - 1 is always negative for Sign=1 (RIC ≤
+	// Delta Base), which the decoder MUST reject (RFC 9204 §4.5.1.2).
+	if src[p]&0x80 != 0 {
+		return 0, ErrDecompressionFailed
+	}
+	_, m, err := hpack.DecodeInteger(src[p:], 7)
 	if err != nil {
 		return 0, ErrDecompressionFailed
 	}
