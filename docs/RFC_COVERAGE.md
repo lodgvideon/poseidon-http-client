@@ -244,6 +244,7 @@ protection (RFC 9001) and the connection engine are later phases.
 | §19.13  | Conformance | TestConformance_RFC9000_Sec1913_StreamDataBlocked (zero stream credit → STREAM_DATA_BLOCKED, once per limit) |
 | §4.5    | Conformance | TestConformance_RFC9000_Sec45_FinBypassesFlowControl (a FIN consumes no credit — bare FIN sent at zero credit), TestConformance_RFC9000_Sec45_FinalSizeLatch (Send after FIN → ErrStreamFinished) |
 | §10.2   | Unit        | TestConn_CloseWithError_SendsAppConnectionClose (CloseWithError emits one CONNECTION_CLOSE on the 1-RTT space and closes the transport), TestConn_Close_Idempotent (a second Close sends nothing more), TestConn_CloseWithError_DowngradesAppBeforeOneRTT (§10.2.3: an application close before 1-RTT is sent as a transport CONNECTION_CLOSE with APPLICATION_ERROR) |
+| §10.2   | Conformance | TestConn_Poll_MalformedFrame_SendsConnectionClose (a received malformed frame makes Poll emit a CONNECTION_CLOSE with FRAME_ENCODING_ERROR), TestConn_Fail_SendsCloseForProtocolError (a protocol-violation error is signalled with the mapped transport code), TestConn_Fail_NoCloseForIOError (an I/O error sends nothing) |
 | §4.1    | Unit        | TestConn_SendStream_Wire (client Send → decrypt → STREAM bytes match), TestStream_Grantable_Unit (credit-clamp accounting), TestStream_Send_NotEstablished (Send before 1-RTT keys → ErrNotEstablished) |
 
 ## RFC 9001 — Using TLS to Secure QUIC (Phase G — HTTP/3)

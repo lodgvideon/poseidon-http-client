@@ -22,7 +22,7 @@ func (c *Conn) Establish(ctx context.Context) error {
 			return err
 		}
 		if err := c.recvDatagram(buf[:n]); err != nil {
-			return err
+			return c.fail(err) // signal a protocol violation with CONNECTION_CLOSE
 		}
 		if err := c.flush(); err != nil {
 			return err
@@ -54,7 +54,7 @@ func (c *Conn) Poll() error {
 		return err
 	}
 	if err := c.recvDatagram(c.pollBuf[:n]); err != nil {
-		return err
+		return c.fail(err)
 	}
 	c.discardStaleKeys() // drop a superseded key-update generation past its window (§6.3)
 	// Drain datagrams already buffered in the socket without blocking, so a
@@ -93,7 +93,7 @@ func (c *Conn) drainBuffered() error {
 			return err
 		}
 		if err := c.recvDatagram(c.pollBuf[:n]); err != nil {
-			return err
+			return c.fail(err)
 		}
 	}
 	return nil
@@ -107,7 +107,13 @@ func (c *Conn) recvDatagram(datagram []byte) error {
 	for len(rest) > 0 {
 		hdr, err := ParseHeader(rest, len(c.scid))
 		if err != nil {
-			return err
+			// An unauthenticated header that cannot be parsed cannot be associated
+			// with the connection, so the remainder of the datagram is discarded —
+			// never a connection error (RFC 9000 §5.2, §12.2). Stopping the scan
+			// (the next packet boundary is unknown) still lets any valid coalesced
+			// packets decoded earlier drive the handshake below. This also absorbs
+			// trailing datagram padding.
+			break
 		}
 		pkt := rest[:hdr.PacketLen]
 		rest = rest[hdr.PacketLen:]
