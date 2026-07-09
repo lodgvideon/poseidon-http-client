@@ -39,8 +39,10 @@ type Conn struct {
 	pc PacketConn
 	hs *TLSHandshake
 
-	dcid []byte // server connection ID (our original random DCID until Retry)
-	scid []byte // our source connection ID (may be zero-length)
+	dcid         []byte // server connection ID (our original random DCID until Retry)
+	scid         []byte // our source connection ID (may be zero-length)
+	retryToken   []byte // address-validation token from a Retry, echoed in later Initials (§8.1.2)
+	handledRetry bool   // a Retry has been processed (at most one accepted, §17.2.5.2)
 
 	initialSealer   *Sealer
 	handshakeSealer *Sealer

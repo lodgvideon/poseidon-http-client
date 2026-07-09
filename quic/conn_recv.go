@@ -120,7 +120,11 @@ func (c *Conn) recvDatagram(datagram []byte) error {
 		}
 		pkt := rest[:hdr.PacketLen]
 		rest = rest[hdr.PacketLen:]
-		if hdr.Type == PacketRetry || hdr.Type == PacketVersionNegotiation {
+		if hdr.Type == PacketRetry {
+			c.handleRetry(hdr, pkt) // validate + re-key + resend the Initial (§17.2.5); never fatal
+			continue
+		}
+		if hdr.Type == PacketVersionNegotiation {
 			continue // no protected payload; handled in a later phase
 		}
 		// Adopt the server's connection ID as our destination (RFC 9000 §7.2).
@@ -362,8 +366,13 @@ func (c *Conn) sealPacket(sp int, frames []byte, ackEliciting bool, retrans []re
 	if sp == spaceInitial {
 		// RFC 9000 §14.1: a datagram carrying an Initial packet MUST be at least
 		// 1200 bytes or the server discards it. Pad the frames so the whole
-		// datagram (header + pn + frames + 16-byte tag) reaches that minimum.
-		hdr := 1 + 4 + 1 + len(c.dcid) + 1 + len(c.scid) + 1 + 2 // +token len 0, +2-byte length
+		// datagram (header + pn + frames + 16-byte tag) reaches that minimum. The
+		// header includes the token varint + token bytes (a Retry token, or empty).
+		tok := 1 + len(c.retryToken)
+		if len(c.retryToken) >= 0x40 {
+			tok++ // a token of 64+ bytes needs a 2-byte length varint
+		}
+		hdr := 1 + 4 + 1 + len(c.dcid) + 1 + len(c.scid) + tok + 2 // +2-byte length field
 		if need := InitialDatagramMinSize - hdr - 4 - 16; need > minFrames {
 			minFrames = need
 		}
@@ -381,7 +390,7 @@ func (c *Conn) sealPacket(sp int, frames []byte, ackEliciting bool, retrans []re
 	var pnOffset int
 	switch sp {
 	case spaceInitial:
-		hdr, pnOffset = AppendLongHeader(nil, PacketInitial, QUICVersion1, c.dcid, c.scid, nil, pnLen, length)
+		hdr, pnOffset = AppendLongHeader(nil, PacketInitial, QUICVersion1, c.dcid, c.scid, c.retryToken, pnLen, length)
 	case spaceHandshake:
 		hdr, pnOffset = AppendLongHeader(nil, PacketHandshake, QUICVersion1, c.dcid, c.scid, nil, pnLen, length)
 	default:

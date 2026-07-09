@@ -215,7 +215,7 @@ protection (RFC 9001) and the connection engine are later phases.
 | §19 (all frames) | Roundtrip | TestFrames_RoundTrip |
 | §12.4   | Negative    | TestParseFrames_Malformed, TestParseFrames_MoreMalformed (malformed → ErrFrameEncoding) |
 | §17.2.2 | Conformance | TestConformance_RFC9000_Sec172_InitialHeader |
-| §17.2.5 | Conformance | TestConformance_RFC9000_Sec1725_RetryHeader |
+| §17.2.5 | Conformance | TestConformance_RFC9000_Sec1725_RetryHeader, TestConformance_RFC9000_Sec1725_RetryRekeysAndResends (a valid Retry adopts the server CID, re-derives Initial keys, stores the token, re-queues the ClientHello), TestConformance_RFC9000_Sec17253_RetryResendCarriesToken (the resent Initial carries the token, is padded, decrypts under the new keys), TestConn_Retry_Discards (bad tag / second Retry / post-server-Initial Retry discarded, §17.2.5.2) |
 | §17.2.1 | Conformance | TestConformance_RFC9000_Sec171_VersionNegotiation |
 | §17.3   | Conformance | TestConformance_RFC9000_Sec173_ShortHeader |
 | §17.2 / §17.3.1 | Conformance | TestConformance_RFC9000_Sec1731_ReservedBitsProtocolViolation (short-header reserved bits nonzero → PROTOCOL_VIOLATION), TestConformance_RFC9000_Sec172_LongHeaderReservedBits (long-header), TestConn_ReservedBitsZero_Accepted (a valid packet with zero reserved bits is not rejected) |
@@ -282,6 +282,7 @@ bytes exactly, and the client interoperates with a live Caddy HTTP/3 server.
 | §5.3    | Roundtrip   | TestPacketProtection_RoundTrip (seal → open recovers pn + payload) |
 | §5.3    | Negative    | TestPacketProtection_AuthFailure (tampered / wrong-key → ErrCryptoDecrypt) |
 | §5.4    | Roundtrip   | TestHeaderProtection_Reversible, TestPacketProtection_ShortSample |
+| §5.8    | Conformance | TestConformance_RFC9001_Sec58_RetryIntegrityKAT (Retry Integrity Tag verified against the Appendix A.4 known-answer vector; tampered packet and wrong original DCID fail) |
 | §A.3    | Conformance | TestDecodePacketNumber (packet-number reconstruction, §A.3 example) |
 | §4      | Integration | TestTLSHandshake_InMemory (full TLS 1.3 QUIC handshake client↔server via crypto/tls.QUICConn; secrets match, keys derive, ALPN h3) |
 | §4.1    | Unit        | TestKeysFromSecret_UnsupportedSuite (ChaCha20 → ErrCryptoSuite, deferred) |
