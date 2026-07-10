@@ -99,6 +99,12 @@ var ErrStreamFinished = errors.New("quic: stream already finished")
 // with RESET_STREAM; no further data may be sent (RFC 9000 §3.2).
 var ErrStreamReset = errors.New("quic: stream reset")
 
+// ErrStreamState is a peer frame that violates a stream's directionality — a
+// STREAM or RESET_STREAM on a send-only stream, or a STOP_SENDING on a
+// receive-only stream — which is a STREAM_STATE_ERROR (RFC 9000 §19.4, §19.5,
+// §19.8).
+var ErrStreamState = errors.New("quic: stream state error")
+
 // ErrTooManyStreams is returned by OpenStream when opening another stream would
 // exceed the peer's advertised stream limit (RFC 9000 §4.6).
 var ErrTooManyStreams = errors.New("quic: too many streams")
