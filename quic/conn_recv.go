@@ -717,6 +717,10 @@ func (h *connFrameHandler) OnStreamDataBlocked(id, _ uint64) error {
 	if id&0x3 == 0x2 || h.c.localStreamNotCreated(id) {
 		return ErrStreamState
 	}
+	// A server-uni stream past the advertised limit is a STREAM_LIMIT_ERROR (§4.6).
+	if h.c.exceedsUniStreamLimit(id) {
+		return ErrTooManyUniStreams
+	}
 	return nil
 }
 
@@ -743,6 +747,16 @@ func (h *connFrameHandler) permitInSpace(typ uint64) error {
 		}
 		return ErrProtocolViolation // a known frame not permitted in this space (§12.5)
 	}
+}
+
+// exceedsUniStreamLimit reports whether id names a server-initiated unidirectional
+// stream (id&0x3 == 0x3) beyond the initial_max_streams_uni the client advertised.
+// Receiving any frame that references such an ID is a STREAM_LIMIT_ERROR (RFC 9000
+// §4.6): id>>2 is the stream's zero-based index among its type. acceptPeerUniStream
+// applies the same bound when a STREAM frame opens the stream; this covers the
+// other frames that can reference one.
+func (c *Conn) exceedsUniStreamLimit(id uint64) bool {
+	return id&0x3 == 0x3 && id>>2 >= c.localMaxStreamsUni
 }
 
 // localStreamNotCreated reports whether id names a locally initiated (client)
@@ -822,6 +836,11 @@ func (h *connFrameHandler) OnResetStream(id, errCode, finalSize uint64) error {
 	// stream (id&0x3 == 0x2) — is a STREAM_STATE_ERROR (RFC 9000 §19.4).
 	if id&0x3 == 0x2 {
 		return ErrStreamState
+	}
+	// A RESET_STREAM referencing a server-uni stream past the advertised limit is a
+	// STREAM_LIMIT_ERROR, even though we never opened it (RFC 9000 §4.6).
+	if h.c.exceedsUniStreamLimit(id) {
+		return ErrTooManyUniStreams
 	}
 	s := h.c.streams[id]
 	if s == nil {
