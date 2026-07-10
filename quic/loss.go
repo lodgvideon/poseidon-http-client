@@ -42,6 +42,33 @@ func (rf retransFrame) encode(dst []byte) []byte {
 	}
 }
 
+// earliestLossTime returns the time the earliest still-unacknowledged
+// ack-eliciting packet that has a later acknowledged packet will be declared lost
+// by the time threshold (RFC 9002 §6.1.2), and the space it is in. These are the
+// packets a loss-detection timer must cover: a later packet was acknowledged, so
+// they are eligible for time-threshold loss even if no further acknowledgement
+// arrives. ok is false when no space has such a packet, in which case only the
+// probe timeout applies (a fully lost tail has no later acknowledgement).
+func (c *Conn) earliestLossTime() (t time.Time, space int, ok bool) {
+	space = -1
+	delay := c.rtt.lossDelay()
+	for sp := 0; sp < numSpaces; sp++ {
+		s := &c.sent[sp]
+		if !s.haveLargestAcked {
+			continue
+		}
+		for pn, p := range s.packets {
+			if pn > s.largestAckedPN || !p.ackEliciting {
+				continue // no later acknowledged packet, or nothing to retransmit
+			}
+			if lt := p.timeSent.Add(delay); space == -1 || lt.Before(t) {
+				t, space = lt, sp
+			}
+		}
+	}
+	return t, space, space != -1
+}
+
 // detectLost declares packets in space sp lost and queues their retransmittable
 // frames for resend (RFC 9002 §6.1). It runs on receipt of an ACK, after the
 // acknowledged packets have been removed and the RTT updated. A packet is lost

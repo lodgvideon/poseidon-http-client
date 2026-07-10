@@ -110,6 +110,20 @@ func isTimeout(err error) bool {
 	return ok && t.Timeout()
 }
 
+// lossDetectionDeadline returns when the loss-detection timer next expires and
+// whether it is a time-threshold loss timer (RFC 9002 §6.2). A pending
+// time-threshold loss takes priority over the probe timeout; with neither a
+// pending loss nor anything in flight it is the idle bound.
+func (c *Conn) lossDetectionDeadline() (time.Time, bool) {
+	if lt, _, ok := c.earliestLossTime(); ok {
+		return lt, true
+	}
+	if c.hasInFlight() {
+		return c.clock().Add(c.ptoPeriod()), false
+	}
+	return c.clock().Add(idleTimeout), false
+}
+
 // readWithPTO reads one datagram, bounding the wait by the probe timeout when
 // the transport exposes SetReadDeadline. On a PTO expiry with data in flight it
 // sends a probe, backs off, and retries; otherwise a timeout is returned to the
@@ -137,11 +151,7 @@ func (c *Conn) readWithPTO(ctx context.Context, buf []byte) (int, error) {
 	}
 	for {
 		if hasDeadline {
-			wait := idleTimeout
-			if c.hasInFlight() {
-				wait = c.ptoPeriod()
-			}
-			deadline := c.clock().Add(wait)
+			deadline, _ := c.lossDetectionDeadline()
 			if d, ok := ctx.Deadline(); ok && d.Before(deadline) {
 				deadline = d // honor a nearer context deadline
 			}
@@ -161,10 +171,20 @@ func (c *Conn) readWithPTO(ctx context.Context, buf []byte) (int, error) {
 		if e := ctx.Err(); e != nil {
 			return 0, e
 		}
-		if !hasDeadline || !isTimeout(err) || !c.hasInFlight() || c.ptoCount >= maxPTOBackoff {
-			return 0, err // real error, unprobeable, nothing to probe, or gave up
+		if !hasDeadline || !isTimeout(err) {
+			return 0, err // real error, or a transport without deadlines
 		}
-		c.onPTO()
+		// A time-threshold loss timer expiry runs loss detection; otherwise the
+		// probe timeout resends (RFC 9002 §6.2). With neither a pending loss nor a
+		// probe to send, the idle bound elapsed with nothing to do.
+		switch lt, sp, ok := c.earliestLossTime(); {
+		case ok && !lt.After(c.clock()):
+			c.detectLost(sp)
+		case c.hasInFlight() && c.ptoCount < maxPTOBackoff:
+			c.onPTO()
+		default:
+			return 0, err // idle timeout or probe backoff exhausted
+		}
 		if err := c.flush(); err != nil {
 			return 0, err
 		}
