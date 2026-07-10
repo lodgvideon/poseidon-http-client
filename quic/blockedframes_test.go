@@ -39,7 +39,8 @@ func TestConformance_RFC9000_Sec1321_BlockedFramesAckEliciting(t *testing.T) {
 // for a stream the peer can send on is accepted (RFC 9000 §19.13).
 func TestConformance_RFC9000_Sec1913_StreamDataBlockedStreamState(t *testing.T) {
 	// Cursors: client bidi opened through ID 0 (next is 4); client uni through 2.
-	newConn := func() *Conn { return &Conn{nextBidiStreamID: 4, openedUni: 1} }
+	// localMaxStreamsUni lets the server open uni streams up to ID 3+4·N (§4.6).
+	newConn := func() *Conn { return &Conn{nextBidiStreamID: 4, openedUni: 1, localMaxStreamsUni: 10} }
 
 	if err := (&connFrameHandler{c: newConn()}).OnStreamDataBlocked(2, 0); err != ErrStreamState {
 		t.Fatalf("STREAM_DATA_BLOCKED on a send-only client-uni stream = %v, want ErrStreamState", err)
