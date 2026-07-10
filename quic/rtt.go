@@ -138,25 +138,34 @@ func (s *sentSpace) onSent(pn uint64, t time.Time, ackEliciting bool, frames []r
 }
 
 // ack processes an acknowledgement of the packet-number range [low, high],
-// removing those packets from the in-flight set. When high is a newly
-// acknowledged, ack-eliciting packet it returns its send time so the caller can
-// generate an RTT sample (RFC 9002 §5.1). Only the range containing the largest
-// acknowledged (high == largest) can yield a sample.
+// removing those packets from the in-flight set. It returns the largest
+// acknowledged packet's send time and a flag: an RTT sample is generated when the
+// largest is newly acknowledged AND at least one of the newly acknowledged packets
+// was ack-eliciting — even if the largest itself was not (RFC 9002 §5.1). Only the
+// range containing the largest acknowledged (high == largest) can yield a sample.
 func (s *sentSpace) ack(low, high uint64) (sendTime time.Time, hasRTT bool) {
-	if !s.haveLargestAcked || high > s.largestAckedPN {
-		if p, ok := s.packets[high]; ok && p.ackEliciting {
-			sendTime = p.timeSent
-			hasRTT = true
-		}
+	newLargest := !s.haveLargestAcked || high > s.largestAckedPN
+	haveLargest := false
+	if p, ok := s.packets[high]; ok && newLargest {
+		sendTime = p.timeSent // the sample uses the largest acked packet's send time
+		haveLargest = true
+	}
+	if newLargest {
 		s.largestAckedPN = high
 		s.haveLargestAcked = true
 	}
 	// Iterate our own sent packets (bounded) rather than the ACK range (which a
-	// malformed frame could make enormous) to find the ones to remove.
-	for pn := range s.packets {
+	// malformed frame could make enormous) to find the ones to remove, noting
+	// whether any newly acknowledged packet was ack-eliciting.
+	anyAckEliciting := false
+	for pn, p := range s.packets {
 		if pn >= low && pn <= high {
+			if p.ackEliciting {
+				anyAckEliciting = true
+			}
 			delete(s.packets, pn)
 		}
 	}
+	hasRTT = newLargest && haveLargest && anyAckEliciting
 	return sendTime, hasRTT
 }
