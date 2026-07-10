@@ -573,6 +573,11 @@ func (h *connFrameHandler) OnPing() error { h.ackEliciting = true; return nil }
 
 func (h *connFrameHandler) OnStream(id, offset uint64, fin bool, data []byte) error {
 	h.ackEliciting = true
+	// A STREAM frame on a send-only stream — a client-initiated unidirectional
+	// stream (id&0x3 == 0x2) — is a STREAM_STATE_ERROR (RFC 9000 §19.8).
+	if id&0x3 == 0x2 {
+		return ErrStreamState
+	}
 	s := h.c.streams[id]
 	if s == nil {
 		// An id we did not open. Classify by its low two bits (RFC 9000 §2.1).
@@ -617,6 +622,11 @@ func (h *connFrameHandler) OnStream(id, offset uint64, fin bool, data []byte) er
 // received contiguously before the reset remains readable.
 func (h *connFrameHandler) OnResetStream(id, errCode, finalSize uint64) error {
 	h.ackEliciting = true
+	// A RESET_STREAM on a send-only stream — a client-initiated unidirectional
+	// stream (id&0x3 == 0x2) — is a STREAM_STATE_ERROR (RFC 9000 §19.4).
+	if id&0x3 == 0x2 {
+		return ErrStreamState
+	}
 	s := h.c.streams[id]
 	if s == nil {
 		return nil
@@ -653,6 +663,12 @@ func (h *connFrameHandler) OnResetStream(id, errCode, finalSize uint64) error {
 // application error code.
 func (h *connFrameHandler) OnStopSending(id, errCode uint64) error {
 	h.ackEliciting = true
+	// A STOP_SENDING on a receive-only stream — a server-initiated unidirectional
+	// stream (id&0x3 == 0x3) — is a STREAM_STATE_ERROR (RFC 9000 §19.5): the client
+	// has no send side there, so it must not reset one.
+	if id&0x3 == 0x3 {
+		return ErrStreamState
+	}
 	if s := h.c.streams[id]; s != nil {
 		_ = s.Reset(errCode)
 	}
