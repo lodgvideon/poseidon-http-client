@@ -693,9 +693,21 @@ func (h *connFrameHandler) OnPing() error { h.ackEliciting = true; return nil }
 // MAX_STREAM_DATA / MAX_STREAMS — but these frames are ack-eliciting, so a packet
 // carrying only one of them must still be acknowledged (§13.2.1). The inherited
 // nop handlers left such a packet unacknowledged, so the peer retransmitted it.
-func (h *connFrameHandler) OnDataBlocked(uint64) error            { h.ackEliciting = true; return nil }
-func (h *connFrameHandler) OnStreamDataBlocked(_, _ uint64) error { h.ackEliciting = true; return nil }
-func (h *connFrameHandler) OnStreamsBlocked(bool, uint64) error   { h.ackEliciting = true; return nil }
+func (h *connFrameHandler) OnDataBlocked(uint64) error          { h.ackEliciting = true; return nil }
+func (h *connFrameHandler) OnStreamsBlocked(bool, uint64) error { h.ackEliciting = true; return nil }
+
+// OnStreamDataBlocked additionally validates the stream (RFC 9000 §19.13):
+// STREAM_DATA_BLOCKED is sent by a stream's sender, so receiving one for a
+// send-only stream (client-initiated unidirectional, id&0x3 == 0x2 — the peer has
+// no send side there) or for a locally initiated stream not yet created is a
+// STREAM_STATE_ERROR.
+func (h *connFrameHandler) OnStreamDataBlocked(id, _ uint64) error {
+	h.ackEliciting = true
+	if id&0x3 == 0x2 || h.c.localStreamNotCreated(id) {
+		return ErrStreamState
+	}
+	return nil
+}
 
 // permitInSpace enforces RFC 9000 §12.4 (Table 3) / §12.5: a frame carried in a
 // packet-number space that does not permit its type is a PROTOCOL_VIOLATION. Only

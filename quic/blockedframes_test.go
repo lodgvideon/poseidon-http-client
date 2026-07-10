@@ -19,7 +19,9 @@ func TestConformance_RFC9000_Sec1321_BlockedFramesAckEliciting(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			h := &connFrameHandler{c: &Conn{}, space: spaceApp} // BLOCKED frames ride 1-RTT
+			// nextBidiStreamID past 0 so the STREAM_DATA_BLOCKED on stream 0 is for a
+			// created bidi stream (§19.13), not a not-yet-created one.
+			h := &connFrameHandler{c: &Conn{nextBidiStreamID: 4}, space: spaceApp} // BLOCKED frames ride 1-RTT
 			if err := ParseFrames(tc.frame, h); err != nil {
 				t.Fatalf("ParseFrames: %v", err)
 			}
@@ -27,5 +29,28 @@ func TestConformance_RFC9000_Sec1321_BlockedFramesAckEliciting(t *testing.T) {
 				t.Fatal("a BLOCKED frame must be ack-eliciting (§13.2.1)")
 			}
 		})
+	}
+}
+
+// TestConformance_RFC9000_Sec1913_StreamDataBlockedStreamState checks that a
+// received STREAM_DATA_BLOCKED — sent only by a stream's sender — is a
+// STREAM_STATE_ERROR for a send-only stream (client-initiated unidirectional, the
+// peer has no send side) or a locally initiated stream not yet created, while one
+// for a stream the peer can send on is accepted (RFC 9000 §19.13).
+func TestConformance_RFC9000_Sec1913_StreamDataBlockedStreamState(t *testing.T) {
+	// Cursors: client bidi opened through ID 0 (next is 4); client uni through 2.
+	newConn := func() *Conn { return &Conn{nextBidiStreamID: 4, openedUni: 1} }
+
+	if err := (&connFrameHandler{c: newConn()}).OnStreamDataBlocked(2, 0); err != ErrStreamState {
+		t.Fatalf("STREAM_DATA_BLOCKED on a send-only client-uni stream = %v, want ErrStreamState", err)
+	}
+	if err := (&connFrameHandler{c: newConn()}).OnStreamDataBlocked(4, 0); err != ErrStreamState {
+		t.Fatalf("STREAM_DATA_BLOCKED on a not-yet-created client-bidi stream = %v, want ErrStreamState", err)
+	}
+	if err := (&connFrameHandler{c: newConn()}).OnStreamDataBlocked(0, 0); err != nil {
+		t.Fatalf("STREAM_DATA_BLOCKED on a created client-bidi stream = %v, want nil", err)
+	}
+	if err := (&connFrameHandler{c: newConn()}).OnStreamDataBlocked(3, 0); err != nil {
+		t.Fatalf("STREAM_DATA_BLOCKED on a server-uni (peer-sender) stream = %v, want nil", err)
 	}
 }
