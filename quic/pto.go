@@ -14,6 +14,11 @@ const (
 	kInitialRtt   = 333 * time.Millisecond // §6.2.2 initial RTT before any sample
 	maxPTOBackoff = 8                      // give up after this many doublings
 	idleTimeout   = 10 * time.Second       // give-up bound when nothing is in flight to probe
+	// handshakeTimeout bounds the whole handshake. The anti-deadlock PTO (§6.2.2.1)
+	// keeps probing while the handshake is incomplete, and a server that
+	// acknowledges each probe but never completes would otherwise reset the backoff
+	// and idle timers forever; this caps that.
+	handshakeTimeout = 10 * time.Second
 )
 
 // ptoBase is the un-backed-off probe timeout (RFC 9002 §6.2.1): smoothed_rtt +
@@ -69,13 +74,27 @@ func (c *Conn) onPTO() {
 	// space had retransmittable frames to resend — the only in-flight ack-eliciting
 	// data is a lone *_BLOCKED or PING, which carry no retransmit descriptor — send
 	// a fresh PING so the probe still elicits an ACK, rather than backing off
-	// without probing.
-	if !queued && c.hasInFlight() {
-		c.probePending = true
+	// without probing. Before the handshake completes the probe is an Initial or
+	// Handshake PING to unblock an anti-amplification-limited server (§6.2.2.1),
+	// even with nothing in flight; afterward it is an application-space PING.
+	if !queued {
+		if c.handshakeAntiDeadlock() {
+			c.handshakeProbe = true
+		} else if c.hasInFlight() {
+			c.probePending = true
+		}
 	}
 	if c.ptoCount < maxPTOBackoff {
 		c.ptoCount++
 	}
+}
+
+// handshakeAntiDeadlock reports whether the client must keep a probe timer running
+// even with no ack-eliciting packet in flight: until its handshake completes, an
+// anti-amplification-limited server may be blocked waiting for the client, so the
+// client probes to unblock it (RFC 9002 §6.2.2.1).
+func (c *Conn) handshakeAntiDeadlock() bool {
+	return !c.handshakeComplete
 }
 
 // queueOldestProbe re-queues the frames of the oldest unacknowledged
@@ -119,7 +138,7 @@ func (c *Conn) lossDetectionDeadline() (time.Time, bool) {
 	if lt, _, ok := c.earliestLossTime(); ok {
 		return lt, true
 	}
-	if c.hasInFlight() {
+	if c.hasInFlight() || c.handshakeAntiDeadlock() {
 		return c.clock().Add(c.ptoPeriod()), false
 	}
 	if idleDL, ok := c.idleDeadline(); ok {
@@ -232,7 +251,7 @@ func (c *Conn) readWithPTO(ctx context.Context, buf []byte) (int, error) {
 		switch lt, sp, ok := c.earliestLossTime(); {
 		case ok && !lt.After(c.clock()):
 			c.detectLost(sp)
-		case c.hasInFlight() && c.ptoCount < maxPTOBackoff:
+		case (c.hasInFlight() || c.handshakeAntiDeadlock()) && c.ptoCount < maxPTOBackoff:
 			c.onPTO()
 		default:
 			return 0, err // idle timeout or probe backoff exhausted

@@ -75,8 +75,10 @@ func TestConformance_RFC9002_Sec612_LossTimerDeclaresLost(t *testing.T) {
 	client, server := net.Pipe() // honors deadlines; server never writes
 	defer client.Close()
 	defer server.Close()
-	c := &Conn{pc: client}                // real clock (now == nil)
-	c.rtt.update(10*time.Millisecond, 0)  // smoothed 10ms → lossDelay ≈ 11ms
+	// handshakeComplete: a reordered application-space loss is a post-handshake
+	// scenario, so the §6.2.2.1 anti-deadlock PTO is not in play.
+	c := &Conn{pc: client, handshakeComplete: true} // real clock (now == nil)
+	c.rtt.update(10*time.Millisecond, 0)            // smoothed 10ms → lossDelay ≈ 11ms
 	// Packet 5 acknowledged, packet 0 still pending and sent 50 ms ago (well past
 	// the loss delay): a reordered loss the timer must catch without a probe.
 	c.sent[spaceApp].onSent(0, time.Now().Add(-50*time.Millisecond), true, nil)

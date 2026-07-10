@@ -11,9 +11,13 @@ import (
 // Establish sends the client's Initial flight, then reads datagrams and drives
 // the handshake — feeding inbound CRYPTO to TLS, installing keys, and sending
 // the client's responding flights and acknowledgements — until the handshake
-// completes (RFC 9000 §7, RFC 9001 §4). ctx bounds only the initial send; the
-// caller sets a read deadline on the PacketConn to bound the loop.
+// completes (RFC 9000 §7, RFC 9001 §4). The whole handshake is bounded by
+// handshakeTimeout so an anti-deadlock PTO (§6.2.2.1) cannot probe a server that
+// acknowledges but never completes forever; the caller's ctx deadline, if nearer,
+// still applies.
 func (c *Conn) Establish(ctx context.Context) error {
+	ctx, cancel := context.WithTimeout(ctx, handshakeTimeout)
+	defer cancel()
 	if err := c.sendInitialFlight(ctx); err != nil {
 		return err
 	}
@@ -303,6 +307,20 @@ func (c *Conn) flushRetransmits(sp int) error {
 	return nil
 }
 
+// handshakeProbeSpace returns the packet-number space a pending pre-handshake
+// anti-deadlock PING (RFC 9002 §6.2.2.1) is sent in — the highest space with keys,
+// Handshake if available else Initial (which sealPacket pads to 1200, §14.1) — or
+// -1 when no such probe is pending.
+func (c *Conn) handshakeProbeSpace() int {
+	if !c.handshakeProbe {
+		return -1
+	}
+	if c.handshakeSealer != nil {
+		return spaceHandshake
+	}
+	return spaceInitial
+}
+
 // flush sends, for every space that owes a retransmission, CRYPTO, or an ACK:
 // first one packet per queued retransmit frame (retransmit takes priority,
 // RFC 9000 §13.3), then one packet with any pending ACK and new CRYPTO.
@@ -314,9 +332,10 @@ func (c *Conn) flush() error {
 		// CloseWithError, never through flush.
 		return nil
 	}
+	hsProbeSpace := c.handshakeProbeSpace()
 	for sp := 0; sp < numSpaces; sp++ {
 		hasCtrl := sp == spaceApp && len(c.pendingCtrl) > 0
-		hasProbe := sp == spaceApp && c.probePending
+		hasProbe := (sp == spaceApp && c.probePending) || sp == hsProbeSpace
 		nothing := len(c.pendingCrypto[sp]) == 0 && !c.acks[sp].ackPending() &&
 			len(c.retransQueue[sp]) == 0 && !hasCtrl && !hasProbe
 		if nothing || c.sealerFor(sp) == nil {
@@ -339,10 +358,12 @@ func (c *Conn) flush() error {
 			c.pendingCtrl = c.pendingCtrl[:0]
 		}
 		if hasProbe {
-			// A PTO probe with nothing else to resend (RFC 9002 §6.2.4): a bare PING
-			// to elicit an ACK. Not retransmitted — a later PTO re-probes.
+			// A PTO probe with nothing else to resend (RFC 9002 §6.2.4, §6.2.2.1): a
+			// bare PING to elicit an ACK. Not retransmitted — a later PTO re-probes.
+			// At most one probe flag is ever set (onPTO chooses one), so clearing
+			// both here is safe once this space's probe is emitted.
 			frames = AppendPing(frames)
-			c.probePending = false
+			c.probePending, c.handshakeProbe = false, false
 		}
 		var retrans []retransFrame
 		hasCrypto := len(c.pendingCrypto[sp]) > 0

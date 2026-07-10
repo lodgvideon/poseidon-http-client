@@ -69,12 +69,13 @@ type Conn struct {
 	largestRecv [numSpaces]uint64     // largest received packet number per space
 	haveRecv    [numSpaces]bool
 
-	sent         [numSpaces]sentSpace      // packets we sent, per space (ACK/RTT/loss)
-	rtt          rttStats                  // round-trip-time estimates (RFC 9002 §5)
-	now          func() time.Time          // clock (time.Now; overridable in tests)
-	retransQueue [numSpaces][]retransFrame // frames of lost packets awaiting resend
-	ptoCount     uint                      // consecutive probe timeouts (backoff, RFC 9002 §6.2.1)
-	probePending bool                      // a PTO needs a PING probe sent in the app space (§6.2.4)
+	sent           [numSpaces]sentSpace      // packets we sent, per space (ACK/RTT/loss)
+	rtt            rttStats                  // round-trip-time estimates (RFC 9002 §5)
+	now            func() time.Time          // clock (time.Now; overridable in tests)
+	retransQueue   [numSpaces][]retransFrame // frames of lost packets awaiting resend
+	ptoCount       uint                      // consecutive probe timeouts (backoff, RFC 9002 §6.2.1)
+	probePending   bool                      // a PTO needs a PING probe sent in the app space (§6.2.4)
+	handshakeProbe bool                      // a PTO needs a PING probe in the Handshake/Initial space (§6.2.2.1)
 
 	// NewReno congestion control (RFC 9002 §7), connection-wide across spaces.
 	// cwnd == 0 disables it (the sentinel for hand-built test connections).
