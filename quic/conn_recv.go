@@ -4,6 +4,8 @@ import (
 	"context"
 	"crypto/tls"
 	"time"
+
+	"github.com/lodgvideon/poseidon-http-client/internal/bytesx"
 )
 
 // Establish sends the client's Initial flight, then reads datagrams and drives
@@ -551,6 +553,14 @@ func (h *connFrameHandler) OnAckRange(gap, length uint64) error {
 }
 
 func (h *connFrameHandler) OnCrypto(offset uint64, data []byte) error {
+	// The sum of a CRYPTO frame's offset and length cannot exceed 2^62-1
+	// (RFC 9000 §19.6); a frame beyond that limit is a FRAME_ENCODING_ERROR. Unlike
+	// a STREAM frame, CRYPTO has no flow-control gate, so this is the only bound.
+	// offset is a varint (≤ MaxVarint) and len(data) fits a datagram, so the sum
+	// cannot overflow uint64.
+	if offset+uint64(len(data)) > bytesx.MaxVarint {
+		return ErrFrameEncoding
+	}
 	// The handshake CRYPTO stream spans many frames and packets (a server's
 	// certificate flight is several KB); reassemble it by offset so out-of-order
 	// or gapped delivery still yields the TLS messages in order.
