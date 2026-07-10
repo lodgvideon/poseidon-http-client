@@ -230,6 +230,7 @@ protection (RFC 9001) and the connection engine are later phases.
 | §12.2   | Unit        | TestProcessDatagram_ServerInitial, TestProcessDatagram_Coalesced (split coalesced packets, decrypt per level, dispatch frames) |
 | §12.2   | Negative    | TestProcessDatagram_SkipNoKeys, TestProcessDatagram_AuthFailure, TestProcessDatagram_Retry, TestProcessDatagram_Malformed |
 | §13.2 / §19.3 | Unit  | TestAckTracker_RoundTrip, TestAckTracker_PendingAndLargest (received PNs → ACK ranges → decode back to the exact set) |
+| §13.2.1 | Conformance | TestConformance_RFC9000_Sec1321_BlockedFramesAckEliciting (DATA_BLOCKED / STREAM_DATA_BLOCKED / STREAMS_BLOCKED are ack-eliciting, so a packet carrying only one is acknowledged, not left unacked and retransmitted) |
 | §7.1 / §14.1 | Unit   | TestConn_SendInitialFlight (Conn drives the handshake to a ClientHello and sends one padded Initial datagram that decrypts back to it) |
 | §7 / RFC 9001 §4 | Integration | TestConn_Establish_InMemory (**full QUIC v1 + TLS 1.3 handshake** completes between the client Conn and an in-memory server over a datagram pipe: Initial + Handshake flights, key installs, handshake done) |
 | §19.6   | Unit        | TestConnFrameHandler_OnCrypto_ReassemblesByOffset (out-of-order CRYPTO frames reassembled by offset before feeding TLS — a real server's certificate flight spans many frames) |
