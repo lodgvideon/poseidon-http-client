@@ -982,6 +982,23 @@ func (h *connFrameHandler) OnPathChallenge(data *[8]byte) error {
 	return nil
 }
 
+// OnNewToken consumes a NEW_TOKEN (RFC 9000 §19.7). This client keeps no token
+// store across connections, so the token is not retained, but the frame is
+// ack-eliciting and must be acknowledged (§13.2.1); the nop handler would have left
+// a packet carrying only it unacknowledged, prompting the peer to retransmit.
+func (h *connFrameHandler) OnNewToken([]byte) error {
+	h.ackEliciting = true
+	return nil
+}
+
+// OnPathResponse consumes a PATH_RESPONSE (RFC 9000 §19.18). This client never
+// sends a PATH_CHALLENGE, so it has no path validation to complete, but the frame
+// is ack-eliciting and must be acknowledged (§13.2.1).
+func (h *connFrameHandler) OnPathResponse(*[8]byte) error {
+	h.ackEliciting = true
+	return nil
+}
+
 func (h *connFrameHandler) OnHandshakeDone() error {
 	h.c.handshakeComplete = true
 	// HANDSHAKE_DONE confirms the handshake for a client (RFC 9001 §4.1.2), which
