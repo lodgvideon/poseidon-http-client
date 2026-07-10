@@ -231,6 +231,7 @@ protection (RFC 9001) and the connection engine are later phases.
 | §14.1   | Conformance | TestConformance_RFC9000_Sec141_InitialFlight (real ClientHello → padded ≥1200 Initial → protect → parse+decrypt round-trip) |
 | §12.2   | Unit        | TestProcessDatagram_ServerInitial, TestProcessDatagram_Coalesced (split coalesced packets, decrypt per level, dispatch frames) |
 | §12.2   | Negative    | TestProcessDatagram_SkipNoKeys, TestProcessDatagram_AuthFailure, TestProcessDatagram_Retry, TestProcessDatagram_Malformed |
+| §13.1   | Conformance | TestConformance_RFC9000_Sec131_AckForNeverSentPacket (an ACK whose Largest Acknowledged is at or above sendPN — a packet number the client never sent — → PROTOCOL_VIOLATION; an ACK reaching only sent packets is accepted) |
 | §13.2 / §19.3 | Unit  | TestAckTracker_RoundTrip, TestAckTracker_PendingAndLargest (received PNs → ACK ranges → decode back to the exact set) |
 | §13.2.1 | Conformance | TestConformance_RFC9000_Sec1321_BlockedFramesAckEliciting (DATA_BLOCKED / STREAM_DATA_BLOCKED / STREAMS_BLOCKED are ack-eliciting, so a packet carrying only one is acknowledged, not left unacked and retransmitted) |
 | §7.1 / §14.1 | Unit   | TestConn_SendInitialFlight (Conn drives the handshake to a ClientHello and sends one padded Initial datagram that decrypts back to it) |

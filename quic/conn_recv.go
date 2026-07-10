@@ -617,6 +617,13 @@ func (h *connFrameHandler) OnAck(largest, ackDelay, firstRange uint64) error {
 	if firstRange > largest {
 		return ErrFrameEncoding
 	}
+	// An ACK acknowledging a packet number we never sent is a PROTOCOL_VIOLATION
+	// (RFC 9000 §13.1). Packet numbers are assigned sequentially with no gaps, so
+	// sendPN — the next number to send — is one past every packet in flight; a
+	// Largest Acknowledged at or above it cannot name a packet we sent.
+	if largest >= h.c.sendPN[h.space] {
+		return ErrProtocolViolation
+	}
 	low := largest - firstRange
 	h.c.onAckRange(h.space, low, largest, delay, h.priorInFlight)
 	h.ackLow = low

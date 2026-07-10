@@ -18,7 +18,7 @@ func TestConformance_RFC9000_Sec1931_AckFirstRangeNegative(t *testing.T) {
 func TestConformance_RFC9000_Sec1931_AckRangeNegative(t *testing.T) {
 	// Gap underflow: after acking [8,10] (ackLow=8), a Gap of 7 makes the next
 	// range's highest packet 8-7-2 = -1.
-	h := &connFrameHandler{c: &Conn{}}
+	h := &connFrameHandler{c: ackConn()}
 	if err := h.OnAck(10, 0, 2); err != nil {
 		t.Fatalf("first range: %v", err)
 	}
@@ -28,7 +28,7 @@ func TestConformance_RFC9000_Sec1931_AckRangeNegative(t *testing.T) {
 
 	// Length underflow: ackLow=8, Gap 0 → highest 6, then a Length of 7 makes the
 	// lowest packet 6-7 = -1.
-	h2 := &connFrameHandler{c: &Conn{}}
+	h2 := &connFrameHandler{c: ackConn()}
 	if err := h2.OnAck(10, 0, 2); err != nil {
 		t.Fatalf("first range: %v", err)
 	}
@@ -49,9 +49,18 @@ func TestConformance_RFC9000_Sec1931_AckNegativeViaParser(t *testing.T) {
 
 	// A valid ACK: acks [8,10], then Gap 0 / Length 1 acks [5,6].
 	good := AppendAck(nil, 10, 0, 2, []AckRange{{Gap: 0, Length: 1}})
-	if err := ParseFrames(good, &connFrameHandler{c: &Conn{}}); err != nil {
+	if err := ParseFrames(good, &connFrameHandler{c: ackConn()}); err != nil {
 		t.Fatalf("ParseFrames(valid multi-range ack) = %v, want nil", err)
 	}
+}
+
+// ackConn returns a Conn whose Initial-space send counter is high enough that the
+// ACKs these tests feed are for packets it could have sent (RFC 9000 §13.1), so the
+// tests exercise the §19.3.1 range validation rather than the never-sent check.
+func ackConn() *Conn {
+	c := &Conn{}
+	c.sendPN[spaceInitial] = 100
+	return c
 }
 
 // TestConformance_RFC9000_Sec1931_AckBoundariesAccepted checks that the exact
@@ -71,7 +80,7 @@ func TestConformance_RFC9000_Sec1931_AckBoundariesAccepted(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			if err := ParseFrames(c.ack, &connFrameHandler{c: &Conn{}}); err != nil {
+			if err := ParseFrames(c.ack, &connFrameHandler{c: ackConn()}); err != nil {
 				t.Fatalf("a valid ACK reaching packet 0 was rejected: %v", err)
 			}
 		})

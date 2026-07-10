@@ -128,6 +128,7 @@ func TestConformance_RFC9002_Sec78_FullWindowAckGrowsCwnd(t *testing.T) {
 		c.sent[spaceApp].onSent(pn, sent, true, nil)
 		c.onPacketSent(spaceApp, pn, true, 1200)
 	}
+	c.sendPN[spaceApp] = 10 // sent packets 0..9 (§13.1 never-sent gate)
 	if c.bytesInFlight != 12000 {
 		t.Fatalf("bytesInFlight = %d, want 12000 (full window)", c.bytesInFlight)
 	}

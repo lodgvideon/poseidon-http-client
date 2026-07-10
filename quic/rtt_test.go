@@ -72,6 +72,7 @@ func TestConnFrameHandler_OnAck_UpdatesRTT(t *testing.T) {
 	c := &Conn{now: func() time.Time { return tm }}
 	c.sent[spaceApp].onSent(10, base, true, nil)
 	c.sent[spaceApp].onSent(11, base, true, nil)
+	c.sendPN[spaceApp] = 12 // sent through packet 11 (§13.1 never-sent gate)
 
 	tm = base.Add(30 * ms)
 	h := &connFrameHandler{c: c, space: spaceApp}
@@ -94,6 +95,7 @@ func TestConnFrameHandler_OnAckRange_Gap(t *testing.T) {
 	for pn := uint64(8); pn <= 11; pn++ {
 		c.sent[spaceApp].onSent(pn, base, true, nil)
 	}
+	c.sendPN[spaceApp] = 12 // sent through packet 11 (§13.1 never-sent gate)
 	h := &connFrameHandler{c: c, space: spaceApp}
 	// Largest 11, first range 0 (just 11); then gap 0 (skip 10), length 1 (8..9).
 	if err := h.OnAck(11, 0, 0); err != nil {
