@@ -140,3 +140,55 @@ func (c *Conn) removeInFlight(size int) {
 		c.bytesInFlight = 0
 	}
 }
+
+// pacingCredit returns the bytes the pacer will admit right now (RFC 9002 §7.7).
+// A token bucket refills from elapsed wall-clock time at rate N·cwnd/smoothed_rtt
+// (N = 1.25, applied as 5/4) and is capped at the initial congestion window, the
+// burst limit §7.7 recommends. Congestion control disabled (cwnd == 0) or no RTT
+// sample yet means no pacing — a full initial-window burst is allowed, which is
+// itself §7.7/§7.2's initial-window burst allowance.
+func (c *Conn) pacingCredit() uint64 {
+	if c.cwnd == 0 || c.rtt.smoothedRTT <= 0 {
+		return kInitialWindow
+	}
+	now := c.clock()
+	if c.pacingLast.IsZero() {
+		c.pacingLast = now
+		c.pacingBudget = kInitialWindow // a fresh sender may burst the initial window
+	}
+	elapsed := now.Sub(c.pacingLast)
+	if elapsed <= 0 {
+		return c.pacingBudget
+	}
+	if elapsed >= time.Second {
+		// Beyond a second the bucket is certainly full; short-circuit so the refill
+		// multiply below cannot overflow on a large window, and drop the surplus time.
+		c.pacingBudget, c.pacingLast = kInitialWindow, now
+		return c.pacingBudget
+	}
+	rate := 5 * c.cwnd / 4 // N·cwnd bytes per smoothed-RTT (N = 1.25 as 5/4)
+	add := rate * uint64(elapsed) / uint64(c.rtt.smoothedRTT)
+	if add == 0 {
+		// Sub-byte elapsed: leave pacingLast so this time accumulates into a later
+		// refill. Advancing it here would discard the time and let a fast retry loop
+		// starve the bucket to a standstill.
+		return c.pacingBudget
+	}
+	// Advance pacingLast only by the time that produced `add` whole bytes, carrying
+	// the sub-byte remainder forward so the long-run rate stays N·cwnd/smoothed_rtt.
+	consumed := time.Duration(add * uint64(c.rtt.smoothedRTT) / rate)
+	c.pacingLast = c.pacingLast.Add(consumed)
+	c.pacingBudget = min(kInitialWindow, c.pacingBudget+add)
+	return c.pacingBudget
+}
+
+// pacingOnSend debits size bytes from the pacing bucket after a paced packet is
+// sent (RFC 9002 §7.7). It is a no-op on the unpaced path, where the bucket is
+// never consulted.
+func (c *Conn) pacingOnSend(size uint64) {
+	if c.pacingBudget <= size {
+		c.pacingBudget = 0
+		return
+	}
+	c.pacingBudget -= size
+}

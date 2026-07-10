@@ -15,6 +15,7 @@ const (
 	blockStream
 	blockConn
 	blockCong // congestion window full (RFC 9002 §7); not signalled with a frame
+	blockPace // pacing bucket empty (RFC 9002 §7.7); refills with elapsed time, no frame
 )
 
 // Send writes data on the stream as one or more STREAM frames over the 1-RTT
@@ -114,6 +115,14 @@ func (s *Stream) grantable(remaining int) (int, blockKind) {
 			return 0, blockCong
 		}
 		credit = min(credit, s.conn.cwnd-s.conn.bytesInFlight)
+		// Pacing (RFC 9002 §7.7): clamp to the token bucket so a full window is not
+		// dumped back-to-back. An empty bucket stalls the send like a congestion
+		// block; it refills as wall-clock time passes, so the caller retries later.
+		paced := s.conn.pacingCredit()
+		if paced == 0 {
+			return 0, blockPace
+		}
+		credit = min(credit, paced)
 	}
 	return int(min(credit, uint64(remaining), uint64(s.maxChunk()))), blockNone
 }
