@@ -30,6 +30,11 @@ func TestConformance_RFC9114_Sec621_ReadsServerSettings(t *testing.T) {
 	if !client.settingsRead {
 		t.Fatal("SETTINGS should have been read")
 	}
+	// The parsed SETTINGS_MAX_FIELD_SECTION_SIZE must reach the field the request
+	// path reads (RFC 9114 §4.2.2); this pins the whole parse→store wiring.
+	if client.maxFieldSection != 16384 {
+		t.Fatalf("maxFieldSection = %d, want 16384 (read from the server SETTINGS)", client.maxFieldSection)
+	}
 }
 
 // TestConformance_RFC9114_Sec621_MissingSettings checks that a control stream

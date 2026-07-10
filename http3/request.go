@@ -1,9 +1,20 @@
 package http3
 
 import (
+	"errors"
+
 	"github.com/lodgvideon/poseidon-http-client/hpack"
 	"github.com/lodgvideon/poseidon-http-client/qpack"
 )
+
+// ErrFieldSectionTooLarge is returned by EncodeHeaders when the request's field
+// section exceeds the peer's SETTINGS_MAX_FIELD_SECTION_SIZE (RFC 9114 §4.2.2).
+// The request is refused locally rather than sent for the server to reject.
+var ErrFieldSectionTooLarge = errors.New("http3: field section exceeds peer SETTINGS_MAX_FIELD_SECTION_SIZE")
+
+// fieldLineOverhead is the per-field byte cost added to the name and value
+// lengths when sizing a field section (RFC 9114 §4.2.2).
+const fieldLineOverhead = 32
 
 // Request is the subset of an HTTP request a client maps onto an HTTP/3 HEADERS
 // frame: the request pseudo-headers plus regular header fields. The CONNECT and
@@ -23,7 +34,11 @@ type Request struct {
 // dst wrapped in a HEADERS frame (§7.2.2). It returns ErrH3Message if a required
 // pseudo-header is missing or a regular header is invalid or connection-specific
 // (§4.2), so the client never generates a malformed request on the wire.
-func (r *Request) EncodeHeaders(enc *qpack.Encoder, dst []byte) ([]byte, error) {
+//
+// maxFieldSection is the peer's SETTINGS_MAX_FIELD_SECTION_SIZE; a field section
+// whose uncompressed size exceeds it is refused with ErrFieldSectionTooLarge
+// (§4.2.2). Pass the maximum uint64 when the peer imposes no limit.
+func (r *Request) EncodeHeaders(enc *qpack.Encoder, dst []byte, maxFieldSection uint64) ([]byte, error) {
 	if r.Method == "" || r.Scheme == "" || r.Path == "" {
 		return nil, ErrH3Message // required request pseudo-headers (§4.3.1)
 	}
@@ -43,6 +58,17 @@ func (r *Request) EncodeHeaders(enc *qpack.Encoder, dst []byte) ([]byte, error) 
 			return nil, ErrH3Message
 		}
 		fields = append(fields, h)
+	}
+	// The field-section size is the uncompressed cost of every field — name plus
+	// value plus a 32-byte overhead each (§4.2.2). The peer advises a sender SHOULD
+	// NOT exceed its limit; this client enforces it strictly and refuses to send.
+	// Summed on uint64 so a crafted huge header cannot overflow.
+	var size uint64
+	for i := range fields {
+		size += uint64(len(fields[i].Name)) + uint64(len(fields[i].Value)) + fieldLineOverhead
+	}
+	if size > maxFieldSection {
+		return nil, ErrFieldSectionTooLarge
 	}
 	section := enc.EncodeFieldSection(nil, fields)
 	return AppendHeaders(dst, section), nil
