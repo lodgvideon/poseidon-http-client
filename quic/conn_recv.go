@@ -344,7 +344,15 @@ func (c *Conn) openApp(pkt []byte, pnOffset int) (pn uint64, payload []byte, ok 
 // priority, RFC 9000 §13.3). A STREAM frame for a stream whose send side has
 // been reset is dropped (§13.3: its data is not retransmitted).
 func (c *Conn) flushRetransmits(sp int) error {
+	var sent uint64
 	for len(c.retransQueue[sp]) > 0 {
+		// Burst limit (RFC 9002 §7.7): when congestion control is active, resend at
+		// most an initial congestion window per flush so a whole-flight loss is not
+		// retransmitted back-to-back. The remainder stays queued and drains on the
+		// next flush (every Poll, and on the loss/PTO timer).
+		if c.cwnd > 0 && sent >= kInitialWindow {
+			break
+		}
 		rf := c.retransQueue[sp][0]
 		c.retransQueue[sp] = c.retransQueue[sp][1:]
 		if rf.kind == retransStream {
@@ -359,6 +367,7 @@ func (c *Conn) flushRetransmits(sp int) error {
 		if _, err := c.pc.Write(pkt); err != nil {
 			return err
 		}
+		sent += uint64(len(pkt))
 	}
 	return nil
 }
@@ -499,6 +508,12 @@ func (c *Conn) sealPacket(sp int, frames []byte, ackEliciting bool, retrans []re
 	c.onPacketSent(sp, pn, ackEliciting, len(pkt)) // congestion accounting (RFC 9002 §7)
 	if sp == spaceApp {
 		c.appSendCount++ // toward the AEAD confidentiality limit (§6.6)
+		if ackEliciting {
+			// Debit the pacing bucket by the on-wire size so the burst limit is in the
+			// same units as the congestion window; ACK-only packets are not paced
+			// (RFC 9002 §7.7).
+			c.pacingOnSend(uint64(len(pkt)))
+		}
 	}
 	return pkt, nil
 }

@@ -85,6 +85,8 @@ type Conn struct {
 	ccBytesAcked   uint64    // bytes acked toward the next cwnd increase (avoidance)
 	recoveryStart  time.Time // start of the current recovery episode (§7.3.1)
 	firstRTTSample time.Time // when the first RTT sample arrived; gates persistent congestion (§7.6)
+	pacingBudget   uint64    // token-bucket pacing allowance in bytes (RFC 9002 §7.7)
+	pacingLast     time.Time // last pacing-bucket refill instant
 
 	peer               TransportParams // parsed peer transport parameters (send limits)
 	gotServerCID       bool            // the server's SCID has been adopted as our DCID
