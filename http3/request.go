@@ -2,6 +2,7 @@ package http3
 
 import (
 	"errors"
+	"strings"
 
 	"github.com/lodgvideon/poseidon-http-client/hpack"
 	"github.com/lodgvideon/poseidon-http-client/qpack"
@@ -35,15 +36,15 @@ func requiresAuthority(scheme string) bool {
 	return scheme == "http" || scheme == "https"
 }
 
-// hasHostHeader reports whether the regular header fields include a Host header (a
-// lowercase "host" in HTTP/3).
-func hasHostHeader(headers []hpack.HeaderField) bool {
+// hostHeaderValue returns the value of the Host header (lowercase "host" in
+// HTTP/3) among the regular fields, and whether one is present.
+func hostHeaderValue(headers []hpack.HeaderField) (string, bool) {
 	for i := range headers {
 		if string(headers[i].Name) == "host" {
-			return true
+			return string(headers[i].Value), true
 		}
 	}
-	return false
+	return "", false
 }
 
 // EncodeHeaders QPACK-encodes the request's field section — the request pseudo-
@@ -65,10 +66,23 @@ func (r *Request) EncodeHeaders(enc *qpack.Encoder, dst []byte, maxFieldSection 
 		!validFieldValue([]byte(r.Authority)) || !validFieldValue([]byte(r.Path)) {
 		return nil, ErrH3Message
 	}
+	host, haveHost := hostHeaderValue(r.Headers)
 	// An http or https request MUST carry an :authority pseudo-header or a Host
 	// header field (RFC 9114 §4.3.1).
-	if r.Authority == "" && requiresAuthority(r.Scheme) && !hasHostHeader(r.Headers) {
+	if r.Authority == "" && requiresAuthority(r.Scheme) && !haveHost {
 		return nil, ErrH3Message
+	}
+	// The authority MUST NOT include the deprecated userinfo subcomponent for an
+	// http or https URI (RFC 9114 §4.3.1); its presence is marked by an '@'.
+	if requiresAuthority(r.Scheme) && strings.ContainsRune(r.Authority, '@') {
+		return nil, ErrH3Message
+	}
+	// If both the Host header and :authority are present they MUST carry the same
+	// value, and neither present field may be empty (RFC 9114 §4.3.1).
+	if haveHost {
+		if host == "" || (r.Authority != "" && host != r.Authority) {
+			return nil, ErrH3Message
+		}
 	}
 	fields := make([]hpack.HeaderField, 0, 4+len(r.Headers))
 	fields = append(fields,

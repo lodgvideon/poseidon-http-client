@@ -52,3 +52,33 @@ func TestConformance_RFC9114_Sec431_AuthorityRequired(t *testing.T) {
 		t.Fatalf("https with :authority: err = %v, want nil", err)
 	}
 }
+
+// TestConformance_RFC9114_Sec431_AuthorityUserinfoAndHostMatch checks the §4.3.1
+// MUSTs on the authority: it MUST NOT include the deprecated userinfo subcomponent
+// (an '@'), and if both a Host header and :authority are present they MUST carry the
+// same non-empty value.
+func TestConformance_RFC9114_Sec431_AuthorityUserinfoAndHostMatch(t *testing.T) {
+	var enc qpack.Encoder
+	enc2 := func() *qpack.Encoder { var e qpack.Encoder; return &e }
+
+	// :authority carrying userinfo → malformed.
+	userinfo := &Request{Method: "GET", Scheme: "https", Authority: "user@example.com", Path: "/"}
+	if _, err := userinfo.EncodeHeaders(&enc, nil, ^uint64(0)); err != ErrH3Message {
+		t.Fatalf(":authority with userinfo: err = %v, want ErrH3Message", err)
+	}
+	// A Host header disagreeing with :authority → malformed.
+	mismatch := &Request{Method: "GET", Scheme: "https", Authority: "a.com", Path: "/", Headers: []hpack.HeaderField{hf("host", "b.com")}}
+	if _, err := mismatch.EncodeHeaders(enc2(), nil, ^uint64(0)); err != ErrH3Message {
+		t.Fatalf("Host != :authority: err = %v, want ErrH3Message", err)
+	}
+	// An empty Host header → malformed.
+	emptyHost := &Request{Method: "GET", Scheme: "https", Authority: "a.com", Path: "/", Headers: []hpack.HeaderField{hf("host", "")}}
+	if _, err := emptyHost.EncodeHeaders(enc2(), nil, ^uint64(0)); err != ErrH3Message {
+		t.Fatalf("empty Host header: err = %v, want ErrH3Message", err)
+	}
+	// A Host header equal to :authority → accepted.
+	same := &Request{Method: "GET", Scheme: "https", Authority: "a.com", Path: "/", Headers: []hpack.HeaderField{hf("host", "a.com")}}
+	if _, err := same.EncodeHeaders(enc2(), nil, ^uint64(0)); err != nil {
+		t.Fatalf("Host == :authority: err = %v, want nil", err)
+	}
+}
