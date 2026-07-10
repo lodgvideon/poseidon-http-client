@@ -218,6 +218,7 @@ protection (RFC 9001) and the connection engine are later phases.
 | §19.1   | Conformance | TestConformance_RFC9000_Sec191_Padding |
 | §19 (all frames) | Roundtrip | TestFrames_RoundTrip |
 | §12.4   | Negative    | TestParseFrames_Malformed, TestParseFrames_MoreMalformed (malformed → ErrFrameEncoding) |
+| §12.4 / §12.5 | Conformance | TestConformance_RFC9000_Sec124_FrameTypePermittedBySpace (a frame carried in a space that does not permit its type → PROTOCOL_VIOLATION: Initial/Handshake permit only PADDING/PING/ACK/CRYPTO/CONNECTION_CLOSE-0x1c, so HANDSHAKE_DONE, STREAM, MAX_DATA, or an application CONNECTION_CLOSE-0x1d there is rejected — closing the forged-Initial HANDSHAKE_DONE handshake-completion hole — while the permitted frames and any frame in the 1-RTT space are accepted; an unknown type is FRAME_ENCODING_ERROR per §12.4) |
 | §17.2.2 | Conformance | TestConformance_RFC9000_Sec172_InitialHeader |
 | §17.2.5 | Conformance | TestConformance_RFC9000_Sec1725_RetryHeader, TestConformance_RFC9000_Sec1725_RetryRekeysAndResends (a valid Retry adopts the server CID, re-derives Initial keys, stores the token, re-queues the ClientHello), TestConformance_RFC9000_Sec17253_RetryResendCarriesToken (the resent Initial carries the token, is padded, decrypts under the new keys), TestConn_Retry_Discards (bad tag / second Retry / post-server-Initial Retry discarded, §17.2.5.2) |
 | §17.2.1 | Conformance | TestConformance_RFC9000_Sec171_VersionNegotiation |

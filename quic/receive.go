@@ -44,6 +44,11 @@ type DatagramResult struct {
 // not-yet-readable packets. A structurally malformed header stops parsing and
 // returns ErrPacketEncoding. Retry and Version Negotiation packets carry no
 // protected payload and are only flagged for the caller to handle.
+//
+// This helper does NOT enforce the RFC 9000 §12.4 frame-type-by-space rules; it
+// parses with the caller's handler for any space. The live Conn receive path
+// (recvDatagram) uses a space-aware handler that gates frames; this exported entry
+// point is not on that path.
 func ProcessDatagram(datagram []byte, dcidLen int, ks *KeySet, largestAcked func(PacketType) uint64, h FrameHandler) (DatagramResult, error) {
 	var res DatagramResult
 	rest := datagram

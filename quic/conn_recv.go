@@ -673,6 +673,31 @@ func (h *connFrameHandler) OnDataBlocked(uint64) error            { h.ackEliciti
 func (h *connFrameHandler) OnStreamDataBlocked(_, _ uint64) error { h.ackEliciting = true; return nil }
 func (h *connFrameHandler) OnStreamsBlocked(bool, uint64) error   { h.ackEliciting = true; return nil }
 
+// permitInSpace enforces RFC 9000 §12.4 (Table 3) / §12.5: a frame carried in a
+// packet-number space that does not permit its type is a PROTOCOL_VIOLATION. Only
+// PADDING, PING, ACK, CRYPTO, and a transport CONNECTION_CLOSE (0x1c) may appear in
+// Initial and Handshake packets; the 1-RTT (application) space permits any frame.
+// Without this gate a forged Initial — protected only with keys derived from the
+// on-wire connection ID, so any observer can build one — could carry HANDSHAKE_DONE
+// and drive the client to a spurious "handshake complete" with no 1-RTT keys, or
+// inject STREAM/flow-control state before the handshake is authenticated.
+func (h *connFrameHandler) permitInSpace(typ uint64) error {
+	if h.space == spaceApp {
+		return nil
+	}
+	switch typ {
+	case FramePadding, FramePing, FrameACK, FrameACKECN, FrameCrypto, FrameConnectionClose:
+		return nil
+	default:
+		if typ > FrameHandshakeDone {
+			// An unknown frame type is a FRAME_ENCODING_ERROR regardless of space
+			// (RFC 9000 §12.4), matching how parseFrameBody rejects it in 1-RTT.
+			return ErrFrameEncoding
+		}
+		return ErrProtocolViolation // a known frame not permitted in this space (§12.5)
+	}
+}
+
 // localStreamNotCreated reports whether id names a locally initiated (client)
 // stream that has not yet been created — one at or above the next ID we would
 // allocate for its type (RFC 9000 §3.2). A frame that references such a stream is a

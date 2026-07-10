@@ -99,14 +99,26 @@ func (nopFrameHandler) OnPathResponse(*[8]byte) error                           
 func (nopFrameHandler) OnConnectionClose(bool, uint64, uint64, []byte) error       { return nil }
 func (nopFrameHandler) OnHandshakeDone() error                                     { return nil }
 
+// spacePermitter is implemented by a FrameHandler that enforces which frame types
+// may appear in the packet-number space of the packet being parsed (RFC 9000
+// §12.4 Table 3 / §12.5). ParseFrames consults it, when present, before dispatching
+// each frame, so a frame carried in a space that does not permit it is rejected
+// before it reaches a handler method. Handlers that do not implement it (tests,
+// the nop handler) accept every frame type.
+type spacePermitter interface {
+	permitInSpace(typ uint64) error
+}
+
 // ParseFrames parses every frame in a decrypted packet payload, dispatching each
 // to h in order. It returns ErrFrameEncoding on any malformed frame (truncated
 // field, varint past end, length past end, unknown type) — a connection error
 // per RFC 9000 §12.4 — or the handler's error.
 func ParseFrames(payload []byte, h FrameHandler) error {
+	permit, _ := h.(spacePermitter)
 	p := 0
 	for p < len(payload) {
-		// PADDING (0x00) is a single zero byte; coalesce a run into one call.
+		// PADDING (0x00) is a single zero byte; coalesce a run into one call. PADDING
+		// is permitted in every packet type, so it needs no space check.
 		if payload[p] == 0x00 {
 			start := p
 			for p < len(payload) && payload[p] == 0x00 {
@@ -122,6 +134,11 @@ func ParseFrames(payload []byte, h FrameHandler) error {
 			return ErrFrameEncoding
 		}
 		p += n
+		if permit != nil {
+			if err := permit.permitInSpace(typ); err != nil {
+				return err
+			}
+		}
 		np, err := parseFrameBody(typ, payload, p, h)
 		if err != nil {
 			return err
