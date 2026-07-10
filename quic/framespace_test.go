@@ -50,7 +50,9 @@ func TestConformance_RFC9000_Sec124_FrameTypePermittedBySpace(t *testing.T) {
 		{"crypto", crypto},
 		{"transport-connection-close", transportClose},
 	} {
-		h := &connFrameHandler{c: &Conn{}, space: spaceInitial}
+		c := &Conn{}
+		c.sendPN[spaceInitial] = 1 // so the ACK of packet 0 is not a §13.1 never-sent
+		h := &connFrameHandler{c: c, space: spaceInitial}
 		if err := ParseFrames(tc.frame, h); err != nil {
 			t.Fatalf("Initial %s: ParseFrames = %v, want nil (permitted §12.4)", tc.name, err)
 		}

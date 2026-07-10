@@ -41,6 +41,7 @@ func TestConformance_RFC9002_Sec53_AckDelayExponentDecode(t *testing.T) {
 	c := &Conn{now: func() time.Time { return base }, handshakeConfirmed: true,
 		peer: TransportParams{AckDelayExponent: 4, MaxAckDelay: 25 * ms}}
 	h := &connFrameHandler{c: c, space: spaceApp}
+	c.sendPN[spaceApp] = 2 // we sent packets 0 and 1 (§13.1 never-sent gate)
 
 	c.sent[spaceApp].onSent(0, base.Add(-100*ms), true, nil)
 	if err := h.OnAck(0, 0, 0); err != nil { // first sample: RTT 100ms
@@ -65,6 +66,7 @@ func TestConformance_RFC9002_Sec53_InitialSpaceFixedExponent(t *testing.T) {
 	base := time.Unix(10, 0)
 	c := &Conn{now: func() time.Time { return base }, peer: TransportParams{AckDelayExponent: 5, MaxAckDelay: 25 * ms}}
 	h := &connFrameHandler{c: c, space: spaceHandshake}
+	c.sendPN[spaceHandshake] = 2 // we sent packets 0 and 1 (§13.1 never-sent gate)
 
 	c.sent[spaceHandshake].onSent(0, base.Add(-100*ms), true, nil)
 	if err := h.OnAck(0, 0, 0); err != nil {
@@ -89,6 +91,7 @@ func TestConn_AckDelay_OverflowBounded(t *testing.T) {
 	base := time.Unix(10, 0)
 	c := &Conn{now: func() time.Time { return base }, peer: TransportParams{AckDelayExponent: 3}}
 	h := &connFrameHandler{c: c, space: spaceHandshake}
+	c.sendPN[spaceHandshake] = 2 // we sent packets 0 and 1 (§13.1 never-sent gate)
 
 	c.sent[spaceHandshake].onSent(0, base.Add(-100*ms), true, nil)
 	if err := h.OnAck(0, 0, 0); err != nil {
@@ -118,6 +121,7 @@ func TestConformance_RFC9002_Sec53_AckDelayClampedToMax(t *testing.T) {
 	c := &Conn{now: func() time.Time { return base }, handshakeConfirmed: true,
 		peer: TransportParams{AckDelayExponent: 3, MaxAckDelay: 5 * ms}}
 	h := &connFrameHandler{c: c, space: spaceApp}
+	c.sendPN[spaceApp] = 2 // we sent packets 0 and 1 (§13.1 never-sent gate)
 
 	c.sent[spaceApp].onSent(0, base.Add(-100*ms), true, nil)
 	if err := h.OnAck(0, 0, 0); err != nil {
