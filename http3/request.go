@@ -29,6 +29,23 @@ type Request struct {
 	Body      []byte // optional request body, sent in a DATA frame after HEADERS
 }
 
+// requiresAuthority reports whether a scheme has a mandatory authority component;
+// "http" and "https" do (RFC 9114 §4.3.1).
+func requiresAuthority(scheme string) bool {
+	return scheme == "http" || scheme == "https"
+}
+
+// hasHostHeader reports whether the regular header fields include a Host header (a
+// lowercase "host" in HTTP/3).
+func hasHostHeader(headers []hpack.HeaderField) bool {
+	for i := range headers {
+		if string(headers[i].Name) == "host" {
+			return true
+		}
+	}
+	return false
+}
+
 // EncodeHeaders QPACK-encodes the request's field section — the request pseudo-
 // headers first, then the regular headers (RFC 9114 §4.3.1) — and appends it to
 // dst wrapped in a HEADERS frame (§7.2.2). It returns ErrH3Message if a required
@@ -41,6 +58,17 @@ type Request struct {
 func (r *Request) EncodeHeaders(enc *qpack.Encoder, dst []byte, maxFieldSection uint64) ([]byte, error) {
 	if r.Method == "" || r.Scheme == "" || r.Path == "" {
 		return nil, ErrH3Message // required request pseudo-headers (§4.3.1)
+	}
+	// Pseudo-header values are field values: they MUST NOT contain NUL, CR, or LF
+	// (RFC 9114 §4.2), exactly as the regular field values are checked below.
+	if !validFieldValue([]byte(r.Method)) || !validFieldValue([]byte(r.Scheme)) ||
+		!validFieldValue([]byte(r.Authority)) || !validFieldValue([]byte(r.Path)) {
+		return nil, ErrH3Message
+	}
+	// An http or https request MUST carry an :authority pseudo-header or a Host
+	// header field (RFC 9114 §4.3.1).
+	if r.Authority == "" && requiresAuthority(r.Scheme) && !hasHostHeader(r.Headers) {
+		return nil, ErrH3Message
 	}
 	fields := make([]hpack.HeaderField, 0, 4+len(r.Headers))
 	fields = append(fields,

@@ -15,9 +15,10 @@ import (
 // uncompressed name+value+32 cost of every field (RFC 9114 §4.2.2).
 func TestConformance_RFC9114_Sec422_FieldSectionSizeLimit(t *testing.T) {
 	var enc qpack.Encoder
-	req := &Request{Method: "GET", Scheme: "https", Path: "/"}
-	// :method/GET (7+3+32) + :scheme/https (7+5+32) + :path // (5+1+32) = 124.
-	const size = (7 + 3 + 32) + (7 + 5 + 32) + (5 + 1 + 32)
+	req := &Request{Method: "GET", Scheme: "https", Authority: "h", Path: "/"}
+	// :method/GET (7+3+32) + :scheme/https (7+5+32) + :authority/h (10+1+32) +
+	// :path // (5+1+32) = 167.
+	const size = (7 + 3 + 32) + (7 + 5 + 32) + (10 + 1 + 32) + (5 + 1 + 32)
 
 	if _, err := req.EncodeHeaders(&enc, nil, size); err != nil {
 		t.Fatalf("at exactly the limit: err = %v, want nil", err)
@@ -32,11 +33,11 @@ func TestConformance_RFC9114_Sec422_FieldSectionSizeLimit(t *testing.T) {
 func TestConformance_RFC9114_Sec422_ExtraHeaderCounted(t *testing.T) {
 	var enc qpack.Encoder
 	req := &Request{
-		Method: "GET", Scheme: "https", Path: "/",
+		Method: "GET", Scheme: "https", Authority: "h", Path: "/",
 		Headers: []hpack.HeaderField{{Name: []byte("accept"), Value: []byte("text/html")}},
 	}
-	const base = (7 + 3 + 32) + (7 + 5 + 32) + (5 + 1 + 32) // 124
-	const extra = 6 + 9 + 32                                // accept: text/html = 47
+	const base = (7 + 3 + 32) + (7 + 5 + 32) + (10 + 1 + 32) + (5 + 1 + 32) // 167
+	const extra = 6 + 9 + 32                                                // accept: text/html = 47
 	if _, err := req.EncodeHeaders(&enc, nil, base+extra); err != nil {
 		t.Fatalf("at the limit including the extra header: err = %v, want nil", err)
 	}
