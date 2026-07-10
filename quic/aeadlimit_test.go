@@ -14,7 +14,7 @@ func TestConformance_RFC9001_Sec66_ConfidentialityLimitCloses(t *testing.T) {
 	pc := &closePC{}
 	c := &Conn{pc: pc, dcid: []byte("aeadtest"), oneRTTSealer: sealer, appSendCount: aeadConfidentialityLimit}
 
-	if _, err := c.sealPacket(spaceApp, []byte{byte(FramePing)}, true, nil); err != ErrAEADLimit {
+	if _, err := c.sealPacket(spaceApp, []byte{byte(FramePing)}, true, nil, false); err != ErrAEADLimit {
 		t.Fatalf("sealPacket at the confidentiality limit = %v, want ErrAEADLimit", err)
 	}
 	if !c.closed {
@@ -35,7 +35,7 @@ func TestConn_AEADConfidentiality_CounterIncrements(t *testing.T) {
 	sealer, _ := closeTestSealerOpener(t, 0x67)
 	c := &Conn{pc: &closePC{}, dcid: []byte("aeadtest"), oneRTTSealer: sealer}
 	for i := 0; i < 3; i++ {
-		if _, err := c.sealPacket(spaceApp, []byte{byte(FramePing)}, true, nil); err != nil {
+		if _, err := c.sealPacket(spaceApp, []byte{byte(FramePing)}, true, nil, false); err != nil {
 			t.Fatalf("sealPacket %d: %v", i, err)
 		}
 	}

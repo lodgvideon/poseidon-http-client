@@ -74,7 +74,7 @@ func (c *Conn) CloseWithError(app bool, code uint64, reason string) error {
 		frame := AppendConnectionClose(nil, app, code, 0, []byte(reason))
 		// CONNECTION_CLOSE is not ack-eliciting (RFC 9000 §13.2.1); it is sent
 		// once, not tracked for retransmission.
-		if pkt, err := c.sealPacket(sp, frame, false, nil); err == nil {
+		if pkt, err := c.sealPacket(sp, frame, false, nil, false); err == nil {
 			_, _ = c.pc.Write(pkt)
 		}
 	}

@@ -377,7 +377,7 @@ func (c *Conn) flushRetransmits(sp int) error {
 				continue
 			}
 		}
-		pkt, err := c.sealPacket(sp, rf.encode(nil), true, []retransFrame{rf})
+		pkt, err := c.sealPacket(sp, rf.encode(nil), true, []retransFrame{rf}, false)
 		if err != nil {
 			return err
 		}
@@ -433,11 +433,13 @@ func (c *Conn) flush() error {
 		if c.acks[sp].ackPending() {
 			frames = c.acks[sp].appendACK(frames, 0)
 		}
+		padPath := false
 		if hasCtrl {
 			// MAX_DATA / MAX_STREAM_DATA credit grants (§4.1). Not retransmitted:
 			// a later grant supersedes a lost one, so recovery is self-healing.
 			frames = append(frames, c.pendingCtrl...)
 			c.pendingCtrl = c.pendingCtrl[:0]
+			padPath, c.pathRespPending = c.pathRespPending, false // §8.2.2 pad if a PATH_RESPONSE rode along
 		}
 		if hasProbe {
 			// A PTO probe with nothing else to resend (RFC 9002 §6.2.4, §6.2.2.1): a
@@ -458,7 +460,7 @@ func (c *Conn) flush() error {
 			retrans = []retransFrame{{kind: retransCrypto, offset: off, data: data}}
 		}
 		// A packet carrying CRYPTO, a credit grant, or a PING probe is ack-eliciting.
-		pkt, err := c.sealPacket(sp, frames, hasCrypto || hasCtrl || hasProbe, retrans)
+		pkt, err := c.sealPacket(sp, frames, hasCrypto || hasCtrl || hasProbe, retrans, padPath)
 		if err != nil {
 			return err
 		}
@@ -472,7 +474,7 @@ func (c *Conn) flush() error {
 // sealPacket builds and protects a packet for a space carrying frames. Frames
 // are padded to keep the packet long enough for the header-protection sample
 // (RFC 9001 §5.4.2).
-func (c *Conn) sealPacket(sp int, frames []byte, ackEliciting bool, retrans []retransFrame) ([]byte, error) {
+func (c *Conn) sealPacket(sp int, frames []byte, ackEliciting bool, retrans []retransFrame, padTo1200 bool) ([]byte, error) {
 	// AEAD confidentiality limit (RFC 9001 §6.6): this client cannot initiate its
 	// own key update, so once it has sealed the limit of 1-RTT packets under the
 	// current key it must stop and close with AEAD_LIMIT_REACHED rather than seal
@@ -492,6 +494,14 @@ func (c *Conn) sealPacket(sp int, frames []byte, ackEliciting bool, retrans []re
 			tok++ // a token of 64+ bytes needs a 2-byte length varint
 		}
 		hdr := 1 + 4 + 1 + len(c.dcid) + 1 + len(c.scid) + tok + 2 // +2-byte length field
+		if need := InitialDatagramMinSize - hdr - 4 - 16; need > minFrames {
+			minFrames = need
+		}
+	} else if padTo1200 {
+		// RFC 9000 §8.2.2: a datagram carrying a PATH_RESPONSE MUST be expanded to at
+		// least 1200 bytes, to confirm the path carries that size in both directions
+		// and to limit amplification. The short header is the first byte plus the DCID.
+		hdr := 1 + len(c.dcid)
 		if need := InitialDatagramMinSize - hdr - 4 - 16; need > minFrames {
 			minFrames = need
 		}
@@ -978,6 +988,7 @@ func (h *connFrameHandler) OnPathChallenge(data *[8]byte) error {
 	h.ackEliciting = true
 	if len(h.c.pendingCtrl) < maxPendingCtrl {
 		h.c.pendingCtrl = AppendPathResponse(h.c.pendingCtrl, *data)
+		h.c.pathRespPending = true // its datagram MUST be expanded to 1200 (§8.2.2)
 	}
 	return nil
 }

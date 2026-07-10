@@ -174,7 +174,7 @@ func (c *Conn) writeAppFrames(frames []byte, retrans []retransFrame) error {
 		// once the connection is closed, including by a received CONNECTION_CLOSE.
 		return ErrConnClosed
 	}
-	pkt, err := c.sealPacket(spaceApp, frames, true, retrans)
+	pkt, err := c.sealPacket(spaceApp, frames, true, retrans, false)
 	if err != nil {
 		return err
 	}
