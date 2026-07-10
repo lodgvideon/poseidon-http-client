@@ -673,6 +673,23 @@ func (h *connFrameHandler) OnDataBlocked(uint64) error            { h.ackEliciti
 func (h *connFrameHandler) OnStreamDataBlocked(_, _ uint64) error { h.ackEliciting = true; return nil }
 func (h *connFrameHandler) OnStreamsBlocked(bool, uint64) error   { h.ackEliciting = true; return nil }
 
+// localStreamNotCreated reports whether id names a locally initiated (client)
+// stream that has not yet been created — one at or above the next ID we would
+// allocate for its type (RFC 9000 §3.2). A frame that references such a stream is a
+// STREAM_STATE_ERROR (§19.5, §19.8, §19.10); an ID below the high-water mark was created
+// (perhaps since closed) and must instead be ignored. Peer-initiated streams
+// (server-uni/bidi) are never "not yet created" from our side and return false.
+func (c *Conn) localStreamNotCreated(id uint64) bool {
+	switch id & 0x03 {
+	case 0x00: // client-initiated bidirectional: IDs 0, 4, 8, …
+		return id >= c.nextBidiStreamID
+	case 0x02: // client-initiated unidirectional: IDs 2, 6, 10, …
+		return id >= 2+c.openedUni*4
+	default:
+		return false
+	}
+}
+
 func (h *connFrameHandler) OnStream(id, offset uint64, fin bool, data []byte) error {
 	h.ackEliciting = true
 	// A STREAM frame on a send-only stream — a client-initiated unidirectional
@@ -691,7 +708,12 @@ func (h *connFrameHandler) OnStream(id, offset uint64, fin bool, data []byte) er
 			}
 		case 0x01: // server-initiated bidirectional — never permitted for a client
 			return ErrServerBidiStream
-		default: // a client-initiated stream we never opened — ignore
+		default: // client-initiated bidirectional (0x00) we have no open record of
+			// A STREAM for a locally initiated stream not yet created is a
+			// STREAM_STATE_ERROR (§19.8); one already created but since closed is ignored.
+			if h.c.localStreamNotCreated(id) {
+				return ErrStreamState
+			}
 			return nil
 		}
 	}
@@ -779,6 +801,12 @@ func (h *connFrameHandler) OnStopSending(id, errCode uint64) error {
 	}
 	if s := h.c.streams[id]; s != nil {
 		_ = s.Reset(errCode)
+		return nil
+	}
+	// A STOP_SENDING for a locally initiated stream not yet created is a
+	// STREAM_STATE_ERROR (§19.5); one already created but since closed is ignored.
+	if h.c.localStreamNotCreated(id) {
+		return ErrStreamState
 	}
 	return nil
 }
@@ -793,8 +821,22 @@ func (h *connFrameHandler) OnMaxData(maximum uint64) error {
 
 func (h *connFrameHandler) OnMaxStreamData(streamID, maximum uint64) error {
 	h.ackEliciting = true
-	if s := h.c.streams[streamID]; s != nil && maximum > s.sendMax {
-		s.sendMax = maximum
+	// A MAX_STREAM_DATA for a receive-only stream — a server-initiated
+	// unidirectional stream (id&0x3 == 0x3) — is a STREAM_STATE_ERROR (RFC 9000
+	// §19.10): the client has no send side there to credit.
+	if streamID&0x3 == 0x3 {
+		return ErrStreamState
+	}
+	if s := h.c.streams[streamID]; s != nil {
+		if maximum > s.sendMax {
+			s.sendMax = maximum
+		}
+		return nil
+	}
+	// One for a locally initiated stream not yet created is likewise a
+	// STREAM_STATE_ERROR (§19.10); one created and since closed is ignored.
+	if h.c.localStreamNotCreated(streamID) {
+		return ErrStreamState
 	}
 	return nil
 }

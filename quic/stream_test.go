@@ -122,11 +122,11 @@ func TestConn_OnStream_DeliversToOpenStream(t *testing.T) {
 	if !s.recv.complete() {
 		t.Fatal("stream should be complete after FIN")
 	}
-	// A frame for an unopened client-initiated stream (id&3==0, we never opened
-	// stream 8) is ignored, not an error. Server-initiated streams are classified
-	// and accepted or rejected separately (see accept_uni_test.go).
-	if err := h.OnStream(8, 0, false, []byte("x")); err != nil {
-		t.Fatalf("unopened client stream: %v", err)
+	// A STREAM for a locally initiated stream we have not yet created (id&3==0, and
+	// stream 8 is above our high-water mark of 4) is a STREAM_STATE_ERROR (§19.8).
+	// Server-initiated streams are classified separately (see accept_uni_test.go).
+	if err := h.OnStream(8, 0, false, []byte("x")); err != ErrStreamState {
+		t.Fatalf("STREAM on a not-yet-created client stream = %v, want ErrStreamState", err)
 	}
 }
 
