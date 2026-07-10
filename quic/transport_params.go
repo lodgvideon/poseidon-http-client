@@ -133,11 +133,13 @@ func (tp *TransportParams) set(id uint64, value []byte) error {
 	case tpInitialMaxStreamDataBidiRemote:
 		return tp.setUint(value, &tp.InitialMaxStreamDataBidiRemote)
 	case tpInitialMaxStreamsBidi:
-		return tp.setUint(value, &tp.InitialMaxStreamsBidi)
+		// A max_streams value greater than 2^60 is invalid (RFC 9000 §4.6): it
+		// implies a stream ID that cannot be expressed as a QUIC varint.
+		return tp.setBoundedUint(value, &tp.InitialMaxStreamsBidi, maxStreamsLimit)
 	case tpInitialMaxStreamDataUni:
 		return tp.setUint(value, &tp.InitialMaxStreamDataUni)
 	case tpInitialMaxStreamsUni:
-		return tp.setUint(value, &tp.InitialMaxStreamsUni)
+		return tp.setBoundedUint(value, &tp.InitialMaxStreamsUni, maxStreamsLimit)
 	case tpMaxUDPPayloadSize:
 		v, ok := tpReadUint(value)
 		if !ok || v < 1200 {
@@ -173,6 +175,17 @@ func (tp *TransportParams) set(id uint64, value []byte) error {
 func (tp *TransportParams) setUint(value []byte, dst *uint64) error {
 	v, ok := tpReadUint(value)
 	if !ok {
+		return ErrTransportParameter
+	}
+	*dst = v
+	return nil
+}
+
+// setBoundedUint is setUint with an inclusive upper bound: a value above max is a
+// TRANSPORT_PARAMETER_ERROR (RFC 9000 §7.4).
+func (tp *TransportParams) setBoundedUint(value []byte, dst *uint64, max uint64) error {
+	v, ok := tpReadUint(value)
+	if !ok || v > max {
 		return ErrTransportParameter
 	}
 	*dst = v
