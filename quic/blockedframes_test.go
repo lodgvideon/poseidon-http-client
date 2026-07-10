@@ -19,7 +19,7 @@ func TestConformance_RFC9000_Sec1321_BlockedFramesAckEliciting(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			h := &connFrameHandler{c: &Conn{}}
+			h := &connFrameHandler{c: &Conn{}, space: spaceApp} // BLOCKED frames ride 1-RTT
 			if err := ParseFrames(tc.frame, h); err != nil {
 				t.Fatalf("ParseFrames: %v", err)
 			}
