@@ -225,21 +225,35 @@ func (c *Client) Do(ctx context.Context, req *Request) (*Response, []byte, error
 
 // roundTrip sends the request on stream and reads the response. Its caller aborts
 // the stream on a non-nil error.
+// sendRequest writes the request's HEADERS — ending the stream immediately when
+// there is no body — and then the body in a DATA frame carrying the FIN (RFC 9114
+// §4.1). If the server aborts reading the request with STOP_SENDING (surfaced as
+// ErrStreamReset), the send stops but is not fatal: the caller still reads the
+// response on the stream's independent receive side (§4.1). Any other send error is
+// returned.
+func (c *Client) sendRequest(ctx context.Context, stream quicStream, req *Request, frame []byte) error {
+	hasBody := len(req.Body) > 0
+	if err := c.sendAll(ctx, stream, frame, !hasBody); err != nil {
+		if !errors.Is(err, quic.ErrStreamReset) {
+			return err
+		}
+		return nil // send aborted by STOP_SENDING; still read the response
+	}
+	if hasBody {
+		if err := c.sendAll(ctx, stream, AppendData(nil, req.Body), true); err != nil && !errors.Is(err, quic.ErrStreamReset) {
+			return err
+		}
+	}
+	return nil
+}
+
 func (c *Client) roundTrip(ctx context.Context, stream quicStream, req *Request) (*Response, []byte, error) {
 	frame, err := req.EncodeHeaders(&c.enc, nil, c.maxFieldSection)
 	if err != nil {
 		return nil, nil, err
 	}
-	// Send HEADERS, ending the stream now only if there is no body; otherwise
-	// the body follows in a DATA frame that carries the FIN (RFC 9114 §4.1).
-	hasBody := len(req.Body) > 0
-	if err := c.sendAll(ctx, stream, frame, !hasBody); err != nil {
+	if err := c.sendRequest(ctx, stream, req, frame); err != nil {
 		return nil, nil, err
-	}
-	if hasBody {
-		if err := c.sendAll(ctx, stream, AppendData(nil, req.Body), true); err != nil {
-			return nil, nil, err
-		}
 	}
 
 	var fr FrameReader

@@ -5,6 +5,8 @@ import (
 	"context"
 	"errors"
 	"testing"
+
+	"github.com/lodgvideon/poseidon-http-client/quic"
 )
 
 // fakeStream records what the client sends and hands back queued response chunks
@@ -18,6 +20,7 @@ type fakeStream struct {
 	recvReset     bool   // the peer reset its send side (RESET_STREAM received)
 	recvResetCode uint64 // the application error code carried by that RESET_STREAM
 	sendCap       int    // max bytes accepted per Send (0 = unlimited); models flow control
+	sendResetErr  bool   // Send returns quic.ErrStreamReset (models a received STOP_SENDING)
 	reset      bool // Reset was called
 	stopped    bool // StopSending was called
 	resetCode  uint64
@@ -27,6 +30,9 @@ type fakeStream struct {
 func (s *fakeStream) ID() uint64 { return s.id }
 
 func (s *fakeStream) Send(data []byte, fin bool) (int, error) {
+	if s.sendResetErr {
+		return 0, quic.ErrStreamReset // the peer reset our send side (STOP_SENDING)
+	}
 	n := len(data)
 	if s.sendCap > 0 && n > s.sendCap {
 		n = s.sendCap
@@ -149,6 +155,26 @@ func TestClient_RequestResponse(t *testing.T) {
 	}
 	if conn.polls == 0 {
 		t.Fatal("expected at least one Poll to receive the body")
+	}
+}
+
+// TestConformance_RFC9114_Sec41_ResponseReadAfterStopSending checks that when the
+// server aborts reading the request with STOP_SENDING (surfaced as ErrStreamReset
+// on the send path), the client stops sending but still reads the response on the
+// stream's independent receive side (RFC 9114 §4.1) rather than discarding it.
+func TestConformance_RFC9114_Sec41_ResponseReadAfterStopSending(t *testing.T) {
+	headersFrame := AppendHeaders(nil, encodeSection(hf(":status", "200")))
+	conn := &fakeConn{req: &fakeStream{recvChunks: [][]byte{headersFrame}, fin: true, sendResetErr: true}}
+	client, err := NewClientFake(conn, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, _, err := client.Do(context.Background(), &Request{Method: "POST", Scheme: "https", Authority: "h", Path: "/", Body: []byte("aborted request body")})
+	if err != nil {
+		t.Fatalf("Do after STOP_SENDING = %v, want the response still delivered", err)
+	}
+	if resp.Status != 200 {
+		t.Fatalf("status = %d, want 200", resp.Status)
 	}
 }
 
