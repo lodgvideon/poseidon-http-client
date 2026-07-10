@@ -90,6 +90,7 @@ type Conn struct {
 
 	peer               TransportParams // parsed peer transport parameters (send limits)
 	gotServerCID       bool            // the server's SCID has been adopted as our DCID
+	serverSCID         []byte          // the authenticated server Source Connection ID (§7.2 discard check)
 	closed             bool
 	peerClose          *PeerClosedError      // set when a CONNECTION_CLOSE is received (draining, §10.2.2)
 	resetTokens        map[uint64][16]byte // stateless reset token per active peer CID sequence (§10.3)
