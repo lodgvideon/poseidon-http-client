@@ -54,3 +54,19 @@ func TestConformance_RFC9000_Sec1913_StreamDataBlockedStreamState(t *testing.T) 
 		t.Fatalf("STREAM_DATA_BLOCKED on a server-uni (peer-sender) stream = %v, want nil", err)
 	}
 }
+
+// TestConformance_RFC9000_Sec1914_StreamsBlockedOverLimit checks that a
+// STREAMS_BLOCKED frame whose Maximum Streams exceeds 2^60 is a
+// FRAME_ENCODING_ERROR — a larger value implies a stream ID past the 2^62-1 varint
+// space (RFC 9000 §19.14) — while exactly 2^60 is accepted, for both types.
+func TestConformance_RFC9000_Sec1914_StreamsBlockedOverLimit(t *testing.T) {
+	const limit = uint64(1) << 60
+	for _, uni := range []bool{false, true} {
+		if err := (&connFrameHandler{c: &Conn{}}).OnStreamsBlocked(uni, limit); err != nil {
+			t.Fatalf("STREAMS_BLOCKED uni=%v maximum=2^60 = %v, want nil", uni, err)
+		}
+		if err := (&connFrameHandler{c: &Conn{}}).OnStreamsBlocked(uni, limit+1); err != ErrFrameEncoding {
+			t.Fatalf("STREAMS_BLOCKED uni=%v maximum=2^60+1 = %v, want ErrFrameEncoding", uni, err)
+		}
+	}
+}

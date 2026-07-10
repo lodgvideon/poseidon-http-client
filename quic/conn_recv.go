@@ -693,8 +693,19 @@ func (h *connFrameHandler) OnPing() error { h.ackEliciting = true; return nil }
 // MAX_STREAM_DATA / MAX_STREAMS — but these frames are ack-eliciting, so a packet
 // carrying only one of them must still be acknowledged (§13.2.1). The inherited
 // nop handlers left such a packet unacknowledged, so the peer retransmitted it.
-func (h *connFrameHandler) OnDataBlocked(uint64) error          { h.ackEliciting = true; return nil }
-func (h *connFrameHandler) OnStreamsBlocked(bool, uint64) error { h.ackEliciting = true; return nil }
+func (h *connFrameHandler) OnDataBlocked(uint64) error { h.ackEliciting = true; return nil }
+
+// OnStreamsBlocked marks the packet ack-eliciting and rejects an out-of-range limit
+// (RFC 9000 §19.14): the Maximum Streams field cannot exceed 2^60, as a larger value
+// implies a stream ID past the 2^62-1 varint space — a FRAME_ENCODING_ERROR, the
+// same bound MAX_STREAMS enforces (§19.11).
+func (h *connFrameHandler) OnStreamsBlocked(_ bool, maximum uint64) error {
+	h.ackEliciting = true
+	if maximum > maxStreamsLimit {
+		return ErrFrameEncoding
+	}
+	return nil
+}
 
 // OnStreamDataBlocked additionally validates the stream (RFC 9000 §19.13):
 // STREAM_DATA_BLOCKED is sent by a stream's sender, so receiving one for a
