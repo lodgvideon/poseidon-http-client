@@ -91,7 +91,17 @@ const (
 	tpInitialSourceConnectionID       uint64 = 0x0f
 	tpOriginalDestinationConnectionID uint64 = 0x00
 	tpRetrySourceConnectionID         uint64 = 0x10
+	tpPreferredAddress                uint64 = 0x0d
 )
+
+// preferredAddressFixedLen is the length of the fixed prefix of a preferred_address
+// transport parameter (RFC 9000 §18.2): IPv4 address (4) + IPv4 port (2) + IPv6
+// address (16) + IPv6 port (2), followed by a 1-byte Connection ID Length.
+const preferredAddressFixedLen = 24
+
+// maxConnIDLen is the largest connection ID a QUIC v1 endpoint may use (RFC 9000
+// §17.2); a preferred_address connection ID beyond it is malformed.
+const maxConnIDLen = 20
 
 // ParseTransportParams decodes the peer's transport parameters (RFC 9000 §18).
 // Each parameter is an identifier, a length, and that many value bytes; the
@@ -190,6 +200,28 @@ func (tp *TransportParams) set(id uint64, value []byte) error {
 	case tpInitialSourceConnectionID, tpOriginalDestinationConnectionID, tpRetrySourceConnectionID:
 		// Raw connection-ID bytes (not a varint), authenticated in §7.3.
 		tp.setConnectionID(id, value)
+	case tpPreferredAddress:
+		return validatePreferredAddress(value)
+	}
+	return nil
+}
+
+// validatePreferredAddress checks the structure of a preferred_address transport
+// parameter (RFC 9000 §18.2). The client never migrates to the server's preferred
+// address, so the address is not retained, but a malformed parameter — a length
+// that does not match its embedded Connection ID Length, or a zero-length
+// connection ID (which §9.6 forbids) — is a TRANSPORT_PARAMETER_ERROR.
+func validatePreferredAddress(value []byte) error {
+	if len(value) < preferredAddressFixedLen+1 {
+		return ErrTransportParameter // too short to hold the Connection ID Length byte
+	}
+	cidLen := int(value[preferredAddressFixedLen])
+	if cidLen == 0 || cidLen > maxConnIDLen {
+		return ErrTransportParameter // §9.6: the connection ID MUST NOT be zero length
+	}
+	// Fixed prefix + length byte + CID + 16-byte stateless reset token.
+	if len(value) != preferredAddressFixedLen+1+cidLen+16 {
+		return ErrTransportParameter
 	}
 	return nil
 }
