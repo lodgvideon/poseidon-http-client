@@ -39,15 +39,19 @@ func (c *Conn) onPacketSent(sp int, pn uint64, ackEliciting bool, size int) {
 // onPacketAcked removes a newly acknowledged packet from the in-flight total and
 // grows the congestion window (RFC 9002 §7.3.1–§7.3.2): additively in slow start
 // (cwnd < ssthresh), or by one max_datagram_size per window of bytes acknowledged
-// in congestion avoidance. A packet sent during the current recovery episode does
-// not grow the window.
-func (c *Conn) onPacketAcked(p sentPacket) {
+// in congestion avoidance. A packet sent during the current recovery episode, or
+// while the sender was application-limited rather than congestion-limited (§7.8),
+// does not grow the window.
+func (c *Conn) onPacketAcked(p sentPacket, cwndLimited bool) {
 	c.removeInFlight(p.size)
 	if c.cwnd == 0 {
 		return // congestion control disabled (test sentinel)
 	}
 	if !p.timeSent.After(c.recoveryStart) {
 		return // sent at or before the recovery episode start: no growth (§7.3.2)
+	}
+	if !cwndLimited {
+		return // the flight was application-limited: do not grow the window (§7.8)
 	}
 	if c.cwnd < c.ssthresh {
 		c.cwnd += uint64(p.size) // slow start
@@ -111,6 +115,20 @@ func (c *Conn) onPersistentCongestion() {
 	c.recoveryStart = time.Time{} // §7.6.1: congestion_recovery_start_time = 0
 	c.ccBytesAcked = 0
 	c.rtt.resetMin = true
+}
+
+// cwndLimited reports whether a flight of priorInFlight bytes (the bytes in
+// flight before the acknowledgement was processed) was limited by the congestion
+// window rather than by the application (RFC 9002 §7.8). Only acknowledgements of
+// congestion-limited flights grow the window, so an application that sends less
+// than a window cannot inflate it. In slow start a more-than-half-full window
+// still counts as limited, so growth is not stalled when acknowledgements arrive
+// one packet at a time and the window has already partly drained.
+func (c *Conn) cwndLimited(priorInFlight uint64) bool {
+	if priorInFlight >= c.cwnd {
+		return true
+	}
+	return c.cwnd < c.ssthresh && priorInFlight > c.cwnd/2 // slow start
 }
 
 // removeInFlight subtracts a packet's size from the in-flight total, guarding
