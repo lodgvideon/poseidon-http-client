@@ -78,9 +78,9 @@ type Conn struct {
 
 	// NewReno congestion control (RFC 9002 §7), connection-wide across spaces.
 	// cwnd == 0 disables it (the sentinel for hand-built test connections).
-	cwnd          uint64    // congestion window in bytes
-	bytesInFlight uint64    // ack-eliciting bytes sent but not acked/lost
-	ssthresh      uint64    // slow-start threshold (^uint64(0) = infinite)
+	cwnd           uint64    // congestion window in bytes
+	bytesInFlight  uint64    // ack-eliciting bytes sent but not acked/lost
+	ssthresh       uint64    // slow-start threshold (^uint64(0) = infinite)
 	ccBytesAcked   uint64    // bytes acked toward the next cwnd increase (avoidance)
 	recoveryStart  time.Time // start of the current recovery episode (§7.3.1)
 	firstRTTSample time.Time // when the first RTT sample arrived; gates persistent congestion (§7.6)
@@ -97,6 +97,8 @@ type Conn struct {
 	openedUni          uint64             // count of client uni streams opened (§4.6 gate; ID = 2+4n)
 	streams            map[uint64]*Stream // open streams by ID
 	localMaxStreamsUni uint64             // uni streams the peer may open toward us (we advertised, §4.6)
+	localMaxIdle       time.Duration      // max_idle_timeout we advertised (§10.1); 0 = none
+	lastActivity       time.Time          // last received packet, for the idle timer; the timer starts at NewConn and resets on receipt, so §10.1's "restart on send if not already running" is a no-op (§10.1)
 	acceptedUni        []*Stream          // accepted server-initiated uni streams awaiting AcceptUniStream
 	pollBuf            []byte             // reused datagram buffer for Poll
 
@@ -151,7 +153,9 @@ func NewConn(pc PacketConn, tlsConfig *tls.Config, transportParams []byte) (*Con
 	// server-initiated uni streams can be gated against it (RFC 9000 §4.6).
 	if tp, err := ParseTransportParams(transportParams); err == nil {
 		c.localMaxStreamsUni = tp.InitialMaxStreamsUni
+		c.localMaxIdle = tp.MaxIdleTimeout // the idle timeout we advertised (§10.1)
 	}
+	c.lastActivity = c.now() // the idle timer starts at connection creation
 	return c, nil
 }
 

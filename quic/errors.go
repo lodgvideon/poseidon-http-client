@@ -59,6 +59,11 @@ var ErrCryptoSuite = errors.New("quic: unsupported cipher suite")
 // to the TRANSPORT_PARAMETER_ERROR (0x08) transport error (RFC 9000 §7.4).
 var ErrTransportParameter = errors.New("quic: transport parameter error")
 
+// ErrIdleTimeout is returned by the receive path when the connection has been
+// idle longer than the negotiated max_idle_timeout and has been silently closed
+// (RFC 9000 §10.1). No CONNECTION_CLOSE is sent; the state is discarded.
+var ErrIdleTimeout = errors.New("quic: idle timeout")
+
 // ErrStreamFinished is returned by Stream.Send once the stream's FIN has been
 // sent; the final size is fixed and no further data may be sent (RFC 9000 §4.5).
 var ErrStreamFinished = errors.New("quic: stream already finished")

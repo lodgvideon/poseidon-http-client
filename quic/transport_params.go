@@ -11,6 +11,10 @@ import (
 const (
 	defaultAckDelayExponent uint64        = 3
 	defaultMaxAckDelay      time.Duration = 25 * time.Millisecond
+	// maxIdleTimeoutMillis caps a peer's max_idle_timeout so scaling it to a
+	// nanosecond Duration cannot overflow int64 (RFC 9000 §18.2 sets no upper
+	// bound). It is math.MaxInt64 / 1e6 ≈ 292 years — effectively unbounded.
+	maxIdleTimeoutMillis uint64 = uint64(1<<63-1) / uint64(time.Millisecond)
 )
 
 // TransportParams holds the peer's QUIC transport parameters that a client needs
@@ -48,10 +52,16 @@ type TransportParams struct {
 	// acknowledgement. It bounds the ack delay used in RTT estimation and feeds the
 	// PTO. Default 25 ms.
 	MaxAckDelay time.Duration
+	// MaxIdleTimeout is the peer's max_idle_timeout (0x01): after this much idle
+	// time the peer will close the connection. The effective idle timeout is the
+	// minimum of the two endpoints' non-zero values (§10.1). Zero (absent or
+	// explicit) means the peer imposes no idle timeout.
+	MaxIdleTimeout time.Duration
 }
 
 // Transport-parameter identifiers the parser dispatches on (RFC 9000 §18.2).
 const (
+	tpMaxIdleTimeout                 uint64 = 0x01
 	tpMaxUDPPayloadSize              uint64 = 0x03
 	tpInitialMaxData                 uint64 = 0x04
 	tpInitialMaxStreamDataBidiLocal  uint64 = 0x05
@@ -106,36 +116,28 @@ func ParseTransportParams(raw []byte) (TransportParams, error) {
 // set stores or validates one parameter. Unhandled identifiers are ignored.
 func (tp *TransportParams) set(id uint64, value []byte) error {
 	switch id {
+	case tpMaxIdleTimeout:
+		v, ok := tpReadUint(value)
+		if !ok {
+			return ErrTransportParameter
+		}
+		// The value is in milliseconds (§18.2); any value is valid, 0 disables it.
+		// Cap before scaling to nanoseconds so an absurd value cannot overflow the
+		// int64 Duration into a negative — such a value is effectively no timeout.
+		if v > maxIdleTimeoutMillis {
+			v = maxIdleTimeoutMillis
+		}
+		tp.MaxIdleTimeout = time.Duration(v) * time.Millisecond
 	case tpInitialMaxData:
-		v, ok := tpReadUint(value)
-		if !ok {
-			return ErrTransportParameter
-		}
-		tp.InitialMaxData = v
+		return tp.setUint(value, &tp.InitialMaxData)
 	case tpInitialMaxStreamDataBidiRemote:
-		v, ok := tpReadUint(value)
-		if !ok {
-			return ErrTransportParameter
-		}
-		tp.InitialMaxStreamDataBidiRemote = v
+		return tp.setUint(value, &tp.InitialMaxStreamDataBidiRemote)
 	case tpInitialMaxStreamsBidi:
-		v, ok := tpReadUint(value)
-		if !ok {
-			return ErrTransportParameter
-		}
-		tp.InitialMaxStreamsBidi = v
+		return tp.setUint(value, &tp.InitialMaxStreamsBidi)
 	case tpInitialMaxStreamDataUni:
-		v, ok := tpReadUint(value)
-		if !ok {
-			return ErrTransportParameter
-		}
-		tp.InitialMaxStreamDataUni = v
+		return tp.setUint(value, &tp.InitialMaxStreamDataUni)
 	case tpInitialMaxStreamsUni:
-		v, ok := tpReadUint(value)
-		if !ok {
-			return ErrTransportParameter
-		}
-		tp.InitialMaxStreamsUni = v
+		return tp.setUint(value, &tp.InitialMaxStreamsUni)
 	case tpMaxUDPPayloadSize:
 		v, ok := tpReadUint(value)
 		if !ok || v < 1200 {
@@ -163,6 +165,17 @@ func (tp *TransportParams) set(id uint64, value []byte) error {
 		tp.InitialSourceConnectionID = append([]byte(nil), value...)
 		tp.HaveInitialSourceConnectionID = true
 	}
+	return nil
+}
+
+// setUint decodes an integer parameter value and stores it in dst, returning a
+// TRANSPORT_PARAMETER_ERROR on a malformed encoding (RFC 9000 §18).
+func (tp *TransportParams) setUint(value []byte, dst *uint64) error {
+	v, ok := tpReadUint(value)
+	if !ok {
+		return ErrTransportParameter
+	}
+	*dst = v
 	return nil
 }
 
@@ -197,11 +210,18 @@ type LocalTransportParams struct {
 	// SourceConnectionID is the client's chosen source connection ID (0x0f),
 	// which the server verifies (§7.3). It may be zero-length.
 	SourceConnectionID []byte
+	// MaxIdleTimeout is the idle timeout the client advertises, in milliseconds
+	// (0x01, §10.1). Zero omits the parameter, leaving the effective timeout to the
+	// server's advertised value.
+	MaxIdleTimeout uint64
 }
 
 // AppendTransportParams encodes the client's transport parameters (RFC 9000 §18)
 // into the wire form carried in the TLS quic_transport_parameters extension.
 func AppendTransportParams(dst []byte, p LocalTransportParams) []byte {
+	if p.MaxIdleTimeout > 0 {
+		dst = appendTPInt(dst, tpMaxIdleTimeout, p.MaxIdleTimeout) // §10.1, milliseconds
+	}
 	dst = appendTPInt(dst, tpInitialMaxData, p.InitialMaxData)
 	dst = appendTPInt(dst, tpInitialMaxStreamDataBidiLocal, p.InitialMaxStreamDataBidiLocal)
 	dst = appendTPInt(dst, tpInitialMaxStreamDataUni, p.InitialMaxStreamDataUni)
