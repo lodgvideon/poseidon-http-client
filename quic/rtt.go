@@ -30,6 +30,7 @@ type rttStats struct {
 	smoothedRTT time.Duration
 	rttvar      time.Duration
 	haveSample  bool
+	resetMin    bool // §5.2: reset min_rtt to the next sample after persistent congestion
 }
 
 // update folds a new RTT sample and the peer's reported ack delay into the
@@ -43,7 +44,12 @@ func (r *rttStats) update(latest, ackDelay time.Duration) {
 		r.haveSample = true
 		return
 	}
-	if latest < r.minRTT {
+	if r.resetMin {
+		// Persistent congestion reset (§5.2): adopt this sample as the new min_rtt
+		// outright, discarding a stale low estimate from before the path changed.
+		r.minRTT = latest
+		r.resetMin = false
+	} else if latest < r.minRTT {
 		r.minRTT = latest
 	}
 	// Subtract the peer's ack delay, but never bring the sample below min_rtt.
@@ -76,6 +82,50 @@ type sentSpace struct {
 	packets          map[uint64]sentPacket
 	largestAckedPN   uint64
 	haveLargestAcked bool
+	// ackedElicit holds the send times of acknowledged ack-eliciting packets,
+	// pruned to those newer than the oldest packet still in flight. It answers
+	// whether an acknowledgement fell inside a lost span, which would break the
+	// unbroken loss that persistent congestion requires (RFC 9002 §7.6.1).
+	ackedElicit []time.Time
+}
+
+// ackedInSpan reports whether any acknowledged ack-eliciting packet was sent
+// strictly between lo and hi (RFC 9002 §7.6.1).
+func (s *sentSpace) ackedInSpan(lo, hi time.Time) bool {
+	for _, t := range s.ackedElicit {
+		if t.After(lo) && t.Before(hi) {
+			return true
+		}
+	}
+	return false
+}
+
+// pruneAcked drops recorded acknowledgement times at or before the oldest packet
+// still in flight. A future persistent-congestion span begins at a lost (still
+// unacknowledged) packet, so an earlier acknowledgement can never fall inside it;
+// this bounds the slice to the current in-flight window.
+func (s *sentSpace) pruneAcked() {
+	if len(s.ackedElicit) == 0 {
+		return
+	}
+	var oldest time.Time
+	found := false
+	for _, p := range s.packets {
+		if p.ackEliciting && (!found || p.timeSent.Before(oldest)) {
+			oldest, found = p.timeSent, true
+		}
+	}
+	if !found {
+		s.ackedElicit = s.ackedElicit[:0]
+		return
+	}
+	kept := s.ackedElicit[:0]
+	for _, t := range s.ackedElicit {
+		if t.After(oldest) {
+			kept = append(kept, t)
+		}
+	}
+	s.ackedElicit = kept
 }
 
 // onSent records that packet pn was sent at t carrying the given

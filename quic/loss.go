@@ -59,8 +59,8 @@ func (c *Conn) detectLost(sp int) {
 		return
 	}
 	lostSendTime := c.clock().Add(-c.rtt.lossDelay())
-	var newestLost time.Time
-	anyLost := false
+	var newestLost, earliestPC, latestPC time.Time
+	anyLost, anyPC := false, false
 	for pn, p := range s.packets {
 		if pn > s.largestAckedPN {
 			continue // only packets before an acknowledged one are eligible
@@ -76,10 +76,30 @@ func (c *Conn) detectLost(sp int) {
 			if !anyLost || p.timeSent.After(newestLost) {
 				newestLost, anyLost = p.timeSent, true
 			}
+			// Persistent congestion (§7.6) counts only ack-eliciting packets sent
+			// after the first RTT sample: track the span they cover.
+			if !c.firstRTTSample.IsZero() && p.timeSent.After(c.firstRTTSample) {
+				if !anyPC || p.timeSent.Before(earliestPC) {
+					earliestPC = p.timeSent
+				}
+				if !anyPC || p.timeSent.After(latestPC) {
+					latestPC = p.timeSent
+				}
+				anyPC = true
+			}
 		}
 		delete(s.packets, pn) // safe to delete during range in Go
 	}
-	if anyLost {
-		c.onCongestionEvent(newestLost) // halve cwnd once for this loss episode
+	if !anyLost {
+		return
 	}
+	c.onCongestionEvent(newestLost) // halve cwnd once for this loss episode
+	// If the lost ack-eliciting packets span longer than the persistent congestion
+	// duration and no packet inside that span was acknowledged, every packet across
+	// the period was lost: collapse the window (RFC 9002 §7.6.1).
+	if anyPC && latestPC.Sub(earliestPC) > c.persistentCongestionDuration() &&
+		!s.ackedInSpan(earliestPC, latestPC) {
+		c.onPersistentCongestion()
+	}
+	s.pruneAcked()
 }

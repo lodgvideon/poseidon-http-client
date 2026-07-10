@@ -81,8 +81,9 @@ type Conn struct {
 	cwnd          uint64    // congestion window in bytes
 	bytesInFlight uint64    // ack-eliciting bytes sent but not acked/lost
 	ssthresh      uint64    // slow-start threshold (^uint64(0) = infinite)
-	ccBytesAcked  uint64    // bytes acked toward the next cwnd increase (avoidance)
-	recoveryStart time.Time // start of the current recovery episode (§7.3.1)
+	ccBytesAcked   uint64    // bytes acked toward the next cwnd increase (avoidance)
+	recoveryStart  time.Time // start of the current recovery episode (§7.3.1)
+	firstRTTSample time.Time // when the first RTT sample arrived; gates persistent congestion (§7.6)
 
 	peer               TransportParams // parsed peer transport parameters (send limits)
 	gotServerCID       bool            // the server's SCID has been adopted as our DCID
@@ -204,10 +205,19 @@ func (c *Conn) onAckRange(sp int, low, high uint64, ackDelay time.Duration) {
 	for pn, p := range c.sent[sp].packets {
 		if pn >= low && pn <= high && p.ackEliciting {
 			c.onPacketAcked(p)
+			// Remember the send time so loss detection can tell whether an
+			// acknowledgement fell inside a lost span (RFC 9002 §7.6.1).
+			c.sent[sp].ackedElicit = append(c.sent[sp].ackedElicit, p.timeSent)
 		}
 	}
 	if sendTime, ok := c.sent[sp].ack(low, high); ok {
+		firstSample := !c.rtt.haveSample
 		c.rtt.update(c.clock().Sub(sendTime), ackDelay)
+		if firstSample {
+			// Persistent congestion (§7.6) only considers packets sent after the first
+			// RTT sample, so it cannot fire on the pre-handshake flight.
+			c.firstRTTSample = c.clock()
+		}
 		c.ptoCount = 0 // §6.2.1: a newly-acked ack-eliciting packet resets the backoff
 	}
 }
