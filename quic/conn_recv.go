@@ -117,6 +117,23 @@ func (c *Conn) drainBuffered() error {
 // recvDatagram processes every packet coalesced in a datagram: decrypt with the
 // space's Opener, dispatch frames, record the packet number, then feed any
 // reassembled CRYPTO to the TLS handshake and pump the resulting events.
+// shouldAbandonOnVN decides whether a received Version Negotiation packet makes
+// the client abandon the connection attempt (RFC 9000 §6.2). This client offers
+// only QUIC v1, so a genuine VN — one it has not already superseded and that does
+// not list v1 — means no common version exists. The two exceptions are discarded,
+// not abandoned: a VN received after another server packet was already processed
+// (stale or spoofed), and one whose Supported Versions list includes v1 (which a
+// genuine VN never does).
+func (c *Conn) shouldAbandonOnVN(pkt []byte, hdr Header) bool {
+	// A VN is discarded once an Initial or Retry has been processed (RFC 9000
+	// §6.2, §17.2.5.2): the handshake is already under way, so a later VN is stale
+	// or spoofed.
+	if c.handledRetry || c.haveRecv[spaceInitial] || c.haveRecv[spaceHandshake] || c.haveRecv[spaceApp] {
+		return false
+	}
+	return !vnOffers(pkt, hdr, QUICVersion1)
+}
+
 func (c *Conn) recvDatagram(datagram []byte) error {
 	rest := datagram
 	for len(rest) > 0 {
@@ -137,7 +154,10 @@ func (c *Conn) recvDatagram(datagram []byte) error {
 			continue
 		}
 		if hdr.Type == PacketVersionNegotiation {
-			continue // no protected payload; handled in a later phase
+			if c.shouldAbandonOnVN(pkt, hdr) {
+				return ErrVersionNegotiation
+			}
+			continue
 		}
 		// Adopt the server's connection ID as our destination (RFC 9000 §7.2).
 		if !c.gotServerCID && len(hdr.SCID) > 0 {
