@@ -73,10 +73,11 @@ func TestConformance_RFC9114_Sec431_RequestPseudoHeadersFirst(t *testing.T) {
 }
 
 // TestRequest_OmitsEmptyAuthority verifies :authority is left out of the field
-// section when empty (RFC 9114 §4.3.1) rather than sent as an empty value.
+// section when empty (RFC 9114 §4.3.1) rather than sent as an empty value. A Host
+// header satisfies the §4.3.1 authority requirement so the request is well-formed.
 func TestRequest_OmitsEmptyAuthority(t *testing.T) {
 	var enc qpack.Encoder
-	req := &Request{Method: "GET", Scheme: "https", Path: "/"}
+	req := &Request{Method: "GET", Scheme: "https", Path: "/", Headers: []hpack.HeaderField{hf("host", "example.com")}}
 	frame, err := req.EncodeHeaders(&enc, nil, ^uint64(0))
 	if err != nil {
 		t.Fatal(err)
@@ -101,9 +102,9 @@ func TestConformance_RFC9114_Sec42_RequestValidation(t *testing.T) {
 		{"missing_method", &Request{Scheme: "https", Path: "/"}},
 		{"missing_scheme", &Request{Method: "GET", Path: "/"}},
 		{"missing_path", &Request{Method: "GET", Scheme: "https"}},
-		{"uppercase_header", &Request{Method: "GET", Scheme: "https", Path: "/", Headers: []hpack.HeaderField{hf("X-Foo", "1")}}},
-		{"connection_specific", &Request{Method: "GET", Scheme: "https", Path: "/", Headers: []hpack.HeaderField{hf("connection", "keep-alive")}}},
-		{"crlf_value", &Request{Method: "GET", Scheme: "https", Path: "/", Headers: []hpack.HeaderField{hf("x-h", "a\r\nb")}}},
+		{"uppercase_header", &Request{Method: "GET", Scheme: "https", Authority: "h", Path: "/", Headers: []hpack.HeaderField{hf("X-Foo", "1")}}},
+		{"connection_specific", &Request{Method: "GET", Scheme: "https", Authority: "h", Path: "/", Headers: []hpack.HeaderField{hf("connection", "keep-alive")}}},
+		{"crlf_value", &Request{Method: "GET", Scheme: "https", Authority: "h", Path: "/", Headers: []hpack.HeaderField{hf("x-h", "a\r\nb")}}},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
