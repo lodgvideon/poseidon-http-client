@@ -176,6 +176,7 @@ func (c *Conn) recvDatagram(datagram []byte) error {
 			return err
 		}
 		c.acks[sp].receive(pn, fh.ackEliciting)
+		c.lastActivity = c.clock() // a processed packet resets the idle timer (§10.1)
 		if !c.haveRecv[sp] || pn > c.largestRecv[sp] {
 			c.largestRecv[sp] = pn
 			c.haveRecv[sp] = true

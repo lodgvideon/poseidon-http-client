@@ -113,7 +113,8 @@ func isTimeout(err error) bool {
 // lossDetectionDeadline returns when the loss-detection timer next expires and
 // whether it is a time-threshold loss timer (RFC 9002 §6.2). A pending
 // time-threshold loss takes priority over the probe timeout; with neither a
-// pending loss nor anything in flight it is the idle bound.
+// pending loss nor anything in flight it is the negotiated idle timeout, or a
+// fixed give-up bound when no idle timeout is in effect.
 func (c *Conn) lossDetectionDeadline() (time.Time, bool) {
 	if lt, _, ok := c.earliestLossTime(); ok {
 		return lt, true
@@ -121,7 +122,49 @@ func (c *Conn) lossDetectionDeadline() (time.Time, bool) {
 	if c.hasInFlight() {
 		return c.clock().Add(c.ptoPeriod()), false
 	}
+	if idleDL, ok := c.idleDeadline(); ok {
+		return idleDL, false
+	}
 	return c.clock().Add(idleTimeout), false
+}
+
+// effectiveIdle is the negotiated idle timeout: the smaller of the two endpoints'
+// advertised max_idle_timeout values, where zero (absent or explicit) means that
+// endpoint imposes none (RFC 9000 §10.1). Zero means no idle timeout is in effect.
+func effectiveIdle(local, peer time.Duration) time.Duration {
+	switch {
+	case local == 0:
+		return peer
+	case peer == 0:
+		return local
+	case local < peer:
+		return local
+	default:
+		return peer
+	}
+}
+
+// idleDeadline returns the instant the connection is idle-closed (RFC 9000 §10.1)
+// and whether an idle timeout is in effect. The period is floored at three PTOs so
+// a run of lost probes cannot trip an idle close during loss recovery.
+func (c *Conn) idleDeadline() (time.Time, bool) {
+	eff := effectiveIdle(c.localMaxIdle, c.peer.MaxIdleTimeout)
+	if eff == 0 {
+		return time.Time{}, false
+	}
+	if floor := 3 * c.ptoPeriod(); eff < floor {
+		eff = floor
+	}
+	return c.lastActivity.Add(eff), true
+}
+
+// idleClose silently closes the connection after the idle timeout (RFC 9000
+// §10.1): no CONNECTION_CLOSE is sent — the state is discarded — and
+// ErrIdleTimeout is returned so the caller learns why the read ended.
+func (c *Conn) idleClose() error {
+	c.closed = true
+	_ = c.pc.Close()
+	return ErrIdleTimeout
 }
 
 // readWithPTO reads one datagram, bounding the wait by the probe timeout when
@@ -152,6 +195,9 @@ func (c *Conn) readWithPTO(ctx context.Context, buf []byte) (int, error) {
 	for {
 		if hasDeadline {
 			deadline, _ := c.lossDetectionDeadline()
+			if idleDL, ok := c.idleDeadline(); ok && idleDL.Before(deadline) {
+				deadline = idleDL // idle timeout may be nearer than a probe (§10.1)
+			}
 			if d, ok := ctx.Deadline(); ok && d.Before(deadline) {
 				deadline = d // honor a nearer context deadline
 			}
@@ -173,6 +219,12 @@ func (c *Conn) readWithPTO(ctx context.Context, buf []byte) (int, error) {
 		}
 		if !hasDeadline || !isTimeout(err) {
 			return 0, err // real error, or a transport without deadlines
+		}
+		// The connection is silently closed once it has been idle for the negotiated
+		// max_idle_timeout (RFC 9000 §10.1), checked before probing so a due idle
+		// close is not masked by a probe.
+		if idleDL, ok := c.idleDeadline(); ok && !idleDL.After(c.clock()) {
+			return 0, c.idleClose()
 		}
 		// A time-threshold loss timer expiry runs loss detection; otherwise the
 		// probe timeout resends (RFC 9002 §6.2). With neither a pending loss nor a

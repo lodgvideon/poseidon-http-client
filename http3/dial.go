@@ -41,6 +41,7 @@ var localTransportParams = quic.LocalTransportParams{
 	InitialMaxStreamDataBidiLocal: quic.DefaultStreamRecvWindow,
 	InitialMaxStreamDataUni:       quic.DefaultStreamRecvWindow,
 	InitialMaxStreamsUni:          3,
+	MaxIdleTimeout:                30000, // 30 s idle timeout (RFC 9000 §10.1)
 }
 
 // Dial establishes an HTTP/3 connection to addr ("host:port") over UDP and
