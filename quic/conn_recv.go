@@ -571,6 +571,16 @@ func (h *connFrameHandler) OnCrypto(offset uint64, data []byte) error {
 
 func (h *connFrameHandler) OnPing() error { h.ackEliciting = true; return nil }
 
+// OnDataBlocked, OnStreamDataBlocked, and OnStreamsBlocked acknowledge the peer's
+// informational flow-control-blocked signals (RFC 9000 §19.12–§19.14). No action
+// is needed — the client advertises its receive limits via MAX_DATA /
+// MAX_STREAM_DATA / MAX_STREAMS — but these frames are ack-eliciting, so a packet
+// carrying only one of them must still be acknowledged (§13.2.1). The inherited
+// nop handlers left such a packet unacknowledged, so the peer retransmitted it.
+func (h *connFrameHandler) OnDataBlocked(uint64) error            { h.ackEliciting = true; return nil }
+func (h *connFrameHandler) OnStreamDataBlocked(_, _ uint64) error { h.ackEliciting = true; return nil }
+func (h *connFrameHandler) OnStreamsBlocked(bool, uint64) error   { h.ackEliciting = true; return nil }
+
 func (h *connFrameHandler) OnStream(id, offset uint64, fin bool, data []byte) error {
 	h.ackEliciting = true
 	// A STREAM frame on a send-only stream — a client-initiated unidirectional
