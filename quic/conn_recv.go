@@ -685,6 +685,12 @@ func (h *connFrameHandler) OnResetStream(id, errCode, finalSize uint64) error {
 	if s.recv.complete() {
 		return nil // the whole stream was already received; a later reset has no effect (§3.5)
 	}
+	// A final size already fixed by a received FIN cannot change (RFC 9000 §4.5): a
+	// RESET_STREAM declaring a different final size is a FINAL_SIZE_ERROR. This is
+	// independent of flow control, so it is checked before the FC-gated bounds.
+	if s.recv.fin && finalSize != s.recv.finalSize {
+		return ErrFinalSize
+	}
 	// The final size accounts for every byte the peer sent on the stream (RFC 9000
 	// §4.5): it may not fall below data already received, may not exceed the
 	// per-stream or connection limit (§4.1), and its increment counts against the
