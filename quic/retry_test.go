@@ -68,6 +68,9 @@ func TestConformance_RFC9000_Sec1725_RetryRekeysAndResends(t *testing.T) {
 	if got := hex.EncodeToString(c.dcid); got != "f067a5502a4262b5" {
 		t.Fatalf("dcid = %s, want the Retry SCID f067a5502a4262b5", got)
 	}
+	if got := hex.EncodeToString(c.retrySCID); got != "f067a5502a4262b5" {
+		t.Fatalf("retrySCID = %s, want the Retry SCID f067a5502a4262b5 (for §7.3 validation)", got)
+	}
 	if string(c.retryToken) != "token" {
 		t.Fatalf("retryToken = %q, want \"token\"", c.retryToken)
 	}

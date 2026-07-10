@@ -69,6 +69,7 @@ func (c *Conn) handleRetry(hdr Header, pkt []byte) {
 		return
 	}
 	c.handledRetry = true
+	c.retrySCID = append([]byte(nil), hdr.SCID...) // authenticated later via retry_source_connection_id (§7.3)
 	c.dcid = newDCID
 	c.initialSealer = is
 	c.keys.Initial = io

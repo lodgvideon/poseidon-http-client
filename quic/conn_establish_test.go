@@ -168,7 +168,6 @@ func TestConn_Establish_InMemory(t *testing.T) {
 	// initial_source_connection_id against it (RFC 9000 §7.3), so the server's
 	// transport parameters must carry the same value.
 	serverSCID := []byte{0xab, 0xcd, 0xef}
-	serverTP := concat(clientTP, tpBytes(tpInitialSourceConnectionID, serverSCID))
 
 	toServer := make(chan []byte, 16)
 	fromServer := make(chan []byte, 16)
@@ -179,6 +178,12 @@ func TestConn_Establish_InMemory(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+
+	// The server echoes the client's first-Initial Destination Connection ID in
+	// original_destination_connection_id, which the client authenticates (§7.3).
+	serverTP := concat(clientTP,
+		tpBytes(tpInitialSourceConnectionID, serverSCID),
+		tpBytes(tpOriginalDestinationConnectionID, client.origDCID))
 
 	done := make(chan struct{})
 	go runServerHandshake(t, serverPC, cert, serverTP, serverSCID, done)
