@@ -59,6 +59,9 @@ func (c *Conn) Poll(ctx context.Context) error {
 	if err := c.recvDatagram(c.pollBuf[:n]); err != nil {
 		return c.fail(err)
 	}
+	if c.peerClose != nil {
+		return c.peerClose // a received CONNECTION_CLOSE ended the connection (§10.2.2)
+	}
 	c.discardStaleKeys() // drop a superseded key-update generation past its window (§6.3)
 	// Drain datagrams already buffered in the socket without blocking, so a
 	// server's response burst is processed and acknowledged as one batch rather
@@ -67,6 +70,9 @@ func (c *Conn) Poll(ctx context.Context) error {
 	// as loss and collapses its congestion window (RFC 9002 §7).
 	if err := c.drainBuffered(); err != nil {
 		return err
+	}
+	if c.peerClose != nil {
+		return c.peerClose // a CONNECTION_CLOSE arrived in the drained burst (§10.2.2)
 	}
 	return c.flush()
 }
@@ -299,6 +305,13 @@ func (c *Conn) flushRetransmits(sp int) error {
 // first one packet per queued retransmit frame (retransmit takes priority,
 // RFC 9000 §13.3), then one packet with any pending ACK and new CRYPTO.
 func (c *Conn) flush() error {
+	if c.closed {
+		// Draining or closing (RFC 9000 §10.2.2): once the connection is closed —
+		// including by a received CONNECTION_CLOSE — no further packets may be sent.
+		// The single final CONNECTION_CLOSE, if any, is emitted directly by
+		// CloseWithError, never through flush.
+		return nil
+	}
 	for sp := 0; sp < numSpaces; sp++ {
 		hasCtrl := sp == spaceApp && len(c.pendingCtrl) > 0
 		hasProbe := sp == spaceApp && c.probePending
@@ -700,7 +713,13 @@ func (h *connFrameHandler) OnHandshakeDone() error {
 	return nil
 }
 
-func (h *connFrameHandler) OnConnectionClose(bool, uint64, uint64, []byte) error {
+// OnConnectionClose enters the draining state on a received CONNECTION_CLOSE
+// (RFC 9000 §10.2.2): the connection is marked closed so the send path emits
+// nothing further, and the peer's error is recorded for Poll to surface.
+func (h *connFrameHandler) OnConnectionClose(app bool, code, _ uint64, reason []byte) error {
 	h.c.closed = true
+	if h.c.peerClose == nil {
+		h.c.peerClose = &PeerClosedError{App: app, Code: code, Reason: string(reason)}
+	}
 	return nil
 }

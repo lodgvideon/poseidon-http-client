@@ -1,6 +1,9 @@
 package quic
 
-import "errors"
+import (
+	"errors"
+	"fmt"
+)
 
 // Transport error codes (RFC 9000 §20.1), carried in a CONNECTION_CLOSE frame
 // of type 0x1c.
@@ -63,6 +66,30 @@ var ErrTransportParameter = errors.New("quic: transport parameter error")
 // idle longer than the negotiated max_idle_timeout and has been silently closed
 // (RFC 9000 §10.1). No CONNECTION_CLOSE is sent; the state is discarded.
 var ErrIdleTimeout = errors.New("quic: idle timeout")
+
+// ErrConnClosed is returned by the send path when the connection is closed — by a
+// received CONNECTION_CLOSE (draining), a local close, or an idle timeout — so no
+// further packets may be sent (RFC 9000 §10.2).
+var ErrConnClosed = errors.New("quic: connection closed")
+
+// PeerClosedError reports that the peer terminated the connection with a
+// CONNECTION_CLOSE frame (RFC 9000 §10.2). App is true for an application-level
+// close (frame type 0x1d); Code is the error code and Reason the diagnostic phrase.
+// Poll returns it once a CONNECTION_CLOSE has been received.
+type PeerClosedError struct {
+	App    bool
+	Code   uint64
+	Reason string
+}
+
+// Error implements error.
+func (e *PeerClosedError) Error() string {
+	kind := "transport"
+	if e.App {
+		kind = "application"
+	}
+	return fmt.Sprintf("quic: peer closed the connection (%s error %#x)", kind, e.Code)
+}
 
 // ErrStreamFinished is returned by Stream.Send once the stream's FIN has been
 // sent; the final size is fixed and no further data may be sent (RFC 9000 §4.5).
