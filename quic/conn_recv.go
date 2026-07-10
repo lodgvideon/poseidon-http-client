@@ -501,6 +501,11 @@ func (h *connFrameHandler) OnAck(largest, ackDelay, firstRange uint64) error {
 	if h.space == spaceApp && h.c.handshakeConfirmed && delay > h.c.peer.MaxAckDelay {
 		delay = h.c.peer.MaxAckDelay
 	}
+	// The smallest packet number in the first range is Largest - First ACK Range;
+	// if that is negative the ACK is malformed (RFC 9000 §19.3.1).
+	if firstRange > largest {
+		return ErrFrameEncoding
+	}
 	low := largest - firstRange
 	h.c.onAckRange(h.space, low, largest, delay, h.priorInFlight)
 	h.ackLow = low
@@ -528,7 +533,17 @@ func decodeAckDelay(ackDelay, exp uint64) time.Duration {
 // OnAckRange processes an additional ACK range below the previous one: a gap of
 // gap+1 unacknowledged packets, then length+1 acknowledged (RFC 9000 §19.3).
 func (h *connFrameHandler) OnAckRange(gap, length uint64) error {
+	// This range's highest packet is ackLow - Gap - 2 and its lowest is that minus
+	// Length; if either computed packet number is negative the ACK is malformed
+	// (RFC 9000 §19.3.1). gap and length are varints (≤ 2^62-1), so gap+2 cannot
+	// overflow uint64.
+	if gap+2 > h.ackLow {
+		return ErrFrameEncoding
+	}
 	high := h.ackLow - gap - 2
+	if length > high {
+		return ErrFrameEncoding
+	}
 	low := high - length
 	h.c.onAckRange(h.space, low, high, 0, h.priorInFlight) // only the first range carries the largest
 	h.ackLow = low

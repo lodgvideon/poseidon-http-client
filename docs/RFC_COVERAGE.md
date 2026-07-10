@@ -206,6 +206,7 @@ protection (RFC 9001) and the connection engine are later phases.
 | §16     | Conformance | TestConformance_RFC9000_Sec16_VarintRoundTrip, TestConformance_RFC9000_Sec16_NonMinimalDecode, TestConformance_RFC9000_Sec16_IncompleteInput |
 | §16     | Roundtrip   | TestVarint_ExhaustiveRoundTrip |
 | §19.3   | Conformance | TestConformance_RFC9000_Sec193_AckFrame, TestConformance_RFC9000_Sec193_AckECN |
+| §19.3.1 | Conformance | TestConformance_RFC9000_Sec1931_AckFirstRangeNegative (First ACK Range > Largest Acknowledged → FRAME_ENCODING_ERROR), TestConformance_RFC9000_Sec1931_AckRangeNegative (a Gap or Length underflowing the running lower bound → FRAME_ENCODING_ERROR), TestConformance_RFC9000_Sec1931_AckNegativeViaParser (rejected end-to-end through ParseFrames; a valid multi-range ACK still accepted) |
 | §19.8   | Conformance | TestConformance_RFC9000_Sec19_StreamFrame, TestParseStream_NoLength |
 | §19.15  | Conformance | TestConformance_RFC9000_Sec1915_NewConnectionID (frame codec), TestConn_NewConnectionID_DuplicateSeqConflict (reusing a sequence number for a different connection ID → PROTOCOL_VIOLATION; identical retransmit accepted) |
 | §5.1.1  | Conformance | TestConformance_RFC9000_Sec511_ActiveCIDLimit (a NEW_CONNECTION_ID past active_connection_id_limit, default 2 including the handshake CID at seq 0 → CONNECTION_ID_LIMIT_ERROR) |
