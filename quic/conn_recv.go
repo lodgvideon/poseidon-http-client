@@ -457,11 +457,12 @@ func spaceLevel(sp int) tls.QUICEncryptionLevel {
 // connFrameHandler dispatches the frames of one received packet into the Conn.
 type connFrameHandler struct {
 	nopFrameHandler
-	c            *Conn
-	space        int
-	ackEliciting bool
-	sawAck       bool   // an ACK frame was seen (run loss detection after parsing)
-	ackLow       uint64 // smallest packet number of the ACK range being decoded
+	c             *Conn
+	space         int
+	ackEliciting  bool
+	sawAck        bool   // an ACK frame was seen (run loss detection after parsing)
+	ackLow        uint64 // smallest packet number of the ACK range being decoded
+	priorInFlight uint64 // bytes in flight before this ACK frame, for the §7.8 cwnd-limited test
 }
 
 // OnAck processes the first (largest) range of an ACK frame: it acknowledges
@@ -469,6 +470,9 @@ type connFrameHandler struct {
 // (RFC 9000 §19.3, RFC 9002 §5). ACK frames are not themselves ack-eliciting.
 func (h *connFrameHandler) OnAck(largest, ackDelay, firstRange uint64) error {
 	h.sawAck = true
+	// Capture the bytes in flight before this frame removes any acknowledged
+	// packet; the whole frame's ranges share it for the §7.8 cwnd-limited test.
+	h.priorInFlight = h.c.bytesInFlight
 	// Decode the ACK Delay (RFC 9000 §19.3). The negotiated ack_delay_exponent
 	// applies only to the Application space; the Initial and Handshake spaces use a
 	// fixed exponent of 3 (the transport parameters are not yet available there).
@@ -484,7 +488,7 @@ func (h *connFrameHandler) OnAck(largest, ackDelay, firstRange uint64) error {
 		delay = h.c.peer.MaxAckDelay
 	}
 	low := largest - firstRange
-	h.c.onAckRange(h.space, low, largest, delay)
+	h.c.onAckRange(h.space, low, largest, delay, h.priorInFlight)
 	h.ackLow = low
 	return nil
 }
@@ -512,7 +516,7 @@ func decodeAckDelay(ackDelay, exp uint64) time.Duration {
 func (h *connFrameHandler) OnAckRange(gap, length uint64) error {
 	high := h.ackLow - gap - 2
 	low := high - length
-	h.c.onAckRange(h.space, low, high, 0) // only the first range carries the largest
+	h.c.onAckRange(h.space, low, high, 0, h.priorInFlight) // only the first range carries the largest
 	h.ackLow = low
 	return nil
 }

@@ -198,13 +198,18 @@ func (c *Conn) clock() time.Time {
 // updating the RTT estimate from the largest newly-acknowledged packet
 // (RFC 9002 §5). ackDelay is the peer's decoded ACK delay (zero for ranges that
 // cannot carry the largest acked).
-func (c *Conn) onAckRange(sp int, low, high uint64, ackDelay time.Duration) {
+func (c *Conn) onAckRange(sp int, low, high uint64, ackDelay time.Duration, priorInFlight uint64) {
+	// Whether the flight was congestion-limited is decided once from the bytes in
+	// flight before this acknowledgement removed anything (RFC 9002 §7.8), so a
+	// single ACK covering a full-window burst does not misread the later packets as
+	// application-limited after the earlier ones are freed.
+	limited := c.cwndLimited(priorInFlight)
 	// Credit the congestion controller for each newly acknowledged ack-eliciting
 	// packet before ack() removes it (RFC 9002 §7.3). Iterate our own sent packets
 	// rather than the ACK range, so a malformed huge range cannot make this costly.
 	for pn, p := range c.sent[sp].packets {
 		if pn >= low && pn <= high && p.ackEliciting {
-			c.onPacketAcked(p)
+			c.onPacketAcked(p, limited)
 			// Remember the send time so loss detection can tell whether an
 			// acknowledgement fell inside a lost span (RFC 9002 §7.6.1).
 			c.sent[sp].ackedElicit = append(c.sent[sp].ackedElicit, p.timeSent)

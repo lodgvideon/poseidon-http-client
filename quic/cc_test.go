@@ -16,7 +16,7 @@ func ccTestConn() *Conn {
 func TestConformance_RFC9002_Sec731_SlowStart(t *testing.T) {
 	c := ccTestConn()
 	c.bytesInFlight = 3600
-	c.onPacketAcked(sentPacket{timeSent: time.Unix(1000, 0), ackEliciting: true, size: 1200})
+	c.onPacketAcked(sentPacket{timeSent: time.Unix(1000, 0), ackEliciting: true, size: 1200}, true)
 	if c.cwnd != kInitialWindow+1200 {
 		t.Fatalf("cwnd = %d, want %d (slow start += acked)", c.cwnd, kInitialWindow+1200)
 	}
@@ -34,7 +34,7 @@ func TestConformance_RFC9002_Sec733_CongestionAvoidance(t *testing.T) {
 	c.cwnd, c.ssthresh = 4800, 4800 // cwnd >= ssthresh → congestion avoidance
 	for i := 0; i < 4; i++ {        // one full window (4×1200) acknowledged
 		c.bytesInFlight = 4800
-		c.onPacketAcked(sentPacket{timeSent: time.Unix(1000, 0), ackEliciting: true, size: 1200})
+		c.onPacketAcked(sentPacket{timeSent: time.Unix(1000, 0), ackEliciting: true, size: 1200}, true)
 	}
 	if c.cwnd != 4800+maxDatagramSize {
 		t.Fatalf("cwnd = %d, want %d (+1 mds per window acked)", c.cwnd, 4800+maxDatagramSize)
@@ -45,8 +45,8 @@ func TestConformance_RFC9002_Sec733_CongestionAvoidance(t *testing.T) {
 	big.cwnd, big.ssthresh = 2<<20, 1<<20
 	start := big.cwnd
 	for acked := uint64(0); acked < start; acked += 1200 {
-		big.bytesInFlight = 1200
-		big.onPacketAcked(sentPacket{timeSent: time.Unix(1000, 0), ackEliciting: true, size: 1200})
+		big.bytesInFlight = big.cwnd // congestion-limited: window kept full
+		big.onPacketAcked(sentPacket{timeSent: time.Unix(1000, 0), ackEliciting: true, size: 1200}, true)
 	}
 	if big.cwnd <= start {
 		t.Fatalf("cwnd = %d did not grow past %d — avoidance froze at a high window", big.cwnd, start)
@@ -73,6 +73,76 @@ func TestConformance_RFC9002_Sec731_HalveOncePerRecovery(t *testing.T) {
 	c.onCongestionEvent(base.Add(50 * time.Millisecond)) // new episode (after recoveryStart)
 	if c.cwnd != 5000 {
 		t.Fatalf("new episode: cwnd=%d, want 5000", c.cwnd)
+	}
+}
+
+// TestConformance_RFC9002_Sec78_AppLimitedNoGrowth checks that acknowledging a
+// packet sent while the sender was application-limited (bytes in flight below the
+// window) does not grow the congestion window, though it still frees the acked
+// bytes (RFC 9002 §7.8).
+func TestConformance_RFC9002_Sec78_AppLimitedNoGrowth(t *testing.T) {
+	c := ccTestConn()
+	c.bytesInFlight = 3600 // window far from full
+	c.onPacketAcked(sentPacket{timeSent: time.Unix(1000, 0), ackEliciting: true, size: 1200}, false)
+	if c.cwnd != kInitialWindow {
+		t.Fatalf("cwnd = %d, want %d (an app-limited ack must not grow the window)", c.cwnd, kInitialWindow)
+	}
+	if c.bytesInFlight != 2400 {
+		t.Fatalf("bytesInFlight = %d, want 2400 (acked bytes still freed)", c.bytesInFlight)
+	}
+}
+
+// TestConformance_RFC9002_Sec78_CwndLimited checks the congestion-limited test:
+// a flight below half the window is application-limited, a full (or over-full)
+// window is congestion-limited, and in slow start a more-than-half-full window
+// counts as limited so growth is not stalled by unbatched acks (§7.8).
+func TestConformance_RFC9002_Sec78_CwndLimited(t *testing.T) {
+	c := ccTestConn() // cwnd = kInitialWindow (12000), ssthresh = ∞ (slow start)
+	if c.cwndLimited(1200) {
+		t.Fatal("a nearly empty window must be application-limited")
+	}
+	if !c.cwndLimited(kInitialWindow) {
+		t.Fatal("a full window must be congestion-limited")
+	}
+	if !c.cwndLimited(kInitialWindow/2 + 1) {
+		t.Fatal("a more-than-half-full window in slow start must be congestion-limited")
+	}
+	// Out of slow start the half-full relaxation does not apply.
+	c.ssthresh = 6000
+	if c.cwndLimited(kInitialWindow / 2) {
+		t.Fatal("a half-full window in congestion avoidance must be application-limited")
+	}
+}
+
+// TestConformance_RFC9002_Sec78_FullWindowAckGrowsCwnd drives a full-window,
+// multi-range ACK through the frame parser and connFrameHandler to pin the §7.8
+// wiring: the bytes in flight are captured once before the frame removes anything
+// and reused across every range, so each acknowledged packet of a congestion-
+// limited flight grows cwnd. A stale re-read after the first range would grow the
+// window for only part of the flight.
+func TestConformance_RFC9002_Sec78_FullWindowAckGrowsCwnd(t *testing.T) {
+	base := time.Unix(3000, 0)
+	c := &Conn{cwnd: 12000, ssthresh: ^uint64(0), now: func() time.Time { return base }}
+	sent := base.Add(-100 * time.Millisecond)
+	for pn := uint64(0); pn < 10; pn++ { // ten 1200-byte packets fill the window
+		c.sent[spaceApp].onSent(pn, sent, true, nil)
+		c.onPacketSent(spaceApp, pn, true, 1200)
+	}
+	if c.bytesInFlight != 12000 {
+		t.Fatalf("bytesInFlight = %d, want 12000 (full window)", c.bytesInFlight)
+	}
+	// One ACK frame acknowledging 6–9 (First ACK Range) and 0–4 (an additional
+	// range), leaving packet 5 in flight: nine packets acknowledged.
+	ack := AppendAck(nil, 9, 0, 3, []AckRange{{Gap: 0, Length: 4}})
+	fh := &connFrameHandler{c: c, space: spaceApp}
+	if err := ParseFrames(ack, fh); err != nil {
+		t.Fatalf("ParseFrames: %v", err)
+	}
+	// Slow start adds each acknowledged packet: 9 × 1200. A stale re-read of bytes
+	// in flight in the additional range would classify it application-limited and
+	// grow by only 4 × 1200.
+	if c.cwnd != 12000+9*1200 {
+		t.Fatalf("cwnd = %d, want %d (a full-window multi-range ack grows per packet)", c.cwnd, 12000+9*1200)
 	}
 }
 
@@ -151,7 +221,7 @@ func TestCC_DisabledSentinel(t *testing.T) {
 	if b != blockNone || n == 0 {
 		t.Fatalf("cwnd==0 must not gate: got (%d, %v)", n, b)
 	}
-	c.onPacketAcked(sentPacket{timeSent: time.Unix(1000, 0), ackEliciting: true, size: 1200})
+	c.onPacketAcked(sentPacket{timeSent: time.Unix(1000, 0), ackEliciting: true, size: 1200}, true)
 	if c.cwnd != 0 {
 		t.Fatalf("cwnd must stay 0 (disabled), got %d", c.cwnd)
 	}

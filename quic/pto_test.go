@@ -50,7 +50,7 @@ func TestConn_PTOCount_ResetOnAck(t *testing.T) {
 	c := &Conn{now: func() time.Time { return base }}
 	c.ptoCount = 3
 	c.sent[spaceApp].onSent(5, base, true, nil)
-	c.onAckRange(spaceApp, 5, 5, 0) // acknowledges an ack-eliciting packet
+	c.onAckRange(spaceApp, 5, 5, 0, 0) // acknowledges an ack-eliciting packet
 	if c.ptoCount != 0 {
 		t.Fatalf("ptoCount = %d, want 0 after acknowledgement", c.ptoCount)
 	}
