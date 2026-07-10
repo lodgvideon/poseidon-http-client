@@ -162,6 +162,37 @@ func (c *Conn) statelessResetReceived() error {
 	return ErrStatelessReset
 }
 
+// decryptPacket removes protection from a received packet in space sp, returning
+// its packet number and frame payload. ok is false when the packet cannot be
+// decrypted — no keys installed yet, or authentication failed — which is never
+// fatal; the caller skips the packet. A non-nil err ends the connection: a
+// short-header failure that is a stateless reset (RFC 9000 §10.3.1) or the AEAD
+// integrity limit being exceeded (RFC 9001 §6.6).
+func (c *Conn) decryptPacket(sp int, pkt []byte, pnOffset int, isFirst bool, datagram []byte) (pn uint64, payload []byte, ok bool, err error) {
+	if sp == spaceApp {
+		// The application space may carry a key update (RFC 9001 §6), so it needs the
+		// key-phase-aware open path.
+		if pn, payload, ok = c.openApp(pkt, pnOffset); ok {
+			return pn, payload, true, nil
+		}
+		if c.isStatelessReset(isFirst, datagram) {
+			return 0, nil, false, c.statelessResetReceived()
+		}
+		if c.authFailures > aeadIntegrityLimit {
+			return 0, nil, false, ErrAEADLimit
+		}
+		return 0, nil, false, nil
+	}
+	op := c.openerFor(sp)
+	if op == nil {
+		return 0, nil, false, nil // keys for this level not yet installed
+	}
+	if pn, _, payload, err = op.Open(pkt, pnOffset, c.largestRecv[sp]); err != nil {
+		return 0, nil, false, nil // authentication failed; skip
+	}
+	return pn, payload, true, nil
+}
+
 func (c *Conn) recvDatagram(datagram []byte) error {
 	rest := datagram
 	first := true
@@ -190,43 +221,29 @@ func (c *Conn) recvDatagram(datagram []byte) error {
 			}
 			continue
 		}
-		// Adopt the server's connection ID as our destination (RFC 9000 §7.2).
-		if !c.gotServerCID && len(hdr.SCID) > 0 {
-			c.dcid = append(c.dcid[:0], hdr.SCID...)
-			c.gotServerCID = true
+		// Once the server's connection ID is known, a long-header packet carrying a
+		// different Source Connection ID is from a different source and MUST be
+		// discarded (RFC 9000 §7.2). Short-header packets carry no SCID.
+		if c.gotServerCID && hdr.Type != PacketShort && !bytesEqual(hdr.SCID, c.serverSCID) {
+			continue
 		}
 		sp := packetSpace(hdr.Type)
-		var pn uint64
-		var payload []byte
-		if sp == spaceApp {
-			// The application space may carry a key update (RFC 9001 §6), so it
-			// needs the key-phase-aware open path.
-			var ok bool
-			pn, payload, ok = c.openApp(pkt, hdr.PNOffset)
-			if !ok {
-				// A short-header packet that fails to decrypt may be a stateless reset
-				// (RFC 9000 §10.3.1): it ends in a token the peer gave us.
-				if c.isStatelessReset(isFirst, datagram) {
-					return c.statelessResetReceived()
-				}
-				// Too many packets failed authentication across all keys — the peer
-				// (or an attacker) is exhausting the AEAD integrity limit, so the
-				// connection MUST be closed immediately (RFC 9001 §6.6).
-				if c.authFailures > aeadIntegrityLimit {
-					return ErrAEADLimit
-				}
-				continue // no keys yet, or authentication failed; skip this packet
-			}
-		} else {
-			op := c.openerFor(sp)
-			if op == nil {
-				continue // keys for this level not yet installed
-			}
-			var err error
-			pn, _, payload, err = op.Open(pkt, hdr.PNOffset, c.largestRecv[sp])
-			if err != nil {
-				continue // authentication failed; skip
-			}
+		pn, payload, ok, err := c.decryptPacket(sp, pkt, hdr.PNOffset, isFirst, datagram)
+		if err != nil {
+			return err
+		}
+		if !ok {
+			continue // no keys yet, or authentication failed; skip this packet
+		}
+		// Adopt the server's connection ID from the first AUTHENTICATED long-header
+		// packet (RFC 9000 §7.2). Deferring adoption until after the AEAD succeeds
+		// keeps a forged or garbage Initial — which anyone can build, since Initial
+		// keys derive from the on-wire connection ID — from poisoning our
+		// Destination Connection ID and stalling the handshake.
+		if !c.gotServerCID && len(hdr.SCID) > 0 {
+			c.dcid = append(c.dcid[:0], hdr.SCID...)
+			c.serverSCID = append(c.serverSCID[:0], hdr.SCID...)
+			c.gotServerCID = true
 		}
 		// The header's reserved bits MUST be zero once protection is removed from
 		// an authenticated packet (RFC 9000 §17.2 long header, §17.3.1 short
