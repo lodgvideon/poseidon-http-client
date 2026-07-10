@@ -11,9 +11,9 @@ const activeCIDLimit uint64 = 2
 // Prior To (switching the one in use if it is retired), rejects a reused
 // sequence number with a different ID (PROTOCOL_VIOLATION), and closes with
 // CONNECTION_ID_LIMIT_ERROR if more than active_connection_id_limit IDs would be
-// active. The stateless reset token is not retained (this client does not detect
-// stateless resets).
-func (h *connFrameHandler) OnNewConnectionID(seq, retirePriorTo uint64, cid []byte, _ *[16]byte) error {
+// active. The stateless reset token is retained so a stateless reset ending in it
+// can be recognized (RFC 9000 §10.3).
+func (h *connFrameHandler) OnNewConnectionID(seq, retirePriorTo uint64, cid []byte, token *[16]byte) error {
 	h.ackEliciting = true
 	c := h.c
 	if c.serverCIDs == nil {
@@ -33,6 +33,11 @@ func (h *connFrameHandler) OnNewConnectionID(seq, retirePriorTo uint64, cid []by
 		return nil // a duplicate retransmission
 	}
 	c.serverCIDs[seq] = append([]byte(nil), cid...)
+	if token != nil {
+		// Arm the token only for a CID actually stored — never one retired on arrival
+		// (the seq < retirePriorTo path above returns before here) (§10.3.1).
+		c.registerResetToken(seq, *token)
+	}
 
 	// An increased Retire Prior To retires every lower-sequence connection ID
 	// (§5.1.2). The frame guarantees retirePriorTo <= seq, so the ID just stored is
@@ -43,6 +48,7 @@ func (h *connFrameHandler) OnNewConnectionID(seq, retirePriorTo uint64, cid []by
 			if s < retirePriorTo {
 				c.queueRetire(s)
 				delete(c.serverCIDs, s)
+				delete(c.resetTokens, s) // a retired CID's token MUST NOT be checked (§10.3.1)
 			}
 		}
 		if c.curCIDSeq < retirePriorTo {

@@ -2,6 +2,7 @@ package quic
 
 import (
 	"context"
+	"crypto/subtle"
 	"crypto/tls"
 	"time"
 
@@ -134,9 +135,39 @@ func (c *Conn) shouldAbandonOnVN(pkt []byte, hdr Header) bool {
 	return !vnOffers(pkt, hdr, QUICVersion1)
 }
 
+// isStatelessReset reports whether the first packet of an undecryptable datagram
+// is a stateless reset: at least 21 bytes and ending in the reset token bound to
+// the connection ID currently in use (RFC 9000 §10.3, §10.3.1). Only the in-use
+// CID's token is matched — never a retired or unused one, per §10.3.1 — and the
+// comparison is constant time so a near-miss token cannot be probed by timing. It
+// is a no-op unless isFirst.
+func (c *Conn) isStatelessReset(isFirst bool, datagram []byte) bool {
+	if !isFirst || len(datagram) < 21 {
+		return false
+	}
+	token, ok := c.resetTokens[c.curCIDSeq]
+	if !ok {
+		return false
+	}
+	return subtle.ConstantTimeCompare(datagram[len(datagram)-16:], token[:]) == 1
+}
+
+// statelessResetReceived tears the connection down on a stateless reset (RFC 9000
+// §10.3): the state is discarded and no CONNECTION_CLOSE is sent (the peer has no
+// connection state), so ErrStatelessReset is returned to the caller. The transport
+// socket is closed too, mirroring idleClose, so no descriptor leaks.
+func (c *Conn) statelessResetReceived() error {
+	c.closed = true
+	_ = c.pc.Close()
+	return ErrStatelessReset
+}
+
 func (c *Conn) recvDatagram(datagram []byte) error {
 	rest := datagram
+	first := true
 	for len(rest) > 0 {
+		isFirst := first
+		first = false
 		hdr, err := ParseHeader(rest, len(c.scid))
 		if err != nil {
 			// An unauthenticated header that cannot be parsed cannot be associated
@@ -173,6 +204,11 @@ func (c *Conn) recvDatagram(datagram []byte) error {
 			var ok bool
 			pn, payload, ok = c.openApp(pkt, hdr.PNOffset)
 			if !ok {
+				// A short-header packet that fails to decrypt may be a stateless reset
+				// (RFC 9000 §10.3.1): it ends in a token the peer gave us.
+				if c.isStatelessReset(isFirst, datagram) {
+					return c.statelessResetReceived()
+				}
 				// Too many packets failed authentication across all keys — the peer
 				// (or an attacker) is exhausting the AEAD integrity limit, so the
 				// connection MUST be closed immediately (RFC 9001 §6.6).

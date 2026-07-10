@@ -57,11 +57,18 @@ type TransportParams struct {
 	// minimum of the two endpoints' non-zero values (§10.1). Zero (absent or
 	// explicit) means the peer imposes no idle timeout.
 	MaxIdleTimeout time.Duration
+	// StatelessResetToken is the peer's stateless_reset_token (0x02), the 16-byte
+	// token tied to the connection ID it used during the handshake. A datagram
+	// ending in it signals a stateless reset (§10.3). HaveStatelessResetToken
+	// records whether the parameter was present.
+	StatelessResetToken     [16]byte
+	HaveStatelessResetToken bool
 }
 
 // Transport-parameter identifiers the parser dispatches on (RFC 9000 §18.2).
 const (
 	tpMaxIdleTimeout                 uint64 = 0x01
+	tpStatelessResetToken            uint64 = 0x02
 	tpMaxUDPPayloadSize              uint64 = 0x03
 	tpInitialMaxData                 uint64 = 0x04
 	tpInitialMaxStreamDataBidiLocal  uint64 = 0x05
@@ -128,6 +135,13 @@ func (tp *TransportParams) set(id uint64, value []byte) error {
 			v = maxIdleTimeoutMillis
 		}
 		tp.MaxIdleTimeout = time.Duration(v) * time.Millisecond
+	case tpStatelessResetToken:
+		// A raw 16-byte token, not a varint (RFC 9000 §18.2).
+		if len(value) != 16 {
+			return ErrTransportParameter
+		}
+		copy(tp.StatelessResetToken[:], value)
+		tp.HaveStatelessResetToken = true
 	case tpInitialMaxData:
 		return tp.setUint(value, &tp.InitialMaxData)
 	case tpInitialMaxStreamDataBidiRemote:
