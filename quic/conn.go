@@ -91,11 +91,13 @@ type Conn struct {
 	peer               TransportParams // parsed peer transport parameters (send limits)
 	gotServerCID       bool            // the server's SCID has been adopted as our DCID
 	serverSCID         []byte          // the authenticated server Source Connection ID (§7.2 discard check)
+	origDCID           []byte          // the DCID of the client's first Initial, for §7.3 validation
+	retrySCID          []byte          // the Source Connection ID of a received Retry, for §7.3 validation
 	closed             bool
-	peerClose          *PeerClosedError      // set when a CONNECTION_CLOSE is received (draining, §10.2.2)
+	peerClose          *PeerClosedError    // set when a CONNECTION_CLOSE is received (draining, §10.2.2)
 	resetTokens        map[uint64][16]byte // stateless reset token per active peer CID sequence (§10.3)
-	handshakeComplete  bool                  // TLS handshake finished (drives Establish + TLS pump)
-	handshakeConfirmed bool             // QUIC HANDSHAKE_DONE received (RFC 9001 §4.1.2; gates key update §6.1)
+	handshakeComplete  bool                // TLS handshake finished (drives Establish + TLS pump)
+	handshakeConfirmed bool                // QUIC HANDSHAKE_DONE received (RFC 9001 §4.1.2; gates key update §6.1)
 	sendBuf            []byte
 
 	nextBidiStreamID   uint64             // next client-initiated bidi stream ID (0, 4, 8, …)
@@ -148,6 +150,7 @@ func NewConn(pc PacketConn, tlsConfig *tls.Config, transportParams []byte) (*Con
 		pc:            pc,
 		hs:            NewClientHandshake(tlsConfig, transportParams),
 		dcid:          dcid,
+		origDCID:      append([]byte(nil), dcid...), // the first Initial's DCID, for §7.3
 		initialSealer: is,
 		now:           time.Now,
 		connRecvMax:   DefaultConnRecvWindow,
@@ -353,7 +356,23 @@ func (c *Conn) PeerTransportParameters(params []byte) error {
 	// initial_source_connection_id MUST be present and equal the Source Connection
 	// ID of the server's first Initial packet, which the client adopted as its
 	// destination CID. An absent or mismatched value signals a spoofed handshake.
-	if !tp.HaveInitialSourceConnectionID || !bytes.Equal(tp.InitialSourceConnectionID, c.dcid) {
+	if !tp.HaveInitialSourceConnectionID || !bytes.Equal(tp.InitialSourceConnectionID, c.serverSCID) {
+		return ErrTransportParameter
+	}
+	// The server MUST include original_destination_connection_id, and it MUST equal
+	// the Destination Connection ID of the client's first Initial (RFC 9000 §7.3).
+	// This authenticates the CID exchange against an off-path injection.
+	if !tp.HaveOriginalDestinationConnectionID || !bytes.Equal(tp.OriginalDestinationConnectionID, c.origDCID) {
+		return ErrTransportParameter
+	}
+	// retry_source_connection_id MUST be present exactly when a Retry was processed,
+	// and MUST equal that Retry's Source Connection ID (RFC 9000 §7.3). Its presence
+	// without a Retry, absence after one, or a mismatch is a spoofed exchange.
+	if c.handledRetry {
+		if !tp.HaveRetrySourceConnectionID || !bytes.Equal(tp.RetrySourceConnectionID, c.retrySCID) {
+			return ErrTransportParameter
+		}
+	} else if tp.HaveRetrySourceConnectionID {
 		return ErrTransportParameter
 	}
 	return nil

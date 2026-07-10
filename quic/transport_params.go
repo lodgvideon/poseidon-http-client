@@ -45,6 +45,15 @@ type TransportParams struct {
 	// from a zero-length connection ID.
 	InitialSourceConnectionID     []byte
 	HaveInitialSourceConnectionID bool
+	// OriginalDestinationConnectionID (0x00) is the Destination Connection ID of the
+	// client's first Initial; the client authenticates it against the value it chose
+	// (§7.3). RetrySourceConnectionID (0x10) must be present exactly when a Retry was
+	// received and must equal that Retry's Source Connection ID (§7.3). The Have*
+	// flags distinguish an absent parameter (a §7.3 error) from a zero-length CID.
+	OriginalDestinationConnectionID     []byte
+	HaveOriginalDestinationConnectionID bool
+	RetrySourceConnectionID             []byte
+	HaveRetrySourceConnectionID         bool
 	// AckDelayExponent is the peer's ack_delay_exponent (0x0a): the ACK Delay
 	// field the peer sends is scaled by 2^AckDelayExponent microseconds. Default 3.
 	AckDelayExponent uint64
@@ -67,19 +76,21 @@ type TransportParams struct {
 
 // Transport-parameter identifiers the parser dispatches on (RFC 9000 §18.2).
 const (
-	tpMaxIdleTimeout                 uint64 = 0x01
-	tpStatelessResetToken            uint64 = 0x02
-	tpMaxUDPPayloadSize              uint64 = 0x03
-	tpInitialMaxData                 uint64 = 0x04
-	tpInitialMaxStreamDataBidiLocal  uint64 = 0x05
-	tpInitialMaxStreamDataBidiRemote uint64 = 0x06
-	tpInitialMaxStreamDataUni        uint64 = 0x07
-	tpInitialMaxStreamsBidi          uint64 = 0x08
-	tpInitialMaxStreamsUni           uint64 = 0x09
-	tpAckDelayExponent               uint64 = 0x0a
-	tpMaxAckDelay                    uint64 = 0x0b
-	tpActiveConnectionIDLimit        uint64 = 0x0e
-	tpInitialSourceConnectionID      uint64 = 0x0f
+	tpMaxIdleTimeout                  uint64 = 0x01
+	tpStatelessResetToken             uint64 = 0x02
+	tpMaxUDPPayloadSize               uint64 = 0x03
+	tpInitialMaxData                  uint64 = 0x04
+	tpInitialMaxStreamDataBidiLocal   uint64 = 0x05
+	tpInitialMaxStreamDataBidiRemote  uint64 = 0x06
+	tpInitialMaxStreamDataUni         uint64 = 0x07
+	tpInitialMaxStreamsBidi           uint64 = 0x08
+	tpInitialMaxStreamsUni            uint64 = 0x09
+	tpAckDelayExponent                uint64 = 0x0a
+	tpMaxAckDelay                     uint64 = 0x0b
+	tpActiveConnectionIDLimit         uint64 = 0x0e
+	tpInitialSourceConnectionID       uint64 = 0x0f
+	tpOriginalDestinationConnectionID uint64 = 0x00
+	tpRetrySourceConnectionID         uint64 = 0x10
 )
 
 // ParseTransportParams decodes the peer's transport parameters (RFC 9000 §18).
@@ -176,12 +187,25 @@ func (tp *TransportParams) set(id uint64, value []byte) error {
 			return ErrTransportParameter // §18.2: values of 2^14 ms or greater are invalid
 		}
 		tp.MaxAckDelay = time.Duration(v) * time.Millisecond
-	case tpInitialSourceConnectionID:
+	case tpInitialSourceConnectionID, tpOriginalDestinationConnectionID, tpRetrySourceConnectionID:
 		// Raw connection-ID bytes (not a varint), authenticated in §7.3.
-		tp.InitialSourceConnectionID = append([]byte(nil), value...)
-		tp.HaveInitialSourceConnectionID = true
+		tp.setConnectionID(id, value)
 	}
 	return nil
+}
+
+// setConnectionID records one of the raw connection-ID transport parameters and
+// marks it present (RFC 9000 §7.3, §18.2).
+func (tp *TransportParams) setConnectionID(id uint64, value []byte) {
+	cid := append([]byte(nil), value...)
+	switch id {
+	case tpInitialSourceConnectionID:
+		tp.InitialSourceConnectionID, tp.HaveInitialSourceConnectionID = cid, true
+	case tpOriginalDestinationConnectionID:
+		tp.OriginalDestinationConnectionID, tp.HaveOriginalDestinationConnectionID = cid, true
+	case tpRetrySourceConnectionID:
+		tp.RetrySourceConnectionID, tp.HaveRetrySourceConnectionID = cid, true
+	}
 }
 
 // setUint decodes an integer parameter value and stores it in dst, returning a
