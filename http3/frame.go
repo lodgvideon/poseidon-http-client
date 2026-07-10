@@ -27,10 +27,15 @@ const (
 	SettingQPACKBlockedStreams   uint64 = 0x07
 )
 
-// ErrH3Settings is returned when a SETTINGS payload is truncated, repeats an
-// identifier, or carries a reserved identifier. It maps to the H3_SETTINGS_ERROR
-// error code (RFC 9114 §7.2.4).
+// ErrH3Settings is returned when a SETTINGS payload repeats an identifier or
+// carries a reserved identifier. It maps to the H3_SETTINGS_ERROR error code
+// (RFC 9114 §7.2.4.1).
 var ErrH3Settings = errors.New("http3: malformed settings")
+
+// ErrH3Frame is returned when a frame payload terminates before the end of its
+// fields — for SETTINGS, a setting identifier or value cut off by the frame
+// length. It maps to the H3_FRAME_ERROR error code (RFC 9114 §7.1).
+var ErrH3Frame = errors.New("http3: malformed frame")
 
 // appendV appends v as a QUIC varint (RFC 9000 §16) without allocating. v must
 // be <= bytesx.MaxVarint (2^62-1); larger values would collide with the varint
@@ -117,24 +122,25 @@ func ParseFrameHeader(b []byte) (typ, length uint64, n int, err error) {
 }
 
 // ParseSettings decodes a SETTINGS frame payload into its parameters
-// (RFC 9114 §7.2.4). A truncated identifier/value pair, a repeated identifier,
-// or a reserved HTTP/2-carryover identifier (0x02–0x05, §7.2.4.1) is an
-// ErrH3Settings error (→ H3_SETTINGS_ERROR).
+// (RFC 9114 §7.2.4). A truncated identifier/value pair — a field cut off by the
+// frame length — is an ErrH3Frame error (→ H3_FRAME_ERROR, §7.1); a repeated
+// identifier or a reserved HTTP/2-carryover identifier (0x02–0x05) is an
+// ErrH3Settings error (→ H3_SETTINGS_ERROR, §7.2.4.1).
 func ParseSettings(payload []byte) ([]Setting, error) {
 	var out []Setting
 	seen := make(map[uint64]struct{})
 	for len(payload) > 0 {
 		id, in := bytesx.ReadVarint(payload)
 		if in == 0 {
-			return nil, ErrH3Settings
+			return nil, ErrH3Frame // a setting cut off by the frame length (§7.1)
 		}
 		payload = payload[in:]
 		val, vn := bytesx.ReadVarint(payload)
 		if vn == 0 {
-			return nil, ErrH3Settings
+			return nil, ErrH3Frame // the value cut off by the frame length (§7.1)
 		}
 		payload = payload[vn:]
-		if id >= 0x02 && id <= 0x05 { // reserved h2 settings MUST be rejected
+		if id >= 0x02 && id <= 0x05 { // reserved h2 settings MUST be rejected (§7.2.4.1)
 			return nil, ErrH3Settings
 		}
 		if _, dup := seen[id]; dup {
