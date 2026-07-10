@@ -40,7 +40,7 @@ func TestConformance_RFC9114_Sec431_RequestPseudoHeadersFirst(t *testing.T) {
 		Method: "GET", Scheme: "https", Authority: "example.com", Path: "/index.html",
 		Headers: []hpack.HeaderField{hf("accept", "text/html")},
 	}
-	frame, err := req.EncodeHeaders(&enc, nil)
+	frame, err := req.EncodeHeaders(&enc, nil, ^uint64(0))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -77,7 +77,7 @@ func TestConformance_RFC9114_Sec431_RequestPseudoHeadersFirst(t *testing.T) {
 func TestRequest_OmitsEmptyAuthority(t *testing.T) {
 	var enc qpack.Encoder
 	req := &Request{Method: "GET", Scheme: "https", Path: "/"}
-	frame, err := req.EncodeHeaders(&enc, nil)
+	frame, err := req.EncodeHeaders(&enc, nil, ^uint64(0))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -107,7 +107,7 @@ func TestConformance_RFC9114_Sec42_RequestValidation(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			if _, err := c.req.EncodeHeaders(&enc, nil); err != ErrH3Message {
+			if _, err := c.req.EncodeHeaders(&enc, nil, ^uint64(0)); err != ErrH3Message {
 				t.Fatalf("err = %v, want ErrH3Message", err)
 			}
 		})

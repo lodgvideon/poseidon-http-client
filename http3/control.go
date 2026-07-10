@@ -99,6 +99,19 @@ func (c *Client) routeUni(typ uint64, s quicStream, rest []byte) error {
 	return nil
 }
 
+// applyServerSettings records the server settings the client acts on. Only
+// SETTINGS_MAX_FIELD_SECTION_SIZE (§4.2.2) currently bounds client behavior — it
+// caps the size of a request field section; the QPACK settings stay at the
+// static-table-only defaults (RFC 9204 §5). An absent value leaves the field at
+// its no-limit default (§7.2.4.1).
+func (c *Client) applyServerSettings(settings []Setting) {
+	for _, s := range settings {
+		if s.ID == SettingMaxFieldSectionSize {
+			c.maxFieldSection = s.Value
+		}
+	}
+}
+
 // readControl parses frames off the server control stream: the mandatory first
 // SETTINGS (§6.2.1), then GOAWAY (§5.2). A rule violation closes the connection
 // with the matching HTTP/3 error code.
@@ -121,9 +134,11 @@ func (c *Client) readControl() error {
 			if typ != FrameSettings {
 				return c.connError(H3MissingSettings) // §6.2.1: SETTINGS must be first
 			}
-			if _, perr := ParseSettings(payload); perr != nil {
+			settings, perr := ParseSettings(payload)
+			if perr != nil {
 				return c.connError(H3SettingsErrorCode)
 			}
+			c.applyServerSettings(settings)
 			c.settingsRead = true
 			continue
 		}

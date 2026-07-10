@@ -115,14 +115,15 @@ type Client struct {
 
 	// Server control-stream state (RFC 9114 §6.2.1, §5.2), serviced after every
 	// poll. Single-goroutine; no locking.
-	pendingUni    []*uniStream // accepted server uni streams whose type isn't peeled yet
-	control       quicStream   // the server control stream, once identified
-	controlReader FrameReader
-	qpackEnc      quicStream // the server QPACK encoder stream (RFC 9204 §4.2)
-	qpackDec      quicStream // the server QPACK decoder stream (RFC 9204 §4.2)
-	settingsRead  bool       // the mandatory first SETTINGS frame has been read
-	goawayID      uint64 // the largest request stream id the server will process
-	haveGoaway    bool
+	pendingUni      []*uniStream // accepted server uni streams whose type isn't peeled yet
+	control         quicStream   // the server control stream, once identified
+	controlReader   FrameReader
+	qpackEnc        quicStream // the server QPACK encoder stream (RFC 9204 §4.2)
+	qpackDec        quicStream // the server QPACK decoder stream (RFC 9204 §4.2)
+	settingsRead    bool       // the mandatory first SETTINGS frame has been read
+	goawayID        uint64     // the largest request stream id the server will process
+	haveGoaway      bool
+	maxFieldSection uint64 // peer SETTINGS_MAX_FIELD_SECTION_SIZE; max uint64 until known (§4.2.2)
 }
 
 // uniStream is an accepted server unidirectional stream whose leading stream-type
@@ -140,7 +141,7 @@ func NewClient(conn *quic.Conn, settings []Setting) (*Client, error) {
 }
 
 func newClient(ctx context.Context, conn quicConn, settings []Setting) (*Client, error) {
-	c := &Client{conn: conn}
+	c := &Client{conn: conn, maxFieldSection: ^uint64(0)} // no limit until the peer's SETTINGS arrive
 	control, err := conn.OpenUniStream()
 	if err != nil {
 		return nil, err
@@ -225,7 +226,7 @@ func (c *Client) Do(ctx context.Context, req *Request) (*Response, []byte, error
 // roundTrip sends the request on stream and reads the response. Its caller aborts
 // the stream on a non-nil error.
 func (c *Client) roundTrip(ctx context.Context, stream quicStream, req *Request) (*Response, []byte, error) {
-	frame, err := req.EncodeHeaders(&c.enc, nil)
+	frame, err := req.EncodeHeaders(&c.enc, nil, c.maxFieldSection)
 	if err != nil {
 		return nil, nil, err
 	}
