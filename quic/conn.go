@@ -76,6 +76,7 @@ type Conn struct {
 	ptoCount       uint                      // consecutive probe timeouts (backoff, RFC 9002 §6.2.1)
 	probePending   bool                      // a PTO needs a PING probe sent in the app space (§6.2.4)
 	handshakeProbe bool                      // a PTO needs a PING probe in the Handshake/Initial space (§6.2.2.1)
+	ptoExempt      bool                      // a queued PTO probe may exceed the congestion window once (§7, §6.2.4)
 
 	// NewReno congestion control (RFC 9002 §7), connection-wide across spaces.
 	// cwnd == 0 disables it (the sentinel for hand-built test connections).

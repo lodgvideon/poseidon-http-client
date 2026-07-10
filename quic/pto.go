@@ -77,7 +77,12 @@ func (c *Conn) onPTO() {
 	// without probing. Before the handshake completes the probe is an Initial or
 	// Handshake PING to unblock an anti-amplification-limited server (§6.2.2.1),
 	// even with nothing in flight; afterward it is an application-space PING.
-	if !queued {
+	if queued {
+		// The probe rides the retransmit queue; let one packet past the congestion
+		// window on this PTO, since a PTO probe is exempt from cwnd (RFC 9002 §7) and
+		// a PTO MUST send at least one ack-eliciting packet (§6.2.4).
+		c.ptoExempt = true
+	} else {
 		if c.handshakeAntiDeadlock() {
 			c.handshakeProbe = true
 		} else if c.hasInFlight() {

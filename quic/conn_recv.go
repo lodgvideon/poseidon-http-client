@@ -381,12 +381,24 @@ func (c *Conn) openApp(pkt []byte, pnOffset int) (pn uint64, payload []byte, ok 
 func (c *Conn) flushRetransmits(sp int) error {
 	var sent uint64
 	for len(c.retransQueue[sp]) > 0 {
-		// Burst limit (RFC 9002 §7.7): when congestion control is active, resend at
-		// most an initial congestion window per flush so a whole-flight loss is not
-		// retransmitted back-to-back. The remainder stays queued and drains on the
-		// next flush (every Poll, and on the loss/PTO timer).
-		if c.cwnd > 0 && sent >= kInitialWindow {
-			break
+		if c.cwnd > 0 {
+			// A retransmission counts against the congestion window like any other
+			// ack-eliciting packet (RFC 9002 §7): stop once the window is full. Loss
+			// detection removes the lost bytes from bytes_in_flight before queueing the
+			// retransmit, so there is room to resend. A queued PTO probe is exempt from
+			// the window (§7) and MUST send at least one packet (§6.2.4), so let exactly
+			// one packet through; the remainder drains on the next flush.
+			if c.bytesInFlight >= c.cwnd {
+				if !c.ptoExempt {
+					break
+				}
+				c.ptoExempt = false
+			}
+			// Burst limit (RFC 9002 §7.7): resend at most an initial congestion window
+			// per flush so a whole-flight loss is not retransmitted back-to-back.
+			if sent >= kInitialWindow {
+				break
+			}
 		}
 		rf := c.retransQueue[sp][0]
 		c.retransQueue[sp] = c.retransQueue[sp][1:]
@@ -486,6 +498,9 @@ func (c *Conn) flush() error {
 			return err
 		}
 	}
+	// Drop any PTO exemption not consumed above (the probe found room under the
+	// window), so it cannot leak past this flush onto an ordinary retransmit.
+	c.ptoExempt = false
 	return nil
 }
 
