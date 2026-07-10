@@ -2,6 +2,7 @@ package http3
 
 import (
 	"context"
+	"errors"
 
 	"github.com/lodgvideon/poseidon-http-client/internal/bytesx"
 )
@@ -136,6 +137,9 @@ func (c *Client) readControl() error {
 			}
 			settings, perr := ParseSettings(payload)
 			if perr != nil {
+				if errors.Is(perr, ErrH3Frame) {
+					return c.connError(H3FrameError) // a setting cut off by the frame length (§7.1)
+				}
 				return c.connError(H3SettingsErrorCode)
 			}
 			c.applyServerSettings(settings)

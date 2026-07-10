@@ -97,10 +97,17 @@ func TestParseFrameHeader_Incomplete(t *testing.T) {
 	}
 }
 
-func TestParseSettings_Truncated(t *testing.T) {
+// TestConformance_RFC9114_Sec71_SettingsTruncatedIsFrameError checks that a
+// SETTINGS payload whose identifier/value is cut off by the frame length is an
+// H3_FRAME_ERROR (RFC 9114 §7.1), not an H3_SETTINGS_ERROR.
+func TestConformance_RFC9114_Sec71_SettingsTruncatedIsFrameError(t *testing.T) {
 	// An identifier with no value.
-	if _, err := ParseSettings([]byte{0x06}); err != ErrH3Settings {
-		t.Fatalf("err = %v, want ErrH3Settings", err)
+	if _, err := ParseSettings([]byte{0x06}); err != ErrH3Frame {
+		t.Fatalf("truncated setting: err = %v, want ErrH3Frame", err)
+	}
+	// A value varint cut off mid-encoding (0x40 begins a 2-byte varint).
+	if _, err := ParseSettings([]byte{0x06, 0x40}); err != ErrH3Frame {
+		t.Fatalf("truncated value: err = %v, want ErrH3Frame", err)
 	}
 }
 
