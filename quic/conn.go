@@ -88,8 +88,9 @@ type Conn struct {
 	peer               TransportParams // parsed peer transport parameters (send limits)
 	gotServerCID       bool            // the server's SCID has been adopted as our DCID
 	closed             bool
-	handshakeComplete  bool // TLS handshake finished (drives Establish + TLS pump)
-	handshakeConfirmed bool // QUIC HANDSHAKE_DONE received (RFC 9001 §4.1.2; gates key update §6.1)
+	peerClose          *PeerClosedError // set when a CONNECTION_CLOSE is received (draining, §10.2.2)
+	handshakeComplete  bool             // TLS handshake finished (drives Establish + TLS pump)
+	handshakeConfirmed bool             // QUIC HANDSHAKE_DONE received (RFC 9001 §4.1.2; gates key update §6.1)
 	sendBuf            []byte
 
 	nextBidiStreamID   uint64             // next client-initiated bidi stream ID (0, 4, 8, …)

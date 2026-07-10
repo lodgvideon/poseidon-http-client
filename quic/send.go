@@ -160,6 +160,11 @@ func (s *Stream) emitBlocked(kind blockKind) {
 // frames to resend if the packet is lost (nil for the informational *_BLOCKED
 // frames, which are not retransmitted this phase).
 func (c *Conn) writeAppFrames(frames []byte, retrans []retransFrame) error {
+	if c.closed {
+		// Draining or closing (RFC 9000 §10.2.2): no application frame may be sent
+		// once the connection is closed, including by a received CONNECTION_CLOSE.
+		return ErrConnClosed
+	}
 	pkt, err := c.sealPacket(spaceApp, frames, true, retrans)
 	if err != nil {
 		return err
