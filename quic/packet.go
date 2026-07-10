@@ -47,6 +47,21 @@ func ParseHeader(pkt []byte, dcidLen int) (Header, error) {
 	return parseLongHeader(pkt)
 }
 
+// vnOffers reports whether a Version Negotiation packet's Supported Versions list
+// includes version v. The list is a sequence of 4-byte versions following the
+// DCID and SCID (RFC 9000 §17.2.1); hdr is the parsed VN header for pkt. A
+// trailing partial version (not a multiple of 4) is ignored.
+func vnOffers(pkt []byte, hdr Header, v uint32) bool {
+	off := 7 + len(hdr.DCID) + len(hdr.SCID) // byte0 + version(4) + dcidLen(1) + DCID + scidLen(1) + SCID
+	for off+4 <= len(pkt) {
+		if binary.BigEndian.Uint32(pkt[off:]) == v {
+			return true
+		}
+		off += 4
+	}
+	return false
+}
+
 func parseLongHeader(pkt []byte) (Header, error) {
 	if len(pkt) < 5 {
 		return Header{}, ErrPacketEncoding

@@ -72,6 +72,11 @@ var ErrIdleTimeout = errors.New("quic: idle timeout")
 // further packets may be sent (RFC 9000 §10.2).
 var ErrConnClosed = errors.New("quic: connection closed")
 
+// ErrVersionNegotiation is returned when the server answers with a Version
+// Negotiation packet: this client supports only QUIC v1, so it abandons the
+// connection attempt (RFC 9000 §6.2).
+var ErrVersionNegotiation = errors.New("quic: server does not support QUIC v1 (version negotiation)")
+
 // PeerClosedError reports that the peer terminated the connection with a
 // CONNECTION_CLOSE frame (RFC 9000 §10.2). App is true for an application-level
 // close (frame type 0x1d); Code is the error code and Reason the diagnostic phrase.
