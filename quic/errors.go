@@ -72,6 +72,11 @@ var ErrIdleTimeout = errors.New("quic: idle timeout")
 // further packets may be sent (RFC 9000 §10.2).
 var ErrConnClosed = errors.New("quic: connection closed")
 
+// ErrStatelessReset is returned when the peer signals a stateless reset — an
+// unprocessable datagram ending in a reset token the peer gave us — so the
+// connection is torn down (RFC 9000 §10.3). No CONNECTION_CLOSE is sent.
+var ErrStatelessReset = errors.New("quic: stateless reset received")
+
 // ErrVersionNegotiation is returned when the server answers with a Version
 // Negotiation packet: this client supports only QUIC v1, so it abandons the
 // connection attempt (RFC 9000 §6.2).

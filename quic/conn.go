@@ -89,8 +89,9 @@ type Conn struct {
 	peer               TransportParams // parsed peer transport parameters (send limits)
 	gotServerCID       bool            // the server's SCID has been adopted as our DCID
 	closed             bool
-	peerClose          *PeerClosedError // set when a CONNECTION_CLOSE is received (draining, §10.2.2)
-	handshakeComplete  bool             // TLS handshake finished (drives Establish + TLS pump)
+	peerClose          *PeerClosedError      // set when a CONNECTION_CLOSE is received (draining, §10.2.2)
+	resetTokens        map[uint64][16]byte // stateless reset token per active peer CID sequence (§10.3)
+	handshakeComplete  bool                  // TLS handshake finished (drives Establish + TLS pump)
 	handshakeConfirmed bool             // QUIC HANDSHAKE_DONE received (RFC 9001 §4.1.2; gates key update §6.1)
 	sendBuf            []byte
 
@@ -342,6 +343,9 @@ func (c *Conn) PeerTransportParameters(params []byte) error {
 	}
 	c.peer = tp
 	c.connMax = tp.InitialMaxData
+	if tp.HaveStatelessResetToken {
+		c.registerResetToken(0, tp.StatelessResetToken) // bound to the server's handshake CID, sequence 0 (§10.3)
+	}
 	// Authenticate the server's connection ID (RFC 9000 §7.3): its
 	// initial_source_connection_id MUST be present and equal the Source Connection
 	// ID of the server's first Initial packet, which the client adopted as its
@@ -350,6 +354,17 @@ func (c *Conn) PeerTransportParameters(params []byte) error {
 		return ErrTransportParameter
 	}
 	return nil
+}
+
+// registerResetToken remembers the stateless reset token the peer bound to the
+// connection ID with the given sequence (RFC 9000 §10.3). Keying by sequence lets
+// the token be dropped when that CID is retired, so §10.3.1's rule that a reset is
+// only ever matched against the CID in use — never a retired or unused one — holds.
+func (c *Conn) registerResetToken(seq uint64, t [16]byte) {
+	if c.resetTokens == nil {
+		c.resetTokens = map[uint64][16]byte{}
+	}
+	c.resetTokens[seq] = t
 }
 
 // HandshakeComplete marks the TLS handshake finished (HandshakeSink).
