@@ -193,6 +193,35 @@ func (c *Conn) decryptPacket(sp int, pkt []byte, pnOffset int, isFirst bool, dat
 	return pn, payload, true, nil
 }
 
+// prefilterPacket handles packets that are dealt with before decryption. It
+// returns skip=true when the packet needs no further processing: a Retry (validated
+// and re-keyed in place), a Version Negotiation (which may abandon the connection
+// via a non-nil err), a server Initial carrying a non-empty Token (RFC 9000
+// §17.2.2), or a long-header packet whose Source Connection ID differs from the
+// authenticated server one once it is known (§7.2).
+func (c *Conn) prefilterPacket(hdr Header, pkt []byte) (skip bool, err error) {
+	switch {
+	case hdr.Type == PacketRetry:
+		c.handleRetry(hdr, pkt) // validate + re-key + resend the Initial (§17.2.5); never fatal
+		return true, nil
+	case hdr.Type == PacketVersionNegotiation:
+		if c.shouldAbandonOnVN(pkt, hdr) {
+			return true, ErrVersionNegotiation
+		}
+		return true, nil
+	case hdr.Type == PacketInitial && len(hdr.Token) > 0:
+		// A server's Initial MUST carry an empty Token; discard one with a non-zero
+		// Token Length rather than erroring, so an injected Initial cannot end the
+		// connection (RFC 9000 §17.2.2).
+		return true, nil
+	case c.gotServerCID && hdr.Type != PacketShort && !bytesEqual(hdr.SCID, c.serverSCID):
+		// A long-header packet with a different Source Connection ID is from another
+		// source (§7.2). Short-header packets carry no SCID.
+		return true, nil
+	}
+	return false, nil
+}
+
 func (c *Conn) recvDatagram(datagram []byte) error {
 	rest := datagram
 	first := true
@@ -211,20 +240,9 @@ func (c *Conn) recvDatagram(datagram []byte) error {
 		}
 		pkt := rest[:hdr.PacketLen]
 		rest = rest[hdr.PacketLen:]
-		if hdr.Type == PacketRetry {
-			c.handleRetry(hdr, pkt) // validate + re-key + resend the Initial (§17.2.5); never fatal
-			continue
-		}
-		if hdr.Type == PacketVersionNegotiation {
-			if c.shouldAbandonOnVN(pkt, hdr) {
-				return ErrVersionNegotiation
-			}
-			continue
-		}
-		// Once the server's connection ID is known, a long-header packet carrying a
-		// different Source Connection ID is from a different source and MUST be
-		// discarded (RFC 9000 §7.2). Short-header packets carry no SCID.
-		if c.gotServerCID && hdr.Type != PacketShort && !bytesEqual(hdr.SCID, c.serverSCID) {
+		if skip, err := c.prefilterPacket(hdr, pkt); err != nil {
+			return err
+		} else if skip {
 			continue
 		}
 		sp := packetSpace(hdr.Type)
