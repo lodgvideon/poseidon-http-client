@@ -119,6 +119,7 @@ type Conn struct {
 	connRecvTotal    uint64 // sum of the highest received offset over all streams (receive FC, §4.1)
 	connRecvMax      uint64 // connection-level receive limit we advertise; raised via MAX_DATA
 	pendingCtrl      []byte // app-space control frames to send (MAX_DATA/MAX_STREAM_DATA)
+	pathRespPending  bool   // pendingCtrl holds a PATH_RESPONSE; its datagram must reach 1200 (§8.2.2)
 
 	// AEAD usage limits (RFC 9001 §6.6). This client supports only AES-GCM and is
 	// a pure key-update responder, so on reaching a limit it must close with

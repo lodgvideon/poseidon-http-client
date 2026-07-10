@@ -213,7 +213,7 @@ protection (RFC 9001) and the connection engine are later phases.
 | §5.1.2  | Conformance | TestConformance_RFC9000_Sec512_RetirePriorToSwitchesCID (an increased Retire Prior To retires lower-sequence CIDs, switches the CID in use if it was retired, and queues a RETIRE_CONNECTION_ID on the retransmit queue; already-retired sequences are not re-queued) |
 | §19.16  | Conformance | TestConformance_RFC9000_Sec1916_RetireConnectionID (this client offers a zero-length source connection ID, so any received RETIRE_CONNECTION_ID → PROTOCOL_VIOLATION) |
 | §19.17  | Conformance | TestConformance_RFC9000_Sec1917_PathChallenge |
-| §8.2.2  | Conformance | TestConformance_RFC9000_Sec822_PathChallengeEchoed (a received PATH_CHALLENGE queues a PATH_RESPONSE echoing its 8 bytes), TestConn_PathChallenge_SentByFlush (the PATH_RESPONSE is written on the next flush with the echoed data) |
+| §8.2.2  | Conformance | TestConformance_RFC9000_Sec822_PathChallengeEchoed (a received PATH_CHALLENGE queues a PATH_RESPONSE echoing its 8 bytes), TestConn_PathChallenge_SentByFlush (the PATH_RESPONSE is written on the next flush with the echoed data), TestConformance_RFC9000_Sec822_PathResponsePaddedTo1200 (the datagram carrying the PATH_RESPONSE is expanded to at least 1200 bytes, while an ordinary control-frame datagram is not) |
 | §19.19  | Conformance | TestConformance_RFC9000_Sec1919_ConnectionClose |
 | §19.1   | Conformance | TestConformance_RFC9000_Sec191_Padding |
 | §19 (all frames) | Roundtrip | TestFrames_RoundTrip |
