@@ -5,6 +5,70 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [v0.9.0] — 2026-07-11
+
+### Added
+
+- **HTTP/3 client — a from-scratch, zero-dependency QUIC + HTTP/3 stack.** A
+  second protocol alongside the HTTP/2 client, implemented in pure Go from the
+  RFCs with **no `quic-go`, no `net/http`, no `golang.org/x/net`** — the same
+  zero-dependency, fine-grained-control philosophy as the HTTP/2 codec. Public
+  entry point: `http3.Dial(ctx, addr, tlsConfig) → *Client`, then `Client.Do`.
+  The layers, each conformance-tested (see
+  [docs/RFC_COVERAGE.md](docs/RFC_COVERAGE.md); design in
+  [docs/HTTP3_DESIGN.md](docs/HTTP3_DESIGN.md)):
+
+  - **QUIC transport (RFC 9000)** — connection establishment, stream
+    multiplexing, bidirectional flow control (`MAX_DATA` / `MAX_STREAM_DATA` /
+    `MAX_STREAMS`), connection-ID issuance and rotation (`NEW_CONNECTION_ID` /
+    `RETIRE_CONNECTION_ID`), ACK ranges, transport parameters, varint framing,
+    `CONNECTION_CLOSE`, and Retry (`quic/`).
+  - **Loss recovery + congestion control (RFC 9002)** — ACK-based loss
+    detection, PTO / probe timeouts, RTT estimation, and a congestion controller
+    with retransmission (`loss.go`, `cc.go`, `pto.go`, `rtt.go`).
+  - **QUIC-TLS (RFC 9001)** — the TLS 1.3 handshake over CRYPTO streams, 1-RTT
+    key derivation, key update (Key Phase 0→1), and AEAD packet + header
+    protection (`crypto*.go`, `handshake.go`).
+  - **QPACK (RFC 9204)** — a static-table encoder and decoder. The client
+    advertises `SETTINGS_QPACK_MAX_TABLE_CAPACITY = 0` (static-only, no
+    dynamic-table state to synchronise); a server that references the dynamic
+    table anyway is rejected cleanly as `QPACK_DECOMPRESSION_FAILED` rather than
+    mis-decoded (`qpack/`).
+  - **HTTP/3 (RFC 9114)** — the control stream + `SETTINGS`, request/response
+    mapping (`HEADERS` / `DATA` / trailers / 1xx interim responses), strict frame
+    and message-order validation, typed HTTP/3 and QUIC error codes,
+    `RESET_STREAM` / `STOP_SENDING` handling with retryable classification
+    (`*StreamResetError.Retryable()`), and `GOAWAY` drain (`http3/`).
+
+### Hardened
+
+- **Receive-path resource bounds** (#162–166) — the decode path is bounded
+  against an adversarial or buggy peer: bounded ACK / loss-tracking memory,
+  capped stream and CRYPTO reassembly buffers, a `NEW_CONNECTION_ID`
+  retire-flood bound, HTTP/3 response per-frame and cumulative size caps
+  (`ErrResponseTooLarge`), and eviction of reset streams from the routing map.
+
+### Tested
+
+- **Conformance suites** for RFC 9000, 9001, 9002, 9114, and 9204, gate-tracked
+  by `conformance-gate` (see [docs/RFC_COVERAGE.md](docs/RFC_COVERAGE.md)).
+- **Whole-stack interop**, run in CI, against **three independent HTTP/3 server
+  implementations** over real UDP — Caddy (`quic-go`, Go), nginx (its own C QUIC
+  stack), and aioquic (pure Python) — plus a fault-injecting server (malformed
+  frames, `RESET_STREAM`, `STOP_SENDING`, dynamic-QPACK) and a loss/reorder relay
+  (`test/integration/http3`).
+
+### Known limitations
+
+- **ChaCha20-Poly1305 header protection is deferred** — AES-GCM cipher suites
+  only (RFC 9001 §5.1). A ChaCha20-only server is a documented graceful failure.
+- **QPACK is static-only** — no dynamic-table *encode*; the decoder honours a
+  capacity of 0.
+- **`Client.Do` is blocking and sequential** — the engine is single-goroutine
+  and not safe for concurrent use, so the public API exposes no concurrent
+  in-flight requests (QUIC multiplexing exists at the transport).
+- A few rare RFC 9000 conformance items remain deferred (documented in `docs/`).
+
 ## [v0.8.0] — 2026-07-08
 
 ### Added
