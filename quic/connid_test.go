@@ -34,17 +34,19 @@ func TestConformance_RFC9000_Sec512_RetirePriorToSwitchesCID(t *testing.T) {
 	if len(c.serverCIDs) != 1 {
 		t.Fatalf("active CIDs = %d, want 1 (only seq 1 remains)", len(c.serverCIDs))
 	}
-	// A NEW_CONNECTION_ID below the retire boundary is retired, not stored, and the
-	// RETIRE is not duplicated for an already-retired sequence (spam bound).
+	// A NEW_CONNECTION_ID below the retire boundary is retired (a RETIRE_CONNECTION_ID
+	// is sent, RFC 9000 §5.1.2) and not stored. A conformant server can deliver such a
+	// frame by reordering, so it must be retired even below the boundary; a peer that
+	// floods them is bounded by maxPendingRetires (see TestConn_NewConnectionID_FloodBounded).
 	before := len(c.retransQueue[spaceApp])
 	if err := h.OnNewConnectionID(0, 0, []byte("origcid0"), &[16]byte{}); err != nil {
-		t.Fatalf("NEW_CONNECTION_ID for a retired seq: %v", err)
+		t.Fatalf("NEW_CONNECTION_ID for a below-boundary seq: %v", err)
 	}
 	if _, stored := c.serverCIDs[0]; stored {
 		t.Fatal("a NEW_CONNECTION_ID below the retire boundary must not be stored")
 	}
-	if len(c.retransQueue[spaceApp]) != before {
-		t.Fatal("a RETIRE for an already-retired sequence must not be re-queued")
+	if len(c.retransQueue[spaceApp]) != before+1 {
+		t.Fatal("a below-boundary NEW_CONNECTION_ID must queue a RETIRE_CONNECTION_ID (§5.1.2)")
 	}
 }
 
@@ -62,6 +64,65 @@ func TestConn_NewConnectionID_DuplicateSeqConflict(t *testing.T) {
 	}
 	if err := h.OnNewConnectionID(1, 0, []byte("newcid01"), &[16]byte{}); err != nil {
 		t.Fatalf("identical retransmit = %v, want nil", err)
+	}
+}
+
+// TestConn_NewConnectionID_FloodBounded checks that a peer advancing Retire Prior
+// To in lockstep with the sequence number — keeping the active set within the
+// limit while forcing one retirement per frame — cannot grow the retransmit queue
+// without bound: the connection is closed with CONNECTION_ID_LIMIT_ERROR once the
+// queued RETIRE frames exceed the cap (RFC 9000 §5.1.2).
+func TestConn_NewConnectionID_FloodBounded(t *testing.T) {
+	c := &Conn{dcid: []byte("origcid0")}
+	h := &connFrameHandler{c: c}
+	closed := false
+	for i := uint64(1); i < 100000; i++ {
+		cid := []byte{byte(i), byte(i >> 8), byte(i >> 16), 0xcc}
+		err := h.OnNewConnectionID(i, i-1, cid, &[16]byte{}) // rpt = i-1 retires the prior CID
+		if err == ErrConnectionIDLimit {
+			closed = true
+			break
+		}
+		if err != nil {
+			t.Fatalf("frame %d: unexpected %v", i, err)
+		}
+	}
+	if !closed {
+		t.Fatal("a NEW_CONNECTION_ID flood must be refused with ErrConnectionIDLimit")
+	}
+	if got := len(c.retransQueue[spaceApp]); got > maxPendingRetires+1 {
+		t.Fatalf("retransQueue = %d, want bounded near %d", got, maxPendingRetires)
+	}
+	if len(c.serverCIDs) > int(activeCIDLimit) {
+		t.Fatalf("active CIDs = %d, want <= %d (retirement kept the set small)", len(c.serverCIDs), activeCIDLimit)
+	}
+	if code, ok := closeCodeFor(ErrConnectionIDLimit); !ok || code != ErrCodeConnectionIDLimitError {
+		t.Fatalf("closeCodeFor = %#x,%v, want CONNECTION_ID_LIMIT_ERROR", code, ok)
+	}
+}
+
+// TestConn_NewConnectionID_ReorderedBelowBoundaryRetired: a conformant server
+// issues sequence numbers in order, but reordering can deliver a lower sequence
+// after a higher one already advanced Retire Prior To past it. That connection ID
+// was never stored, so the boundary sweep never retired it; it must still get its
+// own RETIRE_CONNECTION_ID (RFC 9000 §5.1.2).
+func TestConn_NewConnectionID_ReorderedBelowBoundaryRetired(t *testing.T) {
+	c := &Conn{dcid: []byte("origcid0")}
+	h := &connFrameHandler{c: c}
+	// seq 5 with retire_prior_to 5 arrives first (reordered ahead of seq 3).
+	if err := h.OnNewConnectionID(5, 5, []byte("cid00005"), &[16]byte{}); err != nil {
+		t.Fatal(err)
+	}
+	before := len(c.retransQueue[spaceApp])
+	// seq 3 arrives late, below the boundary, and was never stored.
+	if err := h.OnNewConnectionID(3, 0, []byte("cid00003"), &[16]byte{}); err != nil {
+		t.Fatal(err)
+	}
+	if _, stored := c.serverCIDs[3]; stored {
+		t.Fatal("a below-boundary seq must not be stored")
+	}
+	if len(c.retransQueue[spaceApp]) != before+1 {
+		t.Fatal("a genuinely-new below-boundary connection ID must be retired (§5.1.2)")
 	}
 }
 

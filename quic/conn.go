@@ -49,10 +49,10 @@ type Conn struct {
 	// server SCID adopted at the handshake, higher ones arrive in
 	// NEW_CONNECTION_ID. curCIDSeq is the sequence of the CID in use (c.dcid);
 	// retirePriorTo is the highest Retire Prior To seen.
-	serverCIDs    map[uint64][]byte
-	retiredCIDs   map[uint64]bool // sequences already scheduled for RETIRE_CONNECTION_ID (dedup)
-	curCIDSeq     uint64
-	retirePriorTo uint64
+	serverCIDs     map[uint64][]byte
+	curCIDSeq      uint64
+	retirePriorTo  uint64
+	pendingRetires int // RETIRE_CONNECTION_ID frames queued but not yet sent (flood bound, §5.1.2)
 
 	initialSealer   *Sealer
 	handshakeSealer *Sealer
