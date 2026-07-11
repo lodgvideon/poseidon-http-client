@@ -7,8 +7,11 @@ import (
 )
 
 // TestConformance_RFC9000_Sec196_CryptoOffsetExceedsMax checks that a CRYPTO frame
-// whose offset plus length exceeds 2^62-1 is a FRAME_ENCODING_ERROR, while a frame
-// at exactly the limit is accepted (RFC 9000 §19.6).
+// whose offset plus length exceeds 2^62-1 is a FRAME_ENCODING_ERROR (RFC 9000
+// §19.6). At exactly the limit the encoding check does not fire; such an extreme
+// offset is instead refused by the separate CRYPTO buffer cap (§7.5) — no real
+// handshake reaches offset 2^62, so this only confirms the varint boundary is
+// inclusive, not an encoding error.
 func TestConformance_RFC9000_Sec196_CryptoOffsetExceedsMax(t *testing.T) {
 	// offset = MaxVarint with one byte of data → offset+length = 2^62 > 2^62-1.
 	h := &connFrameHandler{c: &Conn{}}
@@ -16,10 +19,11 @@ func TestConformance_RFC9000_Sec196_CryptoOffsetExceedsMax(t *testing.T) {
 		t.Fatalf("OnCrypto(offset=MaxVarint, 1 byte) = %v, want ErrFrameEncoding", err)
 	}
 
-	// Boundary: offset+length == 2^62-1 exactly is accepted.
+	// Boundary: offset+length == 2^62-1 exactly is not an encoding error; the
+	// buffer cap refuses it instead (CRYPTO_BUFFER_EXCEEDED, not FRAME_ENCODING).
 	h2 := &connFrameHandler{c: &Conn{}}
-	if err := h2.OnCrypto(bytesx.MaxVarint-1, []byte{0x00}); err != nil {
-		t.Fatalf("OnCrypto at the exact limit = %v, want nil", err)
+	if err := h2.OnCrypto(bytesx.MaxVarint-1, []byte{0x00}); err != ErrCryptoBufferExceeded {
+		t.Fatalf("OnCrypto at the exact varint limit = %v, want ErrCryptoBufferExceeded", err)
 	}
 
 	// A normal offset is accepted.

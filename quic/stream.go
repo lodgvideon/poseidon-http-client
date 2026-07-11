@@ -1,7 +1,5 @@
 package quic
 
-import "sort"
-
 // Stream is a QUIC stream. For an HTTP/3 client the relevant streams are
 // client-initiated bidirectional streams (one request/response exchange each).
 type Stream struct {
@@ -195,8 +193,45 @@ func (r *recvStream) insert(offset uint64, data []byte) {
 		r.absorb()
 		return
 	}
-	r.pending = append(r.pending, streamChunk{offset, append([]byte(nil), data...)})
-	sort.Slice(r.pending, func(i, j int) bool { return r.pending[i].offset < r.pending[j].offset })
+	r.bufferGap(offset, data)
+}
+
+// bufferGap stores [offset, offset+len(data)) among the out-of-order chunks,
+// merging it with any chunk it overlaps or abuts so pending stays sorted by
+// offset and non-overlapping — one chunk per gap, no byte buffered twice. A peer
+// that resends the same gapped frame, or overlapping gapped frames, therefore
+// cannot inflate pending past the receive-flow-control window: without this a
+// duplicate append (recvHighest does not advance, so flow control never rejects
+// it) grew the buffer without bound. Overlapping input yields to bytes already
+// held, which a conformant peer guarantees are identical (RFC 9000 §2.2). The
+// merge is a single ordered pass, replacing the previous append-then-resort
+// (O(n log n) per frame, quadratic against a peer sending many tiny gaps).
+func (r *recvStream) bufferGap(offset uint64, data []byte) {
+	lo, hi := offset, offset+uint64(len(data))
+	out := make([]streamChunk, 0, len(r.pending)+1)
+	placed := false
+	for _, c := range r.pending {
+		cLo, cHi := c.offset, c.offset+uint64(len(c.data))
+		if cHi < lo || cLo > hi { // disjoint from the (possibly grown) new interval
+			if cLo > hi && !placed { // first chunk beyond the new one: emit it in order
+				out = append(out, streamChunk{lo, append([]byte(nil), data...)})
+				placed = true
+			}
+			out = append(out, c)
+			continue
+		}
+		// Overlap or adjacency: fuse c into the new interval, keeping already-held
+		// bytes on any overlap.
+		nLo, nHi := min(lo, cLo), max(hi, cHi)
+		buf := make([]byte, nHi-nLo)
+		copy(buf[lo-nLo:], data)   // new bytes first
+		copy(buf[cLo-nLo:], c.data) // existing bytes win on overlap
+		lo, hi, data = nLo, nHi, buf
+	}
+	if !placed {
+		out = append(out, streamChunk{lo, append([]byte(nil), data...)})
+	}
+	r.pending = out
 }
 
 // absorb folds any buffered chunks that are now contiguous into data.

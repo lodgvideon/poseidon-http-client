@@ -103,6 +103,56 @@ func TestRecvStream_MultipleBufferedChunks(t *testing.T) {
 	}
 }
 
+// TestRecvStream_GappedResendDoesNotGrow: a peer resending the same gapped frame
+// (or overlapping gapped frames) must not grow the pending buffer without bound.
+// Because recvHighest does not advance on a resend, receive-flow control never
+// rejects it, so the reassembly buffer itself must dedup.
+func TestRecvStream_GappedResendDoesNotGrow(t *testing.T) {
+	r := &recvStream{}
+	for i := 0; i < 1000; i++ {
+		_ = r.receive(100, []byte("PAYLOAD"), false) // same gap, 1000 times
+	}
+	if len(r.pending) != 1 {
+		t.Fatalf("pending chunks = %d, want 1 (duplicate gaps must merge)", len(r.pending))
+	}
+	var buffered int
+	for _, c := range r.pending {
+		buffered += len(c.data)
+	}
+	if buffered != len("PAYLOAD") {
+		t.Fatalf("buffered bytes = %d, want %d (no duplicate storage)", buffered, len("PAYLOAD"))
+	}
+	// Overlapping resends that each extend by one byte also stay a single chunk.
+	for i := 1; i <= 50; i++ {
+		_ = r.receive(200, bytes.Repeat([]byte("x"), i), false)
+	}
+	for _, c := range r.pending {
+		if c.offset == 200 && len(c.data) != 50 {
+			t.Fatalf("overlapping chunk at 200 = %d bytes, want 50 (merged, not accumulated)", len(c.data))
+		}
+	}
+	if len(r.pending) != 2 {
+		t.Fatalf("pending chunks = %d, want 2 (one per distinct gap)", len(r.pending))
+	}
+}
+
+// TestRecvStream_OverlappingGapsMerge: chunks that overlap or abut in the pending
+// buffer fuse into one non-overlapping run, and the correct bytes surface once the
+// preceding gap is filled (already-held bytes win on overlap, RFC 9000 §2.2).
+func TestRecvStream_OverlappingGapsMerge(t *testing.T) {
+	r := &recvStream{}
+	_ = r.receive(4, []byte("EFGH"), false) // [4,8)
+	_ = r.receive(6, []byte("GHIJ"), false) // [6,10) overlaps [4,8), extends to 10
+	_ = r.receive(2, []byte("CD"), false)   // [2,4) abuts [4,10)
+	if len(r.pending) != 1 {
+		t.Fatalf("pending chunks = %d, want 1 (all fused)", len(r.pending))
+	}
+	_ = r.receive(0, []byte("AB"), false) // fills the gap to offset 0
+	if got := r.bytes(); !bytes.Equal(got, []byte("ABCDEFGHIJ")) {
+		t.Fatalf("bytes = %q, want %q", got, "ABCDEFGHIJ")
+	}
+}
+
 func TestConn_OnStream_DeliversToOpenStream(t *testing.T) {
 	c := &Conn{peer: TransportParams{InitialMaxStreamsBidi: 4}}
 	s, err := c.OpenStream() // stream 0
@@ -152,6 +202,26 @@ func TestConnFrameHandler_OnCrypto_ReassemblesByOffset(t *testing.T) {
 	}
 	if got := string(c.cryptoRecv[spaceInitial].read()); got != "hello world" {
 		t.Fatalf("reassembled CRYPTO = %q, want %q", got, "hello world")
+	}
+}
+
+// TestConnFrameHandler_OnCrypto_BufferCap: CRYPTO has no flow-control window, so
+// a gapped frame reaching too far past the consumed prefix must be refused with
+// CRYPTO_BUFFER_EXCEEDED (RFC 9000 §7.5) rather than buffered without bound.
+func TestConnFrameHandler_OnCrypto_BufferCap(t *testing.T) {
+	c := &Conn{}
+	h := &connFrameHandler{c: c, space: spaceInitial}
+
+	// A gapped frame within the cap is buffered.
+	if err := h.OnCrypto(maxCryptoBuffer-1, []byte("x")); err != nil {
+		t.Fatalf("CRYPTO within the cap = %v, want nil", err)
+	}
+	// One byte past the cap is refused.
+	if err := h.OnCrypto(maxCryptoBuffer, []byte("x")); err != ErrCryptoBufferExceeded {
+		t.Fatalf("CRYPTO past the cap = %v, want ErrCryptoBufferExceeded", err)
+	}
+	if code, ok := closeCodeFor(ErrCryptoBufferExceeded); !ok || code != ErrCodeCryptoBufferExceeded {
+		t.Fatalf("closeCodeFor = %#x,%v, want CRYPTO_BUFFER_EXCEEDED", code, ok)
 	}
 }
 

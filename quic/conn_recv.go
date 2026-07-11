@@ -711,6 +711,12 @@ func (h *connFrameHandler) OnAckRange(gap, length uint64) error {
 	return nil
 }
 
+// maxCryptoBuffer bounds how far past the consumed prefix a gapped CRYPTO frame
+// may reach. A real handshake is a few KB delivered largely in order, so 64 KiB
+// of headroom never trips on legitimate traffic while capping the reassembly
+// buffer a peer without a flow-control gate could otherwise grow without bound.
+const maxCryptoBuffer uint64 = 64 << 10
+
 func (h *connFrameHandler) OnCrypto(offset uint64, data []byte) error {
 	// The sum of a CRYPTO frame's offset and length cannot exceed 2^62-1
 	// (RFC 9000 §19.6); a frame beyond that limit is a FRAME_ENCODING_ERROR. Unlike
@@ -720,10 +726,20 @@ func (h *connFrameHandler) OnCrypto(offset uint64, data []byte) error {
 	if offset+uint64(len(data)) > bytesx.MaxVarint {
 		return ErrFrameEncoding
 	}
+	// CRYPTO has no flow-control window (RFC 9000 §7.5), so bound how far ahead of
+	// the consumed prefix a gapped frame may sit. Without this a peer — or an
+	// on-path forger of Initial packets — could buffer unbounded gapped handshake
+	// bytes that never become contiguous and so are never handed to (and rejected
+	// by) the TLS layer. maxCryptoBuffer past the read cursor is ample for a real
+	// certificate flight, which is delivered largely in order.
+	cr := &h.c.cryptoRecv[h.space]
+	if offset+uint64(len(data)) > uint64(cr.readOff)+maxCryptoBuffer {
+		return ErrCryptoBufferExceeded // §7.5 permits closing with CRYPTO_BUFFER_EXCEEDED
+	}
 	// The handshake CRYPTO stream spans many frames and packets (a server's
 	// certificate flight is several KB); reassemble it by offset so out-of-order
 	// or gapped delivery still yields the TLS messages in order.
-	_ = h.c.cryptoRecv[h.space].receive(offset, data, false) // never FIN, so never a final-size error
+	_ = cr.receive(offset, data, false) // never FIN, so never a final-size error
 	h.ackEliciting = true
 	return nil
 }
