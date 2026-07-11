@@ -78,3 +78,40 @@ jobs:
       - name: docker compose down
         if: always()
         run: docker compose -f test/integration/http3/docker-compose.yml down -v
+
+  # HTTP/3 recovery under network faults: the client dials Caddy through a UDP
+  # relay that drops (loss recovery, RFC 9002) or reorders (ack-range handling +
+  # receive reassembly) datagrams. Levels are kept conservative for CI
+  # reliability; the seed is fixed so a failure is reproducible.
+  h3-interop-faults:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      LOSS_COMPOSE: test/integration/http3/docker-compose.loss.yml
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Loss recovery (15%)
+        env:
+          LOSS_PCT: "15"
+        run: docker compose -f "$LOSS_COMPOSE" run --rm runner
+      - name: Logs on failure (loss)
+        if: failure()
+        run: docker compose -f "$LOSS_COMPOSE" logs
+        continue-on-error: true
+      - name: down (loss)
+        if: always()
+        run: docker compose -f "$LOSS_COMPOSE" down -v
+
+      - name: Reordering (20%)
+        env:
+          LOSS_PCT: "0"
+          REORDER_PCT: "20"
+        run: docker compose -f "$LOSS_COMPOSE" run --rm runner
+      - name: Logs on failure (reorder)
+        if: failure()
+        run: docker compose -f "$LOSS_COMPOSE" logs
+        continue-on-error: true
+      - name: down (reorder)
+        if: always()
+        run: docker compose -f "$LOSS_COMPOSE" down -v
