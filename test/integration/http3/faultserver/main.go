@@ -3,29 +3,43 @@
 // QUIC stack. It is built on quic-go's raw QUIC API (not its http3.Server) so it
 // can control exact frame bytes and stream error codes.
 //
-// FAULT selects the misbehaviour (default "reset"):
-//   - reset: accept each request stream and RESET_STREAM it with
-//     H3_REQUEST_REJECTED (0x010b), so the client surfaces a retryable
-//     StreamResetError (RFC 9114 §4.1.1, §8.1).
+// It routes on the request :path (decoded with quic-go's qpack), one fault per
+// path (RFC 9114 references):
+//   - /data-before-headers → a DATA frame before any HEADERS (§4.1 →
+//     H3_FRAME_UNEXPECTED)
+//   - /trunc-headers        → a HEADERS frame whose declared length is never
+//     satisfied before the clean FIN (§7.1 → H3_FRAME_ERROR)
+//   - /settings-on-request  → a SETTINGS frame on a request stream (§7.2.4 →
+//     H3_FRAME_UNEXPECTED)
+//   - anything else (incl. "/") → RESET_STREAM with H3_REQUEST_REJECTED (§8.1),
+//     which the client surfaces as a retryable StreamResetError (§4.1.1)
 //
-// It lives in its own module so quic-go is not a dependency of the client.
-// Run in the compose harness; env: CERT/KEY (default /certs/{cert,key}.pem),
-// ADDR (default :443), FAULT.
+// It lives in its own module so quic-go is not a dependency of the client. Run in
+// the compose harness; env: CERT/KEY (default /certs/{cert,key}.pem),
+// ADDR (default :443).
 package main
 
 import (
+	"bufio"
 	"context"
 	"crypto/tls"
 	"io"
 	"log"
 	"os"
 
+	"github.com/quic-go/qpack"
 	"github.com/quic-go/quic-go"
+	"github.com/quic-go/quic-go/quicvarint"
 )
 
-// h3RequestRejected is HTTP/3 H3_REQUEST_REJECTED (RFC 9114 §8.1) — the client
-// classifies a reset with this code as retryable.
-const h3RequestRejected = 0x010b
+// H3 frame types (RFC 9114 §7.2) and the H3_REQUEST_REJECTED code (§8.1) the
+// client classifies as retryable.
+const (
+	frameData         = 0x00
+	frameHeaders      = 0x01
+	frameSettings     = 0x04
+	h3RequestRejected = 0x010b
+)
 
 func env(name, def string) string {
 	if v := os.Getenv(name); v != "" {
@@ -44,24 +58,23 @@ func main() {
 		NextProtos:   []string{"h3"},
 		MinVersion:   tls.VersionTLS13,
 	}
-	fault := env("FAULT", "reset")
-
-	ln, err := quic.ListenAddr(env("ADDR", ":443"), tlsConf, &quic.Config{})
+	addr := env("ADDR", ":443")
+	ln, err := quic.ListenAddr(addr, tlsConf, &quic.Config{})
 	if err != nil {
 		log.Fatalf("faultserver: listen: %v", err)
 	}
-	log.Printf("faultserver: listening %s, fault=%q", env("ADDR", ":443"), fault)
+	log.Printf("faultserver: listening %s (path-routed faults)", addr)
 
 	for {
 		conn, err := ln.Accept(context.Background())
 		if err != nil {
 			log.Fatalf("faultserver: accept: %v", err)
 		}
-		go handle(conn, fault)
+		go handle(conn)
 	}
 }
 
-func handle(conn *quic.Conn, fault string) {
+func handle(conn *quic.Conn) {
 	ctx := context.Background()
 
 	// A conformant server opens its control stream and sends SETTINGS first
@@ -73,7 +86,7 @@ func handle(conn *quic.Conn, fault string) {
 	if ctrl, err := conn.OpenUniStreamSync(ctx); err != nil {
 		log.Printf("faultserver: open control stream: %v", err)
 	} else {
-		_, _ = ctrl.Write([]byte{0x00, 0x04, 0x00})
+		_, _ = ctrl.Write([]byte{0x00, frameSettings, 0x00})
 	}
 	// Drain the client's unidirectional streams (its control + QPACK streams) so
 	// their flow control does not stall.
@@ -92,16 +105,60 @@ func handle(conn *quic.Conn, fault string) {
 		if err != nil {
 			return
 		}
-		go serve(s, fault)
+		go serve(s)
 	}
 }
 
-func serve(s *quic.Stream, fault string) {
-	switch fault {
-	default: // "reset"
-		// Abort the response with RESET_STREAM and stop reading the request with
-		// STOP_SENDING, both carrying H3_REQUEST_REJECTED.
+func serve(s *quic.Stream) {
+	switch requestPath(s) {
+	case "/data-before-headers":
+		_, _ = s.Write(dataFrame([]byte("early")))
+		_ = s.Close()
+	case "/trunc-headers":
+		// A HEADERS frame declaring 100 bytes, but only 2 sent before the FIN
+		// (100 needs a 2-byte varint, so encode it — the client must decode that).
+		hdr := quicvarint.Append([]byte{frameHeaders}, 100)
+		_, _ = s.Write(append(hdr, 0xaa, 0xbb))
+		_ = s.Close()
+	case "/settings-on-request":
+		_, _ = s.Write([]byte{frameSettings, 0x00}) // SETTINGS, length 0
+		_ = s.Close()
+	default:
 		s.CancelWrite(quic.StreamErrorCode(h3RequestRejected))
 		s.CancelRead(quic.StreamErrorCode(h3RequestRejected))
 	}
+}
+
+// requestPath reads the request's HEADERS frame off the stream and returns its
+// :path, or "" if it cannot be read (in which case the default reset applies).
+func requestPath(s *quic.Stream) string {
+	br := bufio.NewReader(s)
+	typ, err := quicvarint.Read(br)
+	if err != nil || typ != frameHeaders {
+		return ""
+	}
+	length, err := quicvarint.Read(br)
+	if err != nil || length > 64<<10 { // guard against a hostile field-section length
+		return ""
+	}
+	field := make([]byte, length)
+	if _, err := io.ReadFull(br, field); err != nil {
+		return ""
+	}
+	next := qpack.NewDecoder().Decode(field)
+	for {
+		hf, err := next()
+		if err != nil { // io.EOF when the field section is exhausted, or a decode error
+			return ""
+		}
+		if hf.Name == ":path" {
+			return hf.Value
+		}
+	}
+}
+
+// dataFrame encodes an HTTP/3 DATA frame (RFC 9114 §7.2.1).
+func dataFrame(data []byte) []byte {
+	out := quicvarint.Append([]byte{frameData}, uint64(len(data)))
+	return append(out, data...)
 }
