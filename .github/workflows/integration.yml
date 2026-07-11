@@ -65,7 +65,7 @@ jobs:
       # (fixtures, certs) exiting cannot tear the stack down before the runner
       # executes — `run` starts the dependency graph, runs only the runner, and
       # returns its exit code.
-      - name: HTTP/3 interop matrix (Caddy + nginx)
+      - name: HTTP/3 interop matrix (Caddy + nginx + aioquic)
         run: |
           docker compose -f test/integration/http3/docker-compose.yml \
             run --rm runner
