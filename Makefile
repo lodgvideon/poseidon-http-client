@@ -1,5 +1,5 @@
 .PHONY: lint test test-race test-debug bench bench-gate fuzz-replay coverage coverage-gate tidy
-.PHONY: it-up it-down it-logs it-test it-test-fast it-certs h3-interop h3-interop-loss
+.PHONY: it-up it-down it-logs it-test it-test-fast it-certs h3-interop h3-interop-loss h3-interop-reorder
 
 # Minimum overall and per-package statement coverage. CI fails below this.
 COVERAGE_MIN ?= 80
@@ -96,9 +96,15 @@ h3-interop:
 	@trap '$(DOCKER_COMPOSE) -f $(H3_COMPOSE) down -v 2>/dev/null' EXIT; \
 	$(DOCKER_COMPOSE) -f $(H3_COMPOSE) run --rm runner
 
-# Same interop suite, but the client dials through a UDP relay that drops ~10%
-# of datagrams each way — passes only if loss recovery (RFC 9002) works.
+# Same interop suite, but the client dials through a UDP relay that injects
+# network faults. h3-interop-loss drops ~10% of datagrams each way (loss recovery,
+# RFC 9002); h3-interop-reorder reorders ~20% with no loss (ack-range handling +
+# receive reassembly under reorder). Override LOSS_PCT/REORDER_PCT/SEED to vary.
 H3_LOSS_COMPOSE = test/integration/http3/docker-compose.loss.yml
 h3-interop-loss:
 	@trap '$(DOCKER_COMPOSE) -f $(H3_LOSS_COMPOSE) down -v 2>/dev/null' EXIT; \
 	$(DOCKER_COMPOSE) -f $(H3_LOSS_COMPOSE) run --rm runner
+
+h3-interop-reorder:
+	@trap '$(DOCKER_COMPOSE) -f $(H3_LOSS_COMPOSE) down -v 2>/dev/null' EXIT; \
+	LOSS_PCT=0 REORDER_PCT=20 $(DOCKER_COMPOSE) -f $(H3_LOSS_COMPOSE) run --rm runner

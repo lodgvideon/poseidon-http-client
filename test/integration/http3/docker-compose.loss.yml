@@ -37,6 +37,8 @@ services:
     environment:
       UPSTREAM: h3caddy:443
       LOSS_PCT: "${LOSS_PCT:-10}"
+      REORDER_PCT: "${REORDER_PCT:-0}"
+      SEED: "${SEED:-1}"
     command: go run test/integration/http3/lossproxy.go
     restart: "no"
 
