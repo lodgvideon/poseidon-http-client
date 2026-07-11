@@ -1,13 +1,19 @@
 name: poseidon-h3-it
 
-# HTTP/3 interop: a real Caddy HTTP/3 server and an in-container test runner on a
-# shared bridge network. The runner runs the client in a container (not on the
-# host) because Docker Desktop on Windows does not forward host UDP to a
-# published container port — container-to-container UDP works everywhere.
+# HTTP/3 interop MATRIX: the from-scratch client is exercised against two real,
+# independent HTTP/3 server stacks on a shared bridge network — Caddy (quic-go,
+# Go) and nginx (its own C QUIC implementation) — so cross-implementation interop
+# bugs (QPACK, flow control, connection-ID rotation, key-update timing) surface,
+# not just quic-go's behaviour. The runner runs the client in a container (not on
+# the host) because Docker Desktop on Windows does not forward host UDP to a
+# published container port; container-to-container UDP works everywhere.
 
 networks:
   h3net:
     driver: bridge
+
+volumes:
+  certs:
 
 services:
   # Generate the 1 MiB throughput fixture (/srv/huge.txt) as an exact repeat of
@@ -27,6 +33,18 @@ services:
         i=0; while [ $$i -lt 64 ]; do cat /tmp/b >> /srv/huge.txt; i=$$((i+1)); done
     restart: "no"
 
+  # Self-signed cert for nginx (Caddy issues its own internal cert). The client
+  # skips verification, so a bare self-signed cert is sufficient.
+  certs:
+    image: alpine/openssl
+    volumes:
+      - certs:/certs
+    command: >
+      req -x509 -newkey rsa:2048 -nodes -days 3650
+      -keyout /certs/key.pem -out /certs/cert.pem -subj "/CN=h3nginx"
+    restart: "no"
+
+  # ── Caddy — quic-go (Go) HTTP/3 ─────────────────────────────────
   caddy:
     image: caddy:2
     hostname: h3caddy
@@ -45,18 +63,39 @@ services:
       start_period: 2s
     restart: "no"
 
+  # ── nginx — its own C QUIC HTTP/3 stack ─────────────────────────
+  # The nginx image ships no curl/wget for a healthcheck, so it is gated on
+  # service_started; the runner retries the dial until nginx is serving.
+  nginx:
+    image: nginx:1.27
+    hostname: h3nginx
+    networks: [h3net]
+    depends_on:
+      fixtures:
+        condition: service_completed_successfully
+      certs:
+        condition: service_completed_successfully
+    volumes:
+      - ./nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./srv:/srv:ro
+      - certs:/certs:ro
+    restart: "no"
+
   runner:
     image: golang:1.24
     depends_on:
       caddy:
         condition: service_healthy
+      nginx:
+        condition: service_started
     networks: [h3net]
     working_dir: /src
     volumes:
       - ../../..:/src
     environment:
-      H3_INTEROP_ADDR: h3caddy:443
+      # name=host:port pairs — the interop tests run every scenario against each.
+      H3_INTEROP_ADDRS: "caddy=h3caddy:443,nginx=h3nginx:443"
       GOFLAGS: -count=1
     command: >
-      go test ./http3/ -tags interop -run TestInterop -v -timeout 90s
+      go test ./http3/ -tags interop -run TestInterop -v -timeout 120s
     restart: "no"

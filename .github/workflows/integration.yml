@@ -50,3 +50,31 @@ jobs:
       - name: docker compose down
         if: always()
         run: docker compose -f test/integration/docker-compose.yml down -v
+
+  # HTTP/3 interop matrix: the from-scratch client against two real, independent
+  # HTTP/3 server stacks (Caddy/quic-go and nginx/C) over real UDP. Container-to-
+  # container UDP works on Linux CI (the host-UDP-forwarding limitation is Docker
+  # Desktop on Windows only); the runner's exit code gates the job.
+  h3-interop:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      # `run` (not `up --abort-on-container-exit`) so the one-shot init services
+      # (fixtures, certs) exiting cannot tear the stack down before the runner
+      # executes — `run` starts the dependency graph, runs only the runner, and
+      # returns its exit code.
+      - name: HTTP/3 interop matrix (Caddy + nginx)
+        run: |
+          docker compose -f test/integration/http3/docker-compose.yml \
+            run --rm runner
+
+      - name: Dump logs on failure
+        if: failure()
+        run: docker compose -f test/integration/http3/docker-compose.yml logs
+        continue-on-error: true
+
+      - name: docker compose down
+        if: always()
+        run: docker compose -f test/integration/http3/docker-compose.yml down -v
