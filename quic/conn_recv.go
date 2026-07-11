@@ -407,6 +407,9 @@ func (c *Conn) flushRetransmits(sp int) error {
 				continue
 			}
 		}
+		if rf.kind == retransRetire && c.pendingRetires > 0 {
+			c.pendingRetires-- // a queued RETIRE_CONNECTION_ID is now on the wire
+		}
 		pkt, err := c.sealPacket(sp, rf.encode(nil), true, []retransFrame{rf}, false)
 		if err != nil {
 			return err
