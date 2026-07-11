@@ -11,6 +11,8 @@
 //     satisfied before the clean FIN (§7.1 → H3_FRAME_ERROR)
 //   - /settings-on-request  → a SETTINGS frame on a request stream (§7.2.4 →
 //     H3_FRAME_UNEXPECTED)
+//   - /stop-sending         → STOP_SENDING the request while the client is still
+//     sending its body, then a valid 200 (§4.1: the client reads the response)
 //   - anything else (incl. "/") → RESET_STREAM with H3_REQUEST_REJECTED (§8.1),
 //     which the client surfaces as a retryable StreamResetError (§4.1.1)
 //
@@ -21,6 +23,7 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"crypto/tls"
 	"io"
@@ -123,6 +126,13 @@ func serve(s *quic.Stream) {
 	case "/settings-on-request":
 		_, _ = s.Write([]byte{frameSettings, 0x00}) // SETTINGS, length 0
 		_ = s.Close()
+	case "/stop-sending":
+		// Abort reading the request (STOP_SENDING) while the client is still
+		// sending its body, but still send a valid response so the client — whose
+		// body send returns ErrStreamReset — reads the response anyway (§4.1).
+		s.CancelRead(quic.StreamErrorCode(h3RequestRejected))
+		_, _ = s.Write(headersFrame(qpack.HeaderField{Name: ":status", Value: "200"}))
+		_ = s.Close()
 	default:
 		s.CancelWrite(quic.StreamErrorCode(h3RequestRejected))
 		s.CancelRead(quic.StreamErrorCode(h3RequestRejected))
@@ -161,4 +171,16 @@ func requestPath(s *quic.Stream) string {
 func dataFrame(data []byte) []byte {
 	out := quicvarint.Append([]byte{frameData}, uint64(len(data)))
 	return append(out, data...)
+}
+
+// headersFrame QPACK-encodes the fields (static table only — the field-section
+// prefix is written by the encoder) into an HTTP/3 HEADERS frame (§7.2.2).
+func headersFrame(fields ...qpack.HeaderField) []byte {
+	var buf bytes.Buffer
+	enc := qpack.NewEncoder(&buf)
+	for i := range fields {
+		_ = enc.WriteField(fields[i])
+	}
+	_ = enc.Close()
+	return append(quicvarint.Append([]byte{frameHeaders}, uint64(buf.Len())), buf.Bytes()...)
 }

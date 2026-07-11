@@ -118,9 +118,13 @@ P2.
   adding G4 (DATA before HEADERS), G3 (SETTINGS on a request stream), and G2
   (truncated HEADERS) — each must raise a fatal HTTP/3 **connection** error, not
   a hang or a partial-as-success. All held.
-- **Next:** D4 STOP_SENDING (needs a body request + a valid response), E1 GOAWAY,
-  E3 Retry; B2 (a server that uses the QPACK dynamic table despite cap 0); add
-  quiche/lsquic servers to the matrix.
+- **Batch 5:** D4 STOP_SENDING — the server aborts reading a 2 MiB body mid-send
+  (past the window, so the client is provably blocked) yet sends a valid 200; the
+  client stops sending but still reads the response (§4.1). Added a reusable
+  QPACK-encoded-response helper to the fault server.
+- **Next:** E1 GOAWAY, E3 Retry; B2 (a server that uses the QPACK dynamic table
+  despite cap 0 — needs a hand-rolled dynamic encoder, quic-go's is static-only);
+  add quiche/lsquic servers to the matrix.
 
 ## 6. Harness needed
 

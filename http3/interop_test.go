@@ -364,3 +364,28 @@ func TestFault_SettingsOnRequestStream(t *testing.T) { expectConnError(t, "/sett
 // satisfied before the stream's clean FIN is a truncated frame — H3_FRAME_ERROR
 // (RFC 9114 §7.1).
 func TestFault_TruncatedHeaders(t *testing.T) { expectConnError(t, "/trunc-headers") }
+
+// TestFault_StopSending checks that when the server aborts reading the request
+// with STOP_SENDING while the client is still sending its body, the client stops
+// sending but still reads the response on the stream's independent receive side
+// (RFC 9114 §4.1) — it must not fail the request. The body (2 MiB) is well past
+// the server's initial receive windows (quic-go's are 512 KiB stream, 768 KiB
+// conn, and it never grants more here since /stop-sending never reads the body),
+// so the client is provably still mid-send when STOP_SENDING arrives — the abort
+// is load-bearing (without it the send stalls to the deadline), so the path is
+// genuinely exercised, not a body that fit in one go.
+func TestFault_StopSending(t *testing.T) {
+	forEachInteropServer(t, func(t *testing.T, client *Client, host string) {
+		resp, _, err := do(t, client, &Request{
+			Method: "POST", Scheme: "https", Authority: host, Path: "/stop-sending",
+			Body: make([]byte, 2<<20),
+		})
+		if err != nil {
+			t.Fatalf("Do = %v, want the response read despite STOP_SENDING", err)
+		}
+		if resp.Status != 200 {
+			t.Fatalf("status = %d, want 200", resp.Status)
+		}
+		t.Logf("STOP_SENDING mid-body -> response still read, status=%d", resp.Status)
+	})
+}
