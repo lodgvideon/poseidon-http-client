@@ -146,6 +146,15 @@ var ErrNotEstablished = errors.New("quic: connection not established")
 // §5.1.1). It maps to CONNECTION_ID_LIMIT_ERROR (0x09).
 var ErrConnectionIDLimit = errors.New("quic: peer exceeded the active connection ID limit")
 
+// ErrCryptoBufferExceeded is a connection error: buffering a received CRYPTO
+// frame would push the out-of-order handshake reassembly buffer past a fixed
+// bound. CRYPTO carries no flow control (RFC 9000 §7.5), so this cap is the only
+// thing stopping a peer — or an on-path forger of Initial packets, whose keys
+// derive from the observable connection ID — from exhausting memory with gapped
+// CRYPTO before the handshake authenticates. It maps to CRYPTO_BUFFER_EXCEEDED
+// (0x0d), which §7.5 permits in this case.
+var ErrCryptoBufferExceeded = errors.New("quic: crypto buffer exceeded")
+
 // ErrProtocolViolation is a connection error for a peer that violates the
 // protocol in a way with no more specific code — here, a packet whose header
 // reserved bits are non-zero after protection is removed (RFC 9000 §17.2,
