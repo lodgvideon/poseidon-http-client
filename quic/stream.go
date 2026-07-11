@@ -90,17 +90,52 @@ func (s *Stream) ResetReceived() bool { return s.recvReset }
 func (s *Stream) ResetCode() uint64 { return s.recvResetCode }
 
 // maybeRetire drops a stream from the routing map once both directions have
-// reached a terminal state — the FIN has been sent and the receive side is
-// finished (fully received or reset) — so a long-lived connection carrying many
-// requests does not accumulate finished streams. finSent is mutually exclusive
-// with sendReset (Reset is a no-op once the FIN is sent), so a retired stream is
-// never one whose STREAM data the retransmitter must suppress (§13.3), and its
+// reached a terminal state — the send side finished (FIN sent) or reset, and the
+// receive side finished (fully received) or reset — so a long-lived connection
+// carrying many aborted or completed requests does not accumulate dead streams.
+// A stream reset before its FIN is retired too: Reset first scrubs the stream's
+// STREAM data from the retransmit sources (scrubResetStreamData), so a retired
+// stream is never one whose data the retransmitter would resend (§13.3). Its
 // received bytes stay counted in connection flow control. The map only routes
 // inbound frames; the caller's *Stream and its buffered data are unaffected, and
 // a late retransmit for the id is ignored as a stream we never opened.
 func (c *Conn) maybeRetire(s *Stream) {
-	if s.finSent && (s.recvReset || s.recv.complete()) {
+	sendDone := s.finSent || s.sendReset
+	recvDone := s.recvReset || s.recv.complete()
+	if sendDone && recvDone {
 		delete(c.streams, s.id)
+	}
+}
+
+// scrubResetStreamData drops every STREAM frame of a reset stream from the
+// retransmit sources — the pending retransmit queue and the frames of packets
+// still in flight — so the stream's data is never resent (RFC 9000 §13.3), even
+// once the stream is dropped from the routing map and the flush-time suppression
+// check can no longer find it. The RESET_STREAM frame itself is a different kind
+// and is left in place, so it still retransmits until acknowledged.
+func (c *Conn) scrubResetStreamData(id uint64) {
+	q := c.retransQueue[spaceApp][:0]
+	for _, rf := range c.retransQueue[spaceApp] {
+		if rf.kind == retransStream && rf.streamID == id {
+			continue
+		}
+		q = append(q, rf)
+	}
+	c.retransQueue[spaceApp] = q
+	for pn, p := range c.sent[spaceApp].packets {
+		var kept []retransFrame
+		changed := false
+		for _, rf := range p.frames {
+			if rf.kind == retransStream && rf.streamID == id {
+				changed = true
+				continue
+			}
+			kept = append(kept, rf)
+		}
+		if changed {
+			p.frames = kept
+			c.sent[spaceApp].packets[pn] = p
+		}
 	}
 }
 
@@ -116,10 +151,18 @@ func (s *Stream) Reset(errCode uint64) error {
 		return ErrNotEstablished
 	}
 	s.sendReset = true
+	// The send side is aborted: this stream's buffered STREAM data must never be
+	// resent (§13.3), so drop it from the retransmit sources before it can be
+	// retired below.
+	s.conn.scrubResetStreamData(s.id)
 	// finalSize is the number of bytes already sent (§19.4). Retransmitted until
 	// acknowledged (§13.3) via the retrans descriptor.
 	rf := retransFrame{kind: retransReset, streamID: s.id, errCode: errCode, offset: s.sendOffset}
-	return s.conn.writeAppFrames(AppendResetStream(nil, s.id, errCode, s.sendOffset), []retransFrame{rf})
+	if err := s.conn.writeAppFrames(AppendResetStream(nil, s.id, errCode, s.sendOffset), []retransFrame{rf}); err != nil {
+		return err
+	}
+	s.conn.maybeRetire(s) // if the receive side is already terminal, both are now done
+	return nil
 }
 
 // StopSending requests that the peer abort the send side of the stream (its data

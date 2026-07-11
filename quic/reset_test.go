@@ -27,7 +27,7 @@ func newResetTestConn(t *testing.T) (*Conn, *Stream, *Opener, *closePC) {
 	sealer, opener := closeTestSealerOpener(t, 0x88)
 	pc := &closePC{}
 	c := &Conn{
-		pc: pc, dcid: []byte("resettst"), oneRTTSealer: sealer,
+		pc: pc, dcid: []byte("resettst"), oneRTTSealer: sealer, connMax: 1 << 20,
 		peer: TransportParams{InitialMaxStreamsBidi: 1, InitialMaxStreamDataBidiRemote: 1000},
 	}
 	s, err := c.OpenStream()
@@ -162,8 +162,8 @@ func TestConformance_RFC9000_Sec133_ResetRetransmittedOnLoss(t *testing.T) {
 // stream's STREAM data is not retransmitted (§13.3).
 func TestConformance_RFC9000_Sec133_NoStreamRetransmitAfterReset(t *testing.T) {
 	c, s, opener, pc := newResetTestConn(t)
-	if _, err := s.Send([]byte("hello"), false); err != nil { // pn 0: STREAM
-		t.Fatal(err)
+	if n, err := s.Send([]byte("hello"), false); err != nil || n != 5 { // pn 0: STREAM
+		t.Fatalf("Send = %d,%v, want 5,nil (STREAM data must actually go out)", n, err)
 	}
 	if err := s.Reset(0x0108); err != nil { // pn 1: RESET_STREAM
 		t.Fatal(err)
@@ -178,5 +178,46 @@ func TestConformance_RFC9000_Sec133_NoStreamRetransmitAfterReset(t *testing.T) {
 		if fr := decodeStreamCtl(t, opener, c.dcid, w); fr.stream {
 			t.Fatal("STREAM data must not be retransmitted after RESET_STREAM (§13.3)")
 		}
+	}
+}
+
+// TestConformance_RFC9000_Sec133_NoRetransmitAfterResetAndEvict checks that a
+// reset stream's STREAM data is not retransmitted even after the stream has been
+// retired from the routing map: Reset scrubs the data from the retransmit
+// sources, so §13.3 does not depend on the flush-time suppression check finding
+// the stream by id.
+func TestConformance_RFC9000_Sec133_NoRetransmitAfterResetAndEvict(t *testing.T) {
+	c, s, opener, pc := newResetTestConn(t)
+	h := &connFrameHandler{c: c}
+	if n, err := s.Send([]byte("hello"), false); err != nil || n != 5 { // pn 0: STREAM
+		t.Fatalf("Send = %d,%v, want 5,nil (STREAM data must actually go out)", n, err)
+	}
+	if err := s.Reset(0x0108); err != nil { // pn 1: RESET_STREAM; scrubs the STREAM data
+		t.Fatal(err)
+	}
+	if err := h.OnResetStream(s.id, 0x0108, 5); err != nil { // receive side terminal → stream retired
+		t.Fatal(err)
+	}
+	if _, ok := c.streams[s.id]; ok {
+		t.Fatal("stream should be retired after send reset + receive reset")
+	}
+	writesBefore := len(pc.writes)
+	c.sent[spaceApp].largestAckedPN, c.sent[spaceApp].haveLargestAcked = 5, true
+	c.detectLost(spaceApp) // both the STREAM (pn 0) and RESET (pn 1) packets are lost
+	if err := c.flush(); err != nil {
+		t.Fatal(err)
+	}
+	sawReset := false
+	for _, w := range pc.writes[writesBefore:] {
+		fr := decodeStreamCtl(t, opener, c.dcid, w)
+		if fr.stream {
+			t.Fatal("STREAM data must not be retransmitted after RESET_STREAM, even once retired (§13.3)")
+		}
+		if fr.reset {
+			sawReset = true
+		}
+	}
+	if !sawReset {
+		t.Fatal("the lost RESET_STREAM must still be retransmitted (§13.3)")
 	}
 }

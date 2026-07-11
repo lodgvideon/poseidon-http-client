@@ -53,17 +53,20 @@ func TestConn_StreamRetire_OnPeerReset(t *testing.T) {
 	}
 }
 
-// TestConn_StreamRetire_KeepsResetSendStream checks that a stream whose SEND side
-// we reset (finSent false) is not retired, so the §13.3 retransmit-suppression
-// check can still find it by id.
-func TestConn_StreamRetire_KeepsResetSendStream(t *testing.T) {
+// TestConn_StreamRetire_EvictsResetStream checks that a stream reset on the send
+// side before its FIN is retired once its receive side is also terminal, so a
+// long-lived connection does not accumulate reset streams. Reset scrubs the
+// stream's STREAM data from the retransmit sources first, so §13.3 still holds
+// even though the stream is no longer in the routing map (see
+// TestConformance_RFC9000_Sec133_NoRetransmitAfterResetAndEvict).
+func TestConn_StreamRetire_EvictsResetStream(t *testing.T) {
 	c, s, h := newRetireConn(t)
-	s.sendReset = true // we sent RESET_STREAM; finSent stays false
+	s.sendReset = true // send side aborted, finSent stays false
 	if err := h.OnResetStream(s.ID(), 0, 0); err != nil {
 		t.Fatal(err)
 	}
-	if _, ok := c.streams[s.ID()]; !ok {
-		t.Fatal("a reset send-side stream must stay in the map for §13.3 suppression")
+	if _, ok := c.streams[s.ID()]; ok {
+		t.Fatal("a stream terminal on both sides (send reset + recv reset) must be retired")
 	}
 }
 
