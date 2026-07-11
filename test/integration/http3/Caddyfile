@@ -10,6 +10,24 @@ h3caddy:443, localhost:443, lossproxy:443 {
 	tls internal
 	root * /srv
 
+	# Fixed status codes for the status-pass-through test (A3).
+	@s204 path /status/204
+	handle @s204 {
+		respond 204
+	}
+	@s304 path /status/304
+	handle @s304 {
+		respond 304
+	}
+	@s404 path /status/404
+	handle @s404 {
+		respond "not found" 404
+	}
+	@s500 path /status/500
+	handle @s500 {
+		respond "boom" 500
+	}
+
 	# "/" (and a POST to it) get a small canned response; other paths are served
 	# from /srv (e.g. /big.txt, a 16 KiB body for the large-response test).
 	@root path /
