@@ -71,6 +71,34 @@ func TestAckTracker_RoundTrip(t *testing.T) {
 	}
 }
 
+// TestAckTracker_BoundedRanges: a peer that never fills the gaps (every other
+// packet number) must not make the tracker retain unbounded ranges or build an
+// ACK frame too large for one datagram. The largest received is always kept.
+func TestAckTracker_BoundedRanges(t *testing.T) {
+	var a ackTracker
+	const n = 500
+	for i := uint64(0); i < n; i++ {
+		a.receive(i*2, true) // 0,2,4,… — every PN its own range, gaps never fill
+	}
+	if len(a.ranges) > maxAckRanges {
+		t.Fatalf("ranges = %d, want <= %d", len(a.ranges), maxAckRanges)
+	}
+	if l, ok := a.largest(); !ok || l != (n-1)*2 {
+		t.Fatalf("largest = %d,%v, want %d,true", l, ok, (n-1)*2)
+	}
+	buf := a.appendACK(nil, 0)
+	if len(buf) > 1200 {
+		t.Fatalf("ACK frame is %d bytes, must fit one datagram", len(buf))
+	}
+	dec := &ackDecoder{acked: map[uint64]bool{}}
+	if err := ParseFrames(buf, dec); err != nil {
+		t.Fatalf("ParseFrames(%x): %v", buf, err)
+	}
+	if !dec.acked[(n-1)*2] {
+		t.Fatal("ACK frame must acknowledge the largest received packet")
+	}
+}
+
 func TestAckTracker_PendingAndLargest(t *testing.T) {
 	var a ackTracker
 	if _, ok := a.largest(); ok || a.ackPending() {

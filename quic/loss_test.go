@@ -81,6 +81,36 @@ func TestConn_DetectLost_NoLossWithinThresholds(t *testing.T) {
 	}
 }
 
+// TestConn_DetectLost_PrunesAckedElicitWithoutLoss: a connection that never
+// loses a packet still prunes recorded acknowledgement times down to the
+// in-flight window, so ackedElicit cannot grow without bound over a long clean
+// run (the load-generator target case). Before the fix pruneAcked ran only after
+// the no-loss early return, so a lossless ACK left the slice growing forever.
+func TestConn_DetectLost_PrunesAckedElicitWithoutLoss(t *testing.T) {
+	base := time.Unix(800, 0)
+	c := &Conn{now: func() time.Time { return base }}
+	c.rtt.update(20*ms, 0)
+	// pn 5 sent "now" stays in flight (the oldest unacked); pn 6 is acknowledged.
+	c.sent[spaceApp].onSent(5, base, true, streamFrame(0, 5, "x"))
+	c.sent[spaceApp].onSent(6, base, true, nil)
+	c.sent[spaceApp].ack(6, 6) // largestAckedPN=6; pn 5 stays in flight, no loss
+	// Acknowledgement times from a long lossless run: those at or before the oldest
+	// in-flight packet (base) must be dropped, newer ones kept.
+	c.sent[spaceApp].ackedElicit = []time.Time{
+		base.Add(-time.Second), // older → pruned
+		base,                   // equal → pruned (prune keeps strictly-after)
+		base.Add(time.Second),  // newer → kept
+	}
+	c.detectLost(spaceApp)
+
+	if n := len(c.retransQueue[spaceApp]); n != 0 {
+		t.Fatalf("no loss expected within thresholds; retransQueue has %d frames", n)
+	}
+	if got := c.sent[spaceApp].ackedElicit; len(got) != 1 || !got[0].Equal(base.Add(time.Second)) {
+		t.Fatalf("ackedElicit = %v, want only base+1s (pruned to the in-flight window)", got)
+	}
+}
+
 func TestRTTStats_LossDelay(t *testing.T) {
 	var r rttStats
 	if r.lossDelay() != kGranularity {
