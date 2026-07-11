@@ -109,8 +109,15 @@ P2.
   reassembled body on `/big.txt`, and == body on 4xx/5xx) · D6 *functional-scale
   only* (reuse + retirement path; the leak bound is unit-tested in the quic
   package, #166). See [`http3/interop_test.go`](../http3/interop_test.go).
-- **Next:** extend `lossproxy.go` (F-sweep + reorder); fault-injecting H3 server
-  (B2, D3/D4, G*, E1/E3); add quiche/lsquic servers.
+- **Batch 2:** F1 loss (10/15/20%) + F2 reorder — `lossproxy.go` gains a
+  guaranteed-swap reorder with injection counters; CI `h3-interop-faults`.
+- **Batch 3:** D3 server RESET_STREAM → retryable `StreamResetError`, against a
+  deliberately misbehaving quic-go `faultserver` (its own module); CI
+  `h3-interop-fault`. This scaffold unlocks the remaining negative suites.
+- **Next:** more faults on `faultserver` (D4 STOP_SENDING, G1–G5 malformed /
+  out-of-order frames, E1 GOAWAY, E3 Retry) via request-path routing; B2 (a
+  server that uses the QPACK dynamic table despite cap 0); add quiche/lsquic
+  servers to the matrix.
 
 ## 6. Harness needed
 

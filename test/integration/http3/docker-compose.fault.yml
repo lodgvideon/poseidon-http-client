@@ -1,0 +1,58 @@
+name: poseidon-h3-fault
+
+# HTTP/3 negative-path interop: the from-scratch client against a deliberately
+# misbehaving server (test/integration/http3/faultserver), so the client's error
+# handling is exercised against a real QUIC stack. The fault server is built on
+# quic-go's raw API in its own module, so quic-go is not a client dependency; it
+# needs go >= 1.25 (golang:1.25), while the runner stays on the client's 1.24.
+# The runner retries the dial until the fault server has compiled and is serving.
+
+networks:
+  h3net:
+    driver: bridge
+
+volumes:
+  certs:
+
+services:
+  certs:
+    image: alpine/openssl
+    volumes:
+      - certs:/certs
+    command: >
+      req -x509 -newkey rsa:2048 -nodes -days 3650
+      -keyout /certs/key.pem -out /certs/cert.pem -subj "/CN=faultserver"
+    restart: "no"
+
+  faultserver:
+    image: golang:1.25
+    hostname: faultserver
+    networks: [h3net]
+    depends_on:
+      certs:
+        condition: service_completed_successfully
+    working_dir: /src/test/integration/http3/faultserver
+    volumes:
+      - ../../..:/src
+      - certs:/certs:ro
+    environment:
+      FAULT: reset
+    command: go run .
+    restart: "no"
+
+  runner:
+    image: golang:1.24
+    depends_on:
+      faultserver:
+        condition: service_started
+    networks: [h3net]
+    working_dir: /src
+    volumes:
+      - ../../..:/src
+    environment:
+      H3_INTEROP_ADDR: faultserver:443
+      H3_DIAL_TIMEOUT: "60" # the server compiles quic-go before it listens
+      GOFLAGS: -count=1
+    command: >
+      go test ./http3/ -tags interop -run TestFault -v -timeout 120s
+    restart: "no"

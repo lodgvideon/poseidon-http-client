@@ -47,3 +47,7 @@ test/integration/undertow-server/.settings/
 
 # Runtime logs
 .logs/
+
+# fault server test binary (built by go run/build in the container)
+test/integration/http3/faultserver/faultserver
+test/integration/http3/faultserver/faultserver.exe
