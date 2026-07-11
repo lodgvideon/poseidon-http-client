@@ -1,12 +1,13 @@
 name: poseidon-h3-it
 
-# HTTP/3 interop MATRIX: the from-scratch client is exercised against two real,
+# HTTP/3 interop MATRIX: the from-scratch client is exercised against three real,
 # independent HTTP/3 server stacks on a shared bridge network — Caddy (quic-go,
-# Go) and nginx (its own C QUIC implementation) — so cross-implementation interop
-# bugs (QPACK, flow control, connection-ID rotation, key-update timing) surface,
-# not just quic-go's behaviour. The runner runs the client in a container (not on
-# the host) because Docker Desktop on Windows does not forward host UDP to a
-# published container port; container-to-container UDP works everywhere.
+# Go), nginx (its own C QUIC implementation), and aioquic (pure Python, QPACK via
+# ls-qpack) — so cross-implementation interop bugs (QPACK, flow control,
+# connection-ID rotation, key-update timing) surface, not just quic-go's
+# behaviour. The runner runs the client in a container (not on the host) because
+# Docker Desktop on Windows does not forward host UDP to a published container
+# port; container-to-container UDP works everywhere.
 
 networks:
   h3net:
@@ -81,6 +82,40 @@ services:
       - certs:/certs:ro
     restart: "no"
 
+  # ── aioquic — a third independent QUIC/H3 stack (pure Python) ────
+  # Its value is transport-layer diversity: aioquic's own ACK strategy, MAX_STREAMS
+  # replenishment, flow-control cadence, and handshake shape, distinct from quic-go
+  # (Caddy) and nginx's C stack. (QPACK is ls-qpack, a third encoder, but static-
+  # only against the capacity-0 client — small extra decode coverage.) It pip-
+  # installs aioquic at startup (prebuilt wheels, a few seconds), then serve() binds
+  # the socket and the server touches /tmp/ready; the healthcheck polls that file so
+  # the runner (gated on service_healthy) waits out startup without a raised dial
+  # timeout, and a PyPI hiccup fails the healthcheck rather than burning test time.
+  aioquic:
+    image: python:3.12-slim
+    hostname: h3aioquic
+    networks: [h3net]
+    depends_on:
+      fixtures:
+        condition: service_completed_successfully
+      certs:
+        condition: service_completed_successfully
+    volumes:
+      - ./aioquic/server.py:/app/server.py:ro
+      - ./srv:/srv:ro
+      - certs:/certs:ro
+    command:
+      - sh
+      - -c
+      - pip install --quiet --no-cache-dir 'aioquic==1.2.0' && exec python /app/server.py
+    healthcheck:
+      test: ["CMD-SHELL", "test -f /tmp/ready"]
+      interval: 2s
+      timeout: 2s
+      retries: 40
+      start_period: 3s
+    restart: "no"
+
   runner:
     image: golang:1.24
     depends_on:
@@ -88,13 +123,15 @@ services:
         condition: service_healthy
       nginx:
         condition: service_started
+      aioquic:
+        condition: service_healthy
     networks: [h3net]
     working_dir: /src
     volumes:
       - ../../..:/src
     environment:
       # name=host:port pairs — the interop tests run every scenario against each.
-      H3_INTEROP_ADDRS: "caddy=h3caddy:443,nginx=h3nginx:443"
+      H3_INTEROP_ADDRS: "caddy=h3caddy:443,nginx=h3nginx:443,aioquic=h3aioquic:443"
       GOFLAGS: -count=1
     command: >
       go test ./http3/ -tags interop -run TestInterop -v -timeout 120s

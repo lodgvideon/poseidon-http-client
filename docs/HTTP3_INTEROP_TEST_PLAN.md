@@ -36,8 +36,8 @@ network conditions**. Tracks progress against the `//go:build interop` suite in
 
 ## 3. Test dimensions (matrix)
 
-- **Server impl:** Caddy `quic-go`/Go ✓ · nginx C ✓ · + quiche (Rust) · lsquic
-  (LiteSpeed/H2O) · aioquic (Python) · msquic · haproxy.
+- **Server impl:** Caddy `quic-go`/Go ✓ · nginx C ✓ · aioquic Python (QPACK =
+  ls-qpack) ✓ · + quiche (Rust) · lsquic (LiteSpeed/H2O) · msquic · haproxy.
 - **Network** (fault-injecting UDP relay, extend `lossproxy.go`): clean · loss
   {1,5,10,20,30}% · reorder · latency+jitter · dup · bit-corruption · low-MTU ·
   throttle · combos.
@@ -127,9 +127,22 @@ P2.
   Count, despite the client's advertised capacity 0, is rejected cleanly as
   QPACK_DECOMPRESSION_FAILED — not mis-decoded, not a hang. A 3-byte raw field
   section suffices; no dynamic encoder needed. Held.
+- **Batch 7 (breadth — 3rd server stack):** a pure-Python **aioquic** server
+  (`test/integration/http3/aioquic/server.py`, ~90 lines on aioquic's low-level H3
+  API) joins the matrix as a third genuinely independent QUIC + H3 stack. Its value
+  is **transport-layer diversity** — aioquic's own ACK strategy, MAX_STREAMS
+  replenishment (the 300-request SequentialReuse test depends on it), flow-control
+  cadence, and handshake shape, distinct from Caddy's quic-go and nginx's C stack.
+  Because `forEachInteropServer` already loops every `H3_INTEROP_ADDRS` entry, all
+  seven `TestInterop_*` scenarios run against it with zero new test code. (Its
+  QPACK is ls-qpack, a third encoder; but aioquic honors the client's advertised
+  `QPACK_MAX_TABLE_CAPACITY=0` — its encoder is capped by the peer setting — so it
+  encodes static-only, where the three stacks' header bytes nearly coincide; the
+  extra *decode* coverage is small, and dynamic-table rejection is B2's job, not
+  this.) All seven held; **7 iterations, 0 client bugs**.
 - **Next (diminishing returns for bug-finding):** E1 GOAWAY, E3 Retry (incremental
-  faults); breadth — add quiche/lsquic servers to the matrix; the typed-error
-  follow-up to pin exact H3/QPACK codes end-to-end.
+  faults); a 4th stack (quiche/Rust or lsquic) for more encoder diversity; the
+  typed-error follow-up to pin exact H3/QPACK codes end-to-end.
 
 ## 6. Harness needed
 
@@ -137,14 +150,14 @@ P2.
    `lossproxy.go`.
 2. Fault-injecting H3 server (malformed frames, dynamic QPACK, resets, trailers,
    1xx, GOAWAY, retry on command) — highest-leverage asset.
-3. More server images (quiche, lsquic, aioquic, msquic).
+3. More server images (aioquic ✓; next quiche, lsquic, msquic).
 4. Memory/RSS probe for D6/J3.
 5. Align with the community **QUIC Interop Runner** matrix.
 
 ## 7. CI vs nightly
 
 - **PR CI (< 5 min, hermetic):** A/B (P0/P1), C1/C2/C6, D6, F1(one level) —
-  Caddy + nginx.
+  Caddy + nginx + aioquic.
 - **Nightly:** full server matrix, F-sweep, D6 long, H2–H4, I2/I3, J*.
 
 ## 8. Exit criteria & flake policy
