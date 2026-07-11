@@ -117,16 +117,19 @@ func (c *Conn) detectLost(sp int) {
 		}
 		delete(s.packets, pn) // safe to delete during range in Go
 	}
-	if !anyLost {
-		return
+	if anyLost {
+		c.onCongestionEvent(newestLost) // halve cwnd once for this loss episode
+		// If the lost ack-eliciting packets span longer than the persistent congestion
+		// duration and no packet inside that span was acknowledged, every packet across
+		// the period was lost: collapse the window (RFC 9002 §7.6.1).
+		if anyPC && latestPC.Sub(earliestPC) > c.persistentCongestionDuration() &&
+			!s.ackedInSpan(earliestPC, latestPC) {
+			c.onPersistentCongestion()
+		}
 	}
-	c.onCongestionEvent(newestLost) // halve cwnd once for this loss episode
-	// If the lost ack-eliciting packets span longer than the persistent congestion
-	// duration and no packet inside that span was acknowledged, every packet across
-	// the period was lost: collapse the window (RFC 9002 §7.6.1).
-	if anyPC && latestPC.Sub(earliestPC) > c.persistentCongestionDuration() &&
-		!s.ackedInSpan(earliestPC, latestPC) {
-		c.onPersistentCongestion()
-	}
+	// Prune on every ACK, not only when a loss fired: a lossless connection would
+	// otherwise never reach this call and ackedElicit would grow without bound. The
+	// prune is safe regardless — a future persistent-congestion span begins at a
+	// still-unacknowledged packet, so no earlier acknowledgement can fall inside it.
 	s.pruneAcked()
 }

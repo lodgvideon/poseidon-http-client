@@ -5,6 +5,15 @@ import "sort"
 // pnRange is an inclusive range of received packet numbers.
 type pnRange struct{ lo, hi uint64 }
 
+// maxAckRanges bounds how many packet-number ranges a tracker retains. A peer
+// that sends packets with permanent gaps (every other packet number, say) would
+// otherwise grow ranges without limit — unbounded memory, an O(n log n) re-sort
+// per packet, and eventually an ACK frame too large for one datagram, which the
+// connection cannot send. RFC 9000 §13.2.4 permits acknowledging only a subset
+// of received packets, so dropping the oldest ranges is conformant; the cost is
+// at most a spurious retransmission of a long-past packet.
+const maxAckRanges = 32
+
 // ackTracker records the packet numbers received in one packet-number space and
 // builds ACK frames from them (RFC 9000 §13.2, §19.3). Ranges are kept sorted
 // descending by upper bound, non-overlapping and non-adjacent. One tracker per
@@ -38,6 +47,12 @@ func (a *ackTracker) receive(pn uint64, ackEliciting bool) {
 		} else {
 			merged = append(merged, r)
 		}
+	}
+	// Drop the oldest ranges past the cap. merged is sorted descending by upper
+	// bound, so the newest — including the largest received, which the peer needs
+	// for loss detection and RTT — are kept.
+	if len(merged) > maxAckRanges {
+		merged = merged[:maxAckRanges]
 	}
 	a.ranges = merged
 }
