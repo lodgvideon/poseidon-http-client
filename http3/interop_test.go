@@ -337,3 +337,30 @@ func TestFault_ServerReset(t *testing.T) {
 		t.Logf("server reset -> StreamResetError code=%#x retryable=%v", rst.Code, rst.Retryable())
 	})
 }
+
+// expectConnError drives a request whose response the fault server corrupts at
+// the frame level, and asserts the client raises a fatal HTTP/3 connection error
+// (ErrH3Control — it sends CONNECTION_CLOSE with the right code) rather than
+// hanging or returning a partial response as success.
+func expectConnError(t *testing.T, path string) {
+	forEachInteropServer(t, func(t *testing.T, client *Client, host string) {
+		_, _, err := do(t, client, &Request{Method: "GET", Scheme: "https", Authority: host, Path: path})
+		if !errors.Is(err, ErrH3Control) {
+			t.Fatalf("GET %s = %v (%T), want a connection error (ErrH3Control)", path, err, err)
+		}
+		t.Logf("GET %s -> connection error, as required", path)
+	})
+}
+
+// TestFault_DataBeforeHeaders: a DATA frame before any HEADERS on the response
+// stream is an invalid frame sequence — H3_FRAME_UNEXPECTED (RFC 9114 §4.1).
+func TestFault_DataBeforeHeaders(t *testing.T) { expectConnError(t, "/data-before-headers") }
+
+// TestFault_SettingsOnRequestStream: SETTINGS is control-stream-only; on a
+// request stream it is H3_FRAME_UNEXPECTED (RFC 9114 §7.2.4).
+func TestFault_SettingsOnRequestStream(t *testing.T) { expectConnError(t, "/settings-on-request") }
+
+// TestFault_TruncatedHeaders: a HEADERS frame whose declared length is never
+// satisfied before the stream's clean FIN is a truncated frame — H3_FRAME_ERROR
+// (RFC 9114 §7.1).
+func TestFault_TruncatedHeaders(t *testing.T) { expectConnError(t, "/trunc-headers") }

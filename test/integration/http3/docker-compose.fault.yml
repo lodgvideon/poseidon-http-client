@@ -35,8 +35,6 @@ services:
     volumes:
       - ../../..:/src
       - certs:/certs:ro
-    environment:
-      FAULT: reset
     command: go run .
     restart: "no"
 
