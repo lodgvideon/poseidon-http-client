@@ -64,6 +64,27 @@ const (
 	H3QpackDecompressionFailed uint64 = 0x0200 // QPACK_DECOMPRESSION_FAILED
 )
 
+// maxInterimResponses bounds the 1xx informational responses buffered before the
+// final response (RFC 9114 §4.1), so a server streaming them endlessly — including
+// as empty frames that add no bytes — cannot exhaust memory.
+const maxInterimResponses = 100
+
+// maxResponseBytes bounds a whole response the client buffers in memory: it is
+// both the per-frame declared-length cap (a single HEADERS, trailer, or DATA frame
+// past it is refused before its payload is buffered — RFC 9114 places no per-frame
+// size limit, so the request stream otherwise had none) and the cumulative cap on
+// the header, body, trailer, and 1xx payloads retained together. One limit keeps
+// the two consistent: a single DATA frame up to the whole budget is accepted, but
+// the retained total cannot exceed it. A var, not a const, so a test can exercise
+// the limit without buffering hundreds of megabytes.
+var maxResponseBytes uint64 = 1 << 27 // 128 MiB
+
+// ErrResponseTooLarge is returned by Do when a response exceeds a client buffering
+// limit — a single frame or the retained total past maxResponseBytes, or the
+// interim (1xx) responses past maxInterimResponses. The request stream is aborted;
+// it is not a connection error.
+var ErrResponseTooLarge = errors.New("http3: response exceeds client buffering limit")
+
 // StreamResetError reports that the server abruptly aborted the request stream
 // with RESET_STREAM (RFC 9000 §3.5) before the response finished. Code is the
 // HTTP/3 application error code the server signalled (RFC 9114 §8.1).
@@ -211,11 +232,15 @@ func (c *Client) Do(ctx context.Context, req *Request) (*Response, []byte, error
 	resp, body, err := c.roundTrip(ctx, stream, req)
 	if err != nil {
 		// Best-effort abort of the abandoned exchange. A malformed response is a
-		// stream error of type H3_MESSAGE_ERROR (RFC 9114 §4.1.2); anything else
+		// stream error of type H3_MESSAGE_ERROR (RFC 9114 §4.1.2); a response that
+		// exceeds a buffering cap is signalled H3_EXCESSIVE_LOAD (§8.1); anything else
 		// (a context cancel, a decode abort) is signalled H3_REQUEST_CANCELLED.
 		code := H3RequestCancelled
-		if errors.Is(err, ErrH3Message) {
+		switch {
+		case errors.Is(err, ErrH3Message):
 			code = H3MessageError
+		case errors.Is(err, ErrResponseTooLarge):
+			code = H3ExcessiveLoad
 		}
 		_ = stream.StopSending(code)
 		_ = stream.Reset(code)
@@ -257,9 +282,11 @@ func (c *Client) roundTrip(ctx context.Context, stream quicStream, req *Request)
 	}
 
 	var fr FrameReader
+	fr.SetMaxFrameLen(maxResponseBytes) // refuse a frame larger than the whole budget before buffering it
 	var resp *Response
 	var interim []*Response
 	var body []byte
+	var total uint64 // header, body, trailer, and 1xx payload bytes retained so far
 	var trailersSeen bool
 	for {
 		if data := stream.Recv(); len(data) > 0 {
@@ -267,8 +294,13 @@ func (c *Client) roundTrip(ctx context.Context, stream quicStream, req *Request)
 		}
 		for {
 			typ, payload, rerr := fr.ReadFrame()
+			if errors.Is(rerr, ErrNeedMore) {
+				break // wait for more stream bytes
+			}
 			if rerr != nil {
-				break // ErrNeedMore: wait for more stream bytes
+				// An oversized frame (ErrH3FrameTooLarge) — abort the request rather
+				// than buffer it. Mapped to ErrResponseTooLarge so Do aborts the stream.
+				return nil, nil, ErrResponseTooLarge
 			}
 			switch typ {
 			case FrameHeaders:
@@ -278,12 +310,19 @@ func (c *Client) roundTrip(ctx context.Context, stream quicStream, req *Request)
 				if trailersSeen {
 					return nil, nil, c.connError(H3FrameUnexpected)
 				}
+				total += uint64(len(payload))
+				if total > maxResponseBytes {
+					return nil, nil, ErrResponseTooLarge // retained header/body/trailer bytes over the cap
+				}
 				if resp == nil {
 					r, derr := DecodeResponseHeaders(&c.dec, payload)
 					if derr != nil {
 						return c.decodeError(derr)
 					}
 					if r.Status < 200 {
+						if len(interim) >= maxInterimResponses {
+							return nil, nil, ErrResponseTooLarge // a 1xx flood (RFC 9114 §4.1)
+						}
 						interim = append(interim, r) // informational 1xx; keep reading
 					} else {
 						resp = r
@@ -303,6 +342,10 @@ func (c *Client) roundTrip(ctx context.Context, stream quicStream, req *Request)
 					// §4.1) — a connection error, not a stream error.
 					return nil, nil, c.connError(H3FrameUnexpected)
 				}
+				total += uint64(len(payload))
+				if total > maxResponseBytes {
+					return nil, nil, ErrResponseTooLarge // retained header/body/trailer bytes over the cap
+				}
 				body = append(body, payload...)
 			case FrameSettings, FrameCancelPush, FrameGoaway, FrameMaxPushID, 0x02, 0x06, 0x08, 0x09:
 				// Control-stream-only and reserved HTTP/2-carryover frame types
@@ -319,21 +362,11 @@ func (c *Client) roundTrip(ctx context.Context, stream quicStream, req *Request)
 				// request stream MUST be ignored (§9, §7.2.8).
 			}
 		}
-		if stream.Finished() {
-			if stream.ResetReceived() {
-				// The server aborted the response with RESET_STREAM (RFC 9000 §3.5).
-				// Surface the application error code so the caller can distinguish a
-				// rejected (retryable) request from a completed one (RFC 9114 §4.1.1),
-				// rather than returning a truncated body as a success. A reset is an
-				// abrupt end, so its mid-frame position is not an §7.1 frame error.
-				return nil, nil, &StreamResetError{Code: stream.ResetCode()}
-			}
-			if fr.Buffered() > 0 {
-				// The stream ended cleanly in the middle of a frame — the last frame
-				// was truncated by the clean end of the stream (RFC 9114 §7.1): a
-				// connection error H3_FRAME_ERROR.
-				return nil, nil, c.connError(H3FrameError)
-			}
+		done, eerr := c.endOfResponse(stream, &fr)
+		if eerr != nil {
+			return nil, nil, eerr
+		}
+		if done {
 			break
 		}
 		if err := c.poll(ctx); err != nil {
@@ -341,6 +374,25 @@ func (c *Client) roundTrip(ctx context.Context, stream quicStream, req *Request)
 		}
 	}
 	return finalizeResponse(resp, body, req, interim)
+}
+
+// endOfResponse reports whether the response stream has ended. done is true when
+// no more frames will arrive; err is non-nil if it ended abnormally — the server
+// aborted with RESET_STREAM (RFC 9000 §3.5), surfaced as a StreamResetError so the
+// caller can distinguish a rejected (retryable) request from a completed one
+// (RFC 9114 §4.1.1), or the stream ended cleanly in the middle of a frame, which
+// truncates the last frame (RFC 9114 §7.1): a connection error H3_FRAME_ERROR.
+func (c *Client) endOfResponse(stream quicStream, fr *FrameReader) (done bool, err error) {
+	if !stream.Finished() {
+		return false, nil
+	}
+	if stream.ResetReceived() {
+		return true, &StreamResetError{Code: stream.ResetCode()}
+	}
+	if fr.Buffered() > 0 {
+		return true, c.connError(H3FrameError)
+	}
+	return true, nil
 }
 
 // finalizeResponse validates a fully received response and returns it, or
