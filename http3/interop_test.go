@@ -365,6 +365,18 @@ func TestFault_SettingsOnRequestStream(t *testing.T) { expectConnError(t, "/sett
 // (RFC 9114 §7.1).
 func TestFault_TruncatedHeaders(t *testing.T) { expectConnError(t, "/trunc-headers") }
 
+// TestFault_QpackDynamicRef: the #1 cross-implementation risk. The client is a
+// static-only QPACK decoder (it advertises SETTINGS_QPACK_MAX_TABLE_CAPACITY=0),
+// so a server that references the dynamic table anyway must be rejected cleanly
+// with QPACK_DECOMPRESSION_FAILED (a connection error, RFC 9204 §2.2) — not
+// misdecoded, and not a hang.
+func TestFault_QpackDynamicRef(t *testing.T) { expectConnError(t, "/qpack-dynamic-ref") }
+
+// TestFault_QpackRequiredInsertCount: a field-section prefix with a non-zero
+// Required Insert Count claims dynamic-table state the capacity-0 client cannot
+// have, and must be rejected as QPACK_DECOMPRESSION_FAILED (RFC 9204 §4.5.1).
+func TestFault_QpackRequiredInsertCount(t *testing.T) { expectConnError(t, "/qpack-ric") }
+
 // TestFault_StopSending checks that when the server aborts reading the request
 // with STOP_SENDING while the client is still sending its body, the client stops
 // sending but still reads the response on the stream's independent receive side
