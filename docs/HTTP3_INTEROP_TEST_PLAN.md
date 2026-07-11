@@ -122,9 +122,14 @@ P2.
   (past the window, so the client is provably blocked) yet sends a valid 200; the
   client stops sending but still reads the response (§4.1). Added a reusable
   QPACK-encoded-response helper to the fault server.
-- **Next:** E1 GOAWAY, E3 Retry; B2 (a server that uses the QPACK dynamic table
-  despite cap 0 — needs a hand-rolled dynamic encoder, quic-go's is static-only);
-  add quiche/lsquic servers to the matrix.
+- **Batch 6 (B2 — the #1 risk):** a response that references the QPACK dynamic
+  table (an indexed field line with T=0) or carries a non-zero Required Insert
+  Count, despite the client's advertised capacity 0, is rejected cleanly as
+  QPACK_DECOMPRESSION_FAILED — not mis-decoded, not a hang. A 3-byte raw field
+  section suffices; no dynamic encoder needed. Held.
+- **Next (diminishing returns for bug-finding):** E1 GOAWAY, E3 Retry (incremental
+  faults); breadth — add quiche/lsquic servers to the matrix; the typed-error
+  follow-up to pin exact H3/QPACK codes end-to-end.
 
 ## 6. Harness needed
 

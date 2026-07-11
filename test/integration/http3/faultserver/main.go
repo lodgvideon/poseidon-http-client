@@ -13,6 +13,11 @@
 //     H3_FRAME_UNEXPECTED)
 //   - /stop-sending         → STOP_SENDING the request while the client is still
 //     sending its body, then a valid 200 (§4.1: the client reads the response)
+//   - /qpack-dynamic-ref    → a response field section referencing the dynamic
+//     table despite the client's capacity 0 (RFC 9204 §2.2 →
+//     QPACK_DECOMPRESSION_FAILED)
+//   - /qpack-ric            → a non-zero Required Insert Count (RFC 9204 §4.5.1 →
+//     QPACK_DECOMPRESSION_FAILED)
 //   - anything else (incl. "/") → RESET_STREAM with H3_REQUEST_REJECTED (§8.1),
 //     which the client surfaces as a retryable StreamResetError (§4.1.1)
 //
@@ -126,6 +131,19 @@ func serve(s *quic.Stream) {
 	case "/settings-on-request":
 		_, _ = s.Write([]byte{frameSettings, 0x00}) // SETTINGS, length 0
 		_ = s.Close()
+	case "/qpack-dynamic-ref":
+		// A HEADERS field section that references the dynamic table (an indexed
+		// field line with T=0) despite the client advertising QPACK capacity 0:
+		// prefix RIC=0, base=0, then 0x80 (indexed, dynamic, index 0). The client's
+		// static-only decoder must reject it as QPACK_DECOMPRESSION_FAILED (§2.2).
+		_, _ = s.Write(rawHeadersFrame([]byte{0x00, 0x00, 0x80}))
+		_ = s.Close()
+	case "/qpack-ric":
+		// A field-section prefix with a non-zero Required Insert Count (0x05):
+		// claims dynamic-table insertions the client cannot have (capacity 0), so
+		// it must reject as QPACK_DECOMPRESSION_FAILED (RFC 9204 §4.5.1).
+		_, _ = s.Write(rawHeadersFrame([]byte{0x05, 0x00}))
+		_ = s.Close()
 	case "/stop-sending":
 		// Abort reading the request (STOP_SENDING) while the client is still
 		// sending its body, but still send a valid response so the client — whose
@@ -182,5 +200,11 @@ func headersFrame(fields ...qpack.HeaderField) []byte {
 		_ = enc.WriteField(fields[i])
 	}
 	_ = enc.Close()
-	return append(quicvarint.Append([]byte{frameHeaders}, uint64(buf.Len())), buf.Bytes()...)
+	return rawHeadersFrame(buf.Bytes())
+}
+
+// rawHeadersFrame wraps a raw (possibly malformed) QPACK field section in an
+// HTTP/3 HEADERS frame, for faults that need exact field-section bytes.
+func rawHeadersFrame(fieldSection []byte) []byte {
+	return append(quicvarint.Append([]byte{frameHeaders}, uint64(len(fieldSection))), fieldSection...)
 }
