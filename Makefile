@@ -1,5 +1,5 @@
 .PHONY: lint test test-race test-debug bench bench-gate fuzz-replay coverage coverage-gate tidy
-.PHONY: it-up it-down it-logs it-test it-test-fast it-certs h3-interop h3-interop-loss h3-interop-reorder
+.PHONY: it-up it-down it-logs it-test it-test-fast it-certs h3-interop h3-interop-loss h3-interop-reorder h3-interop-fault
 
 # Minimum overall and per-package statement coverage. CI fails below this.
 COVERAGE_MIN ?= 80
@@ -108,3 +108,11 @@ h3-interop-loss:
 h3-interop-reorder:
 	@trap '$(DOCKER_COMPOSE) -f $(H3_LOSS_COMPOSE) down -v 2>/dev/null' EXIT; \
 	LOSS_PCT=0 REORDER_PCT=20 $(DOCKER_COMPOSE) -f $(H3_LOSS_COMPOSE) run --rm runner
+
+# HTTP/3 negative-path interop against a deliberately misbehaving server
+# (faultserver, quic-go): checks the client's error handling — the reset fault
+# surfaces a retryable StreamResetError (RFC 9114 §4.1.1).
+H3_FAULT_COMPOSE = test/integration/http3/docker-compose.fault.yml
+h3-interop-fault:
+	@trap '$(DOCKER_COMPOSE) -f $(H3_FAULT_COMPOSE) down -v 2>/dev/null' EXIT; \
+	$(DOCKER_COMPOSE) -f $(H3_FAULT_COMPOSE) run --rm runner

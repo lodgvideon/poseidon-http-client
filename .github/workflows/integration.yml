@@ -115,3 +115,25 @@ jobs:
       - name: down (reorder)
         if: always()
         run: docker compose -f "$LOSS_COMPOSE" down -v
+
+  # HTTP/3 negative-path interop: the client against a deliberately misbehaving
+  # quic-go server (test/integration/http3/faultserver) — the reset fault checks
+  # a retryable StreamResetError is surfaced (RFC 9114 §4.1.1). The server
+  # compiles before it listens; the runner retries the dial.
+  h3-interop-fault:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      FAULT_COMPOSE: test/integration/http3/docker-compose.fault.yml
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: HTTP/3 negative paths (fault server)
+        run: docker compose -f "$FAULT_COMPOSE" run --rm runner
+      - name: Logs on failure
+        if: failure()
+        run: docker compose -f "$FAULT_COMPOSE" logs
+        continue-on-error: true
+      - name: down
+        if: always()
+        run: docker compose -f "$FAULT_COMPOSE" down -v

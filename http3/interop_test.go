@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/tls"
+	"errors"
 	"net"
 	"os"
 	"strconv"
@@ -72,7 +73,10 @@ func dialServer(t *testing.T, addr string) (*Client, string) {
 	}
 	cfg := &tls.Config{ServerName: host, InsecureSkipVerify: true}
 
-	deadline := time.Now().Add(20 * time.Second)
+	// Default 20s; the fault harness raises it (H3_DIAL_TIMEOUT) because its server
+	// compiles quic-go before it listens. Kept low for the matrix so a genuinely
+	// down server fails per-subtest rather than blowing the whole binary timeout.
+	deadline := time.Now().Add(dialTimeout())
 	var client *Client
 	for {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -113,6 +117,17 @@ func forEachInteropServer(t *testing.T, body func(t *testing.T, client *Client, 
 			body(t, client, host)
 		})
 	}
+}
+
+// dialTimeout is how long dialServer retries before giving up, overridable via
+// H3_DIAL_TIMEOUT (seconds) for a server that is slow to start listening.
+func dialTimeout() time.Duration {
+	if v := os.Getenv("H3_DIAL_TIMEOUT"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			return time.Duration(n) * time.Second
+		}
+	}
+	return 20 * time.Second
 }
 
 // findHeader returns the value of the named response header (case-insensitive)
@@ -296,5 +311,29 @@ func TestInterop_SequentialReuse(t *testing.T) {
 			}
 		}
 		t.Logf("%d sequential requests on one connection: all 200", n)
+	})
+}
+
+// TestFault_ServerReset checks that when the server aborts the request stream
+// with RESET_STREAM carrying H3_REQUEST_REJECTED (RFC 9114 §8.1), the client
+// surfaces a *StreamResetError with that code, classified retryable so the caller
+// can safely retry on a new connection (§4.1.1) — rather than returning a
+// truncated body as success. It runs only against the fault server (which resets
+// every request); its TestFault_ name keeps it out of the `-run TestInterop`
+// matrix, where Caddy and nginx would answer normally.
+func TestFault_ServerReset(t *testing.T) {
+	forEachInteropServer(t, func(t *testing.T, client *Client, host string) {
+		_, _, err := do(t, client, &Request{Method: "GET", Scheme: "https", Authority: host, Path: "/"})
+		var rst *StreamResetError
+		if !errors.As(err, &rst) {
+			t.Fatalf("Do = %v (%T), want *StreamResetError", err, err)
+		}
+		if rst.Code != H3RequestRejected {
+			t.Fatalf("reset code = %#x, want H3_REQUEST_REJECTED (%#x)", rst.Code, H3RequestRejected)
+		}
+		if !rst.Retryable() {
+			t.Fatal("a H3_REQUEST_REJECTED reset must be Retryable()")
+		}
+		t.Logf("server reset -> StreamResetError code=%#x retryable=%v", rst.Code, rst.Retryable())
 	})
 }
