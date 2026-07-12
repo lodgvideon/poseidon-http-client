@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sync/atomic"
 
 	"github.com/lodgvideon/poseidon-http-client/qpack"
 	"github.com/lodgvideon/poseidon-http-client/quic"
@@ -42,6 +43,13 @@ var ErrGoAway = errors.New("http3: server is going away")
 // stream (§7.2); a CONNECTION_CLOSE with the specific HTTP/3 error code has
 // already been sent.
 var ErrH3Control = errors.New("http3: connection error")
+
+// ErrConcurrentUse is returned by Do when another Do on the same Client is still
+// in flight. A Client drives one QUIC connection from a single goroutine and is
+// not safe for concurrent use (it has no cross-request multiplexing yet); a
+// second concurrent Do would corrupt the shared connection, QPACK, and control-
+// stream state, so it is rejected loudly instead. Use one Client per goroutine.
+var ErrConcurrentUse = errors.New("http3: Client.Do called concurrently")
 
 // HTTP/3 error codes (RFC 9114 §8.1), carried in the QUIC application
 // CONNECTION_CLOSE frame.
@@ -145,6 +153,11 @@ type Client struct {
 	goawayID        uint64     // the largest request stream id the server will process
 	haveGoaway      bool
 	maxFieldSection uint64 // peer SETTINGS_MAX_FIELD_SECTION_SIZE; max uint64 until known (§4.2.2)
+
+	// inFlight guards against concurrent Do: a Client drives one connection from a
+	// single goroutine, so a second concurrent Do is rejected with ErrConcurrentUse
+	// rather than allowed to corrupt the shared state above.
+	inFlight atomic.Bool
 }
 
 // uniStream is an accepted server unidirectional stream whose leading stream-type
@@ -176,7 +189,10 @@ func newClient(ctx context.Context, conn quicConn, settings []Setting) (*Client,
 // Close terminates the HTTP/3 connection, sending a CONNECTION_CLOSE with
 // H3_NO_ERROR (RFC 9114 §8.1) so the server can release the connection
 // immediately rather than waiting for its idle timeout, then closing the
-// transport. It is idempotent.
+// transport. It is idempotent across sequential calls, but — like the rest of
+// the Client — must not be called concurrently with an in-flight Do: both touch
+// the connection's unsynchronized packet-number and AEAD state. To close a Do
+// that is still running, cancel its context first, then Close.
 func (c *Client) Close() error {
 	return c.conn.CloseWithError(true, H3NoError, "")
 }
@@ -212,6 +228,13 @@ func (c *Client) sendAll(ctx context.Context, stream quicStream, data []byte, fi
 // response) the request stream is aborted with STOP_SENDING and RESET_STREAM so
 // the server frees it and stops sending (RFC 9000 §3.5, RFC 9114 §4.1).
 func (c *Client) Do(ctx context.Context, req *Request) (*Response, []byte, error) {
+	// One request at a time: a second concurrent Do would race on the shared
+	// connection / QPACK / control-stream state (RFC 9114 multiplexing is not yet
+	// exposed). Reject it loudly instead of corrupting the connection.
+	if !c.inFlight.CompareAndSwap(false, true) {
+		return nil, nil, ErrConcurrentUse
+	}
+	defer c.inFlight.Store(false)
 	if err := ctx.Err(); err != nil {
 		return nil, nil, err
 	}
