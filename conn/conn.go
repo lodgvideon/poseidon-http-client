@@ -86,7 +86,9 @@ var encBufPool = sync.Pool{
 // fcMu, pingMu, originsMu, and altSvcMu are leaf locks — each is only ever held
 // on its own, never together with another of these mutexes or with each other,
 // so they are unordered. (onDataReceived takes fcMu and Stream.mu sequentially,
-// not nested; Ping and onPingReceived release pingMu before taking wmu.)
+// not nested; the outbound Ping registers its waiter under pingMu and releases
+// it before taking wmu, while the inbound writePingAck takes only wmu and
+// deliverPingAck only pingMu — so pingMu and wmu are never held together.)
 type Conn struct {
 	transport net.Conn
 	fr        *frame.Framer
