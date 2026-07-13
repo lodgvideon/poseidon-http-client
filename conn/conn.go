@@ -40,13 +40,6 @@ const readBufferSize = 16 * 1024
 // 16 KiB matches the default max frame size.
 const writeBufferSize = 16 * 1024
 
-// groupCommitFlushBytes bounds a group-commit convoy: once this many bytes are
-// buffered, the next writer flushes instead of deferring, so the convoy size
-// (and any deferring writer's wait) stays bounded and flushes happen regularly
-// under sustained load. Half the write buffer, leaving headroom below the
-// bufio auto-flush boundary.
-const groupCommitFlushBytes = writeBufferSize / 2
-
 // encBufPool recycles the HPACK block-fragment buffer used by writeHeaders.
 // The buffer is returned immediately after Framer.WriteHeaders — the call
 // is synchronous under wmu, so no concurrent access is possible.
@@ -78,21 +71,11 @@ type Conn struct {
 
 	wmu sync.Mutex // serializes all writes to fr
 
-	// Group-commit (opt-in via ConnOptions.GroupCommit). When on, a HEADERS
-	// writer that finds another writer queued on wmu (writeWaiters>0, buffer
-	// below groupCommitFlushBytes) defers its flush so the next holder batches
-	// both frames into one tls.Conn.Write — fewer TLS record encrypts + socket
-	// writes under concurrent load. The deferring writer waits on flushCond and
-	// returns the convoy flush's (sticky, conn-fatal) error, so per-frame
-	// write-error semantics are preserved with no async contract. writeWaiters
-	// is incremented right before wmu.Lock and decremented right after
-	// acquiring; flushSeq/flushErr are guarded by wmu.
-	groupCommit    bool
-	writeWaiters   atomic.Int32
-	flushSeq       uint64     // completed-flush counter; a deferring writer waits for it to advance
-	flushErr       error      // sticky first flush error (conn-fatal)
-	flushCond      *sync.Cond // broadcast after each flush; locker is &wmu
-	flushDeferring int        // writers currently blocked in flushCond.Wait (wmu); skip broadcast when 0
+	// wbatch implements the opt-in group-commit write optimization and owns all
+	// group-commit state (see writeBatcher). Its cond is locked by wmu. Left nil
+	// on hand-constructed Conns; every method is nil-safe, so a nil batcher
+	// behaves as if group-commit were off.
+	wbatch *writeBatcher
 
 	smu      sync.Mutex // guards next stream id and streams map
 	nextID   uint32
@@ -189,8 +172,7 @@ func NewClientConn(ctx context.Context, transport net.Conn, opts ConnOptions) (*
 		peerConnSendWindow: int32(connInitialRecvWindow),
 	}
 	c.fcOutCond = sync.NewCond(&c.fcOutMu)
-	c.flushCond = sync.NewCond(&c.wmu)
-	c.groupCommit = opts.GroupCommit
+	c.wbatch = newWriteBatcher(opts.GroupCommit, &c.wmu, wb)
 	// Sync Framer read limit to our advertised MaxFrameSize. Default Framer
 	// cap is 16384; peers honouring our SETTINGS may send frames up to the
 	// advertised value, which would be rejected as ErrFrameTooLarge otherwise.
@@ -350,11 +332,9 @@ func (c *Conn) Close() error {
 	c.wmu.Lock()
 	_ = c.fr.WriteGoAway(c.lastClientStreamID(), frame.ErrCodeNoError, nil)
 	_ = c.flushWrite()
-	if c.flushCond != nil {
-		// Wake any group-commit writer deferring on a flush; it re-checks and
-		// flushes itself against the now-closing transport rather than hanging.
-		c.flushCond.Broadcast()
-	}
+	// Wake any group-commit writer deferring on a flush; it re-checks and
+	// flushes itself against the now-closing transport rather than hanging.
+	c.wbatch.wakeAllLocked()
 	c.wmu.Unlock()
 	_ = c.transport.Close()
 	<-c.readerDone
@@ -487,9 +467,9 @@ func (c *Conn) writeHeadersWithPriority(_ context.Context, s *Stream, fields []h
 	if c.closed.Load() {
 		return ErrConnClosed
 	}
-	c.writeWaiters.Add(1)
+	c.wbatch.enter()
 	c.wmu.Lock()
-	c.writeWaiters.Add(-1)
+	c.wbatch.leave()
 	defer c.wmu.Unlock()
 	if s.id == 0 {
 		// Seed the per-stream outbound flow-control window from the peer's
@@ -525,9 +505,7 @@ func (c *Conn) writeHeadersWithPriority(_ context.Context, s *Stream, fields []h
 		// so it does not wait for a convoy flush that will never come (it will
 		// re-check and flush itself). Guarded so an uncontended write does
 		// nothing.
-		if c.groupCommit && c.flushDeferring > 0 {
-			c.flushCond.Broadcast()
-		}
+		c.wbatch.wakeDeferredLocked()
 		return err
 	}
 	c.bumpFramesSent()
@@ -538,41 +516,14 @@ func (c *Conn) writeHeadersWithPriority(_ context.Context, s *Stream, fields []h
 	return c.commitFrame()
 }
 
-// commitFrame flushes the buffered writer under wmu. With group-commit off it
-// is exactly flushWrite. With it on, a writer that finds another already queued
-// on wmu (and the buffer below the convoy threshold) defers: it waits for that
-// queued writer to flush the convoy in one tls.Conn.Write, then returns that
-// flush's (sticky, conn-fatal) error — so per-frame write-error semantics are
-// preserved with no async contract. It waits at most one broadcast, then
-// flushes itself, which (with the byte threshold) bounds both the wait and the
-// convoy size and guarantees regular flushes under sustained load. Because the
-// caller holds wmu continuously from the writeWaiters check into flushCond.Wait
-// (which atomically releases it), the waker's broadcast cannot be missed. MUST
-// hold c.wmu.
+// commitFrame flushes the buffered writer under wmu via the group-commit batcher
+// (a plain flush when group-commit is off; see writeBatcher.commit). A
+// hand-constructed Conn with no batcher flushes directly. MUST hold c.wmu.
 func (c *Conn) commitFrame() error {
-	if !c.groupCommit {
+	if c.wbatch == nil {
 		return c.flushWrite()
 	}
-	if c.writeWaiters.Load() > 0 && c.wb != nil && c.wb.Buffered() < groupCommitFlushBytes {
-		target := c.flushSeq + 1
-		c.flushDeferring++
-		c.flushCond.Wait() // atomically releases + reacquires wmu
-		c.flushDeferring--
-		if c.flushSeq >= target {
-			return c.flushErr // our convoy was flushed by the queued writer
-		}
-		// Spurious wakeup (or the queued writer errored before flushing):
-		// fall through and flush ourselves so we always make progress.
-	}
-	err := c.flushWrite()
-	c.flushSeq++
-	if err != nil && c.flushErr == nil {
-		c.flushErr = err // sticky: a transport write error is connection-fatal
-	}
-	if c.flushDeferring > 0 {
-		c.flushCond.Broadcast() // only when someone is actually deferring
-	}
-	return c.flushErr
+	return c.wbatch.commit()
 }
 
 // maxOutFrameSize returns the largest frame payload we may emit: the
