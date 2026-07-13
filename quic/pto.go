@@ -62,7 +62,7 @@ func (c *Conn) hasInFlight() bool {
 // onPTO handles a probe-timeout expiry (RFC 9002 §6.2.4): it re-queues the
 // oldest unacknowledged ack-eliciting packet's frames in each space as a probe
 // (which elicits an ACK and, once one arrives, drives loss detection), and backs
-// off the timer.
+// off the timer. Assumes c.mu is held (called from the receive path).
 func (c *Conn) onPTO() {
 	queued := false
 	for sp := 0; sp < numSpaces; sp++ {

@@ -16,7 +16,8 @@ const (
 // and, as consumption frees receive window, grants the peer more credit by
 // queueing MAX_STREAM_DATA and MAX_DATA frames (RFC 9000 §4.1). Grants are
 // batched — sent only when the limit would advance by at least half a window —
-// so a large response does not emit a control frame per read.
+// so a large response does not emit a control frame per read. Assumes c.mu is
+// held (invoked from the Recv path, which takes c.mu).
 func (c *Conn) onStreamConsumed(s *Stream, n uint64) {
 	c.connRecvConsumed += n
 

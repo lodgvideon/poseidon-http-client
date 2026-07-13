@@ -46,9 +46,13 @@ func closeCodeFor(err error) (uint64, bool) {
 // (closeCodeFor), the connection sends a CONNECTION_CLOSE with the matching
 // transport error code (RFC 9000 §10.2) so the peer learns why, then the error is
 // returned unchanged. Non-protocol errors pass through without sending anything.
+//
+// Assumes c.mu is held: fail runs only from the receive path (Poll/Establish),
+// so it calls closeWithErrorLocked directly rather than the re-locking public
+// CloseWithError wrapper (which would self-deadlock on the single mutex).
 func (c *Conn) fail(err error) error {
 	if code, ok := closeCodeFor(err); ok {
-		_ = c.CloseWithError(false, code, "")
+		_ = c.closeWithErrorLocked(false, code, "")
 	}
 	return err
 }
@@ -64,6 +68,15 @@ func (c *Conn) fail(err error) error {
 // cannot be sent as an application frame, so it is downgraded to a transport
 // CONNECTION_CLOSE with APPLICATION_ERROR in the highest available space.
 func (c *Conn) CloseWithError(app bool, code uint64, reason string) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.closeWithErrorLocked(app, code, reason)
+}
+
+// closeWithErrorLocked is CloseWithError's body. Assumes c.mu is held. It is the
+// reentrancy-safe target for the receive-path up-calls (sealPacket's AEAD-limit
+// close and fail), which already hold c.mu and must not re-take it.
+func (c *Conn) closeWithErrorLocked(app bool, code uint64, reason string) error {
 	if c.closed {
 		return c.pc.Close()
 	}

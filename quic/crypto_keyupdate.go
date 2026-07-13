@@ -125,7 +125,8 @@ func (c *Conn) initAppWriteKU(suite uint16, secret []byte, hp cipher.Block) erro
 // pre-derived next generations become current, the Key Phase flips so the client
 // sends the new phase, and the following generation is pre-derived. pn is the
 // packet number that triggered the update — the boundary below which reordered
-// old-generation packets are routed to prev.
+// old-generation packets are routed to prev. Assumes c.mu is held (it swaps the
+// sealer and read openers the send path reads under the same lock).
 func (c *Conn) commitKeyUpdate(pn uint64) {
 	ku := c.ku
 	// Retain the superseded read generation for reordered old-phase packets.
@@ -157,7 +158,8 @@ func (c *Conn) appSendPhase() bool {
 }
 
 // discardStaleKeys drops the retained previous-generation read Opener once its
-// 3×PTO retention window has elapsed (RFC 9001 §6.3).
+// 3×PTO retention window has elapsed (RFC 9001 §6.3). Assumes c.mu is held
+// (called from pollLocked).
 func (c *Conn) discardStaleKeys() {
 	if c.ku != nil && c.ku.prev != nil && c.clock().After(c.ku.prevUntil) {
 		c.ku.prev = nil

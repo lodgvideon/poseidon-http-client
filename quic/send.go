@@ -29,6 +29,13 @@ const (
 // flow-control credit, so it is never blocked. Send after the FIN returns
 // ErrStreamFinished.
 func (s *Stream) Send(data []byte, fin bool) (int, error) {
+	s.conn.mu.Lock()
+	defer s.conn.mu.Unlock()
+	return s.sendLocked(data, fin)
+}
+
+// sendLocked is Send's body. Assumes s.conn.mu is held.
+func (s *Stream) sendLocked(data []byte, fin bool) (int, error) {
 	if s.sendReset {
 		return 0, ErrStreamReset
 	}
@@ -167,7 +174,9 @@ func (s *Stream) emitBlocked(kind blockKind) {
 // writeAppFrames seals frames into a 1-RTT packet and writes the datagram. The
 // STREAM and *_BLOCKED frames it carries are ack-eliciting; retrans names the
 // frames to resend if the packet is lost (nil for the informational *_BLOCKED
-// frames, which are not retransmitted this phase).
+// frames, which are not retransmitted this phase). Assumes c.mu is held (it
+// seals a packet and writes the wire; callers are sendLocked/resetLocked/
+// stopSendingLocked and the receive-path emitBlocked).
 func (c *Conn) writeAppFrames(frames []byte, retrans []retransFrame) error {
 	if c.closed {
 		// Draining or closing (RFC 9000 §10.2.2): no application frame may be sent
