@@ -2,18 +2,19 @@
   "enabledPlugins": {
     "ork@orchestkit": true
   },
-  "enabledMcpjsonServers": ["serena"],
+  "enabledMcpjsonServers": ["serena", "context7", "sequential-thinking"],
+  "env": {
+    "ORCHESTKIT_PROTECTED_BRANCHES": "main,master",
+    "ORCHESTKIT_COMMIT_SCOPE": "optional",
+    "ORCHESTKIT_AGENT_BROWSER_ALLOW_LOCALHOST": "1",
+    "ORCHESTKIT_PERF_SNAPSHOT_ENABLED": "1",
+    "ORCHESTKIT_LOG_LEVEL": "warn"
+  },
   "hooks": {
     "SessionStart": [
       {
         "matcher": "startup|clear|compact",
         "hooks": [
-          {
-            "type": "command",
-            "command": "bash -c 'bash \"$(git rev-parse --show-toplevel)/.claude/hooks/superpowers-session-start.sh\"'",
-            "timeout": 10,
-            "statusMessage": "Loading superpowers..."
-          },
           {
             "type": "command",
             "command": "bash -c 'node \"$(git rev-parse --show-toplevel)/.claude/hooks/caveman-activate.js\"'",
