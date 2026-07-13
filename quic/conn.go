@@ -136,6 +136,15 @@ type Conn struct {
 	// AEAD_LIMIT_REACHED rather than rotate keys itself.
 	appSendCount uint64 // 1-RTT packets sealed under the current write key (confidentiality)
 	authFailures uint64 // 1-RTT packets that failed authentication, across all keys (integrity)
+
+	// Stream wake vocabulary (docs/HTTP3_DESIGN.md §3.3), all guarded by c.mu.
+	// Added in PR 2b as additive, INERT plumbing: the receive path produces these
+	// signals but nothing consumes them yet (http3.Client.Do still inline-polls).
+	streamCredit   chan struct{} // cap 1; signaled from OnMaxStreams when the peer raises the cumulative stream limit
+	sendWindowGrew bool          // a receive burst freed congestion-window/connection credit; swept at end of burst
+	done           chan struct{} // the single-close latch channel; closed once by terminateLocked, never reopened
+	closeErr       error         // the first terminating error, published before done is closed
+	terminated     bool          // guards terminateLocked against a double close(done) / closeErr clobber
 }
 
 // NewConn creates a client QUIC connection over pc. tlsConfig must set
@@ -165,8 +174,10 @@ func NewConn(pc PacketConn, tlsConfig *tls.Config, transportParams []byte) (*Con
 		initialSealer: is,
 		now:           time.Now,
 		connRecvMax:   DefaultConnRecvWindow,
-		cwnd:          kInitialWindow, // arm NewReno (RFC 9002 §7.2)
-		ssthresh:      ^uint64(0),     // "infinite" until the first loss
+		cwnd:          kInitialWindow,         // arm NewReno (RFC 9002 §7.2)
+		ssthresh:      ^uint64(0),             // "infinite" until the first loss
+		done:          make(chan struct{}),    // single-close latch (§3.3)
+		streamCredit:  make(chan struct{}, 1), // cap-1 stream-limit wake (§3.3)
 	}
 	c.keys.Initial = io
 	// Retain the unidirectional-stream limit we advertise, so inbound
@@ -188,7 +199,7 @@ func (c *Conn) acceptPeerUniStream(id uint64) (*Stream, error) {
 	if id>>2 >= c.localMaxStreamsUni {
 		return nil, ErrTooManyUniStreams
 	}
-	s := &Stream{id: id, conn: c, recvMax: DefaultStreamRecvWindow}
+	s := &Stream{id: id, conn: c, recvMax: DefaultStreamRecvWindow, ready: make(chan struct{}, 1)}
 	if c.streams == nil {
 		c.streams = map[uint64]*Stream{}
 	}
@@ -223,6 +234,67 @@ func (c *Conn) clock() time.Time {
 		return time.Now()
 	}
 	return c.now()
+}
+
+// signalReady pokes a stream's readiness channel without ever blocking
+// (docs/HTTP3_DESIGN.md §3.3). The cap-1 channel coalesces: a token already
+// buffered is left in place and a slow (or absent) consumer never stalls the
+// receive path — the HTTP/2 push rule. Callers run inside the locked receive
+// path; s.ready is nil only for hand-built test streams, where the send case on
+// a nil channel is never selected, so the default branch keeps it a no-op.
+func (c *Conn) signalReady(s *Stream) {
+	select {
+	case s.ready <- struct{}{}:
+	default:
+	}
+}
+
+// signalStreamCredit wakes a caller blocked on the cumulative stream limit when
+// the peer raises MAX_STREAMS (docs/HTTP3_DESIGN.md §3.3; consumed in PR 2d).
+// Non-blocking, cap-1 coalescing, like signalReady.
+func (c *Conn) signalStreamCredit() {
+	select {
+	case c.streamCredit <- struct{}{}:
+	default:
+	}
+}
+
+// maybeBroadcastSendWindow performs the end-of-burst congestion-window wake
+// (docs/HTTP3_DESIGN.md §3.3, INV-5). blockCong/blockPace senders have no
+// frame-driven wake — the window opens only through ACK/loss accounting — so a
+// receive burst that freed in-flight bytes or raised connection credit sets
+// sendWindowGrew, and this does one O(n) signalReady sweep over the open streams
+// and clears the flag. Gated so the sweep is per-window-growing-burst, not per
+// packet. Called at the end of the Poll receive burst, under c.mu.
+func (c *Conn) maybeBroadcastSendWindow() {
+	if !c.sendWindowGrew {
+		return
+	}
+	c.sendWindowGrew = false
+	for _, s := range c.streams {
+		c.signalReady(s)
+	}
+}
+
+// terminateLocked is the single-close latch (docs/HTTP3_DESIGN.md §3.3): it
+// records the first terminating error and closes c.done exactly once so every
+// blocked WaitReadable / WaitSendable wakes. Idempotent and first-error-wins —
+// later callers (there are several independent teardown paths) no-op. Assumes
+// c.mu is held. PR 2b calls it only from closeWithErrorLocked as the latch;
+// rerouting the other teardown paths through it is PR 2c.
+func (c *Conn) terminateLocked(err error) {
+	if c.terminated {
+		return
+	}
+	c.terminated = true
+	if c.closeErr == nil {
+		c.closeErr = err
+	}
+	// done is nil only for hand-built test Conns that never use the wake latch;
+	// NewConn always allocates it, so a real connection always closes it here.
+	if c.done != nil {
+		close(c.done)
+	}
 }
 
 // onAckRange acknowledges the packet-number range [low, high] in space sp,

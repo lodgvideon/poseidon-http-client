@@ -133,12 +133,44 @@ func (c *Conn) cwndLimited(priorInFlight uint64) bool {
 
 // removeInFlight subtracts a packet's size from the in-flight total, guarding
 // against underflow (test packets carry size 0, and this defends any drift).
+//
+// Freeing in-flight bytes opens congestion-window headroom, so it flags the
+// receive burst as window-growing (docs/HTTP3_DESIGN.md §3.3, INV-5):
+// maybeBroadcastSendWindow then wakes senders parked on blockCong, which have no
+// other frame-driven wake. This is the single choke point through which every
+// flight-freeing site passes — onPacketAcked, detectLost, discardSpace, and
+// queueOldestProbe — so the flag is set once here rather than at each call site.
 func (c *Conn) removeInFlight(size int) {
 	if c.bytesInFlight >= uint64(size) {
 		c.bytesInFlight -= uint64(size)
 	} else {
 		c.bytesInFlight = 0
 	}
+	c.sendWindowGrew = true
+}
+
+// pacingRefillDelay estimates how long until the pacing token bucket refills
+// enough to admit one more datagram (RFC 9002 §7.7). WaitSendable arms a timer
+// for this long when a send is pacing-limited (blockPace), because the bucket
+// refills on wall-clock time with no inbound event to wake the sender. The
+// estimate is the time to accrue one maxDatagramSize of credit at the pacing rate
+// N·cwnd/smoothed_rtt (N = 5/4). It is kept slightly generous so a low estimate
+// only costs an early recheck, never a stall (docs/HTTP3_DESIGN.md §7, residual
+// risk 1). With pacing disabled (cwnd == 0) or no RTT sample it falls back to a
+// short poll interval, so a blocked waiter still makes progress.
+func (c *Conn) pacingRefillDelay() time.Duration {
+	if c.cwnd == 0 || c.rtt.smoothedRTT <= 0 {
+		return time.Millisecond
+	}
+	rate := 5 * c.cwnd / 4 // bytes per smoothed-RTT
+	if rate == 0 {
+		return time.Millisecond
+	}
+	d := time.Duration(uint64(maxDatagramSize) * uint64(c.rtt.smoothedRTT) / rate)
+	if d <= 0 {
+		return time.Millisecond
+	}
+	return d
 }
 
 // pacingCredit returns the bytes the pacer will admit right now (RFC 9002 §7.7).

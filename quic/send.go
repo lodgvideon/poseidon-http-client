@@ -50,6 +50,9 @@ func (s *Stream) sendLocked(data []byte, fin bool) (int, error) {
 		if remaining := len(data) - sent; remaining > 0 {
 			n, blocked := s.grantable(remaining)
 			if n == 0 {
+				// Record which limit stalled this send so WaitSendable can pick its
+				// wake source (docs/HTTP3_DESIGN.md §3.3): only blockPace arms a timer.
+				s.sendBlock = blocked
 				s.emitBlocked(blocked)
 				return sent, nil
 			}
