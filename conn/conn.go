@@ -51,6 +51,42 @@ var encBufPool = sync.Pool{
 }
 
 // Conn is one HTTP/2 connection.
+//
+// # Lock ordering
+//
+// Conn has eight mutexes, plus each Stream's own mu. To avoid deadlock a
+// goroutine that needs more than one at a time MUST acquire them left-to-right
+// in the order below, and MUST NOT acquire a lock that sits to the left of one
+// it already holds:
+//
+//	wmu → psMu → smu → fcOutMu → Stream.mu
+//
+// That total order is a linearization of the nestings that actually occur in
+// this package (traced across every Lock/RLock site):
+//
+//   - wmu → psMu → smu → Stream.mu: writeHeadersWithPriority, holding wmu,
+//     assigns a first-time stream's id and seeds its send window from the peer's
+//     SETTINGS_INITIAL_WINDOW_SIZE (deferred id allocation preserves the RFC 7540
+//     §5.1.1 monotonic-id order across concurrent openers).
+//   - psMu → smu → Stream.mu: applyPeerSettings applies a retroactive
+//     SETTINGS_INITIAL_WINDOW_SIZE delta to every open stream (§6.9.2). It takes
+//     wmu — for the HPACK-encoder resize — only AFTER releasing psMu, so wmu
+//     stays strictly above psMu rather than nesting under it.
+//   - wmu → smu → Stream.mu: writeRSTStream, holding wmu, returns the stream's
+//     inflight slot via releaseInflight; releaseInflight and markStreamDone are
+//     the smu → Stream.mu nesting.
+//   - fcOutMu → Stream.mu: acquireSendCredits debits the per-stream and the
+//     connection outbound send windows together (§6.9). fcOutMu never nests with
+//     wmu, psMu, or smu; it shares only Stream.mu, the innermost lock.
+//
+// Stream.mu is always innermost: Stream methods (SendHeaders, SendData, Close,
+// push) release it before calling any Conn write or registry method, so it never
+// reaches back up the chain.
+//
+// fcMu, pingMu, originsMu, and altSvcMu are leaf locks — each is only ever held
+// on its own, never together with another of these mutexes or with each other,
+// so they are unordered. (onDataReceived takes fcMu and Stream.mu sequentially,
+// not nested; Ping and onPingReceived release pingMu before taking wmu.)
 type Conn struct {
 	transport net.Conn
 	fr        *frame.Framer
