@@ -13,6 +13,18 @@ type AdvertisedSettings struct {
 	MaxHeaderListSize    uint32
 }
 
+// defaultMaxHeaderListSize bounds the decompressed header-list size we will
+// accept from a peer (RFC 7540 §6.5.2 / §10.5.1). Unlike the compressed
+// CONTINUATION-accumulation ceiling (handler.defaultMaxHeaderBytes), this
+// caps the sum of decoded HeaderField.Size() and defends against HPACK
+// expansion bombs — a small block of indexed references that decode to a
+// very large field list. It is announced to the peer and enforced on decode.
+// 8 MiB matches the sibling compressed ceiling: generous for legitimate
+// response headers, bounded against an adversarial or buggy server. A caller
+// wanting a different bound sets AdvertisedSettings.MaxHeaderListSize
+// explicitly; a very large value effectively opts out.
+const defaultMaxHeaderListSize = 8 << 20 // 8 MiB
+
 func (s AdvertisedSettings) defaulted() AdvertisedSettings {
 	if s.HeaderTableSize == 0 {
 		s.HeaderTableSize = 4096
@@ -25,6 +37,9 @@ func (s AdvertisedSettings) defaulted() AdvertisedSettings {
 	}
 	if s.MaxFrameSize == 0 {
 		s.MaxFrameSize = 16384
+	}
+	if s.MaxHeaderListSize == 0 {
+		s.MaxHeaderListSize = defaultMaxHeaderListSize
 	}
 	return s
 }

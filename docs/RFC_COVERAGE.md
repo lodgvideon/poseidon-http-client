@@ -96,6 +96,7 @@ non-ACK PING frames with `ACK=1` and the original 8-byte payload
 | §6.8    | Unit        | TestOnGoAway_BlocksNewStream, TestOnGoAway_StreamsAtOrBelowLastID_Survive, TestOnGoAway_WakesAcquireSendCredits |
 | §6.2    | Conformance | TestConformance_RFC7540_Sec6_2_HeadersSplitIntoContinuation (conn) — oversized HEADERS block split into HEADERS+CONTINUATION frames |
 | §6.10   | Conformance | TestConformance_RFC7540_Sec6_10_ContinuationFlagsAndPadding (conn) — padding/priority only on HEADERS; END_HEADERS only on final CONTINUATION |
+| §10.5.1 | Conformance | TestConformance_RFC7540_Sec10_5_1_HeaderListSizeCap_EnhanceYourCalm (conn) — decoded header list exceeding local SETTINGS_MAX_HEADER_LIST_SIZE rejected as connection error ENHANCE_YOUR_CALM; decompressed-size DoS gate (HPACK expansion bomb) enabled by default (8 MiB), announced to peer and enforced on decode. Supporting: TestAdvertisedSettings_Defaulted_BoundsHeaderListSize, TestEncodeAdvertised_AnnouncesHeaderListSize, TestHeaderListSizeCap_WithinLimit_Succeeds |
 | §8.1    | Conformance | TestConformance_RFC7540_Sec8_1_BodyStream_EndStream (client/) |
 | §8.1    | Integration | TestIntegration_Client_BodyStream_Small, TestIntegration_Client_BodyStream_Large, TestIntegration_Client_BodyStream_CloseEarly (client/) |
 | §8.1.2.1 | Conformance | TestConformance_RFC7540_Sec8_1_2_1_PseudoHeadersFirst (client/) |

@@ -1,11 +1,24 @@
 package conn
 
 import (
+	"errors"
 	"sync"
 
 	"github.com/lodgvideon/poseidon-http-client/frame"
 	"github.com/lodgvideon/poseidon-http-client/hpack"
 )
+
+// headerDecodeConnError maps an HPACK decode failure to a typed connection
+// error. A decoded header list exceeding SETTINGS_MAX_HEADER_LIST_SIZE is
+// ENHANCE_YOUR_CALM (RFC 7540 §10.5.1) — the block was well-formed, the peer
+// simply exceeded a limit we advertised. Every other decode failure is a
+// genuine COMPRESSION_ERROR (RFC 7541 malformed input).
+func headerDecodeConnError(err error) *ConnError {
+	if errors.Is(err, hpack.ErrHeaderListTooLarge) {
+		return &ConnError{Code: frame.ErrCodeEnhanceYourCalm, Reason: err.Error()}
+	}
+	return &ConnError{Code: frame.ErrCodeCompressionError, Reason: err.Error()}
+}
 
 // headerSlabPool recycles the byte backing for HPACK-decoded header
 // fields. The client layer transfers slab ownership via StreamEvent.Slab
@@ -231,7 +244,7 @@ func (h *connHandler) emitHeaderBlock(s *Stream, hb []byte, endStream, isTrailer
 		return nil
 	})
 	if err != nil {
-		return &ConnError{Code: frame.ErrCodeCompressionError, Reason: err.Error()}
+		return headerDecodeConnError(err)
 	}
 	evType := EventHeaders
 	if isTrailer {
@@ -338,7 +351,7 @@ func (h *connHandler) OnPushPromise(fh frame.FrameHeader, promisedStreamID uint3
 		h.scratch = append(h.scratch, f)
 		return nil
 	}); err != nil {
-		return &ConnError{Code: frame.ErrCodeCompressionError, Reason: err.Error()}
+		return headerDecodeConnError(err)
 	}
 
 	// Register the pushed (server-initiated, even) stream.
