@@ -6,6 +6,7 @@ import (
 	"crypto/rand"
 	"crypto/tls"
 	"errors"
+	"sync"
 	"time"
 )
 
@@ -36,6 +37,14 @@ type PacketConn interface {
 // handshake to the send path and manages establishment. Not safe for concurrent
 // use by multiple goroutines.
 type Conn struct {
+	// mu guards ALL Conn mutable state and the wire (every pc.Write). The
+	// discipline mirrors the HTTP/2 layer: public entry points take mu and
+	// delegate to an assume-held internal (…Locked); receive-path helpers and
+	// frame handlers run only inside a locked section and never re-lock. A
+	// single mutex (not RWMutex) because the receive path mutates send-path
+	// state, so the state does not partition (see docs/HTTP3_DESIGN.md §3.2).
+	mu sync.Mutex
+
 	pc PacketConn
 	hs *TLSHandshake
 
@@ -192,6 +201,13 @@ func (c *Conn) acceptPeerUniStream(id uint64) (*Stream, error) {
 // stream, or nil if none is pending. It does not block; the caller drives the
 // connection with Poll and drains newly accepted streams between polls.
 func (c *Conn) AcceptUniStream() *Stream {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.acceptUniStreamLocked()
+}
+
+// acceptUniStreamLocked is AcceptUniStream's body. Assumes c.mu is held.
+func (c *Conn) acceptUniStreamLocked() *Stream {
 	if len(c.acceptedUni) == 0 {
 		return nil
 	}

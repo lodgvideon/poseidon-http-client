@@ -17,6 +17,12 @@ import (
 // acknowledges but never completes forever; the caller's ctx deadline, if nearer,
 // still applies.
 func (c *Conn) Establish(ctx context.Context) error {
+	// Hold c.mu for the whole handshake so its calls to fail (and the send/recv
+	// helpers) are unconditionally assume-held internals — one convention with no
+	// pre-reader special case. Establish runs before any concurrency, so holding
+	// the lock across the handshake reads costs nothing.
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	ctx, cancel := context.WithTimeout(ctx, handshakeTimeout)
 	defer cancel()
 	if err := c.sendInitialFlight(ctx); err != nil {
@@ -46,6 +52,15 @@ func (c *Conn) Establish(ctx context.Context) error {
 // completes (RFC 9000 §13). The caller sets a read deadline on the PacketConn to
 // bound the wait.
 func (c *Conn) Poll(ctx context.Context) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.pollLocked(ctx)
+}
+
+// pollLocked is Poll's body. Assumes c.mu is held for the whole cycle, including
+// the blocking read (harmless while a single goroutine drives the connection; the
+// release-across-read restructure is a later PR — see docs/HTTP3_DESIGN.md §3.2).
+func (c *Conn) pollLocked(ctx context.Context) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -94,6 +109,7 @@ const maxDrainBurst = 512
 // without blocking, using a read deadline in the past so an empty socket returns
 // immediately. It is a no-op on transports that cannot set a read deadline (they
 // have no non-blocking read), preserving their one-datagram-per-Poll behavior.
+// Assumes c.mu is held (called from pollLocked).
 func (c *Conn) drainBuffered() error {
 	dl, ok := c.pc.(interface{ SetReadDeadline(time.Time) error })
 	if !ok {
@@ -222,6 +238,8 @@ func (c *Conn) prefilterPacket(hdr Header, pkt []byte) (skip bool, err error) {
 	return false, nil
 }
 
+// recvDatagram decrypts and dispatches every packet coalesced in one datagram.
+// Assumes c.mu is held (called from pollLocked/drainBuffered/Establish).
 func (c *Conn) recvDatagram(datagram []byte) error {
 	rest := datagram
 	first := true
@@ -439,6 +457,7 @@ func (c *Conn) handshakeProbeSpace() int {
 // flush sends, for every space that owes a retransmission, CRYPTO, or an ACK:
 // first one packet per queued retransmit frame (retransmit takes priority,
 // RFC 9000 §13.3), then one packet with any pending ACK and new CRYPTO.
+// Assumes c.mu is held (called from pollLocked/Establish and the send helpers).
 func (c *Conn) flush() error {
 	if c.closed {
 		// Draining or closing (RFC 9000 §10.2.2): once the connection is closed —
@@ -509,14 +528,17 @@ func (c *Conn) flush() error {
 
 // sealPacket builds and protects a packet for a space carrying frames. Frames
 // are padded to keep the packet long enough for the header-protection sample
-// (RFC 9001 §5.4.2).
+// (RFC 9001 §5.4.2). Assumes c.mu is held (it advances sendPN and touches the
+// sealer/pacing/congestion state, all guarded by c.mu).
 func (c *Conn) sealPacket(sp int, frames []byte, ackEliciting bool, retrans []retransFrame, padTo1200 bool) ([]byte, error) {
 	// AEAD confidentiality limit (RFC 9001 §6.6): this client cannot initiate its
 	// own key update, so once it has sealed the limit of 1-RTT packets under the
 	// current key it must stop and close with AEAD_LIMIT_REACHED rather than seal
 	// another. The !c.closed guard lets the CONNECTION_CLOSE packet itself seal.
 	if sp == spaceApp && !c.closed && c.appSendCount >= aeadConfidentialityLimit {
-		_ = c.CloseWithError(false, ErrCodeAEADLimitReached, "")
+		// closeWithErrorLocked, not the public CloseWithError: sealPacket already
+		// holds c.mu, so re-locking would self-deadlock the single mutex.
+		_ = c.closeWithErrorLocked(false, ErrCodeAEADLimitReached, "")
 		return nil, ErrAEADLimit
 	}
 	minFrames := 20 // ensures payload+tag reaches the 16-byte HP sample
@@ -626,6 +648,11 @@ func spaceLevel(sp int) tls.QUICEncryptionLevel {
 }
 
 // connFrameHandler dispatches the frames of one received packet into the Conn.
+//
+// Every On* handler on this type assumes c.mu is held: they run only from
+// recvDatagram, which itself runs inside a locked pollLocked/Establish section.
+// A handler that must mutate send-side stream state (e.g. OnStopSending) calls
+// the assume-held …Locked internal, never the re-locking public wrapper.
 type connFrameHandler struct {
 	nopFrameHandler
 	c             *Conn
@@ -953,7 +980,9 @@ func (h *connFrameHandler) OnStopSending(id, errCode uint64) error {
 		return ErrStreamState
 	}
 	if s := h.c.streams[id]; s != nil {
-		_ = s.Reset(errCode)
+		// resetLocked, not the public Reset: this handler runs under c.mu inside the
+		// receive path, so re-locking through the public wrapper would self-deadlock.
+		_ = s.resetLocked(errCode)
 		return nil
 	}
 	// A STOP_SENDING for a locally initiated stream not yet created is a

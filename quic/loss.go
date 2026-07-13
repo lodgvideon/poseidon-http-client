@@ -80,6 +80,8 @@ func (c *Conn) earliestLossTime() (t time.Time, space int, ok bool) {
 // fully lost tail or sole flight is not recovered here — that needs the probe
 // timeout (RFC 9002 §6.2), a following phase. Until then the caller's read
 // deadline bounds the wait.
+//
+// Assumes c.mu is held (runs from the receive path, mutating sent/cwnd state).
 func (c *Conn) detectLost(sp int) {
 	s := &c.sent[sp]
 	if !s.haveLargestAcked {
