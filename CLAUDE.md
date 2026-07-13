@@ -1,9 +1,10 @@
 # poseidon-http-client — Claude context
 
-Low-level HTTP/2 client in Go. Implements RFC 7540 + RFC 7541 from
-scratch (no `net/http`, no `golang.org/x/net/http2`). Target users:
-load generators needing zero-alloc codec + fine-grained control over
-streams, flow control, pooling.
+Low-level multi-protocol HTTP client in Go — HTTP/1.1, HTTP/2, and
+HTTP/3 — implemented from scratch from the RFCs (no `net/http`, no
+`golang.org/x/net`, no `quic-go`). Target users: load generators
+needing zero-alloc codec + fine-grained control over streams, flow
+control, pooling.
 
 ## Quick commands
 
@@ -26,28 +27,66 @@ Pre-commit hook (optional): `git config core.hooksPath .githooks`.
 ## Architecture
 
 ```
-conn/                # B-layer: connection, streams, flow control, handshake
-  └── depends on: frame, hpack
+client/              # Public API (C-layer): Do / DoStream, per-host pool,
+                     # managed pool + resolver + selector (service discovery),
+                     # retry, rate limit, hooks, metrics. Drives H1/H2/H3.
+                     └── depends on: conn, http3, http1, frame, hpack
+
+# ── HTTP/2 ──────────────────────────────────────────────
+conn/                # B-layer: H2 connection, streams, flow control, handshake
+                     └── depends on: frame, hpack
 frame/               # A-layer: HTTP/2 frame codec (parser + writer + Framer)
 hpack/               # A-layer: RFC 7541 HPACK encoder/decoder
-internal/bytesx/     # Big-endian helpers (Uint24, Uint31)
-docs/                # RFC_COVERAGE.md (authoritative test-to-RFC map), BENCH_BASELINE.md, COVERAGE.md
+
+# ── HTTP/3 ──────────────────────────────────────────────
+http3/               # H-layer: RFC 9114 framing + request/response mapping
+                     └── depends on: quic, qpack
+quic/                # QUIC v1 engine (from scratch, no quic-go): RFC 9000
+                     # transport + RFC 9001 QUIC-TLS handshake / key update +
+                     # RFC 9002 loss recovery + NewReno congestion control
+                     └── depends on: internal/bytesx
+qpack/               # A-layer: RFC 9204 QPACK (static-table encode / decode)
+                     └── depends on: hpack
+
+# ── HTTP/1.1 ────────────────────────────────────────────
+http1/               # RFC 2616 HTTP/1.1 wire protocol (ALPN fallback transport)
+
+# ── shared ──────────────────────────────────────────────
+internal/bytesx/     # Private helpers: big-endian Uint24/Uint31, QUIC varint
+                     # codec, buffer pool, padding strip. Used by frame, quic,
+                     # http3 (NOT hpack).
+docs/                # RFC_COVERAGE.md (authoritative test-to-RFC map),
+                     # BENCH_BASELINE.md, COVERAGE.md, HTTP3_DESIGN.md
 ```
 
-Public packages: `frame`, `hpack`, `conn`. `cmd/` not exist —
-library only. `Conn` owns one `*frame.Framer` + one
-`*hpack.Encoder` + one `*hpack.Decoder` per connection, serializes
-writes via `wmu`.
+Public packages: `client`, `conn`, `frame`, `hpack`, `http3`, `quic`,
+`qpack`, `http1`. No `cmd/` — library only. `client` is the entry
+point most callers use; `conn` / `frame` / `hpack` / `http3` / `quic`
+are usable standalone for fine-grained control. Each H2 `Conn` owns
+one `*frame.Framer` + one `*hpack.Encoder` + one `*hpack.Decoder` and
+serializes writes via `wmu`.
 
 ## Phase status
 
-Read [CHANGELOG.md](CHANGELOG.md) and [conn/doc.go](conn/doc.go) for
-current milestone. **Phase B complete** (B.2.6 merged or in PR
-stack #5/#6/#7): multi-stream, full bidirectional flow control,
-dynamic SETTINGS + ACK with retroactive `INITIAL_WINDOW_SIZE` resize,
-peer `MAX_CONCURRENT_STREAMS` gate, GOAWAY drain, PING ACK echo.
-Next: **Phase C** — public client + connection pool + service
-discovery.
+Read [CHANGELOG.md](CHANGELOG.md) for the authoritative history.
+**All three protocols shipped** — HTTP/1.1, HTTP/2, and HTTP/3:
+
+- **HTTP/2 (Phases A–B)** — frame + HPACK codec, connection layer:
+  multi-stream, full bidirectional flow control, dynamic SETTINGS + ACK
+  with retroactive `INITIAL_WINDOW_SIZE` resize, peer
+  `MAX_CONCURRENT_STREAMS` gate, GOAWAY drain, PING ACK echo.
+- **Public client + pool + discovery (Phase C, `client/`)** — `Do` /
+  `DoStream`, per-host connection pool, managed pool with resolver-based
+  service discovery + round-robin / random / consistent-hash selectors,
+  retry layer, token-bucket rate limit, lifecycle hooks, metrics.
+- **HTTP/1.1 fallback (`http1/`)** — zero-dep wire protocol, reached via
+  ALPN negotiation or an explicit single-conn transport.
+- **HTTP/3 (Phase G — `quic/` + `http3/` + `qpack/`, shipped v0.9.0
+  2026-07-11)** — from-scratch QUIC v1 (RFC 9000) + QUIC-TLS (9001) +
+  loss recovery / congestion control (9002) + HTTP/3 (9114) + QPACK
+  (9204), no `quic-go`. Entry point `http3.Dial`. Known deferrals:
+  ChaCha20 header protection, static-only QPACK, blocking/sequential
+  `Client.Do` (see CHANGELOG v0.9.0 "Known limitations").
 
 ## Code-style gates (golangci-lint v2.5, see `.golangci.yml`)
 

@@ -1,5 +1,7 @@
-// Package bytesx provides private byte-level helpers used by the frame
-// and hpack packages. Not part of the public API.
+// Package bytesx provides private byte-level helpers: big-endian Uint24 /
+// Uint31 read-write (HTTP/2 frame headers), the QUIC variable-length integer
+// codec, a reusable byte-buffer pool, and QUIC padding stripping. Used by the
+// frame, quic, and http3 packages. Not part of the public API.
 package bytesx
 
 // ReadUint24 reads a big-endian 24-bit unsigned integer from b[:3].
