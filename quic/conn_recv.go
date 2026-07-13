@@ -96,6 +96,9 @@ func (c *Conn) pollLocked(ctx context.Context) error {
 	if c.peerClose != nil {
 		return c.peerClose // a CONNECTION_CLOSE arrived in the drained burst (§10.2.2)
 	}
+	// End of the receive burst: if it freed congestion-window or connection credit,
+	// wake senders parked on blockCong/blockConn in one O(n) sweep (§3.3, INV-5).
+	c.maybeBroadcastSendWindow()
 	return c.flush()
 }
 
@@ -912,6 +915,7 @@ func (h *connFrameHandler) OnStream(id, offset uint64, fin bool, data []byte) er
 	if err := s.recv.receive(offset, data, fin); err != nil { // §4.5 final-size checks
 		return err
 	}
+	h.c.signalReady(s) // response data / fin arrived — wake a blocked reader (§3.3)
 	h.c.maybeRetire(s) // fully received + our FIN sent → drop from the routing map
 	return nil
 }
@@ -964,6 +968,7 @@ func (h *connFrameHandler) OnResetStream(id, errCode, finalSize uint64) error {
 	}
 	s.recvReset = true
 	s.recvResetCode = errCode // surfaced to the application (RFC 9114 §8.1 request error)
+	h.c.signalReady(s)        // reset arrived — wake a blocked reader (§3.3)
 	h.c.maybeRetire(s)        // receive side terminal (reset) + our FIN sent → drop from the map
 	return nil
 }
@@ -983,6 +988,9 @@ func (h *connFrameHandler) OnStopSending(id, errCode uint64) error {
 		// resetLocked, not the public Reset: this handler runs under c.mu inside the
 		// receive path, so re-locking through the public wrapper would self-deadlock.
 		_ = s.resetLocked(errCode)
+		// sendReset is now flipped: a parked sender's next Send returns
+		// ErrStreamReset and must fall through to reading the response (§3.3, fix F4).
+		h.c.signalReady(s)
 		return nil
 	}
 	// A STOP_SENDING for a locally initiated stream not yet created is a
@@ -997,6 +1005,13 @@ func (h *connFrameHandler) OnMaxData(maximum uint64) error {
 	h.ackEliciting = true
 	if maximum > h.c.connMax { // absolute ceiling; ignore non-increasing (§4.1)
 		h.c.connMax = maximum
+		// Connection-level send credit rose: wake every stream parked on blockConn
+		// (§3.3). Also flag the burst so the end-of-burst cwnd sweep runs for any
+		// blockCong waiter that the raised credit lets past the window.
+		for _, s := range h.c.streams {
+			h.c.signalReady(s)
+		}
+		h.c.sendWindowGrew = true
 	}
 	return nil
 }
@@ -1012,6 +1027,7 @@ func (h *connFrameHandler) OnMaxStreamData(streamID, maximum uint64) error {
 	if s := h.c.streams[streamID]; s != nil {
 		if maximum > s.sendMax {
 			s.sendMax = maximum
+			h.c.signalReady(s) // this stream's send credit rose — wake a blocked sender (§3.3)
 		}
 		return nil
 	}
@@ -1038,12 +1054,20 @@ func (h *connFrameHandler) OnMaxStreams(uni bool, maximum uint64) error {
 	if maximum > maxStreamsLimit {
 		return ErrFrameEncoding
 	}
+	raised := false
 	if uni {
 		if maximum > h.c.peer.InitialMaxStreamsUni {
 			h.c.peer.InitialMaxStreamsUni = maximum
+			raised = true
 		}
 	} else if maximum > h.c.peer.InitialMaxStreamsBidi {
 		h.c.peer.InitialMaxStreamsBidi = maximum
+		raised = true
+	}
+	if raised {
+		// Wake a caller blocked on the cumulative stream limit (§3.3; consumed in
+		// PR 2d, where OpenStream becomes waitable on c.streamCredit).
+		h.c.signalStreamCredit()
 	}
 	return nil
 }

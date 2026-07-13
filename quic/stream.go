@@ -1,5 +1,10 @@
 package quic
 
+import (
+	"context"
+	"time"
+)
+
 // Stream is a QUIC stream. For an HTTP/3 client the relevant streams are
 // client-initiated bidirectional streams (one request/response exchange each).
 type Stream struct {
@@ -17,6 +22,10 @@ type Stream struct {
 	recvHighest    uint64 // highest byte offset received on this stream (flow control, §4.1)
 	recvReset      bool   // peer sent RESET_STREAM — the receive side is aborted (§3.5)
 	recvResetCode  uint64 // the application error code carried by that RESET_STREAM (§19.4)
+
+	// Stream wake vocabulary (docs/HTTP3_DESIGN.md §3.3), guarded by conn.mu.
+	ready     chan struct{} // cap 1; reader→consumer progress signal for recv-readiness and send-unblock (never closed)
+	sendBlock blockKind     // which flow-control limit last stalled a short Send; WaitSendable arms a pacing timer only for blockPace
 }
 
 // ID returns the stream's QUIC stream identifier.
@@ -41,7 +50,7 @@ func (c *Conn) openStreamLocked() (*Stream, error) {
 	id := c.nextBidiStreamID
 	c.nextBidiStreamID += 4
 	c.openedBidi++
-	s := &Stream{id: id, conn: c, sendMax: c.peer.InitialMaxStreamDataBidiRemote, recvMax: DefaultStreamRecvWindow}
+	s := &Stream{id: id, conn: c, sendMax: c.peer.InitialMaxStreamDataBidiRemote, recvMax: DefaultStreamRecvWindow, ready: make(chan struct{}, 1)}
 	if c.streams == nil {
 		c.streams = map[uint64]*Stream{}
 	}
@@ -66,7 +75,7 @@ func (c *Conn) openUniStreamLocked() (*Stream, error) {
 	}
 	id := 2 + c.openedUni*4
 	c.openedUni++
-	s := &Stream{id: id, conn: c, sendMax: c.peer.InitialMaxStreamDataUni, recvMax: DefaultStreamRecvWindow}
+	s := &Stream{id: id, conn: c, sendMax: c.peer.InitialMaxStreamDataUni, recvMax: DefaultStreamRecvWindow, ready: make(chan struct{}, 1)}
 	if c.streams == nil {
 		c.streams = map[uint64]*Stream{}
 	}
@@ -348,4 +357,61 @@ func (r *recvStream) read() []byte {
 // arrived and every byte up to the final size is contiguous.
 func (r *recvStream) complete() bool {
 	return r.fin && uint64(len(r.data)) == r.finalSize && len(r.pending) == 0
+}
+
+// WaitReadable blocks until the stream may have more response data to read, its
+// context is cancelled, or the connection terminates (docs/HTTP3_DESIGN.md §3.3).
+// It is level-triggered: a woken caller re-reads its predicate (Recv / RecvState)
+// under conn.mu before deciding to block again, so the cap-1 s.ready buffer plus
+// that recheck close the check-then-block lost-wakeup window. Added in PR 2b but
+// not yet driven by Do (the request path still inline-polls).
+func (s *Stream) WaitReadable(ctx context.Context) error {
+	select {
+	case <-s.ready:
+		return nil // recheck the predicate under conn.mu after waking
+	case <-ctx.Done():
+		return ctx.Err() // per-request cancel — only this caller
+	case <-s.conn.done:
+		return s.conn.closeErr // connection terminated; the latch published closeErr before closing done
+	}
+}
+
+// WaitSendable blocks until the stream may admit more send data, its context is
+// cancelled, or the connection terminates (docs/HTTP3_DESIGN.md §3.3). It owns
+// the pacing timer: blockCong/blockStream/blockConn all resolve to an
+// inbound-event wake via s.ready, but blockPace refills on wall-clock time with
+// no inbound event, so only that case arms a time.After(pacingRefillDelay). The
+// sendBlock read and the timer are taken under conn.mu, released before the
+// select, so the lock is never held across the wait. Added in PR 2b but not yet
+// driven by Do.
+func (s *Stream) WaitSendable(ctx context.Context) error {
+	s.conn.mu.Lock()
+	var timer <-chan time.Time
+	if s.sendBlock == blockPace {
+		timer = time.After(s.conn.pacingRefillDelay())
+	}
+	s.conn.mu.Unlock()
+	select {
+	case <-s.ready:
+		return nil
+	case <-timer:
+		return nil // the pacing bucket has refilled; retry Send
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-s.conn.done:
+		return s.conn.closeErr
+	}
+}
+
+// RecvState returns a locked snapshot of the receive side (docs/HTTP3_DESIGN.md
+// §3.3, fix F5): finished mirrors Finished (a clean complete FIN or a peer
+// RESET_STREAM), reset mirrors ResetReceived, and code is the reset's application
+// error code. The reader mutates recv.fin/finalSize/data and recvReset under
+// conn.mu in OnStream/OnResetStream, so a consumer must read them under the same
+// lock rather than via the individual lock-free accessors. Added in PR 2b for the
+// future Do read loop; not yet called by Do.
+func (s *Stream) RecvState() (finished, reset bool, code uint64) {
+	s.conn.mu.Lock()
+	defer s.conn.mu.Unlock()
+	return s.recvReset || s.recv.complete(), s.recvReset, s.recvResetCode
 }
