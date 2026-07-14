@@ -48,13 +48,6 @@ var ErrGoAway = errors.New("http3: server is going away")
 // already been sent.
 var ErrH3Control = errors.New("http3: connection error")
 
-// ErrConcurrentUse is returned by Do when another Do on the same Client is still
-// in flight. A Client drives one QUIC connection from a single goroutine and is
-// not safe for concurrent use (it has no cross-request multiplexing yet); a
-// second concurrent Do would corrupt the shared connection, QPACK, and control-
-// stream state, so it is rejected loudly instead. Use one Client per goroutine.
-var ErrConcurrentUse = errors.New("http3: Client.Do called concurrently")
-
 // HTTP/3 error codes (RFC 9114 §8.1), carried in the QUIC application
 // CONNECTION_CLOSE frame.
 const (
@@ -117,7 +110,7 @@ func (e *StreamResetError) Retryable() bool { return e.Code == H3RequestRejected
 type connAdapter struct{ *quic.Conn }
 
 func (a connAdapter) OpenStream(ctx context.Context) (quicStream, error) {
-	s, err := a.Conn.OpenStreamContext(ctx) // waits on stream credit; threads the request ctx (2d)
+	s, err := a.OpenStreamContext(ctx) // waits on stream credit; threads the request ctx (2d)
 	if err != nil {
 		return nil, err // avoid returning a non-nil interface wrapping a nil *Stream
 	}
@@ -144,8 +137,10 @@ func (a connAdapter) AcceptUniStream() quicStream {
 // codecs (docs/HTTP3_DESIGN.md §3.5, PR 2d), so nothing request-scoped is shared. A
 // dedicated reader goroutine drives the QUIC engine and services the server control
 // stream for the connection's lifetime (§3.1). Do sends its own request frames and
-// blocks on per-stream wakeups; still one Do at a time in this PR (inFlight retained
-// — real concurrency is enabled in the final 2d commit).
+// blocks on per-stream wakeups, so N goroutines may call Do on one Client
+// concurrently — OpenStream's id/map mutation and every seal are under the QUIC
+// c.mu, streams wake independently, control state is reader-owned, and QPACK is
+// per-request (§3.5). Client is safe for concurrent use.
 type Client struct {
 	conn quicConn
 
@@ -173,12 +168,6 @@ type Client struct {
 	// one atomic, no separate haveGoaway bool).
 	maxFieldSection atomic.Uint64
 	goaway          atomic.Uint64
-
-	// inFlight guards against concurrent Do: this PR keeps the single-request
-	// contract, so the only concurrency is reader ↔ single Do. A second concurrent
-	// Do is rejected with ErrConcurrentUse rather than allowed to corrupt the shared
-	// QPACK/reader state. Removed in PR 2d.
-	inFlight atomic.Bool
 }
 
 // uniStream is an accepted server unidirectional stream whose leading stream-type
@@ -305,13 +294,6 @@ func (c *Client) sendAll(ctx context.Context, stream quicStream, data []byte, fi
 // response) the request stream is aborted with STOP_SENDING and RESET_STREAM so
 // the server frees it and stops sending (RFC 9000 §3.5, RFC 9114 §4.1).
 func (c *Client) Do(ctx context.Context, req *Request) (*Response, []byte, error) {
-	// One request at a time: a second concurrent Do would race on the shared
-	// connection / QPACK / control-stream state (RFC 9114 multiplexing is not yet
-	// exposed). Reject it loudly instead of corrupting the connection.
-	if !c.inFlight.CompareAndSwap(false, true) {
-		return nil, nil, ErrConcurrentUse
-	}
-	defer c.inFlight.Store(false)
 	if err := ctx.Err(); err != nil {
 		return nil, nil, err
 	}
