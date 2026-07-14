@@ -167,8 +167,16 @@ func (e *h3Exchange) Recv(ctx context.Context) (conn.StreamEvent, error) {
 // to: one EventHeaders (:status rebuilt as an inline field, then the response
 // headers), one EventData carrying the whole body, and — when the response
 // carried a trailer section — one EventTrailers. The final event sets EndStream
-// so drainResponse concludes. Informational 1xx responses (resp.Interim) are not
-// replayed on the buffered path (Do already returned the final response).
+// so drainResponse concludes.
+//
+// Informational 1xx responses (resp.Interim) are intentionally dropped, not
+// replayed, for parity with the buffered H2 Do path — which exposes no interim
+// surface either: client.Response has no Interim field, and drainResponse's
+// handleHeadersEvent latches gotHeaders on the first EventHeaders and early-
+// returns on every later one. Replaying each resp.Interim as a pre-final
+// EventHeaders would therefore be worse than dropping it: the first replayed 1xx
+// would latch as resp.Status and the real final status would be discarded.
+// Dropping 1xx keeps H2 and H3 buffered Do behaviour identical.
 func (e *h3Exchange) synthesize(resp *http3.Response, body []byte) {
 	hdrs := append(e.hdrsScratch[:0], conn.HeaderField{Name: hdrStatus, Value: e.statusValue(resp.Status)})
 	hdrs = append(hdrs, resp.Headers...)
