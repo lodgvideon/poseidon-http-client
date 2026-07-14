@@ -334,6 +334,55 @@ func AppendTransportParams(dst []byte, p LocalTransportParams) []byte {
 	return append(dst, p.SourceConnectionID...)
 }
 
+// ServerTransportParams are the transport parameters a server advertises
+// (RFC 9000 §18.2, server role): the limits within which a client may send.
+//
+// The receive windows are deliberately not settable here. AppendServerTransportParams
+// advertises exactly the windows a server connection enforces (DefaultConnRecvWindow
+// and DefaultStreamRecvWindow, see NewServerConn and acceptPeerBidiStream), so a
+// client is never told it may send more than the connection will accept.
+type ServerTransportParams struct {
+	// MaxStreamsBidi is how many bidirectional streams a client may open (0x08) —
+	// one per in-flight request.
+	MaxStreamsBidi uint64
+	// MaxStreamsUni is how many unidirectional streams a client may open (0x09).
+	// HTTP/3 needs at least three: the control stream and the two QPACK streams.
+	MaxStreamsUni uint64
+	// MaxIdleTimeout is the idle timeout the server advertises, in milliseconds
+	// (0x01, §10.1). Zero omits the parameter.
+	MaxIdleTimeout uint64
+}
+
+// AppendServerTransportParams encodes a server's transport parameters into the
+// wire form carried in the TLS quic_transport_parameters extension.
+//
+// scid is the Source Connection ID the server chose for this connection and
+// origDCID the Destination Connection ID the client used in its first Initial.
+// The client authenticates both (§7.3), so they are per-connection and cannot be
+// hoisted into ServerTransportParams.
+func AppendServerTransportParams(dst []byte, p ServerTransportParams, scid, origDCID []byte) []byte {
+	if p.MaxIdleTimeout > 0 {
+		dst = appendTPInt(dst, tpMaxIdleTimeout, p.MaxIdleTimeout) // §10.1, milliseconds
+	}
+	dst = appendTPInt(dst, tpInitialMaxData, DefaultConnRecvWindow)
+	// The request stream is client-initiated, so from the server's perspective it
+	// is "bidi_remote" (0x06); a client-opened unidirectional stream is 0x07.
+	dst = appendTPInt(dst, tpInitialMaxStreamDataBidiRemote, DefaultStreamRecvWindow)
+	dst = appendTPInt(dst, tpInitialMaxStreamDataUni, DefaultStreamRecvWindow)
+	dst = appendTPInt(dst, tpInitialMaxStreamsBidi, p.MaxStreamsBidi)
+	dst = appendTPInt(dst, tpInitialMaxStreamsUni, p.MaxStreamsUni)
+	// The connection IDs carry raw bytes, not varints.
+	dst = appendTPBytes(dst, tpInitialSourceConnectionID, scid)
+	return appendTPBytes(dst, tpOriginalDestinationConnectionID, origDCID)
+}
+
+// appendTPBytes encodes one byte-valued transport parameter (id, length, bytes).
+func appendTPBytes(dst []byte, id uint64, v []byte) []byte {
+	dst = appendV(dst, id)
+	dst = appendV(dst, uint64(len(v)))
+	return append(dst, v...)
+}
+
 // appendTPInt encodes one integer transport parameter (id, length, varint value).
 func appendTPInt(dst []byte, id, v uint64) []byte {
 	dst = appendV(dst, id)
