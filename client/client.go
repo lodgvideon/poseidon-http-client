@@ -66,6 +66,27 @@ const (
 	// request, and a per-address HTTP/3 sub-pool fans out. Requires
 	// ClientOptions.Resolver and ClientOptions.TLSConfig; Addr must be empty.
 	TransportH3Managed
+
+	// TransportH1Pool pools up to Pool.MaxConnsPerHost HTTP/1.1 connections to one
+	// Addr. Unlike the H2/H3 pools this is an exclusive-checkout pool: HTTP/1.1
+	// carries one exchange per connection at a time, so MaxConnsPerHost IS the
+	// request concurrency and Pool.MaxStreamsPerConn does not apply. A request
+	// that finds every connection busy blocks until one frees or ctx is done.
+	// Connections are kept alive and reused, and discarded when the response says
+	// the connection will not persist. ClientOptions.Pool is required, and
+	// ConnOpts.Dialer must NOT assert ALPN "h2" — use a plain TCP dialer or a TLS
+	// dialer with NextProtos containing only "http/1.1".
+	//
+	// New TransportKinds MUST be appended here, at the end of the block: inserting
+	// one mid-block silently renumbers every kind below it.
+	TransportH1Pool
+
+	// TransportH1Managed is the HTTP/1.1 analogue of TransportManaged: a Resolver
+	// discovers backends, a Selector (RoundRobin by default) picks one per
+	// request, and a per-address exclusive-checkout HTTP/1.1 sub-pool fans out.
+	// Requires ClientOptions.Resolver; Addr must be empty. As with
+	// TransportH1Pool, ConnOpts.Dialer must not assert ALPN "h2".
+	TransportH1Managed
 )
 
 // DefaultMaxDecompressedSize is the default maximum decompressed body
@@ -205,9 +226,9 @@ type Client struct {
 // NewClient validates opts and constructs a Client. It does NOT dial;
 // the first Do or DoStream call triggers a lazy connection establish.
 func NewClient(opts ClientOptions) (*Client, error) {
-	// Managed transports (HTTP/2 or HTTP/3) let the Resolver own addressing, so
-	// they must not carry an Addr; every other transport requires one.
-	if opts.Transport != TransportManaged && opts.Transport != TransportH3Managed {
+	// Managed transports let the Resolver own addressing, so they must not carry
+	// an Addr; every other transport requires one.
+	if !isManagedTransport(opts.Transport) {
 		if opts.Addr == "" || containsAnyWhitespace(opts.Addr) {
 			return nil, fmt.Errorf("client: ClientOptions.Addr must be a non-empty host:port without whitespace")
 		}
@@ -285,7 +306,11 @@ func validateTransportOptions(opts ClientOptions) error {
 		if opts.Pool == nil {
 			return fmt.Errorf("%w: Pool is required for TransportH3Pool", ErrInvalidPoolOptions)
 		}
-	case TransportManaged, TransportH3Managed:
+	case TransportH1Pool:
+		if opts.Pool == nil {
+			return fmt.Errorf("%w: Pool is required for TransportH1Pool", ErrInvalidPoolOptions)
+		}
+	case TransportManaged, TransportH3Managed, TransportH1Managed:
 		if opts.Resolver == nil {
 			return fmt.Errorf("%w: Resolver is required for this managed transport", ErrInvalidOptions)
 		}
@@ -300,9 +325,24 @@ func validateTransportOptions(opts ClientOptions) error {
 
 // isH3Transport reports whether kind speaks HTTP/3 over QUIC and therefore dials
 // via http3.Dial (needing a *tls.Config) instead of a conn.Dialer.
+//
+// There is deliberately no isH1Transport analogue: the HTTP/1.1 transports dial
+// through ConnOpts.Dialer exactly like the HTTP/2 ones, so they need no carve-out
+// from the Dialer-required check.
 func isH3Transport(kind TransportKind) bool {
 	switch kind {
 	case TransportH3, TransportH3Pool, TransportH3Managed:
+		return true
+	default:
+		return false
+	}
+}
+
+// isManagedTransport reports whether kind discovers its addresses through a
+// Resolver rather than a fixed ClientOptions.Addr.
+func isManagedTransport(kind TransportKind) bool {
+	switch kind {
+	case TransportManaged, TransportH3Managed, TransportH1Managed:
 		return true
 	default:
 		return false
@@ -374,6 +414,20 @@ func buildTransport(opts ClientOptions, hooksPtr *atomic.Pointer[Hooks], metrics
 			return nil, err
 		}
 		return &h3ManagedTransport{mp: mp}, nil
+	case TransportH1Pool:
+		return &h1PoolTransport{
+			p: newH1Pool(opts.Addr, opts.ConnOpts.Dialer, *opts.Pool, hooksPtr, metrics),
+		}, nil
+	case TransportH1Managed:
+		po := PoolOptions{}
+		if opts.Pool != nil {
+			po = *opts.Pool
+		}
+		mp, err := newH1ManagedPool(opts.Resolver, opts.Selector, opts.DrainMode, opts.ConnOpts.Dialer, po, hooksPtr, metrics)
+		if err != nil {
+			return nil, err
+		}
+		return &h1ManagedTransport{mp: mp}, nil
 	}
 	return nil, fmt.Errorf("%w: %d", ErrInvalidTransportKind, int(opts.Transport))
 }
@@ -418,6 +472,10 @@ func (c *Client) PoolStats() Stats {
 	case *h3PoolTransport:
 		return t.p.Stats()
 	case *h3ManagedTransport:
+		return t.mp.stats()
+	case *h1PoolTransport:
+		return t.p.Stats()
+	case *h1ManagedTransport:
 		return t.mp.stats()
 	}
 	return Stats{}

@@ -125,6 +125,69 @@ func NewH3PoolClient(addr string, tlsConfig *tls.Config, pool PoolOptions, opts 
 	}, opts)
 }
 
+// NewH1Client builds a single-connection HTTP/1.1 client: one connection to addr,
+// lazy-dialed on first request, with auto-redial. Requests are serialized — HTTP/1.1
+// has no multiplexing and pipelining is deliberately unsupported, so a second
+// concurrent request waits for the first to finish. For concurrent load use
+// NewH1PoolClient, where MaxConnsPerHost sets the concurrency.
+//
+// The dialer must not offer or assert ALPN "h2": use a plain TCP dialer
+// (&conn.PlaintextDialer{}), or a TLS dialer whose Config.NextProtos contains only
+// "http/1.1". A dialer asserting "h2" fails the handshake against an HTTP/1.1-only
+// server; for automatic negotiation use TransportALPN via NewClient instead.
+func NewH1Client(addr string, dialer conn.Dialer, opts ...Option) (*Client, error) {
+	return buildClient(ClientOptions{
+		Addr:      addr,
+		Transport: TransportH1SingleConn,
+		ConnOpts:  conn.ConnOptions{Dialer: dialer},
+	}, opts)
+}
+
+// NewH1PoolClient builds a pooled HTTP/1.1 client: up to pool.MaxConnsPerHost
+// connections to one addr, with keep-alive reuse, idle eviction, and health-check
+// sweeps.
+//
+// Unlike the HTTP/2 and HTTP/3 pools this is an exclusive-checkout pool. HTTP/1.1
+// carries exactly one request/response exchange per connection at a time, so:
+//
+//   - pool.MaxConnsPerHost IS the request concurrency — it is the only knob that
+//     matters here, and the pool never exceeds it.
+//   - pool.MaxStreamsPerConn does NOT apply to HTTP/1.1 and is ignored. (PoolOptions
+//     is shared with the H2/H3 pools; the per-conn cap here is always 1.)
+//   - A request arriving when every connection is busy blocks until one frees or
+//     its ctx is done — it is never serialized onto a busy connection.
+//
+// Connections are reused after each exchange and discarded when the response says
+// the connection will not persist ("Connection: close", HTTP/1.0 without
+// keep-alive), on any exchange error, or when the peer closed the socket.
+//
+// The dialer must not offer or assert ALPN "h2" — see NewH1Client.
+func NewH1PoolClient(addr string, dialer conn.Dialer, pool PoolOptions, opts ...Option) (*Client, error) {
+	p := pool // copy so the caller's value is not retained/aliased
+	return buildClient(ClientOptions{
+		Addr:      addr,
+		Transport: TransportH1Pool,
+		Pool:      &p,
+		ConnOpts:  conn.ConnOptions{Dialer: dialer},
+	}, opts)
+}
+
+// NewManagedH1Client builds a managed multi-address HTTP/1.1 client: the resolver
+// discovers backends, a selector (RoundRobin by default) picks one per request, and
+// a per-address exclusive-checkout HTTP/1.1 sub-pool fans out. No Addr — the
+// resolver owns addressing. Tune the per-address sub-pools (notably
+// MaxConnsPerHost, which sets per-address concurrency) with the Pool field via
+// NewClient; MaxStreamsPerConn does not apply to HTTP/1.1.
+//
+// The dialer must not offer or assert ALPN "h2" — see NewH1Client.
+func NewManagedH1Client(resolver Resolver, dialer conn.Dialer, opts ...Option) (*Client, error) {
+	return buildClient(ClientOptions{
+		Transport: TransportH1Managed,
+		Resolver:  resolver,
+		ConnOpts:  conn.ConnOptions{Dialer: dialer},
+	}, opts)
+}
+
 // NewManagedClient builds a managed multi-address client: resolver discovers
 // backends, a selector (RoundRobin by default) picks one per request, and a
 // per-address sub-pool fans out. No Addr — the resolver owns addressing.
