@@ -367,16 +367,25 @@ func TestFault_SettingsOnRequestStream(t *testing.T) { expectConnError(t, "/sett
 // (RFC 9114 §7.1).
 func TestFault_TruncatedHeaders(t *testing.T) { expectConnError(t, "/trunc-headers") }
 
-// TestFault_QpackDynamicRef: the #1 cross-implementation risk. The client is a
-// static-only QPACK decoder (it advertises SETTINGS_QPACK_MAX_TABLE_CAPACITY=0),
-// so a server that references the dynamic table anyway must be rejected cleanly
-// with QPACK_DECOMPRESSION_FAILED (a connection error, RFC 9204 §2.2) — not
-// misdecoded, and not a hang.
+// TestFault_QpackDynamicRef: the client now advertises a non-zero
+// SETTINGS_QPACK_MAX_TABLE_CAPACITY, so a WELL-FORMED dynamic reference decodes
+// (that live path is exercised end-to-end by the real interop matrix — Caddy /
+// nginx / aioquic all use dynamic QPACK for response headers once capacity > 0 —
+// e.g. TestInterop_GET). This fault stays an error because its reference is
+// MALFORMED, not merely dynamic: the field section is prefix RIC=0, Base=0, then a
+// dynamic indexed field line (0x80), which resolves to Base-relative index 0 of an
+// empty acknowledged window — an out-of-range reference the decoder must reject as
+// QPACK_DECOMPRESSION_FAILED (a connection error, RFC 9204 §2.2), regardless of
+// capacity, not misdecode and not hang.
 func TestFault_QpackDynamicRef(t *testing.T) { expectConnError(t, "/qpack-dynamic-ref") }
 
 // TestFault_QpackRequiredInsertCount: a field-section prefix with a non-zero
-// Required Insert Count claims dynamic-table state the capacity-0 client cannot
-// have, and must be rejected as QPACK_DECOMPRESSION_FAILED (RFC 9204 §4.5.1).
+// Required Insert Count that exceeds the entries the server actually inserted (the
+// fault server runs no encoder, so our table's insert count is 0). Because the
+// client advertises SETTINGS_QPACK_BLOCKED_STREAMS=0 it never blocks waiting for
+// the encoder stream to catch up, so a Required Insert Count past the insert count
+// is rejected immediately as QPACK_DECOMPRESSION_FAILED (RFC 9204 §4.5.1) rather
+// than hanging.
 func TestFault_QpackRequiredInsertCount(t *testing.T) { expectConnError(t, "/qpack-ric") }
 
 // TestFault_StopSending checks that when the server aborts reading the request

@@ -17,9 +17,9 @@ type dtEntry struct {
 // (encoder-stream instructions, §3.2.5), by an index relative to a field
 // section's Base (§3.2.5), or as a post-Base index (§3.2.6).
 //
-// It is INERT in this build: nothing on the wire references it because the
-// client advertises SETTINGS_QPACK_MAX_TABLE_CAPACITY=0. Not safe for concurrent
-// use.
+// The http3 client sizes one of these to the SETTINGS_QPACK_MAX_TABLE_CAPACITY it
+// advertises and shares it across the connection under its own lock; this type is
+// not safe for concurrent use on its own.
 type DynamicTable struct {
 	entries []dtEntry // logical FIFO ring; entries[head..head+count) wraps
 	head    int       // slot of the oldest live entry

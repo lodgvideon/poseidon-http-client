@@ -24,16 +24,17 @@ type Response struct {
 // the caller sharing dt across goroutines must hold its read lock across this
 // call, because the kept field bytes are copied inside the decode.
 //
-// The bool report is true when the field section referenced the dynamic table
-// (its Required Insert Count was non-zero), so the caller must acknowledge it with
-// a Section Acknowledgment (RFC 9204 §2.1.4, §4.4.1). It is always false in the
-// static-only profile.
+// The uint64 report is the section's Required Insert Count. When it is non-zero
+// the field section referenced the dynamic table, so the caller must acknowledge
+// it with a Section Acknowledgment for the stream — which also implicitly advances
+// the encoder's Known Received Count to this value (RFC 9204 §2.1.4, §4.4.1). It
+// is always zero in the static-only profile.
 //
 // It returns ErrH3Message (→ H3_MESSAGE_ERROR, a stream error) for a rule
 // violation, or qpack.ErrDecompressionFailed (→ QPACK_DECOMPRESSION_FAILED, a
 // connection error, RFC 9204 §2.2) if the field section itself is malformed.
 // The caller maps these to different error codes and scopes.
-func DecodeResponseHeaders(dec *qpack.Decoder, dt *qpack.DynamicTable, fieldSection []byte) (*Response, bool, error) {
+func DecodeResponseHeaders(dec *qpack.Decoder, dt *qpack.DynamicTable, fieldSection []byte) (*Response, uint64, error) {
 	resp := &Response{}
 	var haveStatus, sawRegular bool
 	err := dec.DecodeFieldSection(fieldSection, dt, func(name, value []byte) error {
@@ -66,14 +67,14 @@ func DecodeResponseHeaders(dec *qpack.Decoder, dt *qpack.DynamicTable, fieldSect
 		return nil
 	})
 	if err != nil {
-		return nil, false, err
+		return nil, 0, err
 	}
 	if !haveStatus {
-		return nil, false, ErrH3Message
+		return nil, 0, ErrH3Message
 	}
 	// The decode succeeded, so the prefix is well-formed and this cannot error.
 	ric, _ := qpack.RequiredInsertCount(fieldSection, dt)
-	return resp, ric > 0, nil
+	return resp, ric, nil
 }
 
 // DecodeTrailers QPACK-decodes a trailing HEADERS field section into its regular
@@ -81,12 +82,12 @@ func DecodeResponseHeaders(dec *qpack.Decoder, dt *qpack.DynamicTable, fieldSect
 // any field name beginning with ':' (or an empty name) is a malformed message;
 // regular names/values are validated exactly as in a header section (§4.2, §5.5).
 // Dynamic references are resolved against dt (nil for the static-only profile);
-// the caller sharing dt must hold its read lock across this call. The bool report
-// is true when the section referenced the dynamic table, so the caller must send a
-// Section Acknowledgment (RFC 9204 §4.4.1). It returns ErrH3Message for a rule
-// violation, or qpack.ErrDecompressionFailed if the field section itself is
-// malformed.
-func DecodeTrailers(dec *qpack.Decoder, dt *qpack.DynamicTable, fieldSection []byte) ([]hpack.HeaderField, bool, error) {
+// the caller sharing dt must hold its read lock across this call. The uint64
+// report is the section's Required Insert Count; when non-zero the section
+// referenced the dynamic table, so the caller must send a Section Acknowledgment
+// (RFC 9204 §4.4.1). It returns ErrH3Message for a rule violation, or
+// qpack.ErrDecompressionFailed if the field section itself is malformed.
+func DecodeTrailers(dec *qpack.Decoder, dt *qpack.DynamicTable, fieldSection []byte) ([]hpack.HeaderField, uint64, error) {
 	var fields []hpack.HeaderField
 	err := dec.DecodeFieldSection(fieldSection, dt, func(name, value []byte) error {
 		if len(name) == 0 || name[0] == ':' {
@@ -102,10 +103,10 @@ func DecodeTrailers(dec *qpack.Decoder, dt *qpack.DynamicTable, fieldSection []b
 		return nil
 	})
 	if err != nil {
-		return nil, false, err
+		return nil, 0, err
 	}
 	ric, _ := qpack.RequiredInsertCount(fieldSection, dt) // decode succeeded → prefix well-formed
-	return fields, ric > 0, nil
+	return fields, ric, nil
 }
 
 // canHaveContent reports whether a final response with this status, for a request
