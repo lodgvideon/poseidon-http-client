@@ -411,6 +411,28 @@ interop-level RIC-ahead scenario (a fault server sending a section before its
 encoder-stream insert) is a follow-up; the unit matrix below fully exercises the
 wait/wake, the ctx-bounded park, and the M-blocked bound against a fake encoder.
 
+Q5 adds the ENCODE side: the client maintains its OWN dynamic table (the table the
+server keeps as decoder), sized from the server's advertised
+`SETTINGS_QPACK_MAX_TABLE_CAPACITY` (0, or below 32, ⇒ static-only, a no-op). It is a
+conservative encoder — insert-then-reference-after-ack: a repeated header is inserted
+on our encoder stream the first time it is seen (Insert With Name Reference /
+Literal Name, §4.3.2/§4.3.3), and a request field section references it only once the
+server's decoder acknowledges it — an Insert Count Increment on the server's decoder
+stream advances our Known Received Count (§2.1.4 / §4.4.3), and only entries below it
+are referenced. So a referenced section's Required Insert Count is never ahead of the
+server's insert count and no request stream ever blocks. The encoder never evicts (it
+inserts only while there is room under its chosen capacity), so an entry referenced by
+an in-flight request cannot be dropped. All encoder state — the table, its Known
+Received Count, and the encoder-stream write buffer — is serialized under a new leaf
+`encMu` (a `Do` encodes one request under it; the reader applies the server's decoder
+stream under it), never held across a wait. The static-table output is preserved
+byte-for-byte before SETTINGS arrive and against a capacity-0 server. The CI interop
+(Caddy / nginx / aioquic decoding our dynamic-referencing requests) is the wire gate;
+the unit matrix round-trips every encoded section and every Insert instruction back
+through the Q1 decoder against a mirror of the server's decode table, pinning the
+Required Insert Count / Base / index math a wrong byte of which would fail every
+request.
+
 | Section | Type        | Test |
 |---------|-------------|------|
 | App. A  | Roundtrip   | TestStaticTable_Shape (99-entry 0-based static table) |
@@ -442,6 +464,11 @@ wait/wake, the ctx-bounded park, and the M-blocked bound against a fake encoder.
 | §2.1.3 (blocked) | Conformance | TestConformance_RFC9204_Sec213_BlockedDecodeWaitsForInsert (a section whose Required Insert Count is ahead of the insert count parks the decode until the reader applies the encoder-stream insert, then unblocks and decodes — `-race -count=5`), TestConformance_RFC9204_Sec213_BlockedDecodeCtxTimeout (a blocked decode whose promised insert never arrives fails on the request ctx deadline, never hangs) — Q4 |
 | §2.1.2 (blocked) | Conformance | TestConformance_RFC9204_Sec212_BlockedStreamLimitEnforced (with SETTINGS_QPACK_BLOCKED_STREAMS=2 a third simultaneously-blocked section exceeds the advertised limit → QPACK_DECOMPRESSION_FAILED) — Q4 |
 | §2.1.3 (concurrency) | Race | TestConcurrent_QPACKBlockedStreams_UnderRace (many decoders with heterogeneous Required Insert Counts, some blocked, wake correctly as the reader delivers inserts and broadcasts — no lost wake, no race, no deadlock; `-race -count=5`) — Q4 |
+| §2.1 (encode) | Conformance | TestConformance_RFC9204_Sec21_EncodeReferenceAfterAck (qpack: insert-then-reference-after-ack — the first request inserts and stays byte-identical to the static encoder, the second references the dynamic entries; both round-trip through the Q1 decoder against a server-mirror table with the right Required Insert Count / Base), TestConformance_RFC9204_Sec21_EncodeSideDynamicTable (http3: full client round-trip — server SETTINGS install the encoder, the request field sections decode against the table rebuilt from our encoder stream) — Q5 |
+| §2.1.4 (encode) | Conformance | TestConformance_RFC9204_Sec214_ReferenceOnlyAcknowledged (only entries below the Known Received Count are referenced — a partial Insert Count Increment leaves the unacknowledged entry static), TestConformance_RFC9204_Sec44_ParseDecoderInstructions (an Insert Count Increment advances the Known Received Count; a zero increment or one past the inserts made → QPACK_DECODER_STREAM_ERROR; Section Acknowledgment / Stream Cancellation consumed as no-ops; a partial instruction retained) — Q5 |
+| §4.3.1–3 (encode) | Conformance | TestConformance_RFC9204_Sec21_EncodeReferenceAfterAck (Set Dynamic Table Capacity + Insert With Name Reference emitted on our encoder stream and replayed by the Q1 decoder), TestConformance_RFC9204_Sec322_EncoderNeverEvicts (the encoder inserts only what fits under capacity, so the mirror never evicts — live entries equal the insert count) — Q5 |
+| §3.2.3 (encode) | Conformance | TestConformance_RFC9204_Sec21_EncodeStaticFallbackServerCapZero (a server capacity of 0 keeps the encoder static-only: the field section is byte-identical to the static encoder and nothing beyond the type byte is written on our encoder stream), TestNewDynamicEncoder_RejectsTinyCapacity (qpack: a capacity below 32 is rejected → the caller stays static-only) — Q5 |
+| §2.1 (encode concurrency) | Race | TestConcurrent_QPACKEncoderDynamic_UnderRace (N goroutines encode requests through the shared encoder dynamic table while acknowledgments apply through the same encMu-guarded path the reader uses — no race, no deadlock; `-race -count=5`) — Q5 |
 
 ## RFC 9114 — HTTP/3 (Phase G)
 

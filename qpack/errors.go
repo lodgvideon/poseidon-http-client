@@ -27,3 +27,10 @@ var ErrDecompressionFailed = errors.New("qpack: decompression failed")
 // insertion too large for the table. It corresponds to the
 // QPACK_ENCODER_STREAM_ERROR (0x0201) connection error.
 var ErrEncoderStream = errors.New("qpack: encoder stream error")
+
+// ErrDecoderStream is returned when applying a decoder-stream instruction
+// (RFC 9204 §4.4) the peer's decoder sent fails: a malformed instruction, an
+// Insert Count Increment of zero, or an acknowledgment that would advance the
+// encoder's Known Received Count past the entries it has actually inserted. It
+// corresponds to the QPACK_DECODER_STREAM_ERROR (0x0202) connection error.
+var ErrDecoderStream = errors.New("qpack: decoder stream error")

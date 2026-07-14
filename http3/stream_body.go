@@ -17,8 +17,7 @@ import (
 // the stream on a non-nil error; once the head is returned the BodyReader owns the
 // abort.
 func (c *Client) roundTripStream(ctx context.Context, stream quicStream, req *Request) (resp *Response, brOut *BodyReader, err error) {
-	var enc qpack.Encoder
-	frame, eerr := req.EncodeHeaders(&enc, nil, c.maxFieldSection.Load())
+	frame, eerr := c.encodeRequestHeaders(req)
 	if eerr != nil {
 		return nil, nil, eerr
 	}

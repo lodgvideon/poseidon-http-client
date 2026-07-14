@@ -1,5 +1,7 @@
 package qpack
 
+import "bytes"
+
 // dtEntry stores offsets into the arena for one dynamic-table entry. Each
 // entry's RFC size is nameLen + valueLen + 32 (RFC 9204 §3.2.1, identical to
 // HPACK §4.1).
@@ -96,6 +98,32 @@ func (dt *DynamicTable) at(abs uint64) (name, value []byte, ok bool) {
 	e := dt.entries[pos]
 	return dt.arena[e.nameOff : e.nameOff+e.nameLen],
 		dt.arena[e.valueOff : e.valueOff+e.valueLen], true
+}
+
+// canInsertWithoutEvict reports whether an entry of the given name and value
+// lengths fits under the current capacity without evicting any live entry
+// (RFC 9204 §3.2.2). The encode side uses it to stay eviction-free, so an entry
+// referenced by an in-flight (unacknowledged) request is never dropped.
+func (dt *DynamicTable) canInsertWithoutEvict(nameLen, valueLen int) bool {
+	return dt.size+entrySize(nameLen, valueLen) <= dt.capacity
+}
+
+// lookupDynamic returns the absolute index of the oldest live entry equal to
+// (name, value), or ok=false when none matches. The oldest match is preferred
+// because it is the most likely to already have been acknowledged by the peer's
+// decoder, and thus safe for the encoder to reference. The scan is linear over
+// the live entries; the table is small (bounded by the capacity, ~a few dozen
+// entries), so this stays cheap and allocation-free.
+func (dt *DynamicTable) lookupDynamic(name, value []byte) (abs uint64, ok bool) {
+	oldest := dt.oldestAbs()
+	for i := 0; i < dt.count; i++ {
+		a := oldest + uint64(i)
+		n, v, present := dt.at(a)
+		if present && bytes.Equal(n, name) && bytes.Equal(v, value) {
+			return a, true
+		}
+	}
+	return 0, false
 }
 
 // atInsertCountRelative resolves an encoder-stream relative index (RFC 9204
