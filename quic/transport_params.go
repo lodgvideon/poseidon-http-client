@@ -170,7 +170,7 @@ func (tp *TransportParams) setStreamData(id uint64, value []byte) (handled bool,
 	return false, nil
 }
 
-func (tp *TransportParams) set(id uint64, value []byte) error {
+func (tp *TransportParams) set(id uint64, value []byte) error { //nolint:gocyclo // flat dispatch over transport-parameter IDs — dense by count, not branching logic
 	if handled, err := tp.setStreamData(id, value); handled {
 		return err
 	}
