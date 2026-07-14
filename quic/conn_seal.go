@@ -190,23 +190,27 @@ func (c *Conn) sealPacket(sp int, frames []byte, ackEliciting bool, retrans []re
 	c.sent[sp].onSent(pn, c.clock(), ackEliciting, retrans)
 	length := uint64(pnLen + len(frames) + 16)
 
-	var hdr []byte
+	// Build the header into the reused hdrScratch and seal into the reused
+	// sealScratch (see the Conn scratch fields' doc): both are consumed by the
+	// immediately-following pc.Write and never retained, so reuse under c.mu is
+	// safe. Reassigning the fields captures any capacity growth for the next seal.
 	var pnOffset int
 	switch sp {
 	case spaceInitial:
-		hdr, pnOffset = AppendLongHeader(nil, PacketInitial, QUICVersion1, c.dcid, c.scid, c.retryToken, pnLen, length)
+		c.hdrScratch, pnOffset = AppendLongHeader(c.hdrScratch[:0], PacketInitial, QUICVersion1, c.dcid, c.scid, c.retryToken, pnLen, length)
 	case spaceHandshake:
-		hdr, pnOffset = AppendLongHeader(nil, PacketHandshake, QUICVersion1, c.dcid, c.scid, nil, pnLen, length)
+		c.hdrScratch, pnOffset = AppendLongHeader(c.hdrScratch[:0], PacketHandshake, QUICVersion1, c.dcid, c.scid, nil, pnLen, length)
 	default:
-		hdr, pnOffset = AppendShortHeader(nil, c.dcid, pnLen, c.appSendPhase())
+		c.hdrScratch, pnOffset = AppendShortHeader(c.hdrScratch[:0], c.dcid, pnLen, c.appSendPhase())
 	}
 	for i := pnLen - 1; i >= 0; i-- {
-		hdr = append(hdr, byte(pn>>(8*uint(i))))
+		c.hdrScratch = append(c.hdrScratch, byte(pn>>(8*uint(i))))
 	}
-	pkt, err := c.sealerFor(sp).Seal(nil, hdr, pnOffset, pnLen, pn, frames)
+	pkt, err := c.sealerFor(sp).Seal(c.sealScratch[:0], c.hdrScratch, pnOffset, pnLen, pn, frames)
 	if err != nil {
 		return nil, err
 	}
+	c.sealScratch = pkt // retain the (possibly grown) backing array for the next seal
 	c.onPacketSent(sp, pn, ackEliciting, len(pkt)) // congestion accounting (RFC 9002 §7)
 	if sp == spaceApp {
 		c.appSendCount++ // toward the AEAD confidentiality limit (§6.6)

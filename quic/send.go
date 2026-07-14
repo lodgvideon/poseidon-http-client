@@ -84,9 +84,14 @@ func (s *Stream) sendLocked(data []byte, fin bool) (int, error) {
 func (s *Stream) writeStreamFrame(chunk []byte, fin bool) error {
 	rf := retransFrame{
 		kind: retransStream, streamID: s.id, offset: s.sendOffset, fin: fin,
-		data: append([]byte(nil), chunk...),
+		data: append([]byte(nil), chunk...), // private copy retained for retransmit (§13.3); NOT the reused scratch
 	}
-	if err := s.conn.writeAppFrames(AppendStream(nil, s.id, s.sendOffset, fin, chunk), []retransFrame{rf}); err != nil {
+	// Build the STREAM frame into the reused frameScratch: it is consumed by the
+	// seal below (as the AEAD payload) before any next writeStreamFrame overwrites
+	// it, and c.mu is held throughout, so reuse is safe. rf.data above is a
+	// separate private copy, so a resend never reads this scratch.
+	s.conn.frameScratch = AppendStream(s.conn.frameScratch[:0], s.id, s.sendOffset, fin, chunk)
+	if err := s.conn.writeAppFrames(s.conn.frameScratch, []retransFrame{rf}); err != nil {
 		return err
 	}
 	s.sendOffset += uint64(len(chunk))
