@@ -2,6 +2,8 @@ package quic
 
 import (
 	"bytes"
+	"context"
+	"crypto/tls"
 	"testing"
 )
 
@@ -170,4 +172,63 @@ func TestSealPacket_BadPNLen(t *testing.T) {
 	if _, err := SealPacket(nil, sealer, PacketHandshake, []byte{1}, []byte{2}, nil, 0, 5, []byte{0x01}); err != ErrPacketEncoding {
 		t.Fatalf("SealPacket(pnLen=5) = %v, want ErrPacketEncoding", err)
 	}
+}
+
+// TestStartServerHandshake_ClientCompletes drives a real client Conn against
+// StartServerHandshake over an in-memory datagram channel: the server accepts the
+// client's Initial, generates its first flight, and the client's TLS handshake
+// completes. This is the end-to-end cover for AcceptInitial + StartServerHandshake
+// + SealPacket + NewServerHandshake together.
+func TestStartServerHandshake_ClientCompletes(t *testing.T) {
+	cert, pool := genServerCert(t)
+	clientTP := concat(
+		tpInt(tpInitialMaxData, 1<<20),
+		tpInt(tpInitialMaxStreamDataBidiRemote, 1<<20),
+		tpInt(tpInitialMaxStreamsBidi, 16),
+	)
+	serverSCID := []byte{0xab, 0xcd, 0xef}
+
+	toServer := make(chan []byte, 16)
+	fromServer := make(chan []byte, 16)
+	clientPC := &chanPC{rx: fromServer, tx: toServer}
+
+	client, err := NewConn(clientPC, &tls.Config{ServerName: "example.com", RootCAs: pool}, clientTP)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The server authenticates against the client's original DCID and advertises
+	// its own source CID (RFC 9000 §7.3).
+	serverTP := concat(clientTP,
+		tpBytes(tpInitialSourceConnectionID, serverSCID),
+		tpBytes(tpOriginalDestinationConnectionID, client.origDCID))
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		dg := <-toServer // the client's Initial datagram
+		ci, err := AcceptInitial(dg)
+		if err != nil {
+			t.Errorf("AcceptInitial: %v", err)
+			return
+		}
+		flight, err := StartServerHandshake(ci, &tls.Config{Certificates: []tls.Certificate{cert}}, serverTP, serverSCID)
+		if err != nil {
+			t.Errorf("StartServerHandshake: %v", err)
+			return
+		}
+		if flight.HandshakeSealer == nil {
+			t.Errorf("StartServerHandshake installed no handshake sealer")
+		}
+		for _, d := range flight.Datagrams {
+			fromServer <- d
+		}
+	}()
+
+	if err := client.Establish(context.Background()); err != nil {
+		t.Fatalf("client Establish: %v", err)
+	}
+	if !client.handshakeComplete {
+		t.Fatal("client handshake did not complete against StartServerHandshake")
+	}
+	<-done
 }

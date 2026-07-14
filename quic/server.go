@@ -1,6 +1,10 @@
 package quic
 
-import "errors"
+import (
+	"context"
+	"crypto/tls"
+	"errors"
+)
 
 // This file holds the server-role entry points to the QUIC transport. The rest
 // of the package drives the client (dialing) role; server support is being added
@@ -143,4 +147,121 @@ func SealPacket(dst []byte, s *Sealer, typ PacketType, dcid, scid, token []byte,
 		hdr = append(hdr, byte(pn>>(8*uint(i))))
 	}
 	return s.Seal(dst, hdr, pnOffset, pnLen, pn, payload)
+}
+
+// serverFlightSink captures a server handshake's outbound CRYPTO per packet-
+// number space, plus the Handshake- and 1-RTT-level send sealers as crypto/tls
+// installs write keys, so StartServerHandshake can seal the response flights.
+type serverFlightSink struct {
+	crypto          [numSpaces][]byte
+	handshakeSealer *Sealer
+	appSealer       *Sealer
+}
+
+func (s *serverFlightSink) WriteCrypto(l tls.QUICEncryptionLevel, d []byte) error {
+	s.crypto[levelSpace(l)] = append(s.crypto[levelSpace(l)], d...)
+	return nil
+}
+
+func (s *serverFlightSink) SetReadKeys(tls.QUICEncryptionLevel, uint16, []byte) error { return nil }
+
+func (s *serverFlightSink) SetWriteKeys(l tls.QUICEncryptionLevel, suite uint16, secret []byte) error {
+	k, err := KeysFromSecret(suite, secret)
+	if err != nil {
+		return err
+	}
+	sealer, err := NewSealer(k)
+	if err != nil {
+		return err
+	}
+	switch levelSpace(l) {
+	case spaceHandshake:
+		s.handshakeSealer = sealer
+	case spaceApp:
+		s.appSealer = sealer
+	}
+	return nil
+}
+
+func (s *serverFlightSink) PeerTransportParameters([]byte) error { return nil }
+func (s *serverFlightSink) HandshakeComplete() error             { return nil }
+
+// ServerFlight is the server's first response to a client Initial: the sealed
+// datagram(s) to send back, plus the handshake state and send sealers needed to
+// carry the connection forward.
+type ServerFlight struct {
+	// Datagrams are the sealed packets to send to the client, each its own
+	// datagram: the Initial (ServerHello) and, once handshake keys exist, the
+	// Handshake flight (EncryptedExtensions .. Finished).
+	Datagrams [][]byte
+	// Handshake is the in-progress server handshake, to be driven further as the
+	// client's later CRYPTO arrives.
+	Handshake *TLSHandshake
+	// HandshakeSealer protects Handshake-level packets. AppSealer protects 1-RTT
+	// packets and is non-nil once the server installs application write keys
+	// (after it sends its Finished).
+	HandshakeSealer *Sealer
+	AppSealer       *Sealer
+	// SCID is the server's source connection ID used on the response packets.
+	SCID []byte
+}
+
+// StartServerHandshake processes a client's first Initial (as returned by
+// AcceptInitial), drives the TLS server through its first flight, and returns the
+// sealed response datagrams plus the state to continue the connection. cfg
+// carries the server certificate(s); tp is the server's serialized transport
+// parameters; scid is the server's chosen source connection ID, which the client
+// adopts as its destination CID. Reply packets are addressed to the client's
+// source connection ID (ci.SCID).
+//
+// It produces only the server's first flight; the handshake completes later, once
+// the client's Handshake-level Finished is fed to the returned Handshake.
+func StartServerHandshake(ci *ClientInitial, cfg *tls.Config, tp, scid []byte) (*ServerFlight, error) {
+	// The server's Initial keys derive from the client's original DCID.
+	_, serverKeys := InitialKeys(ci.DCID)
+	initialSealer, err := NewSealer(serverKeys)
+	if err != nil {
+		return nil, err
+	}
+
+	hs := NewServerHandshake(cfg, tp)
+	sink := &serverFlightSink{}
+	if err := hs.Start(context.Background()); err != nil {
+		return nil, err
+	}
+	if err := hs.Pump(sink); err != nil {
+		return nil, err
+	}
+	if err := hs.HandleCrypto(tls.QUICEncryptionLevelInitial, ci.CryptoData); err != nil {
+		return nil, err
+	}
+	if err := hs.Pump(sink); err != nil {
+		return nil, err
+	}
+
+	flight := &ServerFlight{
+		Handshake:       hs,
+		HandshakeSealer: sink.handshakeSealer,
+		AppSealer:       sink.appSealer,
+		SCID:            append([]byte(nil), scid...),
+	}
+	// Initial packet: the ServerHello, addressed to the client's source CID.
+	if len(sink.crypto[spaceInitial]) > 0 {
+		f := AppendCrypto(nil, 0, sink.crypto[spaceInitial])
+		dg, err := SealPacket(nil, initialSealer, PacketInitial, ci.SCID, scid, nil, 0, 4, f)
+		if err != nil {
+			return nil, err
+		}
+		flight.Datagrams = append(flight.Datagrams, dg)
+	}
+	// Handshake packet: EncryptedExtensions .. Finished, once handshake keys exist.
+	if sink.handshakeSealer != nil && len(sink.crypto[spaceHandshake]) > 0 {
+		f := AppendCrypto(nil, 0, sink.crypto[spaceHandshake])
+		dg, err := SealPacket(nil, sink.handshakeSealer, PacketHandshake, ci.SCID, scid, nil, 0, 4, f)
+		if err != nil {
+			return nil, err
+		}
+		flight.Datagrams = append(flight.Datagrams, dg)
+	}
+	return flight, nil
 }
