@@ -21,6 +21,15 @@ const (
 func (c *Conn) onStreamConsumed(s *Stream, n uint64) {
 	c.connRecvConsumed += n
 
+	// connRecvMax == 0 is the receive-flow-control-disabled sentinel (the gate
+	// OnStream uses to skip enforcement): with no enforcement there is no credit to
+	// grant, so queue nothing. Before the Recv-path flushControl (INV-3) a spurious
+	// grant here sat unsent and was harmless; now it would be flushed, so gate it —
+	// and a real connection always seeds connRecvMax (NewConn / DefaultConnRecvWindow).
+	if c.connRecvMax == 0 {
+		return
+	}
+
 	// Per-stream: keep the advertised limit a full window ahead of what has
 	// been consumed on this stream.
 	if want := uint64(s.recv.readOff) + DefaultStreamRecvWindow; want >= s.recvMax+DefaultStreamRecvWindow/2 {

@@ -3,39 +3,22 @@ package http3
 import (
 	"context"
 	"errors"
-	"sync"
 	"testing"
 )
 
-// TestClient_Do_ConcurrentRejected proves the single-request contract is
-// enforced, not merely documented: while one Do is in flight, a second
-// concurrent Do returns ErrConcurrentUse without touching the connection, and
-// the guard is released once the first Do completes.
-//
-// It is a real concurrency test — the first Do is blocked inside its receive
-// loop (via pollHook) with the in-flight guard held, and the second Do races it
-// — so it must be run under -race.
+// TestClient_Do_ConcurrentRejected proves the single-request contract PR 2c keeps
+// (inFlight retained): while one Do is in flight — its request sent and parked in
+// WaitReadable holding the guard — a second concurrent Do returns ErrConcurrentUse
+// without touching the connection, and the guard is released once the first Do
+// completes. Run under -race.
 func TestClient_Do_ConcurrentRejected(t *testing.T) {
 	headersFrame := AppendHeaders(nil, encodeSection(hf(":status", "200")))
 	dataFrame := AppendData(nil, []byte("hi"))
 
-	// The request stream yields its HEADERS but is not finished, so the first Do
-	// blocks in poll; on release, poll delivers the DATA frame and the FIN so Do
-	// can complete.
+	// The request stream yields its HEADERS but no FIN, so the first Do reads the
+	// headers then parks in WaitReadable holding the in-flight guard.
 	req := &fakeStream{recvChunks: [][]byte{headersFrame}, fin: false}
-	entered := make(chan struct{})
-	release := make(chan struct{})
-	var once sync.Once
 	conn := &fakeConn{req: req}
-	conn.pollHook = func(context.Context) error {
-		once.Do(func() {
-			close(entered) // the first Do is now past the guard and blocked here
-			<-release
-			req.recvChunks = append(req.recvChunks, dataFrame)
-			req.fin = true
-		})
-		return nil
-	}
 
 	client, err := NewClientFake(conn, nil)
 	if err != nil {
@@ -53,7 +36,7 @@ func TestClient_Do_ConcurrentRejected(t *testing.T) {
 		done <- result{resp, err}
 	}()
 
-	<-entered // the first Do holds the in-flight guard and is blocked in poll
+	waitSent(t, conn) // the first Do holds the guard and is parked reading the response
 
 	// A second, concurrent Do must be rejected loudly rather than corrupt the
 	// shared connection / QPACK / control-stream state.
@@ -62,7 +45,8 @@ func TestClient_Do_ConcurrentRejected(t *testing.T) {
 		t.Fatalf("concurrent Do = %v, want ErrConcurrentUse", err)
 	}
 
-	close(release) // let the first Do finish
+	conn.pushRecv(dataFrame, true) // deliver the body + FIN so the first Do completes
+
 	got := <-done
 	if got.err != nil {
 		t.Fatalf("first Do = %v, want success", got.err)

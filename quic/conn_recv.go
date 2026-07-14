@@ -49,37 +49,80 @@ func (c *Conn) Establish(ctx context.Context) error {
 
 // Poll reads one datagram and processes it — dispatching frames to open streams
 // and sending acknowledgements — for driving receive after the handshake
-// completes (RFC 9000 §13). The caller sets a read deadline on the PacketConn to
-// bound the wait.
+// completes (RFC 9000 §13). It runs on the connection's reader goroutine.
+//
+// The one structural change from the single-goroutine era (docs/HTTP3_DESIGN.md
+// §3.2): the blocking pc.Read runs with c.mu RELEASED, so a concurrent Send can
+// seal and write a request while the reader is parked. The sequence is: lock →
+// leading flush (retransmits) → publish+arm the read deadline → arm→recheck ctx →
+// UNLOCK → blocking read → relock → timestamp after reacquiring → process. Every
+// error return latches terminateLocked so a blocked Do wakes.
+//
+// POSTCONDITION: Poll never returns holding c.mu — serviceControl and the H3
+// control servicing on the reader goroutine rely on this.
 func (c *Conn) Poll(ctx context.Context) error {
 	c.mu.Lock()
-	defer c.mu.Unlock()
-	return c.pollLocked(ctx)
-}
-
-// pollLocked is Poll's body. Assumes c.mu is held for the whole cycle, including
-// the blocking read (harmless while a single goroutine drives the connection; the
-// release-across-read restructure is a later PR — see docs/HTTP3_DESIGN.md §3.2).
-func (c *Conn) pollLocked(ctx context.Context) error {
+	// Leading flush: retransmits queued by reader-side detectLost, and any credit
+	// grants, must go out before we park (the original leading flush).
+	if err := c.flush(); err != nil {
+		c.terminateLocked(err)
+		c.mu.Unlock()
+		return err
+	}
 	if err := ctx.Err(); err != nil {
+		c.mu.Unlock()
 		return err
 	}
 	if c.pollBuf == nil {
 		c.pollBuf = make([]byte, 2048)
 	}
-	// Flush any output queued since the last read — notably MAX_STREAM_DATA /
-	// MAX_DATA credit grants from the application consuming a response — before
-	// blocking, or a flow-control-blocked peer would never send the data that
-	// would unblock the read (a deadlock until the idle timeout).
-	if err := c.flush(); err != nil {
+	// One connection-lifetime watchdog: on ctx (connCtx) cancel it pokes the read
+	// deadline into the past to unblock the parked Read (§3.1, INV-4).
+	c.ensureReadWatchdog(ctx)
+	// Compute and publish the read deadline under the lock before arming it, so a
+	// Do-side send can legally shorten it against the blocked Read (§4 INV-4).
+	dl := c.computeReadDeadline(ctx)
+	c.armedReadDeadline = dl
+	c.setReadDeadline(dl)
+	// Arm→recheck guard: a cancel that fired before we armed must not be masked by
+	// the freshly-armed future deadline (the deadline-clobber race).
+	if err := ctx.Err(); err != nil {
+		c.mu.Unlock()
 		return err
 	}
-	n, err := c.readWithPTO(ctx, c.pollBuf)
+	c.mu.Unlock()
+
+	n, err := c.pc.Read(c.pollBuf) // BLOCKING, UNLOCKED — a Do may seal+send here
+
+	c.mu.Lock()
+	now := c.clock() // timestamp AFTER reacquiring, so a Do's hold time does not skew RTT
+	perr := c.afterReadLocked(ctx, n, err, now)
+	if perr != nil {
+		// Catch-all latch: every teardown funnels through terminateLocked so a
+		// blocked WaitReadable / WaitSendable wakes (§3.3). First-error-wins, so a
+		// graceful Close that latched before connCancel is preserved over ctx.Err().
+		c.terminateLocked(perr)
+	}
+	c.mu.Unlock()
+	return perr
+}
+
+// afterReadLocked processes the outcome of the unlocked pc.Read. err is the read
+// error (nil on data), n the datagram length. Assumes c.mu is held.
+func (c *Conn) afterReadLocked(ctx context.Context, n int, err error, now time.Time) error {
+	// A ctx (connCtx) cancel unblocked the Read via the watchdog's past deadline;
+	// surface it as terminal, never as a PTO retry (which would re-arm and block).
+	if e := ctx.Err(); e != nil {
+		return e
+	}
 	if err != nil {
-		return err
+		if !isTimeout(err) {
+			return err // a real I/O error ends the connection
+		}
+		return c.handleExpiry(now, err) // deadline expiry: PTO / loss / idle
 	}
-	if err := c.recvDatagram(c.pollBuf[:n]); err != nil {
-		return c.fail(err)
+	if e := c.recvDatagram(c.pollBuf[:n]); e != nil {
+		return c.fail(e)
 	}
 	if c.peerClose != nil {
 		return c.peerClose // a received CONNECTION_CLOSE ended the connection (§10.2.2)
@@ -87,11 +130,9 @@ func (c *Conn) pollLocked(ctx context.Context) error {
 	c.discardStaleKeys() // drop a superseded key-update generation past its window (§6.3)
 	// Drain datagrams already buffered in the socket without blocking, so a
 	// server's response burst is processed and acknowledged as one batch rather
-	// than one datagram per Poll — one-at-a-time is too slow for a bulk transfer,
-	// the kernel receive buffer overflows, and the peer treats the resulting gaps
-	// as loss and collapses its congestion window (RFC 9002 §7).
-	if err := c.drainBuffered(); err != nil {
-		return err
+	// than one datagram per Poll (RFC 9002 §7).
+	if e := c.drainBuffered(); e != nil {
+		return e
 	}
 	if c.peerClose != nil {
 		return c.peerClose // a CONNECTION_CLOSE arrived in the drained burst (§10.2.2)
@@ -100,6 +141,125 @@ func (c *Conn) pollLocked(ctx context.Context) error {
 	// wake senders parked on blockCong/blockConn in one O(n) sweep (§3.3, INV-5).
 	c.maybeBroadcastSendWindow()
 	return c.flush()
+}
+
+// handleExpiry handles a read-deadline expiry (the moved readWithPTO expiry
+// branch, §3.2): an idle close if due, else one loss-detection or PTO step, then a
+// flush. Returning nil lets the reader re-poll (re-arm + read) for the next step;
+// a non-nil error (idle close, or the give-up timeout) ends the connection. Assumes
+// c.mu is held; now is the post-reacquire timestamp.
+func (c *Conn) handleExpiry(now time.Time, timeout error) error {
+	// Idle close first, gated on now >= idleDeadline, so an early PTO wake (a Do-side
+	// re-arm shortened the deadline) never mis-fires an idle close before probing.
+	if idleDL, ok := c.idleDeadline(); ok && !idleDL.After(now) {
+		return c.idleClose()
+	}
+	switch lt, sp, ok := c.earliestLossTime(); {
+	case ok && !lt.After(now):
+		c.detectLost(sp)
+	case (c.hasInFlight() || c.handshakeAntiDeadlock()) && c.ptoCount < maxPTOBackoff:
+		c.onPTO()
+	default:
+		return timeout // idle bound elapsed with nothing to probe / backoff exhausted
+	}
+	return c.flush()
+}
+
+// computeReadDeadline is the instant the reader arms as the blocking-read deadline:
+// the nearest of the loss-detection deadline, the idle deadline, and the caller's
+// context deadline (mirrors the moved readWithPTO deadline computation).
+func (c *Conn) computeReadDeadline(ctx context.Context) time.Time {
+	dl, _ := c.lossDetectionDeadline()
+	if idleDL, ok := c.idleDeadline(); ok && idleDL.Before(dl) {
+		dl = idleDL // idle timeout may be nearer than a probe (§10.1)
+	}
+	if d, ok := ctx.Deadline(); ok && d.Before(dl) {
+		dl = d
+	}
+	return dl
+}
+
+// setReadDeadline arms the PacketConn read deadline when the transport supports it
+// (a no-op otherwise, preserving the plain-Read behavior of deadline-less pipes).
+func (c *Conn) setReadDeadline(t time.Time) {
+	if dl, ok := c.pc.(interface{ SetReadDeadline(time.Time) error }); ok {
+		_ = dl.SetReadDeadline(t)
+	}
+}
+
+// rearmReadDeadline shortens the parked reader's read deadline after a Do-side send
+// put a packet in flight (docs/HTTP3_DESIGN.md §4 INV-4): the loss-detection
+// deadline is now sub-second where the reader armed the idle scale, so the reader
+// must wake to run PTO/loss detection. SetReadDeadline is legal against a blocked
+// Read. A no-op when no reader has parked (armedReadDeadline zero). Assumes c.mu is
+// held (called from the send epilogues, which hold it after sealPacket).
+func (c *Conn) rearmReadDeadline() {
+	if c.armedReadDeadline.IsZero() {
+		return
+	}
+	newDL, _ := c.lossDetectionDeadline()
+	if newDL.Before(c.armedReadDeadline) {
+		c.setReadDeadline(newDL)
+		c.armedReadDeadline = newDL
+	}
+}
+
+// ensureReadWatchdog starts, once per connection, the goroutine that pokes the read
+// deadline into the past when ctx (the connection-lifetime connCtx) is cancelled,
+// so a blocked pc.Read unblocks on Close (docs/HTTP3_DESIGN.md §3.1). It touches
+// only pc.SetReadDeadline (safe concurrently with Read per the net.Conn contract),
+// so it never races the engine, and exits when ctx is done. A no-op for a ctx with
+// no Done channel (hand-built test conns) or a transport without deadlines. Assumes
+// c.mu is held.
+func (c *Conn) ensureReadWatchdog(ctx context.Context) {
+	if c.readWatchdogStarted || ctx.Done() == nil {
+		return
+	}
+	dl, ok := c.pc.(interface{ SetReadDeadline(time.Time) error })
+	if !ok {
+		c.readWatchdogStarted = true // no deadline support: nothing to watch
+		return
+	}
+	c.readWatchdogStarted = true
+	go func() {
+		<-ctx.Done()
+		_ = dl.SetReadDeadline(pastDeadline)
+	}()
+}
+
+// flushControl emits the app-space credit grants (MAX_DATA / MAX_STREAM_DATA) and a
+// PATH_RESPONSE queued in pendingCtrl, on the CONSUMER's goroutine, before it
+// releases c.mu (docs/HTTP3_DESIGN.md §4 INV-3): the goroutine that consumed
+// received bytes grants its own credit immediately rather than waiting for the
+// parked reader's next flush, so a flow-control-blocked peer is unblocked without a
+// round trip. It emits ONLY pendingCtrl / PATH_RESPONSE, NEVER the pending ACK — the
+// ACK cadence stays reader-owned (INV-6). A PATH_RESPONSE keeps its 1200-byte
+// padding (BREAK3, RFC 9000 §8.2.2). Assumes c.mu is held.
+func (c *Conn) flushControl() error {
+	if len(c.pendingCtrl) == 0 {
+		return nil
+	}
+	if c.closed || c.sealerFor(spaceApp) == nil {
+		return nil // draining, or 1-RTT keys not yet installed
+	}
+	var frames []byte
+	frames = append(frames, c.pendingCtrl...)
+	c.pendingCtrl = c.pendingCtrl[:0]
+	// A PATH_RESPONSE that rode along MUST go out in a >=1200-byte datagram even when
+	// a Do-side Recv flushes it (BREAK3), so replicate flush's padding decision.
+	padPath := false
+	padPath, c.pathRespPending = c.pathRespPending, false
+	// Credit grants are self-healing (a later grant supersedes a lost one), so they
+	// are not retransmitted. The frames are ack-eliciting.
+	pkt, err := c.sealPacket(spaceApp, frames, true, nil, padPath)
+	if err != nil {
+		return err
+	}
+	if _, err := c.pc.Write(pkt); err != nil {
+		return err
+	}
+	c.rearmReadDeadline() // the grant put a packet in flight (§4 INV-4)
+	return nil
 }
 
 // maxDrainBurst bounds how many extra datagrams a single Poll drains after its
@@ -112,7 +272,7 @@ const maxDrainBurst = 512
 // without blocking, using a read deadline in the past so an empty socket returns
 // immediately. It is a no-op on transports that cannot set a read deadline (they
 // have no non-blocking read), preserving their one-datagram-per-Poll behavior.
-// Assumes c.mu is held (called from pollLocked).
+// Assumes c.mu is held (called from the Poll receive path).
 func (c *Conn) drainBuffered() error {
 	dl, ok := c.pc.(interface{ SetReadDeadline(time.Time) error })
 	if !ok {
@@ -176,6 +336,9 @@ func (c *Conn) isStatelessReset(isFirst bool, datagram []byte) bool {
 // connection state), so ErrStatelessReset is returned to the caller. The transport
 // socket is closed too, mirroring idleClose, so no descriptor leaks.
 func (c *Conn) statelessResetReceived() error {
+	// Latch the single-close state so a blocked WaitReadable / WaitSendable wakes
+	// with ErrStatelessReset (docs/HTTP3_DESIGN.md §3.3, F5).
+	c.terminateLocked(ErrStatelessReset)
 	c.closed = true
 	_ = c.pc.Close()
 	return ErrStatelessReset
@@ -242,7 +405,7 @@ func (c *Conn) prefilterPacket(hdr Header, pkt []byte) (skip bool, err error) {
 }
 
 // recvDatagram decrypts and dispatches every packet coalesced in one datagram.
-// Assumes c.mu is held (called from pollLocked/drainBuffered/Establish).
+// Assumes c.mu is held (called from Poll/drainBuffered/Establish).
 func (c *Conn) recvDatagram(datagram []byte) error {
 	rest := datagram
 	first := true
@@ -460,7 +623,7 @@ func (c *Conn) handshakeProbeSpace() int {
 // flush sends, for every space that owes a retransmission, CRYPTO, or an ACK:
 // first one packet per queued retransmit frame (retransmit takes priority,
 // RFC 9000 §13.3), then one packet with any pending ACK and new CRYPTO.
-// Assumes c.mu is held (called from pollLocked/Establish and the send helpers).
+// Assumes c.mu is held (called from Poll/Establish and the send helpers).
 func (c *Conn) flush() error {
 	if c.closed {
 		// Draining or closing (RFC 9000 §10.2.2): once the connection is closed —
@@ -653,7 +816,7 @@ func spaceLevel(sp int) tls.QUICEncryptionLevel {
 // connFrameHandler dispatches the frames of one received packet into the Conn.
 //
 // Every On* handler on this type assumes c.mu is held: they run only from
-// recvDatagram, which itself runs inside a locked pollLocked/Establish section.
+// recvDatagram, which itself runs inside a locked Poll/Establish section.
 // A handler that must mutate send-side stream state (e.g. OnStopSending) calls
 // the assume-held …Locked internal, never the re-locking public wrapper.
 type connFrameHandler struct {

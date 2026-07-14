@@ -4,32 +4,49 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"sync"
+	"sync/atomic"
 	"testing"
 
 	"github.com/lodgvideon/poseidon-http-client/quic"
 )
 
-// fakeStream records what the client sends and hands back queued response chunks
-// (one per Recv), modeling stream data arriving across several Poll calls.
+// fakeStream models a QUIC stream under the reader-goroutine architecture
+// (docs/HTTP3_DESIGN.md §3). A request stream's response chunks in recvChunks are
+// DELIVERED by the reader — the fake conn's Poll advances deliverIdx and signals
+// ready — and read by Do via Recv, which returns the whole delivered-but-unread
+// prefix (like quic.Stream.Recv returning all contiguous bytes). A server
+// unidirectional stream (directRead, set by AcceptUniStream) is read straight off
+// recvChunks by serviceControl, one chunk per Recv, with no reader delivery.
 type fakeStream struct {
-	id         uint64
-	sent       []byte
-	finSent    bool
+	id      uint64
+	conn    *fakeConn
+	sent    []byte
+	finSent bool
+
 	recvChunks    [][]byte
-	fin           bool
+	deliverIdx    int    // chunks the reader (Poll) has delivered — request streams
+	readIdx       int    // chunks Recv has consumed
+	directRead    bool   // server uni stream: Recv reads recvChunks directly
+	fin           bool   // stream carries FIN after the last chunk
 	recvReset     bool   // the peer reset its send side (RESET_STREAM received)
 	recvResetCode uint64 // the application error code carried by that RESET_STREAM
 	sendCap       int    // max bytes accepted per Send (0 = unlimited); models flow control
 	sendResetErr  bool   // Send returns quic.ErrStreamReset (models a received STOP_SENDING)
-	reset      bool // Reset was called
-	stopped    bool // StopSending was called
-	resetCode  uint64
-	stopCode   uint64
+
+	reset     bool // Reset was called
+	stopped   bool // StopSending was called
+	resetCode uint64
+	stopCode  uint64
+
+	ready chan struct{} // cap 1; reader→Do wake, like quic.Stream.ready
 }
 
 func (s *fakeStream) ID() uint64 { return s.id }
 
 func (s *fakeStream) Send(data []byte, fin bool) (int, error) {
+	s.conn.mu.Lock()
+	defer s.conn.mu.Unlock()
 	if s.sendResetErr {
 		return 0, quic.ErrStreamReset // the peer reset our send side (STOP_SENDING)
 	}
@@ -45,60 +62,235 @@ func (s *fakeStream) Send(data []byte, fin bool) (int, error) {
 }
 
 func (s *fakeStream) Recv() []byte {
-	if len(s.recvChunks) == 0 {
-		return nil
+	s.conn.mu.Lock()
+	defer s.conn.mu.Unlock()
+	if s.directRead {
+		// Server uni stream: one chunk per call (a stream-type varint or a control
+		// frame may arrive across service calls).
+		if s.readIdx >= len(s.recvChunks) {
+			return nil
+		}
+		c := s.recvChunks[s.readIdx]
+		s.readIdx++
+		return c
 	}
-	c := s.recvChunks[0]
-	s.recvChunks = s.recvChunks[1:]
-	return c
+	// Request stream: return all delivered-but-unread bytes at once.
+	var out []byte
+	for s.readIdx < s.deliverIdx {
+		out = append(out, s.recvChunks[s.readIdx]...)
+		s.readIdx++
+	}
+	return out
 }
 
-// Finished reports end-of-stream once the FIN is set and every queued chunk has
-// been handed out, or once the peer has reset the stream.
-func (s *fakeStream) Finished() bool { return s.recvReset || (s.fin && len(s.recvChunks) == 0) }
+func (s *fakeStream) finishedLocked() bool {
+	if s.recvReset {
+		return true
+	}
+	if s.directRead {
+		return s.fin && s.readIdx >= len(s.recvChunks)
+	}
+	return s.fin && s.deliverIdx >= len(s.recvChunks)
+}
 
-func (s *fakeStream) ResetReceived() bool { return s.recvReset }
-func (s *fakeStream) ResetCode() uint64   { return s.recvResetCode }
+// Finished reports end-of-stream. Used by checkCriticalStreams on the reader.
+func (s *fakeStream) Finished() bool {
+	s.conn.mu.Lock()
+	defer s.conn.mu.Unlock()
+	return s.finishedLocked()
+}
 
-func (s *fakeStream) Reset(code uint64) error       { s.resetCode = code; s.reset = true; return nil }
-func (s *fakeStream) StopSending(code uint64) error { s.stopCode = code; s.stopped = true; return nil }
+// RecvState is the locked snapshot the response loop reads (docs/HTTP3_DESIGN.md §3.4).
+func (s *fakeStream) RecvState() (finished, reset bool, code uint64) {
+	s.conn.mu.Lock()
+	defer s.conn.mu.Unlock()
+	return s.finishedLocked(), s.recvReset, s.recvResetCode
+}
+
+// WaitReadable blocks until the reader signals progress, the request ctx is
+// cancelled, or the connection terminates (docs/HTTP3_DESIGN.md §3.3).
+func (s *fakeStream) WaitReadable(ctx context.Context) error {
+	select {
+	case <-s.ready:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-s.conn.done:
+		return s.conn.closeErr
+	}
+}
+
+// WaitSendable mirrors WaitReadable: the fake Send always makes progress when
+// there is data, so a park here only happens in the never-completing tests.
+func (s *fakeStream) WaitSendable(ctx context.Context) error {
+	select {
+	case <-s.ready:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-s.conn.done:
+		return s.conn.closeErr
+	}
+}
+
+func (s *fakeStream) Reset(code uint64) error {
+	s.conn.mu.Lock()
+	defer s.conn.mu.Unlock()
+	s.resetCode = code
+	s.reset = true
+	return nil
+}
+func (s *fakeStream) StopSending(code uint64) error {
+	s.conn.mu.Lock()
+	defer s.conn.mu.Unlock()
+	s.stopCode = code
+	s.stopped = true
+	return nil
+}
 
 type fakeConn struct {
+	mu sync.Mutex
+
 	control    *fakeStream
 	req        *fakeStream
-	polls      int
+	polls      atomic.Int64
 	uniSendCap int                         // send cap applied to the control stream
-	pollHook   func(context.Context) error // overrides Poll when set (for ctx tests)
+	pollHook   func(context.Context) error // overrides Poll when set (for special tests)
 	acceptQ    []quicStream                // server uni streams handed out by AcceptUniStream
 	closeApp   bool                        // captured CloseWithError arguments
 	closeCode  uint64
 	closed     bool
+
+	done     chan struct{} // closed once by CloseWithError; models quic.Conn.done
+	closeErr error         // published before done is closed; models quic.Conn.closeErr
+	wake     chan struct{} // cap 1; kicked by pushRecv so a parked Poll re-delivers
+}
+
+// ensureInitLocked lazily allocates the wake/close channels so tests can build a
+// fakeConn with a struct literal.
+func (c *fakeConn) ensureInitLocked() {
+	if c.done == nil {
+		c.done = make(chan struct{})
+	}
+	if c.wake == nil {
+		c.wake = make(chan struct{}, 1)
+	}
 }
 
 func (c *fakeConn) AcceptUniStream() quicStream {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.ensureInitLocked()
 	if len(c.acceptQ) == 0 {
 		return nil
 	}
 	s := c.acceptQ[0]
 	c.acceptQ = c.acceptQ[1:]
+	if fs, ok := s.(*fakeStream); ok {
+		fs.conn = c
+		fs.directRead = true
+		if fs.ready == nil {
+			fs.ready = make(chan struct{}, 1)
+		}
+	}
 	return s
 }
 
 func (c *fakeConn) OpenUniStream() (quicStream, error) {
-	c.control = &fakeStream{sendCap: c.uniSendCap}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.ensureInitLocked()
+	c.control = &fakeStream{conn: c, sendCap: c.uniSendCap, ready: make(chan struct{}, 1)}
 	return c.control, nil
 }
-func (c *fakeConn) OpenStream() (quicStream, error) { return c.req, nil }
-func (c *fakeConn) Poll(ctx context.Context) error {
-	if c.pollHook != nil {
-		return c.pollHook(ctx)
+
+func (c *fakeConn) OpenStream() (quicStream, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.ensureInitLocked()
+	if c.req == nil {
+		c.req = &fakeStream{}
 	}
-	c.polls++
+	c.req.conn = c
+	if c.req.ready == nil {
+		c.req.ready = make(chan struct{}, 1)
+	}
+	return c.req, nil
+}
+
+// Poll models the reader step: it delivers the request stream's pending response
+// chunks in one burst (advancing deliverIdx and signalling ready), and otherwise
+// parks until data is fed (pushRecv), the ctx is cancelled, or the connection is
+// closed — so the reader never busy-loops and never auto-services the control
+// stream for a request-less test (control_test.go drives serviceControl itself).
+func (c *fakeConn) Poll(ctx context.Context) error {
+	c.mu.Lock()
+	c.ensureInitLocked()
+	c.polls.Add(1)
+	delivered := false
+	if r := c.req; r != nil && !r.directRead && r.deliverIdx < len(r.recvChunks) {
+		r.deliverIdx = len(r.recvChunks) // deliver the whole available burst at once
+		delivered = true
+		if r.ready != nil {
+			select {
+			case r.ready <- struct{}{}:
+			default:
+			}
+		}
+	}
+	hook, done, wake := c.pollHook, c.done, c.wake
+	c.mu.Unlock()
+	if delivered {
+		return nil
+	}
+	if hook != nil {
+		return hook(ctx)
+	}
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-done:
+		c.mu.Lock()
+		e := c.closeErr
+		c.mu.Unlock()
+		return e
+	case <-wake:
+		return nil // fed more data; loop to deliver
+	}
+}
+
+func (c *fakeConn) CloseWithError(app bool, code uint64, _ string) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.ensureInitLocked()
+	if c.closed {
+		return nil // idempotent: first close wins (mirrors quic.Conn)
+	}
+	c.closed, c.closeApp, c.closeCode = true, app, code
+	if c.closeErr == nil {
+		c.closeErr = quic.ErrConnClosed
+	}
+	close(c.done)
 	return nil
 }
-func (c *fakeConn) CloseWithError(app bool, code uint64, _ string) error {
-	c.closed, c.closeApp, c.closeCode = true, app, code
-	return nil
+
+// pushRecv appends a response chunk (optionally the FIN) to the request stream and
+// wakes the parked reader so its next Poll delivers it — for tests that stream
+// data mid-flight.
+func (c *fakeConn) pushRecv(chunk []byte, fin bool) {
+	c.mu.Lock()
+	if chunk != nil {
+		c.req.recvChunks = append(c.req.recvChunks, chunk)
+	}
+	if fin {
+		c.req.fin = true
+	}
+	w := c.wake
+	c.mu.Unlock()
+	select {
+	case w <- struct{}{}:
+	default:
+	}
 }
 
 // TestClient_RequestResponse drives a full request/response through the HTTP/3
@@ -153,7 +345,7 @@ func TestClient_RequestResponse(t *testing.T) {
 	if !bytes.Equal(body, []byte("hello world")) {
 		t.Fatalf("body = %q, want %q", body, "hello world")
 	}
-	if conn.polls == 0 {
+	if conn.polls.Load() == 0 {
 		t.Fatal("expected at least one Poll to receive the body")
 	}
 }
@@ -501,5 +693,5 @@ func TestClient_Close(t *testing.T) {
 // NewClientFake constructs a Client over a fake quicConn (test-only shim around
 // the unexported newClient).
 func NewClientFake(conn quicConn, settings []Setting) (*Client, error) {
-	return newClient(context.Background(), conn, settings)
+	return newClient(conn, settings)
 }

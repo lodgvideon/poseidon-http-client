@@ -186,6 +186,9 @@ func (c *Conn) idleDeadline() (time.Time, bool) {
 // §10.1): no CONNECTION_CLOSE is sent — the state is discarded — and
 // ErrIdleTimeout is returned so the caller learns why the read ended.
 func (c *Conn) idleClose() error {
+	// Latch the single-close state so a blocked WaitReadable / WaitSendable wakes
+	// with ErrIdleTimeout (docs/HTTP3_DESIGN.md §3.3, F5).
+	c.terminateLocked(ErrIdleTimeout)
 	c.closed = true
 	_ = c.pc.Close()
 	return ErrIdleTimeout

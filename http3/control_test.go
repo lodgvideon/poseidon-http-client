@@ -32,8 +32,8 @@ func TestConformance_RFC9114_Sec621_ReadsServerSettings(t *testing.T) {
 	}
 	// The parsed SETTINGS_MAX_FIELD_SECTION_SIZE must reach the field the request
 	// path reads (RFC 9114 §4.2.2); this pins the whole parse→store wiring.
-	if client.maxFieldSection != 16384 {
-		t.Fatalf("maxFieldSection = %d, want 16384 (read from the server SETTINGS)", client.maxFieldSection)
+	if client.maxFieldSection.Load() != 16384 {
+		t.Fatalf("maxFieldSection = %d, want 16384 (read from the server SETTINGS)", client.maxFieldSection.Load())
 	}
 }
 
@@ -58,12 +58,18 @@ func TestConformance_RFC9114_Sec52_GoAwayGatesRequests(t *testing.T) {
 	server := &fakeStream{id: 3, recvChunks: [][]byte{serverControl(nil, AppendGoaway(nil, 0)...)}}
 	conn := &fakeConn{req: &fakeStream{id: 0}, acceptQ: []quicStream{server}}
 	client, _ := NewClientFake(conn, nil)
+	// The reader owns control servicing, but with an empty request stream its Poll
+	// parks before reaching serviceControl; drive it here so the GOAWAY is processed
+	// before Do checks the gate (RFC 9114 §5.2).
+	if err := client.serviceControl(); err != nil {
+		t.Fatalf("serviceControl: %v", err)
+	}
 	_, _, err := client.Do(context.Background(), &Request{Method: "GET", Scheme: "https", Authority: "e", Path: "/"})
 	if err != ErrGoAway {
 		t.Fatalf("Do after GOAWAY(0) on stream 0 = %v, want ErrGoAway", err)
 	}
-	if !client.haveGoaway || client.goawayID != 0 {
-		t.Fatalf("goaway state: have=%v id=%d", client.haveGoaway, client.goawayID)
+	if client.goaway.Load() != 0 {
+		t.Fatalf("goaway state: id=%d, want 0", client.goaway.Load())
 	}
 }
 

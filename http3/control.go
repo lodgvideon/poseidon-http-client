@@ -1,7 +1,6 @@
 package http3
 
 import (
-	"context"
 	"errors"
 
 	"github.com/lodgvideon/poseidon-http-client/internal/bytesx"
@@ -12,20 +11,11 @@ import (
 // declared length is treated as H3_EXCESSIVE_LOAD rather than buffered.
 const maxControlFrameLen = 1 << 16
 
-// poll drives the connection one step and then services the server control
-// stream (RFC 9114 §6.2.1), so SETTINGS and GOAWAY are processed at the same
-// cadence as request-stream reads. It is the single funnel for driving the
-// connection; the engine is single-goroutine, so no locking is needed.
-func (c *Client) poll(ctx context.Context) error {
-	if err := c.conn.Poll(ctx); err != nil {
-		return err
-	}
-	return c.serviceControl()
-}
-
 // serviceControl accepts newly arrived server-initiated unidirectional streams,
 // identifies each by its leading stream-type varint, and reads the control
-// stream. It does not block; it processes only bytes already received.
+// stream. It does not block; it processes only bytes already received. It runs on
+// the reader goroutine after each Poll — outside c.mu, safe because Poll never
+// returns holding it (docs/HTTP3_DESIGN.md §3.1, §3.2 postcondition).
 func (c *Client) serviceControl() error {
 	for s := c.conn.AcceptUniStream(); s != nil; s = c.conn.AcceptUniStream() {
 		c.pendingUni = append(c.pendingUni, &uniStream{stream: s})
@@ -108,7 +98,7 @@ func (c *Client) routeUni(typ uint64, s quicStream, rest []byte) error {
 func (c *Client) applyServerSettings(settings []Setting) {
 	for _, s := range settings {
 		if s.ID == SettingMaxFieldSectionSize {
-			c.maxFieldSection = s.Value
+			c.maxFieldSection.Store(s.Value) // reader writes; a Do reads (§3.5)
 		}
 	}
 }
@@ -162,11 +152,12 @@ func (c *Client) readControl() error {
 			}
 			// A GOAWAY id MUST NOT be greater than any previously received
 			// (RFC 9114 §5.2); a larger one is a connection error. An equal or
-			// smaller id lowers (or re-confirms) the drain boundary.
-			if c.haveGoaway && id > c.goawayID {
+			// smaller id lowers (or re-confirms) the drain boundary. goaway is
+			// ^uint64(0) until the first GOAWAY (§3.5), so a first id always lands.
+			if prev := c.goaway.Load(); prev != ^uint64(0) && id > prev {
 				return c.connError(H3IDError)
 			}
-			c.goawayID, c.haveGoaway = id, true
+			c.goaway.Store(id) // reader writes; a Do reads (§3.5)
 		case FrameCancelPush:
 			// The client never sends MAX_PUSH_ID, so the maximum push ID is unset
 			// and every push ID is out of range: a CANCEL_PUSH referencing any push
