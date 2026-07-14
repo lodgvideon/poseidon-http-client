@@ -22,7 +22,7 @@ func (mt *h3ManagedTransport) openExchange(ctx context.Context) (protoStream, fu
 	if err != nil {
 		return nil, nil, nil, err
 	}
-	return &h3Exchange{client: cl}, nil, release, nil
+	return getH3Exchange(cl), nil, release, nil
 }
 
 // close implements transport.close. Idempotent.

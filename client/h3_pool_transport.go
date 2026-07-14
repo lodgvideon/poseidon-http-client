@@ -28,7 +28,7 @@ func (pt *h3PoolTransport) openExchange(ctx context.Context) (protoStream, func(
 		return nil, nil, nil, err
 	}
 	release := func() { pt.p.release(mc, nil) }
-	return &h3Exchange{client: mc.cl}, nil, release, nil
+	return getH3Exchange(mc.cl), nil, release, nil
 }
 
 // close implements transport.close. Idempotent.

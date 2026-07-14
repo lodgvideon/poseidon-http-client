@@ -442,7 +442,7 @@ func TestH3_SplitPseudoHeaders(t *testing.T) {
 		{Name: []byte(":path"), Value: []byte("/p")},
 		{Name: []byte("h1"), Value: []byte("v1")},
 		{Name: []byte("h2"), Value: []byte("v2")},
-	})
+	}, nil)
 	if err != nil {
 		t.Fatalf("splitPseudoHeaders: %v", err)
 	}
@@ -456,7 +456,7 @@ func TestH3_SplitPseudoHeaders(t *testing.T) {
 	if _, _, _, _, _, err = splitPseudoHeaders([]conn.HeaderField{
 		{Name: []byte(":method"), Value: []byte("GET")},
 		{Name: []byte(":protocol"), Value: []byte("websocket")},
-	}); !errors.Is(err, ErrInvalidRequest) {
+	}, nil); !errors.Is(err, ErrInvalidRequest) {
 		t.Fatalf("unknown pseudo-header err = %v, want ErrInvalidRequest", err)
 	}
 }
