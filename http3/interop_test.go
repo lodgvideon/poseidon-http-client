@@ -381,12 +381,21 @@ func TestFault_QpackDynamicRef(t *testing.T) { expectConnError(t, "/qpack-dynami
 
 // TestFault_QpackRequiredInsertCount: a field-section prefix with a non-zero
 // Required Insert Count that exceeds the entries the server actually inserted (the
-// fault server runs no encoder, so our table's insert count is 0). Because the
-// client advertises SETTINGS_QPACK_BLOCKED_STREAMS=0 it never blocks waiting for
-// the encoder stream to catch up, so a Required Insert Count past the insert count
-// is rejected immediately as QPACK_DECOMPRESSION_FAILED (RFC 9204 §4.5.1) rather
-// than hanging.
-func TestFault_QpackRequiredInsertCount(t *testing.T) { expectConnError(t, "/qpack-ric") }
+// fault server runs no encoder, so our table's insert count is 0).
+//
+// Q4 changed this behavior: the client now advertises SETTINGS_QPACK_BLOCKED_STREAMS
+// > 0, so a Required Insert Count ahead of the insert count no longer fails fast —
+// the decode PARKS until the encoder stream catches up (RFC 9204 §2.1.3), bounded by
+// the request ctx. Against this fault server (which never sends the promised insert)
+// the request would now fail on the ctx deadline, not with an immediate
+// QPACK_DECOMPRESSION_FAILED, so expectConnError no longer applies. The interop-level
+// coverage of the RIC-ahead wait — a fault server that sends the section AHEAD of its
+// encoder-stream insert, then delivers the insert so the decode unblocks — is a Q4
+// follow-up; the unit tests (TestConformance_RFC9204_Sec213_*) fully exercise the
+// wait/wake and the ctx-bounded park.
+func TestFault_QpackRequiredInsertCount(t *testing.T) {
+	t.Skip("Q4: RIC-ahead now parks until the encoder catches up; fault-server RIC-ahead scenario is a follow-up")
+}
 
 // TestFault_StopSending checks that when the server aborts reading the request
 // with STOP_SENDING while the client is still sending its body, the client stops

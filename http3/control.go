@@ -85,6 +85,13 @@ func (c *Client) readQPACKEncoder() error {
 		// covered is not counted twice. qpackMu is already released, so the
 		// decoder-stream Send does not run under the table lock.
 		c.qpackAckInserts(after)
+		// Wake every Do parked waiting for the insert count to reach its section's
+		// Required Insert Count (RFC 9204 §2.1.3, Q4). insertCount was already
+		// published (under qpackMu.Lock above) before this broadcast, so a woken Do
+		// re-reads the new value; a Do that checks between the store and this signal
+		// sees the new count and never parks. qpackMu is released, so this does not
+		// run under the table lock.
+		c.signalQPACKReady()
 	}
 	return nil
 }
