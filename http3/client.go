@@ -140,15 +140,14 @@ func (a connAdapter) AcceptUniStream() quicStream {
 }
 
 // Client is a minimal HTTP/3 client over an established QUIC connection. It owns
-// the connection's control stream and QPACK codecs. A dedicated reader goroutine
-// drives the QUIC engine and services the server control stream for the
-// connection's lifetime (docs/HTTP3_DESIGN.md §3.1). Do sends its own request
-// frames and blocks on per-stream wakeups; still one Do at a time in this PR
-// (inFlight retained — real concurrency is PR 2d).
+// the connection's control stream; each request carries its own stack-local QPACK
+// codecs (docs/HTTP3_DESIGN.md §3.5, PR 2d), so nothing request-scoped is shared. A
+// dedicated reader goroutine drives the QUIC engine and services the server control
+// stream for the connection's lifetime (§3.1). Do sends its own request frames and
+// blocks on per-stream wakeups; still one Do at a time in this PR (inFlight retained
+// — real concurrency is enabled in the final 2d commit).
 type Client struct {
 	conn quicConn
-	enc  qpack.Encoder
-	dec  qpack.Decoder
 
 	// Connection lifecycle. The reader goroutine runs Poll + serviceControl on
 	// connCtx until the connection terminates; Close cancels connCtx and waits on
@@ -380,7 +379,15 @@ func (c *Client) sendRequest(ctx context.Context, stream quicStream, req *Reques
 }
 
 func (c *Client) roundTrip(ctx context.Context, stream quicStream, req *Request) (*Response, []byte, error) {
-	frame, err := req.EncodeHeaders(&c.enc, nil, c.maxFieldSection.Load())
+	// Per-request QPACK codecs (docs/HTTP3_DESIGN.md §5, PR 2d): stack-local, so N
+	// concurrent Do never share them. The encoder is an empty struct (trivially
+	// safe); the decoder holds Huffman scratch buffers that the slices it emits
+	// alias, so a shared decoder would let one Do's decoded headers be overwritten
+	// by another — per-request is mandatory, not an optimization. Static-only QPACK
+	// keeps each codec stateless per request, so nothing is lost but scratch reuse.
+	var enc qpack.Encoder
+	var dec qpack.Decoder
+	frame, err := req.EncodeHeaders(&enc, nil, c.maxFieldSection.Load())
 	if err != nil {
 		return nil, nil, err
 	}
@@ -390,7 +397,7 @@ func (c *Client) roundTrip(ctx context.Context, stream quicStream, req *Request)
 
 	var fr FrameReader
 	fr.SetMaxFrameLen(maxResponseBytes) // refuse a frame larger than the whole budget before buffering it
-	var rb respBuilder
+	rb := respBuilder{dec: &dec}
 	for {
 		if data := stream.Recv(); len(data) > 0 {
 			fr.Feed(data)
@@ -434,6 +441,7 @@ func (c *Client) roundTrip(ctx context.Context, stream quicStream, req *Request)
 // respBuilder accumulates a decoded HTTP/3 response as request-stream frames are
 // parsed across successive FrameReader feeds (see roundTrip / consumeFrames).
 type respBuilder struct {
+	dec          *qpack.Decoder // per-request QPACK decoder (2d): its Huffman scratch is aliased by decoded slices, so it MUST NOT be shared across concurrent Do
 	resp         *Response
 	interim      []*Response // informational 1xx responses, in receive order
 	body         []byte
@@ -480,7 +488,7 @@ func (c *Client) dispatchFrame(rb *respBuilder, typ uint64, payload []byte) erro
 			return ErrResponseTooLarge // retained header/body/trailer bytes over the cap
 		}
 		if rb.resp == nil {
-			r, derr := DecodeResponseHeaders(&c.dec, payload)
+			r, derr := DecodeResponseHeaders(rb.dec, payload)
 			if derr != nil {
 				_, _, e := c.decodeError(derr)
 				return e
@@ -494,7 +502,7 @@ func (c *Client) dispatchFrame(rb *respBuilder, typ uint64, payload []byte) erro
 				rb.resp = r
 			}
 		} else {
-			tr, derr := DecodeTrailers(&c.dec, payload)
+			tr, derr := DecodeTrailers(rb.dec, payload)
 			if derr != nil {
 				_, _, e := c.decodeError(derr)
 				return e
