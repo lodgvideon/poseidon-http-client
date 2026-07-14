@@ -35,6 +35,15 @@ func (s *Stream) Send(data []byte, fin bool) (int, error) {
 }
 
 // sendLocked is Send's body. Assumes s.conn.mu is held.
+//
+// A large body splits into many equal-size (~1200-byte) 1-RTT datagrams; instead
+// of one sendto per datagram, they are accumulated into a GSO batch and handed to
+// the transport in a single WriteGSO on Linux (else a per-datagram loop) — see
+// quic/gso.go. Each datagram is still sealed and recorded individually inside the
+// loop, so packet numbers, retransmit records, and congestion accounting are
+// unchanged; only the syscall count drops. The batch is flushed on every exit, and
+// early before the informational *_BLOCKED frame, which is a different-size packet
+// that must not ride the GSO segment.
 func (s *Stream) sendLocked(data []byte, fin bool) (int, error) {
 	if s.sendReset {
 		return 0, ErrStreamReset
@@ -45,43 +54,52 @@ func (s *Stream) sendLocked(data []byte, fin bool) (int, error) {
 	if s.conn.oneRTTSealer == nil {
 		return 0, ErrNotEstablished
 	}
+	batch := s.conn.newBatch()
 	sent := 0
 	for {
 		if remaining := len(data) - sent; remaining > 0 {
 			n, blocked := s.grantable(remaining)
 			if n == 0 {
-				// Record which limit stalled this send so WaitSendable can pick its
-				// wake source (docs/HTTP3_DESIGN.md §3.3): only blockPace arms a timer.
+				// Flush the accumulated STREAM datagrams before the BLOCKED frame, then
+				// record which limit stalled this send so WaitSendable can pick its wake
+				// source (docs/HTTP3_DESIGN.md §3.3): only blockPace arms a timer.
+				if err := s.conn.flushBatch(&batch); err != nil {
+					return sent, err
+				}
 				s.sendBlock = blocked
 				s.emitBlocked(blocked)
 				return sent, nil
 			}
 			last := fin && sent+n == len(data)
-			if err := s.writeStreamFrame(data[sent:sent+n], last); err != nil {
+			if err := s.writeStreamFrame(&batch, data[sent:sent+n], last); err != nil {
+				_ = s.conn.flushBatch(&batch) // best-effort: send what was already sealed
 				return sent, err
 			}
 			sent += n
 			if last {
-				return sent, nil
+				return sent, s.conn.flushBatch(&batch)
 			}
 			continue
 		}
 		// All data admitted. A FIN owed with no unsent bytes consumes no
 		// credit, so emit the zero-length end-of-stream frame unconditionally.
 		if fin && !s.finSent {
-			if err := s.writeStreamFrame(nil, true); err != nil {
+			if err := s.writeStreamFrame(&batch, nil, true); err != nil {
+				_ = s.conn.flushBatch(&batch)
 				return sent, err
 			}
 		}
-		return sent, nil
+		return sent, s.conn.flushBatch(&batch)
 	}
 }
 
-// writeStreamFrame emits one STREAM frame carrying chunk at the current send
-// offset, setting FIN when fin is true, then advances the send accounting. The
-// chunk is retained (as a copy) so the frame can be retransmitted at this same
-// offset if the packet is lost; a resend does not re-advance the accounting.
-func (s *Stream) writeStreamFrame(chunk []byte, fin bool) error {
+// writeStreamFrame seals one STREAM frame carrying chunk at the current send
+// offset (FIN set when fin is true) into the GSO batch, then advances the send
+// accounting. The chunk is retained (as a copy) so the frame can be retransmitted
+// at this same offset if the packet is lost; a resend does not re-advance the
+// accounting. The sealed datagram is copied into the batch, so the packet reaches
+// the wire when the batch is flushed, not here.
+func (s *Stream) writeStreamFrame(b *packetBatch, chunk []byte, fin bool) error {
 	rf := retransFrame{
 		kind: retransStream, streamID: s.id, offset: s.sendOffset, fin: fin,
 		data: append([]byte(nil), chunk...), // private copy retained for retransmit (§13.3); NOT the reused scratch
@@ -91,7 +109,7 @@ func (s *Stream) writeStreamFrame(chunk []byte, fin bool) error {
 	// it, and c.mu is held throughout, so reuse is safe. rf.data above is a
 	// separate private copy, so a resend never reads this scratch.
 	s.conn.frameScratch = AppendStream(s.conn.frameScratch[:0], s.id, s.sendOffset, fin, chunk)
-	if err := s.conn.writeAppFrames(s.conn.frameScratch, []retransFrame{rf}); err != nil {
+	if err := s.conn.sealAppToBatch(b, s.conn.frameScratch, []retransFrame{rf}); err != nil {
 		return err
 	}
 	s.sendOffset += uint64(len(chunk))
@@ -204,4 +222,23 @@ func (c *Conn) writeAppFrames(frames []byte, retrans []retransFrame) error {
 	// §4 INV-4). A no-op when no reader has parked (armedReadDeadline zero).
 	c.rearmReadDeadline()
 	return nil
+}
+
+// sealAppToBatch is writeAppFrames' batched counterpart (quic/gso.go): it seals an
+// ack-eliciting 1-RTT packet exactly as writeAppFrames does — same congestion,
+// pacing, AEAD, and sentPacket accounting inside sealPacket — but appends the
+// sealed datagram to the GSO batch instead of writing it, so a multi-datagram burst
+// leaves in one syscall. The rearmReadDeadline epilogue happens once, when the
+// batch is flushed. Assumes c.mu is held.
+func (c *Conn) sealAppToBatch(b *packetBatch, frames []byte, retrans []retransFrame) error {
+	if c.closed {
+		// Draining or closing (RFC 9000 §10.2.2): no application frame may be sent
+		// once the connection is closed, including by a received CONNECTION_CLOSE.
+		return ErrConnClosed
+	}
+	pkt, err := c.sealPacket(spaceApp, frames, true, retrans, false)
+	if err != nil {
+		return err
+	}
+	return c.addToBatch(b, pkt)
 }

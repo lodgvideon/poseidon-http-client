@@ -26,6 +26,22 @@ func (u *udpConn) Write(b []byte) (int, error)       { return u.c.Write(b) }
 func (u *udpConn) Close() error                      { return u.c.Close() }
 func (u *udpConn) SetReadDeadline(t time.Time) error { return u.c.SetReadDeadline(t) }
 
+// WriteGSO sends buf as consecutive UDP datagrams of segSize bytes (the last may be
+// shorter) in one syscall via Linux UDP segmentation offload, degrading to a
+// per-datagram loop on non-Linux platforms or paths without offload support
+// (quic.SendGSO). Implementing it makes *udpConn a batched-write PacketConn, so the
+// QUIC send path coalesces a multi-datagram STREAM burst — the #1 UDP throughput
+// limiter — into a single sendmsg. On Linux the raw fd comes from SyscallConn; if
+// that is unavailable the per-datagram fallback over u.c still delivers every
+// datagram.
+func (u *udpConn) WriteGSO(buf []byte, segSize int) (int, error) {
+	rc, err := u.c.SyscallConn()
+	if err != nil {
+		rc = nil // no raw fd: SendGSO degrades to a per-datagram loop over u.c
+	}
+	return quic.SendGSO(rc, u.c, buf, segSize)
+}
+
 // qpackDynamicTableCapacity is the SETTINGS_QPACK_MAX_TABLE_CAPACITY the client
 // advertises (RFC 9204 §5): the maximum bytes the server's encoder may hold in
 // the dynamic table WE maintain as its decoder. A non-zero value turns the
