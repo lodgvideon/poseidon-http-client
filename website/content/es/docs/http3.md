@@ -91,6 +91,10 @@ Las tres suites AEAD de TLS 1.3 están soportadas para la protección de paquete
 
 La compresión de cabeceras usa QPACK con tabla dinámica en ambas direcciones: el cliente codifica las cabeceras de la petición contra la tabla dinámica y decodifica las inserciones del servidor en el stream del decodificador. Ocurre de forma automática; no hay nada que configurar.
 
+## Asignaciones de memoria
+
+El códec de wire de HTTP/3 no asigna memoria: los frames y cabeceras de paquete QUIC, los frames HTTP/3 y las secciones de campos QPACK se codifican y decodifican a 0 B/op, 0 allocs/op. La misma puerta de benchmarks en CI que lo exige para el códec de frames y HPACK de HTTP/2 cubre los paquetes `qpack`, `quic` y `http3`. La excepción es la ruta de envío de paquetes QUIC: construir y sellar un paquete saliente asigna una cantidad pequeña y acotada por paquete. Una petición sobre HTTP/3 es, por tanto, de pocas asignaciones, no de cero.
+
 ## Control de congestión
 
 El valor por defecto es NewReno. BBR está disponible de forma opcional:

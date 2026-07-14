@@ -32,7 +32,7 @@ client.ClientOptions{
 
 **From scratch, near-zero dependencies.** No `quic-go`, no `nghttp2`, no cgo. Direct dependencies are `golang.org/x/net` and `golang.org/x/crypto` (the latter only for ChaCha20-Poly1305 packet protection); the TLS 1.3 handshake uses the standard library `crypto/tls`. The protocol code is all in this module — auditable, with a small surface and no transitive supply-chain sprawl.
 
-**Zero-alloc codec.** Frame and HPACK encode/decode run at 0 B/op, 0 allocs/op, and a CI bench gate fails the build if that regresses. At high request rates in a load generator, per-frame allocations show up directly as GC pressure; this codec does not contribute any. The `frame`, `hpack`, and `qpack` packages are usable standalone.
+**Zero-alloc codec.** The whole wire codec runs at 0 B/op, 0 allocs/op for both protocol versions — HTTP/2 (frame and HPACK encode/decode) and HTTP/3 (QUIC frame and packet-header parsing and serialization, HTTP/3 frames, QPACK field sections) — and a CI bench gate fails the build if that regresses. At high request rates in a load generator, per-frame allocations show up directly as GC pressure; this codec does not contribute any. The `frame`, `hpack`, and `qpack` packages are usable standalone. One honest boundary: the QUIC packet send path (building and encrypting an outgoing packet) is low-alloc, not zero — the zero-alloc claim covers the codec, not the whole request.
 
 **Fine-grained control.** Direct access to streams, flow-control windows, SETTINGS, pooling policy, congestion control (NewReno or BBR), and pacing — knobs `net/http` hides behind its transport. If your tool needs to hold a window closed, pin stream concurrency, or measure the effect of a congestion controller, the levers are exposed.
 
