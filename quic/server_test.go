@@ -409,6 +409,55 @@ func TestServerConn_AcceptsClientStreams(t *testing.T) {
 	}
 }
 
+// TestStreamIDsFollowRole pins role-aware stream-ID assignment (RFC 9000 §2.1): a
+// server opens unidirectional streams 3, 7, 11 … and bidirectional 1, 5, 9 …,
+// while a client opens 2, 6, 10 … and 0, 4, 8 …. Opening under the other role's
+// IDs makes the peer close the connection as a protocol violation.
+func TestStreamIDsFollowRole(t *testing.T) {
+	t.Parallel()
+	limits := TransportParams{InitialMaxStreamsUni: 3, InitialMaxStreamsBidi: 3}
+
+	server := &Conn{isServer: true, nextBidiStreamID: 1, peer: limits}
+	for _, want := range []uint64{3, 7, 11} {
+		s, err := server.OpenUniStream()
+		if err != nil {
+			t.Fatalf("server OpenUniStream: %v", err)
+		}
+		if s.ID() != want {
+			t.Errorf("server uni stream id = %d, want %d", s.ID(), want)
+		}
+	}
+	for _, want := range []uint64{1, 5, 9} {
+		s, err := server.OpenStream()
+		if err != nil {
+			t.Fatalf("server OpenStream: %v", err)
+		}
+		if s.ID() != want {
+			t.Errorf("server bidi stream id = %d, want %d", s.ID(), want)
+		}
+	}
+
+	client := &Conn{peer: limits} // isServer false, nextBidiStreamID 0
+	for _, want := range []uint64{2, 6, 10} {
+		s, err := client.OpenUniStream()
+		if err != nil {
+			t.Fatalf("client OpenUniStream: %v", err)
+		}
+		if s.ID() != want {
+			t.Errorf("client uni stream id = %d, want %d", s.ID(), want)
+		}
+	}
+	for _, want := range []uint64{0, 4, 8} {
+		s, err := client.OpenStream()
+		if err != nil {
+			t.Fatalf("client OpenStream: %v", err)
+		}
+		if s.ID() != want {
+			t.Errorf("client bidi stream id = %d, want %d", s.ID(), want)
+		}
+	}
+}
+
 // extractHandshakeCrypto walks the packets in a datagram, decrypts each Handshake
 // packet with opener, and returns the reassembled CRYPTO stream (the client's
 // Finished), ignoring Initial/1-RTT packets and non-CRYPTO frames.

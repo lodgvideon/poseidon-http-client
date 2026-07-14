@@ -733,7 +733,7 @@ func (c *Conn) localStreamNotCreated(id uint64) bool {
 		return false // peer-initiated streams are never "not yet created" from our side
 	}
 	if id&0x2 == 2 { // our unidirectional stream
-		return id >= 2+c.openedUni*4
+		return id >= c.uniStreamBase()+c.openedUni*4
 	}
 	return id >= c.nextBidiStreamID // our bidirectional stream
 }

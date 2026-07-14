@@ -108,10 +108,22 @@ func (c *Conn) waitStreamCredit(ctx context.Context) error {
 	}
 }
 
-// OpenUniStream opens the next client-initiated unidirectional stream (RFC 9000
-// §2.1: IDs 2, 6, 10, …) — the HTTP/3 control and QPACK streams, which are
-// send-only from the opener. It returns ErrTooManyStreams if opening another
-// would exceed the peer's advertised initial_max_streams_uni limit (§4.6).
+// uniStreamBase is the first unidirectional stream ID this endpoint opens
+// (RFC 9000 §2.1): 2 for a client, 3 for a server. Later ones step by 4. The
+// peer rejects a stream opened under the other role's IDs, so this must follow
+// the connection's role.
+func (c *Conn) uniStreamBase() uint64 {
+	if c.isServer {
+		return 3
+	}
+	return 2
+}
+
+// OpenUniStream opens the next unidirectional stream this endpoint initiates
+// (RFC 9000 §2.1: IDs 2, 6, 10, … for a client; 3, 7, 11, … for a server) — the
+// HTTP/3 control and QPACK streams, which are send-only from the opener. It
+// returns ErrTooManyStreams if opening another would exceed the peer's advertised
+// initial_max_streams_uni limit (§4.6).
 func (c *Conn) OpenUniStream() (*Stream, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -123,7 +135,7 @@ func (c *Conn) openUniStreamLocked() (*Stream, error) {
 	if c.openedUni >= c.peer.InitialMaxStreamsUni {
 		return nil, ErrTooManyStreams
 	}
-	id := 2 + c.openedUni*4
+	id := c.uniStreamBase() + c.openedUni*4
 	c.openedUni++
 	s := &Stream{id: id, conn: c, sendMax: c.peer.InitialMaxStreamDataUni, recvMax: DefaultStreamRecvWindow, ready: make(chan struct{}, 1)}
 	if c.streams == nil {
@@ -370,7 +382,7 @@ func (r *recvStream) bufferGap(offset uint64, data []byte) {
 		// bytes on any overlap.
 		nLo, nHi := min(lo, cLo), max(hi, cHi)
 		buf := make([]byte, nHi-nLo)
-		copy(buf[lo-nLo:], data)   // new bytes first
+		copy(buf[lo-nLo:], data)    // new bytes first
 		copy(buf[cLo-nLo:], c.data) // existing bytes win on overlap
 		lo, hi, data = nLo, nHi, buf
 	}
