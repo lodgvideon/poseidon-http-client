@@ -177,9 +177,20 @@ type Client struct {
 	// Ack never interleave a partial instruction.
 	clientQPACKEnc quicStream
 	clientQPACKDec quicStream
-	decWMu         sync.Mutex   // serializes decoder-stream writes; a leaf lock (never held across a wait)
-	decWriteBuf    []byte       // decoder-stream bytes accepted for send but not yet flushed (flow-control residue)
-	decHasResidue  atomic.Bool  // true when decWriteBuf holds unflushed bytes — lets the reader skip the lock otherwise
+	decWMu         sync.Mutex  // serializes decoder-stream writes; a leaf lock (never held across a wait)
+	decWriteBuf    []byte      // decoder-stream bytes accepted for send but not yet flushed (flow-control residue)
+	decHasResidue  atomic.Bool // true when decWriteBuf holds unflushed bytes — lets the reader skip the lock otherwise
+
+	// knownReceivedCount mirrors the encoder's Known Received Count (RFC 9204
+	// §2.1.4): the number of dynamic-table insertions the server's encoder knows we
+	// have received. BOTH decoder instructions we send advance it — an Insert Count
+	// Increment (§4.4.3) reports inserts past it, and a Section Acknowledgment
+	// (§4.4.1) implicitly advances it to the acknowledged section's Required Insert
+	// Count. Guarded by decWMu together with the decoder-stream writes, so the value
+	// we compute matches the order the encoder applies our instructions and the two
+	// mechanisms never double-count the same insert (which would push the encoder's
+	// Known Received Count past the inserts it made — a QPACK_DECODER_STREAM_ERROR).
+	knownReceivedCount uint64
 
 	// Shared connection-scoped QPACK dynamic table (RFC 9204 §3.2). This is the
 	// ONE piece of QPACK state shared across goroutines: the reader WRITES it
@@ -190,8 +201,8 @@ type Client struct {
 	// lock: it is never nested with the quic connection's c.mu and never held
 	// across a wait (docs/HTTP3_DESIGN.md concurrency rules R2). insertCount is
 	// published as an atomic after each apply so it can be observed without the
-	// lock. INERT in this build: capacity is 0, so the table stays empty and no
-	// field section references it.
+	// lock. Live in this build: dial.go advertises a non-zero capacity, so a server
+	// inserts entries here and references them from response field sections.
 	qpackMu     sync.RWMutex
 	qpackDyn    *qpack.DynamicTable
 	insertCount atomic.Uint64
@@ -227,7 +238,8 @@ func newClient(conn quicConn, settings []Setting) (*Client, error) {
 	c.goaway.Store(^uint64(0))          // "none" until a real GOAWAY lands (§5.2)
 	// The shared dynamic table's maximum capacity is the SETTINGS_QPACK_MAX_TABLE_
 	// CAPACITY we advertise — the decoder controls its own table size (RFC 9204
-	// §3.2.3). INERT here: dial.go advertises 0, so the table stays empty.
+	// §3.2.3). dial.go advertises a non-zero capacity, so the server may insert up
+	// to this many bytes into the table we maintain and reference them.
 	c.qpackDyn = qpack.NewDynamicTable(qpackMaxTableCapacity(settings))
 	c.connCtx, c.connCancel = context.WithCancel(context.Background())
 
@@ -287,7 +299,8 @@ func newClient(conn quicConn, settings []Setting) (*Client, error) {
 
 // qpackMaxTableCapacity returns the SETTINGS_QPACK_MAX_TABLE_CAPACITY the client
 // advertises (RFC 9204 §5), or 0 if the setting is absent — the value that sizes
-// the shared dynamic table's maximum capacity. INERT here: dial.go advertises 0.
+// the shared dynamic table's maximum capacity. dial.go advertises a non-zero
+// value, so the table is live.
 func qpackMaxTableCapacity(settings []Setting) uint64 {
 	for _, s := range settings {
 		if s.ID == SettingQPACKMaxTableCapacity {
@@ -438,11 +451,53 @@ func (c *Client) flushQPACKDecoder() {
 	c.decWMu.Unlock()
 }
 
+// qpackAckInserts emits an Insert Count Increment (RFC 9204 §4.4.3) covering the
+// dynamic-table insertions the encoder does not yet know we hold — those past the
+// Known Received Count — and advances the Known Received Count to insertCount. The
+// reader calls it after applying encoder-stream inserts. It is a no-op when the
+// Known Received Count already covers insertCount, which happens when a Section
+// Acknowledgment implicitly acknowledged the same inserts first (§2.1.4): counting
+// them again would push the encoder's Known Received Count past the inserts it has
+// made, a QPACK_DECODER_STREAM_ERROR. The Known Received Count update and the
+// decoder-stream append are both under decWMu, so the increment matches the order
+// the encoder applies our instructions. At SETTINGS_QPACK_BLOCKED_STREAMS=0 the
+// increment is what lets a conformant server learn we hold an insert before it may
+// reference it, so this fires promptly as inserts arrive.
+func (c *Client) qpackAckInserts(insertCount uint64) {
+	c.decWMu.Lock()
+	defer c.decWMu.Unlock()
+	if insertCount > c.knownReceivedCount {
+		c.decWriteBuf = append(c.decWriteBuf, qpack.AppendInsertCountIncrement(nil, insertCount-c.knownReceivedCount)...)
+		c.knownReceivedCount = insertCount
+	}
+	c.flushDecWriteLocked()
+}
+
+// qpackSectionAck emits a Section Acknowledgment (RFC 9204 §4.4.1) for streamID
+// after a field section with Required Insert Count ric > 0 (one that referenced
+// the dynamic table) was fully decoded. A Section Acknowledgment also implicitly
+// advances the encoder's Known Received Count to ric (§2.1.4), so we mirror that:
+// inserts up to ric are now known-received and MUST NOT be re-acknowledged by a
+// later Insert Count Increment. The acknowledgment is always sent (the encoder
+// needs it to release the stream's outstanding references); only the Known
+// Received Count update is conditional. Both are under decWMu so they stay
+// consistent with the wire order.
+func (c *Client) qpackSectionAck(streamID, ric uint64) {
+	c.decWMu.Lock()
+	defer c.decWMu.Unlock()
+	if ric > c.knownReceivedCount {
+		c.knownReceivedCount = ric
+	}
+	c.decWriteBuf = append(c.decWriteBuf, qpack.AppendSectionAcknowledgment(nil, streamID)...)
+	c.flushDecWriteLocked()
+}
+
 // qpackCancelStream sends a Stream Cancellation (RFC 9204 §4.4.2) for streamID on
 // our decoder stream, telling the server's encoder that an aborted stream will not
-// acknowledge the dynamic-table references its field sections made. INERT: with
-// table capacity 0 no section ever references the dynamic table, so this is never
-// reached on the wire.
+// acknowledge the dynamic-table references its field sections made. It does not
+// touch the Known Received Count — a cancelled section was never acknowledged, so
+// its inserts are only known-received if a prior Insert Count Increment already
+// reported them. It is reached only when an aborted stream referenced the table.
 func (c *Client) qpackCancelStream(streamID uint64) {
 	c.qpackDecWrite(qpack.AppendStreamCancellation(nil, streamID))
 }
@@ -589,7 +644,8 @@ func (c *Client) roundTrip(ctx context.Context, stream quicStream, req *Request)
 	fr.SetMaxFrameLen(maxResponseBytes) // refuse a frame larger than the whole budget before buffering it
 	rb := respBuilder{dec: &dec, streamID: stream.ID()}
 	// On any abort of a stream that referenced the dynamic table, notify the encoder
-	// (RFC 9204 §4.4.2). INERT: refDynamic never becomes true at capacity 0.
+	// (RFC 9204 §4.4.2). refDynamic is set when a decoded section resolved a dynamic
+	// reference (Required Insert Count > 0).
 	defer func() {
 		if err != nil && rb.refDynamic {
 			c.qpackCancelStream(rb.streamID)
@@ -649,8 +705,7 @@ type respBuilder struct {
 	// instructions (Section Acknowledgment / Stream Cancellation) this exchange
 	// emits. refDynamic records that at least one decoded field section referenced
 	// the shared dynamic table, so an abort of this stream must send a Stream
-	// Cancellation (RFC 9204 §4.4.2). INERT: refDynamic never becomes true at
-	// capacity 0.
+	// Cancellation (RFC 9204 §4.4.2).
 	streamID   uint64
 	refDynamic bool
 
@@ -684,17 +739,18 @@ func (c *Client) consumeFrames(fr *FrameReader, rb *respBuilder) error {
 }
 
 // ackDynamicSection, when the just-decoded field section referenced the shared
-// dynamic table (ref), records it on rb and emits a Section Acknowledgment for the
-// stream on our decoder stream (RFC 9204 §2.1.4, §4.4.1). It is called AFTER
+// dynamic table (Required Insert Count ric > 0), records it on rb and emits a
+// Section Acknowledgment for the stream on our decoder stream (RFC 9204 §2.1.4,
+// §4.4.1), advancing the Known Received Count to ric. It is called AFTER
 // qpackMu.RUnlock, so the decoder-stream Send never runs under the table lock — the
-// two are independent leaf locks (decWMu, qpackMu). INERT: ref is always false at
-// table capacity 0, so nothing is emitted.
-func (c *Client) ackDynamicSection(rb *respBuilder, ref bool) {
-	if !ref {
+// two are independent leaf locks (decWMu, qpackMu). ric is captured under the same
+// RLock as the decode, so it reflects the table state the section resolved against.
+func (c *Client) ackDynamicSection(rb *respBuilder, ric uint64) {
+	if ric == 0 {
 		return
 	}
 	rb.refDynamic = true
-	c.qpackDecWrite(qpack.AppendSectionAcknowledgment(nil, rb.streamID))
+	c.qpackSectionAck(rb.streamID, ric)
 }
 
 // dispatchFrame folds one request-stream frame into rb, enforcing HTTP/3 message
@@ -720,13 +776,13 @@ func (c *Client) dispatchFrame(rb *respBuilder, typ uint64, payload []byte) erro
 			// copy completes before RUnlock (DecodeResponseHeaders copies each kept
 			// field inside the callback). Section Ack is emitted after the lock drops.
 			c.qpackMu.RLock()
-			r, ref, derr := DecodeResponseHeaders(rb.dec, c.qpackDyn, payload)
+			r, ric, derr := DecodeResponseHeaders(rb.dec, c.qpackDyn, payload)
 			c.qpackMu.RUnlock()
 			if derr != nil {
 				_, _, e := c.decodeError(derr)
 				return e
 			}
-			c.ackDynamicSection(rb, ref)
+			c.ackDynamicSection(rb, ric)
 			if r.Status < 200 {
 				if len(rb.interim) >= maxInterimResponses {
 					return ErrResponseTooLarge // a 1xx flood (RFC 9114 §4.1)
@@ -737,13 +793,13 @@ func (c *Client) dispatchFrame(rb *respBuilder, typ uint64, payload []byte) erro
 			}
 		} else {
 			c.qpackMu.RLock()
-			tr, ref, derr := DecodeTrailers(rb.dec, c.qpackDyn, payload)
+			tr, ric, derr := DecodeTrailers(rb.dec, c.qpackDyn, payload)
 			c.qpackMu.RUnlock()
 			if derr != nil {
 				_, _, e := c.decodeError(derr)
 				return e
 			}
-			c.ackDynamicSection(rb, ref)
+			c.ackDynamicSection(rb, ric)
 			rb.resp.Trailers = tr
 			rb.trailersSeen = true
 		}

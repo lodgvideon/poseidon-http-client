@@ -6,10 +6,12 @@ import (
 	"github.com/lodgvideon/poseidon-http-client/hpack"
 )
 
-// This file implements the QPACK instruction streams (RFC 9204 §4.3, §4.4). It
-// is INERT in this build: the client advertises
-// SETTINGS_QPACK_MAX_TABLE_CAPACITY=0, so no instructions are exchanged on the
-// wire. The codec exists so a later PR can wire the dynamic table in.
+// This file implements the QPACK instruction streams (RFC 9204 §4.3, §4.4): the
+// decoder-instruction emitters the client sends on its decoder stream (Section
+// Acknowledgment, Stream Cancellation, Insert Count Increment) and the
+// encoder-instruction parser it applies to the dynamic table. With the client
+// advertising a non-zero SETTINGS_QPACK_MAX_TABLE_CAPACITY these are exchanged on
+// the wire for every connection that uses the dynamic table.
 
 // --- Decoder instructions (RFC 9204 §4.4): the decoder emits these ---
 

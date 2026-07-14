@@ -4,7 +4,6 @@ import (
 	"errors"
 
 	"github.com/lodgvideon/poseidon-http-client/internal/bytesx"
-	"github.com/lodgvideon/poseidon-http-client/qpack"
 )
 
 // maxControlFrameLen bounds a frame the client will buffer on the server control
@@ -49,13 +48,14 @@ func (c *Client) serviceControl() error {
 
 // readQPACKEncoder applies the server's QPACK encoder-stream instructions (RFC
 // 9204 §4.3) to the shared dynamic table and, when new entries were inserted,
-// emits an Insert Count Increment on our decoder stream (§4.4.3). It is
-// reader-owned: only this call, on the reader goroutine, writes the table, and it
-// holds qpackMu.Lock only for the pure apply (no I/O, no wait, no c.mu), so qpackMu
-// stays a leaf lock. A partial trailing instruction is retained in qpackEncBuf for
-// the next service pass. A malformed instruction or a capacity violation is a
-// QPACK_ENCODER_STREAM_ERROR connection error (§6). INERT: with capacity 0 the
-// server sends no inserts, so this applies nothing and emits nothing.
+// acknowledges them with an Insert Count Increment on our decoder stream (§4.4.3).
+// It is reader-owned: only this call, on the reader goroutine, writes the table,
+// and it holds qpackMu.Lock only for the pure apply (no I/O, no wait, no c.mu), so
+// qpackMu stays a leaf lock. A partial trailing instruction is retained in
+// qpackEncBuf for the next service pass. A malformed instruction or a capacity
+// violation is a QPACK_ENCODER_STREAM_ERROR connection error (§6). Live: with a
+// non-zero advertised capacity the server inserts entries here and we acknowledge
+// them so it can advance its Known Received Count and reference them.
 func (c *Client) readQPACKEncoder() error {
 	if c.qpackEnc == nil {
 		return nil
@@ -80,9 +80,11 @@ func (c *Client) readQPACKEncoder() error {
 	}
 	if after > before {
 		// Acknowledge the newly received inserts so the encoder can advance its Known
-		// Received Count (RFC 9204 §4.4.3). qpackMu is already released, so the
+		// Received Count (RFC 9204 §4.4.3). qpackAckInserts increments only past the
+		// current Known Received Count, so an insert a Section Acknowledgment already
+		// covered is not counted twice. qpackMu is already released, so the
 		// decoder-stream Send does not run under the table lock.
-		c.qpackDecWrite(qpack.AppendInsertCountIncrement(nil, after-before))
+		c.qpackAckInserts(after)
 	}
 	return nil
 }
@@ -118,7 +120,7 @@ func (c *Client) routeUni(typ uint64, s quicStream, rest []byte) error {
 		// so its reference is retained to detect the server closing it, and its
 		// instructions are applied to the shared dynamic table by readQPACKEncoder.
 		// Any instruction bytes that arrived with the type varint are seeded here.
-		// INERT: with capacity 0 the server sends no instructions.
+		// Live: with a non-zero advertised capacity the server sends inserts here.
 		if c.qpackEnc != nil {
 			return c.connError(H3StreamCreationError) // only one encoder stream (§4.2)
 		}
@@ -142,9 +144,12 @@ func (c *Client) routeUni(typ uint64, s quicStream, rest []byte) error {
 
 // applyServerSettings records the server settings the client acts on. Only
 // SETTINGS_MAX_FIELD_SECTION_SIZE (§4.2.2) currently bounds client behavior — it
-// caps the size of a request field section; the QPACK settings stay at the
-// static-table-only defaults (RFC 9204 §5). An absent value leaves the field at
-// its no-limit default (§7.2.4.1).
+// caps the size of a request field section. The server's QPACK settings are
+// deliberately ignored: SETTINGS_QPACK_MAX_TABLE_CAPACITY bounds the table the
+// server maintains as decoder (relevant only if WE encoded dynamically, which we
+// do not), and the size of the table WE maintain for the server's encoder is
+// governed by the value WE advertise, not the server's. An absent value leaves the
+// field at its no-limit default (§7.2.4.1).
 func (c *Client) applyServerSettings(settings []Setting) {
 	for _, s := range settings {
 		if s.ID == SettingMaxFieldSectionSize {

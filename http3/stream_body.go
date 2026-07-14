@@ -33,7 +33,7 @@ func (c *Client) roundTripStream(ctx context.Context, stream quicStream, req *Re
 	br.fr.SetMaxFrameLen(maxResponseBytes)
 	// If an interim/final HEADERS referenced the dynamic table before a pre-head
 	// error aborts the stream, notify the encoder (RFC 9204 §4.4.2). Once the head
-	// is returned the BodyReader owns this (BodyReader.abort). INERT at capacity 0.
+	// is returned the BodyReader owns this (BodyReader.abort).
 	defer func() {
 		if err != nil && br.rb.refDynamic {
 			c.qpackCancelStream(br.rb.streamID)
@@ -272,8 +272,8 @@ func (r *BodyReader) fail(err error) error {
 // releases the server-side stream. A connection error (ErrH3Control) has already
 // torn down the whole connection, but aborting the stream too is harmless. If the
 // stream referenced the dynamic table, it also emits a Stream Cancellation so the
-// encoder can release the outstanding references (RFC 9204 §4.4.2). INERT: at
-// capacity 0 refDynamic is never set, so no cancellation is emitted.
+// encoder can release the outstanding references (RFC 9204 §4.4.2). refDynamic is
+// set only when a decoded section resolved a dynamic reference.
 func (r *BodyReader) abort(err error) {
 	if r.aborted {
 		return

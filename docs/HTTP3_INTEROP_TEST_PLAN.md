@@ -13,9 +13,13 @@ network conditions**. Tracks progress against the `//go:build interop` suite in
   exists at the transport, but the public API exposes no concurrent in-flight
   requests, so suites D1/D2 (concurrent streams) are **not exercisable via the
   public API** — a documented limitation, not a writable test.
-- **Static-only QPACK decoder.** The client advertises
-  `SETTINGS_QPACK_MAX_TABLE_CAPACITY=0`; a server that uses the dynamic table
-  anyway must fail as `QPACK_DECOMPRESSION_FAILED`, not hang.
+- **Dynamic QPACK decoder (Q3).** The client advertises
+  `SETTINGS_QPACK_MAX_TABLE_CAPACITY=4096` with `SETTINGS_QPACK_BLOCKED_STREAMS=0`,
+  so a server may insert into the dynamic table and reference those entries: a
+  well-formed dynamic reference decodes. Only a malformed prefix, an out-of-range
+  index, or a Required Insert Count past the insert count fails as
+  `QPACK_DECOMPRESSION_FAILED`; because BLOCKED_STREAMS is 0 the decoder never
+  blocks, so such a section is rejected rather than hung.
 - **ChaCha20-Poly1305 header protection deferred.** A ChaCha20-only server is a
   known incompatibility → graceful failure, documented.
 - **Receive-path resource bounds** (PRs #162–166) — must not false-trip on real
@@ -25,7 +29,7 @@ network conditions**. Tracks progress against the `//go:build interop` suite in
 
 | Rank | Failure class | Why it bites this client |
 |---|---|---|
-| R1 | QPACK header mismatch | static-only decoder; server dynamic-table use breaks it |
+| R1 | QPACK header mismatch | live dynamic decoder; a wrong insert/reference or Known Received Count desync breaks compression |
 | R2 | Flow-control stalls | large/long transfers exercise MAX_STREAM_DATA/MAX_DATA loops |
 | R3 | Loss recovery / CC | only 10% loss tested; PTO/retransmit/cwnd untested at scale |
 | R4 | Stream lifecycle | reset / STOP_SENDING / retirement leak (#166) on long conns |

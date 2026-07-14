@@ -375,10 +375,18 @@ under `Lock`, every `Do` resolves dynamic references under `RLock` and copies ea
 kept field before releasing), the reader emits an Insert Count Increment for
 inserts it applies (§4.4.3), each decoded section that referenced the dynamic
 table triggers a Section Acknowledgment (§2.1.4 / §4.4.1), and an aborted stream
-that referenced the table triggers a Stream Cancellation (§4.4.2). It stays INERT:
-`dial.go` still advertises capacity 0, so in production the shared table stays
-empty and none of these instructions is emitted — the wiring is exercised by
-feeding a fake encoder stream at a non-zero test capacity.
+that referenced the table triggers a Stream Cancellation (§4.4.2).
+
+Q3 flips the switch: `dial.go` advertises `SETTINGS_QPACK_MAX_TABLE_CAPACITY=4096`
+(`SETTINGS_QPACK_BLOCKED_STREAMS` stays 0), so a live server inserts into the
+shared table and references those entries from response field sections. The Known
+Received Count is coordinated so an Insert Count Increment (§4.4.3) and a Section
+Acknowledgment (§2.1.4 / §4.4.1) never double-count the same insert regardless of
+arrival order. Because BLOCKED_STREAMS is 0 the decoder never blocks: a Required
+Insert Count past the insert count is rejected as QPACK_DECOMPRESSION_FAILED rather
+than waiting. The end-to-end decode path is the CI interop gate (Caddy / nginx /
+aioquic all use dynamic QPACK once capacity > 0); the unit matrix below drives the
+same path deterministically against a fake encoder stream at capacity 4096.
 
 | Section | Type        | Test |
 |---------|-------------|------|
@@ -394,7 +402,7 @@ feeding a fake encoder stream at a non-zero test capacity.
 | §4.5.5  | Conformance | TestConformance_RFC9204_Sec455_PostBaseNameRefDecode (Literal with Post-Base Name Reference) |
 | §4.5.6  | Conformance | TestConformance_RFC9204_Sec456_LiteralNameDecode |
 | §4.5 / §4.5.1.2 | Conformance | TestConformance_RFC9204_Sec45_DecodeErrors (dynamic-ref / malformed / a field-section prefix with the Base Sign bit set — negative Base with the forced-zero Required Insert Count — → QPACK_DECOMPRESSION_FAILED), TestQPACK_DecodeDynamic_Errors (unreachable RIC, Base underflow, absent post-Base entry), TestQPACK_StaticOnly_WithTable (nil vs non-nil table decode identically at RIC 0) |
-| §2.2 / §6 | Conformance | TestConformance_RFC9204_Sec22_DecompressionFailedClosesConn (a field section the static-only decoder cannot decode → QPACK_DECOMPRESSION_FAILED, an application-layer CONNECTION_CLOSE, not a per-stream reset) |
+| §2.2 / §6 | Conformance | TestConformance_RFC9204_Sec22_DecompressionFailedClosesConn (a field section the decoder cannot resolve → QPACK_DECOMPRESSION_FAILED, an application-layer CONNECTION_CLOSE, not a per-stream reset). With the table live a WELL-FORMED dynamic reference decodes instead (§3.2.1 row); only a malformed prefix, an out-of-range index, or a Required Insert Count past the insert count still fails — the re-baselined interop faults TestFault_QpackDynamicRef / TestFault_QpackRequiredInsertCount |
 | §4.5    | Roundtrip   | TestQPACK_RoundTrip, TestQPACK_EmptySection |
 | §4.2    | Conformance | TestConformance_RFC9204_Sec42_QPACKStreamClosed (server closing its QPACK encoder stream → H3_CLOSED_CRITICAL_STREAM), TestConformance_RFC9204_Sec42_DuplicateQPACKStream (a second QPACK encoder stream → H3_STREAM_CREATION_ERROR) |
 | §4.2 (wiring) | Conformance | TestClient_RequestResponse / TestClient_SendDrainsUnderFlowControl (client opens its own control + QPACK encoder (0x02) + decoder (0x03) uni-streams; the decoder stream leads with its type byte) — Q2 |
@@ -403,6 +411,10 @@ feeding a fake encoder stream at a non-zero test capacity.
 | §4.4.2 (wiring) | Conformance | TestConformance_RFC9204_Sec442_StreamCancellationOnAbort (aborting a stream that referenced the dynamic table emits a Stream Cancellation) — Q2 |
 | §4.4.3 (wiring) | Conformance | TestConformance_RFC9204_Sec43_EncoderInstructionsApplied (an Insert Count Increment is emitted on the decoder stream for newly applied inserts) — Q2 |
 | §3.2 (concurrency) | Race | TestConcurrent_QPACKDynamicTable_UnderRace (reader inserts under qpackMu.Lock while N decoders resolve dynamic references under qpackMu.RLock — `-race -count=5`, no race, no deadlock) — Q2 |
+| §3.2.1 (live) | Conformance | TestConformance_RFC9204_Sec321_DynamicTableCapacityHonored (capacity 4096: server encoder inserts two entries, response HEADERS reference them by Base-relative indexed / Base-relative name reference / post-Base indexed; decode succeeds against the shared table; the decoder stream carries an Insert Count Increment then a Section Acknowledgment per stream with the right Known Received Count) — Q3 |
+| §2.1.4 / §4.4.3 (live) | Conformance | TestConformance_RFC9204_Sec214_KnownReceivedCountCoordination (an Insert Count Increment and a Section Acknowledgment never double-count the same insert, either arrival order — the redundant increment is suppressed) — Q3 |
+| §3.2.2 (live) | Conformance | TestConformance_RFC9204_Sec322_EvictionAndEvictedReference (insert past capacity evicts the oldest entry; a live-entry reference decodes, an evicted-entry reference → QPACK_DECOMPRESSION_FAILED) — Q3 |
+| §4.5.1 (live) | Conformance | TestConformance_RFC9204_Sec451_RequiredInsertCountExceedsInserts (at SETTINGS_QPACK_BLOCKED_STREAMS=0 a Required Insert Count past the insert count → QPACK_DECOMPRESSION_FAILED, no block/hang) — Q3 |
 
 ## RFC 9114 — HTTP/3 (Phase G)
 

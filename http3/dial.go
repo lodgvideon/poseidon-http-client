@@ -26,11 +26,24 @@ func (u *udpConn) Write(b []byte) (int, error)       { return u.c.Write(b) }
 func (u *udpConn) Close() error                      { return u.c.Close() }
 func (u *udpConn) SetReadDeadline(t time.Time) error { return u.c.SetReadDeadline(t) }
 
-// defaultSettings are the HTTP/3 SETTINGS a client advertises: the QPACK dynamic
-// table is disabled (static-table-only codec), so its capacity and blocked
-// streams are both zero (RFC 9204 §5).
+// qpackDynamicTableCapacity is the SETTINGS_QPACK_MAX_TABLE_CAPACITY the client
+// advertises (RFC 9204 §5): the maximum bytes the server's encoder may hold in
+// the dynamic table WE maintain as its decoder. A non-zero value turns the
+// dynamic table on, so a live server inserts entries on its encoder stream and
+// references them from response field sections; the shared *qpack.DynamicTable is
+// sized to this value in newClient. 4096 bytes (~64 small entries) is the common
+// default across HTTP/3 stacks and bounds the memory one connection's table costs.
+const qpackDynamicTableCapacity uint64 = 4096
+
+// defaultSettings are the HTTP/3 SETTINGS a client advertises. The QPACK dynamic
+// table is enabled with a non-zero capacity (RFC 9204 §5), so the server may use
+// dynamic QPACK for response headers. SETTINGS_QPACK_BLOCKED_STREAMS stays 0: the
+// decoder never blocks waiting for the encoder stream to catch up, so a conformant
+// server only references entries it has already been told (via an Insert Count
+// Increment) that we hold — a section's Required Insert Count never exceeds our
+// insert count (Q4 territory would raise this).
 var defaultSettings = []Setting{
-	{SettingQPACKMaxTableCapacity, 0},
+	{SettingQPACKMaxTableCapacity, qpackDynamicTableCapacity},
 	{SettingQPACKBlockedStreams, 0},
 }
 
