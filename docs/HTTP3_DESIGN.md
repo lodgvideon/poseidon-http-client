@@ -507,3 +507,26 @@ Honestly, after folding the fixes:
 5. **Wire-behavior diff, not a bug.** Credit grants decoupled from ACK packets (INV-6) produce more small ack-eliciting packets and more peer ACK traffic. Interop packet-count assertions will shift; call it out in PR descriptions so the diff is not mistaken for a regression.
 
 **Files to change:** `quic/conn.go` (`c.mu`, `done`, `closeErr`, `terminated`, `armedReadDeadline`, `streamCredit`, `sendWindowGrew`), `quic/conn_recv.go` (`Poll` read-unlock restructure, `flushControl` with PATH_RESPONSE padding, `terminateLocked` routing), `quic/pto.go` (`readWithPTO` on `connCtx`, expiry gating), `quic/cc.go` + `quic/recvflow.go` (set `sendWindowGrew` on flight/credit release), `quic/send.go` (record `s.sendBlock`), `quic/stream.go` (`ready`, `signalReady`, `WaitReadable`, `WaitSendable`, `RecvState`, `resetLocked`/`stopSendingLocked`, `Recv` credit flush), `quic/close.go` (`closeWithErrorLocked`, single close via `terminateLocked`), `http3/client.go` (reader goroutine, `NewClient` reader-first, drop `inFlight`, per-request QPACK codecs, `Close` latch-before-cancel + release-before-`readerDone`, atomics, GOAWAY/open atomicity), `http3/control.go` (reader-owned servicing). **Tests:** rewrite `http3/client_ctx_test.go`; replace `http3/client_concurrency_test.go` with the true concurrency+`-race` suite; add a large-upload interop echo and a loss-relay gate to the 2c/2d matrices.
+
+## 8. Opt-in BBR v1 congestion control
+
+NewReno (RFC 9002 §7, `quic/cc.go`) remains the default and only controller on the
+send path unless a caller opts in. `NewConn(pc, cfg, tp, WithCongestionControl(CCBBR))`
+selects BBR v1 (draft-cardwell-iccrg-bbr-congestion-control, `quic/bbr.go`): a
+model-based controller that estimates bottleneck bandwidth (`btlbw`, a windowed max
+of delivery-rate samples) and round-trip propagation delay (`min_rtt`, a windowed
+min), then paces at `pacing_gain·btlbw` and caps the flight at `cwnd_gain·btlbw·min_rtt`.
+BBR reuses the existing seam: it writes the same `c.cwnd` and a new `c.pacingRate`
+that the §7.7 pacing token bucket consumes, so the send gate in `grantable` is
+unchanged. When BBR is not selected (`ccAlgo == CCNewReno`, the zero value) none of
+the BBR code runs and every NewReno arithmetic path is byte-for-byte identical to the
+pre-BBR build — pinned by `TestBBR_DefaultInvariance_NewRenoUnchanged`.
+
+BBR is loss-tolerant: a single loss does not shrink the window (unlike NewReno's
+halving), though a full persistent-congestion span still collapses the window to the
+floor and re-enters Startup. **The throughput benefit of BBR over NewReno on a
+bufferbloated or lossy WAN path is real in principle but is NOT quantified here** —
+measuring it requires a netem/tc WAN lab (bandwidth, delay, and loss shaping), which
+is out of scope for the unit suite. The tests in `quic/bbr_test.go` pin the model's
+mechanics (sampler math, filter expiry, state transitions, loss tolerance, the
+default-invariance guard), not its performance.

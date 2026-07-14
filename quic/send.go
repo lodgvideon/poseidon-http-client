@@ -81,6 +81,9 @@ func (s *Stream) sendLocked(data []byte, fin bool) (int, error) {
 			}
 			sent += n
 			if last {
+				if s.conn.ccAlgo == CCBBR {
+					s.conn.bbrMarkAppLimited() // sent all the caller had; flag app-limited if the pipe isn't full
+				}
 				return sent, s.conn.flushBatch(&batch)
 			}
 			continue
@@ -92,6 +95,9 @@ func (s *Stream) sendLocked(data []byte, fin bool) (int, error) {
 				_ = s.conn.flushBatch(&batch)
 				return sent, err
 			}
+		}
+		if s.conn.ccAlgo == CCBBR {
+			s.conn.bbrMarkAppLimited() // sent all the caller had; flag app-limited if the pipe isn't full
 		}
 		return sent, s.conn.flushBatch(&batch)
 	}

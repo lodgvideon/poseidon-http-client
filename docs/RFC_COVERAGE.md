@@ -358,6 +358,30 @@ in cc.go).
 | §7 (gate) | Unit      | TestCC_GateClampedByWindow (grantable clamps to the remaining window and reports blockCong — no frame — when full), TestCC_PureAckNotCounted (pure-ACK packets are not in flight), TestCC_DisabledSentinel (cwnd==0 leaves the send path unthrottled) |
 | §7      | Conformance | TestConformance_RFC9002_Sec7_RetransmitRespectsCwnd (a retransmission counts against the congestion window — flushRetransmits sends nothing while bytes_in_flight fills the window and drains the queue once there is room; loss detection frees the lost bytes first and a PTO probe bypasses the window, so no stall) |
 
+### Opt-in BBR v1 (draft-cardwell-iccrg-bbr-congestion-control)
+
+BBR is an OPT-IN alternative to NewReno, selected with
+`NewConn(..., WithCongestionControl(CCBBR))` (bbr.go). It reuses the RFC 9002 §7.7
+pacing token bucket (driven by `pacing_gain·btlbw` instead of `5·cwnd/4`) and the
+same congestion-window send gate (driven by `cwnd_gain·BDP`). NewReno stays the
+default; when it is selected none of the BBR paths run. Throughput benefit over
+NewReno is path-dependent and requires a netem/tc WAN lab to quantify — it is not
+claimed by these tests, which pin the model's mechanics only.
+
+| Section | Type | Test |
+|---------|------|------|
+| §4.1.1 (delivery rate) | Unit | TestBBR_DeliveryRateSample (a known send/ack timeline yields the expected btlbw; an app-limited sample below the estimate is ignored while one above still raises it) |
+| §2.3 (btlbw max-filter) | Unit | TestBBR_MaxFilter_WindowedExpiry (windowed running-max surfaces the peak and lets an older, larger sample age out of the window) |
+| §4.3.1 (min_rtt filter) | Unit | TestBBR_MinRTT_WindowedMinExpiry (min_rtt adopts any lower sample, ignores higher ones in-window, and adopts a higher one once the 10 s window expires) |
+| §4.3.2 (Startup→Drain) | Unit | TestBBR_Startup_To_Drain (Startup ends and Drain begins after btlbw fails to grow ≥25% for three rounds) |
+| §4.3.2 (Drain→ProbeBW) | Unit | TestBBR_Drain_To_ProbeBW (Drain hands off to ProbeBW once the flight falls to the BDP) |
+| §4.3.3 (ProbeBW cycle) | Unit | TestBBR_ProbeBW_CycleAdvance (pacing-gain cycle advances one phase per min_rtt; the 0.75 phase exits early when inflight ≤ BDP) |
+| §4.3.4 (ProbeRTT) | Unit | TestBBR_ProbeRTT_EntryAndExit (10 s without a min_rtt refresh enters ProbeRTT; it exits after the flight drains and one round elapses past the hold) |
+| §4.1 (loss tolerance) | Unit | TestBBR_LossToleranceVsNewReno (a single loss does NOT shrink the BBR window, whereas NewReno halves on the same event) |
+| RFC 9002 §7.6 (persistent congestion) | Unit | TestBBR_PersistentCongestionCollapse (a persistent-congestion episode collapses BBR cwnd to the floor, clears the pacing rate, and re-enters Startup with a fresh model) |
+| §3 / RFC 9002 §7.7 (send gate) | Unit | TestBBR_DrivesCwndAndPacingThroughSeam (one real ACK range makes BBR write both c.cwnd from the BDP and c.pacingRate from btlbw — the single gate NewReno also reads) |
+| Default invariance | Unit | TestBBR_DefaultInvariance_NewRenoUnchanged (a connection with no option is NewReno; a scripted ack/loss sequence yields byte-identical, pinned cwnd/ssthresh and never engages the BBR pacer) |
+
 ## RFC 9204 — QPACK (Phase G — HTTP/3)
 
 G.3 lands the `qpack/` static-table codec: a static-table-only encoder and a
