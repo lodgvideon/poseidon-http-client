@@ -70,6 +70,39 @@ type h3Exchange struct {
 	events []conn.StreamEvent // synthesised from the http3.Response
 	idx    int                // next event to replay
 	closed bool
+
+	// Per-request scratch, reused across pooled reuses to keep the buffered Do
+	// path allocation-free (see h3ExchangePool). regularScratch backs
+	// req.Headers (the non-pseudo request fields, split out in
+	// SendHeadersWithPriority); hdrsScratch backs the synthesised response
+	// EventHeaders slice; statusBuf backs the synthesised :status value. All
+	// three are consumed synchronously — regularScratch by the buffered Do,
+	// hdrsScratch + statusBuf by drainResponse (which copies the fields it keeps
+	// into the caller's Response, never retaining these backing arrays) — so
+	// recycling them on Close is safe.
+	regularScratch []conn.HeaderField
+	hdrsScratch    []conn.HeaderField
+	statusBuf      [3]byte
+}
+
+// h3ExchangePool recycles h3Exchange structs (and their per-request scratch
+// slices) across buffered Do calls, mirroring the H2 replyPool/hdrSlicePool
+// pattern. An exchange is drawn in openExchange and returned in Close once
+// drainResponse has copied every response field into the caller's Response, so
+// no recycled scratch is ever aliased by a live Response. The buffered Do is
+// synchronous, so this holds without further synchronisation.
+var h3ExchangePool = sync.Pool{New: func() any { return new(h3Exchange) }}
+
+// getH3Exchange draws an h3Exchange from the pool, bound to client and cleared
+// of the prior request's replay state. The scratch slices retain their backing
+// arrays for reuse; their contents are overwritten on next use.
+func getH3Exchange(client h3Client) *h3Exchange {
+	e := h3ExchangePool.Get().(*h3Exchange)
+	e.client = client
+	e.called = false
+	e.idx = 0
+	e.closed = false
+	return e
 }
 
 // SendHeaders on a buffered HTTP/3 exchange is only reached via the request
@@ -85,10 +118,11 @@ func (e *h3Exchange) SendHeaders(_ context.Context, _ []conn.HeaderField, _ bool
 // fields, routing the remaining fields to Request.Headers. endStream and the H2
 // priority hint are irrelevant to a buffered exchange and ignored.
 func (e *h3Exchange) SendHeadersWithPriority(_ context.Context, fields []conn.HeaderField, _ bool, _ *frame.Priority) error {
-	method, scheme, authority, path, regular, err := splitPseudoHeaders(fields)
+	method, scheme, authority, path, regular, err := splitPseudoHeaders(fields, e.regularScratch)
 	if err != nil {
 		return err
 	}
+	e.regularScratch = regular // keep the (possibly grown) backing array for reuse
 	e.req.Method = method
 	e.req.Scheme = scheme
 	e.req.Authority = authority
@@ -136,29 +170,68 @@ func (e *h3Exchange) Recv(ctx context.Context) (conn.StreamEvent, error) {
 // so drainResponse concludes. Informational 1xx responses (resp.Interim) are not
 // replayed on the buffered path (Do already returned the final response).
 func (e *h3Exchange) synthesize(resp *http3.Response, body []byte) {
-	hdrs := make([]conn.HeaderField, 0, 1+len(resp.Headers))
-	hdrs = append(hdrs, conn.HeaderField{Name: hdrStatus, Value: statusValue(resp.Status)})
+	hdrs := append(e.hdrsScratch[:0], conn.HeaderField{Name: hdrStatus, Value: e.statusValue(resp.Status)})
 	hdrs = append(hdrs, resp.Headers...)
+	e.hdrsScratch = hdrs // keep the (possibly grown) backing array for reuse
 
 	hasTrailers := len(resp.Trailers) > 0
-	e.events = append(e.events,
+	events := append(e.events[:0],
 		conn.StreamEvent{Type: conn.EventHeaders, Headers: hdrs},
 		conn.StreamEvent{Type: conn.EventData, Data: body, EndStream: !hasTrailers},
 	)
 	if hasTrailers {
-		e.events = append(e.events, conn.StreamEvent{
+		events = append(events, conn.StreamEvent{
 			Type:      conn.EventTrailers,
 			Headers:   resp.Trailers,
 			EndStream: true,
 		})
 	}
+	e.events = events
 }
 
-// Close marks the exchange finished. The buffered Do is synchronous, so by the
-// time drainResponse (or an error path) calls Close the round-trip has already
-// completed or aborted itself — there is nothing to cancel. Idempotent.
+// statusValue renders resp.Status as its 3-digit ASCII :status value into the
+// exchange's statusBuf, avoiding the per-request []byte(strconv.Itoa(...)) pair
+// of allocations. The result backs only the synthesised :status field, which
+// drainResponse's parseStatus reads (via parseThreeDigitInt) and then drops —
+// it is never appended to the caller's Response.Headers — so reusing this
+// per-exchange scratch across requests transfers no memory to the caller. A
+// status outside 100–999 (which the http3 layer guarantees will not occur for a
+// final response) falls back to the allocating helper so the exact
+// out-of-range error behaviour of parseThreeDigitInt is preserved.
+func (e *h3Exchange) statusValue(status int) []byte {
+	if status < 100 || status > 999 {
+		return statusValue(status)
+	}
+	e.statusBuf[0] = byte('0' + status/100)
+	e.statusBuf[1] = byte('0' + (status/10)%10)
+	e.statusBuf[2] = byte('0' + status%10)
+	return e.statusBuf[:]
+}
+
+// Close marks the exchange finished and returns it to h3ExchangePool. The
+// buffered Do is synchronous, so by the time drainResponse (or an error path)
+// calls Close the round-trip has already completed or aborted itself — there is
+// nothing to cancel, and every response field drainResponse keeps has already
+// been copied into the caller's Response, so recycling the scratch is safe.
+// Idempotent: a second Close is a no-op (the closed flag stays set through
+// recycling and is only cleared when getH3Exchange re-issues the struct), so a
+// pooled exchange is never double-Put.
 func (e *h3Exchange) Close() error {
+	if e.closed {
+		return nil
+	}
 	e.closed = true
+	e.client = nil
+	e.req.Method = ""
+	e.req.Scheme = ""
+	e.req.Authority = ""
+	e.req.Path = ""
+	e.req.Headers = nil
+	e.req.Body = e.req.Body[:0]
+	e.events = e.events[:0]
+	e.regularScratch = e.regularScratch[:0]
+	e.hdrsScratch = e.hdrsScratch[:0]
+	h3ExchangePool.Put(e)
 	return nil
 }
 
@@ -230,11 +303,13 @@ func (h *h3RespStream) Close() error {
 // splitPseudoHeaders separates the request pseudo-headers from the regular
 // fields. The pseudo values are copied into strings (the caller's backing array
 // is pooled and reused after SendHeaders returns) and the regular fields are
-// copied into a freshly-allocated slice for the same reason. An unrecognised
-// pseudo-header (e.g. :protocol for extended CONNECT) is rejected — the buffered
-// http3.Request models only :method/:scheme/:authority/:path.
-func splitPseudoHeaders(fields []conn.HeaderField) (method, scheme, authority, path string, regular []conn.HeaderField, err error) {
-	regular = make([]conn.HeaderField, 0, len(fields))
+// appended into dst[:0] — pass a reusable per-exchange scratch to avoid a
+// per-request allocation, or nil for a freshly-allocated slice. The returned
+// regular slice must be kept (it may have grown a new backing array). An
+// unrecognised pseudo-header (e.g. :protocol for extended CONNECT) is rejected —
+// the buffered http3.Request models only :method/:scheme/:authority/:path.
+func splitPseudoHeaders(fields, dst []conn.HeaderField) (method, scheme, authority, path string, regular []conn.HeaderField, err error) {
+	regular = dst[:0]
 	for i := range fields {
 		f := fields[i]
 		if len(f.Name) > 0 && f.Name[0] == ':' {
@@ -307,7 +382,7 @@ func (s *singleH3Conn) openExchange(ctx context.Context) (protoStream, func(uint
 	if err != nil {
 		return nil, nil, nil, err
 	}
-	return &h3Exchange{client: cl}, nil, func() {}, nil
+	return getH3Exchange(cl), nil, func() {}, nil
 }
 
 // acquireClient returns the cached h3Client, lazy-dialling one if needed. It
