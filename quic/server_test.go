@@ -284,6 +284,30 @@ drain:
 	if sc.connMax == 0 {
 		t.Error("NewServerConn: connMax (peer InitialMaxData) not seeded")
 	}
+
+	// 1-RTT request path: the client seals a STREAM frame on bidi stream 0 with its
+	// real 1-RTT sealer; the server decrypts it (its read keys match the client's
+	// write keys), accepts the request stream, and reads the data through its
+	// receive path.
+	req := AppendStream(nil, 0, 0, true, []byte("GET /"))
+	pkt, err := SealPacket(nil, client.oneRTTSealer, PacketShort, sc.scid, nil, nil, 0, 4, req)
+	if err != nil {
+		t.Fatalf("seal client 1-RTT request: %v", err)
+	}
+	res, err := ProcessDatagram(pkt, len(sc.scid), &sc.keys, func(PacketType) uint64 { return 0 }, &connFrameHandler{c: sc, space: spaceApp})
+	if err != nil {
+		t.Fatalf("server ProcessDatagram: %v", err)
+	}
+	if res.Processed != 1 {
+		t.Fatalf("server processed %d packets, want 1 (%+v)", res.Processed, res)
+	}
+	rs := sc.AcceptBidiStream()
+	if rs == nil || rs.ID() != 0 {
+		t.Fatalf("AcceptBidiStream = %v, want request stream 0", rs)
+	}
+	if got := string(rs.Recv()); got != "GET /" {
+		t.Fatalf("server read request %q, want %q", got, "GET /")
+	}
 }
 
 // TestServerConn_AcceptsClientStreams checks a server connection accepts a
