@@ -119,7 +119,7 @@ func TestConformance_RFC9204_Sec45_DecodeErrors(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			err := NewDecoder().DecodeFieldSection(tc.in, func([]byte, []byte) error { return nil })
+			err := NewDecoder().DecodeFieldSection(tc.in, nil, func([]byte, []byte) error { return nil })
 			if !errors.Is(err, ErrDecompressionFailed) {
 				t.Fatalf("DecodeFieldSection(%x) err = %v, want ErrDecompressionFailed", tc.in, err)
 			}
@@ -131,7 +131,7 @@ func TestConformance_RFC9204_Sec45_DecodeErrors(t *testing.T) {
 func TestDecode_EmitError(t *testing.T) {
 	boom := errors.New("boom")
 	in := NewEncoder().EncodeFieldSection(nil, []hpack.HeaderField{hf(":method", "GET")})
-	err := NewDecoder().DecodeFieldSection(in, func([]byte, []byte) error { return boom })
+	err := NewDecoder().DecodeFieldSection(in, nil, func([]byte, []byte) error { return boom })
 	if !errors.Is(err, boom) {
 		t.Fatalf("err = %v, want boom", err)
 	}
@@ -140,7 +140,7 @@ func TestDecode_EmitError(t *testing.T) {
 func assertDecode(t *testing.T, in []byte, want []hpack.HeaderField) {
 	t.Helper()
 	var got []hpack.HeaderField
-	err := NewDecoder().DecodeFieldSection(in, func(name, value []byte) error {
+	err := NewDecoder().DecodeFieldSection(in, nil, func(name, value []byte) error {
 		got = append(got, hpack.HeaderField{
 			Name:  append([]byte(nil), name...),
 			Value: append([]byte(nil), value...),
@@ -187,7 +187,7 @@ func BenchmarkDecodeFieldSection(b *testing.B) {
 	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		if err := dec.DecodeFieldSection(buf, emit); err != nil {
+		if err := dec.DecodeFieldSection(buf, nil, emit); err != nil {
 			b.Fatal(err)
 		}
 	}

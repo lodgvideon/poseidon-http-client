@@ -15,7 +15,7 @@ func decodeAll(t *testing.T, section []byte) []hpack.HeaderField {
 	t.Helper()
 	var dec qpack.Decoder
 	var out []hpack.HeaderField
-	err := dec.DecodeFieldSection(section, func(name, value []byte) error {
+	err := dec.DecodeFieldSection(section, nil, func(name, value []byte) error {
 		out = append(out, hpack.HeaderField{Name: append([]byte(nil), name...), Value: append([]byte(nil), value...)})
 		return nil
 	})

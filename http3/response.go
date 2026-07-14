@@ -28,7 +28,9 @@ type Response struct {
 func DecodeResponseHeaders(dec *qpack.Decoder, fieldSection []byte) (*Response, error) {
 	resp := &Response{}
 	var haveStatus, sawRegular bool
-	err := dec.DecodeFieldSection(fieldSection, func(name, value []byte) error {
+	// Static-only profile: the client advertises capacity 0, so no dynamic
+	// table is threaded through (RFC 9204 §2.2).
+	err := dec.DecodeFieldSection(fieldSection, nil, func(name, value []byte) error {
 		if len(name) == 0 {
 			return ErrH3Message
 		}
@@ -74,7 +76,7 @@ func DecodeResponseHeaders(dec *qpack.Decoder, fieldSection []byte) (*Response, 
 // if the field section itself is malformed.
 func DecodeTrailers(dec *qpack.Decoder, fieldSection []byte) ([]hpack.HeaderField, error) {
 	var fields []hpack.HeaderField
-	err := dec.DecodeFieldSection(fieldSection, func(name, value []byte) error {
+	err := dec.DecodeFieldSection(fieldSection, nil, func(name, value []byte) error {
 		if len(name) == 0 || name[0] == ':' {
 			return ErrH3Message // trailers carry no pseudo-headers (§4.3)
 		}

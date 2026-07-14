@@ -15,8 +15,15 @@ const (
 
 // ErrDecompressionFailed is returned by the Decoder when a field section cannot
 // be decoded: a malformed or truncated representation, a static-table index out
-// of range, or a reference to the dynamic table (which this static-only profile
-// does not support — the client advertises SETTINGS_QPACK_MAX_TABLE_CAPACITY=0,
-// so a conformant peer never emits one). It corresponds to the
-// QPACK_DECOMPRESSION_FAILED (0x0200) connection error.
+// of range, or a dynamic-table reference that cannot be resolved (an entry not
+// present, an out-of-range index, or a Required Insert Count the table has not
+// reached). It corresponds to the QPACK_DECOMPRESSION_FAILED (0x0200)
+// connection error.
 var ErrDecompressionFailed = errors.New("qpack: decompression failed")
+
+// ErrEncoderStream is returned when applying an encoder-stream instruction
+// (RFC 9204 §4.3) fails: a malformed instruction, an unresolvable name
+// reference, a Set Dynamic Table Capacity above the advertised maximum, or an
+// insertion too large for the table. It corresponds to the
+// QPACK_ENCODER_STREAM_ERROR (0x0201) connection error.
+var ErrEncoderStream = errors.New("qpack: encoder stream error")
