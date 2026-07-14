@@ -12,6 +12,7 @@ import (
 	"github.com/lodgvideon/poseidon-http-client/conn"
 	"github.com/lodgvideon/poseidon-http-client/frame"
 	"github.com/lodgvideon/poseidon-http-client/http3"
+	"github.com/lodgvideon/poseidon-http-client/quic"
 )
 
 // h3Client is the subset of *http3.Client the transport drives: a buffered Do
@@ -40,6 +41,24 @@ func h3DialFn(ctx context.Context, addr string, tlsConfig *tls.Config) (h3Client
 		return nil, err
 	}
 	return cl, nil
+}
+
+// makeH3DialFn returns an h3 dial function that forwards connOpts to every QUIC
+// connection it dials (http3.Dial). ClientOptions.H3ConnOptions flow through here,
+// so a client configured with quic.WithCongestionControl(quic.CCBBR) dials BBR
+// connections. With no options it is exactly h3DialFn, so the default path (and
+// the tests that pin it) are unchanged.
+func makeH3DialFn(connOpts []quic.ConnOption) func(context.Context, string, *tls.Config) (h3Client, error) {
+	if len(connOpts) == 0 {
+		return h3DialFn
+	}
+	return func(ctx context.Context, addr string, tlsConfig *tls.Config) (h3Client, error) {
+		cl, err := http3.Dial(ctx, addr, tlsConfig, connOpts...)
+		if err != nil {
+			return nil, err
+		}
+		return cl, nil
+	}
 }
 
 // ————————————————————————————————————————————————————————————————
