@@ -84,8 +84,18 @@ func (c *Conn) Poll(ctx context.Context) error {
 	// deadline into the past to unblock the parked Read (§3.1, INV-4).
 	c.ensureReadWatchdog(ctx)
 	// Compute and publish the read deadline under the lock before arming it, so a
-	// Do-side send can legally shorten it against the blocked Read (§4 INV-4).
-	dl := c.computeReadDeadline(ctx)
+	// Do-side send can legally shorten it against the blocked Read (§4 INV-4). The
+	// loss/idle/ctx deadline is retained separately (armedLossDeadline) so a deferred
+	// ACK, which may pull the read deadline nearer, does not disguise itself as a
+	// loss/PTO expiry (RFC 9000 §13.2.1; see handleExpiry).
+	base := c.computeReadDeadline(ctx)
+	c.armedLossDeadline = base
+	dl := base
+	c.armedForAck = false
+	if !c.ackDeadline.IsZero() && c.ackDeadline.Before(dl) {
+		dl = c.ackDeadline // wake to flush the deferred ACK within max_ack_delay
+		c.armedForAck = true
+	}
 	c.armedReadDeadline = dl
 	c.setReadDeadline(dl)
 	// Arm→recheck guard: a cancel that fired before we armed must not be masked by
@@ -151,6 +161,11 @@ func (c *Conn) afterReadLocked(ctx context.Context, n, segSize int, err error, n
 	// End of the receive burst: if it freed congestion-window or connection credit,
 	// wake senders parked on blockCong/blockConn in one O(n) sweep (§3.3, INV-5).
 	c.maybeBroadcastSendWindow()
+	// Decide the Application-space ACK cadence for this burst (RFC 9000 §13.2.1):
+	// send now on an immediate trigger, else arm the max_ack_delay deferral so the
+	// owed ACK rides the next outbound packet or fires on the timer. The flush below
+	// emits it only if now due.
+	c.updateAppAckDeferral(now)
 	return c.flush()
 }
 
@@ -160,18 +175,36 @@ func (c *Conn) afterReadLocked(ctx context.Context, n, segSize int, err error, n
 // a non-nil error (idle close, or the give-up timeout) ends the connection. Assumes
 // c.mu is held; now is the post-reacquire timestamp.
 func (c *Conn) handleExpiry(now time.Time, timeout error) error {
-	// Idle close first, gated on now >= idleDeadline, so an early PTO wake (a Do-side
-	// re-arm shortened the deadline) never mis-fires an idle close before probing.
-	if idleDL, ok := c.idleDeadline(); ok && !idleDL.After(now) {
-		return c.idleClose()
-	}
-	switch lt, sp, ok := c.earliestLossTime(); {
-	case ok && !lt.After(now):
-		c.detectLost(sp)
-	case (c.hasInFlight() || c.handshakeAntiDeadlock()) && c.ptoCount < maxPTOBackoff:
-		c.onPTO()
-	default:
-		return timeout // idle bound elapsed with nothing to probe / backoff exhausted
+	// The read deadline may have been pulled nearer by a deferred Application-space
+	// ACK (RFC 9000 §13.2.1), so a wake no longer implies a loss/PTO/idle event is
+	// due. When the reader armed FOR the ACK deadline (armedForAck, captured at arm
+	// time so a concurrent piggyback that clears ackDeadline cannot flip it), run the
+	// loss/PTO/idle machinery only once its own (pre-ACK) deadline has genuinely
+	// elapsed; otherwise this is an ACK-only wake and the trailing flush sends the
+	// owed ACK without touching ptoCount — a deferred ACK must never provoke a
+	// spurious PTO probe or retransmit. When armed for the loss/idle deadline, a
+	// timeout means that event is due (unchanged pre-deferral behavior).
+	lossIdleDue := !c.armedForAck || !c.armedLossDeadline.After(now)
+	if lossIdleDue {
+		// Idle close first, gated on now >= idleDeadline, so an early PTO wake (a
+		// Do-side re-arm shortened the deadline) never mis-fires an idle close before
+		// probing.
+		if idleDL, ok := c.idleDeadline(); ok && !idleDL.After(now) {
+			return c.idleClose()
+		}
+		switch lt, sp, ok := c.earliestLossTime(); {
+		case ok && !lt.After(now):
+			c.detectLost(sp)
+		case (c.hasInFlight() || c.handshakeAntiDeadlock()) && c.ptoCount < maxPTOBackoff:
+			c.onPTO()
+		default:
+			// Nothing to probe. If an ACK is not owed either, the idle bound elapsed
+			// with nothing to do / the backoff is exhausted → surface the timeout to
+			// end the connection; otherwise fall through to flush the owed ACK.
+			if !c.ackDue(spaceApp) {
+				return timeout
+			}
+		}
 	}
 	return c.flush()
 }
@@ -198,6 +231,56 @@ func (c *Conn) setReadDeadline(t time.Time) {
 	}
 }
 
+// canScheduleAckTimer reports whether the transport can arm a read deadline, the
+// mechanism a deferred ACK relies on to fire within max_ack_delay when no outbound
+// packet carries it first. A transport without it (a plain pipe in a unit test)
+// cannot schedule the fallback, so an ACK is never deferred there — it is sent
+// immediately, preserving the pre-deferral behavior and never risking a stall.
+func (c *Conn) canScheduleAckTimer() bool {
+	_, ok := c.pc.(interface{ SetReadDeadline(time.Time) error })
+	return ok
+}
+
+// updateAppAckDeferral decides, at the end of a receive burst, whether the owed
+// Application-space ACK is sent now or deferred (RFC 9000 §13.2.1). Only the 1-RTT
+// space defers, and only once the handshake is complete — Initial/Handshake ACKs
+// and the pre-1-RTT path stay immediate. On an immediate trigger (an out-of-order
+// arrival or the 2nd ack-eliciting packet since the last ACK, tracked in
+// acks[spaceApp]) it clears the deadline so flush emits the ACK now. Otherwise it
+// arms the deadline at now + max_ack_delay, anchored to the first deferred packet
+// so a run of in-order packets cannot push the ACK past the bound. Assumes c.mu.
+func (c *Conn) updateAppAckDeferral(now time.Time) {
+	if !c.handshakeComplete || !c.acks[spaceApp].pending {
+		return
+	}
+	if c.acks[spaceApp].immediate || !c.canScheduleAckTimer() {
+		c.ackDeadline = time.Time{} // send now: §13.2.1 immediate, or no fallback timer
+		return
+	}
+	if c.ackDeadline.IsZero() {
+		// We advertise no max_ack_delay, so our value is the RFC 9000 §18.2 default.
+		c.ackDeadline = now.Add(defaultMaxAckDelay)
+	}
+}
+
+// ackDue reports whether the owed ACK for space sp must be written now. Initial and
+// Handshake spaces, and the Application space before the handshake completes, ACK
+// immediately (RFC 9000 §13.2.1). A 1-RTT ACK is due on an immediate trigger, when
+// no deferral is armed (an unset deadline — e.g. a transport that cannot schedule
+// the timer), or once its max_ack_delay deadline has elapsed. Assumes c.mu.
+func (c *Conn) ackDue(sp int) bool {
+	if !c.acks[sp].pending {
+		return false
+	}
+	if sp != spaceApp || !c.handshakeComplete {
+		return true
+	}
+	if c.acks[sp].immediate || c.ackDeadline.IsZero() {
+		return true
+	}
+	return !c.ackDeadline.After(c.clock())
+}
+
 // rearmReadDeadline shortens the parked reader's read deadline after a Do-side send
 // put a packet in flight (docs/HTTP3_DESIGN.md §4 INV-4): the loss-detection
 // deadline is now sub-second where the reader armed the idle scale, so the reader
@@ -208,10 +291,22 @@ func (c *Conn) rearmReadDeadline() {
 	if c.armedReadDeadline.IsZero() {
 		return
 	}
-	newDL, _ := c.lossDetectionDeadline()
-	if newDL.Before(c.armedReadDeadline) {
-		c.setReadDeadline(newDL)
-		c.armedReadDeadline = newDL
+	newLossDL, _ := c.lossDetectionDeadline()
+	if newLossDL.Before(c.armedLossDeadline) {
+		c.armedLossDeadline = newLossDL // the in-flight packet shortened the loss/PTO timer
+	}
+	// The wake deadline is the nearer of the loss/PTO deadline and any deferred-ACK
+	// deadline (RFC 9000 §13.2.1), so the owed ACK still fires within max_ack_delay.
+	dl := c.armedLossDeadline
+	forAck := false
+	if !c.ackDeadline.IsZero() && c.ackDeadline.Before(dl) {
+		dl = c.ackDeadline
+		forAck = true
+	}
+	if dl.Before(c.armedReadDeadline) {
+		c.setReadDeadline(dl)
+		c.armedReadDeadline = dl
+		c.armedForAck = forAck // this send moved the binding deadline; record which
 	}
 }
 

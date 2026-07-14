@@ -1,6 +1,10 @@
 package quic
 
-import "github.com/lodgvideon/poseidon-http-client/internal/bytesx"
+import (
+	"time"
+
+	"github.com/lodgvideon/poseidon-http-client/internal/bytesx"
+)
 
 // maxDatagramSize is the conservative outbound datagram cap used before path MTU
 // discovery: RFC 9000 §14 guarantees any usable path supports at least 1200
@@ -100,25 +104,57 @@ func (s *Stream) sendLocked(data []byte, fin bool) (int, error) {
 // accounting. The sealed datagram is copied into the batch, so the packet reaches
 // the wire when the batch is flushed, not here.
 func (s *Stream) writeStreamFrame(b *packetBatch, chunk []byte, fin bool) error {
+	c := s.conn
 	rf := retransFrame{
 		kind: retransStream, streamID: s.id, offset: s.sendOffset, fin: fin,
 		data: append([]byte(nil), chunk...), // private copy retained for retransmit (§13.3); NOT the reused scratch
 	}
-	// Build the STREAM frame into the reused frameScratch: it is consumed by the
+	// Build the frame payload into the reused frameScratch: it is consumed by the
 	// seal below (as the AEAD payload) before any next writeStreamFrame overwrites
 	// it, and c.mu is held throughout, so reuse is safe. rf.data above is a
 	// separate private copy, so a resend never reads this scratch.
-	s.conn.frameScratch = AppendStream(s.conn.frameScratch[:0], s.id, s.sendOffset, fin, chunk)
-	if err := s.conn.sealAppToBatch(b, s.conn.frameScratch, []retransFrame{rf}); err != nil {
+	c.frameScratch = c.frameScratch[:0]
+	// Piggyback an owed Application-space ACK on this STREAM packet when one fits
+	// (RFC 9000 §13.2.1): the deferred ACK rides the request instead of leaving as
+	// its own datagram, halving send syscalls on the GET request/response path. The
+	// ACK is not ack-eliciting and is never retransmitted, so it is left out of rf.
+	// It is prepended so the peer sees the acknowledgement first. A full-size STREAM
+	// chunk leaves no room, so the ACK stays deferred and fires on the timer.
+	piggyback := c.handshakeComplete && c.acks[spaceApp].pending
+	if piggyback {
+		c.frameScratch = c.acks[spaceApp].buildACK(c.frameScratch, 0)
+		overhead := 1 + len(c.dcid) + 4 + 16 // short header + 4-byte PN + AEAD tag
+		if overhead+len(c.frameScratch)+streamFrameLen(s.id, s.sendOffset, chunk) > maxDatagramSize {
+			c.frameScratch = c.frameScratch[:0] // would overflow the datagram; keep deferring
+			piggyback = false
+		}
+	}
+	c.frameScratch = AppendStream(c.frameScratch, s.id, s.sendOffset, fin, chunk)
+	if err := c.sealAppToBatch(b, c.frameScratch, []retransFrame{rf}); err != nil {
 		return err
 	}
+	if piggyback {
+		c.acks[spaceApp].acked() // the owed ACK rode this packet; clear it + the deferral
+		c.ackDeadline = time.Time{}
+	}
 	s.sendOffset += uint64(len(chunk))
-	s.conn.connSent += uint64(len(chunk))
+	c.connSent += uint64(len(chunk))
 	if fin {
 		s.finSent = true
-		s.conn.maybeRetire(s) // if the response already arrived, both sides are now done
+		c.maybeRetire(s) // if the response already arrived, both sides are now done
 	}
 	return nil
+}
+
+// streamFrameLen is the encoded byte length of the STREAM frame AppendStream would
+// produce for these arguments (type + Stream ID + optional Offset + Length + data),
+// used to decide whether a piggybacked ACK still fits the 1200-byte datagram.
+func streamFrameLen(streamID, offset uint64, data []byte) int {
+	n := 1 + bytesx.VarintLen(streamID)
+	if offset != 0 {
+		n += bytesx.VarintLen(offset)
+	}
+	return n + bytesx.VarintLen(uint64(len(data))) + len(data)
 }
 
 // grantable computes how many of the next remaining bytes may be sent now,
