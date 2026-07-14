@@ -2,6 +2,7 @@ package client
 
 import (
 	"context"
+	"crypto/tls"
 	"fmt"
 	"io"
 	"net"
@@ -43,6 +44,13 @@ const (
 	// TransportSingleConn; for servers that only speak HTTP/1.1 it falls
 	// back automatically. ConnOpts.Dialer should be *conn.FlexDialer.
 	TransportALPN
+
+	// TransportH3 speaks HTTP/3 over QUIC using a single lazy-dialled
+	// *http3.Client. It owns UDP/QUIC dialing via http3.Dial, so it requires
+	// ClientOptions.TLSConfig (with ServerName) and Addr rather than
+	// ConnOpts.Dialer. This is the buffered request path only (Client.Do);
+	// DoStream/BodyStream and connection pooling are not yet supported.
+	TransportH3
 )
 
 // DefaultMaxDecompressedSize is the default maximum decompressed body
@@ -63,8 +71,16 @@ type ClientOptions struct {
 	Addr string
 
 	// ConnOpts is forwarded verbatim to conn.Dial. ConnOpts.Dialer
-	// must be non-nil.
+	// must be non-nil for every transport except TransportH3, which owns
+	// its own QUIC dialing.
 	ConnOpts conn.ConnOptions
+
+	// TLSConfig is the TLS configuration used by TransportH3 (HTTP/3 over
+	// QUIC). It should set ServerName; the "h3" ALPN token and TLS 1.3
+	// minimum are applied automatically by the http3 dialer. Required for
+	// TransportH3 and ignored by every other transport (which dial via
+	// ConnOpts.Dialer).
+	TLSConfig *tls.Config
 
 	// DialBackoff suppresses repeated dial attempts within this window
 	// after a failed dial. Zero disables suppression (immediate retry).
@@ -173,14 +189,21 @@ func NewClient(opts ClientOptions) (*Client, error) {
 			return nil, fmt.Errorf("client: ClientOptions.Addr must be a non-empty host:port without whitespace")
 		}
 	}
-	if opts.ConnOpts.Dialer == nil {
+	// TransportH3 owns its own QUIC dialing and needs a *tls.Config, not a
+	// conn.Dialer — carve it out of the Dialer-required check and require the
+	// TLS config instead.
+	if opts.Transport == TransportH3 {
+		if opts.TLSConfig == nil {
+			return nil, fmt.Errorf("client: ClientOptions.TLSConfig is required for TransportH3")
+		}
+	} else if opts.ConnOpts.Dialer == nil {
 		return nil, fmt.Errorf("client: ClientOptions.ConnOpts.Dialer is required")
 	}
 	if opts.PushHandler != nil {
 		opts.ConnOpts.EnablePush = true
 	}
 	switch opts.Transport {
-	case TransportSingleConn, TransportH1SingleConn, TransportALPN:
+	case TransportSingleConn, TransportH1SingleConn, TransportALPN, TransportH3:
 		if opts.Pool != nil {
 			return nil, fmt.Errorf("%w: Pool must be nil for this transport kind", ErrInvalidPoolOptions)
 		}
@@ -201,44 +224,9 @@ func NewClient(opts ClientOptions) (*Client, error) {
 	metrics := &Metrics{}
 	hooksPtr := new(atomic.Pointer[Hooks])
 	hooksPtr.Store(opts.Hooks)
-	var tr transport
-	switch opts.Transport {
-	case TransportSingleConn:
-		tr = &singleConn{
-			addr:     opts.Addr,
-			connOpts: opts.ConnOpts,
-			backoff:  opts.DialBackoff,
-			hooksRef: hooksPtr,
-			metrics:  metrics,
-		}
-	case TransportPool:
-		tr = newPoolTransport(opts.Addr, opts.ConnOpts, *opts.Pool, hooksPtr, metrics)
-	case TransportManaged:
-		po := PoolOptions{}
-		if opts.Pool != nil {
-			po = *opts.Pool
-		}
-		mp, err := newManagedPool(opts.Resolver, opts.Selector, opts.DrainMode, opts.ConnOpts, po, hooksPtr, metrics)
-		if err != nil {
-			return nil, err
-		}
-		tr = &managedTransport{mp: mp}
-	case TransportH1SingleConn:
-		tr = &h1singleConn{
-			addr:     opts.Addr,
-			dialer:   opts.ConnOpts.Dialer,
-			backoff:  opts.DialBackoff,
-			hooksRef: hooksPtr,
-			metrics:  metrics,
-		}
-	case TransportALPN:
-		tr = &alpnSingleConn{
-			addr:     opts.Addr,
-			connOpts: opts.ConnOpts,
-			backoff:  opts.DialBackoff,
-			hooksRef: hooksPtr,
-			metrics:  metrics,
-		}
+	tr, err := buildTransport(opts, hooksPtr, metrics)
+	if err != nil {
+		return nil, err
 	}
 	scheme := opts.DefaultScheme
 	if scheme == "" {
@@ -272,6 +260,61 @@ func NewClient(opts ClientOptions) (*Client, error) {
 		maxResponseBodySize: maxBody,
 	}
 	return c, nil
+}
+
+// buildTransport constructs the concrete transport for opts.Transport. opts has
+// already been validated by NewClient, so the only error path is the managed
+// pool's own constructor. Kept separate from NewClient so the latter stays under
+// the gocyclo budget.
+func buildTransport(opts ClientOptions, hooksPtr *atomic.Pointer[Hooks], metrics *Metrics) (transport, error) {
+	switch opts.Transport {
+	case TransportSingleConn:
+		return &singleConn{
+			addr:     opts.Addr,
+			connOpts: opts.ConnOpts,
+			backoff:  opts.DialBackoff,
+			hooksRef: hooksPtr,
+			metrics:  metrics,
+		}, nil
+	case TransportPool:
+		return newPoolTransport(opts.Addr, opts.ConnOpts, *opts.Pool, hooksPtr, metrics), nil
+	case TransportManaged:
+		po := PoolOptions{}
+		if opts.Pool != nil {
+			po = *opts.Pool
+		}
+		mp, err := newManagedPool(opts.Resolver, opts.Selector, opts.DrainMode, opts.ConnOpts, po, hooksPtr, metrics)
+		if err != nil {
+			return nil, err
+		}
+		return &managedTransport{mp: mp}, nil
+	case TransportH1SingleConn:
+		return &h1singleConn{
+			addr:     opts.Addr,
+			dialer:   opts.ConnOpts.Dialer,
+			backoff:  opts.DialBackoff,
+			hooksRef: hooksPtr,
+			metrics:  metrics,
+		}, nil
+	case TransportALPN:
+		return &alpnSingleConn{
+			addr:     opts.Addr,
+			connOpts: opts.ConnOpts,
+			backoff:  opts.DialBackoff,
+			hooksRef: hooksPtr,
+			metrics:  metrics,
+		}, nil
+	case TransportH3:
+		return &singleH3Conn{
+			addr:      opts.Addr,
+			tlsConfig: opts.TLSConfig,
+			backoff:   opts.DialBackoff,
+			dialFn:    h3DialFn,
+			hooksRef:  hooksPtr,
+			metrics:   metrics,
+		}, nil
+	}
+	return nil, fmt.Errorf("%w: %d", ErrInvalidTransportKind, int(opts.Transport))
 }
 
 // Close releases the underlying transport. Subsequent Do/DoStream

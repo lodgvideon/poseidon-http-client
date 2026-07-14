@@ -134,5 +134,5 @@ services:
       H3_INTEROP_ADDRS: "caddy=h3caddy:443,nginx=h3nginx:443,aioquic=h3aioquic:443"
       GOFLAGS: -count=1
     command: >
-      go test ./http3/ -tags interop -run TestInterop -v -timeout 120s
+      go test ./http3/ ./client/ -tags interop -run TestInterop -v -timeout 120s
     restart: "no"
