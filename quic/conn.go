@@ -110,6 +110,19 @@ type Conn struct {
 	handshakeConfirmed bool                // QUIC HANDSHAKE_DONE received (RFC 9001 §4.1.2; gates key update §6.1)
 	sendBuf            []byte
 
+	// Per-Conn send scratch, reused across seals to keep the send path alloc-lean
+	// instead of allocating a fresh header/frame/seal-output buffer per packet.
+	// Safe ONLY because c.mu is held across the whole seal+pc.Write, so no two
+	// goroutines ever touch the scratch at once, AND pc.Write copies the datagram
+	// into the kernel synchronously (net.UDPConn.Write) and never retains the
+	// slice after returning — so the next seal is free to overwrite it. The sealed
+	// bytes are NOT retained for retransmit: flushRetransmits re-seals from the
+	// retained retransFrame descriptors (whose data is a private copy), never from
+	// this scratch, so reuse cannot corrupt a resend.
+	hdrScratch   []byte // long/short header + packet number (sealPacket)
+	frameScratch []byte // STREAM frame bytes (writeStreamFrame)
+	sealScratch  []byte // AEAD seal output = the on-wire datagram (sealPacket)
+
 	nextBidiStreamID   uint64             // next client-initiated bidi stream ID (0, 4, 8, …)
 	openedBidi         uint64             // count of client bidi streams opened (RFC 9000 §4.6 gate)
 	openedUni          uint64             // count of client uni streams opened (§4.6 gate; ID = 2+4n)
