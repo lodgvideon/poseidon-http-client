@@ -114,14 +114,7 @@ func runServerHandshake(t *testing.T, pc PacketConn, cert tls.Certificate, tp, s
 		return
 	}
 
-	shs := &TLSHandshake{
-		conn: tls.QUICServer(&tls.QUICConfig{TLSConfig: &tls.Config{
-			Certificates: []tls.Certificate{cert},
-			NextProtos:   []string{"h3"},
-			MinVersion:   tls.VersionTLS13,
-		}}),
-		tp: tp,
-	}
+	shs := NewServerHandshake(&tls.Config{Certificates: []tls.Certificate{cert}}, tp)
 	ss := &serverSink{}
 	if err := shs.Start(context.Background()); err != nil {
 		t.Errorf("server Start: %v", err)
