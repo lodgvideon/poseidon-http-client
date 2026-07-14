@@ -105,3 +105,42 @@ func (c *cryptoReassembler) OnCrypto(offset uint64, data []byte) error {
 
 // assembled returns the contiguous CRYPTO bytes from offset 0.
 func (c *cryptoReassembler) assembled() []byte { return c.buf[:c.end] }
+
+// SealPacket builds and protects a single QUIC packet carrying payload (already
+// framed) and appends it to dst. typ selects the form: PacketInitial,
+// PacketHandshake, and PacketZeroRTT use a long header (dcid, scid, and — for
+// Initial only — token); PacketShort uses a 1-RTT short header (dcid only). pn is
+// the full packet number and pnLen its on-wire length (1–4).
+//
+// The payload is padded with PADDING frames when it is too short for header
+// protection to sample (RFC 9001 §5.4.2). Unlike BuildInitialPacket it does not
+// pad to the 1200-byte anti-amplification floor — a server bounds its early
+// flights to 3× the bytes it has received, so that padding is the caller's call.
+// It is the send-side counterpart to AcceptInitial, used to assemble the server's
+// response flights.
+func SealPacket(dst []byte, s *Sealer, typ PacketType, dcid, scid, token []byte, pn uint64, pnLen int, payload []byte) ([]byte, error) {
+	if pnLen < 1 || pnLen > 4 {
+		return nil, ErrPacketEncoding
+	}
+	// Header protection samples 16 bytes starting 4 bytes past the packet-number
+	// offset, so packet number + payload + 16-byte AEAD tag must be ≥ 20 bytes
+	// (RFC 9001 §5.4.2). Pad the frames with PADDING (zero bytes) when too short.
+	if need := (4 - pnLen) - len(payload); need > 0 {
+		padded := make([]byte, 0, len(payload)+need)
+		padded = append(padded, payload...)
+		payload = append(padded, make([]byte, need)...)
+	}
+	const aeadTag = 16
+	var hdr []byte
+	var pnOffset int
+	if typ == PacketShort {
+		hdr, pnOffset = AppendShortHeader(nil, dcid, pnLen, false)
+	} else {
+		length := uint64(pnLen + len(payload) + aeadTag)
+		hdr, pnOffset = AppendLongHeader(nil, typ, QUICVersion1, dcid, scid, token, pnLen, length)
+	}
+	for i := pnLen - 1; i >= 0; i-- {
+		hdr = append(hdr, byte(pn>>(8*uint(i))))
+	}
+	return s.Seal(dst, hdr, pnOffset, pnLen, pn, payload)
+}
