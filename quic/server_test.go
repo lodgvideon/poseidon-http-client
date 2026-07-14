@@ -174,12 +174,13 @@ func TestSealPacket_BadPNLen(t *testing.T) {
 	}
 }
 
-// TestStartServerHandshake_ClientCompletes drives a real client Conn against
-// StartServerHandshake over an in-memory datagram channel: the server accepts the
-// client's Initial, generates its first flight, and the client's TLS handshake
-// completes. This is the end-to-end cover for AcceptInitial + StartServerHandshake
-// + SealPacket + NewServerHandshake together.
-func TestStartServerHandshake_ClientCompletes(t *testing.T) {
+// TestStartServerHandshake_FullHandshake drives a real client Conn against the
+// server-role primitives over an in-memory datagram channel and completes the
+// handshake on BOTH sides: the client's TLS handshake completes against the
+// server's flight, and the server completes when fed the client's Finished,
+// installing 1-RTT keys. End-to-end cover for AcceptInitial + StartServerHandshake
+// + HandleClientHandshake + SealPacket + NewServerHandshake.
+func TestStartServerHandshake_FullHandshake(t *testing.T) {
 	cert, pool := genServerCert(t)
 	clientTP := concat(
 		tpInt(tpInitialMaxData, 1<<20),
@@ -202,26 +203,24 @@ func TestStartServerHandshake_ClientCompletes(t *testing.T) {
 		tpBytes(tpInitialSourceConnectionID, serverSCID),
 		tpBytes(tpOriginalDestinationConnectionID, client.origDCID))
 
-	done := make(chan struct{})
+	var flight *ServerFlight
+	serverErr := make(chan error, 1)
 	go func() {
-		defer close(done)
 		dg := <-toServer // the client's Initial datagram
 		ci, err := AcceptInitial(dg)
 		if err != nil {
-			t.Errorf("AcceptInitial: %v", err)
+			serverErr <- err
 			return
 		}
-		flight, err := StartServerHandshake(ci, &tls.Config{Certificates: []tls.Certificate{cert}}, serverTP, serverSCID)
+		flight, err = StartServerHandshake(ci, &tls.Config{Certificates: []tls.Certificate{cert}}, serverTP, serverSCID)
 		if err != nil {
-			t.Errorf("StartServerHandshake: %v", err)
+			serverErr <- err
 			return
-		}
-		if flight.HandshakeSealer == nil {
-			t.Errorf("StartServerHandshake installed no handshake sealer")
 		}
 		for _, d := range flight.Datagrams {
 			fromServer <- d
 		}
+		serverErr <- nil
 	}()
 
 	if err := client.Establish(context.Background()); err != nil {
@@ -230,5 +229,59 @@ func TestStartServerHandshake_ClientCompletes(t *testing.T) {
 	if !client.handshakeComplete {
 		t.Fatal("client handshake did not complete against StartServerHandshake")
 	}
-	<-done
+	if err := <-serverErr; err != nil { // publishes flight (happens-before)
+		t.Fatalf("server: %v", err)
+	}
+	if flight.HandshakeSealer == nil || flight.HandshakeOpener == nil {
+		t.Fatal("server did not install Handshake keys")
+	}
+
+	// The client sent its Handshake Finished during Establish; drain it and
+	// complete the server side.
+	var clientHS []byte
+drain:
+	for {
+		select {
+		case dg := <-toServer:
+			clientHS = append(clientHS, extractHandshakeCrypto(t, dg, flight.HandshakeOpener)...)
+		default:
+			break drain
+		}
+	}
+	if len(clientHS) == 0 {
+		t.Fatal("captured no client Handshake CRYPTO to complete the server")
+	}
+	if err := flight.HandleClientHandshake(clientHS); err != nil {
+		t.Fatalf("HandleClientHandshake: %v", err)
+	}
+	if !flight.Complete {
+		t.Fatal("server handshake did not complete")
+	}
+	if flight.AppSealer == nil || flight.AppOpener == nil {
+		t.Fatal("server did not install 1-RTT keys")
+	}
+}
+
+// extractHandshakeCrypto walks the packets in a datagram, decrypts each Handshake
+// packet with opener, and returns the reassembled CRYPTO stream (the client's
+// Finished), ignoring Initial/1-RTT packets and non-CRYPTO frames.
+func extractHandshakeCrypto(t *testing.T, datagram []byte, opener *Opener) []byte {
+	t.Helper()
+	var out []byte
+	for off := 0; off < len(datagram); {
+		hdr, err := ParseHeader(datagram[off:], 0)
+		if err != nil || hdr.PacketLen <= 0 {
+			break
+		}
+		if hdr.Type == PacketHandshake {
+			if _, _, payload, err := opener.Open(datagram[off:off+hdr.PacketLen], hdr.PNOffset, 0); err == nil {
+				var cr cryptoReassembler
+				if err := ParseFrames(payload, &cr); err == nil {
+					out = append(out, cr.assembled()...)
+				}
+			}
+		}
+		off += hdr.PacketLen
+	}
+	return out
 }

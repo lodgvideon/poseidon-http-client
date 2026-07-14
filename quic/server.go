@@ -156,6 +156,9 @@ type serverFlightSink struct {
 	crypto          [numSpaces][]byte
 	handshakeSealer *Sealer
 	appSealer       *Sealer
+	handshakeOpener *Opener
+	appOpener       *Opener
+	complete        bool
 }
 
 func (s *serverFlightSink) WriteCrypto(l tls.QUICEncryptionLevel, d []byte) error {
@@ -163,7 +166,23 @@ func (s *serverFlightSink) WriteCrypto(l tls.QUICEncryptionLevel, d []byte) erro
 	return nil
 }
 
-func (s *serverFlightSink) SetReadKeys(tls.QUICEncryptionLevel, uint16, []byte) error { return nil }
+func (s *serverFlightSink) SetReadKeys(l tls.QUICEncryptionLevel, suite uint16, secret []byte) error {
+	k, err := KeysFromSecret(suite, secret)
+	if err != nil {
+		return err
+	}
+	opener, err := NewOpener(k)
+	if err != nil {
+		return err
+	}
+	switch levelSpace(l) {
+	case spaceHandshake:
+		s.handshakeOpener = opener
+	case spaceApp:
+		s.appOpener = opener
+	}
+	return nil
+}
 
 func (s *serverFlightSink) SetWriteKeys(l tls.QUICEncryptionLevel, suite uint16, secret []byte) error {
 	k, err := KeysFromSecret(suite, secret)
@@ -184,26 +203,33 @@ func (s *serverFlightSink) SetWriteKeys(l tls.QUICEncryptionLevel, suite uint16,
 }
 
 func (s *serverFlightSink) PeerTransportParameters([]byte) error { return nil }
-func (s *serverFlightSink) HandshakeComplete() error             { return nil }
+func (s *serverFlightSink) HandshakeComplete() error             { s.complete = true; return nil }
 
-// ServerFlight is the server's first response to a client Initial: the sealed
-// datagram(s) to send back, plus the handshake state and send sealers needed to
-// carry the connection forward.
+// ServerFlight is the server's response to a client Initial and the state to
+// carry the connection forward: the sealed datagram(s) to send, the handshake,
+// and the send/receive keys as they are installed.
 type ServerFlight struct {
 	// Datagrams are the sealed packets to send to the client, each its own
-	// datagram: the Initial (ServerHello) and, once handshake keys exist, the
-	// Handshake flight (EncryptedExtensions .. Finished).
+	// datagram: the Initial (ServerHello) and the Handshake flight
+	// (EncryptedExtensions .. Finished).
 	Datagrams [][]byte
-	// Handshake is the in-progress server handshake, to be driven further as the
-	// client's later CRYPTO arrives.
+	// Handshake is the in-progress server handshake, driven further via
+	// HandleClientHandshake as the client's CRYPTO arrives.
 	Handshake *TLSHandshake
-	// HandshakeSealer protects Handshake-level packets. AppSealer protects 1-RTT
-	// packets and is non-nil once the server installs application write keys
-	// (after it sends its Finished).
+	// HandshakeSealer / HandshakeOpener protect Handshake-level packets sent and
+	// received. AppSealer / AppOpener protect 1-RTT packets and are non-nil once
+	// application keys are installed (AppSealer after the server's Finished,
+	// AppOpener once the handshake completes).
 	HandshakeSealer *Sealer
+	HandshakeOpener *Opener
 	AppSealer       *Sealer
+	AppOpener       *Opener
+	// Complete reports whether the TLS handshake has finished.
+	Complete bool
 	// SCID is the server's source connection ID used on the response packets.
 	SCID []byte
+
+	sink *serverFlightSink // retained to keep pumping the handshake
 }
 
 // StartServerHandshake processes a client's first Initial (as returned by
@@ -242,8 +268,11 @@ func StartServerHandshake(ci *ClientInitial, cfg *tls.Config, tp, scid []byte) (
 	flight := &ServerFlight{
 		Handshake:       hs,
 		HandshakeSealer: sink.handshakeSealer,
+		HandshakeOpener: sink.handshakeOpener,
 		AppSealer:       sink.appSealer,
+		AppOpener:       sink.appOpener,
 		SCID:            append([]byte(nil), scid...),
+		sink:            sink,
 	}
 	// Initial packet: the ServerHello, addressed to the client's source CID.
 	if len(sink.crypto[spaceInitial]) > 0 {
@@ -264,4 +293,21 @@ func StartServerHandshake(ci *ClientInitial, cfg *tls.Config, tp, scid []byte) (
 		flight.Datagrams = append(flight.Datagrams, dg)
 	}
 	return flight, nil
+}
+
+// HandleClientHandshake feeds the client's Handshake-level CRYPTO (its Finished)
+// into the server handshake and pumps it. On success the TLS handshake is
+// complete and 1-RTT keys are installed: Complete reports true, and AppSealer /
+// AppOpener protect application (1-RTT) packets sent and received.
+func (f *ServerFlight) HandleClientHandshake(cryptoData []byte) error {
+	if err := f.Handshake.HandleCrypto(tls.QUICEncryptionLevelHandshake, cryptoData); err != nil {
+		return err
+	}
+	if err := f.Handshake.Pump(f.sink); err != nil {
+		return err
+	}
+	f.AppSealer = f.sink.appSealer
+	f.AppOpener = f.sink.appOpener
+	f.Complete = f.sink.complete
+	return nil
 }
