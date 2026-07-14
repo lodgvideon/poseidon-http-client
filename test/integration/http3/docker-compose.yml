@@ -46,8 +46,12 @@ services:
     restart: "no"
 
   # ── Caddy — quic-go (Go) HTTP/3 ─────────────────────────────────
+  # Digest-pinned so the interop matrix does not drift when the caddy:2 /
+  # nginx:1.27 tags are re-published (a silent server upgrade could mask or
+  # introduce a client interop regression). Refresh with:
+  #   docker buildx imagetools inspect caddy:2   (resolved 2026-07-14)
   caddy:
-    image: caddy:2
+    image: caddy:2@sha256:af5fdcd76f2db5e4e974ee92f96ee8c0fc3edb55bd4ba5032547cbf3f65e486d
     hostname: h3caddy
     networks: [h3net]
     depends_on:
@@ -68,7 +72,7 @@ services:
   # The nginx image ships no curl/wget for a healthcheck, so it is gated on
   # service_started; the runner retries the dial until nginx is serving.
   nginx:
-    image: nginx:1.27
+    image: nginx:1.27@sha256:6784fb0834aa7dbbe12e3d7471e69c290df3e6ba810dc38b34ae33d3c1c05f7d
     hostname: h3nginx
     networks: [h3net]
     depends_on:
