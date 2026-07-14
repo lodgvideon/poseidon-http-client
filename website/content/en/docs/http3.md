@@ -91,6 +91,10 @@ All three TLS 1.3 AEAD suites are supported for QUIC packet protection: AES-128-
 
 Header compression uses dynamic-table QPACK in both directions: the client encodes request headers against the dynamic table and decodes server insertions on the decoder stream. This happens automatically; there is no knob to turn.
 
+## Allocations
+
+The HTTP/3 wire codec is zero-alloc: QUIC frames and packet headers, HTTP/3 frames, and QPACK field sections encode and decode at 0 B/op, 0 allocs/op. The same CI bench gate that enforces this for the HTTP/2 frame and HPACK codec covers the `qpack`, `quic`, and `http3` packages. The QUIC packet send path is the exception: building and sealing an outgoing packet allocates a small, bounded amount per packet. A request over HTTP/3 is therefore low-alloc, not allocation-free.
+
 ## Congestion control
 
 The default is NewReno. BBR is available opt-in:

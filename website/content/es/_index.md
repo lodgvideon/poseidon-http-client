@@ -13,7 +13,7 @@ Licencia MIT. Requiere Go 1.25. Código fuente: [github.com/lodgvideon/poseidon-
 
 - **Un cliente, tres versiones del protocolo** — HTTP/1.1, /2 y /3 con la misma API `Do`/`DoStream`; la biblioteca estándar de Go no tiene HTTP/3.
 - **Desde cero, casi sin dependencias** — sin `quic-go`, sin `nghttp2`, sin cgo; una superficie pequeña y auditable.
-- **Códec sin asignaciones** — codificación y decodificación de frames y HPACK a 0 B/op y 0 allocs/op, garantizado por un bench gate en CI.
+- **Códec de wire sin asignaciones** — HTTP/2 (frames, HPACK) y HTTP/3 (QPACK, frames HTTP/3, frames QUIC y cabeceras de paquete) codifican y decodifican a 0 B/op y 0 allocs/op, garantizado por un bench gate en CI.
 - **Control fino** — streams, ventanas de control de flujo, SETTINGS, política de pooling, control de congestión (NewReno o BBR); mandos que `net/http` oculta.
 - **Funciones de generación de carga incorporadas** — pooling de conexiones, descubrimiento de servicios por DNS, reintentos, limitación de tasa, hooks y métricas, compartidas entre H2 y H3.
 - **Probado por conformidad** — ~200 tests de conformidad ligados a secciones de RFC, una matriz de interoperabilidad HTTP/3 con 3 servidores (Caddy, nginx, aioquic) sobre UDP real, parsers de wire con fuzzing, `-race` en todo el proyecto.
