@@ -2,6 +2,7 @@ package http3
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
 	"fmt"
 	"sync"
@@ -133,6 +134,18 @@ func (a connAdapter) AcceptUniStream() quicStream {
 		return s // avoid a non-nil interface wrapping a nil *Stream
 	}
 	return nil
+}
+
+// ConnectionState returns the TLS connection state of the underlying QUIC
+// connection (ALPN, negotiated cipher suite, peer certificates). It returns the
+// zero value when the connection does not expose one (e.g. a test fake).
+func (c *Client) ConnectionState() tls.ConnectionState {
+	if cs, ok := c.conn.(interface {
+		ConnectionState() tls.ConnectionState
+	}); ok {
+		return cs.ConnectionState()
+	}
+	return tls.ConnectionState{}
 }
 
 // Client is a minimal HTTP/3 client over an established QUIC connection. It owns

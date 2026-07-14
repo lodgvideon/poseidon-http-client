@@ -157,10 +157,12 @@ func TestTLSHandshake_InMemory(t *testing.T) {
 	}
 }
 
-// TestKeysFromSecret_UnsupportedSuite rejects a suite we do not yet protect
-// packets with (ChaCha20-Poly1305).
+// TestKeysFromSecret_UnsupportedSuite rejects a suite with no defined QUIC header
+// protection scheme (TLS_AES_128_CCM_8_SHA256, 0x1305 — RFC 9001 §5.4.1). The
+// AES-GCM suites and ChaCha20-Poly1305 are supported and covered elsewhere.
 func TestKeysFromSecret_UnsupportedSuite(t *testing.T) {
-	if _, err := KeysFromSecret(tls.TLS_CHACHA20_POLY1305_SHA256, make([]byte, 32)); err == nil {
-		t.Fatal("expected ErrCryptoSuite for ChaCha20")
+	const tlsAES128CCM8SHA256 = uint16(0x1305)
+	if _, err := KeysFromSecret(tlsAES128CCM8SHA256, make([]byte, 32)); err == nil {
+		t.Fatal("expected ErrCryptoSuite for an unsupported suite")
 	}
 }

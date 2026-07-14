@@ -3,6 +3,7 @@ package quic
 import (
 	"crypto/hkdf"
 	"crypto/sha256"
+	"crypto/tls"
 	"hash"
 )
 
@@ -15,11 +16,14 @@ var quicV1InitialSalt = []byte{
 
 // PacketKeys holds the packet-protection material derived from one traffic
 // secret (RFC 9001 §5.1): the AEAD key, the 12-byte IV, and the
-// header-protection key.
+// header-protection key. Suite is the negotiated TLS cipher suite the keys are
+// for; it selects the AEAD and header-protection algorithm when a Sealer/Opener
+// is built (a zero Suite is treated as AEAD_AES_128_GCM for hand-built keys).
 type PacketKeys struct {
-	Key []byte
-	IV  []byte
-	HP  []byte
+	Key   []byte
+	IV    []byte
+	HP    []byte
+	Suite uint16
 }
 
 // hkdfExpandLabel implements HKDF-Expand-Label (RFC 8446 §7.1) with the TLS 1.3
@@ -62,5 +66,9 @@ func InitialKeys(dcid []byte) (client, server PacketKeys) {
 	}
 	clientSecret := hkdfExpandLabel(sha256.New, initialSecret, "client in", sha256.Size)
 	serverSecret := hkdfExpandLabel(sha256.New, initialSecret, "server in", sha256.Size)
-	return deriveKeys(sha256.New, clientSecret, 16), deriveKeys(sha256.New, serverSecret, 16)
+	client = deriveKeys(sha256.New, clientSecret, 16)
+	server = deriveKeys(sha256.New, serverSecret, 16)
+	client.Suite = tls.TLS_AES_128_GCM_SHA256
+	server.Suite = tls.TLS_AES_128_GCM_SHA256
+	return client, server
 }

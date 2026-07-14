@@ -1,0 +1,67 @@
+name: poseidon-h3-chacha
+
+# ChaCha20-Poly1305 interop: a single nginx server pinned to
+# TLS_CHACHA20_POLY1305_SHA256 (see nginx.chacha.conf), so the from-scratch
+# client's ChaCha20-Poly1305 packet protection (RFC 9001 §5.3 / §5.4.4) is proven
+# on the wire — the handshake cannot fall back to an AES-GCM suite. Self-contained
+# (its own certs + runner) and independent of the main matrix, so it does not
+# perturb docker-compose.yml. The runner runs the client in a container on the
+# same network (Docker Desktop on Windows does not forward host UDP to a published
+# container port; container-to-container UDP works everywhere).
+#
+# Run (from the repo root):
+#   docker compose -f test/integration/http3/docker-compose.chacha.yml run --rm runner
+#   docker compose -f test/integration/http3/docker-compose.chacha.yml down -v
+
+networks:
+  h3net:
+    driver: bridge
+
+volumes:
+  certs:
+
+services:
+  # Self-signed cert for nginx (the client skips verification).
+  certs:
+    image: alpine/openssl
+    volumes:
+      - certs:/certs
+    command: >
+      req -x509 -newkey rsa:2048 -nodes -days 3650
+      -keyout /certs/key.pem -out /certs/cert.pem -subj "/CN=h3nginxchacha"
+    restart: "no"
+
+  # nginx pinned to ChaCha20-Poly1305 — mirrors the main compose nginx service
+  # (same digest-pinned image, certs + srv volumes), only the conf differs. Its
+  # image ships no curl/wget for a healthcheck, so it is gated on service_started
+  # and the runner retries the dial until it is serving.
+  nginxchacha:
+    image: nginx:1.27@sha256:6784fb0834aa7dbbe12e3d7471e69c290df3e6ba810dc38b34ae33d3c1c05f7d
+    hostname: h3nginxchacha
+    networks: [h3net]
+    depends_on:
+      certs:
+        condition: service_completed_successfully
+    volumes:
+      - ./nginx.chacha.conf:/etc/nginx/nginx.conf:ro
+      - ./srv:/srv:ro
+      - certs:/certs:ro
+    restart: "no"
+
+  runner:
+    image: golang:1.24
+    depends_on:
+      nginxchacha:
+        condition: service_started
+    networks: [h3net]
+    working_dir: /src
+    volumes:
+      - ../../..:/src
+    environment:
+      # host:port of the ChaCha20-only server; the ChaCha interop test dials it and
+      # asserts the negotiated cipher suite is TLS_CHACHA20_POLY1305_SHA256.
+      H3_INTEROP_CHACHA_ADDR: "h3nginxchacha:443"
+      GOFLAGS: -count=1
+    command: >
+      go test ./http3/ -tags interop -run TestInteropChaCha -v -timeout 60s
+    restart: "no"

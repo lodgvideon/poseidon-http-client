@@ -497,6 +497,11 @@ func (c *Conn) SetWriteKeys(level tls.QUICEncryptionLevel, suite uint16, secret 
 	return nil
 }
 
+// ConnectionState returns the TLS connection state once the handshake has
+// progressed enough to populate it (ALPN, negotiated cipher suite, peer
+// certificates). It is a snapshot of the underlying crypto/tls state.
+func (c *Conn) ConnectionState() tls.ConnectionState { return c.hs.ConnectionState() }
+
 // discardSpace drops all state for a packet-number space when its keys are
 // discarded (RFC 9001 §4.9): it un-counts the space's in-flight bytes from the
 // congestion controller (RFC 9002 §6.4) and clears its sent, ACK, retransmit,
