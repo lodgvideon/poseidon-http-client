@@ -10,6 +10,7 @@ import (
 
 	"github.com/lodgvideon/poseidon-http-client/conn"
 	"github.com/lodgvideon/poseidon-http-client/frame"
+	"github.com/lodgvideon/poseidon-http-client/http3"
 )
 
 func TestIsIdempotent_Methods(t *testing.T) {
@@ -269,6 +270,123 @@ func TestRetryer_Do_GoAway_Retries(t *testing.T) {
 	}
 	if f.calls != 2 {
 		t.Errorf("calls = %d, want 2", f.calls)
+	}
+}
+
+// TestRetryer_Do_H3RequestRejected_Retries drives the retry loop with an
+// *http3.StreamResetError{H3_REQUEST_REJECTED} surfaced from the H3 Do path
+// (as h3Exchange.Recv returns it verbatim). The Retryer must retry, exactly
+// like the H2 REFUSED_STREAM / conn.ErrGoAway equivalents.
+func TestRetryer_Do_H3RequestRejected_Retries(t *testing.T) {
+	t.Parallel()
+	f := &fakeDoer{t: t, results: []doResult{
+		{nil, &http3.StreamResetError{Code: http3.H3RequestRejected}},
+		{&Response{Status: 200}, nil},
+	}}
+	r := NewRetryer(&Client{}, RetryOptions{
+		MaxAttempts: 3,
+		Backoff:     func(int) time.Duration { return 0 },
+	})
+	r.d = f
+	var resp Response
+	if err := r.Do(context.Background(), &Request{Method: "GET", Path: "/"}, &resp); err != nil {
+		t.Fatalf("Do err = %v, want nil after H3 retry", err)
+	}
+	if resp.Status != 200 {
+		t.Errorf("Status = %d, want 200", resp.Status)
+	}
+	if f.calls != 2 {
+		t.Errorf("calls = %d, want 2", f.calls)
+	}
+}
+
+// TestRetryer_Do_H3ResetNonRejected_Stops confirms a non-rejected H3 reset
+// (which may have had application side effects) stops the loop after one call.
+func TestRetryer_Do_H3ResetNonRejected_Stops(t *testing.T) {
+	t.Parallel()
+	rst := &http3.StreamResetError{Code: http3.H3RequestCancelled}
+	f := &fakeDoer{t: t, results: []doResult{{nil, rst}}}
+	r := NewRetryer(&Client{}, RetryOptions{
+		MaxAttempts: 3,
+		Backoff:     func(int) time.Duration { return 0 },
+	})
+	r.d = f
+	var _res Response
+	err := r.Do(context.Background(), &Request{Method: "GET", Path: "/"}, &_res)
+	if !errors.Is(err, rst) {
+		t.Fatalf("err = %v, want %v", err, rst)
+	}
+	if f.calls != 1 {
+		t.Errorf("calls = %d, want 1 (non-rejected H3 reset must not retry)", f.calls)
+	}
+}
+
+// TestRetryer_Do_H3GoAway_Retries drives the loop with http3.ErrGoAway (the
+// H3 analogue of conn.ErrGoAway): the server is going away and did not process
+// the request, so it is retried on a fresh attempt.
+func TestRetryer_Do_H3GoAway_Retries(t *testing.T) {
+	t.Parallel()
+	f := &fakeDoer{t: t, results: []doResult{
+		{nil, http3.ErrGoAway},
+		{&Response{Status: 200}, nil},
+	}}
+	r := NewRetryer(&Client{}, RetryOptions{
+		MaxAttempts: 3,
+		Backoff:     func(int) time.Duration { return 0 },
+	})
+	r.d = f
+	var resp Response
+	if err := r.Do(context.Background(), &Request{Method: "GET", Path: "/"}, &resp); err != nil || resp.Status != 200 {
+		t.Fatalf("Do = %v, %v; want 200, nil", resp, err)
+	}
+	if f.calls != 2 {
+		t.Errorf("calls = %d, want 2", f.calls)
+	}
+}
+
+// TestRetryer_Do_H3RequestRejected_NonIdempotent_NoRetry confirms the
+// idempotency gate still applies to H3 errors: a POST is not retried even
+// though H3_REQUEST_REJECTED is a retryable transport error.
+func TestRetryer_Do_H3RequestRejected_NonIdempotent_NoRetry(t *testing.T) {
+	t.Parallel()
+	f := &fakeDoer{t: t, results: []doResult{
+		{nil, &http3.StreamResetError{Code: http3.H3RequestRejected}},
+		{&Response{Status: 200}, nil}, // never reached
+	}}
+	r := NewRetryer(&Client{}, RetryOptions{MaxAttempts: 3})
+	r.d = f
+	var _res Response
+	err := r.Do(context.Background(), &Request{Method: "POST", Path: "/"}, &_res)
+	if err == nil {
+		t.Fatal("expected error on POST + H3 reset, got nil")
+	}
+	if f.calls != 1 {
+		t.Errorf("calls = %d, want 1 (non-idempotent must not retry)", f.calls)
+	}
+}
+
+// TestRetryer_Do_5xxStatus_NotRetried confirms a real 5xx HTTP status is a
+// successful response (nil transport error), not a transport failure, so the
+// default Retryer (no user IsRetryable) does not retry it.
+func TestRetryer_Do_5xxStatus_NotRetried(t *testing.T) {
+	t.Parallel()
+	f := &fakeDoer{t: t, results: []doResult{
+		{&Response{Status: 503}, nil},
+	}}
+	r := NewRetryer(&Client{}, RetryOptions{
+		MaxAttempts: 3,
+		Backoff:     func(int) time.Duration { return 0 },
+	})
+	r.d = f
+	var resp Response
+	if err := r.Do(context.Background(), &Request{Method: "GET", Path: "/"}, &resp); err != nil {
+		t.Fatalf("Do err = %v, want nil (5xx is a response, not a transport error)", err)
+	}
+	if resp.Status != 503 {
+		t.Errorf("Status = %d, want 503", resp.Status)
+	}
+	if f.calls != 1 {
+		t.Errorf("calls = %d, want 1 (5xx status must not be retried)", f.calls)
 	}
 }
 

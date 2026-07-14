@@ -11,6 +11,7 @@ import (
 
 	"github.com/lodgvideon/poseidon-http-client/conn"
 	"github.com/lodgvideon/poseidon-http-client/frame"
+	"github.com/lodgvideon/poseidon-http-client/http3"
 )
 
 // isIdempotent reports whether req may be retried after a transport
@@ -60,6 +61,22 @@ func builtinShouldRetry(err error) bool {
 		}
 	}
 	if errors.Is(err, conn.ErrGoAway) {
+		return true
+	}
+	// HTTP/3 transport errors (RFC 9114), surfaced verbatim by the
+	// buffered h3Exchange. Mirror the H2 equivalents above:
+	//   *http3.StreamResetError — the server RESET_STREAM'd the request.
+	//     Retryable() is true iff the code is H3_REQUEST_REJECTED (§4.1.1),
+	//     meaning the request received no application processing; the http3
+	//     type owns that decision, so defer to it. Any other reset code
+	//     (e.g. H3_REQUEST_CANCELLED) may have had side effects — do not retry.
+	//   http3.ErrGoAway — server is going away and will not process the new
+	//     request (§5.2); the H3 analogue of conn.ErrGoAway. Safe to retry.
+	var h3rst *http3.StreamResetError
+	if errors.As(err, &h3rst) {
+		return h3rst.Retryable()
+	}
+	if errors.Is(err, http3.ErrGoAway) {
 		return true
 	}
 	var de *DialError
