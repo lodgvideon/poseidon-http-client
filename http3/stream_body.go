@@ -16,20 +16,29 @@ import (
 // via respBuilder.onData rather than buffered whole. Its caller (DoStream) aborts
 // the stream on a non-nil error; once the head is returned the BodyReader owns the
 // abort.
-func (c *Client) roundTripStream(ctx context.Context, stream quicStream, req *Request) (*Response, *BodyReader, error) {
+func (c *Client) roundTripStream(ctx context.Context, stream quicStream, req *Request) (resp *Response, brOut *BodyReader, err error) {
 	var enc qpack.Encoder
-	frame, err := req.EncodeHeaders(&enc, nil, c.maxFieldSection.Load())
-	if err != nil {
-		return nil, nil, err
+	frame, eerr := req.EncodeHeaders(&enc, nil, c.maxFieldSection.Load())
+	if eerr != nil {
+		return nil, nil, eerr
 	}
-	if err := c.sendRequest(ctx, stream, req, frame); err != nil {
-		return nil, nil, err
+	if serr := c.sendRequest(ctx, stream, req, frame); serr != nil {
+		return nil, nil, serr
 	}
 
 	br := &BodyReader{c: c, stream: stream, ctx: ctx, req: req}
 	br.rb.dec = &br.dec       // per-request QPACK decoder (2d); its scratch aliases decoded slices
+	br.rb.streamID = stream.ID()
 	br.rb.onData = br.stashData
 	br.fr.SetMaxFrameLen(maxResponseBytes)
+	// If an interim/final HEADERS referenced the dynamic table before a pre-head
+	// error aborts the stream, notify the encoder (RFC 9204 §4.4.2). Once the head
+	// is returned the BodyReader owns this (BodyReader.abort). INERT at capacity 0.
+	defer func() {
+		if err != nil && br.rb.refDynamic {
+			c.qpackCancelStream(br.rb.streamID)
+		}
+	}()
 
 	// Read until the final (non-1xx) response HEADERS arrive. Only HEADERS frames
 	// are valid before then (DATA before the final response is a connection error,
@@ -261,13 +270,19 @@ func (r *BodyReader) fail(err error) error {
 
 // abort issues STOP_SENDING + RESET_STREAM once, so an abandoned or errored body
 // releases the server-side stream. A connection error (ErrH3Control) has already
-// torn down the whole connection, but aborting the stream too is harmless.
+// torn down the whole connection, but aborting the stream too is harmless. If the
+// stream referenced the dynamic table, it also emits a Stream Cancellation so the
+// encoder can release the outstanding references (RFC 9204 §4.4.2). INERT: at
+// capacity 0 refDynamic is never set, so no cancellation is emitted.
 func (r *BodyReader) abort(err error) {
 	if r.aborted {
 		return
 	}
 	r.aborted = true
 	abortStream(r.stream, err)
+	if r.rb.refDynamic {
+		r.c.qpackCancelStream(r.rb.streamID)
+	}
 }
 
 // Trailers returns the trailing field section received after the body, or nil if

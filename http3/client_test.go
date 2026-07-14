@@ -161,6 +161,9 @@ type fakeConn struct {
 	mu sync.Mutex
 
 	control    *fakeStream
+	clientQEnc *fakeStream // the client's own QPACK encoder stream (2nd uni opened)
+	clientQDec *fakeStream // the client's own QPACK decoder stream (3rd uni opened)
+	uniOpened  int         // count of OpenUniStream calls, to route the three client uni streams
 	req        *fakeStream
 	polls      atomic.Int64
 	uniSendCap int                         // send cap applied to the control stream
@@ -205,12 +208,26 @@ func (c *fakeConn) AcceptUniStream() quicStream {
 	return s
 }
 
+// OpenUniStream hands out the three client unidirectional streams newClient opens
+// in order: control (0x00), then the client QPACK encoder (0x02) and decoder (0x03)
+// streams. Only the control stream carries uniSendCap (the flow-control-drain
+// test); the QPACK streams accept sends whole.
 func (c *fakeConn) OpenUniStream() (quicStream, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.ensureInitLocked()
-	c.control = &fakeStream{conn: c, sendCap: c.uniSendCap, ready: make(chan struct{}, 1)}
-	return c.control, nil
+	s := &fakeStream{conn: c, ready: make(chan struct{}, 1)}
+	switch c.uniOpened {
+	case 0:
+		s.sendCap = c.uniSendCap
+		c.control = s
+	case 1:
+		c.clientQEnc = s
+	case 2:
+		c.clientQDec = s
+	}
+	c.uniOpened++
+	return s, nil
 }
 
 func (c *fakeConn) OpenStream(_ context.Context) (quicStream, error) {

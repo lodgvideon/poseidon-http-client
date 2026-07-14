@@ -62,6 +62,21 @@ func (d *Decoder) DecodeFieldSection(src []byte, dt *DynamicTable, emit func(nam
 	return nil
 }
 
+// RequiredInsertCount parses only the Encoded Field Section Prefix of src
+// (RFC 9204 §4.5.1) and returns the section's Required Insert Count resolved
+// against dt. A non-zero value means the section references the dynamic table,
+// so once the section is decoded the decoder MUST acknowledge it with a Section
+// Acknowledgment (§2.1.4, §4.4.1). It returns ErrDecompressionFailed if the
+// prefix is malformed; a caller that has already decoded the section
+// successfully can ignore the error, as the prefix is then known well-formed.
+// With a nil table (static-only profile) any non-zero encoded insert count is
+// rejected, so the result is always 0. dt is read, not mutated; a caller sharing
+// dt across goroutines must hold its read lock for this call.
+func RequiredInsertCount(src []byte, dt *DynamicTable) (uint64, error) {
+	_, ric, _, err := parsePrefix(src, dt)
+	return ric, err
+}
+
 // decodeIndexed handles an Indexed Field Line (§4.5.2), static or dynamic
 // relative to Base, and returns the offset past it.
 func (d *Decoder) decodeIndexed(src []byte, p int, base uint64, dt *DynamicTable, emit func(name, value []byte) error) (int, error) {

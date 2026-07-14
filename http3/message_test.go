@@ -118,7 +118,7 @@ func TestConformance_RFC9114_Sec42_RequestValidation(t *testing.T) {
 func TestConformance_RFC9114_Sec412_ResponseDecode(t *testing.T) {
 	section := encodeSection(hf(":status", "200"), hf("content-type", "text/plain"), hf("te", "trailers"))
 	var dec qpack.Decoder
-	resp, err := DecodeResponseHeaders(&dec, section)
+	resp, _, err := DecodeResponseHeaders(&dec, nil, section)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -155,7 +155,7 @@ func TestConformance_RFC9114_Sec412_MalformedResponse(t *testing.T) {
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			var dec qpack.Decoder
-			if _, err := DecodeResponseHeaders(&dec, c.section); err != ErrH3Message {
+			if _, _, err := DecodeResponseHeaders(&dec, nil, c.section); err != ErrH3Message {
 				t.Fatalf("err = %v, want ErrH3Message", err)
 			}
 		})

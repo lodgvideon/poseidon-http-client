@@ -88,3 +88,13 @@ func AppendClientControlStream(dst []byte, settings []Setting) []byte {
 	dst = appendV(dst, StreamTypeControl)
 	return AppendSettings(dst, settings)
 }
+
+// AppendClientQPACKStream appends the leading stream-type varint a client writes
+// to open one of its QPACK instruction streams — the encoder stream
+// (StreamTypeQPACKEncoder, 0x02) or the decoder stream (StreamTypeQPACKDecoder,
+// 0x03) (RFC 9204 §4.2). Unlike the control stream these carry no frame header:
+// the type varint is followed directly by a raw byte stream of QPACK
+// instructions.
+func AppendClientQPACKStream(dst []byte, streamType uint64) []byte {
+	return appendV(dst, streamType)
+}

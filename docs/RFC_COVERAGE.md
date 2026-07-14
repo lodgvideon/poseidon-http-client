@@ -368,6 +368,18 @@ instructions are exchanged — a nil `DynamicTable` preserves the static-only
 decode path exactly. The codec is proved against the RFC 9204 Appendix B worked
 examples.
 
+Q2 wires the Q1 codec into the `http3.Client`: the client opens its own encoder
+and decoder instruction streams (§4.2), a connection-scoped shared `DynamicTable`
+guarded by a new leaf `qpackMu` (the reader applies the server encoder stream
+under `Lock`, every `Do` resolves dynamic references under `RLock` and copies each
+kept field before releasing), the reader emits an Insert Count Increment for
+inserts it applies (§4.4.3), each decoded section that referenced the dynamic
+table triggers a Section Acknowledgment (§2.1.4 / §4.4.1), and an aborted stream
+that referenced the table triggers a Stream Cancellation (§4.4.2). It stays INERT:
+`dial.go` still advertises capacity 0, so in production the shared table stays
+empty and none of these instructions is emitted — the wiring is exercised by
+feeding a fake encoder stream at a non-zero test capacity.
+
 | Section | Type        | Test |
 |---------|-------------|------|
 | App. A  | Roundtrip   | TestStaticTable_Shape (99-entry 0-based static table) |
@@ -385,6 +397,12 @@ examples.
 | §2.2 / §6 | Conformance | TestConformance_RFC9204_Sec22_DecompressionFailedClosesConn (a field section the static-only decoder cannot decode → QPACK_DECOMPRESSION_FAILED, an application-layer CONNECTION_CLOSE, not a per-stream reset) |
 | §4.5    | Roundtrip   | TestQPACK_RoundTrip, TestQPACK_EmptySection |
 | §4.2    | Conformance | TestConformance_RFC9204_Sec42_QPACKStreamClosed (server closing its QPACK encoder stream → H3_CLOSED_CRITICAL_STREAM), TestConformance_RFC9204_Sec42_DuplicateQPACKStream (a second QPACK encoder stream → H3_STREAM_CREATION_ERROR) |
+| §4.2 (wiring) | Conformance | TestClient_RequestResponse / TestClient_SendDrainsUnderFlowControl (client opens its own control + QPACK encoder (0x02) + decoder (0x03) uni-streams; the decoder stream leads with its type byte) — Q2 |
+| §4.3 (wiring) | Conformance | TestConformance_RFC9204_Sec43_EncoderInstructionsApplied (reader applies the server encoder stream's Set Capacity + Insert to the shared table, publishes the advanced insert count) — Q2 |
+| §2.1.4 / §4.4.1 (wiring) | Conformance | TestConformance_RFC9204_Sec441_SectionAcknowledgment (a HEADERS section that references a dynamic entry decodes against the shared table and emits a Section Acknowledgment for the stream) — Q2 |
+| §4.4.2 (wiring) | Conformance | TestConformance_RFC9204_Sec442_StreamCancellationOnAbort (aborting a stream that referenced the dynamic table emits a Stream Cancellation) — Q2 |
+| §4.4.3 (wiring) | Conformance | TestConformance_RFC9204_Sec43_EncoderInstructionsApplied (an Insert Count Increment is emitted on the decoder stream for newly applied inserts) — Q2 |
+| §3.2 (concurrency) | Race | TestConcurrent_QPACKDynamicTable_UnderRace (reader inserts under qpackMu.Lock while N decoders resolve dynamic references under qpackMu.RLock — `-race -count=5`, no race, no deadlock) — Q2 |
 
 ## RFC 9114 — HTTP/3 (Phase G)
 

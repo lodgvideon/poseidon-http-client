@@ -11,14 +11,14 @@ import (
 // headers and rejects any pseudo-header (RFC 9114 §4.1/§4.3).
 func TestDecodeTrailers(t *testing.T) {
 	var dec qpack.Decoder
-	fields, err := DecodeTrailers(&dec, encodeSection(hf("x-checksum", "abc"), hf("x-count", "3")))
+	fields, _, err := DecodeTrailers(&dec, nil, encodeSection(hf("x-checksum", "abc"), hf("x-count", "3")))
 	if err != nil {
 		t.Fatalf("DecodeTrailers: %v", err)
 	}
 	if len(fields) != 2 || string(fields[0].Name) != "x-checksum" || string(fields[1].Value) != "3" {
 		t.Fatalf("trailer fields = %+v", fields)
 	}
-	if _, err := DecodeTrailers(&dec, encodeSection(hf(":status", "200"))); err != ErrH3Message {
+	if _, _, err := DecodeTrailers(&dec, nil, encodeSection(hf(":status", "200"))); err != ErrH3Message {
 		t.Fatalf("pseudo-header in trailers: err = %v, want ErrH3Message", err)
 	}
 }
