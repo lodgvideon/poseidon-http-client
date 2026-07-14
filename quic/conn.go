@@ -158,6 +158,24 @@ type Conn struct {
 	// PTO/loss detection instead of sleeping to the idle scale. Zero means no reader
 	// has parked yet (hand-built test conns, or before the first Poll).
 	armedReadDeadline time.Time
+	// armedLossDeadline is the loss/idle/ctx deadline the reader computed before
+	// folding in the deferred-ACK deadline (below). armedReadDeadline is the min of
+	// the two. handleExpiry compares the wake time against this to tell a genuine
+	// loss/PTO/idle expiry from a wake caused only by the ACK deadline firing early,
+	// so a deferred ACK never provokes a spurious PTO probe (RFC 9000 §13.2.1).
+	armedLossDeadline time.Time
+	// armedForAck records, at arm time, that armedReadDeadline was set to the deferred
+	// ACK deadline because it was nearer than the loss/idle deadline. Captured then —
+	// not recomputed from the live ackDeadline at wake — so a concurrent Do that clears
+	// ackDeadline (by piggybacking the ACK) cannot flip a wake back into a spurious PTO.
+	armedForAck bool
+	// ackDeadline is when a deferred Application-space ACK must be sent by — the
+	// receipt time of the first not-yet-acknowledged in-order ack-eliciting packet
+	// plus our advertised max_ack_delay (RFC 9000 §13.2.1). Zero means no ACK is
+	// deferred (none owed, or an immediate-ACK trigger fired, or the transport cannot
+	// schedule the fallback timer). It shortens the reader's read deadline so the
+	// owed ACK fires within max_ack_delay when no outbound packet carries it first.
+	ackDeadline time.Time
 	// readWatchdogStarted guards the one connection-lifetime goroutine that pokes the
 	// read deadline into the past on connCtx cancel, so a blocked pc.Read unblocks on
 	// Close (§3.1). Guarded by c.mu; started lazily on the first Poll with a live ctx.

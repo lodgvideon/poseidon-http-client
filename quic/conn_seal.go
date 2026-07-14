@@ -1,5 +1,7 @@
 package quic
 
+import "time"
+
 // NOTE (RFC 9001 §6.6): the AEAD usage limits ARE enforced — sealPacket counts
 // 1-RTT packets under the current key (appSendCount) and closes with
 // AEAD_LIMIT_REACHED at the confidentiality limit, and openApp counts failed
@@ -93,7 +95,10 @@ func (c *Conn) flush() error {
 	for sp := 0; sp < numSpaces; sp++ {
 		hasCtrl := sp == spaceApp && len(c.pendingCtrl) > 0
 		hasProbe := (sp == spaceApp && c.probePending) || sp == hsProbeSpace
-		nothing := len(c.pendingCrypto[sp]) == 0 && !c.acks[sp].ackPending() &&
+		// A deferred-but-not-yet-due Application ACK (RFC 9000 §13.2.1) does not by
+		// itself warrant a packet — it rides the next outbound one or the timer — so
+		// the "is there work" test uses ackDue, not ackPending.
+		nothing := len(c.pendingCrypto[sp]) == 0 && !c.ackDue(sp) &&
 			len(c.retransQueue[sp]) == 0 && !hasCtrl && !hasProbe
 		if nothing || c.sealerFor(sp) == nil {
 			continue // idle, or keys not yet available
@@ -101,13 +106,13 @@ func (c *Conn) flush() error {
 		if err := c.flushRetransmits(sp); err != nil {
 			return err
 		}
-		if len(c.pendingCrypto[sp]) == 0 && !c.acks[sp].ackPending() && !hasCtrl && !hasProbe {
+		if len(c.pendingCrypto[sp]) == 0 && !c.ackDue(sp) && !hasCtrl && !hasProbe {
 			continue
 		}
-		var frames []byte
-		if c.acks[sp].ackPending() {
-			frames = c.acks[sp].appendACK(frames, 0)
-		}
+		// We are building a packet for this space anyway, so coalesce any owed ACK —
+		// even one still inside its deferral window — clearing the deferral. Sending
+		// early on a packet we must send is always within max_ack_delay (§13.2.1).
+		frames := c.takePendingAck(sp, nil)
 		padPath := false
 		if hasCtrl {
 			// MAX_DATA / MAX_STREAM_DATA credit grants (§4.1). Not retransmitted:
@@ -147,6 +152,21 @@ func (c *Conn) flush() error {
 	// window), so it cannot leak past this flush onto an ordinary retransmit.
 	c.ptoExempt = false
 	return nil
+}
+
+// takePendingAck appends the owed ACK for space sp to frames — clearing the owed
+// state and, for the Application space, the deferred-ACK deadline (RFC 9000
+// §13.2.1) — and returns the extended slice. A no-op returning frames unchanged
+// when no ACK is owed. Assumes c.mu is held.
+func (c *Conn) takePendingAck(sp int, frames []byte) []byte {
+	if !c.acks[sp].ackPending() {
+		return frames
+	}
+	frames = c.acks[sp].appendACK(frames, 0)
+	if sp == spaceApp {
+		c.ackDeadline = time.Time{}
+	}
+	return frames
 }
 
 // sealPacket builds and protects a packet for a space carrying frames. Frames
