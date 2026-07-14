@@ -26,6 +26,13 @@ import (
 //	docker compose -f test/integration/http3/docker-compose.yml run --rm \
 //	  -e POSEIDON_SOAK_DURATION=120s -e POSEIDON_SOAK_WORKERS=64 \
 //	  runner go test ./client/ -tags soak -run TestSoak_H3 -v -timeout 10m
+//
+// Two transports are soaked, because they are different code:
+//   - TestSoak_H3ConnStability   — NewH3Client, the single-conn transport.
+//   - TestSoak_H3PoolConnStability — NewH3PoolClient, the pooled transport, whose
+//     actor acquire/release path the single-conn client never touches. That gap is
+//     how the acquire/abandon slot leak (replyAcquire racing its send against
+//     req.ctx.Done()) survived to the eve of v1.0.
 
 // soakServer picks the first H3_INTEROP_ADDRS entry, preferring caddy (quic-go,
 // the most permissive peer for a long reuse run). Falls back to localhost:4433.
@@ -218,6 +225,168 @@ func TestSoak_H3ConnStability(t *testing.T) {
 	}
 	// Heap ceiling: after GC, live heap should return near the steady-state
 	// baseline. 2x + 8 MiB tolerates fragmentation without hiding unbounded growth.
+	if finalHeap > baseHeap*2+(8<<20) {
+		t.Errorf("soak: heap growth suggests a leak: baseline %.1fMiB, final %.1fMiB",
+			float64(baseHeap)/(1<<20), float64(finalHeap)/(1<<20))
+	}
+}
+
+// TestSoak_H3PoolConnStability is TestSoak_H3ConnStability's pooled twin: the same
+// sustained load and the same goroutine/heap ceilings, but through NewH3PoolClient
+// so the h3Pool actor's acquire/release path is soaked too.
+//
+// Its extra job is the acquire/abandon path. Every fourth request is an "abandon
+// probe" carrying a deliberately tiny per-request timeout, so its ctx is usually
+// already done by the time the actor serves it — exactly the shape of a real load
+// generator's per-request deadline. A probe's outcome is not a health signal and is
+// excluded from the error rate; what the probes must not do is cost the pool a
+// stream slot. A slot leaked per abandon (the bug this soak was added alongside)
+// starves the pool's MaxConnsPerHost*MaxStreamsPerConn budget within seconds, after
+// which the ordinary requests fail on acquire and the error-rate ceiling trips.
+func TestSoak_H3PoolConnStability(t *testing.T) {
+	name, addr := soakServer()
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil {
+		host = addr
+	}
+	dur := soakDuration()
+	workers := soakWorkers()
+
+	// A small pool makes leaked slots starve it fast: a leak is a failure here,
+	// not a slow drift hidden behind a large budget.
+	const maxConns, maxStreams = 4, 8
+	t.Logf("soak: server=%s addr=%s duration=%s workers=%d pool=%dx%d",
+		name, addr, dur, workers, maxConns, maxStreams)
+
+	c, err := NewH3PoolClient(addr,
+		&tls.Config{ServerName: host, InsecureSkipVerify: true}, //nolint:gosec // interop dials self-signed
+		PoolOptions{
+			MaxConnsPerHost:   maxConns,
+			MaxStreamsPerConn: maxStreams,
+			HealthCheckPeriod: time.Second,
+		})
+	if err != nil {
+		t.Fatalf("NewH3PoolClient(%s): %v", addr, err)
+	}
+	t.Cleanup(func() { _ = c.Close() })
+
+	doGet := func(ctx context.Context, timeout time.Duration) error {
+		var resp Response
+		rctx, cancel := context.WithTimeout(ctx, timeout)
+		defer cancel()
+		return c.Do(rctx, &Request{
+			Method: "GET", Scheme: "https", Authority: host, Path: "/", BodyMode: BodyBuffer,
+		}, &resp)
+	}
+
+	// Prime the pool (retry until the server is listening).
+	deadline := time.Now().Add(20 * time.Second)
+	for {
+		if err := doGet(context.Background(), 10*time.Second); err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("soak: server %s never became reachable", addr)
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), dur)
+	defer cancel()
+
+	var reqs, errs, probes atomic.Int64
+	var wg sync.WaitGroup
+	for i := 0; i < workers; i++ {
+		wg.Add(1)
+		go func(seed int) {
+			defer wg.Done()
+			for n := seed; ctx.Err() == nil; n++ {
+				if n%4 == 0 {
+					// Abandon probe: a sub-millisecond deadline that usually expires
+					// during acquire. Either outcome is fine — a leaked slot is not.
+					probes.Add(1)
+					_ = doGet(ctx, time.Duration(n%500+1)*time.Microsecond)
+					continue
+				}
+				if err := doGet(ctx, 10*time.Second); err != nil {
+					if ctx.Err() != nil {
+						return // shutdown, not a failure
+					}
+					errs.Add(1)
+					continue
+				}
+				reqs.Add(1)
+			}
+		}(i)
+	}
+
+	// Warm up, then snapshot the baseline mid-run (steady state, pool conns up).
+	warmup := dur / 6
+	if warmup < 5*time.Second {
+		warmup = 5 * time.Second
+	}
+	if warmup > dur/2 {
+		warmup = dur / 2
+	}
+	time.Sleep(warmup)
+	baseGoroutines := runtime.NumGoroutine()
+	baseHeap := heapInuse()
+	t.Logf("soak: baseline goroutines=%d heapInuse=%.1fMiB (after %s warmup)",
+		baseGoroutines, float64(baseHeap)/(1<<20), warmup)
+
+	sampleDone := make(chan struct{})
+	go func() {
+		tk := time.NewTicker(10 * time.Second)
+		defer tk.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				close(sampleDone)
+				return
+			case <-tk.C:
+				var m runtime.MemStats
+				runtime.ReadMemStats(&m)
+				t.Logf("soak: sample goroutines=%d heapInuse=%.1fMiB reqs=%d errs=%d probes=%d",
+					runtime.NumGoroutine(), float64(m.HeapInuse)/(1<<20),
+					reqs.Load(), errs.Load(), probes.Load())
+			}
+		}
+	}()
+
+	<-ctx.Done()
+	wg.Wait()
+	<-sampleDone
+
+	// Let reader/pool/reclaim goroutines quiesce, then measure.
+	time.Sleep(2 * time.Second)
+	finalGoroutines := runtime.NumGoroutine()
+	finalHeap := heapInuse()
+
+	total := reqs.Load()
+	rps := float64(total) / dur.Seconds()
+	t.Logf("soak: DONE reqs=%d errs=%d probes=%d (%.0f req/s) | goroutines %d->%d | heapInuse %.1f->%.1f MiB",
+		total, errs.Load(), probes.Load(), rps, baseGoroutines, finalGoroutines,
+		float64(baseHeap)/(1<<20), float64(finalHeap)/(1<<20))
+
+	if total == 0 {
+		t.Fatal("soak: zero successful requests")
+	}
+	if probes.Load() == 0 {
+		t.Fatal("soak: no abandon probes ran — the acquire/abandon path was not exercised")
+	}
+	// A leaked stream slot per abandon starves the pool and surfaces here first:
+	// the ordinary requests can no longer acquire and time out.
+	if errs.Load() > total/20 { // >5% error rate is a red flag
+		t.Errorf("soak: high error rate: %d errs / %d ok (pool starved by leaked slots?)",
+			errs.Load(), total)
+	}
+	// Goroutine ceiling. Each abandoned acquire spawns a reclaim goroutine, but
+	// each is owed exactly one reply and exits on receiving it; a reply the actor
+	// owes and never sends would hang one per abandon and blow past this.
+	if finalGoroutines > baseGoroutines+workers+16 {
+		t.Errorf("soak: goroutine growth suggests a leak: baseline %d, final %d (workers=%d)",
+			baseGoroutines, finalGoroutines, workers)
+	}
 	if finalHeap > baseHeap*2+(8<<20) {
 		t.Errorf("soak: heap growth suggests a leak: baseline %.1fMiB, final %.1fMiB",
 			float64(baseHeap)/(1<<20), float64(finalHeap)/(1<<20))
