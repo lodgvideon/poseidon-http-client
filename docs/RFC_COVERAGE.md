@@ -356,17 +356,32 @@ in cc.go).
 
 G.3 lands the `qpack/` static-table codec: a static-table-only encoder and a
 decoder for the static + literal representations, reusing the `hpack`
-prefixed-integer + Huffman codecs. The dynamic table and the encoder/decoder
-instruction streams are deferred (a client advertising
-`SETTINGS_QPACK_MAX_TABLE_CAPACITY=0` forbids the peer from using them).
+prefixed-integer + Huffman codecs.
+
+Q1 adds the dynamic-table machinery: a `DynamicTable` (absolute indexing +
+eviction, §3.2), an encoder-instruction parser and decoder-instruction emitter
+(§4.3/§4.4), and dynamic-reference resolution in the decoder (indexed,
+name-reference, and post-Base forms, plus the Required Insert Count and signed
+Base). It is INERT on the wire: the client still advertises
+`SETTINGS_QPACK_MAX_TABLE_CAPACITY=0`, so the encoder still emits RIC 0 and no
+instructions are exchanged — a nil `DynamicTable` preserves the static-only
+decode path exactly. The codec is proved against the RFC 9204 Appendix B worked
+examples.
 
 | Section | Type        | Test |
 |---------|-------------|------|
 | App. A  | Roundtrip   | TestStaticTable_Shape (99-entry 0-based static table) |
-| §4.5.1–2 | Conformance | TestConformance_RFC9204_Sec45_StaticIndexedEncode (section prefix + Indexed Field Line) |
+| App. B  | Conformance | TestConformance_RFC9204_AppB_DynamicTable (B.2–B.5 verbatim: Set Capacity, Insert With/Without Name Reference, Duplicate, eviction, and field sections decoded via post-Base and Base-relative dynamic references, with the decoder-instruction responses re-encoded) |
+| §3.2.4–6 | Conformance | TestConformance_RFC9204_AppB_DynamicTable, FuzzDynamicIndexResolution (absolute / insert-count-relative / Base-relative / post-Base index identities) |
+| §4.3.1–4 | Conformance | TestConformance_RFC9204_AppB_DynamicTable, TestQPACK_EncoderInstructions_Partial (Set Capacity + Insert on a byte-fragmented encoder stream), TestQPACK_EncoderInstructions_Errors (capacity over max, missing/oob name ref, oversize insert → QPACK_ENCODER_STREAM_ERROR) |
+| §4.4.1–3 | Conformance | TestQPACK_DecoderInstructions_Encode (Section Acknowledgment / Stream Cancellation / Insert Count Increment prefixed-integer bytes), TestConformance_RFC9204_AppB_DynamicTable |
+| §4.5.1.1 | Conformance | TestQPACK_RequiredInsertCount_Decode (wraparound past 2*MaxEntries, out-of-range rejection), FuzzRequiredInsertCount (encode/decode round-trip over the valid window) |
+| §4.5.2  | Conformance | TestConformance_RFC9204_Sec452_IndexedDynamicDecode (Indexed Field Line, dynamic Base-relative), TestConformance_RFC9204_Sec45_StaticIndexedEncode |
+| §4.5.3  | Conformance | TestConformance_RFC9204_Sec453_LiteralNameRefDynamicDecode (Literal with dynamic Name Reference, Base-relative) |
 | §4.5.4  | Conformance | TestConformance_RFC9204_Sec454_LiteralNameRefDecode |
+| §4.5.5  | Conformance | TestConformance_RFC9204_Sec455_PostBaseNameRefDecode (Literal with Post-Base Name Reference) |
 | §4.5.6  | Conformance | TestConformance_RFC9204_Sec456_LiteralNameDecode |
-| §4.5 / §4.5.1.2 | Conformance | TestConformance_RFC9204_Sec45_DecodeErrors (dynamic-ref / malformed / a field-section prefix with the Base Sign bit set — negative Base with the forced-zero Required Insert Count — → QPACK_DECOMPRESSION_FAILED) |
+| §4.5 / §4.5.1.2 | Conformance | TestConformance_RFC9204_Sec45_DecodeErrors (dynamic-ref / malformed / a field-section prefix with the Base Sign bit set — negative Base with the forced-zero Required Insert Count — → QPACK_DECOMPRESSION_FAILED), TestQPACK_DecodeDynamic_Errors (unreachable RIC, Base underflow, absent post-Base entry), TestQPACK_StaticOnly_WithTable (nil vs non-nil table decode identically at RIC 0) |
 | §2.2 / §6 | Conformance | TestConformance_RFC9204_Sec22_DecompressionFailedClosesConn (a field section the static-only decoder cannot decode → QPACK_DECOMPRESSION_FAILED, an application-layer CONNECTION_CLOSE, not a per-stream reset) |
 | §4.5    | Roundtrip   | TestQPACK_RoundTrip, TestQPACK_EmptySection |
 | §4.2    | Conformance | TestConformance_RFC9204_Sec42_QPACKStreamClosed (server closing its QPACK encoder stream → H3_CLOSED_CRITICAL_STREAM), TestConformance_RFC9204_Sec42_DuplicateQPACKStream (a second QPACK encoder stream → H3_STREAM_CREATION_ERROR) |
