@@ -35,6 +35,13 @@ runner-1  | HTTP/3 response: status=200 body="hello from http3"
 runner-1  | --- PASS: TestInterop_GET
 ```
 
+## ChaCha20-Poly1305
+
+`docker compose -f test/integration/http3/docker-compose.chacha.yml run --rm runner`
+dials an nginx pinned to `TLS_CHACHA20_POLY1305_SHA256` (see `nginx.chacha.conf`) and
+asserts a 200 plus `ConnectionState().CipherSuite == TLS_CHACHA20_POLY1305_SHA256`,
+proving the client's ChaCha20-Poly1305 packet protection on the wire.
+
 ## Why a container runner (not the host)
 
 The `runner` service runs the Go client **inside a container** on the same

@@ -68,7 +68,7 @@ func (c *Conn) decryptPacket(sp int, pkt []byte, pnOffset int, isFirst bool, dat
 		if c.isStatelessReset(isFirst, datagram) {
 			return 0, nil, false, c.statelessResetReceived()
 		}
-		if c.authFailures > aeadIntegrityLimit {
+		if c.authFailures > c.integrityLimit() {
 			return 0, nil, false, ErrAEADLimit
 		}
 		return 0, nil, false, nil

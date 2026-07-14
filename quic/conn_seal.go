@@ -178,7 +178,7 @@ func (c *Conn) sealPacket(sp int, frames []byte, ackEliciting bool, retrans []re
 	// own key update, so once it has sealed the limit of 1-RTT packets under the
 	// current key it must stop and close with AEAD_LIMIT_REACHED rather than seal
 	// another. The !c.closed guard lets the CONNECTION_CLOSE packet itself seal.
-	if sp == spaceApp && !c.closed && c.appSendCount >= aeadConfidentialityLimit {
+	if sp == spaceApp && !c.closed && c.appSendCount >= c.confidentialityLimit() {
 		// closeWithErrorLocked, not the public CloseWithError: sealPacket already
 		// holds c.mu, so re-locking would self-deadlock the single mutex.
 		_ = c.closeWithErrorLocked(false, ErrCodeAEADLimitReached, "")

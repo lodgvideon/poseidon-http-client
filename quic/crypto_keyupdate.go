@@ -1,19 +1,52 @@
 package quic
 
 import (
-	"crypto/cipher"
+	"crypto/tls"
 	"hash"
 	"time"
 )
 
-// AEAD usage limits for the AES-GCM suites (RFC 9001 §6.6). The confidentiality
-// limit bounds packets sealed under one key; the integrity limit bounds packets
-// that fail authentication across all keys. (ChaCha20-Poly1305 has different
-// limits, but this client only supports AES-GCM.)
+// AEAD usage limits (RFC 9001 §6.6) are SUITE-DEPENDENT, and the two limits move
+// in opposite directions between suites. The confidentiality limit bounds packets
+// sealed under one key; the integrity limit bounds packets that fail
+// authentication across all keys. AES-GCM is 2^23 / 2^52; AEAD_CHACHA20_POLY1305
+// is 2^62 / 2^36 — a far larger confidentiality count but a SMALLER integrity
+// count. So the AES-GCM confidentiality limit is safe (merely conservative) for
+// ChaCha20, but the AES-GCM integrity limit is NOT: reusing 2^52 for ChaCha20
+// would tolerate 2^16x more forged packets than §6.6 permits. aeadLimits selects
+// the pair by suite; the named constants are the AES-GCM values, used for AES
+// connections and as the fallback for hand-built test conns with no key-update
+// state.
 const (
 	aeadConfidentialityLimit = uint64(1) << 23
 	aeadIntegrityLimit       = uint64(1) << 52
 )
+
+// aeadLimits returns the RFC 9001 §6.6 (confidentiality, integrity) AEAD usage
+// limits for a cipher suite. AEAD_CHACHA20_POLY1305 permits far more sealed
+// packets (2^62) but far fewer authentication failures (2^36) than AES-GCM, so the
+// two suites cannot share one integrity limit.
+func aeadLimits(suite uint16) (confidentiality, integrity uint64) {
+	if suite == tls.TLS_CHACHA20_POLY1305_SHA256 {
+		return uint64(1) << 62, uint64(1) << 36
+	}
+	return aeadConfidentialityLimit, aeadIntegrityLimit // AES-GCM (RFC 9001 §6.6)
+}
+
+// aeadSuite is the negotiated 1-RTT cipher suite. A hand-built connection with no
+// key-update state has no negotiated suite, so it falls back to AES-128-GCM (whose
+// limits the AEAD-limit tests assert against).
+func (c *Conn) aeadSuite() uint16 {
+	if c.ku != nil {
+		return c.ku.suite
+	}
+	return tls.TLS_AES_128_GCM_SHA256
+}
+
+// confidentialityLimit is the §6.6 max packets sealed under the current 1-RTT key
+// for the negotiated suite. integrityLimit is the §6.6 max failed authentications.
+func (c *Conn) confidentialityLimit() uint64 { conf, _ := aeadLimits(c.aeadSuite()); return conf }
+func (c *Conn) integrityLimit() uint64       { _, integ := aeadLimits(c.aeadSuite()); return integ }
 
 // keyUpdate holds RFC 9001 §6 key-update state for the application (1-RTT) space.
 // The current-generation read Opener and write Sealer live on the Conn
@@ -31,19 +64,19 @@ type keyUpdate struct {
 	phase  bool // current Key Phase bit (the value we send and expect to receive)
 
 	// read (server → client) generations
-	readSecret     []byte       // current-generation read traffic secret (copied)
-	nextReadSecret []byte       // pre-derived next-generation read secret
-	readHP         cipher.Block // shared header-protection key (not rotated)
-	next           *Opener      // pre-derived next-generation read Opener
-	prev           *Opener      // previous-generation read Opener (nil until first update)
-	prevUntil      time.Time    // discard deadline for prev (RFC 9001 §6.3)
-	boundary       uint64       // lowest packet number of the current read generation
+	readSecret     []byte          // current-generation read traffic secret (copied)
+	nextReadSecret []byte          // pre-derived next-generation read secret
+	readHP         headerProtector // shared header-protection key (not rotated)
+	next           *Opener         // pre-derived next-generation read Opener
+	prev           *Opener         // previous-generation read Opener (nil until first update)
+	prevUntil      time.Time       // discard deadline for prev (RFC 9001 §6.3)
+	boundary       uint64          // lowest packet number of the current read generation
 	haveBoundary   bool
 
 	// write (client → server) generations
 	writeSecret     []byte
 	nextWriteSecret []byte
-	writeHP         cipher.Block
+	writeHP         headerProtector
 	nextSealer      *Sealer // pre-derived next-generation write Sealer
 }
 
@@ -53,9 +86,9 @@ func quicKuSecret(h func() hash.Hash, secret []byte) []byte {
 	return hkdfExpandLabel(h, secret, "quic ku", len(secret))
 }
 
-// openerWithHP builds an Opener from keys but forces its header-protection key to
-// hp, so a ratcheted generation keeps the original (un-rotated) HP key.
-func openerWithHP(keys PacketKeys, hp cipher.Block) (*Opener, error) {
+// openerWithHP builds an Opener from keys but forces its header protector to hp,
+// so a ratcheted generation keeps the original (un-rotated) HP key.
+func openerWithHP(keys PacketKeys, hp headerProtector) (*Opener, error) {
 	op, err := NewOpener(keys)
 	if err != nil {
 		return nil, err
@@ -64,9 +97,9 @@ func openerWithHP(keys PacketKeys, hp cipher.Block) (*Opener, error) {
 	return op, nil
 }
 
-// sealerWithHP builds a Sealer from keys but forces its header-protection key to
-// hp (see openerWithHP).
-func sealerWithHP(keys PacketKeys, hp cipher.Block) (*Sealer, error) {
+// sealerWithHP builds a Sealer from keys but forces its header protector to hp
+// (see openerWithHP).
+func sealerWithHP(keys PacketKeys, hp headerProtector) (*Sealer, error) {
 	s, err := NewSealer(keys)
 	if err != nil {
 		return nil, err
@@ -78,7 +111,7 @@ func sealerWithHP(keys PacketKeys, hp cipher.Block) (*Sealer, error) {
 // initAppReadKU records the application read secret and pre-derives the next
 // read generation (RFC 9001 §6). hp is the current generation's header-protection
 // key, retained and shared across generations.
-func (c *Conn) initAppReadKU(suite uint16, secret []byte, hp cipher.Block) error {
+func (c *Conn) initAppReadKU(suite uint16, secret []byte, hp headerProtector) error {
 	h, keyLen, err := hashForSuite(suite)
 	if err != nil {
 		return err
@@ -100,7 +133,7 @@ func (c *Conn) initAppReadKU(suite uint16, secret []byte, hp cipher.Block) error
 
 // initAppWriteKU records the application write secret and pre-derives the next
 // write generation.
-func (c *Conn) initAppWriteKU(suite uint16, secret []byte, hp cipher.Block) error {
+func (c *Conn) initAppWriteKU(suite uint16, secret []byte, hp headerProtector) error {
 	h, keyLen, err := hashForSuite(suite)
 	if err != nil {
 		return err

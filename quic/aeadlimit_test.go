@@ -2,8 +2,38 @@ package quic
 
 import (
 	"bytes"
+	"crypto/tls"
 	"testing"
 )
+
+// TestConformance_RFC9001_Sec66_AEADLimitsSuiteAware checks that the §6.6 AEAD
+// usage limits are selected per cipher suite: AEAD_CHACHA20_POLY1305 has a larger
+// confidentiality limit (2^62) but a SMALLER integrity limit (2^36) than AES-GCM
+// (2^23 / 2^52). A single shared integrity limit would let a ChaCha20 connection
+// tolerate 2^16x more forged packets than §6.6 permits, so the split is mandatory.
+func TestConformance_RFC9001_Sec66_AEADLimitsSuiteAware(t *testing.T) {
+	if conf, integ := aeadLimits(tls.TLS_CHACHA20_POLY1305_SHA256); conf != 1<<62 || integ != 1<<36 {
+		t.Fatalf("ChaCha20 limits = (%d, %d), want (2^62=%d, 2^36=%d)",
+			conf, integ, uint64(1)<<62, uint64(1)<<36)
+	}
+	for _, s := range []uint16{tls.TLS_AES_128_GCM_SHA256, tls.TLS_AES_256_GCM_SHA384} {
+		if conf, integ := aeadLimits(s); conf != aeadConfidentialityLimit || integ != aeadIntegrityLimit {
+			t.Fatalf("AES suite %#x limits = (%d, %d), want AES-GCM (2^23, 2^52)", s, conf, integ)
+		}
+	}
+	// A connection with no key-update state falls back to the AES-GCM limits.
+	if got := (&Conn{}).integrityLimit(); got != aeadIntegrityLimit {
+		t.Fatalf("integrityLimit() with nil ku = %d, want AES 2^52", got)
+	}
+	// A ChaCha20 connection reports the ChaCha20 limits at the enforcement sites.
+	c := &Conn{ku: &keyUpdate{suite: tls.TLS_CHACHA20_POLY1305_SHA256}}
+	if got := c.integrityLimit(); got != 1<<36 {
+		t.Fatalf("integrityLimit() on a ChaCha20 conn = %d, want 2^36", got)
+	}
+	if got := c.confidentialityLimit(); got != 1<<62 {
+		t.Fatalf("confidentialityLimit() on a ChaCha20 conn = %d, want 2^62", got)
+	}
+}
 
 // TestConformance_RFC9001_Sec66_ConfidentialityLimitCloses checks that, having
 // sealed the confidentiality limit of 1-RTT packets under one key, the client

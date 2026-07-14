@@ -3,6 +3,11 @@ package quic
 import (
 	"crypto/aes"
 	"crypto/cipher"
+	"crypto/tls"
+	"encoding/binary"
+
+	"golang.org/x/crypto/chacha20"
+	"golang.org/x/crypto/chacha20poly1305"
 )
 
 // Sealer applies QUIC packet protection on the send path (RFC 9001 §5): AEAD
@@ -11,40 +16,63 @@ import (
 // level's PacketKeys. Not safe for concurrent use.
 type Sealer struct {
 	aead cipher.AEAD
-	hp   cipher.Block
+	hp   headerProtector
 	iv   [12]byte
 }
 
 // Opener removes QUIC packet protection on the receive path.
 type Opener struct {
 	aead cipher.AEAD
-	hp   cipher.Block
+	hp   headerProtector
 	iv   [12]byte
 }
 
-func newAEAD(k PacketKeys) (cipher.AEAD, cipher.Block, [12]byte, error) {
+// newAEAD builds the AEAD and header protector for a set of PacketKeys, selecting
+// the algorithm from k.Suite (RFC 9001 §5.1, §5.4): AEAD_AES_128_GCM /
+// AEAD_AES_256_GCM with AES-ECB header protection for the AES-GCM suites (a zero
+// Suite is treated as AES-128-GCM for hand-built keys), and AEAD_CHACHA20_POLY1305
+// with ChaCha20 header protection for TLS_CHACHA20_POLY1305_SHA256. Wrong key
+// sizes return ErrCryptoKey; any other suite returns ErrCryptoSuite.
+func newAEAD(k PacketKeys) (cipher.AEAD, headerProtector, [12]byte, error) {
 	var iv [12]byte
 	if len(k.IV) != 12 {
 		return nil, nil, iv, ErrCryptoKey
 	}
-	block, err := aes.NewCipher(k.Key)
-	if err != nil {
-		return nil, nil, iv, ErrCryptoKey
-	}
-	aead, err := cipher.NewGCM(block)
-	if err != nil {
-		return nil, nil, iv, ErrCryptoKey
-	}
-	hp, err := aes.NewCipher(k.HP)
-	if err != nil {
-		return nil, nil, iv, ErrCryptoKey
-	}
 	copy(iv[:], k.IV)
-	return aead, hp, iv, nil
+
+	switch k.Suite {
+	case tls.TLS_CHACHA20_POLY1305_SHA256:
+		aead, err := chacha20poly1305.New(k.Key)
+		if err != nil {
+			return nil, nil, iv, ErrCryptoKey
+		}
+		if len(k.HP) != chacha20.KeySize {
+			return nil, nil, iv, ErrCryptoKey
+		}
+		var hpKey [32]byte
+		copy(hpKey[:], k.HP)
+		return aead, chachaHeaderProtector{key: hpKey}, iv, nil
+	case tls.TLS_AES_128_GCM_SHA256, tls.TLS_AES_256_GCM_SHA384, 0:
+		block, err := aes.NewCipher(k.Key)
+		if err != nil {
+			return nil, nil, iv, ErrCryptoKey
+		}
+		aead, err := cipher.NewGCM(block)
+		if err != nil {
+			return nil, nil, iv, ErrCryptoKey
+		}
+		hp, err := aes.NewCipher(k.HP)
+		if err != nil {
+			return nil, nil, iv, ErrCryptoKey
+		}
+		return aead, aesHeaderProtector{block: hp}, iv, nil
+	default:
+		return nil, nil, iv, ErrCryptoSuite
+	}
 }
 
-// NewSealer builds a Sealer for AEAD_AES_128_GCM (or AES-256-GCM) packet
-// protection from a set of PacketKeys.
+// NewSealer builds a Sealer for the packet-protection suite named by k.Suite
+// (AES-GCM or ChaCha20-Poly1305) from a set of PacketKeys.
 func NewSealer(k PacketKeys) (*Sealer, error) {
 	aead, hp, iv, err := newAEAD(k)
 	if err != nil {
@@ -84,7 +112,7 @@ func (s *Sealer) Seal(dst, hdr []byte, pnOffset, pnLen int, pn uint64, payload [
 	start := len(dst)
 	dst = append(dst, hdr...)
 	dst = s.aead.Seal(dst, nonce[:], payload, hdr)
-	if err := applyHeaderProtection(s.hp, dst[start:], pnOffset, pnLen); err != nil {
+	if err := sealHeader(s.hp, dst[start:], pnOffset, pnLen); err != nil {
 		return nil, err
 	}
 	return dst, nil
@@ -115,7 +143,7 @@ func (o *Opener) Open(pkt []byte, pnOffset int, largestAcked uint64) (pn uint64,
 // the caller then chooses the AEAD generation for openAEAD. It must be called at
 // most once per packet (it mutates the header in place).
 func (o *Opener) unprotectHeader(pkt []byte, pnOffset int, largestAcked uint64) (pn uint64, pnLen int, keyPhase bool, err error) {
-	pnLen, err = removeHeaderProtection(o.hp, pkt, pnOffset)
+	pnLen, err = openHeader(o.hp, pkt, pnOffset)
 	if err != nil {
 		return 0, 0, false, err
 	}
@@ -143,24 +171,78 @@ func (o *Opener) openAEAD(pkt []byte, pnOffset, pnLen int, pn uint64) ([]byte, e
 	return payload, nil
 }
 
-// applyHeaderProtection masks the first byte and packet number using a sample of
-// the protected payload (RFC 9001 §5.4).
-func applyHeaderProtection(block cipher.Block, pkt []byte, pnOffset, pnLen int) error {
-	mask, err := headerMask(block, pkt, pnOffset)
+// headerProtector derives the 5-byte header-protection mask from a 16-byte
+// ciphertext sample (RFC 9001 §5.4.1). Only these 5 bytes are ever consumed:
+// mask[0] masks the header's low bits and mask[1:1+pnLen] masks the packet
+// number. How the sample becomes the mask is the one suite-specific part of
+// packet protection, so it is the seam between the AES-GCM suites and
+// ChaCha20-Poly1305.
+type headerProtector interface {
+	headerMask(sample []byte) [5]byte
+}
+
+// aesHeaderProtector derives the mask by single-block ECB encryption of the
+// sample under the header-protection key (RFC 9001 §5.4.3), for the AES-GCM
+// suites.
+type aesHeaderProtector struct{ block cipher.Block }
+
+func (h aesHeaderProtector) headerMask(sample []byte) [5]byte {
+	var full [16]byte
+	h.block.Encrypt(full[:], sample)
+	var mask [5]byte
+	copy(mask[:], full[:])
+	return mask
+}
+
+// chachaHeaderProtector derives the mask from a ChaCha20 key stream keyed by the
+// header-protection key, using the sample's first 4 bytes as the little-endian
+// block counter and its remaining 12 bytes as the nonce (RFC 9001 §5.4.4).
+type chachaHeaderProtector struct{ key [32]byte }
+
+func (h chachaHeaderProtector) headerMask(sample []byte) [5]byte {
+	counter := binary.LittleEndian.Uint32(sample[0:4])
+	c, err := chacha20.NewUnauthenticatedCipher(h.key[:], sample[4:16])
+	if err != nil {
+		// The key is a fixed 32 bytes and the nonce slice is exactly 12 bytes, so
+		// the constructor cannot fail; a non-nil error would be a programming bug.
+		panic("quic: chacha20 header protection: " + err.Error())
+	}
+	c.SetCounter(counter)
+	var mask [5]byte
+	c.XORKeyStream(mask[:], mask[:]) // key stream XOR zeros = the first 5 key-stream bytes
+	return mask
+}
+
+// headerSample returns the 16-byte header-protection sample, taken 4 bytes past
+// the packet-number offset (RFC 9001 §5.4.2), or ErrCryptoSample if the packet is
+// too short to contain it.
+func headerSample(pkt []byte, pnOffset int) ([]byte, error) {
+	off := pnOffset + 4
+	if off+16 > len(pkt) {
+		return nil, ErrCryptoSample
+	}
+	return pkt[off : off+16], nil
+}
+
+// sealHeader masks the first byte and packet number of pkt using the header
+// protector hp and a sample of the protected payload (RFC 9001 §5.4).
+func sealHeader(hp headerProtector, pkt []byte, pnOffset, pnLen int) error {
+	sample, err := headerSample(pkt, pnOffset)
 	if err != nil {
 		return err
 	}
-	maskHeader(pkt, pnOffset, pnLen, mask)
+	maskHeader(pkt, pnOffset, pnLen, hp.headerMask(sample))
 	return nil
 }
 
-// removeHeaderProtection reverses applyHeaderProtection and returns the
-// packet-number length recovered from the now-unmasked first byte.
-func removeHeaderProtection(block cipher.Block, pkt []byte, pnOffset int) (pnLen int, err error) {
-	mask, err := headerMask(block, pkt, pnOffset)
+// openHeader reverses sealHeader and returns the packet-number length recovered
+// from the now-unmasked first byte.
+func openHeader(hp headerProtector, pkt []byte, pnOffset int) (pnLen int, err error) {
+	sample, err := headerSample(pkt, pnOffset)
 	if err != nil {
 		return 0, err
 	}
+	mask := hp.headerMask(sample)
 	// Unmask the first byte first to learn the packet-number length.
 	if pkt[0]&0x80 != 0 {
 		pkt[0] ^= mask[0] & 0x0f // long header: low 4 bits
@@ -177,20 +259,21 @@ func removeHeaderProtection(block cipher.Block, pkt []byte, pnOffset int) (pnLen
 	return pnLen, nil
 }
 
-// headerMask computes the 5-byte-relevant header-protection mask from a 16-byte
-// sample of the packet taken 4 bytes past the packet-number offset (RFC 9001
-// §5.4.2). For AES the mask is a single-block ECB encryption of the sample.
-func headerMask(block cipher.Block, pkt []byte, pnOffset int) ([16]byte, error) {
-	var mask [16]byte
-	sampleOff := pnOffset + 4
-	if sampleOff+16 > len(pkt) {
-		return mask, ErrCryptoSample
-	}
-	block.Encrypt(mask[:], pkt[sampleOff:sampleOff+16])
-	return mask, nil
+// applyHeaderProtection masks a packet's header with an AES header-protection
+// block cipher (RFC 9001 §5.4.3). It is the AES-typed entry point; the Sealer
+// routes through sealHeader with the connection's headerProtector.
+func applyHeaderProtection(block cipher.Block, pkt []byte, pnOffset, pnLen int) error {
+	return sealHeader(aesHeaderProtector{block: block}, pkt, pnOffset, pnLen)
 }
 
-func maskHeader(pkt []byte, pnOffset, pnLen int, mask [16]byte) {
+// removeHeaderProtection reverses applyHeaderProtection (see sealHeader/openHeader).
+func removeHeaderProtection(block cipher.Block, pkt []byte, pnOffset int) (pnLen int, err error) {
+	return openHeader(aesHeaderProtector{block: block}, pkt, pnOffset)
+}
+
+// maskHeader XORs the 5-byte header-protection mask into the first byte (low 4
+// bits for a long header, low 5 for a short header) and the packet number.
+func maskHeader(pkt []byte, pnOffset, pnLen int, mask [5]byte) {
 	if pkt[0]&0x80 != 0 {
 		pkt[0] ^= mask[0] & 0x0f
 	} else {

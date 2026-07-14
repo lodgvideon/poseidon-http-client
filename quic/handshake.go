@@ -9,15 +9,19 @@ import (
 )
 
 // hashForSuite returns the KDF hash constructor and AEAD key length for a cipher
-// suite (RFC 9001 §5.1). AES-GCM suites are supported; others (ChaCha20-Poly1305)
-// return ErrCryptoSuite. It is the single source of truth for the suite→hash/len
-// mapping used by both key derivation and the "quic ku" key-update ratchet.
+// suite (RFC 9001 §5.1). The AES-GCM suites and ChaCha20-Poly1305 are supported;
+// any other suite returns ErrCryptoSuite. It is the single source of truth for the
+// suite→hash/len mapping used by both key derivation and the "quic ku" key-update
+// ratchet. The header-protection key length matches the AEAD key length, and the
+// IV is always 12 bytes.
 func hashForSuite(suite uint16) (func() hash.Hash, int, error) {
 	switch suite {
 	case tls.TLS_AES_128_GCM_SHA256:
 		return sha256.New, 16, nil
 	case tls.TLS_AES_256_GCM_SHA384:
 		return sha512.New384, 32, nil
+	case tls.TLS_CHACHA20_POLY1305_SHA256:
+		return sha256.New, 32, nil
 	default:
 		return nil, 0, ErrCryptoSuite
 	}
@@ -25,15 +29,18 @@ func hashForSuite(suite uint16) (func() hash.Hash, int, error) {
 
 // KeysFromSecret derives packet-protection keys (key/iv/hp) from a TLS traffic
 // secret and the negotiated cipher suite (RFC 9001 §5.1). The suite selects the
-// KDF hash and key length. AES-GCM suites are supported; ChaCha20-Poly1305 is
-// deferred (its header protection needs a non-stdlib primitive) and returns
+// KDF hash and key length and is stamped onto the returned keys so the Sealer /
+// Opener built from them uses the matching AEAD and header-protection algorithm.
+// The AES-GCM suites and ChaCha20-Poly1305 are supported; any other suite returns
 // ErrCryptoSuite.
 func KeysFromSecret(suite uint16, secret []byte) (PacketKeys, error) {
 	h, keyLen, err := hashForSuite(suite)
 	if err != nil {
 		return PacketKeys{}, err
 	}
-	return deriveKeys(h, secret, keyLen), nil
+	keys := deriveKeys(h, secret, keyLen)
+	keys.Suite = suite
+	return keys, nil
 }
 
 // HandshakeSink receives TLS handshake progress from a TLSHandshake pump. The

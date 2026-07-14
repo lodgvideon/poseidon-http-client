@@ -158,6 +158,39 @@ func TestInterop_GET(t *testing.T) {
 	})
 }
 
+// interopChaChaAddr is the ChaCha20-only server the ChaCha interop test dials
+// (H3_INTEROP_CHACHA_ADDR, e.g. "h3nginxchacha:443"). Empty ⇒ the test is skipped;
+// it runs only under docker-compose.chacha.yml, not the default matrix.
+func interopChaChaAddr() string { return os.Getenv("H3_INTEROP_CHACHA_ADDR") }
+
+// TestInteropChaCha_GET dials a server pinned to TLS_CHACHA20_POLY1305_SHA256 and
+// asserts the from-scratch client completes the handshake with ChaCha20-Poly1305
+// packet protection (RFC 9001 §5.3 AEAD, §5.4.4 header protection), gets a 200,
+// and that the negotiated cipher suite really is ChaCha20-Poly1305 — proving the
+// ChaCha path on the wire, not only in unit round-trips. Skipped unless
+// H3_INTEROP_CHACHA_ADDR is set (the ChaCha compose file sets it).
+func TestInteropChaCha_GET(t *testing.T) {
+	addr := interopChaChaAddr()
+	if addr == "" {
+		t.Skip("H3_INTEROP_CHACHA_ADDR unset; run via test/integration/http3/docker-compose.chacha.yml")
+	}
+	client, host := dialServer(t, addr)
+	resp, body, err := do(t, client, &Request{Method: "GET", Scheme: "https", Authority: host, Path: "/"})
+	if err != nil {
+		t.Fatalf("Do: %v", err)
+	}
+	if resp.Status != 200 {
+		t.Fatalf("status = %d, want 200", resp.Status)
+	}
+	if len(body) == 0 {
+		t.Fatal("GET / body is empty, want the server's canned response")
+	}
+	if cs := client.ConnectionState().CipherSuite; cs != tls.TLS_CHACHA20_POLY1305_SHA256 {
+		t.Fatalf("negotiated cipher suite = %#x, want TLS_CHACHA20_POLY1305_SHA256 (%#x)", cs, tls.TLS_CHACHA20_POLY1305_SHA256)
+	}
+	t.Logf("ChaCha20 GET / -> status=%d, cipher=TLS_CHACHA20_POLY1305_SHA256, %d bytes", resp.Status, len(body))
+}
+
 // TestInterop_POST sends a request body in a DATA frame and asserts the server
 // accepts it (a malformed body framing would make the server reset the stream).
 func TestInterop_POST(t *testing.T) {
