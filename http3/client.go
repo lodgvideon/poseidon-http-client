@@ -30,7 +30,7 @@ type quicStream interface {
 // quicConn is the QUIC connection surface the client uses. A connAdapter over
 // *quic.Conn satisfies it; tests supply a fake.
 type quicConn interface {
-	OpenStream() (quicStream, error)
+	OpenStream(ctx context.Context) (quicStream, error)
 	OpenUniStream() (quicStream, error)
 	AcceptUniStream() quicStream // next accepted server-initiated uni stream, or nil
 	Poll(ctx context.Context) error
@@ -116,8 +116,8 @@ func (e *StreamResetError) Retryable() bool { return e.Code == H3RequestRejected
 // return quicStream where *quic.Conn returns the concrete *quic.Stream.
 type connAdapter struct{ *quic.Conn }
 
-func (a connAdapter) OpenStream() (quicStream, error) {
-	s, err := a.Conn.OpenStream()
+func (a connAdapter) OpenStream(ctx context.Context) (quicStream, error) {
+	s, err := a.Conn.OpenStreamContext(ctx) // waits on stream credit; threads the request ctx (2d)
 	if err != nil {
 		return nil, err // avoid returning a non-nil interface wrapping a nil *Stream
 	}
@@ -316,15 +316,24 @@ func (c *Client) Do(ctx context.Context, req *Request) (*Response, []byte, error
 	if err := ctx.Err(); err != nil {
 		return nil, nil, err
 	}
-	stream, err := c.conn.OpenStream()
+	// OpenStream blocks on stream credit (2d): when at the peer's cumulative
+	// initial_max_streams_bidi limit it parks until a MAX_STREAMS grant, ctx fires,
+	// or the connection terminates — so a wave of concurrent Do past the limit waits
+	// for the peer to raise it instead of racing an immediate error.
+	stream, err := c.conn.OpenStream(ctx)
 	if err != nil {
 		return nil, nil, err
 	}
 	// GOAWAY gate (RFC 9114 §5.2): the server will not process a request on a stream
 	// id at or above the GOAWAY id it published. goaway is ^uint64(0) until a real
 	// GOAWAY lands, so this never trips on a healthy connection. The reader publishes
-	// goaway from serviceControl; Do reads it (§3.5).
+	// goaway from serviceControl; Do reads it (§3.5). Reclaim the just-opened stream
+	// with STOP_SENDING + RESET_STREAM so maybeRetire drops its c.streams entry — the
+	// post-open abandon path that closes the 2d TOCTOU leak (F4) rather than leaving
+	// a dead stream in the routing map.
 	if stream.ID() >= c.goaway.Load() {
+		_ = stream.StopSending(H3RequestCancelled)
+		_ = stream.Reset(H3RequestCancelled)
 		return nil, nil, ErrGoAway // the caller should retry on a new connection
 	}
 	resp, body, err := c.roundTrip(ctx, stream, req)

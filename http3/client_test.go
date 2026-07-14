@@ -204,7 +204,7 @@ func (c *fakeConn) OpenUniStream() (quicStream, error) {
 	return c.control, nil
 }
 
-func (c *fakeConn) OpenStream() (quicStream, error) {
+func (c *fakeConn) OpenStream(_ context.Context) (quicStream, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.ensureInitLocked()
