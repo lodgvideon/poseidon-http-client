@@ -1,9 +1,11 @@
 package client
 
 import (
+	"bytes"
 	"context"
 	"crypto/tls"
 	"errors"
+	"io"
 	"sync/atomic"
 	"testing"
 
@@ -13,15 +15,25 @@ import (
 
 // fakeH3Client is a test double for *http3.Client. It captures the request it
 // receives (deep-copied, since the real path mutates a pooled buffer after the
-// call) and returns a canned response/body or error.
+// call) and returns a canned response/body or error over both the buffered Do and
+// the streaming DoStream paths.
 type fakeH3Client struct {
 	resp  *http3.Response
 	body  []byte
 	doErr error
 
-	gotReq  *http3.Request
-	doCalls int32
-	closes  int32
+	// bodyChunks, when non-nil, is the ordered sequence of DATA chunks DoStream
+	// yields (each a separate BodyEvent), so a streaming test can assert incremental
+	// delivery. When nil, DoStream yields the whole body as one chunk.
+	bodyChunks [][]byte
+	// nextErr, when non-nil, is returned by the streaming body's Next after all
+	// chunks — modelling a mid-body server reset or protocol error.
+	nextErr error
+
+	gotReq   *http3.Request
+	lastBody *fakeH3Body // the body returned by the most recent DoStream
+	doCalls  int32
+	closes   int32
 }
 
 func (f *fakeH3Client) Do(_ context.Context, req *http3.Request) (*http3.Response, []byte, error) {
@@ -36,8 +48,62 @@ func (f *fakeH3Client) Do(_ context.Context, req *http3.Request) (*http3.Respons
 	return f.resp, f.body, nil
 }
 
+func (f *fakeH3Client) DoStream(_ context.Context, req *http3.Request) (*http3.Response, http3.ResponseBody, error) {
+	atomic.AddInt32(&f.doCalls, 1)
+	cp := *req
+	cp.Headers = append([]conn.HeaderField(nil), req.Headers...)
+	cp.Body = append([]byte(nil), req.Body...)
+	f.gotReq = &cp
+	if f.doErr != nil {
+		return nil, nil, f.doErr
+	}
+	chunks := f.bodyChunks
+	if chunks == nil && len(f.body) > 0 {
+		chunks = [][]byte{f.body}
+	}
+	f.lastBody = &fakeH3Body{chunks: chunks, trailers: f.resp.Trailers, nextErr: f.nextErr}
+	return f.resp, f.lastBody, nil
+}
+
 func (f *fakeH3Client) Close() error {
 	atomic.AddInt32(&f.closes, 1)
+	return nil
+}
+
+// fakeH3Body is a test double for http3.ResponseBody. It yields the configured
+// DATA chunks in order (one per Next), then the trailer section (if any), then a
+// clean End — or nextErr after the chunks, modelling a mid-body abort.
+type fakeH3Body struct {
+	chunks       [][]byte
+	trailers     []conn.HeaderField
+	nextErr      error
+	idx          int
+	trailersDone bool
+	closes       int32
+}
+
+func (b *fakeH3Body) Next(_ context.Context) (http3.BodyEvent, error) {
+	if b.idx < len(b.chunks) {
+		c := b.chunks[b.idx]
+		b.idx++
+		return http3.BodyEvent{Data: c}, nil
+	}
+	if b.nextErr != nil {
+		err := b.nextErr
+		b.nextErr = nil
+		return http3.BodyEvent{}, err
+	}
+	if len(b.trailers) > 0 && !b.trailersDone {
+		b.trailersDone = true
+		return http3.BodyEvent{Trailers: b.trailers, End: true}, nil
+	}
+	return http3.BodyEvent{End: true}, nil
+}
+
+func (b *fakeH3Body) Trailers() []conn.HeaderField { return b.trailers }
+
+func (b *fakeH3Body) Close() error {
+	atomic.AddInt32(&b.closes, 1)
 	return nil
 }
 
@@ -420,5 +486,180 @@ func TestNewH3Client_WiresTransport(t *testing.T) {
 	}
 	if sc.addr != "h3.example:443" || sc.tlsConfig == nil || sc.dialFn == nil {
 		t.Fatalf("singleH3Conn not wired: addr=%q tls=%v dialFn=%v", sc.addr, sc.tlsConfig != nil, sc.dialFn != nil)
+	}
+}
+
+// TestH3_DoStream_Incremental drives Client.DoStream over the H3 transport and
+// asserts the response head arrives before the body and each DATA chunk surfaces
+// as its own StreamEvent, ending with EndStream.
+func TestH3_DoStream_Incremental(t *testing.T) {
+	fake := &fakeH3Client{
+		resp:       &http3.Response{Status: 200, Headers: []conn.HeaderField{{Name: []byte("content-type"), Value: []byte("text/plain")}}},
+		bodyChunks: [][]byte{[]byte("alpha"), []byte("beta"), []byte("gamma")},
+	}
+	c := newH3TestClient(t, fake, nil)
+	defer func() { _ = c.Close() }()
+
+	var sr StreamResponse
+	if err := c.DoStream(context.Background(), &Request{Method: "GET", Path: "/stream"}, &sr); err != nil {
+		t.Fatalf("DoStream: %v", err)
+	}
+	defer func() { _ = sr.Close() }()
+	if sr.Status != 200 {
+		t.Fatalf("status = %d, want 200", sr.Status)
+	}
+	if !hasHeader(sr.Headers, "content-type", "text/plain") {
+		t.Fatalf("headers missing content-type: %+v", sr.Headers)
+	}
+
+	var got [][]byte
+	for {
+		ev, err := sr.Recv(context.Background())
+		if err != nil {
+			t.Fatalf("Recv: %v", err)
+		}
+		if ev.Type == EventData && len(ev.Data) > 0 {
+			got = append(got, append([]byte(nil), ev.Data...))
+		}
+		if ev.EndStream {
+			break
+		}
+	}
+	want := [][]byte{[]byte("alpha"), []byte("beta"), []byte("gamma")}
+	if len(got) != len(want) {
+		t.Fatalf("got %d chunks, want %d (%q)", len(got), len(want), got)
+	}
+	for i := range want {
+		if !bytes.Equal(got[i], want[i]) {
+			t.Fatalf("chunk %d = %q, want %q", i, got[i], want[i])
+		}
+	}
+}
+
+// TestH3_DoStream_Trailers verifies a response trailer section surfaces as an
+// EventTrailers over the H3 streaming path.
+func TestH3_DoStream_Trailers(t *testing.T) {
+	fake := &fakeH3Client{
+		resp: &http3.Response{
+			Status:   200,
+			Trailers: []conn.HeaderField{{Name: []byte("grpc-status"), Value: []byte("0")}},
+		},
+		bodyChunks: [][]byte{[]byte("payload")},
+	}
+	c := newH3TestClient(t, fake, nil)
+	defer func() { _ = c.Close() }()
+
+	var sr StreamResponse
+	if err := c.DoStream(context.Background(), &Request{Method: "GET", Path: "/"}, &sr); err != nil {
+		t.Fatalf("DoStream: %v", err)
+	}
+	defer func() { _ = sr.Close() }()
+
+	tr, err := sr.WaitTrailers(context.Background())
+	if err != nil {
+		t.Fatalf("WaitTrailers: %v", err)
+	}
+	if !hasHeader(tr, "grpc-status", "0") {
+		t.Fatalf("trailers = %+v, want grpc-status=0", tr)
+	}
+}
+
+// TestH3_DoStream_ResetError verifies a mid-body error from the http3 body reader
+// (e.g. a server RESET_STREAM) surfaces from Recv verbatim so retry classification
+// via errors.As still works.
+func TestH3_DoStream_ResetError(t *testing.T) {
+	fake := &fakeH3Client{
+		resp:       &http3.Response{Status: 200},
+		bodyChunks: [][]byte{[]byte("partial")},
+		nextErr:    &http3.StreamResetError{Code: http3.H3RequestRejected},
+	}
+	c := newH3TestClient(t, fake, nil)
+	defer func() { _ = c.Close() }()
+
+	var sr StreamResponse
+	if err := c.DoStream(context.Background(), &Request{Method: "GET", Path: "/"}, &sr); err != nil {
+		t.Fatalf("DoStream: %v", err)
+	}
+	defer func() { _ = sr.Close() }()
+
+	// First Recv delivers the partial chunk; the second surfaces the reset error.
+	if _, err := sr.Recv(context.Background()); err != nil {
+		t.Fatalf("Recv#1: %v", err)
+	}
+	_, err := sr.Recv(context.Background())
+	var rse *http3.StreamResetError
+	if !errors.As(err, &rse) {
+		t.Fatalf("Recv#2 err = %v (%T), want *http3.StreamResetError", err, err)
+	}
+	if !rse.Retryable() {
+		t.Fatal("H3_REQUEST_REJECTED should be retryable")
+	}
+}
+
+// TestH3_BodyStream_ReadIncremental drives Do with BodyMode=BodyStream over the H3
+// transport: the whole body reads back correctly, and each Read pulls exactly one
+// underlying chunk — the proof that the body is streamed, not buffered whole.
+func TestH3_BodyStream_ReadIncremental(t *testing.T) {
+	fake := &fakeH3Client{
+		resp:       &http3.Response{Status: 200},
+		bodyChunks: [][]byte{[]byte("one"), []byte("two"), []byte("three")},
+	}
+	c := newH3TestClient(t, fake, nil)
+	defer func() { _ = c.Close() }()
+
+	var resp Response
+	resp.Reset()
+	if err := c.Do(context.Background(), &Request{Method: "GET", Path: "/", BodyMode: BodyStream}, &resp); err != nil {
+		t.Fatalf("Do(BodyStream): %v", err)
+	}
+	if resp.BodyReader == nil {
+		t.Fatal("BodyReader is nil for BodyStream over H3")
+	}
+
+	// One Read with a buffer large enough for a chunk pulls exactly one chunk from
+	// the underlying body — incremental, not the whole body at once.
+	buf := make([]byte, 64)
+	n, err := resp.BodyReader.Read(buf)
+	if err != nil && err != io.EOF {
+		t.Fatalf("first Read: %v", err)
+	}
+	if string(buf[:n]) != "one" {
+		t.Fatalf("first Read = %q, want %q (one chunk)", buf[:n], "one")
+	}
+	if fake.lastBody.idx != 1 {
+		t.Fatalf("underlying chunks pulled = %d after first Read, want 1 (incremental)", fake.lastBody.idx)
+	}
+
+	rest, err := io.ReadAll(resp.BodyReader)
+	if err != nil {
+		t.Fatalf("ReadAll: %v", err)
+	}
+	if got := "one" + string(rest); got != "onetwothree" {
+		t.Fatalf("full body = %q, want %q", got, "onetwothree")
+	}
+	if err := resp.BodyReader.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+}
+
+// TestH3_BodyStream_UsesStreamingPath asserts the buffered Do path is NOT taken for
+// BodyStream: the streaming DoStream path yields a BodyReader without pre-buffering.
+func TestH3_BodyStream_UsesStreamingPath(t *testing.T) {
+	fake := &fakeH3Client{resp: &http3.Response{Status: 200}, bodyChunks: [][]byte{[]byte("x")}}
+	c := newH3TestClient(t, fake, nil)
+	defer func() { _ = c.Close() }()
+
+	var resp Response
+	resp.Reset()
+	if err := c.Do(context.Background(), &Request{Method: "GET", Path: "/", BodyMode: BodyStream}, &resp); err != nil {
+		t.Fatalf("Do(BodyStream): %v", err)
+	}
+	defer func() { _ = resp.BodyReader.Close() }()
+	// The streaming path leaves Response.Body empty; body arrives only via BodyReader.
+	if len(resp.Body) != 0 {
+		t.Fatalf("Response.Body = %q, want empty (streaming path)", resp.Body)
+	}
+	if fake.lastBody == nil {
+		t.Fatal("DoStream path not taken: lastBody is nil")
 	}
 }

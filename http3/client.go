@@ -297,43 +297,87 @@ func (c *Client) Do(ctx context.Context, req *Request) (*Response, []byte, error
 	if err := ctx.Err(); err != nil {
 		return nil, nil, err
 	}
-	// OpenStream blocks on stream credit (2d): when at the peer's cumulative
-	// initial_max_streams_bidi limit it parks until a MAX_STREAMS grant, ctx fires,
-	// or the connection terminates — so a wave of concurrent Do past the limit waits
-	// for the peer to raise it instead of racing an immediate error.
-	stream, err := c.conn.OpenStream(ctx)
+	stream, err := c.openRequestStream(ctx)
 	if err != nil {
 		return nil, nil, err
 	}
-	// GOAWAY gate (RFC 9114 §5.2): the server will not process a request on a stream
-	// id at or above the GOAWAY id it published. goaway is ^uint64(0) until a real
-	// GOAWAY lands, so this never trips on a healthy connection. The reader publishes
-	// goaway from serviceControl; Do reads it (§3.5). Reclaim the just-opened stream
-	// with STOP_SENDING + RESET_STREAM so maybeRetire drops its c.streams entry — the
-	// post-open abandon path that closes the 2d TOCTOU leak (F4) rather than leaving
-	// a dead stream in the routing map.
+	resp, body, err := c.roundTrip(ctx, stream, req)
+	if err != nil {
+		abortStream(stream, err)
+	}
+	return resp, body, err
+}
+
+// DoStream sends req on a new request stream and returns after the final response
+// HEADERS frame, before the body is buffered. It yields the response head plus a
+// *BodyReader that pulls DATA frames incrementally (and the trailer section, if
+// any) over the same reader-goroutine wake machinery Do uses, so peak retained
+// memory is one frame rather than the whole body. The caller MUST call
+// BodyReader.Close when it stops reading early, so the request stream is aborted
+// and its resources released.
+//
+// ctx bounds the whole exchange, including every BodyReader.Next call. On an error
+// before the head is returned the stream is aborted exactly like Do; once the head
+// is returned, BodyReader owns aborting the stream on its own errors and on Close.
+func (c *Client) DoStream(ctx context.Context, req *Request) (*Response, ResponseBody, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, nil, err
+	}
+	stream, err := c.openRequestStream(ctx)
+	if err != nil {
+		return nil, nil, err
+	}
+	resp, br, err := c.roundTripStream(ctx, stream, req)
+	if err != nil {
+		abortStream(stream, err)
+		return nil, nil, err
+	}
+	return resp, br, nil
+}
+
+// openRequestStream opens a new bidirectional request stream and applies the
+// GOAWAY gate shared by Do and DoStream.
+//
+// OpenStream blocks on stream credit (2d): when at the peer's cumulative
+// initial_max_streams_bidi limit it parks until a MAX_STREAMS grant, ctx fires, or
+// the connection terminates — so a wave of concurrent requests past the limit
+// waits for the peer to raise it instead of racing an immediate error.
+//
+// GOAWAY gate (RFC 9114 §5.2): the server will not process a request on a stream id
+// at or above the GOAWAY id it published. goaway is ^uint64(0) until a real GOAWAY
+// lands, so this never trips on a healthy connection. The reader publishes goaway
+// from serviceControl; the request reads it (§3.5). Reclaim the just-opened stream
+// with STOP_SENDING + RESET_STREAM so maybeRetire drops its c.streams entry — the
+// post-open abandon path that closes the 2d TOCTOU leak (F4).
+func (c *Client) openRequestStream(ctx context.Context) (quicStream, error) {
+	stream, err := c.conn.OpenStream(ctx)
+	if err != nil {
+		return nil, err
+	}
 	if stream.ID() >= c.goaway.Load() {
 		_ = stream.StopSending(H3RequestCancelled)
 		_ = stream.Reset(H3RequestCancelled)
-		return nil, nil, ErrGoAway // the caller should retry on a new connection
+		return nil, ErrGoAway // the caller should retry on a new connection
 	}
-	resp, body, err := c.roundTrip(ctx, stream, req)
-	if err != nil {
-		// Best-effort abort of the abandoned exchange. A malformed response is a
-		// stream error of type H3_MESSAGE_ERROR (RFC 9114 §4.1.2); a response that
-		// exceeds a buffering cap is signalled H3_EXCESSIVE_LOAD (§8.1); anything else
-		// (a context cancel, a decode abort) is signalled H3_REQUEST_CANCELLED.
-		code := H3RequestCancelled
-		switch {
-		case errors.Is(err, ErrH3Message):
-			code = H3MessageError
-		case errors.Is(err, ErrResponseTooLarge):
-			code = H3ExcessiveLoad
-		}
-		_ = stream.StopSending(code)
-		_ = stream.Reset(code)
+	return stream, nil
+}
+
+// abortStream best-effort aborts an abandoned request exchange with STOP_SENDING +
+// RESET_STREAM so the server frees it and stops sending (RFC 9000 §3.5, RFC 9114
+// §4.1). A malformed response is a stream error of type H3_MESSAGE_ERROR (§4.1.2);
+// a response that exceeds a buffering cap is signalled H3_EXCESSIVE_LOAD (§8.1);
+// anything else (a context cancel, a decode abort, an early Close) is signalled
+// H3_REQUEST_CANCELLED.
+func abortStream(stream quicStream, err error) {
+	code := H3RequestCancelled
+	switch {
+	case errors.Is(err, ErrH3Message):
+		code = H3MessageError
+	case errors.Is(err, ErrResponseTooLarge):
+		code = H3ExcessiveLoad
 	}
-	return resp, body, err
+	_ = stream.StopSending(code)
+	_ = stream.Reset(code)
 }
 
 // roundTrip sends the request on stream and reads the response. Its caller aborts
@@ -429,6 +473,13 @@ type respBuilder struct {
 	body         []byte
 	total        uint64 // header, body, trailer, and 1xx payload bytes retained so far
 	trailersSeen bool
+
+	// onData, when non-nil, receives each DATA frame's payload instead of it
+	// being appended to body — the streaming path (DoStream). The payload aliases
+	// the FrameReader buffer and is valid only until the next ReadFrame/Feed, so
+	// the callback must consume or hand it off before the reader advances. Buffered
+	// Do leaves onData nil.
+	onData func(payload []byte) error
 }
 
 // consumeFrames reads and dispatches every complete frame currently buffered in
@@ -502,6 +553,9 @@ func (c *Client) dispatchFrame(rb *respBuilder, typ uint64, payload []byte) erro
 		if rb.total > maxResponseBytes {
 			return ErrResponseTooLarge // retained header/body/trailer bytes over the cap
 		}
+		if rb.onData != nil {
+			return rb.onData(payload) // streaming path: hand the chunk to the BodyReader
+		}
 		rb.body = append(rb.body, payload...)
 	case FrameSettings, FrameCancelPush, FrameGoaway, FrameMaxPushID, 0x02, 0x06, 0x08, 0x09:
 		// Control-stream-only and reserved HTTP/2-carryover frame types MUST NOT
@@ -529,13 +583,29 @@ func finalizeResponse(resp *Response, body []byte, req *Request, interim []*Resp
 	if resp == nil {
 		return nil, nil, ErrH3Message
 	}
-	if canHaveContent(resp.Status, req.Method) {
-		if n, present, valid := responseContentLength(resp.Headers); present && (!valid || n != int64(len(body))) {
-			return nil, nil, ErrH3Message
-		}
+	if !contentLengthMatches(resp, req.Method, int64(len(body))) {
+		return nil, nil, ErrH3Message
 	}
 	resp.Interim = interim
 	return resp, body, nil
+}
+
+// contentLengthMatches reports whether resp's declared Content-Length is
+// consistent with a body of bodyLen bytes for a request using method (RFC 9114
+// §4.1.2). A response that can carry content and declares a Content-Length must
+// have it equal the received DATA; a response that never has content (204, 304, a
+// HEAD response) or declares no Content-Length is always consistent. It is shared
+// by the buffered finalizeResponse and the streaming BodyReader, which validates
+// once the whole body has been observed.
+func contentLengthMatches(resp *Response, method string, bodyLen int64) bool {
+	if !canHaveContent(resp.Status, method) {
+		return true
+	}
+	n, present, valid := responseContentLength(resp.Headers)
+	if !present {
+		return true
+	}
+	return valid && n == bodyLen
 }
 
 // decodeError maps a header field-section decode failure to the right scope: a

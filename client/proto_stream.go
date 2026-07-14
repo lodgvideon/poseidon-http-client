@@ -37,3 +37,19 @@ type protoStream interface {
 	// Close cancels an in-flight exchange. Idempotent.
 	Close() error
 }
+
+// respStream is the minimal streaming-read surface the response body reader
+// (responseBodyReader) and StreamResponse drive to deliver DATA / trailers /
+// reset events incrementally. It is exactly the tail of protoStream — Recv +
+// Close — and is satisfied by:
+//   - *conn.Stream (HTTP/2) — the concrete stream reads events from its channel;
+//   - *h3RespStream (HTTP/3) — wraps an http3.BodyReader (defined in h3_transport.go).
+//
+// It is deliberately narrower than protoStream so DoStream/BodyStream can hold an
+// interface that both protocols satisfy without the Send half. On the H2 hot path
+// a *conn.Stream (a pointer) is boxed into this interface at most once per request,
+// which costs no allocation — the pointer is stored inline in the interface word.
+type respStream interface {
+	Recv(ctx context.Context) (conn.StreamEvent, error)
+	Close() error
+}

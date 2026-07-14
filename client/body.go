@@ -13,7 +13,7 @@ import (
 // transfers to Response.BodyReader.
 type responseBodyReader struct {
 	ctx       context.Context
-	stream    *conn.Stream
+	stream    respStream
 	release   func()    // returns conn to pool; called exactly once in Close
 	resp      *Response // written with trailers when EventTrailers arrives
 	buf       []byte    // unconsumed tail of last DATA event (aliases curData)

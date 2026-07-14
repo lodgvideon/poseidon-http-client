@@ -83,8 +83,17 @@ func (s *fakeStream) Recv() []byte {
 	return out
 }
 
+// resetActive reports whether the peer's RESET_STREAM has surfaced. A real
+// stream returns its buffered response bytes before reporting the terminal
+// reset, so the reset only becomes visible once every buffered chunk has been
+// read (readIdx past the last chunk). Reporting it earlier races the response
+// header read and makes DoStream return the reset instead of the head.
+func (s *fakeStream) resetActive() bool {
+	return s.recvReset && s.readIdx >= len(s.recvChunks)
+}
+
 func (s *fakeStream) finishedLocked() bool {
-	if s.recvReset {
+	if s.resetActive() {
 		return true
 	}
 	if s.directRead {
@@ -104,7 +113,7 @@ func (s *fakeStream) Finished() bool {
 func (s *fakeStream) RecvState() (finished, reset bool, code uint64) {
 	s.conn.mu.Lock()
 	defer s.conn.mu.Unlock()
-	return s.finishedLocked(), s.recvReset, s.recvResetCode
+	return s.finishedLocked(), s.resetActive(), s.recvResetCode
 }
 
 // WaitReadable blocks until the reader signals progress, the request ctx is
