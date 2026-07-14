@@ -13,6 +13,7 @@ import (
 
 	"github.com/lodgvideon/poseidon-http-client/conn"
 	"github.com/lodgvideon/poseidon-http-client/frame"
+	"github.com/lodgvideon/poseidon-http-client/http3"
 )
 
 // TestRepro_RetryOnInternalError_Behavior is the REPRO for the
@@ -76,6 +77,39 @@ func TestConformance_RFC7540_Sec7_NoRetryOnCancel(t *testing.T) {
 func TestConformance_RFC7540_Sec6_8_RetryGoAway_StillRetries(t *testing.T) {
 	if !builtinShouldRetry(conn.ErrGoAway) {
 		t.Errorf("builtinShouldRetry(ErrGoAway) = false; want true (existing behavior)")
+	}
+}
+
+// TestConformance_RFC9114_Sec411_RetryOnRequestRejected: a server
+// RESET_STREAM carrying H3_REQUEST_REJECTED (RFC 9114 §4.1.1) means the
+// request received no application processing — the H3 analogue of an H2
+// REFUSED_STREAM. The buffered h3Exchange surfaces the *http3.StreamResetError
+// verbatim; builtinShouldRetry must classify it retryable via Retryable().
+func TestConformance_RFC9114_Sec411_RetryOnRequestRejected(t *testing.T) {
+	rst := &http3.StreamResetError{Code: http3.H3RequestRejected}
+	if !builtinShouldRetry(rst) {
+		t.Errorf("builtinShouldRetry(H3 reset H3_REQUEST_REJECTED) = false; want true (request not processed, §4.1.1)")
+	}
+}
+
+// TestConformance_RFC9114_Sec411_NoRetryOnNonRejectedReset: a RESET_STREAM
+// with any other code (here H3_REQUEST_CANCELLED) may have had application
+// side effects, so the request is NOT safe to retry. Retryable() is false for
+// every code but H3_REQUEST_REJECTED, so builtinShouldRetry must not retry.
+func TestConformance_RFC9114_Sec411_NoRetryOnNonRejectedReset(t *testing.T) {
+	rst := &http3.StreamResetError{Code: http3.H3RequestCancelled}
+	if builtinShouldRetry(rst) {
+		t.Errorf("builtinShouldRetry(H3 reset H3_REQUEST_CANCELLED) = true; want false (may have had side effects)")
+	}
+}
+
+// TestConformance_RFC9114_Sec52_RetryOnGoAway: http3.ErrGoAway means the
+// server is going away and will not process the new request (RFC 9114 §5.2) —
+// the H3 analogue of conn.ErrGoAway, which is already retried. The request is
+// safe to retry on a fresh connection.
+func TestConformance_RFC9114_Sec52_RetryOnGoAway(t *testing.T) {
+	if !builtinShouldRetry(http3.ErrGoAway) {
+		t.Errorf("builtinShouldRetry(http3.ErrGoAway) = false; want true (server going away, request not processed)")
 	}
 }
 
