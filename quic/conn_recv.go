@@ -45,13 +45,17 @@ func (c *Conn) Establish(ctx context.Context) error {
 	return nil
 }
 
-// Poll reads one datagram and processes it — dispatching frames to open streams
-// and sending acknowledgements — for driving receive after the handshake
-// completes (RFC 9000 §13). It runs on the connection's reader goroutine.
+// Poll reads a datagram (or, on a GRO-capable transport, a whole coalesced burst)
+// and processes it — dispatching frames to open streams and sending
+// acknowledgements — for driving receive after the handshake completes (RFC 9000
+// §13). It runs on the connection's reader goroutine.
 //
 // The one structural change from the single-goroutine era (docs/HTTP3_DESIGN.md
-// §3.2): the blocking pc.Read runs with c.mu RELEASED, so a concurrent Send can
-// seal and write a request while the reader is parked. The sequence is: lock →
+// §3.2): the blocking read (c.readPacket) runs with c.mu RELEASED, so a concurrent
+// Send can seal and write a request while the reader is parked. The sequence is:
+// lock → leading flush (retransmits) → publish+arm the read deadline → arm→recheck
+// ctx → UNLOCK → blocking read → relock → timestamp after reacquiring → process.
+// Every error return latches terminateLocked so a blocked Do wakes.
 // leading flush (retransmits) → publish+arm the read deadline → arm→recheck ctx →
 // UNLOCK → blocking read → relock → timestamp after reacquiring → process. Every
 // error return latches terminateLocked so a blocked Do wakes.
@@ -72,7 +76,9 @@ func (c *Conn) Poll(ctx context.Context) error {
 		return err
 	}
 	if c.pollBuf == nil {
-		c.pollBuf = make([]byte, 2048)
+		// Enlarged to a GRO burst when the transport batches receive, else the
+		// single-datagram size (quic/gro.go).
+		c.pollBuf = make([]byte, c.pollBufLen())
 	}
 	// One connection-lifetime watchdog: on ctx (connCtx) cancel it pokes the read
 	// deadline into the past to unblock the parked Read (§3.1, INV-4).
@@ -90,11 +96,13 @@ func (c *Conn) Poll(ctx context.Context) error {
 	}
 	c.mu.Unlock()
 
-	n, err := c.pc.Read(c.pollBuf) // BLOCKING, UNLOCKED — a Do may seal+send here
+	// BLOCKING, UNLOCKED — a Do may seal+send here. On a GRO-capable transport this
+	// returns a whole coalesced burst (segSize>0) in one syscall; else one datagram.
+	n, segSize, err := c.readPacket()
 
 	c.mu.Lock()
 	now := c.clock() // timestamp AFTER reacquiring, so a Do's hold time does not skew RTT
-	perr := c.afterReadLocked(ctx, n, err, now)
+	perr := c.afterReadLocked(ctx, n, segSize, err, now)
 	if perr != nil {
 		// Catch-all latch: every teardown funnels through terminateLocked so a
 		// blocked WaitReadable / WaitSendable wakes (§3.3). First-error-wins, so a
@@ -105,9 +113,11 @@ func (c *Conn) Poll(ctx context.Context) error {
 	return perr
 }
 
-// afterReadLocked processes the outcome of the unlocked pc.Read. err is the read
-// error (nil on data), n the datagram length. Assumes c.mu is held.
-func (c *Conn) afterReadLocked(ctx context.Context, n int, err error, now time.Time) error {
+// afterReadLocked processes the outcome of the unlocked read. err is the read
+// error (nil on data), n the bytes read into c.pollBuf, and segSize the GRO
+// segment size (0 for a single datagram; >0 when c.pollBuf[:n] holds several
+// coalesced datagrams of segSize bytes). Assumes c.mu is held.
+func (c *Conn) afterReadLocked(ctx context.Context, n, segSize int, err error, now time.Time) error {
 	// A ctx (connCtx) cancel unblocked the Read via the watchdog's past deadline;
 	// surface it as terminal, never as a PTO retry (which would re-arm and block).
 	if e := ctx.Err(); e != nil {
@@ -119,7 +129,10 @@ func (c *Conn) afterReadLocked(ctx context.Context, n int, err error, now time.T
 		}
 		return c.handleExpiry(now, err) // deadline expiry: PTO / loss / idle
 	}
-	if e := c.recvDatagram(c.pollBuf[:n]); e != nil {
+	// A GRO read hands back several coalesced datagrams; recvGRO splits them and
+	// feeds each through the same recvDatagram the single-read path uses. A non-GRO
+	// read (segSize 0) is one recvDatagram, unchanged.
+	if e := c.recvGRO(n, segSize); e != nil {
 		return c.fail(e)
 	}
 	if c.peerClose != nil {
@@ -278,15 +291,20 @@ func (c *Conn) drainBuffered() error {
 	}
 	for i := 0; i < maxDrainBurst; i++ {
 		_ = dl.SetReadDeadline(c.clock().Add(-time.Nanosecond))
-		n, err := c.pc.Read(c.pollBuf)
+		n, segSize, err := c.readPacket()
 		if err != nil {
 			if isTimeout(err) {
 				return nil // socket drained
 			}
 			return err
 		}
-		if err := c.recvDatagram(c.pollBuf[:n]); err != nil {
+		// One read may be a GRO burst; recvGRO splits it into datagrams and feeds
+		// each through the unchanged recvDatagram (segSize 0 = one datagram).
+		if err := c.recvGRO(n, segSize); err != nil {
 			return c.fail(err)
+		}
+		if c.peerClose != nil {
+			return nil // a CONNECTION_CLOSE arrived in the burst: stop draining (§10.2.2)
 		}
 	}
 	return nil
