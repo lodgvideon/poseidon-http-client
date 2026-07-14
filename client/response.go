@@ -155,7 +155,7 @@ type StreamResponse struct {
 	// the initial HEADERS frame. Valid until Close() is called.
 	Headers []conn.HeaderField
 
-	stream    *conn.Stream
+	stream    respStream
 	release   func()
 	closeOnce sync.Once
 	drained   bool

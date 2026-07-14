@@ -15,11 +15,13 @@ import (
 )
 
 // h3Client is the subset of *http3.Client the transport drives: a buffered Do
-// (returns the whole response head + body) and Close. Defining it as an
-// interface keeps the transport testable — a fake satisfies it without a live
-// QUIC connection — while *http3.Client satisfies it directly.
+// (returns the whole response head + body), an incremental DoStream (returns the
+// response head plus a BodyReader that pulls DATA frames on demand), and Close.
+// Defining it as an interface keeps the transport testable — a fake satisfies it
+// without a live QUIC connection — while *http3.Client satisfies it directly.
 type h3Client interface {
 	Do(ctx context.Context, req *http3.Request) (*http3.Response, []byte, error)
+	DoStream(ctx context.Context, req *http3.Request) (*http3.Response, http3.ResponseBody, error)
 	Close() error
 }
 
@@ -154,6 +156,71 @@ func (e *h3Exchange) Close() error {
 	return nil
 }
 
+// beginStream switches the exchange from the buffered Do to the incremental
+// DoStream path: the request assembled from the protoStream Send calls is round-
+// tripped up to the response HEADERS, and the returned *http3.BodyReader pulls the
+// DATA frames (and trailers) on demand. It is called once per streaming request by
+// client.beginRespStream, before any Recv. On a DoStream error the stream is
+// already aborted by http3.Client; here we only surface the typed error.
+func (e *h3Exchange) beginStream(ctx context.Context) (respStream, error) {
+	resp, body, err := e.client.DoStream(ctx, &e.req)
+	if err != nil {
+		return nil, err
+	}
+	return &h3RespStream{resp: resp, body: body}, nil
+}
+
+// ————————————————————————————————————————————————————————————————
+// h3RespStream — one streaming HTTP/3 response body as a respStream
+// ————————————————————————————————————————————————————————————————
+
+// h3RespStream adapts an http3.BodyReader to the respStream interface so the
+// client's responseBodyReader and StreamResponse read an HTTP/3 body through the
+// same Recv → conn.StreamEvent surface as an HTTP/2 *conn.Stream. The response
+// head (already read by DoStream) is replayed as the first EventHeaders; each
+// subsequent Recv pulls one body event from the BodyReader:
+//   - a DATA chunk        → EventData (Data aliases the reader's frame buffer,
+//     valid until the next Recv/Close — the same contract as an H2 EventData);
+//   - the trailer section → EventTrailers (EndStream);
+//   - a clean end         → a terminal empty EventData with EndStream set, so the
+//     client readers observe end-of-stream exactly as they do for an H2 FIN;
+//   - a server reset / protocol error → the typed error verbatim (e.g.
+//     *http3.StreamResetError), preserving errors.As retry classification.
+type h3RespStream struct {
+	resp        *http3.Response
+	body        http3.ResponseBody
+	headersDone bool
+}
+
+// Recv delivers the next conn.StreamEvent for the HTTP/3 response.
+func (h *h3RespStream) Recv(ctx context.Context) (conn.StreamEvent, error) {
+	if !h.headersDone {
+		h.headersDone = true
+		hdrs := make([]conn.HeaderField, 0, 1+len(h.resp.Headers))
+		hdrs = append(hdrs, conn.HeaderField{Name: hdrStatus, Value: statusValue(h.resp.Status)})
+		hdrs = append(hdrs, h.resp.Headers...)
+		return conn.StreamEvent{Type: conn.EventHeaders, Headers: hdrs}, nil
+	}
+	be, err := h.body.Next(ctx)
+	if err != nil {
+		return conn.StreamEvent{}, err
+	}
+	switch {
+	case be.Trailers != nil:
+		return conn.StreamEvent{Type: conn.EventTrailers, Headers: be.Trailers, EndStream: true}, nil
+	case be.End:
+		return conn.StreamEvent{Type: conn.EventData, EndStream: true}, nil
+	default:
+		return conn.StreamEvent{Type: conn.EventData, Data: be.Data}, nil
+	}
+}
+
+// Close aborts the underlying HTTP/3 body reader (RST_STREAM if not fully drained).
+// Idempotent.
+func (h *h3RespStream) Close() error {
+	return h.body.Close()
+}
+
 // splitPseudoHeaders separates the request pseudo-headers from the regular
 // fields. The pseudo values are copied into strings (the caller's backing array
 // is pooled and reused after SendHeaders returns) and the regular fields are
@@ -199,9 +266,9 @@ func statusValue(status int) []byte {
 // (one QUIC connection) per transport, lazy-dialled on first use and shared
 // across concurrent exchanges (http3.Client supports concurrent Do). Unlike
 // singleConn it owns UDP/QUIC dialing via http3.Dial rather than a conn.Dialer,
-// so it holds a *tls.Config + addr instead of conn.ConnOptions. This is the
-// buffered transport only: streaming responses and connection pooling are later
-// PRs.
+// so it holds a *tls.Config + addr instead of conn.ConnOptions. It serves both the
+// buffered path (h3Exchange + http3.Client.Do) and the streaming path (h3RespStream
+// + http3.Client.DoStream); connection pooling is a later PR.
 type singleH3Conn struct {
 	addr      string
 	tlsConfig *tls.Config

@@ -48,8 +48,9 @@ const (
 	// TransportH3 speaks HTTP/3 over QUIC using a single lazy-dialled
 	// *http3.Client. It owns UDP/QUIC dialing via http3.Dial, so it requires
 	// ClientOptions.TLSConfig (with ServerName) and Addr rather than
-	// ConnOpts.Dialer. This is the buffered request path only (Client.Do);
-	// DoStream/BodyStream and connection pooling are not yet supported.
+	// ConnOpts.Dialer. Both the buffered request path (Client.Do) and the
+	// streaming paths (Client.DoStream / Do with BodyMode=BodyStream) are
+	// supported; connection pooling is not yet.
 	TransportH3
 )
 
@@ -494,20 +495,26 @@ func (c *Client) do(ctx context.Context, req *Request, resp *Response) error {
 			release()
 			return fmt.Errorf("client: BodyStream requires a non-nil *Response")
 		}
-		ev, err := s.Recv(ctx)
+		rs, err := beginRespStream(ctx, s)
 		if err != nil {
 			_ = s.Close()
 			release()
 			return err
 		}
+		ev, err := rs.Recv(ctx)
+		if err != nil {
+			_ = rs.Close()
+			release()
+			return err
+		}
 		if ev.Type != conn.EventHeaders {
-			_ = s.Close()
+			_ = rs.Close()
 			release()
 			return fmt.Errorf("client: expected initial HEADERS, got %s", ev.Type)
 		}
 		n, perr := parseStatus(ev.Headers, &resp.Headers)
 		if perr != nil {
-			_ = s.Close()
+			_ = rs.Close()
 			release()
 			return perr
 		}
@@ -515,18 +522,9 @@ func (c *Client) do(ctx context.Context, req *Request, resp *Response) error {
 		if ev.Slab != nil {
 			resp.slabs = append(resp.slabs, ev.Slab)
 		}
-		// BodyStream requires a *conn.Stream for responseBodyReader.
-		// H1.1 does not support BodyStream; the protoStream is always
-		// a *conn.Stream here for that feature.
-		cs, ok := s.(*conn.Stream)
-		if !ok {
-			_ = s.Close()
-			release()
-			return fmt.Errorf("client: BodyStream not supported for HTTP/1.1 connections")
-		}
 		resp.BodyReader = &responseBodyReader{
 			ctx:     ctx,
-			stream:  cs,
+			stream:  rs,
 			release: release,
 			resp:    resp,
 			lg:      armLeakGuard("Response.BodyReader"),
@@ -602,20 +600,26 @@ func (c *Client) doStream(ctx context.Context, req *Request, sr *StreamResponse)
 		return err
 	}
 
-	ev, err := s.Recv(ctx)
+	rs, err := beginRespStream(ctx, s)
 	if err != nil {
 		_ = s.Close()
 		release()
 		return err
 	}
+	ev, err := rs.Recv(ctx)
+	if err != nil {
+		_ = rs.Close()
+		release()
+		return err
+	}
 	if ev.Type != conn.EventHeaders {
-		_ = s.Close()
+		_ = rs.Close()
 		release()
 		return fmt.Errorf("client: expected initial HEADERS, got %s", ev.Type)
 	}
 	n, perr := parseStatus(ev.Headers, &sr.Headers)
 	if perr != nil {
-		_ = s.Close()
+		_ = rs.Close()
 		release()
 		return perr
 	}
@@ -623,20 +627,31 @@ func (c *Client) doStream(ctx context.Context, req *Request, sr *StreamResponse)
 	if ev.Slab != nil {
 		sr.slabs = append(sr.slabs, ev.Slab) // transfer slab ownership
 	}
-	// DoStream requires a *conn.Stream; H1.1 connections do not support it.
-	cs, ok := s.(*conn.Stream)
-	if !ok {
-		_ = s.Close()
-		release()
-		return fmt.Errorf("client: DoStream not supported for HTTP/1.1 connections")
-	}
-	sr.stream = cs
+	sr.stream = rs
 	sr.release = release
 	sr.lg = armLeakGuard("StreamResponse")
 	if ev.EndStream {
 		sr.drained = true
 	}
 	return nil
+}
+
+// beginRespStream selects the incremental streaming reader for a protoStream,
+// per protocol. HTTP/2 uses the *conn.Stream directly — it is already a streaming
+// stream, and boxing the pointer into respStream costs no allocation. HTTP/3
+// switches the buffered h3Exchange over to http3.Client.DoStream. HTTP/1.1
+// (h1Exchange) buffers whole responses and has no incremental path, so it is
+// rejected with ErrStreamingUnsupported. This replaces the two former
+// s.(*conn.Stream) type asserts.
+func beginRespStream(ctx context.Context, s protoStream) (respStream, error) {
+	switch v := s.(type) {
+	case *conn.Stream:
+		return v, nil
+	case *h3Exchange:
+		return v.beginStream(ctx)
+	default:
+		return nil, ErrStreamingUnsupported
+	}
 }
 
 // SetHooks atomically replaces the active hook set. Pass nil to

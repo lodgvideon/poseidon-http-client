@@ -116,4 +116,10 @@ var (
 	// trailer field, so the request is rejected rather than silently dropping
 	// the trailer section.
 	ErrTrailersUnsupportedH3 = errors.New("client: buffered HTTP/3 transport does not support request trailers")
+
+	// ErrStreamingUnsupported is returned by DoStream and Do(BodyMode=BodyStream)
+	// when the underlying transport has no incremental response-body path. The
+	// HTTP/1.1 transport (h1Exchange) buffers each response, so it cannot stream;
+	// HTTP/2 (*conn.Stream) and HTTP/3 (via http3.Client.DoStream) both can.
+	ErrStreamingUnsupported = errors.New("client: streaming responses are not supported by this transport")
 )
