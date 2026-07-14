@@ -156,15 +156,17 @@ type Conn struct {
 	// so borrowing and returning it here needs no further guarding.
 	gsoBatch []byte
 
-	nextBidiStreamID   uint64             // next client-initiated bidi stream ID (0, 4, 8, …)
-	openedBidi         uint64             // count of client bidi streams opened (RFC 9000 §4.6 gate)
-	openedUni          uint64             // count of client uni streams opened (§4.6 gate; ID = 2+4n)
-	streams            map[uint64]*Stream // open streams by ID
-	localMaxStreamsUni uint64             // uni streams the peer may open toward us (we advertised, §4.6)
-	localMaxIdle       time.Duration      // max_idle_timeout we advertised (§10.1); 0 = none
-	lastActivity       time.Time          // last received packet, for the idle timer; the timer starts at NewConn and resets on receipt, so §10.1's "restart on send if not already running" is a no-op (§10.1)
-	acceptedUni        []*Stream          // accepted server-initiated uni streams awaiting AcceptUniStream
-	pollBuf            []byte             // reused datagram buffer for Poll
+	nextBidiStreamID    uint64             // next client-initiated bidi stream ID (0, 4, 8, …)
+	openedBidi          uint64             // count of client bidi streams opened (RFC 9000 §4.6 gate)
+	openedUni           uint64             // count of client uni streams opened (§4.6 gate; ID = 2+4n)
+	streams             map[uint64]*Stream // open streams by ID
+	localMaxStreamsUni  uint64             // uni streams the peer may open toward us (we advertised, §4.6)
+	localMaxStreamsBidi uint64             // bidi streams the peer may open toward us (server role; we advertised, §4.6)
+	localMaxIdle        time.Duration      // max_idle_timeout we advertised (§10.1); 0 = none
+	lastActivity        time.Time          // last received packet, for the idle timer; the timer starts at NewConn and resets on receipt, so §10.1's "restart on send if not already running" is a no-op (§10.1)
+	acceptedUni         []*Stream          // accepted server-initiated uni streams awaiting AcceptUniStream
+	acceptedBidi        []*Stream          // accepted client-initiated bidi streams awaiting AcceptBidiStream (server role)
+	pollBuf             []byte             // reused datagram buffer for Poll
 
 	connSent         uint64 // cumulative bytes sent in STREAM frames across all streams (§4.1)
 	connMax          uint64 // absolute connection-level send ceiling; init = peer.InitialMaxData
@@ -316,6 +318,47 @@ func (c *Conn) acceptUniStreamLocked() *Stream {
 	}
 	s := c.acceptedUni[0]
 	c.acceptedUni = c.acceptedUni[1:]
+	return s
+}
+
+// acceptPeerBidiStream accepts a client-initiated bidirectional stream (RFC 9000
+// §2.1, id&0x3==0) on a server connection — a request stream. It gates on the
+// bidirectional-stream limit the server advertised (§4.6). The stream is
+// registered (so reassembly and flow control apply) and queued for
+// AcceptBidiStream; its send window is the client's per-stream limit for its own
+// bidi streams (initial_max_stream_data_bidi_local), and its receive window is
+// the one we advertise.
+func (c *Conn) acceptPeerBidiStream(id uint64) (*Stream, error) {
+	if id>>2 >= c.localMaxStreamsBidi {
+		return nil, ErrTooManyBidiStreams
+	}
+	s := &Stream{
+		id:      id,
+		conn:    c,
+		sendMax: c.peer.InitialMaxStreamDataBidiLocal,
+		recvMax: DefaultStreamRecvWindow,
+		ready:   make(chan struct{}, 1),
+	}
+	if c.streams == nil {
+		c.streams = map[uint64]*Stream{}
+	}
+	c.streams[id] = s
+	c.acceptedBidi = append(c.acceptedBidi, s)
+	return s, nil
+}
+
+// AcceptBidiStream returns the next accepted client-initiated bidirectional
+// stream (a request), or nil if none is pending. Server connections only. It
+// does not block; the caller drives the connection with Poll and drains newly
+// accepted streams between polls.
+func (c *Conn) AcceptBidiStream() *Stream {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if len(c.acceptedBidi) == 0 {
+		return nil
+	}
+	s := c.acceptedBidi[0]
+	c.acceptedBidi = c.acceptedBidi[1:]
 	return s
 }
 

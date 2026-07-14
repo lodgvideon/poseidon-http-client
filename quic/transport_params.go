@@ -29,6 +29,11 @@ type TransportParams struct {
 	// (0x06). The peer names the parameter from its own perspective, so
 	// "remote" means opened by the receiver of the parameter (the client).
 	InitialMaxStreamDataBidiRemote uint64
+	// InitialMaxStreamDataBidiLocal is the per-stream receive limit the peer
+	// applies to bidirectional streams the peer itself initiates (0x05). A server
+	// uses it as its send limit on a client-initiated request stream. The client
+	// send path does not consume it; it is retained for the server role.
+	InitialMaxStreamDataBidiLocal uint64
 	// InitialMaxStreamsBidi is the maximum number of bidirectional streams the
 	// client is permitted to open (0x08).
 	InitialMaxStreamsBidi uint64
@@ -167,6 +172,8 @@ func (tp *TransportParams) set(id uint64, value []byte) error {
 		return tp.setUint(value, &tp.InitialMaxData)
 	case tpInitialMaxStreamDataBidiRemote:
 		return tp.setUint(value, &tp.InitialMaxStreamDataBidiRemote)
+	case tpInitialMaxStreamDataBidiLocal:
+		return tp.setUint(value, &tp.InitialMaxStreamDataBidiLocal)
 	case tpInitialMaxStreamsBidi:
 		// A max_streams value greater than 2^60 is invalid (RFC 9000 §4.6): it
 		// implies a stream ID that cannot be expressed as a QUIC varint.

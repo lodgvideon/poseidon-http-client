@@ -729,35 +729,43 @@ func (c *Conn) exceedsUniStreamLimit(id uint64) bool {
 // (perhaps since closed) and must instead be ignored. Peer-initiated streams
 // (server-uni/bidi) are never "not yet created" from our side and return false.
 func (c *Conn) localStreamNotCreated(id uint64) bool {
-	switch id & 0x03 {
-	case 0x00: // client-initiated bidirectional: IDs 0, 4, 8, …
-		return id >= c.nextBidiStreamID
-	case 0x02: // client-initiated unidirectional: IDs 2, 6, 10, …
-		return id >= 2+c.openedUni*4
-	default:
-		return false
+	if (id&0x1 == 1) != c.isServer {
+		return false // peer-initiated streams are never "not yet created" from our side
 	}
+	if id&0x2 == 2 { // our unidirectional stream
+		return id >= 2+c.openedUni*4
+	}
+	return id >= c.nextBidiStreamID // our bidirectional stream
 }
 
 func (h *connFrameHandler) OnStream(id, offset uint64, fin bool, data []byte) error {
 	h.ackEliciting = true
-	// A STREAM frame on a send-only stream — a client-initiated unidirectional
-	// stream (id&0x3 == 0x2) — is a STREAM_STATE_ERROR (RFC 9000 §19.8).
-	if id&0x3 == 0x2 {
+	ours := (id&0x1 == 1) == h.c.isServer // a stream this endpoint initiated
+	uni := id&0x2 == 2
+	// A STREAM frame on our own send-only (unidirectional) stream is a
+	// STREAM_STATE_ERROR (RFC 9000 §19.8).
+	if uni && ours {
 		return ErrStreamState
 	}
 	s := h.c.streams[id]
 	if s == nil {
-		// An id we did not open. Classify by its low two bits (RFC 9000 §2.1).
-		switch id & 0x03 {
-		case 0x03: // server-initiated unidirectional (control, QPACK) — accept it
+		// An id we have no record of: accept a peer-initiated stream, or classify a
+		// locally initiated one (RFC 9000 §2.1).
+		switch {
+		case !ours && uni: // peer-initiated unidirectional (control, QPACK) — accept it
 			var err error
 			if s, err = h.c.acceptPeerUniStream(id); err != nil {
 				return err // STREAM_LIMIT_ERROR → CONNECTION_CLOSE
 			}
-		case 0x01: // server-initiated bidirectional — never permitted for a client
-			return ErrServerBidiStream
-		default: // client-initiated bidirectional (0x00) we have no open record of
+		case !ours && !uni: // peer-initiated bidirectional
+			if !h.c.isServer {
+				return ErrServerBidiStream // a client never permits a server-initiated bidi stream
+			}
+			var err error
+			if s, err = h.c.acceptPeerBidiStream(id); err != nil {
+				return err // a request stream past our advertised limit → STREAM_LIMIT_ERROR
+			}
+		default: // ours && bidirectional: a locally initiated stream we have no open record of
 			// A STREAM for a locally initiated stream not yet created is a
 			// STREAM_STATE_ERROR (§19.8); one already created but since closed is ignored.
 			if h.c.localStreamNotCreated(id) {

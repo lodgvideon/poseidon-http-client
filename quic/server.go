@@ -368,6 +368,7 @@ func NewServerConn(pc PacketConn, f *ServerFlight, clientDCID, clientSCID []byte
 	c.keys.OneRTT = f.AppOpener
 	if local, err := ParseTransportParams(f.LocalTransportParams); err == nil {
 		c.localMaxStreamsUni = local.InitialMaxStreamsUni
+		c.localMaxStreamsBidi = local.InitialMaxStreamsBidi
 		c.localMaxIdle = local.MaxIdleTimeout
 	}
 	c.lastActivity = c.now()

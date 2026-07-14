@@ -286,6 +286,57 @@ drain:
 	}
 }
 
+// TestServerConn_AcceptsClientStreams checks a server connection accepts a
+// client-initiated bidirectional stream (a request) and a client-initiated
+// unidirectional stream (control/QPACK), rejects its own send-only streams, and
+// enforces the advertised bidi limit.
+func TestServerConn_AcceptsClientStreams(t *testing.T) {
+	t.Parallel()
+	c := &Conn{
+		isServer:            true,
+		localMaxStreamsBidi: 3,
+		localMaxStreamsUni:  3,
+		peer:                TransportParams{InitialMaxStreamDataBidiLocal: 1 << 20},
+		// connRecvMax left 0 disables receive flow control for this hand-built conn.
+	}
+	h := &connFrameHandler{c: c}
+
+	// Client-initiated bidi stream 0 is accepted as a request.
+	if err := h.OnStream(0, 0, false, []byte("request")); err != nil {
+		t.Fatalf("OnStream(client bidi 0): %v", err)
+	}
+	if c.streams[0] == nil {
+		t.Fatal("client bidi stream 0 was not created")
+	}
+	if c.streams[0].sendMax != 1<<20 {
+		t.Errorf("sendMax = %d, want %d (client bidi_local)", c.streams[0].sendMax, 1<<20)
+	}
+	if got := c.AcceptBidiStream(); got == nil || got.ID() != 0 {
+		t.Fatalf("AcceptBidiStream = %v, want stream 0", got)
+	}
+	if c.AcceptBidiStream() != nil {
+		t.Fatal("AcceptBidiStream returned an unexpected second stream")
+	}
+
+	// Client-initiated uni stream 2 is accepted (control/QPACK).
+	if err := h.OnStream(2, 0, false, []byte{0x00}); err != nil {
+		t.Fatalf("OnStream(client uni 2): %v", err)
+	}
+	if got := c.AcceptUniStream(); got == nil || got.ID() != 2 {
+		t.Fatalf("AcceptUniStream = %v, want stream 2", got)
+	}
+
+	// The server's own send-only stream (server uni, id 3) must reject inbound STREAM.
+	if err := h.OnStream(3, 0, false, []byte{0x00}); err != ErrStreamState {
+		t.Fatalf("OnStream(server uni 3) = %v, want ErrStreamState", err)
+	}
+
+	// A request stream past the advertised bidi limit is a STREAM_LIMIT_ERROR.
+	if err := h.OnStream(12, 0, false, []byte("x")); err != ErrTooManyBidiStreams {
+		t.Fatalf("OnStream(over-limit bidi 12) = %v, want ErrTooManyBidiStreams", err)
+	}
+}
+
 // extractHandshakeCrypto walks the packets in a datagram, decrypts each Handshake
 // packet with opener, and returns the reassembled CRYPTO stream (the client's
 // Finished), ignoring Initial/1-RTT packets and non-CRYPTO frames.
