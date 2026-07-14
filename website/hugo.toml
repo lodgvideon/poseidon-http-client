@@ -1,0 +1,51 @@
+# Hugo configuration for the poseidon-http-client documentation site.
+# Built and deployed to GitHub Pages by .github/workflows/pages.yml.
+# Theme: hugo-book (pulled as a Hugo Module — see go.mod).
+
+baseURL = "https://lodgvideon.github.io/poseidon-http-client/"
+title = "poseidon-http-client"
+
+# Multilingual: English is canonical; the others are maintained translations.
+defaultContentLanguage = "en"
+defaultContentLanguageInSubdir = true
+enableGitInfo = false
+
+[module]
+  [[module.imports]]
+    path = "github.com/alex-shpak/hugo-book"
+
+[languages]
+  [languages.en]
+    label = "English"
+    contentDir = "content/en"
+    weight = 1
+  [languages.zh]
+    label = "中文"
+    contentDir = "content/zh"
+    weight = 2
+  [languages.es]
+    label = "Español"
+    contentDir = "content/es"
+    weight = 3
+  [languages.ru]
+    label = "Русский"
+    contentDir = "content/ru"
+    weight = 4
+  [languages.ja]
+    label = "日本語"
+    contentDir = "content/ja"
+    weight = 5
+
+[params]
+  BookTheme = "auto"
+  BookToC = true
+  BookRepo = "https://github.com/lodgvideon/poseidon-http-client"
+  BookEditPath = "edit/main/website"
+  BookSearch = true
+
+[markup.goldmark.renderer]
+  unsafe = false
+
+[markup.highlight]
+  style = "github"
+  noClasses = false

@@ -93,9 +93,11 @@ func NewPoolClient(addr string, dialer conn.Dialer, pool PoolOptions, opts ...Op
 
 // NewH3Client builds a buffered HTTP/3 client: one QUIC connection to addr,
 // lazy-dialled on first request via http3.Dial. tlsConfig should set ServerName;
-// the "h3" ALPN token and TLS 1.3 minimum are applied automatically. Only the
-// buffered request path (Client.Do) is supported — DoStream and connection
-// pooling are not yet available for HTTP/3.
+// the "h3" ALPN token and TLS 1.3 minimum are applied automatically. Both the
+// buffered path (Client.Do) and streaming response bodies (Client.DoStream) are
+// supported; for request multiplexing across several QUIC connections use
+// NewH3PoolClient, and for BBR congestion control set
+// ClientOptions.H3ConnOptions via NewClient.
 func NewH3Client(addr string, tlsConfig *tls.Config, opts ...Option) (*Client, error) {
 	return buildClient(ClientOptions{
 		Addr:      addr,

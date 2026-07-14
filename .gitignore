@@ -51,3 +51,15 @@ test/integration/undertow-server/.settings/
 # fault server test binary (built by go run/build in the container)
 test/integration/http3/faultserver/faultserver
 test/integration/http3/faultserver/faultserver.exe
+
+# Agent/tooling local artifacts
+.logs/
+.opencode/
+
+# Hugo build output
+website/public/
+website/resources/
+
+# Agent chain artifacts
+.claude/chain/
+website/.hugo_build.lock

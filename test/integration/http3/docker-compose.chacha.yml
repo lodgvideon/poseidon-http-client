@@ -49,7 +49,7 @@ services:
     restart: "no"
 
   runner:
-    image: golang:1.24
+    image: golang:1.25
     depends_on:
       nginxchacha:
         condition: service_started

@@ -1,0 +1,54 @@
+name: pages
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'website/**'
+      - '.github/workflows/pages.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# Allow one concurrent deployment; don't cancel an in-progress one.
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.25'
+      - name: Setup Hugo (extended)
+        uses: peaceiris/actions-hugo@v3
+        with:
+          hugo-version: '0.164.0'
+          extended: true
+      - name: Resolve theme module
+        working-directory: website
+        run: hugo mod get -u
+      - name: Build
+        working-directory: website
+        run: hugo --minify --gc
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: website/public
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-24.04
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

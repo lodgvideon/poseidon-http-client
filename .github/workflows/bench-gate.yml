@@ -7,7 +7,7 @@ jobs:
       - uses: actions/checkout@v4
         with: { fetch-depth: 0 }
       - uses: actions/setup-go@v5
-        with: { go-version: '1.24' }
+        with: { go-version: '1.25' }
       - name: Bench HEAD (Phase A only)
         # B.1 conn benches are intentionally non-zero-alloc per the
         # B.1 design spec; their zero-alloc work is deferred to B.2.

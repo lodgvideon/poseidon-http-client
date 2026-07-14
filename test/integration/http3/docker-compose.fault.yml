@@ -3,8 +3,8 @@ name: poseidon-h3-fault
 # HTTP/3 negative-path interop: the from-scratch client against a deliberately
 # misbehaving server (test/integration/http3/faultserver), so the client's error
 # handling is exercised against a real QUIC stack. The fault server is built on
-# quic-go's raw API in its own module, so quic-go is not a client dependency; it
-# needs go >= 1.25 (golang:1.25), while the runner stays on the client's 1.24.
+# quic-go's raw API in its own module, so quic-go is not a client dependency;
+# both it and the runner build on golang:1.25 (the client's minimum Go).
 # The runner retries the dial until the fault server has compiled and is serving.
 
 networks:
@@ -39,7 +39,7 @@ services:
     restart: "no"
 
   runner:
-    image: golang:1.24
+    image: golang:1.25
     depends_on:
       faultserver:
         condition: service_started
