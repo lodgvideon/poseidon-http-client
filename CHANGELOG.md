@@ -5,6 +5,63 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [v1.0.0] — 2026-07-15
+
+The first stable release: HTTP/1.1, HTTP/2, and HTTP/3 through one client API,
+on a from-scratch, near-zero-dependency stack.
+
+### Added
+
+- **HTTP/3 as a first-class transport in `client.Client`.** The same `Do` /
+  `DoStream` API drives HTTP/3 over QUIC: transports `TransportH3`,
+  `TransportH3Pool`, `TransportH3Managed`, and the constructors `NewH3Client`,
+  `NewH3PoolClient`, `NewManagedH3Client`. Concurrent in-flight requests over one
+  QUIC connection, connection pooling, service discovery, streaming, retries,
+  hooks, and metrics now work over HTTP/3, not only HTTP/2.
+- **Dynamic QPACK (RFC 9204), both directions** — encode and decode with the
+  dynamic table, encoder/decoder instruction streams, known-received-count, and
+  blocked-streams handling (#193–#196, #202).
+- **ChaCha20-Poly1305 packet protection (RFC 9001 §5.3 / §5.4.4)** — handshakes
+  complete against ChaCha20-only servers; verified byte-for-byte against the
+  RFC 9001 §A.5 test vector and on the wire (#204).
+- **BBR congestion control (opt-in)** via
+  `ClientOptions.H3ConnOptions = []quic.ConnOption{quic.WithCongestionControl(quic.CCBBR)}`;
+  NewReno stays the default (#203, #206).
+- **Batched UDP I/O on Linux** — GSO send, GRO receive, and bounded ACK deferral
+  (#199–#201).
+- A documentation site (Hugo → GitHub Pages) in English, 中文, Español, Русский,
+  and 日本語, plus runnable `examples/http1`, `examples/http2`, `examples/http3`.
+
+### Changed
+
+- **Minimum Go version is now 1.25** — a supported release that receives security
+  backports.
+- New direct dependency `golang.org/x/crypto` (ChaCha20-Poly1305 only). Still no
+  `quic-go`, `nghttp2`, `net/http`, or cgo.
+- README rewritten; per-protocol guides and an accurate support matrix replace the
+  earlier single-request/HTTP-2-only description.
+
+### Security
+
+- **CI security scanning** — `govulncheck` (Go vulnerability database, reachable
+  symbols) and CodeQL, plus Dependabot for Go modules and GitHub Actions.
+- **Suite-aware AEAD usage limits (RFC 9001 §6.6)** — ChaCha20-Poly1305 uses its
+  mandated 2^36 integrity limit rather than AES-GCM's 2^52.
+- Added `SECURITY.md` with a private disclosure process.
+
+### Tested
+
+- **Soak / endurance** — over one million requests on one managed HTTP/3
+  connection with no goroutine or heap growth.
+- **Fuzzed wire parsers** for QUIC, HTTP/3, and QPACK (#198).
+- HTTP/3 interop extended with a ChaCha20-only server and a 1 MiB BBR transfer,
+  across Caddy, nginx, and aioquic.
+
+### Removed
+
+- Internal working documents (design specs, review notes, investigations) and
+  stray build artifacts pruned from the repository.
+
 ## [v0.9.0] — 2026-07-11
 
 ### Added

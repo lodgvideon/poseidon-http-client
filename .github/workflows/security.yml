@@ -1,0 +1,51 @@
+name: security
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    # Weekly re-scan so a newly-disclosed advisory against an already-shipped
+    # dependency is caught even with no code change.
+    - cron: '0 6 * * 1'
+
+permissions:
+  contents: read
+
+jobs:
+  govulncheck:
+    name: govulncheck
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          # Scan on the latest patched toolchain so a fix already shipped in the
+          # Go standard library is picked up; govulncheck fails only on
+          # vulnerabilities reachable from this module's call graph.
+          go-version: 'stable'
+          cache: true
+      - name: Install govulncheck
+        run: go install golang.org/x/vuln/cmd/govulncheck@latest
+      - name: Scan for reachable known vulnerabilities
+        run: govulncheck ./...
+
+  codeql:
+    name: CodeQL
+    runs-on: ubuntu-24.04
+    permissions:
+      security-events: write
+      actions: read
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: github/codeql-action/init@v3
+        with:
+          languages: go
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.25'
+      - uses: github/codeql-action/autobuild@v3
+      - uses: github/codeql-action/analyze@v3
+        with:
+          category: "/language:go"
