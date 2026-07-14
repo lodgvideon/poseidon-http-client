@@ -185,6 +185,7 @@ func TestStartServerHandshake_FullHandshake(t *testing.T) {
 	clientTP := concat(
 		tpInt(tpInitialMaxData, 1<<20),
 		tpInt(tpInitialMaxStreamDataBidiRemote, 1<<20),
+		tpInt(tpInitialMaxStreamDataBidiLocal, 1<<20), // server's send limit on the request stream
 		tpInt(tpInitialMaxStreamsBidi, 16),
 	)
 	serverSCID := []byte{0xab, 0xcd, 0xef}
@@ -235,6 +236,12 @@ func TestStartServerHandshake_FullHandshake(t *testing.T) {
 	if flight.HandshakeSealer == nil || flight.HandshakeOpener == nil {
 		t.Fatal("server did not install Handshake keys")
 	}
+	if len(flight.PeerTransportParams) == 0 {
+		t.Fatal("server did not capture the client's transport parameters")
+	}
+	if _, err := ParseTransportParams(flight.PeerTransportParams); err != nil {
+		t.Fatalf("captured client transport params do not parse: %v", err)
+	}
 
 	// The client sent its Handshake Finished during Establish; drain it and
 	// complete the server side.
@@ -259,6 +266,128 @@ drain:
 	}
 	if flight.AppSealer == nil || flight.AppOpener == nil {
 		t.Fatal("server did not install 1-RTT keys")
+	}
+
+	// Wrap the completed handshake into a connected server Conn.
+	sc, err := NewServerConn(&chanPC{rx: toServer, tx: fromServer}, flight, client.origDCID, client.scid)
+	if err != nil {
+		t.Fatalf("NewServerConn: %v", err)
+	}
+	if !sc.isServer {
+		t.Error("NewServerConn: isServer = false")
+	}
+	if sc.oneRTTSealer == nil || sc.keys.OneRTT == nil {
+		t.Error("NewServerConn: 1-RTT keys not installed")
+	}
+	if !sc.handshakeComplete {
+		t.Error("NewServerConn: handshakeComplete = false")
+	}
+	if sc.connMax == 0 {
+		t.Error("NewServerConn: connMax (peer InitialMaxData) not seeded")
+	}
+
+	// 1-RTT request path: the client seals a STREAM frame on bidi stream 0 with its
+	// real 1-RTT sealer; the server decrypts it (its read keys match the client's
+	// write keys), accepts the request stream, and reads the data through its
+	// receive path.
+	req := AppendStream(nil, 0, 0, true, []byte("GET /"))
+	pkt, err := SealPacket(nil, client.oneRTTSealer, PacketShort, sc.scid, nil, nil, 0, 4, req)
+	if err != nil {
+		t.Fatalf("seal client 1-RTT request: %v", err)
+	}
+	res, err := ProcessDatagram(pkt, len(sc.scid), &sc.keys, func(PacketType) uint64 { return 0 }, &connFrameHandler{c: sc, space: spaceApp})
+	if err != nil {
+		t.Fatalf("server ProcessDatagram: %v", err)
+	}
+	if res.Processed != 1 {
+		t.Fatalf("server processed %d packets, want 1 (%+v)", res.Processed, res)
+	}
+	rs := sc.AcceptBidiStream()
+	if rs == nil || rs.ID() != 0 {
+		t.Fatalf("AcceptBidiStream = %v, want request stream 0", rs)
+	}
+	if got := string(rs.Recv()); got != "GET /" {
+		t.Fatalf("server read request %q, want %q", got, "GET /")
+	}
+
+	// 1-RTT response path: the server writes a response on the request stream via
+	// its real send path (seal + flush to its PacketConn); the client opens its
+	// side of the stream, decrypts the response, and reads it.
+	reqStream, err := client.OpenStream()
+	if err != nil {
+		t.Fatalf("client OpenStream: %v", err)
+	}
+	for drained := false; !drained; { // clear any leftover handshake datagrams
+		select {
+		case <-fromServer:
+		default:
+			drained = true
+		}
+	}
+	if _, err := rs.Send([]byte("200 OK"), true); err != nil {
+		t.Fatalf("server Send response: %v", err)
+	}
+	respDg := <-fromServer
+	rres, err := ProcessDatagram(respDg, len(client.scid), &client.keys, func(PacketType) uint64 { return 0 }, &connFrameHandler{c: client, space: spaceApp})
+	if err != nil {
+		t.Fatalf("client ProcessDatagram(response): %v", err)
+	}
+	if rres.Processed != 1 {
+		t.Fatalf("client processed %d response packets, want 1 (%+v)", rres.Processed, rres)
+	}
+	if got := string(reqStream.Recv()); got != "200 OK" {
+		t.Fatalf("client read response %q, want %q", got, "200 OK")
+	}
+}
+
+// TestServerConn_AcceptsClientStreams checks a server connection accepts a
+// client-initiated bidirectional stream (a request) and a client-initiated
+// unidirectional stream (control/QPACK), rejects its own send-only streams, and
+// enforces the advertised bidi limit.
+func TestServerConn_AcceptsClientStreams(t *testing.T) {
+	t.Parallel()
+	c := &Conn{
+		isServer:            true,
+		localMaxStreamsBidi: 3,
+		localMaxStreamsUni:  3,
+		peer:                TransportParams{InitialMaxStreamDataBidiLocal: 1 << 20},
+		// connRecvMax left 0 disables receive flow control for this hand-built conn.
+	}
+	h := &connFrameHandler{c: c}
+
+	// Client-initiated bidi stream 0 is accepted as a request.
+	if err := h.OnStream(0, 0, false, []byte("request")); err != nil {
+		t.Fatalf("OnStream(client bidi 0): %v", err)
+	}
+	if c.streams[0] == nil {
+		t.Fatal("client bidi stream 0 was not created")
+	}
+	if c.streams[0].sendMax != 1<<20 {
+		t.Errorf("sendMax = %d, want %d (client bidi_local)", c.streams[0].sendMax, 1<<20)
+	}
+	if got := c.AcceptBidiStream(); got == nil || got.ID() != 0 {
+		t.Fatalf("AcceptBidiStream = %v, want stream 0", got)
+	}
+	if c.AcceptBidiStream() != nil {
+		t.Fatal("AcceptBidiStream returned an unexpected second stream")
+	}
+
+	// Client-initiated uni stream 2 is accepted (control/QPACK).
+	if err := h.OnStream(2, 0, false, []byte{0x00}); err != nil {
+		t.Fatalf("OnStream(client uni 2): %v", err)
+	}
+	if got := c.AcceptUniStream(); got == nil || got.ID() != 2 {
+		t.Fatalf("AcceptUniStream = %v, want stream 2", got)
+	}
+
+	// The server's own send-only stream (server uni, id 3) must reject inbound STREAM.
+	if err := h.OnStream(3, 0, false, []byte{0x00}); err != ErrStreamState {
+		t.Fatalf("OnStream(server uni 3) = %v, want ErrStreamState", err)
+	}
+
+	// A request stream past the advertised bidi limit is a STREAM_LIMIT_ERROR.
+	if err := h.OnStream(12, 0, false, []byte("x")); err != ErrTooManyBidiStreams {
+		t.Fatalf("OnStream(over-limit bidi 12) = %v, want ErrTooManyBidiStreams", err)
 	}
 }
 

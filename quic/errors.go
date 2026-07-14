@@ -132,6 +132,11 @@ var ErrFinalSize = errors.New("quic: stream final size error")
 // stream beyond the limit we advertised (STREAM_LIMIT_ERROR, RFC 9000 §4.6).
 var ErrTooManyUniStreams = errors.New("quic: peer exceeded unidirectional stream limit")
 
+// ErrTooManyBidiStreams is a connection error: the peer opened a bidirectional
+// stream beyond the limit we advertised (STREAM_LIMIT_ERROR, RFC 9000 §4.6). A
+// server sees this when a client opens too many request streams.
+var ErrTooManyBidiStreams = errors.New("quic: peer exceeded bidirectional stream limit")
+
 // ErrServerBidiStream is a connection error: the server opened a bidirectional
 // stream, which an HTTP/3 client never permits (STREAM_LIMIT_ERROR, RFC 9000
 // §4.6 — the client advertises no bidirectional stream credit to the server).

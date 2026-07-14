@@ -27,7 +27,7 @@ func closeCodeFor(err error) (uint64, bool) {
 		return ErrCodeFinalSizeError, true
 	case errors.Is(err, ErrCryptoBufferExceeded):
 		return ErrCodeCryptoBufferExceeded, true
-	case errors.Is(err, ErrTooManyUniStreams), errors.Is(err, ErrServerBidiStream):
+	case errors.Is(err, ErrTooManyUniStreams), errors.Is(err, ErrTooManyBidiStreams), errors.Is(err, ErrServerBidiStream):
 		return ErrCodeStreamLimitError, true
 	case errors.Is(err, ErrStreamState):
 		return ErrCodeStreamStateError, true

@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/tls"
 	"errors"
+	"time"
 )
 
 // This file holds the server-role entry points to the QUIC transport. The rest
@@ -158,6 +159,7 @@ type serverFlightSink struct {
 	appSealer       *Sealer
 	handshakeOpener *Opener
 	appOpener       *Opener
+	peerTP          []byte
 	complete        bool
 }
 
@@ -202,8 +204,11 @@ func (s *serverFlightSink) SetWriteKeys(l tls.QUICEncryptionLevel, suite uint16,
 	return nil
 }
 
-func (s *serverFlightSink) PeerTransportParameters([]byte) error { return nil }
-func (s *serverFlightSink) HandshakeComplete() error             { s.complete = true; return nil }
+func (s *serverFlightSink) PeerTransportParameters(params []byte) error {
+	s.peerTP = append([]byte(nil), params...)
+	return nil
+}
+func (s *serverFlightSink) HandshakeComplete() error { s.complete = true; return nil }
 
 // ServerFlight is the server's response to a client Initial and the state to
 // carry the connection forward: the sealed datagram(s) to send, the handshake,
@@ -226,6 +231,14 @@ type ServerFlight struct {
 	AppOpener       *Opener
 	// Complete reports whether the TLS handshake has finished.
 	Complete bool
+	// PeerTransportParams is the client's raw QUIC transport parameters, delivered
+	// during the handshake (RFC 9000 §7.4); a server connection parses them for the
+	// client's flow-control and stream limits.
+	PeerTransportParams []byte
+	// LocalTransportParams is the server's own serialized transport parameters
+	// (the tp passed to StartServerHandshake); a server connection parses them for
+	// the stream and idle limits it advertised.
+	LocalTransportParams []byte
 	// SCID is the server's source connection ID used on the response packets.
 	SCID []byte
 
@@ -266,13 +279,15 @@ func StartServerHandshake(ci *ClientInitial, cfg *tls.Config, tp, scid []byte) (
 	}
 
 	flight := &ServerFlight{
-		Handshake:       hs,
-		HandshakeSealer: sink.handshakeSealer,
-		HandshakeOpener: sink.handshakeOpener,
-		AppSealer:       sink.appSealer,
-		AppOpener:       sink.appOpener,
-		SCID:            append([]byte(nil), scid...),
-		sink:            sink,
+		Handshake:            hs,
+		HandshakeSealer:      sink.handshakeSealer,
+		HandshakeOpener:      sink.handshakeOpener,
+		AppSealer:            sink.appSealer,
+		AppOpener:            sink.appOpener,
+		PeerTransportParams:  sink.peerTP,
+		LocalTransportParams: append([]byte(nil), tp...),
+		SCID:                 append([]byte(nil), scid...),
+		sink:                 sink,
 	}
 	// Initial packet: the ServerHello, addressed to the client's source CID.
 	if len(sink.crypto[spaceInitial]) > 0 {
@@ -310,4 +325,52 @@ func (f *ServerFlight) HandleClientHandshake(cryptoData []byte) error {
 	f.AppOpener = f.sink.appOpener
 	f.Complete = f.sink.complete
 	return nil
+}
+
+// NewServerConn builds a connected server-role Conn from a completed server
+// handshake (f.Complete must be true). pc is the per-connection datagram
+// transport; clientDCID is the Destination Connection ID from the client's first
+// Initial (RFC 9000 §7.3), and clientSCID is the client's Source Connection ID,
+// which becomes this connection's Destination CID. The 1-RTT and Handshake keys,
+// the peer transport parameters, and the connection IDs are seeded from f, so the
+// connection is ready to send and receive 1-RTT packets.
+//
+// Key update (RFC 9001 §6) is not yet armed on a server connection, and the
+// handshake is assumed already acknowledged; see docs/QUIC_SERVER_DESIGN.md.
+func NewServerConn(pc PacketConn, f *ServerFlight, clientDCID, clientSCID []byte) (*Conn, error) {
+	if f == nil || !f.Complete {
+		return nil, errors.New("quic: server handshake not complete")
+	}
+	peer, err := ParseTransportParams(f.PeerTransportParams)
+	if err != nil {
+		return nil, err
+	}
+	c := &Conn{
+		pc:                pc,
+		hs:                f.Handshake,
+		isServer:          true,
+		dcid:              append([]byte(nil), clientSCID...),
+		scid:              append([]byte(nil), f.SCID...),
+		origDCID:          append([]byte(nil), clientDCID...),
+		now:               time.Now,
+		connRecvMax:       DefaultConnRecvWindow,
+		cwnd:              kInitialWindow,
+		ssthresh:          ^uint64(0),
+		done:              make(chan struct{}),
+		streamCredit:      make(chan struct{}, 1),
+		handshakeComplete: true,
+		handshakeSealer:   f.HandshakeSealer,
+		oneRTTSealer:      f.AppSealer,
+		peer:              peer,
+		connMax:           peer.InitialMaxData,
+	}
+	c.keys.Handshake = f.HandshakeOpener
+	c.keys.OneRTT = f.AppOpener
+	if local, err := ParseTransportParams(f.LocalTransportParams); err == nil {
+		c.localMaxStreamsUni = local.InitialMaxStreamsUni
+		c.localMaxStreamsBidi = local.InitialMaxStreamsBidi
+		c.localMaxIdle = local.MaxIdleTimeout
+	}
+	c.lastActivity = c.now()
+	return c, nil
 }
