@@ -375,6 +375,9 @@ func NewServerConn(pc PacketConn, f *ServerFlight, clientDCID, clientSCID []byte
 		oneRTTSealer:      f.AppSealer,
 		peer:              peer,
 		connMax:           peer.InitialMaxData,
+		// A server initiates bidirectional streams at 1, 5, 9 … (RFC 9000 §2.1);
+		// the client's 0, 4, 8 … are the request streams it accepts.
+		nextBidiStreamID: 1,
 	}
 	c.keys.Handshake = f.HandshakeOpener
 	c.keys.OneRTT = f.AppOpener
