@@ -50,8 +50,21 @@ const (
 	// ClientOptions.TLSConfig (with ServerName) and Addr rather than
 	// ConnOpts.Dialer. Both the buffered request path (Client.Do) and the
 	// streaming paths (Client.DoStream / Do with BodyMode=BodyStream) are
-	// supported; connection pooling is not yet.
+	// supported.
 	TransportH3
+
+	// TransportH3Pool pools up to Pool.MaxConnsPerHost QUIC connections to one
+	// Addr, distributing streams across them (Pool.MaxStreamsPerConn per conn)
+	// and evicting dead conns. Like TransportH3 it owns QUIC dialing and requires
+	// ClientOptions.TLSConfig (with ServerName) and Addr; ClientOptions.Pool is
+	// required.
+	TransportH3Pool
+
+	// TransportH3Managed is the HTTP/3 analogue of TransportManaged: a Resolver
+	// discovers backends, a Selector (RoundRobin by default) picks one per
+	// request, and a per-address HTTP/3 sub-pool fans out. Requires
+	// ClientOptions.Resolver and ClientOptions.TLSConfig; Addr must be empty.
+	TransportH3Managed
 )
 
 // DefaultMaxDecompressedSize is the default maximum decompressed body
@@ -185,17 +198,19 @@ type Client struct {
 // NewClient validates opts and constructs a Client. It does NOT dial;
 // the first Do or DoStream call triggers a lazy connection establish.
 func NewClient(opts ClientOptions) (*Client, error) {
-	if opts.Transport != TransportManaged {
+	// Managed transports (HTTP/2 or HTTP/3) let the Resolver own addressing, so
+	// they must not carry an Addr; every other transport requires one.
+	if opts.Transport != TransportManaged && opts.Transport != TransportH3Managed {
 		if opts.Addr == "" || containsAnyWhitespace(opts.Addr) {
 			return nil, fmt.Errorf("client: ClientOptions.Addr must be a non-empty host:port without whitespace")
 		}
 	}
-	// TransportH3 owns its own QUIC dialing and needs a *tls.Config, not a
-	// conn.Dialer — carve it out of the Dialer-required check and require the
+	// HTTP/3 transports own their own QUIC dialing and need a *tls.Config, not a
+	// conn.Dialer — carve them out of the Dialer-required check and require the
 	// TLS config instead.
-	if opts.Transport == TransportH3 {
+	if isH3Transport(opts.Transport) {
 		if opts.TLSConfig == nil {
-			return nil, fmt.Errorf("client: ClientOptions.TLSConfig is required for TransportH3")
+			return nil, fmt.Errorf("client: ClientOptions.TLSConfig is required for HTTP/3 transports")
 		}
 	} else if opts.ConnOpts.Dialer == nil {
 		return nil, fmt.Errorf("client: ClientOptions.ConnOpts.Dialer is required")
@@ -203,24 +218,8 @@ func NewClient(opts ClientOptions) (*Client, error) {
 	if opts.PushHandler != nil {
 		opts.ConnOpts.EnablePush = true
 	}
-	switch opts.Transport {
-	case TransportSingleConn, TransportH1SingleConn, TransportALPN, TransportH3:
-		if opts.Pool != nil {
-			return nil, fmt.Errorf("%w: Pool must be nil for this transport kind", ErrInvalidPoolOptions)
-		}
-	case TransportPool:
-		if opts.Pool == nil {
-			return nil, fmt.Errorf("%w: Pool is required for TransportPool", ErrInvalidPoolOptions)
-		}
-	case TransportManaged:
-		if opts.Resolver == nil {
-			return nil, fmt.Errorf("%w: Resolver is required for TransportManaged", ErrInvalidOptions)
-		}
-		if opts.Addr != "" {
-			return nil, fmt.Errorf("%w: Addr must be empty for TransportManaged (Resolver owns addressing)", ErrInvalidOptions)
-		}
-	default:
-		return nil, fmt.Errorf("%w: %d", ErrInvalidTransportKind, int(opts.Transport))
+	if err := validateTransportOptions(opts); err != nil {
+		return nil, err
 	}
 	metrics := &Metrics{}
 	hooksPtr := new(atomic.Pointer[Hooks])
@@ -261,6 +260,46 @@ func NewClient(opts ClientOptions) (*Client, error) {
 		maxResponseBodySize: maxBody,
 	}
 	return c, nil
+}
+
+// validateTransportOptions checks the Pool/Resolver/Addr cross-field matrix per
+// transport kind. Split out of NewClient to keep it under the gocyclo budget.
+func validateTransportOptions(opts ClientOptions) error {
+	switch opts.Transport {
+	case TransportSingleConn, TransportH1SingleConn, TransportALPN, TransportH3:
+		if opts.Pool != nil {
+			return fmt.Errorf("%w: Pool must be nil for this transport kind", ErrInvalidPoolOptions)
+		}
+	case TransportPool:
+		if opts.Pool == nil {
+			return fmt.Errorf("%w: Pool is required for TransportPool", ErrInvalidPoolOptions)
+		}
+	case TransportH3Pool:
+		if opts.Pool == nil {
+			return fmt.Errorf("%w: Pool is required for TransportH3Pool", ErrInvalidPoolOptions)
+		}
+	case TransportManaged, TransportH3Managed:
+		if opts.Resolver == nil {
+			return fmt.Errorf("%w: Resolver is required for this managed transport", ErrInvalidOptions)
+		}
+		if opts.Addr != "" {
+			return fmt.Errorf("%w: Addr must be empty for a managed transport (Resolver owns addressing)", ErrInvalidOptions)
+		}
+	default:
+		return fmt.Errorf("%w: %d", ErrInvalidTransportKind, int(opts.Transport))
+	}
+	return nil
+}
+
+// isH3Transport reports whether kind speaks HTTP/3 over QUIC and therefore dials
+// via http3.Dial (needing a *tls.Config) instead of a conn.Dialer.
+func isH3Transport(kind TransportKind) bool {
+	switch kind {
+	case TransportH3, TransportH3Pool, TransportH3Managed:
+		return true
+	default:
+		return false
+	}
 }
 
 // buildTransport constructs the concrete transport for opts.Transport. opts has
@@ -314,6 +353,20 @@ func buildTransport(opts ClientOptions, hooksPtr *atomic.Pointer[Hooks], metrics
 			hooksRef:  hooksPtr,
 			metrics:   metrics,
 		}, nil
+	case TransportH3Pool:
+		return &h3PoolTransport{
+			p: newH3Pool(opts.Addr, opts.TLSConfig, *opts.Pool, h3DialFn, hooksPtr, metrics),
+		}, nil
+	case TransportH3Managed:
+		po := PoolOptions{}
+		if opts.Pool != nil {
+			po = *opts.Pool
+		}
+		mp, err := newH3ManagedPool(opts.Resolver, opts.Selector, opts.DrainMode, opts.TLSConfig, po, h3DialFn, hooksPtr, metrics)
+		if err != nil {
+			return nil, err
+		}
+		return &h3ManagedTransport{mp: mp}, nil
 	}
 	return nil, fmt.Errorf("%w: %d", ErrInvalidTransportKind, int(opts.Transport))
 }
@@ -354,6 +407,10 @@ func (c *Client) PoolStats() Stats {
 	case *poolTransport:
 		return t.p.Stats()
 	case *managedTransport:
+		return t.mp.stats()
+	case *h3PoolTransport:
+		return t.p.Stats()
+	case *h3ManagedTransport:
 		return t.mp.stats()
 	}
 	return Stats{}

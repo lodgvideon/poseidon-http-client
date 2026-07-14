@@ -16,12 +16,18 @@ import (
 
 // h3Client is the subset of *http3.Client the transport drives: a buffered Do
 // (returns the whole response head + body), an incremental DoStream (returns the
-// response head plus a BodyReader that pulls DATA frames on demand), and Close.
-// Defining it as an interface keeps the transport testable — a fake satisfies it
-// without a live QUIC connection — while *http3.Client satisfies it directly.
+// response head plus a BodyReader that pulls DATA frames on demand), Close, and a
+// non-blocking Alive liveness probe (used by the connection pool to evict a dead
+// QUIC connection on release). Defining it as an interface keeps the transport
+// testable — a fake satisfies it without a live QUIC connection — while
+// *http3.Client satisfies it directly.
 type h3Client interface {
 	Do(ctx context.Context, req *http3.Request) (*http3.Response, []byte, error)
 	DoStream(ctx context.Context, req *http3.Request) (*http3.Response, http3.ResponseBody, error)
+	// Alive reports whether the underlying QUIC connection is still usable. It
+	// must not block. singleH3Conn ignores it (single-conn has no liveness
+	// gate); the HTTP/3 pool uses it to eject dead connections on release.
+	Alive() bool
 	Close() error
 }
 
@@ -268,7 +274,8 @@ func statusValue(status int) []byte {
 // singleConn it owns UDP/QUIC dialing via http3.Dial rather than a conn.Dialer,
 // so it holds a *tls.Config + addr instead of conn.ConnOptions. It serves both the
 // buffered path (h3Exchange + http3.Client.Do) and the streaming path (h3RespStream
-// + http3.Client.DoStream); connection pooling is a later PR.
+// + http3.Client.DoStream). For multiple QUIC connections to one host, use
+// TransportH3Pool (h3Pool); this transport is the single-connection case.
 type singleH3Conn struct {
 	addr      string
 	tlsConfig *tls.Config
@@ -307,8 +314,9 @@ func (s *singleH3Conn) openExchange(ctx context.Context) (protoStream, func(uint
 // mirrors singleConn.acquireConn: in-flight dial dedup via s.dialing, backoff
 // suppression after a failed dial, and OnDial/dial-metric emission. http3.Client
 // exposes no liveness probe, so (unlike singleConn) a dead connection is not
-// auto-redialled here — a failed Do surfaces the error to the caller. Redial-on-
-// death lands with the pooling PR.
+// auto-redialled here — a failed Do surfaces the error to the caller. For
+// automatic replacement of a dead connection, use TransportH3Pool, whose actor
+// evicts dead conns and dials fresh ones.
 func (s *singleH3Conn) acquireClient(ctx context.Context) (h3Client, error) {
 	for {
 		s.mu.Lock()

@@ -104,6 +104,25 @@ func NewH3Client(addr string, tlsConfig *tls.Config, opts ...Option) (*Client, e
 	}, opts)
 }
 
+// NewH3PoolClient builds a pooled HTTP/3 client: up to pool.MaxConnsPerHost QUIC
+// connections to one addr, each carrying up to pool.MaxStreamsPerConn concurrent
+// streams, with dead-conn eviction and idle/health-check sweeps. Streams are
+// distributed across the connections; a new QUIC conn is dialled when the live
+// ones are all at their MaxStreamsPerConn cap (up to MaxConnsPerHost). tlsConfig
+// should set ServerName; the "h3" ALPN token and TLS 1.3 minimum are applied
+// automatically. The per-conn cap is a pool policy — the peer's QUIC
+// initial_max_streams_bidi is enforced underneath by the http3/quic layer's
+// stream-credit backpressure.
+func NewH3PoolClient(addr string, tlsConfig *tls.Config, pool PoolOptions, opts ...Option) (*Client, error) {
+	p := pool // copy so the caller's value is not retained/aliased
+	return buildClient(ClientOptions{
+		Addr:      addr,
+		Transport: TransportH3Pool,
+		Pool:      &p,
+		TLSConfig: tlsConfig,
+	}, opts)
+}
+
 // NewManagedClient builds a managed multi-address client: resolver discovers
 // backends, a selector (RoundRobin by default) picks one per request, and a
 // per-address sub-pool fans out. No Addr — the resolver owns addressing.
@@ -112,6 +131,21 @@ func NewManagedClient(resolver Resolver, dialer conn.Dialer, opts ...Option) (*C
 		Transport: TransportManaged,
 		Resolver:  resolver,
 		ConnOpts:  conn.ConnOptions{Dialer: dialer},
+	}, opts)
+}
+
+// NewManagedH3Client builds a managed multi-address HTTP/3 client: the resolver
+// discovers backends, a selector (RoundRobin by default) picks one per request,
+// and a per-address HTTP/3 sub-pool fans out over QUIC. No Addr — the resolver
+// owns addressing. tlsConfig should set ServerName; the "h3" ALPN token and TLS
+// 1.3 minimum are applied automatically. Pass WithConnOptions is not applicable to
+// HTTP/3; use the Pool option via NewClient for per-sub-pool tuning, or the
+// WithSelector / WithDrainMode options here.
+func NewManagedH3Client(resolver Resolver, tlsConfig *tls.Config, opts ...Option) (*Client, error) {
+	return buildClient(ClientOptions{
+		Transport: TransportH3Managed,
+		Resolver:  resolver,
+		TLSConfig: tlsConfig,
 	}, opts)
 }
 
