@@ -101,14 +101,9 @@ func TestTLSHandshake_InMemory(t *testing.T) {
 	tp := []byte{0x01, 0x02, 0x03}
 
 	client := NewClientHandshake(&tls.Config{ServerName: "example.com", RootCAs: pool}, tp)
-	server := &TLSHandshake{
-		conn: tls.QUICServer(&tls.QUICConfig{TLSConfig: &tls.Config{
-			Certificates: []tls.Certificate{cert},
-			NextProtos:   []string{"h3"},
-			MinVersion:   tls.VersionTLS13,
-		}}),
-		tp: tp,
-	}
+	// Construct the server via the public constructor with a bare config: this
+	// also proves NewServerHandshake fills in TLS 1.3 + ALPN "h3" (asserted below).
+	server := NewServerHandshake(&tls.Config{Certificates: []tls.Certificate{cert}}, tp)
 
 	ctx := context.Background()
 	if err := client.Start(ctx); err != nil {

@@ -74,6 +74,21 @@ func NewClientHandshake(cfg *tls.Config, tp []byte) *TLSHandshake {
 	return &TLSHandshake{conn: tls.QUICClient(&tls.QUICConfig{TLSConfig: c}), tp: tp}
 }
 
+// NewServerHandshake creates a server-side QUIC TLS handshake. cfg must carry
+// the server's certificate(s); it is cloned and forced to TLS 1.3, with ALPN
+// "h3" filled in when unset. tp is the server's serialized QUIC transport
+// parameters (RFC 9000 §7.4), which crypto/tls emits in the EncryptedExtensions.
+// It is the server-role counterpart to NewClientHandshake: the transport engine
+// feeds it the client's Initial CRYPTO and pumps events the same way.
+func NewServerHandshake(cfg *tls.Config, tp []byte) *TLSHandshake {
+	c := cfg.Clone()
+	c.MinVersion = tls.VersionTLS13
+	if len(c.NextProtos) == 0 {
+		c.NextProtos = []string{"h3"}
+	}
+	return &TLSHandshake{conn: tls.QUICServer(&tls.QUICConfig{TLSConfig: c}), tp: tp}
+}
+
 // Start begins the handshake (the client generates its ClientHello). Pump must
 // be called afterwards to drain the resulting events.
 func (h *TLSHandshake) Start(ctx context.Context) error { return h.conn.Start(ctx) }
