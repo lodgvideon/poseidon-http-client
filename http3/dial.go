@@ -139,7 +139,7 @@ var localTransportParams = quic.LocalTransportParams{
 // Dial establishes an HTTP/3 connection to addr ("host:port") over UDP and
 // returns a ready Client. tlsConfig must set ServerName; the ALPN token "h3" and
 // TLS 1.3 minimum are set automatically. ctx bounds the handshake.
-func Dial(ctx context.Context, addr string, tlsConfig *tls.Config) (*Client, error) {
+func Dial(ctx context.Context, addr string, tlsConfig *tls.Config, opts ...quic.ConnOption) (*Client, error) {
 	raddr, err := net.ResolveUDPAddr("udp", addr)
 	if err != nil {
 		return nil, err
@@ -152,14 +152,14 @@ func Dial(ctx context.Context, addr string, tlsConfig *tls.Config) (*Client, err
 	// than dropped while the single-goroutine receive loop drains it one
 	// datagram at a time (best-effort).
 	_ = uc.SetReadBuffer(udpSocketBuffer)
-	return dialConn(ctx, &udpConn{c: uc}, h3TLSConfig(tlsConfig))
+	return dialConn(ctx, &udpConn{c: uc}, h3TLSConfig(tlsConfig), opts...)
 }
 
 // dialConn establishes a QUIC connection over pc, wires the client transport
 // parameters, and returns a ready HTTP/3 Client. pc is closed on any failure.
-func dialConn(ctx context.Context, pc quic.PacketConn, cfg *tls.Config) (*Client, error) {
+func dialConn(ctx context.Context, pc quic.PacketConn, cfg *tls.Config, opts ...quic.ConnOption) (*Client, error) {
 	tp := quic.AppendTransportParams(nil, localTransportParams)
-	conn, err := quic.NewConn(pc, cfg, tp)
+	conn, err := quic.NewConn(pc, cfg, tp, opts...)
 	if err != nil {
 		_ = pc.Close()
 		return nil, err

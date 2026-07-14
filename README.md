@@ -260,26 +260,34 @@ Connection- and message-level failures match the sentinels `ErrH3Control`,
 `ErrResponseTooLarge` (the response exceeded the client's buffering cap) via
 `errors.Is`.
 
-### HTTP/3 scope and known limitations
+### HTTP/3 support matrix and non-goals
 
-The HTTP/3 client is honest about what it is: a correct, well-tested,
-single-request client — not (yet) a load-generation engine.
+The HTTP/3 stack speaks the same `client.Do` API as HTTP/2: concurrent in-flight
+requests, connection pooling, service discovery, retries, hooks/metrics, dynamic
+QPACK, and opt-in BBR all work over HTTP/3 — not only HTTP/2.
 
-- **`Client.Do` is blocking and sequential.** The engine is single-goroutine
-  and a `Client` is not safe for concurrent use; there is no
-  concurrent-in-flight-request API. QUIC stream multiplexing exists at the
-  transport level, but the public API does not expose it yet. For parallel
-  load, dial one `Client` per worker.
-- **QPACK is static-table only.** The client advertises
-  `SETTINGS_QPACK_MAX_TABLE_CAPACITY = 0`; there is no dynamic-table encoding,
-  and a server that references the dynamic table anyway is rejected cleanly as
-  `QPACK_DECOMPRESSION_FAILED` rather than mis-decoded.
-- **ChaCha20-Poly1305 header protection is deferred** — AES-GCM cipher suites
-  only. A ChaCha20-only server is a documented graceful failure.
-- **The load-generator feature set is HTTP/2 only.** Connection pooling, DNS
-  service discovery, retries (`Retryer`), rate limiting, hooks/metrics, server
-  push, and extended CONNECT exist solely in the `client` package. The HTTP/3
-  side offers none of these — say `Dial`, `Do`, `Close` and mean it.
+**Supported**
+
+| Capability | Detail |
+|---|---|
+| **Cipher suites** | All TLS 1.3 AEADs — AES-128-GCM, AES-256-GCM, **and ChaCha20-Poly1305** (RFC 9001 §5.3 / §5.4.4) |
+| **Concurrency** | Concurrent in-flight requests over one QUIC connection (stream multiplexing); `Client.Do` / `DoStream` over `TransportH3` are safe for concurrent use |
+| **Pooling & discovery** | `TransportH3Pool` (multi-conn per host) and `TransportH3Managed` (`Resolver` + `Selector`), mirroring the HTTP/2 transports |
+| **QPACK** | Dynamic-table encoding **and** decoding, both directions (RFC 9204) |
+| **Congestion control** | NewReno by default; opt-in BBR via `ClientOptions.H3ConnOptions = []quic.ConnOption{quic.WithCongestionControl(quic.CCBBR)}` |
+| **Batched I/O (Linux)** | GSO send + GRO receive; bounded ACK deferral/coalescing |
+| **Resilience & observability** | Retries, rate limiting, `Hooks`, metrics — shared with the HTTP/2 client through the unified `client.Do` |
+
+**Non-goals (deliberately out of scope for 1.0)**
+
+- **0-RTT / session resumption** — the client never sends early data; a server that offers a session ticket is simply not resumed, nothing fails.
+- **Connection migration** — one 4-tuple for a connection's life; the client never initiates path migration and a peer cannot force it.
+- **HTTP/3 server push** — not implemented; the client does not advertise push.
+- An **unsupported cipher suite** fails cleanly at key install (`ErrCryptoSuite`) — never a hang, panic, or silent mis-decode.
+
+Throughput note: BBR ships correct and opt-in, but its benefit over NewReno is
+only measurable on a bottlenecked WAN path (a `netem` lab), not on loopback/CI —
+so it is verified for correctness (unit + interop), not claimed as a speedup.
 
 ## Features
 
@@ -302,9 +310,9 @@ single-request client — not (yet) a load-generation engine.
 | Layer | What you get |
 |---|---|
 | **QUIC transport (RFC 9000)** | Connection establishment, stream multiplexing, bidirectional flow control (`MAX_DATA` / `MAX_STREAM_DATA` / `MAX_STREAMS`), connection-ID issuance and rotation, ACK ranges, transport parameters, varint framing, `CONNECTION_CLOSE`, Retry |
-| **Loss recovery + congestion control (RFC 9002)** | ACK-based loss detection, PTO / probe timeouts, RTT estimation, congestion controller with retransmission — the client stays correct on lossy, reordering paths |
-| **QUIC-TLS (RFC 9001)** | TLS 1.3 handshake over CRYPTO streams via stdlib `tls.QUICConn`, 1-RTT key derivation, key update, AEAD packet + header protection (AES-GCM) |
-| **QPACK (RFC 9204)** | Static-table encoder and decoder, zero-alloc, bench-gated; dynamic-table references rejected cleanly |
+| **Loss recovery + congestion control (RFC 9002)** | ACK-based loss detection, PTO / probe timeouts, RTT estimation; **NewReno (default) or opt-in BBR** with retransmission; pacing; **GSO/GRO batched UDP I/O + ACK coalescing on Linux** — the client stays correct on lossy, reordering paths |
+| **QUIC-TLS (RFC 9001)** | TLS 1.3 handshake over CRYPTO streams via stdlib `tls.QUICConn`, 1-RTT key derivation, key update, AEAD packet + header protection — **AES-128/256-GCM and ChaCha20-Poly1305**; suite-aware AEAD usage limits (§6.6) |
+| **QPACK (RFC 9204)** | Static- **and dynamic-table** encoder and decoder, both directions; encoder/decoder instruction streams with known-received-count and blocked-streams handling; zero-alloc static path, bench-gated |
 | **HTTP/3 (RFC 9114)** | Control stream + `SETTINGS`; request/response mapping (`HEADERS` / `DATA` / trailers / 1xx interim responses); strict frame and message-order validation; typed HTTP/3 + QUIC error codes; `RESET_STREAM` / `STOP_SENDING` handling with retryable classification; `GOAWAY` drain |
 | **Robustness** | Receive path bounded against adversarial peers: capped ACK/loss-tracking memory, stream and CRYPTO reassembly caps, `NEW_CONNECTION_ID` flood bound, per-frame and cumulative response size caps (`ErrResponseTooLarge`) |
 | **Testing** | Conformance suites for all five RFCs (gate-tracked); CI interop matrix vs. Caddy, nginx, and aioquic over real UDP; fault-injecting server; loss/reorder relay |

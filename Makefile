@@ -1,5 +1,5 @@
 .PHONY: lint test test-race test-debug bench bench-gate fuzz-replay coverage coverage-gate tidy
-.PHONY: it-up it-down it-logs it-test it-test-fast it-certs h3-interop h3-interop-loss h3-interop-reorder h3-interop-fault
+.PHONY: it-up it-down it-logs it-test it-test-fast it-certs h3-interop h3-interop-loss h3-interop-reorder h3-interop-fault h3-interop-chacha h3-soak
 
 # Minimum overall and per-package statement coverage. CI fails below this.
 COVERAGE_MIN ?= 80
@@ -116,3 +116,22 @@ H3_FAULT_COMPOSE = test/integration/http3/docker-compose.fault.yml
 h3-interop-fault:
 	@trap '$(DOCKER_COMPOSE) -f $(H3_FAULT_COMPOSE) down -v 2>/dev/null' EXIT; \
 	$(DOCKER_COMPOSE) -f $(H3_FAULT_COMPOSE) run --rm runner
+
+# HTTP/3 interop against an nginx server pinned to TLS_CHACHA20_POLY1305_SHA256,
+# proving the client's ChaCha20-Poly1305 packet protection (RFC 9001 §5.3/§5.4.4)
+# on the wire — the handshake cannot fall back to an AES-GCM suite.
+H3_CHACHA_COMPOSE = test/integration/http3/docker-compose.chacha.yml
+h3-interop-chacha:
+	@trap '$(DOCKER_COMPOSE) -f $(H3_CHACHA_COMPOSE) down -v 2>/dev/null' EXIT; \
+	$(DOCKER_COMPOSE) -f $(H3_CHACHA_COMPOSE) run --rm runner
+
+# HTTP/3 soak: sustained concurrent load against the interop Caddy server for
+# POSEIDON_SOAK_DURATION (default 120s) with POSEIDON_SOAK_WORKERS (default 64),
+# asserting the managed client leaks no goroutines or heap (resource-exhaustion
+# guard, cf. the receive-path bounds). Not part of CI (long-running).
+h3-soak:
+	@trap '$(DOCKER_COMPOSE) -f $(H3_COMPOSE) down -v 2>/dev/null' EXIT; \
+	$(DOCKER_COMPOSE) -f $(H3_COMPOSE) run --rm \
+	  -e POSEIDON_SOAK_DURATION=$${POSEIDON_SOAK_DURATION:-120s} \
+	  -e POSEIDON_SOAK_WORKERS=$${POSEIDON_SOAK_WORKERS:-64} \
+	  runner go test ./client/ -tags soak -run TestSoak_H3 -v -timeout 15m

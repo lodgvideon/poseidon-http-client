@@ -12,6 +12,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/lodgvideon/poseidon-http-client/quic"
 )
 
 // h3InteropServer is one HTTP/3 server the client interop test dials.
@@ -127,6 +129,67 @@ func TestInterop_ClientH3_GetStatusBody(t *testing.T) {
 				t.Fatal("RequestsSucceeded counter did not increment")
 			}
 			t.Logf("H3 GET / via client.Do -> status=%d bodylen=%d", resp.Status, len(resp.Body))
+		})
+	}
+}
+
+// TestInterop_ClientH3_BBR_HugeTransfer drives a 1 MiB HTTP/3 download through the
+// public Client.Do with BBR congestion control opted in via
+// ClientOptions.H3ConnOptions, proving the opt-in BBR controller completes a real
+// multi-RTT transfer over the wire against each live server — the on-the-wire
+// evidence that complements BBR's unit tests (#203).
+func TestInterop_ClientH3_BBR_HugeTransfer(t *testing.T) {
+	for _, srv := range h3InteropServers() {
+		srv := srv
+		t.Run(srv.name, func(t *testing.T) {
+			host, _, err := net.SplitHostPort(srv.addr)
+			if err != nil {
+				host = srv.addr
+			}
+			c, err := NewClient(ClientOptions{
+				Addr:      srv.addr,
+				Transport: TransportH3,
+				TLSConfig: &tls.Config{ServerName: host, InsecureSkipVerify: true}, //nolint:gosec // interop dials self-signed servers
+				H3ConnOptions: []quic.ConnOption{
+					quic.WithCongestionControl(quic.CCBBR),
+				},
+			})
+			if err != nil {
+				t.Fatalf("NewClient(H3+BBR): %v", err)
+			}
+			t.Cleanup(func() { _ = c.Close() })
+
+			// Retry the first request until the server is listening.
+			var resp Response
+			deadline := time.Now().Add(h3DialTimeout())
+			for {
+				resp.Reset()
+				ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+				err = c.Do(ctx, &Request{
+					Method:    "GET",
+					Scheme:    "https",
+					Authority: host,
+					Path:      "/huge.txt",
+					BodyMode:  BodyBuffer,
+				}, &resp)
+				cancel()
+				if err == nil {
+					break
+				}
+				if time.Now().After(deadline) {
+					t.Fatalf("Do(GET /huge.txt) with BBR: %v", err)
+				}
+				time.Sleep(500 * time.Millisecond)
+			}
+			if resp.Status != 200 {
+				t.Fatalf("status = %d, want 200", resp.Status)
+			}
+			// huge.txt is the 1 MiB throughput fixture — a full BBR transfer must
+			// deliver all of it (hundreds of packets, enough to leave Startup).
+			if len(resp.Body) < 1<<20 {
+				t.Fatalf("body = %d bytes, want the full 1 MiB huge.txt (BBR transfer truncated?)", len(resp.Body))
+			}
+			t.Logf("H3+BBR GET /huge.txt -> status=%d bodylen=%d", resp.Status, len(resp.Body))
 		})
 	}
 }

@@ -14,6 +14,7 @@ import (
 	"unsafe"
 
 	"github.com/lodgvideon/poseidon-http-client/conn"
+	"github.com/lodgvideon/poseidon-http-client/quic"
 )
 
 // TransportKind selects which transport strategy a Client uses.
@@ -95,6 +96,12 @@ type ClientOptions struct {
 	// TransportH3 and ignored by every other transport (which dial via
 	// ConnOpts.Dialer).
 	TLSConfig *tls.Config
+
+	// H3ConnOptions are forwarded to every QUIC connection dialled by the
+	// HTTP/3 transports (TransportH3, TransportH3Pool, TransportH3Managed) —
+	// e.g. quic.WithCongestionControl(quic.CCBBR) to opt into BBR congestion
+	// control. Ignored by the H1/H2 transports, which do not dial QUIC.
+	H3ConnOptions []quic.ConnOption
 
 	// DialBackoff suppresses repeated dial attempts within this window
 	// after a failed dial. Zero disables suppression (immediate retry).
@@ -349,20 +356,20 @@ func buildTransport(opts ClientOptions, hooksPtr *atomic.Pointer[Hooks], metrics
 			addr:      opts.Addr,
 			tlsConfig: opts.TLSConfig,
 			backoff:   opts.DialBackoff,
-			dialFn:    h3DialFn,
+			dialFn:    makeH3DialFn(opts.H3ConnOptions),
 			hooksRef:  hooksPtr,
 			metrics:   metrics,
 		}, nil
 	case TransportH3Pool:
 		return &h3PoolTransport{
-			p: newH3Pool(opts.Addr, opts.TLSConfig, *opts.Pool, h3DialFn, hooksPtr, metrics),
+			p: newH3Pool(opts.Addr, opts.TLSConfig, *opts.Pool, makeH3DialFn(opts.H3ConnOptions), hooksPtr, metrics),
 		}, nil
 	case TransportH3Managed:
 		po := PoolOptions{}
 		if opts.Pool != nil {
 			po = *opts.Pool
 		}
-		mp, err := newH3ManagedPool(opts.Resolver, opts.Selector, opts.DrainMode, opts.TLSConfig, po, h3DialFn, hooksPtr, metrics)
+		mp, err := newH3ManagedPool(opts.Resolver, opts.Selector, opts.DrainMode, opts.TLSConfig, po, makeH3DialFn(opts.H3ConnOptions), hooksPtr, metrics)
 		if err != nil {
 			return nil, err
 		}
