@@ -29,6 +29,12 @@ type connPacketConn struct {
 	remote *net.UDPAddr
 	in     chan []byte // datagrams the listener demuxed for this connection
 
+	// onClose, if set, runs once when this view is closed. The listener uses it to
+	// drop its route, so the routing table tracks live connections rather than
+	// every connection ever served. A Conn closes its PacketConn on every terminal
+	// path, so this fires for idle timeouts and peer closes too.
+	onClose func()
+
 	mu       sync.Mutex
 	deadline time.Time
 	changed  chan struct{} // replaced on every SetReadDeadline to wake a parked Read
@@ -111,7 +117,12 @@ func (c *connPacketConn) SetReadDeadline(t time.Time) error {
 // Close releases this connection's view. The shared socket stays open for the
 // listener's other connections; only the listener closes it.
 func (c *connPacketConn) Close() error {
-	c.closeOnce.Do(func() { close(c.closed) })
+	c.closeOnce.Do(func() {
+		close(c.closed)
+		if c.onClose != nil {
+			c.onClose()
+		}
+	})
 	return nil
 }
 
@@ -159,6 +170,7 @@ type Listener struct {
 	mu       sync.Mutex
 	conns    map[string]*connPacketConn // by the SCID we issued: routes post-handshake packets
 	halfOpen map[string]struct{}        // client original DCIDs with a handshake already in flight
+	halfPCs  map[string]*connPacketConn // by SCID: views whose handshake is still in flight
 
 	accepted  chan *Conn
 	closed    chan struct{}
@@ -185,6 +197,7 @@ func Listen(addr string, cfg *tls.Config, p ServerTransportParams) (*Listener, e
 		tp:       p,
 		conns:    map[string]*connPacketConn{},
 		halfOpen: map[string]struct{}{},
+		halfPCs:  map[string]*connPacketConn{},
 		accepted: make(chan *Conn, 16),
 		closed:   make(chan struct{}),
 	}
@@ -210,15 +223,31 @@ func (l *Listener) Accept(ctx context.Context) (*Conn, error) {
 	}
 }
 
-// Close stops the listener and its demux loop. Connections already handed out by
-// Accept keep their per-connection view of the socket alive until the caller
-// closes them, so Close does not interrupt in-flight requests; it only stops new
-// ones from arriving.
+// Close stops the listener and its demux loop, and abandons any handshake still
+// in flight. Connections already handed out by Accept are untouched — they belong
+// to the caller — so Close does not interrupt in-flight requests; it only stops
+// new ones from arriving. It returns once the demux loop and every pending
+// handshake have stopped.
 func (l *Listener) Close() error {
 	var err error
 	l.closeOnce.Do(func() {
 		close(l.closed)
 		err = l.sock.Close() // unblocks the demux loop's ReadFromUDP
+
+		// Wake any handshake parked reading its half-open connection. Closing the
+		// socket does not touch those views, so without this they would linger until
+		// their own listenerHandshakeTimeout fired and Close would wait for them.
+		// Collect first, then close outside the lock: a view's onClose takes l.mu.
+		l.mu.Lock()
+		pending := make([]*connPacketConn, 0, len(l.halfPCs))
+		for _, pc := range l.halfPCs {
+			pending = append(pending, pc)
+		}
+		l.mu.Unlock()
+		for _, pc := range pending {
+			_ = pc.Close()
+		}
+
 		l.wg.Wait()
 	})
 	return err
@@ -300,34 +329,49 @@ func (l *Listener) handshake(initial []byte, remote *net.UDPAddr) {
 	}
 
 	// Register the route before sending, so the client's reply — addressed to the
-	// SCID we are about to advertise — is delivered rather than dropped.
+	// SCID we are about to advertise — is delivered rather than dropped. onClose
+	// drops the route once the connection ends, so the table holds live
+	// connections rather than every one ever served.
 	pc := newConnPacketConn(l.sock, remote, 64)
+	pc.onClose = func() { l.dropConn(scid) }
 	l.mu.Lock()
 	l.conns[string(scid)] = pc
+	l.halfPCs[string(scid)] = pc // its handshake is in flight; Close must wake it
 	l.mu.Unlock()
+	defer l.dropHalfPC(scid)
+
+	// Until the connection is accepted this goroutine owns the handshake and the
+	// socket view. crypto/tls keeps a goroutine alive behind the handshake until it
+	// is closed, so every abandonment below must release it — otherwise a peer that
+	// never finishes leaks one per attempt. Once accepted, the Conn owns both and
+	// releases them when it terminates.
+	accepted := false
+	defer func() {
+		if !accepted {
+			_ = flight.Handshake.Close()
+			_ = pc.Close() // its onClose drops the route
+		}
+	}()
 
 	for _, d := range flight.Datagrams {
 		if _, err := l.sock.WriteToUDP(d, remote); err != nil {
-			l.dropConn(scid)
 			return
 		}
 	}
 
 	// Read the client's Handshake flight (its Finished) and complete the handshake.
 	if err := l.completeHandshake(pc, flight); err != nil {
-		l.dropConn(scid)
 		return
 	}
 
 	conn, err := NewServerConn(pc, flight, ci.DCID, ci.SCID)
 	if err != nil {
-		l.dropConn(scid)
 		return
 	}
 	select {
 	case l.accepted <- conn:
+		accepted = true
 	case <-l.closed:
-		l.dropConn(scid)
 	}
 }
 
@@ -385,6 +429,14 @@ func handshakeCrypto(datagram []byte, opener *Opener) []byte {
 func (l *Listener) dropConn(scid []byte) {
 	l.mu.Lock()
 	delete(l.conns, string(scid))
+	l.mu.Unlock()
+}
+
+// dropHalfPC forgets a view whose handshake has finished (either way): Close no
+// longer needs to wake it.
+func (l *Listener) dropHalfPC(scid []byte) {
+	l.mu.Lock()
+	delete(l.halfPCs, string(scid))
 	l.mu.Unlock()
 }
 

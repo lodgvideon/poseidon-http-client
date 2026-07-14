@@ -264,6 +264,17 @@ func StartServerHandshake(ci *ClientInitial, cfg *tls.Config, tp, scid []byte) (
 	}
 
 	hs := NewServerHandshake(cfg, tp)
+	// crypto/tls runs the handshake on its own goroutine until it completes or is
+	// closed, so every path that abandons hs here must close it — otherwise a peer
+	// whose handshake fails leaks a goroutine per attempt. On success the caller
+	// owns hs (through ServerFlight.Handshake) and closes it with the connection.
+	handedOff := false
+	defer func() {
+		if !handedOff {
+			_ = hs.Close()
+		}
+	}()
+
 	sink := &serverFlightSink{}
 	if err := hs.Start(context.Background()); err != nil {
 		return nil, err
@@ -307,6 +318,7 @@ func StartServerHandshake(ci *ClientInitial, cfg *tls.Config, tp, scid []byte) (
 		}
 		flight.Datagrams = append(flight.Datagrams, dg)
 	}
+	handedOff = true
 	return flight, nil
 }
 

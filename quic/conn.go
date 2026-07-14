@@ -425,6 +425,14 @@ func (c *Conn) terminateLocked(err error) {
 	if c.closeErr == nil {
 		c.closeErr = err
 	}
+	// Release the TLS handshake. crypto/tls runs a QUICConn's handshake on its own
+	// goroutine that only exits when the handshake completes or Close cancels it,
+	// so a connection torn down mid-handshake would leak it. This latch runs once
+	// on every terminal path, which makes it the one place that must not miss.
+	// (hs is nil only for hand-built test connections.)
+	if c.hs != nil {
+		_ = c.hs.Close()
+	}
 	// done is nil only for hand-built test Conns that never use the wake latch;
 	// NewConn always allocates it, so a real connection always closes it here.
 	if c.done != nil {

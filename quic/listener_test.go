@@ -3,12 +3,97 @@ package quic
 import (
 	"context"
 	"crypto/tls"
+	"crypto/x509"
 	"errors"
 	"net"
 	"os"
+	"runtime"
 	"testing"
 	"time"
 )
+
+// startListener starts a Listener with a self-signed certificate and returns it
+// with the pool that trusts it.
+func startListener(t *testing.T) (*Listener, *x509.CertPool) {
+	t.Helper()
+	cert, pool := genServerCert(t)
+	l, err := Listen("127.0.0.1:0", &tls.Config{Certificates: []tls.Certificate{cert}},
+		ServerTransportParams{MaxStreamsBidi: 16, MaxStreamsUni: 4})
+	if err != nil {
+		t.Fatalf("Listen: %v", err)
+	}
+	t.Cleanup(func() { _ = l.Close() })
+	return l, pool
+}
+
+// dialListener dials l with a real client Conn and completes the handshake,
+// returning the client and the accepted server connection.
+func dialListener(t *testing.T, ctx context.Context, l *Listener, pool *x509.CertPool) (*Conn, *Conn) {
+	t.Helper()
+	uc, err := net.DialUDP("udp", nil, l.Addr().(*net.UDPAddr))
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	t.Cleanup(func() { _ = uc.Close() })
+
+	clientTP := AppendTransportParams(nil, LocalTransportParams{
+		InitialMaxData:                1 << 20,
+		InitialMaxStreamDataBidiLocal: 1 << 20, // the server's send window for the response
+		InitialMaxStreamDataUni:       1 << 20,
+		InitialMaxStreamsUni:          4,
+	})
+	client, err := NewConn(uc, &tls.Config{ServerName: "example.com", RootCAs: pool}, clientTP)
+	if err != nil {
+		t.Fatalf("NewConn: %v", err)
+	}
+	if err := client.Establish(ctx); err != nil {
+		t.Fatalf("client Establish against listener: %v", err)
+	}
+	sc, err := l.Accept(ctx)
+	if err != nil {
+		t.Fatalf("Accept: %v", err)
+	}
+	return client, sc
+}
+
+// clientHelloInitial builds a real client Initial carrying a genuine ClientHello
+// for dcid, so a listener starts a handshake for it and then waits for a Finished
+// the test never sends — a half-open connection.
+func clientHelloInitial(t *testing.T, pool *x509.CertPool, dcid []byte) []byte {
+	t.Helper()
+	tp := AppendTransportParams(nil, LocalTransportParams{
+		InitialMaxData:                1 << 20,
+		InitialMaxStreamDataBidiLocal: 1 << 20,
+		InitialMaxStreamDataUni:       1 << 20,
+		InitialMaxStreamsUni:          4,
+	})
+	hs := NewClientHandshake(&tls.Config{ServerName: "example.com", RootCAs: pool}, tp)
+	// Release it here, not at test end: only the ClientHello bytes are wanted (the
+	// sink copies them), and a lingering handshake would be counted by the
+	// goroutine-leak test below.
+	defer func() { _ = hs.Close() }()
+	if err := hs.Start(context.Background()); err != nil {
+		t.Fatalf("client handshake Start: %v", err)
+	}
+	sink := newMemSink()
+	if err := hs.Pump(sink); err != nil {
+		t.Fatalf("client handshake Pump: %v", err)
+	}
+	hello := sink.crypto[tls.QUICEncryptionLevelInitial]
+	if len(hello) == 0 {
+		t.Fatal("client handshake produced no ClientHello")
+	}
+	clientKeys, _ := InitialKeys(dcid)
+	sealer, err := NewSealer(clientKeys)
+	if err != nil {
+		t.Fatalf("NewSealer: %v", err)
+	}
+	pkt, err := BuildInitialPacket(nil, sealer, dcid, nil, nil, 0, 4, 0, hello, InitialDatagramMinSize)
+	if err != nil {
+		t.Fatalf("BuildInitialPacket: %v", err)
+	}
+	return pkt
+}
 
 // loopbackPair returns a shared socket (the listener's) and a peer socket
 // standing in for a client, both on the loopback.
@@ -34,42 +119,10 @@ func loopbackPair(t *testing.T) (shared, peer *net.UDPConn) {
 // over 1-RTT, each side driven by its own Poll loop. This is the end-to-end cover
 // for the listener, the per-connection socket view, and the server-role Conn.
 func TestListener_AcceptAndRoundTrip(t *testing.T) {
-	cert, pool := genServerCert(t)
-	l, err := Listen("127.0.0.1:0", &tls.Config{Certificates: []tls.Certificate{cert}},
-		ServerTransportParams{MaxStreamsBidi: 16, MaxStreamsUni: 4})
-	if err != nil {
-		t.Fatalf("Listen: %v", err)
-	}
-	t.Cleanup(func() { _ = l.Close() })
-
-	// A connected *net.UDPConn is a PacketConn (Read/Write/Close) and honours read
-	// deadlines, so the client needs no adapter.
-	uc, err := net.DialUDP("udp", nil, l.Addr().(*net.UDPAddr))
-	if err != nil {
-		t.Fatalf("dial: %v", err)
-	}
-	t.Cleanup(func() { _ = uc.Close() })
-
-	clientTP := AppendTransportParams(nil, LocalTransportParams{
-		InitialMaxData:                1 << 20,
-		InitialMaxStreamDataBidiLocal: 1 << 20, // the server's send window for the response
-		InitialMaxStreamDataUni:       1 << 20,
-		InitialMaxStreamsUni:          4,
-	})
-	client, err := NewConn(uc, &tls.Config{ServerName: "example.com", RootCAs: pool}, clientTP)
-	if err != nil {
-		t.Fatalf("NewConn: %v", err)
-	}
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
-
-	if err := client.Establish(ctx); err != nil {
-		t.Fatalf("client Establish against listener: %v", err)
-	}
-	sc, err := l.Accept(ctx)
-	if err != nil {
-		t.Fatalf("Accept: %v", err)
-	}
+	l, pool := startListener(t)
+	client, sc := dialListener(t, ctx, l, pool)
 	if !sc.isServer || sc.oneRTTSealer == nil {
 		t.Fatal("accepted connection is not an established server connection")
 	}
@@ -122,6 +175,98 @@ func TestListener_AcceptAndRoundTrip(t *testing.T) {
 	if got != want {
 		t.Fatalf("client read response %q, want %q", got, want)
 	}
+}
+
+// TestListener_DropsRouteWhenConnectionCloses pins a routing table that otherwise
+// grew with every connection ever served: a connection that ends must drop its
+// route, not linger for the life of the process.
+func TestListener_DropsRouteWhenConnectionCloses(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	l, pool := startListener(t)
+	_, sc := dialListener(t, ctx, l, pool)
+
+	l.mu.Lock()
+	routes := len(l.conns)
+	l.mu.Unlock()
+	if routes != 1 {
+		t.Fatalf("listener holds %d routes with one connection up, want 1", routes)
+	}
+
+	if err := sc.Close(); err != nil {
+		t.Fatalf("server Close: %v", err)
+	}
+	l.mu.Lock()
+	routes = len(l.conns)
+	l.mu.Unlock()
+	if routes != 0 {
+		t.Fatalf("listener still holds %d routes after the connection closed, want 0", routes)
+	}
+}
+
+// TestListener_CloseIsPromptWithHandshakeInFlight pins Close waking a half-open
+// handshake rather than waiting out listenerHandshakeTimeout.
+func TestListener_CloseIsPromptWithHandshakeInFlight(t *testing.T) {
+	l, pool := startListener(t)
+	uc, err := net.DialUDP("udp", nil, l.Addr().(*net.UDPAddr))
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer func() { _ = uc.Close() }()
+
+	// A genuine ClientHello starts the server handshake; then we go silent, so it
+	// parks waiting for a Finished that never arrives.
+	if _, err := uc.Write(clientHelloInitial(t, pool, []byte{1, 2, 3, 4, 5, 6, 7, 8})); err != nil {
+		t.Fatalf("write Initial: %v", err)
+	}
+	time.Sleep(300 * time.Millisecond) // let the listener park in completeHandshake
+
+	start := time.Now()
+	if err := l.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	if d := time.Since(start); d > 3*time.Second {
+		t.Fatalf("Close took %v with a handshake in flight: it waited out the %v handshake timeout instead of waking it",
+			d, listenerHandshakeTimeout)
+	}
+}
+
+// TestListener_AbandonedHandshakesDoNotLeak pins the crypto/tls handshake
+// goroutine being released when a handshake is abandoned. The listener answers
+// every Initial without validation, so a peer that never finishes could otherwise
+// grow the goroutine count without bound — a remotely triggerable leak.
+func TestListener_AbandonedHandshakesDoNotLeak(t *testing.T) {
+	l, pool := startListener(t)
+	uc, err := net.DialUDP("udp", nil, l.Addr().(*net.UDPAddr))
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer func() { _ = uc.Close() }()
+
+	runtime.GC()
+	base := runtime.NumGoroutine()
+
+	const n = 10
+	for i := 0; i < n; i++ {
+		dcid := []byte{byte(i), 2, 3, 4, 5, 6, 7, 8} // a distinct connection each time
+		if _, err := uc.Write(clientHelloInitial(t, pool, dcid)); err != nil {
+			t.Fatalf("write Initial %d: %v", i, err)
+		}
+	}
+	time.Sleep(500 * time.Millisecond) // let the handshakes start and park
+	if err := l.Close(); err != nil {  // wakes them: every one is abandoned
+		t.Fatalf("Close: %v", err)
+	}
+
+	for i := 0; i < 50; i++ { // let the abandoned handshakes release
+		runtime.GC()
+		if runtime.NumGoroutine() <= base+2 {
+			return
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	t.Fatalf("goroutines did not settle after %d abandoned handshakes: %d now vs %d before — the TLS handshakes leak",
+		n, runtime.NumGoroutine(), base)
 }
 
 // TestConnPacketConn_WriteReachesPeer checks a write goes out of the shared
