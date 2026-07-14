@@ -266,6 +266,24 @@ drain:
 	if flight.AppSealer == nil || flight.AppOpener == nil {
 		t.Fatal("server did not install 1-RTT keys")
 	}
+
+	// Wrap the completed handshake into a connected server Conn.
+	sc, err := NewServerConn(&chanPC{rx: toServer, tx: fromServer}, flight, client.origDCID, client.scid)
+	if err != nil {
+		t.Fatalf("NewServerConn: %v", err)
+	}
+	if !sc.isServer {
+		t.Error("NewServerConn: isServer = false")
+	}
+	if sc.oneRTTSealer == nil || sc.keys.OneRTT == nil {
+		t.Error("NewServerConn: 1-RTT keys not installed")
+	}
+	if !sc.handshakeComplete {
+		t.Error("NewServerConn: handshakeComplete = false")
+	}
+	if sc.connMax == 0 {
+		t.Error("NewServerConn: connMax (peer InitialMaxData) not seeded")
+	}
 }
 
 // extractHandshakeCrypto walks the packets in a datagram, decrypts each Handshake

@@ -48,6 +48,11 @@ type Conn struct {
 	pc PacketConn
 	hs *TLSHandshake
 
+	// isServer marks a connection built for the server role (NewServerConn). It
+	// gates the few role-specific behaviors (stream-ID assignment, stream
+	// acceptance, connection-ID handling) that differ from the client default.
+	isServer bool
+
 	dcid         []byte // server connection ID (our original random DCID until Retry)
 	scid         []byte // our source connection ID (may be zero-length)
 	retryToken   []byte // address-validation token from a Retry, echoed in later Initials (§8.1.2)
@@ -110,13 +115,13 @@ type Conn struct {
 
 	// Delivery-rate sampler (draft-cheng-iccrg-delivery-rate-estimation), advanced
 	// by the ack path only when BBR is active.
-	delivered        uint64    // cumulative bytes acknowledged over the connection
-	deliveredTime    time.Time // instant of the most recent delivery (ack)
-	appLimitedUntil  uint64    // delivered-count bound below which samples are app-limited (0 = not app-limited)
-	rsPriorDelivered uint64    // per-ACK-range rate-sample representative: max acked P.delivered
-	rsPriorTime      time.Time // its delivered-time snapshot
-	rsPriorAppLimited bool     // whether that representative was app-limited
-	rsPriorValid     bool      // a representative was seen this range
+	delivered         uint64    // cumulative bytes acknowledged over the connection
+	deliveredTime     time.Time // instant of the most recent delivery (ack)
+	appLimitedUntil   uint64    // delivered-count bound below which samples are app-limited (0 = not app-limited)
+	rsPriorDelivered  uint64    // per-ACK-range rate-sample representative: max acked P.delivered
+	rsPriorTime       time.Time // its delivered-time snapshot
+	rsPriorAppLimited bool      // whether that representative was app-limited
+	rsPriorValid      bool      // a representative was seen this range
 
 	peer               TransportParams // parsed peer transport parameters (send limits)
 	gotServerCID       bool            // the server's SCID has been adopted as our DCID
