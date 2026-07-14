@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/tls"
 	"net"
+	"syscall"
 	"time"
 
 	"github.com/lodgvideon/poseidon-http-client/quic"
@@ -13,18 +14,62 @@ import (
 // so a server's send burst is buffered rather than dropped between reads.
 const udpSocketBuffer = 4 << 20
 
+// groControlLen sizes udpConn.oob, the reused buffer that receives the recvmsg
+// ancillary data carrying the UDP_GRO segment size. 128 bytes holds the single
+// small control message the kernel attaches (only UDP_GRO is enabled) with ample
+// headroom; it is allocated once and reused across reads on the reader goroutine.
+const groControlLen = 128
+
 // udpConn adapts a connected *net.UDPConn to quic.PacketConn. Read/Write operate
 // on the connected socket, so datagrams only flow to and from the dialed server.
 // SetReadDeadline lets the QUIC engine bound each read by the probe timeout
-// (RFC 9002 §6.2) rather than a fixed interval.
+// (RFC 9002 §6.2) rather than a fixed interval. It also implements the optional
+// batched-write (WriteGSO) and batched-receive (ReadGRO) capabilities the QUIC
+// engine uses on Linux; the rc/oob/gro* fields backing ReadGRO are touched only by
+// the single QUIC reader goroutine, so they need no locking.
 type udpConn struct {
-	c *net.UDPConn
+	c        *net.UDPConn
+	rc       syscall.RawConn // cached raw fd for GRO reads (nil if unavailable)
+	rcTried  bool            // SyscallConn resolution attempted once
+	groTried bool            // UDP_GRO enable attempted once (best-effort)
+	oob      []byte          // reused ancillary-data buffer for GRO cmsg parsing
 }
 
 func (u *udpConn) Read(b []byte) (int, error)        { return u.c.Read(b) }
 func (u *udpConn) Write(b []byte) (int, error)       { return u.c.Write(b) }
 func (u *udpConn) Close() error                      { return u.c.Close() }
 func (u *udpConn) SetReadDeadline(t time.Time) error { return u.c.SetReadDeadline(t) }
+
+// ReadGRO reads one datagram, or one GRO-coalesced burst, from the connected UDP
+// socket in a single recvmsg on Linux, returning the bytes read and the GRO
+// segment size (0 for a single, non-coalesced datagram); it degrades to a plain
+// Read with segSize 0 on non-Linux platforms or paths without offload support
+// (quic.RecvGRO). Implementing it makes *udpConn a batched-receive PacketConn, so
+// the QUIC receive path processes a server's response burst with one syscall
+// instead of one per datagram — the recv-side twin of WriteGSO. UDP_GRO is enabled
+// (best-effort) on the first call; the raw fd and control buffer are reused across
+// reads, which are serialized on the QUIC reader goroutine.
+func (u *udpConn) ReadGRO(buf []byte) (int, int, error) {
+	rc := u.rawConn()
+	if rc != nil && !u.groTried {
+		u.groTried = true
+		_ = quic.EnableGRO(rc) // best-effort; on failure segSize stays 0 (single datagram)
+	}
+	if u.oob == nil {
+		u.oob = make([]byte, groControlLen)
+	}
+	return quic.RecvGRO(rc, u.c, buf, u.oob)
+}
+
+// rawConn returns the cached raw file descriptor for GRO reads, resolving it once.
+// A nil result (SyscallConn failed) makes RecvGRO fall back to a plain Read.
+func (u *udpConn) rawConn() syscall.RawConn {
+	if !u.rcTried {
+		u.rcTried = true
+		u.rc, _ = u.c.SyscallConn()
+	}
+	return u.rc
+}
 
 // WriteGSO sends buf as consecutive UDP datagrams of segSize bytes (the last may be
 // shorter) in one syscall via Linux UDP segmentation offload, degrading to a
