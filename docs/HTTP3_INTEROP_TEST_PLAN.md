@@ -13,13 +13,18 @@ network conditions**. Tracks progress against the `//go:build interop` suite in
   exists at the transport, but the public API exposes no concurrent in-flight
   requests, so suites D1/D2 (concurrent streams) are **not exercisable via the
   public API** — a documented limitation, not a writable test.
-- **Dynamic QPACK decoder (Q3).** The client advertises
-  `SETTINGS_QPACK_MAX_TABLE_CAPACITY=4096` with `SETTINGS_QPACK_BLOCKED_STREAMS=0`,
+- **Dynamic QPACK decoder (Q3/Q4).** The client advertises
+  `SETTINGS_QPACK_MAX_TABLE_CAPACITY=4096` with `SETTINGS_QPACK_BLOCKED_STREAMS=16`,
   so a server may insert into the dynamic table and reference those entries: a
-  well-formed dynamic reference decodes. Only a malformed prefix, an out-of-range
-  index, or a Required Insert Count past the insert count fails as
-  `QPACK_DECOMPRESSION_FAILED`; because BLOCKED_STREAMS is 0 the decoder never
-  blocks, so such a section is rejected rather than hung.
+  well-formed dynamic reference decodes. Q4: a section whose Required Insert Count is
+  ahead of the insert count no longer fails fast — the decode blocks until the
+  encoder stream catches up (RFC 9204 §2.1.3), bounded by the request ctx, and at
+  most 16 streams may block at once (§2.1.2). A malformed prefix, an out-of-range
+  index, or a Required Insert Count that can never be satisfied still fails as
+  `QPACK_DECOMPRESSION_FAILED`. The RIC-ahead wait is covered at the unit level
+  (`TestConformance_RFC9204_Sec21{2,3}_*`); a fault server sending a section ahead of
+  its encoder-stream insert (so the decode blocks then unblocks over the wire) is a
+  Q4 interop follow-up — `TestFault_QpackRequiredInsertCount` is skipped meanwhile.
 - **ChaCha20-Poly1305 header protection deferred.** A ChaCha20-only server is a
   known incompatibility → graceful failure, documented.
 - **Receive-path resource bounds** (PRs #162–166) — must not false-trip on real

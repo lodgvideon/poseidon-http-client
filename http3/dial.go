@@ -35,16 +35,34 @@ func (u *udpConn) SetReadDeadline(t time.Time) error { return u.c.SetReadDeadlin
 // default across HTTP/3 stacks and bounds the memory one connection's table costs.
 const qpackDynamicTableCapacity uint64 = 4096
 
+// qpackBlockedStreams is the SETTINGS_QPACK_BLOCKED_STREAMS the client advertises
+// (RFC 9204 §5, §2.1.2): the maximum number of request streams whose response
+// field section the decoder will accept while it references dynamic-table entries
+// the server's encoder stream has not delivered yet — a section whose Required
+// Insert Count is ahead of our insert count. Each such stream parks (off qpackMu)
+// until the encoder stream catches up (§2.1.3), so this bounds how many requests
+// may be simultaneously head-of-line blocked on the encoder stream, and thus the
+// memory those parked decodes tie up. 16 is a conservative small value: it is
+// enough that a normal server pipelining a handful of dynamic references never
+// stalls needlessly, yet small enough that a misbehaving encoder cannot make an
+// unbounded number of streams block — accepting a section past the limit is a
+// QPACK_DECOMPRESSION_FAILED (§2.1.2). Exceeding it is a decoder-detectable
+// encoder violation, not a hang: a blocked decode is always ctx-bounded.
+const qpackBlockedStreams uint64 = 16
+
 // defaultSettings are the HTTP/3 SETTINGS a client advertises. The QPACK dynamic
 // table is enabled with a non-zero capacity (RFC 9204 §5), so the server may use
-// dynamic QPACK for response headers. SETTINGS_QPACK_BLOCKED_STREAMS stays 0: the
-// decoder never blocks waiting for the encoder stream to catch up, so a conformant
-// server only references entries it has already been told (via an Insert Count
-// Increment) that we hold — a section's Required Insert Count never exceeds our
-// insert count (Q4 territory would raise this).
+// dynamic QPACK for response headers, and SETTINGS_QPACK_BLOCKED_STREAMS is
+// non-zero (Q4), so the server's encoder may reference an entry from a response
+// field section before its Insert Count Increment has told us we hold it: such a
+// section's Required Insert Count is ahead of our insert count, and the decode
+// parks until the encoder stream delivers the promised inserts (RFC 9204 §2.1.3)
+// rather than failing. The wait is bounded by the request context, so a server
+// that promises inserts it never sends fails the request on ctx timeout instead of
+// hanging, and at most qpackBlockedStreams streams may block at once (§2.1.2).
 var defaultSettings = []Setting{
 	{SettingQPACKMaxTableCapacity, qpackDynamicTableCapacity},
-	{SettingQPACKBlockedStreams, 0},
+	{SettingQPACKBlockedStreams, qpackBlockedStreams},
 }
 
 // localTransportParams are the limits the client advertises so the server has

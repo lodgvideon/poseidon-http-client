@@ -207,6 +207,34 @@ type Client struct {
 	qpackDyn    *qpack.DynamicTable
 	insertCount atomic.Uint64
 
+	// Blocked-stream wake (RFC 9204 §2.1.3, Q4). SETTINGS_QPACK_BLOCKED_STREAMS is
+	// non-zero, so a response field section may reference dynamic-table entries the
+	// server's encoder stream has not delivered yet — its Required Insert Count is
+	// ahead of insertCount. A Do decoding such a section parks (off qpackMu — never
+	// hold a lock across a wait, R2) until the reader advances insertCount to cover
+	// it. Unlike the per-stream signalReady and the cap-1 c.streamCredit, which each
+	// hand a token to ONE waiter, a single insert-count advance can unblock ANY
+	// number of parked Dos, each waiting on a DIFFERENT Required Insert Count — so
+	// the wake is a broadcast: signalQPACKReady closes qpackReady (waking every
+	// current waiter) and installs a fresh channel for the next generation, guarded
+	// by qpackReadyMu. Level-triggered: a woken Do re-reads insertCount (the atomic)
+	// and re-parks on the new channel if still short, so close-then-replace closes
+	// the check-then-block lost-wakeup window exactly as the cap-1 signals do. The
+	// wait is always bounded by the request ctx and by connCtx (connection
+	// teardown), so a promised insert that never arrives fails the request rather
+	// than hanging.
+	qpackReadyMu sync.Mutex
+	qpackReady   chan struct{} // broadcast channel: closed+replaced to wake blocked decodes (§2.1.3)
+
+	// qpackBlocked is the number of request streams currently parked on the insert
+	// count, and qpackMaxBlocked is the SETTINGS_QPACK_BLOCKED_STREAMS we advertise —
+	// the ceiling the encoder must respect (RFC 9204 §2.1.2). A new blocked section
+	// that would push qpackBlocked past qpackMaxBlocked is an encoder violation, a
+	// QPACK_DECOMPRESSION_FAILED. registerBlocked reserves a slot with an atomic
+	// compare-and-increment against the ceiling so concurrent Dos cannot overshoot it.
+	qpackBlocked    atomic.Uint64
+	qpackMaxBlocked uint64
+
 	// maxFieldSection and goaway are published as atomics (docs/HTTP3_DESIGN.md
 	// §3.5): the reader writes them from serviceControl, a Do reads them. maxFieldSection
 	// is the peer SETTINGS_MAX_FIELD_SECTION_SIZE (init ^uint64(0) = no limit, §4.2.2).
@@ -241,6 +269,11 @@ func newClient(conn quicConn, settings []Setting) (*Client, error) {
 	// §3.2.3). dial.go advertises a non-zero capacity, so the server may insert up
 	// to this many bytes into the table we maintain and reference them.
 	c.qpackDyn = qpack.NewDynamicTable(qpackMaxTableCapacity(settings))
+	// SETTINGS_QPACK_BLOCKED_STREAMS (Q4): the ceiling on simultaneously-blocked
+	// decodes we advertise, and a fresh broadcast channel a blocked Do parks on until
+	// the reader advances the insert count (RFC 9204 §2.1.2, §2.1.3).
+	c.qpackMaxBlocked = qpackBlockedStreamsSetting(settings)
+	c.qpackReady = make(chan struct{})
 	c.connCtx, c.connCancel = context.WithCancel(context.Background())
 
 	// Open the control stream plus the client's own QPACK encoder + decoder streams
@@ -304,6 +337,22 @@ func newClient(conn quicConn, settings []Setting) (*Client, error) {
 func qpackMaxTableCapacity(settings []Setting) uint64 {
 	for _, s := range settings {
 		if s.ID == SettingQPACKMaxTableCapacity {
+			return s.Value
+		}
+	}
+	return 0
+}
+
+// qpackBlockedStreamsSetting returns the SETTINGS_QPACK_BLOCKED_STREAMS the client
+// advertises (RFC 9204 §5, §2.1.2), or 0 if the setting is absent — the ceiling on
+// how many request streams may be simultaneously blocked waiting for the encoder
+// stream to reach a section's Required Insert Count. At 0 the decoder never parks:
+// a Required Insert Count past the insert count fails immediately as
+// QPACK_DECOMPRESSION_FAILED (the static-only / Q3 profile). dial.go advertises a
+// non-zero value (Q4), enabling the blocked-decode wait.
+func qpackBlockedStreamsSetting(settings []Setting) uint64 {
+	for _, s := range settings {
+		if s.ID == SettingQPACKBlockedStreams {
 			return s.Value
 		}
 	}
@@ -460,9 +509,10 @@ func (c *Client) flushQPACKDecoder() {
 // them again would push the encoder's Known Received Count past the inserts it has
 // made, a QPACK_DECODER_STREAM_ERROR. The Known Received Count update and the
 // decoder-stream append are both under decWMu, so the increment matches the order
-// the encoder applies our instructions. At SETTINGS_QPACK_BLOCKED_STREAMS=0 the
-// increment is what lets a conformant server learn we hold an insert before it may
-// reference it, so this fires promptly as inserts arrive.
+// the encoder applies our instructions. The increment is what lets a conformant
+// server learn we hold an insert before it may reference it, so this fires promptly
+// as inserts arrive; the same reader pass also broadcasts (signalQPACKReady) to wake
+// any decode blocked waiting for that insert count (§2.1.3, Q4).
 func (c *Client) qpackAckInserts(insertCount uint64) {
 	c.decWMu.Lock()
 	defer c.decWMu.Unlock()
@@ -500,6 +550,132 @@ func (c *Client) qpackSectionAck(streamID, ric uint64) {
 // reported them. It is reached only when an aborted stream referenced the table.
 func (c *Client) qpackCancelStream(streamID uint64) {
 	c.qpackDecWrite(qpack.AppendStreamCancellation(nil, streamID))
+}
+
+// signalQPACKReady wakes every Do parked in waitQPACKInsert so each re-checks
+// whether the shared dynamic table's insert count has reached its section's
+// Required Insert Count (RFC 9204 §2.1.3). The reader calls it after
+// readQPACKEncoder advances the insert count. Unlike the per-stream signalReady and
+// the single-slot c.streamCredit — which each hand a token to ONE waiter — a single
+// advance of the insert count can unblock ANY number of parked Dos, each waiting on
+// a different Required Insert Count, so this is a broadcast: it closes the current
+// readiness channel (waking all current waiters at once) and installs a fresh one
+// for the next generation. It never holds qpackReadyMu across a wait (it only
+// closes and re-makes a channel), so it is safe to call from the reader goroutine.
+func (c *Client) signalQPACKReady() {
+	c.qpackReadyMu.Lock()
+	close(c.qpackReady)
+	c.qpackReady = make(chan struct{})
+	c.qpackReadyMu.Unlock()
+}
+
+// waitQPACKInsert parks until the shared dynamic table's insert count reaches need
+// — a section's Required Insert Count that is ahead of what the encoder stream has
+// delivered (RFC 9204 §2.1.3) — or the request/connection ends. It is
+// level-triggered and never holds a lock across the wait (R2): it captures the
+// current broadcast channel under qpackReadyMu, re-reads the insert count (the
+// atomic the reader publishes), and returns as soon as insertCount >= need; a
+// signalQPACKReady between the read and the select closes the captured channel, so
+// the recheck-then-park pair closes the lost-wakeup window exactly like the cap-1
+// WaitReadable/streamCredit waits. The wait is bounded three ways so it can never
+// hang: the request ctx (a promised insert that never arrives fails on the caller's
+// deadline/cancel), and connCtx (the reader cancels it on connection teardown).
+func (c *Client) waitQPACKInsert(ctx context.Context, need uint64) error {
+	for {
+		c.qpackReadyMu.Lock()
+		ready := c.qpackReady
+		c.qpackReadyMu.Unlock()
+		if c.insertCount.Load() >= need {
+			return nil // the encoder stream has caught up; retry the decode
+		}
+		select {
+		case <-ready:
+			// The reader advanced the insert count; loop to re-check the level.
+		case <-ctx.Done():
+			return ctx.Err() // per-request cancel/deadline — the no-hang guarantee
+		case <-c.connCtx.Done():
+			return c.connCtx.Err() // the connection was torn down (fatal / Close)
+		}
+	}
+}
+
+// registerBlocked reserves one blocked-stream slot, enforcing the advertised
+// SETTINGS_QPACK_BLOCKED_STREAMS ceiling (RFC 9204 §2.1.2) with an atomic
+// compare-and-increment so concurrent Dos cannot overshoot it. It returns false
+// when all qpackMaxBlocked slots are taken — the encoder referenced entries in a
+// way that would block more streams than we permit, a decoder-detectable violation
+// the caller surfaces as QPACK_DECOMPRESSION_FAILED. At qpackMaxBlocked == 0 (the
+// static-only / Q3 profile) it always returns false, so a blocked section fails
+// immediately rather than parking.
+func (c *Client) registerBlocked() bool {
+	for {
+		cur := c.qpackBlocked.Load()
+		if cur >= c.qpackMaxBlocked {
+			return false
+		}
+		if c.qpackBlocked.CompareAndSwap(cur, cur+1) {
+			return true
+		}
+	}
+}
+
+// unregisterBlocked releases a slot reserved by registerBlocked once the stream is
+// no longer blocked (its decode resolved, or the request/connection ended).
+func (c *Client) unregisterBlocked() {
+	c.qpackBlocked.Add(^uint64(0)) // -1
+}
+
+// decodeBlocking decodes a response field section against the shared dynamic table,
+// waiting for the encoder stream to reach the section's Required Insert Count when
+// it references entries not yet delivered (RFC 9204 §2.1.3, Q4). decodeUnderLock is
+// invoked with qpackMu held for reading and the section guaranteed decodable
+// (insertCount >= its Required Insert Count), so its own Required-Insert-Count gate
+// never trips and the fields it copies cannot be rewritten by a concurrent
+// insert/eviction; it must complete every copy before returning. The
+// Required-Insert-Count check and the decode run under the SAME RLock, so the
+// insert count cannot advance between them (a consistent snapshot).
+//
+// When the section is blocked (its Required Insert Count is ahead of the insert
+// count) this reserves a blocked-stream slot (enforcing the M-blocked-stream limit,
+// §2.1.2) and parks off qpackMu on waitQPACKInsert until the reader delivers the
+// promised inserts, then retries — level-triggered. It returns:
+//   - nil once decodeUnderLock succeeds;
+//   - qpack.ErrDecompressionFailed for a malformed / never-satisfiable prefix or an
+//     M-blocked-limit violation (the caller maps it to QPACK_DECOMPRESSION_FAILED);
+//   - decodeUnderLock's own error (a message-rule violation or a decode failure); or
+//   - the request/connection error from waitQPACKInsert (ctx cancel/deadline or
+//     teardown) — so a promised insert that never arrives fails, never hangs.
+func (c *Client) decodeBlocking(rb *respBuilder, payload []byte, decodeUnderLock func() error) error {
+	registered := false
+	defer func() {
+		if registered {
+			c.unregisterBlocked()
+		}
+	}()
+	for {
+		c.qpackMu.RLock()
+		ric, rerr := qpack.RequiredInsertCount(payload, c.qpackDyn)
+		if rerr != nil {
+			c.qpackMu.RUnlock()
+			return rerr // a malformed or never-satisfiable prefix — a decompression failure
+		}
+		if ric <= c.qpackDyn.InsertCount() {
+			err := decodeUnderLock() // decodable now — decode under the same consistent RLock
+			c.qpackMu.RUnlock()
+			return err
+		}
+		c.qpackMu.RUnlock()
+		// Blocked: the section references entries the encoder stream has not delivered.
+		if !registered {
+			if !c.registerBlocked() {
+				return qpack.ErrDecompressionFailed // exceeded SETTINGS_QPACK_BLOCKED_STREAMS (§2.1.2)
+			}
+			registered = true
+		}
+		if werr := c.waitQPACKInsert(rb.ctx, ric); werr != nil {
+			return werr // ctx cancel/deadline or connection teardown — bounded, never a hang
+		}
+	}
 }
 
 // Do sends req on a new request stream and reads the response, driving the QUIC
@@ -642,7 +818,7 @@ func (c *Client) roundTrip(ctx context.Context, stream quicStream, req *Request)
 
 	var fr FrameReader
 	fr.SetMaxFrameLen(maxResponseBytes) // refuse a frame larger than the whole budget before buffering it
-	rb := respBuilder{dec: &dec, streamID: stream.ID()}
+	rb := respBuilder{dec: &dec, streamID: stream.ID(), ctx: ctx}
 	// On any abort of a stream that referenced the dynamic table, notify the encoder
 	// (RFC 9204 §4.4.2). refDynamic is set when a decoded section resolved a dynamic
 	// reference (Required Insert Count > 0).
@@ -700,6 +876,16 @@ type respBuilder struct {
 	body         []byte
 	total        uint64 // header, body, trailer, and 1xx payload bytes retained so far
 	trailersSeen bool
+
+	// ctx bounds a blocked field-section decode (RFC 9204 §2.1.3, Q4): when a section
+	// references dynamic entries the encoder stream has not delivered yet, dispatchFrame
+	// parks on it via decodeBlocking until the insert count catches up, and this ctx —
+	// the request's own — is what makes that wait finite (a promised insert that never
+	// arrives fails on cancel/deadline). Carried on rb so dispatchFrame, called from
+	// both the buffered and streaming receive loops, need not change signature; the
+	// streaming BodyReader refreshes it per Next call. It is nil only in unit tests that
+	// drive a non-blocking dispatchFrame directly, where the wait is never reached.
+	ctx context.Context
 
 	// streamID is the request stream's id, used to key the QPACK decoder-stream
 	// instructions (Section Acknowledgment / Stream Cancellation) this exchange
@@ -774,10 +960,17 @@ func (c *Client) dispatchFrame(rb *respBuilder, typ uint64, payload []byte) erro
 			// Decode under qpackMu.RLock so the reader's concurrent inserts / arena
 			// compaction cannot rewrite the shared bytes the emit callback copies; the
 			// copy completes before RUnlock (DecodeResponseHeaders copies each kept
-			// field inside the callback). Section Ack is emitted after the lock drops.
-			c.qpackMu.RLock()
-			r, ric, derr := DecodeResponseHeaders(rb.dec, c.qpackDyn, payload)
-			c.qpackMu.RUnlock()
+			// field inside the callback). When the section's Required Insert Count is
+			// ahead of the insert count (Q4), decodeBlocking parks off qpackMu until the
+			// encoder stream catches up (§2.1.3), bounded by rb.ctx. Section Ack is
+			// emitted after the decode resolves, off the table lock.
+			var r *Response
+			var ric uint64
+			derr := c.decodeBlocking(rb, payload, func() error {
+				var e error
+				r, ric, e = DecodeResponseHeaders(rb.dec, c.qpackDyn, payload)
+				return e
+			})
 			if derr != nil {
 				_, _, e := c.decodeError(derr)
 				return e
@@ -792,15 +985,21 @@ func (c *Client) dispatchFrame(rb *respBuilder, typ uint64, payload []byte) erro
 				rb.resp = r
 			}
 		} else {
-			c.qpackMu.RLock()
-			tr, ric, derr := DecodeTrailers(rb.dec, c.qpackDyn, payload)
-			c.qpackMu.RUnlock()
+			var ric uint64
+			derr := c.decodeBlocking(rb, payload, func() error {
+				tr, r, e := DecodeTrailers(rb.dec, c.qpackDyn, payload)
+				if e != nil {
+					return e
+				}
+				rb.resp.Trailers = tr // fields are copied inside the decode, safe to hold past RUnlock
+				ric = r
+				return nil
+			})
 			if derr != nil {
 				_, _, e := c.decodeError(derr)
 				return e
 			}
 			c.ackDynamicSection(rb, ric)
-			rb.resp.Trailers = tr
 			rb.trailersSeen = true
 		}
 	case FrameData:

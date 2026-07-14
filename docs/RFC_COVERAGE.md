@@ -377,16 +377,33 @@ inserts it applies (§4.4.3), each decoded section that referenced the dynamic
 table triggers a Section Acknowledgment (§2.1.4 / §4.4.1), and an aborted stream
 that referenced the table triggers a Stream Cancellation (§4.4.2).
 
-Q3 flips the switch: `dial.go` advertises `SETTINGS_QPACK_MAX_TABLE_CAPACITY=4096`
-(`SETTINGS_QPACK_BLOCKED_STREAMS` stays 0), so a live server inserts into the
-shared table and references those entries from response field sections. The Known
-Received Count is coordinated so an Insert Count Increment (§4.4.3) and a Section
-Acknowledgment (§2.1.4 / §4.4.1) never double-count the same insert regardless of
-arrival order. Because BLOCKED_STREAMS is 0 the decoder never blocks: a Required
-Insert Count past the insert count is rejected as QPACK_DECOMPRESSION_FAILED rather
-than waiting. The end-to-end decode path is the CI interop gate (Caddy / nginx /
-aioquic all use dynamic QPACK once capacity > 0); the unit matrix below drives the
-same path deterministically against a fake encoder stream at capacity 4096.
+Q3 flips the switch: `dial.go` advertises `SETTINGS_QPACK_MAX_TABLE_CAPACITY=4096`,
+so a live server inserts into the shared table and references those entries from
+response field sections. The Known Received Count is coordinated so an Insert Count
+Increment (§4.4.3) and a Section Acknowledgment (§2.1.4 / §4.4.1) never double-count
+the same insert regardless of arrival order. The end-to-end decode path is the CI
+interop gate (Caddy / nginx / aioquic all use dynamic QPACK once capacity > 0); the
+unit matrix below drives the same path deterministically against a fake encoder
+stream at capacity 4096.
+
+Q4 raises `SETTINGS_QPACK_BLOCKED_STREAMS` to 16, so a server's encoder may
+reference a dynamic-table entry from a response field section before its Insert
+Count Increment has told us we hold it — a section whose Required Insert Count is
+ahead of our insert count. Such a decode now PARKS (off `qpackMu` — never a lock
+across a wait, R2) until the reader advances the insert count to cover it (§2.1.3),
+rather than failing. The reader broadcasts on every insert-count advance (a single
+advance can unblock any number of parked decodes, each waiting on a different
+Required Insert Count), and each parked decode re-reads the published insert count
+level-triggered, so no wake is lost. The wait is bounded by the request context and
+by connection teardown, so a server that promises inserts it never sends fails the
+request on ctx timeout instead of hanging; at most 16 streams may block at once
+(§2.1.2) — a section past the limit is a QPACK_DECOMPRESSION_FAILED. A Required
+Insert Count that is malformed or can never be satisfied is still rejected
+immediately. At `BLOCKED_STREAMS=0` (the static-only / Q3 unit profile) the decoder
+still never parks: a Required Insert Count past the insert count fails fast. The
+interop-level RIC-ahead scenario (a fault server sending a section before its
+encoder-stream insert) is a follow-up; the unit matrix below fully exercises the
+wait/wake, the ctx-bounded park, and the M-blocked bound against a fake encoder.
 
 | Section | Type        | Test |
 |---------|-------------|------|
@@ -415,6 +432,9 @@ same path deterministically against a fake encoder stream at capacity 4096.
 | §2.1.4 / §4.4.3 (live) | Conformance | TestConformance_RFC9204_Sec214_KnownReceivedCountCoordination (an Insert Count Increment and a Section Acknowledgment never double-count the same insert, either arrival order — the redundant increment is suppressed) — Q3 |
 | §3.2.2 (live) | Conformance | TestConformance_RFC9204_Sec322_EvictionAndEvictedReference (insert past capacity evicts the oldest entry; a live-entry reference decodes, an evicted-entry reference → QPACK_DECOMPRESSION_FAILED) — Q3 |
 | §4.5.1 (live) | Conformance | TestConformance_RFC9204_Sec451_RequiredInsertCountExceedsInserts (at SETTINGS_QPACK_BLOCKED_STREAMS=0 a Required Insert Count past the insert count → QPACK_DECOMPRESSION_FAILED, no block/hang) — Q3 |
+| §2.1.3 (blocked) | Conformance | TestConformance_RFC9204_Sec213_BlockedDecodeWaitsForInsert (a section whose Required Insert Count is ahead of the insert count parks the decode until the reader applies the encoder-stream insert, then unblocks and decodes — `-race -count=5`), TestConformance_RFC9204_Sec213_BlockedDecodeCtxTimeout (a blocked decode whose promised insert never arrives fails on the request ctx deadline, never hangs) — Q4 |
+| §2.1.2 (blocked) | Conformance | TestConformance_RFC9204_Sec212_BlockedStreamLimitEnforced (with SETTINGS_QPACK_BLOCKED_STREAMS=2 a third simultaneously-blocked section exceeds the advertised limit → QPACK_DECOMPRESSION_FAILED) — Q4 |
+| §2.1.3 (concurrency) | Race | TestConcurrent_QPACKBlockedStreams_UnderRace (many decoders with heterogeneous Required Insert Counts, some blocked, wake correctly as the reader delivers inserts and broadcasts — no lost wake, no race, no deadlock; `-race -count=5`) — Q4 |
 
 ## RFC 9114 — HTTP/3 (Phase G)
 
