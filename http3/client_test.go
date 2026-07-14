@@ -163,7 +163,7 @@ type fakeConn struct {
 
 	done     chan struct{} // closed once by CloseWithError; models quic.Conn.done
 	closeErr error         // published before done is closed; models quic.Conn.closeErr
-	wake     chan struct{} // cap 1; kicked by pushRecv so a parked Poll re-delivers
+	wake     chan struct{} // cap 1; wakes a parked Poll to re-deliver fed data
 }
 
 // ensureInitLocked lazily allocates the wake/close channels so tests can build a
@@ -204,7 +204,7 @@ func (c *fakeConn) OpenUniStream() (quicStream, error) {
 	return c.control, nil
 }
 
-func (c *fakeConn) OpenStream() (quicStream, error) {
+func (c *fakeConn) OpenStream(_ context.Context) (quicStream, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.ensureInitLocked()
@@ -220,7 +220,7 @@ func (c *fakeConn) OpenStream() (quicStream, error) {
 
 // Poll models the reader step: it delivers the request stream's pending response
 // chunks in one burst (advancing deliverIdx and signalling ready), and otherwise
-// parks until data is fed (pushRecv), the ctx is cancelled, or the connection is
+// parks until data is fed (via wake), the ctx is cancelled, or the connection is
 // closed — so the reader never busy-loops and never auto-services the control
 // stream for a request-less test (control_test.go drives serviceControl itself).
 func (c *fakeConn) Poll(ctx context.Context) error {
@@ -272,25 +272,6 @@ func (c *fakeConn) CloseWithError(app bool, code uint64, _ string) error {
 	}
 	close(c.done)
 	return nil
-}
-
-// pushRecv appends a response chunk (optionally the FIN) to the request stream and
-// wakes the parked reader so its next Poll delivers it — for tests that stream
-// data mid-flight.
-func (c *fakeConn) pushRecv(chunk []byte, fin bool) {
-	c.mu.Lock()
-	if chunk != nil {
-		c.req.recvChunks = append(c.req.recvChunks, chunk)
-	}
-	if fin {
-		c.req.fin = true
-	}
-	w := c.wake
-	c.mu.Unlock()
-	select {
-	case w <- struct{}{}:
-	default:
-	}
 }
 
 // TestClient_RequestResponse drives a full request/response through the HTTP/3

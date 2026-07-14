@@ -30,7 +30,7 @@ type quicStream interface {
 // quicConn is the QUIC connection surface the client uses. A connAdapter over
 // *quic.Conn satisfies it; tests supply a fake.
 type quicConn interface {
-	OpenStream() (quicStream, error)
+	OpenStream(ctx context.Context) (quicStream, error)
 	OpenUniStream() (quicStream, error)
 	AcceptUniStream() quicStream // next accepted server-initiated uni stream, or nil
 	Poll(ctx context.Context) error
@@ -47,13 +47,6 @@ var ErrGoAway = errors.New("http3: server is going away")
 // stream (§7.2); a CONNECTION_CLOSE with the specific HTTP/3 error code has
 // already been sent.
 var ErrH3Control = errors.New("http3: connection error")
-
-// ErrConcurrentUse is returned by Do when another Do on the same Client is still
-// in flight. A Client drives one QUIC connection from a single goroutine and is
-// not safe for concurrent use (it has no cross-request multiplexing yet); a
-// second concurrent Do would corrupt the shared connection, QPACK, and control-
-// stream state, so it is rejected loudly instead. Use one Client per goroutine.
-var ErrConcurrentUse = errors.New("http3: Client.Do called concurrently")
 
 // HTTP/3 error codes (RFC 9114 §8.1), carried in the QUIC application
 // CONNECTION_CLOSE frame.
@@ -116,8 +109,8 @@ func (e *StreamResetError) Retryable() bool { return e.Code == H3RequestRejected
 // return quicStream where *quic.Conn returns the concrete *quic.Stream.
 type connAdapter struct{ *quic.Conn }
 
-func (a connAdapter) OpenStream() (quicStream, error) {
-	s, err := a.Conn.OpenStream()
+func (a connAdapter) OpenStream(ctx context.Context) (quicStream, error) {
+	s, err := a.OpenStreamContext(ctx) // waits on stream credit; threads the request ctx (2d)
 	if err != nil {
 		return nil, err // avoid returning a non-nil interface wrapping a nil *Stream
 	}
@@ -140,15 +133,16 @@ func (a connAdapter) AcceptUniStream() quicStream {
 }
 
 // Client is a minimal HTTP/3 client over an established QUIC connection. It owns
-// the connection's control stream and QPACK codecs. A dedicated reader goroutine
-// drives the QUIC engine and services the server control stream for the
-// connection's lifetime (docs/HTTP3_DESIGN.md §3.1). Do sends its own request
-// frames and blocks on per-stream wakeups; still one Do at a time in this PR
-// (inFlight retained — real concurrency is PR 2d).
+// the connection's control stream; each request carries its own stack-local QPACK
+// codecs (docs/HTTP3_DESIGN.md §3.5, PR 2d), so nothing request-scoped is shared. A
+// dedicated reader goroutine drives the QUIC engine and services the server control
+// stream for the connection's lifetime (§3.1). Do sends its own request frames and
+// blocks on per-stream wakeups, so N goroutines may call Do on one Client
+// concurrently — OpenStream's id/map mutation and every seal are under the QUIC
+// c.mu, streams wake independently, control state is reader-owned, and QPACK is
+// per-request (§3.5). Client is safe for concurrent use.
 type Client struct {
 	conn quicConn
-	enc  qpack.Encoder
-	dec  qpack.Decoder
 
 	// Connection lifecycle. The reader goroutine runs Poll + serviceControl on
 	// connCtx until the connection terminates; Close cancels connCtx and waits on
@@ -174,12 +168,6 @@ type Client struct {
 	// one atomic, no separate haveGoaway bool).
 	maxFieldSection atomic.Uint64
 	goaway          atomic.Uint64
-
-	// inFlight guards against concurrent Do: this PR keeps the single-request
-	// contract, so the only concurrency is reader ↔ single Do. A second concurrent
-	// Do is rejected with ErrConcurrentUse rather than allowed to corrupt the shared
-	// QPACK/reader state. Removed in PR 2d.
-	inFlight atomic.Bool
 }
 
 // uniStream is an accepted server unidirectional stream whose leading stream-type
@@ -306,25 +294,27 @@ func (c *Client) sendAll(ctx context.Context, stream quicStream, data []byte, fi
 // response) the request stream is aborted with STOP_SENDING and RESET_STREAM so
 // the server frees it and stops sending (RFC 9000 §3.5, RFC 9114 §4.1).
 func (c *Client) Do(ctx context.Context, req *Request) (*Response, []byte, error) {
-	// One request at a time: a second concurrent Do would race on the shared
-	// connection / QPACK / control-stream state (RFC 9114 multiplexing is not yet
-	// exposed). Reject it loudly instead of corrupting the connection.
-	if !c.inFlight.CompareAndSwap(false, true) {
-		return nil, nil, ErrConcurrentUse
-	}
-	defer c.inFlight.Store(false)
 	if err := ctx.Err(); err != nil {
 		return nil, nil, err
 	}
-	stream, err := c.conn.OpenStream()
+	// OpenStream blocks on stream credit (2d): when at the peer's cumulative
+	// initial_max_streams_bidi limit it parks until a MAX_STREAMS grant, ctx fires,
+	// or the connection terminates — so a wave of concurrent Do past the limit waits
+	// for the peer to raise it instead of racing an immediate error.
+	stream, err := c.conn.OpenStream(ctx)
 	if err != nil {
 		return nil, nil, err
 	}
 	// GOAWAY gate (RFC 9114 §5.2): the server will not process a request on a stream
 	// id at or above the GOAWAY id it published. goaway is ^uint64(0) until a real
 	// GOAWAY lands, so this never trips on a healthy connection. The reader publishes
-	// goaway from serviceControl; Do reads it (§3.5).
+	// goaway from serviceControl; Do reads it (§3.5). Reclaim the just-opened stream
+	// with STOP_SENDING + RESET_STREAM so maybeRetire drops its c.streams entry — the
+	// post-open abandon path that closes the 2d TOCTOU leak (F4) rather than leaving
+	// a dead stream in the routing map.
 	if stream.ID() >= c.goaway.Load() {
+		_ = stream.StopSending(H3RequestCancelled)
+		_ = stream.Reset(H3RequestCancelled)
 		return nil, nil, ErrGoAway // the caller should retry on a new connection
 	}
 	resp, body, err := c.roundTrip(ctx, stream, req)
@@ -371,7 +361,15 @@ func (c *Client) sendRequest(ctx context.Context, stream quicStream, req *Reques
 }
 
 func (c *Client) roundTrip(ctx context.Context, stream quicStream, req *Request) (*Response, []byte, error) {
-	frame, err := req.EncodeHeaders(&c.enc, nil, c.maxFieldSection.Load())
+	// Per-request QPACK codecs (docs/HTTP3_DESIGN.md §5, PR 2d): stack-local, so N
+	// concurrent Do never share them. The encoder is an empty struct (trivially
+	// safe); the decoder holds Huffman scratch buffers that the slices it emits
+	// alias, so a shared decoder would let one Do's decoded headers be overwritten
+	// by another — per-request is mandatory, not an optimization. Static-only QPACK
+	// keeps each codec stateless per request, so nothing is lost but scratch reuse.
+	var enc qpack.Encoder
+	var dec qpack.Decoder
+	frame, err := req.EncodeHeaders(&enc, nil, c.maxFieldSection.Load())
 	if err != nil {
 		return nil, nil, err
 	}
@@ -381,7 +379,7 @@ func (c *Client) roundTrip(ctx context.Context, stream quicStream, req *Request)
 
 	var fr FrameReader
 	fr.SetMaxFrameLen(maxResponseBytes) // refuse a frame larger than the whole budget before buffering it
-	var rb respBuilder
+	rb := respBuilder{dec: &dec}
 	for {
 		if data := stream.Recv(); len(data) > 0 {
 			fr.Feed(data)
@@ -425,6 +423,7 @@ func (c *Client) roundTrip(ctx context.Context, stream quicStream, req *Request)
 // respBuilder accumulates a decoded HTTP/3 response as request-stream frames are
 // parsed across successive FrameReader feeds (see roundTrip / consumeFrames).
 type respBuilder struct {
+	dec          *qpack.Decoder // per-request QPACK decoder (2d): its Huffman scratch is aliased by decoded slices, so it MUST NOT be shared across concurrent Do
 	resp         *Response
 	interim      []*Response // informational 1xx responses, in receive order
 	body         []byte
@@ -471,7 +470,7 @@ func (c *Client) dispatchFrame(rb *respBuilder, typ uint64, payload []byte) erro
 			return ErrResponseTooLarge // retained header/body/trailer bytes over the cap
 		}
 		if rb.resp == nil {
-			r, derr := DecodeResponseHeaders(&c.dec, payload)
+			r, derr := DecodeResponseHeaders(rb.dec, payload)
 			if derr != nil {
 				_, _, e := c.decodeError(derr)
 				return e
@@ -485,7 +484,7 @@ func (c *Client) dispatchFrame(rb *respBuilder, typ uint64, payload []byte) erro
 				rb.resp = r
 			}
 		} else {
-			tr, derr := DecodeTrailers(&c.dec, payload)
+			tr, derr := DecodeTrailers(rb.dec, payload)
 			if derr != nil {
 				_, _, e := c.decodeError(derr)
 				return e

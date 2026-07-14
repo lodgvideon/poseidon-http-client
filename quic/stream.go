@@ -55,7 +55,57 @@ func (c *Conn) openStreamLocked() (*Stream, error) {
 		c.streams = map[uint64]*Stream{}
 	}
 	c.streams[id] = s
+	// Baton-pass (docs/HTTP3_DESIGN.md §5, PR 2d): a single MAX_STREAMS grant of N
+	// slots signals c.streamCredit only once (cap-1), so if credit still remains
+	// after this open, wake the next OpenStreamContext parked on it. Chaining the
+	// wake here lets one grant wake N waiters in turn; the chain stops on its own
+	// once openStreamLocked returns ErrTooManyStreams (which signals nothing).
+	if c.openedBidi < c.peer.InitialMaxStreamsBidi {
+		c.signalStreamCredit()
+	}
 	return s, nil
+}
+
+// OpenStreamContext opens the next client-initiated bidirectional stream, blocking
+// on stream credit rather than failing fast (docs/HTTP3_DESIGN.md §5, PR 2d). When
+// the cumulative initial_max_streams_bidi limit is reached (RFC 9000 §4.6) it parks
+// on c.streamCredit until the peer raises the limit with MAX_STREAMS
+// (signalStreamCredit), ctx is cancelled, or the connection terminates, then
+// retries. This is the documented backpressure a concurrent Do may see: it can
+// block on stream credit until the peer grants more or ctx fires. A caller that
+// prefers fail-fast uses OpenStream (which returns ErrTooManyStreams immediately).
+func (c *Conn) OpenStreamContext(ctx context.Context) (*Stream, error) {
+	for {
+		c.mu.Lock()
+		s, err := c.openStreamLocked()
+		c.mu.Unlock()
+		if err == nil {
+			return s, nil
+		}
+		if err != ErrTooManyStreams {
+			return nil, err // a non-credit error is not resolved by waiting
+		}
+		if werr := c.waitStreamCredit(ctx); werr != nil {
+			return nil, werr
+		}
+	}
+}
+
+// waitStreamCredit blocks until the peer raises the cumulative stream limit
+// (signalStreamCredit from OnMaxStreams), ctx is cancelled, or the connection
+// terminates (docs/HTTP3_DESIGN.md §3.3). Level-triggered: OpenStreamContext
+// re-reads the limit under c.mu after waking, so the cap-1 c.streamCredit buffer
+// plus that recheck close the check-then-block lost-wakeup window, exactly like
+// WaitReadable. c.mu is never held across this wait.
+func (c *Conn) waitStreamCredit(ctx context.Context) error {
+	select {
+	case <-c.streamCredit:
+		return nil // recheck the limit under c.mu after waking
+	case <-ctx.Done():
+		return ctx.Err() // the request's own ctx — fail-fast backpressure escape
+	case <-c.done:
+		return c.closeErr // connection terminated; the latch published closeErr
+	}
 }
 
 // OpenUniStream opens the next client-initiated unidirectional stream (RFC 9000
