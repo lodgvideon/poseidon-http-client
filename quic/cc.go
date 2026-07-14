@@ -31,6 +31,18 @@ func (c *Conn) onPacketSent(sp int, pn uint64, ackEliciting bool, size int) {
 	}
 	if p, ok := c.sent[sp].packets[pn]; ok {
 		p.size = size
+		if c.ccAlgo == CCBBR {
+			// Snapshot the delivery-rate state into the packet BEFORE it joins the
+			// flight (draft-cheng-iccrg-delivery-rate-estimation). When the pipe was
+			// empty, restart the delivery interval at now so an idle gap is not counted
+			// as delivery time.
+			if c.bytesInFlight == 0 {
+				c.deliveredTime = c.clock()
+			}
+			p.delivered = c.delivered
+			p.deliveredTime = c.deliveredTime
+			p.appLimited = c.appLimitedUntil != 0
+		}
 		c.sent[sp].packets[pn] = p
 	}
 	c.bytesInFlight += uint64(size)
@@ -46,6 +58,13 @@ func (c *Conn) onPacketAcked(p sentPacket, cwndLimited bool) {
 	c.removeInFlight(p.size)
 	if c.cwnd == 0 {
 		return // congestion control disabled (test sentinel)
+	}
+	if c.ccAlgo == CCBBR {
+		// Advance the delivery-rate sampler for this packet. The model update and the
+		// cwnd/pacing_rate write happen once per ACK range in bbrOnAckRange; RETURN
+		// here so NewReno's slow-start / congestion-avoidance arithmetic never runs.
+		c.bbrOnPacketAcked(p)
+		return
 	}
 	if !p.timeSent.After(c.recoveryStart) {
 		return // sent at or before the recovery episode start: no growth (§7.3.2)
@@ -75,6 +94,12 @@ func (c *Conn) onPacketAcked(p sentPacket, cwndLimited bool) {
 func (c *Conn) onCongestionEvent(sentTime time.Time) {
 	if c.cwnd == 0 {
 		return // congestion control disabled (test sentinel)
+	}
+	if c.ccAlgo == CCBBR {
+		// BBR is loss-tolerant (draft-cardwell-iccrg-bbr §4.1): a loss does NOT halve
+		// the window. cwnd stays model-driven (btlbw·min_rtt); the loss is otherwise
+		// noted by the loss-detection path that freed the bytes via removeInFlight.
+		return
 	}
 	if !sentTime.After(c.recoveryStart) {
 		return // already in recovery for this episode
@@ -110,6 +135,15 @@ func (c *Conn) persistentCongestionDuration() time.Duration {
 func (c *Conn) onPersistentCongestion() {
 	if c.cwnd == 0 {
 		return // congestion control disabled (test sentinel)
+	}
+	if c.ccAlgo == CCBBR {
+		// A path that lost an entire PTO span is dead even for loss-tolerant BBR:
+		// collapse to the floor, discard the bandwidth estimate, and re-enter Startup
+		// so the controller re-probes the path from scratch (draft-cardwell §4.3.4).
+		c.bbrOnPersistentCongestion()
+		c.recoveryStart = time.Time{} // §7.6.1: congestion_recovery_start_time = 0
+		c.rtt.resetMin = true
+		return
 	}
 	c.cwnd = kMinimumWindow
 	c.recoveryStart = time.Time{} // §7.6.1: congestion_recovery_start_time = 0
@@ -162,6 +196,15 @@ func (c *Conn) pacingRefillDelay() time.Duration {
 	if c.cwnd == 0 || c.rtt.smoothedRTT <= 0 {
 		return time.Millisecond
 	}
+	if c.pacingRate != 0 {
+		// BBR pacing (bbr.go): the rate is in bytes/second, so one datagram of credit
+		// accrues in maxDatagramSize/pacing_rate seconds.
+		d := time.Duration(uint64(maxDatagramSize) * uint64(time.Second) / c.pacingRate)
+		if d <= 0 {
+			return time.Millisecond
+		}
+		return d
+	}
 	rate := 5 * c.cwnd / 4 // bytes per smoothed-RTT
 	if rate == 0 {
 		return time.Millisecond
@@ -196,6 +239,19 @@ func (c *Conn) pacingCredit() uint64 {
 		// Beyond a second the bucket is certainly full; short-circuit so the refill
 		// multiply below cannot overflow on a large window, and drop the surplus time.
 		c.pacingBudget, c.pacingLast = kInitialWindow, now
+		return c.pacingBudget
+	}
+	if c.pacingRate != 0 {
+		// BBR pacing (bbr.go): refill the same token bucket from the model's
+		// bytes/second rate. elapsed is bounded below one second by the branch above,
+		// so pacing_rate·elapsed cannot overflow uint64 for any realistic rate.
+		add := c.pacingRate * uint64(elapsed) / uint64(time.Second)
+		if add == 0 {
+			return c.pacingBudget // sub-byte elapsed: accumulate the time into a later refill
+		}
+		consumed := time.Duration(add * uint64(time.Second) / c.pacingRate)
+		c.pacingLast = c.pacingLast.Add(consumed)
+		c.pacingBudget = min(kInitialWindow, c.pacingBudget+add)
 		return c.pacingBudget
 	}
 	rate := 5 * c.cwnd / 4 // N·cwnd bytes per smoothed-RTT (N = 1.25 as 5/4)

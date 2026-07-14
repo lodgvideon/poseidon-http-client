@@ -98,6 +98,26 @@ type Conn struct {
 	pacingBudget   uint64    // token-bucket pacing allowance in bytes (RFC 9002 §7.7)
 	pacingLast     time.Time // last pacing-bucket refill instant
 
+	// Opt-in BBR v1 congestion control (bbr.go), selected with
+	// WithCongestionControl(CCBBR). When ccAlgo == CCNewReno (the zero value and
+	// default) NOTHING below is touched and every arithmetic path in cc.go is
+	// byte-identical to the NewReno-only build. When BBR is active it drives the
+	// SAME send gate by writing c.cwnd and c.pacingRate; NewReno's slow-start /
+	// congestion-avoidance arithmetic is bypassed.
+	ccAlgo     CongestionControlAlgorithm // CCNewReno (default) or CCBBR
+	bbr        *bbr                       // BBR model state; nil unless ccAlgo == CCBBR
+	pacingRate uint64                     // BBR pacing rate in bytes/sec (0 ⇒ NewReno's 5·cwnd/4)
+
+	// Delivery-rate sampler (draft-cheng-iccrg-delivery-rate-estimation), advanced
+	// by the ack path only when BBR is active.
+	delivered        uint64    // cumulative bytes acknowledged over the connection
+	deliveredTime    time.Time // instant of the most recent delivery (ack)
+	appLimitedUntil  uint64    // delivered-count bound below which samples are app-limited (0 = not app-limited)
+	rsPriorDelivered uint64    // per-ACK-range rate-sample representative: max acked P.delivered
+	rsPriorTime      time.Time // its delivered-time snapshot
+	rsPriorAppLimited bool     // whether that representative was app-limited
+	rsPriorValid     bool      // a representative was seen this range
+
 	peer               TransportParams // parsed peer transport parameters (send limits)
 	gotServerCID       bool            // the server's SCID has been adopted as our DCID
 	serverSCID         []byte          // the authenticated server Source Connection ID (§7.2 discard check)
@@ -197,12 +217,21 @@ type Conn struct {
 	terminated     bool          // guards terminateLocked against a double close(done) / closeErr clobber
 }
 
+// ConnOption configures a Conn at construction time. Options are additive and
+// applied in order after the connection's defaults are set; passing none leaves
+// every default in place (in particular, NewReno congestion control).
+type ConnOption func(*Conn)
+
 // NewConn creates a client QUIC connection over pc. tlsConfig must set
 // ServerName; transportParams is the serialized QUIC transport parameters
 // (RFC 9000 §7.4). It chooses a random Destination Connection ID, derives the
 // Initial keys from it (RFC 9001 §5.2), and prepares the TLS handshake — but
 // does not send anything until Establish.
-func NewConn(pc PacketConn, tlsConfig *tls.Config, transportParams []byte) (*Conn, error) {
+//
+// opts are optional functional configuration (e.g. WithCongestionControl); with
+// none supplied the connection uses NewReno, byte-for-byte as before options
+// existed.
+func NewConn(pc PacketConn, tlsConfig *tls.Config, transportParams []byte, opts ...ConnOption) (*Conn, error) {
 	dcid := make([]byte, 8)
 	if _, err := rand.Read(dcid); err != nil {
 		return nil, err
@@ -237,6 +266,14 @@ func NewConn(pc PacketConn, tlsConfig *tls.Config, transportParams []byte) (*Con
 		c.localMaxIdle = tp.MaxIdleTimeout // the idle timeout we advertised (§10.1)
 	}
 	c.lastActivity = c.now() // the idle timer starts at connection creation
+	for _, opt := range opts {
+		opt(c)
+	}
+	// If an option selected BBR, arm its model now that the clock is in place.
+	// NewReno (the default) leaves c.bbr nil and every CC field untouched.
+	if c.ccAlgo == CCBBR && c.bbr == nil {
+		c.initBBR()
+	}
 	return c, nil
 }
 
@@ -357,6 +394,9 @@ func (c *Conn) onAckRange(sp int, low, high uint64, ackDelay time.Duration, prio
 	// single ACK covering a full-window burst does not misread the later packets as
 	// application-limited after the earlier ones are freed.
 	limited := c.cwndLimited(priorInFlight)
+	if c.ccAlgo == CCBBR {
+		c.rsPriorValid = false // reset the BBR delivery-rate representative for this range
+	}
 	// Credit the congestion controller for each newly acknowledged ack-eliciting
 	// packet before ack() removes it (RFC 9002 §7.3). Iterate our own sent packets
 	// rather than the ACK range, so a malformed huge range cannot make this costly.
@@ -377,6 +417,14 @@ func (c *Conn) onAckRange(sp int, low, high uint64, ackDelay time.Duration, prio
 			c.firstRTTSample = c.clock()
 		}
 		c.ptoCount = 0 // §6.2.1: a newly-acked ack-eliciting packet resets the backoff
+		if c.ccAlgo == CCBBR {
+			c.bbrUpdateMinRTT(c.rtt.latestRTT, c.clock()) // feed BBR's 10 s windowed-min filter
+		}
+	}
+	// BBR derives cwnd and pacing_rate from the delivery-rate model once per ACK
+	// range; NewReno never enters here (its window is grown in onPacketAcked).
+	if c.ccAlgo == CCBBR {
+		c.bbrOnAckRange()
 	}
 }
 

@@ -70,11 +70,20 @@ func absDuration(d time.Duration) time.Duration {
 
 // sentPacket records a packet the client sent, for acknowledgement, RTT
 // sampling, and loss detection.
+//
+// The delivered/deliveredTime/appLimited fields are the delivery-rate sampler's
+// per-packet snapshot (draft-cheng-iccrg-delivery-rate-estimation), written by
+// onPacketSent only when BBR is the active controller (bbr.go). Under NewReno
+// they stay zero and are never read, so NewReno accounting is unchanged.
 type sentPacket struct {
 	timeSent     time.Time
 	ackEliciting bool
 	size         int            // on-wire packet length in bytes, for congestion control (RFC 9002 §7)
 	frames       []retransFrame // retransmittable frames carried (nil = nothing to resend)
+
+	delivered     uint64    // C.delivered snapshot at send (BBR delivery-rate sampler)
+	deliveredTime time.Time // C.delivered_time snapshot at send (BBR delivery-rate sampler)
+	appLimited    bool      // sender was application-limited at send (BBR: sample may be skipped)
 }
 
 // sentSpace tracks the unacknowledged packets sent in one packet-number space.
