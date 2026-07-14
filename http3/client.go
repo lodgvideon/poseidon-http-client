@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sync"
 	"sync/atomic"
 
 	"github.com/lodgvideon/poseidon-http-client/qpack"
@@ -67,6 +68,8 @@ const (
 
 	// QPACK error codes (RFC 9204 §6), carried in the same HTTP/3 CONNECTION_CLOSE.
 	H3QpackDecompressionFailed uint64 = 0x0200 // QPACK_DECOMPRESSION_FAILED
+	H3QpackEncoderStreamError  uint64 = 0x0201 // QPACK_ENCODER_STREAM_ERROR
+	H3QpackDecoderStreamError  uint64 = 0x0202 // QPACK_DECODER_STREAM_ERROR
 )
 
 // maxInterimResponses bounds the 1xx informational responses buffered before the
@@ -133,14 +136,18 @@ func (a connAdapter) AcceptUniStream() quicStream {
 }
 
 // Client is a minimal HTTP/3 client over an established QUIC connection. It owns
-// the connection's control stream; each request carries its own stack-local QPACK
-// codecs (docs/HTTP3_DESIGN.md §3.5, PR 2d), so nothing request-scoped is shared. A
-// dedicated reader goroutine drives the QUIC engine and services the server control
-// stream for the connection's lifetime (§3.1). Do sends its own request frames and
-// blocks on per-stream wakeups, so N goroutines may call Do on one Client
-// concurrently — OpenStream's id/map mutation and every seal are under the QUIC
-// c.mu, streams wake independently, control state is reader-owned, and QPACK is
-// per-request (§3.5). Client is safe for concurrent use.
+// the connection's control stream and its own QPACK instruction streams; each
+// request carries its own stack-local QPACK codecs (docs/HTTP3_DESIGN.md §3.5, PR
+// 2d), and the one shared piece — the connection-scoped QPACK dynamic table — is
+// guarded by qpackMu (the reader applies the server encoder stream under Lock, a
+// Do resolves references under RLock; RFC 9204 Q2). A dedicated reader goroutine
+// drives the QUIC engine and services the server control + QPACK encoder streams
+// for the connection's lifetime (§3.1). Do sends its own request frames and blocks
+// on per-stream wakeups, so N goroutines may call Do on one Client concurrently —
+// OpenStream's id/map mutation and every seal are under the QUIC c.mu, streams wake
+// independently, control state is reader-owned, and the shared dynamic table is
+// serialized by qpackMu (a leaf lock never nested with c.mu). Client is safe for
+// concurrent use.
 type Client struct {
 	conn quicConn
 
@@ -158,7 +165,36 @@ type Client struct {
 	controlReader FrameReader
 	qpackEnc      quicStream // the server QPACK encoder stream (RFC 9204 §4.2)
 	qpackDec      quicStream // the server QPACK decoder stream (RFC 9204 §4.2)
+	qpackEncBuf   []byte     // reader-owned: server encoder-stream bytes not yet a whole instruction
 	settingsRead  bool       // the mandatory first SETTINGS frame has been read
+
+	// The client's own QPACK instruction streams (RFC 9204 §4.2), opened at
+	// newClient. clientQPACKEnc carries our encoder instructions — none in the
+	// static-only profile, so it stays at just its type byte — and clientQPACKDec
+	// carries our decoder instructions (Insert Count Increment, Section
+	// Acknowledgment, Stream Cancellation). Writes to the decoder stream funnel
+	// through qpackDecWrite under decWMu so the reader's ICI and each Do's Section
+	// Ack never interleave a partial instruction.
+	clientQPACKEnc quicStream
+	clientQPACKDec quicStream
+	decWMu         sync.Mutex   // serializes decoder-stream writes; a leaf lock (never held across a wait)
+	decWriteBuf    []byte       // decoder-stream bytes accepted for send but not yet flushed (flow-control residue)
+	decHasResidue  atomic.Bool  // true when decWriteBuf holds unflushed bytes — lets the reader skip the lock otherwise
+
+	// Shared connection-scoped QPACK dynamic table (RFC 9204 §3.2). This is the
+	// ONE piece of QPACK state shared across goroutines: the reader WRITES it
+	// (applying the server encoder stream's inserts/evictions under qpackMu.Lock),
+	// every Do READS it (resolving dynamic references during one DecodeFieldSection
+	// under qpackMu.RLock, copying every kept field before releasing — eviction and
+	// arena compaction rewrite the shared bytes). qpackMu is a NEW, SEPARATE leaf
+	// lock: it is never nested with the quic connection's c.mu and never held
+	// across a wait (docs/HTTP3_DESIGN.md concurrency rules R2). insertCount is
+	// published as an atomic after each apply so it can be observed without the
+	// lock. INERT in this build: capacity is 0, so the table stays empty and no
+	// field section references it.
+	qpackMu     sync.RWMutex
+	qpackDyn    *qpack.DynamicTable
+	insertCount atomic.Uint64
 
 	// maxFieldSection and goaway are published as atomics (docs/HTTP3_DESIGN.md
 	// §3.5): the reader writes them from serviceControl, a Do reads them. maxFieldSection
@@ -189,26 +225,76 @@ func newClient(conn quicConn, settings []Setting) (*Client, error) {
 	c := &Client{conn: conn, readerDone: make(chan struct{})}
 	c.maxFieldSection.Store(^uint64(0)) // no limit until the peer's SETTINGS arrive
 	c.goaway.Store(^uint64(0))          // "none" until a real GOAWAY lands (§5.2)
+	// The shared dynamic table's maximum capacity is the SETTINGS_QPACK_MAX_TABLE_
+	// CAPACITY we advertise — the decoder controls its own table size (RFC 9204
+	// §3.2.3). INERT here: dial.go advertises 0, so the table stays empty.
+	c.qpackDyn = qpack.NewDynamicTable(qpackMaxTableCapacity(settings))
 	c.connCtx, c.connCancel = context.WithCancel(context.Background())
 
+	// Open the control stream plus the client's own QPACK encoder + decoder streams
+	// (RFC 9204 §4.2). OpenUniStream does not block — it fails immediately if the
+	// peer granted too few unidirectional streams — so a server that grants fewer
+	// than three is a startup error rather than a hang. All three are opened before
+	// the reader starts so a stream-type varint is never sent out of order.
 	control, err := conn.OpenUniStream()
 	if err != nil {
 		c.connCancel()
 		close(c.readerDone) // no reader was started
 		return nil, err
 	}
+	qenc, err := conn.OpenUniStream()
+	if err != nil {
+		c.connCancel()
+		close(c.readerDone)
+		return nil, err
+	}
+	qdec, err := conn.OpenUniStream()
+	if err != nil {
+		c.connCancel()
+		close(c.readerDone)
+		return nil, err
+	}
+	c.clientQPACKEnc = qenc
+	c.clientQPACKDec = qdec
+	// Seed the decoder stream's type byte through the same serialized path the
+	// reader's Insert Count Increment uses, so it is guaranteed to be the first
+	// byte on the stream even though the reader goroutine starts below. Best-effort
+	// (non-blocking): any flow-control residue is flushed on a later reader pass.
+	c.qpackDecWrite(AppendClientQPACKStream(nil, StreamTypeQPACKDecoder))
+
 	// Start the reader BEFORE sending SETTINGS (docs/HTTP3_DESIGN.md §5, ordering
 	// fix): a flow-control-blocked SETTINGS send is unblocked by the peer's MAX_DATA
 	// that the reader processes — otherwise a startup deadlock.
 	go c.readLoop()
-	if err := c.sendAll(c.connCtx, control, AppendClientControlStream(nil, settings), false); err != nil {
-		// The reader is running; tear it down so it is not leaked.
-		c.connCancel()
-		_ = c.conn.CloseWithError(true, H3NoError, "")
-		<-c.readerDone
-		return nil, err
+	startup := [...]struct {
+		stream quicStream
+		data   []byte
+	}{
+		{control, AppendClientControlStream(nil, settings)},
+		{qenc, AppendClientQPACKStream(nil, StreamTypeQPACKEncoder)},
+	}
+	for _, s := range startup {
+		if err := c.sendAll(c.connCtx, s.stream, s.data, false); err != nil {
+			// The reader is running; tear it down so it is not leaked.
+			c.connCancel()
+			_ = c.conn.CloseWithError(true, H3NoError, "")
+			<-c.readerDone
+			return nil, err
+		}
 	}
 	return c, nil
+}
+
+// qpackMaxTableCapacity returns the SETTINGS_QPACK_MAX_TABLE_CAPACITY the client
+// advertises (RFC 9204 §5), or 0 if the setting is absent — the value that sizes
+// the shared dynamic table's maximum capacity. INERT here: dial.go advertises 0.
+func qpackMaxTableCapacity(settings []Setting) uint64 {
+	for _, s := range settings {
+		if s.ID == SettingQPACKMaxTableCapacity {
+			return s.Value
+		}
+	}
+	return 0
 }
 
 // readLoop is the connection's reader goroutine (docs/HTTP3_DESIGN.md §3.1): it
@@ -302,6 +388,63 @@ func (c *Client) sendAll(ctx context.Context, stream quicStream, data []byte, fi
 			}
 		}
 	}
+}
+
+// qpackDecWrite appends a complete QPACK decoder-stream instruction (RFC 9204
+// §4.4) and flushes as much as the decoder stream's flow-control window admits
+// without blocking. Any tail left by back-pressure is retained and flushed by the
+// next call or the reader's next service pass, so the byte stream stays whole even
+// when split across sends — every caller appends only complete instructions.
+//
+// All decoder-stream writers funnel through here: the reader's Insert Count
+// Increment, each Do's Section Acknowledgment, and a Stream Cancellation on abort.
+// decWMu serializes them, so instructions never interleave. The Send is
+// best-effort (it never parks on WaitSendable), so this is safe to call from the
+// reader goroutine — it never waits for itself — and decWMu is a leaf lock never
+// held across a wait.
+func (c *Client) qpackDecWrite(instr []byte) {
+	c.decWMu.Lock()
+	defer c.decWMu.Unlock()
+	if len(instr) > 0 {
+		c.decWriteBuf = append(c.decWriteBuf, instr...)
+	}
+	c.flushDecWriteLocked()
+}
+
+// flushDecWriteLocked sends as much of decWriteBuf as the decoder stream will
+// accept without blocking, retaining any unsent tail. Assumes decWMu is held.
+func (c *Client) flushDecWriteLocked() {
+	if c.clientQPACKDec == nil || len(c.decWriteBuf) == 0 {
+		return
+	}
+	n, err := c.clientQPACKDec.Send(c.decWriteBuf, false)
+	if err != nil {
+		return // stream/connection error; the reader teardown handles it
+	}
+	if n >= len(c.decWriteBuf) {
+		c.decWriteBuf = c.decWriteBuf[:0]
+	} else {
+		c.decWriteBuf = append(c.decWriteBuf[:0], c.decWriteBuf[n:]...) // left-shift the residue
+	}
+	c.decHasResidue.Store(len(c.decWriteBuf) > 0)
+}
+
+// flushQPACKDecoder flushes any flow-control residue on the decoder stream. The
+// reader calls it once per service pass, gated by decHasResidue so the common
+// no-residue path skips the lock entirely.
+func (c *Client) flushQPACKDecoder() {
+	c.decWMu.Lock()
+	c.flushDecWriteLocked()
+	c.decWMu.Unlock()
+}
+
+// qpackCancelStream sends a Stream Cancellation (RFC 9204 §4.4.2) for streamID on
+// our decoder stream, telling the server's encoder that an aborted stream will not
+// acknowledge the dynamic-table references its field sections made. INERT: with
+// table capacity 0 no section ever references the dynamic table, so this is never
+// reached on the wire.
+func (c *Client) qpackCancelStream(streamID uint64) {
+	c.qpackDecWrite(qpack.AppendStreamCancellation(nil, streamID))
 }
 
 // Do sends req on a new request stream and reads the response, driving the QUIC
@@ -424,26 +567,34 @@ func (c *Client) sendRequest(ctx context.Context, stream quicStream, req *Reques
 	return nil
 }
 
-func (c *Client) roundTrip(ctx context.Context, stream quicStream, req *Request) (*Response, []byte, error) {
-	// Per-request QPACK codecs (docs/HTTP3_DESIGN.md §5, PR 2d): stack-local, so N
-	// concurrent Do never share them. The encoder is an empty struct (trivially
-	// safe); the decoder holds Huffman scratch buffers that the slices it emits
-	// alias, so a shared decoder would let one Do's decoded headers be overwritten
-	// by another — per-request is mandatory, not an optimization. Static-only QPACK
-	// keeps each codec stateless per request, so nothing is lost but scratch reuse.
+func (c *Client) roundTrip(ctx context.Context, stream quicStream, req *Request) (resp *Response, body []byte, err error) {
+	// Per-request QPACK codecs (docs/HTTP3_DESIGN.md §5, PR 2d): the encoder and the
+	// decoder's Huffman scratch are stack-local, so N concurrent Do never share
+	// them. The one piece they DO share is the connection-scoped dynamic table,
+	// which each DecodeFieldSection reads under qpackMu.RLock (dispatchFrame). The
+	// decoder holds Huffman scratch buffers that the slices it emits alias, so a
+	// shared decoder would let one Do's decoded headers be overwritten by another —
+	// per-request is mandatory, not an optimization.
 	var enc qpack.Encoder
 	var dec qpack.Decoder
-	frame, err := req.EncodeHeaders(&enc, nil, c.maxFieldSection.Load())
-	if err != nil {
-		return nil, nil, err
+	frame, eerr := req.EncodeHeaders(&enc, nil, c.maxFieldSection.Load())
+	if eerr != nil {
+		return nil, nil, eerr
 	}
-	if err := c.sendRequest(ctx, stream, req, frame); err != nil {
-		return nil, nil, err
+	if serr := c.sendRequest(ctx, stream, req, frame); serr != nil {
+		return nil, nil, serr
 	}
 
 	var fr FrameReader
 	fr.SetMaxFrameLen(maxResponseBytes) // refuse a frame larger than the whole budget before buffering it
-	rb := respBuilder{dec: &dec}
+	rb := respBuilder{dec: &dec, streamID: stream.ID()}
+	// On any abort of a stream that referenced the dynamic table, notify the encoder
+	// (RFC 9204 §4.4.2). INERT: refDynamic never becomes true at capacity 0.
+	defer func() {
+		if err != nil && rb.refDynamic {
+			c.qpackCancelStream(rb.streamID)
+		}
+	}()
 	for {
 		if data := stream.Recv(); len(data) > 0 {
 			fr.Feed(data)
@@ -494,6 +645,15 @@ type respBuilder struct {
 	total        uint64 // header, body, trailer, and 1xx payload bytes retained so far
 	trailersSeen bool
 
+	// streamID is the request stream's id, used to key the QPACK decoder-stream
+	// instructions (Section Acknowledgment / Stream Cancellation) this exchange
+	// emits. refDynamic records that at least one decoded field section referenced
+	// the shared dynamic table, so an abort of this stream must send a Stream
+	// Cancellation (RFC 9204 §4.4.2). INERT: refDynamic never becomes true at
+	// capacity 0.
+	streamID   uint64
+	refDynamic bool
+
 	// onData, when non-nil, receives each DATA frame's payload instead of it
 	// being appended to body — the streaming path (DoStream). The payload aliases
 	// the FrameReader buffer and is valid only until the next ReadFrame/Feed, so
@@ -523,6 +683,20 @@ func (c *Client) consumeFrames(fr *FrameReader, rb *respBuilder) error {
 	}
 }
 
+// ackDynamicSection, when the just-decoded field section referenced the shared
+// dynamic table (ref), records it on rb and emits a Section Acknowledgment for the
+// stream on our decoder stream (RFC 9204 §2.1.4, §4.4.1). It is called AFTER
+// qpackMu.RUnlock, so the decoder-stream Send never runs under the table lock — the
+// two are independent leaf locks (decWMu, qpackMu). INERT: ref is always false at
+// table capacity 0, so nothing is emitted.
+func (c *Client) ackDynamicSection(rb *respBuilder, ref bool) {
+	if !ref {
+		return
+	}
+	rb.refDynamic = true
+	c.qpackDecWrite(qpack.AppendSectionAcknowledgment(nil, rb.streamID))
+}
+
 // dispatchFrame folds one request-stream frame into rb, enforcing HTTP/3 message
 // order and the response-size caps (RFC 9114 §4.1). It returns a scoped error for
 // an invalid frame sequence (connection error), an oversized response
@@ -541,11 +715,18 @@ func (c *Client) dispatchFrame(rb *respBuilder, typ uint64, payload []byte) erro
 			return ErrResponseTooLarge // retained header/body/trailer bytes over the cap
 		}
 		if rb.resp == nil {
-			r, derr := DecodeResponseHeaders(rb.dec, payload)
+			// Decode under qpackMu.RLock so the reader's concurrent inserts / arena
+			// compaction cannot rewrite the shared bytes the emit callback copies; the
+			// copy completes before RUnlock (DecodeResponseHeaders copies each kept
+			// field inside the callback). Section Ack is emitted after the lock drops.
+			c.qpackMu.RLock()
+			r, ref, derr := DecodeResponseHeaders(rb.dec, c.qpackDyn, payload)
+			c.qpackMu.RUnlock()
 			if derr != nil {
 				_, _, e := c.decodeError(derr)
 				return e
 			}
+			c.ackDynamicSection(rb, ref)
 			if r.Status < 200 {
 				if len(rb.interim) >= maxInterimResponses {
 					return ErrResponseTooLarge // a 1xx flood (RFC 9114 §4.1)
@@ -555,11 +736,14 @@ func (c *Client) dispatchFrame(rb *respBuilder, typ uint64, payload []byte) erro
 				rb.resp = r
 			}
 		} else {
-			tr, derr := DecodeTrailers(rb.dec, payload)
+			c.qpackMu.RLock()
+			tr, ref, derr := DecodeTrailers(rb.dec, c.qpackDyn, payload)
+			c.qpackMu.RUnlock()
 			if derr != nil {
 				_, _, e := c.decodeError(derr)
 				return e
 			}
+			c.ackDynamicSection(rb, ref)
 			rb.resp.Trailers = tr
 			rb.trailersSeen = true
 		}

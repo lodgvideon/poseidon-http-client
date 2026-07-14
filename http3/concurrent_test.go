@@ -268,11 +268,18 @@ func (c *muxConn) newRequestStreamLocked(id uint64, seq int) *muxStream {
 	}
 }
 
+// OpenUniStream hands out the three client unidirectional streams (control, QPACK
+// encoder, QPACK decoder). All accept sends whole (isControl); only the first is
+// retained as the control stream. INERT: at capacity 0 the QPACK streams carry
+// nothing beyond their type byte.
 func (c *muxConn) OpenUniStream() (quicStream, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	c.control = &muxStream{conn: c, isControl: true, ready: make(chan struct{}, 1)}
-	return c.control, nil
+	s := &muxStream{conn: c, isControl: true, ready: make(chan struct{}, 1)}
+	if c.control == nil {
+		c.control = s
+	}
+	return s, nil
 }
 
 func (c *muxConn) AcceptUniStream() quicStream { return nil } // no server-initiated uni streams

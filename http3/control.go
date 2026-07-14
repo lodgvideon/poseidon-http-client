@@ -4,6 +4,7 @@ import (
 	"errors"
 
 	"github.com/lodgvideon/poseidon-http-client/internal/bytesx"
+	"github.com/lodgvideon/poseidon-http-client/qpack"
 )
 
 // maxControlFrameLen bounds a frame the client will buffer on the server control
@@ -37,7 +38,53 @@ func (c *Client) serviceControl() error {
 	if err := c.readControl(); err != nil {
 		return err
 	}
+	if err := c.readQPACKEncoder(); err != nil {
+		return err
+	}
+	if c.decHasResidue.Load() {
+		c.flushQPACKDecoder() // flush any decoder-stream bytes a prior send left flow-control-blocked
+	}
 	return c.checkCriticalStreams()
+}
+
+// readQPACKEncoder applies the server's QPACK encoder-stream instructions (RFC
+// 9204 §4.3) to the shared dynamic table and, when new entries were inserted,
+// emits an Insert Count Increment on our decoder stream (§4.4.3). It is
+// reader-owned: only this call, on the reader goroutine, writes the table, and it
+// holds qpackMu.Lock only for the pure apply (no I/O, no wait, no c.mu), so qpackMu
+// stays a leaf lock. A partial trailing instruction is retained in qpackEncBuf for
+// the next service pass. A malformed instruction or a capacity violation is a
+// QPACK_ENCODER_STREAM_ERROR connection error (§6). INERT: with capacity 0 the
+// server sends no inserts, so this applies nothing and emits nothing.
+func (c *Client) readQPACKEncoder() error {
+	if c.qpackEnc == nil {
+		return nil
+	}
+	if data := c.qpackEnc.Recv(); len(data) > 0 {
+		c.qpackEncBuf = append(c.qpackEncBuf, data...)
+	}
+	if len(c.qpackEncBuf) == 0 {
+		return nil
+	}
+	c.qpackMu.Lock()
+	before := c.qpackDyn.InsertCount()
+	n, perr := c.qpackDyn.ParseEncoderInstructions(c.qpackEncBuf)
+	after := c.qpackDyn.InsertCount()
+	c.insertCount.Store(after) // publish for lock-free observation (§3.5)
+	c.qpackMu.Unlock()
+	if n > 0 {
+		c.qpackEncBuf = append(c.qpackEncBuf[:0], c.qpackEncBuf[n:]...) // drop applied bytes; keep the partial tail
+	}
+	if perr != nil {
+		return c.connError(H3QpackEncoderStreamError)
+	}
+	if after > before {
+		// Acknowledge the newly received inserts so the encoder can advance its Known
+		// Received Count (RFC 9204 §4.4.3). qpackMu is already released, so the
+		// decoder-stream Send does not run under the table lock.
+		c.qpackDecWrite(qpack.AppendInsertCountIncrement(nil, after-before))
+	}
+	return nil
 }
 
 // checkCriticalStreams reports a connection error if the server has closed any
@@ -67,13 +114,16 @@ func (c *Client) routeUni(typ uint64, s quicStream, rest []byte) error {
 		c.controlReader.SetMaxFrameLen(maxControlFrameLen)
 		c.controlReader.Feed(rest)
 	case StreamTypeQPACKEncoder:
-		// We advertise a zero-capacity QPACK dynamic table, so the encoder stream
-		// carries no instructions to process — but it is a critical stream, so its
-		// reference is retained to detect the server closing it (RFC 9204 §4.2).
+		// The server's encoder stream (RFC 9204 §4.2, §4.3). It is a critical stream,
+		// so its reference is retained to detect the server closing it, and its
+		// instructions are applied to the shared dynamic table by readQPACKEncoder.
+		// Any instruction bytes that arrived with the type varint are seeded here.
+		// INERT: with capacity 0 the server sends no instructions.
 		if c.qpackEnc != nil {
 			return c.connError(H3StreamCreationError) // only one encoder stream (§4.2)
 		}
 		c.qpackEnc = s
+		c.qpackEncBuf = append(c.qpackEncBuf, rest...)
 	case StreamTypeQPACKDecoder:
 		if c.qpackDec != nil {
 			return c.connError(H3StreamCreationError) // only one decoder stream (§4.2)
