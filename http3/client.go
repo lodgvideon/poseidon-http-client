@@ -258,6 +258,26 @@ func (c *Client) Close() error {
 	return err
 }
 
+// Alive reports, without blocking, whether the connection's reader goroutine is
+// still running — i.e. the QUIC connection has neither hit a fatal error nor been
+// closed. It is a liveness probe for connection pools: once the reader exits (a
+// transport error, an idle timeout, a peer CONNECTION_CLOSE, or a local Close),
+// readerDone is closed and Alive returns false, so the pool can evict the client.
+//
+// There is a brief window between a fatal error latching in the QUIC layer and the
+// reader closing readerDone during which Alive still reports true; a Do issued in
+// that window returns the terminal error, so a pool that re-checks Alive on release
+// still evicts the dead connection promptly (matching the HTTP/2 pool's
+// eject-on-release contract).
+func (c *Client) Alive() bool {
+	select {
+	case <-c.readerDone:
+		return false
+	default:
+		return true
+	}
+}
+
 // sendAll writes the whole of data on stream. Stream.Send consumes only a prefix
 // when flow-control / congestion / pacing blocked, so this advances past each
 // partial send until every byte — and the FIN, which rides the final byte — is on

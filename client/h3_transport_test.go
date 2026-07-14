@@ -34,6 +34,7 @@ type fakeH3Client struct {
 	lastBody *fakeH3Body // the body returned by the most recent DoStream
 	doCalls  int32
 	closes   int32
+	deadFlag int32 // non-zero → Alive reports false (see kill)
 }
 
 func (f *fakeH3Client) Do(_ context.Context, req *http3.Request) (*http3.Response, []byte, error) {
@@ -65,8 +66,18 @@ func (f *fakeH3Client) DoStream(_ context.Context, req *http3.Request) (*http3.R
 	return f.resp, f.lastBody, nil
 }
 
+// dead, when set, makes Alive report false — modelling a QUIC connection that has
+// terminated. Read/written atomically so pool tests can flip it from another
+// goroutine.
+func (f *fakeH3Client) Alive() bool { return atomic.LoadInt32(&f.deadFlag) == 0 }
+
+func (f *fakeH3Client) kill() { atomic.StoreInt32(&f.deadFlag, 1) }
+
 func (f *fakeH3Client) Close() error {
 	atomic.AddInt32(&f.closes, 1)
+	// A closed QUIC client is no longer alive (the real *http3.Client closes its
+	// readerDone latch on Close), so reflect that here for the pool's Alive gate.
+	atomic.StoreInt32(&f.deadFlag, 1)
 	return nil
 }
 
