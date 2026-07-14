@@ -205,12 +205,16 @@ func TestPruneExpiredWaiters_DropsCancelledKeepsLive(t *testing.T) {
 	dead, cancel := context.WithCancel(context.Background())
 	cancel()
 
+	// Every waiter carries the cap-1 reply channel acquire gives it: a pruned
+	// waiter is still owed exactly one reply (its caller's reclaim goroutine is
+	// blocked on it), and a live one must not be replied to.
 	in := []acquireReq{
-		{ctx: live},
-		{ctx: dead},
-		{ctx: live},
-		{ctx: dead},
+		{ctx: live, reply: make(chan acquireResp, 1)},
+		{ctx: dead, reply: make(chan acquireResp, 1)},
+		{ctx: live, reply: make(chan acquireResp, 1)},
+		{ctx: dead, reply: make(chan acquireResp, 1)},
 	}
+	dropped := []acquireReq{in[1], in[3]}
 	out := pruneExpiredWaiters(in)
 	if len(out) != 2 {
 		t.Fatalf("len(out) = %d, want 2", len(out))
@@ -220,6 +224,19 @@ func TestPruneExpiredWaiters_DropsCancelledKeepsLive(t *testing.T) {
 		case <-w.ctx.Done():
 			t.Fatalf("out[%d] ctx unexpectedly done", i)
 		default:
+		}
+		if len(w.reply) != 0 {
+			t.Fatalf("out[%d]: live waiter was replied to by pruning", i)
+		}
+	}
+	for i, w := range dropped {
+		select {
+		case resp := <-w.reply:
+			if resp.err == nil {
+				t.Fatalf("dropped[%d] reply err = nil, want ctx error", i)
+			}
+		default:
+			t.Fatalf("dropped[%d] got no reply: its reclaim goroutine would hang forever", i)
 		}
 	}
 }
@@ -459,9 +476,14 @@ func TestPool_Evict_RemovesTarget(t *testing.T) {
 	}
 }
 
-// --- replyAcquire ctx-cancel branch ---
+// --- replyAcquire: unconditional single reply ---
 
-func TestPool_ReplyAcquire_CtxCancelledReturnsCredit(t *testing.T) {
+// TestPool_ReplyAcquire_DeliversEvenWhenCtxCancelled pins the invariant that
+// replaced the old ctx.Done() race: the actor always delivers the one reply it
+// owes, and never decrements active itself. A cancelled caller reclaims the
+// committed mc via acquire's reclaim goroutine — racing the send against
+// ctx.Done() would strand the mc in the buffer and leak the slot instead.
+func TestPool_ReplyAcquire_DeliversEvenWhenCtxCancelled(t *testing.T) {
 	t.Parallel()
 	p := newPool("ignored:0", conn.ConnOptions{}, PoolOptions{MaxConnsPerHost: 1}, nil, nil)
 	t.Cleanup(func() { _ = p.Close() })
@@ -469,18 +491,23 @@ func TestPool_ReplyAcquire_CtxCancelledReturnsCredit(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel() // already cancelled
 
-	// Use an unbuffered channel so the send arm always blocks, forcing the
-	// ctx.Done() arm to be selected.
-	reply := make(chan acquireResp) // unbuffered
+	reply := make(chan acquireResp, 1)
 	req := acquireReq{ctx: ctx, reply: reply}
 
-	// Synthesise a non-nil mc so we can verify active is decremented.
 	mc := &managedConn{active: 1}
-	p.replyAcquire(req, mc, nil)
+	p.replyAcquire(req, mc, nil) // must not block, must not touch mc.active
 
-	// active must be decremented back.
-	if mc.active != 0 {
-		t.Fatalf("mc.active = %d, want 0 after ctx-cancel replyAcquire", mc.active)
+	select {
+	case resp := <-reply:
+		if resp.mc != mc {
+			t.Fatalf("reply mc = %p, want %p", resp.mc, mc)
+		}
+	default:
+		t.Fatal("replyAcquire delivered nothing to an abandoned caller: " +
+			"the committed mc is stranded and its slot leaked")
+	}
+	if mc.active != 1 {
+		t.Fatalf("mc.active = %d, want 1 (the reclaiming caller releases, not the actor)", mc.active)
 	}
 }
 

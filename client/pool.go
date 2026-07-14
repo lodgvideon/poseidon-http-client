@@ -367,16 +367,29 @@ func (p *Pool) handleClose(rs *runState) {
 	}
 }
 
-// replyAcquire delivers an acquire reply, or returns the assigned mc
-// to the pool if the caller's ctx already cancelled.
+// replyAcquire delivers the single reply owed to req. The send never blocks:
+// reply is a cap-1 channel used by exactly one request, and the actor sends
+// exactly one reply per request it accepts (happy path, serveWaiters,
+// handleDialDone, pruneExpiredWaiters, or handleClose).
+//
+// This must NOT race the send against req.ctx.Done(). When a caller has given up
+// AND its buffered reply channel is still writable, both cases are ready and Go
+// picks at random; picking the send strands an mc whose active count the actor
+// has already incremented in a channel nobody reads, so mc.active-- never runs
+// and the stream slot is leaked for the life of the conn. Abandoning callers
+// reclaim through acquire's reclaim goroutine instead — the only handoff that
+// cannot drop a committed conn.
 func (p *Pool) replyAcquire(req acquireReq, mc *managedConn, err error) {
-	select {
-	case req.reply <- acquireResp{mc: mc, err: err}:
-	case <-req.ctx.Done():
-		if mc != nil {
-			mc.active--
-			mc.lastUsed = time.Now()
-		}
+	req.reply <- acquireResp{mc: mc, err: err}
+}
+
+// reclaim consumes the reply owed to an abandoned acquire and returns any conn
+// the actor committed to it. Spawned only once the actor has accepted the
+// request, at which point exactly one reply is guaranteed, so this receive
+// always completes and the goroutine always exits.
+func (p *Pool) reclaim(reply chan acquireResp) {
+	if resp := <-reply; resp.mc != nil {
+		p.release(resp.mc, nil)
 	}
 }
 
@@ -574,13 +587,17 @@ func countLive(conns []*managedConn) int {
 
 // pruneExpiredWaiters drops waiters whose ctx is already done. Reuses
 // the slice's backing array to avoid allocation churn.
+//
+// Each dropped waiter is still sent the one reply it is owed: its caller's
+// reclaim goroutine is blocked waiting for exactly one value, so dropping the
+// waiter silently would hang that goroutine forever. The send cannot block
+// (cap-1 channel, single use).
 func pruneExpiredWaiters(ws []acquireReq) []acquireReq {
 	out := ws[:0]
 	for _, w := range ws {
 		select {
 		case <-w.ctx.Done():
-			// Caller abandoned. Drop the waiter; no reply needed since
-			// the caller has already returned ctx.Err() from acquire().
+			w.reply <- acquireResp{err: w.ctx.Err()}
 		default:
 			out = append(out, w)
 		}
@@ -593,13 +610,9 @@ func pruneExpiredWaiters(ws []acquireReq) []acquireReq {
 // eventually call p.release(mc, requestErr).
 func (p *Pool) acquire(ctx context.Context) (*managedConn, error) {
 	start := time.Now()
-	// Merge AcquireTimeout into ctx so that req.ctx.Done() fires on ALL
-	// abandonment paths, including AcquireTimeout. This is required for
-	// the sync.Pool channel optimisation: replyAcquire checks req.ctx.Done
-	// before sending, so once ctx is cancelled the actor will not send on
-	// reply. The drain in the defer is then guaranteed to see an empty
-	// channel (or one already-buffered message from the rare race window),
-	// making it safe to return the channel to replyPool.
+	// Merge AcquireTimeout into ctx so that ctx.Done() fires on ALL abandonment
+	// paths, including AcquireTimeout: the reclaim handoff below and the actor's
+	// waiter pruning are both keyed on req.ctx.
 	acquireTimeoutActive := false
 	if p.opts.AcquireTimeout > 0 {
 		deadline := time.Now().Add(p.opts.AcquireTimeout)
@@ -621,10 +634,12 @@ func (p *Pool) acquire(ctx context.Context) (*managedConn, error) {
 	// cross-pool conn ("stream reset by peer"). Two states are safe:
 	//   (a) the actor never received req (first-select abandonment), or
 	//   (b) we consumed the actor's single reply (happy path).
-	// On second-select abandonment (ctx.Done / closedCh after the actor
-	// took req) the actor may still call replyAcquire; we drop the channel
-	// to GC rather than recycle. replyAcquire's send is buffered (cap 1)
-	// so the late send never blocks and no goroutine leaks.
+	// On second-select abandonment (ctx.Done / closedCh after the actor took
+	// req) the actor still owes exactly one reply, which the reclaim goroutine
+	// consumes — but reclaim, not us, is then the channel's last reader, so we
+	// drop it to GC rather than hand a channel we no longer own back to a pool
+	// shared with every other Pool in the process. One allocation on a path that
+	// is already returning an error is the cheaper side of that trade.
 	recycle := func() {
 		select {
 		case <-reply:
@@ -638,7 +653,7 @@ func (p *Pool) acquire(ctx context.Context) (*managedConn, error) {
 	// Send the request to the actor.
 	select {
 	case p.acquireCh <- req:
-		// Actor owns req now; fall through to await its reply.
+		// The actor now owns req and owes it exactly one reply.
 	case <-ctx.Done():
 		recycle() // actor never received req — safe to recycle
 		return nil, mapAcquireErr(ctx, acquireTimeoutActive)
@@ -656,10 +671,15 @@ func (p *Pool) acquire(ctx context.Context) (*managedConn, error) {
 		}
 		return resp.mc, resp.err
 	case <-ctx.Done():
-		// Actor may still send on reply later — do NOT recycle.
+		// Both this case and the reply case can be ready at once (the actor may
+		// have just committed a conn to us); Go would pick between them at random.
+		// Hand the pending reply to reclaim so a conn committed to an acquire we
+		// are abandoning goes back to the pool instead of being stranded.
+		// reclaim owns the channel from here — do NOT recycle.
+		go p.reclaim(reply)
 		return nil, mapAcquireErr(ctx, acquireTimeoutActive)
 	case <-p.closedCh:
-		// Actor may still send on reply later — do NOT recycle.
+		go p.reclaim(reply)
 		return nil, ErrPoolClosed
 	}
 }

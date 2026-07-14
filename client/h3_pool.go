@@ -293,16 +293,29 @@ func (p *h3Pool) handleClose(rs *h3RunState) {
 	}
 }
 
-// replyAcquire delivers an acquire reply, or returns the assigned mc to the pool
-// if the caller's ctx already cancelled.
+// replyAcquire delivers the single reply owed to req. The send never blocks:
+// reply is a cap-1 channel used by exactly one request, and the actor sends
+// exactly one reply per request it accepts (happy path, serveWaiters,
+// handleDialDone, h3PruneExpiredWaiters, or handleClose).
+//
+// This must NOT race the send against req.ctx.Done(). When a caller has given up
+// AND its buffered reply channel is still writable, both cases are ready and Go
+// picks at random; picking the send strands an mc whose active count the actor
+// has already incremented in a channel nobody reads, so mc.active-- never runs
+// and the stream slot is leaked for the life of the conn. Abandoning callers
+// reclaim through acquire's reclaim goroutine instead — the only handoff that
+// cannot drop a committed conn.
 func (p *h3Pool) replyAcquire(req h3AcquireReq, mc *h3ManagedConn, err error) {
-	select {
-	case req.reply <- h3AcquireResp{mc: mc, err: err}:
-	case <-req.ctx.Done():
-		if mc != nil {
-			mc.active--
-			mc.lastUsed = time.Now()
-		}
+	req.reply <- h3AcquireResp{mc: mc, err: err}
+}
+
+// reclaim consumes the reply owed to an abandoned acquire and returns any conn
+// the actor committed to it. Spawned only once the actor has accepted the
+// request, at which point exactly one reply is guaranteed, so this receive
+// always completes and the goroutine always exits.
+func (p *h3Pool) reclaim(reply chan h3AcquireResp) {
+	if resp := <-reply; resp.mc != nil {
+		p.release(resp.mc, nil)
 	}
 }
 
@@ -481,12 +494,15 @@ func h3CountLive(conns []*h3ManagedConn) int {
 }
 
 // h3PruneExpiredWaiters drops waiters whose ctx is already done, reusing the
-// slice's backing array.
+// slice's backing array. Each dropped waiter is still sent the one reply it is
+// owed: its caller's reclaim goroutine is blocked waiting for exactly one value,
+// and the send cannot block (cap-1, single use).
 func h3PruneExpiredWaiters(ws []h3AcquireReq) []h3AcquireReq {
 	out := ws[:0]
 	for _, w := range ws {
 		select {
 		case <-w.ctx.Done():
+			w.reply <- h3AcquireResp{err: w.ctx.Err()}
 		default:
 			out = append(out, w)
 		}
@@ -519,8 +535,9 @@ func (p *h3Pool) acquire(ctx context.Context) (*h3ManagedConn, error) {
 
 	select {
 	case p.acquireCh <- req:
+		// The actor now owns req and owes it exactly one reply.
 	case <-ctx.Done():
-		return nil, mapAcquireErr(ctx, acquireTimeoutActive)
+		return nil, mapAcquireErr(ctx, acquireTimeoutActive) // never accepted; nothing to reclaim
 	case <-p.closedCh:
 		return nil, ErrPoolClosed
 	}
@@ -532,8 +549,14 @@ func (p *h3Pool) acquire(ctx context.Context) (*h3ManagedConn, error) {
 		}
 		return resp.mc, resp.err
 	case <-ctx.Done():
+		// Both this case and the reply case can be ready at once (the actor may
+		// have just committed a conn to us); Go would pick between them at random.
+		// Hand the pending reply to reclaim so a conn committed to an acquire we
+		// are abandoning goes back to the pool instead of being stranded.
+		go p.reclaim(reply)
 		return nil, mapAcquireErr(ctx, acquireTimeoutActive)
 	case <-p.closedCh:
+		go p.reclaim(reply)
 		return nil, ErrPoolClosed
 	}
 }
