@@ -1,6 +1,7 @@
 package client
 
 import (
+	"crypto/tls"
 	"time"
 
 	"github.com/lodgvideon/poseidon-http-client/conn"
@@ -87,6 +88,19 @@ func NewPoolClient(addr string, dialer conn.Dialer, pool PoolOptions, opts ...Op
 		Transport: TransportPool,
 		Pool:      &p,
 		ConnOpts:  conn.ConnOptions{Dialer: dialer},
+	}, opts)
+}
+
+// NewH3Client builds a buffered HTTP/3 client: one QUIC connection to addr,
+// lazy-dialled on first request via http3.Dial. tlsConfig should set ServerName;
+// the "h3" ALPN token and TLS 1.3 minimum are applied automatically. Only the
+// buffered request path (Client.Do) is supported — DoStream and connection
+// pooling are not yet available for HTTP/3.
+func NewH3Client(addr string, tlsConfig *tls.Config, opts ...Option) (*Client, error) {
+	return buildClient(ClientOptions{
+		Addr:      addr,
+		Transport: TransportH3,
+		TLSConfig: tlsConfig,
 	}, opts)
 }
 

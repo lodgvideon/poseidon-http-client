@@ -110,4 +110,10 @@ var (
 	// transport does not implement; the request is rejected rather than
 	// corrupting the connection with a second request line.
 	ErrTrailersUnsupportedH1 = errors.New("client: HTTP/1.1 does not support request trailers")
+
+	// ErrTrailersUnsupportedH3 is returned when a request carrying trailers
+	// is sent over the buffered HTTP/3 transport. http3.Request has no request-
+	// trailer field, so the request is rejected rather than silently dropping
+	// the trailer section.
+	ErrTrailersUnsupportedH3 = errors.New("client: buffered HTTP/3 transport does not support request trailers")
 )
