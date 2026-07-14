@@ -235,6 +235,12 @@ func TestStartServerHandshake_FullHandshake(t *testing.T) {
 	if flight.HandshakeSealer == nil || flight.HandshakeOpener == nil {
 		t.Fatal("server did not install Handshake keys")
 	}
+	if len(flight.PeerTransportParams) == 0 {
+		t.Fatal("server did not capture the client's transport parameters")
+	}
+	if _, err := ParseTransportParams(flight.PeerTransportParams); err != nil {
+		t.Fatalf("captured client transport params do not parse: %v", err)
+	}
 
 	// The client sent its Handshake Finished during Establish; drain it and
 	// complete the server side.

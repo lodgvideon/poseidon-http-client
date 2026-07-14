@@ -158,6 +158,7 @@ type serverFlightSink struct {
 	appSealer       *Sealer
 	handshakeOpener *Opener
 	appOpener       *Opener
+	peerTP          []byte
 	complete        bool
 }
 
@@ -202,7 +203,10 @@ func (s *serverFlightSink) SetWriteKeys(l tls.QUICEncryptionLevel, suite uint16,
 	return nil
 }
 
-func (s *serverFlightSink) PeerTransportParameters([]byte) error { return nil }
+func (s *serverFlightSink) PeerTransportParameters(params []byte) error {
+	s.peerTP = append([]byte(nil), params...)
+	return nil
+}
 func (s *serverFlightSink) HandshakeComplete() error             { s.complete = true; return nil }
 
 // ServerFlight is the server's response to a client Initial and the state to
@@ -226,6 +230,10 @@ type ServerFlight struct {
 	AppOpener       *Opener
 	// Complete reports whether the TLS handshake has finished.
 	Complete bool
+	// PeerTransportParams is the client's raw QUIC transport parameters, delivered
+	// during the handshake (RFC 9000 §7.4); a server connection parses them for the
+	// client's flow-control and stream limits.
+	PeerTransportParams []byte
 	// SCID is the server's source connection ID used on the response packets.
 	SCID []byte
 
@@ -269,10 +277,11 @@ func StartServerHandshake(ci *ClientInitial, cfg *tls.Config, tp, scid []byte) (
 		Handshake:       hs,
 		HandshakeSealer: sink.handshakeSealer,
 		HandshakeOpener: sink.handshakeOpener,
-		AppSealer:       sink.appSealer,
-		AppOpener:       sink.appOpener,
-		SCID:            append([]byte(nil), scid...),
-		sink:            sink,
+		AppSealer:           sink.appSealer,
+		AppOpener:           sink.appOpener,
+		PeerTransportParams: sink.peerTP,
+		SCID:                append([]byte(nil), scid...),
+		sink:                sink,
 	}
 	// Initial packet: the ServerHello, addressed to the client's source CID.
 	if len(sink.crypto[spaceInitial]) > 0 {
