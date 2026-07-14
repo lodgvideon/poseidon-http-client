@@ -40,8 +40,14 @@ func (c *Client) serviceControl() error {
 	if err := c.readQPACKEncoder(); err != nil {
 		return err
 	}
+	if err := c.readQPACKDecoder(); err != nil {
+		return err
+	}
 	if c.decHasResidue.Load() {
 		c.flushQPACKDecoder() // flush any decoder-stream bytes a prior send left flow-control-blocked
+	}
+	if c.encHasResidue.Load() {
+		c.flushQPACKEncoderStream() // flush any encoder-stream inserts a prior send left flow-control-blocked
 	}
 	return c.checkCriticalStreams()
 }
@@ -149,20 +155,64 @@ func (c *Client) routeUni(typ uint64, s quicStream, rest []byte) error {
 	return nil
 }
 
-// applyServerSettings records the server settings the client acts on. Only
-// SETTINGS_MAX_FIELD_SECTION_SIZE (§4.2.2) currently bounds client behavior — it
-// caps the size of a request field section. The server's QPACK settings are
-// deliberately ignored: SETTINGS_QPACK_MAX_TABLE_CAPACITY bounds the table the
-// server maintains as decoder (relevant only if WE encoded dynamically, which we
-// do not), and the size of the table WE maintain for the server's encoder is
-// governed by the value WE advertise, not the server's. An absent value leaves the
-// field at its no-limit default (§7.2.4.1).
+// applyServerSettings records the server settings the client acts on.
+// SETTINGS_MAX_FIELD_SECTION_SIZE (§4.2.2) caps the size of a request field
+// section. SETTINGS_QPACK_MAX_TABLE_CAPACITY (RFC 9204 §3.2.3) bounds the encode-
+// side dynamic table WE maintain for the server's decoder (Q5): a non-zero value
+// installs that table (enableEncoderDynamic), so repeated request headers are
+// inserted and referenced; 0 (or absent) keeps the encoder static-only. The
+// server's SETTINGS_QPACK_BLOCKED_STREAMS is not used because our conservative
+// encoder never sends a section blocked on an unacknowledged insert. An absent
+// value leaves each field at its default (§7.2.4.1).
 func (c *Client) applyServerSettings(settings []Setting) {
+	var serverQPACKMaxCap uint64
 	for _, s := range settings {
-		if s.ID == SettingMaxFieldSectionSize {
+		switch s.ID {
+		case SettingMaxFieldSectionSize:
 			c.maxFieldSection.Store(s.Value) // reader writes; a Do reads (§3.5)
+		case SettingQPACKMaxTableCapacity:
+			serverQPACKMaxCap = s.Value
 		}
 	}
+	c.enableEncoderDynamic(serverQPACKMaxCap) // no-op when 0 / too small (§3.2.3)
+}
+
+// readQPACKDecoder applies the server's QPACK decoder-stream instructions (RFC
+// 9204 §4.4) to the encode-side state: an Insert Count Increment advances the
+// encoder's Known Received Count so those inserts become referenceable, and a
+// Section Acknowledgment / Stream Cancellation releases outstanding references (a
+// no-op in the eviction-free reference-after-ack profile). It mirrors
+// readQPACKEncoder: reader-owned, holding encMu only for the pure apply (no I/O,
+// no wait), so encMu stays a leaf lock. A partial trailing instruction is retained
+// in qpackDecBuf. A malformed instruction, a zero increment, or an acknowledgment
+// past the inserts we made is a QPACK_DECODER_STREAM_ERROR connection error (§6).
+// Before the encoder is installed (pre-SETTINGS, or a server capacity of 0), the
+// server has nothing to acknowledge, so any bytes are drained and discarded.
+func (c *Client) readQPACKDecoder() error {
+	if c.qpackDec == nil {
+		return nil
+	}
+	if data := c.qpackDec.Recv(); len(data) > 0 {
+		c.qpackDecBuf = append(c.qpackDecBuf, data...)
+	}
+	if len(c.qpackDecBuf) == 0 {
+		return nil
+	}
+	c.encMu.Lock()
+	if c.qpackEncoder == nil {
+		c.qpackDecBuf = c.qpackDecBuf[:0] // nothing to acknowledge yet; discard
+		c.encMu.Unlock()
+		return nil
+	}
+	n, perr := c.qpackEncoder.ParseDecoderInstructions(c.qpackDecBuf)
+	c.encMu.Unlock()
+	if n > 0 {
+		c.qpackDecBuf = append(c.qpackDecBuf[:0], c.qpackDecBuf[n:]...) // drop applied bytes; keep the partial tail
+	}
+	if perr != nil {
+		return c.connError(H3QpackDecoderStreamError)
+	}
+	return nil
 }
 
 // readControl parses frames off the server control stream: the mandatory first

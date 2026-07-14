@@ -369,16 +369,6 @@ func insertLiteral(name, value string) []byte {
 	return append(dst, value...)
 }
 
-// encodeRequiredInsertCount is the §4.5.1.1 encoding transform, used to prove
-// the decoder inverts it (kept in the test package: the wire encoder always
-// emits RIC 0 in this INERT build).
-func encodeRequiredInsertCount(ric, maxEntries uint64) uint64 {
-	if ric == 0 {
-		return 0
-	}
-	return (ric % (2 * maxEntries)) + 1
-}
-
 // FuzzRequiredInsertCount round-trips the §4.5.1.1 encode/decode over the valid
 // window (ReqInsertCount in (TotalInserts-MaxEntries, TotalInserts]); the
 // reconstruction must recover the original value across the 2*MaxEntries wrap.

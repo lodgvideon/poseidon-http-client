@@ -137,17 +137,19 @@ func (a connAdapter) AcceptUniStream() quicStream {
 
 // Client is a minimal HTTP/3 client over an established QUIC connection. It owns
 // the connection's control stream and its own QPACK instruction streams; each
-// request carries its own stack-local QPACK codecs (docs/HTTP3_DESIGN.md §3.5, PR
-// 2d), and the one shared piece — the connection-scoped QPACK dynamic table — is
-// guarded by qpackMu (the reader applies the server encoder stream under Lock, a
-// Do resolves references under RLock; RFC 9204 Q2). A dedicated reader goroutine
-// drives the QUIC engine and services the server control + QPACK encoder streams
-// for the connection's lifetime (§3.1). Do sends its own request frames and blocks
-// on per-stream wakeups, so N goroutines may call Do on one Client concurrently —
-// OpenStream's id/map mutation and every seal are under the QUIC c.mu, streams wake
-// independently, control state is reader-owned, and the shared dynamic table is
-// serialized by qpackMu (a leaf lock never nested with c.mu). Client is safe for
-// concurrent use.
+// request carries its own stack-local QPACK decoder scratch (docs/HTTP3_DESIGN.md
+// §3.5, PR 2d), while TWO pieces of QPACK state are connection-scoped and shared:
+// the decode-side dynamic table under qpackMu (the reader applies the server
+// encoder stream under Lock, a Do resolves references under RLock; RFC 9204 Q2),
+// and the encode-side dynamic table under encMu (a Do inserts + references while
+// encoding one request, the reader applies the server decoder stream; RFC 9204 Q5).
+// A dedicated reader goroutine drives the QUIC engine and services the server
+// control + both QPACK instruction streams for the connection's lifetime (§3.1). Do
+// sends its own request frames and blocks on per-stream wakeups, so N goroutines may
+// call Do on one Client concurrently — OpenStream's id/map mutation and every seal
+// are under the QUIC c.mu, streams wake independently, control state is reader-owned,
+// the shared decode table is serialized by qpackMu and the shared encode table by
+// encMu (both leaf locks never nested with c.mu). Client is safe for concurrent use.
 type Client struct {
 	conn quicConn
 
@@ -166,6 +168,7 @@ type Client struct {
 	qpackEnc      quicStream // the server QPACK encoder stream (RFC 9204 §4.2)
 	qpackDec      quicStream // the server QPACK decoder stream (RFC 9204 §4.2)
 	qpackEncBuf   []byte     // reader-owned: server encoder-stream bytes not yet a whole instruction
+	qpackDecBuf   []byte     // reader-owned: server decoder-stream bytes not yet a whole instruction (Q5)
 	settingsRead  bool       // the mandatory first SETTINGS frame has been read
 
 	// The client's own QPACK instruction streams (RFC 9204 §4.2), opened at
@@ -191,6 +194,25 @@ type Client struct {
 	// mechanisms never double-count the same insert (which would push the encoder's
 	// Known Received Count past the inserts it made — a QPACK_DECODER_STREAM_ERROR).
 	knownReceivedCount uint64
+
+	// Encode-side dynamic QPACK (RFC 9204 §2.1, Q5). The client inserts repeated
+	// request-header entries into its OWN encoder dynamic table — the table the
+	// SERVER maintains as decoder — sends Insert instructions on our encoder stream
+	// (clientQPACKEnc), and references acknowledged entries in request field
+	// sections. qpackEncoder is created only once the server's SETTINGS reveal a
+	// non-zero SETTINGS_QPACK_MAX_TABLE_CAPACITY (the encoder MUST NOT insert before
+	// it knows the decoder's capacity); until then, and against a server that
+	// advertises 0, it stays nil and every request encodes static-only. All encoder
+	// state — the table, its Known Received Count, and the encoder-stream write
+	// buffer — is guarded by encMu, a leaf lock (never nested with the QUIC c.mu,
+	// which the best-effort encoder-stream Send takes beneath it, and never held
+	// across a wait): a Do holds it to encode one request, the reader holds it to
+	// apply the server's decoder-stream acknowledgments (advancing the Known
+	// Received Count) and to install the encoder when SETTINGS arrive.
+	encMu         sync.Mutex
+	qpackEncoder  *qpack.Encoder // nil ⇒ static-only encoding (pre-SETTINGS or server capacity 0)
+	encWriteBuf   []byte         // encoder-stream bytes accepted for send but not yet flushed (flow-control residue)
+	encHasResidue atomic.Bool    // true when encWriteBuf holds unflushed bytes — lets the reader skip the lock otherwise
 
 	// Shared connection-scoped QPACK dynamic table (RFC 9204 §3.2). This is the
 	// ONE piece of QPACK state shared across goroutines: the reader WRITES it
@@ -301,31 +323,31 @@ func newClient(conn quicConn, settings []Setting) (*Client, error) {
 	}
 	c.clientQPACKEnc = qenc
 	c.clientQPACKDec = qdec
-	// Seed the decoder stream's type byte through the same serialized path the
-	// reader's Insert Count Increment uses, so it is guaranteed to be the first
-	// byte on the stream even though the reader goroutine starts below. Best-effort
+	// Seed BOTH QPACK instruction streams' type bytes through the same serialized
+	// write buffers the reader later appends to, so each type byte is guaranteed to
+	// be the first byte on its stream even though the reader goroutine starts below.
+	// The decoder stream's buffer carries the reader's Insert Count Increment; the
+	// encoder stream's buffer carries the reader's Set Dynamic Table Capacity +
+	// inserts once the server's SETTINGS enable the encode side (Q5) — routing the
+	// encoder type byte here (rather than a separate startup send) closes the race
+	// where the reader could flush Set Capacity ahead of the type byte. Best-effort
 	// (non-blocking): any flow-control residue is flushed on a later reader pass.
 	c.qpackDecWrite(AppendClientQPACKStream(nil, StreamTypeQPACKDecoder))
+	c.encMu.Lock()
+	c.encWriteBuf = append(c.encWriteBuf, AppendClientQPACKStream(nil, StreamTypeQPACKEncoder)...)
+	c.flushEncWriteLocked()
+	c.encMu.Unlock()
 
 	// Start the reader BEFORE sending SETTINGS (docs/HTTP3_DESIGN.md §5, ordering
 	// fix): a flow-control-blocked SETTINGS send is unblocked by the peer's MAX_DATA
 	// that the reader processes — otherwise a startup deadlock.
 	go c.readLoop()
-	startup := [...]struct {
-		stream quicStream
-		data   []byte
-	}{
-		{control, AppendClientControlStream(nil, settings)},
-		{qenc, AppendClientQPACKStream(nil, StreamTypeQPACKEncoder)},
-	}
-	for _, s := range startup {
-		if err := c.sendAll(c.connCtx, s.stream, s.data, false); err != nil {
-			// The reader is running; tear it down so it is not leaked.
-			c.connCancel()
-			_ = c.conn.CloseWithError(true, H3NoError, "")
-			<-c.readerDone
-			return nil, err
-		}
+	if err := c.sendAll(c.connCtx, control, AppendClientControlStream(nil, settings), false); err != nil {
+		// The reader is running; tear it down so it is not leaked.
+		c.connCancel()
+		_ = c.conn.CloseWithError(true, H3NoError, "")
+		<-c.readerDone
+		return nil, err
 	}
 	return c, nil
 }
@@ -498,6 +520,95 @@ func (c *Client) flushQPACKDecoder() {
 	c.decWMu.Lock()
 	c.flushDecWriteLocked()
 	c.decWMu.Unlock()
+}
+
+// enableEncoderDynamic installs the connection's encode-side dynamic table once
+// the server's SETTINGS reveal its SETTINGS_QPACK_MAX_TABLE_CAPACITY (RFC 9204
+// §3.2.3, Q5). It is a no-op when the server advertises a capacity too small to
+// hold any entry (below 32, so MaxEntries would be 0), leaving the encoder static-
+// only. Our table capacity is min(server max, our own qpackDynamicTableCapacity),
+// and a Set Dynamic Table Capacity instruction (§4.3.1) is queued as the first
+// bytes on our encoder stream. Idempotent: the server sends SETTINGS once, but a
+// second call is guarded. Runs on the reader goroutine (applyServerSettings),
+// outside c.mu; encMu is a leaf lock.
+func (c *Client) enableEncoderDynamic(serverMaxCapacity uint64) {
+	if serverMaxCapacity < 32 {
+		return // static-only: no whole entry fits, dynamic referencing impossible
+	}
+	chosen := serverMaxCapacity
+	if chosen > qpackDynamicTableCapacity {
+		chosen = qpackDynamicTableCapacity // our table need not be as large as the server permits
+	}
+	c.encMu.Lock()
+	defer c.encMu.Unlock()
+	if c.qpackEncoder != nil {
+		return // already installed (SETTINGS is processed once)
+	}
+	enc, err := qpack.NewDynamicEncoder(serverMaxCapacity, chosen)
+	if err != nil {
+		return // stay static-only rather than risk a malformed encoder table
+	}
+	c.qpackEncoder = enc
+	c.encWriteBuf = enc.DrainEncoderInstructions(c.encWriteBuf) // the Set Dynamic Table Capacity instruction
+	c.flushEncWriteLocked()
+}
+
+// flushEncWriteLocked sends as much of encWriteBuf as the encoder stream will
+// accept without blocking, retaining any unsent tail (RFC 9204 §4.2). Assumes
+// encMu is held. Best-effort like the decoder-stream flush: the Send never parks,
+// so encMu is never held across a wait, and the retained residue preserves the
+// insertion order the byte stream requires.
+func (c *Client) flushEncWriteLocked() {
+	if c.clientQPACKEnc == nil || len(c.encWriteBuf) == 0 {
+		return
+	}
+	n, err := c.clientQPACKEnc.Send(c.encWriteBuf, false)
+	if err != nil {
+		return // stream/connection error; the reader teardown handles it
+	}
+	if n >= len(c.encWriteBuf) {
+		c.encWriteBuf = c.encWriteBuf[:0]
+	} else {
+		c.encWriteBuf = append(c.encWriteBuf[:0], c.encWriteBuf[n:]...) // left-shift the residue
+	}
+	c.encHasResidue.Store(len(c.encWriteBuf) > 0)
+}
+
+// flushQPACKEncoderStream flushes any flow-control residue on our encoder stream.
+// The reader calls it once per service pass, gated by encHasResidue so the common
+// no-residue path skips the lock entirely.
+func (c *Client) flushQPACKEncoderStream() {
+	c.encMu.Lock()
+	c.flushEncWriteLocked()
+	c.encMu.Unlock()
+}
+
+// encodeRequestHeaders builds req's HEADERS frame. When the server enabled dynamic
+// QPACK it uses the connection's shared encoder dynamic table (Q5): repeated header
+// entries are inserted (with the resulting Insert instructions queued on our
+// encoder stream, in insertion order) and acknowledged entries are referenced. It
+// holds encMu for the whole encode so concurrent Do calls serialize their table
+// inserts and encoder-stream writes; the encode is CPU-only and the encoder-stream
+// flush is best-effort, so encMu is never held across a wait. When the encoder is
+// static-only (pre-SETTINGS or server capacity 0) it produces exactly the
+// static-table output — byte-for-byte today's encoding — via a throwaway encoder.
+func (c *Client) encodeRequestHeaders(req *Request) ([]byte, error) {
+	c.encMu.Lock()
+	defer c.encMu.Unlock()
+	if c.qpackEncoder == nil {
+		var enc qpack.Encoder // static-only profile (nil dynamic table)
+		return req.EncodeHeaders(&enc, nil, c.maxFieldSection.Load())
+	}
+	frame, err := req.EncodeHeaders(c.qpackEncoder, nil, c.maxFieldSection.Load())
+	if err != nil {
+		return nil, err
+	}
+	before := len(c.encWriteBuf)
+	c.encWriteBuf = c.qpackEncoder.DrainEncoderInstructions(c.encWriteBuf)
+	if len(c.encWriteBuf) > before {
+		c.flushEncWriteLocked()
+	}
+	return frame, nil
 }
 
 // qpackAckInserts emits an Insert Count Increment (RFC 9204 §4.4.3) covering the
@@ -799,16 +910,14 @@ func (c *Client) sendRequest(ctx context.Context, stream quicStream, req *Reques
 }
 
 func (c *Client) roundTrip(ctx context.Context, stream quicStream, req *Request) (resp *Response, body []byte, err error) {
-	// Per-request QPACK codecs (docs/HTTP3_DESIGN.md §5, PR 2d): the encoder and the
-	// decoder's Huffman scratch are stack-local, so N concurrent Do never share
-	// them. The one piece they DO share is the connection-scoped dynamic table,
-	// which each DecodeFieldSection reads under qpackMu.RLock (dispatchFrame). The
-	// decoder holds Huffman scratch buffers that the slices it emits alias, so a
-	// shared decoder would let one Do's decoded headers be overwritten by another —
-	// per-request is mandatory, not an optimization.
-	var enc qpack.Encoder
+	// Per-request QPACK decoder (docs/HTTP3_DESIGN.md §5, PR 2d): its Huffman scratch
+	// is stack-local, so N concurrent Do never share it (a shared decoder would let
+	// one Do's decoded headers, which alias that scratch, be overwritten by another —
+	// per-request is mandatory). The encoder is the OTHER shared piece (Q5): the
+	// connection-scoped dynamic table, serialized inside encodeRequestHeaders under
+	// encMu, so repeated headers across concurrent requests build one shared table.
 	var dec qpack.Decoder
-	frame, eerr := req.EncodeHeaders(&enc, nil, c.maxFieldSection.Load())
+	frame, eerr := c.encodeRequestHeaders(req)
 	if eerr != nil {
 		return nil, nil, eerr
 	}
