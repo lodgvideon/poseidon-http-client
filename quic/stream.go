@@ -95,11 +95,16 @@ func (s *Stream) Recv() []byte {
 	return s.recvLocked()
 }
 
-// recvLocked is Recv's body. Assumes s.conn.mu is held.
+// recvLocked is Recv's body. Assumes s.conn.mu is held. Consuming bytes queues the
+// credit grants in pendingCtrl (onStreamConsumed); flushControl then emits them on
+// this consuming goroutine before Recv releases c.mu, so a flow-control-blocked
+// peer is unblocked without waiting for the parked reader's next flush
+// (docs/HTTP3_DESIGN.md §4 INV-3).
 func (s *Stream) recvLocked() []byte {
 	data := s.recv.read()
 	if len(data) > 0 {
 		s.conn.onStreamConsumed(s, uint64(len(data)))
+		_ = s.conn.flushControl() // grant our own receive credit now (INV-3)
 	}
 	return data
 }

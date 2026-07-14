@@ -131,6 +131,17 @@ type Conn struct {
 	pendingCtrl      []byte // app-space control frames to send (MAX_DATA/MAX_STREAM_DATA)
 	pathRespPending  bool   // pendingCtrl holds a PATH_RESPONSE; its datagram must reach 1200 (§8.2.2)
 
+	// armedReadDeadline is the read deadline the reader published before parking in
+	// the blocking pc.Read (docs/HTTP3_DESIGN.md §3.2). A Do-side send epilogue may
+	// shorten it (rearmReadDeadline, §4 INV-4) so the parked reader wakes to run
+	// PTO/loss detection instead of sleeping to the idle scale. Zero means no reader
+	// has parked yet (hand-built test conns, or before the first Poll).
+	armedReadDeadline time.Time
+	// readWatchdogStarted guards the one connection-lifetime goroutine that pokes the
+	// read deadline into the past on connCtx cancel, so a blocked pc.Read unblocks on
+	// Close (§3.1). Guarded by c.mu; started lazily on the first Poll with a live ctx.
+	readWatchdogStarted bool
+
 	// AEAD usage limits (RFC 9001 §6.6). This client supports only AES-GCM and is
 	// a pure key-update responder, so on reaching a limit it must close with
 	// AEAD_LIMIT_REACHED rather than rotate keys itself.

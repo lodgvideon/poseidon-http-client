@@ -190,6 +190,13 @@ func (c *Conn) writeAppFrames(frames []byte, retrans []retransFrame) error {
 	if err != nil {
 		return err
 	}
-	_, err = c.pc.Write(pkt)
-	return err
+	if _, err := c.pc.Write(pkt); err != nil {
+		return err
+	}
+	// A Do-side send put an ack-eliciting packet in flight, shortening the
+	// loss-detection deadline below what the parked reader armed; shorten the read
+	// deadline so the reader wakes to run PTO/loss detection (docs/HTTP3_DESIGN.md
+	// §4 INV-4). A no-op when no reader has parked (armedReadDeadline zero).
+	c.rearmReadDeadline()
+	return nil
 }

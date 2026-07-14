@@ -76,7 +76,7 @@ func dialConn(ctx context.Context, pc quic.PacketConn, cfg *tls.Config) (*Client
 		_ = pc.Close()
 		return nil, err
 	}
-	client, err := newClient(ctx, connAdapter{conn}, defaultSettings)
+	client, err := newClient(connAdapter{conn}, defaultSettings)
 	if err != nil {
 		_ = pc.Close()
 		return nil, err

@@ -159,7 +159,7 @@ func (c *Conn) appSendPhase() bool {
 
 // discardStaleKeys drops the retained previous-generation read Opener once its
 // 3×PTO retention window has elapsed (RFC 9001 §6.3). Assumes c.mu is held
-// (called from pollLocked).
+// (called from the Poll receive path).
 func (c *Conn) discardStaleKeys() {
 	if c.ku != nil && c.ku.prev != nil && c.clock().After(c.ku.prevUntil) {
 		c.ku.prev = nil
