@@ -1,6 +1,8 @@
 package quic
 
 import (
+	"context"
+	"crypto/tls"
 	"errors"
 	"net"
 	"os"
@@ -24,6 +26,102 @@ func loopbackPair(t *testing.T) (shared, peer *net.UDPConn) {
 	}
 	t.Cleanup(func() { _ = peer.Close() })
 	return shared, peer
+}
+
+// TestListener_AcceptAndRoundTrip runs a real client Conn against a Listener over
+// loopback UDP: the listener accepts the client's Initial, drives the handshake,
+// and hands back a server Conn; then the two exchange a request and a response
+// over 1-RTT, each side driven by its own Poll loop. This is the end-to-end cover
+// for the listener, the per-connection socket view, and the server-role Conn.
+func TestListener_AcceptAndRoundTrip(t *testing.T) {
+	cert, pool := genServerCert(t)
+	l, err := Listen("127.0.0.1:0", &tls.Config{Certificates: []tls.Certificate{cert}},
+		ServerTransportParams{MaxStreamsBidi: 16, MaxStreamsUni: 4})
+	if err != nil {
+		t.Fatalf("Listen: %v", err)
+	}
+	t.Cleanup(func() { _ = l.Close() })
+
+	// A connected *net.UDPConn is a PacketConn (Read/Write/Close) and honours read
+	// deadlines, so the client needs no adapter.
+	uc, err := net.DialUDP("udp", nil, l.Addr().(*net.UDPAddr))
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	t.Cleanup(func() { _ = uc.Close() })
+
+	clientTP := AppendTransportParams(nil, LocalTransportParams{
+		InitialMaxData:                1 << 20,
+		InitialMaxStreamDataBidiLocal: 1 << 20, // the server's send window for the response
+		InitialMaxStreamDataUni:       1 << 20,
+		InitialMaxStreamsUni:          4,
+	})
+	client, err := NewConn(uc, &tls.Config{ServerName: "example.com", RootCAs: pool}, clientTP)
+	if err != nil {
+		t.Fatalf("NewConn: %v", err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	if err := client.Establish(ctx); err != nil {
+		t.Fatalf("client Establish against listener: %v", err)
+	}
+	sc, err := l.Accept(ctx)
+	if err != nil {
+		t.Fatalf("Accept: %v", err)
+	}
+	if !sc.isServer || sc.oneRTTSealer == nil {
+		t.Fatal("accepted connection is not an established server connection")
+	}
+
+	// The server serves exactly one request: poll until a request stream arrives,
+	// read it, answer it.
+	const want = "200 OK from listener"
+	served := make(chan error, 1)
+	go func() {
+		for {
+			if err := sc.Poll(ctx); err != nil {
+				served <- err
+				return
+			}
+			rs := sc.AcceptBidiStream()
+			if rs == nil {
+				continue
+			}
+			if got := string(rs.Recv()); got != "GET /" {
+				served <- errors.New("server read request " + got + ", want GET /")
+				return
+			}
+			_, err := rs.Send([]byte(want), true)
+			served <- err
+			return
+		}
+	}()
+
+	reqStream, err := client.OpenStream()
+	if err != nil {
+		t.Fatalf("client OpenStream: %v", err)
+	}
+	if _, err := reqStream.Send([]byte("GET /"), true); err != nil {
+		t.Fatalf("client Send request: %v", err)
+	}
+	if err := <-served; err != nil {
+		t.Fatalf("server: %v", err)
+	}
+
+	// Poll the client until the response lands on its stream.
+	var got string
+	for deadline := time.Now().Add(10 * time.Second); time.Now().Before(deadline); {
+		if err := client.Poll(ctx); err != nil {
+			t.Fatalf("client Poll: %v", err)
+		}
+		if got = string(reqStream.Recv()); got != "" {
+			break
+		}
+	}
+	if got != want {
+		t.Fatalf("client read response %q, want %q", got, want)
+	}
 }
 
 // TestConnPacketConn_WriteReachesPeer checks a write goes out of the shared
