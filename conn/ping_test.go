@@ -58,8 +58,14 @@ func TestConn_Ping_RTT(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Ping: %v", err)
 	}
-	if rtt <= 0 {
-		t.Errorf("RTT = %v, want > 0", rtt)
+	// A zero RTT is a legitimate measurement, not a failure. On coarse-resolution
+	// monotonic clocks (notably Windows) a fast in-memory loopback ping round-trip
+	// can complete within a single clock tick, so time.Since(start) rounds to
+	// exactly 0. Only a negative RTT would signal a real bug (a clock running
+	// backwards). The upper bound below still proves an RTT was measured in
+	// loopback range.
+	if rtt < 0 {
+		t.Errorf("RTT = %v, want >= 0", rtt)
 	}
 	if rtt >= time.Second {
 		t.Errorf("RTT = %v, want < 1s (loopback server)", rtt)
@@ -212,8 +218,11 @@ func TestConn_DeliverPingAck_UnsolicitedIsNoop(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Ping after unsolicited ACK delivery: %v", err)
 	}
-	if rtt <= 0 {
-		t.Errorf("RTT = %v, want > 0", rtt)
+	// See TestConn_Ping_RTT: a zero RTT is valid on coarse-resolution clocks;
+	// only a negative RTT indicates a bug. The err == nil check above is what
+	// proves the unsolicited ACK was a no-op (a real Ping still succeeded).
+	if rtt < 0 {
+		t.Errorf("RTT = %v, want >= 0", rtt)
 	}
 }
 
