@@ -381,84 +381,13 @@ func (c *Client) roundTrip(ctx context.Context, stream quicStream, req *Request)
 
 	var fr FrameReader
 	fr.SetMaxFrameLen(maxResponseBytes) // refuse a frame larger than the whole budget before buffering it
-	var resp *Response
-	var interim []*Response
-	var body []byte
-	var total uint64 // header, body, trailer, and 1xx payload bytes retained so far
-	var trailersSeen bool
+	var rb respBuilder
 	for {
 		if data := stream.Recv(); len(data) > 0 {
 			fr.Feed(data)
 		}
-		for {
-			typ, payload, rerr := fr.ReadFrame()
-			if errors.Is(rerr, ErrNeedMore) {
-				break // wait for more stream bytes
-			}
-			if rerr != nil {
-				// An oversized frame (ErrH3FrameTooLarge) — abort the request rather
-				// than buffer it. Mapped to ErrResponseTooLarge so Do aborts the stream.
-				return nil, nil, ErrResponseTooLarge
-			}
-			switch typ {
-			case FrameHeaders:
-				// Message order (RFC 9114 §4.1): (1xx HEADERS)* final HEADERS
-				// DATA* trailer-HEADERS?. A HEADERS after the trailers is an invalid
-				// frame sequence — a connection error, not a stream error.
-				if trailersSeen {
-					return nil, nil, c.connError(H3FrameUnexpected)
-				}
-				total += uint64(len(payload))
-				if total > maxResponseBytes {
-					return nil, nil, ErrResponseTooLarge // retained header/body/trailer bytes over the cap
-				}
-				if resp == nil {
-					r, derr := DecodeResponseHeaders(&c.dec, payload)
-					if derr != nil {
-						return c.decodeError(derr)
-					}
-					if r.Status < 200 {
-						if len(interim) >= maxInterimResponses {
-							return nil, nil, ErrResponseTooLarge // a 1xx flood (RFC 9114 §4.1)
-						}
-						interim = append(interim, r) // informational 1xx; keep reading
-					} else {
-						resp = r
-					}
-				} else {
-					tr, derr := DecodeTrailers(&c.dec, payload)
-					if derr != nil {
-						return c.decodeError(derr)
-					}
-					resp.Trailers = tr
-					trailersSeen = true
-				}
-			case FrameData:
-				if resp == nil || trailersSeen {
-					// DATA before the final response, after a 1xx (which has no body),
-					// or after the trailers is an invalid frame sequence (RFC 9114
-					// §4.1) — a connection error, not a stream error.
-					return nil, nil, c.connError(H3FrameUnexpected)
-				}
-				total += uint64(len(payload))
-				if total > maxResponseBytes {
-					return nil, nil, ErrResponseTooLarge // retained header/body/trailer bytes over the cap
-				}
-				body = append(body, payload...)
-			case FrameSettings, FrameCancelPush, FrameGoaway, FrameMaxPushID, 0x02, 0x06, 0x08, 0x09:
-				// Control-stream-only and reserved HTTP/2-carryover frame types
-				// MUST NOT appear on a request stream (SETTINGS §7.2.4, CANCEL_PUSH
-				// §7.2.3, GOAWAY §7.2.6, MAX_PUSH_ID §7.2.7, reserved §7.2.8): a
-				// connection error, so close the connection rather than the stream.
-				return nil, nil, c.connError(H3FrameUnexpected)
-			case FramePushPromise:
-				// Server push is disabled — the client never sends MAX_PUSH_ID — so
-				// a PUSH_PROMISE is invalid (RFC 9114 §4.6, §7.2.5): a connection error.
-				return nil, nil, c.connError(H3IDError)
-			default:
-				// GREASE (0x1f·N+0x21) and other genuinely-unknown frame types on a
-				// request stream MUST be ignored (§9, §7.2.8).
-			}
+		if err := c.consumeFrames(&fr, &rb); err != nil {
+			return nil, nil, err
 		}
 		// One locked snapshot of the receive side (docs/HTTP3_DESIGN.md §3.4, F5).
 		finished, reset, code := stream.RecvState()
@@ -490,7 +419,105 @@ func (c *Client) roundTrip(ctx context.Context, stream quicStream, req *Request)
 		}
 		break
 	}
-	return finalizeResponse(resp, body, req, interim)
+	return finalizeResponse(rb.resp, rb.body, req, rb.interim)
+}
+
+// respBuilder accumulates a decoded HTTP/3 response as request-stream frames are
+// parsed across successive FrameReader feeds (see roundTrip / consumeFrames).
+type respBuilder struct {
+	resp         *Response
+	interim      []*Response // informational 1xx responses, in receive order
+	body         []byte
+	total        uint64 // header, body, trailer, and 1xx payload bytes retained so far
+	trailersSeen bool
+}
+
+// consumeFrames reads and dispatches every complete frame currently buffered in
+// fr, accumulating into rb. It returns nil when the reader needs more stream
+// bytes (ErrNeedMore) or after the buffer drains, and a non-nil error — already
+// scoped to the right connection/stream level — on any protocol violation or an
+// oversized frame (mapped to ErrResponseTooLarge).
+func (c *Client) consumeFrames(fr *FrameReader, rb *respBuilder) error {
+	for {
+		typ, payload, rerr := fr.ReadFrame()
+		if errors.Is(rerr, ErrNeedMore) {
+			return nil // wait for more stream bytes
+		}
+		if rerr != nil {
+			// An oversized frame (ErrH3FrameTooLarge) — abort rather than buffer it.
+			return ErrResponseTooLarge
+		}
+		if err := c.dispatchFrame(rb, typ, payload); err != nil {
+			return err
+		}
+	}
+}
+
+// dispatchFrame folds one request-stream frame into rb, enforcing HTTP/3 message
+// order and the response-size caps (RFC 9114 §4.1). It returns a scoped error for
+// an invalid frame sequence (connection error), an oversized response
+// (ErrResponseTooLarge), or a header decode failure; nil otherwise.
+func (c *Client) dispatchFrame(rb *respBuilder, typ uint64, payload []byte) error {
+	switch typ {
+	case FrameHeaders:
+		// Message order (RFC 9114 §4.1): (1xx HEADERS)* final HEADERS DATA*
+		// trailer-HEADERS?. A HEADERS after the trailers is an invalid frame
+		// sequence — a connection error, not a stream error.
+		if rb.trailersSeen {
+			return c.connError(H3FrameUnexpected)
+		}
+		rb.total += uint64(len(payload))
+		if rb.total > maxResponseBytes {
+			return ErrResponseTooLarge // retained header/body/trailer bytes over the cap
+		}
+		if rb.resp == nil {
+			r, derr := DecodeResponseHeaders(&c.dec, payload)
+			if derr != nil {
+				_, _, e := c.decodeError(derr)
+				return e
+			}
+			if r.Status < 200 {
+				if len(rb.interim) >= maxInterimResponses {
+					return ErrResponseTooLarge // a 1xx flood (RFC 9114 §4.1)
+				}
+				rb.interim = append(rb.interim, r) // informational 1xx; keep reading
+			} else {
+				rb.resp = r
+			}
+		} else {
+			tr, derr := DecodeTrailers(&c.dec, payload)
+			if derr != nil {
+				_, _, e := c.decodeError(derr)
+				return e
+			}
+			rb.resp.Trailers = tr
+			rb.trailersSeen = true
+		}
+	case FrameData:
+		if rb.resp == nil || rb.trailersSeen {
+			// DATA before the final response, after a 1xx (which has no body), or
+			// after the trailers is an invalid frame sequence (RFC 9114 §4.1).
+			return c.connError(H3FrameUnexpected)
+		}
+		rb.total += uint64(len(payload))
+		if rb.total > maxResponseBytes {
+			return ErrResponseTooLarge // retained header/body/trailer bytes over the cap
+		}
+		rb.body = append(rb.body, payload...)
+	case FrameSettings, FrameCancelPush, FrameGoaway, FrameMaxPushID, 0x02, 0x06, 0x08, 0x09:
+		// Control-stream-only and reserved HTTP/2-carryover frame types MUST NOT
+		// appear on a request stream (SETTINGS §7.2.4, CANCEL_PUSH §7.2.3, GOAWAY
+		// §7.2.6, MAX_PUSH_ID §7.2.7, reserved §7.2.8): a connection error.
+		return c.connError(H3FrameUnexpected)
+	case FramePushPromise:
+		// Server push is disabled — the client never sends MAX_PUSH_ID — so a
+		// PUSH_PROMISE is invalid (RFC 9114 §4.6, §7.2.5): a connection error.
+		return c.connError(H3IDError)
+	default:
+		// GREASE (0x1f·N+0x21) and other genuinely-unknown frame types on a request
+		// stream MUST be ignored (§9, §7.2.8).
+	}
+	return nil
 }
 
 // finalizeResponse validates a fully received response and returns it, or
