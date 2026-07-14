@@ -147,7 +147,33 @@ func ParseTransportParams(raw []byte) (TransportParams, error) {
 }
 
 // set stores or validates one parameter. Unhandled identifiers are ignored.
+// setStreamData handles the connection- and stream-level flow-control and
+// stream-count transport parameters, which are all plain (bounded) varints. It
+// reports whether id named one of them, so set can dispatch the rest.
+func (tp *TransportParams) setStreamData(id uint64, value []byte) (handled bool, err error) {
+	switch id {
+	case tpInitialMaxData:
+		return true, tp.setUint(value, &tp.InitialMaxData)
+	case tpInitialMaxStreamDataBidiRemote:
+		return true, tp.setUint(value, &tp.InitialMaxStreamDataBidiRemote)
+	case tpInitialMaxStreamDataBidiLocal:
+		return true, tp.setUint(value, &tp.InitialMaxStreamDataBidiLocal)
+	case tpInitialMaxStreamDataUni:
+		return true, tp.setUint(value, &tp.InitialMaxStreamDataUni)
+	case tpInitialMaxStreamsBidi:
+		// A max_streams value greater than 2^60 is invalid (RFC 9000 §4.6): it
+		// implies a stream ID that cannot be expressed as a QUIC varint.
+		return true, tp.setBoundedUint(value, &tp.InitialMaxStreamsBidi, maxStreamsLimit)
+	case tpInitialMaxStreamsUni:
+		return true, tp.setBoundedUint(value, &tp.InitialMaxStreamsUni, maxStreamsLimit)
+	}
+	return false, nil
+}
+
 func (tp *TransportParams) set(id uint64, value []byte) error {
+	if handled, err := tp.setStreamData(id, value); handled {
+		return err
+	}
 	switch id {
 	case tpMaxIdleTimeout:
 		v, ok := tpReadUint(value)
@@ -168,20 +194,6 @@ func (tp *TransportParams) set(id uint64, value []byte) error {
 		}
 		copy(tp.StatelessResetToken[:], value)
 		tp.HaveStatelessResetToken = true
-	case tpInitialMaxData:
-		return tp.setUint(value, &tp.InitialMaxData)
-	case tpInitialMaxStreamDataBidiRemote:
-		return tp.setUint(value, &tp.InitialMaxStreamDataBidiRemote)
-	case tpInitialMaxStreamDataBidiLocal:
-		return tp.setUint(value, &tp.InitialMaxStreamDataBidiLocal)
-	case tpInitialMaxStreamsBidi:
-		// A max_streams value greater than 2^60 is invalid (RFC 9000 §4.6): it
-		// implies a stream ID that cannot be expressed as a QUIC varint.
-		return tp.setBoundedUint(value, &tp.InitialMaxStreamsBidi, maxStreamsLimit)
-	case tpInitialMaxStreamDataUni:
-		return tp.setUint(value, &tp.InitialMaxStreamDataUni)
-	case tpInitialMaxStreamsUni:
-		return tp.setBoundedUint(value, &tp.InitialMaxStreamsUni, maxStreamsLimit)
 	case tpMaxUDPPayloadSize:
 		v, ok := tpReadUint(value)
 		if !ok || v < 1200 {

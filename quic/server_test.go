@@ -180,7 +180,12 @@ func TestSealPacket_BadPNLen(t *testing.T) {
 // server's flight, and the server completes when fed the client's Finished,
 // installing 1-RTT keys. End-to-end cover for AcceptInitial + StartServerHandshake
 // + HandleClientHandshake + SealPacket + NewServerHandshake.
-func TestStartServerHandshake_FullHandshake(t *testing.T) {
+// setupServerConn runs a full handshake between a real client Conn and the
+// server-role primitives, completes the server side, and wraps it in a server
+// Conn via NewServerConn. It returns the connected client and server connections
+// and the in-memory datagram channels between them.
+func setupServerConn(t *testing.T) (*Conn, *Conn, chan []byte, chan []byte) {
+	t.Helper()
 	cert, pool := genServerCert(t)
 	clientTP := concat(
 		tpInt(tpInitialMaxData, 1<<20),
@@ -273,6 +278,16 @@ drain:
 	if err != nil {
 		t.Fatalf("NewServerConn: %v", err)
 	}
+	return client, sc, toServer, fromServer
+}
+
+// TestStartServerHandshake_FullHandshake checks the connected state of a server
+// connection built from a completed handshake against a real client.
+func TestStartServerHandshake_FullHandshake(t *testing.T) {
+	client, sc, _, _ := setupServerConn(t)
+	if !client.handshakeComplete {
+		t.Fatal("client handshake did not complete")
+	}
 	if !sc.isServer {
 		t.Error("NewServerConn: isServer = false")
 	}
@@ -285,11 +300,15 @@ drain:
 	if sc.connMax == 0 {
 		t.Error("NewServerConn: connMax (peer InitialMaxData) not seeded")
 	}
+}
 
-	// 1-RTT request path: the client seals a STREAM frame on bidi stream 0 with its
-	// real 1-RTT sealer; the server decrypts it (its read keys match the client's
-	// write keys), accepts the request stream, and reads the data through its
-	// receive path.
+// TestServerConn_RequestResponseRoundTrip drives a full 1-RTT request/response
+// between a real client Conn and a server Conn.
+func TestServerConn_RequestResponseRoundTrip(t *testing.T) {
+	client, sc, _, fromServer := setupServerConn(t)
+
+	// Request: the client seals a STREAM frame on bidi stream 0 with its real 1-RTT
+	// sealer; the server decrypts it, accepts the request stream, and reads it.
 	req := AppendStream(nil, 0, 0, true, []byte("GET /"))
 	pkt, err := SealPacket(nil, client.oneRTTSealer, PacketShort, sc.scid, nil, nil, 0, 4, req)
 	if err != nil {
@@ -310,9 +329,8 @@ drain:
 		t.Fatalf("server read request %q, want %q", got, "GET /")
 	}
 
-	// 1-RTT response path: the server writes a response on the request stream via
-	// its real send path (seal + flush to its PacketConn); the client opens its
-	// side of the stream, decrypts the response, and reads it.
+	// Response: the server writes on the request stream via its real send path; the
+	// client opens its side, decrypts the response, and reads it.
 	reqStream, err := client.OpenStream()
 	if err != nil {
 		t.Fatalf("client OpenStream: %v", err)
