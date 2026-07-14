@@ -19,6 +19,29 @@ func (p *countingPC) Write(b []byte) (int, error) { p.datagrams.Add(1); return l
 func (p *countingPC) Read([]byte) (int, error)    { return 0, io.EOF }
 func (p *countingPC) Close() error                { return nil }
 
+// countingGSOPC is countingPC's batched-write twin: it implements gsoWriter, so the
+// send path coalesces a multi-datagram burst into one WriteGSO. writes counts
+// syscalls (Write + WriteGSO), datagrams counts UDP packets (segments). With GSO a
+// 16 KiB body is N datagrams but ONE write — the syscall saving this PR targets.
+type countingGSOPC struct {
+	writes    atomic.Int64
+	datagrams atomic.Int64
+}
+
+func (p *countingGSOPC) Write(b []byte) (int, error) {
+	p.writes.Add(1)
+	p.datagrams.Add(1)
+	return len(b), nil
+}
+
+func (p *countingGSOPC) WriteGSO(buf []byte, segSize int) (int, error) {
+	p.writes.Add(1)
+	p.datagrams.Add(int64((len(buf) + segSize - 1) / segSize))
+	return len(buf), nil
+}
+func (p *countingGSOPC) Read([]byte) (int, error) { return 0, io.EOF }
+func (p *countingGSOPC) Close() error             { return nil }
+
 // benchSendConn builds a Conn with an installed 1-RTT sealer, huge flow-control
 // windows, a counting PacketConn, and one open client bidi stream — the minimal
 // rig that drives the real seal→PacketConn.Write send path (writeStreamFrame →
@@ -27,13 +50,21 @@ func (p *countingPC) Close() error                { return nil }
 // so grantable is bounded only by the per-datagram budget and the huge windows.
 func benchSendConn(b *testing.B) (*Conn, *Stream, *countingPC) {
 	b.Helper()
+	pc := &countingPC{}
+	c, s := benchSendConnPC(b, pc)
+	return c, s, pc
+}
+
+// benchSendConnPC is benchSendConn over an arbitrary PacketConn, so a benchmark can
+// swap in a batched-write (gsoWriter) transport to measure the syscall saving.
+func benchSendConnPC(b *testing.B, pc PacketConn) (*Conn, *Stream) {
+	b.Helper()
 	dcid := []byte("benchdc0")
 	keys, _ := InitialKeys(dcid)
 	sealer, err := NewSealer(keys)
 	if err != nil {
 		b.Fatal(err)
 	}
-	pc := &countingPC{}
 	c := &Conn{
 		pc:           pc,
 		dcid:         dcid,
@@ -49,7 +80,7 @@ func benchSendConn(b *testing.B) (*Conn, *Stream, *countingPC) {
 	if err != nil {
 		b.Fatal(err)
 	}
-	return c, s, pc
+	return c, s
 }
 
 // resetSend rewinds the per-op send state so each iteration re-seals from a fixed
@@ -122,5 +153,32 @@ func BenchmarkQUICSend_Stream16KiB(b *testing.B) {
 		}
 	}
 	b.StopTimer()
+	// Without GSO one datagram is one Write is one sendto, so writes/op == datagrams/op:
+	// the ~15-syscall/request baseline the GSO variant collapses to ~1.
+	b.ReportMetric(float64(pc.datagrams.Load())/float64(b.N), "writes/op")
+	b.ReportMetric(float64(pc.datagrams.Load())/float64(b.N), "datagrams/op")
+}
+
+// BenchmarkQUICSend_Stream16KiB_GSO is BenchmarkQUICSend_Stream16KiB over a
+// batched-write (gsoWriter) transport: the same ~15 datagrams per 16 KiB request
+// now leave in ONE WriteGSO, so writes/op drops from ~15 to ~1 while datagrams/op
+// is unchanged — the direct proxy for the sendto-per-packet throughput limiter this
+// PR removes on Linux. datagrams/op stays ~15; writes/op is the figure that moves.
+func BenchmarkQUICSend_Stream16KiB_GSO(b *testing.B) {
+	requireSendBench(b)
+	pc := &countingGSOPC{}
+	c, s := benchSendConnPC(b, pc)
+	body := make([]byte, 16*1024)
+	b.SetBytes(int64(len(body)))
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		resetSend(c, s)
+		if _, err := s.Send(body, false); err != nil {
+			b.Fatal(err)
+		}
+	}
+	b.StopTimer()
+	b.ReportMetric(float64(pc.writes.Load())/float64(b.N), "writes/op")
 	b.ReportMetric(float64(pc.datagrams.Load())/float64(b.N), "datagrams/op")
 }

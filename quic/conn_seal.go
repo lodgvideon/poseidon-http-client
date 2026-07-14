@@ -15,6 +15,11 @@ package quic
 // been reset is dropped (§13.3: its data is not retransmitted).
 func (c *Conn) flushRetransmits(sp int) error {
 	var sent uint64
+	// Resent packets of the same size (e.g. a run of full-size STREAM datagrams from
+	// one lost flight) coalesce into a single GSO write; a size change or a cap flushes
+	// the batch and starts a new one (quic/gso.go). Each packet is still sealed and
+	// recorded individually, so retransmit accounting and packet numbers are unchanged.
+	batch := c.newBatch()
 	for len(c.retransQueue[sp]) > 0 {
 		if c.cwnd > 0 {
 			// A retransmission counts against the congestion window like any other
@@ -47,14 +52,15 @@ func (c *Conn) flushRetransmits(sp int) error {
 		}
 		pkt, err := c.sealPacket(sp, rf.encode(nil), true, []retransFrame{rf}, false)
 		if err != nil {
+			_ = c.flushBatch(&batch) // best-effort: send what was already sealed
 			return err
 		}
-		if _, err := c.pc.Write(pkt); err != nil {
+		if err := c.addToBatch(&batch, pkt); err != nil {
 			return err
 		}
 		sent += uint64(len(pkt))
 	}
-	return nil
+	return c.flushBatch(&batch)
 }
 
 // handshakeProbeSpace returns the packet-number space a pending pre-handshake
@@ -210,7 +216,7 @@ func (c *Conn) sealPacket(sp int, frames []byte, ackEliciting bool, retrans []re
 	if err != nil {
 		return nil, err
 	}
-	c.sealScratch = pkt // retain the (possibly grown) backing array for the next seal
+	c.sealScratch = pkt                            // retain the (possibly grown) backing array for the next seal
 	c.onPacketSent(sp, pn, ackEliciting, len(pkt)) // congestion accounting (RFC 9002 §7)
 	if sp == spaceApp {
 		c.appSendCount++ // toward the AEAD confidentiality limit (§6.6)

@@ -123,6 +123,14 @@ type Conn struct {
 	frameScratch []byte // STREAM frame bytes (writeStreamFrame)
 	sealScratch  []byte // AEAD seal output = the on-wire datagram (sealPacket)
 
+	// gsoBatch is the reused backing array for a GSO send batch (quic/gso.go): a
+	// multi-datagram STREAM burst or same-size retransmit run is sealed one packet
+	// at a time (each copied out of sealScratch) into this contiguous buffer, then
+	// handed to the transport as one WriteGSO. Owned by whatever packetBatch is live
+	// under c.mu; only one is ever live at a time (the send path serializes on c.mu),
+	// so borrowing and returning it here needs no further guarding.
+	gsoBatch []byte
+
 	nextBidiStreamID   uint64             // next client-initiated bidi stream ID (0, 4, 8, …)
 	openedBidi         uint64             // count of client bidi streams opened (RFC 9000 §4.6 gate)
 	openedUni          uint64             // count of client uni streams opened (§4.6 gate; ID = 2+4n)
