@@ -185,6 +185,7 @@ func TestStartServerHandshake_FullHandshake(t *testing.T) {
 	clientTP := concat(
 		tpInt(tpInitialMaxData, 1<<20),
 		tpInt(tpInitialMaxStreamDataBidiRemote, 1<<20),
+		tpInt(tpInitialMaxStreamDataBidiLocal, 1<<20), // server's send limit on the request stream
 		tpInt(tpInitialMaxStreamsBidi, 16),
 	)
 	serverSCID := []byte{0xab, 0xcd, 0xef}
@@ -307,6 +308,35 @@ drain:
 	}
 	if got := string(rs.Recv()); got != "GET /" {
 		t.Fatalf("server read request %q, want %q", got, "GET /")
+	}
+
+	// 1-RTT response path: the server writes a response on the request stream via
+	// its real send path (seal + flush to its PacketConn); the client opens its
+	// side of the stream, decrypts the response, and reads it.
+	reqStream, err := client.OpenStream()
+	if err != nil {
+		t.Fatalf("client OpenStream: %v", err)
+	}
+	for drained := false; !drained; { // clear any leftover handshake datagrams
+		select {
+		case <-fromServer:
+		default:
+			drained = true
+		}
+	}
+	if _, err := rs.Send([]byte("200 OK"), true); err != nil {
+		t.Fatalf("server Send response: %v", err)
+	}
+	respDg := <-fromServer
+	rres, err := ProcessDatagram(respDg, len(client.scid), &client.keys, func(PacketType) uint64 { return 0 }, &connFrameHandler{c: client, space: spaceApp})
+	if err != nil {
+		t.Fatalf("client ProcessDatagram(response): %v", err)
+	}
+	if rres.Processed != 1 {
+		t.Fatalf("client processed %d response packets, want 1 (%+v)", rres.Processed, rres)
+	}
+	if got := string(reqStream.Recv()); got != "200 OK" {
+		t.Fatalf("client read response %q, want %q", got, "200 OK")
 	}
 }
 
