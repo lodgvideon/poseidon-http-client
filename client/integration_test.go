@@ -18,8 +18,6 @@ import (
 	"github.com/lodgvideon/poseidon-http-client/client"
 	"github.com/lodgvideon/poseidon-http-client/conn"
 	"github.com/lodgvideon/poseidon-http-client/frame"
-	xhttp2 "golang.org/x/net/http2"
-	"golang.org/x/net/http2/h2c"
 )
 
 func newTLSH2Server(t *testing.T, h http.Handler) (*httptest.Server, string) {
@@ -615,8 +613,14 @@ func newH2CServer(t *testing.T, h http.Handler) string {
 	if err != nil {
 		t.Fatalf("listen: %v", err)
 	}
+	// HTTP/1.1 and cleartext HTTP/2 on one listener, as x/net's h2c.NewHandler
+	// used to do for us. That package is deprecated in favour of this field.
+	protos := new(http.Protocols)
+	protos.SetHTTP1(true)
+	protos.SetUnencryptedHTTP2(true)
 	srv := &http.Server{
-		Handler:           h2c.NewHandler(h, &xhttp2.Server{}),
+		Handler:           h,
+		Protocols:         protos,
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 	go func() { _ = srv.Serve(ln) }()

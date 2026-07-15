@@ -8,9 +8,6 @@ import (
 	"testing"
 	"time"
 
-	xhttp2 "golang.org/x/net/http2"
-	"golang.org/x/net/http2/h2c"
-
 	"github.com/lodgvideon/poseidon-http-client/hpack"
 )
 
@@ -23,8 +20,14 @@ func startH2CServer(t *testing.T, handler http.Handler) string {
 	if err != nil {
 		t.Fatalf("listen: %v", err)
 	}
+	// HTTP/1.1 and cleartext HTTP/2 on one listener, as x/net's h2c.NewHandler
+	// used to do for us. That package is deprecated in favour of this field.
+	protos := new(http.Protocols)
+	protos.SetHTTP1(true)
+	protos.SetUnencryptedHTTP2(true)
 	srv := &http.Server{
-		Handler:           h2c.NewHandler(handler, &xhttp2.Server{}),
+		Handler:           handler,
+		Protocols:         protos,
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 	go func() { _ = srv.Serve(ln) }()
