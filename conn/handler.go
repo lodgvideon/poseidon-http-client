@@ -72,9 +72,12 @@ type connOps interface {
 	// stream-event buffer size for new (pushed) streams.
 	pushSupport() (enabled bool, eventBuf int)
 
-	// registerPushedStream creates a server-initiated stream with the
-	// given even ID and returns it.
-	registerPushedStream(id uint32) *Stream
+	// reservePushedStream validates a promised stream id and registers
+	// the server-initiated stream it reserves. Returns
+	// ErrIllegalPromisedID for an id that is not idle (RFC 7540 §6.6)
+	// and ErrPushRefused when our advertised concurrent-stream cap for
+	// server-initiated streams is already reached.
+	reservePushedStream(id uint32) (*Stream, error)
 
 	// rstStream sends RST_STREAM for the given stream ID.
 	rstStream(id uint32, code frame.ErrCode) error
@@ -108,11 +111,13 @@ type connHandler struct {
 	scratch []hpack.HeaderField
 
 	// pendingHeaderBlock buffers HEADERS+CONTINUATION fragments of the
-	// in-flight stream until END_HEADERS arrives.
+	// in-flight stream until END_HEADERS arrives. The block is classified
+	// (final / informational / trailers) only once it is complete and
+	// decoded — the classification keys on :status, which is not knowable
+	// until then (RFC 7540 §8.1).
 	pendingStreamID  uint32
 	pendingBuf       []byte
 	pendingEndStream bool
-	pendingTrailer   bool // true if buffered HEADERS is a trailers frame
 
 	// maxHeaderBytes caps the total bytes accumulated across a
 	// HEADERS+CONTINUATION sequence before END_HEADERS arrives. Without it a
@@ -195,9 +200,6 @@ func (h *connHandler) OnHeaders(fh frame.FrameHeader, hb frame.HeaderBlock, _ *f
 	}
 	end := fh.Flags&frame.FlagHeadersEndStream != 0
 	endHeaders := fh.Flags&frame.FlagHeadersEndHeaders != 0
-	// A second HEADERS block on the same stream after the response
-	// headers have been delivered is a trailers frame (RFC 7540 §8.1).
-	isTrailer := s.headersReceived
 
 	if !endHeaders {
 		// Buffer until CONTINUATION completes the block. A single HEADERS frame
@@ -206,13 +208,9 @@ func (h *connHandler) OnHeaders(fh frame.FrameHeader, hb frame.HeaderBlock, _ *f
 		h.pendingStreamID = fh.StreamID
 		h.pendingBuf = append(h.pendingBuf[:0], hb...)
 		h.pendingEndStream = end
-		h.pendingTrailer = isTrailer
 		return nil
 	}
-	if !isTrailer {
-		s.headersReceived = true
-	}
-	return h.emitHeaderBlock(s, hb, end, isTrailer)
+	return h.emitHeaderBlock(s, hb, end)
 }
 
 // OnContinuation implements frame.Handler.
@@ -230,14 +228,71 @@ func (h *connHandler) OnContinuation(fh frame.FrameHeader, hb frame.HeaderBlock)
 	if fh.Flags&frame.FlagContinuationEndHeaders == 0 {
 		return nil
 	}
-	end := h.pendingEndStream
-	if !h.pendingTrailer {
-		s.headersReceived = true
-	}
-	return h.emitHeaderBlock(s, h.pendingBuf, end, h.pendingTrailer)
+	return h.emitHeaderBlock(s, h.pendingBuf, h.pendingEndStream)
 }
 
-func (h *connHandler) emitHeaderBlock(s *Stream, hb []byte, endStream, isTrailer bool) error {
+// maxInterimResponses bounds the informational (1xx) header blocks a peer may
+// send on one stream before the final response. Each is decoded and handed to
+// the caller, so an unbounded run is peer-driven work with no natural end.
+// 100 matches http1.maxInterimResponses and http3.maxInterimResponses — one
+// number for one concept across all three protocols.
+const maxInterimResponses = 100
+
+// isInformationalStatus reports whether a decoded header block carries a 1xx
+// status. RFC 7540 §8.1 keys trailer classification on the arrival of a
+// *final* (non-informational) status code, so a 1xx block must not latch
+// Stream.headersReceived. :status is a pseudo-header and so precedes the
+// regular fields (§8.1.2.1); the scan tolerates it being absent (a malformed
+// block, which the client layer rejects on its own).
+func isInformationalStatus(fields []hpack.HeaderField) bool {
+	for i := range fields {
+		if string(fields[i].Name) == ":status" {
+			return len(fields[i].Value) == 3 && fields[i].Value[0] == '1'
+		}
+	}
+	return false
+}
+
+// classifyHeaderBlock decides which event a just-decoded header block becomes
+// and enforces RFC 7540 §8.1's ordering rules on the response side:
+//
+//   - Before a final status, a 1xx block is informational: it does not end the
+//     stream and does not latch headersReceived, so the *next* block is still a
+//     response and not a trailer section. §8.1 defines trailers as HEADERS
+//     "after receiving a final (non-informational) status code".
+//   - After a final status, a block is a trailer section, which §8.1 requires
+//     to terminate the stream: "An endpoint that receives a HEADERS frame
+//     without the END_STREAM flag set after receiving a final (non-
+//     informational) status code MUST treat the corresponding request or
+//     response as malformed". §8.1.2.6 routes malformed to a *stream* error of
+//     type PROTOCOL_ERROR (§5.4.2), so the connection survives.
+//
+// A 1xx that sets END_STREAM is likewise malformed: an informational response
+// is not a complete response (RFC 7230 §3.3, RFC 9113 §8.1 states this
+// explicitly), and admitting it would end the stream with no final status —
+// silently yielding a 1xx as the caller's result.
+func (h *connHandler) classifyHeaderBlock(s *Stream, endStream bool) (StreamEventType, error) {
+	if s.headersReceived {
+		if !endStream {
+			return 0, &StreamError{StreamID: s.id, Code: frame.ErrCodeProtocolError}
+		}
+		return EventTrailers, nil
+	}
+	if isInformationalStatus(h.scratch) {
+		if endStream {
+			return 0, &StreamError{StreamID: s.id, Code: frame.ErrCodeProtocolError}
+		}
+		s.interimCount++
+		if s.interimCount > maxInterimResponses {
+			return 0, &StreamError{StreamID: s.id, Code: frame.ErrCodeEnhanceYourCalm}
+		}
+		return EventInterimHeaders, nil
+	}
+	s.headersReceived = true
+	return EventHeaders, nil
+}
+
+func (h *connHandler) emitHeaderBlock(s *Stream, hb []byte, endStream bool) error {
 	h.scratch = h.scratch[:0]
 	err := h.dec.DecodeBlock(hb, func(f hpack.HeaderField) error {
 		h.scratch = append(h.scratch, f)
@@ -246,9 +301,9 @@ func (h *connHandler) emitHeaderBlock(s *Stream, hb []byte, endStream, isTrailer
 	if err != nil {
 		return headerDecodeConnError(err)
 	}
-	evType := EventHeaders
-	if isTrailer {
-		evType = EventTrailers
+	evType, cerr := h.classifyHeaderBlock(s, endStream)
+	if cerr != nil {
+		return cerr
 	}
 	if endStream {
 		s.markRemoteEnd()
@@ -325,8 +380,10 @@ func (h *connHandler) OnSettings(fh frame.FrameHeader, s frame.SettingsParams) e
 
 // OnPushPromise implements frame.Handler.
 // When EnablePush is false, returns PROTOCOL_ERROR per RFC 7540 §8.2.
-// When true, registers the promised (even-ID) stream and delivers an
-// EventPushPromise on the parent stream's Recv channel.
+// When true, validates the promised id (§6.6), registers the promised
+// (even-ID) stream and delivers an EventPushPromise on the parent stream's
+// Recv channel. A promise beyond our advertised concurrent server-initiated
+// stream cap is rejected with RST_STREAM(REFUSED_STREAM) per §6.6.
 func (h *connHandler) OnPushPromise(fh frame.FrameHeader, promisedStreamID uint32, hb frame.HeaderBlock, _ uint8) error {
 	h.streams.bumpFramesReceived()
 	enabled, _ := h.streams.pushSupport()
@@ -337,15 +394,12 @@ func (h *connHandler) OnPushPromise(fh frame.FrameHeader, promisedStreamID uint3
 		}
 	}
 
-	// Look up the parent stream.
-	parent := h.streams.lookupStream(fh.StreamID)
-	if parent == nil {
-		// Parent gone; reset the promised stream to be safe.
-		_ = h.streams.rstStream(promisedStreamID, frame.ErrCodeCancel)
-		return nil
-	}
-
-	// Decode the promised pseudo-headers.
+	// Decode the promised pseudo-headers BEFORE any decision that keeps the
+	// connection alive. HPACK is a connection-wide stateful context (RFC
+	// 7541 §2.2): every header block mutates the dynamic table, so skipping
+	// one desynchronizes the decoder for every later block on the
+	// connection. Both survivable outcomes below — a vanished parent and a
+	// refused promise — return nil and keep reading, so neither may skip it.
 	h.scratch = h.scratch[:0]
 	if err := h.dec.DecodeBlock(hb, func(f hpack.HeaderField) error {
 		h.scratch = append(h.scratch, f)
@@ -354,8 +408,29 @@ func (h *connHandler) OnPushPromise(fh frame.FrameHeader, promisedStreamID uint3
 		return headerDecodeConnError(err)
 	}
 
-	// Register the pushed (server-initiated, even) stream.
-	pushed := h.streams.registerPushedStream(promisedStreamID)
+	// Look up the parent stream.
+	parent := h.streams.lookupStream(fh.StreamID)
+	if parent == nil {
+		// Parent gone; reset the promised stream to be safe.
+		_ = h.streams.rstStream(promisedStreamID, frame.ErrCodeCancel)
+		return nil
+	}
+
+	// Reserve the pushed (server-initiated, even) stream.
+	pushed, err := h.streams.reservePushedStream(promisedStreamID)
+	if err != nil {
+		if errors.Is(err, ErrPushRefused) {
+			// §6.6: "Recipients of PUSH_PROMISE frames can choose to reject
+			// promised streams by returning a RST_STREAM referencing the
+			// promised stream identifier back to the sender." A stream-level
+			// refusal — the connection and the parent stream both survive.
+			_ = h.streams.rstStream(promisedStreamID, frame.ErrCodeRefusedStream)
+			return nil
+		}
+		// §6.6: a PUSH_PROMISE promising an id that is not idle is a
+		// connection error of type PROTOCOL_ERROR.
+		return &ConnError{Code: frame.ErrCodeProtocolError, Reason: err.Error()}
+	}
 
 	// Build slab-backed header fields (same pattern as emitHeaderBlock).
 	slabPtr := headerSlabPool.Get().(*[]byte)

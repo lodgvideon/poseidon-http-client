@@ -183,6 +183,10 @@ type Client struct {
 	qpackEncBuf   []byte     // reader-owned: server encoder-stream bytes not yet a whole instruction
 	qpackDecBuf   []byte     // reader-owned: server decoder-stream bytes not yet a whole instruction (Q5)
 	settingsRead  bool       // the mandatory first SETTINGS frame has been read
+	// qpackEncBufMax caps qpackEncBuf, the retained partial encoder instruction; it
+	// is derived in newClient from the table capacity we advertise, so it can never
+	// be tighter than the largest insert our own SETTINGS invite (qpackEncoderInstrCap).
+	qpackEncBufMax uint64
 
 	// The client's own QPACK instruction streams (RFC 9204 §4.2), opened at
 	// newClient. clientQPACKEnc carries our encoder instructions — none in the
@@ -304,6 +308,11 @@ func newClient(conn quicConn, settings []Setting) (*Client, error) {
 	// §3.2.3). dial.go advertises a non-zero capacity, so the server may insert up
 	// to this many bytes into the table we maintain and reference them.
 	c.qpackDyn = qpack.NewDynamicTable(qpackMaxTableCapacity(settings))
+	// The server's encoder stream is unframed, so nothing but this cap bounds the
+	// partial instruction we hold while waiting for the rest of it (RFC 9204 §4.3).
+	// It tracks the capacity we advertise above, so it admits every insert those
+	// SETTINGS invite.
+	c.qpackEncBufMax = qpackEncoderInstrCap(qpackMaxTableCapacity(settings))
 	// SETTINGS_QPACK_BLOCKED_STREAMS (Q4): the ceiling on simultaneously-blocked
 	// decodes we advertise, and a fresh broadcast channel a blocked Do parks on until
 	// the reader advances the insert count (RFC 9204 §2.1.2, §2.1.3).

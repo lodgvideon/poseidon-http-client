@@ -11,7 +11,7 @@ A low-level HTTP client for Go that implements HTTP/1.1, HTTP/2, and HTTP/3 from
 ## Why poseidon
 
 - **One client, three protocol versions.** HTTP/1.1, HTTP/2, and HTTP/3 through the same `Do`/`DoStream` API. The Go standard library has no HTTP/3; most stacks bolt it on via a separate library.
-- **From scratch, near-zero dependencies.** No `quic-go`, no `nghttp2`, no cgo. Direct dependencies are `golang.org/x/net` and `golang.org/x/crypto` (ChaCha20-Poly1305 packet protection only); the TLS 1.3 handshake uses the standard library `crypto/tls`. Small, auditable surface.
+- **No third-party protocol code.** Every protocol stack — QUIC (RFC 9000/9001/9002), HTTP/3 (RFC 9114), QPACK (RFC 9204), HTTP/2 framing (RFC 7540), HPACK (RFC 7541), HTTP/1.1 — is written from scratch in this module. No `quic-go`, no `nghttp2`, no `net/http`, no cgo; the TLS 1.3 handshake uses the standard library `crypto/tls`. The four direct dependencies are crypto and compression primitives, taken deliberately rather than hand-rolled: `golang.org/x/net`, `golang.org/x/crypto` (ChaCha20-Poly1305 packet protection), `github.com/andybalholm/brotli`, and `github.com/klauspost/compress` (zstd). A decompressor is a prime attack surface; reimplementing Poly1305 or Brotli's 122 KB dictionary would add risk, not remove it.
 - **Zero-alloc codec.** The wire codec for both protocol versions — HTTP/2 frame + HPACK, and QUIC + HTTP/3 frames + QPACK — runs at 0 B/op, 0 allocs/op, enforced by a CI bench gate. This matters at load-generator request rates.
 - **Fine-grained control.** Direct access to streams, flow-control windows, SETTINGS, pooling policy, and congestion control (NewReno default, opt-in BBR) — knobs `net/http` hides.
 - **Load-generation features built in.** Connection pooling, DNS service discovery (Resolver/Selector), bounded retries, token-bucket rate limiting, lifecycle hooks, and metrics — shared across HTTP/2 and HTTP/3.
@@ -168,9 +168,9 @@ Runnable versions of all three live in [`examples/`](examples/).
 | | HTTP/1.1 | HTTP/2 | HTTP/3 |
 |---|---|---|---|
 | Spec | HTTP/1.1 over TLS | RFC 7540 + HPACK (RFC 7541) | RFC 9114 + QUIC (RFC 9000/9001/9002) + QPACK (RFC 9204) |
-| Constructors | `NewClient` with `TransportH1SingleConn` | `NewSingleConnClient`, `NewPoolClient`, `NewManagedClient` | `NewH3Client`, `NewH3PoolClient`, `NewManagedH3Client` |
-| Concurrency model | One connection, requests serialized (no pipelining) | Stream multiplexing, `MAX_CONCURRENT_STREAMS` gating | Concurrent in-flight requests over one QUIC connection |
-| Streaming | Buffered | `DoStream`, body streaming, request trailers | `DoStream`, body streaming |
+| Constructors | `NewH1Client`, `NewH1PoolClient`, `NewManagedH1Client` | `NewSingleConnClient`, `NewPoolClient`, `NewManagedClient` | `NewH3Client`, `NewH3PoolClient`, `NewManagedH3Client` |
+| Concurrency model | Exclusive-checkout pool: one exchange per connection (no pipelining), so `MaxConnsPerHost` is the request concurrency; a request waits, bounded by ctx, for a free connection | Stream multiplexing, `MAX_CONCURRENT_STREAMS` gating | Concurrent in-flight requests over one QUIC connection |
+| Streaming | Request bodies stream (`BodyReader`, chunked); responses are always buffered — `DoStream` and `BodyMode: BodyStream` return an error | `DoStream`, body streaming, request trailers | `DoStream`, body streaming |
 | Flow control | — | Full bidirectional, dynamic SETTINGS, GOAWAY drain | QUIC stream + connection flow control |
 | Header compression | — | HPACK, zero-alloc | Dynamic QPACK, both directions (encode + decode), zero-alloc |
 | Extras | ALPN fallback: `TransportALPN` falls back to HTTP/1.1 when the server does not offer h2 | Server push (PUSH_PROMISE), request priority, extended CONNECT (RFC 8441, WebSockets over H2), CONTINUATION, HTTP CONNECT proxy dialers, H2C prior knowledge, PING keepalive | AES-128-GCM / AES-256-GCM / ChaCha20-Poly1305; NewReno default, opt-in BBR; GSO/GRO batched UDP and bounded ACK coalescing on Linux |
@@ -178,6 +178,16 @@ Runnable versions of all three live in [`examples/`](examples/).
 Shared across protocols:
 
 - **Request API** — `client.GET(path)`, or `client.Request{Method, Scheme, Authority, Path, BodyMode}` (`BodyBuffer` or `BodyStream`). `Response{Status, Body}` is caller-owned; `Reset()` reuses it across requests.
+- **Compression, both directions** — responses in gzip, deflate, br, and zstd are decoded automatically (the client advertises `accept-encoding: gzip, deflate, br, zstd`); a decompression-bomb guard (`WithMaxDecompressedSize`, default 10 MiB) rejects over-expanding bodies with `ErrBodyTooLarge`. Request bodies compress on demand: set `Request.CompressBody` to `EncodingGzip`, `EncodingDeflate`, `EncodingBrotli`, or `EncodingZstd` and the client compresses the body and sets `content-encoding` itself; the zero value sends the body unchanged at zero extra allocations. Setting `content-encoding` manually means "this body is already encoded" and it is left untouched; setting both returns `ErrConflictingContentEncoding`. Identical over HTTP/1.1, HTTP/2, and HTTP/3.
+
+  ```go
+  c.Do(ctx, &client.Request{
+      Method: "POST", Path: "/ingest",
+      Body:   payload,
+      CompressBody: client.EncodingZstd, // client sets content-encoding itself
+  }, &resp)
+  ```
+
 - **Pooling and discovery** — per-host pools (`PoolOptions{MaxConnsPerHost, MaxStreamsPerConn, HealthCheckPeriod}`) with least-loaded stream pick and idle eviction; Resolver + Selector service discovery.
 - **Resilience** — opt-in `Retryer` (bounded retries of idempotent requests on REFUSED_STREAM / GOAWAY / dial errors, exponential backoff + jitter), `WithRateLimit(perSecond, burst)`, per-request timeouts via context.
 - **Observability** — `Client.Hooks` (OnDial, OnRequestComplete, OnRetry, …), `Client.MetricsSnapshot()` (counters + latency histogram), `Client.PoolStats()`.

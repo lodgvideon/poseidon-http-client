@@ -533,6 +533,16 @@ func (c *Client) Do(ctx context.Context, req *Request, resp *Response) error {
 		ctx, cancel = context.WithTimeout(ctx, req.Timeout)
 		defer cancel()
 	}
+	// Encode the body before the hooks fire, so BytesSent below reports what
+	// actually goes on the wire. Released once the body has been written, which
+	// c.do has done by the time it returns on every BodyMode.
+	req, release, err := prepareCompressedRequest(req)
+	if err != nil {
+		return err
+	}
+	if release != nil {
+		defer release()
+	}
 	authority := req.Authority
 	if authority == "" {
 		authority = c.authority
@@ -540,7 +550,7 @@ func (c *Client) Do(ctx context.Context, req *Request, resp *Response) error {
 	c.observeStart(req, authority)
 	start := time.Now()
 
-	err := c.do(ctx, req, resp)
+	err = c.do(ctx, req, resp)
 
 	var status int
 	var bytesRecv int64
@@ -623,16 +633,11 @@ func (c *Client) do(ctx context.Context, req *Request, resp *Response) error {
 			release()
 			return err
 		}
-		ev, err := rs.Recv(ctx)
+		ev, err := recvFinalHeaders(ctx, rs)
 		if err != nil {
 			_ = rs.Close()
 			release()
 			return err
-		}
-		if ev.Type != conn.EventHeaders {
-			_ = rs.Close()
-			release()
-			return fmt.Errorf("client: expected initial HEADERS, got %s", ev.Type)
 		}
 		n, perr := parseStatus(ev.Headers, &resp.Headers)
 		if perr != nil {
@@ -697,6 +702,16 @@ func (c *Client) DoStream(ctx context.Context, req *Request, sr *StreamResponse)
 		ctx, cancel = context.WithTimeout(ctx, req.Timeout)
 		defer cancel()
 	}
+	// See Do: encode before the hooks fire. doStream has written the whole
+	// request body by the time it returns, so releasing here is safe even though
+	// the response stream stays open.
+	req, release, err := prepareCompressedRequest(req)
+	if err != nil {
+		return err
+	}
+	if release != nil {
+		defer release()
+	}
 	sr.reset()
 	authority := req.Authority
 	if authority == "" {
@@ -705,7 +720,7 @@ func (c *Client) DoStream(ctx context.Context, req *Request, sr *StreamResponse)
 	c.observeStart(req, authority)
 	start := time.Now()
 
-	err := c.doStream(ctx, req, sr)
+	err = c.doStream(ctx, req, sr)
 
 	var status int
 	if err == nil {
@@ -728,16 +743,11 @@ func (c *Client) doStream(ctx context.Context, req *Request, sr *StreamResponse)
 		release()
 		return err
 	}
-	ev, err := rs.Recv(ctx)
+	ev, err := recvFinalHeaders(ctx, rs)
 	if err != nil {
 		_ = rs.Close()
 		release()
 		return err
-	}
-	if ev.Type != conn.EventHeaders {
-		_ = rs.Close()
-		release()
-		return fmt.Errorf("client: expected initial HEADERS, got %s", ev.Type)
 	}
 	n, perr := parseStatus(ev.Headers, &sr.Headers)
 	if perr != nil {
@@ -1020,12 +1030,27 @@ func drainResponse(ctx context.Context, pushLookup func(uint32) (*conn.Stream, b
 			if done {
 				return nil
 			}
+		case conn.EventInterimHeaders:
+			// Informational 1xx (RFC 7540 §8.1). Client.Do surfaces only the
+			// final response — matching http1 (ReadResponse skips 1xx) and
+			// http3 (h3_transport drops resp.Interim) — so drop it and keep
+			// pumping. Raw conn callers still see EventInterimHeaders.
+			recycleHeaderSlab(ev.Slab)
 		case conn.EventTrailers:
 			if req.WantTrailers {
-				resp.Trailers = append(resp.Trailers, ev.Headers...)
+				// Overwrite rather than accumulate: a response has at most one
+				// trailer section. conn enforces §8.1's END_STREAM requirement
+				// on trailers, so a second block cannot arrive; the [:0] keeps
+				// Trailers bounded regardless, matching body.go's handling of
+				// the same event. Slabs stay in resp.slabs and are returned as
+				// one batch by Response.Reset — never Put twice.
+				resp.Trailers = append(resp.Trailers[:0], ev.Headers...)
 				if ev.Slab != nil {
 					resp.slabs = append(resp.slabs, ev.Slab)
 				}
+			} else {
+				// Trailers unwanted: return the slab instead of dropping it.
+				recycleHeaderSlab(ev.Slab)
 			}
 			if ev.EndStream {
 				return nil
@@ -1045,10 +1070,50 @@ func drainResponse(ctx context.Context, pushLookup func(uint32) (*conn.Stream, b
 	}
 }
 
+// recvFinalHeaders reads stream events until the final (non-informational)
+// response HEADERS arrives, dropping any 1xx blocks that precede it (RFC 7540
+// §8.1). Informational responses are not surfaced by Client.Do / DoStream —
+// the same policy http1 (ReadResponse skips 1xx) and http3 (h3_transport drops
+// resp.Interim) apply — so all three protocols agree on what the caller sees.
+// Raw conn users still observe EventInterimHeaders. The loop is bounded by
+// conn's maxInterimResponses, which resets the stream past the cap.
+func recvFinalHeaders(ctx context.Context, rs respStream) (conn.StreamEvent, error) {
+	for {
+		ev, err := rs.Recv(ctx)
+		if err != nil {
+			return conn.StreamEvent{}, err
+		}
+		if ev.Type == conn.EventInterimHeaders {
+			recycleHeaderSlab(ev.Slab)
+			continue
+		}
+		if ev.Type != conn.EventHeaders {
+			return conn.StreamEvent{}, fmt.Errorf("client: expected initial HEADERS, got %s", ev.Type)
+		}
+		return ev, nil
+	}
+}
+
+// recycleHeaderSlab returns a header slab to conn's pool. nil-safe. Used for
+// header blocks the client layer decodes but does not retain (informational
+// 1xx, unwanted trailers) — dropping them would still be correct (sync.Pool
+// tolerates buffers that are never Put) but would forfeit the reuse.
+func recycleHeaderSlab(slab *[]byte) {
+	if slab != nil {
+		*slab = (*slab)[:0]
+		conn.GetHeaderSlabPool().Put(slab)
+	}
+}
+
 // handleHeadersEvent processes a single EventHeaders from drainResponse.
 // Returns (done=true, nil) when the stream is complete.
 func handleHeadersEvent(ev conn.StreamEvent, req *Request, resp *Response, gotHeaders *bool, enc *ContentEncoding) (done bool, err error) {
 	if *gotHeaders {
+		// Unreachable via conn: a second non-informational block after the
+		// final status is classified as trailers (RFC 7540 §8.1). Kept as a
+		// guard for other protoStream implementations; the final status set
+		// below must win, so never re-parse — just release the slab.
+		recycleHeaderSlab(ev.Slab)
 		return ev.EndStream, nil
 	}
 	n, perr := parseStatus(ev.Headers, &resp.Headers)

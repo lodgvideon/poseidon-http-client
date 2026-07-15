@@ -7,8 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [v1.0.0] — 2026-07-15
 
-The first stable release: HTTP/1.1, HTTP/2, and HTTP/3 through one client API,
-on a from-scratch, near-zero-dependency stack.
+The first stable release: HTTP/1.1, HTTP/2, and HTTP/3 through one client API.
+Every protocol stack — QUIC, HTTP/3, QPACK, HTTP/2 framing, HPACK, HTTP/1.1 — is
+written from scratch in this module: no third-party protocol code, no cgo.
 
 ### Added
 
@@ -18,6 +19,27 @@ on a from-scratch, near-zero-dependency stack.
   `NewH3PoolClient`, `NewManagedH3Client`. Concurrent in-flight requests over one
   QUIC connection, connection pooling, service discovery, streaming, retries,
   hooks, and metrics now work over HTTP/3, not only HTTP/2.
+- **HTTP/1.1 parity** — `TransportH1Pool` and `TransportH1Managed` join
+  `TransportH1SingleConn`, with `NewH1Client`, `NewH1PoolClient` and
+  `NewManagedH1Client`. HTTP/1.1 has no multiplexing, so the pool is an
+  exclusive-checkout pool: one exchange per connection, `MaxConnsPerHost` *is* the
+  request concurrency (`MaxStreamsPerConn` does not apply), and a request waits
+  for a free connection at the cap. Before this, HTTP/1.1 load could not be
+  generated at all — a single connection meant strictly serial requests (#219).
+- **Brotli and zstd response decoding** — the client now decodes `gzip`,
+  `deflate`, `br` and `zstd`, and advertises all four in `accept-encoding` (it
+  previously advertised only `gzip` while already decoding `deflate`). Pooled
+  readers, a decompression-bomb guard, and an 8 MiB zstd window cap (#223).
+- **Request-body compression** — `Request.CompressBody` compresses the body with
+  any of the four codings and sets `content-encoding` itself. The zero value sends
+  the body unchanged at zero allocations. A manually-set `content-encoding` still
+  means "already encoded" (RFC 9110 §8.4) and is left alone; setting both returns
+  `ErrConflictingContentEncoding` (#225).
+- **QUIC server role** — `quic.Listen` / `Listener.Accept` and
+  `Conn.AcceptBidiStream` / `AcceptUniStream` expose a server-role QUIC endpoint
+  that reuses the client's connection, crypto and stream machinery. It is a QUIC
+  server role, not an HTTP/3 server. Its immediate value is giving the client a
+  genuine peer to be tested against (#205, #207, #217–#222).
 - **Dynamic QPACK (RFC 9204), both directions** — encode and decode with the
   dynamic table, encoder/decoder instruction streams, known-received-count, and
   blocked-streams handling (#193–#196, #202).
@@ -36,10 +58,42 @@ on a from-scratch, near-zero-dependency stack.
 
 - **Minimum Go version is now 1.25** — a supported release that receives security
   backports.
-- New direct dependency `golang.org/x/crypto` (ChaCha20-Poly1305 only). Still no
-  `quic-go`, `nghttp2`, `net/http`, or cgo.
+- **Four direct dependencies**, all crypto or compression primitives taken
+  deliberately rather than hand-rolled: `golang.org/x/net`, `golang.org/x/crypto`
+  (ChaCha20-Poly1305), `github.com/andybalholm/brotli`, and
+  `github.com/klauspost/compress` (zstd). Every protocol stack remains written
+  from scratch here — still no `quic-go`, `nghttp2`, `net/http`, or cgo. Rolling
+  our own Poly1305 or Brotli would be a security liability with no upside.
+- `Content-Encoding` matching is now case-insensitive (RFC 9110 §8.4.1). A
+  response labelled `Content-Encoding: GZIP` was previously handed back still
+  compressed.
 - README rewritten; per-protocol guides and an accurate support matrix replace the
   earlier single-request/HTTP-2-only description.
+- **Removed `frame.Framer.SetMaxHeaderListSize`.** It was exported and documented
+  as the read-side cap on a header block, but nothing ever read the value. The
+  cap that does the work is `hpack.Decoder.SetMaxHeaderListSize`, wired from
+  `conn`, plus the handler's compressed-byte ceiling.
+
+### Fixed
+
+- **Every closed QUIC connection leaked a goroutine.** `crypto/tls` runs a
+  `QUICConn`'s handshake on its own goroutine, which exits only when the
+  handshake finishes or `Close` cancels it — so a connection torn down before
+  that, including any client connection, left one behind. Teardown now closes the
+  handshake on every terminal path. The fix shipped in v0.10.0 alongside the
+  server-role work but went unrecorded here; it affects clients, not only
+  servers.
+- **A race in the HTTP/2 and HTTP/3 connection pools leaked stream slots.**
+  `replyAcquire` selected between delivering its reply and the caller's cancelled
+  context; because the reply channel is buffered, both cases could be ready at
+  once and Go chose at random. When the send won, the response — carrying a
+  connection whose in-flight count had already been incremented — was stranded in
+  a channel nobody read, so the slot was never returned. The trigger was an
+  ordinary per-request timeout, and the leak was monotonic: a pool would starve
+  permanently. Found while building the HTTP/1.1 pool, whose cap of one made it
+  fire in half of all runs instead of hiding behind large caps. Waiter pruning
+  also dropped queued requests without replying. Both fixed, with regression tests
+  that fail on the previous code (#220).
 
 ### Security
 
@@ -47,13 +101,77 @@ on a from-scratch, near-zero-dependency stack.
   symbols) and CodeQL, plus Dependabot for Go modules and GitHub Actions.
 - **Suite-aware AEAD usage limits (RFC 9001 §6.6)** — ChaCha20-Poly1305 uses its
   mandated 2^36 integrity limit rather than AES-GCM's 2^52.
+- **Bounded HTTP/1.1 response reads.** A peer that never sends a line terminator
+  could make the client read until it ran out of memory. Status lines, header
+  lines, and chunk-size lines are now read within the existing 16 KiB connection
+  buffer; the header block is capped at 8 MiB (the same limit HTTP/2 advertises
+  as `MaxHeaderListSize`), and interim 1xx responses and trailers are bounded.
+  Over-limit responses fail with the new `http1.ErrResponseTooLarge`, mirroring
+  `http3.ErrResponseTooLarge`. Header names are lowercased as ASCII per
+  RFC 7230 §3.2.6: `strings.ToLower` re-encodes each invalid byte as U+FFFD,
+  which both corrupted the name and let a peer retain three bytes per byte sent.
+- **Server push no longer corrupts the request-stream gate.** Registering a
+  pushed stream never took a `MAX_CONCURRENT_STREAMS` slot, but closing one
+  released a slot — so every pushed stream that closed freed a slot belonging to
+  a real request. Measured: three concurrent request streams against a peer gate
+  of two, and `Shutdown` returning immediately with a request still open. The two
+  limits are directional and independent (RFC 7540 §5.1.2 / §6.5.2), so they are
+  now two counters, each releasing to the one that issued the slot. The push
+  registry is bounded by the client's own advertised
+  `SETTINGS_MAX_CONCURRENT_STREAMS` — which §6.5.2 already defines as the streams
+  the peer may create — with over-cap promises refused per §6.6. A promised
+  stream ID is now validated (even, non-zero, increasing; §5.1.1): previously a
+  PUSH_PROMISE for ID 1 overwrote the client's own stream 1. Push is opt-in
+  (`EnablePush`), off by default.
+- **HTTP/2 understands 1xx informational responses.** A server sending
+  `103 Early Hints` before its real response — Cloudflare, Fastly and Shopify all
+  do — made the client report the 103 as the final answer: `Status` was 103, the
+  real 200 header block arrived as *trailers*, and `Do` returned no error. On the
+  `BodyStream` path the body came back empty, also with no error. The cause was
+  RFC 7540 §8.1: trailers are a header block after a **final (non-informational)**
+  status, and the code treated the first block as final whatever it held.
+  Informational blocks now surface as `conn.EventInterimHeaders` and are capped at
+  100 per stream (matching HTTP/1.1 and HTTP/3); `Client.Do` and `DoStream` report
+  the final status, as they already did on the other two protocols. §8.1's other
+  half is enforced too: a trailer block without END_STREAM is malformed
+  (§8.1.2.6) and is now a stream error, which also bounds the trailer-block flood
+  a peer could otherwise sustain.
+- **QUIC streams release consumed bytes.** A receive stream's buffer was only
+  ever appended to: reading advanced a cursor but never freed the bytes behind
+  it, so a stream retained every byte it had ever received. Receive flow control
+  did not bound this — its window is keyed on the read cursor, so it slides
+  forward as the application consumes, bounding bytes *in flight* rather than
+  bytes *retained*. `DoStream` therefore did not stream: an 8 MiB response
+  retained 8 MiB after being fully consumed, 32x the 256 KiB window. Fixed by
+  releasing the consumed prefix. Also ~3x faster on the receive path, since the
+  growing buffer had been forcing `append` to recopy.
+- **Bounded HPACK dynamic-table entry ring.** The HTTP/2 dynamic table grew its
+  entry ring by one slot per header and never reused an evicted entry's slot, so
+  a peer could drive the ring's size with its header *count* rather than the
+  4096-octet table size that is supposed to bound it. Empty-name/empty-value
+  literals cost three bytes on the wire and bought a slot each: 3 MB sent
+  retained 16 MB, with no ceiling. The ring now grows only when every slot is
+  live, matching QPACK. Compaction allocates a fresh ring rather than aliasing
+  the old one — with a ring that can now wrap, the aliasing would have silently
+  swapped one header's value for another's.
+- **`AdvertisedSettings.HeaderTableSize` above 4096 no longer breaks the
+  connection.** The value was wired into the HPACK encoder but not the decoder,
+  which stayed at hpack's 4096 default — so a peer that used exactly the table
+  size we offered was rejected with a decoding error (RFC 7541 §6.3). Go's
+  HTTP/2 server never triggered it: its encoder clamps to its own 4096 limit and
+  never announces a larger table.
 - Added `SECURITY.md` with a private disclosure process.
 
 ### Tested
 
 - **Soak / endurance** — over one million requests on one managed HTTP/3
-  connection with no goroutine or heap growth.
+  connection with no goroutine or heap growth. A second soak drives the *pooled*
+  transport (471k requests plus 157k deliberately-abandoned acquires) — the
+  single-connection soak never touched the pool's acquire/release path, which is
+  how the slot leak above survived undetected.
 - **Fuzzed wire parsers** for QUIC, HTTP/3, and QPACK (#198).
+  connection with no goroutine or heap growth.
+- **Fuzzed wire parsers** for QUIC, HTTP/3, QPACK (#198), and HTTP/1.1.
 - HTTP/3 interop extended with a ChaCha20-only server and a 1 MiB BBR transfer,
   across Caddy, nginx, and aioquic.
 

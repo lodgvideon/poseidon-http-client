@@ -1,5 +1,10 @@
 package hpack
 
+// initialEntryRing is the slot count the entry ring is first sized to; it then
+// doubles on demand. maxSize caps how many entries can be live, so the doubling
+// terminates regardless of how many headers a peer sends.
+const initialEntryRing = 32
+
 // dynEntry stores offsets into the arena. Each entry's RFC size is
 // nameLen + valueLen + 32 (RFC 7541 §4.1).
 type dynEntry struct {
@@ -69,10 +74,12 @@ func (d *dynamicTable) add(name, value []byte) {
 	d.arena = append(d.arena, value...)
 	d.used += uint32(len(name) + len(value))
 
-	if cap(d.entries) > len(d.entries) {
-		d.entries = d.entries[:len(d.entries)+1]
-	} else {
-		d.entries = append(d.entries, dynEntry{})
+	// Take the slot after the newest live entry, growing the ring only when every
+	// slot is live. Growing per insertion instead would let a peer drive the ring's
+	// size with its header COUNT — an evicted entry's slot would never be reused —
+	// which maxSize is supposed to bound.
+	if d.count == len(d.entries) {
+		d.growEntries()
 	}
 	pos := (d.head + d.count) % len(d.entries)
 	d.entries[pos] = dynEntry{nameOff, uint32(len(name)), valueOff, uint32(len(value))}
@@ -82,6 +89,25 @@ func (d *dynamicTable) add(name, value []byte) {
 	if uint32(len(d.arena)) > d.used*2 && d.count > 0 {
 		d.compactArena()
 	}
+}
+
+// growEntries doubles the entry ring and re-bases it so the oldest live entry
+// sits at slot 0. It is called only when the ring is full, so it runs at most
+// log2(maxSize/32) times over a table's life — maxSize caps how many entries can
+// be live, so the doubling stops there no matter how many headers the peer sends.
+func (d *dynamicTable) growEntries() {
+	n := len(d.entries) * 2
+	if n < initialEntryRing {
+		n = initialEntryRing
+	}
+	next := make([]dynEntry, n)
+	// count == 0 implies the ring is empty and the loop does not run, so the
+	// modulus is never evaluated against a zero-length ring.
+	for i := 0; i < d.count; i++ {
+		next[i] = d.entries[(d.head+i)%len(d.entries)]
+	}
+	d.entries = next
+	d.head = 0
 }
 
 func (d *dynamicTable) evictOldest() {
@@ -130,7 +156,10 @@ func (d *dynamicTable) compactArena() {
 		return
 	}
 	newArena := make([]byte, 0, d.used*2)
-	newEntries := d.entries[:d.count] // reuse backing array
+	// A fresh ring: aliasing d.entries[:count] would corrupt a wrapped ring
+	// (head != 0) because a write to slot i can clobber a source slot not yet
+	// read. Compaction is rare, so the allocation is immaterial.
+	newEntries := make([]dynEntry, d.count)
 	for i := 0; i < d.count; i++ {
 		pos := (d.head + i) % len(d.entries)
 		e := d.entries[pos]

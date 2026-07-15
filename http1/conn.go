@@ -3,6 +3,7 @@ package http1
 import (
 	"bufio"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -12,6 +13,61 @@ import (
 	"time"
 
 	"github.com/lodgvideon/poseidon-http-client/hpack"
+)
+
+// ErrResponseTooLarge reports that the server sent more than the client will
+// buffer for one response: a single protocol line past readBufSize, a header
+// or trailer block past maxHeaderListBytes, or interim responses past
+// maxInterimResponses. It mirrors http3.ErrResponseTooLarge so a caller can
+// classify "the peer is hostile or broken" the same way across transports —
+// the pool discards a connection on any exchange error, so nothing depends on
+// telling this apart, but a load generator counting failure modes wants to.
+//
+// The connection is always left un-poolable when this is returned: the bytes
+// needed to resynchronise the stream are exactly the bytes being refused.
+var ErrResponseTooLarge = errors.New("http1: response exceeds client buffering limit")
+
+const (
+	// readBufSize is the bufio.Reader buffer and therefore, by construction,
+	// the hard ceiling on one CRLF-terminated protocol line: readLine uses
+	// ReadSlice, which never grows the buffer and reports ErrBufferFull
+	// instead of accumulating. The bound has to be structural rather than a
+	// post-hoc length check — by the time a ReadString has returned a line to
+	// measure, the memory it took is already committed, which is the whole
+	// bug being fixed here.
+	//
+	// 16 KiB is what this reader already allocated, so the cap is free, and it
+	// is roughly twice what mainstream servers will even emit or accept on one
+	// header line (nginx large_client_header_buffers 8k; Apache
+	// LimitRequestFieldSize 8190). A legitimate response line does not reach
+	// it.
+	readBufSize = 16 * 1024
+
+	// maxHeaderListBytes bounds a whole header or trailer block. A per-line
+	// cap cannot catch a server that sends endlessly many short, perfectly
+	// well-formed header lines, so the block needs its own ceiling on the
+	// accumulated total.
+	//
+	// It is deliberately the same 8 MiB as conn.defaultMaxHeaderListSize, the
+	// HTTP/2 SETTINGS_MAX_HEADER_LIST_SIZE this client advertises, rather than
+	// a second invented number: the amount of response header a caller should
+	// expect this library to buffer does not depend on which protocol version
+	// carried it.
+	maxHeaderListBytes = 8 << 20 // 8 MiB
+
+	// hpackFieldOverhead is the per-field accounting overhead from RFC 7541
+	// §4.1, matching hpack.HeaderField.Size(). Charging it per line is what
+	// makes a flood of tiny lines cost something: without it, "a: b\r\n"
+	// repeated forever would be charged only its wire bytes and a server could
+	// buy an unbounded field count very cheaply.
+	hpackFieldOverhead = 32
+
+	// maxInterimResponses bounds the 1xx responses drained before the final
+	// one, matching http3's identical cap. This vector is a livelock rather
+	// than a leak — each interim response is parsed and discarded, so memory is
+	// flat — but ReadResponse otherwise never returns while a server keeps
+	// sending them.
+	maxInterimResponses = 100
 )
 
 // Conn is a persistent HTTP/1.1 connection. At most one Exchange at a time
@@ -28,7 +84,7 @@ type Conn struct {
 func NewConn(nc net.Conn) *Conn {
 	return &Conn{
 		nc: nc,
-		br: bufio.NewReaderSize(nc, 16*1024),
+		br: bufio.NewReaderSize(nc, readBufSize),
 	}
 }
 
@@ -197,6 +253,36 @@ func (ex *Exchange) WriteBody(ctx context.Context, p []byte, fin bool) error {
 	return err
 }
 
+// readLine reads one CRLF-terminated protocol line and returns it with the
+// trailing CRLF stripped. what names the line for the error message ("status
+// line", "header line", ...).
+//
+// The read is bounded by construction. bufio.Reader.ReadSlice returns a slice
+// into the fixed 16 KiB buffer and reports ErrBufferFull once that buffer is
+// full without a delimiter, so a server that never sends '\n' costs a bounded
+// amount of memory. This is the difference that matters: the ReadString this
+// replaces would append each full buffer to a growing fragment list and keep
+// reading, so the client's allocation tracked whatever the server chose to
+// send. A length check after the fact could not have helped — the memory is
+// spent before there is anything to check.
+//
+// The returned slice aliases the reader's buffer and is invalidated by the
+// next read, so it is copied into a string before returning.
+func (ex *Exchange) readLine(what string) (string, error) {
+	line, err := ex.c.br.ReadSlice('\n')
+	if err != nil {
+		if errors.Is(err, bufio.ErrBufferFull) {
+			// Refusing the line leaves the stream mid-line and its position
+			// indeterminate: resynchronising would mean reading exactly the
+			// bytes being refused. The connection must not be pooled.
+			ex.keepAlive = false
+			return "", fmt.Errorf("http1: %s exceeds %d bytes: %w", what, readBufSize, ErrResponseTooLarge)
+		}
+		return "", fmt.Errorf("http1: read %s: %w", what, err)
+	}
+	return strings.TrimRight(string(line), "\r\n"), nil
+}
+
 // ReadResponse reads the HTTP/1.1 response status line and headers.
 // It skips 1xx informational responses automatically and blocks until a
 // final (≥200) status is received.
@@ -208,13 +294,13 @@ func (ex *Exchange) ReadResponse(ctx context.Context) (statusCode int, headers [
 	}
 
 	var proto string
+	var interim int
 	for {
 		// Status line: "HTTP/1.x NNN Reason\r\n"
-		line, rerr := ex.c.br.ReadString('\n')
+		line, rerr := ex.readLine("status line")
 		if rerr != nil {
-			return 0, nil, fmt.Errorf("http1: read status line: %w", rerr)
+			return 0, nil, rerr
 		}
-		line = strings.TrimRight(line, "\r\n")
 
 		parts := strings.SplitN(line, " ", 3)
 		if len(parts) < 2 || !strings.HasPrefix(parts[0], "HTTP/1") {
@@ -231,6 +317,12 @@ func (ex *Exchange) ReadResponse(ctx context.Context) (statusCode int, headers [
 			break
 		}
 		// 1xx informational: drain its headers and loop back for the real response.
+		interim++
+		if interim > maxInterimResponses {
+			ex.keepAlive = false
+			return 0, nil, fmt.Errorf("http1: more than %d interim responses: %w",
+				maxInterimResponses, ErrResponseTooLarge)
+		}
 		if err = ex.consumeHeaders(nil, false); err != nil {
 			return 0, nil, err
 		}
@@ -248,30 +340,85 @@ func (ex *Exchange) ReadResponse(ctx context.Context) (statusCode int, headers [
 		Value: []byte(strconv.Itoa(statusCode)),
 	})
 
-	err = ex.consumeHeaders(&headers, true)
-	return statusCode, headers, err
+	// Drop the partial block on error rather than handing it back beside the
+	// error. Nothing reads it (the sole caller discards the response on any
+	// error), and on the too-large path it is precisely the accumulation being
+	// complained about — returning it would keep alive the memory the cap
+	// exists to release.
+	if err = ex.consumeHeaders(&headers, true); err != nil {
+		return 0, nil, err
+	}
+	return statusCode, headers, nil
+}
+
+// asciiLowerHeaderName lowercases a response header name over ASCII only,
+// returning s unchanged when it already has no upper-case letter.
+//
+// strings.ToLower is the wrong primitive for peer-controlled bytes: it is
+// Unicode-aware, so it re-encodes every byte that is not valid UTF-8 into the
+// three-byte replacement rune. A header name is an ASCII token (RFC 7230
+// §3.2.6), so that can only corrupt a name that was already invalid — and it
+// inflates it 3x while doing so, which would let a server retain three bytes
+// for every byte maxHeaderListBytes charges it. Lowering ASCII only keeps
+// retained bytes <= bytes received, which is what makes the header cap mean
+// what it says. Found by FuzzReadResponse.
+func asciiLowerHeaderName(s string) string {
+	hasUpper := false
+	for i := 0; i < len(s); i++ {
+		if c := s[i]; c >= 'A' && c <= 'Z' {
+			hasUpper = true
+			break
+		}
+	}
+	if !hasUpper {
+		return s // the common case: no allocation
+	}
+	b := make([]byte, len(s))
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if c >= 'A' && c <= 'Z' {
+			c += 'a' - 'A'
+		}
+		b[i] = c
+	}
+	return string(b)
 }
 
 // consumeHeaders reads HTTP/1.1 headers until a blank line.
 // When out is non-nil, parsed headers are appended to *out.
 // When parseBody is true, it also updates ex.contentLen, ex.respChunked,
 // and ex.keepAlive from the header values.
+//
+// The block as a whole is bounded by maxHeaderListBytes. Each line is charged
+// its wire length plus the RFC 7541 §4.1 per-field overhead, which is what
+// stops a server that sends endlessly many short, individually legal header
+// lines — the one vector here that no per-line cap can see.
 func (ex *Exchange) consumeHeaders(out *[]hpack.HeaderField, parseBody bool) error {
+	var listSize uint64
 	for {
-		line, err := ex.c.br.ReadString('\n')
+		line, err := ex.readLine("header line")
 		if err != nil {
-			return fmt.Errorf("http1: read header line: %w", err)
+			return err
 		}
-		line = strings.TrimRight(line, "\r\n")
 		if line == "" {
 			return nil // blank line = end of headers
+		}
+
+		// Charge the line before parsing it, so that lines skipped as
+		// malformed below still count: otherwise a flood of colon-less lines
+		// would spin here forever for free.
+		listSize += uint64(len(line)) + hpackFieldOverhead
+		if listSize > maxHeaderListBytes {
+			ex.keepAlive = false
+			return fmt.Errorf("http1: header list exceeds %d bytes: %w",
+				maxHeaderListBytes, ErrResponseTooLarge)
 		}
 
 		colon := strings.IndexByte(line, ':')
 		if colon < 0 {
 			continue // skip malformed header lines
 		}
-		name := strings.ToLower(strings.TrimSpace(line[:colon]))
+		name := asciiLowerHeaderName(strings.TrimSpace(line[:colon]))
 		value := strings.TrimSpace(line[colon+1:])
 
 		if parseBody {
@@ -373,11 +520,10 @@ func (ex *Exchange) readChunkedChunk(buf []byte) (n int, done bool, err error) {
 	// Need to start a new chunk?
 	for ex.chunkRemaining == 0 {
 		// Read chunk-size line: "hex[;extension]\r\n"
-		line, lerr := ex.c.br.ReadString('\n')
+		line, lerr := ex.readLine("chunk size")
 		if lerr != nil {
-			return 0, false, fmt.Errorf("http1: read chunk size: %w", lerr)
+			return 0, false, lerr
 		}
-		line = strings.TrimRight(line, "\r\n")
 		if semi := strings.IndexByte(line, ';'); semi >= 0 {
 			line = line[:semi] // strip chunk extensions
 		}
@@ -396,12 +542,16 @@ func (ex *Exchange) readChunkedChunk(buf []byte) (n int, done bool, err error) {
 			return 0, false, fmt.Errorf("http1: invalid chunk size %q: negative", line)
 		}
 		if size == 0 {
-			// Terminal chunk. Consume optional trailers.
-			for {
-				tline, terr := ex.c.br.ReadString('\n')
-				if terr != nil || strings.TrimRight(tline, "\r\n") == "" {
-					break
-				}
+			// Terminal chunk. Consume optional trailers, bounded exactly as the
+			// header block is — a trailer section is a header block, and a
+			// server can stream one forever just as easily.
+			//
+			// Any other error (typically EOF from a server that closes straight
+			// after the terminal chunk) stays tolerated as it was before: the
+			// body is already complete, so the response is good even when the
+			// trailers are not.
+			if terr := ex.consumeHeaders(nil, false); terr != nil && errors.Is(terr, ErrResponseTooLarge) {
+				return 0, false, terr
 			}
 			ex.chunkFinal = true
 			return 0, true, nil
@@ -422,8 +572,8 @@ func (ex *Exchange) readChunkedChunk(buf []byte) (n int, done bool, err error) {
 
 	// After exhausting a chunk, consume its trailing CRLF.
 	if ex.chunkRemaining == 0 {
-		if _, lerr := ex.c.br.ReadString('\n'); lerr != nil {
-			return n, false, fmt.Errorf("http1: read chunk CRLF: %w", lerr)
+		if _, lerr := ex.readLine("chunk CRLF"); lerr != nil {
+			return n, false, lerr
 		}
 	}
 

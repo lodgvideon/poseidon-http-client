@@ -1,10 +1,14 @@
-// Package quic implements a complete QUIC v1 client transport from scratch for
-// the HTTP/3 client (design in docs/HTTP3_DESIGN.md). It is the full engine, not
-// just a codec: connection establishment and lifecycle (RFC 9000), stream
-// multiplexing and flow control, the TLS 1.3 handshake over CRYPTO streams and
-// AEAD packet + header protection with key update (RFC 9001), and ACK-based loss
-// detection, PTO, RTT estimation, and NewReno congestion control with pacing
-// (RFC 9002).
+// Package quic implements a complete QUIC v1 transport from scratch, in both
+// client and server roles (design in docs/HTTP3_DESIGN.md). The client role
+// carries the HTTP/3 client; the server role (Listen, Listener.Accept,
+// Conn.AcceptBidiStream, Conn.AcceptUniStream) reuses the same Conn, crypto,
+// packet handling, and stream machinery. It is a QUIC server role, not an
+// HTTP/3 server — the HTTP/3 mapping on top is client-only. It is the full
+// engine, not just a codec: connection establishment and lifecycle (RFC 9000),
+// stream multiplexing and flow control, the TLS 1.3 handshake over CRYPTO
+// streams and AEAD packet + header protection with key update (RFC 9001), and
+// ACK-based loss detection, PTO, RTT estimation, and NewReno congestion control
+// with pacing (RFC 9002).
 //
 // The frame codec is one layer within it: frames live inside a decrypted QUIC
 // packet payload — a byte slice, not a stream — so the parser operates over a

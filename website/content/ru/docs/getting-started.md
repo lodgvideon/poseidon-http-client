@@ -88,7 +88,9 @@ func main() {
 
 | Конструктор | Протокол | Модель соединений |
 |---|---|---|
-| `client.NewClient(ClientOptions{Transport: client.TransportH1SingleConn, ...})` | HTTP/1.1 | Одно соединение, запросы последовательно |
+| `client.NewH1Client(addr, dialer, opts...)` | HTTP/1.1 | Одно соединение, запросы последовательно |
+| `client.NewH1PoolClient(addr, dialer, pool, opts...)` | HTTP/1.1 | Пул с эксклюзивным захватом, один запрос на соединение |
+| `client.NewManagedH1Client(resolver, dialer, opts...)` | HTTP/1.1 | Service discovery (Resolver + Selector) |
 | `client.NewSingleConnClient(addr, dialer, opts...)` | HTTP/2 | Одно соединение, автоматический redial |
 | `client.NewPoolClient(addr, dialer, pool, opts...)` | HTTP/2 | Пул соединений на хост |
 | `client.NewManagedClient(resolver, dialer, opts...)` | HTTP/2 | Service discovery (Resolver + Selector) |

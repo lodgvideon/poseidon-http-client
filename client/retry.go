@@ -253,6 +253,21 @@ func (r *Retryer) Do(ctx context.Context, req *Request, resp *Response) error {
 	if req == nil || !r.canRetry(req) {
 		return r.d.Do(ctx, req, resp)
 	}
+	// Encode the body once, above the loop, instead of re-encoding it on every
+	// attempt. The result is inert (see prepareCompressedRequest), so the
+	// Client.Do inside the loop passes it straight through.
+	//
+	// canRetry has already excluded a BodyReader — a stream cannot be replayed —
+	// so this only ever sees a buffered body and release is nil in practice. It
+	// is honoured anyway rather than dropped, so the contract holds if canRetry
+	// ever loosens.
+	req, release, err := prepareCompressedRequest(req)
+	if err != nil {
+		return err
+	}
+	if release != nil {
+		defer release()
+	}
 	return r.doLoop(ctx, req, resp)
 }
 
@@ -300,7 +315,14 @@ func (r *Retryer) DoStream(ctx context.Context, req *Request, sr *StreamResponse
 	if req == nil || !r.canRetry(req) {
 		return r.d.DoStream(ctx, req, sr)
 	}
-	var err error
+	// Encode once above the loop; see Do.
+	req, release, err := prepareCompressedRequest(req)
+	if err != nil {
+		return err
+	}
+	if release != nil {
+		defer release()
+	}
 	for attempt := 0; attempt < r.opts.MaxAttempts; attempt++ {
 		if attempt > 0 {
 			backoff := r.opts.Backoff(attempt)

@@ -56,6 +56,47 @@ tracked in [docs/RFC_COVERAGE.md](docs/RFC_COVERAGE.md). The policy:
 Integration and negative tests that pin behavior of a specific RFC section
 also belong in the matrix, in their own rows.
 
+## Peer-input policy (mandatory)
+
+This is a client. Every byte it parses is chosen by someone else, and a server
+that is hostile — or merely broken — is the normal case, not the edge case. So:
+
+**New code that consumes peer-controlled bytes must ship with a bound and a
+fuzz target that provably reaches it.**
+
+1. **A bound.** Peer input must never drive an unbounded `append`, `make`, map
+   insert, loop, goroutine, or timer. Reach for a read primitive that is bounded
+   *by construction* — `bufio.ReadSlice`, `io.LimitReader` — over "read it, then
+   check the length". By the time you can check, the memory is already spent.
+2. **A cap that charges what memory retains.** If the cap counts wire bytes but
+   the code retains decoded, decompressed, or re-encoded bytes, the cap
+   under-counts by the expansion ratio. This is a real bug we shipped:
+   `strings.ToLower` is Unicode-aware and re-encodes each invalid byte as the
+   3-byte U+FFFD rune, so an 8 MiB cap admitted 24 MiB.
+3. **Reuse the existing limit.** Prefer an established number
+   (`conn.defaultMaxHeaderListSize`, a `SETTINGS` value) over a new one. A second
+   number for the same concept is a bug waiting to happen.
+4. **A fuzz target that reaches the new parser.** Same package is not the same
+   thing as reached — trace the call chain from the entry point and say so in the
+   PR. Run it (`-fuzz=FuzzX -fuzztime=120s`), and commit any crasher as a seed.
+5. **Know what fuzzing cannot do.** Fuzz inputs are finite, so a never-terminated
+   line or a never-ending stream just hits EOF. Unbounded-read bugs need a test
+   with an *infinite* peer. Fuzzing catches panics, amplification, and
+   half-built results; it does not catch "reads forever".
+
+If you add a parser and cannot bound it, say so in the PR rather than leaving it
+implied.
+
+### Why this rule exists
+
+Every miss so far has the same shape: **the mechanism existed, and the new code
+was outside its reach.** The receive-bounds work enumerated frame readers, so the
+QPACK dynamic table — not a frame reader — grew without limit. `maxControlFrameLen`
+is a `FrameReader` mechanism, so the unframed QPACK encoder stream was never
+covered by it. `http1` was decorative until it became a pooled transport, and its
+reads were never revisited. When you add a parser, the question is not "is there
+a bound in this package" but "does the bound reach *me*".
+
 ## Interop matrix (HTTP/3)
 
 The HTTP/3 client is verified against real, independent server
