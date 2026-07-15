@@ -1,6 +1,10 @@
 package conn
 
-import "time"
+import (
+	"time"
+
+	"github.com/lodgvideon/poseidon-http-client/hpack"
+)
 
 // AdvertisedSettings is what we send to the peer in our SETTINGS frame.
 // Zero values are replaced by RFC 7540 defaults; MaxConcurrentStreams
@@ -24,6 +28,27 @@ type AdvertisedSettings struct {
 // wanting a different bound sets AdvertisedSettings.MaxHeaderListSize
 // explicitly; a very large value effectively opts out.
 const defaultMaxHeaderListSize = 8 << 20 // 8 MiB
+
+// applyDecoderSettings makes the HPACK decoder enforce what we advertised.
+//
+// Both limits are promises to the peer about the blocks it sends us, so the
+// decoder is the side that has to keep them:
+//
+//   - MAX_HEADER_LIST_SIZE bounds the decompressed field list (RFC 7540
+//     §10.5.1) — the HPACK expansion-bomb defense. The Framer and handler byte
+//     caps only bound the compressed block.
+//   - HEADER_TABLE_SIZE is how large a dynamic table the peer may use. A peer
+//     that takes us at our word announces the new size with a dynamic table
+//     size update, and RFC 7541 §6.3 makes an update above the SETTINGS limit a
+//     decoding error. Left at hpack's 4096 default, advertising anything larger
+//     killed the connection the moment a conformant peer used exactly what we
+//     offered.
+//
+// s must be defaulted; a zero value here would disable the list bound.
+func applyDecoderSettings(d *hpack.Decoder, s AdvertisedSettings) {
+	d.SetMaxHeaderListSize(s.MaxHeaderListSize)
+	d.SetMaxDynamicTableSize(s.HeaderTableSize)
+}
 
 func (s AdvertisedSettings) defaulted() AdvertisedSettings {
 	if s.HeaderTableSize == 0 {
