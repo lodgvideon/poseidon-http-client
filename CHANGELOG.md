@@ -56,6 +56,19 @@ on a from-scratch, near-zero-dependency stack.
   `http3.ErrResponseTooLarge`. Header names are lowercased as ASCII per
   RFC 7230 §3.2.6: `strings.ToLower` re-encodes each invalid byte as U+FFFD,
   which both corrupted the name and let a peer retain three bytes per byte sent.
+- **HTTP/2 understands 1xx informational responses.** A server sending
+  `103 Early Hints` before its real response — Cloudflare, Fastly and Shopify all
+  do — made the client report the 103 as the final answer: `Status` was 103, the
+  real 200 header block arrived as *trailers*, and `Do` returned no error. On the
+  `BodyStream` path the body came back empty, also with no error. The cause was
+  RFC 7540 §8.1: trailers are a header block after a **final (non-informational)**
+  status, and the code treated the first block as final whatever it held.
+  Informational blocks now surface as `conn.EventInterimHeaders` and are capped at
+  100 per stream (matching HTTP/1.1 and HTTP/3); `Client.Do` and `DoStream` report
+  the final status, as they already did on the other two protocols. §8.1's other
+  half is enforced too: a trailer block without END_STREAM is malformed
+  (§8.1.2.6) and is now a stream error, which also bounds the trailer-block flood
+  a peer could otherwise sustain.
 - **QUIC streams release consumed bytes.** A receive stream's buffer was only
   ever appended to: reading advanced a cursor but never freed the bytes behind
   it, so a stream retained every byte it had ever received. Receive flow control

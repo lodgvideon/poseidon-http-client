@@ -78,7 +78,15 @@ func (r *responseBodyReader) Read(p []byte) (int, error) {
 			r.recycleData()
 			r.done = true
 			return 0, &StreamResetError{Code: ev.RSTCode}
+		case conn.EventInterimHeaders:
+			// Informational 1xx (RFC 7540 §8.1) — no body, stream continues.
+			// Do() consumed the final HEADERS before handing this reader over,
+			// so a 1xx can only appear here on a peer that interleaves them
+			// after the final status; skip it either way.
+			recycleHeaderSlab(ev.Slab)
+			continue
 		case conn.EventHeaders:
+			recycleHeaderSlab(ev.Slab)
 			continue // spurious mid-stream HEADERS; skip
 		}
 	}
