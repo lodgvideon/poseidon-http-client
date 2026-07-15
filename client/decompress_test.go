@@ -187,8 +187,39 @@ func TestDecompress_AcceptEncodingSent(t *testing.T) {
 		BodyMode: BodyBuffer,
 	}, &resp)
 
-	if gotAcceptEncoding != "gzip" {
-		t.Errorf("Accept-Encoding = %q, want %q", gotAcceptEncoding, "gzip")
+	// The client decodes gzip, deflate, br and zstd, so it advertises all
+	// four: advertising a subset would leave servers compressing with a
+	// coding we would have decoded for free.
+	if want := "gzip, deflate, br, zstd"; gotAcceptEncoding != want {
+		t.Errorf("Accept-Encoding = %q, want %q", gotAcceptEncoding, want)
+	}
+}
+
+// TestDecompress_AcceptEncodingSuppressed pins that DisableDecompression stops
+// the client advertising codings it will not decode.
+func TestDecompress_AcceptEncodingSuppressed(t *testing.T) {
+	var gotAcceptEncoding string
+	var seen bool
+	c, srv := newDecompressTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, seen = r.Header["Accept-Encoding"]
+		gotAcceptEncoding = r.Header.Get("Accept-Encoding")
+		w.Write([]byte("ok"))
+	}))
+	defer c.Close()
+	defer srv.Close()
+
+	var resp Response
+	if err := c.Do(context.Background(), &Request{
+		Method:               "GET",
+		Path:                 "/",
+		BodyMode:             BodyBuffer,
+		DisableDecompression: true,
+	}, &resp); err != nil {
+		t.Fatalf("Do: %v", err)
+	}
+
+	if seen {
+		t.Errorf("Accept-Encoding = %q, want header absent under DisableDecompression", gotAcceptEncoding)
 	}
 }
 
@@ -228,7 +259,9 @@ func TestDetectEncoding(t *testing.T) {
 		{"gzip", []conn.HeaderField{{Name: []byte("content-encoding"), Value: []byte("gzip")}}, EncodingGzip},
 		{"deflate", []conn.HeaderField{{Name: []byte("content-encoding"), Value: []byte("deflate")}}, EncodingDeflate},
 		{"identity", []conn.HeaderField{{Name: []byte("content-encoding"), Value: []byte("identity")}}, EncodingIdentity},
-		{"other-encoding", []conn.HeaderField{{Name: []byte("content-encoding"), Value: []byte("br")}}, EncodingIdentity},
+		{"brotli", []conn.HeaderField{{Name: []byte("content-encoding"), Value: []byte("br")}}, EncodingBrotli},
+		{"zstd", []conn.HeaderField{{Name: []byte("content-encoding"), Value: []byte("zstd")}}, EncodingZstd},
+		{"other-encoding", []conn.HeaderField{{Name: []byte("content-encoding"), Value: []byte("compress")}}, EncodingIdentity},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
