@@ -533,6 +533,16 @@ func (c *Client) Do(ctx context.Context, req *Request, resp *Response) error {
 		ctx, cancel = context.WithTimeout(ctx, req.Timeout)
 		defer cancel()
 	}
+	// Encode the body before the hooks fire, so BytesSent below reports what
+	// actually goes on the wire. Released once the body has been written, which
+	// c.do has done by the time it returns on every BodyMode.
+	req, release, err := prepareCompressedRequest(req)
+	if err != nil {
+		return err
+	}
+	if release != nil {
+		defer release()
+	}
 	authority := req.Authority
 	if authority == "" {
 		authority = c.authority
@@ -540,7 +550,7 @@ func (c *Client) Do(ctx context.Context, req *Request, resp *Response) error {
 	c.observeStart(req, authority)
 	start := time.Now()
 
-	err := c.do(ctx, req, resp)
+	err = c.do(ctx, req, resp)
 
 	var status int
 	var bytesRecv int64
@@ -697,6 +707,16 @@ func (c *Client) DoStream(ctx context.Context, req *Request, sr *StreamResponse)
 		ctx, cancel = context.WithTimeout(ctx, req.Timeout)
 		defer cancel()
 	}
+	// See Do: encode before the hooks fire. doStream has written the whole
+	// request body by the time it returns, so releasing here is safe even though
+	// the response stream stays open.
+	req, release, err := prepareCompressedRequest(req)
+	if err != nil {
+		return err
+	}
+	if release != nil {
+		defer release()
+	}
 	sr.reset()
 	authority := req.Authority
 	if authority == "" {
@@ -705,7 +725,7 @@ func (c *Client) DoStream(ctx context.Context, req *Request, sr *StreamResponse)
 	c.observeStart(req, authority)
 	start := time.Now()
 
-	err := c.doStream(ctx, req, sr)
+	err = c.doStream(ctx, req, sr)
 
 	var status int
 	if err == nil {

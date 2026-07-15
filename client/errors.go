@@ -29,6 +29,20 @@ var (
 	// present but does not parse as a non-negative integer. Distinct
 	// from ErrEmptyResponse so retry logic can treat the two separately.
 	ErrInvalidStatus = errors.New("client: response :status is not a valid integer")
+
+	// ErrConflictingContentEncoding is returned when a Request sets both
+	// Request.CompressBody and its own content-encoding header. The two say
+	// contradictory things about the body — "encode this" versus "this is
+	// already encoded" — and either reading corrupts it, so the request is
+	// refused rather than guessed at. Wraps ErrInvalidRequest, so it is a hard
+	// stop for the Retryer.
+	ErrConflictingContentEncoding = errors.New("client: content-encoding header conflicts with Request.CompressBody")
+
+	// ErrUnsupportedContentEncoding is returned when Request.CompressBody names
+	// a coding this client cannot produce. Failing is deliberate: silently
+	// sending the body uncompressed would leave the caller believing it was
+	// compressed. Wraps ErrInvalidRequest, so it is a hard stop for the Retryer.
+	ErrUnsupportedContentEncoding = errors.New("client: unsupported Request.CompressBody encoding")
 )
 
 // StreamResetError is returned from Do (or surfaced via DoStream's
