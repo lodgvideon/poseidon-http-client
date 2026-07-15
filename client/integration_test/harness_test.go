@@ -13,9 +13,6 @@ import (
 	"testing"
 	"time"
 
-	"golang.org/x/net/http2"
-	"golang.org/x/net/http2/h2c"
-
 	"github.com/lodgvideon/poseidon-http-client/client"
 	"github.com/lodgvideon/poseidon-http-client/conn"
 )
@@ -83,16 +80,19 @@ func startGoReference() {
 	mux := http.NewServeMux()
 	registerFixtures(mux)
 
-	h2s := &http2.Server{}
-	h := h2c.NewHandler(mux, h2s)
-
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		panic(fmt.Sprintf("startGoReference: listen: %v", err))
 	}
 
+	// HTTP/1.1 and cleartext HTTP/2 on one listener, as x/net's h2c.NewHandler
+	// used to do for us. That package is deprecated in favour of this field.
+	protos := new(http.Protocols)
+	protos.SetHTTP1(true)
+	protos.SetUnencryptedHTTP2(true)
 	goRefServer = &http.Server{
-		Handler:     h,
+		Handler:     mux,
+		Protocols:   protos,
 		IdleTimeout: 60 * time.Second,
 	}
 	goRefURL = "http://" + ln.Addr().String()
