@@ -190,12 +190,14 @@ func (e *h3Exchange) Recv(ctx context.Context) (conn.StreamEvent, error) {
 //
 // Informational 1xx responses (resp.Interim) are intentionally dropped, not
 // replayed, for parity with the buffered H2 Do path — which exposes no interim
-// surface either: client.Response has no Interim field, and drainResponse's
-// handleHeadersEvent latches gotHeaders on the first EventHeaders and early-
-// returns on every later one. Replaying each resp.Interim as a pre-final
-// EventHeaders would therefore be worse than dropping it: the first replayed 1xx
-// would latch as resp.Status and the real final status would be discarded.
-// Dropping 1xx keeps H2 and H3 buffered Do behaviour identical.
+// surface either: client.Response has no Interim field, and drainResponse drops
+// conn.EventInterimHeaders after returning its slab (RFC 7540 §8.1). H1.1
+// agrees: http1's ReadResponse skips 1xx without surfacing them. So all three
+// protocols show Client.Do callers only the final response.
+//
+// Replaying each resp.Interim as a conn.EventInterimHeaders would be harmless
+// but pointless: drainResponse would drop it again. Dropping here keeps the
+// synthesised event sequence minimal and H2/H3 buffered Do behaviour identical.
 func (e *h3Exchange) synthesize(resp *http3.Response, body []byte) {
 	hdrs := append(e.hdrsScratch[:0], conn.HeaderField{Name: hdrStatus, Value: e.statusValue(resp.Status)})
 	hdrs = append(hdrs, resp.Headers...)

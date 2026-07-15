@@ -20,6 +20,13 @@ const (
 	EventTrailers                               // Headers populated, trailers
 	EventReset                                  // RSTCode populated
 	EventPushPromise                            // Headers populated (promised), PushStreamID set
+	// EventInterimHeaders carries an informational (1xx) response header
+	// block; Headers is populated and EndStream is always false. A 1xx is
+	// not the final response: the stream continues and a later EventHeaders
+	// delivers the final status (RFC 7540 §8.1). Callers that do not care
+	// about informational responses may ignore this event — dropping it
+	// yields the correct final status either way.
+	EventInterimHeaders
 )
 
 // String returns the lowercase name of t.
@@ -35,6 +42,8 @@ func (t StreamEventType) String() string {
 		return "reset"
 	case EventPushPromise:
 		return "push_promise"
+	case EventInterimHeaders:
+		return "interim_headers"
 	default:
 		return "unknown"
 	}
@@ -48,7 +57,7 @@ func (t StreamEventType) String() string {
 // returns the pointer to conn.GetHeaderSlabPool() in Response.Reset / sr.Close.
 type StreamEvent struct {
 	Type      StreamEventType
-	Headers   []hpack.HeaderField // EventHeaders / EventTrailers
+	Headers   []hpack.HeaderField // EventHeaders / EventTrailers / EventInterimHeaders
 	Data      []byte              // EventData
 	EndStream bool                // any event closing the response side
 	RSTCode   frame.ErrCode       // EventReset
@@ -99,12 +108,19 @@ type Stream struct {
 	// inflightDone in markStreamDone / releaseInflight.
 	pushed bool
 
-	// headersReceived is set after the first non-trailer HEADERS block
-	// for this stream is delivered. The reader goroutine consults it to
-	// classify subsequent HEADERS frames as trailers (RFC 7540 §8.1).
-	// Single-goroutine access — only the reader goroutine reads and
-	// writes this field — so no synchronization is required.
+	// headersReceived is set once a *final* (non-informational) response
+	// HEADERS block for this stream is delivered. The reader goroutine
+	// consults it to classify subsequent HEADERS frames as trailers
+	// (RFC 7540 §8.1 keys trailers on a final status, so a 1xx block must
+	// not latch this). Single-goroutine access — only the reader goroutine
+	// reads and writes this field — so no synchronization is required.
 	headersReceived bool
+
+	// interimCount is the number of informational (1xx) header blocks
+	// received on this stream, bounded by maxInterimResponses so a peer
+	// cannot stream 1xx blocks forever. Same single-goroutine access
+	// discipline as headersReceived.
+	interimCount int
 
 	// recvWindow is the number of payload bytes the peer can still
 	// send to *this* stream before we must refill it via WINDOW_UPDATE
@@ -192,6 +208,7 @@ func recycleStream(pool *sync.Pool, s *Stream) {
 	s.inflightDone = false
 	s.pushed = false
 	s.headersReceived = false
+	s.interimCount = 0
 	s.recvRefundPending = 0
 	s.sendWindow = 0
 	s.resetSignal = make(chan struct{})
