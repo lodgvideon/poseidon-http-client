@@ -371,7 +371,6 @@ func NewServerConn(pc PacketConn, f *ServerFlight, clientDCID, clientSCID []byte
 		done:              make(chan struct{}),
 		streamCredit:      make(chan struct{}, 1),
 		handshakeComplete: true,
-		handshakeSealer:   f.HandshakeSealer,
 		oneRTTSealer:      f.AppSealer,
 		peer:              peer,
 		connMax:           peer.InitialMaxData,
@@ -379,7 +378,14 @@ func NewServerConn(pc PacketConn, f *ServerFlight, clientDCID, clientSCID []byte
 		// the client's 0, 4, 8 … are the request streams it accepts.
 		nextBidiStreamID: 1,
 	}
-	c.keys.Handshake = f.HandshakeOpener
+	// Deliberately no Handshake keys. The handshake finished before this connection
+	// existed, so RFC 9001 §4.9.2 has us discard them once it is confirmed. Keeping
+	// them would be actively harmful: this connection's CRYPTO receive state is
+	// empty (the handshake ran in the listener, not here), so a Handshake packet
+	// that still arrives — a retransmission, or one left in the queue — would
+	// decrypt, look like new CRYPTO, and be fed to a finished crypto/tls handshake,
+	// which errors and closes the connection with CRYPTO_ERROR. Without the keys it
+	// is simply undecryptable and skipped, which is what the RFC asks for anyway.
 	c.keys.OneRTT = f.AppOpener
 	if local, err := ParseTransportParams(f.LocalTransportParams); err == nil {
 		c.localMaxStreamsUni = local.InitialMaxStreamsUni
