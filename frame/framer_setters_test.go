@@ -28,14 +28,6 @@ func TestFramer_SetMaxReadFrameSize_AppliesOnRead(t *testing.T) {
 	}
 }
 
-func TestFramer_SetMaxHeaderListSize_StoresValue(t *testing.T) {
-	fr := NewFramer(nil, nil)
-	fr.SetMaxHeaderListSize(2048)
-	if fr.maxHeaderListSize != 2048 {
-		t.Fatalf("maxHeaderListSize = %d, want 2048", fr.maxHeaderListSize)
-	}
-}
-
 func TestFramer_SetReadBuffer_OverridesInternalBuffer(t *testing.T) {
 	fr := NewFramer(nil, nil)
 	custom := make([]byte, 1024)

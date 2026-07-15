@@ -12,8 +12,10 @@ head.txt
 base.txt
 diff.txt
 
-# Fuzz cache (Go default)
-testdata/fuzz/*/
+# Fuzz corpus: deliberately NOT ignored. Go's generated corpus lives in
+# $GOCACHE/fuzz, not here — the only thing `go test` writes under
+# testdata/fuzz/<Target>/ is a crasher, which MUST be committed: it is the
+# regression seed the `go test -run=Fuzz` replay in CI reruns forever.
 
 # IDE
 .vscode/

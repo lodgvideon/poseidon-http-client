@@ -11,6 +11,39 @@ import (
 // declared length is treated as H3_EXCESSIVE_LOAD rather than buffered.
 const maxControlFrameLen = 1 << 16
 
+// qpackInstrOverhead bounds the non-literal octets of one encoder instruction: a
+// name index plus two literal length prefixes (RFC 9204 §4.3.2, §4.3.3). Each is a
+// prefix integer of at most 6 octets — hpack's decoder rejects a 6th continuation
+// octet as an overflow — so 18 is the true ceiling and 64 leaves room to spare.
+const qpackInstrOverhead = 64
+
+// qpackEncoderInstrCap returns the maximum octets of a single partially-arrived
+// encoder-stream instruction the client will retain while the rest of it arrives,
+// for a decoder advertising maxTableCapacity as SETTINGS_QPACK_MAX_TABLE_CAPACITY.
+//
+// The retained tail only ever holds ONE partial instruction — ParseEncoderInstructions
+// applies and drops every whole one — so the cap is the largest instruction a
+// conforming encoder can send. The largest is an insert, and RFC 9204 §3.2.2 forbids
+// inserting an entry larger than the table capacity while §3.2.1 charges every entry
+// name+value+32 octets, so an insertable entry's DECODED name+value is at most
+// capacity-32. Its WIRE form is at most 4x that: a Huffman literal (§4.3.3) is
+// normally smaller than its decoding, but the longest RFC 7541 Huffman code is 30
+// bits, so an encoder that Huffman-codes bytes it should have sent raw could expand
+// by just under 3.75x. 4*capacity + qpackInstrOverhead therefore admits every
+// instruction any conforming encoder can send, and refuses everything else.
+//
+// maxTableCapacity is clamped first. It is the value WE advertise, but NewClient
+// takes it from a caller, and a literal's wire length is itself bounded at 2^32-1 by
+// the prefix-integer decoder — so a larger capacity cannot make a legitimate
+// instruction any larger, it could only overflow the multiply.
+func qpackEncoderInstrCap(maxTableCapacity uint64) uint64 {
+	const clamp = 1 << 32
+	if maxTableCapacity > clamp {
+		maxTableCapacity = clamp
+	}
+	return 4*maxTableCapacity + qpackInstrOverhead
+}
+
 // serviceControl accepts newly arrived server-initiated unidirectional streams,
 // identifies each by its leading stream-type varint, and reads the control
 // stream. It does not block; it processes only bytes already received. It runs on
@@ -83,6 +116,15 @@ func (c *Client) readQPACKEncoder() error {
 	}
 	if perr != nil {
 		return c.connError(H3QpackEncoderStreamError)
+	}
+	// What survives the drop above is one partial instruction the server has declared
+	// but not finished sending. Bounding it here — AFTER the parse, on the retained
+	// tail rather than on the bytes received — is what lets a server legitimately
+	// burst megabytes of whole instructions (all applied and dropped within this
+	// pass) while refusing one that declares a length it never delivers. Without it a
+	// server declaring a huge literal and dribbling grows qpackEncBuf forever.
+	if uint64(len(c.qpackEncBuf)) > c.qpackEncBufMax {
+		return c.connError(H3ExcessiveLoad)
 	}
 	if after > before {
 		// Acknowledge the newly received inserts so the encoder can advance its Known
@@ -212,6 +254,13 @@ func (c *Client) readQPACKDecoder() error {
 	if perr != nil {
 		return c.connError(H3QpackDecoderStreamError)
 	}
+	// No cap is needed on qpackDecBuf, unlike the encoder stream's (see
+	// readQPACKEncoder). Every decoder instruction is a single prefix integer with no
+	// length-prefixed literal to declare and withhold, so the retained tail is only
+	// ever a partial integer — at most 5 octets, because a 6th continuation octet is
+	// an overflow (a typed decoder-stream error) rather than a request for more bytes.
+	// A cap here could never fire; TestConformance_RFC9204_Sec44_DecoderStreamTailIsSelfBounding
+	// pins that, so a future length-carrying instruction on this stream fails loudly.
 	return nil
 }
 

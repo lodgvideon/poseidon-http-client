@@ -29,6 +29,10 @@ jobs:
             target: FuzzFramerReadFrame
           - pkg: ./hpack
             target: FuzzHPACKDecode
+          - pkg: ./hpack
+            target: FuzzHuffmanRoundTrip
+          - pkg: ./hpack
+            target: FuzzDecodeInteger
           - pkg: ./qpack
             target: FuzzDecodeFieldSection
           - pkg: ./qpack
