@@ -47,13 +47,22 @@ on a from-scratch, near-zero-dependency stack.
   symbols) and CodeQL, plus Dependabot for Go modules and GitHub Actions.
 - **Suite-aware AEAD usage limits (RFC 9001 §6.6)** — ChaCha20-Poly1305 uses its
   mandated 2^36 integrity limit rather than AES-GCM's 2^52.
+- **Bounded HTTP/1.1 response reads.** A peer that never sends a line terminator
+  could make the client read until it ran out of memory. Status lines, header
+  lines, and chunk-size lines are now read within the existing 16 KiB connection
+  buffer; the header block is capped at 8 MiB (the same limit HTTP/2 advertises
+  as `MaxHeaderListSize`), and interim 1xx responses and trailers are bounded.
+  Over-limit responses fail with the new `http1.ErrResponseTooLarge`, mirroring
+  `http3.ErrResponseTooLarge`. Header names are lowercased as ASCII per
+  RFC 7230 §3.2.6: `strings.ToLower` re-encodes each invalid byte as U+FFFD,
+  which both corrupted the name and let a peer retain three bytes per byte sent.
 - Added `SECURITY.md` with a private disclosure process.
 
 ### Tested
 
 - **Soak / endurance** — over one million requests on one managed HTTP/3
   connection with no goroutine or heap growth.
-- **Fuzzed wire parsers** for QUIC, HTTP/3, and QPACK (#198).
+- **Fuzzed wire parsers** for QUIC, HTTP/3, QPACK (#198), and HTTP/1.1.
 - HTTP/3 interop extended with a ChaCha20-only server and a 1 MiB BBR transfer,
   across Caddy, nginx, and aioquic.
 
