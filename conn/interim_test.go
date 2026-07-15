@@ -16,11 +16,17 @@ import (
 // Cloudflare/Fastly/Shopify do) and then the real 200 + body.
 func earlyHintsHandler(interim int, body string) http.HandlerFunc {
 	return func(w http.ResponseWriter, _ *http.Request) {
+		// Every header is set before the first WriteHeader, and none is touched
+		// after. net/http's HTTP/2 server hands the header map to its write
+		// goroutine when it emits a 1xx and encodes it there, so a handler that
+		// mutates the map after a 1xx races with that encode. The race is in the
+		// harness, not in the code under test — but it is real, and flaky enough
+		// to pass -race by luck.
+		w.Header().Add("Link", "</style.css>; rel=preload; as=style")
+		w.Header().Set("Content-Type", "text/plain")
 		for i := 0; i < interim; i++ {
-			w.Header().Add("Link", "</style.css>; rel=preload; as=style")
 			w.WriteHeader(http.StatusEarlyHints) // 103
 		}
-		w.Header().Set("Content-Type", "text/plain")
 		w.WriteHeader(http.StatusOK)
 		_, _ = io.WriteString(w, body)
 	}
