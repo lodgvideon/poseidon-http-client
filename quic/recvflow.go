@@ -32,7 +32,7 @@ func (c *Conn) onStreamConsumed(s *Stream, n uint64) {
 
 	// Per-stream: keep the advertised limit a full window ahead of what has
 	// been consumed on this stream.
-	if want := uint64(s.recv.readOff) + DefaultStreamRecvWindow; want >= s.recvMax+DefaultStreamRecvWindow/2 {
+	if want := s.recv.base + DefaultStreamRecvWindow; want >= s.recvMax+DefaultStreamRecvWindow/2 {
 		s.recvMax = want
 		c.pendingCtrl = AppendMaxStreamData(c.pendingCtrl, s.id, want)
 	}
