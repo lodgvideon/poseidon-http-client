@@ -1,0 +1,2 @@
+go test fuzz v1
+[]byte("HTTP/1 2000\n000000000000\xa20\xa0\xd00\xa80\xbd\xf80\x980000\xec0\xec\xfc:0000\n\n")
