@@ -1,17 +1,72 @@
 name: nightly
+
+# Mutation fuzzing of every binary-protocol parser in the module. Kept off the PR
+# path: regular CI only replays the seed corpus via `go test`, which proves the
+# parsers still handle the inputs we already thought of. Finding the inputs we did
+# not think of is this job's whole purpose, and it needs minutes per target.
 on:
   schedule:
     - cron: '0 3 * * *'
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
 jobs:
   fuzz:
+    name: fuzz ${{ matrix.target }}
     runs-on: ubuntu-24.04
+    timeout-minutes: 12
+    strategy:
+      fail-fast: false # one crashing target must not cancel the others
+      matrix:
+        include:
+          - pkg: ./internal/bytesx
+            target: FuzzReadVarint
+          - pkg: ./conn
+            target: FuzzConnReader
+          - pkg: ./frame
+            target: FuzzFramerReadFrame
+          - pkg: ./hpack
+            target: FuzzHPACKDecode
+          - pkg: ./qpack
+            target: FuzzDecodeFieldSection
+          - pkg: ./qpack
+            target: FuzzRequiredInsertCount
+          - pkg: ./qpack
+            target: FuzzDynamicIndexResolution
+          - pkg: ./http3
+            target: FuzzFrameReader
+          - pkg: ./http3
+            target: FuzzParseSettings
+          - pkg: ./quic
+            target: FuzzParseFrames
+          - pkg: ./quic
+            target: FuzzParseHeader
+          # First contact with an unauthenticated peer: the most exposed code here.
+          - pkg: ./quic
+            target: FuzzAcceptInitial
+          - pkg: ./quic
+            target: FuzzParseTransportParams
     steps:
       - uses: actions/checkout@v4
+
       - uses: actions/setup-go@v5
         with: { go-version: '1.25' }
-      - run: go test -fuzz=FuzzHPACKDecode -fuzztime=10m ./hpack
-      - run: go test -fuzz=FuzzFramerReadFrame -fuzztime=10m ./frame
-      - run: go test -fuzz=FuzzConnReader -fuzztime=10m ./conn
-      - if: failure()
+
+      # -run '^$' keeps the unit tests out of the way so the whole budget goes to
+      # mutation.
+      - name: Fuzz ${{ matrix.target }}
+        run: go test -run '^$' -fuzz '^${{ matrix.target }}$' -fuzztime=5m ${{ matrix.pkg }}
+
+      # A crash writes its reproducer to <pkg>/testdata/fuzz/<Target>/<hash>, so
+      # match it with a recursive glob. The previous root-anchored `testdata/fuzz/`
+      # matched no package, which would have dropped the reproducer for every crash
+      # this job ever found — the one artifact that makes a crash actionable.
+      - name: Upload crash reproducer on failure
+        if: failure()
         uses: actions/upload-artifact@v4
-        with: { name: fuzz-corpus, path: testdata/fuzz/ }
+        with:
+          name: fuzz-crash-${{ matrix.target }}
+          path: '**/testdata/fuzz/**'
+          if-no-files-found: ignore
