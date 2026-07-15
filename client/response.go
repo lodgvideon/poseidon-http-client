@@ -215,9 +215,17 @@ func (sr *StreamResponse) Recv(ctx context.Context) (StreamEvent, error) {
 			return StreamEvent{}, err
 		}
 		switch ev.Type {
+		case conn.EventInterimHeaders:
+			// Informational 1xx (RFC 7540 §8.1). DoStream already consumed the
+			// final HEADERS to fill Status, so a 1xx reaching Recv is a peer
+			// oddity; skip it and keep pumping. StreamResponse exposes no
+			// interim surface, matching Client.Do across all three protocols.
+			recycleHeaderSlab(ev.Slab)
+			continue
 		case conn.EventHeaders:
 			// Spurious post-initial HEADERS without trailer detection —
 			// protocol oddity from peer. Skip and keep pumping.
+			recycleHeaderSlab(ev.Slab)
 			continue
 		case conn.EventData:
 			out := StreamEvent{
