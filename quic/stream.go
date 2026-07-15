@@ -307,12 +307,24 @@ type streamChunk struct {
 
 // recvStream reassembles the bytes of one stream's receive direction from
 // STREAM frames that may arrive out of order or overlapping (RFC 9000 §2.2). It
-// keeps the contiguous prefix in data and buffers later chunks until the gap
-// fills.
+// keeps the not-yet-read contiguous run in data and buffers later chunks until
+// the gap fills.
+//
+// data is a sliding window, not the whole stream: read releases the bytes it
+// returns, so the buffer holds only what the peer has sent but the application
+// has not yet consumed — bounded by the receive-flow-control window
+// (DefaultStreamRecvWindow), not by the stream's total length. Retaining the
+// whole stream instead was a real leak: receive flow control slides its limit
+// forward as the application consumes (recvflow.go), so it bounds bytes
+// in flight and never bounds bytes retained.
+//
+// base makes that release possible. Every offset in a STREAM frame is absolute,
+// so the contiguous prefix's extent is base+len(data), never len(data) alone;
+// there is no other place the consumed byte count is recorded.
 type recvStream struct {
-	data      []byte        // contiguous bytes received from offset 0
-	pending   []streamChunk // buffered chunks beyond len(data), sorted by offset
-	readOff   int           // bytes of data already returned by read
+	data      []byte        // contiguous unread bytes, starting at absolute offset base
+	pending   []streamChunk // buffered chunks beyond base+len(data), sorted by offset
+	base      uint64        // absolute stream offset of data[0] = bytes already returned by read
 	highest   uint64        // highest byte offset received (offset+len), for §4.5 checks
 	fin       bool
 	finalSize uint64
@@ -342,7 +354,7 @@ func (r *recvStream) receive(offset uint64, data []byte, fin bool) error {
 }
 
 func (r *recvStream) insert(offset uint64, data []byte) {
-	have := uint64(len(r.data))
+	have := r.base + uint64(len(r.data)) // absolute end of the contiguous prefix
 	if offset+uint64(len(data)) <= have {
 		return // wholly duplicate
 	}
@@ -396,7 +408,7 @@ func (r *recvStream) bufferGap(offset uint64, data []byte) {
 func (r *recvStream) absorb() {
 	for len(r.pending) > 0 {
 		c := r.pending[0]
-		have := uint64(len(r.data))
+		have := r.base + uint64(len(r.data)) // absolute end of the contiguous prefix
 		if c.offset+uint64(len(c.data)) <= have {
 			r.pending = r.pending[1:] // duplicate
 			continue
@@ -409,21 +421,36 @@ func (r *recvStream) absorb() {
 	}
 }
 
-// bytes returns the contiguous received prefix (offset 0 onward).
+// bytes returns the contiguous received run that read has not yet returned
+// (absolute offsets [base, base+len(data))). Once read has released a prefix,
+// that prefix is gone: this is the unread remainder, not the stream from 0.
 func (r *recvStream) bytes() []byte { return r.data }
 
-// read returns the contiguous bytes not yet returned by a prior read, advancing
-// the read cursor to the end of the contiguous prefix.
+// read returns the contiguous bytes not yet returned by a prior read and
+// releases them from the buffer, so a consumed stream retains nothing.
+//
+// The returned slice aliases the buffer — Stream.Recv's contract is that the
+// result stays valid until the next Recv — so the release must re-slice PAST the
+// returned bytes, never truncate back over them. r.data keeps the same backing
+// array positioned at the array index just after d, so a later append writes
+// beyond d and cannot clobber it; truncating to r.data[:0] would instead point
+// the next append straight at d[0]. Re-slicing does leave d's array alive while
+// the tail is reused, but the array is at most a window's worth of appends, and
+// append reallocates a fresh (small) one once that tail is spent, which is what
+// keeps retention O(window) rather than O(bytes ever received).
 func (r *recvStream) read() []byte {
-	d := r.data[r.readOff:]
-	r.readOff = len(r.data)
+	d := r.data
+	r.base += uint64(len(d))
+	r.data = r.data[len(d):] // empty, positioned after d — never r.data[:0]
 	return d
 }
 
 // complete reports whether the whole stream has been received: the FIN has
-// arrived and every byte up to the final size is contiguous.
+// arrived and every byte up to the final size is contiguous. The contiguous
+// prefix ends at base+len(data): bytes already read still count toward the final
+// size even though they are no longer buffered.
 func (r *recvStream) complete() bool {
-	return r.fin && uint64(len(r.data)) == r.finalSize && len(r.pending) == 0
+	return r.fin && r.base+uint64(len(r.data)) == r.finalSize && len(r.pending) == 0
 }
 
 // WaitReadable blocks until the stream may have more response data to read, its
