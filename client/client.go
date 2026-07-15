@@ -852,7 +852,7 @@ func buildHeaders(req *Request, defaultAuthority, defaultScheme string, sp *[]co
 	}
 	*sp = append(*sp, req.Headers...)
 	if !req.DisableDecompression && shouldSendAcceptEncoding(req) {
-		*sp = append(*sp, conn.HeaderField{Name: hdrAcceptEncoding, Value: encGzip})
+		*sp = append(*sp, conn.HeaderField{Name: hdrAcceptEncoding, Value: acceptEncodingValue})
 	}
 	if req.BodyReader != nil && req.ContentLength > 0 {
 		*sp = append(*sp, conn.HeaderField{
