@@ -261,7 +261,7 @@ var huffmanCodes = [257]huffmanCode{
 	{0x7ffffe9, 27},   // sym 246
 	{0x7ffffea, 27},   // sym 247
 	{0x7ffffeb, 27},   // sym 248
-	{0xfffffe, 28},    // sym 249
+	{0xffffffe, 28},   // sym 249
 	{0x7ffffec, 27},   // sym 250
 	{0x7ffffed, 27},   // sym 251
 	{0x7ffffee, 27},   // sym 252
