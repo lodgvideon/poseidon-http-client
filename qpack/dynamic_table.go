@@ -10,6 +10,12 @@ type dtEntry struct {
 	valueOff, valueLen uint32
 }
 
+// initialEntryRing is the slot count the entry ring is first sized to; it then
+// doubles as needed. The capacity bounds how many entries can be live at once
+// (every entry is at least 32 bytes, RFC 9204 §3.2.1), so the ring stops doubling
+// at maxCapacity/32 slots however many instructions the peer sends.
+const initialEntryRing = 32
+
 // DynamicTable is a QPACK dynamic table (RFC 9204 §3.2) for one direction of one
 // connection. Entries are appended at monotonically increasing ABSOLUTE indices
 // (§3.2.4): the first insertion has absolute index 0, and InsertCount is the
@@ -23,9 +29,13 @@ type dtEntry struct {
 // advertises and shares it across the connection under its own lock; this type is
 // not safe for concurrent use on its own.
 type DynamicTable struct {
-	entries []dtEntry // logical FIFO ring; entries[head..head+count) wraps
-	head    int       // slot of the oldest live entry
-	count   int       // number of live entries
+	// entries is a FIFO ring of len(entries) slots holding count live entries at
+	// slots head..head+count (mod len). It grows only when the ring is full, so an
+	// evicted entry's slot is reused and the ring's size tracks the CAPACITY rather
+	// than the number of instructions the peer has sent.
+	entries []dtEntry
+	head    int // slot of the oldest live entry
+	count   int // number of live entries
 
 	arena []byte // packed name+value bytes for live entries
 	used  uint32 // arena bytes in active use (excludes dead gaps)
@@ -53,8 +63,9 @@ type DynamicTable struct {
 // starts at 0; the peer's Set Dynamic Table Capacity instruction raises it, up
 // to maxCapacity.
 func NewDynamicTable(maxCapacity uint64) *DynamicTable {
+	// The entry ring is left nil: the first insert sizes it (growEntries), so a
+	// table that never inserts costs nothing.
 	return &DynamicTable{
-		entries:     make([]dtEntry, 0, 32),
 		arena:       make([]byte, 0, 1024),
 		maxCapacity: maxCapacity,
 	}
@@ -188,10 +199,12 @@ func (dt *DynamicTable) insert(name, value []byte) bool {
 	dt.arena = append(dt.arena, value...)
 	dt.used += uint32(len(name) + len(value))
 
-	if cap(dt.entries) > len(dt.entries) {
-		dt.entries = dt.entries[:len(dt.entries)+1]
-	} else {
-		dt.entries = append(dt.entries, dtEntry{})
+	// Take the slot after the newest live entry, growing the ring only when every
+	// slot is live. Growing per insertion instead would let a peer drive the ring's
+	// size with its instruction COUNT — an evicted entry's slot would never be
+	// reused — which the capacity is supposed to bound.
+	if dt.count == len(dt.entries) {
+		dt.growEntries()
 	}
 	pos := (dt.head + dt.count) % len(dt.entries)
 	dt.entries[pos] = dtEntry{nameOff, uint32(len(name)), valueOff, uint32(len(value))}
@@ -203,6 +216,26 @@ func (dt *DynamicTable) insert(name, value []byte) bool {
 		dt.compactArena()
 	}
 	return true
+}
+
+// growEntries doubles the entry ring and re-bases it so the oldest live entry
+// sits at slot 0. It is called only when the ring is full, so it runs at most
+// log2(maxCapacity/32) times over a table's life — the capacity caps how many
+// entries can be live, so the doubling stops there no matter how many insertions
+// the peer drives.
+func (dt *DynamicTable) growEntries() {
+	n := len(dt.entries) * 2
+	if n < initialEntryRing {
+		n = initialEntryRing
+	}
+	next := make([]dtEntry, n)
+	// count == 0 implies the ring is empty and the loop does not run, so the
+	// modulus is never evaluated against a zero-length ring.
+	for i := 0; i < dt.count; i++ {
+		next[i] = dt.entries[(dt.head+i)%len(dt.entries)]
+	}
+	dt.entries = next
+	dt.head = 0
 }
 
 // evictOldest removes the entry with the lowest absolute index (RFC 9204
@@ -217,8 +250,11 @@ func (dt *DynamicTable) evictOldest() {
 	dt.head = (dt.head + 1) % len(dt.entries)
 	dt.count--
 	if dt.count == 0 {
+		// The table is empty: re-base it so the next insert starts at slot 0 and
+		// reuses the arena from the front.
 		dt.arena = dt.arena[:0]
 		dt.used = 0
+		dt.head = 0
 	}
 }
 
