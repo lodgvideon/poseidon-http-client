@@ -72,9 +72,12 @@ type connOps interface {
 	// stream-event buffer size for new (pushed) streams.
 	pushSupport() (enabled bool, eventBuf int)
 
-	// registerPushedStream creates a server-initiated stream with the
-	// given even ID and returns it.
-	registerPushedStream(id uint32) *Stream
+	// reservePushedStream validates a promised stream id and registers
+	// the server-initiated stream it reserves. Returns
+	// ErrIllegalPromisedID for an id that is not idle (RFC 7540 §6.6)
+	// and ErrPushRefused when our advertised concurrent-stream cap for
+	// server-initiated streams is already reached.
+	reservePushedStream(id uint32) (*Stream, error)
 
 	// rstStream sends RST_STREAM for the given stream ID.
 	rstStream(id uint32, code frame.ErrCode) error
@@ -377,8 +380,10 @@ func (h *connHandler) OnSettings(fh frame.FrameHeader, s frame.SettingsParams) e
 
 // OnPushPromise implements frame.Handler.
 // When EnablePush is false, returns PROTOCOL_ERROR per RFC 7540 §8.2.
-// When true, registers the promised (even-ID) stream and delivers an
-// EventPushPromise on the parent stream's Recv channel.
+// When true, validates the promised id (§6.6), registers the promised
+// (even-ID) stream and delivers an EventPushPromise on the parent stream's
+// Recv channel. A promise beyond our advertised concurrent server-initiated
+// stream cap is rejected with RST_STREAM(REFUSED_STREAM) per §6.6.
 func (h *connHandler) OnPushPromise(fh frame.FrameHeader, promisedStreamID uint32, hb frame.HeaderBlock, _ uint8) error {
 	h.streams.bumpFramesReceived()
 	enabled, _ := h.streams.pushSupport()
@@ -389,15 +394,12 @@ func (h *connHandler) OnPushPromise(fh frame.FrameHeader, promisedStreamID uint3
 		}
 	}
 
-	// Look up the parent stream.
-	parent := h.streams.lookupStream(fh.StreamID)
-	if parent == nil {
-		// Parent gone; reset the promised stream to be safe.
-		_ = h.streams.rstStream(promisedStreamID, frame.ErrCodeCancel)
-		return nil
-	}
-
-	// Decode the promised pseudo-headers.
+	// Decode the promised pseudo-headers BEFORE any decision that keeps the
+	// connection alive. HPACK is a connection-wide stateful context (RFC
+	// 7541 §2.2): every header block mutates the dynamic table, so skipping
+	// one desynchronizes the decoder for every later block on the
+	// connection. Both survivable outcomes below — a vanished parent and a
+	// refused promise — return nil and keep reading, so neither may skip it.
 	h.scratch = h.scratch[:0]
 	if err := h.dec.DecodeBlock(hb, func(f hpack.HeaderField) error {
 		h.scratch = append(h.scratch, f)
@@ -406,8 +408,29 @@ func (h *connHandler) OnPushPromise(fh frame.FrameHeader, promisedStreamID uint3
 		return headerDecodeConnError(err)
 	}
 
-	// Register the pushed (server-initiated, even) stream.
-	pushed := h.streams.registerPushedStream(promisedStreamID)
+	// Look up the parent stream.
+	parent := h.streams.lookupStream(fh.StreamID)
+	if parent == nil {
+		// Parent gone; reset the promised stream to be safe.
+		_ = h.streams.rstStream(promisedStreamID, frame.ErrCodeCancel)
+		return nil
+	}
+
+	// Reserve the pushed (server-initiated, even) stream.
+	pushed, err := h.streams.reservePushedStream(promisedStreamID)
+	if err != nil {
+		if errors.Is(err, ErrPushRefused) {
+			// §6.6: "Recipients of PUSH_PROMISE frames can choose to reject
+			// promised streams by returning a RST_STREAM referencing the
+			// promised stream identifier back to the sender." A stream-level
+			// refusal — the connection and the parent stream both survive.
+			_ = h.streams.rstStream(promisedStreamID, frame.ErrCodeRefusedStream)
+			return nil
+		}
+		// §6.6: a PUSH_PROMISE promising an id that is not idle is a
+		// connection error of type PROTOCOL_ERROR.
+		return &ConnError{Code: frame.ErrCodeProtocolError, Reason: err.Error()}
+	}
 
 	// Build slab-backed header fields (same pattern as emitHeaderBlock).
 	slabPtr := headerSlabPool.Get().(*[]byte)

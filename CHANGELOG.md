@@ -60,6 +60,19 @@ on a from-scratch, near-zero-dependency stack.
   `http3.ErrResponseTooLarge`. Header names are lowercased as ASCII per
   RFC 7230 §3.2.6: `strings.ToLower` re-encodes each invalid byte as U+FFFD,
   which both corrupted the name and let a peer retain three bytes per byte sent.
+- **Server push no longer corrupts the request-stream gate.** Registering a
+  pushed stream never took a `MAX_CONCURRENT_STREAMS` slot, but closing one
+  released a slot — so every pushed stream that closed freed a slot belonging to
+  a real request. Measured: three concurrent request streams against a peer gate
+  of two, and `Shutdown` returning immediately with a request still open. The two
+  limits are directional and independent (RFC 7540 §5.1.2 / §6.5.2), so they are
+  now two counters, each releasing to the one that issued the slot. The push
+  registry is bounded by the client's own advertised
+  `SETTINGS_MAX_CONCURRENT_STREAMS` — which §6.5.2 already defines as the streams
+  the peer may create — with over-cap promises refused per §6.6. A promised
+  stream ID is now validated (even, non-zero, increasing; §5.1.1): previously a
+  PUSH_PROMISE for ID 1 overwrote the client's own stream 1. Push is opt-in
+  (`EnablePush`), off by default.
 - **HTTP/2 understands 1xx informational responses.** A server sending
   `103 Early Hints` before its real response — Cloudflare, Fastly and Shopify all
   do — made the client report the 103 as the final answer: `Status` was 103, the

@@ -115,10 +115,26 @@ type Conn struct {
 	// behaves as if group-commit were off.
 	wbatch *writeBatcher
 
-	smu      sync.Mutex // guards next stream id and streams map
-	nextID   uint32
-	streams  map[uint32]*Stream
+	smu     sync.Mutex // guards next stream id and streams map
+	nextID  uint32
+	streams map[uint32]*Stream
+	// inflight counts streams *we* initiated (NewStream) that have not
+	// been released. SETTINGS_MAX_CONCURRENT_STREAMS is directional (RFC
+	// 7540 §5.1.2, §6.5.2): the peer's advertised value limits the streams
+	// we open, so a server-pushed stream — which the server initiated —
+	// must never be counted here. pushInflight is its counterpart.
 	inflight uint32
+	// pushInflight counts registered server-initiated (pushed) streams.
+	// Bounded by the value *we* advertise in SETTINGS_MAX_CONCURRENT_STREAMS,
+	// which per §6.5.2 is precisely "the number of streams that the sender
+	// permits the receiver to create". Kept separate from inflight so a
+	// pushing server can neither starve nor inflate our own stream gate.
+	pushInflight uint32
+	// lastPromisedID is the highest promised stream id accepted from a
+	// PUSH_PROMISE. §5.1.1 requires a new id to exceed every id the sender
+	// has opened or reserved, so promised ids must strictly increase; §6.6
+	// makes a violation a connection error of type PROTOCOL_ERROR.
+	lastPromisedID uint32
 
 	// fcMu guards the connection-level recv window. The corresponding
 	// per-stream window lives on Stream and is guarded by Stream.mu.
@@ -267,15 +283,39 @@ func (c *Conn) pushSupport() (enabled bool, eventBuf int) {
 	return c.opts.EnablePush, c.opts.StreamEventBuffer
 }
 
-// registerPushedStream creates and registers a server-initiated stream
-// with the given even ID.
-func (c *Conn) registerPushedStream(id uint32) *Stream {
+// reservePushedStream validates a promised stream id and, if it is legal and
+// we have room, creates and registers the server-initiated stream it reserves.
+// Validation, the cap check and the registry insert happen under one smu hold
+// so a burst of promises cannot race past the bound.
+//
+// Returns ErrIllegalPromisedID when the id is not a legal choice for the
+// server's next stream (RFC 7540 §5.1.1: even, non-zero, and greater than
+// every id already reserved) — §6.6 makes that a connection error of type
+// PROTOCOL_ERROR, so the caller must not merely reset the stream.
+//
+// Returns ErrPushRefused when accepting would exceed the concurrent
+// server-initiated stream count we advertised in
+// SETTINGS_MAX_CONCURRENT_STREAMS. §6.6 lets a recipient reject a promised
+// stream with RST_STREAM on the promised id, so the caller resets rather than
+// killing the connection.
+func (c *Conn) reservePushedStream(id uint32) (*Stream, error) {
+	c.smu.Lock()
+	defer c.smu.Unlock()
+	if id == 0 || id%2 != 0 || id <= c.lastPromisedID {
+		return nil, ErrIllegalPromisedID
+	}
+	// The id is spent on the wire whether or not we accept it, so record it
+	// before the cap check: a later promise must still exceed a refused one.
+	c.lastPromisedID = id
+	if c.pushInflight >= c.opts.Settings.MaxConcurrentStreams {
+		return nil, ErrPushRefused
+	}
 	s := c.allocStream(c.opts.StreamEventBuffer, c.connRecvWindow)
 	s.id = id
-	c.smu.Lock()
+	s.pushed = true
 	c.streams[id] = s
-	c.smu.Unlock()
-	return s
+	c.pushInflight++
+	return s, nil
 }
 
 // rstStream sends a RST_STREAM frame for the given stream ID.
@@ -1437,14 +1477,13 @@ func (c *Conn) markStreamDone(id uint32) {
 	s.mu.Lock()
 	ended := s.localEnded && s.remoteEnded
 	released := s.inflightDone
+	pushed := s.pushed
 	if ended && !released {
 		s.inflightDone = true
 	}
 	s.mu.Unlock()
 	if ended && !released {
-		if c.inflight > 0 {
-			c.inflight--
-		}
+		c.releaseSlotLocked(pushed)
 		delete(c.streams, id)
 	}
 	// Wake Shutdown when the conn is fully drained.
@@ -1471,15 +1510,30 @@ func (c *Conn) releaseInflight(id uint32) {
 	}
 	s.mu.Lock()
 	released := s.inflightDone
+	pushed := s.pushed
 	if !released {
 		s.inflightDone = true
 	}
 	s.mu.Unlock()
 	if !released {
-		if c.inflight > 0 {
-			c.inflight--
-		}
+		c.releaseSlotLocked(pushed)
 		delete(c.streams, id)
+	}
+}
+
+// releaseSlotLocked returns one slot to the counter that issued it: the
+// pushed stream's own bound, or our NewStream gate. Routing by the stream's
+// origin is what keeps each count exact — the two limits are directional and
+// independent (RFC 7540 §5.1.2). Callers hold smu.
+func (c *Conn) releaseSlotLocked(pushed bool) {
+	if pushed {
+		if c.pushInflight > 0 {
+			c.pushInflight--
+		}
+		return
+	}
+	if c.inflight > 0 {
+		c.inflight--
 	}
 }
 
