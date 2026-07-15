@@ -91,6 +91,13 @@ type Stream struct {
 	remoteEnded  bool // peer sent END_STREAM (or RST)
 	closed       bool // RST or graceful close
 	inflightDone bool // inflight slot already returned to the pool
+	// pushed marks a server-initiated stream created from a PUSH_PROMISE.
+	// It selects which of the two directional concurrency counters this
+	// stream's slot came from, so the release path returns it to the same
+	// one (RFC 7540 §5.1.2). Set once under smu at reservation; never true
+	// for a stream from NewStream. Read under Stream.mu alongside
+	// inflightDone in markStreamDone / releaseInflight.
+	pushed bool
 
 	// headersReceived is set after the first non-trailer HEADERS block
 	// for this stream is delivered. The reader goroutine consults it to
@@ -183,6 +190,7 @@ func recycleStream(pool *sync.Pool, s *Stream) {
 	s.remoteEnded = false
 	s.closed = false
 	s.inflightDone = false
+	s.pushed = false
 	s.headersReceived = false
 	s.recvRefundPending = 0
 	s.sendWindow = 0

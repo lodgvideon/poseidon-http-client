@@ -29,6 +29,18 @@ var (
 	// ErrUnexpectedPushPromise is surfaced when the peer sends a
 	// PUSH_PROMISE despite our handshake advertising ENABLE_PUSH=0.
 	ErrUnexpectedPushPromise = errors.New("conn: peer sent PUSH_PROMISE while ENABLE_PUSH=0")
+	// ErrIllegalPromisedID is surfaced when a PUSH_PROMISE promises a
+	// stream id that is not a legal choice for the server's next stream:
+	// zero, odd (the client-initiated space), or not greater than an id
+	// the server already reserved (RFC 7540 §5.1.1). §6.6 makes this a
+	// connection error of type PROTOCOL_ERROR.
+	ErrIllegalPromisedID = errors.New("conn: PUSH_PROMISE promised an illegal stream id")
+	// ErrPushRefused reports that a promised stream was rejected because
+	// accepting it would exceed the concurrent server-initiated stream
+	// count we advertised in SETTINGS_MAX_CONCURRENT_STREAMS. Internal to
+	// the reader path: it becomes an RST_STREAM(REFUSED_STREAM) on the
+	// promised id (RFC 7540 §6.6), never a caller-visible error.
+	ErrPushRefused = errors.New("conn: promised stream refused; push cap reached")
 	// ErrGoAway is returned by NewStream once the peer has sent a
 	// GOAWAY frame: existing streams whose ID is ≤ the GOAWAY's
 	// last-stream-id continue, but no new streams may be opened on

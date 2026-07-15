@@ -17,6 +17,15 @@ import (
 // they don't deadlock the symmetrical peer/client write pair.
 func pipeServer(t *testing.T, srv net.Conn, after func(srvFr *frame.Framer)) {
 	t.Helper()
+	pipeServerWithSettings(t, srv, frame.SettingsParams{}, after)
+}
+
+// pipeServerWithSettings is pipeServer with a peer SETTINGS payload of the
+// caller's choosing. The handshake already reads the client's SETTINGS ACK,
+// so an advertised value is guaranteed applied to Conn.peerSettings by the
+// time NewClientConn returns — no extra frame plumbing in the test body.
+func pipeServerWithSettings(t *testing.T, srv net.Conn, params frame.SettingsParams, after func(srvFr *frame.Framer)) {
+	t.Helper()
 	defer srv.Close()
 	preface := make([]byte, 24)
 	if _, err := readN(srv, preface); err != nil {
@@ -26,7 +35,7 @@ func pipeServer(t *testing.T, srv net.Conn, after func(srvFr *frame.Framer)) {
 	srvFr := frame.NewFramer(srv, srv)
 
 	writeDone := make(chan error, 1)
-	go func() { writeDone <- srvFr.WriteSettings(frame.SettingsParams{}) }()
+	go func() { writeDone <- srvFr.WriteSettings(params) }()
 	if _, err := srvFr.ReadFrame(context.Background(), &nilHandler{}); err != nil {
 		t.Logf("server read client settings: %v", err)
 		return

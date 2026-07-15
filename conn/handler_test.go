@@ -36,7 +36,7 @@ func (*fakeStreamMap) writePingAck([8]byte) error                           { re
 func (*fakeStreamMap) deliverPingAck([8]byte)                               {}
 func (*fakeStreamMap) onGoAwayReceived(uint32, frame.ErrCode)               {}
 func (*fakeStreamMap) pushSupport() (bool, int)                             { return false, 8 }
-func (*fakeStreamMap) registerPushedStream(uint32) *Stream                  { return nil }
+func (*fakeStreamMap) reservePushedStream(uint32) (*Stream, error)          { return nil, nil }
 func (*fakeStreamMap) rstStream(uint32, frame.ErrCode) error                { return nil }
 func (m *fakeStreamMap) storeOrigins(origins []string)            { m.origins = origins }
 func (m *fakeStreamMap) storeAltSvc(entries []frame.AltSvcEntry)  { m.altSvc = entries }
