@@ -40,6 +40,10 @@ on a from-scratch, near-zero-dependency stack.
   `quic-go`, `nghttp2`, `net/http`, or cgo.
 - README rewritten; per-protocol guides and an accurate support matrix replace the
   earlier single-request/HTTP-2-only description.
+- **Removed `frame.Framer.SetMaxHeaderListSize`.** It was exported and documented
+  as the read-side cap on a header block, but nothing ever read the value. The
+  cap that does the work is `hpack.Decoder.SetMaxHeaderListSize`, wired from
+  `conn`, plus the handler's compressed-byte ceiling.
 
 ### Security
 
@@ -74,6 +78,12 @@ on a from-scratch, near-zero-dependency stack.
   live, matching QPACK. Compaction allocates a fresh ring rather than aliasing
   the old one — with a ring that can now wrap, the aliasing would have silently
   swapped one header's value for another's.
+- **`AdvertisedSettings.HeaderTableSize` above 4096 no longer breaks the
+  connection.** The value was wired into the HPACK encoder but not the decoder,
+  which stayed at hpack's 4096 default — so a peer that used exactly the table
+  size we offered was rejected with a decoding error (RFC 7541 §6.3). Go's
+  HTTP/2 server never triggered it: its encoder clamps to its own 4096 limit and
+  never announces a larger table.
 - Added `SECURITY.md` with a private disclosure process.
 
 ### Tested
