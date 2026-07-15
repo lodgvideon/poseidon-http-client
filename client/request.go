@@ -42,6 +42,10 @@ type Request struct {
 	// non-nil, a content-length header is emitted in the HEADERS frame.
 	// Zero or negative: no content-length header. For Body []byte the
 	// length is derived automatically; this field is ignored in that case.
+	//
+	// Ignored entirely when CompressBody is set: it describes the uncompressed
+	// body, so it cannot describe what goes on the wire. See CompressBody for
+	// what is sent instead.
 	ContentLength int64
 
 	// BodyMode controls how the response body is handled. The zero value,
@@ -76,6 +80,26 @@ type Request struct {
 	// IdempotencyAuto, classifies by Method; ForceIdempotent / ForceNotIdempotent
 	// override it. Replaces the former *bool, dropping the addr-of-a-local dance.
 	Idempotency IdempotencyMode
+
+	// CompressBody compresses the request body with the given coding before
+	// sending, and sets the content-encoding header itself. The zero value,
+	// EncodingIdentity, sends the body unchanged — the existing behaviour.
+	//
+	// This is deliberately a separate knob from the content-encoding header.
+	// That header is a representation header (RFC 9110 §8.4): it describes what
+	// the body already *is*. Callers who compress their own bodies set it and
+	// expect those exact bytes on the wire, so it cannot double as a request to
+	// compress without silently double-encoding them. Setting both this field
+	// and a content-encoding header is refused with
+	// [ErrConflictingContentEncoding]; an unrecognised coding is refused with
+	// [ErrUnsupportedContentEncoding].
+	//
+	// content-length is managed for you and any caller-supplied one is replaced:
+	// for a Body the compressed length is sent, and for a BodyReader — whose
+	// compressed length cannot be known before it is read — no content-length is
+	// sent at all (HTTP/1.1 then uses chunked transfer-coding). A request with no
+	// body is left alone: there is no representation to encode.
+	CompressBody ContentEncoding
 
 	// DisableDecompression, when true, prevents automatic gzip/deflate
 	// decompression of the response body. When false (default), the
@@ -200,7 +224,9 @@ func validateRequest(r *Request) error {
 				ErrInvalidRequest, r.Trailers[i].Name)
 		}
 	}
-	return nil
+	// Checked here as well as at the point of use so Do rejects a
+	// self-contradictory request before opening a connection.
+	return validateCompressBody(r)
 }
 
 // containsAnyWhitespace reports whether s contains any Unicode
