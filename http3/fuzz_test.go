@@ -1,6 +1,78 @@
 package http3
 
-import "testing"
+import (
+	"testing"
+
+	"github.com/lodgvideon/poseidon-http-client/hpack"
+	"github.com/lodgvideon/poseidon-http-client/qpack"
+)
+
+// FuzzQPACKEncoderStreamBuffer drives arbitrary server QPACK encoder-stream bytes
+// (RFC 9204 §4.3) through readQPACKEncoder in CHUNKS, the way the reader goroutine
+// does, and asserts the one property the whole memory story rests on: whenever the
+// client keeps the connection alive, the partial instruction it retained is within
+// the cap derived from the table capacity it advertised. The encoder stream is
+// unframed and wholly server-controlled, and readInstrString parks on `needMore`
+// until a declared literal fully arrives, so an unbounded retained tail is the
+// natural failure — it is what this target exists to catch.
+//
+// maxCap is fuzzed, and the cap tracks it (qpackEncoderInstrCap), so small
+// capacities put the cap within reach of ordinary fuzz-sized inputs instead of
+// needing the 16 KB a 4096-byte table's cap would demand.
+func FuzzQPACKEncoderStreamBuffer(f *testing.F) {
+	// Insert With Literal Name declaring a 2 GiB name, then dribbling it: the shape
+	// that grew the buffer without bound before the cap existed. A seed that stays
+	// UNDER the cap would prove nothing, so these carry enough bytes to cross it at
+	// the small advertised capacities — at maxCap 0 the cap is its floor of 64.
+	huge := hpack.EncodeInteger(nil, 5, 0x40, 1<<31)
+	dribbleA, dribbleB := make([]byte, 64), make([]byte, 64)
+	f.Add(uint64(0), huge, dribbleA, dribbleB)
+	f.Add(uint64(32), huge, dribbleA, dribbleB)
+	f.Add(uint64(4096), huge, dribbleA, dribbleB)
+	// A declared length just under a small cap, dribbled past it.
+	f.Add(uint64(64), hpack.EncodeInteger(nil, 5, 0x40, 4000), dribbleA, dribbleB)
+	// Whole instructions, which must be applied and dropped, never retained.
+	f.Add(uint64(4096), hpack.EncodeInteger(nil, 5, 0x20, 4096), []byte{0x41, 'a', 0x01, 'b'}, []byte(nil))
+	f.Add(uint64(4096), []byte{0x40, 0x00}, []byte(nil), []byte(nil))
+	f.Add(uint64(0), []byte{}, []byte{}, []byte{})
+
+	f.Fuzz(func(t *testing.T, maxCap uint64, c1, c2, c3 []byte) {
+		maxCap %= 1 << 16
+
+		// A Client wired for exactly this path — no reader goroutine, so a fuzz
+		// iteration costs nothing but the parse.
+		conn := &fakeConn{}
+		stream := &fakeStream{id: 3, conn: conn, directRead: true, recvChunks: [][]byte{c1, c2, c3}}
+		c := &Client{
+			conn:           conn,
+			qpackDyn:       qpack.NewDynamicTable(maxCap),
+			qpackEncBufMax: qpackEncoderInstrCap(maxCap),
+			qpackReady:     make(chan struct{}),
+			qpackEnc:       stream,
+		}
+
+		for i := 0; i < len(stream.recvChunks); i++ {
+			err := c.readQPACKEncoder()
+			if err == nil {
+				// Alive: the retained tail is a partial instruction and MUST be capped.
+				if uint64(len(c.qpackEncBuf)) > c.qpackEncBufMax {
+					t.Fatalf("chunk %d: retained %d bytes of a partial instruction, cap %d "+
+						"(advertised capacity %d): the encoder stream buffer is unbounded",
+						i, len(c.qpackEncBuf), c.qpackEncBufMax, maxCap)
+				}
+				continue
+			}
+			// Dead: the only error this path may produce is the typed connection error.
+			if err != ErrH3Control {
+				t.Fatalf("chunk %d: untyped error %v, want ErrH3Control", i, err)
+			}
+			if !conn.closed {
+				t.Fatalf("chunk %d: returned %v without closing the connection", i, err)
+			}
+			break
+		}
+	})
+}
 
 // FuzzFrameReader streams arbitrary bytes through the HTTP/3 frame reader
 // (RFC 9114 §7.1) via Feed + a ReadFrame loop, the shape a real stream reader
