@@ -88,7 +88,9 @@ func main() {
 
 | コンストラクタ | プロトコル | コネクションモデル |
 |---|---|---|
-| `client.NewClient(ClientOptions{Transport: client.TransportH1SingleConn, ...})` | HTTP/1.1 | 1 コネクション、リクエストは直列実行 |
+| `client.NewH1Client(addr, dialer, opts...)` | HTTP/1.1 | 1 コネクション、リクエストは直列実行 |
+| `client.NewH1PoolClient(addr, dialer, pool, opts...)` | HTTP/1.1 | 排他チェックアウト方式のプール、1 コネクションにつき 1 リクエスト |
+| `client.NewManagedH1Client(resolver, dialer, opts...)` | HTTP/1.1 | サービスディスカバリ（Resolver + Selector） |
 | `client.NewSingleConnClient(addr, dialer, opts...)` | HTTP/2 | 1 コネクション、自動再接続 |
 | `client.NewPoolClient(addr, dialer, pool, opts...)` | HTTP/2 | ホスト単位のコネクションプール |
 | `client.NewManagedClient(resolver, dialer, opts...)` | HTTP/2 | サービスディスカバリ（Resolver + Selector） |

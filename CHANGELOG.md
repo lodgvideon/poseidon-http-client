@@ -7,8 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [v1.0.0] — 2026-07-15
 
-The first stable release: HTTP/1.1, HTTP/2, and HTTP/3 through one client API,
-on a from-scratch, near-zero-dependency stack.
+The first stable release: HTTP/1.1, HTTP/2, and HTTP/3 through one client API.
+Every protocol stack — QUIC, HTTP/3, QPACK, HTTP/2 framing, HPACK, HTTP/1.1 — is
+written from scratch in this module: no third-party protocol code, no cgo.
 
 ### Added
 
@@ -18,6 +19,27 @@ on a from-scratch, near-zero-dependency stack.
   `NewH3PoolClient`, `NewManagedH3Client`. Concurrent in-flight requests over one
   QUIC connection, connection pooling, service discovery, streaming, retries,
   hooks, and metrics now work over HTTP/3, not only HTTP/2.
+- **HTTP/1.1 parity** — `TransportH1Pool` and `TransportH1Managed` join
+  `TransportH1SingleConn`, with `NewH1Client`, `NewH1PoolClient` and
+  `NewManagedH1Client`. HTTP/1.1 has no multiplexing, so the pool is an
+  exclusive-checkout pool: one exchange per connection, `MaxConnsPerHost` *is* the
+  request concurrency (`MaxStreamsPerConn` does not apply), and a request waits
+  for a free connection at the cap. Before this, HTTP/1.1 load could not be
+  generated at all — a single connection meant strictly serial requests (#219).
+- **Brotli and zstd response decoding** — the client now decodes `gzip`,
+  `deflate`, `br` and `zstd`, and advertises all four in `accept-encoding` (it
+  previously advertised only `gzip` while already decoding `deflate`). Pooled
+  readers, a decompression-bomb guard, and an 8 MiB zstd window cap (#223).
+- **Request-body compression** — `Request.CompressBody` compresses the body with
+  any of the four codings and sets `content-encoding` itself. The zero value sends
+  the body unchanged at zero allocations. A manually-set `content-encoding` still
+  means "already encoded" (RFC 9110 §8.4) and is left alone; setting both returns
+  `ErrConflictingContentEncoding` (#225).
+- **QUIC server role** — `quic.Listen` / `Listener.Accept` and
+  `Conn.AcceptBidiStream` / `AcceptUniStream` expose a server-role QUIC endpoint
+  that reuses the client's connection, crypto and stream machinery. It is a QUIC
+  server role, not an HTTP/3 server. Its immediate value is giving the client a
+  genuine peer to be tested against (#205, #207, #217–#222).
 - **Dynamic QPACK (RFC 9204), both directions** — encode and decode with the
   dynamic table, encoder/decoder instruction streams, known-received-count, and
   blocked-streams handling (#193–#196, #202).
@@ -36,10 +58,31 @@ on a from-scratch, near-zero-dependency stack.
 
 - **Minimum Go version is now 1.25** — a supported release that receives security
   backports.
-- New direct dependency `golang.org/x/crypto` (ChaCha20-Poly1305 only). Still no
-  `quic-go`, `nghttp2`, `net/http`, or cgo.
+- **Four direct dependencies**, all crypto or compression primitives taken
+  deliberately rather than hand-rolled: `golang.org/x/net`, `golang.org/x/crypto`
+  (ChaCha20-Poly1305), `github.com/andybalholm/brotli`, and
+  `github.com/klauspost/compress` (zstd). Every protocol stack remains written
+  from scratch here — still no `quic-go`, `nghttp2`, `net/http`, or cgo. Rolling
+  our own Poly1305 or Brotli would be a security liability with no upside.
+- `Content-Encoding` matching is now case-insensitive (RFC 9110 §8.4.1). A
+  response labelled `Content-Encoding: GZIP` was previously handed back still
+  compressed.
 - README rewritten; per-protocol guides and an accurate support matrix replace the
   earlier single-request/HTTP-2-only description.
+
+### Fixed
+
+- **A race in the HTTP/2 and HTTP/3 connection pools leaked stream slots.**
+  `replyAcquire` selected between delivering its reply and the caller's cancelled
+  context; because the reply channel is buffered, both cases could be ready at
+  once and Go chose at random. When the send won, the response — carrying a
+  connection whose in-flight count had already been incremented — was stranded in
+  a channel nobody read, so the slot was never returned. The trigger was an
+  ordinary per-request timeout, and the leak was monotonic: a pool would starve
+  permanently. Found while building the HTTP/1.1 pool, whose cap of one made it
+  fire in half of all runs instead of hiding behind large caps. Waiter pruning
+  also dropped queued requests without replying. Both fixed, with regression tests
+  that fail on the previous code (#220).
 
 ### Security
 
@@ -52,7 +95,10 @@ on a from-scratch, near-zero-dependency stack.
 ### Tested
 
 - **Soak / endurance** — over one million requests on one managed HTTP/3
-  connection with no goroutine or heap growth.
+  connection with no goroutine or heap growth. A second soak drives the *pooled*
+  transport (471k requests plus 157k deliberately-abandoned acquires) — the
+  single-connection soak never touched the pool's acquire/release path, which is
+  how the slot leak above survived undetected.
 - **Fuzzed wire parsers** for QUIC, HTTP/3, and QPACK (#198).
 - HTTP/3 interop extended with a ChaCha20-only server and a 1 MiB BBR transfer,
   across Caddy, nginx, and aioquic.

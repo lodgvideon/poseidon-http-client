@@ -88,7 +88,9 @@ El constructor que se invoca determina la versión del protocolo:
 
 | Constructor | Protocolo | Modelo de conexión |
 |---|---|---|
-| `client.NewClient(ClientOptions{Transport: client.TransportH1SingleConn, ...})` | HTTP/1.1 | Una conexión, peticiones serializadas |
+| `client.NewH1Client(addr, dialer, opts...)` | HTTP/1.1 | Una conexión, peticiones serializadas |
+| `client.NewH1PoolClient(addr, dialer, pool, opts...)` | HTTP/1.1 | Pool de checkout exclusivo, una petición por conexión |
+| `client.NewManagedH1Client(resolver, dialer, opts...)` | HTTP/1.1 | Service discovery (Resolver + Selector) |
 | `client.NewSingleConnClient(addr, dialer, opts...)` | HTTP/2 | Una conexión, redial automático |
 | `client.NewPoolClient(addr, dialer, pool, opts...)` | HTTP/2 | Pool de conexiones por host |
 | `client.NewManagedClient(resolver, dialer, opts...)` | HTTP/2 | Service discovery (Resolver + Selector) |

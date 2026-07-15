@@ -88,7 +88,9 @@ func main() {
 
 | 构造函数 | 协议 | 连接模型 |
 |---|---|---|
-| `client.NewClient(ClientOptions{Transport: client.TransportH1SingleConn, ...})` | HTTP/1.1 | 单连接，请求串行 |
+| `client.NewH1Client(addr, dialer, opts...)` | HTTP/1.1 | 单连接，请求串行 |
+| `client.NewH1PoolClient(addr, dialer, pool, opts...)` | HTTP/1.1 | 独占式连接池，每条连接同时只处理一个请求 |
+| `client.NewManagedH1Client(resolver, dialer, opts...)` | HTTP/1.1 | 服务发现（Resolver + Selector） |
 | `client.NewSingleConnClient(addr, dialer, opts...)` | HTTP/2 | 单连接，自动重拨 |
 | `client.NewPoolClient(addr, dialer, pool, opts...)` | HTTP/2 | 按主机的连接池 |
 | `client.NewManagedClient(resolver, dialer, opts...)` | HTTP/2 | 服务发现（Resolver + Selector） |
