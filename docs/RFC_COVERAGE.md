@@ -18,6 +18,7 @@ and round-trip through ReadFrame. The conformance row is what the
 | §6.1    | Roundtrip   | TestFramer_Data_Roundtrip, TestFramer_DataPadded_Roundtrip |
 | §6.2    | Conformance | TestConformance_RFC7540_Sec62_HeadersFrame_PriorityPaddedEndHeaders |
 | §6.2    | Roundtrip   | TestFramer_Headers_RoundTrip, TestFramer_HeadersWithPriority_RoundTrip, TestFramer_HeadersPadded_RoundTrip |
+| §6.3    | Conformance | TestConformance_RFC7541_Sec63_DecoderHonorsAdvertisedTableSize, TestConformance_RFC7541_Sec63_DecoderRejectsAboveAdvertised (conn) — a dynamic table size update above the SETTINGS_HEADER_TABLE_SIZE limit is a decoding error; the decoder's limit must be the value we advertised, not hpack's 4096 default, or a peer honouring our own offer is rejected |
 | §6.3    | Conformance | TestConformance_RFC7540_Sec63_PriorityFrame |
 | §6.3    | Roundtrip   | TestFramer_Priority_RoundTrip |
 | §6.4    | Conformance | TestConformance_RFC7540_Sec64_RstStreamFrame |
