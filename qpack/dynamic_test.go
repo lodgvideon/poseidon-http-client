@@ -452,3 +452,67 @@ func FuzzDynamicIndexResolution(f *testing.F) {
 		eq(gN, gV, gOK, wN, wV, wOK)
 	})
 }
+
+// TestQPACK_EncoderInstructions_RingBoundedByCapacity pins the fix for the entry
+// ring growing with the peer's INSTRUCTION COUNT rather than with the table's
+// capacity (found by FuzzParseEncoderInstructions; the minimised input is the
+// committed seed c17449cd555bc213).
+//
+// A 1-byte Duplicate instruction (RFC 9204 §4.3.4) re-inserts the newest entry,
+// which at a capacity of one entry immediately evicts its predecessor: the live
+// table never grows, but each insertion used to append a ring slot that eviction
+// never reclaimed. That is ~16 bytes of permanent heap per wire byte, unbounded —
+// while SETTINGS_QPACK_MAX_TABLE_CAPACITY is precisely the value that is supposed
+// to bound it. Reclamation was left to compactArena, which is gated on ARENA bytes
+// and so never fires for an entry whose name and value are both empty: such an
+// entry costs 32 bytes of §3.2.1 accounting size but zero arena bytes.
+func TestQPACK_EncoderInstructions_RingBoundedByCapacity(t *testing.T) {
+	const capacity = 32 // exactly one empty ("", "") entry: every insert evicts
+	instr := hpack.EncodeInteger(nil, 5, 0x20, capacity) // Set Dynamic Table Capacity
+	instr = append(instr, 0x40, 0x00)                    // Insert With Literal Name ("", "")
+	const duplicates = 4096
+	for i := 0; i < duplicates; i++ {
+		instr = append(instr, 0x00) // Duplicate, relative index 0
+	}
+
+	dt := NewDynamicTable(capacity)
+	n, err := dt.ParseEncoderInstructions(instr)
+	if err != nil {
+		t.Fatalf("ParseEncoderInstructions: %v", err)
+	}
+	if n != len(instr) {
+		t.Fatalf("consumed %d bytes, want all %d", n, len(instr))
+	}
+
+	// The logical state stays exactly as the RFC requires: absolute indices are
+	// permanent so the insert count tracks every insertion (§3.2.4), while the live
+	// window holds the single entry the capacity affords (§3.2.2).
+	if got, want := dt.InsertCount(), uint64(1+duplicates); got != want {
+		t.Fatalf("insert count %d, want %d", got, want)
+	}
+	if dt.Len() != 1 {
+		t.Fatalf("live entries %d, want 1", dt.Len())
+	}
+	if dt.Size() > dt.Capacity() {
+		t.Fatalf("size %d exceeds capacity %d", dt.Size(), dt.Capacity())
+	}
+	// The newest entry must still resolve, so bounding the ring did not cost
+	// correctness: this is what makes the ring a ring rather than an append-only log.
+	if name, val, ok := dt.at(dt.InsertCount() - 1); !ok || len(name) != 0 || len(val) != 0 {
+		t.Fatalf("newest entry = {%q:%q ok=%v}, want the empty entry", name, val, ok)
+	}
+	if _, _, ok := dt.at(0); ok {
+		t.Fatalf("absolute index 0 still resolves after %d evictions", duplicates)
+	}
+
+	// The point of the fix: storage tracks the capacity, not the instruction count.
+	// Before it, this ring held 4097 slots. The bound is deliberately loose and
+	// stated in absolute terms rather than against the ring's sizing constant — it
+	// pins the property (a 1-entry table keeps a small ring however many
+	// instructions arrive), not today's growth policy.
+	if len(dt.entries) > 64 {
+		t.Fatalf("entry ring grew to %d slots for a 1-entry table after %d instructions; "+
+			"storage must track the capacity, not the peer's instruction count",
+			len(dt.entries), 1+duplicates)
+	}
+}
