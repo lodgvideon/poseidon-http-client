@@ -175,6 +175,15 @@ func TestListener_AcceptAndRoundTrip(t *testing.T) {
 	if got != want {
 		t.Fatalf("client read response %q, want %q", got, want)
 	}
+
+	// The server confirms the handshake with HANDSHAKE_DONE (RFC 9001 §4.1.2).
+	// Until the client sees it, it holds its Handshake keys and cannot key-update.
+	client.mu.Lock()
+	confirmed := client.handshakeConfirmed
+	client.mu.Unlock()
+	if !confirmed {
+		t.Error("client never confirmed the handshake: the server sent no HANDSHAKE_DONE")
+	}
 }
 
 // TestListener_DropsRouteWhenConnectionCloses pins a routing table that otherwise

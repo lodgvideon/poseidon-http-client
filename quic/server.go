@@ -392,6 +392,13 @@ func NewServerConn(pc PacketConn, f *ServerFlight, clientDCID, clientSCID []byte
 		c.localMaxStreamsBidi = local.InitialMaxStreamsBidi
 		c.localMaxIdle = local.MaxIdleTimeout
 	}
+	// RFC 9001 §4.1.2: a server considers the handshake confirmed the moment it
+	// completes, and tells the client so with HANDSHAKE_DONE. Without it the client
+	// never confirms — it holds its Handshake keys and cannot run a key update.
+	// Queue it as an app-space control frame; the connection's first flush sends it.
+	c.handshakeConfirmed = true
+	c.pendingCtrl = AppendHandshakeDone(c.pendingCtrl)
+
 	c.lastActivity = c.now()
 	return c, nil
 }
