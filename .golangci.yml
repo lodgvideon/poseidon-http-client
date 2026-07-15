@@ -2,6 +2,15 @@ version: "2"
 
 run:
   timeout: 5m
+  # Without these, golangci-lint type-checks nothing behind a custom build tag:
+  # it reports "build constraints exclude all Go files" and then prints
+  # "0 issues." — clean-looking output for a package it never read. That hid a
+  # deprecated h2c.NewHandler in the integration harness through a lint job that
+  # was green and always would have been.
+  build-tags:
+    - integration
+    - interop
+    - poseidondebug
 
 linters:
   default: none

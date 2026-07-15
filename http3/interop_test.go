@@ -43,8 +43,9 @@ func interopServers() []interopServer {
 	if list == "" {
 		return []interopServer{{name: "default", addr: interopAddr()}}
 	}
-	var out []interopServer
-	for _, e := range strings.Split(list, ",") {
+	parts := strings.Split(list, ",")
+	out := make([]interopServer, 0, len(parts))
+	for _, e := range parts {
 		e = strings.TrimSpace(e)
 		if e == "" {
 			continue
