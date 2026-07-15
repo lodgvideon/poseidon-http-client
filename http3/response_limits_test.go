@@ -29,6 +29,40 @@ func TestClient_RejectsOversizedResponseFrame(t *testing.T) {
 	}
 }
 
+// TestFrameReader_OversizedFrameRefusedBeforeBuffering pins the ORDERING that makes
+// a request stream's FrameReader safe against a server that declares a huge frame
+// length and then dribbles the payload. ReadFrame consults the cap on the DECLARED
+// length the instant the frame header parses — before the "is the payload buffered
+// yet" check — so the dribble never begins: the reader errors on the first pass and
+// its buffer never grows past the frame header it already held.
+//
+// Swapping those two checks would silently turn the cap into a no-op against a
+// dribbling peer (the reader would return ErrNeedMore and buffer toward the declared
+// length forever), and every caller-level test would still pass, because they all
+// deliver the payload. Hence a direct test at this level.
+func TestFrameReader_OversizedFrameRefusedBeforeBuffering(t *testing.T) {
+	var r FrameReader
+	r.SetMaxFrameLen(maxResponseBytes)
+
+	// A frame header declaring 2^40 bytes, then a dribble of payload that will never
+	// reach the declared length.
+	r.Feed(AppendFrameHeader(nil, FrameData, 1<<40))
+	header := r.Buffered()
+	for i := 0; i < 8; i++ {
+		if _, _, err := r.ReadFrame(); !errors.Is(err, ErrH3FrameTooLarge) {
+			t.Fatalf("pass %d: ReadFrame = %v, want ErrH3FrameTooLarge; the reader buffered "+
+				"%d bytes toward a declared 2^40-byte frame", i, err, r.Buffered())
+		}
+		r.Feed(bytes.Repeat([]byte("x"), 4096)) // the server dribbles on regardless
+	}
+	// The cap fired before any payload was consumed, so whatever is buffered is only
+	// what the peer pushed at us — the reader never grew toward the declared length.
+	if grown := r.Buffered() - header; grown > 8*4096 {
+		t.Fatalf("reader buffered %d bytes beyond the frame header, want <= the %d dribbled: "+
+			"the cap is being consulted after the payload accumulates", grown, 8*4096)
+	}
+}
+
 // TestClient_AcceptsLargeSingleDataFrame: a body delivered as one DATA frame up to
 // the whole budget is accepted — the per-frame cap must not be tighter than the
 // total cap (RFC 9114 places no per-frame size limit on DATA).
