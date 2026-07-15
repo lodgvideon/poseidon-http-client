@@ -76,6 +76,13 @@ written from scratch in this module: no third-party protocol code, no cgo.
 
 ### Fixed
 
+- **Every closed QUIC connection leaked a goroutine.** `crypto/tls` runs a
+  `QUICConn`'s handshake on its own goroutine, which exits only when the
+  handshake finishes or `Close` cancels it — so a connection torn down before
+  that, including any client connection, left one behind. Teardown now closes the
+  handshake on every terminal path. The fix shipped in v0.10.0 alongside the
+  server-role work but went unrecorded here; it affects clients, not only
+  servers.
 - **A race in the HTTP/2 and HTTP/3 connection pools leaked stream slots.**
   `replyAcquire` selected between delivering its reply and the caller's cancelled
   context; because the reply channel is buffered, both cases could be ready at
