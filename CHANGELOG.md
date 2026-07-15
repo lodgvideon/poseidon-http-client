@@ -76,6 +76,21 @@ written from scratch in this module: no third-party protocol code, no cgo.
 
 ### Fixed
 
+- **An HTTP/2 pool never recovered from a server restart.** `conn.IsAlive`
+  reported a connection healthy after its peer had vanished — a crash, a
+  restart, an RST — because it asked only whether `Close` had been called or a
+  GOAWAY received. The reader had already noticed and exited; nothing turned
+  that into death, since `readerLoop` returns without closing the connection and
+  the only listener on its exit is a keepalive loop that does not run unless
+  `KeepaliveInterval` is set (it is zero by default). So the pool kept handing
+  out the corpse: measured with a 50ms health check, every request after a
+  restart failed on the same socket pair, forever — the health check asks the
+  same question, and the resulting `context.DeadlineExceeded` is not retryable.
+  `IsAlive` now treats the reader's exit as the connection's death, which is
+  what `http3.Client.Alive` already did. HTTP/1.1 was never affected: its pool
+  evicts on the exchange error rather than on a liveness probe. Graceful GOAWAY
+  worked throughout, which is why this survived — the tested way of losing a
+  peer was the one that worked.
 - **Every closed QUIC connection leaked a goroutine.** `crypto/tls` runs a
   `QUICConn`'s handshake on its own goroutine, which exits only when the
   handshake finishes or `Close` cancels it — so a connection torn down before
