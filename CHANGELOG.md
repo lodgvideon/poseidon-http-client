@@ -56,6 +56,15 @@ on a from-scratch, near-zero-dependency stack.
   `http3.ErrResponseTooLarge`. Header names are lowercased as ASCII per
   RFC 7230 §3.2.6: `strings.ToLower` re-encodes each invalid byte as U+FFFD,
   which both corrupted the name and let a peer retain three bytes per byte sent.
+- **Bounded HPACK dynamic-table entry ring.** The HTTP/2 dynamic table grew its
+  entry ring by one slot per header and never reused an evicted entry's slot, so
+  a peer could drive the ring's size with its header *count* rather than the
+  4096-octet table size that is supposed to bound it. Empty-name/empty-value
+  literals cost three bytes on the wire and bought a slot each: 3 MB sent
+  retained 16 MB, with no ceiling. The ring now grows only when every slot is
+  live, matching QPACK. Compaction allocates a fresh ring rather than aliasing
+  the old one — with a ring that can now wrap, the aliasing would have silently
+  swapped one header's value for another's.
 - Added `SECURITY.md` with a private disclosure process.
 
 ### Tested
