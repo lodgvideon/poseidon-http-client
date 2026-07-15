@@ -637,7 +637,7 @@ func (h *connFrameHandler) OnCrypto(offset uint64, data []byte) error {
 	// by) the TLS layer. maxCryptoBuffer past the read cursor is ample for a real
 	// certificate flight, which is delivered largely in order.
 	cr := &h.c.cryptoRecv[h.space]
-	if offset+uint64(len(data)) > uint64(cr.readOff)+maxCryptoBuffer {
+	if offset+uint64(len(data)) > cr.base+maxCryptoBuffer {
 		return ErrCryptoBufferExceeded // §7.5 permits closing with CRYPTO_BUFFER_EXCEEDED
 	}
 	// The handshake CRYPTO stream spans many frames and packets (a server's

@@ -56,6 +56,15 @@ on a from-scratch, near-zero-dependency stack.
   `http3.ErrResponseTooLarge`. Header names are lowercased as ASCII per
   RFC 7230 §3.2.6: `strings.ToLower` re-encodes each invalid byte as U+FFFD,
   which both corrupted the name and let a peer retain three bytes per byte sent.
+- **QUIC streams release consumed bytes.** A receive stream's buffer was only
+  ever appended to: reading advanced a cursor but never freed the bytes behind
+  it, so a stream retained every byte it had ever received. Receive flow control
+  did not bound this — its window is keyed on the read cursor, so it slides
+  forward as the application consumes, bounding bytes *in flight* rather than
+  bytes *retained*. `DoStream` therefore did not stream: an 8 MiB response
+  retained 8 MiB after being fully consumed, 32x the 256 KiB window. Fixed by
+  releasing the consumed prefix. Also ~3x faster on the receive path, since the
+  growing buffer had been forcing `append` to recopy.
 - **Bounded HPACK dynamic-table entry ring.** The HTTP/2 dynamic table grew its
   entry ring by one slot per header and never reused an evicted entry's slot, so
   a peer could drive the ring's size with its header *count* rather than the
