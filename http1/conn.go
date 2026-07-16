@@ -165,6 +165,12 @@ type Exchange struct {
 	clSeen         bool  // a Content-Length field was present
 	clValue        int64 // its value, when clSeen && clErr == nil
 	clErr          error // first Content-Length defect seen, if any
+	// respTE and respCL record mere presence of Transfer-Encoding and
+	// Content-Length in the response head, independent of their values and of
+	// the order they arrived in. RFC 9112 §6.3 rule 3 keys on both being
+	// present, and either can be parsed first.
+	respTE         bool
+	respCL         bool
 	contentLen     int64 // -1 = read until connection close
 	bodyRead       int64
 	chunkRemaining int64
@@ -383,6 +389,19 @@ func (ex *Exchange) ReadResponse(ctx context.Context) (statusCode int, headers [
 	if err = ex.consumeHeaders(&headers, true); err != nil {
 		return 0, nil, err
 	}
+
+	// RFC 9112 §6.3 rule 3: a message carrying both Transfer-Encoding and
+	// Content-Length "might indicate an attempt to perform request smuggling
+	// (§11.2) or response splitting (§11.1) and ought to be handled as an
+	// error"; the sender MUST close the connection after responding. For a
+	// client, "close" means the socket must not be reused: the two headers
+	// disagree about where this response ends, so whatever is on the wire next
+	// cannot be trusted to be the next response. keepAlive=false is what
+	// carries that — client/h1_pool.go's handleRelease evicts any conn released
+	// with it rather than returning it to the idle set.
+	if ex.respTE && ex.respCL {
+		ex.keepAlive = false
+	}
 	return statusCode, headers, nil
 }
 
@@ -518,13 +537,21 @@ func (ex *Exchange) noteContentLength(value string) {
 // whole header block has been read, and is the only place ex.contentLen is set
 // from a Content-Length field.
 //
-// The respChunked gate is RFC 9112 §6.3 rules 3 and 5 acting together: rule 3
-// says Transfer-Encoding overrides Content-Length, and rule 5's fatal case is
-// scoped to a message "received without Transfer-Encoding". So when the body is
-// chunk-framed the Content-Length is not consulted at all — not even to reject
-// it — because it no longer decides anything about where this response ends.
+// The respTE gate is RFC 9112 §6.3 rules 3 and 5 acting together: rule 3 says
+// Transfer-Encoding overrides Content-Length, and rule 5's fatal case is scoped
+// to a message "received without Transfer-Encoding". So whenever the field is
+// PRESENT the Content-Length is not consulted at all — not even to reject it —
+// because it no longer decides anything about where this response ends.
+//
+// The gate is presence of the field, not chunked framing. Those coincide only
+// while a substring match makes respChunked true for every Transfer-Encoding
+// carrying "chunked" anywhere. Once the final-coding parse lands, "TE: gzip"
+// leaves respChunked false while the field is still present, and gating on
+// respChunked would let a Content-Length re-frame a body that rule 4 says must
+// be read until the server closes — which is the TE.CL desync this file exists
+// to close.
 func (ex *Exchange) resolveContentLength() error {
-	if ex.respChunked {
+	if ex.respTE {
 		return nil
 	}
 	if ex.clErr != nil {
@@ -552,6 +579,35 @@ func truncateForError(s string) string {
 		return s
 	}
 	return s[:max] + "..."
+}
+
+// lastTransferCoding returns the final transfer-coding token of one
+// Transfer-Encoding field value, lowercased, or "" when the list is empty.
+//
+// RFC 9112 §7 defines the field as a comma-separated list of transfer-coding,
+// each optionally carrying ";"-delimited parameters, with optional whitespace
+// around the commas. Only the last element decides the framing (§6.3 rules 3
+// and 4), so that is all this reports. Splitting on "," without honouring
+// quoted-string parameters is safe for that question: a quoted comma can only
+// appear inside a parameter of some coding, and the token that follows the
+// final unquoted comma is still the final coding.
+//
+// Lowering is ASCII-only for the same reason asciiLowerHeaderName is (RFC 9110
+// §5.1 makes the comparison case-insensitive; the token itself is ASCII per
+// §5.6.2, so strings.ToLower could only re-encode bytes that were already
+// invalid).
+func lastTransferCoding(value string) string {
+	last := ""
+	for _, tok := range strings.Split(value, ",") {
+		if semi := strings.IndexByte(tok, ';'); semi >= 0 {
+			tok = tok[:semi]
+		}
+		tok = strings.Trim(tok, " \t")
+		if tok != "" {
+			last = tok
+		}
+	}
+	return asciiLowerHeaderName(last)
 }
 
 // consumeHeaders reads HTTP/1.1 headers until a blank line.
@@ -600,11 +656,29 @@ func (ex *Exchange) consumeHeaders(out *[]hpack.HeaderField, parseBody bool) err
 		if parseBody {
 			switch name {
 			case "content-length":
+				ex.respCL = true
 				ex.noteContentLength(value)
 			case "transfer-encoding":
-				if strings.Contains(strings.ToLower(value), "chunked") {
+				ex.respTE = true
+				// RFC 9112 §7: the field value is an ordered, comma-separated
+				// list of transfer-coding tokens. Only "chunked" as the *final*
+				// coding gives chunked framing; a substring match instead reads
+				// "not-chunked" and "chunked, gzip" as chunked and then desyncs
+				// on the first body byte.
+				//
+				// Either branch overrides any Content-Length parsed so far
+				// (§6.3 rule 3), which is why contentLen is assigned
+				// unconditionally here: this is the only place that can undo a
+				// Content-Length that arrived first.
+				if lastTransferCoding(value) == "chunked" {
 					ex.respChunked = true
 					ex.contentLen = -2 // sentinel: chunked overrides content-length
+				} else {
+					// §6.3 rule 4: chunked is not the final encoding, so the
+					// body length is determined by reading until the server
+					// closes the connection.
+					ex.respChunked = false
+					ex.contentLen = -1
 				}
 			case "connection":
 				lower := strings.ToLower(value)

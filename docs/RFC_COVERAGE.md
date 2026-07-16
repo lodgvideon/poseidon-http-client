@@ -139,8 +139,8 @@ non-ACK PING frames with `ACK=1` and the original 8-byte payload
 |---------|-------------|------|
 | §3.6.1  | Conformance | TestConformance_RFC2616_Sec3_6_1_MultipleChunks — multi-chunk body reassembled across ReadBodyChunk calls |
 | §3.6.1  | Conformance | TestConformance_RFC2616_Sec3_6_1_EmptyChunkedBody — terminal 0-chunk produces empty body immediately |
-| §4.4 R3 | Conformance | TestConformance_RFC2616_Sec4_4_Rule3_ChunkedWinsContentLengthFirst — Transfer-Encoding beats Content-Length (CL first) |
-| §4.4 R3 | Conformance | TestConformance_RFC2616_Sec4_4_Rule3_ChunkedWinsTransferEncodingFirst — Transfer-Encoding beats Content-Length (TE first) |
+| §4.4 R3 | Conformance | TestConformance_RFC2616_Sec4_4_Rule4_ChunkedWinsContentLengthFirst — Transfer-Encoding beats Content-Length (CL first) |
+| §4.4 R3 | Conformance | TestConformance_RFC2616_Sec4_4_Rule4_ChunkedWinsTransferEncodingFirst — Transfer-Encoding beats Content-Length (TE first) |
 | §6.1    | Conformance | TestConformance_RFC2616_Sec6_1_HTTP10StatusLineParsed — HTTP/1.0 status line accepted by parser |
 | §8.1    | Conformance | TestConformance_RFC2616_Sec8_1_HTTP10DefaultClose — HTTP/1.0 without Connection header → KeepAlive() false |
 | §8.1    | Conformance | TestConformance_RFC2616_Sec8_1_HTTP10KeepAliveHeader — HTTP/1.0 + Connection: keep-alive → KeepAlive() true |
@@ -149,13 +149,19 @@ non-ACK PING frames with `ACK=1` and the original 8-byte payload
 
 ## RFC 9112 — HTTP/1.1 message syntax (http1/, client/)
 
-RFC 9112 obsoletes RFC 7230 and is the current HTTP/1.1 syntax spec; the
-RFC 2616 rows above predate it and are keyed on that document's section
-numbers. Rows here cite the numbered rules of RFC 9112 §6.3 "Message Body
-Length".
+RFC 9112 obsoletes RFC 7230 and is the current HTTP/1.1 message-framing spec;
+the RFC 2616 rows above predate it and are keyed on that document's own section
+numbers, which do not track RFC 9112 §6.3. Rows here cite the numbered rules of
+§6.3 "Message Body Length".
 
 | Section | Type        | Test |
 |---------|-------------|------|
+| §6.3 R4 | Conformance | TestConformance_RFC9112_Sec6_3_Rule4_ChunkedNotFinalReadsUntilClose (http1/) — "Transfer-Encoding: chunked, gzip": chunked is present but not the final coding, so the body length is determined by reading until the server closes, not by chunk framing |
+| §6.3 R4 | Conformance | TestConformance_RFC9112_Sec6_3_Rule4_UnknownCodingReadsUntilClose (http1/) — "Transfer-Encoding: not-chunked" is a different §7 token from "chunked"; matching the field as a substring reads it as chunked and desyncs the stream |
+| §6.3 R3 | Conformance | TestConformance_RFC9112_Sec6_3_Rule3_ContentLengthFirst_TEOverrides (http1/) — TE overrides CL when CL is parsed first; the override must undo a framing decision already made, and the response is not poolable |
+| §6.3 R3 | Conformance | TestConformance_RFC9112_Sec6_3_Rule3_TransferEncodingFirst_CLIgnored (http1/) — same rule in the opposite header order: a Content-Length arriving after Transfer-Encoding must not reinstate length framing |
+| §6.3 R3 | Conformance | TestConformance_RFC9112_Sec6_3_Rule3_ChunkedPlusCLNotReusable (http1/) — TE:chunked + CL frames as chunked (RFC 2616 §4.4 R3 rows) but MUST close: KeepAlive() is false |
+| §6.3 R3 / §11.2 | Conformance | TestConformance_RFC9112_Sec6_3_Rule3_SmuggledResponseNotPooled (client/) — the MUST-close consequence at the pool layer: a TE+CL response evicts its conn (h1Pool.handleRelease), so the next request redials rather than reusing a socket whose framing the peer disputed |
 | §6.3 R3 | Conformance | TestConformance_RFC9112_Sec6_3_Rule3_InvalidContentLengthIgnoredWhenChunked (http1/) — Transfer-Encoding overrides Content-Length, so a chunk-framed response is not failed over an invalid Content-Length. Both header orders: rule 5's fatal case is scoped to a message "without Transfer-Encoding", and that absence is not known until the blank line |
 | §6.3 R5 | Conformance | TestConformance_RFC9112_Sec6_3_Rule5_ConflictingContentLengthsRejected (http1/) — two Content-Length field lines that disagree combine (RFC 9110 §5.3) into a non-1\*DIGIT value → unrecoverable: typed error + connection not poolable. The CL.CL desync |
 | §6.3 R5 | Conformance | TestConformance_RFC9112_Sec6_3_Rule5_ConflictingContentLengthsRejectedOrderIndependent (http1/) — same verdict when the conflicting pair straddles another field |
@@ -164,6 +170,9 @@ Length".
 | §6.3 R5 | Conformance | TestConformance_RFC9112_Sec6_3_Rule5_IdenticalDuplicatesAccepted (http1/) — the obligation NOT to over-reject: duplicate identical field lines are processed with that single value as the length |
 | §6.3 R5 | Conformance | TestConformance_RFC9112_Sec6_3_Rule5_CommaListIdenticalValuesAccepted (http1/) — rule 5's literal exception: a comma-separated list whose values are all valid and all the same |
 | §6.3 R5 / §11.2 | Conformance | TestConformance_RFC9112_Sec6_3_Rule5_PoisonedConnNotPooled (client/) — the pool-layer payoff: a conn poisoned by conflicting Content-Length is evicted, not reused. Pins that request 2 dials fresh and does not read the response smuggled inside request 1's body |
+| §6.3 R4 | Conformance | TestConformance_RFC9112_Sec6_3_Rule4_TENotFinalIgnoresValidCL (http1/) — a present-but-not-chunked Transfer-Encoding overrides even a *valid* Content-Length; rule 4 hands the length to connection close, and re-framing at the Content-Length truncates the body and strands the tail on the socket |
+| §6.3 R5 | Conformance | TestConformance_RFC9112_Sec6_3_Rule5_ScopedToMessagesWithoutTE (http1/) — rule 5 is scoped to a message received "without Transfer-Encoding": with the field present its discard path must not fire however invalid the Content-Length. Rule 3 still forbids reuse, so KeepAlive() is false |
+| §6.3 R5 | Conformance | TestConformance_RFC9112_Sec6_3_Rule5_InvalidCLWithoutTEStillRejected (http1/) — the control for that scoping: strip the Transfer-Encoding and rule 5 applies again unchanged, so narrowing the gate cannot silently disable it |
 
 ## RFC 9110 — HTTP semantics (http1/)
 
