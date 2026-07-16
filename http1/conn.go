@@ -644,6 +644,60 @@ func (ex *Exchange) ReadResponse(ctx context.Context) (statusCode int, headers [
 	if ex.respTE && ex.respCL {
 		ex.keepAlive = false
 	}
+
+	// A status that RFC 9112 §6.3 rule 1 makes bodyless, whose head nevertheless
+	// declared a body.
+	//
+	// Rule 1 is honoured correctly by ReadBodyChunk — a 204/304 ends at the blank
+	// line whatever the fields say — and that is exactly what makes this
+	// dangerous. The declared bytes are never read, so they stay on the socket,
+	// and the connection is pooled. The next request then parses attacker-chosen
+	// bytes as its status line, and because the attacker chose them they can be a
+	// complete well-formed response: request N+1 gets a response the server never
+	// sent for it, with err=nil.
+	//
+	// §6.3 forbids exactly that outcome: "A client MUST NOT process, cache, or
+	// forward such extra data as a separate response, since such behavior would
+	// be vulnerable to cache poisoning."
+	//
+	// This is not #251's CL.CL desync — there is one Content-Length and it is
+	// valid, so resolveContentLength never objects — and not the TE+CL shape
+	// above. It is the head declaring a body the status forbids.
+	switch ex.statusCode {
+	case 204:
+		// RFC 9110 §8.6: "A server MUST NOT send a Content-Length header field in
+		// any response with a status code of 1xx (Informational) or 204 (No
+		// Content)". RFC 9112 §6.1 says the same of Transfer-Encoding. Either
+		// field on a 204 means the peer is broken or hostile, and body-shaped
+		// bytes may be sitting on the socket.
+		if ex.respTE || ex.respCL {
+			ex.keepAlive = false
+		}
+	case 304:
+		// Content-Length on a 304 is explicitly permitted and must NOT cost the
+		// connection — §8.6: "A server MAY send a Content-Length header field in
+		// a 304 (Not Modified) response to a conditional GET request". It
+		// describes the selected representation, not a message body, so no bytes
+		// follow it. Origin servers send it routinely; evicting on it would cost
+		// a connection per conditional GET.
+		//
+		// Transfer-Encoding gets no such licence. Honesty about the grounds: no
+		// RFC forbids it on a 304 either — §6.1's MUST NOT lists 1xx, 204 and a
+		// 2xx to CONNECT, and 304 is not among them. This is therefore this
+		// client's reading, not a quoted rule: unlike Content-Length,
+		// Transfer-Encoding has no representation-describing meaning to fall back
+		// on. It is a message-framing field, and rule 1 says this message has no
+		// body to frame — so its presence says the server intends bytes we are
+		// required not to read.
+		if ex.respTE {
+			ex.keepAlive = false
+		}
+	}
+	// HEAD is deliberately absent. Rule 1 makes a HEAD response bodyless too, but
+	// RFC 9110 §9.3.2 — "The server SHOULD send the same header fields in response
+	// to a HEAD request as it would have sent if the request method had been GET"
+	// — makes Content-Length normal there, describing the body a GET would have
+	// returned. Evicting on it would discard a pooled connection after every HEAD.
 	return statusCode, headers, nil
 }
 
