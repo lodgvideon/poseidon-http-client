@@ -59,6 +59,26 @@ func TestConn_SmallAdvertisedWindow_StillCompletes(t *testing.T) {
 			}
 			opts := ConnOptions{}
 			opts.Settings.InitialWindowSize = window
+			// Size the event buffer to the whole download.
+			//
+			// The default is 8, and nothing in this client applies backpressure
+			// from Recv to the reader goroutine: the reader refunds the window as
+			// it processes each DATA frame, which lets the peer send more, which
+			// the reader pushes as more events. The only limit on how far ahead
+			// the reader gets is how fast this loop drains — and a full channel
+			// is not a wait, it is a DROP: push() closes the stream and delivers
+			// EventReset with EndStream set (conn/stream.go), so the loop below
+			// exits early and the test reports a short read.
+			//
+			// That matters most at the small windows this test exists for: a
+			// 1024-byte window means ~200 DATA events for a 200 KiB body, so an
+			// 8-deep buffer needs the consumer to keep pace with the socket for
+			// all 200. On a loaded CI runner under -race it does not, and the
+			// failure surfaced as "the peer is waiting for a WINDOW_UPDATE" —
+			// accusing the very bug this test pins, which was not what happened.
+			// Event-buffer capacity is not what this test is about; make it a
+			// non-factor rather than a coin flip.
+			opts.StreamEventBuffer = 512
 			c, err := NewClientConn(t.Context(), nc, opts)
 			if err != nil {
 				t.Fatalf("NewClientConn: %v", err)
@@ -94,6 +114,17 @@ func TestConn_SmallAdvertisedWindow_StillCompletes(t *testing.T) {
 				if ev.Type == EventData {
 					got += len(ev.Data)
 					GetDataBufPool().Put(ev.DataSlab)
+				}
+				// A reset ends the stream too, and would otherwise be
+				// indistinguishable from a clean finish at the check below — the
+				// short read would then be blamed on the refund threshold, which
+				// is not what happened. Name the real cause instead.
+				if ev.Type == EventReset {
+					t.Fatalf("stream reset (code %v) after %d of %d bytes with "+
+						"InitialWindowSize=%d — this is NOT the refund bug: the client "+
+						"reset its own stream, which push() does when the event buffer "+
+						"fills and this loop has fallen behind the reader",
+						ev.RSTCode, got, bodyLen, window)
 				}
 				if ev.EndStream {
 					break
