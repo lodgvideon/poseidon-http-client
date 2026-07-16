@@ -515,6 +515,22 @@ func (c *Conn) Stats() ConnStats {
 // suitable for transport pools that need to decide whether to reuse
 // or redial.
 func (c *Conn) IsAlive() bool {
+	// The reader owns the transport, so its exit is the connection's death —
+	// whether or not anyone called Close. readerLoop returns on a transport
+	// error without closing the Conn, and the only other listener on readerDone
+	// is keepaliveLoop, which does not run unless opts.KeepaliveInterval > 0
+	// (zero by default, and client/ never sets it). Without this check a peer
+	// that vanished — crash, restart, RST — left IsAlive answering true forever,
+	// and a pool kept handing the corpse out. http3.Client.Alive is this.
+	//
+	// readerDone is nil on a hand-built Conn that never started a reader; a
+	// receive on a nil channel blocks, so such a Conn falls through to the
+	// flags below rather than reading as dead.
+	select {
+	case <-c.readerDone:
+		return false
+	default:
+	}
 	return !c.closed.Load() && !c.goAwayReceived.Load()
 }
 
