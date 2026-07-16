@@ -155,6 +155,9 @@ numbers, which do not track RFC 9112 §6.3.
 
 | Section | Type        | Test |
 |---------|-------------|------|
+| §7.1 | Conformance | TestConformance_RFC9112_Sec7_1_InvalidChunkSizeRejected (http1/) — `chunk-size = 1*HEXDIG`: non-hex, empty, signed (`+5` — strconv.ParseInt accepts a sign, the ABNF does not) and int64-overflow sizes are refused, and each leaves KeepAlive() false. Only the negative case previously cleared it; the rest returned an error on a still-poolable mid-stream socket |
+| §7.1 | Conformance | TestConformance_RFC9112_Sec7_1_ValidChunkSizeAccepted (http1/) — over-rejection guard: legal spellings (single digit, leading zeros) still frame a body |
+| §7.1 | Conformance | TestConformance_RFC9112_Sec7_1_HexDigitsAcceptedBothCases (http1/) — a-f and A-F are both HEXDIG; a 0xab-byte chunk makes a case-folding slip show as a wrong length, not a parse failure |
 | §6.1 | Conformance | TestConformance_RFC9112_Sec6_1_NoContentLengthWithTransferEncoding (http1/) — "A sender MUST NOT send a Content-Length header field in any message that contains a Transfer-Encoding header field": the client must not emit the smuggling pair itself, for any spelling of the caller's header (RFC 9110 §5.1 makes names case-insensitive) |
 | §6.1 | Conformance | TestConformance_RFC9112_Sec6_1_SingleContentLengthOnBodylessPost (http1/) — a bodyless POST/PUT/PATCH with a caller-supplied Content-Length emits exactly one; the client's own "Content-Length: 0" must not be appended beside it (CL.CL, §11.2, in the request direction) |
 | §6.1 | Conformance | TestConformance_RFC9112_Sec6_1_BodylessPostStillGetsContentLengthZero (http1/) — the control: with no caller-supplied Content-Length the client still adds its own, so the duplicate fix cannot silently drop the header |
