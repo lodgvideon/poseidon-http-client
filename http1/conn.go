@@ -132,7 +132,7 @@ type Exchange struct {
 	respChunked bool
 	// respTE and respCL record mere presence of Transfer-Encoding and
 	// Content-Length in the response head, independent of their values and of
-	// the order they arrived in. RFC 9112 §6.3 rule 4 keys on both being
+	// the order they arrived in. RFC 9112 §6.3 rule 3 keys on both being
 	// present, and either can be parsed first.
 	respTE         bool
 	respCL         bool
@@ -355,7 +355,7 @@ func (ex *Exchange) ReadResponse(ctx context.Context) (statusCode int, headers [
 		return 0, nil, err
 	}
 
-	// RFC 9112 §6.3 rule 4: a message carrying both Transfer-Encoding and
+	// RFC 9112 §6.3 rule 3: a message carrying both Transfer-Encoding and
 	// Content-Length "might indicate an attempt to perform request smuggling
 	// (§11.2) or response splitting (§11.1) and ought to be handled as an
 	// error"; the sender MUST close the connection after responding. For a
@@ -473,9 +473,9 @@ func (ex *Exchange) consumeHeaders(out *[]hpack.HeaderField, parseBody bool) err
 			switch name {
 			case "content-length":
 				ex.respCL = true
-				// RFC 9112 §6.3 rule 5: a *valid* Content-Length with no
+				// RFC 9112 §6.3 rule 6: a *valid* Content-Length with no
 				// Transfer-Encoding defines the body length. The !respTE guard
-				// is rule 4 seen from the other header order — Content-Length
+				// is rule 3 seen from the other header order — Content-Length
 				// may legally arrive after Transfer-Encoding, and it must not
 				// reinstate length framing that the Transfer-Encoding branch
 				// already overrode.
@@ -491,14 +491,14 @@ func (ex *Exchange) consumeHeaders(out *[]hpack.HeaderField, parseBody bool) err
 				// on the first body byte.
 				//
 				// Either branch overrides any Content-Length parsed so far
-				// (§6.3 rule 4), which is why contentLen is assigned
+				// (§6.3 rule 3), which is why contentLen is assigned
 				// unconditionally here: this is the only place that can undo a
 				// Content-Length that arrived first.
 				if lastTransferCoding(value) == "chunked" {
 					ex.respChunked = true
 					ex.contentLen = -2 // sentinel: chunked overrides content-length
 				} else {
-					// §6.3 rule 3: chunked is not the final encoding, so the
+					// §6.3 rule 4: chunked is not the final encoding, so the
 					// body length is determined by reading until the server
 					// closes the connection.
 					ex.respChunked = false

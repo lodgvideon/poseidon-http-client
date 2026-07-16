@@ -15,14 +15,14 @@ import (
 	"testing"
 )
 
-// TestConformance_RFC9112_Sec6_3_Rule3_ChunkedNotFinalReadsUntilClose pins
+// TestConformance_RFC9112_Sec6_3_Rule4_ChunkedNotFinalReadsUntilClose pins
 // RFC 9112 §6.3 rule 3: "If a Transfer-Encoding header field is present and the
 // chunked transfer coding is not the final encoding, the message body length is
 // determined by reading the connection until it is closed by the server."
 //
 // "chunked, gzip" names chunked first and gzip last, so chunked is NOT final
 // and the body is raw bytes up to EOF — not chunk framing.
-func TestConformance_RFC9112_Sec6_3_Rule3_ChunkedNotFinalReadsUntilClose(t *testing.T) {
+func TestConformance_RFC9112_Sec6_3_Rule4_ChunkedNotFinalReadsUntilClose(t *testing.T) {
 	t.Parallel()
 	resp := "HTTP/1.1 200 OK\r\n" +
 		"Transfer-Encoding: chunked, gzip\r\n" +
@@ -40,12 +40,12 @@ func TestConformance_RFC9112_Sec6_3_Rule3_ChunkedNotFinalReadsUntilClose(t *test
 	}
 }
 
-// TestConformance_RFC9112_Sec6_3_Rule3_UnknownCodingReadsUntilClose pins the
+// TestConformance_RFC9112_Sec6_3_Rule4_UnknownCodingReadsUntilClose pins the
 // same rule 3 for a coding whose name merely *contains* "chunked". RFC 9112 §7
 // makes the field an ordered list of transfer-coding tokens, and "not-chunked"
 // is a different token from "chunked" — a substring test reads it as chunked
 // framing and desyncs on the first body byte.
-func TestConformance_RFC9112_Sec6_3_Rule3_UnknownCodingReadsUntilClose(t *testing.T) {
+func TestConformance_RFC9112_Sec6_3_Rule4_UnknownCodingReadsUntilClose(t *testing.T) {
 	t.Parallel()
 	resp := "HTTP/1.1 200 OK\r\n" +
 		"Transfer-Encoding: not-chunked\r\n" +
@@ -60,7 +60,7 @@ func TestConformance_RFC9112_Sec6_3_Rule3_UnknownCodingReadsUntilClose(t *testin
 	}
 }
 
-// TestConformance_RFC9112_Sec6_3_Rule4_ContentLengthFirst_TEOverrides pins
+// TestConformance_RFC9112_Sec6_3_Rule3_ContentLengthFirst_TEOverrides pins
 // RFC 9112 §6.3 rule 4: "If a message is received with both a Transfer-Encoding
 // and a Content-Length header field, the Transfer-Encoding overrides the
 // Content-Length."
@@ -72,7 +72,7 @@ func TestConformance_RFC9112_Sec6_3_Rule3_UnknownCodingReadsUntilClose(t *testin
 // chunked) makes the body run to EOF, so all 10 bytes belong to this response.
 // Framing at 5 would leave "EXTRA" on the wire to be read as the head of the
 // next response — the response-splitting half of §11.
-func TestConformance_RFC9112_Sec6_3_Rule4_ContentLengthFirst_TEOverrides(t *testing.T) {
+func TestConformance_RFC9112_Sec6_3_Rule3_ContentLengthFirst_TEOverrides(t *testing.T) {
 	t.Parallel()
 	resp := "HTTP/1.1 200 OK\r\n" +
 		"Content-Length: 5\r\n" +
@@ -95,11 +95,11 @@ func TestConformance_RFC9112_Sec6_3_Rule4_ContentLengthFirst_TEOverrides(t *test
 	}
 }
 
-// TestConformance_RFC9112_Sec6_3_Rule4_TransferEncodingFirst_CLIgnored is the
+// TestConformance_RFC9112_Sec6_3_Rule3_TransferEncodingFirst_CLIgnored is the
 // opposite header order of the test above: Transfer-Encoding is parsed before
 // Content-Length arrives. Rule 4 is order-independent, so the late
 // Content-Length must not reinstate length framing.
-func TestConformance_RFC9112_Sec6_3_Rule4_TransferEncodingFirst_CLIgnored(t *testing.T) {
+func TestConformance_RFC9112_Sec6_3_Rule3_TransferEncodingFirst_CLIgnored(t *testing.T) {
 	t.Parallel()
 	resp := "HTTP/1.1 200 OK\r\n" +
 		"Transfer-Encoding: gzip\r\n" +
@@ -122,7 +122,7 @@ func TestConformance_RFC9112_Sec6_3_Rule4_TransferEncodingFirst_CLIgnored(t *tes
 	}
 }
 
-// TestConformance_RFC9112_Sec6_3_Rule4_ChunkedPlusCLNotReusable pins the
+// TestConformance_RFC9112_Sec6_3_Rule3_ChunkedPlusCLNotReusable pins the
 // MUST-close half of rule 4 on the classic smuggling shape: "Transfer-Encoding:
 // chunked" plus "Content-Length: 5". The framing question is settled (chunked
 // wins — that is the existing RFC2616 §4.4 rule 3 pair), but the message "might
@@ -131,7 +131,7 @@ func TestConformance_RFC9112_Sec6_3_Rule4_TransferEncodingFirst_CLIgnored(t *tes
 //
 // The framing assertion is included so the test still fails if a fix breaks
 // chunked-wins while getting keepAlive right.
-func TestConformance_RFC9112_Sec6_3_Rule4_ChunkedPlusCLNotReusable(t *testing.T) {
+func TestConformance_RFC9112_Sec6_3_Rule3_ChunkedPlusCLNotReusable(t *testing.T) {
 	t.Parallel()
 	resp := "HTTP/1.1 200 OK\r\n" +
 		"Transfer-Encoding: chunked\r\n" +

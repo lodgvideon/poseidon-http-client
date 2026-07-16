@@ -196,7 +196,7 @@ func TestH1PoolTransport_Warmup_PreDials(t *testing.T) {
 	t.Fatalf("warmup dialed %d conns, want 3", d.count("h:80"))
 }
 
-// TestConformance_RFC9112_Sec6_3_Rule4_SmuggledResponseNotPooled proves the
+// TestConformance_RFC9112_Sec6_3_Rule3_SmuggledResponseNotPooled proves the
 // payoff of RFC 9112 §6.3 rule 4 at the layer that matters. A response carrying
 // both Transfer-Encoding and Content-Length "might indicate an attempt to
 // perform request smuggling (§11.2)" and the connection MUST be closed after
@@ -204,7 +204,7 @@ func TestH1PoolTransport_Warmup_PreDials(t *testing.T) {
 // security claim is that the next request does not land on the poisoned socket.
 // So this asserts through the pool: two requests, two dials, and the first conn
 // closed.
-func TestConformance_RFC9112_Sec6_3_Rule4_SmuggledResponseNotPooled(t *testing.T) {
+func TestConformance_RFC9112_Sec6_3_Rule3_SmuggledResponseNotPooled(t *testing.T) {
 	t.Parallel()
 	// Chunked framing is unambiguous and the body is well formed, so the
 	// exchange succeeds: nothing but rule 4 can force the redial here.
