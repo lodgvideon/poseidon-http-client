@@ -166,8 +166,26 @@ func (ex *Exchange) WriteRequest(ctx context.Context, fields []hpack.HeaderField
 			path = string(f.Value)
 		case ":authority":
 			authority = string(f.Value)
-		case "content-length":
-			hasContentLength = true
+		default:
+			// Content-Length must be recognised case-insensitively (RFC 9110
+			// §5.1: "Field names are case-insensitive"). An exact match here
+			// against the lower-case spelling missed the canonical
+			// "Content-Length" while the emit loop below lower-cased and wrote
+			// it anyway, so hasContentLength stayed false, reqChunked was set,
+			// and the request went out carrying BOTH a content-length field and
+			// Transfer-Encoding: chunked. RFC 9112 §6.1: "A sender MUST NOT send
+			// a Content-Length header field in any message that contains a
+			// Transfer-Encoding header field." That pair is the request-smuggling
+			// primitive (§11.2) — a front end honouring one and a back end the
+			// other disagree about where the request ends — and this client was
+			// generating it, unprompted, for every caller that spelled the header
+			// the way the RFC does.
+			//
+			// The fold is byte-wise rather than strings.ToLower so that probing a
+			// name costs no allocation on the request hot path.
+			if asciiEqualFold(f.Name, "content-length") {
+				hasContentLength = true
+			}
 		}
 	}
 	ex.method = method
@@ -202,10 +220,17 @@ func (ex *Exchange) WriteRequest(ctx context.Context, fields []hpack.HeaderField
 	// Body framing signals.
 	if endStream {
 		// No body follows. Add Content-Length: 0 for methods that could carry a
-		// body so strict servers don't reject the request.
-		switch method {
-		case "POST", "PUT", "PATCH":
-			bufs = append(bufs, []byte("Content-Length: 0\r\n"))
+		// body so strict servers don't reject the request — but only when the
+		// caller supplied none. The field loop above has already written any
+		// caller-supplied Content-Length to the wire, so appending
+		// unconditionally emitted two disagreeing Content-Length field lines,
+		// which is the CL.CL desync (RFC 9112 §11.2) in the request direction:
+		// the same construct this client rejects when a server sends it.
+		if !hasContentLength {
+			switch method {
+			case "POST", "PUT", "PATCH":
+				bufs = append(bufs, []byte("Content-Length: 0\r\n"))
+			}
 		}
 	} else if ex.reqChunked {
 		bufs = append(bufs, []byte("Transfer-Encoding: chunked\r\n"))
@@ -368,6 +393,30 @@ func (ex *Exchange) ReadResponse(ctx context.Context) (statusCode int, headers [
 		ex.keepAlive = false
 	}
 	return statusCode, headers, nil
+}
+
+// asciiEqualFold reports whether name matches lower case-insensitively, where
+// lower is an all-lower-case ASCII literal. It allocates nothing, so a caller's
+// header names can be probed on the request hot path.
+//
+// ASCII-only folding is not a shortcut here, it is the correct rule: RFC 9110
+// §5.6.2 confines a field name to `token`, which is ASCII, so a name carrying a
+// non-ASCII byte is malformed and cannot equal any token this client looks for.
+// strings.EqualFold would additionally apply Unicode case rules to those bytes.
+func asciiEqualFold(name []byte, lower string) bool {
+	if len(name) != len(lower) {
+		return false
+	}
+	for i := 0; i < len(name); i++ {
+		c := name[i]
+		if c >= 'A' && c <= 'Z' {
+			c += 'a' - 'A'
+		}
+		if c != lower[i] {
+			return false
+		}
+	}
+	return true
 }
 
 // asciiLowerHeaderName lowercases a response header name over ASCII only,
