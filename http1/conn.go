@@ -937,56 +937,36 @@ func truncateForError(s string) string {
 // asciiLowerHeaderName returns its argument unchanged for an already-lower-case
 // token. http1 is a pooled transport on a load generator's hot path and sits
 // outside the bench gate's scope, so nothing else would catch a regression here.
-func lastTransferCoding(value string) string {
-
+func lastTransferCoding(value string) (name string, wellFormed bool) {
 	last := ""
-
 	start := 0
-
 	inQuotes := false
-
 	for i := 0; i <= len(value); i++ {
-
 		if i == len(value) || (value[i] == ',' && !inQuotes) {
-
-			if name := transferCodingName(value[start:i]); name != "" {
-
-				last = name
-
+			if n := transferCodingName(value[start:i]); n != "" {
+				last = n
 			}
-
 			start = i + 1
-
 			continue
-
 		}
-
 		switch value[i] {
-
 		case '\\':
-
 			// quoted-pair: inside a quoted-string the next octet is data,
-
 			// including a '"' that would otherwise close it.
-
 			if inQuotes && i+1 < len(value) {
-
 				i++
-
 			}
-
 		case '"':
-
 			inQuotes = !inQuotes
-
 		}
-
 	}
-
-	return asciiLowerHeaderName(last)
-
+	// A quoted-string still open at end-of-value is unterminated: the field is
+	// malformed (RFC 9110 §10.1.4 admits no such value), and the scan may have
+	// swallowed a real final coding into the runaway quote — chunked;x=", gzip
+	// otherwise resolves to "chunked" because the unclosed quote eats the comma.
+	// The caller must treat !wellFormed as malformed, not as a coding verdict.
+	return asciiLowerHeaderName(last), !inQuotes
 }
-
 
 // transferCodingName returns the bare coding name of one Transfer-Encoding list
 // element: OWS-trimmed, with any ";"-delimited parameters removed.
@@ -1181,7 +1161,21 @@ func (ex *Exchange) commitHeaderLine(line string, have bool, out *[]hpack.Header
 				// Only "chunked" as the *final* coding gives chunked framing; a
 				// substring match instead reads "not-chunked" and "chunked, gzip"
 				// as chunked and then desyncs on the first body byte.
-				coding := lastTransferCoding(value)
+				coding, wellFormed := lastTransferCoding(value)
+				if !wellFormed {
+					// An unterminated quoted-string makes the Transfer-Encoding
+					// malformed (RFC 9110 §10.1.4), and the runaway quote may have
+					// swallowed the real final coding — `chunked;x=", gzip` reads
+					// as final coding "chunked" only because the unclosed quote ate
+					// the comma. The framing verdict cannot be trusted, so fall to
+					// §6.3 rule 4's read-until-close AND condemn the connection: the
+					// body boundary is indeterminate, so the socket must not be
+					// pooled for the next response to resynchronise on.
+					ex.respChunked = false
+					ex.contentLen = -1
+					ex.keepAlive = false
+					break
+				}
 				if coding == "" {
 					// This field line contributes no codings, so it cannot move
 					// the verdict — earlier lines still decide.
