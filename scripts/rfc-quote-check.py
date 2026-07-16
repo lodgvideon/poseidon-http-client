@@ -34,6 +34,10 @@ RFCS = ("9112", "9110", "2616", "7540", "7541", "9114", "9204", "9000")
 # pins which document to check against; a bare "§6.3: ..." is checked against all.
 CITE = re.compile(r'(?:RFC\s*(\d{4})\s*)?§[0-9][0-9.]*[^:"]{0,40}:\s*"([^"]{25,600})"')
 
+# A Go format verb, which marks a string as a message rather than a quotation.
+# Testing for a bare "%" instead skipped any quotation containing a percent sign.
+FMT_VERB = re.compile(r"%[-+# 0-9.\[\]*]*[vTtbcdoOqxXUeEfFgGsp%w]")
+
 
 def norm(t):
     return re.sub(r"\s+", " ", t).strip()
@@ -60,27 +64,50 @@ def variants(text):
     return (collapsed, collapsed.replace("- ", "-"))
 
 
+class CorpusError(Exception):
+    """An RFC text could not be obtained, so nothing can be checked against it."""
+
+
 def load(num):
+    """Return both readings of RFC `num`, or raise.
+
+    Raising rather than returning None is the point. This used to warn and hand
+    back None, and main() then skipped the whole check when the corpus came back
+    empty — so a network blip on the CI runner turned the gate into a no-op that
+    printed nothing and exited 0. A gate that cannot fail is decoration, and one
+    that quietly stops gating when the network hiccups is worse than decoration,
+    because its green tick still gets believed.
+    """
     os.makedirs(CACHE, exist_ok=True)
     path = os.path.join(CACHE, f"rfc{num}.txt")
     if not os.path.exists(path):
         url = f"https://www.rfc-editor.org/rfc/rfc{num}.txt"
         try:
-            with urllib.request.urlopen(url, timeout=30) as r, open(path, "wb") as f:
-                f.write(r.read())
+            with urllib.request.urlopen(url, timeout=30) as r:
+                body = r.read()
         except Exception as e:
-            print(f"warn: could not fetch RFC {num}: {e}", file=sys.stderr)
-            return None
+            raise CorpusError(f"could not fetch RFC {num} from {url}: {e}") from e
+        if len(body) < 10000:
+            raise CorpusError(f"RFC {num} fetched but is only {len(body)} bytes; refusing to trust it")
+        with open(path, "wb") as f:
+            f.write(body)
     with open(path, encoding="utf-8", errors="replace") as f:
-        return variants(f.read())
+        text = f.read()
+    if len(text) < 10000:
+        raise CorpusError(f"cached RFC {num} is only {len(text)} bytes; delete {path} and retry")
+    return variants(text)
 
 
 def main():
     paths = sys.argv[1:] or ["http1", "conn", "http3"]
-    corpus = {n: v for n in RFCS if (v := load(n))}
-    if not corpus:
-        print("no RFC texts available; skipping", file=sys.stderr)
-        return 0
+    try:
+        corpus = {n: load(n) for n in RFCS}
+    except CorpusError as e:
+        # Fail CLOSED. Every RFC in RFCS is needed to judge the citations in this
+        # tree, so a missing one means "unknown", not "fine".
+        print(f"error: {e}", file=sys.stderr)
+        print("refusing to pass a quotation check with an incomplete corpus", file=sys.stderr)
+        return 2
 
     ok = bad = 0
     for p in paths:
@@ -90,14 +117,24 @@ def main():
             joined = re.sub(r"\n\s*//", " ", open(f, encoding="utf-8").read())
             for m in CITE.finditer(joined):
                 which, q = m.group(1), m.group(2)
-                if any(x in q for x in ("%", "\\r", "\\n")):
-                    continue  # format string or wire fixture, not a quotation
+                # Skip things that are not prose: Go format strings and wire
+                # fixtures. Matching a bare "%" skipped any quotation that merely
+                # contained a percent sign, so the test is for an actual verb.
+                if FMT_VERB.search(q) or "\\r" in q or "\\n" in q:
+                    continue
                 # An ellipsis is a legitimate elision: every piece must appear,
                 # but not necessarily adjacently.
                 parts = [norm(x) for x in q.split("...") if len(norm(x).split()) >= 4]
                 if not parts:
                     continue
-                pool = [corpus[which]] if which in corpus else list(corpus.values())
+                if which is not None and which not in corpus:
+                    # A citation naming an RFC outside RFCS. Checking it against
+                    # the other documents would report a correct quotation as
+                    # fabricated, so add the RFC to RFCS instead of guessing.
+                    print(f"error: {f} cites RFC {which}, which is not in the corpus")
+                    bad += 1
+                    continue
+                pool = [corpus[which]] if which else list(corpus.values())
                 if any(all(part in v for part in parts) for vs in pool for v in vs):
                     ok += 1
                 else:

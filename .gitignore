@@ -65,3 +65,4 @@ website/resources/
 # Agent chain artifacts
 .claude/chain/
 website/.hugo_build.lock
+scripts/.rfc-cache/
