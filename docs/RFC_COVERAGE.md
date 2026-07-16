@@ -147,6 +147,32 @@ non-ACK PING frames with `ACK=1` and the original 8-byte payload
 | §10.3.5 | Conformance | TestConformance_RFC2616_Sec10_3_5_304NoBody — 304 body skipped even when Content-Length present |
 | §14.23  | Conformance | TestConformance_RFC2616_Sec14_23_HostHeaderInRequest — request wire includes Host derived from :authority |
 
+## RFC 9112 — HTTP/1.1 message syntax (http1/, client/)
+
+RFC 9112 obsoletes RFC 7230 and is the current HTTP/1.1 syntax spec; the
+RFC 2616 rows above predate it and are keyed on that document's section
+numbers. Rows here cite the numbered rules of RFC 9112 §6.3 "Message Body
+Length".
+
+| Section | Type        | Test |
+|---------|-------------|------|
+| §6.3 R3 | Conformance | TestConformance_RFC9112_Sec6_3_Rule3_InvalidContentLengthIgnoredWhenChunked (http1/) — Transfer-Encoding overrides Content-Length, so a chunk-framed response is not failed over an invalid Content-Length. Both header orders: rule 5's fatal case is scoped to a message "without Transfer-Encoding", and that absence is not known until the blank line |
+| §6.3 R5 | Conformance | TestConformance_RFC9112_Sec6_3_Rule5_ConflictingContentLengthsRejected (http1/) — two Content-Length field lines that disagree combine (RFC 9110 §5.3) into a non-1\*DIGIT value → unrecoverable: typed error + connection not poolable. The CL.CL desync |
+| §6.3 R5 | Conformance | TestConformance_RFC9112_Sec6_3_Rule5_ConflictingContentLengthsRejectedOrderIndependent (http1/) — same verdict when the conflicting pair straddles another field |
+| §6.3 R5 | Conformance | TestConformance_RFC9112_Sec6_3_Rule5_CommaListDifferingValuesRejected (http1/) — "Content-Length: 5, 10", the same message with the duplication pre-folded onto one line, is not rule 5's all-same exception |
+| §6.3 R5 | Conformance | TestConformance_RFC9112_Sec6_3_Rule5_NonNumericContentLengthRejected (http1/) — a single invalid value is unrecoverable, not a silent degrade to rule 8's read-until-close |
+| §6.3 R5 | Conformance | TestConformance_RFC9112_Sec6_3_Rule5_IdenticalDuplicatesAccepted (http1/) — the obligation NOT to over-reject: duplicate identical field lines are processed with that single value as the length |
+| §6.3 R5 | Conformance | TestConformance_RFC9112_Sec6_3_Rule5_CommaListIdenticalValuesAccepted (http1/) — rule 5's literal exception: a comma-separated list whose values are all valid and all the same |
+| §6.3 R5 / §11.2 | Conformance | TestConformance_RFC9112_Sec6_3_Rule5_PoisonedConnNotPooled (client/) — the pool-layer payoff: a conn poisoned by conflicting Content-Length is evicted, not reused. Pins that request 2 dials fresh and does not read the response smuggled inside request 1's body |
+
+## RFC 9110 — HTTP semantics (http1/)
+
+| Section | Type        | Test |
+|---------|-------------|------|
+| §8.6    | Conformance | TestConformance_RFC9110_Sec8_6_SignedContentLengthRejected (http1/) — `Content-Length = 1*DIGIT` admits no sign; "+5" and "-5" are invalid framing, not values to reinterpret (strconv.ParseInt accepts both) |
+| §8.6    | Conformance | TestConformance_RFC9110_Sec8_6_OverflowContentLengthRejected (http1/) — "a recipient MUST anticipate potentially large decimal numerals and prevent parsing errors due to integer conversion overflows": a numeral past int64 is refused, not wrapped |
+| §8.6    | Conformance | TestConformance_RFC9110_Sec8_6_MaxInt64ContentLengthAccepted (http1/) — the other side of that boundary: MaxInt64 is valid 1\*DIGIT, so the overflow guard must not be an off-by-one |
+
 ## RFC 8336 — ORIGIN Frame
 
 | Section | Type        | Test |
