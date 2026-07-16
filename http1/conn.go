@@ -1127,12 +1127,34 @@ func (ex *Exchange) commitHeaderLine(line string, have bool, out *[]hpack.Header
 				// Only "chunked" as the *final* coding gives chunked framing; a
 				// substring match instead reads "not-chunked" and "chunked, gzip"
 				// as chunked and then desyncs on the first body byte.
-				//
+				coding := lastTransferCoding(value)
+				if coding == "" {
+					// This field line contributes no codings, so it cannot move
+					// the verdict — earlier lines still decide.
+					//
+					// Repeated field lines are ONE list: RFC 9110 §5.3 defines
+					// them by appending each value "to the initial field line
+					// value in order, separated by a comma", so
+					//
+					//	Transfer-Encoding: chunked
+					//	Transfer-Encoding:
+					//
+					// is the message "Transfer-Encoding: chunked, " — whose empty
+					// final element §5.6.1.2 requires a recipient to ignore,
+					// leaving chunked as the final coding. Letting each line
+					// overwrite the verdict made the second line win and turned a
+					// chunked body into read-until-close: the same message spelled
+					// on one line ("chunked, ") parsed correctly, which is what
+					// isolates this to the multi-line path rather than to
+					// lastTransferCoding, whose own contract already skips empty
+					// elements.
+					break
+				}
 				// Either branch overrides any Content-Length parsed so far
 				// (§6.3 rule 3), which is why contentLen is assigned
 				// unconditionally here: this is the only place that can undo a
 				// Content-Length that arrived first.
-				if lastTransferCoding(value) == "chunked" {
+				if coding == "chunked" {
 					ex.respChunked = true
 					ex.contentLen = -2 // sentinel: chunked overrides content-length
 				} else {
