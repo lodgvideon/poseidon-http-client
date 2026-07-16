@@ -159,6 +159,7 @@ numbers, which do not track RFC 9112 §6.3.
 
 | Section | Type        | Test |
 |---------|-------------|------|
+| §6.3 R1 / §11.1 | Conformance | TestConformance_RFC9112_Sec6_3_Rule1_BodylessStatusDeclaringBodyNotPooled (http1/) — a 204 with Content-Length or Transfer-Encoding (both MUST NOTs: RFC 9110 §8.6, RFC 9112 §6.1), or a 304 with Transfer-Encoding, declares a body rule 1 forbids reading. The declared bytes stay on the socket, so the conn must not be pooled: "A client MUST NOT process, cache, or forward such extra data as a separate response, since such behavior would be vulnerable to cache poisoning" |
 | §5.2 | Conformance | TestObsFoldAccumulation_IsLinearInBytesReceived (http1/) — joining N obs-fold continuations must cost O(total bytes). The first cut was O(n²): 688 KB of legal, under-cap header allocated 5 GB. maxHeaderListBytes bounds the bytes a server sends, not the work they buy |
 | §5.2 | Conformance | TestObsFoldAccumulation_UnfoldsCorrectlyAtScale (http1/) — the control: the cheap path must still join every fold, so the cost bound cannot be met by dropping them |
 | §5.2 | Conformance | TestConformance_RFC9112_Sec5_2_ObsFoldDoesNotSmuggleContentLength (http1/) — a fold line was split on ':' and became a REAL Content-Length the server never sent, reframing the body and stranding the rest on a pooled socket. Header smuggling: "X-Junk: a
@@ -199,6 +200,8 @@ numbers, which do not track RFC 9112 §6.3.
 
 | Section | Type        | Test |
 |---------|-------------|------|
+| §8.6 | Conformance | TestConformance_RFC9110_Sec8_6_ContentLengthOn304StaysPoolable (http1/) — the over-rejection guard: "A server MAY send a Content-Length header field in a 304 (Not Modified) response to a conditional GET request". It describes the representation, not a body, so the conn stays poolable; evicting would cost a connection per conditional GET |
+| §9.3.2 | Conformance | TestConformance_RFC9110_Sec9_3_2_ContentLengthOnHeadStaysPoolable (http1/) — the other guard: rule 1 makes a HEAD response bodyless too, but "The server SHOULD send the same header fields in response to a HEAD request as it would have sent if the request method had been GET", so Content-Length is normal there |
 | §5.3 | Conformance | TestConformance_RFC9110_Sec5_3_RepeatedTELinesAreOneList (http1/) — repeated field lines are ONE list: §5.3 appends each value "to the initial field line value in order, separated by a comma". Two Transfer-Encoding lines and the equivalent one-line list must frame identically; each line overwriting the verdict let an empty final line erase chunked framing |
 | §5.3 | Conformance | TestConformance_RFC9110_Sec5_3_EmptyTELineAloneStillPresent (http1/) — the boundary: a line contributing no codings still makes the FIELD present, which RFC 9112 §6.3 rule 3 and rule 5 both key on. Skipping its framing effect must not make it invisible |
 | §5.5    | Conformance | TestConformance_RFC9110_Sec5_5_HeaderValueCRLF_NotWritten (http1/) — a caller header value containing CRLF is refused with ErrInvalidRequest and **no bytes reach the socket**; asserted on captured wire bytes, not on the error. Without the check the value's tail arrives at the origin as extra header fields of the client's own request (RFC 9112 §11.2 request splitting) |
