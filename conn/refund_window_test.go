@@ -73,14 +73,18 @@ func TestConn_SmallAdvertisedWindow_StillCompletes(t *testing.T) {
 				t.Fatalf("SendHeaders: %v", err)
 			}
 
-			// Bound every Recv rather than the loop: a stalled window shows up as
-			// one Recv that never returns, and a loop deadline would leave the
-			// test hanging inside it rather than reporting how far it got.
-			ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
-			defer cancel()
+			// Bound every Recv on its own, not the whole loop: the deadlock this
+			// pins is a *stall* — a Recv that never returns because the window is
+			// spent — so the clock must reset on each byte that does arrive.
+			// A single loop-wide deadline instead measures total transfer time,
+			// which under -race on a loaded runner is long enough to fire on a
+			// download that is merely slow, not stalled (seen in CI: 49152 of
+			// 204800 at exactly the 5s mark).
 			var got int
 			for {
-				ev, err := s.Recv(ctx)
+				recvCtx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+				ev, err := s.Recv(recvCtx)
+				cancel()
 				if err != nil {
 					t.Fatalf("stalled after %d of %d bytes with InitialWindowSize=%d: %v — "+
 						"the peer spent its window and is waiting for a WINDOW_UPDATE that a "+

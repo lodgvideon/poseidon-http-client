@@ -1142,7 +1142,7 @@ func handleDataEvent(ev conn.StreamEvent, req *Request, resp *Response, enc Cont
 	// Payload consumed (copied out, unwanted, or over-limit): return the pooled
 	// buffer on every exit path.
 	if ev.DataSlab != nil {
-		conn.GetDataBufPool().Put(ev.DataSlab)
+		putDataSlab(ev.DataSlab)
 	}
 	if over {
 		return false, fmt.Errorf("%w: received %d bytes, limit %d", ErrBodyTooLarge, resp.BytesReceived, maxBody)
