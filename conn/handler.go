@@ -301,6 +301,14 @@ func (h *connHandler) emitHeaderBlock(s *Stream, hb []byte, endStream bool) erro
 	if err != nil {
 		return headerDecodeConnError(err)
 	}
+	// Every decoded field is checked here, and here only: this is the one place
+	// an HPACK block becomes fields the caller sees, so a rule applied here
+	// cannot be walked around by a later path. See conn/validate.go for what
+	// RFC 7540 §10.3 and §8.1.2.2 require and why they bind a client and not
+	// only an intermediary.
+	if verr := h.validateResponseFields(s); verr != nil {
+		return verr
+	}
 	evType, cerr := h.classifyHeaderBlock(s, endStream)
 	if cerr != nil {
 		return cerr
@@ -513,3 +521,29 @@ func (h *connHandler) OnWindowUpdate(fh frame.FrameHeader, increment uint32) err
 
 // Compile-time check that *connHandler satisfies frame.Handler.
 var _ frame.Handler = (*connHandler)(nil)
+
+// validateResponseFields treats a malformed response as RFC 7540 §8.1.2.6
+// requires: "Malformed requests or responses that are detected MUST be treated
+// as a stream error (Section 5.4.2) of type PROTOCOL_ERROR." A stream error and
+// not a connection error, so one hostile response costs one stream and the
+// connection survives — which matters for a pooled client.
+//
+// §8.1.2.6 is explicit about the direction that applies to us: "Clients MUST NOT
+// accept a malformed response." This path accepted every one of these until now.
+func (h *connHandler) validateResponseFields(s *Stream) error {
+	for i := range h.scratch {
+		name, value := h.scratch[i].Name, h.scratch[i].Value
+		// Pseudo-headers are validated by classifyHeaderBlock, which knows which
+		// ones belong in a response; their ':' would fail the token check here.
+		if len(name) > 0 && name[0] == ':' {
+			if !validFieldValue(value) {
+				return &StreamError{StreamID: s.id, Code: frame.ErrCodeProtocolError}
+			}
+			continue
+		}
+		if !validFieldName(name) || !validFieldValue(value) || forbiddenResponseField(name) {
+			return &StreamError{StreamID: s.id, Code: frame.ErrCodeProtocolError}
+		}
+	}
+	return nil
+}
