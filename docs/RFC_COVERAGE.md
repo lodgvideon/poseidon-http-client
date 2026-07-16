@@ -147,6 +147,29 @@ non-ACK PING frames with `ACK=1` and the original 8-byte payload
 | §10.3.5 | Conformance | TestConformance_RFC2616_Sec10_3_5_304NoBody — 304 body skipped even when Content-Length present |
 | §14.23  | Conformance | TestConformance_RFC2616_Sec14_23_HostHeaderInRequest — request wire includes Host derived from :authority |
 
+## RFC 9112 / RFC 9110 — HTTP/1.1 message syntax + HTTP semantics (http1/, client/)
+
+RFC 9112 obsoletes RFC 7230 and, with RFC 9110, supersedes RFC 2616. New H1
+conformance rows key on these; the RFC 2616 rows above predate the split and are
+left alone rather than renumbered in passing.
+
+Send path only so far — what this client puts on the wire. These rows have no
+HTTP/2 counterpart by construction: HPACK length-prefixes a field value into a
+frame payload, so a CR there cannot forge a frame boundary. HTTP/1.1 is the only
+transport here whose framing is in-band.
+
+| Section | Type        | Test |
+|---------|-------------|------|
+| §5.5    | Conformance | TestConformance_RFC9110_Sec5_5_HeaderValueCRLF_NotWritten (http1/) — a caller header value containing CRLF is refused with ErrInvalidRequest and **no bytes reach the socket**; asserted on captured wire bytes, not on the error. Without the check the value's tail arrives at the origin as extra header fields of the client's own request (RFC 9112 §11.2 request splitting) |
+| §5.5    | Conformance | TestConformance_RFC9110_Sec5_5_HeaderValueNUL_NotWritten (http1/) — NUL in a field value refused; not a delimiter here, but it terminates a C string, so one value can mean different things to this client and to a C proxy |
+| §5.5    | Conformance | TestConformance_RFC9110_Sec5_5_AuthorityCRLF_NotWritten (http1/) — :authority becomes the Host field value and answers to §5.5; CRLF there is refused. This is the vector client/validateRequest never sees: it checks Method and Path but not Authority |
+| §5.5    | Conformance | TestConformance_RFC9110_Sec5_5_ClientDo_HeaderValueCRLF_Refused, _AuthorityCRLF_Refused (client/) — the refusal survives the full Client.Do path against a real net/http origin, whose parsed header set is the oracle. Proves the http1-layer check is genuinely reached and not bypassed by client/ |
+| §5.5    | Conformance | TestConformance_RFC9110_Sec5_5_LegalValuesUnaffected (http1/), _ClientDo_LegalRequestUnaffected (client/) — over-rejection guard: field-value permits SP and HTAB internally, so a normal request still goes out intact |
+| §5.6.2  | Conformance | TestConformance_RFC9110_Sec5_6_2_HeaderNameToken_NotWritten (http1/) — a field name is a token; CRLF, ':', SP or NUL in a name is refused. A ':' in a name forges a field boundary exactly as a CR forges a line boundary. (§5.1 is what makes names case-insensitive, hence the writer may lower-case them; §5.6.2 is what constrains the bytes) |
+| §7.2    | Conformance | TestConformance_RFC9110_Sec7_2_EmptyAuthorityEmptyHost (http1/) — "If the target URI's authority component is missing or undefined, then a client MUST send a Host header field with an empty field value": an empty :authority emits the literal line `Host: ` and is **not** an error. Boundary row — it fails if the §5.5 validator overshoots into rejecting an empty authority |
+| §3      | Conformance | TestConformance_RFC9112_Sec3_RequestLine_NotWritten (http1/) — request-line = method SP request-target SP HTTP-version; SP or CTL in method or target re-cuts the line, so both are refused. client/ already rejects whitespace in Method/Path (containsAnyWhitespace uses unicode.IsSpace, true for CR and LF — verified) but not NUL, and http1 is a public package a caller can use directly |
+| §11.2   | Conformance | Covered by the §5.5 / §5.6.2 / §3 rows above — smuggling is the consequence those rules exist to prevent, not a separate assertion. Sharpest demonstration is TestConformance_RFC9112_Sec3_RequestLine_NotWritten/method_with_CRLF: with the fix reverted, one WriteRequest call puts two complete requests on one socket |
+
 ## RFC 8336 — ORIGIN Frame
 
 | Section | Type        | Test |
