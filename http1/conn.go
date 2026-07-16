@@ -998,12 +998,33 @@ func parseChunkSize(s string) (int64, bool) {
 func (ex *Exchange) consumeHeaders(out *[]hpack.HeaderField, parseBody bool) error {
 	var listSize uint64
 
-	// field holds the current logical field line with any obs-folds already
-	// joined into it. A line cannot be interpreted when it is read, because the
-	// NEXT line may be a continuation of it (RFC 9112 §5.2) — so each line is
-	// held until something proves it complete: a non-folded line, or the blank
-	// line ending the block.
+	// field holds the current logical field line. A line cannot be interpreted
+	// when it is read, because the NEXT line may be a continuation of it
+	// (RFC 9112 §5.2) — so each line is held until something proves it complete:
+	// a non-folded line, or the blank line ending the block.
+	//
+	// folded is nil until this field actually carries a fold, and only then does
+	// anything get copied. That split is not tidiness, it is the whole cost
+	// model:
+	//
+	//   - The fold-free path — every line of every ordinary response — assigns a
+	//     string header and allocates nothing.
+	//   - The folded path appends into one growing buffer, so joining N
+	//     continuations costs O(total bytes) amortised.
+	//
+	// The first cut of this used `field += " " + rest`, which reallocates and
+	// copies everything accumulated so far on EVERY fold. That is O(n²) in the
+	// bytes a server chooses to send, and maxHeaderListBytes (8 MiB) bounds the
+	// bytes, not the work they buy:
+	//
+	//	wire  86 KB ->    83 MiB allocated,   8ms
+	//	wire 344 KB ->  1281 MiB allocated, 130ms
+	//	wire 688 KB ->  5067 MiB allocated, 500ms
+	//
+	// Doubling the wire quadrupled the memory. A cap that charges what arrives
+	// says nothing about what processing it costs.
 	var field string
+	var folded []byte
 	var haveField bool
 
 	for {
@@ -1014,7 +1035,7 @@ func (ex *Exchange) consumeHeaders(out *[]hpack.HeaderField, parseBody bool) err
 		if line == "" {
 			// Blank line = end of headers. Commit whatever field was still
 			// being folded into.
-			if err := ex.commitHeaderLine(field, haveField, out, parseBody); err != nil {
+			if err := ex.commitHeaderLine(logicalLine(field, folded), haveField, out, parseBody); err != nil {
 				return err
 			}
 			// The Content-Length verdict can only be reached here, once it is
@@ -1059,15 +1080,23 @@ func (ex *Exchange) consumeHeaders(out *[]hpack.HeaderField, parseBody bool) err
 				ex.keepAlive = false
 				return fmt.Errorf("http1: obs-fold with no preceding field line: %w", ErrInvalidHeaderBlock)
 			}
-			field += " " + strings.TrimLeft(line, " \t")
+			if folded == nil {
+				// First fold on this field: take one copy of what we have, sized
+				// for it plus this continuation, and append from here on.
+				folded = make([]byte, 0, len(field)+len(line)+16)
+				folded = append(folded, field...)
+			}
+			// §5.2: "replace each received obs-fold with one or more SP octets".
+			folded = append(folded, ' ')
+			folded = append(folded, strings.TrimLeft(line, " 	")...)
 			continue
 		}
 
 		// A non-folded line proves the previous one complete.
-		if err := ex.commitHeaderLine(field, haveField, out, parseBody); err != nil {
+		if err := ex.commitHeaderLine(logicalLine(field, folded), haveField, out, parseBody); err != nil {
 			return err
 		}
-		field, haveField = line, true
+		field, folded, haveField = line, nil, true
 	}
 }
 
@@ -1286,4 +1315,16 @@ func (ex *Exchange) readChunkedChunk(buf []byte) (n int, done bool, err error) {
 // "Connection: close" or used HTTP/1.0 without "Connection: keep-alive".
 func (ex *Exchange) KeepAlive() bool {
 	return ex.keepAlive
+}
+
+// logicalLine returns the complete field line: the raw line when it carried no
+// obs-fold, or the joined buffer when it did.
+//
+// The string conversion happens once per folded field, not once per fold, which
+// is what keeps joining N continuations linear rather than quadratic.
+func logicalLine(field string, folded []byte) string {
+	if folded == nil {
+		return field
+	}
+	return string(folded)
 }

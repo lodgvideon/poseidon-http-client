@@ -155,6 +155,8 @@ numbers, which do not track RFC 9112 §6.3.
 
 | Section | Type        | Test |
 |---------|-------------|------|
+| §5.2 | Conformance | TestObsFoldAccumulation_IsLinearInBytesReceived (http1/) — joining N obs-fold continuations must cost O(total bytes). The first cut was O(n²): 688 KB of legal, under-cap header allocated 5 GB. maxHeaderListBytes bounds the bytes a server sends, not the work they buy |
+| §5.2 | Conformance | TestObsFoldAccumulation_UnfoldsCorrectlyAtScale (http1/) — the control: the cheap path must still join every fold, so the cost bound cannot be met by dropping them |
 | §5.2 | Conformance | TestConformance_RFC9112_Sec5_2_ObsFoldDoesNotSmuggleContentLength (http1/) — a fold line was split on ':' and became a REAL Content-Length the server never sent, reframing the body and stranding the rest on a pooled socket. Header smuggling: "X-Junk: a
 | §5.2 | Conformance | TestConformance_RFC9112_Sec5_2_ObsFoldDoesNotSmuggleTransferEncoding (http1/) — the same primitive aimed at the other framing header |
 | §5.2 | Conformance | TestConformance_RFC9112_Sec5_2_ObsFoldUnfoldsToSP (http1/) — "A user agent ... MUST replace each received obs-fold with one or more SP octets prior to interpreting the field value": SP or HTAB, one or many, repeated folds, and a value that starts on the fold |
