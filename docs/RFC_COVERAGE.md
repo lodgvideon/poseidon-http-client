@@ -139,24 +139,32 @@ non-ACK PING frames with `ACK=1` and the original 8-byte payload
 |---------|-------------|------|
 | §3.6.1  | Conformance | TestConformance_RFC2616_Sec3_6_1_MultipleChunks — multi-chunk body reassembled across ReadBodyChunk calls |
 | §3.6.1  | Conformance | TestConformance_RFC2616_Sec3_6_1_EmptyChunkedBody — terminal 0-chunk produces empty body immediately |
-| §4.4 R3 | Conformance | TestConformance_RFC2616_Sec4_4_Rule3_ChunkedWinsContentLengthFirst — Transfer-Encoding beats Content-Length (CL first) |
-| §4.4 R3 | Conformance | TestConformance_RFC2616_Sec4_4_Rule3_ChunkedWinsTransferEncodingFirst — Transfer-Encoding beats Content-Length (TE first) |
+| §4.4 R3 | Conformance | TestConformance_RFC2616_Sec4_4_Rule4_ChunkedWinsContentLengthFirst — Transfer-Encoding beats Content-Length (CL first) |
+| §4.4 R3 | Conformance | TestConformance_RFC2616_Sec4_4_Rule4_ChunkedWinsTransferEncodingFirst — Transfer-Encoding beats Content-Length (TE first) |
 | §6.1    | Conformance | TestConformance_RFC2616_Sec6_1_HTTP10StatusLineParsed — HTTP/1.0 status line accepted by parser |
 | §8.1    | Conformance | TestConformance_RFC2616_Sec8_1_HTTP10DefaultClose — HTTP/1.0 without Connection header → KeepAlive() false |
 | §8.1    | Conformance | TestConformance_RFC2616_Sec8_1_HTTP10KeepAliveHeader — HTTP/1.0 + Connection: keep-alive → KeepAlive() true |
 | §10.3.5 | Conformance | TestConformance_RFC2616_Sec10_3_5_304NoBody — 304 body skipped even when Content-Length present |
 | §14.23  | Conformance | TestConformance_RFC2616_Sec14_23_HostHeaderInRequest — request wire includes Host derived from :authority |
 
-## RFC 9112 / RFC 9110 — HTTP/1.1 message syntax + HTTP semantics (http1/, client/)
+## RFC 9112 — HTTP/1.1 message syntax (http1/, client/)
 
-RFC 9112 obsoletes RFC 7230 and, with RFC 9110, supersedes RFC 2616. New H1
-conformance rows key on these; the RFC 2616 rows above predate the split and are
-left alone rather than renumbered in passing.
+RFC 9112 obsoletes RFC 7230 and is the current HTTP/1.1 message-framing spec;
+the RFC 2616 rows above predate it and are keyed on that document's own section
+numbers, which do not track RFC 9112 §6.3.
 
-Send path only so far — what this client puts on the wire. These rows have no
-HTTP/2 counterpart by construction: HPACK length-prefixes a field value into a
-frame payload, so a CR there cannot forge a frame boundary. HTTP/1.1 is the only
-transport here whose framing is in-band.
+| Section | Type        | Test |
+|---------|-------------|------|
+| §6.3 R4 | Conformance | TestConformance_RFC9112_Sec6_3_Rule4_ChunkedNotFinalReadsUntilClose (http1/) — "Transfer-Encoding: chunked, gzip": chunked is present but not the final coding, so the body length is determined by reading until the server closes, not by chunk framing |
+| §6.3 R4 | Conformance | TestConformance_RFC9112_Sec6_3_Rule4_UnknownCodingReadsUntilClose (http1/) — "Transfer-Encoding: not-chunked" is a different §7 token from "chunked"; matching the field as a substring reads it as chunked and desyncs the stream |
+| §6.3 R3 | Conformance | TestConformance_RFC9112_Sec6_3_Rule3_ContentLengthFirst_TEOverrides (http1/) — TE overrides CL when CL is parsed first; the override must undo a framing decision already made, and the response is not poolable |
+| §6.3 R3 | Conformance | TestConformance_RFC9112_Sec6_3_Rule3_TransferEncodingFirst_CLIgnored (http1/) — same rule in the opposite header order: a Content-Length arriving after Transfer-Encoding must not reinstate length framing |
+| §6.3 R3 | Conformance | TestConformance_RFC9112_Sec6_3_Rule3_ChunkedPlusCLNotReusable (http1/) — TE:chunked + CL frames as chunked (RFC 2616 §4.4 R3 rows) but MUST close: KeepAlive() is false |
+| §6.3 R3 / §11.2 | Conformance | TestConformance_RFC9112_Sec6_3_Rule3_SmuggledResponseNotPooled (client/) — the MUST-close consequence at the pool layer: a TE+CL response evicts its conn (h1Pool.handleRelease), so the next request redials rather than reusing a socket whose framing the peer disputed |
+| §3      | Conformance | TestConformance_RFC9112_Sec3_RequestLine_NotWritten (http1/) — request-line = method SP request-target SP HTTP-version; SP or CTL in method or target re-cuts the line, so both are refused. client/ already rejects whitespace in Method/Path (containsAnyWhitespace uses unicode.IsSpace, true for CR and LF — verified) but not NUL, and http1 is a public package a caller can use directly |
+| §11.2   | Conformance | Covered by the §5.5 / §5.6.2 / §3 rows above — smuggling is the consequence those rules exist to prevent, not a separate assertion. Sharpest demonstration is TestConformance_RFC9112_Sec3_RequestLine_NotWritten/method_with_CRLF: with the fix reverted, one WriteRequest call puts two complete requests on one socket |
+
+## RFC 9110 — HTTP semantics (http1/, client/)
 
 | Section | Type        | Test |
 |---------|-------------|------|
@@ -167,8 +175,6 @@ transport here whose framing is in-band.
 | §5.5    | Conformance | TestConformance_RFC9110_Sec5_5_LegalValuesUnaffected (http1/), _ClientDo_LegalRequestUnaffected (client/) — over-rejection guard: field-value permits SP and HTAB internally, so a normal request still goes out intact |
 | §5.6.2  | Conformance | TestConformance_RFC9110_Sec5_6_2_HeaderNameToken_NotWritten (http1/) — a field name is a token; CRLF, ':', SP or NUL in a name is refused. A ':' in a name forges a field boundary exactly as a CR forges a line boundary. (§5.1 is what makes names case-insensitive, hence the writer may lower-case them; §5.6.2 is what constrains the bytes) |
 | §7.2    | Conformance | TestConformance_RFC9110_Sec7_2_EmptyAuthorityEmptyHost (http1/) — "If the target URI's authority component is missing or undefined, then a client MUST send a Host header field with an empty field value": an empty :authority emits the literal line `Host: ` and is **not** an error. Boundary row — it fails if the §5.5 validator overshoots into rejecting an empty authority |
-| §3      | Conformance | TestConformance_RFC9112_Sec3_RequestLine_NotWritten (http1/) — request-line = method SP request-target SP HTTP-version; SP or CTL in method or target re-cuts the line, so both are refused. client/ already rejects whitespace in Method/Path (containsAnyWhitespace uses unicode.IsSpace, true for CR and LF — verified) but not NUL, and http1 is a public package a caller can use directly |
-| §11.2   | Conformance | Covered by the §5.5 / §5.6.2 / §3 rows above — smuggling is the consequence those rules exist to prevent, not a separate assertion. Sharpest demonstration is TestConformance_RFC9112_Sec3_RequestLine_NotWritten/method_with_CRLF: with the fix reverted, one WriteRequest call puts two complete requests on one socket |
 
 ## RFC 8336 — ORIGIN Frame
 
