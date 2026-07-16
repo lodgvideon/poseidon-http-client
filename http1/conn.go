@@ -77,6 +77,16 @@ var ErrInvalidContentLength = errors.New("http1: invalid Content-Length")
 // thinks it did, so the stream position is indeterminate.
 var ErrInvalidHeaderBlock = errors.New("http1: invalid header block")
 
+// ErrInvalidChunkSize reports that a chunk-size line was not RFC 9112 §7.1's
+// ABNF `chunk-size = 1*HEXDIG`: empty, non-hex, signed, or past int64.
+//
+// The connection is always left un-poolable when this is returned. A chunk-size
+// this client cannot parse is a chunk boundary it cannot find, so it no longer
+// knows where this response ends — and a pooled connection would begin its next
+// response somewhere inside the previous one's body, parsing peer-chosen bytes
+// as a status line.
+var ErrInvalidChunkSize = errors.New("http1: invalid chunk size")
+
 const (
 	// readBufSize is the bufio.Reader buffer and therefore, by construction,
 	// the hard ceiling on one CRLF-terminated protocol line: readLine uses
@@ -524,8 +534,25 @@ func (ex *Exchange) readLine(what string) (string, error) {
 // Returns the response headers as []hpack.HeaderField. The first element is
 // always the ":status" pseudo-header for compatibility with the client layer.
 func (ex *Exchange) ReadResponse(ctx context.Context) (statusCode int, headers []hpack.HeaderField, err error) {
+	// Install this exchange's read deadline unconditionally — a deadline when
+	// ctx has one, the zero value when it does not.
+	//
+	// The write path installs its deadline and clears it with a defer, because
+	// writing is over when WriteRequest returns. Reading is not: ReadBodyChunk
+	// runs after this function returns and must stay under the same deadline, so
+	// there is nothing here to defer to. That left the deadline installed on the
+	// socket after the exchange, and the connection is pooled — so the NEXT
+	// request inherited the PREVIOUS one's deadline and failed with i/o timeout
+	// at an instant that had nothing to do with it, even with no deadline of its
+	// own.
+	//
+	// Setting it on every entry rather than clearing it on every exit is what
+	// makes that unrepresentable: an exchange's read deadline is exactly its own
+	// ctx's, and no exit path has to remember anything.
 	if dl, ok := ctx.Deadline(); ok {
 		_ = ex.c.nc.SetReadDeadline(dl)
+	} else {
+		_ = ex.c.nc.SetReadDeadline(time.Time{})
 	}
 
 	var proto string
@@ -909,6 +936,45 @@ func transferCodingName(el string) string {
 	return strings.Trim(el, " \t")
 }
 
+// parseChunkSize parses one RFC 9112 §7.1 `chunk-size = 1*HEXDIG`, reporting
+// !ok for anything else.
+//
+// It exists for the same reason parseDecimalOctets does: strconv.ParseInt is a
+// superset of the ABNF in the direction that matters. ParseInt(s, 16, 64)
+// accepts a leading sign, so "+5" was taken as a five-octet chunk — peer-chosen
+// framing spelled in a way the grammar does not admit. "-5" was caught only by a
+// separate `size < 0` check downstream, which is the shape of a guard written
+// per-symptom rather than per-grammar; parsing to the grammar removes the need
+// for either.
+//
+// The accumulator is checked before each shift rather than after, so a numeral
+// longer than int64 is refused instead of wrapping into a small or negative
+// size.
+func parseChunkSize(s string) (int64, bool) {
+	if len(s) == 0 {
+		return 0, false
+	}
+	var n int64
+	for i := 0; i < len(s); i++ {
+		var d int64
+		switch c := s[i]; {
+		case c >= '0' && c <= '9':
+			d = int64(c - '0')
+		case c >= 'a' && c <= 'f':
+			d = int64(c-'a') + 10
+		case c >= 'A' && c <= 'F':
+			d = int64(c-'A') + 10
+		default:
+			return 0, false
+		}
+		if n > (math.MaxInt64-d)/16 {
+			return 0, false
+		}
+		n = n*16 + d
+	}
+	return n, true
+}
+
 // consumeHeaders reads HTTP/1.1 headers until a blank line.
 // When out is non-nil, parsed headers are appended to *out.
 // When parseBody is true, it also updates ex.contentLen, ex.respChunked,
@@ -1132,30 +1198,50 @@ func (ex *Exchange) readChunkedChunk(buf []byte) (n int, done bool, err error) {
 			line = line[:semi] // strip chunk extensions
 		}
 		line = strings.TrimSpace(line)
-		size, perr := strconv.ParseInt(line, 16, 64)
-		if perr != nil {
-			return 0, false, fmt.Errorf("http1: invalid chunk size %q: %w", line, perr)
-		}
-		if size < 0 {
-			// chunk-size is 1*HEXDIG (unsigned) per RFC 7230 §4.1;
-			// ParseInt accepts a leading '-', so reject it explicitly
-			// before it becomes a negative slice bound below. The chunked
-			// framing is now corrupt and the stream position indeterminate,
-			// so the connection must not be pooled.
+		size, ok := parseChunkSize(line)
+		if !ok {
+			// Any unparseable chunk-size means the chunked framing is corrupt and
+			// the stream position indeterminate — the next bytes might be chunk
+			// data, a size line, or a whole response the server never sent. The
+			// connection must not be pooled, whatever shape the defect took.
+			//
+			// Only the negative case used to clear keepAlive; a non-hex or empty
+			// size returned the error with the socket still marked reusable, so a
+			// caller honouring KeepAlive()'s documented contract pooled a
+			// mid-stream connection and read an attacker-chosen response on it.
+			// Same corrupt framing, same indeterminate position, opposite verdict.
 			ex.keepAlive = false
-			return 0, false, fmt.Errorf("http1: invalid chunk size %q: negative", line)
+			return 0, false, fmt.Errorf("http1: invalid chunk size %q: %w", truncateForError(line), ErrInvalidChunkSize)
 		}
 		if size == 0 {
 			// Terminal chunk. Consume optional trailers, bounded exactly as the
 			// header block is — a trailer section is a header block, and a
 			// server can stream one forever just as easily.
-			//
-			// Any other error (typically EOF from a server that closes straight
-			// after the terminal chunk) stays tolerated as it was before: the
-			// body is already complete, so the response is good even when the
-			// trailers are not.
-			if terr := ex.consumeHeaders(nil, false); terr != nil && errors.Is(terr, ErrResponseTooLarge) {
-				return 0, false, terr
+			if terr := ex.consumeHeaders(nil, false); terr != nil {
+				if errors.Is(terr, io.EOF) || errors.Is(terr, io.ErrUnexpectedEOF) {
+					// The server closed straight after the terminal chunk. The
+					// body is already complete, so the response is good even
+					// though the trailer section never arrived — but the socket
+					// is gone, so it must not be pooled.
+					ex.keepAlive = false
+				} else {
+					// Anything else — a read deadline, a too-large block, a
+					// malformed fold — means the trailer section is
+					// unterminated, so the stream position is indeterminate and
+					// the response cannot be called complete.
+					//
+					// This used to tolerate EVERY error except ErrResponseTooLarge
+					// and report done=true, err=nil. A stalled trailer section
+					// therefore swallowed the caller's deadline whole and left
+					// KeepAlive() true with the server's next bytes unread: the
+					// pool handed that socket to the next request, which parsed
+					// them as its status line. The comment justifying the
+					// tolerance said "typically EOF" — and for EOF it was sound,
+					// because a dead socket merely fails on next use. The
+					// predicate was "any error"; a deadline is not EOF.
+					ex.keepAlive = false
+					return 0, false, terr
+				}
 			}
 			ex.chunkFinal = true
 			return 0, true, nil
