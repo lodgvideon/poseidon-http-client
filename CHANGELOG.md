@@ -76,6 +76,16 @@ written from scratch in this module: no third-party protocol code, no cgo.
 
 ### Fixed
 
+- **A small advertised receive window deadlocked every HTTP/2 download.**
+  `conn.AdvertisedSettings.InitialWindowSize` is public and RFC 7540 §6.5.2
+  permits 0 to 2^31-1, but the WINDOW_UPDATE that replenishes a stream's window
+  only fired once 32768 bytes had accumulated — a constant chosen as half of the
+  *default* 65535 window. Advertise less than that and the peer spent its whole
+  window, the refund counter never reached a threshold larger than the window
+  feeding it, and the transfer stopped dead: at 16384 (the default
+  MAX_FRAME_SIZE, a natural choice) a 200 KiB download delivered exactly 16384
+  bytes and then hung. The threshold is now half the advertised window, which is
+  what the constant was always meant to express.
 - **An HTTP/2 pool never recovered from a server restart.** `conn.IsAlive`
   reported a connection healthy after its peer had vanished — a crash, a
   restart, an RST — because it asked only whether `Close` had been called or a
