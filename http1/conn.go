@@ -28,6 +28,22 @@ import (
 // needed to resynchronise the stream are exactly the bytes being refused.
 var ErrResponseTooLarge = errors.New("http1: response exceeds client buffering limit")
 
+// ErrInvalidRequest reports that the caller asked this client to send a request
+// that cannot be encoded on an HTTP/1.1 wire without changing its meaning: a
+// header value carrying CR, LF or NUL, a header name that is not a token, or a
+// method/target carrying a space or control character.
+//
+// It is refused rather than sanitised. Silently stripping the bytes would send
+// a request the caller did not write; escaping them has no defined encoding in
+// HTTP/1.1, where the framing *is* the delimiter bytes. Refusing is the only
+// option that keeps "what the caller asked for" and "what goes on the wire" the
+// same message.
+//
+// Nothing is written to the connection when this is returned: the request is
+// validated in full before the first byte leaves. A half-written poisoned
+// request would be exactly the split being prevented.
+var ErrInvalidRequest = errors.New("http1: invalid request")
+
 // ErrInvalidContentLength reports that the response carried a Content-Length
 // this client will not frame a body with: a value that is not RFC 9110 §8.6's
 // ABNF `Content-Length = 1*DIGIT`, a value that overflows int64, or several
@@ -177,6 +193,136 @@ type Exchange struct {
 	chunkFinal     bool // terminal 0-chunk received
 }
 
+// validFieldValue reports whether v is a legal HTTP field value.
+//
+// RFC 9110 §5.5: "Field values ... MUST NOT contain CR, LF, or NUL". Those
+// three bytes and no others: this is the literal rule, not a stricter
+// invention. The field-vchar grammar and obsolete line folding (RFC 9112 §5.2)
+// bound what a sender should emit more tightly, but the security property here
+// is exactly the §5.5 one. CR and LF are the HTTP/1.1 field delimiters, so a
+// value containing them is not one field value: it is several fields and,
+// given a blank line, a whole second request (RFC 9112 §11.2).
+//
+// NUL is in the list for the same reason one step removed. It is not a
+// delimiter to this client, but it terminates a C string, so a value carrying
+// it can mean one thing here and another to a proxy written in C.
+func validFieldValue(v []byte) bool {
+	for _, c := range v {
+		if c == '\r' || c == '\n' || c == 0 {
+			return false
+		}
+	}
+	return true
+}
+
+// tchar is the RFC 9110 §5.6.2 token character set:
+//
+//	"!" / "#" / "$" / "%" / "&" / "'" / "*" / "+" / "-" / "." /
+//	"^" / "_" / "`" / "|" / "~" / DIGIT / ALPHA
+//
+// A table rather than a switch so the check costs one indexed load per byte:
+// this runs per header per request on a load generator's send path.
+var tchar = func() (t [256]bool) {
+	for _, c := range []byte("!#$%&'*+-.^_`|~") {
+		t[c] = true
+	}
+	for c := byte('0'); c <= '9'; c++ {
+		t[c] = true
+	}
+	for c := byte('a'); c <= 'z'; c++ {
+		t[c] = true
+	}
+	for c := byte('A'); c <= 'Z'; c++ {
+		t[c] = true
+	}
+	return t
+}()
+
+// validToken reports whether s is a non-empty RFC 9110 §5.6.2 token.
+//
+// Header names are tokens. (§5.1 is what makes them case-insensitive, which is
+// why WriteRequest may lower-case them; §5.6.2 is what constrains the bytes.)
+// The injection subset is CR, LF, NUL and ':' — a name carrying ':' invents a
+// field boundary the same way a CR invents a line boundary — but checking the
+// whole token rule is no more code than that denylist and is what the grammar
+// actually says, so it holds against the next vector too rather than only the
+// one that prompted it.
+func validToken(s string) bool {
+	if s == "" {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		if !tchar[s[i]] {
+			return false
+		}
+	}
+	return true
+}
+
+// validRequestTarget reports whether s is safe to place in a request line.
+//
+// RFC 9112 §3: request-line = method SP request-target SP HTTP-version. The
+// line is delimited by SP and terminated by CRLF, so a target containing SP or
+// a control character re-cuts that line into different fields, or ends it
+// early: the same class as a header-value CRLF, one line up. Rejecting every
+// byte at or below SP plus DEL covers SP, HTAB, CR, LF and NUL in one bound
+// without enumerating them.
+//
+// Deliberately looser than "a target is a URI reference": this layer owns the
+// framing, not the URI grammar, and re-litigating RFC 3986 here would reject
+// targets a server would have accepted.
+func validRequestTarget(s string) bool {
+	if s == "" {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		if s[i] <= 0x20 || s[i] == 0x7f {
+			return false
+		}
+	}
+	return true
+}
+
+// validateFields checks everything WriteRequest is about to encode, before it
+// encodes any of it.
+//
+// Up front rather than field-by-field during the build because a partial write
+// is itself the failure being prevented: bailing out halfway through the
+// net.Buffers would put the good prefix of a poisoned request on the wire and
+// leave the stream mid-message, which is a worse outcome than either sending it
+// or refusing it.
+func validateFields(method, path, authority string, fields []hpack.HeaderField) error {
+	if !validToken(method) {
+		return fmt.Errorf("%w: method %q is not a token (RFC 9110 §9.1)", ErrInvalidRequest, method)
+	}
+	if !validRequestTarget(path) {
+		return fmt.Errorf("%w: target %q contains a space or control character (RFC 9112 §3)",
+			ErrInvalidRequest, path)
+	}
+	// The authority becomes the Host field value, so it answers to §5.5 like any
+	// other value. Emptiness is deliberately NOT an error: RFC 9110 §7.2 says a
+	// client whose target URI has no authority MUST send Host with an empty
+	// value, so "Host: \r\n" is the conformant output here, not a rejection.
+	if !validFieldValue([]byte(authority)) {
+		return fmt.Errorf("%w: :authority contains CR, LF or NUL (RFC 9110 §5.5)", ErrInvalidRequest)
+	}
+	for _, f := range fields {
+		name := string(f.Name)
+		if len(name) == 0 || name[0] == ':' {
+			continue // pseudo-headers are consumed above, never emitted as fields
+		}
+		if !validToken(name) {
+			return fmt.Errorf("%w: header name %q is not a token (RFC 9110 §5.6.2)",
+				ErrInvalidRequest, name)
+		}
+		if !validFieldValue(f.Value) {
+			return fmt.Errorf("%w: value of header %q contains CR, LF or NUL (RFC 9110 §5.5)",
+				ErrInvalidRequest, name)
+		}
+	}
+	return nil
+}
+
 // WriteRequest sends the HTTP/1.1 request line and headers.
 // fields must contain H2-style pseudo-headers (:method, :path, :authority,
 // :scheme) followed by regular headers. :scheme and :protocol are silently
@@ -204,6 +350,20 @@ func (ex *Exchange) WriteRequest(ctx context.Context, fields []hpack.HeaderField
 		case "content-length":
 			hasContentLength = true
 		}
+	}
+	// Validate before building or writing anything. This layer owns the wire, so
+	// it is the last place a caller-supplied CR can be stopped from becoming a
+	// request boundary, and http1 is a public package: a caller who uses it
+	// directly has nothing else between them and the socket.
+	// RFC 9110 §5.5, RFC 9112 §11.2.
+	//
+	// There is no HTTP/2 equivalent of this check by construction. There the same
+	// value is length-prefixed by HPACK into a frame payload, so a CR is just a
+	// byte and cannot invent a frame boundary. HTTP/1.1 is the only transport
+	// here whose framing is in-band, which is why this lives in this package
+	// rather than somewhere shared.
+	if err := validateFields(method, path, authority, fields); err != nil {
+		return err
 	}
 	ex.method = method
 
