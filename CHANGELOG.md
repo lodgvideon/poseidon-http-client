@@ -101,6 +101,15 @@ written from scratch in this module: no third-party protocol code, no cgo.
   evicts on the exchange error rather than on a liveness probe. Graceful GOAWAY
   worked throughout, which is why this survived — the tested way of losing a
   peer was the one that worked.
+- **A GOAWAY'd connection was evicted while its streams were still draining.**
+  `IsAlive` goes false the moment a GOAWAY arrives, but RFC 7540 §6.8 requires
+  streams at or below the GOAWAY's last-stream-id to be allowed to finish. Three
+  pool sites — the health tick (`evictDead`), the `Client.PoolStats` path
+  (`evictDeadSilent`), and release — closed the connection anyway, turning a
+  graceful server drain into `RST(INTERNAL_ERROR)` on every in-flight request
+  (measured: 4 of 4 died). The eviction now waits for the last stream, matching
+  the `active == 0` guard the idle path already had; the same guard makes
+  `GoAwaysReceived` count connections rather than draining streams.
 - **Every closed QUIC connection leaked a goroutine.** `crypto/tls` runs a
   `QUICConn`'s handshake on its own goroutine, which exits only when the
   handshake finishes or `Close` cancels it — so a connection torn down before
