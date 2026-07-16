@@ -68,6 +68,15 @@ var ErrInvalidRequest = errors.New("http1: invalid request")
 // paths here whose stream position is indeterminate.
 var ErrInvalidContentLength = errors.New("http1: invalid Content-Length")
 
+// ErrInvalidHeaderBlock reports that a response header or trailer block could
+// not be interpreted as a sequence of field lines — currently, an obs-fold
+// continuation (RFC 9112 §5.2) arriving with no field line to continue.
+//
+// The connection is always left un-poolable when this is returned. A block whose
+// structure is not understood cannot be trusted to have ended where this client
+// thinks it did, so the stream position is indeterminate.
+var ErrInvalidHeaderBlock = errors.New("http1: invalid header block")
+
 // ErrInvalidChunkSize reports that a chunk-size line was not RFC 9112 §7.1's
 // ABNF `chunk-size = 1*HEXDIG`: empty, non-hex, signed, or past int64.
 //
@@ -977,15 +986,28 @@ func parseChunkSize(s string) (int64, bool) {
 // lines — the one vector here that no per-line cap can see.
 func (ex *Exchange) consumeHeaders(out *[]hpack.HeaderField, parseBody bool) error {
 	var listSize uint64
+
+	// field holds the current logical field line with any obs-folds already
+	// joined into it. A line cannot be interpreted when it is read, because the
+	// NEXT line may be a continuation of it (RFC 9112 §5.2) — so each line is
+	// held until something proves it complete: a non-folded line, or the blank
+	// line ending the block.
+	var field string
+	var haveField bool
+
 	for {
 		line, err := ex.readLine("header line")
 		if err != nil {
 			return err
 		}
 		if line == "" {
-			// Blank line = end of headers. The Content-Length verdict can only
-			// be reached here, once it is known whether a Transfer-Encoding
-			// also arrived.
+			// Blank line = end of headers. Commit whatever field was still
+			// being folded into.
+			if err := ex.commitHeaderLine(field, haveField, out, parseBody); err != nil {
+				return err
+			}
+			// The Content-Length verdict can only be reached here, once it is
+			// known whether a Transfer-Encoding also arrived.
 			if parseBody {
 				return ex.resolveContentLength()
 			}
@@ -1002,9 +1024,53 @@ func (ex *Exchange) consumeHeaders(out *[]hpack.HeaderField, parseBody bool) err
 				maxHeaderListBytes, ErrResponseTooLarge)
 		}
 
+		// RFC 9112 §5.2 obs-fold: a line beginning with SP or HTAB continues the
+		// PREVIOUS field's value. "A user agent that receives an obs-fold in a
+		// response message that is not within a 'message/http' container MUST
+		// replace each received obs-fold with one or more SP octets prior to
+		// interpreting the field value."
+		//
+		// Joining rather than rejecting is that MUST. Rejecting is the duty of a
+		// server on a request (400) or a proxy on a response (502) — a user
+		// agent is given no such option, so the fold is unfolded and the message
+		// continues.
+		//
+		// The joined bytes are deliberately NOT re-split on ':'. Treating a
+		// continuation as its own field line is how "X-Junk: a\r\n\tContent-Length:
+		// 5" became a real Content-Length that the sender never sent: the client
+		// framed the body at 5, left the rest on the socket, and pooled it for
+		// the next response to parse as a status line — header smuggling.
+		if line[0] == ' ' || line[0] == '\t' {
+			if !haveField {
+				// A fold with nothing to fold into: obs-fold is OWS CRLF RWS,
+				// which only exists after a field line. The block is malformed
+				// and its remainder cannot be trusted to be fields at all.
+				ex.keepAlive = false
+				return fmt.Errorf("http1: obs-fold with no preceding field line: %w", ErrInvalidHeaderBlock)
+			}
+			field += " " + strings.TrimLeft(line, " \t")
+			continue
+		}
+
+		// A non-folded line proves the previous one complete.
+		if err := ex.commitHeaderLine(field, haveField, out, parseBody); err != nil {
+			return err
+		}
+		field, haveField = line, true
+	}
+}
+
+// commitHeaderLine interprets one complete logical field line — obs-folds
+// already joined — appending it to out and, when parseBody, feeding the framing
+// switch.
+func (ex *Exchange) commitHeaderLine(line string, have bool, out *[]hpack.HeaderField, parseBody bool) error {
+	if !have {
+		return nil
+	}
+	{
 		colon := strings.IndexByte(line, ':')
 		if colon < 0 {
-			continue // skip malformed header lines
+			return nil // skip malformed header lines
 		}
 		name := asciiLowerHeaderName(strings.TrimSpace(line[:colon]))
 		value := strings.TrimSpace(line[colon+1:])
@@ -1053,6 +1119,7 @@ func (ex *Exchange) consumeHeaders(out *[]hpack.HeaderField, parseBody bool) err
 			})
 		}
 	}
+	return nil
 }
 
 // ReadBodyChunk reads up to len(buf) bytes of the response body.

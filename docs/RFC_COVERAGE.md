@@ -155,6 +155,11 @@ numbers, which do not track RFC 9112 §6.3.
 
 | Section | Type        | Test |
 |---------|-------------|------|
+| §5.2 | Conformance | TestConformance_RFC9112_Sec5_2_ObsFoldDoesNotSmuggleContentLength (http1/) — a fold line was split on ':' and became a REAL Content-Length the server never sent, reframing the body and stranding the rest on a pooled socket. Header smuggling: "X-Junk: a
+| §5.2 | Conformance | TestConformance_RFC9112_Sec5_2_ObsFoldDoesNotSmuggleTransferEncoding (http1/) — the same primitive aimed at the other framing header |
+| §5.2 | Conformance | TestConformance_RFC9112_Sec5_2_ObsFoldUnfoldsToSP (http1/) — "A user agent ... MUST replace each received obs-fold with one or more SP octets prior to interpreting the field value": SP or HTAB, one or many, repeated folds, and a value that starts on the fold |
+| §5.2 | Conformance | TestConformance_RFC9112_Sec5_2_ObsFoldWithNoPrecedingField (http1/) — `obs-fold = OWS CRLF RWS` exists only after a field line; a block opening with one is not a field block, so it is refused and the conn condemned |
+| §5.2 | Conformance | TestConformance_RFC9112_Sec5_2_ObsFoldInTrailerSection (http1/) — a trailer section is a header block, so it unfolds identically; the over-rejection guard is that a well-formed chunked response with a folded trailer stays poolable |
 | §7.1 | Conformance | TestConformance_RFC9112_Sec7_1_InvalidChunkSizeRejected (http1/) — `chunk-size = 1*HEXDIG`: non-hex, empty, signed (`+5` — strconv.ParseInt accepts a sign, the ABNF does not) and int64-overflow sizes are refused, and each leaves KeepAlive() false. Only the negative case previously cleared it; the rest returned an error on a still-poolable mid-stream socket |
 | §7.1 | Conformance | TestConformance_RFC9112_Sec7_1_ValidChunkSizeAccepted (http1/) — over-rejection guard: legal spellings (single digit, leading zeros) still frame a body |
 | §7.1 | Conformance | TestConformance_RFC9112_Sec7_1_HexDigitsAcceptedBothCases (http1/) — a-f and A-F are both HEXDIG; a 0xab-byte chunk makes a case-folding slip show as a wrong length, not a parse failure |
