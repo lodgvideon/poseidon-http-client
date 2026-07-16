@@ -92,7 +92,10 @@ func fields(extra ...hpack.HeaderField) []hpack.HeaderField {
 
 // TestConformance_RFC9110_Sec5_5_HeaderValueCRLF_NotWritten pins the core bug.
 //
-// RFC 9110 §5.5: "Field values ... MUST NOT contain CR, LF, or NUL."
+// RFC 9110 §5.5: field values containing CR, LF or NUL are "invalid and
+// dangerous"; the section binds a RECIPIENT to reject-or-replace and states no
+// sender-side prohibition, so refusing to emit them is this client's policy.
+// The reason it is the right policy is the one below.
 //
 // A caller-supplied value carrying CRLF used to be concatenated straight into
 // the header block, so the bytes after the CRLF arrived at the server as
@@ -248,15 +251,19 @@ func TestConformance_RFC9112_Sec3_RequestLine_NotWritten(t *testing.T) {
 	}
 }
 
-// TestConformance_RFC9110_Sec7_2_EmptyAuthorityEmptyHost is the boundary that
+// TestConformance_RFC9112_Sec3_2_EmptyAuthorityEmptyHost is the boundary that
 // keeps the fix from overshooting into a different bug.
 //
-// RFC 9110 §7.2: "If the target URI's authority component is missing or
-// undefined, then a client MUST send a Host header field with an empty field
-// value." So an empty :authority is not an error and must not be one: the
-// conformant output is the literal line "Host: ", and a validator that rejected
-// it would violate a MUST while trying to satisfy §5.5.
-func TestConformance_RFC9110_Sec7_2_EmptyAuthorityEmptyHost(t *testing.T) {
+// The rule is RFC 9112 §3.2, not RFC 9110 §7.2 — §7.2 defines what Host means
+// and when a user agent must generate one, while the HTTP/1.1-specific
+// obligation to send it EMPTY lives in 9112: "If the authority component is
+// missing or undefined for the target URI, then a client MUST send a Host
+// header field with an empty field value."
+//
+// So an empty :authority is not an error and must not be one: the conformant
+// output is the literal line "Host: ", and a validator that rejected it would
+// violate a MUST while trying to satisfy §5.5.
+func TestConformance_RFC9112_Sec3_2_EmptyAuthorityEmptyHost(t *testing.T) {
 	ex, capture := rawCapture(t)
 
 	err := ex.WriteRequest(context.Background(), []hpack.HeaderField{
@@ -265,7 +272,7 @@ func TestConformance_RFC9110_Sec7_2_EmptyAuthorityEmptyHost(t *testing.T) {
 		{Name: []byte(":authority"), Value: []byte("")},
 	}, true)
 	if err != nil {
-		t.Fatalf("empty authority must be sent, not refused (RFC 9110 §7.2); err = %v", err)
+		t.Fatalf("empty authority must be sent, not refused (RFC 9112 §3.2); err = %v", err)
 	}
 
 	wire := capture()

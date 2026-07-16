@@ -9,3 +9,7 @@ jobs:
         with: { go-version: '1.25' }
       - run: go test -run=Conformance -count=1 -v ./... | tee rfc.txt
       - run: ./scripts/rfc-coverage-gate.sh rfc.txt
+      # Every span a comment presents as an RFC quotation must be verbatim in the
+      # RFC. Four altered or invented quotations shipped into this package before
+      # this ran; one of them cited a sentence that is not in the document at all.
+      - run: python3 scripts/rfc-quote-check.py http1 conn http3

@@ -214,13 +214,24 @@ type Exchange struct {
 
 // validFieldValue reports whether v is a legal HTTP field value.
 //
-// RFC 9110 §5.5: "Field values ... MUST NOT contain CR, LF, or NUL". Those
-// three bytes and no others: this is the literal rule, not a stricter
-// invention. The field-vchar grammar and obsolete line folding (RFC 9112 §5.2)
-// bound what a sender should emit more tightly, but the security property here
-// is exactly the §5.5 one. CR and LF are the HTTP/1.1 field delimiters, so a
-// value containing them is not one field value: it is several fields and,
-// given a blank line, a whole second request (RFC 9112 §11.2).
+// RFC 9110 §5.5 names exactly these three bytes: "Field values containing CR,
+// LF, or NUL characters are invalid and dangerous, due to the varying ways that
+// implementations might parse and interpret those characters; a recipient of CR,
+// LF, or NUL within a field value MUST either reject the message or replace each
+// of those characters with SP before further processing or forwarding of that
+// message."
+//
+// Note what that MUST binds: a RECIPIENT, and it offers a choice — reject, or
+// replace with SP. §5.5 states no sender-side prohibition at all, so refusing to
+// emit these bytes is this client's policy, not a quotation of one. The policy
+// is the right one anyway, and for a reason §5.5 only gestures at: CR and LF are
+// the HTTP/1.1 field delimiters, so a value containing them is not one field
+// value — it is several fields and, given a blank line, a whole second request
+// (RFC 9112 §11.2). We would be the implementation doing the "varying" parsing.
+//
+// Three bytes and no others: the tighter bound is the field-vchar grammar in the
+// same section, but it is the delimiter property that carries the security
+// weight, and that property belongs to exactly CR, LF and NUL.
 //
 // NUL is in the list for the same reason one step removed. It is not a
 // delimiter to this client, but it terminates a C string, so a value carrying
@@ -319,7 +330,7 @@ func validateFields(method, path, authority string, fields []hpack.HeaderField) 
 			ErrInvalidRequest, path)
 	}
 	// The authority becomes the Host field value, so it answers to §5.5 like any
-	// other value. Emptiness is deliberately NOT an error: RFC 9110 §7.2 says a
+	// other value. Emptiness is deliberately NOT an error: RFC 9112 §3.2 says a
 	// client whose target URI has no authority MUST send Host with an empty
 	// value, so "Host: \r\n" is the conformant output here, not a rejection.
 	if !validFieldValue([]byte(authority)) {
