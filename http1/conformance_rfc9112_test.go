@@ -6,7 +6,7 @@ package http1_test
 // both header orders and are not repeated here. These cover the shapes they do
 // not: chunked that is not the final coding, an unknown coding, a coding whose
 // name merely contains "chunked", and the connection-reuse consequence of
-// rule 4.
+// rule 3.
 //
 // Each test adds a row to docs/RFC_COVERAGE.md.
 
@@ -16,9 +16,10 @@ import (
 )
 
 // TestConformance_RFC9112_Sec6_3_Rule4_ChunkedNotFinalReadsUntilClose pins
-// RFC 9112 §6.3 rule 3: "If a Transfer-Encoding header field is present and the
-// chunked transfer coding is not the final encoding, the message body length is
-// determined by reading the connection until it is closed by the server."
+// RFC 9112 §6.3 rule 4: "If a Transfer-Encoding header field is present in a
+// response and the chunked transfer coding is not the final encoding, the
+// message body length is determined by reading the connection until it is closed
+// by the server."
 //
 // "chunked, gzip" names chunked first and gzip last, so chunked is NOT final
 // and the body is raw bytes up to EOF — not chunk framing.
@@ -41,10 +42,10 @@ func TestConformance_RFC9112_Sec6_3_Rule4_ChunkedNotFinalReadsUntilClose(t *test
 }
 
 // TestConformance_RFC9112_Sec6_3_Rule4_UnknownCodingReadsUntilClose pins the
-// same rule 3 for a coding whose name merely *contains* "chunked". RFC 9112 §7
-// makes the field an ordered list of transfer-coding tokens, and "not-chunked"
-// is a different token from "chunked" — a substring test reads it as chunked
-// framing and desyncs on the first body byte.
+// same rule 4 for a coding whose name merely *contains* "chunked". The field is
+// an ordered list of transfer-coding tokens (RFC 9112 §6.1, element grammar in
+// RFC 9110 §10.1.4), and "not-chunked" is a different token from "chunked" — a
+// substring test reads it as chunked framing and desyncs on the first body byte.
 func TestConformance_RFC9112_Sec6_3_Rule4_UnknownCodingReadsUntilClose(t *testing.T) {
 	t.Parallel()
 	resp := "HTTP/1.1 200 OK\r\n" +
@@ -61,14 +62,14 @@ func TestConformance_RFC9112_Sec6_3_Rule4_UnknownCodingReadsUntilClose(t *testin
 }
 
 // TestConformance_RFC9112_Sec6_3_Rule3_ContentLengthFirst_TEOverrides pins
-// RFC 9112 §6.3 rule 4: "If a message is received with both a Transfer-Encoding
+// RFC 9112 §6.3 rule 3: "If a message is received with both a Transfer-Encoding
 // and a Content-Length header field, the Transfer-Encoding overrides the
 // Content-Length."
 //
 // Content-Length arrives FIRST here, so it is already parsed by the time
 // Transfer-Encoding lands: this is the order in which the override has to
 // undo a decision, not merely decline to make one. Content-Length says 5;
-// rule 4 makes it inoperative and rule 3 (gzip is the final coding, not
+// rule 3 makes it inoperative and rule 4 (gzip is the final coding, not
 // chunked) makes the body run to EOF, so all 10 bytes belong to this response.
 // Framing at 5 would leave "EXTRA" on the wire to be read as the head of the
 // next response — the response-splitting half of §11.

@@ -139,8 +139,8 @@ non-ACK PING frames with `ACK=1` and the original 8-byte payload
 |---------|-------------|------|
 | §3.6.1  | Conformance | TestConformance_RFC2616_Sec3_6_1_MultipleChunks — multi-chunk body reassembled across ReadBodyChunk calls |
 | §3.6.1  | Conformance | TestConformance_RFC2616_Sec3_6_1_EmptyChunkedBody — terminal 0-chunk produces empty body immediately |
-| §4.4 R3 | Conformance | TestConformance_RFC2616_Sec4_4_Rule4_ChunkedWinsContentLengthFirst — Transfer-Encoding beats Content-Length (CL first) |
-| §4.4 R3 | Conformance | TestConformance_RFC2616_Sec4_4_Rule4_ChunkedWinsTransferEncodingFirst — Transfer-Encoding beats Content-Length (TE first) |
+| §4.4 R3 | Conformance | TestConformance_RFC2616_Sec4_4_Rule3_ChunkedWinsContentLengthFirst — Transfer-Encoding beats Content-Length (CL first) |
+| §4.4 R3 | Conformance | TestConformance_RFC2616_Sec4_4_Rule3_ChunkedWinsTransferEncodingFirst — Transfer-Encoding beats Content-Length (TE first) |
 | §6.1    | Conformance | TestConformance_RFC2616_Sec6_1_HTTP10StatusLineParsed — HTTP/1.0 status line accepted by parser |
 | §8.1    | Conformance | TestConformance_RFC2616_Sec8_1_HTTP10DefaultClose — HTTP/1.0 without Connection header → KeepAlive() false |
 | §8.1    | Conformance | TestConformance_RFC2616_Sec8_1_HTTP10KeepAliveHeader — HTTP/1.0 + Connection: keep-alive → KeepAlive() true |
@@ -155,6 +155,9 @@ numbers, which do not track RFC 9112 §6.3.
 
 | Section | Type        | Test |
 |---------|-------------|------|
+| §7 / §6.1 | Conformance | TestConformance_RFC9112_Sec7_QuotedCommaIsNotAListDelimiter (http1/) — a comma inside a quoted transfer-parameter is data, not a list delimiter: `gzip;a=", chunked;x=1"` is ONE coding, so chunked is not final and rule 4 applies. Splitting the raw value on "," forged a final "chunked", chunk-framed the body and left the rest on a poolable socket — response splitting (§11.1) |
+| §7 / §6.1 | Conformance | TestConformance_RFC9112_Sec7_ChunkedFinalAfterParameters (http1/) — the over-rejection guard: chunked-final must still frame as chunked through OWS, no-OWS, ";"-parameters, a trailing empty element (RFC 9110 §5.6.1) and mixed case (§7: coding names are case-insensitive). Pins the two normalization steps whose deletion previously survived both packages' suites |
+| §6.3 R4 | Conformance | TestConformance_RFC9112_Sec7_NonChunkedFinalReadsUntilClose (http1/) — plain non-chunked finals ("chunked, gzip", "not-chunked", "chunkedx") read until close, covering rule 4 independently of the quoted-string machinery |
 | §6.1 | Conformance | TestConformance_RFC9112_Sec6_1_NoContentLengthWithTransferEncoding (http1/) — "A sender MUST NOT send a Content-Length header field in any message that contains a Transfer-Encoding header field": the client must not emit the smuggling pair itself, for any spelling of the caller's header (RFC 9110 §5.1 makes names case-insensitive) |
 | §6.1 | Conformance | TestConformance_RFC9112_Sec6_1_SingleContentLengthOnBodylessPost (http1/) — a bodyless POST/PUT/PATCH with a caller-supplied Content-Length emits exactly one; the client's own "Content-Length: 0" must not be appended beside it (CL.CL, §11.2, in the request direction) |
 | §6.1 | Conformance | TestConformance_RFC9112_Sec6_1_BodylessPostStillGetsContentLengthZero (http1/) — the control: with no caller-supplied Content-Length the client still adds its own, so the duplicate fix cannot silently drop the header |
