@@ -155,6 +155,12 @@ numbers, which do not track RFC 9112 §6.3.
 
 | Section | Type        | Test |
 |---------|-------------|------|
+| §5.2 | Conformance | TestConformance_RFC9112_Sec5_2_ObsFoldDoesNotSmuggleContentLength (http1/) — a fold line was split on ':' and became a REAL Content-Length the server never sent, reframing the body and stranding the rest on a pooled socket. Header smuggling: "X-Junk: a
+	Content-Length: 5" carries ONE field and no Content-Length |
+| §5.2 | Conformance | TestConformance_RFC9112_Sec5_2_ObsFoldDoesNotSmuggleTransferEncoding (http1/) — the same primitive aimed at the other framing header |
+| §5.2 | Conformance | TestConformance_RFC9112_Sec5_2_ObsFoldUnfoldsToSP (http1/) — "A user agent ... MUST replace each received obs-fold with one or more SP octets prior to interpreting the field value": SP or HTAB, one or many, repeated folds, and a value that starts on the fold |
+| §5.2 | Conformance | TestConformance_RFC9112_Sec5_2_ObsFoldWithNoPrecedingField (http1/) — `obs-fold = OWS CRLF RWS` exists only after a field line; a block opening with one is not a field block, so it is refused and the conn condemned |
+| §5.2 | Conformance | TestConformance_RFC9112_Sec5_2_ObsFoldInTrailerSection (http1/) — a trailer section is a header block, so it unfolds identically; the over-rejection guard is that a well-formed chunked response with a folded trailer stays poolable |
 | §6.1 | Conformance | TestConformance_RFC9112_Sec6_1_NoContentLengthWithTransferEncoding (http1/) — "A sender MUST NOT send a Content-Length header field in any message that contains a Transfer-Encoding header field": the client must not emit the smuggling pair itself, for any spelling of the caller's header (RFC 9110 §5.1 makes names case-insensitive) |
 | §6.1 | Conformance | TestConformance_RFC9112_Sec6_1_SingleContentLengthOnBodylessPost (http1/) — a bodyless POST/PUT/PATCH with a caller-supplied Content-Length emits exactly one; the client's own "Content-Length: 0" must not be appended beside it (CL.CL, §11.2, in the request direction) |
 | §6.1 | Conformance | TestConformance_RFC9112_Sec6_1_BodylessPostStillGetsContentLengthZero (http1/) — the control: with no caller-supplied Content-Length the client still adds its own, so the duplicate fix cannot silently drop the header |
