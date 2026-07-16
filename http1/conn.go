@@ -577,13 +577,23 @@ func (ex *Exchange) ReadResponse(ctx context.Context) (statusCode int, headers [
 
 	// RFC 9112 §6.3 rule 3: a message carrying both Transfer-Encoding and
 	// Content-Length "might indicate an attempt to perform request smuggling
-	// (§11.2) or response splitting (§11.1) and ought to be handled as an
-	// error"; the sender MUST close the connection after responding. For a
-	// client, "close" means the socket must not be reused: the two headers
-	// disagree about where this response ends, so whatever is on the wire next
-	// cannot be trusted to be the next response. keepAlive=false is what
-	// carries that — client/h1_pool.go's handleRelease evicts any conn released
-	// with it rather than returning it to the idle set.
+	// (Section 11.2) or response splitting (Section 11.1) and ought to be
+	// handled as an error".
+	//
+	// "Ought to be handled as an error" is all rule 3 says; refusing to reuse
+	// the socket is this client's reading of it, not a quotation. RFC 9112 does
+	// state a hard MUST-close for this shape, but §6.1 scopes it to the other
+	// side of the exchange — "the server MUST close the connection after
+	// responding to such a request" — a server's duty on an inbound request, not
+	// a client's on an inbound response. (The client-side MUST-close in this spec
+	// belongs to §6.3 rule 5, the invalid-Content-Length case, which
+	// resolveContentLength handles.)
+	//
+	// The reading is still forced by the wire: the two headers disagree about
+	// where this response ends, so whatever follows cannot be trusted to be the
+	// next response. keepAlive=false carries that — client/h1_pool.go's
+	// handleRelease evicts any conn released with it rather than returning it to
+	// the idle set.
 	if ex.respTE && ex.respCL {
 		ex.keepAlive = false
 	}
@@ -793,30 +803,101 @@ func truncateForError(s string) string {
 // lastTransferCoding returns the final transfer-coding token of one
 // Transfer-Encoding field value, lowercased, or "" when the list is empty.
 //
-// RFC 9112 §7 defines the field as a comma-separated list of transfer-coding,
-// each optionally carrying ";"-delimited parameters, with optional whitespace
-// around the commas. Only the last element decides the framing (§6.3 rules 3
-// and 4), so that is all this reports. Splitting on "," without honouring
-// quoted-string parameters is safe for that question: a quoted comma can only
-// appear inside a parameter of some coding, and the token that follows the
-// final unquoted comma is still the final coding.
+// The field is a list (RFC 9112 §6.1), whose element grammar RFC 9112 imports
+// rather than defines — it lives in RFC 9110 §10.1.4:
 //
-// Lowering is ASCII-only for the same reason asciiLowerHeaderName is (RFC 9110
-// §5.1 makes the comparison case-insensitive; the token itself is ASCII per
-// §5.6.2, so strings.ToLower could only re-encode bytes that were already
-// invalid).
+//	Transfer-Encoding  = #transfer-coding                    (RFC 9112 §6.1)
+//	transfer-coding    = token *( OWS ";" OWS transfer-parameter )
+//	transfer-parameter = token BWS "=" BWS ( token / quoted-string )
+//	                                                        (RFC 9110 §10.1.4)
+//
+// Only the last element decides the framing (RFC 9112 §6.3 rules 3 and 4), so
+// that is all this reports. Empty elements are skipped rather than counted,
+// because RFC 9110 §5.6.1 requires a recipient to "parse and ignore a reasonable
+// number of empty list elements" — so "gzip, chunked," still ends in chunked.
+//
+// The scan tracks quoted-string state, and that is load-bearing rather than
+// pedantic. A parameter value may be a quoted-string, which may contain a comma,
+// which is then data and not a list delimiter. Splitting the raw value on ","
+// cannot tell the two apart, so `gzip;a=", chunked;x=1"` — ONE coding, gzip,
+// carrying a parameter — was read as a list whose final element was "chunked".
+// The body was then chunk-framed, the connection stayed poolable, and the bytes
+// the server chose were left on the socket for the next response to parse as its
+// status line: response splitting (§11.1), the exact primitive this function
+// exists to deny. An escaped quote inside the string (`a="\", chunked"`) hid it
+// the same way, so quoted-pair is honoured too.
+//
+// Lowering is ASCII-only: RFC 9112 §7 makes transfer-coding names
+// case-insensitive, and §5.6.2 confines a token to ASCII, so strings.ToLower
+// could only re-encode bytes that were already invalid — and would inflate them
+// 3x doing it (see asciiLowerHeaderName).
+//
+// No allocation on the common path: the scan slices the value in place, and
+// asciiLowerHeaderName returns its argument unchanged for an already-lower-case
+// token. http1 is a pooled transport on a load generator's hot path and sits
+// outside the bench gate's scope, so nothing else would catch a regression here.
 func lastTransferCoding(value string) string {
+
 	last := ""
-	for _, tok := range strings.Split(value, ",") {
-		if semi := strings.IndexByte(tok, ';'); semi >= 0 {
-			tok = tok[:semi]
+
+	start := 0
+
+	inQuotes := false
+
+	for i := 0; i <= len(value); i++ {
+
+		if i == len(value) || (value[i] == ',' && !inQuotes) {
+
+			if name := transferCodingName(value[start:i]); name != "" {
+
+				last = name
+
+			}
+
+			start = i + 1
+
+			continue
+
 		}
-		tok = strings.Trim(tok, " \t")
-		if tok != "" {
-			last = tok
+
+		switch value[i] {
+
+		case '\\':
+
+			// quoted-pair: inside a quoted-string the next octet is data,
+
+			// including a '"' that would otherwise close it.
+
+			if inQuotes && i+1 < len(value) {
+
+				i++
+
+			}
+
+		case '"':
+
+			inQuotes = !inQuotes
+
 		}
+
 	}
+
 	return asciiLowerHeaderName(last)
+
+}
+
+
+// transferCodingName returns the bare coding name of one Transfer-Encoding list
+// element: OWS-trimmed, with any ";"-delimited parameters removed.
+//
+// The first ';' can be found without tracking quotes because the name precedes
+// every parameter and a token cannot contain a quote — so any quoted-string in
+// the element lies after that ';', never before it.
+func transferCodingName(el string) string {
+	if semi := strings.IndexByte(el, ';'); semi >= 0 {
+		el = el[:semi]
+	}
+	return strings.Trim(el, " \t")
 }
 
 // consumeHeaders reads HTTP/1.1 headers until a blank line.
@@ -869,11 +950,11 @@ func (ex *Exchange) consumeHeaders(out *[]hpack.HeaderField, parseBody bool) err
 				ex.noteContentLength(value)
 			case "transfer-encoding":
 				ex.respTE = true
-				// RFC 9112 §7: the field value is an ordered, comma-separated
-				// list of transfer-coding tokens. Only "chunked" as the *final*
-				// coding gives chunked framing; a substring match instead reads
-				// "not-chunked" and "chunked, gzip" as chunked and then desyncs
-				// on the first body byte.
+				// RFC 9112 §6.1: the field value is an ordered, comma-separated
+				// list of transfer-coding (element grammar in RFC 9110 §10.1.4).
+				// Only "chunked" as the *final* coding gives chunked framing; a
+				// substring match instead reads "not-chunked" and "chunked, gzip"
+				// as chunked and then desyncs on the first body byte.
 				//
 				// Either branch overrides any Content-Length parsed so far
 				// (§6.3 rule 3), which is why contentLen is assigned
