@@ -156,17 +156,3 @@ func TestConformance_RFC9112_Sec5_2_ObsFoldInTrailerSection(t *testing.T) {
 			"trailer is reusable; over-condemning it would cost a connection per response")
 	}
 }
-
-// readAllTolerant reads a body that ends at connection close: the final read
-// returns an error at EOF, which is the framing working rather than failing.
-func readAllTolerant(ex *http1.Exchange) string {
-	buf := make([]byte, 512)
-	var out []byte
-	for {
-		n, done, err := ex.ReadBodyChunk(buf)
-		out = append(out, buf[:n]...)
-		if err != nil || done {
-			return string(out)
-		}
-	}
-}
