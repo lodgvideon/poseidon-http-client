@@ -178,7 +178,7 @@ type StreamResponse struct {
 // recycleData returns the last delivered EventData's pooled buffer to the pool.
 func (sr *StreamResponse) recycleData() {
 	if sr.curData != nil {
-		conn.GetDataBufPool().Put(sr.curData)
+		putDataSlab(sr.curData)
 		sr.curData = nil
 	}
 }

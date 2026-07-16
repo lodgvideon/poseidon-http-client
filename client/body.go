@@ -28,7 +28,7 @@ type responseBodyReader struct {
 // Recv is about to run (the buf>0 fast path returns before reaching Recv).
 func (r *responseBodyReader) recycleData() {
 	if r.curData != nil {
-		conn.GetDataBufPool().Put(r.curData)
+		putDataSlab(r.curData)
 		r.curData = nil
 	}
 }
