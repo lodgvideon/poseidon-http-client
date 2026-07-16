@@ -199,6 +199,8 @@ numbers, which do not track RFC 9112 §6.3.
 
 | Section | Type        | Test |
 |---------|-------------|------|
+| §5.3 | Conformance | TestConformance_RFC9110_Sec5_3_RepeatedTELinesAreOneList (http1/) — repeated field lines are ONE list: §5.3 appends each value "to the initial field line value in order, separated by a comma". Two Transfer-Encoding lines and the equivalent one-line list must frame identically; each line overwriting the verdict let an empty final line erase chunked framing |
+| §5.3 | Conformance | TestConformance_RFC9110_Sec5_3_EmptyTELineAloneStillPresent (http1/) — the boundary: a line contributing no codings still makes the FIELD present, which RFC 9112 §6.3 rule 3 and rule 5 both key on. Skipping its framing effect must not make it invisible |
 | §5.5    | Conformance | TestConformance_RFC9110_Sec5_5_HeaderValueCRLF_NotWritten (http1/) — a caller header value containing CRLF is refused with ErrInvalidRequest and **no bytes reach the socket**; asserted on captured wire bytes, not on the error. Without the check the value's tail arrives at the origin as extra header fields of the client's own request (RFC 9112 §11.2 request splitting) |
 | §5.5    | Conformance | TestConformance_RFC9110_Sec5_5_HeaderValueNUL_NotWritten (http1/) — NUL in a field value refused; not a delimiter here, but it terminates a C string, so one value can mean different things to this client and to a C proxy |
 | §5.5    | Conformance | TestConformance_RFC9110_Sec5_5_AuthorityCRLF_NotWritten (http1/) — :authority becomes the Host field value and answers to §5.5; CRLF there is refused. This is the vector client/validateRequest never sees: it checks Method and Path but not Authority |
