@@ -10,6 +10,10 @@ and round-trip through ReadFrame. The conformance row is what the
 
 | Section | Type        | Test |
 |---------|-------------|------|
+| §10.3 | Conformance | TestConformance_RFC7540_Sec10_3_ResponseFieldValueCRLFNUL_Malformed (conn/) — "Any request or response that contains a character not permitted in a header field value MUST be treated as malformed": CR, LF and NUL in a response value are a stream error PROTOCOL_ERROR. HPACK is length-prefixed so they cannot split the H2 wire — the damage is downstream, in whatever copies the value into an HTTP/1.1 message |
+| §10.3 | Conformance | TestConformance_RFC7540_Sec10_3_ResponseFieldNameInvalid_Malformed (conn/) — "Requests or responses containing invalid header field names MUST be treated as malformed": upper case (named by §8.1.2.6), spaces, colons, control and non-ASCII bytes, and the empty name |
+| §8.1.2.2 | Conformance | TestConformance_RFC7540_Sec8_1_2_2_ConnectionSpecificResponseField_Malformed (conn/) — "any message containing connection-specific header fields MUST be treated as malformed" binds the receive path too. "te" is rejected at any value: the §8.1.2.2 exception is request-only |
+| §10.3 | Conformance | TestConformance_RFC7540_Sec10_3_LegalResponseFieldsAccepted (conn/) — the over-rejection guard: SP/HTAB inside a value, obs-text, high-bit bytes, every tchar in a name and an empty value are all ordinary traffic and must still be accepted |
 | §3.5    | Conformance | TestConformance_RFC7540_Sec35_ClientPreface |
 | §3.5    | Roundtrip   | TestFramer_ClientPreface |
 | §4.1    | Conformance | TestConformance_RFC7540_Sec41_FrameHeader_RBitMasked |
