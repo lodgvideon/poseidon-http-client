@@ -195,3 +195,43 @@ func TestH1PoolTransport_Warmup_PreDials(t *testing.T) {
 	}
 	t.Fatalf("warmup dialed %d conns, want 3", d.count("h:80"))
 }
+
+// TestConformance_RFC9112_Sec6_3_Rule4_SmuggledResponseNotPooled proves the
+// payoff of RFC 9112 §6.3 rule 4 at the layer that matters. A response carrying
+// both Transfer-Encoding and Content-Length "might indicate an attempt to
+// perform request smuggling (§11.2)" and the connection MUST be closed after
+// it. http1 signals that with KeepAlive()=false, but that is only a proxy — the
+// security claim is that the next request does not land on the poisoned socket.
+// So this asserts through the pool: two requests, two dials, and the first conn
+// closed.
+func TestConformance_RFC9112_Sec6_3_Rule4_SmuggledResponseNotPooled(t *testing.T) {
+	t.Parallel()
+	// Chunked framing is unambiguous and the body is well formed, so the
+	// exchange succeeds: nothing but rule 4 can force the redial here.
+	const smuggled = "HTTP/1.1 200 OK\r\n" +
+		"Transfer-Encoding: chunked\r\n" +
+		"Content-Length: 5\r\n" +
+		"\r\n" +
+		"5\r\nhello\r\n0\r\n\r\n"
+	d := newH1FakeDialer()
+	d.respFn = func(_, _ int) string { return smuggled }
+	c := h1PoolClient(t, d, PoolOptions{MaxConnsPerHost: 4, HealthCheckPeriod: time.Second})
+
+	for i := 0; i < 2; i++ {
+		resp, err := h1Get(context.Background(), c)
+		if err != nil {
+			t.Fatalf("request %d: %v", i, err)
+		}
+		if resp.Status != 200 || string(resp.Body) != "hello" {
+			t.Fatalf("request %d: status=%d body=%q", i, resp.Status, resp.Body)
+		}
+	}
+
+	conns := d.conns("h:80")
+	if len(conns) != 2 {
+		t.Fatalf("dialed %d conns, want 2 (a TE+CL response must not be reused)", len(conns))
+	}
+	if !conns[0].closed.Load() {
+		t.Fatal("conn that sent a TE+CL response was returned to the pool, not closed")
+	}
+}

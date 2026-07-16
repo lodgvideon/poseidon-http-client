@@ -147,6 +147,21 @@ non-ACK PING frames with `ACK=1` and the original 8-byte payload
 | §10.3.5 | Conformance | TestConformance_RFC2616_Sec10_3_5_304NoBody — 304 body skipped even when Content-Length present |
 | §14.23  | Conformance | TestConformance_RFC2616_Sec14_23_HostHeaderInRequest — request wire includes Host derived from :authority |
 
+## RFC 9112 — HTTP/1.1 message syntax and routing (http1/, client/)
+
+RFC 9112 obsoletes RFC 7230 and is the current HTTP/1.1 message-framing spec;
+the RFC 2616 rows above predate it and are kept as-is. Rows here cover only what
+those do not.
+
+| Section | Type        | Test |
+|---------|-------------|------|
+| §6.3 R3 | Conformance | TestConformance_RFC9112_Sec6_3_Rule3_ChunkedNotFinalReadsUntilClose (http1/) — "Transfer-Encoding: chunked, gzip": chunked is present but not the final coding, so the body length is determined by reading until the server closes, not by chunk framing |
+| §6.3 R3 | Conformance | TestConformance_RFC9112_Sec6_3_Rule3_UnknownCodingReadsUntilClose (http1/) — "Transfer-Encoding: not-chunked" is a different §7 token from "chunked"; matching the field as a substring reads it as chunked and desyncs the stream |
+| §6.3 R4 | Conformance | TestConformance_RFC9112_Sec6_3_Rule4_ContentLengthFirst_TEOverrides (http1/) — TE overrides CL when CL is parsed first; the override must undo a framing decision already made, and the response is not poolable |
+| §6.3 R4 | Conformance | TestConformance_RFC9112_Sec6_3_Rule4_TransferEncodingFirst_CLIgnored (http1/) — same rule in the opposite header order: a Content-Length arriving after Transfer-Encoding must not reinstate length framing |
+| §6.3 R4 | Conformance | TestConformance_RFC9112_Sec6_3_Rule4_ChunkedPlusCLNotReusable (http1/) — TE:chunked + CL frames as chunked (RFC 2616 §4.4 R3 rows) but MUST close: KeepAlive() is false |
+| §6.3 R4 / §11.2 | Conformance | TestConformance_RFC9112_Sec6_3_Rule4_SmuggledResponseNotPooled (client/) — the MUST-close consequence at the pool layer: a TE+CL response evicts its conn (h1Pool.handleRelease), so the next request redials rather than reusing a socket whose framing the peer disputed |
+
 ## RFC 8336 — ORIGIN Frame
 
 | Section | Type        | Test |
