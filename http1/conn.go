@@ -950,11 +950,11 @@ func (ex *Exchange) consumeHeaders(out *[]hpack.HeaderField, parseBody bool) err
 				ex.noteContentLength(value)
 			case "transfer-encoding":
 				ex.respTE = true
-				// RFC 9112 §7: the field value is an ordered, comma-separated
-				// list of transfer-coding tokens. Only "chunked" as the *final*
-				// coding gives chunked framing; a substring match instead reads
-				// "not-chunked" and "chunked, gzip" as chunked and then desyncs
-				// on the first body byte.
+				// RFC 9112 §6.1: the field value is an ordered, comma-separated
+				// list of transfer-coding (element grammar in RFC 9110 §10.1.4).
+				// Only "chunked" as the *final* coding gives chunked framing; a
+				// substring match instead reads "not-chunked" and "chunked, gzip"
+				// as chunked and then desyncs on the first body byte.
 				//
 				// Either branch overrides any Content-Length parsed so far
 				// (§6.3 rule 3), which is why contentLen is assigned

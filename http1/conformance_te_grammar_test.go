@@ -1,10 +1,16 @@
 package http1_test
 
-// Conformance tests for the RFC 9112 §7 Transfer-Encoding grammar.
+// Conformance tests for the Transfer-Encoding grammar.
 //
-//	Transfer-Encoding  = #transfer-coding
+//	Transfer-Encoding  = #transfer-coding                    (RFC 9112 §6.1)
 //	transfer-coding    = token *( OWS ";" OWS transfer-parameter )
 //	transfer-parameter = token BWS "=" BWS ( token / quoted-string )
+//	                                                        (RFC 9110 §10.1.4)
+//
+// RFC 9112 imports the element grammar rather than defining it — §7 states only
+// that transfer-coding names are case-insensitive. Getting this attribution
+// right is the point: the misfiled citation this suite corrects in conn.go was
+// reintroduced in this very file's header on the first pass.
 //
 // The framing question is only ever "is chunked the final coding" (§6.3 rules 3
 // and 4), but answering it wrongly in either direction is a desync: reading a
