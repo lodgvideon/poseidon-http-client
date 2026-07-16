@@ -1,0 +1,125 @@
+package conn
+
+import (
+	"bytes"
+	"context"
+	"crypto/tls"
+	"net/http"
+	"net/http/httptest"
+	"testing"
+	"time"
+
+	"github.com/lodgvideon/poseidon-http-client/hpack"
+)
+
+// TestConn_SmallAdvertisedWindow_StillCompletes pins a download against every
+// advertised receive window a caller may legally choose.
+//
+// AdvertisedSettings.InitialWindowSize is public, documented as configurable,
+// and RFC 7540 §6.5.2 permits anything from 0 to 2^31-1. But the refund that
+// replenishes a stream's window only fired once recvWindowRefundThreshold
+// (32768) bytes had accumulated — a constant, chosen as half of the *default*
+// 65535 window. Advertise anything below it and the peer sends exactly one
+// window's worth, exhausts its credit, and waits for a WINDOW_UPDATE that can
+// never arrive, because the refund counter can never reach a threshold larger
+// than the window itself.
+//
+// Measured before the fix, downloading 200 KiB:
+//
+//	InitialWindowSize=65535  -> 204800/204800 bytes in 19ms
+//	InitialWindowSize=32768  -> 204800/204800 bytes in  4ms
+//	InitialWindowSize=16384  ->  16384/204800 bytes in  4s   context deadline exceeded
+//	InitialWindowSize=8192   ->   8192/204800 bytes in  4s   context deadline exceeded
+//
+// The bytes received equal the window exactly, and the cliff sits exactly at the
+// threshold. 16384 is not an exotic choice — it is the default MAX_FRAME_SIZE.
+//
+// 65535 and 32768 are the controls: they pass before the fix, so a failure here
+// is the small-window path, not a broken harness.
+func TestConn_SmallAdvertisedWindow_StillCompletes(t *testing.T) {
+	const bodyLen = 200 << 10 // comfortably larger than any window under test
+	body := bytes.Repeat([]byte("x"), bodyLen)
+
+	srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write(body)
+	}))
+	srv.EnableHTTP2 = true
+	srv.StartTLS()
+	defer srv.Close()
+
+	for _, window := range []uint32{65535, 32768, 16384, 8192, 1024} {
+		t.Run(windowName(window), func(t *testing.T) {
+			d := &TLSDialer{Config: &tls.Config{
+				InsecureSkipVerify: true, //nolint:gosec // a test server's self-signed cert
+				NextProtos:         []string{"h2"},
+			}}
+			nc, err := d.Dial(t.Context(), srv.Listener.Addr().String())
+			if err != nil {
+				t.Fatalf("dial: %v", err)
+			}
+			opts := ConnOptions{}
+			opts.Settings.InitialWindowSize = window
+			c, err := NewClientConn(t.Context(), nc, opts)
+			if err != nil {
+				t.Fatalf("NewClientConn: %v", err)
+			}
+			defer func() { _ = c.Close() }()
+
+			s, err := c.NewStream(t.Context())
+			if err != nil {
+				t.Fatalf("NewStream: %v", err)
+			}
+			if err := s.SendHeaders(t.Context(), getHeaders(), true); err != nil {
+				t.Fatalf("SendHeaders: %v", err)
+			}
+
+			// Bound every Recv rather than the loop: a stalled window shows up as
+			// one Recv that never returns, and a loop deadline would leave the
+			// test hanging inside it rather than reporting how far it got.
+			ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+			defer cancel()
+			var got int
+			for {
+				ev, err := s.Recv(ctx)
+				if err != nil {
+					t.Fatalf("stalled after %d of %d bytes with InitialWindowSize=%d: %v — "+
+						"the peer spent its window and is waiting for a WINDOW_UPDATE that a "+
+						"refund threshold larger than the window can never send",
+						got, bodyLen, window, err)
+				}
+				if ev.Type == EventData {
+					got += len(ev.Data)
+					GetDataBufPool().Put(ev.DataSlab)
+				}
+				if ev.EndStream {
+					break
+				}
+			}
+			if got != bodyLen {
+				t.Errorf("received %d of %d bytes with InitialWindowSize=%d; the peer is waiting for a "+
+					"WINDOW_UPDATE that a refund threshold larger than the window can never send",
+					got, bodyLen, window)
+			}
+		})
+	}
+}
+
+func windowName(w uint32) string {
+	switch w {
+	case 65535:
+		return "default_65535"
+	case 32768:
+		return "at_threshold_32768"
+	default:
+		return "below_threshold"
+	}
+}
+
+func getHeaders() []hpack.HeaderField {
+	return []hpack.HeaderField{
+		{Name: []byte(":method"), Value: []byte("GET")},
+		{Name: []byte(":scheme"), Value: []byte("https")},
+		{Name: []byte(":authority"), Value: []byte("example.com")},
+		{Name: []byte(":path"), Value: []byte("/")},
+	}
+}
