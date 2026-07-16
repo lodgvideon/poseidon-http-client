@@ -441,9 +441,10 @@ func TestConformance_RFC7540_Sec66_PushRegistryBoundedByOurMaxStreams(t *testing
 
 // TestConformance_RFC7540_Sec66_IllegalPromisedIDIsProtocolError pins RFC 7540
 // §6.6: "A receiver MUST treat the receipt of a PUSH_PROMISE that promises an
-// illegal stream identifier (Section 5.1.1) (that is, an identifier for a
-// stream that is not currently in the 'idle' state) as a connection error of
-// type PROTOCOL_ERROR."
+// illegal stream identifier (Section 5.1.1) as a connection error (Section
+// 5.4.1) of type PROTOCOL_ERROR." The section goes on to define the term:
+// "Note that an illegal stream identifier is an identifier for a stream that
+// is not currently in the \"idle\" state."
 //
 // §5.1.1 makes server-initiated ids even and non-zero, and requires a new id to
 // exceed every id the sender has already opened or reserved. Nothing before

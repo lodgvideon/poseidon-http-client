@@ -422,8 +422,9 @@ func (h *connHandler) OnPushPromise(fh frame.FrameHeader, promisedStreamID uint3
 		if errors.Is(err, ErrPushRefused) {
 			// §6.6: "Recipients of PUSH_PROMISE frames can choose to reject
 			// promised streams by returning a RST_STREAM referencing the
-			// promised stream identifier back to the sender." A stream-level
-			// refusal — the connection and the parent stream both survive.
+			// promised stream identifier back to the sender of the
+			// PUSH_PROMISE." A stream-level refusal — the connection and the
+			// parent stream both survive.
 			_ = h.streams.rstStream(promisedStreamID, frame.ErrCodeRefusedStream)
 			return nil
 		}

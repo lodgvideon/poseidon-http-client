@@ -159,8 +159,9 @@ func TestConformance_RFC2616_Sec6_1_HTTP10StatusLineParsed(t *testing.T) {
 }
 
 // TestConformance_RFC2616_Sec10_3_5_304NoBody verifies that a 304 Not Modified
-// response has no body regardless of any Content-Length header (RFC 2616
-// §10.3.5: "The response MUST NOT include a message-body").
+// response has no body regardless of any Content-Length header — RFC 2616
+// §10.3.5: "The 304 response MUST NOT contain a message-body, and thus is
+// always terminated by the first empty line after the header fields."
 func TestConformance_RFC2616_Sec10_3_5_304NoBody(t *testing.T) {
 	t.Parallel()
 	// Server mistakenly includes Content-Length; client must not try to read body.
