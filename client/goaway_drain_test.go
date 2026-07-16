@@ -24,9 +24,13 @@ type goAwayDrainMode struct {
 }
 
 // TestConformance_RFC7540_Sec6_8_PoolDrainsInflightOnGoAway pins the pool half
-// of RFC 7540 §6.8: "Endpoints MUST NOT initiate new streams on the connection
-// after receiving a GOAWAY frame... streams with an identifier at or below the
-// last stream identifier are allowed to complete."
+// of RFC 7540 §6.8. The GOAWAY carries a last-stream-id; the sender "will ignore
+// frames sent on streams initiated by the receiver if the stream has an
+// identifier higher than the included last stream identifier", and "Receivers of
+// a GOAWAY frame MUST NOT open additional streams on the connection". By the
+// contrapositive of the first clause, streams at or below that id are the ones
+// the sender still processes — so the pool must let them complete rather than
+// close the connection out from under them.
 //
 // A real net/http2 server's graceful Shutdown sends GOAWAY(maxClientStreamID)
 // and — for a NO_ERROR GOAWAY — does not arm its own shutdown timer until every
