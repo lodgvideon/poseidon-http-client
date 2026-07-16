@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net"
 	"strconv"
 	"strings"
@@ -42,6 +43,30 @@ var ErrResponseTooLarge = errors.New("http1: response exceeds client buffering l
 // validated in full before the first byte leaves. A half-written poisoned
 // request would be exactly the split being prevented.
 var ErrInvalidRequest = errors.New("http1: invalid request")
+
+// ErrInvalidContentLength reports that the response carried a Content-Length
+// this client will not frame a body with: a value that is not RFC 9110 §8.6's
+// ABNF `Content-Length = 1*DIGIT`, a value that overflows int64, or several
+// Content-Length values that disagree.
+//
+// RFC 9112 §6.3 rule 5 makes this unrecoverable rather than ignorable — "If a
+// message is received without Transfer-Encoding and with an invalid
+// Content-Length header field, then the message framing is invalid and the
+// recipient MUST treat it as an unrecoverable error ... If it is in a response
+// message received by a user agent, the user agent MUST close the connection to
+// the server and discard the received response." Disagreeing values are the
+// same case and not a separate one: RFC 9110 §5.3 lets a recipient combine
+// repeated field lines into one comma-separated value, so "Content-Length: 5"
+// followed by "Content-Length: 10" is "Content-Length: 5, 10", which is not
+// 1*DIGIT.
+//
+// Picking a winner instead of rejecting is the CL.CL request-smuggling desync
+// (RFC 9112 §11.2): the bytes the losing value would have covered stay unread
+// on the socket, and a pooled connection then begins its next response
+// mid-stream — parsing peer-chosen body bytes as a status line. The connection
+// is therefore always left un-poolable when this is returned, matching the other
+// paths here whose stream position is indeterminate.
+var ErrInvalidContentLength = errors.New("http1: invalid Content-Length")
 
 const (
 	// readBufSize is the bufio.Reader buffer and therefore, by construction,
@@ -146,6 +171,16 @@ type Exchange struct {
 	statusCode  int
 	keepAlive   bool
 	respChunked bool
+	// clSeen, clValue and clErr accumulate the Content-Length decision across
+	// the header block instead of committing to it line by line. RFC 9112 §6.3
+	// rule 5 only makes an invalid Content-Length fatal "without
+	// Transfer-Encoding", and rule 3 lets Transfer-Encoding override it — but
+	// either header may arrive first, so neither question can be answered until
+	// the blank line. Resolving early is what would make the verdict depend on
+	// the order the server chose to send its headers in.
+	clSeen         bool  // a Content-Length field was present
+	clValue        int64 // its value, when clSeen && clErr == nil
+	clErr          error // first Content-Length defect seen, if any
 	// respTE and respCL record mere presence of Transfer-Encoding and
 	// Content-Length in the response head, independent of their values and of
 	// the order they arrived in. RFC 9112 §6.3 rule 3 keys on both being
@@ -563,6 +598,149 @@ func asciiLowerHeaderName(s string) string {
 	return string(b)
 }
 
+// parseDecimalOctets parses one RFC 9110 §8.6 `1*DIGIT` field value, reporting
+// !ok for anything else.
+//
+// It exists because strconv.ParseInt is a superset of that ABNF in exactly the
+// direction that matters: ParseInt accepts a leading sign, so "+5" would be
+// taken as 5 (a value the spec says is invalid framing) and "-5" as -5, which
+// then silently fails the contentLen >= 0 test in ReadBodyChunk and degrades the
+// response to read-until-close. Both are peer-chosen framing this client must
+// refuse, not reinterpret.
+//
+// The accumulator is checked before each multiply rather than after, so a
+// numeral longer than int64 is rejected instead of wrapping — RFC 9110 §8.6:
+// "a recipient MUST anticipate potentially large decimal numerals and prevent
+// parsing errors due to integer conversion overflows".
+func parseDecimalOctets(s string) (int64, bool) {
+	if len(s) == 0 {
+		return 0, false
+	}
+	var n int64
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if c < '0' || c > '9' {
+			return 0, false
+		}
+		d := int64(c - '0')
+		if n > (math.MaxInt64-d)/10 {
+			return 0, false
+		}
+		n = n*10 + d
+	}
+	return n, true
+}
+
+// parseContentLength parses one Content-Length field value, which is normally a
+// bare 1*DIGIT but is also allowed to be a comma-separated list whose values are
+// all valid and all identical — RFC 9112 §6.3 rule 5 makes that list the one
+// exception to "invalid Content-Length is unrecoverable", to be "processed with
+// that single value used as the Content-Length field value". It arises when an
+// upstream processor combines duplicate fields per RFC 9110 §5.3, so refusing it
+// would break responses that are merely relayed, not hostile.
+//
+// A list whose values differ ("5, 10") is not the exception and is rejected: it
+// is the CL.CL desync with the duplication already folded into one line.
+func parseContentLength(value string) (int64, bool) {
+	var first int64
+	seen := false
+	for {
+		part := value
+		comma := strings.IndexByte(value, ',')
+		if comma >= 0 {
+			part = value[:comma]
+		}
+		n, ok := parseDecimalOctets(strings.Trim(part, " \t"))
+		if !ok {
+			return 0, false
+		}
+		if !seen {
+			first, seen = n, true
+		} else if n != first {
+			return 0, false
+		}
+		if comma < 0 {
+			return first, true
+		}
+		value = value[comma+1:]
+	}
+}
+
+// noteContentLength records one Content-Length field line. The verdict is
+// deferred to resolveContentLength; see the clErr field comment.
+//
+// The first defect is the one kept: later lines cannot clear it, and a response
+// with several bad Content-Length lines is no more or less unrecoverable than
+// one with a single bad line.
+func (ex *Exchange) noteContentLength(value string) {
+	if ex.clErr != nil {
+		return
+	}
+	n, ok := parseContentLength(value)
+	if !ok {
+		ex.clErr = fmt.Errorf("http1: Content-Length %q is not 1*DIGIT: %w",
+			truncateForError(value), ErrInvalidContentLength)
+		return
+	}
+	if ex.clSeen && n != ex.clValue {
+		// Two field lines that disagree. Per RFC 9110 §5.3 this is the same
+		// message as a single "Content-Length: a, b" line, and rule 5 rejects it
+		// for the same reason.
+		ex.clErr = fmt.Errorf("http1: conflicting Content-Length %d and %d: %w",
+			ex.clValue, n, ErrInvalidContentLength)
+		return
+	}
+	ex.clSeen, ex.clValue = true, n
+}
+
+// resolveContentLength applies the deferred Content-Length verdict once the
+// whole header block has been read, and is the only place ex.contentLen is set
+// from a Content-Length field.
+//
+// The respTE gate is RFC 9112 §6.3 rules 3 and 5 acting together: rule 3 says
+// Transfer-Encoding overrides Content-Length, and rule 5's fatal case is scoped
+// to a message "received without Transfer-Encoding". So whenever the field is
+// PRESENT the Content-Length is not consulted at all — not even to reject it —
+// because it no longer decides anything about where this response ends.
+//
+// The gate is presence of the field, not chunked framing. Those coincide only
+// while a substring match makes respChunked true for every Transfer-Encoding
+// carrying "chunked" anywhere. Once the final-coding parse lands, "TE: gzip"
+// leaves respChunked false while the field is still present, and gating on
+// respChunked would let a Content-Length re-frame a body that rule 4 says must
+// be read until the server closes — which is the TE.CL desync this file exists
+// to close.
+func (ex *Exchange) resolveContentLength() error {
+	if ex.respTE {
+		return nil
+	}
+	if ex.clErr != nil {
+		// Rule 5: "the user agent MUST close the connection to the server and
+		// discard the received response." The error discards it; keepAlive=false
+		// is what closes the connection rather than pooling it, since the body
+		// boundary this response claimed cannot be believed and the stream
+		// position is therefore indeterminate.
+		ex.keepAlive = false
+		return ex.clErr
+	}
+	if ex.clSeen {
+		ex.contentLen = ex.clValue
+	}
+	return nil
+}
+
+// truncateForError bounds a peer-controlled value spliced into an error string.
+// A header line may be up to readBufSize (16 KiB) and an error tends to be
+// logged, so the full value is not worth carrying; the head of it is enough to
+// identify the offender.
+func truncateForError(s string) string {
+	const max = 64
+	if len(s) <= max {
+		return s
+	}
+	return s[:max] + "..."
+}
+
 // lastTransferCoding returns the final transfer-coding token of one
 // Transfer-Encoding field value, lowercased, or "" when the list is empty.
 //
@@ -609,7 +787,13 @@ func (ex *Exchange) consumeHeaders(out *[]hpack.HeaderField, parseBody bool) err
 			return err
 		}
 		if line == "" {
-			return nil // blank line = end of headers
+			// Blank line = end of headers. The Content-Length verdict can only
+			// be reached here, once it is known whether a Transfer-Encoding
+			// also arrived.
+			if parseBody {
+				return ex.resolveContentLength()
+			}
+			return nil
 		}
 
 		// Charge the line before parsing it, so that lines skipped as
@@ -633,15 +817,7 @@ func (ex *Exchange) consumeHeaders(out *[]hpack.HeaderField, parseBody bool) err
 			switch name {
 			case "content-length":
 				ex.respCL = true
-				// RFC 9112 §6.3 rule 6: a *valid* Content-Length with no
-				// Transfer-Encoding defines the body length. The !respTE guard
-				// is rule 3 seen from the other header order — Content-Length
-				// may legally arrive after Transfer-Encoding, and it must not
-				// reinstate length framing that the Transfer-Encoding branch
-				// already overrode.
-				if n, perr := strconv.ParseInt(value, 10, 64); perr == nil && !ex.respTE && ex.contentLen < 0 {
-					ex.contentLen = n
-				}
+				ex.noteContentLength(value)
 			case "transfer-encoding":
 				ex.respTE = true
 				// RFC 9112 §7: the field value is an ordered, comma-separated
