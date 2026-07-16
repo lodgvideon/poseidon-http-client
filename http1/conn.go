@@ -69,8 +69,10 @@ var ErrInvalidRequest = errors.New("http1: invalid request")
 var ErrInvalidContentLength = errors.New("http1: invalid Content-Length")
 
 // ErrInvalidHeaderBlock reports that a response header or trailer block could
-// not be interpreted as a sequence of field lines — currently, an obs-fold
-// continuation (RFC 9112 §5.2) arriving with no field line to continue.
+// not be interpreted as a well-formed sequence of field lines: an obs-fold
+// continuation (RFC 9112 §5.2) with no field line to continue, or a field whose
+// name is not a token or whose value carries CR, LF or NUL (RFC 9110 §5.6.2,
+// §5.5).
 //
 // The connection is always left un-poolable when this is returned. A block whose
 // structure is not understood cannot be trusted to have ended where this client
@@ -1168,6 +1170,22 @@ func (ex *Exchange) commitHeaderLine(line string, have bool, out *[]hpack.Header
 		}
 		name := asciiLowerHeaderName(strings.TrimSpace(line[:colon]))
 		value := strings.TrimSpace(line[colon+1:])
+
+		// A response field must be a token name with a value free of CR, LF and
+		// NUL (RFC 9110 §5.6.2, §5.5). This mirrors what WriteRequest enforces on
+		// the SEND side and what conn/http3 enforce on their receive sides — http1
+		// validated outgoing request fields but handed an incoming response field
+		// to the caller verbatim, so a NUL or a bare CR the server put in a value
+		// reached whatever copied it into an HTTP/1.1 message, a log, or a header
+		// of its own. §5.5: a recipient of such a byte "MUST either reject the
+		// message or replace each of those characters with SP". We reject and
+		// condemn the connection: the block is not a well-formed field sequence,
+		// so the stream position cannot be trusted.
+		if !validToken(name) || !validFieldValue([]byte(value)) {
+			ex.keepAlive = false
+			return fmt.Errorf("http1: response header %q has an invalid name or a value "+
+				"containing CR, LF or NUL: %w", truncateForError(name), ErrInvalidHeaderBlock)
+		}
 
 		if parseBody {
 			switch name {
