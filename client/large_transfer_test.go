@@ -52,10 +52,16 @@ const (
 	// i.e. how many bytes the peer may have in flight to us on one stream
 	// before it must wait for a WINDOW_UPDATE.
 	//
-	// It must stay >= conn's recvWindowRefundThreshold (32768, conn/conn.go:488)
-	// or the download deadlocks: onDataReceived only emits a stream
-	// WINDOW_UPDATE once recvRefundPending crosses that threshold, so a smaller
-	// advertised window is exhausted before any refund is ever sent.
+	// 65535 is the RFC 7540 §6.5.2 default, chosen here because this test is
+	// about retention rather than flow control and the default keeps it off the
+	// interesting paths.
+	//
+	// A smaller window would work too. This comment used to say it must stay
+	// >= conn's recvWindowRefundThreshold or the download deadlocks — true when
+	// written, and fixed since: streamRefundThreshold (conn/conn.go) scales the
+	// refund threshold down to half the window when the window is smaller, so a
+	// refund is always reachable. conn's TestConn_SmallAdvertisedWindow_StillCompletes
+	// pins exactly that, down to a 1024-byte window.
 	ltStreamWindow = 65535
 
 	// ltPipelineBytes is the most DATA the H2 receive pipeline can hold at once:
