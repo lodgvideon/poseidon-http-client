@@ -138,21 +138,60 @@ func TestConformance_RFC9112_Sec5_2_ObsFoldWithNoPrecedingField(t *testing.T) {
 }
 
 // TestConformance_RFC9112_Sec5_2_ObsFoldInTrailerSection covers the other block
-// that consumeHeaders parses. A trailer section is a header block, so the same
-// unfolding applies — and a smuggled trailer is the same primitive one layer
-// down.
+// consumeHeaders parses.
+//
+// A folded trailer CANNOT smuggle, and the reason is worth stating because it is
+// not obvious: the trailer section is read with consumeHeaders(nil, false), so
+// parseBody is false and out is nil. A Content-Length spliced in there reaches
+// neither the framing switch nor the caller. The first version of this test
+// claimed to pin trailer smuggling and PASSED with the obs-fold bug fully
+// restored — it could not fail, because there was nothing there to fail.
+//
+// What IS reachable: a trailer section opening with a fold has no field line to
+// continue, so it is refused — and #257 makes any non-EOF trailer error condemn
+// the connection. Both halves are asserted; either alone is a silent desync.
 func TestConformance_RFC9112_Sec5_2_ObsFoldInTrailerSection(t *testing.T) {
-	ex := wireExchange(t, "GET",
-		"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n"+
-			"5\r\nhello\r\n0\r\nX-Trailer: a\r\n\tContent-Length: 99\r\n\r\n")
-	if _, _, err := ex.ReadResponse(context.Background()); err != nil {
-		t.Fatalf("ReadResponse: %v", err)
-	}
-	if body := drainBody(t, ex); body != "hello" {
-		t.Errorf("body = %q, want %q", body, "hello")
-	}
-	if !ex.KeepAlive() {
-		t.Error("KeepAlive() = false — a well-formed chunked response with a folded " +
-			"trailer is reusable; over-condemning it would cost a connection per response")
-	}
+	t.Run("fold_with_no_preceding_trailer_is_refused", func(t *testing.T) {
+		ex := wireExchange(t, "GET",
+			"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n"+
+				"5\r\nhello\r\n0\r\n Content-Length: 99\r\n\r\n")
+		if _, _, err := ex.ReadResponse(context.Background()); err != nil {
+			t.Fatalf("ReadResponse: %v", err)
+		}
+		buf := make([]byte, 64)
+		var err error
+		for {
+			_, done, e := ex.ReadBodyChunk(buf)
+			err = e
+			if e != nil || done {
+				break
+			}
+		}
+		if !errors.Is(err, http1.ErrInvalidHeaderBlock) {
+			t.Errorf("error = %v, want it to wrap ErrInvalidHeaderBlock — a trailer "+
+				"section opening with a fold has no field line to continue", err)
+		}
+		if ex.KeepAlive() {
+			t.Error("KeepAlive() = true after an uninterpretable trailer section, want false")
+		}
+	})
+
+	t.Run("well_formed_folded_trailer_stays_poolable", func(t *testing.T) {
+		// The over-rejection guard. Since #257 condemns the conn on any non-EOF
+		// trailer error, an unfolding that errored here would silently halve pool
+		// reuse for every server that folds a trailer.
+		ex := wireExchange(t, "GET",
+			"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n"+
+				"5\r\nhello\r\n0\r\nX-Trailer: a\r\n\tcontinued\r\n\r\n")
+		if _, _, err := ex.ReadResponse(context.Background()); err != nil {
+			t.Fatalf("ReadResponse: %v", err)
+		}
+		if body := drainBody(t, ex); body != "hello" {
+			t.Errorf("body = %q, want %q", body, "hello")
+		}
+		if !ex.KeepAlive() {
+			t.Error("KeepAlive() = false — a well-formed chunked response with a folded " +
+				"trailer is reusable; over-condemning it costs a connection per response")
+		}
+	})
 }
