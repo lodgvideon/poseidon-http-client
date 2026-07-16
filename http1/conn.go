@@ -515,8 +515,25 @@ func (ex *Exchange) readLine(what string) (string, error) {
 // Returns the response headers as []hpack.HeaderField. The first element is
 // always the ":status" pseudo-header for compatibility with the client layer.
 func (ex *Exchange) ReadResponse(ctx context.Context) (statusCode int, headers []hpack.HeaderField, err error) {
+	// Install this exchange's read deadline unconditionally — a deadline when
+	// ctx has one, the zero value when it does not.
+	//
+	// The write path installs its deadline and clears it with a defer, because
+	// writing is over when WriteRequest returns. Reading is not: ReadBodyChunk
+	// runs after this function returns and must stay under the same deadline, so
+	// there is nothing here to defer to. That left the deadline installed on the
+	// socket after the exchange, and the connection is pooled — so the NEXT
+	// request inherited the PREVIOUS one's deadline and failed with i/o timeout
+	// at an instant that had nothing to do with it, even with no deadline of its
+	// own.
+	//
+	// Setting it on every entry rather than clearing it on every exit is what
+	// makes that unrepresentable: an exchange's read deadline is exactly its own
+	// ctx's, and no exit path has to remember anything.
 	if dl, ok := ctx.Deadline(); ok {
 		_ = ex.c.nc.SetReadDeadline(dl)
+	} else {
+		_ = ex.c.nc.SetReadDeadline(time.Time{})
 	}
 
 	var proto string
@@ -1082,13 +1099,31 @@ func (ex *Exchange) readChunkedChunk(buf []byte) (n int, done bool, err error) {
 			// Terminal chunk. Consume optional trailers, bounded exactly as the
 			// header block is — a trailer section is a header block, and a
 			// server can stream one forever just as easily.
-			//
-			// Any other error (typically EOF from a server that closes straight
-			// after the terminal chunk) stays tolerated as it was before: the
-			// body is already complete, so the response is good even when the
-			// trailers are not.
-			if terr := ex.consumeHeaders(nil, false); terr != nil && errors.Is(terr, ErrResponseTooLarge) {
-				return 0, false, terr
+			if terr := ex.consumeHeaders(nil, false); terr != nil {
+				if errors.Is(terr, io.EOF) || errors.Is(terr, io.ErrUnexpectedEOF) {
+					// The server closed straight after the terminal chunk. The
+					// body is already complete, so the response is good even
+					// though the trailer section never arrived — but the socket
+					// is gone, so it must not be pooled.
+					ex.keepAlive = false
+				} else {
+					// Anything else — a read deadline, a too-large block, a
+					// malformed fold — means the trailer section is
+					// unterminated, so the stream position is indeterminate and
+					// the response cannot be called complete.
+					//
+					// This used to tolerate EVERY error except ErrResponseTooLarge
+					// and report done=true, err=nil. A stalled trailer section
+					// therefore swallowed the caller's deadline whole and left
+					// KeepAlive() true with the server's next bytes unread: the
+					// pool handed that socket to the next request, which parsed
+					// them as its status line. The comment justifying the
+					// tolerance said "typically EOF" — and for EOF it was sound,
+					// because a dead socket merely fails on next use. The
+					// predicate was "any error"; a deadline is not EOF.
+					ex.keepAlive = false
+					return 0, false, terr
+				}
 			}
 			ex.chunkFinal = true
 			return 0, true, nil
