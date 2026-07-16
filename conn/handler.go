@@ -173,6 +173,8 @@ func (h *connHandler) OnData(fh frame.FrameHeader, p []byte, _ uint8) error {
 	if err := h.streams.onDataReceived(s, fh.Length); err != nil {
 		return err
 	}
+	// Count every DATA payload byte for the END_STREAM Content-Length check.
+	s.bodyLen += int64(len(p))
 	end := fh.Flags&frame.FlagDataEndStream != 0
 	// Pooled copy of the framer's reused read buffer; ownership transfers to the
 	// client via StreamEvent.DataSlab, returned to dataBufPool once Data is
@@ -180,6 +182,14 @@ func (h *connHandler) OnData(fh frame.FrameHeader, p []byte, _ uint8) error {
 	bufPtr := dataBufPool.Get().(*[]byte)
 	*bufPtr = append((*bufPtr)[:0], p...)
 	if end {
+		// Validate before ending the stream: on a Content-Length mismatch the
+		// caller must see a reset, not this frame delivered as a clean
+		// completion. Returning the StreamError here routes to the reader loop's
+		// non-fatal path, which pushes EventReset and RSTs just this stream.
+		if cerr := h.checkContentLength(s); cerr != nil {
+			dataBufPool.Put(bufPtr)
+			return cerr
+		}
 		s.markRemoteEnd()
 		h.streams.markStreamDone(fh.StreamID)
 	}
@@ -289,7 +299,53 @@ func (h *connHandler) classifyHeaderBlock(s *Stream, endStream bool) (StreamEven
 		return EventInterimHeaders, nil
 	}
 	s.headersReceived = true
+	// Capture the final response's status and Content-Length declaration for the
+	// END_STREAM check. Only the final block declares the body's length; a 1xx or
+	// a trailer block does not, and both are handled above.
+	s.respStatus = numericStatus(h.scratch)
+	s.clDeclared, s.clPresent, s.clValid = responseContentLength(h.scratch)
 	return EventHeaders, nil
+}
+
+// statusOf returns the numeric :status of a decoded response block, or 0 when it
+// is absent or malformed. classifyHeaderBlock rejects a block with no valid
+// status downstream; 0 here simply means "not a content-bearing status", which
+// is the safe default for the Content-Length check.
+func numericStatus(fields []hpack.HeaderField) int {
+	for i := range fields {
+		if string(fields[i].Name) != ":status" {
+			continue
+		}
+		n, ok := parseDecimalDigits(fields[i].Value)
+		if !ok || n > 599 {
+			return 0
+		}
+		return int(n)
+	}
+	return 0
+}
+
+// checkContentLength enforces RFC 7540 §8.1.2.6's Content-Length rule once the
+// whole body has been observed: a content-bearing response that declared a
+// Content-Length must have it equal the DATA received, and a declared value that
+// was not 1*DIGIT (or self-contradictory across repeats) is malformed on its own.
+// Returns a stream-scoped PROTOCOL_ERROR, per "Malformed requests or responses
+// that are detected MUST be treated as a stream error ... of type
+// PROTOCOL_ERROR" — one bad response costs one stream, not the connection.
+func (h *connHandler) checkContentLength(s *Stream) error {
+	if !s.clPresent {
+		return nil
+	}
+	s.mu.Lock()
+	isHead := s.reqIsHead
+	s.mu.Unlock()
+	if !statusCanHaveContent(s.respStatus, isHead) {
+		return nil
+	}
+	if !s.clValid || s.clDeclared != s.bodyLen {
+		return &StreamError{StreamID: s.id, Code: frame.ErrCodeProtocolError}
+	}
+	return nil
 }
 
 func (h *connHandler) emitHeaderBlock(s *Stream, hb []byte, endStream bool) error {
@@ -314,6 +370,11 @@ func (h *connHandler) emitHeaderBlock(s *Stream, hb []byte, endStream bool) erro
 		return cerr
 	}
 	if endStream {
+		// An empty-body final response: bodyLen is 0, so a declared non-zero
+		// Content-Length on a content-bearing status is a mismatch caught here.
+		if cerr := h.checkContentLength(s); cerr != nil {
+			return cerr
+		}
 		s.markRemoteEnd()
 		h.streams.markStreamDone(s.id)
 	}

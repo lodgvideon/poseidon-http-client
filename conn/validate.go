@@ -1,5 +1,7 @@
 package conn
 
+import "github.com/lodgvideon/poseidon-http-client/hpack"
+
 // Validation of decoded response fields.
 //
 // This mirrors http3/validate.go deliberately, rule for rule. HTTP/2 and HTTP/3
@@ -100,4 +102,65 @@ func forbiddenResponseField(name []byte) bool {
 		return true
 	}
 	return false
+}
+
+// responseContentLength extracts the response's Content-Length from decoded
+// fields: its value, whether it was present, and whether it is valid. A value
+// that is not a non-negative run of ASCII digits, or repeated values that
+// disagree, make it present-but-invalid — RFC 9110 §8.6 defines it as 1*DIGIT,
+// and a self-contradictory declaration cannot be believed. Mirrors
+// http3/response.go's function of the same shape.
+func responseContentLength(fields []hpack.HeaderField) (n int64, present, valid bool) {
+	for i := range fields {
+		if string(fields[i].Name) != "content-length" {
+			continue
+		}
+		v, ok := parseDecimalDigits(fields[i].Value)
+		if !ok || (present && v != n) {
+			return 0, true, false
+		}
+		n, present = v, true
+	}
+	return n, present, present
+}
+
+// parseDecimalDigits parses a non-empty run of ASCII digits into a non-negative
+// int64, rejecting a leading sign, empty input, and any overflow of int64. The
+// accumulator is checked before each multiply so a long numeral is refused
+// rather than wrapped (RFC 9110 §8.6: "a recipient MUST anticipate potentially
+// large decimal numerals and prevent parsing errors due to integer conversion
+// overflows").
+func parseDecimalDigits(b []byte) (int64, bool) {
+	if len(b) == 0 {
+		return 0, false
+	}
+	var n int64
+	for _, c := range b {
+		if c < '0' || c > '9' {
+			return 0, false
+		}
+		d := int64(c - '0')
+		if n > (maxInt64-d)/10 {
+			return 0, false
+		}
+		n = n*10 + d
+	}
+	return n, true
+}
+
+// maxInt64 is the int64 ceiling, spelled out to keep parseDecimalDigits free of
+// a math import.
+const maxInt64 = int64(^uint64(0) >> 1)
+
+// statusCanHaveContent reports whether a response with this status and request
+// method is defined to carry content. RFC 7540 §8.1.2.6 exempts exactly these
+// from the Content-Length-equals-DATA check: "A response that is defined to have
+// no payload ... can have a non-zero content-length header field, even though no
+// content is included in DATA frames." A HEAD response never has content
+// (RFC 9110 §9.3.2); 204 and 304 never do.
+func statusCanHaveContent(status int, reqIsHead bool) bool {
+	if reqIsHead {
+		return false
+	}
+	return status != 204 && status != 304
 }

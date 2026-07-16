@@ -122,6 +122,26 @@ type Stream struct {
 	// discipline as headersReceived.
 	interimCount int
 
+	// bodyLen, respStatus and the cl* fields validate the final response's
+	// declared Content-Length against the DATA actually received, at END_STREAM
+	// (RFC 7540 §8.1.2.6: "A request or response is also malformed if the value
+	// of a content-length header field does not equal the sum of the DATA frame
+	// payload lengths that form the body"). clValid is false when the value is
+	// not 1*DIGIT or repeated values disagree; clPresent records that a
+	// Content-Length was on the final response at all. All reader-goroutine-only,
+	// like headersReceived.
+	bodyLen    int64
+	respStatus int
+	clDeclared int64
+	clPresent  bool
+	clValid    bool
+
+	// reqIsHead records that this stream's request method is HEAD, whose response
+	// is defined to carry no content whatever its Content-Length says (RFC 9110
+	// §9.3.2). Written under mu by the caller's SendHeaders goroutine before any
+	// response frame can arrive; read under mu at the Content-Length check.
+	reqIsHead bool
+
 	// recvWindow is the number of payload bytes the peer can still
 	// send to *this* stream before we must refill it via WINDOW_UPDATE
 	// (RFC 7540 §6.9.1). Initialized from our advertised
@@ -209,6 +229,16 @@ func recycleStream(pool *sync.Pool, s *Stream) {
 	s.pushed = false
 	s.headersReceived = false
 	s.interimCount = 0
+	// The Content-Length check's per-response state, reset so a pooled Stream
+	// starts each request clean. Missing these leaked a previous response's
+	// bodyLen into the next (caught by TestDoStream_WaitTrailers_Reuse: declared
+	// 4, bodyLen 8 on the second iteration of a reused connection).
+	s.bodyLen = 0
+	s.respStatus = 0
+	s.clDeclared = 0
+	s.clPresent = false
+	s.clValid = false
+	s.reqIsHead = false
 	s.recvRefundPending = 0
 	s.sendWindow = 0
 	s.resetSignal = make(chan struct{})
@@ -297,6 +327,16 @@ func (s *Stream) SendHeadersWithPriority(ctx context.Context, fields []hpack.Hea
 	if s.closed || s.localEnded {
 		s.mu.Unlock()
 		return ErrStreamClosed
+	}
+	// Record whether this request is a HEAD, for the response's Content-Length
+	// check: a HEAD response is defined to carry no content whatever it declares
+	// (RFC 9110 §9.3.2). Written here under mu, before any response can arrive, so
+	// the reader goroutine reads a stable value at END_STREAM.
+	for i := range fields {
+		if string(fields[i].Name) == ":method" {
+			s.reqIsHead = string(fields[i].Value) == "HEAD"
+			break
+		}
 	}
 	s.mu.Unlock()
 	if err := s.w.writeHeadersWithPriority(ctx, s, fields, endStream, prio); err != nil {
