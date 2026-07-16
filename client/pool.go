@@ -278,12 +278,20 @@ func (p *Pool) handleAcquire(rs *runState, req acquireReq) {
 	rs.waiters = append(rs.waiters, req)
 }
 
-// handleRelease decrements the conn's active count and evicts it
-// if the underlying connection is no longer alive.
+// handleRelease decrements the conn's active count and evicts it once the
+// underlying connection is no longer alive AND the stream just released was its
+// last. This is the pool's only eviction site for a conn still carrying
+// traffic — evictDead and evictDeadSilent both defer to it — so it is where a
+// GOAWAY'd conn is finally reaped, after RFC 7540 §6.8's drain.
+//
+// The active==0 guard is also what makes GoAwaysReceived a count of conns
+// rather than of streams: without it every release on a GOAWAY'd conn
+// incremented, so one GOAWAY on a conn with 4 draining streams counted 4 —
+// while its sibling ConnsClosed, fired from evict, counted 1.
 func (p *Pool) handleRelease(rs *runState, msg releaseMsg) {
 	msg.mc.active--
 	msg.mc.lastUsed = time.Now()
-	if !msg.mc.c.IsAlive() {
+	if !msg.mc.c.IsAlive() && msg.mc.active == 0 {
 		reason := CloseDead
 		if msg.mc.c.GoAwayReceived() {
 			reason = CloseGoAway
@@ -529,11 +537,25 @@ func (p *Pool) evictIdle(conns []*managedConn) []*managedConn {
 	return out
 }
 
-// evictDead removes conns whose IsAlive returns false.
+// evictDead removes conns whose IsAlive returns false AND that have no
+// in-flight streams, mirroring evictIdle's active==0 guard.
+//
+// The guard is load-bearing, not tidiness. IsAlive() is false the moment a
+// GOAWAY lands, but RFC 7540 §6.8 says streams at or below the GOAWAY's
+// lastStreamID MUST be allowed to complete — the peer is still processing them
+// and holds the conn open for exactly them. Closing here tears the transport
+// down under those streams and surfaces them to the caller as
+// RST(INTERNAL_ERROR), turning a graceful server drain into failed requests.
+//
+// A conn that is dead rather than draining loses nothing by waiting: its reader
+// is gone and shutdownStreams has already reset every stream on it, so each
+// release arrives promptly and handleRelease evicts. Either way pickLeastLoaded
+// skips it (not IsAlive) and countLive excludes it, so while it lingers it can
+// neither take new streams nor block a redial.
 func (p *Pool) evictDead(conns []*managedConn) []*managedConn {
 	out := conns[:0]
 	for _, mc := range conns {
-		if !mc.c.IsAlive() {
+		if !mc.c.IsAlive() && mc.active == 0 {
 			reason := CloseDead
 			if mc.c.GoAwayReceived() {
 				reason = CloseGoAway
@@ -548,13 +570,20 @@ func (p *Pool) evictDead(conns []*managedConn) []*managedConn {
 	return out
 }
 
-// evictDeadSilent removes conns whose IsAlive returns false without firing
-// hooks or updating counters. Used from the Stats path where eviction is
-// purely a bookkeeping cleanup, not a lifecycle event.
+// evictDeadSilent removes conns whose IsAlive returns false and that have no
+// in-flight streams, without firing hooks or updating counters. Used from the
+// Stats path where eviction is purely a bookkeeping cleanup, not a lifecycle
+// event.
+//
+// Carries evictDead's active==0 guard for the same §6.8 reason, and needs it
+// more: Stats() is reachable from the public Client.PoolStats(), so without the
+// guard a metrics scrape that happened to land during a peer's graceful drain
+// would close the conn out from under its own in-flight requests. Observability
+// must not be able to fail a request.
 func (p *Pool) evictDeadSilent(conns []*managedConn) []*managedConn {
 	out := conns[:0]
 	for _, mc := range conns {
-		if !mc.c.IsAlive() {
+		if !mc.c.IsAlive() && mc.active == 0 {
 			_ = mc.c.Close()
 			continue
 		}

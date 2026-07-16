@@ -487,6 +487,31 @@ const connInitialRecvWindow = 65535
 // stalls to at most that much in-flight without a window credit.
 const recvWindowRefundThreshold = 32768
 
+// streamRefundThreshold is the refund threshold for a stream whose receive
+// window is `window` bytes.
+//
+// recvWindowRefundThreshold is half of the *default* window, which is only a
+// batching choice while the window is the default. Advertise a smaller one and
+// the constant becomes a deadlock: the peer spends its whole window, we
+// accumulate fewer bytes than the threshold, and neither side ever moves —
+// a counter cannot reach a threshold larger than the window that feeds it.
+// AdvertisedSettings.InitialWindowSize is public and RFC 7540 §6.5.2 allows
+// 0..2^31-1, so every value below 32768 (including 16384, the default
+// MAX_FRAME_SIZE) hung every download.
+//
+// Keeping it at half the window preserves the original intent — one refund per
+// half window of data — at any size. The floor of 1 keeps a pathological
+// window of 1 refunding per byte rather than never.
+func streamRefundThreshold(window uint32) uint32 {
+	if half := window / 2; half < recvWindowRefundThreshold {
+		if half == 0 {
+			return 1
+		}
+		return half
+	}
+	return recvWindowRefundThreshold
+}
+
 func (c *Conn) lastClientStreamID() uint32 {
 	c.smu.Lock()
 	defer c.smu.Unlock()
@@ -892,7 +917,7 @@ func (c *Conn) onDataReceived(s *Stream, length uint32) error {
 	streamRefund := uint32(0)
 	if !streamOverrun {
 		s.recvRefundPending += length
-		if s.recvRefundPending >= recvWindowRefundThreshold {
+		if s.recvRefundPending >= streamRefundThreshold(c.opts.Settings.InitialWindowSize) {
 			streamRefund = s.recvRefundPending
 			s.recvRefundPending = 0
 			s.recvWindow += int32(streamRefund)
