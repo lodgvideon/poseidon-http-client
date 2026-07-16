@@ -80,7 +80,6 @@ func TestConformance_RFC9112_Sec7_1_ValidChunkSizeAccepted(t *testing.T) {
 	}{
 		{"single_digit", "5", "hello"},
 		{"leading_zeros", "0005", "hello"},
-		{"max_hexdig_lower", "5", "hello"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			ex := wireExchange(t, "GET",
@@ -96,24 +95,36 @@ func TestConformance_RFC9112_Sec7_1_ValidChunkSizeAccepted(t *testing.T) {
 	}
 }
 
-// TestConformance_RFC9112_Sec7_1_HexDigitsAcceptedBothCases pins that a-f and
-// A-F are both HEXDIG, using a chunk long enough that a case-folding slip shows
-// up as a wrong length rather than a parse failure.
+// TestConformance_RFC9112_Sec7_1_HexDigitsAcceptedBothCases pins the whole
+// HEXDIG range in both cases, using a chunk long enough that a mis-decoded digit
+// shows up as a wrong length rather than a parse failure.
+//
+// Each size below is chosen to exercise a boundary of the three accept ranges:
+// "a"/"A" is the low end of the letter ranges, "f"/"F" the high end — the digit
+// an off-by-one in `c <= 'f'` drops — and the mixed spellings pin that case is
+// folded per digit, not per string.
 func TestConformance_RFC9112_Sec7_1_HexDigitsAcceptedBothCases(t *testing.T) {
-	body := make([]byte, 0xab)
-	for i := range body {
-		body[i] = 'x'
-	}
-	for _, size := range []string{"ab", "AB", "aB"} {
-		t.Run(size, func(t *testing.T) {
+	for _, tc := range []struct {
+		size string
+		want int
+	}{
+		{"ab", 0xab}, {"AB", 0xab}, {"aB", 0xab}, // low end of a-f / A-F
+		{"ff", 0xff}, {"FF", 0xff}, {"fF", 0xff}, // high end — the `c <= 'f'` boundary
+		{"a0f", 0xa0f}, // digits and letters mixed, both cases of the range
+	} {
+		t.Run(tc.size, func(t *testing.T) {
+			body := make([]byte, tc.want)
+			for i := range body {
+				body[i] = 'x'
+			}
 			ex := wireExchange(t, "GET",
 				"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n"+
-					size+"\r\n"+string(body)+"\r\n0\r\n\r\n")
+					tc.size+"\r\n"+string(body)+"\r\n0\r\n\r\n")
 			if _, _, err := ex.ReadResponse(context.Background()); err != nil {
-				t.Fatalf("ReadResponse: %v", err)
+				t.Fatalf("ReadResponse for chunk-size %q: %v", tc.size, err)
 			}
-			if got := drainBody(t, ex); len(got) != 0xab {
-				t.Errorf("read %d bytes for chunk-size %q, want %d", len(got), size, 0xab)
+			if got := drainBody(t, ex); len(got) != tc.want {
+				t.Errorf("read %d bytes for chunk-size %q, want %d", len(got), tc.size, tc.want)
 			}
 		})
 	}
