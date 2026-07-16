@@ -23,4 +23,4 @@ jobs:
           path: scripts/.rfc-cache
           key: rfc-corpus-${{ hashFiles('scripts/rfc-quote-check.py') }}
           restore-keys: rfc-corpus-
-      - run: python3 scripts/rfc-quote-check.py http1 conn http3
+      - run: python3 scripts/rfc-quote-check.py

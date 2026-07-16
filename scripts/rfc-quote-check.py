@@ -98,8 +98,30 @@ def load(num):
     return variants(text)
 
 
+def discover_dirs():
+    """Every directory in the tree that holds Go source.
+
+    The scope used to be a hand-maintained list — `http1 conn http3` — which
+    drifted: client/ was never scanned, and a fabricated RFC 7540 §6.8
+    quotation sat in it unchecked. A path list a human keeps in sync with the
+    package layout is exactly the kind of thing this whole script exists to
+    stop trusting. So the default scope is now the tree itself: any dir with a
+    .go file, minus the ones no citation should live in.
+    """
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    skip = {".git", "vendor", "testdata", "node_modules", "website"}
+    dirs = set()
+    for dirpath, dirnames, filenames in os.walk(root):
+        dirnames[:] = [d for d in dirnames if d not in skip and not d.startswith(".")]
+        if any(f.endswith(".go") for f in filenames):
+            dirs.add(os.path.relpath(dirpath, root))
+    return sorted(dirs)
+
+
 def main():
-    paths = sys.argv[1:] or ["http1", "conn", "http3"]
+    # Explicit args override discovery (handy for `... http1` while iterating);
+    # with none, scan every Go dir so the scope cannot silently drift.
+    paths = sys.argv[1:] or discover_dirs()
     try:
         corpus = {n: load(n) for n in RFCS}
     except CorpusError as e:
