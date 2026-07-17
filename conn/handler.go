@@ -477,6 +477,20 @@ func (h *connHandler) OnPushPromise(fh frame.FrameHeader, promisedStreamID uint3
 		return headerDecodeConnError(err)
 	}
 
+	// Validate the promised request fields before anything downstream sees
+	// them. A PUSH_PROMISE carries the header set of the request the server is
+	// promising to answer, and RFC 7540 §10.3 makes an invalid field name or a
+	// value carrying CR/LF/NUL malformed regardless of direction; §8.1.2.6
+	// treats a malformed block as a stream error of type PROTOCOL_ERROR. This
+	// is a stream-level refusal — the connection and the parent stream survive,
+	// like the ErrPushRefused path below — so the promised stream is reset and
+	// nothing is reserved or delivered. Done before reservePushedStream so there
+	// is no half-reserved stream to unwind on the malformed path.
+	if !validatePromisedRequestFields(h.scratch) {
+		_ = h.streams.rstStream(promisedStreamID, frame.ErrCodeProtocolError)
+		return nil
+	}
+
 	// Look up the parent stream.
 	parent := h.streams.lookupStream(fh.StreamID)
 	if parent == nil {

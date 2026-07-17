@@ -104,6 +104,59 @@ func forbiddenResponseField(name []byte) bool {
 	return false
 }
 
+// forbiddenRequestField reports whether a field is prohibited in an HTTP/2
+// REQUEST (RFC 7540 §8.1.2.2). A PUSH_PROMISE carries a *request* header set —
+// the request the server is promising to answer — so its fields are validated
+// as a request, not a response, and this deliberately diverges from
+// forbiddenResponseField on the one field where the two directions differ.
+//
+// The connection-specific fields are forbidden in both directions:
+// "any message containing connection-specific header fields MUST be treated as
+// malformed (Section 8.1.2.6)." te is the exception, and it is a request-only
+// one: "The only exception to this is the TE header field, which MAY be present
+// in an HTTP/2 request; when it is, it MUST NOT contain any value other than
+// "trailers"." So te is allowed here iff its value is exactly "trailers" —
+// where forbiddenResponseField refuses te at any value.
+func forbiddenRequestField(name, value []byte) bool {
+	switch string(name) {
+	case "connection", "keep-alive", "proxy-connection", "transfer-encoding", "upgrade":
+		return true
+	case "te":
+		return string(value) != "trailers"
+	}
+	return false
+}
+
+// validatePromisedRequestFields reports whether a decoded PUSH_PROMISE header
+// block is a well-formed HTTP/2 request field set: no field name that is not a
+// token, no field value carrying CR, LF or NUL (RFC 7540 §10.3), and no
+// connection-specific field (§8.1.2.2). It is the request-side counterpart of
+// validateResponseFields, applied on the push path so a promised header block
+// gets the same scrutiny as a normal response — OnPushPromise otherwise handed
+// the decoded fields to the caller verbatim, the exact send-validated/
+// receive-trusting asymmetry §10.3 exists to close.
+//
+// Pseudo-header names (":method", ":path", ":scheme", ":authority") lead with a
+// ':' that would fail the token check, so only their values are checked for the
+// forbidden bytes; classifyHeaderBlock does not run on this path, but the
+// promised request is a directive the caller acts on, not a response body, so
+// the field-injection bytes are what matter here.
+func validatePromisedRequestFields(fields []hpack.HeaderField) bool {
+	for i := range fields {
+		name, value := fields[i].Name, fields[i].Value
+		if len(name) > 0 && name[0] == ':' {
+			if !validFieldValue(value) {
+				return false
+			}
+			continue
+		}
+		if !validFieldName(name) || !validFieldValue(value) || forbiddenRequestField(name, value) {
+			return false
+		}
+	}
+	return true
+}
+
 // responseContentLength extracts the response's Content-Length from decoded
 // fields: its value, whether it was present, and whether it is valid. A value
 // that is not a non-negative run of ASCII digits, or repeated values that
