@@ -284,7 +284,7 @@ func (c *Client) readControl() error {
 	}
 	for {
 		typ, payload, err := c.controlReader.ReadFrame()
-		if err == ErrH3FrameTooLarge {
+		if errors.Is(err, ErrH3FrameTooLarge) {
 			return c.connError(H3ExcessiveLoad)
 		}
 		if err != nil {

@@ -2,6 +2,7 @@ package quic
 
 import (
 	"context"
+	"errors"
 	"time"
 )
 
@@ -82,7 +83,7 @@ func (c *Conn) OpenStreamContext(ctx context.Context) (*Stream, error) {
 		if err == nil {
 			return s, nil
 		}
-		if err != ErrTooManyStreams {
+		if !errors.Is(err, ErrTooManyStreams) {
 			return nil, err // a non-credit error is not resolved by waiting
 		}
 		if werr := c.waitStreamCredit(ctx); werr != nil {
