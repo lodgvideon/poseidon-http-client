@@ -204,6 +204,8 @@ numbers, which do not track RFC 9112 §6.3.
 
 | Section | Type        | Test |
 |---------|-------------|------|
+| §5.5 | Conformance | TestConformance_RFC9110_Sec5_5_ResponseFieldValueCRNUL_Rejected (http1/) — an INCOMING response field with a non-token name or a value carrying CR or NUL is rejected and the conn condemned. http1 validated outgoing request fields (#252) but handed a response field to the caller verbatim; conn (#263) and http3 both validate their receive sides |
+| §5.5 | Conformance | TestConformance_RFC9110_Sec5_5_LegalResponseFieldsAccepted (http1/) — the over-rejection guard: SP/HTAB inside a value, obs-text, high-bit bytes and an empty value are accepted. §5.5 forbids only CR, LF and NUL |
 | §10.1.4 | Conformance | TestConformance_RFC9110_Sec10_1_4_UnterminatedQuotedTENotChunked (http1/) — a transfer-parameter quoted-string that never closes is malformed; the runaway quote swallows the rest of the list into one element (`chunked;x=", gzip` -> final coding "chunked"), so the client must NOT chunk-frame it, and must not pool the socket — the body boundary is indeterminate |
 | §10.1.4 | Conformance | TestConformance_RFC9110_Sec10_1_4_TerminatedQuotedTEStillFrames (http1/) — the over-rejection guard: a correctly terminated quoted parameter is legal, so the coding after it still decides the framing |
 | §8.6 | Conformance | TestConformance_RFC9110_Sec8_6_ContentLengthOn304StaysPoolable (http1/) — the over-rejection guard: "A server MAY send a Content-Length header field in a 304 (Not Modified) response to a conditional GET request". It describes the representation, not a body, so the conn stays poolable; evicting would cost a connection per conditional GET |
