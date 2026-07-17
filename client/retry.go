@@ -276,12 +276,21 @@ func (r *Retryer) doLoop(ctx context.Context, req *Request, resp *Response) erro
 	var err error
 	for attempt := 0; attempt < r.opts.MaxAttempts; attempt++ {
 		if attempt > 0 {
+			// Release the previous attempt's response BEFORE backing off. A
+			// retryable attempt can leave resp holding a live resource: with
+			// BodyMode=BodyStream the previous Do set resp.BodyReader, which owns
+			// the pooled connection until Reset/Close closes it (canRetry excludes
+			// a request BodyReader, not a streaming RESPONSE). Resetting after the
+			// sleep, as this did, leaked that connection whenever sleepBackoff
+			// returned early on a cancelled context — the `return err` below skipped
+			// the reset, so the pool slot was never reclaimed and, MaxConnsPerHost
+			// being the whole budget, later callers eventually starved.
+			resp.Reset()
 			backoff := r.opts.Backoff(attempt)
 			r.fireRetry(req, attempt, err, backoff)
 			if err = r.sleepBackoff(ctx, backoff); err != nil {
 				return err
 			}
-			resp.Reset()
 		}
 		err = r.d.Do(ctx, req, resp)
 		if err == nil {
