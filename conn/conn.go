@@ -151,6 +151,11 @@ type Conn struct {
 	fcOutMu            sync.Mutex
 	fcOutCond          *sync.Cond
 	peerConnSendWindow int32
+	// readerGone is set (under fcOutMu) when the reader goroutine exits on a
+	// transport error, and fcOutCond is broadcast, so a writer parked in
+	// acquireSendCredits wakes and bails instead of waiting for a WINDOW_UPDATE
+	// that can never arrive on a dead connection.
+	readerGone bool
 
 	// goAwayReceived flags that the peer has sent GOAWAY (RFC 7540
 	// §6.8). New NewStream calls return ErrGoAway; existing streams
@@ -246,8 +251,11 @@ func NewClientConn(ctx context.Context, transport net.Conn, opts ConnOptions) (*
 	c.psMu.Unlock()
 	// Apply the initial peer SETTINGS to encoder / streams (no streams
 	// exist yet, so this just propagates HEADER_TABLE_SIZE to the
-	// HPACK encoder when the peer advertised one).
-	c.applyInitialPeerSettings(peer)
+	// HPACK encoder when the peer advertised one) and reject an out-of-range
+	// SETTINGS_INITIAL_WINDOW_SIZE before any stream is opened against it.
+	if err := c.applyInitialPeerSettings(peer); err != nil {
+		return nil, err
+	}
 	go c.readerLoop()
 	if opts.KeepaliveInterval > 0 {
 		go c.keepaliveLoop(opts.KeepaliveInterval)
@@ -1039,7 +1047,7 @@ func (c *Conn) acquireSendCredits(ctx context.Context, s *Stream, want, padOverh
 		}
 	}()
 	for {
-		if c.closed.Load() {
+		if c.closed.Load() || c.readerGone {
 			return 0, ErrConnClosed
 		}
 		if err := ctx.Err(); err != nil {
@@ -1126,13 +1134,30 @@ func (c *Conn) onWindowUpdate(streamID uint32, increment uint32) error {
 // only the connection-scoped knobs (HPACK table size) need to be
 // propagated; the per-stream INITIAL_WINDOW_SIZE will be picked up
 // when the first stream calls writeHeaders.
-func (c *Conn) applyInitialPeerSettings(peer frame.SettingsParams) {
+// maxInitialWindowSize is the RFC 7540 §6.9.1 ceiling on a flow-control window,
+// 2^31-1. §6.5.2 makes a SETTINGS_INITIAL_WINDOW_SIZE above it a connection error
+// of type FLOW_CONTROL_ERROR.
+const maxInitialWindowSize = int64(1)<<31 - 1
+
+func (c *Conn) applyInitialPeerSettings(peer frame.SettingsParams) error {
 	for i := 0; i < peer.N; i++ {
 		p := peer.Pairs[i]
-		if p.ID == frame.SettingHeaderTableSize {
+		switch p.ID {
+		case frame.SettingHeaderTableSize:
 			c.enc.SetMaxDynamicTableSize(p.Value)
+		case frame.SettingInitialWindowSize:
+			// RFC 7540 §6.5.2: a value above 2^31-1 MUST be a FLOW_CONTROL_ERROR.
+			// The mid-connection applyPeerSettings enforced this; the handshake path
+			// did not, so int32(0x80000000) seeded every new stream's send window
+			// deeply negative. acquireSendCredits' `avail > padOverhead` is then
+			// never true, and a body-bearing request blocks in fcOutCond.Wait
+			// forever (with a non-cancellable context) instead of failing fast.
+			if int64(p.Value) > maxInitialWindowSize {
+				return &ConnError{Code: frame.ErrCodeFlowControlError, Reason: "SETTINGS_INITIAL_WINDOW_SIZE exceeds 2^31-1"}
+			}
 		}
 	}
+	return nil
 }
 
 // applyPeerSettings handles a non-ACK SETTINGS frame received after
@@ -1553,6 +1578,19 @@ func (c *Conn) shutdownStreams(reason error) {
 		}
 		close(s.events)
 	}
+	// Wake any writer parked in acquireSendCredits. The connection is dead, so the
+	// WINDOW_UPDATE it waits for can never arrive; without this a SendData blocked
+	// on an exhausted send window hangs forever on a non-cancellable context.
+	// readerGone and the broadcast are set under fcOutMu — the cond's locker — so a
+	// writer that has just released it in Wait re-checks readerGone and bails with
+	// ErrConnClosed. c.closed stays false on a reader-death teardown (see IsAlive),
+	// which is why the send window is the only other exit and this is needed.
+	c.fcOutMu.Lock()
+	c.readerGone = true
+	if c.fcOutCond != nil {
+		c.fcOutCond.Broadcast()
+	}
+	c.fcOutMu.Unlock()
 	if errors.Is(reason, io.EOF) {
 		return
 	}
