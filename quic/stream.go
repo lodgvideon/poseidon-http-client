@@ -350,8 +350,28 @@ func (r *recvStream) receive(offset uint64, data []byte, fin bool) error {
 		r.highest = end
 	}
 	r.insert(offset, data)
+	// Cap the number of retained out-of-order ranges. A peer that sends many
+	// tiny, non-adjacent STREAM frames (e.g. one byte at every other offset)
+	// forces one buffered chunk per gap. The receive-flow-control window bounds
+	// the BYTES buffered but not the COUNT of ranges, and bufferGap is O(ranges)
+	// per frame — so an unbounded range count is a quadratic-CPU denial of
+	// service. RFC 9000 §11.1 lets an endpoint treat resource-exhausting
+	// behaviour as a connection error; past the cap we stop reassembling and
+	// close with PROTOCOL_VIOLATION instead. The bound is far above what real
+	// packet reordering produces (adjacent ranges fuse in bufferGap and never
+	// count).
+	if len(r.pending) > maxRecvGapChunks {
+		return ErrProtocolViolation
+	}
 	return nil
 }
+
+// maxRecvGapChunks bounds the out-of-order STREAM ranges a single stream will
+// hold before its reassembly is treated as a denial of service (see receive).
+// 512 is orders of magnitude above the handful of ranges genuine packet
+// reordering leaves outstanding, while keeping the per-frame O(ranges) merge and
+// the total retained state bounded by a small constant.
+const maxRecvGapChunks = 512
 
 func (r *recvStream) insert(offset uint64, data []byte) {
 	have := r.base + uint64(len(r.data)) // absolute end of the contiguous prefix
