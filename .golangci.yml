@@ -26,6 +26,12 @@ linters:
     - unused
     - prealloc
     - ineffassign
+    # errorlint: a sentinel compared with == (or a bare type assertion) silently
+    # stops matching the moment that error is wrapped with %w. Every production
+    # comparison uses errors.Is/As; this keeps it that way. Tests keep the direct
+    # == form (they construct the sentinel they compare against), so it is
+    # excluded below alongside errcheck/gosec.
+    - errorlint
   settings:
     gocyclo:
       min-complexity: 25
@@ -63,7 +69,7 @@ linters:
       # test body asserts behavior via other means; G104 false-positives
       # (e.g. w.Write in handler funcs, gzip.Writer.Close in setup code).
       - path: _test\.go$
-        linters: [errcheck, gosec]
+        linters: [errcheck, gosec, errorlint]
 
 issues:
   max-issues-per-linter: 0

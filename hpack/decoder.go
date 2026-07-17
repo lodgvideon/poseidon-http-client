@@ -1,5 +1,7 @@
 package hpack
 
+import "errors"
+
 // Decoder decodes HPACK header blocks. Holds a dynamic table per HTTP/2
 // connection. NOT goroutine-safe.
 type Decoder struct {
@@ -236,7 +238,7 @@ func (d *Decoder) decodePartial(src []byte, visit FieldVisitor) (int, error) {
 	for consumed < len(src) {
 		scratchSnap := len(d.scratch)
 		n, err := d.decodeOne(src[consumed:], visit)
-		if err == ErrTruncated {
+		if errors.Is(err, ErrTruncated) {
 			d.scratch = d.scratch[:scratchSnap]
 			return consumed, nil
 		}
