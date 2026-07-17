@@ -186,6 +186,18 @@ func (h *connHandler) OnData(fh frame.FrameHeader, p []byte, _ uint8) error {
 	if err := h.streams.onDataReceived(s, fh.Length); err != nil {
 		return err
 	}
+	// A DATA frame before the response HEADERS is a malformed message and is
+	// rejected AFTER the flow-control accounting above (which §6.9.1 requires even
+	// for a frame in error). RFC 7540 §8.1 defines a response as HEADERS then
+	// optional DATA; a body with no preceding response is not one. Without this,
+	// a single DATA(END_STREAM) with no HEADERS made client.Do return
+	// (Response{Status:0, Body:<server bytes>}, nil) — a nil error with an
+	// attacker-controlled body and an impossible status. §8.1.2.6 routes a
+	// malformed message to a stream error of type PROTOCOL_ERROR; the HTTP/3
+	// sibling (dispatchFrame's rb.resp==nil check) has always rejected this.
+	if !s.headersReceived {
+		return &StreamError{StreamID: s.id, Code: frame.ErrCodeProtocolError}
+	}
 	// Count every DATA payload byte for the END_STREAM Content-Length check.
 	s.bodyLen += int64(len(p))
 	end := fh.Flags&frame.FlagDataEndStream != 0

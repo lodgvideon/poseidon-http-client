@@ -113,6 +113,7 @@ func TestHandler_OnData_PushesDataEvent(t *testing.T) {
 	m := newFakeStreamMap()
 	h := newConnHandler(m, hpack.NewDecoder())
 	s := m.addStream(1)
+	s.headersReceived = true // the response HEADERS have arrived; DATA is now valid body
 
 	fh := frame.FrameHeader{Type: frame.FrameData, Length: 5, StreamID: 1}
 	if err := h.OnData(fh, []byte("hello"), 0); err != nil {
