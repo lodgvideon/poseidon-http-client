@@ -33,6 +33,10 @@ and round-trip through ReadFrame. The conformance row is what the
 | §6.4    | Roundtrip   | TestFramer_RSTStream_RoundTrip |
 | §6.5    | Conformance | TestConformance_RFC7540_Sec65_SettingsFrame, TestConformance_RFC7540_Sec65_SettingsAck |
 | §6.5    | Roundtrip   | TestFramer_Settings_RoundTrip, TestFramer_SettingsAck_RoundTrip |
+| §6.5    | Conformance | TestConformance_RFC7540_Sec6_5_ManyParametersAccepted (frame/) — §6.5 sets no bound on the parameter count and "the value of a SETTINGS parameter is the last value that is seen by a receiver"; a >16-parameter frame (routine with RFC 8701 GREASE settings) must be accepted, not torn down, and a defined setting after many unknown ids must not be crowded out of the store |
+| §6.5    | Conformance | TestConformance_RFC7540_Sec6_5_LastValueWins (frame/) — a repeated identifier resolves to its last occurrence and occupies one slot |
+| §6.5.2  | Conformance | TestConformance_RFC7540_Sec6_5_2_UnknownIgnored (frame/) — an "unsupported identifier MUST ignore that setting"; the decoder stores no slot for an unknown id |
+| RFC 8336 §2.2 | Negative | TestDispatchOrigin_IgnoresNonZeroStream (frame/) — "an ORIGIN frame on any other stream is invalid and MUST be ignored"; ignored (return nil, OnOrigin not called), not turned into a connection-teardown error |
 | §6.6    | Conformance | TestConformance_RFC7540_Sec66_PushPromiseFrame |
 | §6.6    | Roundtrip   | TestFramer_PushPromise_RoundTrip |
 | §6.7    | Conformance | TestConformance_RFC7540_Sec67_PingFrame |

@@ -38,16 +38,22 @@ func TestDispatchOrigin_Valid(t *testing.T) {
 	}
 }
 
-func TestDispatchOrigin_RejectsNonZeroStream(t *testing.T) {
+func TestDispatchOrigin_IgnoresNonZeroStream(t *testing.T) {
 	t.Parallel()
 
+	// RFC 8336 §2.2: "an ORIGIN frame on any other stream is invalid and MUST be
+	// ignored." Ignored, not rejected — a plain error here would fall through to
+	// the reader loop's teardown path and kill the connection over a droppable
+	// frame. So ReadFrame must return nil and OnOrigin must NOT fire.
 	raw := frameBytes(0, FrameOrigin, 0, 1, nil)
 	fr := NewFramer(nil, bytes.NewReader(raw))
 
 	rh := &originRecordingHandler{}
-	_, err := fr.ReadFrame(context.Background(), rh)
-	if !errors.Is(err, ErrProtocolError) {
-		t.Fatalf("expected ErrProtocolError, got %v", err)
+	if _, err := fr.ReadFrame(context.Background(), rh); err != nil {
+		t.Fatalf("expected nil (frame ignored), got %v", err)
+	}
+	if rh.called {
+		t.Fatal("OnOrigin fired for an ORIGIN frame on a non-zero stream; it must be ignored")
 	}
 }
 
@@ -100,6 +106,7 @@ func TestDispatchOrigin_Empty(t *testing.T) {
 
 type originRecordingHandler struct {
 	origins []string
+	called  bool
 }
 
 func (h *originRecordingHandler) OnData(FrameHeader, []byte, uint8) error { return nil }
@@ -120,5 +127,6 @@ func (h *originRecordingHandler) OnAltSvc(_ FrameHeader, entries []AltSvcEntry) 
 
 func (h *originRecordingHandler) OnOrigin(_ FrameHeader, origins []string) error {
 	h.origins = origins
+	h.called = true
 	return nil
 }

@@ -239,15 +239,17 @@ func TestFramer_dispatchSettings_AckWithNonEmptyPayload(t *testing.T) {
 
 // TestFramer_dispatchSettings_TooManyPairs sends SETTINGS with more than 16
 // pairs and expects ErrSettingsLength.
-func TestFramer_dispatchSettings_TooManyPairs(t *testing.T) {
-	// 17 pairs × 6 bytes = 102 bytes.
+func TestFramer_dispatchSettings_ManyPairsAccepted(t *testing.T) {
+	// 17 pairs × 6 bytes = 102 bytes. RFC 7540 §6.5 sets no upper bound on the
+	// parameter count, so a 17-parameter frame is legal and must NOT be rejected.
+	// The identifiers here are all 0x0 (undefined), so they are ignored per
+	// §6.5.2 — the point is only that the frame no longer tears down the reader.
 	payload := make([]byte, 17*6)
 	raw := frameBytes(uint32(len(payload)), FrameSettings, 0, 0, payload)
 	fr := NewFramer(nil, bytes.NewReader(raw))
 	fr.SetMaxReadFrameSize(16384)
-	_, err := fr.ReadFrame(context.Background(), &recordingHandler{})
-	if !errors.Is(err, ErrSettingsLength) {
-		t.Fatalf("err = %v, want ErrSettingsLength", err)
+	if _, err := fr.ReadFrame(context.Background(), &recordingHandler{}); err != nil {
+		t.Fatalf("err = %v, want nil — a 17-parameter SETTINGS frame is legal", err)
 	}
 }
 

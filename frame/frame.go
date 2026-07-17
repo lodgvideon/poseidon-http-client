@@ -74,10 +74,30 @@ type SettingPair struct {
 	Value uint32
 }
 
-// SettingsParams holds up to 16 SETTINGS pairs (zero-alloc, no map).
+// SettingsParams holds the current value of each DEFINED SETTINGS parameter
+// (zero-alloc, no map). Sized to the number of identifiers this implementation
+// understands (7), not to any wire limit: RFC 7540 §6.5 says a receiver keeps
+// only "the current value of its parameters", so the decoder stores one slot per
+// identifier with the last value seen, never one slot per wire occurrence.
 type SettingsParams struct {
 	Pairs [16]SettingPair
 	N     int
+}
+
+// set records id=value, replacing any existing value for id so the LAST value
+// wins (RFC 7540 §6.5: "the value of a SETTINGS parameter is the last value that
+// is seen by a receiver"). Because the decoder only ever calls this with defined
+// identifiers, N is bounded by the number of those identifiers and Pairs cannot
+// overflow, however many parameters — repeats included — the peer sends.
+func (s *SettingsParams) set(id SettingID, value uint32) {
+	for i := 0; i < s.N; i++ {
+		if s.Pairs[i].ID == id {
+			s.Pairs[i].Value = value
+			return
+		}
+	}
+	s.Pairs[s.N] = SettingPair{ID: id, Value: value}
+	s.N++
 }
 
 // HeaderBlock is an opaque view over a HEADERS / PUSH_PROMISE / CONTINUATION
