@@ -28,7 +28,7 @@ import glob
 import urllib.request
 
 CACHE = os.environ.get("RFC_CACHE", os.path.join(os.path.dirname(__file__), ".rfc-cache"))
-RFCS = ("9112", "9110", "2616", "7540", "7541", "9114", "9204", "9000")
+RFCS = ("9112", "9110", "2616", "7540", "7541", "9114", "9204", "9000", "8336")
 
 # A quotation is a citation, a colon, then a quoted span. The optional RFC number
 # pins which document to check against; a bare "§6.3: ..." is checked against all.

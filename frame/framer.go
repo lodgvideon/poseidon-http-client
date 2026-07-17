@@ -620,18 +620,42 @@ func (f *Framer) dispatchSettings(fh FrameHeader, payload []byte, h Handler) err
 	if fh.Length%6 != 0 {
 		return ErrSettingsLength
 	}
-	if len(payload)/6 > len(SettingsParams{}.Pairs) {
-		return ErrSettingsLength
-	}
+	// RFC 7540 §6.5 puts no upper bound on the number of parameters and permits
+	// repeats: "Each parameter in a SETTINGS frame replaces any existing value
+	// for that parameter ... the value of a SETTINGS parameter is the last value
+	// that is seen by a receiver", and "a receiver of a SETTINGS frame does not
+	// need to maintain any state other than the current value of its parameters."
+	// The fixed Pairs array is therefore not a wire limit — it is the store of
+	// current values, one slot per DEFINED identifier. Unknown identifiers are
+	// dropped here (§6.5.2: an "unsupported identifier MUST ignore that setting"),
+	// which also stops a peer from sending many distinct unknown ids to crowd a
+	// real setting out of a bounded array. The previous `len(payload)/6 > 16`
+	// rejection aborted the entire connection on a legal 17-parameter frame — one
+	// a server sending GREASE reserved settings (RFC 8701) produces routinely.
 	var s SettingsParams
 	for i := 0; i+6 <= len(payload); i += 6 {
-		s.Pairs[s.N] = SettingPair{
-			ID:    SettingID(uint16(payload[i])<<8 | uint16(payload[i+1])),
-			Value: uint32(payload[i+2])<<24 | uint32(payload[i+3])<<16 | uint32(payload[i+4])<<8 | uint32(payload[i+5]),
+		id := SettingID(uint16(payload[i])<<8 | uint16(payload[i+1]))
+		if !isDefinedSetting(id) {
+			continue
 		}
-		s.N++
+		s.set(id, uint32(payload[i+2])<<24|uint32(payload[i+3])<<16|uint32(payload[i+4])<<8|uint32(payload[i+5]))
 	}
 	return h.OnSettings(fh, s)
+}
+
+// isDefinedSetting reports whether id is a SETTINGS parameter this
+// implementation understands (RFC 7540 §6.5.2 identifiers 0x1–0x6 plus RFC 8441
+// §3's 0x8). An unknown or unsupported identifier "MUST ignore that setting"
+// (§6.5.2), so it is never stored — bounding the parameter store to the defined
+// set regardless of how many parameters the peer sends.
+func isDefinedSetting(id SettingID) bool {
+	switch id {
+	case SettingHeaderTableSize, SettingEnablePush, SettingMaxConcurrentStreams,
+		SettingInitialWindowSize, SettingMaxFrameSize, SettingMaxHeaderListSize,
+		SettingEnableConnectProtocol:
+		return true
+	}
+	return false
 }
 
 func (f *Framer) dispatchPushPromise(fh FrameHeader, payload []byte, h Handler) error {
@@ -700,12 +724,19 @@ func (f *Framer) dispatchContinuation(fh FrameHeader, payload []byte, h Handler)
 }
 
 // dispatchOrigin parses an ORIGIN frame (RFC 8336 §3) and calls OnOrigin.
-// ORIGIN frames MUST be sent on stream 0; non-zero stream ID is a
-// PROTOCOL_ERROR. Each origin entry is a 2-byte big-endian length
-// prefix followed by the origin ASCII string (scheme://host[:port]).
+// Each origin entry is a 2-byte big-endian length prefix followed by the origin
+// ASCII string (scheme://host[:port]).
+//
+// An ORIGIN frame on a non-zero stream is not a connection error: RFC 8336 §2.2
+// says "The ORIGIN frame MUST be sent on stream 0; an ORIGIN frame on any other
+// stream is invalid and MUST be ignored." The payload has already been read off
+// the wire by ReadFrame, so ignoring it is just returning nil without calling
+// OnOrigin — where returning a plain error would have fallen through to the
+// reader loop's connection-teardown path and killed the whole connection over a
+// frame the RFC says to drop.
 func (f *Framer) dispatchOrigin(fh FrameHeader, payload []byte, h Handler) error {
 	if fh.StreamID != 0 {
-		return ErrProtocolError
+		return nil
 	}
 	var origins []string
 	for len(payload) >= 2 {
