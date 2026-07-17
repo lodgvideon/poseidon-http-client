@@ -121,6 +121,12 @@ type connHandler struct {
 	pendingStreamID  uint32
 	pendingBuf       []byte
 	pendingEndStream bool
+	// pendingIsPush distinguishes a buffered PUSH_PROMISE header block (spanning
+	// CONTINUATION) from a HEADERS block: both accumulate in pendingBuf keyed to
+	// the frame's stream, but a completed push block routes to the push handler,
+	// not emitHeaderBlock. pendingPromisedID carries the promised stream id.
+	pendingIsPush     bool
+	pendingPromisedID uint32
 
 	// maxHeaderBytes caps the total bytes accumulated across a
 	// HEADERS+CONTINUATION sequence before END_HEADERS arrives. Without it a
@@ -222,6 +228,7 @@ func (h *connHandler) OnHeaders(fh frame.FrameHeader, hb frame.HeaderBlock, _ *f
 		h.pendingStreamID = fh.StreamID
 		h.pendingBuf = append(h.pendingBuf[:0], hb...)
 		h.pendingEndStream = end
+		h.pendingIsPush = false // a HEADERS block, not a promise
 		return nil
 	}
 	if s == nil {
@@ -249,6 +256,13 @@ func (h *connHandler) OnContinuation(fh frame.FrameHeader, hb frame.HeaderBlock)
 	}
 	if fh.Flags&frame.FlagContinuationEndHeaders == 0 {
 		return nil
+	}
+	// A reassembled PUSH_PROMISE routes back to its own handler, which does its
+	// own parent lookup and reservation. A HEADERS block emits on its stream, or —
+	// if the stream is gone — is decoded and discarded to keep the decoder synced.
+	if h.pendingIsPush {
+		h.pendingIsPush = false
+		return h.handlePushPromiseBlock(h.pendingStreamID, h.pendingPromisedID, h.pendingBuf)
 	}
 	if s := h.streams.lookupStream(fh.StreamID); s != nil {
 		return h.emitHeaderBlock(s, h.pendingBuf, h.pendingEndStream)
@@ -495,6 +509,26 @@ func (h *connHandler) OnPushPromise(fh frame.FrameHeader, promisedStreamID uint3
 		}
 	}
 
+	// A PUSH_PROMISE header block may span CONTINUATION frames (RFC 7540 §6.6,
+	// §6.10). Buffer the fragment until END_HEADERS rather than decoding it
+	// truncated, which was a COMPRESSION_ERROR that tore the whole connection
+	// down. The block accumulates in the same pendingBuf the HEADERS path uses,
+	// keyed to the parent stream, with pendingIsPush marking it a promise so
+	// OnContinuation routes the completed block back here.
+	if fh.Flags&frame.FlagPushPromiseEndHeaders == 0 {
+		h.pendingStreamID = fh.StreamID
+		h.pendingBuf = append(h.pendingBuf[:0], hb...)
+		h.pendingIsPush = true
+		h.pendingPromisedID = promisedStreamID
+		return nil
+	}
+	return h.handlePushPromiseBlock(fh.StreamID, promisedStreamID, hb)
+}
+
+// handlePushPromiseBlock decodes and processes a complete promised header block
+// (RFC 7540 §6.6). Split out of OnPushPromise so a CONTINUATION-spanned promise,
+// reassembled in OnContinuation, is handled identically to a single-frame one.
+func (h *connHandler) handlePushPromiseBlock(parentStreamID, promisedStreamID uint32, hb []byte) error {
 	// Decode the promised pseudo-headers BEFORE any decision that keeps the
 	// connection alive. HPACK is a connection-wide stateful context (RFC
 	// 7541 §2.2): every header block mutates the dynamic table, so skipping
@@ -524,7 +558,7 @@ func (h *connHandler) OnPushPromise(fh frame.FrameHeader, promisedStreamID uint3
 	}
 
 	// Look up the parent stream.
-	parent := h.streams.lookupStream(fh.StreamID)
+	parent := h.streams.lookupStream(parentStreamID)
 	if parent == nil {
 		// Parent gone; reset the promised stream to be safe.
 		_ = h.streams.rstStream(promisedStreamID, frame.ErrCodeCancel)

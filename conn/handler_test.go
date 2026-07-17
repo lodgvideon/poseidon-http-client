@@ -18,6 +18,7 @@ type fakeStreamMap struct {
 	origins      []string
 	altSvc       []frame.AltSvcEntry
 	connRecvOnly uint32 // bytes routed through accountConnRecvOnly (unknown-stream DATA)
+	pushEnabled  bool   // controls pushSupport() for push tests
 }
 
 func (m *fakeStreamMap) lookupStream(id uint32) *Stream {
@@ -36,7 +37,7 @@ func (*fakeStreamMap) writeSettingsAck() error                              { re
 func (*fakeStreamMap) writePingAck([8]byte) error                           { return nil }
 func (*fakeStreamMap) deliverPingAck([8]byte)                               {}
 func (*fakeStreamMap) onGoAwayReceived(uint32, frame.ErrCode)               {}
-func (*fakeStreamMap) pushSupport() (bool, int)                             { return false, 8 }
+func (m *fakeStreamMap) pushSupport() (bool, int)                           { return m.pushEnabled, 8 }
 func (*fakeStreamMap) reservePushedStream(uint32) (*Stream, error)          { return nil, nil }
 func (*fakeStreamMap) rstStream(uint32, frame.ErrCode) error                { return nil }
 func (m *fakeStreamMap) storeOrigins(origins []string)            { m.origins = origins }
