@@ -1139,12 +1139,19 @@ func (c *Client) dispatchFrame(rb *respBuilder, typ uint64, payload []byte) erro
 			// after the trailers is an invalid frame sequence (RFC 9114 §4.1).
 			return c.connError(H3FrameUnexpected)
 		}
+		if rb.onData != nil {
+			// Streaming path (DoStream): the chunk is handed to the BodyReader and
+			// not retained — peak memory is one frame, not the whole body — so it
+			// does NOT count against maxResponseBytes, the cap on bytes held
+			// together in memory. Counting it aborted a legitimate streamed download
+			// larger than the cap even though nothing over one frame was ever kept.
+			return rb.onData(payload)
+		}
+		// Buffered path (Do): the body accumulates in rb.body, so it is capped
+		// alongside the retained header and trailer bytes.
 		rb.total += uint64(len(payload))
 		if rb.total > maxResponseBytes {
-			return ErrResponseTooLarge // retained header/body/trailer bytes over the cap
-		}
-		if rb.onData != nil {
-			return rb.onData(payload) // streaming path: hand the chunk to the BodyReader
+			return ErrResponseTooLarge
 		}
 		rb.body = append(rb.body, payload...)
 	case FrameSettings, FrameCancelPush, FrameGoaway, FrameMaxPushID, 0x02, 0x06, 0x08, 0x09:
