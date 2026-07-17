@@ -286,6 +286,7 @@ numbers, which do not track RFC 9112 §6.3.
 |----------|-------------|------|
 | §5.1     | Roundtrip   | TestEncodeInteger_RFCExamples, TestDecodeInteger_RFCExamples, TestDecodeInteger_Truncated, TestDecodeInteger_Overflow |
 | §5.2     | Roundtrip   | TestEncodeStringLiteral_*, TestDecodeStringLiteral_*, TestHuffmanEncode_*, TestHuffmanDecode_* |
+| §5.2     | Conformance | TestConformance_RFC7541_StreamingDecode_TruncatedLiteralDoesNotPanic (hpack/) — a truncated string literal following a complete field does not crash the streaming decoder; parseLiteral clobbered d.scratch with decodeStringLiteral's nil-on-truncation result, so the decodePartial rollback resliced a nil scratch (panic, remote crash). The complete field is emitted and the truncated one resumes when its bytes arrive |
 | §C.2.1   | Conformance | TestConformance_RFC7541_C2_1_LiteralIndexing |
 | §C.2.2   | Conformance | TestConformance_RFC7541_C2_2_LiteralNoIndexing |
 | §C.2.3   | Conformance | TestConformance_RFC7541_C2_3_NeverIndexed |
