@@ -19,6 +19,7 @@ func TestOnData_PooledZeroAlloc(t *testing.T) {
 	m := newFakeStreamMap()
 	h := newConnHandler(m, hpack.NewDecoder())
 	s := m.addStream(1)
+	s.headersReceived = true // response HEADERS received; DATA is valid body
 
 	payload := make([]byte, 4096)
 	fh := frame.FrameHeader{Type: frame.FrameData, Length: uint32(len(payload)), StreamID: 1}
@@ -50,6 +51,7 @@ func TestOnData_DataMatchesPayload(t *testing.T) {
 	m := newFakeStreamMap()
 	h := newConnHandler(m, hpack.NewDecoder())
 	s := m.addStream(1)
+	s.headersReceived = true // response HEADERS received; DATA is valid body
 
 	payload := []byte("hello-poseidon-data-frame")
 	fh := frame.FrameHeader{Type: frame.FrameData, Length: uint32(len(payload)), StreamID: 1}
@@ -80,6 +82,7 @@ func TestOnData_DistinctBuffersWhileOutstanding(t *testing.T) {
 	m := newFakeStreamMap()
 	h := newConnHandler(m, hpack.NewDecoder())
 	s := m.addStream(1)
+	s.headersReceived = true // response HEADERS received; DATA is valid body
 
 	fh := frame.FrameHeader{Type: frame.FrameData, Length: 4, StreamID: 1}
 	if err := h.OnData(fh, []byte("AAAA"), 0); err != nil {
