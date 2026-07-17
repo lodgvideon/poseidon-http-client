@@ -11,12 +11,13 @@ import (
 
 // fakeStreamMap is the bare interface handler.go needs from *Conn.
 type fakeStreamMap struct {
-	mu      sync.Mutex
-	streams map[uint32]*Stream
-	w       *fakeStreamWriter
-	bufSize int
-	origins []string
-	altSvc  []frame.AltSvcEntry
+	mu           sync.Mutex
+	streams      map[uint32]*Stream
+	w            *fakeStreamWriter
+	bufSize      int
+	origins      []string
+	altSvc       []frame.AltSvcEntry
+	connRecvOnly uint32 // bytes routed through accountConnRecvOnly (unknown-stream DATA)
 }
 
 func (m *fakeStreamMap) lookupStream(id uint32) *Stream {
@@ -41,6 +42,11 @@ func (*fakeStreamMap) rstStream(uint32, frame.ErrCode) error                { re
 func (m *fakeStreamMap) storeOrigins(origins []string)            { m.origins = origins }
 func (m *fakeStreamMap) storeAltSvc(entries []frame.AltSvcEntry)  { m.altSvc = entries }
 func (*fakeStreamMap) bumpFramesReceived()                        {}
+
+func (m *fakeStreamMap) accountConnRecvOnly(length uint32) error {
+	m.connRecvOnly += length
+	return nil
+}
 
 func newFakeStreamMap() *fakeStreamMap {
 	w := &fakeStreamWriter{}

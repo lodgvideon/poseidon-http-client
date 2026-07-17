@@ -896,20 +896,10 @@ func (c *Conn) writeRSTStreamBestEffort(s *Stream, code frame.ErrCode) {
 func (c *Conn) onDataReceived(s *Stream, length uint32) error {
 	debit := int32(length)
 
-	c.fcMu.Lock()
-	c.connRecvWindow -= debit
-	if c.connRecvWindow < 0 {
-		c.fcMu.Unlock()
-		return &ConnError{Code: frame.ErrCodeFlowControlError, Reason: "peer overflowed connection recv window"}
+	connRefund, err := c.debitConnRecv(length)
+	if err != nil {
+		return err
 	}
-	c.connRefundPending += length
-	connRefund := uint32(0)
-	if c.connRefundPending >= recvWindowRefundThreshold {
-		connRefund = c.connRefundPending
-		c.connRefundPending = 0
-		c.connRecvWindow += int32(connRefund)
-	}
-	c.fcMu.Unlock()
 
 	s.mu.Lock()
 	s.recvWindow -= debit
@@ -947,6 +937,53 @@ func (c *Conn) onDataReceived(s *Stream, length uint32) error {
 		if err := c.writeWindowUpdate(0, connRefund); err != nil {
 			return err
 		}
+	}
+	return nil
+}
+
+// debitConnRecv accounts one flow-controlled frame of `length` bytes against the
+// connection-level recv window and returns the bytes that crossed the refund
+// threshold (0 if none) so the caller can emit WINDOW_UPDATE(stream=0). It is the
+// single place the connection window is debited: onDataReceived charges it
+// alongside the per-stream window, and accountConnRecvOnly charges it for a frame
+// whose stream is gone. Both MUST agree, and one copy of the arithmetic is how
+// they stay agreed.
+func (c *Conn) debitConnRecv(length uint32) (uint32, error) {
+	c.fcMu.Lock()
+	defer c.fcMu.Unlock()
+	c.connRecvWindow -= int32(length)
+	if c.connRecvWindow < 0 {
+		return 0, &ConnError{Code: frame.ErrCodeFlowControlError, Reason: "peer overflowed connection recv window"}
+	}
+	c.connRefundPending += length
+	if c.connRefundPending >= recvWindowRefundThreshold {
+		refund := c.connRefundPending
+		c.connRefundPending = 0
+		c.connRecvWindow += int32(refund)
+		return refund, nil
+	}
+	return 0, nil
+}
+
+// accountConnRecvOnly charges the connection-level recv window for a DATA frame
+// whose stream is not in the registry — one we reset, or one already fully closed
+// and evicted. RFC 7540 §6.9: "A receiver that receives a flow-controlled frame
+// MUST always account for its contribution against the connection flow-control
+// window ... This is necessary even if the frame is in error." §5.1 names this
+// exact case: "Flow-controlled frames (i.e., DATA) received after sending
+// RST_STREAM are counted toward the connection flow-control window." OnData used
+// to drop such a frame outright, so its bytes were never charged nor refunded and
+// the peer's connection send window shrank permanently on every cancelled stream;
+// on a long-lived pooled connection that cancels streams it reaches zero and
+// stalls every stream. The payload is still dropped (§5.1: an endpoint "MUST
+// ignore frames" on a stream it has reset) — only the window is settled.
+func (c *Conn) accountConnRecvOnly(length uint32) error {
+	connRefund, err := c.debitConnRecv(length)
+	if err != nil {
+		return err
+	}
+	if connRefund > 0 {
+		return c.writeWindowUpdate(0, connRefund)
 	}
 	return nil
 }

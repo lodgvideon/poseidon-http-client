@@ -60,6 +60,9 @@ func GetDataBufPool() *sync.Pool { return &dataBufPool }
 type connOps interface {
 	lookupStream(id uint32) *Stream
 	onDataReceived(s *Stream, length uint32) error
+	// accountConnRecvOnly settles the connection-level recv window for a DATA
+	// frame whose stream is no longer in the registry (RFC 7540 §6.9, §5.1).
+	accountConnRecvOnly(length uint32) error
 	markStreamDone(id uint32)
 	onWindowUpdate(streamID, increment uint32) error
 	applyPeerSettings(s frame.SettingsParams) error
@@ -168,7 +171,11 @@ func (h *connHandler) OnData(fh frame.FrameHeader, p []byte, _ uint8) error {
 	h.streams.bumpFramesReceived()
 	s := h.streams.lookupStream(fh.StreamID)
 	if s == nil {
-		return nil // unknown stream — peer chatter, ignored
+		// The stream is gone — reset by us, or already closed and evicted — so
+		// the DATA payload is ignored (RFC 7540 §5.1). But its bytes still count
+		// against the CONNECTION flow-control window (§6.9, §5.1), so the window
+		// must be settled or it leaks and the connection eventually stalls.
+		return h.streams.accountConnRecvOnly(fh.Length)
 	}
 	if err := h.streams.onDataReceived(s, fh.Length); err != nil {
 		return err
