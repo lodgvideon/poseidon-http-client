@@ -111,7 +111,7 @@ func FuzzDecodeResponseHeaders(f *testing.F) {
 				if !validFieldName(h.Name) || !validFieldValue(h.Value) {
 					t.Fatalf("accepted field %q: %q, which fails §4.2 validation", h.Name, h.Value)
 				}
-				if forbiddenField(h.Name, h.Value) {
+				if forbiddenResponseField(h.Name) {
 					t.Fatalf("accepted §4.2-forbidden field %q: %q", h.Name, h.Value)
 				}
 			}
@@ -173,7 +173,7 @@ func FuzzDecodeTrailers(f *testing.F) {
 				if !validFieldName(h.Name) || !validFieldValue(h.Value) {
 					t.Fatalf("accepted trailer %q: %q, which fails §4.2 validation", h.Name, h.Value)
 				}
-				if forbiddenField(h.Name, h.Value) {
+				if forbiddenResponseField(h.Name) {
 					t.Fatalf("accepted §4.2-forbidden trailer %q: %q", h.Name, h.Value)
 				}
 			}

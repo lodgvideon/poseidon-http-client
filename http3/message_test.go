@@ -116,7 +116,10 @@ func TestConformance_RFC9114_Sec42_RequestValidation(t *testing.T) {
 }
 
 func TestConformance_RFC9114_Sec412_ResponseDecode(t *testing.T) {
-	section := encodeSection(hf(":status", "200"), hf("content-type", "text/plain"), hf("te", "trailers"))
+	// A well-formed response: :status plus a regular header. "te" is NOT included
+	// here — unlike a request, a response may not carry it at any value (§4.2), and
+	// TestConformance_RFC9114_Sec4_2_ResponseTETrailers_Malformed pins that.
+	section := encodeSection(hf(":status", "200"), hf("content-type", "text/plain"))
 	var dec qpack.Decoder
 	resp, _, err := DecodeResponseHeaders(&dec, nil, section)
 	if err != nil {
@@ -125,7 +128,7 @@ func TestConformance_RFC9114_Sec412_ResponseDecode(t *testing.T) {
 	if resp.Status != 200 {
 		t.Fatalf("status = %d, want 200", resp.Status)
 	}
-	if len(resp.Headers) != 2 || string(resp.Headers[0].Name) != "content-type" ||
+	if len(resp.Headers) != 1 || string(resp.Headers[0].Name) != "content-type" ||
 		string(resp.Headers[0].Value) != "text/plain" {
 		t.Fatalf("headers = %+v", resp.Headers)
 	}
