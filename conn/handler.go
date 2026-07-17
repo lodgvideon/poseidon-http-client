@@ -212,20 +212,23 @@ func (h *connHandler) OnData(fh frame.FrameHeader, p []byte, _ uint8) error {
 func (h *connHandler) OnHeaders(fh frame.FrameHeader, hb frame.HeaderBlock, _ *frame.Priority, _ uint8) error {
 	h.streams.bumpFramesReceived()
 	s := h.streams.lookupStream(fh.StreamID)
-	if s == nil {
-		return nil
-	}
 	end := fh.Flags&frame.FlagHeadersEndStream != 0
 	endHeaders := fh.Flags&frame.FlagHeadersEndHeaders != 0
 
 	if !endHeaders {
-		// Buffer until CONTINUATION completes the block. A single HEADERS frame
-		// is already bounded by MAX_FRAME_SIZE; the unbounded vector is the
-		// CONTINUATION stream, capped in OnContinuation.
+		// Buffer until CONTINUATION completes the block — even when the stream is
+		// gone. A single HEADERS frame is already bounded by MAX_FRAME_SIZE; the
+		// unbounded vector is the CONTINUATION stream, capped in OnContinuation.
 		h.pendingStreamID = fh.StreamID
 		h.pendingBuf = append(h.pendingBuf[:0], hb...)
 		h.pendingEndStream = end
 		return nil
+	}
+	if s == nil {
+		// Stream gone (reset or completed and evicted, RFC 7540 §5.1) or never
+		// opened. The event is dropped, but the block MUST still be decoded to
+		// keep the connection-wide HPACK decoder in sync (see drainHeaderBlock).
+		return h.drainHeaderBlock(hb)
 	}
 	return h.emitHeaderBlock(s, hb, end)
 }
@@ -233,8 +236,10 @@ func (h *connHandler) OnHeaders(fh frame.FrameHeader, hb frame.HeaderBlock, _ *f
 // OnContinuation implements frame.Handler.
 func (h *connHandler) OnContinuation(fh frame.FrameHeader, hb frame.HeaderBlock) error {
 	h.streams.bumpFramesReceived()
-	s := h.streams.lookupStream(fh.StreamID)
-	if s == nil || h.pendingStreamID != fh.StreamID {
+	// Match against the in-flight block regardless of stream liveness: a block
+	// buffered while its stream still existed must be completed and decoded even
+	// if the stream was reset in between, or the decoder desyncs.
+	if h.pendingStreamID != fh.StreamID {
 		return nil
 	}
 	h.pendingBuf = append(h.pendingBuf, hb...)
@@ -245,7 +250,27 @@ func (h *connHandler) OnContinuation(fh frame.FrameHeader, hb frame.HeaderBlock)
 	if fh.Flags&frame.FlagContinuationEndHeaders == 0 {
 		return nil
 	}
-	return h.emitHeaderBlock(s, h.pendingBuf, h.pendingEndStream)
+	if s := h.streams.lookupStream(fh.StreamID); s != nil {
+		return h.emitHeaderBlock(s, h.pendingBuf, h.pendingEndStream)
+	}
+	return h.drainHeaderBlock(h.pendingBuf)
+}
+
+// drainHeaderBlock decodes hb through the connection-wide HPACK decoder and
+// discards the fields. A HEADERS/CONTINUATION block for a stream we have already
+// evicted (reset or completed) — or never opened — MUST still be decoded: HPACK
+// is a connection-wide stateful context (RFC 7541 §2.2), and a decoder that skips
+// a block misses any Literal-with-Incremental-Indexing entry the peer's encoder
+// added to the dynamic table, so every later block on the connection resolves an
+// index to the wrong field or fails with a COMPRESSION_ERROR that tears the whole
+// pooled connection down. This mirrors the decode-before-bail OnPushPromise
+// already performs; OnData's evicted-stream path settles flow control the same
+// way, and this settles the decoder.
+func (h *connHandler) drainHeaderBlock(hb []byte) error {
+	if err := h.dec.DecodeBlock(hb, func(hpack.HeaderField) error { return nil }); err != nil {
+		return headerDecodeConnError(err)
+	}
+	return nil
 }
 
 // maxInterimResponses bounds the informational (1xx) header blocks a peer may
