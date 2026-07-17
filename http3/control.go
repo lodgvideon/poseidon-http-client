@@ -186,6 +186,14 @@ func (c *Client) routeUni(typ uint64, s quicStream, rest []byte) error {
 			return c.connError(H3StreamCreationError) // only one decoder stream (§4.2)
 		}
 		c.qpackDec = s
+		// Seed any decoder-stream instruction bytes that arrived coalesced with
+		// the stream-type varint, exactly as the encoder case does above. A
+		// conformant server MAY pipeline its first Section Acknowledgment / Insert
+		// Count Increment with the type byte in one STREAM frame; those bytes are
+		// already off the stream (Recv will not return them again), so dropping
+		// them here desyncs the decoder stream — the encoder's Known Received Count
+		// never advances, or a later read misaligns on a partial instruction.
+		c.qpackDecBuf = append(c.qpackDecBuf, rest...)
 	case StreamTypePush:
 		// We never send MAX_PUSH_ID, so the server MUST NOT open a push stream
 		// (§6.2.5, §7.2.5).

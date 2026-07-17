@@ -80,7 +80,7 @@ func TestOnGoAway_WakesAcquireSendCredits(t *testing.T) {
 	go func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 		defer cancel()
-		_, _ = c.acquireSendCredits(ctx, s, 100)
+		_, _ = c.acquireSendCredits(ctx, s, 100, 0)
 		close(woke)
 	}()
 
