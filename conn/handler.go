@@ -606,19 +606,52 @@ var _ frame.Handler = (*connHandler)(nil)
 // §8.1.2.6 is explicit about the direction that applies to us: "Clients MUST NOT
 // accept a malformed response." This path accepted every one of these until now.
 func (h *connHandler) validateResponseFields(s *Stream) error {
+	streamErr := func() error { return &StreamError{StreamID: s.id, Code: frame.ErrCodeProtocolError} }
+
+	// classifyHeaderBlock sets headersReceived only after a FINAL header block,
+	// and it runs after this, so headersReceived==true here means this block is a
+	// trailer section. RFC 7540 §8.1.2.1: "Pseudo-header fields MUST NOT appear in
+	// trailers." Until now the ':' branch below only checked the value, so every
+	// pseudo-header rule this enforces — undefined pseudo, duplicate :status,
+	// pseudo-after-regular, pseudo-in-trailers — was accepted, a malformed
+	// response delivered to the caller as success. The HTTP/3 sibling
+	// (http3/response.go) has always rejected all of these; this is the H2 path
+	// catching up.
+	isTrailer := s.headersReceived
+	sawRegular, sawStatus := false, false
 	for i := range h.scratch {
 		name, value := h.scratch[i].Name, h.scratch[i].Value
-		// Pseudo-headers are validated by classifyHeaderBlock, which knows which
-		// ones belong in a response; their ':' would fail the token check here.
 		if len(name) > 0 && name[0] == ':' {
-			if !validFieldValue(value) {
-				return &StreamError{StreamID: s.id, Code: frame.ErrCodeProtocolError}
+			// §8.1.2.1: "All pseudo-header fields MUST appear in the header block
+			// before regular header fields. Any request or response that contains
+			// a pseudo-header field that appears in a header block after a regular
+			// header field MUST be treated as malformed".
+			if sawRegular {
+				return streamErr()
 			}
+			// The only pseudo-header defined for a response is :status, at most
+			// once, and none is allowed in a trailer section. §8.1.2.1: "Endpoints
+			// MUST treat a request or response that contains undefined or invalid
+			// pseudo-header fields as malformed".
+			if isTrailer || string(name) != ":status" || sawStatus {
+				return streamErr()
+			}
+			if !validFieldValue(value) {
+				return streamErr()
+			}
+			sawStatus = true
 			continue
 		}
 		if !validFieldName(name) || !validFieldValue(value) || forbiddenResponseField(name) {
-			return &StreamError{StreamID: s.id, Code: frame.ErrCodeProtocolError}
+			return streamErr()
 		}
+		sawRegular = true
+	}
+	// A response header block (final or interim) must carry :status; a trailer
+	// section must not. RFC 7540 §8.1.2.4: the :status pseudo-header "MUST be
+	// included in all responses; otherwise, the response is malformed".
+	if !isTrailer && !sawStatus {
+		return streamErr()
 	}
 	return nil
 }
