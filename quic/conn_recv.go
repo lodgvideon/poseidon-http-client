@@ -643,7 +643,18 @@ func (h *connFrameHandler) OnCrypto(offset uint64, data []byte) error {
 	// The handshake CRYPTO stream spans many frames and packets (a server's
 	// certificate flight is several KB); reassemble it by offset so out-of-order
 	// or gapped delivery still yields the TLS messages in order.
-	_ = cr.receive(offset, data, false) // never FIN, so never a final-size error
+	//
+	// Propagate receive's error. There is no FIN here, so ErrFinalSize never
+	// arises — but receive also returns ErrProtocolViolation once the retained
+	// out-of-order range count crosses maxRecvGapChunks, the anti-quadratic
+	// reassembly cap. Discarding it left the CRYPTO stream (which has no
+	// flow-control window) open to the same O(n^2) bufferGap denial of service the
+	// STREAM path is protected against, since the byte-window bound alone still
+	// admits ~32K one-byte gapped chunks. The sibling OnStream propagates the same
+	// error.
+	if err := cr.receive(offset, data, false); err != nil {
+		return err
+	}
 	h.ackEliciting = true
 	return nil
 }
