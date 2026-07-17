@@ -163,11 +163,17 @@ func (d *Decoder) parseLiteral(src []byte, namePrefixBits uint8) (name, value []
 	consumed = n
 	if idx == 0 {
 		nameStart := len(d.scratch)
-		var nb int
-		d.scratch, nb, err = decodeStringLiteral(d.scratch, src[consumed:])
-		if err != nil {
-			return nil, nil, 0, err
+		// Assign d.scratch only on success. decodeStringLiteral returns a nil
+		// slice on truncation/error; writing that back would replace d.scratch
+		// (len N) with nil (cap 0), and decodePartial's rollback
+		// `d.scratch = d.scratch[:scratchSnap]` then panics with a slice bounds
+		// error on a peer-crafted truncated literal. It never mutates the existing
+		// bytes before erroring, so keeping the old d.scratch on error is correct.
+		grown, nb, serr := decodeStringLiteral(d.scratch, src[consumed:])
+		if serr != nil {
+			return nil, nil, 0, serr
 		}
+		d.scratch = grown
 		consumed += nb
 		name = d.scratch[nameStart:]
 	} else {
@@ -181,11 +187,13 @@ func (d *Decoder) parseLiteral(src []byte, namePrefixBits uint8) (name, value []
 		name = d.scratch[nameStart:]
 	}
 	valueStart := len(d.scratch)
-	var vb int
-	d.scratch, vb, err = decodeStringLiteral(d.scratch, src[consumed:])
-	if err != nil {
-		return nil, nil, 0, err
+	// Same as the name above: keep d.scratch intact on a truncated value so the
+	// streaming rollback in decodePartial cannot reslice a nil scratch.
+	grown, vb, serr := decodeStringLiteral(d.scratch, src[consumed:])
+	if serr != nil {
+		return nil, nil, 0, serr
 	}
+	d.scratch = grown
 	consumed += vb
 	value = d.scratch[valueStart:]
 	return name, value, consumed, nil
