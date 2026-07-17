@@ -199,6 +199,16 @@ func validateRequest(r *Request) error {
 		return fmt.Errorf("%w: :protocol pseudo-header requires Method=CONNECT (RFC 8441 §4), got %q",
 			ErrInvalidRequest, r.Method)
 	}
+	// A synthesized pseudo-header value carrying CR, LF or NUL is a request-
+	// splitting vector once an HTTP/2->HTTP/1.1 downgrading intermediary
+	// translates it verbatim (RFC 7540 §10.3). http1 refuses these on its own
+	// wire; the HTTP/2 and HTTP/3 send paths, which share this validator, had no
+	// equivalent, so an Authority or Scheme like "a\r\nX-Injected: 1" reached the
+	// encoder untouched.
+	if bad := firstInjectionPseudoField(r); bad != "" {
+		return fmt.Errorf("%w: %s value carries CR, LF or NUL (request-splitting vector, RFC 7540 §10.3)",
+			ErrInvalidRequest, bad)
+	}
 	// RFC 7540 §8.1.2.3: connection-specific headers MUST NOT appear
 	// in HTTP/2 requests. Sending any of them is a request-smuggling
 	// vector through HTTP/1.1 downgrading intermediaries.
@@ -217,10 +227,20 @@ func validateRequest(r *Request) error {
 			return fmt.Errorf("%w: TE header value %q forbidden; only %q is allowed (RFC 7540 §8.1.2.3)",
 				ErrInvalidRequest, hf.Value, "trailers")
 		}
+		// The value the same §10.3 vector rides on. HPACK cannot split the H2
+		// wire with these bytes, but a downgrading intermediary can.
+		if hasFieldInjectionByte(hf.Value) {
+			return fmt.Errorf("%w: header %q value carries CR, LF or NUL (request-splitting vector, RFC 7540 §10.3)",
+				ErrInvalidRequest, hf.Name)
+		}
 	}
 	for i := range r.Trailers {
 		if len(r.Trailers[i].Name) > 0 && r.Trailers[i].Name[0] == ':' {
 			return fmt.Errorf("%w: pseudo-header %q in Trailers slice",
+				ErrInvalidRequest, r.Trailers[i].Name)
+		}
+		if hasFieldInjectionByte(r.Trailers[i].Value) {
+			return fmt.Errorf("%w: trailer %q value carries CR, LF or NUL (request-splitting vector, RFC 7540 §10.3)",
 				ErrInvalidRequest, r.Trailers[i].Name)
 		}
 	}
@@ -239,4 +259,45 @@ func containsAnyWhitespace(s string) bool {
 		}
 	}
 	return false
+}
+
+// hasFieldInjectionByte reports whether v carries CR, LF or NUL — the three
+// bytes RFC 7540 §10.3 names as the ones that "might be exploited by an attacker
+// if they are translated verbatim". HPACK length-prefixes a field value, so these
+// cannot split the HTTP/2 wire itself; the danger is an HTTP/2->HTTP/1.1
+// downgrading intermediary, where CR and LF ARE the field and line delimiters, so
+// a value carrying them becomes several fields and, past a blank line, an injected
+// request (§8.1.2.6 makes such a message malformed). NUL is in the set for the
+// same reason one step removed: it terminates a C string, so a value carrying it
+// can mean one thing here and another to a proxy written in C.
+func hasFieldInjectionByte(v []byte) bool {
+	for _, c := range v {
+		if c == '\r' || c == '\n' || c == 0 {
+			return true
+		}
+	}
+	return false
+}
+
+// firstInjectionPseudoField returns the name of the first synthesized
+// pseudo-header value that carries an injection byte, or "" if none does. Method
+// and Path are already refused for CR and LF by the whitespace checks in
+// validateRequest, but not for NUL; Scheme, Authority and Protocol are checked
+// nowhere else. http1.WriteRequest refuses these bytes on its own wire — this is
+// the guard for the HTTP/2 and HTTP/3 send paths, which share validateRequest and
+// had no equivalent.
+func firstInjectionPseudoField(r *Request) string {
+	switch {
+	case hasFieldInjectionByte(unsafeStringToBytes(r.Method)):
+		return "method"
+	case hasFieldInjectionByte(unsafeStringToBytes(r.Path)):
+		return "path"
+	case hasFieldInjectionByte(unsafeStringToBytes(r.Scheme)):
+		return "scheme"
+	case hasFieldInjectionByte(unsafeStringToBytes(r.Authority)):
+		return "authority"
+	case hasFieldInjectionByte(unsafeStringToBytes(r.Protocol)):
+		return ":protocol"
+	}
+	return ""
 }
