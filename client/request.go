@@ -218,6 +218,11 @@ func validateRequest(r *Request) error {
 			return fmt.Errorf("%w: pseudo-header %q in regular Headers slice",
 				ErrInvalidRequest, hf.Name)
 		}
+		if !isTokenName(hf.Name) {
+			return fmt.Errorf("%w: header name %q is not a token (RFC 9110 §5.6.2); a name "+
+				"carrying CR, LF, NUL, a space or a colon is a request-splitting vector",
+				ErrInvalidRequest, hf.Name)
+		}
 		name := strings.ToLower(string(hf.Name))
 		if forbiddenRequestHeader(name) {
 			return fmt.Errorf("%w: %q header is forbidden in HTTP/2 requests (RFC 7540 §8.1.2.3)",
@@ -237,6 +242,10 @@ func validateRequest(r *Request) error {
 	for i := range r.Trailers {
 		if len(r.Trailers[i].Name) > 0 && r.Trailers[i].Name[0] == ':' {
 			return fmt.Errorf("%w: pseudo-header %q in Trailers slice",
+				ErrInvalidRequest, r.Trailers[i].Name)
+		}
+		if !isTokenName(r.Trailers[i].Name) {
+			return fmt.Errorf("%w: trailer name %q is not a token (RFC 9110 §5.6.2)",
 				ErrInvalidRequest, r.Trailers[i].Name)
 		}
 		if hasFieldInjectionByte(r.Trailers[i].Value) {
@@ -277,6 +286,46 @@ func hasFieldInjectionByte(v []byte) bool {
 		}
 	}
 	return false
+}
+
+// tokenChar is the RFC 9110 §5.6.2 token character set: DIGIT / ALPHA / one of
+// "!#$%&'*+-.^_`|~". Upper case is included — a header field name is a token and
+// tokens are case-insensitive, so refusing upper case here would reject a
+// perfectly legal caller name.
+var tokenChar = func() (t [256]bool) {
+	for _, c := range []byte("!#$%&'*+-.^_`|~") {
+		t[c] = true
+	}
+	for c := byte('0'); c <= '9'; c++ {
+		t[c] = true
+	}
+	for c := byte('a'); c <= 'z'; c++ {
+		t[c] = true
+	}
+	for c := byte('A'); c <= 'Z'; c++ {
+		t[c] = true
+	}
+	return t
+}()
+
+// isTokenName reports whether name is a non-empty RFC 9110 §5.6.2 token — the
+// grammar every HTTP header field name obeys. A name outside it (a space, a
+// colon, CR/LF/NUL, any control byte) cannot be put on the wire without changing
+// the message: on HTTP/1.1 those bytes ARE the delimiters, and an HTTP/2->HTTP/1.1
+// downgrading intermediary re-serialising "X\r\nInjected: 1" produces a second
+// header line. http1.WriteRequest (validToken) and http3 (validFieldName) both
+// refuse such a name; validateRequest checked field VALUES for the same bytes but
+// never the NAME, so the HTTP/2 send path emitted it verbatim.
+func isTokenName(name []byte) bool {
+	if len(name) == 0 {
+		return false
+	}
+	for _, c := range name {
+		if !tokenChar[c] {
+			return false
+		}
+	}
+	return true
 }
 
 // firstInjectionPseudoField returns the name of the first synthesized

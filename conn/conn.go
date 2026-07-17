@@ -310,7 +310,15 @@ func (c *Conn) reservePushedStream(id uint32) (*Stream, error) {
 	if c.pushInflight >= c.opts.Settings.MaxConcurrentStreams {
 		return nil, ErrPushRefused
 	}
-	s := c.allocStream(c.opts.StreamEventBuffer, c.connRecvWindow)
+	// Seed the pushed stream's per-stream recv window from the value we
+	// advertised as SETTINGS_INITIAL_WINDOW_SIZE — the same seed NewStream uses —
+	// NOT from c.connRecvWindow. connRecvWindow is the CONNECTION window, a
+	// different quantity that fluctuates as inbound DATA is debited; seeding a
+	// per-stream window from it under-credited the push (badly once other streams
+	// have debited the connection window, or when InitialWindowSize is configured
+	// above the connection default), so the peer's legal push overran a window
+	// smaller than the one we told it about and got RST(FLOW_CONTROL_ERROR).
+	s := c.allocStream(c.opts.StreamEventBuffer, int32(c.opts.Settings.InitialWindowSize))
 	s.id = id
 	s.pushed = true
 	c.streams[id] = s
@@ -761,14 +769,14 @@ func (c *Conn) writeData(ctx context.Context, s *Stream, p []byte, endStream boo
 		}
 		c.wmu.Lock()
 		defer c.wmu.Unlock()
-		if padLen > 0 {
-			if err := c.fr.WriteDataPadded(s.id, true, nil, padLen); err != nil {
-				return err
-			}
-		} else {
-			if err := c.fr.WriteData(s.id, true, nil); err != nil {
-				return err
-			}
+		// A terminal empty DATA frame is sent unpadded even when DATA padding is
+		// enabled. An unpadded empty frame carries zero flow-controlled bytes, so
+		// it needs no send-window credit; padding it would put 1+padLen
+		// flow-controlled bytes (RFC 7540 §6.9.1) on the wire that this branch
+		// acquires no credit for — the under-debit that drifts our send window
+		// above the peer's. A zero-length frame is not worth padding for privacy.
+		if err := c.fr.WriteData(s.id, true, nil); err != nil {
+			return err
 		}
 		c.bumpFramesSent()
 		// Flush before the deferred Unlock so the empty END_STREAM DATA
@@ -797,7 +805,10 @@ func (c *Conn) writeData(ctx context.Context, s *Stream, p []byte, endStream boo
 		if want > effectiveMaxFrame {
 			want = effectiveMaxFrame
 		}
-		n, err := c.acquireSendCredits(ctx, s, want)
+		// padOverhead is charged against the send windows alongside the data
+		// bytes: WriteDataPadded emits n + 1 + padLen flow-controlled bytes, all
+		// of which the peer debits (RFC 7540 §6.9.1).
+		n, err := c.acquireSendCredits(ctx, s, want, padOverhead)
 		if err != nil {
 			return err
 		}
@@ -1015,7 +1026,7 @@ func (c *Conn) writeWindowUpdate(streamID uint32, increment uint32) error {
 // A context-cancellation watcher (context.AfterFunc) is registered only
 // when we actually need to block in cond.Wait, not on every call. This
 // avoids a goroutine + channel allocation per write chunk (F-P1-04).
-func (c *Conn) acquireSendCredits(ctx context.Context, s *Stream, want int) (int, error) {
+func (c *Conn) acquireSendCredits(ctx context.Context, s *Stream, want, padOverhead int) (int, error) {
 	if want <= 0 {
 		return 0, nil
 	}
@@ -1042,14 +1053,21 @@ func (c *Conn) acquireSendCredits(ctx context.Context, s *Stream, want int) (int
 		if connWin < avail {
 			avail = connWin
 		}
-		if avail > 0 {
+		// A padded DATA frame costs its data bytes PLUS the pad-length octet and
+		// the padding against both windows (RFC 7540 §6.9.1). Reserve room for the
+		// padding overhead and at least one data byte before committing; debit the
+		// whole frame cost so our windows track what the peer debits. padOverhead
+		// is 0 on the unpadded path, where this reduces to the original arithmetic.
+		if avail > int32(padOverhead) {
+			maxData := avail - int32(padOverhead)
 			n := int32(want)
-			if n > avail {
-				n = avail
+			if n > maxData {
+				n = maxData
 			}
-			c.peerConnSendWindow -= n
+			debit := n + int32(padOverhead)
+			c.peerConnSendWindow -= debit
 			s.mu.Lock()
-			s.sendWindow -= n
+			s.sendWindow -= debit
 			s.mu.Unlock()
 			return int(n), nil
 		}
