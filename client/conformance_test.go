@@ -257,9 +257,14 @@ func TestConformance_RFC7540_Sec6_8_PoolDrainsOnGoAway(t *testing.T) {
 	t.Fatalf("ActiveConns = %d, want 0 after peer shutdown", c.PoolStats().ActiveConns)
 }
 
-// TestConformance_RFC7540_Sec8_1_BodyStream_EndStream verifies that
-// the final DATA frame in a streaming response carries END_STREAM=1,
-// satisfying RFC 7540 §8.1 half-close semantics.
+// TestConformance_RFC7540_Sec8_1_BodyStream_EndStream checks RFC 7540 §8.1
+// half-close at the observable client-layer boundary: a streaming response whose
+// body reads to a clean io.EOF and whose Close returns nil ended cleanly — the
+// peer half-closed (END_STREAM) rather than the stream being reset. This layer
+// cannot see the DATA frame's END_STREAM flag directly; that wire-level assertion
+// lives in the conn/ frame tests. What it pins here is that the streaming API
+// surfaces a clean end as a clean end: the full payload, then EOF, then a
+// no-error Close — a truncated body or a mid-stream RST would break one of those.
 func TestConformance_RFC7540_Sec8_1_BodyStream_EndStream(t *testing.T) {
 	payload := []byte("conformance body")
 	_, addr := newTLSH2Server(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {

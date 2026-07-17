@@ -70,17 +70,23 @@ func TestBuildHeaders_SingleContentLength(t *testing.T) {
 // guard: with no BodyReader there is no managed Content-Length to append, so a
 // caller-supplied one must survive untouched. Stripping it would silently change
 // requests that were already correct.
+//
+// The witness value is a distinctive "42", not "0". buildHeaders' managed path
+// appends "Content-Length: 0" for a bodyless request that reaches it, so a "0"
+// here proves nothing — a strip-then-re-append bug and a correct pass-through
+// produce the identical ["0"]. "42" is a value the managed path never emits, so
+// it survives only if the caller's own field was carried through verbatim.
 func TestBuildHeaders_CallerContentLengthKeptWithoutBody(t *testing.T) {
 	req := &Request{
 		Method:  "POST",
 		Path:    "/",
-		Headers: []conn.HeaderField{{Name: []byte("Content-Length"), Value: []byte("0")}},
+		Headers: []conn.HeaderField{{Name: []byte("Content-Length"), Value: []byte("42")}},
 	}
 	var sp []conn.HeaderField
 	got := contentLengths(buildHeaders(req, "x.test", "https", &sp))
-	if len(got) != 1 || got[0] != "0" {
-		t.Errorf("content-length fields = %v, want exactly [\"0\"] — with no BodyReader "+
-			"nothing managed is appended, so the caller's field must pass through", got)
+	if len(got) != 1 || got[0] != "42" {
+		t.Errorf("content-length fields = %v, want exactly [\"42\"] — with no BodyReader "+
+			"nothing managed is appended, so the caller's field must pass through unchanged", got)
 	}
 }
 
