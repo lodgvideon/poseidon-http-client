@@ -95,6 +95,7 @@ non-ACK PING frames with `ACK=1` and the original 8-byte payload
 | §6.4    | Integration | TestIntegration_ContextCancel_TearsDownStream (context-cancel surfaces RST_STREAM(CANCEL)) |
 | §6.6    | Negative    | TestHandler_OnPushPromise_ReturnsConnError (PUSH_PROMISE rejected with PROTOCOL_ERROR while ENABLE_PUSH=0) |
 | §6.9.1  | Integration | TestIntegration_LargeBody_RefundsRecvWindow_NoStall (>65535-byte body completes only when WINDOW_UPDATE is emitted) |
+| §6.9 / §5.1 | Conformance | TestConformance_RFC7540_Sec6_9_DataOnEvictedStream_AccountsConnWindow (conn/) — DATA on a stream no longer in the registry (reset/evicted) still charges the connection window: "A receiver ... MUST always account for its contribution against the connection flow-control window ... even if the frame is in error"; "Flow-controlled frames (i.e., DATA) received after sending RST_STREAM are counted toward the connection flow-control window". OnData used to drop the frame with zero accounting, leaking the peer's send window until the pooled connection stalled |
 | §6.9.1  | Unit        | TestConn_OnData_EmitsWindowUpdate_OnceThresholdReached (per-stream + conn refund frames) |
 | §6.9.1  | Negative    | TestConn_OnData_PeerOverflowsConnWindow_ReturnsConnError, TestConn_OnData_PeerOverflowsStreamWindow_ReturnsStreamError |
 | §6.9.1  | Integration | TestIntegration_LargePOST_RespectsPeerSendWindow (200 KiB upload completes via WINDOW_UPDATE-driven send credit) |
