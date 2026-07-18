@@ -189,8 +189,16 @@ type Exchange struct {
 	reqChunked bool // sending chunked request body
 
 	// response side
-	statusCode  int
-	keepAlive   bool
+	statusCode int
+	keepAlive  bool
+	// closeSeen latches once any Connection field line carried a "close"
+	// option. RFC 9110 §5.3 combines repeated Connection field lines into one
+	// value, so "close" then "keep-alive" arriving on separate lines means
+	// "close, keep-alive" — close wins and the connection must not be reused.
+	// Without this latch, a later "keep-alive" line would overwrite the earlier
+	// "close" verdict (the same order-independence problem clSeen/clErr solve
+	// for Content-Length).
+	closeSeen   bool
 	respChunked bool
 	// clSeen, clValue and clErr accumulate the Content-Length decision across
 	// the header block instead of committing to it line by line. RFC 9112 §6.3
@@ -606,6 +614,7 @@ func (ex *Exchange) ReadResponse(ctx context.Context) (statusCode int, headers [
 	ex.statusCode = statusCode
 	// RFC 2616 §8.1: HTTP/1.1 defaults to persistent; HTTP/1.0 defaults to close.
 	ex.keepAlive = proto == "HTTP/1.1"
+	ex.closeSeen = false
 	ex.contentLen = -1
 
 	headers = make([]hpack.HeaderField, 0, 12)
@@ -1234,7 +1243,8 @@ func (ex *Exchange) commitHeaderLine(line string, have bool, out *[]hpack.Header
 				lower := strings.ToLower(value)
 				if strings.Contains(lower, "close") {
 					ex.keepAlive = false
-				} else if strings.Contains(lower, "keep-alive") {
+					ex.closeSeen = true
+				} else if strings.Contains(lower, "keep-alive") && !ex.closeSeen {
 					ex.keepAlive = true
 				}
 			}
