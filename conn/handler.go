@@ -475,16 +475,42 @@ func (h *connHandler) OnPriority(_ frame.FrameHeader, _ frame.Priority) error {
 	return nil // deprecated by RFC 9113; ignored
 }
 
-// OnRSTStream implements frame.Handler.
+// OnRSTStream implements frame.Handler. A peer RST_STREAM moves the stream to
+// "closed" in both directions (RFC 7540 §5.1): the client can no longer send on
+// it, so its local half is done too. markStreamDone releases the inflight slot
+// and evicts the stream only once both ends have ended, so localEnded is forced
+// here. Without it a stream reset mid-upload held its MAX_CONCURRENT_STREAMS slot
+// until the caller happened to call Stream.Close(), leaking slots and registry
+// entries on a long-lived conn.
+//
+// Ordering is load-bearing against a concurrent Stream.Close():
+//
+//   - The EventReset is pushed FIRST, while the stream is not yet bothEnded, so
+//     it can never race Close() -> recycleStream (which rewrites s.events with no
+//     lock held) or land on a recycled/reused struct.
+//   - remoteEnded, localEnded and closed are set together in ONE s.mu section.
+//     Close() returns early when it observes closed and only recycles when
+//     !closed && bothEnded (== localEnded && remoteEnded). remoteEnded is set
+//     here in the same hold as closed, so Close() can never observe
+//     bothEnded && !closed: it either sees closed (no-op) or sees remoteEnded
+//     still false (sends its own CANCEL, never recycles). This holds regardless
+//     of localEnded's prior value — a request whose upload already completed has
+//     localEnded==true before the RST, so setting remoteEnded in a section
+//     separate from closed would leave a window where a concurrent Close() sees
+//     bothEnded && !closed and recycles the stream out from under this handler.
 func (h *connHandler) OnRSTStream(fh frame.FrameHeader, code frame.ErrCode) error {
 	h.streams.bumpFramesReceived()
 	s := h.streams.lookupStream(fh.StreamID)
 	if s == nil {
 		return nil
 	}
-	s.markRemoteEnd()
-	h.streams.markStreamDone(fh.StreamID)
 	s.push(StreamEvent{Type: EventReset, RSTCode: code, EndStream: true})
+	s.mu.Lock()
+	s.remoteEnded = true
+	s.localEnded = true
+	s.closed = true
+	s.mu.Unlock()
+	h.streams.markStreamDone(fh.StreamID)
 	return nil
 }
 
