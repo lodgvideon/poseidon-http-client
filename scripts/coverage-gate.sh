@@ -26,6 +26,15 @@ fi
 # code) so they don't trip the per-package floor at 0%.
 PKG_TABLE=$(go test -cover ./... 2>&1 | grep -E '\bcoverage:' | grep -v '/examples/' || true)
 
+# A package with no _test.go emits no `coverage:` row, so it silently drops out
+# of BOTH the per-package floor (the grep above discards it) and the `total:`
+# figure (it is never instrumented into the profile). That lets the worst case —
+# a package whose only test was deleted — pass at effectively 0% while the gate
+# prints "all ... >= MIN". `go list` reports test-less packages deterministically
+# (its output format does not vary with the toolchain the way `go test`'s
+# "[no test files]" line does); any non-examples one is a hard 0% failure.
+NO_TEST_PKGS=$(go list -f '{{if and (eq (len .TestGoFiles) 0) (eq (len .XTestGoFiles) 0)}}{{.ImportPath}}{{end}}' ./... 2>/dev/null | grep -v '/examples/' || true)
+
 if [[ -z "$PKG_TABLE" ]]; then
   echo "coverage-gate: 'go test -cover ./...' produced no coverage rows" >&2
   exit 2
@@ -53,6 +62,16 @@ awk -v p="$OVERALL" -v m="$MIN" 'BEGIN { if (p+0 < m+0) exit 1 }' || {
   echo "coverage-gate: FAIL total coverage ${OVERALL}% < ${MIN}%" >&2
   FAIL=1
 }
+
+# A non-examples package with no test files is 0% coverage that the rows above
+# cannot see — fail on it explicitly.
+if [[ -n "$NO_TEST_PKGS" ]]; then
+  while IFS= read -r pkg; do
+    [[ -z "$pkg" ]] && continue
+    echo "coverage-gate: FAIL $pkg has no test files (0% < ${MIN}%)" >&2
+    FAIL=1
+  done <<< "$NO_TEST_PKGS"
+fi
 
 if [[ "$FAIL" -ne 0 ]]; then
   exit 1
