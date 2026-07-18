@@ -56,7 +56,7 @@ func DecodeResponseHeaders(dec *qpack.Decoder, dt *qpack.DynamicTable, fieldSect
 			haveStatus = true
 			return nil
 		}
-		if !validFieldName(name) || !validFieldValue(value) || forbiddenField(name, value) {
+		if !validFieldName(name) || !validFieldValue(value) || forbiddenResponseField(name) {
 			return ErrH3Message
 		}
 		sawRegular = true
@@ -93,7 +93,7 @@ func DecodeTrailers(dec *qpack.Decoder, dt *qpack.DynamicTable, fieldSection []b
 		if len(name) == 0 || name[0] == ':' {
 			return ErrH3Message // trailers carry no pseudo-headers (§4.3)
 		}
-		if !validFieldName(name) || !validFieldValue(value) || forbiddenField(name, value) {
+		if !validFieldName(name) || !validFieldValue(value) || forbiddenResponseField(name) {
 			return ErrH3Message
 		}
 		fields = append(fields, hpack.HeaderField{

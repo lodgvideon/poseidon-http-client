@@ -96,7 +96,7 @@ func (r *Request) EncodeHeaders(enc *qpack.Encoder, dst []byte, maxFieldSection 
 
 	for i := range r.Headers {
 		h := r.Headers[i]
-		if !validFieldName(h.Name) || !validFieldValue(h.Value) || forbiddenField(h.Name, h.Value) {
+		if !validFieldName(h.Name) || !validFieldValue(h.Value) || forbiddenRequestField(h.Name, h.Value) {
 			return nil, ErrH3Message
 		}
 		fields = append(fields, h)

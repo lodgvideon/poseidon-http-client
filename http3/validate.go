@@ -39,15 +39,39 @@ func validFieldValue(value []byte) bool {
 	return true
 }
 
-// forbiddenField reports whether a field is prohibited in HTTP/3 (RFC 9114
-// §4.2): the connection-specific header fields, and "te" with any value other
-// than "trailers".
-func forbiddenField(name, value []byte) bool {
+// connectionSpecificField reports whether name is one of the connection-specific
+// header fields RFC 9114 §4.2 forbids in HTTP/3 in either direction: "any message
+// containing connection-specific fields MUST be treated as malformed." "te" is
+// excluded here because it is the one field whose treatment differs by direction
+// (see forbiddenRequestField / forbiddenResponseField).
+func connectionSpecificField(name []byte) bool {
 	switch string(name) {
 	case "connection", "transfer-encoding", "keep-alive", "upgrade", "proxy-connection":
 		return true
-	case "te":
-		return string(value) != "trailers"
 	}
 	return false
+}
+
+// forbiddenRequestField reports whether a field is prohibited in an HTTP/3
+// REQUEST (RFC 9114 §4.2). "te" is allowed here iff its value is exactly
+// "trailers": "The only exception to this is the TE header field, which MAY be
+// present in an HTTP/3 request header; when it is, it MUST NOT contain any value
+// other than "trailers"."
+func forbiddenRequestField(name, value []byte) bool {
+	if string(name) == "te" {
+		return string(value) != "trailers"
+	}
+	return connectionSpecificField(name)
+}
+
+// forbiddenResponseField reports whether a field is prohibited in an HTTP/3
+// RESPONSE or trailer section (RFC 9114 §4.2). The §4.2 te exception is scoped to
+// a request ("an HTTP/3 request header"), so a response carrying "te" at ANY
+// value is a connection-specific field and therefore malformed. Splitting the two
+// directions is exactly what conn/validate.go did for HTTP/2; sharing one helper
+// let the request-only te:trailers exemption leak onto the response and trailer
+// receive paths, silently accepting a malformed response and forwarding a
+// hop-by-hop te header downstream.
+func forbiddenResponseField(name []byte) bool {
+	return string(name) == "te" || connectionSpecificField(name)
 }
