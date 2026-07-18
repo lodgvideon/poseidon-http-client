@@ -478,8 +478,16 @@ func (c *Conn) Shutdown(gracefulTimeout time.Duration) error {
 		c.fcOutCond.Broadcast()
 	}
 	c.fcOutMu.Unlock()
-	// If no in-flight streams, close immediately. Otherwise wait.
-	if c.inflight == 0 {
+	// If no in-flight streams, close immediately. Otherwise wait. Read
+	// c.inflight under c.smu — the reader goroutine decrements it under the
+	// same lock as responses complete (markStreamDone -> releaseSlotLocked), so
+	// a lock-free read here races that write. draining is already set (above),
+	// so a stream that completes after this read still closes drainDone and the
+	// select below observes it; no wakeup is lost.
+	c.smu.Lock()
+	noInflight := c.inflight == 0
+	c.smu.Unlock()
+	if noInflight {
 		return c.Close()
 	}
 	timer := time.NewTimer(gracefulTimeout)
