@@ -387,6 +387,8 @@ func validateFields(method, path, authority string, fields []hpack.HeaderField) 
 func (ex *Exchange) WriteRequest(ctx context.Context, fields []hpack.HeaderField, endStream bool) error {
 	var method, path, authority string
 	var hasContentLength bool
+	var clCount int
+	var clValue string
 
 	for _, f := range fields {
 		switch string(f.Name) {
@@ -415,6 +417,8 @@ func (ex *Exchange) WriteRequest(ctx context.Context, fields []hpack.HeaderField
 			// name costs no allocation on the request hot path.
 			if asciiEqualFold(f.Name, "content-length") {
 				hasContentLength = true
+				clCount++
+				clValue = string(f.Value)
 			}
 		}
 	}
@@ -433,6 +437,25 @@ func (ex *Exchange) WriteRequest(ctx context.Context, fields []hpack.HeaderField
 		return err
 	}
 	ex.method = method
+
+	// RFC 9110 §5.3 makes Content-Length a singleton field; two field lines are
+	// the CL.CL request-smuggling primitive (RFC 9112 §11.2) when they disagree
+	// and are never legitimate for a sender to emit. Refuse rather than pick one.
+	if clCount > 1 {
+		return fmt.Errorf("%w: %d Content-Length header fields; a request must carry at most one (RFC 9110 §5.3, RFC 9112 §11.2)",
+			ErrInvalidRequest, clCount)
+	}
+	// RFC 9110 §8.6: a sender MUST NOT emit a Content-Length it knows to be
+	// incorrect. endStream means no body follows, so a non-zero caller
+	// Content-Length declares octets that will never be written — a CL.0 desync
+	// on a reused connection, where the peer reads the next request's bytes as
+	// this phantom body. A caller "0" is fine (declares and sends nothing).
+	if endStream && hasContentLength {
+		if n, err := strconv.Atoi(strings.TrimSpace(clValue)); err != nil || n != 0 {
+			return fmt.Errorf("%w: Content-Length %q on a request with no body (RFC 9110 §8.6)",
+				ErrInvalidRequest, clValue)
+		}
+	}
 
 	// Determine how to frame the request body.
 	if !endStream && !hasContentLength {

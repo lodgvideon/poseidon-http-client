@@ -106,22 +106,28 @@ func TestConformance_RFC9112_Sec6_1_NoContentLengthWithTransferEncoding(t *testi
 }
 
 // TestConformance_RFC9112_Sec6_1_SingleContentLengthOnBodylessPost pins that a
-// bodyless POST carrying a caller-supplied Content-Length emits exactly one.
+// bodyless POST carrying a caller-supplied Content-Length: 0 emits exactly one.
 //
 // The client appends its own "Content-Length: 0" for POST/PUT/PATCH so strict
 // servers accept a bodyless request, but did so without checking whether the
 // caller had already supplied one — which the field loop had already written.
 // Two disagreeing Content-Length lines is the CL.CL desync (RFC 9112 §11.2,
 // and §6.3 rule 5 on the receiving end) emitted by us.
+//
+// The caller value is 0 because that is the only Content-Length that agrees with
+// a bodyless request: a non-zero Content-Length with no body is itself a §8.6
+// desync and is now refused outright (see
+// TestConformance_RFC9110_Sec8_6_ContentLengthWithoutBodyRejected), so a caller
+// "0" is the case where the append-vs-caller de-duplication still has to hold.
 func TestConformance_RFC9112_Sec6_1_SingleContentLengthOnBodylessPost(t *testing.T) {
 	for _, method := range []string{"POST", "PUT", "PATCH"} {
 		t.Run(method, func(t *testing.T) {
 			head := requestHead(t, method, true,
-				hpack.HeaderField{Name: []byte("Content-Length"), Value: []byte("5")})
+				hpack.HeaderField{Name: []byte("Content-Length"), Value: []byte("0")})
 			if n := countFieldLines(head, "content-length"); n != 1 {
 				t.Errorf("%d Content-Length field lines, want 1:\n%s\n"+
-					"two disagreeing values let a front end and a back end frame this "+
-					"request differently", n, head)
+					"the client must not append its own Content-Length: 0 when the "+
+					"caller already supplied one", n, head)
 			}
 		})
 	}
