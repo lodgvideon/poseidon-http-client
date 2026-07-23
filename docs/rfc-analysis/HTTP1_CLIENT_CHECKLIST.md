@@ -1,0 +1,835 @@
+# HTTP/1.1 Client Conformance Checklist (RFC 9110 + 9112, 2026)
+
+_Client-relevant normative obligations only (client_relevant = true), level in MUST / MUST NOT / REQUIRED / SHOULD / SHOULD NOT / RECOMMENDED. Source: double-verified facts catalog. Use for final reconciliation against the `http1/` package. **163 hard (MUST-family), 93 soft (SHOULD-family), 256 total.**_
+
+## RFC 9112  section 1-2
+
+- [ ] `9112 1-2-19` **MUST** - If a request body is deliberately terminated with a line-ending, the user agent must count those CRLF octets in the message body length.
+  - _RFC:_ the user agent MUST count the terminating CRLF octets as part of the message body length
+  - _check:_ Content-Length (or chunk size) must include any trailing CRLF the caller put in the body; the client never appends CRLF outside the declared length.
+- [ ] `9112 1-2-21` **MUST NOT** - A sender must not put whitespace between the start-line and the first header field.
+  - _RFC:_ A sender MUST NOT send whitespace between the start-line and the first header field.
+  - _check:_ Serializer writes the first field line immediately after request-line CRLF with no leading SP/HTAB; reject field names starting with whitespace.
+- [ ] `9112 1-2-22` **MUST** - A recipient seeing whitespace between the start-line and the first header field must reject the message or consume (ignore) each whitespace-preceded line until a proper field or end of headers.
+  - _RFC:_ MUST either reject the message as invalid or consume each whitespace-preceded line without further processing of it
+  - _check:_ Response parser hitting a SP/HTAB-prefixed line directly after the status-line must error the response or skip that line and all subsequent whitespace-prefixed lines — never interpret it as a field (response-splitting defense).
+- [ ] `9112 1-2-18` **MUST NOT** - An HTTP/1.1 user agent must not send an extra CRLF before or after a request.
+  - _RFC:_ An HTTP/1.1 user agent MUST NOT preface or follow a request with an extra CRLF.
+  - _check:_ Serializer emits no leading CRLF before the request-line and no trailing CRLF after the message body; assert wire bytes in tests.
+- [ ] `9112 1-2-14` **MUST** - A recipient must parse HTTP messages as octet sequences in a US-ASCII-superset encoding, never as Unicode character streams.
+  - _RFC:_ A recipient MUST parse an HTTP message as a sequence of octets in an encoding that is a superset of US-ASCII [USASCII].
+  - _check:_ Parse on raw []byte; never decode the wire bytes to string/UTF-8 before field lines are delineated (Go []byte parsing satisfies this — verify no early string conversion).
+- [ ] `9112 1-2-16` **MUST NOT** - A sender must never emit a bare CR (CR not followed by LF) in any protocol element outside the content.
+  - _RFC:_ A sender MUST NOT generate a bare CR (a CR character not immediately followed by LF) within any protocol elements other than the content.
+  - _check:_ Reject or sanitize CR in caller-supplied method, target, field names/values before serialization; only body bytes may contain lone CR.
+- [ ] `9112 1-2-17` **MUST** - A recipient of a bare CR must treat the element as invalid or replace each bare CR with SP before processing or forwarding.
+  - _RFC:_ A recipient of such a bare CR MUST consider that element to be invalid or replace each bare CR with SP before processing the element or forwarding the message.
+  - _check:_ Response parser must detect lone CR inside status-line/field-lines and either error the message or substitute SP — it must not pass bare CR through untouched.
+
+## RFC 9112  section 3
+
+- [ ] `9112 3-20` **MUST** - When making a request to a proxy (other than CONNECT or server-wide OPTIONS), the client must send the target URI in absolute-form.
+  - _RFC:_ a client MUST send the target URI in "absolute-form" as the request-target
+  - _check:_ If the transport goes through a configured HTTP proxy, serialize the full absolute-URI as the request-target instead of origin-form.
+- [ ] `9112 3-19` **MUST** - If the target URI's path component is empty, the client must send "/" as the origin-form path.
+  - _RFC:_ If the target URI's path component is empty, the client MUST send "/" as the path within the origin-form of request-target.
+  - _check:_ Map empty path to "/" (e.g. "http://example.com" becomes "GET / HTTP/1.1"); never emit an empty request-target.
+- [ ] `9112 3-29` **MUST** - For CONNECT, the client must send only the host and port of the tunnel destination as the request-target.
+  - _RFC:_ a client MUST send only the host and port of the tunnel destination as the request-target
+  - _check:_ CONNECT request-target is host:port only — no scheme, no userinfo, no path, no query.
+- [ ] `9112 3-22` **MUST** - A client must send a Host header even when the request-target is in absolute-form.
+  - _RFC:_ A client MUST send a Host header field in an HTTP/1.1 request even if the request-target is in the absolute-form
+  - _check:_ Do not suppress Host on proxied absolute-form requests; emit both the absolute-URI target and a matching Host field.
+- [ ] `9112 3-33` **MUST** - For a server-wide OPTIONS request, the client must send only "*" as the request-target.
+  - _RFC:_ the client MUST send only "*" (%x2A) as the request-target
+  - _check:_ API for server-wide OPTIONS must serialize `OPTIONS * HTTP/1.1`; do not substitute "/" or the absolute URI.
+- [ ] `9112 3-13` **MUST** - A client must send a Host header field in every HTTP/1.1 request message.
+  - _RFC:_ A client MUST send a Host header field (Section 7.2 of [HTTP]) in all HTTP/1.1 request messages.
+  - _check:_ Unconditionally add Host to every request the client serializes; there is no code path that may omit it.
+- [ ] `9112 3-18` **MUST** - For direct-to-origin requests (other than CONNECT or server-wide OPTIONS), the client must send only the absolute path and query of the target URI.
+  - _RFC:_ a client MUST send only the absolute path and query components of the target URI as the request-target
+  - _check:_ When not talking to a proxy, strip scheme+authority and send path?query only; authority goes in Host.
+- [ ] `9112 3-15` **MUST** - If the target URI's authority component is missing or undefined, the client must send a Host header with an empty field value.
+  - _RFC:_ If the authority component is missing or undefined for the target URI, then a client MUST send a Host header field with an empty field value.
+  - _check:_ For authority-less URIs emit `Host:` with empty value rather than omitting the field.
+- [ ] `9112 3-14` **MUST** - If the target URI has an authority component, the Host field value must be identical to it, minus any userinfo and its "@".
+  - _RFC:_ a client MUST send a field value for Host that is identical to that authority component, excluding any userinfo subcomponent and its "@" delimiter
+  - _check:_ Derive Host verbatim from the URI authority (host[:port]); strip userinfo@ if present; do not re-case or re-encode.
+- [ ] `9112 3-6` RECOMMENDED - All HTTP senders and recipients are recommended to support request-lines of at least 8000 octets.
+  - _RFC:_ It is RECOMMENDED that all HTTP senders and recipients support, at a minimum, request-line lengths of 8000 octets.
+  - _check:_ Client's request serializer must build and send request-lines up to at least 8000 octets without truncating or erroring.
+
+## RFC 9112  section 4-5
+
+- [ ] `9112 4-5-21` **MUST NOT** - A sender must not generate a message whose field line values contain line folding, unless it is packaged within message/http.
+  - _RFC:_ A sender MUST NOT generate a message that includes line folding (i.e., that has any field line value that contains a match to the obs-fold rule)
+  - _check:_ Request serializer must reject or refuse field values containing CR/LF sequences that would form obs-fold; never emit multi-line header values.
+- [ ] `9112 4-5-24` **MUST** - A user agent receiving obs-fold in a response (outside message/http) must replace each obs-fold with one or more SP octets before interpreting the field value.
+  - _RFC:_ A user agent that receives an obs-fold in a response message that is not within a "message/http" container MUST replace each received obs-fold with one or more SP octets prior to interpreting the field value
+  - _check:_ Client response parser MUST unfold: on CRLF followed by SP/HTAB, splice the continuation into the current value with SP replacing the fold — the user-agent rule offers no reject alternative. Test with a folded header from the server.
+- [ ] `9112 4-5-9` **MUST** - A server must send the SP separating status-code from reason-phrase even when the reason-phrase is absent, so the status-line ends with a space.
+  - _RFC:_ A server MUST send the space that separates the status-code from the reason-phrase even when the reason-phrase is absent
+  - _check:_ Client parser must accept 'HTTP/1.1 200 ' (trailing SP, empty reason-phrase) as valid; combined with 4-5-3 it may also tolerate the SP being absent.
+- [ ] `9112 4-5-8` SHOULD - A client should ignore the content of the reason phrase because it is not a reliable information channel.
+  - _RFC:_ A client SHOULD ignore the reason-phrase content
+  - _check:_ Never base client logic (retry, error classification, etc.) on the reason phrase; at most retain it for logging/debugging.
+
+## RFC 9112  section 6
+
+- [ ] `9112 6-36` **MUST** - Rule 6: if the sender closes or the recipient times out before the declared number of octets arrive, the recipient must consider the message incomplete and close the connection.
+  - _RFC:_ If the sender closes the connection or the recipient times out before the indicated number of octets are received, the recipient MUST consider the message to be incomplete and close the connection.
+  - _check:_ EOF or timeout with fewer than Content-Length octets read → report a truncated/incomplete-body error (not a successful short body) and close; never return the partial body as complete.
+- [ ] `9112 6-34` **MUST** - Rule 5: if the unrecoverable error is in a response received by a user agent, it must close the connection to the server and discard the received response.
+  - _RFC:_ the user agent MUST close the connection to the server and discard the received response
+  - _check:_ On invalid Content-Length in a response (not saved by the identical-list exception): surface an error to the caller, deliver no body, and close/evict the connection — never guess a length.
+- [ ] `9112 6-31` **MUST** - Rule 5: without Transfer-Encoding, an invalid Content-Length makes the framing invalid and the recipient must treat it as an unrecoverable error — unless the value parses as a comma-separated list whose members are all valid and all identical, in which case that single value is used.
+  - _RFC:_ the message framing is invalid and the recipient MUST treat it as an unrecoverable error, unless the field value can be successfully parsed as a comma-separated list
+  - _check:_ Content-Length validator: strict decimal parse; on failure, try comma-list — accept only if every element is a valid identical value (also covers repeated CL field lines); anything else is an unrecoverable framing error.
+- [ ] `9112 6-46` **MUST NOT** - A client must not process, cache, or forward extra data left after a completed response as if it were a separate response (cache-poisoning risk).
+  - _RFC:_ A client MUST NOT process, cache, or forward such extra data as a separate response
+  - _check:_ Never parse leftover bytes beyond the last expected response as a new response; there must be an outstanding request for a response to be attributed to — otherwise discard and close.
+- [ ] `9112 6-44` **MUST NOT** - A client must not use the chunked transfer coding unless it knows the server handles HTTP/1.1 (or later) requests.
+  - _RFC:_ A client MUST NOT use the chunked transfer coding unless it knows the server will handle HTTP/1.1 (or later) requests
+  - _check:_ Gate chunked request bodies on known server HTTP/1.1 support (configuration or remembered response version); otherwise buffer to compute Content-Length.
+- [ ] `9112 6-43` **MUST** - A user agent sending a request with a body must include either a valid Content-Length or use the chunked transfer coding.
+  - _RFC:_ A user agent that sends a request that contains a message body MUST send either a valid Content-Length header field or use the chunked transfer coding.
+  - _check:_ Serializer invariant: any non-empty request body implies exactly one of a valid Content-Length or Transfer-Encoding ending in chunked; refuse to send a bodied request with neither.
+- [ ] `9112 6-25` **MUST** - Rule 2: a client must ignore any Content-Length or Transfer-Encoding fields received in a 2xx response to CONNECT.
+  - _RFC:_ A client MUST ignore any Content-Length or Transfer-Encoding header fields received in such a message.
+  - _check:_ In the 2xx-to-CONNECT path, discard CL/TE from the framing decision entirely (do not read a body, do not error); tunnel starts right after the header section.
+- [ ] `9112 6-6` **MUST** - Every recipient must be able to parse the chunked transfer coding.
+  - _RFC:_ A recipient MUST be able to parse the chunked transfer coding
+  - _check:_ Client must implement a full chunked decoder (chunk-size hex, extensions, last-chunk, trailer section, terminating CRLF) for response bodies.
+- [ ] `9112 6-8` **MUST** - If any non-chunked transfer coding is applied to a request's content, the sender must apply chunked as the final transfer coding.
+  - _RFC:_ If any transfer coding other than chunked is applied to a request's content, the sender MUST apply chunked as the final transfer coding
+  - _check:_ If the client ever emits gzip/other transfer codings on a request, it must append chunked last (e.g. 'Transfer-Encoding: gzip, chunked'); never send a request whose TE list does not end in chunked.
+- [ ] `9112 6-7` **MUST NOT** - A sender must not apply the chunked coding more than once to the same message body.
+  - _RFC:_ A sender MUST NOT apply the chunked transfer coding more than once to a message body
+  - _check:_ Emitter must never produce Transfer-Encoding with 'chunked' listed twice; reject/refuse to build such a request.
+- [ ] `9112 6-21` **MUST NOT** - A sender must not send Content-Length in any message that contains a Transfer-Encoding header field.
+  - _RFC:_ A sender MUST NOT send a Content-Length header field in any message that contains a Transfer-Encoding header field.
+  - _check:_ Request serializer must enforce mutual exclusion: if Transfer-Encoding is set, strip/refuse any Content-Length (and vice versa).
+- [ ] `9112 6-19` **MUST** - A server or client receiving an HTTP/1.0 message containing Transfer-Encoding must treat the framing as faulty and close the connection after processing the message.
+  - _RFC:_ MUST treat the message as if the framing is faulty, even if a Content-Length is present, and close the connection after processing the message
+  - _check:_ If a response line says HTTP/1.0 and Transfer-Encoding is present, ignore any Content-Length, treat framing as faulty, and mark the connection not-reusable (close after processing).
+- [ ] `9112 6-15` **MUST NOT** - A client must not send Transfer-Encoding in a request unless it knows the server handles HTTP/1.1 or later.
+  - _RFC:_ A client MUST NOT send a request containing Transfer-Encoding unless it knows the server will handle HTTP/1.1 requests (or later minor revisions)
+  - _check:_ Gate chunked/TE request emission on known server HTTP/1.1 support (configuration or a remembered prior response version); default to Content-Length otherwise.
+- [ ] `9112 6-42` SHOULD - Unless a non-chunked transfer coding was applied, a client sending a request body should use a valid Content-Length when the length is known in advance, rather than chunked.
+  - _RFC:_ a client that sends a request containing a message body SHOULD use a valid Content-Length header field if the message body length is known in advance
+  - _check:_ Request builder default: known-length body → Content-Length; use chunked only for unknown-length/streamed bodies.
+
+## RFC 9112  section 7
+
+- [ ] `9112 7-18` **MUST NOT** - A recipient must not merge a trailer field into the header section unless the field's definition explicitly permits and instructs safe merging.
+  - _RFC:_ A recipient MUST NOT merge a received trailer field into the header section unless its corresponding header field definition explicitly permits and instructs how the trailer field value can be safely merged.
+  - _check:_ Never auto-merge trailers into response headers; absent per-field merge knowledge, always keep them separate (satisfies 7-17 too).
+- [ ] `9112 7-17` **MUST** - A recipient retaining a trailer field must either store/forward it separately from header fields or merge it into the header section.
+  - _RFC:_ A recipient that retains a received trailer field MUST either store/forward the trailer field separately from the received header fields or merge the received trailer field into the header section.
+  - _check:_ If trailers are exposed in the response API, keep them in a distinct trailers collection, not silently appended to the header list.
+- [ ] `9112 7-35` **MUST** - A sender of TE must also send a "TE" connection option in the Connection header field.
+  - _RFC:_ a sender of TE MUST also send a "TE" connection option within the Connection header field (Section 7.6.1 of [HTTP]) in order to prevent the TE header field from being forwarded
+  - _check:_ Whenever the request includes a TE header, automatically add "TE" to the Connection header (emit "Connection: TE" or append to existing list).
+- [ ] `9112 7-29` **MUST NOT** - A client must not send "chunked" in TE; chunked is always acceptable to HTTP/1.1 recipients.
+  - _RFC:_ A client MUST NOT send the chunked transfer coding name in TE; chunked is always acceptable for HTTP/1.1 recipients.
+  - _check:_ TE emitter must filter/refuse "chunked" as a member; validate user-supplied TE values against this.
+- [ ] `9112 7-8` **MUST** - A recipient must be able to parse and decode chunked transfer coding.
+  - _RFC:_ A recipient MUST be able to parse and decode the chunked transfer coding.
+  - _check:_ Chunked response decoding is mandatory in the client; it cannot be feature-flagged off or rejected.
+- [ ] `9112 7-9` **MUST** - Recipients must guard chunk-size parsing against integer overflow and precision loss from large hexadecimal numerals.
+  - _RFC:_ recipients MUST anticipate potentially large hexadecimal numerals and prevent parsing errors due to integer conversion overflows or precision loss due to integer representation
+  - _check:_ Bound chunk-size parse: detect uint64 overflow (or cap accepted hex digits) and fail the message cleanly instead of wrapping/truncating.
+- [ ] `9112 7-13` **MUST** - A recipient must ignore unrecognized chunk extensions.
+  - _RFC:_ A recipient MUST ignore unrecognized chunk extensions.
+  - _check:_ Parse-and-discard unknown chunk extensions without failing the message; ignoring is mandatory, not optional.
+- [ ] `9112 7-22` SHOULD - Parameters on the compression codings should be treated as an error.
+  - _RFC:_ The presence of parameters with any of these compression codings SHOULD be treated as an error.
+  - _check:_ Reject transfer-coding values like "gzip;q=x" appearing in Transfer-Encoding (q in TE is a pseudo-parameter, not a coding parameter).
+- [ ] `9112 7-10` SHOULD - The chunked coding defines no parameters; their presence should be treated as an error.
+  - _RFC:_ The chunked coding does not define any parameters. Their presence SHOULD be treated as an error.
+  - _check:_ Reject Transfer-Encoding values like "chunked;foo=bar" (parameters on the coding name, distinct from per-chunk chunk-ext).
+
+## RFC 9112  section 8-9
+
+- [ ] `9112 8-9-71` **MUST** - Clients must send a TLS closure alert before closing the connection.
+  - _RFC:_ Clients MUST send a closure alert before closing the connection.
+  - _check:_ Connection close path for TLS must call CloseWrite/close_notify (Go crypto/tls Conn.Close does this) — never bare TCP close on a TLS connection.
+- [ ] `9112 8-9-34` **MUST NOT** - When retrying pipelined requests after a failed connection, the client must not pipeline immediately after establishing the new connection.
+  - _RFC:_ When retrying pipelined requests after a failed connection (a connection not explicitly closed by the server in its last complete response), a client MUST NOT pipeline immediately after connection establishment
+  - _check:_ On the retry connection, send only the first remaining request and wait for its response before pipelining again (TCP reset can erase an error response).
+- [ ] `9112 8-9-26` **MUST** - A client must read the entire response body before reusing the connection for a subsequent request.
+  - _RFC:_ a client MUST read the entire response message body if it intends to reuse the same connection for a subsequent request.
+  - _check:_ Before returning a connection to the pool, fully drain (or verify fully read) the response body; if the caller abandoned the body, close instead of reuse.
+- [ ] `9112 8-9-51` **MUST NOT** - A client that sends "close" must not send further requests on that connection.
+  - _RFC:_ A client that sends a "close" connection option MUST NOT send further requests on that connection (after the one containing the "close")
+  - _check:_ Once a request with Connection: close is written, mark the connection non-reusable so the pool never schedules another request on it.
+- [ ] `9112 8-9-64` **MUST** - All HTTP data over TLS must be sent as TLS application data; the connection is otherwise treated normally, including persistent reuse.
+  - _RFC:_ All HTTP data MUST be sent as TLS "application data"
+  - _check:_ Write HTTP bytes only through the TLS record layer as application data; keep-alive/pooling rules apply identically to TLS connections.
+- [ ] `9112 8-9-58` **MUST** - A client receiving "close" must stop sending requests on that connection and close it after reading the close-bearing response.
+  - _RFC:_ A client that receives a "close" connection option MUST cease sending requests on that connection and close the connection after reading the response message containing the "close" connection option
+  - _check:_ On Connection: close in a response: immediately bar new requests on that connection, finish reading that response body, then close and evict from pool.
+- [ ] `9112 8-9-52` **MUST** - A client that sends "close" must close the connection after reading the final response to that request.
+  - _RFC:_ MUST close the connection after reading the final response message corresponding to this request.
+  - _check:_ After the final (non-1xx) response to a close-flagged request is fully read, actively close the connection (for TLS, per 8-9-71/72).
+- [ ] `9112 8-9-11` **MUST** - A client with more than one outstanding request on a connection must maintain a list of those requests in the order sent.
+  - _RFC:_ A client that has more than one outstanding request on a connection MUST maintain a list of outstanding requests in the order sent
+  - _check:_ If pipelining is ever enabled, keep an ordered FIFO queue of in-flight requests per connection.
+- [ ] `9112 8-9-2` **MUST** - A client receiving an incomplete response (premature close or failed chunked decoding) must record the message as incomplete.
+  - _RFC:_ A client that receives an incomplete response message, which can occur when a connection is closed prematurely or when decoding a supposedly chunked transfer coding fails, MUST record the message as incomplete.
+  - _check:_ Response object/error path must carry an explicit incomplete flag when body ends early or chunked decode fails; never silently return truncated body as complete.
+- [ ] `9112 8-9-13` **MUST NOT** - Data received on a connection with no outstanding requests must not be treated as a valid response.
+  - _RFC:_ If a client receives data on a connection that doesn't have outstanding requests, the client MUST NOT consider that data to be a valid response
+  - _check:_ Bytes arriving on an idle pooled connection must never be parsed as a response for a later request; mark the connection unusable.
+- [ ] `9112 8-9-12` **MUST** - A client must associate each received response to the first outstanding request that has not yet received a final (non-1xx) response.
+  - _RFC:_ MUST associate each received response message on that connection to the first outstanding request that has not yet received a final (non-1xx) response.
+  - _check:_ Match responses to queue head; a 1xx does not pop the queue — only the final non-1xx response does.
+- [ ] `9112 8-9-21` **MUST** - A client that does not support persistent connections must send "close" in every request.
+  - _RFC:_ A client that does not support persistent connections MUST send the "close" connection option in every request message.
+  - _check:_ If a non-pooling / one-shot mode exists, it must emit Connection: close on every request it sends.
+- [ ] `9112 8-9-42` SHOULD - A client or server wishing to time out should issue a graceful close on the connection.
+  - _RFC:_ A client or server that wishes to time out SHOULD issue a graceful close on the connection.
+  - _check:_ Idle-reaper should close connections gracefully (and for TLS, send close_notify per 8-9-71), not abort/RST.
+- [ ] `9112 8-9-68` SHOULD - On an incomplete close, a client should treat as completed all requests for which it received the full Content-Length of data or the terminal zero-length chunk.
+  - _RFC:_ When encountering an incomplete close, a client SHOULD treat as completed all requests for which it has received either
+  - _check:_ After incomplete TLS close: responses satisfying their Content-Length, or chunked responses that reached the zero-length chunk, count as complete; others are incomplete.
+- [ ] `9112 8-9-59` SHOULD NOT - After receiving "close", the client should not assume already-pipelined requests will be processed by the server.
+  - _RFC:_ if additional pipelined requests had been sent on the connection, the client SHOULD NOT assume that they will be processed by the server.
+  - _check:_ Treat pipelined requests queued behind a close-bearing response as unanswered: requeue/retry per idempotency rules, never assume success.
+- [ ] `9112 8-9-70` SHOULD - A client detecting an incomplete close should recover gracefully.
+  - _RFC:_ A client detecting an incomplete close SHOULD recover gracefully.
+  - _check:_ Missing peer close_notify must not crash or hang the client; classify per 8-9-68/69 and continue (retry/evict as appropriate).
+- [ ] `9112 8-9-35` SHOULD NOT - A user agent should not pipeline requests after a non-idempotent method until that method's final response arrives, unless it can recover from partial failure.
+  - _RFC:_ A user agent SHOULD NOT pipeline requests after a non-idempotent method, until the final response status code for that method has been received
+  - _check:_ Pipeline scheduler must stall the queue behind any non-idempotent (e.g., POST) request until its final response, absent explicit recovery support.
+- [ ] `9112 8-9-14` SHOULD - On unsolicited data the client should close the connection (delimitation is ambiguous) unless the data is only one or more CRLF, which may be discarded.
+  - _RFC:_ the client SHOULD close the connection, since message delimitation is now ambiguous, unless the data consists only of one or more CRLF
+  - _check:_ Idle-connection reader: discard bare CRLFs; on any other unsolicited bytes, evict and close the connection instead of reusing it.
+- [ ] `9112 8-9-33` SHOULD - A pipelining client should retry unanswered requests if the connection closes before all responses arrive.
+  - _RFC:_ A client that pipelines requests SHOULD retry unanswered requests if the connection closes before it receives all of the corresponding responses.
+  - _check:_ On premature close of a pipelined connection, requeue the unanswered tail (subject to 8-9-29 idempotency conditions).
+- [ ] `9112 8-9-15` SHOULD - HTTP implementations should support persistent connections.
+  - _RFC:_ HTTP implementations SHOULD support persistent connections.
+  - _check:_ Client must implement keep-alive/connection reuse as the default mode, not close-per-request.
+- [ ] `9112 8-9-47` SHOULD - If the response indicates the server rejects the body and is closing, the client should immediately stop transmitting and close its side.
+  - _RFC:_ the client SHOULD immediately cease transmitting the body and close its side of the connection.
+  - _check:_ On early final response with Connection: close during upload, abort the body write and close the client side instead of finishing the upload.
+- [ ] `9112 8-9-49` SHOULD - A sender should send a Connection header with the "close" option when it intends to close the connection.
+  - _RFC:_ A sender SHOULD send a Connection header field (Section 7.6.1 of [HTTP]) containing the "close" connection option when it intends to close a connection.
+  - _check:_ When the client decides a request is its last on a connection, emit Connection: close on that request.
+- [ ] `9112 8-9-43` SHOULD - Implementations should constantly monitor open connections for a received closure signal and respond appropriately.
+  - _RFC:_ Implementations SHOULD constantly monitor open connections for a received closure signal and respond to it as appropriate
+  - _check:_ Keep a reader (or readable-event check) on idle pooled connections so peer close/EOF is detected promptly and the connection is evicted before reuse.
+- [ ] `9112 8-9-46` SHOULD - A client transmitting a message body should monitor the connection for an error response while transmitting.
+  - _RFC:_ A client sending a message body SHOULD monitor the network connection for an error response while it is transmitting the request.
+  - _check:_ While streaming a request body, concurrently read the connection so an early error response (e.g., 4xx) is noticed before the upload finishes.
+
+## RFC 9110  section 2-3
+
+- [ ] `9110 2-3-15` **MUST** - A recipient must interpret received protocol elements per the defined semantics (including extensions), unless it has determined the specific sender implements them incorrectly.
+  - _RFC:_ A recipient MUST interpret a received protocol element according to the semantics defined for it by this specification, including extensions to this specification
+  - _check:_ No bespoke reinterpretation of status codes or header semantics in the response path; deviations only as targeted per-sender workarounds (see 2-3-12).
+- [ ] `9110 2-3-14` **MUST** - A recipient must be able to parse protocol elements at least as long as the ones it itself generates.
+  - _RFC:_ a recipient MUST be able to parse and process protocol element lengths that are at least as long as the values that it generates for those same protocol elements
+  - _check:_ Check that every parse-side limit (max URI length, max field-line size, max field-section size) is >= the maximum the client will emit for the same element; enforce emission caps <= parse caps.
+- [ ] `9110 2-3-9` **MUST NOT** - A sender must not emit any protocol element that fails its ABNF grammar.
+  - _RFC:_ A sender MUST NOT generate protocol elements that do not match the grammar defined by the corresponding ABNF rules.
+  - _check:_ Validate everything written to the wire — method token, request-target, version, field names (token), field values (field-content), chunk sizes — against the governing ABNF before emission; reject or sanitize caller input that violates it (header-injection guard).
+- [ ] `9110 2-3-10` **MUST NOT** - A sender must not emit protocol elements or syntax alternatives reserved for other roles in that message.
+  - _RFC:_ a sender MUST NOT generate protocol elements or syntax alternatives that are only allowed to be generated by participants in other roles
+  - _check:_ Client must never emit server-only constructs (status lines, response-only fields as originator semantics) or proxy-only syntax alternatives (e.g., absolute-form target on a non-proxy connection, per RFC 9112 §3.2).
+- [ ] `9110 2-3-13` SHOULD - A recipient should parse received protocol elements defensively, expecting grammar violations and unreasonable sizes.
+  - _RFC:_ A recipient SHOULD parse a received protocol element defensively, with only marginal expectations that the element will conform to its ABNF grammar and fit within a reasonable buffer size.
+  - _check:_ Response parser must use bounded buffers with explicit limits (status line, field section, chunk-size line) and fail gracefully on malformed or oversized input — never trust peer input for allocation sizing (matches repo Peer-input policy).
+
+## RFC 9110  section 4
+
+- [ ] `9110 4-44` **MUST** - The client must construct the reference identity from the URI host: IP-ID for a literal IP address, DNS-ID for a name.
+  - _RFC:_ The client MUST construct a reference identity from the service's host: if the host is a literal IP address (Section 4.3.5), the reference identity is an IP-ID
+  - _check:_ Branch on host form: IP literal verifies against SAN iPAddress (IP-ID); registered name verifies against SAN DNS names (DNS-ID).
+- [ ] `9110 4-43` **MUST** - In general the client must verify service identity using the RFC 6125 Section 6 verification process.
+  - _RFC:_ a client MUST verify the service identity using the verification process defined in Section 6 of [RFC6125].
+  - _check:_ Use RFC 6125-conformant certificate name matching (in Go, crypto/tls default VerifyHostname behavior satisfies this).
+- [ ] `9110 4-42` **MUST** - To establish a secured connection to dereference a URI, the client must verify the service's identity is an acceptable match for the URI's origin server.
+  - _RFC:_ a client MUST verify that the service's identity is an acceptable match for the URI's origin server.
+  - _check:_ TLS handshake must include hostname/identity verification against the target URI's host before any request is sent.
+- [ ] `9110 4-49` **MUST** - On an invalid certificate, automated clients must log the error to an appropriate audit log if one is available.
+  - _RFC:_ Automated clients MUST log the error to an appropriate audit log (if available)
+  - _check:_ Surface certificate-verification failures through the client's logging/metrics/hooks path, not silently.
+- [ ] `9110 4-48` **MUST** - If the certificate is not valid for the target URI's origin, a user agent must either obtain user confirmation before proceeding or terminate with a bad certificate error.
+  - _RFC:_ a user agent MUST either obtain confirmation from the user before proceeding (see Section 3.5) or terminate the connection with a bad certificate error.
+  - _check:_ Interactive-UA rule; for a library client the applicable branch is terminate-on-invalid-certificate (see 4-49/4-50 for automated clients).
+- [ ] `9110 4-45` **MUST NOT** - Clients must not use a CN-ID (certificate Common Name) reference identity.
+  - _RFC:_ A reference identity of type CN-ID MUST NOT be used by clients.
+  - _check:_ Never fall back to the certificate Subject CN for hostname matching; SAN-only verification (Go crypto/tls already ignores CN).
+- [ ] `9110 4-24` **MUST NOT** - A sender must not include the userinfo subcomponent or its "@" delimiter when generating an http(s) URI as a target URI or field value in a message.
+  - _RFC:_ A sender MUST NOT generate the userinfo subcomponent (and its "@" delimiter) when an "http" or "https" URI reference is generated within a message as a target URI or field value.
+  - _check:_ Strip userinfo before serializing any URI into a request-target (absolute-form), Host, Referer, or other field; never emit "user@host".
+- [ ] `9110 4-52` **MUST** - If a disable setting exists, automated clients must also provide a setting that enables the certificate check.
+  - _RFC:_ but MUST provide a setting which enables it
+  - _check:_ Verification must be available (and sensibly the default); a client with verification permanently off is non-conformant.
+- [ ] `9110 4-9` **MUST** - A recipient processing an http URI reference with an empty host must reject it as invalid.
+  - _RFC:_ A recipient that processes such a URI reference MUST reject it as invalid.
+  - _check:_ When parsing URIs from responses (e.g. Location redirects) or config, reject "http://" with empty host with an error.
+- [ ] `9110 4-8` **MUST NOT** - A sender must never generate an http URI whose host identifier is empty.
+  - _RFC:_ A sender MUST NOT generate an "http" URI with an empty host identifier.
+  - _check:_ Validate before emitting: refuse to build a request (or absolute-form target) from an http URI with empty host.
+- [ ] `9110 4-12` **MUST NOT** - A sender must never generate an https URI whose host identifier is empty.
+  - _RFC:_ A sender MUST NOT generate an "https" URI with an empty host identifier.
+  - _check:_ Refuse to build a request from an https URI with empty host.
+- [ ] `9110 4-14` **MUST** - A client must secure its requests for https resources before sending them and must accept only secured responses to those requests.
+  - _RFC:_ A client MUST ensure that its HTTP requests for an "https" resource are secured, prior to being communicated, and that it only accepts secured responses to those requests.
+  - _check:_ Never send an https-target request over a plaintext connection; complete TLS handshake first and read responses only from that secured connection.
+- [ ] `9110 4-13` **MUST** - A recipient processing an https URI reference with an empty host must reject it as invalid.
+  - _RFC:_ A recipient that processes such a URI reference MUST reject it as invalid.
+  - _check:_ Reject "https://" with empty host wherever URIs are parsed (redirect targets, user input).
+- [ ] `9110 4-5` RECOMMENDED - All senders and recipients should support URIs of at least 8000 octets in protocol elements.
+  - _RFC:_ It is RECOMMENDED that all senders and recipients support, at a minimum, URIs with lengths of 8000 octets in protocol elements.
+  - _check:_ Do not cap target URIs, request-lines, or received URI-valued fields (Location etc.) below 8000 octets.
+- [ ] `9110 4-50` SHOULD - On an invalid certificate, automated clients should terminate the connection with a bad certificate error.
+  - _RFC:_ SHOULD terminate the connection (with a bad certificate error)
+  - _check:_ Default behavior on cert failure: abort the handshake/connection and return the error to the caller.
+- [ ] `9110 4-25` SHOULD - Before using an http(s) URI received from an untrusted source, a recipient should parse for userinfo and treat its presence as an error (phishing defense).
+  - _RFC:_ a recipient SHOULD parse for userinfo and treat its presence as an error
+  - _check:_ When following redirects or other server-supplied URIs, detect "@" userinfo in the authority and fail the request (or refuse the redirect).
+
+## RFC 9110  section 5
+
+- [ ] `9110 5-51` **MUST** - A sender generating HTTP-date timestamps must emit them in IMF-fixdate format.
+  - _RFC:_ When a sender generates a field that contains one or more timestamps defined as HTTP-date, the sender MUST generate those timestamps in the IMF-fixdate format.
+  - _check:_ All dates the client emits (e.g., If-Modified-Since) must be serialized as e.g. "Sun, 06 Nov 1994 08:49:37 GMT".
+- [ ] `9110 5-57` **MUST NOT** - A sender must not generate whitespace in an HTTP-date beyond the SP octets the grammar specifies.
+  - _RFC:_ A sender MUST NOT generate additional whitespace in an HTTP-date beyond that specifically included as SP in the grammar.
+  - _check:_ Date serializer emits exactly the grammar's single-SP separators, nothing more.
+- [ ] `9110 5-27` **MUST** - Grammar: recipients must accept lists matching [ element ] *( OWS "," OWS [ element ] ); empty elements do not count toward element cardinality.
+  - _RFC:_ #element => [ element ] *( OWS "," OWS [ element ] )
+  - _check:_ Implement the lenient recipient grammar for parsing and count only non-empty members when enforcing 1# minimums.
+- [ ] `9110 5-50` **MUST** - A recipient parsing a timestamp in an HTTP field must accept all three HTTP-date formats.
+  - _RFC:_ A recipient that parses a timestamp value in an HTTP field MUST accept all three HTTP-date formats.
+  - _check:_ Client must parse IMF-fixdate, rfc850-date, and asctime-date in Date/Last-Modified/Expires/Retry-After etc.
+- [ ] `9110 5-39` **MUST** - Recipients processing a quoted-string value must treat each quoted-pair as if replaced by the octet following the backslash.
+  - _RFC:_ Recipients that process the value of a quoted-string MUST handle a quoted-pair as if it were replaced by the octet following the backslash.
+  - _check:_ Quoted-string decoder must unescape \X to X for every quoted-pair before exposing the value.
+- [ ] `9110 5-35` **MUST** - A recipient must parse for bad whitespace and remove it before interpreting the protocol element.
+  - _RFC:_ A recipient MUST parse for such bad whitespace and remove it before interpreting the protocol element.
+  - _check:_ Parser must tolerate and strip whitespace at BWS positions in received values before evaluation.
+- [ ] `9110 5-34` **MUST NOT** - A sender must not generate bad whitespace (BWS) in messages.
+  - _RFC:_ A sender MUST NOT generate BWS in messages.
+  - _check:_ Serializer must never emit whitespace at BWS positions (e.g., around "=" in transfer/auth params where grammar shows BWS).
+- [ ] `9110 5-58` **MUST** - Recipients of rfc850-date two-digit years must interpret a timestamp appearing more than 50 years in the future as the most recent past year with the same last two digits.
+  - _RFC:_ MUST interpret a timestamp that appears to be more than 50 years in the future as representing the most recent year in the past that had the same last two digits
+  - _check:_ rfc850 parser resolves yy by the 50-year sliding window relative to current time, never a fixed 19xx/20xx pivot.
+- [ ] `9110 5-18` **MUST** - A field parsing implementation must strip leading/trailing whitespace permitted by the messaging syntax before evaluating the field value.
+  - _RFC:_ a field parsing implementation MUST exclude such whitespace prior to evaluating the field value.
+  - _check:_ Client header parser must trim OWS around the field line value before storing/interpreting it.
+- [ ] `9110 5-9` **MUST NOT** - A sender must not generate multiple field lines with the same name (or append to an existing one) unless the field's definition allows comma-separated list recombination.
+  - _RFC:_ a sender MUST NOT generate multiple field lines with the same name in a message (whether in the headers or trailers)
+  - _check:_ When emitting requests, reject or merge duplicate singleton headers; allow duplicates only for list-based fields.
+- [ ] `9110 5-26` **MUST** - A recipient must parse and ignore a reasonable number of empty list elements, bounded to avoid denial-of-service.
+  - _RFC:_ A recipient MUST parse and ignore a reasonable number of empty list elements
+  - _check:_ Client list parser must skip empty members (e.g., "foo , ,bar") without error, with a bounded tolerance limit.
+- [ ] `9110 5-25` **MUST NOT** - A sender must not generate empty list elements; emitted lists must match element *( OWS "," OWS element ).
+  - _RFC:_ In any production that uses the list construct, a sender MUST NOT generate empty list elements.
+  - _check:_ When serializing list-based headers, never produce ",,", leading/trailing commas, or whitespace-only members.
+- [ ] `9110 5-21` **MUST** - A recipient of CR, LF, or NUL within a field value must either reject the message or replace each such character with SP before further processing/forwarding.
+  - _RFC:_ a recipient of CR, LF, or NUL within a field value MUST either reject the message or replace each of those characters with SP
+  - _check:_ Response parser must detect bare CR, LF, NUL inside field values and either fail the message or substitute SP — never pass them through (response-splitting defense).
+- [ ] `9110 5-42` SHOULD NOT - A sender should not generate quoted-pairs in a comment except to escape parentheses and backslash.
+  - _RFC:_ A sender SHOULD NOT generate a quoted-pair in a comment except where necessary to quote parentheses ["(" and ")"] and backslash octets occurring within that comment.
+  - _check:_ If the client emits comments (e.g., in User-Agent), escape only ( ) and \ inside them.
+- [ ] `9110 5-5` SHOULD - Non-proxy recipients should ignore unrecognized header and trailer fields.
+  - _RFC:_ Other recipients SHOULD ignore unrecognized header and trailer fields.
+  - _check:_ Client response parser must not error on unknown header/trailer names; skip them and expose them opaquely to the caller.
+- [ ] `9110 5-30` SHOULD - Where optional whitespace is preferred for readability, a sender should generate OWS as a single SP.
+  - _RFC:_ a sender SHOULD generate the optional whitespace as a single SP
+  - _check:_ Serializer emits exactly one SP at OWS positions where whitespace is customary (e.g., after list commas).
+- [ ] `9110 5-20` SHOULD - A recipient should treat obs-text octets in field content as opaque data.
+  - _RFC:_ A recipient SHOULD treat other allowed octets in field content (i.e., obs-text) as opaque data.
+  - _check:_ Do not charset-decode or reject 0x80-0xFF in received header values; pass bytes through unchanged.
+- [ ] `9110 5-31` SHOULD NOT - Otherwise a sender should not generate optional whitespace except when overwriting invalid elements during in-place filtering.
+  - _RFC:_ a sender SHOULD NOT generate optional whitespace except as needed to overwrite invalid or unwanted protocol elements during in-place message filtering.
+  - _check:_ Serializer emits no gratuitous SP/HTAB at other OWS positions.
+- [ ] `9110 5-41` SHOULD NOT - A sender should not generate quoted-pairs in a quoted-string except to escape DQUOTE and backslash.
+  - _RFC:_ A sender SHOULD NOT generate a quoted-pair in a quoted-string except where necessary to quote DQUOTE and backslash octets occurring within that string.
+  - _check:_ Quoted-string encoder escapes only " and \; all other characters are emitted literally.
+- [ ] `9110 5-32` SHOULD - A sender should generate required whitespace (RWS) as a single SP.
+  - _RFC:_ A sender SHOULD generate RWS as a single SP.
+  - _check:_ Where the grammar requires whitespace between tokens, emit exactly one SP.
+
+## RFC 9110  section 6
+
+- [ ] `9110 6-34` **MUST NOT** - A recipient must not merge a trailer field into the header section unless it understands the field definition and that definition explicitly permits and defines safe merging.
+  - _RFC:_ A recipient MUST NOT merge a trailer field into a header section unless the recipient understands the corresponding header field definition
+  - _check:_ Never fold received trailers into the response header map by default; merging requires an explicit per-field allowlist.
+- [ ] `9110 6-33` **MUST NOT** - A sender must not generate a trailer field unless it knows the field's definition permits it to be sent in trailers.
+  - _RFC:_ A sender MUST NOT generate a trailer field unless the sender knows the corresponding header field name's definition permits the field to be sent in trailers.
+  - _check:_ When the client sends chunked-request trailers, allow only field names whose definitions are known to permit trailer use (never framing/routing/auth fields).
+- [ ] `9110 6-45` **MUST** - A recipient with a clock that receives a response without Date must record the receipt time and append a corresponding Date header if the message is cached or forwarded downstream.
+  - _RFC:_ MUST record the time it was received and append a corresponding Date header field to the message's header section if it is cached or forwarded downstream
+  - _check:_ If the client ever caches or forwards responses, stamp a receipt-time Date onto Date-less responses; otherwise record receipt time for age calculations.
+- [ ] `9110 6-38` **MUST** - A trailer field that may be generated more than once during a message must be defined as a list-based field.
+  - _RFC:_ Trailer fields that might be generated more than once during a message MUST be defined as a list-based field
+  - _check:_ Only emit a repeated trailer field name if that field is list-based; expect repeats only for list-based fields when receiving.
+- [ ] `9110 6-3` **MUST** - A client must retain knowledge of the request while parsing, interpreting, or caching the corresponding response (e.g., HEAD responses cannot be parsed like GET).
+  - _RFC:_ a client MUST retain knowledge of the request when parsing, interpreting, or caching a corresponding response
+  - _check:_ Associate each in-flight response with its request method/target so HEAD/CONNECT/status-dependent body rules are applied correctly.
+- [ ] `9110 6-11` **MUST NOT** - A client must never send a protocol version it does not conform to.
+  - _RFC:_ A client MUST NOT send a version to which it is not conformant.
+  - _check:_ Never emit a version string (e.g., HTTP/2.0 on the wire, HTTP/1.2) the client does not fully implement.
+- [ ] `9110 6-49` SHOULD - A sender intending to generate trailer fields should send a Trailer header field in the header section naming the fields that might appear in the trailers.
+  - _RFC:_ A sender that intends to generate one or more trailer fields in a message SHOULD generate a Trailer header field in the header section of that message
+  - _check:_ When the client sends chunked-request trailers, emit a Trailer header listing the anticipated field names.
+- [ ] `9110 6-41` SHOULD - A sender generating Date should set it to the best available approximation of the message generation time.
+  - _RFC:_ A sender that generates a Date header field SHOULD generate its field value as the best available approximation of the date and time of message generation.
+  - _check:_ If the client emits Date on requests, sample the clock at message origination time.
+- [ ] `9110 6-16` SHOULD - A recipient of a message with a supported major version but higher minor version should process it as the highest minor version it conforms to within that major version.
+  - _RFC:_ SHOULD process the message as if it were in the highest minor version within that major version to which the recipient is conformant
+  - _check:_ Accept e.g. an HTTP/1.2 status line and process the response as HTTP/1.1; do not error on a higher minor version.
+- [ ] `9110 6-10` SHOULD - A client should send the highest request version it conforms to, with a major version no higher than the server is known to support.
+  - _RFC:_ A client SHOULD send a request version equal to the highest version to which the client is conformant
+  - _check:_ Send HTTP/1.1 on the H1 transport (highest conformant version, major <= known server support).
+
+## RFC 9110  section 7
+
+- [ ] `9110 7-62` **MUST** - If multiple protocol layers are being switched, the 101 sender must list the protocols in layer-ascending order.
+  - _RFC:_ if multiple protocol layers are being switched, the sender MUST list the protocols in layer-ascending order.
+  - _check:_ Interpret a multi-member Upgrade in a 101 as a layered stack, bottom layer first.
+- [ ] `9110 7-61` **MUST** - A server sending 101 (Switching Protocols) must send an Upgrade header field naming the protocol(s) the connection is switching to.
+  - _RFC:_ A server that sends a 101 (Switching Protocols) response MUST send an Upgrade header field to indicate the new protocol(s) to which the connection is being switched
+  - _check:_ On receiving 101, require an Upgrade field; a 101 without one (or naming nothing usable) is a protocol violation — fail the exchange rather than guess.
+- [ ] `9110 7-71` **MUST** - If a server receives both Upgrade and Expect: 100-continue, it must send a 100 (Continue) response before sending 101 (Switching Protocols).
+  - _RFC:_ the server MUST send a 100 (Continue) response before sending a 101 (Switching Protocols) response.
+  - _check:_ Client sending both Expect: 100-continue and Upgrade must be prepared for interim 100 followed by 101 on the same exchange.
+- [ ] `9110 7-68` **MUST** - Any sender of Upgrade must also send an "Upgrade" connection option in the Connection header field.
+  - _RFC:_ A sender of Upgrade MUST also send an "Upgrade" connection option in the Connection header field (Section 7.6.1) to inform intermediaries not to forward this field.
+  - _check:_ When the client emits Upgrade in an h1 request, it must also emit 'Connection: upgrade' (auto-add or validate in the serializer).
+- [ ] `9110 7-65` **MUST** - A server sending 426 (Upgrade Required) must send an Upgrade header field listing acceptable protocols in descending preference.
+  - _RFC:_ A server that sends a 426 (Upgrade Required) response MUST send an Upgrade header field to indicate the acceptable protocols, in order of descending preference.
+  - _check:_ Surface 426 plus its Upgrade list to the caller; the client may retry after upgrading.
+- [ ] `9110 7-63` **MUST NOT** - A server must not switch to a protocol the client did not indicate in the corresponding request's Upgrade header field.
+  - _RFC:_ A server MUST NOT switch to a protocol that was not indicated by the client in the corresponding request's Upgrade header field.
+  - _check:_ Client-side check: if the 101 names a protocol the client never offered, treat the response as invalid and close the connection.
+- [ ] `9110 7-7` **MUST** - A user agent must generate a Host header field in every request unless the same information is sent as the :authority pseudo-header.
+  - _RFC:_ A user agent MUST generate a Host header field in a request unless it sends that information as an ":authority" pseudo-header field.
+  - _check:_ http1 path: always synthesize Host from the target URI; h2/h3 path: :authority satisfies this. Never send an HTTP/1.1 request without Host.
+- [ ] `9110 7-5` **MUST NOT** - Authority-form and asterisk-form request targets must not be used with any method other than CONNECT and OPTIONS respectively.
+  - _RFC:_ These forms MUST NOT be used with other methods.
+  - _check:_ Reject or refuse to serialize a request combining authority-form with non-CONNECT or '*' with non-OPTIONS.
+- [ ] `9110 7-27` **MUST NOT** - A sender must not send a connection option that names a field intended for all recipients of the content (e.g. Cache-Control).
+  - _RFC:_ A sender MUST NOT send a connection option corresponding to a field that is intended for all recipients of the content.
+  - _check:_ Validate/deny caller-supplied Connection options naming end-to-end fields (e.g. reject 'Connection: cache-control').
+- [ ] `9110 7-24` **MUST** - When any field other than Connection supplies control information for the current connection, the sender must list that field's name in the Connection header field.
+  - _RFC:_ the sender MUST list the corresponding field name within the Connection header field.
+  - _check:_ If the client emits a hop-by-hop field (e.g. Upgrade, TE), it must also emit 'Connection: <field-name>' naming it. Note HTTP/2+/3 forbid the Connection field entirely — h1-only behavior.
+- [ ] `9110 7-60` SHOULD - Recipients should compare each Upgrade protocol-name to supported protocols case-insensitively, despite registered preferred case.
+  - _RFC:_ recipients SHOULD use case-insensitive comparison when matching each protocol-name to supported protocols.
+  - _check:_ When validating a 101's Upgrade field against the protocols the client offered, match protocol-names case-insensitively.
+- [ ] `9110 7-17` SHOULD - A client that receives a response while still sending the request should continue sending it unless it receives an explicit contrary indication.
+  - _RFC:_ A client that receives a response while it is still sending the associated request SHOULD continue sending that request unless it receives an explicit indication to the contrary
+  - _check:_ On early response (e.g. early 4xx), keep streaming the request body unless the server signals stop (h1 close, h2 RST_STREAM/END_STREAM per §6.4 of HTTP/2). Do not unilaterally abort the upload on a non-final/early response.
+- [ ] `9110 7-8` SHOULD - A user agent that sends Host should place it as the first field in the request header section.
+  - _RFC:_ A user agent that sends Host SHOULD send it as the first field in the header section of a request.
+  - _check:_ In the h1 serializer, write Host immediately after the request line, before all other fields.
+
+## RFC 9110  section 8
+
+- [ ] `9110 8-46` **MUST NOT** - A sender MUST NOT forward a message whose Content-Length is known to be incorrect (request smuggling / response splitting risk).
+  - _RFC:_ a sender MUST NOT forward a message with a Content-Length header field value that is known to be incorrect.
+  - _check:_ Ensure emitted Content-Length exactly equals the body octets written; abort rather than send a known-wrong value.
+- [ ] `9110 8-45` **MUST** - A recipient MUST anticipate arbitrarily large Content-Length numerals and prevent integer overflow or precision loss when parsing.
+  - _RFC:_ a recipient MUST anticipate potentially large decimal numerals and prevent parsing errors due to integer conversion overflows or precision loss due to integer conversion
+  - _check:_ Parse Content-Length with explicit overflow detection (e.g., checked uint64 accumulation); reject on overflow rather than wrapping.
+- [ ] `9110 8-42` **MUST NOT** - A server MUST NOT send Content-Length in any 2xx response to CONNECT.
+  - _RFC:_ A server MUST NOT send a Content-Length header field in any 2xx (Successful) response to a CONNECT request
+  - _check:_ After a 2xx to CONNECT, switch to tunnel mode immediately; ignore any Content-Length present.
+- [ ] `9110 8-41` **MUST NOT** - A server MUST NOT send Content-Length in any 1xx or 204 response.
+  - _RFC:_ A server MUST NOT send a Content-Length header field in any response with a status code of 1xx (Informational) or 204 (No Content).
+  - _check:_ Client robustness: never derive body framing from a Content-Length seen on 1xx/204; treat those responses as bodyless.
+- [ ] `9110 8-47` **MUST NOT** - A sender MUST NOT forward a message with a Content-Length that does not match the 1*DIGIT ABNF (single exception in 8-48).
+  - _RFC:_ a sender MUST NOT forward a message with a Content-Length header field value that does not match the ABNF above
+  - _check:_ Never emit a non-1*DIGIT Content-Length; on receipt, treat malformed values as a framing error, not a best-effort parse.
+- [ ] `9110 8-14` **MUST** - A sender of a multipart body MUST use only CRLF for line breaks between body parts.
+  - _RFC:_ a sender MUST generate only CRLF to represent line breaks between body parts.
+  - _check:_ Any multipart body the client generates must use CRLF (never bare LF) between parts.
+- [ ] `9110 8-17` **MUST** - A sender that applied content codings MUST list them in Content-Encoding in application order.
+  - _RFC:_ the sender that applied the encodings MUST generate a Content-Encoding header field that lists the content codings in the order in which they were applied.
+  - _check:_ If the client compresses a request body, emit Content-Encoding listing codings in the order applied; decode responses in reverse list order.
+- [ ] `9110 8-4` SHOULD - A sender generating a message with content SHOULD include a Content-Type header unless the media type is unknown to it.
+  - _RFC:_ A sender that generates a message containing content SHOULD generate a Content-Type header field in that message unless the intended media type of the enclosed representation is unknown to the sender.
+  - _check:_ When the client sends a request body, set Content-Type whenever the caller supplied or implied a media type.
+- [ ] `9110 8-23` SHOULD - A recipient SHOULD treat "x-compress" as equivalent to "compress".
+  - _RFC:_ A recipient SHOULD consider "x-compress" to be equivalent to "compress".
+  - _check:_ Alias x-compress to compress in the decoder registry (if compress is supported).
+- [ ] `9110 8-18` SHOULD NOT - The "identity" coding is reserved for Accept-Encoding and SHOULD NOT appear in Content-Encoding.
+  - _RFC:_ the coding named "identity" is reserved for its special role in Accept-Encoding and thus SHOULD NOT be included.
+  - _check:_ Never emit Content-Encoding: identity; tolerate it on receipt as a no-op.
+- [ ] `9110 8-26` SHOULD - A recipient SHOULD treat "x-gzip" as equivalent to "gzip".
+  - _RFC:_ A recipient SHOULD consider "x-gzip" to be equivalent to "gzip".
+  - _check:_ Alias x-gzip to gzip in the decoder registry.
+- [ ] `9110 8-36` SHOULD NOT - A user agent SHOULD NOT send Content-Length when the request has no content and the method does not anticipate any.
+  - _RFC:_ A user agent SHOULD NOT send a Content-Length header field when the request message does not contain content and the method semantics do not anticipate such data.
+  - _check:_ Do not emit Content-Length: 0 on bodyless GET/HEAD/DELETE/etc. requests.
+- [ ] `9110 8-35` SHOULD - A user agent SHOULD send Content-Length on requests whose method defines content meaning when not using Transfer-Encoding (e.g., POST with empty body still gets Content-Length: 0).
+  - _RFC:_ A user agent SHOULD send Content-Length in a request when the method defines a meaning for enclosed content and it is not sending Transfer-Encoding.
+  - _check:_ Emit Content-Length (even 0) on POST/PUT/PATCH-style requests unless chunked Transfer-Encoding is used.
+
+## RFC 9110  section 9
+
+- [ ] `9110 9-20` **MUST NOT** - A server must not send content in a response to HEAD.
+  - _RFC:_ The HEAD method is identical to GET except that the server MUST NOT send content in the response.
+  - _check:_ Response parser must treat HEAD responses as bodiless regardless of Content-Length/Transfer-Encoding; never block reading a body after HEAD (framing detail in RFC 9112 Section 6.3).
+- [ ] `9110 9-52` **MUST** - A client must ignore Content-Length and Transfer-Encoding in a successful CONNECT response.
+  - _RFC:_ A client MUST ignore any Content-Length or Transfer-Encoding header fields received in a successful response to CONNECT.
+  - _check:_ In the 2xx-to-CONNECT path, skip all body-framing logic: never consume tunnel bytes as a message body even if CL/TE headers are present.
+- [ ] `9110 9-45` **MUST** - A client must include the port in the CONNECT target even when the source URI elided it.
+  - _RFC:_ a client MUST send the port number even if the CONNECT request is based on a URI reference that contains an authority component with an elided port
+  - _check:_ Always append the (default-resolved) port when constructing the CONNECT target; reject/complete targets that lack an explicit port.
+- [ ] `9110 9-59` **MUST** - A client sending an OPTIONS request with content must include a valid Content-Type describing it.
+  - _RFC:_ A client that generates an OPTIONS request containing content MUST send a valid Content-Type header field describing the representation media type.
+  - _check:_ If a body is attached to OPTIONS, enforce (or auto-require) a Content-Type header before sending; error out if absent.
+- [ ] `9110 9-64` **MUST NOT** - A client must not send content in a TRACE request.
+  - _RFC:_ A client MUST NOT send content in a TRACE request.
+  - _check:_ Reject any request body when the method is TRACE (hard error, not opt-in).
+- [ ] `9110 9-62` **MUST NOT** - A client must not put fields containing sensitive data (credentials, cookies) into a TRACE request.
+  - _RFC:_ A client MUST NOT generate fields in a TRACE request containing sensitive data that might be disclosed by the response.
+  - _check:_ Strip or refuse Authorization/Proxy-Authorization/Cookie (and other configured sensitive fields) when the method is TRACE.
+- [ ] `9110 9-8` SHOULD - A user agent should distinguish safe from unsafe methods when presenting actions to a user.
+  - _RFC:_ A user agent SHOULD distinguish between safe and unsafe methods when presenting potential actions to a user
+  - _check:_ Library has no UI; expose a safe/unsafe predicate so embedding applications can honor this.
+- [ ] `9110 9-41` SHOULD NOT - A client should not send content in a DELETE request unless the origin server has previously indicated support.
+  - _RFC:_ A client SHOULD NOT generate content in a DELETE request unless it is made directly to an origin server that has previously indicated
+  - _check:_ Do not attach a body to DELETE by default; explicit opt-in only.
+- [ ] `9110 9-14` SHOULD NOT - A client should not automatically retry a request that already failed an automatic retry.
+  - _RFC:_ A client SHOULD NOT automatically retry a failed automatic retry.
+  - _check:_ Retry layer default must cap automatic retries of a given request at one; verify retry budget accounting does not re-retry a retried attempt.
+- [ ] `9110 9-12` SHOULD NOT - A client should not auto-retry a non-idempotent request unless it knows the semantics are idempotent or can detect the original was never applied.
+  - _RFC:_ A client SHOULD NOT automatically retry a request with a non-idempotent method unless it has some means to know that the request semantics are actually idempotent
+  - _check:_ Default retry policy must exclude POST/CONNECT/unknown methods; allow opt-in override only via explicit per-request idempotency flag.
+- [ ] `9110 9-17` SHOULD NOT - A client should not send content in a GET request unless the origin server has previously indicated support.
+  - _RFC:_ A client SHOULD NOT generate content in a GET request unless it is made directly to an origin server that has previously indicated
+  - _check:_ Do not attach a body to GET by default; if the API permits it, require an explicit opt-in and document the interop/smuggling risk.
+- [ ] `9110 9-23` SHOULD NOT - A client should not send content in a HEAD request unless the origin server has previously indicated support.
+  - _RFC:_ A client SHOULD NOT generate content in a HEAD request unless it is made directly to an origin server that has previously indicated
+  - _check:_ Do not attach a body to HEAD by default; explicit opt-in only.
+- [ ] `9110 9-21` SHOULD - A server should send the same header fields for HEAD as it would for GET.
+  - _RFC:_ The server SHOULD send the same header fields in response to a HEAD request as it would have sent if the request method had been GET.
+  - _check:_ Client must tolerate Content-Length/Vary etc. on a HEAD response without expecting body bytes to follow.
+
+## RFC 9110  section 10
+
+- [ ] `9110 10-59` **MUST** - If a 3xx Location has no fragment, the user agent must apply the original reference's fragment to the redirect target.
+  - _RFC:_ If the Location value provided in a 3xx (Redirection) response does not have a fragment component, a user agent MUST process the redirection as if the value inherits the fragment component
+  - _check:_ On redirect, carry the original request reference's #fragment onto the resolved Location when Location itself lacks one; keep Location's own fragment when present.
+- [ ] `9110 10-27` **MUST** - When the target URI came from a source with no URI of its own, the user agent must omit Referer or send "about:blank".
+  - _RFC:_ the user agent MUST either exclude the Referer header field or send it with a value of "about:blank"
+  - _check:_ When no referring URI exists, either send no Referer at all or exactly about:blank — never fabricate one.
+- [ ] `9110 10-24` **MUST NOT** - A user agent must strip fragment and userinfo components when generating a Referer value.
+  - _RFC:_ A user agent MUST NOT include the fragment and userinfo components of the URI reference [URI], if any, when generating the Referer field value.
+  - _check:_ Any code that generates Referer (e.g. redirect-following) must remove #fragment and user:pass@ from the URI first.
+- [ ] `9110 10-45` **MUST NOT** - A sender must not put advertising or other nonessential information in a product identifier.
+  - _RFC:_ a sender MUST NOT generate advertising or other nonessential information within the product identifier
+  - _check:_ The library's generated product token must contain no promotional or extraneous data.
+- [ ] `9110 10-39` **MUST** - Any sender of TE must also list "TE" as a connection option in the Connection header field.
+  - _RFC:_ A sender of TE MUST also send a "TE" connection option within the Connection header field (Section 7.6.1) to inform intermediaries not to forward this field.
+  - _check:_ Whenever the HTTP/1.1 client emits a TE header, it must add TE to the Connection header of that request (auto-add or validate).
+- [ ] `9110 10-30` **MUST NOT** - A user agent must never send Referer on an unsecured HTTP request when the referring resource was accessed over a secure protocol.
+  - _RFC:_ A user agent MUST NOT send a Referer header field in an unsecured HTTP request if the referring resource was accessed with a secure protocol.
+  - _check:_ Hard rule in redirect-following: drop Referer on any https-to-http downgrade.
+- [ ] `9110 10-13` **MUST** - A server that sent 100 (Continue) must eventually send a final status code unless the connection closes prematurely.
+  - _RFC:_ A server that sends a 100 (Continue) response MUST ultimately send a final status code, once it receives and processes the request content, unless the connection is closed prematurely.
+  - _check:_ Client must treat 100 as interim: after consuming it, keep reading the same response stream for the final status.
+- [ ] `9110 10-7` **MUST** - A client that intends to wait for 100 (Continue) before sending the body must actually send Expect: 100-continue.
+  - _RFC:_ A client that will wait for a 100 (Continue) response before sending the request content MUST send an Expect header field containing a 100-continue expectation.
+  - _check:_ If the client implements a wait-for-100 mode, it must be gated on having emitted Expect: 100-continue in that request.
+- [ ] `9110 10-6` **MUST NOT** - A client must not send a 100-continue expectation on a request that has no content.
+  - _RFC:_ A client MUST NOT generate a 100-continue expectation in a request that does not include content.
+  - _check:_ Guard: strip/refuse Expect: 100-continue when the request has no body (nil body / zero framing).
+- [ ] `9110 10-29` SHOULD NOT - A user agent should not send Referer cross-origin when the referring resource was fetched over a secure protocol, unless explicitly allowed.
+  - _RFC:_ A user agent SHOULD NOT send a Referer header field if the referring resource was accessed with a secure protocol and the request target has an origin differing from that of the referring resource
+  - _check:_ Default policy: suppress Referer on cross-origin requests when the referrer was https, absent explicit opt-in.
+- [ ] `9110 10-46` SHOULD NOT - A sender should not put non-version information in the product-version portion.
+  - _RFC:_ A sender SHOULD NOT generate information in product-version that is not a version identifier
+  - _check:_ product-version must carry only the version string; successive releases differ only there.
+- [ ] `9110 10-48` SHOULD - A user agent should limit the addition of third-party subproducts to the User-Agent value.
+  - _RFC:_ SHOULD limit the addition of subproducts by third parties
+  - _check:_ Do not let plugins/wrappers append unbounded subproduct tokens to the UA string.
+- [ ] `9110 10-47` SHOULD NOT - A user agent should not generate a needlessly fine-grained User-Agent value.
+  - _RFC:_ A user agent SHOULD NOT generate a User-Agent header field containing needlessly fine-grained detail
+  - _check:_ Do not embed OS/build/host detail in the default UA (fingerprinting and latency).
+- [ ] `9110 10-44` SHOULD - A sender should limit product identifiers to what is necessary to identify the product.
+  - _RFC:_ A sender SHOULD limit generated product identifiers to what is necessary to identify the product
+  - _check:_ Keep the generated User-Agent minimal — library name and version only.
+- [ ] `9110 10-21` SHOULD NOT - A user agent should not send From unless the user explicitly configured it.
+  - _RFC:_ A user agent SHOULD NOT send a From header field without explicit configuration by the user
+  - _check:_ Never auto-generate From; only emit it when the caller explicitly sets it.
+- [ ] `9110 10-22` SHOULD - A robotic user agent should send a valid From so the operator can be contacted.
+  - _RFC:_ A robotic user agent SHOULD send a valid From header field so that the person responsible for running the robot can be contacted
+  - _check:_ For load-generator use, document/support setting a contactable From address (robotic UA).
+- [ ] `9110 10-10` SHOULD - On receiving 417 for a request that carried 100-continue, the client should retry the request without the expectation.
+  - _RFC:_ A client that receives a 417 (Expectation Failed) status code in response to a request containing a 100-continue expectation SHOULD repeat that request without a 100-continue expectation
+  - _check:_ Retry layer: on 417 where the request had Expect: 100-continue, resend once with the Expect field removed.
+- [ ] `9110 10-40` SHOULD - A user agent should send a User-Agent header in every request unless configured not to.
+  - _RFC:_ A user agent SHOULD send a User-Agent header field in each request unless specifically configured not to do so.
+  - _check:_ Send a default User-Agent (e.g. poseidon-http-client/x.y) on every request, with an explicit opt-out.
+- [ ] `9110 10-9` SHOULD NOT - A client that sent 100-continue should not wait indefinitely before sending the body.
+  - _RFC:_ such a client SHOULD NOT wait for an indefinite period before sending the content.
+  - _check:_ Implement a bounded 100-continue wait timeout (e.g. configurable, ~1s default), then send the body anyway.
+
+## RFC 9110  section 11
+
+- [ ] `9110 11-24` **MUST** - For the realm parameter, a sender must generate only the quoted-string syntax, never the token form.
+  - _RFC:_ For historical reasons, a sender MUST only generate the quoted-string syntax.
+  - _check:_ If the client ever emits a realm auth-param (in credentials), always serialize it as a quoted-string (realm="..."), even when the value would be a valid token.
+- [ ] `9110 11-5` **MUST** - Auth-param names are matched case-insensitively and each parameter name must occur at most once per challenge.
+  - _RFC:_ the name token is matched case-insensitively and each parameter name MUST only occur once per challenge
+  - _check:_ When emitting credentials with auth-params never repeat a name; when parsing challenges match param names case-insensitively (treat duplicate names in a received challenge as malformed or first-wins, but never emit them).
+
+## RFC 9110  section 12
+
+- [ ] `9110 12-44` **MUST NOT** - A user agent that does not give the user control over linguistic preferences must not send an Accept-Language field.
+  - _RFC:_ A user agent that does not provide such control to the user MUST NOT send an Accept-Language header field.
+  - _check:_ Never emit Accept-Language by default; send it only when explicitly configured by the caller (caller configuration constitutes the required user control).
+- [ ] `9110 12-12` **MUST NOT** - A sender must not generate a qvalue with more than three digits after the decimal point.
+  - _RFC:_ A sender of qvalue MUST NOT generate more than three digits after the decimal point.
+  - _check:_ Round/truncate caller-supplied weights to at most three decimal places before serializing any q parameter.
+- [ ] `9110 12-19` SHOULD - Recipients should treat any parameter named "q" as the weight regardless of its position among parameters.
+  - _RFC:_ Recipients SHOULD process any parameter named "q" as weight, regardless of parameter ordering.
+  - _check:_ Accept parser (for response Accept fields) must recognize q as weight even if followed by other parameters.
+- [ ] `9110 12-37` SHOULD - If no available representation matches a non-empty Accept-Encoding, the origin server should respond without any content coding unless identity is marked unacceptable.
+  - _RFC:_ the origin server SHOULD send a response without any content coding unless the identity coding is indicated as unacceptable
+  - _check:_ Even after sending Accept-Encoding, always be able to consume an unencoded (identity) response body.
+- [ ] `9110 12-18` SHOULD - Senders using weights in Accept should place the "q" parameter last, after all media-range parameters.
+  - _RFC:_ Senders using weights SHOULD send "q" last (after all media-range parameters).
+  - _check:_ When serializing Accept, always append ;q=... after any media-type parameters of the range.
+
+## RFC 9110  section 13
+
+- [ ] `9110 13-48` **MUST NOT** - A client must not generate If-Range in a request that does not contain a Range header field.
+  - _RFC:_ A client MUST NOT generate an If-Range header field in a request that does not contain a Range header field.
+  - _check:_ Enforce in the request builder: If-Range is only legal when the same request carries Range.
+- [ ] `9110 13-51` **MUST NOT** - A client must not generate If-Range containing a weak entity tag.
+  - _RFC:_ A client MUST NOT generate an If-Range header field containing an entity tag that is marked as weak.
+  - _check:_ Reject W/-prefixed tags when building If-Range; only strong ETags qualify.
+- [ ] `9110 13-35` **MUST** - A recipient must ignore If-Unmodified-Since if the value is not a valid HTTP-date, including when it appears to be a list of dates.
+  - _RFC:_ A recipient MUST ignore the If-Unmodified-Since header field if the received field value is not a valid HTTP-date (including when the field value appears to be a list of dates).
+  - _check:_ Client must emit a single valid HTTP-date; a malformed or list value silently disables the precondition.
+- [ ] `9110 13-37` **MUST** - A recipient must interpret the If-Unmodified-Since timestamp in terms of the origin server's clock.
+  - _RFC:_ A recipient MUST interpret an If-Unmodified-Since field value's timestamp in terms of the origin server's clock.
+  - _check:_ Use the server's Last-Modified value verbatim; do not compute the date from the client's local clock.
+- [ ] `9110 13-52` **MUST NOT** - A client must not generate an HTTP-date If-Range unless it has no entity tag for the representation and the date is a strong validator (Section 8.8.2.2).
+  - _RFC:_ A client MUST NOT generate an If-Range header field containing an HTTP-date unless the client has no entity tag for the corresponding representation and the date is a strong validator
+  - _check:_ Prefer the ETag; fall back to Last-Modified only when no ETag exists AND the date qualifies as strong per 8.8.2.2.
+- [ ] `9110 13-63` **MUST** - A server must ignore the conditional request header fields on methods that do not involve selecting or modifying a representation (e.g., CONNECT, OPTIONS, TRACE).
+  - _RFC:_ MUST ignore the conditional request header fields defined by this specification when received with a request method that does not involve the selection or modification of a selected representation
+  - _check:_ Do not attach conditional headers to CONNECT/OPTIONS/TRACE requests — they will be ignored; the client may warn or strip them.
+- [ ] `9110 13-65` **MUST** - A recipient cache or origin server must evaluate preconditions in the fixed order: If-Match, then If-Unmodified-Since, then If-None-Match, then If-Modified-Since, then If-Range.
+  - _RFC:_ A recipient cache or origin server MUST evaluate the request preconditions defined by this specification in the following order
+  - _check:_ Knowing the fixed order lets the client predict which of several conditionals produced a 412/304/206 and which fields were masked (If-Match masks IUS; If-None-Match masks IMS).
+- [ ] `9110 13-56` **MUST** - A recipient of If-Range must ignore the Range header field when the If-Range condition evaluates to false.
+  - _RFC:_ A recipient of an If-Range header field MUST ignore the Range header field if the If-Range condition evaluates to false.
+  - _check:_ Client must handle a full 200 response where it hoped for 206, discarding/replacing its partial copy.
+- [ ] `9110 13-60` **MUST** - A server must ignore all preconditions when the unconditional response would have been anything other than 2xx or 412.
+  - _RFC:_ A server MUST ignore all received preconditions if its response to the same request without those conditions, prior to processing the request content, would have been a status code other than a 2xx (Successful) or 412 (Precondition Failed).
+  - _check:_ On 3xx/4xx/5xx (redirect, auth, etc.) the client must not conclude anything about its preconditions — they were never evaluated.
+- [ ] `9110 13-34` **MUST** - A recipient must ignore If-Unmodified-Since when the request also contains If-Match.
+  - _RFC:_ A recipient MUST ignore If-Unmodified-Since if the request contains an If-Match header field
+  - _check:_ If the client sends both, expect only If-Match to be evaluated; IUS is a legacy-intermediary fallback.
+- [ ] `9110 13-2` **MUST** - Origin servers must use the strong comparison function when comparing entity tags for If-Match.
+  - _RFC:_ An origin server MUST use the strong comparison function when comparing entity tags for If-Match
+  - _check:_ Comparison is server-side, but the client should never place weak (W/) tags in If-Match: under strong comparison they can never match, so the request always fails with 412.
+- [ ] `9110 13-20` **MUST** - On a false If-None-Match, the origin server must respond 304 for GET/HEAD or 412 for all other methods.
+  - _RFC:_ the origin server MUST respond with either a) the 304 (Not Modified) status code if the request method is GET or HEAD or b) the 412 (Precondition Failed) status code
+  - _check:_ Client must handle 304 on conditional GET/HEAD (serve/refresh stored response, no body) and 412 on other methods.
+- [ ] `9110 13-13` **MUST** - Recipients must use the weak comparison function when comparing entity tags for If-None-Match.
+  - _RFC:_ A recipient MUST use the weak comparison function when comparing entity tags for If-None-Match
+  - _check:_ Client may include weak tags (W/"...") verbatim in If-None-Match — they are valid for cache validation under weak comparison.
+- [ ] `9110 13-25` **MUST** - A recipient must ignore If-Modified-Since if the value is not a valid HTTP-date, has more than one member, or the method is not GET/HEAD.
+  - _RFC:_ A recipient MUST ignore the If-Modified-Since header field if the received field value is not a valid HTTP-date, the field value has more than one member, or if the request method is neither GET nor HEAD.
+  - _check:_ Client must emit exactly one syntactically valid HTTP-date and only on GET/HEAD, or the header will be silently ignored (full 200 returned).
+- [ ] `9110 13-24` **MUST** - A recipient must ignore If-Modified-Since when the request also contains If-None-Match.
+  - _RFC:_ A recipient MUST ignore If-Modified-Since if the request contains an If-None-Match header field
+  - _check:_ If the client sends both, expect only If-None-Match to be evaluated; IMS is merely a legacy-intermediary fallback.
+- [ ] `9110 13-27` **MUST** - A recipient must interpret the If-Modified-Since timestamp in terms of the origin server's clock.
+  - _RFC:_ A recipient MUST interpret an If-Modified-Since field value's timestamp in terms of the origin server's clock.
+  - _check:_ Generate the IMS value from the server's own timestamps (prior Last-Modified or Date), not the client's local clock.
+- [ ] `9110 13-31` SHOULD - On a false If-Modified-Since the origin server should generate a 304 response containing only metadata useful for identifying or updating a cached response.
+  - _RFC:_ the origin server SHOULD generate a 304 (Not Modified) response, including only those metadata that are useful for identifying or updating a previously cached response
+  - _check:_ Client must accept a bodiless 304 with sparse headers and merge them into its stored response rather than expecting full metadata.
+- [ ] `9110 13-15` SHOULD - A client updating stored responses that have entity tags should generate If-None-Match listing those tags on the GET request.
+  - _RFC:_ the client SHOULD generate an If-None-Match header field containing a list of those entity tags when making a GET request
+  - _check:_ If the client caches responses with ETags, build If-None-Match from all stored tags on revalidation GETs so the server can answer 304.
+- [ ] `9110 13-28` SHOULD - An origin server receiving If-Modified-Since without If-None-Match should evaluate the condition per Section 13.2 before performing the method.
+  - _RFC:_ the origin server SHOULD evaluate the If-Modified-Since condition per Section 13.2 prior to performing the method
+  - _check:_ Only SHOULD-strength: client cannot rely on getting 304 even when the resource is unchanged; must always handle full 200.
+- [ ] `9110 13-57` SHOULD - When the If-Range condition is true, the recipient should process the Range header field as requested.
+  - _RFC:_ Otherwise, the recipient SHOULD process the Range header field as requested.
+  - _check:_ Client can expect 206 with the requested ranges when the validator matches, but must still tolerate 200 (SHOULD-strength only).
+
+## RFC 9110  section 14
+
+- [ ] `9110 14-41` **MUST NOT** - A recipient of a 206 whose Content-Range unit it does not understand must not recombine it with a stored representation.
+  - _RFC:_ If a 206 (Partial Content) response contains a Content-Range header field with a range unit that the recipient does not understand, the recipient MUST NOT attempt to recombine it with a stored representation.
+  - _check:_ Before merging a 206 into a partially downloaded file, verify the Content-Range unit is one the client understands (bytes); otherwise discard/treat as opaque.
+- [ ] `9110 14-48` **MUST NOT** - The recipient of an invalid Content-Range must not recombine the received content with a stored representation.
+  - _RFC:_ The recipient of an invalid Content-Range MUST NOT attempt to recombine the received content with a stored representation.
+  - _check:_ On failed Content-Range validation (14-47), abort resume/merge logic; do not splice the body into a partial download.
+- [ ] `9110 14-37` **MUST NOT** - A client must not assume Accept-Ranges guarantees future range requests will get partial responses.
+  - _RFC:_ a client MUST NOT assume that receiving an Accept-Ranges field means that future range requests will return partial responses
+  - _check:_ Even after seeing Accept-Ranges: bytes, every ranged GET must still handle a 200 full-body response path.
+- [ ] `9110 14-18` **MUST** - Recipients must handle arbitrarily large decimal position/length values without integer-overflow parsing errors.
+  - _RFC:_ recipients MUST anticipate potentially large decimal numerals and prevent parsing errors due to integer conversion overflows.
+  - _check:_ Parse first-pos/last-pos/suffix-length/complete-length with explicit overflow detection (e.g. checked uint64 accumulation); fail the value cleanly, never wrap.
+- [ ] `9110 14-24` **MUST** - An origin server must ignore a Range field whose range unit it does not understand.
+  - _RFC:_ An origin server MUST ignore a Range header field that contains a range unit it does not understand.
+  - _check:_ When sending a non-bytes range unit, be prepared for a full 200 response rather than 206 or 416.
+- [ ] `9110 14-22` **MUST** - A server must ignore Range on a request method that is unrecognized or has no defined range handling.
+  - _RFC:_ A server MUST ignore a Range header field received with a request method that is unrecognized or for which range handling is not defined.
+  - _check:_ Do not send Range on non-GET requests expecting partial behavior; if sent, expect it to be ignored.
+- [ ] `9110 14-49` SHOULD - A server generating a 416 to a byte-range request should send Content-Range with an unsatisfied-range value.
+  - _RFC:_ A server generating a 416 (Range Not Satisfiable) response to a byte-range request SHOULD send a Content-Range header field with an unsatisfied-range value
+  - _check:_ On 416, parse Content-Range: bytes */N when present, but tolerate its absence.
+- [ ] `9110 14-52` SHOULD - An origin server should respond 400 to a PUT with Content-Range on a resource that does not support partial PUT.
+  - _RFC:_ An origin server SHOULD respond with a 400 (Bad Request) status code if it receives Content-Range on a PUT for a target resource that does not support partial PUT requests.
+  - _check:_ A client attempting partial PUT must handle 400 as the expected 'unsupported' outcome.
+- [ ] `9110 14-45` SHOULD - For byte ranges, a sender should include the complete representation length unless it is unknown or hard to determine.
+  - _RFC:_ For byte ranges, a sender SHOULD indicate the complete length of the representation from which the range has been extracted, unless the complete length is unknown or difficult to determine.
+  - _check:_ If the client ever emits Content-Range (partial PUT), include "/complete-length" when known; when parsing, prefer the length but tolerate its absence.
+- [ ] `9110 14-29` SHOULD - A client requesting multiple ranges should list them in ascending order unless a later part is specifically needed first.
+  - _RFC:_ A client that is requesting multiple ranges SHOULD list those ranges in ascending order
+  - _check:_ Sort the range-set ascending by first-pos when emitting multi-range requests, unless the caller explicitly needs out-of-order retrieval.
+- [ ] `9110 14-27` SHOULD NOT - A client should not request multiple ranges that are less efficient than one encompassing range.
+  - _RFC:_ A client SHOULD NOT request multiple ranges that are inherently less efficient to process and transfer than a single range that encompasses the same data.
+  - _check:_ Coalesce adjacent/overlapping ranges into a single range before emitting a multi-range Range value.
+- [ ] `9110 14-34` SHOULD - When the ranges-specifier is valid but the unit is unsupported or the specifier unsatisfiable, the server should send 416.
+  - _RFC:_ the server SHOULD send a 416 (Range Not Satisfiable) response.
+  - _check:_ Handle 416: do not retry the same range blindly; use the 416 Content-Range complete-length to recompute a valid range.
+- [ ] `9110 14-32` SHOULD - When preconditions pass and a supported, satisfiable ranges-specifier is received, the server should send 206 with the corresponding partial representation(s).
+  - _RFC:_ the server SHOULD send a 206 (Partial Content) response with content containing one or more partial representations that correspond to the satisfiable range-spec(s) requested.
+  - _check:_ Implement full 206 handling: single-part (Content-Range header + partial body) and multi-part (multipart/byteranges) responses.
+
+## RFC 9110  section 15.1-15.3
+
+- [ ] `9110 15.1-15.3-55` **MUST NOT** - A client that cannot process a multipart/byteranges response must not send a request asking for multiple ranges.
+  - _RFC:_ A client that cannot process a "multipart/byteranges" response MUST NOT generate a request that asks for multiple ranges.
+  - _check:_ If the client lacks a multipart/byteranges parser, its request builder must reject or refuse Range headers containing more than one range-spec.
+- [ ] `9110 15.1-15.3-53` **MUST NOT** - A server must not generate a multipart response to a request for a single range.
+  - _RFC:_ A server MUST NOT generate a multipart response to a request for a single range
+  - _check:_ After a single-range request the client may treat multipart/byteranges as a peer violation; only multi-range requests need the multipart parser.
+- [ ] `9110 15.1-15.3-50` **MUST** - Within the header area of each body part of a multipart 206, the server must generate a Content-Range field for that part's range.
+  - _RFC:_ the server MUST generate a Content-Range header field corresponding to the range being enclosed in that body part.
+  - _check:_ Client's multipart parser can require Content-Range in every part; a part without one is malformed (cf. fact -57 client MUST inspect).
+- [ ] `9110 15.1-15.3-57` **MUST** - A client receiving a multipart response must inspect each body part's Content-Range to determine which range it contains, and cannot rely on receiving the requested ranges or order.
+  - _RFC:_ A client that receives a multipart response MUST inspect the Content-Range header field present in each body part in order to determine which range is contained in that body part
+  - _check:_ Multipart consumption must be driven by each part's Content-Range, never by positional matching against the sent Range header; test out-of-order and coalesced parts.
+- [ ] `9110 15.1-15.3-64` **MUST** - If the union is not the entire representation, the client must process the continuous ranges as an incomplete 200 (if a prefix), a single multipart/byteranges 206, or multiple single-range 206 responses.
+  - _RFC:_ the client MUST process the set of continuous ranges as one of the following: an incomplete 200 (OK) response if the combined response is a prefix of the representation
+  - _check:_ Partial merge results must be represented only as one of the three sanctioned forms (prefix→incomplete 200; else single multipart 206 or multiple Content-Range-bearing 206s).
+- [ ] `9110 15.1-15.3-63` **MUST** - If the union of combined ranges covers the entire representation, the client must process the combined response as a complete 200, including a Content-Length reflecting the complete length.
+  - _RFC:_ the client MUST process the combined response as if it were a complete 200 (OK) response, including a Content-Length header field that reflects the complete length.
+  - _check:_ Merge output covering the full range must be promoted to status 200 with a synthesized Content-Length equal to the representation's complete length.
+- [ ] `9110 15.1-15.3-62` **MUST** - If all matching stored responses are 206s, use the most recent header fields as the base, but the client must replace stored header fields with those in the new response, except Content-Range.
+  - _RFC:_ the client MUST use other header fields provided in the new response, aside from Content-Range, to replace all instances of the corresponding header fields in the stored response.
+  - _check:_ When merging 206s, overlay every header from the new response onto the stored set (replacing all instances), excluding Content-Range which is per-message.
+- [ ] `9110 15.1-15.3-49` **MUST NOT** - A server must not generate a Content-Range header field in the HTTP header section of a multiple-part 206 response.
+  - _RFC:_ a server MUST NOT generate a Content-Range header field in the HTTP header section of a multiple part response
+  - _check:_ Client multipart handling must take ranges from per-part headers only; top-level Content-Range plus multipart Content-Type is inconsistent input to reject or flag.
+- [ ] `9110 15.1-15.3-21` **MUST** - The server must generate an Upgrade header field in a 101 response indicating the protocol(s) in effect afterwards.
+  - _RFC:_ The server MUST generate an Upgrade header field in the response that indicates which protocol(s) will be in effect after this response.
+  - _check:_ Client may rely on Upgrade being present in a 101 to select the follow-on protocol; validate it names a protocol the client offered.
+- [ ] `9110 15.1-15.3-14` **MUST** - A client must be able to parse one or more 1xx responses received before the final response, even when unexpected.
+  - _RFC:_ A client MUST be able to parse one or more 1xx responses received prior to a final response, even if the client does not expect one.
+  - _check:_ Parser must consume any number of unsolicited 1xx responses (including 100 without Expect sent) without error before the final response; test multiple consecutive 1xx.
+- [ ] `9110 15.1-15.3-4` **MUST** - A client must understand the class of any status code from its first digit and treat an unrecognized code as the x00 code of that class.
+  - _RFC:_ a client MUST understand the class of any status code, as indicated by the first digit, and treat an unrecognized status code as being equivalent to the x00 status code of that class.
+  - _check:_ Map unrecognized codes (e.g. 471) to class default (400) for all semantic decisions (retryability, error surfacing); check the fallback path in status handling.
+- [ ] `9110 15.1-15.3-48` **MUST** - For a multi-part 206, the server must generate multipart/byteranges content and a Content-Type field carrying that media type with its required boundary parameter.
+  - _RFC:_ MUST generate "multipart/byteranges" content, as defined in Section 14.6, and a Content-Type header field containing the "multipart/byteranges" media type and its required boundary parameter.
+  - _check:_ If the client sends multi-range requests, it must detect multipart/byteranges via Content-Type and parse the boundary parameter to split parts.
+- [ ] `9110 15.1-15.3-47` **MUST** - For a single-part 206, the server must generate a Content-Range header field describing the enclosed range, with content consisting of that range.
+  - _RFC:_ the server generating the 206 response MUST generate a Content-Range header field, describing what range of the selected representation is enclosed, and a content consisting of the range.
+  - _check:_ Client's single-part 206 path can require a top-level Content-Range; its absence on a non-multipart 206 is a peer violation worth flagging.
+- [ ] `9110 15.1-15.3-41` **MUST** - A client must inspect a 206 response's Content-Type and Content-Range field(s) to determine what parts are enclosed and whether more requests are needed.
+  - _RFC:_ A client MUST inspect a 206 response's Content-Type and Content-Range field(s) to determine what parts are enclosed and whether additional requests are needed.
+  - _check:_ If the client issues Range requests, its 206 path must parse Content-Type (multipart detection) and Content-Range before consuming the body; the server may have satisfied only a subset.
+- [ ] `9110 15.1-15.3-6` SHOULD - A client receiving a response with an invalid status code should process it as a 5xx (Server Error).
+  - _RFC:_ A client that receives a response with an invalid status code SHOULD process the response as if it had a 5xx (Server Error) status code.
+  - _check:_ On out-of-range status, do not hard-fail the parse: treat the response as 5xx (server-error semantics, retry policy of 500) rather than a connection error.
+
+## RFC 9110  section 15.4
+
+- [ ] `9110 15.4-42` **MUST NOT** - On 307, the user agent must not change the request method when automatically redirecting.
+  - _RFC:_ the user agent MUST NOT change the request method if it performs an automatic redirection to that URI.
+  - _check:_ Auto-follow of 307 resends with the identical method (and body); any POST-to-GET rewrite on 307 is a conformance bug. Test: 307 after POST stays POST.
+- [ ] `9110 15.4-13` SHOULD - Change the request method according to the semantics of the specific redirecting status code, where applicable.
+  - _RFC:_ Change the request method according to the redirecting status code's semantics, if applicable.
+  - _check:_ Per-code method table: 303 rewrites to GET/HEAD; 301/302 may rewrite POST to GET; 307/308 never change the method.
+- [ ] `9110 15.4-12` SHOULD - Consider removing caller-supplied header fields with security implications (notably Authorization and Cookie) before following the redirect.
+  - _RFC:_ Consider removing header fields that were not automatically generated by the implementation (i.e., those present in the request because they were added by the calling context) where there are security implications
+  - _check:_ At minimum, drop caller-provided Authorization/Cookie on cross-origin redirects (or expose a policy hook); document the chosen policy.
+- [ ] `9110 15.4-11` SHOULD - Among auto-generated fields to remove/replace: resource-specific fields including Referer, Origin, Authorization, and Cookie.
+  - _RFC:_ Resource-specific header fields, including (but not limited to) Referer, Origin, Authorization, and Cookie.
+  - _check:_ Strip implementation-generated Referer/Origin/Authorization/Cookie on redirect and regenerate for the new resource (or omit).
+- [ ] `9110 15.4-4` SHOULD - When automatically following a redirect, the user agent should resend the original request with the enumerated modifications (facts 15.4-5 through 15.4-14).
+  - _RFC:_ the user agent SHOULD resend the original request message with the following modifications
+  - _check:_ Redirect follower rebuilds the request from the original, applying the modification list, rather than constructing a fresh unrelated request.
+- [ ] `9110 15.4-15` SHOULD - A client should detect and stop cyclical (infinite) redirection loops.
+  - _RFC:_ A client SHOULD detect and intervene in cyclical redirections (i.e., "infinite" redirection loops).
+  - _check:_ Enforce a maximum redirect count and/or visited-URI cycle detection; fail with a distinct error when exceeded.
+- [ ] `9110 15.4-14` SHOULD - If the method was changed to GET or HEAD, remove content-specific header fields.
+  - _RFC:_ If the request method has been changed to GET or HEAD, remove content-specific header fields, including (but not limited to) Content-Encoding, Content-Language, Content-Location, Content-Type, Content-Length, Digest, Last-Modified.
+  - _check:_ When rewriting to GET/HEAD, drop the body and strip Content-* framing/representation headers (Content-Encoding, -Language, -Location, -Type, -Length, Digest, Last-Modified).
+- [ ] `9110 15.4-7` SHOULD - Among auto-generated fields to remove/replace: connection-specific header fields.
+  - _RFC:_ Connection-specific header fields (see Section 7.6.1)
+  - _check:_ Strip Connection and any fields it names (e.g., Keep-Alive, TE, Upgrade) before resending to the new target.
+- [ ] `9110 15.4-6` SHOULD - Remove implementation-generated header fields and regenerate them with values appropriate to the new request.
+  - _RFC:_ Remove header fields that were automatically generated by the implementation, replacing them with updated values as appropriate to the new request.
+  - _check:_ On redirect, strip all headers the client library injected itself and recompute them for the new target rather than copying blindly.
+- [ ] `9110 15.4-5` SHOULD - Replace the target URI with the Location value resolved relative to the original request's target URI.
+  - _RFC:_ Replace the target URI with the URI referenced by the redirection response's Location header field value after resolving it relative to the original request's target URI.
+  - _check:_ Use RFC 3986 relative reference resolution against the original target URI; do not require Location to be absolute.
+- [ ] `9110 15.4-10` SHOULD - Among auto-generated fields to remove/replace: cache-added validators like If-None-Match and If-Modified-Since.
+  - _RFC:_ Validating header fields that were added by the implementation's cache (e.g., If-None-Match, If-Modified-Since)
+  - _check:_ If the client ever adds cache validators itself, drop them on redirect; validators supplied by the caller are governed by 15.4-12 instead.
+- [ ] `9110 15.4-9` SHOULD - Among auto-generated fields to remove/replace: origin-specific fields such as Host.
+  - _RFC:_ Origin-specific header fields (if any), including (but not limited to) Host
+  - _check:_ Recompute Host (and :authority equivalents) from the new target URI; never reuse the old Host on a cross-origin redirect.
+- [ ] `9110 15.4-8` SHOULD - Among auto-generated fields to remove/replace: proxy-configuration fields such as Proxy-Authorization.
+  - _RFC:_ Header fields specific to the client's proxy configuration, including (but not limited to) Proxy-Authorization
+  - _check:_ Do not carry Proxy-Authorization (or other proxy-config headers) across a redirect; regenerate per the proxy applicable to the new target.
+
+## RFC 9110  section 15.5-15.6
+
+- [ ] `9110 15.5-15.6-7` **MUST** - A server generating 401 must send a WWW-Authenticate header with at least one applicable challenge.
+  - _RFC:_ The server generating a 401 response MUST send a WWW-Authenticate header field (Section 11.6.1) containing at least one challenge applicable to the target resource.
+  - _check:_ Client may rely on WWW-Authenticate being present on 401 to drive auth, but must not crash if a non-conforming server omits it.
+- [ ] `9110 15.5-15.6-56` **MUST** - The server must send an Upgrade header in a 426 response indicating the required protocol(s).
+  - _RFC:_ The server MUST send an Upgrade header field in a 426 response to indicate the required protocol(s)
+  - _check:_ Client should read the Upgrade field from 426 to learn the required protocol; surface it to the caller (poseidon does no in-place upgrade).
+- [ ] `9110 15.5-15.6-25` **MUST** - The proxy must send a Proxy-Authenticate header in a 407 with a challenge applicable to that proxy.
+  - _RFC:_ The proxy MUST send a Proxy-Authenticate header field (Section 11.7.1) containing a challenge applicable to that proxy for the request.
+  - _check:_ A client implementing proxy auth parses Proxy-Authenticate from 407; tolerate absence without crashing.
+- [ ] `9110 15.5-15.6-47` SHOULD - A server generating 416 to a byte-range request should include Content-Range with the current representation length.
+  - _RFC:_ A server that generates a 416 response to a byte-range request SHOULD generate a Content-Range header field specifying the current length of the selected representation
+  - _check:_ Parse an unsatisfied-range Content-Range (e.g. "bytes */47022") on 416 to learn the representation length for corrected ranges.
+- [ ] `9110 15.5-15.6-59` SHOULD - A user agent should display an included 5xx error representation to the user.
+  - _RFC:_ A user agent SHOULD display any included representation to the user.
+  - _check:_ Library client: return the 5xx error body to the caller intact.
+- [ ] `9110 15.5-15.6-58` SHOULD - For 5xx responses, the server should include a representation explaining the error, except for HEAD.
+  - _RFC:_ Except when responding to a HEAD request, the server SHOULD send a representation containing an explanation of the error situation
+  - _check:_ Client must be prepared to read/drain a body on any 5xx (and expect no body after HEAD).
+- [ ] `9110 15.5-15.6-40` SHOULD - If a 413 condition is temporary, the server should send Retry-After, after which the client may try again.
+  - _RFC:_ the server SHOULD generate a Retry-After header field to indicate that it is temporary and after what time the client MAY try again
+  - _check:_ Honor Retry-After on 413: only treat as retriable when present, and wait the indicated time before retrying.
+- [ ] `9110 15.5-15.6-9` SHOULD - If a 401 repeats the same challenge after at least one auth attempt, the user agent should present the enclosed representation to the user.
+  - _RFC:_ the user agent SHOULD present the enclosed representation to the user, since it usually contains relevant diagnostic information
+  - _check:_ Stop auth retry loops when the challenge is unchanged after one attempt; surface the response body.
+- [ ] `9110 15.5-15.6-4` SHOULD - User agents should display an included 4xx error representation to the user.
+  - _RFC:_ User agents SHOULD display any included representation to the user.
+  - _check:_ Library client: return the error body to the caller intact rather than discarding it.
+- [ ] `9110 15.5-15.6-2` SHOULD - For 4xx responses, the server should include a representation explaining the error, except for HEAD.
+  - _RFC:_ Except when responding to a HEAD request, the server SHOULD send a representation containing an explanation of the error situation
+  - _check:_ Client must be prepared to read/drain a body on any 4xx (and expect no body after HEAD).
+- [ ] `9110 15.5-15.6-12` SHOULD NOT - On 403, the client should not automatically repeat the request with the same credentials.
+  - _RFC:_ The client SHOULD NOT automatically repeat the request with the same credentials.
+  - _check:_ Retry logic must exclude 403 from automatic retry when the request would carry identical credentials.
+
