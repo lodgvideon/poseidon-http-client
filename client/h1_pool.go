@@ -452,11 +452,21 @@ func (p *h1Pool) evictIdle(conns []*h1ManagedConn) []*h1ManagedConn {
 	return out
 }
 
-// evictDead removes conns whose IsAlive returns false.
+// evictDead removes conns whose IsAlive returns false, and — in this periodic
+// sweep only — idle conns the peer has closed or written unsolicited data on.
+// The socket probe runs here rather than at checkout so the per-request acquire
+// path stays syscall-free; it touches only checked-in conns (active == 0), where
+// no exchange reader is running, so reading through the bufio reader is safe.
+// RFC 9112 §9.6 (monitor idle connections) / RFC 9110 (idle-arriving data is not
+// a valid response, so evict rather than let the next request consume it).
 func (p *h1Pool) evictDead(conns []*h1ManagedConn) []*h1ManagedConn {
 	out := conns[:0]
 	for _, mc := range conns {
-		if !mc.c.IsAlive() {
+		dead := !mc.c.IsAlive()
+		if !dead && mc.active == 0 {
+			dead = !mc.c.ProbeIdle()
+		}
+		if dead {
 			_ = mc.c.Close()
 			p.notifyClose(CloseDead)
 			continue
