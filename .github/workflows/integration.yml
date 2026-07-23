@@ -22,7 +22,7 @@ jobs:
         uses: docker/setup-buildx-action@v4
 
       - name: Build Undertow image
-        uses: docker/build-push-action@v5
+        uses: docker/build-push-action@v7
         with:
           context: test/integration
           file: test/integration/Dockerfile.undertow
