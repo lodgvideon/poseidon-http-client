@@ -346,6 +346,15 @@ func validateFields(method, path, authority string, fields []hpack.HeaderField) 
 	if !validFieldValue([]byte(authority)) {
 		return fmt.Errorf("%w: :authority contains CR, LF or NUL (RFC 9110 §5.5)", ErrInvalidRequest)
 	}
+	// RFC 9110 §4.2.4 / RFC 9112 §3.2: the Host field value MUST exclude any
+	// userinfo subcomponent and its "@" delimiter. '@' cannot appear in a bare
+	// host[:port], so its presence is a caller-supplied userinfo that must not be
+	// emitted verbatim into Host. (The client/ layer rejects this earlier for
+	// Do callers; this guards direct http1 users.)
+	if strings.IndexByte(authority, '@') >= 0 {
+		return fmt.Errorf("%w: :authority %q carries userinfo '@' (RFC 9110 §4.2.4, RFC 9112 §3.2)",
+			ErrInvalidRequest, authority)
+	}
 	for _, f := range fields {
 		name := string(f.Name)
 		if len(name) == 0 || name[0] == ':' {

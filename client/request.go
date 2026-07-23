@@ -184,11 +184,20 @@ func validateRequest(r *Request) error {
 	if r == nil {
 		return fmt.Errorf("%w: nil request", ErrInvalidRequest)
 	}
-	if r.Method == "" || containsAnyWhitespace(r.Method) {
-		return fmt.Errorf("%w: method must be a non-empty token (no whitespace)", ErrInvalidRequest)
+	// RFC 9110 §9.1: the method is a token. http1.WriteRequest refuses a
+	// non-token method on its own wire (validToken); the shared H2/H3 send path
+	// checked only for whitespace, so a method carrying a control byte (e.g.
+	// "GET\x1f") reached the HPACK/QPACK encoder verbatim and produced a
+	// malformed message (RFC 7540 §8.1.2.6). isTokenName rejects empty too.
+	if !isTokenName(unsafeStringToBytes(r.Method)) {
+		return fmt.Errorf("%w: method must be a non-empty RFC 9110 §9.1 token (no whitespace or control bytes)", ErrInvalidRequest)
 	}
-	if r.Path == "" || containsAnyWhitespace(r.Path) {
-		return fmt.Errorf("%w: path must be non-empty without whitespace", ErrInvalidRequest)
+	// RFC 9112 §3: the request-target is delimited by SP and CRLF, so a control
+	// byte in :path re-cuts the line on an http1 downgrade and is malformed on
+	// h2/h3. http1.validRequestTarget refuses these on the wire; the shared path
+	// checked only for whitespace, so other C0 controls and DEL passed through.
+	if r.Path == "" || containsAnyWhitespace(r.Path) || pathHasControlByte(r.Path) {
+		return fmt.Errorf("%w: path must be non-empty without whitespace or control characters (RFC 9112 §3)", ErrInvalidRequest)
 	}
 	// RFC 8441 §4: the :protocol pseudo-header MAY appear ONLY when
 	// Method is "CONNECT". Sending :protocol on any other method is
@@ -209,9 +218,24 @@ func validateRequest(r *Request) error {
 		return fmt.Errorf("%w: %s value carries CR, LF or NUL (request-splitting vector, RFC 7540 §10.3)",
 			ErrInvalidRequest, bad)
 	}
+	// RFC 9110 §4.2.4 deprecates the userinfo subcomponent and RFC 9112 §3.2
+	// requires the Host field value to exclude it: a sender MUST NOT emit
+	// "user@host". The client never synthesizes userinfo, but a caller that
+	// decomposed "http://user:pass@host/" into Authority passes it straight into
+	// Host (h1) or :authority (h2/h3). '@' cannot appear in a bare host[:port],
+	// so its presence is unconditionally an error — matching the http3 sibling.
+	if strings.IndexByte(r.Authority, '@') >= 0 {
+		return fmt.Errorf("%w: :authority %q carries userinfo '@' (RFC 9110 §4.2.4, RFC 9112 §3.2)",
+			ErrInvalidRequest, r.Authority)
+	}
+	// RFC 9110 §9.3.8: a client MUST NOT send content in a TRACE request.
+	if r.Method == "TRACE" && requestHasContent(r) {
+		return fmt.Errorf("%w: TRACE request must not carry content (RFC 9110 §9.3.8)", ErrInvalidRequest)
+	}
 	// RFC 7540 §8.1.2.3: connection-specific headers MUST NOT appear
 	// in HTTP/2 requests. Sending any of them is a request-smuggling
 	// vector through HTTP/1.1 downgrading intermediaries.
+	hasContentType := false
 	for i := range r.Headers {
 		hf := r.Headers[i]
 		if len(hf.Name) > 0 && hf.Name[0] == ':' {
@@ -224,6 +248,9 @@ func validateRequest(r *Request) error {
 				ErrInvalidRequest, hf.Name)
 		}
 		name := strings.ToLower(string(hf.Name))
+		if name == "content-type" {
+			hasContentType = true
+		}
 		if forbiddenRequestHeader(name) {
 			return fmt.Errorf("%w: %q header is forbidden in HTTP/2 requests (RFC 7540 §8.1.2.3)",
 				ErrInvalidRequest, hf.Name)
@@ -238,6 +265,13 @@ func validateRequest(r *Request) error {
 			return fmt.Errorf("%w: header %q value carries CR, LF or NUL (request-splitting vector, RFC 7540 §10.3)",
 				ErrInvalidRequest, hf.Name)
 		}
+	}
+	// RFC 9110 §9.3.7: a client generating an OPTIONS request with content MUST
+	// send a Content-Type. Presence is the enforceable part; media-type validity
+	// stays the caller's.
+	if r.Method == "OPTIONS" && requestHasContent(r) && !hasContentType {
+		return fmt.Errorf("%w: OPTIONS request with content requires a Content-Type header (RFC 9110 §9.3.7)",
+			ErrInvalidRequest)
 	}
 	for i := range r.Trailers {
 		if len(r.Trailers[i].Name) > 0 && r.Trailers[i].Name[0] == ':' {
@@ -268,6 +302,26 @@ func containsAnyWhitespace(s string) bool {
 		}
 	}
 	return false
+}
+
+// pathHasControlByte reports whether s carries a C0 control (0x00–0x1F) or DEL
+// (0x7F). RFC 9112 §3 delimits the request-line by SP and CRLF, so any such byte
+// re-cuts the line on an http1 downgrade and is malformed on h2/h3 (RFC 7540
+// §8.1.2.6). SP (0x20) itself is caught by the containsAnyWhitespace check that
+// runs alongside this one, mirroring http1.validRequestTarget's ≤0x20 / 0x7F rule.
+func pathHasControlByte(s string) bool {
+	for i := 0; i < len(s); i++ {
+		if s[i] <= 0x1f || s[i] == 0x7f {
+			return true
+		}
+	}
+	return false
+}
+
+// requestHasContent reports whether r carries a request body. Used by the
+// method-specific content rules (TRACE MUST NOT, OPTIONS Content-Type).
+func requestHasContent(r *Request) bool {
+	return len(r.Body) > 0 || r.BodyReader != nil
 }
 
 // hasFieldInjectionByte reports whether v carries CR, LF or NUL — the three
