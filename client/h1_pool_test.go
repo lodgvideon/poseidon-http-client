@@ -520,6 +520,50 @@ func TestH1Pool_IdleEviction(t *testing.T) {
 	t.Fatalf("idle conn never evicted; Stats = %+v", p.Stats())
 }
 
+// TestH1Pool_DialError_FailsAllQueuedWaiters pins that a dial failure answers
+// every queued waiter, not just the one at the head.
+//
+// The dial-error branch replied to the head waiter and returned, leaving the rest
+// queued in exactly the state its own doc comment calls terminal — so a burst
+// against a downed host drained at one request per HealthCheckPeriod while NEW
+// acquires were refused in microseconds by the dial-backoff fast path. That
+// priority inversion is the bug; HealthCheckPeriod is set out of reach here so
+// only the dial-done path can answer them.
+func TestH1Pool_DialError_FailsAllQueuedWaiters(t *testing.T) {
+	t.Parallel()
+	d := newH1FakeDialer()
+	d.dialErr = fmt.Errorf("connection refused")
+	p := newH1Pool("h:80", d, PoolOptions{
+		MaxConnsPerHost:   2,
+		HealthCheckPeriod: time.Hour,
+	}, nil, nil)
+	t.Cleanup(func() { _ = p.Close() })
+
+	const n = 4
+	errs := make(chan error, n)
+	for i := 0; i < n; i++ {
+		go func() {
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			_, err := p.acquire(ctx)
+			errs <- err
+		}()
+	}
+
+	deadline := time.After(5 * time.Second)
+	for i := 0; i < n; i++ {
+		select {
+		case err := <-errs:
+			if err == nil {
+				t.Fatal("acquire against a downed host returned a connection")
+			}
+		case <-deadline:
+			t.Fatalf("only %d of %d queued acquires were answered; the rest were left "+
+				"for a health-check tick", i, n)
+		}
+	}
+}
+
 // TestH1Pool_WaiterServedAfterCloseEviction pins that a queued waiter is still
 // served after the last connection is evicted.
 //

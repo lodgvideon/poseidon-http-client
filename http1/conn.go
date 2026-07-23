@@ -89,6 +89,21 @@ var ErrInvalidHeaderBlock = errors.New("http1: invalid header block")
 // as a status line.
 var ErrInvalidChunkSize = errors.New("http1: invalid chunk size")
 
+// ErrUnsolicitedUpgrade reports a 101 (Switching Protocols) response to a request
+// that offered no Upgrade.
+//
+// This client never emits an Upgrade header — WriteRequest strips it from the
+// wire — so every 101 it can possibly receive names a protocol it never offered,
+// which RFC 9110 §7.8 forbids a server from switching to. It was previously
+// treated as an ordinary 1xx: consumeHeaders drained it and the loop kept reading
+// the SAME socket for a "final" status line, so a server answering any request
+// with a 101 followed by a synthetic response had that fabricated response
+// returned to the caller with err == nil, on a connection that stayed poolable.
+//
+// The connection is always left un-poolable when this is returned: after a 101
+// the peer considers the connection to be speaking another protocol entirely.
+var ErrUnsolicitedUpgrade = errors.New("http1: unsolicited 101 Switching Protocols")
+
 const (
 	// readBufSize is the bufio.Reader buffer and therefore, by construction,
 	// the hard ceiling on one CRLF-terminated protocol line: readLine uses
@@ -139,6 +154,16 @@ type Conn struct {
 	nc     net.Conn
 	br     *bufio.Reader
 	closed atomic.Bool
+
+	// peerMinor records the HTTP/1.x minor version the peer last answered with,
+	// and peerMinorKnown whether any response has been read yet. RFC 9112 §6.1
+	// forbids sending Transfer-Encoding to a peer that does not handle HTTP/1.1,
+	// and this is the only evidence of that the client has. Plain fields, not
+	// atomics: a Conn carries one Exchange at a time (no pipelining) and the
+	// caller serialises exchanges, so the write that records it happens-before
+	// the read that consults it.
+	peerMinor      int
+	peerMinorKnown bool
 }
 
 // NewConn wraps nc in a persistent HTTP/1.1 Conn.
@@ -497,6 +522,25 @@ func parseRequestContentLength(v string) (int64, bool) {
 	return n, true
 }
 
+// parseHTTP1Version parses an HTTP/1.x version token and returns its minor digit.
+//
+// RFC 9112 §2.3: HTTP-version = "HTTP" "/" DIGIT "." DIGIT — one digit each side,
+// so a well-formed HTTP/1.x token is exactly 8 bytes. The previous loose
+// HasPrefix(s, "HTTP/1") accept let "HTTP/1.00" through, which then compared
+// unequal to the literal "HTTP/1.0" and slipped past every version-keyed rule
+// while still being an HTTP/1.0 message — it seeded persistent and bypassed the
+// §6.1 Transfer-Encoding close. Parsing once, and keying the rules on the number,
+// makes that unrepresentable.
+func parseHTTP1Version(s string) (minor int, ok bool) {
+	if len(s) != 8 || s[:5] != "HTTP/" || s[5] != '1' || s[6] != '.' {
+		return 0, false
+	}
+	if s[7] < '0' || s[7] > '9' {
+		return 0, false
+	}
+	return int(s[7] - '0'), true
+}
+
 // hasConnectionOption reports whether a Connection field value carries opt as a
 // list member.
 //
@@ -678,6 +722,16 @@ func (ex *Exchange) WriteRequest(ctx context.Context, fields []hpack.HeaderField
 
 	// Determine how to frame the request body.
 	if !endStream && !hasContentLength {
+		// RFC 9112 §6.1: a client MUST NOT send Transfer-Encoding to a peer it does
+		// not know handles HTTP/1.1. Framing was decided with no reference to the
+		// peer at all, so once a 1.0 response was pooled — which "Connection:
+		// keep-alive" makes possible — the next request chunked itself to a peer
+		// the client had itself observed as 1.0. A caller who wants a body on such
+		// a connection must declare a Content-Length.
+		if ex.c.peerMinorKnown && ex.c.peerMinor == 0 {
+			return fmt.Errorf("%w: cannot chunk a request body to a peer that answered HTTP/1.0; "+
+				"send a Content-Length instead (RFC 9112 §6.1)", ErrInvalidRequest)
+		}
 		ex.reqChunked = true
 	}
 
@@ -825,6 +879,15 @@ func (ex *Exchange) readLine(what string) (string, error) {
 // Returns the response headers as []hpack.HeaderField. The first element is
 // always the ":status" pseudo-header for compatibility with the client layer.
 func (ex *Exchange) ReadResponse(ctx context.Context) (statusCode int, headers []hpack.HeaderField, err error) {
+	// Any failure reading the head leaves the stream position unknown, so the
+	// connection must not be pooled. Several exits (a truncated or stalled header
+	// block, a cancelled read) returned with keepAlive still true; deciding it
+	// once here is the same "no exit path has to remember" the body reader uses.
+	defer func() {
+		if err != nil {
+			ex.keepAlive = false
+		}
+	}()
 	// Install this exchange's read deadline unconditionally — a deadline when
 	// ctx has one, the zero value when it does not.
 	//
@@ -849,7 +912,7 @@ func (ex *Exchange) ReadResponse(ctx context.Context) (statusCode int, headers [
 	ex.readCtx = ctx
 	defer armCancel(ctx, ex.c.nc.SetReadDeadline)()
 
-	var proto string
+	var respMinor int
 	var interim int
 	for {
 		// Status line: "HTTP/1.x NNN Reason\r\n"
@@ -859,15 +922,27 @@ func (ex *Exchange) ReadResponse(ctx context.Context) (statusCode int, headers [
 		}
 
 		parts := strings.SplitN(line, " ", 3)
-		if len(parts) < 2 || !strings.HasPrefix(parts[0], "HTTP/1") {
+		if len(parts) < 2 {
 			return 0, nil, fmt.Errorf("http1: malformed status line: %q", line)
 		}
-		proto = parts[0]
+		minor, vok := parseHTTP1Version(parts[0])
+		if !vok {
+			return 0, nil, fmt.Errorf("http1: malformed status line: %q", line)
+		}
+		respMinor = minor
 		code, perr := strconv.Atoi(parts[1])
 		if perr != nil {
 			return 0, nil, fmt.Errorf("http1: invalid status code: %q", parts[1])
 		}
 
+		// A 101 is not an interim status to drain. See ErrUnsolicitedUpgrade:
+		// this client offers no Upgrade, so a 101 can only be a protocol it never
+		// asked for, and continuing to read the socket for a "final" status line
+		// is what let a server fabricate a response for it.
+		if code == 101 {
+			ex.keepAlive = false
+			return 0, nil, fmt.Errorf("%w (the client sends no Upgrade)", ErrUnsolicitedUpgrade)
+		}
 		if code >= 200 {
 			statusCode = code
 			break
@@ -890,7 +965,10 @@ func (ex *Exchange) ReadResponse(ctx context.Context) (statusCode int, headers [
 	// highest minor this client conforms to — HTTP/1.1 — so it too defaults to
 	// persistent rather than being closed as if it were unknown. Only HTTP/1.0
 	// (and a version string with no 1.x minor) closes by default.
-	ex.keepAlive = strings.HasPrefix(proto, "HTTP/1.") && proto != "HTTP/1.0"
+	ex.keepAlive = respMinor >= 1
+	// The only evidence the client has of what the peer speaks; WriteRequest
+	// consults it before framing a request body as chunked (RFC 9112 §6.1).
+	ex.c.peerMinor, ex.c.peerMinorKnown = respMinor, true
 	ex.closeSeen = false
 	ex.contentLen = -1
 
@@ -942,7 +1020,7 @@ func (ex *Exchange) ReadResponse(ctx context.Context) (statusCode int, headers [
 	// 1.0 + keep-alive + chunked response was decoded and returned to the pool.
 	// The body is still chunk-decoded (chunked is self-delimiting, so the caller
 	// gets its bytes); only reuse is refused.
-	if ex.respTE && proto == "HTTP/1.0" {
+	if ex.respTE && respMinor == 0 {
 		ex.keepAlive = false
 	}
 
