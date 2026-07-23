@@ -1,12 +1,15 @@
-# HTTP/1.1 RFC Analysis & Implementation Reconciliation
+# HTTP RFC Analysis & Implementation Reconciliation
 
-Deep, from-scratch analysis of the HTTP/1.1 specification and a conformance
-reconciliation of the `http1/` + `client/` implementation against it.
+Deep, from-scratch analysis of the HTTP specifications this client implements —
+**HTTP/1.1** (`http1/` + `client/`) and **HTTP/2** (`conn/` + `frame/` + `hpack/`) —
+re-deriving every normative rule from raw RFC text and reconciling the code.
 
-The client's HTTP/1.1 layer was originally built against **RFC 2616 (1999)**,
-which is **obsolete**. This analysis re-derives the normative rules from the
-raw RFC text, produces the **current 2026 slice** (RFC 9110 + 9112), diffs the
-two, distills a client obligation checklist, and audits the code against it.
+Both stacks were originally built against **obsolete** RFCs (HTTP/1.1 →
+RFC 2616, 1999; HTTP/2 → RFC 7540, 2015). For each, this analysis re-extracts
+the rules, produces the **current slice** (HTTP/1.1 → RFC 9110 + 9112;
+HTTP/2 → RFC 9113 + HPACK RFC 7541), and diffs old→current. For HTTP/1.1 it also
+distills a client checklist and audits the code (PASS 101 · N/A 142 ·
+actionable 13); the HTTP/2 code reconciliation is the next step.
 
 ## Method (how these were produced)
 
@@ -22,7 +25,7 @@ Extraction ran on the `fable` model; verification and code-judging on `opus`.
 All artifacts are regenerable from the workflow journals via the scripts in the
 session scratchpad (`parse-*.ps1`).
 
-## Artifacts
+## HTTP/1.1 artifacts
 
 | File | What | Size | Verification |
 |------|------|------|--------------|
@@ -37,7 +40,46 @@ session scratchpad (`parse-*.ps1`).
 mislabelled (e.g. `relaxed` vs `removed`). Each is flagged **VERIFY** inline
 with the correction. No substantive normative rule is affected.
 
-## Headline findings
+## HTTP/2 artifacts
+
+Target packages: `frame/` (frame codec), `conn/` (connection engine — streams,
+flow control, SETTINGS, GOAWAY, pseudo-headers, malformed), `hpack/` (RFC 7541).
+
+| File | What | Size | Verification |
+|------|------|------|--------------|
+| [RFC7540_FACTS.md](RFC7540_FACTS.md) | Normative facts of the **obsolete** HTTP/2 spec the client was built to (tests are `TestConformance_RFC7540_*`) | 606 facts | 605 confirmed, 1 cosmetic dispute |
+| [RFC9113_FACTS.md](RFC9113_FACTS.md) | Normative facts of the **current** HTTP/2 spec (RFC 9113, 2022; obsoletes 7540/8740) | 594 facts | 591 confirmed, 3 cosmetic disputes |
+| [RFC7541_HPACK_FACTS.md](RFC7541_HPACK_FACTS.md) | Normative facts of **HPACK** (RFC 7541) → the `hpack/` codec | 167 facts | 166 confirmed, 1 cosmetic dispute |
+| [HTTP2_RFC_DELTA.md](HTTP2_RFC_DELTA.md) | Where a client built to **7540 diverges** from 9113, keyed by client impact | 91 deltas | 90 confirmed, 1 `change_type`-label dispute |
+
+Change-type spread of the 91 deltas: 18 added, 14 clarified, 13 tightened,
+12 removed, 9 unchanged-wording, 7 security-hardening, 7 moved, 6 deprecated,
+4 relaxed, 1 default-changed.
+
+### HTTP/2 headline findings (where a 7540-era client is now off)
+
+- **Priority (RFC 7540 §5.3) is deprecated wholesale.** The dependency/weight
+  tree, PRIORITY frame, and HEADERS priority fields still exist on the wire but
+  9113 servers ignore them. Two client-side consequences: (a) exposing priority
+  knobs (`SendHeadersWithPriority`, CLIENT_GUIDE §4) is a no-op against modern
+  servers — misleading for a load generator; (b) the 7540 **MUST** that a
+  self-dependent stream is a `PROTOCOL_ERROR` was **removed** — a client still
+  enforcing it now RST-kills streams a 9113 peer considers legal. Receiving
+  PRIORITY as a no-op (`OnPriority`) is now spec-blessed, not lazy.
+- **h2c in-band Upgrade removed.** Cleartext HTTP/2 is prior-knowledge only in
+  9113; never offer `Upgrade: h2c` / `HTTP2-Settings`.
+- **Field validation added (9113 §8.2.1)** and pseudo-header / trailer /
+  connection-specific-header rules tightened; malformed = **stream** error
+  (`RST_STREAM(PROTOCOL_ERROR)`), not a connection error.
+- **TLS 1.3 rules added (9113 §9.2.3)**, absorbing RFC 8740.
+- **421 (Misdirected Request)** definition moved out to RFC 9110 §15.5.20.
+
+The HPACK catalog pins the security-critical decoder rules (integer-overflow
+and octet-length caps → decoding error, Huffman EOS/over-long-padding → error,
+index-out-of-range → `COMPRESSION_ERROR`) with per-file reconcile targets
+(`hpack/integer.go`, `hpack/huffman_fsm.go`).
+
+## HTTP/1.1 headline findings
 
 ### Delta 2616 -> 9110/9112 (what "our understanding" got outdated on)
 
