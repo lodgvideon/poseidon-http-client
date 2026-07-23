@@ -49,10 +49,15 @@ import (
 const h1ConnStreamCap = 1
 
 // h1ProbeIdleAfter is how long a pooled connection must have sat idle before a
-// checkout probes it. Short enough that a connection the peer quietly closed or
-// poisoned is caught long before the maintenance sweep would; long enough that
-// back-to-back reuse under load never pays the probe's syscall.
-const h1ProbeIdleAfter = 250 * time.Millisecond
+// checkout probes it.
+//
+// The probe blocks for up to its read deadline and runs on the pool's single
+// actor goroutine, so a threshold short enough to fire under load would serialise
+// every acquire behind it and cap the pool's throughput. Two seconds keeps it off
+// the loaded path entirely — a pool doing real work reuses connections in
+// microseconds — while still catching one the peer quietly closed or poisoned far
+// sooner than the maintenance sweep would.
+const h1ProbeIdleAfter = 2 * time.Second
 
 // h1ManagedConn is the actor's per-conn record. NEVER touched outside the actor
 // goroutine.
@@ -285,10 +290,26 @@ func (p *h1Pool) handleDialDone(rs *h1RunState, dr h1DialResult) {
 			rs.waiters = rs.waiters[1:]
 			p.replyAcquire(req, nil, dr.err)
 		}
+		// The waiters behind that one must not be left to a health-check tick.
+		// Either start another dial, or — when the pool is in exactly the state
+		// that makes handleAcquire fast-refuse a NEW request (dial backoff, nothing
+		// live, nothing in flight) — refuse them for the same reason. Leaving them
+		// queued was a priority inversion: a fresh acquire got an immediate
+		// ErrDialBackoff while an already-queued one waited a full
+		// HealthCheckPeriod, so a burst against a downed host drained one request
+		// per tick.
+		p.ensureDialForWaiters(rs)
+		if rs.inFlightDials == 0 && h1CountLive(rs.conns) == 0 {
+			for _, w := range rs.waiters {
+				p.replyAcquire(w, nil, dr.err)
+			}
+			rs.waiters = nil
+		}
 		return
 	}
 	rs.conns = append(rs.conns, dr.mc)
 	rs.waiters = p.serveWaiters(rs.conns, rs.waiters)
+	p.ensureDialForWaiters(rs)
 }
 
 // handleStats evicts dead conns silently and reports a snapshot.
