@@ -235,6 +235,17 @@ type Exchange struct {
 
 	// request side
 	reqChunked bool // sending chunked request body
+	// reqContentLen is the Content-Length this request declared (-1 when none
+	// was sent, including the chunked case), and reqBodyWritten counts the body
+	// octets actually handed to the socket. RFC 9110 §8.6 forbids a sender from
+	// emitting a Content-Length it knows to be incorrect: a body that over- or
+	// under-runs its declaration desyncs the peer, which then reads the next
+	// request's bytes as this body's tail (or waits for octets that never come).
+	// Nothing reconciled the two, so a caller streaming more or fewer bytes than
+	// it declared put a smuggling primitive on the wire and the connection was
+	// still pooled afterwards.
+	reqContentLen  int64
+	reqBodyWritten int64
 
 	// response side
 	statusCode int
@@ -369,6 +380,32 @@ func validRequestTarget(s string) bool {
 		}
 	}
 	return true
+}
+
+// parseRequestContentLength parses a caller-supplied Content-Length value as RFC
+// 9110 §8.6's `Content-Length = 1*DIGIT`.
+//
+// Surrounding OWS is tolerated — a field value's edges are not part of it — but
+// nothing else is: a sign, or a comma-folded list like "5, 10" (which RFC 9110
+// §5.3 makes equivalent to two field lines, i.e. the CL.CL smuggling primitive
+// on one line), is refused rather than best-effort parsed. That matches how this
+// client's own receive side treats the same bytes; emitting a shape it would
+// reject on arrival is exactly the asymmetry that lets a request smuggle.
+func parseRequestContentLength(v string) (int64, bool) {
+	s := strings.TrimSpace(v)
+	if s == "" {
+		return 0, false
+	}
+	for i := 0; i < len(s); i++ {
+		if s[i] < '0' || s[i] > '9' {
+			return 0, false
+		}
+	}
+	n, err := strconv.ParseInt(s, 10, 64)
+	if err != nil {
+		return 0, false
+	}
+	return n, true
 }
 
 // hasConnectionOption reports whether a Connection field value carries opt as a
@@ -517,16 +554,32 @@ func (ex *Exchange) WriteRequest(ctx context.Context, fields []hpack.HeaderField
 		return fmt.Errorf("%w: %d Content-Length header fields; a request must carry at most one (RFC 9110 §5.3, RFC 9112 §11.2)",
 			ErrInvalidRequest, clCount)
 	}
-	// RFC 9110 §8.6: a sender MUST NOT emit a Content-Length it knows to be
-	// incorrect. endStream means no body follows, so a non-zero caller
-	// Content-Length declares octets that will never be written — a CL.0 desync
-	// on a reused connection, where the peer reads the next request's bytes as
-	// this phantom body. A caller "0" is fine (declares and sends nothing).
-	if endStream && hasContentLength {
-		if n, err := strconv.Atoi(strings.TrimSpace(clValue)); err != nil || n != 0 {
+	// Parse the caller's Content-Length whenever one is present, not only on the
+	// bodyless path.
+	//
+	// RFC 9110 §8.6's ABNF is `Content-Length = 1*DIGIT`, so a folded list like
+	// "5, 10" — which §5.3 makes equivalent to two field lines — is the CL.CL
+	// smuggling primitive on one line, and this client's own receive side already
+	// refuses that shape. Parsing here also hands WriteBody the declared length to
+	// reconcile the body against: §8.6 forbids a sender from emitting a
+	// Content-Length it knows to be incorrect, and a declared length that does not
+	// match the octets written desyncs the peer.
+	ex.reqContentLen = -1
+	if hasContentLength {
+		n, ok := parseRequestContentLength(clValue)
+		if !ok {
+			return fmt.Errorf("%w: Content-Length %q is not 1*DIGIT (RFC 9110 §8.6)",
+				ErrInvalidRequest, clValue)
+		}
+		// endStream means no body follows, so a non-zero declaration is octets
+		// that will never be written — a CL.0 desync on a reused connection,
+		// where the peer reads the next request's bytes as this phantom body. A
+		// caller "0" is fine (declares and sends nothing).
+		if endStream && n != 0 {
 			return fmt.Errorf("%w: Content-Length %q on a request with no body (RFC 9110 §8.6)",
 				ErrInvalidRequest, clValue)
 		}
+		ex.reqContentLen = n
 	}
 
 	// Determine how to frame the request body.
@@ -615,12 +668,32 @@ func (ex *Exchange) WriteBody(ctx context.Context, p []byte, fin bool) error {
 		return err
 	}
 
-	// Non-chunked: write data directly (Content-Length governs framing).
-	if len(p) == 0 {
-		return nil
+	// Non-chunked: write data directly (Content-Length governs framing), keeping
+	// the octets written reconciled against what the head declared.
+	//
+	// Over-run is refused BEFORE the write: once the excess is on the wire the
+	// desync has already happened and cannot be taken back — the peer reads those
+	// octets as the start of the next request. Under-run can only be judged at
+	// fin, where the peer would instead block waiting for octets that never come.
+	// Either way the connection is no longer safe to reuse.
+	if ex.reqContentLen >= 0 && ex.reqBodyWritten+int64(len(p)) > ex.reqContentLen {
+		ex.keepAlive = false
+		return fmt.Errorf("%w: request body exceeds its declared Content-Length %d (RFC 9110 §8.6)",
+			ErrInvalidRequest, ex.reqContentLen)
 	}
-	_, err := ex.c.nc.Write(p)
-	return err
+	if len(p) > 0 {
+		n, err := ex.c.nc.Write(p)
+		ex.reqBodyWritten += int64(n)
+		if err != nil {
+			return err
+		}
+	}
+	if fin && ex.reqContentLen >= 0 && ex.reqBodyWritten != ex.reqContentLen {
+		ex.keepAlive = false
+		return fmt.Errorf("%w: request body is %d octets but declared Content-Length %d (RFC 9110 §8.6)",
+			ErrInvalidRequest, ex.reqBodyWritten, ex.reqContentLen)
+	}
+	return nil
 }
 
 // readLine reads one CRLF-terminated protocol line and returns it with the
@@ -1438,7 +1511,15 @@ func (ex *Exchange) ReadBodyChunk(buf []byte) (n int, done bool, err error) {
 		done = ex.bodyRead >= ex.contentLen
 		if err == io.EOF {
 			if !done {
-				// Premature EOF before Content-Length satisfied.
+				// Premature EOF before Content-Length satisfied. RFC 9112 §6.3
+				// rule 6 makes the message incomplete, and this connection's
+				// stream position is now indeterminate, so it must not be reused —
+				// every other framing-defect path in this file clears keepAlive,
+				// and KeepAlive()'s documented contract says so. client/ happened
+				// to be safe because h1Exchange.Close forces release(false), but
+				// http1 is a public package and a direct caller trusting
+				// KeepAlive() would have pooled a truncated stream.
+				ex.keepAlive = false
 				return n, true, fmt.Errorf("http1: premature EOF: got %d of %d bytes", ex.bodyRead, ex.contentLen)
 			}
 			// Final body bytes arrived coalesced with io.EOF in a single

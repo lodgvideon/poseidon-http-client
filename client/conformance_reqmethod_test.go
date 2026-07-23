@@ -67,6 +67,63 @@ func TestConformance_RFC9110_Sec9_3_7_OptionsContentRequiresContentType(t *testi
 	}
 }
 
+// TestConformance_RFC9113_Sec8_3_1_HostHeaderRefused pins that a caller-supplied
+// host header is refused rather than emitted next to the client's own authority.
+//
+// RFC 9110 §7.7 and RFC 9113 §8.3.1 require Host and :authority to agree; a
+// caller header carrying a different (or empty) host rode the H2 wire alongside
+// :authority, and the pair collapses at any HTTP/2->HTTP/1.1 downgrading
+// intermediary. http1's WriteRequest drops it and derives Host from :authority,
+// and http3 rejects it — the shared gate now agrees with both.
+func TestConformance_RFC9113_Sec8_3_1_HostHeaderRefused(t *testing.T) {
+	for _, v := range []string{"other.example.com", "", "example.com"} {
+		t.Run("host="+v, func(t *testing.T) {
+			err := validateRequest(&Request{
+				Method: "GET", Path: "/", Authority: "example.com",
+				Headers: []conn.HeaderField{{Name: []byte("Host"), Value: []byte(v)}},
+			})
+			if !errors.Is(err, ErrInvalidRequest) {
+				t.Fatalf("validateRequest(host header %q) = %v, want ErrInvalidRequest", v, err)
+			}
+		})
+	}
+	// Over-rejection guard: the authority alone is how a caller sets the host.
+	if err := validateRequest(&Request{Method: "GET", Path: "/", Authority: "example.com"}); err != nil {
+		t.Fatalf("validateRequest(no host header) = %v, want nil", err)
+	}
+}
+
+// TestConformance_RFC9110_Sec10_1_1_Expect100OnBodylessRefused pins that a
+// 100-continue expectation is refused on a request with no content. RFC 9110
+// §10.1.1 forbids generating one there: nothing can be withheld, so the exchange
+// only pays a round trip, or stalls against a server that waits.
+func TestConformance_RFC9110_Sec10_1_1_Expect100OnBodylessRefused(t *testing.T) {
+	for _, v := range []string{"100-continue", "100-Continue"} {
+		t.Run(v, func(t *testing.T) {
+			err := validateRequest(&Request{
+				Method: "POST", Path: "/",
+				Headers: []conn.HeaderField{{Name: []byte("Expect"), Value: []byte(v)}},
+			})
+			if !errors.Is(err, ErrInvalidRequest) {
+				t.Fatalf("validateRequest(Expect: %s, no body) = %v, want ErrInvalidRequest", v, err)
+			}
+		})
+	}
+	// Over-rejection guards: with content it is exactly what the expectation is
+	// for, and an unrelated Expect value is the caller's business.
+	accept := []*Request{
+		{Method: "POST", Path: "/", Body: []byte("x"),
+			Headers: []conn.HeaderField{{Name: []byte("Expect"), Value: []byte("100-continue")}}},
+		{Method: "POST", Path: "/",
+			Headers: []conn.HeaderField{{Name: []byte("Expect"), Value: []byte("other-extension")}}},
+	}
+	for _, req := range accept {
+		if err := validateRequest(req); err != nil {
+			t.Fatalf("validateRequest = %v, want nil", err)
+		}
+	}
+}
+
 // TestConformance_RFC9110_Sec4_2_4_AuthorityUserinfoRejected pins that a caller
 // :authority carrying a userinfo "@" is refused rather than emitted verbatim.
 // RFC 9110 §4.2.4 deprecates the userinfo subcomponent; RFC 9112 §3.2 requires
