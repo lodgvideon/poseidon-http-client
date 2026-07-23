@@ -171,6 +171,15 @@ func forbiddenRequestHeader(name string) bool {
 	case "connection", "keep-alive", "proxy-connection",
 		"transfer-encoding", "upgrade":
 		return true
+	// "host" is not connection-specific, but the client synthesizes the
+	// authority itself: RFC 9110 §7.7 / RFC 9113 §8.3.1 require Host and
+	// :authority to agree, and a caller header carrying a different (or empty)
+	// host was emitted alongside :authority on the H2 wire, where the pair
+	// collapses at any HTTP/2->HTTP/1.1 downgrading intermediary. http1's
+	// WriteRequest drops it and derives Host from :authority, and http3 rejects
+	// it — refusing it here makes the shared gate agree with both.
+	case "host":
+		return true
 	}
 	return false
 }
@@ -234,9 +243,18 @@ func validateRequest(r *Request) error {
 	if r.Method == "TRACE" && requestHasContent(r) {
 		return fmt.Errorf("%w: TRACE request must not carry content (RFC 9110 §9.3.8)", ErrInvalidRequest)
 	}
-	hasContentType, err := checkRegularHeaders(r.Headers)
+	hasContentType, hasExpect100, err := checkRegularHeaders(r.Headers)
 	if err != nil {
 		return err
+	}
+	// RFC 9110 §10.1.1: a client must not generate a 100-continue expectation in
+	// a request that does not include content. There is nothing for the server to
+	// withhold, so the exchange just pays an extra round trip (or stalls against a
+	// server that waits). Same shape as the TRACE/OPTIONS content rules above, and
+	// it lands in the shared gate so h2/h3 get it too.
+	if hasExpect100 && !requestHasContent(r) {
+		return fmt.Errorf("%w: Expect: 100-continue on a request with no content (RFC 9110 §10.1.1)",
+			ErrInvalidRequest)
 	}
 	// RFC 9110 §9.3.7: a client generating an OPTIONS request with content MUST
 	// send a Content-Type. Presence is the enforceable part; media-type validity
@@ -260,15 +278,15 @@ func validateRequest(r *Request) error {
 // requests — sending any is a request-smuggling vector through HTTP/1.1
 // downgrading intermediaries. RFC 9110 §5.6.2: names are tokens; RFC 7540 §10.3:
 // a value carrying CR/LF/NUL is a splitting vector once re-serialised.
-func checkRegularHeaders(headers []conn.HeaderField) (hasContentType bool, err error) {
+func checkRegularHeaders(headers []conn.HeaderField) (hasContentType, hasExpect100 bool, err error) {
 	for i := range headers {
 		hf := headers[i]
 		if len(hf.Name) > 0 && hf.Name[0] == ':' {
-			return false, fmt.Errorf("%w: pseudo-header %q in regular Headers slice",
+			return false, false, fmt.Errorf("%w: pseudo-header %q in regular Headers slice",
 				ErrInvalidRequest, hf.Name)
 		}
 		if !isTokenName(hf.Name) {
-			return false, fmt.Errorf("%w: header name %q is not a token (RFC 9110 §5.6.2); a name "+
+			return false, false, fmt.Errorf("%w: header name %q is not a token (RFC 9110 §5.6.2); a name "+
 				"carrying CR, LF, NUL, a space or a colon is a request-splitting vector",
 				ErrInvalidRequest, hf.Name)
 		}
@@ -276,20 +294,23 @@ func checkRegularHeaders(headers []conn.HeaderField) (hasContentType bool, err e
 		if name == "content-type" {
 			hasContentType = true
 		}
+		if name == "expect" && strings.EqualFold(string(hf.Value), "100-continue") {
+			hasExpect100 = true
+		}
 		if forbiddenRequestHeader(name) {
-			return false, fmt.Errorf("%w: %q header is forbidden in HTTP/2 requests (RFC 7540 §8.1.2.3)",
+			return false, false, fmt.Errorf("%w: %q header is forbidden in HTTP/2 requests (RFC 7540 §8.1.2.3)",
 				ErrInvalidRequest, hf.Name)
 		}
 		if isTEHeader(name) && !strings.EqualFold(string(hf.Value), "trailers") {
-			return false, fmt.Errorf("%w: TE header value %q forbidden; only %q is allowed (RFC 7540 §8.1.2.3)",
+			return false, false, fmt.Errorf("%w: TE header value %q forbidden; only %q is allowed (RFC 7540 §8.1.2.3)",
 				ErrInvalidRequest, hf.Value, "trailers")
 		}
 		if hasFieldInjectionByte(hf.Value) {
-			return false, fmt.Errorf("%w: header %q value carries CR, LF or NUL (request-splitting vector, RFC 7540 §10.3)",
+			return false, false, fmt.Errorf("%w: header %q value carries CR, LF or NUL (request-splitting vector, RFC 7540 §10.3)",
 				ErrInvalidRequest, hf.Name)
 		}
 	}
-	return hasContentType, nil
+	return hasContentType, hasExpect100, nil
 }
 
 // checkRequestTrailers validates the static trailer fields (names are tokens,

@@ -1,0 +1,151 @@
+package http1_test
+
+import (
+	"context"
+	"errors"
+	"strings"
+	"testing"
+
+	"github.com/lodgvideon/poseidon-http-client/hpack"
+	"github.com/lodgvideon/poseidon-http-client/http1"
+)
+
+// TestConformance_RFC9110_Sec8_6_BodyMustMatchDeclaredContentLength pins that a
+// request body is reconciled against the Content-Length its head declared.
+//
+// RFC 9110 §8.6 forbids a sender from emitting a Content-Length it knows to be
+// incorrect. An over-run puts octets on the wire that the peer reads as the start
+// of the next request; an under-run leaves the peer waiting for octets that never
+// come. Nothing reconciled the two, so a caller streaming more or fewer bytes
+// than it declared emitted a smuggling primitive and the connection was still
+// treated as reusable.
+func TestConformance_RFC9110_Sec8_6_BodyMustMatchDeclaredContentLength(t *testing.T) {
+	t.Run("over-run refused before the excess reaches the wire", func(t *testing.T) {
+		ex, capture := rawCapture(t)
+		if err := ex.WriteRequest(context.Background(),
+			reqCL("POST", hpack.HeaderField{Name: []byte("Content-Length"), Value: []byte("5")}), false); err != nil {
+			t.Fatalf("WriteRequest: %v", err)
+		}
+		err := ex.WriteBody(context.Background(), []byte("0123456789"), true)
+		if !errors.Is(err, http1.ErrInvalidRequest) {
+			t.Fatalf("WriteBody(10 octets under Content-Length 5) = %v, want ErrInvalidRequest", err)
+		}
+		if wire := capture(); strings.Contains(wire, "0123456789") {
+			t.Errorf("the excess body reached the wire — the desync is already done:\n%q", wire)
+		}
+	})
+
+	t.Run("under-run refused at fin", func(t *testing.T) {
+		ex, _ := rawCapture(t)
+		if err := ex.WriteRequest(context.Background(),
+			reqCL("POST", hpack.HeaderField{Name: []byte("Content-Length"), Value: []byte("5")}), false); err != nil {
+			t.Fatalf("WriteRequest: %v", err)
+		}
+		err := ex.WriteBody(context.Background(), []byte("abc"), true)
+		if !errors.Is(err, http1.ErrInvalidRequest) {
+			t.Fatalf("WriteBody(3 octets under Content-Length 5, fin) = %v, want ErrInvalidRequest", err)
+		}
+	})
+
+	t.Run("exact match accepted", func(t *testing.T) {
+		ex, capture := rawCapture(t)
+		if err := ex.WriteRequest(context.Background(),
+			reqCL("POST", hpack.HeaderField{Name: []byte("Content-Length"), Value: []byte("5")}), false); err != nil {
+			t.Fatalf("WriteRequest: %v", err)
+		}
+		if err := ex.WriteBody(context.Background(), []byte("HELLO"), true); err != nil {
+			t.Fatalf("WriteBody(exact) = %v, want nil", err)
+		}
+		if wire := capture(); !strings.HasSuffix(wire, "HELLO") {
+			t.Errorf("body missing from the wire:\n%q", wire)
+		}
+	})
+
+	t.Run("split writes summing to the declaration accepted", func(t *testing.T) {
+		ex, _ := rawCapture(t)
+		if err := ex.WriteRequest(context.Background(),
+			reqCL("POST", hpack.HeaderField{Name: []byte("Content-Length"), Value: []byte("5")}), false); err != nil {
+			t.Fatalf("WriteRequest: %v", err)
+		}
+		if err := ex.WriteBody(context.Background(), []byte("HE"), false); err != nil {
+			t.Fatalf("WriteBody(part 1) = %v, want nil", err)
+		}
+		if err := ex.WriteBody(context.Background(), []byte("LLO"), true); err != nil {
+			t.Fatalf("WriteBody(part 2, fin) = %v, want nil", err)
+		}
+	})
+
+	t.Run("chunked body is unaffected", func(t *testing.T) {
+		ex, _ := rawCapture(t)
+		// No Content-Length → chunked framing → nothing to reconcile against.
+		if err := ex.WriteRequest(context.Background(), reqCL("POST"), false); err != nil {
+			t.Fatalf("WriteRequest: %v", err)
+		}
+		if err := ex.WriteBody(context.Background(), []byte("any length at all"), true); err != nil {
+			t.Fatalf("WriteBody(chunked) = %v, want nil", err)
+		}
+	})
+}
+
+// TestConformance_RFC9110_Sec8_6_RequestContentLengthMustBe1DIGIT pins that a
+// caller Content-Length is parsed as §8.6's `Content-Length = 1*DIGIT` on the
+// bodied path too, not only when no body follows.
+//
+// A comma-folded "5, 10" is what RFC 9110 §5.3 makes of two field lines, i.e.
+// the CL.CL smuggling primitive on one line — and this client's own receive side
+// already refuses that shape. Emitting what it would reject on arrival is the
+// asymmetry that lets a request smuggle.
+func TestConformance_RFC9110_Sec8_6_RequestContentLengthMustBe1DIGIT(t *testing.T) {
+	for _, cl := range []string{"5, 10", "5,5", "+5", "-5", "abc", "5x", "", "0x5"} {
+		t.Run(cl, func(t *testing.T) {
+			ex, capture := rawCapture(t)
+			err := ex.WriteRequest(context.Background(),
+				reqCL("POST", hpack.HeaderField{Name: []byte("Content-Length"), Value: []byte(cl)}), false)
+			if !errors.Is(err, http1.ErrInvalidRequest) {
+				t.Fatalf("WriteRequest(Content-Length %q) = %v, want ErrInvalidRequest", cl, err)
+			}
+			if wire := capture(); wire != "" {
+				t.Errorf("a rejected request must put no bytes on the wire, got:\n%q", wire)
+			}
+		})
+	}
+	// Over-rejection guard: a plain decimal, with or without surrounding OWS, is
+	// legal (a field value's edges are not part of it).
+	for _, cl := range []string{"5", " 5 ", "0"} {
+		t.Run("accepted "+cl, func(t *testing.T) {
+			ex, _ := rawCapture(t)
+			if err := ex.WriteRequest(context.Background(),
+				reqCL("POST", hpack.HeaderField{Name: []byte("Content-Length"), Value: []byte(cl)}), false); err != nil {
+				t.Fatalf("WriteRequest(Content-Length %q) = %v, want nil", cl, err)
+			}
+		})
+	}
+}
+
+// TestConformance_RFC9112_Sec6_3_Rule6_PrematureEOFNotPoolable pins that a body
+// that ends before its Content-Length is satisfied leaves the connection
+// unusable. RFC 9112 §6.3 rule 6 makes the message incomplete; the stream
+// position is then indeterminate, so reuse would begin the next response
+// somewhere inside this one. Every other framing-defect path here clears
+// keepAlive, and KeepAlive()'s contract promises it.
+func TestConformance_RFC9112_Sec6_3_Rule6_PrematureEOFNotPoolable(t *testing.T) {
+	ex := wireExchange(t, "GET", "HTTP/1.1 200 OK\r\nContent-Length: 10\r\n\r\nHELLO")
+	if _, _, err := ex.ReadResponse(context.Background()); err != nil {
+		t.Fatalf("ReadResponse: %v", err)
+	}
+	var err error
+	for {
+		var done bool
+		_, done, err = ex.ReadBodyChunk(make([]byte, 64))
+		if err != nil || done {
+			break
+		}
+	}
+	if err == nil {
+		t.Fatal("a body ending before Content-Length must report an error")
+	}
+	if ex.KeepAlive() {
+		t.Error("KeepAlive() = true after a premature EOF, want false — the stream " +
+			"position is indeterminate, so the connection must not be reused (RFC 9112 §6.3 rule 6)")
+	}
+}
