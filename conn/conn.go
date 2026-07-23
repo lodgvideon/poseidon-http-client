@@ -1310,9 +1310,18 @@ func (c *Conn) onGoAwayReceived(lastStreamID uint32, _ frame.ErrCode) {
 		default:
 			s.signalReset(frame.ErrCodeRefusedStream)
 		}
-		s.markRemoteEnd()
+		// remoteEnded, localEnded and closed are set together in ONE s.mu section
+		// so a concurrent Stream.Close() can never observe bothEnded && !closed and
+		// recycle this victim out from under us (recycleStream rewrites s.events
+		// with no lock). A victim whose upload already completed has localEnded==true
+		// before GOAWAY, so setting remoteEnded outside this hold would open the
+		// window. Close() returns early on closed and only recycles when
+		// !closed && bothEnded. The reset was already delivered above, before the
+		// stream became recycle-eligible.
 		s.mu.Lock()
+		s.remoteEnded = true
 		s.localEnded = true
+		s.closed = true
 		s.mu.Unlock()
 		c.markStreamDone(s.id)
 	}
