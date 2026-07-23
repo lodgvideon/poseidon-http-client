@@ -421,28 +421,32 @@ func (f *Framer) WriteGoAway(lastStreamID uint32, code ErrCode, debug []byte) er
 	return nil
 }
 
-// WriteAltSvc writes an ALTSVC frame (RFC 7838 §4). streamID=0 sends
-// server-wide alternative services (entries MUST have non-empty Origin);
-// non-zero streamID sends per-request alternatives (entries MUST have
-// empty Origin). An empty entries slice clears all alternative services.
+// WriteAltSvc writes an ALTSVC frame (RFC 7838 §4). A frame carries exactly
+// one (Origin, Alt-Svc-Field-Value) pair on the wire: a uint16 Origin-Len,
+// the Origin bytes, then the field value as the remainder of the frame —
+// "length determined by subtracting the length of all preceding fields from
+// the frame length" (RFC 7838 §4), so it is NOT length-prefixed. streamID=0
+// sends a server-wide alternative (Origin MUST be non-empty); a non-zero
+// streamID sends a per-request alternative (Origin MUST be empty). An empty
+// entries slice writes an empty payload that clears all alternative services.
+// More than one entry is an error: RFC 7838 permits only a single Origin per
+// frame.
 func (f *Framer) WriteAltSvc(streamID uint32, entries []AltSvcEntry) error {
 	streamID &= 0x7fffffff
 	if len(entries) == 0 {
 		return f.writeFrame(FrameHeader{Length: 0, Type: FrameAltSvc, StreamID: streamID}, nil)
 	}
-	buf := make([]byte, 0, len(entries)*32)
-	for _, e := range entries {
-		if len(e.Origin) > 0xFFFF {
-			return ErrFrameTooLarge
-		}
-		if len(e.AltValue) > 0xFFFFFF {
-			return ErrFrameTooLarge
-		}
-		buf = append(buf, byte(len(e.Origin)>>8), byte(len(e.Origin)))
-		buf = append(buf, e.Origin...)
-		buf = append(buf, byte(len(e.AltValue)>>16), byte(len(e.AltValue)>>8), byte(len(e.AltValue)))
-		buf = append(buf, e.AltValue...)
+	if len(entries) > 1 {
+		return ErrTooManyAltSvc
 	}
+	e := entries[0]
+	if len(e.Origin) > 0xFFFF {
+		return ErrFrameTooLarge
+	}
+	buf := make([]byte, 0, 2+len(e.Origin)+len(e.AltValue))
+	buf = append(buf, byte(len(e.Origin)>>8), byte(len(e.Origin)))
+	buf = append(buf, e.Origin...)
+	buf = append(buf, e.AltValue...)
 	if uint32(len(buf)) > f.maxReadFrameSize {
 		return ErrFrameTooLarge
 	}
@@ -755,36 +759,33 @@ func (f *Framer) dispatchOrigin(fh FrameHeader, payload []byte, h Handler) error
 }
 
 // dispatchAltSvc parses an ALTSVC frame (RFC 7838 §4) and calls OnAltSvc.
-// Each entry is: uint16 Origin-Len, Origin bytes, uint24 Alt-Value-Len,
-// Alt-Value bytes. An empty payload signals clearing all alternative
-// services. Stream-0 frames MUST have non-empty Origin in each entry;
-// non-zero-stream frames MUST have empty Origin.
+// The payload is a uint16 Origin-Len, the Origin bytes, then a single
+// Alt-Svc-Field-Value whose "length determined by subtracting the length of
+// all preceding fields from the frame length" (RFC 7838 §4) — it runs to the
+// end of the frame and is NOT length-prefixed. A frame therefore carries
+// exactly one (Origin, value) pair. An empty payload clears all alternative
+// services.
+//
+// RFC 7838 §4 also requires the receiver to ignore two invalid combinations:
+// a stream-0 frame whose Origin is empty, and a non-zero-stream frame whose
+// Origin is non-empty. Such frames are dropped without calling OnAltSvc.
 func (f *Framer) dispatchAltSvc(fh FrameHeader, payload []byte, h Handler) error {
-	// Empty payload = clear all alt-svc entries (RFC 7838 §4).
+	// Empty payload = clear all alt-svc entries.
 	if len(payload) == 0 {
 		return h.OnAltSvc(fh, nil)
 	}
-	var entries []AltSvcEntry
-	for len(payload) >= 5 { // minimum: 2 + 0 + 3 + 0
-		originLen := int(payload[0])<<8 | int(payload[1])
-		if 2+originLen > len(payload) {
-			return ErrProtocolError
-		}
-		origin := string(payload[2 : 2+originLen])
-		rest := payload[2+originLen:]
-		if len(rest) < 3 {
-			return ErrProtocolError
-		}
-		altLen := int(rest[0])<<16 | int(rest[1])<<8 | int(rest[2])
-		if 3+altLen > len(rest) {
-			return ErrProtocolError
-		}
-		altValue := string(rest[3 : 3+altLen])
-		entries = append(entries, AltSvcEntry{Origin: origin, AltValue: altValue})
-		payload = rest[3+altLen:]
+	if len(payload) < 2 {
+		return ErrProtocolError
 	}
-	if len(payload) > 0 {
-		return ErrProtocolError // trailing bytes
+	originLen := int(payload[0])<<8 | int(payload[1])
+	if 2+originLen > len(payload) {
+		return ErrProtocolError
 	}
-	return h.OnAltSvc(fh, entries)
+	origin := string(payload[2 : 2+originLen])
+	altValue := string(payload[2+originLen:])
+	// RFC 7838 §4 invalid Origin/stream combinations MUST be ignored.
+	if (fh.StreamID == 0) == (origin == "") {
+		return nil
+	}
+	return h.OnAltSvc(fh, []AltSvcEntry{{Origin: origin, AltValue: altValue}})
 }

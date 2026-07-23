@@ -11,7 +11,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - uses: actions/setup-go@v6
         with:
@@ -22,7 +22,7 @@ jobs:
         uses: docker/setup-buildx-action@v4
 
       - name: Build Undertow image
-        uses: docker/build-push-action@v5
+        uses: docker/build-push-action@v7
         with:
           context: test/integration
           file: test/integration/Dockerfile.undertow
@@ -59,7 +59,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # `run` (not `up --abort-on-container-exit`) so the one-shot init services
       # (fixtures, certs) exiting cannot tear the stack down before the runner
@@ -89,7 +89,7 @@ jobs:
     env:
       LOSS_COMPOSE: test/integration/http3/docker-compose.loss.yml
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Loss recovery (15%)
         env:
@@ -126,7 +126,7 @@ jobs:
     env:
       FAULT_COMPOSE: test/integration/http3/docker-compose.fault.yml
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: HTTP/3 negative paths (fault server)
         run: docker compose -f "$FAULT_COMPOSE" run --rm runner

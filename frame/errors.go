@@ -37,4 +37,5 @@ var (
 	ErrShortRead           = errors.New("poseidon/frame: short read on header or payload")
 	ErrZeroIncrement       = errors.New("poseidon/frame: WINDOW_UPDATE with zero increment")
 	ErrProtocolError       = errors.New("poseidon/frame: protocol error")
+	ErrTooManyAltSvc       = errors.New("poseidon/frame: ALTSVC frame carries more than one origin")
 )

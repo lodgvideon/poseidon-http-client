@@ -478,8 +478,16 @@ func (c *Conn) Shutdown(gracefulTimeout time.Duration) error {
 		c.fcOutCond.Broadcast()
 	}
 	c.fcOutMu.Unlock()
-	// If no in-flight streams, close immediately. Otherwise wait.
-	if c.inflight == 0 {
+	// If no in-flight streams, close immediately. Otherwise wait. Read
+	// c.inflight under c.smu — the reader goroutine decrements it under the
+	// same lock as responses complete (markStreamDone -> releaseSlotLocked), so
+	// a lock-free read here races that write. draining is already set (above),
+	// so a stream that completes after this read still closes drainDone and the
+	// select below observes it; no wakeup is lost.
+	c.smu.Lock()
+	noInflight := c.inflight == 0
+	c.smu.Unlock()
+	if noInflight {
 		return c.Close()
 	}
 	timer := time.NewTimer(gracefulTimeout)
@@ -1302,9 +1310,18 @@ func (c *Conn) onGoAwayReceived(lastStreamID uint32, _ frame.ErrCode) {
 		default:
 			s.signalReset(frame.ErrCodeRefusedStream)
 		}
-		s.markRemoteEnd()
+		// remoteEnded, localEnded and closed are set together in ONE s.mu section
+		// so a concurrent Stream.Close() can never observe bothEnded && !closed and
+		// recycle this victim out from under us (recycleStream rewrites s.events
+		// with no lock). A victim whose upload already completed has localEnded==true
+		// before GOAWAY, so setting remoteEnded outside this hold would open the
+		// window. Close() returns early on closed and only recycles when
+		// !closed && bothEnded. The reset was already delivered above, before the
+		// stream became recycle-eligible.
 		s.mu.Lock()
+		s.remoteEnded = true
 		s.localEnded = true
+		s.closed = true
 		s.mu.Unlock()
 		c.markStreamDone(s.id)
 	}
