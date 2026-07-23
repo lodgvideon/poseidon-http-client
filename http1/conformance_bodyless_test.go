@@ -73,8 +73,20 @@ func TestConformance_RFC9112_Sec6_3_Rule1_BodylessStatusDeclaringBodyNotPooled(t
 // representation, not a message body, so no bytes follow it. Origin servers send
 // it routinely — evicting on it would cost a connection per conditional GET,
 // which is a worse failure than the one being prevented.
+// The wire carries the 304 head and nothing else, which is what an origin
+// actually sends: the Content-Length describes the representation, so no body
+// follows it. (Driving it through bodylessKeepAlive would append a second
+// response, and leftover octets are unsolicited data that costs the connection
+// on their own — see TestConformance_RFC9112_Sec6_3_ExtraOctetsAfterResponse.)
 func TestConformance_RFC9110_Sec8_6_ContentLengthOn304StaysPoolable(t *testing.T) {
-	if !bodylessKeepAlive(t, "HTTP/1.1 304 Not Modified\r\nContent-Length: 38\r\n\r\n") {
+	ex := wireExchange(t, "GET", "HTTP/1.1 304 Not Modified\r\nContent-Length: 38\r\n\r\n")
+	if _, _, err := ex.ReadResponse(context.Background()); err != nil {
+		t.Fatalf("ReadResponse: %v", err)
+	}
+	if _, done, err := ex.ReadBodyChunk(make([]byte, 64)); !done || err != nil {
+		t.Fatalf("304 should end immediately: done=%v err=%v", done, err)
+	}
+	if !ex.KeepAlive() {
 		t.Error("KeepAlive() = false for a 304 with Content-Length, want true — §8.6 " +
 			"explicitly permits it on a conditional GET, where it describes the " +
 			"representation rather than a body")

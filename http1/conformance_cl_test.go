@@ -196,7 +196,11 @@ func TestConformance_RFC9112_Sec6_3_Rule5_IdenticalDuplicatesAccepted(t *testing
 		"Content-Length: 5\r\n" +
 		"Content-Length: 5\r\n" +
 		"\r\n" +
-		clDesyncBody
+		// Exactly the declared 5 octets. Trailing bytes would be unsolicited data
+		// that costs the connection on their own (see
+		// TestConformance_RFC9112_Sec6_3_ExtraOctetsAfterResponse), masking what
+		// this test is about: that identical values do not condemn it.
+		"HELLO"
 	ex := wireExchange(t, "GET", resp)
 	if _, _, err := ex.ReadResponse(context.Background()); err != nil {
 		t.Fatalf("identical duplicate Content-Length must be accepted, got: %v", err)
@@ -217,7 +221,7 @@ func TestConformance_RFC9112_Sec6_3_Rule5_CommaListIdenticalValuesAccepted(t *te
 	resp := "HTTP/1.1 200 OK\r\n" +
 		"Content-Length: 5, 5\r\n" +
 		"\r\n" +
-		clDesyncBody
+		"HELLO"
 	ex := wireExchange(t, "GET", resp)
 	if _, _, err := ex.ReadResponse(context.Background()); err != nil {
 		t.Fatalf("identical comma-list Content-Length must be accepted, got: %v", err)
