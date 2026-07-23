@@ -371,6 +371,30 @@ func validRequestTarget(s string) bool {
 	return true
 }
 
+// hasConnectionOption reports whether a Connection field value carries opt as a
+// list member.
+//
+// RFC 9110 §7.6.1 defines Connection as a #token list, so a substring test is
+// wrong in both directions and unsafe in one: "x-keep-alive-probe" contains
+// "keep-alive" without being it, which let a peer flip an otherwise
+// close-by-default response back to poolable with a field this client does not
+// otherwise honour. Matching whole comma-separated members closes that, and
+// EqualFold avoids lower-casing the peer's bytes into a new allocation.
+func hasConnectionOption(value, opt string) bool {
+	for value != "" {
+		tok := value
+		if i := strings.IndexByte(value, ','); i >= 0 {
+			tok, value = value[:i], value[i+1:]
+		} else {
+			value = ""
+		}
+		if strings.EqualFold(strings.TrimSpace(tok), opt) {
+			return true
+		}
+	}
+	return false
+}
+
 // validateFields checks everything WriteRequest is about to encode, before it
 // encodes any of it.
 //
@@ -737,6 +761,19 @@ func (ex *Exchange) ReadResponse(ctx context.Context) (statusCode int, headers [
 	// handleRelease evicts any conn released with it rather than returning it to
 	// the idle set.
 	if ex.respTE && ex.respCL {
+		ex.keepAlive = false
+	}
+
+	// RFC 9112 §6.1: a recipient of an HTTP/1.0 message carrying Transfer-Encoding
+	// must treat the framing as faulty and close the connection after processing
+	// the message — a 1.0 hop is not required to understand chunked, so whatever
+	// re-framed the message may have got it wrong. The version seed above already
+	// defaults HTTP/1.0 to close, but a "Connection: keep-alive" field line flips
+	// it back and nothing re-consulted the version afterwards, so a
+	// 1.0 + keep-alive + chunked response was decoded and returned to the pool.
+	// The body is still chunk-decoded (chunked is self-delimiting, so the caller
+	// gets its bytes); only reuse is refused.
+	if ex.respTE && proto == "HTTP/1.0" {
 		ex.keepAlive = false
 	}
 
@@ -1324,11 +1361,10 @@ func (ex *Exchange) commitHeaderLine(line string, have bool, out *[]hpack.Header
 					ex.contentLen = -1
 				}
 			case "connection":
-				lower := strings.ToLower(value)
-				if strings.Contains(lower, "close") {
+				if hasConnectionOption(value, "close") {
 					ex.keepAlive = false
 					ex.closeSeen = true
-				} else if strings.Contains(lower, "keep-alive") && !ex.closeSeen {
+				} else if hasConnectionOption(value, "keep-alive") && !ex.closeSeen {
 					ex.keepAlive = true
 				}
 			}
@@ -1351,6 +1387,29 @@ func (ex *Exchange) commitHeaderLine(line string, have bool, out *[]hpack.Header
 // For HEAD responses ReadBodyChunk returns (0, true, nil) immediately without
 // reading any bytes (the server must not send a body for HEAD per RFC 7230 §3.3).
 func (ex *Exchange) ReadBodyChunk(buf []byte) (n int, done bool, err error) {
+	// Whatever is still buffered when this message ends is unsolicited, so the
+	// connection must not be pooled.
+	//
+	// This client does not pipeline (one exchange per connection at a time), so at
+	// message completion there is by construction no outstanding request left for
+	// those octets to belong to. RFC 9112 §6.3: "A client MUST NOT process, cache,
+	// or forward such extra data as a separate response, since such behavior would
+	// be vulnerable to cache poisoning." Without this the socket goes back to the
+	// idle set with a peer-chosen response sitting in the reader, and request N+1
+	// parses those bytes as its own status line — a response the server never sent
+	// for it, returned with err == nil.
+	//
+	// A defer rather than a check at each site: every framing mode has its own
+	// done=true return (HEAD, 204/304, Content-Length satisfied, terminal chunk
+	// after its trailer section, read-until-close), and one of them missing the
+	// check is exactly the bug. It is a pure memory read on the bufio reader — no
+	// syscall — so it costs nothing on the hot path. Only a still-poolable
+	// connection is downgraded; error paths have already cleared keepAlive.
+	defer func() {
+		if done && ex.keepAlive && ex.c.br.Buffered() > 0 {
+			ex.keepAlive = false
+		}
+	}()
 	// HEAD responses carry no body regardless of Content-Length.
 	if ex.method == "HEAD" {
 		return 0, true, nil
