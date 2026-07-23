@@ -644,8 +644,12 @@ func (ex *Exchange) ReadResponse(ctx context.Context) (statusCode int, headers [
 	}
 
 	ex.statusCode = statusCode
-	// RFC 2616 §8.1: HTTP/1.1 defaults to persistent; HTTP/1.0 defaults to close.
-	ex.keepAlive = proto == "HTTP/1.1"
+	// RFC 9110 §6: HTTP/1.1 defaults to persistent, HTTP/1.0 to close. A response
+	// with a higher minor version of major 1 (e.g. HTTP/1.2) is processed as the
+	// highest minor this client conforms to — HTTP/1.1 — so it too defaults to
+	// persistent rather than being closed as if it were unknown. Only HTTP/1.0
+	// (and a version string with no 1.x minor) closes by default.
+	ex.keepAlive = strings.HasPrefix(proto, "HTTP/1.") && proto != "HTTP/1.0"
 	ex.closeSeen = false
 	ex.contentLen = -1
 

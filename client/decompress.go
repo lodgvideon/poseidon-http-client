@@ -40,6 +40,12 @@ var (
 // encGzip means gzip content-encoding.
 var encGzip = []byte("gzip")
 
+// encXGzip is the deprecated x-gzip alias for gzip. RFC 9110 §8.4.1 keeps it
+// equivalent to gzip for historical reasons; a server that labels a gzip body
+// "x-gzip" must still be decoded. (No x-compress alias: this client implements
+// no LZW decoder, so "compress"/"x-compress" stays Identity.)
+var encXGzip = []byte("x-gzip")
+
 // encDeflate means deflate content-encoding.
 var encDeflate = []byte("deflate")
 
@@ -186,7 +192,7 @@ func detectEncoding(headers []conn.HeaderField) ContentEncoding {
 		}
 		v := headers[i].Value
 		switch {
-		case bytes.EqualFold(v, encGzip):
+		case bytes.EqualFold(v, encGzip), bytes.EqualFold(v, encXGzip):
 			return EncodingGzip
 		case bytes.EqualFold(v, encDeflate):
 			return EncodingDeflate

@@ -262,6 +262,11 @@ func TestDetectEncoding(t *testing.T) {
 		{"brotli", []conn.HeaderField{{Name: []byte("content-encoding"), Value: []byte("br")}}, EncodingBrotli},
 		{"zstd", []conn.HeaderField{{Name: []byte("content-encoding"), Value: []byte("zstd")}}, EncodingZstd},
 		{"other-encoding", []conn.HeaderField{{Name: []byte("content-encoding"), Value: []byte("compress")}}, EncodingIdentity},
+		// RFC 9110 §8.4.1: x-gzip is a deprecated alias for gzip and must decode.
+		{"x-gzip alias", []conn.HeaderField{{Name: []byte("content-encoding"), Value: []byte("x-gzip")}}, EncodingGzip},
+		{"X-Gzip case-insensitive", []conn.HeaderField{{Name: []byte("content-encoding"), Value: []byte("X-Gzip")}}, EncodingGzip},
+		// Over-rejection guard: no LZW decoder, so x-compress/compress stay Identity.
+		{"x-compress stays identity", []conn.HeaderField{{Name: []byte("content-encoding"), Value: []byte("x-compress")}}, EncodingIdentity},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
