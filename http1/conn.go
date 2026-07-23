@@ -382,6 +382,46 @@ func validRequestTarget(s string) bool {
 	return true
 }
 
+// armDeadline binds ctx to a net.Conn deadline for the duration of one blocking
+// I/O call and returns the release func (use as `defer armDeadline(...)()`).
+//
+// When ctx carries a deadline it is applied directly — the cheap path, and the
+// shape callers are told to use. When ctx is cancellable but carries NO deadline
+// there is nothing to apply, and a blocking Write cannot be selected on: a peer
+// that simply stops reading then hangs the call forever, because this exchange is
+// single-goroutine and has no other thread to notice the cancellation. A watchdog
+// covers exactly that gap by making the deadline elapse when ctx is done, which
+// is what unblocks the syscall. Only that case pays for a goroutine.
+//
+// The release waits for the watchdog to exit before clearing, so a cancellation
+// racing the return cannot leave a past deadline latched on a connection that is
+// about to be reused.
+func armDeadline(ctx context.Context, set func(time.Time) error) func() {
+	if dl, ok := ctx.Deadline(); ok {
+		_ = set(dl)
+		return func() { _ = set(time.Time{}) }
+	}
+	if ctx.Done() == nil {
+		_ = set(time.Time{})
+		return func() {}
+	}
+	stop := make(chan struct{})
+	exited := make(chan struct{})
+	go func() {
+		defer close(exited)
+		select {
+		case <-ctx.Done():
+			_ = set(time.Now())
+		case <-stop:
+		}
+	}()
+	return func() {
+		close(stop)
+		<-exited
+		_ = set(time.Time{})
+	}
+}
+
 // parseRequestContentLength parses a caller-supplied Content-Length value as RFC
 // 9110 §8.6's `Content-Length = 1*DIGIT`.
 //
@@ -494,6 +534,11 @@ func validateFields(method, path, authority string, fields []hpack.HeaderField) 
 //
 // Uses net.Buffers (writev) to avoid copying all header bytes into one buffer.
 func (ex *Exchange) WriteRequest(ctx context.Context, fields []hpack.HeaderField, endStream bool) error {
+	// Checked synchronously: armDeadline's watchdog is asynchronous, so a short
+	// write can complete before it observes an already-dead context.
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	var method, path, authority string
 	var hasContentLength bool
 	var clCount int
@@ -631,10 +676,7 @@ func (ex *Exchange) WriteRequest(ctx context.Context, fields []hpack.HeaderField
 
 	bufs = append(bufs, crlf) // blank line ending headers
 
-	if dl, ok := ctx.Deadline(); ok {
-		_ = ex.c.nc.SetWriteDeadline(dl)
-		defer func() { _ = ex.c.nc.SetWriteDeadline(time.Time{}) }()
-	}
+	defer armDeadline(ctx, ex.c.nc.SetWriteDeadline)()
 	_, err := bufs.WriteTo(ex.c.nc)
 	return err
 }
@@ -643,10 +685,12 @@ func (ex *Exchange) WriteRequest(ctx context.Context, fields []hpack.HeaderField
 // When fin is true this is the last chunk; WriteBody must not be called again.
 // Omit WriteBody entirely when endStream was true in WriteRequest.
 func (ex *Exchange) WriteBody(ctx context.Context, p []byte, fin bool) error {
-	if dl, ok := ctx.Deadline(); ok {
-		_ = ex.c.nc.SetWriteDeadline(dl)
-		defer func() { _ = ex.c.nc.SetWriteDeadline(time.Time{}) }()
+	// Synchronous, for the same reason as WriteRequest: the watchdog below only
+	// covers a cancellation that arrives while a write is already blocked.
+	if err := ctx.Err(); err != nil {
+		return err
 	}
+	defer armDeadline(ctx, ex.c.nc.SetWriteDeadline)()
 
 	if ex.reqChunked {
 		var bufs net.Buffers
