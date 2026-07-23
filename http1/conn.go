@@ -247,6 +247,13 @@ type Exchange struct {
 	reqContentLen  int64
 	reqBodyWritten int64
 
+	// readCtx is the context of the ReadResponse that opened this response, kept
+	// so ReadBodyChunk — whose signature predates ctx and is public API — can
+	// honour cancellation too. Without it a caller with a cancellable,
+	// deadline-less context hung forever mid-body against a silent peer, and the
+	// pool slot that exchange held was never released.
+	readCtx context.Context
+
 	// response side
 	statusCode int
 	keepAlive  bool
@@ -382,6 +389,42 @@ func validRequestTarget(s string) bool {
 	return true
 }
 
+// deadlineLongPast is the "release any blocked I/O now" deadline: unambiguously
+// in the past on every clock, unlike time.Now() on a coarse timer.
+var deadlineLongPast = time.Unix(1, 0)
+
+// armCancel releases a blocked call when ctx is cancelled, WITHOUT otherwise
+// touching the deadline.
+//
+// The read path cannot use armDeadline: ReadResponse deliberately installs its
+// deadline on every entry and never clears it on exit, so that a pooled
+// connection can never inherit the previous exchange's deadline. A release that
+// cleared it would reintroduce exactly that. Cancellation still has to be
+// honoured though — a blocking Read cannot be selected on, and http1 is
+// single-goroutine — so this arms only the "make the deadline elapse now" half.
+//
+// If the watchdog fired, the past deadline is left in place: that exchange has
+// been cancelled and its connection is discarded, never pooled.
+func armCancel(ctx context.Context, set func(time.Time) error) func() {
+	if ctx.Done() == nil {
+		return func() {}
+	}
+	stop := make(chan struct{})
+	exited := make(chan struct{})
+	go func() {
+		defer close(exited)
+		select {
+		case <-ctx.Done():
+			_ = set(deadlineLongPast)
+		case <-stop:
+		}
+	}()
+	return func() {
+		close(stop)
+		<-exited
+	}
+}
+
 // armDeadline binds ctx to a net.Conn deadline for the duration of one blocking
 // I/O call and returns the release func (use as `defer armDeadline(...)()`).
 //
@@ -397,13 +440,17 @@ func validRequestTarget(s string) bool {
 // racing the return cannot leave a past deadline latched on a connection that is
 // about to be reused.
 func armDeadline(ctx context.Context, set func(time.Time) error) func() {
+	// The deadline and the cancellation are NOT alternatives. Treating them as
+	// either/or meant a context that carries both — which is exactly what
+	// client.Do builds from Request.Timeout — got no watchdog, so cancelling such
+	// a request did not release a blocked call until its deadline expired.
 	if dl, ok := ctx.Deadline(); ok {
 		_ = set(dl)
-		return func() { _ = set(time.Time{}) }
+	} else {
+		_ = set(time.Time{})
 	}
 	if ctx.Done() == nil {
-		_ = set(time.Time{})
-		return func() {}
+		return func() { _ = set(time.Time{}) }
 	}
 	stop := make(chan struct{})
 	exited := make(chan struct{})
@@ -411,7 +458,9 @@ func armDeadline(ctx context.Context, set func(time.Time) error) func() {
 		defer close(exited)
 		select {
 		case <-ctx.Done():
-			_ = set(time.Now())
+			// A fixed instant in the past, not time.Now(): "now" can land a hair
+			// in the future on a coarse clock and leave the call blocked.
+			_ = set(deadlineLongPast)
 		case <-stop:
 		}
 	}()
@@ -796,6 +845,9 @@ func (ex *Exchange) ReadResponse(ctx context.Context) (statusCode int, headers [
 	} else {
 		_ = ex.c.nc.SetReadDeadline(time.Time{})
 	}
+	// Kept for the body reads, which have no ctx of their own.
+	ex.readCtx = ctx
+	defer armCancel(ctx, ex.c.nc.SetReadDeadline)()
 
 	var proto string
 	var interim int
@@ -1522,11 +1574,27 @@ func (ex *Exchange) ReadBodyChunk(buf []byte) (n int, done bool, err error) {
 	// check is exactly the bug. It is a pure memory read on the bufio reader — no
 	// syscall — so it costs nothing on the hot path. Only a still-poolable
 	// connection is downgraded; error paths have already cleared keepAlive.
+	// Any error at all condemns the connection. Most framing-defect paths cleared
+	// keepAlive individually, but the ones that did not — the Content-Length tail
+	// return, the chunk-data read error, both readLine failures inside
+	// readChunkedChunk — left a connection whose stream position is unknown
+	// marked reusable, which is the same pooled-desync this defer's other half
+	// prevents. Deciding it once here is what makes "no exit path has to
+	// remember" true.
 	defer func() {
+		if err != nil {
+			ex.keepAlive = false
+			return
+		}
 		if done && ex.keepAlive && ex.c.br.Buffered() > 0 {
 			ex.keepAlive = false
 		}
 	}()
+	// Body reads honour the ReadResponse ctx: a blocking Read cannot be selected
+	// on, and this exchange has no second goroutine to notice a cancellation.
+	if ex.readCtx != nil {
+		defer armCancel(ex.readCtx, ex.c.nc.SetReadDeadline)()
+	}
 	// HEAD responses carry no body regardless of Content-Length.
 	if ex.method == "HEAD" {
 		return 0, true, nil

@@ -48,6 +48,12 @@ import (
 // pipelining, so a checked-out conn is busy until released.
 const h1ConnStreamCap = 1
 
+// h1ProbeIdleAfter is how long a pooled connection must have sat idle before a
+// checkout probes it. Short enough that a connection the peer quietly closed or
+// poisoned is caught long before the maintenance sweep would; long enough that
+// back-to-back reuse under load never pays the probe's syscall.
+const h1ProbeIdleAfter = 250 * time.Millisecond
+
 // h1ManagedConn is the actor's per-conn record. NEVER touched outside the actor
 // goroutine.
 type h1ManagedConn struct {
@@ -241,6 +247,31 @@ func (p *h1Pool) handleRelease(rs *h1RunState, msg h1ReleaseMsg) {
 		rs.conns = p.evict(rs.conns, msg.mc, CloseDead)
 	}
 	rs.waiters = p.serveWaiters(rs.conns, rs.waiters)
+	p.ensureDialForWaiters(rs)
+}
+
+// ensureDialForWaiters starts a dial when queued waiters have nothing left to
+// wait for.
+//
+// serveWaiters can only hand out connections that already exist, and eviction
+// routinely removes the last one — a server "Connection: close" is the ordinary
+// trigger, not an error path. Without this the state {no live conns, no
+// in-flight dials, queued waiters} is TERMINAL: nothing in the pool ever wakes
+// those waiters again and each sits until its own timeout, which is a liveness
+// bug rather than a slow path. handleAcquire has always made this decision for a
+// new request; the release and tick paths have to make it too.
+func (p *h1Pool) ensureDialForWaiters(rs *h1RunState) {
+	if len(rs.waiters) == 0 {
+		return
+	}
+	if h1CountLive(rs.conns)+rs.inFlightDials >= p.opts.MaxConnsPerHost {
+		return
+	}
+	if inDialBackoff(rs.lastDialErrAt, p.opts.DialBackoff) {
+		return
+	}
+	rs.inFlightDials++
+	go p.dialOne()
 }
 
 // handleDialDone processes a completed dial: on success the conn enters the pool;
@@ -278,6 +309,7 @@ func (p *h1Pool) handleTick(rs *h1RunState) {
 	rs.conns = p.evictIdle(rs.conns)
 	rs.conns = p.evictDead(rs.conns)
 	rs.waiters = h1PruneExpiredWaiters(rs.waiters)
+	p.ensureDialForWaiters(rs)
 }
 
 // handleClose drains waiters and shuts down all connections.
@@ -344,6 +376,16 @@ func (p *h1Pool) pickIdle(conns []*h1ManagedConn) *h1ManagedConn {
 			continue
 		}
 		if mc.active >= h1ConnStreamCap {
+			continue
+		}
+		// A connection idle long enough for the peer to have closed it, or to have
+		// pushed unsolicited bytes onto it, is probed before it is handed out.
+		// Reuse microseconds after release is not probed, so the hot path pays no
+		// syscall; the completion-time check in http1.ReadBodyChunk already covers
+		// octets buffered when the previous response ended, and this covers the
+		// ones that arrived afterwards.
+		if time.Since(mc.lastUsed) > h1ProbeIdleAfter && !mc.c.ProbeIdle() {
+			_ = mc.c.Close() // marks it dead; the next sweep removes it
 			continue
 		}
 		return mc
