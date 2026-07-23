@@ -65,14 +65,16 @@ type Request struct {
 
 	// TrailerFunc, when non-nil, is called after the full body is sent.
 	// Its return value replaces Trailers; if it returns nil, Trailers is
-	// used as fallback. Must be idempotent: it is called twice per Do
-	// invocation (once to announce trailer keys in the initial HEADERS
-	// frame, once to send the actual values after the body), and may be
-	// called again on retry. The two calls must return the same set of
-	// keys, though values may differ — the first call reads only keys
-	// (for the Trailer: announcement), the second sends both keys and
-	// values (e.g. checksums computed after body flush).
-	// MUST NOT return pseudo-headers — validated before sending.
+	// used as fallback. Must be idempotent: it is called up to three times
+	// per Do invocation (once to validate, once to announce trailer keys in
+	// the initial HEADERS frame, once to send the actual values after the
+	// body), and may be called again on retry. The calls must return the
+	// same set of keys, though values may differ — the announcement reads
+	// only keys, the final call sends both keys and values (e.g. checksums
+	// computed after body flush).
+	// Names must be RFC 9110 §5.6.2 tokens and neither names nor values may
+	// carry CR, LF or NUL; pseudo-headers are forbidden. All three are
+	// validated before any HEADERS frame is written.
 	TrailerFunc func() []conn.HeaderField
 
 	// Idempotency overrides automatic idempotency classification (which

@@ -197,6 +197,54 @@ func TestDo_RequestTrailers_FuncPseudoHeader(t *testing.T) {
 	}
 }
 
+// TestConformance_RFC7540_Sec8_1_2_6_FuncTrailerInjectionRejected pins that a
+// dynamic trailer (TrailerFunc) carrying a non-token name, or a name or value
+// with CR, LF or NUL, is refused before any HEADERS frame is written. Static
+// Trailers are validated by validateRequest, but TrailerFunc output is dynamic
+// and bypasses it; without a send-time check an injected name would ride the
+// Trailer announcement on the initial HEADERS frame and the trailer HEADERS
+// frame verbatim (RFC 7540 §8.1.2.6 makes such a message malformed; §10.3 is the
+// downgrade-splitting vector). The static equivalents are already rejected.
+func TestConformance_RFC7540_Sec8_1_2_6_FuncTrailerInjectionRejected(t *testing.T) {
+	cases := []struct {
+		name string
+		tf   func() []hpack.HeaderField
+	}{
+		{"name CRLF", func() []hpack.HeaderField {
+			return []hpack.HeaderField{{Name: []byte("x\r\nEvil"), Value: []byte("v")}}
+		}},
+		{"name not a token (space)", func() []hpack.HeaderField {
+			return []hpack.HeaderField{{Name: []byte("x sum"), Value: []byte("v")}}
+		}},
+		{"name not a token (colon)", func() []hpack.HeaderField {
+			return []hpack.HeaderField{{Name: []byte("x:sum"), Value: []byte("v")}}
+		}},
+		{"value CRLF", func() []hpack.HeaderField {
+			return []hpack.HeaderField{{Name: []byte("x-sum"), Value: []byte("ok\r\nX-Injected: 1")}}
+		}},
+		{"value NUL", func() []hpack.HeaderField {
+			return []hpack.HeaderField{{Name: []byte("x-sum"), Value: []byte("a\x00b")}}
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, addr := newTrailerH2Server(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.WriteHeader(200)
+			}))
+			c := trailerClientFor(t, addr)
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			var res client.Response
+			err := c.Do(ctx, &client.Request{
+				Method: "POST", Path: "/", Body: []byte("hello"), TrailerFunc: tc.tf,
+			}, &res)
+			if !errors.Is(err, client.ErrInvalidRequest) {
+				t.Fatalf("expected ErrInvalidRequest, got %v", err)
+			}
+		})
+	}
+}
+
 func TestDoStream_RequestTrailers(t *testing.T) {
 	_, addr := newTrailerH2Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_, _ = io.ReadAll(r.Body)
