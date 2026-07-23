@@ -584,6 +584,19 @@ func (c *Client) sendRequest(ctx context.Context, req *Request) (s protoStream, 
 		return nil, nil, nil, err
 	}
 
+	// Validate dynamic trailers before buildHeaders emits the Trailer
+	// announcement. TrailerFunc output never passes through validateRequest, so
+	// an injected trailer name would otherwise ride the initial HEADERS frame
+	// before writeRequestTrailers could reject it. TrailerFunc is idempotent
+	// (see Request.TrailerFunc), so resolving it here is safe.
+	if hasTrailers(req) {
+		if _, verr := resolveTrailers(req); verr != nil {
+			_ = s.Close()
+			release()
+			return nil, nil, nil, verr
+		}
+	}
+
 	sp := hdrSlicePool.Get().(*[]conn.HeaderField)
 	hdrs := buildHeaders(req, c.authority, c.defaultScheme, sp)
 	trailers := hasTrailers(req)
@@ -944,13 +957,29 @@ func hasTrailers(req *Request) bool {
 
 // resolveTrailers returns the trailer fields to send. TrailerFunc wins;
 // falls back to Trailers when TrailerFunc returns nil.
-// Returns error if resolved fields contain pseudo-headers.
+//
+// It validates the resolved fields: no pseudo-headers, names are RFC 9110 §5.6.2
+// tokens, values carry no CR/LF/NUL. Static req.Trailers are already checked by
+// validateRequest, but TrailerFunc output is dynamic and never passed through
+// it, so a name or value carrying an injection byte would otherwise ride the
+// trailer HEADERS frame — and, via trailerAnnouncement, the initial HEADERS —
+// verbatim (RFC 7540 §8.1.2.6 makes such a message malformed; §10.3 is the
+// downgrade-splitting vector). sendRequest calls this before buildHeaders so the
+// announcement cannot carry an unvalidated name.
 func resolveTrailers(req *Request) ([]conn.HeaderField, error) {
 	fields := resolveTrailerFields(req)
 	for i := range fields {
-		if len(fields[i].Name) > 0 && fields[i].Name[0] == ':' {
-			return nil, fmt.Errorf("%w: pseudo-header %q in trailer",
-				ErrInvalidRequest, fields[i].Name)
+		name := fields[i].Name
+		if len(name) > 0 && name[0] == ':' {
+			return nil, fmt.Errorf("%w: pseudo-header %q in trailer", ErrInvalidRequest, name)
+		}
+		if !isTokenName(name) {
+			return nil, fmt.Errorf("%w: trailer name %q is not a token (RFC 9110 §5.6.2)",
+				ErrInvalidRequest, name)
+		}
+		if hasFieldInjectionByte(fields[i].Value) {
+			return nil, fmt.Errorf("%w: trailer %q value carries CR, LF or NUL (request-splitting vector, RFC 7540 §10.3)",
+				ErrInvalidRequest, name)
 		}
 	}
 	return fields, nil
