@@ -18,7 +18,7 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7
-      - uses: actions/setup-go@v6
+      - uses: actions/setup-go@v7
         with:
           # Scan on the latest patched toolchain so a fix already shipped in the
           # Go standard library is picked up; govulncheck fails only on
@@ -42,7 +42,7 @@ jobs:
       - uses: github/codeql-action/init@v4
         with:
           languages: go
-      - uses: actions/setup-go@v6
+      - uses: actions/setup-go@v7
         with:
           go-version: '1.25'
       - uses: github/codeql-action/autobuild@v4
