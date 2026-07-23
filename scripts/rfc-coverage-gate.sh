@@ -9,7 +9,7 @@ fail=0
 # those. The tag stays because it guards the nine tests that predate that
 # decision -- without it the whole pre-9112 HTTP/1.1 suite could be deleted and
 # this gate would still pass.
-TAGS="RFC2616 RFC7540 RFC7541 RFC8441 RFC9000 RFC9001 RFC9002 RFC9110 RFC9112 RFC9204 RFC9114"
+TAGS="RFC2616 RFC7540 RFC7541 RFC7838 RFC8441 RFC9000 RFC9001 RFC9002 RFC9110 RFC9112 RFC9204 RFC9114"
 
 for tag in $TAGS; do
   if ! grep -E "^--- PASS: TestConformance_${tag}" "$RFC" >/dev/null; then

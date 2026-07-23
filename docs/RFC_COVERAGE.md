@@ -255,12 +255,12 @@ numbers, which do not track RFC 9112 §6.3.
 
 | Section | Type        | Test |
 |---------|-------------|------|
-| §4     | Roundtrip   | TestFramer_AltSvc_RoundTrip (frame/) — server-wide ALTSVC: origin + alt-value TLV encode/decode |
+| §4     | Conformance | TestConformance_RFC7838_Sec4_AltSvcWireFormat (frame/) — the payload is uint16 Origin-Len + Origin + a single Alt-Svc-Field-Value that is the remainder of the frame ("length determined by subtracting the length of all preceding fields from the frame length"), NOT a uint24-length-prefixed repeated list; a compliant frame no longer misparses into ErrProtocolError. Pins the §4 receiver ignore rules (stream-0 empty Origin, non-zero-stream non-empty Origin) and the writer layout |
+| §4     | Roundtrip   | TestFramer_AltSvc_RoundTrip (frame/) — server-wide ALTSVC: non-empty origin + one field value |
 | §4     | Roundtrip   | TestFramer_AltSvc_PerStream_RoundTrip (frame/) — per-stream ALTSVC: empty origin, non-zero stream |
 | §4     | Roundtrip   | TestFramer_AltSvc_EmptyClears (frame/) — empty entries = clear all alt-svc |
-| §4     | Negative    | TestDispatchAltSvc_MalformedTrailingBytes (frame/) — trailing bytes after last entry |
+| §4     | Negative    | TestFramer_AltSvc_RejectsMultipleEntries (frame/) — writer refuses >1 origin per frame (ErrTooManyAltSvc) |
 | §4     | Negative    | TestDispatchAltSvc_OriginOverflow (frame/) — origin-length exceeds payload |
-| §4     | Negative    | TestDispatchAltSvc_AltValueOverflow (frame/) — alt-value-length exceeds payload |
 
 ## RFC 8441 — Bootstrapping WebSockets with HTTP/2
 
