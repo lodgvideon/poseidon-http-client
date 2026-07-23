@@ -520,6 +520,80 @@ func TestH1Pool_IdleEviction(t *testing.T) {
 	t.Fatalf("idle conn never evicted; Stats = %+v", p.Stats())
 }
 
+// TestH1Pool_WaiterServedAfterCloseEviction pins that a queued waiter is still
+// served after the last connection is evicted.
+//
+// serveWaiters can only hand out conns that already exist, and the release path
+// never dialled — so evicting the last conn while a waiter was queued left
+// {no conns, no in-flight dials, queued waiters}, a TERMINAL state in which the
+// waiter sat until its own timeout. The trigger is the ordinary server
+// "Connection: close", not an error path. HealthCheckPeriod is set out of reach
+// so only the release path can rescue this.
+func TestH1Pool_WaiterServedAfterCloseEviction(t *testing.T) {
+	t.Parallel()
+	d := newH1FakeDialer()
+	p := newH1Pool("h:80", d, PoolOptions{
+		MaxConnsPerHost:   1,
+		HealthCheckPeriod: time.Hour,
+	}, nil, nil)
+	t.Cleanup(func() { _ = p.Close() })
+
+	mc := mustAcquireH1(t, p) // the only conn allowed by the cap
+
+	got := make(chan error, 1)
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_, err := p.acquire(ctx)
+		got <- err
+	}()
+	time.Sleep(100 * time.Millisecond) // let the second acquire queue as a waiter
+
+	p.release(mc, false) // "Connection: close": evicted, pool now empty
+
+	select {
+	case err := <-got:
+		if err != nil {
+			t.Fatalf("queued waiter got %v, want a freshly dialled conn", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("queued waiter was never served after the last conn was evicted — " +
+			"the pool had no path back to dialling")
+	}
+}
+
+// TestH1Pool_CheckoutProbeRejectsPeerClosedConn pins that a connection the peer
+// closed while it sat idle is probed at checkout, not handed to the next
+// request. The maintenance sweep alone is not enough: at its default period a
+// conn is re-acquired long before the sweep would look at it.
+func TestH1Pool_CheckoutProbeRejectsPeerClosedConn(t *testing.T) {
+	t.Parallel()
+	d := newH1FakeDialer()
+	p := newH1Pool("h:80", d, PoolOptions{
+		MaxConnsPerHost:   2,
+		HealthCheckPeriod: time.Hour, // only the checkout probe can catch this
+	}, nil, nil)
+	t.Cleanup(func() { _ = p.Close() })
+
+	mc := mustAcquireH1(t, p)
+	p.release(mc, true)
+
+	// Age it past the checkout-probe threshold, then have the peer close it.
+	time.Sleep(h1ProbeIdleAfter + 150*time.Millisecond)
+	d.mu.Lock()
+	fc := d.byAddr["h:80"][0]
+	d.mu.Unlock()
+	fc.closePeer()
+
+	mc2 := mustAcquireH1(t, p)
+	if mc2 == mc {
+		t.Fatal("checkout handed back the connection whose peer had closed it")
+	}
+	if n := d.dials.Load(); n < 2 {
+		t.Errorf("dials = %d, want a re-dial after the dead conn was rejected", n)
+	}
+}
+
 // TestH1Pool_ProbeEvictsPeerClosedIdleConn pins that the periodic maintenance
 // sweep probes idle connections and evicts one whose peer has closed, so a dead
 // connection is never handed to a later request. Recovering only on next use (an
