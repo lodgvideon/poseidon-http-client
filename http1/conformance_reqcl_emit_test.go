@@ -21,7 +21,7 @@ func reqCL(method string, extra ...hpack.HeaderField) []hpack.HeaderField {
 
 // TestConformance_RFC9110_Sec8_6_ContentLengthWithoutBodyRejected pins that a
 // non-zero caller Content-Length on a request that sends no body (endStream) is
-// refused, never emitted. RFC 9110 §8.6: "A sender MUST NOT forward a message
+// refused, never emitted. RFC 9110 §8.6: "a sender MUST NOT forward a message
 // with a Content-Length header field value that is known to be incorrect." The
 // wire would declare N octets that are never written — a CL.0 desync (RFC 9112
 // §11.2) on a reused connection.

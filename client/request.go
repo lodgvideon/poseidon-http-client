@@ -232,39 +232,9 @@ func validateRequest(r *Request) error {
 	if r.Method == "TRACE" && requestHasContent(r) {
 		return fmt.Errorf("%w: TRACE request must not carry content (RFC 9110 §9.3.8)", ErrInvalidRequest)
 	}
-	// RFC 7540 §8.1.2.3: connection-specific headers MUST NOT appear
-	// in HTTP/2 requests. Sending any of them is a request-smuggling
-	// vector through HTTP/1.1 downgrading intermediaries.
-	hasContentType := false
-	for i := range r.Headers {
-		hf := r.Headers[i]
-		if len(hf.Name) > 0 && hf.Name[0] == ':' {
-			return fmt.Errorf("%w: pseudo-header %q in regular Headers slice",
-				ErrInvalidRequest, hf.Name)
-		}
-		if !isTokenName(hf.Name) {
-			return fmt.Errorf("%w: header name %q is not a token (RFC 9110 §5.6.2); a name "+
-				"carrying CR, LF, NUL, a space or a colon is a request-splitting vector",
-				ErrInvalidRequest, hf.Name)
-		}
-		name := strings.ToLower(string(hf.Name))
-		if name == "content-type" {
-			hasContentType = true
-		}
-		if forbiddenRequestHeader(name) {
-			return fmt.Errorf("%w: %q header is forbidden in HTTP/2 requests (RFC 7540 §8.1.2.3)",
-				ErrInvalidRequest, hf.Name)
-		}
-		if isTEHeader(name) && !strings.EqualFold(string(hf.Value), "trailers") {
-			return fmt.Errorf("%w: TE header value %q forbidden; only %q is allowed (RFC 7540 §8.1.2.3)",
-				ErrInvalidRequest, hf.Value, "trailers")
-		}
-		// The value the same §10.3 vector rides on. HPACK cannot split the H2
-		// wire with these bytes, but a downgrading intermediary can.
-		if hasFieldInjectionByte(hf.Value) {
-			return fmt.Errorf("%w: header %q value carries CR, LF or NUL (request-splitting vector, RFC 7540 §10.3)",
-				ErrInvalidRequest, hf.Name)
-		}
+	hasContentType, err := checkRegularHeaders(r.Headers)
+	if err != nil {
+		return err
 	}
 	// RFC 9110 §9.3.7: a client generating an OPTIONS request with content MUST
 	// send a Content-Type. Presence is the enforceable part; media-type validity
@@ -273,23 +243,72 @@ func validateRequest(r *Request) error {
 		return fmt.Errorf("%w: OPTIONS request with content requires a Content-Type header (RFC 9110 §9.3.7)",
 			ErrInvalidRequest)
 	}
-	for i := range r.Trailers {
-		if len(r.Trailers[i].Name) > 0 && r.Trailers[i].Name[0] == ':' {
-			return fmt.Errorf("%w: pseudo-header %q in Trailers slice",
-				ErrInvalidRequest, r.Trailers[i].Name)
-		}
-		if !isTokenName(r.Trailers[i].Name) {
-			return fmt.Errorf("%w: trailer name %q is not a token (RFC 9110 §5.6.2)",
-				ErrInvalidRequest, r.Trailers[i].Name)
-		}
-		if hasFieldInjectionByte(r.Trailers[i].Value) {
-			return fmt.Errorf("%w: trailer %q value carries CR, LF or NUL (request-splitting vector, RFC 7540 §10.3)",
-				ErrInvalidRequest, r.Trailers[i].Name)
-		}
+	if err := checkRequestTrailers(r.Trailers); err != nil {
+		return err
 	}
 	// Checked here as well as at the point of use so Do rejects a
 	// self-contradictory request before opening a connection.
 	return validateCompressBody(r)
+}
+
+// checkRegularHeaders validates the regular (non-pseudo) request header fields
+// and reports whether a Content-Type is present (for the §9.3.7 OPTIONS rule).
+//
+// RFC 7540 §8.1.2.3: connection-specific headers MUST NOT appear in HTTP/2
+// requests — sending any is a request-smuggling vector through HTTP/1.1
+// downgrading intermediaries. RFC 9110 §5.6.2: names are tokens; RFC 7540 §10.3:
+// a value carrying CR/LF/NUL is a splitting vector once re-serialised.
+func checkRegularHeaders(headers []conn.HeaderField) (hasContentType bool, err error) {
+	for i := range headers {
+		hf := headers[i]
+		if len(hf.Name) > 0 && hf.Name[0] == ':' {
+			return false, fmt.Errorf("%w: pseudo-header %q in regular Headers slice",
+				ErrInvalidRequest, hf.Name)
+		}
+		if !isTokenName(hf.Name) {
+			return false, fmt.Errorf("%w: header name %q is not a token (RFC 9110 §5.6.2); a name "+
+				"carrying CR, LF, NUL, a space or a colon is a request-splitting vector",
+				ErrInvalidRequest, hf.Name)
+		}
+		name := strings.ToLower(string(hf.Name))
+		if name == "content-type" {
+			hasContentType = true
+		}
+		if forbiddenRequestHeader(name) {
+			return false, fmt.Errorf("%w: %q header is forbidden in HTTP/2 requests (RFC 7540 §8.1.2.3)",
+				ErrInvalidRequest, hf.Name)
+		}
+		if isTEHeader(name) && !strings.EqualFold(string(hf.Value), "trailers") {
+			return false, fmt.Errorf("%w: TE header value %q forbidden; only %q is allowed (RFC 7540 §8.1.2.3)",
+				ErrInvalidRequest, hf.Value, "trailers")
+		}
+		if hasFieldInjectionByte(hf.Value) {
+			return false, fmt.Errorf("%w: header %q value carries CR, LF or NUL (request-splitting vector, RFC 7540 §10.3)",
+				ErrInvalidRequest, hf.Name)
+		}
+	}
+	return hasContentType, nil
+}
+
+// checkRequestTrailers validates the static trailer fields (names are tokens,
+// values carry no CR/LF/NUL, no pseudo-headers). Dynamic trailers from
+// TrailerFunc are validated separately at send time.
+func checkRequestTrailers(trailers []conn.HeaderField) error {
+	for i := range trailers {
+		if len(trailers[i].Name) > 0 && trailers[i].Name[0] == ':' {
+			return fmt.Errorf("%w: pseudo-header %q in Trailers slice",
+				ErrInvalidRequest, trailers[i].Name)
+		}
+		if !isTokenName(trailers[i].Name) {
+			return fmt.Errorf("%w: trailer name %q is not a token (RFC 9110 §5.6.2)",
+				ErrInvalidRequest, trailers[i].Name)
+		}
+		if hasFieldInjectionByte(trailers[i].Value) {
+			return fmt.Errorf("%w: trailer %q value carries CR, LF or NUL (request-splitting vector, RFC 7540 §10.3)",
+				ErrInvalidRequest, trailers[i].Name)
+		}
+	}
+	return nil
 }
 
 // containsAnyWhitespace reports whether s contains any Unicode

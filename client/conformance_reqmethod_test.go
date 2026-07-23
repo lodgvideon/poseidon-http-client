@@ -39,8 +39,9 @@ func TestConformance_RFC9110_Sec9_3_8_TRACEBodyRejected(t *testing.T) {
 // TestConformance_RFC9110_Sec9_3_7_OptionsContentRequiresContentType pins that an
 // OPTIONS request with content is refused unless it carries a Content-Type. RFC
 // 9110 §9.3.7: "A client that generates an OPTIONS request containing content
-// MUST send a valid Content-Type." Presence is the enforceable part; media-type
-// validity stays the caller's, and the general §8.3 SHOULD is not enforced.
+// MUST send a valid Content-Type header field describing the representation
+// media type." Presence is the enforceable part; media-type validity stays the
+// caller's, and the general §8.3 SHOULD is not enforced.
 func TestConformance_RFC9110_Sec9_3_7_OptionsContentRequiresContentType(t *testing.T) {
 	if err := validateRequest(&Request{Method: "OPTIONS", Path: "/", Body: []byte("x")}); !errors.Is(err, ErrInvalidRequest) {
 		t.Fatalf("OPTIONS+content, no Content-Type = %v, want ErrInvalidRequest (RFC 9110 §9.3.7)", err)
