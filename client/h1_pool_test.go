@@ -29,6 +29,7 @@ import (
 // pool closed it, so eviction/discard assertions can observe teardown.
 type h1FakeConn struct {
 	net.Conn
+	srv    net.Conn // peer half, so a test can simulate a server-side close
 	idx    int
 	reqs   atomic.Int32
 	closed atomic.Bool
@@ -39,6 +40,11 @@ func (c *h1FakeConn) Close() error {
 	c.closed.Store(true)
 	return c.Conn.Close()
 }
+
+// closePeer closes the server half, simulating a peer that closes an idle
+// connection. The client half then reads EOF, which ProbeIdle turns into
+// eviction on the pool's next maintenance sweep.
+func (c *h1FakeConn) closePeer() { _ = c.srv.Close() }
 
 // h1FakeDialer hands out a fresh h1FakeConn per dial, recorded by dial addr so a
 // pool test can count how many TCP connections were opened to each host. Safe for
@@ -76,7 +82,7 @@ func (d *h1FakeDialer) Dial(_ context.Context, addr string) (net.Conn, error) {
 		return nil, err
 	}
 	cli, srv := net.Pipe()
-	fc := &h1FakeConn{Conn: cli, idx: d.nextIdx}
+	fc := &h1FakeConn{Conn: cli, srv: srv, idx: d.nextIdx}
 	d.nextIdx++
 	d.byAddr[addr] = append(d.byAddr[addr], fc)
 	d.mu.Unlock()
@@ -512,6 +518,41 @@ func TestH1Pool_IdleEviction(t *testing.T) {
 		time.Sleep(10 * time.Millisecond)
 	}
 	t.Fatalf("idle conn never evicted; Stats = %+v", p.Stats())
+}
+
+// TestH1Pool_ProbeEvictsPeerClosedIdleConn pins that the periodic maintenance
+// sweep probes idle connections and evicts one whose peer has closed, so a dead
+// connection is never handed to a later request. Recovering only on next use (an
+// exchange error plus retry) is weaker than RFC 9112 §9.6's ask to monitor idle
+// connections for a closure signal. IdleTimeout is left unset so the eviction
+// can only come from the probe, not from age.
+func TestH1Pool_ProbeEvictsPeerClosedIdleConn(t *testing.T) {
+	t.Parallel()
+	d := newH1FakeDialer()
+	p := newH1Pool("h:80", d, PoolOptions{
+		MaxConnsPerHost:   2,
+		HealthCheckPeriod: 10 * time.Millisecond,
+	}, nil, nil)
+	t.Cleanup(func() { _ = p.Close() })
+
+	mc := mustAcquireH1(t, p)
+	p.release(mc, true) // keep-alive → the conn stays idle in the pool
+
+	// The server closes the idle connection.
+	d.mu.Lock()
+	fc := d.byAddr["h:80"][0]
+	d.mu.Unlock()
+	fc.closePeer()
+
+	// The next maintenance tick must probe the idle conn, see EOF, and evict it.
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		if p.Stats().ActiveConns == 0 {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("peer-closed idle conn never evicted by the probe; Stats = %+v", p.Stats())
 }
 
 // ————————————————————————————————————————————————————————————————

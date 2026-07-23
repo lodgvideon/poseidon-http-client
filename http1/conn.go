@@ -161,6 +161,54 @@ func (c *Conn) Close() error {
 	return c.nc.Close()
 }
 
+// ProbeIdle reports whether an idle connection is still safe to reuse. It is a
+// near-non-blocking readability check (bounded by a brief read deadline): an
+// empty, still-open socket returns true; a peer FIN, or any unsolicited byte,
+// returns false.
+//
+// RFC 9112 §9.6 asks implementations to monitor idle connections for a closure
+// signal, and RFC 9110 makes data arriving on a connection with no outstanding
+// request not a valid response — so an idle connection with anything readable
+// must be evicted rather than handed to the next request, which would otherwise
+// consume those bytes as its own status line. IsAlive only reflects a local
+// Close; this actually looks at the socket.
+//
+// It MUST only be called when no exchange is in flight — the caller owns the
+// connection and no ReadResponse/ReadBodyChunk is running (e.g. a pool's
+// maintenance sweep on a checked-in conn). It reads through the same bufio
+// reader an exchange uses, so a concurrent read would corrupt the stream. The
+// read deadline is restored to none before returning, so a later real read is
+// unaffected.
+func (c *Conn) ProbeIdle() bool {
+	if c.closed.Load() {
+		return false
+	}
+	// Anything already buffered on an idle conn is unsolicited by definition.
+	if c.br.Buffered() > 0 {
+		return false
+	}
+	// A brief FUTURE deadline, not a past one: a past deadline makes the read
+	// return a timeout immediately without ever looking at the socket, so an
+	// already-arrived byte or FIN would be missed. With a short future deadline a
+	// peer FIN or unsolicited byte that is already present returns immediately,
+	// while an empty, still-open socket blocks only until the deadline. This runs
+	// in the pool's periodic sweep on checked-in (idle) conns, so the ~1ms wait
+	// costs nothing under load — busy conns are skipped — and only ticks while the
+	// pool is idle. A timeout means healthy; a byte means unsolicited data; any
+	// other error (EOF, reset) means the peer is gone.
+	_ = c.nc.SetReadDeadline(time.Now().Add(time.Millisecond))
+	_, err := c.br.Peek(1)
+	_ = c.nc.SetReadDeadline(time.Time{})
+	if err == nil {
+		return false
+	}
+	var ne net.Error
+	if errors.As(err, &ne) && ne.Timeout() {
+		return true
+	}
+	return false
+}
+
 // NewExchange allocates and returns a new Exchange for the next HTTP/1.1
 // request/response pair. The previous exchange must be fully drained before
 // calling NewExchange again.
