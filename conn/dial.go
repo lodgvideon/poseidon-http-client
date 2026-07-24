@@ -17,6 +17,23 @@ type TLSDialer struct {
 	Config *tls.Config
 }
 
+// h2TLS12CipherSuites returns the TLS 1.2 cipher suites an h2-only dialer offers:
+// the six forward-secret AEAD suites that are NOT on RFC 9113 Appendix A's
+// prohibited list. A fresh slice per call so a caller mutating the returned
+// tls.Config cannot alias a shared backing array. The list mirrors Go's own
+// preferred TLS 1.2 AEAD suites and includes the §9.2.2-mandated
+// TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256.
+func h2TLS12CipherSuites() []uint16 {
+	return []uint16{
+		tls.TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256,
+		tls.TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256,
+		tls.TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384,
+		tls.TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384,
+		tls.TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256,
+		tls.TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256,
+	}
+}
+
 // tlsClientConfig builds the effective *tls.Config for an HTTP/2-over-TLS dial: a
 // clone of the caller's config (or a fresh one), with "h2" ensured in NextProtos
 // for ALPN and the RFC 9113 §9.2 TLS 1.2 floor enforced. The floor is raised even
@@ -31,6 +48,18 @@ func (d *TLSDialer) tlsClientConfig() *tls.Config {
 	}
 	if cfg.MinVersion < tls.VersionTLS12 {
 		cfg.MinVersion = tls.VersionTLS12
+	}
+	// RFC 9113 §9.2.2: "A deployment of HTTP/2 over TLS 1.2 SHOULD NOT use any of
+	// the prohibited cipher suites listed in Appendix A." This dialer negotiates
+	// only h2 (it returns ErrALPNFailed otherwise), so §9.2.2's closing note — a
+	// client MAY advertise prohibited suites to reach an HTTP/1.1 fallback — does
+	// not apply; FlexDialer, which offers http/1.1 too, is deliberately left
+	// unconstrained. Pin the TLS 1.2 offer to the forward-secret AEAD suites (a
+	// superset of the mandated TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256), only when
+	// the caller did not choose its own list. TLS 1.3 suites are not configurable
+	// through this field and are unaffected.
+	if cfg.CipherSuites == nil {
+		cfg.CipherSuites = h2TLS12CipherSuites()
 	}
 	hasH2 := false
 	for _, p := range cfg.NextProtos {
