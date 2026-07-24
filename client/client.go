@@ -864,13 +864,19 @@ func buildHeaders(req *Request, defaultAuthority, defaultScheme string, sp *[]co
 	if authority == "" {
 		authority = defaultAuthority
 	}
+	// RFC 9113 §8.5: a (non-extended) CONNECT omits :scheme and :path — the tunnel
+	// target rides in :authority. An extended CONNECT (RFC 8441, :protocol set)
+	// keeps both, so it is not a regularConnect and takes the normal path.
+	regularConnect := req.Method == "CONNECT" && req.Protocol == ""
 	*sp = (*sp)[:0]
-	*sp = append(*sp,
-		conn.HeaderField{Name: hdrMethod, Value: unsafeStringToBytes(req.Method)},
-		conn.HeaderField{Name: hdrScheme, Value: unsafeStringToBytes(scheme)},
-		conn.HeaderField{Name: hdrAuthority, Value: unsafeStringToBytes(authority)},
-		conn.HeaderField{Name: hdrPath, Value: unsafeStringToBytes(req.Path)},
-	)
+	*sp = append(*sp, conn.HeaderField{Name: hdrMethod, Value: unsafeStringToBytes(req.Method)})
+	if !regularConnect {
+		*sp = append(*sp, conn.HeaderField{Name: hdrScheme, Value: unsafeStringToBytes(scheme)})
+	}
+	*sp = append(*sp, conn.HeaderField{Name: hdrAuthority, Value: unsafeStringToBytes(authority)})
+	if !regularConnect {
+		*sp = append(*sp, conn.HeaderField{Name: hdrPath, Value: unsafeStringToBytes(req.Path)})
+	}
 	if req.Protocol != "" {
 		*sp = append(*sp, conn.HeaderField{Name: hdrProtocol, Value: unsafeStringToBytes(req.Protocol)})
 	}
