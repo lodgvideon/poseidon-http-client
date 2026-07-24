@@ -850,6 +850,32 @@ var hdrSlicePool = sync.Pool{
 	},
 }
 
+// lowerHeaderName returns name with ASCII A–Z folded to lowercase, per RFC 9113
+// §8.2.1 ("Field names MUST be converted to lowercase when constructing an HTTP/2
+// message"). It returns the original slice unchanged — no allocation — when the
+// name is already lowercase, the common case; only a name carrying an uppercase
+// letter is copied.
+func lowerHeaderName(name []byte) []byte {
+	upper := false
+	for _, b := range name {
+		if b >= 'A' && b <= 'Z' {
+			upper = true
+			break
+		}
+	}
+	if !upper {
+		return name
+	}
+	out := make([]byte, len(name))
+	for i, b := range name {
+		if b >= 'A' && b <= 'Z' {
+			b += 'a' - 'A'
+		}
+		out[i] = b
+	}
+	return out
+}
+
 // buildHeaders assembles the on-wire HEADERS slice with pseudo-headers
 // first. sp is the pooled backing array (caller obtains from
 // hdrSlicePool.Get and is responsible for Put after SendHeaders).
@@ -915,7 +941,14 @@ func buildHeaders(req *Request, defaultAuthority, defaultScheme string, sp *[]co
 		if managedCL && bytes.EqualFold(req.Headers[i].Name, hdrContentLength) {
 			continue
 		}
-		*sp = append(*sp, req.Headers[i])
+		// RFC 9113 §8.2.1: "Field names MUST be converted to lowercase when
+		// constructing an HTTP/2 message." The client lowercases the names it
+		// synthesizes; a caller-supplied Request.Headers name is folded here — no
+		// allocation when it is already lowercase — so an uppercase name is never
+		// emitted verbatim as a malformed HTTP/2 field.
+		hf := req.Headers[i]
+		hf.Name = lowerHeaderName(hf.Name)
+		*sp = append(*sp, hf)
 	}
 	if !req.DisableDecompression && shouldSendAcceptEncoding(req) {
 		*sp = append(*sp, conn.HeaderField{Name: hdrAcceptEncoding, Value: acceptEncodingValue})

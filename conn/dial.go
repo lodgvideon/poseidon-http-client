@@ -17,18 +17,20 @@ type TLSDialer struct {
 	Config *tls.Config
 }
 
-// Dial dials addr over TCP, runs the TLS handshake with NextProtos
-// containing "h2", and returns the negotiated *tls.Conn. Returns
-// ErrALPNFailed if the peer did not select "h2".
-func (d *TLSDialer) Dial(ctx context.Context, addr string) (net.Conn, error) {
-	cfg := d.Config
-	if cfg == nil {
-		cfg = &tls.Config{MinVersion: tls.VersionTLS12}
+// tlsClientConfig builds the effective *tls.Config for an HTTP/2-over-TLS dial: a
+// clone of the caller's config (or a fresh one), with "h2" ensured in NextProtos
+// for ALPN and the RFC 9113 §9.2 TLS 1.2 floor enforced. The floor is raised even
+// when a caller pins an explicit lower MinVersion (TLS 1.0/1.1), not only when it
+// is unset — HTTP/2 over TLS requires TLS 1.2 or higher.
+func (d *TLSDialer) tlsClientConfig() *tls.Config {
+	var cfg *tls.Config
+	if d.Config == nil {
+		cfg = &tls.Config{} //nolint:gosec // MinVersion is raised to TLS 1.2 below
 	} else {
-		cfg = cfg.Clone()
-		if cfg.MinVersion == 0 {
-			cfg.MinVersion = tls.VersionTLS12
-		}
+		cfg = d.Config.Clone()
+	}
+	if cfg.MinVersion < tls.VersionTLS12 {
+		cfg.MinVersion = tls.VersionTLS12
 	}
 	hasH2 := false
 	for _, p := range cfg.NextProtos {
@@ -40,8 +42,14 @@ func (d *TLSDialer) Dial(ctx context.Context, addr string) (net.Conn, error) {
 	if !hasH2 {
 		cfg.NextProtos = append([]string{"h2"}, cfg.NextProtos...)
 	}
+	return cfg
+}
 
-	td := &tls.Dialer{Config: cfg}
+// Dial dials addr over TCP, runs the TLS handshake with NextProtos containing
+// "h2", and returns the negotiated *tls.Conn. Returns ErrALPNFailed if the peer
+// did not select "h2".
+func (d *TLSDialer) Dial(ctx context.Context, addr string) (net.Conn, error) {
+	td := &tls.Dialer{Config: d.tlsClientConfig()}
 	c, err := td.DialContext(ctx, "tcp", addr)
 	if err != nil {
 		return nil, err
