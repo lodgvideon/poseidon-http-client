@@ -166,3 +166,75 @@ func TestConformance_RFC9113_Sec6_10_SplitHeaderBlock_Accepted(t *testing.T) {
 		t.Error("connection died on a conformant split header block")
 	}
 }
+
+// TestConformance_RFC9113_Sec6_10_SplitBlockStreamError_ConnSurvives is the
+// regression guard for a §6.10 continuity-state escalation: a response that spans
+// HEADERS+CONTINUATION and is stream-malformed (a forbidden `connection` header)
+// is a STREAM error (RFC 9113 §8.1.2.6 — one stream), and the field block was
+// closed on the wire by the CONTINUATION's END_HEADERS, so the very next frame
+// MUST be processed normally. A regression left the Framer's expectContinuation
+// flag stranded (it was updated only on a nil dispatch), so the next frame tripped
+// a false interleaving error and killed the whole pooled connection.
+func TestConformance_RFC9113_Sec6_10_SplitBlockStreamError_ConnSurvives(t *testing.T) {
+	cli, srv := net.Pipe()
+	defer cli.Close()
+	probe := newFramingProbe()
+	finish, release := newFinish()
+
+	go pipeServer(t, srv, func(srvFr *frame.Framer) {
+		if !awaitRequest(t, srvFr) {
+			return
+		}
+		drainFrames(srvFr, probe)
+		enc := hpack.NewEncoder()
+		// A response carrying a connection-specific header is malformed (a STREAM
+		// error), and it spans HEADERS+CONTINUATION.
+		full := enc.EncodeBlock(nil, []hpack.HeaderField{
+			{Name: []byte(":status"), Value: []byte("200")},
+			{Name: []byte("connection"), Value: []byte("keep-alive")},
+		})
+		half := len(full) / 2
+		<-asyncWrite(func() error {
+			return srvFr.WriteHeaders(frame.WriteHeadersParams{StreamID: 1, BlockFragment: full[:half], EndHeaders: false})
+		})
+		<-asyncWrite(func() error { return srvFr.WriteContinuation(1, true, full[half:]) })
+		// The next frame after the stream reset must be handled, not rejected as an
+		// interleaving violation.
+		<-asyncWrite(func() error { return srvFr.WritePing(false, [8]byte{7}) })
+		<-finish
+	})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	c, err := NewClientConn(ctx, cli, ConnOptions{}.defaulted())
+	if err != nil {
+		t.Fatalf("NewClientConn: %v", err)
+	}
+	defer c.Close()
+
+	s, err := c.NewStream(ctx)
+	if err != nil {
+		t.Fatalf("NewStream: %v", err)
+	}
+	if err := s.SendHeaders(ctx, reqHeaders(), true); err != nil {
+		t.Fatalf("SendHeaders: %v", err)
+	}
+	ev, err := s.Recv(ctx)
+	if err != nil {
+		t.Fatalf("Recv: %v", err)
+	}
+	if ev.Type != EventReset || ev.RSTCode != frame.ErrCodeProtocolError {
+		t.Fatalf("event = {%s %v}, want EventReset PROTOCOL_ERROR for the malformed response", ev.Type, ev.RSTCode)
+	}
+	// The malformed response cost one stream; the connection — and the frame after
+	// it — must survive.
+	select {
+	case code := <-probe.away:
+		t.Errorf("connection torn down (GOAWAY %v) after a stream error on a CONTINUATION-completed block", code)
+	case <-time.After(300 * time.Millisecond):
+	}
+	if !c.IsAlive() {
+		t.Error("connection died after a stream-scoped malformed split response")
+	}
+	release()
+}

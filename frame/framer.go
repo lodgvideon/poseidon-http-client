@@ -555,9 +555,15 @@ func (f *Framer) ReadFrame(ctx context.Context, h Handler) (FrameHeader, error) 
 		// return without error.
 		derr = nil
 	}
-	if derr == nil {
-		f.trackFieldBlock(fh)
-	}
+	// Update §6.10 continuity from the END_HEADERS flag regardless of the dispatch
+	// outcome: the flag is a property of the wire framing, not of dispatch
+	// success. A CONTINUATION that closes a field block but whose handler returns
+	// a NON-FATAL stream error must still clear expectContinuation — otherwise the
+	// next frame trips a false interleaving violation and the whole connection is
+	// torn down for what the RFC scopes to a single stream (§8.1.2.6). A frame
+	// whose dispatch is connection-fatal tears the connection down anyway, so
+	// updating the state for it is harmless.
+	f.trackFieldBlock(fh)
 	return fh, derr
 }
 
