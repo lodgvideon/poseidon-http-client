@@ -864,8 +864,28 @@ func (ex *Exchange) WriteRequest(ctx context.Context, fields []hpack.HeaderField
 
 	bufs = append(bufs, crlf) // blank line ending headers
 
+	return ex.writeHead(ctx, bufs)
+}
+
+// writeHead puts the assembled head on the wire, condemning the exchange if the
+// socket failed part-way through.
+//
+// A failed head write is a PARTIAL head: net.Buffers.WriteTo reports the error
+// after some prefix has already gone, so the peer is mid-request-line or
+// mid-field and cannot resynchronise. Condemning is what stops ReadResponse's
+// `keepAlive = respMinor >= 1 && !ex.condemned` from handing the socket back —
+// the read side has had this invariant as a blanket defer since #310, and the
+// write side simply never did.
+//
+// Split out from WriteRequest only because that function is at the gocyclo
+// ceiling; the split is along the seam where the head stops being assembled and
+// starts being sent.
+func (ex *Exchange) writeHead(ctx context.Context, bufs net.Buffers) error {
 	defer armDeadline(ctx, ex.c.nc.SetWriteDeadline)()
 	_, err := bufs.WriteTo(ex.c.nc)
+	if err != nil {
+		ex.keepAlive, ex.condemned = false, true
+	}
 	return err
 }
 
@@ -897,6 +917,11 @@ func (ex *Exchange) WriteBody(ctx context.Context, p []byte, fin bool) error {
 			return nil
 		}
 		_, err := bufs.WriteTo(ex.c.nc)
+		if err != nil {
+			// Same as the head: a partial chunk leaves the peer's chunked decoder
+			// mid-frame, so the octet boundary is no longer agreed.
+			ex.keepAlive, ex.condemned = false, true
+		}
 		return err
 	}
 
@@ -933,6 +958,9 @@ func (ex *Exchange) WriteBody(ctx context.Context, p []byte, fin bool) error {
 		n, err := ex.c.nc.Write(p)
 		ex.reqBodyWritten += int64(n)
 		if err != nil {
+			// A short write under a declared Content-Length owes the peer octets
+			// it will block waiting for.
+			ex.keepAlive, ex.condemned = false, true
 			return err
 		}
 	}
@@ -2015,6 +2043,22 @@ func (ex *Exchange) readChunkedChunk(buf []byte) (n int, done bool, err error) {
 // a pool after this exchange completes. Returns false when the server sent
 // "Connection: close" or used HTTP/1.0 without "Connection: keep-alive".
 func (ex *Exchange) KeepAlive() bool {
+	// An abandoned upload is not reusable, whether or not anyone called WriteBody
+	// with fin. The under-run check inside WriteBody only fires on the final
+	// chunk, so a caller that declared a Content-Length, wrote part of it, and
+	// then gave up — a cancelled request, a BodyReader that errored — left this
+	// reporting true with the peer still counting octets. The pool then handed
+	// that socket to the next request, whose request-line the peer consumed as
+	// the tail of the previous body.
+	//
+	// Asked here rather than latched at some earlier point because this is the
+	// question's natural home: it is the caller's decision to stop that makes the
+	// body short, and this is the moment the caller asks whether the connection
+	// survived. reqContentLen is -1 unless a length was declared, and is 0 for a
+	// bodyless head, so neither case can trip it.
+	if ex.reqContentLen > 0 && ex.reqBodyWritten < ex.reqContentLen {
+		return false
+	}
 	return ex.keepAlive
 }
 

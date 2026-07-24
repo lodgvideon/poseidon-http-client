@@ -244,9 +244,34 @@ func validateRequest(r *Request) error {
 	if r.Method == "TRACE" && requestHasContent(r) {
 		return fmt.Errorf("%w: TRACE request must not carry content (RFC 9110 §9.3.8)", ErrInvalidRequest)
 	}
-	hasContentType, hasExpect100, err := checkRegularHeaders(r.Headers)
+	hasContentType, hasExpect100, hasContentLength, err := checkRegularHeaders(r.Headers)
 	if err != nil {
 		return err
+	}
+	// A caller-supplied Content-Length is only allowed where this client can hold
+	// it to account. RFC 9110 §8.6: "Because Content-Length is used for message
+	// delimitation in HTTP/1.1, its field value can impact how the message is
+	// parsed by downstream recipients", and a mismatch "might cause a security
+	// failure due to request smuggling or response splitting".
+	//
+	// buildHeaders manages the field — replacing any caller value — whenever the
+	// body length is known: a []byte body, or a BodyReader with ContentLength > 0.
+	// In those cases http1.WriteBody then reconciles the octets actually written
+	// against it, so the emitted value is provably exact. The two shapes below
+	// fall outside that, and the caller's value went to the wire unchecked:
+	//
+	//   - a streaming BodyReader with no declared ContentLength — an arbitrary
+	//     number of octets against a fixed claim;
+	//   - no body at all beside a non-zero claim.
+	//
+	// HTTP/1.1 already refused both in http1.WriteRequest. HTTP/2 and HTTP/3 did
+	// not, and an h2→h1.1 gateway rewrites that unchecked value into exactly the
+	// framing field §8.6 is warning about. Refusing in the shared gate closes the
+	// divergence at the source; callers who know the length set Request
+	// .ContentLength, which is the value this client can and does verify.
+	if hasContentLength && !managesContentLength(r) {
+		return fmt.Errorf("%w: caller-supplied Content-Length cannot be verified against the "+
+			"body being sent; set Request.ContentLength instead (RFC 9110 §8.6)", ErrInvalidRequest)
 	}
 	// RFC 9110 §10.1.1: a client must not generate a 100-continue expectation in
 	// a request that does not include content. There is nothing for the server to
@@ -279,15 +304,36 @@ func validateRequest(r *Request) error {
 // requests — sending any is a request-smuggling vector through HTTP/1.1
 // downgrading intermediaries. RFC 9110 §5.6.2: names are tokens; RFC 7540 §10.3:
 // a value carrying CR/LF/NUL is a splitting vector once re-serialised.
-func checkRegularHeaders(headers []conn.HeaderField) (hasContentType, hasExpect100 bool, err error) {
+// managesContentLength reports whether this client emits the Content-Length for
+// r itself — replacing any the caller supplied — and can therefore vouch for it.
+//
+// The three yes cases each have an owner that strips the caller's value first:
+// prepareCompressedRequest via compressedHeaders for a compressed body, and
+// buildHeaders' managedCL for the two identity-coded shapes whose length is
+// known before the body is sent. Everything else means the caller's number is
+// the one going out with nothing behind it.
+func managesContentLength(r *Request) bool {
+	if r.CompressBody != EncodingIdentity {
+		// compressedHeaders owns the field here: the compressed length for a
+		// buffered body, and no Content-Length at all for a BodyReader, whose
+		// compressed length cannot be known before it is read.
+		return true
+	}
+	if r.BodyReader != nil {
+		return r.ContentLength > 0
+	}
+	return len(r.Body) > 0
+}
+
+func checkRegularHeaders(headers []conn.HeaderField) (hasContentType, hasExpect100, hasContentLength bool, err error) {
 	for i := range headers {
 		hf := headers[i]
 		if len(hf.Name) > 0 && hf.Name[0] == ':' {
-			return false, false, fmt.Errorf("%w: pseudo-header %q in regular Headers slice",
+			return false, false, false, fmt.Errorf("%w: pseudo-header %q in regular Headers slice",
 				ErrInvalidRequest, hf.Name)
 		}
 		if !isTokenName(hf.Name) {
-			return false, false, fmt.Errorf("%w: header name %q is not a token (RFC 9110 §5.6.2); a name "+
+			return false, false, false, fmt.Errorf("%w: header name %q is not a token (RFC 9110 §5.6.2); a name "+
 				"carrying CR, LF, NUL, a space or a colon is a request-splitting vector",
 				ErrInvalidRequest, hf.Name)
 		}
@@ -295,23 +341,26 @@ func checkRegularHeaders(headers []conn.HeaderField) (hasContentType, hasExpect1
 		if name == "content-type" {
 			hasContentType = true
 		}
+		if name == "content-length" {
+			hasContentLength = true
+		}
 		if name == "expect" && hasExpectContinue(hf.Value) {
 			hasExpect100 = true
 		}
 		if forbiddenRequestHeader(name) {
-			return false, false, fmt.Errorf("%w: %q header is forbidden in HTTP/2 requests (RFC 7540 §8.1.2.3)",
+			return false, false, false, fmt.Errorf("%w: %q header is forbidden in HTTP/2 requests (RFC 7540 §8.1.2.3)",
 				ErrInvalidRequest, hf.Name)
 		}
 		if isTEHeader(name) && !strings.EqualFold(string(hf.Value), "trailers") {
-			return false, false, fmt.Errorf("%w: TE header value %q forbidden; only %q is allowed (RFC 7540 §8.1.2.3)",
+			return false, false, false, fmt.Errorf("%w: TE header value %q forbidden; only %q is allowed (RFC 7540 §8.1.2.3)",
 				ErrInvalidRequest, hf.Value, "trailers")
 		}
 		if hasFieldInjectionByte(hf.Value) {
-			return false, false, fmt.Errorf("%w: header %q value carries CR, LF or NUL (request-splitting vector, RFC 7540 §10.3)",
+			return false, false, false, fmt.Errorf("%w: header %q value carries CR, LF or NUL (request-splitting vector, RFC 7540 §10.3)",
 				ErrInvalidRequest, hf.Name)
 		}
 	}
-	return hasContentType, hasExpect100, nil
+	return hasContentType, hasExpect100, hasContentLength, nil
 }
 
 // checkRequestTrailers validates the static trailer fields (names are tokens,
@@ -361,6 +410,18 @@ func hasExpectContinue(v []byte) bool {
 			tok, v = v[:i], v[i+1:]
 		} else {
 			v = nil
+		}
+		// Identify the expectation by its leading token. RFC 9110 §10.1.1:
+		// `expectation = token [ "=" ( token / quoted-string ) parameters ]`, so
+		// everything from the first "=" on is the value and its parameters, not
+		// part of the name. A whole-member comparison therefore missed
+		// "100-continue;x=1" — malformed by that grammar, but a recipient that
+		// reads the token up to the delimiter still sees a 100-continue
+		// expectation and still waits for content this request will never send.
+		// Cutting at ";" as well as "=" is the conservative direction for a check
+		// that polices what we emit.
+		if i := bytes.IndexAny(tok, "=;"); i >= 0 {
+			tok = tok[:i]
 		}
 		if bytes.EqualFold(bytes.Trim(tok, " \t"), expect100Continue) {
 			return true
