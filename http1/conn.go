@@ -1228,10 +1228,13 @@ func (ex *Exchange) checkBodylessStatusFraming() {
 		// Presence alone cost a connection per request against the many endpoints
 		// that answer 204 with an explicit zero (generate_204 and friends), which
 		// is a self-inflicted outage in exchange for no safety.
-		// clErr is part of the test because clValue is only meaningful when the
-		// parse succeeded: an unparseable Content-Length leaves it 0, which would
-		// otherwise read as the harmless zero and let the response through.
-		if ex.respTE || (ex.respCL && (ex.clErr != nil || ex.clValue != 0)) {
+		//
+		// An UNPARSEABLE Content-Length (clValue left 0) never reaches here: with
+		// no Transfer-Encoding, resolveContentLength returns its clErr and
+		// ReadResponse aborts before this runs; with Transfer-Encoding present the
+		// `ex.respTE` term below evicts regardless. So clValue is only inspected
+		// when the parse succeeded, and testing the value is sound.
+		if ex.respTE || (ex.respCL && ex.clValue != 0) {
 			ex.keepAlive = false
 		}
 	case 304:
