@@ -51,13 +51,12 @@ const h1ConnStreamCap = 1
 // h1ProbeIdleAfter is how long a pooled connection must have sat idle before a
 // checkout probes it.
 //
-// The probe blocks for up to its read deadline and runs on the pool's single
-// actor goroutine, so a threshold short enough to fire under load would serialise
-// every acquire behind it and cap the pool's throughput. Two seconds keeps it off
-// the loaded path entirely — a pool doing real work reuses connections in
-// microseconds — while still catching one the peer quietly closed or poisoned far
-// sooner than the maintenance sweep would.
-const h1ProbeIdleAfter = 2 * time.Second
+// Under load connections are reused in microseconds and never reach it, so the
+// probe costs a loaded pool nothing; it fires only on a connection that genuinely
+// sat idle, which is the only window in which a peer can close it or push an
+// unsolicited response at it. The probe itself runs off the actor goroutine (see
+// acquire), so even then it does not serialise the pool.
+const h1ProbeIdleAfter = 250 * time.Millisecond
 
 // h1ManagedConn is the actor's per-conn record. NEVER touched outside the actor
 // goroutine.
@@ -215,7 +214,8 @@ func (p *h1Pool) handleAcquire(rs *h1RunState, req h1AcquireReq) {
 	mc := p.pickIdle(rs.conns)
 	if mc != nil {
 		mc.active++
-		mc.lastUsed = time.Now()
+		// lastUsed is NOT stamped here: it has to mean "idle since", which is what
+		// the checkout probe in acquire keys on. Release stamps it.
 		p.replyAcquire(req, mc, nil)
 		return
 	}
@@ -399,16 +399,6 @@ func (p *h1Pool) pickIdle(conns []*h1ManagedConn) *h1ManagedConn {
 		if mc.active >= h1ConnStreamCap {
 			continue
 		}
-		// A connection idle long enough for the peer to have closed it, or to have
-		// pushed unsolicited bytes onto it, is probed before it is handed out.
-		// Reuse microseconds after release is not probed, so the hot path pays no
-		// syscall; the completion-time check in http1.ReadBodyChunk already covers
-		// octets buffered when the previous response ended, and this covers the
-		// ones that arrived afterwards.
-		if time.Since(mc.lastUsed) > h1ProbeIdleAfter && !mc.c.ProbeIdle() {
-			_ = mc.c.Close() // marks it dead; the next sweep removes it
-			continue
-		}
 		return mc
 	}
 	return nil
@@ -465,7 +455,6 @@ func (p *h1Pool) serveWaiters(conns []*h1ManagedConn, waiters []h1AcquireReq) []
 			return waiters
 		}
 		mc.active++
-		mc.lastUsed = time.Now()
 		req := waiters[0]
 		waiters = waiters[1:]
 		p.replyAcquire(req, mc, nil)
@@ -594,7 +583,37 @@ func h1PruneExpiredWaiters(ws []h1AcquireReq) []h1AcquireReq {
 // conn is free, the pool dials one, ctx is done, or the pool closes. The returned
 // mc is NOT shared with any other caller until released. Caller MUST eventually
 // call p.release(mc, keepAlive).
+// acquire checks out a connection, probing one that has been idle long enough to
+// have gone bad before handing it to the caller.
+//
+// The probe runs HERE, not inside pickIdle, because it blocks for up to its read
+// deadline and the actor is a single goroutine: probing there would serialise
+// every acquire in the pool behind one syscall. Out here the cost is per-request
+// latency on a connection that was idle anyway, and concurrent acquires pay it in
+// parallel.
+//
+// It is what closes the response-queue poisoning that the completion-time check
+// structurally cannot see: octets that arrive AFTER a response was fully read
+// are not in the reader, so only asking the socket at checkout finds them.
 func (p *h1Pool) acquire(ctx context.Context) (*h1ManagedConn, error) {
+	// Bounded: each rejected connection is evicted, so the pool cannot hand out
+	// the same bad one twice, and one extra attempt per possible conn is enough.
+	for attempt := 0; attempt <= p.opts.MaxConnsPerHost; attempt++ {
+		mc, err := p.acquireOnce(ctx)
+		if err != nil || mc == nil {
+			return mc, err
+		}
+		if time.Since(mc.lastUsed) <= h1ProbeIdleAfter || mc.c.ProbeIdle() {
+			return mc, nil
+		}
+		// Peer closed it, or pushed bytes at it, while it sat idle. Give it back
+		// as non-reusable so the actor evicts it, and ask again.
+		p.release(mc, false)
+	}
+	return p.acquireOnce(ctx)
+}
+
+func (p *h1Pool) acquireOnce(ctx context.Context) (*h1ManagedConn, error) {
 	start := time.Now()
 	acquireTimeoutActive := false
 	if p.opts.AcquireTimeout > 0 {

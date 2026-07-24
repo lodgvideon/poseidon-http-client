@@ -271,6 +271,9 @@ type Exchange struct {
 	// still pooled afterwards.
 	reqContentLen  int64
 	reqBodyWritten int64
+	// condemned latches a request-side decision that this connection must not be
+	// reused, so ReadResponse's version-derived persistence cannot undo it.
+	condemned bool
 
 	// readCtx is the context of the ReadResponse that opened this response, kept
 	// so ReadBodyChunk — whose signature predates ctx and is public API — can
@@ -506,7 +509,10 @@ func armDeadline(ctx context.Context, set func(time.Time) error) func() {
 // client's own receive side treats the same bytes; emitting a shape it would
 // reject on arrival is exactly the asymmetry that lets a request smuggle.
 func parseRequestContentLength(v string) (int64, bool) {
-	s := strings.TrimSpace(v)
+	// OWS is SP / HTAB (RFC 9110 §5.6.3), not Unicode whitespace: TrimSpace also
+	// ate VT/FF/NEL, so a value this client's own receive side rejects was
+	// emitted as valid.
+	s := strings.Trim(v, " \t")
 	if s == "" {
 		return 0, false
 	}
@@ -770,6 +776,12 @@ func (ex *Exchange) WriteRequest(ctx context.Context, fields []hpack.HeaderField
 			switch method {
 			case "POST", "PUT", "PATCH":
 				bufs = append(bufs, []byte("Content-Length: 0\r\n"))
+				// Recorded, not merely written: leaving reqContentLen at -1 meant
+				// the body reconciliation skipped this request, so a caller that
+				// went on to call WriteBody wrote a whole second request after a
+				// head declaring zero octets — a CL.0 desync built from the
+				// library's own header and reported as success.
+				ex.reqContentLen = 0
 			}
 		}
 	} else if ex.reqChunked {
@@ -824,7 +836,7 @@ func (ex *Exchange) WriteBody(ctx context.Context, p []byte, fin bool) error {
 	// fin, where the peer would instead block waiting for octets that never come.
 	// Either way the connection is no longer safe to reuse.
 	if ex.reqContentLen >= 0 && ex.reqBodyWritten+int64(len(p)) > ex.reqContentLen {
-		ex.keepAlive = false
+		ex.keepAlive, ex.condemned = false, true
 		return fmt.Errorf("%w: request body exceeds its declared Content-Length %d (RFC 9110 §8.6)",
 			ErrInvalidRequest, ex.reqContentLen)
 	}
@@ -836,7 +848,7 @@ func (ex *Exchange) WriteBody(ctx context.Context, p []byte, fin bool) error {
 		}
 	}
 	if fin && ex.reqContentLen >= 0 && ex.reqBodyWritten != ex.reqContentLen {
-		ex.keepAlive = false
+		ex.keepAlive, ex.condemned = false, true
 		return fmt.Errorf("%w: request body is %d octets but declared Content-Length %d (RFC 9110 §8.6)",
 			ErrInvalidRequest, ex.reqBodyWritten, ex.reqContentLen)
 	}
@@ -965,7 +977,10 @@ func (ex *Exchange) ReadResponse(ctx context.Context) (statusCode int, headers [
 	// highest minor this client conforms to — HTTP/1.1 — so it too defaults to
 	// persistent rather than being closed as if it were unknown. Only HTTP/1.0
 	// (and a version string with no 1.x minor) closes by default.
-	ex.keepAlive = respMinor >= 1
+	// respMinor decides persistence, but must not RESURRECT a connection the
+	// request side already condemned (a body that disagreed with its declared
+	// Content-Length, say) — that write has already desynced the peer.
+	ex.keepAlive = respMinor >= 1 && !ex.condemned
 	// The only evidence the client has of what the peer speaks; WriteRequest
 	// consults it before framing a request body as chunked (RFC 9112 §6.1).
 	ex.c.peerMinor, ex.c.peerMinorKnown = respMinor, true

@@ -256,13 +256,18 @@ func TestCompress_Baseline_H1WireBytes(t *testing.T) {
 
 // Goldens: the literal request bytes. Captured on the parent commit.
 const (
+	// A buffered body's length is known before the request is written, so it is
+	// declared rather than chunk-framed. This golden previously pinned chunked,
+	// which RFC 9112 §6.3 discourages when the length is known AND §6.1 forbids
+	// outright against a peer the client has not observed speaking HTTP/1.1 —
+	// which is every first request on a connection.
 	goldenBufferedBody = "POST /upload HTTP/1.1\r\n" +
 		"Host: %ADDR%\r\n" +
 		"x-test: 1\r\n" +
 		"accept-encoding: gzip, deflate, br, zstd\r\n" +
-		"Transfer-Encoding: chunked\r\n" +
+		"content-length: 10\r\n" +
 		"\r\n" +
-		"a\r\nhello wire\r\n0\r\n\r\n"
+		"hello wire"
 
 	goldenStreamingBody = "POST /stream HTTP/1.1\r\n" +
 		"Host: %ADDR%\r\n" +

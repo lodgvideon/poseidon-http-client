@@ -874,7 +874,19 @@ func buildHeaders(req *Request, defaultAuthority, defaultScheme string, sp *[]co
 	if req.Protocol != "" {
 		*sp = append(*sp, conn.HeaderField{Name: hdrProtocol, Value: unsafeStringToBytes(req.Protocol)})
 	}
-	managedCL := req.BodyReader != nil && req.ContentLength > 0
+	// A known-length body gets a Content-Length, whichever field carries it.
+	//
+	// Only the streaming case used to qualify, so a buffered req.Body went out
+	// with no Content-Length at all — which made WriteRequest frame it chunked,
+	// on a connection whose peer version the client had never observed. RFC 9112
+	// §6.1/§6.3 forbid sending Transfer-Encoding unless the client knows the
+	// server handles HTTP/1.1, and §6.3 asks for a Content-Length whenever the
+	// length is known in advance; a buffered body's length is known by
+	// definition. Declaring it also lets WriteBody reconcile the octets it writes
+	// against the declaration, so the header is provably exact rather than
+	// merely intended.
+	managedCL := (req.BodyReader != nil && req.ContentLength > 0) ||
+		(req.BodyReader == nil && len(req.Body) > 0 && req.CompressBody == EncodingIdentity)
 	for i := range req.Headers {
 		// Drop a caller-supplied Content-Length when this call is about to
 		// append its own. Appending beside it put TWO disagreeing
@@ -903,9 +915,13 @@ func buildHeaders(req *Request, defaultAuthority, defaultScheme string, sp *[]co
 		*sp = append(*sp, conn.HeaderField{Name: hdrAcceptEncoding, Value: acceptEncodingValue})
 	}
 	if managedCL {
+		n := req.ContentLength
+		if req.BodyReader == nil {
+			n = int64(len(req.Body)) // the buffered body's length is what goes out
+		}
 		*sp = append(*sp, conn.HeaderField{
 			Name:  hdrContentLength,
-			Value: []byte(strconv.FormatInt(req.ContentLength, 10)),
+			Value: []byte(strconv.FormatInt(n, 10)),
 		})
 	}
 	// Announce trailers in the initial HEADERS frame so the peer can
