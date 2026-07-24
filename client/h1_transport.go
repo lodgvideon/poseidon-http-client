@@ -189,8 +189,27 @@ func (s *h1singleConn) acquireConn(ctx context.Context) (*http1.Conn, error) {
 		}
 		if s.cur != nil && s.cur.IsAlive() {
 			c := s.cur
+			// IsAlive is a local flag — it says this end has not closed the
+			// connection, and nothing about what the peer has put on it. Reusing
+			// on that alone let a server append a complete unsolicited response
+			// after a well-framed one and have the NEXT request read it as its
+			// own (RFC 9112 §6.3). The pool grew a checkout probe for exactly this
+			// in #313; this transport never got one, so the same attack simply
+			// moved here.
+			//
+			// HasResidue rather than ProbeIdle: this is the request path of a
+			// single-connection transport, where a bounded ~1ms probe would be
+			// paid on every request rather than on an idle checkout.
+			if !c.HasResidue() {
+				s.mu.Unlock()
+				return c, nil
+			}
+			// Unsolicited octets: this connection can no longer be framed. Drop it
+			// and dial a fresh one on the next turn of the loop.
+			s.cur = nil
 			s.mu.Unlock()
-			return c, nil
+			_ = c.Close()
+			continue
 		}
 		s.cur = nil
 		if s.dialing != nil {
