@@ -57,7 +57,13 @@ func TestConformance_RFC9112_Sec4_StatusCodeMustBe3DIGIT(t *testing.T) {
 
 	// Values Atoi accepted that 3DIGIT does not. The sub-200 ones are the
 	// dangerous half — they reached the interim-drain loop.
-	for _, code := range []string{"-5", "+99", "99", "1", "0", "000", "0000200", "1234", "600", "900", "2e2", "0x64", " 200", "２００"} {
+	//
+	// 3DIGIT is the whole rule. "000", "600" and "900" are well-formed status
+	// lines and now belong in the ACCEPT set below: an earlier version of this
+	// test demanded they be refused, which encoded a first-digit restriction this
+	// client had invented on top of the grammar — and which broke every request
+	// against a host that answers 999.
+	for _, code := range []string{"-5", "+99", "99", "1", "0", "0000200", "1234", "2e2", "0x64", " 200", "２００"} {
 		t.Run(code, func(t *testing.T) {
 			ex, err := readResponseErr(t, "HTTP/1.1 "+code+" x\r\n\r\n"+fabricated)
 			if err == nil {
@@ -86,6 +92,14 @@ func TestConformance_RFC9112_Sec4_ValidStatusCodesStillParse(t *testing.T) {
 		{"599", "HTTP/1.1 599 Whatever\r\nContent-Length: 0\r\n\r\n", 599},
 		{"100 then 200", "HTTP/1.1 100 Continue\r\n\r\nHTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n", 200},
 		{"no reason phrase", "HTTP/1.1 204 \r\n\r\n", 204},
+		// Unrecognised classes are processed, not refused. RFC 9110 §15.1 has a
+		// recipient treat an unrecognised status as the x00 of its class, and the
+		// repo's own HTTP1_CLIENT_CHECKLIST spells out "do not hard-fail the
+		// parse". 999 is not hypothetical — it is deployed as a bot-block
+		// response, and refusing it means 0% success against such a host.
+		{"999", "HTTP/1.1 999 Request denied\r\nContent-Length: 0\r\n\r\n", 999},
+		{"600", "HTTP/1.1 600 Odd\r\nContent-Length: 0\r\n\r\n", 600},
+		{"000", "HTTP/1.1 000 Zero\r\nContent-Length: 0\r\n\r\n", 0},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			ex := wireExchange(t, "GET", tc.wire)
@@ -95,6 +109,42 @@ func TestConformance_RFC9112_Sec4_ValidStatusCodesStillParse(t *testing.T) {
 			}
 			if code != tc.want {
 				t.Errorf("status = %d, want %d", code, tc.want)
+			}
+		})
+	}
+}
+
+// TestConformance_RFC9110_Sec15_1_UnrecognisedClassIsFinal pins the other half
+// of accepting 6xx-9xx: they must be treated as FINAL responses, never drained
+// as interim.
+//
+// The interim-drain loop discards a header block and reads the next line off the
+// socket as another status line, so what admits a message to it decides whether
+// a peer can make this client go read one more response. Gating it on "not
+// final" (code >= 200) rather than on the 1xx range itself is what made the
+// grammar load-bearing there in the first place, and what tempted this client
+// into inventing a first-digit restriction the grammar does not have. With the
+// gate stated positively — 100..199 — an unrecognised class cannot reach the
+// loop whatever the parse allows, so the fabricated response parked behind these
+// is never returned.
+func TestConformance_RFC9110_Sec15_1_UnrecognisedClassIsFinal(t *testing.T) {
+	const fabricated = "HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nPWNED"
+
+	for _, code := range []string{"000", "099", "600", "999"} {
+		t.Run(code, func(t *testing.T) {
+			ex := wireExchange(t, "GET",
+				"HTTP/1.1 "+code+" x\r\nContent-Length: 2\r\n\r\nok"+fabricated)
+			got, _, err := ex.ReadResponse(context.Background())
+			if err != nil {
+				t.Fatalf("ReadResponse = %v; §15.1 has an unrecognised status processed, not refused", err)
+			}
+			want := 0
+			for i := 0; i < 3; i++ {
+				want = want*10 + int(code[i]-'0')
+			}
+			if got != want {
+				t.Errorf("status = %d, want %d — the response behind this one was drained "+
+					"into and returned instead", got, want)
 			}
 		})
 	}

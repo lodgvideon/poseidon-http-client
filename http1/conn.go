@@ -579,9 +579,16 @@ func parseHTTP1Version(s string) (minor int, ok bool) {
 // there are multiple recipients of the message and each has its own unique
 // interpretation of robustness".
 //
-// The first digit is required to be 1-5 as well: §15 of [HTTP] defines the
-// classes, so 0xx and 6xx-9xx belong to no class a recipient could interpret,
-// and 0xx would additionally reach the interim path.
+// 3DIGIT is the WHOLE rule, and deliberately so. An earlier version of this
+// also required the first digit to be 1-5, reasoning that §15 defines no other
+// classes. That was this client's own addition, it contradicted RFC 9110 §15.1
+// — which tells a recipient to process an unrecognised status as the x00 of its
+// class rather than fail — and it bought nothing, because the interim-drain
+// loop is gated on the 1xx range directly. What it cost was every request
+// against a host that answers "HTTP/1.1 999 Request denied", a shape deployed
+// in the wild; net/http accepts it, and so does this client's own HTTP/2 status
+// parser. A parse that hard-fails a well-formed status line is an outage, not
+// strictness.
 func parseStatusCode(s string) (int, bool) {
 	if len(s) != 3 {
 		return 0, false
@@ -590,9 +597,6 @@ func parseStatusCode(s string) (int, bool) {
 		if s[i] < '0' || s[i] > '9' {
 			return 0, false
 		}
-	}
-	if s[0] < '1' || s[0] > '5' {
-		return 0, false
 	}
 	return int(s[0]-'0')*100 + int(s[1]-'0')*10 + int(s[2]-'0'), true
 }
@@ -1088,7 +1092,13 @@ func (ex *Exchange) ReadResponse(ctx context.Context) (statusCode int, headers [
 			ex.keepAlive = false
 			return 0, nil, fmt.Errorf("%w (the client sends no Upgrade)", ErrUnsolicitedUpgrade)
 		}
-		if code >= 200 {
+		// Gated on the 1xx range itself, not on "not final". This is the loop the
+		// status-code grammar has to keep malformed input out of — it discards a
+		// header block and reads the next line off the socket as another status
+		// line — so the condition that admits a message to it is stated
+		// positively. Anything outside 1xx is a final response, including the
+		// unrecognised classes §15.1 says to process rather than refuse.
+		if code < 100 || code > 199 {
 			statusCode = code
 			break
 		}
@@ -1190,6 +1200,21 @@ func (ex *Exchange) ReadResponse(ctx context.Context) (statusCode int, headers [
 	// This is not #251's CL.CL desync — there is one Content-Length and it is
 	// valid, so resolveContentLength never objects — and not the TE+CL shape
 	// above. It is the head declaring a body the status forbids.
+	ex.checkBodylessStatusFraming()
+	// HEAD is deliberately absent. Rule 1 makes a HEAD response bodyless too, but
+	// RFC 9110 §9.3.2 — "The server SHOULD send the same header fields in response
+	// to a HEAD request as it would have sent if the request method had been GET"
+	// — makes Content-Length normal there, describing the body a GET would have
+	// returned. Evicting on it would discard a pooled connection after every HEAD.
+	return statusCode, headers, nil
+}
+
+// checkBodylessStatusFraming condemns the connection when a status that RFC 9112
+// §6.3 rule 1 makes bodyless nevertheless declared a body.
+//
+// Split out of ReadResponse only because that function is at the gocyclo
+// ceiling; the seam is where header parsing ends and the framing verdict begins.
+func (ex *Exchange) checkBodylessStatusFraming() {
 	switch ex.statusCode {
 	case 204:
 		// RFC 9110 §8.6: "A server MUST NOT send a Content-Length header field in
@@ -1197,7 +1222,16 @@ func (ex *Exchange) ReadResponse(ctx context.Context) (statusCode int, headers [
 		// Content)". RFC 9112 §6.1 says the same of Transfer-Encoding. Either
 		// field on a 204 means the peer is broken or hostile, and body-shaped
 		// bytes may be sitting on the socket.
-		if ex.respTE || ex.respCL {
+		// Keyed on the VALUE, not on presence. §8.6's MUST NOT is what makes the
+		// field illegal here, but the danger this branch exists for is body-shaped
+		// octets left on the socket — and "Content-Length: 0" describes none.
+		// Presence alone cost a connection per request against the many endpoints
+		// that answer 204 with an explicit zero (generate_204 and friends), which
+		// is a self-inflicted outage in exchange for no safety.
+		// clErr is part of the test because clValue is only meaningful when the
+		// parse succeeded: an unparseable Content-Length leaves it 0, which would
+		// otherwise read as the harmless zero and let the response through.
+		if ex.respTE || (ex.respCL && (ex.clErr != nil || ex.clValue != 0)) {
 			ex.keepAlive = false
 		}
 	case 304:
@@ -1220,12 +1254,6 @@ func (ex *Exchange) ReadResponse(ctx context.Context) (statusCode int, headers [
 			ex.keepAlive = false
 		}
 	}
-	// HEAD is deliberately absent. Rule 1 makes a HEAD response bodyless too, but
-	// RFC 9110 §9.3.2 — "The server SHOULD send the same header fields in response
-	// to a HEAD request as it would have sent if the request method had been GET"
-	// — makes Content-Length normal there, describing the body a GET would have
-	// returned. Evicting on it would discard a pooled connection after every HEAD.
-	return statusCode, headers, nil
 }
 
 // asciiEqualFold reports whether name matches lower case-insensitively, where

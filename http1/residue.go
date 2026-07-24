@@ -20,11 +20,21 @@ type netConner interface{ NetConn() net.Conn }
 // gets no kernel-queue check, and HasResidue degrades to its reader and TLS
 // checks with the caller's ProbeIdle still behind it.
 func (c *Conn) initResidue() {
+	// Unwrap as far as the transports will go, not one level: a *tls.Conn over a
+	// wrapper over a socket is two, and each level that hides the syscall.Conn
+	// costs the FIONREAD layer entirely. Bounded so a wrapper that returns itself
+	// cannot spin.
 	raw := c.nc
-	if w, ok := raw.(netConner); ok {
-		if under := w.NetConn(); under != nil {
-			raw, c.layered = under, true
+	for i := 0; i < 8; i++ {
+		w, ok := raw.(netConner)
+		if !ok {
+			break
 		}
+		under := w.NetConn()
+		if under == nil || under == raw {
+			break
+		}
+		raw, c.layered = under, true
 	}
 	sc, ok := raw.(syscall.Conn)
 	if !ok {
@@ -130,13 +140,33 @@ func (c *Conn) HasResidue() bool {
 		return err == nil
 	}
 
-	// The socket is empty (or unreadable), which does not settle it: crypto/tls
-	// may already hold a complete record in its own input buffer. A deadline in
-	// the PAST is what asks that question — crypto/tls checks no deadline itself,
-	// so the read decrypts what it has buffered and returns the plaintext without
-	// ever touching the socket, and returns a timeout the moment it would have to.
-	// (This is the exact opposite of ProbeIdle's future deadline, which is asking
-	// the socket a question this one deliberately avoids.)
+	if !known {
+		// The receive queue could not be read at all — a transport that is not a
+		// syscall.Conn and hides whatever is (this module's own bufferedConn from
+		// a CONNECT over-read used to; a caller's custom Dialer still can), or a
+		// platform with no FIONREAD here.
+		//
+		// This case MUST NOT use the past-deadline read below. On a plain socket
+		// that returns a timeout without issuing a recv, so the verdict would be
+		// "clean" no matter what the peer sent — a security guard failing OPEN,
+		// silently, on whole classes of transport. A brief FUTURE deadline asks
+		// the socket the real question. It costs ~1ms, which is why it is not the
+		// primary path; being slow on an exotic transport is a price worth paying,
+		// being blind on one is not.
+		_ = c.nc.SetReadDeadline(time.Now().Add(time.Millisecond))
+		_, err := c.br.Peek(1)
+		_ = c.nc.SetReadDeadline(time.Time{})
+		return err == nil
+	}
+
+	// The socket is empty and this is a layered transport, which does not settle
+	// it: crypto/tls may already hold a complete record in its own input buffer.
+	// A deadline in the PAST is what asks that question — crypto/tls checks no
+	// deadline itself, so the read decrypts what it has buffered and returns the
+	// plaintext without ever touching the socket, and returns a timeout the
+	// moment it would have to. (This is the exact opposite of ProbeIdle's future
+	// deadline, and of the fallback above, which are asking the socket a question
+	// this one deliberately avoids.)
 	_ = c.nc.SetReadDeadline(deadlineLongPast)
 	_, err := c.br.Peek(1)
 	_ = c.nc.SetReadDeadline(time.Time{})

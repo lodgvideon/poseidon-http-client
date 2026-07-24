@@ -21,6 +21,13 @@ var (
 	// failed and the configured DialBackoff window has not elapsed.
 	ErrRedialBackoff = errors.New("client: redial in backoff window")
 
+	// ErrResidueOnAcquire is returned when every connection the pool could
+	// offer had unread octets on it — a peer that keeps writing unsolicited
+	// responses (RFC 9112 §6.3). Failing the request is the only safe answer:
+	// such a connection cannot be framed, so handing one back would mean
+	// serving the peer's octets as this request's response.
+	ErrResidueOnAcquire = errors.New("client: no connection free of unsolicited data")
+
 	// ErrEmptyResponse is returned when the response HEADERS frame
 	// did not contain a :status pseudo-header at all.
 	ErrEmptyResponse = errors.New("client: response missing :status")
