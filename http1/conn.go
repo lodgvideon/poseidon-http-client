@@ -551,6 +551,37 @@ func parseHTTP1Version(s string) (minor int, ok bool) {
 	return int(s[7] - '0'), true
 }
 
+// parseStatusCode parses RFC 9112 §4's `status-code = 3DIGIT`.
+//
+// strconv.Atoi is a superset of that ABNF in the direction that decides control
+// flow: it accepts a sign, any digit count, and leading zeros, so "-5", "+99",
+// "99" and "0000200" all produced a number. Every one of those below 200 entered
+// ReadResponse's 1xx interim-drain loop — which discards a header block and
+// parses the NEXT line off the socket as another status line. That is a
+// server-triggered "read me another response" primitive built out of a status
+// line that is not a status line, and §4 warns about exactly this outcome:
+// "lenient parsing can result in response splitting security vulnerabilities if
+// there are multiple recipients of the message and each has its own unique
+// interpretation of robustness".
+//
+// The first digit is required to be 1-5 as well: §15 of [HTTP] defines the
+// classes, so 0xx and 6xx-9xx belong to no class a recipient could interpret,
+// and 0xx would additionally reach the interim path.
+func parseStatusCode(s string) (int, bool) {
+	if len(s) != 3 {
+		return 0, false
+	}
+	for i := 0; i < 3; i++ {
+		if s[i] < '0' || s[i] > '9' {
+			return 0, false
+		}
+	}
+	if s[0] < '1' || s[0] > '5' {
+		return 0, false
+	}
+	return int(s[0]-'0')*100 + int(s[1]-'0')*10 + int(s[2]-'0'), true
+}
+
 // hasConnectionOption reports whether a Connection field value carries opt as a
 // list member.
 //
@@ -568,7 +599,8 @@ func hasConnectionOption(value, opt string) bool {
 		} else {
 			value = ""
 		}
-		if strings.EqualFold(strings.TrimSpace(tok), opt) {
+		// OWS, not Unicode whitespace — see the note in commitHeaderLine.
+		if strings.EqualFold(strings.Trim(tok, " \t"), opt) {
 			return true
 		}
 	}
@@ -839,6 +871,22 @@ func (ex *Exchange) WriteBody(ctx context.Context, p []byte, fin bool) error {
 	// octets as the start of the next request. Under-run can only be judged at
 	// fin, where the peer would instead block waiting for octets that never come.
 	// Either way the connection is no longer safe to reuse.
+	// A head that declared no framing at all — no Content-Length, not chunked —
+	// promised the peer a message ending at the blank line. Octets written after
+	// it are not a body: they are whatever the peer's parser makes of them, and
+	// what it makes of them is the next request-line. That is request smuggling
+	// (§11.2) with the caller's own bytes, so it is refused before the write for
+	// the same reason over-run is — once the octets are gone the desync is done.
+	//
+	// Reachable for exactly the methods that get no synthesized "Content-Length:
+	// 0" on a bodyless head: GET, HEAD, DELETE, OPTIONS. POST/PUT/PATCH were
+	// already covered because their declared 0 made the over-run check below fire
+	// — the guard existed, the value it keyed on just wasn't always there.
+	if len(p) > 0 && ex.reqContentLen < 0 {
+		ex.keepAlive, ex.condemned = false, true
+		return fmt.Errorf("%w: request body written after a head that declared no "+
+			"Content-Length and no chunked framing (RFC 9112 §6)", ErrInvalidRequest)
+	}
 	if ex.reqContentLen >= 0 && ex.reqBodyWritten+int64(len(p)) > ex.reqContentLen {
 		ex.keepAlive, ex.condemned = false, true
 		return fmt.Errorf("%w: request body exceeds its declared Content-Length %d (RFC 9110 §8.6)",
@@ -874,6 +922,16 @@ func (ex *Exchange) WriteBody(ctx context.Context, p []byte, fin bool) error {
 //
 // The returned slice aliases the reader's buffer and is invalidated by the
 // next read, so it is copied into a string before returning.
+//
+// Exactly one CRLF is stripped — or one bare LF, since §2.2 lets a recipient
+// "recognize a single LF as a line terminator and ignore any preceding CR". A CR left at the
+// end after that is a bare CR, and §2.2 requires a recipient of one to "consider
+// that element to be invalid or replace each bare CR with SP". The TrimRight
+// this replaces did neither: it DELETED the run, so "Content-Length: 5\r\r\n"
+// became a clean Content-Length here while a parser honouring §2.2 saw an
+// invalid field — two recipients, two framings, which is the disagreement §11.1
+// names as the response-splitting primitive. Rejecting is the option that cannot
+// desync.
 func (ex *Exchange) readLine(what string) (string, error) {
 	line, err := ex.c.br.ReadSlice('\n')
 	if err != nil {
@@ -886,7 +944,13 @@ func (ex *Exchange) readLine(what string) (string, error) {
 		}
 		return "", fmt.Errorf("http1: read %s: %w", what, err)
 	}
-	return strings.TrimRight(string(line), "\r\n"), nil
+	s := string(line[:len(line)-1]) // the delimiting LF
+	s = strings.TrimSuffix(s, "\r")
+	if strings.HasSuffix(s, "\r") {
+		ex.keepAlive = false
+		return "", fmt.Errorf("http1: %s ends with a bare CR: %w", what, ErrInvalidHeaderBlock)
+	}
+	return s, nil
 }
 
 // ReadResponse reads the HTTP/1.1 response status line and headers.
@@ -946,9 +1010,9 @@ func (ex *Exchange) ReadResponse(ctx context.Context) (statusCode int, headers [
 			return 0, nil, fmt.Errorf("http1: malformed status line: %q", line)
 		}
 		respMinor = minor
-		code, perr := strconv.Atoi(parts[1])
-		if perr != nil {
-			return 0, nil, fmt.Errorf("http1: invalid status code: %q", parts[1])
+		code, cok := parseStatusCode(parts[1])
+		if !cok {
+			return 0, nil, fmt.Errorf("http1: invalid status code: %q", truncateForError(parts[1]))
 		}
 
 		// A 101 is not an interim status to drain. See ErrUnsolicitedUpgrade:
@@ -1544,8 +1608,25 @@ func (ex *Exchange) commitHeaderLine(line string, have bool, out *[]hpack.Header
 		if colon < 0 {
 			return nil // skip malformed header lines
 		}
-		name := asciiLowerHeaderName(strings.TrimSpace(line[:colon]))
-		value := strings.TrimSpace(line[colon+1:])
+		// The field name is NOT trimmed. §5.1: "No whitespace is allowed between
+		// the field name and colon. In the past, differences in the handling of
+		// such whitespace have led to security vulnerabilities in request routing
+		// and response handling." Trimming it silently normalised
+		// "Content-Length : 5" into a Content-Length this client then framed the
+		// body by, while §5.1 obliges a proxy to "remove any such whitespace from
+		// a response message before forwarding" — so the hop in front of us may
+		// well have seen no Content-Length at all. Leaving the space in the name
+		// makes validToken below reject the line, which is the outcome that cannot
+		// disagree with anyone. (A LEADING space cannot reach here: consumeHeaders
+		// has already routed such a line to the obs-fold branch.)
+		name := asciiLowerHeaderName(line[:colon])
+		// OWS is SP / HTAB (RFC 9110 §5.6.3). strings.TrimSpace is Unicode-aware
+		// and also ate VT, FF and NEL, so "Content-Length: 5\v" — which §2.2
+		// requires be parsed as octets, not characters — became a valid 5 here and
+		// an invalid field elsewhere. Same divergence, same class of bug as the
+		// name above; parseRequestContentLength already made this call on the send
+		// side.
+		value := strings.Trim(line[colon+1:], " \t")
 
 		// A response field must be a token name with a value free of CR, LF and
 		// NUL (RFC 9110 §5.6.2, §5.5). This mirrors what WriteRequest enforces on
@@ -1789,11 +1870,19 @@ func (ex *Exchange) readChunkedChunk(buf []byte) (n int, done bool, err error) {
 		if lerr != nil {
 			return 0, false, lerr
 		}
+		// `chunk = chunk-size [ chunk-ext ] CRLF` with `chunk-size = 1*HEXDIG`
+		// (§7.1), so no whitespace may surround the size — EXCEPT the BWS that
+		// §7.1.1's `chunk-ext = *( BWS ";" BWS ... )` puts before the semicolon,
+		// which only exists when there IS a semicolon. Blanket-TrimSpace instead
+		// accepted " 5", "5 " and "5\v" as sizes, and a chunk-size line is where
+		// a framing disagreement costs the most: every byte after it is data or
+		// not data depending on who parsed it.
+		size, ok := int64(0), false
 		if semi := strings.IndexByte(line, ';'); semi >= 0 {
-			line = line[:semi] // strip chunk extensions
+			size, ok = parseChunkSize(strings.TrimRight(line[:semi], " \t"))
+		} else {
+			size, ok = parseChunkSize(line)
 		}
-		line = strings.TrimSpace(line)
-		size, ok := parseChunkSize(line)
 		if !ok {
 			// Any unparseable chunk-size means the chunked framing is corrupt and
 			// the stream position indeterminate — the next bytes might be chunk
@@ -1855,10 +1944,23 @@ func (ex *Exchange) readChunkedChunk(buf []byte) (n int, done bool, err error) {
 		return n, false, err
 	}
 
-	// After exhausting a chunk, consume its trailing CRLF.
+	// After exhausting a chunk, consume its trailing CRLF — and verify that is
+	// all it was. §7.1: `chunk = chunk-size [ chunk-ext ] CRLF chunk-data CRLF`,
+	// so the octets between the last data byte and the next chunk-size line are
+	// exactly one CRLF. This used to read the line and discard it whatever it
+	// held, which made the delimiter "everything up to the next LF": a server
+	// could park arbitrary octets there, and a recipient that measured chunk-data
+	// by chunk-size alone — as the grammar says to — would read them as the next
+	// chunk-size line instead. Two framings of one body again.
 	if ex.chunkRemaining == 0 {
-		if _, lerr := ex.readLine("chunk CRLF"); lerr != nil {
+		term, lerr := ex.readLine("chunk CRLF")
+		if lerr != nil {
 			return n, false, lerr
+		}
+		if term != "" {
+			ex.keepAlive = false
+			return n, false, fmt.Errorf("http1: chunk-data not followed by CRLF, got %q: %w",
+				truncateForError(term), ErrInvalidChunkSize)
 		}
 	}
 
