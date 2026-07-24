@@ -7,9 +7,8 @@ package conn
 //     writeData (closed / no-id paths), writeWindowUpdate (closed),
 //     writeSettingsAck (closed), writePingAck (closed)
 //   - handler.go: OnContinuation, OnPriority
-//   - settings.go: settingsRecorder no-op methods via unusual frames during
-//     handshake (OnData, OnHeaders, OnPriority, OnRSTStream, OnPing, OnGoAway,
-//     OnWindowUpdate, OnContinuation)
+//   - settings.go: settingsRecorder preface guard (RFC 9113 §3.4) — every
+//     handler rejects a frame received before the server's SETTINGS preface
 //   - stream.go: push overflow path → RST_STREAM(REFUSED_STREAM)
 
 import (
@@ -17,6 +16,7 @@ import (
 	"context"
 	"crypto/tls"
 	"crypto/x509"
+	"errors"
 	"io"
 	"net"
 	"net/http"
@@ -441,141 +441,6 @@ func TestHandler_OnPriority_IsNoop(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// settings.go: settingsRecorder no-op methods
-// ---------------------------------------------------------------------------
-
-// TestSettingsRecorder_UnexpectedFramesDuringHandshake builds a net.Pipe
-// peer that sends every unusual frame type BEFORE the real SETTINGS frame,
-// exercising all no-op methods on settingsRecorder (OnData, OnHeaders,
-// OnPriority, OnRSTStream, OnPing, OnGoAway, OnWindowUpdate, OnContinuation).
-func TestSettingsRecorder_UnexpectedFramesDuringHandshake(t *testing.T) {
-	cli, srv := net.Pipe()
-
-	go func() {
-		defer srv.Close()
-
-		// Consume the 24-byte client connection preface.
-		preface := make([]byte, 24)
-		if _, err := io.ReadFull(srv, preface); err != nil {
-			t.Logf("read preface: %v", err)
-			return
-		}
-
-		srvFr := frame.NewFramer(srv, srv)
-
-		// We interleave unusual frames before the real SETTINGS.
-		// net.Pipe is synchronous; writes are run in a goroutine so
-		// they don't deadlock while the client is reading.
-		writeDone := make(chan error, 1)
-		go func() {
-			// DATA (stream 1) — settingsRecorder.OnData
-			if err := srvFr.WriteData(1, false, []byte("junk")); err != nil {
-				writeDone <- err
-				return
-			}
-			// HEADERS (stream 1) — settingsRecorder.OnHeaders
-			enc := hpack.NewEncoder()
-			block := enc.EncodeBlock(nil, []hpack.HeaderField{
-				{Name: []byte(":status"), Value: []byte("200")},
-			})
-			if err := srvFr.WriteHeaders(frame.WriteHeadersParams{
-				StreamID:      1,
-				BlockFragment: block,
-				EndHeaders:    true,
-				EndStream:     false,
-			}); err != nil {
-				writeDone <- err
-				return
-			}
-			// PRIORITY — settingsRecorder.OnPriority
-			if err := srvFr.WritePriority(1, frame.Priority{Weight: 15}); err != nil {
-				writeDone <- err
-				return
-			}
-			// RST_STREAM — settingsRecorder.OnRSTStream
-			if err := srvFr.WriteRSTStream(1, frame.ErrCodeCancel); err != nil {
-				writeDone <- err
-				return
-			}
-			// PING (no ACK) — settingsRecorder.OnPing
-			if err := srvFr.WritePing(false, [8]byte{1, 2, 3, 4, 5, 6, 7, 8}); err != nil {
-				writeDone <- err
-				return
-			}
-			// GOAWAY — settingsRecorder.OnGoAway
-			if err := srvFr.WriteGoAway(0, frame.ErrCodeNoError, nil); err != nil {
-				writeDone <- err
-				return
-			}
-			// WINDOW_UPDATE (stream 0) — settingsRecorder.OnWindowUpdate
-			if err := srvFr.WriteWindowUpdate(0, 65535); err != nil {
-				writeDone <- err
-				return
-			}
-			// CONTINUATION: prime with HEADERS (no END_HEADERS), then CONTINUATION
-			// — settingsRecorder.OnContinuation
-			block2 := enc.EncodeBlock(nil, []hpack.HeaderField{
-				{Name: []byte(":status"), Value: []byte("404")},
-			})
-			if err := srvFr.WriteHeaders(frame.WriteHeadersParams{
-				StreamID:      3,
-				BlockFragment: block2,
-				EndHeaders:    false,
-				EndStream:     false,
-			}); err != nil {
-				writeDone <- err
-				return
-			}
-			if err := srvFr.WriteContinuation(3, true, []byte{0x82}); err != nil {
-				writeDone <- err
-				return
-			}
-			// Now send the real SETTINGS so peerSeen becomes true.
-			if err := srvFr.WriteSettings(frame.SettingsParams{}); err != nil {
-				writeDone <- err
-				return
-			}
-			writeDone <- nil
-		}()
-
-		// Read client SETTINGS while the server goroutine writes unusual frames.
-		if _, err := srvFr.ReadFrame(context.Background(), &nilHandler{}); err != nil {
-			t.Logf("read client settings: %v", err)
-			<-writeDone
-			return
-		}
-		if err := <-writeDone; err != nil {
-			t.Logf("server write unusual frames: %v", err)
-			return
-		}
-
-		// Write SETTINGS ACK (client is now in the second loop waiting for it).
-		writeDone2 := make(chan error, 1)
-		go func() { writeDone2 <- srvFr.WriteSettingsAck() }()
-
-		// Read client SETTINGS ACK.
-		if _, err := srvFr.ReadFrame(context.Background(), &nilHandler{}); err != nil {
-			t.Logf("read client settings ack: %v", err)
-			<-writeDone2
-			return
-		}
-		if err := <-writeDone2; err != nil {
-			t.Logf("server write settings ack: %v", err)
-		}
-		// Handshake complete — just drain until the other side closes.
-	}()
-
-	fr := frame.NewFramer(cli, cli)
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-
-	_, err := handshakeSettings(ctx, fr, func() error { return nil }, AdvertisedSettings{}.defaulted(), false)
-	if err != nil {
-		t.Fatalf("handshakeSettings with unusual frames before SETTINGS: %v", err)
-	}
-}
-
-// ---------------------------------------------------------------------------
 // stream.go: push overflow → RST_STREAM(REFUSED_STREAM)
 // ---------------------------------------------------------------------------
 
@@ -952,19 +817,57 @@ func TestConn_AltSvcEntries_ClearedByEmptySlice(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// settingsRecorder no-ops: OnAltSvc and OnOrigin
+// settingsRecorder preface guard (RFC 9113 §3.4)
 // ---------------------------------------------------------------------------
 
-// TestSettingsRecorder_NoOps calls the no-op OnAltSvc / OnOrigin methods on
-// settingsRecorder (needed to satisfy frame.Handler during handshake).
-func TestSettingsRecorder_NoOps(t *testing.T) {
+// TestSettingsRecorder_PrefaceGuard pins RFC 9113 §3.4: before the server's
+// connection-preface SETTINGS arrives, every non-SETTINGS frame (and a SETTINGS
+// ACK, and a PUSH_PROMISE) is a connection error of type PROTOCOL_ERROR; once the
+// preface SETTINGS has arrived, later frames during the SETTINGS-ACK wait are
+// accepted as no-ops.
+func TestSettingsRecorder_PrefaceGuard(t *testing.T) {
 	t.Parallel()
-	r := &settingsRecorder{}
-	if err := r.OnAltSvc(frame.FrameHeader{}, nil); err != nil {
-		t.Fatalf("OnAltSvc: %v", err)
+	fh := frame.FrameHeader{}
+	calls := map[string]func(*settingsRecorder) error{
+		"OnData":         func(r *settingsRecorder) error { return r.OnData(fh, nil, 0) },
+		"OnHeaders":      func(r *settingsRecorder) error { return r.OnHeaders(fh, nil, nil, 0) },
+		"OnPriority":     func(r *settingsRecorder) error { return r.OnPriority(fh, frame.Priority{}) },
+		"OnRSTStream":    func(r *settingsRecorder) error { return r.OnRSTStream(fh, frame.ErrCodeCancel) },
+		"OnPing":         func(r *settingsRecorder) error { return r.OnPing(fh, [8]byte{}) },
+		"OnGoAway":       func(r *settingsRecorder) error { return r.OnGoAway(fh, 0, frame.ErrCodeNoError, nil) },
+		"OnWindowUpdate": func(r *settingsRecorder) error { return r.OnWindowUpdate(fh, 1) },
+		"OnContinuation": func(r *settingsRecorder) error { return r.OnContinuation(fh, nil) },
+		"OnAltSvc":       func(r *settingsRecorder) error { return r.OnAltSvc(fh, nil) },
+		"OnOrigin":       func(r *settingsRecorder) error { return r.OnOrigin(fh, nil) },
 	}
-	if err := r.OnOrigin(frame.FrameHeader{}, nil); err != nil {
-		t.Fatalf("OnOrigin: %v", err)
+
+	// Before the preface: every one is a connection error PROTOCOL_ERROR.
+	for name, call := range calls {
+		var ce *ConnError
+		if err := call(&settingsRecorder{}); !errors.As(err, &ce) || ce.Code != frame.ErrCodeProtocolError {
+			t.Errorf("%s before preface = %v, want ConnError PROTOCOL_ERROR", name, err)
+		}
+	}
+	if err := (&settingsRecorder{}).OnPushPromise(fh, 0, nil, 0); err == nil {
+		t.Error("OnPushPromise during handshake = nil, want PROTOCOL_ERROR")
+	}
+	ackHdr := frame.FrameHeader{Flags: frame.FlagSettingsAck}
+	if err := (&settingsRecorder{}).OnSettings(ackHdr, frame.SettingsParams{}); err == nil {
+		t.Error("SETTINGS ACK before preface = nil, want PROTOCOL_ERROR")
+	}
+
+	// After the preface SETTINGS arrives (peerSeen), the same frames are no-ops.
+	for name, call := range calls {
+		r := &settingsRecorder{}
+		if err := r.OnSettings(frame.FrameHeader{}, frame.SettingsParams{}); err != nil {
+			t.Fatalf("OnSettings(preface): %v", err)
+		}
+		if !r.peerSeen {
+			t.Fatal("peerSeen not set after a non-ACK SETTINGS")
+		}
+		if err := call(r); err != nil {
+			t.Errorf("%s after preface = %v, want nil", name, err)
+		}
 	}
 }
 

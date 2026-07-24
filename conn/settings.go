@@ -117,23 +117,47 @@ type settingsRecorder struct {
 	ackSeen  bool
 }
 
+// prefaceGuard rejects a frame received before the server's connection preface.
+// RFC 9113 §3.4 requires the server's SETTINGS to be the first frame it sends and
+// makes an invalid connection preface a connection error of type PROTOCOL_ERROR.
+// Any non-SETTINGS frame seen before the server's SETTINGS is such a violation;
+// once the preface SETTINGS has arrived (peerSeen), later frames during the
+// SETTINGS-ACK wait are handled normally.
+func (r *settingsRecorder) prefaceGuard() error {
+	if r.peerSeen {
+		return nil
+	}
+	return &ConnError{Code: frame.ErrCodeProtocolError, Reason: "server preface: first frame was not a SETTINGS frame"}
+}
+
 // OnData implements frame.Handler.
-func (r *settingsRecorder) OnData(frame.FrameHeader, []byte, uint8) error { return nil }
+func (r *settingsRecorder) OnData(frame.FrameHeader, []byte, uint8) error { return r.prefaceGuard() }
 
 // OnHeaders implements frame.Handler.
 func (r *settingsRecorder) OnHeaders(frame.FrameHeader, frame.HeaderBlock, *frame.Priority, uint8) error {
-	return nil
+	return r.prefaceGuard()
 }
 
 // OnPriority implements frame.Handler.
-func (r *settingsRecorder) OnPriority(frame.FrameHeader, frame.Priority) error { return nil }
+func (r *settingsRecorder) OnPriority(frame.FrameHeader, frame.Priority) error {
+	return r.prefaceGuard()
+}
 
 // OnRSTStream implements frame.Handler.
-func (r *settingsRecorder) OnRSTStream(frame.FrameHeader, frame.ErrCode) error { return nil }
+func (r *settingsRecorder) OnRSTStream(frame.FrameHeader, frame.ErrCode) error {
+	return r.prefaceGuard()
+}
 
-// OnSettings implements frame.Handler.
+// OnSettings implements frame.Handler. Non-ACK SETTINGS are the server's
+// connection preface (recorded here; side effects applied later by
+// applyInitialPeerSettings). A SETTINGS ACK is accepted only after the preface
+// has arrived — an ACK as the first frame is itself a preface violation
+// (RFC 9113 §3.4), since the server's own SETTINGS must come first.
 func (r *settingsRecorder) OnSettings(fh frame.FrameHeader, s frame.SettingsParams) error {
 	if fh.Flags&frame.FlagSettingsAck != 0 {
+		if !r.peerSeen {
+			return &ConnError{Code: frame.ErrCodeProtocolError, Reason: "server preface: SETTINGS ACK before server SETTINGS"}
+		}
 		r.ackSeen = true
 		return nil
 	}
@@ -148,19 +172,25 @@ func (r *settingsRecorder) OnPushPromise(frame.FrameHeader, uint32, frame.Header
 }
 
 // OnPing implements frame.Handler.
-func (r *settingsRecorder) OnPing(frame.FrameHeader, [8]byte) error { return nil }
+func (r *settingsRecorder) OnPing(frame.FrameHeader, [8]byte) error { return r.prefaceGuard() }
 
 // OnGoAway implements frame.Handler.
 func (r *settingsRecorder) OnGoAway(frame.FrameHeader, uint32, frame.ErrCode, []byte) error {
-	return nil
+	return r.prefaceGuard()
 }
 
 // OnWindowUpdate implements frame.Handler.
-func (r *settingsRecorder) OnWindowUpdate(frame.FrameHeader, uint32) error { return nil }
+func (r *settingsRecorder) OnWindowUpdate(frame.FrameHeader, uint32) error {
+	return r.prefaceGuard()
+}
 
 // OnContinuation implements frame.Handler.
-func (r *settingsRecorder) OnContinuation(frame.FrameHeader, frame.HeaderBlock) error { return nil }
-func (r *settingsRecorder) OnAltSvc(frame.FrameHeader, []frame.AltSvcEntry) error     { return nil }
-func (r *settingsRecorder) OnOrigin(frame.FrameHeader, []string) error                { return nil }
+func (r *settingsRecorder) OnContinuation(frame.FrameHeader, frame.HeaderBlock) error {
+	return r.prefaceGuard()
+}
+func (r *settingsRecorder) OnAltSvc(frame.FrameHeader, []frame.AltSvcEntry) error {
+	return r.prefaceGuard()
+}
+func (r *settingsRecorder) OnOrigin(frame.FrameHeader, []string) error { return r.prefaceGuard() }
 
 var _ frame.Handler = (*settingsRecorder)(nil)
