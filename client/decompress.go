@@ -397,7 +397,11 @@ func readLimited(dec io.Reader, maxBytes int64, what string) ([]byte, error) {
 // responses we can handle.
 func shouldSendAcceptEncoding(req *Request) bool {
 	for i := range req.Headers {
-		if bytes.Equal(req.Headers[i].Name, hdrAcceptEncoding) {
+		// EqualFold: RFC 9110 §5.1 makes field names case-insensitive, so a caller
+		// spelling it "Accept-Encoding" was not recognised as their own and got
+		// this client's value appended beside it — two Accept-Encoding field lines
+		// where the caller asked for one.
+		if bytes.EqualFold(req.Headers[i].Name, hdrAcceptEncoding) {
 			return false
 		}
 	}
