@@ -349,21 +349,6 @@ func (c *Conn) pushSupport() (enabled bool, eventBuf int) {
 	return c.opts.EnablePush, c.opts.StreamEventBuffer
 }
 
-// reservePushedStream validates a promised stream id and, if it is legal and
-// we have room, creates and registers the server-initiated stream it reserves.
-// Validation, the cap check and the registry insert happen under one smu hold
-// so a burst of promises cannot race past the bound.
-//
-// Returns ErrIllegalPromisedID when the id is not a legal choice for the
-// server's next stream (RFC 7540 §5.1.1: even, non-zero, and greater than
-// every id already reserved) — §6.6 makes that a connection error of type
-// PROTOCOL_ERROR, so the caller must not merely reset the stream.
-//
-// Returns ErrPushRefused when accepting would exceed the concurrent
-// server-initiated stream count we advertised in
-// SETTINGS_MAX_CONCURRENT_STREAMS. §6.6 lets a recipient reject a promised
-// stream with RST_STREAM on the promised id, so the caller resets rather than
-// killing the connection.
 // notePromisedID validates and records a promised stream id (RFC 9113 §6.6 /
 // §5.1.1): it must be even, non-zero, and greater than every id already
 // promised; an illegal id is a connection error PROTOCOL_ERROR (ErrIllegalPromisedID).
@@ -387,6 +372,11 @@ func (c *Conn) notePromisedID(id uint32) error {
 	return nil
 }
 
+// reservePushedStream applies the concurrent server-initiated stream cap and, if
+// there is room, allocates and registers the pushed stream. The id must already
+// have been accepted by notePromisedID (which validated its legality and advanced
+// lastPromisedID); reservePushedStream returns only ErrPushRefused — a §6.6
+// stream-level rejection the caller resets rather than escalating.
 func (c *Conn) reservePushedStream(id uint32) (*Stream, error) {
 	c.smu.Lock()
 	defer c.smu.Unlock()

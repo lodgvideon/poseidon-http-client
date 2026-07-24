@@ -671,21 +671,16 @@ func (h *connHandler) handlePushPromiseBlock(parentStreamID, promisedStreamID ui
 		return nil
 	}
 
-	// Reserve the pushed (server-initiated, even) stream.
+	// Reserve the pushed (server-initiated, even) stream. The id was already
+	// accepted by notePromisedID, so the only error here is ErrPushRefused (the
+	// concurrent-stream cap). RFC 9113 §6.6 lets a recipient reject a promised
+	// stream with RST_STREAM on the promised id — a stream-level refusal, so the
+	// connection and the parent stream both survive; any other (unexpected) error
+	// is treated the same way rather than escalating to a connection teardown.
 	pushed, err := h.streams.reservePushedStream(promisedStreamID)
 	if err != nil {
-		if errors.Is(err, ErrPushRefused) {
-			// §6.6: "Recipients of PUSH_PROMISE frames can choose to reject
-			// promised streams by returning a RST_STREAM referencing the
-			// promised stream identifier back to the sender of the
-			// PUSH_PROMISE." A stream-level refusal — the connection and the
-			// parent stream both survive.
-			_ = h.streams.rstStream(promisedStreamID, frame.ErrCodeRefusedStream)
-			return nil
-		}
-		// §6.6: a PUSH_PROMISE promising an id that is not idle is a
-		// connection error of type PROTOCOL_ERROR.
-		return &ConnError{Code: frame.ErrCodeProtocolError, Reason: err.Error()}
+		_ = h.streams.rstStream(promisedStreamID, frame.ErrCodeRefusedStream)
+		return nil
 	}
 
 	// Build slab-backed header fields (same pattern as emitHeaderBlock).

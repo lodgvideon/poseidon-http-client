@@ -117,7 +117,32 @@ func TestConformance_RFC9113_Sec8_4_PushValidation_RejectsBadPromise(t *testing.
 // discarded, NOT as an idle stream (which would tear the whole connection down,
 // RFC 9113 §5.1). A regression left lastPromisedID unadvanced on the refusal
 // paths, so a raced pushed response killed every sibling stream on the connection.
+// Both refusal paths are covered — a malformed promised field set, and an §8.4
+// validation failure — since notePromisedID runs before either.
 func TestConformance_RFC9113_Sec5_1_RefusedPushResponseDoesNotKillConn(t *testing.T) {
+	base := []hpack.HeaderField{
+		{Name: []byte(":method"), Value: []byte("GET")},
+		{Name: []byte(":scheme"), Value: []byte("https")},
+		{Name: []byte(":authority"), Value: []byte("example.com")},
+		{Name: []byte(":path"), Value: []byte("/a.css")},
+	}
+	t.Run("non-safe method (validation refusal)", func(t *testing.T) {
+		p := append([]hpack.HeaderField(nil), base...)
+		p[0].Value = []byte("POST")
+		assertRefusedPushSurvives(t, p)
+	})
+	t.Run("malformed fields refusal", func(t *testing.T) {
+		p := append(append([]hpack.HeaderField(nil), base...),
+			hpack.HeaderField{Name: []byte("x-bad"), Value: []byte("v\r\ninjected")})
+		assertRefusedPushSurvives(t, p)
+	})
+}
+
+// assertRefusedPushSurvives drives a server that refuses the promise carrying
+// `promise`, then races the pushed response onto the promised stream, and asserts
+// the promise is reset with the connection kept alive.
+func assertRefusedPushSurvives(t *testing.T, promise []hpack.HeaderField) {
+	t.Helper()
 	cli, srv := net.Pipe()
 	defer cli.Close()
 	probe := newPushProbe()
@@ -137,14 +162,7 @@ func TestConformance_RFC9113_Sec5_1_RefusedPushResponseDoesNotKillConn(t *testin
 				EndHeaders:    true,
 			})
 		})
-		// A promise the client refuses (non-safe method).
-		promise := enc.EncodeBlock(nil, []hpack.HeaderField{
-			{Name: []byte(":method"), Value: []byte("POST")},
-			{Name: []byte(":scheme"), Value: []byte("https")},
-			{Name: []byte(":authority"), Value: []byte("example.com")},
-			{Name: []byte(":path"), Value: []byte("/a.css")},
-		})
-		<-asyncWrite(func() error { return srvFr.WritePushPromise(1, 2, promise, true, 0) })
+		<-asyncWrite(func() error { return srvFr.WritePushPromise(1, 2, enc.EncodeBlock(nil, promise), true, 0) })
 		// The server races the pushed response onto stream 2 before our RST lands.
 		<-asyncWrite(func() error {
 			return srvFr.WriteHeaders(frame.WriteHeadersParams{
