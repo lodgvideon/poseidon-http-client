@@ -7,9 +7,10 @@ re-deriving every normative rule from raw RFC text and reconciling the code.
 Both stacks were originally built against **obsolete** RFCs (HTTP/1.1 →
 RFC 2616, 1999; HTTP/2 → RFC 7540, 2015). For each, this analysis re-extracts
 the rules, produces the **current slice** (HTTP/1.1 → RFC 9110 + 9112;
-HTTP/2 → RFC 9113 + HPACK RFC 7541), and diffs old→current. For HTTP/1.1 it also
-distills a client checklist and audits the code (PASS 101 · N/A 142 ·
-actionable 13); the HTTP/2 code reconciliation is the next step.
+HTTP/2 → RFC 9113 + HPACK RFC 7541), and diffs old→current. For **both** it
+distills a client checklist and audits the code: HTTP/1.1 (PASS 101 · N/A 142 ·
+actionable 13) and HTTP/2 (PASS 166 · FAIL 19 · PARTIAL 19 · UNTESTED 11 ·
+REVIEW 17 over 232 obligations).
 
 ## Method (how these were produced)
 
@@ -51,6 +52,8 @@ flow control, SETTINGS, GOAWAY, pseudo-headers, malformed), `hpack/` (RFC 7541).
 | [RFC9113_FACTS.md](RFC9113_FACTS.md) | Normative facts of the **current** HTTP/2 spec (RFC 9113, 2022; obsoletes 7540/8740) | 594 facts | 591 confirmed, 3 cosmetic disputes |
 | [RFC7541_HPACK_FACTS.md](RFC7541_HPACK_FACTS.md) | Normative facts of **HPACK** (RFC 7541) → the `hpack/` codec | 167 facts | 166 confirmed, 1 cosmetic dispute |
 | [HTTP2_RFC_DELTA.md](HTTP2_RFC_DELTA.md) | Where a client built to **7540 diverges** from 9113, keyed by client impact | 91 deltas | 90 confirmed, 1 `change_type`-label dispute |
+| [HTTP2_CLIENT_CHECKLIST.md](HTTP2_CLIENT_CHECKLIST.md) | The **232 client-relevant obligations** (211 MUST-family, 21 SHOULD-family) distilled from RFC 9113 + 7541 | 232 items | derived from verified facts |
+| [HTTP2_RECONCILIATION.md](HTTP2_RECONCILIATION.md) | The implementation **audited** against the checklist (judge + 2 adversarial verifiers) | 232 judged | PASS 166 · FAIL 19 · PARTIAL 19 · UNTESTED 11 · REVIEW 17 |
 
 Change-type spread of the 91 deltas: 18 added, 14 clarified, 13 tightened,
 12 removed, 9 unchanged-wording, 7 security-hardening, 7 moved, 6 deprecated,
