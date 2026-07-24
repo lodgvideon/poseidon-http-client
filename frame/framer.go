@@ -54,6 +54,15 @@ type Framer struct {
 	// so that escape analysis does not promote it to the heap when
 	// io.Writer.Write is called with a sub-slice.
 	writeBuf [256]byte
+
+	// expectContinuation tracks the RFC 9113 §6.10 field-block-continuity
+	// invariant on the READ side: a HEADERS or PUSH_PROMISE frame without
+	// END_HEADERS opens a field block that the next frame MUST continue with a
+	// CONTINUATION on continuationStream, until one sets END_HEADERS. Any other
+	// frame — a different type, a frame on another stream, an extension frame, or
+	// a CONTINUATION with no block open — is a connection error PROTOCOL_ERROR.
+	expectContinuation bool
+	continuationStream uint32
 }
 
 // NewFramer constructs a Framer over the given writer and reader.
@@ -93,8 +102,9 @@ func (f *Framer) Close() {
 // must independently respect the PEER's advertised value, which lives
 // outside the framer (callers track peer settings separately).
 func (f *Framer) SetMaxReadFrameSize(n uint32) { f.maxReadFrameSize = n }
+
 // SetReadBuffer overrides the internal read buffer (useful for pooling).
-func (f *Framer) SetReadBuffer(buf []byte)      { f.readBuf = buf }
+func (f *Framer) SetReadBuffer(buf []byte) { f.readBuf = buf }
 
 // paddingZeros provides a constant zero buffer for padded writes.
 var paddingZeros [256]byte
@@ -505,36 +515,85 @@ func (f *Framer) ReadFrame(ctx context.Context, h Handler) (FrameHeader, error) 
 		}
 	}
 
+	// RFC 9113 §6.10: enforce field-block continuity before dispatch, so an
+	// interleaving frame (or a stray CONTINUATION) is rejected rather than
+	// processed. Checked here — ahead of the per-type switch — so it also catches
+	// an unknown/extension frame in the middle of a field block (§4.3).
+	if err := f.checkFieldBlockContinuity(fh); err != nil {
+		return fh, err
+	}
+
+	var derr error
 	switch fh.Type {
 	case FrameData:
-		return fh, f.dispatchData(fh, payload, h)
+		derr = f.dispatchData(fh, payload, h)
 	case FrameHeaders:
-		return fh, f.dispatchHeaders(fh, payload, h)
+		derr = f.dispatchHeaders(fh, payload, h)
 	case FramePriority:
-		return fh, f.dispatchPriority(fh, payload, h)
+		derr = f.dispatchPriority(fh, payload, h)
 	case FrameRSTStream:
-		return fh, f.dispatchRSTStream(fh, payload, h)
+		derr = f.dispatchRSTStream(fh, payload, h)
 	case FrameSettings:
-		return fh, f.dispatchSettings(fh, payload, h)
+		derr = f.dispatchSettings(fh, payload, h)
 	case FramePushPromise:
-		return fh, f.dispatchPushPromise(fh, payload, h)
+		derr = f.dispatchPushPromise(fh, payload, h)
 	case FramePing:
-		return fh, f.dispatchPing(fh, payload, h)
+		derr = f.dispatchPing(fh, payload, h)
 	case FrameGoAway:
-		return fh, f.dispatchGoAway(fh, payload, h)
+		derr = f.dispatchGoAway(fh, payload, h)
 	case FrameWindowUpdate:
-		return fh, f.dispatchWindowUpdate(fh, payload, h)
+		derr = f.dispatchWindowUpdate(fh, payload, h)
 	case FrameContinuation:
-		return fh, f.dispatchContinuation(fh, payload, h)
+		derr = f.dispatchContinuation(fh, payload, h)
 	case FrameOrigin:
-		return fh, f.dispatchOrigin(fh, payload, h)
+		derr = f.dispatchOrigin(fh, payload, h)
 	case FrameAltSvc:
-		return fh, f.dispatchAltSvc(fh, payload, h)
+		derr = f.dispatchAltSvc(fh, payload, h)
 	default:
 		// RFC 7540 §5.5: implementations MUST ignore frames they do not
 		// understand and continue. Drain the payload (already read) and
 		// return without error.
-		return fh, nil
+		derr = nil
+	}
+	if derr == nil {
+		f.trackFieldBlock(fh)
+	}
+	return fh, derr
+}
+
+// checkFieldBlockContinuity enforces RFC 9113 §6.10 before a frame is dispatched:
+// while a field block is open only a CONTINUATION on the same stream is allowed,
+// and a CONTINUATION is allowed only while a block is open. Both violations are a
+// connection error of type PROTOCOL_ERROR (mapped from these sentinels by the
+// connection layer).
+func (f *Framer) checkFieldBlockContinuity(fh FrameHeader) error {
+	if f.expectContinuation {
+		if fh.Type != FrameContinuation || fh.StreamID != f.continuationStream {
+			return ErrContinuationExpected
+		}
+		return nil
+	}
+	if fh.Type == FrameContinuation {
+		return ErrUnexpectedContinuation
+	}
+	return nil
+}
+
+// trackFieldBlock updates the §6.10 continuity state after a frame dispatches
+// without error: a HEADERS/PUSH_PROMISE without END_HEADERS opens a block on its
+// stream; a CONTINUATION with END_HEADERS closes it.
+func (f *Framer) trackFieldBlock(fh FrameHeader) {
+	switch fh.Type {
+	case FrameHeaders:
+		f.expectContinuation = fh.Flags&FlagHeadersEndHeaders == 0
+		f.continuationStream = fh.StreamID
+	case FramePushPromise:
+		f.expectContinuation = fh.Flags&FlagPushPromiseEndHeaders == 0
+		f.continuationStream = fh.StreamID
+	case FrameContinuation:
+		if fh.Flags&FlagContinuationEndHeaders != 0 {
+			f.expectContinuation = false
+		}
 	}
 }
 

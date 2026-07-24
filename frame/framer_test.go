@@ -8,22 +8,22 @@ import (
 )
 
 type recordingHandler struct {
-	header     FrameHeader
+	header      FrameHeader
 	dataPayload []byte
-	dataPad    uint8
-	hb         []byte
-	prio       *Priority
-	hbPad      uint8
-	rstCode    ErrCode
-	settings   SettingsParams
-	promID     uint32
-	promPad    uint8
-	pingData   [8]byte
-	goLastID   uint32
-	goCode     ErrCode
-	goDebug    []byte
-	winInc     uint32
-	contHB     []byte
+	dataPad     uint8
+	hb          []byte
+	prio        *Priority
+	hbPad       uint8
+	rstCode     ErrCode
+	settings    SettingsParams
+	promID      uint32
+	promPad     uint8
+	pingData    [8]byte
+	goLastID    uint32
+	goCode      ErrCode
+	goDebug     []byte
+	winInc      uint32
+	contHB      []byte
 	priorityVal Priority
 }
 
@@ -89,7 +89,7 @@ func (h *recordingHandler) OnContinuation(fh FrameHeader, hb HeaderBlock) error 
 	h.contHB = append(h.contHB[:0], hb...)
 	return nil
 }
-func (h *recordingHandler) OnOrigin(fh FrameHeader, origins []string) error { return nil }
+func (h *recordingHandler) OnOrigin(fh FrameHeader, origins []string) error      { return nil }
 func (h *recordingHandler) OnAltSvc(fh FrameHeader, entries []AltSvcEntry) error { return nil }
 
 func newFramerWithBuffer() (*Framer, *bytes.Buffer) {
@@ -299,12 +299,20 @@ func TestFramer_WindowUpdate_ZeroIncrementRejected(t *testing.T) {
 
 func TestFramer_Continuation_RoundTrip(t *testing.T) {
 	fr, _ := newFramerWithBuffer()
+	// RFC 9113 §6.10: a CONTINUATION is valid only after a HEADERS/PUSH_PROMISE
+	// without END_HEADERS opens a field block on the same stream. Open one first.
+	if err := fr.WriteHeaders(WriteHeadersParams{StreamID: 1, BlockFragment: []byte{0x82}, EndHeaders: false}); err != nil {
+		t.Fatalf("write HEADERS: %v", err)
+	}
 	if err := fr.WriteContinuation(1, true, []byte{0x82, 0x84}); err != nil {
-		t.Fatalf("write: %v", err)
+		t.Fatalf("write CONTINUATION: %v", err)
 	}
 	h := &recordingHandler{}
 	if _, err := fr.ReadFrame(context.Background(), h); err != nil {
-		t.Fatalf("read: %v", err)
+		t.Fatalf("read HEADERS: %v", err)
+	}
+	if _, err := fr.ReadFrame(context.Background(), h); err != nil {
+		t.Fatalf("read CONTINUATION: %v", err)
 	}
 	if !bytes.Equal(h.contHB, []byte{0x82, 0x84}) {
 		t.Fatalf("hb: %x", h.contHB)

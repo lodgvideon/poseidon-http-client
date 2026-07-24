@@ -38,4 +38,11 @@ var (
 	ErrZeroIncrement       = errors.New("poseidon/frame: WINDOW_UPDATE with zero increment")
 	ErrProtocolError       = errors.New("poseidon/frame: protocol error")
 	ErrTooManyAltSvc       = errors.New("poseidon/frame: ALTSVC frame carries more than one origin")
+	// ErrContinuationExpected is returned when a field block is open (a HEADERS or
+	// PUSH_PROMISE without END_HEADERS) and the next frame is not a CONTINUATION on
+	// the same stream (RFC 9113 §6.10 — a connection error of type PROTOCOL_ERROR).
+	ErrContinuationExpected = errors.New("poseidon/frame: expected CONTINUATION on the open field block")
+	// ErrUnexpectedContinuation is returned when a CONTINUATION frame arrives with
+	// no field block open (RFC 9113 §6.10 — a connection error of type PROTOCOL_ERROR).
+	ErrUnexpectedContinuation = errors.New("poseidon/frame: CONTINUATION with no open field block")
 )

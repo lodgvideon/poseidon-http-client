@@ -226,13 +226,23 @@ func TestConformance_RFC7540_Sec69_WindowUpdateFrame(t *testing.T) {
 	}
 }
 
-// RFC 7540 §6.10 — CONTINUATION: opaque header block fragment.
+// RFC 7540 §6.10 — CONTINUATION: opaque header block fragment. Per RFC 9113
+// §6.10 a CONTINUATION is valid only inside an open field block, so a HEADERS
+// without END_HEADERS precedes it on the same stream.
 func TestConformance_RFC7540_Sec610_ContinuationFrame(t *testing.T) {
+	open := frameBytes(1, FrameHeaders, 0, 1, []byte{0x82}) // HEADERS, no END_HEADERS
 	payload := []byte{0x82, 0x84}
-	raw := frameBytes(uint32(len(payload)), FrameContinuation,
+	cont := frameBytes(uint32(len(payload)), FrameContinuation,
 		FlagContinuationEndHeaders, 1, payload)
+	fr := NewFramer(nil, bytes.NewReader(append(append([]byte{}, open...), cont...)))
 	h := &recordingHandler{}
-	fh := readOneFrame(t, raw, h)
+	if _, err := fr.ReadFrame(context.Background(), h); err != nil {
+		t.Fatalf("read HEADERS: %v", err)
+	}
+	fh, err := fr.ReadFrame(context.Background(), h)
+	if err != nil {
+		t.Fatalf("read CONTINUATION: %v", err)
+	}
 	if fh.Type != FrameContinuation || fh.Flags&FlagContinuationEndHeaders == 0 {
 		t.Fatalf("hdr = %+v", fh)
 	}

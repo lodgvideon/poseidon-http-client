@@ -1657,10 +1657,12 @@ func (c *Conn) mapFrameError(fh frame.FrameHeader, err error) error {
 		return &StreamError{StreamID: fh.StreamID, Code: frame.ErrCodeProtocolError}
 	case errors.Is(err, frame.ErrInvalidStreamID),
 		errors.Is(err, frame.ErrInvalidPadding),
-		errors.Is(err, frame.ErrProtocolError):
-		// Stream-id rule violations (§5.1.1), oversized padding (§6.1) and the
-		// ORIGIN/ALTSVC framing faults are connection errors of type
-		// PROTOCOL_ERROR.
+		errors.Is(err, frame.ErrProtocolError),
+		errors.Is(err, frame.ErrContinuationExpected),
+		errors.Is(err, frame.ErrUnexpectedContinuation):
+		// Stream-id rule violations (§5.1.1), oversized padding (§6.1), the
+		// ORIGIN/ALTSVC framing faults, and field-block continuity violations
+		// (§6.10) are connection errors of type PROTOCOL_ERROR.
 		return connErr(frame.ErrCodeProtocolError)
 	case errors.Is(err, frame.ErrFrameTooLarge),
 		errors.Is(err, frame.ErrRSTWrongLength),
