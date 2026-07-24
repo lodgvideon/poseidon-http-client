@@ -44,6 +44,7 @@ func (*fakeStreamMap) writePingAck([8]byte) error                   { return nil
 func (*fakeStreamMap) deliverPingAck([8]byte)                       {}
 func (*fakeStreamMap) onGoAwayReceived(uint32, frame.ErrCode)       {}
 func (m *fakeStreamMap) pushSupport() (bool, int)                   { return m.pushEnabled, 8 }
+func (*fakeStreamMap) notePromisedID(uint32) error                  { return nil }
 func (*fakeStreamMap) reservePushedStream(uint32) (*Stream, error)  { return nil, nil }
 func (*fakeStreamMap) rstStream(uint32, frame.ErrCode) error        { return nil }
 func (m *fakeStreamMap) storeOrigins(origins []string)              { m.origins = origins }

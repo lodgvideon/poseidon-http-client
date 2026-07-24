@@ -7,6 +7,7 @@ import (
 	"errors"
 	"io"
 	"net"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -309,14 +310,26 @@ func (c *Conn) isIdleStream(id uint32) bool {
 // advertised via ORIGIN frames (RFC 8336). The push accept path treats such an
 // authority as one the server is authoritative for (RFC 9113 §8.4 / §10.1).
 func (c *Conn) isKnownOrigin(authority []byte) bool {
+	a := string(authority)
 	c.originsMu.RLock()
 	defer c.originsMu.RUnlock()
 	for _, o := range c.origins {
-		if o == string(authority) {
+		if originAuthority(o) == a {
 			return true
 		}
 	}
 	return false
+}
+
+// originAuthority returns the host[:port] authority of an ORIGIN entry. An ORIGIN
+// frame carries an ASCII-serialized origin ("scheme://host[:port]", RFC 6454
+// §6.2), whereas a promised :authority carries no scheme, so the scheme must be
+// stripped before the two are compared.
+func originAuthority(origin string) string {
+	if i := strings.Index(origin, "://"); i >= 0 {
+		return origin[i+3:]
+	}
+	return origin
 }
 
 // authorityOf returns the :authority pseudo-header value from a request field
@@ -351,15 +364,35 @@ func (c *Conn) pushSupport() (enabled bool, eventBuf int) {
 // SETTINGS_MAX_CONCURRENT_STREAMS. §6.6 lets a recipient reject a promised
 // stream with RST_STREAM on the promised id, so the caller resets rather than
 // killing the connection.
-func (c *Conn) reservePushedStream(id uint32) (*Stream, error) {
+// notePromisedID validates and records a promised stream id (RFC 9113 §6.6 /
+// §5.1.1): it must be even, non-zero, and greater than every id already
+// promised; an illegal id is a connection error PROTOCOL_ERROR (ErrIllegalPromisedID).
+//
+// Recording it — advancing lastPromisedID — is what keeps a REFUSED promise safe.
+// The id is spent on the wire whether or not we accept the promise, so a later
+// promise must still exceed it; and, critically, the server may race the pushed
+// response onto the promised stream before our RST_STREAM lands. Once
+// lastPromisedID covers the id, those in-flight frames resolve to a *closed*
+// stream (leniently discarded) rather than an *idle* one, whose frames would be a
+// connection error (§5.1) that tears the whole multiplexed connection down.
+// Called before any stream-level refusal in handlePushPromiseBlock, so every
+// refusal path marks the id spent.
+func (c *Conn) notePromisedID(id uint32) error {
 	c.smu.Lock()
 	defer c.smu.Unlock()
 	if id == 0 || id%2 != 0 || id <= c.lastPromisedID {
-		return nil, ErrIllegalPromisedID
+		return ErrIllegalPromisedID
 	}
-	// The id is spent on the wire whether or not we accept it, so record it
-	// before the cap check: a later promise must still exceed a refused one.
 	c.lastPromisedID = id
+	return nil
+}
+
+func (c *Conn) reservePushedStream(id uint32) (*Stream, error) {
+	c.smu.Lock()
+	defer c.smu.Unlock()
+	// id legality and the lastPromisedID advance are handled by notePromisedID,
+	// called earlier on every path; here only the concurrency cap and the
+	// allocation remain.
 	if c.pushInflight >= c.opts.Settings.MaxConcurrentStreams {
 		return nil, ErrPushRefused
 	}

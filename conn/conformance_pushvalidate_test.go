@@ -110,6 +110,88 @@ func TestConformance_RFC9113_Sec8_4_PushValidation_RejectsBadPromise(t *testing.
 	})
 }
 
+// TestConformance_RFC9113_Sec5_1_RefusedPushResponseDoesNotKillConn is the
+// regression guard for a refusal × idle-stream interaction: refusing a promise
+// still marks the promised id spent (advances lastPromisedID), so the server's
+// in-flight pushed-response frames on that id are treated as a closed stream and
+// discarded, NOT as an idle stream (which would tear the whole connection down,
+// RFC 9113 §5.1). A regression left lastPromisedID unadvanced on the refusal
+// paths, so a raced pushed response killed every sibling stream on the connection.
+func TestConformance_RFC9113_Sec5_1_RefusedPushResponseDoesNotKillConn(t *testing.T) {
+	cli, srv := net.Pipe()
+	defer cli.Close()
+	probe := newPushProbe()
+	finish, stop := newFinish()
+	defer stop()
+
+	go pipeServer(t, srv, func(srvFr *frame.Framer) {
+		if !awaitRequest(t, srvFr) {
+			return
+		}
+		drainFrames(srvFr, probe)
+		enc := hpack.NewEncoder()
+		<-asyncWrite(func() error {
+			return srvFr.WriteHeaders(frame.WriteHeadersParams{
+				StreamID:      1,
+				BlockFragment: enc.EncodeBlock(nil, []hpack.HeaderField{{Name: []byte(":status"), Value: []byte("200")}}),
+				EndHeaders:    true,
+			})
+		})
+		// A promise the client refuses (non-safe method).
+		promise := enc.EncodeBlock(nil, []hpack.HeaderField{
+			{Name: []byte(":method"), Value: []byte("POST")},
+			{Name: []byte(":scheme"), Value: []byte("https")},
+			{Name: []byte(":authority"), Value: []byte("example.com")},
+			{Name: []byte(":path"), Value: []byte("/a.css")},
+		})
+		<-asyncWrite(func() error { return srvFr.WritePushPromise(1, 2, promise, true, 0) })
+		// The server races the pushed response onto stream 2 before our RST lands.
+		<-asyncWrite(func() error {
+			return srvFr.WriteHeaders(frame.WriteHeadersParams{
+				StreamID:      2,
+				BlockFragment: enc.EncodeBlock(nil, []hpack.HeaderField{{Name: []byte(":status"), Value: []byte("200")}}),
+				EndHeaders:    true,
+			})
+		})
+		<-asyncWrite(func() error { return srvFr.WriteData(2, true, []byte("body")) })
+		<-asyncWrite(func() error { return srvFr.WritePing(false, [8]byte{9}) })
+		<-finish
+	})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	c, err := NewClientConn(ctx, cli, ConnOptions{Settings: AdvertisedSettings{}.defaulted(), StreamEventBuffer: 16, EnablePush: true})
+	if err != nil {
+		t.Fatalf("NewClientConn: %v", err)
+	}
+	defer c.Close()
+
+	parent := openParentStream(ctx, t, c)
+	_ = parent
+	select {
+	case <-probe.pingAck:
+	case <-ctx.Done():
+		t.Fatal("timed out waiting for the PING ACK barrier (connection likely torn down by the pushed response)")
+	}
+
+	refused := false
+	for _, code := range probe.rstCodes {
+		if code == frame.ErrCodeProtocolError {
+			refused = true
+		}
+	}
+	if !refused {
+		t.Errorf("push not refused with PROTOCOL_ERROR; RST codes %v", probe.rstCodes)
+	}
+	if probe.goAwayHit {
+		t.Errorf("connection torn down (GOAWAY %v) by a pushed response on a refused promised stream", probe.goAwayErr)
+	}
+	if !c.IsAlive() {
+		t.Error("connection died from an in-flight pushed response on a refused promised stream")
+	}
+	stop()
+}
+
 // TestConformance_RFC9113_Sec6_5_2_PushPromiseOnIdleParent_ConnError pins that a
 // PUSH_PROMISE naming an idle parent stream (one the client never opened) is a
 // connection error of type PROTOCOL_ERROR.

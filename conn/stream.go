@@ -234,6 +234,7 @@ func recycleStream(pool *sync.Pool, s *Stream) {
 	s.closed = false
 	s.inflightDone = false
 	s.pushed = false
+	s.reqAuthority = ""
 	s.headersReceived = false
 	s.interimCount = 0
 	// The Content-Length check's per-response state, reset so a pooled Stream

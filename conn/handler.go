@@ -83,11 +83,16 @@ type connOps interface {
 	// stream-event buffer size for new (pushed) streams.
 	pushSupport() (enabled bool, eventBuf int)
 
-	// reservePushedStream validates a promised stream id and registers
-	// the server-initiated stream it reserves. Returns
-	// ErrIllegalPromisedID for an id that is not idle (RFC 7540 §6.6)
-	// and ErrPushRefused when our advertised concurrent-stream cap for
-	// server-initiated streams is already reached.
+	// notePromisedID validates a promised stream id and records it
+	// (advancing lastPromisedID) so a refused promise still marks the id
+	// spent. Returns ErrIllegalPromisedID (a §6.6 connection error) for an
+	// id that is zero, odd, or not greater than an id already promised.
+	notePromisedID(id uint32) error
+
+	// reservePushedStream applies the concurrent-stream cap and registers
+	// the server-initiated stream. Returns ErrPushRefused when our
+	// advertised cap for server-initiated streams is already reached. The
+	// id must already have been accepted by notePromisedID.
 	reservePushedStream(id uint32) (*Stream, error)
 
 	// rstStream sends RST_STREAM for the given stream ID.
@@ -617,6 +622,15 @@ func (h *connHandler) handlePushPromiseBlock(parentStreamID, promisedStreamID ui
 		return nil
 	}); err != nil {
 		return headerDecodeConnError(err)
+	}
+
+	// Validate and record the promised id first (RFC 9113 §6.6): an illegal id is
+	// a connection error PROTOCOL_ERROR, and recording a legal one advances
+	// lastPromisedID so every stream-level refusal below still marks the id spent
+	// — keeping the server's in-flight pushed-response frames on that id out of the
+	// idle-stream connection-error path (§5.1) that would kill the whole connection.
+	if err := h.streams.notePromisedID(promisedStreamID); err != nil {
+		return &ConnError{Code: frame.ErrCodeProtocolError, Reason: err.Error()}
 	}
 
 	// Validate the promised request fields before anything downstream sees
