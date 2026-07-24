@@ -344,105 +344,137 @@ type alpnSingleConn struct {
 	hooksRef *atomic.Pointer[Hooks]
 	metrics  *Metrics
 
-	mu       sync.Mutex
-	detected string    // "" / "h2" / "http/1.1"
-	h2       transport // non-nil after H2 detected
-	h1       transport // non-nil after H1.1 detected
+	mu sync.Mutex
+	// detecting is non-nil while the first dial + protocol detection is in
+	// flight; other callers block on it (closed when detection completes) so only
+	// one goroutine dials, exactly as singleConn.dialing does. The detection runs
+	// with a.mu RELEASED — it dials and, for h2, performs a full SETTINGS
+	// handshake, both unbounded network I/O — so that a silent peer cannot wedge
+	// every other caller and Close() behind the lock.
+	detecting chan struct{}
+	h2        transport // non-nil after H2 detected
+	h1        transport // non-nil after H1.1 detected
+	closed    bool
 }
 
 func (a *alpnSingleConn) delegate() transport {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	if a.h2 != nil {
-		return a.h2
-	}
-	return a.h1
+	return a.delegateLocked()
 }
 
 func (a *alpnSingleConn) openExchange(ctx context.Context) (protoStream, func(uint32) (*conn.Stream, bool), func(), error) {
-	if d := a.delegate(); d != nil {
+	for {
+		a.mu.Lock()
+		if a.closed {
+			a.mu.Unlock()
+			return nil, nil, nil, ErrClosed
+		}
+		if d := a.delegateLocked(); d != nil {
+			a.mu.Unlock()
+			return d.openExchange(ctx)
+		}
+		// A detection is already in flight: wait for it (honouring ctx) and retry.
+		// The old code held a.mu across the whole dial+handshake, so this branch
+		// did not exist — every concurrent caller, and Close(), blocked on the
+		// lock behind a possibly-silent peer.
+		if a.detecting != nil {
+			ch := a.detecting
+			a.mu.Unlock()
+			select {
+			case <-ch:
+				continue
+			case <-ctx.Done():
+				return nil, nil, nil, ctx.Err()
+			}
+		}
+		// Become the detector; release the lock for the long dial + handshake.
+		a.detecting = make(chan struct{})
+		ch := a.detecting
+		a.mu.Unlock()
+
+		d, isH2, derr := a.detectDelegate(ctx)
+
+		a.mu.Lock()
+		a.detecting = nil
+		close(ch)
+		if a.closed {
+			a.mu.Unlock()
+			if d != nil {
+				_ = d.close()
+			}
+			return nil, nil, nil, ErrClosed
+		}
+		if derr != nil {
+			a.mu.Unlock()
+			return nil, nil, nil, derr
+		}
+		// Store the delegate by the protocol that was actually negotiated. Keyed
+		// on isH2, NOT on a "detected != ''" sentinel: conn.NegotiatedProtocol
+		// returns "" for a PlaintextDialer, so the old sentinel never armed on the
+		// plaintext path and each racer built and stored its own h1 delegate,
+		// orphaning the winner's connection.
+		if isH2 {
+			a.h2 = d
+		} else {
+			a.h1 = d
+		}
+		a.mu.Unlock()
+		// Delegate the first exchange like any other: the delegate's own
+		// openExchange finds the connection we handed it as its current one, so
+		// there is no separate first-exchange path to keep in step with it.
 		return d.openExchange(ctx)
 	}
-	// First dial: detect protocol.
+}
+
+// detectDelegate performs the first dial, reads the negotiated protocol, and
+// builds the matching delegate around the connection — all with a.mu RELEASED,
+// because every step is unbounded network I/O. The delegate is returned holding
+// the dialled connection as its current one; the caller stores it under the
+// lock.
+func (a *alpnSingleConn) detectDelegate(ctx context.Context) (transport, bool, error) {
 	nc, err := a.connOpts.Dialer.Dial(ctx, a.addr)
 	if err != nil {
-		return nil, nil, nil, &DialError{Addr: a.addr, Err: err}
+		return nil, false, &DialError{Addr: a.addr, Err: err}
 	}
-	proto := conn.NegotiatedProtocol(nc)
-
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	if a.detected != "" {
-		// Another goroutine raced us and already detected the protocol;
-		// close our conn and delegate.
-		_ = nc.Close()
-		d := a.h2
-		if d == nil {
-			d = a.h1
-		}
-		return d.openExchange(ctx)
-	}
-	a.detected = proto
-
-	switch proto {
-	case "h2":
-		// Build H2 conn from the already-dialled net.Conn.
+	if conn.NegotiatedProtocol(nc) == "h2" {
 		h2c, cerr := conn.NewClientConn(ctx, nc, a.connOpts)
 		if cerr != nil {
 			_ = nc.Close()
-			return nil, nil, nil, &DialError{Addr: a.addr, Err: cerr}
+			return nil, false, &DialError{Addr: a.addr, Err: cerr}
 		}
-		sc := &singleConn{
+		return &singleConn{
 			addr:     a.addr,
 			connOpts: a.connOpts,
 			backoff:  a.backoff,
 			hooksRef: a.hooksRef,
 			metrics:  a.metrics,
 			cur:      h2c,
-		}
-		a.h2 = sc
-		stream, serr := h2c.NewStream(ctx)
-		if serr != nil {
-			return nil, nil, nil, serr
-		}
-		return stream, h2c.LookupStream, func() {}, nil
-
-	default: // "http/1.1" or ""
-		h1c := http1.NewConn(nc)
-		sc := &h1singleConn{
-			addr:     a.addr,
-			dialer:   a.connOpts.Dialer,
-			backoff:  a.backoff,
-			hooksRef: a.hooksRef,
-			metrics:  a.metrics,
-			cur:      h1c,
-		}
-		a.h1 = sc
-		ex := h1c.NewExchange()
-		release := func(keepAlive bool) {
-			if !keepAlive {
-				_ = h1c.Close()
-				sc.mu.Lock()
-				if sc.cur == h1c {
-					sc.cur = nil
-				}
-				sc.mu.Unlock()
-			}
-			sc.inFlight.Unlock()
-		}
-		// Acquire the in-flight slot for this first exchange.
-		sc.inFlight.Lock()
-		h1ex := &h1Exchange{ex: ex, nc: h1c, release: release}
-		return h1ex, nil, func() {}, nil
+		}, true, nil
 	}
+	return &h1singleConn{
+		addr:     a.addr,
+		dialer:   a.connOpts.Dialer,
+		backoff:  a.backoff,
+		hooksRef: a.hooksRef,
+		metrics:  a.metrics,
+		cur:      http1.NewConn(nc),
+	}, false, nil
+}
+
+// delegateLocked returns the detected delegate, or nil if detection has not
+// completed. Caller holds a.mu.
+func (a *alpnSingleConn) delegateLocked() transport {
+	if a.h2 != nil {
+		return a.h2
+	}
+	return a.h1
 }
 
 func (a *alpnSingleConn) close() error {
 	a.mu.Lock()
-	d := a.h2
-	if d == nil {
-		d = a.h1
-	}
+	a.closed = true
+	d := a.delegateLocked()
 	a.mu.Unlock()
 	if d != nil {
 		return d.close()
@@ -452,10 +484,8 @@ func (a *alpnSingleConn) close() error {
 
 func (a *alpnSingleConn) shutdown(gracefulTimeout time.Duration) error {
 	a.mu.Lock()
-	d := a.h2
-	if d == nil {
-		d = a.h1
-	}
+	a.closed = true
+	d := a.delegateLocked()
 	a.mu.Unlock()
 	if d != nil {
 		return d.shutdown(gracefulTimeout)
