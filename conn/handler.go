@@ -72,6 +72,11 @@ type connOps interface {
 	// frame whose stream is no longer in the registry (RFC 7540 §6.9, §5.1).
 	accountConnRecvOnly(length uint32) error
 	markStreamDone(id uint32)
+	// wakeSendWaiters broadcasts the outbound flow-control condition so a writer
+	// blocked in acquireSendCredits re-checks its stream state. Called after a
+	// stream is reset so a blocked writer bails instead of sending DATA post-RST
+	// (RFC 9113 §6.4), mirroring the broadcast onGoAwayReceived already does.
+	wakeSendWaiters()
 	onWindowUpdate(streamID, increment uint32) error
 	applyPeerSettings(s frame.SettingsParams) error
 	writeSettingsAck() error
@@ -565,6 +570,10 @@ func (h *connHandler) OnRSTStream(fh frame.FrameHeader, code frame.ErrCode) erro
 	s.closed = true
 	s.mu.Unlock()
 	h.streams.markStreamDone(fh.StreamID)
+	// Wake a writer blocked in acquireSendCredits so it observes s.closed and bails
+	// instead of sending DATA once credit frees up (RFC 9113 §6.4). Done last, with
+	// no lock held.
+	h.streams.wakeSendWaiters()
 	return nil
 }
 

@@ -1149,7 +1149,16 @@ func (c *Conn) acquireSendCredits(ctx context.Context, s *Stream, want, padOverh
 		}
 		s.mu.Lock()
 		streamWin := s.sendWindow
+		streamClosed := s.closed
 		s.mu.Unlock()
+		if streamClosed {
+			// RFC 9113 §6.4: after a stream is reset (peer RST_STREAM) or otherwise
+			// closed, we must not send further DATA on it. A writer already blocked
+			// here when the reset arrives re-checks on wake and bails, rather than
+			// sending DATA once credit finally frees up. Covers a peer RST and a
+			// GOAWAY that made this stream a refused victim.
+			return 0, ErrStreamClosed
+		}
 		connWin := c.peerConnSendWindow
 		avail := streamWin
 		if connWin < avail {
@@ -1832,6 +1841,15 @@ func (c *Conn) shutdownStreams(reason error) {
 // SendHeaders/SendData when END_STREAM goes out. It releases the
 // stream's slot in the inflight pool exactly once and evicts the
 // stream from the registry once both ends have closed.
+// wakeSendWaiters broadcasts the outbound flow-control condition so every writer
+// blocked in acquireSendCredits re-checks its stream and connection state. Holds
+// only fcOutMu, so it is safe to call with no other lock held.
+func (c *Conn) wakeSendWaiters() {
+	c.fcOutMu.Lock()
+	c.fcOutCond.Broadcast()
+	c.fcOutMu.Unlock()
+}
+
 func (c *Conn) markStreamDone(id uint32) {
 	c.smu.Lock()
 	defer c.smu.Unlock()

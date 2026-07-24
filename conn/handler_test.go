@@ -37,6 +37,7 @@ func (*fakeStreamMap) isKnownOrigin([]byte) bool { return false }
 // in tests that only exercise stream lookup behaviour.
 func (*fakeStreamMap) onDataReceived(*Stream, uint32) error         { return nil }
 func (*fakeStreamMap) markStreamDone(uint32)                        {}
+func (*fakeStreamMap) wakeSendWaiters()                             {}
 func (*fakeStreamMap) onWindowUpdate(uint32, uint32) error          { return nil }
 func (*fakeStreamMap) applyPeerSettings(frame.SettingsParams) error { return nil }
 func (*fakeStreamMap) writeSettingsAck() error                      { return nil }
