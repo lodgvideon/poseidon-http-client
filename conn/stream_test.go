@@ -71,6 +71,14 @@ func (w *fakeStreamWriter) writeRSTStream(_ *Stream, code frame.ErrCode) error {
 	return nil
 }
 
+// rstSnapshot returns the outbound-RST count and last code under the lock, so a
+// test can read them race-free while push's overflow goroutine may still write.
+func (w *fakeStreamWriter) rstSnapshot() (int, frame.ErrCode) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.rstCalls, w.lastRSTCode
+}
+
 func newTestStream(buf int) (*Stream, *fakeStreamWriter) {
 	w := &fakeStreamWriter{}
 	s := newStream(1, buf, w, 65535)

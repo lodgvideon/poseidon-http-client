@@ -547,7 +547,18 @@ func (h *connHandler) OnRSTStream(fh frame.FrameHeader, code frame.ErrCode) erro
 		}
 		return nil
 	}
-	s.push(StreamEvent{Type: EventReset, RSTCode: code, EndStream: true})
+	// RFC 9113 §5.4.2: "To avoid looping, an endpoint MUST NOT send a RST_STREAM
+	// in response to a RST_STREAM frame." Deliver the reset event directly rather
+	// than via s.push, whose overflow path emits an outbound RST_STREAM(REFUSED_
+	// STREAM) — which, in response to a received RST, is exactly that loop. A slow
+	// consumer whose buffer is full still learns of the reset via the reset signal.
+	// Delivered FIRST, before the stream becomes bothEnded below, so it cannot race
+	// a concurrent Close()->recycleStream (same ordering the doc comment describes).
+	select {
+	case s.events <- StreamEvent{Type: EventReset, RSTCode: code, EndStream: true}:
+	default:
+		s.signalReset(code)
+	}
 	s.mu.Lock()
 	s.remoteEnded = true
 	s.localEnded = true
