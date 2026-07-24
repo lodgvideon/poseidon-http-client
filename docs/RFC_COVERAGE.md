@@ -173,6 +173,7 @@ non-ACK PING frames with `ACK=1` and the original 8-byte payload
 | §6.5.2 / §8.4 | Conformance | TestConformance_RFC9113_Sec6_5_2_ServerEnablePushOne_ConnError, TestConformance_RFC9113_Sec6_5_2_HandshakeEnablePushOne_Refused (conn/) — a server SETTINGS_ENABLE_PUSH=1, mid-connection or in the preface, is a connection error PROTOCOL_ERROR ("A client MUST treat receipt of a SETTINGS frame with SETTINGS_ENABLE_PUSH set to 1 as a connection error … of type PROTOCOL_ERROR"); the validator itself is unit-covered by TestCheckPeerSettingValues |
 | §6.5.2 | Conformance | TestConformance_RFC9113_Sec6_5_2_MaxFrameSizeOutOfRange_ConnError (conn/) — a received SETTINGS_MAX_FRAME_SIZE below 2^14 or above 2^24-1 is a connection error PROTOCOL_ERROR ("Values outside this range MUST be treated as a connection error … of type PROTOCOL_ERROR") |
 | §6.5.2 | Conformance | TestConformance_RFC9113_Sec6_5_2_AdvertisedMaxFrameSizeClamped (conn/) — our own advertised MAX_FRAME_SIZE is clamped into [2^14, 2^24-1] ("The value advertised by an endpoint MUST be between this initial value and the maximum allowed frame size … inclusive") |
+| §5.4.1 | Conformance | TestConformance_RFC9113_Sec5_4_1_ErrorGoAwayClosesTransport (conn/) — after emitting a GOAWAY for a connection error the client closes the TCP connection instead of leaving a half-alive socket; the reader loop previously returned without closing the transport |
 
 ## RFC 2616 — HTTP/1.1 (http1/ package)
 

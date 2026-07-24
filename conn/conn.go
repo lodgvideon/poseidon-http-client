@@ -1612,6 +1612,15 @@ func (c *Conn) readerLoop() {
 			}
 			c.emitConnGoAwayIfTyped(err)
 			c.shutdownStreams(err)
+			// RFC 9113 §5.4.1: after sending a GOAWAY for an error condition the
+			// endpoint must close the TCP connection, so the peer is not left with a
+			// half-alive socket. emitConnGoAwayIfTyped writes a GOAWAY only for a
+			// *ConnError, so gate the close on the same type; an io.EOF / transport
+			// error means the socket is already gone.
+			var ce *ConnError
+			if errors.As(err, &ce) {
+				_ = c.transport.Close()
+			}
 			return
 		}
 	}
