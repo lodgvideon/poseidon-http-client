@@ -37,8 +37,10 @@ func TestRecycleStream_ResetsReqAuthority(t *testing.T) {
 	s.reqAuthority = "example.com"
 	s.localEnded, s.remoteEnded = true, true
 	recycleStream(&pool, s)
-	got := pool.Get().(*Stream)
-	if got.reqAuthority != "" {
-		t.Errorf("recycled Stream.reqAuthority = %q, want empty", got.reqAuthority)
+	// recycleStream clears the fields in place before pooling s, so assert on s
+	// directly. Going back through pool.Get() is flaky: sync.Pool may return nil
+	// (the GC can drop a pooled item), which is not what this test is checking.
+	if s.reqAuthority != "" {
+		t.Errorf("recycled Stream.reqAuthority = %q, want empty", s.reqAuthority)
 	}
 }
