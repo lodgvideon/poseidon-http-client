@@ -603,7 +603,21 @@ func (p *h1Pool) acquire(ctx context.Context) (*h1ManagedConn, error) {
 		if err != nil || mc == nil {
 			return mc, err
 		}
-		if time.Since(mc.lastUsed) <= h1ProbeIdleAfter || mc.c.ProbeIdle() {
+		// HasResidue is unconditional; ProbeIdle stays gated on idle age.
+		//
+		// The gate used to cover both, and that was the bug: a connection reused
+		// inside h1ProbeIdleAfter was handed back with NO check at all, so a peer
+		// that appended an unsolicited response just had to land it inside the
+		// reuse gap. Under the load this client is built for that gap is every
+		// reuse, which made the threshold an attacker-chosen window rather than a
+		// race. Removing the gate outright was not an option — ProbeIdle costs a
+		// bounded ~1ms, i.e. more than the request it guards.
+		//
+		// HasResidue answers the poisoning question directly and costs ~0.5µs with
+		// no allocation, so it runs every time. ProbeIdle keeps the threshold and
+		// keeps its own job: it is the one that notices a FIN, which FIONREAD
+		// cannot report.
+		if !mc.c.HasResidue() && (time.Since(mc.lastUsed) <= h1ProbeIdleAfter || mc.c.ProbeIdle()) {
 			return mc, nil
 		}
 		// Peer closed it, or pushed bytes at it, while it sat idle. Give it back

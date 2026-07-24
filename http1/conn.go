@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	"github.com/lodgvideon/poseidon-http-client/hpack"
@@ -164,15 +165,29 @@ type Conn struct {
 	// the read that consults it.
 	peerMinor      int
 	peerMinorKnown bool
+
+	// Cached by initResidue so HasResidue allocates nothing. rawCtl is the real
+	// socket's syscall.RawConn (nil when the transport is not a syscall.Conn),
+	// ctlFn a control func pre-bound to pendN/pendOK, and layered records that
+	// c.nc sits above another net.Conn — i.e. TLS, where octets on the socket are
+	// not necessarily application data. Plain fields for the same reason as
+	// peerMinor: one exchange at a time, and HasResidue runs only between them.
+	rawCtl  syscall.RawConn
+	ctlFn   func(uintptr)
+	pendN   int
+	pendOK  bool
+	layered bool
 }
 
 // NewConn wraps nc in a persistent HTTP/1.1 Conn.
 // nc must already be connected (TCP + optional TLS handshake complete).
 func NewConn(nc net.Conn) *Conn {
-	return &Conn{
+	c := &Conn{
 		nc: nc,
 		br: bufio.NewReaderSize(nc, readBufSize),
 	}
+	c.initResidue()
+	return c
 }
 
 // IsAlive reports whether the connection is open and usable.
@@ -622,6 +637,28 @@ func validateFields(method, path, authority string, fields []hpack.HeaderField) 
 	if !validRequestTarget(path) {
 		return fmt.Errorf("%w: target %q contains a space or control character (RFC 9112 §3)",
 			ErrInvalidRequest, path)
+	}
+	// CONNECT is refused rather than framed. RFC 9112 §6.3 rule 2: "Any 2xx
+	// (Successful) response to a CONNECT request implies that the connection will
+	// become a tunnel immediately after the empty line that concludes the header
+	// fields. A client MUST ignore any Content-Length or Transfer-Encoding header
+	// fields received in such a message."
+	//
+	// This Exchange has no way to honour that. Its response path frames every
+	// message by the fields the peer sent, so a 2xx to CONNECT read the tunnel's
+	// first octets back as a message body — and with no Content-Length at all it
+	// fell to rule 4's read-until-close and blocked until the socket died. There
+	// is also no API here to hand the caller the tunnelled socket afterwards, so
+	// implementing rule 2's framing would produce a "successful" CONNECT whose
+	// tunnel nobody can reach: a conformant desync instead of an obvious one.
+	//
+	// Refusing at the send gate is the honest boundary — the request never
+	// reaches the wire, so no tunnel is ever half-established. Callers wanting a
+	// CONNECT proxy tunnel use conn.ProxyDialer, which speaks it directly.
+	if method == "CONNECT" {
+		return fmt.Errorf("%w: CONNECT is not supported on this exchange; a 2xx to CONNECT "+
+			"makes the connection a tunnel (RFC 9112 §6.3 rule 2) and this client has no "+
+			"tunnel API — use conn.ProxyDialer", ErrInvalidRequest)
 	}
 	// The authority becomes the Host field value, so it answers to §5.5 like any
 	// other value. Emptiness is deliberately NOT an error: RFC 9112 §3.2 says a
@@ -1817,10 +1854,17 @@ func (ex *Exchange) ReadBodyChunk(buf []byte) (n int, done bool, err error) {
 		// Only on the bypass path, and only once the body is complete: ask the
 		// socket what the reader could not see. A peer that closed is already
 		// reported through the io.EOF branch below (the direct read surfaces it
-		// coalesced), so this is specifically about octets it appended. The
-		// ~1ms probe is charged only to a body whose final read was >= 16 KiB,
-		// where it is noise against the transfer it just completed.
-		if bypassed && done && err == nil && ex.keepAlive && !ex.c.ProbeIdle() {
+		// coalesced), so this is specifically about octets it appended.
+		//
+		// HasResidue, not ProbeIdle. This runs inside the armCancel window opened
+		// at the top of ReadBodyChunk, and that watchdog releases a blocked read by
+		// installing a deadline in the PAST — which ProbeIdle, whose whole method
+		// is a bounded future deadline, cannot distinguish from a healthy quiet
+		// socket. It answered "clean" for a cancelled read and left keepAlive true.
+		// HasResidue's decisive layer is FIONREAD, which reads the kernel queue
+		// whatever the deadline says, so the verdict no longer depends on winning
+		// a race with the watchdog. It is also ~0.5µs rather than ~1ms.
+		if bypassed && done && err == nil && ex.keepAlive && ex.c.HasResidue() {
 			ex.keepAlive = false
 		}
 		if err == io.EOF {
