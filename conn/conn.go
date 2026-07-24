@@ -305,6 +305,31 @@ func (c *Conn) isIdleStream(id uint32) bool {
 	return id > c.lastPromisedID
 }
 
+// isKnownOrigin reports whether authority appears in the origin set the peer
+// advertised via ORIGIN frames (RFC 8336). The push accept path treats such an
+// authority as one the server is authoritative for (RFC 9113 §8.4 / §10.1).
+func (c *Conn) isKnownOrigin(authority []byte) bool {
+	c.originsMu.RLock()
+	defer c.originsMu.RUnlock()
+	for _, o := range c.origins {
+		if o == string(authority) {
+			return true
+		}
+	}
+	return false
+}
+
+// authorityOf returns the :authority pseudo-header value from a request field
+// list, or "" when it is absent.
+func authorityOf(fields []hpack.HeaderField) string {
+	for i := range fields {
+		if string(fields[i].Name) == ":authority" {
+			return string(fields[i].Value)
+		}
+	}
+	return ""
+}
+
 // pushSupport reports whether server push is enabled and returns the
 // stream-event buffer size for new pushed streams.
 func (c *Conn) pushSupport() (enabled bool, eventBuf int) {
@@ -651,6 +676,7 @@ func (c *Conn) writeHeadersWithPriority(_ context.Context, s *Stream, fields []h
 		c.streams[s.id] = s
 		s.mu.Lock()
 		s.sendWindow = int32(initial)
+		s.reqAuthority = authorityOf(fields)
 		s.mu.Unlock()
 		c.smu.Unlock()
 		c.psMu.RUnlock()

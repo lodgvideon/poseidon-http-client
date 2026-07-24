@@ -108,6 +108,13 @@ type Stream struct {
 	// inflightDone in markStreamDone / releaseInflight.
 	pushed bool
 
+	// reqAuthority is the :authority pseudo-header of the request this stream
+	// carries, captured when the request HEADERS are written. The push accept
+	// path compares a PUSH_PROMISE's :authority against it — a server is
+	// authoritative for what it already answered over the cert-validated
+	// connection (RFC 9113 §8.4 / §10.1). Guarded by mu.
+	reqAuthority string
+
 	// headersReceived is set once a *final* (non-informational) response
 	// HEADERS block for this stream is delivered. The reader goroutine
 	// consults it to classify subsequent HEADERS frames as trailers
@@ -265,6 +272,13 @@ func (s *Stream) hasRemoteEnded() bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.remoteEnded
+}
+
+// requestAuthority returns the :authority the request on this stream carried.
+func (s *Stream) requestAuthority() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.reqAuthority
 }
 
 // push delivers an event from the reader goroutine. Non-blocking under

@@ -63,6 +63,10 @@ type connOps interface {
 	// §5.1). A frame other than HEADERS/PRIORITY on such a stream is a
 	// connection error PROTOCOL_ERROR; a late frame on a closed stream is not.
 	isIdleStream(id uint32) bool
+	// isKnownOrigin reports whether authority was advertised via an ORIGIN
+	// frame (RFC 8336) — an authority the server is authoritative for on the
+	// push accept path.
+	isKnownOrigin(authority []byte) bool
 	onDataReceived(s *Stream, length uint32) error
 	// accountConnRecvOnly settles the connection-level recv window for a DATA
 	// frame whose stream is no longer in the registry (RFC 7540 §6.9, §5.1).
@@ -632,8 +636,24 @@ func (h *connHandler) handlePushPromiseBlock(parentStreamID, promisedStreamID ui
 	// Look up the parent stream.
 	parent := h.streams.lookupStream(parentStreamID)
 	if parent == nil {
-		// Parent gone; reset the promised stream to be safe.
+		// RFC 9113 §6.5.2 / §5.1: a PUSH_PROMISE on an idle parent stream (one the
+		// client never opened) is a connection error PROTOCOL_ERROR. On a closed
+		// parent (opened then evicted) the promise is refused at the stream level
+		// (§5.1 leniency for a stream we reset).
+		if h.streams.isIdleStream(parentStreamID) {
+			return &ConnError{Code: frame.ErrCodeProtocolError, Reason: "PUSH_PROMISE on idle stream"}
+		}
 		_ = h.streams.rstStream(promisedStreamID, frame.ErrCodeCancel)
+		return nil
+	}
+
+	// RFC 9113 §8.4: refuse a promised request whose method is not safe and
+	// cacheable, that indicates request content, or whose :authority the server
+	// is not authoritative for. This is a stream-level refusal — the connection
+	// and the parent stream survive — done before reservePushedStream so no
+	// stream is half-reserved on the refusal path.
+	if !h.validatePushedRequest(parent.requestAuthority()) {
+		_ = h.streams.rstStream(promisedStreamID, frame.ErrCodeProtocolError)
 		return nil
 	}
 
@@ -676,6 +696,37 @@ func (h *connHandler) handlePushPromiseBlock(parentStreamID, promisedStreamID ui
 	})
 	_ = pushed // stream registered; subsequent HEADERS/DATA frames find it
 	return nil
+}
+
+// validatePushedRequest checks the decoded promised request (in h.scratch)
+// against RFC 9113 §8.4: the :method must be safe and cacheable (GET/HEAD), the
+// promise must not indicate request content, and the :authority must be one the
+// server is authoritative for — matching the request that triggered the push
+// (answered over the cert-validated connection), or an ORIGIN-frame authority.
+// A false return means the promised stream must be reset with PROTOCOL_ERROR.
+func (h *connHandler) validatePushedRequest(parentAuthority string) bool {
+	var method, authority []byte
+	for i := range h.scratch {
+		switch string(h.scratch[i].Name) {
+		case ":method":
+			method = h.scratch[i].Value
+		case ":authority":
+			authority = h.scratch[i].Value
+		case "content-length":
+			// A promise that indicates request content is refused; only an
+			// explicit zero is tolerated (a bodyless GET/HEAD may carry it).
+			if n, ok := parseDecimalDigits(h.scratch[i].Value); !ok || n != 0 {
+				return false
+			}
+		}
+	}
+	if !pushMethodSafeCacheable(method) {
+		return false
+	}
+	if len(authority) == 0 {
+		return false // incomplete header set (§8.3.1): a request needs :authority
+	}
+	return string(authority) == parentAuthority || h.streams.isKnownOrigin(authority)
 }
 
 // OnPing implements frame.Handler. Non-ACK PING frames are echoed

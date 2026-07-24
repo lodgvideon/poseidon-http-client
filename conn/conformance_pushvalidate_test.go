@@ -1,0 +1,151 @@
+package conn
+
+import (
+	"context"
+	"net"
+	"testing"
+	"time"
+
+	"github.com/lodgvideon/poseidon-http-client/frame"
+	"github.com/lodgvideon/poseidon-http-client/hpack"
+)
+
+// Batch 8 — RFC 9113 §8.4 / §6.6 validation of the OPT-IN server-push accept
+// path (EnablePush=true). A client MUST reset a promised stream whose promised
+// request is not safe-and-cacheable, indicates request content, or names an
+// :authority the server is not authoritative for; and a PUSH_PROMISE on an idle
+// parent stream is a connection error. Push is disabled by default (a
+// PUSH_PROMISE is then already a connection error), so these bind only the
+// opt-in path.
+
+// assertPromiseRejected drives a server that responds to the client's request,
+// then sends one PUSH_PROMISE on stream 1 carrying `promise`. It asserts the
+// client resets the promised stream (id 2) with PROTOCOL_ERROR and keeps the
+// connection alive.
+func assertPromiseRejected(t *testing.T, promise []hpack.HeaderField) {
+	t.Helper()
+	cli, srv := net.Pipe()
+	defer cli.Close()
+	probe := newPushProbe()
+	finish, stop := newFinish()
+	defer stop()
+
+	go pipeServer(t, srv, func(srvFr *frame.Framer) {
+		if !awaitRequest(t, srvFr) {
+			return
+		}
+		drainFrames(srvFr, probe)
+		enc := hpack.NewEncoder()
+		<-asyncWrite(func() error {
+			return srvFr.WriteHeaders(frame.WriteHeadersParams{
+				StreamID:      1,
+				BlockFragment: enc.EncodeBlock(nil, []hpack.HeaderField{{Name: []byte(":status"), Value: []byte("200")}}),
+				EndHeaders:    true,
+			})
+		})
+		<-asyncWrite(func() error { return srvFr.WritePushPromise(1, 2, enc.EncodeBlock(nil, promise), true, 0) })
+		<-asyncWrite(func() error { return srvFr.WritePing(false, [8]byte{9}) })
+		<-finish
+	})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	c, err := NewClientConn(ctx, cli, ConnOptions{Settings: AdvertisedSettings{}.defaulted(), StreamEventBuffer: 16, EnablePush: true})
+	if err != nil {
+		t.Fatalf("NewClientConn: %v", err)
+	}
+	defer c.Close()
+
+	parent := openParentStream(ctx, t, c)
+	_ = parent
+	select {
+	case <-probe.pingAck:
+	case <-ctx.Done():
+		t.Fatal("timed out waiting for the PING ACK barrier")
+	}
+
+	found := false
+	for _, code := range probe.rstCodes {
+		if code == frame.ErrCodeProtocolError {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("promised stream not reset with PROTOCOL_ERROR; got RST codes %v", probe.rstCodes)
+	}
+	if probe.goAwayHit {
+		t.Errorf("connection torn down (GOAWAY %v); a bad push is a stream refusal, not a connection error", probe.goAwayErr)
+	}
+	if !c.IsAlive() {
+		t.Error("connection died on a bad PUSH_PROMISE; it must survive a stream-level refusal")
+	}
+	stop()
+}
+
+// TestConformance_RFC9113_Sec8_4_PushValidation_RejectsBadPromise pins the three
+// promised-request refusals: a non-authoritative :authority, a method that is not
+// safe-and-cacheable, and a promise that indicates request content.
+func TestConformance_RFC9113_Sec8_4_PushValidation_RejectsBadPromise(t *testing.T) {
+	base := func() []hpack.HeaderField {
+		return []hpack.HeaderField{
+			{Name: []byte(":method"), Value: []byte("GET")},
+			{Name: []byte(":scheme"), Value: []byte("https")},
+			{Name: []byte(":authority"), Value: []byte("example.com")},
+			{Name: []byte(":path"), Value: []byte("/a.css")},
+		}
+	}
+	t.Run("non-authoritative authority", func(t *testing.T) {
+		p := base()
+		p[2].Value = []byte("evil.example") // not the request's authority
+		assertPromiseRejected(t, p)
+	})
+	t.Run("non-safe method", func(t *testing.T) {
+		p := base()
+		p[0].Value = []byte("POST") // not safe/cacheable
+		assertPromiseRejected(t, p)
+	})
+	t.Run("indicates request content", func(t *testing.T) {
+		p := append(base(), hpack.HeaderField{Name: []byte("content-length"), Value: []byte("5")})
+		assertPromiseRejected(t, p)
+	})
+}
+
+// TestConformance_RFC9113_Sec6_5_2_PushPromiseOnIdleParent_ConnError pins that a
+// PUSH_PROMISE naming an idle parent stream (one the client never opened) is a
+// connection error of type PROTOCOL_ERROR.
+func TestConformance_RFC9113_Sec6_5_2_PushPromiseOnIdleParent_ConnError(t *testing.T) {
+	cli, srv := net.Pipe()
+	defer cli.Close()
+	probe := newFramingProbe()
+	finish, release := newFinish()
+
+	go pipeServer(t, srv, func(srvFr *frame.Framer) {
+		drainFrames(srvFr, probe)
+		enc := hpack.NewEncoder()
+		block := enc.EncodeBlock(nil, []hpack.HeaderField{
+			{Name: []byte(":method"), Value: []byte("GET")},
+			{Name: []byte(":scheme"), Value: []byte("https")},
+			{Name: []byte(":authority"), Value: []byte("example.com")},
+			{Name: []byte(":path"), Value: []byte("/a.css")},
+		})
+		// Parent stream 1 was never opened by the client → idle.
+		<-asyncWrite(func() error { return srvFr.WritePushPromise(1, 2, block, true, 0) })
+		<-finish
+	})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	c, err := NewClientConn(ctx, cli, ConnOptions{Settings: AdvertisedSettings{}.defaulted(), StreamEventBuffer: 16, EnablePush: true})
+	if err != nil {
+		t.Fatalf("NewClientConn: %v", err)
+	}
+	defer c.Close()
+
+	if code := recvCode(t, "GOAWAY", probe.away); code != frame.ErrCodeProtocolError {
+		t.Errorf("GOAWAY code = %v, want PROTOCOL_ERROR", code)
+	}
+	if aliveWithin(c, false, 2*time.Second) {
+		t.Error("connection still alive after a PUSH_PROMISE on an idle parent stream")
+	}
+	release()
+}

@@ -157,6 +157,13 @@ func validatePromisedRequestFields(fields []hpack.HeaderField) bool {
 	return true
 }
 
+// pushMethodSafeCacheable reports whether m is a method a server may push a
+// response to. RFC 9113 §8.4 requires the promised request use a method that is
+// both safe and cacheable, which (RFC 9110 §9.2.1, §9.2.3) is GET or HEAD.
+func pushMethodSafeCacheable(m []byte) bool {
+	return string(m) == "GET" || string(m) == "HEAD"
+}
+
 // responseContentLength extracts the response's Content-Length from decoded
 // fields: its value, whether it was present, and whether it is valid. A value
 // that is not a non-negative run of ASCII digits, or repeated values that
