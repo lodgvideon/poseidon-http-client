@@ -292,7 +292,11 @@ type Exchange struct {
 	// Without this latch, a later "keep-alive" line would overwrite the earlier
 	// "close" verdict (the same order-independence problem clSeen/clErr solve
 	// for Content-Length).
-	closeSeen   bool
+	closeSeen bool
+	// noReuse latches a RESPONSE-side framing condemnation (an indeterminate body
+	// boundary) so a later header line cannot undo it. closeSeen does that job for
+	// an explicit Connection: close; condemned does it for the request side.
+	noReuse     bool
 	respChunked bool
 	// clSeen, clValue and clErr accumulate the Content-Length decision across
 	// the header block instead of committing to it line by line. RFC 9112 §6.3
@@ -301,9 +305,9 @@ type Exchange struct {
 	// either header may arrive first, so neither question can be answered until
 	// the blank line. Resolving early is what would make the verdict depend on
 	// the order the server chose to send its headers in.
-	clSeen         bool  // a Content-Length field was present
-	clValue        int64 // its value, when clSeen && clErr == nil
-	clErr          error // first Content-Length defect seen, if any
+	clSeen  bool  // a Content-Length field was present
+	clValue int64 // its value, when clSeen && clErr == nil
+	clErr   error // first Content-Length defect seen, if any
 	// respTE and respCL record mere presence of Transfer-Encoding and
 	// Content-Length in the response head, independent of their values and of
 	// the order they arrived in. RFC 9112 §6.3 rule 3 keys on both being
@@ -1584,6 +1588,12 @@ func (ex *Exchange) commitHeaderLine(line string, have bool, out *[]hpack.Header
 					ex.respChunked = false
 					ex.contentLen = -1
 					ex.keepAlive = false
+					// Latched, not merely cleared: the "connection" case below
+					// re-sets keepAlive on a keep-alive option, and header lines
+					// arrive in whatever order the peer chose — so without this a
+					// server could undo a framing condemnation just by putting
+					// Connection: keep-alive after its malformed Transfer-Encoding.
+					ex.noReuse = true
 					break
 				}
 				if coding == "" {
@@ -1626,7 +1636,8 @@ func (ex *Exchange) commitHeaderLine(line string, have bool, out *[]hpack.Header
 				if hasConnectionOption(value, "close") {
 					ex.keepAlive = false
 					ex.closeSeen = true
-				} else if hasConnectionOption(value, "keep-alive") && !ex.closeSeen {
+				} else if hasConnectionOption(value, "keep-alive") && !ex.closeSeen &&
+					!ex.noReuse && !ex.condemned {
 					ex.keepAlive = true
 				}
 			}
@@ -1711,9 +1722,26 @@ func (ex *Exchange) ReadBodyChunk(buf []byte) (n int, done bool, err error) {
 		if int64(len(buf)) > remaining {
 			buf = buf[:remaining]
 		}
+		// bufio.Read short-circuits when its buffer is empty AND the caller's
+		// slice is at least buffer-sized: it reads straight into that slice and
+		// the buffer stays empty. Anything the peer appended after this response
+		// then never enters the reader, so the completion guard below — which asks
+		// Buffered() — sees nothing, the connection is pooled, and the next
+		// request parses the peer's appended response as its own (RFC 9112 §6.3
+		// MUST NOT). Note it before the read; the guard cannot infer it after.
+		bypassed := len(buf) >= readBufSize && ex.c.br.Buffered() == 0
 		n, err = ex.c.br.Read(buf)
 		ex.bodyRead += int64(n)
 		done = ex.bodyRead >= ex.contentLen
+		// Only on the bypass path, and only once the body is complete: ask the
+		// socket what the reader could not see. A peer that closed is already
+		// reported through the io.EOF branch below (the direct read surfaces it
+		// coalesced), so this is specifically about octets it appended. The
+		// ~1ms probe is charged only to a body whose final read was >= 16 KiB,
+		// where it is noise against the transfer it just completed.
+		if bypassed && done && err == nil && ex.keepAlive && !ex.c.ProbeIdle() {
+			ex.keepAlive = false
+		}
 		if err == io.EOF {
 			if !done {
 				// Premature EOF before Content-Length satisfied. RFC 9112 §6.3

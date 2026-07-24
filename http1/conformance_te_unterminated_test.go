@@ -73,3 +73,32 @@ func TestConformance_RFC9110_Sec10_1_4_TerminatedQuotedTEStillFrames(t *testing.
 			"is still the final coding", body, "HELLO")
 	}
 }
+
+// TestConformance_RFC9110_Sec10_1_4_MalformedTENotResurrectedByKeepAlive pins
+// that a framing condemnation survives a later Connection: keep-alive.
+//
+// The malformed-Transfer-Encoding branch cleared keepAlive, but the "connection"
+// case re-sets it on a keep-alive option — and header lines arrive in whatever
+// order the peer chose. A server could therefore undo the condemnation of a body
+// whose boundary is indeterminate simply by ordering its headers, handing the
+// pool a socket nobody can resynchronise on. The verdict is now latched.
+func TestConformance_RFC9110_Sec10_1_4_MalformedTENotResurrectedByKeepAlive(t *testing.T) {
+	for _, order := range []struct {
+		name string
+		head string
+	}{
+		{"keep-alive after", "Transfer-Encoding: chunked;x=\", gzip\r\nConnection: keep-alive\r\n"},
+		{"keep-alive before", "Connection: keep-alive\r\nTransfer-Encoding: chunked;x=\", gzip\r\n"},
+	} {
+		t.Run(order.name, func(t *testing.T) {
+			ex := wireExchange(t, "GET", "HTTP/1.1 200 OK\r\n"+order.head+"\r\n5\r\nHELLO\r\n0\r\n\r\n")
+			if _, _, err := ex.ReadResponse(context.Background()); err != nil {
+				t.Fatalf("ReadResponse: %v", err)
+			}
+			if ex.KeepAlive() {
+				t.Error("KeepAlive() = true, want false — the body boundary is indeterminate, " +
+					"so no Connection: keep-alive may put this socket back in the pool")
+			}
+		})
+	}
+}
