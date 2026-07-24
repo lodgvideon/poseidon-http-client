@@ -661,6 +661,19 @@ func (h *connHandler) handlePushPromiseBlock(parentStreamID, promisedStreamID ui
 		return nil
 	}
 
+	// RFC 9113 §6.6: a PUSH_PROMISE is valid only on an associated stream in the
+	// "open" or "half-closed (local)" state — both keep the server's half open. A
+	// registered parent whose remote half already ended is "half-closed (remote)"
+	// (the server sent END_STREAM yet the promise arrives afterward): neither of
+	// the two permitted states, so it is a connection error PROTOCOL_ERROR. A
+	// fully-closed parent is unregistered and handled by the parent==nil branch
+	// above, so this catches only the live half-closed(remote) case. A conformant
+	// server never sends a promise after closing its half, so this rejects only a
+	// misbehaving peer, never a valid push.
+	if parent.hasRemoteEnded() {
+		return &ConnError{Code: frame.ErrCodeProtocolError, Reason: "PUSH_PROMISE on half-closed(remote) stream"}
+	}
+
 	// RFC 9113 §8.4: refuse a promised request whose method is not safe and
 	// cacheable, that indicates request content, or whose :authority the server
 	// is not authoritative for. This is a stream-level refusal — the connection
