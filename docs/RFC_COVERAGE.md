@@ -161,6 +161,16 @@ non-ACK PING frames with `ACK=1` and the original 8-byte payload
 | §5.2     | Negative    | TestConformance_RFC7541_C5_2_HuffmanDecode_InvalidCode, _PrefixOfEos, _EmptyInput (hpack/) — malformed Huffman input returns ErrInvalidHuffman; empty input is valid |
 | §5.2     | Roundtrip   | TestConformance_RFC7541_C5_2_HuffmanDecode_LongString_RoundTrip (hpack/) — 1024-byte ASCII string round-trips through Huffman encode/decode |
 
+## RFC 9113 — HTTP/2 (current; obsoletes RFC 7540)
+
+| Section | Type        | Test |
+|---------|-------------|------|
+| §7.7 / 9113 §8.3.1 | Conformance | TestConformance_RFC9113_Sec8_3_1_HostHeaderRefused (client/) — a caller `host` header is refused instead of riding the H2 wire beside a possibly-different `:authority` |
+| §6.9.1 | Conformance | TestConformance_RFC9113_Sec6_9_1_StreamWindowUpdateZero_StreamError (conn/) — a WINDOW_UPDATE with a 0 increment on a stream is a **stream** error of type PROTOCOL_ERROR; the reader-loop `mapFrameError` resets only that stream and the pooled connection survives, where the old code killed the whole connection with INTERNAL_ERROR |
+| §6.9 | Conformance | TestConformance_RFC9113_Sec6_9_ConnWindowUpdateZero_ConnError (conn/) — a 0-increment WINDOW_UPDATE on the connection flow-control window (stream 0) is a connection error of type PROTOCOL_ERROR, torn down with a typed GOAWAY |
+| §6.3 | Conformance | TestConformance_RFC9113_Sec6_3_PriorityWrongLength_StreamError (conn/) — a PRIORITY frame of length != 5 is a **stream** error of type FRAME_SIZE_ERROR (§6.3), not the connection kill the old plain-sentinel path produced |
+| §6.1 | Conformance | TestConformance_RFC9113_Sec6_1_DataOnStreamZero_ConnError (conn/) — a DATA frame on stream 0 is a connection error of type PROTOCOL_ERROR, now surfaced as a typed GOAWAY rather than a silent close |
+
 ## RFC 2616 — HTTP/1.1 (http1/ package)
 
 | Section | Type        | Test |

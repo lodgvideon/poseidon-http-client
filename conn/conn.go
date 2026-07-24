@@ -1540,8 +1540,11 @@ func (c *Conn) readerLoop() {
 	h := newConnHandler(c, c.dec)
 	h.raiseMaxHeaderBytes(c.opts.Settings.MaxHeaderListSize)
 	for {
-		_, err := c.fr.ReadFrame(context.Background(), h)
+		fh, err := c.fr.ReadFrame(context.Background(), h)
 		if err != nil {
+			// The Framer surfaces a malformed frame as a plain sentinel; map it
+			// to the RFC 9113 scope and typed error code before routing.
+			err = c.mapFrameError(fh, err)
 			// A *StreamError is non-fatal (RFC 7540 §5.4.2): reset only the
 			// offending stream and keep the connection — and every other
 			// in-flight stream — alive. onDataReceived / onWindowUpdate
@@ -1563,6 +1566,60 @@ func (c *Conn) readerLoop() {
 			c.shutdownStreams(err)
 			return
 		}
+	}
+}
+
+// mapFrameError converts a Framer sentinel into a typed *StreamError or
+// *ConnError carrying the RFC 9113 scope and error code, so the reader loop
+// resets a single stream where the spec says stream error (a wrong-length
+// PRIORITY, a 0-increment stream WINDOW_UPDATE) and tears the whole connection
+// down with a typed GOAWAY where it says connection error. Errors the handler
+// already typed (flow-control overruns, malformed responses) and transport / EOF
+// errors pass through unchanged.
+func (c *Conn) mapFrameError(fh frame.FrameHeader, err error) error {
+	var se *StreamError
+	var ce *ConnError
+	if errors.As(err, &se) || errors.As(err, &ce) {
+		return err
+	}
+	connErr := func(code frame.ErrCode) error {
+		return &ConnError{Code: code, Reason: err.Error()}
+	}
+	switch {
+	case errors.Is(err, frame.ErrPriorityWrongLength):
+		// §6.3: a PRIORITY frame of length != 5 is a STREAM error of type
+		// FRAME_SIZE_ERROR — reset the one stream, keep the connection.
+		return &StreamError{StreamID: fh.StreamID, Code: frame.ErrCodeFrameSizeError}
+	case errors.Is(err, frame.ErrZeroIncrement):
+		// §6.9: a WINDOW_UPDATE with a 0 increment is a stream error of type
+		// PROTOCOL_ERROR on a stream, and a connection error on the connection
+		// flow-control window (stream 0).
+		if fh.StreamID == 0 {
+			return connErr(frame.ErrCodeProtocolError)
+		}
+		return &StreamError{StreamID: fh.StreamID, Code: frame.ErrCodeProtocolError}
+	case errors.Is(err, frame.ErrInvalidStreamID),
+		errors.Is(err, frame.ErrInvalidPadding),
+		errors.Is(err, frame.ErrProtocolError):
+		// Stream-id rule violations (§5.1.1), oversized padding (§6.1) and the
+		// ORIGIN/ALTSVC framing faults are connection errors of type
+		// PROTOCOL_ERROR.
+		return connErr(frame.ErrCodeProtocolError)
+	case errors.Is(err, frame.ErrFrameTooLarge),
+		errors.Is(err, frame.ErrRSTWrongLength),
+		errors.Is(err, frame.ErrSettingsLength),
+		errors.Is(err, frame.ErrSettingsAck),
+		errors.Is(err, frame.ErrPingWrongLength),
+		errors.Is(err, frame.ErrWindowWrongLength),
+		errors.Is(err, frame.ErrShortRead):
+		// A frame that exceeds SETTINGS_MAX_FRAME_SIZE, a fixed-size frame of the
+		// wrong length, or one too small for its mandatory fields is a connection
+		// error of type FRAME_SIZE_ERROR (§4.2, §6.4, §6.5, §6.7, §6.9).
+		return connErr(frame.ErrCodeFrameSizeError)
+	default:
+		// io.EOF, context cancellation, transport errors: connection teardown
+		// with no typed GOAWAY (the peer is already gone or not speaking HTTP/2).
+		return err
 	}
 }
 
