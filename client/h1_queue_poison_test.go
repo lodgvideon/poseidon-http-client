@@ -214,3 +214,97 @@ func TestConformance_RFC9112_Sec6_3_LatePoisonNotPooled(t *testing.T) {
 		t.Errorf("accepted %d connections, want 2 — the poisoned connection was reused", n)
 	}
 }
+
+// TestConformance_RFC9112_Sec6_3_BufioBypassPoisonNotPooled pins the exact shape
+// that defeated the completion-time guard: a final body read large enough to
+// take bufio's direct-read path.
+//
+// bufio.Read short-circuits when its buffer is empty AND the caller's slice is at
+// least buffer-sized — it reads straight into that slice. The head is written as
+// its own segment so the buffer IS empty when the body read starts, and the body
+// is exactly readBufSize so the read is exactly buffer-sized. The appended
+// response then never enters the reader, Buffered() reports 0 at completion, and
+// the connection is pooled with the peer's response still on the socket.
+//
+// Mutation-checked: with the bypass probe removed, request 2 returns "PWNED" on
+// one connection.
+func TestConformance_RFC9112_Sec6_3_BufioBypassPoisonNotPooled(t *testing.T) {
+	const bodyLen = 16384 // == http1 readBufSize: the size that takes the direct path
+	const poison = "HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nPWNED"
+	const clean = "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok"
+	body := strings.Repeat("x", bodyLen)
+
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("Listen: %v", err)
+	}
+	defer ln.Close()
+
+	var accepted atomic.Int64
+	go func() {
+		for {
+			nc, aerr := ln.Accept()
+			if aerr != nil {
+				return
+			}
+			n := accepted.Add(1)
+			go func(nc net.Conn, n int64) {
+				defer nc.Close()
+				buf := make([]byte, 4096)
+				if _, rerr := nc.Read(buf); rerr != nil {
+					return
+				}
+				if n == 1 {
+					// Head alone first, so the client's bufio buffer is empty when
+					// it starts reading the body.
+					_, _ = nc.Write([]byte("HTTP/1.1 200 OK\r\nContent-Length: 16384\r\n\r\n"))
+					time.Sleep(50 * time.Millisecond)
+					_, _ = nc.Write([]byte(body + poison))
+				} else {
+					_, _ = nc.Write([]byte(clean))
+				}
+				_, _ = nc.Read(buf)
+			}(nc, n)
+		}
+	}()
+
+	c, err := client.NewH1PoolClient(
+		ln.Addr().String(),
+		h1clDialer(func(ctx context.Context, addr string) (net.Conn, error) {
+			return (&net.Dialer{}).DialContext(ctx, "tcp", addr)
+		}),
+		client.PoolOptions{MaxConnsPerHost: 1},
+		client.WithDefaultScheme("http"),
+	)
+	if err != nil {
+		t.Fatalf("NewH1PoolClient: %v", err)
+	}
+	defer c.Close()
+
+	do := func(resp *client.Response) error {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		resp.Reset()
+		return c.Do(ctx, &client.Request{Method: "GET", Path: "/", BodyMode: client.BodyBuffer}, resp)
+	}
+
+	var resp1 client.Response
+	if err := do(&resp1); err != nil {
+		t.Fatalf("request 1: Do = %v, want success", err)
+	}
+	if len(resp1.Body) != bodyLen {
+		t.Fatalf("request 1: body length = %d, want %d", len(resp1.Body), bodyLen)
+	}
+
+	var resp2 client.Response
+	if err := do(&resp2); err != nil {
+		t.Fatalf("request 2: Do = %v, want success on a fresh connection", err)
+	}
+	if got := string(resp2.Body); got != "ok" {
+		t.Errorf("request 2: body = %q, want %q — the appended response bypassed the "+
+			"reader and the connection was pooled with it still on the socket", got, "ok")
+	}
+	if n := accepted.Load(); n != 2 {
+		t.Errorf("accepted %d connections, want 2 — the poisoned connection was reused", n)
+	}
+}
