@@ -309,7 +309,18 @@ func (s *h1singleConn) warmup(n int) {
 	s.warmupCancel = cancel
 	s.mu.Unlock()
 	go func() {
+		// acquireConn calls HasResidue, which moves the read deadline and peeks at
+		// the reader — so it may only run when no exchange is in flight.
+		// openExchange takes this lock before acquireConn for exactly that reason;
+		// warmup skipped it, which raced bufio state against a live reader and,
+		// worse, made the in-flight response's own octets look like residue:
+		// acquireConn then closed the connection out from under the request that
+		// was reading it, which failed with "use of closed network connection".
+		// Documented as idempotent and safe on an already-warm client, so it must
+		// be exactly that.
+		s.inFlight.Lock()
 		_, _ = s.acquireConn(ctx)
+		s.inFlight.Unlock()
 		cancel()
 		s.mu.Lock()
 		s.warmupCancel = nil

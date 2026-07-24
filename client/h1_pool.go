@@ -624,7 +624,26 @@ func (p *h1Pool) acquire(ctx context.Context) (*h1ManagedConn, error) {
 		// as non-reusable so the actor evicts it, and ask again.
 		p.release(mc, false)
 	}
-	return p.acquireOnce(ctx)
+	// The loop is bounded by MaxConnsPerHost, and every rejected connection was
+	// evicted, so falling out of it means every connection the pool could offer
+	// had residue. Returning one unchecked was the old behaviour and it undid the
+	// guard entirely: MaxConnsPerHost defaults to 1, so exactly two checked
+	// attempts preceded one unchecked one, and a peer that writes on accept fails
+	// the checked attempts by construction — it only had to be persistent to be
+	// handed a poisoned connection anyway.
+	//
+	// Checked here too. A connection that still has residue at this point is not
+	// usable by anyone, so the honest answer is the error, not a socket with an
+	// attacker's response already on it.
+	mc, err := p.acquireOnce(ctx)
+	if err != nil || mc == nil {
+		return mc, err
+	}
+	if !mc.c.HasResidue() {
+		return mc, nil
+	}
+	p.release(mc, false)
+	return nil, ErrResidueOnAcquire
 }
 
 func (p *h1Pool) acquireOnce(ctx context.Context) (*h1ManagedConn, error) {

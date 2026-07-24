@@ -313,10 +313,17 @@ func validateRequest(r *Request) error {
 // known before the body is sent. Everything else means the caller's number is
 // the one going out with nothing behind it.
 func managesContentLength(r *Request) bool {
-	if r.CompressBody != EncodingIdentity {
+	if r.CompressBody != EncodingIdentity && (r.BodyReader != nil || len(r.Body) > 0) {
 		// compressedHeaders owns the field here: the compressed length for a
 		// buffered body, and no Content-Length at all for a BodyReader, whose
 		// compressed length cannot be known before it is read.
+		//
+		// Gated on a body EXISTING, because prepareCompressedRequest returns a
+		// bodyless request untouched — "no representation to encode" — so nothing
+		// strips the caller's Content-Length on that path and the unverifiable
+		// value reached the h2/h3 wire beside END_STREAM. Testing CompressBody
+		// alone recreated, for one shape, exactly the h1↔h2/h3 divergence this
+		// predicate exists to remove.
 		return true
 	}
 	if r.BodyReader != nil {
