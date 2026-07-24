@@ -349,6 +349,12 @@ func (s *Stream) SendHeaders(ctx context.Context, fields []hpack.HeaderField, en
 // SendHeaders.
 func (s *Stream) SendHeadersWithPriority(ctx context.Context, fields []hpack.HeaderField, endStream bool, prio *frame.Priority) error {
 	s.mu.Lock()
+	if s.pushed {
+		s.mu.Unlock()
+		// RFC 9113 §5.1: a server-pushed (reserved(remote)) stream is receive-only
+		// for the client; it may only carry RST_STREAM/WINDOW_UPDATE/PRIORITY from us.
+		return ErrPushedStreamReadOnly
+	}
 	if s.closed || s.localEnded {
 		s.mu.Unlock()
 		return ErrStreamClosed
@@ -390,6 +396,11 @@ func (s *Stream) SendHeadersWithPriority(ctx context.Context, fields []hpack.Hea
 // the connection closes. The caller must call SendHeaders first.
 func (s *Stream) SendData(ctx context.Context, p []byte, endStream bool) error {
 	s.mu.Lock()
+	if s.pushed {
+		s.mu.Unlock()
+		// RFC 9113 §5.1: a server-pushed stream is receive-only for the client.
+		return ErrPushedStreamReadOnly
+	}
 	if s.closed || s.localEnded {
 		s.mu.Unlock()
 		return ErrStreamClosed

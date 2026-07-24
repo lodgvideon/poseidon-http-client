@@ -51,6 +51,13 @@ var (
 	// streams may be opened. Mirrors ErrGoAway semantics for the
 	// outbound (client-initiated) shutdown path.
 	ErrConnDraining = errors.New("conn: connection draining; no new streams")
+	// ErrPushedStreamReadOnly is returned when the caller tries to send request
+	// frames (HEADERS or DATA) on a server-pushed stream obtained via
+	// LookupStream. A pushed stream is receive-only for the client: RFC 9113 §5.1
+	// forbids sending any frame other than RST_STREAM, WINDOW_UPDATE, or PRIORITY
+	// in the "reserved (remote)" state, and the client only ever receives the
+	// promised response — it never sends application data on a pushed stream.
+	ErrPushedStreamReadOnly = errors.New("conn: cannot send on a server-pushed stream (receive-only)")
 )
 
 // ConnError is connection-fatal. After it is returned the Conn is dead
