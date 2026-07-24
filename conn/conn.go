@@ -163,6 +163,10 @@ type Conn struct {
 	// whose id is ≤ goAwayLastStreamID continue.
 	goAwayReceived     atomic.Bool
 	goAwayLastStreamID atomic.Uint32
+	// goAwaySentLast is the last-stream-id advertised in the last GOAWAY we
+	// SENT (goAwayNoneSent until the first). RFC 9113 §6.8 forbids a later
+	// GOAWAY from advertising a larger id, so each send clamps to this.
+	goAwaySentLast atomic.Uint32
 
 	closed     atomic.Bool
 	readerDone chan struct{}
@@ -231,6 +235,7 @@ func NewClientConn(ctx context.Context, transport net.Conn, opts ConnOptions) (*
 		connRecvWindow:     int32(connInitialRecvWindow),
 		peerConnSendWindow: int32(connInitialRecvWindow),
 	}
+	c.goAwaySentLast.Store(goAwayNoneSent)
 	c.fcOutCond = sync.NewCond(&c.fcOutMu)
 	c.wbatch = newWriteBatcher(opts.GroupCommit, &c.wmu, wb)
 	// Sync Framer read limit to our advertised MaxFrameSize. Default Framer
@@ -492,7 +497,7 @@ func (c *Conn) Close() error {
 		_ = dl.SetWriteDeadline(time.Now().Add(closeGoAwayDeadline))
 	}
 	c.wmu.Lock()
-	_ = c.fr.WriteGoAway(c.lastClientStreamID(), frame.ErrCodeNoError, nil)
+	_ = c.fr.WriteGoAway(c.goAwayLastStreamIDToSend(), frame.ErrCodeNoError, nil)
 	_ = c.flushWrite()
 	// Wake any group-commit writer deferring on a flush; it re-checks and
 	// flushes itself against the now-closing transport rather than hanging.
@@ -509,7 +514,7 @@ func (c *Conn) Close() error {
 const closeGoAwayDeadline = 200 * time.Millisecond
 
 // Shutdown performs a graceful connection close (RFC 7540 §6.8).
-// It sends GOAWAY(lastClientStreamID, NO_ERROR) to inform the peer
+// It sends GOAWAY(last peer-initiated stream id, NO_ERROR) to inform the peer
 // that no new streams will be opened, marks the conn as draining
 // (so NewStream returns ErrConnDraining), and waits up to gracefulTimeout
 // for all in-flight streams to complete naturally. After the timeout
@@ -536,7 +541,7 @@ func (c *Conn) Shutdown(gracefulTimeout time.Duration) error {
 		_ = dl.SetWriteDeadline(time.Now().Add(closeGoAwayDeadline))
 	}
 	c.wmu.Lock()
-	_ = c.fr.WriteGoAway(c.lastClientStreamID(), frame.ErrCodeNoError, nil)
+	_ = c.fr.WriteGoAway(c.goAwayLastStreamIDToSend(), frame.ErrCodeNoError, nil)
 	_ = c.flushWrite()
 	c.wmu.Unlock()
 	// Wake any writers blocked in acquireSendCredits so they observe
@@ -604,13 +609,25 @@ func streamRefundThreshold(window uint32) uint32 {
 	return recvWindowRefundThreshold
 }
 
-func (c *Conn) lastClientStreamID() uint32 {
+// goAwayNoneSent is the goAwaySentLast sentinel meaning no GOAWAY has been sent.
+const goAwayNoneSent = ^uint32(0)
+
+// goAwayLastStreamIDToSend returns the last-stream-id to advertise in a GOAWAY we
+// send. RFC 9113 §6.8: the value is the highest-numbered stream the sender may
+// have acted on. A client acts on peer-initiated (even, server-pushed) streams,
+// so it is lastPromisedID — 0 when server push is unused, which is the common
+// case. The value is clamped so a later GOAWAY never advertises a larger id than
+// an earlier one ("Endpoints MUST NOT increase the value they send in the last
+// stream identifier"). Called under wmu, where all GOAWAY writes are serialized.
+func (c *Conn) goAwayLastStreamIDToSend() uint32 {
 	c.smu.Lock()
-	defer c.smu.Unlock()
-	if c.nextID < 3 {
-		return 0
+	id := c.lastPromisedID
+	c.smu.Unlock()
+	if prev := c.goAwaySentLast.Load(); prev != goAwayNoneSent && id > prev {
+		id = prev
 	}
-	return c.nextID - 2
+	c.goAwaySentLast.Store(id)
+	return id
 }
 
 // Stats returns a point-in-time snapshot of connection counters.
@@ -1409,6 +1426,15 @@ func (c *Conn) writeSettingsAck() error {
 // SendData calls (which still go through, until the peer closes the
 // transport).
 func (c *Conn) onGoAwayReceived(lastStreamID uint32, _ frame.ErrCode) {
+	// RFC 9113 §6.8: a peer MUST NOT raise the last-stream-id across successive
+	// GOAWAYs. Defensively clamp a second GOAWAY that tries to — never widen the
+	// set of streams we treat as accepted by the peer. Single-goroutine (reader)
+	// access, so the load-then-store needs no CAS.
+	if c.goAwayReceived.Load() {
+		if prev := c.goAwayLastStreamID.Load(); lastStreamID > prev {
+			lastStreamID = prev
+		}
+	}
 	c.goAwayLastStreamID.Store(lastStreamID)
 	c.goAwayReceived.Store(true)
 
@@ -1767,7 +1793,7 @@ func (c *Conn) emitConnGoAwayIfTyped(err error) {
 		_ = dl.SetWriteDeadline(time.Now().Add(closeGoAwayDeadline))
 	}
 	c.wmu.Lock()
-	_ = c.fr.WriteGoAway(c.lastClientStreamID(), ce.Code, nil)
+	_ = c.fr.WriteGoAway(c.goAwayLastStreamIDToSend(), ce.Code, nil)
 	_ = c.flushWrite()
 	c.wmu.Unlock()
 }
