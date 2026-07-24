@@ -172,3 +172,53 @@ func TestConformance_RFC7540_Sec10_3_LegalResponseFieldsAccepted(t *testing.T) {
 		})
 	}
 }
+
+// TestConformance_RFC9113_Sec8_2_1_ResponseFieldValueEdgeWhitespace_Malformed
+// pins the value rule RFC 9113 §8.2.1 added over 7540: "A field value MUST NOT
+// start or end with an ASCII whitespace character (ASCII SP or HTAB, 0x20 or
+// 0x09)." §8.2.1 makes a violating response malformed, so §8.1.2.6's remedy — a
+// stream error PROTOCOL_ERROR — applies. Same smuggling motivation as the
+// embedded-delimiter rule: " x" reserialized to HTTP/1.1 shifts the field.
+func TestConformance_RFC9113_Sec8_2_1_ResponseFieldValueEdgeWhitespace_Malformed(t *testing.T) {
+	for _, tc := range []struct{ name, value string }{
+		{"leading_SP", " x"},
+		{"trailing_SP", "x "},
+		{"leading_HTAB", "\tx"},
+		{"trailing_HTAB", "x\t"},
+		{"both_ends_SP", " x "},
+		{"only_SP", " "},
+		{"only_HTAB", "\t"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m := newFakeStreamMap()
+			h := newConnHandler(m, hpack.NewDecoder())
+			m.addStream(1)
+			err := deliverBlock(t, h, 1, fields("x-junk", tc.value), false)
+			wantStreamProtocolError(t, err, "edge-whitespace value "+tc.name)
+		})
+	}
+}
+
+// TestConformance_RFC9113_Sec8_2_1_InternalWhitespaceValueAccepted is the
+// over-rejection guard for the edge rule: whitespace is legal INSIDE a value and
+// bounded by visible characters, so these must still pass. Rejecting them would
+// break ordinary responses (a value like "text/plain; charset=utf-8").
+func TestConformance_RFC9113_Sec8_2_1_InternalWhitespaceValueAccepted(t *testing.T) {
+	for _, tc := range []struct{ name, value string }{
+		{"internal_SP", "a b"},
+		{"internal_HTAB", "a\tb"},
+		{"content_type", "text/plain; charset=utf-8"},
+		{"visible_edges", "ab"},
+		{"empty", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m := newFakeStreamMap()
+			h := newConnHandler(m, hpack.NewDecoder())
+			m.addStream(1)
+			if err := deliverBlock(t, h, 1, fields("x-junk", tc.value), false); err != nil {
+				t.Errorf("%s: rejected a legal value (%q): %v — internal whitespace is "+
+					"legal, only leading/trailing SP/HTAB is malformed (§8.2.1)", tc.name, tc.value, err)
+			}
+		})
+	}
+}

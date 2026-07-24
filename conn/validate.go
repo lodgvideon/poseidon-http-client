@@ -56,9 +56,10 @@ func validFieldName(name []byte) bool {
 	return true
 }
 
-// validFieldValue reports whether value carries no CR, LF or NUL.
+// validFieldValue reports whether value is a legal HTTP/2 field value: no CR, LF
+// or NUL at any position, and no leading or trailing ASCII whitespace.
 //
-// RFC 7540 §10.3 names exactly these three and says why: "While most of the
+// RFC 7540 §10.3 names the first three and says why: "While most of the
 // values that can be encoded will not alter header field parsing, carriage return
 // (CR, ASCII 0xd), line feed (LF, ASCII 0xa), and the zero character (NUL, ASCII
 // 0x0) might be exploited by an attacker if they are translated verbatim."
@@ -67,9 +68,23 @@ func validFieldName(name []byte) bool {
 // wire itself — which is exactly why this is easy to skip and worth not skipping.
 // The damage is downstream of us: a caller that copies the value into an HTTP/1.1
 // message, a log line, or a header of its own gets the split we refused to make.
+//
+// RFC 9113 §8.2.1 tightened the value rules with a MUST that 7540 lacked:
+// "A field value MUST NOT start or end with an ASCII whitespace character
+// (ASCII SP or HTAB, 0x20 or 0x09)." A response (or pushed request) carrying an
+// edge-whitespace value "MUST be treated as malformed" — the same smuggling
+// hazard as an embedded delimiter once the value is reserialized to HTTP/1.1.
 func validFieldValue(value []byte) bool {
 	for _, c := range value {
 		if c == 0x00 || c == 0x0a || c == 0x0d {
+			return false
+		}
+	}
+	if n := len(value); n > 0 {
+		if first := value[0]; first == 0x20 || first == 0x09 {
+			return false
+		}
+		if last := value[n-1]; last == 0x20 || last == 0x09 {
 			return false
 		}
 	}
