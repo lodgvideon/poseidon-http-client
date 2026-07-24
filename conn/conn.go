@@ -254,6 +254,9 @@ func NewClientConn(ctx context.Context, transport net.Conn, opts ConnOptions) (*
 	// HPACK encoder when the peer advertised one) and reject an out-of-range
 	// SETTINGS_INITIAL_WINDOW_SIZE before any stream is opened against it.
 	if err := c.applyInitialPeerSettings(peer); err != nil {
+		// The reader loop never started, so nothing else will close the
+		// transport; a rejected server preface must not leak the socket.
+		_ = transport.Close()
 		return nil, err
 	}
 	go c.readerLoop()
@@ -1147,7 +1150,46 @@ func (c *Conn) onWindowUpdate(streamID uint32, increment uint32) error {
 // of type FLOW_CONTROL_ERROR.
 const maxInitialWindowSize = int64(1)<<31 - 1
 
+// frameSizeFloor and frameSizeCeil bound SETTINGS_MAX_FRAME_SIZE (RFC 9113
+// §6.5.2): the initial/minimum value 2^14 and the maximum 2^24-1.
+const (
+	frameSizeFloor uint32 = 1 << 14   // 16384
+	frameSizeCeil  uint32 = 1<<24 - 1 // 16777215
+)
+
+// checkPeerSettingValues rejects a peer SETTINGS value a client must not accept,
+// each a connection error of type PROTOCOL_ERROR (RFC 9113 §5.4.1):
+//
+//   - SETTINGS_ENABLE_PUSH: §6.5.2 "Any value other than 0 or 1 MUST be treated
+//     as a connection error … of type PROTOCOL_ERROR", and §8.4 "A client MUST
+//     treat receipt of a SETTINGS frame with SETTINGS_ENABLE_PUSH set to 1 as a
+//     connection error … of type PROTOCOL_ERROR" — so a server may only send 0.
+//   - SETTINGS_MAX_FRAME_SIZE: §6.5.2 "Values outside this range [2^14, 2^24-1]
+//     MUST be treated as a connection error … of type PROTOCOL_ERROR".
+//
+// SETTINGS_INITIAL_WINDOW_SIZE range is a FLOW_CONTROL_ERROR and is checked at
+// the apply sites, not here.
+func checkPeerSettingValues(s frame.SettingsParams) error {
+	for i := 0; i < s.N; i++ {
+		p := s.Pairs[i]
+		switch p.ID {
+		case frame.SettingEnablePush:
+			if p.Value != 0 {
+				return &ConnError{Code: frame.ErrCodeProtocolError, Reason: "peer SETTINGS_ENABLE_PUSH must be 0"}
+			}
+		case frame.SettingMaxFrameSize:
+			if p.Value < frameSizeFloor || p.Value > frameSizeCeil {
+				return &ConnError{Code: frame.ErrCodeProtocolError, Reason: "SETTINGS_MAX_FRAME_SIZE out of range"}
+			}
+		}
+	}
+	return nil
+}
+
 func (c *Conn) applyInitialPeerSettings(peer frame.SettingsParams) error {
+	if err := checkPeerSettingValues(peer); err != nil {
+		return err
+	}
 	for i := 0; i < peer.N; i++ {
 		p := peer.Pairs[i]
 		switch p.ID {
@@ -1177,6 +1219,12 @@ func (c *Conn) applyInitialPeerSettings(peer frame.SettingsParams) error {
 // 2^31-1 (RFC 7540 §6.9.2).
 func (c *Conn) applyPeerSettings(s frame.SettingsParams) error {
 	const maxWindow = int64(1<<31 - 1)
+
+	// Reject ENABLE_PUSH != 0 and an out-of-range MAX_FRAME_SIZE (both connection
+	// errors of type PROTOCOL_ERROR) before any value is merged or applied.
+	if err := checkPeerSettingValues(s); err != nil {
+		return err
+	}
 
 	// Merge the settings AND apply the retroactive INITIAL_WINDOW_SIZE delta to
 	// existing streams atomically under psMu (lock order psMu->smu->s.mu),

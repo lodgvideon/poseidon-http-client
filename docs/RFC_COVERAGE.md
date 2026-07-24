@@ -170,6 +170,9 @@ non-ACK PING frames with `ACK=1` and the original 8-byte payload
 | §6.9 | Conformance | TestConformance_RFC9113_Sec6_9_ConnWindowUpdateZero_ConnError (conn/) — a 0-increment WINDOW_UPDATE on the connection flow-control window (stream 0) is a connection error of type PROTOCOL_ERROR, torn down with a typed GOAWAY |
 | §6.3 | Conformance | TestConformance_RFC9113_Sec6_3_PriorityWrongLength_StreamError (conn/) — a PRIORITY frame of length != 5 is a **stream** error of type FRAME_SIZE_ERROR (§6.3), not the connection kill the old plain-sentinel path produced |
 | §6.1 | Conformance | TestConformance_RFC9113_Sec6_1_DataOnStreamZero_ConnError (conn/) — a DATA frame on stream 0 is a connection error of type PROTOCOL_ERROR, now surfaced as a typed GOAWAY rather than a silent close |
+| §6.5.2 / §8.4 | Conformance | TestConformance_RFC9113_Sec6_5_2_ServerEnablePushOne_ConnError, TestConformance_RFC9113_Sec6_5_2_HandshakeEnablePushOne_Refused (conn/) — a server SETTINGS_ENABLE_PUSH=1, mid-connection or in the preface, is a connection error PROTOCOL_ERROR ("A client MUST treat receipt of a SETTINGS frame with SETTINGS_ENABLE_PUSH set to 1 as a connection error … of type PROTOCOL_ERROR"); the validator itself is unit-covered by TestCheckPeerSettingValues |
+| §6.5.2 | Conformance | TestConformance_RFC9113_Sec6_5_2_MaxFrameSizeOutOfRange_ConnError (conn/) — a received SETTINGS_MAX_FRAME_SIZE below 2^14 or above 2^24-1 is a connection error PROTOCOL_ERROR ("Values outside this range MUST be treated as a connection error … of type PROTOCOL_ERROR") |
+| §6.5.2 | Conformance | TestConformance_RFC9113_Sec6_5_2_AdvertisedMaxFrameSizeClamped (conn/) — our own advertised MAX_FRAME_SIZE is clamped into [2^14, 2^24-1] ("The value advertised by an endpoint MUST be between this initial value and the maximum allowed frame size … inclusive") |
 
 ## RFC 2616 — HTTP/1.1 (http1/ package)
 
