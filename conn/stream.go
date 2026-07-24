@@ -257,6 +257,16 @@ func (s *Stream) markRemoteEnd() {
 	s.mu.Unlock()
 }
 
+// hasRemoteEnded reports whether the peer has ended its side of the stream
+// (END_STREAM observed, or the stream reset). The reader uses it to detect a
+// frame arriving after END_STREAM on a half-closed(remote) stream (RFC 9113
+// §5.1), which is a stream error STREAM_CLOSED.
+func (s *Stream) hasRemoteEnded() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.remoteEnded
+}
+
 // push delivers an event from the reader goroutine. Non-blocking under
 // the channel's capacity; documented as part of the public contract.
 // On overflow: marks stream closed, dispatches the RST send to a

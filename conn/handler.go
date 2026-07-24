@@ -59,6 +59,10 @@ func GetDataBufPool() *sync.Pool { return &dataBufPool }
 // path (DIP fix from W4 review).
 type connOps interface {
 	lookupStream(id uint32) *Stream
+	// isIdleStream reports whether id names a never-opened stream (RFC 9113
+	// §5.1). A frame other than HEADERS/PRIORITY on such a stream is a
+	// connection error PROTOCOL_ERROR; a late frame on a closed stream is not.
+	isIdleStream(id uint32) bool
 	onDataReceived(s *Stream, length uint32) error
 	// accountConnRecvOnly settles the connection-level recv window for a DATA
 	// frame whose stream is no longer in the registry (RFC 7540 §6.9, §5.1).
@@ -177,11 +181,24 @@ func (h *connHandler) OnData(fh frame.FrameHeader, p []byte, _ uint8) error {
 	h.streams.bumpFramesReceived()
 	s := h.streams.lookupStream(fh.StreamID)
 	if s == nil {
-		// The stream is gone — reset by us, or already closed and evicted — so
-		// the DATA payload is ignored (RFC 7540 §5.1). But its bytes still count
-		// against the CONNECTION flow-control window (§6.9, §5.1), so the window
-		// must be settled or it leaks and the connection eventually stalls.
+		// A DATA frame on an idle stream (never opened) is a connection error of
+		// type PROTOCOL_ERROR (RFC 9113 §5.1). On a closed stream — one we reset,
+		// or that completed and was evicted — the payload is discarded (§5.1
+		// leniency for a stream we reset), but its bytes still count against the
+		// CONNECTION flow-control window (§6.9), so the window must be settled or it
+		// leaks and the connection eventually stalls.
+		if h.streams.isIdleStream(fh.StreamID) {
+			return &ConnError{Code: frame.ErrCodeProtocolError, Reason: "DATA on idle stream"}
+		}
 		return h.streams.accountConnRecvOnly(fh.Length)
+	}
+	// A DATA frame after the peer's END_STREAM — half-closed(remote), still
+	// registered because our upload is open — is a stream error STREAM_CLOSED
+	// (RFC 9113 §5.1 / §6.1). Settle the connection window (the octets are spent)
+	// and reset just this stream; the connection and its siblings survive.
+	if s.hasRemoteEnded() {
+		_ = h.streams.accountConnRecvOnly(fh.Length)
+		return &StreamError{StreamID: s.id, Code: frame.ErrCodeStreamClosed}
 	}
 	if err := h.streams.onDataReceived(s, fh.Length); err != nil {
 		return err
@@ -244,12 +261,23 @@ func (h *connHandler) OnHeaders(fh frame.FrameHeader, hb frame.HeaderBlock, _ *f
 		return nil
 	}
 	if s == nil {
-		// Stream gone (reset or completed and evicted, RFC 7540 §5.1) or never
-		// opened. The event is dropped, but the block MUST still be decoded to
-		// keep the connection-wide HPACK decoder in sync (see drainHeaderBlock).
-		return h.drainHeaderBlock(hb)
+		return h.headerBlockForAbsentStream(fh.StreamID, hb)
 	}
 	return h.emitHeaderBlock(s, hb, end)
+}
+
+// headerBlockForAbsentStream handles a completed HEADERS/CONTINUATION block whose
+// stream is not in the registry. A block on an idle stream — a server opening a
+// stream the client did not (odd), or that no PUSH_PROMISE reserved (even, RFC
+// 9113 §5.1.1) — is a connection error PROTOCOL_ERROR (§5.1). A block on a closed
+// stream (reset or completed and evicted) is decoded to keep the connection-wide
+// HPACK context in sync and then discarded (§5.1 leniency); the idle case tears
+// the connection down, so its block need not be decoded.
+func (h *connHandler) headerBlockForAbsentStream(streamID uint32, hb []byte) error {
+	if h.streams.isIdleStream(streamID) {
+		return &ConnError{Code: frame.ErrCodeProtocolError, Reason: "HEADERS on idle stream"}
+	}
+	return h.drainHeaderBlock(hb)
 }
 
 // OnContinuation implements frame.Handler.
@@ -279,7 +307,7 @@ func (h *connHandler) OnContinuation(fh frame.FrameHeader, hb frame.HeaderBlock)
 	if s := h.streams.lookupStream(fh.StreamID); s != nil {
 		return h.emitHeaderBlock(s, h.pendingBuf, h.pendingEndStream)
 	}
-	return h.drainHeaderBlock(h.pendingBuf)
+	return h.headerBlockForAbsentStream(fh.StreamID, h.pendingBuf)
 }
 
 // drainHeaderBlock decodes hb through the connection-wide HPACK decoder and
@@ -502,6 +530,12 @@ func (h *connHandler) OnRSTStream(fh frame.FrameHeader, code frame.ErrCode) erro
 	h.streams.bumpFramesReceived()
 	s := h.streams.lookupStream(fh.StreamID)
 	if s == nil {
+		// RFC 9113 §6.4: a RST_STREAM naming an idle stream is a connection error
+		// PROTOCOL_ERROR. On a closed stream — one we reset, or that completed and
+		// was evicted — a late RST_STREAM is ignored (§5.1).
+		if h.streams.isIdleStream(fh.StreamID) {
+			return &ConnError{Code: frame.ErrCodeProtocolError, Reason: "RST_STREAM on idle stream"}
+		}
 		return nil
 	}
 	s.push(StreamEvent{Type: EventReset, RSTCode: code, EndStream: true})

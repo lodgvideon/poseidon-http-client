@@ -288,6 +288,23 @@ func (c *Conn) lookupStream(id uint32) *Stream {
 	return c.streams[id]
 }
 
+// isIdleStream reports whether id names a stream that has never been opened
+// (RFC 9113 §5.1 "idle"): a client-initiated (odd) id the client has not yet
+// allocated, or a server-initiated (even) id no PUSH_PROMISE has reserved. The
+// reader uses it to distinguish an idle stream — where a frame other than
+// HEADERS/PRIORITY is a connection error PROTOCOL_ERROR — from a closed stream,
+// where a late frame is minimally processed and discarded (§5.1 leniency for a
+// stream we reset). Client ids are allocated below nextID (§5.1.1 monotonic), and
+// pushed ids up to lastPromisedID, so anything at or beyond those is idle.
+func (c *Conn) isIdleStream(id uint32) bool {
+	c.smu.Lock()
+	defer c.smu.Unlock()
+	if id%2 == 1 {
+		return id >= c.nextID
+	}
+	return id > c.lastPromisedID
+}
+
 // pushSupport reports whether server push is enabled and returns the
 // stream-event buffer size for new pushed streams.
 func (c *Conn) pushSupport() (enabled bool, eventBuf int) {
@@ -1124,7 +1141,13 @@ func (c *Conn) onWindowUpdate(streamID uint32, increment uint32) error {
 	}
 	s := c.lookupStream(streamID)
 	if s == nil {
-		return nil // unknown / closed stream — peer chatter
+		// RFC 9113 §5.1: a WINDOW_UPDATE on an idle stream is a connection error
+		// PROTOCOL_ERROR — any frame other than HEADERS/PRIORITY on an idle stream
+		// is. On a closed stream a late WINDOW_UPDATE is peer chatter and ignored.
+		if c.isIdleStream(streamID) {
+			return &ConnError{Code: frame.ErrCodeProtocolError, Reason: "WINDOW_UPDATE on idle stream"}
+		}
+		return nil
 	}
 	s.mu.Lock()
 	newVal := int64(s.sendWindow) + int64(increment)

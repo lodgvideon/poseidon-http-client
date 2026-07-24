@@ -27,6 +27,11 @@ func (m *fakeStreamMap) lookupStream(id uint32) *Stream {
 	return m.streams[id]
 }
 
+// isIdleStream returns false so these unit tests exercise the closed-stream
+// (lenient) path for an unknown stream id; idle-stream connection errors are
+// covered against the real *Conn in conformance_streamstate_test.go.
+func (*fakeStreamMap) isIdleStream(uint32) bool { return false }
+
 // connOps no-op satisfaction so the wider production interface is met
 // in tests that only exercise stream lookup behaviour.
 func (*fakeStreamMap) onDataReceived(*Stream, uint32) error                 { return nil }
