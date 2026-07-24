@@ -1,6 +1,7 @@
 package client
 
 import (
+	"bytes"
 	"fmt"
 	"io"
 	"strings"
@@ -294,7 +295,7 @@ func checkRegularHeaders(headers []conn.HeaderField) (hasContentType, hasExpect1
 		if name == "content-type" {
 			hasContentType = true
 		}
-		if name == "expect" && strings.EqualFold(string(hf.Value), "100-continue") {
+		if name == "expect" && hasExpectContinue(hf.Value) {
 			hasExpect100 = true
 		}
 		if forbiddenRequestHeader(name) {
@@ -345,6 +346,31 @@ func containsAnyWhitespace(s string) bool {
 	}
 	return false
 }
+
+// hasExpectContinue reports whether an Expect field value carries the
+// 100-continue expectation as a list member.
+//
+// RFC 9110 §10.1.1 defines Expect as a #expectation list, so a whole-value
+// compare was wrong in both spellings that matter: "100-continue, x-foo" and
+// "100-continue " (OWS) both walked past the §10.1.1 MUST NOT on a bodyless
+// request. Members are compared case-insensitively after trimming OWS.
+func hasExpectContinue(v []byte) bool {
+	for len(v) > 0 {
+		tok := v
+		if i := bytes.IndexByte(v, ','); i >= 0 {
+			tok, v = v[:i], v[i+1:]
+		} else {
+			v = nil
+		}
+		if bytes.EqualFold(bytes.Trim(tok, " \t"), expect100Continue) {
+			return true
+		}
+	}
+	return false
+}
+
+// expect100Continue is the only expectation this client polices.
+var expect100Continue = []byte("100-continue")
 
 // pathHasControlByte reports whether s carries a C0 control (0x00–0x1F) or DEL
 // (0x7F). RFC 9112 §3 delimits the request-line by SP and CRLF, so any such byte
