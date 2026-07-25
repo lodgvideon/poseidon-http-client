@@ -108,6 +108,13 @@ type Stream struct {
 	// inflightDone in markStreamDone / releaseInflight.
 	pushed bool
 
+	// reqAuthority is the :authority pseudo-header of the request this stream
+	// carries, captured when the request HEADERS are written. The push accept
+	// path compares a PUSH_PROMISE's :authority against it — a server is
+	// authoritative for what it already answered over the cert-validated
+	// connection (RFC 9113 §8.4 / §10.1). Guarded by mu.
+	reqAuthority string
+
 	// headersReceived is set once a *final* (non-informational) response
 	// HEADERS block for this stream is delivered. The reader goroutine
 	// consults it to classify subsequent HEADERS frames as trailers
@@ -227,6 +234,7 @@ func recycleStream(pool *sync.Pool, s *Stream) {
 	s.closed = false
 	s.inflightDone = false
 	s.pushed = false
+	s.reqAuthority = ""
 	s.headersReceived = false
 	s.interimCount = 0
 	// The Content-Length check's per-response state, reset so a pooled Stream
@@ -255,6 +263,23 @@ func (s *Stream) markRemoteEnd() {
 	s.mu.Lock()
 	s.remoteEnded = true
 	s.mu.Unlock()
+}
+
+// hasRemoteEnded reports whether the peer has ended its side of the stream
+// (END_STREAM observed, or the stream reset). The reader uses it to detect a
+// frame arriving after END_STREAM on a half-closed(remote) stream (RFC 9113
+// §5.1), which is a stream error STREAM_CLOSED.
+func (s *Stream) hasRemoteEnded() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.remoteEnded
+}
+
+// requestAuthority returns the :authority the request on this stream carried.
+func (s *Stream) requestAuthority() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.reqAuthority
 }
 
 // push delivers an event from the reader goroutine. Non-blocking under
@@ -324,6 +349,12 @@ func (s *Stream) SendHeaders(ctx context.Context, fields []hpack.HeaderField, en
 // SendHeaders.
 func (s *Stream) SendHeadersWithPriority(ctx context.Context, fields []hpack.HeaderField, endStream bool, prio *frame.Priority) error {
 	s.mu.Lock()
+	if s.pushed {
+		s.mu.Unlock()
+		// RFC 9113 §5.1: a server-pushed (reserved(remote)) stream is receive-only
+		// for the client; it may only carry RST_STREAM/WINDOW_UPDATE/PRIORITY from us.
+		return ErrPushedStreamReadOnly
+	}
 	if s.closed || s.localEnded {
 		s.mu.Unlock()
 		return ErrStreamClosed
@@ -365,6 +396,11 @@ func (s *Stream) SendHeadersWithPriority(ctx context.Context, fields []hpack.Hea
 // the connection closes. The caller must call SendHeaders first.
 func (s *Stream) SendData(ctx context.Context, p []byte, endStream bool) error {
 	s.mu.Lock()
+	if s.pushed {
+		s.mu.Unlock()
+		// RFC 9113 §5.1: a server-pushed stream is receive-only for the client.
+		return ErrPushedStreamReadOnly
+	}
 	if s.closed || s.localEnded {
 		s.mu.Unlock()
 		return ErrStreamClosed

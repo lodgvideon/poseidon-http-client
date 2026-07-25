@@ -580,8 +580,8 @@ func TestConn_ReservePushedStream_RejectsIllegalIDs(t *testing.T) {
 		ours := newStream(1, 8, c, 65535)
 		c.streams[1] = ours
 
-		if _, err := c.reservePushedStream(1); !errors.Is(err, ErrIllegalPromisedID) {
-			t.Fatalf("reservePushedStream(1) err = %v, want ErrIllegalPromisedID", err)
+		if err := c.notePromisedID(1); !errors.Is(err, ErrIllegalPromisedID) {
+			t.Fatalf("notePromisedID(1) err = %v, want ErrIllegalPromisedID", err)
 		}
 		if got := c.streams[1]; got != ours {
 			t.Fatal("a promise for our own stream 1 replaced it in the registry")
@@ -594,43 +594,52 @@ func TestConn_ReservePushedStream_RejectsIllegalIDs(t *testing.T) {
 	t.Run("illegal ids", func(t *testing.T) {
 		for _, id := range []uint32{0, 1, 3, 7} {
 			c := newConn()
-			if _, err := c.reservePushedStream(id); !errors.Is(err, ErrIllegalPromisedID) {
-				t.Fatalf("reservePushedStream(%d) err = %v, want ErrIllegalPromisedID", id, err)
+			if err := c.notePromisedID(id); !errors.Is(err, ErrIllegalPromisedID) {
+				t.Fatalf("notePromisedID(%d) err = %v, want ErrIllegalPromisedID", id, err)
 			}
 			if len(c.streams) != 0 {
-				t.Fatalf("reservePushedStream(%d) registered %d streams, want 0", id, len(c.streams))
+				t.Fatalf("notePromisedID(%d) registered %d streams, want 0", id, len(c.streams))
 			}
 		}
 	})
 
 	t.Run("ids must strictly increase", func(t *testing.T) {
 		c := newConn()
-		if _, err := c.reservePushedStream(4); err != nil {
-			t.Fatalf("reservePushedStream(4): %v", err)
+		if err := c.notePromisedID(4); err != nil {
+			t.Fatalf("notePromisedID(4): %v", err)
 		}
 		for _, id := range []uint32{4, 2} {
-			if _, err := c.reservePushedStream(id); !errors.Is(err, ErrIllegalPromisedID) {
-				t.Fatalf("reservePushedStream(%d) after 4: err = %v, want ErrIllegalPromisedID", id, err)
+			if err := c.notePromisedID(id); !errors.Is(err, ErrIllegalPromisedID) {
+				t.Fatalf("notePromisedID(%d) after 4: err = %v, want ErrIllegalPromisedID", id, err)
 			}
 		}
-		if _, err := c.reservePushedStream(6); err != nil {
-			t.Fatalf("reservePushedStream(6) after 4: %v", err)
+		if err := c.notePromisedID(6); err != nil {
+			t.Fatalf("notePromisedID(6) after 4: %v", err)
 		}
 	})
 
 	t.Run("a refused id still advances the promised-id floor", func(t *testing.T) {
 		c := newConn()
 		c.opts.Settings.MaxConcurrentStreams = 1
+		if err := c.notePromisedID(2); err != nil {
+			t.Fatalf("notePromisedID(2): %v", err)
+		}
 		if _, err := c.reservePushedStream(2); err != nil {
 			t.Fatalf("reservePushedStream(2): %v", err)
+		}
+		// 4 is spent on the wire even though the cap will refuse it: notePromisedID
+		// advances the promised-id floor before the cap check, so the server's
+		// raced pushed-response frames on stream 4 resolve to a closed stream
+		// (discarded), not an idle one (which would kill the connection, §5.1).
+		if err := c.notePromisedID(4); err != nil {
+			t.Fatalf("notePromisedID(4): %v", err)
 		}
 		if _, err := c.reservePushedStream(4); !errors.Is(err, ErrPushRefused) {
 			t.Fatalf("reservePushedStream(4) at cap 1: err = %v, want ErrPushRefused", err)
 		}
-		// 4 was spent on the wire even though we refused it, so a repeat is
-		// still illegal rather than merely refused.
-		if _, err := c.reservePushedStream(4); !errors.Is(err, ErrIllegalPromisedID) {
-			t.Fatalf("reservePushedStream(4) repeat: err = %v, want ErrIllegalPromisedID", err)
+		// The floor advanced past 4, so a repeat promise for it is illegal.
+		if err := c.notePromisedID(4); !errors.Is(err, ErrIllegalPromisedID) {
+			t.Fatalf("notePromisedID(4) repeat: err = %v, want ErrIllegalPromisedID", err)
 		}
 	})
 }

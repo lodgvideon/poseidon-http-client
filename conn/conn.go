@@ -7,6 +7,7 @@ import (
 	"errors"
 	"io"
 	"net"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -162,6 +163,10 @@ type Conn struct {
 	// whose id is ≤ goAwayLastStreamID continue.
 	goAwayReceived     atomic.Bool
 	goAwayLastStreamID atomic.Uint32
+	// goAwaySentLast is the last-stream-id advertised in the last GOAWAY we
+	// SENT (goAwayNoneSent until the first). RFC 9113 §6.8 forbids a later
+	// GOAWAY from advertising a larger id, so each send clamps to this.
+	goAwaySentLast atomic.Uint32
 
 	closed     atomic.Bool
 	readerDone chan struct{}
@@ -230,6 +235,7 @@ func NewClientConn(ctx context.Context, transport net.Conn, opts ConnOptions) (*
 		connRecvWindow:     int32(connInitialRecvWindow),
 		peerConnSendWindow: int32(connInitialRecvWindow),
 	}
+	c.goAwaySentLast.Store(goAwayNoneSent)
 	c.fcOutCond = sync.NewCond(&c.fcOutMu)
 	c.wbatch = newWriteBatcher(opts.GroupCommit, &c.wmu, wb)
 	// Sync Framer read limit to our advertised MaxFrameSize. Default Framer
@@ -254,6 +260,9 @@ func NewClientConn(ctx context.Context, transport net.Conn, opts ConnOptions) (*
 	// HPACK encoder when the peer advertised one) and reject an out-of-range
 	// SETTINGS_INITIAL_WINDOW_SIZE before any stream is opened against it.
 	if err := c.applyInitialPeerSettings(peer); err != nil {
+		// The reader loop never started, so nothing else will close the
+		// transport; a rejected server preface must not leak the socket.
+		_ = transport.Close()
 		return nil, err
 	}
 	go c.readerLoop()
@@ -285,36 +294,100 @@ func (c *Conn) lookupStream(id uint32) *Stream {
 	return c.streams[id]
 }
 
+// isIdleStream reports whether id names a stream that has never been opened
+// (RFC 9113 §5.1 "idle"): a client-initiated (odd) id the client has not yet
+// allocated, or a server-initiated (even) id no PUSH_PROMISE has reserved. The
+// reader uses it to distinguish an idle stream — where a frame other than
+// HEADERS/PRIORITY is a connection error PROTOCOL_ERROR — from a closed stream,
+// where a late frame is minimally processed and discarded (§5.1 leniency for a
+// stream we reset). Client ids are allocated below nextID (§5.1.1 monotonic), and
+// pushed ids up to lastPromisedID, so anything at or beyond those is idle.
+func (c *Conn) isIdleStream(id uint32) bool {
+	c.smu.Lock()
+	defer c.smu.Unlock()
+	if id%2 == 1 {
+		return id >= c.nextID
+	}
+	return id > c.lastPromisedID
+}
+
+// isKnownOrigin reports whether authority appears in the origin set the peer
+// advertised via ORIGIN frames (RFC 8336). The push accept path treats such an
+// authority as one the server is authoritative for (RFC 9113 §8.4 / §10.1).
+func (c *Conn) isKnownOrigin(authority []byte) bool {
+	a := string(authority)
+	c.originsMu.RLock()
+	defer c.originsMu.RUnlock()
+	for _, o := range c.origins {
+		if originAuthority(o) == a {
+			return true
+		}
+	}
+	return false
+}
+
+// originAuthority returns the host[:port] authority of an ORIGIN entry. An ORIGIN
+// frame carries an ASCII-serialized origin ("scheme://host[:port]", RFC 6454
+// §6.2), whereas a promised :authority carries no scheme, so the scheme must be
+// stripped before the two are compared.
+func originAuthority(origin string) string {
+	if i := strings.Index(origin, "://"); i >= 0 {
+		return origin[i+3:]
+	}
+	return origin
+}
+
+// authorityOf returns the :authority pseudo-header value from a request field
+// list, or "" when it is absent.
+func authorityOf(fields []hpack.HeaderField) string {
+	for i := range fields {
+		if string(fields[i].Name) == ":authority" {
+			return string(fields[i].Value)
+		}
+	}
+	return ""
+}
+
 // pushSupport reports whether server push is enabled and returns the
 // stream-event buffer size for new pushed streams.
 func (c *Conn) pushSupport() (enabled bool, eventBuf int) {
 	return c.opts.EnablePush, c.opts.StreamEventBuffer
 }
 
-// reservePushedStream validates a promised stream id and, if it is legal and
-// we have room, creates and registers the server-initiated stream it reserves.
-// Validation, the cap check and the registry insert happen under one smu hold
-// so a burst of promises cannot race past the bound.
+// notePromisedID validates and records a promised stream id (RFC 9113 §6.6 /
+// §5.1.1): it must be even, non-zero, and greater than every id already
+// promised; an illegal id is a connection error PROTOCOL_ERROR (ErrIllegalPromisedID).
 //
-// Returns ErrIllegalPromisedID when the id is not a legal choice for the
-// server's next stream (RFC 7540 §5.1.1: even, non-zero, and greater than
-// every id already reserved) — §6.6 makes that a connection error of type
-// PROTOCOL_ERROR, so the caller must not merely reset the stream.
-//
-// Returns ErrPushRefused when accepting would exceed the concurrent
-// server-initiated stream count we advertised in
-// SETTINGS_MAX_CONCURRENT_STREAMS. §6.6 lets a recipient reject a promised
-// stream with RST_STREAM on the promised id, so the caller resets rather than
-// killing the connection.
-func (c *Conn) reservePushedStream(id uint32) (*Stream, error) {
+// Recording it — advancing lastPromisedID — is what keeps a REFUSED promise safe.
+// The id is spent on the wire whether or not we accept the promise, so a later
+// promise must still exceed it; and, critically, the server may race the pushed
+// response onto the promised stream before our RST_STREAM lands. Once
+// lastPromisedID covers the id, those in-flight frames resolve to a *closed*
+// stream (leniently discarded) rather than an *idle* one, whose frames would be a
+// connection error (§5.1) that tears the whole multiplexed connection down.
+// Called before any stream-level refusal in handlePushPromiseBlock, so every
+// refusal path marks the id spent.
+func (c *Conn) notePromisedID(id uint32) error {
 	c.smu.Lock()
 	defer c.smu.Unlock()
 	if id == 0 || id%2 != 0 || id <= c.lastPromisedID {
-		return nil, ErrIllegalPromisedID
+		return ErrIllegalPromisedID
 	}
-	// The id is spent on the wire whether or not we accept it, so record it
-	// before the cap check: a later promise must still exceed a refused one.
 	c.lastPromisedID = id
+	return nil
+}
+
+// reservePushedStream applies the concurrent server-initiated stream cap and, if
+// there is room, allocates and registers the pushed stream. The id must already
+// have been accepted by notePromisedID (which validated its legality and advanced
+// lastPromisedID); reservePushedStream returns only ErrPushRefused — a §6.6
+// stream-level rejection the caller resets rather than escalating.
+func (c *Conn) reservePushedStream(id uint32) (*Stream, error) {
+	c.smu.Lock()
+	defer c.smu.Unlock()
+	// id legality and the lastPromisedID advance are handled by notePromisedID,
+	// called earlier on every path; here only the concurrency cap and the
+	// allocation remain.
 	if c.pushInflight >= c.opts.Settings.MaxConcurrentStreams {
 		return nil, ErrPushRefused
 	}
@@ -424,7 +497,7 @@ func (c *Conn) Close() error {
 		_ = dl.SetWriteDeadline(time.Now().Add(closeGoAwayDeadline))
 	}
 	c.wmu.Lock()
-	_ = c.fr.WriteGoAway(c.lastClientStreamID(), frame.ErrCodeNoError, nil)
+	_ = c.fr.WriteGoAway(c.goAwayLastStreamIDToSend(), frame.ErrCodeNoError, nil)
 	_ = c.flushWrite()
 	// Wake any group-commit writer deferring on a flush; it re-checks and
 	// flushes itself against the now-closing transport rather than hanging.
@@ -441,7 +514,7 @@ func (c *Conn) Close() error {
 const closeGoAwayDeadline = 200 * time.Millisecond
 
 // Shutdown performs a graceful connection close (RFC 7540 §6.8).
-// It sends GOAWAY(lastClientStreamID, NO_ERROR) to inform the peer
+// It sends GOAWAY(last peer-initiated stream id, NO_ERROR) to inform the peer
 // that no new streams will be opened, marks the conn as draining
 // (so NewStream returns ErrConnDraining), and waits up to gracefulTimeout
 // for all in-flight streams to complete naturally. After the timeout
@@ -468,7 +541,7 @@ func (c *Conn) Shutdown(gracefulTimeout time.Duration) error {
 		_ = dl.SetWriteDeadline(time.Now().Add(closeGoAwayDeadline))
 	}
 	c.wmu.Lock()
-	_ = c.fr.WriteGoAway(c.lastClientStreamID(), frame.ErrCodeNoError, nil)
+	_ = c.fr.WriteGoAway(c.goAwayLastStreamIDToSend(), frame.ErrCodeNoError, nil)
 	_ = c.flushWrite()
 	c.wmu.Unlock()
 	// Wake any writers blocked in acquireSendCredits so they observe
@@ -536,13 +609,25 @@ func streamRefundThreshold(window uint32) uint32 {
 	return recvWindowRefundThreshold
 }
 
-func (c *Conn) lastClientStreamID() uint32 {
+// goAwayNoneSent is the goAwaySentLast sentinel meaning no GOAWAY has been sent.
+const goAwayNoneSent = ^uint32(0)
+
+// goAwayLastStreamIDToSend returns the last-stream-id to advertise in a GOAWAY we
+// send. RFC 9113 §6.8: the value is the highest-numbered stream the sender may
+// have acted on. A client acts on peer-initiated (even, server-pushed) streams,
+// so it is lastPromisedID — 0 when server push is unused, which is the common
+// case. The value is clamped so a later GOAWAY never advertises a larger id than
+// an earlier one ("Endpoints MUST NOT increase the value they send in the last
+// stream identifier"). Called under wmu, where all GOAWAY writes are serialized.
+func (c *Conn) goAwayLastStreamIDToSend() uint32 {
 	c.smu.Lock()
-	defer c.smu.Unlock()
-	if c.nextID < 3 {
-		return 0
+	id := c.lastPromisedID
+	c.smu.Unlock()
+	if prev := c.goAwaySentLast.Load(); prev != goAwayNoneSent && id > prev {
+		id = prev
 	}
-	return c.nextID - 2
+	c.goAwaySentLast.Store(id)
+	return id
 }
 
 // Stats returns a point-in-time snapshot of connection counters.
@@ -631,6 +716,7 @@ func (c *Conn) writeHeadersWithPriority(_ context.Context, s *Stream, fields []h
 		c.streams[s.id] = s
 		s.mu.Lock()
 		s.sendWindow = int32(initial)
+		s.reqAuthority = authorityOf(fields)
 		s.mu.Unlock()
 		c.smu.Unlock()
 		c.psMu.RUnlock()
@@ -1063,7 +1149,16 @@ func (c *Conn) acquireSendCredits(ctx context.Context, s *Stream, want, padOverh
 		}
 		s.mu.Lock()
 		streamWin := s.sendWindow
+		streamClosed := s.closed
 		s.mu.Unlock()
+		if streamClosed {
+			// RFC 9113 §6.4: after a stream is reset (peer RST_STREAM) or otherwise
+			// closed, we must not send further DATA on it. A writer already blocked
+			// here when the reset arrives re-checks on wake and bails, rather than
+			// sending DATA once credit finally frees up. Covers a peer RST and a
+			// GOAWAY that made this stream a refused victim.
+			return 0, ErrStreamClosed
+		}
 		connWin := c.peerConnSendWindow
 		avail := streamWin
 		if connWin < avail {
@@ -1121,7 +1216,13 @@ func (c *Conn) onWindowUpdate(streamID uint32, increment uint32) error {
 	}
 	s := c.lookupStream(streamID)
 	if s == nil {
-		return nil // unknown / closed stream — peer chatter
+		// RFC 9113 §5.1: a WINDOW_UPDATE on an idle stream is a connection error
+		// PROTOCOL_ERROR — any frame other than HEADERS/PRIORITY on an idle stream
+		// is. On a closed stream a late WINDOW_UPDATE is peer chatter and ignored.
+		if c.isIdleStream(streamID) {
+			return &ConnError{Code: frame.ErrCodeProtocolError, Reason: "WINDOW_UPDATE on idle stream"}
+		}
+		return nil
 	}
 	s.mu.Lock()
 	newVal := int64(s.sendWindow) + int64(increment)
@@ -1147,7 +1248,46 @@ func (c *Conn) onWindowUpdate(streamID uint32, increment uint32) error {
 // of type FLOW_CONTROL_ERROR.
 const maxInitialWindowSize = int64(1)<<31 - 1
 
+// frameSizeFloor and frameSizeCeil bound SETTINGS_MAX_FRAME_SIZE (RFC 9113
+// §6.5.2): the initial/minimum value 2^14 and the maximum 2^24-1.
+const (
+	frameSizeFloor uint32 = 1 << 14   // 16384
+	frameSizeCeil  uint32 = 1<<24 - 1 // 16777215
+)
+
+// checkPeerSettingValues rejects a peer SETTINGS value a client must not accept,
+// each a connection error of type PROTOCOL_ERROR (RFC 9113 §5.4.1):
+//
+//   - SETTINGS_ENABLE_PUSH: §6.5.2 "Any value other than 0 or 1 MUST be treated
+//     as a connection error … of type PROTOCOL_ERROR", and §8.4 "A client MUST
+//     treat receipt of a SETTINGS frame with SETTINGS_ENABLE_PUSH set to 1 as a
+//     connection error … of type PROTOCOL_ERROR" — so a server may only send 0.
+//   - SETTINGS_MAX_FRAME_SIZE: §6.5.2 "Values outside this range [2^14, 2^24-1]
+//     MUST be treated as a connection error … of type PROTOCOL_ERROR".
+//
+// SETTINGS_INITIAL_WINDOW_SIZE range is a FLOW_CONTROL_ERROR and is checked at
+// the apply sites, not here.
+func checkPeerSettingValues(s frame.SettingsParams) error {
+	for i := 0; i < s.N; i++ {
+		p := s.Pairs[i]
+		switch p.ID {
+		case frame.SettingEnablePush:
+			if p.Value != 0 {
+				return &ConnError{Code: frame.ErrCodeProtocolError, Reason: "peer SETTINGS_ENABLE_PUSH must be 0"}
+			}
+		case frame.SettingMaxFrameSize:
+			if p.Value < frameSizeFloor || p.Value > frameSizeCeil {
+				return &ConnError{Code: frame.ErrCodeProtocolError, Reason: "SETTINGS_MAX_FRAME_SIZE out of range"}
+			}
+		}
+	}
+	return nil
+}
+
 func (c *Conn) applyInitialPeerSettings(peer frame.SettingsParams) error {
+	if err := checkPeerSettingValues(peer); err != nil {
+		return err
+	}
 	for i := 0; i < peer.N; i++ {
 		p := peer.Pairs[i]
 		switch p.ID {
@@ -1177,6 +1317,12 @@ func (c *Conn) applyInitialPeerSettings(peer frame.SettingsParams) error {
 // 2^31-1 (RFC 7540 §6.9.2).
 func (c *Conn) applyPeerSettings(s frame.SettingsParams) error {
 	const maxWindow = int64(1<<31 - 1)
+
+	// Reject ENABLE_PUSH != 0 and an out-of-range MAX_FRAME_SIZE (both connection
+	// errors of type PROTOCOL_ERROR) before any value is merged or applied.
+	if err := checkPeerSettingValues(s); err != nil {
+		return err
+	}
 
 	// Merge the settings AND apply the retroactive INITIAL_WINDOW_SIZE delta to
 	// existing streams atomically under psMu (lock order psMu->smu->s.mu),
@@ -1289,6 +1435,15 @@ func (c *Conn) writeSettingsAck() error {
 // SendData calls (which still go through, until the peer closes the
 // transport).
 func (c *Conn) onGoAwayReceived(lastStreamID uint32, _ frame.ErrCode) {
+	// RFC 9113 §6.8: a peer MUST NOT raise the last-stream-id across successive
+	// GOAWAYs. Defensively clamp a second GOAWAY that tries to — never widen the
+	// set of streams we treat as accepted by the peer. Single-goroutine (reader)
+	// access, so the load-then-store needs no CAS.
+	if c.goAwayReceived.Load() {
+		if prev := c.goAwayLastStreamID.Load(); lastStreamID > prev {
+			lastStreamID = prev
+		}
+	}
 	c.goAwayLastStreamID.Store(lastStreamID)
 	c.goAwayReceived.Store(true)
 
@@ -1540,8 +1695,11 @@ func (c *Conn) readerLoop() {
 	h := newConnHandler(c, c.dec)
 	h.raiseMaxHeaderBytes(c.opts.Settings.MaxHeaderListSize)
 	for {
-		_, err := c.fr.ReadFrame(context.Background(), h)
+		fh, err := c.fr.ReadFrame(context.Background(), h)
 		if err != nil {
+			// The Framer surfaces a malformed frame as a plain sentinel; map it
+			// to the RFC 9113 scope and typed error code before routing.
+			err = c.mapFrameError(fh, err)
 			// A *StreamError is non-fatal (RFC 7540 §5.4.2): reset only the
 			// offending stream and keep the connection — and every other
 			// in-flight stream — alive. onDataReceived / onWindowUpdate
@@ -1561,8 +1719,73 @@ func (c *Conn) readerLoop() {
 			}
 			c.emitConnGoAwayIfTyped(err)
 			c.shutdownStreams(err)
+			// RFC 9113 §5.4.1: after sending a GOAWAY for an error condition the
+			// endpoint must close the TCP connection, so the peer is not left with a
+			// half-alive socket. emitConnGoAwayIfTyped writes a GOAWAY only for a
+			// *ConnError, so gate the close on the same type; an io.EOF / transport
+			// error means the socket is already gone.
+			var ce *ConnError
+			if errors.As(err, &ce) {
+				_ = c.transport.Close()
+			}
 			return
 		}
+	}
+}
+
+// mapFrameError converts a Framer sentinel into a typed *StreamError or
+// *ConnError carrying the RFC 9113 scope and error code, so the reader loop
+// resets a single stream where the spec says stream error (a wrong-length
+// PRIORITY, a 0-increment stream WINDOW_UPDATE) and tears the whole connection
+// down with a typed GOAWAY where it says connection error. Errors the handler
+// already typed (flow-control overruns, malformed responses) and transport / EOF
+// errors pass through unchanged.
+func (c *Conn) mapFrameError(fh frame.FrameHeader, err error) error {
+	var se *StreamError
+	var ce *ConnError
+	if errors.As(err, &se) || errors.As(err, &ce) {
+		return err
+	}
+	connErr := func(code frame.ErrCode) error {
+		return &ConnError{Code: code, Reason: err.Error()}
+	}
+	switch {
+	case errors.Is(err, frame.ErrPriorityWrongLength):
+		// §6.3: a PRIORITY frame of length != 5 is a STREAM error of type
+		// FRAME_SIZE_ERROR — reset the one stream, keep the connection.
+		return &StreamError{StreamID: fh.StreamID, Code: frame.ErrCodeFrameSizeError}
+	case errors.Is(err, frame.ErrZeroIncrement):
+		// §6.9: a WINDOW_UPDATE with a 0 increment is a stream error of type
+		// PROTOCOL_ERROR on a stream, and a connection error on the connection
+		// flow-control window (stream 0).
+		if fh.StreamID == 0 {
+			return connErr(frame.ErrCodeProtocolError)
+		}
+		return &StreamError{StreamID: fh.StreamID, Code: frame.ErrCodeProtocolError}
+	case errors.Is(err, frame.ErrInvalidStreamID),
+		errors.Is(err, frame.ErrInvalidPadding),
+		errors.Is(err, frame.ErrProtocolError),
+		errors.Is(err, frame.ErrContinuationExpected),
+		errors.Is(err, frame.ErrUnexpectedContinuation):
+		// Stream-id rule violations (§5.1.1), oversized padding (§6.1), the
+		// ORIGIN/ALTSVC framing faults, and field-block continuity violations
+		// (§6.10) are connection errors of type PROTOCOL_ERROR.
+		return connErr(frame.ErrCodeProtocolError)
+	case errors.Is(err, frame.ErrFrameTooLarge),
+		errors.Is(err, frame.ErrRSTWrongLength),
+		errors.Is(err, frame.ErrSettingsLength),
+		errors.Is(err, frame.ErrSettingsAck),
+		errors.Is(err, frame.ErrPingWrongLength),
+		errors.Is(err, frame.ErrWindowWrongLength),
+		errors.Is(err, frame.ErrShortRead):
+		// A frame that exceeds SETTINGS_MAX_FRAME_SIZE, a fixed-size frame of the
+		// wrong length, or one too small for its mandatory fields is a connection
+		// error of type FRAME_SIZE_ERROR (§4.2, §6.4, §6.5, §6.7, §6.9).
+		return connErr(frame.ErrCodeFrameSizeError)
+	default:
+		// io.EOF, context cancellation, transport errors: connection teardown
+		// with no typed GOAWAY (the peer is already gone or not speaking HTTP/2).
+		return err
 	}
 }
 
@@ -1579,7 +1802,7 @@ func (c *Conn) emitConnGoAwayIfTyped(err error) {
 		_ = dl.SetWriteDeadline(time.Now().Add(closeGoAwayDeadline))
 	}
 	c.wmu.Lock()
-	_ = c.fr.WriteGoAway(c.lastClientStreamID(), ce.Code, nil)
+	_ = c.fr.WriteGoAway(c.goAwayLastStreamIDToSend(), ce.Code, nil)
 	_ = c.flushWrite()
 	c.wmu.Unlock()
 }
@@ -1618,6 +1841,15 @@ func (c *Conn) shutdownStreams(reason error) {
 // SendHeaders/SendData when END_STREAM goes out. It releases the
 // stream's slot in the inflight pool exactly once and evicts the
 // stream from the registry once both ends have closed.
+// wakeSendWaiters broadcasts the outbound flow-control condition so every writer
+// blocked in acquireSendCredits re-checks its stream and connection state. Holds
+// only fcOutMu, so it is safe to call with no other lock held.
+func (c *Conn) wakeSendWaiters() {
+	c.fcOutMu.Lock()
+	c.fcOutCond.Broadcast()
+	c.fcOutMu.Unlock()
+}
+
 func (c *Conn) markStreamDone(id uint32) {
 	c.smu.Lock()
 	defer c.smu.Unlock()

@@ -116,8 +116,8 @@ func TestConformance_RFC8441_Sec4_Protocol_EmptyOnConnect_OK(t *testing.T) {
 
 	var resp Response
 	err = c.Do(ctx, &Request{
-		Method: "CONNECT",
-		Path:   "example.com:443", // host:port, per RFC 7231 §4.3.6
+		Method:    "CONNECT",
+		Authority: "example.com:443", // authority-form target; :path omitted (RFC 9113 §8.5)
 	}, &resp)
 	if err != nil {
 		t.Fatalf("CONNECT without Protocol should be allowed; got %v", err)

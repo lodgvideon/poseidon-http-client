@@ -123,16 +123,19 @@ func TestFramer_dispatchRSTStream_TruncatedPayload(t *testing.T) {
 	}
 }
 
-// === dispatchContinuation error: stream id 0 ===
+// === CONTINUATION with no open field block (RFC 9113 §6.10) ===
 
-// TestFramer_dispatchContinuation_ErrorStreamID0 verifies that a CONTINUATION
-// with stream ID 0 is rejected.
-func TestFramer_dispatchContinuation_ErrorStreamID0(t *testing.T) {
+// TestFramer_Continuation_NoOpenBlock_Rejected verifies that a CONTINUATION with
+// no field block open is rejected. RFC 9113 §6.10 makes this a connection error
+// PROTOCOL_ERROR (ErrUnexpectedContinuation), which the reader now enforces ahead
+// of the per-type dispatch — so it pre-empts the stream-id check for a stream-0
+// CONTINUATION, which is doubly invalid.
+func TestFramer_Continuation_NoOpenBlock_Rejected(t *testing.T) {
 	raw := frameBytes(2, FrameContinuation, FlagContinuationEndHeaders, 0, []byte{0x82, 0x84})
 	fr := NewFramer(nil, bytes.NewReader(raw))
 	_, err := fr.ReadFrame(context.Background(), &recordingHandler{})
-	if !errors.Is(err, ErrInvalidStreamID) {
-		t.Fatalf("err = %v, want ErrInvalidStreamID", err)
+	if !errors.Is(err, ErrUnexpectedContinuation) {
+		t.Fatalf("err = %v, want ErrUnexpectedContinuation", err)
 	}
 }
 

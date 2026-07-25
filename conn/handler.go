@@ -59,11 +59,24 @@ func GetDataBufPool() *sync.Pool { return &dataBufPool }
 // path (DIP fix from W4 review).
 type connOps interface {
 	lookupStream(id uint32) *Stream
+	// isIdleStream reports whether id names a never-opened stream (RFC 9113
+	// §5.1). A frame other than HEADERS/PRIORITY on such a stream is a
+	// connection error PROTOCOL_ERROR; a late frame on a closed stream is not.
+	isIdleStream(id uint32) bool
+	// isKnownOrigin reports whether authority was advertised via an ORIGIN
+	// frame (RFC 8336) — an authority the server is authoritative for on the
+	// push accept path.
+	isKnownOrigin(authority []byte) bool
 	onDataReceived(s *Stream, length uint32) error
 	// accountConnRecvOnly settles the connection-level recv window for a DATA
 	// frame whose stream is no longer in the registry (RFC 7540 §6.9, §5.1).
 	accountConnRecvOnly(length uint32) error
 	markStreamDone(id uint32)
+	// wakeSendWaiters broadcasts the outbound flow-control condition so a writer
+	// blocked in acquireSendCredits re-checks its stream state. Called after a
+	// stream is reset so a blocked writer bails instead of sending DATA post-RST
+	// (RFC 9113 §6.4), mirroring the broadcast onGoAwayReceived already does.
+	wakeSendWaiters()
 	onWindowUpdate(streamID, increment uint32) error
 	applyPeerSettings(s frame.SettingsParams) error
 	writeSettingsAck() error
@@ -75,11 +88,16 @@ type connOps interface {
 	// stream-event buffer size for new (pushed) streams.
 	pushSupport() (enabled bool, eventBuf int)
 
-	// reservePushedStream validates a promised stream id and registers
-	// the server-initiated stream it reserves. Returns
-	// ErrIllegalPromisedID for an id that is not idle (RFC 7540 §6.6)
-	// and ErrPushRefused when our advertised concurrent-stream cap for
-	// server-initiated streams is already reached.
+	// notePromisedID validates a promised stream id and records it
+	// (advancing lastPromisedID) so a refused promise still marks the id
+	// spent. Returns ErrIllegalPromisedID (a §6.6 connection error) for an
+	// id that is zero, odd, or not greater than an id already promised.
+	notePromisedID(id uint32) error
+
+	// reservePushedStream applies the concurrent-stream cap and registers
+	// the server-initiated stream. Returns ErrPushRefused when our
+	// advertised cap for server-initiated streams is already reached. The
+	// id must already have been accepted by notePromisedID.
 	reservePushedStream(id uint32) (*Stream, error)
 
 	// rstStream sends RST_STREAM for the given stream ID.
@@ -177,11 +195,24 @@ func (h *connHandler) OnData(fh frame.FrameHeader, p []byte, _ uint8) error {
 	h.streams.bumpFramesReceived()
 	s := h.streams.lookupStream(fh.StreamID)
 	if s == nil {
-		// The stream is gone — reset by us, or already closed and evicted — so
-		// the DATA payload is ignored (RFC 7540 §5.1). But its bytes still count
-		// against the CONNECTION flow-control window (§6.9, §5.1), so the window
-		// must be settled or it leaks and the connection eventually stalls.
+		// A DATA frame on an idle stream (never opened) is a connection error of
+		// type PROTOCOL_ERROR (RFC 9113 §5.1). On a closed stream — one we reset,
+		// or that completed and was evicted — the payload is discarded (§5.1
+		// leniency for a stream we reset), but its bytes still count against the
+		// CONNECTION flow-control window (§6.9), so the window must be settled or it
+		// leaks and the connection eventually stalls.
+		if h.streams.isIdleStream(fh.StreamID) {
+			return &ConnError{Code: frame.ErrCodeProtocolError, Reason: "DATA on idle stream"}
+		}
 		return h.streams.accountConnRecvOnly(fh.Length)
+	}
+	// A DATA frame after the peer's END_STREAM — half-closed(remote), still
+	// registered because our upload is open — is a stream error STREAM_CLOSED
+	// (RFC 9113 §5.1 / §6.1). Settle the connection window (the octets are spent)
+	// and reset just this stream; the connection and its siblings survive.
+	if s.hasRemoteEnded() {
+		_ = h.streams.accountConnRecvOnly(fh.Length)
+		return &StreamError{StreamID: s.id, Code: frame.ErrCodeStreamClosed}
 	}
 	if err := h.streams.onDataReceived(s, fh.Length); err != nil {
 		return err
@@ -244,12 +275,23 @@ func (h *connHandler) OnHeaders(fh frame.FrameHeader, hb frame.HeaderBlock, _ *f
 		return nil
 	}
 	if s == nil {
-		// Stream gone (reset or completed and evicted, RFC 7540 §5.1) or never
-		// opened. The event is dropped, but the block MUST still be decoded to
-		// keep the connection-wide HPACK decoder in sync (see drainHeaderBlock).
-		return h.drainHeaderBlock(hb)
+		return h.headerBlockForAbsentStream(fh.StreamID, hb)
 	}
 	return h.emitHeaderBlock(s, hb, end)
+}
+
+// headerBlockForAbsentStream handles a completed HEADERS/CONTINUATION block whose
+// stream is not in the registry. A block on an idle stream — a server opening a
+// stream the client did not (odd), or that no PUSH_PROMISE reserved (even, RFC
+// 9113 §5.1.1) — is a connection error PROTOCOL_ERROR (§5.1). A block on a closed
+// stream (reset or completed and evicted) is decoded to keep the connection-wide
+// HPACK context in sync and then discarded (§5.1 leniency); the idle case tears
+// the connection down, so its block need not be decoded.
+func (h *connHandler) headerBlockForAbsentStream(streamID uint32, hb []byte) error {
+	if h.streams.isIdleStream(streamID) {
+		return &ConnError{Code: frame.ErrCodeProtocolError, Reason: "HEADERS on idle stream"}
+	}
+	return h.drainHeaderBlock(hb)
 }
 
 // OnContinuation implements frame.Handler.
@@ -279,7 +321,7 @@ func (h *connHandler) OnContinuation(fh frame.FrameHeader, hb frame.HeaderBlock)
 	if s := h.streams.lookupStream(fh.StreamID); s != nil {
 		return h.emitHeaderBlock(s, h.pendingBuf, h.pendingEndStream)
 	}
-	return h.drainHeaderBlock(h.pendingBuf)
+	return h.headerBlockForAbsentStream(fh.StreamID, h.pendingBuf)
 }
 
 // drainHeaderBlock decodes hb through the connection-wide HPACK decoder and
@@ -502,15 +544,36 @@ func (h *connHandler) OnRSTStream(fh frame.FrameHeader, code frame.ErrCode) erro
 	h.streams.bumpFramesReceived()
 	s := h.streams.lookupStream(fh.StreamID)
 	if s == nil {
+		// RFC 9113 §6.4: a RST_STREAM naming an idle stream is a connection error
+		// PROTOCOL_ERROR. On a closed stream — one we reset, or that completed and
+		// was evicted — a late RST_STREAM is ignored (§5.1).
+		if h.streams.isIdleStream(fh.StreamID) {
+			return &ConnError{Code: frame.ErrCodeProtocolError, Reason: "RST_STREAM on idle stream"}
+		}
 		return nil
 	}
-	s.push(StreamEvent{Type: EventReset, RSTCode: code, EndStream: true})
+	// RFC 9113 §5.4.2: "To avoid looping, an endpoint MUST NOT send a RST_STREAM
+	// in response to a RST_STREAM frame." Deliver the reset event directly rather
+	// than via s.push, whose overflow path emits an outbound RST_STREAM(REFUSED_
+	// STREAM) — which, in response to a received RST, is exactly that loop. A slow
+	// consumer whose buffer is full still learns of the reset via the reset signal.
+	// Delivered FIRST, before the stream becomes bothEnded below, so it cannot race
+	// a concurrent Close()->recycleStream (same ordering the doc comment describes).
+	select {
+	case s.events <- StreamEvent{Type: EventReset, RSTCode: code, EndStream: true}:
+	default:
+		s.signalReset(code)
+	}
 	s.mu.Lock()
 	s.remoteEnded = true
 	s.localEnded = true
 	s.closed = true
 	s.mu.Unlock()
 	h.streams.markStreamDone(fh.StreamID)
+	// Wake a writer blocked in acquireSendCredits so it observes s.closed and bails
+	// instead of sending DATA once credit frees up (RFC 9113 §6.4). Done last, with
+	// no lock held.
+	h.streams.wakeSendWaiters()
 	return nil
 }
 
@@ -581,6 +644,15 @@ func (h *connHandler) handlePushPromiseBlock(parentStreamID, promisedStreamID ui
 		return headerDecodeConnError(err)
 	}
 
+	// Validate and record the promised id first (RFC 9113 §6.6): an illegal id is
+	// a connection error PROTOCOL_ERROR, and recording a legal one advances
+	// lastPromisedID so every stream-level refusal below still marks the id spent
+	// — keeping the server's in-flight pushed-response frames on that id out of the
+	// idle-stream connection-error path (§5.1) that would kill the whole connection.
+	if err := h.streams.notePromisedID(promisedStreamID); err != nil {
+		return &ConnError{Code: frame.ErrCodeProtocolError, Reason: err.Error()}
+	}
+
 	// Validate the promised request fields before anything downstream sees
 	// them. A PUSH_PROMISE carries the header set of the request the server is
 	// promising to answer, and RFC 7540 §10.3 makes an invalid field name or a
@@ -598,26 +670,50 @@ func (h *connHandler) handlePushPromiseBlock(parentStreamID, promisedStreamID ui
 	// Look up the parent stream.
 	parent := h.streams.lookupStream(parentStreamID)
 	if parent == nil {
-		// Parent gone; reset the promised stream to be safe.
+		// RFC 9113 §6.5.2 / §5.1: a PUSH_PROMISE on an idle parent stream (one the
+		// client never opened) is a connection error PROTOCOL_ERROR. On a closed
+		// parent (opened then evicted) the promise is refused at the stream level
+		// (§5.1 leniency for a stream we reset).
+		if h.streams.isIdleStream(parentStreamID) {
+			return &ConnError{Code: frame.ErrCodeProtocolError, Reason: "PUSH_PROMISE on idle stream"}
+		}
 		_ = h.streams.rstStream(promisedStreamID, frame.ErrCodeCancel)
 		return nil
 	}
 
-	// Reserve the pushed (server-initiated, even) stream.
+	// RFC 9113 §6.6: a PUSH_PROMISE is valid only on an associated stream in the
+	// "open" or "half-closed (local)" state — both keep the server's half open. A
+	// registered parent whose remote half already ended is "half-closed (remote)"
+	// (the server sent END_STREAM yet the promise arrives afterward): neither of
+	// the two permitted states, so it is a connection error PROTOCOL_ERROR. A
+	// fully-closed parent is unregistered and handled by the parent==nil branch
+	// above, so this catches only the live half-closed(remote) case. A conformant
+	// server never sends a promise after closing its half, so this rejects only a
+	// misbehaving peer, never a valid push.
+	if parent.hasRemoteEnded() {
+		return &ConnError{Code: frame.ErrCodeProtocolError, Reason: "PUSH_PROMISE on half-closed(remote) stream"}
+	}
+
+	// RFC 9113 §8.4: refuse a promised request whose method is not safe and
+	// cacheable, that indicates request content, or whose :authority the server
+	// is not authoritative for. This is a stream-level refusal — the connection
+	// and the parent stream survive — done before reservePushedStream so no
+	// stream is half-reserved on the refusal path.
+	if !h.validatePushedRequest(parent.requestAuthority()) {
+		_ = h.streams.rstStream(promisedStreamID, frame.ErrCodeProtocolError)
+		return nil
+	}
+
+	// Reserve the pushed (server-initiated, even) stream. The id was already
+	// accepted by notePromisedID, so the only error here is ErrPushRefused (the
+	// concurrent-stream cap). RFC 9113 §6.6 lets a recipient reject a promised
+	// stream with RST_STREAM on the promised id — a stream-level refusal, so the
+	// connection and the parent stream both survive; any other (unexpected) error
+	// is treated the same way rather than escalating to a connection teardown.
 	pushed, err := h.streams.reservePushedStream(promisedStreamID)
 	if err != nil {
-		if errors.Is(err, ErrPushRefused) {
-			// §6.6: "Recipients of PUSH_PROMISE frames can choose to reject
-			// promised streams by returning a RST_STREAM referencing the
-			// promised stream identifier back to the sender of the
-			// PUSH_PROMISE." A stream-level refusal — the connection and the
-			// parent stream both survive.
-			_ = h.streams.rstStream(promisedStreamID, frame.ErrCodeRefusedStream)
-			return nil
-		}
-		// §6.6: a PUSH_PROMISE promising an id that is not idle is a
-		// connection error of type PROTOCOL_ERROR.
-		return &ConnError{Code: frame.ErrCodeProtocolError, Reason: err.Error()}
+		_ = h.streams.rstStream(promisedStreamID, frame.ErrCodeRefusedStream)
+		return nil
 	}
 
 	// Build slab-backed header fields (same pattern as emitHeaderBlock).
@@ -642,6 +738,37 @@ func (h *connHandler) handlePushPromiseBlock(parentStreamID, promisedStreamID ui
 	})
 	_ = pushed // stream registered; subsequent HEADERS/DATA frames find it
 	return nil
+}
+
+// validatePushedRequest checks the decoded promised request (in h.scratch)
+// against RFC 9113 §8.4: the :method must be safe and cacheable (GET/HEAD), the
+// promise must not indicate request content, and the :authority must be one the
+// server is authoritative for — matching the request that triggered the push
+// (answered over the cert-validated connection), or an ORIGIN-frame authority.
+// A false return means the promised stream must be reset with PROTOCOL_ERROR.
+func (h *connHandler) validatePushedRequest(parentAuthority string) bool {
+	var method, authority []byte
+	for i := range h.scratch {
+		switch string(h.scratch[i].Name) {
+		case ":method":
+			method = h.scratch[i].Value
+		case ":authority":
+			authority = h.scratch[i].Value
+		case "content-length":
+			// A promise that indicates request content is refused; only an
+			// explicit zero is tolerated (a bodyless GET/HEAD may carry it).
+			if n, ok := parseDecimalDigits(h.scratch[i].Value); !ok || n != 0 {
+				return false
+			}
+		}
+	}
+	if !pushMethodSafeCacheable(method) {
+		return false
+	}
+	if len(authority) == 0 {
+		return false // incomplete header set (§8.3.1): a request needs :authority
+	}
+	return string(authority) == parentAuthority || h.streams.isKnownOrigin(authority)
 }
 
 // OnPing implements frame.Handler. Non-ACK PING frames are echoed

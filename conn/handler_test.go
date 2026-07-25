@@ -27,22 +27,30 @@ func (m *fakeStreamMap) lookupStream(id uint32) *Stream {
 	return m.streams[id]
 }
 
+// isIdleStream returns false so these unit tests exercise the closed-stream
+// (lenient) path for an unknown stream id; idle-stream connection errors are
+// covered against the real *Conn in conformance_streamstate_test.go.
+func (*fakeStreamMap) isIdleStream(uint32) bool  { return false }
+func (*fakeStreamMap) isKnownOrigin([]byte) bool { return false }
+
 // connOps no-op satisfaction so the wider production interface is met
 // in tests that only exercise stream lookup behaviour.
-func (*fakeStreamMap) onDataReceived(*Stream, uint32) error                 { return nil }
-func (*fakeStreamMap) markStreamDone(uint32)                                {}
-func (*fakeStreamMap) onWindowUpdate(uint32, uint32) error                  { return nil }
-func (*fakeStreamMap) applyPeerSettings(frame.SettingsParams) error         { return nil }
-func (*fakeStreamMap) writeSettingsAck() error                              { return nil }
-func (*fakeStreamMap) writePingAck([8]byte) error                           { return nil }
-func (*fakeStreamMap) deliverPingAck([8]byte)                               {}
-func (*fakeStreamMap) onGoAwayReceived(uint32, frame.ErrCode)               {}
-func (m *fakeStreamMap) pushSupport() (bool, int)                           { return m.pushEnabled, 8 }
-func (*fakeStreamMap) reservePushedStream(uint32) (*Stream, error)          { return nil, nil }
-func (*fakeStreamMap) rstStream(uint32, frame.ErrCode) error                { return nil }
-func (m *fakeStreamMap) storeOrigins(origins []string)            { m.origins = origins }
-func (m *fakeStreamMap) storeAltSvc(entries []frame.AltSvcEntry)  { m.altSvc = entries }
-func (*fakeStreamMap) bumpFramesReceived()                        {}
+func (*fakeStreamMap) onDataReceived(*Stream, uint32) error         { return nil }
+func (*fakeStreamMap) markStreamDone(uint32)                        {}
+func (*fakeStreamMap) wakeSendWaiters()                             {}
+func (*fakeStreamMap) onWindowUpdate(uint32, uint32) error          { return nil }
+func (*fakeStreamMap) applyPeerSettings(frame.SettingsParams) error { return nil }
+func (*fakeStreamMap) writeSettingsAck() error                      { return nil }
+func (*fakeStreamMap) writePingAck([8]byte) error                   { return nil }
+func (*fakeStreamMap) deliverPingAck([8]byte)                       {}
+func (*fakeStreamMap) onGoAwayReceived(uint32, frame.ErrCode)       {}
+func (m *fakeStreamMap) pushSupport() (bool, int)                   { return m.pushEnabled, 8 }
+func (*fakeStreamMap) notePromisedID(uint32) error                  { return nil }
+func (*fakeStreamMap) reservePushedStream(uint32) (*Stream, error)  { return nil, nil }
+func (*fakeStreamMap) rstStream(uint32, frame.ErrCode) error        { return nil }
+func (m *fakeStreamMap) storeOrigins(origins []string)              { m.origins = origins }
+func (m *fakeStreamMap) storeAltSvc(entries []frame.AltSvcEntry)    { m.altSvc = entries }
+func (*fakeStreamMap) bumpFramesReceived()                          {}
 
 func (m *fakeStreamMap) accountConnRecvOnly(length uint32) error {
 	m.connRecvOnly += length

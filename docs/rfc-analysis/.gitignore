@@ -1,0 +1,4 @@
+# Reconciliation-workflow intermediates (regenerable from the workflow journal):
+# per-unit obligation files, checklist/lookup JSON, non-pass triage cache.
+_units/
+_*.json

@@ -204,11 +204,23 @@ func validateRequest(r *Request) error {
 	if !isTokenName(unsafeStringToBytes(r.Method)) {
 		return fmt.Errorf("%w: method must be a non-empty RFC 9110 §9.1 token (no whitespace or control bytes)", ErrInvalidRequest)
 	}
-	// RFC 9112 §3: the request-target is delimited by SP and CRLF, so a control
-	// byte in :path re-cuts the line on an http1 downgrade and is malformed on
-	// h2/h3. http1.validRequestTarget refuses these on the wire; the shared path
-	// checked only for whitespace, so other C0 controls and DEL passed through.
-	if r.Path == "" || containsAnyWhitespace(r.Path) || pathHasControlByte(r.Path) {
+	// RFC 9113 §8.5: a (non-extended) CONNECT request omits :scheme and :path and
+	// carries the tunnel target as the authority-form request-target in
+	// :authority. Enforce the omission (empty Path) and the required authority;
+	// an extended CONNECT (RFC 8441, :protocol set) falls through to the normal
+	// path rules, which is where WebSocket-over-HTTP/2 keeps its :path.
+	if r.Method == "CONNECT" && r.Protocol == "" {
+		if r.Path != "" {
+			return fmt.Errorf("%w: a CONNECT request must omit :path (RFC 9113 §8.5); leave Request.Path empty", ErrInvalidRequest)
+		}
+		if r.Authority == "" {
+			return fmt.Errorf("%w: a CONNECT request requires an authority-form target in :authority (RFC 9113 §8.5)", ErrInvalidRequest)
+		}
+	} else if r.Path == "" || containsAnyWhitespace(r.Path) || pathHasControlByte(r.Path) {
+		// RFC 9112 §3: the request-target is delimited by SP and CRLF, so a control
+		// byte in :path re-cuts the line on an http1 downgrade and is malformed on
+		// h2/h3. http1.validRequestTarget refuses these on the wire; the shared path
+		// checked only for whitespace, so other C0 controls and DEL passed through.
 		return fmt.Errorf("%w: path must be non-empty without whitespace or control characters (RFC 9112 §3)", ErrInvalidRequest)
 	}
 	// RFC 8441 §4: the :protocol pseudo-header MAY appear ONLY when
@@ -366,6 +378,10 @@ func checkRegularHeaders(headers []conn.HeaderField) (hasContentType, hasExpect1
 			return false, false, false, fmt.Errorf("%w: header %q value carries CR, LF or NUL (request-splitting vector, RFC 7540 §10.3)",
 				ErrInvalidRequest, hf.Name)
 		}
+		if edgeWhitespace(hf.Value) {
+			return false, false, false, fmt.Errorf("%w: header %q value starts or ends with SP/HTAB (RFC 9113 §8.2.1)",
+				ErrInvalidRequest, hf.Name)
+		}
 	}
 	return hasContentType, hasExpect100, hasContentLength, nil
 }
@@ -385,6 +401,10 @@ func checkRequestTrailers(trailers []conn.HeaderField) error {
 		}
 		if hasFieldInjectionByte(trailers[i].Value) {
 			return fmt.Errorf("%w: trailer %q value carries CR, LF or NUL (request-splitting vector, RFC 7540 §10.3)",
+				ErrInvalidRequest, trailers[i].Name)
+		}
+		if edgeWhitespace(trailers[i].Value) {
+			return fmt.Errorf("%w: trailer %q value starts or ends with SP/HTAB (RFC 9113 §8.2.1)",
 				ErrInvalidRequest, trailers[i].Name)
 		}
 	}
@@ -476,6 +496,18 @@ func hasFieldInjectionByte(v []byte) bool {
 		}
 	}
 	return false
+}
+
+// edgeWhitespace reports whether v begins or ends with ASCII SP (0x20) or HTAB
+// (0x09). RFC 9113 §8.2.1: "A field value MUST NOT start or end with an ASCII
+// whitespace character (ASCII SP or HTAB, 0x20 or 0x09)." Internal SP/HTAB is
+// ordinary and must not be rejected — only the edges are forbidden.
+func edgeWhitespace(v []byte) bool {
+	if len(v) == 0 {
+		return false
+	}
+	ws := func(b byte) bool { return b == 0x20 || b == 0x09 }
+	return ws(v[0]) || ws(v[len(v)-1])
 }
 
 // tokenChar is the RFC 9110 §5.6.2 token character set: DIGIT / ALPHA / one of

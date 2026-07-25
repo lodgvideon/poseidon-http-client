@@ -63,6 +63,16 @@ func (s AdvertisedSettings) defaulted() AdvertisedSettings {
 	if s.MaxFrameSize == 0 {
 		s.MaxFrameSize = 16384
 	}
+	// RFC 9113 §6.5.2: "The value advertised by an endpoint MUST be between this
+	// initial value and the maximum allowed frame size ... inclusive." Clamp a
+	// caller value outside [2^14, 2^24-1] to the nearest bound so our SETTINGS,
+	// the Framer read limit and outbound chunking stay conformant (a sub-16384
+	// value would otherwise shrink our own framing).
+	if s.MaxFrameSize < frameSizeFloor {
+		s.MaxFrameSize = frameSizeFloor
+	} else if s.MaxFrameSize > frameSizeCeil {
+		s.MaxFrameSize = frameSizeCeil
+	}
 	if s.MaxHeaderListSize == 0 {
 		s.MaxHeaderListSize = defaultMaxHeaderListSize
 	}
