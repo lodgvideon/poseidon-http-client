@@ -1,4 +1,4 @@
-.PHONY: lint test test-race test-debug bench bench-gate fuzz-replay coverage coverage-gate tidy
+.PHONY: lint test test-race test-debug bench bench-gate fuzz-replay coverage coverage-gate tidy contrib-test
 .PHONY: it-up it-down it-logs it-test it-test-fast it-certs h3-interop h3-interop-loss h3-interop-reorder h3-interop-fault h3-interop-chacha h3-soak
 
 # Minimum overall and per-package statement coverage. CI fails below this.
@@ -8,12 +8,36 @@ GO ?= go
 GOLANGCI_LINT ?= golangci-lint
 BENCHSTAT ?= benchstat
 
+# Nested modules. The root `./...` never reaches them, so every target that
+# should cover them has to iterate explicitly.
+CONTRIB_MODULES ?= contrib/prometheus
+
 tidy:
 	$(GO) mod tidy
+	@for m in $(CONTRIB_MODULES); do $(GO) -C $$m mod tidy; done
 
 lint:
 	$(GO) vet ./...
 	$(GOLANGCI_LINT) run
+	@for m in $(CONTRIB_MODULES); do \
+		$(GO) -C $$m vet ./... && (cd $$m && $(GOLANGCI_LINT) run); \
+	done
+
+# Test the contrib modules twice: once against the released parent pinned in
+# their go.mod (what a consumer gets), once against this tree (catches an API
+# break before it ships).
+contrib-test:
+	@for m in $(CONTRIB_MODULES); do \
+		echo "==> $$m (pinned parent)"; \
+		$(GO) -C $$m test -race -count=1 ./... || exit 1; \
+		echo "==> $$m (in-tree parent)"; \
+		$(GO) -C $$m mod edit -replace=github.com/lodgvideon/poseidon-http-client=$(CURDIR); \
+		$(GO) -C $$m mod tidy && $(GO) -C $$m test -race -count=1 ./...; \
+		status=$$?; \
+		$(GO) -C $$m mod edit -dropreplace=github.com/lodgvideon/poseidon-http-client; \
+		$(GO) -C $$m mod tidy; \
+		[ $$status -eq 0 ] || exit $$status; \
+	done
 
 # Default test timeout — client stress/E2E suite needs ~70s under -race.
 TEST_TIMEOUT ?= 180s

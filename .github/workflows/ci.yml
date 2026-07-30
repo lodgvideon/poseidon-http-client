@@ -56,3 +56,32 @@ jobs:
         run: go test -race -count=1 -coverprofile=cover.out $(go list ./... | grep -v /examples/)
       - name: Per-package + total coverage gate (floor = 80)
         run: ./scripts/coverage-gate.sh 80
+
+  # contrib/prometheus is a nested module, so the root `./...` above never
+  # reaches it. It needs its own job or it rots unnoticed.
+  contrib-prometheus:
+    runs-on: ubuntu-24.04
+    defaults:
+      run:
+        working-directory: contrib/prometheus
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version: '1.25'
+          cache: true
+      - name: Install golangci-lint v2.5.0
+        run: curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/master/install.sh | sh -s -- -b /usr/local/bin v2.5.0
+      - run: go vet ./...
+      - run: golangci-lint run ./...
+      # Against the released parent version pinned in go.mod — what a
+      # consumer actually gets.
+      - run: go test -race -count=1 ./...
+      # Against this commit's parent, so a breaking change to the client's
+      # Stats/Metrics/Hooks surface fails here rather than after release.
+      - name: Re-test against the in-tree client
+        run: |
+          go mod edit -replace=github.com/lodgvideon/poseidon-http-client=../..
+          go mod tidy
+          go test -race -count=1 ./...
+          git checkout go.mod go.sum

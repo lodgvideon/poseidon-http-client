@@ -217,7 +217,7 @@ type PoolOptions struct {
 }
 ```
 
-`Client.PoolStats()` returns a `client.Stats` snapshot for pool and managed transports (zero `Stats` for single-conn / H1 / closed pools):
+`Client.PoolStats()` returns a `client.Stats` snapshot for every pool and managed transport — HTTP/1.1, HTTP/2 and HTTP/3 alike (zero `Stats` for single-conn transports and closed pools):
 
 ```go
 type Stats struct {
@@ -1846,6 +1846,32 @@ fmt.Printf("dial mean=%s acquire p99=%s\n",
 Note: `Snapshot()` (on `Counters`, `Histogram`, and `Metrics`) reads each field
 with a single atomic load. Field-to-field consistency is best-effort — a
 concurrent update may land between individual loads.
+
+#### Exporting to Prometheus
+
+`contrib/prometheus` is a separate Go module that turns `PoolStats()`,
+`MetricsSnapshot()` and `Hooks` into Prometheus metrics. It is not imported by
+the core, so it adds no dependency unless you ask for it:
+
+```bash
+go get github.com/lodgvideon/poseidon-http-client/contrib/prometheus
+```
+
+```go
+reg := prom.NewRegistry()
+reg.MustRegister(poseidonprom.NewCollector(c)) // pool gauges + counters, scrape-time only
+
+hm := poseidonprom.NewHookMetrics()            // optional: per-host/method/status series
+reg.MustRegister(hm)
+c.SetHooks(hm.Hooks())
+```
+
+`NewCollector` costs nothing per request — it reads the client only when
+scraped. `NewHookMetrics` records on the request path, in exchange for labels
+the aggregate counters cannot express. See
+[contrib/prometheus/README.md](../contrib/prometheus/README.md) for the metric
+reference, the cardinality rules, and why the republished log2 histograms are
+precise to a factor of 2 only.
 
 #### Instrumented client (Hooks + Metrics together)
 
