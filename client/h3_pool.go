@@ -223,7 +223,7 @@ func (p *h3Pool) handleRelease(rs *h3RunState, msg h3ReleaseMsg) {
 	// A GOAWAY'd conn is drained, not killed: pickLeastLoaded already stopped
 	// handing it out, so once its last in-flight exchange releases there is nothing
 	// left for it to finish (RFC 9114 §5.2).
-	if !msg.mc.cl.Alive() || (msg.mc.cl.GoingAway() && msg.mc.active == 0) {
+	if h3Retired(msg.mc) {
 		rs.conns = p.evict(rs.conns, msg.mc, CloseDead)
 	}
 	rs.waiters = p.serveWaiters(rs.conns, rs.waiters)
@@ -452,7 +452,7 @@ func (p *h3Pool) evictIdle(conns []*h3ManagedConn) []*h3ManagedConn {
 func (p *h3Pool) evictDead(conns []*h3ManagedConn) []*h3ManagedConn {
 	out := conns[:0]
 	for _, mc := range conns {
-		if !mc.cl.Alive() {
+		if h3Retired(mc) {
 			_ = mc.cl.Close()
 			p.notifyClose(CloseDead)
 			continue
@@ -467,7 +467,7 @@ func (p *h3Pool) evictDead(conns []*h3ManagedConn) []*h3ManagedConn {
 func (p *h3Pool) evictDeadSilent(conns []*h3ManagedConn) []*h3ManagedConn {
 	out := conns[:0]
 	for _, mc := range conns {
-		if !mc.cl.Alive() {
+		if h3Retired(mc) {
 			_ = mc.cl.Close()
 			continue
 		}
@@ -489,11 +489,23 @@ func h3SumActive(conns []*h3ManagedConn) int {
 func h3CountLive(conns []*h3ManagedConn) int {
 	n := 0
 	for _, mc := range conns {
-		if mc.cl.Alive() {
+		// A GOAWAY'd conn is draining, not live: it can serve no new request, so
+		// counting it toward MaxConnsPerHost would keep the pool at cap and park
+		// every acquire as a waiter with no dial started (RFC 9114 §5.2).
+		if mc.cl.Alive() && !mc.cl.GoingAway() {
 			n++
 		}
 	}
 	return n
+}
+
+// h3Retired reports whether a conn should leave the pool: the QUIC connection is
+// gone, or the peer sent GOAWAY and the exchanges it undertook to finish have all
+// drained. It is the single predicate every eviction site shares — the HTTP/2 pool
+// carries its equivalent at five sites, and an H3 site that forgets it strands a
+// GOAWAY'd conn in the pool forever.
+func h3Retired(mc *h3ManagedConn) bool {
+	return !mc.cl.Alive() || (mc.cl.GoingAway() && mc.active == 0)
 }
 
 // h3PruneExpiredWaiters drops waiters whose ctx is already done, reusing the

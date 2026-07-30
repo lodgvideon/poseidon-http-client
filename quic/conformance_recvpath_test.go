@@ -260,10 +260,17 @@ func TestConformance_RFC9000_Sec123_ReorderedPacketNotDiscarded(t *testing.T) {
 	if !a.truncated {
 		t.Fatalf("expected truncation after %d gapped packets", maxAckRanges+1)
 	}
-	if !a.seen(a.lowWater - 1) {
-		t.Fatal("below the truncation floor must count as seen")
+	// 100 is inside the range that truncation dropped: genuinely undecidable.
+	if !a.seen(100) {
+		t.Fatal("a number inside a dropped range must count as seen")
 	}
-	if a.seen(a.lowWater + 1) {
+	// 101 was never received and sits above the dropped range, so it is still
+	// provably new — the floor must not be raised to the last retained range's lo.
+	if a.seen(101) {
+		t.Fatalf("lowWater = %d over-discards: 101 was never received and is provably new", a.lowWater)
+	}
+	// And a gap inside the retained window stays new.
+	if a.seen(103) {
 		t.Fatal("a gap inside the retained window is still decidably new")
 	}
 }

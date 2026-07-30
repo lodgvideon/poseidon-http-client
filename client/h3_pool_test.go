@@ -521,3 +521,27 @@ func TestConformance_RFC9114_Sec52_PoolEvictsGoAwayConn(t *testing.T) {
 		t.Fatalf("the drained GOAWAY'd conn should have been closed exactly once, got %d", atomic.LoadInt32(&gone.closes))
 	}
 }
+
+// TestConformance_RFC9114_Sec52_PoolEvictsIdleGoAwayConn is the other half of the
+// §5.2 pool rule, and the one the release-path test cannot reach: a server
+// typically starts a graceful shutdown against an IDLE connection, so no release
+// ever arrives to trigger eviction. Without the health-tick and live-count halves
+// the pool sits at MaxConnsPerHost with a conn that can serve nothing, and every
+// acquire is parked as a waiter with no dial started — a permanent wedge.
+func TestConformance_RFC9114_Sec52_PoolEvictsIdleGoAwayConn(t *testing.T) {
+	p := newH3Pool("e", nil, PoolOptions{}, nil, nil, nil)
+	gone := &barrierH3Client{}
+	rs := &h3RunState{conns: []*h3ManagedConn{{cl: gone, active: 0, streamCap: 10}}}
+	atomic.StoreInt32(&gone.goaway, 1)
+
+	if got := h3CountLive(rs.conns); got != 0 {
+		t.Fatalf("h3CountLive = %d, want 0 — a GOAWAY'd conn must not hold the cap", got)
+	}
+	p.handleTick(rs)
+	if len(rs.conns) != 0 {
+		t.Fatalf("idle GOAWAY'd conn survived the health tick: %d conns", len(rs.conns))
+	}
+	if atomic.LoadInt32(&gone.closes) != 1 {
+		t.Fatalf("evicted conn closed %d times, want 1", atomic.LoadInt32(&gone.closes))
+	}
+}

@@ -86,10 +86,12 @@ func (a *ackTracker) receive(pn uint64, ackEliciting bool) {
 	// bound, so the newest — including the largest received, which the peer needs
 	// for loss detection and RTT — are kept.
 	if len(merged) > maxAckRanges {
-		// History below the last retained range is now gone, so newness there is no
-		// longer decidable — record the floor for seen(). It only ever rises.
-		if lo := merged[maxAckRanges-1].lo; !a.truncated || lo > a.lowWater {
-			a.lowWater, a.truncated = lo, true
+		// Everything up to the top of the highest DROPPED range is no longer
+		// decidable, so that is the floor — not the bottom of the last retained
+		// range. The numbers between the two were never received, and at this moment
+		// we can still prove it, so they stay decidably new. The floor only rises.
+		if lw := merged[maxAckRanges].hi + 1; !a.truncated || lw > a.lowWater {
+			a.lowWater, a.truncated = lw, true
 		}
 		merged = merged[:maxAckRanges]
 	}

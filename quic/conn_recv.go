@@ -506,6 +506,11 @@ func (c *Conn) recvDatagram(datagram []byte) error {
 		// datagram authenticates — the AEAD nonce derives from the packet number — so
 		// without this its frames would be dispatched a second time. Individual frame
 		// handlers absorb most duplicates, but the requirement is on the packet.
+		//
+		// A consequence worth naming: a duplicate no longer marks an ACK owed. That is
+		// safe only because QUIC never reuses a packet number — a peer whose ACK was
+		// lost re-sends the frames under a NEW number, which is decidably new here. Any
+		// future dedup keyed on something other than the packet number would break it.
 		if c.acks[sp].seen(pn) {
 			continue
 		}
