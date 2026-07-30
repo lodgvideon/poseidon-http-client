@@ -11,13 +11,20 @@ func zeroLargest(PacketType) uint64 { return 0 }
 // client would receive it (server sends with the server Initial keys).
 func craftServerInitial(t *testing.T, serverKeys PacketKeys, dcid, scid []byte, pn uint64, payload []byte) []byte {
 	t.Helper()
+	return craftServerInitialVersion(t, serverKeys, dcid, scid, pn, payload, QUICVersion1)
+}
+
+// craftServerInitialVersion is craftServerInitial with an explicit Version field,
+// for the RFC 9000 §5.2 "discard a packet using another version" check.
+func craftServerInitialVersion(t *testing.T, serverKeys PacketKeys, dcid, scid []byte, pn uint64, payload []byte, version uint32) []byte {
+	t.Helper()
 	sealer, err := NewSealer(serverKeys)
 	if err != nil {
 		t.Fatal(err)
 	}
 	pnLen := 4
 	length := uint64(pnLen + len(payload) + 16)
-	hdr, pnOff := AppendLongHeader(nil, PacketInitial, QUICVersion1, dcid, scid, nil, pnLen, length)
+	hdr, pnOff := AppendLongHeader(nil, PacketInitial, version, dcid, scid, nil, pnLen, length)
 	for i := pnLen - 1; i >= 0; i-- {
 		hdr = append(hdr, byte(pn>>(8*uint(i))))
 	}

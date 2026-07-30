@@ -413,13 +413,22 @@ func (c *Conn) drainBuffered() error {
 // authenticated server one once it is known (§7.2).
 func (c *Conn) prefilterPacket(hdr Header, pkt []byte) (skip bool, err error) {
 	switch {
-	case hdr.Type == PacketRetry:
-		c.handleRetry(hdr, pkt) // validate + re-key + resend the Initial (§17.2.5); never fatal
-		return true, nil
 	case hdr.Type == PacketVersionNegotiation:
 		if c.shouldAbandonOnVN(pkt, hdr) {
 			return true, ErrVersionNegotiation
 		}
+		return true, nil
+	case hdr.Type != PacketShort && hdr.Version != QUICVersion1:
+		// "If a client receives a packet that uses a different version than it
+		// initially selected, it MUST discard that packet" (RFC 9000 §5.2). Silently:
+		// anyone can forge a long header, and Initial keys derive from the observable
+		// connection ID, so a v1-sealed packet stamped with another version would
+		// otherwise authenticate and be processed. Version Negotiation (version 0) is
+		// handled above; short headers carry no version field. This gate precedes
+		// Retry, whose integrity tag is version-specific (§17.2.5).
+		return true, nil
+	case hdr.Type == PacketRetry:
+		c.handleRetry(hdr, pkt) // validate + re-key + resend the Initial (§17.2.5); never fatal
 		return true, nil
 	case hdr.Type == PacketInitial && len(hdr.Token) > 0:
 		// A server's Initial MUST carry an empty Token; discard one with a non-zero
@@ -439,6 +448,7 @@ func (c *Conn) prefilterPacket(hdr Header, pkt []byte) (skip bool, err error) {
 func (c *Conn) recvDatagram(datagram []byte) error {
 	rest := datagram
 	first := true
+	var firstDCID []byte // the first packet's Destination Connection ID (§12.2)
 	for len(rest) > 0 {
 		isFirst := first
 		first = false
@@ -454,6 +464,14 @@ func (c *Conn) recvDatagram(datagram []byte) error {
 		}
 		pkt := rest[:hdr.PacketLen]
 		rest = rest[hdr.PacketLen:]
+		// A sender MUST NOT coalesce packets with different Destination Connection
+		// IDs, and a receiver SHOULD ignore any that follow one that does (RFC 9000
+		// §12.2). Skipping, never erroring: the header is unauthenticated.
+		if isFirst {
+			firstDCID = hdr.DCID
+		} else if !bytesEqual(hdr.DCID, firstDCID) {
+			continue
+		}
 		if skip, err := c.prefilterPacket(hdr, pkt); err != nil {
 			return err
 		} else if skip {
@@ -486,6 +504,12 @@ func (c *Conn) recvDatagram(datagram []byte) error {
 			reserved = 0x18 // short header (1-RTT)
 		}
 		if pkt[0]&reserved != 0 {
+			return ErrProtocolViolation
+		}
+		// "An endpoint MUST treat receipt of a packet containing no frames as a
+		// connection error of type PROTOCOL_VIOLATION" (RFC 9000 §12.4). The packet
+		// authenticated, so unlike the skips above this is the peer's own violation.
+		if len(payload) == 0 {
 			return ErrProtocolViolation
 		}
 		fh := connFrameHandler{c: c, space: sp}

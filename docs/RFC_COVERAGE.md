@@ -422,7 +422,9 @@ protection (RFC 9001) and the connection engine are later phases.
 | §6.2    | Conformance | TestConformance_RFC9000_Sec62_VersionNegotiationAbandons (a Version Negotiation packet offering no common version makes the v1-only client abandon the attempt with ErrVersionNegotiation, no CONNECTION_CLOSE), TestConformance_RFC9000_Sec62_VersionNegotiationDiscardExceptions (a VN listing v1, or one received after an Initial/Retry was already processed (§17.2.5.2), is discarded not abandoned) |
 | §17.3   | Conformance | TestConformance_RFC9000_Sec173_ShortHeader |
 | §17.2 / §17.3.1 | Conformance | TestConformance_RFC9000_Sec1731_ReservedBitsProtocolViolation (short-header reserved bits nonzero → PROTOCOL_VIOLATION), TestConformance_RFC9000_Sec172_LongHeaderReservedBits (long-header), TestConn_ReservedBitsZero_Accepted (a valid packet with zero reserved bits is not rejected) |
-| §12.2   | Conformance | TestParseHeader_Coalesced (coalesced-packet walk via PacketLen) |
+| §12.2   | Conformance | TestParseHeader_Coalesced (coalesced-packet walk via PacketLen), TestConformance_RFC9000_Sec122_CoalescedForeignDCIDIgnored (a coalesced packet whose Destination Connection ID differs from the first packet's is ignored, even though it authenticates) |
+| §5.2    | Conformance | TestConformance_RFC9000_Sec52_ForeignVersionDiscarded (a long-header packet stamped with a version other than v1 is discarded before decryption — Initial keys derive from the observable connection ID, so a v1-sealed packet carrying a foreign version would otherwise authenticate; Version Negotiation and short headers unaffected) |
+| §12.4   | Conformance | TestConformance_RFC9000_Sec124_EmptyPacketIsProtocolViolation (an authenticated packet carrying zero frames → PROTOCOL_VIOLATION) |
 | §17     | Roundtrip   | TestPacketHeader_RoundTrip |
 | §17     | Negative    | TestParseHeader_Malformed (malformed header → ErrPacketEncoding) |
 | §17     | Fuzz        | FuzzParseHeader (arbitrary packet bytes + fuzzed local-DCID length → ParseHeader never panics on a truncated/oversized/nonsensical header or an out-of-range DCID length, only ErrPacketEncoding) |
