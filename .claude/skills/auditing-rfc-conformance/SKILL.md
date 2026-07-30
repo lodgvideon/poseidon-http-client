@@ -72,7 +72,7 @@ divergence between your extraction and the catalog is a red flag either way.
 | A verify pass covers only the first N ids of its unit | Not a refutation — the remaining facts have **one** verifier, which the merge rule must treat as unverified. Re-verify exactly those ids with a fresh independent pair, then patch the rows |
 | API `529 Overloaded` kills verify agents in bursts | Same recovery as a session limit (`resumeFromRunId`), but do not retry immediately — a resume launched while another big workflow is still running just re-earns the 529 |
 | Resuming an already-**completed** run to retry a handful of dead agents | Measured: a resume of a killed run replayed 319 cached agents fine, but a resume of a *finished* run re-ran 292 of 322 from scratch and burned the whole session limit. Resume only a run that died mid-flight; for a few stragglers in a finished run, launch a tiny standalone workflow scoped to exactly those ids |
-| Verifier agents write scratch probe files into the repo | They compile throwaway `_test.go` files to *prove* a gap. A `git add -A` while a reconciliation run is live commits them (caught `quic/zzverify_scid_test.go` in a fix commit). Commit fixes by explicit path, or `git status` right before staging |
+| Verifier agents mutate the repo to prove a gap | Two shapes, both caught live: throwaway `_test.go` probes (`quic/zzverify_scid_test.go`), and **edits to production constants left behind** (`kInitialRtt` 333ms→500ms in `quic/pto.go`). A `git add -A` mid-run commits them. Stage by explicit path, and `git status --porcelain` before every commit — account for every line, not just your own |
 
 ## Red flags — stop and restart the step
 
