@@ -228,6 +228,13 @@ func (c *Conn) sealPacket(sp int, frames []byte, ackEliciting bool, retrans []re
 		c.hdrScratch, pnOffset = AppendLongHeader(c.hdrScratch[:0], PacketHandshake, QUICVersion1, c.dcid, c.scid, nil, pnLen, length)
 	default:
 		c.hdrScratch, pnOffset = AppendShortHeader(c.hdrScratch[:0], c.dcid, pnLen, c.appSendPhase())
+		if c.spin {
+			// The latency spin bit (0x20, RFC 9000 §17.4). Not implemented, so it is a
+			// per-connection random constant rather than a constant 0 — §17.4's
+			// RECOMMENDED. It sits outside the header-protection mask (§17.3.1 protects
+			// 0x1f on a short header), so it goes in before the seal.
+			c.hdrScratch[0] |= 0x20
+		}
 	}
 	for i := pnLen - 1; i >= 0; i-- {
 		c.hdrScratch = append(c.hdrScratch, byte(pn>>(8*uint(i))))

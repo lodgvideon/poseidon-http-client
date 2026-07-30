@@ -2,8 +2,10 @@ package quic
 
 import (
 	"bytes"
+	"crypto/tls"
 	"errors"
 	"testing"
+	"time"
 )
 
 // newInitialConn builds a client Conn that can open server Initial packets keyed
@@ -176,5 +178,52 @@ func TestConformance_RFC9000_Sec123_ReplayedPacketDiscarded(t *testing.T) {
 	}
 	if !c.acks[spaceInitial].ackPending() {
 		t.Fatal("control: a new packet number must still be processed")
+	}
+}
+
+// TestConformance_RFC9000_Sec174_SpinBitRandomPerConnection pins §17.4's
+// RECOMMENDED "set the spin bit to a random value either chosen independently for
+// each packet or chosen independently for each connection ID" for an endpoint that
+// does not implement latency spin. A constant 0 is a passive fingerprint. Checks
+// both that the drawn bit reaches the wire and that it varies across connections.
+func TestConformance_RFC9000_Sec174_SpinBitRandomPerConnection(t *testing.T) {
+	seal := func(spin bool) byte {
+		dcid := []byte("spinbit0")
+		keys, _ := InitialKeys(dcid)
+		sealer, err := NewSealer(keys)
+		if err != nil {
+			t.Fatal(err)
+		}
+		c := &Conn{pc: &closePC{}, dcid: dcid, oneRTTSealer: sealer, spin: spin, now: func() time.Time { return time.Unix(9, 0) }}
+		pkt, err := c.sealPacket(spaceApp, AppendPing(nil), true, nil, false)
+		if err != nil {
+			t.Fatalf("sealPacket: %v", err)
+		}
+		return pkt[0]
+	}
+	if got := seal(true) & 0x20; got == 0 {
+		t.Fatal("spin=true must set bit 0x20 on the short header")
+	}
+	if got := seal(false) & 0x20; got != 0 {
+		t.Fatal("spin=false must leave bit 0x20 clear")
+	}
+
+	// The value is actually drawn per connection, not hard-coded: over enough
+	// NewConn calls both values must appear.
+	tlsCfg := &tls.Config{InsecureSkipVerify: true, NextProtos: []string{"h3"}} //nolint:gosec // test-only
+	var seenTrue, seenFalse bool
+	for i := 0; i < 64 && (!seenTrue || !seenFalse); i++ {
+		c, err := NewConn(&closePC{}, tlsCfg, nil)
+		if err != nil {
+			t.Fatalf("NewConn: %v", err)
+		}
+		if c.spin {
+			seenTrue = true
+		} else {
+			seenFalse = true
+		}
+	}
+	if !seenTrue || !seenFalse {
+		t.Fatalf("spin bit is not random per connection: sawTrue=%v sawFalse=%v", seenTrue, seenFalse)
 	}
 }

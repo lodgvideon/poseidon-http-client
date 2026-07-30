@@ -11,6 +11,11 @@ import (
 const (
 	defaultAckDelayExponent uint64        = 3
 	defaultMaxAckDelay      time.Duration = 25 * time.Millisecond
+	// ackAlarmSlop is the headroom the deferred-ACK alarm is armed short of the
+	// advertised max_ack_delay, so alarm-firing delay is inside the advertised bound
+	// rather than on top of it (RFC 9000 §18.2). The peer folds our advertised value
+	// into its PTO, so overshooting it invites a spurious probe.
+	ackAlarmSlop time.Duration = 5 * time.Millisecond
 	// maxIdleTimeoutMillis caps a peer's max_idle_timeout so scaling it to a
 	// nanosecond Duration cannot overflow int64 (RFC 9000 §18.2 sets no upper
 	// bound). It is math.MaxInt64 / 1e6 ≈ 292 years — effectively unbounded.

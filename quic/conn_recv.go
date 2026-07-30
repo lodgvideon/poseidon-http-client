@@ -258,8 +258,12 @@ func (c *Conn) updateAppAckDeferral(now time.Time) {
 		return
 	}
 	if c.ackDeadline.IsZero() {
-		// We advertise no max_ack_delay, so our value is the RFC 9000 §18.2 default.
-		c.ackDeadline = now.Add(defaultMaxAckDelay)
+		// We advertise no max_ack_delay, so our value is the RFC 9000 §18.2 default —
+		// and §18.2 says the advertised value "SHOULD include the receiver's expected
+		// delays in alarms firing". Arming at exactly the advertised bound leaves zero
+		// budget for read-deadline and scheduler slop, so our real worst case would
+		// routinely exceed what the peer folds into its PTO. Arm a slop short of it.
+		c.ackDeadline = now.Add(defaultMaxAckDelay - ackAlarmSlop)
 	}
 }
 
