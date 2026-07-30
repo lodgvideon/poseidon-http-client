@@ -71,6 +71,7 @@ divergence between your extraction and the catalog is a red flag either way.
 | Requirement prose is stronger than its own `level` | Highest-value dispute class (RFC 9002 run): a `SHOULD NOT` written up as "MUST NOT", a lowercase "recommends" in an *informative* appendix tagged `RECOMMENDED`. Left in, the checklist manufactures false hard-MUST failures. Tell verifiers to compare the paraphrase against the quote, not only the quote against the source |
 | A verify pass covers only the first N ids of its unit | Not a refutation — the remaining facts have **one** verifier, which the merge rule must treat as unverified. Re-verify exactly those ids with a fresh independent pair, then patch the rows |
 | API `529 Overloaded` kills verify agents in bursts | Same recovery as a session limit (`resumeFromRunId`), but do not retry immediately — a resume launched while another big workflow is still running just re-earns the 529 |
+| Verifier agents write scratch probe files into the repo | They compile throwaway `_test.go` files to *prove* a gap. A `git add -A` while a reconciliation run is live commits them (caught `quic/zzverify_scid_test.go` in a fix commit). Commit fixes by explicit path, or `git status` right before staging |
 
 ## Red flags — stop and restart the step
 
