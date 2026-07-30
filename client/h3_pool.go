@@ -16,8 +16,11 @@
 //     QUIC peer limit is enforced underneath by OpenStreamContext's stream-credit
 //     backpressure, RFC 9000 §4.6), so effectiveStreamCap is called with a peer
 //     value of 0 ("unbounded from the pool's view");
-//   - dead conns are evicted uniformly as CloseDead (HTTP/3 has no pool-level
-//     GOAWAY-vs-dead distinction here);
+//   - a conn is retired either as CloseDead (the QUIC reader goroutine is gone)
+//     or as CloseGoAway once a GOAWAY'd conn has drained; h3RetireReason is the
+//     single spelling of that rule, and pickLeastLoaded / h3CountLive apply the
+//     two earlier-firing variants (stop selecting it, stop counting it toward
+//     MaxConnsPerHost so a replacement can be dialled while it finishes);
 //   - the acquire reply channel is a fresh cap-1 channel per call rather than a
 //     recycled sync.Pool channel: the H3 request rate through one QUIC conn is far
 //     lower than an H2 stream open, the surrounding h3Exchange allocates anyway,
@@ -223,10 +226,12 @@ func (p *h3Pool) handleRelease(rs *h3RunState, msg h3ReleaseMsg) {
 	// A GOAWAY'd conn is drained, not killed: pickLeastLoaded already stopped
 	// handing it out, so once its last in-flight exchange releases there is nothing
 	// left for it to finish (RFC 9114 §5.2).
-	if h3Retired(msg.mc) {
-		rs.conns = p.evict(rs.conns, msg.mc, CloseDead)
-	}
+	var evicted bool
+	rs.conns, evicted = p.h3RetireEvict(rs.conns, msg.mc)
 	rs.waiters = p.serveWaiters(rs.conns, rs.waiters)
+	if evicted {
+		p.dialForWaiters(rs)
+	}
 }
 
 // handleDialDone processes a completed dial: on success the conn enters the pool;
@@ -261,12 +266,16 @@ func (p *h3Pool) handleStats(rs *h3RunState, respCh chan<- Stats) {
 // handleTick runs periodic maintenance: idle eviction, dead eviction, stream-cap
 // refresh, and waiter expiry.
 func (p *h3Pool) handleTick(rs *h3RunState) {
+	before := len(rs.conns)
 	rs.conns = p.evictIdle(rs.conns)
 	rs.conns = p.evictDead(rs.conns)
 	for _, mc := range rs.conns {
 		p.refreshStreamCap(mc)
 	}
 	rs.waiters = h3PruneExpiredWaiters(rs.waiters)
+	if len(rs.conns) < before {
+		p.dialForWaiters(rs)
+	}
 }
 
 // handleClose drains waiters and shuts down all connections.
@@ -448,13 +457,16 @@ func (p *h3Pool) evictIdle(conns []*h3ManagedConn) []*h3ManagedConn {
 	return out
 }
 
-// evictDead removes conns whose Alive returns false.
+// evictDead removes retired conns: dead, or GOAWAY'd and drained.
 func (p *h3Pool) evictDead(conns []*h3ManagedConn) []*h3ManagedConn {
 	out := conns[:0]
 	for _, mc := range conns {
-		if h3Retired(mc) {
+		if reason, retire := h3RetireReason(mc); retire {
 			_ = mc.cl.Close()
-			p.notifyClose(CloseDead)
+			if reason == CloseGoAway {
+				p.metrics.Counters.GoAwaysReceived.Add(1)
+			}
+			p.notifyClose(reason)
 			continue
 		}
 		out = append(out, mc)
@@ -462,18 +474,42 @@ func (p *h3Pool) evictDead(conns []*h3ManagedConn) []*h3ManagedConn {
 	return out
 }
 
-// evictDeadSilent removes conns whose Alive returns false without firing hooks or
-// updating counters. Used from the Stats path where eviction is bookkeeping.
+// evictDeadSilent removes retired conns from the Stats path without firing hooks —
+// a metrics scrape must not re-enter caller code. It DOES move the counters: since
+// GOAWAY made eviction routine, a drained conn is often first observed here rather
+// than on the health tick, and a close whose visibility depends on who looked first
+// is worse than no counter at all.
 func (p *h3Pool) evictDeadSilent(conns []*h3ManagedConn) []*h3ManagedConn {
 	out := conns[:0]
 	for _, mc := range conns {
-		if h3Retired(mc) {
+		if reason, retire := h3RetireReason(mc); retire {
 			_ = mc.cl.Close()
+			p.metrics.Counters.ConnsClosed.Add(1)
+			if reason == CloseGoAway {
+				p.metrics.Counters.GoAwaysReceived.Add(1)
+			}
 			continue
 		}
 		out = append(out, mc)
 	}
 	return out
+}
+
+// dialForWaiters starts a replacement dial when an eviction has left a waiter with
+// nothing to be served by. Without it a waiter parked BEFORE the conn was retired
+// is never rescued: handleAcquire is the only other dialer, and it does not run
+// again for an already-parked request, so with no AcquireTimeout the caller waits
+// forever. Respects MaxConnsPerHost and the dial backoff exactly as handleAcquire
+// does. Actor goroutine only.
+func (p *h3Pool) dialForWaiters(rs *h3RunState) {
+	if len(rs.waiters) == 0 || inDialBackoff(rs.lastDialErrAt, p.opts.DialBackoff) {
+		return
+	}
+	if h3CountLive(rs.conns)+rs.inFlightDials >= p.opts.MaxConnsPerHost {
+		return
+	}
+	rs.inFlightDials++
+	go p.dialOne()
 }
 
 // h3SumActive sums active stream counts across conns.
@@ -491,7 +527,10 @@ func h3CountLive(conns []*h3ManagedConn) int {
 	for _, mc := range conns {
 		// A GOAWAY'd conn is draining, not live: it can serve no new request, so
 		// counting it toward MaxConnsPerHost would keep the pool at cap and park
-		// every acquire as a waiter with no dial started (RFC 9114 §5.2).
+		// every acquire as a waiter with no dial started (RFC 9114 §5.2). The trade
+		// is deliberate and matches the HTTP/2 pool: MaxConnsPerHost bounds
+		// SELECTABLE conns, not open sockets, so a long-lived DoStream on a drained
+		// conn is not counted while its replacement is dialled.
 		if mc.cl.Alive() && !mc.cl.GoingAway() {
 			n++
 		}
@@ -499,13 +538,42 @@ func h3CountLive(conns []*h3ManagedConn) int {
 	return n
 }
 
-// h3Retired reports whether a conn should leave the pool: the QUIC connection is
-// gone, or the peer sent GOAWAY and the exchanges it undertook to finish have all
-// drained. It is the single predicate every eviction site shares — the HTTP/2 pool
-// carries its equivalent at five sites, and an H3 site that forgets it strands a
-// GOAWAY'd conn in the pool forever.
-func h3Retired(mc *h3ManagedConn) bool {
-	return !mc.cl.Alive() || (mc.cl.GoingAway() && mc.active == 0)
+// h3RetireReason reports whether a conn should leave the pool and why: the QUIC
+// connection is gone (CloseDead), or the peer sent GOAWAY and the exchanges it
+// undertook to finish have all drained (CloseGoAway). Every eviction site shares
+// it — the HTTP/2 pool carries its equivalent at five sites, and an H3 site that
+// forgets it strands a GOAWAY'd conn in the pool forever.
+//
+// Two neighbouring rules are deliberately NOT this one, because they fire earlier:
+// pickLeastLoaded skips a GOAWAY'd conn even while it still has work, and
+// h3CountLive stops counting it toward MaxConnsPerHost so a replacement can be
+// dialled while it drains.
+//
+// The CloseDead arm has no active==0 guard, unlike the HTTP/2 pool's: Alive is
+// false only once the QUIC reader goroutine is gone, at which point the in-flight
+// exchanges are already doomed and holding the conn open buys nothing.
+func h3RetireReason(mc *h3ManagedConn) (CloseReason, bool) {
+	switch {
+	case !mc.cl.Alive():
+		return CloseDead, true
+	case mc.cl.GoingAway() && mc.active == 0:
+		return CloseGoAway, true
+	}
+	return 0, false
+}
+
+// h3RetireEvict evicts mc if it is retired, counting a drained GOAWAY as such.
+// Returns the (possibly shrunk) slice and whether an eviction happened, so the
+// caller can start a replacement dial for any waiter left behind.
+func (p *h3Pool) h3RetireEvict(conns []*h3ManagedConn, mc *h3ManagedConn) ([]*h3ManagedConn, bool) {
+	reason, retire := h3RetireReason(mc)
+	if !retire {
+		return conns, false
+	}
+	if reason == CloseGoAway {
+		p.metrics.Counters.GoAwaysReceived.Add(1)
+	}
+	return p.evict(conns, mc, reason), true
 }
 
 // h3PruneExpiredWaiters drops waiters whose ctx is already done, reusing the

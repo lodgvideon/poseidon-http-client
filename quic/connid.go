@@ -1,5 +1,7 @@
 package quic
 
+import "crypto/rand"
+
 // activeCIDLimit is the active_connection_id_limit the client honors: it never
 // advertises the parameter, so the RFC 9000 §18.2 default of 2 applies — the
 // server may keep at most this many of the client's destination connection IDs
@@ -110,6 +112,19 @@ func (c *Conn) queueRetire(seq uint64) {
 // after the one in use has been retired, choosing the lowest remaining sequence
 // deterministically. A NEW_CONNECTION_ID's sequence is at least its Retire Prior
 // To, so at least the just-stored ID always remains.
+// redrawSpin draws a fresh latency-spin bit for the current connection ID (RFC 9000
+// §17.4). crypto/rand.Read cannot fail on the supported Go versions; on the
+// impossible error the bit simply keeps its previous value, which is no worse than
+// the constant this replaced. Assumes c.mu is held (or that the conn is not yet
+// published, as in NewConn).
+func (c *Conn) redrawSpin() {
+	var b [1]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return
+	}
+	c.spin = b[0]&1 != 0
+}
+
 func (c *Conn) switchToActiveCID() {
 	best, found := uint64(0), false
 	for s := range c.serverCIDs {
@@ -120,5 +135,10 @@ func (c *Conn) switchToActiveCID() {
 	if found {
 		c.dcid = append(c.dcid[:0], c.serverCIDs[best]...)
 		c.curCIDSeq = best
+		// RFC 9000 §17.4 asks for a spin bit "chosen independently for each packet or
+		// chosen independently for each connection ID". Keeping the NewConn draw across
+		// a rotation would hand a passive observer one bit linking the old connection
+		// ID to the new one — exactly the boundary the per-CID wording exists to break.
+		c.redrawSpin()
 	}
 }

@@ -260,9 +260,17 @@ func (c *Conn) emitStreamsBlocked(uni bool, limit uint64) {
 	if c.streamsBlockedSet[i] && c.streamsBlockedLimit[i] == limit {
 		return
 	}
+	// Latch only on a successful write. A stream-limit stall has no other liveness
+	// trigger — OpenStreamContext parks on c.streamCredit, whose only wake source is
+	// the peer's MAX_STREAMS, which the peer only sends because it saw this frame —
+	// so a dropped datagram plus an eager latch turns a transient stall into a wait
+	// until the caller's context expires. Re-emitting on the next refusal cannot
+	// spin: the opener re-parks after each one.
+	if err := c.writeAppFrames(AppendStreamsBlocked(nil, uni, limit), nil); err != nil {
+		return
+	}
 	c.streamsBlockedSet[i] = true
 	c.streamsBlockedLimit[i] = limit
-	_ = c.writeAppFrames(AppendStreamsBlocked(nil, uni, limit), nil)
 }
 
 // writeAppFrames seals frames into a 1-RTT packet and writes the datagram. The

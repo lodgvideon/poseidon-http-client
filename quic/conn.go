@@ -279,14 +279,10 @@ func NewConn(pc PacketConn, tlsConfig *tls.Config, transportParams []byte, opts 
 	c.keys.Initial = io
 	// This client does not participate in latency spin, and RFC 9000 §17.4 then
 	// RECOMMENDS setting the spin bit "to a random value either chosen independently
-	// for each packet or chosen independently for each connection ID". Per-connection
-	// is the cheaper of the two and keeps the header writer allocation-free; a
+	// for each packet or chosen independently for each connection ID". Per-connection-
+	// ID is the cheaper of the two and keeps the header writer allocation-free; a
 	// constant 0 would be a passive fingerprint distinguishing this client.
-	var spin [1]byte
-	if _, err := rand.Read(spin[:]); err != nil {
-		return nil, err
-	}
-	c.spin = spin[0]&1 != 0
+	c.redrawSpin()
 	// Retain the unidirectional-stream limit we advertise, so inbound
 	// server-initiated uni streams can be gated against it (RFC 9000 §4.6).
 	if tp, err := ParseTransportParams(transportParams); err == nil {

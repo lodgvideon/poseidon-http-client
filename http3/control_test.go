@@ -78,8 +78,8 @@ func TestConformance_RFC9114_Sec52_GoAwayGatesRequests(t *testing.T) {
 // TestConformance_RFC9114_Sec724_SettingsSendSideValidated pins the two send-side
 // SETTINGS MUST NOTs on the exported NewClient path, whose caller supplies the
 // slice: the same identifier twice (§7.2.4) and a reserved HTTP/2-carryover
-// identifier 0x02–0x05 (§7.2.4.1). Identifier 0x00 is unassigned, not reserved, so
-// it must still be accepted.
+// identifier 0x02–0x05 (§7.2.4.1). The MUST NOT names the HTTP/2 carryover range,
+// which starts at 0x01, so 0x00 falls outside it and stays the caller's call.
 func TestConformance_RFC9114_Sec724_SettingsSendSideValidated(t *testing.T) {
 	cases := []struct {
 		name string
@@ -88,7 +88,7 @@ func TestConformance_RFC9114_Sec724_SettingsSendSideValidated(t *testing.T) {
 	}{
 		{"duplicate", []Setting{{SettingQPACKBlockedStreams, 16}, {SettingQPACKBlockedStreams, 8}}, ErrH3Settings},
 		{"reserved_h2", []Setting{{0x03, 1}}, ErrH3Settings},
-		{"unassigned_zero_ok", []Setting{{0x00, 1}}, nil},
+		{"zero_outside_h2_carryover_range", []Setting{{0x00, 1}}, nil},
 		{"defaults_ok", defaultSettings, nil},
 	}
 	for _, c := range cases {

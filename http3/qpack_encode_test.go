@@ -85,14 +85,14 @@ func sampleRequest() (*Request, []hpack.HeaderField) {
 		Scheme:    "https",
 		Authority: "example.com",
 		Path:      "/",
-		Headers:   []hpack.HeaderField{{Name: []byte("cookie"), Value: []byte("sess=abc")}},
+		Headers:   []hpack.HeaderField{{Name: []byte("user-agent"), Value: []byte("poseidon/1")}},
 	}
 	want := []hpack.HeaderField{
 		{Name: []byte(":method"), Value: []byte("GET")},
 		{Name: []byte(":scheme"), Value: []byte("https")},
 		{Name: []byte(":authority"), Value: []byte("example.com")},
 		{Name: []byte(":path"), Value: []byte("/")},
-		{Name: []byte("cookie"), Value: []byte("sess=abc")},
+		{Name: []byte("user-agent"), Value: []byte("poseidon/1")},
 	}
 	return req, want
 }

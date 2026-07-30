@@ -545,3 +545,42 @@ func TestConformance_RFC9114_Sec52_PoolEvictsIdleGoAwayConn(t *testing.T) {
 		t.Fatalf("evicted conn closed %d times, want 1", atomic.LoadInt32(&gone.closes))
 	}
 }
+
+// TestConformance_RFC9114_Sec52_GoAwayEvictionDialsForWaiter covers the case the
+// two eviction tests cannot: a request parked as a waiter BEFORE the GOAWAY
+// arrived. Skipping the conn in pickLeastLoaded and dropping it from the live count
+// only rescues acquires that come afterwards; handleAcquire is the sole other
+// dialer, and it does not run again for an already-parked request. With no
+// AcquireTimeout set — which newH3Pool does not default — that waiter would hang
+// until the pool closed. An eviction that shrinks the pool must start the
+// replacement dial itself.
+func TestConformance_RFC9114_Sec52_GoAwayEvictionDialsForWaiter(t *testing.T) {
+	dialed := make(chan struct{}, 1)
+	dialFn := func(context.Context, string, *tls.Config) (h3Client, error) {
+		dialed <- struct{}{}
+		return &barrierH3Client{}, nil
+	}
+	p := newH3Pool("e", nil, PoolOptions{MaxConnsPerHost: 1}, dialFn, nil, nil)
+	defer p.Close()
+
+	gone := &barrierH3Client{}
+	mc := &h3ManagedConn{cl: gone, active: 1, streamCap: 1}
+	rs := &h3RunState{
+		conns:   []*h3ManagedConn{mc},
+		waiters: []h3AcquireReq{{ctx: context.Background(), reply: make(chan h3AcquireResp, 1)}},
+	}
+	atomic.StoreInt32(&gone.goaway, 1)
+
+	p.handleRelease(rs, h3ReleaseMsg{mc: mc})
+	if len(rs.conns) != 0 {
+		t.Fatalf("drained GOAWAY'd conn not evicted: %d conns", len(rs.conns))
+	}
+	if rs.inFlightDials != 1 {
+		t.Fatalf("inFlightDials = %d, want 1 — the parked waiter has nothing to be served by", rs.inFlightDials)
+	}
+	select {
+	case <-dialed:
+	case <-time.After(2 * time.Second):
+		t.Fatal("no replacement dial was started for the parked waiter")
+	}
+}

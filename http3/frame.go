@@ -107,8 +107,10 @@ func AppendSettings(dst []byte, settings []Setting) []byte {
 // identifier MUST NOT occur more than once in the SETTINGS frame") or one of the
 // reserved HTTP/2-carryover identifiers 0x02–0x05, which §7.2.4.1 says MUST NOT be
 // sent. Either makes a conformant peer answer with H3_SETTINGS_ERROR — and this
-// client's own ParseSettings rejects both. Identifier 0x00 is *not* reserved: it is
-// merely unassigned, so a peer ignores it. Dial's defaults always pass; the gate
+// client's own ParseSettings rejects both. The MUST NOT is scoped to identifiers
+// "defined in [HTTP/2] where there is no corresponding HTTP/3 setting", and the
+// HTTP/2 registry starts at 0x01, so the set is exactly 0x02-0x05 -- 0x00 lies
+// outside it and is left to the caller. Dial's defaults always pass; the gate
 // exists for the exported NewClient, whose caller supplies the slice.
 func validateSettings(settings []Setting) error {
 	seen := make(map[uint64]struct{}, len(settings))
