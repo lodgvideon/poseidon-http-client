@@ -133,28 +133,41 @@ func (e *Encoder) EncodeFieldSection(dst []byte, fields []hpack.HeaderField) []b
 // dynamic profile's fallback for a field it does not reference dynamically.
 func appendStaticFieldLines(dst []byte, fields []hpack.HeaderField) []byte {
 	for i := range fields {
-		dst = appendStaticFieldLine(dst, fields[i].Name, fields[i].Value)
+		dst = appendStaticFieldLine(dst, fields[i].Name, fields[i].Value, fields[i].Sensitive)
 	}
 	return dst
 }
 
 // appendStaticFieldLine writes one field as an Indexed Field Line (static),
-// a Literal with static Name Reference, or a Literal with Literal Name.
-func appendStaticFieldLine(dst, name, value []byte) []byte {
+// a Literal with static Name Reference, or a Literal with Literal Name. A
+// sensitive field gets the N bit set on its literal form (§7.1): the peer and any
+// intermediary MUST NOT index it. An exact static match carries no secret — the
+// value is a fixed public constant — so it stays a plain Indexed Field Line.
+func appendStaticFieldLine(dst, name, value []byte, sensitive bool) []byte {
 	idx, exact, nameMatch := lookupStatic(name, value)
 	switch {
 	case exact:
 		// Indexed Field Line, static table (1Txxxxxx, T=1): §4.5.2.
 		return hpack.EncodeInteger(dst, 6, 0xc0, uint64(idx))
 	case nameMatch:
-		// Literal Field Line with Name Reference, static (01NTxxxx, N=0, T=1): §4.5.4.
-		dst = hpack.EncodeInteger(dst, 4, 0x50, uint64(idx))
+		// Literal Field Line with Name Reference, static (01NTxxxx, T=1): §4.5.4.
+		dst = hpack.EncodeInteger(dst, 4, staticNameRefByte(sensitive), uint64(idx))
 		return encodeStringLiteral(dst, value, 7, 0x00)
 	default:
-		// Literal Field Line with Literal Name (001NHxxx, N=0): §4.5.6.
-		dst = encodeLiteralName(dst, name)
+		// Literal Field Line with Literal Name (001NHxxx): §4.5.6.
+		dst = encodeLiteralName(dst, name, sensitive)
 		return encodeStringLiteral(dst, value, 7, 0x00)
 	}
+}
+
+// staticNameRefByte is the Literal Field Line with Name Reference prefix
+// (01NTxxxx, §4.5.4) for a static name reference: T=1, plus N=1 when the field is
+// marked sensitive.
+func staticNameRefByte(sensitive bool) byte {
+	if sensitive {
+		return 0x70 // 01 N=1 T=1
+	}
+	return 0x50 // 01 N=0 T=1
 }
 
 // encodeDynamicFieldSection encodes fields using the dynamic table where an entry
@@ -176,23 +189,31 @@ func (e *Encoder) encodeDynamicFieldSection(dst []byte, fields []hpack.HeaderFie
 			e.reps = append(e.reps, fieldRep{repStaticIndexed, uint64(idx)})
 			continue
 		}
-		if abs, ok := e.dt.lookupDynamic(name, value); ok {
-			if abs < e.known {
-				// Present and acknowledged: reference it (Base-relative Indexed, §4.5.2).
-				e.reps = append(e.reps, fieldRep{repDynamicIndexed, abs})
-				if !haveRef || abs > maxRefAbs {
-					maxRefAbs = abs
-					haveRef = true
+		// A sensitive field never touches the dynamic table — not inserted, not
+		// referenced. The dynamic table is one compression context shared by every
+		// request on the connection, so mixing a confidential value into it with
+		// attacker-controlled data is the BREACH/CRIME opening RFC 9114 §10.3
+		// forbids; RFC 9204 §7.1 sends such a field as a literal with the N bit set,
+		// which the literal representations below do.
+		if !fields[i].Sensitive {
+			if abs, ok := e.dt.lookupDynamic(name, value); ok {
+				if abs < e.known {
+					// Present and acknowledged: reference it (Base-relative Indexed, §4.5.2).
+					e.reps = append(e.reps, fieldRep{repDynamicIndexed, abs})
+					if !haveRef || abs > maxRefAbs {
+						maxRefAbs = abs
+						haveRef = true
+					}
+					continue
 				}
-				continue
+				// Present but not yet acknowledged (or inserted earlier in THIS section):
+				// fall through to a static/literal representation and do NOT re-insert.
+			} else if e.dt.canInsertWithoutEvict(len(name), len(value)) {
+				// New repeated-header candidate with room: insert it for future requests.
+				// This occurrence is still encoded statically (the entry is not yet
+				// acknowledged, so it cannot be referenced here).
+				e.insertEntry(name, value, idx, nameMatch)
 			}
-			// Present but not yet acknowledged (or inserted earlier in THIS section):
-			// fall through to a static/literal representation and do NOT re-insert.
-		} else if e.dt.canInsertWithoutEvict(len(name), len(value)) {
-			// New repeated-header candidate with room: insert it for future requests.
-			// This occurrence is still encoded statically (the entry is not yet
-			// acknowledged, so it cannot be referenced here).
-			e.insertEntry(name, value, idx, nameMatch)
 		}
 		if nameMatch {
 			e.reps = append(e.reps, fieldRep{repStaticNameRef, uint64(idx)})
@@ -217,10 +238,10 @@ func (e *Encoder) encodeDynamicFieldSection(dst []byte, fields []hpack.HeaderFie
 			// Base - abs - 1 (§4.5.2, §3.2.5).
 			dst = hpack.EncodeInteger(dst, 6, 0x80, base-rep.idx-1)
 		case repStaticNameRef:
-			dst = hpack.EncodeInteger(dst, 4, 0x50, rep.idx)
+			dst = hpack.EncodeInteger(dst, 4, staticNameRefByte(fields[i].Sensitive), rep.idx)
 			dst = encodeStringLiteral(dst, fields[i].Value, 7, 0x00)
 		case repLiteral:
-			dst = encodeLiteralName(dst, fields[i].Name)
+			dst = encodeLiteralName(dst, fields[i].Name, fields[i].Sensitive)
 			dst = encodeStringLiteral(dst, fields[i].Value, 7, 0x00)
 		}
 	}
@@ -324,14 +345,18 @@ func encodeRequiredInsertCount(ric, maxEntries uint64) uint64 {
 }
 
 // encodeLiteralName writes the name field of a Literal-with-Literal-Name
-// representation: a 3-bit-prefix string with the 001 prefix, N=0, and the H bit
-// at bit 3.
-func encodeLiteralName(dst, name []byte) []byte {
+// representation: a 3-bit-prefix string with the 001 prefix, the N bit at bit 4,
+// and the H bit at bit 3.
+func encodeLiteralName(dst, name []byte, sensitive bool) []byte {
+	base := byte(0x20) // 001 N=0
+	if sensitive {
+		base = 0x30 // 001 N=1
+	}
 	if hlen := hpack.HuffmanEncodedLen(name); hlen < len(name) {
-		dst = hpack.EncodeInteger(dst, 3, 0x28, uint64(hlen)) // 001 N=0 H=1
+		dst = hpack.EncodeInteger(dst, 3, base|0x08, uint64(hlen)) // H=1
 		return hpack.HuffmanEncode(dst, name)
 	}
-	dst = hpack.EncodeInteger(dst, 3, 0x20, uint64(len(name))) // 001 N=0 H=0
+	dst = hpack.EncodeInteger(dst, 3, base, uint64(len(name))) // H=0
 	return append(dst, name...)
 }
 

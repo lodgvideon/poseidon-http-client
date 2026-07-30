@@ -149,6 +149,49 @@ func TestConformance_RFC9204_Sec411_Integer62Bit(t *testing.T) {
 	}
 }
 
+// TestConformance_RFC9204_Sec71_SensitiveNeverIndexed pins the RFC 9114 §10.3 MUST
+// NOT against the dynamic encode path: a field marked sensitive must never enter
+// the connection-wide compression context, however often it repeats, and must go
+// out as a literal with the N bit set (RFC 9204 §7.1). The dynamic table is shared
+// by every request on the connection, so an indexed secret is the BREACH opening.
+func TestConformance_RFC9204_Sec71_SensitiveNeverIndexed(t *testing.T) {
+	enc, err := NewDynamicEncoder(4096, 4096)
+	if err != nil {
+		t.Fatalf("NewDynamicEncoder: %v", err)
+	}
+	enc.DrainEncoderInstructions(nil) // drop the Set Dynamic Table Capacity instruction
+	secret := []hpack.HeaderField{{Name: []byte("authorization"), Value: []byte("Bearer s3cr3t"), Sensitive: true}}
+	// Encode it three times: without the sensitive flag the second pass would
+	// insert it and the third would reference it Base-relative.
+	for round := 0; round < 3; round++ {
+		buf := enc.EncodeFieldSection(nil, secret)
+		if enc.InsertCount() != 0 {
+			t.Fatalf("round %d: InsertCount = %d, want 0 — the secret entered the dynamic table", round, enc.InsertCount())
+		}
+		if got := enc.DrainEncoderInstructions(nil); len(got) != 0 {
+			t.Fatalf("round %d: encoder instructions %x, want none", round, got)
+		}
+		if buf[0] != 0x00 || buf[1] != 0x00 {
+			t.Fatalf("round %d: prefix %x %x, want RIC 0 Base 0", round, buf[0], buf[1])
+		}
+		// "authorization" is static index 23 (name-only match), so the field line is
+		// a Literal with static Name Reference: 01 N=1 T=1 -> the N bit must be set.
+		if line := buf[2]; line&0xf0 != 0x70 {
+			t.Fatalf("round %d: field line %#x, want 01 N=1 T=1 (0x7x)", round, line)
+		}
+	}
+	// Control: the same field without the flag is inserted and then referenced.
+	plain := []hpack.HeaderField{{Name: []byte("authorization"), Value: []byte("Bearer s3cr3t")}}
+	enc2, err := NewDynamicEncoder(4096, 4096)
+	if err != nil {
+		t.Fatalf("NewDynamicEncoder: %v", err)
+	}
+	enc2.EncodeFieldSection(nil, plain)
+	if enc2.InsertCount() == 0 {
+		t.Fatal("control: a non-sensitive repeated field was never inserted, so the test proves nothing")
+	}
+}
+
 func TestConformance_RFC9204_Sec44_ParseDecoderInstructions(t *testing.T) {
 	newEnc := func(t *testing.T, inserts int) *Encoder {
 		t.Helper()
