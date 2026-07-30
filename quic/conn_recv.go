@@ -17,6 +17,11 @@ import (
 // acknowledges but never completes forever; the caller's ctx deadline, if nearer,
 // still applies.
 func (c *Conn) Establish(ctx context.Context) error {
+	// The handshake runs pre-reader on a single goroutine; holding c.mu across its
+	// whole body makes fail and the TLS-pump HandshakeSink callbacks unconditional
+	// assume-held internals, one uniform convention with the post-handshake engine.
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	ctx, cancel := context.WithTimeout(ctx, handshakeTimeout)
 	defer cancel()
 	if err := c.sendInitialFlight(ctx); err != nil {
@@ -46,6 +51,8 @@ func (c *Conn) Establish(ctx context.Context) error {
 // completes (RFC 9000 §13). The caller sets a read deadline on the PacketConn to
 // bound the wait.
 func (c *Conn) Poll(ctx context.Context) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -516,7 +523,7 @@ func (c *Conn) sealPacket(sp int, frames []byte, ackEliciting bool, retrans []re
 	// current key it must stop and close with AEAD_LIMIT_REACHED rather than seal
 	// another. The !c.closed guard lets the CONNECTION_CLOSE packet itself seal.
 	if sp == spaceApp && !c.closed && c.appSendCount >= aeadConfidentialityLimit {
-		_ = c.CloseWithError(false, ErrCodeAEADLimitReached, "")
+		_ = c.closeWithErrorLocked(false, ErrCodeAEADLimitReached, "") // sealPacket runs with c.mu held
 		return nil, ErrAEADLimit
 	}
 	minFrames := 20 // ensures payload+tag reaches the 16-byte HP sample
@@ -953,7 +960,7 @@ func (h *connFrameHandler) OnStopSending(id, errCode uint64) error {
 		return ErrStreamState
 	}
 	if s := h.c.streams[id]; s != nil {
-		_ = s.Reset(errCode)
+		_ = s.resetLocked(errCode) // OnStopSending runs on the receive path with c.mu held
 		return nil
 	}
 	// A STOP_SENDING for a locally initiated stream not yet created is a

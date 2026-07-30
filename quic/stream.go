@@ -28,6 +28,8 @@ func (s *Stream) ID() uint64 { return s.id }
 // advertised initial_max_streams_bidi limit (§4.6). It does not send anything
 // until the caller writes to the stream.
 func (c *Conn) OpenStream() (*Stream, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	if c.openedBidi >= c.peer.InitialMaxStreamsBidi {
 		return nil, ErrTooManyStreams
 	}
@@ -47,6 +49,8 @@ func (c *Conn) OpenStream() (*Stream, error) {
 // send-only from the opener. It returns ErrTooManyStreams if opening another
 // would exceed the peer's advertised initial_max_streams_uni limit (§4.6).
 func (c *Conn) OpenUniStream() (*Stream, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	if c.openedUni >= c.peer.InitialMaxStreamsUni {
 		return nil, ErrTooManyStreams
 	}
@@ -67,6 +71,8 @@ func (c *Conn) OpenUniStream() (*Stream, error) {
 // Consuming bytes frees receive-flow-control window, which may queue
 // MAX_STREAM_DATA / MAX_DATA to grant the peer more credit (RFC 9000 §4.1).
 func (s *Stream) Recv() []byte {
+	s.conn.mu.Lock()
+	defer s.conn.mu.Unlock()
 	data := s.recv.read()
 	if len(data) > 0 {
 		s.conn.onStreamConsumed(s, uint64(len(data)))
@@ -144,6 +150,14 @@ func (c *Conn) scrubResetStreamData(id uint64) {
 // be sent (Send returns ErrStreamReset). It is idempotent and a no-op once the
 // stream's FIN has been sent — the peer already has the whole request.
 func (s *Stream) Reset(errCode uint64) error {
+	s.conn.mu.Lock()
+	defer s.conn.mu.Unlock()
+	return s.resetLocked(errCode)
+}
+
+// resetLocked is Reset with c.mu held — the form OnStopSending calls reentrantly
+// from the receive path.
+func (s *Stream) resetLocked(errCode uint64) error {
 	if s.finSent || s.sendReset {
 		return nil
 	}
@@ -170,6 +184,14 @@ func (s *Stream) Reset(errCode uint64) error {
 // (RFC 9000 §3.5, §19.5). Used to abandon a response the caller no longer wants,
 // so the peer stops filling our receive buffer. Idempotent.
 func (s *Stream) StopSending(errCode uint64) error {
+	s.conn.mu.Lock()
+	defer s.conn.mu.Unlock()
+	return s.stopSendingLocked(errCode)
+}
+
+// stopSendingLocked is StopSending with c.mu held, for callers already on a
+// locked path.
+func (s *Stream) stopSendingLocked(errCode uint64) error {
 	if s.recvReset {
 		return nil
 	}

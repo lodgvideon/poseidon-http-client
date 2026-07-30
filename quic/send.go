@@ -29,6 +29,8 @@ const (
 // flow-control credit, so it is never blocked. Send after the FIN returns
 // ErrStreamFinished.
 func (s *Stream) Send(data []byte, fin bool) (int, error) {
+	s.conn.mu.Lock()
+	defer s.conn.mu.Unlock()
 	if s.sendReset {
 		return 0, ErrStreamReset
 	}

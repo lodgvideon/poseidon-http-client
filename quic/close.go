@@ -46,9 +46,11 @@ func closeCodeFor(err error) (uint64, bool) {
 // (closeCodeFor), the connection sends a CONNECTION_CLOSE with the matching
 // transport error code (RFC 9000 §10.2) so the peer learns why, then the error is
 // returned unchanged. Non-protocol errors pass through without sending anything.
+// fail runs on the receive path with c.mu held, so it closes via the assume-held
+// closeWithErrorLocked rather than re-taking the lock through CloseWithError.
 func (c *Conn) fail(err error) error {
 	if code, ok := closeCodeFor(err); ok {
-		_ = c.CloseWithError(false, code, "")
+		_ = c.closeWithErrorLocked(false, code, "")
 	}
 	return err
 }
@@ -64,6 +66,14 @@ func (c *Conn) fail(err error) error {
 // cannot be sent as an application frame, so it is downgraded to a transport
 // CONNECTION_CLOSE with APPLICATION_ERROR in the highest available space.
 func (c *Conn) CloseWithError(app bool, code uint64, reason string) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.closeWithErrorLocked(app, code, reason)
+}
+
+// closeWithErrorLocked is CloseWithError with c.mu already held — the form the
+// receive path (fail, the AEAD-limit close in sealPacket) calls reentrantly.
+func (c *Conn) closeWithErrorLocked(app bool, code uint64, reason string) error {
 	if c.closed {
 		return c.pc.Close()
 	}
@@ -86,7 +96,9 @@ func (c *Conn) CloseWithError(app bool, code uint64, reason string) error {
 // Close terminates the connection gracefully, sending a transport NO_ERROR
 // CONNECTION_CLOSE (RFC 9000 §10.2) before closing the transport.
 func (c *Conn) Close() error {
-	return c.CloseWithError(false, ErrCodeNoError, "")
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.closeWithErrorLocked(false, ErrCodeNoError, "")
 }
 
 // closeSpace returns the highest packet-number space that has send keys and its

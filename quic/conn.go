@@ -6,6 +6,7 @@ import (
 	"crypto/rand"
 	"crypto/tls"
 	"errors"
+	"sync"
 	"time"
 )
 
@@ -36,6 +37,16 @@ type PacketConn interface {
 // handshake to the send path and manages establishment. Not safe for concurrent
 // use by multiple goroutines.
 type Conn struct {
+	// mu guards all mutable Conn state and the wire (RFC 9000 defines no
+	// concurrency model of its own). Public entry points — Poll, Send, Recv,
+	// OpenStream, OpenUniStream, Reset, StopSending, AcceptUniStream,
+	// CloseWithError, Close — take it; internal helpers and the …Locked variants
+	// assume it is held. Until the background reader goroutine lands (a later
+	// phase) the connection is still driven by a single goroutine, so the lock is
+	// uncontended; it is introduced now so the receive path and concurrent senders
+	// can share the connection safely once it is not.
+	mu sync.Mutex
+
 	pc PacketConn
 	hs *TLSHandshake
 
@@ -192,6 +203,8 @@ func (c *Conn) acceptPeerUniStream(id uint64) (*Stream, error) {
 // stream, or nil if none is pending. It does not block; the caller drives the
 // connection with Poll and drains newly accepted streams between polls.
 func (c *Conn) AcceptUniStream() *Stream {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	if len(c.acceptedUni) == 0 {
 		return nil
 	}
