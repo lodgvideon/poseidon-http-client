@@ -89,6 +89,24 @@ func (a *ackTracker) receive(pn uint64, ackEliciting bool) {
 // received since the last ACK was built).
 func (a *ackTracker) ackPending() bool { return a.pending }
 
+// seen reports whether pn cannot be shown to be new in this space: either it falls
+// inside a retained range (definitely received before) or below the oldest range
+// still retained (the tracker dropped that history at maxAckRanges, so newness is
+// unknowable). RFC 9000 §12.3 requires discarding a packet "unless it is certain
+// that it has not processed another packet with the same packet number", so
+// uncertainty counts as seen. Ranges are sorted descending by upper bound.
+func (a *ackTracker) seen(pn uint64) bool {
+	if len(a.ranges) == 0 {
+		return false
+	}
+	for _, r := range a.ranges {
+		if pn >= r.lo && pn <= r.hi {
+			return true
+		}
+	}
+	return pn < a.ranges[len(a.ranges)-1].lo
+}
+
 // largest returns the largest packet number received, and whether any have been.
 func (a *ackTracker) largest() (uint64, bool) {
 	if len(a.ranges) == 0 {

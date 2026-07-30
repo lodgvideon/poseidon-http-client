@@ -496,6 +496,15 @@ func (c *Conn) recvDatagram(datagram []byte) error {
 		if !ok {
 			continue // no keys yet, or authentication failed; skip this packet
 		}
+		// "A receiver MUST discard a newly unprotected packet unless it is certain
+		// that it has not processed another packet with the same packet number from
+		// the same packet number space" (RFC 9000 §12.3). A bit-identical replayed
+		// datagram authenticates — the AEAD nonce derives from the packet number — so
+		// without this its frames would be dispatched a second time. Individual frame
+		// handlers absorb most duplicates, but the requirement is on the packet.
+		if c.acks[sp].seen(pn) {
+			continue
+		}
 		// Adopt the server's connection ID from the first AUTHENTICATED long-header
 		// packet (RFC 9000 §7.2). Deferring adoption until after the AEAD succeeds
 		// keeps a forged or garbage Initial — which anyone can build, since Initial

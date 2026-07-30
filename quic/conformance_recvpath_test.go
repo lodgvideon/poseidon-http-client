@@ -140,3 +140,41 @@ func TestConformance_RFC9001_Sec57_ZeroRTTDiscardedNotDecrypted(t *testing.T) {
 		t.Fatal("a 0-RTT packet was processed in the Initial packet-number space")
 	}
 }
+
+// TestConformance_RFC9000_Sec123_ReplayedPacketDiscarded pins "A receiver MUST
+// discard a newly unprotected packet unless it is certain that it has not processed
+// another packet with the same packet number from the same packet number space." A
+// replayed datagram authenticates — the AEAD nonce derives from the packet number —
+// so the duplicate must be dropped before its frames reach the handlers. Observable:
+// after the owed ACK is consumed, the replay must not oblige a fresh one.
+func TestConformance_RFC9000_Sec123_ReplayedPacketDiscarded(t *testing.T) {
+	origDCID := []byte("origdcid")
+	_, serverKeys := InitialKeys(origDCID)
+
+	c := newInitialConn(t, origDCID)
+	pkt := craftServerInitial(t, serverKeys, nil, []byte{0xaa}, 7, AppendPing(nil))
+
+	if err := c.recvDatagram(pkt); err != nil {
+		t.Fatalf("first recvDatagram = %v, want nil", err)
+	}
+	if !c.acks[spaceInitial].ackPending() {
+		t.Fatal("an ack-eliciting packet should leave an ACK owed")
+	}
+	c.acks[spaceInitial].acked() // the ACK went out
+
+	if err := c.recvDatagram(pkt); err != nil {
+		t.Fatalf("replayed recvDatagram = %v, want nil (discarded)", err)
+	}
+	if c.acks[spaceInitial].ackPending() {
+		t.Fatal("a replayed packet was processed again: its PING re-owed an ACK")
+	}
+
+	// Control: a genuinely new packet number is still processed.
+	fresh := craftServerInitial(t, serverKeys, nil, []byte{0xaa}, 8, AppendPing(nil))
+	if err := c.recvDatagram(fresh); err != nil {
+		t.Fatalf("fresh recvDatagram = %v, want nil", err)
+	}
+	if !c.acks[spaceInitial].ackPending() {
+		t.Fatal("control: a new packet number must still be processed")
+	}
+}
