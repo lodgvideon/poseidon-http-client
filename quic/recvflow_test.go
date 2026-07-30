@@ -143,3 +143,59 @@ func TestConn_ReceiveFlowControl_NoGrantBelowThreshold(t *testing.T) {
 		t.Fatalf("stream recvMax should be unchanged, got %d", s.recvMax)
 	}
 }
+
+// TestConformance_RFC9000_Sec133_NoCreditAfterFinalSize pins the §13.3 SHOULD that
+// an endpoint stop sending MAX_STREAM_DATA once the receiving part is in Size Known
+// or Reset Recvd: the final size is settled, so extra credit buys the peer nothing
+// and only costs a control frame. Connection-level MAX_DATA is unaffected.
+func TestConformance_RFC9000_Sec133_NoCreditAfterFinalSize(t *testing.T) {
+	win := int(DefaultStreamRecvWindow)
+
+	for _, tc := range []struct {
+		name  string
+		close func(h *connFrameHandler, id uint64) error
+	}{
+		{"size_known", func(h *connFrameHandler, id uint64) error {
+			return h.OnStream(id, uint64(win), true, nil) // FIN at the current offset
+		}},
+		{"reset_recvd", func(h *connFrameHandler, id uint64) error {
+			return h.OnResetStream(id, 0, uint64(win))
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c := &Conn{peer: TransportParams{InitialMaxStreamsBidi: 1}, connRecvMax: DefaultConnRecvWindow}
+			s, err := c.OpenStream()
+			if err != nil {
+				t.Fatal(err)
+			}
+			h := &connFrameHandler{c: c}
+			if err := h.OnStream(s.ID(), 0, false, make([]byte, win)); err != nil {
+				t.Fatal(err)
+			}
+			if err := tc.close(h, s.ID()); err != nil {
+				t.Fatal(err)
+			}
+			before := s.recvMax
+			s.Recv() // consuming a full window would normally advance the limit
+			if s.recvMax != before {
+				t.Fatalf("recvMax advanced %d -> %d after the final size was known", before, s.recvMax)
+			}
+		})
+	}
+
+	// Control: without a FIN or reset the same consumption does advance the limit.
+	c := &Conn{peer: TransportParams{InitialMaxStreamsBidi: 1}, connRecvMax: DefaultConnRecvWindow}
+	s, err := c.OpenStream()
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := &connFrameHandler{c: c}
+	if err := h.OnStream(s.ID(), 0, false, make([]byte, win)); err != nil {
+		t.Fatal(err)
+	}
+	before := s.recvMax
+	s.Recv()
+	if s.recvMax == before {
+		t.Fatal("control: an open stream did not advance recvMax, so the test proves nothing")
+	}
+}

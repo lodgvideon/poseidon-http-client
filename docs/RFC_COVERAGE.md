@@ -425,6 +425,7 @@ protection (RFC 9001) and the connection engine are later phases.
 | §12.2   | Conformance | TestParseHeader_Coalesced (coalesced-packet walk via PacketLen), TestConformance_RFC9000_Sec122_CoalescedForeignDCIDIgnored (a coalesced packet whose Destination Connection ID differs from the first packet's is ignored, even though it authenticates) |
 | §5.2    | Conformance | TestConformance_RFC9000_Sec52_ForeignVersionDiscarded (a long-header packet stamped with a version other than v1 is discarded before decryption — Initial keys derive from the observable connection ID, so a v1-sealed packet carrying a foreign version would otherwise authenticate; Version Negotiation and short headers unaffected) |
 | §12.4   | Conformance | TestConformance_RFC9000_Sec124_EmptyPacketIsProtocolViolation (an authenticated packet carrying zero frames → PROTOCOL_VIOLATION) |
+| §13.3   | Conformance | TestConformance_RFC9000_Sec133_NoCreditAfterFinalSize (no further MAX_STREAM_DATA once the receiving part is Size Known or Reset Recvd, in both directions, with an open-stream control) |
 | §17     | Roundtrip   | TestPacketHeader_RoundTrip |
 | §17     | Negative    | TestParseHeader_Malformed (malformed header → ErrPacketEncoding) |
 | §17     | Fuzz        | FuzzParseHeader (arbitrary packet bytes + fuzzed local-DCID length → ParseHeader never panics on a truncated/oversized/nonsensical header or an out-of-range DCID length, only ErrPacketEncoding) |
