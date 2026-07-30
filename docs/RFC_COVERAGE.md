@@ -659,7 +659,9 @@ request.
 |---------|-------------|------|
 | App. A  | Roundtrip   | TestStaticTable_Shape (99-entry 0-based static table) |
 | App. B  | Conformance | TestConformance_RFC9204_AppB_DynamicTable (B.2–B.5 verbatim: Set Capacity, Insert With/Without Name Reference, Duplicate, eviction, and field sections decoded via post-Base and Base-relative dynamic references, with the decoder-instruction responses re-encoded) |
+| §2.1.2 / §2.2.1 | Conformance | TestConformance_RFC9204_Sec212_RequiredInsertCountSmallerThanExpected (a section declaring a Required Insert Count below the largest referenced absolute index + 1 → QPACK_DECOMPRESSION_FAILED, on all four dynamic representations) |
 | §3.2.4–6 | Conformance | TestConformance_RFC9204_AppB_DynamicTable, FuzzDynamicIndexResolution (absolute / insert-count-relative / Base-relative / post-Base index identities) |
+| §4.1.1  | Conformance | TestConformance_RFC9204_Sec411_Integer62Bit (prefixed integers decode up to 2^62-1 across every prefix width used by QPACK; 2^62 rejected) |
 | §4.3.1–4 | Conformance | TestConformance_RFC9204_AppB_DynamicTable, TestQPACK_EncoderInstructions_Partial (Set Capacity + Insert on a byte-fragmented encoder stream), TestQPACK_EncoderInstructions_Errors (capacity over max, missing/oob name ref, oversize insert → QPACK_ENCODER_STREAM_ERROR) |
 | §4.4.1–3 | Conformance | TestQPACK_DecoderInstructions_Encode (Section Acknowledgment / Stream Cancellation / Insert Count Increment prefixed-integer bytes), TestConformance_RFC9204_AppB_DynamicTable |
 | §4.5.1.1 | Conformance | TestQPACK_RequiredInsertCount_Decode (wraparound past 2*MaxEntries, out-of-range rejection), FuzzRequiredInsertCount (encode/decode round-trip over the valid window) |

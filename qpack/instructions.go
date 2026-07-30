@@ -77,7 +77,7 @@ func (dt *DynamicTable) parseOneEncoderInstruction(src []byte) (n int, needMore 
 		return dt.parseInsertWithLiteralName(src)
 	case b&0x20 != 0:
 		// Set Dynamic Table Capacity (001xxxxx): RFC 9204 §4.3.1.
-		capacity, nc, ierr := hpack.DecodeInteger(src, 5)
+		capacity, nc, ierr := decodeInt(src, 5)
 		if ierr != nil {
 			return needMoreOrErr(ierr)
 		}
@@ -95,7 +95,7 @@ func (dt *DynamicTable) parseOneEncoderInstruction(src []byte) (n int, needMore 
 // The name comes from the static table (static=true) or the dynamic table by an
 // index relative to the current insert count; the value is a string literal.
 func (dt *DynamicTable) parseInsertWithNameRef(src []byte, static bool) (int, bool, error) {
-	idx, ni, ierr := hpack.DecodeInteger(src, 6)
+	idx, ni, ierr := decodeInt(src, 6)
 	if ierr != nil {
 		return needMoreOrErr(ierr)
 	}
@@ -154,7 +154,7 @@ func (dt *DynamicTable) parseInsertWithLiteralName(src []byte) (int, bool, error
 // parseDuplicate handles Duplicate (RFC 9204 §4.3.4): re-insert an existing
 // dynamic-table entry named by an index relative to the current insert count.
 func (dt *DynamicTable) parseDuplicate(src []byte) (int, bool, error) {
-	idx, ni, ierr := hpack.DecodeInteger(src, 5)
+	idx, ni, ierr := decodeInt(src, 5)
 	if ierr != nil {
 		return needMoreOrErr(ierr)
 	}
@@ -182,7 +182,7 @@ func readInstrString(scratch *[]byte, src []byte, prefixBits uint8) (out []byte,
 		return nil, 0, true, nil
 	}
 	huff := src[0]&(byte(1)<<prefixBits) != 0
-	length, ni, derr := hpack.DecodeInteger(src, prefixBits)
+	length, ni, derr := decodeInt(src, prefixBits)
 	if derr != nil {
 		if errors.Is(derr, hpack.ErrTruncated) {
 			return nil, 0, true, nil

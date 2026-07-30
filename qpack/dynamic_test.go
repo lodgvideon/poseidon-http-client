@@ -335,6 +335,41 @@ func TestQPACK_DecodeDynamic_Errors(t *testing.T) {
 	}
 }
 
+// TestConformance_RFC9204_Sec212_RequiredInsertCountSmallerThanExpected rejects a
+// field section whose declared Required Insert Count is below the lowest value
+// with which the section can be decoded. RFC 9204 §2.1.2 fixes that value at the
+// largest referenced absolute index plus one, and §2.2.1 makes a smaller count a
+// connection error of type QPACK_DECOMPRESSION_FAILED. Every dynamic
+// representation must enforce it, so all four are exercised against a table that
+// holds the referenced entries — without the bound they would decode happily.
+func TestConformance_RFC9204_Sec212_RequiredInsertCountSmallerThanExpected(t *testing.T) {
+	dt := NewDynamicTable(4096)
+	applyInserts(t, dt, []byte{0x3f, 0xe1, 0x1f},
+		insertLiteral("a", "1"), insertLiteral("b", "2"), insertLiteral("c", "3"))
+	dec := NewDecoder()
+	cases := []struct {
+		name string
+		in   []byte
+	}{
+		// RIC=1, Base=3 (Sign=0, DeltaBase=2); Indexed dynamic idx 0 -> abs 2 >= RIC.
+		{"indexed", []byte{0x02, 0x02, 0x80}},
+		// Same prefix; Literal with dynamic Name Reference idx 0 -> abs 2 >= RIC.
+		{"name_ref", []byte{0x02, 0x02, 0x40, 0x00}},
+		// RIC=1, Base=0 (Sign=1, DeltaBase=0); Post-Base idx 1 -> abs 1 >= RIC.
+		{"post_base", []byte{0x02, 0x80, 0x11}},
+		// Same prefix; Post-Base Name Reference idx 1 -> abs 1 >= RIC.
+		{"post_base_name_ref", []byte{0x02, 0x80, 0x01, 0x00}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			err := dec.DecodeFieldSection(c.in, dt, func([]byte, []byte) error { return nil })
+			if !errors.Is(err, ErrDecompressionFailed) {
+				t.Fatalf("DecodeFieldSection(%x) = %v, want ErrDecompressionFailed", c.in, err)
+			}
+		})
+	}
+}
+
 // TestQPACK_StaticOnly_WithTable confirms a section that uses only static and
 // literal representations (RIC=0) decodes identically whether a dynamic table is
 // present or nil — the INERT path is unaffected.

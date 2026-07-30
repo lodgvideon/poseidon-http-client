@@ -22,6 +22,20 @@ func EncodeInteger(dst []byte, n uint8, prefixByte byte, i uint64) []byte {
 // Caller MUST mask the prefix bits before calling: src[0] is interpreted as
 // the encoded byte (the implementation only reads the low N bits of src[0]).
 func DecodeInteger(src []byte, n uint8) (uint64, int, error) {
+	return decodeInteger(src, n, 0xffff_ffff, 32)
+}
+
+// DecodeIntegerMax is DecodeInteger with an explicit ceiling. RFC 7541 §5.1 puts
+// no upper bound on the representation, so the bound is the caller's protocol
+// limit: 2^32-1 for HPACK, 2^62-1 for QPACK, which RFC 9204 §4.1.1 requires
+// implementations to decode.
+func DecodeIntegerMax(src []byte, n uint8, max uint64) (uint64, int, error) {
+	return decodeInteger(src, n, max, 63)
+}
+
+// decodeInteger reads an N-bit prefix integer, rejecting a value above max or a
+// continuation run that shifts past maxShift bits.
+func decodeInteger(src []byte, n uint8, max uint64, maxShift uint) (uint64, int, error) {
 	if len(src) == 0 {
 		return 0, 0, ErrTruncated
 	}
@@ -38,13 +52,15 @@ func DecodeInteger(src []byte, n uint8) (uint64, int, error) {
 		}
 		b := src[consumed]
 		consumed++
-		if m >= 32 {
+		if m >= maxShift {
 			return 0, 0, ErrIntegerOverflow
 		}
-		v += uint64(b&0x7f) << m
-		if v > 0xffff_ffff {
+		chunk := uint64(b & 0x7f)
+		add := chunk << m
+		if add>>m != chunk || add > max-v {
 			return 0, 0, ErrIntegerOverflow
 		}
+		v += add
 		if b&0x80 == 0 {
 			return v, consumed, nil
 		}

@@ -125,6 +125,30 @@ func TestConformance_RFC9204_Sec214_ReferenceOnlyAcknowledged(t *testing.T) {
 // advances the Known Received Count, a zero increment or one past the inserts made
 // is a QPACK_DECODER_STREAM_ERROR, Section Acknowledgment / Stream Cancellation are
 // consumed as no-ops, and a partial instruction is left for the next call.
+// TestConformance_RFC9204_Sec411_Integer62Bit pins the §4.1.1 MUST that a QPACK
+// implementation decode prefixed integers up to and including 62 bits long. The
+// shared HPACK reader stops at 2^32-1, which is enough for HTTP/2 but false-rejects
+// a conformant server here: a Section Acknowledgment or Stream Cancellation carries
+// a QUIC stream ID, legal up to 2^62-1.
+func TestConformance_RFC9204_Sec411_Integer62Bit(t *testing.T) {
+	const max62 = uint64(1)<<62 - 1
+	for _, prefix := range []uint8{3, 4, 5, 6, 7, 8} {
+		t.Run(strconv.Itoa(int(prefix)), func(t *testing.T) {
+			buf := hpack.EncodeInteger(nil, prefix, 0x00, max62)
+			got, n, err := decodeInt(buf, prefix)
+			if err != nil || got != max62 || n != len(buf) {
+				t.Fatalf("decodeInt(%x, %d) = %d, %d, %v; want %d, %d, nil",
+					buf, prefix, got, n, err, max62, len(buf))
+			}
+			// 2^62 is past the ceiling and must still be rejected.
+			over := hpack.EncodeInteger(nil, prefix, 0x00, uint64(1)<<62)
+			if _, _, err := decodeInt(over, prefix); !errors.Is(err, hpack.ErrIntegerOverflow) {
+				t.Fatalf("decodeInt(2^62) err = %v, want ErrIntegerOverflow", err)
+			}
+		})
+	}
+}
+
 func TestConformance_RFC9204_Sec44_ParseDecoderInstructions(t *testing.T) {
 	newEnc := func(t *testing.T, inserts int) *Encoder {
 		t.Helper()

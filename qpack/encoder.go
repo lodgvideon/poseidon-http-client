@@ -291,7 +291,7 @@ func (e *Encoder) ParseDecoderInstructions(src []byte) (int, error) {
 			prefix = 6 // Insert Count Increment (00xxxxxx, 6-bit increment): §4.4.3.
 			isIncrement = true
 		}
-		val, n, err := hpack.DecodeInteger(src[p:], prefix)
+		val, n, err := decodeInt(src[p:], prefix)
 		if err != nil {
 			if errors.Is(err, hpack.ErrTruncated) {
 				break // partial instruction: leave it unconsumed and resume later
