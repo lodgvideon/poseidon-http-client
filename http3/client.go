@@ -300,6 +300,9 @@ func NewClient(conn *quic.Conn, settings []Setting) (*Client, error) {
 }
 
 func newClient(conn quicConn, settings []Setting) (*Client, error) {
+	if err := validateSettings(settings); err != nil {
+		return nil, err
+	}
 	c := &Client{conn: conn, readerDone: make(chan struct{})}
 	c.maxFieldSection.Store(^uint64(0)) // no limit until the peer's SETTINGS arrive
 	c.goaway.Store(^uint64(0))          // "none" until a real GOAWAY lands (§5.2)

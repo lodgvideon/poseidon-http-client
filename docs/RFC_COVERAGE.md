@@ -720,6 +720,8 @@ exercised in the Docker-peer interop phase.
 |---------|-------------|------|
 | §7.2    | Conformance | TestConformance_RFC9114_Sec72_FrameRoundTrip (DATA/HEADERS/GOAWAY/MAX_PUSH_ID/CANCEL_PUSH write → header parse → payload) |
 | §7.2.4  | Conformance | TestConformance_RFC9114_Sec724_SettingsRoundTrip, TestConformance_RFC9114_Sec724_DuplicateSetting (SETTINGS round-trip; repeated id → H3_SETTINGS_ERROR) |
+| §7.2.4 / §7.2.4.1 | Conformance | TestConformance_RFC9114_Sec724_SettingsSendSideValidated (the exported NewClient refuses caller settings this client MUST NOT send: a repeated identifier, a reserved HTTP/2-carryover id 0x02–0x05; unassigned 0x00 stays legal) |
+| §7.2.4.1 | Conformance | TestConformance_RFC9114_Sec7241_GreaseSettingSent (the client's own SETTINGS carries a reserved 0x1f*N+0x21 identifier, and one arriving from the server parses and is ignored) |
 | §7.1    | Negative    | TestParseFrameHeader_Incomplete (truncated Type/Length varint → ErrH3Frame) |
 | §7.1    | Conformance | TestConformance_RFC9114_Sec71_SettingsTruncatedIsFrameError (a SETTINGS identifier or value cut off by the frame length → H3_FRAME_ERROR — a frame-layout error, §7.1 — distinct from the H3_SETTINGS_ERROR raised for a reserved or duplicate identifier) |
 | §6.2 / §6.2.1 | Conformance | TestConformance_RFC9114_Sec62_ControlStream (client control stream = type 0x00 + first SETTINGS frame; peeled + read back) |

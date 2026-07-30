@@ -121,10 +121,22 @@ const qpackBlockedStreams uint64 = 16
 // rather than failing. The wait is bounded by the request context, so a server
 // that promises inserts it never sends fails the request on ctx timeout instead of
 // hanging, and at most qpackBlockedStreams streams may block at once (§2.1.2).
+// The third entry is a reserved "grease" identifier of the form 0x1f*N + 0x21
+// (N=1): RFC 9114 §7.2.4.1 says endpoints SHOULD include at least one, so that a
+// peer's ignore-unknown-setting path is exercised on every connection instead of
+// ossifying around the identifiers in use today. The value is arbitrary and the
+// peer MUST NOT ascribe it any meaning.
 var defaultSettings = []Setting{
 	{SettingQPACKMaxTableCapacity, qpackDynamicTableCapacity},
 	{SettingQPACKBlockedStreams, qpackBlockedStreams},
+	{greaseSettingID, 0x1f},
 }
+
+// greaseSettingID is the reserved setting identifier 0x1f*1 + 0x21 (RFC 9114
+// §7.2.4.1). Any identifier congruent to 0x21 modulo 0x1f is reserved; a fixed one
+// keeps the emitted SETTINGS deterministic for tests while still exercising the
+// peer's ignore path.
+const greaseSettingID uint64 = 0x1f*1 + 0x21
 
 // localTransportParams are the limits the client advertises so the server has
 // credit to send the response and open its control/QPACK streams.

@@ -2,6 +2,7 @@ package http3
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 )
@@ -71,6 +72,59 @@ func TestConformance_RFC9114_Sec52_GoAwayGatesRequests(t *testing.T) {
 	}
 	if client.goaway.Load() != 0 {
 		t.Fatalf("goaway state: id=%d, want 0", client.goaway.Load())
+	}
+}
+
+// TestConformance_RFC9114_Sec724_SettingsSendSideValidated pins the two send-side
+// SETTINGS MUST NOTs on the exported NewClient path, whose caller supplies the
+// slice: the same identifier twice (§7.2.4) and a reserved HTTP/2-carryover
+// identifier 0x02–0x05 (§7.2.4.1). Identifier 0x00 is unassigned, not reserved, so
+// it must still be accepted.
+func TestConformance_RFC9114_Sec724_SettingsSendSideValidated(t *testing.T) {
+	cases := []struct {
+		name string
+		in   []Setting
+		want error
+	}{
+		{"duplicate", []Setting{{SettingQPACKBlockedStreams, 16}, {SettingQPACKBlockedStreams, 8}}, ErrH3Settings},
+		{"reserved_h2", []Setting{{0x03, 1}}, ErrH3Settings},
+		{"unassigned_zero_ok", []Setting{{0x00, 1}}, nil},
+		{"defaults_ok", defaultSettings, nil},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			conn := &fakeConn{req: &fakeStream{}}
+			_, err := NewClientFake(conn, c.in)
+			if !errors.Is(err, c.want) {
+				t.Fatalf("NewClient(%v) err = %v, want %v", c.in, err, c.want)
+			}
+		})
+	}
+}
+
+// TestConformance_RFC9114_Sec7241_GreaseSettingSent pins the §7.2.4.1 SHOULD that
+// an endpoint include at least one reserved identifier of the form 0x1f*N + 0x21 in
+// its own SETTINGS, and the matching receive-side rule that one arriving from the
+// server is ignored rather than rejected.
+func TestConformance_RFC9114_Sec7241_GreaseSettingSent(t *testing.T) {
+	var grease int
+	for _, s := range defaultSettings {
+		if s.ID >= 0x21 && (s.ID-0x21)%0x1f == 0 {
+			grease++
+		}
+	}
+	if grease == 0 {
+		t.Fatalf("defaultSettings = %v, want at least one reserved 0x1f*N+0x21 identifier", defaultSettings)
+	}
+	// Receive side: the server's own grease identifier must parse and be ignored.
+	raw := AppendSettings(nil, []Setting{{greaseSettingID, 7}, {SettingQPACKBlockedStreams, 4}})
+	_, _, hn, err := ParseFrameHeader(raw)
+	if err != nil {
+		t.Fatalf("ParseFrameHeader: %v", err)
+	}
+	got, err := ParseSettings(raw[hn:])
+	if err != nil || len(got) != 2 {
+		t.Fatalf("ParseSettings with a grease id = %v, %v; want both settings, nil", got, err)
 	}
 }
 
