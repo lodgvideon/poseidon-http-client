@@ -584,3 +584,67 @@ func TestConformance_RFC9114_Sec52_GoAwayEvictionDialsForWaiter(t *testing.T) {
 		t.Fatal("no replacement dial was started for the parked waiter")
 	}
 }
+
+// TestH3Pool_DialFailureDoesNotStrandQueuedWaiters pins the two ways a parked
+// waiter could be abandoned with no dialer. newH3Pool does not default
+// AcquireTimeout, so either one is an unbounded hang, not a slow path.
+func TestH3Pool_DialFailureDoesNotStrandQueuedWaiters(t *testing.T) {
+	newWaiter := func() h3AcquireReq {
+		return h3AcquireReq{ctx: context.Background(), reply: make(chan h3AcquireResp, 1)}
+	}
+
+	// A failed dial replies to the first waiter. The ones behind it must not be left
+	// to a health-check tick: with nothing live and nothing in flight the pool is in
+	// exactly the state that fast-refuses a NEW acquire, so they get the same error.
+	t.Run("behind_the_first", func(t *testing.T) {
+		p := newH3Pool("e", nil, PoolOptions{MaxConnsPerHost: 1}, nil, nil, nil)
+		defer p.Close()
+		a, b := newWaiter(), newWaiter()
+		rs := &h3RunState{waiters: []h3AcquireReq{a, b}, inFlightDials: 1}
+
+		p.handleDialDone(rs, h3DialResult{err: ErrPoolClosed})
+
+		for i, w := range []h3AcquireReq{a, b} {
+			select {
+			case resp := <-w.reply:
+				if resp.err == nil {
+					t.Fatalf("waiter %d got a conn, want the dial error", i)
+				}
+			default:
+				t.Fatalf("waiter %d left queued with no dial in flight", i)
+			}
+		}
+		if len(rs.waiters) != 0 {
+			t.Fatalf("%d waiters still queued", len(rs.waiters))
+		}
+	})
+
+	// An eviction that lands inside the dial backoff cannot dial. Nothing else
+	// would retry if the tick only dialled when it had just shrunk the pool — and by
+	// then the pool is already empty, so it never shrinks again.
+	t.Run("eviction_inside_backoff", func(t *testing.T) {
+		dialed := make(chan struct{}, 1)
+		dialFn := func(context.Context, string, *tls.Config) (h3Client, error) {
+			dialed <- struct{}{}
+			return &barrierH3Client{}, nil
+		}
+		p := newH3Pool("e", nil, PoolOptions{MaxConnsPerHost: 1, DialBackoff: 10 * time.Millisecond}, dialFn, nil, nil)
+		defer p.Close()
+		rs := &h3RunState{waiters: []h3AcquireReq{newWaiter()}, lastDialErrAt: time.Now()}
+
+		p.handleTick(rs) // inside the backoff: correctly does not dial
+		if rs.inFlightDials != 0 {
+			t.Fatal("dialled inside the backoff window")
+		}
+		time.Sleep(20 * time.Millisecond)
+		p.handleTick(rs) // backoff expired, pool empty — nothing shrank, must still dial
+		if rs.inFlightDials != 1 {
+			t.Fatalf("inFlightDials = %d after the backoff expired, want 1", rs.inFlightDials)
+		}
+		select {
+		case <-dialed:
+		case <-time.After(2 * time.Second):
+			t.Fatal("no dial started for the waiter once the backoff expired")
+		}
+	})
+}

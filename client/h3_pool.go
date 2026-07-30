@@ -226,12 +226,9 @@ func (p *h3Pool) handleRelease(rs *h3RunState, msg h3ReleaseMsg) {
 	// A GOAWAY'd conn is drained, not killed: pickLeastLoaded already stopped
 	// handing it out, so once its last in-flight exchange releases there is nothing
 	// left for it to finish (RFC 9114 §5.2).
-	var evicted bool
-	rs.conns, evicted = p.h3RetireEvict(rs.conns, msg.mc)
+	rs.conns, _ = p.h3RetireEvict(rs.conns, msg.mc)
 	rs.waiters = p.serveWaiters(rs.conns, rs.waiters)
-	if evicted {
-		p.dialForWaiters(rs)
-	}
+	p.dialForWaiters(rs)
 }
 
 // handleDialDone processes a completed dial: on success the conn enters the pool;
@@ -245,16 +242,35 @@ func (p *h3Pool) handleDialDone(rs *h3RunState, dr h3DialResult) {
 			rs.waiters = rs.waiters[1:]
 			p.replyAcquire(req, nil, dr.err)
 		}
+		// The waiters behind that one must not be left to a health-check tick.
+		// Either start another dial, or — when the pool is in exactly the state that
+		// makes handleAcquire fast-refuse a NEW request (dial backoff, nothing live,
+		// nothing in flight) — refuse them for the same reason. Leaving them queued is
+		// a priority inversion: a fresh acquire gets an immediate ErrDialBackoff while
+		// an already-queued one waits a full HealthCheckPeriod. Mirrors h1Pool.
+		p.dialForWaiters(rs)
+		if rs.inFlightDials == 0 && h3CountLive(rs.conns) == 0 {
+			for _, w := range rs.waiters {
+				p.replyAcquire(w, nil, dr.err)
+			}
+			rs.waiters = nil
+		}
 		return
 	}
 	p.refreshStreamCap(dr.mc)
 	rs.conns = append(rs.conns, dr.mc)
 	rs.waiters = p.serveWaiters(rs.conns, rs.waiters)
+	p.dialForWaiters(rs)
 }
 
 // handleStats evicts dead conns silently and reports a snapshot.
 func (p *h3Pool) handleStats(rs *h3RunState, respCh chan<- Stats) {
 	rs.conns = p.evictDeadSilent(rs.conns)
+	// A scrape that shrinks the pool must leave it able to recover, exactly as an
+	// eviction anywhere else does. No reachable strand was found through this path
+	// today, but leaving the one eviction site unwired is how the last two rounds
+	// of this bug happened.
+	p.dialForWaiters(rs)
 	respCh <- Stats{
 		ActiveConns:     len(rs.conns),
 		InFlightStreams: h3SumActive(rs.conns),
@@ -266,16 +282,16 @@ func (p *h3Pool) handleStats(rs *h3RunState, respCh chan<- Stats) {
 // handleTick runs periodic maintenance: idle eviction, dead eviction, stream-cap
 // refresh, and waiter expiry.
 func (p *h3Pool) handleTick(rs *h3RunState) {
-	before := len(rs.conns)
-	rs.conns = p.evictIdle(rs.conns)
+	// evictDead first: a conn that drained, then received GOAWAY, then idled out is
+	// a GOAWAY close, and evictIdle would report it as CloseIdle and skip the
+	// GoAwaysReceived counter.
 	rs.conns = p.evictDead(rs.conns)
+	rs.conns = p.evictIdle(rs.conns)
 	for _, mc := range rs.conns {
 		p.refreshStreamCap(mc)
 	}
 	rs.waiters = h3PruneExpiredWaiters(rs.waiters)
-	if len(rs.conns) < before {
-		p.dialForWaiters(rs)
-	}
+	p.dialForWaiters(rs)
 }
 
 // handleClose drains waiters and shuts down all connections.
@@ -495,12 +511,19 @@ func (p *h3Pool) evictDeadSilent(conns []*h3ManagedConn) []*h3ManagedConn {
 	return out
 }
 
-// dialForWaiters starts a replacement dial when an eviction has left a waiter with
-// nothing to be served by. Without it a waiter parked BEFORE the conn was retired
-// is never rescued: handleAcquire is the only other dialer, and it does not run
-// again for an already-parked request, so with no AcquireTimeout the caller waits
-// forever. Respects MaxConnsPerHost and the dial backoff exactly as handleAcquire
-// does. Actor goroutine only.
+// dialForWaiters starts a dial whenever a waiter is parked and the pool has room.
+// Without it a waiter parked BEFORE a conn was retired is never rescued:
+// handleAcquire is the only other dialer, and it does not run again for an
+// already-parked request, so with no AcquireTimeout (which newH3Pool does not
+// default) the caller waits forever.
+//
+// Call it UNCONDITIONALLY from every actor path that can change the picture —
+// release, dial-done, tick, stats — the way h1Pool.ensureDialForWaiters is called.
+// Gating it on "this call evicted something" is what turned a recoverable stall
+// into a permanent one twice: a dial that failed inside the backoff window, and a
+// tick that shrinks nothing because the pool is already empty, both leave waiters
+// with no dialer. Respects MaxConnsPerHost and the dial backoff exactly as
+// handleAcquire does. Actor goroutine only.
 func (p *h3Pool) dialForWaiters(rs *h3RunState) {
 	if len(rs.waiters) == 0 || inDialBackoff(rs.lastDialErrAt, p.opts.DialBackoff) {
 		return

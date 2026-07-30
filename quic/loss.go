@@ -11,6 +11,11 @@ const (
 	retransReset       // RESET_STREAM
 	retransStopSending // STOP_SENDING
 	retransRetire      // RETIRE_CONNECTION_ID (offset carries the sequence number)
+	// STREAMS_BLOCKED: offset carries the limit, fin marks the unidirectional form.
+	// RFC 9000 §13.3 asks for a new frame when the packet carrying the most recent
+	// one is lost; without this the peer never learns we are stalled and never sends
+	// MAX_STREAMS, and the parked opener waits out its context.
+	retransStreamsBlocked
 )
 
 // retransFrame is the information needed to re-send a lost frame's data as a new
@@ -37,6 +42,8 @@ func (rf retransFrame) encode(dst []byte) []byte {
 		return AppendStopSending(dst, rf.streamID, rf.errCode)
 	case retransRetire:
 		return AppendRetireConnectionID(dst, rf.offset)
+	case retransStreamsBlocked:
+		return AppendStreamsBlocked(dst, rf.fin, rf.offset)
 	default:
 		return AppendCrypto(dst, rf.offset, rf.data)
 	}

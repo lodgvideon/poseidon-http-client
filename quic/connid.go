@@ -108,10 +108,6 @@ func (c *Conn) queueRetire(seq uint64) {
 	c.pendingRetires++
 }
 
-// switchToActiveCID moves the connection to a remaining active connection ID
-// after the one in use has been retired, choosing the lowest remaining sequence
-// deterministically. A NEW_CONNECTION_ID's sequence is at least its Retire Prior
-// To, so at least the just-stored ID always remains.
 // redrawSpin draws a fresh latency-spin bit for the current connection ID (RFC 9000
 // §17.4). crypto/rand.Read cannot fail on the supported Go versions; on the
 // impossible error the bit simply keeps its previous value, which is no worse than
@@ -125,6 +121,10 @@ func (c *Conn) redrawSpin() {
 	c.spin = b[0]&1 != 0
 }
 
+// switchToActiveCID moves the connection to a remaining active connection ID
+// after the one in use has been retired, choosing the lowest remaining sequence
+// deterministically. A NEW_CONNECTION_ID's sequence is at least its Retire Prior
+// To, so at least the just-stored ID always remains.
 func (c *Conn) switchToActiveCID() {
 	best, found := uint64(0), false
 	for s := range c.serverCIDs {

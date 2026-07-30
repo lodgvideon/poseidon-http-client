@@ -265,8 +265,11 @@ func (c *Conn) emitStreamsBlocked(uni bool, limit uint64) {
 	// the peer's MAX_STREAMS, which the peer only sends because it saw this frame —
 	// so a dropped datagram plus an eager latch turns a transient stall into a wait
 	// until the caller's context expires. Re-emitting on the next refusal cannot
-	// spin: the opener re-parks after each one.
-	if err := c.writeAppFrames(AppendStreamsBlocked(nil, uni, limit), nil); err != nil {
+	// spin: the opener re-parks after each one. The frame is also retransmitted on
+	// loss (RFC 9000 §13.3) — a dropped datagram is not a write error, so the latch
+	// alone would not cover it.
+	retrans := []retransFrame{{kind: retransStreamsBlocked, offset: limit, fin: uni}}
+	if err := c.writeAppFrames(AppendStreamsBlocked(nil, uni, limit), retrans); err != nil {
 		return
 	}
 	c.streamsBlockedSet[i] = true
