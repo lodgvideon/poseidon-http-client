@@ -3,6 +3,7 @@ package http3
 import (
 	"context"
 	"testing"
+	"time"
 )
 
 // serverControl builds the bytes of a server control stream: the control
@@ -70,6 +71,29 @@ func TestConformance_RFC9114_Sec52_GoAwayGatesRequests(t *testing.T) {
 	}
 	if client.goaway.Load() != 0 {
 		t.Fatalf("goaway state: id=%d, want 0", client.goaway.Load())
+	}
+}
+
+// TestConformance_RFC9114_Sec52_GoAwayHighIDGatesRequests pins the §5.2 MUST NOT
+// against the graceful shutdown the RFC itself describes: a server opens with
+// GOAWAY carrying the maximum request id (2^62-4) and only later lowers it. Every
+// real stream id is below that, so gating on "id >= goaway" alone lets the client
+// keep opening requests indefinitely. "Endpoints MUST NOT initiate new requests
+// ... after receipt of a GOAWAY frame from the peer" is unconditional.
+func TestConformance_RFC9114_Sec52_GoAwayHighIDGatesRequests(t *testing.T) {
+	const maxRequestID = uint64(1)<<62 - 4
+	server := &fakeStream{id: 3, recvChunks: [][]byte{serverControl(nil, AppendGoaway(nil, maxRequestID)...)}}
+	conn := &fakeConn{req: &fakeStream{id: 0}, acceptQ: []quicStream{server}}
+	client, _ := NewClientFake(conn, nil)
+	if err := client.serviceControl(); err != nil {
+		t.Fatalf("serviceControl: %v", err)
+	}
+	// Bounded: an ungated Do parks on the fake stream waiting for a response.
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	_, _, err := client.Do(ctx, &Request{Method: "GET", Scheme: "https", Authority: "e", Path: "/"})
+	if err != ErrGoAway {
+		t.Fatalf("Do after GOAWAY(2^62-4) = %v, want ErrGoAway", err)
 	}
 }
 
