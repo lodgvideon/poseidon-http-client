@@ -416,6 +416,7 @@ type barrierH3Client struct {
 	signalAll func()
 	closes    int32
 	dead      int32
+	goaway    int32
 }
 
 func (b *barrierH3Client) Do(ctx context.Context, _ *http3.Request) (*http3.Response, []byte, error) {
@@ -433,7 +434,8 @@ func (b *barrierH3Client) Do(ctx context.Context, _ *http3.Request) (*http3.Resp
 func (b *barrierH3Client) DoStream(context.Context, *http3.Request) (*http3.Response, http3.ResponseBody, error) {
 	return nil, nil, errors.New("barrierH3Client: DoStream not used")
 }
-func (b *barrierH3Client) Alive() bool { return atomic.LoadInt32(&b.dead) == 0 }
+func (b *barrierH3Client) Alive() bool     { return atomic.LoadInt32(&b.dead) == 0 }
+func (b *barrierH3Client) GoingAway() bool { return atomic.LoadInt32(&b.goaway) != 0 }
 func (b *barrierH3Client) Close() error {
 	atomic.AddInt32(&b.closes, 1)
 	return nil
@@ -471,5 +473,51 @@ func TestNewClient_H3Pool_RequiresPoolAndTLS(t *testing.T) {
 		Addr: "h:443", Transport: TransportH3Pool, Pool: &PoolOptions{MaxConnsPerHost: 2},
 	}); err == nil {
 		t.Fatal("missing TLSConfig for TransportH3Pool = nil error, want failure")
+	}
+}
+
+// TestConformance_RFC9114_Sec52_PoolEvictsGoAwayConn pins the pool half of the §5.2
+// rule. Once the H3 client refuses every new request after GOAWAY, a pool that
+// still hands that connection out turns a graceful server shutdown into a retry
+// loop: the retry classifier treats http3.ErrGoAway as retryable, re-acquires the
+// same conn, and fails identically until retries are exhausted. The conn must stop
+// being selected immediately and be evicted once its in-flight work drains — never
+// closed under a request the server has undertaken to finish.
+func TestConformance_RFC9114_Sec52_PoolEvictsGoAwayConn(t *testing.T) {
+	p := newH3Pool("e", nil, PoolOptions{}, nil, nil, nil)
+	gone := &barrierH3Client{}
+	fresh := &barrierH3Client{}
+	conns := []*h3ManagedConn{
+		{cl: gone, active: 0, streamCap: 10},
+		{cl: fresh, active: 1, streamCap: 10},
+	}
+
+	if got := p.pickLeastLoaded(conns); got == nil || got.cl != gone {
+		t.Fatal("baseline: the least-loaded pick should be the idle conn")
+	}
+	atomic.StoreInt32(&gone.goaway, 1)
+	if got := p.pickLeastLoaded(conns); got == nil || got.cl != fresh {
+		t.Fatal("a GOAWAY'd conn must not be handed out for a new request")
+	}
+
+	// Two exchanges still in flight on it: the first release must NOT close it —
+	// the server has undertaken to finish what it already accepted.
+	rs := &h3RunState{conns: conns}
+	conns[0].active = 2
+	p.handleRelease(rs, h3ReleaseMsg{mc: conns[0]})
+	if len(rs.conns) != 2 {
+		t.Fatal("a GOAWAY'd conn with work still in flight must not be evicted")
+	}
+	if atomic.LoadInt32(&gone.closes) != 0 {
+		t.Fatal("a GOAWAY'd conn must not be closed under an in-flight request")
+	}
+
+	// The last one drains: now it has nothing left to do and is evicted.
+	p.handleRelease(rs, h3ReleaseMsg{mc: conns[0]})
+	if len(rs.conns) != 1 || rs.conns[0].cl != fresh {
+		t.Fatalf("drained GOAWAY'd conn not evicted: %d conns left", len(rs.conns))
+	}
+	if atomic.LoadInt32(&gone.closes) != 1 {
+		t.Fatalf("the drained GOAWAY'd conn should have been closed exactly once, got %d", atomic.LoadInt32(&gone.closes))
 	}
 }

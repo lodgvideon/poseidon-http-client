@@ -29,6 +29,12 @@ type h3Client interface {
 	// must not block. singleH3Conn ignores it (single-conn has no liveness
 	// gate); the HTTP/3 pool uses it to eject dead connections on release.
 	Alive() bool
+	// GoingAway reports whether the peer has sent GOAWAY, after which the
+	// connection refuses every new request while still finishing the exchanges
+	// already in flight (RFC 9114 §5.2). The pool stops handing such a connection
+	// out and evicts it once it has drained; it stays Alive until then, so
+	// in-flight responses are not cut short. Must not block.
+	GoingAway() bool
 	Close() error
 }
 

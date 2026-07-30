@@ -28,6 +28,12 @@ type ackTracker struct {
 	// packets received since the last ACK was built; both reset in acked().
 	immediate   bool
 	elicitCount int
+	// Truncation floor for seen() (RFC 9000 §12.3). maxAckRanges drops the oldest
+	// ranges; below lowWater the tracker no longer knows what it has processed.
+	// Unset until a drop actually happens, so ordinary reordering below the
+	// current ranges stays decidably new.
+	lowWater  uint64
+	truncated bool
 }
 
 // receive records that packet number pn was received. ackEliciting marks
@@ -80,6 +86,11 @@ func (a *ackTracker) receive(pn uint64, ackEliciting bool) {
 	// bound, so the newest — including the largest received, which the peer needs
 	// for loss detection and RTT — are kept.
 	if len(merged) > maxAckRanges {
+		// History below the last retained range is now gone, so newness there is no
+		// longer decidable — record the floor for seen(). It only ever rises.
+		if lo := merged[maxAckRanges-1].lo; !a.truncated || lo > a.lowWater {
+			a.lowWater, a.truncated = lo, true
+		}
 		merged = merged[:maxAckRanges]
 	}
 	a.ranges = merged
@@ -90,21 +101,20 @@ func (a *ackTracker) receive(pn uint64, ackEliciting bool) {
 func (a *ackTracker) ackPending() bool { return a.pending }
 
 // seen reports whether pn cannot be shown to be new in this space: either it falls
-// inside a retained range (definitely received before) or below the oldest range
-// still retained (the tracker dropped that history at maxAckRanges, so newness is
-// unknowable). RFC 9000 §12.3 requires discarding a packet "unless it is certain
+// inside a retained range (definitely received before) or below lowWater, the floor
+// under which maxAckRanges truncation actually discarded history, leaving newness
+// undecidable. RFC 9000 §12.3 requires discarding a packet "unless it is certain
 // that it has not processed another packet with the same packet number", so
-// uncertainty counts as seen. Ranges are sorted descending by upper bound.
+// undecidable counts as seen — but only where history was really lost. Absent
+// truncation a number below every retained range is provably new, which is the
+// ordinary case of a reordered packet arriving after a higher one.
 func (a *ackTracker) seen(pn uint64) bool {
-	if len(a.ranges) == 0 {
-		return false
-	}
 	for _, r := range a.ranges {
 		if pn >= r.lo && pn <= r.hi {
 			return true
 		}
 	}
-	return pn < a.ranges[len(a.ranges)-1].lo
+	return a.truncated && pn < a.lowWater
 }
 
 // largest returns the largest packet number received, and whether any have been.

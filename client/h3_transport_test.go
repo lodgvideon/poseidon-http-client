@@ -30,11 +30,12 @@ type fakeH3Client struct {
 	// chunks — modelling a mid-body server reset or protocol error.
 	nextErr error
 
-	gotReq   *http3.Request
-	lastBody *fakeH3Body // the body returned by the most recent DoStream
-	doCalls  int32
-	closes   int32
-	deadFlag int32 // non-zero → Alive reports false (see kill)
+	gotReq     *http3.Request
+	lastBody   *fakeH3Body // the body returned by the most recent DoStream
+	doCalls    int32
+	closes     int32
+	deadFlag   int32 // non-zero → Alive reports false (see kill)
+	goawayFlag int32 // non-zero → GoingAway reports true (peer sent GOAWAY)
 }
 
 func (f *fakeH3Client) Do(_ context.Context, req *http3.Request) (*http3.Response, []byte, error) {
@@ -69,7 +70,8 @@ func (f *fakeH3Client) DoStream(_ context.Context, req *http3.Request) (*http3.R
 // dead, when set, makes Alive report false — modelling a QUIC connection that has
 // terminated. Read/written atomically so pool tests can flip it from another
 // goroutine.
-func (f *fakeH3Client) Alive() bool { return atomic.LoadInt32(&f.deadFlag) == 0 }
+func (f *fakeH3Client) Alive() bool     { return atomic.LoadInt32(&f.deadFlag) == 0 }
+func (f *fakeH3Client) GoingAway() bool { return atomic.LoadInt32(&f.goawayFlag) != 0 }
 
 func (f *fakeH3Client) kill() { atomic.StoreInt32(&f.deadFlag, 1) }
 

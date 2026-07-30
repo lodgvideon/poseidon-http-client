@@ -220,7 +220,10 @@ func (p *h3Pool) handleAcquire(rs *h3RunState, req h3AcquireReq) {
 func (p *h3Pool) handleRelease(rs *h3RunState, msg h3ReleaseMsg) {
 	msg.mc.active--
 	msg.mc.lastUsed = time.Now()
-	if !msg.mc.cl.Alive() {
+	// A GOAWAY'd conn is drained, not killed: pickLeastLoaded already stopped
+	// handing it out, so once its last in-flight exchange releases there is nothing
+	// left for it to finish (RFC 9114 §5.2).
+	if !msg.mc.cl.Alive() || (msg.mc.cl.GoingAway() && msg.mc.active == 0) {
 		rs.conns = p.evict(rs.conns, msg.mc, CloseDead)
 	}
 	rs.waiters = p.serveWaiters(rs.conns, rs.waiters)
@@ -324,8 +327,8 @@ func (p *h3Pool) reclaim(reply chan h3AcquireResp) {
 func (p *h3Pool) pickLeastLoaded(conns []*h3ManagedConn) *h3ManagedConn {
 	var best *h3ManagedConn
 	for _, mc := range conns {
-		if !mc.cl.Alive() {
-			continue
+		if !mc.cl.Alive() || mc.cl.GoingAway() {
+			continue // dead, or GOAWAY'd and refusing every new request (§5.2)
 		}
 		if mc.active >= mc.streamCap {
 			continue

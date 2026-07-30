@@ -227,3 +227,43 @@ func TestConformance_RFC9000_Sec174_SpinBitRandomPerConnection(t *testing.T) {
 		t.Fatalf("spin bit is not random per connection: sawTrue=%v sawFalse=%v", seenTrue, seenFalse)
 	}
 }
+
+// TestConformance_RFC9000_Sec123_ReorderedPacketNotDiscarded is the false-reject
+// guard on the §12.3 duplicate check: "unless it is certain" licenses discarding
+// only what the receiver cannot decide. A packet numbered below one already
+// received is provably new while the tracker still holds every range, so ordinary
+// reordering must be processed. Only real maxAckRanges truncation makes the region
+// below the retained window undecidable.
+func TestConformance_RFC9000_Sec123_ReorderedPacketNotDiscarded(t *testing.T) {
+	origDCID := []byte("origdcid")
+	_, serverKeys := InitialKeys(origDCID)
+
+	c := newInitialConn(t, origDCID)
+	// pn 1 overtakes pn 0 on the wire.
+	if err := c.recvDatagram(craftServerInitial(t, serverKeys, nil, []byte{0xaa}, 1, AppendPing(nil))); err != nil {
+		t.Fatalf("recvDatagram(pn=1) = %v", err)
+	}
+	c.acks[spaceInitial].acked()
+	if err := c.recvDatagram(craftServerInitial(t, serverKeys, nil, []byte{0xaa}, 0, AppendPing(nil))); err != nil {
+		t.Fatalf("recvDatagram(pn=0) = %v", err)
+	}
+	if !c.acks[spaceInitial].ackPending() {
+		t.Fatal("a reordered lower packet number was discarded as a duplicate")
+	}
+
+	// Only actual truncation closes the floor. Force >maxAckRanges gaps, then a
+	// number under the retained window becomes undecidable and is discarded.
+	var a ackTracker
+	for i := 0; i <= maxAckRanges; i++ {
+		a.receive(uint64(100+2*i), true) // permanent gaps: one range per packet
+	}
+	if !a.truncated {
+		t.Fatalf("expected truncation after %d gapped packets", maxAckRanges+1)
+	}
+	if !a.seen(a.lowWater - 1) {
+		t.Fatal("below the truncation floor must count as seen")
+	}
+	if a.seen(a.lowWater + 1) {
+		t.Fatal("a gap inside the retained window is still decidably new")
+	}
+}

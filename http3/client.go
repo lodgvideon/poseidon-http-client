@@ -473,6 +473,13 @@ func (c *Client) Alive() bool {
 	}
 }
 
+// GoingAway reports whether the peer has sent GOAWAY. After that this connection
+// refuses every new request (RFC 9114 §5.2, enforced in openRequestStream) while
+// still finishing the exchanges already in flight — that is the point of a
+// graceful shutdown. A pool must therefore stop handing the connection out but
+// MUST NOT close it until those exchanges drain; Alive stays true meanwhile.
+func (c *Client) GoingAway() bool { return c.goaway.Load() != ^uint64(0) }
+
 // sendAll writes the whole of data on stream. Stream.Send consumes only a prefix
 // when flow-control / congestion / pacing blocked, so this advances past each
 // partial send until every byte — and the FIN, which rides the final byte — is on
