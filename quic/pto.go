@@ -65,8 +65,8 @@ func (c *Conn) hasInFlight() bool {
 }
 
 // ptoArmed reports whether space sp participates in the probe timer. RFC 9002
-// §6.2.1: "An endpoint MUST NOT set a timer for the Application Data packet number
-// space until the handshake is confirmed." Between TLS completion and
+// §6.2.1: "An endpoint MUST NOT set its PTO timer for the Application Data packet
+// number space until the handshake is confirmed." Between TLS completion and
 // HANDSHAKE_DONE the server may not hold 1-RTT read keys yet, so a 1-RTT probe is
 // guaranteed-spurious retransmission.
 func (c *Conn) ptoArmed(sp int) bool {

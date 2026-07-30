@@ -241,7 +241,8 @@ func (s *Stream) emitBlocked(kind blockKind) {
 
 // emitStreamsBlocked tells the peer that its cumulative stream limit is refusing a
 // new stream (RFC 9000 §4.6, §19.14): "A sender SHOULD send a STREAMS_BLOCKED
-// frame when it wishes to open a stream but is unable to." Without it a server
+// frame (type=0x16 or 0x17) when it wishes to open a stream but is unable to do so
+// due to the maximum stream limit set by its peer". Without it a server
 // that under-grants gets no signal that we are stalled, so it has no trigger to
 // send MAX_STREAMS. Informational, latched per distinct
 // limit like emitBlocked. Best-effort: before 1-RTT keys exist the seal fails and
