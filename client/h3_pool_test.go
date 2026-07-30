@@ -484,7 +484,7 @@ func TestNewClient_H3Pool_RequiresPoolAndTLS(t *testing.T) {
 // being selected immediately and be evicted once its in-flight work drains — never
 // closed under a request the server has undertaken to finish.
 func TestConformance_RFC9114_Sec52_PoolEvictsGoAwayConn(t *testing.T) {
-	p := newH3Pool("e", nil, PoolOptions{}, nil, nil, nil)
+	p := inertH3Pool(PoolOptions{}, nil)
 	gone := &barrierH3Client{}
 	fresh := &barrierH3Client{}
 	conns := []*h3ManagedConn{
@@ -529,7 +529,7 @@ func TestConformance_RFC9114_Sec52_PoolEvictsGoAwayConn(t *testing.T) {
 // the pool sits at MaxConnsPerHost with a conn that can serve nothing, and every
 // acquire is parked as a waiter with no dial started — a permanent wedge.
 func TestConformance_RFC9114_Sec52_PoolEvictsIdleGoAwayConn(t *testing.T) {
-	p := newH3Pool("e", nil, PoolOptions{}, nil, nil, nil)
+	p := inertH3Pool(PoolOptions{}, nil)
 	gone := &barrierH3Client{}
 	rs := &h3RunState{conns: []*h3ManagedConn{{cl: gone, active: 0, streamCap: 10}}}
 	atomic.StoreInt32(&gone.goaway, 1)
@@ -560,8 +560,7 @@ func TestConformance_RFC9114_Sec52_GoAwayEvictionDialsForWaiter(t *testing.T) {
 		dialed <- struct{}{}
 		return &barrierH3Client{}, nil
 	}
-	p := newH3Pool("e", nil, PoolOptions{MaxConnsPerHost: 1}, dialFn, nil, nil)
-	defer p.Close()
+	p := inertH3Pool(PoolOptions{MaxConnsPerHost: 1}, dialFn)
 
 	gone := &barrierH3Client{}
 	mc := &h3ManagedConn{cl: gone, active: 1, streamCap: 1}
@@ -585,6 +584,41 @@ func TestConformance_RFC9114_Sec52_GoAwayEvictionDialsForWaiter(t *testing.T) {
 	}
 }
 
+// inertH3Pool builds an h3Pool WITHOUT starting its actor goroutine, for tests that
+// drive handleAcquire / handleRelease / handleDialDone / handleTick directly on
+// their own h3RunState. newH3Pool would start a second actor with its own state, so
+// a dial these tests provoke would land in that other state instead.
+func inertH3Pool(opts PoolOptions, dialFn func(context.Context, string, *tls.Config) (h3Client, error)) *h3Pool {
+	// Same defaults newH3Pool applies — DialBackoff in particular, since the
+	// dial-done error arm's behaviour turns on whether the backoff is active.
+	if opts.MaxConnsPerHost <= 0 {
+		opts.MaxConnsPerHost = 1
+	}
+	if opts.HealthCheckPeriod <= 0 {
+		opts.HealthCheckPeriod = 30 * time.Second
+	}
+	if opts.DialBackoff <= 0 {
+		opts.DialBackoff = 1 * time.Second
+	}
+	if opts.DialTimeout <= 0 {
+		opts.DialTimeout = 30 * time.Second
+	}
+	if dialFn == nil {
+		dialFn = func(context.Context, string, *tls.Config) (h3Client, error) {
+			return nil, ErrPoolClosed // never reached in these tests; never a real dial
+		}
+	}
+	return &h3Pool{
+		opts:       opts,
+		addr:       "e",
+		dialFn:     dialFn,
+		dialDoneCh: make(chan h3DialResult, 4),
+		closeCh:    make(chan struct{}),
+		closedCh:   make(chan struct{}),
+		metrics:    &Metrics{},
+	}
+}
+
 // TestH3Pool_DialFailureDoesNotStrandQueuedWaiters pins the two ways a parked
 // waiter could be abandoned with no dialer. newH3Pool does not default
 // AcquireTimeout, so either one is an unbounded hang, not a slow path.
@@ -597,8 +631,7 @@ func TestH3Pool_DialFailureDoesNotStrandQueuedWaiters(t *testing.T) {
 	// to a health-check tick: with nothing live and nothing in flight the pool is in
 	// exactly the state that fast-refuses a NEW acquire, so they get the same error.
 	t.Run("behind_the_first", func(t *testing.T) {
-		p := newH3Pool("e", nil, PoolOptions{MaxConnsPerHost: 1}, nil, nil, nil)
-		defer p.Close()
+		p := inertH3Pool(PoolOptions{MaxConnsPerHost: 1}, nil)
 		a, b := newWaiter(), newWaiter()
 		rs := &h3RunState{waiters: []h3AcquireReq{a, b}, inFlightDials: 1}
 
@@ -628,8 +661,7 @@ func TestH3Pool_DialFailureDoesNotStrandQueuedWaiters(t *testing.T) {
 			dialed <- struct{}{}
 			return &barrierH3Client{}, nil
 		}
-		p := newH3Pool("e", nil, PoolOptions{MaxConnsPerHost: 1, DialBackoff: 10 * time.Millisecond}, dialFn, nil, nil)
-		defer p.Close()
+		p := inertH3Pool(PoolOptions{MaxConnsPerHost: 1, DialBackoff: 10 * time.Millisecond}, dialFn)
 		rs := &h3RunState{waiters: []h3AcquireReq{newWaiter()}, lastDialErrAt: time.Now()}
 
 		p.handleTick(rs) // inside the backoff: correctly does not dial

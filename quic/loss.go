@@ -26,7 +26,7 @@ type retransFrame struct {
 	kind     retransKind
 	streamID uint64 // stream frames; offset doubles as the final size for retransReset
 	offset   uint64
-	fin      bool   // retransStream only
+	fin      bool   // retransStream: the FIN flag; retransStreamsBlocked: the uni scope
 	errCode  uint64 // retransReset / retransStopSending only
 	data     []byte
 }

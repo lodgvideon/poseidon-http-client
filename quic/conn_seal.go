@@ -52,6 +52,18 @@ func (c *Conn) flushRetransmits(sp int) error {
 		if rf.kind == retransRetire && c.pendingRetires > 0 {
 			c.pendingRetires-- // a queued RETIRE_CONNECTION_ID is now on the wire
 		}
+		if rf.kind == retransStreamsBlocked {
+			// RFC 9000 §13.3: re-send a blocked signal "only while the endpoint is
+			// blocked on the corresponding limit", and "these frames always include the
+			// limit that is causing blocking at the time that they are transmitted". The
+			// descriptor froze the limit at emit time, so drop it if the peer has since
+			// given us room, and otherwise restate today's limit rather than the stale one.
+			limit, blocked := c.streamsBlockedNow(rf.fin)
+			if !blocked {
+				continue
+			}
+			rf.offset = limit
+		}
 		pkt, err := c.sealPacket(sp, rf.encode(nil), true, []retransFrame{rf}, false)
 		if err != nil {
 			_ = c.flushBatch(&batch) // best-effort: send what was already sealed

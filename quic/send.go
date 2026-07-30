@@ -243,10 +243,22 @@ func (s *Stream) emitBlocked(kind blockKind) {
 // new stream (RFC 9000 §4.6, §19.14): "A sender SHOULD send a STREAMS_BLOCKED
 // frame when it wishes to open a stream but is unable to." Without it a server
 // that under-grants gets no signal that we are stalled, so it has no trigger to
-// send MAX_STREAMS. Informational and never retransmitted, latched per distinct
+// send MAX_STREAMS. Informational, latched per distinct
 // limit like emitBlocked. Best-effort: before 1-RTT keys exist the seal fails and
 // the frame is dropped, which is fine — the limit is re-signalled on the next
 // refusal at a new limit value. Assumes c.mu is held.
+// streamsBlockedNow reports the peer's current cumulative stream limit for the
+// bidirectional or unidirectional scope, and whether we are still blocked on it —
+// the two things RFC 9000 §13.3 requires a re-sent STREAMS_BLOCKED to reflect at
+// transmit time rather than at the time the lost frame was first built. Assumes
+// c.mu is held.
+func (c *Conn) streamsBlockedNow(uni bool) (limit uint64, blocked bool) {
+	if uni {
+		return c.peer.InitialMaxStreamsUni, c.openedUni >= c.peer.InitialMaxStreamsUni
+	}
+	return c.peer.InitialMaxStreamsBidi, c.openedBidi >= c.peer.InitialMaxStreamsBidi
+}
+
 func (c *Conn) emitStreamsBlocked(uni bool, limit uint64) {
 	if c.oneRTTSealer == nil || c.closed {
 		// No 1-RTT keys yet (or shutting down): there is nothing to send the frame
@@ -278,8 +290,9 @@ func (c *Conn) emitStreamsBlocked(uni bool, limit uint64) {
 
 // writeAppFrames seals frames into a 1-RTT packet and writes the datagram. The
 // STREAM and *_BLOCKED frames it carries are ack-eliciting; retrans names the
-// frames to resend if the packet is lost (nil for the informational *_BLOCKED
-// frames, which are not retransmitted this phase). Assumes c.mu is held (it
+// frames to resend if the packet is lost — nil for DATA_BLOCKED and
+// STREAM_DATA_BLOCKED, but not for STREAMS_BLOCKED, which RFC 9000 §13.3 has us
+// re-send because nothing else can unstick a stream-limit stall. Assumes c.mu is held (it
 // seals a packet and writes the wire; callers are sendLocked/resetLocked/
 // stopSendingLocked and the receive-path emitBlocked).
 func (c *Conn) writeAppFrames(frames []byte, retrans []retransFrame) error {

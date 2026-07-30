@@ -265,12 +265,14 @@ func (p *h3Pool) handleDialDone(rs *h3RunState, dr h3DialResult) {
 
 // handleStats evicts dead conns silently and reports a snapshot.
 func (p *h3Pool) handleStats(rs *h3RunState, respCh chan<- Stats) {
+	// Deliberately no dialForWaiters here, unlike the four actor paths that can
+	// change the picture: h1Pool does not dial from its stats path either, no
+	// reachable strand goes through this one (retirement needs !Alive, whose
+	// in-flight exchanges all release through handleRelease, or GoingAway with
+	// active==0, which handleRelease reaches in the same call), and a read-only
+	// scrape that opens a QUIC connection — possibly for a caller that has already
+	// given up — is a side effect no metrics reader should pay for.
 	rs.conns = p.evictDeadSilent(rs.conns)
-	// A scrape that shrinks the pool must leave it able to recover, exactly as an
-	// eviction anywhere else does. No reachable strand was found through this path
-	// today, but leaving the one eviction site unwired is how the last two rounds
-	// of this bug happened.
-	p.dialForWaiters(rs)
 	respCh <- Stats{
 		ActiveConns:     len(rs.conns),
 		InFlightStreams: h3SumActive(rs.conns),
@@ -518,7 +520,8 @@ func (p *h3Pool) evictDeadSilent(conns []*h3ManagedConn) []*h3ManagedConn {
 // default) the caller waits forever.
 //
 // Call it UNCONDITIONALLY from every actor path that can change the picture —
-// release, dial-done, tick, stats — the way h1Pool.ensureDialForWaiters is called.
+// release, both arms of dial-done, and tick — the same four sites
+// h1Pool.ensureDialForWaiters is called from.
 // Gating it on "this call evicted something" is what turned a recoverable stall
 // into a permanent one twice: a dial that failed inside the backoff window, and a
 // tick that shrinks nothing because the pool is already empty, both leave waiters
@@ -586,8 +589,8 @@ func h3RetireReason(mc *h3ManagedConn) (CloseReason, bool) {
 }
 
 // h3RetireEvict evicts mc if it is retired, counting a drained GOAWAY as such.
-// Returns the (possibly shrunk) slice and whether an eviction happened, so the
-// caller can start a replacement dial for any waiter left behind.
+// Returns the (possibly shrunk) slice and whether an eviction happened; callers
+// dial for waiters unconditionally, so the flag is informational.
 func (p *h3Pool) h3RetireEvict(conns []*h3ManagedConn, mc *h3ManagedConn) ([]*h3ManagedConn, bool) {
 	reason, retire := h3RetireReason(mc)
 	if !retire {

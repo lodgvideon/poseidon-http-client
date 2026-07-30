@@ -130,3 +130,61 @@ func TestConformance_RFC9000_Sec1914_StreamsBlockedOnRefusedOpen(t *testing.T) {
 		}
 	})
 }
+
+// TestConformance_RFC9000_Sec133_StreamsBlockedRetransmitRestatesLimit pins the two
+// trailing clauses of the §13.3 blocked-signal rule, which a frozen retransmit
+// descriptor silently drops: re-send "only while the endpoint is blocked on the
+// corresponding limit", and "these frames always include the limit that is causing
+// blocking at the time that they are transmitted".
+func TestConformance_RFC9000_Sec133_StreamsBlockedRetransmitRestatesLimit(t *testing.T) {
+	newConn := func(limit uint64) (*Conn, *countingPC) {
+		dcid := []byte("sbretran")
+		keys, _ := InitialKeys(dcid)
+		sealer, err := NewSealer(keys)
+		if err != nil {
+			t.Fatal(err)
+		}
+		pc := &countingPC{}
+		return &Conn{
+			pc: pc, dcid: dcid, oneRTTSealer: sealer,
+			peer: TransportParams{InitialMaxStreamsBidi: limit},
+		}, pc
+	}
+
+	// The peer raised the limit before the loss was detected: the stall is over, so
+	// the stale signal must not go out at all.
+	c, pc := newConn(0)
+	if _, err := c.OpenStream(); err != ErrTooManyStreams {
+		t.Fatal("setup: the open should have been refused")
+	}
+	before := pc.datagrams.Load() // the original STREAMS_BLOCKED(0)
+	c.retransQueue[spaceApp] = append(c.retransQueue[spaceApp],
+		retransFrame{kind: retransStreamsBlocked, offset: 0, fin: false})
+	c.peer.InitialMaxStreamsBidi = 8 // MAX_STREAMS arrived
+	if err := c.flushRetransmits(spaceApp); err != nil {
+		t.Fatalf("flushRetransmits: %v", err)
+	}
+	if got := pc.datagrams.Load(); got != before {
+		t.Fatalf("sent %d datagram(s) while no longer blocked, want 0", got-before)
+	}
+	if n := len(c.retransQueue[spaceApp]); n != 0 {
+		t.Fatalf("descriptor left queued: %d", n)
+	}
+
+	// Still blocked, but at a limit that has moved since the lost frame was built:
+	// the re-sent frame must carry today's limit, not the frozen one.
+	c2, _ := newConn(4)
+	c2.openedBidi = 4
+	c2.retransQueue[spaceApp] = append(c2.retransQueue[spaceApp],
+		retransFrame{kind: retransStreamsBlocked, offset: 1, fin: false}) // stale limit 1
+	if err := c2.flushRetransmits(spaceApp); err != nil {
+		t.Fatalf("flushRetransmits: %v", err)
+	}
+	limit, blocked := c2.streamsBlockedNow(false)
+	if !blocked || limit != 4 {
+		t.Fatalf("streamsBlockedNow = (%d, %v), want (4, true)", limit, blocked)
+	}
+	if got := string(retransFrame{kind: retransStreamsBlocked, offset: limit}.encode(nil)); got != string(AppendStreamsBlocked(nil, false, 4)) {
+		t.Fatalf("re-encoded frame = %x, want the frame for limit 4", got)
+	}
+}
