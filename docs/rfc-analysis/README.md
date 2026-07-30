@@ -1,16 +1,23 @@
 # HTTP RFC Analysis & Implementation Reconciliation
 
 Deep, from-scratch analysis of the HTTP specifications this client implements —
-**HTTP/1.1** (`http1/` + `client/`) and **HTTP/2** (`conn/` + `frame/` + `hpack/`) —
-re-deriving every normative rule from raw RFC text and reconciling the code.
+**HTTP/1.1** (`http1/` + `client/`), **HTTP/2** (`conn/` + `frame/` + `hpack/`)
+and **HTTP/3** (`http3/` + `qpack/` + `quic/`) — re-deriving every normative
+rule from raw RFC text and reconciling the code.
 
-Both stacks were originally built against **obsolete** RFCs (HTTP/1.1 →
+The first two stacks were originally built against **obsolete** RFCs (HTTP/1.1 →
 RFC 2616, 1999; HTTP/2 → RFC 7540, 2015). For each, this analysis re-extracts
 the rules, produces the **current slice** (HTTP/1.1 → RFC 9110 + 9112;
 HTTP/2 → RFC 9113 + HPACK RFC 7541), and diffs old→current. For **both** it
 distills a client checklist and audits the code: HTTP/1.1 (PASS 101 · N/A 142 ·
 actionable 13) and HTTP/2 (PASS 166 · FAIL 19 · PARTIAL 19 · UNTESTED 11 ·
 REVIEW 17 over 232 obligations).
+
+HTTP/3 was built against current RFCs from day one, so there is no version
+delta; instead the whole dependency chain is catalogued — RFC 9114 (HTTP/3),
+9204 (QPACK), and the QUIC trio 9000 / 9001 / 9002 — 2698 verified facts
+distilled into a 666-item client checklist, with the code reconciliation still
+outstanding.
 
 ## Method (how these were produced)
 
@@ -81,6 +88,54 @@ The HPACK catalog pins the security-critical decoder rules (integer-overflow
 and octet-length caps → decoding error, Huffman EOS/over-long-padding → error,
 index-out-of-range → `COMPRESSION_ERROR`) with per-file reconcile targets
 (`hpack/integer.go`, `hpack/huffman_fsm.go`).
+
+## HTTP/3 artifacts
+
+Target packages: `http3/` (RFC 9114 — control stream, SETTINGS, request/response
+mapping, frame codec, field validation), `qpack/` (RFC 9204), `quic/` (RFC 9000
+transport + 9001 TLS + 9002 loss recovery/congestion control).
+
+Unlike HTTP/1.1 and HTTP/2, the HTTP/3 stack was built against the **current**
+RFCs from the start, so there is no obsolete-spec delta to compute. Instead the
+full dependency chain is catalogued — the application layer alone is not enough
+to audit a client that also implements its own QUIC.
+
+| File | What | Size | Verification |
+|------|------|------|--------------|
+| [RFC9114_FACTS.md](RFC9114_FACTS.md) | Normative facts of **HTTP/3** (RFC 9114) → `http3/` | 523 facts | 513 confirmed, 10 disputes |
+| [RFC9204_QPACK_FACTS.md](RFC9204_QPACK_FACTS.md) | Normative facts of **QPACK** (RFC 9204) → `qpack/` | 311 facts | 310 confirmed, 1 dispute |
+| [RFC9000_QUIC_TRANSPORT_FACTS.md](RFC9000_QUIC_TRANSPORT_FACTS.md) | Normative facts of the **QUIC v1 transport** (RFC 9000, all 22 sections + Appendix A) → `quic/` | 1218 facts | 1211 confirmed, 7 disputes |
+| [RFC9001_QUIC_TLS_FACTS.md](RFC9001_QUIC_TLS_FACTS.md) | Normative facts of **QUIC-TLS** (RFC 9001) → `quic/` crypto path | 318 facts | 314 confirmed, 4 disputes |
+| [RFC9002_QUIC_RECOVERY_FACTS.md](RFC9002_QUIC_RECOVERY_FACTS.md) | Normative facts of **QUIC loss detection + congestion control** (RFC 9002, incl. both pseudocode appendices) → `quic/` | 328 facts | 324 confirmed, 4 disputes |
+| [HTTP3_CLIENT_CHECKLIST.md](HTTP3_CLIENT_CHECKLIST.md) | The **666 client-relevant obligations** (484 MUST-family, 182 SHOULD-family) distilled from all five catalogs, bucketed by RFC section for reconciliation | 666 items | derived from verified facts |
+
+2698 facts total. The code reconciliation against `http3/` + `qpack/` + `quic/`
+is the next step — the checklist is already bucketed (50 buckets) for the
+judge + adversarial-verifier pass.
+
+### What the HTTP/3 disputes caught
+
+The refutation rate (~0.9% across 2698 facts) sits in the healthy band, and the
+dominant class is more interesting than the HTTP/1.1+2 runs produced —
+**requirement prose stronger than its own level**:
+
+- `9002 7.7-8-12`: prose said "a sender MUST NOT treat pacing-induced delay as
+  application-limited"; RFC 9002 §7.8 says **SHOULD NOT**. An audit reading the
+  prose alone would have scored a permissible deviation as a hard-MUST failure.
+- `9002 B-3` / `B-4`: lowercase "recommends" inside the **informative**
+  pseudocode appendix was tagged `RECOMMENDED`; the real normative rule for the
+  ssthresh reduction is a **MUST** in §7.3.2 — the fact was simultaneously too
+  strong (level) and too weak (wrong source section).
+- `9114 11-23`, `9204 2.2-3-41`: lowercase "required"/"must" tagged as BCP 14
+  keywords. Per RFC 8174 they bind only in all capitals.
+- `9114 4.4-4.6-46`: "any HTTP cache" narrowed to `client`, erasing the
+  deliberate contrast with the preceding client-scoped sentence.
+- `9114 A-53`: an intermediary-scoped retry-safety statement mis-attributed to
+  the client — i.e. an inferred, not stated, retry guarantee.
+
+Each is flagged **VERIFY** inline with the correction. Facts that only one
+verifier covered were re-verified by a fresh independent pair rather than
+counted as refutations.
 
 ## HTTP/1.1 headline findings
 
