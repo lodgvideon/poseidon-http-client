@@ -1,0 +1,2205 @@
+# HTTP/3 client conformance checklist (RFC 9114 + 9204 + 9000 + 9001 + 9002)
+
+_Client-relevant normative obligations distilled from the verified fact catalogs. 666 items: 484 MUST-family, 182 SHOULD-family. Each row keeps the verbatim RFC quote and the reconcile target. Rows marked (VERIFY) had a verifier disagreement in the source catalog -- check the fact catalog before judging them._
+
+| Bucket | Items | Hard | Soft |
+|--------|-------|------|------|
+| `9114-3` | 14 | 8 | 6 |
+| `9114-10` | 8 | 6 | 2 |
+| `9114-6` | 23 | 16 | 7 |
+| `9114-5` | 8 | 4 | 4 |
+| `9114-8-9` | 7 | 5 | 2 |
+| `9114-7-7.2.3` | 11 | 9 | 2 |
+| `9114-4.2-4.3` | 23 | 21 | 2 |
+| `9114-11` | 4 | 4 | 0 |
+| `9114-4.1` | 22 | 12 | 10 |
+| `9114-7.2.4-7.2.8` | 36 | 29 | 7 |
+| `9114-4.4-4.6` | 13 | 10 | 3 |
+| `9204-1-2.1` | 5 | 4 | 1 |
+| `9204-4.5` | 4 | 4 | 0 |
+| `9204-4.1-4.4` | 13 | 13 | 0 |
+| `9204-5-8` | 2 | 1 | 1 |
+| `9204-2.2-3` | 15 | 14 | 1 |
+| `9000-1-2` | 5 | 4 | 1 |
+| `9000-4` | 18 | 12 | 6 |
+| `9000-13.1-13.2` | 25 | 11 | 14 |
+| `9000-3` | 8 | 4 | 4 |
+| `9000-7` | 27 | 26 | 1 |
+| `9000-13.3-13.4` | 10 | 7 | 3 |
+| `9000-10.1-10.2` | 14 | 8 | 6 |
+| `9000-8` | 19 | 16 | 3 |
+| `9000-10.3-11` | 15 | 10 | 5 |
+| `9000-12` | 18 | 16 | 2 |
+| `9000-9` | 17 | 11 | 6 |
+| `9000-5-6` | 26 | 15 | 11 |
+| `9000-21.2-21.14` | 5 | 1 | 4 |
+| `9000-14-16` | 18 | 9 | 9 |
+| `9000-18` | 9 | 8 | 1 |
+| `9000-19.9-19.21` | 30 | 26 | 4 |
+| `9000-19.1-19.8` | 11 | 10 | 1 |
+| `9000-17.1-17.2.2` | 16 | 15 | 1 |
+| `9000-22` | 2 | 2 | 0 |
+| `9000-17.2.4-17.4` | 19 | 18 | 1 |
+| `9001-7-8` | 11 | 10 | 1 |
+| `9001-9-10` | 7 | 6 | 1 |
+| `9001-5.5-5.8` | 10 | 9 | 1 |
+| `9001-4.6-4.9` | 10 | 8 | 2 |
+| `9001-6` | 23 | 17 | 6 |
+| `9001-4.1-4.5` | 12 | 8 | 4 |
+| `9001-5.1-5.4` | 5 | 5 | 0 |
+| `9002-7.7-8` | 6 | 1 | 5 |
+| `9002-7.3-7.6` | 12 | 9 | 3 |
+| `9002-5` | 10 | 5 | 5 |
+| `9002-6.1-6.2` | 25 | 13 | 12 |
+| `9002-B` | 2 | 0 | 2 |
+| `9002-6.3-7.2` | 9 | 4 | 5 |
+| `9002-A` | 4 | 0 | 4 |
+
+## 9114-3
+
+- [ ] `9114/3-1` **MUST** -- On receiving the server certificate in the TLS handshake, the client must verify it is an acceptable match for the URI's origin server per RFC 9110 Section 4.3.4.
+      - quote: "the client MUST verify that the certificate is an acceptable match for the URI's origin server"
+      - check: http3/dial.go + quic/ TLS handshake: confirm crypto/tls verification is on by default (ServerName set, InsecureSkipVerify only opt-in per gosec G402 tuning).
+- [ ] `9114/3-2` **MUST NOT** -- If the certificate cannot be verified against the URI's origin server, the client must not treat the server as authoritative for that origin.
+      - quote: "the client MUST NOT consider the server authoritative for that origin"
+      - check: http3/dial.go: a TLS verification failure in the quic/ handshake must abort Dial with an error, never yield a usable Client.
+- [ ] `9114/3-5` **SHOULD** -- If QUIC connection establishment fails (e.g., UDP blocked), clients should fall back to TCP-based HTTP versions.
+      - quote: "clients SHOULD attempt to use TCP-based versions of HTTP in this case"
+      - check: http3/dial.go: no h2/h1 fallback exists (documented non-goal); confirm Dial surfaces a distinguishable error so the caller/client layer can fall back.
+- [ ] `9114/3-10` **MUST** -- Before making requests for an origin whose scheme is not "https", the client must ensure the server is willing to serve that scheme.
+      - quote: "the client MUST ensure the server is willing to serve that scheme"
+      - check: http3/validate.go / request.go: simplest conformance is restricting :scheme to https (or requiring explicit caller opt-in); verify current scheme handling.
+- [ ] `9114/3-12` **MUST** -- HTTP/3 clients must support a mechanism to indicate the target host to the server during the TLS handshake.
+      - quote: "HTTP/3 clients MUST support a mechanism to indicate the target host to the server during the TLS handshake"
+      - check: http3/dial.go: tls.Config.ServerName must be populated (from addr host or caller config) before the quic/ TLS 1.3 handshake starts.
+- [ ] `9114/3-13` **MUST** -- When the server is identified by a domain name, clients must send the SNI TLS extension unless an alternative target-host mechanism is used.
+      - quote: "clients MUST send the Server Name Indication (SNI; [RFC6066]) TLS extension unless an alternative mechanism to indicate the target host is used"
+      - check: http3/dial.go + quic/ handshake: crypto/tls sends SNI iff ServerName is non-empty and not an IP literal — verify ServerName derivation strips port and is not dropped for domain names.
+- [ ] `9114/3-16` **MUST** -- After the QUIC connection is established, each endpoint must send a SETTINGS frame as the initial frame of its HTTP control stream.
+      - quote: "a SETTINGS frame MUST be sent by each endpoint as the initial frame of their respective HTTP control stream"
+      - check: http3/control.go: on setup, open the unidirectional control stream (type 0x00 via quic/ uni-stream) and write SETTINGS before any other frame; also enforce peer's first control frame is SETTINGS.
+- [ ] `9114/3-19` **MUST** -- To reuse an existing connection for a new origin, the client must validate the server's certificate for the new origin per RFC 9110 Section 4.3.4, which requires retaining the certificate.
+      - quote: "clients MUST validate the certificate presented by the server for the new origin server using the process described in Section 4.3.4 of [HTTP]"
+      - check: http3/client.go: if connection reuse across origins exists, check the quic/ handshake retains the peer cert chain and re-verifies per new hostname; otherwise confirm pool never coalesces origins.
+- [ ] `9114/3-20` **MUST NOT** -- If the certificate is not acceptable for the new origin for any reason, the connection must not be reused for that origin.
+      - quote: "the connection MUST NOT be reused"
+      - check: http3/client.go / client pool: on cert-mismatch for a candidate origin, fall through to a fresh dial — never route the request over the mismatched conn.
+- [ ] `9114/3-21` **SHOULD** -- When the certificate is unacceptable for the new origin, a new connection should be established for that origin.
+      - quote: "a new connection SHOULD be established for the new origin"
+      - check: client-layer pool over http3: verify the miss path dials a new conn rather than failing the request outright.
+- [ ] `9114/3-22` **SHOULD** -- If the certificate-verification failure reason might apply to other origins already associated with the connection, the client should revalidate the certificate for those origins.
+      - quote: "the client SHOULD revalidate the server certificate for those origins"
+      - check: http3/client.go: only applies if multi-origin coalescing is implemented (e.g., expiry/revocation invalidates all coalesced origins); N/A if pool is per-origin.
+- [ ] `9114/3-23` **SHOULD NOT** -- Clients should not open more than one HTTP/3 connection to a given IP address and UDP port (however derived: URI, alt-svc, proxy, or name resolution).
+      - quote: "Clients SHOULD NOT open more than one HTTP/3 connection to a given IP address and UDP port"
+      - check: client-layer pool / http3/client.go: check pool keying and dial dedup — concurrent Do calls to the same addr should share one conn, not race-dial several.
+- [ ] `9114/3-25` **SHOULD** -- A client should avoid creating multiple connections to the same IP and port with the same configuration.
+      - quote: "SHOULD avoid creating multiple connections with the same configuration"
+      - check: client-layer pool over http3: singleflight/dedup on dial for identical (addr, config) keys; check for thundering-herd dials under concurrency.
+- [ ] `9114/3-27` **SHOULD** -- When either endpoint closes the HTTP/3 connection, the terminating endpoint should first send a GOAWAY frame so both sides can determine which frames were processed.
+      - quote: "the terminating endpoint SHOULD first send a GOAWAY frame"
+      - check: http3/control.go + client.go Close path: client-side graceful close should emit GOAWAY on the control stream before quic/ CONNECTION_CLOSE; also handle inbound GOAWAY per Section 5.2.
+
+## 9114-10
+
+- [ ] `9114/10-5` **MUST** -- A request or response containing an invalid field name must be treated as malformed, so it can never be translated into an HTTP/1.1 message by an intermediary.
+      - quote: "Requests or responses containing invalid field names MUST be treated as malformed."
+      - check: http3/validate.go — after qpack/decoder.go decode, reject responses whose field names contain octets outside token/lowercase rules (§4.1.2, RFC 9110 §5.1); QPACK itself does not validate names.
+- [ ] `9114/10-6` **MUST** -- A request or response containing a field-value character not permitted by the field-content ABNF (notably CR 0x0d, LF 0x0a, NUL 0x00) must be treated as malformed.
+      - quote: "Any request or response that contains a character not permitted in a field value MUST be treated as malformed."
+      - check: http3/validate.go — enforce CR/LF/NUL rejection in decoded response field values AND in field values the client encodes into requests (guard at request.go); valid set per RFC 9110 §5.5 field-content.
+- [ ] `9114/10-9` **SHOULD** -- A client that accepts server push should limit the number of push IDs it has outstanding at a time to bound PUSH_PROMISE resource commitment.
+      - quote: "A client that accepts server push SHOULD limit the number of push IDs it issues at a time."
+      - check: http3/control.go — confirm MAX_PUSH_ID is never sent (push disabled = limit of zero, which satisfies this); if push is ever enabled, cap outstanding push IDs incrementally.
+- [ ] `9114/10-10` **SHOULD** -- Implementations should track use of abuse-prone features (server push, unknown/undefined protocol elements, field compression) and set limits on their use.
+      - quote: "Implementations SHOULD track the use of these features and set limits on their use."
+      - check: http3/control.go + frame.go — check bounded, O(length)-skip handling of unknown SETTINGS identifiers, unknown frame types, and unknown unidirectional stream types (peer-input policy: bound by construction, charge what memory retains); quic/ for stream-count limits.
+- [ ] `9114/10-17` **MUST NOT** -- On a secure channel, an implementation must not compress content mixing confidential and attacker-controlled data unless each source gets a separate compression context (BREACH-class attacks).
+      - quote: "Implementations communicating on a secure channel MUST NOT compress content that includes both confidential and attacker-controlled data unless separate compression contexts are used for each source of data."
+      - check: qpack/encoder.go — verify sensitive request fields (Authorization, Cookie) are emitted as never-indexed literals / not inserted into any dynamic table shared with attacker-influenced values; static-table-only mode largely satisfies this but re-check since dynamic QPACK was added un-audited.
+- [ ] `9114/10-18` **MUST NOT** -- Compression must not be used at all if the source of the data cannot be reliably determined.
+      - quote: "Compression MUST NOT be used if the source of data cannot be reliably determined."
+      - check: qpack/encoder.go — client controls its own header sources, so this is satisfiable by construction; confirm no code path compresses values of unknown provenance (e.g., headers copied verbatim from a prior response) with indexing.
+- [ ] `9114/10-21` **MUST** -- An implementation must ensure a frame's declared length exactly matches the combined length of the fields it contains (nested varint length elements are a parsing hazard).
+      - quote: "An implementation MUST ensure that the length of a frame exactly matches the length of the fields it contains."
+      - check: http3/frame.go — every fixed-structure frame parser (SETTINGS, GOAWAY, MAX_PUSH_ID, CANCEL_PUSH, PUSH_PROMISE push-ID prefix) must reject leftover or missing bytes vs. the declared length with H3_FRAME_ERROR; check internal/bytesx varint reads are bounds-checked against frame length.
+- [ ] `9114/10-22` **MUST** -- When 0-RTT early data is used with HTTP/3, the anti-replay mitigations of RFC 8470 (HTTP-REPLAY) must be applied.
+      - quote: "The anti-replay mitigations in [HTTP-REPLAY] MUST be applied when using HTTP/3 with 0-RTT."
+      - check: quic/ — 0-RTT is a stated non-goal; verify the handshake never sends early data. If 0-RTT is ever added, the http3/ client must restrict early-data requests to safe/idempotent methods and handle 425 (Too Early) per RFC 8470.
+
+## 9114-6
+
+- [ ] `9114/6-7` **MUST** -- A client must treat any server-initiated bidirectional stream as a connection error of type H3_STREAM_CREATION_ERROR unless an extension negotiated its use.
+      - quote: "Clients MUST treat receipt of a server-initiated bidirectional stream as a connection error of type H3_STREAM_CREATION_ERROR unless such an extension has been negotiated."
+      - check: http3/client.go or control.go accept loop: any incoming server-initiated bidi stream from quic/ must close the connection with H3_STREAM_CREATION_ERROR (0x0103).
+- [ ] `9114/6-10` **MUST** -- Both clients and servers must send transport parameters allowing the peer to create at least three unidirectional streams.
+      - quote: "the transport parameters sent by both clients and servers MUST allow the peer to create at least three unidirectional streams"
+      - check: http3/dial.go + quic/ transport parameters: client's initial_max_streams_uni must be >= 3.
+- [ ] `9114/6-11` **SHOULD** -- Transport parameters should grant at least 1,024 bytes of flow-control credit to each unidirectional stream.
+      - quote: "These transport parameters SHOULD also provide at least 1,024 bytes of flow-control credit to each unidirectional stream."
+      - check: quic/ transport parameters set in http3/dial.go: initial_max_stream_data_uni >= 1024.
+- [ ] `9114/6-12` **SHOULD** -- Endpoints should open the control stream and mandatory-extension streams (QPACK encoder/decoder) before any other unidirectional streams.
+      - quote: "Endpoints SHOULD create the HTTP control stream as well as the unidirectional streams required by mandatory extensions (such as the QPACK encoder and decoder streams) first"
+      - check: http3/dial.go setup order: open control (0x00) then qpack encoder/decoder uni streams before issuing any request.
+- [ ] `9114/6-13` **MUST** -- On receiving an unknown stream type, the recipient must either abort reading the stream or discard its data without processing.
+      - quote: "Recipients of unknown stream types MUST either abort reading of the stream or discard incoming data without further processing."
+      - check: http3/control.go incoming-uni-stream handler: unknown type must STOP_SENDING (abort) or drain-and-discard; must not attempt to parse frames.
+- [ ] `9114/6-14` **SHOULD** -- If the recipient aborts reading an unknown stream type, it should use H3_STREAM_CREATION_ERROR or a reserved error code.
+      - quote: "If reading is aborted, the recipient SHOULD use the H3_STREAM_CREATION_ERROR error code or a reserved error code"
+      - check: http3/control.go: when aborting unknown uni streams, the quic/ STOP_SENDING error code should be H3_STREAM_CREATION_ERROR (0x0103) or a reserved 0x1f*N+0x21 code.
+- [ ] `9114/6-15` **MUST NOT** -- An unknown stream type must never be escalated to a connection error.
+      - quote: "The recipient MUST NOT consider unknown stream types to be a connection error of any kind."
+      - check: http3/control.go: unknown uni-stream type path must never call quic/ connection close; stream-level handling only.
+- [ ] `9114/6-16` **SHOULD NOT** -- A recipient should not discard incoming unidirectional stream data before it has read the stream type, since some types affect connection state.
+      - quote: "a recipient SHOULD NOT discard data from incoming unidirectional streams prior to reading the stream type"
+      - check: http3/control.go: always read the type varint before deciding to drop a uni stream (no blanket STOP_SENDING before the type byte).
+- [ ] `9114/6-18` **MUST NOT** -- Stream types that could modify state or semantics of existing protocol components must not be sent until the peer is known to support them.
+      - quote: "stream types that could modify the state or semantics of existing protocol components, including QPACK or other extensions, MUST NOT be sent until the peer is known to support them"
+      - check: http3/dial.go + control.go: client sends only mandatory types (0x00, QPACK 0x02/0x03) — verify no extension stream types are emitted before peer SETTINGS confirms support.
+- [ ] `9114/6-20` **MUST** -- A receiver must tolerate unidirectional streams that are closed or reset before the stream-type header was received.
+      - quote: "A receiver MUST tolerate unidirectional streams being closed or reset prior to the reception of the unidirectional stream header."
+      - check: http3/control.go uni-stream reader: EOF or quic/ RESET_STREAM before the type varint must be handled quietly, not treated as a connection error.
+- [ ] `9114/6-22` **MUST** -- Each endpoint must open exactly one control stream at connection start and send SETTINGS as the first frame on it.
+      - quote: "Each side MUST initiate a single control stream at the beginning of the connection and send its SETTINGS frame as the first frame on this stream."
+      - check: http3/dial.go + control.go: client must open its control stream and write SETTINGS before any request; verify SETTINGS is the very first frame written.
+- [ ] `9114/6-23` **MUST** -- If the first frame on the peer's control stream is anything other than SETTINGS, it is a connection error of type H3_MISSING_SETTINGS.
+      - quote: "If the first frame of the control stream is any other frame type, this MUST be treated as a connection error of type H3_MISSING_SETTINGS."
+      - check: http3/control.go peer-control-stream parser: first frame type != SETTINGS must close the connection with H3_MISSING_SETTINGS (0x010a).
+- [ ] `9114/6-24` **MUST** -- Receipt of a second stream claiming to be a control stream is a connection error of type H3_STREAM_CREATION_ERROR.
+      - quote: "receipt of a second stream claiming to be a control stream MUST be treated as a connection error of type H3_STREAM_CREATION_ERROR"
+      - check: http3/control.go: track whether a peer control stream was already accepted; a second type-0x00 uni stream must trigger connection close H3_STREAM_CREATION_ERROR (0x0103).
+- [ ] `9114/6-25` **MUST NOT** -- The sender must never close its control stream.
+      - quote: "The sender MUST NOT close the control stream"
+      - check: http3/control.go: client must never FIN or reset its own control stream, including during GOAWAY/graceful shutdown — only the QUIC connection close ends it.
+- [ ] `9114/6-26` **MUST NOT** -- The receiver must never request that the sender close the control stream (no STOP_SENDING on it).
+      - quote: "the receiver MUST NOT request that the sender close the control stream"
+      - check: http3/control.go: never issue quic/ STOP_SENDING against the peer's control stream.
+- [ ] `9114/6-27` **MUST** -- If either control stream is closed at any point, it is a connection error of type H3_CLOSED_CRITICAL_STREAM.
+      - quote: "If either control stream is closed at any point, this MUST be treated as a connection error of type H3_CLOSED_CRITICAL_STREAM."
+      - check: http3/control.go reader: EOF or RESET_STREAM on the peer control stream (and reset of our own) must close the connection with H3_CLOSED_CRITICAL_STREAM (0x0104).
+- [ ] `9114/6-28` **SHOULD** -- Endpoints should grant enough flow-control credit that the peer's control stream never becomes blocked.
+      - quote: "endpoints SHOULD provide enough flow-control credit to keep the peer's control stream from becoming blocked"
+      - check: quic/ stream flow control: MAX_STREAM_DATA updates for the peer control stream must be issued promptly (check window refill logic used by http3/control.go).
+- [ ] `9114/6-31` **MUST** -- Only servers can push; a server receiving a client-initiated push stream treats it as a connection error of type H3_STREAM_CREATION_ERROR — so a client must never open a push stream.
+      - quote: "if a server receives a client-initiated push stream, this MUST be treated as a connection error of type H3_STREAM_CREATION_ERROR"
+      - check: http3/dial.go + control.go: verify the client never opens a uni stream with type 0x01 (only 0x00 and QPACK types are ever sent).
+- [ ] `9114/6-32` **SHOULD NOT** -- A client should not abort reading a push stream before it has read the push stream header, to avoid disagreement about consumed push IDs.
+      - quote: "A client SHOULD NOT abort reading on a push stream prior to reading the push stream header"
+      - check: http3/control.go: if a type-0x01 stream arrives, read the Push ID varint before any STOP_SENDING/cancel.
+- [ ] `9114/6-33` **MUST** -- Each push ID may appear in at most one push stream header.
+      - quote: "Each push ID MUST only be used once in a push stream header."
+      - check: Server-side emission rule, but the client enforces it via 6-34; if push is ever supported, http3/ must track seen push IDs.
+- [ ] `9114/6-34` **MUST** -- If a client detects a push ID reused across two push stream headers, it must treat this as a connection error of type H3_ID_ERROR.
+      - quote: "the client MUST treat this as a connection error of type H3_ID_ERROR"
+      - check: http3/control.go: if push streams are parsed at all, keep a set of seen push IDs and close the connection with H3_ID_ERROR (0x0108) on a duplicate.
+- [ ] `9114/6-37` **MUST NOT** -- Endpoints must not ascribe any meaning to received reserved-type streams.
+      - quote: "Endpoints MUST NOT consider these streams to have any meaning upon receipt."
+      - check: http3/control.go: reserved-type streams must be discarded/aborted like any unknown type without side effects on connection state.
+- [ ] `9114/6-39` **SHOULD** -- When resetting a reserved stream, the sender should use the H3_NO_ERROR error code or a reserved error code.
+      - quote: "When resetting the stream, either the H3_NO_ERROR error code or a reserved error code (Section 8.1) SHOULD be used."
+      - check: Optional; if grease emission is added, quic/ RESET_STREAM code must be H3_NO_ERROR (0x0100) or a reserved 0x1f*N+0x21 code.
+
+## 9114-5
+
+- [ ] `9114/5-2` **SHOULD** -- An HTTP/3 implementation SHOULD open a new connection for new requests when the existing connection is approaching the negotiated idle timeout.
+      - quote: "they SHOULD do so if approaching the idle timeout"
+      - check: http3/client.go + client/ pool — check conn-reuse logic consults remaining idle time before dispatching; dial fresh conn when near timeout (likely missing).
+- [ ] `9114/5-11` **SHOULD** -- Upon sending GOAWAY, the endpoint SHOULD explicitly cancel any requests or pushes with identifiers greater than or equal to the indicated one, to clean up transport state.
+      - quote: "the endpoint SHOULD explicitly cancel (see Sections 4.1.1 and 7.2.3) any requests or pushes that have identifiers greater than or equal to the one indicated"
+      - check: http3/control.go — when the client sends GOAWAY, cancel (CANCEL_PUSH / reset via quic/) push streams with push ID >= the value.
+- [ ] `9114/5-12` **SHOULD** -- The GOAWAY sender SHOULD keep cancelling affected requests or pushes as more of them arrive after the GOAWAY.
+      - quote: "The endpoint SHOULD continue to do so as more requests or pushes arrive."
+      - check: http3/control.go — post-GOAWAY, late-arriving push streams >= the sent push ID must still be cancelled, not just those known at send time.
+- [ ] `9114/5-13` **MUST NOT** -- After receiving a GOAWAY from the peer, an endpoint MUST NOT initiate new requests or promise new pushes on that connection.
+      - quote: "Endpoints MUST NOT initiate new requests or promise new pushes on the connection after receipt of a GOAWAY frame from the peer."
+      - check: http3/client.go + control.go — a received-GOAWAY flag must gate Client.Do so no new request stream opens on that conn.
+- [ ] `9114/5-21` **MUST NOT** -- In a subsequent GOAWAY the identifier MUST NOT be greater than any previously sent identifier, since the peer may already have retried unprocessed requests elsewhere.
+      - quote: "the identifier in each frame MUST NOT be greater than the identifier in any previous frame"
+      - check: http3/control.go — if the client ever sends multiple GOAWAYs, enforce non-increasing push ID on the send path.
+- [ ] `9114/5-22` **MUST** -- Receiving a GOAWAY whose identifier is larger than a previously received one MUST be treated as a connection error of type H3_ID_ERROR.
+      - quote: "Receiving a GOAWAY containing a larger identifier than previously received MUST be treated as a connection error of type H3_ID_ERROR."
+      - check: http3/control.go — track lowest received GOAWAY id; on increase, close the connection via quic/ with H3_ID_ERROR (0x0108).
+- [ ] `9114/5-30` **SHOULD** -- An endpoint completing a graceful shutdown SHOULD close the connection with the H3_NO_ERROR error code.
+      - quote: "An endpoint that completes a graceful shutdown SHOULD use the H3_NO_ERROR error code when closing the connection."
+      - check: http3/client.go Close → quic/ CONNECTION_CLOSE — verify graceful close sends application error H3_NO_ERROR (0x0100), not 0 or a transport code.
+- [ ] `9114/5-37` **MUST** -- If the connection terminates without a GOAWAY, clients MUST assume every request sent, in whole or in part, might have been processed.
+      - quote: "If a connection terminates without a GOAWAY frame, clients MUST assume that any request that was sent, whether in whole or in part, might have been processed."
+      - check: client/ retry policy for H3 — on transport close with no GOAWAY, only idempotent/safe requests may auto-retry; never blind-retry non-idempotent ones.
+
+## 9114-8-9
+
+- [ ] `9114/8-9-6` **MUST** -- An error code used in an unexpected context, or an unknown error code, must be treated exactly as if H3_NO_ERROR had been received (though closing the stream still has its normal side effects).
+      - quote: "use of an error code in an unexpected context or receipt of an unknown error code MUST be treated as equivalent to H3_NO_ERROR"
+      - check: http3/stream.go + client.go: decoding of RESET_STREAM/STOP_SENDING/CONNECTION_CLOSE codes must not reject or special-case unknown values — treat them as H3_NO_ERROR.
+- [ ] `9114/8-9-26` **SHOULD** -- Implementations should, with some probability, send a grease error code from the reserved space instead of H3_NO_ERROR when closing without error.
+      - quote: "Implementations SHOULD select an error code from this space with some probability when they would have sent H3_NO_ERROR."
+      - check: http3/client.go graceful-close path: check whether H3_NO_ERROR is sometimes greased with 0x1f*N+0x21 (the repo greps show grease handling in control.go/client.go — verify send side, not just receive).
+- [ ] `9114/8-9-29` **MUST** -- Implementations must ignore unknown or unsupported values in all extensible protocol elements (frame types, settings, error codes, stream types).
+      - quote: "Implementations MUST ignore unknown or unsupported values in all extensible protocol elements."
+      - check: http3/frame.go: unknown frame types must be skipped (payload consumed) without error on request and control streams; http3/control.go: unknown SETTINGS identifiers ignored.
+- [ ] `9114/8-9-30` **MUST** -- Implementations must discard the data of, or abort reading on, any unidirectional stream whose stream type is unknown or unsupported — never treat it as a connection error.
+      - quote: "Implementations MUST discard data or abort reading on unidirectional streams that have unknown or unsupported types."
+      - check: http3/control.go inbound uni-stream dispatch: unknown stream-type varint must drain-and-discard or send STOP_SENDING (quic/ must support abort-reading), with no connection teardown.
+- [ ] `9114/8-9-31` **SHOULD** -- An unknown frame type does not satisfy a positional requirement for a known frame — e.g., if the first control-stream frame is an unknown type, the SETTINGS-first requirement is unmet and this should be treated as an error.
+      - quote: "an unknown frame type does not satisfy that requirement and SHOULD be treated as an error"
+      - check: http3/control.go: the SETTINGS-first check must fire on the literal first frame type — a grease/unknown frame before SETTINGS is an H3_MISSING_SETTINGS error, not skipped.
+- [ ] `9114/8-9-32` **MUST** -- Extensions that could change the semantics of existing protocol components (e.g., altering HEADERS frame layout) must be negotiated with the peer before use.
+      - quote: "Extensions that could change the semantics of existing protocol components MUST be negotiated before being used."
+      - check: http3/: no semantic extensions are implemented today; if any are added, gate activation on an explicit peer SETTINGS signal read in http3/control.go before changing any parse/emit behavior.
+- [ ] `9114/8-9-33` **MUST** -- When a setting is used to negotiate an extension, its default value must be defined so that the extension is disabled if the setting is omitted.
+      - quote: "If a setting is used for extension negotiation, the default value MUST be defined in such a fashion that the extension is disabled if the setting is omitted"
+      - check: http3/control.go SETTINGS handling: absence of a setting must map to extension-off defaults (e.g., QPACK dynamic table only enabled by explicit peer SETTINGS_QPACK_MAX_TABLE_CAPACITY — cross-check with qpack/ encoder gating).
+
+## 9114-7-7.2.3
+
+- [ ] `9114/7-7.2.3-13` **MUST** -- A frame payload must contain exactly the fields defined for that frame type — no more, no fewer.
+      - quote: "Each frame's payload MUST contain exactly the fields identified in its description."
+      - check: http3/frame.go: per-type parsers (CANCEL_PUSH, GOAWAY, MAX_PUSH_ID, SETTINGS) must consume exactly Length bytes and fail otherwise.
+- [ ] `9114/7-7.2.3-14` **MUST** -- A payload with trailing extra bytes after its defined fields, or one that ends before the fields are complete, is a connection error of type H3_FRAME_ERROR.
+      - quote: "a frame payload that terminates before the end of the identified fields MUST be treated as a connection error of type H3_FRAME_ERROR"
+      - check: http3/frame.go + control.go: verify both under- and over-length payloads (e.g. CANCEL_PUSH with leftover bytes) close the connection with H3_FRAME_ERROR (0x106), not a stream error.
+- [ ] `9114/7-7.2.3-15` **MUST** -- Where a frame contains internal length encodings redundant with the frame Length, the receiver must verify they are self-consistent.
+      - quote: "redundant length encodings MUST be verified to be self-consistent"
+      - check: http3/frame.go (and qpack/decoder.go for encoded field sections): inner varint-length fields must be bounds-checked against the outer frame Length; mismatch -> H3_FRAME_ERROR.
+- [ ] `9114/7-7.2.3-16` **MUST** -- If a stream ends cleanly (FIN) in the middle of a frame, the truncated last frame is a connection error of type H3_FRAME_ERROR.
+      - quote: "When a stream terminates cleanly, if the last frame on the stream was truncated, this MUST be treated as a connection error of type H3_FRAME_ERROR."
+      - check: http3/stream.go + stream_body.go: FIN arriving mid-frame (header or payload short of Length) must surface a connection error H3_FRAME_ERROR, not plain io.EOF.
+- [ ] `9114/7-7.2.3-19` **MUST** -- DATA frames must always be associated with an HTTP request or response (i.e., carried on request or push streams only).
+      - quote: "DATA frames MUST be associated with an HTTP request or response."
+      - check: http3/stream_body.go + request.go: client emits DATA only on request streams and maps received DATA only to a response body.
+- [ ] `9114/7-7.2.3-20` **MUST** -- Receiving a DATA frame on the control stream requires responding with a connection error of type H3_FRAME_UNEXPECTED.
+      - quote: "If a DATA frame is received on a control stream, the recipient MUST respond with a connection error of type H3_FRAME_UNEXPECTED."
+      - check: http3/control.go: control-stream dispatch must close the connection with H3_FRAME_UNEXPECTED (0x105) on DATA — check via quic/ connection close, not stream reset.
+- [ ] `9114/7-7.2.3-23` **MUST** -- Receiving a HEADERS frame on the control stream requires responding with a connection error of type H3_FRAME_UNEXPECTED.
+      - quote: "If a HEADERS frame is received on a control stream, the recipient MUST respond with a connection error of type H3_FRAME_UNEXPECTED."
+      - check: http3/control.go: control-stream dispatch must connection-error with H3_FRAME_UNEXPECTED on HEADERS.
+- [ ] `9114/7-7.2.3-32` **SHOULD NOT** -- A client should not send CANCEL_PUSH for a push whose push stream it has already received.
+      - quote: "A client SHOULD NOT send a CANCEL_PUSH frame when it has already received a corresponding push stream."
+      - check: http3/client.go + control.go: client currently has no push support — verify there is no CANCEL_PUSH send path at all (trivially conformant); if push is added, gate sends on push-stream receipt.
+- [ ] `9114/7-7.2.3-33` **SHOULD** -- If a push stream arrives after the client sent CANCEL_PUSH for it, the client should abort reading that stream with error code H3_REQUEST_CANCELLED.
+      - quote: "The client SHOULD abort reading the stream with an error code of H3_REQUEST_CANCELLED."
+      - check: http3/dial.go / control.go inbound uni-stream path: push-typed streams must be abortable via quic/ STOP_SENDING with H3_REQUEST_CANCELLED (0x10C); with no MAX_PUSH_ID advertised, confirm the H3_ID_ERROR path applies instead.
+- [ ] `9114/7-7.2.3-34` **MUST** -- Receiving CANCEL_PUSH on any stream other than the control stream is a connection error of type H3_FRAME_UNEXPECTED.
+      - quote: "Receiving a CANCEL_PUSH frame on a stream other than the control stream MUST be treated as a connection error of type H3_FRAME_UNEXPECTED."
+      - check: http3/stream.go: request-stream frame dispatch must connection-error with H3_FRAME_UNEXPECTED on CANCEL_PUSH (0x03), not skip it as unknown.
+- [ ] `9114/7-7.2.3-35` **MUST** -- A CANCEL_PUSH referencing a push ID beyond what is currently allowed on the connection (by MAX_PUSH_ID) is a connection error of type H3_ID_ERROR.
+      - quote: "If a CANCEL_PUSH frame is received that references a push ID greater than currently allowed on the connection, this MUST be treated as a connection error of type H3_ID_ERROR."
+      - check: http3/control.go: validate CANCEL_PUSH Push ID against the MAX_PUSH_ID the client advertised (none advertised => every push ID is disallowed) and close with H3_ID_ERROR (0x108).
+
+## 9114-4.2-4.3
+
+- [ ] `9114/4.2-4.3-1` **MUST** -- Field names must be converted to lowercase before being encoded.
+      - quote: "Characters in field names MUST be converted to lowercase prior to their encoding."
+      - check: qpack/encoder.go + http3/validate.go: confirm request field names are lowercased (or non-lowercase rejected) before QPACK encoding in http3/request.go.
+- [ ] `9114/4.2-4.3-2` **MUST** -- A request or response whose field names contain uppercase characters must be treated as malformed.
+      - quote: "A request or response containing uppercase characters in field names MUST be treated as malformed."
+      - check: http3/validate.go + http3/response.go: decoded response with uppercase field name must be treated malformed (H3_MESSAGE_ERROR stream handling per §4.1.2).
+- [ ] `9114/4.2-4.3-3` **MUST NOT** -- An endpoint must never generate a field section containing connection-specific fields (Connection, Keep-Alive, Proxy-Connection, Transfer-Encoding, Upgrade).
+      - quote: "An endpoint MUST NOT generate an HTTP/3 field section containing connection-specific fields"
+      - check: http3/validate.go: verify request-emit path rejects/strips connection-specific headers before http3/request.go encodes them.
+- [ ] `9114/4.2-4.3-4` **MUST** -- Any received message containing connection-specific fields must be treated as malformed.
+      - quote: "any message containing connection-specific fields MUST be treated as malformed."
+      - check: http3/validate.go + http3/response.go: responses carrying Connection/Keep-Alive/etc. must be treated malformed, not passed to the caller silently.
+- [ ] `9114/4.2-4.3-6` **MUST NOT** -- When TE is present in a request it must carry no value other than "trailers".
+      - quote: "when it is, it MUST NOT contain any value other than "trailers"."
+      - check: http3/validate.go: enforce TE value == "trailers" exactly on the request-emit path in http3/request.go.
+- [ ] `9114/4.2-4.3-10` **MUST** -- Multiple decompressed cookie field lines must be concatenated with "; " before being passed to any non-HTTP/2/HTTP/3 context.
+      - quote: "these MUST be concatenated into a single byte string using the two-byte delimiter of "; " (ASCII 0x3b, 0x20) before being passed into a context other than HTTP/2 or HTTP/3"
+      - check: http3/response.go: decide/document whether decoded Cookie lines surfaced to callers are pre-concatenated with "; "; if the client hands fields to generic app code, concatenation is required.
+- [ ] `9114/4.2-4.3-16` **SHOULD NOT** -- An implementation that has received SETTINGS_MAX_FIELD_SECTION_SIZE should not send a message header exceeding the advertised size.
+      - quote: "An implementation that has received this parameter SHOULD NOT send an HTTP message header that exceeds the indicated size"
+      - check: http3/control.go (store peer setting) + http3/request.go (enforce on encode): request header sections must be checked against the server-advertised limit (http3/maxfieldsection_test.go).
+- [ ] `9114/4.2-4.3-19` **MUST NOT** -- Endpoints must not generate any pseudo-header fields beyond those defined in RFC 9114 (absent a negotiated extension).
+      - quote: "Endpoints MUST NOT generate pseudo-header fields other than those defined in this document."
+      - check: http3/request.go + http3/validate.go: only :method/:scheme/:authority/:path (and :protocol only if extended-CONNECT is negotiated) may be emitted; reject caller-supplied ':' names.
+- [ ] `9114/4.2-4.3-20` **MUST NOT** -- Request-defined pseudo-headers must not appear in responses, and response-defined pseudo-headers must not appear in requests.
+      - quote: "Pseudo-header fields defined for requests MUST NOT appear in responses; pseudo-header fields defined for responses MUST NOT appear in requests."
+      - check: http3/validate.go + http3/response.go: response decode must reject :method/:scheme/:authority/:path; request encode must never emit :status.
+- [ ] `9114/4.2-4.3-21` **MUST NOT** -- Pseudo-header fields must not appear in trailer sections.
+      - quote: "Pseudo-header fields MUST NOT appear in trailer sections."
+      - check: http3/response.go (trailer decode → malformed) + http3/request.go / http3/stream_body.go (trailer emit must refuse ':' names); see http3/interim_trailers_test.go.
+- [ ] `9114/4.2-4.3-22` **MUST** -- A request or response containing undefined or invalid pseudo-header fields must be treated as malformed.
+      - quote: "Endpoints MUST treat a request or response that contains undefined or invalid pseudo-header fields as malformed."
+      - check: http3/validate.go: unknown/invalid pseudo-header in a decoded response → malformed → H3_MESSAGE_ERROR stream treatment per §4.1.2 (check the error code used in http3/stream.go).
+- [ ] `9114/4.2-4.3-23` **MUST** -- All pseudo-header fields must precede regular header fields in the header section.
+      - quote: "All pseudo-header fields MUST appear in the header section before regular header fields."
+      - check: http3/request.go: pseudo-headers must be encoded first, before all regular fields, in the QPACK field section.
+- [ ] `9114/4.2-4.3-24` **MUST** -- A message with a pseudo-header field appearing after a regular header field must be treated as malformed.
+      - quote: "Any request or response that contains a pseudo-header field that appears in a header section after a regular header field MUST be treated as malformed."
+      - check: http3/validate.go + http3/response.go: decode must track the pseudo→regular ordering transition and treat a late pseudo-header as malformed.
+- [ ] `9114/4.2-4.3-27` **MUST NOT** -- :authority must not include the deprecated userinfo subcomponent for "http" or "https" URIs.
+      - quote: "The authority MUST NOT include the deprecated userinfo subcomponent for URIs of scheme "http" or "https"."
+      - check: http3/request.go + http3/validate.go: strip or reject user@ userinfo when building :authority from the target URL.
+- [ ] `9114/4.2-4.3-29` **SHOULD** -- Clients generating HTTP/3 requests directly should use :authority rather than the Host header field.
+      - quote: "Clients that generate HTTP/3 requests directly SHOULD use the :authority pseudo-header field instead of the Host header field."
+      - check: http3/request.go: emit :authority (not Host) from the target URL; decide policy for caller-supplied Host headers (see fact 33 equality rule).
+- [ ] `9114/4.2-4.3-31` **MUST NOT** -- :path must not be empty for "http" or "https" URIs.
+      - quote: "This pseudo-header field MUST NOT be empty for "http" or "https" URIs"
+      - check: http3/validate.go: reject empty :path on request emit (http3/requestvalidate_test.go should pin this).
+- [ ] `9114/4.2-4.3-32` **MUST** -- "http"/"https" URIs lacking a path component must use :path value "/".
+      - quote: ""http" or "https" URIs that do not contain a path component MUST include a value of / (ASCII 0x2f)."
+      - check: http3/request.go: default :path to "/" when the target URL has an empty path.
+- [ ] `9114/4.2-4.3-34` **MUST** -- Every non-CONNECT HTTP/3 request must include exactly one :method, one :scheme, and one :path pseudo-header.
+      - quote: "All HTTP/3 requests MUST include exactly one value for the :method, :scheme, and :path pseudo-header fields, unless the request is a CONNECT request"
+      - check: http3/request.go + http3/validate.go: emit each of :method/:scheme/:path exactly once; reject duplicates or omissions before encoding.
+- [ ] `9114/4.2-4.3-35` **MUST** -- If :scheme has a mandatory authority component (including http/https), the request must contain :authority or Host.
+      - quote: "the request MUST contain either an :authority pseudo-header field or a Host header field."
+      - check: http3/request.go: :authority always populated for http/https targets; http3/validate.go rejects requests with neither.
+- [ ] `9114/4.2-4.3-36` **MUST NOT** -- When :authority or Host is present, it must not be empty.
+      - quote: "If these fields are present, they MUST NOT be empty."
+      - check: http3/validate.go: reject empty :authority and empty Host header values on request emit.
+- [ ] `9114/4.2-4.3-37` **MUST** -- When both :authority and Host are present, they must contain the same value.
+      - quote: "If both fields are present, they MUST contain the same value."
+      - check: http3/validate.go: if a caller supplies a Host header alongside the derived :authority, enforce equality (or strip Host) before encoding in http3/request.go.
+- [ ] `9114/4.2-4.3-38` **MUST NOT** -- If the scheme has no mandatory authority component and the request target provides none, the request must contain neither :authority nor Host.
+      - quote: "If the scheme does not have a mandatory authority component and none is provided in the request target, the request MUST NOT contain the :authority pseudo-header or Host header fields."
+      - check: http3/request.go: for non-authority schemes without an authority, omit both :authority and Host (only relevant if non-http(s) schemes are supported — see fact 26).
+- [ ] `9114/4.2-4.3-41` **MUST** -- Every response must include the :status pseudo-header carrying the HTTP status code; a response without it is malformed.
+      - quote: "This pseudo-header field MUST be included in all responses; otherwise, the response is malformed"
+      - check: http3/response.go + http3/validate.go: client must treat a decoded response with missing/duplicate/invalid :status as malformed (§4.1.2 → H3_MESSAGE_ERROR), not default the status.
+
+## 9114-11
+
+- [ ] `9114/11-12` **MUST NOT** -- Frame-type codes of form 0x1f*N+0x21 (0x21, 0x40, ... 0x3ffffffffffffffe) are permanently unassignable grease values IANA must never allocate or list.
+      - quote: "Each code of the format 0x1f * N + 0x21 ... MUST NOT be assigned by IANA and MUST NOT appear in the listing of assigned values."
+      - check: http3/frame.go — grease frame types (0x1f*N+0x21) must hit the ignore-unknown-frame path on receipt (never mapped to a known type); if the client greases, sent types must use this formula.
+- [ ] `9114/11-21` **MUST NOT** -- Settings codes of form 0x1f*N+0x21 (0x21, 0x40, ... 0x3ffffffffffffffe) are permanently unassignable grease values IANA must never allocate or list.
+      - quote: "Each code of the format 0x1f * N + 0x21 ... MUST NOT be assigned by IANA and MUST NOT appear in the listing of assigned values."
+      - check: http3/control.go — grease setting identifiers (0x1f*N+0x21) received in peer SETTINGS must be ignored (unknown-setting path), never rejected; if the client greases its own SETTINGS, use this formula.
+- [ ] `9114/11-30` **MUST NOT** -- Error codes of form 0x1f*N+0x21 (0x21, 0x40, ... 0x3ffffffffffffffe) are permanently unassignable grease values IANA must never allocate or list.
+      - quote: "Each code of the format 0x1f * N + 0x21 ... MUST NOT be assigned by IANA and MUST NOT appear in the listing of assigned values."
+      - check: http3 + quic/ — unknown/grease error codes received from the peer must be handled gracefully (treated as generic/unknown error, per §8.1 semantics), never as a parse failure; greased error codes an endpoint sends use this formula.
+- [ ] `9114/11-36` **MUST NOT** -- Stream-type codes of form 0x1f*N+0x21 (0x21, 0x40, ... 0x3ffffffffffffffe) are permanently unassignable grease values IANA must never allocate or list.
+      - quote: "Each code of the format 0x1f * N + 0x21 ... MUST NOT be assigned by IANA and MUST NOT appear in the listing of assigned values."
+      - check: http3 uni-stream dispatch — incoming unidirectional streams with grease/unknown types (0x21, 0x40, ...) must be tolerated (abort reading with H3_STREAM_CREATION_ERROR or discard, per §6.2.3) without a connection error; if the client greases, opened stream types use this formula.
+
+## 9114-4.1
+
+- [ ] `9114/4.1-1` **MUST** -- A client must send only one request per request stream (client-initiated bidirectional QUIC stream).
+      - quote: "A client MUST send only a single request on a given stream."
+      - check: http3/client.go + http3/stream.go: every Do/request opens a fresh client-initiated bidi QUIC stream; no second request ever written to an existing stream.
+- [ ] `9114/4.1-5` **MUST** -- On a given stream, multiple requests, or an additional response after the final response, must be treated as malformed.
+      - quote: "receipt of multiple requests or receipt of an additional HTTP response following a final HTTP response MUST be treated as malformed"
+      - check: http3/response.go + stream.go: after the final response (and optional trailers), any further response HEADERS => malformed => stream error H3_MESSAGE_ERROR per 4.1.2.
+- [ ] `9114/4.1-8` **MUST** -- An invalid sequence of frames on a request/push stream must be treated as a connection error H3_FRAME_UNEXPECTED.
+      - quote: "Receipt of an invalid sequence of frames MUST be treated as a connection error of type H3_FRAME_UNEXPECTED."
+      - check: http3/stream.go frame-sequence state machine: violation closes the whole QUIC connection with H3_FRAME_UNEXPECTED (0x105) — connection error, not stream reset.
+- [ ] `9114/4.1-11` **MUST** -- PUSH_PROMISE frames are forbidden on push streams; a pushed response containing one is a connection error H3_FRAME_UNEXPECTED.
+      - quote: "a pushed response that includes PUSH_PROMISE frames MUST be treated as a connection error of type H3_FRAME_UNEXPECTED"
+      - check: http3/ push-stream reader (control.go/stream.go): PUSH_PROMISE seen on a push stream => connection error 0x105.
+- [ ] `9114/4.1-14` **MUST NOT** -- Transfer codings are not defined in HTTP/3; the Transfer-Encoding header field must not be used.
+      - quote: "the Transfer-Encoding header field MUST NOT be used"
+      - check: http3/validate.go + request.go: never emit Transfer-Encoding on requests; treat its presence in a received response as a prohibited field => malformed (H3_MESSAGE_ERROR).
+- [ ] `9114/4.1-18` **MUST** -- After sending its request, the client must close the stream for sending (FIN).
+      - quote: "After sending a request, a client MUST close the stream for sending."
+      - check: http3/stream_body.go: FIN is written when the request body completes, unconditionally, on every code path.
+- [ ] `9114/4.1-19` **MUST NOT** -- Except for CONNECT, the client must not make closing its sending side dependent on receiving a response.
+      - quote: "clients MUST NOT make stream closure dependent on receiving a response to their request"
+      - check: http3/stream_body.go: FIN must not wait on response arrival; only the CONNECT path (Section 4.4) may hold the send side open.
+- [ ] `9114/4.1-20` **MUST** -- After sending the final response, the server must close its sending side, fully closing the QUIC stream.
+      - quote: "After sending a final response, the server MUST close the stream for sending."
+      - check: http3/response.go + stream_body.go: client relies on peer FIN to delimit the final response; a response body ending without FIN is truncation, not success.
+- [ ] `9114/4.1-22` **SHOULD** -- Endpoints should process partial HTTP messages incrementally once enough has been received to make progress.
+      - quote: "endpoints SHOULD begin processing partial HTTP messages once enough of the message has been received to make progress"
+      - check: http3/client.go + stream_body.go: response headers/body are surfaced to the caller as they arrive (streaming), not buffered until FIN.
+- [ ] `9114/4.1-23` **SHOULD** -- If a client-initiated stream ends without enough of the request to produce a response, the server should abort its response stream with H3_REQUEST_INCOMPLETE.
+      - quote: "the server SHOULD abort its response stream with the error code H3_REQUEST_INCOMPLETE"
+      - check: http3/ error-code constants: define H3_REQUEST_INCOMPLETE (0x10D) and map a received RESET_STREAM with it to a distinct typed client error.
+- [ ] `9114/4.1-25` **SHOULD** -- H3_NO_ERROR should be the code used when asking the client to stop sending on the request stream.
+      - quote: "The error code H3_NO_ERROR SHOULD be used when requesting that the client stop sending on the request stream."
+      - check: quic/ STOP_SENDING surfacing + http3/stream_body.go: STOP_SENDING with H3_NO_ERROR (0x100) is benign — stop uploading, do not report an error to the caller.
+- [ ] `9114/4.1-26` **MUST NOT** -- Clients must not discard a complete response merely because their request was terminated abruptly.
+      - quote: "Clients MUST NOT discard complete responses as a result of having their request terminated abruptly"
+      - check: http3/stream_body.go: reset/STOP_SENDING of the request-send side must not drop a fully received response — deliver it to the caller.
+- [ ] `9114/4.1-27` **SHOULD** -- If the server sends a response but does not abort reading, the client should keep sending the request content and close normally.
+      - quote: "clients SHOULD continue sending the content of the request and close the stream normally"
+      - check: http3/stream_body.go: an early/complete response without STOP_SENDING must not cancel the in-progress body upload; finish and FIN normally.
+- [ ] `9114/4.1-30` **SHOULD** -- Cancellation should abruptly terminate all still-open stream directions: reset the sending parts and abort reading the receiving parts.
+      - quote: "Implementations SHOULD cancel requests by abruptly terminating any directions of a stream that are still open"
+      - check: http3/stream.go cancel path + quic/: cancel issues RESET_STREAM on the send side AND STOP_SENDING on the receive side (both, if both still open).
+- [ ] `9114/4.1-31` **SHOULD** -- When rejecting a request without any application processing, the server should abort its response stream with H3_REQUEST_REJECTED.
+      - quote: "The server SHOULD abort its response stream with the error code H3_REQUEST_REJECTED."
+      - check: http3/ error codes + client retry: RESET_STREAM(H3_REQUEST_REJECTED=0x10B) on the response side means the request was never processed.
+- [ ] `9114/4.1-34` **SHOULD** -- A server abandoning a response after partial processing should abort the response stream with H3_REQUEST_CANCELLED.
+      - quote: "it SHOULD abort its response stream with the error code H3_REQUEST_CANCELLED"
+      - check: http3/ error codes: H3_REQUEST_CANCELLED (0x10C) received on response stream must map to a non-retry-safe (possibly-processed) typed error.
+- [ ] `9114/4.1-35` **SHOULD** -- Clients should use error code H3_REQUEST_CANCELLED when cancelling requests.
+      - quote: "Client SHOULD use the error code H3_REQUEST_CANCELLED to cancel requests."
+      - check: http3/stream.go: the cancel path's RESET_STREAM and STOP_SENDING carry H3_REQUEST_CANCELLED (0x10C), not H3_NO_ERROR or an internal code.
+- [ ] `9114/4.1-37` **MUST NOT** -- Clients must not use H3_REQUEST_REJECTED except to echo a server that requested request-stream closure with that code.
+      - quote: "Clients MUST NOT use the H3_REQUEST_REJECTED error code, except when a server has requested closure of the request stream with this error code"
+      - check: http3/stream.go + quic/ STOP_SENDING handling: RESET_STREAM sent in reply to STOP_SENDING(H3_REQUEST_REJECTED) may echo that code; the client never originates 0x10B itself.
+- [ ] `9114/4.1-39` **SHOULD NOT** -- A response of which only part was received before cancellation should not be used.
+      - quote: "if a stream is cancelled after receiving a partial response, the response SHOULD NOT be used"
+      - check: http3/stream_body.go: reset mid-body surfaces an error to the caller; a truncated body must never be returned as a successful response.
+- [ ] `9114/4.1-40` **SHOULD NOT** -- Clients should not auto-retry non-idempotent requests unless they can establish idempotent semantics or that the original was never applied.
+      - quote: "a client SHOULD NOT automatically retry a request with a non-idempotent method unless it has some means to know that the request semantics are idempotent"
+      - check: http3/client.go (and client/ retry policy once TransportH3 parity lands): gate automatic retry on method idempotency, except when H3_REQUEST_REJECTED proves non-processing (4.1-32).
+- [ ] `9114/4.1-45` **MUST** -- A detected malformed request or response must be treated as a stream error of type H3_MESSAGE_ERROR.
+      - quote: "Malformed requests or responses that are detected MUST be treated as a stream error of type H3_MESSAGE_ERROR."
+      - check: http3/validate.go + stream.go: malformed => STOP_SENDING/RESET_STREAM with H3_MESSAGE_ERROR (0x10E) on that stream only — stream error, never a connection close (contrast H3_FRAME_UNEXPECTED in 4.1-8).
+- [ ] `9114/4.1-47` **MUST NOT** -- Clients must not accept (must reject) a malformed response.
+      - quote: "Clients MUST NOT accept a malformed response."
+      - check: http3/validate.go + response.go: every malformed condition in 4.1-41/42 must fail the exchange with H3_MESSAGE_ERROR and never deliver the response to the caller — deliberately strict, no lenient parsing.
+
+## 9114-7.2.4-7.2.8
+
+- [ ] `9114/7.2.4-7.2.8-3` **MUST** -- Each peer must send SETTINGS as the very first frame on its control stream.
+      - quote: "A SETTINGS frame MUST be sent as the first frame of each control stream (see Section 6.2.1) by each peer"
+      - check: http3/dial.go + http3/control.go: verify the client opens the control stream, writes the stream-type varint, then writes SETTINGS before any other frame.
+- [ ] `9114/7.2.4-7.2.8-4` **MUST NOT** -- After the first SETTINGS frame, no further SETTINGS frames may be sent.
+      - quote: "it MUST NOT be sent subsequently"
+      - check: http3/control.go: verify no code path writes a second SETTINGS frame on the control stream after setup.
+- [ ] `9114/7.2.4-7.2.8-5` **MUST** -- A second SETTINGS frame on the control stream is a connection error H3_FRAME_UNEXPECTED.
+      - quote: "If an endpoint receives a second SETTINGS frame on the control stream, the endpoint MUST respond with a connection error of type H3_FRAME_UNEXPECTED."
+      - check: http3/control.go: control-stream reader must track that SETTINGS was seen and close the connection (quic CONNECTION_CLOSE, code H3_FRAME_UNEXPECTED 0x0105) on a duplicate.
+- [ ] `9114/7.2.4-7.2.8-6` **MUST NOT** -- SETTINGS may only be sent on the control stream.
+      - quote: "SETTINGS frames MUST NOT be sent on any stream other than the control stream."
+      - check: http3/stream.go + http3/request.go: verify no path emits frame type 0x04 on a request stream.
+- [ ] `9114/7.2.4-7.2.8-7` **MUST** -- Receiving SETTINGS on a non-control stream is a connection error H3_FRAME_UNEXPECTED.
+      - quote: "If an endpoint receives a SETTINGS frame on a different stream, the endpoint MUST respond with a connection error of type H3_FRAME_UNEXPECTED."
+      - check: http3/stream.go: request-stream frame dispatch must treat type 0x04 as a connection error H3_FRAME_UNEXPECTED, not as an ignorable unknown frame.
+- [ ] `9114/7.2.4-7.2.8-8` **MUST NOT** -- A SETTINGS frame must not contain the same setting identifier twice.
+      - quote: "The same setting identifier MUST NOT occur more than once in the SETTINGS frame."
+      - check: http3/control.go: verify the SETTINGS encoder emits each identifier at most once.
+- [ ] `9114/7.2.4-7.2.8-11` **MUST** -- Unknown setting identifiers must be ignored.
+      - quote: "An implementation MUST ignore any parameter with an identifier it does not understand."
+      - check: http3/control.go: parseSettings must skip unknown identifiers without error — but see fact 17: reserved HTTP/2 IDs are NOT unknown, they are errors.
+- [ ] `9114/7.2.4-7.2.8-14` **SHOULD** -- Endpoints should send at least one grease setting in their SETTINGS frame.
+      - quote: "Endpoints SHOULD include at least one such setting in their SETTINGS frame."
+      - check: http3/control.go: check whether the client's SETTINGS writer includes a grease setting (0x1f*N+0x21 with arbitrary value); add if missing.
+- [ ] `9114/7.2.4-7.2.8-15` **MUST NOT** -- Received grease settings must be given no semantic meaning.
+      - quote: "Endpoints MUST NOT consider such settings to have any meaning upon receipt."
+      - check: http3/control.go: verify no special-casing of grease identifiers — they must be indistinguishable from unknown settings.
+- [ ] `9114/7.2.4-7.2.8-16` **MUST NOT** -- HTTP/2 setting identifiers with no HTTP/3 equivalent must never be sent.
+      - quote: "These reserved settings MUST NOT be sent"
+      - check: http3/control.go: verify the client's SETTINGS encoder never emits reserved IDs 0x00, 0x02, 0x03, 0x04, 0x05 (per §11.2.2).
+- [ ] `9114/7.2.4-7.2.8-17` **MUST** -- Receipt of a reserved HTTP/2 setting identifier is a connection error H3_SETTINGS_ERROR.
+      - quote: "their receipt MUST be treated as a connection error of type H3_SETTINGS_ERROR"
+      - check: http3/control.go: parseSettings must special-case IDs 0x00, 0x02, 0x03, 0x04, 0x05 → connection error H3_SETTINGS_ERROR (0x0109), NOT the generic unknown-ignore path.
+- [ ] `9114/7.2.4-7.2.8-18` **MUST NOT** -- An endpoint must not send frames or requests that violate its current knowledge of the peer's settings.
+      - quote: "An HTTP implementation MUST NOT send frames or requests that would be invalid based on its current understanding of the peer's settings."
+      - check: http3/request.go + http3/client.go: verify the encoded request field-section size is checked against a received peer SETTINGS_MAX_FIELD_SECTION_SIZE before sending.
+- [ ] `9114/7.2.4-7.2.8-19` **SHOULD** -- Endpoints should assume initial/default setting values for messages sent before the peer's SETTINGS arrives.
+      - quote: "Each endpoint SHOULD use these initial values to send messages before the peer's SETTINGS frame has arrived"
+      - check: http3/client.go: verify requests may be sent before server SETTINGS arrive, using defaults (unlimited field section) until updated.
+- [ ] `9114/7.2.4-7.2.8-20` **MUST NOT** -- An endpoint must not wait for any peer data before sending its own SETTINGS.
+      - quote: "Endpoints MUST NOT require any data to be received from the peer prior to sending the SETTINGS frame"
+      - check: http3/dial.go: verify the control stream + SETTINGS are written unconditionally during Dial, with no read-before-write dependency on the server.
+- [ ] `9114/7.2.4-7.2.8-21` **MUST** -- SETTINGS must be sent as soon as the transport can send data.
+      - quote: "settings MUST be sent as soon as the transport is ready to send data"
+      - check: http3/dial.go + quic/: verify SETTINGS is flushed immediately after the QUIC handshake completes, before returning the Client or sending the first request.
+- [ ] `9114/7.2.4-7.2.8-24` **SHOULD NOT** -- Clients should not block indefinitely waiting for the server's SETTINGS before sending requests.
+      - quote: "Clients SHOULD NOT wait indefinitely for SETTINGS to arrive before sending requests"
+      - check: http3/client.go: verify Do does not gate on receipt of server SETTINGS (no unbounded wait).
+- [ ] `9114/7.2.4-7.2.8-25` **SHOULD** -- Clients should process received datagrams so SETTINGS is likely applied before the first request.
+      - quote: "they SHOULD process received datagrams in order to increase the likelihood of processing SETTINGS before sending the first request"
+      - check: quic/ receive loop + http3/dial.go: verify inbound packets (and thus the control stream) are being read/processed during and immediately after Dial.
+- [ ] `9114/7.2.4-7.2.8-27` **SHOULD** -- Clients should persist server-provided settings alongside resumption state.
+      - quote: "Clients SHOULD store the settings the server provided in the HTTP/3 connection where resumption information was provided"
+      - check: quic/ + http3/: vacuous without 0-RTT/resumption support; if session tickets are ever stored, settings must be stored with them.
+- [ ] `9114/7.2.4-7.2.8-29` **MUST** -- A client attempting 0-RTT must comply with the stored settings, or defaults if none stored.
+      - quote: "A client MUST comply with stored settings -- or default values if no values are stored -- when attempting 0-RTT."
+      - check: quic/: no 0-RTT attempt path exists — verify and mark vacuous; this MUST becomes load-bearing if 0-RTT is ever added.
+- [ ] `9114/7.2.4-7.2.8-30` **MUST** -- Once the server's new SETTINGS arrives, the client must comply with those values.
+      - quote: "Once a server has provided new settings, clients MUST comply with those values."
+      - check: http3/control.go: verify that applying the server's SETTINGS updates the live limits used by http3/request.go (e.g. MAX_FIELD_SECTION_SIZE checked at send time, not a stale snapshot).
+- [ ] `9114/7.2.4-7.2.8-35` **MUST** -- Post-0-RTT settings incompatible with previously specified ones are a connection error H3_SETTINGS_ERROR.
+      - quote: "sends settings that are not compatible with the previously specified settings, this MUST be treated as a connection error of type H3_SETTINGS_ERROR"
+      - check: http3/control.go: vacuous without 0-RTT; if added, compare newly received SETTINGS against stored values and close with H3_SETTINGS_ERROR (0x0109) on incompatibility.
+- [ ] `9114/7.2.4-7.2.8-36` **MUST** -- After accepted 0-RTT, omission of a previously non-default understood setting is a connection error H3_SETTINGS_ERROR.
+      - quote: "omits a setting value that the client understands (apart from reserved setting identifiers) that was previously specified to have a non-default value, this MUST be treated as a connection error"
+      - check: http3/control.go: vacuous without 0-RTT; if added, detect omitted previously-non-default settings in the new SETTINGS frame → H3_SETTINGS_ERROR.
+- [ ] `9114/7.2.4-7.2.8-40` **MUST** -- A client must treat a PUSH_PROMISE whose push ID exceeds what it advertised as connection error H3_ID_ERROR.
+      - quote: "A client MUST treat receipt of a PUSH_PROMISE frame that contains a larger push ID than the client has advertised as a connection error of H3_ID_ERROR."
+      - check: http3/stream.go: since this client never sends MAX_PUSH_ID, ANY PUSH_PROMISE exceeds the (unset) advertisement — verify receipt closes the connection with H3_ID_ERROR (0x0108), not silent ignore.
+- [ ] `9114/7.2.4-7.2.8-43` **SHOULD** -- Clients should compare header sections of resources promised multiple times.
+      - quote: "Clients SHOULD compare the request header sections for resources promised multiple times."
+      - check: http3/: N/A while push is rejected outright (fact 40); becomes relevant only if push support is added — then a per-push-ID promise cache is needed.
+- [ ] `9114/7.2.4-7.2.8-44` **MUST** -- A mismatched duplicate promise for an already-promised push ID is a connection error H3_GENERAL_PROTOCOL_ERROR.
+      - quote: "If a client receives a push ID that has already been promised and detects a mismatch, it MUST respond with a connection error of type H3_GENERAL_PROTOCOL_ERROR."
+      - check: http3/: vacuous while all pushes are rejected via H3_ID_ERROR; if push is added, compare against stored promise and close with H3_GENERAL_PROTOCOL_ERROR (0x0101) on mismatch.
+- [ ] `9114/7.2.4-7.2.8-45` **SHOULD** -- If duplicate promised field sections match exactly, the client should associate the push with each promising stream.
+      - quote: "the client SHOULD associate the pushed content with each stream on which a PUSH_PROMISE frame was received"
+      - check: http3/: N/A without push support; note in coverage matrix.
+- [ ] `9114/7.2.4-7.2.8-47` **MUST** -- A PUSH_PROMISE on the control stream is a connection error H3_FRAME_UNEXPECTED.
+      - quote: "If a PUSH_PROMISE frame is received on the control stream, the client MUST respond with a connection error of type H3_FRAME_UNEXPECTED."
+      - check: http3/control.go: control-stream frame dispatch must map type 0x05 to connection error H3_FRAME_UNEXPECTED (0x0105), not unknown-ignore.
+- [ ] `9114/7.2.4-7.2.8-48` **MUST NOT** -- A client must never send a PUSH_PROMISE frame.
+      - quote: "A client MUST NOT send a PUSH_PROMISE frame."
+      - check: http3/frame.go + http3/request.go: verify no writer API can emit frame type 0x05.
+- [ ] `9114/7.2.4-7.2.8-53` **MUST** -- A client must treat a GOAWAY carrying a stream ID that is not client-initiated bidirectional as connection error H3_ID_ERROR.
+      - quote: "A client MUST treat receipt of a GOAWAY frame containing a stream ID of any other type as a connection error of type H3_ID_ERROR."
+      - check: http3/control.go: GOAWAY handler must validate id % 4 == 0 (client-initiated bidi) and close with H3_ID_ERROR (0x0108) otherwise.
+- [ ] `9114/7.2.4-7.2.8-55` **MUST** -- A GOAWAY on any stream other than the control stream is a connection error H3_FRAME_UNEXPECTED.
+      - quote: "A client MUST treat a GOAWAY frame on a stream other than the control stream as a connection error of type H3_FRAME_UNEXPECTED."
+      - check: http3/stream.go: request-stream dispatch must map type 0x07 to connection error H3_FRAME_UNEXPECTED, not unknown-ignore.
+- [ ] `9114/7.2.4-7.2.8-58` **MUST** -- MAX_PUSH_ID received on any stream other than the control stream is a connection error H3_FRAME_UNEXPECTED.
+      - quote: "Receipt of a MAX_PUSH_ID frame on any other stream MUST be treated as a connection error of type H3_FRAME_UNEXPECTED."
+      - check: http3/stream.go: request-stream dispatch must map type 0x0d to connection error H3_FRAME_UNEXPECTED.
+- [ ] `9114/7.2.4-7.2.8-60` **MUST** -- A client must treat any received MAX_PUSH_ID frame as connection error H3_FRAME_UNEXPECTED.
+      - quote: "A client MUST treat the receipt of a MAX_PUSH_ID frame as a connection error of type H3_FRAME_UNEXPECTED."
+      - check: http3/control.go: control-stream dispatch must map type 0x0d to connection error H3_FRAME_UNEXPECTED (0x0105) — client role means receiving it is always an error.
+- [ ] `9114/7.2.4-7.2.8-62` **MUST** -- MAX_PUSH_ID must never decrease; a smaller value than previously received is a connection error H3_ID_ERROR.
+      - quote: "receipt of a MAX_PUSH_ID frame that contains a smaller value than previously received MUST be treated as a connection error of type H3_ID_ERROR."
+      - check: http3/control.go: enforced by the server, but constrains the client's send side — if MAX_PUSH_ID sending is ever added, values must be monotonically non-decreasing.
+- [ ] `9114/7.2.4-7.2.8-65` **MUST NOT** -- Received grease frames must be given no meaning.
+      - quote: "Endpoints MUST NOT consider these frames to have any meaning upon receipt."
+      - check: http3/stream.go + http3/control.go: verify grease frame types are not special-cased anywhere — identical handling to any unknown type.
+- [ ] `9114/7.2.4-7.2.8-66` **MUST NOT** -- HTTP/2 frame types with no HTTP/3 equivalent must never be sent.
+      - quote: "These frame types MUST NOT be sent"
+      - check: http3/frame.go: verify no writer emits reserved types 0x02 (PRIORITY), 0x06 (PING), 0x08 (WINDOW_UPDATE), 0x09 (CONTINUATION) per §11.2.1.
+- [ ] `9114/7.2.4-7.2.8-67` **MUST** -- Receipt of a reserved HTTP/2 frame type is a connection error H3_FRAME_UNEXPECTED.
+      - quote: "their receipt MUST be treated as a connection error of type H3_FRAME_UNEXPECTED"
+      - check: http3/frame.go + http3/stream.go + http3/control.go: CRITICAL — types 0x02, 0x06, 0x08, 0x09 must NOT fall into the generic unknown-ignore path; they must trigger connection error H3_FRAME_UNEXPECTED (0x0105) on both request and control streams.
+
+## 9114-4.4-4.6
+
+- [ ] `9114/4.4-4.6-2` **MUST** -- A CONNECT request must set the :method pseudo-header field to "CONNECT".
+      - quote: "The :method pseudo-header field is set to "CONNECT""
+      - check: http3/request.go EncodeHeaders has no CONNECT branch; if CONNECT support is added, emit :method=CONNECT and gate the other pseudo-header rules on it.
+- [ ] `9114/4.4-4.6-3` **MUST** -- A CONNECT request must omit the :scheme and :path pseudo-header fields.
+      - quote: "The :scheme and :path pseudo-header fields are omitted"
+      - check: http3/request.go:60 rejects empty Scheme/Path unconditionally — correct today (blocks malformed CONNECT), but must be method-gated if CONNECT is implemented.
+- [ ] `9114/4.4-4.6-4` **MUST** -- A CONNECT request's :authority pseudo-header must contain the host and port to connect to (authority-form).
+      - quote: "The :authority pseudo-header field contains the host and port to connect to"
+      - check: http3/request.go + http3/validate.go — a CONNECT path must require non-empty :authority including an explicit port.
+- [ ] `9114/4.4-4.6-11` **MUST** -- Receipt of any other known frame type on a CONNECT stream after tunnel establishment is a connection error of type H3_FRAME_UNEXPECTED.
+      - quote: "Receipt of any other known frame type MUST be treated as a connection error of type H3_FRAME_UNEXPECTED."
+      - check: http3/client.go frame dispatch — in tunnel mode, known non-DATA frames must trigger connError(H3FrameUnexpected) (0x0105, client.go:60).
+- [ ] `9114/4.4-4.6-13` **SHOULD NOT** -- Clients should not close the send side of a CONNECT stream while still expecting data from the tunnel target.
+      - quote: "clients SHOULD NOT close a stream for sending while they still expect to receive data from the target of the CONNECT."
+      - check: http3/client.go — a CONNECT API must let the caller hold the send side open independently of the receive side (half-close control).
+- [ ] `9114/4.4-4.6-27` **MUST** -- A client must treat receipt of a push stream as a connection error of type H3_ID_ERROR when it has never sent MAX_PUSH_ID.
+      - quote: "MUST treat receipt of a push stream as a connection error of type H3_ID_ERROR when no MAX_PUSH_ID frame has been sent"
+      - check: Implemented: http3/control.go:198-200 connError(H3IDError) on push-typed uni stream; pinned by control_test.go:156-164 — verify RFC_COVERAGE.md row exists.
+- [ ] `9114/4.4-4.6-28` **MUST** -- A client must treat a push stream referencing a push ID greater than the advertised maximum as a connection error of type H3_ID_ERROR.
+      - quote: "when the stream references a push ID that is greater than the maximum push ID"
+      - check: http3/control.go — currently subsumed (no MAX_PUSH_ID sent means every ID exceeds the max); if push is ever enabled, add explicit max-push-ID tracking and compare before accepting.
+- [ ] `9114/4.4-4.6-35` **MUST** -- Before using a pushed request for an origin not yet validated on the connection, the client must perform the same authority verification as for sending its own request (Section 3.3).
+      - quote: "it MUST perform the same verification process it would do before sending a request for that origin on the connection"
+      - check: N/A while push is disabled; if enabled, tie to the origin/certificate validation done at http3/dial.go connection setup.
+- [ ] `9114/4.4-4.6-36` **MUST NOT** -- If that verification fails, the client must not consider the server authoritative for the pushed origin.
+      - quote: "If this verification fails, the client MUST NOT consider the server authoritative for that origin."
+      - check: N/A while push is disabled; pairs with 4.4-4.6-35 in any future push implementation in http3/client.go.
+- [ ] `9114/4.4-4.6-37` **SHOULD** -- A client should send CANCEL_PUSH on receiving a PUSH_PROMISE whose request is not cacheable, not known safe, indicates request content, or is from a non-authoritative server.
+      - quote: "Clients SHOULD send a CANCEL_PUSH frame upon receipt of a PUSH_PROMISE frame carrying a request that is not cacheable, is not known to be safe"
+      - check: Moot today (PUSH_PROMISE is a connection error); if push is enabled, wire http3/frame.go:82 AppendCancelPush onto the control-stream send path in http3/control.go.
+- [ ] `9114/4.4-4.6-38` **MUST NOT** -- Responses corresponding to an unacceptable push must not be used or cached by the client.
+      - quote: "Any corresponding responses MUST NOT be used or cached."
+      - check: Trivially satisfied — poseidon rejects all pushes and has no HTTP cache; keep true if push is ever enabled (discard, never surface).
+- [ ] `9114/4.4-4.6-43` **SHOULD** -- Clients should abort reading and discard data from push streams whose PUSH_PROMISE is not processed in a reasonable time.
+      - quote: "Clients SHOULD abort reading and discard data already read from push streams if no corresponding PUSH_PROMISE frame is processed in a reasonable amount of time."
+      - check: Trivially satisfied — push streams terminate the connection immediately in http3/control.go; a future push implementation needs an orphan-stream timeout.
+- [ ] `9114/4.4-4.6-46` **MUST NOT** (VERIFY) -- Pushed responses that are not cacheable must not be stored by any HTTP cache.
+      - quote: "Pushed responses that are not cacheable MUST NOT be stored by any HTTP cache."
+      - check: Trivially satisfied — no cache and no push acceptance anywhere in http3/; re-verify if either is ever added.
+
+## 9204-1-2.1
+
+- [ ] `9204/1-2.1-11` **MUST** -- An encoder MUST emit field representations in the exact order the field lines appear in the input field section.
+      - quote: "An encoder MUST emit field representations in the order they appear in the input field section."
+      - check: qpack/encoder.go driven by http3/request.go: verify encoding iterates the request field list in order with no reordering (e.g., no map-based iteration or index-sorting).
+- [ ] `9204/1-2.1-15` **MUST NOT** -- The encoder MUST NOT insert an entry (including a duplicate of an existing entry) if making room would require evicting entries that are not evictable.
+      - quote: "the encoder MUST NOT insert that entry into the dynamic table (including duplicates of existing entries)"
+      - check: qpack/encoder.go: before any Insert/Duplicate, verify all entries that would be evicted are evictable per 1-2.1-13; otherwise fall back to a literal representation.
+- [ ] `9204/1-2.1-23` **MUST** -- An encoder MUST at all times limit the number of streams that could become blocked to the peer's advertised SETTINGS_QPACK_BLOCKED_STREAMS value.
+      - quote: "An encoder MUST limit the number of streams that could become blocked to the value of SETTINGS_QPACK_BLOCKED_STREAMS at all times."
+      - check: qpack/encoder.go: before referencing an entry above Known Received Count, count streams with potentially-blocking sections against the server's SETTINGS_QPACK_BLOCKED_STREAMS (plumbed from http3/control.go SETTINGS parse); note the count is streams that COULD block, not streams actually blocked.
+- [ ] `9204/1-2.1-24` **MUST** -- A decoder that encounters more blocked streams than it advertised MUST treat this as a connection error of type QPACK_DECOMPRESSION_FAILED.
+      - quote: "If a decoder encounters more blocked streams than it promised to support, it MUST treat this as a connection error of type QPACK_DECOMPRESSION_FAILED"
+      - check: qpack/decoder.go + qpack/errors.go: blocked-stream counter with hard limit; exceeding it must surface QPACK_DECOMPRESSION_FAILED as a CONNECTION error through http3 (closing the QUIC connection, not just the stream).
+- [ ] `9204/1-2.1-26` **SHOULD NOT** -- An encoder SHOULD NOT write an instruction unless sufficient stream and connection flow-control credit is available for the entire instruction, to avoid flow-control deadlocks.
+      - quote: "an encoder SHOULD NOT write an instruction unless sufficient stream and connection flow-control credit is available for the entire instruction"
+      - check: http3/control.go encoder-stream writes via quic stream: check writes of a whole instruction are gated on available QUIC stream+connection flow-control credit (quic/ send path), or that instructions are buffered atomically; apply the same discipline to the client's decoder-stream instructions.
+
+## 9204-4.5
+
+- [ ] `9204/4.5-10` **MUST** -- A decoder that encounters an EncodedInsertCount value that no conformant encoder could have produced must treat it as a connection error QPACK_DECOMPRESSION_FAILED.
+      - quote: "If the decoder encounters a value of EncodedInsertCount that could not have been produced by a conformant encoder, it MUST treat this as a connection error of type QPACK_DECOMPRESSION_FAILED"
+      - check: qpack/decoder.go + qpack/errors.go: every Error branch of the RIC reconstruction algorithm must map to QPACK_DECOMPRESSION_FAILED and http3 must close the connection with that code (not a stream error).
+- [ ] `9204/4.5-18` **MUST NOT** -- The value of Base is never allowed to be negative in a produced field section.
+      - quote: "The value of Base MUST NOT be negative."
+      - check: qpack/encoder.go: assert the encoder can never emit S=1 with DeltaBase >= ReqInsertCount (which would encode a negative Base).
+- [ ] `9204/4.5-19` **MUST** -- An endpoint receiving a field section prefix with Sign bit 1 where Required Insert Count <= Delta Base (i.e., negative Base) must treat the field block as invalid.
+      - quote: "treat a field block with a Sign bit of 1 as invalid if the value of Required Insert Count is less than or equal to the value of Delta Base"
+      - check: qpack/decoder.go: verify an explicit S==1 && ReqInsertCount <= DeltaBase check rejects the field section (QPACK_DECOMPRESSION_FAILED per Section 6 framing of decompression failure).
+- [ ] `9204/4.5-29` **MUST** -- When the 'N' bit is set on a field line, that field line must always be encoded with a literal representation, never an indexed one.
+      - quote: "When the 'N' bit is set, the encoded field line MUST always be encoded with a literal representation."
+      - check: qpack/encoder.go: verify sensitive request fields (e.g. authorization, cookie — see http3/request.go policy) are emitted as literals with N=1 and are never inserted into the dynamic table or matched to indexed forms.
+
+## 9204-4.1-4.4
+
+- [ ] `9204/4.1-4.4-2` **MUST** -- Implementations must be able to decode prefixed integers up to and including 62 bits long.
+      - quote: "QPACK implementations MUST be able to decode integers up to and including 62 bits long."
+      - check: qpack/decoder.go / instructions.go: check the prefix-int reader accepts 62-bit values (fits uint64) without overflow and bounds continuation bytes; test max value 2^62-1.
+- [ ] `9204/4.1-4.4-12` **MUST** -- Each endpoint must initiate at most one encoder stream and at most one decoder stream.
+      - quote: "Each endpoint MUST initiate, at most, one encoder stream and, at most, one decoder stream."
+      - check: http3/control.go: ensure the client opens exactly one encoder and one decoder stream per connection (no re-open on error/reconnect paths).
+- [ ] `9204/4.1-4.4-13` **MUST** -- Receiving a second encoder stream or a second decoder stream is a connection error of type H3_STREAM_CREATION_ERROR.
+      - quote: "Receipt of a second instance of either stream type MUST be treated as a connection error of type H3_STREAM_CREATION_ERROR."
+      - check: http3/control.go: unidirectional-stream demux must track that a 0x02 and a 0x03 stream were already seen and close the connection with H3_STREAM_CREATION_ERROR on a duplicate.
+- [ ] `9204/4.1-4.4-14` **MUST NOT** -- The sender must never close (FIN) its encoder or decoder stream.
+      - quote: "The sender MUST NOT close either of these streams"
+      - check: http3/control.go: verify the client never FINs or resets its own encoder/decoder streams for the connection lifetime, including on graceful shutdown before connection close.
+- [ ] `9204/4.1-4.4-15` **MUST NOT** -- The receiver must never request that the sender close the encoder or decoder stream (e.g., via STOP_SENDING).
+      - quote: "the receiver MUST NOT request that the sender close either of these streams."
+      - check: http3/control.go + quic stream API: ensure the client never sends STOP_SENDING on the server's encoder/decoder streams (check any generic abandon-unidirectional-stream path excludes 0x02/0x03).
+- [ ] `9204/4.1-4.4-16` **MUST** -- Closure of either the encoder or decoder unidirectional stream is a connection error of type H3_CLOSED_CRITICAL_STREAM.
+      - quote: "Closure of either unidirectional stream type MUST be treated as a connection error of type H3_CLOSED_CRITICAL_STREAM."
+      - check: http3/control.go: reader loops for the server's encoder/decoder streams must convert FIN or RESET_STREAM into connection error H3_CLOSED_CRITICAL_STREAM (same treatment as the control stream).
+- [ ] `9204/4.1-4.4-19` **MUST** -- An endpoint must accept the peer's encoder and decoder streams even when the connection's settings prevent their use.
+      - quote: "An endpoint MUST allow its peer to create an encoder stream and a decoder stream even if the connection's settings prevent their use."
+      - check: http3/control.go: even if the client advertises max table capacity 0, incoming 0x02/0x03 streams from the server must be accepted (and their instructions validated), not rejected as unknown.
+- [ ] `9204/4.1-4.4-22` **MUST** -- The new dynamic table capacity the encoder sets must not exceed the limit the decoder advertised (Section 3.2.3).
+      - quote: "The new capacity MUST be lower than or equal to the limit described in Section 3.2.3."
+      - check: qpack/encoder.go: client-as-encoder must clamp any Set Capacity it sends to the server-advertised SETTINGS_QPACK_MAX_TABLE_CAPACITY (plumbed from http3 SETTINGS handling).
+- [ ] `9204/4.1-4.4-24` **MUST** -- A decoder receiving a Set Capacity value exceeding its advertised limit must treat it as a connection error of type QPACK_ENCODER_STREAM_ERROR.
+      - quote: "The decoder MUST treat a new dynamic table capacity value that exceeds this limit as a connection error of type QPACK_ENCODER_STREAM_ERROR."
+      - check: qpack/decoder.go + errors.go: client-as-decoder must compare incoming Set Capacity against its own advertised SETTINGS_QPACK_MAX_TABLE_CAPACITY and raise QPACK_ENCODER_STREAM_ERROR (0x201) as a connection error.
+- [ ] `9204/4.1-4.4-25` **MUST NOT** -- Capacity reduction may evict entries, but must never evict entries that are not evictable (entries with outstanding references, Section 2.1.1).
+      - quote: "This MUST NOT cause the eviction of entries that are not evictable"
+      - check: qpack/dynamic_table.go: on capacity reduction, eviction must stop at entries still referenced by unacknowledged field sections (encoder side) — check the evictable/ref-count gate.
+- [ ] `9204/4.1-4.4-37` **MUST** -- An encoder receiving a Section Acknowledgment for a stream with no outstanding unacknowledged non-zero-RIC field sections must treat it as a connection error of type QPACK_DECODER_STREAM_ERROR.
+      - quote: "every encoded field section with a non-zero Required Insert Count has already been acknowledged, this MUST be treated as a connection error of type QPACK_DECODER_STREAM_ERROR"
+      - check: qpack/encoder.go + errors.go: client-as-encoder must track per-stream outstanding sections it sent with RIC>0 and raise QPACK_DECODER_STREAM_ERROR (0x202) on an unexpected/duplicate Section Ack from the server.
+- [ ] `9204/4.1-4.4-44` **MUST** -- An encoder receiving an Insert Count Increment with an Increment field equal to zero must treat it as a connection error of type QPACK_DECODER_STREAM_ERROR.
+      - quote: "An encoder that receives an Increment field equal to zero, or one that increases the Known Received Count beyond what the encoder has sent, MUST treat this"
+      - check: qpack/encoder.go + errors.go: client-as-encoder must reject Increment == 0 with connection error QPACK_DECODER_STREAM_ERROR (0x202).
+- [ ] `9204/4.1-4.4-45` **MUST** -- An encoder receiving an Insert Count Increment that would push the Known Received Count beyond the number of insertions it has actually sent must treat it as a connection error of type QPACK_DECODER_STREAM_ERROR.
+      - quote: "one that increases the Known Received Count beyond what the encoder has sent, MUST treat this as a connection error of type QPACK_DECODER_STREAM_ERROR"
+      - check: qpack/encoder.go: validate KnownReceivedCount + Increment <= InsertCount(sent) before applying; overflow (including uint64 wrap) raises QPACK_DECODER_STREAM_ERROR.
+
+## 9204-5-8
+
+- [ ] `9204/5-8-36` **SHOULD** -- The integer and string-literal limits should be large enough to process the largest individual field the HTTP implementation can be configured to accept.
+      - quote: "These limits SHOULD be large enough to process the largest individual field the HTTP implementation can be configured to accept."
+      - check: qpack limits vs http3/validate.go and any client max-header-size config: QPACK caps must be >= the configured max field size, or valid responses get falsely rejected (interop/false-reject dimension).
+- [ ] `9204/5-8-37` **MUST** -- A value larger than the implementation can decode must be treated as a stream error of type QPACK_DECOMPRESSION_FAILED on a request stream, or a connection error of the appropriate type on the encoder or decoder stream.
+      - quote: "this MUST be treated as a stream error of type QPACK_DECOMPRESSION_FAILED if on a request stream or a connection error of the appropriate type"
+      - check: qpack/decoder.go + http3: oversize in a response field section -> stream error 0x0200; on the server's encoder stream -> connection error 0x0201; on the server's decoder stream -> connection error 0x0202 (raised by the encoder side in encoder.go).
+
+## 9204-2.2-3
+
+- [ ] `9204/2.2-3-2` **MUST** -- The decoder must emit field lines in the exact order their representations appear in the encoded field section.
+      - quote: "The decoder MUST emit field lines in the order their representations appear in the encoded field section."
+      - check: qpack/decoder.go — verify field-section decode appends fields strictly in wire order, no reordering; http3/response.go preserves that order.
+- [ ] `9204/2.2-3-4` **SHOULD** -- While a stream is blocked, its encoded field-section data should remain within the stream's flow-control window (releasing it prematurely enables memory-exhaustion attacks).
+      - quote: "While blocked, encoded field section data SHOULD remain in the blocked stream's flow-control window."
+      - check: http3/response.go + quic flow control — if blocked decoding is supported, do not grant flow-control credit for buffered-but-unprocessed field-section bytes.
+- [ ] `9204/2.2-3-6` **MUST** -- A Required Insert Count smaller than the lowest value with which the section can be decoded must be treated as a connection error of type QPACK_DECOMPRESSION_FAILED.
+      - quote: "If it encounters a Required Insert Count smaller than expected, it MUST treat this as a connection error of type QPACK_DECOMPRESSION_FAILED"
+      - check: qpack/decoder.go — recompute expected RIC (max referenced absolute index + 1, per §2.1.2) after decoding and reject smaller declared RIC with the errors.go decompression-failed code.
+- [ ] `9204/2.2-3-9` **MUST** -- After decoding a field section that contains dynamic-table references, the decoder must emit a Section Acknowledgment instruction.
+      - quote: "After the decoder finishes decoding a field section encoded using representations containing dynamic table references, it MUST emit a Section Acknowledgment instruction"
+      - check: qpack/decoder.go + http3/response.go — after any section decoded with RIC > 0, emit Section Acknowledgment on the decoder stream; sections with only static/literal refs need no ack.
+- [ ] `9204/2.2-3-16` **MUST** -- A field-line representation referencing a dynamic entry that is already evicted, or whose absolute index >= the declared Required Insert Count, must be treated as connection error QPACK_DECOMPRESSION_FAILED.
+      - quote: "an absolute index greater than or equal to the declared Required Insert Count (Section 4.5.1), it MUST treat this as a connection error of type QPACK_DECOMPRESSION_FAILED"
+      - check: qpack/decoder.go — every dynamic reference in a representation must check both not-evicted AND abs < declared RIC; map to the decompression-failed code in errors.go.
+- [ ] `9204/2.2-3-17` **MUST** -- An encoder instruction (e.g., Insert With Name Reference, Duplicate) referencing an already-evicted dynamic entry must be treated as connection error QPACK_ENCODER_STREAM_ERROR.
+      - quote: "a reference in an encoder instruction to a dynamic table entry that has already been evicted, it MUST treat this as a connection error of type QPACK_ENCODER_STREAM_ERROR."
+      - check: qpack/decoder.go encoder-stream handler (instructions.go) — evicted-entry references in encoder instructions raise QPACK_ENCODER_STREAM_ERROR, a distinct errors.go code from the field-section path.
+- [ ] `9204/2.2-3-22` **MUST** -- An invalid static table index in a field line representation must be treated as connection error QPACK_DECOMPRESSION_FAILED.
+      - quote: "When the decoder encounters an invalid static table index in a field line representation, it MUST treat this as a connection error of type QPACK_DECOMPRESSION_FAILED."
+      - check: qpack/decoder.go — static index bounds check (> 98) in representation decode raises the decompression-failed code.
+- [ ] `9204/2.2-3-23` **MUST** -- An invalid static table index received on the encoder stream must be treated as connection error QPACK_ENCODER_STREAM_ERROR.
+      - quote: "If this index is received on the encoder stream, this MUST be treated as a connection error of type QPACK_ENCODER_STREAM_ERROR."
+      - check: qpack/decoder.go encoder-stream path — same bounds check but must raise QPACK_ENCODER_STREAM_ERROR, not the field-section error code.
+- [ ] `9204/2.2-3-25` **MUST NOT** -- The dynamic table can contain duplicate entries (same name and value); the decoder must not treat duplicates as an error.
+      - quote: "duplicate entries MUST NOT be treated as an error by the decoder."
+      - check: qpack/dynamic_table.go — insert path accepts duplicate name/value pairs without error (Duplicate instruction produces exactly this).
+- [ ] `9204/2.2-3-32` **MUST NOT** -- The encoder must not cause a dynamic table entry to be evicted unless that entry is evictable (abs index < Known Received Count and zero references).
+      - quote: "The encoder MUST NOT cause a dynamic table entry to be evicted unless that entry is evictable"
+      - check: qpack/encoder.go — before inserting, verify the entries eviction would remove are evictable per 2.2-3-14; otherwise encode the field as a literal instead of inserting.
+- [ ] `9204/2.2-3-33` **MUST** -- It is an error for the encoder to attempt to add an entry larger than the dynamic table capacity; the decoder must treat this as connection error QPACK_ENCODER_STREAM_ERROR.
+      - quote: "the encoder attempts to add an entry that is larger than the dynamic table capacity; the decoder MUST treat this as a connection error of type QPACK_ENCODER_STREAM_ERROR."
+      - check: qpack/decoder.go — encoder-stream insert with entrySize > capacity raises QPACK_ENCODER_STREAM_ERROR; qpack/encoder.go must never attempt an oversize insert (fall back to literal).
+- [ ] `9204/2.2-3-37` **MUST NOT** -- The encoder must not set a dynamic table capacity exceeding the decoder-advertised maximum, though it may use a lower capacity.
+      - quote: "The encoder MUST NOT set a dynamic table capacity that exceeds this maximum, but it can choose to use a lower dynamic table capacity"
+      - check: qpack/encoder.go — clamp Set Dynamic Table Capacity to the server's advertised SETTINGS_QPACK_MAX_TABLE_CAPACITY (from http3/control.go SETTINGS processing).
+- [ ] `9204/2.2-3-41` **MUST** (VERIFY) -- If the server sends any other value than the remembered non-zero one, or omits SETTINGS_QPACK_MAX_TABLE_CAPACITY entirely, the (client) encoder must treat this as connection error QPACK_DECODER_STREAM_ERROR.
+      - quote: "If it specifies any other value, or omits SETTINGS_QPACK_MAX_TABLE_CAPACITY from SETTINGS, the encoder must treat this as a connection error of type QPACK_DECODER_STREAM_ERROR."
+      - check: http3/control.go — only relevant if 0-RTT is ever added: validate remembered vs received SETTINGS_QPACK_MAX_TABLE_CAPACITY and raise QPACK_DECODER_STREAM_ERROR (errors.go) on mismatch/omission.
+- [ ] `9204/2.2-3-43` **MUST NOT** -- While the maximum table capacity is zero, the encoder must not insert entries into the dynamic table.
+      - quote: "the encoder MUST NOT insert entries into the dynamic table"
+      - check: qpack/encoder.go — no dynamic inserts while effective max capacity is 0 (before server SETTINGS, or when server advertises 0).
+- [ ] `9204/2.2-3-44` **MUST NOT** -- While the maximum table capacity is zero, the encoder must not send ANY encoder instructions on the encoder stream (not even Set Dynamic Table Capacity 0).
+      - quote: "MUST NOT send any encoder instructions on the encoder stream."
+      - check: http3/control.go + qpack/encoder.go — the client encoder stream may carry only the unidirectional stream-type byte (stream framing, not an instruction) while server max capacity is 0/unknown; verify nothing else is written.
+
+## 9000-1-2
+
+- [ ] `9000/1-2-15` **MUST NOT** -- An endpoint must never reuse a stream ID within a connection.
+      - quote: "A QUIC endpoint MUST NOT reuse a stream ID within a connection."
+      - check: quic/stream.go / conn.go: client-side stream allocator must be strictly monotonically increasing per type; never recycle an ID even after stream close.
+- [ ] `9000/1-2-22` **MUST** -- Endpoints must be able to deliver stream data to the application as an ordered byte stream, which requires buffering out-of-order data up to the advertised flow control limit.
+      - quote: "Endpoints MUST be able to deliver stream data to an application as an ordered byte stream."
+      - check: quic/stream.go + recvflow.go: out-of-order reassembly buffer must accept gaps up to the stream's advertised MAX_STREAM_DATA; buffer bound = advertised limit (peer-input policy: bound by construction).
+- [ ] `9000/1-2-25` **MUST NOT** -- A sender must not change the data at a given offset within a stream when it is transmitted multiple times.
+      - quote: "The data at a given offset MUST NOT change if it is sent multiple times"
+      - check: quic/stream.go + loss.go retransmission: retransmitted STREAM data must come from the original retained send buffer at the same offsets — never re-slice mutated application buffers.
+- [ ] `9000/1-2-28` **MUST NOT** -- An endpoint must not send data on any stream beyond the flow control limits set by its peer.
+      - quote: "An endpoint MUST NOT send data on any stream without ensuring that it is within the flow control limits set by its peer."
+      - check: quic/stream.go send path: writes must block/queue until both per-stream (MAX_STREAM_DATA) and connection (MAX_DATA) send credit cover the bytes; check the credit gate covers retransmissions too (they don't consume new credit but new data does).
+- [ ] `9000/1-2-29` **SHOULD** -- A QUIC implementation should provide a way for the application to indicate the relative priority of streams, and use that to allocate resources.
+      - quote: "A QUIC implementation SHOULD provide ways in which an application can indicate the relative priority of streams."
+      - check: quic/conn.go send scheduler: check whether any stream priority hook exists; for a load-gen client, round-robin scheduling with no API is a documented SHOULD-level gap, not a MUST failure.
+
+## 9000-4
+
+- [ ] `9000/4-1` **SHOULD** -- Implementations should expose an interface letting the TLS/crypto layer communicate its buffering limits, since CRYPTO data is not flow controlled like stream data.
+      - quote: "QUIC implementations SHOULD provide an interface for the cryptographic protocol implementation to communicate its buffering limits."
+      - check: quic/handshake.go + conn_crypto.go: check whether CRYPTO receive buffering is bounded and whether the TLS layer can signal a buffer limit.
+- [ ] `9000/4-4` **MUST NOT** -- A sender must never send stream data beyond either the stream-level or the connection-level flow control limit.
+      - quote: "Senders MUST NOT send data in excess of either limit."
+      - check: quic/stream.go send path: verify writes block on BOTH per-stream send credit and connection send credit before emitting STREAM frames.
+- [ ] `9000/4-10` **MUST** -- A receiver must close the connection with FLOW_CONTROL_ERROR when the peer sends data violating the advertised connection or stream data limits.
+      - quote: "A receiver MUST close the connection with an error of type FLOW_CONTROL_ERROR if the sender violates the advertised connection or stream data limits"
+      - check: quic/recvflow.go + errors.go: both stream-level and connection-level violations must raise a connection close with FLOW_CONTROL_ERROR.
+- [ ] `9000/4-11` **MUST** -- A sender must ignore MAX_STREAM_DATA or MAX_DATA frames that do not increase the current flow control limit.
+      - quote: "A sender MUST ignore any MAX_STREAM_DATA or MAX_DATA frames that do not increase flow control limits."
+      - check: quic/stream.go + conn.go: handling of MAX_STREAM_DATA/MAX_DATA must apply max(current, new), never regress send credit.
+- [ ] `9000/4-12` **SHOULD** -- A sender blocked by flow control should send a STREAM_DATA_BLOCKED or DATA_BLOCKED frame to signal it has data pending.
+      - quote: "A sender SHOULD send a STREAM_DATA_BLOCKED or DATA_BLOCKED frame to indicate to the receiver that it has data to write but is blocked by flow control limits"
+      - check: quic/stream.go + frame_write.go: check STREAM_DATA_BLOCKED/DATA_BLOCKED are emitted when send credit is exhausted with data queued.
+- [ ] `9000/4-13` **SHOULD** -- A flow-control-limited sender should periodically resend STREAM_DATA_BLOCKED or DATA_BLOCKED when no ack-eliciting packets are in flight, to keep the connection from idle-timing out.
+      - quote: "a sender that is flow control limited SHOULD periodically send a STREAM_DATA_BLOCKED or DATA_BLOCKED frame when it has no ack-eliciting packets in flight"
+      - check: quic/stream.go + pto.go/conn.go: verify a periodic blocked-frame keepalive exists while blocked, or accept idle-timeout risk knowingly.
+- [ ] `9000/4-15` **MUST NOT** -- A receiver must not wait for a STREAM_DATA_BLOCKED or DATA_BLOCKED frame before advertising more credit, since blocked senders are not required to send them.
+      - quote: "a receiver MUST NOT wait for a STREAM_DATA_BLOCKED or DATA_BLOCKED frame before sending a MAX_STREAM_DATA or MAX_DATA frame"
+      - check: quic/recvflow.go: MAX_* advertisement must be driven by consumption/thresholds, never gated on receipt of blocked frames.
+- [ ] `9000/4-17` **MUST** -- RESET_STREAM terminates only one direction; both endpoints must keep flow control state for the unterminated direction of a bidirectional stream until it reaches a terminal state.
+      - quote: "Both endpoints MUST maintain flow control state for the stream in the unterminated direction until that direction enters a terminal state."
+      - check: quic/stream.go: verify a RESET_STREAM in one direction of a bidi stream does not free or corrupt the other direction's flow-control accounting.
+- [ ] `9000/4-20` **MUST** -- The receiver must use the stream's final size to account for all bytes sent on the stream in its connection-level flow controller (entering Size Known / Reset Recvd).
+      - quote: "The receiver MUST use the final size of the stream to account for all bytes sent on the stream in its connection-level flow controller"
+      - check: quic/recvflow.go + stream.go: on RESET_STREAM or FIN, connection-level FC must be charged up to final size even for bytes never actually received.
+- [ ] `9000/4-21` **MUST NOT** -- An endpoint must not send stream data at or beyond the final size once a final size exists for the stream.
+      - quote: "An endpoint MUST NOT send data on a stream at or beyond the final size."
+      - check: quic/stream.go: after sending FIN or RESET_STREAM, retransmissions must never extend past the final size; no new data at/after it.
+- [ ] `9000/4-22` **SHOULD** -- A known final size cannot change; if a RESET_STREAM or STREAM frame indicates a different final size, the endpoint should respond with FINAL_SIZE_ERROR.
+      - quote: "If a RESET_STREAM or STREAM frame is received indicating a change in the final size for the stream, an endpoint SHOULD respond with an error of type FINAL_SIZE_ERROR"
+      - check: quic/stream.go + errors.go: validate RESET_STREAM Final Size and FIN offsets against any previously known final size; raise FINAL_SIZE_ERROR on mismatch.
+- [ ] `9000/4-23` **SHOULD** -- A receiver should treat data received at or beyond the final size as FINAL_SIZE_ERROR, even after the stream is closed.
+      - quote: "A receiver SHOULD treat receipt of data at or beyond the final size as an error of type FINAL_SIZE_ERROR, even after a stream is closed"
+      - check: quic/stream.go: check STREAM frames extending at/past a known final size trigger FINAL_SIZE_ERROR, including on closed streams while state is retained.
+- [ ] `9000/4-27` **MUST** -- A max_streams transport parameter or MAX_STREAMS frame with value greater than 2^60 must cause immediate connection close: TRANSPORT_PARAMETER_ERROR if from a transport parameter, FRAME_ENCODING_ERROR if from a frame.
+      - quote: "the connection MUST be closed immediately with a connection error of type TRANSPORT_PARAMETER_ERROR if the offending value was received in a transport parameter or of type FRAME_ENCODING_ERROR"
+      - check: quic/transport_params.go: reject initial_max_streams_* > 2^60 with TRANSPORT_PARAMETER_ERROR; quic/frame.go: reject MAX_STREAMS > 2^60 with FRAME_ENCODING_ERROR.
+- [ ] `9000/4-28` **MUST NOT** -- An endpoint must not open more streams than the cumulative limit its peer has advertised.
+      - quote: "Endpoints MUST NOT exceed the limit set by their peer."
+      - check: quic/conn.go: client stream-open path must gate on the peer's current max_streams (per type) before allocating a stream ID.
+- [ ] `9000/4-29` **MUST** -- Receiving a frame with a stream ID exceeding the stream limit this endpoint advertised is a connection error of type STREAM_LIMIT_ERROR.
+      - quote: "An endpoint that receives a frame with a stream ID exceeding the limit it has sent MUST treat this as a connection error of type STREAM_LIMIT_ERROR"
+      - check: quic/conn_recv.go + stream.go: server-initiated stream IDs must be checked against our advertised max_streams; errors.go must define STREAM_LIMIT_ERROR.
+- [ ] `9000/4-30` **MUST** -- MAX_STREAMS frames that do not increase the current stream limit must be ignored (a smaller advertisement has no effect).
+      - quote: "MAX_STREAMS frames that do not increase the stream limit MUST be ignored."
+      - check: quic/conn.go: MAX_STREAMS handling must apply max(current, new) per stream type and never regress the open budget.
+- [ ] `9000/4-31` **SHOULD** -- An endpoint unable to open a new stream because of the peer's limit should send a STREAMS_BLOCKED frame (a debugging signal).
+      - quote: "An endpoint that is unable to open a new stream due to the peer's limits SHOULD send a STREAMS_BLOCKED frame"
+      - check: quic/conn.go + frame_write.go: check STREAMS_BLOCKED emission when a client stream-open is refused by the peer's max_streams.
+- [ ] `9000/4-32` **MUST NOT** -- An endpoint must not wait for a STREAMS_BLOCKED frame before advertising additional stream credit, since the peer may never send it.
+      - quote: "An endpoint MUST NOT wait to receive this signal before advertising additional credit"
+      - check: quic/conn.go: MAX_STREAMS advertisement for peer-initiated streams (e.g., server uni streams for H3) must be driven by stream closure, not by STREAMS_BLOCKED receipt.
+
+## 9000-13.1-13.2
+
+- [ ] `9000/13.1-13.2-5` **MUST NOT** -- A packet must not be acknowledged until packet protection has been removed successfully and every frame in it has been processed.
+      - quote: "A packet MUST NOT be acknowledged until packet protection has been successfully removed and all frames contained in the packet have been processed."
+      - check: quic/conn_recv.go + quic/ack_tracker.go — verify the packet number is recorded in the ACK tracker only after AEAD open succeeds AND all frames parse/process without error.
+- [ ] `9000/13.1-13.2-8` **SHOULD** -- An endpoint should treat an acknowledgment for a packet it never sent as a connection error of type PROTOCOL_VIOLATION, when detectable.
+      - quote: "An endpoint SHOULD treat receipt of an acknowledgment for a packet it did not send as a connection error of type PROTOCOL_VIOLATION"
+      - check: quic/loss.go — check ACK processing rejects Largest Acknowledged >= next unsent packet number in that space with PROTOCOL_VIOLATION (errors.go code).
+- [ ] `9000/13.1-13.2-10` **SHOULD** -- When sending a packet for any reason, an endpoint should attempt to bundle an ACK frame if one has not been sent recently.
+      - quote: "When sending a packet for any reason, an endpoint SHOULD attempt to include an ACK frame if one has not been sent recently."
+      - check: quic/packet_write.go — check outgoing packet assembly opportunistically prepends a fresh ACK frame from ack_tracker.go.
+- [ ] `9000/13.1-13.2-11` **SHOULD** -- Every packet received and processed should be acknowledged at least once.
+      - quote: "Every packet SHOULD be acknowledged at least once"
+      - check: quic/ack_tracker.go — ranges must cover all processed packets, including non-ack-eliciting ones, until safely retired.
+- [ ] `9000/13.1-13.2-12` **MUST** -- Ack-eliciting packets must be acknowledged at least once within the delay the endpoint advertised in its max_ack_delay transport parameter.
+      - quote: "ack-eliciting packets MUST be acknowledged at least once within the maximum delay an endpoint communicated using the max_ack_delay transport parameter"
+      - check: quic/ack_tracker.go + quic/transport_params.go — verify the delayed-ACK timer never exceeds the client's own advertised max_ack_delay.
+- [ ] `9000/13.1-13.2-15` **MUST** -- An endpoint must acknowledge all ack-eliciting Initial and Handshake packets immediately, and all ack-eliciting 0-RTT and 1-RTT packets within its advertised max_ack_delay (except when decryption keys are unavailable pre-confirmation).
+      - quote: "An endpoint MUST acknowledge all ack-eliciting Initial and Handshake packets immediately and all ack-eliciting 0-RTT and 1-RTT packets within its advertised max_ack_delay"
+      - check: quic/ack_tracker.go — verify Initial/Handshake spaces use no ack delay (immediate ACK), while the 1-RTT space may delay up to max_ack_delay.
+- [ ] `9000/13.1-13.2-17` **MUST NOT** -- Because ACK-only packets are not congestion controlled, an endpoint must not send more than one ACK-only packet in response to a single received ack-eliciting packet.
+      - quote: "an endpoint MUST NOT send more than one such packet in response to receiving an ack-eliciting packet."
+      - check: quic/ack_tracker.go + quic/packet_write.go — verify at most one ACK-only packet is emitted per ack-eliciting receipt (ack-pending flag cleared on send).
+- [ ] `9000/13.1-13.2-18` **MUST NOT** -- An endpoint must not send a non-ack-eliciting packet in response to a non-ack-eliciting packet, even if there are packet gaps preceding it (prevents infinite ACK loops).
+      - quote: "An endpoint MUST NOT send a non-ack-eliciting packet in response to a non-ack-eliciting packet, even if there are packet gaps that precede the received packet."
+      - check: quic/ack_tracker.go — verify receiving an ACK-only (non-ack-eliciting) packet never triggers sending an ACK-only packet, even with gaps.
+- [ ] `9000/13.1-13.2-19` **SHOULD** -- An endpoint should bundle an ACK frame with other outgoing frames when there are new ack-eliciting packets to acknowledge.
+      - quote: "An endpoint SHOULD send an ACK frame with other frames when there are new ack-eliciting packets to acknowledge."
+      - check: quic/packet_write.go — outgoing STREAM/CRYPTO packets should piggyback pending ACKs from ack_tracker.go.
+- [ ] `9000/13.1-13.2-21` **MUST NOT** -- An endpoint that occasionally adds ack-eliciting frames to otherwise non-ack-eliciting packets (to elicit ACKs) must not do so in every such packet, to avoid an infinite ACK feedback loop.
+      - quote: "an endpoint MUST NOT send an ack-eliciting frame in all packets that would otherwise be non-ack-eliciting, to avoid an infinite feedback loop of acknowledgments."
+      - check: quic/ack_tracker.go + quic/pto.go — if PING is ever bundled into ACK-only packets, verify it is rate-limited (e.g. once per RTT), not on every one.
+- [ ] `9000/13.1-13.2-22` **SHOULD** -- An endpoint should generate and send an ACK without delay when a received ack-eliciting packet has a packet number lower than another already-received ack-eliciting packet (reordering).
+      - quote: "when the received packet has a packet number less than another ack-eliciting packet that has been received"
+      - check: quic/ack_tracker.go — verify immediate-ACK trigger on out-of-order (lower-numbered) ack-eliciting arrivals.
+- [ ] `9000/13.1-13.2-23` **SHOULD** -- An endpoint should generate and send an ACK without delay when a received ack-eliciting packet is above the highest received and there are missing packets between them (gap detected).
+      - quote: "when the packet has a packet number larger than the highest-numbered ack-eliciting packet that has been received and there are missing packets between that packet and this packet."
+      - check: quic/ack_tracker.go — verify immediate-ACK trigger when a new largest packet creates a gap in the tracked ranges.
+- [ ] `9000/13.1-13.2-24` **SHOULD** -- Packets marked with the ECN Congestion Experienced (CE) codepoint in the IP header should be acknowledged immediately.
+      - quote: "packets marked with the ECN Congestion Experienced (CE) codepoint in the IP header SHOULD be acknowledged immediately"
+      - check: quic/conn_recv.go + quic/gro — check whether ECN bits are read from the socket at all; if ECN is unsupported (no ECN counts sent), this is N/A but should be documented.
+- [ ] `9000/13.1-13.2-25` **SHOULD** -- A receiver should send an ACK frame after receiving at least two ack-eliciting packets.
+      - quote: "A receiver SHOULD send an ACK frame after receiving at least two ack-eliciting packets."
+      - check: quic/ack_tracker.go — verify the every-2-ack-eliciting-packets immediate-ACK threshold alongside the max_ack_delay timer.
+- [ ] `9000/13.1-13.2-27` **SHOULD** -- ACK frames should always acknowledge the most recently received packets; the more out of order packets are, the more urgent an updated ACK is.
+      - quote: "ACK frames SHOULD always acknowledge the most recently received packets"
+      - check: quic/ack_tracker.go — generated ACK must always include the newest ranges; older ranges are what get dropped under size pressure.
+- [ ] `9000/13.1-13.2-29` **SHOULD** -- After the receiver's own ACK frame is acknowledged, it should stop tracking the ACK Ranges that ACK covered.
+      - quote: "the receiver SHOULD stop tracking those acknowledged ACK Ranges."
+      - check: quic/ack_tracker.go + quic/loss.go — verify sent-ACK Largest Acknowledged is recorded per packet and ranges are pruned when that packet is acked (see 13.2.4).
+- [ ] `9000/13.1-13.2-32` **MUST** -- A receiver must retain an ACK Range unless it can guarantee it will never subsequently accept packets with numbers in that range.
+      - quote: "A receiver MUST retain an ACK Range unless it can ensure that it will not subsequently accept packets with numbers in that range."
+      - check: quic/ack_tracker.go — when discarding a range, verify a rising floor (minimum packet number) exists and conn_recv.go drops/ignores packets below it rather than re-accepting.
+- [ ] `9000/13.1-13.2-33` **MUST** -- Even if all ACK Ranges are discarded, the receiver must retain the largest successfully processed packet number, since it is needed to recover (decode) subsequent packet numbers.
+      - quote: "they MUST retain the largest packet number that has been successfully processed, as that is used to recover packet numbers from subsequent packets"
+      - check: quic/packet.go + quic/ack_tracker.go — largest-received per PN space must persist independently of range pruning and feed packet-number decoding (§17.1).
+- [ ] `9000/13.1-13.2-34` **SHOULD** -- A receiver should include an ACK Range containing the largest received packet number in every ACK frame it sends.
+      - quote: "A receiver SHOULD include an ACK Range containing the largest received packet number in every ACK frame."
+      - check: quic/ack_tracker.go + quic/frame_write.go — Largest Acknowledged in every emitted ACK must be the true largest received; truncation must never drop the newest range.
+- [ ] `9000/13.1-13.2-40` **MUST NOT** -- An endpoint must not include delays it does not control (e.g., OS kernel hold time) in the ACK Delay field.
+      - quote: "An endpoint MUST NOT include delays that it does not control when populating the ACK Delay field in an ACK frame."
+      - check: quic/ack_tracker.go — ACK Delay clock must start at packet processing (or key-buffer entry per fact 41), not at socket enqueue time it cannot observe.
+- [ ] `9000/13.1-13.2-41` **SHOULD** -- Endpoints should include buffering delays caused by unavailable decryption keys in the ACK Delay field, since these are large and non-repeating.
+      - quote: "endpoints SHOULD include buffering delays caused by unavailability of decryption keys, since these delays can be large and are likely to be non-repeating."
+      - check: quic/conn_recv.go + quic/ack_tracker.go — if undecryptable packets are buffered, timestamp them at arrival so ACK Delay covers the key-wait.
+- [ ] `9000/13.1-13.2-42` **SHOULD** -- When the measured acknowledgment delay exceeds the endpoint's advertised max_ack_delay (notably during the handshake), it should report the measured delay rather than clamping it.
+      - quote: "When the measured acknowledgment delay is larger than its max_ack_delay, an endpoint SHOULD report the measured delay."
+      - check: quic/ack_tracker.go — verify ACK Delay is not clamped to max_ack_delay on the sending side.
+- [ ] `9000/13.1-13.2-43` **MUST** -- ACK frames must only be carried in packets of the same packet number space as the packets being acknowledged.
+      - quote: "ACK frames MUST only be carried in a packet that has the same packet number space as the packet being acknowledged"
+      - check: quic/ack_tracker.go + quic/packet_write.go — per-space ACK state; Initial ACKs go only in Initial packets, Handshake in Handshake, 1-RTT in 1-RTT (conn_seal.go levels).
+- [ ] `9000/13.1-13.2-44` **MUST** -- Packets protected with 1-RTT keys must be acknowledged in packets that are also protected with 1-RTT keys.
+      - quote: "packets that are protected with 1-RTT keys MUST be acknowledged in packets that are also protected with 1-RTT keys."
+      - check: quic/packet_write.go + quic/conn_seal.go — verify ApplicationData-space ACKs are sealed only at the 1-RTT level, never Handshake.
+- [ ] `9000/13.1-13.2-47` **SHOULD** -- To avoid a congestion-window deadlock, a sender should periodically send other (ack-eliciting) frames in addition to PADDING frames so the receiver's acknowledgments open the window.
+      - quote: "a sender SHOULD ensure that other frames are sent periodically in addition to PADDING frames to elicit acknowledgments from the receiver."
+      - check: quic/packet_write.go + quic/pto.go — if any PADDING-only packets are ever emitted (padding of Initials), verify they carry or are followed by ack-eliciting frames (CRYPTO/PING).
+
+## 9000-3
+
+- [ ] `9000/3-23` **MUST** -- Before a stream is created, all streams of the same type with lower-numbered stream IDs MUST be created, so creation order is consistent at both endpoints.
+      - quote: "Before a stream is created, all streams of the same type with lower-numbered stream IDs MUST be created."
+      - check: quic/stream.go + conn_recv.go: a frame for server-initiated stream N must implicitly create all lower-numbered same-type streams (matters for stream-limit accounting); client must open its own streams in ID order.
+- [ ] `9000/3-37` **MUST NOT** -- A sender MUST NOT send STREAM, STREAM_DATA_BLOCKED, or RESET_STREAM frames for a stream from a terminal state (Data Recvd or Reset Recvd).
+      - quote: "A sender MUST NOT send any of these frames from a terminal state ("Data Recvd" or "Reset Recvd")."
+      - check: quic/stream.go + loss.go: block emission AND retransmission of these frame types once the send half is terminal.
+- [ ] `9000/3-38` **MUST NOT** -- A sender MUST NOT send STREAM or STREAM_DATA_BLOCKED for a stream in Reset Sent or any terminal state — i.e., after it has sent RESET_STREAM.
+      - quote: "A sender MUST NOT send a STREAM or STREAM_DATA_BLOCKED frame for a stream in the "Reset Sent" state or any terminal state"
+      - check: quic/stream.go + loss.go: after sending RESET_STREAM, suppress pending/queued STREAM data and its retransmissions; only RESET_STREAM itself may be retransmitted.
+- [ ] `9000/3-47` **SHOULD** -- When the application aborts reading a stream in the Recv or Size Known state, the transport SHOULD send a STOP_SENDING frame to prompt closure of the opposite direction.
+      - quote: "the transport SHOULD signal this by sending a STOP_SENDING frame to prompt closure of the stream in the opposite direction"
+      - check: quic/stream.go: verify the abort-read/CancelRead API emits STOP_SENDING with the application error code when recv half is in Recv or Size Known (http3 request cancellation path).
+- [ ] `9000/3-49` **MUST** -- An endpoint that receives STOP_SENDING MUST send a RESET_STREAM frame if the stream is in the Ready or Send state.
+      - quote: "An endpoint that receives a STOP_SENDING frame MUST send a RESET_STREAM frame if the stream is in the "Ready" or "Send" state."
+      - check: quic/stream.go: inbound STOP_SENDING handler must emit RESET_STREAM when send half is Ready/Send (e.g., server cancels a request body upload).
+- [ ] `9000/3-51` **SHOULD** -- If any outstanding data is declared lost after STOP_SENDING was received, the endpoint SHOULD send RESET_STREAM instead of retransmitting the data.
+      - quote: "If any outstanding data is declared lost, the endpoint SHOULD send a RESET_STREAM frame instead of retransmitting the data."
+      - check: quic/loss.go + stream.go: loss-triggered retransmission should check for received STOP_SENDING and convert to RESET_STREAM rather than resending stream data.
+- [ ] `9000/3-52` **SHOULD** -- An endpoint SHOULD copy the error code from the received STOP_SENDING frame into the RESET_STREAM it sends, though any application error code is permitted.
+      - quote: "An endpoint SHOULD copy the error code from the STOP_SENDING frame to the RESET_STREAM frame it sends, but it can use any application error code."
+      - check: quic/stream.go: RESET_STREAM emitted in response to STOP_SENDING should carry the STOP_SENDING's application error code.
+- [ ] `9000/3-54` **SHOULD** -- STOP_SENDING SHOULD only be sent for a stream that has not already been reset by the peer; it is most useful in Recv or Size Known.
+      - quote: "STOP_SENDING SHOULD only be sent for a stream that has not been reset by the peer."
+      - check: quic/stream.go: suppress STOP_SENDING emission once RESET_STREAM has been received for the stream.
+
+## 9000-7
+
+- [ ] `9000/7-1` **MUST** -- The cryptographic handshake must provide authenticated key exchange in which the server is always authenticated, the client optionally, every connection yields distinct unrelated keys, and keying material covers 0-RTT and 1-RTT packet protection.
+      - quote: "The cryptographic handshake MUST provide the following properties"
+      - check: quic/handshake.go + crypto*.go: verify TLS 1.3 server certificate verification is enforced and per-connection secrets drive packet protection keys.
+- [ ] `9000/7-2` **MUST** -- The handshake must provide authenticated exchange of both endpoints' transport parameters, with confidentiality protection for the server's transport parameters.
+      - quote: "authenticated exchange of values for transport parameters of both endpoints, and confidentiality protection for server transport parameters"
+      - check: quic/handshake.go + transport_params.go: TPs carried in the TLS extension; server TPs arrive in EncryptedExtensions (Handshake-level protected).
+- [ ] `9000/7-3` **MUST** -- The handshake must provide authenticated negotiation of an application protocol (ALPN in TLS).
+      - quote: "authenticated negotiation of an application protocol"
+      - check: quic/handshake.go: ALPN offered in ClientHello and the negotiated protocol taken from the authenticated TLS handshake (http3 sets "h3").
+- [ ] `9000/7-6` **MUST** -- Endpoints must explicitly negotiate an application protocol; there must be no implicit protocol agreement.
+      - quote: "Endpoints MUST explicitly negotiate an application protocol."
+      - check: quic/handshake.go: handshake must fail if the server selects no ALPN protocol; check http3.Dial requires "h3" to be negotiated.
+- [ ] `9000/7-12` **MUST** -- The client's initial Destination Connection ID (before any server Initial or Retry is received) must be an unpredictable value at least 8 bytes long.
+      - quote: "This Destination Connection ID MUST be at least 8 bytes in length."
+      - check: quic/initial.go / connid.go: verify the random original DCID is generated with length >= 8 from a CSPRNG.
+- [ ] `9000/7-13` **MUST** -- Until any packet is received from the server, the client must use the same Destination Connection ID value on every packet of the connection.
+      - quote: "Until a packet is received from the server, the client MUST use the same Destination Connection ID value on all packets in this connection."
+      - check: quic/conn.go + packet_write.go: DCID must not change across Initial retransmissions/PTO probes before the first server packet arrives.
+- [ ] `9000/7-19` **MUST** -- Once the client has received a valid Initial packet from the server, it must discard any subsequent packet on that connection carrying a different Source Connection ID.
+      - quote: "Once a client has received a valid Initial packet from the server, it MUST discard any subsequent packet it receives on that connection with a different Source Connection ID."
+      - check: quic/conn_recv.go: after the first valid server Initial, compare SCID of later long-header packets against the recorded server SCID and drop mismatches.
+- [ ] `9000/7-20` **MUST** -- The client must change the Destination Connection ID it sends in response to only the first received Initial or Retry packet, never in response to later ones.
+      - quote: "A client MUST change the Destination Connection ID it uses for sending packets in response to only the first received Initial or Retry packet."
+      - check: quic/conn.go + retry.go: DCID may be updated at most once for a Retry and once for the first server Initial; ignore SCIDs of later packets.
+- [ ] `9000/7-23` **MUST** -- If subsequent Initial packets include a different Source Connection ID than the first, they must be discarded.
+      - quote: "if subsequent Initial packets include a different Source Connection ID, they MUST be discarded"
+      - check: quic/conn_recv.go: Initial packets arriving after the first with a changed SCID are dropped, not processed (overlaps 7-19 check).
+- [ ] `9000/7-27` **MUST** -- Peer-provided values of the connection-ID transport parameters must match the values the endpoint actually used in the Destination and Source Connection ID fields of its Initial packets.
+      - quote: "The values provided by a peer for these transport parameters MUST match the values that an endpoint used in the Destination and Source Connection ID fields of Initial packets"
+      - check: quic/transport_params.go: cross-check initial_source_connection_id / original_destination_connection_id / retry_source_connection_id against recorded wire CIDs.
+- [ ] `9000/7-28` **MUST** -- Endpoints must validate that received transport parameters match the connection ID values received on the wire (anti-injection authentication of handshake CIDs).
+      - quote: "Endpoints MUST validate that received transport parameters match received connection ID values."
+      - check: quic/handshake.go: verify a post-TP-receipt validation step exists comparing server SCID (and Retry SCID) to the authenticated TP values.
+- [ ] `9000/7-29` **MUST** -- Absence of initial_source_connection_id from either endpoint, or absence of original_destination_connection_id from the server, must be treated as a connection error of type TRANSPORT_PARAMETER_ERROR.
+      - quote: "MUST treat the absence of the initial_source_connection_id transport parameter from either endpoint or the absence of the original_destination_connection_id transport parameter from the server as a connection error"
+      - check: quic/transport_params.go + errors.go: missing mandatory CID params -> close with TRANSPORT_PARAMETER_ERROR (0x8).
+- [ ] `9000/7-30` **MUST** -- Absence of retry_source_connection_id from the server after the client received a Retry packet must be treated as a connection error of type TRANSPORT_PARAMETER_ERROR or PROTOCOL_VIOLATION.
+      - quote: "An endpoint MUST treat the following as a connection error of type TRANSPORT_PARAMETER_ERROR or PROTOCOL_VIOLATION: absence of the retry_source_connection_id transport parameter from the server after receiving a Retry packet"
+      - check: quic/retry.go + transport_params.go: if a Retry was processed, require retry_source_connection_id to be present or close the connection.
+- [ ] `9000/7-31` **MUST** -- Presence of the retry_source_connection_id transport parameter when no Retry packet was received must be treated as a connection error (TRANSPORT_PARAMETER_ERROR or PROTOCOL_VIOLATION).
+      - quote: "presence of the retry_source_connection_id transport parameter when no Retry packet was received"
+      - check: quic/transport_params.go: reject retry_source_connection_id when the connection saw no Retry.
+- [ ] `9000/7-32` **MUST** -- A mismatch between the connection-ID transport parameter values received from the peer and the corresponding Destination/Source Connection ID fields of Initial packets must be treated as a connection error (TRANSPORT_PARAMETER_ERROR or PROTOCOL_VIOLATION).
+      - quote: "a mismatch between values received from a peer in these transport parameters and the value sent in the corresponding Destination or Source Connection ID fields of Initial packets"
+      - check: quic/transport_params.go: byte-compare each CID TP against the wire value; mismatch -> connection close with TRANSPORT_PARAMETER_ERROR or PROTOCOL_VIOLATION.
+- [ ] `9000/7-35` **MUST** -- Receipt of a transport parameter with an invalid value must be treated as a connection error of type TRANSPORT_PARAMETER_ERROR.
+      - quote: "An endpoint MUST treat receipt of a transport parameter with an invalid value as a connection error of type TRANSPORT_PARAMETER_ERROR."
+      - check: quic/transport_params.go + errors.go: out-of-range values (e.g. ack_delay_exponent>20, max_udp_payload_size<1200) -> TRANSPORT_PARAMETER_ERROR.
+- [ ] `9000/7-36` **MUST NOT** -- An endpoint must not send the same transport parameter more than once within a transport parameters extension.
+      - quote: "An endpoint MUST NOT send a parameter more than once in a given transport parameters extension."
+      - check: quic/transport_params.go: encoder must emit each parameter ID at most once.
+- [ ] `9000/7-37` **SHOULD** -- Receipt of duplicate transport parameters should be treated as a connection error of type TRANSPORT_PARAMETER_ERROR.
+      - quote: "An endpoint SHOULD treat receipt of duplicate transport parameters as a connection error of type TRANSPORT_PARAMETER_ERROR."
+      - check: quic/transport_params.go: decoder tracks seen IDs and rejects duplicates with TRANSPORT_PARAMETER_ERROR.
+- [ ] `9000/7-41` **MUST NOT** -- A client must not use remembered values for ack_delay_exponent, max_ack_delay, initial_source_connection_id, original_destination_connection_id, preferred_address, retry_source_connection_id, or stateless_reset_token when attempting 0-RTT.
+      - quote: "A client MUST NOT use remembered values for the following parameters: ack_delay_exponent, max_ack_delay, initial_source_connection_id, original_destination_connection_id, preferred_address, retry_source_connection_id, and stateless_reset_token."
+      - check: quic/: 0-RTT unimplemented — rule vacuous; if 0-RTT is ever added, transport_params.go must exclude these seven from the remembered set.
+- [ ] `9000/7-42` **MUST** -- For those non-remembered parameters the client must use the server's newly supplied handshake values, falling back to defaults if the server provides none.
+      - quote: "The client MUST use the server's new values in the handshake instead; if the server does not provide new values, the default values are used."
+      - check: quic/transport_params.go: defaults (ack_delay_exponent=3, max_ack_delay=25ms, etc.) applied when a parameter is absent from the server's TPs.
+- [ ] `9000/7-43` **MUST** -- A client that attempts to send 0-RTT data must remember all other server transport parameters that it is able to process.
+      - quote: "A client that attempts to send 0-RTT data MUST remember all other transport parameters used by the server that it is able to process."
+      - check: quic/: vacuous — client never attempts 0-RTT; confirm no session-ticket TP persistence claims 0-RTT capability.
+- [ ] `9000/7-50` **MUST** -- When sending frames in 0-RTT packets, a client must use only the remembered transport parameters.
+      - quote: "When sending frames in 0-RTT packets, a client MUST only use remembered transport parameters"
+      - check: quic/: vacuous — no 0-RTT send path; keep it that way or gate on remembered TPs if added.
+- [ ] `9000/7-51` **MUST NOT** -- In 0-RTT packets a client must not use updated values learned from the server's new transport parameters or from frames received in 1-RTT packets; updated values apply only to 1-RTT packets.
+      - quote: "it MUST NOT use updated values that it learns from the server's updated transport parameters or from frames received in 1-RTT packets"
+      - check: quic/: vacuous without 0-RTT; note for any future 0-RTT work in conn.go/stream.go limit accounting.
+- [ ] `9000/7-53` **MUST** -- An endpoint must ignore transport parameters it does not support; absence of a parameter disables the optional feature it negotiates.
+      - quote: "An endpoint MUST ignore transport parameters that it does not support."
+      - check: quic/transport_params.go: decoder must skip unknown parameter IDs (read id+length, skip value) without error.
+- [ ] `9000/7-55` **MUST** -- Implementations must support buffering at least 4096 bytes of data received in out-of-order CRYPTO frames.
+      - quote: "Implementations MUST support buffering at least 4096 bytes of data received in out-of-order CRYPTO frames."
+      - check: quic/conn_crypto.go: out-of-order CRYPTO reassembly buffer capacity must be >= 4096 bytes per the buffering policy.
+- [ ] `9000/7-57` **MUST** -- If an endpoint's CRYPTO buffer is exceeded during the handshake and it does not expand the buffer, it must close the connection with a CRYPTO_BUFFER_EXCEEDED error code.
+      - quote: "If an endpoint does not expand its buffer, it MUST close the connection with a CRYPTO_BUFFER_EXCEEDED error code."
+      - check: quic/conn_crypto.go + errors.go: on handshake-phase buffer overflow, close with CRYPTO_BUFFER_EXCEEDED (0x0d), not silent drop.
+- [ ] `9000/7-59` **MUST** -- Packets containing CRYPTO frames that were discarded (post-handshake buffer policy) must still be acknowledged, since the packet itself was received and processed.
+      - quote: "Packets containing discarded CRYPTO frames MUST be acknowledged because the packet has been received and processed by the transport even though the CRYPTO frame was discarded."
+      - check: quic/ack_tracker.go + conn_recv.go: packet is registered as received (ack-eliciting) even when its CRYPTO payload is discarded.
+
+## 9000-13.3-13.4
+
+- [ ] `9000/13.3-13.4-10` **MUST NOT** -- The content of a retransmitted RESET_STREAM frame (error code, final size) must be identical to the original.
+      - quote: "The content of a RESET_STREAM frame MUST NOT change when it is sent again."
+      - check: quic/stream.go — store reset error code + final size once at reset time; retransmit path must reuse the stored values.
+- [ ] `9000/13.3-13.4-15` **SHOULD** -- An endpoint should stop sending MAX_STREAM_DATA once the receiving part of the stream reaches Size Known or Reset Recvd.
+      - quote: "An endpoint SHOULD stop sending MAX_STREAM_DATA frames when the receiving part of the stream enters a "Size Known" or "Reset Recvd" state."
+      - check: quic/recvflow.go + quic/stream.go — suppress MAX_STREAM_DATA after FIN offset known or RESET_STREAM received.
+- [ ] `9000/13.3-13.4-30` **SHOULD** -- Endpoints should prioritize retransmitting lost data over sending new data unless application priorities say otherwise.
+      - quote: "Endpoints SHOULD prioritize retransmission of data over sending new data, unless priorities specified by the application indicate otherwise"
+      - check: quic/packet_write.go — frame scheduling order should drain retransmit queues before new stream data.
+- [ ] `9000/13.3-13.4-32` **MUST** -- A receiver must accept packets containing outdated frames, e.g. a MAX_DATA carrying a smaller limit than one already received.
+      - quote: "A receiver MUST accept packets containing an outdated frame, such as a MAX_DATA frame carrying a smaller maximum data value than one found in an older packet."
+      - check: quic/conn_recv.go + quic/stream.go — non-increasing MAX_DATA/MAX_STREAM_DATA/MAX_STREAMS must be treated as no-ops, never as errors.
+- [ ] `9000/13.3-13.4-33` **SHOULD** -- A sender should not retransmit information from packets that were acknowledged — including packets acked after being declared lost (spurious loss under reordering).
+      - quote: "A sender SHOULD avoid retransmitting information from packets once they are acknowledged."
+      - check: quic/loss.go — spurious-loss handling: late ACK of a declared-lost packet should cancel its pending retransmission.
+- [ ] `9000/13.3-13.4-35` **MUST** -- Upon detecting losses a sender must take appropriate congestion control action per the recovery spec.
+      - quote: "Upon detecting losses, a sender MUST take appropriate congestion control action."
+      - check: quic/loss.go → quic/cc.go / quic/bbr.go — every loss event must feed the congestion controller (NewReno/BBR).
+- [ ] `9000/13.3-13.4-39` **MUST** -- Even an endpoint that never sets ECT itself must report ECN markings it receives, if the platform makes them accessible.
+      - quote: "the endpoint MUST provide feedback about ECN markings it receives, if these are accessible."
+      - check: quic/gro + quic/conn_recv.go — if the recv path reads ECN from cmsgs, those counts MUST flow into ack_tracker.go and be emitted in ACK-ECN frames.
+- [ ] `9000/13.3-13.4-57` **MUST NOT** -- An endpoint must not fail ECN validation because of an ACK frame that does not increase the largest acknowledged packet number (reordered ACKs).
+      - quote: "An endpoint MUST NOT fail ECN validation as a result of processing an ACK frame that does not increase the largest acknowledged packet number."
+      - check: quic/loss.go — gate ECN validation on largest-acked advancing; skip validation for reordered/stale ACKs.
+- [ ] `9000/13.3-13.4-60` **MUST** -- If ECN validation fails, the endpoint must disable ECN: it stops setting the ECT codepoint in IP packets it sends.
+      - quote: "If validation fails, then the endpoint MUST disable ECN."
+      - check: quic/conn.go + packet_write.go/socket layer — validation failure must clear the outgoing ECN marking flag immediately.
+- [ ] `9000/13.3-13.4-62` **MUST** -- After successful validation an endpoint may keep setting ECT on subsequent packets, but must disable ECN if validation later fails mid-connection (paths change).
+      - quote: "an endpoint MUST disable ECN if validation later fails."
+      - check: quic/loss.go + quic/conn.go — validation checks must run continuously on every ACK with counts, not only during the initial testing window.
+
+## 9000-10.1-10.2
+
+- [ ] `9000/10.1-10.2-8` **MUST** -- Endpoints must raise the effective idle timeout period to at least three times the current Probe Timeout (PTO).
+      - quote: "endpoints MUST increase the idle timeout period to be at least three times the current Probe Timeout (PTO)"
+      - check: quic/conn.go + quic/pto.go — idle deadline = max(effective_idle_timeout, 3*PTO); PTO is 'current' (RTT-dependent), so recompute rather than freezing at handshake.
+- [ ] `9000/10.1-10.2-18` **SHOULD** -- The closing and draining states should persist for at least three times the current PTO interval.
+      - quote: "These states SHOULD persist for at least three times the current PTO interval"
+      - check: quic/close.go + quic/pto.go — drain/close timer must be 3*PTO computed from current RTT estimates, not a hardcoded constant.
+- [ ] `9000/10.1-10.2-21` **SHOULD** -- When the closing or draining state ends, the endpoint should discard all connection state.
+      - quote: "Once its closing or draining state ends, an endpoint SHOULD discard all connection state."
+      - check: quic/close.go — after the drain timer fires, free the conn (keys, streams, ack tracker, timers) and stop the receive loop; check for goroutine/state leaks.
+- [ ] `9000/10.1-10.2-25` **SHOULD** -- An endpoint should rate-limit the packets it generates in the closing state, e.g. via progressively increasing packet-count or time thresholds before responding.
+      - quote: "An endpoint SHOULD limit the rate at which it generates packets in the closing state."
+      - check: quic/close.go — check close-response path has exponential backoff (packet count or elapsed time), not a 1:1 reply to every incoming packet.
+- [ ] `9000/10.1-10.2-30` **MUST** -- An endpoint that dropped packet protection keys in closing must cap the cumulative size of packets it sends at three times the cumulative size of packets received and attributed to the connection.
+      - quote: "such endpoints MUST limit the cumulative size of packets it sends to three times the cumulative size of the packets that are received and attributed to the connection."
+      - check: quic/close.go — applies only if keys are dropped while closing (fact -29); if keys are retained and packets validated, this cap is not required.
+- [ ] `9000/10.1-10.2-33` **MUST** -- In the closing state, packets from an unvalidated (new) source address must either be discarded, or responses to that address capped at three times the bytes received from it.
+      - quote: "An endpoint in the closing state MUST either discard packets received from an unvalidated address or limit the cumulative size of packets it sends to an unvalidated address"
+      - check: quic/conn_recv.go — a connected UDP socket makes the OS discard other-source datagrams, satisfying the discard branch; verify the client socket is connect()ed (no migration support).
+- [ ] `9000/10.1-10.2-35` **MUST NOT** -- An endpoint in the draining state must not send any packets.
+      - quote: "an endpoint in the draining state MUST NOT send any packets."
+      - check: quic/close.go + quic/packet_write.go — hard gate: once draining, suppress ALL sends (ACKs, PTO probes, close re-sends, pending stream data); check every send path consults the draining flag under c.mu.
+- [ ] `9000/10.1-10.2-38` **MUST NOT** -- Beyond that optional single close packet, the endpoint must not send further packets, to avoid a perpetual CONNECTION_CLOSE exchange.
+      - quote: "An endpoint MUST NOT send further packets."
+      - check: quic/close.go — verify receiving a peer CONNECTION_CLOSE can trigger at most one outbound packet total; no repeated replies (close-loop prevention).
+- [ ] `9000/10.1-10.2-41` **MUST** -- After the handshake is confirmed, any CONNECTION_CLOSE frame must be sent in a 1-RTT packet.
+      - quote: "After the handshake is confirmed (see Section 4.1.2 of [QUIC-TLS]), an endpoint MUST send any CONNECTION_CLOSE frames in a 1-RTT packet"
+      - check: quic/close.go + quic/conn_seal.go — once HANDSHAKE_DONE is received (client-side confirmation), close packets must be built at the 1-RTT level only, never Initial/Handshake.
+- [ ] `9000/10.1-10.2-43` **SHOULD** -- A server unsure whether the client has Handshake keys should send CONNECTION_CLOSE in both Handshake and Initial packets so at least one is processable.
+      - quote: "a server SHOULD send a CONNECTION_CLOSE frame in both Handshake and Initial packets to ensure that at least one of them is processable by the client"
+      - check: quic/conn_recv.go — server-side rule, but the client receive path must accept CONNECTION_CLOSE (0x1c) in Initial and Handshake packets during the handshake and enter draining.
+- [ ] `9000/10.1-10.2-45` **SHOULD** -- Before the handshake is confirmed, an endpoint should send its CONNECTION_CLOSE frame in both Handshake and 1-RTT packets, since the peer might not yet process 1-RTT.
+      - quote: "Prior to confirming the handshake, a peer might be unable to process 1-RTT packets, so an endpoint SHOULD send a CONNECTION_CLOSE frame in both Handshake and 1-RTT packets."
+      - check: quic/close.go + quic/packet_write.go — client closing between handshake-complete and handshake-confirmed should coalesce the close at Handshake AND 1-RTT levels in one datagram.
+- [ ] `9000/10.1-10.2-47` **MUST** -- A CONNECTION_CLOSE of type 0x1d (application close) must be converted to type 0x1c (transport close) when sent in Initial or Handshake packets, to avoid exposing application state.
+      - quote: "A CONNECTION_CLOSE of type 0x1d MUST be replaced by a CONNECTION_CLOSE of type 0x1c when sending the frame in Initial or Handshake packets."
+      - check: quic/close.go + quic/frame_write.go — if the app closes (0x1d) before the handshake confirms, the Initial/Handshake copies must be rewritten as 0x1c; only the 1-RTT copy may carry 0x1d.
+- [ ] `9000/10.1-10.2-48` **MUST** -- When converting a 0x1d close to 0x1c for Initial/Handshake packets, the Reason Phrase field must be cleared (emptied).
+      - quote: "Endpoints MUST clear the value of the Reason Phrase field"
+      - check: quic/close.go — the converted 0x1c frame must carry an empty Reason Phrase (length 0); check the conversion path does not copy the application reason string.
+- [ ] `9000/10.1-10.2-49` **SHOULD** -- When converting to a 0x1c CONNECTION_CLOSE, the error code should be APPLICATION_ERROR.
+      - quote: "SHOULD use the APPLICATION_ERROR code when converting to a CONNECTION_CLOSE of type 0x1c"
+      - check: quic/close.go + quic/errors.go — converted frame's error code should be APPLICATION_ERROR (0x0c); verify the constant exists in errors.go and is used here.
+
+## 9000-8
+
+- [ ] `9000/8-1` **MUST** -- An endpoint receiving packets from a not-yet-validated address must limit data sent to that address to three times the data received from it (anti-amplification limit).
+      - quote: "after receiving packets from an address that is not yet validated, an endpoint MUST limit the amount of data it sends to the unvalidated address to three times the amount"
+      - check: quic/conn.go — for a client the server address is validated on first successfully processed packet, so the limit never binds after that; confirm no code wrongly throttles the client send path pre-handshake.
+- [ ] `9000/8-7` **MUST** -- Clients must ensure every UDP datagram containing an Initial packet has a UDP payload of at least 1200 bytes, adding PADDING frames as necessary.
+      - quote: "Clients MUST ensure that UDP datagrams containing Initial packets have UDP payloads of at least 1200 bytes, adding PADDING frames as necessary."
+      - check: quic/initial.go + packet_write.go — verify every Initial-carrying datagram (first flight, coalesced flights, and Retry re-sends) pads the datagram, not the packet, to >=1200.
+- [ ] `9000/8-8` **MUST** -- To prevent the handshake anti-amplification deadlock, clients must send a packet on Probe Timeout (PTO).
+      - quote: "To prevent this deadlock, clients MUST send a packet on a Probe Timeout (PTO)"
+      - check: quic/pto.go — PTO must fire and transmit during handshake even when nothing is outstanding-unacked from client's perspective.
+- [ ] `9000/8-9` **MUST** -- On PTO the client must send an Initial packet in a >=1200-byte UDP datagram if it lacks Handshake keys, and otherwise send a Handshake packet.
+      - quote: "the client MUST send an Initial packet in a UDP datagram that contains at least 1200 bytes if it does not have Handshake keys, and otherwise send a Handshake packet"
+      - check: quic/pto.go — check probe-packet selection: Initial (padded to 1200) before Handshake keys exist, Handshake packet after.
+- [ ] `9000/8-13` **MUST** -- A Retry-provided token must be repeated by the client in all Initial packets it sends for that connection after receiving the Retry packet.
+      - quote: "This token MUST be repeated by the client in all Initial packets it sends for that connection after it receives the Retry packet."
+      - check: quic/retry.go + initial.go — after Retry, ALL subsequent Initials (including PTO retransmissions) must carry the token, not just the next one.
+- [ ] `9000/8-15` **SHOULD** -- On receiving a client Initial with an invalid Retry token that is otherwise valid, the server should immediately close the connection with an INVALID_TOKEN error.
+      - quote: "the server SHOULD immediately close (Section 10.2) the connection with an INVALID_TOKEN error."
+      - check: quic/errors.go — client only needs INVALID_TOKEN (0x0b) defined so a server CONNECTION_CLOSE carrying it is parsed and surfaced correctly.
+- [ ] `9000/8-17` **MUST** -- A client using a NEW_TOKEN-provided token must include it in all Initial packets it sends, unless a Retry replaces the token with a newer one.
+      - quote: "The client MUST include the token in all Initial packets it sends, unless a Retry replaces the token with a newer one."
+      - check: quic/initial.go — if the client ever sends a stored token, it must go in every Initial; also a Retry token must override a NEW_TOKEN token for the rest of the attempt.
+- [ ] `9000/8-18` **MUST NOT** -- A client must not use a token provided in a Retry packet for future connections.
+      - quote: "The client MUST NOT use the token provided in a Retry for future connections."
+      - check: quic/retry.go — verify the Retry token is scoped to the current Conn/attempt and never persisted across Dial calls.
+- [ ] `9000/8-24` **SHOULD** -- When connecting to a server for which the client retains an applicable, unused token, the client should include that token in the Token field of its Initial packet.
+      - quote: "When connecting to a server for which the client retains an applicable and unused token, it SHOULD include that token in the Token field of its Initial packet."
+      - check: quic/ + http3 dial path — client likely has no cross-connection token cache; document as an accepted SHOULD gap or implement a per-server token store.
+- [ ] `9000/8-25` **MUST NOT** -- A client must not include a token that is not applicable to the server it is connecting to, unless it knows the issuing and target servers jointly manage tokens.
+      - quote: "A client MUST NOT include a token that is not applicable to the server that it is connecting to"
+      - check: If a token store is ever added, key it by server identity (certificate names); until then vacuously satisfied — note in RFC_COVERAGE.
+- [ ] `9000/8-27` **MUST** -- A token obtained in a Retry packet must be used immediately during that connection attempt and cannot be used in subsequent connection attempts.
+      - quote: "a token obtained in a Retry packet MUST be used immediately during the connection attempt and cannot be used in subsequent connection attempts."
+      - check: quic/retry.go — Retry token applied to the in-progress attempt only; pairs with 8-18 (no persistence).
+- [ ] `9000/8-28` **SHOULD NOT** -- A client should not reuse a NEW_TOKEN-frame token across different connection attempts, to avoid linkability by on-path entities.
+      - quote: "A client SHOULD NOT reuse a token from a NEW_TOKEN frame for different connection attempts."
+      - check: If a token store is added: mark tokens used-once; currently vacuous.
+- [ ] `9000/8-51` **MUST NOT** -- Endpoints must not discard datagrams that appear too small when they contain PATH_CHALLENGE or PATH_RESPONSE frames.
+      - quote: "endpoints MUST NOT discard datagrams that appear to be too small when they contain PATH_CHALLENGE or PATH_RESPONSE."
+      - check: quic/conn_recv.go — ensure no minimum-datagram-size drop is applied before frame parsing when the datagram carries PATH_CHALLENGE/PATH_RESPONSE.
+- [ ] `9000/8-52` **MUST** -- On receiving a PATH_CHALLENGE frame, an endpoint must respond by echoing its data in a PATH_RESPONSE frame.
+      - quote: "On receiving a PATH_CHALLENGE frame, an endpoint MUST respond by echoing the data contained in the PATH_CHALLENGE frame in a PATH_RESPONSE frame."
+      - check: quic/conn_recv.go + conn.go — PATH_CHALLENGE handler must queue a PATH_RESPONSE with the exact 8-byte payload (pathresp_test.go exists; verify).
+- [ ] `9000/8-53` **MUST NOT** -- An endpoint must not delay transmission of a packet containing a PATH_RESPONSE frame unless constrained by congestion control.
+      - quote: "An endpoint MUST NOT delay transmission of a packet containing a PATH_RESPONSE frame unless constrained by congestion control."
+      - check: quic/conn.go — PATH_RESPONSE must be sent promptly, not batched behind ack-delay or write coalescing timers.
+- [ ] `9000/8-54` **MUST** -- A PATH_RESPONSE frame must be sent on the network path where the corresponding PATH_CHALLENGE was received.
+      - quote: "A PATH_RESPONSE frame MUST be sent on the network path where the PATH_CHALLENGE frame was received."
+      - check: quic/conn.go — trivially satisfied on a single-path client (one UDP socket); note as vacuous in RFC_COVERAGE.
+- [ ] `9000/8-56` **MUST** -- Datagrams containing a PATH_RESPONSE frame must be expanded to at least 1200 bytes.
+      - quote: "An endpoint MUST expand datagrams that contain a PATH_RESPONSE frame to at least the smallest allowed maximum datagram size of 1200 bytes."
+      - check: quic/packet_write.go — when a packet carries PATH_RESPONSE, pad the enclosing datagram to >=1200 (same mechanism as Initial padding); verify this exists.
+- [ ] `9000/8-57` **MUST NOT** -- An endpoint must not expand a PATH_RESPONSE-carrying datagram if the resulting data would exceed the anti-amplification limit.
+      - quote: "an endpoint MUST NOT expand the datagram containing the PATH_RESPONSE if the resulting data exceeds the anti-amplification limit."
+      - check: quic/packet_write.go — client has no anti-amp limit toward a validated server, so unconditional expansion is fine; document why the exception is unreachable.
+- [ ] `9000/8-58` **MUST NOT** -- An endpoint must not send more than one PATH_RESPONSE frame in response to one PATH_CHALLENGE frame; the peer sends more challenges to evoke more responses.
+      - quote: "An endpoint MUST NOT send more than one PATH_RESPONSE frame in response to one PATH_CHALLENGE frame"
+      - check: quic/loss.go + conn.go — PATH_RESPONSE must NOT be retransmitted on loss (excluded from the retransmit-on-loss frame set); each received PATH_CHALLENGE yields exactly one response.
+
+## 9000-10.3-11
+
+- [ ] `9000/10.3-11-2` **MUST** -- An endpoint that wants to signal a fatal connection error must use a CONNECTION_CLOSE frame whenever it is able to, not a stateless reset.
+      - quote: "An endpoint that wishes to communicate a fatal connection error MUST use a CONNECTION_CLOSE frame if it is able."
+      - check: quic/close.go: every fatal-error path while the connection has keys/state must send CONNECTION_CLOSE, never silently drop the connection.
+- [ ] `9000/10.3-11-11` **SHOULD** -- An endpoint should pad every packet it sends to at least 22 bytes longer than the minimum connection ID length it asks the peer to include, so peer stateless resets stay indistinguishable.
+      - quote: "SHOULD ensure that all packets it sends are at least 22 bytes longer than the minimum connection ID length that it requests the peer to include in its packets"
+      - check: quic/packet_write.go: with the client's source CID length (likely zero) the floor is 22 bytes total — verify smallest short-header packets (ACK-only) meet it or PADDING is added.
+- [ ] `9000/10.3-11-15` **MUST** -- Endpoints must discard packets too small to be valid QUIC packets; with QUIC-TLS AEADs, short-header packets smaller than 21 bytes are never valid.
+      - quote: "Endpoints MUST discard packets that are too small to be valid QUIC packets."
+      - check: quic/conn_recv.go / packet.go: verify short-header datagrams under 21 bytes are rejected before decryption is attempted.
+- [ ] `9000/10.3-11-17` **MUST** -- Any received packet ending in a valid stateless reset token must be treated as a Stateless Reset, even if it has a long header (other QUIC versions may allow that).
+      - quote: "endpoints MUST treat any packet ending in a valid stateless reset token as a Stateless Reset"
+      - check: quic/conn_recv.go: the token check must not be gated on the header form bit — long-header datagrams ending in a known token count too.
+- [ ] `9000/10.3-11-23` **MUST** -- The token comparison must be performed whenever the first packet of an incoming datagram cannot be associated with a connection or cannot be decrypted.
+      - quote: "the comparison MUST be performed when the first packet in an incoming datagram either cannot be associated with a connection or cannot be decrypted"
+      - check: quic/conn_recv.go: both failure paths (unknown DCID and AEAD decrypt failure) must fall through to the stateless-reset token check, not just drop.
+- [ ] `9000/10.3-11-24` **MUST NOT** -- An endpoint must not check received datagrams against tokens for connection IDs it has never used or that it has retired.
+      - quote: "An endpoint MUST NOT check for any stateless reset tokens associated with connection IDs it has not used or for connection IDs that have been retired."
+      - check: quic/connid.go: only tokens whose CID the client has actually used in sent packets and not retired may be in the comparison set.
+- [ ] `9000/10.3-11-25` **MUST** -- Token comparison must not leak information about token values (e.g., use constant-time comparison or compare keyed-PRF-transformed values).
+      - quote: "endpoints MUST perform the comparison without leaking information about the value of the token"
+      - check: quic/conn_recv.go or connid.go: use crypto/subtle.ConstantTimeCompare (or HMAC-transformed storage) for the 16-byte token match.
+- [ ] `9000/10.3-11-26` **MUST** -- If the last 16 bytes of a datagram match a stored stateless reset token, the endpoint must enter the draining period and send no further packets on the connection.
+      - quote: "the endpoint MUST enter the draining period and not send any further packets on this connection"
+      - check: quic/close.go + conn_recv.go: on token match transition straight to draining (no CONNECTION_CLOSE sent) and surface a stateless-reset error to the caller.
+- [ ] `9000/10.3-11-37` **SHOULD** -- An endpoint that detects an error should signal that error to its peer.
+      - quote: "An endpoint that detects an error SHOULD signal the existence of that error to its peer."
+      - check: quic/close.go + errors.go: detected transport errors should produce CONNECTION_CLOSE (or RESET_STREAM for stream-level), not silent local teardown.
+- [ ] `9000/10.3-11-39` **SHOULD** -- The most appropriate error code should be included in the frame that signals the error.
+      - quote: "The most appropriate error code (Section 20) SHOULD be included in the frame that signals the error."
+      - check: quic/errors.go + close.go: each detection site should carry its specific transport error code into the CONNECTION_CLOSE frame.
+- [ ] `9000/10.3-11-41` **MUST NOT** -- A stateless reset must not be used by an endpoint that still has the state necessary to send a CONNECTION_CLOSE or RESET_STREAM frame on the connection.
+      - quote: "A stateless reset MUST NOT be used by an endpoint that has the state necessary to send a frame on the connection."
+      - check: quic/close.go: trivially satisfied (no reset generation), but confirm all error paths with live state route to CONNECTION_CLOSE/RESET_STREAM.
+- [ ] `9000/10.3-11-42` **MUST** -- Errors that render the connection unusable (obvious protocol-semantics violations, connection-wide state corruption) must be signaled with a CONNECTION_CLOSE frame.
+      - quote: "corruption of state that affects an entire connection, MUST be signaled using a CONNECTION_CLOSE frame"
+      - check: quic/close.go: connection-fatal detections (frame/flow-control/state violations) must all trigger the immediate-close CONNECTION_CLOSE path.
+- [ ] `9000/10.3-11-45` **SHOULD** -- An endpoint should be prepared to retransmit a packet containing CONNECTION_CLOSE if it keeps receiving packets on a terminated connection, with limits on retransmission count and duration.
+      - quote: "An endpoint SHOULD be prepared to retransmit a packet containing a CONNECTION_CLOSE frame if it receives more packets on a terminated connection."
+      - check: quic/close.go: during the closing period, incoming packets should trigger a (rate-limited) re-send of the CONNECTION_CLOSE packet.
+- [ ] `9000/10.3-11-49` **MUST** -- RESET_STREAM must only be instigated by the application protocol using QUIC, never by the transport on its own initiative.
+      - quote: "RESET_STREAM MUST only be instigated by the application protocol that uses QUIC."
+      - check: quic/stream.go: RESET_STREAM should originate only from the public cancel/reset API or the STOP_SENDING-triggered path — check no transport-internal code resets streams for transport reasons.
+- [ ] `9000/10.3-11-52` **SHOULD** -- Application protocols should define rules for handling streams that are prematurely canceled by either endpoint.
+      - quote: "Application protocols SHOULD define rules for handling streams that are prematurely canceled by either endpoint."
+      - check: http3/: verify the H3 layer handles streams reset mid-request (e.g., H3_REQUEST_CANCELLED semantics) rather than treating any reset as a transport failure.
+
+## 9000-12
+
+- [ ] `9000/12-8` **MUST** -- Receivers must be able to process coalesced packets in a single UDP datagram.
+      - quote: "Receivers MUST be able to process coalesced packets."
+      - check: quic/conn_recv.go — datagram loop splits by Length and processes every contained packet.
+- [ ] `9000/12-11` **SHOULD** -- An endpoint should pack multiple frames into one packet at the same encryption level instead of coalescing multiple same-level packets.
+      - quote: "An endpoint SHOULD include multiple frames in a single packet if they are to be sent at the same encryption level"
+      - check: quic/packet_write.go + frame_write.go — frame packing fills one packet per level per datagram.
+- [ ] `9000/12-13` **MUST NOT** -- Senders must not coalesce packets with different connection IDs into a single UDP datagram.
+      - quote: "Senders MUST NOT coalesce QUIC packets with different connection IDs into a single UDP datagram."
+      - check: quic/packet_write.go — all packets coalesced into one datagram must share the same DCID.
+- [ ] `9000/12-14` **SHOULD** -- Receivers should ignore subsequent coalesced packets whose Destination Connection ID differs from the first packet in the datagram.
+      - quote: "Receivers SHOULD ignore any subsequent packets with a different Destination Connection ID than the first packet in the datagram."
+      - check: quic/conn_recv.go — compare each coalesced packet's DCID against the first; skip mismatches.
+- [ ] `9000/12-15` **MUST** -- Each coalesced packet must be individually processed and separately acknowledged, as if received in different datagrams.
+      - quote: "The receiver of coalesced QUIC packets MUST individually process each QUIC packet and separately acknowledge them, as if they were received as the payload of different UDP datagrams."
+      - check: quic/conn_recv.go + ack_tracker.go — per-packet processing and per-space ACK tracking for every coalesced packet.
+- [ ] `9000/12-16` **MUST** -- If decryption of one coalesced packet fails, the receiver may discard or buffer it but must attempt to process the remaining packets in the datagram.
+      - quote: "the receiver MAY either discard or buffer the packet for later processing and MUST attempt to process the remaining packets."
+      - check: quic/conn_recv.go — decrypt failure (e.g. keys not yet available) must not abort the datagram loop.
+- [ ] `9000/12-24` **MUST** -- Packet numbers in each space start at 0, and each subsequent packet in a space must increase the packet number by at least one.
+      - quote: "Packet numbers in each space start at packet number 0. Subsequent packets sent in the same packet number space MUST increase the packet number by at least one."
+      - check: quic/conn_seal.go — per-space send PN starts at 0 and strictly increments.
+- [ ] `9000/12-25` **MUST NOT** -- An endpoint must never reuse a packet number within the same packet number space in one connection (retransmissions get new packet numbers).
+      - quote: "A QUIC endpoint MUST NOT reuse a packet number within the same packet number space in one connection."
+      - check: quic/conn_seal.go + loss.go — retransmitted frames go in new packets with fresh PNs; PN never reused.
+- [ ] `9000/12-26` **MUST** -- If the send packet number reaches 2^62-1, the sender must close the connection without sending CONNECTION_CLOSE or any further packets.
+      - quote: "If the packet number for sending reaches 2^62-1, the sender MUST close the connection without sending a CONNECTION_CLOSE frame or any further packets"
+      - check: quic/conn_seal.go + close.go — on PN exhaustion, silent close path (no CONNECTION_CLOSE emitted).
+- [ ] `9000/12-28` **MUST** -- A receiver must discard a newly unprotected packet unless certain it has not already processed a packet with the same packet number in that space.
+      - quote: "A receiver MUST discard a newly unprotected packet unless it is certain that it has not processed another packet with the same packet number"
+      - check: quic/ack_tracker.go + conn_recv.go — duplicate-PN detection per space before frame processing.
+- [ ] `9000/12-29` **MUST** -- Duplicate suppression must happen after removing packet protection, not on the unauthenticated header packet number.
+      - quote: "Duplicate suppression MUST happen after removing packet protection"
+      - check: quic/conn_recv.go — dedupe check placed after successful AEAD decryption.
+- [ ] `9000/12-32` **MUST** -- A packet payload that contains frames must contain at least one frame and may contain multiple frames and frame types.
+      - quote: "The payload of a packet that contains frames MUST contain at least one frame, and MAY contain multiple frames and multiple frame types."
+      - check: quic/packet_write.go — never seal a packet with an empty plaintext payload.
+- [ ] `9000/12-33` **MUST** -- Receipt of a packet containing no frames is a connection error of type PROTOCOL_VIOLATION.
+      - quote: "An endpoint MUST treat receipt of a packet containing no frames as a connection error of type PROTOCOL_VIOLATION."
+      - check: quic/conn_recv.go + errors.go — empty decrypted payload → connection error PROTOCOL_VIOLATION.
+- [ ] `9000/12-59` **MUST** -- Receipt of a frame in a packet type where it is not permitted (per Table 3) is a connection error of type PROTOCOL_VIOLATION.
+      - quote: "An endpoint MUST treat receipt of a frame in a packet type that is not permitted as a connection error of type PROTOCOL_VIOLATION."
+      - check: quic/conn_recv.go — per-packet-type frame allowlist enforcing Table 3; errors.go PROTOCOL_VIOLATION.
+- [ ] `9000/12-64` **MUST** -- Receipt of a frame of unknown type is a connection error of type FRAME_ENCODING_ERROR.
+      - quote: "An endpoint MUST treat the receipt of a frame of unknown type as a connection error of type FRAME_ENCODING_ERROR."
+      - check: quic/frame.go — unknown frame type in parser → connection error FRAME_ENCODING_ERROR (errors.go).
+- [ ] `9000/12-67` **MUST** -- A frame type must be sent using the shortest possible varint encoding (single byte for all types defined in RFC 9000); applies to all current and future frame types.
+      - quote: "a frame type MUST use the shortest possible encoding"
+      - check: quic/frame_write.go — emit frame types as minimal-length varints (single byte for 0x00-0x1e).
+- [ ] `9000/12-71` **MUST** -- CONNECTION_CLOSE frames of type 0x1d (application errors) must only appear in the application data packet number space.
+      - quote: "CONNECTION_CLOSE frames signaling application errors (type 0x1d) MUST only appear in the application data packet number space."
+      - check: quic/close.go — app close before 1-RTT keys must be converted to 0x1c (per Section 10.2.3); conn_recv.go reject 0x1d in Initial/Handshake.
+- [ ] `9000/12-73` **MUST** -- All frame types other than PADDING, PING, CRYPTO, ACK, and CONNECTION_CLOSE(0x1c) must only be sent in the application data packet number space.
+      - quote: "All other frame types MUST only be sent in the application data packet number space."
+      - check: quic/packet_write.go + frame_write.go — Initial/Handshake payloads restricted to PADDING/PING/ACK/CRYPTO/CONNECTION_CLOSE(0x1c).
+
+## 9000-9
+
+- [ ] `9000/9-1` **MUST NOT** -- An endpoint must not initiate connection migration before the TLS handshake is confirmed.
+      - quote: "An endpoint MUST NOT initiate connection migration before the handshake is confirmed, as defined in Section 4.1.2 of [QUIC-TLS]."
+      - check: quic/conn.go — client never rebinds its UDP socket mid-connection; verify one socket is bound at Dial and never re-bound, so this holds by construction.
+- [ ] `9000/9-2` **MUST NOT** -- If the peer sent disable_active_migration, the endpoint must not send any packets (including probing packets) from a different local address than used in the handshake, unless acting on preferred_address.
+      - quote: "an endpoint also MUST NOT send packets (including probing packets; see Section 9.1) from a different local address to the address the peer used during the handshake"
+      - check: quic/transport_params.go + conn.go — check the client honors a server-sent disable_active_migration; satisfied by construction if all sends go through the single Dial-time socket (verify GSO path in gro/gso uses the same socket).
+- [ ] `9000/9-3` **MUST** -- If the peer violates disable_active_migration, the endpoint must either drop those packets without generating a Stateless Reset, or proceed with path validation and allow migration.
+      - quote: "the endpoint MUST either drop the incoming packets on that path without generating a Stateless Reset or proceed with path validation and allow the peer to migrate"
+      - check: quic/transport_params.go — check whether client sends disable_active_migration; if so, conn_recv.go must silently drop new-path packets (satisfied: no stateless-reset generation is a stated non-goal).
+- [ ] `9000/9-4` **MUST** -- An endpoint must perform path validation if it detects any change to a peer's address (e.g., NAT rebinding), unless that address was previously validated.
+      - quote: "An endpoint MUST perform path validation (Section 8.2) if it detects any change to a peer's address, unless it has previously validated that address."
+      - check: quic/conn_recv.go — for a client the peer is the server; a changed server source address is instead discarded per 9-9/9-45. Verify conn_recv.go compares datagram source addr to the dialed server addr.
+- [ ] `9000/9-9` **MUST** -- A client must discard packets that arrive from an unknown server address.
+      - quote: "If a client receives packets from an unknown server address, the client MUST discard these packets."
+      - check: quic/conn_recv.go — key check: verify every received datagram's source address is compared against the dialed server address and dropped on mismatch BEFORE any parsing/decryption side effects.
+- [ ] `9000/9-31` **SHOULD** -- An endpoint receiving a PATH_CHALLENGE on its active path should send a non-probing packet in response (in addition to the mandatory PATH_RESPONSE of §8.2).
+      - quote: "An endpoint that receives a PATH_CHALLENGE on an active path SHOULD send a non-probing packet in response."
+      - check: quic/conn_recv.go + frame_write.go — client CAN receive PATH_CHALLENGE (server validating after client NAT rebinding); verify PATH_CHALLENGE is parsed and answered with PATH_RESPONSE, and check whether an ack-eliciting/non-probing packet accompanies it.
+- [ ] `9000/9-39` **MUST NOT** -- An endpoint must not reuse the same connection ID when sending from more than one local address.
+      - quote: "An endpoint MUST NOT reuse a connection ID when sending from more than one local address"
+      - check: quic/connid.go + packet_write.go — trivially satisfied by the single Dial-time socket; verify no code path (incl. gro/gso batching) sends via a second socket.
+- [ ] `9000/9-40` **MUST NOT** -- An endpoint must not reuse a connection ID when sending to more than one destination address.
+      - quote: "Similarly, an endpoint MUST NOT reuse a connection ID when sending to more than one destination address."
+      - check: quic/packet_write.go — trivially satisfied: client sends only to the dialed server address; verify no alternate-destination send path exists.
+- [ ] `9000/9-42` **SHOULD NOT** -- An endpoint should not initiate migration with a peer that requested a zero-length connection ID, since new-path traffic would be trivially linkable.
+      - quote: "An endpoint SHOULD NOT initiate migration with a peer that has requested a zero-length connection ID"
+      - check: quic/conn.go — trivially satisfied (no migration ever initiated); no check needed.
+- [ ] `9000/9-44` **SHOULD** -- Endpoints should provide new connection IDs to the peer before the peer migrates, so migration is possible and paths cannot be correlated.
+      - quote: "endpoints SHOULD provide new connection IDs before peers migrate"
+      - check: quic/connid.go — check whether the client issues NEW_CONNECTION_ID frames for its own CIDs; acceptable gap since the server never migrates in v1, but document the deviation.
+- [ ] `9000/9-45` **SHOULD** -- A client that receives packets from a new server address it did not initiate migration to should discard those packets.
+      - quote: "If a client receives packets from a new server address when the client has not initiated a migration to that address, the client SHOULD discard these packets."
+      - check: quic/conn_recv.go — same source-address gate as 9-9; since the client never migrates to a preferred address, EVERY non-dialed server source address must be dropped.
+- [ ] `9000/9-48` **SHOULD** -- Once the handshake is confirmed, a client should select one of the server-provided preferred addresses and initiate path validation to it.
+      - quote: "Once the handshake is confirmed, the client SHOULD select one of the two addresses provided by the server and initiate path validation"
+      - check: quic/conn.go — deliberately NOT implemented (no migration); SHOULD-level, so ignoring preferred_address is conformant — document the deviation in doc.go.
+- [ ] `9000/9-51` **MUST** -- If path validation of the preferred address fails, the client must continue sending all future packets to the server's original IP address.
+      - quote: "If path validation fails, the client MUST continue sending all future packets to the server's original IP address."
+      - check: quic/packet_write.go — trivially satisfied: the client always sends to the original dialed address.
+- [ ] `9000/9-52` **MUST** -- A client that migrates to a preferred address must validate the chosen address before migrating.
+      - quote: "A client that migrates to a preferred address MUST validate the address it chooses before migrating; see Section 21.5.3."
+      - check: quic/conn.go — trivially satisfied (never migrates); binds any future preferred_address implementation.
+- [ ] `9000/9-57` **MUST NOT** -- Preferred addresses are valid only for the connection in which they were provided; a client must not use them for other connections, including resumed ones.
+      - quote: "A client MUST NOT use these for other connections, including connections that are resumed from the current connection."
+      - check: quic/transport_params.go + conn.go — verify preferred_address contents are never cached across connections (e.g., not stored alongside session tickets / resumption state in handshake.go).
+- [ ] `9000/9-65` **SHOULD** -- Endpoints sending over IPv6 should apply an IPv6 flow label per RFC 6437, unless the local API does not allow setting flow labels.
+      - quote: "Endpoints that send data using IPv6 SHOULD apply an IPv6 flow label in compliance with [RFC6437], unless the local API does not allow setting IPv6 flow labels."
+      - check: quic/conn.go socket setup (and gro/gso) — Go's net.UDPConn does not expose flow-label control portably; the OS-assigned label satisfies the escape clause. Note as accepted, no code change.
+- [ ] `9000/9-66` **MUST** -- IPv6 flow label generation must be designed to minimize linkability with previously used flow labels, since a stable label enables cross-path correlation.
+      - quote: "The flow label generation MUST be designed to minimize the chances of linkability with a previously used flow label"
+      - check: quic/ socket layer — only binds an implementation that sets flow labels itself; since quic/ delegates to the OS (9-65), no action, but flag if explicit flow-label setting is ever added.
+
+## 9000-5-6
+
+- [ ] `9000/5-6-2` **MUST NOT** -- Connection IDs must not contain information an external observer could use to correlate them with other connection IDs of the same connection.
+      - quote: "Connection IDs MUST NOT contain any information that can be used by an external observer (that is, one that does not cooperate with the issuer) to correlate them"
+      - check: quic/connid.go — local CID generation must be crypto/rand, no embedded counter or linkable structure.
+- [ ] `9000/5-6-3` **MUST NOT** -- The same connection ID value must never be issued more than once on the same connection.
+      - quote: "the same connection ID MUST NOT be issued more than once on the same connection."
+      - check: quic/connid.go — issuance path must dedupe against all previously issued CID values for the connection.
+- [ ] `9000/5-6-8` **MUST NOT** -- An endpoint must not run multiple concurrent zero-length-CID connections on the same local IP address and port (unless migration/rebinding/port-reuse are certainly absent).
+      - quote: "An endpoint MUST NOT use the same IP address and port for multiple concurrent connections with zero-length connection IDs"
+      - check: quic/conn.go — if client SCID is zero-length, each Dial must get its own local UDP socket/port (a connected socket per conn satisfies this).
+- [ ] `9000/5-6-11` **MUST** -- The sequence number on each newly issued connection ID (via NEW_CONNECTION_ID) must increase by exactly 1.
+      - quote: "The sequence number on each newly issued connection ID MUST increase by 1."
+      - check: quic/connid.go + frame_write.go — if client issues NEW_CONNECTION_ID, seq increments by 1; vacuous if client never issues.
+- [ ] `9000/5-6-13` **MUST** -- After issuing a connection ID, an endpoint must accept packets carrying it for the connection's life or until the peer retires it via RETIRE_CONNECTION_ID.
+      - quote: "it MUST accept packets that carry this connection ID for the duration of the connection or until its peer invalidates the connection ID via a RETIRE_CONNECTION_ID frame"
+      - check: quic/conn_recv.go — every active locally issued CID (if any) must match as DCID until server retires it.
+- [ ] `9000/5-6-15` **SHOULD** -- An endpoint should keep its peer supplied with a sufficient number of available, unused connection IDs.
+      - quote: "An endpoint SHOULD ensure that its peer has a sufficient number of available and unused connection IDs."
+      - check: quic/connid.go — client-side replenishment policy for CIDs it issues; vacuous if client uses zero-length/single CID.
+- [ ] `9000/5-6-17` **MUST NOT** -- An endpoint must not provide more connection IDs than the peer's advertised active_connection_id_limit.
+      - quote: "An endpoint MUST NOT provide more connection IDs than the peer's limit."
+      - check: quic/connid.go — gate any NEW_CONNECTION_ID issuance on the server's advertised active_connection_id_limit.
+- [ ] `9000/5-6-19` **MUST** -- After processing a NEW_CONNECTION_ID frame (adds plus retirements), if active connection IDs exceed the endpoint's own advertised active_connection_id_limit, it must close with CONNECTION_ID_LIMIT_ERROR.
+      - quote: "if the number of active connection IDs exceeds the value advertised in its active_connection_id_limit transport parameter, an endpoint MUST close the connection with an error of type CONNECTION_ID_LIMIT_ERROR"
+      - check: quic/connid.go NEW_CONNECTION_ID handler — count active server CIDs AFTER applying Retire Prior To; over-limit closes with CONNECTION_ID_LIMIT_ERROR (errors.go 0x09).
+- [ ] `9000/5-6-20` **SHOULD** -- An endpoint should supply a replacement connection ID when the peer retires one.
+      - quote: "An endpoint SHOULD supply a new connection ID when the peer retires a connection ID."
+      - check: quic/connid.go — on RETIRE_CONNECTION_ID from server, issue a fresh NEW_CONNECTION_ID (if client issues CIDs at all).
+- [ ] `9000/5-6-28` **SHOULD** -- Endpoints should retire connection IDs whose associated local or destination address is no longer actively used.
+      - quote: "Endpoints SHOULD retire connection IDs when they are no longer actively using either the local or destination address for which the connection ID was used."
+      - check: quic/connid.go — single-path client never changes address, so vacuous in practice.
+- [ ] `9000/5-6-29` **SHOULD** -- An endpoint forcing retirement via increased Retire Prior To should keep accepting the previously issued CIDs until the peer actually retires them.
+      - quote: "The endpoint SHOULD continue to accept the previously issued connection IDs until they are retired by the peer."
+      - check: quic/connid.go + conn_recv.go — if client ever raises Retire Prior To, old local CIDs must keep matching until retired; vacuous otherwise.
+- [ ] `9000/5-6-31` **MUST** -- On receiving an increased Retire Prior To, the peer must stop using and retire (with RETIRE_CONNECTION_ID) the indicated CIDs before adding the newly provided CID to its active set.
+      - quote: "the peer MUST stop using the corresponding connection IDs and retire them with RETIRE_CONNECTION_ID frames before adding the newly provided connection ID to the set of active connection IDs."
+      - check: quic/connid.go NEW_CONNECTION_ID handler — process Retire Prior To FIRST (queue RETIRE_CONNECTION_ID per retired seq, stop sending on them), THEN add the new CID; ordering feeds the 5-6-19 limit check.
+- [ ] `9000/5-6-32` **SHOULD** -- An endpoint should bound the number of locally retired CIDs whose RETIRE_CONNECTION_ID frames are still unacknowledged.
+      - quote: "An endpoint SHOULD limit the number of connection IDs it has retired locally for which RETIRE_CONNECTION_ID frames have not yet been acknowledged."
+      - check: quic/connid.go + loss.go — track unacked RETIRE_CONNECTION_ID frames and bound the pending set.
+- [ ] `9000/5-6-33` **SHOULD** -- An endpoint should be able to send and track at least 2x active_connection_id_limit pending RETIRE_CONNECTION_ID frames.
+      - quote: "An endpoint SHOULD allow for sending and tracking a number of RETIRE_CONNECTION_ID frames of at least twice the value of the active_connection_id_limit transport parameter."
+      - check: quic/connid.go — pending-retirement capacity >= 2 x our advertised active_connection_id_limit.
+- [ ] `9000/5-6-34` **MUST NOT** -- An endpoint must never drop a peer-issued connection ID from its state without sending RETIRE_CONNECTION_ID for it.
+      - quote: "An endpoint MUST NOT forget a connection ID without retiring it"
+      - check: quic/connid.go — any removal of a server CID from the active set must be paired with an emitted RETIRE_CONNECTION_ID.
+- [ ] `9000/5-6-36` **SHOULD NOT** -- Endpoints should not raise Retire Prior To again before all CIDs covered by the previous Retire Prior To value have been retired by the peer.
+      - quote: "Endpoints SHOULD NOT issue updates of the Retire Prior To field before receiving RETIRE_CONNECTION_ID frames that retire all connection IDs indicated by the previous Retire Prior To value."
+      - check: quic/connid.go — only if client ever sends Retire Prior To; vacuous otherwise.
+- [ ] `9000/5-6-43` **MUST** -- If an endpoint processes any content of such an unauthenticated packet before discovering an error, it must either raise a connection error or fully revert all state changes made.
+      - quote: "An endpoint MUST generate a connection error if processing the contents of these packets prior to discovering an error, or fully revert any changes made during that processing."
+      - check: quic/conn_recv.go — parse Initial/Retry/VN fully before committing any connection state, or ensure clean rollback on mid-parse failure.
+- [ ] `9000/5-6-47` **MUST** -- A client must discard any packet whose version differs from the version it initially selected.
+      - quote: "If a client receives a packet that uses a different version than it initially selected, it MUST discard that packet."
+      - check: quic/conn_recv.go — version field check against QUIC v1 (0x00000001) on every long-header packet; non-matching dropped (VN packets, version 0, handled separately).
+- [ ] `9000/5-6-53` **SHOULD** -- A server refusing a new connection should send an Initial packet carrying CONNECTION_CLOSE with error code CONNECTION_REFUSED.
+      - quote: "it SHOULD send an Initial packet containing a CONNECTION_CLOSE frame with error code CONNECTION_REFUSED."
+      - check: quic/errors.go — CONNECTION_REFUSED (0x02) must be defined; conn_recv.go/close.go must surface a handshake-time CONNECTION_CLOSE to the Dial caller.
+- [ ] `9000/5-6-55` **SHOULD** -- Clients cannot send Handshake packets before receiving a server response, so servers should ignore any that arrive; the client premise constrains the client send path.
+      - quote: "Clients are not able to send Handshake packets prior to receiving a server response, so servers SHOULD ignore any such packets."
+      - check: quic/handshake.go + conn_seal.go — handshake keys must only exist after the server flight, structurally preventing early Handshake-packet sends; confirm no path emits Handshake-level packets pre-keys.
+- [ ] `9000/5-6-57` **SHOULD** -- A server deployment with address-based load balancing and no continuity solution should advertise disable_active_migration.
+      - quote: "SHOULD indicate that migration is not supported by using the disable_active_migration transport parameter."
+      - check: quic/transport_params.go — client must at least parse/tolerate disable_active_migration; client never migrates, so nothing further to enforce.
+- [ ] `9000/5-6-62` **SHOULD** -- Clients supporting multiple QUIC versions should pad their first UDP datagram (with PADDING frames) to the largest of the minimum datagram sizes across all supported versions.
+      - quote: "Clients that support multiple QUIC versions SHOULD ensure that the first UDP datagram they send is sized to the largest of the minimum datagram sizes from all versions they support"
+      - check: quic/initial.go + packet_write.go — client is v1-only, but the first datagram must still meet v1's 1200-byte minimum (§14.1); verify Initial padding.
+- [ ] `9000/5-6-64` **MUST NOT** -- An endpoint must never send a Version Negotiation packet in response to receiving a Version Negotiation packet.
+      - quote: "An endpoint MUST NOT send a Version Negotiation packet in response to receiving a Version Negotiation packet."
+      - check: quic/conn_recv.go — trivially satisfied if the client has no VN-send path; confirm none exists.
+- [ ] `9000/5-6-66` **MUST** -- A client supporting only QUIC v1 must abandon the connection attempt upon receiving a Version Negotiation packet, subject to the two discard exceptions.
+      - quote: "A client that supports only this version of QUIC MUST abandon the current connection attempt if it receives a Version Negotiation packet, with the following two exceptions."
+      - check: quic/conn_recv.go — on a valid VN packet, abort the handshake and surface a version-negotiation error to the Dial caller.
+- [ ] `9000/5-6-67` **MUST** -- A client must discard any Version Negotiation packet once it has received and successfully processed any other packet (including an earlier VN packet).
+      - quote: "A client MUST discard any Version Negotiation packet if it has received and successfully processed any other packet, including an earlier Version Negotiation packet."
+      - check: quic/conn_recv.go — need a processed-any-packet flag; after the first successfully processed server packet, VN packets are ignored (prevents late/injected VN killing a live handshake).
+- [ ] `9000/5-6-68` **MUST** -- A client must discard a Version Negotiation packet whose version list contains the version the client selected.
+      - quote: "A client MUST discard a Version Negotiation packet that lists the QUIC version selected by the client."
+      - check: quic/conn_recv.go — scan the VN version list; if 0x00000001 is present, drop the VN packet instead of abandoning (downgrade-injection defense).
+
+## 9000-21.2-21.14
+
+- [ ] `9000/21.2-21.14-15` **MUST NOT** -- A client must not send non-probing frames to a server's preferred address before it has validated that address.
+      - quote: "A client MUST NOT send non-probing frames to a preferred address prior to validating that address"
+      - check: quic/transport_params.go: verify preferred_address is parsed/skipped and the client never migrates to it (no-migration design makes this trivially satisfied; guard needed if migration is ever added).
+- [ ] `9000/21.2-21.14-17` **SHOULD NOT** -- Endpoints should not allow connections or migration to a loopback address when the same service was previously reachable at a different interface or the address came from a non-loopback service.
+      - quote: "Endpoints SHOULD NOT allow connections or migration to a loopback address if the same service was previously available at a different interface"
+      - check: quic/transport_params.go + client dial: no server-directed re-addressing exists (preferred_address unused, no migration), so the risky redirect path is unreachable — confirm and note.
+- [ ] `9000/21.2-21.14-18` **SHOULD NOT** -- Endpoints should not refuse to use an address (e.g., link-local or private-range) unless they have specific network knowledge that sending to unvalidated addresses in that range is unsafe.
+      - quote: "Endpoints SHOULD NOT refuse to use an address unless they have specific knowledge about the network indicating that sending datagrams to unvalidated addresses in a given range is not safe"
+      - check: Client dial performs no address-range filtering — compliant by default; keep it that way unless a caller-opt-in policy is added.
+- [ ] `9000/21.2-21.14-23` **SHOULD** -- QUIC deployments should mitigate stream fragmentation and reassembly attacks, e.g., by avoiding memory overcommitment, bounding tracking structures, delaying reassembly, or hole age/duration heuristics.
+      - quote: "QUIC deployments SHOULD provide mitigations for stream fragmentation attacks."
+      - check: quic/stream.go receive reassembly + recvflow.go: verify reassembly-gap tracking structures are bounded and retained memory is charged against (and capped by) the advertised flow-control window — matches the repo peer-input policy.
+- [ ] `9000/21.2-21.14-27` **SHOULD** -- Implementations should track processing cost relative to connection progress and treat excessive quantities of non-productive packets (e.g., tiny flow-control increments, state-churn frames) as an attack.
+      - quote: "implementations SHOULD track cost of processing relative to progress and treat excessive quantities of any non-productive packets as indicative of an attack"
+      - check: quic connection read loop (conn/frame dispatch in quic/): no cost-vs-progress accounting exists — documented gap; low risk for a load generator dialing chosen servers, but consider counters for non-productive frames.
+
+## 9000-14-16
+
+- [ ] `9000/14-16-1` **MUST NOT** -- QUIC must not be used at all on a network path that cannot carry a maximum UDP datagram payload of at least 1200 bytes.
+      - quote: "QUIC MUST NOT be used if the network path cannot support a maximum datagram size of at least 1200 bytes."
+      - check: quic/send.go + quic/initial.go: verify the 1200-byte floor is a hard constant and nothing ever configures a smaller max datagram size.
+- [ ] `9000/14-16-6` **MUST NOT** -- UDP datagrams carrying QUIC must never be fragmented at the IP layer.
+      - quote: "UDP datagrams MUST NOT be fragmented at the IP layer."
+      - check: quic/gro-gso / UDP socket setup: verify datagram sizes never exceed the enforced max so the kernel is not asked to fragment; check socket options.
+- [ ] `9000/14-16-7` **MUST** -- On IPv4 the Don't Fragment (DF) bit must be set when the platform allows it.
+      - quote: "the Don't Fragment (DF) bit MUST be set if possible, to prevent fragmentation on the path."
+      - check: quic/gro-gso or socket setup code: check IP_MTU_DISCOVER/IP_DONTFRAG (or platform equivalent) is set on the IPv4 UDP socket.
+- [ ] `9000/14-16-8` **MUST NOT** -- An endpoint must not close the connection merely because a received datagram fails a size constraint (datagram size is unauthenticated).
+      - quote: "an endpoint MUST NOT close a connection when it receives a datagram that does not meet size constraints"
+      - check: quic/close.go + receive path: verify no CONNECTION_CLOSE / error path is triggered by an undersized incoming datagram.
+- [ ] `9000/14-16-10` **MUST** -- A client must pad or coalesce every UDP datagram carrying an Initial packet up to at least 1200 bytes of UDP payload.
+      - quote: "A client MUST expand the payload of all UDP datagrams carrying Initial packets to at least the smallest allowed maximum datagram size of 1200 bytes"
+      - check: quic/initial.go + quic/packet_write.go: verify EVERY datagram containing an Initial (including PTO retransmits and Initial ACKs) is padded/coalesced to >=1200, not just the first flight.
+- [ ] `9000/14-16-17` **SHOULD** -- An endpoint should use DPLPMTUD or PMTUD to learn whether the path supports a desired maximum datagram size without fragmentation.
+      - quote: "An endpoint SHOULD use DPLPMTUD (Section 14.3) or PMTUD (Section 14.2.1) to determine whether the path to a destination will support a desired maximum datagram size without fragmentation."
+      - check: quic/send.go: if no PMTU discovery is implemented, document the deviation (SHOULD) and ensure 14-16-18's cap applies instead.
+- [ ] `9000/14-16-18` **SHOULD NOT** -- Without PMTUD/DPLPMTUD, an endpoint should not send datagrams larger than 1200 bytes (the smallest allowed maximum datagram size).
+      - quote: "QUIC endpoints SHOULD NOT send datagrams larger than the smallest allowed maximum datagram size."
+      - check: quic/send.go: with no PMTU discovery, verify the hard send cap is 1200 bytes per datagram (also constrains gro/gso GSO segment size).
+- [ ] `9000/14-16-19` **SHOULD** -- All packets that are not PMTU probes should fit within the current maximum datagram size to avoid fragmentation or drop.
+      - quote: "All QUIC packets that are not sent in a PMTU probe SHOULD be sized to fit within the maximum datagram size"
+      - check: quic/send.go + quic/packet_write.go: verify packet assembly never exceeds the current max datagram size on the normal (non-probe) path.
+- [ ] `9000/14-16-20` **MUST** -- If the PMTU for a path drops below 1200 bytes, the endpoint must immediately stop sending on that path except PMTU probes and CONNECTION_CLOSE packets.
+      - quote: "it MUST immediately cease sending QUIC packets, except for those in PMTU probes or those containing CONNECTION_CLOSE frames, on the affected path."
+      - check: quic/send.go: check how persistent EMSGSIZE/ICMP-derived socket errors are handled — sending must stop (except close) if the path can't carry 1200.
+- [ ] `9000/14-16-22` **SHOULD** -- Implementations doing any PMTU discovery should track a separate maximum datagram size per (local IP, remote IP) pair.
+      - quote: "SHOULD maintain a maximum datagram size for each combination of local and remote IP addresses."
+      - check: quic/send.go: only applies if PMTU discovery exists; a fixed 1200 cap with no migration makes this vacuous — confirm and note.
+- [ ] `9000/14-16-24` **MUST** -- An endpoint must ignore any ICMP message claiming the PMTU has dropped below 1200 bytes.
+      - quote: "An endpoint MUST ignore an ICMP message that claims the PMTU has decreased below QUIC's smallest allowed maximum datagram size."
+      - check: quic/send.go: Go surfaces ICMP as write errors on connected UDP sockets — verify such errors never shrink the datagram cap below 1200 or tear down the connection by themselves.
+- [ ] `9000/14-16-25` **SHOULD** -- Endpoints using PMTUD should validate ICMP messages to guard against off-path packet injection.
+      - quote: "QUIC endpoints using PMTUD SHOULD validate ICMP messages to protect from packet injection"
+      - check: Conditional on PMTUD support; quic/ has no raw-ICMP processing today — confirm none exists, else validation is required.
+- [ ] `9000/14-16-26` **SHOULD** -- ICMP validation should use the quoted packet in the ICMP payload to associate the message with a specific transport connection.
+      - quote: "This validation SHOULD use the quoted packet supplied in the payload of an ICMP message to associate the message with a corresponding transport connection"
+      - check: Only if raw ICMP is ever consumed; quic/connid.go connection IDs would be the matching key. Confirm N/A currently.
+- [ ] `9000/14-16-27` **MUST** -- ICMP validation must at minimum match IP addresses and UDP ports, and where possible connection IDs, against an active QUIC session.
+      - quote: "ICMP message validation MUST include matching IP addresses and UDP ports [RFC8085] and, when possible, connection IDs to an active QUIC session."
+      - check: Conditional: binding only if the client processes ICMP for PMTUD. quic/: confirm no ICMP consumption, else implement the 4-tuple + CID match.
+- [ ] `9000/14-16-28` **SHOULD** -- ICMP messages failing validation should be ignored entirely.
+      - quote: "The endpoint SHOULD ignore all ICMP messages that fail validation."
+      - check: Conditional on ICMP processing in quic/; connected-socket error handling in send.go should already treat unverifiable errors as advisory.
+- [ ] `9000/14-16-29` **MUST NOT** -- An endpoint must never increase its PMTU estimate based on ICMP messages.
+      - quote: "An endpoint MUST NOT increase the PMTU based on ICMP messages"
+      - check: quic/send.go: verify no code path raises the datagram size cap from a socket/ICMP error signal.
+- [ ] `9000/14-16-32` **SHOULD** -- Endpoints implementing DPLPMTUD should set the initial BASE_PLPMTU consistent with QUIC's 1200-byte smallest allowed maximum datagram size.
+      - quote: "Endpoints SHOULD set the initial value of BASE_PLPMTU (Section 5.1 of [DPLPMTUD]) to be consistent with QUIC's smallest allowed maximum datagram size."
+      - check: Only if DPLPMTUD is implemented in quic/send.go; the base/floor would be the same 1200 constant.
+- [ ] `9000/14-16-40` **SHOULD NOT** -- Loss of a packet carried in a PMTU probe should not trigger a congestion control reaction (though probes still consume congestion window).
+      - quote: "Loss of a QUIC packet that is carried in a PMTU probe is therefore not a reliable indication of congestion and SHOULD NOT trigger a congestion control reaction"
+      - check: quic/ congestion controller (NewReno/BBR): if probes are added, mark probe packets so their loss bypasses cwnd reduction; N/A without probing.
+
+## 9000-18
+
+- [ ] `9000/18-11` **MUST NOT** -- A client is forbidden from sending the stateless_reset_token transport parameter; a server may send it.
+      - quote: "This transport parameter MUST NOT be sent by a client but MAY be sent by a server."
+      - check: quic/transport_params.go — confirm the client encoder can never emit ID 0x02.
+- [ ] `9000/18-26` **SHOULD** -- The advertised max_ack_delay should include the endpoint's expected timer/alarm firing slop (e.g., a 5 ms timer that fires up to 1 ms late should be advertised as 6 ms).
+      - quote: "This value SHOULD include the receiver's expected delays in alarms firing."
+      - check: quic/transport_params.go + ack_tracker.go — check our advertised max_ack_delay covers the actual ACK-delay timer granularity plus scheduling slop.
+- [ ] `9000/18-31` **MUST NOT** -- An endpoint that receives disable_active_migration is forbidden from using a new local address when sending to the address the peer used during the handshake.
+      - quote: "An endpoint that receives this transport parameter MUST NOT use a new local address when sending to the address that the peer used during the handshake."
+      - check: quic/send.go — client does no migration, so trivially satisfied; verify the UDP socket/local address is never rebound mid-connection.
+- [ ] `9000/18-38` **MUST NOT** -- A server that chose a zero-length source connection ID is forbidden from providing a preferred_address at all.
+      - quote: "A server that chooses a zero-length connection ID MUST NOT provide a preferred address."
+      - check: quic/transport_params.go — client validation: presence of 0x0d from a zero-length-SCID server is a protocol violation (see 18-40).
+- [ ] `9000/18-39` **MUST NOT** -- A server is forbidden from including a zero-length Connection ID inside the preferred_address transport parameter.
+      - quote: "a server MUST NOT include a zero-length connection ID in this transport parameter"
+      - check: quic/transport_params.go — client parser must check Connection ID Length > 0 in 0x0d.
+- [ ] `9000/18-40` **MUST** -- A client that receives a preferred_address violating the zero-length-connection-ID rules must treat it as a connection error of type TRANSPORT_PARAMETER_ERROR.
+      - quote: "A client MUST treat a violation of these requirements as a connection error of type TRANSPORT_PARAMETER_ERROR."
+      - check: quic/transport_params.go + errors.go — even though this client ignores preferred_address, it MUST still close with TRANSPORT_PARAMETER_ERROR (0x8) on a zero-length CID in 0x0d or on 0x0d from a zero-length-SCID server.
+- [ ] `9000/18-43` **MUST** -- An advertised active_connection_id_limit value must be at least 2.
+      - quote: "The value of the active_connection_id_limit parameter MUST be at least 2."
+      - check: quic/transport_params.go — client encoder must never advertise 0x0e < 2 (omit it or send >= 2).
+- [ ] `9000/18-44` **MUST** -- An endpoint receiving an active_connection_id_limit less than 2 must close the connection with TRANSPORT_PARAMETER_ERROR.
+      - quote: "An endpoint that receives a value less than 2 MUST close the connection with an error of type TRANSPORT_PARAMETER_ERROR."
+      - check: quic/transport_params.go + errors.go — decoder must reject 0x0e values 0 and 1 with TRANSPORT_PARAMETER_ERROR (0x8).
+- [ ] `9000/18-51` **MUST NOT** -- A client is forbidden from including any server-only transport parameter: original_destination_connection_id, preferred_address, retry_source_connection_id, or stateless_reset_token.
+      - quote: "A client MUST NOT include any server-only transport parameter: original_destination_connection_id, preferred_address, retry_source_connection_id, or stateless_reset_token."
+      - check: quic/transport_params.go — client encoder must be structurally unable to emit IDs 0x00, 0x02, 0x0d, 0x10.
+
+## 9000-19.9-19.21
+
+- [ ] `9000/19.9-19.21-3` **MUST NOT** -- The sum of final sizes across all streams, including terminal-state streams, must never exceed the connection data limit the receiver advertised.
+      - quote: "The sum of the final sizes on all streams -- including streams in terminal states -- MUST NOT exceed the value advertised by a receiver."
+      - check: quic/send.go: sender must gate on peer MAX_DATA including bytes attributed to reset/finished streams (RESET_STREAM final size counts).
+- [ ] `9000/19.9-19.21-4` **MUST** -- An endpoint must close the connection with FLOW_CONTROL_ERROR if it receives more connection-level data than the MAX_DATA value it advertised.
+      - quote: "An endpoint MUST terminate a connection with an error of type FLOW_CONTROL_ERROR if it receives more data than the maximum data value that it has sent."
+      - check: quic/recvflow.go: on inbound STREAM data (and RESET_STREAM final size) exceeding advertised connection window, raise FLOW_CONTROL_ERROR connection close.
+- [ ] `9000/19.9-19.21-7` **MUST** -- Receiving MAX_STREAM_DATA for a locally initiated stream the endpoint has not yet created is a STREAM_STATE_ERROR connection error.
+      - quote: "Receiving a MAX_STREAM_DATA frame for a locally initiated stream that has not yet been created MUST be treated as a connection error of type STREAM_STATE_ERROR."
+      - check: quic/stream.go: check MAX_STREAM_DATA for a client-initiated stream ID above the highest opened → STREAM_STATE_ERROR.
+- [ ] `9000/19.9-19.21-8` **MUST** -- Receiving MAX_STREAM_DATA for a receive-only stream (from the frame receiver's perspective) is a STREAM_STATE_ERROR connection error.
+      - quote: "An endpoint that receives a MAX_STREAM_DATA frame for a receive-only stream MUST terminate the connection with error STREAM_STATE_ERROR."
+      - check: quic/stream.go: MAX_STREAM_DATA on a server-initiated unidirectional stream (client receive-only) must produce STREAM_STATE_ERROR.
+- [ ] `9000/19.9-19.21-10` **MUST NOT** -- A sender must never send stream data beyond the largest Maximum Stream Data value the receiver advertised for that stream.
+      - quote: "The data sent on a stream MUST NOT exceed the largest maximum stream data value advertised by the receiver."
+      - check: quic/send.go + stream.go: outbound STREAM chunking must respect per-stream send window from peer MAX_STREAM_DATA / initial transport params.
+- [ ] `9000/19.9-19.21-11` **MUST** -- An endpoint must close the connection with FLOW_CONTROL_ERROR if it receives stream data beyond the largest per-stream limit it advertised.
+      - quote: "MUST terminate a connection with an error of type FLOW_CONTROL_ERROR if it receives more data than the largest maximum stream data that it has sent"
+      - check: quic/recvflow.go: inbound STREAM offset+length past the stream window advertised → FLOW_CONTROL_ERROR connection close.
+- [ ] `9000/19.9-19.21-13` **MUST** -- A MAX_STREAMS value permitting streams beyond the 2^60 cumulative-count cap must be treated as a FRAME_ENCODING_ERROR connection error.
+      - quote: "Receipt of a frame that permits opening of a stream larger than this limit MUST be treated as a connection error of type FRAME_ENCODING_ERROR."
+      - check: quic/recvflow.go or frame.go: validate received Maximum Streams <= 2^60, else FRAME_ENCODING_ERROR.
+- [ ] `9000/19.9-19.21-14` **MUST** -- A MAX_STREAMS frame that does not increase the current stream limit must be ignored (loss/reordering can deliver stale limits).
+      - quote: "MAX_STREAMS frames that do not increase the stream limit MUST be ignored."
+      - check: quic/recvflow.go: apply MAX_STREAMS only if value > current limit; never regress.
+- [ ] `9000/19.9-19.21-15` **MUST NOT** -- An endpoint must not open more streams than the peer's current cumulative stream limit allows.
+      - quote: "An endpoint MUST NOT open more streams than permitted by the current stream limit set by its peer."
+      - check: quic/stream.go + send.go: client stream-open path must block/queue until peer MAX_STREAMS (or initial_max_streams_* transport param) permits.
+- [ ] `9000/19.9-19.21-16` **MUST** -- If a peer opens more streams than permitted, the endpoint must close the connection with STREAM_LIMIT_ERROR.
+      - quote: "An endpoint MUST terminate a connection with an error of type STREAM_LIMIT_ERROR if a peer opens more streams than was permitted."
+      - check: quic/recvflow.go + stream.go: server-initiated stream IDs above the limit the client advertised → STREAM_LIMIT_ERROR.
+- [ ] `9000/19.9-19.21-18` **SHOULD** -- A sender blocked by connection-level flow control should send a DATA_BLOCKED frame.
+      - quote: "A sender SHOULD send a DATA_BLOCKED frame (type=0x14) when it wishes to send data but is unable to do so due to connection-level flow control"
+      - check: quic/send.go + frame_write.go: verify client emits DATA_BLOCKED when the connection send window is exhausted.
+- [ ] `9000/19.9-19.21-20` **SHOULD** -- A sender blocked by stream-level flow control should send a STREAM_DATA_BLOCKED frame.
+      - quote: "A sender SHOULD send a STREAM_DATA_BLOCKED frame (type=0x15) when it wishes to send data but is unable to do so due to stream-level flow control."
+      - check: quic/send.go + stream.go: verify client emits STREAM_DATA_BLOCKED when a per-stream send window is exhausted.
+- [ ] `9000/19.9-19.21-21` **MUST** -- Receiving STREAM_DATA_BLOCKED for a send-only stream (from the receiver's perspective) is a STREAM_STATE_ERROR connection error.
+      - quote: "An endpoint that receives a STREAM_DATA_BLOCKED frame for a send-only stream MUST terminate the connection with error STREAM_STATE_ERROR."
+      - check: quic/recvflow.go or stream.go: STREAM_DATA_BLOCKED referencing a client-initiated unidirectional stream (client send-only) → STREAM_STATE_ERROR.
+- [ ] `9000/19.9-19.21-23` **SHOULD** -- A sender blocked by the peer's stream limit should send a STREAMS_BLOCKED frame (0x16 bidirectional, 0x17 unidirectional).
+      - quote: "A sender SHOULD send a STREAMS_BLOCKED frame (type=0x16 or 0x17) when it wishes to open a stream but is unable to do so due to the maximum stream limit"
+      - check: quic/send.go + recvflow.go: verify client emits STREAMS_BLOCKED (correct bidi/uni type) when stream-open is gated on peer MAX_STREAMS.
+- [ ] `9000/19.9-19.21-25` **MUST** -- A STREAMS_BLOCKED Maximum Streams value exceeding 2^60 must be treated as a connection error of type STREAM_LIMIT_ERROR or FRAME_ENCODING_ERROR.
+      - quote: "Receipt of a frame that encodes a larger stream ID MUST be treated as a connection error of type STREAM_LIMIT_ERROR or FRAME_ENCODING_ERROR."
+      - check: quic/frame.go or recvflow.go: validate inbound STREAMS_BLOCKED value <= 2^60.
+- [ ] `9000/19.9-19.21-27` **MUST** -- A NEW_CONNECTION_ID Length field less than 1 or greater than 20 is invalid and must be treated as a FRAME_ENCODING_ERROR connection error.
+      - quote: "Values less than 1 and greater than 20 are invalid and MUST be treated as a connection error of type FRAME_ENCODING_ERROR."
+      - check: quic/frame.go: validate 1 <= Length <= 20 on parse → FRAME_ENCODING_ERROR otherwise.
+- [ ] `9000/19.9-19.21-28` **MUST NOT** -- An endpoint must not send NEW_CONNECTION_ID while it requires the peer to send packets with a zero-length Destination Connection ID.
+      - quote: "An endpoint MUST NOT send this frame if it currently requires that its peer send packets with a zero-length Destination Connection ID."
+      - check: quic/connid.go: if client uses a zero-length source CID it must never emit NEW_CONNECTION_ID.
+- [ ] `9000/19.9-19.21-29` **MUST** -- An endpoint sending packets with a zero-length Destination Connection ID must treat receipt of NEW_CONNECTION_ID as PROTOCOL_VIOLATION.
+      - quote: "An endpoint that is sending packets with a zero-length Destination Connection ID MUST treat receipt of a NEW_CONNECTION_ID frame as a connection error of type PROTOCOL_VIOLATION."
+      - check: quic/connid.go: if peer's CID is zero-length (client sends zero-length DCID), inbound NEW_CONNECTION_ID → PROTOCOL_VIOLATION.
+- [ ] `9000/19.9-19.21-30` **MUST NOT** -- Receiving the same NEW_CONNECTION_ID frame multiple times (retransmission) must not be treated as a connection error; the sequence number deduplicates.
+      - quote: "Receipt of the same frame multiple times MUST NOT be treated as a connection error."
+      - check: quic/connid.go: duplicate NEW_CONNECTION_ID with identical fields must be idempotent, not an error.
+- [ ] `9000/19.9-19.21-32` **MUST** -- When sending NEW_CONNECTION_ID, the Retire Prior To value must be less than or equal to the Sequence Number.
+      - quote: "The value in the Retire Prior To field MUST be less than or equal to the value in the Sequence Number field."
+      - check: quic/frame_write.go + connid.go: if client ever emits NEW_CONNECTION_ID, enforce RetirePriorTo <= SequenceNumber.
+- [ ] `9000/19.9-19.21-33` **MUST** -- Receiving a NEW_CONNECTION_ID with Retire Prior To greater than Sequence Number must be treated as FRAME_ENCODING_ERROR.
+      - quote: "Receiving a value in the Retire Prior To field that is greater than that in the Sequence Number field MUST be treated as a connection error of type FRAME_ENCODING_ERROR."
+      - check: quic/connid.go or frame.go: validate RetirePriorTo <= SequenceNumber on parse → FRAME_ENCODING_ERROR.
+- [ ] `9000/19.9-19.21-34` **MUST** -- A receiver must ignore Retire Prior To values that do not increase the largest Retire Prior To value received so far.
+      - quote: "A receiver MUST ignore any Retire Prior To fields that do not increase the largest received Retire Prior To value."
+      - check: quic/connid.go: track high-water Retire Prior To; smaller/equal values are no-ops.
+- [ ] `9000/19.9-19.21-35` **MUST** -- On receiving a NEW_CONNECTION_ID whose sequence number is below a previously received Retire Prior To, the endpoint must send a RETIRE_CONNECTION_ID retiring that CID (unless already sent).
+      - quote: "MUST send a corresponding RETIRE_CONNECTION_ID frame that retires the newly received connection ID, unless it has already done so for that sequence number."
+      - check: quic/connid.go: auto-retire late-arriving CIDs with seq < high-water Retire Prior To; dedupe per sequence number.
+- [ ] `9000/19.9-19.21-38` **MUST** -- Receiving a RETIRE_CONNECTION_ID whose sequence number is greater than any connection ID sequence number the endpoint ever issued must be treated as PROTOCOL_VIOLATION.
+      - quote: "Receipt of a RETIRE_CONNECTION_ID frame containing a sequence number greater than any previously sent to the peer MUST be treated as a connection error of type PROTOCOL_VIOLATION."
+      - check: quic/connid.go: validate inbound RETIRE_CONNECTION_ID seq against the highest sequence the client has issued (0 if only the handshake CID).
+- [ ] `9000/19.9-19.21-39` **MUST NOT** -- A RETIRE_CONNECTION_ID frame must not name the connection ID used as the Destination Connection ID of the packet carrying the frame.
+      - quote: "The sequence number specified in a RETIRE_CONNECTION_ID frame MUST NOT refer to the Destination Connection ID field of the packet in which the frame is contained."
+      - check: quic/connid.go + send.go: when client retires a server CID, ensure the carrying packet's DCID is not the CID being retired.
+- [ ] `9000/19.9-19.21-42` **MUST** -- An endpoint that provides a zero-length connection ID must treat receipt of RETIRE_CONNECTION_ID as a PROTOCOL_VIOLATION connection error.
+      - quote: "An endpoint that provides a zero-length connection ID MUST treat receipt of a RETIRE_CONNECTION_ID frame as a connection error of type PROTOCOL_VIOLATION."
+      - check: quic/connid.go: if client's own source CID is zero-length, inbound RETIRE_CONNECTION_ID → PROTOCOL_VIOLATION.
+- [ ] `9000/19.9-19.21-44` **MUST** -- The recipient of a PATH_CHALLENGE must generate a PATH_RESPONSE containing the identical Data value.
+      - quote: "The recipient of this frame MUST generate a PATH_RESPONSE frame (Section 19.18) containing the same Data value."
+      - check: quic/frame.go + send.go: even without migration support, client must echo any server PATH_CHALLENGE as PATH_RESPONSE with the same 8 bytes — verify the conn read loop does this.
+- [ ] `9000/19.9-19.21-51` **SHOULD** -- The Reason Phrase should be a UTF-8 encoded string; it can be zero length.
+      - quote: "This SHOULD be a UTF-8 encoded string"
+      - check: quic/close.go + frame_write.go: reason phrases the client emits should be UTF-8; accept zero-length on parse.
+- [ ] `9000/19.9-19.21-59` **MUST** -- An extension using a new frame type must first ensure the peer can understand it (e.g., negotiated via a transport parameter); frames are not self-describing.
+      - quote: "An extension to QUIC that wishes to use a new type of frame MUST first ensure that a peer is able to understand the frame."
+      - check: quic/frame.go + transport_params.go: client implements no extension frames; parser must reject unknown frame types (FRAME_ENCODING_ERROR per Section 12.4) rather than skip them.
+- [ ] `9000/19.9-19.21-61` **MUST** -- Extension frames must be congestion controlled and must elicit an ACK, except extension frames that replace or supplement the ACK frame.
+      - quote: "Extension frames MUST be congestion controlled and MUST cause an ACK frame to be sent."
+      - check: quic/ack_tracker.go + send.go: if any extension frame is ever added, it must count as ack-eliciting and congestion-controlled by default.
+
+## 9000-19.1-19.8
+
+- [ ] `9000/19.1-19.8-6` **MUST** -- Implementations must correctly parse and process both ACK frame types, 0x02 (no ECN) and 0x03 (with ECN counts).
+      - quote: "QUIC implementations MUST properly handle both types"
+      - check: quic/frame.go: decoder accepts type 0x03 and parses the trailing ECN Counts, not just 0x02.
+- [ ] `9000/19.1-19.8-7` **SHOULD** -- An endpoint that has enabled ECN on packets it sends should feed the ACK frame's ECN counts into its congestion state.
+      - quote: "if they have enabled ECN for packets they send, they SHOULD use the information in the ECN section to manage their congestion state"
+      - check: quic/send.go congestion control: N/A if the client never marks ECT; still must parse counts (fact 6).
+- [ ] `9000/19.1-19.8-26` **MUST** -- If ACK range arithmetic yields any negative packet number, the endpoint must raise a connection error of type FRAME_ENCODING_ERROR.
+      - quote: "If any computed packet number is negative, an endpoint MUST generate a connection error of type FRAME_ENCODING_ERROR."
+      - check: quic/frame.go + errors.go: underflow check during range expansion closes conn with FRAME_ENCODING_ERROR (0x07).
+- [ ] `9000/19.1-19.8-33` **MUST** -- Receiving RESET_STREAM for a stream that is send-only for this endpoint is a connection error STREAM_STATE_ERROR.
+      - quote: "An endpoint that receives a RESET_STREAM frame for a send-only stream MUST terminate the connection with error STREAM_STATE_ERROR"
+      - check: quic/stream.go + errors.go: RESET_STREAM on a client-initiated unidirectional stream (client's send-only) must close conn with STREAM_STATE_ERROR (0x05).
+- [ ] `9000/19.1-19.8-37` **MUST** -- Receiving STOP_SENDING for a locally initiated stream that has not yet been created is a connection error STREAM_STATE_ERROR.
+      - quote: "Receiving a STOP_SENDING frame for a locally initiated stream that has not yet been created MUST be treated as a connection error of type STREAM_STATE_ERROR."
+      - check: quic/stream.go: STOP_SENDING naming a client-initiated stream ID above the highest opened must close conn with STREAM_STATE_ERROR.
+- [ ] `9000/19.1-19.8-38` **MUST** -- Receiving STOP_SENDING for a stream that is receive-only for this endpoint is a connection error STREAM_STATE_ERROR.
+      - quote: "An endpoint that receives a STOP_SENDING frame for a receive-only stream MUST terminate the connection with error STREAM_STATE_ERROR."
+      - check: quic/stream.go: STOP_SENDING on a server-initiated unidirectional stream (client's receive-only) must close conn with STREAM_STATE_ERROR.
+- [ ] `9000/19.1-19.8-44` **MUST** -- A CRYPTO frame whose offset plus data length exceeds 2^62-1 must be treated as a connection error of FRAME_ENCODING_ERROR or CRYPTO_BUFFER_EXCEEDED.
+      - quote: "Receipt of a frame that exceeds this limit MUST be treated as a connection error of type FRAME_ENCODING_ERROR or CRYPTO_BUFFER_EXCEEDED"
+      - check: quic/frame.go + errors.go: check offset+length <= 2^62-1 on CRYPTO parse; overflow-safe addition.
+- [ ] `9000/19.1-19.8-49` **MUST** -- A client must treat a NEW_TOKEN frame with an empty Token field as a connection error of type FRAME_ENCODING_ERROR.
+      - quote: "A client MUST treat receipt of a NEW_TOKEN frame with an empty Token field as a connection error of type FRAME_ENCODING_ERROR."
+      - check: quic/frame.go + errors.go: Token Length == 0 on parse closes conn with FRAME_ENCODING_ERROR (0x07).
+- [ ] `9000/19.1-19.8-51` **MUST NOT** -- A client must never send a NEW_TOKEN frame.
+      - quote: "Clients MUST NOT send NEW_TOKEN frames."
+      - check: quic/frame_write.go + send.go: ensure no code path emits frame type 0x07 from the client.
+- [ ] `9000/19.1-19.8-58` **MUST** -- Receiving a STREAM frame for a locally initiated stream not yet created, or for a send-only stream, must terminate the connection with STREAM_STATE_ERROR.
+      - quote: "MUST terminate the connection with error STREAM_STATE_ERROR if it receives a STREAM frame for a locally initiated stream that has not yet been created, or for a send-only stream"
+      - check: quic/stream.go + errors.go: inbound STREAM naming an unopened client-initiated ID or a client send-only (client-initiated uni) stream closes conn with STREAM_STATE_ERROR.
+- [ ] `9000/19.1-19.8-62` **MUST** -- A STREAM frame whose offset plus data length exceeds 2^62-1 must be treated as a connection error of FRAME_ENCODING_ERROR or FLOW_CONTROL_ERROR.
+      - quote: "Receipt of a frame that exceeds this limit MUST be treated as a connection error of type FRAME_ENCODING_ERROR or FLOW_CONTROL_ERROR"
+      - check: quic/frame.go + errors.go: overflow-safe offset+length <= 2^62-1 check on STREAM parse.
+
+## 9000-17.1-17.2.2
+
+- [ ] `9000/17.1-17.2.2-4` **MUST** -- Before any acknowledgment has been received for a packet number space, the sender must encode the full (untruncated) packet number.
+      - quote: "Prior to receiving an acknowledgment for a packet number space, the full packet number MUST be included; it is not to be truncated"
+      - check: quic/packet_write.go: PN length selection must use full encoding until first ACK arrives in that space (largest_acked absent case in Appendix A.2).
+- [ ] `9000/17.1-17.2.2-5` **MUST** -- After an acknowledgment is received for a space, the sender must choose a packet number size representing more than twice the range between the largest acknowledged packet number and the packet number being sent.
+      - quote: "the sender MUST use a packet number size able to represent more than twice as large a range as the difference between the largest acknowledged packet number"
+      - check: quic/packet_write.go: PN encode picks num_bytes covering 2*(pn - largest_acked)+1 candidate values (Appendix A.2 algorithm).
+- [ ] `9000/17.1-17.2.2-6` **SHOULD** -- An endpoint should choose a packet number encoding large enough that the packet number can still be recovered if the packet arrives after later-sent packets.
+      - quote: "An endpoint SHOULD use a large enough packet number encoding to allow the packet number to be recovered even if the packet arrives after packets that are sent afterwards."
+      - check: quic/packet_write.go: check PN size selection is not minimal-only; slack for reordering per A.2.
+- [ ] `9000/17.1-17.2.2-15` **MUST** -- A received packet with a zero Fixed Bit is not a valid QUIC v1 packet and must be discarded.
+      - quote: "Packets containing a zero value for this bit are not valid packets in this version and MUST be discarded."
+      - check: quic/packet.go: receive path drops packets with b0&0x40==0 (except Version Negotiation, identified by Version==0 first).
+- [ ] `9000/17.1-17.2.2-19` **MUST NOT** -- Destination Connection ID Length is an 8-bit unsigned integer and in QUIC version 1 must not exceed 20 bytes when sending.
+      - quote: "In QUIC version 1, this value MUST NOT exceed 20 bytes."
+      - check: quic/packet_write.go + connid.go: never emit a long header with DCID length > 20.
+- [ ] `9000/17.1-17.2.2-20` **MUST** -- An endpoint receiving a version 1 long header whose Destination Connection ID Length exceeds 20 must drop the packet.
+      - quote: "Endpoints that receive a version 1 long header with a value larger than 20 MUST drop the packet."
+      - check: quic/packet.go: long header parser rejects/drops when DCID len byte > 20.
+- [ ] `9000/17.1-17.2.2-21` **MUST NOT** -- Source Connection ID Length is an 8-bit unsigned integer and in QUIC version 1 must not exceed 20 bytes when sending.
+      - quote: "In QUIC version 1, this value MUST NOT exceed 20 bytes."
+      - check: quic/packet_write.go + connid.go: never emit a long header with SCID length > 20.
+- [ ] `9000/17.1-17.2.2-22` **MUST** -- An endpoint receiving a version 1 long header whose Source Connection ID Length exceeds 20 must drop the packet.
+      - quote: "Endpoints that receive a version 1 long header with a value larger than 20 MUST drop the packet."
+      - check: quic/packet.go: long header parser rejects/drops when SCID len byte > 20.
+- [ ] `9000/17.1-17.2.2-26` **MUST** -- Reserved Bits (mask 0x0c of byte 0, header-protected) must be set to 0 prior to applying header protection when sending.
+      - quote: "The value included prior to protection MUST be set to 0."
+      - check: quic/packet_write.go: byte 0 of Initial/0-RTT/Handshake packets has bits 0x0c clear before header protection.
+- [ ] `9000/17.1-17.2.2-27` **MUST** -- An endpoint must treat non-zero Reserved Bits, observed after removing both packet and header protection, as a connection error of type PROTOCOL_VIOLATION.
+      - quote: "An endpoint MUST treat receipt of a packet that has a non-zero value for these bits after removing both packet and header protection as a connection error of type PROTOCOL_VIOLATION"
+      - check: quic/packet.go + errors.go: reserved-bit check runs only after successful AEAD decryption and raises PROTOCOL_VIOLATION conn error.
+- [ ] `9000/17.1-17.2.2-36` **MUST** -- Clients must ignore the value of the 7-bit Unused field in a Version Negotiation packet.
+      - quote: "Clients MUST ignore the value of this field."
+      - check: quic/packet.go: VN parse ignores byte0 low 7 bits entirely (including fixed-bit position).
+- [ ] `9000/17.1-17.2.2-38` **MUST** -- The Version field of a Version Negotiation packet must be exactly 0x00000000.
+      - quote: "The Version field of a Version Negotiation packet MUST be set to 0x00000000."
+      - check: quic/packet.go: client treats only Version==0x00000000 as VN; any other value parsed as versioned packet.
+- [ ] `9000/17.1-17.2.2-39` **MUST** -- The server must copy the Source Connection ID of the packet it received into the Destination Connection ID field of the Version Negotiation packet, so a client can validate the echo.
+      - quote: "The server MUST include the value from the Source Connection ID field of the packet it receives in the Destination Connection ID field."
+      - check: quic/packet.go (VN handling): client should verify VN DCID equals the SCID it sent; mismatched VN packets are off-path forgeries to discard.
+- [ ] `9000/17.1-17.2.2-40` **MUST** -- The Source Connection ID of a Version Negotiation packet must be copied from the Destination Connection ID of the received packet (the client's initially random choice).
+      - quote: "The value for Source Connection ID MUST be copied from the Destination Connection ID of the received packet"
+      - check: quic/packet.go (VN handling): client should verify VN SCID equals the DCID it originally sent before acting on the packet.
+- [ ] `9000/17.1-17.2.2-50` **MUST** -- Initial packets sent by a server must set the Token Length field to 0.
+      - quote: "Initial packets sent by the server MUST set the Token Length field to 0"
+      - check: quic/packet.go: client-side parse of server Initial should enforce Token Length == 0 (pairs with fact -51).
+- [ ] `9000/17.1-17.2.2-51` **MUST** -- A client receiving an Initial packet with a non-zero Token Length must either discard the packet or generate a connection error of type PROTOCOL_VIOLATION.
+      - quote: "clients that receive an Initial packet with a non-zero Token Length field MUST either discard the packet or generate a connection error of type PROTOCOL_VIOLATION"
+      - check: quic/packet.go + errors.go: server Initial with Token Length != 0 -> drop or PROTOCOL_VIOLATION; verify one of the two happens.
+
+## 9000-22
+
+- [ ] `9000/22-27` **MUST NOT** -- All version codepoints matching the pattern 0x?a?a?a?a are reserved (for forcing version negotiation / grease) and are never assigned or listed by IANA.
+      - quote: "All codepoints that follow the pattern 0x?a?a?a?a are reserved, MUST NOT be assigned by IANA, and MUST NOT appear in the listing of assigned values."
+      - check: quic/packet.go — when processing a Version Negotiation packet, the client must never select a 0x?a?a?a?a value as a usable version.
+- [ ] `9000/22-47` **MUST NOT** -- Every transport parameter value of the form 31*N+27 (27, 58, 89, ...) is reserved for grease and is never assigned or listed by IANA.
+      - quote: "Each value of the form "31 * N + 27" for integer values of N (that is, 27, 58, 89, ...) are reserved; these values MUST NOT be assigned by IANA"
+      - check: quic/transport_params.go — decoder must silently skip reserved IDs 31N+27 (they will appear from greasing servers); if the client greases, it picks IDs from this set.
+
+## 9000-17.2.4-17.4
+
+- [ ] `9000/17.2.4-17.4-8` **MUST** -- Receipt of a Handshake packet containing any frame other than CRYPTO/PING/PADDING/ACK/CONNECTION_CLOSE(0x1c) is a connection error of type PROTOCOL_VIOLATION.
+      - quote: "Endpoints MUST treat receipt of Handshake packets with other frames as a connection error of type PROTOCOL_VIOLATION."
+      - check: quic/frame.go + errors.go: per-packet-type frame whitelist for Handshake; violation closes connection with PROTOCOL_VIOLATION.
+- [ ] `9000/17.2.4-17.4-14` **MUST** -- The client must ignore the Unused bits of a Retry packet, which the server sets to an arbitrary value.
+      - quote: "The value in the Unused field is set to an arbitrary value by the server; a client MUST ignore these bits."
+      - check: quic/retry.go: do not validate or branch on byte0 & 0x0f of a Retry packet.
+- [ ] `9000/17.2.4-17.4-18` **MUST** -- The client must discard a Retry packet whose Source Connection ID equals the Destination Connection ID of the client's Initial packet.
+      - quote: "A client MUST discard a Retry packet that contains a Source Connection ID field that is identical to the Destination Connection ID field of its Initial packet."
+      - check: quic/retry.go: compare Retry SCID against the original DCID chosen for the Initial; discard on equality.
+- [ ] `9000/17.2.4-17.4-19` **MUST** -- The client must use the Retry packet's Source Connection ID as the Destination Connection ID of all subsequent packets it sends.
+      - quote: "The client MUST use the value from the Source Connection ID field of the Retry packet in the Destination Connection ID field of subsequent packets that it sends."
+      - check: quic/retry.go + connid.go: adopt Retry SCID as the active DCID for every later packet (Initial, Handshake, 1-RTT).
+- [ ] `9000/17.2.4-17.4-22` **MUST** -- A client must accept and process at most one Retry packet per connection attempt.
+      - quote: "A client MUST accept and process at most one Retry packet for each connection attempt."
+      - check: quic/retry.go: retry-processed flag on the connection; second Retry is dropped.
+- [ ] `9000/17.2.4-17.4-23` **MUST** -- Once the client has processed an Initial or a Retry packet from the server, it must discard any subsequent Retry packets.
+      - quote: "After the client has received and processed an Initial or Retry packet from the server, it MUST discard any subsequent Retry packets that it receives."
+      - check: quic/retry.go: discard Retry also after any server Initial has been processed, not just after a prior Retry.
+- [ ] `9000/17.2.4-17.4-24` **MUST** -- The client must discard any Retry packet whose Retry Integrity Tag fails validation.
+      - quote: "Clients MUST discard Retry packets that have a Retry Integrity Tag that cannot be validated"
+      - check: quic/retry.go: verify integrity tag (RFC 9001 5.8) before acting on the Retry; silent drop on failure.
+- [ ] `9000/17.2.4-17.4-25` **MUST** -- The client must discard a Retry packet with a zero-length Retry Token field.
+      - quote: "A client MUST discard a Retry packet with a zero-length Retry Token field."
+      - check: quic/retry.go: reject/drop Retry whose token length is 0 (payload length == 16-byte tag only).
+- [ ] `9000/17.2.4-17.4-29` **MUST NOT** -- The client must not change its Source Connection ID after a Retry, since the server may bind it into token validation.
+      - quote: "The client MUST NOT change the Source Connection ID because the server could include the connection ID as part of its token validation logic"
+      - check: quic/retry.go + connid.go: keep the original client SCID in all post-Retry Initials.
+- [ ] `9000/17.2.4-17.4-34` **MUST** -- The client must send the same cryptographic handshake message in the post-Retry Initial as in the original Initial.
+      - quote: "A client MUST use the same cryptographic handshake message it included in this packet."
+      - check: quic/retry.go: reuse the identical ClientHello bytes (no TLS re-generation) when rebuilding the Initial after Retry.
+- [ ] `9000/17.2.4-17.4-38` **MUST NOT** -- The client must not reset the packet number of any packet number space after processing a Retry packet (same key+nonce on different content would break packet protection).
+      - quote: "A client MUST NOT reset the packet number for any packet number space after processing a Retry packet."
+      - check: quic/send.go: per-space next-PN counters continue monotonically across Retry; verify the post-Retry Initial does not restart at 0 if an Initial was already sent.
+- [ ] `9000/17.2.4-17.4-46` **MUST** -- Short-header packets with a zero Fixed Bit are not valid in this version and must be discarded.
+      - quote: "Packets containing a zero value for this bit are not valid packets in this version and MUST be discarded."
+      - check: quic/packet.go: drop (not connection-error) inbound short-header packets with byte0 & 0x40 == 0.
+- [ ] `9000/17.2.4-17.4-48` **MUST** -- The two Reserved Bits (mask 0x18) of a 1-RTT packet must be 0 prior to header protection; they are covered by header protection.
+      - quote: "The value included prior to protection MUST be set to 0."
+      - check: quic/packet_write.go: never set bits 0x18 in the plaintext short-header first byte before header protection is applied.
+- [ ] `9000/17.2.4-17.4-49` **MUST** -- Receipt of a 1-RTT packet with non-zero reserved bits, after removing both packet and header protection, is a connection error of type PROTOCOL_VIOLATION.
+      - quote: "An endpoint MUST treat receipt of a packet that has a non-zero value for these bits, after removing both packet and header protection, as a connection error of type PROTOCOL_VIOLATION"
+      - check: quic/packet.go + errors.go: after successful AEAD decryption, check byte0 & 0x18 != 0 and close with PROTOCOL_VIOLATION.
+- [ ] `9000/17.2.4-17.4-59` **MUST** -- An endpoint that does not support the spin bit must disable it as defined (random/ignored bit behavior).
+      - quote: "An endpoint that does not support this feature MUST disable it, as defined below."
+      - check: quic/packet_write.go: if the client does not implement spinning, it must follow the disabled-mode rules — check what value it writes at 0x20 and that it never acts on inbound spin.
+- [ ] `9000/17.2.4-17.4-60` **MUST** -- Implementations must let administrators disable the spin bit globally or per connection.
+      - quote: "Implementations MUST allow administrators of clients and servers to disable the spin bit either globally or on a per-connection basis."
+      - check: quic/: if spin is ever enabled, expose a config knob (Options struct) to disable it; trivially satisfied if spin is never implemented as enabled.
+- [ ] `9000/17.2.4-17.4-61` **MUST** -- Even when not administratively disabled, endpoints must randomly disable the spin bit for at least one in every 16 network paths or one in every 16 connection IDs.
+      - quote: "endpoints MUST disable their use of the spin bit for a random selection of at least one in every 16 network paths, or for one in every 16 connection IDs"
+      - check: quic/: applies only if spin is implemented as enabled — per-connection 1/16 random disable at setup.
+- [ ] `9000/17.2.4-17.4-63` **MUST** -- When the spin bit is disabled, an endpoint must ignore any incoming spin bit value.
+      - quote: "endpoints MAY set the spin bit to any value and MUST ignore any incoming value"
+      - check: quic/packet.go: inbound byte0 & 0x20 must not affect any state when spin is disabled/unimplemented.
+- [ ] `9000/17.2.4-17.4-64` **RECOMMENDED** -- It is recommended that a disabled spin bit be set to a random value chosen independently per packet or per connection ID.
+      - quote: "It is RECOMMENDED that endpoints set the spin bit to a random value either chosen independently for each packet or chosen independently for each connection ID."
+      - check: quic/packet_write.go: check whether the client writes a constant 0 at 0x20 vs the recommended random value (per-connection random is cheapest).
+
+## 9001-7-8
+
+- [ ] `9001/7-8-1` **SHOULD** -- Because Initial packets are not protected with a secret key and can be tampered with, implementations should be cautious about relying on any unauthenticated data carried in Initial packets (e.g., ACK frames, ACK Delay).
+      - quote: "Implementations SHOULD use caution in relying on any data that is contained in Initial packets that is not otherwise authenticated."
+      - check: quic/conn_recv.go + loss recovery: Initial keys derive from a public salt — verify ACK/ACK-Delay data from Initial space is not trusted for anything irreversible (e.g., discarding state) beyond what RFC 9002 requires.
+- [ ] `9001/7-8-3` **MUST** -- Unless another agreed mechanism exists, endpoints must use ALPN to negotiate the application protocol.
+      - quote: "Unless another mechanism is used for agreeing on an application protocol, endpoints MUST use ALPN for this purpose."
+      - check: quic/handshake.go: verify the client always populates ALPN (NextProtos) in the TLS config — http3.Dial should force "h3"; consider rejecting an empty ALPN list at Dial time.
+- [ ] `9001/7-8-4` **MUST** -- When using ALPN, endpoints must immediately close the connection with a no_application_protocol TLS alert (QUIC error code 0x0178) if no application protocol is negotiated.
+      - quote: "endpoints MUST immediately close a connection (see Section 10.2 of [QUIC-TRANSPORT]) with a no_application_protocol TLS alert (QUIC error code 0x0178; see Section 4.8)"
+      - check: quic/handshake.go + quic/errors.go: on handshake completion with no negotiated ALPN, send CONNECTION_CLOSE with error 0x0178 (CRYPTO_ERROR base 0x0100 + alert 120), not a generic error.
+- [ ] `9001/7-8-5` **MUST** -- QUIC clients specifically (not only servers, as in base ALPN) must use error code 0x0178 to terminate the connection when ALPN negotiation fails.
+      - quote: "QUIC clients MUST use error 0x0178 to terminate a connection when ALPN negotiation fails."
+      - check: quic/errors.go: verify the TLS alert→transport-error mapping (0x0100-0x01ff) covers no_application_protocol (alert 120 → 0x0178) and that handshake.go routes client-side ALPN failure through it.
+- [ ] `9001/7-8-9` **MUST** -- A client must treat the server's selection of an application protocol incompatible with the QUIC version in use as a connection error of type 0x0178.
+      - quote: "a client MUST treat the selection of an incompatible application protocol by a server as a connection error of type 0x0178."
+      - check: quic/handshake.go: verify the client validates the server-selected ALPN is one it offered (crypto/tls enforces membership) and that a mismatch is surfaced as 0x0178, not a generic handshake error.
+- [ ] `9001/7-8-13` **MUST** -- Endpoints must send the quic_transport_parameters extension; it is not optional.
+      - quote: "Endpoints MUST send the quic_transport_parameters extension"
+      - check: quic/handshake.go: verify client transport parameters are always set on the TLS/QUIC config before the ClientHello is generated, on every Dial path.
+- [ ] `9001/7-8-14` **MUST** -- An endpoint receiving a ClientHello or EncryptedExtensions without the quic_transport_parameters extension must close the connection with error 0x016d (equivalent to a fatal TLS missing_extension alert).
+      - quote: "endpoints that receive ClientHello or EncryptedExtensions messages without the quic_transport_parameters extension MUST close the connection with an error of type 0x016d"
+      - check: quic/handshake.go + errors.go: if the server's EncryptedExtensions carries no transport parameters, close with 0x016d (0x0100 + missing_extension alert 109) — verify this exact code, not PROTOCOL_VIOLATION.
+- [ ] `9001/7-8-16` **MUST NOT** -- Endpoints must not send the quic_transport_parameters extension in a TLS connection that does not use QUIC (e.g., TLS over TCP).
+      - quote: "Endpoints MUST NOT send this extension in a TLS connection that does not use QUIC"
+      - check: quic/transport_params.go: verify the extension is only wired through the QUIC handshake path (crypto/tls QUICConn) and never registered on any plain-TLS config elsewhere in the repo (e.g., client/ H1/H2 TLS dials).
+- [ ] `9001/7-8-17` **MUST** -- An implementation that supports the quic_transport_parameters extension must send a fatal unsupported_extension alert if it receives the extension when the transport is not QUIC.
+      - quote: "A fatal unsupported_extension alert MUST be sent by an implementation that supports this extension if the extension is received when the transport is not QUIC."
+      - check: quic/handshake.go: vacuously satisfied if the extension exists only inside the QUIC handshake (crypto/tls enforces this); confirm no custom TLS-over-TCP code accepts extension 0x39.
+- [ ] `9001/7-8-20` **MUST NOT** -- Clients must never send the EndOfEarlyData TLS message.
+      - quote: "Clients MUST NOT send the EndOfEarlyData message."
+      - check: quic/handshake.go: no 0-RTT is implemented, and crypto/tls QUIC mode never emits EndOfEarlyData; verify no code path writes it into the CRYPTO stream.
+- [ ] `9001/7-8-25` **MUST NOT** -- A client must not request TLS 1.3 middlebox compatibility mode (i.e., must send an empty legacy_session_id and no change_cipher_spec).
+      - quote: "A client MUST NOT request the use of the TLS 1.3 compatibility mode."
+      - check: quic/handshake.go: verify the TLS stack in QUIC mode (crypto/tls QUICClient) generates a ClientHello with empty legacy_session_id — add a wire-level assertion test on the emitted ClientHello if absent.
+
+## 9001-9-10
+
+- [ ] `9001/9-10-2` **MUST** -- Endpoints using 0-RTT must implement and use the TLS 1.3 replay protections (anti-replay mechanisms of RFC 8446 Section 8).
+      - quote: "Endpoints MUST implement and use the replay protections described in [TLS13]"
+      - check: quic/handshake.go — client is 0-RTT-free by design; verify early data is never offered in ClientHello so this MUST is satisfied vacuously; re-audit if 0-RTT is ever added.
+- [ ] `9001/9-10-4` **MUST NOT** -- TLS session tickets and address validation tokens must not be used to communicate application semantics between endpoints.
+      - quote: "These MUST NOT be used to communicate application semantics between endpoints"
+      - check: quic/retry.go + quic/handshake.go — confirm the client never encodes or extracts application meaning from Retry/NEW_TOKEN tokens or session tickets.
+- [ ] `9001/9-10-5` **MUST** -- Clients must treat session tickets and address validation tokens as opaque values, never parsing or interpreting their contents.
+      - quote: "clients MUST treat them as opaque values"
+      - check: quic/retry.go — verify the Retry token is stored and echoed byte-for-byte into the subsequent Initial without any parsing; same for any NEW_TOKEN handling in handshake.go/conn_recv.go.
+- [ ] `9001/9-10-10` **MUST** -- The packet containing a ClientHello must be padded to a minimum size, as an anti-amplification / anti-reflection defense.
+      - quote: "the packet containing a ClientHello MUST be padded to a minimum size"
+      - check: quic/packet.go + the Initial send path driven by handshake.go — verify client Initial datagrams carrying ClientHello CRYPTO frames are padded to at least 1200 bytes (RFC 9000 Section 14.1).
+- [ ] `9001/9-10-18` **MUST** -- On receive, header-protection removal, packet-number recovery, and packet-protection removal must be applied together, free of timing and other side channels (e.g., no discarding duplicate packet numbers before attempting decryption).
+      - quote: "the entire process of header protection removal, packet number recovery, and packet protection removal MUST be applied together without timing and other side channels"
+      - check: quic/conn_recv.go — verify the decrypt path does not short-circuit on duplicate packet number, guessed PN length, or Key Phase before AEAD open; dedup checks must run only after successful decryption.
+- [ ] `9001/9-10-19` **MUST** -- On send, construction and protection of packet payloads and packet numbers must be free from side channels that would reveal the packet number or its encoded size.
+      - quote: "construction and protection of packet payloads and packet numbers MUST be free from side channels that would reveal the packet number or its encoded size"
+      - check: quic/crypto_protect.go + quic/packet.go — verify PN encoding and header-protection application on the send path have no externally observable branching/timing dependent on PN value or length.
+- [ ] `9001/9-10-20` **SHOULD** -- After receiving a key update, an endpoint should generate and save the next set of receive packet-protection keys (per Section 6.3), so later receipt does not create timing signals leaking the Key Phase.
+      - quote: "After receiving a key update, an endpoint SHOULD generate and save the next set of receive packet protection keys"
+      - check: quic/crypto_keyupdate.go — verify the next-generation receive keys are precomputed eagerly after a key update completes, not derived lazily inside the per-packet decrypt path.
+
+## 9001-5.5-5.8
+
+- [ ] `9001/5.5-5.8-1` **MUST** -- After successfully receiving a packet with a given packet number, an endpoint must discard packets in the same packet number space with higher packet numbers that cannot be unprotected with the same key or (after a key update) a subsequent packet protection key.
+      - quote: "it MUST discard all packets in the same packet number space with higher packet numbers if they cannot be successfully unprotected with either the same key"
+      - check: quic/conn_recv.go — AEAD-open failure must drop the packet silently (no conn error, no PN-state update); with key phase flip, trial-decrypt via crypto_keyupdate.go next-gen keys, then drop.
+- [ ] `9001/5.5-5.8-2` **MUST** -- A packet that appears to trigger a key update (flipped Key Phase) but fails to unprotect must be discarded without committing the key update.
+      - quote: "a packet that appears to trigger a key update but cannot be unprotected successfully MUST be discarded"
+      - check: quic/crypto_keyupdate.go — short-header packet with flipped Key Phase bit failing AEAD must be dropped and must NOT advance the key phase or install next-gen keys.
+- [ ] `9001/5.5-5.8-4` **MUST NOT** -- A client must not use 0-RTT for application data unless the application in use specifically requests it.
+      - quote: "A client therefore MUST NOT use 0-RTT for application data unless specifically requested by the application that is in use"
+      - check: quic/handshake.go — 0-RTT is a project non-goal; trivially satisfied. Confirm no early_data extension is offered in ClientHello.
+- [ ] `9001/5.5-5.8-5` **MUST** -- An application protocol using QUIC must include a profile defining acceptable 0-RTT use; otherwise 0-RTT may only carry QUIC frames that do not carry application data.
+      - quote: "An application protocol that uses QUIC MUST include a profile that defines acceptable use of 0-RTT"
+      - check: http3/ — the HTTP/3 0-RTT profile (RFC 9114 §10.9) would govern; moot while 0-RTT is unimplemented.
+- [ ] `9001/5.5-5.8-9` **SHOULD** -- A client should stop sending 0-RTT data upon an indication that its 0-RTT data has been rejected.
+      - quote: "A client SHOULD stop sending 0-RTT data if it receives an indication that 0-RTT data has been rejected"
+      - check: N/A — vacuously satisfied; no 0-RTT data is ever sent.
+- [ ] `9001/5.5-5.8-11` **MUST NOT** -- A client must not attempt to decrypt 0-RTT packets it receives.
+      - quote: "A client MUST NOT attempt to decrypt 0-RTT packets it receives"
+      - check: quic/conn_recv.go + packet.go — a long-header packet with type 0x1 (0-RTT) must never reach a decrypt attempt on the client receive path.
+- [ ] `9001/5.5-5.8-12` **MUST** -- A client must discard any 0-RTT packets it receives instead of decrypting them.
+      - quote: "and instead MUST discard them"
+      - check: quic/conn_recv.go — 0-RTT-type packets must be dropped outright, not buffered in the undecryptable-packet queue.
+- [ ] `9001/5.5-5.8-13` **MUST NOT** -- Once a client has installed 1-RTT keys, it must not send any more 0-RTT packets.
+      - quote: "Once a client has installed 1-RTT keys, it MUST NOT send any more 0-RTT packets"
+      - check: N/A — vacuously satisfied (no 0-RTT send path); would gate in quic/conn_seal.go level selection if 0-RTT were added.
+- [ ] `9001/5.5-5.8-15` **MUST NOT** -- Endpoints in either role must not decrypt 1-RTT packets from their peer before completing the TLS handshake.
+      - quote: "Endpoints in either role MUST NOT decrypt 1-RTT packets from their peer prior to completing the handshake"
+      - check: quic/conn_crypto.go + conn_recv.go — ensure the 1-RTT opener is not usable (not installed, or gated) until TLS handshake completion.
+- [ ] `9001/5.5-5.8-22` **MUST NOT** -- A client, even if it has 1-RTT secrets, must not process incoming 1-RTT protected packets before the TLS handshake is complete.
+      - quote: "Even if it has 1-RTT secrets, a client MUST NOT process incoming 1-RTT protected packets before the TLS handshake is complete"
+      - check: quic/conn_recv.go + handshake.go — client-specific form of -15: verify short-header packets are not decrypted/processed until crypto/tls reports handshake completion (check install ordering in conn_crypto.go).
+
+## 9001-4.6-4.9
+
+- [ ] `9001/4.6-4.9-6` **MUST** -- A client receiving a NewSessionTicket whose early_data extension carries any value other than 0xffffffff must close the connection with PROTOCOL_VIOLATION.
+      - quote: "A client MUST treat receipt of a NewSessionTicket that contains an early_data extension with any other value as a connection error of type PROTOCOL_VIOLATION"
+      - check: quic/handshake.go — check post-handshake NewSessionTicket handling: if the ticket is parsed at all, validate max_early_data_size==0xffffffff and raise PROTOCOL_VIOLATION (errors.go) otherwise; if tickets are skipped unparsed, document that this check is unreachable.
+- [ ] `9001/4.6-4.9-13` **SHOULD** -- After 0-RTT rejection, a client should treat an acknowledgment of a 0-RTT packet as a PROTOCOL_VIOLATION connection error if it can detect it.
+      - quote: "a client SHOULD treat receipt of an acknowledgment for a 0-RTT packet as a connection error of type PROTOCOL_VIOLATION, if it is able to detect the condition"
+      - check: quic/conn_recv.go — N/A: no 0-RTT packets are ever sent, so no 0-RTT packet numbers exist to be acked; nothing to detect.
+- [ ] `9001/4.6-4.9-14` **MUST** -- On 0-RTT rejection the client must reset the state of all streams, including application state bound to those streams.
+      - quote: "The client therefore MUST reset the state of all streams, including application state bound to those streams."
+      - check: quic/ + http3/ — N/A now; if 0-RTT is ever added, rejection must tear down all early stream and HTTP/3 state (settings, QPACK assumptions) before replay over 1-RTT.
+- [ ] `9001/4.6-4.9-22` **MUST** -- A QUIC endpoint must treat every TLS alert as fatal regardless of its nominal level, since QUIC can only convey fatal alerts.
+      - quote: "a QUIC endpoint MUST treat any alert from TLS as if it were at the "fatal" level"
+      - check: quic/handshake.go — any alert received or generated (including close_notify/user_canceled class warnings) must terminate the connection; verify no warning-alert tolerance path exists.
+- [ ] `9001/4.6-4.9-25` **MUST** -- Retransmissions of CRYPTO frame data originally sent at a lower encryption level must be sent at that same encryption level.
+      - quote: "If packets from a lower encryption level contain CRYPTO frames, frames that retransmit that data MUST be sent at the same encryption level."
+      - check: quic/ loss-recovery + handshake.go — verify lost Initial/Handshake CRYPTO data is retransmitted using the original level's sealer (conn_seal.go), never promoted to a higher level.
+- [ ] `9001/4.6-4.9-28` **MUST** -- New data must always be sent at the highest currently available encryption level, even while older keys are retained.
+      - quote: "new data MUST be sent at the highest currently available encryption level"
+      - check: quic/conn_seal.go + send path — packet assembly must pick the highest installed sealer for any new frames; only the 4.6-4.9-25/29 exceptions use older levels.
+- [ ] `9001/4.6-4.9-31` **MUST** -- A client must discard Initial keys the first time it sends a Handshake packet.
+      - quote: "a client MUST discard Initial keys when it first sends a Handshake packet"
+      - check: quic/conn_crypto.go + conn_seal.go — verify Initial sealer AND opener are dropped exactly when the first Handshake-level packet is sent (not when Handshake keys install), and conn_recv.go then discards late Initial packets as undecryptable.
+- [ ] `9001/4.6-4.9-33` **MUST NOT** -- After discarding Initial keys, endpoints must not send any further Initial packets.
+      - quote: "Endpoints MUST NOT send Initial packets after this point."
+      - check: quic/ send path + handshake.go — once the first Handshake packet is sent, no path (including loss recovery and PTO probes) may emit an Initial packet.
+- [ ] `9001/4.6-4.9-35` **MUST** -- An endpoint must discard its Handshake keys when the TLS handshake is confirmed.
+      - quote: "An endpoint MUST discard its Handshake keys when the TLS handshake is confirmed"
+      - check: quic/conn_crypto.go + conn_recv.go — for a client, handshake confirmed = receipt of HANDSHAKE_DONE (RFC 9001 §4.1.2); verify HANDSHAKE_DONE triggers dropping Handshake sealer/opener and that Handshake-level loss state is abandoned.
+- [ ] `9001/4.6-4.9-37` **SHOULD** -- A client should discard 0-RTT keys as soon as it installs 1-RTT keys, since they have no further use.
+      - quote: "a client SHOULD discard 0-RTT keys as soon as it installs 1-RTT keys as they have no use after that moment"
+      - check: quic/conn_crypto.go — N/A: no 0-RTT keys are ever derived; if added, tie discard to 1-RTT key installation.
+
+## 9001-6
+
+- [ ] `9001/6-5` **MUST NOT** -- An endpoint is forbidden from sending a TLS KeyUpdate handshake message.
+      - quote: "Endpoints MUST NOT send a TLS KeyUpdate message."
+      - check: quic/handshake.go: confirm the TLS layer never emits post-handshake KeyUpdate onto CRYPTO streams.
+- [ ] `9001/6-6` **MUST** -- Receipt of a TLS KeyUpdate message must be treated as connection error 0x010a (unexpected_message alert).
+      - quote: "Endpoints MUST treat the receipt of a TLS KeyUpdate message as a connection error of type 0x010a"
+      - check: quic/handshake.go + errors.go: post-handshake CRYPTO handling must reject KeyUpdate with CRYPTO_ERROR 0x0100+10 (0x010a).
+- [ ] `9001/6-11` **MUST NOT** -- An endpoint is forbidden from initiating a key update before the handshake is confirmed.
+      - quote: "An endpoint MUST NOT initiate a key update prior to having confirmed the handshake (Section 4.1.2)."
+      - check: quic/crypto_keyupdate.go: initiation refused until client-side handshake-confirmed flag set.
+- [ ] `9001/6-12` **MUST NOT** -- A subsequent key update is forbidden until an acknowledgment is received for a packet protected with current-phase keys.
+      - quote: "An endpoint MUST NOT initiate a subsequent key update unless it has received an acknowledgment for a packet that was sent protected with keys from the current key phase"
+      - check: quic/crypto_keyupdate.go + ack_tracker.go: gate next update on ack of a current-phase packet.
+- [ ] `9001/6-16` **MUST** -- Old keys must be retained until a packet protected with the new keys has been successfully unprotected.
+      - quote: "An endpoint MUST retain old keys until it has successfully unprotected a packet sent using the new keys."
+      - check: quic/crypto_keyupdate.go + conn_recv.go: old read keys not dropped before first successful new-key decrypt.
+- [ ] `9001/6-17` **SHOULD** -- Old keys should be retained for some period even after a new-key packet has been unprotected, to avoid dropping delayed packets.
+      - quote: "An endpoint SHOULD retain old keys for some time after unprotecting a packet sent using the new keys."
+      - check: quic/crypto_keyupdate.go: old read keys kept for a grace window (see 6-39 for the 3xPTO bound).
+- [ ] `9001/6-19` **MUST** -- On successful decryption with next-phase keys, the endpoint must update its own send keys to that phase.
+      - quote: "The endpoint MUST update its send keys to the corresponding key phase in response"
+      - check: quic/crypto_keyupdate.go: peer-initiated update forces local write-key rollover to matching phase.
+- [ ] `9001/6-20` **MUST** -- Send keys must be updated before any acknowledgment of the packet received with updated keys is sent.
+      - quote: "Sending keys MUST be updated before sending an acknowledgment for the packet that was received with updated keys."
+      - check: quic/conn_recv.go + conn_seal.go: ordering — write keys switch before the ACK covering the triggering packet is sealed.
+- [ ] `9001/6-23` **MUST NOT** -- When responding to an apparent key update, the endpoint must not produce a timing side channel revealing that the Key Phase bit was invalid.
+      - quote: "Endpoints responding to an apparent key update MUST NOT generate a timing side-channel signal that might indicate that the Key Phase bit was invalid"
+      - check: quic/conn_recv.go: failed-phase decrypt path should be constant-shape; document best-effort stance in Go.
+- [ ] `9001/6-27` **SHOULD** -- Once generated, the next set of receive keys should be kept even if the triggering packet is later discarded (forged-update DoS defense).
+      - quote: "Once generated, the next set of packet protection keys SHOULD be retained, even if the packet that was received was subsequently discarded."
+      - check: quic/crypto_keyupdate.go: next-generation read keys not thrown away on decrypt failure of the trigger packet.
+- [ ] `9001/6-28` **MUST** -- An endpoint must be capable of holding two sets of receive keys simultaneously: current and next.
+      - quote: "endpoints MUST be able to retain two sets of packet protection keys for receiving packets: the current and the next"
+      - check: quic/crypto_keyupdate.go + conn_crypto.go: 1-RTT opener holds at least current+next key sets.
+- [ ] `9001/6-31` **MUST** -- A sender must protect higher-numbered packets with the same or newer keys than lower-numbered packets.
+      - quote: "Packets with higher packet numbers MUST be protected with either the same or newer packet protection keys than packets with lower packet numbers."
+      - check: quic/packet_write.go + conn_seal.go: key-phase rollover must be ordered with packet-number allocation under one lock.
+- [ ] `9001/6-32` **MUST** -- Successfully unprotecting with old keys a packet whose number is higher than packets seen under newer keys must be treated as KEY_UPDATE_ERROR.
+      - quote: "An endpoint that successfully removes protection with old keys when newer keys were used for packets with lower packet numbers MUST treat this as a connection error of type KEY_UPDATE_ERROR"
+      - check: quic/conn_recv.go: after old-key decrypt succeeds, compare recovered PN against newer-key PNs and raise KEY_UPDATE_ERROR (0x0e).
+- [ ] `9001/6-38` **SHOULD** -- An endpoint should wait 3x PTO after the ack confirming the previous key update before initiating another update, so the peer can drop old keys safely.
+      - quote: "Endpoints SHOULD wait three times the PTO before initiating a key update after receiving an acknowledgment that confirms that the previous key update was received"
+      - check: quic/crypto_keyupdate.go + pto.go: 3xPTO pacing between successive locally initiated updates.
+- [ ] `9001/6-39` **SHOULD** -- Old read keys should be retained no longer than 3x PTO after the first packet protected with new keys is received.
+      - quote: "An endpoint SHOULD retain old read keys for no more than three times the PTO after having received a packet protected using the new keys"
+      - check: quic/crypto_keyupdate.go: old-read-key retention timer bounded at 3xPTO.
+- [ ] `9001/6-40` **SHOULD** -- After that 3x PTO period, old read keys and their corresponding secrets should be discarded.
+      - quote: "After this period, old read keys and their corresponding secrets SHOULD be discarded."
+      - check: quic/crypto_keyupdate.go: verify secrets (not just derived keys) are dropped/zeroed on expiry.
+- [ ] `9001/6-41` **MUST** -- An endpoint must count the number of packets it encrypts under each key set.
+      - quote: "Endpoints MUST count the number of encrypted packets for each set of keys."
+      - check: quic/conn_seal.go: per-key-generation encryption counter incremented on every seal (aeadlimit_test.go covers).
+- [ ] `9001/6-42` **MUST** -- If encrypted-packet count with one key exceeds the AEAD's confidentiality limit, the endpoint must stop using those keys.
+      - quote: "If the total number of encrypted packets with the same key exceeds the confidentiality limit for the selected AEAD, the endpoint MUST stop using those keys"
+      - check: quic/conn_seal.go + crypto_keyupdate.go: hard stop on sealing once confidentiality limit hit.
+- [ ] `9001/6-43` **MUST** -- A key update must be initiated before the confidentiality limit for the selected AEAD is exceeded by sent packets.
+      - quote: "Endpoints MUST initiate a key update before sending more protected packets than the confidentiality limit for the selected AEAD permits."
+      - check: quic/crypto_keyupdate.go: proactive update triggered below the limit (with headroom for the ack-gate in 6-12).
+- [ ] `9001/6-44` **MUST** -- If a key update is impossible or the integrity limit is reached, the endpoint must stop using the connection, responding only with stateless resets.
+      - quote: "the endpoint MUST stop using the connection and only send stateless resets in response to receiving packets"
+      - check: quic/conn_seal.go + close.go: client generates no stateless resets by design; must still cease all sends on the connection.
+- [ ] `9001/6-45` **RECOMMENDED** -- It is recommended to immediately close the connection with AEAD_LIMIT_REACHED before reaching a state where key updates are impossible.
+      - quote: "It is RECOMMENDED that endpoints immediately close the connection with a connection error of type AEAD_LIMIT_REACHED before reaching a state where key updates are not possible."
+      - check: quic/close.go + errors.go: close path uses AEAD_LIMIT_REACHED (0x0f) when limit is imminent and update blocked.
+- [ ] `9001/6-49` **MUST** -- An endpoint must count received packets that fail authentication over the connection's lifetime.
+      - quote: "endpoints MUST count the number of received packets that fail authentication during the lifetime of a connection"
+      - check: quic/conn_recv.go: connection-lifetime forgery counter incremented on every AEAD open failure, across all keys and levels.
+- [ ] `9001/6-50` **MUST** -- If authentication failures across all keys exceed the AEAD's integrity limit, the endpoint must immediately close with AEAD_LIMIT_REACHED and process no more packets.
+      - quote: "the endpoint MUST immediately close the connection with a connection error of type AEAD_LIMIT_REACHED and not process any more packets"
+      - check: quic/conn_recv.go + errors.go: integrity-limit breach closes with 0x0f and halts packet processing (aeadlimit_test.go).
+
+## 9001-4.1-4.5
+
+- [ ] `9001/4.1-4.5-1` **MUST** -- If QUIC retransmits TLS handshake data, it must use the keys the data was originally associated with, even if TLS has since moved to newer keys.
+      - quote: "If QUIC needs to retransmit that data, it MUST use the same keys even if TLS has already updated to newer keys."
+      - check: quic/handshake.go + loss recovery: lost CRYPTO data must be retransmitted at its original encryption level, never re-encrypted at the current level.
+- [ ] `9001/4.1-4.5-3` **SHOULD** -- When packets of different types need to be sent at the same time, endpoints should coalesce them into the same UDP datagram.
+      - quote: "When packets of different types need to be sent, endpoints SHOULD use coalesced packets to send them in the same UDP datagram."
+      - check: quic/handshake.go send path: check the client coalesces Initial+Handshake (and Handshake+1-RTT) packets in one datagram during the handshake.
+- [ ] `9001/4.1-4.5-17` **MUST NOT** -- A CRYPTO frame in a packet from a previously installed encryption level must not contain data extending past the end of previously received data in that level's flow.
+      - quote: "it MUST NOT contain data that extends past the end of previously received data in that flow."
+      - check: quic/handshake.go: receiver-side check — after a level's handshake data is consumed, new bytes beyond the recorded end at that level are a violation.
+- [ ] `9001/4.1-4.5-18` **MUST** -- Receiving CRYPTO data that extends past previously received data at an old encryption level must be treated as a connection error of type PROTOCOL_VIOLATION.
+      - quote: "Implementations MUST treat any violations of this requirement as a connection error of type PROTOCOL_VIOLATION."
+      - check: quic/handshake.go + errors.go: verify a typed PROTOCOL_VIOLATION (0x0a) connection close exists for new-data-on-old-level, with a conformance test.
+- [ ] `9001/4.1-4.5-20` **MUST** -- When TLS provides keys for a higher encryption level while unconsumed CRYPTO data remains at a previous level, the endpoint must treat it as a connection error of type PROTOCOL_VIOLATION.
+      - quote: "if there is data from a previous encryption level that TLS has not consumed, this MUST be treated as a connection error of type PROTOCOL_VIOLATION."
+      - check: quic/handshake.go: on installing keys for a higher level, check for leftover unconsumed CRYPTO at lower levels and close with PROTOCOL_VIOLATION.
+- [ ] `9001/4.1-4.5-26` **SHOULD** -- While waiting for asynchronous TLS processing (e.g., certificate validation), an endpoint should buffer received packets that might be decryptable once pending keys become available.
+      - quote: "an endpoint SHOULD buffer received packets if they might be processed using keys that are not yet available."
+      - check: quic/conn_recv.go: undecryptable-packet queue replayed on key install (bounded); check Handshake/1-RTT packets arriving before keys are kept.
+- [ ] `9001/4.1-4.5-27` **SHOULD** -- An endpoint should continue responding to packets it can process while waiting for TLS processing to complete.
+      - quote: "An endpoint SHOULD continue to respond to packets that can be processed during this time."
+      - check: quic/conn_recv.go: processing of decryptable packets must not stall behind buffered undecryptable ones.
+- [ ] `9001/4.1-4.5-31` **MUST NOT** -- Clients must not offer TLS versions older than 1.3 in the handshake.
+      - quote: "Clients MUST NOT offer TLS versions older than 1.3."
+      - check: quic/handshake.go: tls.Config must force MinVersion=tls.VersionTLS13, including when the caller supplies a config with a lower MinVersion.
+- [ ] `9001/4.1-4.5-32` **MUST** -- An endpoint must terminate the connection if a TLS version older than 1.3 is negotiated.
+      - quote: "An endpoint MUST terminate the connection if a version of TLS older than 1.3 is negotiated."
+      - check: quic/handshake.go: with MinVersion pinned, crypto/tls enforces this; verify caller-supplied tls.Config cannot relax it below 1.3.
+- [ ] `9001/4.1-4.5-37` **MUST** -- A client must authenticate the identity of the server, typically via certificate verification against a trusted issuer.
+      - quote: "A client MUST authenticate the identity of the server."
+      - check: quic/handshake.go: ServerName must be set on tls.Config and InsecureSkipVerify must remain a deliberate caller opt-in (G402), never a silent default.
+- [ ] `9001/4.1-4.5-41` **MUST** -- A client must treat receipt of a post-handshake TLS CertificateRequest message as a connection error of type PROTOCOL_VIOLATION.
+      - quote: "clients MUST treat receipt of such messages as a connection error of type PROTOCOL_VIOLATION."
+      - check: quic/handshake.go + errors.go: check how post-handshake CRYPTO other than NewSessionTicket/KeyUpdate surfaces from crypto/tls; the conn must close with PROTOCOL_VIOLATION (0x0a), not ignore it.
+- [ ] `9001/4.1-4.5-44` **SHOULD NOT** -- Clients should not reuse session tickets, because reuse lets entities other than the server correlate connections.
+      - quote: "Clients SHOULD NOT reuse tickets as that allows entities other than the server to correlate connections"
+      - check: quic/handshake.go: if ClientSessionCache is wired up, check crypto/tls single-use ticket behavior; a load-generator reusing one ticket across many conns violates this.
+
+## 9001-5.1-5.4
+
+- [ ] `9001/5.1-5.4-22` **MUST** -- The TLS 1.3 HKDF-Expand-Label function must be used for Initial packets even when TLS 1.3 is not among the offered TLS versions.
+      - quote: "The HKDF-Expand-Label function defined in TLS 1.3 MUST be used for Initial packets even where the TLS versions offered do not include TLS 1.3."
+      - check: quic/initial.go — Initial key schedule must not depend on handshake.go's TLS version negotiation state.
+- [ ] `9001/5.1-5.4-28` **MUST NOT** -- A cipher suite must not be negotiated unless a header protection scheme is defined for it.
+      - quote: "A cipher suite MUST NOT be negotiated unless a header protection scheme is defined for the cipher suite."
+      - check: quic/handshake.go — offered suites restricted to the four with defined HP (AES-128-GCM, AES-128-CCM, AES-256-GCM, ChaCha20-Poly1305).
+- [ ] `9001/5.1-5.4-37` **MUST** -- An endpoint must initiate a key update before exceeding any confidentiality limit set for the AEAD in use (which may be lower than the packet number limit).
+      - quote: "An endpoint MUST initiate a key update (Section 6) prior to exceeding any limit set for the AEAD that is in use."
+      - check: quic/crypto_keyupdate.go + quic/conn_seal.go — track packets encrypted per key and trigger key update before the per-suite confidentiality limit (§6.6).
+- [ ] `9001/5.1-5.4-48` **MUST** -- A header protection algorithm must be specified for an AEAD before its cipher suite can be used with QUIC; this document defines them only for AES-128-GCM, AES-128-CCM, AES-256-GCM, and ChaCha20-Poly1305.
+      - quote: "Before a TLS cipher suite can be used with QUIC, a header protection algorithm MUST be specified for the AEAD used with that cipher suite."
+      - check: quic/handshake.go — enabled suite set must be exactly the four with defined HP algorithms.
+- [ ] `9001/5.1-5.4-51` **MUST** -- An endpoint must discard received packets that are too short to contain a complete header-protection sample.
+      - quote: "An endpoint MUST discard packets that are not long enough to contain a complete sample."
+      - check: quic/conn_recv.go — length check (pn_offset + 4 + 16 bytes available) before HP removal; drop, don't error the connection.
+
+## 9002-7.7-8
+
+- [ ] `9002/7.7-8-1` **SHOULD** -- A sender should pace the sending of all in-flight packets, driven by input from the congestion controller.
+      - quote: "A sender SHOULD pace sending of all in-flight packets based on input from the congestion controller."
+      - check: quic/cc.go + quic/send.go — verify the send path consults a pacer fed by the congestion controller (NewReno and opt-in BBR) rather than releasing the whole window at once.
+- [ ] `9002/7.7-8-2` **MUST** -- A sender must either implement pacing or limit packet bursts; sending with no inter-packet delay and no burst cap is non-conformant.
+      - quote: "Senders MUST either use pacing or limit such bursts."
+      - check: quic/send.go — hard requirement: confirm the send loop is either paced or caps back-to-back packet bursts; if pacing is absent in the NewReno path (quic/cc.go), a burst limit must exist.
+- [ ] `9002/7.7-8-3` **SHOULD** -- Senders should cap packet bursts at the initial congestion window.
+      - quote: "Senders SHOULD limit bursts to the initial congestion window"
+      - check: quic/send.go + quic/cc.go — check the burst-size cap equals kInitialWindow (the Section 7.2 initial window) when no better path knowledge exists.
+- [ ] `9002/7.7-8-5` **SHOULD** -- Packets containing only ACK frames should not be paced, so acknowledgment delivery to the peer is not delayed.
+      - quote: "packets containing only ACK frames SHOULD therefore not be paced."
+      - check: quic/send.go + quic/ack_tracker.go — verify ACK-only packets bypass the pacer/congestion gate on the send path (they are also not congestion controlled per Section 7).
+- [ ] `9002/7.7-8-11` **SHOULD NOT** -- When bytes in flight is below the congestion window and sending is not pacing limited (window underutilized), the congestion window should not be grown in slow start or congestion avoidance.
+      - quote: "the congestion window SHOULD NOT be increased in either slow start or congestion avoidance."
+      - check: quic/cc.go — verify OnPacketAcked window growth (both slow-start doubling and avoidance additive increase) is skipped when the window was underutilized (app-limited/flow-control-limited); same check for quic/bbr.go app-limited handling.
+- [ ] `9002/7.7-8-12` **SHOULD NOT** (VERIFY) -- A sender must not treat pacing-induced delay as application-limited: if it would have filled the window absent pacing delay, it is not application limited.
+      - quote: "A sender SHOULD NOT consider itself application limited if it would have fully utilized the congestion window without pacing delay."
+      - check: quic/cc.go + quic/send.go — check the app-limited detection: packets held back only by the pacer must still count the window as utilized, so growth is not wrongly suppressed.
+
+## 9002-7.3-7.6
+
+- [ ] `9002/7.3-7.6-5` **MUST** -- The sender must exit slow start and enter a recovery period when a packet is lost or when the peer-reported ECN-CE count increases.
+      - quote: "The sender MUST exit slow start and enter a recovery period when a packet is lost or when the ECN-CE count reported by its peer increases."
+      - check: quic/cc.go + quic/conn_recv.go — verify both loss detection (loss.go callback) and an ECN-CE count increase in ACK processing trigger entry into recovery from slow start.
+- [ ] `9002/7.3-7.6-9` **MUST** -- On entering a recovery period, the sender must set the slow start threshold to half the congestion window value at the time loss is detected.
+      - quote: "a sender MUST set the slow start threshold to half the value of the congestion window when loss is detected."
+      - check: quic/cc.go — verify ssthresh = cwnd * kLossReductionFactor (0.5) on recovery entry, using the cwnd value at loss detection.
+- [ ] `9002/7.3-7.6-10` **MUST** -- The congestion window must be set to the reduced slow start threshold value before the recovery period is exited.
+      - quote: "The congestion window MUST be set to the reduced value of the slow start threshold before exiting the recovery period."
+      - check: quic/cc.go — verify cwnd is set to the halved ssthresh no later than recovery exit (immediately on entry is the common implementation).
+- [ ] `9002/7.3-7.6-16` **MUST** -- In congestion avoidance, the AIMD approach must limit congestion window increase to at most one maximum datagram size per congestion window of bytes acknowledged.
+      - quote: "MUST limit the increase to the congestion window to at most one maximum datagram size for each congestion window that is acknowledged."
+      - check: quic/cc.go — verify CA growth is cwnd += max_datagram_size * acked_bytes / cwnd (or equivalent counter) and cannot exceed one max datagram size per cwnd acked.
+- [ ] `9002/7.3-7.6-20` **MUST NOT** -- Endpoints must not ignore the loss of packets that were sent after the earliest acknowledged packet in a given packet number space.
+      - quote: "Endpoints MUST NOT ignore the loss of packets that were sent after the earliest acknowledged packet in a given packet number space."
+      - check: quic/loss.go — if the 7.4 exemption is implemented, verify it only applies to packets sent before the earliest acked packet in that PN space; otherwise all detected losses must feed cc.go.
+- [ ] `9002/7.3-7.6-21` **MUST NOT** -- Probe packets must not be blocked by the congestion controller.
+      - quote: "Probe packets MUST NOT be blocked by the congestion controller."
+      - check: quic/pto.go + quic/send.go — verify PTO probe transmission bypasses the cwnd/bytes-in-flight gate that normally blocks sends in send.go.
+- [ ] `9002/7.3-7.6-22` **MUST** -- A sender must count probe packets as additionally in flight (they add network load without establishing packet loss).
+      - quote: "A sender MUST however count these packets as being additionally in flight, since these packets add network load without establishing packet loss."
+      - check: quic/pto.go + quic/loss.go — verify probe packets are recorded in sent-packet bookkeeping and their bytes added to bytes_in_flight despite bypassing the cwnd gate.
+- [ ] `9002/7.3-7.6-27` **RECOMMENDED** -- The recommended value for kPersistentCongestionThreshold is 3 (approximately equivalent to TCP declaring an RTO after two TLPs).
+      - quote: "The RECOMMENDED value for kPersistentCongestionThreshold is 3"
+      - check: quic/cc.go — verify kPersistentCongestionThreshold constant equals 3.
+- [ ] `9002/7.3-7.6-32` **MUST** -- The two packets bounding the persistent congestion period must be ack-eliciting, since a receiver is only required to acknowledge ack-eliciting packets within max_ack_delay.
+      - quote: "These two packets MUST be ack-eliciting, since a receiver is required to acknowledge only ack-eliciting packets within its maximum acknowledgment delay"
+      - check: quic/cc.go + quic/loss.go — verify the endpoint packets of the persistent-congestion window are filtered to ack-eliciting lost packets (sent-packet bookkeeping must record ack-eliciting flag).
+- [ ] `9002/7.3-7.6-33` **SHOULD NOT** -- The persistent congestion period should not start until there is at least one RTT sample, to avoid declaring it with too few probes under an inflated initial RTT.
+      - quote: "The persistent congestion period SHOULD NOT start until there is at least one RTT sample."
+      - check: quic/rtt.go + quic/cc.go — verify persistent congestion cannot be declared before the first RTT sample (kInitialRtt-based PTO era must not count toward the period).
+- [ ] `9002/7.3-7.6-34` **SHOULD** -- Persistent congestion should consider packets sent across all packet number spaces, since network congestion is not affected by packet number spaces.
+      - quote: "persistent congestion SHOULD consider packets sent across packet number spaces."
+      - check: quic/cc.go + quic/packet.go — check whether the persistent-congestion scan spans Initial/Handshake/1-RTT sent-packet histories or is per-space; per-space is only the MAY fallback (7.3-7.6-35).
+- [ ] `9002/7.3-7.6-36` **MUST** -- When persistent congestion is declared, the sender's congestion window must be reduced to the minimum congestion window (kMinimumWindow).
+      - quote: "the sender's congestion window MUST be reduced to the minimum congestion window (kMinimumWindow)"
+      - check: quic/cc.go — verify persistent congestion sets cwnd = kMinimumWindow (2 * max_datagram_size per Appendix B), which re-enters slow start since cwnd < ssthresh.
+
+## 9002-5
+
+- [ ] `9002/5-6` **SHOULD NOT** -- An ACK frame that does not newly acknowledge the largest acknowledged packet should not be used to update RTT estimates (avoids duplicate samples per packet).
+      - quote: "an ACK frame SHOULD NOT be used to update RTT estimates if it does not newly acknowledge the largest acknowledged packet"
+      - check: quic/conn_recv.go — check the newly-acknowledged test on largest_acked before feeding rtt.go; a duplicate/old ACK must not re-sample.
+- [ ] `9002/5-7` **MUST NOT** -- An RTT sample must not be generated from an ACK frame that does not newly acknowledge at least one ack-eliciting packet (its ACK Delay could be arbitrarily large).
+      - quote: "An RTT sample MUST NOT be generated on receiving an ACK frame that does not newly acknowledge at least one ack-eliciting packet."
+      - check: quic/conn_recv.go — verify the newly-acked set is scanned for the ack-eliciting flag (from loss.go sent-packet bookkeeping) before RTT sampling.
+- [ ] `9002/5-8` **MUST** -- On the very first RTT sample, min_rtt must be set to latest_rtt.
+      - quote: "min_rtt MUST be set to the latest_rtt on the first RTT sample."
+      - check: quic/rtt.go — first-sample branch must seed min_rtt from latest_rtt, not from kInitialRtt.
+- [ ] `9002/5-9` **MUST** -- On every subsequent sample, min_rtt must be set to min(min_rtt, latest_rtt).
+      - quote: "min_rtt MUST be set to the lesser of min_rtt and latest_rtt (Section 5.1) on all other samples."
+      - check: quic/rtt.go — check min_rtt = min(min_rtt, latest_rtt) on each sample; loss.go uses min_rtt to reject implausibly small samples in time-threshold loss.
+- [ ] `9002/5-11` **SHOULD** -- After persistent congestion is established, endpoints should reset min_rtt to the newest RTT sample (avoids repeatedly declaring persistent congestion when RTT increases).
+      - quote: "Endpoints SHOULD set the min_rtt to the newest RTT sample after persistent congestion is established."
+      - check: quic/cc.go (persistent congestion path) + quic/rtt.go — check a min_rtt-reset hook fires when persistent congestion is declared; likely-missing sibling-divergence candidate.
+- [ ] `9002/5-13` **SHOULD NOT** -- Implementations should not refresh min_rtt too often, since the true path minimum is not frequently observable.
+      - quote: "Implementations SHOULD NOT refresh the min_rtt value too often since the actual minimum RTT of the path is not frequently observable."
+      - check: quic/rtt.go — if any min_rtt refresh exists (5-12), verify it is rate-limited/event-gated, not per-ACK.
+- [ ] `9002/5-15` **SHOULD** -- The endpoint should ignore the peer's max_ack_delay (not clamp reported delays to it) until the handshake is confirmed, since handshake-time delays can legitimately exceed it.
+      - quote: "SHOULD ignore the peer's max_ack_delay until the handshake is confirmed;"
+      - check: quic/rtt.go — the min(ack_delay, max_ack_delay) clamp must be gated on a handshake-confirmed flag (client: confirmed on HANDSHAKE_DONE, see conn_recv.go/close.go key-discard path).
+- [ ] `9002/5-18` **MUST** -- After the handshake is confirmed, the endpoint must clamp the acknowledgment delay used for RTT adjustment to the lesser of the reported delay and the peer's max_ack_delay.
+      - quote: "MUST use the lesser of the acknowledgment delay and the peer's max_ack_delay after the handshake is confirmed"
+      - check: quic/rtt.go — verify ack_delay = min(ack_delay, peer max_ack_delay from transport parameters) once handshake confirmed; max_ack_delay must come from the peer's TP, not a local constant.
+- [ ] `9002/5-19` **MUST NOT** -- The endpoint must not subtract the acknowledgment delay from an RTT sample if the result would be smaller than min_rtt (limits underestimation from a misreporting peer).
+      - quote: "MUST NOT subtract the acknowledgment delay from the RTT sample if the resulting value is smaller than the min_rtt."
+      - check: quic/rtt.go — verify the guard `latest_rtt >= min_rtt + ack_delay` (or equivalent) protects the subtraction; adjusted_rtt falls back to raw latest_rtt otherwise.
+- [ ] `9002/5-20` **SHOULD** -- If acknowledgment processing was locally postponed because decryption keys were unavailable (e.g. client gets a 0-RTT ack before 1-RTT keys), the endpoint should subtract that local delay from its RTT sample until the handshake is confirmed.
+      - quote: "an endpoint SHOULD subtract such local delays from its RTT sample until the handshake is confirmed."
+      - check: quic/conn_recv.go — if undecryptable packets are buffered and replayed after key install, the buffering delay must be subtracted from the sample pre-confirmation; if no 0-RTT and no buffering (repo non-goal), record N/A with proof no replay path feeds rtt.go.
+
+## 9002-6.1-6.2
+
+- [ ] `9002/6.1-6.2-5` **RECOMMENDED** -- The recommended initial packet reordering threshold kPacketThreshold is 3.
+      - quote: "The RECOMMENDED initial value for the packet reordering threshold (kPacketThreshold) is 3"
+      - check: quic/loss.go: check kPacketThreshold constant equals 3.
+- [ ] `9002/6.1-6.2-6` **SHOULD NOT** -- Implementations should not use a packet reordering threshold smaller than 3.
+      - quote: "implementations SHOULD NOT use a packet threshold less than 3"
+      - check: quic/loss.go: ensure no configuration path can lower the packet threshold below 3.
+- [ ] `9002/6.1-6.2-7` **SHOULD** -- Once a later packet in the same packet number space is acknowledged, the endpoint should declare an earlier packet lost if it was sent more than the time threshold ago.
+      - quote: "an endpoint SHOULD declare an earlier packet lost if it was sent a threshold amount of time in the past."
+      - check: quic/loss.go: time-threshold loss must trigger only after a later packet within the SAME PN space is acked.
+- [ ] `9002/6.1-6.2-8` **MUST** -- The time threshold must be at least the local timer granularity (kGranularity) to avoid declaring packets lost too early.
+      - quote: "this time threshold MUST be set to at least the local timer granularity, as indicated by the kGranularity constant."
+      - check: quic/loss.go: loss delay computation must floor at kGranularity.
+- [ ] `9002/6.1-6.2-10` **SHOULD** -- If packets sent before the largest acknowledged packet cannot yet be declared lost, a loss-detection timer should be set for the remaining time.
+      - quote: "then a timer SHOULD be set for the remaining time."
+      - check: quic/loss.go: setLossDetectionTimer must arm at earliest loss_time = sentTime + lossDelay across unacked packets.
+- [ ] `9002/6.1-6.2-11` **RECOMMENDED** -- The recommended time threshold multiplier kTimeThreshold is 9/8 of the RTT.
+      - quote: "The RECOMMENDED time threshold (kTimeThreshold), expressed as an RTT multiplier, is 9/8."
+      - check: quic/loss.go: check kTimeThreshold constant is 9/8 (e.g. rtt*9/8 integer math without truncation to 1).
+- [ ] `9002/6.1-6.2-12` **RECOMMENDED** -- The recommended timer granularity kGranularity is 1 millisecond.
+      - quote: "The RECOMMENDED value of the timer granularity (kGranularity) is 1 millisecond."
+      - check: quic/loss.go and quic/pto.go: kGranularity constant = 1ms, shared by loss delay and PTO floors.
+- [ ] `9002/6.1-6.2-15` **MUST NOT** -- A PTO timer expiration must not cause prior unacknowledged packets to be marked as lost; loss is declared only via packet/time thresholds on ACK receipt.
+      - quote: "MUST NOT cause prior unacknowledged packets to be marked as lost."
+      - check: quic/pto.go: onPTOExpired must only send probes, never move packets to lost or trigger cc.go OnPacketsLost.
+- [ ] `9002/6.1-6.2-18` **MUST** -- The PTO period must be at least kGranularity so the timer cannot expire immediately.
+      - quote: "The PTO period MUST be at least kGranularity to avoid the timer expiring immediately."
+      - check: quic/pto.go: floor final PTO period at kGranularity (relevant when smoothed_rtt is tiny on loopback).
+- [ ] `9002/6.1-6.2-19` **MUST** -- When ack-eliciting packets are in flight in multiple packet number spaces, the PTO timer must be set to the earlier deadline of the Initial and Handshake spaces.
+      - quote: "the timer MUST be set to the earlier value of the Initial and Handshake packet number spaces."
+      - check: quic/pto.go: timer selection must take min over Initial/Handshake space deadlines during the handshake.
+- [ ] `9002/6.1-6.2-20` **MUST NOT** -- An endpoint must not arm the PTO timer for the Application Data packet number space until the handshake is confirmed.
+      - quote: "An endpoint MUST NOT set its PTO timer for the Application Data packet number space until the handshake is confirmed."
+      - check: quic/pto.go: gate AppData (incl. 0-RTT/1-RTT) PTO arming on handshake-confirmed (HANDSHAKE_DONE received on client).
+- [ ] `9002/6.1-6.2-21` **SHOULD** -- A sender should restart its PTO timer every time an ack-eliciting packet is sent or acknowledged, or when Initial or Handshake keys are discarded.
+      - quote: "A sender SHOULD restart its PTO timer every time an ack-eliciting packet is sent or acknowledged, or when Initial or Handshake keys are discarded"
+      - check: quic/pto.go + close.go: verify re-arm hooks on send (send.go), on ACK processing (conn_recv.go), and on key discard (close.go).
+- [ ] `9002/6.1-6.2-22` **MUST** -- When a PTO timer expires, the PTO backoff must be increased so the PTO period doubles.
+      - quote: "When a PTO timer expires, the PTO backoff MUST be increased, resulting in the PTO period being set to twice its current value."
+      - check: quic/pto.go: ptoCount increment on expiry; period scaled by 2^ptoCount.
+- [ ] `9002/6.1-6.2-27` **MUST NOT** -- The PTO timer must not be armed while a time-threshold loss-detection timer is set; the loss timer takes precedence.
+      - quote: "The PTO timer MUST NOT be set if a timer is set for time threshold loss detection"
+      - check: quic/loss.go + pto.go: unified timer arbitration — if any space has a loss_time, arm that instead of PTO.
+- [ ] `9002/6.1-6.2-29` **SHOULD** -- When no previous RTT is available, the initial RTT should be 333 milliseconds, yielding an initial handshake PTO of 1 second.
+      - quote: "When no previous RTT is available, the initial RTT SHOULD be set to 333 milliseconds."
+      - check: quic/rtt.go: kInitialRtt constant = 333ms; verify first PTO before any sample computes to ~1s (initialRtt + 2*initialRtt).
+- [ ] `9002/6.1-6.2-31` **SHOULD NOT** -- The PATH_CHALLENGE/PATH_RESPONSE delay should not be treated as an RTT sample (it must not update smoothed_rtt/rttvar/min_rtt).
+      - quote: "the delay SHOULD NOT be considered an RTT sample."
+      - check: quic/rtt.go + conn_recv.go: confirm PATH_RESPONSE handling never calls the RTT sampler.
+- [ ] `9002/6.1-6.2-33` **MUST** -- When Initial or Handshake keys are discarded, the PTO and loss-detection timers must be reset, since a timer may reference the discarded space.
+      - quote: "When Initial or Handshake keys are discarded, the PTO and loss detection timers MUST be reset"
+      - check: quic/close.go: key-discard path must clear the discarded space's sent-packet state and re-run timer arming in loss.go/pto.go.
+- [ ] `9002/6.1-6.2-36` **MUST** -- The client must keep the PTO timer armed — even with no packets in flight — until an acknowledgment of one of its Handshake packets arrives or the handshake is confirmed, to unblock an amplification-limited server.
+      - quote: "the client MUST set the PTO timer if the client has not received an acknowledgment for any of its Handshake packets and the handshake is not confirmed"
+      - check: quic/pto.go: verify PTO arming does not short-circuit on empty in-flight before the first Handshake ack / handshake confirmation.
+- [ ] `9002/6.1-6.2-37` **MUST** -- When that pre-validation PTO fires, the client must send a Handshake packet if it possesses Handshake keys.
+      - quote: "When the PTO fires, the client MUST send a Handshake packet if it has Handshake keys"
+      - check: quic/pto.go + send.go: probe path must prefer the Handshake space once Handshake keys exist.
+- [ ] `9002/6.1-6.2-38` **MUST** -- If the client lacks Handshake keys when that PTO fires, it must send an Initial packet in a UDP datagram padded to at least 1200 bytes.
+      - quote: "it MUST send an Initial packet in a UDP datagram with a payload of at least 1200 bytes."
+      - check: quic/pto.go + send.go/packet.go: Initial-space probe datagrams must be padded to >=1200 bytes.
+- [ ] `9002/6.1-6.2-41` **MUST** -- When a PTO timer expires, the sender must send at least one ack-eliciting packet in the affected packet number space as a probe.
+      - quote: "a sender MUST send at least one ack-eliciting packet in the packet number space as a probe."
+      - check: quic/pto.go: onPTOExpired must guarantee a probe in the expired space even if cwnd is exhausted (probes are not cwnd-gated in send.go).
+- [ ] `9002/6.1-6.2-43` **MUST** -- Every probe packet sent on a PTO must be ack-eliciting.
+      - quote: "All probe packets sent on a PTO MUST be ack-eliciting."
+      - check: quic/pto.go + send.go: probe builder must never emit an ACK/PADDING-only packet; add PING if nothing else is ack-eliciting.
+- [ ] `9002/6.1-6.2-44` **SHOULD** -- Besides the expired space, the sender should also send ack-eliciting probes from other packet number spaces that have in-flight data, coalescing where possible.
+      - quote: "the sender SHOULD send ack-eliciting packets from other packet number spaces with in-flight data, coalescing packets if possible."
+      - check: quic/pto.go: during handshake, probe both Handshake and Application Data spaces when both have in-flight data.
+- [ ] `9002/6.1-6.2-46` **SHOULD** -- An endpoint should include new data in packets sent on PTO expiration.
+      - quote: "An endpoint SHOULD include new data in packets that are sent on PTO expiration."
+      - check: quic/pto.go + send.go: probe content selection should prefer fresh stream/CRYPTO data over pure PING.
+- [ ] `9002/6.1-6.2-49` **SHOULD** -- When there is no new or retransmittable data, the sender should send a PING or other ack-eliciting frame in a single packet and rearm the PTO timer.
+      - quote: "the sender SHOULD send a PING or other ack-eliciting frame in a single packet, rearming the PTO timer."
+      - check: quic/pto.go: empty-payload probe path must fall back to PING and re-arm the timer.
+
+## 9002-B
+
+- [ ] `9002/B-3` **RECOMMENDED** (VERIFY) -- kLossReductionFactor scales down the congestion window on a new loss event; the recommended value is 0.5.
+      - quote: "Scaling factor applied to reduce the congestion window when a new loss event is detected. Section 7 recommends a value of 0.5."
+      - check: quic/cc.go — verify loss-reduction factor 0.5 (e.g. cwnd/2 or ssthresh = cwnd*0.5) in the congestion-event path.
+- [ ] `9002/B-4` **RECOMMENDED** (VERIFY) -- kPersistentCongestionThreshold is a PTO multiplier defining the persistent-congestion period; the recommended value is 3.
+      - quote: "Period of time for persistent congestion to be established, specified as a PTO multiplier. Section 7.6 recommends a value of 3."
+      - check: quic/cc.go — verify persistent-congestion threshold constant = 3 used in the §7.6 duration formula (smoothed_rtt + max(4*rttvar, kGranularity) + max_ack_delay) * 3.
+
+## 9002-6.3-7.2
+
+- [ ] `9002/6.3-7.2-7` **MUST** -- When Initial or Handshake packet protection keys are discarded, the sender must discard all loss-recovery state associated with packets sent under those keys.
+      - quote: "The sender MUST discard all recovery state associated with those packets"
+      - check: quic/close.go (key discard on level change) + quic/loss.go — verify discarding a packet-number space drops all sent-packet records, loss times, and PTO state for that space.
+- [ ] `9002/6.3-7.2-8` **MUST** -- When keys are discarded, the sender must remove the packets sent with those keys from the count of bytes in flight.
+      - quote: "MUST remove them from the count of bytes in flight"
+      - check: quic/close.go + quic/cc.go — verify key/space discard subtracts each in-flight packet's size from bytes_in_flight without triggering congestion events.
+- [ ] `9002/6.3-7.2-15` **MUST** -- A sender using a congestion controller other than the specified NewReno-like one must conform to the congestion control guidelines in RFC 8085 Section 3.1.
+      - quote: "the chosen controller MUST conform to the congestion control guidelines specified in Section 3.1 of [RFC8085]"
+      - check: quic/bbr.go — the opt-in BBR controller must satisfy RFC 8085 §3.1 guidelines (react to loss, bound send rate); audit its loss/ECN reaction paths.
+- [ ] `9002/6.3-7.2-20` **MUST NOT** -- An endpoint must not send a packet that would push bytes_in_flight above the congestion window, except for the PTO and recovery-entry carve-outs.
+      - quote: "An endpoint MUST NOT send a packet if it would cause bytes_in_flight (see Appendix B.2) to be larger than the congestion window"
+      - check: quic/send.go — verify the congestion-window gate blocks any in-flight-counting packet that would exceed cwnd in quic/cc.go (and the BBR path in quic/bbr.go).
+- [ ] `9002/6.3-7.2-25` **SHOULD** -- Endpoints should use an initial congestion window of ten times the maximum datagram size (kInitialWindow = 10 * max_datagram_size).
+      - quote: "Endpoints SHOULD use an initial congestion window of ten times the maximum datagram size (max_datagram_size)"
+      - check: quic/cc.go — check the initial window constant is 10 * max_datagram_size, computed from the actual configured datagram size, not a hardcoded byte count.
+- [ ] `9002/6.3-7.2-26` **SHOULD** -- The initial congestion window is capped at the larger of 14,720 bytes or twice the maximum datagram size.
+      - quote: "while limiting the window to the larger of 14,720 bytes or twice the maximum datagram size"
+      - check: quic/cc.go — verify initial window = min(10 * max_datagram_size, max(14720, 2 * max_datagram_size)); the 14,720-byte cap matters if max_datagram_size > 1472.
+- [ ] `9002/6.3-7.2-27` **SHOULD** -- If the maximum datagram size changes during the connection, the initial congestion window should be recalculated with the new size.
+      - quote: "If the maximum datagram size changes during the connection, the initial congestion window SHOULD be recalculated with the new size."
+      - check: quic/cc.go — check whether max_datagram_size can change (e.g. from transport parameters after handshake) and whether the initial-window value is recomputed; if size is fixed for the connection, document that.
+- [ ] `9002/6.3-7.2-28` **SHOULD** -- If the maximum datagram size is decreased in order to complete the handshake, the congestion window should be reset to the new initial congestion window.
+      - quote: "If the maximum datagram size is decreased in order to complete the handshake, the congestion window SHOULD be set to the new initial congestion window."
+      - check: quic/cc.go + quic/send.go — if the client ever shrinks its datagram size mid-handshake (PMTU fallback), cwnd must be reset to the recomputed initial window; if no such shrink path exists, verify and note.
+- [ ] `9002/6.3-7.2-31` **RECOMMENDED** -- The recommended minimum congestion window (kMinimumWindow) is 2 * max_datagram_size.
+      - quote: "The RECOMMENDED value is 2 * max_datagram_size."
+      - check: quic/cc.go — check the minimum-window constant equals 2 * max_datagram_size and derives from the same datagram-size variable as the initial window.
+
+## 9002-A
+
+- [ ] `9002/A-10` **RECOMMENDED** -- kPacketThreshold, the maximum packet reordering before packet-threshold loss detection declares loss, has recommended value 3.
+      - quote: "Maximum reordering in packets before packet threshold loss detection considers a packet lost. The value recommended in Section 6.1.1 is 3."
+      - check: quic/loss.go — verify packet-threshold constant equals 3.
+- [ ] `9002/A-11` **RECOMMENDED** -- kTimeThreshold, the time-reordering window expressed as an RTT multiplier, has recommended value 9/8.
+      - quote: "Specified as an RTT multiplier. The value recommended in Section 6.1.2 is 9/8."
+      - check: quic/loss.go — verify time threshold multiplier is 9/8 (e.g. rtt*9/8 computed without integer truncation).
+- [ ] `9002/A-12` **RECOMMENDED** -- kGranularity is the system-dependent timer granularity, with a recommended value of 1 ms.
+      - quote: "Timer granularity. This is a system-dependent value, and Section 6.1.2 recommends a value of 1 ms."
+      - check: quic/loss.go + quic/pto.go — verify kGranularity = 1ms and that it floors both loss_delay and the PTO variance term.
+- [ ] `9002/A-13` **RECOMMENDED** -- kInitialRtt, the RTT assumed before any RTT sample exists, has recommended value 333 ms.
+      - quote: "The RTT used before an RTT sample is taken. The value recommended in Section 6.2.2 is 333 ms."
+      - check: quic/rtt.go — verify initial RTT constant is 333ms (not the older 500ms from draft versions).
+

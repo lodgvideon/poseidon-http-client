@@ -47,6 +47,21 @@ func hostHeaderValue(headers []hpack.HeaderField) (string, bool) {
 	return "", false
 }
 
+// defaultSensitiveField reports whether a field name carries credentials by
+// convention and so must not enter the QPACK dynamic table, a compression context
+// shared by every request on the connection (RFC 9114 §10.3, RFC 9204 §7.1). The
+// caller can mark any other field with hpack.HeaderField.Sensitive; this is the
+// floor, not the ceiling, because a caller who never sets the flag would otherwise
+// get the default-path exposure the rule exists to prevent. Names are already
+// lowercase — validFieldName rejects uppercase (§4.2).
+func defaultSensitiveField(name []byte) bool {
+	switch string(name) {
+	case "authorization", "proxy-authorization", "cookie":
+		return true
+	}
+	return false
+}
+
 // EncodeHeaders QPACK-encodes the request's field section — the request pseudo-
 // headers first, then the regular headers (RFC 9114 §4.3.1) — and appends it to
 // dst wrapped in a HEADERS frame (§7.2.2). It returns ErrH3Message if a required
@@ -99,6 +114,7 @@ func (r *Request) EncodeHeaders(enc *qpack.Encoder, dst []byte, maxFieldSection 
 		if !validFieldName(h.Name) || !validFieldValue(h.Value) || forbiddenRequestField(h.Name, h.Value) {
 			return nil, ErrH3Message
 		}
+		h.Sensitive = h.Sensitive || defaultSensitiveField(h.Name)
 		fields = append(fields, h)
 	}
 	// The field-section size is the uncompressed cost of every field — name plus

@@ -52,6 +52,18 @@ func (c *Conn) flushRetransmits(sp int) error {
 		if rf.kind == retransRetire && c.pendingRetires > 0 {
 			c.pendingRetires-- // a queued RETIRE_CONNECTION_ID is now on the wire
 		}
+		if rf.kind == retransStreamsBlocked {
+			// RFC 9000 §13.3: re-send a blocked signal "only while the endpoint is
+			// blocked on the corresponding limit", and "these frames always include the
+			// limit that is causing blocking at the time that they are transmitted". The
+			// descriptor froze the limit at emit time, so drop it if the peer has since
+			// given us room, and otherwise restate today's limit rather than the stale one.
+			limit, blocked := c.streamsBlockedNow(rf.fin)
+			if !blocked {
+				continue
+			}
+			rf.offset = limit
+		}
 		pkt, err := c.sealPacket(sp, rf.encode(nil), true, []retransFrame{rf}, false)
 		if err != nil {
 			_ = c.flushBatch(&batch) // best-effort: send what was already sealed
@@ -228,6 +240,13 @@ func (c *Conn) sealPacket(sp int, frames []byte, ackEliciting bool, retrans []re
 		c.hdrScratch, pnOffset = AppendLongHeader(c.hdrScratch[:0], PacketHandshake, QUICVersion1, c.dcid, c.scid, nil, pnLen, length)
 	default:
 		c.hdrScratch, pnOffset = AppendShortHeader(c.hdrScratch[:0], c.dcid, pnLen, c.appSendPhase())
+		if c.spin {
+			// The latency spin bit (0x20, RFC 9000 §17.4). Not implemented, so it is a
+			// per-connection random constant rather than a constant 0 — §17.4's
+			// RECOMMENDED. It sits outside the header-protection mask (§17.3.1 protects
+			// 0x1f on a short header), so it goes in before the seal.
+			c.hdrScratch[0] |= 0x20
+		}
 	}
 	for i := pnLen - 1; i >= 0; i-- {
 		c.hdrScratch = append(c.hdrScratch, byte(pn>>(8*uint(i))))

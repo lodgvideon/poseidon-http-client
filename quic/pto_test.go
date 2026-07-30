@@ -25,7 +25,9 @@ func TestConn_PTOPeriod(t *testing.T) {
 // unacknowledged packet's frames and backs off (RFC 9002 §6.2.4).
 func TestConn_OnPTO_QueuesProbe(t *testing.T) {
 	base := time.Unix(1, 0)
-	c := &Conn{now: func() time.Time { return base }}
+	// handshakeConfirmed: 1-RTT data is only in flight after HANDSHAKE_DONE, and the
+	// Application-space probe timer is not armed before that (RFC 9002 §6.2.1).
+	c := &Conn{now: func() time.Time { return base }, handshakeConfirmed: true}
 	c.sent[spaceApp].onSent(0, base, true, streamFrame(0, 0, "oldest"))
 	c.sent[spaceApp].onSent(1, base.Add(ms), true, streamFrame(0, 6, "newer"))
 
@@ -103,7 +105,7 @@ func TestConn_ReadWithPTO_ProbesOnTimeout(t *testing.T) {
 		t.Fatal(err)
 	}
 	pc := &deadlinePC{datagram: []byte("later")}
-	c := &Conn{pc: pc, dcid: []byte("ptotest0"), oneRTTSealer: sealer, now: func() time.Time { return base }}
+	c := &Conn{pc: pc, dcid: []byte("ptotest0"), oneRTTSealer: sealer, now: func() time.Time { return base }, handshakeConfirmed: true}
 	c.sent[spaceApp].onSent(0, base, true, streamFrame(0, 0, "req")) // in flight, probeable
 
 	buf := make([]byte, 64)

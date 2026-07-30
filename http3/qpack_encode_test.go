@@ -85,14 +85,14 @@ func sampleRequest() (*Request, []hpack.HeaderField) {
 		Scheme:    "https",
 		Authority: "example.com",
 		Path:      "/",
-		Headers:   []hpack.HeaderField{{Name: []byte("cookie"), Value: []byte("sess=abc")}},
+		Headers:   []hpack.HeaderField{{Name: []byte("user-agent"), Value: []byte("poseidon/1")}},
 	}
 	want := []hpack.HeaderField{
 		{Name: []byte(":method"), Value: []byte("GET")},
 		{Name: []byte(":scheme"), Value: []byte("https")},
 		{Name: []byte(":authority"), Value: []byte("example.com")},
 		{Name: []byte(":path"), Value: []byte("/")},
-		{Name: []byte("cookie"), Value: []byte("sess=abc")},
+		{Name: []byte("user-agent"), Value: []byte("poseidon/1")},
 	}
 	return req, want
 }
@@ -272,7 +272,64 @@ func TestConcurrent_QPACKEncoderDynamic_UnderRace(t *testing.T) {
 		}(g)
 	}
 
-	encWG.Wait()  // let every encoder finish
-	close(stop)   // then stop the acknowledger
+	encWG.Wait() // let every encoder finish
+	close(stop)  // then stop the acknowledger
 	ackWG.Wait()
+}
+
+// TestConformance_RFC9114_Sec103_CredentialFieldsNeverIndexed closes the loop on
+// the §10.3 MUST NOT: the qpack encoder honours HeaderField.Sensitive, but nothing
+// on the request path set it, so on the default Do path — where the dynamic table
+// is enabled by the SERVER's advertised capacity, not by caller opt-in — a bearer
+// token or session cookie was inserted into the connection-wide compression context
+// on its second use. Credential-bearing names are now sensitive by default.
+func TestConformance_RFC9114_Sec103_CredentialFieldsNeverIndexed(t *testing.T) {
+	enc, err := qpack.NewDynamicEncoder(4096, 4096)
+	if err != nil {
+		t.Fatalf("NewDynamicEncoder: %v", err)
+	}
+	enc.DrainEncoderInstructions(nil) // drop Set Dynamic Table Capacity
+	req := &Request{
+		Method: "GET", Scheme: "https", Authority: "e", Path: "/",
+		Headers: []hpack.HeaderField{
+			{Name: []byte("authorization"), Value: []byte("Bearer s3cr3t")},
+			{Name: []byte("cookie"), Value: []byte("sid=deadbeef")},
+			{Name: []byte("proxy-authorization"), Value: []byte("Basic zzz")},
+			{Name: []byte("x-run-id"), Value: []byte("load-test-42")},
+		},
+	}
+	for round := 0; round < 3; round++ {
+		if _, err := req.EncodeHeaders(enc, nil, ^uint64(0)); err != nil {
+			t.Fatalf("round %d: EncodeHeaders: %v", round, err)
+		}
+	}
+	// The instruction stream is Huffman-coded, so scanning it for the plaintext
+	// proves nothing. Count insertions instead. Exactly two fields may enter the
+	// table: :authority (a static NAME match, so a new entry) and x-run-id. None of
+	// the three credential fields may.
+	if got := enc.InsertCount(); got != 2 {
+		t.Fatalf("InsertCount = %d, want 2 (:authority + x-run-id) — a credential was indexed", got)
+	}
+
+	// Control: give the same three values ordinary names and they DO get inserted,
+	// so the assertion above is about the names, not about an inert table.
+	ctl, err := qpack.NewDynamicEncoder(4096, 4096)
+	if err != nil {
+		t.Fatalf("NewDynamicEncoder: %v", err)
+	}
+	plain := *req
+	plain.Headers = []hpack.HeaderField{
+		{Name: []byte("x-a"), Value: []byte("Bearer s3cr3t")},
+		{Name: []byte("x-b"), Value: []byte("sid=deadbeef")},
+		{Name: []byte("x-c"), Value: []byte("Basic zzz")},
+		{Name: []byte("x-run-id"), Value: []byte("load-test-42")},
+	}
+	for round := 0; round < 3; round++ {
+		if _, err := plain.EncodeHeaders(ctl, nil, ^uint64(0)); err != nil {
+			t.Fatalf("control round %d: %v", round, err)
+		}
+	}
+	if got := ctl.InsertCount(); got != 5 {
+		t.Fatalf("control InsertCount = %d, want 5 — the fixture does not exercise insertion", got)
+	}
 }

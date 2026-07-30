@@ -17,6 +17,20 @@ type Decoder struct {
 // NewDecoder returns a QPACK decoder.
 func NewDecoder() *Decoder { return &Decoder{} }
 
+// maxQPACKInteger is the ceiling every QPACK prefixed integer is read at: RFC
+// 9204 §4.1.1 requires implementations to decode integers up to and including 62
+// bits long. HPACK's own 2^32-1 ceiling is too low here — a Section
+// Acknowledgment or Stream Cancellation carries a QUIC stream ID, which is legal
+// up to 2^62-1, and rejecting one false-rejects a conformant server.
+const maxQPACKInteger = 1<<62 - 1
+
+// decodeInt reads an N-bit prefix integer at the QPACK ceiling. Values that are
+// out of range for their field (an index past the table, a length past the input)
+// stay the caller's business.
+func decodeInt(src []byte, prefixBits uint8) (uint64, int, error) {
+	return hpack.DecodeIntegerMax(src, prefixBits, maxQPACKInteger)
+}
+
 // DecodeFieldSection parses the QPACK field section in src, resolving dynamic
 // references against dt (nil for the static-only profile), and calls emit once
 // per header field, in order. The name and value slices passed to emit are
@@ -41,19 +55,19 @@ func (d *Decoder) DecodeFieldSection(src []byte, dt *DynamicTable, emit func(nam
 		switch b := src[p]; {
 		case b&0x80 != 0:
 			// Indexed Field Line (1Txxxxxx): §4.5.2 (T=1 static, T=0 dynamic).
-			p, err = d.decodeIndexed(src, p, base, dt, emit)
+			p, err = d.decodeIndexed(src, p, base, ric, dt, emit)
 		case b&0x40 != 0:
 			// Literal Field Line with Name Reference (01NTxxxx): §4.5.3.
-			p, err = d.decodeLiteralNameRef(src, p, base, dt, emit)
+			p, err = d.decodeLiteralNameRef(src, p, base, ric, dt, emit)
 		case b&0x20 != 0:
 			// Literal Field Line with Literal Name (001NHxxx): §4.5.6.
 			p, err = d.decodeLiteralName(src, p, emit)
 		case b&0x10 != 0:
 			// Indexed Field Line with Post-Base Index (0001xxxx): §4.5.4.
-			p, err = d.decodePostBaseIndexed(src, p, base, dt, emit)
+			p, err = d.decodePostBaseIndexed(src, p, base, ric, dt, emit)
 		default:
 			// Literal Field Line with Post-Base Name Reference (0000Nxxx): §4.5.5.
-			p, err = d.decodePostBaseNameRef(src, p, base, dt, emit)
+			p, err = d.decodePostBaseNameRef(src, p, base, ric, dt, emit)
 		}
 		if err != nil {
 			return err
@@ -79,13 +93,13 @@ func RequiredInsertCount(src []byte, dt *DynamicTable) (uint64, error) {
 
 // decodeIndexed handles an Indexed Field Line (§4.5.2), static or dynamic
 // relative to Base, and returns the offset past it.
-func (d *Decoder) decodeIndexed(src []byte, p int, base uint64, dt *DynamicTable, emit func(name, value []byte) error) (int, error) {
+func (d *Decoder) decodeIndexed(src []byte, p int, base, ric uint64, dt *DynamicTable, emit func(name, value []byte) error) (int, error) {
 	static := src[p]&0x40 != 0
-	idx, n, ierr := hpack.DecodeInteger(src[p:], 6)
+	idx, n, ierr := decodeInt(src[p:], 6)
 	if ierr != nil {
 		return p, ErrDecompressionFailed
 	}
-	name, val, ok := resolveIndexed(dt, base, idx, static)
+	name, val, ok := resolveIndexed(dt, base, ric, idx, static)
 	if !ok {
 		return p, ErrDecompressionFailed
 	}
@@ -94,13 +108,13 @@ func (d *Decoder) decodeIndexed(src []byte, p int, base uint64, dt *DynamicTable
 
 // decodeLiteralNameRef handles a Literal Field Line with Name Reference
 // (§4.5.3), static or dynamic relative to Base, followed by a literal value.
-func (d *Decoder) decodeLiteralNameRef(src []byte, p int, base uint64, dt *DynamicTable, emit func(name, value []byte) error) (int, error) {
+func (d *Decoder) decodeLiteralNameRef(src []byte, p int, base, ric uint64, dt *DynamicTable, emit func(name, value []byte) error) (int, error) {
 	static := src[p]&0x10 != 0
-	idx, n, ierr := hpack.DecodeInteger(src[p:], 4)
+	idx, n, ierr := decodeInt(src[p:], 4)
 	if ierr != nil {
 		return p, ErrDecompressionFailed
 	}
-	name, ok := resolveNameRef(dt, base, idx, static)
+	name, ok := resolveNameRef(dt, base, ric, idx, static)
 	if !ok {
 		return p, ErrDecompressionFailed
 	}
@@ -126,12 +140,12 @@ func (d *Decoder) decodeLiteralName(src []byte, p int, emit func(name, value []b
 
 // decodePostBaseIndexed handles an Indexed Field Line with Post-Base Index
 // (§4.5.4): the absolute index is Base + idx.
-func (d *Decoder) decodePostBaseIndexed(src []byte, p int, base uint64, dt *DynamicTable, emit func(name, value []byte) error) (int, error) {
-	idx, n, ierr := hpack.DecodeInteger(src[p:], 4)
+func (d *Decoder) decodePostBaseIndexed(src []byte, p int, base, ric uint64, dt *DynamicTable, emit func(name, value []byte) error) (int, error) {
+	idx, n, ierr := decodeInt(src[p:], 4)
 	if ierr != nil {
 		return p, ErrDecompressionFailed
 	}
-	if dt == nil {
+	if dt == nil || !postBaseWithinRIC(base, ric, idx) {
 		return p, ErrDecompressionFailed
 	}
 	name, val, ok := dt.atPostBase(base, idx)
@@ -144,12 +158,12 @@ func (d *Decoder) decodePostBaseIndexed(src []byte, p int, base uint64, dt *Dyna
 // decodePostBaseNameRef handles a Literal Field Line with Post-Base Name
 // Reference (§4.5.5): the name is at absolute index Base + idx, followed by a
 // literal value.
-func (d *Decoder) decodePostBaseNameRef(src []byte, p int, base uint64, dt *DynamicTable, emit func(name, value []byte) error) (int, error) {
-	idx, n, ierr := hpack.DecodeInteger(src[p:], 3)
+func (d *Decoder) decodePostBaseNameRef(src []byte, p int, base, ric uint64, dt *DynamicTable, emit func(name, value []byte) error) (int, error) {
+	idx, n, ierr := decodeInt(src[p:], 3)
 	if ierr != nil {
 		return p, ErrDecompressionFailed
 	}
-	if dt == nil {
+	if dt == nil || !postBaseWithinRIC(base, ric, idx) {
 		return p, ErrDecompressionFailed
 	}
 	name, _, ok := dt.atPostBase(base, idx)
@@ -165,30 +179,46 @@ func (d *Decoder) decodePostBaseNameRef(src []byte, p int, base uint64, dt *Dyna
 
 // resolveIndexed resolves the name and value of an Indexed Field Line (§4.5.2):
 // from the static table when static, otherwise from dt at Base - idx - 1.
-func resolveIndexed(dt *DynamicTable, base, idx uint64, static bool) (name, value []byte, ok bool) {
+func resolveIndexed(dt *DynamicTable, base, ric, idx uint64, static bool) (name, value []byte, ok bool) {
 	if static {
 		if idx >= uint64(len(staticTable)) {
 			return nil, nil, false
 		}
 		return staticNameB[idx], staticValueB[idx], true
 	}
-	if dt == nil {
+	if dt == nil || !baseRelativeWithinRIC(base, ric, idx) {
 		return nil, nil, false
 	}
 	return dt.atBaseRelative(base, idx)
 }
 
+// baseRelativeWithinRIC reports whether a Base-relative field-line index names an
+// absolute index below the section's declared Required Insert Count. RFC 9204
+// §2.1.2 fixes that count at the largest referenced absolute index plus one, so a
+// reference at or above it means the count is smaller than expected — §2.2.1
+// makes that a connection error of type QPACK_DECOMPRESSION_FAILED.
+func baseRelativeWithinRIC(base, ric, relIndex uint64) bool {
+	return relIndex < base && base-relIndex-1 < ric
+}
+
+// postBaseWithinRIC is baseRelativeWithinRIC for a post-Base index (§4.5.4,
+// §4.5.5), whose absolute index is Base + postIndex.
+func postBaseWithinRIC(base, ric, postIndex uint64) bool {
+	abs := base + postIndex
+	return abs >= base && abs < ric // abs < base means the addition overflowed
+}
+
 // resolveNameRef resolves the name of a Literal Field Line with Name Reference
 // (§4.5.3): from the static table when static, otherwise from dt at
 // Base - idx - 1.
-func resolveNameRef(dt *DynamicTable, base, idx uint64, static bool) (name []byte, ok bool) {
+func resolveNameRef(dt *DynamicTable, base, ric, idx uint64, static bool) (name []byte, ok bool) {
 	if static {
 		if idx >= uint64(len(staticTable)) {
 			return nil, false
 		}
 		return staticNameB[idx], true
 	}
-	if dt == nil {
+	if dt == nil || !baseRelativeWithinRIC(base, ric, idx) {
 		return nil, false
 	}
 	n, _, o := dt.atBaseRelative(base, idx)
@@ -201,7 +231,7 @@ func resolveNameRef(dt *DynamicTable, base, idx uint64, static bool) (name []byt
 // field line. With dt=nil the table is treated as empty (MaxEntries=0), so any
 // non-zero encoded Insert Count is rejected — the static-only profile.
 func parsePrefix(src []byte, dt *DynamicTable) (base, ric uint64, off int, err error) {
-	encIC, n, derr := hpack.DecodeInteger(src, 8)
+	encIC, n, derr := decodeInt(src, 8)
 	if derr != nil {
 		return 0, 0, 0, ErrDecompressionFailed
 	}
@@ -214,7 +244,7 @@ func parsePrefix(src []byte, dt *DynamicTable) (base, ric uint64, off int, err e
 		return 0, 0, 0, ErrDecompressionFailed // the Base byte must be present
 	}
 	sign := src[p]&0x80 != 0
-	delta, m, derr := hpack.DecodeInteger(src[p:], 7)
+	delta, m, derr := decodeInt(src[p:], 7)
 	if derr != nil {
 		return 0, 0, 0, ErrDecompressionFailed
 	}
@@ -281,7 +311,7 @@ func readString(scratch *[]byte, src []byte, p int, prefixBits uint8) (out []byt
 		return nil, p, ErrDecompressionFailed
 	}
 	huff := src[p]&(byte(1)<<prefixBits) != 0
-	length, n, derr := hpack.DecodeInteger(src[p:], prefixBits)
+	length, n, derr := decodeInt(src[p:], prefixBits)
 	if derr != nil {
 		return nil, p, ErrDecompressionFailed
 	}

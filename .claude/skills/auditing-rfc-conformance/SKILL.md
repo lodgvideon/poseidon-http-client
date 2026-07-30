@@ -68,6 +68,11 @@ divergence between your extraction and the catalog is a red flag either way.
 | Task notification truncates the result | `journal.jsonl` in the workflow transcript dir is the source of truth; parse it, not the notification |
 | Old RFCs (2616) are paginated | Tell extractors to ignore page headers/footers and treat wrapped text as continuous; 9110/9112 are unpaginated |
 | Quote "not found" by verifier but rule is right | Expected cosmetic class: extractor dropped inline `(Section X.Y)` or ABNF `;` comments — flag VERIFY, keep the fact |
+| Requirement prose is stronger than its own `level` | Highest-value dispute class (RFC 9002 run): a `SHOULD NOT` written up as "MUST NOT", a lowercase "recommends" in an *informative* appendix tagged `RECOMMENDED`. Left in, the checklist manufactures false hard-MUST failures. Tell verifiers to compare the paraphrase against the quote, not only the quote against the source |
+| A verify pass covers only the first N ids of its unit | Not a refutation — the remaining facts have **one** verifier, which the merge rule must treat as unverified. Re-verify exactly those ids with a fresh independent pair, then patch the rows |
+| API `529 Overloaded` kills verify agents in bursts | Same recovery as a session limit (`resumeFromRunId`), but do not retry immediately — a resume launched while another big workflow is still running just re-earns the 529 |
+| Resuming an already-**completed** run to retry a handful of dead agents | Measured: a resume of a killed run replayed 319 cached agents fine, but a resume of a *finished* run re-ran 292 of 322 from scratch and burned the whole session limit. Resume only a run that died mid-flight; for a few stragglers in a finished run, launch a tiny standalone workflow scoped to exactly those ids |
+| Verifier agents mutate the repo to prove a gap | Two shapes, both caught live: throwaway `_test.go` probes (`quic/zzverify_scid_test.go`), and **edits to production constants left behind** (`kInitialRtt` 333ms→500ms in `quic/pto.go`). A `git add -A` mid-run commits them. Stage by explicit path, and `git status --porcelain` before every commit — account for every line, not just your own |
 
 ## Red flags — stop and restart the step
 

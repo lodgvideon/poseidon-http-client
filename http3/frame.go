@@ -102,6 +102,30 @@ func AppendSettings(dst []byte, settings []Setting) []byte {
 	return dst
 }
 
+// validateSettings rejects a caller-supplied settings slice this client must not
+// put on the wire: a repeated identifier (RFC 9114 §7.2.4, "The same setting
+// identifier MUST NOT occur more than once in the SETTINGS frame") or one of the
+// reserved HTTP/2-carryover identifiers 0x02–0x05, which §7.2.4.1 says MUST NOT be
+// sent. Either makes a conformant peer answer with H3_SETTINGS_ERROR — and this
+// client's own ParseSettings rejects both. The MUST NOT is scoped to identifiers
+// "defined in [HTTP/2] where there is no corresponding HTTP/3 setting", and the
+// HTTP/2 registry starts at 0x01, so the set is exactly 0x02-0x05 -- 0x00 lies
+// outside it and is left to the caller. Dial's defaults always pass; the gate
+// exists for the exported NewClient, whose caller supplies the slice.
+func validateSettings(settings []Setting) error {
+	seen := make(map[uint64]struct{}, len(settings))
+	for _, s := range settings {
+		if s.ID >= 0x02 && s.ID <= 0x05 {
+			return ErrH3Settings
+		}
+		if _, dup := seen[s.ID]; dup {
+			return ErrH3Settings
+		}
+		seen[s.ID] = struct{}{}
+	}
+	return nil
+}
+
 // ParseFrameHeader reads an HTTP/3 frame header from b — the Type and Length
 // varints (RFC 9114 §7.1) — returning the type, the payload length, and the
 // number of header bytes consumed. If the header is not fully present it returns

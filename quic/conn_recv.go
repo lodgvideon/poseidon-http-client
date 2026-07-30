@@ -258,8 +258,12 @@ func (c *Conn) updateAppAckDeferral(now time.Time) {
 		return
 	}
 	if c.ackDeadline.IsZero() {
-		// We advertise no max_ack_delay, so our value is the RFC 9000 §18.2 default.
-		c.ackDeadline = now.Add(defaultMaxAckDelay)
+		// We advertise no max_ack_delay, so our value is the RFC 9000 §18.2 default —
+		// and §18.2 says the advertised value "SHOULD include the receiver's expected
+		// delays in alarms firing". Arming at exactly the advertised bound leaves zero
+		// budget for read-deadline and scheduler slop, so our real worst case would
+		// routinely exceed what the peer folds into its PTO. Arm a slop short of it.
+		c.ackDeadline = now.Add(defaultMaxAckDelay - ackAlarmSlop)
 	}
 }
 
@@ -413,13 +417,33 @@ func (c *Conn) drainBuffered() error {
 // authenticated server one once it is known (§7.2).
 func (c *Conn) prefilterPacket(hdr Header, pkt []byte) (skip bool, err error) {
 	switch {
-	case hdr.Type == PacketRetry:
-		c.handleRetry(hdr, pkt) // validate + re-key + resend the Initial (§17.2.5); never fatal
-		return true, nil
 	case hdr.Type == PacketVersionNegotiation:
 		if c.shouldAbandonOnVN(pkt, hdr) {
 			return true, ErrVersionNegotiation
 		}
+		return true, nil
+	case hdr.Type != PacketShort && hdr.Version != QUICVersion1:
+		// "If a client receives a packet that uses a different version than it
+		// initially selected, it MUST discard that packet" (RFC 9000 §5.2). Silently:
+		// anyone can forge a long header, and Initial keys derive from the observable
+		// connection ID, so a v1-sealed packet stamped with another version would
+		// otherwise authenticate and be processed. Version Negotiation (version 0) is
+		// handled above; short headers carry no version field. This gate precedes
+		// Retry, whose integrity tag is version-specific (§17.2.5).
+		return true, nil
+	case hdr.Type == PacketZeroRTT:
+		// A client never has 0-RTT read keys — only a server does — so RFC 9001 §5.7
+		// says a client "MUST NOT attempt to decrypt 0-RTT packets it receives and
+		// instead MUST discard them". Without this case packetSpace's default arm
+		// routes 0-RTT into the Initial space and hands the packet to the Initial
+		// Opener: Initial keys derive from the observable connection ID with a public
+		// salt, so an on-path forger could seal a 0-RTT-typed packet that
+		// authenticates and have its frames processed and its SCID adopted. The
+		// exported ProcessDatagram helper has always skipped it (KeySet.openerFor
+		// returns nil for this type); the live path had not.
+		return true, nil
+	case hdr.Type == PacketRetry:
+		c.handleRetry(hdr, pkt) // validate + re-key + resend the Initial (§17.2.5); never fatal
 		return true, nil
 	case hdr.Type == PacketInitial && len(hdr.Token) > 0:
 		// A server's Initial MUST carry an empty Token; discard one with a non-zero
@@ -439,6 +463,7 @@ func (c *Conn) prefilterPacket(hdr Header, pkt []byte) (skip bool, err error) {
 func (c *Conn) recvDatagram(datagram []byte) error {
 	rest := datagram
 	first := true
+	var firstDCID []byte // the first packet's Destination Connection ID (§12.2)
 	for len(rest) > 0 {
 		isFirst := first
 		first = false
@@ -454,6 +479,14 @@ func (c *Conn) recvDatagram(datagram []byte) error {
 		}
 		pkt := rest[:hdr.PacketLen]
 		rest = rest[hdr.PacketLen:]
+		// A sender MUST NOT coalesce packets with different Destination Connection
+		// IDs, and a receiver SHOULD ignore any that follow one that does (RFC 9000
+		// §12.2). Skipping, never erroring: the header is unauthenticated.
+		if isFirst {
+			firstDCID = hdr.DCID
+		} else if !bytesEqual(hdr.DCID, firstDCID) {
+			continue
+		}
 		if skip, err := c.prefilterPacket(hdr, pkt); err != nil {
 			return err
 		} else if skip {
@@ -466,6 +499,20 @@ func (c *Conn) recvDatagram(datagram []byte) error {
 		}
 		if !ok {
 			continue // no keys yet, or authentication failed; skip this packet
+		}
+		// "A receiver MUST discard a newly unprotected packet unless it is certain
+		// that it has not processed another packet with the same packet number from
+		// the same packet number space" (RFC 9000 §12.3). A bit-identical replayed
+		// datagram authenticates — the AEAD nonce derives from the packet number — so
+		// without this its frames would be dispatched a second time. Individual frame
+		// handlers absorb most duplicates, but the requirement is on the packet.
+		//
+		// A consequence worth naming: a duplicate no longer marks an ACK owed. That is
+		// safe only because QUIC never reuses a packet number — a peer whose ACK was
+		// lost re-sends the frames under a NEW number, which is decidably new here. Any
+		// future dedup keyed on something other than the packet number would break it.
+		if c.acks[sp].seen(pn) {
+			continue
 		}
 		// Adopt the server's connection ID from the first AUTHENTICATED long-header
 		// packet (RFC 9000 §7.2). Deferring adoption until after the AEAD succeeds
@@ -486,6 +533,12 @@ func (c *Conn) recvDatagram(datagram []byte) error {
 			reserved = 0x18 // short header (1-RTT)
 		}
 		if pkt[0]&reserved != 0 {
+			return ErrProtocolViolation
+		}
+		// "An endpoint MUST treat receipt of a packet containing no frames as a
+		// connection error of type PROTOCOL_VIOLATION" (RFC 9000 §12.4). The packet
+		// authenticated, so unlike the skips above this is the peer's own violation.
+		if len(payload) == 0 {
 			return ErrProtocolViolation
 		}
 		fh := connFrameHandler{c: c, space: sp}

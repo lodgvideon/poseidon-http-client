@@ -37,8 +37,9 @@ func (f *benchH3Client) DoStream(context.Context, *http3.Request) (*http3.Respon
 	return f.resp, nil, nil
 }
 
-func (f *benchH3Client) Alive() bool  { return true }
-func (f *benchH3Client) Close() error { return nil }
+func (f *benchH3Client) Alive() bool     { return true }
+func (f *benchH3Client) GoingAway() bool { return false }
+func (f *benchH3Client) Close() error    { return nil }
 
 // newBenchH3Client wires a TransportH3 Client whose dialer yields fake instead of
 // a live QUIC connection.

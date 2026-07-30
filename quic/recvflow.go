@@ -31,10 +31,15 @@ func (c *Conn) onStreamConsumed(s *Stream, n uint64) {
 	}
 
 	// Per-stream: keep the advertised limit a full window ahead of what has
-	// been consumed on this stream.
-	if want := s.recv.base + DefaultStreamRecvWindow; want >= s.recvMax+DefaultStreamRecvWindow/2 {
-		s.recvMax = want
-		c.pendingCtrl = AppendMaxStreamData(c.pendingCtrl, s.id, want)
+	// been consumed on this stream — but stop once the receiving part is in Size
+	// Known or Reset Recvd (RFC 9000 §3.2, §13.3): the final size is settled, so no
+	// further data can arrive and more credit would buy the peer nothing. The
+	// connection-level grant below is unaffected; §4.1 accounting still runs.
+	if !s.recv.fin && !s.recvReset {
+		if want := s.recv.base + DefaultStreamRecvWindow; want >= s.recvMax+DefaultStreamRecvWindow/2 {
+			s.recvMax = want
+			c.pendingCtrl = AppendMaxStreamData(c.pendingCtrl, s.id, want)
+		}
 	}
 	// Connection-level: a window ahead of total bytes consumed across streams.
 	if want := c.connRecvConsumed + DefaultConnRecvWindow; want >= c.connRecvMax+DefaultConnRecvWindow/2 {

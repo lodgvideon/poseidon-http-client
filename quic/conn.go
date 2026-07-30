@@ -173,6 +173,17 @@ type Conn struct {
 	dataBlockedLimit uint64 // last connMax a DATA_BLOCKED was emitted for (emit once per limit)
 	dataBlockedSet   bool   // whether a DATA_BLOCKED has been emitted yet
 
+	// spin is this connection's fixed latency-spin bit value (RFC 9000 §17.4).
+	// Latency spin is not implemented, so the bit carries no meaning; it is drawn
+	// once at random per connection rather than left constant.
+	spin bool
+
+	// STREAMS_BLOCKED latches, indexed [bidi, uni] (RFC 9000 §19.14). Same
+	// emit-once-per-distinct-limit rule as the *_BLOCKED frames above, so a caller
+	// retrying an open in a loop does not flood the peer.
+	streamsBlockedLimit [2]uint64
+	streamsBlockedSet   [2]bool
+
 	connRecvConsumed uint64 // total bytes the app has read across all streams (receive FC)
 	connRecvTotal    uint64 // sum of the highest received offset over all streams (receive FC, §4.1)
 	connRecvMax      uint64 // connection-level receive limit we advertise; raised via MAX_DATA
@@ -266,6 +277,12 @@ func NewConn(pc PacketConn, tlsConfig *tls.Config, transportParams []byte, opts 
 		streamCredit:  make(chan struct{}, 1), // cap-1 stream-limit wake (§3.3)
 	}
 	c.keys.Initial = io
+	// This client does not participate in latency spin, and RFC 9000 §17.4 then
+	// RECOMMENDS setting the spin bit "to a random value either chosen independently
+	// for each packet or chosen independently for each connection ID". Per-connection-
+	// ID is the cheaper of the two and keeps the header writer allocation-free; a
+	// constant 0 would be a passive fingerprint distinguishing this client.
+	c.redrawSpin()
 	// Retain the unidirectional-stream limit we advertise, so inbound
 	// server-initiated uni streams can be gated against it (RFC 9000 §4.6).
 	if tp, err := ParseTransportParams(transportParams); err == nil {

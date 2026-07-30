@@ -125,6 +125,73 @@ func TestConformance_RFC9204_Sec214_ReferenceOnlyAcknowledged(t *testing.T) {
 // advances the Known Received Count, a zero increment or one past the inserts made
 // is a QPACK_DECODER_STREAM_ERROR, Section Acknowledgment / Stream Cancellation are
 // consumed as no-ops, and a partial instruction is left for the next call.
+// TestConformance_RFC9204_Sec411_Integer62Bit pins the §4.1.1 MUST that a QPACK
+// implementation decode prefixed integers up to and including 62 bits long. The
+// shared HPACK reader stops at 2^32-1, which is enough for HTTP/2 but false-rejects
+// a conformant server here: a Section Acknowledgment or Stream Cancellation carries
+// a QUIC stream ID, legal up to 2^62-1.
+func TestConformance_RFC9204_Sec411_Integer62Bit(t *testing.T) {
+	const max62 = uint64(1)<<62 - 1
+	for _, prefix := range []uint8{3, 4, 5, 6, 7, 8} {
+		t.Run(strconv.Itoa(int(prefix)), func(t *testing.T) {
+			buf := hpack.EncodeInteger(nil, prefix, 0x00, max62)
+			got, n, err := decodeInt(buf, prefix)
+			if err != nil || got != max62 || n != len(buf) {
+				t.Fatalf("decodeInt(%x, %d) = %d, %d, %v; want %d, %d, nil",
+					buf, prefix, got, n, err, max62, len(buf))
+			}
+			// 2^62 is past the ceiling and must still be rejected.
+			over := hpack.EncodeInteger(nil, prefix, 0x00, uint64(1)<<62)
+			if _, _, err := decodeInt(over, prefix); !errors.Is(err, hpack.ErrIntegerOverflow) {
+				t.Fatalf("decodeInt(2^62) err = %v, want ErrIntegerOverflow", err)
+			}
+		})
+	}
+}
+
+// TestConformance_RFC9204_Sec71_SensitiveNeverIndexed pins the RFC 9114 §10.3 MUST
+// NOT against the dynamic encode path: a field marked sensitive must never enter
+// the connection-wide compression context, however often it repeats, and must go
+// out as a literal with the N bit set (RFC 9204 §7.1). The dynamic table is shared
+// by every request on the connection, so an indexed secret is the BREACH opening.
+func TestConformance_RFC9204_Sec71_SensitiveNeverIndexed(t *testing.T) {
+	enc, err := NewDynamicEncoder(4096, 4096)
+	if err != nil {
+		t.Fatalf("NewDynamicEncoder: %v", err)
+	}
+	enc.DrainEncoderInstructions(nil) // drop the Set Dynamic Table Capacity instruction
+	secret := []hpack.HeaderField{{Name: []byte("authorization"), Value: []byte("Bearer s3cr3t"), Sensitive: true}}
+	// Encode it three times: without the sensitive flag the second pass would
+	// insert it and the third would reference it Base-relative.
+	for round := 0; round < 3; round++ {
+		buf := enc.EncodeFieldSection(nil, secret)
+		if enc.InsertCount() != 0 {
+			t.Fatalf("round %d: InsertCount = %d, want 0 — the secret entered the dynamic table", round, enc.InsertCount())
+		}
+		if got := enc.DrainEncoderInstructions(nil); len(got) != 0 {
+			t.Fatalf("round %d: encoder instructions %x, want none", round, got)
+		}
+		if buf[0] != 0x00 || buf[1] != 0x00 {
+			t.Fatalf("round %d: prefix %x %x, want RIC 0 Base 0", round, buf[0], buf[1])
+		}
+		// "authorization" is static index 23 (name-only match), so the field line is
+		// a Literal with static Name Reference: 01 N=1 T=1 -> the N bit must be set.
+		if line := buf[2]; line&0xf0 != 0x70 {
+			t.Fatalf("round %d: field line %#x, want 01 N=1 T=1 (0x7x)", round, line)
+		}
+	}
+	// Control: the same field without the flag is inserted and then referenced.
+	plain := []hpack.HeaderField{{Name: []byte("authorization"), Value: []byte("Bearer s3cr3t")}}
+	enc2, err := NewDynamicEncoder(4096, 4096)
+	if err != nil {
+		t.Fatalf("NewDynamicEncoder: %v", err)
+	}
+	enc2.EncodeFieldSection(nil, plain)
+	if enc2.InsertCount() == 0 {
+		t.Fatal("control: a non-sensitive repeated field was never inserted, so the test proves nothing")
+	}
+}
+
 func TestConformance_RFC9204_Sec44_ParseDecoderInstructions(t *testing.T) {
 	newEnc := func(t *testing.T, inserts int) *Encoder {
 		t.Helper()

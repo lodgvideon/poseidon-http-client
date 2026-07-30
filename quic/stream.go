@@ -46,6 +46,7 @@ func (c *Conn) OpenStream() (*Stream, error) {
 // openStreamLocked is OpenStream's body. Assumes c.mu is held.
 func (c *Conn) openStreamLocked() (*Stream, error) {
 	if c.openedBidi >= c.peer.InitialMaxStreamsBidi {
+		c.emitStreamsBlocked(false, c.peer.InitialMaxStreamsBidi)
 		return nil, ErrTooManyStreams
 	}
 	id := c.nextBidiStreamID
@@ -134,6 +135,7 @@ func (c *Conn) OpenUniStream() (*Stream, error) {
 // openUniStreamLocked is OpenUniStream's body. Assumes c.mu is held.
 func (c *Conn) openUniStreamLocked() (*Stream, error) {
 	if c.openedUni >= c.peer.InitialMaxStreamsUni {
+		c.emitStreamsBlocked(true, c.peer.InitialMaxStreamsUni)
 		return nil, ErrTooManyStreams
 	}
 	id := c.uniStreamBase() + c.openedUni*4

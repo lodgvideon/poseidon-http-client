@@ -278,8 +278,8 @@ type Client struct {
 	// §3.5): the reader writes them from serviceControl, a Do reads them. maxFieldSection
 	// is the peer SETTINGS_MAX_FIELD_SECTION_SIZE (init ^uint64(0) = no limit, §4.2.2).
 	// goaway is the largest request stream id the server will process (init ^uint64(0)
-	// = "none", so stream.ID() >= goaway is false until a real GOAWAY lands, §5.2 —
-	// one atomic, no separate haveGoaway bool).
+	// = "none", so any other value means a GOAWAY has landed and no new request may
+	// be initiated, §5.2 — one atomic, no separate haveGoaway bool).
 	maxFieldSection atomic.Uint64
 	goaway          atomic.Uint64
 }
@@ -300,6 +300,9 @@ func NewClient(conn *quic.Conn, settings []Setting) (*Client, error) {
 }
 
 func newClient(conn quicConn, settings []Setting) (*Client, error) {
+	if err := validateSettings(settings); err != nil {
+		return nil, err
+	}
 	c := &Client{conn: conn, readerDone: make(chan struct{})}
 	c.maxFieldSection.Store(^uint64(0)) // no limit until the peer's SETTINGS arrive
 	c.goaway.Store(^uint64(0))          // "none" until a real GOAWAY lands (§5.2)
@@ -469,6 +472,13 @@ func (c *Client) Alive() bool {
 		return true
 	}
 }
+
+// GoingAway reports whether the peer has sent GOAWAY. After that this connection
+// refuses every new request (RFC 9114 §5.2, enforced in openRequestStream) while
+// still finishing the exchanges already in flight — that is the point of a
+// graceful shutdown. A pool must therefore stop handing the connection out but
+// MUST NOT close it until those exchanges drain; Alive stays true meanwhile.
+func (c *Client) GoingAway() bool { return c.goaway.Load() != ^uint64(0) }
 
 // sendAll writes the whole of data on stream. Stream.Send consumes only a prefix
 // when flow-control / congestion / pacing blocked, so this advances past each
@@ -870,18 +880,22 @@ func (c *Client) DoStream(ctx context.Context, req *Request) (*Response, Respons
 // the connection terminates — so a wave of concurrent requests past the limit
 // waits for the peer to raise it instead of racing an immediate error.
 //
-// GOAWAY gate (RFC 9114 §5.2): the server will not process a request on a stream id
-// at or above the GOAWAY id it published. goaway is ^uint64(0) until a real GOAWAY
-// lands, so this never trips on a healthy connection. The reader publishes goaway
-// from serviceControl; the request reads it (§3.5). Reclaim the just-opened stream
-// with STOP_SENDING + RESET_STREAM so maybeRetire drops its c.streams entry — the
-// post-open abandon path that closes the 2d TOCTOU leak (F4).
+// GOAWAY gate (RFC 9114 §5.2): "Endpoints MUST NOT initiate new requests ... after
+// receipt of a GOAWAY frame from the peer" — unconditionally, not only for stream
+// ids at or above the published one. §5.2 blesses a two-stage shutdown in which the
+// server first sends GOAWAY with the maximum request id (2^62-4) and lowers it
+// later, so gating on the id alone would keep admitting requests forever. goaway is
+// ^uint64(0) until a real GOAWAY lands, so this never trips on a healthy connection.
+// The reader publishes goaway from serviceControl; the request reads it (§3.5).
+// Reclaim the just-opened stream with STOP_SENDING + RESET_STREAM so maybeRetire
+// drops its c.streams entry — the post-open abandon path that closes the 2d TOCTOU
+// leak (F4), and which also covers a GOAWAY landing during OpenStream.
 func (c *Client) openRequestStream(ctx context.Context) (quicStream, error) {
 	stream, err := c.conn.OpenStream(ctx)
 	if err != nil {
 		return nil, err
 	}
-	if stream.ID() >= c.goaway.Load() {
+	if c.goaway.Load() != ^uint64(0) {
 		_ = stream.StopSending(H3RequestCancelled)
 		_ = stream.Reset(H3RequestCancelled)
 		return nil, ErrGoAway // the caller should retry on a new connection

@@ -220,8 +220,13 @@ func TestConn_AckDefer_DefersLoneInOrder(t *testing.T) {
 	if !c.acks[spaceApp].pending {
 		t.Fatal("the ACK must remain owed (pending) after deferral")
 	}
-	if want := base.Add(defaultMaxAckDelay); !c.ackDeadline.Equal(want) {
-		t.Fatalf("ackDeadline = %v, want recv + max_ack_delay = %v", c.ackDeadline, want)
+	// Armed a slop short of the advertised max_ack_delay so alarm-firing delay stays
+	// inside the value the peer folds into its PTO (RFC 9000 §18.2).
+	if want := base.Add(defaultMaxAckDelay - ackAlarmSlop); !c.ackDeadline.Equal(want) {
+		t.Fatalf("ackDeadline = %v, want recv + max_ack_delay - slop = %v", c.ackDeadline, want)
+	}
+	if !c.ackDeadline.Before(base.Add(defaultMaxAckDelay)) {
+		t.Fatal("the ACK alarm must fire strictly inside the advertised max_ack_delay")
 	}
 }
 

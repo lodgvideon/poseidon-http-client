@@ -239,10 +239,61 @@ func (s *Stream) emitBlocked(kind blockKind) {
 	}
 }
 
+// emitStreamsBlocked tells the peer that its cumulative stream limit is refusing a
+// new stream (RFC 9000 §4.6, §19.14): "A sender SHOULD send a STREAMS_BLOCKED
+// frame (type=0x16 or 0x17) when it wishes to open a stream but is unable to do so
+// due to the maximum stream limit set by its peer". Without it a server
+// that under-grants gets no signal that we are stalled, so it has no trigger to
+// send MAX_STREAMS. Informational, latched per distinct
+// limit like emitBlocked. Best-effort: before 1-RTT keys exist the seal fails and
+// the frame is dropped, which is fine — the limit is re-signalled on the next
+// refusal at a new limit value. Assumes c.mu is held.
+// streamsBlockedNow reports the peer's current cumulative stream limit for the
+// bidirectional or unidirectional scope, and whether we are still blocked on it —
+// the two things RFC 9000 §13.3 requires a re-sent STREAMS_BLOCKED to reflect at
+// transmit time rather than at the time the lost frame was first built. Assumes
+// c.mu is held.
+func (c *Conn) streamsBlockedNow(uni bool) (limit uint64, blocked bool) {
+	if uni {
+		return c.peer.InitialMaxStreamsUni, c.openedUni >= c.peer.InitialMaxStreamsUni
+	}
+	return c.peer.InitialMaxStreamsBidi, c.openedBidi >= c.peer.InitialMaxStreamsBidi
+}
+
+func (c *Conn) emitStreamsBlocked(uni bool, limit uint64) {
+	if c.oneRTTSealer == nil || c.closed {
+		// No 1-RTT keys yet (or shutting down): there is nothing to send the frame
+		// in. Leave the latch clear so the next refusal at this limit signals.
+		return
+	}
+	i := 0
+	if uni {
+		i = 1
+	}
+	if c.streamsBlockedSet[i] && c.streamsBlockedLimit[i] == limit {
+		return
+	}
+	// Latch only on a successful write. A stream-limit stall has no other liveness
+	// trigger — OpenStreamContext parks on c.streamCredit, whose only wake source is
+	// the peer's MAX_STREAMS, which the peer only sends because it saw this frame —
+	// so a dropped datagram plus an eager latch turns a transient stall into a wait
+	// until the caller's context expires. Re-emitting on the next refusal cannot
+	// spin: the opener re-parks after each one. The frame is also retransmitted on
+	// loss (RFC 9000 §13.3) — a dropped datagram is not a write error, so the latch
+	// alone would not cover it.
+	retrans := []retransFrame{{kind: retransStreamsBlocked, offset: limit, fin: uni}}
+	if err := c.writeAppFrames(AppendStreamsBlocked(nil, uni, limit), retrans); err != nil {
+		return
+	}
+	c.streamsBlockedSet[i] = true
+	c.streamsBlockedLimit[i] = limit
+}
+
 // writeAppFrames seals frames into a 1-RTT packet and writes the datagram. The
 // STREAM and *_BLOCKED frames it carries are ack-eliciting; retrans names the
-// frames to resend if the packet is lost (nil for the informational *_BLOCKED
-// frames, which are not retransmitted this phase). Assumes c.mu is held (it
+// frames to resend if the packet is lost — nil for DATA_BLOCKED and
+// STREAM_DATA_BLOCKED, but not for STREAMS_BLOCKED, which RFC 9000 §13.3 has us
+// re-send because nothing else can unstick a stream-limit stall. Assumes c.mu is held (it
 // seals a packet and writes the wire; callers are sendLocked/resetLocked/
 // stopSendingLocked and the receive-path emitBlocked).
 func (c *Conn) writeAppFrames(frames []byte, retrans []retransFrame) error {

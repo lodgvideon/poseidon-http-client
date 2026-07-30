@@ -416,6 +416,7 @@ type barrierH3Client struct {
 	signalAll func()
 	closes    int32
 	dead      int32
+	goaway    int32
 }
 
 func (b *barrierH3Client) Do(ctx context.Context, _ *http3.Request) (*http3.Response, []byte, error) {
@@ -433,7 +434,8 @@ func (b *barrierH3Client) Do(ctx context.Context, _ *http3.Request) (*http3.Resp
 func (b *barrierH3Client) DoStream(context.Context, *http3.Request) (*http3.Response, http3.ResponseBody, error) {
 	return nil, nil, errors.New("barrierH3Client: DoStream not used")
 }
-func (b *barrierH3Client) Alive() bool { return atomic.LoadInt32(&b.dead) == 0 }
+func (b *barrierH3Client) Alive() bool     { return atomic.LoadInt32(&b.dead) == 0 }
+func (b *barrierH3Client) GoingAway() bool { return atomic.LoadInt32(&b.goaway) != 0 }
 func (b *barrierH3Client) Close() error {
 	atomic.AddInt32(&b.closes, 1)
 	return nil
@@ -472,4 +474,209 @@ func TestNewClient_H3Pool_RequiresPoolAndTLS(t *testing.T) {
 	}); err == nil {
 		t.Fatal("missing TLSConfig for TransportH3Pool = nil error, want failure")
 	}
+}
+
+// TestConformance_RFC9114_Sec52_PoolEvictsGoAwayConn pins the pool half of the §5.2
+// rule. Once the H3 client refuses every new request after GOAWAY, a pool that
+// still hands that connection out turns a graceful server shutdown into a retry
+// loop: the retry classifier treats http3.ErrGoAway as retryable, re-acquires the
+// same conn, and fails identically until retries are exhausted. The conn must stop
+// being selected immediately and be evicted once its in-flight work drains — never
+// closed under a request the server has undertaken to finish.
+func TestConformance_RFC9114_Sec52_PoolEvictsGoAwayConn(t *testing.T) {
+	p := inertH3Pool(PoolOptions{}, nil)
+	gone := &barrierH3Client{}
+	fresh := &barrierH3Client{}
+	conns := []*h3ManagedConn{
+		{cl: gone, active: 0, streamCap: 10},
+		{cl: fresh, active: 1, streamCap: 10},
+	}
+
+	if got := p.pickLeastLoaded(conns); got == nil || got.cl != gone {
+		t.Fatal("baseline: the least-loaded pick should be the idle conn")
+	}
+	atomic.StoreInt32(&gone.goaway, 1)
+	if got := p.pickLeastLoaded(conns); got == nil || got.cl != fresh {
+		t.Fatal("a GOAWAY'd conn must not be handed out for a new request")
+	}
+
+	// Two exchanges still in flight on it: the first release must NOT close it —
+	// the server has undertaken to finish what it already accepted.
+	rs := &h3RunState{conns: conns}
+	conns[0].active = 2
+	p.handleRelease(rs, h3ReleaseMsg{mc: conns[0]})
+	if len(rs.conns) != 2 {
+		t.Fatal("a GOAWAY'd conn with work still in flight must not be evicted")
+	}
+	if atomic.LoadInt32(&gone.closes) != 0 {
+		t.Fatal("a GOAWAY'd conn must not be closed under an in-flight request")
+	}
+
+	// The last one drains: now it has nothing left to do and is evicted.
+	p.handleRelease(rs, h3ReleaseMsg{mc: conns[0]})
+	if len(rs.conns) != 1 || rs.conns[0].cl != fresh {
+		t.Fatalf("drained GOAWAY'd conn not evicted: %d conns left", len(rs.conns))
+	}
+	if atomic.LoadInt32(&gone.closes) != 1 {
+		t.Fatalf("the drained GOAWAY'd conn should have been closed exactly once, got %d", atomic.LoadInt32(&gone.closes))
+	}
+}
+
+// TestConformance_RFC9114_Sec52_PoolEvictsIdleGoAwayConn is the other half of the
+// §5.2 pool rule, and the one the release-path test cannot reach: a server
+// typically starts a graceful shutdown against an IDLE connection, so no release
+// ever arrives to trigger eviction. Without the health-tick and live-count halves
+// the pool sits at MaxConnsPerHost with a conn that can serve nothing, and every
+// acquire is parked as a waiter with no dial started — a permanent wedge.
+func TestConformance_RFC9114_Sec52_PoolEvictsIdleGoAwayConn(t *testing.T) {
+	p := inertH3Pool(PoolOptions{}, nil)
+	gone := &barrierH3Client{}
+	rs := &h3RunState{conns: []*h3ManagedConn{{cl: gone, active: 0, streamCap: 10}}}
+	atomic.StoreInt32(&gone.goaway, 1)
+
+	if got := h3CountLive(rs.conns); got != 0 {
+		t.Fatalf("h3CountLive = %d, want 0 — a GOAWAY'd conn must not hold the cap", got)
+	}
+	p.handleTick(rs)
+	if len(rs.conns) != 0 {
+		t.Fatalf("idle GOAWAY'd conn survived the health tick: %d conns", len(rs.conns))
+	}
+	if atomic.LoadInt32(&gone.closes) != 1 {
+		t.Fatalf("evicted conn closed %d times, want 1", atomic.LoadInt32(&gone.closes))
+	}
+}
+
+// TestConformance_RFC9114_Sec52_GoAwayEvictionDialsForWaiter covers the case the
+// two eviction tests cannot: a request parked as a waiter BEFORE the GOAWAY
+// arrived. Skipping the conn in pickLeastLoaded and dropping it from the live count
+// only rescues acquires that come afterwards; handleAcquire is the sole other
+// dialer, and it does not run again for an already-parked request. With no
+// AcquireTimeout set — which newH3Pool does not default — that waiter would hang
+// until the pool closed. An eviction that shrinks the pool must start the
+// replacement dial itself.
+func TestConformance_RFC9114_Sec52_GoAwayEvictionDialsForWaiter(t *testing.T) {
+	dialed := make(chan struct{}, 1)
+	dialFn := func(context.Context, string, *tls.Config) (h3Client, error) {
+		dialed <- struct{}{}
+		return &barrierH3Client{}, nil
+	}
+	p := inertH3Pool(PoolOptions{MaxConnsPerHost: 1}, dialFn)
+
+	gone := &barrierH3Client{}
+	mc := &h3ManagedConn{cl: gone, active: 1, streamCap: 1}
+	rs := &h3RunState{
+		conns:   []*h3ManagedConn{mc},
+		waiters: []h3AcquireReq{{ctx: context.Background(), reply: make(chan h3AcquireResp, 1)}},
+	}
+	atomic.StoreInt32(&gone.goaway, 1)
+
+	p.handleRelease(rs, h3ReleaseMsg{mc: mc})
+	if len(rs.conns) != 0 {
+		t.Fatalf("drained GOAWAY'd conn not evicted: %d conns", len(rs.conns))
+	}
+	if rs.inFlightDials != 1 {
+		t.Fatalf("inFlightDials = %d, want 1 — the parked waiter has nothing to be served by", rs.inFlightDials)
+	}
+	select {
+	case <-dialed:
+	case <-time.After(2 * time.Second):
+		t.Fatal("no replacement dial was started for the parked waiter")
+	}
+}
+
+// inertH3Pool builds an h3Pool WITHOUT starting its actor goroutine, for tests that
+// drive handleAcquire / handleRelease / handleDialDone / handleTick directly on
+// their own h3RunState. newH3Pool would start a second actor with its own state, so
+// a dial these tests provoke would land in that other state instead.
+func inertH3Pool(opts PoolOptions, dialFn func(context.Context, string, *tls.Config) (h3Client, error)) *h3Pool {
+	// Same defaults newH3Pool applies — DialBackoff in particular, since the
+	// dial-done error arm's behaviour turns on whether the backoff is active.
+	if opts.MaxConnsPerHost <= 0 {
+		opts.MaxConnsPerHost = 1
+	}
+	if opts.HealthCheckPeriod <= 0 {
+		opts.HealthCheckPeriod = 30 * time.Second
+	}
+	if opts.DialBackoff <= 0 {
+		opts.DialBackoff = 1 * time.Second
+	}
+	if opts.DialTimeout <= 0 {
+		opts.DialTimeout = 30 * time.Second
+	}
+	if dialFn == nil {
+		dialFn = func(context.Context, string, *tls.Config) (h3Client, error) {
+			return nil, ErrPoolClosed // never reached in these tests; never a real dial
+		}
+	}
+	return &h3Pool{
+		opts:       opts,
+		addr:       "e",
+		dialFn:     dialFn,
+		dialDoneCh: make(chan h3DialResult, 4),
+		closeCh:    make(chan struct{}),
+		closedCh:   make(chan struct{}),
+		metrics:    &Metrics{},
+	}
+}
+
+// TestH3Pool_DialFailureDoesNotStrandQueuedWaiters pins the two ways a parked
+// waiter could be abandoned with no dialer. newH3Pool does not default
+// AcquireTimeout, so either one is an unbounded hang, not a slow path.
+func TestH3Pool_DialFailureDoesNotStrandQueuedWaiters(t *testing.T) {
+	newWaiter := func() h3AcquireReq {
+		return h3AcquireReq{ctx: context.Background(), reply: make(chan h3AcquireResp, 1)}
+	}
+
+	// A failed dial replies to the first waiter. The ones behind it must not be left
+	// to a health-check tick: with nothing live and nothing in flight the pool is in
+	// exactly the state that fast-refuses a NEW acquire, so they get the same error.
+	t.Run("behind_the_first", func(t *testing.T) {
+		p := inertH3Pool(PoolOptions{MaxConnsPerHost: 1}, nil)
+		a, b := newWaiter(), newWaiter()
+		rs := &h3RunState{waiters: []h3AcquireReq{a, b}, inFlightDials: 1}
+
+		p.handleDialDone(rs, h3DialResult{err: ErrPoolClosed})
+
+		for i, w := range []h3AcquireReq{a, b} {
+			select {
+			case resp := <-w.reply:
+				if resp.err == nil {
+					t.Fatalf("waiter %d got a conn, want the dial error", i)
+				}
+			default:
+				t.Fatalf("waiter %d left queued with no dial in flight", i)
+			}
+		}
+		if len(rs.waiters) != 0 {
+			t.Fatalf("%d waiters still queued", len(rs.waiters))
+		}
+	})
+
+	// An eviction that lands inside the dial backoff cannot dial. Nothing else
+	// would retry if the tick only dialled when it had just shrunk the pool — and by
+	// then the pool is already empty, so it never shrinks again.
+	t.Run("eviction_inside_backoff", func(t *testing.T) {
+		dialed := make(chan struct{}, 1)
+		dialFn := func(context.Context, string, *tls.Config) (h3Client, error) {
+			dialed <- struct{}{}
+			return &barrierH3Client{}, nil
+		}
+		p := inertH3Pool(PoolOptions{MaxConnsPerHost: 1, DialBackoff: 10 * time.Millisecond}, dialFn)
+		rs := &h3RunState{waiters: []h3AcquireReq{newWaiter()}, lastDialErrAt: time.Now()}
+
+		p.handleTick(rs) // inside the backoff: correctly does not dial
+		if rs.inFlightDials != 0 {
+			t.Fatal("dialled inside the backoff window")
+		}
+		time.Sleep(20 * time.Millisecond)
+		p.handleTick(rs) // backoff expired, pool empty — nothing shrank, must still dial
+		if rs.inFlightDials != 1 {
+			t.Fatalf("inFlightDials = %d after the backoff expired, want 1", rs.inFlightDials)
+		}
+		select {
+		case <-dialed:
+		case <-time.After(2 * time.Second):
+			t.Fatal("no dial started for the waiter once the backoff expired")
+		}
+	})
 }
