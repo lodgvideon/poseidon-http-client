@@ -71,3 +71,62 @@ func TestConformance_RFC9000_Sec1914_StreamsBlockedOverLimit(t *testing.T) {
 		}
 	}
 }
+
+// TestConformance_RFC9000_Sec1914_StreamsBlockedOnRefusedOpen pins the §19.14
+// SHOULD that an endpoint signal the peer when its cumulative stream limit refuses
+// a new stream — otherwise a server that under-grants never learns the client is
+// stalled, so it has no trigger to send MAX_STREAMS. Latched per distinct limit
+// value like the other *_BLOCKED frames, so a retry loop cannot flood the peer.
+func TestConformance_RFC9000_Sec1914_StreamsBlockedOnRefusedOpen(t *testing.T) {
+	newConn := func(bidi, uni uint64) (*Conn, *countingPC) {
+		dcid := []byte("blocked0")
+		keys, _ := InitialKeys(dcid)
+		sealer, err := NewSealer(keys)
+		if err != nil {
+			t.Fatal(err)
+		}
+		pc := &countingPC{}
+		return &Conn{
+			pc: pc, dcid: dcid, oneRTTSealer: sealer,
+			peer: TransportParams{InitialMaxStreamsBidi: bidi, InitialMaxStreamsUni: uni},
+		}, pc
+	}
+
+	t.Run("bidi", func(t *testing.T) {
+		c, pc := newConn(0, 0)
+		if _, err := c.OpenStream(); err != ErrTooManyStreams {
+			t.Fatalf("OpenStream at limit 0 = %v, want ErrTooManyStreams", err)
+		}
+		if got := pc.datagrams.Load(); got != 1 {
+			t.Fatalf("datagrams after the first refusal = %d, want 1 (STREAMS_BLOCKED)", got)
+		}
+		// A second refusal at the same limit must not re-emit.
+		if _, err := c.OpenStream(); err != ErrTooManyStreams {
+			t.Fatal("second OpenStream should still be refused")
+		}
+		if got := pc.datagrams.Load(); got != 1 {
+			t.Fatalf("datagrams after a repeat refusal = %d, want still 1", got)
+		}
+		// A raised-then-exhausted limit is a new value, so it is signalled again.
+		c.peer.InitialMaxStreamsBidi = 1
+		if _, err := c.OpenStream(); err != nil {
+			t.Fatalf("OpenStream after the grant: %v", err)
+		}
+		if _, err := c.OpenStream(); err != ErrTooManyStreams {
+			t.Fatal("OpenStream past the raised limit should be refused")
+		}
+		if got := pc.datagrams.Load(); got != 2 {
+			t.Fatalf("datagrams after refusal at a new limit = %d, want 2", got)
+		}
+	})
+
+	t.Run("uni", func(t *testing.T) {
+		c, pc := newConn(0, 0)
+		if _, err := c.OpenUniStream(); err != ErrTooManyStreams {
+			t.Fatalf("OpenUniStream at limit 0 = %v, want ErrTooManyStreams", err)
+		}
+		if got := pc.datagrams.Load(); got != 1 {
+			t.Fatalf("datagrams after the first refusal = %d, want 1 (STREAMS_BLOCKED uni)", got)
+		}
+	})
+}

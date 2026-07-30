@@ -239,6 +239,32 @@ func (s *Stream) emitBlocked(kind blockKind) {
 	}
 }
 
+// emitStreamsBlocked tells the peer that its cumulative stream limit is refusing a
+// new stream (RFC 9000 §4.6, §19.14): "A sender SHOULD send a STREAMS_BLOCKED
+// frame when it wishes to open a stream but is unable to." Without it a server
+// that under-grants gets no signal that we are stalled, so it has no trigger to
+// send MAX_STREAMS. Informational and never retransmitted, latched per distinct
+// limit like emitBlocked. Best-effort: before 1-RTT keys exist the seal fails and
+// the frame is dropped, which is fine — the limit is re-signalled on the next
+// refusal at a new limit value. Assumes c.mu is held.
+func (c *Conn) emitStreamsBlocked(uni bool, limit uint64) {
+	if c.oneRTTSealer == nil || c.closed {
+		// No 1-RTT keys yet (or shutting down): there is nothing to send the frame
+		// in. Leave the latch clear so the next refusal at this limit signals.
+		return
+	}
+	i := 0
+	if uni {
+		i = 1
+	}
+	if c.streamsBlockedSet[i] && c.streamsBlockedLimit[i] == limit {
+		return
+	}
+	c.streamsBlockedSet[i] = true
+	c.streamsBlockedLimit[i] = limit
+	_ = c.writeAppFrames(AppendStreamsBlocked(nil, uni, limit), nil)
+}
+
 // writeAppFrames seals frames into a 1-RTT packet and writes the datagram. The
 // STREAM and *_BLOCKED frames it carries are ack-eliciting; retrans names the
 // frames to resend if the packet is lost (nil for the informational *_BLOCKED

@@ -173,6 +173,12 @@ type Conn struct {
 	dataBlockedLimit uint64 // last connMax a DATA_BLOCKED was emitted for (emit once per limit)
 	dataBlockedSet   bool   // whether a DATA_BLOCKED has been emitted yet
 
+	// STREAMS_BLOCKED latches, indexed [bidi, uni] (RFC 9000 §19.14). Same
+	// emit-once-per-distinct-limit rule as the *_BLOCKED frames above, so a caller
+	// retrying an open in a loop does not flood the peer.
+	streamsBlockedLimit [2]uint64
+	streamsBlockedSet   [2]bool
+
 	connRecvConsumed uint64 // total bytes the app has read across all streams (receive FC)
 	connRecvTotal    uint64 // sum of the highest received offset over all streams (receive FC, §4.1)
 	connRecvMax      uint64 // connection-level receive limit we advertise; raised via MAX_DATA
