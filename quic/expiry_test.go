@@ -66,6 +66,9 @@ func TestConn_Poll_PTOProbeOnTimeout(t *testing.T) {
 		oneRTTSealer:      sealer,
 		now:               func() time.Time { return base },
 		handshakeComplete: true, // no anti-deadlock probe; no idle timeout advertised
+		// The Application-space probe timer is armed only once the handshake is
+		// confirmed (RFC 9002 §6.2.1), which is also when 1-RTT data can be in flight.
+		handshakeConfirmed: true,
 	}
 	// One ack-eliciting packet (pn 0) in flight, so the probe timer runs and has
 	// something to re-queue on expiry. sendPN is advanced past it so the resent

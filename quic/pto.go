@@ -34,8 +34,10 @@ func (c *Conn) ptoBase() time.Duration {
 		v = kGranularity
 	}
 	base := c.rtt.smoothedRTT + v
-	if c.handshakeComplete {
-		base += c.peer.MaxAckDelay // only the application space carries ack delay
+	if c.handshakeConfirmed {
+		// Only the Application space carries max_ack_delay, and that space has no PTO
+		// timer until the handshake is confirmed (RFC 9002 §6.2.1).
+		base += c.peer.MaxAckDelay
 	}
 	return base
 }
@@ -50,6 +52,9 @@ func (c *Conn) ptoPeriod() time.Duration {
 // space — the condition under which the probe timer runs (RFC 9002 §6.2.1).
 func (c *Conn) hasInFlight() bool {
 	for sp := 0; sp < numSpaces; sp++ {
+		if !c.ptoArmed(sp) {
+			continue
+		}
 		for _, p := range c.sent[sp].packets {
 			if p.ackEliciting {
 				return true
@@ -59,6 +64,15 @@ func (c *Conn) hasInFlight() bool {
 	return false
 }
 
+// ptoArmed reports whether space sp participates in the probe timer. RFC 9002
+// §6.2.1: "An endpoint MUST NOT set a timer for the Application Data packet number
+// space until the handshake is confirmed." Between TLS completion and
+// HANDSHAKE_DONE the server may not hold 1-RTT read keys yet, so a 1-RTT probe is
+// guaranteed-spurious retransmission.
+func (c *Conn) ptoArmed(sp int) bool {
+	return sp != spaceApp || c.handshakeConfirmed
+}
+
 // onPTO handles a probe-timeout expiry (RFC 9002 §6.2.4): it re-queues the
 // oldest unacknowledged ack-eliciting packet's frames in each space as a probe
 // (which elicits an ACK and, once one arrives, drives loss detection), and backs
@@ -66,6 +80,9 @@ func (c *Conn) hasInFlight() bool {
 func (c *Conn) onPTO() {
 	queued := false
 	for sp := 0; sp < numSpaces; sp++ {
+		if !c.ptoArmed(sp) {
+			continue
+		}
 		if c.queueOldestProbe(sp) {
 			queued = true
 		}

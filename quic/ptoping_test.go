@@ -22,7 +22,7 @@ func TestConformance_RFC9002_Sec624_PTOSendsPingWhenNoData(t *testing.T) {
 	sealer, _ := NewSealer(keys)
 	opener, _ := NewOpener(keys)
 	pc := &closePC{}
-	c := &Conn{pc: pc, dcid: dcid, oneRTTSealer: sealer, handshakeComplete: true, now: func() time.Time { return time.Unix(3, 0) }}
+	c := &Conn{pc: pc, dcid: dcid, oneRTTSealer: sealer, handshakeComplete: true, handshakeConfirmed: true, now: func() time.Time { return time.Unix(3, 0) }}
 	c.keys.OneRTT = opener
 	c.sent[spaceApp].onSent(0, c.clock(), true, nil) // ack-eliciting, no retransmittable frames
 
@@ -60,7 +60,7 @@ func TestConformance_RFC9002_Sec624_PTOSendsPingWhenNoData(t *testing.T) {
 // TestConn_PTO_NoPingWhenDataToResend checks that a PTO resends the oldest
 // unacknowledged frames when there are some — and does not also mark a bare PING.
 func TestConn_PTO_NoPingWhenDataToResend(t *testing.T) {
-	c := &Conn{now: func() time.Time { return time.Unix(3, 0) }}
+	c := &Conn{now: func() time.Time { return time.Unix(3, 0) }, handshakeConfirmed: true}
 	c.sent[spaceApp].onSent(0, c.clock(), true, []retransFrame{{kind: retransStream, streamID: 0, data: []byte("x")}})
 	c.onPTO()
 	if c.probePending {
@@ -68,5 +68,40 @@ func TestConn_PTO_NoPingWhenDataToResend(t *testing.T) {
 	}
 	if len(c.retransQueue[spaceApp]) == 0 {
 		t.Fatal("the oldest packet's frames should be queued for resend")
+	}
+}
+
+// TestConformance_RFC9002_Sec621_NoAppPTOBeforeConfirmed pins "An endpoint MUST NOT
+// set a timer for the Application Data packet number space until the handshake is
+// confirmed." Between TLS completion and HANDSHAKE_DONE the server may still lack
+// 1-RTT read keys, so probing 1-RTT there is guaranteed-spurious retransmission.
+func TestConformance_RFC9002_Sec621_NoAppPTOBeforeConfirmed(t *testing.T) {
+	base := time.Unix(5, 0)
+	newConn := func(confirmed bool) *Conn {
+		c := &Conn{now: func() time.Time { return base }, handshakeComplete: true, handshakeConfirmed: confirmed}
+		c.sent[spaceApp].onSent(0, base, true, streamFrame(0, 0, "oneRTT"))
+		return c
+	}
+
+	c := newConn(false)
+	if c.hasInFlight() {
+		t.Fatal("1-RTT data in flight must not arm the probe timer before the handshake is confirmed")
+	}
+	c.onPTO()
+	if len(c.retransQueue[spaceApp]) != 0 {
+		t.Fatalf("probe queued in the Application space before confirmation: %+v", c.retransQueue[spaceApp])
+	}
+	if _, ok := c.sent[spaceApp].packets[0]; !ok {
+		t.Fatal("the unconfirmed Application packet must stay in flight, not be probed")
+	}
+
+	// Control: once confirmed the very same state does arm and probe.
+	c = newConn(true)
+	if !c.hasInFlight() {
+		t.Fatal("control: confirmed 1-RTT data in flight should arm the probe timer")
+	}
+	c.onPTO()
+	if len(c.retransQueue[spaceApp]) != 1 {
+		t.Fatalf("control: probe queue = %+v, want the oldest packet's frame", c.retransQueue[spaceApp])
 	}
 }
