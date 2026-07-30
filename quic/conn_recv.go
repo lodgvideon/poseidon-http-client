@@ -427,6 +427,17 @@ func (c *Conn) prefilterPacket(hdr Header, pkt []byte) (skip bool, err error) {
 		// handled above; short headers carry no version field. This gate precedes
 		// Retry, whose integrity tag is version-specific (§17.2.5).
 		return true, nil
+	case hdr.Type == PacketZeroRTT:
+		// A client never has 0-RTT read keys — only a server does — so RFC 9001 §5.7
+		// says a client "MUST NOT attempt to decrypt 0-RTT packets it receives and
+		// instead MUST discard them". Without this case packetSpace's default arm
+		// routes 0-RTT into the Initial space and hands the packet to the Initial
+		// Opener: Initial keys derive from the observable connection ID with a public
+		// salt, so an on-path forger could seal a 0-RTT-typed packet that
+		// authenticates and have its frames processed and its SCID adopted. The
+		// exported ProcessDatagram helper has always skipped it (KeySet.openerFor
+		// returns nil for this type); the live path had not.
+		return true, nil
 	case hdr.Type == PacketRetry:
 		c.handleRetry(hdr, pkt) // validate + re-key + resend the Initial (§17.2.5); never fatal
 		return true, nil

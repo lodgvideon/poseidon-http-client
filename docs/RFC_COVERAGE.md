@@ -502,6 +502,7 @@ bytes exactly, and the client interoperates with a live Caddy HTTP/3 server.
 | App. A.2 | Conformance | TestConformance_RFC9001_AppA2_ClientInitial (building the client Initial reproduces the RFC's protected packet byte-for-byte: keys + CRYPTO framing + PADDING + AEAD + header protection) |
 | App. A.3 | Conformance | TestConformance_RFC9001_AppA3_ServerInitial (opening the server's protected Initial recovers packet number 1 and the exact payload: HP removal + PN recovery + AEAD decrypt) |
 | §5.1    | Conformance | TestConformance_RFC9001_Sec51_ExpandLabel (client_initial_secret vs Appendix A.1) |
+| §5.7    | Conformance | TestConformance_RFC9001_Sec57_ZeroRTTDiscardedNotDecrypted (a long-header 0-RTT packet is discarded before space selection, never handed to the Initial Opener — a client has no 0-RTT read keys, and Initial keys derive from the observable connection ID, so an on-path forger could otherwise have a 0-RTT-typed packet authenticate and its SCID adopted) |
 | §5.3    | Conformance | TestConformance_RFC9001_Sec53_Nonce (IV XOR packet number vs A.1-derived values) |
 | §5.3    | Roundtrip   | TestPacketProtection_RoundTrip (seal → open recovers pn + payload) |
 | §5.3    | Negative    | TestPacketProtection_AuthFailure (tampered / wrong-key → ErrCryptoDecrypt) |

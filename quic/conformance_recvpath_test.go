@@ -102,3 +102,41 @@ func TestConformance_RFC9000_Sec124_EmptyPacketIsProtocolViolation(t *testing.T)
 		t.Fatalf("recvDatagram(zero-frame packet) = %v, want ErrProtocolViolation", err)
 	}
 }
+
+// TestConformance_RFC9001_Sec57_ZeroRTTDiscardedNotDecrypted pins "a client MUST NOT
+// attempt to decrypt 0-RTT packets it receives and instead MUST discard them"
+// (RFC 9001 §5.7). Without the discard, packetSpace's default arm routes a 0-RTT
+// packet into the Initial space and hands it to the Initial Opener — and Initial
+// keys derive from the observable connection ID with a public salt, so an on-path
+// forger can seal a 0-RTT-typed packet that genuinely authenticates.
+func TestConformance_RFC9001_Sec57_ZeroRTTDiscardedNotDecrypted(t *testing.T) {
+	origDCID := []byte("origdcid")
+	_, serverKeys := InitialKeys(origDCID)
+	forgedSCID := []byte{0x11, 0x22, 0x33, 0x44}
+
+	sealer, err := NewSealer(serverKeys)
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload := AppendPing(make([]byte, 0, 32))
+	pnLen := 4
+	hdr, pnOff := AppendLongHeader(nil, PacketZeroRTT, QUICVersion1, nil, forgedSCID, nil, pnLen, uint64(pnLen+len(payload)+16))
+	for i := pnLen - 1; i >= 0; i-- {
+		hdr = append(hdr, 0)
+	}
+	pkt, err := sealer.Seal(nil, hdr, pnOff, pnLen, 0, payload)
+	if err != nil {
+		t.Fatalf("Seal: %v", err)
+	}
+
+	c := newInitialConn(t, origDCID)
+	if err := c.recvDatagram(pkt); err != nil {
+		t.Fatalf("recvDatagram(0-RTT) = %v, want nil (discarded)", err)
+	}
+	if c.gotServerCID {
+		t.Fatal("a 0-RTT packet must not be decrypted, let alone have its SCID adopted")
+	}
+	if c.haveRecv[spaceInitial] {
+		t.Fatal("a 0-RTT packet was processed in the Initial packet-number space")
+	}
+}
