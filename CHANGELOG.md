@@ -5,6 +5,26 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **`grpc` — gRPC-over-HTTP/2 as a first-class transport.** `grpc.Dial` returns
+  a `ClientConn` that multiplexes calls over one HTTP/2 connection, the same way
+  gRPC itself does, so there is no pool to configure. All four call shapes work:
+  unary (`Invoke`), server-streaming, client-streaming, and bidirectional — the
+  send and receive halves of a `Stream` are independently usable from two
+  goroutines. Covers length-prefixed message framing, `grpc-status` /
+  `grpc-message` trailers, the Trailers-Only response shape, the
+  HTTP-status-to-gRPC-code and RST_STREAM-to-gRPC-code mapping tables,
+  `grpc-timeout` from the context deadline, and `-bin` binary metadata.
+  No protobuf dependency: messages cross the API as `[]byte`. Documented in
+  [docs/GRPC_GUIDE.md](docs/GRPC_GUIDE.md), with `examples/grpc`.
+
+  The package sits on `conn`, not on `client`: `client.DoStream` writes the
+  whole request body before it returns, so client-streaming and bidirectional
+  calls cannot be expressed through it.
+
 ## [v1.0.0] — 2026-07-15
 
 The first stable release: HTTP/1.1, HTTP/2, and HTTP/3 through one client API.
