@@ -612,16 +612,26 @@ func (c *Client) Do(ctx context.Context, req *Request, resp *Response) error {
 // writes the body and trailers, and returns the exchange ready for response
 // reading. On error the transport is released and no cleanup is needed.
 //
-// Returns (s, pushLookup, release, err). pushLookup is non-nil only for H2
-// transports and is passed to drainResponse to handle server push.
+// Returns (s, pushLookup, release, sendCut, err). pushLookup is non-nil only
+// for H2 transports and is passed to drainResponse to handle server push.
+//
+// sendCut is non-nil when the upload was cut short by the peer closing the
+// stream and that failure was deliberately not treated as fatal (see the RFC
+// 9113 §8.1 comment below). It is not an error the caller should return on its
+// own — the response may well be complete — but if the response path ALSO
+// fails, sendCut is the earlier and more accurate cause and must be preferred.
+// Returning the response path's error there would report a client-side
+// event-buffer overflow, which conn signals with its own forged
+// RST_STREAM(REFUSED_STREAM), as "the server did not process this request" —
+// and Retryer would replay a request the server had already answered.
 //
 // Avoids heap-escaping the implicit struct: escape analysis confirmed via
 // -gcflags=-m that returning fields by value keeps them on the stack
 // (verified 2026-06-15 for the H2 hot path).
-func (c *Client) sendRequest(ctx context.Context, req *Request) (s protoStream, pushLookup func(uint32) (*conn.Stream, bool), release func(), err error) {
+func (c *Client) sendRequest(ctx context.Context, req *Request) (s protoStream, pushLookup func(uint32) (*conn.Stream, bool), release func(), sendCut error, err error) {
 	s, pushLookup, release, err = c.tr.openExchange(ctx)
 	if err != nil {
-		return nil, nil, nil, err
+		return nil, nil, nil, nil, err
 	}
 
 	// Validate dynamic trailers before buildHeaders emits the Trailer
@@ -633,7 +643,7 @@ func (c *Client) sendRequest(ctx context.Context, req *Request) (s protoStream, 
 		if _, verr := resolveTrailers(req); verr != nil {
 			_ = s.Close()
 			release()
-			return nil, nil, nil, verr
+			return nil, nil, nil, nil, verr
 		}
 	}
 
@@ -646,7 +656,7 @@ func (c *Client) sendRequest(ctx context.Context, req *Request) (s protoStream, 
 		hdrSlicePool.Put(sp)
 		_ = s.Close()
 		release()
-		return nil, nil, nil, err
+		return nil, nil, nil, nil, err
 	}
 	*sp = (*sp)[:0]
 	hdrSlicePool.Put(sp)
@@ -657,33 +667,75 @@ func (c *Client) sendRequest(ctx context.Context, req *Request) (s protoStream, 
 		// with NO_ERROR to stop an upload it does not need — "Clients MUST NOT
 		// discard responses as a result of receiving such a RST_STREAM" — and
 		// conn closes the stream on any reset per §5.1, so that benign signal
-		// reaches here as ErrStreamClosed on a request the server has answered,
-		// with the response sitting in the stream's event buffer. Hand the
-		// stream back and let the response path decide. It cannot hang: every
-		// route to ErrStreamClosed also delivers a reset event, which surfaces
-		// as a typed *StreamResetError carrying the peer's actual code. Any
-		// other write failure stays fatal — nothing reached the peer, so there
-		// is no response to wait for.
+		// reaches here as ErrStreamClosed on a request the server has answered.
+		// Hand the stream back and let the response path decide, recording the
+		// failure in sendCut so it can be preferred if that path fails too.
+		//
+		// Reaching the response path is safe because the routes that produce
+		// ErrStreamClosed here all deliver a stream event as well: a peer
+		// RST_STREAM (conn.connHandler.OnRSTStream), a GOAWAY teardown, and
+		// conn's own event-buffer overflow each enqueue an EventReset or signal
+		// one before setting the flag. The two routes that would NOT — a caller
+		// Close() and a healthy stream that has already sent END_STREAM — are
+		// unreachable from here: this method never closes the stream it is
+		// about to return, and it emits END_STREAM exactly once. That is a
+		// property of THIS function, not of conn, so it has to be re-checked if
+		// the send sequence below ever grows a second END_STREAM or a Close.
+		//
+		// Any other write failure stays fatal. Nothing arrives to read: those
+		// failures come from a dead transport or a cancelled context, not from
+		// a peer that answered early — though the frames written before the
+		// failure may well have reached the peer, so "nothing was sent" is not
+		// the reason.
 		if err = writeRequestBody(ctx, s, req, !trailers); err != nil {
 			if !errors.Is(err, conn.ErrStreamClosed) {
 				_ = s.Close()
 				release()
-				return nil, nil, nil, err
+				return nil, nil, nil, nil, err
 			}
+			sendCut = err
 		} else if trailers {
-			if err = writeRequestTrailers(ctx, s, req); err != nil && !errors.Is(err, conn.ErrStreamClosed) {
-				_ = s.Close()
-				release()
-				return nil, nil, nil, err
+			if err = writeRequestTrailers(ctx, s, req); err != nil {
+				if !errors.Is(err, conn.ErrStreamClosed) {
+					_ = s.Close()
+					release()
+					return nil, nil, nil, nil, err
+				}
+				sendCut = err
 			}
 		}
 	}
 
-	return s, pushLookup, release, nil
+	return s, pushLookup, release, sendCut, nil
+}
+
+// preferSendCut picks which failure to report when the response path failed on
+// a request whose upload had already been cut short. sendCut came first and
+// names the real cause; respErr may be conn's own forged
+// RST_STREAM(REFUSED_STREAM) from an event-buffer overflow, which the retry
+// layer reads as "the server did not process this request" and would replay.
+// A nil respErr means the response arrived despite the cut — the §8.1 case
+// this all exists for — and nothing is reported.
+//
+// respErr is folded into the message rather than the chain on purpose: wrapping
+// it would put a *StreamResetError back where errors.As can reach it, and the
+// retry classifier keys on exactly that. The text keeps the peer's code
+// visible for diagnosis without making it decide anything.
+func preferSendCut(respErr, sendCut error) error {
+	if respErr == nil {
+		return nil
+	}
+	if sendCut == nil {
+		return respErr
+	}
+	// respErr.Error(), not %w or %v on the error itself: this is the one place
+	// where keeping it out of the chain is the point, and %v would read as an
+	// oversight to errorlint and to the next person.
+	return fmt.Errorf("%w (the upload was cut short and the response then failed: %s)", sendCut, respErr.Error())
 }
 
 func (c *Client) do(ctx context.Context, req *Request, resp *Response) error {
-	s, pushLookup, release, err := c.sendRequest(ctx, req)
+	s, pushLookup, release, sendCut, err := c.sendRequest(ctx, req)
 	if err != nil {
 		return err
 	}
@@ -698,13 +750,13 @@ func (c *Client) do(ctx context.Context, req *Request, resp *Response) error {
 		if err != nil {
 			_ = s.Close()
 			release()
-			return err
+			return preferSendCut(err, sendCut)
 		}
 		ev, err := recvFinalHeaders(ctx, rs)
 		if err != nil {
 			_ = rs.Close()
 			release()
-			return err
+			return preferSendCut(err, sendCut)
 		}
 		n, perr := parseStatus(ev.Headers, &resp.Headers)
 		if perr != nil {
@@ -721,7 +773,15 @@ func (c *Client) do(ctx context.Context, req *Request, resp *Response) error {
 			stream:  rs,
 			release: release,
 			resp:    resp,
-			lg:      armLeakGuard("Response.BodyReader"),
+			// A response that ended on its HEADERS frame — 204/304, a HEAD, or
+			// any status-only reply — has no DATA or trailer event to end the
+			// body on, so without this the reader pumps one event too many. It
+			// then blocks until ctx (no reset), or reports a benign
+			// RST_STREAM(NO_ERROR) as a *StreamResetError (§8.1, the very thing
+			// this release fixes on the buffered path). doStream sets the same
+			// flag on StreamResponse; this literal was the sibling that did not.
+			done: ev.EndStream,
+			lg:   armLeakGuard("Response.BodyReader"),
 		}
 		if !req.DisableDecompression {
 			enc := detectEncoding(resp.Headers)
@@ -745,7 +805,7 @@ func (c *Client) do(ctx context.Context, req *Request, resp *Response) error {
 	err = drainResponse(ctx, pushLookup, s, req, resp, c.pushHandler, c.maxDecompressedSize, c.maxResponseBodySize)
 	_ = s.Close()
 	release()
-	return err
+	return preferSendCut(err, sendCut)
 }
 
 // DoStream issues a request and returns once the initial HEADERS frame
@@ -799,7 +859,7 @@ func (c *Client) DoStream(ctx context.Context, req *Request, sr *StreamResponse)
 
 // doStream is the inner streaming transport, without hook/metric wrapping.
 func (c *Client) doStream(ctx context.Context, req *Request, sr *StreamResponse) error {
-	s, _, release, err := c.sendRequest(ctx, req)
+	s, _, release, sendCut, err := c.sendRequest(ctx, req)
 	if err != nil {
 		return err
 	}
@@ -808,13 +868,13 @@ func (c *Client) doStream(ctx context.Context, req *Request, sr *StreamResponse)
 	if err != nil {
 		_ = s.Close()
 		release()
-		return err
+		return preferSendCut(err, sendCut)
 	}
 	ev, err := recvFinalHeaders(ctx, rs)
 	if err != nil {
 		_ = rs.Close()
 		release()
-		return err
+		return preferSendCut(err, sendCut)
 	}
 	n, perr := parseStatus(ev.Headers, &sr.Headers)
 	if perr != nil {

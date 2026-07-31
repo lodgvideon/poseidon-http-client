@@ -100,6 +100,15 @@ func (s *Stream) Send(ctx context.Context, msg []byte) error {
 // CloseSend half-closes the request side, telling the server no more messages
 // follow. It is idempotent. A server-streaming call sends one message then
 // CloseSend; a bidirectional call may CloseSend while still receiving.
+//
+// It returns nil when the peer has already torn the stream down — the RFC 9113
+// §8.1 case a server creates by answering without reading the request body.
+// Nothing is half-closed in that case and no END_STREAM reaches the wire, but
+// there is nothing left to tell the peer either, and failing here would make
+// callers discard a response the server has already sent. The reset is not
+// swallowed: it decides the call through Recv and Status. A caller that needs
+// to know whether its request was delivered in full must read the outcome, not
+// this error.
 func (s *Stream) CloseSend(ctx context.Context) error {
 	if s.closed.Load() {
 		return ErrStreamClosed

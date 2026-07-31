@@ -24,6 +24,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `client.NewClient` uses it to reject a transport/dialer pairing that can only
   fail. Custom dialers may implement it to get the same check.
 
+### Changed
+
+- **`grpc.Stream.CloseSend` no longer reports a peer-closed stream as a
+  failure** (#337). It returns nil when the peer has already reset the stream,
+  because half-closing one is then a no-op and failing made callers discard a
+  response the server had already sent (see Fixed, below). Code of the shape
+  `if err := s.CloseSend(ctx); err != nil { abort() }` will now proceed in that
+  case. Nothing is lost: the reset still decides the call through `Recv` and
+  `Status`, which is where an RPC's outcome has always been determined. `Send`
+  is unchanged and still strict.
+
+- **A `Response.BodyReader` for a response that ended on its HEADERS frame now
+  reports `io.EOF` immediately.** A 204, a 304, a HEAD or any status-only reply
+  read one event too many before, which meant blocking until the context
+  expired, or reporting a trailing `RST_STREAM` as a `*StreamResetError`.
+  `DoStream`'s `StreamResponse` always carried the flag over; the buffered
+  `Do` + `BodyMode: BodyStream` reader was the sibling that did not.
+
 ### Fixed
 
 - **A complete HTTP/2 response was discarded when the server ended the upload
@@ -42,18 +60,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   returned on the first body-write error, so both surfaced
   `conn: stream already closed` on a request the server had answered, with the
   response sitting unread in the stream's event buffer. Reproduced at ~9% under
-  CPU load and deterministically with a request larger than the peer's upload
-  buffer; it had already failed CI three times, each time in a different test.
+  CPU load; it had already failed CI three times, each time in a different test.
   A send-side failure is no longer decisive for the outcome: when the upload
-  fails with `conn.ErrStreamClosed` both paths now consult the receive side,
-  which is where the peer's actual reset code lives. This is what `http3.Client`
-  already did with the QUIC equivalent (`STOP_SENDING` → `quic.ErrStreamReset`),
-  so the HTTP/2 stack was the odd one out. Two knock-on fixes fall out: a
-  streaming caller's `grpc.Stream.CloseSend` no longer fails on a benign reset,
-  and a *genuine* reset arriving during an upload now reaches `client.Do` as the
-  typed `*StreamResetError` the retry layer keys on, rather than a bare
-  `ErrStreamClosed`. `Send` stays strict — a message that never reached the peer
-  is still an error.
+  fails with `conn.ErrStreamClosed` both paths now consult the receive side.
+  This is what `http3.Client` already did with the QUIC equivalent
+  (`STOP_SENDING` → `quic.ErrStreamReset`), so the HTTP/2 stack was the odd one
+  out. `Send` stays strict — a message that never reached the peer is still an
+  error.
+
+  The guarantee is bounded by what the stream's event buffer can hold while the
+  upload is parked and nobody is draining it: a response that overruns
+  `ConnOptions.StreamEventBuffer` is still lost, because `conn` resets its own
+  stream to shed it. That failure is reported as `conn.ErrStreamClosed` rather
+  than as the synthesised `RST_STREAM(REFUSED_STREAM)` `conn` uses internally —
+  deliberately, since the retry layer reads REFUSED_STREAM as "the server did
+  not process this request" and would otherwise replay a request the server had
+  already answered (measured at 3 executions of one `DELETE` instead of 1).
 
 - **HTTP/1.1 over TLS silently negotiated HTTP/2 and failed every request**
   (#334). `conn.TLSDialer` rewrote a caller's explicit `Config.NextProtos`,

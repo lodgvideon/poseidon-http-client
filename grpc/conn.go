@@ -316,8 +316,14 @@ func (cc *ClientConn) Invoke(ctx context.Context, method string, req []byte, md 
 	// describes: the server wrote a complete response and reset the stream
 	// with NO_ERROR rather than wait for a request body it never read. The
 	// answer is already buffered, so the receive side decides the outcome.
-	// Every other send failure stays fatal — nothing reached the server, and
-	// Recv would then block until ctx expires.
+	//
+	// Every other send failure stays fatal, because nothing is coming back to
+	// read and Recv would block until ctx expires. Not because nothing was
+	// sent — conn chunks a message across several DATA frames and flushes each
+	// (see the sendErr comment in stream.go), so a failure partway leaves
+	// frames with the peer. The distinction that matters is whether a response
+	// is on its way, and only a peer that closed the stream after answering
+	// gives us one.
 	if err := s.Send(ctx, req); err != nil && !errors.Is(err, conn.ErrStreamClosed) {
 		return nil, err
 	}

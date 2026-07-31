@@ -53,7 +53,19 @@ var (
 )
 
 // StreamResetError is returned from Do (or surfaced via DoStream's
-// EventReset) when the peer sends RST_STREAM mid-response.
+// EventReset) when the stream is reset while a response is being read.
+//
+// Code is not always the peer's. conn resets its own stream with a synthesised
+// RST_STREAM(REFUSED_STREAM) when a response outruns the per-stream event
+// buffer, and that reaches the caller here too. The retry classifier reads
+// REFUSED_STREAM as "the server did not process this request", which is not
+// true of that case — so a request whose upload was cut short deliberately
+// does NOT surface as a StreamResetError (see preferSendCut in client.go),
+// because there the forged code could not be told from a real one.
+//
+// A reset that follows a complete response is not an error at all: RFC 9113
+// §8.1 requires the response be kept, and neither Do nor Response.BodyReader
+// reports one.
 type StreamResetError struct {
 	Code conn.ErrCode
 }
