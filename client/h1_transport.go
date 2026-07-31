@@ -103,7 +103,7 @@ func (e *h1Exchange) Recv(ctx context.Context) (conn.StreamEvent, error) {
 	// buffers are only ever grown, never shrunk, so cap >= h1BodyChunkSize holds
 	// in practice; the guard keeps a zero-length buffer from reaching
 	// ReadBodyChunk, which would read nothing and spin.
-	bufPtr := conn.GetDataBufPool().Get().(*[]byte)
+	bufPtr := getDataSlab()
 	buf := *bufPtr
 	if cap(buf) < h1BodyChunkSize {
 		buf = make([]byte, h1BodyChunkSize)
