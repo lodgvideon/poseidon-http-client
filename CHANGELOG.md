@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [v0.11.0] — 2026-07-31
+
 ### Added
 
 - **`grpc` — a gRPC-over-HTTP/2 client.** Note this is not a `client.Transport`:
@@ -31,6 +33,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
   No pooling, resolver, retry, hooks or metrics yet — a `ClientConn` is one
   connection, and everything above it is the caller's. HTTP/2 only.
+
+### Fixed
+
+- A pre-existing data race in `conn` stream recycling: a teardown that made a
+  stream both-ended while the reader still touched it could let a concurrent
+  `Close` recycle the stream under the reader. Terminal-event delivery and
+  stream end now happen atomically under the stream mutex (#329).
 
 ## [v1.0.0] — 2026-07-15
 
