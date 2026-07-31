@@ -1841,6 +1841,15 @@ func (c *Conn) shutdownStreams(reason error) {
 // SendHeaders/SendData when END_STREAM goes out. It releases the
 // stream's slot in the inflight pool exactly once and evicts the
 // stream from the registry once both ends have closed.
+//
+// It holds c.smu across its ENTIRE body on purpose, and that span is
+// load-bearing for the recycle rendezvous, not incidental. This method runs
+// on two goroutines for one stream — the reader (terminal frame) and the app
+// (SendData/SendHeaders with END_STREAM) — and smu serializes them so that the
+// inflightDone false->true guard admits exactly one into the eviction block.
+// A future "release smu earlier to cut contention" refactor would let both in,
+// re-open the double-recycle this fix closes, and reintroduce the data race
+// against recycleStream. Do not narrow the hold without moving the guard.
 // wakeSendWaiters broadcasts the outbound flow-control condition so every writer
 // blocked in acquireSendCredits re-checks its stream and connection state. Holds
 // only fcOutMu, so it is safe to call with no other lock held.

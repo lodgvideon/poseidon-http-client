@@ -2,6 +2,7 @@ package conn
 
 import (
 	"context"
+	"io"
 	"net/http"
 	"sync"
 	"testing"
@@ -78,6 +79,82 @@ func TestConn_AbandonCloseDuringResponse_NoRace(t *testing.T) {
 
 				// Exactly one Recv, then abandon — no drain to END_STREAM.
 				_, _ = s.Recv(ctx)
+				_ = s.Close()
+				cancel()
+			}
+		}()
+	}
+	wg.Wait()
+}
+
+// TestConn_TwoCompleterRecycle_NoRace exercises the interleaving the abandon
+// test does not: a request that uploads a body, so the app goroutine's
+// SendData(endStream=true) can complete bothEnded at nearly the same instant
+// the reader delivers the response END_STREAM. Both goroutines then enter
+// markStreamDone for the same stream, and the recycle rendezvous must admit
+// exactly one — the inflightDone guard under c.smu is what guarantees it.
+//
+// The caller here drains cleanly to END_STREAM before Close, which is the
+// ordering that actually fires the bothEnded/connDone rendezvous (as opposed to
+// the abandon test's RST path), so this is the coverage that hardens the
+// exactly-once recycle rather than the unsynchronized-teardown race.
+func TestConn_TwoCompleterRecycle_NoRace(t *testing.T) {
+	srv, cfg := startH2TestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Consume the upload before responding, so the request END_STREAM and
+		// the response END_STREAM are genuinely concurrent teardowns rather
+		// than strictly ordered.
+		_, _ = io.Copy(io.Discard, r.Body)
+		w.Header().Set("Content-Type", "text/plain")
+		w.WriteHeader(200)
+		_, _ = w.Write([]byte("ok"))
+	}))
+	defer srv.Close()
+
+	c := dialServer(t, srv, cfg)
+	defer func() { _ = c.Close() }()
+
+	const workers = 24
+	const itersPerWorker = 40
+	body := []byte("0123456789012345678901234567890123456789") // 40-byte upload
+
+	var wg sync.WaitGroup
+	wg.Add(workers)
+	for w := 0; w < workers; w++ {
+		go func() {
+			defer wg.Done()
+			for i := 0; i < itersPerWorker; i++ {
+				ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+
+				s, err := c.NewStream(ctx)
+				if err != nil {
+					cancel()
+					continue
+				}
+				// Open with a body still to come (endStream=false), then send
+				// the body and half-close from the app goroutine.
+				if err := s.SendHeaders(ctx, []hpack.HeaderField{
+					{Name: []byte(":method"), Value: []byte("POST")},
+					{Name: []byte(":scheme"), Value: []byte("https")},
+					{Name: []byte(":authority"), Value: []byte("example.com")},
+					{Name: []byte(":path"), Value: []byte("/")},
+				}, false); err != nil {
+					_ = s.Close()
+					cancel()
+					continue
+				}
+				if err := s.SendData(ctx, body, true); err != nil {
+					_ = s.Close()
+					cancel()
+					continue
+				}
+				// Drain to END_STREAM, then Close — the clean-completion path
+				// that fires the recycle rendezvous.
+				for {
+					ev, rerr := s.Recv(ctx)
+					if rerr != nil || ev.EndStream {
+						break
+					}
+				}
 				_ = s.Close()
 				cancel()
 			}
