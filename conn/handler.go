@@ -478,6 +478,11 @@ func (h *connHandler) emitHeaderBlock(s *Stream, hb []byte, endStream bool) erro
 			return cerr
 		}
 	}
+	// Capture the id before the delivery below. Once deliverEnd returns, a
+	// Close() racing this handler may already have recycled the struct, and
+	// recycleStream zeroes s.id — reading it afterwards is the same race one
+	// field over.
+	streamID := s.id
 	// Build one slab for all header bytes, one slice for all fields.
 	// Ownership of the slab transfers to the client via StreamEvent.Slab;
 	// the client returns it to headerSlabPool in Response.Reset / sr.Close.
@@ -508,7 +513,7 @@ func (h *connHandler) emitHeaderBlock(s *Stream, hb []byte, endStream bool) erro
 		headerSlabPool.Put(slabPtr)
 	}
 	if endStream {
-		h.streams.markStreamDone(s.id)
+		h.streams.markStreamDone(streamID)
 	}
 	return nil
 }
