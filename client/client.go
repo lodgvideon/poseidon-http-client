@@ -36,8 +36,11 @@ const (
 
 	// TransportH1SingleConn is the HTTP/1.1 analogue of TransportSingleConn:
 	// at most one *http1.Conn per Client. Requests are serialized (no
-	// pipelining). ConnOpts.Dialer must NOT assert ALPN "h2" — use a plain
-	// TCP dialer or a TLS dialer with NextProtos containing only "http/1.1".
+	// pipelining). ConnOpts.Dialer must NOT assert ALPN "h2" — use
+	// &conn.H1TLSDialer{} over TLS or &conn.PlaintextDialer{} in cleartext.
+	// A dialer asserting "h2" (conn.TLSDialer) is rejected by NewClient with
+	// ErrALPNProtocolMismatch, and a connection that negotiates any protocol
+	// other than "http/1.1" is refused at dial time with the same error.
 	TransportH1SingleConn
 
 	// TransportALPN dials with conn.FlexDialer (offers "h2" and "http/1.1")
@@ -75,8 +78,8 @@ const (
 	// that finds every connection busy blocks until one frees or ctx is done.
 	// Connections are kept alive and reused, and discarded when the response says
 	// the connection will not persist. ClientOptions.Pool is required, and
-	// ConnOpts.Dialer must NOT assert ALPN "h2" — use a plain TCP dialer or a TLS
-	// dialer with NextProtos containing only "http/1.1".
+	// ConnOpts.Dialer must NOT assert ALPN "h2" — use &conn.H1TLSDialer{} over
+	// TLS or &conn.PlaintextDialer{} in cleartext (see TransportH1SingleConn).
 	//
 	// New TransportKinds MUST be appended here, at the end of the block: inserting
 	// one mid-block silently renumbers every kind below it.
@@ -243,6 +246,8 @@ func NewClient(opts ClientOptions) (*Client, error) {
 		}
 	} else if opts.ConnOpts.Dialer == nil {
 		return nil, fmt.Errorf("client: ClientOptions.ConnOpts.Dialer is required")
+	} else if err := validateDialerALPN(opts.Transport, opts.ConnOpts.Dialer); err != nil {
+		return nil, err
 	}
 	if opts.PushHandler != nil {
 		opts.ConnOpts.EnablePush = true
@@ -322,6 +327,40 @@ func validateTransportOptions(opts ClientOptions) error {
 		return fmt.Errorf("%w: %d", ErrInvalidTransportKind, int(opts.Transport))
 	}
 	return nil
+}
+
+// transportALPN returns the ALPN protocol kind speaks over TLS, or "" when the
+// pairing is not fixed: TransportALPN routes to whichever protocol the server
+// selects, and the HTTP/3 transports do not dial through a conn.Dialer at all.
+func transportALPN(kind TransportKind) string {
+	switch kind {
+	case TransportSingleConn, TransportPool, TransportManaged:
+		return "h2"
+	case TransportH1SingleConn, TransportH1Pool, TransportH1Managed:
+		return "http/1.1"
+	default:
+		return ""
+	}
+}
+
+// validateDialerALPN rejects a dialer whose ALPN assertion the transport cannot
+// use. Pairing conn.TLSDialer (asserts "h2") with an HTTP/1.1 transport dials
+// successfully and then fails every exchange with "read status line: EOF" — the
+// peer framed the connection as HTTP/2 — so the pairing is refused up front.
+// Dialers that assert nothing (conn.FlexDialer, conn.PlaintextDialer, anything
+// not implementing conn.ALPNAsserter) are left alone: the negotiated protocol is
+// re-checked at dial time by the HTTP/1.1 transports.
+func validateDialerALPN(kind TransportKind, d conn.Dialer) error {
+	a, ok := d.(conn.ALPNAsserter)
+	if !ok {
+		return nil
+	}
+	asserted := a.AssertsALPN()
+	want := transportALPN(kind)
+	if asserted == "" || want == "" || asserted == want {
+		return nil
+	}
+	return fmt.Errorf("%w: dialer asserts %q but this transport speaks %q", ErrALPNProtocolMismatch, asserted, want)
 }
 
 // isH3Transport reports whether kind speaks HTTP/3 over QUIC and therefore dials

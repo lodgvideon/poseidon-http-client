@@ -138,10 +138,11 @@ func main() {
 		Addr:      "example.com:443",
 		Transport: client.TransportH1SingleConn,
 		ConnOpts: conn.ConnOptions{
-			// Offer only http/1.1 so the server cannot select h2.
-			Dialer: &conn.TLSDialer{Config: &tls.Config{
+			// H1TLSDialer offers only http/1.1, so an h2-capable server cannot
+			// select h2. (conn.TLSDialer asserts h2 and is refused here.)
+			Dialer: &conn.H1TLSDialer{Config: &tls.Config{
 				ServerName: "example.com",
-				NextProtos: []string{"http/1.1"},
+				MinVersion: tls.VersionTLS12,
 			}},
 		},
 	})

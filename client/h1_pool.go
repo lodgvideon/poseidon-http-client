@@ -429,6 +429,12 @@ func (p *h1Pool) dialOne() {
 	dialStart := time.Now()
 	p.metrics.Counters.DialsAttempted.Add(1)
 	nc, err := p.dialer.Dial(ctx, p.addr)
+	if err == nil {
+		if aerr := assertH1Conn(nc); aerr != nil {
+			_ = nc.Close()
+			nc, err = nil, aerr
+		}
+	}
 	dur := time.Since(dialStart)
 	p.metrics.Latency.Dial.Observe(dur)
 	if err != nil {

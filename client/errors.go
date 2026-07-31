@@ -143,4 +143,19 @@ var (
 	// HTTP/1.1 transport (h1Exchange) buffers each response, so it cannot stream;
 	// HTTP/2 (*conn.Stream) and HTTP/3 (via http3.Client.DoStream) both can.
 	ErrStreamingUnsupported = errors.New("client: streaming responses are not supported by this transport")
+
+	// ErrALPNProtocolMismatch reports that a connection's application protocol
+	// is not the one the transport speaks. It is returned in two places:
+	//
+	//   - by NewClient, when ConnOpts.Dialer asserts an ALPN protocol
+	//     (conn.ALPNAsserter) the chosen transport cannot use — an HTTP/1.1
+	//     transport with conn.TLSDialer, or an HTTP/2 transport with
+	//     conn.H1TLSDialer;
+	//   - by the HTTP/1.1 transports, when a freshly dialled connection reports
+	//     a negotiated ALPN protocol other than "http/1.1".
+	//
+	// The second check is the backstop for a custom dialer: writing an HTTP/1.1
+	// request into a connection the peer frames as HTTP/2 fails as an unhelpful
+	// "read status line: EOF" on every exchange, with nothing pointing at ALPN.
+	ErrALPNProtocolMismatch = errors.New("client: negotiated ALPN protocol does not match transport")
 )

@@ -172,14 +172,15 @@ The `:authority` for requests defaults to a port-stripped form of `Addr` (`deriv
 
 `ConnOpts.Dialer` is always required. The `conn` package ships these:
 
-- `&conn.TLSDialer{Config: *tls.Config}` — TCP + TLS, asserts ALPN `h2` (default; `Config` nil → TLS 1.2+ with `NextProtos=["h2"]`). Returns `conn.ErrALPNFailed` if the peer does not select `h2`.
-- `&conn.PlaintextDialer{}` — raw TCP for H2C prior-knowledge (no TLS/ALPN). Pair with `DefaultScheme: "http"`.
+- `&conn.TLSDialer{Config: *tls.Config}` — TCP + TLS, asserts ALPN `h2` (default; `Config` nil → TLS 1.2+ with `NextProtos=["h2"]`). Returns `conn.ErrALPNFailed` if the peer does not select `h2`, and `conn.ErrALPNConflict` — before dialing — if `Config.NextProtos` is non-empty and excludes `h2` (that combination used to be silently rewritten to `["h2","http/1.1"]`).
+- `&conn.H1TLSDialer{Config: *tls.Config}` — TCP + TLS offering **only** `http/1.1`; the TLS dialer for the H1 transports. Returns `conn.ErrALPNNotHTTP11` if the peer selects something else (no ALPN at all is accepted), and `conn.ErrALPNConflict` if `Config.NextProtos` contains `h2`.
+- `&conn.PlaintextDialer{}` — raw TCP for H2C prior-knowledge (no TLS/ALPN). Pair with `DefaultScheme: "http"`. Also the cleartext dialer for the H1 transports.
 - `&conn.FlexDialer{Config: *tls.Config}` — TCP + TLS offering both `h2` and `http/1.1`; use with `TransportALPN`.
 - `&conn.ProxyTLSDialer{ProxyURL, ProxyTLS, TLSConfig}` — dials through an HTTP `CONNECT` proxy, then TLS + ALPN `h2` to the target over the tunnel. `ProxyURL` is `http://…` (plaintext to proxy) or `https://…` (TLS to proxy first); embed `user:pass@` for `Proxy-Authorization: Basic`. `TLSConfig` is the *target* TLS config (`ServerName` = target host). Drop-in for `TLSDialer` — see `ExampleProxyTLSDialer`.
 - `&conn.ProxyDialer{ProxyURL, ProxyTLS}` — the raw `CONNECT` tunnel only (returns the plaintext `net.Conn`); use when you want to layer your own TLS, or for H2C through a proxy.
-- A plain-TCP or `http/1.1`-only TLS dialer for `TransportH1SingleConn`.
-
 Any type implementing `conn.Dialer` (`Dial(ctx, addr) (net.Conn, error)`) works, so you can wrap these or supply your own.
+
+**Dialer/transport pairing is checked.** A dialer may implement `conn.ALPNAsserter` (`AssertsALPN() string`) to declare the one protocol it ever returns — `TLSDialer` and `ProxyTLSDialer` return `"h2"`, `H1TLSDialer` returns `"http/1.1"`, `FlexDialer` returns `""` (no assertion). `NewClient` rejects a pairing that can only fail — an H1 transport with an `h2` dialer, or an H2 transport with `H1TLSDialer` — with `client.ErrALPNProtocolMismatch`. Independently, the H1 transports re-check the negotiated protocol on every dial and refuse a connection that came back as `h2`, so a custom dialer gets the same error at the dial instead of `http1: read status line: EOF` on every exchange.
 
 ### The five transport kinds
 
@@ -199,7 +200,7 @@ const (
 
 **`TransportManaged`.** Multi-address fan-out: a `Resolver` discovers backends, a `Selector` picks one per acquire, and the managed pool keeps a per-address sub-`Pool` (each configured by the optional shared `PoolOptions`). `Addr` MUST be empty. On a *dial-only* failure (`*DialError`, `ErrDialBackoff`, `ErrPoolClosed`) it fails over to the next address; non-dial errors propagate. When the Resolver drops an address, `DrainMode` governs the sub-pool's teardown. `NewClient` does an eager initial `Resolve` (surfaces hard errors immediately). Use for: load generators hitting a service with several backends / DNS-discovered endpoints.
 
-**`TransportH1SingleConn`.** HTTP/1.1 analogue of single-conn: at most one `*http1.Conn`, requests **serialized** (one in-flight exchange at a time, no pipelining). `ConnOpts.Dialer` must NOT assert ALPN `h2` — use `PlaintextDialer` or a TLS dialer whose `NextProtos` is `http/1.1`-only. `DoStream`/`BodyMode: client.BodyStream` and request trailers are **not** supported (the latter returns `ErrTrailersUnsupportedH1`). Use for: an HTTP/1.1-only origin you must talk to with the same `Request`/`Response` API.
+**`TransportH1SingleConn`.** HTTP/1.1 analogue of single-conn: at most one `*http1.Conn`, requests **serialized** (one in-flight exchange at a time, no pipelining). `ConnOpts.Dialer` must NOT assert ALPN `h2` — use `&conn.H1TLSDialer{}` over TLS or `&conn.PlaintextDialer{}` in cleartext; `&conn.TLSDialer{}` is rejected with `ErrALPNProtocolMismatch`. `DoStream`/`BodyMode: client.BodyStream` and request trailers are **not** supported (the latter returns `ErrTrailersUnsupportedH1`). Use for: an HTTP/1.1-only origin you must talk to with the same `Request`/`Response` API.
 
 **`TransportALPN`.** Dials once with a `FlexDialer` (offers `h2` + `http/1.1`), detects the negotiated protocol, and permanently delegates to a single-conn (H2) or H1 single-conn (H1.1). Identical to `TransportSingleConn` against H2 servers; falls back to HTTP/1.1 automatically. `ConnOpts.Dialer` should be `*conn.FlexDialer`. Use for: a target whose protocol you don't know in advance.
 
@@ -263,6 +264,18 @@ c, err := client.NewClient(client.ClientOptions{
     },
 })
 // Requests serialized; DoStream / Request.BodyMode=BodyStream / trailers unsupported.
+```
+
+Over TLS — including against an origin that also offers `h2` — use `H1TLSDialer`, which offers only `http/1.1` so the server cannot select `h2`:
+
+```go
+c, err := client.NewH1PoolClient("legacy.example.com:443",
+    &conn.H1TLSDialer{Config: &tls.Config{
+        ServerName: "legacy.example.com",
+        MinVersion: tls.VersionTLS12,
+    }},
+    client.PoolOptions{MaxConnsPerHost: 8}, // MaxConnsPerHost IS the concurrency
+)
 ```
 
 ### Auto-negotiating origin (`TransportALPN`)

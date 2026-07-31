@@ -13,6 +13,19 @@ var (
 	// ErrALPNFailed is returned when the TLS handshake completed but
 	// the negotiated ALPN protocol is not "h2".
 	ErrALPNFailed = errors.New("conn: ALPN did not negotiate h2")
+	// ErrALPNNotHTTP11 is returned by H1TLSDialer when the TLS handshake
+	// completed but the peer selected an ALPN protocol other than
+	// "http/1.1" (an empty selection — the peer does not speak ALPN — is
+	// accepted, since HTTP/1.1 is what an ALPN-less TLS peer implies).
+	ErrALPNNotHTTP11 = errors.New("conn: ALPN did not negotiate http/1.1")
+	// ErrALPNConflict is returned before any dial when a dialer's ALPN
+	// assertion contradicts the caller's explicit Config.NextProtos — e.g.
+	// TLSDialer (which asserts "h2") given NextProtos=["http/1.1"], or
+	// H1TLSDialer given a list containing "h2". Overriding the caller's
+	// list would negotiate a protocol the caller did not ask for and hand
+	// it to a codec that cannot speak it, so the mismatch is refused at the
+	// dial call instead.
+	ErrALPNConflict = errors.New("conn: dialer ALPN assertion conflicts with Config.NextProtos")
 	// ErrTooManyStreams is returned by NewStream when the in-flight
 	// count already equals min(local advertised, peer-advertised)
 	// MaxConcurrentStreams.
