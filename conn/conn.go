@@ -1841,6 +1841,15 @@ func (c *Conn) shutdownStreams(reason error) {
 // SendHeaders/SendData when END_STREAM goes out. It releases the
 // stream's slot in the inflight pool exactly once and evicts the
 // stream from the registry once both ends have closed.
+//
+// It holds c.smu across its ENTIRE body on purpose, and that span is
+// load-bearing for the recycle rendezvous, not incidental. This method runs
+// on two goroutines for one stream — the reader (terminal frame) and the app
+// (SendData/SendHeaders with END_STREAM) — and smu serializes them so that the
+// inflightDone false->true guard admits exactly one into the eviction block.
+// A future "release smu earlier to cut contention" refactor would let both in,
+// re-open the double-recycle this fix closes, and reintroduce the data race
+// against recycleStream. Do not narrow the hold without moving the guard.
 // wakeSendWaiters broadcasts the outbound flow-control condition so every writer
 // blocked in acquireSendCredits re-checks its stream and connection state. Holds
 // only fcOutMu, so it is safe to call with no other lock held.
@@ -1852,9 +1861,9 @@ func (c *Conn) wakeSendWaiters() {
 
 func (c *Conn) markStreamDone(id uint32) {
 	c.smu.Lock()
-	defer c.smu.Unlock()
 	s, ok := c.streams[id]
 	if !ok {
+		c.smu.Unlock()
 		return
 	}
 	s.mu.Lock()
@@ -1865,9 +1874,26 @@ func (c *Conn) markStreamDone(id uint32) {
 		s.inflightDone = true
 	}
 	s.mu.Unlock()
+
+	recycle := false
 	if ended && !released {
 		c.releaseSlotLocked(pushed)
 		delete(c.streams, id)
+		// Registry entry gone: the reader can no longer look this struct up,
+		// so this is the connection side's final contact. Rendezvous with
+		// Close via appClosed/connDone: whichever of the two runs second
+		// recycles. Gated on !closed so only a cleanly-completed stream is
+		// pooled — a reset/overflow stream may still have a background RST
+		// goroutine referencing s.w (see Stream.push's overflow path).
+		s.mu.Lock()
+		if !s.closed {
+			if s.appClosed {
+				recycle = true
+			} else {
+				s.connDone = true
+			}
+		}
+		s.mu.Unlock()
 	}
 	// Wake Shutdown when the conn is fully drained.
 	if c.draining.Load() && c.inflight == 0 {
@@ -1877,6 +1903,13 @@ func (c *Conn) markStreamDone(id uint32) {
 		default:
 			close(c.drainDone)
 		}
+	}
+	c.smu.Unlock()
+	// Recycle outside smu — recycleStream never needs it, and holding smu
+	// across it would serialize unrelated streams' registry lookups behind a
+	// pool drain/refill.
+	if recycle {
+		recycleStream(&c.streamPool, s)
 	}
 }
 

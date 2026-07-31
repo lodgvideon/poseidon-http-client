@@ -108,6 +108,20 @@ type Stream struct {
 	// inflightDone in markStreamDone / releaseInflight.
 	pushed bool
 
+	// appClosed records that Close() ran. Half of the recycle rendezvous (other
+	// half: connDone): a cleanly-completed stream returns to streamPool only once
+	// BOTH markStreamDone (which evicts it) and Close have finished with the
+	// struct — whichever is second recycles. Guarded by mu; reset by
+	// recycleStream. Distinct from `released`, the atomic Close-idempotency latch
+	// that must survive recycle.
+	appClosed bool
+	// connDone records that markStreamDone retired a cleanly-completed stream:
+	// both ends ended, slot released, and the registry entry deleted — so the
+	// reader can never look the struct up again. Close observing connDone is the
+	// rendezvous's second party. Set only AFTER delete(c.streams,id). Guarded by
+	// mu; reset by recycleStream.
+	connDone bool
+
 	// reqAuthority is the :authority pseudo-header of the request this stream
 	// carries, captured when the request HEADERS are written. The push accept
 	// path compares a PUSH_PROMISE's :authority against it — a server is
@@ -234,6 +248,8 @@ func recycleStream(pool *sync.Pool, s *Stream) {
 	s.closed = false
 	s.inflightDone = false
 	s.pushed = false
+	s.appClosed = false
+	s.connDone = false
 	s.reqAuthority = ""
 	s.headersReceived = false
 	s.interimCount = 0
@@ -265,6 +281,31 @@ func (s *Stream) markRemoteEnd() {
 	s.mu.Unlock()
 }
 
+// deliverEnd delivers e and, when end is true, marks the remote side ended —
+// both under one s.mu hold.
+//
+// The ordering is load-bearing against a concurrent Stream.Close(), the same
+// way OnRSTStream's is. Close computes bothEnded (localEnded && remoteEnded)
+// under s.mu and recycles the stream when it holds. Setting remoteEnded in a
+// section separate from the delivery leaves a window where Close observes
+// bothEnded — localEnded is already true for any request whose upload finished
+// — and recycles the struct while this handler is still pushing into it. Under
+// one hold there is no such window: Close either runs first and sees
+// remoteEnded false (so it sends its own CANCEL and recycles nothing), or runs
+// second and finds the event already delivered.
+//
+// It also keeps remoteEnded visible before the consumer can observe the event,
+// so a Close() immediately after reading END_STREAM still recycles instead of
+// emitting a pointless RST_STREAM(CANCEL) on a stream that ended cleanly.
+func (s *Stream) deliverEnd(e StreamEvent, end bool) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if end {
+		s.remoteEnded = true
+	}
+	return s.pushLocked(e)
+}
+
 // hasRemoteEnded reports whether the peer has ended its side of the stream
 // (END_STREAM observed, or the stream reset). The reader uses it to detect a
 // frame arriving after END_STREAM on a half-closed(remote) stream (RFC 9113
@@ -288,15 +329,29 @@ func (s *Stream) requestAuthority() string {
 // background goroutine (so the reader is never blocked on wmu), and
 // signals via resetSignal so a blocked Recv unblocks immediately.
 func (s *Stream) push(e StreamEvent) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.pushLocked(e)
+}
+
+// pushLocked is push with s.mu already held by the caller. It exists so the
+// reader can deliver a terminal event and mark the stream ended in ONE critical
+// section, which is what stops a concurrent Close() from recycling the struct
+// in between — recycleStream rewrites s.events and zeroes every field, so a
+// push landing after it writes to an orphaned channel on a struct another
+// request may already own.
+//
+// Every step here is non-blocking: the two channel sends use select/default,
+// and the RST write is handed to a background goroutine. Holding s.mu across
+// them therefore cannot stall the reader.
+func (s *Stream) pushLocked(e StreamEvent) bool {
 	select {
 	case s.events <- e:
 		return true
 	default:
 	}
-	s.mu.Lock()
 	already := s.closed
 	s.closed = true
-	s.mu.Unlock()
 	if already {
 		return false
 	}
@@ -443,6 +498,17 @@ func (s *Stream) Recv(ctx context.Context) (StreamEvent, error) {
 // retain a *Stream past Close — allocStream re-arms the guard for the next
 // lifetime, so a Close on a stale reference to a re-allocated struct is not
 // protected (no in-tree caller does this).
+//
+// A cleanly-completed stream (bothEnded) is recycled via a rendezvous with
+// the reader's markStreamDone rather than directly here: markStreamDone is
+// what evicts the stream from the connection's registry, and only after
+// that eviction can no other goroutine look the struct up and touch it.
+// Recycling here unconditionally — as soon as Close merely observes
+// bothEnded — raced markStreamDone's own read/write of the same fields,
+// because recycleStream mutates every field of *Stream with no lock held.
+// appClosed/connDone are the two halves of that handshake: whichever of
+// Close/markStreamDone finishes second with the struct is the one that
+// recycles it.
 func (s *Stream) Close() error {
 	// released is the idempotency guard. It survives recycleStream (which
 	// resets closed/w/... for pool reuse), so a repeat Close while the struct
@@ -451,20 +517,36 @@ func (s *Stream) Close() error {
 		return nil
 	}
 	s.mu.Lock()
-	already := s.closed // e.g. push() set this on event-channel overflow
+	s.appClosed = true
+	closed := s.closed // e.g. push() set this on event-channel overflow
 	bothEnded := s.localEnded && s.remoteEnded
-	s.closed = true
+	connDone := s.connDone
 	w := s.w
+	if !closed && !bothEnded {
+		// Abandoning an incomplete stream: our RST is the sole teardown: the
+		// reader will never see END_STREAM to reach markStreamDone's own path.
+		s.closed = true
+	}
 	s.mu.Unlock()
-	if already {
-		// Already closed (RST already sent by push overflow); don't double-RST.
+	if closed {
+		// Already closed (RST already sent by push overflow, or a peer
+		// reset/GOAWAY already tore this stream down); never pooled from here.
 		return nil
 	}
-	if bothEnded {
-		// Both sides ended normally; recycle without sending RST.
+	if connDone {
+		// markStreamDone already evicted the stream from the registry and
+		// found appClosed false at the time — so it left recycling to us. We
+		// are the second (and last) party to touch the struct.
 		if c, ok := w.(*Conn); ok {
 			recycleStream(&c.streamPool, s)
 		}
+		return nil
+	}
+	if bothEnded {
+		// Clean completion is in flight or already handled: either
+		// markStreamDone hasn't run its eviction yet (it will recycle once it
+		// does, since appClosed is now true) or it already recycled directly.
+		// Either way we must not touch the struct.
 		return nil
 	}
 	return w.writeRSTStream(s, frame.ErrCodeCancel)
