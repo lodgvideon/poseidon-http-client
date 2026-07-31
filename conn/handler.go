@@ -246,13 +246,15 @@ func (h *connHandler) OnData(fh frame.FrameHeader, p []byte, _ uint8) error {
 			dataBufPool.Put(bufPtr)
 			return cerr
 		}
-		s.markRemoteEnd()
-		h.streams.markStreamDone(fh.StreamID)
 	}
-	if !s.push(StreamEvent{Type: EventData, Data: *bufPtr, DataSlab: bufPtr, EndStream: end}) {
+	// Delivered and marked ended in one s.mu section — see Stream.deliverEnd.
+	if !s.deliverEnd(StreamEvent{Type: EventData, Data: *bufPtr, DataSlab: bufPtr, EndStream: end}, end) {
 		// Event dropped on channel overflow (push reset the stream); return the
 		// pooled buffer rather than leaking it to GC under backpressure.
 		dataBufPool.Put(bufPtr)
+	}
+	if end {
+		h.streams.markStreamDone(fh.StreamID)
 	}
 	return nil
 }
@@ -475,8 +477,6 @@ func (h *connHandler) emitHeaderBlock(s *Stream, hb []byte, endStream bool) erro
 		if cerr := h.checkContentLength(s); cerr != nil {
 			return cerr
 		}
-		s.markRemoteEnd()
-		h.streams.markStreamDone(s.id)
 	}
 	// Build one slab for all header bytes, one slice for all fields.
 	// Ownership of the slab transfers to the client via StreamEvent.Slab;
@@ -496,15 +496,19 @@ func (h *connHandler) emitHeaderBlock(s *Stream, hb []byte, endStream bool) erro
 			Sensitive: f.Sensitive,
 		}
 	}
-	if !s.push(StreamEvent{
+	// Delivered and marked ended in one s.mu section — see Stream.deliverEnd.
+	if !s.deliverEnd(StreamEvent{
 		Type:      evType,
 		Headers:   copied,
 		Slab:      slabPtr,
 		EndStream: endStream,
-	}) {
+	}, endStream) {
 		// push dropped the event (channel overflow); return slab to pool.
 		*slabPtr = (*slabPtr)[:0]
 		headerSlabPool.Put(slabPtr)
+	}
+	if endStream {
+		h.streams.markStreamDone(s.id)
 	}
 	return nil
 }

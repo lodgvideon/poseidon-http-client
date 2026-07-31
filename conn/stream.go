@@ -265,6 +265,31 @@ func (s *Stream) markRemoteEnd() {
 	s.mu.Unlock()
 }
 
+// deliverEnd delivers e and, when end is true, marks the remote side ended —
+// both under one s.mu hold.
+//
+// The ordering is load-bearing against a concurrent Stream.Close(), the same
+// way OnRSTStream's is. Close computes bothEnded (localEnded && remoteEnded)
+// under s.mu and recycles the stream when it holds. Setting remoteEnded in a
+// section separate from the delivery leaves a window where Close observes
+// bothEnded — localEnded is already true for any request whose upload finished
+// — and recycles the struct while this handler is still pushing into it. Under
+// one hold there is no such window: Close either runs first and sees
+// remoteEnded false (so it sends its own CANCEL and recycles nothing), or runs
+// second and finds the event already delivered.
+//
+// It also keeps remoteEnded visible before the consumer can observe the event,
+// so a Close() immediately after reading END_STREAM still recycles instead of
+// emitting a pointless RST_STREAM(CANCEL) on a stream that ended cleanly.
+func (s *Stream) deliverEnd(e StreamEvent, end bool) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if end {
+		s.remoteEnded = true
+	}
+	return s.pushLocked(e)
+}
+
 // hasRemoteEnded reports whether the peer has ended its side of the stream
 // (END_STREAM observed, or the stream reset). The reader uses it to detect a
 // frame arriving after END_STREAM on a half-closed(remote) stream (RFC 9113
@@ -288,15 +313,29 @@ func (s *Stream) requestAuthority() string {
 // background goroutine (so the reader is never blocked on wmu), and
 // signals via resetSignal so a blocked Recv unblocks immediately.
 func (s *Stream) push(e StreamEvent) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.pushLocked(e)
+}
+
+// pushLocked is push with s.mu already held by the caller. It exists so the
+// reader can deliver a terminal event and mark the stream ended in ONE critical
+// section, which is what stops a concurrent Close() from recycling the struct
+// in between — recycleStream rewrites s.events and zeroes every field, so a
+// push landing after it writes to an orphaned channel on a struct another
+// request may already own.
+//
+// Every step here is non-blocking: the two channel sends use select/default,
+// and the RST write is handed to a background goroutine. Holding s.mu across
+// them therefore cannot stall the reader.
+func (s *Stream) pushLocked(e StreamEvent) bool {
 	select {
 	case s.events <- e:
 		return true
 	default:
 	}
-	s.mu.Lock()
 	already := s.closed
 	s.closed = true
-	s.mu.Unlock()
 	if already {
 		return false
 	}
