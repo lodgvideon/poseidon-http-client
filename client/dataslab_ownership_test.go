@@ -58,11 +58,21 @@ func newSlabLedger() *slabLedger {
 	}
 }
 
-// got records one slab delivered to the consumer. One delivered
-// StreamEvent.DataSlab is exactly one dataBufPool.Get: conn's OnData Gets once
-// per DATA frame and immediately Puts back the only buffer it does not deliver
-// (the push()-overflow path), so deliveries and Gets are in bijection for every
-// slab that reaches this package.
+// got records one slab taken out of the pool.
+//
+// It used to be called from a tap on the stream's Recv, inferring a Get from a
+// DELIVERY. That inference is sound only when every Get is followed by a
+// delivery, which holds for conn's OnData (it Gets once per DATA frame and
+// immediately Puts back the only buffer it does not deliver, the
+// push()-overflow path) but NOT for h1Exchange.Recv, which Gets its own buffer
+// and, when ReadBodyChunk fails, correctly Puts it without delivering anything.
+// Against a delivery-inferred ledger that Put scores as a double-Put — the pool
+// hands the same pointer back, so the slab has an earlier delivery on record —
+// and, in the other direction, an H1 buffer that leaked would balance and pass.
+//
+// Callers now tap the real Get (installSlabGetTap) so the ledger counts what
+// actually happened. Delivery-side taps remain for the H2/H3 paths, where the
+// Getter is on conn's side of the boundary and cannot be reached from here.
 func (l *slabLedger) got(p *[]byte) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
@@ -105,7 +115,7 @@ func (l *slabLedger) check(t *testing.T) int {
 	for p, g := range l.gets {
 		deliveries += g
 		if l.puts[p] != g {
-			t.Errorf("slab %p: conn Got it %d time(s), client Put it %d time(s) — want exactly one Put per Get",
+			t.Errorf("slab %p: Got %d time(s), Put %d time(s) — want exactly one Put per Get",
 				p, g, l.puts[p])
 		}
 	}
@@ -125,6 +135,23 @@ func installSlabPutTap(t *testing.T, led *slabLedger) {
 		prev(slab)
 	}
 	t.Cleanup(func() { putDataSlab = prev })
+}
+
+// installSlabGetTap routes every client-side DATA-slab Get through led. Pair it
+// with installSlabPutTap on any path where the CLIENT is the Getter — today
+// that is h1Exchange.Recv — so the ledger records Gets that produce no delivery
+// (the ReadBodyChunk error path) instead of inferring them from deliveries and
+// mis-scoring the resulting Put. Same serial-execution safety argument as
+// installSlabPutTap.
+func installSlabGetTap(t *testing.T, led *slabLedger) {
+	t.Helper()
+	prev := getDataSlab
+	getDataSlab = func() *[]byte {
+		slab := prev()
+		led.got(slab)
+		return slab
+	}
+	t.Cleanup(func() { getDataSlab = prev })
 }
 
 // slabTapTransport wraps a Client's transport so the protoStream handed to

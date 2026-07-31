@@ -1,10 +1,14 @@
 package client
 
 import (
+	"bufio"
 	"context"
+	"fmt"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -56,6 +60,58 @@ func h1PatternServer(t *testing.T, pattern []byte, chunk int) string {
 	return srv.Listener.Addr().String()
 }
 
+// h1RawServer starts a listener that speaks HTTP/1.1 by hand and returns its
+// address. respond is called once per request, after the request head has been
+// consumed; when keepAlive is false the connection is closed as soon as it
+// returns.
+//
+// Two things httptest cannot do for the tests below. A response body that stops
+// short of its own Content-Length is not expressible through net/http's Handler
+// interface at all. And net/http's server allocates per request in the SAME
+// process the allocation benchmark measures — AllocedBytesPerOp is a
+// process-wide TotalAlloc delta — so its bytes would land inside the assertion
+// and the gate would move with the Go toolchain rather than with this client.
+// Reading the head through bufio.ReadSlice returns slices into the reader's own
+// buffer, and the response is precomputed by the caller, so this server's
+// steady-state contribution is essentially the write syscall.
+func h1RawServer(t *testing.T, respond func(net.Conn) error, keepAlive bool) string {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+	go func() {
+		for {
+			c, aerr := ln.Accept()
+			if aerr != nil {
+				return // listener closed by cleanup
+			}
+			go func(c net.Conn) {
+				defer func() { _ = c.Close() }()
+				rd := bufio.NewReaderSize(c, 4096)
+				for {
+					// Consume the request head: lines until a bare CRLF. The tests
+					// here issue only bodyless GETs.
+					for {
+						line, rerr := rd.ReadSlice('\n')
+						if rerr != nil {
+							return
+						}
+						if len(line) <= 2 {
+							break
+						}
+					}
+					if respond(c) != nil || !keepAlive {
+						return
+					}
+				}
+			}(c)
+		}
+	}()
+	return ln.Addr().String()
+}
+
 func h1PoolTestClient(t *testing.T, addr string) *Client {
 	t.Helper()
 	c, err := NewClient(ClientOptions{
@@ -89,14 +145,18 @@ const (
 // Only the buffered Do path is exercised because it is the only one H1 has:
 // beginRespStream rejects h1Exchange with ErrStreamingUnsupported, so
 // drainResponse -> handleDataEvent is the sole consumer of an H1 DataSlab.
+// The ledger taps the real Get here (installSlabGetTap) rather than inferring
+// one per delivery the way the H2 tests must. On the H1 path the client is the
+// Getter, so the inference would be wrong in both directions — see slabLedger
+// .got. That also makes the sibling truncated-body test below possible at all.
 func TestIT_DataSlab_H1_Do_MultiChunk_PutExactlyOnce(t *testing.T) {
 	led := newSlabLedger()
+	installSlabGetTap(t, led)
 	installSlabPutTap(t, led)
 
 	pattern := nonRepeatingPattern(h1SlabTotal)
 	c := h1PoolTestClient(t, h1PatternServer(t, pattern, h1SlabChunk))
 	defer c.Close()
-	c.tr = &slabTapTransport{transport: c.tr, led: led}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
@@ -106,18 +166,73 @@ func TestIT_DataSlab_H1_Do_MultiChunk_PutExactlyOnce(t *testing.T) {
 		t.Fatalf("Do: %v", err)
 	}
 
-	deliveries := led.check(t)
+	gets := led.check(t)
 	// Control 1: the ledger saw a sequence of slabs. Per-pointer accounting over a
-	// single delivery degenerates to "one Get, one Put" and would pass against
-	// code with no per-chunk discipline at all.
-	if deliveries < 2 {
-		t.Fatalf("observed %d DATA slab deliveries, want >= 2 — the ledger cannot "+
-			"distinguish per-chunk ownership from a single-chunk body", deliveries)
+	// single Get degenerates to "one Get, one Put" and would pass against code
+	// with no per-chunk discipline at all.
+	if gets < 2 {
+		t.Fatalf("observed %d DATA slab Gets, want >= 2 — the ledger cannot "+
+			"distinguish per-chunk ownership from a single-chunk body", gets)
 	}
 	// Control 2: the body survived being reassembled out of recycled buffers.
 	// Without this the ledger would pass just as well against a Recv that handed
 	// back one buffer every time and corrupted every response.
 	assertPattern(t, resp.Body, pattern)
+}
+
+// TestIT_DataSlab_H1_TruncatedBody_PutExactlyOnce covers h1Exchange.Recv's ERROR
+// branch, which is the one place in the client where a slab is Got and then
+// returned without ever being delivered. Nothing exercised it: the other H1
+// tests all drive responses that complete, so the branch shipped untested and
+// its Put was invisible to a ledger that counted deliveries.
+//
+// The server declares a Content-Length it does not satisfy and hangs up, so
+// ReadBodyChunk fails with a premature-EOF error partway through the body. By
+// then several chunks have been Got, delivered and Put through the SAME pooled
+// pointer, so the final undelivered Get/Put lands on a pointer with history —
+// exactly the case a delivery-inferred ledger mis-scores as a double-Put.
+func TestIT_DataSlab_H1_TruncatedBody_PutExactlyOnce(t *testing.T) {
+	led := newSlabLedger()
+	installSlabGetTap(t, led)
+	installSlabPutTap(t, led)
+
+	const (
+		declared = 500000
+		sent     = 6 * 8192
+	)
+	addr := h1RawServer(t, func(c net.Conn) error {
+		hdr := fmt.Sprintf("HTTP/1.1 200 OK\r\nContent-Length: %d\r\n\r\n", declared)
+		if _, err := c.Write([]byte(hdr)); err != nil {
+			return err
+		}
+		_, err := c.Write(make([]byte, sent))
+		return err // caller closes the conn: body ends short of Content-Length
+	}, false)
+
+	c := h1PoolTestClient(t, addr)
+	defer c.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+
+	var resp Response
+	err := c.Do(ctx, &Request{Method: "GET", Path: "/", BodyMode: BodyBuffer}, &resp)
+	if err == nil {
+		t.Fatal("Do succeeded on a body truncated short of its Content-Length; " +
+			"the error branch under test never ran")
+	}
+	if !strings.Contains(err.Error(), "premature EOF") {
+		t.Fatalf("Do error = %v, want a premature-EOF framing error — some other "+
+			"failure got here first and the Recv error branch may not have run", err)
+	}
+
+	gets := led.check(t)
+	// The undelivered Get is the point of the test: without it the run is just a
+	// shorter version of the multi-chunk test.
+	if gets < 2 {
+		t.Fatalf("observed %d DATA slab Gets, want >= 2 (several delivered chunks "+
+			"plus the undelivered one from the failing read)", gets)
+	}
 }
 
 // TestH1_ConcurrentReuse_NoCrossRequestBleed is the dynamic twin of the ledger.
@@ -198,33 +313,41 @@ func TestH1_ConcurrentReuse_NoCrossRequestBleed(t *testing.T) {
 // pool, a transport, or the exchange's read path.
 //
 // Bytes, not allocation count: by count this bug was ~1 object/request and
-// looked unremarkable, which is exactly why it survived. Allocation counting is
-// deterministic, so the only noise here is the race detector's own overhead;
-// the threshold clears both modes by a wide margin (measured, 2 KiB response:
-// 4.3 KB plain / 9.5 KB under -race after the fix, 24.9 KB / 25.8 KB before).
-// It is a tripwire on a kilobyte-scale regression, not a budget to tune against.
+// looked unremarkable, which is exactly why it survived.
+//
+// The peer is h1RawServer, not httptest, and that is load-bearing rather than
+// incidental. AllocedBytesPerOp is a process-wide TotalAlloc delta, so an
+// in-process net/http server puts its own per-request allocations inside the
+// assertion: the figure stops being "what the client allocates", the budget is
+// shared with the standard library, and a Go release that changes net/http's
+// server profile fails this test with a message accusing h1Exchange. Against a
+// precomputed-response raw server the number is the client's, and the threshold
+// can be set where it actually bites.
 func TestH1_AllocatedBytesPerRequest(t *testing.T) {
 	if testing.Short() {
 		t.Skip("allocation measurement needs a benchmark run")
 	}
 	const (
 		bodySize = 2048
-		// h1BodyChunkSize is the natural bound, and says what the test means: one
-		// request must not allocate as much as the scratch buffer it used to carry
-		// inline. Anything at that scale is per-request memory that belongs in a
-		// pool.
-		maxBytesPerOp = h1BodyChunkSize
+		// Split by build tag and set from measurement — see h1_allocgate_norace_test.go.
+		// Deliberately far below the pre-fix floor rather than just below it: a limit
+		// near 16 KiB would only catch a regression that reintroduced the whole scratch
+		// array, and would wave through a smaller per-request buffer held behind a
+		// pointer, which the struct-size test cannot see either.
+		maxBytesPerOp = h1AllocGateLimit
 	)
 	body := make([]byte, bodySize)
 	for i := range body {
 		body[i] = byte(i % 251)
 	}
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		_, _ = w.Write(body)
-	}))
-	t.Cleanup(srv.Close)
+	// Precomputed once: the server's steady-state work is one Write.
+	canned := append([]byte(fmt.Sprintf("HTTP/1.1 200 OK\r\nContent-Length: %d\r\n\r\n", bodySize)), body...)
+	addr := h1RawServer(t, func(nc net.Conn) error {
+		_, werr := nc.Write(canned)
+		return werr
+	}, true)
 
-	c := h1PoolTestClient(t, srv.Listener.Addr().String())
+	c := h1PoolTestClient(t, addr)
 	defer c.Close()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)

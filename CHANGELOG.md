@@ -17,10 +17,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   buffer from `conn`'s shared DATA-payload pool and hands ownership to the caller
   via `StreamEvent.DataSlab`, the contract HTTP/2 has always used; that also
   removes the per-chunk `make([]byte, n)` copy `Recv` made out of the scratch
-  array (a further 15% of allocated bytes). Measured on a 2 KiB response:
-  **24.9 KB → 4.3 KB allocated per request**, with the allocation count
-  unchanged. Affects `TransportH1SingleConn`, `TransportH1Pool` and
-  `TransportH1Managed`; no API change.
+  array (a further 15% of allocated bytes). Measured client-side on a 2 KiB
+  response, against a peer that allocates nothing per request:
+  **23.1 KB → 2.6 KB allocated per request** (`-race`: 23.4 KB → 7.2 KB), with
+  the allocation count unchanged. Affects `TransportH1SingleConn`,
+  `TransportH1Pool` and `TransportH1Managed`; no API change.
 
 - **HTTP/1.1 spawned a context watchdog per blocking I/O call** (follow-up to
   #331). `armCancel` and `armDeadline` each allocated two channels, two closures
@@ -37,6 +38,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   deadline and a cancel — what `client.Do` builds from `Request.Timeout` — still
   arms. `Conn.Close` retires the goroutine. Measured on the same 2 KiB response:
   **4.2 KB → 3.2 KB allocated per request, 66 → 51 allocations**. No API change.
+
+  Those two figures, and the 4.3 KB one first published for the entry above, were
+  taken with an in-process `net/http` peer inside the measurement — `AllocedBytesPerOp`
+  is a process-wide counter, so the server's own per-request allocations were being
+  attributed to the client. Re-measured against a peer that allocates nothing per
+  request, the two changes together take HTTP/1.1 from **23.1 KB to 1.6 KB per
+  request (45 → 29 allocations)**; the figures quoted per-entry above are each
+  correct for the harness in use when that entry was written.
 
 ## [v0.11.0] — 2026-07-31
 
