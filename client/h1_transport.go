@@ -23,6 +23,18 @@ import (
 //  4. Recv (body calls)                     → ReadBodyChunk → EventData
 //  5. Recv (final)                          → EventData{EndStream:true}
 //  6. Close                                 → drain + release
+//
+// This struct is allocated once per REQUEST — every openExchange on every H1
+// transport builds one — so it must stay pointer-sized. It used to carry a
+// 16 KiB inline scratch array for ReadBodyChunk, which made that per-request
+// allocation 16 KiB: 69.5% of all bytes the client allocated in a 200 RPS
+// profile, and the reason HTTP/1.1 spent +87% bytes/request against net/http on
+// byte-identical work. The intent — do not allocate inside Recv — was right; the
+// scoping was not, because an exchange is per-request while the thing that
+// outlives requests is the pooled connection. Recv now takes its read buffer
+// from conn's shared DATA-payload pool instead, which is the same buffer H2's
+// OnData has always used and is per-connection-agnostic: nothing has to be
+// scoped to the exchange at all.
 type h1Exchange struct {
 	ex      *http1.Exchange
 	nc      *http1.Conn
@@ -31,10 +43,13 @@ type h1Exchange struct {
 	// response state
 	headersSent bool // Recv has returned EventHeaders
 	done        bool // EndStream delivered
-
-	// scratch buffer for ReadBodyChunk; avoids per-Recv allocation.
-	buf [16 * 1024]byte //nolint:structcheck
 }
+
+// h1BodyChunkSize is the ReadBodyChunk granularity, and the floor on the pooled
+// buffer Recv reads into. It matches conn.dataBufPool's own New size (the
+// default SETTINGS_MAX_FRAME_SIZE), so a buffer that has been round-tripping
+// through the H2 path is already big enough and no warm-up regrow happens.
+const h1BodyChunkSize = 16 * 1024
 
 // SendHeaders on an HTTP/1.1 exchange is only ever reached via the request
 // trailer path (initial headers go through SendHeadersWithPriority). HTTP/1.1
@@ -57,6 +72,15 @@ func (e *h1Exchange) SendData(ctx context.Context, p []byte, endStream bool) err
 // Recv synthesises conn.StreamEvents from the HTTP/1.1 response.
 // First call triggers ReadResponse (status + headers → EventHeaders).
 // Subsequent calls read body chunks → EventData.
+//
+// EventData.Data aliases the pooled buffer named by EventData.DataSlab and is
+// valid only until the next Recv or Close — the contract conn.StreamEvent
+// already documents and that every consumer in this package (handleDataEvent,
+// responseBodyReader.recycleData, StreamResponse.recycleData) already honours
+// for H2. H1 used to be the one path that opted out, copying each chunk into a
+// fresh make([]byte, n); that copy was 15% of the client's allocated bytes on
+// top of the scratch array it copied out of. Handing the pooled buffer straight
+// through removes both.
 func (e *h1Exchange) Recv(ctx context.Context) (conn.StreamEvent, error) {
 	if !e.headersSent {
 		_, headers, err := e.ex.ReadResponse(ctx)
@@ -74,20 +98,32 @@ func (e *h1Exchange) Recv(ctx context.Context) (conn.StreamEvent, error) {
 		return conn.StreamEvent{}, conn.ErrStreamClosed
 	}
 
-	n, done, err := e.ex.ReadBodyChunk(e.buf[:])
+	// Read straight into a pooled buffer and transfer ownership to the caller via
+	// DataSlab, exactly as conn's OnData does for an H2 DATA frame. The pool's
+	// buffers are only ever grown, never shrunk, so cap >= h1BodyChunkSize holds
+	// in practice; the guard keeps a zero-length buffer from reaching
+	// ReadBodyChunk, which would read nothing and spin.
+	bufPtr := conn.GetDataBufPool().Get().(*[]byte)
+	buf := *bufPtr
+	if cap(buf) < h1BodyChunkSize {
+		buf = make([]byte, h1BodyChunkSize)
+	}
+	buf = buf[:cap(buf)]
+
+	n, done, err := e.ex.ReadBodyChunk(buf)
 	if err != nil {
+		// Nothing was delivered, so this is the only owner: return the buffer
+		// rather than abandoning it to GC.
+		*bufPtr = buf
+		putDataSlab(bufPtr)
 		return conn.StreamEvent{}, err
 	}
 	e.done = done
-	// Copy data into a fresh slice so the caller owns it past the next Recv.
-	var data []byte
-	if n > 0 {
-		data = make([]byte, n)
-		copy(data, e.buf[:n])
-	}
+	*bufPtr = buf[:n]
 	ev := conn.StreamEvent{
 		Type:      conn.EventData,
-		Data:      data,
+		Data:      *bufPtr,
+		DataSlab:  bufPtr,
 		EndStream: done,
 	}
 	if done {
