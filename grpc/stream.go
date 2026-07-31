@@ -110,7 +110,7 @@ func (s *Stream) CloseSend(ctx context.Context) error {
 		return nil
 	}
 	if s.sendErr != nil {
-		return s.sendErr
+		return benignHalfClose(s.sendErr)
 	}
 	// An empty DATA frame with END_STREAM: it consumes no flow-control
 	// credit, so it cannot block behind an exhausted send window.
@@ -119,10 +119,35 @@ func (s *Stream) CloseSend(ctx context.Context) error {
 	// reached the peer.
 	if err := s.s.SendData(ctx, nil, true); err != nil {
 		s.sendErr = err
-		return err
+		return benignHalfClose(err)
 	}
 	s.sentEnd = true
 	return nil
+}
+
+// benignHalfClose reports a half-close that failed only because the peer had
+// already torn the stream down as success.
+//
+// RFC 9113 §8.1 permits a server that has written a complete response to send
+// RST_STREAM(NO_ERROR), asking the client to stop sending the request body.
+// Both net/http2 and grpc-go's server do exactly that for any handler that
+// does not drain the body — the common case for a unary method. conn
+// implements §5.1 faithfully and closes the stream on any reset, so that
+// benign signal reaches this layer as conn.ErrStreamClosed on a call the
+// server has already answered, with the response sitting complete in the
+// stream's event buffer.
+//
+// Telling a peer that has stopped listening that no more messages follow is a
+// no-op, so failing the half-close only makes callers discard a response they
+// already have. The reset is not swallowed: it reaches the receive side as
+// EventReset, where a real code (CANCEL, REFUSED_STREAM, INTERNAL_ERROR)
+// becomes the call's Status. Send stays strict — a message that did not reach
+// the server is a genuine failure, and sendErr keeps it latched.
+func benignHalfClose(err error) error {
+	if errors.Is(err, conn.ErrStreamClosed) {
+		return nil
+	}
+	return err
 }
 
 // Recv returns the next message from the server. It returns io.EOF when the

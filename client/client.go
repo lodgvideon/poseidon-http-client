@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/tls"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -651,13 +652,26 @@ func (c *Client) sendRequest(ctx context.Context, req *Request) (s protoStream, 
 	hdrSlicePool.Put(sp)
 
 	if !endStream || trailers {
+		// A failed upload is not decisive on its own. RFC 9113 §8.1 lets a
+		// server that has already sent a complete response reset the stream
+		// with NO_ERROR to stop an upload it does not need — "Clients MUST NOT
+		// discard responses as a result of receiving such a RST_STREAM" — and
+		// conn closes the stream on any reset per §5.1, so that benign signal
+		// reaches here as ErrStreamClosed on a request the server has answered,
+		// with the response sitting in the stream's event buffer. Hand the
+		// stream back and let the response path decide. It cannot hang: every
+		// route to ErrStreamClosed also delivers a reset event, which surfaces
+		// as a typed *StreamResetError carrying the peer's actual code. Any
+		// other write failure stays fatal — nothing reached the peer, so there
+		// is no response to wait for.
 		if err = writeRequestBody(ctx, s, req, !trailers); err != nil {
-			_ = s.Close()
-			release()
-			return nil, nil, nil, err
-		}
-		if trailers {
-			if err = writeRequestTrailers(ctx, s, req); err != nil {
+			if !errors.Is(err, conn.ErrStreamClosed) {
+				_ = s.Close()
+				release()
+				return nil, nil, nil, err
+			}
+		} else if trailers {
+			if err = writeRequestTrailers(ctx, s, req); err != nil && !errors.Is(err, conn.ErrStreamClosed) {
 				_ = s.Close()
 				release()
 				return nil, nil, nil, err

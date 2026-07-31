@@ -312,7 +312,13 @@ func (cc *ClientConn) Invoke(ctx context.Context, method string, req []byte, md 
 	}
 	defer func() { _ = s.Close() }()
 
-	if err := s.Send(ctx, req); err != nil {
+	// conn.ErrStreamClosed here is the RFC 9113 §8.1 case benignHalfClose
+	// describes: the server wrote a complete response and reset the stream
+	// with NO_ERROR rather than wait for a request body it never read. The
+	// answer is already buffered, so the receive side decides the outcome.
+	// Every other send failure stays fatal — nothing reached the server, and
+	// Recv would then block until ctx expires.
+	if err := s.Send(ctx, req); err != nil && !errors.Is(err, conn.ErrStreamClosed) {
 		return nil, err
 	}
 	if err := s.CloseSend(ctx); err != nil {

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/tls"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -292,4 +293,77 @@ func TestConformance_RFC7540_Sec8_1_BodyStream_EndStream(t *testing.T) {
 	}
 	// Close returned without error — stream ended cleanly (END_STREAM
 	// received, no RST_STREAM sent). Confirms §8.1 half-close.
+}
+
+// benignResetRequest is larger than net/http2's default per-stream and
+// per-connection upload buffers (1 MiB each), so a handler that never reads the
+// body cannot refund enough flow-control credit for the whole upload. The body
+// write blocks on credit until the server's RST_STREAM(NO_ERROR) wakes it,
+// which makes an otherwise scheduling-dependent window deterministic.
+const benignResetRequest = 2 << 20
+
+// TestConformance_RFC9113_Sec8_1_BenignResetKeepsBufferedResponse pins RFC 9113
+// §8.1 on the buffered Do path: "Clients MUST NOT discard responses as a result
+// of receiving such a RST_STREAM". A server that answers without draining the
+// request body resets the still-open upload with NO_ERROR; conn closes the
+// stream on that reset per §5.1, so the upload fails — and sendRequest used to
+// return that failure, throwing away a complete response already buffered on
+// the stream. The conn layer has pinned the same clause since
+// TestConformance_RFC9113_Sec8_1_CompleteResponseNotDiscardedByTrailingRSTNoError;
+// this is its sibling one layer up. Same defect as grpc issue #337.
+func TestConformance_RFC9113_Sec8_1_BenignResetKeepsBufferedResponse(t *testing.T) {
+	_, addr := newTLSH2Server(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(200)
+		_, _ = w.Write([]byte("answer"))
+	}))
+	c := clientFor(t, addr)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	var res client.Response
+	err := c.Do(ctx, &client.Request{
+		Method:   "POST",
+		Path:     "/no-drain",
+		Body:     make([]byte, benignResetRequest),
+		BodyMode: client.BodyBuffer,
+	}, &res)
+	if err != nil {
+		t.Fatalf("Do = %v; want the response the server already sent", err)
+	}
+	if res.Status != 200 {
+		t.Fatalf("status = %d, want 200", res.Status)
+	}
+	if string(res.Body) != "answer" {
+		t.Fatalf("body = %q, want %q — the response must survive the benign reset intact", res.Body, "answer")
+	}
+}
+
+// TestConformance_RFC9113_Sec8_1_RealResetStillFailsUpload is the
+// over-tolerance guard for the test above: tolerating a benign reset must not
+// tolerate a real one. http.ErrAbortHandler makes net/http abort the response
+// without logging, putting an RST_STREAM with a non-NO_ERROR code on the wire,
+// and that must still reach the caller as a typed *StreamResetError rather than
+// a 200 with an empty body.
+func TestConformance_RFC9113_Sec8_1_RealResetStillFailsUpload(t *testing.T) {
+	_, addr := newTLSH2Server(t, http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		panic(http.ErrAbortHandler)
+	}))
+	c := clientFor(t, addr)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	var res client.Response
+	err := c.Do(ctx, &client.Request{
+		Method:   "POST",
+		Path:     "/abort",
+		Body:     make([]byte, benignResetRequest),
+		BodyMode: client.BodyBuffer,
+	}, &res)
+	if err == nil {
+		t.Fatalf("Do = nil (status %d, body %q); want the peer's reset", res.Status, res.Body)
+	}
+	var sre *client.StreamResetError
+	if !errors.As(err, &sre) {
+		t.Fatalf("Do error = %v (%T), want *StreamResetError", err, err)
+	}
 }

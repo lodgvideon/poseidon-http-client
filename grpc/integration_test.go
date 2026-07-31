@@ -850,3 +850,107 @@ func TestIntegration_UnaryRejectsSecondMessage(t *testing.T) {
 		t.Fatalf("Invoke = %v, want an INTERNAL status", err)
 	}
 }
+
+// srvAnswerWithoutDraining writes a complete response and returns without ever
+// reading the request body. net/http2's server then follows RFC 9113 §8.1 and
+// resets the still-open request stream with NO_ERROR — "stop sending, I have
+// already answered". grpc-go's server does the same. It is the shape of every
+// unary handler that ignores its input, and #337 is what the client used to
+// make of it.
+func srvAnswerWithoutDraining(code Code, msg string) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		srvBeginResponse(w)
+		if code == OK {
+			_ = srvWriteMessage(w, []byte("answer"))
+		}
+		srvFinish(w, code, msg)
+	})
+}
+
+// benignResetRequest is larger than net/http2's default per-stream and
+// per-connection upload buffers (1 MiB each), so a handler that never reads the
+// body cannot refund enough flow-control credit for the whole request. Send
+// blocks in conn's acquireSendCredits until the server's RST_STREAM(NO_ERROR)
+// wakes it — which is what makes the timing window of #337 deterministic
+// instead of a ~9% flake under CPU load.
+const benignResetRequest = 2 << 20
+
+// TestConformance_RFC9113_Sec8_1_BenignResetKeepsResponse pins RFC 9113 §8.1: a
+// RST_STREAM(NO_ERROR) that follows a complete response is a request to stop
+// sending, not a failed call. conn closes the stream on it per §5.1, so the
+// send side fails — and Invoke must still return the answer already buffered
+// on the receive side rather than the send-side error.
+func TestConformance_RFC9113_Sec8_1_BenignResetKeepsResponse(t *testing.T) {
+	srv, cfg := startGRPCServer(t, srvAnswerWithoutDraining(OK, ""))
+	defer srv.Close()
+	cc := dialGRPC(t, srv, cfg)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	got, err := cc.Invoke(ctx, "/test.Svc/NoDrain", make([]byte, benignResetRequest), nil)
+	if err != nil {
+		t.Fatalf("Invoke = %q, %v; want the response the server already sent", got, err)
+	}
+	if string(got) != "answer" {
+		t.Fatalf("Invoke = %q, want %q", got, "answer")
+	}
+}
+
+// TestConformance_RFC9113_Sec8_1_BenignResetKeepsNonOKStatus is the other half: tolerating the
+// benign reset must not launder a failed call into a success, nor replace the
+// server's own diagnosis with the reset's INTERNAL mapping.
+func TestConformance_RFC9113_Sec8_1_BenignResetKeepsNonOKStatus(t *testing.T) {
+	srv, cfg := startGRPCServer(t, srvAnswerWithoutDraining(NotFound, "no such row"))
+	defer srv.Close()
+	cc := dialGRPC(t, srv, cfg)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	_, err := cc.Invoke(ctx, "/test.Svc/NoDrain", make([]byte, benignResetRequest), nil)
+	var st *Status
+	if !errors.As(err, &st) {
+		t.Fatalf("Invoke error = %v (%T), want *Status", err, err)
+	}
+	if st.Code != NotFound || st.Message != "no such row" {
+		t.Fatalf("status = %v %q, want NOT_FOUND %q", st.Code, st.Message, "no such row")
+	}
+}
+
+// TestConformance_RFC9113_Sec8_1_CloseSendAfterBenignReset covers the same defect through the
+// streaming API, where the caller drives the half-close itself. The sleep only
+// widens the window — if the reset has not landed yet the half-close simply
+// succeeds, so the test cannot fail spuriously in the other direction.
+func TestConformance_RFC9113_Sec8_1_CloseSendAfterBenignReset(t *testing.T) {
+	srv, cfg := startGRPCServer(t, srvAnswerWithoutDraining(OK, ""))
+	defer srv.Close()
+	cc := dialGRPC(t, srv, cfg)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	s, err := cc.NewStream(ctx, "/test.Svc/NoDrain", nil)
+	if err != nil {
+		t.Fatalf("NewStream: %v", err)
+	}
+	defer func() { _ = s.Close() }()
+
+	if err := s.Send(ctx, []byte("x")); err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+	time.Sleep(200 * time.Millisecond)
+	if err := s.CloseSend(ctx); err != nil {
+		t.Fatalf("CloseSend after a benign reset = %v, want nil", err)
+	}
+	msg, err := s.Recv(ctx)
+	if err != nil {
+		t.Fatalf("Recv: %v", err)
+	}
+	if string(msg) != "answer" {
+		t.Fatalf("Recv = %q, want %q", msg, "answer")
+	}
+	if _, err := s.Recv(ctx); !errors.Is(err, io.EOF) {
+		t.Fatalf("second Recv = %v, want io.EOF", err)
+	}
+	if st := s.Status(); st.Code != OK {
+		t.Fatalf("status = %v, want OK", st.Code)
+	}
+}
