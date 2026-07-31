@@ -108,6 +108,20 @@ type Stream struct {
 	// inflightDone in markStreamDone / releaseInflight.
 	pushed bool
 
+	// appClosed records that Close() ran. Half of the recycle rendezvous (other
+	// half: connDone): a cleanly-completed stream returns to streamPool only once
+	// BOTH markStreamDone (which evicts it) and Close have finished with the
+	// struct — whichever is second recycles. Guarded by mu; reset by
+	// recycleStream. Distinct from `released`, the atomic Close-idempotency latch
+	// that must survive recycle.
+	appClosed bool
+	// connDone records that markStreamDone retired a cleanly-completed stream:
+	// both ends ended, slot released, and the registry entry deleted — so the
+	// reader can never look the struct up again. Close observing connDone is the
+	// rendezvous's second party. Set only AFTER delete(c.streams,id). Guarded by
+	// mu; reset by recycleStream.
+	connDone bool
+
 	// reqAuthority is the :authority pseudo-header of the request this stream
 	// carries, captured when the request HEADERS are written. The push accept
 	// path compares a PUSH_PROMISE's :authority against it — a server is
@@ -234,6 +248,8 @@ func recycleStream(pool *sync.Pool, s *Stream) {
 	s.closed = false
 	s.inflightDone = false
 	s.pushed = false
+	s.appClosed = false
+	s.connDone = false
 	s.reqAuthority = ""
 	s.headersReceived = false
 	s.interimCount = 0
@@ -482,6 +498,17 @@ func (s *Stream) Recv(ctx context.Context) (StreamEvent, error) {
 // retain a *Stream past Close — allocStream re-arms the guard for the next
 // lifetime, so a Close on a stale reference to a re-allocated struct is not
 // protected (no in-tree caller does this).
+//
+// A cleanly-completed stream (bothEnded) is recycled via a rendezvous with
+// the reader's markStreamDone rather than directly here: markStreamDone is
+// what evicts the stream from the connection's registry, and only after
+// that eviction can no other goroutine look the struct up and touch it.
+// Recycling here unconditionally — as soon as Close merely observes
+// bothEnded — raced markStreamDone's own read/write of the same fields,
+// because recycleStream mutates every field of *Stream with no lock held.
+// appClosed/connDone are the two halves of that handshake: whichever of
+// Close/markStreamDone finishes second with the struct is the one that
+// recycles it.
 func (s *Stream) Close() error {
 	// released is the idempotency guard. It survives recycleStream (which
 	// resets closed/w/... for pool reuse), so a repeat Close while the struct
@@ -490,20 +517,36 @@ func (s *Stream) Close() error {
 		return nil
 	}
 	s.mu.Lock()
-	already := s.closed // e.g. push() set this on event-channel overflow
+	s.appClosed = true
+	closed := s.closed // e.g. push() set this on event-channel overflow
 	bothEnded := s.localEnded && s.remoteEnded
-	s.closed = true
+	connDone := s.connDone
 	w := s.w
+	if !closed && !bothEnded {
+		// Abandoning an incomplete stream: our RST is the sole teardown: the
+		// reader will never see END_STREAM to reach markStreamDone's own path.
+		s.closed = true
+	}
 	s.mu.Unlock()
-	if already {
-		// Already closed (RST already sent by push overflow); don't double-RST.
+	if closed {
+		// Already closed (RST already sent by push overflow, or a peer
+		// reset/GOAWAY already tore this stream down); never pooled from here.
 		return nil
 	}
-	if bothEnded {
-		// Both sides ended normally; recycle without sending RST.
+	if connDone {
+		// markStreamDone already evicted the stream from the registry and
+		// found appClosed false at the time — so it left recycling to us. We
+		// are the second (and last) party to touch the struct.
 		if c, ok := w.(*Conn); ok {
 			recycleStream(&c.streamPool, s)
 		}
+		return nil
+	}
+	if bothEnded {
+		// Clean completion is in flight or already handled: either
+		// markStreamDone hasn't run its eviction yet (it will recycle once it
+		// does, since appClosed is now true) or it already recycled directly.
+		// Either way we must not touch the struct.
 		return nil
 	}
 	return w.writeRSTStream(s, frame.ErrCodeCancel)

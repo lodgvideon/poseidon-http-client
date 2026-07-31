@@ -1852,9 +1852,9 @@ func (c *Conn) wakeSendWaiters() {
 
 func (c *Conn) markStreamDone(id uint32) {
 	c.smu.Lock()
-	defer c.smu.Unlock()
 	s, ok := c.streams[id]
 	if !ok {
+		c.smu.Unlock()
 		return
 	}
 	s.mu.Lock()
@@ -1865,9 +1865,26 @@ func (c *Conn) markStreamDone(id uint32) {
 		s.inflightDone = true
 	}
 	s.mu.Unlock()
+
+	recycle := false
 	if ended && !released {
 		c.releaseSlotLocked(pushed)
 		delete(c.streams, id)
+		// Registry entry gone: the reader can no longer look this struct up,
+		// so this is the connection side's final contact. Rendezvous with
+		// Close via appClosed/connDone: whichever of the two runs second
+		// recycles. Gated on !closed so only a cleanly-completed stream is
+		// pooled — a reset/overflow stream may still have a background RST
+		// goroutine referencing s.w (see Stream.push's overflow path).
+		s.mu.Lock()
+		if !s.closed {
+			if s.appClosed {
+				recycle = true
+			} else {
+				s.connDone = true
+			}
+		}
+		s.mu.Unlock()
 	}
 	// Wake Shutdown when the conn is fully drained.
 	if c.draining.Load() && c.inflight == 0 {
@@ -1877,6 +1894,13 @@ func (c *Conn) markStreamDone(id uint32) {
 		default:
 			close(c.drainDone)
 		}
+	}
+	c.smu.Unlock()
+	// Recycle outside smu — recycleStream never needs it, and holding smu
+	// across it would serialize unrelated streams' registry lookups behind a
+	// pool drain/refill.
+	if recycle {
+		recycleStream(&c.streamPool, s)
 	}
 }
 
