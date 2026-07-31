@@ -3,8 +3,16 @@
 //
 // # Dependency order
 //
-// grpc → conn → frame, hpack. No import of client, http1, http3, or any
-// third-party gRPC library.
+// grpc → conn → frame, hpack. grpc also imports frame directly, for the
+// RST_STREAM error codes it maps to gRPC status codes. No import of client,
+// http1, http3, or any third-party gRPC library.
+//
+// This package is HTTP/2 only. That is not a choice made here: http3.Request
+// carries a []byte body with no incremental send path, so the streaming call
+// shapes cannot be expressed on that stack at all yet.
+//
+// Note the import-path collision with google.golang.org/grpc — a caller
+// holding both must alias one of them.
 //
 // # Scope
 //

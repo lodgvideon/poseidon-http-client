@@ -35,7 +35,9 @@ HTTP/1.1 + HTTP/2 stack (A→B→C):
   conn/              # B-layer: HTTP/2 connection, streams, flow control, handshake
     └── depends on: frame, hpack
   http1/             # B-layer: minimal HTTP/1.1 wire protocol (reuses hpack.HeaderField)
-  grpc/              # C-layer: gRPC-over-HTTP/2 transport. Sits on conn/, NOT on
+  grpc/              # C-layer: gRPC-over-HTTP/2 client (NOT a client.Transport —
+                     #   separate entry point, absent from client.Do).
+                     #   Sits on conn/, NOT on
                      #   client/ — client.DoStream writes the whole request body
                      #   before returning, so client-streaming and bidi are not
                      #   expressible through it. No protobuf dep: messages are

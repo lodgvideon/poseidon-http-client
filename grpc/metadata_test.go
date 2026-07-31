@@ -27,9 +27,9 @@ func TestAppendMetadata_TextAndBinary(t *testing.T) {
 	if string(md[1].Value) != "AP8Q" {
 		t.Fatalf("binary value = %q, want base64", md[1].Value)
 	}
-	got, ok := MetadataValue(md, "trace-bin")
-	if !ok {
-		t.Fatal("MetadataValue(-bin) not found")
+	got, ok, err := MetadataValue(md, "trace-bin")
+	if !ok || err != nil {
+		t.Fatalf("MetadataValue(-bin): ok=%v err=%v", ok, err)
 	}
 	if string(got) != "\x00\xff\x10" {
 		t.Fatalf("decoded = % x", got)
@@ -39,20 +39,88 @@ func TestAppendMetadata_TextAndBinary(t *testing.T) {
 func TestMetadataValue_UnpaddedBinaryAccepted(t *testing.T) {
 	// gRPC permits a peer to omit base64 padding; the read side must cope.
 	md := []conn.HeaderField{{Name: []byte("k-bin"), Value: []byte("AP8Q")}}
-	if _, ok := MetadataValue(md, "k-bin"); !ok {
-		t.Fatal("padded form rejected")
+	if _, ok, err := MetadataValue(md, "k-bin"); !ok || err != nil {
+		t.Fatalf("padded form rejected: ok=%v err=%v", ok, err)
 	}
 	md = []conn.HeaderField{{Name: []byte("k-bin"), Value: []byte("YQ")}}
-	got, ok := MetadataValue(md, "k-bin")
-	if !ok || string(got) != "a" {
-		t.Fatalf("unpadded decode = %q ok=%v", got, ok)
+	got, ok, err := MetadataValue(md, "k-bin")
+	if !ok || err != nil || string(got) != "a" {
+		t.Fatalf("unpadded decode = %q ok=%v err=%v", got, ok, err)
+	}
+}
+
+// TestMetadataValue_MalformedBinaryIsNotAbsent pins the difference between "the
+// peer sent nothing" and "the peer sent something undecodable". Folding the
+// second into the first makes an application that reads a signature or a
+// capability out of metadata take its nothing-to-check branch on a value the
+// peer corrupted on purpose — fail-open on peer input.
+func TestMetadataValue_MalformedBinaryIsNotAbsent(t *testing.T) {
+	md := []conn.HeaderField{{Name: []byte("sig-bin"), Value: []byte("!!!not base64!!!")}}
+	v, ok, err := MetadataValue(md, "sig-bin")
+	if !ok {
+		t.Fatal("ok = false — a present-but-corrupt value must not read as absent")
+	}
+	if err == nil {
+		t.Fatal("err = nil, want a decode failure")
+	}
+	if v != nil {
+		t.Fatalf("value = %q, want nil alongside the error", v)
+	}
+	if _, ok, err := MetadataValue(md, "missing-bin"); ok || err != nil {
+		t.Fatalf("absent key = ok=%v err=%v, want false/nil", ok, err)
 	}
 }
 
 func TestAppendMetadata_RejectsReservedAndPseudo(t *testing.T) {
-	for _, k := range []string{":path", "content-type", "TE", "grpc-timeout", "user-agent", ""} {
+	// Owned by the transport, forbidden in HTTP/2 outright, or inside the
+	// grpc- namespace the protocol reserves for itself.
+	for _, k := range []string{
+		"content-type", "TE", "grpc-timeout", "user-agent", "grpc-accept-encoding",
+		"connection", "keep-alive", "proxy-connection", "transfer-encoding", "upgrade", "host",
+		"grpc-status", "grpc-message", "grpc-anything-future",
+	} {
 		if _, err := AppendMetadata(nil, k, []byte("x")); !errors.Is(err, ErrReservedMetadata) {
 			t.Errorf("AppendMetadata(%q) = %v, want ErrReservedMetadata", k, err)
+		}
+	}
+	// Not a legal field name at all. A pseudo-header's colon is not a token
+	// character, so these fail the syntax gate before the reserved-name gate.
+	for _, k := range []string{":path", ":authority", "", "bad key", "x\r\ny: 1", "tab\tkey"} {
+		if _, err := AppendMetadata(nil, k, []byte("x")); !errors.Is(err, ErrInvalidMetadata) {
+			t.Errorf("AppendMetadata(%q) = %v, want ErrInvalidMetadata", k, err)
+		}
+	}
+}
+
+// TestAppendMetadata_RejectsInjectionValues pins the send-side gate. HPACK
+// length-prefixes a field value, so these bytes cannot split the HTTP/2 wire
+// itself; the exposure is an HTTP/2-to-HTTP/1.1 downgrading intermediary, where
+// CR and LF *are* the delimiters and a value carrying them becomes several
+// fields and, past a blank line, an injected request.
+func TestAppendMetadata_RejectsInjectionValues(t *testing.T) {
+	for _, v := range []string{
+		"bob\r\nx-admin: true", "a\nb", "cr\rhere", "nul\x00byte", " leading", "trailing ", "\ttab",
+	} {
+		if _, err := AppendMetadata(nil, "x-user", []byte(v)); !errors.Is(err, ErrInvalidMetadata) {
+			t.Errorf("AppendMetadata(value=%q) = %v, want ErrInvalidMetadata", v, err)
+		}
+	}
+	if _, err := AppendMetadata(nil, "x-user", []byte("plain-value")); err != nil {
+		t.Errorf("AppendMetadata(legal value) = %v, want nil", err)
+	}
+}
+
+// TestDefaultSensitiveField pins the credential list this package refuses to let
+// into the HPACK dynamic table.
+func TestDefaultSensitiveField(t *testing.T) {
+	for _, n := range []string{"authorization", "proxy-authorization", "cookie"} {
+		if !defaultSensitiveField([]byte(n)) {
+			t.Errorf("%q not treated as sensitive", n)
+		}
+	}
+	for _, n := range []string{"x-request-id", "authorization-scheme", "", "auth"} {
+		if defaultSensitiveField([]byte(n)) {
+			t.Errorf("%q wrongly treated as sensitive", n)
 		}
 	}
 }
@@ -74,6 +142,14 @@ func TestEncodeTimeout_RoundsUp(t *testing.T) {
 		// 100s is 1e8µs — one digit too many — so the unit steps up to ms.
 		{100 * time.Second, "100000m"},
 		{time.Hour, "3600000m"},
+		// Every case above divides its chosen unit exactly, so none of them
+		// reaches the rounding branch. These do — the remainder only exists
+		// once the value is too large for nanoseconds, which is the atom.
+		// Drop the round-up and each one loses its last digit, handing the
+		// server a deadline shorter than the caller's.
+		{time.Hour + time.Nanosecond, "3600001m"},
+		{100*time.Second + time.Nanosecond, "100001m"},
+		{100*time.Millisecond + time.Nanosecond, "100001u"},
 		{40 * time.Hour, "144000S"},
 		{100000 * time.Hour, "6000000M"},
 	}

@@ -9,7 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- **`grpc` — gRPC-over-HTTP/2 as a first-class transport.** `grpc.Dial` returns
+- **`grpc` — a gRPC-over-HTTP/2 client.** Note this is not a `client.Transport`:
+  the package has its own entry point and does not appear under `client.Do`.
+  `grpc.Dial` returns
   a `ClientConn` that multiplexes calls over one HTTP/2 connection, the same way
   gRPC itself does, so there is no pool to configure. All four call shapes work:
   unary (`Invoke`), server-streaming, client-streaming, and bidirectional — the
@@ -18,12 +20,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `grpc-message` trailers, the Trailers-Only response shape, the
   HTTP-status-to-gRPC-code and RST_STREAM-to-gRPC-code mapping tables,
   `grpc-timeout` from the context deadline, and `-bin` binary metadata.
-  No protobuf dependency: messages cross the API as `[]byte`. Documented in
+  No protobuf dependency: messages cross the API as `[]byte`. Credentials
+  (`authorization`, `proxy-authorization`, `cookie`) are marked sensitive so they
+  never enter the connection's HPACK dynamic table. Documented in
   [docs/GRPC_GUIDE.md](docs/GRPC_GUIDE.md), with `examples/grpc`.
 
   The package sits on `conn`, not on `client`: `client.DoStream` writes the
   whole request body before it returns, so client-streaming and bidirectional
   calls cannot be expressed through it.
+
+  No pooling, resolver, retry, hooks or metrics yet — a `ClientConn` is one
+  connection, and everything above it is the caller's. HTTP/2 only.
 
 ## [v1.0.0] — 2026-07-15
 

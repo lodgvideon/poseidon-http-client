@@ -32,18 +32,34 @@ var binEncoding = base64.StdEncoding
 //
 // It returns ErrReservedMetadata for pseudo-headers and for the headers the
 // transport sets itself, so a caller cannot silently break the RPC by, say,
-// overriding content-type.
+// overriding content-type, and ErrInvalidMetadata for a name or value that
+// would not be a legal HTTP/2 field.
+//
+// A text value is stored aliasing the caller's slice — it is not copied — so a
+// caller reusing a scratch buffer must not overwrite it before NewStream has
+// written the headers. A binary value is base64-encoded into fresh memory and
+// carries no such constraint.
 func AppendMetadata(md []conn.HeaderField, key string, value []byte) ([]conn.HeaderField, error) {
 	k := strings.ToLower(key)
+	name := []byte(k)
+	if err := validMetadataName(name); err != nil {
+		return nil, err
+	}
 	if err := checkMetadataKey(k); err != nil {
 		return nil, err
 	}
 	if strings.HasSuffix(k, binSuffix) {
+		// Validate what reaches the wire, not what the caller passed: a binary
+		// value legitimately contains NUL and CR, and it is the base64 of it —
+		// which never can — that becomes the field value.
 		enc := make([]byte, binEncoding.EncodedLen(len(value)))
 		binEncoding.Encode(enc, value)
-		return append(md, conn.HeaderField{Name: []byte(k), Value: enc}), nil
+		return append(md, conn.HeaderField{Name: name, Value: enc}), nil
 	}
-	return append(md, conn.HeaderField{Name: []byte(k), Value: value}), nil
+	if err := validMetadataValue(name, value); err != nil {
+		return nil, err
+	}
+	return append(md, conn.HeaderField{Name: name, Value: value}), nil
 }
 
 // reservedKeys are the request headers the transport owns. A caller that needs
@@ -55,10 +71,21 @@ var reservedKeys = map[string]struct{}{
 	"grpc-encoding":        {},
 	"grpc-accept-encoding": {},
 	"user-agent":           {},
+	// Connection-specific fields, forbidden in HTTP/2 outright (RFC 9113
+	// §8.2.2). "host" is not connection-specific, but the transport derives
+	// :authority itself and the pair must agree (RFC 9113 §8.3.1), so a caller
+	// copy can only disagree. Same list client/request.go refuses.
+	"connection":        {},
+	"keep-alive":        {},
+	"proxy-connection":  {},
+	"transfer-encoding": {},
+	"upgrade":           {},
+	"host":              {},
 }
 
-// checkMetadataKey rejects keys the transport owns and keys that are not
-// valid HTTP/2 field names for this position.
+// checkMetadataKey rejects keys the transport owns. Name syntax is validated
+// separately by validMetadataName; callers should reach both through
+// validMetadata rather than calling this alone.
 func checkMetadataKey(k string) error {
 	if k == "" {
 		return fmt.Errorf("%w: empty key", ErrReservedMetadata)
@@ -69,29 +96,44 @@ func checkMetadataKey(k string) error {
 	if _, bad := reservedKeys[k]; bad {
 		return fmt.Errorf("%w: %q", ErrReservedMetadata, k)
 	}
+	// The gRPC protocol reserves the whole grpc- namespace for itself, not just
+	// the names in use today: "Header names starting with 'grpc-' but not
+	// listed here are reserved for future GRPC use and should not be used by
+	// applications." Refusing the prefix is what keeps a caller's header from
+	// colliding with a future protocol field.
+	if strings.HasPrefix(k, "grpc-") {
+		return fmt.Errorf("%w: the grpc- namespace is reserved by the protocol: %q",
+			ErrReservedMetadata, k)
+	}
 	return nil
 }
 
 // MetadataValue returns the value of the first entry named key, decoding
-// base64 when key ends in "-bin". ok is false when no such entry exists.
-// The returned slice aliases md for text keys and is freshly allocated for
-// binary keys.
-func MetadataValue(md []conn.HeaderField, key string) (value []byte, ok bool) {
+// base64 when key ends in "-bin". The returned slice aliases md for text keys
+// and is freshly allocated for binary keys.
+//
+// ok reports whether an entry named key was present; err reports that one was
+// present but could not be decoded. The two are separate on purpose. Folding a
+// malformed "-bin" value into ok=false would make it indistinguishable from
+// "the peer sent nothing", and an application that reads a signature or
+// capability out of metadata would take its no-credential-required branch on a
+// value the peer deliberately corrupted — fail-open on peer input.
+func MetadataValue(md []conn.HeaderField, key string) (value []byte, ok bool, err error) {
 	k := strings.ToLower(key)
 	for i := range md {
 		if string(md[i].Name) != k {
 			continue
 		}
 		if !strings.HasSuffix(k, binSuffix) {
-			return md[i].Value, true
+			return md[i].Value, true, nil
 		}
-		dec, err := decodeBin(md[i].Value)
-		if err != nil {
-			return nil, false
+		dec, derr := decodeBin(md[i].Value)
+		if derr != nil {
+			return nil, true, fmt.Errorf("grpc: metadata %q is not valid base64: %w", k, derr)
 		}
-		return dec, true
+		return dec, true, nil
 	}
-	return nil, false
+	return nil, false, nil
 }
 
 // decodeBin base64-decodes a -bin metadata value, accepting both the padded
@@ -145,22 +187,4 @@ func encodeTimeout(d time.Duration) string {
 		}
 	}
 	return strconv.Itoa(maxTimeoutDigits) + "H"
-}
-
-// decodeTimeout parses a grpc-timeout field value. It exists for tests and for
-// callers that inspect what was sent; the client never receives this header.
-func decodeTimeout(v string) (time.Duration, error) {
-	if len(v) < 2 {
-		return 0, fmt.Errorf("grpc: malformed grpc-timeout %q", v)
-	}
-	n, err := strconv.ParseInt(v[:len(v)-1], 10, 64)
-	if err != nil || n < 0 {
-		return 0, fmt.Errorf("grpc: malformed grpc-timeout %q", v)
-	}
-	for _, u := range timeoutUnits {
-		if u.suffix == v[len(v)-1] {
-			return time.Duration(n) * u.size, nil
-		}
-	}
-	return 0, fmt.Errorf("grpc: unknown grpc-timeout unit in %q", v)
 }

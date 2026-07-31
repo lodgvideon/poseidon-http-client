@@ -35,7 +35,7 @@ func TestDecoder_MessageSpansChunks(t *testing.T) {
 	if err != nil {
 		t.Fatalf("AppendMessage: %v", err)
 	}
-	var d Decoder
+	var d decoder
 	for i := 0; i < len(full)-1; i++ {
 		d.Push(full[i : i+1])
 		if _, ok, err := d.Next(); ok || err != nil {
@@ -64,7 +64,7 @@ func TestDecoder_MultipleMessagesInOneChunk(t *testing.T) {
 			t.Fatalf("AppendMessage: %v", err)
 		}
 	}
-	var d Decoder
+	var d decoder
 	d.Push(buf)
 	for _, want := range []string{"a", "bb", "ccc"} {
 		msg, ok, err := d.Next()
@@ -81,7 +81,7 @@ func TestDecoder_MultipleMessagesInOneChunk(t *testing.T) {
 }
 
 func TestDecoder_CompressedFlagRejected(t *testing.T) {
-	var d Decoder
+	var d decoder
 	d.Push([]byte{1, 0, 0, 0, 1, 'x'})
 	if _, _, err := d.Next(); !errors.Is(err, ErrCompressed) {
 		t.Fatalf("Next = %v, want ErrCompressed", err)
@@ -92,8 +92,8 @@ func TestDecoder_CompressedFlagRejected(t *testing.T) {
 // against the length prefix, not against what has arrived: a hostile peer that
 // declares 4 GiB must be refused on the prefix alone.
 func TestDecoder_OversizeRejectedBeforeBuffering(t *testing.T) {
-	var d Decoder
-	d.Max = 16
+	var d decoder
+	d.max = 16
 	d.Push([]byte{0, 0xFF, 0xFF, 0xFF, 0xFF})
 	if _, _, err := d.Next(); !errors.Is(err, ErrMessageTooLarge) {
 		t.Fatalf("Next = %v, want ErrMessageTooLarge", err)
@@ -108,7 +108,7 @@ func TestDecoder_TruncatedMessageLeavesPending(t *testing.T) {
 	if err != nil {
 		t.Fatalf("AppendMessage: %v", err)
 	}
-	var d Decoder
+	var d decoder
 	d.Push(full[:len(full)-2])
 	if _, ok, err := d.Next(); ok || err != nil {
 		t.Fatalf("Next = ok=%v err=%v, want incomplete", ok, err)
@@ -122,7 +122,7 @@ func TestDecoder_TruncatedMessageLeavesPending(t *testing.T) {
 // grow the decoder's buffer without bound as messages are consumed.
 func TestDecoder_CompactKeepsBufferBounded(t *testing.T) {
 	msg := bytes.Repeat([]byte("x"), 1024)
-	var d Decoder
+	var d decoder
 	for i := 0; i < 2000; i++ {
 		chunk, err := AppendMessage(nil, msg)
 		if err != nil {
@@ -142,8 +142,88 @@ func TestDecoder_CompactKeepsBufferBounded(t *testing.T) {
 	}
 }
 
+// TestDecoder_CompactPreservesContent drives the one path that moves bytes in
+// place: a partially-consumed buffer being slid to the front. Every other test
+// either drains the buffer exactly — taking compact's fast path — or never
+// drains before the next Push, so the slide itself was never executed. An
+// off-by-one in that copy is silent payload corruption, not a crash.
+func TestDecoder_CompactPreservesContent(t *testing.T) {
+	var d decoder
+	// Chunks deliberately misaligned with message boundaries, which is the
+	// normal case on the wire: DATA frames know nothing about messages.
+	var wire []byte
+	want := []string{"alpha", "bravo-longer", "c", "delta-longest-of-them"}
+	for _, m := range want {
+		var err error
+		wire, err = AppendMessage(wire, []byte(m))
+		if err != nil {
+			t.Fatalf("AppendMessage: %v", err)
+		}
+	}
+
+	var got []string
+	for off := 0; off < len(wire); off += 7 {
+		end := off + 7
+		if end > len(wire) {
+			end = len(wire)
+		}
+		d.Push(wire[off:end])
+		// Drain at most one message per Push, so the buffer is routinely left
+		// partly consumed and the next Push has to compact around it.
+		if msg, ok, err := d.Next(); err != nil {
+			t.Fatalf("Next: %v", err)
+		} else if ok {
+			got = append(got, string(msg))
+		}
+	}
+	for {
+		msg, ok, err := d.Next()
+		if err != nil {
+			t.Fatalf("Next: %v", err)
+		}
+		if !ok {
+			break
+		}
+		got = append(got, string(msg))
+	}
+
+	if len(got) != len(want) {
+		t.Fatalf("decoded %d messages, want %d: %q", len(got), len(want), got)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("message %d = %q, want %q — compaction moved the wrong bytes", i, got[i], want[i])
+		}
+	}
+	if d.Pending() != 0 {
+		t.Fatalf("Pending = %d", d.Pending())
+	}
+}
+
+// TestDecoder_CompactBoundedWhilePartlyConsumed keeps the buffer permanently
+// half-drained, which is the state the slide exists to bound.
+func TestDecoder_CompactBoundedWhilePartlyConsumed(t *testing.T) {
+	msg := bytes.Repeat([]byte("y"), 512)
+	var d decoder
+	for i := 0; i < 500; i++ {
+		chunk, err := AppendMessage(nil, msg)
+		if err != nil {
+			t.Fatalf("AppendMessage: %v", err)
+		}
+		// Two messages in, one message out: the pending region never empties.
+		d.Push(chunk)
+		d.Push(chunk)
+		if _, ok, err := d.Next(); err != nil || !ok {
+			t.Fatalf("iteration %d: ok=%v err=%v", i, ok, err)
+		}
+	}
+	if cap(d.buf) > 1<<20 {
+		t.Fatalf("buffer grew to %d bytes while permanently half-consumed", cap(d.buf))
+	}
+}
+
 func TestDecoder_Reset(t *testing.T) {
-	var d Decoder
+	var d decoder
 	d.Push([]byte{0, 0, 0, 0, 9})
 	d.Reset()
 	if d.Pending() != 0 {

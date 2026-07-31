@@ -7,12 +7,25 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 
 	"github.com/lodgvideon/poseidon-http-client/conn"
 )
 
 // ErrSendClosed is reported when Send is called after CloseSend.
 var ErrSendClosed = errors.New("grpc: send side already closed")
+
+// ErrStreamClosed is reported by every Stream method called after Close.
+var ErrStreamClosed = errors.New("grpc: stream closed by the caller")
+
+// maxMetadataFields caps how many fields a single response header or trailer
+// block may carry. conn's MAX_HEADER_LIST_SIZE bounds the block's *encoded*
+// size, but this package copies the decoded block into memory that lives as
+// long as the Stream, and a hpack.HeaderField is 56 bytes against a 33-byte
+// minimum charge — so the byte cap alone lets a peer pin substantially more
+// than it spends. gRPC metadata runs to tens of entries; a thousand is already
+// far past any real use.
+const maxMetadataFields = 1024
 
 // Stream is one gRPC call.
 //
@@ -24,11 +37,17 @@ var ErrSendClosed = errors.New("grpc: send side already closed")
 // internal mutex, while the receive side must be driven by one goroutine only.
 type Stream struct {
 	s   *conn.Stream
-	dec Decoder
+	dec decoder
 
 	sendMu  sync.Mutex
 	sendBuf []byte
 	sentEnd bool
+	// sendErr latches the first send failure. conn.writeData chunks a message
+	// across several DATA frames and flushes each, so a failure partway leaves
+	// a truncated message on the wire; letting a later Send append to that
+	// would put its length prefix where the server expects the tail of the
+	// previous message and resynchronise the stream onto garbage.
+	sendErr error
 
 	// Receive-side state. Owned by the single receiving goroutine.
 	header      []conn.HeaderField
@@ -42,14 +61,27 @@ type Stream struct {
 	err error
 
 	closeOnce sync.Once
+	// closed is read by every method, so it cannot live under sendMu or in the
+	// receive-side state. conn recycles a Stream into its pool on Close once
+	// both directions have ended — and the reader goroutine sets remoteEnded at
+	// frame receipt, before this layer has consumed the event — so touching
+	// s.s after Close risks reading a struct that has been handed to another
+	// RPC on the same connection.
+	closed atomic.Bool
 }
 
 // Send writes one message. It may be called repeatedly for a client-streaming
 // or bidirectional call, and concurrently with Recv. It blocks while the
 // stream or connection send window is exhausted, until ctx is done.
 func (s *Stream) Send(ctx context.Context, msg []byte) error {
+	if s.closed.Load() {
+		return ErrStreamClosed
+	}
 	s.sendMu.Lock()
 	defer s.sendMu.Unlock()
+	if s.sendErr != nil {
+		return s.sendErr
+	}
 	if s.sentEnd {
 		return ErrSendClosed
 	}
@@ -58,22 +90,39 @@ func (s *Stream) Send(ctx context.Context, msg []byte) error {
 		return err
 	}
 	s.sendBuf = buf
-	return s.s.SendData(ctx, buf, false)
+	if err := s.s.SendData(ctx, buf, false); err != nil {
+		s.sendErr = err
+		return err
+	}
+	return nil
 }
 
 // CloseSend half-closes the request side, telling the server no more messages
 // follow. It is idempotent. A server-streaming call sends one message then
 // CloseSend; a bidirectional call may CloseSend while still receiving.
 func (s *Stream) CloseSend(ctx context.Context) error {
+	if s.closed.Load() {
+		return ErrStreamClosed
+	}
 	s.sendMu.Lock()
 	defer s.sendMu.Unlock()
 	if s.sentEnd {
 		return nil
 	}
-	s.sentEnd = true
+	if s.sendErr != nil {
+		return s.sendErr
+	}
 	// An empty DATA frame with END_STREAM: it consumes no flow-control
 	// credit, so it cannot block behind an exhausted send window.
-	return s.s.SendData(ctx, nil, true)
+	// sentEnd is latched only on success — setting it first would make a retry
+	// after a failed write return nil and report a half-close that never
+	// reached the peer.
+	if err := s.s.SendData(ctx, nil, true); err != nil {
+		s.sendErr = err
+		return err
+	}
+	s.sentEnd = true
+	return nil
 }
 
 // Recv returns the next message from the server. It returns io.EOF when the
@@ -89,6 +138,9 @@ func (s *Stream) CloseSend(ctx context.Context) error {
 //
 // The returned slice is a fresh copy owned by the caller.
 func (s *Stream) Recv(ctx context.Context) ([]byte, error) {
+	if s.closed.Load() {
+		return nil, ErrStreamClosed
+	}
 	for {
 		msg, ok, err := s.dec.Next()
 		if err != nil {
@@ -113,6 +165,9 @@ func (s *Stream) Recv(ctx context.Context) ([]byte, error) {
 // header block arrives. It returns the terminal error when the call failed
 // before any headers were sent.
 func (s *Stream) Header(ctx context.Context) ([]conn.HeaderField, error) {
+	if s.closed.Load() {
+		return nil, ErrStreamClosed
+	}
 	for !s.headersSeen {
 		if s.err != nil {
 			return nil, s.err
@@ -129,31 +184,55 @@ func (s *Stream) Header(ctx context.Context) ([]conn.HeaderField, error) {
 
 // Trailer returns the trailing metadata. It is meaningful only after Recv has
 // reported the end of the stream; before that it returns nil.
+//
+// It reads receive-side state, so it must be called from the same goroutine
+// that drives Recv. Reading it from the sending goroutine of a bidirectional
+// call is a data race.
 func (s *Stream) Trailer() []conn.HeaderField { return s.trailer }
 
 // Status returns the RPC's terminal status. It is meaningful only after Recv
 // has reported the end of the stream.
+//
+// Like Trailer, it must be called from the goroutine that drives Recv.
 func (s *Stream) Status() Status { return s.status }
 
 // Close releases the stream. When the call has not completed it sends
 // RST_STREAM(CANCEL), which is how a client abandons an RPC early. Idempotent.
+//
+// Every other method fails with ErrStreamClosed afterwards. That is not
+// politeness: conn.Stream.Close recycles the struct into its connection's pool
+// once both directions have ended, and the reader goroutine marks the remote
+// side ended when the frame arrives rather than when this layer consumes the
+// event — so "both ended" is routinely true while the trailers are still
+// queued. Calling into a recycled struct would read another RPC's events.
+//
+// Close must not be called while another goroutine is inside Recv on the same
+// Stream. Cancel that goroutine's context first, then Close.
 func (s *Stream) Close() error {
 	var err error
-	s.closeOnce.Do(func() { err = s.s.Close() })
+	s.closeOnce.Do(func() {
+		s.closed.Store(true)
+		err = s.s.Close()
+	})
 	return err
 }
 
 // terminal converts the recorded end-of-stream state into what Recv returns:
 // io.EOF for a successful call, the *Status otherwise.
 func (s *Stream) terminal() error {
-	if n := s.dec.Pending(); n > 0 {
+	// The recorded status comes first. A peer that aborts mid-message — trailers
+	// carrying RESOURCE_EXHAUSTED, or RST_STREAM(ENHANCE_YOUR_CALM) — leaves
+	// bytes in the decoder as a *consequence* of the abort, and reporting the
+	// truncation instead would replace the peer's diagnosis with our own and
+	// turn a retriable code into a non-retriable INTERNAL.
+	if err := s.status.Err(); err != nil {
+		return err
+	}
+	if s.dec.Pending() > 0 {
 		return s.fail(&Status{
 			Code:    Internal,
 			Message: "server closed the stream in the middle of a message",
 		})
-	}
-	if err := s.status.Err(); err != nil {
-		return err
 	}
 	return io.EOF
 }
@@ -215,30 +294,40 @@ func (s *Stream) pump(ctx context.Context) error {
 // servers report most errors, and it arrives as EventHeaders rather than
 // EventTrailers because no response header block preceded it.
 func (s *Stream) onHeaders(ev conn.StreamEvent) {
+	if s.headersSeen {
+		// conn classifies a second block as trailers, so this is currently
+		// unreachable; the guard is kept because client/client.go keeps the
+		// same one, and because silently overwriting the response headers is
+		// the worst possible failure mode if that classification ever changes.
+		return
+	}
 	s.header = cloneFields(ev.Headers)
 	putHeaderSlab(ev.Slab)
 	s.headersSeen = true
 	s.httpStatus = pseudoStatus(s.header)
 
 	if ev.EndStream {
-		s.trailer = s.header
+		// Trailers-Only: the one block is both. Copy rather than alias, so a
+		// caller mutating what Header() returned cannot change what Trailer()
+		// returns.
+		s.trailer = append([]conn.HeaderField(nil), s.header...)
 		s.finish(s.header)
 		return
 	}
 	if s.httpStatus != 200 {
-		// A non-200 with a continuing body is still a failed call: the
-		// HTTP-to-gRPC mapping applies and nothing that follows can rescue it.
-		s.status = Status{
-			Code:    statusFromHTTP(s.httpStatus),
-			Message: "server returned HTTP status " + strconv.Itoa(s.httpStatus),
-		}
-		s.done = true
+		// A non-200 is a failed call and nothing that follows can rescue it —
+		// but the status-mapping table is defined for use "only for clients
+		// that received a response that did not include grpc-status", and
+		// grpc-java's HTTP-error path puts grpc-status and grpc-message in
+		// exactly this block. finish prefers them and falls back to the table,
+		// so the server's own diagnosis survives.
+		s.finish(s.header)
 		return
 	}
 	if !validContentType(s.header) {
 		s.status = Status{
 			Code:    Internal,
-			Message: "server response is missing a application/grpc content-type",
+			Message: "server response is missing an application/grpc content-type",
 		}
 		s.done = true
 	}
@@ -256,9 +345,10 @@ func (s *Stream) finish(fields []conn.HeaderField) {
 		}
 		return
 	}
-	// No grpc-status. A non-200 HTTP status is the documented fallback;
-	// otherwise the server broke the contract.
-	if s.httpStatus != 0 && s.httpStatus != 200 {
+	// No grpc-status: the mapping table is the whole answer, including its 200
+	// row, which is UNKNOWN precisely because a truly successful response would
+	// have carried a grpc-status.
+	if s.httpStatus != 0 {
 		s.status = Status{
 			Code:    statusFromHTTP(s.httpStatus),
 			Message: "server returned HTTP status " + strconv.Itoa(s.httpStatus) + " without a grpc-status",
@@ -266,7 +356,7 @@ func (s *Stream) finish(fields []conn.HeaderField) {
 		return
 	}
 	s.status = Status{
-		Code:    Internal,
+		Code:    Unknown,
 		Message: "server closed the stream without sending grpc-status",
 	}
 }
@@ -278,6 +368,9 @@ func (s *Stream) finish(fields []conn.HeaderField) {
 func cloneFields(src []conn.HeaderField) []conn.HeaderField {
 	if len(src) == 0 {
 		return nil
+	}
+	if len(src) > maxMetadataFields {
+		src = src[:maxMetadataFields]
 	}
 	n := 0
 	for i := range src {
@@ -331,6 +424,12 @@ func findField(fields []conn.HeaderField, name string) ([]byte, bool) {
 func pseudoStatus(fields []conn.HeaderField) int {
 	v, ok := findField(fields, ":status")
 	if !ok {
+		return 0
+	}
+	// Exactly three digits (RFC 9113 §8.3.2). Accumulating an unbounded digit
+	// string would let "000200" read as 200, and would wrap a long enough one
+	// back onto 200 outright — laundering a peer-chosen string into success.
+	if len(v) != 3 {
 		return 0
 	}
 	n := 0

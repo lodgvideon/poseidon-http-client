@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"net"
 	"strings"
 	"time"
 
@@ -39,6 +38,12 @@ type Options struct {
 
 	// MaxRecvMessageSize caps the size of a single received message.
 	// Zero means DefaultMaxMessageSize.
+	//
+	// It is also the per-stream memory budget, not only a limit: Dial sizes
+	// conn's event channel from it (see eventBufferFor), so a stream can hold
+	// roughly this much queued DATA plus the same again in the reassembly
+	// buffer while the application is behind. Raise it per call with the
+	// MaxRecvMessageSize CallOption rather than connection-wide.
 	MaxRecvMessageSize int
 }
 
@@ -53,7 +58,79 @@ func (o Options) defaulted() Options {
 	if o.MaxRecvMessageSize <= 0 {
 		o.MaxRecvMessageSize = DefaultMaxMessageSize
 	}
+	if o.Conn.StreamEventBuffer <= 0 {
+		o.Conn.StreamEventBuffer = eventBufferFor(o.MaxRecvMessageSize, o.Conn.Settings.MaxFrameSize)
+	}
+	if o.Conn.Settings.MaxHeaderListSize == 0 {
+		o.Conn.Settings.MaxHeaderListSize = DefaultMaxHeaderListSize
+	}
+	// gRPC has no server push, and a pushed stream this package never reads
+	// would sit in conn's registry until the connection dies. Refusing it at
+	// the SETTINGS level beats discarding an event we asked for.
+	o.Conn.EnablePush = false
 	return o
+}
+
+// DefaultMaxHeaderListSize caps the uncompressed size of a response header or
+// trailer block. conn's own default is 8 MiB, which is a sane ceiling for a web
+// response but two orders of magnitude past anything gRPC metadata carries —
+// and this package copies each block into caller-owned memory that lives as
+// long as the Stream, so what the cap admits is what a peer can pin.
+const DefaultMaxHeaderListSize = 1 << 20
+
+// eventBufferSlackBytes is the headroom added to the per-stream event budget on
+// top of one maximum-size message: the HEADERS event, the trailer event, and a
+// few frames of whatever follows. It is a byte figure, not a slot count —
+// expressed in slots it would silently multiply by the advertised frame size,
+// so a caller who raised MaxFrameSize for throughput would get hundreds of
+// megabytes of headroom they never asked for.
+const eventBufferSlackBytes = 256 << 10
+
+// maxEventBufferBytes caps the DATA a single stream's event channel may hold
+// while the application is behind. Past this, conn's RST_STREAM is the correct
+// answer: a peer that can outrun the consumer by more than this is not going to
+// be rescued by a larger queue.
+const maxEventBufferBytes = 8 << 20
+
+// minEventBuffer keeps at least conn's own default number of slots, so a caller
+// who advertises an enormous MaxFrameSize is never worse off than the default.
+const minEventBuffer = 8
+
+// maxEventBuffer caps the slot count itself, independently of the byte budget,
+// so a tiny advertised frame size cannot turn the budget into a huge channel.
+const maxEventBuffer = 512
+
+// eventBufferFor sizes conn's per-stream event channel from a byte budget.
+//
+// This is load-bearing, not a tuning knob. conn refunds flow-control window
+// from the reader goroutine as each DATA frame arrives (conn.onDataReceived),
+// not as the application consumes it, so HTTP/2 backpressure never throttles
+// the peer to the consumer's pace. The only thing between a fast server and a
+// busy client is the event channel — and when it fills, conn drops the event
+// and resets its own stream with REFUSED_STREAM (conn.Stream.push). conn's
+// default of 8 slots is 128 KiB at the default frame size, so an ordinary gRPC
+// response of a few hundred KiB loses frames partway through and surfaces to
+// the caller as a truncated message.
+//
+// The budget is bytes rather than frames because every queued EventData pins a
+// pooled DATA buffer of up to one frame: slots x frameSize is the memory a peer
+// can hold per stream, so that product is what has to be bounded.
+func eventBufferFor(maxMessage int, maxFrameSize uint32) int {
+	if maxFrameSize == 0 {
+		maxFrameSize = 16384 // conn's advertised default
+	}
+	budget := maxMessage + eventBufferSlackBytes
+	if budget > maxEventBufferBytes {
+		budget = maxEventBufferBytes
+	}
+	n := budget / int(maxFrameSize)
+	if n < minEventBuffer {
+		return minEventBuffer
+	}
+	if n > maxEventBuffer {
+		return maxEventBuffer
+	}
+	return n
 }
 
 // ClientConn is one HTTP/2 connection carrying gRPC calls. It multiplexes as
@@ -74,7 +151,11 @@ type ClientConn struct {
 func Dial(ctx context.Context, addr string, opts Options) (*ClientConn, error) {
 	opts = opts.defaulted()
 	if opts.Authority == "" {
-		opts.Authority = authorityFromAddr(addr)
+		// The dialled address doubles as :authority. Right for a name, wrong
+		// for a literal: dialling "10.0.0.7:443" sends ":authority:
+		// 10.0.0.7:443", which servers that route on it will reject. Set
+		// Options.Authority explicitly when dialling an IP.
+		opts.Authority = addr
 	}
 	c, err := conn.Dial(ctx, addr, opts.Conn)
 	if err != nil {
@@ -86,6 +167,13 @@ func Dial(ctx context.Context, addr string, opts Options) (*ClientConn, error) {
 // NewClientConn wraps an already-established HTTP/2 connection. Options.
 // Authority is required, because there is no address to derive it from. The
 // returned ClientConn does not own c: Close leaves it open.
+//
+// Options.Conn is ignored here — c is already built. That includes the event
+// buffer Dial would have sized: c must have been created with a
+// ConnOptions.StreamEventBuffer large enough to hold one MaxRecvMessageSize
+// worth of DATA frames, or large messages will be truncated. See
+// eventBufferFor for why. Prefer Dial unless the connection has to be shared
+// with something else.
 func NewClientConn(c *conn.Conn, opts Options) (*ClientConn, error) {
 	if c == nil {
 		return nil, errors.New("grpc: nil conn.Conn")
@@ -95,15 +183,6 @@ func NewClientConn(c *conn.Conn, opts Options) (*ClientConn, error) {
 		return nil, errors.New("grpc: Options.Authority is required when wrapping an existing conn.Conn")
 	}
 	return &ClientConn{c: c, opts: opts}, nil
-}
-
-// authorityFromAddr strips a port-less address to itself and leaves host:port
-// intact, which is what :authority wants in both cases.
-func authorityFromAddr(addr string) string {
-	if _, _, err := net.SplitHostPort(addr); err != nil {
-		return addr
-	}
-	return addr
 }
 
 // Conn returns the underlying HTTP/2 connection, for callers that need
@@ -119,23 +198,57 @@ func (cc *ClientConn) Close() error {
 	return cc.c.Close()
 }
 
+// CallOption customises a single RPC. The interface is closed — only this
+// package can implement it — so options can be added without breaking callers.
+type CallOption interface {
+	apply(*callOptions)
+}
+
+// callOptions is the resolved per-call configuration.
+type callOptions struct {
+	maxRecvMessageSize int
+}
+
+// maxRecvCallOption implements CallOption for MaxRecvMessageSize.
+type maxRecvCallOption int
+
+func (o maxRecvCallOption) apply(c *callOptions) { c.maxRecvMessageSize = int(o) }
+
+// MaxRecvMessageSize overrides Options.MaxRecvMessageSize for one call — for
+// the single method that returns a large payload, without paying its memory
+// cost on every other call sharing the connection.
+func MaxRecvMessageSize(n int) CallOption { return maxRecvCallOption(n) }
+
 // NewStream opens a gRPC call on cc. method is the fully-qualified path,
 // "/package.Service/Method". md carries request metadata built with
 // AppendMetadata; it may be nil.
 //
 // The request HEADERS frame is written before NewStream returns, so a deadline
-// already on ctx is propagated to the server as grpc-timeout. ctx also governs
-// the whole call: cancelling it makes in-flight Send and Recv return.
+// already on ctx is propagated to the server as grpc-timeout.
 //
-// The caller must Close the returned Stream unless it reads it to completion.
-func (cc *ClientConn) NewStream(ctx context.Context, method string, md []conn.HeaderField) (*Stream, error) {
+// ctx governs this call's setup only. It is NOT retained: Send, CloseSend and
+// Recv each take their own context and are cancelled by that one. Pass the same
+// context throughout unless you intend the deadline the server was told and the
+// deadline this client enforces to differ.
+//
+// The caller must Close the returned Stream unless it reads it to completion,
+// and after any Recv error — an abandoned stream holds a conn.Stream slot and
+// leaves the server generating a response nobody reads.
+func (cc *ClientConn) NewStream(ctx context.Context, method string, md []conn.HeaderField, opts ...CallOption) (*Stream, error) {
 	if !strings.HasPrefix(method, "/") {
 		return nil, fmt.Errorf("%w: %q", ErrBadMethod, method)
 	}
+	// Caller-built md never went through AppendMetadata, so it is validated in
+	// full here. Neither conn nor hpack checks field syntax on the send path,
+	// which makes this the last gate before the wire.
 	for i := range md {
-		if err := checkMetadataKey(string(md[i].Name)); err != nil {
+		if err := validMetadata(md[i].Name, md[i].Value); err != nil {
 			return nil, err
 		}
+	}
+	co := callOptions{maxRecvMessageSize: cc.opts.MaxRecvMessageSize}
+	for _, o := range opts {
+		o.apply(&co)
 	}
 	hdrs := cc.buildHeaders(ctx, method, md)
 
@@ -148,7 +261,7 @@ func (cc *ClientConn) NewStream(ctx context.Context, method string, md []conn.He
 		return nil, err
 	}
 	st := &Stream{s: s}
-	st.dec.Max = cc.opts.MaxRecvMessageSize
+	st.dec.max = co.maxRecvMessageSize
 	return st, nil
 }
 
@@ -175,13 +288,25 @@ func (cc *ClientConn) buildHeaders(ctx context.Context, method string, md []conn
 			Value: []byte(encodeTimeout(time.Until(dl))),
 		})
 	}
-	return append(hdrs, md...)
+	for i := range md {
+		f := md[i]
+		// The floor, not the ceiling: a caller who never sets Sensitive would
+		// otherwise have their credential added to the connection's HPACK
+		// dynamic table, where it outlives the RPC and is emitted as a
+		// one-byte index on every later call. Mirrors http3/request.go.
+		f.Sensitive = f.Sensitive || defaultSensitiveField(f.Name)
+		hdrs = append(hdrs, f)
+	}
+	return hdrs
 }
 
 // Invoke performs a unary RPC: one request message, one response message. It
 // is the common case expressed in terms of Stream.
-func (cc *ClientConn) Invoke(ctx context.Context, method string, req []byte, md []conn.HeaderField) ([]byte, error) {
-	s, err := cc.NewStream(ctx, method, md)
+// A caller that needs the response headers, trailers or the full Status uses
+// NewStream instead; Invoke is sugar for the case where only the message
+// matters.
+func (cc *ClientConn) Invoke(ctx context.Context, method string, req []byte, md []conn.HeaderField, opts ...CallOption) ([]byte, error) {
+	s, err := cc.NewStream(ctx, method, md, opts...)
 	if err != nil {
 		return nil, err
 	}
@@ -195,6 +320,12 @@ func (cc *ClientConn) Invoke(ctx context.Context, method string, req []byte, md 
 	}
 	resp, err := s.Recv(ctx)
 	if err != nil {
+		// A bare io.EOF means the call completed with status OK but carried no
+		// message. Every other Invoke failure is a *Status, so this one is too
+		// rather than making the caller special-case io.EOF.
+		if errors.Is(err, io.EOF) {
+			return nil, &Status{Code: Internal, Message: "unary method returned no message"}
+		}
 		return nil, err
 	}
 	// Drain to the terminal event so a non-OK grpc-status that follows the

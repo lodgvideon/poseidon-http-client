@@ -565,8 +565,11 @@ func TestIntegration_MissingGRPCStatus(t *testing.T) {
 	if !errors.As(err, &st) {
 		t.Fatalf("Invoke error = %v (%T), want *Status", err, err)
 	}
-	if st.Code != Internal {
-		t.Fatalf("code = %v, want INTERNAL", st.Code)
+	// The mapping table's 200 row is UNKNOWN, not INTERNAL: a truly successful
+	// response would have carried a grpc-status, so a 200 without one leaves
+	// the client with no idea what happened.
+	if st.Code != Unknown {
+		t.Fatalf("code = %v, want UNKNOWN", st.Code)
 	}
 }
 
@@ -653,14 +656,14 @@ func TestIntegration_MetadataRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Header: %v", err)
 	}
-	if v, ok := MetadataValue(hdr, "x-echo-id"); !ok || string(v) != "req-7" {
-		t.Fatalf("echoed id = %q ok=%v", v, ok)
+	if v, ok, err := MetadataValue(hdr, "x-echo-id"); !ok || err != nil || string(v) != "req-7" {
+		t.Fatalf("echoed id = %q ok=%v err=%v", v, ok, err)
 	}
 	// The server echoed the base64 the client put on the wire back under a key
 	// that also ends in -bin, so reading it decodes and completes the round
 	// trip: the original bytes come back byte-for-byte.
-	if v, ok := MetadataValue(hdr, "x-echo-bin"); !ok || string(v) != "\xde\xad" {
-		t.Fatalf("echoed binary = % x ok=%v, want de ad", v, ok)
+	if v, ok, err := MetadataValue(hdr, "x-echo-bin"); !ok || err != nil || string(v) != "\xde\xad" {
+		t.Fatalf("echoed binary = % x ok=%v err=%v, want de ad", v, ok, err)
 	}
 }
 

@@ -38,9 +38,12 @@ func main() {
 				NextProtos:         []string{"h2"},
 				InsecureSkipVerify: *insecure, //nolint:gosec // opt-in via -insecure
 			}},
-			// gRPC keepalive: a PING every 30s, connection declared dead if no
-			// ACK arrives in time.
-			KeepaliveInterval: 30 * time.Second,
+			// gRPC servers enforce a minimum ping interval — grpc-go's default
+			// is 5 minutes, and it answers anything faster with
+			// GOAWAY(ENHANCE_YOUR_CALM) after two strikes. They also refuse
+			// pings on a connection with no active stream by default. Leave
+			// this at zero unless the server is configured to permit more.
+			KeepaliveInterval: 10 * time.Minute,
 		},
 	})
 	if err != nil {

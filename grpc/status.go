@@ -59,7 +59,10 @@ var codeNames = [...]string{
 // String returns the canonical name of the code, or CODE(n) when n is outside
 // the range the gRPC specification defines.
 func (c Code) String() string {
-	if int(c) < len(codeNames) {
+	// Compared in Code's own (uint32) domain, not via int: on a 32-bit target
+	// int(c) for a peer-supplied 4294967295 is -1, which passes a signed guard
+	// and then indexes the array out of range.
+	if c < Code(len(codeNames)) {
 		return codeNames[c]
 	}
 	return "CODE(" + strconv.FormatUint(uint64(c), 10) + ")"
@@ -96,7 +99,9 @@ func (s Status) Err() error {
 
 // statusFromHTTP maps an HTTP response status to a gRPC code, per the
 // "HTTP-Status to gRPC-Status" table in the gRPC over HTTP/2 specification.
-// It is used only when the server ends the stream without a grpc-status.
+// It is used only when the server ends the stream without a grpc-status —
+// which is why 200 maps to UNKNOWN through the default arm rather than to OK:
+// a truly successful response would have carried a grpc-status.
 func statusFromHTTP(httpStatus int) Code {
 	switch httpStatus {
 	case 400:
@@ -147,7 +152,7 @@ func parseStatusCode(v string) Code {
 // stray or truncated escape is passed through verbatim rather than failing
 // the RPC, because the message is diagnostic text, not protocol state.
 func decodeMessage(v string) string {
-	if !strings.ContainsRune(v, '%') {
+	if !strings.ContainsRune(v, '%') && !hasControlByte(v) {
 		return v
 	}
 	var b strings.Builder
@@ -157,16 +162,41 @@ func decodeMessage(v string) string {
 			hi, ok1 := unhex(v[i+1])
 			lo, ok2 := unhex(v[i+2])
 			if ok1 && ok2 {
-				b.WriteByte(hi<<4 | lo)
+				if c := hi<<4 | lo; !controlByte(c) {
+					b.WriteByte(c)
+				}
 				i += 3
 				continue
 			}
 		}
-		b.WriteByte(v[i])
+		if !controlByte(v[i]) {
+			b.WriteByte(v[i])
+		}
 		i++
 	}
 	return b.String()
 }
+
+// hasControlByte reports whether v carries a control byte verbatim. conn
+// rejects those in a decoded response field, so on the live path this is always
+// false — the scan is here so the guarantee decodeMessage offers holds by
+// construction rather than by trusting a check in another package.
+func hasControlByte(v string) bool {
+	for i := 0; i < len(v); i++ {
+		if controlByte(v[i]) {
+			return true
+		}
+	}
+	return false
+}
+
+// controlByte reports whether c is a C0 control or DEL. conn rejects these in a
+// raw field value, but percent-decoding runs after that check and would put
+// them back: a peer that sends "%0A" followed by a plausible timestamp forges a
+// line in the caller's log, and "%1B" delivers ANSI escapes to whatever
+// terminal prints the error. The specification requires the decode not to fail
+// the RPC, so they are dropped rather than rejected.
+func controlByte(c byte) bool { return c < 0x20 || c == 0x7f }
 
 // unhex converts one hexadecimal digit to its value.
 func unhex(c byte) (byte, bool) {

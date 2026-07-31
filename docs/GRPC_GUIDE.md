@@ -7,8 +7,11 @@ is what a load generator wants — a pre-marshaled fixture replayed millions of
 times costs nothing to re-encode.
 
 ```
-grpc → conn → frame, hpack
+grpc → conn → frame, hpack     (plus frame directly, for RST_STREAM codes)
 ```
+
+HTTP/2 only. `http3.Request` carries a `[]byte` body with no incremental send
+path, so the streaming call shapes cannot be expressed on that stack yet.
 
 It does **not** go through `client`. That is deliberate: `client.DoStream`
 writes the entire request body before it returns, so client-streaming and
@@ -23,8 +26,7 @@ defer cancel()
 
 cc, err := grpc.Dial(ctx, "api.example.com:443", grpc.Options{
     Conn: conn.ConnOptions{
-        Dialer:            &conn.TLSDialer{Config: &tls.Config{NextProtos: []string{"h2"}}},
-        KeepaliveInterval: 30 * time.Second,
+        Dialer: &conn.TLSDialer{Config: &tls.Config{NextProtos: []string{"h2"}}},
     },
 })
 if err != nil {
@@ -36,9 +38,14 @@ resp, err := cc.Invoke(ctx, "/helloworld.Greeter/SayHello", reqBytes, nil)
 ```
 
 A `ClientConn` is **one** HTTP/2 connection multiplexing as many concurrent
-calls as the peer's `SETTINGS_MAX_CONCURRENT_STREAMS` allows. That is gRPC's own
-model, so there is no pool to configure — open a second `ClientConn` when you
-want a second connection.
+calls as the peer's `SETTINGS_MAX_CONCURRENT_STREAMS` allows. There is no
+pooling yet: open a second `ClientConn` when you want a second connection, and
+build the pool, the health checking and the reconnect-on-GOAWAY yourself.
+
+If you arrive from grpc-go, note the name is narrower here than there. grpc-go's
+`ClientConn` is a virtual channel owning a resolver, a balancer and a set of
+subconnections; this one is the single-connection object underneath that. It
+does not resolve names, load-balance, or reconnect.
 
 The context deadline becomes the `grpc-timeout` header, so the server cancels
 its own work when the caller gives up. A context without a deadline sends no
@@ -119,8 +126,13 @@ Four different wire shapes all land in `Status`:
    `UNAVAILABLE`, `CANCEL` → `CANCELED`, `ENHANCE_YOUR_CALM` →
    `RESOURCE_EXHAUSTED`, everything else → `INTERNAL`.
 
-A 200 response that ends with no `grpc-status` anywhere is `INTERNAL`, not a
-success. So is a stream that ends in the middle of a message.
+A 200 response that ends with no `grpc-status` anywhere is `UNKNOWN`, not a
+success — that is the 200 row of the mapping table, and it reads that way
+precisely because a genuinely successful response would have carried a status. A
+stream that ends mid-message is `INTERNAL`, unless the peer also sent a status,
+in which case the peer's own diagnosis wins: the truncation is a consequence of
+whatever it reported, and replacing `UNAVAILABLE` with `INTERNAL` would turn a
+retriable failure into a permanent one.
 
 ## Metadata
 
@@ -133,26 +145,56 @@ md, _ = grpc.AppendMetadata(md, "trace-bin", traceID)
 s, err := cc.NewStream(ctx, "/pkg.Svc/Method", md)
 ```
 
-Keys the transport owns — `content-type`, `te`, `user-agent`, `grpc-timeout`,
-`grpc-encoding`, `grpc-accept-encoding`, and any pseudo-header — are rejected
-with `ErrReservedMetadata` rather than silently overriding the request.
+Keys the transport owns — `content-type`, `te`, `user-agent`, the connection-
+specific fields HTTP/2 forbids outright, and the whole `grpc-` namespace the
+protocol reserves — are rejected with `ErrReservedMetadata`. Names that are not
+lowercase tokens and values carrying CR, LF, NUL or edge whitespace are rejected
+with `ErrInvalidMetadata`; that check is the last gate before the wire, since
+neither `conn` nor `hpack` validates outbound fields, and it is what stops a
+caller-forwarded value from becoming an injected request at an HTTP/1.1
+downgrading hop.
 
 Read response metadata with `Header(ctx)` (blocks until the server's header
 block arrives) and `Trailer()` (valid once `Recv` has reported the end of the
-stream). `MetadataValue` reverses the `-bin` encoding, accepting both padded
-and unpadded base64.
+stream, and callable only from the goroutine driving `Recv`).
+
+```go
+v, ok, err := grpc.MetadataValue(hdr, "x-trace-bin")
+```
+
+`MetadataValue` reverses the `-bin` encoding, accepting both padded and unpadded
+base64. `ok` and `err` are separate on purpose: a value the peer sent but
+corrupted must not read the same as a value the peer never sent, or an
+application checking for a signature takes its nothing-to-verify branch on
+exactly the input an attacker controls.
+
+Credentials never enter the HPACK dynamic table. `authorization`,
+`proxy-authorization` and `cookie` are marked sensitive automatically — that is
+a floor, and any other field can be marked by setting `Sensitive` on it
+directly. Without it a bearer token would be indexed once and then emitted as a
+one-byte reference on every later call over the same connection.
 
 ## Message framing
 
 Every gRPC message is a 1-byte compressed flag plus a 4-byte big-endian length
 plus the payload. HTTP/2 DATA boundaries have nothing to do with message
 boundaries: one DATA frame may carry several messages, and one message may span
-many frames. `Decoder` handles the reassembly; `Recv` hands back a fresh copy
-the caller owns.
+many frames. Reassembly is internal; `Recv` hands back a fresh copy the caller
+owns. `AppendMessage` is exported for the other side of the wire — a test
+server, a recorded fixture.
 
 `MaxRecvMessageSize` (default 4 MiB, matching gRPC) is checked **against the
-declared length prefix**, before any of the payload is buffered, so a hostile
-peer cannot make the client allocate on its say-so.
+declared length prefix**, so a peer announcing 4 GiB is refused on the prefix
+alone rather than after its payload arrives. One DATA frame of the payload may
+be buffered before the check runs — HTTP/2 flow control bounds that — and the
+reassembly buffer settles at roughly one message.
+
+The same number is also the per-stream memory budget, not only a limit: `Dial`
+sizes conn's event channel from it, because conn refunds flow-control window as
+frames arrive rather than as the application consumes them, so nothing else
+throttles a fast server to a slow consumer. Use the `MaxRecvMessageSize`
+`CallOption` to raise it for the one method that needs it instead of paying for
+it on every call.
 
 ## Compression
 
@@ -166,15 +208,17 @@ per-message `grpc-encoding`.
 
 ## Keepalive
 
-Set `Options.Conn.KeepaliveInterval` to enable HTTP/2 PINGs, and
-`KeepaliveTimeout` to bound how long a missing ACK is tolerated before the
-connection is closed. `ClientConn.Conn()` exposes the underlying `*conn.Conn`
-for a one-off `Ping` or for `Stats`.
+Keepalive is **off by default, and that is the safe setting.** gRPC servers
+enforce a minimum ping interval — grpc-go's default is 5 minutes — and refuse
+pings on a connection with no active stream. Two violations and the server sends
+`GOAWAY(ENHANCE_YOUR_CALM)` with debug data `too_many_pings` and drops the
+connection.
 
-The client does not implement gRPC's server-side keepalive-enforcement dance: a
-server that answers aggressive PINGs with `GOAWAY(ENHANCE_YOUR_CALM)` will close
-the connection, and in-flight calls fail with that as their status. Pick an
-interval the server permits.
+`Options.Conn.KeepaliveInterval` enables PINGs and `KeepaliveTimeout` bounds how
+long a missing ACK is tolerated. The loop pings unconditionally — it does not
+back off after a GOAWAY and does not skip idle connections — so set an interval
+the server is configured to permit, or leave it at zero. `ClientConn.Conn()`
+exposes the underlying `*conn.Conn` for a one-off `Ping` or for `Stats`.
 
 ## Not covered
 

@@ -37,24 +37,28 @@ func AppendMessage(dst, msg []byte) ([]byte, error) {
 	return append(dst, msg...), nil
 }
 
-// Decoder reassembles length-prefixed gRPC messages from the DATA chunks a
+// decoder reassembles length-prefixed gRPC messages from the DATA chunks a
 // conn.Stream delivers. A message may span any number of chunks, and one
 // chunk may carry any number of messages — neither boundary is aligned with
 // the other on the wire.
 //
-// The zero Decoder is ready to use and applies DefaultMaxMessageSize.
-type Decoder struct {
+// It is deliberately unexported: Next returns a slice that is only valid until
+// the next call, which is a silent-corruption footgun in an exported type, and
+// Stream owns the only instance. AppendMessage stays exported because building
+// the other side of the wire (a test server, a fixture) genuinely needs it.
+//
+// The zero decoder is ready to use and applies DefaultMaxMessageSize.
+type decoder struct {
 	buf []byte // pending bytes: buf[off:] is undelivered
 	off int
-	// Max is the largest message accepted. Zero means DefaultMaxMessageSize.
-	// Set it before the first Push.
-	Max int
+	// max is the largest message accepted. Zero means DefaultMaxMessageSize.
+	max int
 }
 
 // Push appends a DATA chunk to the decoder's pending bytes. The chunk is
 // copied, so the caller may return its backing buffer to a pool immediately
 // after Push returns.
-func (d *Decoder) Push(chunk []byte) {
+func (d *decoder) Push(chunk []byte) {
 	if len(chunk) == 0 {
 		return
 	}
@@ -62,10 +66,27 @@ func (d *Decoder) Push(chunk []byte) {
 	d.buf = append(d.buf, chunk...)
 }
 
+// limit returns the effective maximum message size.
+func (d *decoder) limit() int {
+	if d.max <= 0 {
+		return DefaultMaxMessageSize
+	}
+	return d.max
+}
+
+// overLimit reports whether the pending bytes have grown past what one
+// maximum-size message can occupy. Stream.Recv drains with Next before every
+// Push, so it cannot reach this — but the bound belongs in the decoder rather
+// than in its caller's call order, because a caller that pushes twice without
+// draining would otherwise have no bound at all.
+func (d *decoder) overLimit() bool {
+	return d.Pending() > d.limit()+prefixLen
+}
+
 // compact slides undelivered bytes to the front once the consumed prefix has
 // grown past half the buffer, so a long-lived stream does not grow buf without
 // bound.
-func (d *Decoder) compact() {
+func (d *decoder) compact() {
 	if d.off == 0 {
 		return
 	}
@@ -85,7 +106,7 @@ func (d *Decoder) compact() {
 // hold no complete message yet and the caller should Push more. The returned
 // slice aliases the decoder's buffer and stays valid only until the next Push
 // or Next — copy it to retain it.
-func (d *Decoder) Next() (msg []byte, ok bool, err error) {
+func (d *decoder) Next() (msg []byte, ok bool, err error) {
 	avail := d.buf[d.off:]
 	if len(avail) < prefixLen {
 		return nil, false, nil
@@ -94,10 +115,7 @@ func (d *Decoder) Next() (msg []byte, ok bool, err error) {
 		return nil, false, ErrCompressed
 	}
 	n := binary.BigEndian.Uint32(avail[1:prefixLen])
-	limit := d.Max
-	if limit <= 0 {
-		limit = DefaultMaxMessageSize
-	}
+	limit := d.limit()
 	if uint64(n) > uint64(limit) {
 		return nil, false, fmt.Errorf("%w: %d > %d", ErrMessageTooLarge, n, limit)
 	}
@@ -111,10 +129,10 @@ func (d *Decoder) Next() (msg []byte, ok bool, err error) {
 // Pending reports the number of buffered bytes that do not yet form a complete
 // message. A non-zero value when the stream ends means the peer truncated a
 // message mid-flight.
-func (d *Decoder) Pending() int { return len(d.buf) - d.off }
+func (d *decoder) Pending() int { return len(d.buf) - d.off }
 
 // Reset drops all pending bytes, keeping the allocated buffer for reuse.
-func (d *Decoder) Reset() {
+func (d *decoder) Reset() {
 	d.buf = d.buf[:0]
 	d.off = 0
 }
