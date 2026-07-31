@@ -162,8 +162,18 @@ type ProxyTLSDialer struct {
 	TLSConfig *tls.Config
 }
 
+// AssertsALPN reports that this dialer only ever returns h2 connections.
+func (d *ProxyTLSDialer) AssertsALPN() string { return "h2" }
+
 // Dial connects through proxy → TLS handshake → returns the TLS connection.
+// Returns ErrALPNConflict — before contacting the proxy — if TLSConfig pins a
+// non-empty NextProtos that excludes "h2"; like TLSDialer, this dialer asserts
+// h2 and will not silently rewrite a caller's explicit ALPN offer.
 func (d *ProxyTLSDialer) Dial(ctx context.Context, addr string) (net.Conn, error) {
+	if d.TLSConfig != nil && len(d.TLSConfig.NextProtos) > 0 && !containsProto(d.TLSConfig.NextProtos, "h2") {
+		return nil, fmt.Errorf("%w: ProxyTLSDialer asserts \"h2\" but TLSConfig.NextProtos is %q",
+			ErrALPNConflict, d.TLSConfig.NextProtos)
+	}
 	// Step 1: CONNECT tunnel.
 	tunnel, err := (&ProxyDialer{ProxyURL: d.ProxyURL, ProxyTLS: d.ProxyTLS}).Dial(ctx, addr)
 	if err != nil {
@@ -177,14 +187,7 @@ func (d *ProxyTLSDialer) Dial(ctx context.Context, addr string) (net.Conn, error
 	} else {
 		cfg = cfg.Clone()
 	}
-	hasH2 := false
-	for _, p := range cfg.NextProtos {
-		if p == "h2" {
-			hasH2 = true
-			break
-		}
-	}
-	if !hasH2 {
+	if !containsProto(cfg.NextProtos, "h2") {
 		cfg.NextProtos = append([]string{"h2"}, cfg.NextProtos...)
 	}
 	// Extract host for ServerName if not set.

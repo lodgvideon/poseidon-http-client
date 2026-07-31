@@ -7,7 +7,54 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`conn.H1TLSDialer` — HTTP/1.1 over TLS** (#334). The HTTP/1.1 transports
+  documented a dialer requirement no exported dialer met: "a TLS dialer with
+  `NextProtos` containing only `http/1.1`". `TLSDialer` asserts h2, `FlexDialer`
+  offers h2 alongside http/1.1 (so any h2-capable server picks h2), and
+  `PlaintextDialer` does no TLS — leaving every HTTPS + HTTP/1.1 caller to write
+  their own `conn.Dialer`. `H1TLSDialer` offers only the `http/1.1` ALPN token
+  and asserts the peer did not select something else (`ErrALPNNotHTTP11`; a peer
+  that negotiates no ALPN at all is accepted, since that implies HTTP/1.1).
+
+- **`conn.ALPNAsserter`** — an optional `AssertsALPN() string` on a dialer,
+  declaring the one protocol it ever returns. `TLSDialer` and `ProxyTLSDialer`
+  answer `"h2"`, `H1TLSDialer` `"http/1.1"`, `FlexDialer` `""` (no assertion).
+  `client.NewClient` uses it to reject a transport/dialer pairing that can only
+  fail. Custom dialers may implement it to get the same check.
+
 ### Fixed
+
+- **HTTP/1.1 over TLS silently negotiated HTTP/2 and failed every request**
+  (#334). `conn.TLSDialer` rewrote a caller's explicit `Config.NextProtos`,
+  prepending `"h2"` — so the natural-looking `TLSDialer{Config: &tls.Config{
+  NextProtos: []string{"http/1.1"}}}` on `TransportH1Pool` offered
+  `["h2","http/1.1"]`, the server picked h2, and the dial *succeeded* because the
+  dialer's own assertion is h2. The HTTP/1.1 codec then wrote request lines into
+  a connection the peer framed as HTTP/2: every exchange failed with
+  `http1: read status line: EOF` on the client and `bogus greeting` on the
+  server, neither message mentioning ALPN. In a benchmark harness this failed
+  100% of HTTP/1.1 requests while still producing plausible-looking allocation
+  and CPU numbers, because the driver was faithfully measuring the cost of
+  failing. Three changes, each closing the gap at a different depth:
+
+  - `TLSDialer.Dial` (and `ProxyTLSDialer.Dial`) now returns
+    `conn.ErrALPNConflict` — before any network I/O — when `Config.NextProtos` is
+    non-empty and excludes `"h2"`, instead of overriding it. The empty-list case
+    still defaults to `["h2"]`, so no working configuration changes behaviour.
+  - `client.NewClient` rejects a dialer whose `AssertsALPN` the transport cannot
+    use — an H1 transport with `TLSDialer`, an H2 transport with `H1TLSDialer` —
+    with the new `client.ErrALPNProtocolMismatch`.
+  - The HTTP/1.1 transports (`TransportH1SingleConn`, `TransportH1Pool`,
+    `TransportH1Managed`) re-check the negotiated protocol on every dial and
+    refuse a connection that came back as anything other than `http/1.1`,
+    reporting it as a dial failure with the same typed error. This is the
+    backstop for a custom dialer that makes no assertion for `NewClient` to
+    check.
+
+  `README.md`, `examples/http1` and `docs/CLIENT_GUIDE.md` carried the broken
+  `TLSDialer` + `NextProtos: ["http/1.1"]` recipe and now use `H1TLSDialer`.
 
 - **HTTP/1.1 allocated 16 KiB of scratch memory per request** (#331). `h1Exchange`
   carried an inline 16 KiB array for `ReadBodyChunk`, and every H1 transport

@@ -3,6 +3,7 @@ package client
 import (
 	"context"
 	"fmt"
+	"net"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -11,6 +12,22 @@ import (
 	"github.com/lodgvideon/poseidon-http-client/frame"
 	"github.com/lodgvideon/poseidon-http-client/http1"
 )
+
+// assertH1Conn rejects a freshly dialled connection whose ALPN protocol says the
+// peer is not speaking HTTP/1.1. Every H1 dial path runs it, so a dialer that
+// offers "h2" — conn.FlexDialer against an h2-capable server, or a custom dialer
+// that does not implement conn.ALPNAsserter and so escaped NewClient's check —
+// fails at the dial with a message naming the protocol, instead of turning every
+// exchange into "http1: read status line: EOF" while the server logs a bogus
+// HTTP/2 preface. A connection with no negotiated protocol (plain TCP, or TLS
+// against a peer that does not speak ALPN) is fine: that is HTTP/1.1 by default.
+func assertH1Conn(nc net.Conn) error {
+	if p := conn.NegotiatedProtocol(nc); p != "" && p != "http/1.1" {
+		return fmt.Errorf("%w: dialer negotiated %q, the HTTP/1.1 transport requires \"http/1.1\" (use conn.H1TLSDialer for HTTP/1.1 over TLS)",
+			ErrALPNProtocolMismatch, p)
+	}
+	return nil
+}
 
 // h1Exchange adapts *http1.Exchange to the protoStream interface so that
 // Client.sendRequest and Client.drainResponse can drive HTTP/1.1 without
@@ -270,6 +287,12 @@ func (s *h1singleConn) acquireConn(ctx context.Context) (*http1.Conn, error) {
 		dialStart := time.Now()
 		s.metrics.Counters.DialsAttempted.Add(1)
 		nc, dialErr := s.dialer.Dial(ctx, s.addr)
+		if dialErr == nil {
+			if err := assertH1Conn(nc); err != nil {
+				_ = nc.Close()
+				nc, dialErr = nil, err
+			}
+		}
 		dur := time.Since(dialStart)
 		s.metrics.Latency.Dial.Observe(dur)
 		if dialErr != nil {

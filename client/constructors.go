@@ -131,10 +131,11 @@ func NewH3PoolClient(addr string, tlsConfig *tls.Config, pool PoolOptions, opts 
 // concurrent request waits for the first to finish. For concurrent load use
 // NewH1PoolClient, where MaxConnsPerHost sets the concurrency.
 //
-// The dialer must not offer or assert ALPN "h2": use a plain TCP dialer
-// (&conn.PlaintextDialer{}), or a TLS dialer whose Config.NextProtos contains only
-// "http/1.1". A dialer asserting "h2" fails the handshake against an HTTP/1.1-only
-// server; for automatic negotiation use TransportALPN via NewClient instead.
+// The dialer must not offer or assert ALPN "h2": use &conn.H1TLSDialer{} over
+// TLS, or &conn.PlaintextDialer{} in cleartext. &conn.TLSDialer{} asserts "h2"
+// and is rejected here with ErrALPNProtocolMismatch — against a server offering
+// both protocols it would negotiate HTTP/2 and leave this transport writing
+// HTTP/1.1 into it. For automatic negotiation use TransportALPN via NewClient.
 func NewH1Client(addr string, dialer conn.Dialer, opts ...Option) (*Client, error) {
 	return buildClient(ClientOptions{
 		Addr:      addr,
