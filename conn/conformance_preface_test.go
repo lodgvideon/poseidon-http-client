@@ -82,7 +82,21 @@ func TestConformance_RFC9113_Sec3_4_NonSettingsFirstFrame_Refused(t *testing.T) 
 func TestConformance_RFC9113_Sec3_4_SettingsFirstFrame_Accepted(t *testing.T) {
 	cli, srv := net.Pipe()
 	defer cli.Close()
-	go pipeServer(t, srv, nil)
+	// The server end must outlive the IsAlive assertion. With a nil `after`,
+	// pipeServer returns the moment the SETTINGS/ACK exchange completes and its
+	// deferred srv.Close() hangs up the pipe, racing readerLoop's first
+	// ReadFrame against this goroutine. When the reader loses that race it
+	// closes readerDone, and IsAlive correctly reports the connection dead.
+	// Park the peer in `after` instead, and join it — pipeServer logs to t on
+	// its error paths, so it must not outlive the test.
+	stopSrv, releaseSrv := newFinish()
+	srvDone := make(chan struct{})
+	go func() {
+		defer close(srvDone)
+		pipeServer(t, srv, func(_ *frame.Framer) { <-stopSrv })
+	}()
+	stopServer := func() { releaseSrv(); <-srvDone }
+	t.Cleanup(stopServer)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
@@ -93,5 +107,9 @@ func TestConformance_RFC9113_Sec3_4_SettingsFirstFrame_Accepted(t *testing.T) {
 	if !c.IsAlive() {
 		t.Error("connection not alive after a conformant handshake")
 	}
+	// Retire the peer before Close. A server still parked in `after` leaves
+	// nobody reading the pipe, so Close's best-effort GOAWAY would block until
+	// its full closeGoAwayDeadline expires — 200ms of pure wall-clock per run.
+	stopServer()
 	_ = c.Close()
 }
