@@ -22,6 +22,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   unchanged. Affects `TransportH1SingleConn`, `TransportH1Pool` and
   `TransportH1Managed`; no API change.
 
+- **HTTP/1.1 spawned a context watchdog per blocking I/O call** (follow-up to
+  #331). `armCancel` and `armDeadline` each allocated two channels, two closures
+  and a goroutine, and one request/response arms them several times over — the
+  head write, each body write, the response read and every body chunk. They were
+  the two remaining H1 sites in the reported heap profile (8 MB + 4 MB). The
+  watchdog is now one goroutine per `http1.Conn`, started lazily on the first
+  cancellable context and re-armed around each call under the serialization
+  `Conn` already documents; arming allocates nothing. Both invariants the
+  per-call form documented are preserved: the release still blocks until the
+  watchdog can no longer install a deadline (an unbuffered rendezvous in place
+  of `<-exited`), so a cancellation racing the return cannot latch a past
+  deadline on a connection about to be pooled; and a context carrying BOTH a
+  deadline and a cancel — what `client.Do` builds from `Request.Timeout` — still
+  arms. `Conn.Close` retires the goroutine. Measured on the same 2 KiB response:
+  **4.2 KB → 3.2 KB allocated per request, 66 → 51 allocations**. No API change.
+
 ## [v0.11.0] — 2026-07-31
 
 ### Added
