@@ -10,6 +10,7 @@ import (
 	"net"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"syscall"
 	"time"
@@ -150,7 +151,8 @@ const (
 
 // Conn is a persistent HTTP/1.1 connection. At most one Exchange at a time
 // (no pipelining). The caller serializes exchanges via an external mutex or
-// by using Conn only from one goroutine at a time.
+// by using Conn only from one goroutine at a time. That serialization is what
+// the connection's single context watchdog rests on — see ctxWatchdog.
 type Conn struct {
 	nc     net.Conn
 	br     *bufio.Reader
@@ -177,6 +179,11 @@ type Conn struct {
 	pendN   int
 	pendOK  bool
 	layered bool
+
+	// wd is the connection's single context watchdog, re-armed around each
+	// blocking read or write instead of respawned. Its channels are made here
+	// once; its goroutine starts on the first arming that needs it.
+	wd ctxWatchdog
 }
 
 // NewConn wraps nc in a persistent HTTP/1.1 Conn.
@@ -186,6 +193,10 @@ func NewConn(nc net.Conn) *Conn {
 		nc: nc,
 		br: bufio.NewReaderSize(nc, readBufSize),
 	}
+	c.wd.armCh = make(chan watchReq)
+	c.wd.disarmCh = make(chan struct{})
+	c.wd.quit = make(chan struct{})
+	c.wd.gone = make(chan struct{})
 	c.initResidue()
 	return c
 }
@@ -198,6 +209,12 @@ func (c *Conn) IsAlive() bool {
 // Close closes the underlying network connection.
 func (c *Conn) Close() error {
 	c.closed.Store(true)
+	// Retires the watchdog goroutine, which otherwise lives as long as the
+	// connection. It exits from its idle state, so an arming in flight is
+	// unaffected: that call's disarm still completes, and the goroutine leaves
+	// on the next trip round its loop. sync.Once because Close is idempotent
+	// and closing a closed channel panics.
+	c.wd.stop.Do(func() { close(c.wd.quit) })
 	return c.nc.Close()
 }
 
@@ -440,8 +457,144 @@ func validRequestTarget(s string) bool {
 // in the past on every clock, unlike time.Now() on a coarse timer.
 var deadlineLongPast = time.Unix(1, 0)
 
+// deadlineKind selects which of the socket's two deadlines an arming trips.
+//
+// It replaces the `set func(time.Time) error` these helpers used to take. Every
+// call site spelled that argument as a method value (`c.nc.SetReadDeadline`),
+// and a method value is a heap-allocated closure — one of the per-call
+// allocations the per-connection watchdog exists to remove, so the selector has
+// to be a value rather than a func.
+type deadlineKind bool
+
+const (
+	readDeadline  deadlineKind = false
+	writeDeadline deadlineKind = true
+)
+
+// setDeadline applies t to the deadline named by k.
+func (c *Conn) setDeadline(k deadlineKind, t time.Time) error {
+	if k == writeDeadline {
+		return c.nc.SetWriteDeadline(t)
+	}
+	return c.nc.SetReadDeadline(t)
+}
+
+// watchReq is one arming. It travels by value over an unbuffered channel, so
+// arming the watchdog puts nothing on the heap.
+type watchReq struct {
+	ctx  context.Context
+	kind deadlineKind
+}
+
+// ctxWatchdog is the connection's context watchdog: ONE goroutine, started on
+// the first arming that needs one and re-armed for the duration of each
+// blocking read or write, in place of a goroutine + two channels + two closures
+// per call. A single request/response arms it several times — the head write,
+// each body write, the response read, every body chunk — which is why the
+// per-call form was the second and third HTTP/1.1 allocation site by bytes.
+//
+// It rests on the serialization Conn already documents: at most one exchange at
+// a time, and within an exchange the calls are ordered (write the request, then
+// read the response). Every arming is also paired with a deferred disarm in the
+// SAME call, so no arming outlives the function that made it, and within that
+// contract exactly one arming is live at any instant. A caller that breaks the
+// contract — writing the body from one goroutine while another reads — blocks
+// its second arming here until the first disarms, but it is already racing on
+// the Exchange's own plain fields, so this is not a new hazard.
+//
+// The state machine is two rendezvous on unbuffered channels:
+//
+//	idle --armCh--> watching --disarmCh--> idle
+//
+// disarmCh is what keeps "the release waits for the watchdog to exit" true of a
+// goroutine that never exits. An unbuffered send completes only once the
+// receiver has committed to one branch of its select, so by the time disarm
+// returns the watchdog has either already tripped the deadline or can no longer
+// trip it for this arming — exactly what the per-call `<-exited` guaranteed.
+// That is what lets releaseDeadline clear the deadline with no cancellation
+// racing in behind the clear to latch a past deadline on a connection about to
+// be pooled and reused.
+//
+// The goroutine lives until Conn.Close, which every discard path already owes
+// the connection anyway (it holds an fd), so this adds no lifetime obligation
+// that was not already there.
+type ctxWatchdog struct {
+	// started gates the lazy goroutine: a connection only ever handed
+	// non-cancellable contexts (ctx.Done() == nil) never starts one. An atomic
+	// CAS rather than a sync.Once because Once.Do takes a func, and the closure
+	// handed to it escapes into doSlow — a heap allocation on EVERY arming,
+	// which is exactly the cost this type exists to remove.
+	started atomic.Bool
+	// stop guards close(quit) so a second Conn.Close cannot panic. Close is not
+	// on the hot path, so a Once costs nothing here.
+	stop     sync.Once
+	armCh    chan watchReq
+	disarmCh chan struct{}
+	// quit is closed by Conn.Close, gone by the goroutine as it leaves. gone is
+	// what stops an arming that races Close from blocking forever on a channel
+	// no one will ever receive from.
+	quit chan struct{}
+	gone chan struct{}
+}
+
+// watch is the watchdog goroutine: idle until armed, bound to one context until
+// disarmed, for the life of the connection.
+func (c *Conn) watch() {
+	defer close(c.wd.gone)
+	for {
+		select {
+		case <-c.wd.quit:
+			return
+		case req := <-c.wd.armCh:
+			select {
+			case <-req.ctx.Done():
+				// A fixed instant in the past, not time.Now(): "now" can land a
+				// hair in the future on a coarse clock and leave the call
+				// blocked. Nor a short future deadline — that leaves the call
+				// blocked until it elapses, which is the opposite of the job.
+				_ = c.setDeadline(req.kind, deadlineLongPast)
+				// The disarm always arrives: the deadline just tripped is what
+				// returns the blocked call, and that call's deferred disarm is
+				// the other half of this arming.
+				<-c.wd.disarmCh
+			case <-c.wd.disarmCh:
+			}
+		}
+	}
+}
+
+// armWatch binds ctx to the watchdog for the duration of one blocking call and
+// reports whether it took. The result MUST be handed to disarmWatch, in the
+// same call, on every exit path.
+func (c *Conn) armWatch(ctx context.Context, k deadlineKind) bool {
+	if ctx == nil || ctx.Done() == nil {
+		return false
+	}
+	if !c.wd.started.Load() && c.wd.started.CompareAndSwap(false, true) {
+		go c.watch()
+	}
+	select {
+	case c.wd.armCh <- watchReq{ctx: ctx, kind: k}:
+		return true
+	case <-c.wd.gone:
+		// Conn.Close won the race. The socket is already closed, so a blocking
+		// call returns on its own and there is nothing left for a watchdog to
+		// release.
+		return false
+	}
+}
+
+// disarmWatch returns the watchdog to idle. It blocks until the watchdog has
+// committed to leaving this connection's deadlines alone — see ctxWatchdog.
+func (c *Conn) disarmWatch(armed bool) {
+	if !armed {
+		return
+	}
+	c.wd.disarmCh <- struct{}{}
+}
+
 // armCancel releases a blocked call when ctx is cancelled, WITHOUT otherwise
-// touching the deadline.
+// touching the deadline. Pair it with disarmWatch.
 //
 // The read path cannot use armDeadline: ReadResponse deliberately installs its
 // deadline on every entry and never clears it on exit, so that a pooled
@@ -452,70 +605,43 @@ var deadlineLongPast = time.Unix(1, 0)
 //
 // If the watchdog fired, the past deadline is left in place: that exchange has
 // been cancelled and its connection is discarded, never pooled.
-func armCancel(ctx context.Context, set func(time.Time) error) func() {
-	if ctx.Done() == nil {
-		return func() {}
-	}
-	stop := make(chan struct{})
-	exited := make(chan struct{})
-	go func() {
-		defer close(exited)
-		select {
-		case <-ctx.Done():
-			_ = set(deadlineLongPast)
-		case <-stop:
-		}
-	}()
-	return func() {
-		close(stop)
-		<-exited
-	}
+func (c *Conn) armCancel(ctx context.Context, k deadlineKind) bool {
+	return c.armWatch(ctx, k)
 }
 
 // armDeadline binds ctx to a net.Conn deadline for the duration of one blocking
-// I/O call and returns the release func (use as `defer armDeadline(...)()`).
+// I/O call. Pair it with releaseDeadline, passing back what it returned.
 //
 // When ctx carries a deadline it is applied directly — the cheap path, and the
 // shape callers are told to use. When ctx is cancellable but carries NO deadline
 // there is nothing to apply, and a blocking Write cannot be selected on: a peer
 // that simply stops reading then hangs the call forever, because this exchange is
-// single-goroutine and has no other thread to notice the cancellation. A watchdog
-// covers exactly that gap by making the deadline elapse when ctx is done, which
-// is what unblocks the syscall. Only that case pays for a goroutine.
-//
-// The release waits for the watchdog to exit before clearing, so a cancellation
-// racing the return cannot leave a past deadline latched on a connection that is
-// about to be reused.
-func armDeadline(ctx context.Context, set func(time.Time) error) func() {
+// single-goroutine and has no other thread to notice the cancellation. The
+// watchdog covers exactly that gap by making the deadline elapse when ctx is
+// done, which is what unblocks the syscall.
+func (c *Conn) armDeadline(ctx context.Context, k deadlineKind) bool {
 	// The deadline and the cancellation are NOT alternatives. Treating them as
 	// either/or meant a context that carries both — which is exactly what
 	// client.Do builds from Request.Timeout — got no watchdog, so cancelling such
-	// a request did not release a blocked call until its deadline expired.
+	// a request did not release a blocked call until its deadline expired. Hence
+	// an unconditional arm below, not an else-branch of this one.
 	if dl, ok := ctx.Deadline(); ok {
-		_ = set(dl)
+		_ = c.setDeadline(k, dl)
 	} else {
-		_ = set(time.Time{})
+		_ = c.setDeadline(k, time.Time{})
 	}
-	if ctx.Done() == nil {
-		return func() { _ = set(time.Time{}) }
-	}
-	stop := make(chan struct{})
-	exited := make(chan struct{})
-	go func() {
-		defer close(exited)
-		select {
-		case <-ctx.Done():
-			// A fixed instant in the past, not time.Now(): "now" can land a hair
-			// in the future on a coarse clock and leave the call blocked.
-			_ = set(deadlineLongPast)
-		case <-stop:
-		}
-	}()
-	return func() {
-		close(stop)
-		<-exited
-		_ = set(time.Time{})
-	}
+	return c.armWatch(ctx, k)
+}
+
+// releaseDeadline disarms the watchdog and clears the deadline armDeadline
+// installed.
+//
+// The disarm happens first and blocks until the watchdog can no longer fire, so
+// a cancellation racing the return cannot land its past deadline after the
+// clear and leave it latched on a connection that is about to be reused.
+func (c *Conn) releaseDeadline(k deadlineKind, armed bool) {
+	c.disarmWatch(armed)
+	_ = c.setDeadline(k, time.Time{})
 }
 
 // parseRequestContentLength parses a caller-supplied Content-Length value as RFC
@@ -885,7 +1011,8 @@ func (ex *Exchange) WriteRequest(ctx context.Context, fields []hpack.HeaderField
 // ceiling; the split is along the seam where the head stops being assembled and
 // starts being sent.
 func (ex *Exchange) writeHead(ctx context.Context, bufs net.Buffers) error {
-	defer armDeadline(ctx, ex.c.nc.SetWriteDeadline)()
+	armed := ex.c.armDeadline(ctx, writeDeadline)
+	defer ex.c.releaseDeadline(writeDeadline, armed)
 	_, err := bufs.WriteTo(ex.c.nc)
 	if err != nil {
 		ex.keepAlive, ex.condemned = false, true
@@ -902,7 +1029,8 @@ func (ex *Exchange) WriteBody(ctx context.Context, p []byte, fin bool) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	defer armDeadline(ctx, ex.c.nc.SetWriteDeadline)()
+	armed := ex.c.armDeadline(ctx, writeDeadline)
+	defer ex.c.releaseDeadline(writeDeadline, armed)
 
 	if ex.reqChunked {
 		var bufs net.Buffers
@@ -1059,7 +1187,8 @@ func (ex *Exchange) ReadResponse(ctx context.Context) (statusCode int, headers [
 	}
 	// Kept for the body reads, which have no ctx of their own.
 	ex.readCtx = ctx
-	defer armCancel(ctx, ex.c.nc.SetReadDeadline)()
+	armed := ex.c.armCancel(ctx, readDeadline)
+	defer ex.c.disarmWatch(armed)
 
 	var respMinor int
 	var interim int
@@ -1873,9 +2002,8 @@ func (ex *Exchange) ReadBodyChunk(buf []byte) (n int, done bool, err error) {
 	}()
 	// Body reads honour the ReadResponse ctx: a blocking Read cannot be selected
 	// on, and this exchange has no second goroutine to notice a cancellation.
-	if ex.readCtx != nil {
-		defer armCancel(ex.readCtx, ex.c.nc.SetReadDeadline)()
-	}
+	armed := ex.c.armCancel(ex.readCtx, readDeadline)
+	defer ex.c.disarmWatch(armed)
 	// HEAD responses carry no body regardless of Content-Length.
 	if ex.method == "HEAD" {
 		return 0, true, nil
