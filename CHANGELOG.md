@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **HTTP/1.1 allocated 16 KiB of scratch memory per request** (#331). `h1Exchange`
+  carried an inline 16 KiB array for `ReadBodyChunk`, and every H1 transport
+  heap-allocates one exchange per request — so the buffer meant to avoid a small
+  per-`Recv` allocation was paid, in full, per request instead. At 200 RPS it was
+  69.5% of all bytes the client allocated. `Recv` now reads straight into a
+  buffer from `conn`'s shared DATA-payload pool and hands ownership to the caller
+  via `StreamEvent.DataSlab`, the contract HTTP/2 has always used; that also
+  removes the per-chunk `make([]byte, n)` copy `Recv` made out of the scratch
+  array (a further 15% of allocated bytes). Measured on a 2 KiB response:
+  **24.9 KB → 4.3 KB allocated per request**, with the allocation count
+  unchanged. Affects `TransportH1SingleConn`, `TransportH1Pool` and
+  `TransportH1Managed`; no API change.
+
 ## [v0.11.0] — 2026-07-31
 
 ### Added
