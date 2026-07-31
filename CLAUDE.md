@@ -35,6 +35,13 @@ HTTP/1.1 + HTTP/2 stack (A→B→C):
   conn/              # B-layer: HTTP/2 connection, streams, flow control, handshake
     └── depends on: frame, hpack
   http1/             # B-layer: minimal HTTP/1.1 wire protocol (reuses hpack.HeaderField)
+  grpc/              # C-layer: gRPC-over-HTTP/2 client (NOT a client.Transport —
+                     #   separate entry point, absent from client.Do).
+                     #   Sits on conn/, NOT on
+                     #   client/ — client.DoStream writes the whole request body
+                     #   before returning, so client-streaming and bidi are not
+                     #   expressible through it. No protobuf dep: messages are
+                     #   []byte. See docs/GRPC_GUIDE.md
   frame/             # A-layer: HTTP/2 frame codec (parser + writer + Framer)
   hpack/             # A-layer: RFC 7541 HPACK encoder/decoder
 
@@ -49,10 +56,11 @@ internal/bytesx/     # Shared low-level: QUIC varint codec, buffer pool,
                      #   big-endian uint24/uint31, RFC 7540 padding strip
                      #   (used by frame, quic, http3 — NOT hpack)
 docs/                # RFC_COVERAGE.md (authoritative test-to-RFC map),
-                     #   HTTP3_DESIGN.md, CLIENT_GUIDE.md, BENCH_BASELINE.md, COVERAGE.md
+                     #   HTTP3_DESIGN.md, CLIENT_GUIDE.md, GRPC_GUIDE.md,
+                     #   BENCH_BASELINE.md, COVERAGE.md
 ```
 
-Public packages: `client`, `conn`, `frame`, `hpack`, `http1`, `http3`,
+Public packages: `client`, `conn`, `frame`, `grpc`, `hpack`, `http1`, `http3`,
 `quic`, `qpack`. `cmd/` does not exist — library only; the one binary is
 `examples/loadgen`. Each HTTP/2 `Conn` owns one `*frame.Framer` + one
 `*hpack.Encoder` + one `*hpack.Decoder`, serializing writes via `wmu`.
