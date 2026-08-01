@@ -189,10 +189,14 @@ type Stream struct {
 	// a fresh channel in recycleStream.
 	resetSignal chan struct{}
 
-	// resetCode stores the ErrCode delivered with the forced reset.
-	// 0 means no reset has been signalled. Written via CAS in
-	// signalReset to guarantee exactly one close(resetSignal).
+	// resetCode stores the ErrCode delivered with the forced reset. Written
+	// once, by whichever signalReset call wins resetSignalled.
 	resetCode atomic.Uint32
+
+	// resetSignalled guarantees exactly one close(resetSignal). It cannot be
+	// inferred from resetCode: NO_ERROR is 0, so a CAS(0 -> code) guard admits
+	// every caller once code is 0 and closes the channel twice.
+	resetSignalled atomic.Bool
 
 	// released guards Close() idempotency independently of the operational
 	// `closed` flag. recycleStream resets `closed` (for pool reuse) but must
@@ -283,9 +287,17 @@ func (s *Stream) endWithReset(wantID uint32, code frame.ErrCode) bool {
 // The CAS ensures only the first caller closes resetSignal (idempotent).
 // Callers hold s.mu.
 func (s *Stream) signalReset(code frame.ErrCode) {
-	if s.resetCode.CompareAndSwap(0, uint32(code)) {
-		close(s.resetSignal)
+	// The guard is its own flag, not a CAS on resetCode. CAS(0 -> code) is not
+	// idempotent when code is itself 0: it succeeds, leaves resetCode at 0, and
+	// so succeeds again for the next caller — closing an already-closed channel
+	// and panicking the reader. NO_ERROR is 0, and NO_ERROR is exactly the code
+	// RFC 9113 §8.1 has a server send after a complete response, so the one
+	// value that broke the contract was the common one.
+	if !s.resetSignalled.CompareAndSwap(false, true) {
+		return
 	}
+	s.resetCode.Store(uint32(code))
+	close(s.resetSignal)
 }
 
 // recycleStream drains any buffered events, zeroes all fields, and returns s
@@ -385,6 +397,7 @@ func (s *Stream) resetForPoolLocked() {
 	s.sendWindow = 0
 	s.resetSignal = make(chan struct{})
 	s.resetCode.Store(0)
+	s.resetSignalled.Store(false)
 	// recvActive is zero by construction — this only runs with no reader
 	// registered — but recycleWanted must not survive into the next lifetime,
 	// or the first Recv of the reused stream would recycle it on exit.
@@ -643,6 +656,31 @@ func (s *Stream) Recv(ctx context.Context) (StreamEvent, error) {
 		}
 		return e, nil
 	case <-resetSignal:
+		// Deliver anything already buffered first. resetSignal is closed only
+		// on the full-channel fallback — every caller of signalReset reaches it
+		// from the default arm of a send into s.events — so a ready resetSignal
+		// means, by construction, that undelivered events are sitting in the
+		// channel. A plain three-way select has no priority and Go picks
+		// uniformly among ready cases, which made each Recv a coin flip and an
+		// N-event response survive with probability 2^-N. For a complete
+		// response followed by the RST_STREAM(NO_ERROR) of RFC 9113 §8.1 that
+		// is a discarded response, which "Clients MUST NOT discard responses as
+		// a result of receiving such a RST_STREAM" forbids outright.
+		//
+		// Draining before the select instead would fix the same thing and cost
+		// more: ctx.Done() would then lose to a channel that never empties
+		// during a fast download, deferring cancellation for the length of the
+		// transfer. Preferring events only in this arm leaves events-vs-ctx
+		// exactly as it was. The reset is terminal and is not going anywhere;
+		// the buffered events are finite, so it is reported as soon as they run
+		// out.
+		select {
+		case e, ok := <-events:
+			if ok {
+				return e, nil
+			}
+		default:
+		}
 		code := frame.ErrCode(s.resetCode.Load())
 		return StreamEvent{Type: EventReset, RSTCode: code, EndStream: true}, nil
 	case <-ctx.Done():
