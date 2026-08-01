@@ -172,6 +172,16 @@ func TestConn_ShutdownWithFullEventChannel_ReaderStillExits(t *testing.T) {
 	sLive := openParkedStream(t, c)
 
 	liveTerm := make(chan error, 1)
+	// Closed once the consumer has actually received the response HEADERS. The
+	// drained check below cannot stand in for it: an empty channel means
+	// "consumed" and "never delivered" alike, and openParkedStream returns as
+	// soon as the request is written, without waiting for the response. Kill
+	// the connection before sLive's HEADERS are parsed and shutdownStreams
+	// delivers its reset into an empty channel, so this Recv legitimately
+	// returns a reset — which the assertion below then reports as a failure.
+	// Rare enough to pass everywhere for months and to survive 100 local runs
+	// under -race; it surfaced on Linux CI under coverage instrumentation.
+	liveHeaders := make(chan struct{})
 	go func() {
 		ev, rerr := sLive.Recv(ctx) // the flushed HEADERS
 		if rerr != nil {
@@ -182,6 +192,7 @@ func TestConn_ShutdownWithFullEventChannel_ReaderStillExits(t *testing.T) {
 			liveTerm <- errors.New("sLive: expected HEADERS first, got " + ev.Type.String())
 			return
 		}
+		close(liveHeaders)
 		term, clean := terminalOf(ctx, sLive)
 		if clean {
 			liveTerm <- errors.New("sLive: clean END_STREAM after the connection died")
@@ -201,8 +212,14 @@ func TestConn_ShutdownWithFullEventChannel_ReaderStillExits(t *testing.T) {
 	if got, want := len(sStuck.events), cap(sStuck.events); got != want {
 		t.Fatalf("sStuck event channel is %d/%d full; shutdownStreams would take its send arm and the default: branch would go untested", got, want)
 	}
-	// And sLive's must be drained, or both streams take the same arm and the
-	// "differing drain depths" crossing is not set up.
+	// And sLive's must be drained — genuinely drained, which means waiting for
+	// the consumer to say it got the HEADERS rather than only observing an
+	// empty channel.
+	select {
+	case <-liveHeaders:
+	case <-time.After(5 * time.Second):
+		t.Fatal("sLive never received its response HEADERS; killing the connection now would test the empty-channel path, not the drained one")
+	}
 	for len(sLive.events) > 0 && time.Now().Before(deadline) {
 		time.Sleep(5 * time.Millisecond)
 	}
