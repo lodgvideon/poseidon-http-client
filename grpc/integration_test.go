@@ -850,3 +850,183 @@ func TestIntegration_UnaryRejectsSecondMessage(t *testing.T) {
 		t.Fatalf("Invoke = %v, want an INTERNAL status", err)
 	}
 }
+
+// srvAnswerWithoutDraining writes a complete response and returns without ever
+// reading the request body. net/http2's server then follows RFC 9113 §8.1 and
+// resets the still-open request stream with NO_ERROR — "stop sending, I have
+// already answered". grpc-go's server does the same. It is the shape of every
+// unary handler that ignores its input, and #337 is what the client used to
+// make of it.
+func srvAnswerWithoutDraining(code Code, msg string) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		srvBeginResponse(w)
+		if code == OK {
+			_ = srvWriteMessage(w, []byte("answer"))
+		}
+		srvFinish(w, code, msg)
+	})
+}
+
+// benignResetUploadBuf pins the peer's upload window rather than inheriting
+// net/http2's 1 MiB default, so the mechanism below is the one actually at
+// work. Measured on Go 1.26 against the default window, a 64 KiB body — a
+// sixteenth of it — still reproduced the bug 20/20, and a 2 MiB body still did
+// so with the window forced to 32 MiB: the default-sized version was winning a
+// timing race, not exhausting credit, and would have degraded silently.
+const benignResetUploadBuf = 64 << 10
+
+// benignResetRequest is twice the pinned window, so the upload parks in conn's
+// acquireSendCredits on credit a handler that never reads the body cannot
+// refund, and only the server's RST_STREAM(NO_ERROR) wakes it. That turns the
+// ~9%-under-load window of #337 into a one-iteration reproduction.
+const benignResetRequest = 2 * benignResetUploadBuf
+
+// startNoDrainServer is startGRPCServer with the pinned upload window.
+func startNoDrainServer(t *testing.T, h http.Handler) (*httptest.Server, *tls.Config) {
+	t.Helper()
+	srv := httptest.NewUnstartedServer(h)
+	srv.EnableHTTP2 = true
+	srv.Config.HTTP2 = &http.HTTP2Config{
+		MaxReceiveBufferPerStream:     benignResetUploadBuf,
+		MaxReceiveBufferPerConnection: benignResetUploadBuf,
+	}
+	srv.StartTLS()
+	pool := x509.NewCertPool()
+	for _, c := range srv.TLS.Certificates {
+		for _, der := range c.Certificate {
+			if cert, err := x509.ParseCertificate(der); err == nil {
+				pool.AddCert(cert)
+			}
+		}
+	}
+	return srv, &tls.Config{RootCAs: pool, ServerName: "example.com"}
+}
+
+// TestConformance_RFC9113_Sec8_1_BenignResetKeepsResponse pins RFC 9113 §8.1: a
+// RST_STREAM(NO_ERROR) that follows a complete response is a request to stop
+// sending, not a failed call. conn closes the stream on it per §5.1, so the
+// send side fails — and Invoke must still return the answer already buffered
+// on the receive side rather than the send-side error.
+func TestConformance_RFC9113_Sec8_1_BenignResetKeepsResponse(t *testing.T) {
+	srv, cfg := startNoDrainServer(t, srvAnswerWithoutDraining(OK, ""))
+	defer srv.Close()
+	cc := dialGRPC(t, srv, cfg)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	got, err := cc.Invoke(ctx, "/test.Svc/NoDrain", make([]byte, benignResetRequest), nil)
+	if err != nil {
+		t.Fatalf("Invoke = %q, %v; want the response the server already sent", got, err)
+	}
+	if string(got) != "answer" {
+		t.Fatalf("Invoke = %q, want %q", got, "answer")
+	}
+}
+
+// TestConformance_RFC9113_Sec8_1_BenignResetKeepsNonOKStatus is the other half: tolerating the
+// benign reset must not launder a failed call into a success, nor replace the
+// server's own diagnosis with the reset's INTERNAL mapping.
+func TestConformance_RFC9113_Sec8_1_BenignResetKeepsNonOKStatus(t *testing.T) {
+	srv, cfg := startNoDrainServer(t, srvAnswerWithoutDraining(NotFound, "no such row"))
+	defer srv.Close()
+	cc := dialGRPC(t, srv, cfg)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	_, err := cc.Invoke(ctx, "/test.Svc/NoDrain", make([]byte, benignResetRequest), nil)
+	var st *Status
+	if !errors.As(err, &st) {
+		t.Fatalf("Invoke error = %v (%T), want *Status", err, err)
+	}
+	if st.Code != NotFound || st.Message != "no such row" {
+		t.Fatalf("status = %v %q, want NOT_FOUND %q", st.Code, st.Message, "no such row")
+	}
+}
+
+// TestConformance_RFC9113_Sec8_1_CloseSendAfterBenignReset covers the same
+// defect through the streaming API, where the caller drives the half-close
+// itself.
+//
+// The barrier is draining the response, not a sleep. Draining to io.EOF
+// consumes the trailers, and the RST_STREAM follows them on the wire, so by
+// the time Recv reports EOF the reader goroutine has already latched the
+// stream closed — CloseSend is guaranteed to meet it. An earlier version slept
+// 200 ms instead, which could only fail *silently*: measured with the guard
+// reverted, a 0 ms sleep exercised it 0/50 times while still passing.
+func TestConformance_RFC9113_Sec8_1_CloseSendAfterBenignReset(t *testing.T) {
+	srv, cfg := startNoDrainServer(t, srvAnswerWithoutDraining(OK, ""))
+	defer srv.Close()
+	cc := dialGRPC(t, srv, cfg)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	s, err := cc.NewStream(ctx, "/test.Svc/NoDrain", nil)
+	if err != nil {
+		t.Fatalf("NewStream: %v", err)
+	}
+	defer func() { _ = s.Close() }()
+
+	if err := s.Send(ctx, []byte("x")); err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+	msg, err := s.Recv(ctx)
+	if err != nil {
+		t.Fatalf("Recv: %v", err)
+	}
+	if string(msg) != "answer" {
+		t.Fatalf("Recv = %q, want %q", msg, "answer")
+	}
+	if _, err := s.Recv(ctx); !errors.Is(err, io.EOF) {
+		t.Fatalf("second Recv = %v, want io.EOF", err)
+	}
+	if st := s.Status(); st.Code != OK {
+		t.Fatalf("status = %v, want OK", st.Code)
+	}
+	if err := s.CloseSend(ctx); err != nil {
+		t.Fatalf("CloseSend after a benign reset = %v, want nil", err)
+	}
+	// The scope guard. Half-closing a stream the peer has torn down is a no-op
+	// and reporting it would make callers discard the response; delivering a
+	// MESSAGE to that stream is not, and must still fail. Widening
+	// benignHalfClose to cover Send passed the whole grpc suite before this.
+	if err := s.Send(ctx, []byte("late")); err == nil {
+		t.Fatal("Send after a benign reset = nil; a message that never reached the server must be an error")
+	}
+}
+
+// TestConformance_RFC9113_Sec8_1_SendAfterBenignResetStillFails is the scope
+// guard that _CloseSendAfterBenignReset cannot provide. There the late Send
+// meets an already-latched sendErr and fails before reaching the wire, so
+// widening benignHalfClose to cover Send goes unnoticed. Here nothing has been
+// sent yet — the handler answers off the HEADERS frame alone — so the first
+// Send is the one whose own SendData meets the closed stream.
+//
+// Half-closing a stream the peer has torn down is a no-op and reporting it
+// would make callers discard the response §8.1 says they must keep. Handing a
+// MESSAGE to that stream is not a no-op: it never reaches the server, and
+// telling the caller otherwise would silently drop it.
+func TestConformance_RFC9113_Sec8_1_SendAfterBenignResetStillFails(t *testing.T) {
+	srv, cfg := startNoDrainServer(t, srvAnswerWithoutDraining(OK, ""))
+	defer srv.Close()
+	cc := dialGRPC(t, srv, cfg)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	s, err := cc.NewStream(ctx, "/test.Svc/NoDrain", nil)
+	if err != nil {
+		t.Fatalf("NewStream: %v", err)
+	}
+	defer func() { _ = s.Close() }()
+
+	// Drain to io.EOF without ever sending: the reset follows the trailers on
+	// the wire, so the stream is latched closed by the time EOF is reported.
+	if _, err := s.Recv(ctx); err != nil {
+		t.Fatalf("Recv: %v", err)
+	}
+	if _, err := s.Recv(ctx); !errors.Is(err, io.EOF) {
+		t.Fatalf("second Recv = %v, want io.EOF", err)
+	}
+	if err := s.Send(ctx, []byte("late")); err == nil {
+		t.Fatal("Send after a benign reset = nil; the message never reached the server")
+	}
+}

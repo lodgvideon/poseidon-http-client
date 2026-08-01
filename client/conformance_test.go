@@ -4,12 +4,15 @@ import (
 	"bytes"
 	"context"
 	"crypto/tls"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
+	"testing/iotest"
 	"time"
 
 	"golang.org/x/net/http2"
@@ -292,4 +295,289 @@ func TestConformance_RFC7540_Sec8_1_BodyStream_EndStream(t *testing.T) {
 	}
 	// Close returned without error — stream ended cleanly (END_STREAM
 	// received, no RST_STREAM sent). Confirms §8.1 half-close.
+}
+
+// benignResetUploadBuf pins the peer's upload window instead of inheriting
+// net/http2's 1 MiB default. Two reasons. It makes the mechanism the comments
+// claim the actual mechanism: with a 64 KiB window a 128 KiB body cannot be
+// written without credit the non-draining handler never refunds, so the write
+// is genuinely parked rather than merely losing a timing race. And it removes
+// a silent dependency on a Go default — measured on Go 1.26 a 64 KiB body
+// reproduced the bug 20/20 against the 1 MiB default, i.e. well below the
+// window, which is proof the default-sized version was timing-driven and would
+// degrade without anyone noticing.
+const benignResetUploadBuf = 64 << 10
+
+// benignResetRequest is twice the pinned window above, so the upload blocks
+// after the first window's worth of DATA.
+const benignResetRequest = 2 * benignResetUploadBuf
+
+// newNoDrainServer starts an h2 test server with a deliberately small upload
+// window (see benignResetUploadBuf) running h.
+func newNoDrainServer(t *testing.T, h http.Handler) (*httptest.Server, string) {
+	t.Helper()
+	s := httptest.NewUnstartedServer(h)
+	s.EnableHTTP2 = true
+	s.Config.HTTP2 = &http.HTTP2Config{
+		MaxReceiveBufferPerStream:     benignResetUploadBuf,
+		MaxReceiveBufferPerConnection: benignResetUploadBuf,
+	}
+	s.StartTLS()
+	t.Cleanup(s.Close)
+	return s, strings.TrimPrefix(s.URL, "https://")
+}
+
+// TestConformance_RFC9113_Sec8_1_BenignResetKeepsBufferedResponse pins RFC 9113
+// §8.1 on the buffered Do path: "Clients MUST NOT discard responses as a result
+// of receiving such a RST_STREAM". A server that answers without draining the
+// request body resets the still-open upload with NO_ERROR; conn closes the
+// stream on that reset per §5.1, so the upload fails — and sendRequest used to
+// return that failure, throwing away a complete response already buffered on
+// the stream. The conn layer has pinned the same clause since
+// TestConformance_RFC9113_Sec8_1_CompleteResponseNotDiscardedByTrailingRSTNoError;
+// this is its sibling one layer up. Same defect as grpc issue #337.
+func TestConformance_RFC9113_Sec8_1_BenignResetKeepsBufferedResponse(t *testing.T) {
+	_, addr := newNoDrainServer(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(200)
+		_, _ = w.Write([]byte("answer"))
+	}))
+	c := clientFor(t, addr)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	var res client.Response
+	err := c.Do(ctx, &client.Request{
+		Method:   "POST",
+		Path:     "/no-drain",
+		Body:     make([]byte, benignResetRequest),
+		BodyMode: client.BodyBuffer,
+	}, &res)
+	if err != nil {
+		t.Fatalf("Do = %v; want the response the server already sent", err)
+	}
+	if res.Status != 200 {
+		t.Fatalf("status = %d, want 200", res.Status)
+	}
+	if string(res.Body) != "answer" {
+		t.Fatalf("body = %q, want %q — the response must survive the benign reset intact", res.Body, "answer")
+	}
+}
+
+// TestConformance_RFC9113_Sec8_1_RealResetStillFailsUpload is the
+// over-tolerance guard for the test above: tolerating a benign reset must not
+// tolerate a real one. http.ErrAbortHandler makes net/http abort the response
+// without logging, putting an RST_STREAM with a non-NO_ERROR code on the wire,
+// and that must still fail the request rather than yield a 200 with an empty
+// body.
+//
+// The error stays conn.ErrStreamClosed rather than becoming a
+// *StreamResetError. That is deliberate and load-bearing, not an oversight:
+// when the upload is cut short AND the response does not arrive, the reset the
+// response path sees may be conn's own forged RST_STREAM(REFUSED_STREAM) from
+// an event-buffer overflow — a code the retry layer reads as "the server did
+// not process this request". Surfacing it would let Retryer replay a request
+// the server had already answered; measured at 3 executions instead of 1.
+// TestConformance_RFC9113_Sec8_1_CutUploadFailureIsNotRetryable pins that.
+func TestConformance_RFC9113_Sec8_1_RealResetStillFailsUpload(t *testing.T) {
+	_, addr := newNoDrainServer(t, http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		panic(http.ErrAbortHandler)
+	}))
+	c := clientFor(t, addr)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	var res client.Response
+	err := c.Do(ctx, &client.Request{
+		Method:   "POST",
+		Path:     "/abort",
+		Body:     make([]byte, benignResetRequest),
+		BodyMode: client.BodyBuffer,
+	}, &res)
+	if err == nil {
+		t.Fatalf("Do = nil (status %d, body %q); want the peer's reset", res.Status, res.Body)
+	}
+	if !errors.Is(err, conn.ErrStreamClosed) {
+		t.Fatalf("Do error = %v (%T), want it to wrap conn.ErrStreamClosed", err, err)
+	}
+	var sre *client.StreamResetError
+	if errors.As(err, &sre) {
+		t.Fatalf("Do error = %v exposes *StreamResetError{%v}; the retry layer keys on that type and would replay the request", err, sre.Code)
+	}
+}
+
+// TestConformance_RFC9113_Sec8_1_CutUploadFailureIsNotRetryable pins the
+// boundary of the tolerance above. When the upload is cut short AND the
+// response does not survive, the reset the response path observes may be
+// conn's OWN forged RST_STREAM(REFUSED_STREAM), emitted when the per-stream
+// event buffer overflows because the blocked uploader is not draining it. The
+// peer sent no such thing — it answered the request in full. Surfacing that
+// code as a *StreamResetError lets builtinShouldRetry read it as "the server
+// did not process the request; safe to retry" and replay a request the server
+// already executed. Measured before the preferSendCut guard: 3 executions of
+// one DELETE.
+func TestConformance_RFC9113_Sec8_1_CutUploadFailureIsNotRetryable(t *testing.T) {
+	var executions atomic.Int32
+	_, addr := newNoDrainServer(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		executions.Add(1)
+		w.WriteHeader(200)
+		w.(http.Flusher).Flush()
+		// Outrun the default 8-slot event buffer while the uploader is parked
+		// on flow-control credit, so conn resets its own stream and the
+		// response is genuinely lost.
+		for i := 0; i < 64; i++ {
+			_, _ = w.Write(make([]byte, 16<<10))
+			w.(http.Flusher).Flush()
+		}
+	}))
+	c := clientFor(t, addr)
+	r := c.Retryer(client.RetryOptions{
+		MaxAttempts: 3,
+		Backoff:     func(int) time.Duration { return 0 },
+	})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	var res client.Response
+	err := r.Do(ctx, &client.Request{
+		Method:   "DELETE",
+		Path:     "/resource",
+		Body:     make([]byte, benignResetRequest),
+		BodyMode: client.BodyBuffer,
+	}, &res)
+	if err == nil {
+		t.Skipf("the response survived the reset (status %d) — this test needs the event buffer to overflow", res.Status)
+	}
+	if n := executions.Load(); n != 1 {
+		t.Fatalf("server executed the DELETE %d times, want 1: err = %v (%T) was classified as retryable", n, err, err)
+	}
+}
+
+// TestConformance_RFC9113_Sec8_1_BenignResetKeepsStreamedResponse is the
+// BodyStream sibling of _BenignResetKeepsBufferedResponse. A status-only
+// response (END_STREAM on the HEADERS frame) has no DATA or trailer event to
+// end the body on, so a reader that does not carry EndStream over from the
+// header event pumps one event too many and hands the caller the benign
+// RST_STREAM(NO_ERROR) as a *StreamResetError — discarding the very response
+// §8.1 says must be kept, on the one Do mode the buffered test does not cover.
+func TestConformance_RFC9113_Sec8_1_BenignResetKeepsStreamedResponse(t *testing.T) {
+	_, addr := newNoDrainServer(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusRequestEntityTooLarge)
+	}))
+	c := clientFor(t, addr)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	var res client.Response
+	err := c.Do(ctx, &client.Request{
+		Method:   "POST",
+		Path:     "/too-big",
+		Body:     make([]byte, benignResetRequest),
+		BodyMode: client.BodyStream,
+	}, &res)
+	if err != nil {
+		t.Fatalf("Do = %v; want the 413 the server already sent", err)
+	}
+	defer func() { _ = res.BodyReader.Close() }()
+	if res.Status != http.StatusRequestEntityTooLarge {
+		t.Fatalf("status = %d, want 413", res.Status)
+	}
+	body, rerr := io.ReadAll(res.BodyReader)
+	if rerr != nil {
+		t.Fatalf("BodyReader read = %v, want io.EOF at once: the response ended on its HEADERS frame", rerr)
+	}
+	if len(body) != 0 {
+		t.Fatalf("body = %q, want empty", body)
+	}
+}
+
+// TestConformance_RFC9113_Sec8_1_BenignResetDuringTrailers covers the second
+// half of the send sequence: the benign reset can just as well land between
+// the body and the request trailers, and the trailer write then fails with the
+// same ErrStreamClosed. Without the guard on that write the response is
+// discarded exactly as it was for the body write.
+// The body must SUCCEED for the trailer write to be reached at all, so the
+// blocked-on-credit trick the other tests use does not apply here: it would
+// fail the body write instead and skip the trailer branch entirely (which is
+// how this test first passed while guarding nothing). Instead the body is a
+// reader that hands over one chunk and then waits for the handler to return —
+// the moment net/http2 emits the reset — before reporting EOF. Reaching EOF
+// with endStream=false writes no further DATA, so the trailer HEADERS frame is
+// the first thing that meets the closed stream.
+func TestConformance_RFC9113_Sec8_1_BenignResetDuringTrailers(t *testing.T) {
+	handlerReturned := make(chan struct{})
+	_, addr := newNoDrainServer(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(200)
+		_, _ = w.Write([]byte("answer"))
+		w.(http.Flusher).Flush()
+		close(handlerReturned)
+	}))
+	c := clientFor(t, addr)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	var res client.Response
+	err := c.Do(ctx, &client.Request{
+		Method:     "POST",
+		Path:       "/no-drain-trailers",
+		BodyReader: &resetRendezvousReader{done: handlerReturned},
+		BodyMode:   client.BodyBuffer,
+		Trailers:   []conn.HeaderField{{Name: []byte("x-checksum"), Value: []byte("deadbeef")}},
+	}, &res)
+	if err != nil {
+		t.Fatalf("Do = %v; want the response the server already sent", err)
+	}
+	if res.Status != 200 || string(res.Body) != "answer" {
+		t.Fatalf("status=%d body=%q, want 200 %q", res.Status, res.Body, "answer")
+	}
+}
+
+// resetRendezvousReader yields one small chunk, then blocks until the server
+// handler has returned (and, with a short grace, until our reader goroutine has
+// processed the RST_STREAM it triggers) before reporting EOF.
+type resetRendezvousReader struct {
+	done chan struct{}
+	sent bool
+}
+
+func (r *resetRendezvousReader) Read(p []byte) (int, error) {
+	if !r.sent {
+		r.sent = true
+		copy(p, "chunk")
+		return 5, nil
+	}
+	<-r.done
+	time.Sleep(100 * time.Millisecond)
+	return 0, io.EOF
+}
+
+// TestConformance_RFC9113_Sec8_1_NonResetWriteFailureStillAborts is the scope
+// guard on the tolerance: only a peer-closed stream is benign. A request body
+// that fails to read is a local failure on a healthy stream — nothing is
+// coming back — so it must abort at once rather than block in the response
+// path until the context expires. Widening the guard to tolerate every write
+// error passed the whole suite before this test existed.
+func TestConformance_RFC9113_Sec8_1_NonResetWriteFailureStillAborts(t *testing.T) {
+	_, addr := newTLSH2Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.Copy(io.Discard, r.Body)
+		w.WriteHeader(200)
+	}))
+	c := clientFor(t, addr)
+
+	sentinel := errors.New("body source exploded")
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	var res client.Response
+	start := time.Now()
+	err := c.Do(ctx, &client.Request{
+		Method:     "POST",
+		Path:       "/",
+		BodyReader: iotest.ErrReader(sentinel),
+		BodyMode:   client.BodyBuffer,
+	}, &res)
+	if !errors.Is(err, sentinel) {
+		t.Fatalf("Do = %v (%T), want the body reader's own error", err, err)
+	}
+	if d := time.Since(start); d > 5*time.Second {
+		t.Fatalf("Do took %v — it waited for a response that was never coming", d)
+	}
 }
