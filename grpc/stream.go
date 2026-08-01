@@ -372,10 +372,30 @@ func (s *Stream) onHeaders(ev conn.StreamEvent) {
 // where the server ended the stream with DATA and sent no trailers at all.
 func (s *Stream) finish(fields []conn.HeaderField) {
 	s.done = true
+	badHTTP := s.httpStatus != 0 && s.httpStatus != 200
 	if v, ok := findField(fields, "grpc-status"); ok {
-		s.status = Status{Code: parseStatusCode(string(v))}
-		if m, ok := findField(fields, "grpc-message"); ok {
-			s.status.Message = decodeMessage(string(m))
+		code := parseStatusCode(string(v))
+		// A non-200 response may not declare itself successful. The preference
+		// for the peer's own grpc-status is about whose diagnosis wins, not
+		// about whether one can contradict the transport it arrived on: the
+		// gRPC protocol fixes ":status 200" for every conforming response, so
+		// a non-200 carrying grpc-status OK is impossible by construction and
+		// the mapping table never contemplates it. Accepting it reported a
+		// call the client had already classified as failed as a *successful*
+		// one — and on this path the body has already been dropped, so what
+		// the caller got was an empty success indistinguishable from a real
+		// one, on a value the peer chose. Note "00" parses to OK as well,
+		// which is why the guard is on the parsed code rather than the text.
+		if !badHTTP || code != OK {
+			s.status = Status{Code: code}
+			if m, ok := findField(fields, "grpc-message"); ok {
+				s.status.Message = decodeMessage(string(m))
+			}
+			return
+		}
+		s.status = Status{
+			Code:    statusFromHTTP(s.httpStatus),
+			Message: "server returned HTTP status " + strconv.Itoa(s.httpStatus) + " with grpc-status OK",
 		}
 		return
 	}

@@ -44,6 +44,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A non-200 gRPC response carrying `grpc-status: 0` was reported as a
+  successful call** (#352). `grpc/stream.go` prefers a `grpc-status` found in a
+  non-200 header block over the HTTP-status mapping table, deliberately: the
+  table is defined for use "only for clients that received a response that did
+  not include grpc-status. If grpc-status was provided, it must be used", and
+  grpc-java's HTTP-error path puts one there. But that rule settles whose
+  diagnosis wins, not whether a diagnosis may contradict the transport it
+  arrived on. The gRPC protocol fixes `:status 200` for every conforming
+  response, so a non-200 carrying OK is impossible by construction — and
+  honouring it reported a call the client had already classified as failed as a
+  success. On that path the body has already been dropped, so what a
+  `NewStream` caller received was `io.EOF` with zero messages: an empty success
+  it cannot tell from a real one, on a value the peer chose. `Invoke` was
+  insulated only by accident, through its no-message check.
+
+  The Trailers-Only shape had the same hole by a different route — it reaches
+  `finish` before the non-200 check runs at all — and `"00"` parses to OK as
+  surely as `"0"`, so the guard is on the parsed code rather than the text. A
+  non-OK `grpc-status` on a non-200 still wins over the table, and a 200
+  carrying OK is untouched; both are pinned as over-rejection guards.
+
 - **A complete response could be discarded in favour of a reset that arrived
   after it** (#350). `Stream.Recv` selected over the event channel, the reset
   signal and the context with no priority. `signalReset` is reachable only from
