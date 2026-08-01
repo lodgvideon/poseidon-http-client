@@ -198,6 +198,13 @@ type Stream struct {
 	// every caller once code is 0 and closes the channel twice.
 	resetSignalled atomic.Bool
 
+	// endSignal is closed when the terminal DATA frame could not be enqueued.
+	// It is the clean-completion sibling of resetSignal: that frame carries no
+	// payload, only the fact that the response is over, so losing the stream
+	// over it would destroy a response the peer delivered in full.
+	endSignal    chan struct{}
+	endSignalled atomic.Bool
+
 	// released guards Close() idempotency independently of the operational
 	// `closed` flag. recycleStream resets `closed` (for pool reuse) but must
 	// NOT reset `released`, so a repeat Close() while the struct is still
@@ -236,6 +243,7 @@ func newStream(id uint32, eventBuf int, w streamWriter, recvWindow int32) *Strea
 		events:      make(chan StreamEvent, eventBuf),
 		recvWindow:  recvWindow,
 		resetSignal: make(chan struct{}),
+		endSignal:   make(chan struct{}),
 	}
 }
 
@@ -398,6 +406,8 @@ func (s *Stream) resetForPoolLocked() {
 	s.resetSignal = make(chan struct{})
 	s.resetCode.Store(0)
 	s.resetSignalled.Store(false)
+	s.endSignal = make(chan struct{})
+	s.endSignalled.Store(false)
 	// recvActive is zero by construction — this only runs with no reader
 	// registered — but recycleWanted must not survive into the next lifetime,
 	// or the first Recv of the reused stream would recycle it on exit.
@@ -437,7 +447,35 @@ func (s *Stream) deliverEnd(e StreamEvent, end bool) bool {
 	if end {
 		s.remoteEnded = true
 	}
+	// A terminal DATA frame with an empty payload carries nothing except the
+	// fact that the response is over, and pushLocked's overflow path costs the
+	// whole stream: it resets and delivers EventReset for a response the peer
+	// wrote in full. That is the common shape rather than a corner — a flushing
+	// server whose chunks exactly fill the channel loses everything to a
+	// zero-byte marker, with every byte of the body already delivered. Say it
+	// out of band instead. Only EventData qualifies: a trailer block ends the
+	// stream too, and carries fields the caller must still receive.
+	if end && e.Type == EventData && len(e.Data) == 0 {
+		select {
+		case s.events <- e:
+			return true
+		default:
+		}
+		s.signalEnd()
+		// Reported as not-enqueued so the caller returns the pooled buffer.
+		// Nothing was dropped: the event held nothing.
+		return false
+	}
 	return s.pushLocked(e)
+}
+
+// signalEnd marks the response complete for a consumer that could not be handed
+// the terminal event. Exactly one close, guarded by its own flag for the reason
+// spelled out on signalReset.
+func (s *Stream) signalEnd() {
+	if s.endSignalled.CompareAndSwap(false, true) {
+		close(s.endSignal)
+	}
 }
 
 // hasRemoteEnded reports whether the peer has ended its side of the stream
@@ -666,7 +704,7 @@ func (s *Stream) Recv(ctx context.Context) (StreamEvent, error) {
 		return StreamEvent{}, ErrStreamClosed
 	}
 	s.recvActive++
-	events, resetSignal := s.events, s.resetSignal
+	events, resetSignal, endSignal := s.events, s.resetSignal, s.endSignal
 	s.mu.Unlock()
 	defer s.recvLeave()
 
@@ -704,6 +742,18 @@ func (s *Stream) Recv(ctx context.Context) (StreamEvent, error) {
 		}
 		code := frame.ErrCode(s.resetCode.Load())
 		return StreamEvent{Type: EventReset, RSTCode: code, EndStream: true}, nil
+	case <-endSignal:
+		// Buffered events first, for the reason above: the body arrived before
+		// the marker that ends it, and reporting the end early would truncate
+		// the very response this signal exists to preserve.
+		select {
+		case e, ok := <-events:
+			if ok {
+				return e, nil
+			}
+		default:
+		}
+		return StreamEvent{Type: EventData, EndStream: true}, nil
 	case <-ctx.Done():
 		return StreamEvent{}, ctx.Err()
 	}

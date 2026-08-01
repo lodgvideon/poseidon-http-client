@@ -662,3 +662,60 @@ func TestConformance_RFC9113_Sec8_7_LocalOverflowIsNotRetried(t *testing.T) {
 		t.Fatalf("server executed the DELETE %d times, want 1: err = %v (%T) was classified as retryable", n, err, err)
 	}
 }
+
+// TestConformance_ChunkedResponseSurvivesAtDefaultConfig is #344 end to end, at
+// the configuration the issue was filed against: nothing set beyond the dialer.
+//
+// The consumer is parked before the server floods, on purpose. Draining inline
+// lets a fast machine keep up and the channel never fills — the first version of
+// this test passed with the sizing reverted, which is the same as not testing
+// it. Here the reader takes the headers, signals, and only then does the handler
+// write its chunks, so the events queue against a consumer that is not reading.
+//
+// 24 chunks + headers + the terminal marker is 26 events: past conn's floor of
+// 8, inside the client's computed 64. Two changes are needed for it to pass —
+// the sizing, and a terminal frame carrying no payload no longer shedding the
+// stream.
+func TestConformance_ChunkedResponseSurvivesAtDefaultConfig(t *testing.T) {
+	const (
+		chunks    = 24
+		chunkSize = 512
+	)
+	consumerParked := make(chan struct{})
+	_, addr := newTLSH2Server(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/plain")
+		w.WriteHeader(200)
+		w.(http.Flusher).Flush()
+		<-consumerParked
+		for i := 0; i < chunks; i++ {
+			_, _ = w.Write(make([]byte, chunkSize))
+			w.(http.Flusher).Flush()
+		}
+	}))
+	c := clientFor(t, addr)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	var res client.Response
+	if err := c.Do(ctx, &client.Request{
+		Method:   "GET",
+		Path:     "/chunked",
+		BodyMode: client.BodyStream,
+	}, &res); err != nil {
+		t.Fatalf("Do: %v", err)
+	}
+	defer func() { _ = res.BodyReader.Close() }()
+
+	// Headers are in hand and nothing is reading the body: release the flood
+	// and give it time to queue against an idle consumer.
+	close(consumerParked)
+	time.Sleep(250 * time.Millisecond)
+
+	body, err := io.ReadAll(res.BodyReader)
+	if err != nil {
+		t.Fatalf("read = %v after %d bytes; the server wrote the response in full", err, len(body))
+	}
+	if len(body) != chunks*chunkSize {
+		t.Fatalf("body = %d bytes, want %d", len(body), chunks*chunkSize)
+	}
+}
