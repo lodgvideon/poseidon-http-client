@@ -465,6 +465,25 @@ func (s *Stream) push(e StreamEvent) bool {
 // Every step here is non-blocking: the two channel sends use select/default,
 // and the RST write is handed to a background goroutine. Holding s.mu across
 // them therefore cannot stall the reader.
+//
+// The code is CANCEL, not REFUSED_STREAM. This teardown is the client giving
+// up on a response it cannot buffer, which is what RFC 9113 §7 defines CANCEL
+// for — "The endpoint uses this error code to indicate that the stream is no
+// longer needed". REFUSED_STREAM asserts something else entirely, and
+// something false: §8.7 gives it the meaning "the stream is being closed prior
+// to any processing having occurred. Any request that was sent on the reset
+// stream can be safely retried." Here the server processed the request and
+// answered it — we simply could not hold the answer.
+//
+// That mattered in two places, both of which believed the code. client's retry
+// classifier read the RFC guarantee literally and replayed requests the server
+// had already executed (measured: one DELETE run three times), and grpc's
+// status map turned it into UNAVAILABLE, gRPC's canonical retryable code, for
+// the same reason. Neither is patched around: the classifier and the map are
+// right, and were being told a lie. The two REFUSED_STREAM resets this package
+// still sends are the ones where the claim is true — a stream stranded by
+// GOAWAY, which the peer really never processed, and a refused PUSH_PROMISE,
+// where §8.4.2 sanctions "either the CANCEL or REFUSED_STREAM code".
 func (s *Stream) pushLocked(e StreamEvent) bool {
 	select {
 	case s.events <- e:
@@ -480,20 +499,20 @@ func (s *Stream) pushLocked(e StreamEvent) bool {
 		// Use best-effort write with a 5-second deadline so the goroutine
 		// cannot hang indefinitely on a stuck transport (F-P0-04).
 		if c, ok := s.w.(*Conn); ok {
-			c.writeRSTStreamBestEffort(s, frame.ErrCodeRefusedStream)
+			c.writeRSTStreamBestEffort(s, frame.ErrCodeCancel)
 		} else {
-			_ = s.w.writeRSTStream(s, frame.ErrCodeRefusedStream)
+			_ = s.w.writeRSTStream(s, frame.ErrCodeCancel)
 		}
 	}()
 	// Try to deliver EventReset via channel; if full, signal via resetSignal.
 	select {
 	case s.events <- StreamEvent{
 		Type:      EventReset,
-		RSTCode:   frame.ErrCodeRefusedStream,
+		RSTCode:   frame.ErrCodeCancel,
 		EndStream: true,
 	}:
 	default:
-		s.signalReset(frame.ErrCodeRefusedStream)
+		s.signalReset(frame.ErrCodeCancel)
 	}
 	return false
 }

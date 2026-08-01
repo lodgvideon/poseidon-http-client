@@ -301,7 +301,10 @@ func TestIT_H2_StreamedDownload_NonConsumerIsRefused(t *testing.T) {
 			got, ltStreamWindow)
 	}
 
-	// The caller learns about it as RST_STREAM(REFUSED_STREAM), not as a stall.
+	// The caller learns about it as a reset, not as a stall. The code is CANCEL:
+	// the client shed a response it could not buffer, so REFUSED_STREAM's
+	// promise that the request went unprocessed (RFC 9113 §8.7) would be false
+	// and would make the retry layer replay work the server already did.
 	rctx, rcancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer rcancel()
 	for {
@@ -310,13 +313,13 @@ func TestIT_H2_StreamedDownload_NonConsumerIsRefused(t *testing.T) {
 			t.Fatalf("Recv: %v, want an EventReset to arrive", err)
 		}
 		if ev.Type == client.EventReset {
-			if ev.ResetCode != frame.ErrCodeRefusedStream {
-				t.Fatalf("reset code = %v, want REFUSED_STREAM", ev.ResetCode)
+			if ev.ResetCode != frame.ErrCodeCancel {
+				t.Fatalf("reset code = %v, want CANCEL", ev.ResetCode)
 			}
 			break
 		}
 	}
-	t.Logf("non-consumer stopped after %d bytes (%.0f KiB) of %d MiB, via RST_STREAM(REFUSED_STREAM); advertised stream window is %d B",
+	t.Logf("non-consumer stopped after %d bytes (%.0f KiB) of %d MiB, via RST_STREAM(CANCEL); advertised stream window is %d B",
 		got, float64(got)/1024, ltBodyBytes>>20, ltStreamWindow)
 }
 
