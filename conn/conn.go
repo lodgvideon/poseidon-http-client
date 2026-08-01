@@ -1447,38 +1447,33 @@ func (c *Conn) onGoAwayReceived(lastStreamID uint32, _ frame.ErrCode) {
 	c.goAwayLastStreamID.Store(lastStreamID)
 	c.goAwayReceived.Store(true)
 
+	// The id travels with the stream rather than being read back from s.id in
+	// the loop: the struct can be recycled between the snapshot and the reset,
+	// and s.id is one of the fields recycling zeroes.
+	type goAwayVictim struct {
+		id uint32
+		s  *Stream
+	}
 	c.smu.Lock()
-	victims := make([]*Stream, 0, len(c.streams))
+	victims := make([]goAwayVictim, 0, len(c.streams))
 	for id, s := range c.streams {
 		if id > lastStreamID {
-			victims = append(victims, s)
+			victims = append(victims, goAwayVictim{id: id, s: s})
 		}
 	}
 	c.smu.Unlock()
 
-	for _, s := range victims {
+	for _, v := range victims {
 		// Surface the cancellation as REFUSED_STREAM — the peer never
 		// processed our HEADERS, so it is safe for the caller to retry
-		// on a fresh connection.
-		select {
-		case s.events <- StreamEvent{Type: EventReset, RSTCode: frame.ErrCodeRefusedStream, EndStream: true}:
-		default:
-			s.signalReset(frame.ErrCodeRefusedStream)
+		// on a fresh connection. endWithReset does the delivery and the
+		// end-of-stream flags in one s.mu section, and declines both when the
+		// struct has already been recycled out from under this loop — which the
+		// snapshot cannot prevent, since smu is released before it runs.
+		if !v.s.endWithReset(v.id, frame.ErrCodeRefusedStream) {
+			continue
 		}
-		// remoteEnded, localEnded and closed are set together in ONE s.mu section
-		// so a concurrent Stream.Close() can never observe bothEnded && !closed and
-		// recycle this victim out from under us (recycleStream rewrites s.events
-		// with no lock). A victim whose upload already completed has localEnded==true
-		// before GOAWAY, so setting remoteEnded outside this hold would open the
-		// window. Close() returns early on closed and only recycles when
-		// !closed && bothEnded. The reset was already delivered above, before the
-		// stream became recycle-eligible.
-		s.mu.Lock()
-		s.remoteEnded = true
-		s.localEnded = true
-		s.closed = true
-		s.mu.Unlock()
-		c.markStreamDone(s.id)
+		c.markStreamDone(v.id)
 	}
 
 	c.fcOutMu.Lock()

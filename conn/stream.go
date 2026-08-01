@@ -235,9 +235,53 @@ func newStream(id uint32, eventBuf int, w streamWriter, recvWindow int32) *Strea
 	}
 }
 
+// endWithReset delivers a terminal reset event and ends the stream in ONE mu
+// section, and reports whether it did. It is how the connection reader tears a
+// stream down — from a received RST_STREAM, or from a GOAWAY that stranded it.
+//
+// wantID is the stream id the caller looked the struct up under. A *Stream is
+// pooled, so by the time this runs the struct may already have been recycled
+// and handed to another request; recycleStream zeroes id, and ids are assigned
+// monotonically under wmu so one never recurs on a connection. A mismatch
+// therefore means "this is no longer the stream you meant" and the caller must
+// leave it alone — including not calling markStreamDone for it.
+//
+// Delivering INSIDE the section is the point. Both callers used to deliver
+// first and take mu afterwards, on the reasoning that a reset ahead of the
+// stream becoming recycle-eligible could not race the recycle. That reasoning
+// only covers eligibility this loop creates itself. The application creates it
+// independently: finishing its upload sets localEnded and drives markStreamDone
+// to set connDone, and its Close then recycles — rewriting s.events and
+// s.resetSignal under mu while this delivery read them without it. Both were
+// reproducible under -race in about a tenth of a second.
+func (s *Stream) endWithReset(wantID uint32, code frame.ErrCode) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.id != wantID {
+		return false
+	}
+	// Non-blocking, so holding mu across it cannot stall the reader: the send
+	// has a default, and signalReset is a CAS plus a close.
+	select {
+	case s.events <- StreamEvent{Type: EventReset, RSTCode: code, EndStream: true}:
+	default:
+		s.signalReset(code)
+	}
+	// remoteEnded, localEnded and closed are set together so a concurrent
+	// Close() can never observe bothEnded && !closed and recycle the struct in
+	// between. A stream whose upload already completed has localEnded true
+	// beforehand, so setting remoteEnded in a separate section would open that
+	// window regardless of this one.
+	s.remoteEnded = true
+	s.localEnded = true
+	s.closed = true
+	return true
+}
+
 // signalReset marks the stream as forcibly reset and closes resetSignal
 // so any Recv() blocked on a full events channel unblocks immediately.
 // The CAS ensures only the first caller closes resetSignal (idempotent).
+// Callers hold s.mu.
 func (s *Stream) signalReset(code frame.ErrCode) {
 	if s.resetCode.CompareAndSwap(0, uint32(code)) {
 		close(s.resetSignal)
