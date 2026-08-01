@@ -40,12 +40,17 @@ func TestStream_CloseDuringTerminalDelivery_NoRace(t *testing.T) {
 	c := dialServer(t, srv, cfg)
 	defer func() { _ = c.Close() }()
 
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
-	defer cancel()
-
+	// A context per iteration, not one for the whole loop. With a shared 60 s
+	// deadline the drain below parks on the first stream its own Close
+	// cancelled and stays there until the deadline expires — so the test ran
+	// for a full minute and the remaining 59 iterations asserted nothing,
+	// having no time budget left. Per-iteration, all 60 actually execute and
+	// the whole test finishes in a fraction of a second.
 	for i := 0; i < 60; i++ {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		s, err := c.NewStream(ctx)
 		if err != nil {
+			cancel()
 			t.Fatalf("iteration %d: NewStream: %v", i, err)
 		}
 		// endStream=true: the send side is done before any response arrives, so
@@ -56,25 +61,44 @@ func TestStream_CloseDuringTerminalDelivery_NoRace(t *testing.T) {
 			{Name: []byte(":authority"), Value: []byte("example.com")},
 			{Name: []byte(":path"), Value: []byte("/")},
 		}, true); err != nil {
+			cancel()
 			t.Fatalf("iteration %d: SendHeaders: %v", i, err)
 		}
 
+		// Close and drain race each other, both off the main goroutine, so the
+		// drain can be released as soon as Close has returned. Draining inline
+		// instead — as this loop used to — parks on a stream nothing will ever
+		// deliver to again and only leaves when the context expires, which is
+		// what made the whole test cost its entire deadline and left the
+		// remaining iterations asserting nothing. Errors are expected and
+		// uninteresting: the reader touching a recycled struct is the failure
+		// this test looks for, and -race is what reports it.
 		var wg sync.WaitGroup
-		wg.Add(1)
+		wg.Add(2)
 		go func() {
 			defer wg.Done()
 			_ = s.Close()
 		}()
-		// Drain concurrently with the Close above. Errors are expected and
-		// uninteresting — the reader touching a recycled struct is the failure
-		// this test looks for, and -race is what reports it.
-		for {
-			ev, err := s.Recv(ctx)
-			if err != nil || ev.EndStream {
-				break
+		drained := make(chan struct{})
+		go func() {
+			defer wg.Done()
+			defer close(drained)
+			for {
+				ev, err := s.Recv(ctx)
+				if err != nil || ev.EndStream {
+					return
+				}
 			}
+		}()
+		select {
+		case <-drained:
+		case <-time.After(50 * time.Millisecond):
+			// The drain is parked on a stream that is already gone; cancelling
+			// is how a real caller would release it.
+			cancel()
 		}
 		wg.Wait()
+		cancel()
 	}
 }
 
@@ -127,5 +151,120 @@ func TestStream_CloseAfterDrain_StillRecycles(t *testing.T) {
 	}
 	if err := s.Close(); err != nil {
 		t.Fatalf("Close: %v", err)
+	}
+}
+
+// TestStream_RecycleUnderInFlightRecv_NoRace is the deterministic counterpart
+// to the stress test above, and covers the holder that the appClosed/connDone
+// handshake does not know about: the application's own reader.
+//
+// The handshake settles which of Close and markStreamDone pools the struct, on
+// the premise that once both are done nobody is left holding it. A goroutine
+// sitting in Recv is holding it — Recv blocks on s.events and s.resetSignal, so
+// it must read those fields outside the mutex, and recycleStream rewrites both.
+// Close racing an in-flight Recv is not a caller retaining a stream "past
+// Close"; it is one goroutine cancelling another's read, which is ordinary.
+//
+// Where the stress test hopes to hit the window, this one constructs it: the
+// reader is parked in the select before the recycle is driven, so the two
+// accesses are ordered and -race reports every time. Against the pre-fix code
+// it failed on the first iteration with two races, at conn/stream.go:243
+// (s.events) and :268 (s.resetSignal), which is exactly the pair CI reported.
+func TestStream_RecycleUnderInFlightRecv_NoRace(t *testing.T) {
+	// The handler sends its header block and then holds the stream open, so
+	// the reader below consumes exactly one event and is then parked in the
+	// select with nothing to wake it. A handler that completed the response
+	// would let the reader finish before the recycle is driven, and the test
+	// would assert nothing while still passing.
+	handlerDone := make(chan struct{})
+	defer close(handlerDone)
+	srv, cfg := startH2TestServer(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(200)
+		w.(http.Flusher).Flush()
+		<-handlerDone
+	}))
+	defer srv.Close()
+	c := dialServer(t, srv, cfg)
+	defer func() { _ = c.Close() }()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	s, err := c.NewStream(ctx)
+	if err != nil {
+		t.Fatalf("NewStream: %v", err)
+	}
+	if err := s.SendHeaders(ctx, []hpack.HeaderField{
+		{Name: []byte(":method"), Value: []byte("GET")},
+		{Name: []byte(":scheme"), Value: []byte("https")},
+		{Name: []byte(":authority"), Value: []byte("example.com")},
+		{Name: []byte(":path"), Value: []byte("/")},
+	}, true); err != nil {
+		t.Fatalf("SendHeaders: %v", err)
+	}
+
+	// gotHeaders fires once the reader has consumed the header block, so the
+	// wait below is on an observed state rather than on a duration.
+	gotHeaders := make(chan struct{})
+	readerOut := make(chan struct{})
+	readerCtx, readerCancel := context.WithCancel(context.Background())
+	defer readerCancel()
+	go func() {
+		defer close(readerOut)
+		first := true
+		for {
+			ev, err := s.Recv(readerCtx)
+			if first {
+				first = false
+				close(gotHeaders)
+			}
+			if err != nil || ev.EndStream {
+				return
+			}
+		}
+	}()
+	select {
+	case <-gotHeaders:
+	case <-time.After(10 * time.Second):
+		t.Fatal("reader never saw the response headers")
+	}
+	// One event consumed, none left: the next Recv is parked in the select.
+	time.Sleep(100 * time.Millisecond)
+
+	// Drive Close down the connDone branch, the one that pools the struct
+	// immediately. Setting the flag by hand is what makes this deterministic:
+	// the real handshake reaches the same state, just not on cue.
+	s.mu.Lock()
+	s.connDone = true
+	s.closed = false
+	s.mu.Unlock()
+	_ = s.Close()
+
+	// The recycle must have been DEFERRED, not merely serialised. Taking the
+	// mutex around the channel snapshot is enough to silence -race, so without
+	// this assertion the deferral could be deleted and the test would still
+	// pass — while the struct sat in the pool, available to another request,
+	// with a reader still holding it and still about to touch resetCode and
+	// recvActive on whatever lifetime owned it by then.
+	s.mu.Lock()
+	pooled := s.w == nil
+	s.mu.Unlock()
+	if pooled {
+		t.Fatal("stream was reset for the pool while a reader was inside Recv")
+	}
+
+	// Release the reader; the recycle it is owed must then run.
+	readerCancel()
+	select {
+	case <-readerOut:
+	case <-time.After(10 * time.Second):
+		t.Fatal("reader never returned: the deferred recycle must not block it")
+	}
+
+	// And the deferral must not lose the recycle: the last reader out owes it.
+	s.mu.Lock()
+	recycled := s.w == nil && s.id == 0
+	s.mu.Unlock()
+	if !recycled {
+		t.Fatal("deferred recycle never ran; the stream leaked out of the pool")
 	}
 }

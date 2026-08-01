@@ -1909,7 +1909,7 @@ func (c *Conn) markStreamDone(id uint32) {
 	// across it would serialize unrelated streams' registry lookups behind a
 	// pool drain/refill.
 	if recycle {
-		recycleStream(&c.streamPool, s)
+		recycleStream(s)
 	}
 }
 
