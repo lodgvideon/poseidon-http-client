@@ -44,6 +44,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A request queued on the HTTP/2 pool could wait forever after the pool**
+  **lost its last connection** (#359). `serveWaiters` can only hand out
+  capacity that exists, and eviction routinely removes the last conn — a peer
+  GOAWAY and its drain is the ordinary trigger. The dial decision lived only in
+  `handleAcquire`, so `{no live conns, no in-flight dials, queued waiters}` was
+  terminal: release, dial-done and tick all passed through it without acting.
+  Measured on the default options, that state survived ~30 health-check ticks
+  against a server that was still dialable, and the waiter was served only when
+  an unrelated request happened to arrive — so a pool whose every worker is
+  parked deadlocks rather than running slowly. The H1 and H3 pools have had the
+  equivalent rescue since they shipped.
+
+  A failed dial now also refuses **every** queued waiter once the pool is in
+  the state that makes a new request fast-refuse, instead of only the first.
+  Leaving the rest queued was a priority inversion: measured, a fresh acquire
+  was refused with `ErrDialBackoff` in 0 ms while two earlier waiters stayed
+  parked past the end of the backoff window and left only at `Close`.
+
+  The tick path serves waiters before considering a dial, which is HTTP/2
+  specific: per-conn capacity is dynamic here, so a peer that raised
+  SETTINGS_MAX_CONCURRENT_STREAMS can make existing connections able to serve
+  waiters that had nothing to wait for a moment ago. Dialing first would open a
+  connection the pool did not need. The rescue is deliberately absent from the
+  stats path: it only removes conns that were already not live, so it cannot
+  create the terminal state, and a metrics scrape must not open connections.
+
 - **A chunked response could be destroyed by the frame that carries no**
   **bytes** (#344). conn sheds a stream whose event channel overflows: it
   resets and hands the caller an `EventReset`. For a flushing server whose
