@@ -44,6 +44,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`Stream.Recv` no longer registers on a stream that has been Closed**
+  (#354). The reader registration that keeps a recycle off the struct protects
+  a goroutine parked INSIDE `Recv`. It says nothing about the gap between two
+  calls, which is the ordinary shape of a read loop — client's response-body
+  reader issues one `Recv` per `Read` and loops outside. A `Close` landing in
+  that gap pools the struct, and the next call registered on it: a reader from
+  a finished request inflated the `recvActive` of whatever request claimed the
+  struct next and deferred that request's recycle behind itself. It also parked
+  on the orphaned channel until its own context expired, turning a finished
+  stream into a full context's worth of waiting. `Recv` now returns
+  `ErrStreamClosed` at once.
+
+  This narrows the window rather than closing it, and the limit is documented
+  in place with a test that asserts the current behaviour. If the struct is
+  re-allocated before a stale reference re-enters `Recv`, `allocStream` re-arms
+  the flag and the guard admits it — measured, it then receives the next
+  request's events. Closing that needs the caller to present the lifetime it
+  believes it holds, which `Recv` cannot infer from a receiver that is the
+  struct itself, and the send side has the same hole. "Callers must not retain
+  a `*Stream` past `Close`" remains a real obligation.
+
 - **A non-200 gRPC response carrying `grpc-status: 0` was reported as a
   successful call** (#352). `grpc/stream.go` prefers a `grpc-status` found in a
   non-200 header block over the HTTP-status mapping table, deliberately: the

@@ -644,6 +644,27 @@ func (s *Stream) Recv(ctx context.Context) (StreamEvent, error) {
 	// it holds whatever a future change does to where the reset runs, and this
 	// pair of fields has now produced two shipped races.
 	s.mu.Lock()
+	// Refuse a reader whose stream has already been Closed. The registration
+	// above protects a goroutine that is INSIDE Recv; it does nothing for one
+	// between two Recv calls, which is the ordinary shape of a read loop —
+	// client's response-body reader calls Recv once per Read. A Close landing
+	// in that gap pools the struct, and the next call would otherwise register
+	// on it, inflating the recvActive of whatever request claims it next and
+	// deferring that request's recycle behind a reader that has nothing to do
+	// with it. It also stops the caller parking on the orphaned channel until
+	// its context expires: ErrStreamClosed is both the truth and immediate.
+	//
+	// This does NOT make a stale reference safe. If the struct is re-allocated
+	// before the stale Recv runs, allocStream re-arms released and this gate
+	// admits it — measured, it then receives the NEXT request's events. Closing
+	// that window needs the caller to present the lifetime it thinks it holds,
+	// which Recv cannot infer from a receiver that IS the struct; the send side
+	// has the same hole. "Callers must not retain a *Stream past Close" is still
+	// a real obligation, not a formality.
+	if s.released.Load() {
+		s.mu.Unlock()
+		return StreamEvent{}, ErrStreamClosed
+	}
 	s.recvActive++
 	events, resetSignal := s.events, s.resetSignal
 	s.mu.Unlock()
