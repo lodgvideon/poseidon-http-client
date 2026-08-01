@@ -44,6 +44,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A chunked response could be destroyed by the frame that carries no**
+  **bytes** (#344). conn sheds a stream whose event channel overflows: it
+  resets and hands the caller an `EventReset`. For a flushing server whose
+  chunks exactly fill the channel, the event that overflows is the terminal
+  zero-length DATA frame — every byte of the body already delivered, and the
+  response lost to a marker. A terminal `EventData` with no payload is now
+  reported out of band instead, the clean-completion sibling of the existing
+  reset signal. A trailer block also ends the stream but carries fields the
+  caller must receive, so it is deliberately not covered by that.
+
+  `client` also sizes the per-stream event channel now, instead of inheriting
+  conn's floor of 8 — `grpc` has had a computed default since it shipped and
+  the client never got the equivalent. It is a byte budget divided by the
+  advertised frame size (1 MiB, clamped to 16..64 slots, so 64 by default),
+  not a flat count: every queued DATA event pins a pooled buffer of up to one
+  frame, so a caller who raised `MaxFrameSize` for throughput would otherwise
+  multiply what one stream can retain without asking. The reporter measured
+  0/11,944 failures at 64.
+
+  Neither change makes shedding impossible, and no finite size could: a
+  consumer that falls more than a channel behind a flushing server still loses
+  the stream, and nothing distinguishes "momentarily descheduled" from
+  "genuinely slower than the peer". Only refunding flow-control window on
+  consumption rather than on receipt would, which is a much larger change —
+  conn refunds at receipt, so HTTP/2 backpressure never throttles a peer to
+  its consumer's pace and this channel is the only bound there is.
+
 - **`Stream.Recv` no longer registers on a stream that has been Closed**
   (#354). The reader registration that keeps a recycle off the struct protects
   a goroutine parked INSIDE `Recv`. It says nothing about the gap between two

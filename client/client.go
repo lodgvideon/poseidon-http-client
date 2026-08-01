@@ -253,6 +253,9 @@ func NewClient(opts ClientOptions) (*Client, error) {
 	if opts.PushHandler != nil {
 		opts.ConnOpts.EnablePush = true
 	}
+	if opts.ConnOpts.StreamEventBuffer <= 0 {
+		opts.ConnOpts.StreamEventBuffer = defaultStreamEventBuffer(opts.ConnOpts.Settings.MaxFrameSize)
+	}
 	if err := validateTransportOptions(opts); err != nil {
 		return nil, err
 	}
@@ -1426,4 +1429,54 @@ func deriveAuthority(addr string) string {
 		return host
 	}
 	return addr
+}
+
+// streamEventBufferBudget is the memory a single stream may pin in queued
+// events while its consumer is behind. It is a byte figure divided by the
+// advertised frame size rather than a slot count, because a queued EventData
+// holds a pooled DATA buffer that ratchets up to one frame: slots x frame size
+// is what the peer can make this client retain, so that product is the thing to
+// bound. A caller who raises MaxFrameSize for throughput would otherwise
+// multiply the ceiling silently — at 1 MiB frames a flat 64 slots is 64 MiB per
+// stream, and 6.4 GiB across a pool of 8 connections at 100 streams each.
+const streamEventBufferBudget = 1 << 20
+
+// minStreamEventBuffer keeps a floor for the case the budget cannot express:
+// slots are charged per FRAME, not per byte, so a server flushing many small
+// chunks exhausts them at almost no memory. Eight 512-byte chunks is 4 KiB and
+// fills conn's default of 8.
+const minStreamEventBuffer = 16
+
+// maxStreamEventBuffer caps the slot count independently of the byte budget, so
+// a small advertised frame size cannot turn the budget into a huge channel.
+const maxStreamEventBuffer = 64
+
+// defaultStreamEventBuffer sizes conn's per-stream event channel for the client.
+//
+// conn's own default is 8, which is a floor with no knowledge of what a response
+// looks like. That is the whole of #344: a chunked response with 8 flushed
+// chunks delivers 10 events, the channel sheds the stream, and a response the
+// server wrote in full becomes an error. grpc has had a computed default since
+// it shipped; the client never got the equivalent.
+//
+// This does not make shedding impossible, and no finite size could: a consumer
+// that falls more than a channel behind a flushing server still loses the
+// stream, and nothing here distinguishes "momentarily descheduled" from
+// "genuinely slower than the peer". Only refunding flow-control window on
+// consumption rather than on receipt would, which is a different and much
+// larger change — conn refunds at receipt today, so HTTP/2 backpressure never
+// throttles a peer to its consumer's pace and this channel is the only bound
+// there is.
+func defaultStreamEventBuffer(maxFrameSize uint32) int {
+	if maxFrameSize == 0 {
+		maxFrameSize = 16384 // conn's advertised default
+	}
+	n := streamEventBufferBudget / int(maxFrameSize)
+	if n < minStreamEventBuffer {
+		return minStreamEventBuffer
+	}
+	if n > maxStreamEventBuffer {
+		return maxStreamEventBuffer
+	}
+	return n
 }
