@@ -26,6 +26,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A stream could be recycled out from under a goroutine sitting in
+  `Stream.Recv`.** `conn` pools `*Stream` and settles who returns it with a
+  two-party handshake: `Close` marks the application side done, the reader
+  goroutine's `markStreamDone` marks the connection side done, and whichever
+  finishes second calls `recycleStream` — which rewrites every field, including
+  `s.events` and `s.resetSignal`, and hands the struct back to the pool. The
+  premise is that once both parties are done nobody holds a reference. A third
+  party does: the application's own reader. `Recv` blocks on those two channels,
+  so it must read the fields outside the mutex, and a `Close` racing an
+  in-flight `Recv` is not a caller keeping a stream past `Close` — it is one
+  goroutine cancelling another's read, which is ordinary. CI reported it as a
+  `DATA RACE` at `conn/stream.go:243`/`:268` against `:482`/`:487`; #329 fixed
+  *which* party recycles, not this.
+
+  The reader is now a participant too: `Recv` registers under the stream mutex,
+  `recycleStream` defers when a reader is registered, and the last reader out
+  performs the deferred recycle. The field reset moved under the mutex and
+  `pool.Put` now happens only after unlocking, so the struct's next owner can
+  never find its mutex held by the previous one. A reader that blocks
+  indefinitely postpones pooling, which costs a pool hit rather than
+  correctness. `TestStream_RecycleUnderInFlightRecv_NoRace` reproduces it
+  deterministically — it parks a reader in the select and then drives the
+  recycle, where the existing stress test could only hope to hit the window —
+  and asserts both halves: that the recycle is *deferred* while the reader is
+  inside, and that it is not *lost* when the reader leaves.
+
+  `recycleStream` no longer takes the destination pool as a parameter. The
+  deferred path cannot honour one — it runs long after the caller that wanted
+  the recycle is gone — so a parameter would have been obeyed on one path and
+  silently ignored on the other, losing the recycle outright for any writer
+  that is not the `*Conn` the stream belongs to. Both call sites passed exactly
+  that `*Conn`'s pool, so reading it from `s.w` loses nothing.
+
+  Separately, `TestStream_CloseDuringTerminalDelivery_NoRace` shared one 60 s
+  context across all 60 iterations, so it parked on the first stream its own
+  `Close` had cancelled and stayed there until the deadline: the test cost a
+  full minute and 59 of its 60 iterations asserted nothing. Close and drain now
+  race each other off the main goroutine and the drain is released as soon as
+  `Close` returns — all 60 iterations run, in about three seconds.
+
 - **HTTP/1.1 over TLS silently negotiated HTTP/2 and failed every request**
   (#334). `conn.TLSDialer` rewrote a caller's explicit `Config.NextProtos`,
   prepending `"h2"` — so the natural-looking `TLSDialer{Config: &tls.Config{
