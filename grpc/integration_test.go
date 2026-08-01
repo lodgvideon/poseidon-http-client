@@ -1030,3 +1030,85 @@ func TestConformance_RFC9113_Sec8_1_SendAfterBenignResetStillFails(t *testing.T)
 		t.Fatal("Send after a benign reset = nil; the message never reached the server")
 	}
 }
+
+// srvNonOKWithGRPCStatus writes a non-200 response whose header block carries
+// grpc-status: v. Real gRPC servers never do this — the protocol fixes
+// ":status 200" for every response — so it models a broken intermediary, or a
+// peer choosing its own values.
+func srvNonOKWithGRPCStatus(status int, v string, trailersOnly bool, body []byte) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/grpc")
+		w.Header().Set("grpc-status", v)
+		w.WriteHeader(status)
+		if trailersOnly {
+			return
+		}
+		w.(http.Flusher).Flush()
+		if len(body) > 0 {
+			_, _ = w.Write(body)
+		}
+	})
+}
+
+// TestConformance_GRPC_NonOKStatusCannotReportOK pins that a response the
+// client has already classified as failed cannot declare itself successful.
+//
+// The preference for a grpc-status found in a non-200 block is deliberate and
+// stays: the status-mapping table is defined for use "only for clients that
+// received a response that did not include grpc-status. If grpc-status was
+// provided, it must be used", and grpc-java's HTTP-error path puts one there.
+// But that rule settles whose diagnosis wins, not whether a diagnosis may
+// contradict the transport it arrived on. OK is the one value where honouring
+// it manufactures a success: the body has already been dropped on this path,
+// so the caller received io.EOF with zero messages — an empty success it
+// cannot tell from a real one, on a value the peer chose.
+//
+// Both spellings of the response are covered. The Trailers-Only shape reaches
+// finish from a different branch of onHeaders, before the non-200 check runs
+// at all, and "00" parses to OK as surely as "0".
+func TestConformance_GRPC_NonOKStatusCannotReportOK(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		httpStatus   int
+		grpcStatus   string
+		trailersOnly bool
+		body         []byte
+		wantCode     Code
+	}{
+		{"header block, 500", 500, "0", false, []byte("ignored"), Unknown},
+		{"trailers-only, 500", 500, "0", true, nil, Unknown},
+		{"padded zero", 500, "00", false, nil, Unknown},
+		{"404 maps to UNIMPLEMENTED", 404, "0", false, nil, Unimplemented},
+		// The over-rejection guards: a non-OK grpc-status on a non-200 must
+		// still win over the table, and a 200 carrying grpc-status OK is the
+		// ordinary successful call.
+		{"non-OK diagnosis still wins", 400, "8", false, nil, ResourceExhausted},
+		{"200 with OK is untouched", 200, "0", true, nil, OK},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv, cfg := startGRPCServer(t, srvNonOKWithGRPCStatus(tc.httpStatus, tc.grpcStatus, tc.trailersOnly, tc.body))
+			defer srv.Close()
+			cc := dialGRPC(t, srv, cfg)
+
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			s, err := cc.NewStream(ctx, "/test.Svc/M", nil)
+			if err != nil {
+				t.Fatalf("NewStream: %v", err)
+			}
+			defer func() { _ = s.Close() }()
+			if err := s.CloseSend(ctx); err != nil {
+				t.Fatalf("CloseSend: %v", err)
+			}
+			for {
+				if _, rerr := s.Recv(ctx); rerr != nil {
+					break
+				}
+			}
+			if got := s.Status().Code; got != tc.wantCode {
+				t.Fatalf("status = %v, want %v (HTTP %d, grpc-status %q)",
+					got, tc.wantCode, tc.httpStatus, tc.grpcStatus)
+			}
+		})
+	}
+}
