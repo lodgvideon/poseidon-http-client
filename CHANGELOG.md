@@ -65,6 +65,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   non-OK `grpc-status` on a non-200 still wins over the table, and a 200
   carrying OK is untouched; both are pinned as over-rejection guards.
 
+- **A complete response could be discarded in favour of a reset that arrived
+  after it** (#350). `Stream.Recv` selected over the event channel, the reset
+  signal and the context with no priority. `signalReset` is reachable only from
+  the full-channel fallback — every caller tries a send into `s.events` first —
+  so a ready reset signal means, by construction, that undelivered events are
+  queued behind it. Go picks uniformly among ready cases, which made each
+  `Recv` an independent coin flip and an N-event response reach its consumer
+  with probability 2^-N: measured at 49.5% for a single `Recv` and ~99.6% loss
+  over a full drain loop. For a server that answers in full and then sends
+  `RST_STREAM(NO_ERROR)` to stop an upload it does not need, that is the very
+  discard RFC 9113 §8.1 forbids — the clause `conn` already pins on the ordered
+  path. The reset case now delivers anything already buffered first. Draining
+  before the select would fix the same thing and cost more: `ctx.Done()` would
+  then lose to a channel that never empties during a fast download.
+
+  The guard on `close(resetSignal)` was a CAS on `resetCode` from 0 to the
+  code, which is not idempotent when the code is itself 0 — it succeeds, leaves
+  the field at 0, and admits the next caller, closing the channel twice and
+  panicking the reader. NO_ERROR is 0, and NO_ERROR is exactly what §8.1 has a
+  server send after a complete response, so the one value that broke the
+  contract was the common one. The guard is now its own flag.
 
 - **A complete HTTP/2 response was discarded when the server ended the upload
   with `RST_STREAM(NO_ERROR)`** (#337). RFC 9113 §8.1 lets a server that has
