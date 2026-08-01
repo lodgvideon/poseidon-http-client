@@ -19,6 +19,7 @@ import (
 
 	"github.com/lodgvideon/poseidon-http-client/client"
 	"github.com/lodgvideon/poseidon-http-client/conn"
+	"github.com/lodgvideon/poseidon-http-client/frame"
 )
 
 // TestConformance_RFC7540_Sec5_1_2_PoolGatesOnPeerMaxStreams verifies that the
@@ -377,7 +378,10 @@ func TestConformance_RFC9113_Sec8_1_BenignResetKeepsBufferedResponse(t *testing.
 // an event-buffer overflow — a code the retry layer reads as "the server did
 // not process this request". Surfacing it would let Retryer replay a request
 // the server had already answered; measured at 3 executions instead of 1.
-// TestConformance_RFC9113_Sec8_1_CutUploadFailureIsNotRetryable pins that.
+// conn now sends CANCEL there, so that code no longer reaches the classifier
+// at all — this assertion outlives the reason it was written for, and is kept
+// because the error a caller sees for a failed upload should still be the
+// upload's.
 func TestConformance_RFC9113_Sec8_1_RealResetStillFailsUpload(t *testing.T) {
 	_, addr := newNoDrainServer(t, http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
 		panic(http.ErrAbortHandler)
@@ -406,15 +410,20 @@ func TestConformance_RFC9113_Sec8_1_RealResetStillFailsUpload(t *testing.T) {
 }
 
 // TestConformance_RFC9113_Sec8_1_CutUploadFailureIsNotRetryable pins the
-// boundary of the tolerance above. When the upload is cut short AND the
-// response does not survive, the reset the response path observes may be
-// conn's OWN forged RST_STREAM(REFUSED_STREAM), emitted when the per-stream
-// event buffer overflows because the blocked uploader is not draining it. The
-// peer sent no such thing — it answered the request in full. Surfacing that
-// code as a *StreamResetError lets builtinShouldRetry read it as "the server
-// did not process the request; safe to retry" and replay a request the server
-// already executed. Measured before the preferSendCut guard: 3 executions of
-// one DELETE.
+// boundary of the tolerance above: a request whose upload was cut short and
+// whose response is then lost must not be replayed.
+//
+// It is now guarded twice and no longer differentiates preferSendCut on its
+// own. conn used to shed an unbuffered response with a forged
+// RST_STREAM(REFUSED_STREAM) — the code RFC 9113 §8.7 reserves for the
+// server's promise that it never processed the request — which
+// builtinShouldRetry believed, replaying work already done (measured: 3
+// executions of one DELETE). preferSendCut kept that code away from the
+// classifier. conn now sends CANCEL, so the lie is gone at its source and this
+// test passes with preferSendCut reverted. The property is still worth
+// pinning; the mechanism it happens to exercise is no longer the one it was
+// written for. TestConformance_RFC9113_Sec8_7_LocalOverflowIsNotRetried pins
+// the source directly, on a request whose upload succeeds.
 func TestConformance_RFC9113_Sec8_1_CutUploadFailureIsNotRetryable(t *testing.T) {
 	var executions atomic.Int32
 	_, addr := newNoDrainServer(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -579,5 +588,77 @@ func TestConformance_RFC9113_Sec8_1_NonResetWriteFailureStillAborts(t *testing.T
 	}
 	if d := time.Since(start); d > 5*time.Second {
 		t.Fatalf("Do took %v — it waited for a response that was never coming", d)
+	}
+}
+
+// TestConformance_RFC9113_Sec8_7_LocalOverflowIsNotRetried pins the code conn
+// puts on a stream it sheds itself.
+//
+// §8.7 names REFUSED_STREAM as one of exactly two mechanisms by which a peer
+// guarantees a request went unprocessed — "The REFUSED_STREAM error code can be
+// included in a RST_STREAM frame to indicate that the stream is being closed
+// prior to any processing having occurred.  Any request that was sent on the
+// reset stream can be safely retried." — and the retry classifier is built on
+// that promise. conn used to make the promise on the server's behalf whenever
+// its own per-stream event buffer overflowed, so a response the client merely
+// failed to hold became a licence to run the request again. Measured before the
+// fix: one DELETE executed three times.
+//
+// The upload here is tiny and completes normally; only the response overruns
+// the buffer. That keeps the test on the plain overflow path rather than the
+// cut-upload path of the §8.1 tests above, so it pins the code at its source
+// and does not depend on preferSendCut.
+func TestConformance_RFC9113_Sec8_7_LocalOverflowIsNotRetried(t *testing.T) {
+	var executions atomic.Int32
+	_, addr := newTLSH2Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		executions.Add(1)
+		_, _ = io.Copy(io.Discard, r.Body)
+		w.WriteHeader(200)
+		w.(http.Flusher).Flush()
+		// Outrun the default 8-slot event buffer before the caller can drain it.
+		for i := 0; i < 128; i++ {
+			_, _ = w.Write(make([]byte, 16<<10))
+			w.(http.Flusher).Flush()
+		}
+	}))
+	// One event slot: the reader refunds flow-control window at frame receipt,
+	// not at consumption, so the peer is never throttled to the consumer's pace
+	// and a single slot overflows on the second frame. That is the bound conn
+	// sheds the stream on, reached here on purpose rather than by out-racing a
+	// drain loop with volume.
+	c, err := client.NewClient(client.ClientOptions{
+		Addr: addr,
+		ConnOpts: conn.ConnOptions{
+			Dialer:            &conn.TLSDialer{Config: &tls.Config{InsecureSkipVerify: true}},
+			StreamEventBuffer: 1,
+		},
+	})
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+	t.Cleanup(func() { _ = c.Close() })
+	r := c.Retryer(client.RetryOptions{
+		MaxAttempts: 3,
+		Backoff:     func(int) time.Duration { return 0 },
+	})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	var res client.Response
+	err = r.Do(ctx, &client.Request{
+		Method:   "DELETE",
+		Path:     "/resource",
+		Body:     []byte("x"),
+		BodyMode: client.BodyBuffer,
+	}, &res)
+	if err == nil {
+		t.Skipf("the response fit after all (status %d, %d bytes) — this test needs the event buffer to overflow", res.Status, len(res.Body))
+	}
+	var sre *client.StreamResetError
+	if errors.As(err, &sre) && sre.Code == frame.ErrCodeRefusedStream {
+		t.Fatalf("a locally-shed response reported REFUSED_STREAM, which promises the server never processed the request")
+	}
+	if n := executions.Load(); n != 1 {
+		t.Fatalf("server executed the DELETE %d times, want 1: err = %v (%T) was classified as retryable", n, err, err)
 	}
 }

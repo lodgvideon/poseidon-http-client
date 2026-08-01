@@ -56,12 +56,12 @@ var (
 // EventReset) when the stream is reset while a response is being read.
 //
 // Code is not always the peer's. conn resets its own stream with a synthesised
-// RST_STREAM(REFUSED_STREAM) when a response outruns the per-stream event
-// buffer, and that reaches the caller here too. The retry classifier reads
-// REFUSED_STREAM as "the server did not process this request", which is not
-// true of that case — so a request whose upload was cut short deliberately
-// does NOT surface as a StreamResetError (see preferSendCut in client.go),
-// because there the forged code could not be told from a real one.
+// RST_STREAM(CANCEL) when a response outruns the per-stream event buffer, and
+// that reaches the caller here too — the code says the client stopped wanting
+// the stream, which is exactly what happened, and the retry classifier
+// correctly does not retry it. It used to be REFUSED_STREAM, whose RFC 9113
+// §8.7 meaning is a promise that the server never processed the request; that
+// made the classifier replay work the server had already done.
 //
 // A reset that follows a complete response is not an error at all: RFC 9113
 // §8.1 requires the response be kept, and neither Do nor Response.BodyReader

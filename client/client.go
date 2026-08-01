@@ -619,11 +619,15 @@ func (c *Client) Do(ctx context.Context, req *Request, resp *Response) error {
 // stream and that failure was deliberately not treated as fatal (see the RFC
 // 9113 §8.1 comment below). It is not an error the caller should return on its
 // own — the response may well be complete — but if the response path ALSO
-// fails, sendCut is the earlier and more accurate cause and must be preferred.
-// Returning the response path's error there would report a client-side
-// event-buffer overflow, which conn signals with its own forged
-// RST_STREAM(REFUSED_STREAM), as "the server did not process this request" —
-// and Retryer would replay a request the server had already answered.
+// fails, sendCut is the earlier and more accurate cause and must be preferred:
+// the upload failing is what set everything after it in motion.
+//
+// It was introduced for a sharper reason that no longer applies. conn used to
+// shed an unbuffered response with a forged RST_STREAM(REFUSED_STREAM), which
+// the retry classifier read as "the server did not process this request" and
+// replayed; keeping sendCut as the outcome hid that code from the classifier.
+// conn now sends CANCEL there, so the lie is fixed at its source and this is
+// no longer load-bearing for retry — only for reporting the first cause.
 //
 // Avoids heap-escaping the implicit struct: escape analysis confirmed via
 // -gcflags=-m that returning fields by value keeps them on the stack

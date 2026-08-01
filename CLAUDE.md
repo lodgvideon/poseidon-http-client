@@ -113,7 +113,7 @@ section behavior.
   monotonic-id ordering across concurrent `NewStream` callers). Don't
   read `Stream.ID()` before SendHeaders.
 - `Stream.events` channel buffer = `opts.StreamEventBuffer` (default
-  8). Full → `push` drops + sends RST(REFUSED_STREAM). Caller must
+  8). Full → `push` drops + sends RST(CANCEL). Caller must
   drain `Recv` promptly or set larger buffer.
 - `recvWindowRefundThreshold = 32 KiB` — WINDOW_UPDATEs batch at this
   granularity (B.2.2). Lower = more control-frame chatter; higher =

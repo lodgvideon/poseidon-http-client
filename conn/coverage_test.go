@@ -478,8 +478,14 @@ func TestStream_Push_Overflow_SendsRST(t *testing.T) {
 	if rstCalls == 0 {
 		t.Fatalf("writeRSTStream not called after push overflow")
 	}
-	if code != frame.ErrCodeRefusedStream {
-		t.Fatalf("RST code = %v, want REFUSED_STREAM", code)
+	// CANCEL, not REFUSED_STREAM: this reset is the client giving up on a
+	// response it cannot buffer, which is RFC 9113 §7's "the stream is no
+	// longer needed". REFUSED_STREAM would assert §8.7's "closed prior to any
+	// processing having occurred ... can be safely retried", which is false —
+	// the server answered. client's retry classifier and grpc's status map both
+	// read the code literally, so the wrong one replayed executed requests.
+	if code != frame.ErrCodeCancel {
+		t.Fatalf("RST code = %v, want CANCEL: a locally-shed response is not a request the server declined", code)
 	}
 }
 

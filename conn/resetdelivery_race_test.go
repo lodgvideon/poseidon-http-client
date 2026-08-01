@@ -5,6 +5,7 @@ import (
 	"context"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/lodgvideon/poseidon-http-client/frame"
 )
@@ -138,4 +139,84 @@ func TestStream_EndWithReset_RefusesRecycledStruct(t *testing.T) {
 	if n := len(s.events); n != 1 {
 		t.Fatalf("events = %d, want the one reset", n)
 	}
+}
+
+// TestStream_PushOverflow_EmitsCancelEverywhere pins the error code on all
+// three places a shed stream announces itself, because they are separate
+// branches and a test that happens to take one leaves the others free to
+// diverge: the RST_STREAM put on the wire, the EventReset delivered when the
+// channel still has room, and the resetSignal fallback when it does not.
+//
+// CANCEL, not REFUSED_STREAM. RFC 9113 §7 defines CANCEL as "the stream is no
+// longer needed", which is what shedding a response is. §8.7 makes
+// REFUSED_STREAM a promise about the SERVER — "the stream is being closed
+// prior to any processing having occurred.  Any request that was sent on the
+// reset stream can be safely retried." — and the client is in no position to
+// make it: the server answered, and the retry layer acts on the promise.
+func TestStream_PushOverflow_EmitsCancelEverywhere(t *testing.T) {
+	t.Run("wire and resetSignal", func(t *testing.T) {
+		w := &fakeStreamWriter{}
+		s := newStream(1, 1, w, 65535)
+		s.push(StreamEvent{Type: EventHeaders}) // fills the one slot
+		s.push(StreamEvent{Type: EventData})    // overflows
+
+		deadline := time.Now().Add(2 * time.Second)
+		for time.Now().Before(deadline) {
+			w.mu.Lock()
+			n := w.rstCalls
+			w.mu.Unlock()
+			if n > 0 {
+				break
+			}
+			time.Sleep(2 * time.Millisecond)
+		}
+		w.mu.Lock()
+		calls, code := w.rstCalls, w.lastRSTCode
+		w.mu.Unlock()
+		if calls == 0 {
+			t.Fatal("no RST_STREAM written after overflow")
+		}
+		if code != frame.ErrCodeCancel {
+			t.Fatalf("wire RST code = %v, want CANCEL", code)
+		}
+		// The channel was still full, so the reset took the signal fallback.
+		if got := frame.ErrCode(s.resetCode.Load()); got != frame.ErrCodeCancel {
+			t.Fatalf("signalReset code = %v, want CANCEL", got)
+		}
+	})
+
+	// The channel-delivered branch cannot be reached on demand: pushLocked
+	// drains nothing between the push that overflows and the reset it then
+	// tries to enqueue, so the channel is still full unless a consumer pops in
+	// that window. Race for it instead of pretending it is deterministic, and
+	// say so rather than passing quietly if the window never opens.
+	t.Run("buffered event", func(t *testing.T) {
+		delivered := 0
+		for i := 0; i < 500; i++ {
+			w := &fakeStreamWriter{}
+			s := newStream(1, 1, w, 65535)
+			s.push(StreamEvent{Type: EventHeaders})
+			done := make(chan struct{})
+			go func() {
+				defer close(done)
+				<-s.events
+			}()
+			s.push(StreamEvent{Type: EventData})
+			<-done
+			for len(s.events) > 0 {
+				ev := <-s.events
+				if ev.Type != EventReset {
+					continue
+				}
+				delivered++
+				if ev.RSTCode != frame.ErrCodeCancel {
+					t.Fatalf("delivered reset code = %v, want CANCEL", ev.RSTCode)
+				}
+			}
+		}
+		if delivered == 0 {
+			t.Skip("the consumer never popped inside the window; the channel branch was not exercised")
+		}
+		t.Logf("channel-delivered resets observed: %d/500", delivered)
+	})
 }
