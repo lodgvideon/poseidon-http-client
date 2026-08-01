@@ -201,6 +201,28 @@ type Stream struct {
 	// re-arms it for the next lifetime (so a stale reference to a re-allocated
 	// struct is not protected — callers must not retain across Close).
 	released atomic.Bool
+
+	// recvActive counts goroutines currently inside Recv, and recycleWanted
+	// records a recycle that had to be deferred because one was. Both guarded
+	// by mu.
+	//
+	// The appClosed/connDone handshake below settles which of Close and
+	// markStreamDone returns the struct to the pool, on the premise that once
+	// both have finished nobody holds a reference. That misses a third party:
+	// the application's own reader. Recv necessarily reads s.events and
+	// s.resetSignal OUTSIDE mu — it blocks on them — so a recycle running
+	// while a reader sits in that select rewrites the very channels it is
+	// selecting on, and hands the struct to the pool for another request to
+	// claim while the reader still points at it. Callers are told not to keep
+	// a *Stream past Close, but Close racing an in-flight Recv is not "past":
+	// it is the ordinary shape of one goroutine cancelling another's read.
+	//
+	// So the reader is a participant too: Recv registers here, and whichever
+	// of the three finishes last does the recycling. A reader that blocks
+	// forever merely postpones pooling, which costs a pool hit, not
+	// correctness.
+	recvActive    int
+	recycleWanted bool
 }
 
 func newStream(id uint32, eventBuf int, w streamWriter, recvWindow int32) *Stream {
@@ -222,10 +244,62 @@ func (s *Stream) signalReset(code frame.ErrCode) {
 	}
 }
 
-// recycleStream drains any buffered events, zeroes all fields, and
-// returns s to pool. Only call when the stream is fully done (both
-// sides ended or RST sent/received) and no goroutine holds a reference.
-func recycleStream(pool *sync.Pool, s *Stream) {
+// recycleStream drains any buffered events, zeroes all fields, and returns s
+// to pool. Only call when the stream is fully done (both sides ended or RST
+// sent/received) and the connection and application sides have both let go.
+//
+// A reader inside Recv is the one holder this cannot be told about in advance,
+// so it is checked for here: with one present the recycle is recorded and
+// handed to that reader's exit path instead (see Stream.recvActive). The reset
+// itself runs under mu — the same mutex Recv takes to snapshot the channels it
+// selects on — and pool.Put happens only after unlocking, so the next owner of
+// the struct never finds its mutex held by us.
+// The destination pool is taken from s.w rather than passed in. It used to be
+// a parameter, but the deferred path cannot honour one — recvLeave runs long
+// after the caller that wanted the recycle is gone — so a parameter would be
+// obeyed on one path and silently ignored on the other. Both call sites pass
+// the pool of the very Conn that is already s.w, so nothing is lost by reading
+// it from there, and the mismatch cannot be reintroduced.
+func recycleStream(s *Stream) {
+	s.mu.Lock()
+	if s.recvActive > 0 {
+		s.recycleWanted = true
+		s.mu.Unlock()
+		return
+	}
+	s.putLocked()
+}
+
+// recvLeave is Recv's exit path. It drops the reader's registration and, when
+// it was the last one out and a recycle was deferred while it read, performs
+// that recycle.
+func (s *Stream) recvLeave() {
+	s.mu.Lock()
+	s.recvActive--
+	if s.recvActive > 0 || !s.recycleWanted {
+		s.mu.Unlock()
+		return
+	}
+	s.recycleWanted = false
+	s.putLocked()
+}
+
+// putLocked resets s for reuse and returns it to its connection's pool. The
+// caller holds s.mu; putLocked releases it before the Put, so the struct's next
+// owner never finds its mutex held by the previous one.
+func (s *Stream) putLocked() {
+	// Captured before resetForPoolLocked nils it out.
+	w := s.w
+	s.resetForPoolLocked()
+	s.mu.Unlock()
+	if c, ok := w.(*Conn); ok {
+		c.streamPool.Put(s)
+	}
+}
+
+// resetForPoolLocked drains buffered events and returns every field to its
+// zero-lifetime value. Caller holds s.mu and is responsible for the pool.Put.
+func (s *Stream) resetForPoolLocked() {
 	// Drop any events still buffered on the old channel. Their pooled DATA
 	// buffers (DataSlab) are abandoned to GC here, matching shutdownStreams
 	// and the header-slab teardown path: sync.Pool tolerates buffers that are
@@ -267,7 +341,10 @@ func recycleStream(pool *sync.Pool, s *Stream) {
 	s.sendWindow = 0
 	s.resetSignal = make(chan struct{})
 	s.resetCode.Store(0)
-	pool.Put(s)
+	// recvActive is zero by construction — this only runs with no reader
+	// registered — but recycleWanted must not survive into the next lifetime,
+	// or the first Recv of the reused stream would recycle it on exit.
+	s.recycleWanted = false
 }
 
 // ID returns the HTTP/2 stream identifier.
@@ -478,13 +555,31 @@ func (s *Stream) SendData(ctx context.Context, p []byte, endStream bool) error {
 // Recv blocks until the next event for this stream is ready, the stream
 // terminates, or ctx is cancelled.
 func (s *Stream) Recv(ctx context.Context) (StreamEvent, error) {
+	// Register as a reader: that is what keeps recycleStream off the struct
+	// until this returns, and it is the load-bearing half — the select below
+	// blocks, so it cannot hold the mutex, and a recycle landing under it
+	// would rewrite the very channels being selected on and pool the struct
+	// for another request to claim.
+	//
+	// Snapshotting the two channels in the same critical section is belt and
+	// braces. With the registration in place nothing rewrites them while we
+	// are here, so a mutation that reads the fields after unlocking does not
+	// fail any test. It is kept because it makes this function's safety local:
+	// it holds whatever a future change does to where the reset runs, and this
+	// pair of fields has now produced two shipped races.
+	s.mu.Lock()
+	s.recvActive++
+	events, resetSignal := s.events, s.resetSignal
+	s.mu.Unlock()
+	defer s.recvLeave()
+
 	select {
-	case e, ok := <-s.events:
+	case e, ok := <-events:
 		if !ok {
 			return StreamEvent{}, ErrStreamClosed
 		}
 		return e, nil
-	case <-s.resetSignal:
+	case <-resetSignal:
 		code := frame.ErrCode(s.resetCode.Load())
 		return StreamEvent{Type: EventReset, RSTCode: code, EndStream: true}, nil
 	case <-ctx.Done():
@@ -536,10 +631,9 @@ func (s *Stream) Close() error {
 	if connDone {
 		// markStreamDone already evicted the stream from the registry and
 		// found appClosed false at the time — so it left recycling to us. We
-		// are the second (and last) party to touch the struct.
-		if c, ok := w.(*Conn); ok {
-			recycleStream(&c.streamPool, s)
-		}
+		// are the second (and last) party to touch the struct, unless a reader
+		// is still inside Recv, in which case recycleStream hands it on.
+		recycleStream(s)
 		return nil
 	}
 	if bothEnded {

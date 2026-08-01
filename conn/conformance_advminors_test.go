@@ -1,7 +1,6 @@
 package conn
 
 import (
-	"sync"
 	"testing"
 )
 
@@ -32,14 +31,14 @@ func TestIsKnownOrigin_StripsScheme(t *testing.T) {
 // the per-request reqAuthority field: a recycled Stream must not carry a previous
 // request's :authority into the next request on a reused connection.
 func TestRecycleStream_ResetsReqAuthority(t *testing.T) {
-	var pool sync.Pool
 	s := newStream(1, 8, nil, 65535)
 	s.reqAuthority = "example.com"
 	s.localEnded, s.remoteEnded = true, true
-	recycleStream(&pool, s)
+	recycleStream(s)
 	// recycleStream clears the fields in place before pooling s, so assert on s
-	// directly. Going back through pool.Get() is flaky: sync.Pool may return nil
+	// directly. Going back through a pool is flaky: sync.Pool may return nil
 	// (the GC can drop a pooled item), which is not what this test is checking.
+	// s.w is nil here, so nothing is pooled at all — the reset is the point.
 	if s.reqAuthority != "" {
 		t.Errorf("recycled Stream.reqAuthority = %q, want empty", s.reqAuthority)
 	}
