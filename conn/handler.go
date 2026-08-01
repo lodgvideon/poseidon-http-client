@@ -562,22 +562,20 @@ func (h *connHandler) OnRSTStream(fh frame.FrameHeader, code frame.ErrCode) erro
 		return nil
 	}
 	// RFC 9113 §5.4.2: "To avoid looping, an endpoint MUST NOT send a RST_STREAM
-	// in response to a RST_STREAM frame." Deliver the reset event directly rather
-	// than via s.push, whose overflow path emits an outbound RST_STREAM(REFUSED_
-	// STREAM) — which, in response to a received RST, is exactly that loop. A slow
-	// consumer whose buffer is full still learns of the reset via the reset signal.
-	// Delivered FIRST, before the stream becomes bothEnded below, so it cannot race
-	// a concurrent Close()->recycleStream (same ordering the doc comment describes).
-	select {
-	case s.events <- StreamEvent{Type: EventReset, RSTCode: code, EndStream: true}:
-	default:
-		s.signalReset(code)
+	// in response to a RST_STREAM frame." endWithReset delivers the event
+	// directly rather than via s.push, whose overflow path emits an outbound
+	// RST_STREAM(REFUSED_STREAM) — which, in response to a received RST, is
+	// exactly that loop. A slow consumer whose buffer is full still learns of
+	// the reset via the reset signal.
+	//
+	// It returns false when the struct has already been recycled and belongs to
+	// another request, which the lookup above cannot rule out: the application
+	// may complete and Close this stream between it and here. Nothing more is
+	// owed to a stream that is already gone — least of all markStreamDone,
+	// which would retire whatever now owns the id.
+	if !s.endWithReset(fh.StreamID, code) {
+		return nil
 	}
-	s.mu.Lock()
-	s.remoteEnded = true
-	s.localEnded = true
-	s.closed = true
-	s.mu.Unlock()
 	h.streams.markStreamDone(fh.StreamID)
 	// Wake a writer blocked in acquireSendCredits so it observes s.closed and bails
 	// instead of sending DATA once credit frees up (RFC 9113 §6.4). Done last, with
