@@ -191,7 +191,7 @@ func (mp *managedPool) acquire(ctx context.Context) (*conn.Conn, func(), error) 
 		}
 		mc, err := sub.p.acquire(ctx)
 		if err == nil {
-			release := func() { sub.p.release(mc, nil) }
+			release := func() { sub.p.release(mc) }
 			return mc.c, release, nil
 		}
 		if !isDialOnlyErr(err) {

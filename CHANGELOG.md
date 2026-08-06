@@ -61,6 +61,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Concurrent `Read` and `Close` on `Response.BodyReader` raced, and the**
+  **abort did not work** (#392). `Close` returned the pooled DATA slab while an
+  in-flight `Read` still aliased it through its surplus buffer, so a later
+  request could be handed the same slab and overwrite bytes the caller was
+  about to copy out — reproduced under `-race`. `closeOnce` guarded
+  Close-against-Close only. Separately, `Close` did not wake a `Read` parked in
+  `Recv`: the abort returned promptly and the reader goroutine hung until the
+  caller's own deadline fired. Both matter because `BodyReader` is an
+  `io.ReadCloser`, and closing one from another goroutine to abort a slow read
+  is exactly what that interface's convention invites. The reader's fields are
+  now serialised, and `Close` cancels a private context that releases the
+  parked read.
+
 - **The ACK tracker re-sorted its whole range set on every received packet**
   (rest of #345). `receive` appended the new packet number and called
   `sort.Slice`, whose reflect-based swapper allocates — **88 B/op and 3 allocs

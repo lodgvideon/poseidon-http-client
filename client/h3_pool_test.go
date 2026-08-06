@@ -138,7 +138,7 @@ func TestH3Pool_DistributesStreamsAcrossConns(t *testing.T) {
 	}
 
 	for _, mc := range held {
-		p.release(mc, nil)
+		p.release(mc)
 	}
 }
 
@@ -167,7 +167,7 @@ func TestH3Pool_ReusesConnUnderCap(t *testing.T) {
 		} else if mc.cl != first {
 			t.Fatalf("acquire[%d] used a new conn; want reuse of the single under-cap conn", i)
 		}
-		p.release(mc, nil)
+		p.release(mc)
 	}
 	if got := d.count("h:443"); got != 1 {
 		t.Fatalf("dialed %d conns for 3 sequential under-cap acquires, want 1", got)
@@ -208,7 +208,7 @@ func TestH3Pool_EvictsDeadConnOnRelease(t *testing.T) {
 
 	// Simulate the QUIC connection dying, then release.
 	fake.kill()
-	p.release(mc, nil)
+	p.release(mc)
 
 	// The release path must evict (fire CloseDead) promptly.
 	deadline := time.Now().Add(3 * time.Second)

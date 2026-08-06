@@ -173,7 +173,7 @@ func (mp *h3ManagedPool) acquire(ctx context.Context) (h3Client, func(), error) 
 		}
 		mc, err := sub.p.acquire(ctx)
 		if err == nil {
-			release := func() { sub.p.release(mc, nil) }
+			release := func() { sub.p.release(mc) }
 			return mc.cl, release, nil
 		}
 		if !isDialOnlyErr(err) {

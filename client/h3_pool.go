@@ -63,8 +63,7 @@ type h3AcquireResp struct {
 
 // h3ReleaseMsg is sent on h3Pool.releaseCh after a request completes.
 type h3ReleaseMsg struct {
-	mc  *h3ManagedConn
-	err error // non-nil → request failed; actor still re-checks Alive
+	mc *h3ManagedConn
 }
 
 // h3DialResult is sent by a dial helper goroutine on h3Pool.dialDoneCh.
@@ -345,7 +344,7 @@ func (p *h3Pool) replyAcquire(req h3AcquireReq, mc *h3ManagedConn, err error) {
 // always completes and the goroutine always exits.
 func (p *h3Pool) reclaim(reply chan h3AcquireResp) {
 	if resp := <-reply; resp.mc != nil {
-		p.release(resp.mc, nil)
+		p.release(resp.mc)
 	}
 }
 
@@ -624,7 +623,7 @@ func h3PruneExpiredWaiters(ws []h3AcquireReq) []h3AcquireReq {
 
 // acquire requests an h3ManagedConn from the actor. The returned mc's active count
 // has already been incremented by the actor. Caller MUST eventually call
-// p.release(mc, requestErr).
+// p.release(mc).
 func (p *h3Pool) acquire(ctx context.Context) (*h3ManagedConn, error) {
 	start := time.Now()
 	acquireTimeoutActive := false
@@ -673,14 +672,14 @@ func (p *h3Pool) acquire(ctx context.Context) (*h3ManagedConn, error) {
 	}
 }
 
-// release returns mc to the actor with an optional request error. The actor
-// re-checks Alive and evicts a dead conn regardless of reqErr.
-func (p *h3Pool) release(mc *h3ManagedConn, reqErr error) {
+// release returns mc to the actor. It carries no request error: handleRelease
+// re-checks Alive unconditionally, which is the safer rule — see Pool.release.
+func (p *h3Pool) release(mc *h3ManagedConn) {
 	if mc == nil {
 		return
 	}
 	select {
-	case p.releaseCh <- h3ReleaseMsg{mc: mc, err: reqErr}:
+	case p.releaseCh <- h3ReleaseMsg{mc: mc}:
 	case <-p.closedCh:
 		// Pool already closed: the actor is gone, so close the conn directly
 		// rather than leaking it. h3Client.Close is idempotent.
@@ -710,7 +709,7 @@ func (p *h3Pool) warmup(n int) {
 		mc, err := p.acquire(ctx)
 		cancel()
 		if err == nil {
-			p.release(mc, nil)
+			p.release(mc)
 		}
 	}
 }
