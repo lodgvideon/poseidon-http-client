@@ -41,10 +41,10 @@ func (pt *poolTransport) openExchange(ctx context.Context) (protoStream, func(ui
 	cn := mc.c
 	stream, serr := cn.NewStream(ctx)
 	if serr != nil {
-		pt.p.release(mc, serr)
+		pt.p.release(mc)
 		return nil, nil, nil, serr
 	}
-	release := func() { pt.p.release(mc, nil) }
+	release := func() { pt.p.release(mc) }
 	return stream, cn.LookupStream, release, nil
 }
 

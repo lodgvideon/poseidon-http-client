@@ -36,7 +36,7 @@ func TestPool_StatsEvictionIsCounted(t *testing.T) {
 	if err != nil {
 		t.Fatalf("acquire: %v", err)
 	}
-	p.release(mc, nil)
+	p.release(mc)
 	// release is asynchronous. Without waiting for the actor to process it, the
 	// kill below can land first and handleRelease evicts through evict(), which
 	// counts — so the test would pass without ever reaching the Stats path it
@@ -87,7 +87,7 @@ func TestPool_TickAttributesGoAwayBeforeIdle(t *testing.T) {
 	if err != nil {
 		t.Fatalf("acquire: %v", err)
 	}
-	p.release(mc, nil)
+	p.release(mc)
 
 	// A real GOAWAY: the server shuts down gracefully.
 	shut, shutCancel := context.WithTimeout(context.Background(), 5*time.Second)

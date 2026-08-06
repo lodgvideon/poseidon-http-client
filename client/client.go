@@ -775,8 +775,15 @@ func (c *Client) do(ctx context.Context, req *Request, resp *Response) error {
 		if ev.Slab != nil {
 			resp.slabs = append(resp.slabs, ev.Slab)
 		}
+		// The reader gets its own cancellable context, not the caller's ctx
+		// directly. Close cancels it, which is what unblocks a Read parked in
+		// Recv: closing the stream alone does not wake that goroutine, so an
+		// abort through the io.ReadCloser left the reader hanging until the
+		// caller's own deadline fired.
+		bodyCtx, bodyCancel := context.WithCancel(ctx)
 		resp.BodyReader = &responseBodyReader{
-			ctx:     ctx,
+			ctx:     bodyCtx,
+			cancel:  bodyCancel,
 			stream:  rs,
 			release: release,
 			resp:    resp,

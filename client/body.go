@@ -12,39 +12,67 @@ import (
 // Constructed by do() when Request.BodyMode is BodyStream; ownership
 // transfers to Response.BodyReader.
 type responseBodyReader struct {
-	ctx       context.Context
-	stream    respStream
-	release   func()    // returns conn to pool; called exactly once in Close
-	resp      *Response // written with trailers when EventTrailers arrives
-	buf       []byte    // unconsumed tail of last DATA event (aliases curData)
-	curData   *[]byte   // pooled buffer backing buf/last event; recycled on next event/Close
+	ctx     context.Context
+	cancel  context.CancelFunc // cancels ctx in Close, waking a parked Read
+	stream  respStream
+	release func()    // returns conn to pool; called exactly once in Close
+	resp    *Response // written with trailers when EventTrailers arrives
+
+	// mu guards every field below it. This is an io.ReadCloser handed to the
+	// caller, and the convention that type carries — net/http's resp.Body — is
+	// that Close from another goroutine is how you abort a slow read. Without
+	// this, Close recycled the pooled DATA slab while an in-flight Read still
+	// aliased it through buf, so a later request could be handed the same slab
+	// and overwrite bytes this caller was about to copy out.
+	//
+	// mu is never held across stream.Recv or stream.Close: those block, and
+	// holding it there would make the abort wait for the read it is aborting.
+	mu      sync.Mutex
+	buf     []byte  // unconsumed tail of last DATA event (aliases curData)
+	curData *[]byte // pooled buffer backing buf/last event; recycled on next event/Close
+	done    bool    // no more events coming: END_STREAM, trailers, or reset
+	closed  bool    // Close ran; buf and curData are no longer ours to read
+
 	closeOnce sync.Once
-	done      bool
 	lg        *leakGuard // reports a leak if GC'd without Close (debug builds only)
 }
 
-// recycleData returns the current pooled DATA buffer to the pool. Safe only
-// when buf (which aliases it) has been fully consumed — true whenever a new
-// Recv is about to run (the buf>0 fast path returns before reaching Recv).
-func (r *responseBodyReader) recycleData() {
+// recycleDataLocked is recycleData with mu held. It clears buf as well as
+// curData: buf aliases the slab, so leaving it set would let a later Read copy
+// out of a buffer another request already owns.
+func (r *responseBodyReader) recycleDataLocked() {
 	if r.curData != nil {
 		putDataSlab(r.curData)
 		r.curData = nil
 	}
+	r.buf = nil
 }
 
 // Read implements io.Reader. Blocks on stream.Recv until DATA arrives,
 // fills p, and saves any surplus in r.buf for the next call. Returns
 // io.EOF when END_STREAM or EventTrailers is observed.
 func (r *responseBodyReader) Read(p []byte) (int, error) {
+	r.mu.Lock()
+	// closed, not done, gates the buf fast path below. They are different
+	// states: done means no more EVENTS are coming, and a surplus tail may
+	// still be sitting in buf waiting to be drained — the ordinary
+	// END_STREAM-with-remainder case. closed means Close ran, so buf aliases a
+	// slab that has gone back to the pool and must not be read at all.
+	if r.closed {
+		r.mu.Unlock()
+		return 0, io.EOF
+	}
 	if len(r.buf) > 0 {
 		n := copy(p, r.buf)
 		r.buf = r.buf[n:]
+		r.mu.Unlock()
 		return n, nil
 	}
 	if r.done {
+		r.mu.Unlock()
 		return 0, io.EOF
 	}
+	r.mu.Unlock()
 	for {
 		ev, err := r.stream.Recv(r.ctx)
 		if err != nil {
@@ -52,31 +80,47 @@ func (r *responseBodyReader) Read(p []byte) (int, error) {
 		}
 		switch ev.Type {
 		case conn.EventData:
+			r.mu.Lock()
 			// The previous frame's surplus was fully consumed before we
 			// reached this Recv, so its pooled buffer is safe to recycle.
-			r.recycleData()
+			r.recycleDataLocked()
+			if r.closed {
+				// Close landed while we were parked in Recv. The stream is gone
+				// and release() has run; hand this frame's slab straight back
+				// rather than storing it on a reader nobody will drain.
+				putDataSlab(ev.DataSlab)
+				r.mu.Unlock()
+				return 0, io.EOF
+			}
 			r.curData = ev.DataSlab
 			n := copy(p, ev.Data)
 			if n < len(ev.Data) {
 				r.buf = ev.Data[n:] // aliases r.curData until consumed
 			}
+			eof := false
 			if ev.EndStream {
 				r.done = true
-				if n == len(ev.Data) {
-					return n, io.EOF
-				}
+				eof = n == len(ev.Data)
+			}
+			r.mu.Unlock()
+			if eof {
+				return n, io.EOF
 			}
 			return n, nil
 		case conn.EventTrailers:
-			r.recycleData()
+			r.mu.Lock()
+			r.recycleDataLocked()
 			if r.resp != nil {
 				r.resp.Trailers = append(r.resp.Trailers[:0], ev.Headers...)
 			}
 			r.done = true
+			r.mu.Unlock()
 			return 0, io.EOF
 		case conn.EventReset:
-			r.recycleData()
+			r.mu.Lock()
+			r.recycleDataLocked()
 			r.done = true
+			r.mu.Unlock()
 			return 0, &StreamResetError{Code: ev.RSTCode}
 		case conn.EventInterimHeaders:
 			// Informational 1xx (RFC 7540 §8.1) — no body, stream continues.
@@ -99,8 +143,27 @@ func (r *responseBodyReader) Close() error {
 	var err error
 	r.closeOnce.Do(func() {
 		r.lg.disarm()
+		// Both outside mu on purpose: they release a Read parked in Recv, and
+		// holding the lock across them would make the abort wait for the very
+		// read it is aborting.
+		//
+		// The cancel is what actually wakes that Read. stream.Close tears the
+		// stream down but does not signal a Recv already blocked on the event
+		// channel, so without this an abort through the io.ReadCloser left the
+		// reader hanging until the caller's own deadline fired — Close returned
+		// promptly and the goroutine behind it did not.
+		if r.cancel != nil {
+			r.cancel()
+		}
 		err = r.stream.Close()
-		r.recycleData()
+		r.mu.Lock()
+		r.closed = true // later Reads return EOF instead of touching a freed slab
+		// Safe to recycle here: mu serialises this against every point where a
+		// Read touches curData or buf, and a Read parked in Recv holds no alias
+		// (the buf fast path returns before it reaches Recv). A Read that wakes
+		// afterwards sees closed and hands its own slab straight back.
+		r.recycleDataLocked()
+		r.mu.Unlock()
 		r.release()
 	})
 	return err
