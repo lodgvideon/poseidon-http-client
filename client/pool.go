@@ -278,6 +278,40 @@ func (p *Pool) handleAcquire(rs *runState, req acquireReq) {
 	rs.waiters = append(rs.waiters, req)
 }
 
+// ensureDialForWaiters starts a dial when queued waiters have nothing left to
+// wait for.
+//
+// serveWaiters can only hand out capacity that already exists, and eviction
+// routinely removes the last conn — a peer GOAWAY followed by its drain is the
+// ordinary trigger, not an error path. Without this the state {no live conns,
+// no in-flight dials, queued waiters} is TERMINAL: release, dial-done and tick
+// all pass through it without acting, so nothing re-enters the dial decision
+// and each waiter sits until its own context expires. Measured on the default
+// options: that state held across ~30 health-check ticks with the server still
+// dialable, and the waiter was served only when an unrelated request happened
+// to arrive. It is worse than the H1 case it was ported from, because a pool
+// whose every worker is already parked never receives that request.
+//
+// handleAcquire has always made this decision for a NEW request. The point is
+// that the decision belongs to the state, not to the arrival of work.
+//
+// Deliberately not called from handleStats: that path only removes conns which
+// were already not live, so it cannot create the terminal state, and a metrics
+// scrape must not open connections.
+func (p *Pool) ensureDialForWaiters(rs *runState) {
+	if len(rs.waiters) == 0 {
+		return
+	}
+	if countLive(rs.conns)+rs.inFlightDials >= p.opts.MaxConnsPerHost {
+		return
+	}
+	if inDialBackoff(rs.lastDialErrAt, p.opts.DialBackoff) {
+		return
+	}
+	rs.inFlightDials++
+	go p.dialOne()
+}
+
 // handleRelease decrements the conn's active count and evicts it once the
 // underlying connection is no longer alive AND the stream just released was its
 // last. This is the pool's only eviction site for a conn still carrying
@@ -300,6 +334,7 @@ func (p *Pool) handleRelease(rs *runState, msg releaseMsg) {
 		rs.conns = p.evict(rs.conns, msg.mc, reason)
 	}
 	rs.waiters = p.serveWaiters(rs.conns, rs.waiters)
+	p.ensureDialForWaiters(rs)
 }
 
 // handleDialDone processes a completed dial: on success the conn
@@ -313,11 +348,34 @@ func (p *Pool) handleDialDone(rs *runState, dr dialResult) {
 			rs.waiters = rs.waiters[1:]
 			p.replyAcquire(req, nil, dr.err)
 		}
+		// The waiters behind that one must not be left to a health-check tick.
+		// Either start another dial, or — when the pool is in exactly the state
+		// that makes handleAcquire fast-refuse a NEW request (dial backoff,
+		// nothing live, nothing in flight) — refuse them for the same reason.
+		// Leaving them queued is a priority inversion, and a sharper one here
+		// than on H1: measured, a fresh acquire was refused with ErrDialBackoff
+		// in 0ms while two earlier waiters stayed parked past the end of the
+		// backoff window and left only when the pool was closed. H1 drains one
+		// per tick; H2 has no tick-path dial at all, so it drains none.
+		//
+		// countLive excludes a GOAWAY'd conn still draining, which is right:
+		// draining streams can never become capacity for a waiter, since such a
+		// conn is evicted once its last stream ends and is never picked again.
+		// Waiters here are per-STREAM, so one failed dial can refuse a large
+		// queue at once — the same semantics as H1, and better than the hang.
+		p.ensureDialForWaiters(rs)
+		if rs.inFlightDials == 0 && countLive(rs.conns) == 0 {
+			for _, w := range rs.waiters {
+				p.replyAcquire(w, nil, dr.err)
+			}
+			rs.waiters = nil
+		}
 		return
 	}
 	p.refreshStreamCap(dr.mc)
 	rs.conns = append(rs.conns, dr.mc)
 	rs.waiters = p.serveWaiters(rs.conns, rs.waiters)
+	p.ensureDialForWaiters(rs)
 }
 
 // handleStats evicts dead conns silently and reports a snapshot.
@@ -339,7 +397,14 @@ func (p *Pool) handleTick(rs *runState) {
 	for _, mc := range rs.conns {
 		p.refreshStreamCap(mc)
 	}
+	// Serving before dialing is H2-specific. Per-conn capacity is dynamic here:
+	// a peer that raised SETTINGS_MAX_CONCURRENT_STREAMS makes existing conns
+	// able to serve waiters that had nothing to wait for a moment ago, and no
+	// other tick path offers them. Dialing first would open a connection the
+	// pool did not need.
+	rs.waiters = p.serveWaiters(rs.conns, rs.waiters)
 	rs.waiters = pruneExpiredWaiters(rs.waiters)
+	p.ensureDialForWaiters(rs)
 }
 
 // handleClose drains waiters and shuts down all connections.
