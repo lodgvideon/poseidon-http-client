@@ -41,6 +41,11 @@ type Response struct {
 	// Caller reads body bytes then calls Close(). Trailers (if any) are
 	// written into Response.Trailers just before Close returns io.EOF.
 	// Reset() calls Close() automatically when BodyReader is non-nil.
+	//
+	// Close may be called from another goroutine while a Read is in flight —
+	// the io.ReadCloser convention for aborting a slow read, as with
+	// net/http's Response.Body. It releases the blocked Read promptly, and
+	// every Read after it returns io.EOF.
 	BodyReader io.ReadCloser
 
 	// slabs holds pooled slab pointers that back Headers and Trailers
