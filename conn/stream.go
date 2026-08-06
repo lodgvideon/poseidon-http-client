@@ -815,12 +815,29 @@ func (s *Stream) Close() error {
 	bothEnded := s.localEnded && s.remoteEnded
 	connDone := s.connDone
 	w := s.w
+	nowClosed := false
 	if !closed && !bothEnded {
 		// Abandoning an incomplete stream: our RST is the sole teardown: the
 		// reader will never see END_STREAM to reach markStreamDone's own path.
 		s.closed = true
+		nowClosed = true
 	}
 	s.mu.Unlock()
+	if nowClosed {
+		// Wake a writer parked in acquireSendCredits so it observes s.closed and
+		// bails, exactly as OnRSTStream does for a peer reset. The bail-out check
+		// was written for that path and its broadcast came with it; this path
+		// sets the same flag and inherited neither, so a Send blocked on
+		// flow-control credit slept through the Close that was meant to abandon
+		// it and woke only when its own context expired. A condition variable's
+		// predicate is only as live as its broadcasts.
+		//
+		// Done with no lock held: the documented order is fcOutMu before
+		// Stream.mu, and wakeSendWaiters takes fcOutMu.
+		if c, ok := w.(*Conn); ok {
+			c.wakeSendWaiters()
+		}
+	}
 	if closed {
 		// Already closed (RST already sent by push overflow, or a peer
 		// reset/GOAWAY already tore this stream down); never pooled from here.

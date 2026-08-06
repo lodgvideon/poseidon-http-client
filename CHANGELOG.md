@@ -61,6 +61,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Closing a stream did not cancel a send blocked on flow-control credit.**
+  `acquireSendCredits` already bails with `ErrStreamClosed` when it sees the
+  stream closed — but only on wake, and it is parked in `cond.Wait()`. That
+  check and the broadcast that makes it observable were written together for
+  the peer `RST_STREAM` path (RFC 9113 §6.4). `Stream.Close` sets the same flag
+  and inherited neither, so a `SendData` blocked on an exhausted send window
+  slept through the `Close` meant to abandon it and woke only when its own
+  context expired — on the one API documented as how a client abandons a
+  request early. With a long-lived request context that is a stuck goroutine.
+  `Close` now wakes send waiters, as the peer-reset path does.
+
 - **Recycling a stream allocated a fresh event channel every time, in the**
   **path whose purpose is to avoid allocating** (#341). At gRPC's default of
   272 slots that is ~24 KiB per RPC — the largest single allocation the gRPC
