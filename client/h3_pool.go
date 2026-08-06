@@ -410,7 +410,10 @@ func (p *h3Pool) dialOne() {
 		}
 	}
 	if err != nil {
-		p.dialDoneCh <- h3DialResult{err: err}
+		// Wrapped for the same reason as the H2 pool: managedPool's failover
+		// and the retry classifier both key on *DialError, and a raw error
+		// disables both silently.
+		p.dialDoneCh <- h3DialResult{err: &DialError{Addr: p.addr, Err: err}}
 		return
 	}
 	mc := &h3ManagedConn{cl: cl, dialedAt: time.Now(), lastUsed: time.Now()}

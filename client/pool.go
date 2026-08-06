@@ -531,10 +531,20 @@ func (p *Pool) dialOne() {
 		}
 	}
 	if err != nil {
+		// Wrapped, not raw. "This failure came from dialing" is a fact only
+		// this site knows, and two consumers downstream have to act on it:
+		// managedPool's acquire loop moves to the next address only for a
+		// dial-only error, and the retry classifier treats one as retryable
+		// because nothing was sent. Handing them the bare dialer error made
+		// both silently do the wrong thing — failover aborted on the first
+		// address instead of trying the second, and a Retryer-wrapped client
+		// did not retry. DialError.Unwrap keeps errors.Is/As working on the
+		// cause, so no caller inspecting the underlying error is affected.
+		//
 		// Always deliver the result. Pool.Close drains every in-flight dial,
 		// so this send never blocks forever, and the watchdog above already
 		// cancels a hung dial's context when the pool closes.
-		p.dialDoneCh <- dialResult{err: err}
+		p.dialDoneCh <- dialResult{err: &DialError{Addr: p.addr, Err: err}}
 		return
 	}
 	mc := &managedConn{c: c, dialedAt: time.Now(), lastUsed: time.Now()}

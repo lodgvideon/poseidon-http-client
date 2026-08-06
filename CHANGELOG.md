@@ -26,6 +26,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **The HTTP/2 and HTTP/3 pools now report a failed dial as `*DialError`**
+  (#359). Two consumers classify on that type and both silently did the wrong
+  thing with the bare dialer error. `managedPool`'s acquire loop moves to the
+  next address only for a dial-only failure, so multi-address failover — a
+  documented feature — never fired on a first dial failure for either
+  transport; the HTTP/1.1 pool has always wrapped and always failed over.
+  `builtinShouldRetry` keys on the same type, so a `Retryer`-wrapped client
+  over a pooled H2/H3 transport did not retry a dial failure either, although
+  nothing had been sent.
+
+  That second effect is a behaviour change, not only a bug fix: a client
+  against a downed host goes from failing fast to `MaxAttempts` with backoff.
+  It matches every other transport — the single-conn H2, H3 and H1 paths all
+  wrapped already — and `DialError.Unwrap` keeps `errors.Is`/`errors.As`
+  working on the cause, so callers inspecting the underlying error are
+  unaffected.
+
 - **`grpc.Stream.CloseSend` no longer reports a peer-closed stream as a
   failure** (#337). It returns nil when the peer has already reset the stream,
   because half-closing one is then a no-op and failing made callers discard a
