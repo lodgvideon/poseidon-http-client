@@ -41,8 +41,17 @@ type groReader interface {
 // coalesced GRO burst when the transport supports batched receive, else the
 // single-datagram size (preserving the non-GRO buffer semantics).
 func (c *Conn) pollBufLen() int {
-	if _, ok := c.pc.(groReader); ok {
-		return groReadBuffer
+	// groCanCoalesce, not just the interface assertion. A transport may implement
+	// ReadGRO unconditionally — http3's udpConn does, so the tree builds
+	// everywhere — but off Linux RecvGRO is a plain Read that can never fill more
+	// than one datagram. Sizing on the assertion alone handed every connection a
+	// 64 KiB buffer instead of 2 KiB on Windows, macOS and the BSDs: 32x the
+	// memory, for a coalescing that cannot happen. On a pooled load generator
+	// that is the difference between ~2 MB and ~64 MB at a thousand connections.
+	if groCanCoalesce {
+		if _, ok := c.pc.(groReader); ok {
+			return groReadBuffer
+		}
 	}
 	return pollBufSize
 }

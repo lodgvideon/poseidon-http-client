@@ -80,11 +80,11 @@ func (u *udpConn) rawConn() syscall.RawConn {
 // that is unavailable the per-datagram fallback over u.c still delivers every
 // datagram.
 func (u *udpConn) WriteGSO(buf []byte, segSize int) (int, error) {
-	rc, err := u.c.SyscallConn()
-	if err != nil {
-		rc = nil // no raw fd: SendGSO degrades to a per-datagram loop over u.c
-	}
-	return quic.SendGSO(rc, u.c, buf, segSize)
+	// u.rawConn(), not u.c.SyscallConn(): the latter re-resolves and allocates a
+	// fresh syscall.RawConn on every send. The read side already cached it; this
+	// side called through to the socket each time. A nil result degrades SendGSO
+	// to a per-datagram loop over u.c, exactly as before.
+	return quic.SendGSO(u.rawConn(), u.c, buf, segSize)
 }
 
 // qpackDynamicTableCapacity is the SETTINGS_QPACK_MAX_TABLE_CAPACITY the client

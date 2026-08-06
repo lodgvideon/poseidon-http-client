@@ -61,6 +61,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Every QUIC connection carried a 64 KiB receive buffer on platforms that**
+  **cannot coalesce** (found while working #348). `pollBufLen` sized the buffer
+  on whether the transport implements `ReadGRO`, and http3's `udpConn`
+  implements it unconditionally so the tree builds everywhere — but off Linux
+  `RecvGRO` is a plain single-datagram `Read`. Windows, macOS and the BSDs
+  therefore got **32x the memory** (64 KiB instead of 2 KiB) per connection for
+  a coalescing that cannot happen; on a pooled load generator that is ~2 MB
+  versus ~64 MB at a thousand connections. Sizing is now gated on a
+  platform constant as well as the interface.
+- **`udpConn.WriteGSO` re-resolved the raw file descriptor on every send**,
+  calling `SyscallConn()` per datagram burst where the read side had cached it
+  since it was written.
+
 - **The QUIC packet-crypto path allocated on every packet** (part of #345).
   The AEAD nonce and the header-protection mask were built on the stack and
   returned by value, then handed to interface calls (`cipher.AEAD.Seal/Open`,
