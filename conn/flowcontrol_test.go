@@ -31,7 +31,9 @@ func TestIntegration_LargeBody_RefundsRecvWindow_NoStall(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	c := dialServer(t, srv, cfg)
+	// 64 events: the body is 200 KiB and the peer's frames are up to 16 KiB, so
+	// the default buffer of 8 can overflow before this test's loop drains it.
+	c := dialServerOpts(t, srv, cfg, 64)
 	defer c.Close()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -48,19 +50,7 @@ func TestIntegration_LargeBody_RefundsRecvWindow_NoStall(t *testing.T) {
 	}, true); err != nil {
 		t.Fatalf("SendHeaders: %v", err)
 	}
-	var got []byte
-	for {
-		ev, err := s.Recv(ctx)
-		if err != nil {
-			t.Fatalf("Recv after %d bytes: %v", len(got), err)
-		}
-		if ev.Type == EventData {
-			got = append(got, ev.Data...)
-		}
-		if ev.EndStream {
-			break
-		}
-	}
+	got := drainBody(ctx, t, s)
 	if len(got) != len(body) {
 		t.Fatalf("got %d bytes, want %d", len(got), len(body))
 	}
@@ -188,4 +178,81 @@ func parseWindowUpdates(t *testing.T, b []byte) []windowUpdateRecord {
 		b = b[9+length:]
 	}
 	return out
+}
+
+// TestIntegration_EventBufferOverflow_ReportsResetNotShortBody pins the
+// behaviour that made the CI failure above unreadable.
+//
+// When the caller falls behind the reader the connection cancels its own stream
+// by design (RFC 9113 §7 CANCEL — "the stream is no longer needed"), and the
+// EventReset it delivers carries EndStream. A drain loop that breaks on
+// EndStream without checking Type therefore exits as though the body were
+// complete, and the test reports a byte-count mismatch — which reads as data
+// corruption or a flow-control stall rather than "this caller was too slow".
+//
+// A one-slot buffer and a caller that does not drain makes the overflow
+// deterministic, so this documents the contract rather than racing it.
+func TestIntegration_EventBufferOverflow_ReportsResetNotShortBody(t *testing.T) {
+	const bodySize = 200 * 1024
+	body := make([]byte, bodySize)
+	if _, err := rand.Read(body); err != nil {
+		t.Fatalf("rand: %v", err)
+	}
+	srv, cfg := startH2TestServer(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("content-length", fmt.Sprintf("%d", len(body)))
+		_, _ = w.Write(body)
+	}))
+	defer srv.Close()
+
+	c := dialServerOpts(t, srv, cfg, 1)
+	defer c.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	s, err := c.NewStream(ctx)
+	if err != nil {
+		t.Fatalf("NewStream: %v", err)
+	}
+	if err := s.SendHeaders(ctx, []hpack.HeaderField{
+		{Name: []byte(":method"), Value: []byte("GET")},
+		{Name: []byte(":scheme"), Value: []byte("https")},
+		{Name: []byte(":authority"), Value: []byte("example.com")},
+		{Name: []byte(":path"), Value: []byte("/big")},
+	}, true); err != nil {
+		t.Fatalf("SendHeaders: %v", err)
+	}
+
+	// Do not drain: let the reader fill the one-slot buffer and overflow it.
+	time.Sleep(300 * time.Millisecond)
+
+	sawReset := false
+	total := 0
+	for {
+		ev, err := s.Recv(ctx)
+		if err != nil {
+			break // the stream is gone; the reset already happened
+		}
+		if ev.Type == EventReset {
+			sawReset = true
+			if ev.RSTCode != frame.ErrCodeCancel {
+				t.Fatalf("overflow reset code = %d, want CANCEL (%d)", ev.RSTCode, frame.ErrCodeCancel)
+			}
+			if !ev.EndStream {
+				t.Fatal("overflow reset did not carry EndStream — the misleading-break hazard would not exist")
+			}
+			break
+		}
+		if ev.Type == EventData {
+			total += len(ev.Data)
+		}
+		if ev.EndStream {
+			break
+		}
+	}
+	if !sawReset {
+		t.Skipf("no overflow observed (drained %d of %d bytes); the machine kept up", total, bodySize)
+	}
+	if total >= bodySize {
+		t.Fatalf("reset after a complete body (%d bytes) — overflow should truncate", total)
+	}
 }

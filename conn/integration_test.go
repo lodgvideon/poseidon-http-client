@@ -34,15 +34,57 @@ func startH2TestServer(t *testing.T, h http.Handler) (*httptest.Server, *tls.Con
 
 func dialServer(t *testing.T, srv *httptest.Server, cfg *tls.Config) *Conn {
 	t.Helper()
+	return dialServerOpts(t, srv, cfg, 0)
+}
+
+// dialServerOpts is dialServer with an explicit per-stream event-buffer size.
+// A test that reads a body larger than a few frames needs one: with the default
+// buffer, a reader that gets ahead of the test's drain loop overflows the
+// channel, and the connection then cancels its own stream by design. Under
+// coverage instrumentation the drain loop is slow enough for that to happen.
+func dialServerOpts(t *testing.T, srv *httptest.Server, cfg *tls.Config, eventBuf int) *Conn {
+	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 	c, err := Dial(ctx, srv.Listener.Addr().String(), ConnOptions{
-		Dialer: &TLSDialer{Config: cfg},
+		Dialer:            &TLSDialer{Config: cfg},
+		StreamEventBuffer: eventBuf,
 	})
 	if err != nil {
 		t.Fatalf("Dial: %v", err)
 	}
 	return c
+}
+
+// drainBody reads a stream to its end and returns the concatenated DATA.
+//
+// It distinguishes a reset from a clean end, which the bare `if ev.EndStream {
+// break }` loop most tests use cannot: the connection sets EndStream on the
+// EventReset it delivers when the event channel overflows, so that loop exits
+// as if the body were complete and the test then reports a byte-count mismatch.
+// That reads as data corruption when it is really "this test fell behind the
+// reader" — the failure it produced on CI cost a full investigation to tell
+// apart from a flow-control bug.
+func drainBody(ctx context.Context, t *testing.T, s *Stream) []byte {
+	t.Helper()
+	var got []byte
+	for {
+		ev, err := s.Recv(ctx)
+		if err != nil {
+			t.Fatalf("Recv after %d bytes: %v", len(got), err)
+		}
+		if ev.Type == EventReset {
+			t.Fatalf("stream reset with code %d after %d bytes — not a short body; "+
+				"if this is RSTCode 8 (CANCEL) the event buffer overflowed and this "+
+				"test needs a larger StreamEventBuffer", ev.RSTCode, len(got))
+		}
+		if ev.Type == EventData {
+			got = append(got, ev.Data...)
+		}
+		if ev.EndStream {
+			return got
+		}
+	}
 }
 
 func TestIntegration_EmptyGET(t *testing.T) {
