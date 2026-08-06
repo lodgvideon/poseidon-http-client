@@ -61,6 +61,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Recycling a stream allocated a fresh event channel every time, in the**
+  **path whose purpose is to avoid allocating** (#341). At gRPC's default of
+  272 slots that is ~24 KiB per RPC — the largest single allocation the gRPC
+  client made — and the plain HTTP/2 path paid 1.1 KiB per request for the
+  same thing. Measured end to end on a unary call: **35.4 KB/op down to 9.2
+  KB/op**, 107 allocations down to 101.
+
+  The replacement was justified as orphaning "a stale reference held by a
+  goroutine from the previous stream lifetime". That reasoning does not hold:
+  no writer in this package captures the channel — `push`, `deliverEnd`,
+  `endWithReset` and `shutdownStreams` all read the field at send time, so a
+  late writer lands in the new channel whether it was replaced or not. The
+  orphaning prevented nothing.
+
+  It was load-bearing for something else, undocumented: `shutdownStreams`
+  closes the channel when the connection reader dies, and a closed channel
+  survives the drain, so a struct pooled without repair hands the next request
+  a stream whose first `Recv` reports `ErrStreamClosed` before anything is
+  sent and whose first delivery panics the reader goroutine. The channel is
+  now replaced only when that actually happened, recorded at the close. The
+  two signal channels follow the same rule, using the flags that already guard
+  their closes.
+
 - **Pool evictions observed through `Stats()` were never counted, and a**
   **peer GOAWAY could be recorded as local idleness** (#359). `evictDeadSilent`
   closed a connection without incrementing `ConnsClosed`: silent was meant to
