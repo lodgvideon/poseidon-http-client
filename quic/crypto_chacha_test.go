@@ -41,7 +41,8 @@ func TestConformance_RFC9001_AppA5_ChaCha20(t *testing.T) {
 	// Header-protection mask from the RFC's 16-byte sample (RFC 9001 §5.4.4).
 	var hpKey [32]byte
 	copy(hpKey[:], keys.HP)
-	mask := chachaHeaderProtector{key: hpKey}.headerMask(unhex(t, "5e5cd55c41f69080575d7999c25a5bfb"))
+	var mask [5]byte
+	(&chachaHeaderProtector{key: hpKey}).headerMask(unhex(t, "5e5cd55c41f69080575d7999c25a5bfb"), &mask)
 	if want := unhex(t, "aefefe7d03"); !bytes.Equal(mask[:], want) {
 		t.Errorf("header mask = %x, want %x", mask[:], want)
 	}
@@ -132,7 +133,8 @@ func TestHeaderProtection_AES_ByteIdentical(t *testing.T) {
 	sample := unhex(t, "00112233445566778899aabbccddeeff")
 	var raw [16]byte
 	block.Encrypt(raw[:], sample)
-	got := aesHeaderProtector{block: block}.headerMask(sample)
+	var got [5]byte
+	(&aesHeaderProtector{block: block}).headerMask(sample, &got)
 	if !bytes.Equal(got[:], raw[:5]) {
 		t.Fatalf("aesHeaderProtector mask = %x, want raw ECB first 5 bytes %x", got[:], raw[:5])
 	}

@@ -83,6 +83,14 @@ type Conn struct {
 	largestRecv [numSpaces]uint64     // largest received packet number per space
 	haveRecv    [numSpaces]bool
 
+	// fh is the frame handler reused for every received packet. It used to be
+	// built fresh in recvDatagram, but ParseFrames takes a FrameHandler
+	// interface, so the composite literal escaped — 6 allocs and 168 B on every
+	// datagram received. Reset per packet by resetFrameHandler; safe to share
+	// because every field is per-packet state and recvDatagram runs under c.mu
+	// on the single reader goroutine.
+	fh connFrameHandler
+
 	sent           [numSpaces]sentSpace      // packets we sent, per space (ACK/RTT/loss)
 	rtt            rttStats                  // round-trip-time estimates (RFC 9002 §5)
 	now            func() time.Time          // clock (time.Now; overridable in tests)
