@@ -61,6 +61,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The HTTP/1.1 request head was written one segment at a time** (#356).
+  `WriteRequest` built the request line and every header field as a separate
+  `net.Buffers` segment for a `writev`, but writev is void through TLS —
+  crypto/tls has no vectored write, so `net.Buffers.WriteTo` falls back to one
+  `tls.Conn.Write` per segment, each its own TLS record and syscall: seven for
+  an ordinary head, where net/http sends one. The HTTP/2 stack solved this by
+  wrapping its transport in a `bufio.Writer`; the HTTP/1.1 path had no
+  equivalent. The head is now assembled into a reusable per-connection buffer
+  and written once. Measured, seven-segment head: TLS **7 syscalls -> 1**,
+  end-to-end HeadTLS 38.3 -> 6.1 us (-84%); plaintext stays at one syscall
+  (writev today) and drops 21 -> 11 allocs by shedding the per-line buffers, so
+  neither transport regresses. The single write is also atomic where
+  net.Buffers could put a good prefix of a rejected request on the wire.
+
 - **`frame.Framer.WritePing` allocated 8 B on every call**, on a path the
   inbound-PING echo reaches for every PING the peer sends (RFC 7540 §6.7). The
   `[8]byte` argument is a by-value array on the stack, and passing `data[:]`

@@ -122,6 +122,12 @@ const (
 	// it.
 	readBufSize = 16 * 1024
 
+	// headBufRetainMax caps how large the reusable head-assembly buffer may grow
+	// before it is dropped rather than kept for the next exchange, so one request
+	// with an enormous header block does not pin that memory for the connection's
+	// life. Matches readBufSize: an ordinary head is a few hundred bytes.
+	headBufRetainMax = 16 * 1024
+
 	// maxHeaderListBytes bounds a whole header or trailer block. A per-line
 	// cap cannot catch a server that sends endlessly many short, perfectly
 	// well-formed header lines, so the block needs its own ceiling on the
@@ -179,6 +185,18 @@ type Conn struct {
 	pendN   int
 	pendOK  bool
 	layered bool
+
+	// headBuf is the reusable scratch the request line + header block is
+	// assembled into, so the whole head goes out as ONE Write. net.Buffers used
+	// to carry each field line as its own segment for a writev, but writev is
+	// void through TLS — crypto/tls has no vectored write, so net.Buffers falls
+	// back to one tls.Conn.Write per segment, each its own record and syscall
+	// (seven for an ordinary head). conn/ solved the same problem for HTTP/2
+	// with a bufio.Writer; here one coalescing buffer does it without pinning
+	// the persistent 4-16 KiB a bufio.Writer would. Reused across exchanges
+	// under the one-exchange-at-a-time contract, same discipline as peerMinor;
+	// dropped when it grows past headBufRetainMax.
+	headBuf []byte
 
 	// wd is the connection's single context watchdog, re-armed around each
 	// blocking read or write instead of respawned. Its channels are made here
@@ -834,7 +852,8 @@ func validateFields(method, path, authority string, fields []hpack.HeaderField) 
 // endStream is false, WriteRequest adds "Transfer-Encoding: chunked" and
 // WriteBody writes RFC 7230 chunk framing.
 //
-// Uses net.Buffers (writev) to avoid copying all header bytes into one buffer.
+// Assembles the whole head into the connection's reusable buffer and writes it
+// once — see Conn.headBuf for why not net.Buffers.
 func (ex *Exchange) WriteRequest(ctx context.Context, fields []hpack.HeaderField, endStream bool) error {
 	// Checked synchronously: armDeadline's watchdog is asynchronous, so a short
 	// write can complete before it observes an already-dead context.
@@ -944,12 +963,16 @@ func (ex *Exchange) WriteRequest(ctx context.Context, fields []hpack.HeaderField
 		ex.reqChunked = true
 	}
 
-	// Build request using net.Buffers for scatter-gather write (writev on Linux).
-	var bufs net.Buffers
-	bufs = append(bufs,
-		[]byte(method+" "+path+" HTTP/1.1\r\n"),
-		[]byte("Host: "+authority+"\r\n"),
-	)
+	// Assemble the whole head into the connection's reusable buffer and send it
+	// as one Write — see Conn.headBuf for why not net.Buffers.
+	h := ex.c.headBuf[:0]
+	h = append(h, method...)
+	h = append(h, ' ')
+	h = append(h, path...)
+	h = append(h, " HTTP/1.1\r\n"...)
+	h = append(h, "Host: "...)
+	h = append(h, authority...)
+	h = append(h, "\r\n"...)
 
 	for _, f := range fields {
 		name := string(f.Name)
@@ -963,7 +986,10 @@ func (ex *Exchange) WriteRequest(ctx context.Context, fields []hpack.HeaderField
 			// H2 forbidden / hop-by-hop headers; we manage them ourselves.
 			continue
 		}
-		bufs = append(bufs, []byte(lower+": "+string(f.Value)+"\r\n"))
+		h = append(h, lower...)
+		h = append(h, ": "...)
+		h = append(h, f.Value...)
+		h = append(h, "\r\n"...)
 	}
 
 	// Body framing signals.
@@ -978,7 +1004,7 @@ func (ex *Exchange) WriteRequest(ctx context.Context, fields []hpack.HeaderField
 		if !hasContentLength {
 			switch method {
 			case "POST", "PUT", "PATCH":
-				bufs = append(bufs, []byte("Content-Length: 0\r\n"))
+				h = append(h, "Content-Length: 0\r\n"...)
 				// Recorded, not merely written: leaving reqContentLen at -1 meant
 				// the body reconciliation skipped this request, so a caller that
 				// went on to call WriteBody wrote a whole second request after a
@@ -988,21 +1014,21 @@ func (ex *Exchange) WriteRequest(ctx context.Context, fields []hpack.HeaderField
 			}
 		}
 	} else if ex.reqChunked {
-		bufs = append(bufs, []byte("Transfer-Encoding: chunked\r\n"))
+		h = append(h, "Transfer-Encoding: chunked\r\n"...)
 	}
 	// else: Content-Length already in user-supplied headers.
 
-	bufs = append(bufs, crlf) // blank line ending headers
+	h = append(h, "\r\n"...) // blank line ending headers
 
-	return ex.writeHead(ctx, bufs)
+	return ex.writeHead(ctx, h)
 }
 
 // writeHead puts the assembled head on the wire, condemning the exchange if the
 // socket failed part-way through.
 //
-// A failed head write is a PARTIAL head: net.Buffers.WriteTo reports the error
-// after some prefix has already gone, so the peer is mid-request-line or
-// mid-field and cannot resynchronise. Condemning is what stops ReadResponse's
+// A failed head write is a PARTIAL head: a short Write reports the error after
+// some prefix has already gone, so the peer is mid-request-line or mid-field
+// and cannot resynchronise. Condemning is what stops ReadResponse's
 // `keepAlive = respMinor >= 1 && !ex.condemned` from handing the socket back —
 // the read side has had this invariant as a blanket defer since #310, and the
 // write side simply never did.
@@ -1010,10 +1036,20 @@ func (ex *Exchange) WriteRequest(ctx context.Context, fields []hpack.HeaderField
 // Split out from WriteRequest only because that function is at the gocyclo
 // ceiling; the split is along the seam where the head stops being assembled and
 // starts being sent.
-func (ex *Exchange) writeHead(ctx context.Context, bufs net.Buffers) error {
+func (ex *Exchange) writeHead(ctx context.Context, head []byte) error {
+	// Keep the assembled buffer for the next exchange on this connection, but
+	// drop an outsized one rather than pin it for the connection's life. The
+	// bytes have been read into `head`, so retaining it is safe regardless of
+	// how the Write below goes. Done here rather than in WriteRequest to keep
+	// that function under the gocyclo ceiling.
+	if cap(head) <= headBufRetainMax {
+		ex.c.headBuf = head
+	} else {
+		ex.c.headBuf = nil
+	}
 	armed := ex.c.armDeadline(ctx, writeDeadline)
 	defer ex.c.releaseDeadline(writeDeadline, armed)
-	_, err := bufs.WriteTo(ex.c.nc)
+	_, err := ex.c.nc.Write(head)
 	if err != nil {
 		ex.keepAlive, ex.condemned = false, true
 	}
