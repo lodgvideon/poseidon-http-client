@@ -90,7 +90,7 @@ func TestWarmup_NoActiveLeak(t *testing.T) {
 	if err != nil {
 		t.Fatalf("seed acquire: %v", err)
 	}
-	p.release(mc, nil)
+	p.release(mc)
 
 	p.warmup(2)
 
@@ -166,7 +166,7 @@ func TestPoolClose_NoDialDoneLeak(t *testing.T) {
 			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 			defer cancel()
 			if mc, err := p.acquire(ctx); err == nil {
-				p.release(mc, nil)
+				p.release(mc)
 			}
 		}()
 		time.Sleep(time.Millisecond)

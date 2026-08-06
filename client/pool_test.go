@@ -376,7 +376,7 @@ func TestPool_Release_NilMC_NoOp(t *testing.T) {
 	t.Cleanup(func() { _ = p.Close() })
 
 	// Must not panic or block.
-	p.release(nil, nil)
+	p.release(nil)
 }
 
 // --- release when pool is closed (closedCh branch) ---
@@ -396,7 +396,7 @@ func TestPool_Release_PoolClosed_NoDeadlock(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		p.release(mc, nil)
+		p.release(mc)
 	}()
 	select {
 	case <-done:
