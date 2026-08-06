@@ -541,8 +541,9 @@ func (c *Conn) recvDatagram(datagram []byte) error {
 		if len(payload) == 0 {
 			return ErrProtocolViolation
 		}
-		fh := connFrameHandler{c: c, space: sp}
-		if err := ParseFrames(payload, &fh); err != nil {
+		fh := &c.fh
+		fh.reset(c, sp)
+		if err := ParseFrames(payload, fh); err != nil {
 			return err
 		}
 		c.acks[sp].receive(pn, fh.ackEliciting)
@@ -588,6 +589,20 @@ type connFrameHandler struct {
 	sawAck        bool   // an ACK frame was seen (run loss detection after parsing)
 	ackLow        uint64 // smallest packet number of the ACK range being decoded
 	priorInFlight uint64 // bytes in flight before this ACK frame, for the §7.8 cwnd-limited test
+}
+
+// reset re-arms the handler for one received packet. Every field is per-packet
+// state, so this must clear all of them: the handler is reused across packets
+// (it lives on the Conn to keep ParseFrames from escaping a fresh one each
+// time), and a field left set would carry, say, a previous packet's sawAck into
+// a packet that carried no ACK — running loss detection against stale ranges.
+func (h *connFrameHandler) reset(c *Conn, space int) {
+	h.c = c
+	h.space = space
+	h.ackEliciting = false
+	h.sawAck = false
+	h.ackLow = 0
+	h.priorInFlight = 0
 }
 
 // OnAck processes the first (largest) range of an ACK frame: it acknowledges
