@@ -42,8 +42,8 @@ func TestBuildHeaders_CredentialsMarkedSensitive(t *testing.T) {
 			continue
 		}
 		seen[n] = true
-		if h.Sensitive != want[n] {
-			t.Errorf("%q Sensitive = %v, want %v", n, h.Sensitive, want[n])
+		if h.Sensitive() != want[n] {
+			t.Errorf("%q Sensitive = %v, want %v", n, h.Sensitive(), want[n])
 		}
 	}
 	for n := range want {
@@ -58,9 +58,9 @@ func TestBuildHeaders_CredentialsMarkedSensitive(t *testing.T) {
 func TestBuildHeaders_CallerSensitiveIsPreserved(t *testing.T) {
 	cc := &ClientConn{opts: Options{}.defaulted()}
 	cc.opts.Authority = "example.com"
-	md := []conn.HeaderField{{Name: []byte("x-api-key"), Value: []byte("k"), Sensitive: true}}
+	md := []conn.HeaderField{{Name: []byte("x-api-key"), Value: []byte("k"), Indexing: conn.IndexNever}}
 	for _, h := range cc.buildHeaders(context.Background(), "/t.S/M", md) {
-		if string(h.Name) == "x-api-key" && !h.Sensitive {
+		if string(h.Name) == "x-api-key" && !h.Sensitive() {
 			t.Fatal("caller-set Sensitive was cleared")
 		}
 	}

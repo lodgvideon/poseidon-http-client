@@ -1408,7 +1408,7 @@ func copyHeaders(in []conn.HeaderField) []conn.HeaderField {
 	for i := range in {
 		out[i].Name = append([]byte(nil), in[i].Name...)
 		out[i].Value = append([]byte(nil), in[i].Value...)
-		out[i].Sensitive = in[i].Sensitive
+		out[i].Indexing = in[i].Indexing
 	}
 	return out
 }

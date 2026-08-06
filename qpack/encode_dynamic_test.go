@@ -160,7 +160,7 @@ func TestConformance_RFC9204_Sec71_SensitiveNeverIndexed(t *testing.T) {
 		t.Fatalf("NewDynamicEncoder: %v", err)
 	}
 	enc.DrainEncoderInstructions(nil) // drop the Set Dynamic Table Capacity instruction
-	secret := []hpack.HeaderField{{Name: []byte("authorization"), Value: []byte("Bearer s3cr3t"), Sensitive: true}}
+	secret := []hpack.HeaderField{{Name: []byte("authorization"), Value: []byte("Bearer s3cr3t"), Indexing: hpack.IndexNever}}
 	// Encode it three times: without the sensitive flag the second pass would
 	// insert it and the third would reference it Base-relative.
 	for round := 0; round < 3; round++ {

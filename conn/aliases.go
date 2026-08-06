@@ -14,10 +14,24 @@ type (
 
 	// HeaderField is a decoded HPACK name/value pair.
 	HeaderField = hpack.HeaderField
+
+	// IndexingMode selects a header field's HPACK literal representation, and
+	// therefore whether it enters the dynamic table.
+	IndexingMode = hpack.IndexingMode
 )
 
 const (
 	// ErrCodeRefusedStream is the HTTP/2 error code indicating the peer
 	// refused to accept the stream (used in GOAWAY / RST_STREAM context).
 	ErrCodeRefusedStream = frame.ErrCodeRefusedStream
+
+	// IndexIncremental indexes the field into the dynamic table (the default).
+	IndexIncremental = hpack.IndexIncremental
+
+	// IndexWithout keeps a per-request-varying field out of the dynamic table
+	// without claiming any security meaning.
+	IndexWithout = hpack.IndexWithout
+
+	// IndexNever marks a field never-indexed, which intermediaries must honour.
+	IndexNever = hpack.IndexNever
 )

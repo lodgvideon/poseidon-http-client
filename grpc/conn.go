@@ -286,15 +286,24 @@ func (cc *ClientConn) buildHeaders(ctx context.Context, method string, md []conn
 		hdrs = append(hdrs, conn.HeaderField{
 			Name:  []byte("grpc-timeout"),
 			Value: []byte(encodeTimeout(time.Until(dl))),
+			// The remaining time, at the finest unit that fits 8 digits — so a
+			// different value on essentially every RPC. Indexing it would insert
+			// an entry that can never be matched again and evict one that could,
+			// churning the connection's dynamic table for the life of the conn.
+			// Not IndexNever: a deadline is not a credential, and §7.1.3 binds
+			// intermediaries to preserve what that mode marks.
+			Indexing: conn.IndexWithout,
 		})
 	}
 	for i := range md {
 		f := md[i]
-		// The floor, not the ceiling: a caller who never sets Sensitive would
-		// otherwise have their credential added to the connection's HPACK
+		// The floor, not the ceiling: a caller who never asks for never-indexed
+		// would otherwise have their credential added to the connection's HPACK
 		// dynamic table, where it outlives the RPC and is emitted as a
 		// one-byte index on every later call. Mirrors http3/request.go.
-		f.Sensitive = f.Sensitive || defaultSensitiveField(f.Name)
+		if defaultSensitiveField(f.Name) {
+			f.Indexing = conn.IndexNever
+		}
 		hdrs = append(hdrs, f)
 	}
 	return hdrs
