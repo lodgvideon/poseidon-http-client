@@ -61,6 +61,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The ACK tracker re-sorted its whole range set on every received packet**
+  (rest of #345). `receive` appended the new packet number and called
+  `sort.Slice`, whose reflect-based swapper allocates — **88 B/op and 3 allocs
+  on every packet the peer sent** — to re-sort a slice that was already sorted
+  apart from the one element just appended. Because the ranges are kept
+  disjoint and non-adjacent, a single packet number can touch at most the range
+  directly above it and the one directly below, so it is now an ordered insert
+  with four cases. **0 B/op, 0 allocs**; 860 -> 21.6 ns in the permanently
+  gapped worst case and 71.7 -> 4.8 ns for contiguous arrivals. Verified
+  against the previous implementation kept verbatim as a differential oracle.
+
 - **The QUIC packet-crypto path allocated on every packet** (part of #345).
   The AEAD nonce and the header-protection mask were built on the stack and
   returned by value, then handed to interface calls (`cipher.AEAD.Seal/Open`,
