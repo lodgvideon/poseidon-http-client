@@ -13,14 +13,25 @@ import (
 func TestConformance_RFC9001_Sec53_Nonce(t *testing.T) {
 	var iv [12]byte
 	copy(iv[:], unhex(t, "fa044b2f42a3fd3b46fb255c")) // A.1 client iv
-	if got := makeNonce(iv, 2); !bytes.Equal(got[:], unhex(t, "fa044b2f42a3fd3b46fb255e")) {
+	var got [12]byte
+	putNonce(&got, iv, 2)
+	if !bytes.Equal(got[:], unhex(t, "fa044b2f42a3fd3b46fb255e")) {
 		t.Errorf("nonce(pn=2) = %x, want ...255e", got)
 	}
-	if got := makeNonce(iv, 0x1234); !bytes.Equal(got[:], unhex(t, "fa044b2f42a3fd3b46fb3768")) {
+	putNonce(&got, iv, 0x1234)
+	if !bytes.Equal(got[:], unhex(t, "fa044b2f42a3fd3b46fb3768")) {
 		t.Errorf("nonce(pn=0x1234) = %x, want ...3768", got)
 	}
-	if got := makeNonce(iv, 0); !bytes.Equal(got[:], iv[:]) {
+	putNonce(&got, iv, 0)
+	if !bytes.Equal(got[:], iv[:]) {
 		t.Errorf("nonce(pn=0) = %x, want the IV unchanged", got)
+	}
+	// putNonce overwrites rather than XORing into whatever was there: the
+	// scratch it writes to is reused across every packet on a connection, so a
+	// stale nonce leaking into the next packet would be a protocol break.
+	putNonce(&got, iv, 2)
+	if !bytes.Equal(got[:], unhex(t, "fa044b2f42a3fd3b46fb255e")) {
+		t.Errorf("reused scratch: nonce(pn=2) = %x, want ...255e", got)
 	}
 }
 

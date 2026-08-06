@@ -61,6 +61,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The QUIC packet-crypto path allocated on every packet** (part of #345).
+  The AEAD nonce and the header-protection mask were built on the stack and
+  returned by value, then handed to interface calls (`cipher.AEAD.Seal/Open`,
+  `headerProtector.headerMask`), so both escaped: **32 B and 2 allocs per
+  packet sealed**, plus the mask again per packet opened. Both now write
+  through per-Sealer/Opener scratch. The per-packet frame handler escaped the
+  same way through `ParseFrames`' interface parameter and is now a reset-per-
+  packet field on `Conn`. Seal and header-open are both **0 B/op, 0 allocs**.
+  `quic` is inside the enforced zero-alloc bench-gate, but the package had no
+  packet-crypto benchmark at all — only send-path ones that self-skip — so the
+  gate had nothing to fail on; `BenchmarkSealPacket` and `BenchmarkOpenPacket`
+  close that. The ChaCha20 header protector still allocates a cipher per packet
+  (no re-key API for a per-packet nonce); AES-GCM is the default suite.
+
 - **BREAKING: `hpack.HeaderField.Sensitive bool` is replaced by**
   **`Indexing hpack.IndexingMode`** (#332), adding RFC 7541 §6.2.2 literal
   without indexing, which the encoder could not emit. A caller previously had
