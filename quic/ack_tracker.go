@@ -1,7 +1,5 @@
 package quic
 
-import "sort"
-
 // pnRange is an inclusive range of received packet numbers.
 type pnRange struct{ lo, hi uint64 }
 
@@ -69,33 +67,61 @@ func (a *ackTracker) receive(pn uint64, ackEliciting bool) {
 	if !isNew {
 		return // already recorded; range set unchanged
 	}
-	a.ranges = append(a.ranges, pnRange{pn, pn})
-	sort.Slice(a.ranges, func(i, j int) bool { return a.ranges[i].hi > a.ranges[j].hi })
-	merged := a.ranges[:1]
-	for _, r := range a.ranges[1:] {
-		last := &merged[len(merged)-1]
-		if r.hi+1 >= last.lo {
-			if r.lo < last.lo {
-				last.lo = r.lo
-			}
-		} else {
-			merged = append(merged, r)
-		}
-	}
-	// Drop the oldest ranges past the cap. merged is sorted descending by upper
+	a.insert(pn)
+	// Drop the oldest ranges past the cap. ranges is sorted descending by upper
 	// bound, so the newest — including the largest received, which the peer needs
 	// for loss detection and RTT — are kept.
-	if len(merged) > maxAckRanges {
+	if len(a.ranges) > maxAckRanges {
 		// Everything up to the top of the highest DROPPED range is no longer
 		// decidable, so that is the floor — not the bottom of the last retained
 		// range. The numbers between the two were never received, and at this moment
 		// we can still prove it, so they stay decidably new. The floor only rises.
-		if lw := merged[maxAckRanges].hi + 1; !a.truncated || lw > a.lowWater {
+		if lw := a.ranges[maxAckRanges].hi + 1; !a.truncated || lw > a.lowWater {
 			a.lowWater, a.truncated = lw, true
 		}
-		merged = merged[:maxAckRanges]
+		a.ranges = a.ranges[:maxAckRanges]
 	}
-	a.ranges = merged
+}
+
+// insert adds pn — known not to be contained in any existing range — keeping
+// ranges sorted descending by upper bound, non-overlapping and non-adjacent.
+//
+// This used to be append + sort.Slice + a full merge pass on every received
+// packet. sort.Slice takes a reflect-based swapper, which allocates, so every
+// packet the peer sent cost heap traffic on the receive path — and it re-sorted
+// a slice that was already sorted apart from the one element just appended.
+//
+// Because the invariant holds on entry, a single packet number can touch at
+// most two ranges: the one directly above it and the one directly below. So the
+// whole operation is a position search plus one of four cases.
+//
+// Adjacency is tested as hi+1 == pn and lo == pn+1, never pn-1 == hi. Packet
+// numbers start at zero, and pn-1 on pn == 0 underflows to MaxUint64, which
+// would read as adjacent to a range ending at the top of the space.
+func (a *ackTracker) insert(pn uint64) {
+	// i is the first range whose upper bound is below pn. Everything before it
+	// sits entirely above pn, since pn is contained in none of them.
+	i := 0
+	for i < len(a.ranges) && a.ranges[i].hi >= pn {
+		i++
+	}
+	mergeUp := i > 0 && a.ranges[i-1].lo == pn+1             // extends the range above downwards
+	mergeDown := i < len(a.ranges) && a.ranges[i].hi+1 == pn // extends the range below upwards
+
+	switch {
+	case mergeUp && mergeDown:
+		// pn fills the last hole between two ranges; they become one.
+		a.ranges[i-1].lo = a.ranges[i].lo
+		a.ranges = append(a.ranges[:i], a.ranges[i+1:]...)
+	case mergeUp:
+		a.ranges[i-1].lo = pn
+	case mergeDown:
+		a.ranges[i].hi = pn
+	default:
+		a.ranges = append(a.ranges, pnRange{})
+		copy(a.ranges[i+1:], a.ranges[i:])
+		a.ranges[i] = pnRange{pn, pn}
+	}
 }
 
 // ackPending reports whether an ACK is owed (an ack-eliciting packet has been
