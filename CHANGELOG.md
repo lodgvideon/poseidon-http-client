@@ -61,6 +61,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The HTTP/3 send path copied the whole request body to prepend a**
+  **<=9-byte DATA frame header** (#347, part 1). `sendRequest` materialised the
+  body into a fresh contiguous DATA buffer via `AppendData`, and that copy
+  bought nothing: the QUIC layer takes its own retransmit copy of every chunk
+  regardless, so the body was copied twice before the wire. Measured at
+  ~`len(body)` B/op per request (12,296 -> 16 at an 11 KiB body). The DATA
+  header now rides the request-owned HEADERS buffer and the body streams
+  directly. Deliberately not the issue's two-write form — a lone 9-byte send
+  would flush a GSO batch by itself, one extra datagram and syscall per
+  request, the wrong trade on a stack whose ceiling is the syscall rate; riding
+  the header on the HEADERS datagram keeps the datagram count unchanged. Wire
+  bytes and FIN placement are byte-identical to before, pinned across body
+  sizes from 0 to 256 KiB.
+
 - **Closing a stream did not cancel a send blocked on flow-control credit.**
   `acquireSendCredits` already bails with `ErrStreamClosed` when it sees the
   stream closed — but only on wake, and it is parked in `cond.Wait()`. That
