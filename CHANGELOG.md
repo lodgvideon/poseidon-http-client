@@ -75,6 +75,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   bytes and FIN placement are byte-identical to before, pinned across body
   sizes from 0 to 256 KiB.
 
+- **`frame.Framer.WritePing` allocated 8 B on every call**, on a path the
+  inbound-PING echo reaches for every PING the peer sends (RFC 7540 §6.7). The
+  `[8]byte` argument is a by-value array on the stack, and passing `data[:]`
+  through `writeFrame`'s `io.Writer` forced it to the heap. It escaped the
+  bench-gate's zero-allocation guarantee only because no PING benchmark was
+  checked in. `WritePing` now copies into the Framer's heap-resident scratch
+  first, as `WriteWindowUpdate` already does; a benchmark for it and for
+  `WriteWindowUpdate` are added so the gate catches a regression.
+
 - **Closing a stream did not cancel a send blocked on flow-control credit.**
   `acquireSendCredits` already bails with `ErrStreamClosed` when it sees the
   stream closed — but only on wake, and it is parked in `cond.Wait()`. That
