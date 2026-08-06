@@ -541,6 +541,9 @@ func (p *h1Pool) evictDeadSilent(conns []*h1ManagedConn) []*h1ManagedConn {
 	for _, mc := range conns {
 		if !mc.c.IsAlive() {
 			_ = mc.c.Close()
+			// Counted, not notified — see the H2 sibling's comment. HTTP/1.1
+			// has no GOAWAY, so there is no second counter to attribute.
+			p.metrics.Counters.ConnsClosed.Add(1)
 			continue
 		}
 		out = append(out, mc)
