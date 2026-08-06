@@ -1811,6 +1811,13 @@ func (c *Conn) shutdownStreams(reason error) {
 		default:
 			s.signalReset(frame.ErrCodeInternalError)
 		}
+		// Recorded before the close so the recycle path knows the channel needs
+		// replacing. This is the only site that closes s.events, and a closed
+		// channel survives a drain — len() and receive both keep working on it —
+		// so a struct pooled without repair would hand the next request a channel
+		// that reports ErrStreamClosed before anything is sent, and panic the
+		// reader goroutine on the first delivery.
+		s.eventsClosed.Store(true)
 		close(s.events)
 	}
 	// Wake any writer parked in acquireSendCredits. The connection is dead, so the

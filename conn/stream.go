@@ -198,6 +198,12 @@ type Stream struct {
 	// every caller once code is 0 and closes the channel twice.
 	resetSignalled atomic.Bool
 
+	// eventsClosed records that shutdownStreams closed s.events. It is the only
+	// reason the recycle path has to replace the channel rather than reuse it,
+	// and replacing a 272-slot channel — grpc's default — costs 24 KiB on every
+	// RPC, in the path whose whole purpose is to avoid allocating.
+	eventsClosed atomic.Bool
+
 	// endSignal is closed when the terminal DATA frame could not be enqueued.
 	// It is the clean-completion sibling of resetSignal: that frame carries no
 	// payload, only the fact that the response is over, so losing the stream
@@ -374,11 +380,25 @@ func (s *Stream) resetForPoolLocked() {
 	for len(s.events) > 0 {
 		<-s.events
 	}
-	// Recreate the events channel with the same capacity. Any stale
-	// reference held by a goroutine from the previous stream lifetime
-	// (e.g. a deferred push/RST send) now writes to the orphaned old
-	// channel, preventing cross-stream event contamination.
-	s.events = make(chan StreamEvent, cap(s.events))
+	// Replace the channel only when shutdownStreams closed it. A closed
+	// channel survives the drain above, so reusing one would hand the next
+	// request a stream whose first Recv reports ErrStreamClosed and whose
+	// first delivery panics the connection reader with a send on a closed
+	// channel.
+	//
+	// It used to be replaced unconditionally, to orphan "a stale reference
+	// held by a goroutine from the previous stream lifetime". That reasoning
+	// does not hold: no writer in this package captures the channel. push,
+	// deliverEnd, endWithReset and shutdownStreams all read s.events at send
+	// time, so a late writer lands in the NEW channel whether it was replaced
+	// or not — the orphaning prevented nothing, while costing 24 KiB per RPC
+	// at grpc's 272-slot default and 1.1 KiB at conn's own 8. What stops a
+	// late writer is the id gate in endWithReset and the closed flag that
+	// keeps an overflowed stream out of the pool entirely.
+	if s.eventsClosed.Load() {
+		s.events = make(chan StreamEvent, cap(s.events))
+		s.eventsClosed.Store(false)
+	}
 	s.id = 0
 	s.w = nil
 	s.localEnded = false
@@ -403,11 +423,17 @@ func (s *Stream) resetForPoolLocked() {
 	s.reqIsHead = false
 	s.recvRefundPending = 0
 	s.sendWindow = 0
-	s.resetSignal = make(chan struct{})
+	// Same rule for the two signal channels, and the flag that guards each
+	// close is exactly "this channel is closed", so it doubles as the test.
+	if s.resetSignalled.Load() {
+		s.resetSignal = make(chan struct{})
+		s.resetSignalled.Store(false)
+	}
 	s.resetCode.Store(0)
-	s.resetSignalled.Store(false)
-	s.endSignal = make(chan struct{})
-	s.endSignalled.Store(false)
+	if s.endSignalled.Load() {
+		s.endSignal = make(chan struct{})
+		s.endSignalled.Store(false)
+	}
 	// recvActive is zero by construction — this only runs with no reader
 	// registered — but recycleWanted must not survive into the next lifetime,
 	// or the first Recv of the reused stream would recycle it on exit.
