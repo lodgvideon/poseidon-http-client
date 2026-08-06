@@ -67,7 +67,7 @@ func benchPool(b *testing.B, groupCommit bool, conns, maxStreams, workers int) {
 
 	c, err := client.NewPoolClient(srv.Listener.Addr().String(), d,
 		client.PoolOptions{MaxConnsPerHost: conns, MaxStreamsPerConn: maxStreams},
-		client.WithConnOptions(func(co *conn.ConnOptions) { co.GroupCommit = groupCommit }))
+		client.WithConnOptions(func(co *conn.ConnOptions) { co.DisableGroupCommit = !groupCommit }))
 	if err != nil {
 		b.Fatalf("NewPoolClient: %v", err)
 	}

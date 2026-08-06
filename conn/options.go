@@ -108,15 +108,33 @@ type ConnOptions struct {
 	// EventPushPromise on the parent stream's Recv channel.
 	EnablePush bool
 
-	// GroupCommit enables group-commit write batching (opt-in, default off).
-	// When a HEADERS writer finds another writer queued on the write lock, it
-	// defers its flush so the next holder batches both frames into a single
-	// tls.Conn.Write — fewer TLS record encrypts + socket writes under high
-	// per-connection stream concurrency. It is a strict no-op when there is no
-	// contention (a lone request is never delayed) and preserves per-frame
-	// write-error semantics. Trades a bounded amount of client-side batching
-	// for throughput; leave off for latency-fidelity-critical measurements.
-	GroupCommit bool
+	// DisableGroupCommit turns off group-commit write batching, which is ON by
+	// default. When a HEADERS writer finds another writer queued on the write
+	// lock, it defers its flush so the next holder batches both frames into a
+	// single tls.Conn.Write — fewer TLS record encrypts and socket writes under
+	// per-connection stream concurrency.
+	//
+	// The default is on because the batching is a strict no-op without
+	// contention: the deferral is gated on another HEADERS writer already being
+	// queued, so a lone request takes the same code path as with it disabled and
+	// is never delayed. Measured on Linux over one TLS h2 connection, 3000
+	// requests per point, batching on versus off:
+	//
+	//	workers   p50        p99        frames/flush
+	//	1         -1.0%      -6.1%      1.00
+	//	2         -0.1%      +0.6%      1.01
+	//	4         -1.7%      +2.3%      1.19
+	//	8         -22.8%     -30.6%     1.70
+	//	64        -62.4%     -51.2%     9.71
+	//
+	// The 1-4 worker rows are noise (their sign flips between runs); frames per
+	// flush stays 1.00 at one worker, which is the no-op property showing up in
+	// the data. From 8 workers up both the median and the tail improve, because
+	// the syscalls it removes were themselves the queueing.
+	//
+	// Set this to disable it for latency-fidelity-critical measurements where
+	// any client-side batching is unacceptable regardless of its effect.
+	DisableGroupCommit bool
 }
 
 func (o ConnOptions) defaulted() ConnOptions {

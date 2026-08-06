@@ -69,7 +69,7 @@ func benchSetupCounting(b *testing.B, groupCommit bool) (*Conn, *flushCountConn,
 	dialer := &countingDialer{inner: &TLSDialer{Config: cfg}}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	c, err := Dial(ctx, srv.Listener.Addr().String(), ConnOptions{Dialer: dialer, GroupCommit: groupCommit})
+	c, err := Dial(ctx, srv.Listener.Addr().String(), ConnOptions{Dialer: dialer, DisableGroupCommit: !groupCommit})
 	if err != nil {
 		b.Fatalf("Dial: %v", err)
 	}

@@ -61,6 +61,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **BREAKING: group-commit write batching is now ON by default.**
+  `ConnOptions.GroupCommit bool` is replaced by `ConnOptions.DisableGroupCommit`
+  `bool` (#360), so the zero value is the enabled one. A caller that set
+  `GroupCommit: true` gets a compile error rather than a silent change of
+  meaning; a caller that wants the old default sets `DisableGroupCommit: true`.
+  The feature was measured and shipped in v0.8.0 but left opt-in, so no default
+  user got it — on a library whose target is load generators, that default was
+  inverted. Measured on Linux over one TLS h2 connection, 3000 requests per
+  point, on versus off: p50/p99 change is noise at 1-4 concurrent streams
+  (sign flips between runs) and frames-per-flush stays 1.00 at one stream — the
+  batching is a strict no-op without contention, so a lone request is never
+  delayed. From 8 streams up both median and tail improve (-22.8%/-30.6% at 8,
+  -62.4%/-51.2% at 64), because the syscalls it removes were the queueing.
+
 - **The ACK tracker re-sorted its whole range set on every received packet**
   (rest of #345). `receive` appended the new packet number and called
   `sort.Slice`, whose reflect-based swapper allocates — **88 B/op and 3 allocs

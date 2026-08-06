@@ -56,7 +56,7 @@ func TestGroupCommit_ConcurrentGETs_NoDeadlock(t *testing.T) {
 	dialer := &countingDialer{inner: &TLSDialer{Config: cfg}}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	c, err := Dial(ctx, srv.Listener.Addr().String(), ConnOptions{Dialer: dialer, GroupCommit: true})
+	c, err := Dial(ctx, srv.Listener.Addr().String(), ConnOptions{Dialer: dialer})
 	if err != nil {
 		t.Fatalf("Dial: %v", err)
 	}
@@ -158,7 +158,7 @@ func TestGroupCommit_WriteError_SurfacesNoHang(t *testing.T) {
 	dialer := &faultDialer{inner: &TLSDialer{Config: cfg}}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	c, err := Dial(ctx, srv.Listener.Addr().String(), ConnOptions{Dialer: dialer, GroupCommit: true})
+	c, err := Dial(ctx, srv.Listener.Addr().String(), ConnOptions{Dialer: dialer})
 	if err != nil {
 		t.Fatalf("Dial: %v", err)
 	}
@@ -216,5 +216,65 @@ func TestGroupCommit_WriteError_SurfacesNoHang(t *testing.T) {
 	}
 	if errSeen.Load() == 0 {
 		t.Fatal("expected the injected write failure to surface as an error")
+	}
+}
+
+// TestGroupCommit_OnByDefault pins the default. The zero ConnOptions must build
+// a connection whose batcher is enabled, and DisableGroupCommit must switch it
+// off — the inverted field name exists precisely so the zero value is the
+// enabled one.
+func TestGroupCommit_OnByDefault(t *testing.T) {
+	srv, cfg := startH2TestServer(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(204)
+	}))
+	defer srv.Close()
+
+	on := dialServer(t, srv, cfg)
+	defer on.Close()
+	if on.wbatch == nil || !on.wbatch.enabled {
+		t.Fatal("zero ConnOptions left group-commit disabled; the default is meant to be on")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	off, err := Dial(ctx, srv.Listener.Addr().String(), ConnOptions{
+		Dialer:             &TLSDialer{Config: cfg},
+		DisableGroupCommit: true,
+	})
+	if err != nil {
+		t.Fatalf("Dial: %v", err)
+	}
+	defer off.Close()
+	if off.wbatch == nil || off.wbatch.enabled {
+		t.Fatal("DisableGroupCommit did not disable the batcher")
+	}
+}
+
+// TestGroupCommit_LoneWriterNeverDefers is the property the default rests on: a
+// writer that finds no other writer queued must take the plain-flush path, so a
+// request with no concurrency is not delayed by batching. It is checked at the
+// batcher rather than end-to-end because the claim is structural — the deferral
+// is gated on waiters > 0, and nothing else can reach it.
+func TestGroupCommit_LoneWriterNeverDefers(t *testing.T) {
+	var mu sync.Mutex
+	b := newWriteBatcher(true, &mu, nil)
+
+	mu.Lock()
+	// No enter() has run, so waiters is 0. commit must return without waiting;
+	// if it deferred it would block here forever, since nobody will broadcast.
+	done := make(chan error, 1)
+	go func() { done <- b.commit() }()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("lone commit = %v, want nil", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("lone writer deferred with no other writer queued — a request with no concurrency was delayed")
+	}
+	mu.Unlock()
+
+	if b.deferring != 0 {
+		t.Fatalf("deferring = %d after a lone commit, want 0", b.deferring)
 	}
 }

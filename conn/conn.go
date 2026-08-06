@@ -237,7 +237,7 @@ func NewClientConn(ctx context.Context, transport net.Conn, opts ConnOptions) (*
 	}
 	c.goAwaySentLast.Store(goAwayNoneSent)
 	c.fcOutCond = sync.NewCond(&c.fcOutMu)
-	c.wbatch = newWriteBatcher(opts.GroupCommit, &c.wmu, wb)
+	c.wbatch = newWriteBatcher(!opts.DisableGroupCommit, &c.wmu, wb)
 	// Sync Framer read limit to our advertised MaxFrameSize. Default Framer
 	// cap is 16384; peers honouring our SETTINGS may send frames up to the
 	// advertised value, which would be rejected as ErrFrameTooLarge otherwise.
