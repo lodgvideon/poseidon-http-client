@@ -61,6 +61,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A re-added address was blackholed forever under `DrainLazy`.**
+  `subPoolState.draining` was set when the resolver dropped an address and
+  never cleared anywhere. Under `DrainHard` and `DrainGraceful` the sub-pool
+  leaves the registry so the stale flag goes with it, but `DrainLazy`'s
+  `beginDrain` is a deliberate no-op — the entry stayed, and both
+  `snapshotActive` and `getOrCreateSubPool` exclude a draining sub-pool. A
+  resolver flap (remove then re-add, the ordinary DNS case) therefore removed
+  the address permanently; with a single resolved address that is a permanent
+  `ErrNoAddresses`. `applySet` now revives a returning address, and the drain
+  watcher drops through `dropIfDraining`, which re-checks registration
+  identity and the draining flag under the same lock as the delete so a revive
+  cannot land in a check-then-act window and get a live address's connections
+  torn down. Fixed in all three managed pools.
+
 - **BREAKING: `hpack.HeaderField.Sensitive bool` is replaced by**
   **`Indexing hpack.IndexingMode`** (#332), adding RFC 7541 §6.2.2 literal
   without indexing, which the encoder could not emit. A caller previously had

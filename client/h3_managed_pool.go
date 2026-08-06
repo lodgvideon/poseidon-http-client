@@ -284,6 +284,18 @@ func (mp *h3ManagedPool) applySet(next []Address) {
 		if _, ok := prev[a.String()]; !ok {
 			added = append(added, a)
 		}
+		// Revive an address that is back after being removed. draining was only
+		// ever set, never cleared, so under DrainLazy — where beginDrain is a
+		// no-op and nothing else removes the sub-pool — a resolver flap
+		// (remove then re-add, the ordinary DNS case) left the address excluded
+		// by snapshotActive and getOrCreateSubPool for the life of the pool. With
+		// a single address that is a permanent ErrNoAddresses. Clearing the flag
+		// is safe against a DrainGraceful watchDrain still polling this
+		// sub-pool: that goroutine re-checks draining before dropping, and
+		// dropSubPool only deletes the registry entry it was called for.
+		if s, ok := mp.subPools[a.String()]; ok && s.draining {
+			s.draining = false
+		}
 	}
 	for _, a := range mp.addrs {
 		if _, ok := nextSet[a.String()]; ok {
@@ -342,7 +354,10 @@ func (mp *h3ManagedPool) watchDrain(s *h3SubPoolState) {
 		case <-t.C:
 		}
 		if s.p.Stats().InFlightStreams == 0 {
-			mp.dropSubPool(s, true)
+			// dropIfDraining, not dropSubPool: the address may have come back
+			// while this watcher was polling, and closing the sub-pool then
+			// would tear down a live address's connections.
+			mp.dropIfDraining(s)
 			return
 		}
 		interval *= 2
@@ -356,11 +371,37 @@ func (mp *h3ManagedPool) watchDrain(s *h3SubPoolState) {
 // dropSubPool removes s from the registry and optionally closes it.
 func (mp *h3ManagedPool) dropSubPool(s *h3SubPoolState, doClose bool) {
 	mp.mu.Lock()
-	delete(mp.subPools, s.addr.String())
+	// Identity-checked: deleting by key alone would remove whatever sub-pool
+	// currently holds this address, which after a remove/re-add flap is a
+	// different, live one.
+	if cur, ok := mp.subPools[s.addr.String()]; ok && cur == s {
+		delete(mp.subPools, s.addr.String())
+	}
 	mp.mu.Unlock()
 	if doClose {
 		_ = s.p.Close()
 	}
+}
+
+// dropIfDraining removes and closes s only if it is still the registered,
+// draining sub-pool for its address. Returns false if it was revived, in which
+// case nothing is closed.
+//
+// The check and the delete are under one lock deliberately. A watcher that
+// tested "still draining?" and then called an unguarded drop would leave a
+// window for applySet to revive the address in between, and the drop would
+// close a sub-pool serving a live address.
+func (mp *h3ManagedPool) dropIfDraining(s *h3SubPoolState) bool {
+	mp.mu.Lock()
+	cur, ok := mp.subPools[s.addr.String()]
+	if !ok || cur != s || !s.draining {
+		mp.mu.Unlock()
+		return false
+	}
+	delete(mp.subPools, s.addr.String())
+	mp.mu.Unlock()
+	_ = s.p.Close()
+	return true
 }
 
 // close stops the h3ManagedPool and closes every sub-pool. Idempotent.
