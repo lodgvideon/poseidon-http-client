@@ -44,6 +44,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Pool evictions observed through `Stats()` were never counted, and a**
+  **peer GOAWAY could be recorded as local idleness** (#359). `evictDeadSilent`
+  closed a connection without incrementing `ConnsClosed`: silent was meant to
+  mean "no user callback", and had come to mean "no record" as well. `Stats()`
+  is reachable from the public `Client.PoolStats()`, and scraping is exactly
+  what causes such an eviction to be noticed there — so a connection killed out
+  of band and first seen by a metrics read was closed with the counter staying
+  at zero forever. It is counted now; the hook stays suppressed, because firing
+  a lifecycle callback from inside a metrics read is a different thing and
+  remains wrong. Applies to the HTTP/2 and HTTP/1.1 pools; HTTP/3 already
+  counted.
+
+  The HTTP/2 maintenance tick also ran idle eviction before dead eviction, so a
+  connection the peer had GOAWAY'd — which is very often also idle, having
+  stopped taking new streams — was reaped as `CloseIdle` and never incremented
+  `GoAwaysReceived`. A rolling restart looked like ordinary idling. Dead now
+  sweeps first, which for HTTP/2 is a pair of atomic flag reads and costs
+  nothing. The HTTP/1.1 pool deliberately keeps the opposite order: its dead
+  sweep runs a bounded socket probe per connection on the actor goroutine, so
+  probing connections the idle sweep would have discarded for free would stall
+  every acquire and release — and HTTP/1.1 has no GOAWAY to attribute.
+
 - **A request queued on the HTTP/2 pool could wait forever after the pool**
   **lost its last connection** (#359). `serveWaiters` can only hand out
   capacity that exists, and eviction routinely removes the last conn — a peer

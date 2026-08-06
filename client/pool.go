@@ -392,8 +392,20 @@ func (p *Pool) handleStats(rs *runState, respCh chan<- Stats) {
 // handleTick runs periodic maintenance: idle eviction, dead
 // eviction, stream-cap refresh, and waiter expiry.
 func (p *Pool) handleTick(rs *runState) {
-	rs.conns = p.evictIdle(rs.conns)
+	// Dead before idle. Whichever sweep reaches a conn first decides what
+	// killed it, and a conn the peer GOAWAY'd is very often also idle — it
+	// stopped taking new streams. Reaping it as CloseIdle attributes a peer's
+	// shutdown to local inactivity and never increments GoAwaysReceived, so a
+	// rolling restart shows up as ordinary idling. evictDead here is a pair of
+	// atomic flag reads, so the order costs nothing.
+	//
+	// The HTTP/1.1 pool deliberately keeps the opposite order: its evictDead
+	// runs a bounded socket probe per conn on the actor goroutine, so probing
+	// conns that evictIdle would have discarded for free would stall every
+	// acquire and release for up to MaxConnsPerHost probes per tick — and h1
+	// has no GOAWAY, so there is nothing to attribute.
 	rs.conns = p.evictDead(rs.conns)
+	rs.conns = p.evictIdle(rs.conns)
 	for _, mc := range rs.conns {
 		p.refreshStreamCap(mc)
 	}
@@ -636,9 +648,16 @@ func (p *Pool) evictDead(conns []*managedConn) []*managedConn {
 }
 
 // evictDeadSilent removes conns whose IsAlive returns false and that have no
-// in-flight streams, without firing hooks or updating counters. Used from the
-// Stats path where eviction is purely a bookkeeping cleanup, not a lifecycle
-// event.
+// in-flight streams, without firing hooks. Used from the Stats path.
+//
+// Silent means no user callback, not no record. A counter is a record of what
+// the pool did, and suppressing it made the pool lie about its own behaviour in
+// the one place an operator looks: Stats() is reachable from the public
+// Client.PoolStats(), so scraping is what causes these evictions to be
+// observed — a conn killed out of band and first noticed by a metrics read was
+// closed with ConnsClosed staying at zero forever. The hook stays suppressed;
+// firing a lifecycle callback from inside a metrics read is a different thing
+// and remains wrong.
 //
 // Carries evictDead's active==0 guard for the same §6.8 reason, and needs it
 // more: Stats() is reachable from the public Client.PoolStats(), so without the
@@ -650,6 +669,10 @@ func (p *Pool) evictDeadSilent(conns []*managedConn) []*managedConn {
 	for _, mc := range conns {
 		if !mc.c.IsAlive() && mc.active == 0 {
 			_ = mc.c.Close()
+			p.metrics.Counters.ConnsClosed.Add(1)
+			if mc.c.GoAwayReceived() {
+				p.metrics.Counters.GoAwaysReceived.Add(1)
+			}
 			continue
 		}
 		out = append(out, mc)
