@@ -109,8 +109,7 @@ type acquireResp struct {
 
 // releaseMsg is sent on Pool.releaseCh after a request completes.
 type releaseMsg struct {
-	mc  *managedConn
-	err error // non-nil → request failed; actor re-checks IsAlive
+	mc *managedConn
 }
 
 // dialResult is sent by a dial helper goroutine on Pool.dialDoneCh.
@@ -474,7 +473,7 @@ func (p *Pool) replyAcquire(req acquireReq, mc *managedConn, err error) {
 // always completes and the goroutine always exits.
 func (p *Pool) reclaim(reply chan acquireResp) {
 	if resp := <-reply; resp.mc != nil {
-		p.release(resp.mc, nil)
+		p.release(resp.mc)
 	}
 }
 
@@ -734,7 +733,7 @@ func pruneExpiredWaiters(ws []acquireReq) []acquireReq {
 
 // acquire requests a managedConn from the actor. The returned mc's
 // active count has already been incremented by the actor. Caller MUST
-// eventually call p.release(mc, requestErr).
+// eventually call p.release(mc).
 func (p *Pool) acquire(ctx context.Context) (*managedConn, error) {
 	start := time.Now()
 	// Merge AcquireTimeout into ctx so that ctx.Done() fires on ALL abandonment
@@ -822,15 +821,21 @@ func mapAcquireErr(ctx context.Context, acquireTimeoutActive bool) error {
 	return ctx.Err()
 }
 
-// release returns mc to the actor with an optional request error.
-// Non-nil reqErr causes the actor to re-check IsAlive and evict on
-// failure.
-func (p *Pool) release(mc *managedConn, reqErr error) {
+// release returns mc to the actor.
+//
+// It carries no request error. handleRelease re-checks IsAlive
+// unconditionally, which is strictly the safer rule: it catches a conn that
+// died under a request that SUCCEEDED, and it does not evict a healthy conn
+// merely because one request on it failed. The parameter used to be here and
+// the actor never read it, while this comment claimed the opposite — so anyone
+// reasoning about eviction from the signature was reasoning about behaviour
+// that did not exist.
+func (p *Pool) release(mc *managedConn) {
 	if mc == nil {
 		return
 	}
 	select {
-	case p.releaseCh <- releaseMsg{mc: mc, err: reqErr}:
+	case p.releaseCh <- releaseMsg{mc: mc}:
 	case <-p.closedCh:
 		// Pool already closed: the actor is gone and won't process this
 		// release, so close the conn directly rather than dropping it (a leak).
@@ -897,7 +902,7 @@ func (p *Pool) warmup(n int) {
 		mc, err := p.acquire(ctx)
 		cancel()
 		if err == nil {
-			p.release(mc, nil)
+			p.release(mc)
 		}
 	}
 }

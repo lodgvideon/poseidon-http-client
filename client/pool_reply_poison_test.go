@@ -60,7 +60,7 @@ func TestPool_ReplyChannelNotPoisonedUnderAbandonment(t *testing.T) {
 				ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 				mc, err := p.acquire(ctx)
 				if err == nil {
-					p.release(mc, nil)
+					p.release(mc)
 				} else if errors.Is(err, ErrPoolClosed) {
 					poisoned.Store(true)
 					cancel()
@@ -103,7 +103,7 @@ func TestPool_ReplyChannelNotPoisonedUnderAbandonment(t *testing.T) {
 			}
 			time.Sleep(2 * time.Millisecond)
 			if err == nil {
-				vp.release(mc, nil)
+				vp.release(mc)
 			}
 			occCancel()
 			_ = vp.Close()

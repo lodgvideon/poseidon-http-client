@@ -95,7 +95,7 @@ func TestPool_AbandonedAcquire_DoesNotLeakStreamSlots(t *testing.T) {
 	if err != nil {
 		t.Fatalf("priming acquire: %v", err)
 	}
-	p.release(mc, nil)
+	p.release(mc)
 	if s := waitStats(p, func(s Stats) bool { return s.InFlightStreams == 0 }, 2*time.Second); s.InFlightStreams != 0 {
 		t.Fatalf("priming release did not settle: %+v", s)
 	}
@@ -108,7 +108,7 @@ func TestPool_AbandonedAcquire_DoesNotLeakStreamSlots(t *testing.T) {
 		amc, aerr := p.acquire(actx)
 		if aerr == nil {
 			// The reply won the caller's select; releasing is the caller's contract.
-			p.release(amc, nil)
+			p.release(amc)
 		}
 	}
 
@@ -125,7 +125,7 @@ func TestPool_AbandonedAcquire_DoesNotLeakStreamSlots(t *testing.T) {
 		t.Fatalf("normal acquire after %d abandons = %v, want success (pool starved by leaked slots)",
 			abandonIters, err2)
 	}
-	p.release(mc2, nil)
+	p.release(mc2)
 
 	// Every reclaim goroutine must exit: the actor owes each accepted request
 	// exactly one reply, and reclaim blocks until it arrives.
@@ -151,7 +151,7 @@ func TestH3Pool_AbandonedAcquire_DoesNotLeakStreamSlots(t *testing.T) {
 	if err != nil {
 		t.Fatalf("priming acquire: %v", err)
 	}
-	p.release(mc, nil)
+	p.release(mc)
 	if s := waitH3Stats(p, func(s Stats) bool { return s.InFlightStreams == 0 }, 2*time.Second); s.InFlightStreams != 0 {
 		t.Fatalf("priming release did not settle: %+v", s)
 	}
@@ -163,7 +163,7 @@ func TestH3Pool_AbandonedAcquire_DoesNotLeakStreamSlots(t *testing.T) {
 		acancel()
 		amc, aerr := p.acquire(actx)
 		if aerr == nil {
-			p.release(amc, nil)
+			p.release(amc)
 		}
 	}
 
@@ -179,7 +179,7 @@ func TestH3Pool_AbandonedAcquire_DoesNotLeakStreamSlots(t *testing.T) {
 		t.Fatalf("normal acquire after %d abandons = %v, want success (pool starved by leaked slots)",
 			abandonIters, err2)
 	}
-	p.release(mc2, nil)
+	p.release(mc2)
 
 	if n := waitGoroutines(before+4, 3*time.Second); n > before+4 {
 		t.Errorf("goroutine leak after abandoned acquires: before=%d after=%d (want <= %d)",
@@ -233,14 +233,14 @@ func TestPool_PrunedWaiter_IsStillReplied(t *testing.T) {
 			before, n, before+4)
 	}
 
-	p.release(held, nil)
+	p.release(held)
 	ctx2, cancel2 := context.WithTimeout(context.Background(), 3*time.Second)
 	mc2, err2 := p.acquire(ctx2)
 	cancel2()
 	if err2 != nil {
 		t.Fatalf("acquire after pruning = %v, want success", err2)
 	}
-	p.release(mc2, nil)
+	p.release(mc2)
 }
 
 // TestH3Pool_PrunedWaiter_IsStillReplied is the H3 twin of
@@ -276,12 +276,12 @@ func TestH3Pool_PrunedWaiter_IsStillReplied(t *testing.T) {
 			before, n, before+4)
 	}
 
-	p.release(held, nil)
+	p.release(held)
 	ctx2, cancel2 := context.WithTimeout(context.Background(), 3*time.Second)
 	mc2, err2 := p.acquire(ctx2)
 	cancel2()
 	if err2 != nil {
 		t.Fatalf("acquire after pruning = %v, want success", err2)
 	}
-	p.release(mc2, nil)
+	p.release(mc2)
 }
