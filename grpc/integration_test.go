@@ -966,7 +966,13 @@ func TestConformance_RFC9113_Sec8_1_CloseSendAfterBenignReset(t *testing.T) {
 	}
 	defer func() { _ = s.Close() }()
 
-	if err := s.Send(ctx, []byte("x")); err != nil {
+	// The benign reset can beat this first Send to the stream: the no-drain
+	// server answers off the HEADERS alone and RSTs, and if that RST lands
+	// first the Send legitimately returns conn.ErrStreamClosed — the very §8.1
+	// case this test is about. Demanding the Send succeed made the test race
+	// the server (it flaked on loaded Linux CI). Either outcome is fine; the
+	// response is buffered before the reset and recoverable through Recv below.
+	if err := s.Send(ctx, []byte("x")); err != nil && !errors.Is(err, conn.ErrStreamClosed) {
 		t.Fatalf("Send: %v", err)
 	}
 	msg, err := s.Recv(ctx)
