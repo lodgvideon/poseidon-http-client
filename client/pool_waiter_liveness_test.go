@@ -49,7 +49,7 @@ func TestPool_WaiterRescuedAfterLastConnEvicted(t *testing.T) {
 	go func() {
 		mc, aerr := p.acquire(ctx)
 		if aerr == nil {
-			p.release(mc, nil)
+			p.release(mc)
 		}
 		parked <- aerr
 	}()
@@ -61,7 +61,7 @@ func TestPool_WaiterRescuedAfterLastConnEvicted(t *testing.T) {
 	// release evicts the now-dead conn and the pool is left with a waiter and
 	// nothing to serve it from.
 	_ = held.c.Close()
-	p.release(held, nil)
+	p.release(held)
 
 	select {
 	case aerr := <-parked:
@@ -110,7 +110,7 @@ func TestPool_DialFailureRefusesEveryQueuedWaiter(t *testing.T) {
 			defer wg.Done()
 			mc, aerr := p.acquire(ctx)
 			if aerr == nil {
-				p.release(mc, nil)
+				p.release(mc)
 			}
 			errs <- aerr
 		}()
@@ -175,7 +175,7 @@ func TestPool_WaiterRescueRespectsMaxConns(t *testing.T) {
 		go func() {
 			mc, aerr := p.acquire(ctx)
 			if aerr == nil {
-				p.release(mc, nil)
+				p.release(mc)
 			}
 			parked <- aerr
 		}()
@@ -186,7 +186,7 @@ func TestPool_WaiterRescueRespectsMaxConns(t *testing.T) {
 
 	// A release that frees a stream but evicts nothing: one waiter is served
 	// from the existing conn, and the pool must not have dialled for the other.
-	p.release(held[0], nil)
+	p.release(held[0])
 	select {
 	case aerr := <-parked:
 		if aerr != nil {
@@ -199,6 +199,6 @@ func TestPool_WaiterRescueRespectsMaxConns(t *testing.T) {
 	if s.ActiveConns > 1 {
 		t.Fatalf("pool holds %d conns with MaxConnsPerHost=1: the rescue dial ignored the limit (%+v)", s.ActiveConns, s)
 	}
-	p.release(held[1], nil)
+	p.release(held[1])
 	<-parked
 }
