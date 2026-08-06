@@ -15,6 +15,8 @@ import (
 	"time"
 
 	"github.com/lodgvideon/poseidon-http-client/hpack"
+
+	"github.com/lodgvideon/poseidon-http-client/quic"
 )
 
 // interopServer is one server the interop matrix dials.
@@ -81,7 +83,7 @@ func dialServer(t *testing.T, addr string) (*Client, string) {
 	var client *Client
 	for {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		client, err = Dial(ctx, addr, cfg)
+		client, err = Dial(ctx, addr, cfg, interopConnOptions()...)
 		cancel()
 		if err == nil {
 			break
@@ -95,6 +97,20 @@ func dialServer(t *testing.T, addr string) (*Client, string) {
 	// the live server at the end of every interop test.
 	t.Cleanup(func() { _ = client.Close() })
 	return client, host
+}
+
+// interopConnOptions turns H3_INTEROP_CC into quic.ConnOptions for the dial.
+//
+// The congestion controller is the one knob the interop harness could not reach,
+// which is why BBR shipped opt-in with its gain unquantified (#362): it is
+// selectable through quic.WithCongestionControl from client code, but nothing in
+// this harness could select it, so the two arms of the comparison could not be
+// run. "bbr" opts in; anything else (including unset) leaves the NewReno default.
+func interopConnOptions() []quic.ConnOption {
+	if strings.EqualFold(os.Getenv("H3_INTEROP_CC"), "bbr") {
+		return []quic.ConnOption{quic.WithCongestionControl(quic.CCBBR)}
+	}
+	return nil
 }
 
 // do issues one request with a bounded per-request timeout, so a single stalled
