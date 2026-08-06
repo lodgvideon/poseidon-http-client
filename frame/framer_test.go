@@ -395,6 +395,37 @@ func BenchmarkFramer_WriteHeaders_minimal(b *testing.B) {
 	}
 }
 
+// BenchmarkFramer_WritePing exists to keep WritePing under the bench-gate's
+// zero-allocation guarantee. It used to allocate 8 B/op: the by-value [8]byte
+// argument escaped through writeFrame's io.Writer, and nothing checked it
+// because no PING bench was on the gate. The inbound-PING echo path reaches it
+// for every PING the peer sends.
+func BenchmarkFramer_WritePing(b *testing.B) {
+	var buf bytes.Buffer
+	fr := NewFramer(&buf, nil)
+	var data [8]byte
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		buf.Reset()
+		_ = fr.WritePing(true, data)
+	}
+}
+
+// BenchmarkFramer_WriteWindowUpdate covers the control-frame write path the
+// flow-controlled read side emits steadily; it has always been zero-alloc and
+// this pins it.
+func BenchmarkFramer_WriteWindowUpdate(b *testing.B) {
+	var buf bytes.Buffer
+	fr := NewFramer(&buf, nil)
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		buf.Reset()
+		_ = fr.WriteWindowUpdate(1, 65535)
+	}
+}
+
 func BenchmarkFramer_ReadFrame_DATA_1KB(b *testing.B) {
 	var buf bytes.Buffer
 	fr := NewFramer(&buf, &buf)

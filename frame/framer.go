@@ -397,7 +397,15 @@ func (f *Framer) WritePing(ack bool, data [8]byte) error {
 	if ack {
 		flags |= FlagPingAck
 	}
-	return f.writeFrame(FrameHeader{Length: 8, Type: FramePing, Flags: flags, StreamID: 0}, data[:])
+	// Copy into the per-Framer scratch before slicing. data is a by-value
+	// array on the stack; passing data[:] straight to writeFrame — whose
+	// f.w.Write takes an io.Writer — forces the array to the heap, 8 B/op on a
+	// path the inbound-PING echo reaches for every PING the peer sends. smallBuf
+	// is already heap-resident, so a slice of it does not allocate, exactly as
+	// WriteWindowUpdate builds its payload. Safe under the single-writer
+	// contract wmu enforces: the Write completes before this returns.
+	copy(f.smallBuf[:8], data[:])
+	return f.writeFrame(FrameHeader{Length: 8, Type: FramePing, Flags: flags, StreamID: 0}, f.smallBuf[:8])
 }
 
 // WriteGoAway writes a GOAWAY frame. Zero allocations when debug is
