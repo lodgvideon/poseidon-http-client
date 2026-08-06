@@ -5,6 +5,7 @@ import (
 	"crypto/tls"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -323,17 +324,19 @@ func TestIT_H2_StreamedDownload_NonConsumerIsRefused(t *testing.T) {
 		got, float64(got)/1024, ltBodyBytes>>20, ltStreamWindow)
 }
 
-// TestIT_H1_LargeDownload_HasNoStreamingPathAndDiscardsFlat covers the H1 half
-// of the retention question, and first establishes why that half is small.
+// TestIT_H1_LargeDownload_StreamsAndDiscardsFlat covers the H1 half
+// of the retention question.
 //
-// H1 has no incremental response API: client.go's beginRespStream only accepts
-// *conn.Stream and *h3Exchange, so *h1Exchange — and therefore every H1
-// transport — is rejected with ErrStreamingUnsupported. There is no H1
-// equivalent of the H2 test above to write; asserting the rejection is the
-// honest coverage, rather than inventing a streamed-H1 test for an API that
-// does not exist.
+// This used to assert the opposite of its first section: beginRespStream
+// accepted only *conn.Stream and *h3Exchange, so every H1 transport was
+// rejected with ErrStreamingUnsupported, and the comment here explained that
+// asserting the rejection was the honest coverage "rather than inventing a
+// streamed-H1 test for an API that does not exist". The API did exist —
+// h1Exchange.Recv has always read one chunk per call and marked the last one
+// EndStream. Only the dispatch rejected it. Both doors are open now and both
+// are drained here.
 //
-// That leaves Do. Do(BodyBuffer) retains the whole body by contract, so it has
+// Do(BodyBuffer) retains the whole body by contract, so it has
 // no retention claim to test. Do(BodyDiscard) does: it must count bytes without
 // keeping them, at any size. That is asserted here at 64 MiB.
 //
@@ -344,7 +347,7 @@ func TestIT_H2_StreamedDownload_NonConsumerIsRefused(t *testing.T) {
 // runtime.GC() measurement therefore cannot fail — verified by making
 // h1Exchange retain every chunk it read, which the heap assertion did not
 // notice. resp.Body and BytesReceived are what can actually be asserted here.
-func TestIT_H1_LargeDownload_HasNoStreamingPathAndDiscardsFlat(t *testing.T) {
+func TestIT_H1_LargeDownload_StreamsAndDiscardsFlat(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Length", fmt.Sprint(ltBodyBytes))
 		w.WriteHeader(200)
@@ -375,15 +378,25 @@ func TestIT_H1_LargeDownload_HasNoStreamingPathAndDiscardsFlat(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 
-	// H1 has no streaming path at all — both doors are locked.
+	// Both streaming doors are open on H1 now: h1Exchange.Recv reads a chunk at a
+	// time and beginRespStream dispatches to it. Draining each proves the path
+	// works at this size; the retention question below is this test's subject.
 	var sr client.StreamResponse
-	if err := c.DoStream(ctx, &client.Request{Method: "GET", Path: "/"}, &sr); !errors.Is(err, client.ErrStreamingUnsupported) {
-		t.Fatalf("H1 DoStream err = %v, want ErrStreamingUnsupported", err)
+	if err := c.DoStream(ctx, &client.Request{Method: "GET", Path: "/"}, &sr); err != nil {
+		t.Fatalf("H1 DoStream: %v", err)
 	}
+	_ = sr.Close()
 	var streamed client.Response
-	if err := c.Do(ctx, &client.Request{Method: "GET", Path: "/", BodyMode: client.BodyStream}, &streamed); !errors.Is(err, client.ErrStreamingUnsupported) {
-		t.Fatalf("H1 Do(BodyStream) err = %v, want ErrStreamingUnsupported", err)
+	if err := c.Do(ctx, &client.Request{Method: "GET", Path: "/", BodyMode: client.BodyStream}, &streamed); err != nil {
+		t.Fatalf("H1 Do(BodyStream): %v", err)
 	}
+	if streamed.BodyReader == nil {
+		t.Fatal("H1 Do(BodyStream) returned no BodyReader")
+	}
+	if _, err := io.Copy(io.Discard, streamed.BodyReader); err != nil {
+		t.Fatalf("drain streamed H1 body: %v", err)
+	}
+	_ = streamed.BodyReader.Close()
 
 	// The one large-transfer shape H1 does support must not retain the body.
 	var resp client.Response

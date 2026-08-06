@@ -61,6 +61,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **HTTP/1.1 now serves `DoStream` and `Do(BodyMode=BodyStream)`** (#322).
+  Both returned `ErrStreamingUnsupported`, on the documented claim that
+  `h1Exchange` "buffers whole responses and has no incremental path". That was
+  never true of the code: `h1Exchange.Recv` has always read one chunk per call
+  through `http1.Exchange.ReadBodyChunk`, handed it over in a pooled slab, and
+  marked the last one `EndStream` — the same `Recv` -> `conn.StreamEvent`
+  surface HTTP/2 and HTTP/3 present. Only `beginRespStream`'s dispatch rejected
+  it. So this is real incremental streaming, not the buffered stand-in the issue
+  asked for. Connection release is unchanged: `h1Exchange` owns it behind a
+  `sync.Once`, and the release the streaming caller holds is the no-op the H1
+  transports already returned.
+
 - **The ACK tracker re-sorted its whole range set on every received packet**
   (rest of #345). `receive` appended the new packet number and called
   `sort.Slice`, whose reflect-based swapper allocates — **88 B/op and 3 allocs
