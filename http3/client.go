@@ -931,6 +931,21 @@ func abortStream(stream quicStream, err error) {
 // returned.
 func (c *Client) sendRequest(ctx context.Context, stream quicStream, req *Request, frame []byte) error {
 	hasBody := len(req.Body) > 0
+	if hasBody {
+		// Append the DATA frame header (a <=9-byte Type+Length varint pair) to
+		// the request-owned HEADERS buffer, then stream req.Body directly, rather
+		// than materialising the whole body into a fresh DATA buffer via
+		// AppendData. The old copy bought nothing: writeStreamFrame takes its own
+		// retransmit copy of every chunk regardless, so the body was copied twice
+		// before the wire — measured at ~len(body) B/op per request.
+		//
+		// The header rides the HEADERS datagram rather than being sent on its own:
+		// a lone sendAll of 9 bytes would flush a GSO batch by itself, one extra
+		// datagram and syscall per request, which on a stack whose ceiling is the
+		// syscall rate is the wrong trade. frame comes from EncodeHeaders(enc, nil,
+		// ...) fresh per request, so appending to it aliases nothing.
+		frame = AppendFrameHeader(frame, FrameData, uint64(len(req.Body)))
+	}
 	if err := c.sendAll(ctx, stream, frame, !hasBody); err != nil {
 		if !errors.Is(err, quic.ErrStreamReset) {
 			return err
@@ -938,7 +953,7 @@ func (c *Client) sendRequest(ctx context.Context, stream quicStream, req *Reques
 		return nil // send aborted by STOP_SENDING; still read the response
 	}
 	if hasBody {
-		if err := c.sendAll(ctx, stream, AppendData(nil, req.Body), true); err != nil && !errors.Is(err, quic.ErrStreamReset) {
+		if err := c.sendAll(ctx, stream, req.Body, true); err != nil && !errors.Is(err, quic.ErrStreamReset) {
 			return err
 		}
 	}
