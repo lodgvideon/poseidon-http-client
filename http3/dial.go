@@ -28,11 +28,26 @@ const groControlLen = 128
 // engine uses on Linux; the rc/oob/gro* fields backing ReadGRO are touched only by
 // the single QUIC reader goroutine, so they need no locking.
 type udpConn struct {
-	c        *net.UDPConn
-	rc       syscall.RawConn // cached raw fd for GRO reads (nil if unavailable)
-	rcTried  bool            // SyscallConn resolution attempted once
-	groTried bool            // UDP_GRO enable attempted once (best-effort)
-	oob      []byte          // reused ancillary-data buffer for GRO cmsg parsing
+	c *net.UDPConn
+	// rc is the raw fd for the offloaded send and receive paths, nil when
+	// SyscallConn is unavailable. Resolved once in newUDPConn and never written
+	// again: ReadGRO runs on the QUIC reader goroutine and WriteGSO on the
+	// sender, so a lazily-populated cache here would be an unsynchronised write
+	// racing a read. Immutable after construction, both may read it freely.
+	rc       syscall.RawConn
+	groTried bool   // UDP_GRO enable attempted once (best-effort); reader goroutine only
+	oob      []byte // reused ancillary-data buffer for GRO cmsg parsing; reader goroutine only
+}
+
+// newUDPConn wraps uc, resolving the raw file descriptor up front so the field
+// is immutable for the lifetime of the connection. A failure leaves rc nil,
+// which makes both SendGSO and RecvGRO fall back to the unoffloaded path.
+func newUDPConn(uc *net.UDPConn) *udpConn {
+	rc, err := uc.SyscallConn()
+	if err != nil {
+		rc = nil
+	}
+	return &udpConn{c: uc, rc: rc}
 }
 
 func (u *udpConn) Read(b []byte) (int, error)        { return u.c.Read(b) }
@@ -50,25 +65,14 @@ func (u *udpConn) SetReadDeadline(t time.Time) error { return u.c.SetReadDeadlin
 // (best-effort) on the first call; the raw fd and control buffer are reused across
 // reads, which are serialized on the QUIC reader goroutine.
 func (u *udpConn) ReadGRO(buf []byte) (int, int, error) {
-	rc := u.rawConn()
-	if rc != nil && !u.groTried {
+	if u.rc != nil && !u.groTried {
 		u.groTried = true
-		_ = quic.EnableGRO(rc) // best-effort; on failure segSize stays 0 (single datagram)
+		_ = quic.EnableGRO(u.rc) // best-effort; on failure segSize stays 0 (single datagram)
 	}
 	if u.oob == nil {
 		u.oob = make([]byte, groControlLen)
 	}
-	return quic.RecvGRO(rc, u.c, buf, u.oob)
-}
-
-// rawConn returns the cached raw file descriptor for GRO reads, resolving it once.
-// A nil result (SyscallConn failed) makes RecvGRO fall back to a plain Read.
-func (u *udpConn) rawConn() syscall.RawConn {
-	if !u.rcTried {
-		u.rcTried = true
-		u.rc, _ = u.c.SyscallConn()
-	}
-	return u.rc
+	return quic.RecvGRO(u.rc, u.c, buf, u.oob)
 }
 
 // WriteGSO sends buf as consecutive UDP datagrams of segSize bytes (the last may be
@@ -80,11 +84,11 @@ func (u *udpConn) rawConn() syscall.RawConn {
 // that is unavailable the per-datagram fallback over u.c still delivers every
 // datagram.
 func (u *udpConn) WriteGSO(buf []byte, segSize int) (int, error) {
-	// u.rawConn(), not u.c.SyscallConn(): the latter re-resolves and allocates a
-	// fresh syscall.RawConn on every send. The read side already cached it; this
-	// side called through to the socket each time. A nil result degrades SendGSO
-	// to a per-datagram loop over u.c, exactly as before.
-	return quic.SendGSO(u.rawConn(), u.c, buf, segSize)
+	// u.rc, not u.c.SyscallConn(): the latter re-resolved and allocated a fresh
+	// syscall.RawConn on every send. It is resolved once at construction, so
+	// reading it here does not race the reader goroutine's ReadGRO. A nil rc
+	// degrades SendGSO to a per-datagram loop over u.c, exactly as before.
+	return quic.SendGSO(u.rc, u.c, buf, segSize)
 }
 
 // qpackDynamicTableCapacity is the SETTINGS_QPACK_MAX_TABLE_CAPACITY the client
@@ -164,7 +168,7 @@ func Dial(ctx context.Context, addr string, tlsConfig *tls.Config, opts ...quic.
 	// than dropped while the single-goroutine receive loop drains it one
 	// datagram at a time (best-effort).
 	_ = uc.SetReadBuffer(udpSocketBuffer)
-	return dialConn(ctx, &udpConn{c: uc}, h3TLSConfig(tlsConfig), opts...)
+	return dialConn(ctx, newUDPConn(uc), h3TLSConfig(tlsConfig), opts...)
 }
 
 // dialConn establishes a QUIC connection over pc, wires the client transport
