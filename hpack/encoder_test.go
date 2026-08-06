@@ -9,7 +9,7 @@ import (
 // RFC 7541 §C.2.4: indexed header field representation (":method GET").
 func TestEncoder_IndexedFromStaticTable(t *testing.T) {
 	enc := NewEncoder()
-	dst := enc.WriteField(nil, []byte(":method"), []byte("GET"), false)
+	dst := enc.WriteField(nil, []byte(":method"), []byte("GET"), IndexIncremental)
 	want, _ := hex.DecodeString("82")
 	if !bytes.Equal(dst, want) {
 		t.Fatalf("got %x, want %x", dst, want)
@@ -19,7 +19,7 @@ func TestEncoder_IndexedFromStaticTable(t *testing.T) {
 // RFC 7541 §C.2.1: literal with incremental indexing — new name/value.
 func TestEncoder_LiteralWithIncrementalIndexing_NewName(t *testing.T) {
 	enc := NewEncoder()
-	dst := enc.WriteField(nil, []byte("custom-key"), []byte("custom-header"), false)
+	dst := enc.WriteField(nil, []byte("custom-key"), []byte("custom-header"), IndexIncremental)
 	if dst[0] != 0x40 {
 		t.Fatalf("prefix = %#x, want 0x40", dst[0])
 	}
@@ -32,7 +32,7 @@ func TestEncoder_LiteralWithIncrementalIndexing_NewName(t *testing.T) {
 // Using :method (static idx 2) so the index fits in the 4-bit prefix.
 func TestEncoder_NeverIndexed_OnSensitive(t *testing.T) {
 	enc := NewEncoder()
-	dst := enc.WriteField(nil, []byte(":method"), []byte("SECRET"), true)
+	dst := enc.WriteField(nil, []byte(":method"), []byte("SECRET"), IndexNever)
 	if dst[0] != 0x12 {
 		t.Fatalf("prefix = %#x, want 0x12", dst[0])
 	}
@@ -58,7 +58,7 @@ func TestEncoder_EncodeBlock_MultipleFields(t *testing.T) {
 func TestEncoder_Reset_ClearsState(t *testing.T) {
 	enc := NewEncoder()
 	enc.SetMaxDynamicTableSizeLimit(1024)
-	_ = enc.WriteField(nil, []byte("custom-key"), []byte("v"), false)
+	_ = enc.WriteField(nil, []byte("custom-key"), []byte("v"), IndexIncremental)
 	if enc.dt.len() == 0 {
 		t.Fatal("precondition: dynamic table should have an entry")
 	}
@@ -77,7 +77,7 @@ func TestEncoder_Reset_ClearsState(t *testing.T) {
 func TestEncoder_PendingSizeUpdateEmitted(t *testing.T) {
 	enc := NewEncoder()
 	enc.SetMaxDynamicTableSizeLimit(512)
-	dst := enc.WriteField(nil, []byte(":method"), []byte("GET"), false)
+	dst := enc.WriteField(nil, []byte(":method"), []byte("GET"), IndexIncremental)
 	// First byte must be a Dynamic Table Size Update (prefix 001x_xxxx).
 	if dst[0]&0xe0 != 0x20 {
 		t.Fatalf("expected size update prefix 0x20, got %#x", dst[0])

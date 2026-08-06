@@ -12,9 +12,9 @@ func collectFields(t *testing.T, d *Decoder, blockHex string) []HeaderField {
 	var got []HeaderField
 	err := d.DecodeBlock(block, func(f HeaderField) error {
 		got = append(got, HeaderField{
-			Name:      append([]byte{}, f.Name...),
-			Value:     append([]byte{}, f.Value...),
-			Sensitive: f.Sensitive,
+			Name:     append([]byte{}, f.Name...),
+			Value:    append([]byte{}, f.Value...),
+			Indexing: f.Indexing,
 		})
 		return nil
 	})
@@ -54,7 +54,7 @@ func TestDecoder_LiteralWithoutIndexing(t *testing.T) {
 func TestDecoder_LiteralNeverIndexed(t *testing.T) {
 	d := NewDecoder()
 	got := collectFields(t, d, "100870617373776f72640673656372657420")
-	if !got[0].Sensitive {
+	if !got[0].Sensitive() {
 		t.Fatalf("Sensitive flag not set on never-indexed")
 	}
 }

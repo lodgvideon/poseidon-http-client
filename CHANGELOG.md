@@ -61,6 +61,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **BREAKING: `hpack.HeaderField.Sensitive bool` is replaced by**
+  **`Indexing hpack.IndexingMode`** (#332), adding RFC 7541 §6.2.2 literal
+  without indexing, which the encoder could not emit. A caller previously had
+  two choices: insert the field into the dynamic table, or mark it
+  never-indexed (§6.2.3). A header whose value varies per request therefore
+  evicted an entry it could never match again — in this client, `grpc-timeout`,
+  whose value is the remaining deadline at 8-digit precision and so differs on
+  essentially every RPC. Using `Sensitive` to avoid the insertion abuses a
+  signal §7.1.3 reserves for values whose exposure to intermediaries matters.
+  The three modes are now `IndexIncremental` (the zero value, previous
+  default), `IndexWithout`, and `IndexNever` (previously `Sensitive: true`);
+  `HeaderField.Sensitive()` remains as a method for reading. `grpc-timeout` is
+  now sent with `IndexWithout`. The decoder already accepted incoming §6.2.2
+  and now reports it as `IndexWithout` instead of losing the distinction.
+  Migration: `Sensitive: true` becomes `Indexing: IndexNever`, and a
+  `f.Sensitive` read becomes `f.Sensitive()`. Encoder stays 0 B/op.
+
 - **The HTTP/1.1 request head was written one segment at a time** (#356).
   `WriteRequest` built the request line and every header field as a separate
   `net.Buffers` segment for a `writev`, but writev is void through TLS —

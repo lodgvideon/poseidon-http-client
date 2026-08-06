@@ -121,17 +121,19 @@ func (d *Decoder) decodeFragment(src []byte, visit FieldVisitor) error {
 				return err
 			}
 			src = src[n:]
-			if err := visit(HeaderField{Name: name, Value: value, Sensitive: true}); err != nil {
+			if err := visit(HeaderField{Name: name, Value: value, Indexing: IndexNever}); err != nil {
 				return err
 			}
 		case b&0xf0 == 0x00:
-			// 6.2.2: literal without indexing.
+			// 6.2.2: literal without indexing. Reported as IndexWithout so the
+			// representation the peer chose survives the decode; before
+			// IndexingMode existed this was indistinguishable from §6.2.1.
 			name, value, n, err := d.parseLiteral(src, 4)
 			if err != nil {
 				return err
 			}
 			src = src[n:]
-			if err := visit(HeaderField{Name: name, Value: value}); err != nil {
+			if err := visit(HeaderField{Name: name, Value: value, Indexing: IndexWithout}); err != nil {
 				return err
 			}
 		default:
@@ -303,16 +305,17 @@ func (d *Decoder) decodeOne(src []byte, visit FieldVisitor) (int, error) {
 		if err != nil {
 			return 0, err
 		}
-		if err := visit(HeaderField{Name: name, Value: value, Sensitive: true}); err != nil {
+		if err := visit(HeaderField{Name: name, Value: value, Indexing: IndexNever}); err != nil {
 			return 0, err
 		}
 		return n, nil
 	case b&0xf0 == 0x00:
+		// 6.2.2: literal without indexing — see decodeFragment.
 		name, value, n, err := d.parseLiteral(src, 4)
 		if err != nil {
 			return 0, err
 		}
-		if err := visit(HeaderField{Name: name, Value: value}); err != nil {
+		if err := visit(HeaderField{Name: name, Value: value, Indexing: IndexWithout}); err != nil {
 			return 0, err
 		}
 		return n, nil

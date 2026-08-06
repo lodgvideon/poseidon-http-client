@@ -114,7 +114,9 @@ func (r *Request) EncodeHeaders(enc *qpack.Encoder, dst []byte, maxFieldSection 
 		if !validFieldName(h.Name) || !validFieldValue(h.Value) || forbiddenRequestField(h.Name, h.Value) {
 			return nil, ErrH3Message
 		}
-		h.Sensitive = h.Sensitive || defaultSensitiveField(h.Name)
+		if defaultSensitiveField(h.Name) {
+			h.Indexing = hpack.IndexNever
+		}
 		fields = append(fields, h)
 	}
 	// The field-section size is the uncompressed cost of every field — name plus

@@ -74,15 +74,16 @@ func (e *Encoder) Reset() {
 func (e *Encoder) EncodeBlock(dst []byte, fields []HeaderField) []byte {
 	dst = e.maybeEmitSizeUpdate(dst)
 	for i := range fields {
-		dst = e.writeFieldAlreadyFlushedSize(dst, fields[i].Name, fields[i].Value, fields[i].Sensitive)
+		dst = e.writeFieldAlreadyFlushedSize(dst, fields[i].Name, fields[i].Value, fields[i].Indexing)
 	}
 	return dst
 }
 
-// WriteField encodes a single field and appends to dst.
-func (e *Encoder) WriteField(dst, name, value []byte, sensitive bool) []byte {
+// WriteField encodes a single field and appends to dst. mode selects the
+// literal representation — see IndexingMode.
+func (e *Encoder) WriteField(dst, name, value []byte, mode IndexingMode) []byte {
 	dst = e.maybeEmitSizeUpdate(dst)
-	return e.writeFieldAlreadyFlushedSize(dst, name, value, sensitive)
+	return e.writeFieldAlreadyFlushedSize(dst, name, value, mode)
 }
 
 func (e *Encoder) maybeEmitSizeUpdate(dst []byte) []byte {
@@ -94,14 +95,20 @@ func (e *Encoder) maybeEmitSizeUpdate(dst []byte) []byte {
 	return dst
 }
 
-func (e *Encoder) writeFieldAlreadyFlushedSize(dst, name, value []byte, sensitive bool) []byte {
+func (e *Encoder) writeFieldAlreadyFlushedSize(dst, name, value []byte, mode IndexingMode) []byte {
+	// A full match still collapses to an indexed field under IndexWithout:
+	// referencing an existing entry inserts nothing and evicts nothing, so it
+	// respects the caller's "keep this out of the table" intent while being
+	// strictly smaller. IndexNever is excluded because §7.1.3 requires the
+	// never-indexed representation be preserved.
+	indexable := mode != IndexNever
 	staticIdx, fullStatic := staticIndex(name, value)
-	if fullStatic && !sensitive {
+	if fullStatic && indexable {
 		return EncodeInteger(dst, 7, 0x80, staticIdx)
 	}
 
 	dynIdx, fullDyn := e.dynamicLookup(name, value)
-	if fullDyn && !sensitive {
+	if fullDyn && indexable {
 		return EncodeInteger(dst, 7, 0x80, dynIdx+uint64(staticTableLen))
 	}
 
@@ -112,17 +119,19 @@ func (e *Encoder) writeFieldAlreadyFlushedSize(dst, name, value []byte, sensitiv
 		nameIdx = dynIdx + uint64(staticTableLen)
 	}
 
-	switch {
-	case sensitive:
-		dst = EncodeInteger(dst, 4, 0x10, nameIdx)
+	switch mode {
+	case IndexNever:
+		dst = EncodeInteger(dst, 4, 0x10, nameIdx) // §6.2.3 literal never indexed
+	case IndexWithout:
+		dst = EncodeInteger(dst, 4, 0x00, nameIdx) // §6.2.2 literal without indexing
 	default:
-		dst = EncodeInteger(dst, 6, 0x40, nameIdx)
+		dst = EncodeInteger(dst, 6, 0x40, nameIdx) // §6.2.1 literal with incremental indexing
 	}
 	if nameIdx == 0 {
 		dst = encodeStringLiteral(dst, name, false)
 	}
 	dst = encodeStringLiteral(dst, value, false)
-	if !sensitive {
+	if mode == IndexIncremental {
 		e.dt.add(name, value)
 	}
 	return dst

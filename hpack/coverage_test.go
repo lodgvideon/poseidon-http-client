@@ -357,9 +357,9 @@ func TestDecodeOne_NeverIndexed_Success(t *testing.T) {
 	var got []HeaderField
 	n, err := d.decodeOne(src, func(f HeaderField) error {
 		got = append(got, HeaderField{
-			Name:      append([]byte{}, f.Name...),
-			Value:     append([]byte{}, f.Value...),
-			Sensitive: f.Sensitive,
+			Name:     append([]byte{}, f.Name...),
+			Value:    append([]byte{}, f.Value...),
+			Indexing: f.Indexing,
 		})
 		return nil
 	})
@@ -369,7 +369,7 @@ func TestDecodeOne_NeverIndexed_Success(t *testing.T) {
 	if n != len(src) {
 		t.Fatalf("consumed %d, want %d", n, len(src))
 	}
-	if len(got) != 1 || !got[0].Sensitive {
+	if len(got) != 1 || !got[0].Sensitive() {
 		t.Fatalf("got %+v, want sensitive field", got)
 	}
 }
@@ -586,9 +586,9 @@ func TestDecodeStringLiteral_HuffmanDecode(t *testing.T) {
 func TestEncoder_DynamicFullMatch(t *testing.T) {
 	enc := NewEncoder()
 	// First encode adds custom-key=custom-val to dynamic table.
-	_ = enc.WriteField(nil, []byte("custom-key"), []byte("custom-val"), false)
+	_ = enc.WriteField(nil, []byte("custom-key"), []byte("custom-val"), IndexIncremental)
 	// Second encode should find the full match in the dynamic table.
-	dst := enc.WriteField(nil, []byte("custom-key"), []byte("custom-val"), false)
+	dst := enc.WriteField(nil, []byte("custom-key"), []byte("custom-val"), IndexIncremental)
 	// Result should be a single indexed byte (0x80 | index).
 	if len(dst) != 1 || dst[0]&0x80 == 0 {
 		t.Fatalf("expected indexed representation, got %x", dst)

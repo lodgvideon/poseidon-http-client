@@ -26,7 +26,7 @@ func runVector(t *testing.T, name string, blockHex string, want []fxField, table
 	}
 	var got []fxField
 	if err := d.DecodeBlock(block, func(f HeaderField) error {
-		got = append(got, fxField{name: string(f.Name), value: string(f.Value), sensitive: f.Sensitive})
+		got = append(got, fxField{name: string(f.Name), value: string(f.Value), sensitive: f.Sensitive()})
 		return nil
 	}); err != nil {
 		t.Fatalf("%s decode: %v", name, err)
@@ -46,13 +46,17 @@ func runEncodeRoundtrip(t *testing.T, name string, fields []fxField) {
 	enc := NewEncoder()
 	hf := make([]HeaderField, len(fields))
 	for i, f := range fields {
-		hf[i] = HeaderField{Name: []byte(f.name), Value: []byte(f.value), Sensitive: f.sensitive}
+		mode := IndexIncremental
+		if f.sensitive {
+			mode = IndexNever
+		}
+		hf[i] = HeaderField{Name: []byte(f.name), Value: []byte(f.value), Indexing: mode}
 	}
 	block := enc.EncodeBlock(nil, hf)
 	dec := NewDecoder()
 	var got []fxField
 	if err := dec.DecodeBlock(block, func(f HeaderField) error {
-		got = append(got, fxField{name: string(f.Name), value: string(f.Value), sensitive: f.Sensitive})
+		got = append(got, fxField{name: string(f.Name), value: string(f.Value), sensitive: f.Sensitive()})
 		return nil
 	}); err != nil {
 		t.Fatalf("%s roundtrip decode: %v", name, err)

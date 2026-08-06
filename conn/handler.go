@@ -496,9 +496,9 @@ func (h *connHandler) emitHeaderBlock(s *Stream, hb []byte, endStream bool) erro
 		*slabPtr = append(*slabPtr, f.Value...)
 		endOff := len(*slabPtr)
 		copied[i] = hpack.HeaderField{
-			Name:      (*slabPtr)[nameOff:valOff:valOff],
-			Value:     (*slabPtr)[valOff:endOff:endOff],
-			Sensitive: f.Sensitive,
+			Name:     (*slabPtr)[nameOff:valOff:valOff],
+			Value:    (*slabPtr)[valOff:endOff:endOff],
+			Indexing: f.Indexing,
 		}
 	}
 	// Delivered and marked ended in one s.mu section — see Stream.deliverEnd.

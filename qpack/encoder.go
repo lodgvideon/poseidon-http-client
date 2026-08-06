@@ -133,7 +133,7 @@ func (e *Encoder) EncodeFieldSection(dst []byte, fields []hpack.HeaderField) []b
 // dynamic profile's fallback for a field it does not reference dynamically.
 func appendStaticFieldLines(dst []byte, fields []hpack.HeaderField) []byte {
 	for i := range fields {
-		dst = appendStaticFieldLine(dst, fields[i].Name, fields[i].Value, fields[i].Sensitive)
+		dst = appendStaticFieldLine(dst, fields[i].Name, fields[i].Value, fields[i].Sensitive())
 	}
 	return dst
 }
@@ -195,7 +195,7 @@ func (e *Encoder) encodeDynamicFieldSection(dst []byte, fields []hpack.HeaderFie
 		// attacker-controlled data is the BREACH/CRIME opening RFC 9114 §10.3
 		// forbids; RFC 9204 §7.1 sends such a field as a literal with the N bit set,
 		// which the literal representations below do.
-		if !fields[i].Sensitive {
+		if !fields[i].Sensitive() {
 			if abs, ok := e.dt.lookupDynamic(name, value); ok {
 				if abs < e.known {
 					// Present and acknowledged: reference it (Base-relative Indexed, §4.5.2).
@@ -238,10 +238,10 @@ func (e *Encoder) encodeDynamicFieldSection(dst []byte, fields []hpack.HeaderFie
 			// Base - abs - 1 (§4.5.2, §3.2.5).
 			dst = hpack.EncodeInteger(dst, 6, 0x80, base-rep.idx-1)
 		case repStaticNameRef:
-			dst = hpack.EncodeInteger(dst, 4, staticNameRefByte(fields[i].Sensitive), rep.idx)
+			dst = hpack.EncodeInteger(dst, 4, staticNameRefByte(fields[i].Sensitive()), rep.idx)
 			dst = encodeStringLiteral(dst, fields[i].Value, 7, 0x00)
 		case repLiteral:
-			dst = encodeLiteralName(dst, fields[i].Name, fields[i].Sensitive)
+			dst = encodeLiteralName(dst, fields[i].Name, fields[i].Sensitive())
 			dst = encodeStringLiteral(dst, fields[i].Value, 7, 0x00)
 		}
 	}
