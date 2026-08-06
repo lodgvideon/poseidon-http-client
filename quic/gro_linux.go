@@ -8,6 +8,12 @@ import (
 	"syscall"
 )
 
+// groCanCoalesce reports whether this platform can actually coalesce datagrams
+// on receive. Only Linux has UDP_GRO; everywhere else RecvGRO degrades to a plain
+// single-datagram Read, so a transport that implements ReadGRO there is still one
+// datagram per syscall and must not be given the large burst buffer.
+const groCanCoalesce = true
+
 // udpGRO is the Linux UDP generic-receive-offload socket option (linux/udp.h:
 // UDP_GRO 104), the receive-side companion to UDP_SEGMENT (udpSegment, 103). The
 // stdlib syscall package does not export it, and this client takes no third-party
