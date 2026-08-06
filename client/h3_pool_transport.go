@@ -27,7 +27,7 @@ func (pt *h3PoolTransport) openExchange(ctx context.Context) (protoStream, func(
 	if err != nil {
 		return nil, nil, nil, err
 	}
-	release := func() { pt.p.release(mc, nil) }
+	release := func() { pt.p.release(mc) }
 	return getH3Exchange(mc.cl), nil, release, nil
 }
 

@@ -23,7 +23,7 @@ var getDataSlab = func() *[]byte {
 
 // putDataSlab returns a DATA payload buffer to conn's pool. It is the single
 // return site every owner in the client funnels through — handleDataEvent
-// (BodyBuffer), responseBodyReader.recycleData (BodyStream),
+// (BodyBuffer), responseBodyReader.recycleDataLocked (BodyStream),
 // StreamResponse.recycleData (DoStream), and h1Exchange.Recv's own error path,
 // which owns a buffer it never delivered. It is the data-slab twin of
 // recycleHeaderSlab, and it is what makes the invariant stated in
