@@ -35,8 +35,16 @@ import (
 	"time"
 )
 
-// h3ManagedConn is the actor's per-conn record. NEVER touched outside the actor
-// goroutine.
+// h3ManagedConn is the actor's per-conn record. Its MUTABLE fields — active,
+// lastUsed, streamCap and the rest — are owned by the actor goroutine and
+// must not be read or written anywhere else.
+//
+// The conn handle itself is the exception and is deliberately readable: it is
+// set once when the dial completes and never reassigned, and the transports
+// read it straight off the value acquire returns. This comment used to say
+// the whole record was NEVER touched outside the actor, which is not true of
+// that field and would send anyone unifying these pools looking for a lock
+// that is not needed — or hiding a field the transport requires.
 type h3ManagedConn struct {
 	cl       h3Client
 	active   int
