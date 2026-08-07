@@ -425,14 +425,22 @@ func (mp *h3ManagedPool) warmup(n int) {
 	if n <= 0 {
 		return
 	}
-	mp.mu.Lock()
-	subs := make([]*h3SubPoolState, 0, len(mp.subPools))
-	for _, s := range mp.subPools {
-		subs = append(subs, s)
+	// Build the sub-pools from the resolved ADDRESS set, not from mp.subPools.
+	// subPools is populated lazily by getOrCreateSubPool, on the first acquire for an
+	// address — so on a freshly constructed pool it is empty, this used to take
+	// the len(subs)==0 early return, and Warmup pre-dialled nothing at all. The
+	// whole point of a warmup is to run before the first request.
+	mp.mu.RLock()
+	addrs := append([]Address(nil), mp.addrs...)
+	mp.mu.RUnlock()
+	subs := make([]*h3SubPoolState, 0, len(addrs))
+	for _, a := range addrs {
+		if s := mp.getOrCreateSubPool(a); s != nil {
+			subs = append(subs, s)
+		}
 	}
-	mp.mu.Unlock()
 	if len(subs) == 0 {
-		return
+		return // no addresses resolved yet, or every one is draining
 	}
 	per := (n + len(subs) - 1) / len(subs)
 	for _, s := range subs {

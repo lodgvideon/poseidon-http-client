@@ -61,6 +61,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`Warmup` did not pre-dial** (#399). On a managed client it opened nothing
+  at all; on the HTTP/2 and HTTP/3 pools it opened exactly one connection
+  regardless of `n`. Two independent causes. `managedPool.warmup` iterated
+  `mp.subPools`, which is populated lazily on the first acquire, so on a fresh
+  pool it was empty and warmup returned early — the state a warmup exists to
+  serve. And the base-pool warmup was a loop of acquire+release: these pools
+  multiplex, so `pickLeastLoaded` handed back the connection just released and
+  the loop never triggered a second dial. The managed pools now build their
+  sub-pools from the resolved address set, and the H2/H3 pools warm up through
+  a new actor message that starts the dials directly, honouring
+  `MaxConnsPerHost` and dial backoff. `h1Pool` was already correct and is
+  unchanged — its hold-then-release fix does not port, because it checks
+  connections out exclusively and these do not. Behaviour now matches what
+  `docs/CLIENT_GUIDE.md` has always documented.
+
 - **A PUSH_PROMISE could be announced to a request that never asked for it**
   (#377, remaining scope). `handlePushPromiseBlock` resolved the parent stream
   by id and then reserved the promised stream, took a header slab from the pool

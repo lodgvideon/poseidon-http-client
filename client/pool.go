@@ -128,6 +128,7 @@ type Pool struct {
 	// channels
 	acquireCh  chan acquireReq
 	releaseCh  chan releaseMsg
+	warmupCh   chan int
 	dialDoneCh chan dialResult
 	statsCh    chan chan Stats
 	closeCh    chan struct{}
@@ -166,6 +167,7 @@ func newPool(addr string, connOpts conn.ConnOptions, opts PoolOptions, hooksRef 
 		addr:       addr,
 		acquireCh:  make(chan acquireReq),
 		releaseCh:  make(chan releaseMsg, 16),
+		warmupCh:   make(chan int),
 		dialDoneCh: make(chan dialResult, 4),
 		statsCh:    make(chan chan Stats),
 		closeCh:    make(chan struct{}),
@@ -237,6 +239,8 @@ func (p *Pool) run() {
 			p.handleAcquire(rs, req)
 		case msg := <-p.releaseCh:
 			p.handleRelease(rs, msg)
+		case n := <-p.warmupCh:
+			p.handleWarmup(rs, n)
 		case dr := <-p.dialDoneCh:
 			p.handleDialDone(rs, dr)
 		case respCh := <-p.statsCh:
@@ -882,27 +886,38 @@ func (p *Pool) warmup(n int) {
 	if n <= 0 {
 		return
 	}
-	stats := p.Stats()
+	select {
+	case p.warmupCh <- n:
+	case <-p.closedCh:
+	}
+}
+
+// handleWarmup starts the dials that bring the pool up to n connections. Runs on
+// the actor goroutine, so it reads rs directly and makes the same capacity and
+// backoff decision handleAcquire makes — minus the waiter, because warmup has no
+// request to serve.
+//
+// It cannot be expressed as a loop of acquire+release, which is what it used to
+// be. This pool multiplexes: pickLeastLoaded returns any conn with a free stream
+// slot, so the second acquire reuses the conn the first one just released and
+// the pool opens exactly ONE connection no matter what n is. Holding the conns
+// instead does not help either — a held conn still has free stream slots — which
+// is why the fix h1Pool.warmup uses (hold, then release together) does not port
+// here. h1 checks out its connection exclusively; this one does not.
+func (p *Pool) handleWarmup(rs *runState, n int) {
 	target := n
 	if target > p.opts.MaxConnsPerHost {
 		target = p.opts.MaxConnsPerHost
 	}
-	need := target - stats.ActiveConns - stats.InFlightDials
+	need := target - countLive(rs.conns) - rs.inFlightDials
 	if need <= 0 {
 		return
 	}
+	if inDialBackoff(rs.lastDialErrAt, p.opts.DialBackoff) {
+		return // a warmup must not defeat the backoff a failing peer earned
+	}
 	for i := 0; i < need; i++ {
-		// Submit a short-lived acquire that triggers a dial. If it resolves to
-		// a conn within the window, release it immediately — acquire increments
-		// the conn's active-stream count on success and the caller MUST release
-		// it, or warmup leaks a phantom in-flight stream that blocks idle
-		// eviction and graceful drain. If it times out, the dial continues in
-		// dialOne's goroutine and the conn joins the pool later.
-		ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
-		mc, err := p.acquire(ctx)
-		cancel()
-		if err == nil {
-			p.release(mc)
-		}
+		rs.inFlightDials++
+		go p.dialOne()
 	}
 }
