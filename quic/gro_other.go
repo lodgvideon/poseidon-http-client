@@ -7,6 +7,10 @@ import (
 	"syscall"
 )
 
+// groCanCoalesce is false off Linux: see the Linux file. RecvGRO here is a plain
+// Read, so the burst buffer would be dead memory on every connection.
+const groCanCoalesce = false
+
 // EnableGRO is a no-op on platforms without UDP generic receive offload (Windows —
 // this dev host — macOS, the BSDs): there is no socket option to set, so the
 // receive path reads one datagram per syscall exactly as before. rc is ignored.
