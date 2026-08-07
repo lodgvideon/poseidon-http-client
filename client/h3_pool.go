@@ -86,6 +86,7 @@ type h3Pool struct {
 	// channels
 	acquireCh  chan h3AcquireReq
 	releaseCh  chan h3ReleaseMsg
+	warmupCh   chan int
 	dialDoneCh chan h3DialResult
 	statsCh    chan chan Stats
 	closeCh    chan struct{}
@@ -125,6 +126,7 @@ func newH3Pool(addr string, tlsConfig *tls.Config, opts PoolOptions, dialFn func
 		dialFn:     dialFn,
 		acquireCh:  make(chan h3AcquireReq),
 		releaseCh:  make(chan h3ReleaseMsg, 16),
+		warmupCh:   make(chan int),
 		dialDoneCh: make(chan h3DialResult, 4),
 		statsCh:    make(chan chan Stats),
 		closeCh:    make(chan struct{}),
@@ -177,6 +179,8 @@ func (p *h3Pool) run() {
 			p.handleAcquire(rs, req)
 		case msg := <-p.releaseCh:
 			p.handleRelease(rs, msg)
+		case n := <-p.warmupCh:
+			p.handleWarmup(rs, n)
 		case dr := <-p.dialDoneCh:
 			p.handleDialDone(rs, dr)
 		case respCh := <-p.statsCh:
@@ -695,21 +699,30 @@ func (p *h3Pool) warmup(n int) {
 	if n <= 0 {
 		return
 	}
-	stats := p.Stats()
+	select {
+	case p.warmupCh <- n:
+	case <-p.closedCh:
+	}
+}
+
+// handleWarmup starts the dials that bring the pool up to n connections. Runs on
+// the actor goroutine and makes the same capacity and backoff decision
+// handleAcquire makes, minus the waiter — see Pool.handleWarmup for why an
+// acquire+release loop cannot express this on a multiplexed pool.
+func (p *h3Pool) handleWarmup(rs *h3RunState, n int) {
 	target := n
 	if target > p.opts.MaxConnsPerHost {
 		target = p.opts.MaxConnsPerHost
 	}
-	need := target - stats.ActiveConns - stats.InFlightDials
+	need := target - h3CountLive(rs.conns) - rs.inFlightDials
 	if need <= 0 {
 		return
 	}
+	if inDialBackoff(rs.lastDialErrAt, p.opts.DialBackoff) {
+		return // a warmup must not defeat the backoff a failing peer earned
+	}
 	for i := 0; i < need; i++ {
-		ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
-		mc, err := p.acquire(ctx)
-		cancel()
-		if err == nil {
-			p.release(mc)
-		}
+		rs.inFlightDials++
+		go p.dialOne()
 	}
 }
