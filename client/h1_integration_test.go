@@ -346,9 +346,10 @@ func TestNewClient_H1SingleConn_MidBodyError(t *testing.T) {
 	}
 }
 
-// TestNewClient_H1SingleConn_DoStream_Error verifies DoStream returns an
-// error for H1.1 transports (streaming not supported).
-func TestNewClient_H1SingleConn_DoStream_Error(t *testing.T) {
+// TestNewClient_H1SingleConn_DoStream verifies DoStream works over H1.1 and
+// delivers the response head plus body events. Its former name ended in _Error:
+// it asserted the rejection that beginRespStream's dispatch used to produce.
+func TestNewClient_H1SingleConn_DoStream(t *testing.T) {
 	t.Parallel()
 	srv := startH1Server(t)
 
@@ -366,15 +367,31 @@ func TestNewClient_H1SingleConn_DoStream_Error(t *testing.T) {
 	if err := c.DoStream(context.Background(), &client.Request{
 		Method: "GET",
 		Path:   "/",
-	}, &sr); err == nil {
-		_ = sr.Close()
-		t.Error("expected error calling DoStream on H1.1 client, got nil")
+	}, &sr); err != nil {
+		t.Fatalf("DoStream on an H1.1 client: %v", err)
+	}
+	defer func() { _ = sr.Close() }()
+	if sr.Status != 200 {
+		t.Fatalf("status = %d, want 200", sr.Status)
+	}
+	for {
+		ev, err := sr.Recv(context.Background())
+		if err != nil {
+			break
+		}
+		if ev.EndStream {
+			break
+		}
 	}
 }
 
-// TestNewClient_H1SingleConn_BodyStream_Error verifies that Do with
-// BodyStream=true returns an error for HTTP/1.1 connections (no streaming).
-func TestNewClient_H1SingleConn_BodyStream_Error(t *testing.T) {
+// TestNewClient_H1SingleConn_BodyStream verifies that Do with BodyStream
+// succeeds over HTTP/1.1 and hands back a readable body.
+//
+// It asserted the opposite until h1Exchange was added to beginRespStream's
+// dispatch: the rejection was never a property of the H1 code, which has always
+// read one chunk per Recv, only of that switch.
+func TestNewClient_H1SingleConn_BodyStream(t *testing.T) {
 	t.Parallel()
 	srv := startH1Server(t)
 
@@ -393,11 +410,15 @@ func TestNewClient_H1SingleConn_BodyStream_Error(t *testing.T) {
 		Method:   "GET",
 		Path:     "/",
 		BodyMode: client.BodyStream,
-	}, &resp); err == nil {
-		if resp.BodyReader != nil {
-			_ = resp.BodyReader.Close()
-		}
-		t.Error("expected error calling Do(BodyStream=true) on H1.1 client, got nil")
+	}, &resp); err != nil {
+		t.Fatalf("Do(BodyStream) on an H1.1 client: %v", err)
+	}
+	if resp.BodyReader == nil {
+		t.Fatal("Do(BodyStream) returned no BodyReader")
+	}
+	defer func() { _ = resp.BodyReader.Close() }()
+	if _, err := io.ReadAll(resp.BodyReader); err != nil {
+		t.Fatalf("read streamed H1 body: %v", err)
 	}
 }
 

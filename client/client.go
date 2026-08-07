@@ -912,16 +912,28 @@ func (c *Client) doStream(ctx context.Context, req *Request, sr *StreamResponse)
 // beginRespStream selects the incremental streaming reader for a protoStream,
 // per protocol. HTTP/2 uses the *conn.Stream directly — it is already a streaming
 // stream, and boxing the pointer into respStream costs no allocation. HTTP/3
-// switches the buffered h3Exchange over to http3.Client.DoStream. HTTP/1.1
-// (h1Exchange) buffers whole responses and has no incremental path, so it is
-// rejected with ErrStreamingUnsupported. This replaces the two former
-// s.(*conn.Stream) type asserts.
+// switches the buffered h3Exchange over to http3.Client.DoStream. HTTP/1.1 uses
+// h1Exchange directly: its Recv already reads one body chunk at a time through
+// http1.Exchange.ReadBodyChunk and marks the last one EndStream, which is the
+// same Recv → conn.StreamEvent surface the other two present.
+//
+// h1Exchange used to fall through to ErrStreamingUnsupported on the claim that it
+// "buffers whole responses and has no incremental path". That was never true of
+// the code: the chunk loop and the pooled DataSlab handover were there from the
+// start. Only this dispatch rejected it.
+//
+// Releasing the connection stays with h1Exchange, whose release is sync.Once-
+// guarded and fires on the terminal chunk or on Close. The release the streaming
+// caller holds is the no-op the h1 transports return for exactly this reason, so
+// there is one owner either way.
 func beginRespStream(ctx context.Context, s protoStream) (respStream, error) {
 	switch v := s.(type) {
 	case *conn.Stream:
 		return v, nil
 	case *h3Exchange:
 		return v.beginStream(ctx)
+	case *h1Exchange:
+		return v, nil
 	default:
 		return nil, ErrStreamingUnsupported
 	}
