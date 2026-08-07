@@ -532,6 +532,28 @@ func (s *Stream) push(e StreamEvent) bool {
 	return s.pushLocked(e)
 }
 
+// pushIfID is push gated on the stream still being the one the caller looked up.
+//
+// A *Stream is pooled, so a caller that resolved it by id and then did any work
+// before delivering can find the struct recycled and re-issued to another
+// request in between — and an ungated push would hand that request an event it
+// was never sent. endWithReset carries the same gate for the two teardown paths;
+// this is the delivery-path counterpart, for a caller whose event is not
+// terminal.
+//
+// Returns false when the id no longer matches, which is not an enqueue failure:
+// the stream the event belonged to is gone, so there is nothing to deliver to
+// and nothing to recycle. Callers must distinguish it from pushLocked's false,
+// which means the channel was full and the stream has been reset.
+func (s *Stream) pushIfID(wantID uint32, e StreamEvent) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.id != wantID {
+		return false
+	}
+	return s.pushLocked(e)
+}
+
 // pushLocked is push with s.mu already held by the caller. It exists so the
 // reader can deliver a terminal event and mark the stream ended in ONE critical
 // section, which is what stops a concurrent Close() from recycling the struct

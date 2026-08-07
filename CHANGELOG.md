@@ -61,6 +61,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A PUSH_PROMISE could be announced to a request that never asked for it**
+  (#377, remaining scope). `handlePushPromiseBlock` resolved the parent stream
+  by id and then reserved the promised stream, took a header slab from the pool
+  and copied every field before delivering. A `*Stream` is pooled, so in that
+  window the application can finish the parent request, `Close` it, and the next
+  `NewStream` can claim the struct — and the ungated `push` then handed the
+  promise to whichever request owns it now. Delivery is now gated on the parent
+  still carrying the id it was looked up under (`pushIfID`, the delivery-path
+  counterpart of `endWithReset`'s gate), and a promise that cannot be announced
+  refuses the promised stream rather than leaving it reserved and unreachable
+  (RFC 9113 §8.4.2 sanctions REFUSED_STREAM for declining a promise).
+
 - **HTTP/1.1 now serves `DoStream` and `Do(BodyMode=BodyStream)`** (#322).
   Both returned `ErrStreamingUnsupported`, on the documented claim that
   `h1Exchange` "buffers whole responses and has no incremental path". That was
