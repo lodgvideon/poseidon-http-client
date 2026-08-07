@@ -73,6 +73,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   refuses the promised stream rather than leaving it reserved and unreachable
   (RFC 9113 §8.4.2 sanctions REFUSED_STREAM for declining a promise).
 
+- **HTTP/1.1 now serves `DoStream` and `Do(BodyMode=BodyStream)`** (#322).
+  Both returned `ErrStreamingUnsupported`, on the documented claim that
+  `h1Exchange` "buffers whole responses and has no incremental path". That was
+  never true of the code: `h1Exchange.Recv` has always read one chunk per call
+  through `http1.Exchange.ReadBodyChunk`, handed it over in a pooled slab, and
+  marked the last one `EndStream` — the same `Recv` -> `conn.StreamEvent`
+  surface HTTP/2 and HTTP/3 present. Only `beginRespStream`'s dispatch rejected
+  it. So this is real incremental streaming, not the buffered stand-in the issue
+  asked for. Connection release is unchanged: `h1Exchange` owns it behind a
+  `sync.Once`, and the release the streaming caller holds is the no-op the H1
+  transports already returned.
+
 - **A stream error delivered its reset without a stream-id gate** (#377),
   so a pooled `*Stream` recycled between the reader's lookup and its delivery
   handed the dead lifetime's `EventReset` to the NEXT request — a reset that
