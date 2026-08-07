@@ -18,10 +18,15 @@ type h3PoolTransport struct {
 // pushLookup is nil (HTTP/3 server push is disabled) and release returns the conn's
 // stream slot to the pool.
 //
-// release reports nil reqErr because the transport interface does not surface
-// per-request errors — dead-conn eviction is driven by the actor re-checking
-// h3Client.Alive() on release and by the background health-check tick, exactly like
-// the HTTP/2 pool.
+// Dead-conn eviction here is driven by the background health-check tick and by
+// h3RetireEvict on release, which retires a conn the peer has GOAWAY'd once its
+// last exchange finishes (RFC 9114 §5.2).
+//
+// This is NOT the same as the HTTP/2 pool, whose handleRelease additionally
+// re-checks IsAlive() and evicts with CloseDead when the conn is both dead and
+// idle. The comment here used to claim the two behaved "exactly" alike; they do
+// not, and a reader unifying the two release paths needs to know which one they
+// are looking at.
 func (pt *h3PoolTransport) openExchange(ctx context.Context) (protoStream, func(uint32) (*conn.Stream, bool), func(), error) {
 	mc, err := pt.p.acquire(ctx)
 	if err != nil {

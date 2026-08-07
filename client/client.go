@@ -922,10 +922,16 @@ func (c *Client) doStream(ctx context.Context, req *Request, sr *StreamResponse)
 // the code: the chunk loop and the pooled DataSlab handover were there from the
 // start. Only this dispatch rejected it.
 //
-// Releasing the connection stays with h1Exchange, whose release is sync.Once-
-// guarded and fires on the terminal chunk or on Close. The release the streaming
-// caller holds is the no-op the h1 transports return for exactly this reason, so
-// there is one owner either way.
+// Releasing the connection stays with h1Exchange: its release fires on the
+// terminal chunk or on Close, and the release the streaming caller holds is the
+// no-op both h1 transports return for exactly this reason, so there is one owner
+// either way.
+//
+// Correcting what this comment said when the case was added: that release is
+// sync.Once-guarded only on the POOL transport. On h1singleConn it is a plain
+// closure, and calling it twice would double-unlock the in-flight mutex. What
+// keeps it to one call there is the e.done contract — Recv sets it on the
+// terminal chunk and Close returns early once set — not a structural guard.
 func beginRespStream(ctx context.Context, s protoStream) (respStream, error) {
 	switch v := s.(type) {
 	case *conn.Stream:

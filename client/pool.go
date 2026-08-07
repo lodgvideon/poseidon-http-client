@@ -80,8 +80,16 @@ type Stats struct {
 	DrainingSubpools int // sub-pools currently draining (removed from resolver set)
 }
 
-// managedConn is the actor's per-conn record. NEVER touched outside
-// the actor goroutine.
+// managedConn is the actor's per-conn record. Its MUTABLE fields — active,
+// lastUsed, streamCap and the rest — are owned by the actor goroutine and
+// must not be read or written anywhere else.
+//
+// The conn handle itself is the exception and is deliberately readable: it is
+// set once when the dial completes and never reassigned, and the transports
+// read it straight off the value acquire returns. This comment used to say
+// the whole record was NEVER touched outside the actor, which is not true of
+// that field and would send anyone unifying these pools looking for a lock
+// that is not needed — or hiding a field the transport requires.
 type managedConn struct {
 	c        *conn.Conn
 	active   int
@@ -215,8 +223,6 @@ func (p *Pool) Stats() Stats {
 	return stats
 }
 
-// run is the actor loop. Owns p.conns, p.waiters, p.inFlightDials,
-// p.lastDialErrAt. Never touched from outside.
 // runState holds the mutable loop-local state of Pool.run. Kept in a
 // struct so extracted handlers can receive it without the caller
 // unpacking/packing individual variables on every iteration.
@@ -227,6 +233,9 @@ type runState struct {
 	lastDialErrAt time.Time
 }
 
+// run is the actor loop. It owns every field of runState — conns, waiters,
+// inFlightDials, lastDialErrAt — which live there and not on Pool, and which no
+// other goroutine reads or writes.
 func (p *Pool) run() {
 	defer close(p.closedCh)
 	rs := &runState{}

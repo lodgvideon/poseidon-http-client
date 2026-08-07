@@ -27,7 +27,6 @@ func newPoolTransportFromPool(p *Pool) *poolTransport {
 
 // openExchange implements transport.openExchange.
 //
-// release reports nil reqErr because the transport interface does not
 // surface per-request errors. Dead-conn eviction is driven by the
 // actor's background health-check tick, which runs every
 // PoolOptions.HealthCheckPeriod (default 30s). Newly arriving acquires

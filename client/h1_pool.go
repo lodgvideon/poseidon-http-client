@@ -58,8 +58,16 @@ const h1ConnStreamCap = 1
 // acquire), so even then it does not serialise the pool.
 const h1ProbeIdleAfter = 250 * time.Millisecond
 
-// h1ManagedConn is the actor's per-conn record. NEVER touched outside the actor
-// goroutine.
+// h1ManagedConn is the actor's per-conn record. Its MUTABLE fields — active,
+// lastUsed, streamCap and the rest — are owned by the actor goroutine and
+// must not be read or written anywhere else.
+//
+// The conn handle itself is the exception and is deliberately readable: it is
+// set once when the dial completes and never reassigned, and the transports
+// read it straight off the value acquire returns. This comment used to say
+// the whole record was NEVER touched outside the actor, which is not true of
+// that field and would send anyone unifying these pools looking for a lock
+// that is not needed — or hiding a field the transport requires.
 type h1ManagedConn struct {
 	c        *http1.Conn
 	active   int // 0 or 1 — see h1ConnStreamCap
@@ -364,7 +372,9 @@ func (p *h1Pool) handleClose(rs *h1RunState) {
 // is a cap-1 channel used by exactly one request, and the actor sends exactly one
 // reply per request it accepts.
 //
-// Unlike its H2/H3 siblings this does NOT race the send against req.ctx.Done().
+// None of the three pools races the send against req.ctx.Done(), and this
+// comment used to claim that as a divergence from the H2/H3 siblings. It is not
+// one — the reason below is why NO pool may do it, and it bites hardest here.
 // Doing so is unsafe for an exclusive-checkout pool: when a caller has given up
 // AND its buffered reply channel is still writable, both select cases are ready
 // and Go picks at random. Picking the send strands mc in a channel nobody reads —
@@ -534,8 +544,11 @@ func (p *h1Pool) evictDead(conns []*h1ManagedConn) []*h1ManagedConn {
 	return out
 }
 
-// evictDeadSilent removes conns whose IsAlive returns false without firing hooks
-// or updating counters. Used from the Stats path where eviction is bookkeeping.
+// evictDeadSilent removes conns whose IsAlive returns false without firing the
+// OnConnClose hook. It DOES count them: the summary used to say "or updating
+// counters", which its own body has contradicted since the counter was added —
+// an eviction observed only through Stats is still an eviction. Used from the
+// Stats path, where firing a hook from a caller's goroutine would be wrong.
 func (p *h1Pool) evictDeadSilent(conns []*h1ManagedConn) []*h1ManagedConn {
 	out := conns[:0]
 	for _, mc := range conns {
