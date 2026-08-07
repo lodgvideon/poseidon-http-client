@@ -61,6 +61,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A stream error delivered its reset without a stream-id gate** (#377),
+  so a pooled `*Stream` recycled between the reader's lookup and its delivery
+  handed the dead lifetime's `EventReset` to the NEXT request — a reset that
+  request was never sent. The delivery now goes through `endWithReset`, which
+  re-checks the id under `s.mu`, the same gate the peer-RST and GOAWAY teardown
+  paths already had. Two latent defects go with it: the old path left a cleanly
+  reset stream looking open, so the application's later `Close` sent a **second**
+  RST carrying CANCEL instead of the error that actually killed the stream; and
+  a writer parked on flow-control credit slept through the reset, because
+  `acquireSendCredits` re-checks `s.closed` only on a condition-variable wake
+  and nothing on this path broadcast one.
+
 - **Every QUIC connection carried a 64 KiB receive buffer on platforms that**
   **cannot coalesce** (found while working #348). `pollBufLen` sized the buffer
   on whether the transport implements `ReadGRO`, and http3's `udpConn`

@@ -412,6 +412,44 @@ func (c *Conn) rstStream(id uint32, code frame.ErrCode) error {
 	return c.writeRSTStream(&Stream{id: id}, code)
 }
 
+// resetStreamOnError tears down the one stream a non-fatal *StreamError names
+// and tells the peer, keeping the connection and every other in-flight stream
+// alive (RFC 9113 §5.4.2).
+//
+// Delivery goes through endWithReset, not push, because a *Stream is pooled:
+// between the lookup here and the delivery the application can finish this
+// request, Close it, and a fresh NewStream can claim the same struct. push has
+// no id gate, so the dead lifetime's EventReset landed in the NEXT request's
+// channel — a reset that request was never sent. endWithReset re-checks s.id
+// under s.mu and refuses.
+//
+// It also sets the terminal flags, which push did not. That removes a duplicate
+// RST the old arm produced on the ordinary path: a cleanly enqueued push left
+// the stream looking open, so the application's later Close sent a second RST —
+// carrying CANCEL, misreporting the error that actually killed the stream.
+//
+// Split out of readerLoop so the wake below can be tested; inline it was a
+// branch no test could reach without a live flow-control overrun.
+func (c *Conn) resetStreamOnError(se *StreamError) {
+	ended := false
+	if s := c.lookupStream(se.StreamID); s != nil {
+		ended = s.endWithReset(se.StreamID, se.Code)
+	}
+	// Unconditional: nothing else emits an RST on this path (endWithReset
+	// signals in-process only), so the peer gets exactly one, carrying se.Code.
+	// rstStream releases the inflight slot via writeRSTStream; releaseInflight
+	// is id-keyed and idempotent, so it no-ops for an already-evicted id.
+	_ = c.rstStream(se.StreamID, se.Code)
+	if ended {
+		// Wake a writer blocked in acquireSendCredits so it observes s.closed
+		// and bails instead of sending DATA once credit frees up (RFC 9113
+		// §6.4). That loop only re-checks the flag on a cond wake, and neither
+		// endWithReset nor rstStream broadcasts. OnRSTStream does the same after
+		// its endWithReset. Done last, with no lock held.
+		c.wakeSendWaiters()
+	}
+}
+
 // LookupStream returns the stream with the given ID, or (nil, false) if
 // no such stream exists. This is primarily used to access server-pushed
 // streams after receiving an EventPushPromise on the parent stream.
@@ -1702,14 +1740,23 @@ func (c *Conn) readerLoop() {
 			// *ConnError and I/O errors tear the whole connection down.
 			var se *StreamError
 			if errors.As(err, &se) {
-				// push() delivers EventReset to the caller; on events-channel
-				// overflow it already fires a best-effort RST_STREAM and releases
-				// the slot (returns false), so send our own RST only when push
-				// enqueued cleanly, avoiding a duplicate frame. rstStream
-				// releases the inflight slot via writeRSTStream.
-				if s := c.lookupStream(se.StreamID); s == nil || s.push(StreamEvent{Type: EventReset, RSTCode: se.Code, EndStream: true}) {
-					_ = c.rstStream(se.StreamID, se.Code)
-				}
+				// Delivery goes through endWithReset, not push, because a
+				// *Stream is pooled: between the lookup above and the delivery
+				// the application can finish this request, Close it, and a fresh
+				// NewStream can claim the same struct. push has no id gate, so
+				// the dead lifetime's EventReset landed in the NEXT request's
+				// channel. endWithReset re-checks s.id under s.mu and refuses.
+				//
+				// It also sets the terminal flags, which push did not. That
+				// removes a duplicate RST the old arm produced on the ordinary
+				// path: a cleanly enqueued push left the stream looking open, so
+				// the application's later Close sent a second RST — with CANCEL,
+				// misreporting the flow-control error that actually killed it.
+				//
+				// The RST is now unconditional. Nothing else emits one on this
+				// path (endWithReset signals in-process only), so the peer gets
+				// exactly one, carrying se.Code.
+				c.resetStreamOnError(se)
 				continue
 			}
 			c.emitConnGoAwayIfTyped(err)
