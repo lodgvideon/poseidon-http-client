@@ -28,7 +28,12 @@ const (
 	// DrainHard closes every conn in the removed sub-pool immediately;
 	// in-flight streams surface as RST_STREAM(CANCEL).
 	DrainHard
-	// DrainLazy refuses new acquires; idle eviction handles eventual close.
+	// DrainLazy refuses new acquires and leaves closing to idle eviction, which
+	// means PoolOptions.IdleTimeout decides whether the conns ever close at all.
+	// That field defaults to 0, documented as "never close on idle" — so under
+	// default options DrainLazy's removed sub-pool keeps its connections open
+	// for the life of the pool, and "eventual" never arrives. Set IdleTimeout,
+	// or use DrainGraceful, which closes once the sub-pool goes idle regardless.
 	DrainLazy
 )
 
