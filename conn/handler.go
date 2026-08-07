@@ -736,13 +736,28 @@ func (h *connHandler) handlePushPromiseBlock(parentStreamID, promisedStreamID ui
 		copied[i].Value = (*slabPtr)[off : off+len(f.Value)]
 	}
 
-	// Deliver push event on the parent stream.
-	parent.push(StreamEvent{
+	// Deliver the push event on the parent stream, gated on it still being the
+	// stream looked up above. A *Stream is pooled and the work between that
+	// lookup and here — reserving the promised stream, taking a slab from the
+	// pool, copying every header field — is a window in which the application
+	// can finish the parent request, Close it, and a fresh NewStream can claim
+	// the struct. An ungated push would then announce this promise to whichever
+	// request now owns it.
+	//
+	// If the parent is gone the promise cannot be announced to anyone, so the
+	// promised stream is refused rather than left reserved and unreachable —
+	// the same stream-level refusal the reservation failure above performs, and
+	// RFC 9113 §8.4.2 sanctions REFUSED_STREAM for declining a promise.
+	if !parent.pushIfID(parentStreamID, StreamEvent{
 		Type:         EventPushPromise,
 		Headers:      copied,
 		PushStreamID: promisedStreamID,
 		Slab:         slabPtr,
-	})
+	}) {
+		headerSlabPool.Put(slabPtr)
+		_ = h.streams.rstStream(promisedStreamID, frame.ErrCodeRefusedStream)
+		return nil
+	}
 	_ = pushed // stream registered; subsequent HEADERS/DATA frames find it
 	return nil
 }
