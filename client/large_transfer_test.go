@@ -379,13 +379,22 @@ func TestIT_H1_LargeDownload_StreamsAndDiscardsFlat(t *testing.T) {
 	defer cancel()
 
 	// Both streaming doors are open on H1 now: h1Exchange.Recv reads a chunk at a
-	// time and beginRespStream dispatches to it. Draining each proves the path
-	// works at this size; the retention question below is this test's subject.
+	// time and beginRespStream dispatches to it. Opening each and reading the
+	// first chunk proves the dispatch reaches h1Exchange, which is all this test
+	// needs from them — the retention question below is its subject.
+	//
+	// Deliberately NOT draining either body. This transport is a single
+	// connection and the fixture is 64 MiB, so a full drain per door tripled the
+	// bytes on one socket and blew the 60s budget under -race in CI while passing
+	// in 0.16s locally. Closing early abandons the body, which forces a redial —
+	// cheap, and the streamed-body drain is covered at a sane size by
+	// TestH1_BodyStream_Incremental.
 	var sr client.StreamResponse
 	if err := c.DoStream(ctx, &client.Request{Method: "GET", Path: "/"}, &sr); err != nil {
 		t.Fatalf("H1 DoStream: %v", err)
 	}
 	_ = sr.Close()
+
 	var streamed client.Response
 	if err := c.Do(ctx, &client.Request{Method: "GET", Path: "/", BodyMode: client.BodyStream}, &streamed); err != nil {
 		t.Fatalf("H1 Do(BodyStream): %v", err)
@@ -393,8 +402,9 @@ func TestIT_H1_LargeDownload_StreamsAndDiscardsFlat(t *testing.T) {
 	if streamed.BodyReader == nil {
 		t.Fatal("H1 Do(BodyStream) returned no BodyReader")
 	}
-	if _, err := io.Copy(io.Discard, streamed.BodyReader); err != nil {
-		t.Fatalf("drain streamed H1 body: %v", err)
+	first := make([]byte, 4096)
+	if _, err := io.ReadFull(streamed.BodyReader, first); err != nil {
+		t.Fatalf("read the first chunk of the streamed H1 body: %v", err)
 	}
 	_ = streamed.BodyReader.Close()
 
