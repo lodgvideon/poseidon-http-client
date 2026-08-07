@@ -93,3 +93,60 @@ func TestH3EvictIdle_KeepsConnWithActiveStreams(t *testing.T) {
 		t.Fatal("evictIdle evicted the conn that still had active streams and kept the idle one")
 	}
 }
+
+// TestHandleTick_DialsForStrandedWaiter pins ensureDialForWaiters inside the
+// HTTP/2 tick. Deleting that call from Pool.handleTick left the suite green.
+//
+// The state it exists to escape is {no live conns, no in-flight dials, queued
+// waiters}. pool.go records it as measured-terminal: release, dial-done and tick
+// all pass through without acting, so nothing re-enters the dial decision and
+// each waiter sits until its own context expires — for up to ~30 health-check
+// ticks with the server still dialable. handleAcquire makes this decision for a
+// NEW request; the point of the tick call is that the decision belongs to the
+// state, not to the arrival of work, and a pool whose every worker is parked
+// never receives that request.
+//
+// No test drove a tick into that state, so the call was free to delete.
+func TestHandleTick_DialsForStrandedWaiter(t *testing.T) {
+	p := newPool("127.0.0.1:1", newConnOpts(), PoolOptions{
+		MaxConnsPerHost:   2,
+		HealthCheckPeriod: time.Hour,
+	}, nil, nil)
+	t.Cleanup(func() { _ = p.Close() })
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	rs := &runState{
+		waiters: []acquireReq{{ctx: ctx, reply: make(chan acquireResp, 1)}},
+	}
+
+	p.handleTick(rs)
+
+	if rs.inFlightDials != 1 {
+		t.Fatalf("inFlightDials = %d after a tick with a stranded waiter, want 1 — "+
+			"nothing re-enters the dial decision, so the waiter blocks until its ctx expires",
+			rs.inFlightDials)
+	}
+}
+
+// TestH1HandleTick_DialsForStrandedWaiter is the HTTP/1.1 twin. Same call, same
+// surviving mutation, and h1_pool.go is where this rescue was written first.
+func TestH1HandleTick_DialsForStrandedWaiter(t *testing.T) {
+	p := newH1Pool("127.0.0.1:1", newH1FakeDialer(), PoolOptions{
+		MaxConnsPerHost:   2,
+		HealthCheckPeriod: time.Hour,
+	}, nil, nil)
+	t.Cleanup(func() { _ = p.Close() })
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	rs := &h1RunState{
+		waiters: []h1AcquireReq{{ctx: ctx, reply: make(chan h1AcquireResp, 1)}},
+	}
+
+	p.handleTick(rs)
+
+	if rs.inFlightDials != 1 {
+		t.Fatalf("inFlightDials = %d after a tick with a stranded waiter, want 1", rs.inFlightDials)
+	}
+}
