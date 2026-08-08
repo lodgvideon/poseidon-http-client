@@ -29,7 +29,13 @@
 // be reused. The actor additionally re-checks IsAlive on release, so a socket that
 // died underneath a nominally keep-alive exchange is still evicted.
 //
-// Idle eviction and health-check sweeps match the other pools' behaviour.
+// Idle eviction matches the other pools. The health-check sweep does NOT, and
+// the difference is the reason the tick order here is the reverse of theirs:
+// this pool's liveness signal is one local bit, so noticing that a peer closed
+// an idle connection takes a socket read (http1.Conn.ProbeIdle) rather than a
+// flag test. Idle eviction therefore runs first, so a conn about to be dropped
+// is never probed, and the probe itself runs off the actor goroutine — see
+// startHealthSweep for why that is safe and what it cost before.
 package client
 
 import (
@@ -73,6 +79,12 @@ type h1ManagedConn struct {
 	active   int // 0 or 1 — see h1ConnStreamCap
 	lastUsed time.Time
 	dialedAt time.Time
+	// probing means the health sweep is reading this conn's socket right now.
+	// The actor sets it before handing the conn to the sweep goroutine and
+	// clears it when the result comes back; while it is set the conn is not a
+	// checkout candidate and not an eviction candidate, which is what keeps the
+	// sweep's read the only one touching the bufio reader.
+	probing bool
 }
 
 // h1AcquireReq is sent on h1Pool.acquireCh. The actor replies on reply.
@@ -112,12 +124,13 @@ type h1Pool struct {
 	dialer conn.Dialer
 
 	// channels
-	acquireCh  chan h1AcquireReq
-	releaseCh  chan h1ReleaseMsg
-	dialDoneCh chan h1DialResult
-	statsCh    chan chan Stats
-	closeCh    chan struct{}
-	closedCh   chan struct{}
+	acquireCh   chan h1AcquireReq
+	releaseCh   chan h1ReleaseMsg
+	dialDoneCh  chan h1DialResult
+	sweepDoneCh chan h1SweepResult
+	statsCh     chan chan Stats
+	closeCh     chan struct{}
+	closedCh    chan struct{}
 
 	closeOnce sync.Once
 
@@ -144,17 +157,18 @@ func newH1Pool(addr string, dialer conn.Dialer, opts PoolOptions, hooksRef *atom
 		metrics = &Metrics{}
 	}
 	p := &h1Pool{
-		opts:       opts,
-		addr:       addr,
-		dialer:     dialer,
-		acquireCh:  make(chan h1AcquireReq),
-		releaseCh:  make(chan h1ReleaseMsg, 16),
-		dialDoneCh: make(chan h1DialResult, 4),
-		statsCh:    make(chan chan Stats),
-		closeCh:    make(chan struct{}),
-		closedCh:   make(chan struct{}),
-		hooksRef:   hooksRef,
-		metrics:    metrics,
+		opts:        opts,
+		addr:        addr,
+		dialer:      dialer,
+		acquireCh:   make(chan h1AcquireReq),
+		releaseCh:   make(chan h1ReleaseMsg, 16),
+		dialDoneCh:  make(chan h1DialResult, 4),
+		sweepDoneCh: make(chan h1SweepResult, 1),
+		statsCh:     make(chan chan Stats),
+		closeCh:     make(chan struct{}),
+		closedCh:    make(chan struct{}),
+		hooksRef:    hooksRef,
+		metrics:     metrics,
 	}
 	go p.run()
 	return p
@@ -188,6 +202,9 @@ type h1RunState struct {
 	waiters       []h1AcquireReq
 	inFlightDials int
 	lastDialErrAt time.Time
+	// sweeping is true while a health sweep is off the actor. It keeps ticks
+	// from piling sweeps on top of each other when a peer is slow to answer.
+	sweeping bool
 }
 
 func (p *h1Pool) run() {
@@ -204,6 +221,8 @@ func (p *h1Pool) run() {
 			p.handleRelease(rs, msg)
 		case dr := <-p.dialDoneCh:
 			p.handleDialDone(rs, dr)
+		case sr := <-p.sweepDoneCh:
+			p.handleSweepDone(rs, sr)
 		case respCh := <-p.statsCh:
 			p.handleStats(rs, respCh)
 		case <-tick.C:
@@ -225,6 +244,19 @@ func (p *h1Pool) handleAcquire(rs *h1RunState, req h1AcquireReq) {
 		// lastUsed is NOT stamped here: it has to mean "idle since", which is what
 		// the checkout probe in acquire keys on. Release stamps it.
 		p.replyAcquire(req, mc, nil)
+		return
+	}
+	if len(rs.waiters) < h1CountReservedIdle(rs.conns) {
+		// pickIdle came back empty only because the health sweep is holding a
+		// conn this caller could otherwise have had, and enough of them are held
+		// to cover everyone already queued plus this request. Falling through
+		// would dial a socket the pool already owns — and since nothing defaults
+		// IdleTimeout, evictIdle is disabled and the surplus is never reclaimed,
+		// it just ratchets to the cap. Queue instead: handleSweepDone serves
+		// waiters the moment the reservation clears, so the wait is one probe
+		// deadline. If the probe says the conn is dead it is evicted there and
+		// ensureDialForWaiters dials for this waiter anyway.
+		rs.waiters = append(rs.waiters, req)
 		return
 	}
 	liveConns := h1CountLive(rs.conns)
@@ -275,6 +307,13 @@ func (p *h1Pool) handleRelease(rs *h1RunState, msg h1ReleaseMsg) {
 // new request; the release and tick paths have to make it too.
 func (p *h1Pool) ensureDialForWaiters(rs *h1RunState) {
 	if len(rs.waiters) == 0 {
+		return
+	}
+	// Conns the health sweep is holding are capacity the pool already owns and is
+	// about to get back, so a waiter one of them will serve is not waiting for a
+	// dial. Without this the tick's own call to this function opens a socket for
+	// the very waiter its own sweep just displaced.
+	if len(rs.waiters) <= h1CountReservedIdle(rs.conns) {
 		return
 	}
 	if h1CountLive(rs.conns)+rs.inFlightDials >= p.opts.MaxConnsPerHost {
@@ -331,12 +370,19 @@ func (p *h1Pool) handleStats(rs *h1RunState, respCh chan<- Stats) {
 	}
 }
 
-// handleTick runs periodic maintenance: idle eviction, dead eviction, and waiter
-// expiry. There is no stream-cap refresh: the HTTP/1.1 per-conn cap is the
-// constant h1ConnStreamCap.
+// handleTick runs periodic maintenance: idle eviction, dead eviction, the health
+// sweep, and waiter expiry. There is no stream-cap refresh: the HTTP/1.1 per-conn
+// cap is the constant h1ConnStreamCap.
+//
+// Idle eviction still runs first, for the reason it always did: a conn that is
+// about to be discarded for idleness should not be probed at all. What changed is
+// that the probe itself no longer runs here — startHealthSweep hands it to a
+// goroutine. Every step left in this function is a predicate over fields the
+// actor already owns, so the tick no longer scales with the number of conns.
 func (p *h1Pool) handleTick(rs *h1RunState) {
 	rs.conns = p.evictIdle(rs.conns)
 	rs.conns = p.evictDead(rs.conns)
+	p.startHealthSweep(rs)
 	rs.waiters = h1PruneExpiredWaiters(rs.waiters)
 	p.ensureDialForWaiters(rs)
 }
@@ -407,6 +453,11 @@ func (p *h1Pool) pickIdle(conns []*h1ManagedConn) *h1ManagedConn {
 			continue
 		}
 		if mc.active >= h1ConnStreamCap {
+			continue
+		}
+		if mc.probing {
+			// The health sweep is reading this socket. Handing it out would put
+			// an exchange reader on the same bufio reader as the probe.
 			continue
 		}
 		return mc
@@ -503,6 +554,10 @@ func (p *h1Pool) evict(conns []*h1ManagedConn, target *h1ManagedConn, reason Clo
 }
 
 // evictIdle removes conns idle past PoolOptions.IdleTimeout.
+//
+// A conn the health sweep has reserved is skipped: the sweep is about to report
+// on it, and evicting it here would close it under a probe that is mid-read and
+// then evict it a second time when the result arrives.
 func (p *h1Pool) evictIdle(conns []*h1ManagedConn) []*h1ManagedConn {
 	if p.opts.IdleTimeout <= 0 {
 		return conns
@@ -510,7 +565,7 @@ func (p *h1Pool) evictIdle(conns []*h1ManagedConn) []*h1ManagedConn {
 	now := time.Now()
 	out := conns[:0]
 	for _, mc := range conns {
-		if mc.active == 0 && now.Sub(mc.lastUsed) > p.opts.IdleTimeout {
+		if !mc.probing && mc.active == 0 && now.Sub(mc.lastUsed) > p.opts.IdleTimeout {
 			_ = mc.c.Close()
 			p.notifyClose(CloseIdle)
 			continue
@@ -521,20 +576,30 @@ func (p *h1Pool) evictIdle(conns []*h1ManagedConn) []*h1ManagedConn {
 }
 
 // evictDead removes conns whose IsAlive returns false, and — in this periodic
-// sweep only — idle conns the peer has closed or written unsolicited data on.
-// The socket probe runs here rather than at checkout so the per-request acquire
-// path stays syscall-free; it touches only checked-in conns (active == 0), where
-// no exchange reader is running, so reading through the bufio reader is safe.
+// sweep only — conns this side has already torn down.
+//
+// The only question asked here is IsAlive, which reads one atomic that this side
+// sets when it tears a conn down. The socket probe that used to run here — the
+// part that notices a peer FIN, which no local flag can report — now runs in
+// startHealthSweep, off the actor goroutine. Splitting them does not change which
+// conns are evicted: the active == 0 guard this function used to carry gated only
+// the probe, never the IsAlive test, so a busy conn that had been closed locally
+// was evicted before and still is.
+//
+// Two consequences of the split are timing-only, and are listed so a future
+// reader does not mistake either for a bug. A conn the probe finds dead is now
+// evicted one channel hop after the tick rather than inside it, so a Stats call
+// landing in that window still counts it. And if Close lands mid-sweep the result
+// is dropped, so handleClose reports that conn CloseManual where a serialised
+// tick would have said CloseDead — the same number of events, one different
+// reason, in the shutdown race only.
+//
 // RFC 9112 §9.6 (monitor idle connections) / RFC 9110 (idle-arriving data is not
 // a valid response, so evict rather than let the next request consume it).
 func (p *h1Pool) evictDead(conns []*h1ManagedConn) []*h1ManagedConn {
 	out := conns[:0]
 	for _, mc := range conns {
-		dead := !mc.c.IsAlive()
-		if !dead && mc.active == 0 {
-			dead = !mc.c.ProbeIdle()
-		}
-		if dead {
+		if !mc.c.IsAlive() {
 			_ = mc.c.Close()
 			p.notifyClose(CloseDead)
 			continue
@@ -542,6 +607,164 @@ func (p *h1Pool) evictDead(conns []*h1ManagedConn) []*h1ManagedConn {
 		out = append(out, mc)
 	}
 	return out
+}
+
+// h1CountReservedIdle counts conns the health sweep is holding that would
+// otherwise be checkout candidates — capacity that exists and is about to come
+// back, as opposed to capacity the pool does not have.
+//
+// pickIdle returning nil means one or the other, and they call for opposite
+// decisions: no capacity justifies a dial, a reservation justifies a short wait.
+// Every site that decides whether to dial has to ask, not just the one a new
+// request arrives on — handleAcquire AND ensureDialForWaiters, the latter reached
+// from the tick, from release, and from both arms of dial-done.
+//
+// The predicate deliberately mirrors pickIdle's minus the probing test, so the
+// two cannot drift into disagreeing about what "available" means.
+func h1CountReservedIdle(conns []*h1ManagedConn) int {
+	n := 0
+	for _, mc := range conns {
+		if mc.probing && mc.c.IsAlive() && mc.active < h1ConnStreamCap {
+			n++
+		}
+	}
+	return n
+}
+
+// h1SweepResult carries a finished health sweep back to the actor. probed is
+// every conn the actor reserved; dead is the subset whose probe failed. Both
+// slices are handed over wholesale so the actor can clear the reservation even
+// for conns it is about to evict.
+type h1SweepResult struct {
+	probed []*h1ManagedConn
+	dead   []*h1ManagedConn
+}
+
+// startHealthSweep reserves every checked-in conn and probes them off the actor
+// goroutine.
+//
+// The probe must not run on the actor. http1.Conn.ProbeIdle arms a 1ms FUTURE
+// read deadline and blocks in Peek; on a HEALTHY idle socket it blocks for the
+// whole deadline by construction, since it returns early only when the peer has
+// sent something. Run inline it therefore cost (idle conns) x one deadline of
+// actor time per tick, and acquireCh is unbuffered, so nothing could acquire or
+// release for that whole stretch. For HTTP/1.1 MaxConnsPerHost IS the concurrency
+// limit, so the stall grew with the very knob a caller raises to go faster:
+// measured at 4.6ms worst-case acquire latency with 2 conns against 271ms with 64.
+//
+// What makes moving it safe is the reservation, not the goroutine. ProbeIdle
+// reads through the same bufio reader an exchange uses, so it may only run when
+// no exchange can start. The actor is the only goroutine that knows active == 0,
+// and it stays the one that decides: it marks the candidates probing, and both
+// pickIdle and evictIdle skip a probing conn, so it can be neither checked out
+// nor evicted while the sweep holds it.
+//
+// Probes run concurrently, so a sweep costs one probe deadline in wall clock
+// rather than one per conn. Callers arriving mid-sweep queue behind a full pool
+// for that single deadline instead of blocking for the whole sweep.
+//
+// KNOWN LIMIT, inherited rather than introduced: the whole design rests on
+// ProbeIdle being bounded by the read deadline it sets. A caller-supplied
+// conn.Dialer could return a net.Conn whose SetReadDeadline succeeds but does
+// nothing, and then Peek blocks until the peer speaks — rs.sweeping stays true,
+// the reserved conns stay reserved, and the pool wedges at its cap. A sweep
+// cannot defend itself by giving up on a probe, because abandoning one would
+// leave a goroutine reading the bufio reader after the reservation cleared,
+// which is the one thing the reservation exists to prevent. Note the same conn
+// wedges main's actor outright, so this narrows the blast radius from the whole
+// pool's actor to its idle set; it does not close it.
+func (p *h1Pool) startHealthSweep(rs *h1RunState) {
+	if rs.sweeping {
+		// A peer that is slow to answer must not make ticks pile sweeps on top
+		// of each other, each reserving the conns the last one already holds.
+		return
+	}
+	var cands []*h1ManagedConn
+	for _, mc := range rs.conns {
+		if mc.active == 0 {
+			mc.probing = true
+			cands = append(cands, mc)
+		}
+	}
+	if len(cands) == 0 {
+		return
+	}
+	rs.sweeping = true
+	go p.runHealthSweep(cands)
+}
+
+// runHealthSweep probes every reserved conn concurrently and reports back. It
+// runs on its own goroutine and touches only the conn handles, never runState.
+func (p *h1Pool) runHealthSweep(cands []*h1ManagedConn) {
+	// Indexed rather than appended: each goroutine owns one slot, so the writes
+	// need no lock, and the nils are filtered once the wait is over.
+	failed := make([]*h1ManagedConn, len(cands))
+	var wg sync.WaitGroup
+	wg.Add(len(cands))
+	for i, mc := range cands {
+		go func(i int, mc *h1ManagedConn) {
+			defer wg.Done()
+			if !mc.c.ProbeIdle() {
+				failed[i] = mc
+			}
+		}(i, mc)
+	}
+	wg.Wait()
+
+	dead := failed[:0]
+	for _, mc := range failed {
+		if mc != nil {
+			dead = append(dead, mc)
+		}
+	}
+
+	select {
+	case p.sweepDoneCh <- h1SweepResult{probed: cands, dead: dead}:
+	case <-p.closedCh:
+		// The pool shut down while we were probing. handleClose has already
+		// closed every conn, so there is nothing left to evict and no actor to
+		// tell — dropping the result is the whole cleanup.
+	}
+}
+
+// handleSweepDone releases the sweep's reservation and evicts what it found.
+//
+// A conn cannot have been checked out or idle-evicted while it was reserved, so
+// every entry in dead is still in rs.conns and is evicted exactly once. Serving
+// waiters afterwards matters: callers that arrived mid-sweep queued because every
+// conn was reserved, and this is the moment capacity comes back.
+func (p *h1Pool) handleSweepDone(rs *h1RunState, sr h1SweepResult) {
+	rs.sweeping = false
+	for _, mc := range sr.probed {
+		mc.probing = false
+	}
+	for _, mc := range sr.dead {
+		rs.conns = p.evict(rs.conns, mc, CloseDead)
+	}
+	rs.waiters = p.serveWaiters(rs.conns, rs.waiters)
+	p.ensureDialForWaiters(rs)
+
+	// A sweep can evict every conn it reserved, and handleAcquire queues callers
+	// against those reservations with no dial of their own — so this is the one
+	// other place the pool can reach {nothing live, nothing in flight, waiters
+	// queued} and leave them with nothing to wake them.
+	//
+	// handleDialDone refuses that state for exactly this reason, but its check
+	// cannot cover this path: when the dial failed these conns were still
+	// reserved, and h1CountLive counts a reserved conn as live, so its "nothing
+	// live" test was false. By the time they die, that dial is long finished.
+	//
+	// Left queued, such a waiter waits a whole HealthCheckPeriod while a FRESH
+	// acquire is refused instantly by the fast-refuse in handleAcquire — the same
+	// priority inversion handleDialDone's comment describes, reached the other way
+	// round.
+	if len(rs.waiters) > 0 && rs.inFlightDials == 0 && h1CountLive(rs.conns) == 0 &&
+		inDialBackoff(rs.lastDialErrAt, p.opts.DialBackoff) {
+		for _, w := range rs.waiters {
+			p.replyAcquire(w, nil, ErrDialBackoff)
+		}
+		rs.waiters = nil
+	}
 }
 
 // evictDeadSilent removes conns whose IsAlive returns false without firing the

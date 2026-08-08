@@ -266,11 +266,20 @@ func (c *Conn) ProbeIdle() bool {
 	// return a timeout immediately without ever looking at the socket, so an
 	// already-arrived byte or FIN would be missed. With a short future deadline a
 	// peer FIN or unsolicited byte that is already present returns immediately,
-	// while an empty, still-open socket blocks only until the deadline. This runs
-	// in the pool's periodic sweep on checked-in (idle) conns, so the ~1ms wait
-	// costs nothing under load — busy conns are skipped — and only ticks while the
-	// pool is idle. A timeout means healthy; a byte means unsolicited data; any
-	// other error (EOF, reset) means the peer is gone.
+	// while an empty, still-open socket blocks until the deadline.
+	//
+	// That last case is the common one and it is not cheap: a HEALTHY idle conn
+	// costs the full deadline every time, measured at ~1.5ms here including the
+	// two SetReadDeadline calls. This comment used to say the wait "costs nothing
+	// under load" and that the sweep "only ticks while the pool is idle" — neither
+	// is true. The health-check ticker is unconditional, and a pool that is busy
+	// overall still has idle conns at the tick instant, one probe each. A caller
+	// must therefore not run this where a stall is visible: the HTTP/1.1 pool
+	// learned that the hard way and now probes off its actor goroutine (see
+	// client.h1Pool.startHealthSweep).
+	//
+	// A timeout means healthy; a byte means unsolicited data; any other error
+	// (EOF, reset) means the peer is gone.
 	_ = c.nc.SetReadDeadline(time.Now().Add(time.Millisecond))
 	_, err := c.br.Peek(1)
 	_ = c.nc.SetReadDeadline(time.Time{})
