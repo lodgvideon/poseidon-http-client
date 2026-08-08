@@ -902,6 +902,13 @@ func (c *Client) doStream(ctx context.Context, req *Request, sr *StreamResponse)
 	}
 	sr.stream = rs
 	sr.release = release
+	// Pre-merge the caller's context with an abort Close can fire. conn.Stream
+	// Recv parks on the event channel and the stream's own signals, so closing
+	// the stream does not wake a reader already blocked in it; this is what
+	// does. Building it here rather than per Recv keeps the streaming path
+	// allocation-free for a caller that passes this same context back.
+	sr.doCtx = ctx
+	sr.recvCtx, sr.abortCancel = context.WithCancel(ctx)
 	sr.lg = armLeakGuard("StreamResponse")
 	if ev.EndStream {
 		sr.drained = true
