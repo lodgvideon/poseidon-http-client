@@ -351,3 +351,71 @@ func TestH3Pool_HandleTick_FlushesWithADrainingConnStillInTheSlice(t *testing.T)
 	assertRefusedWithBackoff(t, resp.err, answered, got, len(rs.waiters),
 		"h3Pool.handleTick with a draining conn")
 }
+
+// TestFlushStrandedWaiters_KeepsTheQueueWhenTheBackoffIsClosed pins the guard
+// that both pools' flush carries for a reason the handlers cannot demonstrate.
+//
+// Through any call site the state is unreachable: ensureDialForWaiters /
+// dialForWaiters would have started a dial (nothing live and nothing in flight
+// is below any cap, and the backoff is what stops it), so inFlightDials would be
+// non-zero and the flush would return one check earlier. Deleting the guard is
+// therefore an EQUIVALENT MUTANT through the handlers — measured, both "drop the
+// backoff guard" mutations survive the whole suite.
+//
+// It is still load-bearing as a contract. Nothing-live with the backoff closed
+// means a dial is owed, not that the caller should be refused, and a future call
+// site reaching this state must not get the opposite answer. Calling it directly
+// is the only way to say so.
+func TestFlushStrandedWaiters_KeepsTheQueueWhenTheBackoffIsClosed(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	// Two hours since the last dial error against a one-hour backoff: closed.
+	expired := time.Now().Add(-2 * time.Hour)
+
+	t.Run("h2", func(t *testing.T) {
+		p := h2StrandPool(t)
+		w := h2StrandWaiter(ctx)
+		rs := &runState{waiters: []acquireReq{w}, lastDialErrAt: expired}
+
+		p.flushStrandedWaiters(rs, ErrDialBackoff)
+
+		if len(rs.waiters) != 1 {
+			t.Fatalf("waiters = %d, want 1 — with the backoff closed this waiter is owed a "+
+				"dial, not a refusal", len(rs.waiters))
+		}
+		if resp, answered := func() (acquireResp, bool) {
+			select {
+			case r := <-w.reply:
+				return r, true
+			default:
+				return acquireResp{}, false
+			}
+		}(); answered {
+			t.Fatalf("waiter refused with %v while the pool was free to dial for it", resp.err)
+		}
+	})
+
+	t.Run("h3", func(t *testing.T) {
+		p := inertH3Pool(PoolOptions{MaxConnsPerHost: 4, DialBackoff: time.Hour}, nil)
+		w := h3AcquireReq{ctx: ctx, reply: make(chan h3AcquireResp, 1)}
+		rs := &h3RunState{waiters: []h3AcquireReq{w}, lastDialErrAt: expired}
+
+		p.flushStrandedWaiters(rs, ErrDialBackoff)
+
+		if len(rs.waiters) != 1 {
+			t.Fatalf("waiters = %d, want 1 — with the backoff closed this waiter is owed a "+
+				"dial, not a refusal", len(rs.waiters))
+		}
+		if resp, answered := func() (h3AcquireResp, bool) {
+			select {
+			case r := <-w.reply:
+				return r, true
+			default:
+				return h3AcquireResp{}, false
+			}
+		}(); answered {
+			t.Fatalf("waiter refused with %v while the pool was free to dial for it", resp.err)
+		}
+	})
+}
