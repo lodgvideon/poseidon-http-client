@@ -227,3 +227,43 @@ core counts multiplexed streams. That is the one step where sharing the function
 changes what the number means, and it gets its own increment.
 
 ---
+
+## Step 5 — H1 on the core; the tier is unified
+
+Same pre-check as H2, and it is the one that mattered: **11 of 13 bodies
+identical to the core, `watchDrain` among them.** The two that differ are
+`getOrCreateSubPool` and `acquire`, differing only at the injection points —
+here `mkRelease` carries `keepAlive`, because H1 is the protocol whose checkout
+is exclusive.
+
+**The `watchDrain` hazard, stated precisely now that it is measurable.** The
+fear was that H1's `InFlightStreams == 0` means exclusive exchanges while H2/H3
+mean multiplexed streams, so one shared predicate would conflate them. It does
+not: `s.p.Stats()` dispatches through the type parameter to `h1Pool.Stats()`,
+which sums `h1SumActive`. The predicate asks "nothing in flight" in each
+protocol's own terms, which is correct for all three, and the code was already
+byte-identical before the move.
+
+What *did* change is real and worth writing down: **the drain poll schedule now
+has one home for three protocols.** `drainPollInit` 20 ms, `drainPollMax` 5 s,
+and the doubling between them used to sit in three places. Retuning them for one
+protocol now retimes sub-pool teardown for all three, and no test asserts
+timing — all three `DrainGraceful` tests assert eventual convergence. That is a
+review-time constraint, not something the gate can catch.
+
+`h1_managed_pool.go` 452 → 89 lines. Tier total **1391 → 733**, of which 448 is
+the shared core: three implementations became one.
+
+Loop: build · vet · lint 0 issues · `-race` green (72 s) · **0 test files
+changed** · gate **13/13**.
+
+**The gate is at its strongest here.** All 13 cases now mutate the single shared
+copy, and each still requires its own protocol's tests to go red. Before the
+refactor, 13 cases proved 13 separate implementations were observed. Now they
+prove that every protocol observes the one implementation — which is the property
+that makes the unification safe to keep, rather than merely safe to have done.
+
+Managed tier complete. Base tier deliberately untouched: 28% mechanically
+unifiable, and its divergences are the load-bearing ones.
+
+---
