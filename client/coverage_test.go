@@ -889,8 +889,9 @@ func TestPool_MapAcquireErr_AcquireTimeout(t *testing.T) {
 		time.Sleep(500 * time.Millisecond)
 		w.WriteHeader(200)
 	}))
-	// Create a pool with MaxConnsPerHost=1, MaxStreamsPerConn=1, AcquireTimeout=1ms.
-	// First request ties up the one slot, second times out.
+	// One conn, one stream on it, and an AcquireTimeout that expires well before
+	// the handler does. The first request ties up the only slot for 500ms; the
+	// second finds the pool at capacity and must be refused.
 	c, err := client.NewClient(client.ClientOptions{
 		Addr:      addr,
 		Transport: client.TransportPool,
@@ -900,7 +901,12 @@ func TestPool_MapAcquireErr_AcquireTimeout(t *testing.T) {
 		Pool: &client.PoolOptions{
 			MaxConnsPerHost:   1,
 			MaxStreamsPerConn: 1,
-			AcquireTimeout:    1 * time.Millisecond,
+			// Long enough to outlive the first request's dial and TLS handshake,
+			// short enough to expire while the handler still holds the only stream
+			// slot. At 1ms the FIRST acquire timed out waiting for its own dial, the
+			// conn then landed in the pool, and the second request sailed through --
+			// so the assertion below was being made about the wrong request.
+			AcquireTimeout: 200 * time.Millisecond,
 		},
 	})
 	if err != nil {
@@ -923,11 +929,15 @@ func TestPool_MapAcquireErr_AcquireTimeout(t *testing.T) {
 	var resp2 client.Response
 	err = c.Do(ctx, &client.Request{Method: "GET", Path: "/"}, &resp2)
 	if !errors.Is(err, client.ErrAcquireTimeout) {
-		t.Logf("got %v, want ErrAcquireTimeout (may have got context variant)", err)
+		t.Fatalf("Do at pool capacity = %v, want ErrAcquireTimeout", err)
 	}
 
-	// Drain the first goroutine.
-	<-errCh
+	// The first request must actually have held the slot. Without this the test
+	// can pass for the wrong reason: if it failed early the pool is idle, and
+	// whatever the second request returns says nothing about acquire timeouts.
+	if ferr := <-errCh; ferr != nil {
+		t.Fatalf("first request, which is supposed to occupy the only slot: %v", ferr)
+	}
 }
 
 // ---------------------------------------------------------------------------
