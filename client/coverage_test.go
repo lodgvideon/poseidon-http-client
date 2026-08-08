@@ -14,6 +14,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -551,8 +552,11 @@ func TestPool_MapAcquireErr_ContextCanceled(t *testing.T) {
 	cancel() // cancel before Do
 	var resp2 client.Response
 	err = c.Do(ctxCancel, &client.Request{Method: "GET", Path: "/"}, &resp2)
+	// The hedge this replaced ("acceptable variant") was unfounded: a context
+	// cancelled before Do is reported as context.Canceled every time. Measured
+	// stable over 25 iterations under -race before tightening.
 	if !errors.Is(err, context.Canceled) {
-		t.Logf("got %v, wanted context.Canceled (acceptable variant)", err)
+		t.Fatalf("Do with an already-cancelled context = %v, want context.Canceled", err)
 	}
 }
 
@@ -1014,7 +1018,7 @@ func TestSingleConn_Do_AfterClose_ErrClosed(t *testing.T) {
 		t.Fatal("expected error after Close, got nil")
 	}
 	if !errors.Is(err, client.ErrClosed) {
-		t.Logf("got %v (not exactly ErrClosed, acceptable)", err)
+		t.Fatalf("Do after Close = %v, want ErrClosed", err)
 	}
 }
 
@@ -1328,7 +1332,7 @@ func TestPool_Acquire_AfterClose_ErrPoolClosed(t *testing.T) {
 	var resp2 client.Response
 	err = c.Do(ctx, &client.Request{Method: "GET", Path: "/"}, &resp2)
 	if !errors.Is(err, client.ErrPoolClosed) {
-		t.Logf("got %v, want ErrPoolClosed (pool closed path)", err)
+		t.Fatalf("Do after Close = %v, want ErrPoolClosed (the test is named for that sentinel and used to accept any error)", err)
 	}
 }
 
@@ -1419,11 +1423,16 @@ func TestFrame_ErrCodeCancel_IsNonZero(t *testing.T) {
 // managed_pool.go: acquire — selector.Pick error path (custom broken selector)
 // ---------------------------------------------------------------------------
 
+// errBrokenSelector is what brokenSelector fails with. A sentinel rather than
+// an inline errors.New, so the test can assert identity instead of matching
+// the message text -- a wrapper that reworded it would otherwise pass.
+var errBrokenSelector = errors.New("selector: intentional failure")
+
 // brokenSelector always returns an error from Pick.
 type brokenSelector struct{}
 
 func (b brokenSelector) Pick(_ []client.Address, _ client.PickContext) (client.Address, error) {
-	return client.Address{}, errors.New("selector: intentional failure")
+	return client.Address{}, errBrokenSelector
 }
 
 func TestManagedPool_Acquire_SelectorPickError(t *testing.T) {
@@ -1458,8 +1467,8 @@ func TestManagedPool_Acquire_SelectorPickError(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected selector error, got nil")
 	}
-	if !strings.Contains(err.Error(), "intentional failure") {
-		t.Logf("got error: %v (want 'intentional failure')", err)
+	if !errors.Is(err, errBrokenSelector) {
+		t.Fatalf("Do with a failing selector = %v, want it to wrap errBrokenSelector", err)
 	}
 }
 
@@ -1470,10 +1479,20 @@ func TestManagedPool_Acquire_SelectorPickError(t *testing.T) {
 
 func TestManagedPool_Acquire_NonDialOnlyErr_ImmediateReturn(t *testing.T) {
 	t.Parallel()
+	// The first request must still hold the single stream slot when the second
+	// one asks. The old version slept 20ms and hoped -- and carried a branch
+	// accepting a nil error "because the first request may have completed",
+	// which made the test unable to fail. The handler now says when it has
+	// arrived, and holds until the test lets go.
+	var once sync.Once
+	arrived := make(chan struct{})
+	release := make(chan struct{})
 	_, addr := newTLSH2Server(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		time.Sleep(200 * time.Millisecond)
+		once.Do(func() { close(arrived) })
+		<-release
 		w.WriteHeader(200)
 	}))
+	defer close(release)
 	host, portStr, _ := net.SplitHostPort(addr)
 	port, err := strconv.Atoi(portStr)
 	if err != nil {
@@ -1490,7 +1509,11 @@ func TestManagedPool_Acquire_NonDialOnlyErr_ImmediateReturn(t *testing.T) {
 		Pool: &client.PoolOptions{
 			MaxConnsPerHost:   1,
 			MaxStreamsPerConn: 1,
-			AcquireTimeout:    1 * time.Millisecond, // very short → ErrAcquireTimeout
+			// Long enough for the first request to dial and take the slot, short
+			// enough that the second gives up promptly. At the previous 1ms even
+			// the FIRST request lost -- a TLS dial cannot finish in 1ms -- so
+			// nothing ever held the slot and the assertion had to be excused.
+			AcquireTimeout: 100 * time.Millisecond,
 		},
 	})
 	if err != nil {
@@ -1504,17 +1527,19 @@ func TestManagedPool_Acquire_NonDialOnlyErr_ImmediateReturn(t *testing.T) {
 		var resp client.Response
 		_ = c.Do(ctx, &client.Request{Method: "GET", Path: "/"}, &resp)
 	}()
-	time.Sleep(20 * time.Millisecond)
+	select {
+	case <-arrived:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the first request never reached the server; nothing was holding the slot")
+	}
 
 	// Second acquire: ErrAcquireTimeout is NOT a dial-only error → immediate return.
 	ctxShort, cancel := context.WithTimeout(ctx, 2*time.Second)
 	defer cancel()
 	var resp2 client.Response
 	err = c.Do(ctxShort, &client.Request{Method: "GET", Path: "/"}, &resp2)
-	if err == nil {
-		t.Log("got nil (first request may have completed); test exercised the path anyway")
-	} else if !errors.Is(err, client.ErrAcquireTimeout) {
-		t.Logf("got %v (ErrAcquireTimeout preferred; other errors may occur on timing)", err)
+	if !errors.Is(err, client.ErrAcquireTimeout) {
+		t.Fatalf("acquire against a held slot = %v, want ErrAcquireTimeout; the 1ms AcquireTimeout is not a dial-only error, so it must return at once", err)
 	}
 }
 
@@ -1585,8 +1610,10 @@ func TestStreamResponse_WaitTrailers_AlreadyDrained(t *testing.T) {
 	if err != nil {
 		t.Errorf("WaitTrailers after drain = %v, want nil", err)
 	}
+	// A response that ends on its HEADERS carries no trailer section at all, so
+	// this is nil rather than an empty slice. The old comment allowed either.
 	if trailers != nil {
-		t.Logf("trailers = %v (may be empty slice from EventTrailers)", trailers)
+		t.Fatalf("WaitTrailers on a stream with no trailer section = %#v, want nil", trailers)
 	}
 }
 
@@ -1700,7 +1727,20 @@ func TestManagedTransport_Warmup(t *testing.T) {
 	// Give warmup goroutines a moment to complete.
 	time.Sleep(200 * time.Millisecond)
 
-	// A subsequent request should succeed (conns already warmed).
+	// Warmup has to have OPENED a conn, and this must be checked BEFORE any
+	// request: asserting only that a later request succeeds proves nothing,
+	// since it dials on demand and succeeds with Warmup deleted entirely.
+	//
+	// One, not two. This client passes no PoolOptions, so MaxConnsPerHost
+	// defaults to 1 and Warmup(2) is capped by it -- which this also pins.
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) && c.PoolStats().ActiveConns < 1 {
+		time.Sleep(5 * time.Millisecond)
+	}
+	if got := c.PoolStats().ActiveConns; got != 1 {
+		t.Fatalf("ActiveConns after Warmup(2) = %d, want 1 (MaxConnsPerHost defaults to 1 here)", got)
+	}
+
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	var resp client.Response
@@ -1866,7 +1906,7 @@ func TestClient_Do_BodyStream_RecvTimeout(t *testing.T) {
 		t.Fatal("expected timeout error from BodyStream with unresponsive server")
 	}
 	if !errors.Is(err, context.DeadlineExceeded) {
-		t.Logf("got %v (expected DeadlineExceeded; other timeout variants are acceptable)", err)
+		t.Fatalf("BodyStream against an unresponsive server = %v, want context.DeadlineExceeded (an 80ms deadline against a 10s handler has no other way to end)", err)
 	}
 }
 
@@ -1947,8 +1987,22 @@ func TestManagedPool_Warmup_AfterFirstRequest(t *testing.T) {
 	// Now call Warmup — subs is non-empty so the loop body runs (s.p.warmup(per)).
 	c.Warmup(2)
 
-	// Give warmup goroutines a moment to start.
-	time.Sleep(50 * time.Millisecond)
+	// This test used to end here, with no assertion of any kind: a Warmup that
+	// was a no-op, dialled the wrong host, or opened a hundred conns all passed
+	// it identically. Its only value was crash detection.
+	//
+	// One conn already exists from the request above, so warming to 2 must add
+	// exactly one more, and must not exceed MaxConnsPerHost.
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		if c.PoolStats().ActiveConns >= 2 {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if got := c.PoolStats().ActiveConns; got != 2 {
+		t.Fatalf("ActiveConns after Warmup(2) = %d, want 2", got)
+	}
 }
 
 // ---------------------------------------------------------------------------
