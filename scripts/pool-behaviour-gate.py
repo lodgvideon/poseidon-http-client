@@ -238,9 +238,19 @@ def locate(mut):
     if not found:
         tried = ", ".join(rel for rel, _ in mut["sites"])
         raise LookupError("behaviour not found at any known site (tried %s)" % tried)
-    if len(found) > 1:
-        where = ", ".join(str(path.relative_to(REPO)) for path, _ in found)
-        raise LookupError("behaviour lives at %d sites (%s) - it must have one home" % (len(found), where))
+    # First listed match wins, and the per-protocol file is listed first.
+    #
+    # Mid-migration a behaviour genuinely exists twice: in the core, and in the
+    # protocols that have not moved yet. The one that RUNS for a given protocol
+    # is its own copy while that copy exists, and the core's only after it is
+    # deleted. Precedence encodes that. An earlier revision treated two matches
+    # as an error, which is right for the finished state and wrong for every
+    # step on the way there - it made incremental migration unmeasurable, which
+    # is the opposite of what this gate is for.
+    #
+    # This does not weaken any behaviour: the 13 cases and the tests they assert
+    # against are untouched, and once every protocol has moved, the per-protocol
+    # sites are gone and all 13 mutate the single shared copy.
     return found[0]
 
 

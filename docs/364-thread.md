@@ -127,3 +127,62 @@ cases. The other 8 are unpinned, which is worth knowing before any of them is
 merged into the core.
 
 ---
+
+## Step 3a — gate: precedence instead of "one home"
+
+Step 2's `locate()` treated two matching sites as an error. Applying the H3
+migration proved that rule wrong: all four H3 cases went CAUGHT, and all nine
+H1/H2 cases went ERROR — *behaviour lives at 2 sites*. Correct observation, wrong
+conclusion. Mid-migration a behaviour genuinely does exist twice: in the core,
+and in every protocol that has not moved yet.
+
+The invariant is not "one copy in the tree" but **one copy that this protocol
+executes** — its own while that copy exists, the core's only after it is deleted.
+`locate()` now takes the first listed match, per-protocol file first.
+
+This is a correction to a rule I invented in step 2, not a relaxation of
+coverage. The 13 cases and the tests they assert against are untouched; once
+every protocol has moved, the per-protocol sites are gone and all 13 mutate the
+single shared copy — strictly stronger than today, because each case then proves
+its own protocol observes the shared code.
+
+Verified in **both** states, because a gate that is only right after the refactor
+would be worthless: 13/13 with H3 migrated, 13/13 with it reverted.
+
+## Step 3b — H3 on the core
+
+`client/managed_core.go`: `managedCore[P, MC, C, R]`, a four-method
+`subPoolBackend[MC]` (`acquire`, `Stats`, `Close`, `warmup`), and
+`coreSubPool[P, MC]`. All 13 methods ported verbatim from the H3 file with types
+substituted. The three measured differences are injected as closures rather than
+branched on:
+
+    newSub    func(key string) P          // which sub-pool to build
+    connOf    func(MC) C                  // read the conn out of the record
+    mkRelease func(P, MC) R               // release shape: func() vs func(bool)
+
+`release` is deliberately NOT on the interface — its signature differs per
+protocol, which is exactly what `mkRelease` exists to absorb.
+
+H3 is two aliases:
+
+    type h3SubPoolState = coreSubPool[*h3Pool, *h3ManagedConn]
+    type h3ManagedPool  = managedCore[*h3Pool, *h3ManagedConn, h3Client, func()]
+
+Aliases, not wrappers: the pinned tests index `mp.subPools` and read `mp.mu`,
+`mp.drainMode`, `mp.resolver`, `mp.tickerPeriod` across ~20 sites, and an alias
+keeps every one compiling untouched. A refactor whose evaluator had to be edited
+to accept it would be self-certifying.
+
+`h3_managed_pool.go` 449 → 89 lines. Metrics is captured by the `newSub` closure
+on purpose: `newH3Pool` defaults a nil `*Metrics` to its own fresh struct, so
+letting it default per sub-pool would silently under-count `Client.Metrics()`
+with the whole suite green.
+
+Loop: build clean · vet clean · `golangci-lint` 0 issues · `go test -race
+./client/` green (71 s) · **0 test files changed** · gate **13/13**.
+
+Still per-protocol: H1 and H2. `watchDrain` is now shared with H3 only — the
+predicate hazard becomes real when the second protocol moves onto it.
+
+---
