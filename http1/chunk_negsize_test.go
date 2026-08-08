@@ -2,8 +2,10 @@ package http1_test
 
 import (
 	"context"
-	"strings"
+	"errors"
 	"testing"
+
+	"github.com/lodgvideon/poseidon-http-client/http1"
 )
 
 // TestReadChunkedChunk_NegativeSizeRejected is a regression test for a
@@ -42,7 +44,10 @@ func TestReadChunkedChunk_NegativeSizeRejected(t *testing.T) {
 	if err == nil {
 		t.Fatalf("negative chunk size accepted (n=%d done=%v); want an error", n, done)
 	}
-	if !strings.Contains(err.Error(), "invalid chunk size") {
-		t.Fatalf("unexpected error for negative chunk size: %v", err)
+	// errors.Is, not a substring of the message: matching the text leaves the
+	// documented caller contract (errors.Is against the sentinel) free to break
+	// while this test stays green.
+	if !errors.Is(err, http1.ErrInvalidChunkSize) {
+		t.Fatalf("negative chunk size: err = %v, want ErrInvalidChunkSize", err)
 	}
 }

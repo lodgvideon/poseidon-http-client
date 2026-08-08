@@ -3,6 +3,7 @@ package conn
 import (
 	"bytes"
 	"context"
+	"errors"
 	"sync"
 	"testing"
 	"time"
@@ -66,8 +67,22 @@ func TestOnGoAway_StreamsAtOrBelowLastID_Survive(t *testing.T) {
 	}
 }
 
-// TestOnGoAway_WakesAcquireSendCredits asserts a writer blocked on
-// send credit observes the GOAWAY-driven cond.Broadcast.
+// TestOnGoAway_WakesAcquireSendCredits asserts a writer blocked on send credit
+// observes the GOAWAY-driven cond.Broadcast (B.2.6).
+//
+// Two things make this attributable, and an earlier version of this test had
+// neither. It PASSED with the GOAWAY-side fcOutCond.Broadcast deleted — verified
+// by mutation — because it gave the writer a 2s context and then waited 3s for
+// it to return. The context was doing the waking, via the AfterFunc watchdog
+// acquireSendCredits registers on its first block, and the 2.00s runtime was the
+// tell.
+//
+//  1. The context outlives the assertion window by 30x, so a timeout cannot be
+//     what ends the wait.
+//  2. The GOAWAY makes this stream a REFUSED victim (lastStreamID below its id),
+//     so the writer has a reason to return rather than re-park on a window that
+//     is still zero. It returns ErrStreamClosed, which names the cause — a bare
+//     "it returned" would still be satisfied by any other wake.
 func TestOnGoAway_WakesAcquireSendCredits(t *testing.T) {
 	c := newGoAwayConn()
 	c.peerConnSendWindow = 0 // force the wait
@@ -76,25 +91,29 @@ func TestOnGoAway_WakesAcquireSendCredits(t *testing.T) {
 	s.sendWindow = 65535
 	c.streams[1] = s
 
-	woke := make(chan struct{})
+	type result struct{ err error }
+	done := make(chan result, 1)
 	go func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
-		_, _ = c.acquireSendCredits(ctx, s, 100, 0)
-		close(woke)
+		_, err := c.acquireSendCredits(ctx, s, 100, 0)
+		done <- result{err}
 	}()
 
 	time.Sleep(50 * time.Millisecond)
-	c.onGoAwayReceived(99, frame.ErrCodeNoError)
+	// lastStreamID 0 < stream 1: the peer never processed our HEADERS, so this
+	// stream is refused and the writer must stop, not wait for credit.
+	c.onGoAwayReceived(0, frame.ErrCodeNoError)
 
-	// The cond.Broadcast wakes the waiter; the loop re-evaluates,
-	// peerConnSendWindow is still zero, so it spins until ctx
-	// expires. We just want to make sure the broadcast happened —
-	// observable via the post-cond loop iteration.
 	select {
-	case <-woke:
-	case <-time.After(3 * time.Second):
-		t.Fatalf("acquireSendCredits never returned after GOAWAY broadcast")
+	case r := <-done:
+		if !errors.Is(r.err, ErrStreamClosed) {
+			t.Fatalf("acquireSendCredits returned %v, want ErrStreamClosed;\n"+
+				"the writer left for some reason other than the GOAWAY that refused its stream", r.err)
+		}
+	case <-time.After(time.Second):
+		t.Fatalf("acquireSendCredits still parked 1s after a GOAWAY refused its stream;\n" +
+			"the GOAWAY path did not broadcast on fcOutCond, so a blocked writer never re-checks (B.2.6)")
 	}
 }
 
