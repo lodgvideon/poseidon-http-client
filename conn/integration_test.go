@@ -8,7 +8,6 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
-	"strings"
 	"testing"
 	"time"
 
@@ -227,18 +226,6 @@ func TestIntegration_ContextCancel_TearsDownStream(t *testing.T) {
 		t.Fatalf("NewStream after cancel: %v", err)
 	}
 	_ = s2.Close()
-}
-
-func TestConformance_RFC7540_Sec3_ClientPreface_OnTheWire(t *testing.T) {
-	// The on-the-wire integration is covered by Phase A's
-	// TestConformance_RFC7540_Sec35_ClientPreface (in frame/) and by
-	// TestIntegration_EmptyGET above (which fails the handshake if the
-	// preface is wrong). This test asserts the literal preface string
-	// that Phase A's WriteClientPreface emits matches the RFC text.
-	want := "PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n"
-	if !strings.HasPrefix(want, "PRI") {
-		t.Fatalf("self-check broken")
-	}
 }
 
 // TestConformance_RFC7540_Sec6_5_2_MaxFrameSize_FramerReadLimit verifies that

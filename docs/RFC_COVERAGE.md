@@ -86,7 +86,6 @@ non-ACK PING frames with `ACK=1` and the original 8-byte payload
 
 | Section | Type        | Test |
 |---------|-------------|------|
-| §3.5    | Conformance | TestConformance_RFC7540_Sec3_ClientPreface_OnTheWire (conn) |
 | §3.5    | Integration | TestIntegration_EmptyGET (handshake + preface byte sequence on the wire) |
 | §6.5    | Integration | TestConn_HandshakeAndIdle, TestHandshakeSettings_RoundTripsAgainstPipePeer (handshake + ack roundtrip) |
 | §5.1    | Integration | TestIntegration_EmptyGET, TestIntegration_POST_1KB_Echo (single-stream end-to-end) |
