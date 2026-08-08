@@ -27,6 +27,15 @@ import (
 // latency must not scale with the number of idle connections. An absolute
 // bound would encode this machine's speed and flake on a loaded CI box; the
 // ratio survives both being slow.
+//
+// What this test does NOT pin, and must not be read as pinning:
+//   - That the sweep runs at all. A pool that never probes anything passes
+//     this trivially. TestH1Pool_ProbeEvictsPeerClosedIdleConn is what covers
+//     presence; the two travel together and deleting either leaves a hole.
+//   - That the probe runs on a separate goroutine. Probing concurrently ON the
+//     actor also keeps latency flat in n, and mutation-checking confirms this
+//     test cannot tell the two apart. Off-actor is a design choice — the actor
+//     does no I/O at all — that measured better, not one this test proves.
 // ————————————————————————————————————————————————————————————————
 
 // h1IdleDialer hands out the client half of a net.Pipe whose peer half is never
@@ -47,6 +56,12 @@ func (d *h1IdleDialer) Dial(_ context.Context, _ string) (net.Conn, error) {
 	d.srvs = append(d.srvs, srv)
 	d.mu.Unlock()
 	return cli, nil
+}
+
+func (d *h1IdleDialer) dialCount() int {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return len(d.srvs)
 }
 
 func (d *h1IdleDialer) closeAll() {
@@ -139,4 +154,71 @@ func TestH1Pool_HealthSweep_DoesNotScaleAcquireLatency(t *testing.T) {
 			smallPool, small, largePool, large, limit)
 	}
 	t.Logf("worst acquire latency: %d conns = %v, %d conns = %v (limit %v)", smallPool, small, largePool, large, limit)
+}
+
+// TestH1Pool_HealthSweep_DoesNotDialOverAReservedConn pins the other half of the
+// reservation contract.
+//
+// The sweep takes every checked-in conn out of the candidate set while it probes.
+// Below MaxConnsPerHost that makes pickIdle return nil for a pool that is not
+// actually out of capacity, and a naive handleAcquire then dials — opening a
+// socket the pool already owns. Nothing defaults IdleTimeout, so evictIdle is a
+// no-op and the surplus is never reclaimed; it just ratchets up to the cap.
+//
+// One conn must therefore serve a strictly serial workload no matter how often
+// the sweep runs.
+func TestH1Pool_HealthSweep_DoesNotDialOverAReservedConn(t *testing.T) {
+	t.Parallel()
+
+	d := &h1IdleDialer{}
+	defer d.closeAll()
+
+	hp := new(atomic.Pointer[Hooks])
+	hp.Store(&Hooks{})
+
+	// Room to dial three more conns than the workload needs, and a sweep period
+	// short enough that most acquires land while one is in flight.
+	p := newH1Pool("reserve.test:80", d, PoolOptions{
+		MaxConnsPerHost:   4,
+		HealthCheckPeriod: time.Millisecond,
+	}, hp, nil)
+	defer func() { _ = p.Close() }()
+
+	// releaseUnderActor hands the conn back and waits for the actor to record it.
+	// release only queues a message, so without this the next acquire can arrive
+	// while the conn still reads as checked out — and the pool then dials a second
+	// one entirely legitimately, on main just as much as here. That race is not
+	// what this test is about, so take it out of the picture.
+	releaseUnderActor := func(mc *h1ManagedConn) {
+		p.release(mc, true)
+		for p.Stats().InFlightStreams != 0 {
+		}
+	}
+
+	ctx := context.Background()
+	mc, err := p.acquire(ctx)
+	if err != nil {
+		t.Fatalf("first acquire: %v", err)
+	}
+	releaseUnderActor(mc)
+	if got := d.dialCount(); got != 1 {
+		t.Fatalf("dials after one acquire = %d, want 1", got)
+	}
+
+	// Strictly serial: never more than one conn checked out, so a correct pool
+	// reuses the same one forever.
+	deadline := time.Now().Add(300 * time.Millisecond)
+	for time.Now().Before(deadline) {
+		mc, err := p.acquire(ctx)
+		if err != nil {
+			t.Fatalf("acquire during sweeps: %v", err)
+		}
+		releaseUnderActor(mc)
+	}
+
+	if got := d.dialCount(); got != 1 {
+		t.Fatalf("pool opened %d conns for a workload one conn can serve;\n"+
+			"an acquire arriving mid-sweep dialled over the conn the sweep had reserved "+
+			"instead of waiting the one probe deadline for it", got)
+	}
 }
