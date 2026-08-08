@@ -525,63 +525,23 @@ func (p *Pool) refreshStreamCap(mc *managedConn) {
 	mc.streamCap = effectiveStreamCap(p.opts.MaxStreamsPerConn, mc.c.PeerMaxConcurrentStreams())
 }
 
-// dialOne is the dial helper goroutine. It dials with a fresh
-// background context so a cancelled waiter doesn't tear down a useful
-// in-flight dial. A DialTimeout bound prevents the goroutine from
-// leaking on a hung TCP connect, and a watchdog cancels the dial early
-// if the pool is closed mid-dial.
-func (p *Pool) dialOne() {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	// Unconditional: newPool is the only place a *Pool is constructed and it
-	// floors DialTimeout at 30s, and p.opts is never reassigned afterwards.
-	ctx, dlCancel := context.WithTimeout(ctx, p.opts.DialTimeout)
-	defer dlCancel()
-	stopWatch := make(chan struct{})
-	go func() {
-		select {
-		case <-p.closedCh:
-			cancel()
-		case <-stopWatch:
-		}
-	}()
-	defer close(stopWatch)
+// dialEnv snapshots what dialAttempt needs from this pool.
+func (p *Pool) dialEnv() dialEnv {
+	return dialEnv{closedCh: p.closedCh, timeout: p.opts.DialTimeout, addr: p.addr, metrics: p.metrics, hooksRef: p.hooksRef}
+}
 
-	dialStart := time.Now()
-	p.metrics.Counters.DialsAttempted.Add(1)
-	c, err := conn.Dial(ctx, p.addr, p.connOpts)
-	dur := time.Since(dialStart)
-	p.metrics.Latency.Dial.Observe(dur)
+// dialOne dials one conn and delivers it to the actor. Always delivers:
+// handleClose's drainer receives this and closes the conn if the pool shut
+// down before it could be pooled, so it is never orphaned.
+func (p *Pool) dialOne() {
+	c, err := dialAttempt(p.dialEnv(), func(ctx context.Context) (*conn.Conn, error) {
+		return conn.Dial(ctx, p.addr, p.connOpts)
+	})
 	if err != nil {
-		p.metrics.Counters.DialsFailed.Add(1)
-	}
-	if hr := p.hooksRef; hr != nil {
-		if h := hr.Load(); h != nil && h.OnDial != nil {
-			h.OnDial(DialEvent{Addr: p.addr, Err: err, Duration: dur})
-		}
-	}
-	if err != nil {
-		// Wrapped, not raw. "This failure came from dialing" is a fact only
-		// this site knows, and two consumers downstream have to act on it:
-		// managedPool's acquire loop moves to the next address only for a
-		// dial-only error, and the retry classifier treats one as retryable
-		// because nothing was sent. Handing them the bare dialer error made
-		// both silently do the wrong thing — failover aborted on the first
-		// address instead of trying the second, and a Retryer-wrapped client
-		// did not retry. DialError.Unwrap keeps errors.Is/As working on the
-		// cause, so no caller inspecting the underlying error is affected.
-		//
-		// Always deliver the result. Pool.Close drains every in-flight dial,
-		// so this send never blocks forever, and the watchdog above already
-		// cancels a hung dial's context when the pool closes.
 		p.dialDoneCh <- dialResult{err: &DialError{Addr: p.addr, Err: err}}
 		return
 	}
-	mc := &managedConn{c: c, lastUsed: time.Now()}
-	// Always deliver; handleClose's drainer receives this and Closes the conn
-	// if the pool shut down before the conn could be pooled, so it is never
-	// orphaned in the buffered dialDoneCh.
-	p.dialDoneCh <- dialResult{mc: mc}
+	p.dialDoneCh <- dialResult{mc: &managedConn{c: c, lastUsed: time.Now()}}
 }
 
 // serveWaiters hands as many waiters as possible a live mc.

@@ -396,50 +396,21 @@ func (p *h3Pool) refreshStreamCap(mc *h3ManagedConn) {
 	mc.streamCap = effectiveStreamCap(p.opts.MaxStreamsPerConn, 0)
 }
 
-// dialOne is the dial helper goroutine. It dials with a fresh background context
-// so a cancelled waiter doesn't tear down a useful in-flight dial. A DialTimeout
-// bound prevents the goroutine from leaking on a hung handshake, and a watchdog
-// cancels the dial early if the pool is closed mid-dial.
-func (p *h3Pool) dialOne() {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	if p.opts.DialTimeout > 0 {
-		var dlCancel context.CancelFunc
-		ctx, dlCancel = context.WithTimeout(ctx, p.opts.DialTimeout)
-		defer dlCancel()
-	}
-	stopWatch := make(chan struct{})
-	go func() {
-		select {
-		case <-p.closedCh:
-			cancel()
-		case <-stopWatch:
-		}
-	}()
-	defer close(stopWatch)
+// dialEnv snapshots what dialAttempt needs from this pool.
+func (p *h3Pool) dialEnv() dialEnv {
+	return dialEnv{closedCh: p.closedCh, timeout: p.opts.DialTimeout, addr: p.addr, metrics: p.metrics, hooksRef: p.hooksRef}
+}
 
-	dialStart := time.Now()
-	p.metrics.Counters.DialsAttempted.Add(1)
-	cl, err := p.dialFn(ctx, p.addr, p.tlsConfig)
-	dur := time.Since(dialStart)
-	p.metrics.Latency.Dial.Observe(dur)
+// dialOne dials one conn and delivers it to the actor.
+func (p *h3Pool) dialOne() {
+	cl, err := dialAttempt(p.dialEnv(), func(ctx context.Context) (h3Client, error) {
+		return p.dialFn(ctx, p.addr, p.tlsConfig)
+	})
 	if err != nil {
-		p.metrics.Counters.DialsFailed.Add(1)
-	}
-	if hr := p.hooksRef; hr != nil {
-		if h := hr.Load(); h != nil && h.OnDial != nil {
-			h.OnDial(DialEvent{Addr: p.addr, Err: err, Duration: dur})
-		}
-	}
-	if err != nil {
-		// Wrapped for the same reason as the H2 pool: managedPool's failover
-		// and the retry classifier both key on *DialError, and a raw error
-		// disables both silently.
 		p.dialDoneCh <- h3DialResult{err: &DialError{Addr: p.addr, Err: err}}
 		return
 	}
-	mc := &h3ManagedConn{cl: cl, dialedAt: time.Now(), lastUsed: time.Now()}
-	p.dialDoneCh <- h3DialResult{mc: mc}
+	p.dialDoneCh <- h3DialResult{mc: &h3ManagedConn{cl: cl, dialedAt: time.Now(), lastUsed: time.Now()}}
 }
 
 // serveWaiters hands as many waiters as possible a live mc.
