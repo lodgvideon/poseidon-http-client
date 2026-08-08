@@ -86,3 +86,44 @@ the human fixed.**
 
 Reverted to `bdcaf60`. Attempt preserved outside the tree; nothing of it is on
 the branch.
+
+## Step 2 — re-scope the gate so a behaviour can move (path B)
+
+Chosen after step 1 showed the gate's per-protocol anchors are destroyed by the
+very operation they are meant to police.
+
+**What changed.** Each case named one `(file, func)`. It now names a list of
+candidate `sites` — the per-protocol implementation, and the shared core once it
+exists — and a new `locate()` picks the one that currently carries the
+behaviour. Zero matches is an error (the anchor rotted); **more than one is also
+an error** (two copies of a behaviour that must have a single home). That second
+check is the one that makes the migration safe to do incrementally: a half-done
+move, where a behaviour exists in both the protocol file and the core, fails
+loudly instead of being silently mutated in the copy nobody runs.
+
+**Verified before any code moved.** `13/13` on unmigrated code — same result as
+before the change, from a gate that can now follow the behaviour. An evaluator
+edit that only proved itself after the refactor it was meant to judge would be
+worthless.
+
+**What was rejected, and why it is recorded here rather than argued again.**
+The wrapper-with-forwarders idea from the step-1 writeup does not work. The gate
+mutates *body lines* inside the anchor function; a forwarder such as
+`applySet(next) { mp.core.applySet(next) }` contains none of them, so the anchor
+resolves and the mutation still cannot apply. Keeping the method name is not
+keeping the observation point. Struck from the options.
+
+**A fear that measurement removed.** `watchDrain`'s `InFlightStreams == 0`
+predicate has no gate case of its own, and it is the function whose meaning
+differs most across protocols — exclusive exchanges on H1, multiplexed streams
+on H2/H3. Probed directly before proceeding: replacing the predicate with
+`if true` (drop the sub-pool regardless of in-flight work) is CAUGHT on all
+three, by the `ReviveBeatsDrainWatcher` tests, which hold a conn in flight
+across the removal precisely so the watcher has something to get wrong. It is
+covered — through the drop-guard cases rather than one of its own.
+
+Gate coverage as it stands: 5 functions of the 13 in the managed tier carry
+cases. The other 8 are unpinned, which is worth knowing before any of them is
+merged into the core.
+
+---

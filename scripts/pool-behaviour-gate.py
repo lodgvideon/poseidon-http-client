@@ -39,14 +39,20 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
 
+# Line-ending-agnostic joiner for multi-line patterns; this tree is CRLF and
+# re.escape does not escape newlines.
+RX_NL = chr(92) + "r?" + chr(92) + "n"
+
 # Each entry: what behaviour is pinned, which function to mutate, the mutation,
 # and the test that must go red. Keep the `why` short enough to read in output.
 MUTATIONS = [
     {
         "name": "h2-revive",
         "why": "a re-added address must be revived, or a resolver flap blackholes it forever",
-        "file": "client/managed_pool.go",
-        "func": "func (mp *managedPool) applySet",
+        "sites": [
+            ("client/managed_pool.go", "func (mp *managedPool) applySet"),
+            ("client/managed_core.go", "func (mp *managedCore[P, MC, C, R]) applySet"),
+        ],
         "find": ["\t\t\ts.draining = false"],
         "repl": "\t\t\t_ = s",
         "test": "TestManagedPool_AddressReAddedAfterRemoval|TestManagedPool_SingleAddressFlap",
@@ -54,8 +60,10 @@ MUTATIONS = [
     {
         "name": "h1-revive",
         "why": "same, HTTP/1.1",
-        "file": "client/h1_managed_pool.go",
-        "func": "func (mp *h1ManagedPool) applySet",
+        "sites": [
+            ("client/h1_managed_pool.go", "func (mp *h1ManagedPool) applySet"),
+            ("client/managed_core.go", "func (mp *managedCore[P, MC, C, R]) applySet"),
+        ],
         "find": ["\t\t\ts.draining = false"],
         "repl": "\t\t\t_ = s",
         "test": "TestH1ManagedPool_AddressReAddedAfterRemoval|TestH1ManagedPool_SingleAddressFlap",
@@ -63,8 +71,10 @@ MUTATIONS = [
     {
         "name": "h3-revive",
         "why": "same, HTTP/3",
-        "file": "client/h3_managed_pool.go",
-        "func": "func (mp *h3ManagedPool) applySet",
+        "sites": [
+            ("client/h3_managed_pool.go", "func (mp *h3ManagedPool) applySet"),
+            ("client/managed_core.go", "func (mp *managedCore[P, MC, C, R]) applySet"),
+        ],
         "find": ["\t\t\ts.draining = false"],
         "repl": "\t\t\t_ = s",
         "test": "TestH3ManagedPool_AddressReAddedAfterRemoval",
@@ -72,8 +82,10 @@ MUTATIONS = [
     {
         "name": "h2-drop-guard",
         "why": "dropIfDraining must check registration identity AND draining under one lock",
-        "file": "client/managed_pool.go",
-        "func": "func (mp *managedPool) dropIfDraining",
+        "sites": [
+            ("client/managed_pool.go", "func (mp *managedPool) dropIfDraining"),
+            ("client/managed_core.go", "func (mp *managedCore[P, MC, C, R]) dropIfDraining"),
+        ],
         "find": ["\tcur, ok := mp.subPools[s.addr.String()]", "\tif !ok || cur != s || !s.draining {"],
         "repl": "\tcur, ok := mp.subPools[s.addr.String()]\n\t_ = cur\n\tif !ok {",
         "test": "TestManagedPool_ReviveBeatsDrainWatcher",
@@ -81,8 +93,10 @@ MUTATIONS = [
     {
         "name": "h1-drop-guard",
         "why": "same, HTTP/1.1",
-        "file": "client/h1_managed_pool.go",
-        "func": "func (mp *h1ManagedPool) dropIfDraining",
+        "sites": [
+            ("client/h1_managed_pool.go", "func (mp *h1ManagedPool) dropIfDraining"),
+            ("client/managed_core.go", "func (mp *managedCore[P, MC, C, R]) dropIfDraining"),
+        ],
         "find": ["\tcur, ok := mp.subPools[s.addr.String()]", "\tif !ok || cur != s || !s.draining {"],
         "repl": "\tcur, ok := mp.subPools[s.addr.String()]\n\t_ = cur\n\tif !ok {",
         "test": "TestH1ManagedPool_ReviveBeatsDrainWatcher",
@@ -90,8 +104,10 @@ MUTATIONS = [
     {
         "name": "h3-drop-guard",
         "why": "same, HTTP/3",
-        "file": "client/h3_managed_pool.go",
-        "func": "func (mp *h3ManagedPool) dropIfDraining",
+        "sites": [
+            ("client/h3_managed_pool.go", "func (mp *h3ManagedPool) dropIfDraining"),
+            ("client/managed_core.go", "func (mp *managedCore[P, MC, C, R]) dropIfDraining"),
+        ],
         "find": ["\tcur, ok := mp.subPools[s.addr.String()]", "\tif !ok || cur != s || !s.draining {"],
         "repl": "\tcur, ok := mp.subPools[s.addr.String()]\n\t_ = cur\n\tif !ok {",
         "test": "TestH3ManagedPool_ReviveBeatsDrainWatcher",
@@ -99,8 +115,10 @@ MUTATIONS = [
     {
         "name": "h2-failover",
         "why": "only isDialOnlyErr continues the address loop; anything else must abort",
-        "file": "client/managed_pool.go",
-        "func": "func (mp *managedPool) acquire",
+        "sites": [
+            ("client/managed_pool.go", "func (mp *managedPool) acquire"),
+            ("client/managed_core.go", "func (mp *managedCore[P, MC, C, R]) acquire"),
+        ],
         "find": ["\t\tif !isDialOnlyErr(err) {"],
         "repl": "\t\tif err != nil {",
         "test": "TestManagedPool_FailsOverOnFirstDialFailure",
@@ -108,8 +126,10 @@ MUTATIONS = [
     {
         "name": "h1-failover",
         "why": "same, HTTP/1.1",
-        "file": "client/h1_managed_pool.go",
-        "func": "func (mp *h1ManagedPool) acquire",
+        "sites": [
+            ("client/h1_managed_pool.go", "func (mp *h1ManagedPool) acquire"),
+            ("client/managed_core.go", "func (mp *managedCore[P, MC, C, R]) acquire"),
+        ],
         "find": ["\t\tif !isDialOnlyErr(err) {"],
         "repl": "\t\tif err != nil {",
         "test": "TestH1ManagedPool_FailsOverOnFirstDialFailure",
@@ -117,8 +137,10 @@ MUTATIONS = [
     {
         "name": "h3-failover",
         "why": "same, HTTP/3",
-        "file": "client/h3_managed_pool.go",
-        "func": "func (mp *h3ManagedPool) acquire",
+        "sites": [
+            ("client/h3_managed_pool.go", "func (mp *h3ManagedPool) acquire"),
+            ("client/managed_core.go", "func (mp *managedCore[P, MC, C, R]) acquire"),
+        ],
         "find": ["\t\tif !isDialOnlyErr(err) {"],
         "repl": "\t\tif err != nil {",
         "test": "TestH3ManagedPool_FailsOverOnFirstDialFailure",
@@ -126,8 +148,10 @@ MUTATIONS = [
     {
         "name": "h2-drainlazy-retains",
         "why": "DrainLazy keeps the sub-pool; dropping it at once is DrainHard's behaviour",
-        "file": "client/managed_pool.go",
-        "func": "func (mp *managedPool) beginDrain",
+        "sites": [
+            ("client/managed_pool.go", "func (mp *managedPool) beginDrain"),
+            ("client/managed_core.go", "func (mp *managedCore[P, MC, C, R]) beginDrain"),
+        ],
         "find": ["\tcase DrainLazy:"],
         "repl": "\tcase DrainLazy:\n\t\tmp.dropSubPool(s, true)",
         "test": "TestManagedPool_DrainLazy_RemovedAddress_RetainsSubPool",
@@ -135,8 +159,10 @@ MUTATIONS = [
     {
         "name": "h1-drainlazy-retains",
         "why": "same, HTTP/1.1",
-        "file": "client/h1_managed_pool.go",
-        "func": "func (mp *h1ManagedPool) beginDrain",
+        "sites": [
+            ("client/h1_managed_pool.go", "func (mp *h1ManagedPool) beginDrain"),
+            ("client/managed_core.go", "func (mp *managedCore[P, MC, C, R]) beginDrain"),
+        ],
         "find": ["\tcase DrainLazy:"],
         "repl": "\tcase DrainLazy:\n\t\tmp.dropSubPool(s, true)",
         "test": "TestH1ManagedPool_DrainLazy_RemovedAddress_RetainsSubPool",
@@ -144,8 +170,10 @@ MUTATIONS = [
     {
         "name": "h3-drainlazy-retains",
         "why": "same, HTTP/3",
-        "file": "client/h3_managed_pool.go",
-        "func": "func (mp *h3ManagedPool) beginDrain",
+        "sites": [
+            ("client/h3_managed_pool.go", "func (mp *h3ManagedPool) beginDrain"),
+            ("client/managed_core.go", "func (mp *managedCore[P, MC, C, R]) beginDrain"),
+        ],
         "find": ["\tcase DrainLazy:"],
         "repl": "\tcase DrainLazy:\n\t\tmp.dropSubPool(s, true)",
         "test": "TestH3ManagedPool_",
@@ -153,8 +181,10 @@ MUTATIONS = [
     {
         "name": "managed-warmup-address-set",
         "why": "warmup must build from the resolved addresses, not the lazily-filled subPools map",
-        "file": "client/managed_pool.go",
-        "func": "func (mp *managedPool) warmup",
+        "sites": [
+            ("client/managed_pool.go", "func (mp *managedPool) warmup"),
+            ("client/managed_core.go", "func (mp *managedCore[P, MC, C, R]) warmup"),
+        ],
         "find": ["\taddrs := append([]Address(nil), mp.addrs...)"],
         "repl": "\taddrs := []Address(nil)",
         "test": "TestWarmup_ManagedPool_PreDialsBeforeAnyRequest",
@@ -181,17 +211,50 @@ def func_span(src: str, signature: str):
     return (start, len(src) if nxt < 0 else nxt)
 
 
-def apply_mutation(src: str, mut) -> str:
-    span = func_span(src, mut["func"])
+def locate(mut):
+    """Find the ONE site that currently carries this behaviour.
+
+    Each case lists candidate (file, function) pairs: the per-protocol
+    implementation and, once it exists, the shared core. During an incremental
+    migration a behaviour lives in exactly one of them - before the migration
+    starts only the first exists, after it finishes only the second. Zero
+    matches means the anchor rotted; more than one means two copies of a
+    behaviour that is supposed to have a single home. Both are errors, because
+    an un-appliable or ambiguous mutation proves nothing.
+    """
+    found = []
+    for rel, signature in mut["sites"]:
+        path = REPO / rel
+        if not path.exists():
+            continue
+        src = read(path)
+        span = func_span(src, signature)
+        if span is None:
+            continue
+        lo, hi = span
+        pattern = re.compile(RX_NL.join(re.escape(line) for line in mut["find"]))
+        if len(pattern.findall(src[lo:hi])) == 1:
+            found.append((path, signature))
+    if not found:
+        tried = ", ".join(rel for rel, _ in mut["sites"])
+        raise LookupError("behaviour not found at any known site (tried %s)" % tried)
+    if len(found) > 1:
+        where = ", ".join(str(path.relative_to(REPO)) for path, _ in found)
+        raise LookupError("behaviour lives at %d sites (%s) - it must have one home" % (len(found), where))
+    return found[0]
+
+
+def apply_mutation(src: str, signature: str, mut) -> str:
+    span = func_span(src, signature)
     if span is None:
-        raise LookupError("function not found: %s" % mut["func"])
+        raise LookupError("function not found: %s" % signature)
     lo, hi = span
     body = src[lo:hi]
     pattern = re.compile(r"\r?\n".join(re.escape(line) for line in mut["find"]))
     hits = pattern.findall(body)
     if len(hits) != 1:
         raise LookupError(
-            "pattern matched %d times inside %s (want exactly 1)" % (len(hits), mut["func"])
+            "pattern matched %d times inside %s (want exactly 1)" % (len(hits), signature)
         )
     crlf = "\r\n" in src
     repl = mut["repl"].replace("\n", "\r\n") if crlf else mut["repl"]
@@ -221,11 +284,16 @@ def main() -> int:
     caught, survived, errors = [], [], []
     with tempfile.TemporaryDirectory() as tmp:
         for mut in selected:
-            target = REPO / mut["file"]
+            try:
+                target, signature = locate(mut)
+            except LookupError as exc:
+                errors.append((mut["name"], str(exc)))
+                print("  ERROR     %s - %s" % (mut["name"], exc))
+                continue
             backup = Path(tmp) / (mut["name"] + ".bak")
             shutil.copyfile(target, backup)
             try:
-                write(target, apply_mutation(read(target), mut))
+                write(target, apply_mutation(read(target), signature, mut))
                 vet = run(["go", "vet", "./client/"])
                 if vet.returncode != 0:
                     errors.append((mut["name"], "mutation does not compile"))
