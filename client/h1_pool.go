@@ -743,6 +743,28 @@ func (p *h1Pool) handleSweepDone(rs *h1RunState, sr h1SweepResult) {
 	}
 	rs.waiters = p.serveWaiters(rs.conns, rs.waiters)
 	p.ensureDialForWaiters(rs)
+
+	// A sweep can evict every conn it reserved, and handleAcquire queues callers
+	// against those reservations with no dial of their own — so this is the one
+	// other place the pool can reach {nothing live, nothing in flight, waiters
+	// queued} and leave them with nothing to wake them.
+	//
+	// handleDialDone refuses that state for exactly this reason, but its check
+	// cannot cover this path: when the dial failed these conns were still
+	// reserved, and h1CountLive counts a reserved conn as live, so its "nothing
+	// live" test was false. By the time they die, that dial is long finished.
+	//
+	// Left queued, such a waiter waits a whole HealthCheckPeriod while a FRESH
+	// acquire is refused instantly by the fast-refuse in handleAcquire — the same
+	// priority inversion handleDialDone's comment describes, reached the other way
+	// round.
+	if len(rs.waiters) > 0 && rs.inFlightDials == 0 && h1CountLive(rs.conns) == 0 &&
+		inDialBackoff(rs.lastDialErrAt, p.opts.DialBackoff) {
+		for _, w := range rs.waiters {
+			p.replyAcquire(w, nil, ErrDialBackoff)
+		}
+		rs.waiters = nil
+	}
 }
 
 // evictDeadSilent removes conns whose IsAlive returns false without firing the
