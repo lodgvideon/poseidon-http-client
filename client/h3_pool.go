@@ -328,9 +328,20 @@ func (p *h3Pool) handleClose(rs *h3RunState) {
 			}
 		}()
 	}
+	// Attribute each conn rather than filing them all under "the operator closed
+	// the pool". A conn the peer had GOAWAY'd went for a reason the caller can act
+	// on -- a rolling restart upstream -- and every other eviction site in this
+	// file already reports it and counts it. h3RetireReason is not the right
+	// question here: its active == 0 clause decides whether a draining conn may be
+	// RETIRED, and at Close it is going regardless of what is still in flight.
 	for _, mc := range rs.conns {
+		reason := CloseManual
+		if mc.cl.GoingAway() {
+			reason = CloseGoAway
+			p.metrics.Counters.GoAwaysReceived.Add(1)
+		}
 		_ = mc.cl.Close()
-		p.notifyClose(CloseManual)
+		p.notifyClose(reason)
 	}
 }
 
