@@ -32,8 +32,15 @@ var statsReplyPool = sync.Pool{
 	New: func() any { return make(chan Stats, 1) },
 }
 
-// PoolOptions configures the per-host connection pool. Zero values
-// are replaced with sensible defaults at NewClient.
+// PoolOptions configures the per-host connection pool.
+//
+// Defaults are applied by the pool constructors, not by NewClient, and they
+// cover four of the seven fields: MaxConnsPerHost, HealthCheckPeriod,
+// DialBackoff and DialTimeout. MaxStreamsPerConn, IdleTimeout and
+// AcquireTimeout are defaulted NOWHERE, so a zero there is load-bearing: it
+// disables idle eviction and leaves an acquire with no bound of its own. This
+// comment used to say every zero value was replaced, and at NewClient, which
+// is why the disabled-by-default half of the surface is easy to miss.
 type PoolOptions struct {
 	// MaxConnsPerHost caps live connections in this pool.
 	// 0 → 1 (effectively single-conn).
@@ -94,7 +101,7 @@ type managedConn struct {
 	c        *conn.Conn
 	active   int
 	lastUsed time.Time
-	dialedAt time.Time
+
 	// streamCap caches effectiveStreamCap(local, peer). Computed when the
 	// dial completes and refreshed on every health-check tick so peer
 	// SETTINGS_MAX_CONCURRENT_STREAMS changes are picked up. Without this
@@ -526,11 +533,10 @@ func (p *Pool) refreshStreamCap(mc *managedConn) {
 func (p *Pool) dialOne() {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	if p.opts.DialTimeout > 0 {
-		var dlCancel context.CancelFunc
-		ctx, dlCancel = context.WithTimeout(ctx, p.opts.DialTimeout)
-		defer dlCancel()
-	}
+	// Unconditional: newPool is the only place a *Pool is constructed and it
+	// floors DialTimeout at 30s, and p.opts is never reassigned afterwards.
+	ctx, dlCancel := context.WithTimeout(ctx, p.opts.DialTimeout)
+	defer dlCancel()
 	stopWatch := make(chan struct{})
 	go func() {
 		select {
@@ -571,7 +577,7 @@ func (p *Pool) dialOne() {
 		p.dialDoneCh <- dialResult{err: &DialError{Addr: p.addr, Err: err}}
 		return
 	}
-	mc := &managedConn{c: c, dialedAt: time.Now(), lastUsed: time.Now()}
+	mc := &managedConn{c: c, lastUsed: time.Now()}
 	// Always deliver; handleClose's drainer receives this and Closes the conn
 	// if the pool shut down before the conn could be pooled, so it is never
 	// orphaned in the buffered dialDoneCh.
@@ -711,9 +717,14 @@ func sumActive(conns []*managedConn) int {
 	return n
 }
 
-// countLive returns the number of conns whose underlying *conn.Conn
-// reports IsAlive(). Used by the actor to gate canDial on live capacity
-// only, not on stale dead-but-not-yet-evicted entries.
+// countLive returns the number of conns whose underlying *conn.Conn reports
+// IsAlive(). The actor uses it wherever a decision turns on capacity that
+// still exists -- the at-cap test in handleAcquire, the dial-for-waiters
+// guard, and the terminal-state check in handleDialDone -- so that a stale
+// dead-but-not-yet-evicted entry cannot stand in for usable capacity.
+//
+// It used to name a function called canDial, which does not exist anywhere in
+// the repo.
 func countLive(conns []*managedConn) int {
 	n := 0
 	for _, mc := range conns {
