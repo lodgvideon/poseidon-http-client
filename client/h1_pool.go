@@ -294,6 +294,10 @@ func (p *h1Pool) handleRelease(rs *h1RunState, msg h1ReleaseMsg) {
 	}
 	rs.waiters = p.serveWaiters(rs.conns, rs.waiters)
 	p.ensureDialForWaiters(rs)
+	// The eviction above can have been the pool's last conn, and a release with
+	// keepAlive=false is the ordinary "Connection: close" path rather than an
+	// error one — so this is the likeliest of the four sites to strand a queue.
+	p.flushStrandedWaiters(rs, ErrDialBackoff)
 }
 
 // ensureDialForWaiters starts a dial when queued waiters have nothing left to
@@ -327,32 +331,88 @@ func (p *h1Pool) ensureDialForWaiters(rs *h1RunState) {
 	go p.dialOne()
 }
 
+// flushStrandedWaiters refuses every queued waiter when the pool holds nothing
+// that could ever serve them: no live conn, no dial in flight, and an open dial
+// backoff window that stops ensureDialForWaiters from starting one.
+//
+// It is the counterpart to ensureDialForWaiters and belongs immediately after
+// every call to it. That pairing is the invariant: ensureDialForWaiters gives a
+// queued caller something to wait FOR, and this one says so when there is
+// nothing. Leaving the state queued is a priority inversion rather than merely a
+// slow path — handleAcquire fast-refuses a FRESH request on these same three
+// conditions, so a caller arriving an instant later gets an immediate
+// ErrDialBackoff while the already-queued one waits a full HealthCheckPeriod.
+//
+// The one call to ensureDialForWaiters that needs no flush after it is
+// handleDialDone's success arm, which has just appended a live conn.
+//
+// err is each site's answer to "why": handleDialDone hands over the DialError it
+// just saw, and everywhere else the honest answer is that the pool is in
+// backoff. That difference is why this takes the error rather than picking one.
+//
+// This used to be written out at one site only. handleTick, handleRelease and
+// handleSweepDone all reach the same state — the tick's evictIdle/evictDead can
+// take the last conn, and a release with keepAlive=false does so on the ordinary
+// "Connection: close" path.
+func (p *h1Pool) flushStrandedWaiters(rs *h1RunState, err error) {
+	if len(rs.waiters) == 0 || rs.inFlightDials > 0 {
+		return
+	}
+	// A conn the health sweep has reserved is counted live here, deliberately:
+	// it is capacity that exists and is about to come back, so a waiter it will
+	// serve is not stranded. handleSweepDone is the site that re-asks once the
+	// reservation clears.
+	if h1CountLive(rs.conns) > 0 {
+		return
+	}
+	if !inDialBackoff(rs.lastDialErrAt, p.opts.DialBackoff) {
+		// Nothing live and nothing in flight with the backoff closed means the
+		// preceding ensureDialForWaiters started a dial, so inFlightDials would
+		// not be zero and this would be unreachable. Tested anyway, so each call
+		// site is correct on its own terms rather than by virtue of what runs
+		// before it.
+		return
+	}
+	for _, w := range rs.waiters {
+		p.replyAcquire(w, nil, err)
+	}
+	rs.waiters = nil
+}
+
 // handleDialDone processes a completed dial: on success the conn enters the pool;
-// on failure the first waiter receives the error.
+// on failure one waiter receives the error.
 func (p *h1Pool) handleDialDone(rs *h1RunState, dr h1DialResult) {
 	rs.inFlightDials--
 	if dr.err != nil {
 		rs.lastDialErrAt = time.Now()
-		if len(rs.waiters) > 0 {
-			req := rs.waiters[0]
-			rs.waiters = rs.waiters[1:]
+		// Refused from the BACK of the queue, not the front.
+		//
+		// A waiter can be queued against a health-sweep reservation rather than
+		// against a dial: handleAcquire queues one with no dial of its own while
+		// len(waiters) < h1CountReservedIdle, because a reserved conn will serve
+		// it within a probe deadline. serveWaiters drains from the FRONT, so
+		// those are precisely the waiters nearest the front — and handing the
+		// front one this dial's error refuses a caller the pool is about to have
+		// capacity for, roughly a millisecond later. Taking from the back refuses
+		// one that genuinely has nothing coming, and when the reservations cover
+		// everyone queued, nobody is refused at all: the failed dial was started
+		// for a caller those reservations can absorb.
+		//
+		// This perturbs FIFO for ERRORS ONLY. Successful service stays strictly
+		// in arrival order through serveWaiters, which is what the rest of this
+		// pool assumes of the waiter queue.
+		if n := len(rs.waiters); n > h1CountReservedIdle(rs.conns) {
+			req := rs.waiters[n-1]
+			rs.waiters = rs.waiters[:n-1]
 			p.replyAcquire(req, nil, dr.err)
 		}
-		// The waiters behind that one must not be left to a health-check tick.
-		// Either start another dial, or — when the pool is in exactly the state
-		// that makes handleAcquire fast-refuse a NEW request (dial backoff, nothing
-		// live, nothing in flight) — refuse them for the same reason. Leaving them
-		// queued was a priority inversion: a fresh acquire got an immediate
-		// ErrDialBackoff while an already-queued one waited a full
-		// HealthCheckPeriod, so a burst against a downed host drained one request
+		// The waiters behind that one must not be left to a health-check tick:
+		// either start another dial, or refuse them for the same reason
+		// handleAcquire fast-refuses a new request. Leaving them queued was a
+		// priority inversion — a burst against a downed host drained one request
 		// per tick.
 		p.ensureDialForWaiters(rs)
-		if rs.inFlightDials == 0 && h1CountLive(rs.conns) == 0 {
-			for _, w := range rs.waiters {
-				p.replyAcquire(w, nil, dr.err)
-			}
-			rs.waiters = nil
-		}
+		p.flushStrandedWaiters(rs, dr.err)
 		return
 	}
 	rs.conns = append(rs.conns, dr.mc)
@@ -386,6 +446,11 @@ func (p *h1Pool) handleTick(rs *h1RunState) {
 	p.startHealthSweep(rs)
 	rs.waiters = h1PruneExpiredWaiters(rs.waiters)
 	p.ensureDialForWaiters(rs)
+	// Either eviction above can take the last conn while waiters queued behind a
+	// full pool are still here, and ensureDialForWaiters returns without rescuing
+	// them whenever a dial backoff is open. Nothing else looks at the queue until
+	// the NEXT tick, a whole HealthCheckPeriod away.
+	p.flushStrandedWaiters(rs, ErrDialBackoff)
 }
 
 // handleClose drains waiters and shuts down all connections.
@@ -725,26 +790,15 @@ func (p *h1Pool) handleSweepDone(rs *h1RunState, sr h1SweepResult) {
 	p.ensureDialForWaiters(rs)
 
 	// A sweep can evict every conn it reserved, and handleAcquire queues callers
-	// against those reservations with no dial of their own — so this is the one
-	// other place the pool can reach {nothing live, nothing in flight, waiters
-	// queued} and leave them with nothing to wake them.
+	// against those reservations with no dial of their own — so this path too can
+	// reach {nothing live, nothing in flight, waiters queued} and leave them with
+	// nothing to wake them.
 	//
-	// handleDialDone refuses that state for exactly this reason, but its check
-	// cannot cover this path: when the dial failed these conns were still
-	// reserved, and h1CountLive counts a reserved conn as live, so its "nothing
-	// live" test was false. By the time they die, that dial is long finished.
-	//
-	// Left queued, such a waiter waits a whole HealthCheckPeriod while a FRESH
-	// acquire is refused instantly by the fast-refuse in handleAcquire — the same
-	// priority inversion handleDialDone's comment describes, reached the other way
-	// round.
-	if len(rs.waiters) > 0 && rs.inFlightDials == 0 && h1CountLive(rs.conns) == 0 &&
-		inDialBackoff(rs.lastDialErrAt, p.opts.DialBackoff) {
-		for _, w := range rs.waiters {
-			p.replyAcquire(w, nil, ErrDialBackoff)
-		}
-		rs.waiters = nil
-	}
+	// handleDialDone's own flush cannot cover it: when that dial failed these
+	// conns were still reserved, and h1CountLive counts a reserved conn as live,
+	// so its "nothing live" test was false. By the time they die, that dial is
+	// long finished.
+	p.flushStrandedWaiters(rs, ErrDialBackoff)
 }
 
 // evictDeadSilent removes conns whose IsAlive returns false without firing the
