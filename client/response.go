@@ -170,6 +170,34 @@ type StreamResponse struct {
 	// Storing *[]byte avoids heap escape on return to HeaderSlabPool.
 	slabs []*[]byte
 
+	// doCtx is the context DoStream was called with. recvCtx is that context
+	// merged with this StreamResponse's own abort, and abortCancel fires the
+	// abort. Close needs them because conn.Stream.Recv parks on the event
+	// channel and the stream's reset/end signals — not on anything Close
+	// touches — so tearing the stream down does not wake a reader already
+	// blocked in it. Without this an abort returned promptly and the goroutine
+	// behind it hung until the caller's own deadline.
+	//
+	// Keeping recvCtx pre-merged is what stops Recv allocating a context per
+	// event on the streaming path: a caller that passes the same context it
+	// gave DoStream, which is the ordinary shape, hits the identity check in
+	// Recv and pays nothing.
+	doCtx       context.Context
+	recvCtx     context.Context
+	abortCancel context.CancelFunc
+
+	// mu guards curData and closed. Close is a legitimate call from another
+	// goroutine — it is how a caller aborts a stream it no longer wants — and
+	// without this it handed the pooled DATA slab back while a concurrent Recv
+	// still held it, so a later request could be given the same slab and
+	// overwrite bytes this caller was about to read. Reported by -race at the
+	// putDataSlab in recycleData.
+	//
+	// mu is never held across stream.Recv or stream.Close: those block, and
+	// holding it there would make the abort wait for the read it is aborting.
+	mu     sync.Mutex
+	closed bool
+
 	// curData is the pooled buffer backing the Data of the most recently
 	// delivered EventData. Recycled on the next Recv (Data is valid only
 	// until then per the StreamEvent contract) and on Close.
@@ -181,11 +209,31 @@ type StreamResponse struct {
 }
 
 // recycleData returns the last delivered EventData's pooled buffer to the pool.
+// Callers must hold sr.mu.
 func (sr *StreamResponse) recycleData() {
 	if sr.curData != nil {
 		putDataSlab(sr.curData)
 		sr.curData = nil
 	}
+}
+
+// recvContext returns the context to park in stream.Recv on: the caller's,
+// merged with this StreamResponse's abort so Close can wake a parked reader.
+// The returned stop func must be called before Recv returns.
+//
+// The common case is free. A caller that hands Recv the same context it gave
+// DoStream gets the merged one built once at DoStream time; only a caller that
+// varies the context per call pays for a fresh merge.
+func (sr *StreamResponse) recvContext(ctx context.Context) (context.Context, func()) {
+	if sr.recvCtx == nil {
+		return ctx, func() {} // pre-#370 construction path, e.g. a zero value
+	}
+	if ctx == sr.doCtx {
+		return sr.recvCtx, func() {}
+	}
+	cctx, cancel := context.WithCancel(ctx)
+	stop := context.AfterFunc(sr.recvCtx, cancel)
+	return cctx, func() { stop(); cancel() }
 }
 
 // reset zeroes the private fields before DoStream reuses the struct.
@@ -199,6 +247,17 @@ func (sr *StreamResponse) reset() {
 	sr.drained = false
 	sr.trailers = nil
 	sr.curData = nil // Close() already recycled it; clear defensively, do not Put.
+	sr.closed = false
+	// Fire it rather than just dropping it. Close normally has, and cancel is
+	// idempotent — but DoStream resets the struct on entry, so a caller that
+	// reuses a StreamResponse without closing the previous one would otherwise
+	// leave a cancelCtx attached to its parent for as long as that parent lives.
+	if sr.abortCancel != nil {
+		sr.abortCancel()
+	}
+	sr.doCtx = nil
+	sr.recvCtx = nil
+	sr.abortCancel = nil
 	// slabs are cleaned up in Close(); reset() is only called for a
 	// struct that has been properly closed already.
 }
@@ -210,12 +269,16 @@ func (sr *StreamResponse) Recv(ctx context.Context) (StreamEvent, error) {
 	// The previously delivered EventData.Data is invalid once Recv is called
 	// again; recycle its pooled buffer now (also returns the final frame's
 	// buffer when a fully-drained caller calls Recv past EndStream).
+	sr.mu.Lock()
 	sr.recycleData()
+	sr.mu.Unlock()
 	if sr.drained {
 		return StreamEvent{}, ErrStreamEnded
 	}
+	rctx, stopAbort := sr.recvContext(ctx)
+	defer stopAbort()
 	for {
-		ev, err := sr.stream.Recv(ctx)
+		ev, err := sr.stream.Recv(rctx)
 		if err != nil {
 			return StreamEvent{}, err
 		}
@@ -238,7 +301,18 @@ func (sr *StreamResponse) Recv(ctx context.Context) (StreamEvent, error) {
 				Data:      ev.Data,
 				EndStream: ev.EndStream,
 			}
+			sr.mu.Lock()
+			if sr.closed {
+				// Close landed while we were parked in stream.Recv. The stream
+				// is gone and release() has run; hand this frame's slab straight
+				// back rather than storing it on a StreamResponse nobody will
+				// drain, and do not return Data that aliases a pooled buffer.
+				putDataSlab(ev.DataSlab)
+				sr.mu.Unlock()
+				return StreamEvent{}, ErrStreamEnded
+			}
 			sr.curData = ev.DataSlab
+			sr.mu.Unlock()
 			if ev.EndStream {
 				sr.drained = true
 			}
@@ -315,8 +389,23 @@ func (sr *StreamResponse) Close() error {
 			conn.GetHeaderSlabPool().Put(sp)
 		}
 		sr.slabs = sr.slabs[:0]
-		sr.recycleData()
+		// Both outside mu on purpose: they release a Recv parked in the stream,
+		// and holding the lock across them would make the abort wait for the
+		// very read it is aborting.
+		//
+		// The cancel is what actually wakes that Recv. stream.Close tears the
+		// stream down but does not signal a reader already blocked on the event
+		// channel, so without this an abort through DoStream left the goroutine
+		// hanging until the caller's own deadline — Close returned promptly and
+		// the reader behind it did not.
+		if sr.abortCancel != nil {
+			sr.abortCancel()
+		}
 		closeErr = sr.stream.Close()
+		sr.mu.Lock()
+		sr.closed = true // a Recv that wakes now hands its own slab straight back
+		sr.recycleData()
+		sr.mu.Unlock()
 		if sr.release != nil {
 			sr.release()
 		}
