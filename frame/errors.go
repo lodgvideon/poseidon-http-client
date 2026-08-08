@@ -1,6 +1,9 @@
 package frame
 
-import "errors"
+import (
+	"errors"
+	"fmt"
+)
 
 // ErrCode mirrors RFC 7540 §7.
 type ErrCode uint32
@@ -46,3 +49,17 @@ var (
 	// no field block open (RFC 9113 §6.10 — a connection error of type PROTOCOL_ERROR).
 	ErrUnexpectedContinuation = errors.New("poseidon/frame: CONTINUATION with no open field block")
 )
+
+// padErr tags a padding violation from internal/bytesx with this package's
+// exported sentinel.
+//
+// bytesx is internal, so its own error value cannot be named — let alone matched
+// with errors.Is — by anything outside the module. Returning it straight through
+// made ErrInvalidPadding dead API and, worse, made conn's own mapFrameError case
+// for oversized padding unreachable: the connection tore down untyped, so no
+// GOAWAY(PROTOCOL_ERROR) reached the peer, which RFC 9113 §6.1 requires.
+//
+// Both identities survive, so a caller may match either.
+func padErr(err error) error {
+	return fmt.Errorf("%w: %w", ErrInvalidPadding, err)
+}

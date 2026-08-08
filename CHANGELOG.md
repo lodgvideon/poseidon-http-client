@@ -61,6 +61,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A padding violation could not be classified, so no GOAWAY reached the**
+  **peer** (#402). `frame.ErrInvalidPadding` was exported and documented, and
+  never returned: `StripPadding` reports with `internal/bytesx`'s own sentinel,
+  which nothing outside the module can name or match with `errors.Is`. That made
+  the exported value dead API and — worse — made `conn`'s `mapFrameError` case
+  for oversized padding unreachable, so a PADDED frame whose pad length reached
+  the payload fell to the untyped default arm: the connection tore down with no
+  `GOAWAY(PROTOCOL_ERROR)`, which RFC 9113 §6.1 requires. The three dispatch
+  sites now wrap with `%w: %w`, so both identities match.
+
 - **`Warmup` did not pre-dial** (#399). On a managed client it opened nothing
   at all; on the HTTP/2 and HTTP/3 pools it opened exactly one connection
   regardless of `n`. Two independent causes. `managedPool.warmup` iterated
