@@ -621,7 +621,7 @@ func (f *Framer) dispatchData(fh FrameHeader, payload []byte, h Handler) error {
 		var err error
 		data, padLen, err = bytesx.StripPadding(payload)
 		if err != nil {
-			return err
+			return padErr(err)
 		}
 	}
 	return h.OnData(fh, data, padLen)
@@ -637,7 +637,7 @@ func (f *Framer) dispatchHeaders(fh FrameHeader, payload []byte, h Handler) erro
 		var err error
 		body, padLen, err = bytesx.StripPadding(payload)
 		if err != nil {
-			return err
+			return padErr(err)
 		}
 	}
 	var prio *Priority
@@ -745,7 +745,7 @@ func (f *Framer) dispatchPushPromise(fh FrameHeader, payload []byte, h Handler) 
 		var err error
 		body, padLen, err = bytesx.StripPadding(payload)
 		if err != nil {
-			return err
+			return padErr(err)
 		}
 	}
 	if len(body) < 4 {
