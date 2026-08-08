@@ -300,8 +300,8 @@ func (p *h1Pool) handleRelease(rs *h1RunState, msg h1ReleaseMsg) {
 	p.flushStrandedWaiters(rs, ErrDialBackoff)
 }
 
-// ensureDialForWaiters starts a dial when queued waiters have nothing left to
-// wait for.
+// ensureDialForWaiters starts a dial for every queued waiter that has nothing
+// left to wait for, up to what MaxConnsPerHost still allows.
 //
 // serveWaiters can only hand out connections that already exist, and eviction
 // routinely removes the last one — a server "Connection: close" is the ordinary
@@ -310,25 +310,37 @@ func (p *h1Pool) handleRelease(rs *h1RunState, msg h1ReleaseMsg) {
 // those waiters again and each sits until its own timeout, which is a liveness
 // bug rather than a slow path. handleAcquire has always made this decision for a
 // new request; the release and tick paths have to make it too.
+//
+// It dials for the whole batch rather than one at a time, and that is not the
+// same question as the one above. As a pure backstop rescuing a terminal state,
+// one dial was right. #411 made this the path that has to re-dial for a batch:
+// handleAcquire now queues a caller against a health-sweep reservation with NO
+// dial of its own, so when a reservation comes back dead, k waiters are here at
+// once. One dial per call serialised them — each dial completed, serveWaiters
+// gave the conn to one waiter, and only then did the next dial start, for k
+// sequential round trips where k parallel acquires on the pre-#411 pool would
+// each have dialled for themselves. The cost scales with MaxConnsPerHost, which
+// for HTTP/1.1 IS the concurrency limit.
 func (p *h1Pool) ensureDialForWaiters(rs *h1RunState) {
-	if len(rs.waiters) == 0 {
-		return
-	}
-	// Conns the health sweep is holding are capacity the pool already owns and is
-	// about to get back, so a waiter one of them will serve is not waiting for a
-	// dial. Without this the tick's own call to this function opens a socket for
-	// the very waiter its own sweep just displaced.
-	if len(rs.waiters) <= h1CountReservedIdle(rs.conns) {
-		return
-	}
-	if h1CountLive(rs.conns)+rs.inFlightDials >= p.opts.MaxConnsPerHost {
-		return
-	}
 	if inDialBackoff(rs.lastDialErrAt, p.opts.DialBackoff) {
 		return
 	}
-	rs.inFlightDials++
-	go p.dialOne()
+	// Waiters with no capacity already on the way to them. Conns the health sweep
+	// is holding are capacity the pool already owns and is about to get back, and
+	// a dial in flight is capacity en route, so neither justifies another socket.
+	// Without the reserved term the tick's own call here opens a socket for the
+	// very waiter its own sweep just displaced; without the in-flight term the
+	// batch loop below would re-dial for waiters it has already dialled for.
+	//
+	// A surplus socket is not self-correcting: nothing in the repo defaults
+	// IdleTimeout, so evictIdle is disabled and the count just ratchets to the
+	// cap.
+	uncovered := len(rs.waiters) - h1CountReservedIdle(rs.conns) - rs.inFlightDials
+	room := p.opts.MaxConnsPerHost - h1CountLive(rs.conns) - rs.inFlightDials
+	for n := min(uncovered, room); n > 0; n-- {
+		rs.inFlightDials++
+		go p.dialOne()
+	}
 }
 
 // flushStrandedWaiters refuses every queued waiter when the pool holds nothing

@@ -68,12 +68,16 @@ func h1SettleAnswer(w h1AcquireReq) (h1AcquireResp, bool) {
 // from rescuing it.
 func h1SettlePool(t *testing.T) *h1Pool {
 	t.Helper()
+	// Cap deliberately above the conn counts used below: the reserved-idle guard
+	// has to be the thing under test, not the cap. At MaxConnsPerHost == 2
+	// ensureDialForWaiters would return on its cap check and mask it.
+	return h1SettlePoolCap(t, 4)
+}
+
+func h1SettlePoolCap(t *testing.T, maxConns int) *h1Pool {
+	t.Helper()
 	p := newH1Pool("127.0.0.1:1", newH1FakeDialer(), PoolOptions{
-		// Deliberately above the conn counts used below: the reserved-idle
-		// guard has to be the thing under test, not the cap. At
-		// MaxConnsPerHost == 2 ensureDialForWaiters would return on its cap
-		// check and mask it.
-		MaxConnsPerHost:   4,
+		MaxConnsPerHost:   maxConns,
 		HealthCheckPeriod: time.Hour,
 		DialBackoff:       time.Hour,
 	}, nil, nil)
@@ -252,6 +256,97 @@ func TestH1HandleDialDone_RefusesTheWaiterNoReservationCovers(t *testing.T) {
 		}
 		if len(rs.waiters) != 2 {
 			t.Fatalf("waiters = %d, want both still queued", len(rs.waiters))
+		}
+	})
+}
+
+// TestH1EnsureDialForWaiters_DialsForEveryUncoveredWaiter answers the third
+// question #412 raises: whether ensureDialForWaiters should start more than one
+// dial.
+//
+// It was written as a backstop that rescues a terminal state, where exactly one
+// dial is right. #411 made it something else as well — the path that has to
+// re-dial for a whole BATCH at once, because handleAcquire now queues callers
+// against a health-sweep reservation with no dial of their own. When that
+// reservation comes back dead, k waiters are re-dialled one at a time: each dial
+// completes, serveWaiters hands the conn to one waiter, and only then does the
+// next dial start. k sequential round-trips where k parallel acquires on the
+// pre-#411 pool would each have dialled for themselves.
+//
+// The cost scales with MaxConnsPerHost, which for HTTP/1.1 IS the concurrency
+// limit — so, as with the stall #411 removed, it grows with the knob a load
+// generator raises to go faster, and it is worst on the link where a round trip
+// is expensive.
+func TestH1EnsureDialForWaiters_DialsForEveryUncoveredWaiter(t *testing.T) {
+	t.Run("a dead sweep re-dials for the whole batch at once", func(t *testing.T) {
+		p := h1SettlePool(t)
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+
+		// Three conns held by the sweep, three callers queued against them, and
+		// the probe comes back saying every one is dead.
+		reserved := []*h1ManagedConn{
+			{c: h1SettleConn(t), probing: true},
+			{c: h1SettleConn(t), probing: true},
+			{c: h1SettleConn(t), probing: true},
+		}
+		rs := &h1RunState{
+			conns:   reserved,
+			waiters: []h1AcquireReq{h1SettleWaiter(ctx), h1SettleWaiter(ctx), h1SettleWaiter(ctx)},
+		}
+
+		// probed and dead are copies, as they are in production: startHealthSweep
+		// builds its candidate slice by appending, and runHealthSweep filters dead
+		// out of its own array, so neither ever aliases rs.conns. handing the same
+		// slice three times would let evict's in-place filtering rewrite the list
+		// being ranged over.
+		p.handleSweepDone(rs, h1SweepResult{
+			probed: append([]*h1ManagedConn(nil), reserved...),
+			dead:   append([]*h1ManagedConn(nil), reserved...),
+		})
+
+		if rs.inFlightDials != 3 {
+			t.Fatalf("inFlightDials = %d for 3 waiters with nothing coming, want 3; "+
+				"one dial per call serialises the batch into 3 round trips, and the "+
+				"acquires that queued against the reservation would each have dialled "+
+				"for themselves before #411", rs.inFlightDials)
+		}
+	})
+
+	t.Run("never dials past MaxConnsPerHost", func(t *testing.T) {
+		p := h1SettlePoolCap(t, 2)
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+
+		rs := &h1RunState{
+			waiters: []h1AcquireReq{h1SettleWaiter(ctx), h1SettleWaiter(ctx), h1SettleWaiter(ctx)},
+		}
+
+		p.ensureDialForWaiters(rs)
+
+		if rs.inFlightDials != 2 {
+			t.Fatalf("inFlightDials = %d for 3 waiters at MaxConnsPerHost=2, want 2", rs.inFlightDials)
+		}
+	})
+
+	t.Run("a dial already in flight covers a waiter", func(t *testing.T) {
+		p := h1SettlePool(t)
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+
+		// One waiter, one dial already on its way for it. A second socket would
+		// be surplus the pool never reclaims — nothing defaults IdleTimeout, so
+		// evictIdle is disabled and the count just ratchets towards the cap. Same
+		// failure mode #411's second commit fixed for reserved conns.
+		rs := &h1RunState{
+			waiters:       []h1AcquireReq{h1SettleWaiter(ctx)},
+			inFlightDials: 1,
+		}
+
+		p.ensureDialForWaiters(rs)
+
+		if rs.inFlightDials != 1 {
+			t.Fatalf("inFlightDials = %d for 1 waiter that already has a dial coming, want 1", rs.inFlightDials)
 		}
 	})
 }
