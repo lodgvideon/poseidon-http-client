@@ -186,3 +186,44 @@ Still per-protocol: H1 and H2. `watchDrain` is now shared with H3 only — the
 predicate hazard becomes real when the second protocol moves onto it.
 
 ---
+
+## Step 4 — H2 on the core
+
+Order chosen deliberately: H2 before H1. H2 and H3 both multiplex, so
+`InFlightStreams` in `watchDrain` means the same thing for both and sharing the
+predicate between them adds no new hazard. H1's exclusive checkout gives that
+field a different meaning, so H1 goes last and alone.
+
+**Checked before moving, not after.** Normalised every H2 method body against
+the core's (comments stripped, identifiers substituted): 11 of 13 identical,
+including `watchDrain` — its only divergence was the back-off comment H1 and H3
+never carried. The two that differ are `getOrCreateSubPool` and `acquire`, and
+the diff of each is exactly the injection points and nothing else:
+
+    -  p: newPool(key, mp.connOpts, mp.poolOpts, mp.hooksRef, mp.metrics)
+    +  p: mp.newSub(key)
+    -  release := func() { sub.p.release(mc) }; return mc.c, release, nil
+    +  return mp.connOf(mc), mp.mkRelease(sub.p, mc), nil
+
+Had anything else differed, migrating H2 onto the core would have changed H2's
+behaviour silently — the gate would likely have caught it, but knowing beforehand
+is cheaper than finding out from a red run.
+
+`managed_pool.go` 490 → 115 lines. Two aliases:
+
+    type subPoolState = coreSubPool[*Pool, *managedConn]
+    type managedPool  = managedCore[*Pool, *managedConn, *conn.Conn, func()]
+
+Loop: build · vet · lint 0 issues · `-race` green (74 s) · **0 test files
+changed** · gate **13/13**.
+
+**The gate is now stronger than it was.** Eight cases — every H2 and H3 one —
+mutate the single shared copy, and each still requires its own protocol's tests
+to go red. That is the property the re-scope in step 3a was for: it proves both
+protocols observe the shared code, which per-protocol anchors never could.
+
+Remaining: H1. Its `watchDrain` predicate counts exclusive exchanges where the
+core counts multiplexed streams. That is the one step where sharing the function
+changes what the number means, and it gets its own increment.
+
+---
