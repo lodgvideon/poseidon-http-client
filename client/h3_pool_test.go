@@ -652,31 +652,64 @@ func TestH3Pool_DialFailureDoesNotStrandQueuedWaiters(t *testing.T) {
 		}
 	})
 
-	// An eviction that lands inside the dial backoff cannot dial. Nothing else
-	// would retry if the tick only dialled when it had just shrunk the pool — and by
-	// then the pool is already empty, so it never shrinks again.
-	t.Run("eviction_inside_backoff", func(t *testing.T) {
+	// An eviction that lands inside the dial backoff cannot dial. This used to
+	// assert that the waiter waits for the backoff to expire and is then dialled
+	// for by a later tick — which #425 changed, because in production that later
+	// tick is a whole HealthCheckPeriod away (the manual second handleTick below
+	// was the only reason the wait looked short), while handleAcquire refuses a
+	// FRESH acquire in the identical state instantly. The waiter is answered now.
+	t.Run("eviction_inside_backoff_refuses_rather_than_parks", func(t *testing.T) {
+		p := inertH3Pool(PoolOptions{MaxConnsPerHost: 1, DialBackoff: time.Hour}, nil)
+		w := newWaiter()
+		rs := &h3RunState{waiters: []h3AcquireReq{w}, lastDialErrAt: time.Now()}
+
+		p.handleTick(rs)
+
+		if rs.inFlightDials != 0 {
+			t.Fatal("dialled inside the backoff window")
+		}
+		select {
+		case resp := <-w.reply:
+			if !errors.Is(resp.err, ErrDialBackoff) {
+				t.Fatalf("waiter got %v, want ErrDialBackoff — the answer handleAcquire "+
+					"already gives a new request in this exact state", resp.err)
+			}
+		default:
+			t.Fatal("waiter left parked for the next health tick, a whole HealthCheckPeriod away")
+		}
+		if len(rs.waiters) != 0 {
+			t.Fatalf("%d waiters still queued after being answered", len(rs.waiters))
+		}
+	})
+
+	// The other half of what the subtest above used to cover, split out because it
+	// is a different property and the refusal now hides it: the tick's dial is
+	// UNCONDITIONAL, not gated on the tick having just shrunk the pool. Were it
+	// gated, an already-empty pool would never shrink again and nothing would
+	// retry.
+	t.Run("tick_dials_for_a_waiter_once_the_backoff_is_closed", func(t *testing.T) {
 		dialed := make(chan struct{}, 1)
 		dialFn := func(context.Context, string, *tls.Config) (h3Client, error) {
 			dialed <- struct{}{}
 			return &barrierH3Client{}, nil
 		}
 		p := inertH3Pool(PoolOptions{MaxConnsPerHost: 1, DialBackoff: 10 * time.Millisecond}, dialFn)
-		rs := &h3RunState{waiters: []h3AcquireReq{newWaiter()}, lastDialErrAt: time.Now()}
-
-		p.handleTick(rs) // inside the backoff: correctly does not dial
-		if rs.inFlightDials != 0 {
-			t.Fatal("dialled inside the backoff window")
+		// Backoff long closed, pool empty, one waiter: nothing shrank in this tick
+		// and it must still dial. No sleep — the clock is not what is under test.
+		rs := &h3RunState{
+			waiters:       []h3AcquireReq{newWaiter()},
+			lastDialErrAt: time.Now().Add(-time.Hour),
 		}
-		time.Sleep(20 * time.Millisecond)
-		p.handleTick(rs) // backoff expired, pool empty — nothing shrank, must still dial
+
+		p.handleTick(rs)
+
 		if rs.inFlightDials != 1 {
-			t.Fatalf("inFlightDials = %d after the backoff expired, want 1", rs.inFlightDials)
+			t.Fatalf("inFlightDials = %d with the backoff closed, want 1", rs.inFlightDials)
 		}
 		select {
 		case <-dialed:
 		case <-time.After(2 * time.Second):
-			t.Fatal("no dial started for the waiter once the backoff expired")
+			t.Fatal("no dial started for the waiter once the backoff was closed")
 		}
 	})
 }
