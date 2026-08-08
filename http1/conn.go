@@ -91,6 +91,20 @@ var ErrInvalidHeaderBlock = errors.New("http1: invalid header block")
 // as a status line.
 var ErrInvalidChunkSize = errors.New("http1: invalid chunk size")
 
+// ErrInvalidStatusLine reports that a response's status line was not RFC 9112
+// §4's ABNF `status-line = HTTP-version SP status-code SP [ reason-phrase ]`:
+// too few fields, an HTTP-version that is not two digits, or a status-code that
+// is not exactly 3DIGIT.
+//
+// The connection is always left un-poolable when this is returned. A status line
+// this client cannot parse is a message boundary it cannot find, so it no longer
+// knows where this response begins.
+//
+// This existed only as untyped fmt.Errorf text until the grammar tests that name
+// it were found to be asserting `err != nil` — there was no sentinel for them to
+// match, so a rejection for an unrelated reason satisfied them.
+var ErrInvalidStatusLine = errors.New("http1: invalid status line")
+
 // ErrUnsolicitedUpgrade reports a 101 (Switching Protocols) response to a request
 // that offered no Upgrade.
 //
@@ -1246,16 +1260,16 @@ func (ex *Exchange) ReadResponse(ctx context.Context) (statusCode int, headers [
 
 		parts := strings.SplitN(line, " ", 3)
 		if len(parts) < 2 {
-			return 0, nil, fmt.Errorf("http1: malformed status line: %q", line)
+			return 0, nil, fmt.Errorf("%w: %q", ErrInvalidStatusLine, line)
 		}
 		minor, vok := parseHTTP1Version(parts[0])
 		if !vok {
-			return 0, nil, fmt.Errorf("http1: malformed status line: %q", line)
+			return 0, nil, fmt.Errorf("%w: %q", ErrInvalidStatusLine, line)
 		}
 		respMinor = minor
 		code, cok := parseStatusCode(parts[1])
 		if !cok {
-			return 0, nil, fmt.Errorf("http1: invalid status code: %q", truncateForError(parts[1]))
+			return 0, nil, fmt.Errorf("%w: bad status code %q", ErrInvalidStatusLine, truncateForError(parts[1]))
 		}
 
 		// A 101 is not an interim status to drain. See ErrUnsolicitedUpgrade:

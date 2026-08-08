@@ -66,9 +66,12 @@ func TestConformance_RFC9112_Sec4_StatusCodeMustBe3DIGIT(t *testing.T) {
 	for _, code := range []string{"-5", "+99", "99", "1", "0", "0000200", "1234", "2e2", "0x64", " 200", "２００"} {
 		t.Run(code, func(t *testing.T) {
 			ex, err := readResponseErr(t, "HTTP/1.1 "+code+" x\r\n\r\n"+fabricated)
-			if err == nil {
-				t.Fatalf("status code %q accepted; want a parse error — 3DIGIT is the whole grammar, "+
-					"and anything under 200 that gets through is a free 'read another response' step", code)
+			// The sentinel, not just "some error": a status line rejected for an
+			// unrelated reason would satisfy err != nil while leaving a caller that
+			// classifies failure modes looking at the wrong one.
+			if !errors.Is(err, http1.ErrInvalidStatusLine) {
+				t.Fatalf("status code %q: err = %v, want ErrInvalidStatusLine — 3DIGIT is the whole grammar, "+
+					"and anything under 200 that gets through is a free 'read another response' step", code, err)
 			}
 			if ex.KeepAlive() {
 				t.Errorf("status code %q: KeepAlive() = true; a status line that is not a status line "+

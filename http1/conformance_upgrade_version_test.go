@@ -48,8 +48,8 @@ func TestConformance_RFC9112_Sec2_3_VersionMustBeTwoDigits(t *testing.T) {
 	for _, v := range []string{"HTTP/1.00", "HTTP/1.", "HTTP/1", "HTTP/11", "HTTP/2.0", "HTTP/1.0.1"} {
 		t.Run(v, func(t *testing.T) {
 			ex := wireExchange(t, "GET", v+" 200 OK\r\nContent-Length: 0\r\n\r\n")
-			if _, _, err := ex.ReadResponse(context.Background()); err == nil {
-				t.Fatalf("ReadResponse accepted version %q, want a malformed-status-line error", v)
+			if _, _, err := ex.ReadResponse(context.Background()); !errors.Is(err, http1.ErrInvalidStatusLine) {
+				t.Fatalf("version %q: err = %v, want ErrInvalidStatusLine", v, err)
 			}
 			if ex.KeepAlive() {
 				t.Error("KeepAlive() = true after a malformed status line, want false")
