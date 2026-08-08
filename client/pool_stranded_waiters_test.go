@@ -419,3 +419,44 @@ func TestFlushStrandedWaiters_KeepsTheQueueWhenTheBackoffIsClosed(t *testing.T) 
 		}
 	})
 }
+
+// TestPool_HandleDialDone_RefusesTheWaitersBehindTheFirst gives the H2 pool the
+// deterministic gate its H3 sibling already had (the behind_the_first subtest of
+// TestH3Pool_DialFailureDoesNotStrandQueuedWaiters), and that this file's hoist
+// otherwise leans on a racy one.
+//
+// TestPool_DialFailureRefusesEveryQueuedWaiter is the existing cover, and it is
+// a coin flip: refusingDialer fails instantly, so whether waiters 2 and 3 reach
+// acquireCh before handleDialDone runs decides whether they are refused by the
+// flush under test or by handleAcquire's fast-refuse on arrival. Measured —
+// deleting the flush from handleDialDone made it FAIL on one run and PASS on the
+// next, same code both times.
+func TestPool_HandleDialDone_RefusesTheWaitersBehindTheFirst(t *testing.T) {
+	p := h2StrandPool(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	sentinel := errors.New("connect refused (synthetic)")
+	a, b, c := h2StrandWaiter(ctx), h2StrandWaiter(ctx), h2StrandWaiter(ctx)
+	rs := &runState{waiters: []acquireReq{a, b, c}, inFlightDials: 1}
+
+	p.handleDialDone(rs, dialResult{err: sentinel})
+
+	for i, w := range []acquireReq{a, b, c} {
+		select {
+		case resp := <-w.reply:
+			if resp.err == nil {
+				t.Fatalf("waiter %d got a conn from a pool with nothing live", i)
+			}
+			if !errors.Is(resp.err, sentinel) {
+				t.Fatalf("waiter %d got %v, want the dial error", i, resp.err)
+			}
+		default:
+			t.Fatalf("waiter %d left queued with nothing live and no dial in flight; it waits a "+
+				"full HealthCheckPeriod while a fresh acquire is refused instantly", i)
+		}
+	}
+	if len(rs.waiters) != 0 {
+		t.Fatalf("%d waiters still queued after every one was answered", len(rs.waiters))
+	}
+}
