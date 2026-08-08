@@ -39,6 +39,7 @@
 package client
 
 import (
+	"net"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -465,53 +466,32 @@ func (p *h1Pool) pickIdle(conns []*h1ManagedConn) *h1ManagedConn {
 	return nil
 }
 
-// dialOne is the dial helper goroutine. It dials with a fresh background context
-// so a cancelled waiter doesn't tear down a useful in-flight dial. A DialTimeout
-// bound prevents the goroutine from leaking on a hung TCP connect, and a watchdog
-// cancels the dial early if the pool is closed mid-dial.
-func (p *h1Pool) dialOne() {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	if p.opts.DialTimeout > 0 {
-		var dlCancel context.CancelFunc
-		ctx, dlCancel = context.WithTimeout(ctx, p.opts.DialTimeout)
-		defer dlCancel()
-	}
-	stopWatch := make(chan struct{})
-	go func() {
-		select {
-		case <-p.closedCh:
-			cancel()
-		case <-stopWatch:
-		}
-	}()
-	defer close(stopWatch)
+// dialEnv snapshots what dialAttempt needs from this pool.
+func (p *h1Pool) dialEnv() dialEnv {
+	return dialEnv{closedCh: p.closedCh, timeout: p.opts.DialTimeout, addr: p.addr, metrics: p.metrics, hooksRef: p.hooksRef}
+}
 
-	dialStart := time.Now()
-	p.metrics.Counters.DialsAttempted.Add(1)
-	nc, err := p.dialer.Dial(ctx, p.addr)
-	if err == nil {
+// dialOne dials one conn and delivers it to the actor. The ALPN assertion runs
+// inside the timed dial: a peer that answered "h2" has cost a real dial, and
+// the OnDial hook should see that attempt fail rather than see it succeed and
+// the caller then receive a DialError from nowhere.
+func (p *h1Pool) dialOne() {
+	nc, err := dialAttempt(p.dialEnv(), func(ctx context.Context) (net.Conn, error) {
+		nc, derr := p.dialer.Dial(ctx, p.addr)
+		if derr != nil {
+			return nil, derr
+		}
 		if aerr := assertH1Conn(nc); aerr != nil {
 			_ = nc.Close()
-			nc, err = nil, aerr
+			return nil, aerr
 		}
-	}
-	dur := time.Since(dialStart)
-	p.metrics.Latency.Dial.Observe(dur)
-	if err != nil {
-		p.metrics.Counters.DialsFailed.Add(1)
-	}
-	if hr := p.hooksRef; hr != nil {
-		if h := hr.Load(); h != nil && h.OnDial != nil {
-			h.OnDial(DialEvent{Addr: p.addr, Err: err, Duration: dur})
-		}
-	}
+		return nc, nil
+	})
 	if err != nil {
 		p.dialDoneCh <- h1DialResult{err: &DialError{Addr: p.addr, Err: err}}
 		return
 	}
-	mc := &h1ManagedConn{c: http1.NewConn(nc), dialedAt: time.Now(), lastUsed: time.Now()}
-	p.dialDoneCh <- h1DialResult{mc: mc}
+	p.dialDoneCh <- h1DialResult{mc: &h1ManagedConn{c: http1.NewConn(nc), dialedAt: time.Now(), lastUsed: time.Now()}}
 }
 
 // serveWaiters hands as many queued waiters as possible an idle conn.
