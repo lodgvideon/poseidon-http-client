@@ -11,6 +11,14 @@ package grpc
 // are pre-encoded once, and the echo writes the client's own DATA payload back
 // verbatim.
 //
+// Read B/op and allocs/op from these, not ns/op. The round trip goes through a
+// real loopback socket, and six identical runs of BenchmarkGRPC_Unary_1KB at
+// benchtime=1000x spread from 126 to 258 microseconds — a 2x swing with nothing
+// changed. Allocation counts over the same runs did not move by one. A latency
+// claim needs a quieter harness than this; an allocation claim does not.
+// BenchmarkGRPC_BuildHeaders is the exception: it touches no socket, so its
+// ns/op is meaningful.
+//
 // Run with:
 //
 //	go test -run='^$' -bench=BenchmarkGRPC -benchmem ./grpc/...
@@ -393,12 +401,14 @@ func BenchmarkGRPC_ServerStream_64x1KB(b *testing.B) {
 // BenchmarkGRPC_BuildHeaders isolates the request header block construction,
 // which every RPC pays before any I/O happens.
 func BenchmarkGRPC_BuildHeaders(b *testing.B) {
-	cc := &ClientConn{opts: Options{Authority: "bench.local"}.defaulted()}
+	cc := newClientConn(nil, Options{Authority: "bench.local"}.defaulted(), false)
 	ctx := context.Background()
 	b.ResetTimer()
 	b.ReportAllocs()
 	for i := 0; i < b.N; i++ {
-		sinkHeaders = cc.buildHeaders(ctx, "/bench.Svc/Echo", nil)
+		sc := headerScratchPool.Get().(*headerScratch)
+		sinkHeaders = cc.buildHeaders(ctx, "/bench.Svc/Echo", nil, sc)
+		putHeaderScratch(sc)
 	}
 }
 

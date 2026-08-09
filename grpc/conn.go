@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/lodgvideon/poseidon-http-client/conn"
@@ -144,6 +145,27 @@ type ClientConn struct {
 	opts Options
 	// owned reports whether Close should also close the underlying conn.Conn.
 	owned bool
+	// scheme, authority and userAgent are the byte forms of the Options fields
+	// of the same name. They are converted once here rather than per RPC: a
+	// []byte(string) conversion in buildHeaders escapes into the header slice
+	// and therefore allocates, and none of the three changes for the life of
+	// the connection.
+	scheme    []byte
+	authority []byte
+	userAgent []byte
+}
+
+// newClientConn builds a ClientConn with the per-connection header bytes
+// precomputed. opts must already have been through defaulted().
+func newClientConn(c *conn.Conn, opts Options, owned bool) *ClientConn {
+	return &ClientConn{
+		c:         c,
+		opts:      opts,
+		owned:     owned,
+		scheme:    []byte(opts.Scheme),
+		authority: []byte(opts.Authority),
+		userAgent: []byte(opts.UserAgent),
+	}
 }
 
 // Dial establishes an HTTP/2 connection to addr and returns a ClientConn ready
@@ -161,7 +183,7 @@ func Dial(ctx context.Context, addr string, opts Options) (*ClientConn, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &ClientConn{c: c, opts: opts, owned: true}, nil
+	return newClientConn(c, opts, true), nil
 }
 
 // NewClientConn wraps an already-established HTTP/2 connection. Options.
@@ -182,7 +204,7 @@ func NewClientConn(c *conn.Conn, opts Options) (*ClientConn, error) {
 	if opts.Authority == "" {
 		return nil, errors.New("grpc: Options.Authority is required when wrapping an existing conn.Conn")
 	}
-	return &ClientConn{c: c, opts: opts}, nil
+	return newClientConn(c, opts, false), nil
 }
 
 // Conn returns the underlying HTTP/2 connection, for callers that need
@@ -250,13 +272,19 @@ func (cc *ClientConn) NewStream(ctx context.Context, method string, md []conn.He
 	for _, o := range opts {
 		o.apply(&co)
 	}
-	hdrs := cc.buildHeaders(ctx, method, md)
+	sc := headerScratchPool.Get().(*headerScratch)
+	hdrs := cc.buildHeaders(ctx, method, md, sc)
 
 	s, err := cc.c.NewStream(ctx)
 	if err != nil {
+		putHeaderScratch(sc)
 		return nil, err
 	}
-	if err := s.SendHeaders(ctx, hdrs, false); err != nil {
+	// SendHeaders encodes the block synchronously, so the scratch is free the
+	// moment it returns — on the error path too.
+	err = s.SendHeaders(ctx, hdrs, false)
+	putHeaderScratch(sc)
+	if err != nil {
 		_ = s.Close()
 		return nil, err
 	}
@@ -265,27 +293,89 @@ func (cc *ClientConn) NewStream(ctx context.Context, method string, md []conn.He
 	return st, nil
 }
 
-// buildHeaders assembles the request header block: pseudo-headers first (RFC
-// 9113 §8.3 requires it), then the fixed gRPC headers, then caller metadata.
-func (cc *ClientConn) buildHeaders(ctx context.Context, method string, md []conn.HeaderField) []conn.HeaderField {
-	hdrs := make([]conn.HeaderField, 0, 8+len(md))
-	hdrs = append(hdrs,
-		conn.HeaderField{Name: []byte(":method"), Value: []byte("POST")},
-		conn.HeaderField{Name: []byte(":scheme"), Value: []byte(cc.opts.Scheme)},
-		conn.HeaderField{Name: []byte(":path"), Value: []byte(method)},
-		conn.HeaderField{Name: []byte(":authority"), Value: []byte(cc.opts.Authority)},
-		conn.HeaderField{Name: []byte("content-type"), Value: []byte("application/grpc")},
-		conn.HeaderField{Name: []byte("user-agent"), Value: []byte(cc.opts.UserAgent)},
+// Header names and the fixed values that go with them, in the byte form the
+// HPACK encoder takes. The encoder reads them and never retains or mutates
+// them (see hpack.HeaderField), so one shared copy serves every connection and
+// every concurrent RPC.
+var (
+	hdrMethod         = []byte(":method")
+	hdrScheme         = []byte(":scheme")
+	hdrPath           = []byte(":path")
+	hdrAuthority      = []byte(":authority")
+	hdrContentType    = []byte("content-type")
+	hdrUserAgent      = []byte("user-agent")
+	hdrTE             = []byte("te")
+	hdrAcceptEncoding = []byte("grpc-accept-encoding")
+	hdrTimeout        = []byte("grpc-timeout")
+
+	valPOST            = []byte("POST")
+	valApplicationGRPC = []byte("application/grpc")
+	valTrailers        = []byte("trailers")
+	valIdentity        = []byte("identity")
+)
+
+// headerScratch is the per-RPC working memory buildHeaders writes into: the
+// field slice itself plus the two values that are not constant and would
+// otherwise each cost an allocation. It is pooled and reused, so a steady
+// stream of RPCs on a connection builds its header blocks without allocating
+// at all.
+//
+// The borrow lasts from buildHeaders until SendHeaders returns. That is safe
+// because the HPACK encoder copies every byte it is given — into the wire
+// output, and into the dynamic table arena for an indexed field — so nothing
+// downstream still points at this memory once the block is encoded.
+type headerScratch struct {
+	fields []conn.HeaderField
+	// path holds the method name, which varies per call.
+	path []byte
+	// timeout holds the rendered grpc-timeout value, present only when the
+	// call's context carries a deadline.
+	timeout []byte
+}
+
+var headerScratchPool = sync.Pool{
+	New: func() any {
+		return &headerScratch{
+			fields:  make([]conn.HeaderField, 0, 12),
+			path:    make([]byte, 0, 64),
+			timeout: make([]byte, 0, 16),
+		}
+	},
+}
+
+// putHeaderScratch returns sc to the pool. The field slice is cleared rather
+// than merely truncated: its entries point at caller-supplied metadata, which
+// for gRPC routinely means credentials, and a pool is exactly the wrong place
+// to keep those reachable after the RPC that carried them is over.
+func putHeaderScratch(sc *headerScratch) {
+	clear(sc.fields)
+	sc.fields = sc.fields[:0]
+	headerScratchPool.Put(sc)
+}
+
+// buildHeaders assembles the request header block into sc: pseudo-headers
+// first (RFC 9113 §8.3 requires it), then the fixed gRPC headers, then caller
+// metadata. The returned slice is valid until sc goes back to the pool.
+func (cc *ClientConn) buildHeaders(ctx context.Context, method string, md []conn.HeaderField, sc *headerScratch) []conn.HeaderField {
+	sc.path = append(sc.path[:0], method...)
+	hdrs := append(sc.fields[:0],
+		conn.HeaderField{Name: hdrMethod, Value: valPOST},
+		conn.HeaderField{Name: hdrScheme, Value: cc.scheme},
+		conn.HeaderField{Name: hdrPath, Value: sc.path},
+		conn.HeaderField{Name: hdrAuthority, Value: cc.authority},
+		conn.HeaderField{Name: hdrContentType, Value: valApplicationGRPC},
+		conn.HeaderField{Name: hdrUserAgent, Value: cc.userAgent},
 		// te: trailers is mandatory: it tells the server this client
 		// understands the trailers that carry grpc-status. RFC 9113 §8.2.2
 		// permits te only with this exact value.
-		conn.HeaderField{Name: []byte("te"), Value: []byte("trailers")},
-		conn.HeaderField{Name: []byte("grpc-accept-encoding"), Value: []byte("identity")},
+		conn.HeaderField{Name: hdrTE, Value: valTrailers},
+		conn.HeaderField{Name: hdrAcceptEncoding, Value: valIdentity},
 	)
 	if dl, ok := ctx.Deadline(); ok {
+		sc.timeout = appendTimeout(sc.timeout[:0], time.Until(dl))
 		hdrs = append(hdrs, conn.HeaderField{
-			Name:  []byte("grpc-timeout"),
-			Value: []byte(encodeTimeout(time.Until(dl))),
+			Name:  hdrTimeout,
+			Value: sc.timeout,
 			// The remaining time, at the finest unit that fits 8 digits — so a
 			// different value on essentially every RPC. Indexing it would insert
 			// an entry that can never be matched again and evict one that could,
@@ -306,6 +396,9 @@ func (cc *ClientConn) buildHeaders(ctx context.Context, method string, md []conn
 		}
 		hdrs = append(hdrs, f)
 	}
+	// Hand the (possibly regrown) backing array back to sc so the growth is
+	// kept rather than repeated on the next borrow.
+	sc.fields = hdrs
 	return hdrs
 }
 

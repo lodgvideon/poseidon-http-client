@@ -170,12 +170,16 @@ var timeoutUnits = [...]struct {
 // "at most 8 digits".
 const maxTimeoutDigits = 99999999
 
-// encodeTimeout renders d as a grpc-timeout field value. Values are rounded up
-// so the server's deadline is never tighter than the caller's, and a d past
-// what eight digits of hours can express is clamped to that maximum.
-func encodeTimeout(d time.Duration) string {
+// appendTimeout appends the grpc-timeout field value for d to dst. Values are
+// rounded up so the server's deadline is never tighter than the caller's, and a
+// d past what eight digits of hours can express is clamped to that maximum.
+//
+// It appends rather than returning a string because it runs on every RPC that
+// carries a deadline: building the value with string concatenation costs two
+// allocations, and appending into the caller's buffer costs none.
+func appendTimeout(dst []byte, d time.Duration) []byte {
 	if d <= 0 {
-		return "0n"
+		return append(dst, '0', 'n')
 	}
 	for _, u := range timeoutUnits {
 		n := int64(d / u.size)
@@ -183,8 +187,13 @@ func encodeTimeout(d time.Duration) string {
 			n++ // round up: a shorter deadline than asked for would be wrong
 		}
 		if n <= maxTimeoutDigits {
-			return strconv.FormatInt(n, 10) + string(u.suffix)
+			return append(strconv.AppendInt(dst, n, 10), u.suffix)
 		}
 	}
-	return strconv.Itoa(maxTimeoutDigits) + "H"
+	return append(strconv.AppendInt(dst, maxTimeoutDigits, 10), 'H')
+}
+
+// encodeTimeout renders d as a grpc-timeout field value.
+func encodeTimeout(d time.Duration) string {
+	return string(appendTimeout(nil, d))
 }
