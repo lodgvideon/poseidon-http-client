@@ -32,9 +32,14 @@ func TestWarmup_ManagedPool_PreDialsBeforeAnyRequest(t *testing.T) {
 	// No request has been issued. This is the state the bug lived in.
 	mp.warmup(4)
 
+	// Wait for BOTH addresses, not for a total of two. The loop used to break on
+	// counts[0]+counts[1] >= 2 and then assert each was non-zero, so a run where
+	// the first address happened to get both dials first exited early and failed
+	// on the second address having none — with the pool behaving correctly. It
+	// held on an idle machine and failed under a loaded CI.
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
-		if int(counts[0].Load())+int(counts[1].Load()) >= 2 {
+		if counts[0].Load() > 0 && counts[1].Load() > 0 {
 			break
 		}
 		time.Sleep(10 * time.Millisecond)
