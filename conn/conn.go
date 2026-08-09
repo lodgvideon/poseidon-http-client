@@ -187,6 +187,13 @@ type Conn struct {
 	closed     atomic.Bool
 	readerDone chan struct{}
 
+	// readerExited mirrors "readerDone is closed" as an atomic. IsAlive runs once
+	// per pooled connection per request, and a channel select is far too
+	// expensive at that rate — see http3.Client.dead, where a profile at 4k
+	// connections put the equivalent select at 19.6% of all CPU. Nothing waits on
+	// this; readerDone remains the thing to block on.
+	readerExited atomic.Bool
+
 	// draining is set by Shutdown to mark the conn as draining. New
 	// NewStream calls return ErrConnDraining (RFC 7540 §6.8 graceful
 	// shutdown pattern). drainDone is closed when the inflight count
@@ -719,15 +726,10 @@ func (c *Conn) IsAlive() bool {
 	// that vanished — crash, restart, RST — left IsAlive answering true forever,
 	// and a pool kept handing the corpse out. http3.Client.Alive is this.
 	//
-	// readerDone is nil on a hand-built Conn that never started a reader; a
-	// receive on a nil channel blocks, so such a Conn falls through to the
-	// flags below rather than reading as dead.
-	select {
-	case <-c.readerDone:
-		return false
-	default:
-	}
-	return !c.closed.Load() && !c.goAwayReceived.Load()
+	// A hand-built Conn that never started a reader has readerExited false, so it
+	// falls through to the flags below rather than reading as dead — the same
+	// outcome the old nil-channel receive produced, without the select.
+	return !c.readerExited.Load() && !c.closed.Load() && !c.goAwayReceived.Load()
 }
 
 // GoAwayReceived reports whether the peer has sent a GOAWAY frame.
@@ -1855,7 +1857,14 @@ func (c *Conn) bumpFramesReceived() { c.atomicFramesReceived.Add(1) }
 // shutting down streams (RFC 7540 §5.4.1). I/O errors and EOF skip
 // GOAWAY (transport already gone).
 func (c *Conn) readerLoop() {
-	defer close(c.readerDone)
+	// Publish the flag BEFORE closing the channel: a goroutine woken by the close
+	// must never then observe the connection as alive. Early is safe, late is the
+	// bug. Deferred in one statement so no return path can set one without the
+	// other.
+	defer func() {
+		c.readerExited.Store(true)
+		close(c.readerDone)
+	}()
 	h := newConnHandler(c, c.dec)
 	h.raiseMaxHeaderBytes(c.opts.Settings.MaxHeaderListSize)
 	for {

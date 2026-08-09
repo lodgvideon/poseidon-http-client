@@ -173,6 +173,14 @@ type Client struct {
 	connCancel context.CancelFunc
 	readerDone chan struct{}
 
+	// dead mirrors "readerDone is closed" as an atomic, because Alive is called
+	// once per pooled connection per request and a channel select is far too
+	// expensive for that: at 4k connections a profile put runtime.chanrecv at
+	// 19.6% and this method at 11.5% of all CPU, entirely from the pool's
+	// selection scan. Nothing waits on it — readerDone remains the thing to
+	// block on; this is only the predicate.
+	dead atomic.Bool
+
 	// Server control-stream state (RFC 9114 §6.2.1, §5.2), reader-owned: touched
 	// only on the reader goroutine (serviceControl after each Poll), so no lock.
 	pendingUni    []*uniStream // accepted server uni streams whose type isn't peeled yet
@@ -331,19 +339,19 @@ func newClient(conn quicConn, settings []Setting) (*Client, error) {
 	control, err := conn.OpenUniStream()
 	if err != nil {
 		c.connCancel()
-		close(c.readerDone) // no reader was started
+		c.markDead() // no reader was started
 		return nil, err
 	}
 	qenc, err := conn.OpenUniStream()
 	if err != nil {
 		c.connCancel()
-		close(c.readerDone)
+		c.markDead()
 		return nil, err
 	}
 	qdec, err := conn.OpenUniStream()
 	if err != nil {
 		c.connCancel()
-		close(c.readerDone)
+		c.markDead()
 		return nil, err
 	}
 	c.clientQPACKEnc = qenc
@@ -412,7 +420,7 @@ func qpackBlockedStreamsSetting(settings []Setting) uint64 {
 // c.mu — safe because Poll never returns holding it (the §3.2 postcondition). Any
 // error is fatal to the connection.
 func (c *Client) readLoop() {
-	defer close(c.readerDone)
+	defer c.markDead()
 	for {
 		if err := c.conn.Poll(c.connCtx); err != nil {
 			c.fatal(err)
@@ -464,13 +472,21 @@ func (c *Client) Close() error {
 // that window returns the terminal error, so a pool that re-checks Alive on release
 // still evicts the dead connection promptly (matching the HTTP/2 pool's
 // eject-on-release contract).
-func (c *Client) Alive() bool {
-	select {
-	case <-c.readerDone:
-		return false
-	default:
-		return true
-	}
+func (c *Client) Alive() bool { return !c.dead.Load() }
+
+// markDead retires the reader: it publishes the flag Alive reads and then closes
+// readerDone. Every path that ends the reader goes through here, so the two can
+// never disagree — a raw close would leave Alive reporting true forever and the
+// pool handing out a corpse.
+//
+// The order is load-bearing. Storing BEFORE the close means a goroutine woken by
+// readerDone always observes dead == true; closing first would let it see the
+// connection as alive. Being early is safe (Alive is already documented as
+// allowed to report death slightly ahead of the reader's exit); being late is
+// the bug.
+func (c *Client) markDead() {
+	c.dead.Store(true)
+	close(c.readerDone)
 }
 
 // GoingAway reports whether the peer has sent GOAWAY. After that this connection
