@@ -130,6 +130,37 @@ func TestBorrow_ReleaseEndsAHeldBorrow(t *testing.T) {
 	}
 }
 
+// TestBorrow_CloseReleasesAHeldBorrow is the leak gate, and it exists because a
+// mutation removing release() from Close broke nothing else: the borrow simply
+// stays held, the pooled slab never returns, and every test still passes. It has
+// to be checked through Close rather than by calling release directly, which is
+// the mistake the first version of these tests made.
+func TestBorrow_CloseReleasesAHeldBorrow(t *testing.T) {
+	cc := dialMockPeer(t, newMockGRPCPeer(t), nil)
+	ctx := t.Context()
+
+	s, err := cc.NewStream(ctx, "/bench.Svc/Echo", nil)
+	if err != nil {
+		t.Fatalf("NewStream: %v", err)
+	}
+	if err := s.SendLast(ctx, bytes.Repeat([]byte{'q'}, 64)); err != nil {
+		t.Fatalf("SendLast: %v", err)
+	}
+	if _, err := s.Recv(ctx); err != nil {
+		t.Fatalf("Recv: %v", err)
+	}
+	// The response arrived in one DATA frame, so the decoder is aliasing it and
+	// nothing has ended the borrow yet.
+	if !s.dec.borrowing {
+		t.Skip("the response did not arrive as a single borrowed chunk; nothing to gate here")
+	}
+
+	_ = s.Close()
+	if s.dec.borrowing || s.dec.borrowed != nil {
+		t.Error("Close left a borrow held — the pooled DATA slab never returns to the pool")
+	}
+}
+
 // TestBorrow_EndToEndOverAReusedConn is the integration check: the borrow path
 // runs inside Stream.pump, where the chunk comes from conn's pooled DATA slab.
 // Several calls on one connection make the pool actually recycle, so a
