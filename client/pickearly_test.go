@@ -9,14 +9,17 @@ import (
 	"github.com/lodgvideon/poseidon-http-client/http3"
 )
 
-// pickLeastLoaded returns early on the first idle connection instead of scanning
-// the whole pool. The claim is that this is EXACTLY what a full scan returns:
-// zero is the smallest possible active count, and the comparison is strict, so
-// ties already go to the earliest connection. A claim of exact equivalence has to
-// be checked against a reference rather than asserted — which is what these do.
+// pickLeastLoaded no longer scans the whole pool: it starts at a rotating cursor
+// and returns the first idle connection it meets, falling back to a full sweep
+// for the true minimum when nothing is idle.
+//
+// That is a DELIBERATE change of selection order, so it cannot be tested against
+// the old loop for pointer equality — the old one always returned the earliest
+// tie, this one spreads. What must still hold is the contract, and these check it
+// as properties over randomised pools rather than on a handful of examples.
 
-// pickFakeH3 is a minimal h3Client whose only job is to answer the two liveness
-// predicates the pick loop calls.
+// pickFakeH3 is a minimal h3Client that answers the two liveness predicates the
+// pick loop calls, and nothing else.
 type pickFakeH3 struct {
 	alive  bool
 	goaway bool
@@ -33,45 +36,26 @@ func (f *pickFakeH3) Alive() bool     { return f.alive }
 func (f *pickFakeH3) GoingAway() bool { return f.goaway }
 func (f *pickFakeH3) Close() error    { return nil }
 
-// refPickH3 is the pre-optimisation loop, kept verbatim as the oracle.
-func refPickH3(conns []*h3ManagedConn) *h3ManagedConn {
-	var best *h3ManagedConn
-	for _, mc := range conns {
-		if !mc.cl.Alive() || mc.cl.GoingAway() {
-			continue
-		}
-		if mc.active >= mc.streamCap {
-			continue
-		}
-		if best == nil || mc.active < best.active {
-			best = mc
-		}
-	}
-	return best
+func h3Eligible(mc *h3ManagedConn) bool {
+	return mc.cl.Alive() && !mc.cl.GoingAway() && mc.active < mc.streamCap
 }
 
-// refPickH2 is the same oracle for the HTTP/2 pool.
-func refPickH2(conns []*managedConn) *managedConn {
-	var best *managedConn
-	for _, mc := range conns {
-		if !mc.c.IsAlive() {
-			continue
-		}
-		if mc.active >= mc.streamCap {
-			continue
-		}
-		if best == nil || mc.active < best.active {
-			best = mc
-		}
-	}
-	return best
+func h2Eligible(mc *managedConn) bool {
+	return mc.c.IsAlive() && mc.active < mc.streamCap
 }
 
-// TestPickLeastLoaded_EarlyReturnMatchesFullScan drives randomised pools through
-// both implementations and requires the SAME pointer back, not merely an equally
-// loaded one: identity is what the caller sees, so returning a different
-// connection with the same active count would still be a behaviour change.
-func TestPickLeastLoaded_EarlyReturnMatchesFullScan(t *testing.T) {
+// TestPickLeastLoaded_ContractHolds is the property set, checked on 3,000
+// randomised pools:
+//
+//  1. it never returns an ineligible connection — dead, GOAWAY'd or at its cap;
+//  2. it returns nil only when nothing is eligible;
+//  3. when any eligible connection is idle, the one returned is idle;
+//  4. when none is idle, the one returned carries the minimum active count.
+//
+// Together these say "least loaded" is still honoured. What is deliberately NOT
+// asserted is which of several equally loaded connections comes back — that is
+// the freedom the rotation uses.
+func TestPickLeastLoaded_ContractHolds(t *testing.T) {
 	rng := rand.New(rand.NewSource(7)) //nolint:gosec // deterministic test input, not crypto
 	p := &h3Pool{}
 
@@ -80,24 +64,53 @@ func TestPickLeastLoaded_EarlyReturnMatchesFullScan(t *testing.T) {
 		conns := make([]*h3ManagedConn, 0, n)
 		for i := 0; i < n; i++ {
 			conns = append(conns, &h3ManagedConn{
-				// A dead or GOAWAY'd conn is skipped, and streamCap 0 forces the
-				// over-cap branch — all three skip paths get exercised.
+				// streamCap 0 forces the at-cap branch even for an idle conn,
+				// which is the case a naive early return gets wrong.
 				cl:        &pickFakeH3{alive: rng.Intn(6) != 0, goaway: rng.Intn(8) == 0},
 				active:    rng.Intn(4),
 				streamCap: rng.Intn(4),
 			})
 		}
-		if got, want := p.pickLeastLoaded(conns), refPickH3(conns); got != want {
-			t.Fatalf("trial %d: early return picked %p, full scan picked %p", trial, got, want)
+
+		anyEligible, anyIdle, minActive := false, false, 1<<30
+		for _, mc := range conns {
+			if !h3Eligible(mc) {
+				continue
+			}
+			anyEligible = true
+			if mc.active == 0 {
+				anyIdle = true
+			}
+			if mc.active < minActive {
+				minActive = mc.active
+			}
+		}
+
+		got := p.pickLeastLoaded(conns)
+		if got == nil {
+			if anyEligible {
+				t.Fatalf("trial %d: returned nil with an eligible connection present", trial)
+			}
+		} else {
+			if !h3Eligible(got) {
+				t.Fatalf("trial %d: returned an ineligible connection", trial)
+			}
+			if anyIdle && got.active != 0 {
+				t.Fatalf("trial %d: an idle connection existed but a busy one (active=%d) was returned",
+					trial, got.active)
+			}
+			if !anyIdle && got.active != minActive {
+				t.Fatalf("trial %d: returned active=%d, want the minimum %d", trial, got.active, minActive)
+			}
 		}
 	}
 }
 
-// TestPickLeastLoaded_H2EarlyReturnMatchesFullScan is the same property for the
-// HTTP/2 pool, whose loop changed identically. conn.Conn's liveness flags are
+// TestPickLeastLoaded_H2ContractHolds is the same property set for the HTTP/2
+// pool, whose loop changed identically. conn.Conn's liveness flags are
 // unexported, so every connection here is alive and the randomisation covers the
-// load dimension; the H3 case above covers the liveness dimension.
-func TestPickLeastLoaded_H2EarlyReturnMatchesFullScan(t *testing.T) {
+// load dimension; the H3 case covers liveness.
+func TestPickLeastLoaded_H2ContractHolds(t *testing.T) {
 	rng := rand.New(rand.NewSource(11)) //nolint:gosec // deterministic test input, not crypto
 	p := &Pool{}
 
@@ -111,37 +124,84 @@ func TestPickLeastLoaded_H2EarlyReturnMatchesFullScan(t *testing.T) {
 				streamCap: rng.Intn(4),
 			})
 		}
-		if got, want := p.pickLeastLoaded(conns), refPickH2(conns); got != want {
-			t.Fatalf("trial %d: early return picked %p, full scan picked %p", trial, got, want)
+
+		anyEligible, anyIdle, minActive := false, false, 1<<30
+		for _, mc := range conns {
+			if !h2Eligible(mc) {
+				continue
+			}
+			anyEligible = true
+			if mc.active == 0 {
+				anyIdle = true
+			}
+			if mc.active < minActive {
+				minActive = mc.active
+			}
+		}
+
+		got := p.pickLeastLoaded(conns)
+		if got == nil {
+			if anyEligible {
+				t.Fatalf("trial %d: returned nil with an eligible connection present", trial)
+			}
+		} else {
+			if !h2Eligible(got) {
+				t.Fatalf("trial %d: returned an ineligible connection", trial)
+			}
+			if anyIdle && got.active != 0 {
+				t.Fatalf("trial %d: an idle connection existed but a busy one was returned", trial)
+			}
+			if !anyIdle && got.active != minActive {
+				t.Fatalf("trial %d: returned active=%d, want the minimum %d", trial, got.active, minActive)
+			}
 		}
 	}
 }
 
-// TestPickLeastLoaded_IdleWinsAndTiesGoToTheEarliest pins the two facts the
-// equivalence argument rests on, so a future edit that breaks either is caught
-// here rather than as a load-distribution change nobody notices.
-func TestPickLeastLoaded_IdleWinsAndTiesGoToTheEarliest(t *testing.T) {
+// TestPickLeastLoaded_RotatesAcrossIdleConns is the point of the cursor: with a
+// pool of idle connections, consecutive picks must spread instead of returning
+// the same one every time. Without rotation this test sees connection 0 four
+// times; the old full scan did exactly that, because its strict comparison gave
+// every tie to the earliest connection.
+func TestPickLeastLoaded_RotatesAcrossIdleConns(t *testing.T) {
 	p := &h3Pool{}
-	live := func(active, capn int) *h3ManagedConn {
-		return &h3ManagedConn{cl: &pickFakeH3{alive: true}, active: active, streamCap: capn}
+	conns := make([]*h3ManagedConn, 4)
+	for i := range conns {
+		conns[i] = &h3ManagedConn{cl: &pickFakeH3{alive: true}, streamCap: 8}
 	}
 
-	busy, idle1, idle2 := live(2, 8), live(0, 8), live(0, 8)
-	if got := p.pickLeastLoaded([]*h3ManagedConn{busy, idle1, idle2}); got != idle1 {
-		t.Errorf("picked %p, want the FIRST idle connection %p — ties go to the earliest", got, idle1)
+	seen := map[*h3ManagedConn]int{}
+	for i := 0; i < len(conns); i++ {
+		got := p.pickLeastLoaded(conns)
+		if got == nil {
+			t.Fatalf("pick %d returned nil", i)
+		}
+		seen[got]++
 	}
-
-	// With nothing idle the full scan still has to run to the end.
-	all := []*h3ManagedConn{live(3, 8), live(1, 8), live(2, 8)}
-	if got := p.pickLeastLoaded(all); got != all[1] {
-		t.Errorf("with no idle connection, picked %p, want the least loaded %p", got, all[1])
+	if len(seen) != len(conns) {
+		t.Errorf("four picks over four idle connections touched %d of them, want all %d — "+
+			"the cursor is not rotating", len(seen), len(conns))
 	}
+}
 
-	// An idle but over-cap connection is not eligible, so the early return must
-	// not fire on it: streamCap 0 means even zero active is at the cap.
-	overCap := live(0, 0)
-	busy2 := live(1, 8)
-	if got := p.pickLeastLoaded([]*h3ManagedConn{overCap, busy2}); got != busy2 {
-		t.Errorf("picked %p, want %p — an at-cap connection is not eligible however idle", got, busy2)
+// TestPickLeastLoaded_CursorSurvivesAShrinkingPool pins the modulus: the cursor
+// persists across calls while the slice length changes as connections are
+// retired, so a stale cursor must not index out of range.
+func TestPickLeastLoaded_CursorSurvivesAShrinkingPool(t *testing.T) {
+	p := &h3Pool{}
+	big := make([]*h3ManagedConn, 8)
+	for i := range big {
+		big[i] = &h3ManagedConn{cl: &pickFakeH3{alive: true}, streamCap: 8}
+	}
+	for i := 0; i < 8; i++ {
+		p.pickLeastLoaded(big) // drive the cursor up
+	}
+	// The pool shrinks to one connection; the cursor is now larger than the slice.
+	small := big[:1]
+	if got := p.pickLeastLoaded(small); got != small[0] {
+		t.Fatalf("after the pool shrank, pick returned %p, want the only connection %p", got, small[0])
+	}
+	if got := p.pickLeastLoaded(nil); got != nil {
+		t.Errorf("pick over an empty pool returned %p, want nil", got)
 	}
 }
