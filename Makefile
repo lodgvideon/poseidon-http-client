@@ -1,4 +1,4 @@
-.PHONY: lint test test-race test-debug bench bench-gate fuzz-replay coverage coverage-gate tidy contrib-test
+.PHONY: lint test test-race test-debug bench bench-alloc bench-gate fuzz-replay coverage coverage-gate tidy contrib-test
 .PHONY: it-up it-down it-logs it-test it-test-fast it-certs h3-interop h3-interop-loss h3-interop-reorder h3-interop-fault h3-interop-chacha h3-soak
 
 # Minimum overall and per-package statement coverage. CI fails below this.
@@ -81,6 +81,12 @@ bench:
 
 bench-gate:
 	./scripts/bench-gate.sh
+
+# Allocation-measuring benchmarks, kept behind a tag because bench-gate is an
+# absolute zero-alloc gate over the codec packages and these exist to report
+# non-zero numbers.
+bench-alloc:
+	$(GO) test -tags allocbench -bench=. -benchmem -benchtime=300x -count=1 -run=^$$ ./http3
 
 # ── Docker integration test infra ────────────────────────────────
 DOCKER_COMPOSE ?= docker compose
