@@ -201,6 +201,7 @@ func TestStaleRef_ParkedWriterWakesOntoTheNextRequest(t *testing.T) {
 	// The peer grants credit — on request B's stream, as far as the connection
 	// is concerned.
 	c.fcOutMu.Lock()
+	connWindowBefore := c.peerConnSendWindow
 	s.mu.Lock()
 	s.sendWindow = 1 << 20
 	s.mu.Unlock()
@@ -218,6 +219,21 @@ func TestStaleRef_ParkedWriterWakesOntoTheNextRequest(t *testing.T) {
 			t.Errorf("request A's parked writer emitted DATA on stream 7: its body bytes were " +
 				"spliced into request B's stream")
 		}
+	}
+
+	// The second consequence, and the one the wake-loop check exists for on its
+	// own: a writer that bails on a dead lifetime must not first spend the
+	// connection's shared credit on it. That debit is permanent — every later
+	// stream on this connection stalls sooner — and it leaves nothing on the
+	// wire, so the frame assertion above cannot see it. Without this, disabling
+	// the wake-loop check alone passed every test, because the pre-write check
+	// still stopped the wrong-id frame.
+	c.fcOutMu.Lock()
+	connWindowAfter := c.peerConnSendWindow
+	c.fcOutMu.Unlock()
+	if connWindowAfter != connWindowBefore {
+		t.Errorf("connection send window went %d -> %d: the woken writer debited shared credit "+
+			"for a stream that no longer exists", connWindowBefore, connWindowAfter)
 	}
 }
 
