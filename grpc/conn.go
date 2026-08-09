@@ -325,25 +325,81 @@ func (cc *ClientConn) NewStream(ctx context.Context, method string, md []conn.He
 			}
 		}
 	}
+	return cc.openStream(ctx, method, md, co, nil, false)
+}
+
+// openStream builds the header block and opens the stream. When body is non-nil
+// it is sent WITH the headers as one transport write and the request side is
+// half-closed — the unary shape, where the only message is also the last (#451).
+// A nil body leaves the request open for Send/SendLast, which is every streaming
+// shape.
+//
+// The fusion is confined to the unary path on purpose. Deferring HEADERS for
+// every stream would break a client-streaming caller that opens a stream and
+// waits for the server's response headers before sending anything: the server
+// would never see the request at all.
+func (cc *ClientConn) openStream(ctx context.Context, method string, md []conn.HeaderField, co callOptions, unaryReq []byte, fuse bool) (*Stream, error) {
+	// Buffers first: the fused message is length-prefixed into the stream's own
+	// pooled send buffer, so folding the send into the open costs no extra
+	// allocation. A nil unaryReq is a legitimate empty request, which is why the
+	// caller passes an explicit flag rather than a nil check.
+	st := &Stream{}
+	st.acquireBufs()
+	st.dec.max = co.maxRecvMessageSize
+
+	var body []byte
+	if fuse {
+		buf, err := AppendMessage(st.sendBuf[:0], unaryReq)
+		if err != nil {
+			st.releaseBufs()
+			return nil, err
+		}
+		st.sendBuf = buf
+		body = buf
+	}
+
 	sc := headerScratchPool.Get().(*headerScratch)
 	hdrs := cc.buildHeaders(ctx, method, md, co.md, sc)
 
 	s, err := cc.c.NewStream(ctx)
 	if err != nil {
 		putHeaderScratch(sc)
+		st.releaseBufs()
 		return nil, err
 	}
-	// SendHeaders encodes the block synchronously, so the scratch is free the
-	// moment it returns — on the error path too.
-	err = s.SendHeaders(ctx, hdrs, false)
+	// Both send calls encode the block synchronously, so the scratch is free the
+	// moment they return — on the error path too.
+	if fuse {
+		err = s.SendHeadersAndData(ctx, hdrs, body, true)
+	} else {
+		err = s.SendHeaders(ctx, hdrs, false)
+	}
 	putHeaderScratch(sc)
 	if err != nil {
-		_ = s.Close()
-		return nil, err
+		// RFC 9113 §8.1: a server may answer in full and then reset the stream
+		// with NO_ERROR rather than read a request body it does not want. The
+		// response is already buffered, so the stream must be handed back for
+		// the receive side to decide the outcome — discarding it here would
+		// throw away an answer the server has already sent. This is the case
+		// InvokeInto used to reach by tolerating ErrStreamClosed from SendLast;
+		// folding the send into the open moved it here.
+		if !errors.Is(err, conn.ErrStreamClosed) {
+			_ = s.Close()
+			st.releaseBufs()
+			return nil, err
+		}
+		st.s = s
+		st.sendErr = err // no END_STREAM reached the wire; CloseSend must still try
+		return st, nil
 	}
-	st := &Stream{s: s}
-	st.acquireBufs()
-	st.dec.max = co.maxRecvMessageSize
+	st.s = s
+	if fuse {
+		// The request is complete. Latched only on success, for the reason
+		// SendLast gives: a failure partway leaves DATA on the wire without
+		// END_STREAM, and recording the request as half-closed would stop a
+		// later CloseSend from finishing the job.
+		st.sentEnd = true
+	}
 	return st, nil
 }
 
@@ -487,32 +543,37 @@ func (cc *ClientConn) Invoke(ctx context.Context, method string, req []byte, md 
 // and so still returns nil.
 func (cc *ClientConn) InvokeInto(ctx context.Context, method string, req, dst []byte, md []conn.HeaderField, opts ...CallOption) ([]byte, error) {
 	dst = dst[:0]
-	s, err := cc.NewStream(ctx, method, md, opts...)
+	if !strings.HasPrefix(method, "/") {
+		return dst, fmt.Errorf("%w: %q", ErrBadMethod, method)
+	}
+	co := callOptions{maxRecvMessageSize: cc.opts.MaxRecvMessageSize}
+	for _, o := range opts {
+		o.apply(&co)
+	}
+	for _, src := range [2][]conn.HeaderField{md, co.md} {
+		for i := range src {
+			if err := validMetadata(src[i].Name, src[i].Value); err != nil {
+				return dst, err
+			}
+		}
+	}
+
+	// The request goes out WITH the headers, in one transport write. A unary
+	// call knows its only message is its last, so END_STREAM rides that
+	// message's DATA frame — and because the body is known before the stream
+	// opens, the HEADERS need not be flushed on their own first (#451).
+	//
+	// conn.ErrStreamClosed here is the RFC 9113 §8.1 case benignHalfClose
+	// describes: the server wrote a complete response and reset the stream with
+	// NO_ERROR rather than wait for a request body it never read. The answer is
+	// already buffered, so the receive side decides the outcome — but unlike the
+	// old two-step path there is no stream to read it from when the open itself
+	// fails, so this stays an error.
+	s, err := cc.openStream(ctx, method, md, co, req, true)
 	if err != nil {
 		return dst, err
 	}
 	defer func() { _ = s.Close() }()
-
-	// SendLast rather than Send + CloseSend: a unary call knows its only
-	// message is its last, so END_STREAM rides that message's DATA frame
-	// instead of an empty frame of its own — one fewer flush, TLS record and
-	// segment per RPC.
-	//
-	// conn.ErrStreamClosed here is the RFC 9113 §8.1 case benignHalfClose
-	// describes: the server wrote a complete response and reset the stream
-	// with NO_ERROR rather than wait for a request body it never read. The
-	// answer is already buffered, so the receive side decides the outcome.
-	//
-	// Every other send failure stays fatal, because nothing is coming back to
-	// read and Recv would block until ctx expires. Not because nothing was
-	// sent — conn chunks a message across several DATA frames and flushes each
-	// (see the sendErr comment in stream.go), so a failure partway leaves
-	// frames with the peer. The distinction that matters is whether a response
-	// is on its way, and only a peer that closed the stream after answering
-	// gives us one.
-	if err := s.SendLast(ctx, req); err != nil && !errors.Is(err, conn.ErrStreamClosed) {
-		return dst, err
-	}
 	resp, err := s.RecvInto(ctx, dst)
 	if err != nil {
 		// A bare io.EOF means the call completed with status OK but carried no

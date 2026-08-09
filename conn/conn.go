@@ -755,6 +755,120 @@ func (c *Conn) PeerMaxConcurrentStreams() int {
 
 // --- streamWriter implementation (called from *Stream).
 
+// writeHeadersAndData emits HEADERS and the whole of p as one flush, so a unary
+// request costs ONE transport write instead of two (#451).
+//
+// It only does that when the send windows can cover p in full WITHOUT waiting.
+// Blocking for credit under wmu would stall every other stream on the
+// connection, and leaving a frame buffered while blocking is the deadlock
+// writeData's pre-block flush exists to avoid — the peer never sees the frame,
+// so it never sends the credit being waited for. When the credit is not there,
+// HEADERS goes out on its own and the body falls back to writeData: exactly
+// today's two writes, so this is never worse than not calling it.
+//
+// This is NOT the batching #360 ruled out. Group-commit makes a writer wait for
+// OTHER streams' frames to form a convoy, and that wait was measured as the
+// cost. This waits for nothing: it writes frames one request already holds, on
+// one stream.
+func (c *Conn) writeHeadersAndData(ctx context.Context, s *Stream, wantGen uint64, fields []hpack.HeaderField, p []byte, endStream bool) error {
+	if c.closed.Load() {
+		return ErrConnClosed
+	}
+	if len(p) == 0 {
+		// Nothing to fold in; the headers carry END_STREAM themselves.
+		return c.writeHeadersWithPriority(ctx, s, fields, endStream, nil)
+	}
+
+	maxFrame := 0
+	padLen := c.opts.Padding.ForData()
+	padOverhead := 0
+	if padLen > 0 {
+		padOverhead = 1 + int(padLen)
+	}
+
+	c.wbatch.enter()
+	c.wmu.Lock()
+	c.wbatch.leave()
+	c.assignStreamIDLocked(s, fields)
+
+	maxFrame = c.maxOutFrameSize()
+	effective := maxFrame
+	if padOverhead > 0 && padOverhead < effective {
+		effective -= padOverhead
+	}
+	if effective <= 0 {
+		c.wmu.Unlock()
+		return c.slowHeadersThenData(ctx, s, wantGen, fields, p, endStream)
+	}
+	// Each frame pays the padding overhead, so the credit needed is the body
+	// plus one overhead per frame it will be cut into.
+	frames := (len(p) + effective - 1) / effective
+	ok, err := c.tryAcquireSendCreditsAll(s, wantGen, len(p), padOverhead*frames)
+	if err != nil {
+		c.wmu.Unlock()
+		return err
+	}
+	if !ok {
+		c.wmu.Unlock()
+		return c.slowHeadersThenData(ctx, s, wantGen, fields, p, endStream)
+	}
+
+	// Committed: from here the credit is spent, so every path must write the
+	// bytes or fail the stream — it cannot fall back.
+	defer c.wmu.Unlock()
+
+	buf := encBufPool.Get().(*[]byte)
+	*buf = (*buf)[:0]
+	block := c.enc.EncodeBlock(*buf, fields)
+	herr := c.writeHeaderBlock(s.id, block, false, nil)
+	*buf = block[:0]
+	encBufPool.Put(buf)
+	if herr != nil {
+		c.wbatch.wakeDeferredLocked()
+		return herr
+	}
+	c.bumpFramesSent()
+
+	// Read id and lifetime together under s.mu, as writeData does, so the id
+	// reaching the wire belongs to the stream this write was authorised for.
+	s.mu.Lock()
+	id, stale := s.id, s.gen.Load() != wantGen
+	s.mu.Unlock()
+	if stale {
+		return ErrStaleStream
+	}
+	for len(p) > 0 {
+		n := len(p)
+		if n > effective {
+			n = effective
+		}
+		last := endStream && n == len(p)
+		var werr error
+		if padLen > 0 {
+			werr = c.fr.WriteDataPadded(id, last, p[:n], padLen)
+		} else {
+			werr = c.fr.WriteData(id, last, p[:n])
+		}
+		if werr != nil {
+			return werr
+		}
+		c.bumpFramesSent()
+		p = p[n:]
+	}
+	// localEnded and markStreamDone are the caller's job, exactly as they are
+	// for writeHeaders and writeData — see SendHeaders/SendData in stream.go.
+	return c.commitFrame()
+}
+
+// slowHeadersThenData is the fallback when the one-shot cannot run: the existing
+// two-write path, unchanged. Assumes wmu is NOT held.
+func (c *Conn) slowHeadersThenData(ctx context.Context, s *Stream, wantGen uint64, fields []hpack.HeaderField, p []byte, endStream bool) error {
+	if err := c.writeHeadersWithPriority(ctx, s, fields, false, nil); err != nil {
+		return err
+	}
+	return c.writeData(ctx, s, wantGen, p, endStream)
+}
+
 func (c *Conn) writeHeadersWithPriority(_ context.Context, s *Stream, fields []hpack.HeaderField, endStream bool, prio *frame.Priority) error {
 	if c.closed.Load() {
 		return ErrConnClosed
