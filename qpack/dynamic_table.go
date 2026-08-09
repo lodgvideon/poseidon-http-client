@@ -2,9 +2,20 @@ package qpack
 
 import "bytes"
 
+// entryOverhead is the per-entry accounting overhead RFC 9204 §3.2.1 adds to
+// name+value length. The same number also fixes the smallest possible entry,
+// which is why maxEntries divides by it and why an encoder configured below it
+// is rejected — those are one constant in three roles, not three constants.
+//
+// HPACK defines the same overhead in RFC 7541 §4.1. That is deliberately a
+// separate constant in a separate package: the two are frozen by different
+// specs and by interop with different peers, so QPACK must not inherit a change
+// to HPACK's, and hpack is an A-layer package this one should not depend on.
+const entryOverhead = 32
+
 // dtEntry stores offsets into the arena for one dynamic-table entry. Each
-// entry's RFC size is nameLen + valueLen + 32 (RFC 9204 §3.2.1, identical to
-// HPACK §4.1).
+// entry's RFC size is nameLen + valueLen + entryOverhead (RFC 9204 §3.2.1,
+// identical to HPACK §4.1).
 type dtEntry struct {
 	nameOff, nameLen   uint32
 	valueOff, valueLen uint32
@@ -12,8 +23,8 @@ type dtEntry struct {
 
 // initialEntryRing is the slot count the entry ring is first sized to; it then
 // doubles as needed. The capacity bounds how many entries can be live at once
-// (every entry is at least 32 bytes, RFC 9204 §3.2.1), so the ring stops doubling
-// at maxCapacity/32 slots however many instructions the peer sends.
+// (every entry is at least entryOverhead bytes), so the ring stops doubling at
+// maxCapacity/entryOverhead slots however many instructions the peer sends.
 const initialEntryRing = 32
 
 // DynamicTable is a QPACK dynamic table (RFC 9204 §3.2) for one direction of one
@@ -84,13 +95,14 @@ func (dt *DynamicTable) Capacity() uint64 { return dt.capacity }
 // index the next inserted entry will take (RFC 9204 §3.2, "Insert Count").
 func (dt *DynamicTable) InsertCount() uint64 { return dt.insertCount }
 
-// maxEntries is floor(maxCapacity / 32): the largest possible number of entries,
-// used to size the Required Insert Count wraparound window (RFC 9204 §4.5.1.1).
-func (dt *DynamicTable) maxEntries() uint64 { return dt.maxCapacity / 32 }
+// maxEntries is floor(maxCapacity / entryOverhead): the largest possible number
+// of entries, since entryOverhead is also the smallest an entry can be. It sizes
+// the Required Insert Count wraparound window (RFC 9204 §4.5.1.1).
+func (dt *DynamicTable) maxEntries() uint64 { return dt.maxCapacity / entryOverhead }
 
 // entrySize is the RFC 9204 §3.2.1 accounting size of an entry.
 func entrySize(nameLen, valueLen int) uint64 {
-	return uint64(nameLen) + uint64(valueLen) + 32
+	return uint64(nameLen) + uint64(valueLen) + entryOverhead
 }
 
 // oldestAbs is the absolute index of the oldest live entry. Valid only when

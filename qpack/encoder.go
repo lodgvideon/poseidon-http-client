@@ -72,10 +72,11 @@ func NewEncoder() *Encoder { return &Encoder{} }
 // encoding; tableCapacity is the size the encoder chooses for its table and MUST
 // NOT exceed maxCapacity (§3.2.3). The encoder queues a Set Dynamic Table Capacity
 // instruction (§4.3.1) as the first thing to send on the encoder stream, retrieved
-// with DrainEncoderInstructions. maxCapacity below 32 (no whole entry fits, and
-// MaxEntries would be 0) is rejected: use NewEncoder for the static-only profile.
+// with DrainEncoderInstructions. maxCapacity below entryOverhead (no whole entry
+// fits, and MaxEntries would be 0) is rejected: use NewEncoder for the
+// static-only profile.
 func NewDynamicEncoder(maxCapacity, tableCapacity uint64) (*Encoder, error) {
-	if maxCapacity < 32 {
+	if maxCapacity < entryOverhead {
 		return nil, ErrEncoderStream
 	}
 	if tableCapacity > maxCapacity {

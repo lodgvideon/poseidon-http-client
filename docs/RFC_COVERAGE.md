@@ -161,6 +161,7 @@ non-ACK PING frames with `ACK=1` and the original 8-byte payload
 | §6.6 / §5.1.1 | Conformance | TestConformance_RFC7540_Sec66_IllegalPromisedIDIsProtocolError (conn/) — a PUSH_PROMISE promising an id that is not idle (zero, odd, duplicate, or decreasing) → connection error PROTOCOL_ERROR. TestConn_ReservePushedStream_RejectsIllegalIDs, TestConn_ReservePushedStream_ReleasesToItsOwnCounter (conn/) — registry identity and counter routing at the reservation boundary |
 | §5.2     | Negative    | TestConformance_RFC7541_C5_2_HuffmanDecode_InvalidCode, _PrefixOfEos, _EmptyInput (hpack/) — malformed Huffman input returns ErrInvalidHuffman; empty input is valid |
 | §5.2     | Roundtrip   | TestConformance_RFC7541_C5_2_HuffmanDecode_LongString_RoundTrip (hpack/) — 1024-byte ASCII string round-trips through Huffman encode/decode |
+| §5.2     | Conformance | TestConformance_RFC7541_Sec5_2_PaddingLongerThanSevenBits_Error (hpack/) — the second of §5.2's two padding rules, "a padding strictly longer than 7 bits MUST be treated as a decoding error", isolated by 0xff: eight 1-bits ARE the EOS prefix, so the not-EOS-MSBs rule cannot fire, and no symbol is emitted. Previously uncovered — moving the decoder's limit from 7 to 8 left the suite green. The 7-bit boundary is asserted to still decode, so the rule cannot over-tighten into rejecting well-formed peer output |
 
 ## RFC 9113 — HTTP/2 (current; obsoletes RFC 7540)
 

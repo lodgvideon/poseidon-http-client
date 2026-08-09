@@ -55,7 +55,7 @@ func (f HeaderField) Sensitive() bool { return f.Indexing == IndexNever }
 // Size returns the entry size as defined in RFC 7541 §4.1 (used for
 // dynamic table accounting).
 func (f HeaderField) Size() uint32 {
-	return uint32(len(f.Name)) + uint32(len(f.Value)) + 32
+	return uint32(len(f.Name)) + uint32(len(f.Value)) + entryOverhead
 }
 
 // FieldVisitor is invoked once per decoded field. f.Name and f.Value are

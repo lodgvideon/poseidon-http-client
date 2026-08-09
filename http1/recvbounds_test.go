@@ -196,8 +196,8 @@ func TestReadChunkedChunk_SizeLineNeverDelimited_Bounded(t *testing.T) {
 // TestReadResponse_InterimFlood_Bounded covers the 1xx drain loop. Unlike the
 // others this one does not grow memory — each interim response is parsed and
 // discarded — so it is a livelock rather than a leak: ReadResponse simply never
-// returns while the server keeps sending. HTTP/3 already caps this
-// (maxInterimResponses); HTTP/1.1 does not.
+// returns while the server keeps sending. All three protocols now cap this at
+// the same maxInterimResponses — see TestInterimCap_MatchesSiblings.
 func TestReadResponse_InterimFlood_Bounded(t *testing.T) {
 	hc := &hostileConn{
 		fill:   []byte("HTTP/1.1 100 Continue\r\n\r\n"),

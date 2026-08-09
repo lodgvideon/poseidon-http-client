@@ -66,3 +66,39 @@ func TestConformance_RFC7541_Sec5_2_HuffmanPaddingNotEosMSBs_Error(t *testing.T)
 			"most significant bits of the code for the EOS symbol MUST be treated as a decoding error", err)
 	}
 }
+
+// TestConformance_RFC7541_Sec5_2_PaddingLongerThanSevenBits_Error is the sibling
+// of the test above. §5.2 states two padding rules, and that test deliberately
+// isolates the first ("padding not corresponding to the EOS prefix") while
+// staying under 7 bits so the second cannot fire. The second — "a padding
+// strictly longer than 7 bits MUST be treated as a decoding error" — had no test
+// at all: changing the decoder's limit from 7 to 8 left the entire suite green.
+//
+// 0xff is that rule in isolation. Eight 1-bits ARE the EOS prefix, so the first
+// rule does not fire, and they emit no symbol — a whole byte carrying nothing
+// but padding, which is precisely what the length rule exists to reject.
+func TestConformance_RFC7541_Sec5_2_PaddingLongerThanSevenBits_Error(t *testing.T) {
+	if _, err := HuffmanDecode(nil, []byte{0xff}); !errors.Is(err, ErrInvalidHuffman) {
+		t.Fatalf("HuffmanDecode(0xff) err = %v, want ErrInvalidHuffman — §5.2: a padding "+
+			"strictly longer than 7 bits MUST be treated as a decoding error", err)
+	}
+
+	// The boundary must still decode. A rule that also rejected exactly 7 bits
+	// would turn well-formed peer output into an error, which is the worse
+	// failure of the two. Symbol 199 is a 25-bit code, so its encoding occupies
+	// 4 bytes and leaves exactly 7 pad bits — the longest padding that is legal.
+	const sym = 199
+	if c := huffmanCodes[sym]; c.nbits != 25 {
+		t.Fatalf("huffmanCodes[%d].nbits = %d, want 25 — test premise broken", sym, c.nbits)
+	}
+	enc := HuffmanEncode(nil, []byte{sym})
+	if len(enc)*8-25 != 7 {
+		t.Fatalf("encoding of symbol %d is %d bytes, leaving %d pad bits, want 7",
+			sym, len(enc), len(enc)*8-25)
+	}
+	got, err := HuffmanDecode(nil, enc)
+	if err != nil || len(got) != 1 || got[0] != sym {
+		t.Fatalf("HuffmanDecode(% x) = (% x, %v), want ([%02x], nil) — exactly 7 pad bits is legal",
+			enc, got, err, sym)
+	}
+}
