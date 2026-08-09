@@ -50,7 +50,7 @@ func TestConformance_RFC7540_Sec68_RealPeerGoAwayPartition(t *testing.T) {
 	// Open N concurrent streams. SendHeaders is what assigns the id (ids are
 	// deferred until the HEADERS write, see conn/doc.go B.2.1), so collect the
 	// ids afterwards rather than assuming them.
-	streams := make([]*Stream, 0, N)
+	streams := make([]StreamRef, 0, N)
 	for i := 0; i < N; i++ {
 		s, err := c.NewStream(ctx)
 		if err != nil {

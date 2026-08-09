@@ -128,10 +128,10 @@ func TestRecycleStream_SurvivesShutdownThenReuse(t *testing.T) {
 
 	c.shutdownStreams(io.EOF) // reader dies: event queued, channel closed
 
-	if err := s.SendData(context.Background(), nil, true); err != nil {
+	if err := s.ref().SendData(context.Background(), nil, true); err != nil {
 		t.Fatalf("SendData(END_STREAM): %v", err)
 	}
-	if err := s.Close(); err != nil {
+	if err := s.ref().Close(); err != nil {
 		t.Fatalf("Close: %v", err)
 	}
 

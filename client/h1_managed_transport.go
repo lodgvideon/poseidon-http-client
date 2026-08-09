@@ -22,7 +22,7 @@ type h1ManagedTransport struct {
 // As in h1PoolTransport, the transport-level release is a no-op and the keep-alive
 // verdict is threaded through h1Exchange.release instead — it is only known once
 // the exchange completes.
-func (mt *h1ManagedTransport) openExchange(ctx context.Context) (protoStream, func(uint32) (*conn.Stream, bool), func(), error) {
+func (mt *h1ManagedTransport) openExchange(ctx context.Context) (protoStream, func(uint32) (conn.StreamRef, bool), func(), error) {
 	c, release, err := mt.mp.acquire(ctx)
 	if err != nil {
 		return nil, nil, nil, err

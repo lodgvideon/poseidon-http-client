@@ -37,7 +37,7 @@ func TestStream_CloseWakesASenderParkedOnCredit(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
 	defer cancel()
 	done := make(chan error, 1)
-	go func() { done <- s.SendData(ctx, []byte("payload"), false) }()
+	go func() { done <- s.ref().SendData(ctx, []byte("payload"), false) }()
 
 	// Let the writer reach cond.Wait rather than racing Close against its entry.
 	deadline := time.Now().Add(5 * time.Second)
@@ -52,7 +52,7 @@ func TestStream_CloseWakesASenderParkedOnCredit(t *testing.T) {
 	}
 	time.Sleep(100 * time.Millisecond)
 
-	_ = s.Close()
+	_ = s.ref().Close()
 	select {
 	case err := <-done:
 		if !errors.Is(err, ErrStreamClosed) {

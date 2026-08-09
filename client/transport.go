@@ -23,7 +23,7 @@ type transport interface {
 	// (H1.1 has no server push).
 	//
 	// Errors include ErrClosed, ErrRedialBackoff, *DialError, and ctx errors.
-	openExchange(ctx context.Context) (s protoStream, pushLookup func(uint32) (*conn.Stream, bool), release func(), err error)
+	openExchange(ctx context.Context) (s protoStream, pushLookup func(uint32) (conn.StreamRef, bool), release func(), err error)
 
 	// close prevents further exchange opens and closes any underlying
 	// conn(s). Idempotent.

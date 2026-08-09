@@ -74,7 +74,7 @@ func TestConn_PeerReset_ConcurrentCloseIsRaceFree(t *testing.T) {
 				}()
 				go func() {
 					defer wg.Done()
-					_ = s.Close()
+					_ = s.ref().Close()
 				}()
 				wg.Wait()
 

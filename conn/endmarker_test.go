@@ -42,7 +42,7 @@ func TestStream_TerminalEmptyDataNeverShedsTheStream(t *testing.T) {
 	defer cancel()
 	want := []StreamEventType{EventHeaders, EventData}
 	for i, wantType := range want {
-		ev, err := s.Recv(ctx)
+		ev, err := s.ref().Recv(ctx)
 		if err != nil {
 			t.Fatalf("Recv %d: %v", i, err)
 		}
@@ -53,7 +53,7 @@ func TestStream_TerminalEmptyDataNeverShedsTheStream(t *testing.T) {
 			t.Fatalf("event %d is a reset; the response was complete", i)
 		}
 	}
-	ev, err := s.Recv(ctx)
+	ev, err := s.ref().Recv(ctx)
 	if err != nil {
 		t.Fatalf("terminal Recv: %v", err)
 	}

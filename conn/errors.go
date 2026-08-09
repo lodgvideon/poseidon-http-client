@@ -36,6 +36,19 @@ var (
 	// ErrStreamClosed is returned by SendHeaders / SendData / Recv
 	// once the stream has been reset locally or by the peer.
 	ErrStreamClosed = errors.New("conn: stream already closed")
+
+	// ErrStaleStream is returned when a StreamRef from a finished request is
+	// used after its Stream has been recycled. It is a caller bug — a handle
+	// retained past Close — not a stream that ended.
+	//
+	// Deliberately NOT wrapped around ErrStreamClosed. Three shipped call sites
+	// treat ErrStreamClosed as benign-and-continue: grpc's benignHalfClose
+	// reports a half-close that never reached the wire as success, grpc.Invoke
+	// swallows it and then blocks in Recv until the context expires, and
+	// client's send path records it as a cut and hands the stream to
+	// drainResponse. Laundering a use-after-recycle through any of those turns a
+	// programming error into a hang or a silently wrong result.
+	ErrStaleStream = errors.New("conn: stale stream handle used after the stream was recycled")
 	// ErrFlowControlExhausted is reserved for future explicit
 	// non-blocking write paths; B.2.3 always blocks instead.
 	ErrFlowControlExhausted = errors.New("conn: send window too small for payload")

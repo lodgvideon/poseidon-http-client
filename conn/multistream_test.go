@@ -72,7 +72,7 @@ func TestConn_NewStream_AfterRelease_ReusesSlot(t *testing.T) {
 	if _, err := c.NewStream(context.Background()); err != ErrTooManyStreams {
 		t.Fatalf("NewStream 3 err = %v, want ErrTooManyStreams", err)
 	}
-	c.releaseUnassignedInflight(s1)
+	c.releaseUnassignedInflight(s1.Stream())
 	if _, err := c.NewStream(context.Background()); err != nil {
 		t.Fatalf("NewStream after release: %v", err)
 	}

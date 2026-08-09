@@ -31,9 +31,22 @@
 // non-ACK PING frames back with ACK=1 and the original 8-byte
 // payload, dropping ACK frames silently (RFC §6.7).
 //
-// *Conn is goroutine-safe across Send/Recv/Close. *Stream methods may
-// be called from one goroutine at a time; the package serializes writes
-// to the underlying transport internally.
+// *Conn is goroutine-safe across Send/Recv/Close. A stream's methods may be
+// called from one goroutine at a time; the package serializes writes to the
+// underlying transport internally.
+//
+// Streams are handled through StreamRef, not *Stream. The structs are pooled
+// and reused across requests, so a raw pointer retained past Close names a
+// struct another request may already own — and nothing on it can tell the
+// difference, the receiver being the struct itself. A StreamRef names one
+// LIFETIME of that struct: NewStream and LookupStream hand one out, and every
+// method on it fails with ErrStaleStream once the stream has been recycled,
+// instead of reading or writing whatever request holds the struct next.
+//
+// The check covers the send path all the way down, not just the method call:
+// a writer parked on flow-control credit re-validates the lifetime when it
+// wakes and again before each frame reaches the wire, because that park can
+// outlast the stream it was authorised for.
 //
 // For a higher-level request/response API, see the client package
 // (Phase C.1), which builds Do and DoStream on top of *Conn.

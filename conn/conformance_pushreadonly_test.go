@@ -26,12 +26,12 @@ func TestConformance_RFC9113_Sec5_1_SendOnPushedStreamRejected(t *testing.T) {
 	fields := []hpack.HeaderField{{Name: []byte(":status"), Value: []byte("200")}}
 
 	t.Run("SendHeaders", func(t *testing.T) {
-		if err := newPushed().SendHeaders(ctx, fields, false); !errors.Is(err, ErrPushedStreamReadOnly) {
+		if err := newPushed().ref().SendHeaders(ctx, fields, false); !errors.Is(err, ErrPushedStreamReadOnly) {
 			t.Errorf("SendHeaders on a pushed stream: err = %v, want ErrPushedStreamReadOnly (§5.1 reserved(remote))", err)
 		}
 	})
 	t.Run("SendData", func(t *testing.T) {
-		if err := newPushed().SendData(ctx, []byte("x"), false); !errors.Is(err, ErrPushedStreamReadOnly) {
+		if err := newPushed().ref().SendData(ctx, []byte("x"), false); !errors.Is(err, ErrPushedStreamReadOnly) {
 			t.Errorf("SendData on a pushed stream: err = %v, want ErrPushedStreamReadOnly (§5.1 reserved(remote))", err)
 		}
 	})
@@ -50,10 +50,10 @@ func TestConformance_RFC9113_Sec5_1_SendOnClientStreamStillWorks(t *testing.T) {
 		{Name: []byte(":authority"), Value: []byte("example.com")},
 	}
 	s := newStream(1, 8, &fakeStreamWriter{}, 65535) // odd id, not pushed
-	if err := s.SendHeaders(ctx, fields, false); err != nil {
+	if err := s.ref().SendHeaders(ctx, fields, false); err != nil {
 		t.Fatalf("SendHeaders on a client stream: %v — the pushed-stream guard must not block requests", err)
 	}
-	if err := s.SendData(ctx, []byte("body"), true); err != nil {
+	if err := s.ref().SendData(ctx, []byte("body"), true); err != nil {
 		t.Errorf("SendData on a client stream: %v", err)
 	}
 }

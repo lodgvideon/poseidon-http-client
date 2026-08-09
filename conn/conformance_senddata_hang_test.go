@@ -24,7 +24,7 @@ func TestConn_AcquireSendCredits_WakesOnReaderDeath(t *testing.T) {
 
 	out := make(chan error, 1)
 	go func() {
-		_, err := c.acquireSendCredits(context.Background(), s, 100, 0)
+		_, err := c.acquireSendCredits(context.Background(), s, s.gen.Load(), 100, 0)
 		out <- err
 	}()
 

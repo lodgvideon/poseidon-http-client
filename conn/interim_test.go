@@ -41,7 +41,7 @@ func statusOf(hdrs []hpack.HeaderField) string {
 	return ""
 }
 
-func getStream(t *testing.T, ctx context.Context, c *Conn) *Stream {
+func getStream(t *testing.T, ctx context.Context, c *Conn) StreamRef {
 	t.Helper()
 	s, err := c.NewStream(ctx)
 	if err != nil {

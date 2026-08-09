@@ -36,7 +36,7 @@ const maxMetadataFields = 1024
 // lock. Each side on its own is single-goroutine: Send is serialised by an
 // internal mutex, while the receive side must be driven by one goroutine only.
 type Stream struct {
-	s   *conn.Stream
+	s   conn.StreamRef
 	dec decoder
 
 	sendMu  sync.Mutex

@@ -27,7 +27,7 @@ func TestStreamClose_IdempotentAfterRecycle(t *testing.T) {
 	s.remoteEnded = true
 	s.mu.Unlock()
 
-	if err := s.Close(); err != nil {
+	if err := s.ref().Close(); err != nil {
 		t.Fatalf("first Close: %v", err)
 	}
 
@@ -38,7 +38,7 @@ func TestStreamClose_IdempotentAfterRecycle(t *testing.T) {
 				panicked = true
 			}
 		}()
-		if err := s.Close(); err != nil {
+		if err := s.ref().Close(); err != nil {
 			t.Fatalf("second Close returned err = %v, want nil", err)
 		}
 	}()

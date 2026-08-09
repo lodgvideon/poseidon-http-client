@@ -126,7 +126,7 @@ func promiseBlock(enc *hpack.Encoder, path string) []byte {
 // build on: client sends HEADERS on stream 1 with END_STREAM, server replies
 // with response HEADERS *without* END_STREAM, so stream 1 stays open and
 // keeps holding its in-flight slot.
-func openParentStream(ctx context.Context, t *testing.T, c *Conn) *Stream {
+func openParentStream(ctx context.Context, t *testing.T, c *Conn) StreamRef {
 	t.Helper()
 	s, err := c.NewStream(ctx)
 	if err != nil {
@@ -407,7 +407,7 @@ func TestConformance_RFC7540_Sec66_PushRegistryBoundedByOurMaxStreams(t *testing
 	delivered := 0
 	for {
 		select {
-		case ev := <-parent.events:
+		case ev := <-parent.Stream().events:
 			if ev.Slab != nil {
 				GetHeaderSlabPool().Put(ev.Slab)
 			}
@@ -792,7 +792,7 @@ func TestConn_PushPromise_DeliveredToParentStream(t *testing.T) {
 	}
 
 	// Read pushed response.
-	pev, err := pushed.Recv(ctx)
+	pev, err := pushed.ref().Recv(ctx)
 	if err != nil {
 		t.Fatalf("pushed stream Recv error: %v", err)
 	}

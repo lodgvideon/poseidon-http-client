@@ -635,7 +635,7 @@ func (c *Client) Do(ctx context.Context, req *Request, resp *Response) error {
 // Avoids heap-escaping the implicit struct: escape analysis confirmed via
 // -gcflags=-m that returning fields by value keeps them on the stack
 // (verified 2026-06-15 for the H2 hot path).
-func (c *Client) sendRequest(ctx context.Context, req *Request) (s protoStream, pushLookup func(uint32) (*conn.Stream, bool), release func(), sendCut error, err error) {
+func (c *Client) sendRequest(ctx context.Context, req *Request) (s protoStream, pushLookup func(uint32) (conn.StreamRef, bool), release func(), sendCut error, err error) {
 	s, pushLookup, release, err = c.tr.openExchange(ctx)
 	if err != nil {
 		return nil, nil, nil, nil, err
@@ -941,7 +941,12 @@ func (c *Client) doStream(ctx context.Context, req *Request, sr *StreamResponse)
 // terminal chunk and Close returns early once set — not a structural guard.
 func beginRespStream(ctx context.Context, s protoStream) (respStream, error) {
 	switch v := s.(type) {
-	case *conn.Stream:
+	case conn.StreamRef:
+		// A value type, not a pointer: Conn.NewStream hands out a handle to one
+		// stream lifetime rather than the pooled struct itself. Keep this an
+		// explicit case — collapsing the switch into an s.(respStream) assertion
+		// would always succeed, respStream being a strict subset of protoStream,
+		// and HTTP/3 would silently take this arm instead of beginStream.
 		return v, nil
 	case *h3Exchange:
 		return v.beginStream(ctx)
@@ -1266,7 +1271,7 @@ func writeBodyReader(ctx context.Context, s protoStream, r io.Reader, endStream 
 // the stream resets, writing into resp in place.
 // pushLookup is non-nil for H2 connections and resolves push-promised stream IDs;
 // it is nil for H1.1 (which has no server push).
-func drainResponse(ctx context.Context, pushLookup func(uint32) (*conn.Stream, bool), s protoStream, req *Request, resp *Response, h PushHandler, maxDecompressed, maxBody int64) error {
+func drainResponse(ctx context.Context, pushLookup func(uint32) (conn.StreamRef, bool), s protoStream, req *Request, resp *Response, h PushHandler, maxDecompressed, maxBody int64) error {
 	var gotHeaders bool
 	var enc ContentEncoding
 	for {
@@ -1423,7 +1428,7 @@ func handleDataEvent(ev conn.StreamEvent, req *Request, resp *Response, enc Cont
 
 // drainPushedStream reads the pushed stream's response and invokes the
 // push handler with the result. Handles nested PUSH_PROMISE recursively.
-func drainPushedStream(ctx context.Context, pushLookup func(uint32) (*conn.Stream, bool), h PushHandler, promisedHeaders []conn.HeaderField, s *conn.Stream, maxDecompressed, maxBody int64) {
+func drainPushedStream(ctx context.Context, pushLookup func(uint32) (conn.StreamRef, bool), h PushHandler, promisedHeaders []conn.HeaderField, s conn.StreamRef, maxDecompressed, maxBody int64) {
 	pr := &Response{}
 	derr := drainResponse(ctx, pushLookup, s, &Request{BodyMode: BodyBuffer}, pr, h, maxDecompressed, maxBody)
 	_ = s.Close()

@@ -121,7 +121,7 @@ func TestConformance_RFC7540_Sec1030_PushPromiseMalformedFields_Rejected(t *test
 			// The parent stream survives: a stream-level refusal leaves the
 			// connection usable. A pending event would be the malformed promise
 			// leaking through, so there must be none buffered.
-			if got := len(parent.events); got != 0 {
+			if got := len(parent.Stream().events); got != 0 {
 				t.Fatalf("parent has %d buffered events; malformed promise leaked to caller", got)
 			}
 		})

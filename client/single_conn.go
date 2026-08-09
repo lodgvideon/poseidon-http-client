@@ -39,7 +39,7 @@ type singleConn struct {
 }
 
 // openExchange implements transport.openExchange.
-func (s *singleConn) openExchange(ctx context.Context) (protoStream, func(uint32) (*conn.Stream, bool), func(), error) {
+func (s *singleConn) openExchange(ctx context.Context) (protoStream, func(uint32) (conn.StreamRef, bool), func(), error) {
 	cn, release, err := s.acquireConn(ctx)
 	if err != nil {
 		return nil, nil, nil, err

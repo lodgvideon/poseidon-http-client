@@ -96,7 +96,7 @@ func TestOnGoAway_WakesAcquireSendCredits(t *testing.T) {
 	go func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
-		_, err := c.acquireSendCredits(ctx, s, 100, 0)
+		_, err := c.acquireSendCredits(ctx, s, s.gen.Load(), 100, 0)
 		done <- result{err}
 	}()
 

@@ -82,7 +82,7 @@ func recvCode(t *testing.T, what string, ch chan frame.ErrCode) frame.ErrCode {
 // openHalfClosedStream opens stream 1 and sends END_STREAM, leaving it
 // half-closed(local) and still registered so a later server frame targeting it
 // resolves to a live *Stream.
-func openHalfClosedStream(ctx context.Context, t *testing.T, c *Conn) *Stream {
+func openHalfClosedStream(ctx context.Context, t *testing.T, c *Conn) StreamRef {
 	t.Helper()
 	s, err := c.NewStream(ctx)
 	if err != nil {

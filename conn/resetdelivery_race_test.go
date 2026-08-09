@@ -39,8 +39,8 @@ func newResetRaceStream(t *testing.T) (*Conn, *Stream) {
 // the reader's teardown loop cannot assume it alone decides when a stream
 // becomes recycle-eligible.
 func finishAndClose(s *Stream) {
-	_ = s.SendData(context.Background(), nil, true)
-	_ = s.Close()
+	_ = s.ref().SendData(context.Background(), nil, true)
+	_ = s.ref().Close()
 }
 
 // TestOnRSTStream_ResetDeliveryRacesRecycle covers the reachable half. RFC 9113
