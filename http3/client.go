@@ -1182,6 +1182,27 @@ func (c *Client) dispatchFrame(rb *respBuilder, typ uint64, payload []byte) erro
 		if rb.total > maxResponseBytes {
 			return ErrResponseTooLarge
 		}
+		if rb.body == nil {
+			// The overwhelmingly common shape is one DATA frame, and copying it
+			// here doubles what the response costs: the reader has already
+			// assembled the whole payload contiguously, so the append below only
+			// grows a second buffer to the same size. Adopt the reader's bytes
+			// instead. Two properties of FrameReader make this safe, and both are
+			// pinned by TestRespBuilder_AdoptedBodyIsSafeToAlias:
+			//
+			//   1. ReadFrame caps the payload at its own length (stream.go's
+			//      three-index slice), so the append below — reached as soon as a
+			//      second DATA frame arrives — must allocate rather than write
+			//      into the reader's buffer.
+			//   2. Feed only ever appends at the tail and ReadFrame only ever
+			//      slides the window forward, so no consumed region is written
+			//      again. A compacting Feed would break this silently.
+			//
+			// fr is a per-request local (see roundTrip), so the array outlives the
+			// exchange and belongs to the caller afterwards.
+			rb.body = payload
+			return nil
+		}
 		rb.body = append(rb.body, payload...)
 	case FrameSettings, FrameCancelPush, FrameGoaway, FrameMaxPushID, 0x02, 0x06, 0x08, 0x09:
 		// Control-stream-only and reserved HTTP/2-carryover frame types MUST NOT
