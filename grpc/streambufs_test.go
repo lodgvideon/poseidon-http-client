@@ -46,27 +46,61 @@ func TestStreamBufs_NoContentLeaksBetweenRPCs(t *testing.T) {
 	}
 }
 
-// TestStreamBufs_ReusedAcrossManyCalls pins that the pool actually recycles:
-// after a warm-up the send buffer stops being regrown from zero.
-func TestStreamBufs_ReusedAcrossManyCalls(t *testing.T) {
+// TestStreamBufs_ReleaseKeepsCapacity pins the mechanism the pool depends on:
+// a released pair carries its capacity back, truncated to zero length.
+//
+// It deliberately does NOT assert that a later stream draws that same pair.
+// sync.Pool does not promise Get returns anything previously Put — it may hand
+// back a fresh one from New, and under -race its per-P caching behaves
+// differently again. A test asserting otherwise passes on a good day and fails
+// on a loaded machine, which is what the first version of this test did. The
+// evidence that recycling actually happens is the allocation gate
+// (TestInvokeInto_AllocsPerCall, 13 -> 10), which measures the outcome rather
+// than guessing at the mechanism.
+func TestStreamBufs_ReleaseKeepsCapacity(t *testing.T) {
 	cc := dialMockPeer(t, newMockGRPCPeer(t), nil)
 	ctx := context.Background()
-	req := bytes.Repeat([]byte{'q'}, 2048)
 
-	for i := 0; i < 8; i++ {
-		if _, err := cc.Invoke(ctx, "/bench.Svc/Echo", req, nil); err != nil {
-			t.Fatalf("call %d: %v", i, err)
-		}
-	}
-	// A stream opened now must come up with capacity already in hand, which is
-	// only true if a previous call returned it.
 	s, err := cc.NewStream(ctx, "/bench.Svc/Echo", nil)
 	if err != nil {
 		t.Fatalf("NewStream: %v", err)
 	}
+	// Grow both buffers the way a real call does, staying under the pool cap.
+	s.sendBuf = append(s.sendBuf[:0], bytes.Repeat([]byte{'x'}, 2048)...)
+	s.dec.buf = append(s.dec.buf[:0], bytes.Repeat([]byte{'y'}, 4096)...)
+	wantSend, wantDec := cap(s.sendBuf), cap(s.dec.buf)
+
+	b := s.bufs
+	_ = s.Close()
+
+	if cap(b.send) != wantSend {
+		t.Errorf("released send buffer has capacity %d, want %d", cap(b.send), wantSend)
+	}
+	if cap(b.dec) != wantDec {
+		t.Errorf("released decoder buffer has capacity %d, want %d", cap(b.dec), wantDec)
+	}
+	if len(b.send) != 0 || len(b.dec) != 0 {
+		t.Errorf("released buffers carry length %d/%d, want 0 — the next owner would read stale bytes",
+			len(b.send), len(b.dec))
+	}
+}
+
+// TestStreamBufs_AcquireAttachesUsableBuffers pins the other half: a stream
+// comes up with both buffers attached and empty, whether the pool recycled a
+// pair or minted one.
+func TestStreamBufs_AcquireAttachesUsableBuffers(t *testing.T) {
+	cc := dialMockPeer(t, newMockGRPCPeer(t), nil)
+	s, err := cc.NewStream(context.Background(), "/bench.Svc/Echo", nil)
+	if err != nil {
+		t.Fatalf("NewStream: %v", err)
+	}
 	defer func() { _ = s.Close() }()
-	if cap(s.sendBuf) == 0 && cap(s.dec.buf) == 0 {
-		t.Error("a fresh stream got no pooled capacity: nothing is being recycled")
+	if s.bufs == nil {
+		t.Fatal("stream came up with no pooled pair attached")
+	}
+	if len(s.sendBuf) != 0 || len(s.dec.buf) != 0 {
+		t.Errorf("stream came up with %d/%d bytes already in its buffers",
+			len(s.sendBuf), len(s.dec.buf))
 	}
 }
 
