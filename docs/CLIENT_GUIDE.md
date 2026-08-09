@@ -439,8 +439,10 @@ when left empty (`Scheme` falls back to `ClientOptions.DefaultScheme`, default
 `ClientOptions.Addr`).
 
 Headers are `conn.HeaderField` values whose `Name` and `Value` are `[]byte`
-(`conn.HeaderField` is an alias for `hpack.HeaderField`; it also has a
-`Sensitive bool` field that forces never-indexed HPACK encoding). The regular
+(`conn.HeaderField` is an alias for `hpack.HeaderField`; its `Indexing` field
+selects the HPACK literal representation, and `conn.IndexNever` forces
+never-indexed encoding for credentials — `Sensitive()` reports that state but
+cannot set it). The regular
 `Headers` slice MUST NOT contain pseudo-headers (names starting with `:`) or
 HTTP/2-forbidden connection headers (`connection`, `keep-alive`,
 `proxy-connection`, `transfer-encoding`, `upgrade`); `te` is allowed only with
