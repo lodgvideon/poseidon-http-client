@@ -466,9 +466,29 @@ func (cc *ClientConn) buildHeaders(ctx context.Context, method string, md, optMD
 // NewStream instead; Invoke is sugar for the case where only the message
 // matters.
 func (cc *ClientConn) Invoke(ctx context.Context, method string, req []byte, md []conn.HeaderField, opts ...CallOption) ([]byte, error) {
+	return cc.InvokeInto(ctx, method, req, nil, md, opts...)
+}
+
+// InvokeInto is Invoke appending the response into dst instead of allocating,
+// the unary counterpart of Stream.RecvInto:
+//
+//	buf, err = cc.InvokeInto(ctx, method, req, buf[:0], nil)
+//
+// The response is appended to dst[:0], so any length dst carries is discarded
+// and only its capacity is used. Semantics are otherwise Invoke's, exactly: the
+// SendLast fast path and its benign-half-close tolerance, io.EOF turned into an
+// Internal status for a method that answered with nothing, and the drain to the
+// terminal event that catches a unary method sending two messages.
+//
+// On error the returned slice is dst[:0] rather than nil, for the reason
+// RecvInto gives: a caller looping unary calls on one buffer would otherwise
+// lose it to the garbage collector on the first failure. Invoke passes dst=nil
+// and so still returns nil.
+func (cc *ClientConn) InvokeInto(ctx context.Context, method string, req, dst []byte, md []conn.HeaderField, opts ...CallOption) ([]byte, error) {
+	dst = dst[:0]
 	s, err := cc.NewStream(ctx, method, md, opts...)
 	if err != nil {
-		return nil, err
+		return dst, err
 	}
 	defer func() { _ = s.Close() }()
 
@@ -490,26 +510,31 @@ func (cc *ClientConn) Invoke(ctx context.Context, method string, req []byte, md 
 	// is on its way, and only a peer that closed the stream after answering
 	// gives us one.
 	if err := s.SendLast(ctx, req); err != nil && !errors.Is(err, conn.ErrStreamClosed) {
-		return nil, err
+		return dst, err
 	}
-	resp, err := s.Recv(ctx)
+	resp, err := s.RecvInto(ctx, dst)
 	if err != nil {
 		// A bare io.EOF means the call completed with status OK but carried no
 		// message. Every other Invoke failure is a *Status, so this one is too
 		// rather than making the caller special-case io.EOF.
 		if errors.Is(err, io.EOF) {
-			return nil, &Status{Code: Internal, Message: "unary method returned no message"}
+			return resp, &Status{Code: Internal, Message: "unary method returned no message"}
 		}
-		return nil, err
+		return resp, err
 	}
 	// Drain to the terminal event so a non-OK grpc-status that follows the
 	// message is reported rather than swallowed, and so a server that sends
 	// two messages to a unary method is caught instead of silently truncated.
+	//
+	// Deliberately Recv, not RecvInto(resp): handing the response buffer to the
+	// drain would let a second message overwrite the answer this call is about
+	// to return. Recv allocates only when a message actually arrives, which is
+	// the error case.
 	if _, err := s.Recv(ctx); !errors.Is(err, io.EOF) {
 		if err == nil {
-			return nil, &Status{Code: Internal, Message: "unary method returned more than one message"}
+			return resp[:0], &Status{Code: Internal, Message: "unary method returned more than one message"}
 		}
-		return nil, err
+		return resp[:0], err
 	}
 	return resp, nil
 }

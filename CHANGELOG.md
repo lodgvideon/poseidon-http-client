@@ -111,6 +111,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   acknowledges anything — with nothing to recycle there is nothing to save, which
   is why `TestSendPath_AllocsPerDatagramSteadyState` was added alongside it.
 
+- **`grpc.ClientConn.InvokeInto` — the unary buffer-reusing form** (#435). `Invoke`
+  handed back the slice it got from `Stream.Recv`, so it inherited that per-call
+  allocation and offered no way to reuse a caller's buffer — the response is the most
+  obviously reusable object in a unary call for a load generator.
+
+  `InvokeInto(ctx, method, req, dst, md, opts...)` appends the response into `dst[:0]`.
+  Semantics are `Invoke`'s exactly: the `SendLast` fast path with its benign-half-close
+  tolerance, `io.EOF` turned into an `Internal` status for a method that answered with
+  nothing, and the drain to the terminal event that catches a unary method sending two
+  messages. `Invoke` is now `InvokeInto(..., nil, ...)`.
+
+  Measured: **13.0 → 12.0 allocations per unary call.** One, which is what this issue
+  removes; the remaining twelve are the `Stream` struct, the decoder buffer, `sendBuf`
+  and the header/trailer clones, and belong to #436.
+
+  The drain deliberately uses `Recv`, not `RecvInto(resp)`. Handing it the response
+  buffer would let a second message overwrite the answer about to be returned — the
+  reuse would corrupt precisely what it optimises.
+
+  The two allocation gates now sit behind `//go:build !race`. The race detector
+  allocates as it instruments, and both gates turn on a difference of a single
+  allocation, which that noise swamps: the new one failed four runs out of five under
+  `-race` while passing every run without it.
+
+  Fourth of the prerequisites tracked by #437.
+
 - **`grpc.Stream.RecvInto` — receive without the per-message allocation** (#434).
   `Recv` returns a fresh copy of every message. Copying is the right default — the
   decoder reuses its buffer across messages, so handing out an alias would break the
