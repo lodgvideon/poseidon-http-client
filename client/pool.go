@@ -331,6 +331,58 @@ func (p *Pool) ensureDialForWaiters(rs *runState) {
 	go p.dialOne()
 }
 
+// flushStrandedWaiters refuses every queued waiter when the pool holds nothing
+// that could ever serve them: no live conn, no dial in flight, and an open dial
+// backoff window that stops ensureDialForWaiters from starting one.
+//
+// It is the counterpart to ensureDialForWaiters and belongs immediately after
+// every call to it. That pairing is the invariant: ensureDialForWaiters gives a
+// queued caller something to wait FOR, and this one says so when there is
+// nothing. handleAcquire fast-refuses a FRESH request on these same three
+// conditions, so leaving the state queued is a priority inversion rather than a
+// slow path — the caller arriving an instant later is served an immediate
+// ErrDialBackoff while the already-queued one waits a full HealthCheckPeriod.
+//
+// It used to be written out inline in handleDialDone alone, which made the state
+// answerable only when a DIAL produced it. handleRelease and handleTick reach it
+// by EVICTION and had no copy (#425). handleRelease is this pool's only eviction
+// site for a conn still carrying traffic, so it is where a GOAWAY'd conn is
+// finally reaped after RFC 7540 §6.8's drain — the ordinary way the last conn
+// goes, not an error path.
+//
+// countLive, not len(conns), is the right test and the two differ here: a
+// GOAWAY'd conn still draining is deliberately not live, because draining
+// streams can never become capacity for a waiter — such a conn is evicted once
+// its last stream ends and is never picked again. So this can fire with conns
+// still in the slice, and that is correct.
+//
+// Waiters are per-STREAM in this pool, so one flush can refuse a large queue at
+// once. Same semantics as the h1 sibling's, and better than the hang.
+//
+// Deliberately not called from handleStats, for the reason ensureDialForWaiters
+// is not: that path only removes conns which were already not live, so it cannot
+// create the state.
+func (p *Pool) flushStrandedWaiters(rs *runState, err error) {
+	if len(rs.waiters) == 0 || rs.inFlightDials > 0 {
+		return
+	}
+	if countLive(rs.conns) > 0 {
+		return
+	}
+	if !inDialBackoff(rs.lastDialErrAt, p.opts.DialBackoff) {
+		// Nothing live and nothing in flight with the backoff closed means the
+		// preceding ensureDialForWaiters started a dial, so inFlightDials would
+		// not be zero and this would be unreachable. Tested anyway, so each call
+		// site is correct on its own terms rather than by virtue of what runs
+		// before it.
+		return
+	}
+	for _, w := range rs.waiters {
+		p.replyAcquire(w, nil, err)
+	}
+	rs.waiters = nil
+}
+
 // handleRelease decrements the conn's active count and evicts it once the
 // underlying connection is no longer alive AND the stream just released was its
 // last. This is the pool's only eviction site for a conn still carrying
@@ -354,6 +406,10 @@ func (p *Pool) handleRelease(rs *runState, msg releaseMsg) {
 	}
 	rs.waiters = p.serveWaiters(rs.conns, rs.waiters)
 	p.ensureDialForWaiters(rs)
+	// That eviction can have been the pool's last live conn — this is where a
+	// GOAWAY'd conn is reaped after its drain — leaving waiters queued behind
+	// capacity that no longer exists.
+	p.flushStrandedWaiters(rs, ErrDialBackoff)
 }
 
 // handleDialDone processes a completed dial: on success the conn
@@ -371,24 +427,19 @@ func (p *Pool) handleDialDone(rs *runState, dr dialResult) {
 		// Either start another dial, or — when the pool is in exactly the state
 		// that makes handleAcquire fast-refuse a NEW request (dial backoff,
 		// nothing live, nothing in flight) — refuse them for the same reason.
-		// Leaving them queued is a priority inversion, and a sharper one here
-		// than on H1: measured, a fresh acquire was refused with ErrDialBackoff
-		// in 0ms while two earlier waiters stayed parked past the end of the
-		// backoff window and left only when the pool was closed. H1 drains one
-		// per tick; H2 has no tick-path dial at all, so it drains none.
+		// Leaving them queued is a priority inversion: measured, a fresh acquire
+		// was refused with ErrDialBackoff in 0ms while two earlier waiters stayed
+		// parked past the end of the backoff window and left only when the pool
+		// was closed.
 		//
-		// countLive excludes a GOAWAY'd conn still draining, which is right:
-		// draining streams can never become capacity for a waiter, since such a
-		// conn is evicted once its last stream ends and is never picked again.
-		// Waiters here are per-STREAM, so one failed dial can refuse a large
-		// queue at once — the same semantics as H1, and better than the hang.
+		// This used to add "H2 has no tick-path dial at all, so it drains none",
+		// which stopped being true once handleTick grew its ensureDialForWaiters
+		// call (pinned by TestHandleTick_DialsForStrandedWaiter).
+		//
+		// See flushStrandedWaiters for why countLive rather than len(conns), and
+		// for what per-STREAM waiters mean when a whole queue is refused at once.
 		p.ensureDialForWaiters(rs)
-		if rs.inFlightDials == 0 && countLive(rs.conns) == 0 {
-			for _, w := range rs.waiters {
-				p.replyAcquire(w, nil, dr.err)
-			}
-			rs.waiters = nil
-		}
+		p.flushStrandedWaiters(rs, dr.err)
 		return
 	}
 	p.refreshStreamCap(dr.mc)
@@ -436,6 +487,11 @@ func (p *Pool) handleTick(rs *runState) {
 	rs.waiters = p.serveWaiters(rs.conns, rs.waiters)
 	rs.waiters = pruneExpiredWaiters(rs.waiters)
 	p.ensureDialForWaiters(rs)
+	// Either eviction above can take the last live conn while waiters queued
+	// behind a full pool are still here, and ensureDialForWaiters returns without
+	// rescuing them whenever a dial backoff is open. Nothing else looks at the
+	// queue until the NEXT tick, a whole HealthCheckPeriod away.
+	p.flushStrandedWaiters(rs, ErrDialBackoff)
 }
 
 // handleClose drains waiters and shuts down all connections.
