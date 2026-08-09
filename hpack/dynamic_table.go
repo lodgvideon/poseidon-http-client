@@ -5,8 +5,20 @@ package hpack
 // terminates regardless of how many headers a peer sends.
 const initialEntryRing = 32
 
+// entryOverhead is the per-entry accounting overhead RFC 7541 §4.1 adds to
+// name+value length. It is not a tunable: the insert side (entrySize) and the
+// evict side (evictOldest) are the two halves of one running total, so a value
+// used by one and not the other either inflates d.size until the table wedges
+// permanently evicting, or underflows it past zero.
+//
+// QPACK defines the same overhead in RFC 9204 §3.2.1 and http3 defines it again
+// for field sections in RFC 9114 §4.2.2. Those are deliberately NOT this
+// constant — each is frozen by its own spec and by interop with the peer, so
+// they must be free to be reasoned about separately.
+const entryOverhead = 32
+
 // dynEntry stores offsets into the arena. Each entry's RFC size is
-// nameLen + valueLen + 32 (RFC 7541 §4.1).
+// nameLen + valueLen + entryOverhead (RFC 7541 §4.1).
 type dynEntry struct {
 	nameOff, nameLen   uint32
 	valueOff, valueLen uint32
@@ -28,7 +40,7 @@ type dynamicTable struct {
 
 func newDynamicTable(maxSize uint32) *dynamicTable {
 	return &dynamicTable{
-		entries: make([]dynEntry, 0, 32),
+		entries: make([]dynEntry, 0, initialEntryRing),
 		arena:   make([]byte, 0, 4096),
 		maxSize: maxSize,
 	}
@@ -54,7 +66,7 @@ func (d *dynamicTable) at(i int) (name, value []byte) {
 }
 
 func entrySize(name, value []byte) uint32 {
-	return uint32(len(name)) + uint32(len(value)) + 32
+	return uint32(len(name)) + uint32(len(value)) + entryOverhead
 }
 
 // add inserts (name, value). If the entry exceeds maxSize, the table is
@@ -115,7 +127,7 @@ func (d *dynamicTable) evictOldest() {
 		return
 	}
 	e := d.entries[d.head]
-	d.size -= e.nameLen + e.valueLen + 32
+	d.size -= e.nameLen + e.valueLen + entryOverhead
 	d.used -= e.nameLen + e.valueLen
 	d.head = (d.head + 1) % len(d.entries)
 	d.count--
