@@ -66,6 +66,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **BREAKING: `quic.RecvGRO` and `quic.SendGSO` take a state handle** (#348).
+  Their signatures are now `RecvGRO(*GROState, syscall.RawConn, io.Reader, []byte)`
+  and `SendGSO(*GSOState, syscall.RawConn, io.Writer, []byte, int)`; `RecvGRO`'s
+  trailing `oob` parameter is gone, absorbed into `GROState`. A caller builds one
+  state per connection per direction with `NewGROState(oobLen)` / `NewGSOState()`
+  and passes it on every call. A nil state takes the unoffloaded fallback, so the
+  degraded path is still one line.
+
+  `RawConn.Read` and `RawConn.Write` take a func through an interface, so the
+  syscall closure escapes and drags every variable it captures to the heap with
+  it. That cost four heap objects on **every** recvmsg and four on every offloaded
+  sendmsg — the send side also rebuilt its whole UDP_SEGMENT control message per
+  call, though only two of its bytes ever change. Hoisting the state onto an
+  object that lives as long as the connection, and taking the closure as a method
+  value exactly once in the constructor, makes both hot paths allocate nothing:
+
+  ```
+  RecvGRO   4 heap objects/call -> 0    (3 once, in NewGROState)
+  SendGSO   4 heap objects/call -> 0    (3 once, in NewGSOState)
+  ```
+
+  Verified by escape analysis under Linux build tags, which is also how the
+  figures above are counted. #348 reports the receive side; the send side has the
+  same defect and is fixed here too.
+
+  The two directions get separate state objects on purpose: `http3`'s `udpConn`
+  drives `ReadGRO` from the QUIC reader goroutine and `WriteGSO` from the sender,
+  and that file already documents the split as the reason not to cache lazily.
+
+  `quic/gro_realsocket_linux_test.go` is new, and is the first test in the package
+  to run `syscall.SendmsgN` and `syscall.Recvmsg` at all — every other GRO/GSO test
+  drives a fake `PacketConn`, so the code that builds the UDP_SEGMENT control
+  message and parses the UDP_GRO one back out had no runtime coverage.
+
 - **The QUIC send path no longer allocates a slice per packet** (#347). Every
   packet carried its retransmittable frames in a `[]retransFrame`, and every send
   site in the package builds a packet around exactly one frame — the loss path

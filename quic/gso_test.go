@@ -303,7 +303,7 @@ func TestGSO_SendGSOFallbackLoop(t *testing.T) {
 	for i := range buf {
 		buf[i] = byte(i)
 	}
-	n, err := SendGSO(nil, w, buf, 100)
+	n, err := SendGSO(nil, nil, w, buf, 100)
 	if err != nil {
 		t.Fatal(err)
 	}

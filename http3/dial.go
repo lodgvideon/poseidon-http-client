@@ -14,10 +14,11 @@ import (
 // so a server's send burst is buffered rather than dropped between reads.
 const udpSocketBuffer = 4 << 20
 
-// groControlLen sizes udpConn.oob, the reused buffer that receives the recvmsg
-// ancillary data carrying the UDP_GRO segment size. 128 bytes holds the single
-// small control message the kernel attaches (only UDP_GRO is enabled) with ample
-// headroom; it is allocated once and reused across reads on the reader goroutine.
+// groControlLen sizes the quic.GROState ancillary-data buffer that receives the
+// recvmsg control message carrying the UDP_GRO segment size. 128 bytes holds the
+// single small control message the kernel attaches (only UDP_GRO is enabled) with
+// ample headroom; it is allocated once and reused across reads on the reader
+// goroutine.
 const groControlLen = 128
 
 // udpConn adapts a connected *net.UDPConn to quic.PacketConn. Read/Write operate
@@ -25,8 +26,9 @@ const groControlLen = 128
 // SetReadDeadline lets the QUIC engine bound each read by the probe timeout
 // (RFC 9002 §6.2) rather than a fixed interval. It also implements the optional
 // batched-write (WriteGSO) and batched-receive (ReadGRO) capabilities the QUIC
-// engine uses on Linux; the rc/oob/gro* fields backing ReadGRO are touched only by
-// the single QUIC reader goroutine, so they need no locking.
+// engine uses on Linux; the groTried and gro fields backing ReadGRO are touched
+// only by the single QUIC reader goroutine, and gso only by the sender, so
+// neither needs locking.
 type udpConn struct {
 	c *net.UDPConn
 	// rc is the raw fd for the offloaded send and receive paths, nil when
@@ -35,8 +37,17 @@ type udpConn struct {
 	// sender, so a lazily-populated cache here would be an unsynchronised write
 	// racing a read. Immutable after construction, both may read it freely.
 	rc       syscall.RawConn
-	groTried bool   // UDP_GRO enable attempted once (best-effort); reader goroutine only
-	oob      []byte // reused ancillary-data buffer for GRO cmsg parsing; reader goroutine only
+	groTried bool // UDP_GRO enable attempted once (best-effort); reader goroutine only
+	// gro and gso hold the reused receive- and send-syscall state (quic.GROState,
+	// quic.GSOState), which is what keeps the offloaded paths from allocating a
+	// closure and its captures on every datagram.
+	//
+	// Two objects rather than one shared one, because they are driven from two
+	// goroutines: gro from the QUIC reader, gso from the sender. They are
+	// allocated in newUDPConn and never re-pointed, so neither goroutine writes a
+	// field the other reads.
+	gro *quic.GROState
+	gso *quic.GSOState
 }
 
 // newUDPConn wraps uc, resolving the raw file descriptor up front so the field
@@ -47,7 +58,12 @@ func newUDPConn(uc *net.UDPConn) *udpConn {
 	if err != nil {
 		rc = nil
 	}
-	return &udpConn{c: uc, rc: rc}
+	return &udpConn{
+		c:   uc,
+		rc:  rc,
+		gro: quic.NewGROState(groControlLen),
+		gso: quic.NewGSOState(),
+	}
 }
 
 func (u *udpConn) Read(b []byte) (int, error)        { return u.c.Read(b) }
@@ -69,10 +85,7 @@ func (u *udpConn) ReadGRO(buf []byte) (int, int, error) {
 		u.groTried = true
 		_ = quic.EnableGRO(u.rc) // best-effort; on failure segSize stays 0 (single datagram)
 	}
-	if u.oob == nil {
-		u.oob = make([]byte, groControlLen)
-	}
-	return quic.RecvGRO(u.rc, u.c, buf, u.oob)
+	return quic.RecvGRO(u.gro, u.rc, u.c, buf)
 }
 
 // WriteGSO sends buf as consecutive UDP datagrams of segSize bytes (the last may be
@@ -88,7 +101,7 @@ func (u *udpConn) WriteGSO(buf []byte, segSize int) (int, error) {
 	// syscall.RawConn on every send. It is resolved once at construction, so
 	// reading it here does not race the reader goroutine's ReadGRO. A nil rc
 	// degrades SendGSO to a per-datagram loop over u.c, exactly as before.
-	return quic.SendGSO(u.rc, u.c, buf, segSize)
+	return quic.SendGSO(u.gso, u.rc, u.c, buf, segSize)
 }
 
 // qpackDynamicTableCapacity is the SETTINGS_QPACK_MAX_TABLE_CAPACITY the client

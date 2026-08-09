@@ -232,7 +232,7 @@ func TestGRO_FallbackNonGROOneReadPerDatagram(t *testing.T) {
 func TestGRO_RecvGROFallbackSingleDatagram(t *testing.T) {
 	want := []byte("one whole datagram")
 	buf := make([]byte, 64)
-	n, seg, err := RecvGRO(nil, bytes.NewReader(want), buf, nil)
+	n, seg, err := RecvGRO(nil, nil, bytes.NewReader(want), buf)
 	if err != nil {
 		t.Fatal(err)
 	}
