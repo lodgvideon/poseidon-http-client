@@ -763,28 +763,7 @@ func (c *Conn) writeHeadersWithPriority(_ context.Context, s *Stream, fields []h
 	c.wmu.Lock()
 	c.wbatch.leave()
 	defer c.wmu.Unlock()
-	if s.id == 0 {
-		// Seed the per-stream outbound flow-control window from the peer's
-		// most recently observed SETTINGS_INITIAL_WINDOW_SIZE and register
-		// the stream atomically under psMu (lock order psMu->smu->s.mu, per
-		// NewStream's documented convention). Holding psMu across the seed +
-		// insert makes it mutually exclusive with applyPeerSettings' merge +
-		// retroactive delta, so this stream is never BOTH seeded at the new
-		// value AND credited the delta — the previous split-lock window
-		// over-credited the send window (RFC 7540 §6.9.2).
-		c.psMu.RLock()
-		initial := settingValue(c.peerSettings, frame.SettingInitialWindowSize, connInitialRecvWindow)
-		c.smu.Lock()
-		s.id = c.nextID
-		c.nextID += 2
-		c.streams[s.id] = s
-		s.mu.Lock()
-		s.sendWindow = int32(initial)
-		s.reqAuthority = authorityOf(fields)
-		s.mu.Unlock()
-		c.smu.Unlock()
-		c.psMu.RUnlock()
-	}
+	c.assignStreamIDLocked(s, fields)
 	buf := encBufPool.Get().(*[]byte)
 	*buf = (*buf)[:0]
 	block := c.enc.EncodeBlock(*buf, fields)
@@ -807,6 +786,35 @@ func (c *Conn) writeHeadersWithPriority(_ context.Context, s *Stream, fields []h
 	// group-commit on this may defer to (and be flushed by) the next queued
 	// writer, batching both frames into one tls.Conn.Write.
 	return c.commitFrame()
+}
+
+// assignStreamIDLocked gives a not-yet-sent stream its on-wire identity and
+// seeds its outbound window. No-op once the id is set. MUST hold c.wmu, so the
+// id order on the wire matches the allocation order (RFC 7540 §5.1.1).
+//
+// Seeding the per-stream outbound flow-control window from the peer's most
+// recently observed SETTINGS_INITIAL_WINDOW_SIZE and registering the stream
+// happen together under psMu (lock order psMu->smu->s.mu, per NewStream's
+// documented convention). Holding psMu across the seed + insert makes it
+// mutually exclusive with applyPeerSettings' merge + retroactive delta, so this
+// stream is never BOTH seeded at the new value AND credited the delta — the
+// previous split-lock window over-credited the send window (RFC 7540 §6.9.2).
+func (c *Conn) assignStreamIDLocked(s *Stream, fields []hpack.HeaderField) {
+	if s.id != 0 {
+		return
+	}
+	c.psMu.RLock()
+	initial := settingValue(c.peerSettings, frame.SettingInitialWindowSize, connInitialRecvWindow)
+	c.smu.Lock()
+	s.id = c.nextID
+	c.nextID += 2
+	c.streams[s.id] = s
+	s.mu.Lock()
+	s.sendWindow = int32(initial)
+	s.reqAuthority = authorityOf(fields)
+	s.mu.Unlock()
+	c.smu.Unlock()
+	c.psMu.RUnlock()
 }
 
 // commitFrame flushes the buffered writer under wmu via the group-commit batcher
@@ -1250,6 +1258,49 @@ func (c *Conn) writeWindowUpdate(streamID uint32, increment uint32) error {
 	// Flush the WINDOW_UPDATE before the deferred Unlock so the peer's send
 	// window is replenished promptly.
 	return c.flushWrite()
+}
+
+// tryAcquireSendCreditsAll is acquireSendCredits without the wait, and
+// all-or-nothing: it debits `want` plus padOverhead from both windows and
+// reports true, or touches nothing and reports false when either window cannot
+// cover the whole amount.
+//
+// It exists so the one-shot send path can decide, while already holding wmu,
+// whether it may emit HEADERS and the whole body in one flush. Blocking for
+// credit under wmu would stall every other stream on the connection, and
+// leaving a frame buffered while blocking is the deadlock writeData's own
+// pre-block flush exists to avoid — the peer never sees the frame, so it never
+// sends the credit being waited for. Never blocking makes both impossible.
+//
+// Partial grants are deliberately refused: a partial write needs a second flush,
+// which is the thing the caller is trying not to do.
+func (c *Conn) tryAcquireSendCreditsAll(s *Stream, wantGen uint64, want, padOverhead int) (bool, error) {
+	if want <= 0 {
+		return true, nil
+	}
+	c.fcOutMu.Lock()
+	defer c.fcOutMu.Unlock()
+	if c.closed.Load() || c.readerGone {
+		return false, ErrConnClosed
+	}
+	s.mu.Lock()
+	streamWin, streamClosed, stale := s.sendWindow, s.closed, s.gen.Load() != wantGen
+	s.mu.Unlock()
+	if stale {
+		return false, ErrStaleStream
+	}
+	if streamClosed {
+		return false, ErrStreamClosed
+	}
+	need := int64(want) + int64(padOverhead)
+	if int64(streamWin) < need || int64(c.peerConnSendWindow) < need {
+		return false, nil
+	}
+	c.peerConnSendWindow -= int32(need)
+	s.mu.Lock()
+	s.sendWindow -= int32(need)
+	s.mu.Unlock()
+	return true, nil
 }
 
 // acquireSendCredits blocks until both the per-stream and the
