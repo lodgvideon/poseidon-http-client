@@ -111,6 +111,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   acknowledges anything — with nothing to recycle there is nothing to save, which
   is why `TestSendPath_AllocsPerDatagramSteadyState` was added alongside it.
 
+- **`grpc.Stream.RecvInto` — receive without the per-message allocation** (#434).
+  `Recv` returns a fresh copy of every message. Copying is the right default — the
+  decoder reuses its buffer across messages, so handing out an alias would break the
+  next call — but it was unconditional, putting a floor of one allocation and one copy
+  per message on every caller, including one that already owns a large enough buffer.
+
+  `RecvInto(ctx, dst)` appends into `dst[:0]` and returns the result, in the same
+  idiom `AppendMessage` already uses on the send side:
+
+  ```go
+  for {
+      buf, err = s.RecvInto(ctx, buf[:0])
+      if errors.Is(err, io.EOF) { break }
+      if err != nil { return err }
+      use(buf)
+  }
+  ```
+
+  Measured on a 64-message stream: **Recv 1.00 allocations per message, RecvInto 0.00.**
+
+  On error `RecvInto` returns `dst[:0]` rather than nil. The terminal iteration of
+  every stream is an error, so returning nil there would hand the caller's buffer to
+  the garbage collector once per stream — exactly the allocation the method removes.
+  `Recv` is now `RecvInto(ctx, nil)` and so still returns nil, keeping its own contract
+  unchanged, which `TestRecv_ContractUnchanged` pins.
+
+  Third of the prerequisites tracked by #437.
+
 - **`grpc.Invoker` — the method set code above this package consumes** (#433).
   `ClientConn` is concrete and is one HTTP/2 connection, so anything built on it was
   welded to that connection. `Invoker` names `Invoke` and `NewStream` so a client can
