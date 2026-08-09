@@ -48,7 +48,7 @@ func (p *countingGSOPC) Close() error             { return nil }
 // writeAppFrames → sealPacket → pc.Write) without standing up a live handshake.
 // Congestion control is left disabled (cwnd == 0, the struct-literal default),
 // so grantable is bounded only by the per-datagram budget and the huge windows.
-func benchSendConn(b *testing.B) (*Conn, *Stream, *countingPC) {
+func benchSendConn(b testing.TB) (*Conn, *Stream, *countingPC) {
 	b.Helper()
 	pc := &countingPC{}
 	c, s := benchSendConnPC(b, pc)
@@ -57,7 +57,7 @@ func benchSendConn(b *testing.B) (*Conn, *Stream, *countingPC) {
 
 // benchSendConnPC is benchSendConn over an arbitrary PacketConn, so a benchmark can
 // swap in a batched-write (gsoWriter) transport to measure the syscall saving.
-func benchSendConnPC(b *testing.B, pc PacketConn) (*Conn, *Stream) {
+func benchSendConnPC(b testing.TB, pc PacketConn) (*Conn, *Stream) {
 	b.Helper()
 	dcid := []byte("benchdc0")
 	keys, _ := InitialKeys(dcid)
@@ -105,7 +105,7 @@ func resetSend(c *Conn, s *Stream) {
 // prints no B/op / allocs/op columns, so the gate ignores it. Run locally with:
 //
 //	POSEIDON_BENCH_SEND=1 go test -run=^$ -bench=BenchmarkQUICSend -benchmem ./quic
-func requireSendBench(b *testing.B) {
+func requireSendBench(b testing.TB) {
 	if os.Getenv("POSEIDON_BENCH_SEND") == "" {
 		b.Skip("send-path bench allocates; set POSEIDON_BENCH_SEND=1 to run (kept out of the zero-alloc bench-gate)")
 	}

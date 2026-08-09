@@ -128,7 +128,7 @@ func (c *Conn) queueOldestProbe(sp int) bool {
 	var oldest sentPacket
 	found := false
 	for pn, p := range c.sent[sp].packets {
-		if !p.ackEliciting || len(p.frames) == 0 {
+		if !p.ackEliciting || !p.hasFrame {
 			continue
 		}
 		if !found || p.timeSent.Before(oldest.timeSent) {
@@ -138,7 +138,7 @@ func (c *Conn) queueOldestProbe(sp int) bool {
 	if !found {
 		return false
 	}
-	c.retransQueue[sp] = append(c.retransQueue[sp], oldest.frames...)
+	c.retransQueue[sp] = append(c.retransQueue[sp], oldest.frame) // found implies hasFrame
 	c.removeInFlight(oldest.size) // abandoned packet leaves flight; the resend re-counts (RFC 9002 §7)
 	delete(c.sent[sp].packets, oldestPN)
 	return true

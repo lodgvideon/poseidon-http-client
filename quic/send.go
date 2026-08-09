@@ -136,7 +136,7 @@ func (s *Stream) writeStreamFrame(b *packetBatch, chunk []byte, fin bool) error 
 		}
 	}
 	c.frameScratch = AppendStream(c.frameScratch, s.id, s.sendOffset, fin, chunk)
-	if err := c.sealAppToBatch(b, c.frameScratch, []retransFrame{rf}); err != nil {
+	if err := c.sealAppToBatch(b, c.frameScratch, &rf); err != nil {
 		return err
 	}
 	if piggyback {
@@ -281,7 +281,7 @@ func (c *Conn) emitStreamsBlocked(uni bool, limit uint64) {
 	// spin: the opener re-parks after each one. The frame is also retransmitted on
 	// loss (RFC 9000 §13.3) — a dropped datagram is not a write error, so the latch
 	// alone would not cover it.
-	retrans := []retransFrame{{kind: retransStreamsBlocked, offset: limit, fin: uni}}
+	retrans := &retransFrame{kind: retransStreamsBlocked, offset: limit, fin: uni}
 	if err := c.writeAppFrames(AppendStreamsBlocked(nil, uni, limit), retrans); err != nil {
 		return
 	}
@@ -296,7 +296,7 @@ func (c *Conn) emitStreamsBlocked(uni bool, limit uint64) {
 // re-send because nothing else can unstick a stream-limit stall. Assumes c.mu is held (it
 // seals a packet and writes the wire; callers are sendLocked/resetLocked/
 // stopSendingLocked and the receive-path emitBlocked).
-func (c *Conn) writeAppFrames(frames []byte, retrans []retransFrame) error {
+func (c *Conn) writeAppFrames(frames []byte, retrans *retransFrame) error {
 	if c.closed {
 		// Draining or closing (RFC 9000 §10.2.2): no application frame may be sent
 		// once the connection is closed, including by a received CONNECTION_CLOSE.
@@ -323,7 +323,7 @@ func (c *Conn) writeAppFrames(frames []byte, retrans []retransFrame) error {
 // sealed datagram to the GSO batch instead of writing it, so a multi-datagram burst
 // leaves in one syscall. The rearmReadDeadline epilogue happens once, when the
 // batch is flushed. Assumes c.mu is held.
-func (c *Conn) sealAppToBatch(b *packetBatch, frames []byte, retrans []retransFrame) error {
+func (c *Conn) sealAppToBatch(b *packetBatch, frames []byte, retrans *retransFrame) error {
 	if c.closed {
 		// Draining or closing (RFC 9000 §10.2.2): no application frame may be sent
 		// once the connection is closed, including by a received CONNECTION_CLOSE.

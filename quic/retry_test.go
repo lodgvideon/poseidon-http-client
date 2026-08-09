@@ -53,7 +53,7 @@ func TestConformance_RFC9000_Sec1725_RetryRekeysAndResends(t *testing.T) {
 	c := &Conn{dcid: odcid, initialSealer: sealer}
 	c.keys.Initial, _ = NewOpener(client)
 	// Simulate the first Initial in flight, carrying the ClientHello CRYPTO.
-	c.sent[spaceInitial].onSent(0, c.clock(), true, []retransFrame{{kind: retransCrypto, offset: 0, data: []byte("clienthello")}})
+	c.sent[spaceInitial].onSent(0, c.clock(), true, &retransFrame{kind: retransCrypto, offset: 0, data: []byte("clienthello")})
 	c.bytesInFlight = 1200
 
 	hdr, err := ParseHeader(pkt, len(c.scid))
@@ -99,7 +99,7 @@ func TestConformance_RFC9000_Sec17253_RetryResendCarriesToken(t *testing.T) {
 	pc := &closePC{}
 	c := &Conn{pc: pc, dcid: append([]byte(nil), odcid...), initialSealer: sealer}
 	c.keys.Initial, _ = NewOpener(client)
-	c.sent[spaceInitial].onSent(0, c.clock(), true, []retransFrame{{kind: retransCrypto, offset: 0, data: []byte("clienthello")}})
+	c.sent[spaceInitial].onSent(0, c.clock(), true, &retransFrame{kind: retransCrypto, offset: 0, data: []byte("clienthello")})
 
 	hdr, _ := ParseHeader(pkt, 0)
 	c.handleRetry(hdr, pkt)

@@ -106,7 +106,9 @@ func (c *Conn) detectLost(sp int) {
 		if !lost {
 			continue
 		}
-		c.retransQueue[sp] = append(c.retransQueue[sp], p.frames...)
+		if p.hasFrame {
+			c.retransQueue[sp] = append(c.retransQueue[sp], p.frame)
+		}
 		if p.ackEliciting { // congestion accounting (RFC 9002 §7.3.1)
 			c.removeInFlight(p.size)
 			if !anyLost || p.timeSent.After(newestLost) {

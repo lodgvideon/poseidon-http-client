@@ -223,17 +223,8 @@ func (c *Conn) scrubResetStreamData(id uint64) {
 	}
 	c.retransQueue[spaceApp] = q
 	for pn, p := range c.sent[spaceApp].packets {
-		var kept []retransFrame
-		changed := false
-		for _, rf := range p.frames {
-			if rf.kind == retransStream && rf.streamID == id {
-				changed = true
-				continue
-			}
-			kept = append(kept, rf)
-		}
-		if changed {
-			p.frames = kept
+		if p.hasFrame && p.frame.kind == retransStream && p.frame.streamID == id {
+			p.frame, p.hasFrame = retransFrame{}, false
 			c.sent[spaceApp].packets[pn] = p
 		}
 	}
@@ -267,7 +258,7 @@ func (s *Stream) resetLocked(errCode uint64) error {
 	// finalSize is the number of bytes already sent (§19.4). Retransmitted until
 	// acknowledged (§13.3) via the retrans descriptor.
 	rf := retransFrame{kind: retransReset, streamID: s.id, errCode: errCode, offset: s.sendOffset}
-	if err := s.conn.writeAppFrames(AppendResetStream(nil, s.id, errCode, s.sendOffset), []retransFrame{rf}); err != nil {
+	if err := s.conn.writeAppFrames(AppendResetStream(nil, s.id, errCode, s.sendOffset), &rf); err != nil {
 		return err
 	}
 	s.conn.maybeRetire(s) // if the receive side is already terminal, both are now done
@@ -298,7 +289,7 @@ func (s *Stream) stopSendingLocked(errCode uint64) error {
 	s.conn.maybeRetire(s) // receive side terminal; if our FIN is also sent, drop from the map
 	// Retransmitted until acknowledged (§13.3): it has no self-healing successor.
 	rf := retransFrame{kind: retransStopSending, streamID: s.id, errCode: errCode}
-	return s.conn.writeAppFrames(AppendStopSending(nil, s.id, errCode), []retransFrame{rf})
+	return s.conn.writeAppFrames(AppendStopSending(nil, s.id, errCode), &rf)
 }
 
 // streamChunk is a run of received stream bytes buffered until the bytes before

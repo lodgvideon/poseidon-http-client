@@ -78,8 +78,18 @@ func absDuration(d time.Duration) time.Duration {
 type sentPacket struct {
 	timeSent     time.Time
 	ackEliciting bool
-	size         int            // on-wire packet length in bytes, for congestion control (RFC 9002 §7)
-	frames       []retransFrame // retransmittable frames carried (nil = nothing to resend)
+	size         int // on-wire packet length in bytes, for congestion control (RFC 9002 §7)
+
+	// frame is the retransmittable frame this packet carries; hasFrame says
+	// whether there is one.
+	//
+	// A value rather than a slice because every send site in this package builds
+	// a packet around at most one such frame — the loss path re-seals each queued
+	// frame into a packet of its own — so the one-element slice this used to be
+	// was allocated per datagram and never held more than one thing. Turn it back
+	// into a slice if a change ever coalesces several lost frames into one packet.
+	frame    retransFrame
+	hasFrame bool
 
 	delivered     uint64    // C.delivered snapshot at send (BBR delivery-rate sampler)
 	deliveredTime time.Time // C.delivered_time snapshot at send (BBR delivery-rate sampler)
@@ -139,11 +149,17 @@ func (s *sentSpace) pruneAcked() {
 
 // onSent records that packet pn was sent at t carrying the given
 // retransmittable frames.
-func (s *sentSpace) onSent(pn uint64, t time.Time, ackEliciting bool, frames []retransFrame) {
+// rf is nil when the packet carries nothing worth resending; it is copied, not
+// retained, so callers may pass the address of a local.
+func (s *sentSpace) onSent(pn uint64, t time.Time, ackEliciting bool, rf *retransFrame) {
 	if s.packets == nil {
 		s.packets = map[uint64]sentPacket{}
 	}
-	s.packets[pn] = sentPacket{timeSent: t, ackEliciting: ackEliciting, frames: frames}
+	p := sentPacket{timeSent: t, ackEliciting: ackEliciting}
+	if rf != nil {
+		p.frame, p.hasFrame = *rf, true
+	}
+	s.packets[pn] = p
 }
 
 // ack processes an acknowledgement of the packet-number range [low, high],

@@ -61,7 +61,7 @@ func TestConformance_RFC9002_Sec624_PTOSendsPingWhenNoData(t *testing.T) {
 // unacknowledged frames when there are some — and does not also mark a bare PING.
 func TestConn_PTO_NoPingWhenDataToResend(t *testing.T) {
 	c := &Conn{now: func() time.Time { return time.Unix(3, 0) }, handshakeConfirmed: true}
-	c.sent[spaceApp].onSent(0, c.clock(), true, []retransFrame{{kind: retransStream, streamID: 0, data: []byte("x")}})
+	c.sent[spaceApp].onSent(0, c.clock(), true, &retransFrame{kind: retransStream, streamID: 0, data: []byte("x")})
 	c.onPTO()
 	if c.probePending {
 		t.Fatal("with retransmittable data in flight, the probe resends it — no bare PING")

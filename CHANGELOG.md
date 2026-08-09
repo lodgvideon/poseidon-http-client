@@ -66,6 +66,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **The QUIC send path no longer allocates a slice per packet** (#347). Every
+  packet carried its retransmittable frames in a `[]retransFrame`, and every send
+  site in the package builds a packet around exactly one frame — the loss path
+  re-seals each queued frame into a packet of its own — so that slice was
+  allocated per datagram and never held more than one thing. `sentPacket` now
+  holds the frame by value and the plumbing passes `*retransFrame`.
+
+  `BenchmarkQUICSend`: 112 B / 2 allocs → 48 B / 1 alloc per datagram.
+  `BenchmarkQUICSend_Stream16KiB`: 18988 B / 30 allocs → 18027 B / 15 allocs, and
+  the same for the GSO variant. `datagrams/op` and `writes/op` are unchanged —
+  this moves allocations, not packets.
+
+  The one remaining allocation is the retransmit copy of the chunk, which RFC
+  9000 §13.3 requires be available until the packet is acknowledged.
+  `TestSendPath_AllocsPerDatagram` gates the count: the send benchmarks that
+  measure it are behind `POSEIDON_BENCH_SEND` and excluded from the zero-alloc
+  bench-gate, which left it ungated until now.
+
 - **`grpc` builds its request header block without allocating.** `buildHeaders`
   cost 17 allocations per RPC — 22 with a deadline — because every constant
   header name and value was a `[]byte("...")` conversion that escaped into the

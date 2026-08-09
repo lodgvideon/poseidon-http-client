@@ -690,9 +690,9 @@ func (c *Conn) sendInitialFlight(ctx context.Context) error {
 	}
 	// Record the Initial as ack-eliciting and retransmittable: its CRYPTO bytes
 	// (a private copy) at their offset, so a lost ClientHello can be resent.
-	c.sent[spaceInitial].onSent(pn, c.clock(), true, []retransFrame{{
+	c.sent[spaceInitial].onSent(pn, c.clock(), true, &retransFrame{
 		kind: retransCrypto, offset: c.cryptoOffset[spaceInitial], data: append([]byte(nil), ch...),
-	}})
+	})
 	c.onPacketSent(spaceInitial, pn, true, len(pkt)) // count toward bytes_in_flight (RFC 9002 §7)
 	c.cryptoOffset[spaceInitial] += uint64(len(ch))
 	c.pendingCrypto[spaceInitial] = c.pendingCrypto[spaceInitial][:0]
