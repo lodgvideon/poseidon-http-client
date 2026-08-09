@@ -113,7 +113,7 @@ func (s *Stream) writeStreamFrame(b *packetBatch, chunk []byte, fin bool) error 
 	c := s.conn
 	rf := retransFrame{
 		kind: retransStream, streamID: s.id, offset: s.sendOffset, fin: fin,
-		data: append([]byte(nil), chunk...), // private copy retained for retransmit (§13.3); NOT the reused scratch
+		data: c.retransCopy(chunk), // private copy retained for retransmit (§13.3); NOT the reused scratch
 	}
 	// Build the frame payload into the reused frameScratch: it is consumed by the
 	// seal below (as the AEAD payload) before any next writeStreamFrame overwrites
