@@ -229,6 +229,10 @@ type CallOption interface {
 // callOptions is the resolved per-call configuration.
 type callOptions struct {
 	maxRecvMessageSize int
+	// md is metadata supplied through WithMetadata. It is kept separate from the
+	// positional argument rather than merged into it, so combining the two costs
+	// no copy — buildHeaders walks both.
+	md []conn.HeaderField
 }
 
 // maxRecvCallOption implements CallOption for MaxRecvMessageSize.
@@ -240,6 +244,25 @@ func (o maxRecvCallOption) apply(c *callOptions) { c.maxRecvMessageSize = int(o)
 // the single method that returns a large payload, without paying its memory
 // cost on every other call sharing the connection.
 func MaxRecvMessageSize(n int) CallOption { return maxRecvCallOption(n) }
+
+// metadataCallOption implements CallOption for WithMetadata.
+type metadataCallOption struct{ md []conn.HeaderField }
+
+func (o metadataCallOption) apply(c *callOptions) { c.md = append(c.md, o.md...) }
+
+// WithMetadata adds request metadata through the CallOption tail rather than the
+// positional argument, so a whole call can be expressed as (ctx, in, opts...)
+// with nothing left over — the shape generated code needs, since CallOption is a
+// closed interface and only this package can add one.
+//
+// It composes: several WithMetadata options accumulate, and all of it is sent in
+// addition to whatever arrived positionally, positional first. Both sources are
+// validated identically and both get the never-indexed default for credential
+// fields; neither is trusted more than the other.
+//
+// The slice is not copied, so it must not be mutated until the call has sent its
+// headers — the same rule the positional argument already carries.
+func WithMetadata(md []conn.HeaderField) CallOption { return metadataCallOption{md: md} }
 
 // NewStream opens a gRPC call on cc. method is the fully-qualified path,
 // "/package.Service/Method". md carries request metadata built with
@@ -260,20 +283,24 @@ func (cc *ClientConn) NewStream(ctx context.Context, method string, md []conn.He
 	if !strings.HasPrefix(method, "/") {
 		return nil, fmt.Errorf("%w: %q", ErrBadMethod, method)
 	}
-	// Caller-built md never went through AppendMetadata, so it is validated in
-	// full here. Neither conn nor hpack checks field syntax on the send path,
-	// which makes this the last gate before the wire.
-	for i := range md {
-		if err := validMetadata(md[i].Name, md[i].Value); err != nil {
-			return nil, err
-		}
-	}
 	co := callOptions{maxRecvMessageSize: cc.opts.MaxRecvMessageSize}
 	for _, o := range opts {
 		o.apply(&co)
 	}
+	// Caller-built metadata never went through AppendMetadata, so it is validated
+	// in full here. Neither conn nor hpack checks field syntax on the send path,
+	// which makes this the last gate before the wire — and it has to cover BOTH
+	// sources, which is why the options are resolved before the check rather than
+	// after it.
+	for _, src := range [2][]conn.HeaderField{md, co.md} {
+		for i := range src {
+			if err := validMetadata(src[i].Name, src[i].Value); err != nil {
+				return nil, err
+			}
+		}
+	}
 	sc := headerScratchPool.Get().(*headerScratch)
-	hdrs := cc.buildHeaders(ctx, method, md, sc)
+	hdrs := cc.buildHeaders(ctx, method, md, co.md, sc)
 
 	s, err := cc.c.NewStream(ctx)
 	if err != nil {
@@ -356,7 +383,7 @@ func putHeaderScratch(sc *headerScratch) {
 // buildHeaders assembles the request header block into sc: pseudo-headers
 // first (RFC 9113 §8.3 requires it), then the fixed gRPC headers, then caller
 // metadata. The returned slice is valid until sc goes back to the pool.
-func (cc *ClientConn) buildHeaders(ctx context.Context, method string, md []conn.HeaderField, sc *headerScratch) []conn.HeaderField {
+func (cc *ClientConn) buildHeaders(ctx context.Context, method string, md, optMD []conn.HeaderField, sc *headerScratch) []conn.HeaderField {
 	sc.path = append(sc.path[:0], method...)
 	hdrs := append(sc.fields[:0],
 		conn.HeaderField{Name: hdrMethod, Value: valPOST},
@@ -385,16 +412,21 @@ func (cc *ClientConn) buildHeaders(ctx context.Context, method string, md []conn
 			Indexing: conn.IndexWithout,
 		})
 	}
-	for i := range md {
-		f := md[i]
-		// The floor, not the ceiling: a caller who never asks for never-indexed
-		// would otherwise have their credential added to the connection's HPACK
-		// dynamic table, where it outlives the RPC and is emitted as a
-		// one-byte index on every later call. Mirrors http3/request.go.
-		if defaultSensitiveField(f.Name) {
-			f.Indexing = conn.IndexNever
+	// Positional metadata first, then whatever WithMetadata supplied. Walking the
+	// two rather than concatenating them keeps this allocation-free.
+	for _, src := range [2][]conn.HeaderField{md, optMD} {
+		for i := range src {
+			f := src[i]
+			// The floor, not the ceiling: a caller who never asks for
+			// never-indexed would otherwise have their credential added to the
+			// connection's HPACK dynamic table, where it outlives the RPC and is
+			// emitted as a one-byte index on every later call. Mirrors
+			// http3/request.go.
+			if defaultSensitiveField(f.Name) {
+				f.Indexing = conn.IndexNever
+			}
+			hdrs = append(hdrs, f)
 		}
-		hdrs = append(hdrs, f)
 	}
 	// Hand the (possibly regrown) backing array back to sc so the growth is
 	// kept rather than repeated on the next borrow.

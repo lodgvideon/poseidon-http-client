@@ -413,7 +413,7 @@ func BenchmarkGRPC_BuildHeaders(b *testing.B) {
 	b.ReportAllocs()
 	for i := 0; i < b.N; i++ {
 		sc := headerScratchPool.Get().(*headerScratch)
-		sinkHeaders = cc.buildHeaders(ctx, "/bench.Svc/Echo", nil, sc)
+		sinkHeaders = cc.buildHeaders(ctx, "/bench.Svc/Echo", nil, nil, sc)
 		putHeaderScratch(sc)
 	}
 }
