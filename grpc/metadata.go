@@ -40,12 +40,19 @@ var binEncoding = base64.StdEncoding
 // written the headers. A binary value is base64-encoded into fresh memory and
 // carries no such constraint.
 func AppendMetadata(md []conn.HeaderField, key string, value []byte) ([]conn.HeaderField, error) {
+	// nil allowlist: the package-level entry point cannot see a connection's
+	// Options, so it stays strict. Use (*ClientConn).AppendMetadata to build a
+	// field whose name is exempted there.
+	return appendMetadata(md, key, value, nil)
+}
+
+func appendMetadata(md []conn.HeaderField, key string, value []byte, allowReserved map[string]struct{}) ([]conn.HeaderField, error) {
 	k := strings.ToLower(key)
 	name := []byte(k)
 	if err := validMetadataName(name); err != nil {
 		return nil, err
 	}
-	if err := checkMetadataKey(k); err != nil {
+	if err := checkMetadataKey(k, allowReserved); err != nil {
 		return nil, err
 	}
 	if strings.HasSuffix(k, binSuffix) {
@@ -60,6 +67,31 @@ func AppendMetadata(md []conn.HeaderField, key string, value []byte) ([]conn.Hea
 		return nil, err
 	}
 	return append(md, conn.HeaderField{Name: name, Value: value}), nil
+}
+
+// reservedAllowSet turns Options.AllowReservedMetadata into the lowercase set
+// checkMetadataKey consults. Returns nil for an empty list, which reads as
+// "nothing exempted" on lookup.
+func reservedAllowSet(names []string) map[string]struct{} {
+	if len(names) == 0 {
+		return nil
+	}
+	set := make(map[string]struct{}, len(names))
+	for _, n := range names {
+		set[strings.ToLower(n)] = struct{}{}
+	}
+	return set
+}
+
+// AppendMetadata is AppendMetadata bound to this connection, so a name listed in
+// Options.AllowReservedMetadata is accepted here too.
+//
+// It exists because the package-level function cannot see the allowlist, and
+// the one thing a caller enabling it needs is the very thing that function does:
+// base64-encoding a "-bin" value. Without this a caller would have to hand-build
+// the conn.HeaderField and reimplement that encoding.
+func (cc *ClientConn) AppendMetadata(md []conn.HeaderField, key string, value []byte) ([]conn.HeaderField, error) {
+	return appendMetadata(md, key, value, cc.allowReserved)
 }
 
 // reservedKeys are the request headers the transport owns. A caller that needs
@@ -86,7 +118,7 @@ var reservedKeys = map[string]struct{}{
 // checkMetadataKey rejects keys the transport owns. Name syntax is validated
 // separately by validMetadataName; callers should reach both through
 // validMetadata rather than calling this alone.
-func checkMetadataKey(k string) error {
+func checkMetadataKey(k string, allowReserved map[string]struct{}) error {
 	if k == "" {
 		return fmt.Errorf("%w: empty key", ErrReservedMetadata)
 	}
@@ -102,8 +134,15 @@ func checkMetadataKey(k string) error {
 	// applications." Refusing the prefix is what keeps a caller's header from
 	// colliding with a future protocol field.
 	if strings.HasPrefix(k, "grpc-") {
-		return fmt.Errorf("%w: the grpc- namespace is reserved by the protocol: %q",
-			ErrReservedMetadata, k)
+		// Options.AllowReservedMetadata exempts specific names from THIS check
+		// only. The pseudo-header and reservedKeys gates above have already run,
+		// so an allowlist cannot be used to forge content-type, te or
+		// grpc-timeout however it is spelled.
+		if _, ok := allowReserved[k]; !ok {
+			return fmt.Errorf("%w: the grpc- namespace is reserved by the protocol: %q "+
+				"(Options.AllowReservedMetadata exempts specific names)",
+				ErrReservedMetadata, k)
+		}
 	}
 	return nil
 }

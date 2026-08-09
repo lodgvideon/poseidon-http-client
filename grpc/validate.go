@@ -92,11 +92,11 @@ func defaultSensitiveField(name []byte) bool {
 // neither conn nor hpack validates on the send path (conn/validate.go covers
 // decoded *response* fields; hpack encodes verbatim), so a field that gets past
 // here reaches the wire unexamined.
-func validMetadata(name, value []byte) error {
+func validMetadata(name, value []byte, allowReserved map[string]struct{}) error {
 	if err := validMetadataName(name); err != nil {
 		return err
 	}
-	if err := checkMetadataKey(string(name)); err != nil {
+	if err := checkMetadataKey(string(name), allowReserved); err != nil {
 		return err
 	}
 	return validMetadataValue(name, value)

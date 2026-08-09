@@ -157,7 +157,26 @@ s, err := cc.NewStream(ctx, "/pkg.Svc/Method", md)
 
 Keys the transport owns — `content-type`, `te`, `user-agent`, the connection-
 specific fields HTTP/2 forbids outright, and the whole `grpc-` namespace the
-protocol reserves — are rejected with `ErrReservedMetadata`. Names that are not
+protocol reserves — are rejected with `ErrReservedMetadata`.
+
+The `grpc-` rule has one deliberate escape hatch. The specification reserves that
+prefix for *future* protocol use, so refusing it is right for application
+metadata — but `grpc-trace-bin` and `grpc-tags-bin` are written by grpc-go's own
+instrumentation rather than by applications, and a client that cannot emit them
+cannot join a census-instrumented deployment's traces:
+
+```go
+cc, err := grpc.Dial(ctx, addr, grpc.Options{
+    AllowReservedMetadata: []string{"grpc-trace-bin"},
+})
+md, _ := cc.AppendMetadata(nil, "grpc-trace-bin", spanContext)
+```
+
+It exempts the listed names from **that check only**. Name syntax, value
+validation, and the transport's own headers are unaffected: listing
+`content-type` or `grpc-timeout` changes nothing. Use `cc.AppendMetadata` rather
+than the package-level `grpc.AppendMetadata` for an exempted key — the package
+function cannot see a connection's options and stays strict. Names that are not
 lowercase tokens and values carrying CR, LF, NUL or edge whitespace are rejected
 with `ErrInvalidMetadata`; that check is the last gate before the wire, since
 neither `conn` nor `hpack` validates outbound fields, and it is what stops a
