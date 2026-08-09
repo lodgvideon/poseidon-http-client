@@ -1,3 +1,5 @@
+//go:build allocbench
+
 package http3
 
 import (
@@ -6,6 +8,21 @@ import (
 )
 
 // Receive-path allocation benchmarks.
+//
+// Behind the allocbench tag, and it has to be. bench-gate is an ABSOLUTE
+// zero-alloc gate — every Benchmark in ./frame ./hpack ./internal/bytesx ./qpack
+// ./quic ./http3 must report 0 B/op and 0 allocs/op (scripts/bench-gate.sh,
+// .github/workflows/bench-gate.yml) — and these exist precisely to MEASURE
+// allocations, so they would trip it. The repository's other allocation bench
+// lives in client/, which is outside the gate's scope; these need http3
+// internals (respBuilder, dispatchFrame) and cannot move there.
+//
+// Run them explicitly:
+//
+//	go test -tags allocbench ./http3/ -run='^$' -bench=RecvPath -benchmem
+//
+// or `make bench-alloc`. Note the tag also hides this file from the default
+// build, so lint and vet do not see it unless the tag is passed.
 //
 // The repository had no instrument for this. client/bench_h3_alloc_test.go
 // substitutes a fake h3Client and never runs http3.Client at all, so it measures
