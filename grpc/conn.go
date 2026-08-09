@@ -414,6 +414,11 @@ func (cc *ClientConn) Invoke(ctx context.Context, method string, req []byte, md 
 	}
 	defer func() { _ = s.Close() }()
 
+	// SendLast rather than Send + CloseSend: a unary call knows its only
+	// message is its last, so END_STREAM rides that message's DATA frame
+	// instead of an empty frame of its own — one fewer flush, TLS record and
+	// segment per RPC.
+	//
 	// conn.ErrStreamClosed here is the RFC 9113 §8.1 case benignHalfClose
 	// describes: the server wrote a complete response and reset the stream
 	// with NO_ERROR rather than wait for a request body it never read. The
@@ -426,10 +431,7 @@ func (cc *ClientConn) Invoke(ctx context.Context, method string, req []byte, md 
 	// frames with the peer. The distinction that matters is whether a response
 	// is on its way, and only a peer that closed the stream after answering
 	// gives us one.
-	if err := s.Send(ctx, req); err != nil && !errors.Is(err, conn.ErrStreamClosed) {
-		return nil, err
-	}
-	if err := s.CloseSend(ctx); err != nil {
+	if err := s.SendLast(ctx, req); err != nil && !errors.Is(err, conn.ErrStreamClosed) {
 		return nil, err
 	}
 	resp, err := s.Recv(ctx)

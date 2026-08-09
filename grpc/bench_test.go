@@ -58,6 +58,11 @@ type mockGRPCPeer struct {
 	ln       net.Listener
 	headers  []byte
 	trailers []byte
+	// dataFrames counts every DATA frame the client sent, across all streams
+	// and connections. It is what tells "the message and the half-close shared
+	// a frame" apart from "they did not" — a distinction the byte counts cannot
+	// make, since the extra frame carries no payload.
+	dataFrames atomic.Int64
 }
 
 func newMockGRPCPeer(tb testing.TB) *mockGRPCPeer {
@@ -206,6 +211,7 @@ func (h *mockGRPCHandler) OnData(fh frame.FrameHeader, p []byte, _ uint8) error 
 	if !h.serving {
 		return nil
 	}
+	h.peer.dataFrames.Add(1)
 	// The client's DATA payload is already a well-formed length-prefixed gRPC
 	// message (or a fragment of one), so echoing the bytes verbatim reproduces
 	// the request as the response with nothing allocated and nothing parsed.

@@ -97,9 +97,58 @@ func (s *Stream) Send(ctx context.Context, msg []byte) error {
 	return nil
 }
 
+// SendLast writes the final message and half-closes the request side in the
+// same DATA frame, telling the server no more messages follow. It is Send
+// followed by CloseSend, minus a frame: the empty END_STREAM frame CloseSend
+// sends carries no payload but costs its own flush, which on a TLS connection
+// is a separate record with its own header and AEAD tag, and — since Go enables
+// TCP_NODELAY — usually a separate segment too. For a small message that
+// overhead is comparable to the message.
+//
+// Use it wherever the last message is known in advance: that is every unary
+// call, and the end of every client-streaming one. Send followed by CloseSend
+// remains correct and remains supported, for a caller that only learns the
+// request is over after the last message has already gone.
+//
+// Unlike CloseSend it is strict about a peer that has already torn the stream
+// down. CloseSend can report that as success because telling a peer that has
+// stopped listening that nothing more follows is a no-op; this call carries a
+// message, and a message that did not reach the server is a real failure.
+func (s *Stream) SendLast(ctx context.Context, msg []byte) error {
+	if s.closed.Load() {
+		return ErrStreamClosed
+	}
+	s.sendMu.Lock()
+	defer s.sendMu.Unlock()
+	if s.sendErr != nil {
+		return s.sendErr
+	}
+	if s.sentEnd {
+		return ErrSendClosed
+	}
+	buf, err := AppendMessage(s.sendBuf[:0], msg)
+	if err != nil {
+		return err
+	}
+	s.sendBuf = buf
+	// sentEnd is latched only on success, for the reason CloseSend gives: a
+	// failure partway through leaves DATA on the wire without END_STREAM, and
+	// recording the request as half-closed would stop a later CloseSend from
+	// finishing the job.
+	if err := s.s.SendData(ctx, buf, true); err != nil {
+		s.sendErr = err
+		return err
+	}
+	s.sentEnd = true
+	return nil
+}
+
 // CloseSend half-closes the request side, telling the server no more messages
 // follow. It is idempotent. A server-streaming call sends one message then
 // CloseSend; a bidirectional call may CloseSend while still receiving.
+//
+// A caller that knows which message is the last should send it with SendLast
+// instead, which folds this half-close into that message's DATA frame.
 //
 // It returns nil when the peer has already torn the stream down — the RFC 9113
 // §8.1 case a server creates by answering without reading the request body.

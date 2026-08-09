@@ -57,10 +57,20 @@ its own work when the caller gives up. A context without a deadline sends no
 
 | Shape | Send side | Receive side |
 |---|---|---|
-| unary | `Send` once, `CloseSend` | one `Recv`, then `io.EOF` |
-| server-streaming | `Send` once, `CloseSend` | `Recv` until `io.EOF` |
-| client-streaming | `Send` N times, `CloseSend` | one `Recv`, then `io.EOF` |
+| unary | `SendLast` once | one `Recv`, then `io.EOF` |
+| server-streaming | `SendLast` once | `Recv` until `io.EOF` |
+| client-streaming | `Send` N-1 times, `SendLast` | one `Recv`, then `io.EOF` |
 | bidirectional | `Send` from goroutine A | `Recv` from goroutine B |
+
+`SendLast` writes the final message and half-closes in the same DATA frame.
+`Send` followed by `CloseSend` does the same thing in two, and the second
+carries no payload — but it still costs its own flush, which over TLS is a
+separate record with its own header and AEAD tag, and (Go enables
+`TCP_NODELAY`) usually a separate segment. For a small message that is
+comparable to the message itself, so prefer `SendLast` wherever the last
+message is known in advance. `Send` + `CloseSend` stays correct, and is the
+right pair for a bidirectional call that only learns it is done after the last
+message has gone.
 
 ```go
 s, err := cc.NewStream(ctx, "/chat.Chat/Session", nil)
