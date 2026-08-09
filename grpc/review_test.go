@@ -12,14 +12,23 @@ import (
 	"github.com/lodgvideon/poseidon-http-client/conn"
 )
 
+// testBuildHeaders borrows and returns a header scratch around buildHeaders the
+// way NewStream does, and copies the result out — the scratch's field array is
+// cleared when it goes back to the pool, so a caller that kept the slice would
+// be reading zeroed entries.
+func testBuildHeaders(cc *ClientConn, ctx context.Context, method string, md []conn.HeaderField) []conn.HeaderField {
+	sc := headerScratchPool.Get().(*headerScratch)
+	defer putHeaderScratch(sc)
+	return append([]conn.HeaderField(nil), cc.buildHeaders(ctx, method, md, sc)...)
+}
+
 // TestBuildHeaders_CredentialsMarkedSensitive is the regression test for the
 // finding that mattered most: hpack.Encoder inserts every non-sensitive field
 // into the connection's dynamic table, so an unmarked bearer token would be
 // retained for the life of the ClientConn and emitted as a one-byte index on
 // every later call — long-lived exposure plus a compression-oracle target.
 func TestBuildHeaders_CredentialsMarkedSensitive(t *testing.T) {
-	cc := &ClientConn{opts: Options{}.defaulted()}
-	cc.opts.Authority = "example.com"
+	cc := newClientConn(nil, Options{Authority: "example.com"}.defaulted(), false)
 
 	md := []conn.HeaderField{
 		{Name: []byte("authorization"), Value: []byte("Bearer secret-token")},
@@ -27,7 +36,7 @@ func TestBuildHeaders_CredentialsMarkedSensitive(t *testing.T) {
 		{Name: []byte("cookie"), Value: []byte("session=abc")},
 		{Name: []byte("x-request-id"), Value: []byte("req-1")},
 	}
-	hdrs := cc.buildHeaders(context.Background(), "/t.S/M", md)
+	hdrs := testBuildHeaders(cc, context.Background(), "/t.S/M", md)
 
 	want := map[string]bool{
 		"authorization":       true,
@@ -56,10 +65,9 @@ func TestBuildHeaders_CredentialsMarkedSensitive(t *testing.T) {
 // TestBuildHeaders_CallerSensitiveIsPreserved pins that the default list is a
 // floor: a caller marking some other field sensitive keeps that.
 func TestBuildHeaders_CallerSensitiveIsPreserved(t *testing.T) {
-	cc := &ClientConn{opts: Options{}.defaulted()}
-	cc.opts.Authority = "example.com"
+	cc := newClientConn(nil, Options{Authority: "example.com"}.defaulted(), false)
 	md := []conn.HeaderField{{Name: []byte("x-api-key"), Value: []byte("k"), Indexing: conn.IndexNever}}
-	for _, h := range cc.buildHeaders(context.Background(), "/t.S/M", md) {
+	for _, h := range testBuildHeaders(cc, context.Background(), "/t.S/M", md) {
 		if string(h.Name) == "x-api-key" && !h.Sensitive() {
 			t.Fatal("caller-set Sensitive was cleared")
 		}

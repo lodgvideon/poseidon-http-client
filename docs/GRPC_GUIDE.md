@@ -57,10 +57,20 @@ its own work when the caller gives up. A context without a deadline sends no
 
 | Shape | Send side | Receive side |
 |---|---|---|
-| unary | `Send` once, `CloseSend` | one `Recv`, then `io.EOF` |
-| server-streaming | `Send` once, `CloseSend` | `Recv` until `io.EOF` |
-| client-streaming | `Send` N times, `CloseSend` | one `Recv`, then `io.EOF` |
+| unary | `SendLast` once | one `Recv`, then `io.EOF` |
+| server-streaming | `SendLast` once | `Recv` until `io.EOF` |
+| client-streaming | `Send` N-1 times, `SendLast` | one `Recv`, then `io.EOF` |
 | bidirectional | `Send` from goroutine A | `Recv` from goroutine B |
+
+`SendLast` writes the final message and half-closes in the same DATA frame.
+`Send` followed by `CloseSend` does the same thing in two, and the second
+carries no payload — but it still costs its own flush, which over TLS is a
+separate record with its own header and AEAD tag, and (Go enables
+`TCP_NODELAY`) usually a separate segment. For a small message that is
+comparable to the message itself, so prefer `SendLast` wherever the last
+message is known in advance. `Send` + `CloseSend` stays correct, and is the
+right pair for a bidirectional call that only learns it is done after the last
+message has gone.
 
 ```go
 s, err := cc.NewStream(ctx, "/chat.Chat/Session", nil)
@@ -219,6 +229,35 @@ long a missing ACK is tolerated. The loop pings unconditionally — it does not
 back off after a GOAWAY and does not skip idle connections — so set an interval
 the server is configured to permit, or leave it at zero. `ClientConn.Conn()`
 exposes the underlying `*conn.Conn` for a one-off `Ping` or for `Stats`.
+
+## Throughput over a real network
+
+`Options.Conn.AutoTuneRecvWindow` is off by default and is the first thing to
+turn on for anything that streams bulk data.
+
+RFC 9113 §6.5.2 starts both HTTP/2 receive windows at 65535 bytes and leaves
+them there until an endpoint says otherwise. Until it is raised, the *whole
+connection* — every stream on it together — can have only 64 KiB in flight per
+round trip: roughly 6.5 MB/s at 10 ms RTT, whatever the link and the CPU can do.
+Loopback hides this completely, so a local benchmark will not show it and a
+staging run across a region will.
+
+```go
+cc, err := grpc.Dial(ctx, addr, grpc.Options{
+    Authority: "api.example.com",
+    Conn: conn.ConnOptions{
+        AutoTuneRecvWindow: true,
+    },
+})
+```
+
+The connection then measures what the peer can actually deliver in one round
+trip and grows both windows to twice that, up to a ceiling derived from
+`StreamEventBuffer × Settings.MaxFrameSize` — which `Dial` already sizes from
+`MaxRecvMessageSize`, so a client configured for large messages gets a
+correspondingly large window without a second knob. Set `MaxRecvWindow` to
+override the ceiling; raise `StreamEventBuffer` alongside it if you do, since
+that budget is what makes the window safe to grow into.
 
 ## Not covered
 

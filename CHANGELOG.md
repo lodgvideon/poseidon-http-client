@@ -18,6 +18,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and asserts the peer did not select something else (`ErrALPNNotHTTP11`; a peer
   that negotiates no ALPN at all is accepted, since that implies HTTP/1.1).
 
+- **`conn.ConnOptions.AutoTuneRecvWindow` + `MaxRecvWindow` — bandwidth-delay-
+  product tuning of the HTTP/2 receive windows** (opt-in, default off). RFC 9113
+  §6.5.2 fixes both receive windows at 65535 bytes until an endpoint raises
+  them, and this client never did: the connection was limited to one window per
+  round trip — about 6.5 MB/s in total at 10 ms RTT, however fast the link or the
+  CPU. The ceiling is invisible on loopback, which is why no benchmark here had
+  ever shown it.
+
+  With the option on, the connection measures how much a peer delivers in one
+  round trip — a PING, and the DATA that arrives before its ACK — and raises both
+  windows to twice that. The sample is bytes-per-round-trip by construction, so
+  there is no clock and no smoothed RTT estimate to get wrong; the peer's ACK is
+  the clock. Windows only grow, and probing backs off exponentially once a sample
+  stops moving the target, so a connection whose window is already large enough
+  stops spending PINGs.
+
+  The ceiling is derived rather than guessed: a window never exceeds
+  `StreamEventBuffer × Settings.MaxFrameSize`, the memory the connection has
+  already committed to buffering for one stream, so tuning cannot make the
+  event-channel overflow reset any likelier than the configured buffer already
+  does. `MaxRecvWindow` overrides it; 64 MiB is the absolute clamp.
+
+  It is opt-in for the reason `GroupCommit` is: this changes flow-control
+  behaviour, and a v1 library should not do that to existing callers silently.
+  Set it on any connection that streams bulk data over a real network —
+  `client.ClientOptions.ConnOpts` and `grpc.Options.Conn` both reach it.
+
+  With the option off, nothing changes: the refund arithmetic reduces exactly to
+  the previous "give back what was spent", which `TestRefundIncrement` pins.
+
+- **`grpc.Stream.SendLast`** — writes the final message and half-closes the
+  request side in the same DATA frame. `Send` followed by `CloseSend` needs two,
+  and the second carries no payload but still costs its own flush: over TLS a
+  separate record with its own header and AEAD tag, and — since Go enables
+  `TCP_NODELAY` — usually a separate segment. `Invoke` now uses it, taking a
+  unary RPC from three transport writes to two (measured by
+  `TestUnaryTransportWriteCount`). Prefer it wherever the last message is known
+  in advance; `Send` + `CloseSend` remains correct and is still the right pair
+  for a bidirectional call that learns it is done only afterwards.
+
 - **`conn.ALPNAsserter`** — an optional `AssertsALPN() string` on a dialer,
   declaring the one protocol it ever returns. `TLSDialer` and `ProxyTLSDialer`
   answer `"h2"`, `H1TLSDialer` `"http/1.1"`, `FlexDialer` `""` (no assertion).
@@ -25,6 +65,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   fail. Custom dialers may implement it to get the same check.
 
 ### Changed
+
+- **`grpc` builds its request header block without allocating.** `buildHeaders`
+  cost 17 allocations per RPC — 22 with a deadline — because every constant
+  header name and value was a `[]byte("...")` conversion that escaped into the
+  header slice. `client/` had already solved this with shared name/value byte
+  slices and a pooled backing array; `grpc/` never inherited the fix. The
+  per-connection scheme, authority and user-agent bytes now live on the
+  `ClientConn`, and a pooled scratch carries the field slice plus the two values
+  that genuinely vary (the method path and the rendered `grpc-timeout`, which
+  `appendTimeout` now writes in place). `BenchmarkGRPC_BuildHeaders`: 269 ns /
+  640 B / 17 allocs → 38.5 ns / 0 B / 0 allocs; a small unary RPC drops from 30
+  to 13 allocations end to end. No API change.
 
 - **The HTTP/2 and HTTP/3 pools now report a failed dial as `*DialError`**
   (#359). Two consumers classify on that type and both silently did the wrong
