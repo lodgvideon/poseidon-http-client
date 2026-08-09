@@ -14,21 +14,27 @@ package hpack
 //     at most 4 symbols if the trie were degenerate, but for the RFC
 //     7541 table the maximum is 2);
 //   - the next state index;
-//   - a "padOK" flag indicating that ending decoding at this state is
-//     a valid EOS-prefix padding (state lies on the all-ones path
-//     from root, depth ≤ 7);
 //   - an "invalid" flag set when the nibble traverses an EOS symbol
 //     (256) or an undefined branch.
 //
 // State 0 is always the root.
+//
+// Whether decoding may legally END at a state is NOT carried on the entry.
+// It is a property of the state, not of the transition that reached it, so
+// it lives in the parallel hufStatePadOK table — see maxPadBits.
 
 type hufFSMEntry struct {
 	syms    [2]uint8
 	nsyms   uint8
 	next    uint16
-	padOK   bool
 	invalid bool
 }
+
+// maxPadBits is the longest EOS-prefix padding a decoder may accept: RFC 7541
+// §5.2 makes padding "strictly longer than 7 bits" a decoding error, because
+// padding exists only to fill out the final byte. HuffmanEncode can emit at
+// most 7 pad bits by construction, so anything longer came from a peer.
+const maxPadBits = 7
 
 var (
 	hufFSM    []hufFSMEntry
@@ -95,13 +101,6 @@ func buildHuffmanFSM() {
 					states = append(states, n)
 				}
 				entry.next = uint16(ns)
-				// padOK: state lies on all-1 path AND depth ≤ 7. Root
-				// (n == root) qualifies trivially (depth 0).
-				if n == root {
-					entry.padOK = true
-				} else if n.allOnes && n.depth <= 7 {
-					entry.padOK = true
-				}
 			}
 			fills = append(fills, entryFill{state: processed, nib: nib, entry: entry})
 		}
@@ -112,11 +111,14 @@ func buildHuffmanFSM() {
 	for _, f := range fills {
 		hufFSM[f.state*16+f.nib] = f.entry
 	}
+	// A state accepts an end-of-input when it sits on the all-ones path within
+	// maxPadBits of the root — i.e. what remains is EOS-prefix padding rather
+	// than a truncated code. The root accepts trivially: nothing is pending.
 	hufStatePadOK = make([]bool, hufStates)
-	hufStatePadOK[0] = true // root accepts (no partial code)
+	hufStatePadOK[0] = true
 	for i := 1; i < hufStates; i++ {
 		s := states[i]
-		hufStatePadOK[i] = s.allOnes && s.depth <= 7
+		hufStatePadOK[i] = s.allOnes && s.depth <= maxPadBits
 	}
 }
 
@@ -175,20 +177,15 @@ func huffmanDecodeFSM(dst, src []byte) ([]byte, error) {
 		}
 		state = e.next
 	}
-	// At end, state must be root (state 0) OR represent valid EOS
-	// padding (on all-1 path, depth ≤ 7). The "next" reached after
-	// consuming the LAST nibble is what we must check, but we've stored
-	// padOK on the entry that produced this state — re-derive from
-	// state index by stepping through any nibble's entry whose next
-	// equals state. Simpler: track per-state padOK directly.
+	// The input ended here, so whatever bits the last state was still expecting
+	// must be legal EOS padding rather than a truncated code (RFC 7541 §5.2).
+	// Acceptance is a property of the state reached, not of the transition that
+	// reached it, which is why it is looked up in hufStatePadOK rather than read
+	// off the last entry: there is no reverse map from a state to the entries
+	// that transition into it.
 	if state == 0 {
 		return dst, nil
 	}
-	// Look up padOK by checking any entry that transitions INTO this
-	// state — but we don't have a reverse map. Instead, a state's
-	// padOK status depends solely on the corresponding trie node, so
-	// we recompute it once at build time and store it in a parallel
-	// table.
 	if int(state) >= len(hufStatePadOK) || !hufStatePadOK[state] {
 		return nil, ErrInvalidHuffman
 	}
