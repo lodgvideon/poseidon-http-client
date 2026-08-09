@@ -111,6 +111,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   acknowledges anything — with nothing to recycle there is nothing to save, which
   is why `TestSendPath_AllocsPerDatagramSteadyState` was added alongside it.
 
+- **`grpc.Invoker` — the method set code above this package consumes** (#433).
+  `ClientConn` is concrete and is one HTTP/2 connection, so anything built on it was
+  welded to that connection. `Invoker` names `Invoke` and `NewStream` so a client can
+  be pointed at a pool or round-robin (this package ships none by design), at a
+  wrapper adding per-call auth, retry or metrics, or at a double so it can be
+  unit-tested without a socket.
+
+  Pure addition: no behaviour change, no signature change, no new dependency. The
+  `var _ Invoker = (*ClientConn)(nil)` assertion lives in the package rather than a
+  test, so a signature drift breaks the build rather than a test run.
+
+  It is a seam for substituting the *connection*, not an abstraction over transports:
+  `NewStream` still returns the concrete `*Stream`, which owns the send/receive
+  lifetime contract. Abstracting that is a larger question and deliberately out of
+  scope.
+
+  Second of the prerequisites tracked by #437.
+
 - **`grpc.WithMetadata` — request metadata as a `CallOption`** (#432). `Invoke` and
   `NewStream` took metadata as a positional argument, separate from the variadic
   option tail. That is fine by hand and awkward for anything generating call sites,
