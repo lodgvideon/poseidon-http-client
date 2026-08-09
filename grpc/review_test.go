@@ -19,7 +19,7 @@ import (
 func testBuildHeaders(cc *ClientConn, ctx context.Context, method string, md []conn.HeaderField) []conn.HeaderField {
 	sc := headerScratchPool.Get().(*headerScratch)
 	defer putHeaderScratch(sc)
-	return append([]conn.HeaderField(nil), cc.buildHeaders(ctx, method, md, sc)...)
+	return append([]conn.HeaderField(nil), cc.buildHeaders(ctx, method, md, nil, sc)...)
 }
 
 // TestBuildHeaders_CredentialsMarkedSensitive is the regression test for the

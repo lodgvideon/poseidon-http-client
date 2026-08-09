@@ -111,6 +111,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   acknowledges anything — with nothing to recycle there is nothing to save, which
   is why `TestSendPath_AllocsPerDatagramSteadyState` was added alongside it.
 
+- **`grpc.WithMetadata` — request metadata as a `CallOption`** (#432). `Invoke` and
+  `NewStream` took metadata as a positional argument, separate from the variadic
+  option tail. That is fine by hand and awkward for anything generating call sites,
+  which wants one uniform `(ctx, in, opts ...CallOption)` shape — and `CallOption`
+  is a closed interface, so only this package can add one.
+
+  Option-supplied metadata is sent in addition to whatever arrived positionally,
+  positional first, and several `WithMetadata` options accumulate rather than
+  overwriting each other. Both existing signatures keep working unchanged.
+
+  The two sources are treated identically where it matters: the syntax check that
+  is the last gate before the wire now runs after the options are resolved and
+  covers both, and the never-indexed default for credential fields applies to
+  both — otherwise the option would have been a way around either. Neither source
+  is copied to combine them, so the header block is still built without
+  allocating.
+
+  First of the prerequisites tracked by #437.
+
 - **BREAKING: streams are handled through `conn.StreamRef`, closing the
   use-after-recycle hole** (#370). `Conn.NewStream` and `Conn.LookupStream` now
   return a `StreamRef`, and `Recv`, `SendData`, `SendHeaders`,
