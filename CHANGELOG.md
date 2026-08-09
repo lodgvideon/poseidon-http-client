@@ -7,7 +7,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [v0.12.0] — 2026-08-10
+
 ### Added
+
+- **`loadgen -transport h3`** (#449). The many-connections-times-small-requests
+  regime is only reachable over HTTP/3, which puts one UDP socket behind each
+  connection, and the load generator spoke HTTP/2 only — so the syscall-floor
+  question in #361 had no instrument. `ServerName` is set explicitly on its TLS
+  config: without it the ClientHello carries no SNI and a server that selects its
+  certificate by name closes the connection during the handshake, which surfaces
+  as `quic: connection closed during handshake` rather than as a missing field.
+  Certificate verification is now **on by default** for both transports, with
+  `-insecure` as the opt-out — it used to be disabled unconditionally, so a
+  loadgen aimed at a real endpoint silently accepted any certificate.
+
+- **A congestion-control measurement harness** (#447). `lossproxy` gained
+  `DELAY_MS`, a fixed one-way delay implemented as a strict FIFO queue per
+  direction — not a timer per datagram, because equal timers fire in
+  goroutine-schedule order, which is reordering, and would corrupt the arm that
+  is supposed to have none. `TestInterop_CCGoodput` measures an **upload**
+  deliberately: congestion control governs the sender, so a download would
+  measure the server's controller. `scripts/cc-matrix.sh` runs both arms over the
+  loss × RTT cells and proves per row that the configured loss was injected.
+
+- **A receive-path allocation benchmark for HTTP/3** (#446), behind the
+  `allocbench` build tag with a `make bench-alloc` target. The repository had no
+  instrument for this — `client/bench_h3_alloc_test.go` substitutes a fake
+  `h3Client` and never runs `http3.Client` at all — which is why the evidence in
+  #342 came from an out-of-tree driver and why one of the three sites that
+  profile named had gone stale without anything noticing. The tag is required:
+  `bench-gate` is an absolute zero-alloc gate whose scope includes `./http3`.
 
 - **`conn.H1TLSDialer` — HTTP/1.1 over TLS** (#334). The HTTP/1.1 transports
   documented a dialer requirement no exported dialer met: "a TLS dialer with
@@ -65,6 +95,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   fail. Custom dialers may implement it to get the same check.
 
 ### Changed
+
+- **The per-entry table overhead is named once per package** (#445).
+  RFC 7541 §4.1 and RFC 9204 §3.2.1 both add 32 octets per dynamic-table entry,
+  and each package spelled the literal three times — in `hpack` as the two halves
+  of one running total, where applying it on insert but not on eviction inflates
+  the table until it wedges or underflows a `uint32` past zero. `hpack` and
+  `qpack` keep **separate** constants on purpose, as do `http1` and `http3`:
+  those numbers are frozen by four different specs and by interop with the peer,
+  so a shared definition would make the wrong thing happen automatically.
+
+- **The 1xx cap is pinned across protocols** (#445). `conn`, `http1` and `http3`
+  each declare `maxInterimResponses = 100` and must agree, because `client.Do` is
+  one API over all three stacks — raising one alone makes the same application
+  against the same origin succeed or fail depending on which protocol ALPN
+  picked. They cannot share a definition without creating import edges the
+  layering deliberately avoids, so each package now carries a tripwire test whose
+  failure message names the other two.
 
 - **The UDP_GRO control message is parsed without allocating.**
   `parseGROSegmentSize` handed the recvmsg ancillary data to
@@ -371,6 +418,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `Do` + `BodyMode: BodyStream` reader was the sibling that did not.
 
 ### Fixed
+
+- **Pool selection no longer costs a channel operation per connection per
+  request** (#448, #449, #450). `Alive`/`IsAlive` were a channel select and
+  `pickLeastLoaded` visited every connection on every request, so dispatching one
+  request over 10,000 connections meant 10,000 channel selects. A CPU profile at
+  4,000 connections put `runtime.chanrecv` at 19.6% of all CPU.
+
+  Both predicates now read an atomic mirroring "the reader has exited"; the
+  channel remains what `Close` waits on. The flag is published **before** the
+  channel closes, so a goroutine woken by it can never then observe the
+  connection as alive — early is safe, late is the bug — and every path that
+  retires a reader goes through one place, so a future raw `close` cannot
+  silently leave the pool handing out a dead connection. The scan now returns at
+  the first idle connection, starting from a rotating cursor so consecutive
+  requests spread instead of piling onto whichever connection sorts first.
+
+  **10,000 connections: 3,217 → 28,500 req/s (8.9x); 4,000: 12,500 → 35,700.**
+  Syscall entry never appeared in any profile, which is what closed the io_uring
+  question (#363).
+
+- **The first DATA payload is adopted as the HTTP/3 response body** (#446)
+  instead of being copied into a second buffer that grows to the same size. Two
+  `FrameReader` properties make it sound and both are now pinned by tests: the
+  payload's capacity equals its length, so appending a second frame must
+  allocate rather than write into the reader's buffered frames; and `Feed` only
+  appends at the tail while `ReadFrame` only slides forward, so a payload already
+  handed out is never rewritten. A compacting `Feed` would break the second
+  silently. 64 KiB body: 341,588 → 276,052 B/op at packet granularity, and
+  139,346 → 73,809 when the response arrives in one burst.
+
+- **A conformance gap in HPACK Huffman padding** (#445). RFC 7541 §5.2 states two
+  padding rules; the existing test isolates the first and deliberately stays
+  under 7 bits so the second cannot fire, so "padding strictly longer than 7 bits
+  MUST be treated as a decoding error" had no test at all — moving the decoder's
+  limit from 7 to 8 left the whole suite green and `0xff` decoded to the empty
+  string instead of failing. Found by mutation-testing a dead flag:
+  `hufFSMEntry.padOK` was assigned and never read, leaving the rule written twice
+  with only one copy load-bearing.
 
 - **A padding violation could not be classified, so no GOAWAY reached the**
   **peer** (#402). `frame.ErrInvalidPadding` was exported and documented, and
