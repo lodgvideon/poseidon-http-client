@@ -1,13 +1,25 @@
-// Command loadgen is a minimal HTTP/2 load generator built on the poseidon
-// client. It spins up a pooled client against a single target, fans out N
-// worker goroutines that issue GET requests for a fixed duration under an
-// optional global QPS cap, then prints a latency + outcome summary derived
-// from the client's built-in MetricsSnapshot.
+// Command loadgen is a minimal load generator built on the poseidon client. It
+// spins up a pooled client against a single target, fans out N worker goroutines
+// that issue GET requests for a fixed duration under an optional global QPS cap,
+// then prints a latency + outcome summary derived from the client's built-in
+// MetricsSnapshot.
+//
+// -transport selects h2 (the default) or h3. The h3 arm exists for the
+// syscall-floor measurement in #361: HTTP/3 puts one UDP socket behind each
+// connection, so the many-connections-times-small-requests regime — where
+// nothing coalesces and GSO/GRO have nothing to amortise — is only reachable
+// there.
 //
 // Example:
 //
 //	go run ./examples/loadgen -url https://localhost:8443/ \
-//	    -conns 4 -workers 64 -duration 30s -rps 5000
+//	    -conns 4 -workers 64 -duration 30s -rps 5000 -insecure
+//
+//	go run ./examples/loadgen -transport h3 -url https://localhost:8443/ \
+//	    -conns 10000 -workers 256 -duration 30s -insecure
+//
+// TLS certificates are verified by default; -insecure turns that off, which the
+// self-signed servers under test/integration need.
 package main
 
 import (
@@ -26,13 +38,19 @@ import (
 
 func main() {
 	var (
-		target   = flag.String("url", "https://localhost:8443/", "target URL (https://host:port/path)")
-		conns    = flag.Int("conns", 4, "max connections in the pool")
-		workers  = flag.Int("workers", 64, "concurrent worker goroutines")
-		duration = flag.Duration("duration", 30*time.Second, "test duration")
-		rps      = flag.Float64("rps", 0, "global request rate cap (0 = unlimited)")
+		target    = flag.String("url", "https://localhost:8443/", "target URL (https://host:port/path)")
+		conns     = flag.Int("conns", 4, "max connections in the pool")
+		workers   = flag.Int("workers", 64, "concurrent worker goroutines")
+		duration  = flag.Duration("duration", 30*time.Second, "test duration")
+		rps       = flag.Float64("rps", 0, "global request rate cap (0 = unlimited)")
+		transport = flag.String("transport", "h2", "transport: h2 or h3")
+		insecure  = flag.Bool("insecure", false,
+			"skip TLS certificate verification (needed for the self-signed test servers)")
 	)
 	flag.Parse()
+	if *transport != "h2" && *transport != "h3" {
+		log.Fatalf("loadgen: -transport must be h2 or h3, got %q", *transport)
+	}
 
 	u, err := url.Parse(*target)
 	if err != nil {
@@ -54,25 +72,47 @@ func main() {
 		},
 	}
 
-	// InsecureSkipVerify keeps the example self-contained against a
-	// self-signed test server; drop it for real targets.
-	dialer := &conn.TLSDialer{
-		Config: &tls.Config{InsecureSkipVerify: true}, //nolint:gosec // example/test target
+	// Certificate verification is ON by default and -insecure turns it off. It
+	// used to be off unconditionally, which meant a loadgen pointed at a real
+	// HTTPS endpoint silently accepted any certificate — the opposite of a safe
+	// default for a tool whose whole purpose is to be aimed at servers. The test
+	// servers in test/integration are self-signed, so they need -insecure.
+	tlsCfg := &tls.Config{
+		ServerName:         u.Hostname(),
+		InsecureSkipVerify: *insecure, //nolint:gosec // opt-in, for self-signed test targets
+	}
+	dialer := &conn.TLSDialer{Config: tlsCfg}
+
+	pool := client.PoolOptions{
+		MaxConnsPerHost:   *conns,
+		MaxStreamsPerConn: 250,
+		HealthCheckPeriod: 5 * time.Second,
 	}
 
-	c, err := client.NewPoolClient(
-		addr,
-		dialer,
-		client.PoolOptions{
-			MaxConnsPerHost:   *conns,
-			MaxStreamsPerConn: 250,
-			HealthCheckPeriod: 5 * time.Second,
-		},
-		client.WithRateLimit(*rps, 0),
-		client.WithHooks(hooks),
-	)
+	var c *client.Client
+	if *transport == "h3" {
+		// TransportH3Pool owns its own QUIC dialing, so it takes the TLS config
+		// directly rather than a conn.Dialer.
+		//
+		// ServerName is set on tlsCfg above. Without it the ClientHello carries no
+		// SNI, and a server that selects its certificate by name closes the
+		// handshake — which looks like a QUIC fault rather than a missing field.
+		c, err = client.NewClient(client.ClientOptions{
+			Addr:               addr,
+			Transport:          client.TransportH3Pool,
+			Pool:               &pool,
+			TLSConfig:          tlsCfg,
+			Hooks:              hooks,
+			RateLimitPerSecond: *rps,
+		})
+	} else {
+		c, err = client.NewPoolClient(addr, dialer, pool,
+			client.WithRateLimit(*rps, 0),
+			client.WithHooks(hooks),
+		)
+	}
 	if err != nil {
-		log.Fatalf("loadgen: build client: %v", err)
+		log.Fatalf("loadgen: build %s client: %v", *transport, err)
 	}
 	defer func() { _ = c.Close() }()
 
