@@ -64,7 +64,7 @@ func dialServerOpts(t *testing.T, srv *httptest.Server, cfg *tls.Config, eventBu
 // That reads as data corruption when it is really "this test fell behind the
 // reader" — the failure it produced on CI cost a full investigation to tell
 // apart from a flow-control bug.
-func drainBody(ctx context.Context, t *testing.T, s *Stream) []byte {
+func drainBody(ctx context.Context, t *testing.T, s StreamRef) []byte {
 	t.Helper()
 	var got []byte
 	for {

@@ -111,6 +111,48 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   acknowledges anything — with nothing to recycle there is nothing to save, which
   is why `TestSendPath_AllocsPerDatagramSteadyState` was added alongside it.
 
+- **BREAKING: streams are handled through `conn.StreamRef`, closing the
+  use-after-recycle hole** (#370). `Conn.NewStream` and `Conn.LookupStream` now
+  return a `StreamRef`, and `Recv`, `SendData`, `SendHeaders`,
+  `SendHeadersWithPriority` and `Close` live on it rather than on `*Stream`.
+  Method names and signatures are unchanged, so most call sites only change
+  where they declared the type; `client` and `grpc` needed no test changes at
+  all.
+
+  `conn.Stream` structs are pooled. `allocStream` re-armed every per-lifetime
+  guard for the new owner, so a pointer retained past `Close` passed all of
+  them: a stale `Recv` returned the *next* request's events, and a stale
+  `SendData` wrote DATA on someone else's stream. It could not be fixed inside
+  the methods — the receiver IS the struct — so the caller has to present the
+  lifetime it believes it holds. A `StreamRef` is that presentation, and every
+  method refuses with the new `ErrStaleStream` once the struct has been
+  recycled.
+
+  Three things the obvious version of this fix gets wrong, all of them pinned by
+  tests:
+
+  - **The generation is bumped at release, not at re-allocation.**
+    `resetForPoolLocked` clears `closed` and `localEnded` and nils the writer, so
+    a stale send against a recycled-but-unclaimed struct would otherwise pass
+    every gate and nil-deref. Bumping there also makes the regression tests
+    independent of a `sync.Pool` draw — the test that pinned this before had a
+    `t.Skip` for exactly that, meaning the guard could ship never having run.
+  - **The check is under `s.mu`, the same section as the operation.** Checking a
+    lifetime outside the lock leaves a window against the recycle it is meant to
+    exclude, which for `Close` means RST_STREAM(CANCEL) on a stranger's live
+    stream — deterministic, no race needed.
+  - **A door check does not cover `SendData`.** `writeData` releases `s.mu` and
+    can park on peer credit indefinitely; the wake loop re-read only `s.closed`,
+    which is *guaranteed false* for every pooled stream because `markStreamDone`
+    pools only when it is false. The lifetime is now re-validated on wake and
+    again — together with the stream id, in one `s.mu` section — before each
+    frame reaches the wire.
+
+  `ErrStaleStream` is deliberately NOT wrapped around `ErrStreamClosed`: three
+  shipped call sites treat that error as benign-and-continue, and laundering a
+  use-after-recycle through them would turn a caller bug into a silent successful
+  half-close, a hang, or a wrong result.
+
 - **BREAKING: `quic.RecvGRO` and `quic.SendGSO` take a state handle** (#348).
   Their signatures are now `RecvGRO(*GROState, syscall.RawConn, io.Reader, []byte)`
   and `SendGSO(*GSOState, syscall.RawConn, io.Writer, []byte, int)`; `RecvGRO`'s

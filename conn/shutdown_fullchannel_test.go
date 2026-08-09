@@ -41,7 +41,7 @@ func parkedH2Server(t *testing.T) *httptest.Server {
 // openParkedStream sends a GET and returns the stream. The response headers are
 // on their way but not consumed; what the caller does with them is the point of
 // each test below.
-func openParkedStream(t *testing.T, c *Conn) *Stream {
+func openParkedStream(t *testing.T, c *Conn) StreamRef {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -71,7 +71,7 @@ func openParkedStream(t *testing.T, c *Conn) *Stream {
 // genuine coin flip (conn/stream.go:349-361), so a caller may see its buffered
 // HEADERS first or be handed the reset straight away. Both are correct; the
 // invariant is that a terminal arrives, bounded, and is never a clean end.
-func terminalOf(ctx context.Context, s *Stream) (err error, cleanEnd bool) {
+func terminalOf(ctx context.Context, s StreamRef) (err error, cleanEnd bool) {
 	for range 8 {
 		ev, rerr := s.Recv(ctx)
 		if rerr != nil {
@@ -206,10 +206,10 @@ func TestConn_ShutdownWithFullEventChannel_ReaderStillExits(t *testing.T) {
 	// ordinary death tests. Poll rather than sleep so a slow machine does not
 	// turn it into a flake.
 	deadline := time.Now().Add(5 * time.Second)
-	for len(sStuck.events) < cap(sStuck.events) && time.Now().Before(deadline) {
+	for len(sStuck.Stream().events) < cap(sStuck.Stream().events) && time.Now().Before(deadline) {
 		time.Sleep(5 * time.Millisecond)
 	}
-	if got, want := len(sStuck.events), cap(sStuck.events); got != want {
+	if got, want := len(sStuck.Stream().events), cap(sStuck.Stream().events); got != want {
 		t.Fatalf("sStuck event channel is %d/%d full; shutdownStreams would take its send arm and the default: branch would go untested", got, want)
 	}
 	// And sLive's must be drained — genuinely drained, which means waiting for
@@ -220,10 +220,10 @@ func TestConn_ShutdownWithFullEventChannel_ReaderStillExits(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("sLive never received its response HEADERS; killing the connection now would test the empty-channel path, not the drained one")
 	}
-	for len(sLive.events) > 0 && time.Now().Before(deadline) {
+	for len(sLive.Stream().events) > 0 && time.Now().Before(deadline) {
 		time.Sleep(5 * time.Millisecond)
 	}
-	if got := len(sLive.events); got != 0 {
+	if got := len(sLive.Stream().events); got != 0 {
 		t.Fatalf("sLive event channel holds %d events; it must be drained for its shutdown to take the send arm", got)
 	}
 
@@ -231,8 +231,8 @@ func TestConn_ShutdownWithFullEventChannel_ReaderStillExits(t *testing.T) {
 	// iterates c.streams; a stream already evicted is never visited, and every
 	// assertion below would pass for the wrong reason.
 	c.smu.Lock()
-	_, stuckReg := c.streams[sStuck.id]
-	_, liveReg := c.streams[sLive.id]
+	_, stuckReg := c.streams[sStuck.Stream().id]
+	_, liveReg := c.streams[sLive.Stream().id]
 	nreg := len(c.streams)
 	c.smu.Unlock()
 	if !stuckReg || !liveReg || nreg != 2 {

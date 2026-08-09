@@ -85,7 +85,7 @@ func TestReaderStreamError_ClosedStreamNeedsSendWake(t *testing.T) {
 
 	parked := make(chan error, 1)
 	go func() {
-		_, err := c.acquireSendCredits(t.Context(), s, 16, 0)
+		_, err := c.acquireSendCredits(t.Context(), s, s.gen.Load(), 16, 0)
 		parked <- err
 	}()
 

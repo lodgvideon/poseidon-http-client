@@ -85,12 +85,29 @@ type StreamEvent struct {
 // Tests fake this out; production code wires it to *Conn.
 type streamWriter interface {
 	writeHeadersWithPriority(ctx context.Context, s *Stream, fields []hpack.HeaderField, endStream bool, prio *frame.Priority) error
-	writeData(ctx context.Context, s *Stream, p []byte, endStream bool) error
+	writeData(ctx context.Context, s *Stream, wantGen uint64, p []byte, endStream bool) error
 	writeRSTStream(s *Stream, code frame.ErrCode) error
 }
 
 // Stream is one in-flight HTTP/2 stream.
 type Stream struct {
+	// gen names the request that currently owns this pooled struct. It is
+	// incremented — never reset — by resetForPoolLocked, the single point where
+	// ownership ends, so a StreamRef minted for lifetime N is refused for every
+	// later lifetime AND for the whole window the struct sits unclaimed in the
+	// pool. Seeded to 1 by newStream so the zero StreamRef can never match.
+	//
+	// Bumping at RELEASE rather than at re-allocation is what makes the pooled
+	// window safe: resetForPoolLocked clears closed and localEnded and nils w,
+	// so a stale send against a recycled-but-unclaimed struct would otherwise
+	// pass every gate and nil-deref the writer.
+	//
+	// Read under s.mu everywhere it gates an operation. It is atomic only so
+	// StreamRef.valid can be used on paths that have not taken the lock yet;
+	// a check that decides whether to act MUST hold s.mu, or it races the
+	// recycle it is trying to exclude.
+	gen atomic.Uint64
+
 	id     uint32
 	w      streamWriter
 	events chan StreamEvent
@@ -243,7 +260,7 @@ type Stream struct {
 }
 
 func newStream(id uint32, eventBuf int, w streamWriter, recvWindow int32) *Stream {
-	return &Stream{
+	s := &Stream{
 		id:          id,
 		w:           w,
 		events:      make(chan StreamEvent, eventBuf),
@@ -251,6 +268,8 @@ func newStream(id uint32, eventBuf int, w streamWriter, recvWindow int32) *Strea
 		resetSignal: make(chan struct{}),
 		endSignal:   make(chan struct{}),
 	}
+	s.gen.Store(1) // never 0: the zero StreamRef must match nothing
+	return s
 }
 
 // endWithReset delivers a terminal reset event and ends the stream in ONE mu
@@ -399,6 +418,11 @@ func (s *Stream) resetForPoolLocked() {
 		s.events = make(chan StreamEvent, cap(s.events))
 		s.eventsClosed.Store(false)
 	}
+	// Ownership ends here, so the handle for it dies here. INCREMENT, never
+	// reset: this function is a wall of zeroing assignments and setting gen to 0
+	// among them would collapse every lifetime onto one value and silently
+	// reopen issue #370 with nothing failing. TestStaleRef_* is what catches it.
+	s.gen.Add(1)
 	s.id = 0
 	s.w = nil
 	s.localEnded = false
@@ -631,9 +655,6 @@ func (s *Stream) pushLocked(e StreamEvent) bool {
 // 7540 §5.1.1's monotonic-id rule. Always emits END_HEADERS=true (B.1
 // does not split into CONTINUATION). When endStream is true the request
 // side is half-closed.
-func (s *Stream) SendHeaders(ctx context.Context, fields []hpack.HeaderField, endStream bool) error {
-	return s.SendHeadersWithPriority(ctx, fields, endStream, nil)
-}
 
 // SendHeadersWithPriority sends a HEADERS frame with optional
 // PRIORITY fields embedded (RFC 7540 §6.3). When prio is non-nil
@@ -641,8 +662,12 @@ func (s *Stream) SendHeaders(ctx context.Context, fields []hpack.HeaderField, en
 // priority payload. StreamID 0 in prio means root stream (no
 // parent). When prio is nil the frame is emitted identically to
 // SendHeaders.
-func (s *Stream) SendHeadersWithPriority(ctx context.Context, fields []hpack.HeaderField, endStream bool, prio *frame.Priority) error {
+func (s *Stream) sendHeadersWithPriority(ctx context.Context, wantGen uint64, fields []hpack.HeaderField, endStream bool, prio *frame.Priority) error {
 	s.mu.Lock()
+	if s.gen.Load() != wantGen {
+		s.mu.Unlock()
+		return ErrStaleStream
+	}
 	if s.pushed {
 		s.mu.Unlock()
 		// RFC 9113 §5.1: a server-pushed (reserved(remote)) stream is receive-only
@@ -688,8 +713,19 @@ func (s *Stream) SendHeadersWithPriority(ctx context.Context, fields []hpack.Hea
 // connection-level outbound flow control (RFC 7540 §6.9). Blocks until
 // enough send-window credit is available, the context is cancelled, or
 // the connection closes. The caller must call SendHeaders first.
-func (s *Stream) SendData(ctx context.Context, p []byte, endStream bool) error {
+
+// sendData is SendData with the caller's lifetime presented.
+//
+// The check here is at the door only. writeData releases s.mu and can park in
+// acquireSendCredits for an unbounded time, so the door check proves "the
+// handle was live on entry" and not "the frame lands on the stream you meant";
+// the wake path carries wantGen for that.
+func (s *Stream) sendData(ctx context.Context, wantGen uint64, p []byte, endStream bool) error {
 	s.mu.Lock()
+	if s.gen.Load() != wantGen {
+		s.mu.Unlock()
+		return ErrStaleStream
+	}
 	if s.pushed {
 		s.mu.Unlock()
 		// RFC 9113 §5.1: a server-pushed stream is receive-only for the client.
@@ -700,7 +736,7 @@ func (s *Stream) SendData(ctx context.Context, p []byte, endStream bool) error {
 		return ErrStreamClosed
 	}
 	s.mu.Unlock()
-	if err := s.w.writeData(ctx, s, p, endStream); err != nil {
+	if err := s.w.writeData(ctx, s, wantGen, p, endStream); err != nil {
 		return err
 	}
 	if endStream {
@@ -716,7 +752,17 @@ func (s *Stream) SendData(ctx context.Context, p []byte, endStream bool) error {
 
 // Recv blocks until the next event for this stream is ready, the stream
 // terminates, or ctx is cancelled.
-func (s *Stream) Recv(ctx context.Context) (StreamEvent, error) {
+// Recv is the unguarded receive kept for callers that still hold a *Stream.
+//
+// It cannot tell a stale reference from a live one — the receiver IS the
+// struct — so a reference retained past Close and re-entered after the struct
+// was handed to another request receives THAT request's events (issue #370).
+// Use the StreamRef returned by Conn.NewStream, whose Recv refuses it.
+
+// recv is Recv with the caller's lifetime presented. wantGen is compared under
+// the same s.mu section that registers the reader, so a recycle cannot land
+// between the check and the registration.
+func (s *Stream) recv(ctx context.Context, wantGen uint64) (StreamEvent, error) {
 	// Register as a reader: that is what keeps recycleStream off the struct
 	// until this returns, and it is the load-bearing half — the select below
 	// blocks, so it cannot hold the mutex, and a recycle landing under it
@@ -747,6 +793,12 @@ func (s *Stream) Recv(ctx context.Context) (StreamEvent, error) {
 	// which Recv cannot infer from a receiver that IS the struct; the send side
 	// has the same hole. "Callers must not retain a *Stream past Close" is still
 	// a real obligation, not a formality.
+	if s.gen.Load() != wantGen {
+		// The struct has been recycled since this handle was minted. Whatever it
+		// is carrying now belongs to another request.
+		s.mu.Unlock()
+		return StreamEvent{}, ErrStaleStream
+	}
 	if s.released.Load() {
 		s.mu.Unlock()
 		return StreamEvent{}, ErrStreamClosed
@@ -824,14 +876,31 @@ func (s *Stream) Recv(ctx context.Context) (StreamEvent, error) {
 // appClosed/connDone are the two halves of that handshake: whichever of
 // Close/markStreamDone finishes second with the struct is the one that
 // recycles it.
-func (s *Stream) Close() error {
+
+// close is Close with the caller's lifetime presented.
+//
+// This is the destructive one. Without the check, a Close from a finished
+// request passes the released latch — allocStream re-arms it — marks the NEW
+// owner closed, wakes its blocked writer with an error, and puts
+// RST_STREAM(CANCEL) on the wire for the new request's stream id. No race
+// needed; see TestStaleRef_CloseResetsTheNextRequest.
+//
+// The gen check and the released CAS both happen under s.mu, which is what
+// makes them mutually ordered against resetForPoolLocked. Checking gen outside
+// the lock would leave exactly the window this closes.
+func (s *Stream) close(wantGen uint64) error {
+	s.mu.Lock()
+	if s.gen.Load() != wantGen {
+		s.mu.Unlock()
+		return ErrStaleStream
+	}
 	// released is the idempotency guard. It survives recycleStream (which
 	// resets closed/w/... for pool reuse), so a repeat Close while the struct
 	// is still pooled returns here instead of dereferencing the nil-ed w.
 	if !s.released.CompareAndSwap(false, true) {
+		s.mu.Unlock()
 		return nil
 	}
-	s.mu.Lock()
 	s.appClosed = true
 	closed := s.closed // e.g. push() set this on event-channel overflow
 	bothEnded := s.localEnded && s.remoteEnded
@@ -881,4 +950,85 @@ func (s *Stream) Close() error {
 		return nil
 	}
 	return w.writeRSTStream(s, frame.ErrCodeCancel)
+}
+
+// StreamRef is a handle to ONE lifetime of a pooled Stream.
+//
+// conn.Stream structs are recycled through a per-connection pool, so a *Stream
+// retained past Close names a struct that another request may already own.
+// Nothing on the struct can tell the difference — the receiver IS the struct —
+// so the caller has to present the lifetime it believes it holds. A StreamRef
+// is that presentation: every method on it refuses, with ErrStaleStream, once
+// the struct has been recycled.
+//
+// It is returned by Conn.NewStream and Conn.LookupStream. Copy it freely; it is
+// a small value and holds no lock. The zero StreamRef is valid to hold and
+// refuses every call, since a live Stream's generation is never 0.
+type StreamRef struct {
+	s   *Stream
+	gen uint64
+}
+
+// ref mints a handle for the stream's current lifetime.
+func (s *Stream) ref() StreamRef { return StreamRef{s: s, gen: s.gen.Load()} }
+
+// Stream returns the underlying stream, which is valid to touch only while
+// Valid reports true — and only immediately, since nothing holds the lifetime
+// still between the two calls. It exists for the few callers that need a field
+// off the struct; prefer the methods.
+func (r StreamRef) Stream() *Stream { return r.s }
+
+// Valid reports whether the handle still names the lifetime it was minted for.
+// It is advisory: a recycle can land the instant after it returns. The methods
+// re-check under the lock, which is the check that decides anything.
+func (r StreamRef) Valid() bool { return r.s != nil && r.s.gen.Load() == r.gen }
+
+// ID returns the stream id, or 0 when the handle is stale.
+func (r StreamRef) ID() uint32 {
+	if !r.Valid() {
+		return 0
+	}
+	return r.s.ID()
+}
+
+// Recv blocks until the next event for this lifetime is ready, the stream
+// terminates, or ctx is cancelled. It returns ErrStaleStream once the struct
+// has been recycled, rather than handing over the next request's events.
+func (r StreamRef) Recv(ctx context.Context) (StreamEvent, error) {
+	if r.s == nil {
+		return StreamEvent{}, ErrStaleStream
+	}
+	return r.s.recv(ctx, r.gen)
+}
+
+// SendData sends DATA for this lifetime, chunked and flow-controlled as
+// Stream.SendData describes.
+func (r StreamRef) SendData(ctx context.Context, p []byte, endStream bool) error {
+	if r.s == nil {
+		return ErrStaleStream
+	}
+	return r.s.sendData(ctx, r.gen, p, endStream)
+}
+
+// SendHeaders sends a HEADERS frame for this lifetime.
+func (r StreamRef) SendHeaders(ctx context.Context, fields []hpack.HeaderField, endStream bool) error {
+	return r.SendHeadersWithPriority(ctx, fields, endStream, nil)
+}
+
+// SendHeadersWithPriority is SendHeaders with PRIORITY fields embedded.
+func (r StreamRef) SendHeadersWithPriority(ctx context.Context, fields []hpack.HeaderField, endStream bool, prio *frame.Priority) error {
+	if r.s == nil {
+		return ErrStaleStream
+	}
+	return r.s.sendHeadersWithPriority(ctx, r.gen, fields, endStream, prio)
+}
+
+// Close releases this lifetime. A handle whose stream has already been recycled
+// is refused, so a late Close cannot reset the request that claimed the struct
+// next.
+func (r StreamRef) Close() error {
+	if r.s == nil {
+		return ErrStaleStream
+	}
+	return r.s.close(r.gen)
 }

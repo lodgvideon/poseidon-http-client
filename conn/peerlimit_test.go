@@ -100,7 +100,7 @@ func TestApplyPeerSettings_LowerMaxConcurrent_DoesNotCloseExistingStreams(t *tes
 	setPeerSetting(&c.peerSettings, frame.SettingMaxConcurrentStreams, 5)
 
 	// Open three streams under the original cap of 5.
-	streams := make([]*Stream, 3)
+	streams := make([]StreamRef, 3)
 	for i := range streams {
 		s, err := c.NewStream(context.Background())
 		if err != nil {

@@ -2,6 +2,7 @@ package conn
 
 import (
 	"context"
+	"errors"
 	"sync"
 	"testing"
 	"time"
@@ -25,11 +26,12 @@ func TestStream_RecvAfterClose_RefusesInsteadOfRegistering(t *testing.T) {
 	s := c.allocStream(4, 65535)
 	s.id = 5
 	c.streams[5] = s
+	ref := s.ref()
 	s.push(StreamEvent{Type: EventHeaders})
 
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
-	if ev, err := s.Recv(ctx); err != nil || ev.Type != EventHeaders {
+	if ev, err := ref.Recv(ctx); err != nil || ev.Type != EventHeaders {
 		t.Fatalf("first Recv = %v, %v", ev.Type, err)
 	}
 
@@ -38,13 +40,16 @@ func TestStream_RecvAfterClose_RefusesInsteadOfRegistering(t *testing.T) {
 	s.mu.Lock()
 	s.connDone = true
 	s.mu.Unlock()
-	_ = s.Close()
+	_ = ref.Close()
 
 	start := time.Now()
 	rctx, rcancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer rcancel()
-	if _, err := s.Recv(rctx); err != ErrStreamClosed {
-		t.Fatalf("Recv after Close = %v, want ErrStreamClosed", err)
+	// The recycle retired this lifetime, so the handle is stale rather than
+	// merely closed. Either way the point of this test stands: it refuses
+	// immediately instead of registering and parking.
+	if _, err := ref.Recv(rctx); !errors.Is(err, ErrStaleStream) && !errors.Is(err, ErrStreamClosed) {
+		t.Fatalf("Recv after Close = %v, want ErrStaleStream or ErrStreamClosed", err)
 	}
 	if d := time.Since(start); d > time.Second {
 		t.Fatalf("Recv after Close took %v — it parked on the orphaned channel instead of refusing", d)
@@ -57,49 +62,49 @@ func TestStream_RecvAfterClose_RefusesInsteadOfRegistering(t *testing.T) {
 	}
 }
 
-// TestStream_RecvAfterClose_ReallocWindowStillOpen documents what the guard
-// above does NOT fix, so nobody reads it as more than it is.
+// TestStream_RecvAfterClose_ReallocIsRefused is the guarantee the previous
+// version of this test asked for.
 //
-// allocStream re-arms released for the new lifetime, so a stale reference that
-// re-enters Recv after the struct has been handed to another request is
-// admitted and receives that request's events. Closing this needs the caller
-// to present the lifetime it believes it holds — which Recv cannot infer, the
-// receiver being the struct itself — and the send side has the same hole. The
-// test asserts the current behaviour rather than the desired one; if it starts
-// failing, the window was closed and this should become the guarantee.
-func TestStream_RecvAfterClose_ReallocWindowStillOpen(t *testing.T) {
+// It used to assert the opposite — that a stale reference re-entering Recv
+// after the struct had been handed to another request received THAT request's
+// events — and its own comment said: "if it starts failing, the window was
+// closed and this should become the guarantee". It is closed, so it is.
+//
+// It also used to t.Skip when sync.Pool handed back a different struct, which
+// meant the guard could ship with its own regression test never having run. It
+// no longer needs the pool to cooperate: the lifetime is retired by the recycle
+// itself, so a handle from the finished request is refused whether or not the
+// struct is claimed again.
+func TestStream_RecvAfterClose_ReallocIsRefused(t *testing.T) {
 	c := &Conn{streams: map[uint32]*Stream{}}
 	c.fcOutCond = sync.NewCond(&c.fcOutMu)
 	s := c.allocStream(4, 65535)
 	s.id = 5
 	c.streams[5] = s
+	refA := s.ref() // the handle the first request holds
 	s.push(StreamEvent{Type: EventHeaders})
 
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
-	if _, err := s.Recv(ctx); err != nil {
+	if _, err := refA.Recv(ctx); err != nil {
 		t.Fatalf("first Recv: %v", err)
 	}
 	s.mu.Lock()
 	s.connDone = true
 	s.mu.Unlock()
-	_ = s.Close()
+	_ = refA.Close()
 
+	// Stage the re-allocation that used to leak the next request's events. If
+	// the pool hands back this very struct, the stale handle is now pointed
+	// straight at request B's live stream — which is the case that mattered.
 	s2 := c.allocStream(4, 65535)
-	if s2 != s {
-		t.Skip("the pool did not hand back the same struct")
-	}
 	s2.id = 7
+	c.streams[7] = s2
 	s2.push(StreamEvent{Type: EventData}) // the second request's event
 
 	rctx, rcancel := context.WithTimeout(context.Background(), time.Second)
 	defer rcancel()
-	ev, err := s.Recv(rctx) // the STALE reference, from the first request
-	if err != nil {
-		t.Fatalf("stale Recv = %v; the realloc window is closed — make this the guarantee", err)
+	if _, err := refA.Recv(rctx); !errors.Is(err, ErrStaleStream) {
+		t.Fatalf("stale Recv = %v, want ErrStaleStream", err)
 	}
-	if ev.Type != EventData {
-		t.Fatalf("stale Recv = %v, want the second request's data (documenting the open window)", ev.Type)
-	}
-	t.Log("known gap: a stale reference re-entering Recv after re-allocation receives the next request's events")
 }

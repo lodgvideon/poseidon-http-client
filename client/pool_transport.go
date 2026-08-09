@@ -32,7 +32,7 @@ func newPoolTransportFromPool(p *Pool) *poolTransport {
 // PoolOptions.HealthCheckPeriod (default 30s). Newly arriving acquires
 // also skip dead conns via pickLeastLoaded's IsAlive() guard, so a
 // transient dead conn won't be picked between ticks.
-func (pt *poolTransport) openExchange(ctx context.Context) (protoStream, func(uint32) (*conn.Stream, bool), func(), error) {
+func (pt *poolTransport) openExchange(ctx context.Context) (protoStream, func(uint32) (conn.StreamRef, bool), func(), error) {
 	mc, err := pt.p.acquire(ctx)
 	if err != nil {
 		return nil, nil, nil, err

@@ -281,7 +281,7 @@ func TestConn_WriteData_ClosedConn(t *testing.T) {
 	s.id = 1
 	s.sendWindow = 65535
 
-	err := c.writeData(context.Background(), s, []byte("hello"), false)
+	err := c.writeData(context.Background(), s, s.gen.Load(), []byte("hello"), false)
 	if err != ErrConnClosed {
 		t.Fatalf("writeData on closed conn = %v, want ErrConnClosed", err)
 	}
@@ -297,7 +297,7 @@ func TestConn_WriteData_NoIDReturnsErrStreamClosed(t *testing.T) {
 	s := newStream(0, 8, c, 65535) // id == 0 → not yet on the wire
 	s.sendWindow = 65535
 
-	err := c.writeData(context.Background(), s, []byte("data"), false)
+	err := c.writeData(context.Background(), s, s.gen.Load(), []byte("data"), false)
 	if err != ErrStreamClosed {
 		t.Fatalf("writeData id=0 = %v, want ErrStreamClosed", err)
 	}
@@ -598,7 +598,7 @@ func TestConn_WriteData_EmptyNoEndStream(t *testing.T) {
 	s.id = 1
 	s.sendWindow = 65535
 
-	err := c.writeData(context.Background(), s, nil, false)
+	err := c.writeData(context.Background(), s, s.gen.Load(), nil, false)
 	if err != nil {
 		t.Fatalf("writeData(empty, noEndStream) = %v, want nil", err)
 	}
@@ -618,7 +618,7 @@ func TestConn_WriteData_EmptyEndStream(t *testing.T) {
 	s.id = 1
 	s.sendWindow = 65535
 
-	err := c.writeData(context.Background(), s, nil, true)
+	err := c.writeData(context.Background(), s, s.gen.Load(), nil, true)
 	if err != nil {
 		t.Fatalf("writeData(empty, endStream) = %v, want nil", err)
 	}
@@ -641,7 +641,7 @@ func TestConn_WriteData_WithPadding(t *testing.T) {
 	s.sendWindow = 65535
 
 	// Non-empty data with padding enabled.
-	if err := c.writeData(context.Background(), s, []byte("hi"), true); err != nil {
+	if err := c.writeData(context.Background(), s, s.gen.Load(), []byte("hi"), true); err != nil {
 		t.Fatalf("writeData with padding: %v", err)
 	}
 	if buf.Len() == 0 {
@@ -662,7 +662,7 @@ func TestConn_WriteData_EmptyWithPadding(t *testing.T) {
 	s.id = 1
 	s.sendWindow = 65535
 
-	if err := c.writeData(context.Background(), s, nil, true); err != nil {
+	if err := c.writeData(context.Background(), s, s.gen.Load(), nil, true); err != nil {
 		t.Fatalf("writeData(empty,padding): %v", err)
 	}
 	if buf.Len() == 0 {
@@ -892,7 +892,7 @@ func TestStream_Recv_ResetSignal(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
-	ev, err := s.Recv(ctx)
+	ev, err := s.ref().Recv(ctx)
 	if err != nil {
 		t.Fatalf("Recv error: %v", err)
 	}
@@ -1167,7 +1167,7 @@ func TestStream_SendHeadersWithPriority_ClosedStream(t *testing.T) {
 	s.mu.Lock()
 	s.closed = true
 	s.mu.Unlock()
-	err := s.SendHeadersWithPriority(context.Background(), nil, false, nil)
+	err := s.ref().SendHeadersWithPriority(context.Background(), nil, false, nil)
 	if err != ErrStreamClosed {
 		t.Fatalf("err = %v, want ErrStreamClosed", err)
 	}
@@ -1182,7 +1182,7 @@ func TestStream_SendHeadersWithPriority_LocalEnded(t *testing.T) {
 	s.mu.Lock()
 	s.localEnded = true
 	s.mu.Unlock()
-	err := s.SendHeadersWithPriority(context.Background(), nil, false, nil)
+	err := s.ref().SendHeadersWithPriority(context.Background(), nil, false, nil)
 	if err != ErrStreamClosed {
 		t.Fatalf("err = %v, want ErrStreamClosed", err)
 	}

@@ -27,7 +27,7 @@ func TestConformance_RFC9113_Sec6_4_AcquireSendCreditsBailsOnResetStream(t *test
 
 	done := make(chan error, 1)
 	go func() {
-		_, err := c.acquireSendCredits(context.Background(), s, 10, 0)
+		_, err := c.acquireSendCredits(context.Background(), s, s.gen.Load(), 10, 0)
 		done <- err
 	}()
 
@@ -55,7 +55,7 @@ func TestConformance_RFC9113_Sec6_4_ResetWakesBlockedSender(t *testing.T) {
 
 	done := make(chan error, 1)
 	go func() {
-		_, err := c.acquireSendCredits(context.Background(), s, 10, 0)
+		_, err := c.acquireSendCredits(context.Background(), s, s.gen.Load(), 10, 0)
 		done <- err
 	}()
 

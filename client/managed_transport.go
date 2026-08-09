@@ -14,7 +14,7 @@ type managedTransport struct {
 
 // openExchange implements transport.openExchange. Delegates to managedPool.acquire
 // which fans across per-address sub-pools via Selector, then opens an H2 stream.
-func (mt *managedTransport) openExchange(ctx context.Context) (protoStream, func(uint32) (*conn.Stream, bool), func(), error) {
+func (mt *managedTransport) openExchange(ctx context.Context) (protoStream, func(uint32) (conn.StreamRef, bool), func(), error) {
 	cn, release, err := mt.mp.acquire(ctx)
 	if err != nil {
 		return nil, nil, nil, err

@@ -82,7 +82,7 @@ func TestConn_AcquireSendCredits_BlocksUntilWindowUpdate(t *testing.T) {
 	}
 	out := make(chan result, 1)
 	go func() {
-		n, err := c.acquireSendCredits(context.Background(), s, 100, 0)
+		n, err := c.acquireSendCredits(context.Background(), s, s.gen.Load(), 100, 0)
 		out <- result{n: n, err: err}
 	}()
 
@@ -120,7 +120,7 @@ func TestConn_AcquireSendCredits_HonorsCtxCancel(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	out := make(chan error, 1)
 	go func() {
-		_, err := c.acquireSendCredits(ctx, s, 100, 0)
+		_, err := c.acquireSendCredits(ctx, s, s.gen.Load(), 100, 0)
 		out <- err
 	}()
 	time.Sleep(20 * time.Millisecond)
@@ -193,7 +193,7 @@ func TestConn_WriteData_ChunksByPeerMaxFrameSize(t *testing.T) {
 	c.streams[1] = s
 
 	payload := make([]byte, 10000) // 3 chunks of 4096+4096+1808
-	if err := c.writeData(context.Background(), s, payload, true); err != nil {
+	if err := c.writeData(context.Background(), s, s.gen.Load(), payload, true); err != nil {
 		t.Fatalf("writeData: %v", err)
 	}
 	frames := parseDataFrames(t, buf.Bytes())

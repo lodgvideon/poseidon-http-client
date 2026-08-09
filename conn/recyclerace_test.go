@@ -17,11 +17,11 @@ import (
 // The request half-closes with its HEADERS, so localEnded is true from the
 // start and the stream becomes bothEnded the instant the reader sets
 // remoteEnded. A Close() landing in that window used to observe bothEnded and
-// call recycleStream, which rewrites s.events and zeroes every field — while
+// call recycleStream, which rewrites s.Stream().events and zeroes every field — while
 // the reader was still pushing into the same struct, and after the struct had
 // been handed back to the pool for another request to claim.
 //
-// Run under -race. The failure is a data race on s.events, not a wrong result,
+// Run under -race. The failure is a data race on s.Stream().events, not a wrong result,
 // so a plain run passes either way.
 //
 // It is a stress test on the invariant, not a reproducer: the window is narrow
@@ -140,9 +140,9 @@ func TestStream_CloseAfterDrain_StillRecycles(t *testing.T) {
 			break
 		}
 	}
-	s.mu.Lock()
-	remoteEnded, localEnded := s.remoteEnded, s.localEnded
-	s.mu.Unlock()
+	s.Stream().mu.Lock()
+	remoteEnded, localEnded := s.Stream().remoteEnded, s.Stream().localEnded
+	s.Stream().mu.Unlock()
 	if !remoteEnded {
 		t.Fatal("remoteEnded false after the consumer read END_STREAM — Close would send a needless CANCEL")
 	}
@@ -160,7 +160,7 @@ func TestStream_CloseAfterDrain_StillRecycles(t *testing.T) {
 //
 // The handshake settles which of Close and markStreamDone pools the struct, on
 // the premise that once both are done nobody is left holding it. A goroutine
-// sitting in Recv is holding it — Recv blocks on s.events and s.resetSignal, so
+// sitting in Recv is holding it — Recv blocks on s.Stream().events and s.resetSignal, so
 // it must read those fields outside the mutex, and recycleStream rewrites both.
 // Close racing an in-flight Recv is not a caller retaining a stream "past
 // Close"; it is one goroutine cancelling another's read, which is ordinary.
@@ -169,7 +169,7 @@ func TestStream_CloseAfterDrain_StillRecycles(t *testing.T) {
 // reader is parked in the select before the recycle is driven, so the two
 // accesses are ordered and -race reports every time. Against the pre-fix code
 // it failed on the first iteration with two races, at conn/stream.go:243
-// (s.events) and :268 (s.resetSignal), which is exactly the pair CI reported.
+// (s.Stream().events) and :268 (s.resetSignal), which is exactly the pair CI reported.
 func TestStream_RecycleUnderInFlightRecv_NoRace(t *testing.T) {
 	// The handler sends its header block and then holds the stream open, so
 	// the reader below consumes exactly one event and is then parked in the
@@ -233,10 +233,10 @@ func TestStream_RecycleUnderInFlightRecv_NoRace(t *testing.T) {
 	// Drive Close down the connDone branch, the one that pools the struct
 	// immediately. Setting the flag by hand is what makes this deterministic:
 	// the real handshake reaches the same state, just not on cue.
-	s.mu.Lock()
-	s.connDone = true
-	s.closed = false
-	s.mu.Unlock()
+	s.Stream().mu.Lock()
+	s.Stream().connDone = true
+	s.Stream().closed = false
+	s.Stream().mu.Unlock()
 	_ = s.Close()
 
 	// The recycle must have been DEFERRED, not merely serialised. Taking the
@@ -245,9 +245,9 @@ func TestStream_RecycleUnderInFlightRecv_NoRace(t *testing.T) {
 	// pass — while the struct sat in the pool, available to another request,
 	// with a reader still holding it and still about to touch resetCode and
 	// recvActive on whatever lifetime owned it by then.
-	s.mu.Lock()
-	pooled := s.w == nil
-	s.mu.Unlock()
+	s.Stream().mu.Lock()
+	pooled := s.Stream().w == nil
+	s.Stream().mu.Unlock()
 	if pooled {
 		t.Fatal("stream was reset for the pool while a reader was inside Recv")
 	}
@@ -261,9 +261,9 @@ func TestStream_RecycleUnderInFlightRecv_NoRace(t *testing.T) {
 	}
 
 	// And the deferral must not lose the recycle: the last reader out owes it.
-	s.mu.Lock()
-	recycled := s.w == nil && s.id == 0
-	s.mu.Unlock()
+	s.Stream().mu.Lock()
+	recycled := s.Stream().w == nil && s.Stream().id == 0
+	s.Stream().mu.Unlock()
 	if !recycled {
 		t.Fatal("deferred recycle never ran; the stream leaked out of the pool")
 	}

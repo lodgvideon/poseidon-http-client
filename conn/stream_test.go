@@ -57,7 +57,7 @@ func (w *fakeStreamWriter) writeHeadersWithPriority(_ context.Context, _ *Stream
 	w.headerCalls++
 	return nil
 }
-func (w *fakeStreamWriter) writeData(_ context.Context, _ *Stream, _ []byte, _ bool) error {
+func (w *fakeStreamWriter) writeData(_ context.Context, _ *Stream, _ uint64, _ []byte, _ bool) error {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	w.dataCalls++
@@ -94,7 +94,7 @@ func TestStream_ID(t *testing.T) {
 
 func TestStream_SendHeaders_DelegatesToWriter(t *testing.T) {
 	s, w := newTestStream(8)
-	err := s.SendHeaders(context.Background(),
+	err := s.ref().SendHeaders(context.Background(),
 		[]hpack.HeaderField{{Name: []byte(":method"), Value: []byte("GET")}},
 		true)
 	if err != nil {
@@ -107,10 +107,10 @@ func TestStream_SendHeaders_DelegatesToWriter(t *testing.T) {
 
 func TestStream_SendData_AfterEndStream_ReturnsErrStreamClosed(t *testing.T) {
 	s, _ := newTestStream(8)
-	if err := s.SendHeaders(context.Background(), nil, true); err != nil {
+	if err := s.ref().SendHeaders(context.Background(), nil, true); err != nil {
 		t.Fatalf("SendHeaders: %v", err)
 	}
-	err := s.SendData(context.Background(), []byte("x"), false)
+	err := s.ref().SendData(context.Background(), []byte("x"), false)
 	if !errors.Is(err, ErrStreamClosed) {
 		t.Fatalf("SendData err = %v, want ErrStreamClosed", err)
 	}
@@ -121,7 +121,7 @@ func TestStream_Recv_ReturnsBufferedEvent(t *testing.T) {
 	s.push(StreamEvent{Type: EventHeaders, EndStream: true})
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
-	e, err := s.Recv(ctx)
+	e, err := s.ref().Recv(ctx)
 	if err != nil {
 		t.Fatalf("Recv: %v", err)
 	}
@@ -134,17 +134,17 @@ func TestStream_Recv_BlocksUntilCancel(t *testing.T) {
 	s, _ := newTestStream(8)
 	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
 	defer cancel()
-	if _, err := s.Recv(ctx); !errors.Is(err, context.DeadlineExceeded) {
+	if _, err := s.ref().Recv(ctx); !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("Recv err = %v, want DeadlineExceeded", err)
 	}
 }
 
 func TestStream_Close_SendsRSTOnce(t *testing.T) {
 	s, w := newTestStream(8)
-	if err := s.Close(); err != nil {
+	if err := s.ref().Close(); err != nil {
 		t.Fatalf("Close 1: %v", err)
 	}
-	if err := s.Close(); err != nil {
+	if err := s.ref().Close(); err != nil {
 		t.Fatalf("Close 2: %v", err)
 	}
 	if w.rstCalls != 1 {
@@ -158,11 +158,11 @@ func TestStream_Close_SendsRSTOnce(t *testing.T) {
 func TestStream_Close_AfterEndStream_DoesNotSendRST(t *testing.T) {
 	s, w := newTestStream(8)
 	s.markRemoteEnd() // simulate END_STREAM observed
-	if err := s.SendHeaders(context.Background(), nil, true); err != nil {
+	if err := s.ref().SendHeaders(context.Background(), nil, true); err != nil {
 		t.Fatalf("SendHeaders: %v", err)
 	}
 	// Both directions ended -> Close is a no-op on the wire.
-	if err := s.Close(); err != nil {
+	if err := s.ref().Close(); err != nil {
 		t.Fatalf("Close: %v", err)
 	}
 	if w.rstCalls != 0 {

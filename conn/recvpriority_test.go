@@ -36,7 +36,7 @@ func TestConformance_RFC9113_Sec8_1_RecvPrefersBufferedEventsOverReset(t *testin
 		s.signalReset(frame.ErrCodeNoError)
 
 		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-		ev, err := s.Recv(ctx)
+		ev, err := s.ref().Recv(ctx)
 		cancel()
 		if err != nil {
 			t.Fatalf("Recv: %v", err)
@@ -60,10 +60,10 @@ func TestConformance_RFC9113_Sec8_1_RecvStillReportsResetWhenDrained(t *testing.
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
-	if ev, err := s.Recv(ctx); err != nil || ev.Type != EventHeaders {
+	if ev, err := s.ref().Recv(ctx); err != nil || ev.Type != EventHeaders {
 		t.Fatalf("first Recv = %v, %v; want the buffered headers", ev.Type, err)
 	}
-	ev, err := s.Recv(ctx)
+	ev, err := s.ref().Recv(ctx)
 	if err != nil {
 		t.Fatalf("second Recv: %v", err)
 	}

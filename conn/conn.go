@@ -474,11 +474,14 @@ func (c *Conn) resetStreamOnError(se *StreamError) {
 // LookupStream returns the stream with the given ID, or (nil, false) if
 // no such stream exists. This is primarily used to access server-pushed
 // streams after receiving an EventPushPromise on the parent stream.
-func (c *Conn) LookupStream(id uint32) (*Stream, bool) {
+func (c *Conn) LookupStream(id uint32) (StreamRef, bool) {
 	c.smu.Lock()
 	defer c.smu.Unlock()
 	s, ok := c.streams[id]
-	return s, ok
+	if !ok {
+		return StreamRef{}, false
+	}
+	return s.ref(), true
 }
 
 // NewStream allocates an in-flight slot for a new outbound stream. The
@@ -488,15 +491,15 @@ func (c *Conn) LookupStream(id uint32) (*Stream, bool) {
 // concurrent NewStream callers. Returns ErrTooManyStreams when the
 // in-flight count has reached min(local MaxConcurrentStreams,
 // peer-advertised SETTINGS_MAX_CONCURRENT_STREAMS).
-func (c *Conn) NewStream(_ context.Context) (*Stream, error) {
+func (c *Conn) NewStream(_ context.Context) (StreamRef, error) {
 	if c.closed.Load() {
-		return nil, ErrConnClosed
+		return StreamRef{}, ErrConnClosed
 	}
 	if c.draining.Load() {
-		return nil, ErrConnDraining
+		return StreamRef{}, ErrConnDraining
 	}
 	if c.goAwayReceived.Load() {
-		return nil, ErrGoAway
+		return StreamRef{}, ErrGoAway
 	}
 	// Read peer setting OUTSIDE smu (lock order: psMu before smu in
 	// applyPeerSettings, so we must not invert here).
@@ -510,13 +513,13 @@ func (c *Conn) NewStream(_ context.Context) (*Stream, error) {
 	c.smu.Lock()
 	if c.inflight >= limit {
 		c.smu.Unlock()
-		return nil, ErrTooManyStreams
+		return StreamRef{}, ErrTooManyStreams
 	}
 	s := c.allocStream(c.opts.StreamEventBuffer, int32(c.opts.Settings.InitialWindowSize))
 	c.inflight++
 	c.smu.Unlock()
 	c.atomicStreamsOpened.Add(1)
-	return s, nil
+	return s.ref(), nil
 }
 
 // allocStream returns a recycled *Stream if one with matching channel
@@ -890,7 +893,13 @@ func (c *Conn) writeHeaderBlock(streamID uint32, block []byte, endStream bool, p
 	return nil
 }
 
-func (c *Conn) writeData(ctx context.Context, s *Stream, p []byte, endStream bool) error {
+// wantGen is the lifetime the caller believes it is writing to. It is re-checked
+// after every park in acquireSendCredits and again under s.mu immediately before
+// each frame is emitted, because the door check in Stream.sendData proves only
+// that the handle was live on entry: this function releases s.mu and can block
+// on peer credit for an unbounded time, during which the struct can complete,
+// be recycled, and be handed to another request.
+func (c *Conn) writeData(ctx context.Context, s *Stream, wantGen uint64, p []byte, endStream bool) error {
 	if c.closed.Load() {
 		return ErrConnClosed
 	}
@@ -930,6 +939,12 @@ func (c *Conn) writeData(ctx context.Context, s *Stream, p []byte, endStream boo
 		}
 		c.wmu.Lock()
 		defer c.wmu.Unlock()
+		s.mu.Lock()
+		staleEnd := s.gen.Load() != wantGen
+		s.mu.Unlock()
+		if staleEnd {
+			return ErrStaleStream
+		}
 		// A terminal empty DATA frame is sent unpadded even when DATA padding is
 		// enabled. An unpadded empty frame carries zero flow-controlled bytes, so
 		// it needs no send-window credit; padding it would put 1+padLen
@@ -969,7 +984,7 @@ func (c *Conn) writeData(ctx context.Context, s *Stream, p []byte, endStream boo
 		// padOverhead is charged against the send windows alongside the data
 		// bytes: WriteDataPadded emits n + 1 + padLen flow-controlled bytes, all
 		// of which the peer debits (RFC 7540 §6.9.1).
-		n, err := c.acquireSendCredits(ctx, s, want, padOverhead)
+		n, err := c.acquireSendCredits(ctx, s, wantGen, want, padOverhead)
 		if err != nil {
 			return err
 		}
@@ -979,13 +994,24 @@ func (c *Conn) writeData(ctx context.Context, s *Stream, p []byte, endStream boo
 			c.wmu.Unlock()
 			return ErrConnClosed
 		}
+		// Read the id and the lifetime in ONE s.mu section, so the id that
+		// reaches the wire is the id of the stream this write was authorised
+		// for. Reading s.id unsynchronised — as this did — is what let a woken
+		// writer address whatever request had claimed the struct by then.
+		s.mu.Lock()
+		id, stale := s.id, s.gen.Load() != wantGen
+		s.mu.Unlock()
+		if stale {
+			c.wmu.Unlock()
+			return ErrStaleStream
+		}
 		if padLen > 0 {
-			if werr := c.fr.WriteDataPadded(s.id, last, p[:n], padLen); werr != nil {
+			if werr := c.fr.WriteDataPadded(id, last, p[:n], padLen); werr != nil {
 				c.wmu.Unlock()
 				return werr
 			}
 		} else {
-			if werr := c.fr.WriteData(s.id, last, p[:n]); werr != nil {
+			if werr := c.fr.WriteData(id, last, p[:n]); werr != nil {
 				c.wmu.Unlock()
 				return werr
 			}
@@ -1233,7 +1259,7 @@ func (c *Conn) writeWindowUpdate(streamID uint32, increment uint32) error {
 // A context-cancellation watcher (context.AfterFunc) is registered only
 // when we actually need to block in cond.Wait, not on every call. This
 // avoids a goroutine + channel allocation per write chunk (F-P1-04).
-func (c *Conn) acquireSendCredits(ctx context.Context, s *Stream, want, padOverhead int) (int, error) {
+func (c *Conn) acquireSendCredits(ctx context.Context, s *Stream, wantGen uint64, want, padOverhead int) (int, error) {
 	if want <= 0 {
 		return 0, nil
 	}
@@ -1255,7 +1281,17 @@ func (c *Conn) acquireSendCredits(ctx context.Context, s *Stream, want, padOverh
 		s.mu.Lock()
 		streamWin := s.sendWindow
 		streamClosed := s.closed
+		stale := s.gen.Load() != wantGen
 		s.mu.Unlock()
+		if stale {
+			// The struct was recycled while this writer was parked. s.closed is
+			// no help here: markStreamDone pools a stream only when it is false,
+			// so the flag this loop already re-read is guaranteed false exactly
+			// when the stream we were writing to is gone. Without this the woken
+			// writer debits the live connection window and emits DATA carrying
+			// the next request's stream id.
+			return 0, ErrStaleStream
+		}
 		if streamClosed {
 			// RFC 9113 §6.4: after a stream is reset (peer RST_STREAM) or otherwise
 			// closed, we must not send further DATA on it. A writer already blocked

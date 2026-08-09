@@ -21,7 +21,7 @@ func TestConformance_RFC7540_Sec6_1_PaddedDataDebitsPaddingOverhead(t *testing.T
 
 		// 100 data bytes with a 10-byte padding overhead (1 pad-length octet + 9
 		// padding). The frame's flow-controlled cost is 110.
-		n, err := c.acquireSendCredits(context.Background(), s, 100, 10)
+		n, err := c.acquireSendCredits(context.Background(), s, s.gen.Load(), 100, 10)
 		if err != nil {
 			t.Fatalf("acquireSendCredits: %v", err)
 		}
@@ -44,7 +44,7 @@ func TestConformance_RFC7540_Sec6_1_PaddedDataDebitsPaddingOverhead(t *testing.T
 		s.sendWindow = 50
 
 		// Window 50, padding 10 → at most 40 data bytes fit (40+10=50).
-		n, err := c.acquireSendCredits(context.Background(), s, 100, 10)
+		n, err := c.acquireSendCredits(context.Background(), s, s.gen.Load(), 100, 10)
 		if err != nil {
 			t.Fatalf("acquireSendCredits: %v", err)
 		}
