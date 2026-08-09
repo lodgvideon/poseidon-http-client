@@ -342,6 +342,7 @@ func (cc *ClientConn) NewStream(ctx context.Context, method string, md []conn.He
 		return nil, err
 	}
 	st := &Stream{s: s}
+	st.acquireBufs()
 	st.dec.max = co.maxRecvMessageSize
 	return st, nil
 }

@@ -111,6 +111,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   acknowledges anything — with nothing to recycle there is nothing to save, which
   is why `TestSendPath_AllocsPerDatagramSteadyState` was added alongside it.
 
+- **`grpc` pools the two per-RPC buffers** (#436). `sendBuf` and the decoder's
+  reassembly buffer both started nil on every call, so each was regrown from zero even
+  though the identical call a microsecond earlier on the same connection had one of
+  exactly the right size. They are now drawn from a pool and returned by `Close`.
+
+  | | before | after |
+  |---|---|---|
+  | `Invoke` | 13 allocs | **10** |
+  | `InvokeInto` | 12 allocs | **9** |
+  | `BenchmarkGRPC_Unary_8B` | 13 allocs/op | **10** |
+  | `BenchmarkGRPC_ServerStream_64x1KB` | 81 allocs/op | **77** |
+
+  Three per unary call rather than the two a buffer count suggests, because each
+  buffer was being grown more than once on its way up.
+
+  **The `Stream` struct itself is deliberately not pooled**, which is a departure from
+  what the issue proposes. Pooling it would mean re-arming `closed` for the next owner,
+  and a caller holding a `Stream` from a finished RPC would then pass every guard and
+  operate on the next call's stream — the same shape as #370 one layer down, which cost
+  an API change to close. Leaving the struct alone keeps `closed` a permanent latch, so
+  a stale reference is refused forever and can never reach buffers the pool has since
+  handed on. That is worth one allocation per call, and the remaining nine are named in
+  the issue rather than hidden.
+
+  Buffers above 64 KiB are dropped instead of pooled, so a single outlier response
+  cannot park its memory for the life of the process.
+
+  Last of the prerequisites tracked by #437.
+
 - **`grpc.ClientConn.InvokeInto` — the unary buffer-reusing form** (#435). `Invoke`
   handed back the slice it got from `Stream.Recv`, so it inherited that per-call
   allocation and offered no way to reuse a caller's buffer — the response is the most
