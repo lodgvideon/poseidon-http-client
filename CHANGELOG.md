@@ -18,6 +18,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and asserts the peer did not select something else (`ErrALPNNotHTTP11`; a peer
   that negotiates no ALPN at all is accepted, since that implies HTTP/1.1).
 
+- **`conn.ConnOptions.AutoTuneRecvWindow` + `MaxRecvWindow` — bandwidth-delay-
+  product tuning of the HTTP/2 receive windows** (opt-in, default off). RFC 9113
+  §6.5.2 fixes both receive windows at 65535 bytes until an endpoint raises
+  them, and this client never did: the connection was limited to one window per
+  round trip — about 6.5 MB/s in total at 10 ms RTT, however fast the link or the
+  CPU. The ceiling is invisible on loopback, which is why no benchmark here had
+  ever shown it.
+
+  With the option on, the connection measures how much a peer delivers in one
+  round trip — a PING, and the DATA that arrives before its ACK — and raises both
+  windows to twice that. The sample is bytes-per-round-trip by construction, so
+  there is no clock and no smoothed RTT estimate to get wrong; the peer's ACK is
+  the clock. Windows only grow, and probing backs off exponentially once a sample
+  stops moving the target, so a connection whose window is already large enough
+  stops spending PINGs.
+
+  The ceiling is derived rather than guessed: a window never exceeds
+  `StreamEventBuffer × Settings.MaxFrameSize`, the memory the connection has
+  already committed to buffering for one stream, so tuning cannot make the
+  event-channel overflow reset any likelier than the configured buffer already
+  does. `MaxRecvWindow` overrides it; 64 MiB is the absolute clamp.
+
+  It is opt-in for the reason `GroupCommit` is: this changes flow-control
+  behaviour, and a v1 library should not do that to existing callers silently.
+  Set it on any connection that streams bulk data over a real network —
+  `client.ClientOptions.ConnOpts` and `grpc.Options.Conn` both reach it.
+
+  With the option off, nothing changes: the refund arithmetic reduces exactly to
+  the previous "give back what was spent", which `TestRefundIncrement` pins.
+
 - **`grpc.Stream.SendLast`** — writes the final message and half-closes the
   request side in the same DATA frame. `Send` followed by `CloseSend` needs two,
   and the second carries no payload but still costs its own flush: over TLS a

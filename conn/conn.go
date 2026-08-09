@@ -143,6 +143,22 @@ type Conn struct {
 	connRecvWindow    int32  // bytes the peer can still send to us at the conn level (RFC 7540 §6.9.1)
 	connRefundPending uint32 // bytes consumed but not yet returned via WINDOW_UPDATE(stream=0)
 
+	// connRecvTarget and streamRecvTarget are the window sizes each refund
+	// restores its scope to. They start at the windows already in effect, so
+	// with auto-tuning off a refund returns exactly what was spent and nothing
+	// about the flow-control behaviour changes. recvWindowTuner raises them, and
+	// nothing ever lowers them — WINDOW_UPDATE can only add.
+	//
+	// Atomics rather than fields under fcMu because the per-stream target is
+	// read while holding Stream.mu and the connection one while holding fcMu; a
+	// scalar atomic composes with both without adding a lock-order edge.
+	connRecvTarget   atomic.Uint32
+	streamRecvTarget atomic.Uint32
+	// tuner samples the bandwidth-delay product and raises the two targets. nil
+	// when ConnOptions.AutoTuneRecvWindow is off. Touched only by the reader
+	// goroutine — see the concurrency note in windowtuner.go.
+	tuner *recvWindowTuner
+
 	// fcOutMu guards the outbound (peer-advertised) connection-level
 	// send window and is the locker for fcOutCond. peerConnSendWindow
 	// starts at 65535 (RFC §6.9.2 fixes this at handshake regardless
@@ -235,6 +251,11 @@ func NewClientConn(ctx context.Context, transport net.Conn, opts ConnOptions) (*
 		connRecvWindow:     int32(connInitialRecvWindow),
 		peerConnSendWindow: int32(connInitialRecvWindow),
 	}
+	// The targets start at the windows already in effect, so with auto-tuning
+	// off the refund arithmetic reduces exactly to "give back what was spent".
+	c.connRecvTarget.Store(connInitialRecvWindow)
+	c.streamRecvTarget.Store(opts.Settings.InitialWindowSize)
+	c.tuner = newRecvWindowTuner(opts, opts.Settings.InitialWindowSize)
 	c.goAwaySentLast.Store(goAwayNoneSent)
 	c.fcOutCond = sync.NewCond(&c.fcOutMu)
 	c.wbatch = newWriteBatcher(opts.GroupCommit, &c.wmu, wb)
@@ -1059,8 +1080,14 @@ func (c *Conn) onDataReceived(s *Stream, length uint32) error {
 	if !streamOverrun {
 		s.recvRefundPending += length
 		if s.recvRefundPending >= streamRefundThreshold(c.opts.Settings.InitialWindowSize) {
-			streamRefund = s.recvRefundPending
+			spent := s.recvRefundPending
 			s.recvRefundPending = 0
+			// Restore to the target, which equals what was spent until the tuner
+			// raises it — see refundIncrement. A stream opened before a raise
+			// catches up here, at its first refund, rather than at creation: the
+			// id is not assigned until SendHeaders, so there is no earlier
+			// moment a WINDOW_UPDATE could name it.
+			streamRefund = refundIncrement(c.streamRecvTarget.Load(), s.recvWindow, spent)
 			s.recvWindow += int32(streamRefund)
 		}
 	}
@@ -1089,6 +1116,20 @@ func (c *Conn) onDataReceived(s *Stream, length uint32) error {
 			return err
 		}
 	}
+	// Feed the frame to the window tuner and open a new sample when it asks. A
+	// failed probe is not escalated: it is an optimization, the transport error
+	// that caused it will surface on the next frame this connection has to
+	// write, and killing a healthy-looking connection over a PING it did not
+	// need would be a worse outcome than measuring nothing.
+	//
+	// accountConnRecvOnly does not feed the tuner. Its bytes arrived on a stream
+	// we had already reset, which is rare, and leaving them out only makes the
+	// sample smaller and the estimate more conservative.
+	if c.tuner != nil && c.tuner.onData(length) {
+		if err := c.writeBDPPing(); err != nil {
+			c.tuner.probeFailed()
+		}
+	}
 	return nil
 }
 
@@ -1108,12 +1149,38 @@ func (c *Conn) debitConnRecv(length uint32) (uint32, error) {
 	}
 	c.connRefundPending += length
 	if c.connRefundPending >= recvWindowRefundThreshold {
-		refund := c.connRefundPending
+		spent := c.connRefundPending
 		c.connRefundPending = 0
+		refund := refundIncrement(c.connRecvTarget.Load(), c.connRecvWindow, spent)
+		if refund == 0 {
+			return 0, nil
+		}
 		c.connRecvWindow += int32(refund)
 		return refund, nil
 	}
 	return 0, nil
+}
+
+// refundIncrement is the WINDOW_UPDATE increment that restores a receive window
+// to its target: what was spent, plus whatever the tuner has since added.
+//
+// While the target sits at the window the connection started with — which is
+// every connection with ConnOptions.AutoTuneRecvWindow off — target minus window
+// IS spent, so this reduces exactly to the classic "give back what was
+// consumed" and the flow-control behaviour is unchanged.
+//
+// A zero target means none was ever published, which is the hand-constructed
+// Conn the unit tests drive directly. Those get the classic answer too, for the
+// same reason writeBatcher's methods are nil-receiver-safe: a Conn assembled
+// without its constructor must not silently lose a protocol obligation.
+func refundIncrement(target uint32, window int32, spent uint32) uint32 {
+	if target == 0 {
+		return spent
+	}
+	if inc := int32(target) - window; inc > 0 {
+		return uint32(inc)
+	}
+	return 0
 }
 
 // accountConnRecvOnly charges the connection-level recv window for a DATA frame
@@ -1603,9 +1670,37 @@ func (c *Conn) writePingAck(payload [8]byte) error {
 	return c.flushWrite()
 }
 
+// writeBDPPing opens a bandwidth-delay-product sample by writing the tuner's
+// PING and flushing it: the sample is the DATA that arrives before its ACK, so
+// a PING left in the write buffer would measure the buffer rather than the
+// link. Called from the reader goroutine, which already takes wmu on this path
+// for WINDOW_UPDATE.
+func (c *Conn) writeBDPPing() error {
+	if c.closed.Load() {
+		return ErrConnClosed
+	}
+	c.wmu.Lock()
+	defer c.wmu.Unlock()
+	if err := c.fr.WritePing(false, bdpPingPayload); err != nil {
+		return err
+	}
+	c.bumpFramesSent()
+	return c.flushWrite()
+}
+
 // deliverPingAck signals any Ping call waiting for payload.
 // Unsolicited ACKs (no matching waiter) are silently ignored.
 func (c *Conn) deliverPingAck(payload [8]byte) {
+	// The tuner's own PING is answered here rather than by a waiter: it has no
+	// caller to wake, only a sample to close. Conn.Ping numbers its payloads
+	// from a counter, so it can never register a waiter under this key and no
+	// application ping is being stolen.
+	if payload == bdpPingPayload {
+		if c.tuner != nil {
+			c.tuner.onAck(c)
+		}
+		return
+	}
 	c.pingMu.Lock()
 	ch, ok := c.pingWaiters[payload]
 	if ok {

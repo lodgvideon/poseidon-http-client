@@ -117,6 +117,38 @@ type ConnOptions struct {
 	// write-error semantics. Trades a bounded amount of client-side batching
 	// for throughput; leave off for latency-fidelity-critical measurements.
 	GroupCommit bool
+
+	// AutoTuneRecvWindow enables bandwidth-delay-product tuning of the receive
+	// windows (opt-in, default off).
+	//
+	// RFC 9113 §6.5.2 fixes both receive windows at 65535 bytes until an
+	// endpoint raises them, which limits a connection to one window per round
+	// trip — roughly 6.5 MB/s in total at 10 ms RTT, no matter how fast the link
+	// or the CPU is. It is invisible on loopback and binding on any real
+	// network. With this on, the connection measures how much a peer delivers in
+	// one round trip (a PING, and the DATA that arrives before its ACK) and
+	// grows both windows to twice that, up to MaxRecvWindow. Windows only ever
+	// grow, and probing backs off once growth stops.
+	//
+	// It costs one PING per round trip while a transfer is ramping, and nothing
+	// once the window is no longer the constraint. Leave it off to hold the
+	// protocol default, which is also what a latency-fidelity measurement of a
+	// default-configured peer wants.
+	AutoTuneRecvWindow bool
+
+	// MaxRecvWindow caps what AutoTuneRecvWindow may grow a window to. It has no
+	// effect when auto-tuning is off.
+	//
+	// Zero derives the cap from the per-stream event budget:
+	// StreamEventBuffer x Settings.MaxFrameSize, which is the memory this
+	// connection has already committed to buffering for one stream. Growing only
+	// that far is what keeps auto-tuning from making the event-channel overflow
+	// reset (see Stream.push) any likelier than the configured buffer already
+	// does. Raise it only alongside StreamEventBuffer.
+	//
+	// Values above 64 MiB are clamped, and a value below the window already in
+	// effect is ignored.
+	MaxRecvWindow uint32
 }
 
 func (o ConnOptions) defaulted() ConnOptions {
