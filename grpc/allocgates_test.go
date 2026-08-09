@@ -45,6 +45,21 @@ func TestInvokeInto_AllocsPerCall(t *testing.T) {
 		t.Errorf("InvokeInto allocates %.1f per call against Invoke's %.1f — dst is not being reused",
 			withReuse, withCopy)
 	}
+
+	// An absolute ceiling as well as the relative check. Without it the gate
+	// passes on any regression that hurts both forms equally: dropping
+	// DiscardMetadata from Invoke puts four allocations back per call and the
+	// comparison above never notices, because InvokeInto grows by the same four.
+	// Same shape as unaryTransportWrites — when the number improves, lower it.
+	const unaryAllocCeiling = 6
+	if withCopy > unaryAllocCeiling {
+		t.Errorf("Invoke allocates %.1f per call, ceiling %d — a per-RPC allocation came back",
+			withCopy, unaryAllocCeiling)
+	}
+	if withCopy < unaryAllocCeiling {
+		t.Errorf("Invoke allocates only %.1f per call, below the recorded %d: the path improved "+
+			"— lower unaryAllocCeiling to lock the win in", withCopy, unaryAllocCeiling)
+	}
 }
 
 // TestRecvInto_AllocsPerMessage is the gate. AllocsPerRun counts the whole

@@ -2,7 +2,9 @@ package grpc
 
 import (
 	"errors"
+	"fmt"
 	"net/http"
+	"sync"
 	"testing"
 )
 
@@ -125,6 +127,69 @@ func TestDiscardMetadata_HeaderAndTrailerAreNil(t *testing.T) {
 	}
 	if s.Status().Code != OK {
 		t.Errorf("status = %v, want OK", s.Status().Code)
+	}
+}
+
+// TestDiscardMetadata_ConcurrentStatusesDoNotCross is the gate for the hazard
+// this option creates: with no copy, finish reads a block that belongs to a
+// pooled slab, and returning that slab one line too early is invisible in a
+// single-threaded test — the bytes are still there because nothing has reused
+// them yet.
+//
+// Many concurrent calls on one connection make the pool actually recycle, so a
+// slab returned before it is read gets overwritten by another call's block and
+// one RPC reports another's message.
+func TestDiscardMetadata_ConcurrentStatusesDoNotCross(t *testing.T) {
+	srv, cfg := startGRPCServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Echo the caller's marker back as the status message, so every call has
+		// a distinct one and a crossed slab is visible as a mismatch.
+		marker := r.Header.Get("x-marker")
+		srvBeginResponse(w)
+		srvFinish(w, PermissionDenied, "denied-for-"+marker)
+	}))
+	defer srv.Close()
+
+	cc := dialGRPC(t, srv, cfg)
+	ctx := t.Context()
+
+	const workers, perWorker = 8, 25
+	errs := make(chan error, workers*perWorker)
+	var wg sync.WaitGroup
+	wg.Add(workers)
+	for w := 0; w < workers; w++ {
+		go func(w int) {
+			defer wg.Done()
+			for i := 0; i < perWorker; i++ {
+				marker := fmt.Sprintf("%d-%d", w, i)
+				md, err := AppendMetadata(nil, "x-marker", []byte(marker))
+				if err != nil {
+					errs <- err
+					return
+				}
+				_, err = cc.Invoke(ctx, "/t.S/M", []byte("q"), md)
+				var st *Status
+				if !errors.As(err, &st) {
+					errs <- fmt.Errorf("%s: error = %T %v, want *Status", marker, err, err)
+					continue
+				}
+				if want := "denied-for-" + marker; st.Message != want {
+					errs <- fmt.Errorf("%s: got status message %q, want %q — a pooled header "+
+						"slab was read after it went back", marker, st.Message, want)
+				}
+			}
+		}(w)
+	}
+	wg.Wait()
+	close(errs)
+	n := 0
+	for err := range errs {
+		if n < 5 {
+			t.Error(err)
+		}
+		n++
+	}
+	if n > 5 {
+		t.Errorf("... and %d more", n-5)
 	}
 }
 
