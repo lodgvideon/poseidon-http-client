@@ -365,18 +365,24 @@ func (s *Stream) acquireBufs() {
 	}
 	s.bufs = b
 	s.sendBuf = b.send[:0]
-	s.dec.buf = b.dec[:0]
+	s.dec.own = b.dec[:0]
+	s.dec.buf = s.dec.own
 }
 
 // releaseBufs returns the buffers, dropping either one that grew past the cap.
 // Called once, from Close's sync.Once, so there is no double-Put to guard.
 func (s *Stream) releaseBufs() {
+	// End any borrow first: a decoder still aliasing a DATA chunk holds that
+	// chunk's pooled slab, and dropping the decoder without releasing it would
+	// keep the buffer out of circulation for good.
+	s.dec.release()
+
 	b := s.bufs
 	if b == nil {
 		return
 	}
 	s.bufs = nil
-	b.send, b.dec = s.sendBuf[:0], s.dec.buf[:0]
+	b.send, b.dec = s.sendBuf[:0], s.dec.own[:0]
 	if cap(b.send) > maxPooledStreamBuf {
 		b.send = nil
 	}
@@ -386,7 +392,7 @@ func (s *Stream) releaseBufs() {
 	// Drop this stream's own view of them first: after the Put they belong to
 	// whoever draws them next, and a stale reference must not be able to reach
 	// through this struct to memory another RPC is writing.
-	s.sendBuf, s.dec.buf = nil, nil
+	s.sendBuf, s.dec.buf, s.dec.own = nil, nil, nil
 	streamBufPool.Put(b)
 }
 
@@ -434,8 +440,14 @@ func (s *Stream) pump(ctx context.Context) error {
 		s.onHeaders(ev)
 
 	case conn.EventData:
-		s.dec.Push(ev.Data)
-		putDataSlab(ev.DataSlab)
+		// Borrow the chunk when nothing is pending, so a DATA frame carrying a
+		// whole message is parsed in place instead of copied. The decoder then
+		// owns the slab and returns it when the borrow ends — see the ownership
+		// rule on PushBorrowed.
+		if !s.dec.PushBorrowed(ev.Data, ev.DataSlab) {
+			s.dec.Push(ev.Data)
+			putDataSlab(ev.DataSlab)
+		}
 		if ev.EndStream {
 			// DATA carrying END_STREAM means no trailers follow, so the
 			// server never sent grpc-status.

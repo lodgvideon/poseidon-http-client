@@ -66,9 +66,13 @@ func TestStreamBufs_ReleaseKeepsCapacity(t *testing.T) {
 		t.Fatalf("NewStream: %v", err)
 	}
 	// Grow both buffers the way a real call does, staying under the pool cap.
+	// The decoder grows through Push rather than by assigning its field: which
+	// field carries the pooled capacity is an internal detail that has already
+	// moved once (dec.buf -> dec.own when the borrow path landed), and a test
+	// that reaches for it breaks on the refactor instead of on the behaviour.
 	s.sendBuf = append(s.sendBuf[:0], bytes.Repeat([]byte{'x'}, 2048)...)
-	s.dec.buf = append(s.dec.buf[:0], bytes.Repeat([]byte{'y'}, 4096)...)
-	wantSend, wantDec := cap(s.sendBuf), cap(s.dec.buf)
+	s.dec.Push(bytes.Repeat([]byte{'y'}, 4096))
+	wantSend, wantDec := cap(s.sendBuf), cap(s.dec.own)
 
 	b := s.bufs
 	_ = s.Close()
