@@ -60,6 +60,10 @@ type Stream struct {
 	// closed connection, a malformed message). It outranks status.
 	err error
 
+	// bufs is the pooled pair backing sendBuf and dec.buf, returned to the pool
+	// by Close. nil when this stream was built without one.
+	bufs *streamBufs
+
 	closeOnce sync.Once
 	// closed is read by every method, so it cannot live under sendMu or in the
 	// receive-side state. conn recycles a Stream into its pool on Close once
@@ -325,8 +329,65 @@ func (s *Stream) Close() error {
 	s.closeOnce.Do(func() {
 		s.closed.Store(true)
 		err = s.s.Close()
+		s.releaseBufs()
 	})
 	return err
+}
+
+// maxPooledStreamBuf bounds what a stream may hand back. A call that received a
+// 64 MiB message would otherwise park 64 MiB in the pool for the life of the
+// process on the strength of one outlier.
+const maxPooledStreamBuf = 64 << 10
+
+// streamBufs is the pair of buffers a Stream would otherwise regrow from zero on
+// every RPC: the send-side length-prefix scratch and the decoder's reassembly
+// buffer.
+//
+// The BUFFERS are pooled and the Stream is not, which is the whole design. A
+// pooled Stream would have to re-arm its closed flag for the next owner, and a
+// caller holding one from a finished RPC would then pass every guard and read
+// the next call's messages — the same shape as issue #370 one layer down, which
+// cost an API change to close. Leaving the struct alone keeps closed a permanent
+// latch: once Close has run, every method on that Stream refuses forever, so a
+// stale reference can never reach the buffers this pool hands to someone else.
+type streamBufs struct {
+	send []byte
+	dec  []byte
+}
+
+var streamBufPool = sync.Pool{New: func() any { return new(streamBufs) }}
+
+// acquireBufs attaches pooled buffers to the stream.
+func (s *Stream) acquireBufs() {
+	b, _ := streamBufPool.Get().(*streamBufs)
+	if b == nil {
+		return
+	}
+	s.bufs = b
+	s.sendBuf = b.send[:0]
+	s.dec.buf = b.dec[:0]
+}
+
+// releaseBufs returns the buffers, dropping either one that grew past the cap.
+// Called once, from Close's sync.Once, so there is no double-Put to guard.
+func (s *Stream) releaseBufs() {
+	b := s.bufs
+	if b == nil {
+		return
+	}
+	s.bufs = nil
+	b.send, b.dec = s.sendBuf[:0], s.dec.buf[:0]
+	if cap(b.send) > maxPooledStreamBuf {
+		b.send = nil
+	}
+	if cap(b.dec) > maxPooledStreamBuf {
+		b.dec = nil
+	}
+	// Drop this stream's own view of them first: after the Put they belong to
+	// whoever draws them next, and a stale reference must not be able to reach
+	// through this struct to memory another RPC is writing.
+	s.sendBuf, s.dec.buf = nil, nil
+	streamBufPool.Put(b)
 }
 
 // terminal converts the recorded end-of-stream state into what Recv returns:
