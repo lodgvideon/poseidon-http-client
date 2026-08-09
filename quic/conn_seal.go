@@ -64,7 +64,7 @@ func (c *Conn) flushRetransmits(sp int) error {
 			}
 			rf.offset = limit
 		}
-		pkt, err := c.sealPacket(sp, rf.encode(nil), true, []retransFrame{rf}, false)
+		pkt, err := c.sealPacket(sp, rf.encode(nil), true, &rf, false)
 		if err != nil {
 			_ = c.flushBatch(&batch) // best-effort: send what was already sealed
 			return err
@@ -141,7 +141,7 @@ func (c *Conn) flush() error {
 			frames = AppendPing(frames)
 			c.probePending, c.handshakeProbe = false, false
 		}
-		var retrans []retransFrame
+		var retrans *retransFrame
 		hasCrypto := len(c.pendingCrypto[sp]) > 0
 		if hasCrypto {
 			off := c.cryptoOffset[sp]
@@ -149,7 +149,7 @@ func (c *Conn) flush() error {
 			frames = AppendCrypto(frames, off, c.pendingCrypto[sp])
 			c.cryptoOffset[sp] += uint64(len(c.pendingCrypto[sp]))
 			c.pendingCrypto[sp] = c.pendingCrypto[sp][:0]
-			retrans = []retransFrame{{kind: retransCrypto, offset: off, data: data}}
+			retrans = &retransFrame{kind: retransCrypto, offset: off, data: data}
 		}
 		// A packet carrying CRYPTO, a credit grant, or a PING probe is ack-eliciting.
 		pkt, err := c.sealPacket(sp, frames, hasCrypto || hasCtrl || hasProbe, retrans, padPath)
@@ -185,7 +185,7 @@ func (c *Conn) takePendingAck(sp int, frames []byte) []byte {
 // are padded to keep the packet long enough for the header-protection sample
 // (RFC 9001 §5.4.2). Assumes c.mu is held (it advances sendPN and touches the
 // sealer/pacing/congestion state, all guarded by c.mu).
-func (c *Conn) sealPacket(sp int, frames []byte, ackEliciting bool, retrans []retransFrame, padTo1200 bool) ([]byte, error) {
+func (c *Conn) sealPacket(sp int, frames []byte, ackEliciting bool, retrans *retransFrame, padTo1200 bool) ([]byte, error) {
 	// AEAD confidentiality limit (RFC 9001 §6.6): this client cannot initiate its
 	// own key update, so once it has sealed the limit of 1-RTT packets under the
 	// current key it must stop and close with AEAD_LIMIT_REACHED rather than seal

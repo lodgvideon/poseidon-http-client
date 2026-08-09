@@ -83,7 +83,9 @@ func (c *Conn) handleRetry(hdr Header, pkt []byte) {
 // number, so this only moves the frames to the retransmit queue.
 func (c *Conn) requeueInitialForRetry() {
 	for pn, p := range c.sent[spaceInitial].packets {
-		c.retransQueue[spaceInitial] = append(c.retransQueue[spaceInitial], p.frames...)
+		if p.hasFrame {
+			c.retransQueue[spaceInitial] = append(c.retransQueue[spaceInitial], p.frame)
+		}
 		if p.ackEliciting {
 			c.removeInFlight(p.size)
 		}

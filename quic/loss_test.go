@@ -20,8 +20,8 @@ func (h *cryptoCollector) OnCrypto(offset uint64, data []byte) error {
 	return nil
 }
 
-func streamFrame(streamID, offset uint64, data string) []retransFrame {
-	return []retransFrame{{kind: retransStream, streamID: streamID, offset: offset, data: []byte(data)}}
+func streamFrame(streamID, offset uint64, data string) *retransFrame {
+	return &retransFrame{kind: retransStream, streamID: streamID, offset: offset, data: []byte(data)}
 }
 
 // TestConformance_RFC9002_Sec611_PacketThresholdLoss: with pn 3 acknowledged,
