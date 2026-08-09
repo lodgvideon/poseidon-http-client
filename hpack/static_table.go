@@ -77,27 +77,66 @@ var staticTable = [62]staticEntry{
 // staticTableLen is the number of valid entries (1..staticTableLen inclusive).
 const staticTableLen = 61
 
-// staticIndex performs a linear scan over the 61-entry static table.
+// staticNameEntry is every static-table row sharing one field name.
+type staticNameEntry struct {
+	// first is the lowest index carrying this name — what a name-only match
+	// returns, per HPACK encoder convention.
+	first uint64
+	// vals holds each (value, index) for this name in ASCENDING index order, so
+	// the first value match found is also the lowest-numbered one.
+	vals []staticVal
+}
+
+type staticVal struct {
+	value []byte
+	idx   uint64
+}
+
+// staticByName indexes the static table by field name, built once at init.
+//
+// It replaces a linear scan of all 61 rows per field. A gRPC request carries
+// nine fields, so that scan cost ~549 bytes.Equal calls per request and was the
+// bulk of the warm encode (#452).
+//
+// Keyed by name only, deliberately. A name+value key would have to be built per
+// lookup, and concatenating two byte slices allocates — which this package's
+// absolute zero-alloc gate forbids. Looking up `m[string(name)]` does NOT
+// allocate (the compiler elides the conversion for a map read), and the
+// remaining value comparison walks a list that is one or two entries for every
+// name except `:status`, which has seven.
+var staticByName map[string]staticNameEntry
+
+func init() {
+	staticByName = make(map[string]staticNameEntry, staticTableLen)
+	for i := 1; i <= staticTableLen; i++ {
+		e := staticTable[i]
+		key := string(e.name)
+		ent, seen := staticByName[key]
+		if !seen {
+			ent.first = uint64(i)
+		}
+		ent.vals = append(ent.vals, staticVal{value: e.value, idx: uint64(i)})
+		staticByName[key] = ent
+	}
+}
+
+// staticIndex looks up a field in the static table.
 // Returns (idx, fullMatch) where idx == 0 means no name match;
 // fullMatch == true means name AND value match.
 //
 // For a name-only match, returns the FIRST entry whose name matches (lowest
 // index), per HPACK encoder convention.
 func staticIndex(name, value []byte) (uint64, bool) {
-	var nameOnly uint64
-	for i := 1; i <= staticTableLen; i++ {
-		e := staticTable[i]
-		if !bytes.Equal(e.name, name) {
-			continue
-		}
-		if bytes.Equal(e.value, value) {
-			return uint64(i), true
-		}
-		if nameOnly == 0 {
-			nameOnly = uint64(i)
+	ent, ok := staticByName[string(name)]
+	if !ok {
+		return 0, false
+	}
+	for i := range ent.vals {
+		if bytes.Equal(ent.vals[i].value, value) {
+			return ent.vals[i].idx, true
 		}
 	}
-	return nameOnly, false
+	return ent.first, false
 }
 
 
