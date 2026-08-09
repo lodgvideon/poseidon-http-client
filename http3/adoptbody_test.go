@@ -44,22 +44,36 @@ func TestFrameReader_PayloadCapIsItsLength(t *testing.T) {
 // this, and it would break it invisibly: the body would be overwritten by
 // whatever arrived next, with every existing test still green.
 func TestFrameReader_FeedDoesNotRewriteConsumedBytes(t *testing.T) {
-	var fr FrameReader
 	body := bytes.Repeat([]byte{'A'}, 512)
-	fr.Feed(AppendData(nil, body))
+	wire := AppendData(nil, body)
+	next := AppendData(nil, bytes.Repeat([]byte{'Z'}, 4096))
 
+	var fr FrameReader
+	fr.Feed(wire)
 	_, payload, err := fr.ReadFrame()
 	if err != nil {
 		t.Fatalf("ReadFrame: %v", err)
 	}
-	// Hold the payload the way dispatchFrame now holds the body, then keep
-	// feeding — enough to force the reader's buffer to grow several times.
-	adopted := payload
-	for i := 0; i < 8; i++ {
-		fr.Feed(bytes.Repeat([]byte{'Z'}, 4096))
+	adopted := payload // held the way dispatchFrame now holds the body
+
+	// Leave a PARTIAL second frame buffered before feeding more. The live window
+	// must be non-empty, or there is nothing for a compacting Feed to move and
+	// the test would pass against the very change it exists to catch.
+	fr.Feed(next[:100])
+	if _, _, err := fr.ReadFrame(); err != ErrNeedMore {
+		t.Fatalf("ReadFrame on a partial frame = %v, want ErrNeedMore", err)
 	}
+	for off := 100; off < len(next); off += 512 {
+		end := off + 512
+		if end > len(next) {
+			end = len(next)
+		}
+		fr.Feed(next[off:end])
+	}
+
 	if !bytes.Equal(adopted, body) {
-		t.Errorf("an adopted payload changed under later Feeds: got %d bytes of %q..., want %d of 'A'",
+		t.Errorf("an adopted payload changed under later Feeds — a compacting Feed would "+
+			"move the live window back over it: got %d bytes starting %q, want %d of 'A'",
 			len(adopted), adopted[:min(8, len(adopted))], len(body))
 	}
 }
