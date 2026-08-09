@@ -1,13 +1,22 @@
-// Command loadgen is a minimal HTTP/2 load generator built on the poseidon
-// client. It spins up a pooled client against a single target, fans out N
-// worker goroutines that issue GET requests for a fixed duration under an
-// optional global QPS cap, then prints a latency + outcome summary derived
-// from the client's built-in MetricsSnapshot.
+// Command loadgen is a minimal load generator built on the poseidon client. It
+// spins up a pooled client against a single target, fans out N worker goroutines
+// that issue GET requests for a fixed duration under an optional global QPS cap,
+// then prints a latency + outcome summary derived from the client's built-in
+// MetricsSnapshot.
+//
+// -transport selects h2 (the default) or h3. The h3 arm exists for the
+// syscall-floor measurement in #361: HTTP/3 puts one UDP socket behind each
+// connection, so the many-connections-times-small-requests regime — where
+// nothing coalesces and GSO/GRO have nothing to amortise — is only reachable
+// there.
 //
 // Example:
 //
 //	go run ./examples/loadgen -url https://localhost:8443/ \
 //	    -conns 4 -workers 64 -duration 30s -rps 5000
+//
+//	go run ./examples/loadgen -transport h3 -url https://localhost:443/ \
+//	    -conns 10000 -workers 256 -duration 30s
 package main
 
 import (
@@ -26,13 +35,17 @@ import (
 
 func main() {
 	var (
-		target   = flag.String("url", "https://localhost:8443/", "target URL (https://host:port/path)")
-		conns    = flag.Int("conns", 4, "max connections in the pool")
-		workers  = flag.Int("workers", 64, "concurrent worker goroutines")
-		duration = flag.Duration("duration", 30*time.Second, "test duration")
-		rps      = flag.Float64("rps", 0, "global request rate cap (0 = unlimited)")
+		target    = flag.String("url", "https://localhost:8443/", "target URL (https://host:port/path)")
+		conns     = flag.Int("conns", 4, "max connections in the pool")
+		workers   = flag.Int("workers", 64, "concurrent worker goroutines")
+		duration  = flag.Duration("duration", 30*time.Second, "test duration")
+		rps       = flag.Float64("rps", 0, "global request rate cap (0 = unlimited)")
+		transport = flag.String("transport", "h2", "transport: h2 or h3")
 	)
 	flag.Parse()
+	if *transport != "h2" && *transport != "h3" {
+		log.Fatalf("loadgen: -transport must be h2 or h3, got %q", *transport)
+	}
 
 	u, err := url.Parse(*target)
 	if err != nil {
@@ -60,19 +73,40 @@ func main() {
 		Config: &tls.Config{InsecureSkipVerify: true}, //nolint:gosec // example/test target
 	}
 
-	c, err := client.NewPoolClient(
-		addr,
-		dialer,
-		client.PoolOptions{
-			MaxConnsPerHost:   *conns,
-			MaxStreamsPerConn: 250,
-			HealthCheckPeriod: 5 * time.Second,
-		},
-		client.WithRateLimit(*rps, 0),
-		client.WithHooks(hooks),
-	)
+	pool := client.PoolOptions{
+		MaxConnsPerHost:   *conns,
+		MaxStreamsPerConn: 250,
+		HealthCheckPeriod: 5 * time.Second,
+	}
+
+	var c *client.Client
+	if *transport == "h3" {
+		// TransportH3Pool owns its own QUIC dialing, so it takes the TLS config
+		// directly rather than a conn.Dialer.
+		//
+		// ServerName is set explicitly. Without it the ClientHello carries no
+		// SNI, and a server that selects its certificate by name closes the
+		// handshake — which looks like a QUIC fault rather than a missing field.
+		host := u.Hostname()
+		c, err = client.NewClient(client.ClientOptions{
+			Addr:      addr,
+			Transport: client.TransportH3Pool,
+			Pool:      &pool,
+			TLSConfig: &tls.Config{
+				ServerName:         host,
+				InsecureSkipVerify: true, //nolint:gosec // example/test target
+			},
+			Hooks:              hooks,
+			RateLimitPerSecond: *rps,
+		})
+	} else {
+		c, err = client.NewPoolClient(addr, dialer, pool,
+			client.WithRateLimit(*rps, 0),
+			client.WithHooks(hooks),
+		)
+	}
 	if err != nil {
-		log.Fatalf("loadgen: build client: %v", err)
+		log.Fatalf("loadgen: build %s client: %v", *transport, err)
 	}
 	defer func() { _ = c.Close() }()
 
