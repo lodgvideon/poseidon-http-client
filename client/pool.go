@@ -558,6 +558,11 @@ func (p *Pool) reclaim(reply chan acquireResp) {
 //
 // Reads mc.streamCap (cached) instead of taking c.psMu.RLock() per call.
 // The cache is refreshed in the dialDoneCh handler and on every tick.
+// It stops at the first idle connection, which is exactly what a full scan would
+// return: zero is the smallest possible active count and the comparison is
+// strict, so ties already go to the earliest connection in the slice. See the H3
+// twin in h3_pool.go — the same loop, the same reasoning, and #448 for the
+// profile that motivated it.
 func (p *Pool) pickLeastLoaded(conns []*managedConn) *managedConn {
 	var best *managedConn
 	for _, mc := range conns {
@@ -566,6 +571,9 @@ func (p *Pool) pickLeastLoaded(conns []*managedConn) *managedConn {
 		}
 		if mc.active >= mc.streamCap {
 			continue
+		}
+		if mc.active == 0 {
+			return mc
 		}
 		if best == nil || mc.active < best.active {
 			best = mc
