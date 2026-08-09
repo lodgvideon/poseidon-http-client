@@ -3,6 +3,7 @@ package conn
 import (
 	"bytes"
 	"context"
+	"errors"
 	"sync"
 	"testing"
 	"time"
@@ -214,8 +215,50 @@ func TestStaleRef_ParkedWriterWakesOntoTheNextRequest(t *testing.T) {
 
 	for _, fh := range parseDataFrames(t, out.snapshot()[before:]) {
 		if fh.streamID == 7 {
-			t.Errorf("request A's parked writer emitted DATA on stream 7: its body bytes were "+
+			t.Errorf("request A's parked writer emitted DATA on stream 7: its body bytes were " +
 				"spliced into request B's stream")
+		}
+	}
+}
+
+// TestStaleRef_GenerationOnlyEverIncreases guards the trap the generation field
+// sets for its own maintainers.
+//
+// resetForPoolLocked is a wall of zeroing assignments — id, w, closed,
+// localEnded, every per-response counter — and gen is the one line in it that
+// must INCREMENT. A future tidy-up that makes it match its neighbours and store
+// 0 collapses every lifetime onto one value and silently reopens #370.
+//
+// The single-recycle tests do not catch that: the first Store(0) still moves gen
+// off the seed, so the handle minted before it still mismatches. It only bites
+// from the second recycle onward, which is why this asserts the invariant
+// directly rather than another scenario.
+func TestStaleRef_GenerationOnlyEverIncreases(t *testing.T) {
+	c, _ := staleRefConn()
+	s := c.allocStream(4, 65535)
+
+	seen := []uint64{s.gen.Load()}
+	if seen[0] == 0 {
+		t.Fatal("a fresh stream has generation 0; the zero StreamRef would match it")
+	}
+	for i := 0; i < 4; i++ {
+		reallocInPlace(c, s, uint32(5+2*i), 65535)
+		refBefore := s.ref()
+		retireAndRecycle(t, s)
+		g := s.gen.Load()
+		if g <= seen[len(seen)-1] {
+			t.Fatalf("recycle %d left generation %d, previous %d — it must strictly increase, "+
+				"or two lifetimes share a value and a stale handle passes",
+				i, g, seen[len(seen)-1])
+		}
+		if g == 0 {
+			t.Fatalf("recycle %d zeroed the generation", i)
+		}
+		seen = append(seen, g)
+		// And the handle from the lifetime just retired stays refused, however
+		// many recycles have happened.
+		if _, err := refBefore.Recv(t.Context()); !errors.Is(err, ErrStaleStream) {
+			t.Fatalf("recycle %d: handle from the retired lifetime = %v, want ErrStaleStream", i, err)
 		}
 	}
 }
