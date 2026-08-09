@@ -91,6 +91,11 @@ type h3Pool struct {
 	// substitute a fake so no live QUIC connection is required.
 	dialFn func(ctx context.Context, addr string, tlsConfig *tls.Config) (h3Client, error)
 
+	// pickCursor rotates where pickLeastLoaded starts scanning, so consecutive
+	// requests land on different idle connections instead of piling onto the
+	// first. Actor-owned: every pick runs on the pool goroutine.
+	pickCursor int
+
 	// channels
 	acquireCh  chan h3AcquireReq
 	releaseCh  chan h3ReleaseMsg
@@ -421,14 +426,35 @@ func (p *h3Pool) reclaim(reply chan h3AcquireResp) {
 
 // pickLeastLoaded returns the live, under-cap mc with smallest active count, or
 // nil if none qualifies. Reads mc.streamCap (cached) so it never blocks.
+//
+// It stops at the first idle connection. That is not an approximation: zero is
+// the smallest an active count can be, and the comparison below is strict, so
+// ties go to the earliest connection in the slice — meaning a full scan would
+// return this very connection. The early return is therefore exactly equivalent,
+// and TestPickLeastLoaded_EarlyReturnMatchesFullScan checks it against a
+// reference implementation over randomised pools.
+//
+// It matters because this runs once per request over every connection, and each
+// visit costs two calls into the H3 client. With 10k connections a profile put
+// this loop's callees at ~19% of all CPU (#448).
 func (p *h3Pool) pickLeastLoaded(conns []*h3ManagedConn) *h3ManagedConn {
+	n := len(conns)
+	if n == 0 {
+		return nil
+	}
+	start := p.pickCursor % n
 	var best *h3ManagedConn
-	for _, mc := range conns {
+	for k := 0; k < n; k++ {
+		mc := conns[(start+k)%n]
 		if !mc.cl.Alive() || mc.cl.GoingAway() {
 			continue // dead, or GOAWAY'd and refusing every new request (§5.2)
 		}
 		if mc.active >= mc.streamCap {
 			continue
+		}
+		if mc.active == 0 {
+			p.pickCursor = (start + k + 1) % n
+			return mc
 		}
 		if best == nil || mc.active < best.active {
 			best = mc

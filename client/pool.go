@@ -140,6 +140,11 @@ type Pool struct {
 	connOpts conn.ConnOptions
 	addr     string
 
+	// pickCursor rotates where pickLeastLoaded starts, so consecutive requests
+	// land on different idle connections instead of piling onto the first.
+	// Actor-owned: every pick runs on the pool goroutine.
+	pickCursor int
+
 	// channels
 	acquireCh  chan acquireReq
 	releaseCh  chan releaseMsg
@@ -558,14 +563,29 @@ func (p *Pool) reclaim(reply chan acquireResp) {
 //
 // Reads mc.streamCap (cached) instead of taking c.psMu.RLock() per call.
 // The cache is refreshed in the dialDoneCh handler and on every tick.
+// It stops at the first idle connection, which is exactly what a full scan would
+// return: zero is the smallest possible active count and the comparison is
+// strict, so ties already go to the earliest connection in the slice. See the H3
+// twin in h3_pool.go — the same loop, the same reasoning, and #448 for the
+// profile that motivated it.
 func (p *Pool) pickLeastLoaded(conns []*managedConn) *managedConn {
+	n := len(conns)
+	if n == 0 {
+		return nil
+	}
+	start := p.pickCursor % n
 	var best *managedConn
-	for _, mc := range conns {
+	for k := 0; k < n; k++ {
+		mc := conns[(start+k)%n]
 		if !mc.c.IsAlive() {
 			continue
 		}
 		if mc.active >= mc.streamCap {
 			continue
+		}
+		if mc.active == 0 {
+			p.pickCursor = (start + k + 1) % n
+			return mc
 		}
 		if best == nil || mc.active < best.active {
 			best = mc
