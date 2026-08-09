@@ -87,6 +87,50 @@ func defaultSensitiveField(name []byte) bool {
 	return false
 }
 
+// isTChar reports whether c is an RFC 9110 §5.6.2 token character.
+func isTChar(c byte) bool {
+	switch {
+	case c >= 'a' && c <= 'z', c >= 'A' && c <= 'Z', c >= '0' && c <= '9':
+		return true
+	}
+	switch c {
+	case '!', '#', '$', '%', '&', '\'', '*', '+', '-', '.', '^', '_', '`', '|', '~':
+		return true
+	}
+	return false
+}
+
+// validContentSubtype checks Options.ContentSubtype. Empty is valid and means
+// no subtype.
+//
+// The subtype reaches a header value, and neither conn nor hpack validates
+// outbound fields, so this is the only gate between a caller's string and the
+// wire — a value carrying CR or LF there is a request-splitting vector at any
+// HTTP/1.1 downgrading hop, exactly as for metadata.
+func validContentSubtype(s string) error {
+	if s == "" {
+		return nil
+	}
+	for i := 0; i < len(s); i++ {
+		if !isTChar(s[i]) {
+			return fmt.Errorf("%w: ContentSubtype %q is not a token (RFC 9110 §5.6.2): "+
+				"byte %d is %q", ErrInvalidMetadata, s, i, s[i])
+		}
+	}
+	return nil
+}
+
+// contentTypeFor renders the request content-type once per connection.
+func contentTypeFor(subtype string) []byte {
+	if subtype == "" {
+		return valApplicationGRPC
+	}
+	out := make([]byte, 0, len(valApplicationGRPC)+1+len(subtype))
+	out = append(out, valApplicationGRPC...)
+	out = append(out, '+')
+	return append(out, subtype...)
+}
+
 // validMetadata checks one caller-supplied field end to end: a legal name, a
 // name the transport does not own, and a legal value. It is the single gate —
 // neither conn nor hpack validates on the send path (conn/validate.go covers
