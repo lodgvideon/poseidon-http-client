@@ -168,6 +168,32 @@ func newClientConn(c *conn.Conn, opts Options, owned bool) *ClientConn {
 	}
 }
 
+// Invoker is the method set that code built on top of this package consumes.
+//
+// ClientConn is concrete and is one HTTP/2 connection, so anything generated or
+// written against it is welded to that connection. The useful things to hand a
+// client are not always a *ClientConn: a pool or round-robin over several
+// connections (this package deliberately ships none — see docs/GRPC_GUIDE.md), a
+// wrapper adding per-call auth, retry or metrics, or a double so a client can be
+// unit-tested without a socket.
+//
+// It is a seam for substituting the CONNECTION, not an abstraction over
+// transports. NewStream still returns the concrete *Stream, so a substitute can
+// front unary calls but cannot fabricate a streaming one without a real
+// conn.Stream behind it — *Stream owns the send/receive lifetime contract, and
+// abstracting that is a much larger question than this interface answers.
+type Invoker interface {
+	// Invoke performs a unary RPC: one request message, one response message.
+	Invoke(ctx context.Context, method string, req []byte, md []conn.HeaderField, opts ...CallOption) ([]byte, error)
+	// NewStream opens a call for any of the streaming shapes.
+	NewStream(ctx context.Context, method string, md []conn.HeaderField, opts ...CallOption) (*Stream, error)
+}
+
+// The whole point of the interface is that the real connection satisfies it, so
+// the assertion is here rather than in a test: a signature change that breaks it
+// should fail the build, not a test run.
+var _ Invoker = (*ClientConn)(nil)
+
 // Dial establishes an HTTP/2 connection to addr and returns a ClientConn ready
 // for NewStream. The returned ClientConn owns the connection: Close closes it.
 func Dial(ctx context.Context, addr string, opts Options) (*ClientConn, error) {
