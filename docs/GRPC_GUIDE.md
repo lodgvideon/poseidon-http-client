@@ -180,9 +180,18 @@ exactly the input an attacker controls.
 
 Credentials never enter the HPACK dynamic table. `authorization`,
 `proxy-authorization` and `cookie` are marked sensitive automatically — that is
-a floor, and any other field can be marked by setting `Sensitive` on it
-directly. Without it a bearer token would be indexed once and then emitted as a
-one-byte reference on every later call over the same connection.
+a floor, and any other field can be marked by setting its `Indexing` field to
+`conn.IndexNever`:
+
+```go
+md := []conn.HeaderField{
+    {Name: []byte("x-api-key"), Value: []byte(key), Indexing: conn.IndexNever},
+}
+```
+
+`Sensitive()` reports that state but cannot set it; it is a method, not a
+field. Without `IndexNever` a bearer token would be indexed once and then
+emitted as a one-byte reference on every later call over the same connection.
 
 ## Message framing
 
