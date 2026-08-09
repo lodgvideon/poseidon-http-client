@@ -219,27 +219,56 @@ func benignHalfClose(err error) error {
 //		use(msg)
 //	}
 //
-// The returned slice is a fresh copy owned by the caller.
+// The returned slice is a fresh copy owned by the caller. RecvInto is the same
+// call without that allocation, for a caller that already has a buffer.
 func (s *Stream) Recv(ctx context.Context) ([]byte, error) {
+	return s.RecvInto(ctx, nil)
+}
+
+// RecvInto is Recv appending into dst instead of allocating, in the same
+// idiom as AppendMessage on the send side:
+//
+//	for {
+//		buf, err = s.RecvInto(ctx, buf[:0])
+//		if errors.Is(err, io.EOF) { break }   // status OK
+//		if err != nil { return err }
+//		use(buf)
+//	}
+//
+// The message is appended to dst[:0], so any length dst carries is discarded and
+// only its capacity is used. The result is caller-owned and stays valid across
+// later calls — unlike the decoder's own buffer, which the next Recv overwrites.
+//
+// Every other part of Recv's contract is unchanged: io.EOF for a call that ended
+// with status OK, a *Status for one that did not, and the sticky transport
+// failure that makes every later call report the same thing.
+//
+// On error the returned slice is dst[:0], not nil. That matters for the loop
+// above: the terminal iteration is an error, and returning nil there would hand
+// the caller's buffer to the garbage collector on every stream — which is the
+// allocation this method exists to avoid. Recv passes dst=nil and so still
+// returns nil, keeping its own contract exactly.
+func (s *Stream) RecvInto(ctx context.Context, dst []byte) ([]byte, error) {
+	dst = dst[:0]
 	if s.closed.Load() {
-		return nil, ErrStreamClosed
+		return dst, ErrStreamClosed
 	}
 	for {
 		msg, ok, err := s.dec.Next()
 		if err != nil {
-			return nil, s.fail(err)
+			return dst, s.fail(err)
 		}
 		if ok {
-			return append([]byte(nil), msg...), nil
+			return append(dst, msg...), nil
 		}
 		if s.err != nil {
-			return nil, s.err
+			return dst, s.err
 		}
 		if s.done {
-			return nil, s.terminal()
+			return dst, s.terminal()
 		}
 		if err := s.pump(ctx); err != nil {
-			return nil, err
+			return dst, err
 		}
 	}
 }
