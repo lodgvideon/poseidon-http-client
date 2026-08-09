@@ -66,6 +66,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **The UDP_GRO control message is parsed without allocating.**
+  `parseGROSegmentSize` handed the recvmsg ancillary data to
+  `syscall.ParseSocketControlMessage`, which appends every message it finds to a
+  slice — one heap allocation on exactly the reads UDP_GRO exists to produce.
+  Measured at 1.00 allocations per coalesced recvmsg, and 0 when no control
+  message is attached. The buffer is now walked in place: 0 either way.
+
+  The offsets still come from the stdlib's exported `CmsgLen`/`CmsgSpace`, so the
+  alignment rules are not hard-coded per GOARCH, and every field read out of the
+  kernel's buffer is bounds-checked first.
+
+  This is a site #348 does not name; it was found while fixing the ones it does.
+  Because the parse now reads a length the kernel wrote and indexes on it,
+  `TestParseGROSegmentSize_MatchesStdlib` diffs it against the implementation it
+  replaced across a table of layouts, `TestParseGROSegmentSize_MalformedYieldsZero`
+  covers the buffers a kernel would never produce, and `FuzzParseGROSegmentSize`
+  keeps the stdlib as an oracle on arbitrary bytes — 6.8M executions clean.
+
 - **The QUIC send path recycles the RFC 9000 §13.3 retransmit copies** (#347).
   Every STREAM chunk is copied out of the reusable frame scratch and retained so
   the frame can be re-sent at its original offset if the packet is lost. That copy

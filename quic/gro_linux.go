@@ -7,6 +7,7 @@ import (
 	"errors"
 	"io"
 	"syscall"
+	"unsafe"
 )
 
 // groCanCoalesce reports whether this platform can actually coalesce datagrams
@@ -95,7 +96,7 @@ func (g *GROState) recv(fd uintptr) bool {
 // receive path's PTO/idle timing and its non-blocking drain are unchanged.
 //
 // stdlib-only: the datagram is read with syscall.Recvmsg and the control message
-// parsed with syscall.ParseSocketControlMessage; no golang.org/x/sys.
+// parsed with the stdlib's own Cmsg offset helpers; no golang.org/x/sys.
 func RecvGRO(g *GROState, rc syscall.RawConn, fallback io.Reader, buf []byte) (n, segSize int, err error) {
 	if g == nil || rc == nil {
 		n, err = fallback.Read(buf)
@@ -124,21 +125,42 @@ func RecvGRO(g *GROState, rc syscall.RawConn, fallback io.Reader, buf []byte) (n
 // host-order int; a shorter body is read defensively as a u16 (a segment size is
 // MTU-bounded, so it never needs more than 16 bits). A malformed control buffer
 // yields 0, degrading to single-datagram processing.
+//
+// The buffer is walked here rather than handed to syscall.ParseSocketControlMessage
+// because that function appends every message to a slice, which is a heap
+// allocation on exactly the reads UDP_GRO exists to produce — measured at one per
+// coalesced recvmsg, and none when no control message is attached.
+//
+// Only exported Cmsg helpers are used for the offsets, so the alignment rules
+// stay the stdlib's on every GOARCH: CmsgLen(0) is the aligned header size, and
+// CmsgSpace(dataLen) is the aligned stride to the next message. Every field read
+// from the kernel's buffer is bounds-checked before use, and the length check is
+// written as l > len(oob)-i rather than i+l > len(oob) so a wild Len cannot
+// overflow the addition it is being checked by.
 func parseGROSegmentSize(oob []byte) int {
-	msgs, err := syscall.ParseSocketControlMessage(oob)
-	if err != nil {
-		return 0
-	}
-	for _, m := range msgs {
-		if m.Header.Level != solUDP || m.Header.Type != udpGRO {
-			continue
+	hdrLen := syscall.CmsgLen(0)
+	for i := 0; i+hdrLen <= len(oob); {
+		//nolint:gosec // overlay cmsghdr on the kernel's own aligned buffer
+		h := (*syscall.Cmsghdr)(unsafe.Pointer(&oob[i]))
+		l := int(h.Len)
+		if l < hdrLen || l > len(oob)-i {
+			return 0 // truncated or malformed: fall back to single-datagram processing
 		}
-		switch {
-		case len(m.Data) >= 4:
-			return int(binary.NativeEndian.Uint32(m.Data))
-		case len(m.Data) >= 2:
-			return int(binary.NativeEndian.Uint16(m.Data))
+		if h.Level == solUDP && h.Type == udpGRO {
+			data := oob[i+hdrLen : i+l]
+			switch {
+			case len(data) >= 4:
+				return int(binary.NativeEndian.Uint32(data))
+			case len(data) >= 2:
+				return int(binary.NativeEndian.Uint16(data))
+			}
+			return 0
 		}
+		step := syscall.CmsgSpace(l - hdrLen)
+		if step <= 0 {
+			return 0 // cannot advance; refuse to spin
+		}
+		i += step
 	}
 	return 0
 }
