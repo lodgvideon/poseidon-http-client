@@ -49,21 +49,81 @@ func AppendMessage(dst, msg []byte) ([]byte, error) {
 //
 // The zero decoder is ready to use and applies DefaultMaxMessageSize.
 type decoder struct {
-	buf []byte // pending bytes: buf[off:] is undelivered
+	// buf holds the pending bytes; buf[off:] is undelivered. It is either own,
+	// or — while borrowed is set — a chunk belonging to the caller.
+	buf []byte
 	off int
 	// max is the largest message accepted. Zero means DefaultMaxMessageSize.
 	max int
+
+	// own is the decoder's own growable buffer. Kept across borrows so its
+	// capacity survives them; buf aliases it whenever nothing is borrowed.
+	own []byte
+
+	// borrowed is the pooled slab backing buf while the decoder aliases a
+	// caller's chunk. See PushBorrowed for the ownership rule.
+	borrowed *[]byte
+	// borrowing distinguishes "borrowing a chunk whose slab is nil" (the pool
+	// was cold, so there is nothing to return) from "not borrowing".
+	borrowing bool
 }
+
+// PushBorrowed hands the decoder a DATA chunk WITHOUT copying it, for the common
+// case where one DATA frame carries whole messages. It reports whether the
+// borrow was taken; when it returns false the caller must fall back to Push.
+//
+// OWNERSHIP RULE. On a true return:
+//   - the decoder's pending bytes ALIAS chunk, so the caller must not write to
+//     it or reuse it;
+//   - the decoder owns slab and returns it to the pool itself, so the caller
+//     must NOT call putDataSlab;
+//   - the borrow ends at the next Push/PushBorrowed — which copies whatever is
+//     still undelivered into the decoder's own buffer first — or at release().
+//
+// This is safe against handing an alias out to callers because RecvInto always
+// copies the message into the caller's destination: nothing the decoder returns
+// outlives the borrow. A future zero-copy Recv would break that and must end
+// the borrow itself.
+func (d *decoder) PushBorrowed(chunk []byte, slab *[]byte) bool {
+	if len(chunk) == 0 || d.Pending() != 0 {
+		// Undelivered bytes are already pending, so this chunk continues a
+		// message and has to be appended to them, not aliased.
+		return false
+	}
+	d.endBorrow()
+	d.buf, d.off = chunk, 0
+	d.borrowed, d.borrowing = slab, true
+	return true
+}
+
+// endBorrow ends a borrow: whatever is still undelivered is copied into the
+// decoder's own buffer, and the borrowed slab goes back to the pool.
+func (d *decoder) endBorrow() {
+	if !d.borrowing {
+		return
+	}
+	d.own = append(d.own[:0], d.buf[d.off:]...)
+	d.buf, d.off = d.own, 0
+	putDataSlab(d.borrowed)
+	d.borrowed, d.borrowing = nil, false
+}
+
+// release ends any borrow, returning the slab. Called when the stream is done
+// with the decoder; a borrow held past that would keep a pooled buffer out of
+// circulation for as long as the stream object lived.
+func (d *decoder) release() { d.endBorrow() }
 
 // Push appends a DATA chunk to the decoder's pending bytes. The chunk is
 // copied, so the caller may return its backing buffer to a pool immediately
-// after Push returns.
+// after Push returns. Prefer PushBorrowed, which skips the copy when it can.
 func (d *decoder) Push(chunk []byte) {
 	if len(chunk) == 0 {
 		return
 	}
+	d.endBorrow()
 	d.compact()
-	d.buf = append(d.buf, chunk...)
+	d.own = append(d.own, chunk...)
+	d.buf = d.own
 }
 
 // limit returns the effective maximum message size.
@@ -86,19 +146,21 @@ func (d *decoder) overLimit() bool {
 // compact slides undelivered bytes to the front once the consumed prefix has
 // grown past half the buffer, so a long-lived stream does not grow buf without
 // bound.
+// Only ever called with buf == own (Push ends any borrow first), so sliding the
+// bytes here cannot touch a caller's chunk.
 func (d *decoder) compact() {
 	if d.off == 0 {
 		return
 	}
-	if d.off == len(d.buf) {
-		d.buf = d.buf[:0]
-		d.off = 0
+	if d.off == len(d.own) {
+		d.own = d.own[:0]
+		d.buf, d.off = d.own, 0
 		return
 	}
-	if d.off*2 >= len(d.buf) {
-		n := copy(d.buf, d.buf[d.off:])
-		d.buf = d.buf[:n]
-		d.off = 0
+	if d.off*2 >= len(d.own) {
+		n := copy(d.own, d.own[d.off:])
+		d.own = d.own[:n]
+		d.buf, d.off = d.own, 0
 	}
 }
 
