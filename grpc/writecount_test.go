@@ -23,7 +23,7 @@ import (
 //
 // Lower it when the send path is changed to emit fewer — the constant is the
 // record of the win, and this test failing low is the reminder to update it.
-const unaryTransportWrites = 2
+const unaryTransportWrites = 1
 
 // writeCountSlack absorbs the occasional WINDOW_UPDATE. unaryWriteCountRPCs is
 // kept small enough that the connection-level refund threshold (32 KiB) is

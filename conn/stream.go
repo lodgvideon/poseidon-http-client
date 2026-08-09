@@ -656,6 +656,61 @@ func (s *Stream) pushLocked(e StreamEvent) bool {
 // does not split into CONTINUATION). When endStream is true the request
 // side is half-closed.
 
+// sendHeadersAndData is SendHeaders followed by SendData, fused into one
+// transport write when the connection can do it (#451).
+//
+// The guards are SendHeaders': the stream must own this lifetime, must not be a
+// pushed (receive-only) stream, and must not already be closed or half-closed.
+// The HEAD bookkeeping is the same too — a HEAD request's response is defined to
+// carry no content whatever it declares (RFC 9110 §9.3.2), and the flag has to be
+// set before any response can arrive.
+//
+// Falls back to the two separate calls when the writer is not a real Conn (tests
+// fake streamWriter), which keeps this a pure optimisation rather than a second
+// code path with its own semantics.
+func (s *Stream) sendHeadersAndData(ctx context.Context, wantGen uint64, fields []hpack.HeaderField, p []byte, endStream bool) error {
+	c, ok := s.w.(*Conn)
+	if !ok {
+		if err := s.sendHeadersWithPriority(ctx, wantGen, fields, false, nil); err != nil {
+			return err
+		}
+		return s.sendData(ctx, wantGen, p, endStream)
+	}
+
+	s.mu.Lock()
+	if s.gen.Load() != wantGen {
+		s.mu.Unlock()
+		return ErrStaleStream
+	}
+	if s.pushed {
+		s.mu.Unlock()
+		return ErrPushedStreamReadOnly
+	}
+	if s.closed || s.localEnded {
+		s.mu.Unlock()
+		return ErrStreamClosed
+	}
+	for i := range fields {
+		if string(fields[i].Name) == ":method" {
+			s.reqIsHead = string(fields[i].Value) == "HEAD"
+			break
+		}
+	}
+	s.mu.Unlock()
+
+	if err := c.writeHeadersAndData(ctx, s, wantGen, fields, p, endStream); err != nil {
+		return err
+	}
+	if endStream {
+		s.mu.Lock()
+		s.localEnded = true
+		id := s.id
+		s.mu.Unlock()
+		c.markStreamDone(id)
+	}
+	return nil
+}
+
 // SendHeadersWithPriority sends a HEADERS frame with optional
 // PRIORITY fields embedded (RFC 7540 §6.3). When prio is non-nil
 // the HEADERS frame carries the PRIORITY flag plus a 5-byte
@@ -1013,6 +1068,21 @@ func (r StreamRef) SendData(ctx context.Context, p []byte, endStream bool) error
 // SendHeaders sends a HEADERS frame for this lifetime.
 func (r StreamRef) SendHeaders(ctx context.Context, fields []hpack.HeaderField, endStream bool) error {
 	return r.SendHeadersWithPriority(ctx, fields, endStream, nil)
+}
+
+// SendHeadersAndData sends HEADERS and body as ONE transport write when the send
+// windows allow it, which takes a unary request from two writes to one (#451).
+//
+// It is a pure optimisation of SendHeaders-then-SendData and is safe to use
+// wherever both would be called back to back with nothing in between: when the
+// credit for the whole body is not immediately available, or the writer is not a
+// real Conn, it does exactly those two calls instead. Never blocks for credit
+// while holding the write lock.
+func (r StreamRef) SendHeadersAndData(ctx context.Context, fields []hpack.HeaderField, p []byte, endStream bool) error {
+	if r.s == nil {
+		return ErrStaleStream
+	}
+	return r.s.sendHeadersAndData(ctx, r.gen, fields, p, endStream)
 }
 
 // SendHeadersWithPriority is SendHeaders with PRIORITY fields embedded.
