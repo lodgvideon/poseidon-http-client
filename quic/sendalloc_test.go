@@ -2,19 +2,34 @@ package quic
 
 import "testing"
 
-// sendAllocsPerDatagram is what one datagram on the ordinary send path costs in
-// heap allocations: the retransmit copy of the chunk, and nothing else.
+// sendAllocsPerDatagram is what one datagram costs in heap allocations when
+// nothing has been acknowledged yet: the RFC 9000 §13.3 retransmit copy of the
+// chunk, and nothing else.
 //
-// RFC 9000 §13.3 requires the data be available to resend until the packet is
-// acknowledged, so that copy is a protocol obligation rather than an oversight
-// — it is the one allocation this path is allowed. The second allocation that
-// used to sit beside it was a one-element []retransFrame per packet, which
-// existed only because sentPacket kept its frames in a slice while every send
-// site in the package builds a packet around exactly one.
+// This is the cold case, not the steady state. §13.3 requires the data be
+// available to resend until the packet is acknowledged, so with no ACKs in sight
+// there is nothing to recycle and every datagram buys a fresh buffer. Once
+// acknowledgements start arriving the copies come off the connection's free list
+// instead — see sendAllocsPerDatagramSteadyState, which is what a real
+// connection pays.
 //
-// Lower it if the retransmit copy is ever drawn from a pool; raise it only with
-// a reason written down here.
+// The second allocation that used to sit beside this one was a one-element
+// []retransFrame per packet, which existed only because sentPacket kept its
+// frames in a slice while every send site in the package builds a packet around
+// exactly one.
 const sendAllocsPerDatagram = 1
+
+// sendAllocsPerDatagramSteadyState is what one datagram costs on a connection
+// whose packets are being acknowledged — every real connection. The §13.3 copy
+// comes off the free list a previous ACK returned it to, so it costs nothing;
+// the one allocation left is the sent-packet map churning as this loop deletes
+// and re-inserts the same packet number, which is an artefact of the harness
+// rather than of the send path.
+//
+// Without the free list this is 2, so the gate below still catches the pooling
+// being removed. Measured directly: pool on, 1 alloc / 160 B; pool off, 2 allocs
+// / 208 B — the 48-byte difference is the retransmit copy.
+const sendAllocsPerDatagramSteadyState = 1
 
 // TestSendPath_AllocsPerDatagram pins the send path's allocation count.
 //
@@ -59,5 +74,49 @@ func TestSendPath_AllocsPerDatagram(t *testing.T) {
 		t.Errorf("send path allocates %.2f times per datagram, fewer than the recorded %d: "+
 			"the path improved — lower sendAllocsPerDatagram to %.0f to lock the win in",
 			got, sendAllocsPerDatagram, got)
+	}
+}
+
+// TestSendPath_AllocsPerDatagramSteadyState is the figure that describes a live
+// connection: send, acknowledge, repeat.
+//
+// TestSendPath_AllocsPerDatagram deliberately never acknowledges anything, so it
+// can only ever see the cold cost — and that is exactly why pooling the §13.3
+// retransmit copy did not move it by a single allocation. Measuring the pool
+// needs the ACK that returns a buffer to the free list, which is the step that
+// benchmark leaves out and every real connection performs.
+func TestSendPath_AllocsPerDatagramSteadyState(t *testing.T) {
+	c, s, pc := benchSendConn(t)
+	req := []byte("GET / HTTP/3\r\nhost: h3.example\r\naccept: */*\r\n\r\n")
+
+	// Warm up past the one-time growth: the sent-packet map, the seal scratch,
+	// and the free list's own backing array.
+	for i := 0; i < 4; i++ {
+		resetSend(c, s)
+		if _, err := s.Send(req, false); err != nil {
+			t.Fatalf("warmup Send: %v", err)
+		}
+		c.sent[spaceApp].ack(c, 0, 0)
+	}
+
+	before := pc.datagrams.Load()
+	const runs = 200
+	got := testing.AllocsPerRun(runs, func() {
+		resetSend(c, s)
+		if _, err := s.Send(req, false); err != nil {
+			t.Fatalf("Send: %v", err)
+		}
+		// The acknowledgement a real peer would return, which is what hands the
+		// retransmit copy back for the next send to reuse.
+		c.sent[spaceApp].ack(c, 0, 0)
+	})
+	if sent := pc.datagrams.Load() - before; sent != runs+1 {
+		t.Fatalf("request took %d datagrams over %d runs, want 1 each", sent, runs+1)
+	}
+
+	if got > sendAllocsPerDatagramSteadyState {
+		t.Errorf("an acknowledged send path allocates %.2f times per datagram, want at most %d: "+
+			"the §13.3 retransmit copy is no longer coming off the free list",
+			got, sendAllocsPerDatagramSteadyState)
 	}
 }

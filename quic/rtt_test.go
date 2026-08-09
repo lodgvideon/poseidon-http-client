@@ -49,7 +49,7 @@ func TestSentSpace_Ack(t *testing.T) {
 	s.onSent(5, base, true, nil)
 	s.onSent(6, base.Add(10*ms), true, nil)
 
-	sendTime, ok := s.ack(5, 6)
+	sendTime, ok := s.ack(nil, 5, 6)
 	if !ok || !sendTime.Equal(base.Add(10*ms)) {
 		t.Fatalf("ack = (%v, %v), want the largest's (pn 6) send time", sendTime, ok)
 	}
@@ -58,7 +58,7 @@ func TestSentSpace_Ack(t *testing.T) {
 	}
 	// A duplicate ACK of an already-largest packet yields no new RTT sample.
 	s.onSent(6, base.Add(10*ms), true, nil)
-	if _, ok := s.ack(6, 6); ok {
+	if _, ok := s.ack(nil, 6, 6); ok {
 		t.Fatal("duplicate largest ack must not resample RTT")
 	}
 }

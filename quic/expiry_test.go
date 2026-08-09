@@ -102,7 +102,7 @@ func TestConn_HandleExpiry_DeclaresLostOnLossTimer(t *testing.T) {
 	// pn 0 sent a second ago; pn 1 acknowledged -> pn 0 is past the time threshold.
 	c.sent[spaceApp].onSent(0, base.Add(-time.Second), true, streamFrame(0, 0, "lost"))
 	c.sent[spaceApp].onSent(1, base.Add(-time.Second), true, nil)
-	c.sent[spaceApp].ack(1, 1) // largestAckedPN=1, haveLargestAcked=true, removes pn 1
+	c.sent[spaceApp].ack(c, 1, 1) // largestAckedPN=1, haveLargestAcked=true, removes pn 1
 
 	if err := c.handleExpiry(base, timeoutError{}); err != nil {
 		t.Fatalf("handleExpiry = %v, want nil (loss detected, connection stays up)", err)

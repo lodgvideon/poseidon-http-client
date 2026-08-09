@@ -33,7 +33,7 @@ func TestConformance_RFC9002_Sec611_PacketThresholdLoss(t *testing.T) {
 	for pn := uint64(0); pn <= 3; pn++ {
 		c.sent[spaceApp].onSent(pn, base, true, streamFrame(0, pn, "x"))
 	}
-	c.sent[spaceApp].ack(3, 3) // acknowledge the largest; sets largestAckedPN=3
+	c.sent[spaceApp].ack(c, 3, 3) // acknowledge the largest; sets largestAckedPN=3
 	c.detectLost(spaceApp)
 
 	if len(c.retransQueue[spaceApp]) != 1 || c.retransQueue[spaceApp][0].offset != 0 {
@@ -56,7 +56,7 @@ func TestConformance_RFC9002_Sec612_TimeThresholdLoss(t *testing.T) {
 	c.rtt.update(20*ms, 0) // lossDelay = 20ms*9/8 = 22.5ms
 	c.sent[spaceApp].onSent(0, base.Add(-50*ms), true, streamFrame(0, 0, "old"))
 	c.sent[spaceApp].onSent(1, base.Add(-50*ms), true, nil)
-	c.sent[spaceApp].ack(1, 1) // largestAckedPN=1; removes pn 1 (mirrors real order)
+	c.sent[spaceApp].ack(c, 1, 1) // largestAckedPN=1; removes pn 1 (mirrors real order)
 	c.detectLost(spaceApp)
 
 	if len(c.retransQueue[spaceApp]) != 1 {
@@ -70,7 +70,7 @@ func TestConn_DetectLost_NoLossWithinThresholds(t *testing.T) {
 	c.rtt.update(20*ms, 0)
 	c.sent[spaceApp].onSent(0, base, true, streamFrame(0, 0, "x")) // sent "now"
 	c.sent[spaceApp].onSent(1, base, true, nil)
-	c.sent[spaceApp].ack(1, 1)
+	c.sent[spaceApp].ack(c, 1, 1)
 	c.detectLost(spaceApp)
 
 	if len(c.retransQueue[spaceApp]) != 0 {
@@ -93,7 +93,7 @@ func TestConn_DetectLost_PrunesAckedElicitWithoutLoss(t *testing.T) {
 	// pn 5 sent "now" stays in flight (the oldest unacked); pn 6 is acknowledged.
 	c.sent[spaceApp].onSent(5, base, true, streamFrame(0, 5, "x"))
 	c.sent[spaceApp].onSent(6, base, true, nil)
-	c.sent[spaceApp].ack(6, 6) // largestAckedPN=6; pn 5 stays in flight, no loss
+	c.sent[spaceApp].ack(c, 6, 6) // largestAckedPN=6; pn 5 stays in flight, no loss
 	// Acknowledgement times from a long lossless run: those at or before the oldest
 	// in-flight packet (base) must be dropped, newer ones kept.
 	c.sent[spaceApp].ackedElicit = []time.Time{
@@ -176,9 +176,9 @@ func TestConn_Retransmit_StreamResendsBytesAtOffsetAndFin(t *testing.T) {
 	}
 	beforeOffset, beforeConn := s.sendOffset, c.connSent
 
-	pc.pkts = nil              // drop the original send; capture only the retransmit
-	c.sent[spaceApp].ack(3, 3) // fake ACK of a higher pn -> largestAckedPN=3
-	c.detectLost(spaceApp)     // pn 0 lost by packet threshold
+	pc.pkts = nil                 // drop the original send; capture only the retransmit
+	c.sent[spaceApp].ack(c, 3, 3) // fake ACK of a higher pn -> largestAckedPN=3
+	c.detectLost(spaceApp)        // pn 0 lost by packet threshold
 	if err := c.flush(); err != nil {
 		t.Fatal(err)
 	}
@@ -203,7 +203,7 @@ func TestConn_Retransmit_AckedPacketNotResent(t *testing.T) {
 	base := time.Unix(900, 0)
 	c := &Conn{now: func() time.Time { return base }}
 	c.sent[spaceApp].onSent(0, base, true, streamFrame(0, 0, "x"))
-	c.sent[spaceApp].ack(0, 5) // acknowledges pn 0 (removed) and sets largestAckedPN=5
+	c.sent[spaceApp].ack(c, 0, 5) // acknowledges pn 0 (removed) and sets largestAckedPN=5
 	c.detectLost(spaceApp)
 	if len(c.retransQueue[spaceApp]) != 0 {
 		t.Fatalf("an acknowledged packet must never be queued for resend, got %+v", c.retransQueue[spaceApp])
@@ -216,7 +216,7 @@ func TestConn_AckOnlyPacketNotRetransmittable(t *testing.T) {
 	base := time.Unix(1000, 0)
 	c := &Conn{now: func() time.Time { return base }}
 	c.sent[spaceApp].onSent(0, base, false, nil)
-	c.sent[spaceApp].ack(3, 3)
+	c.sent[spaceApp].ack(c, 3, 3)
 	c.detectLost(spaceApp)
 	if len(c.retransQueue[spaceApp]) != 0 {
 		t.Fatal("a lost ACK-only packet must not be retransmitted")

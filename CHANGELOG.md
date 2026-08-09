@@ -66,6 +66,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **The QUIC send path recycles the RFC 9000 §13.3 retransmit copies** (#347).
+  Every STREAM chunk is copied out of the reusable frame scratch and retained so
+  the frame can be re-sent at its original offset if the packet is lost. That copy
+  was the last per-datagram heap allocation on the send path; it now comes from a
+  per-connection free list that acknowledgements refill.
+
+  Recycling it is sound only because ownership of a payload is **linear**: it is
+  reachable from exactly one of a `sentPacket` or the retransmit queue, never
+  both. Every exit from the sent-packet map either hands the frame to the queue
+  and deletes the packet in the same step (`detectLost`, `queueOldestProbe`,
+  `requeueInitialForRetry`) or is an acknowledgement, which hands it to nobody —
+  so `sentSpace.ack` is the one moment a payload is dead and the only place it is
+  released. Releasing at `detectLost` instead would hand back a buffer the queue
+  still points at, and the lost packet would be retransmitted at its original
+  offset carrying another frame's bytes, which the peer accepts as valid data.
+  `TestRetransBuf_QueuedPayloadSurvivesRecycling` arranges that exact interleaving.
+
+  Both ends run under `c.mu`, so the free list needs no synchronisation and,
+  unlike a `sync.Pool`, boxes nothing on the way in. It is bounded at 64 buffers
+  (~77 KiB per connection); CRYPTO-sized payloads are dropped rather than parked.
+
+  On an acknowledged connection: **2 allocations / 208 B per datagram → 1 / 160 B**.
+  The remaining one is the sent-packet map churning in the test harness, not the
+  send path. `BenchmarkQUICSend` is unchanged at 1 alloc because it never
+  acknowledges anything — with nothing to recycle there is nothing to save, which
+  is why `TestSendPath_AllocsPerDatagramSteadyState` was added alongside it.
+
 - **BREAKING: `quic.RecvGRO` and `quic.SendGSO` take a state handle** (#348).
   Their signatures are now `RecvGRO(*GROState, syscall.RawConn, io.Reader, []byte)`
   and `SendGSO(*GSOState, syscall.RawConn, io.Writer, []byte, int)`; `RecvGRO`'s

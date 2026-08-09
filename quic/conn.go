@@ -91,14 +91,19 @@ type Conn struct {
 	// on the single reader goroutine.
 	fh connFrameHandler
 
-	sent           [numSpaces]sentSpace      // packets we sent, per space (ACK/RTT/loss)
-	rtt            rttStats                  // round-trip-time estimates (RFC 9002 §5)
-	now            func() time.Time          // clock (time.Now; overridable in tests)
-	retransQueue   [numSpaces][]retransFrame // frames of lost packets awaiting resend
-	ptoCount       uint                      // consecutive probe timeouts (backoff, RFC 9002 §6.2.1)
-	probePending   bool                      // a PTO needs a PING probe sent in the app space (§6.2.4)
-	handshakeProbe bool                      // a PTO needs a PING probe in the Handshake/Initial space (§6.2.2.1)
-	ptoExempt      bool                      // a queued PTO probe may exceed the congestion window once (§7, §6.2.4)
+	sent         [numSpaces]sentSpace      // packets we sent, per space (ACK/RTT/loss)
+	rtt          rttStats                  // round-trip-time estimates (RFC 9002 §5)
+	now          func() time.Time          // clock (time.Now; overridable in tests)
+	retransQueue [numSpaces][]retransFrame // frames of lost packets awaiting resend
+	// retransFree recycles the payload copies retransFrames retain (RFC 9000
+	// §13.3). Both ends run under c.mu — writeStreamFrame takes the copy,
+	// sentSpace.ack releases it — so it needs no synchronisation of its own.
+	// See retransbuf.go for why ack is the only place a payload may be released.
+	retransFree    [][]byte
+	ptoCount       uint // consecutive probe timeouts (backoff, RFC 9002 §6.2.1)
+	probePending   bool // a PTO needs a PING probe sent in the app space (§6.2.4)
+	handshakeProbe bool // a PTO needs a PING probe in the Handshake/Initial space (§6.2.2.1)
+	ptoExempt      bool // a queued PTO probe may exceed the congestion window once (§7, §6.2.4)
 
 	// NewReno congestion control (RFC 9002 §7), connection-wide across spaces.
 	// cwnd == 0 disables it (the sentinel for hand-built test connections).
@@ -489,7 +494,7 @@ func (c *Conn) onAckRange(sp int, low, high uint64, ackDelay time.Duration, prio
 			c.sent[sp].ackedElicit = append(c.sent[sp].ackedElicit, p.timeSent)
 		}
 	}
-	if sendTime, ok := c.sent[sp].ack(low, high); ok {
+	if sendTime, ok := c.sent[sp].ack(c, low, high); ok {
 		firstSample := !c.rtt.haveSample
 		c.rtt.update(c.clock().Sub(sendTime), ackDelay)
 		if firstSample {

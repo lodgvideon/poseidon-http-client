@@ -168,7 +168,9 @@ func (s *sentSpace) onSent(pn uint64, t time.Time, ackEliciting bool, rf *retran
 // largest is newly acknowledged AND at least one of the newly acknowledged packets
 // was ack-eliciting — even if the largest itself was not (RFC 9002 §5.1). Only the
 // range containing the largest acknowledged (high == largest) can yield a sample.
-func (s *sentSpace) ack(low, high uint64) (sendTime time.Time, hasRTT bool) {
+// c owns the free list acknowledged retransmit payloads go back to; it may be
+// nil on a hand-built test sentSpace, which then simply does not recycle.
+func (s *sentSpace) ack(c *Conn, low, high uint64) (sendTime time.Time, hasRTT bool) {
 	newLargest := !s.haveLargestAcked || high > s.largestAckedPN
 	haveLargest := false
 	if p, ok := s.packets[high]; ok && newLargest {
@@ -187,6 +189,11 @@ func (s *sentSpace) ack(low, high uint64) (sendTime time.Time, hasRTT bool) {
 		if pn >= low && pn <= high {
 			if p.ackEliciting {
 				anyAckEliciting = true
+			}
+			// The one exit from this map that hands the frame to nobody, and so
+			// the one place its payload may be recycled. See retransbuf.go.
+			if p.hasFrame && c != nil {
+				c.retransPut(p.frame.data)
 			}
 			delete(s.packets, pn)
 		}

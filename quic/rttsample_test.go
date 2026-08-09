@@ -15,7 +15,7 @@ func TestConformance_RFC9002_Sec51_RTTSampleWhenLargestNonEliciting(t *testing.T
 	s.onSent(5, base.Add(-20*time.Millisecond), true, nil)  // ack-eliciting
 	s.onSent(6, base.Add(-10*time.Millisecond), false, nil) // pure ACK, the largest
 
-	sendTime, hasRTT := s.ack(5, 6)
+	sendTime, hasRTT := s.ack(nil, 5, 6)
 	if !hasRTT {
 		t.Fatal("an RTT sample must be generated when a newly-acked packet is ack-eliciting (§5.1)")
 	}
@@ -33,7 +33,7 @@ func TestConformance_RFC9002_Sec51_NoRTTSampleWithoutAckEliciting(t *testing.T) 
 	s.onSent(5, base, false, nil) // pure ACK
 	s.onSent(6, base, false, nil) // pure ACK, the largest
 
-	if _, hasRTT := s.ack(5, 6); hasRTT {
+	if _, hasRTT := s.ack(nil, 5, 6); hasRTT {
 		t.Fatal("no RTT sample when no newly-acked packet is ack-eliciting (§5.1)")
 	}
 }

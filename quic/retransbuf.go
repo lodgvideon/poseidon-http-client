@@ -1,0 +1,63 @@
+package quic
+
+// retransFreeMax bounds the recycled-buffer list. A connection needs about a
+// congestion window's worth of live retransmit copies at once; past that the
+// extra buffers are memory held for nothing, so the surplus goes to the garbage
+// collector instead. 64 x maxDatagramSize is ~77 KiB per connection.
+const retransFreeMax = 64
+
+// Recycling the RFC 9000 §13.3 retransmit copies.
+//
+// Every STREAM chunk is copied out of the reusable send scratch and retained so
+// the frame can be re-sent at its original offset if the packet is lost. That
+// copy was the last per-datagram heap allocation on the send path.
+//
+// Recycling it is sound only because ownership of a retransFrame's payload is
+// LINEAR: it is reachable from exactly one of a sentPacket or the retransmit
+// queue, never both. Every exit from the sent-packet map either hands the frame
+// to the queue and deletes the packet in the same step — detectLost,
+// queueOldestProbe, requeueInitialForRetry — or is an acknowledgement, which
+// hands it to nobody. The queue drain then seals the same slice into a fresh
+// sentPacket, so the payload cycles between the two owners until an ACK ends it.
+//
+// That makes sentSpace.ack the one and only moment a payload is dead, and the
+// one and only place retransPut is called. Releasing anywhere else — at
+// detectLost, say, where the packet also leaves the map — would hand back a
+// buffer the retransmit queue still points at, and the next send would overwrite
+// it. The lost packet would then be retransmitted at its original offset
+// carrying another frame's bytes, which the peer accepts as valid data. Silent
+// wire corruption, no error anywhere. TestRetransBuf_* pins the rule directly.
+//
+// Both ends run under c.mu — "mu guards ALL Conn mutable state and the wire" —
+// so the free list needs no synchronisation of its own. A sync.Pool would also
+// box the slice header on every Put, which is the allocation this is removing.
+
+// retransCopy returns a copy of src to retain for retransmission, drawn from the
+// connection's free list when one fits. The result always has its own backing
+// array: src is the reused frame scratch and is overwritten by the next frame.
+func (c *Conn) retransCopy(src []byte) []byte {
+	if len(src) == 0 {
+		return nil
+	}
+	if n := len(c.retransFree) - 1; n >= 0 && cap(c.retransFree[n]) >= len(src) {
+		b := c.retransFree[n]
+		c.retransFree[n] = nil // drop the list's reference so the buffer has one owner
+		c.retransFree = c.retransFree[:n]
+		return append(b[:0], src...)
+	}
+	return append([]byte(nil), src...)
+}
+
+// retransPut returns a payload whose packet has been acknowledged to the free
+// list. Buffers larger than a datagram are dropped rather than recycled: those
+// come from CRYPTO flights, which happen a handful of times per connection, and
+// keeping one alive would pin far more memory than it ever saves.
+//
+// MUST be called only from sentSpace.ack. See the ownership note above for what
+// calling it anywhere else costs.
+func (c *Conn) retransPut(b []byte) {
+	if cap(b) == 0 || cap(b) > maxDatagramSize || len(c.retransFree) >= retransFreeMax {
+		return
+	}
+	c.retransFree = append(c.retransFree, b[:0])
+}
