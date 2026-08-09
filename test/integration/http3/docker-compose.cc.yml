@@ -1,0 +1,74 @@
+name: poseidon-h3-cc
+
+# Congestion-control A/B (#362): the same upload run through lossproxy twice,
+# once per controller, over a loss/RTT matrix.
+#
+# The measured transfer is an UPLOAD on purpose. Congestion control governs the
+# sender, so a download would measure Caddy's controller (quic-go's) and say
+# nothing about quic/bbr.go.
+#
+# Drive it with scripts/cc-matrix.sh rather than by hand — the point is the
+# comparison, and a single cell in isolation is not one.
+
+networks:
+  h3net:
+    driver: bridge
+
+services:
+  caddy:
+    image: caddy:2
+    hostname: h3caddy
+    networks: [h3net]
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - ./srv:/srv:ro
+    healthcheck:
+      test: ["CMD", "curl", "-kfsS", "-o", "/dev/null", "https://localhost/"]
+      interval: 1s
+      timeout: 2s
+      retries: 30
+      start_period: 2s
+    restart: "no"
+
+  lossproxy:
+    image: golang:1.25
+    hostname: lossproxy
+    depends_on:
+      caddy:
+        condition: service_healthy
+    networks: [h3net]
+    working_dir: /src
+    volumes:
+      - ../../..:/src
+    environment:
+      UPSTREAM: h3caddy:443
+      LOSS_PCT: "${LOSS_PCT:-0}"
+      REORDER_PCT: "${REORDER_PCT:-0}"
+      # One-way delay; the round trip grows by twice this.
+      DELAY_MS: "${DELAY_MS:-0}"
+      # There is deliberately NO bandwidth/queue knob here. One was written and
+      # removed because it did not bind — see the note in scripts/cc-matrix.sh.
+      # Without it these cells cannot reach the bufferbloat case BBR exists for.
+      SEED: "${SEED:-1}"
+    command: go run test/integration/http3/lossproxy.go
+    restart: "no"
+
+  runner:
+    image: golang:1.25
+    depends_on:
+      lossproxy:
+        condition: service_started
+    networks: [h3net]
+    working_dir: /src
+    volumes:
+      - ../../..:/src
+    environment:
+      H3_INTEROP_ADDR: lossproxy:443
+      H3_INTEROP_CC: "${H3_INTEROP_CC:-newreno}"
+      H3_CC_BYTES: "${H3_CC_BYTES:-4194304}"
+      H3_CC_REPEATS: "${H3_CC_REPEATS:-3}"
+      GOFLAGS: -count=1
+    command: >
+      go test ./http3/ -tags interop
+      -run TestInterop_CCGoodput -v -timeout 20m
+    restart: "no"

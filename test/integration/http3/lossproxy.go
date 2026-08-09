@@ -13,9 +13,17 @@
 // It handles the interop suite's sequential single-connection tests: the current
 // client address is tracked and upstream responses relayed back to it.
 //
+// DELAY_MS adds a fixed one-way delay in each direction, so the round trip grows
+// by twice it. That is the RTT dimension of the congestion-control comparison
+// (#362): NewReno's recovery is paced by RTT, so its behaviour on a 1 ms
+// loopback says nothing about a real path. The delay is a strict FIFO queue per
+// direction, NOT a timer per datagram — equal timers fire in goroutine-schedule
+// order, which would quietly inject reordering into the arm that is supposed to
+// have none and corrupt the comparison it exists to enable.
+//
 // Env: UPSTREAM=host:port (required), LOSS_PCT (default 10), REORDER_PCT
-// (default 0), SEED (default 1). //go:build ignore keeps it out of package
-// builds; run with `go run test/integration/http3/lossproxy.go`.
+// (default 0), DELAY_MS (default 0), SEED (default 1). //go:build ignore keeps
+// it out of package builds; run with `go run test/integration/http3/lossproxy.go`.
 package main
 
 import (
@@ -41,6 +49,73 @@ func envInt(name string, def int) int {
 		log.Fatalf("lossproxy: %s=%q must be an integer in [0,100]: %v", name, v, err)
 	}
 	return n
+}
+
+// envMillis parses a non-negative millisecond count. envInt caps at 100 because
+// it reads percentages; a delay needs a wider range.
+func envMillis(name string) time.Duration {
+	v := os.Getenv(name)
+	if v == "" {
+		return 0
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil || n < 0 || n > 10_000 {
+		log.Fatalf("lossproxy: %s=%q must be an integer in [0,10000]: %v", name, v, err)
+	}
+	return time.Duration(n) * time.Millisecond
+}
+
+// delayLine holds datagrams for a fixed one-way delay.
+//
+// One goroutine drains it in order, so datagrams leave in the order they
+// arrived. A time.AfterFunc per datagram would be simpler and wrong: equal
+// deadlines fire in whatever order the scheduler picks, which is reordering —
+// exactly the fault the REORDER_PCT=0 arm must not have.
+type delayLine struct {
+	d  time.Duration
+	ch chan delayedDatagram
+
+	queued  atomic.Int64
+	dropped atomic.Int64 // queue full: dropping beats blocking the relay loop
+}
+
+type delayedDatagram struct {
+	at   time.Time
+	data []byte
+	send func([]byte)
+}
+
+func newDelayLine(d time.Duration) *delayLine {
+	if d <= 0 {
+		return nil
+	}
+	dl := &delayLine{d: d, ch: make(chan delayedDatagram, 8192)}
+	go func() {
+		for it := range dl.ch {
+			if w := time.Until(it.at); w > 0 {
+				time.Sleep(w)
+			}
+			it.send(it.data)
+		}
+	}()
+	return dl
+}
+
+// wrap returns a send func that defers delivery by the line's delay. The
+// datagram is copied because the caller's buffer is reused by the next read.
+func (dl *delayLine) wrap(send func([]byte)) func([]byte) {
+	if dl == nil {
+		return send
+	}
+	return func(data []byte) {
+		it := delayedDatagram{at: time.Now().Add(dl.d), data: append([]byte(nil), data...), send: send}
+		select {
+		case dl.ch <- it:
+			dl.queued.Add(1)
+		default:
+			dl.dropped.Add(1)
+		}
+	}
 }
 
 // faulter injects loss and reorder into one direction's datagram stream.
@@ -126,6 +201,7 @@ func main() {
 	loss := envInt("LOSS_PCT", 10)
 	reorder := envInt("REORDER_PCT", 0)
 	seed := int64(envInt("SEED", 1))
+	delay := envMillis("DELAY_MS")
 
 	upstream := os.Getenv("UPSTREAM")
 	if upstream == "" {
@@ -143,7 +219,13 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	log.Printf("lossproxy: :443 <-> %s, drop ~%d%%, reorder ~%d%% each way (seed %d)", upstream, loss, reorder, seed)
+	log.Printf("lossproxy: :443 <-> %s, drop ~%d%%, reorder ~%d%%, delay %v each way (RTT +%v) (seed %d)",
+		upstream, loss, reorder, delay, 2*delay, seed)
+
+	// One line per direction: a shared line would serialise both directions
+	// behind one goroutine and turn the delay into a half-duplex bottleneck.
+	delayToClient := newDelayLine(delay)
+	delayToUp := newDelayLine(delay)
 
 	// Independent RNGs so each direction's fault sequence is reproducible.
 	toClient := &faulter{name: "up->client", lossPct: loss, reorderPct: reorder, rng: rand.New(rand.NewSource(seed))}
@@ -153,10 +235,26 @@ func main() {
 	// so the run's log proves the fault actually happened.
 	sig := make(chan os.Signal, 1)
 	signal.Notify(sig, syscall.SIGTERM, syscall.SIGINT)
+	// A delay queue that overflows drops datagrams, which would read as extra
+	// network loss and quietly bias the comparison. Report it separately so a run
+	// whose queue overflowed is recognisable rather than merely lossier.
+	logDelay := func() {
+		for name, dl := range map[string]*delayLine{"up->client": delayToClient, "client->up": delayToUp} {
+			if dl == nil {
+				continue
+			}
+			if d := dl.dropped.Load(); d > 0 {
+				log.Printf("lossproxy %s: DELAY QUEUE OVERFLOW, dropped=%d of queued=%d — "+
+					"this run's loss is NOT the configured loss", name, d, dl.queued.Load())
+			}
+		}
+	}
+
 	go func() {
 		<-sig
 		toClient.logStats()
 		toUp.logStats()
+		logDelay()
 		os.Exit(0)
 	}()
 
@@ -168,6 +266,7 @@ func main() {
 		for range t.C {
 			toClient.logStats()
 			toUp.logStats()
+			logDelay()
 		}
 	}()
 
@@ -183,14 +282,14 @@ func main() {
 				log.Printf("lossproxy: upstream read: %v", err)
 				return
 			}
-			toClient.forward(b[:n], func(d []byte) {
+			toClient.forward(b[:n], delayToClient.wrap(func(d []byte) {
 				mu.Lock()
 				c := client
 				mu.Unlock()
 				if c != nil {
 					_, _ = down.WriteToUDP(d, c)
 				}
-			})
+			}))
 		}
 	}()
 
@@ -205,6 +304,6 @@ func main() {
 		mu.Lock()
 		client = addr
 		mu.Unlock()
-		toUp.forward(buf[:n], func(d []byte) { _, _ = up.Write(d) })
+		toUp.forward(buf[:n], delayToUp.wrap(func(d []byte) { _, _ = up.Write(d) }))
 	}
 }
