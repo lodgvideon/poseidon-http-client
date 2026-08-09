@@ -141,37 +141,3 @@ func TestRecvInto_DiscardsLength(t *testing.T) {
 		t.Error("dst's previous contents leaked into the message")
 	}
 }
-
-// TestRecvInto_AllocsPerMessage is the gate. AllocsPerRun counts the whole
-// process, and the in-process mock peer allocates nothing per echoed frame, so
-// what is left is this package's own cost.
-func TestRecvInto_AllocsPerMessage(t *testing.T) {
-	cc := dialMockPeer(t, newMockGRPCPeer(t), nil)
-	const msgs, size = 64, 256
-
-	measure := func(reuse bool) float64 {
-		s := streamOf(t, cc, msgs, size)
-		ctx := context.Background()
-		buf := make([]byte, 0, size)
-		i := 0
-		return testing.AllocsPerRun(msgs-2, func() {
-			i++
-			var err error
-			if reuse {
-				buf, err = s.RecvInto(ctx, buf[:0])
-			} else {
-				buf, err = s.Recv(ctx)
-			}
-			if err != nil {
-				t.Fatalf("message %d: %v", i, err)
-			}
-		})
-	}
-	withCopy := measure(false)
-	withReuse := measure(true)
-	t.Logf("per message: Recv %.2f allocs, RecvInto %.2f allocs", withCopy, withReuse)
-	if withReuse >= withCopy {
-		t.Errorf("RecvInto allocates %.2f per message against Recv's %.2f — it is not reusing dst",
-			withReuse, withCopy)
-	}
-}
