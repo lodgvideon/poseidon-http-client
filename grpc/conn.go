@@ -310,7 +310,26 @@ type callOptions struct {
 	// positional argument rather than merged into it, so combining the two costs
 	// no copy — buildHeaders walks both.
 	md []conn.HeaderField
+	// discardMD skips copying the response header and trailer blocks.
+	discardMD bool
 }
+
+// DiscardMetadata tells the call it will not read response metadata, so the
+// header and trailer blocks are not copied out of the transport's pooled buffer.
+// Header and Trailer then return nil.
+//
+// Four allocations per RPC. The copy exists so the pooled slab can go straight
+// back and Stream carries no buffer-lifetime contract, which is the right
+// default — this is for a caller that knows it never asks.
+//
+// It does NOT affect the call's outcome: grpc-status and grpc-message are read
+// from the live block and copied out, so Status is identical either way. Invoke
+// sets it for itself, since the unary API exposes neither block.
+func DiscardMetadata() CallOption { return discardMDCallOption{} }
+
+type discardMDCallOption struct{}
+
+func (discardMDCallOption) apply(c *callOptions) { c.discardMD = true }
 
 // maxRecvCallOption implements CallOption for MaxRecvMessageSize.
 type maxRecvCallOption int
@@ -397,6 +416,7 @@ func (cc *ClientConn) openStream(ctx context.Context, method string, md []conn.H
 	st := &Stream{}
 	st.acquireBufs()
 	st.dec.max = co.maxRecvMessageSize
+	st.discardMD = co.discardMD
 
 	var body []byte
 	if fuse {
@@ -601,6 +621,10 @@ func (cc *ClientConn) InvokeInto(ctx context.Context, method string, req, dst []
 	for _, o := range opts {
 		o.apply(&co)
 	}
+	// The unary API returns neither block, so copying them is pure garbage.
+	// After the caller's options, so an explicit DiscardMetadata is not undone
+	// and nothing a caller sets is overridden by it either.
+	co.discardMD = true
 	for _, src := range [2][]conn.HeaderField{md, co.md} {
 		for i := range src {
 			if err := validMetadata(src[i].Name, src[i].Value, cc.allowReserved); err != nil {

@@ -49,6 +49,16 @@ type Stream struct {
 	// previous message and resynchronise the stream onto garbage.
 	sendErr error
 
+	// discardMD skips cloning the response header and trailer blocks out of
+	// conn's pooled slab. Set by DiscardMetadata, and by Invoke for itself: the
+	// unary path calls neither Header nor Trailer, so those four allocations per
+	// RPC are garbage the moment the call returns.
+	//
+	// It does NOT change how the call is decided. finish still reads the block —
+	// the live one rather than the copy — and copies grpc-status and grpc-message
+	// out of it, so status handling is identical either way.
+	discardMD bool
+
 	// Receive-side state. Owned by the single receiving goroutine.
 	header      []conn.HeaderField
 	trailer     []conn.HeaderField
@@ -455,9 +465,15 @@ func (s *Stream) pump(ctx context.Context) error {
 		}
 
 	case conn.EventTrailers:
-		s.trailer = cloneFields(ev.Headers)
+		// Same rule as onHeaders: finish reads the block and copies what it keeps,
+		// so it can run on the live fields when the clone is skipped.
+		live := ev.Headers
+		if !s.discardMD {
+			s.trailer = cloneFields(live)
+			live = s.trailer
+		}
+		s.finish(live)
 		putHeaderSlab(ev.Slab)
-		s.finish(s.trailer)
 
 	case conn.EventReset:
 		s.status = Status{
@@ -486,17 +502,31 @@ func (s *Stream) onHeaders(ev conn.StreamEvent) {
 		// the worst possible failure mode if that classification ever changes.
 		return
 	}
-	s.header = cloneFields(ev.Headers)
-	putHeaderSlab(ev.Slab)
+	// live is the decoded block, pointing into conn's pooled slab. The slab goes
+	// back when this function returns — deferred rather than returned inline,
+	// because everything below reads the block and an early return would
+	// otherwise leave one path reading memory the pool had already handed on.
+	//
+	// Everything read from it here copies what it keeps: pseudoStatus returns an
+	// int, finish converts the two fields it reads with string(), and
+	// validContentType compares. Only the clone outlives this call.
+	defer putHeaderSlab(ev.Slab)
+	live := ev.Headers
+	if !s.discardMD {
+		s.header = cloneFields(live)
+		live = s.header
+	}
 	s.headersSeen = true
-	s.httpStatus = pseudoStatus(s.header)
+	s.httpStatus = pseudoStatus(live)
 
 	if ev.EndStream {
 		// Trailers-Only: the one block is both. Copy rather than alias, so a
 		// caller mutating what Header() returned cannot change what Trailer()
 		// returns.
-		s.trailer = append([]conn.HeaderField(nil), s.header...)
-		s.finish(s.header)
+		if !s.discardMD {
+			s.trailer = append([]conn.HeaderField(nil), s.header...)
+		}
+		s.finish(live)
 		return
 	}
 	if s.httpStatus != 200 {
@@ -506,10 +536,10 @@ func (s *Stream) onHeaders(ev conn.StreamEvent) {
 		// grpc-java's HTTP-error path puts grpc-status and grpc-message in
 		// exactly this block. finish prefers them and falls back to the table,
 		// so the server's own diagnosis survives.
-		s.finish(s.header)
+		s.finish(live)
 		return
 	}
-	if !validContentType(s.header) {
+	if !validContentType(live) {
 		s.status = Status{
 			Code:    Internal,
 			Message: "server response is missing an application/grpc content-type",
