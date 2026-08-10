@@ -124,3 +124,51 @@ func BenchmarkEncoder_EncodeBlock_3req_static(b *testing.B) {
 	}
 	_ = dst
 }
+
+// TestEncoder_Reset_RestoresTableCap is the gate for the invariant every other
+// path maintains: localLimit and the table's own cap must agree.
+//
+// dynamicTable.clear resets the entries and the arena but not maxSize, so Reset
+// setting localLimit back to the default was not enough — the encoder went on
+// indexing against a budget of 4096 into a table that still evicted at the old
+// cap. Nothing reports that: compression just gets worse for the life of the
+// connection, and no size update is pending to explain it.
+func TestEncoder_Reset_RestoresTableCap(t *testing.T) {
+	enc := NewEncoder()
+	enc.SetMaxDynamicTableSizeLimit(100)
+	if enc.dt.maxSize != 100 {
+		t.Fatalf("precondition: table cap = %d, want 100", enc.dt.maxSize)
+	}
+
+	enc.Reset()
+
+	if enc.dt.maxSize != defaultMaxDynamicTableSize {
+		t.Errorf("table cap after Reset = %d, want %d — the encoder believes it has %d "+
+			"bytes to index into while the table evicts at %d",
+			enc.dt.maxSize, defaultMaxDynamicTableSize, enc.localLimit, enc.dt.maxSize)
+	}
+	if enc.localLimit != enc.dt.maxSize {
+		t.Errorf("localLimit %d != table cap %d after Reset; every other path keeps them equal",
+			enc.localLimit, enc.dt.maxSize)
+	}
+}
+
+// TestEncoder_Reset_TableActuallyHoldsTheDefault is the behavioural half. The
+// field check above can be satisfied by setting a number; this checks the table
+// really does accept entries again, which is what the caller notices.
+func TestEncoder_Reset_TableActuallyHoldsTheDefault(t *testing.T) {
+	enc := NewEncoder()
+	enc.SetMaxDynamicTableSizeLimit(64) // too small for the entry below
+	enc.Reset()
+
+	// ~90 bytes with the 32-byte per-entry overhead: it does not fit in 64 and
+	// does fit in 4096, so whether it is retained says which cap is in force.
+	name := []byte("x-a-reasonably-long-header-name")
+	value := []byte("a-value-of-some-length-too")
+	_ = enc.WriteField(nil, name, value, IndexIncremental)
+
+	if enc.dt.len() == 0 {
+		t.Error("the table dropped an entry that fits in the default cap — Reset left it " +
+			"capped at the discarded caller limit")
+	}
+}

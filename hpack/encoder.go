@@ -60,7 +60,22 @@ func (e *Encoder) recomputeLocalLimit() {
 	e.dt.setMaxSize(newLimit)
 }
 
-// Reset clears the dynamic table and pending size update.
+// Reset returns the encoder to its as-new state: the dynamic table is emptied,
+// the peer's advertised limit is forgotten, and a cap set with
+// SetMaxDynamicTableSizeLimit is discarded. The encoder can then be reused on a
+// new connection as if freshly constructed.
+//
+// That last part is a deliberate asymmetry with Decoder.Reset, which preserves
+// its caller configuration. Reset here means NewEncoder, so a caller reusing the
+// object must re-apply its cap; a caller that wants the cap to survive should
+// keep the setting and call SetMaxDynamicTableSizeLimit again.
+//
+// The setMaxSize call is what makes the wipe honest. dynamicTable.clear resets
+// the entries and the arena but not maxSize, so resetting localLimit alone left
+// the encoder indexing against a budget of 4096 into a table that still evicted
+// at the old cap — compression quietly degraded for the life of the connection,
+// with no size update pending to tell anyone. Every other path keeps
+// localLimit == dt.maxSize through recomputeLocalLimit; this one has to too.
 func (e *Encoder) Reset() {
 	e.dt.clear()
 	e.peerMaxSize = defaultMaxDynamicTableSize
@@ -68,6 +83,7 @@ func (e *Encoder) Reset() {
 	e.localLimit = defaultMaxDynamicTableSize
 	e.pendingSizeUpdate = 0
 	e.hasPendingUpdate = false
+	e.dt.setMaxSize(defaultMaxDynamicTableSize)
 }
 
 // EncodeBlock encodes a slice of fields and appends the result to dst.
