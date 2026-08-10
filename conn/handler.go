@@ -450,6 +450,40 @@ func (h *connHandler) checkContentLength(s *Stream) error {
 	return nil
 }
 
+// copyFieldsToSlab copies fields into one pooled byte slab and returns the
+// field slice viewing it, together with the slab so the caller can hand
+// ownership to the client (StreamEvent.Slab) or return it to the pool.
+//
+// Every Name and Value is a THREE-index slice, capacity clamped to its own
+// length. That is the load-bearing detail: the bytes of every field share one
+// backing array, so a two-index slice would leave capacity running to the end of
+// the slab, and a caller appending to one header's value would silently
+// overwrite the next header's bytes — no copy, no error, just another request's
+// headers rewritten in place.
+//
+// It exists because that clamp was applied to the response path and not to the
+// push-promise path, which was written as "same pattern as emitHeaderBlock" and
+// then diverged in two ways: two-index slices, and Indexing dropped on the
+// floor. One function, so the third caller cannot pick the wrong one to imitate.
+func copyFieldsToSlab(fields []hpack.HeaderField) ([]hpack.HeaderField, *[]byte) {
+	slabPtr := headerSlabPool.Get().(*[]byte)
+	*slabPtr = (*slabPtr)[:0]
+	copied := make([]hpack.HeaderField, len(fields))
+	for i, f := range fields {
+		nameOff := len(*slabPtr)
+		*slabPtr = append(*slabPtr, f.Name...)
+		valOff := len(*slabPtr)
+		*slabPtr = append(*slabPtr, f.Value...)
+		endOff := len(*slabPtr)
+		copied[i] = hpack.HeaderField{
+			Name:     (*slabPtr)[nameOff:valOff:valOff],
+			Value:    (*slabPtr)[valOff:endOff:endOff],
+			Indexing: f.Indexing,
+		}
+	}
+	return copied, slabPtr
+}
+
 func (h *connHandler) emitHeaderBlock(s *Stream, hb []byte, endStream bool) error {
 	h.scratch = h.scratch[:0]
 	err := h.dec.DecodeBlock(hb, func(f hpack.HeaderField) error {
@@ -486,21 +520,7 @@ func (h *connHandler) emitHeaderBlock(s *Stream, hb []byte, endStream bool) erro
 	// Build one slab for all header bytes, one slice for all fields.
 	// Ownership of the slab transfers to the client via StreamEvent.Slab;
 	// the client returns it to headerSlabPool in Response.Reset / sr.Close.
-	slabPtr := headerSlabPool.Get().(*[]byte)
-	*slabPtr = (*slabPtr)[:0]
-	copied := make([]hpack.HeaderField, len(h.scratch))
-	for i, f := range h.scratch {
-		nameOff := len(*slabPtr)
-		*slabPtr = append(*slabPtr, f.Name...)
-		valOff := len(*slabPtr)
-		*slabPtr = append(*slabPtr, f.Value...)
-		endOff := len(*slabPtr)
-		copied[i] = hpack.HeaderField{
-			Name:     (*slabPtr)[nameOff:valOff:valOff],
-			Value:    (*slabPtr)[valOff:endOff:endOff],
-			Indexing: f.Indexing,
-		}
-	}
+	copied, slabPtr := copyFieldsToSlab(h.scratch)
 	// Delivered and marked ended in one s.mu section — see Stream.deliverEnd.
 	if !s.deliverEnd(StreamEvent{
 		Type:      evType,
@@ -726,18 +746,7 @@ func (h *connHandler) handlePushPromiseBlock(parentStreamID, promisedStreamID ui
 		return nil
 	}
 
-	// Build slab-backed header fields (same pattern as emitHeaderBlock).
-	slabPtr := headerSlabPool.Get().(*[]byte)
-	*slabPtr = (*slabPtr)[:0]
-	copied := make([]hpack.HeaderField, len(h.scratch))
-	for i, f := range h.scratch {
-		off := len(*slabPtr)
-		*slabPtr = append(*slabPtr, f.Name...)
-		copied[i].Name = (*slabPtr)[off : off+len(f.Name)]
-		off = len(*slabPtr)
-		*slabPtr = append(*slabPtr, f.Value...)
-		copied[i].Value = (*slabPtr)[off : off+len(f.Value)]
-	}
+	copied, slabPtr := copyFieldsToSlab(h.scratch)
 
 	// Deliver the push event on the parent stream, gated on it still being the
 	// stream looked up above. A *Stream is pooled and the work between that
