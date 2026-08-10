@@ -79,7 +79,7 @@ func main() {
 	// servers in test/integration are self-signed, so they need -insecure.
 	tlsCfg := &tls.Config{
 		ServerName:         u.Hostname(),
-		InsecureSkipVerify: *insecure, //nolint:gosec // opt-in, for self-signed test targets
+		InsecureSkipVerify: *insecure,
 	}
 	dialer := &conn.TLSDialer{Config: tlsCfg}
 

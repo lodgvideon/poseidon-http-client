@@ -248,7 +248,7 @@ func doGET(t *testing.T, c *client.Client, path string, wantBody bool) (int, []b
 // tlsConfig returns a TLS config that skips cert verification (self-signed).
 func tlsConfig() *tls.Config {
 	return &tls.Config{
-		InsecureSkipVerify: true, //nolint:gosec // test-only, self-signed certs
+		InsecureSkipVerify: true,
 		NextProtos:         []string{"h2"},
 	}
 }

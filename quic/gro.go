@@ -90,7 +90,10 @@ func (c *Conn) recvGRO(n, segSize int) error {
 			return err
 		}
 		if c.peerClose != nil {
-			return nil // a CONNECTION_CLOSE in the burst: stop, the caller surfaces it
+			//nolint:nilerr // Not the error path: recvDatagram returned nil here.
+			// c.peerClose records a CONNECTION_CLOSE frame, which the caller
+			// surfaces after the burst — returning it twice would double-report.
+			return nil
 		}
 	}
 	return nil

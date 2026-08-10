@@ -56,7 +56,7 @@ func h2Eligible(mc *managedConn) bool {
 // asserted is which of several equally loaded connections comes back — that is
 // the freedom the rotation uses.
 func TestPickLeastLoaded_ContractHolds(t *testing.T) {
-	rng := rand.New(rand.NewSource(7)) //nolint:gosec // deterministic test input, not crypto
+	rng := rand.New(rand.NewSource(7))
 	p := &h3Pool{}
 
 	for trial := 0; trial < 3000; trial++ {
@@ -111,7 +111,7 @@ func TestPickLeastLoaded_ContractHolds(t *testing.T) {
 // unexported, so every connection here is alive and the randomisation covers the
 // load dimension; the H3 case covers liveness.
 func TestPickLeastLoaded_H2ContractHolds(t *testing.T) {
-	rng := rand.New(rand.NewSource(11)) //nolint:gosec // deterministic test input, not crypto
+	rng := rand.New(rand.NewSource(11))
 	p := &Pool{}
 
 	for trial := 0; trial < 3000; trial++ {

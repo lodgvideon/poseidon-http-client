@@ -103,7 +103,7 @@ func TestIntegration_ConnDeathMidBody_NoConcurrentCallerSeesCleanShortBody(t *te
 		// never be exercised.
 		Transport: client.TransportSingleConn,
 		ConnOpts: conn.ConnOptions{Dialer: &conn.TLSDialer{Config: &tls.Config{
-			InsecureSkipVerify: true, //nolint:gosec // a test server's self-signed cert
+			InsecureSkipVerify: true,
 			NextProtos:         []string{"h2"},
 		}}},
 	})

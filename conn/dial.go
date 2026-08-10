@@ -76,7 +76,7 @@ func h2TLS12CipherSuites() []uint16 {
 func (d *TLSDialer) tlsClientConfig() *tls.Config {
 	var cfg *tls.Config
 	if d.Config == nil {
-		cfg = &tls.Config{} //nolint:gosec // MinVersion is raised to TLS 1.2 below
+		cfg = &tls.Config{}
 	} else {
 		cfg = d.Config.Clone()
 	}
@@ -163,7 +163,7 @@ func (d *H1TLSDialer) Dial(ctx context.Context, addr string) (net.Conn, error) {
 	}
 	var cfg *tls.Config
 	if d.Config == nil {
-		cfg = &tls.Config{} //nolint:gosec // MinVersion is set below
+		cfg = &tls.Config{}
 	} else {
 		cfg = d.Config.Clone()
 	}
@@ -224,7 +224,7 @@ func (d *FlexDialer) AssertsALPN() string { return "" }
 func (d *FlexDialer) Dial(ctx context.Context, addr string) (net.Conn, error) {
 	cfg := d.Config
 	if cfg == nil {
-		cfg = &tls.Config{MinVersion: tls.VersionTLS12} //nolint:gosec
+		cfg = &tls.Config{MinVersion: tls.VersionTLS12}
 	} else {
 		cfg = cfg.Clone()
 		if cfg.MinVersion == 0 {

@@ -15,7 +15,7 @@ import (
 // Response, call resp.Reset() before each reuse, and issue requests against a
 // single reused Request. Reusing both structs keeps the hot path allocation-free.
 func ExampleClient_Do() {
-	dialer := &conn.TLSDialer{Config: &tls.Config{InsecureSkipVerify: true}} //nolint:gosec
+	dialer := &conn.TLSDialer{Config: &tls.Config{InsecureSkipVerify: true}}
 	c, err := client.NewClient(client.ClientOptions{
 		Addr:     "api.example.com:443",
 		ConnOpts: conn.ConnOptions{Dialer: dialer},
@@ -43,7 +43,7 @@ func ExampleClient_Do() {
 // ExampleNewSingleConnClient shows the focused single-connection constructor:
 // one HTTP/2 connection with auto-redial, lazy-dialed on the first request.
 func ExampleNewSingleConnClient() {
-	dialer := &conn.TLSDialer{Config: &tls.Config{InsecureSkipVerify: true}} //nolint:gosec
+	dialer := &conn.TLSDialer{Config: &tls.Config{InsecureSkipVerify: true}}
 	c, err := client.NewSingleConnClient("api.example.com:443", dialer)
 	if err != nil {
 		log.Fatal(err)
@@ -61,7 +61,7 @@ func ExampleNewSingleConnClient() {
 // ExampleNewPoolClient shows the pooled constructor: several connections to one
 // address, each multiplexing many concurrent streams, with idle eviction.
 func ExampleNewPoolClient() {
-	dialer := &conn.TLSDialer{Config: &tls.Config{InsecureSkipVerify: true}} //nolint:gosec
+	dialer := &conn.TLSDialer{Config: &tls.Config{InsecureSkipVerify: true}}
 	c, err := client.NewPoolClient("api.example.com:443", dialer, client.PoolOptions{
 		MaxConnsPerHost:   4,
 		MaxStreamsPerConn: 100,
@@ -82,7 +82,7 @@ func ExampleNewPoolClient() {
 
 // ExampleGET shows the GET sugar plus WithHeaders for a one-off request.
 func ExampleGET() {
-	dialer := &conn.TLSDialer{Config: &tls.Config{InsecureSkipVerify: true}} //nolint:gosec
+	dialer := &conn.TLSDialer{Config: &tls.Config{InsecureSkipVerify: true}}
 	c, err := client.NewSingleConnClient("api.example.com:443", dialer)
 	if err != nil {
 		log.Fatal(err)
@@ -102,7 +102,7 @@ func ExampleGET() {
 
 // ExamplePOST shows the POST sugar carrying a request body.
 func ExamplePOST() {
-	dialer := &conn.TLSDialer{Config: &tls.Config{InsecureSkipVerify: true}} //nolint:gosec
+	dialer := &conn.TLSDialer{Config: &tls.Config{InsecureSkipVerify: true}}
 	c, err := client.NewSingleConnClient("api.example.com:443", dialer)
 	if err != nil {
 		log.Fatal(err)
@@ -123,7 +123,7 @@ func ExamplePOST() {
 // ExampleH shows building a prebuilt header slice with the H helper and
 // attaching it to a reused Request literal.
 func ExampleH() {
-	dialer := &conn.TLSDialer{Config: &tls.Config{InsecureSkipVerify: true}} //nolint:gosec
+	dialer := &conn.TLSDialer{Config: &tls.Config{InsecureSkipVerify: true}}
 	c, err := client.NewSingleConnClient("api.example.com:443", dialer)
 	if err != nil {
 		log.Fatal(err)
@@ -154,7 +154,7 @@ func ExampleH() {
 // bytes alias Response-owned memory valid only until the next Reset; use
 // HeaderString (or copy) to retain past then.
 func ExampleResponse_Header() {
-	dialer := &conn.TLSDialer{Config: &tls.Config{InsecureSkipVerify: true}} //nolint:gosec
+	dialer := &conn.TLSDialer{Config: &tls.Config{InsecureSkipVerify: true}}
 	c, err := client.NewSingleConnClient("api.example.com:443", dialer)
 	if err != nil {
 		log.Fatal(err)

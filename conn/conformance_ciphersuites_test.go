@@ -76,7 +76,7 @@ func TestConformance_RFC9113_Sec9_2_2_TLS12CipherSuitesProhibited(t *testing.T) 
 // honored, not silently overridden.
 func TestConformance_RFC9113_Sec9_2_2_ExplicitCipherSuitesRespected(t *testing.T) {
 	caller := []uint16{tls.TLS_ECDHE_RSA_WITH_AES_128_CBC_SHA}
-	d := &TLSDialer{Config: &tls.Config{CipherSuites: caller}} //nolint:gosec // caller's explicit choice is respected by design
+	d := &TLSDialer{Config: &tls.Config{CipherSuites: caller}}
 	got := d.tlsClientConfig()
 	if len(got.CipherSuites) != 1 || got.CipherSuites[0] != tls.TLS_ECDHE_RSA_WITH_AES_128_CBC_SHA {
 		t.Errorf("caller CipherSuites overridden: got %#x, want the caller's explicit [0xc013]", got.CipherSuites)

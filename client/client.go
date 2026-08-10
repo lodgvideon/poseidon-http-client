@@ -992,7 +992,12 @@ var (
 // The caller must not mutate the returned slice. This avoids the
 // allocation of []byte(string) in the hot header-building path.
 func unsafeStringToBytes(s string) []byte {
-	return unsafe.Slice(unsafe.StringData(s), len(s)) //nolint:gosec
+	//nolint:gosec // G103, and this is the audit it asks for: every caller
+	// passes a *Request field that outlives the header block being built, and
+	// every consumer (hpack encoding, the token/injection predicates) only
+	// reads. Nothing writes through the returned slice, so the string's
+	// immutability is not violated.
+	return unsafe.Slice(unsafe.StringData(s), len(s))
 }
 
 // hdrSlicePool recycles the []conn.HeaderField backing array used by

@@ -38,14 +38,14 @@ func FuzzDecodeFieldSection(f *testing.F) {
 
 		// Static-only profile: dynamic references and any non-zero RIC must be
 		// rejected, never panic.
-		NewDecoder().DecodeFieldSection(src, nil, emit) //nolint:errcheck // panic/hang is the only failure mode under test
+		NewDecoder().DecodeFieldSection(src, nil, emit)
 
 		// Populated dynamic table: exercise the dynamic-reference resolution paths.
 		dt := NewDynamicTable(4096)
 		if err := dt.setCapacity(4096); err == nil {
 			dt.insert([]byte("custom-key"), []byte("custom-value"))
 			dt.insert([]byte("x-foo"), []byte("bar"))
-			NewDecoder().DecodeFieldSection(src, dt, emit) //nolint:errcheck // panic/hang is the only failure mode under test
+			NewDecoder().DecodeFieldSection(src, dt, emit)
 		}
 	})
 }

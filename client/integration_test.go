@@ -509,7 +509,7 @@ func TestIntegration_Client_BodyStream_Large(t *testing.T) {
 	c, err := client.NewClient(client.ClientOptions{
 		Addr: addr,
 		ConnOpts: conn.ConnOptions{
-			Dialer:            &conn.TLSDialer{Config: &tls.Config{InsecureSkipVerify: true}}, //nolint:gosec
+			Dialer:            &conn.TLSDialer{Config: &tls.Config{InsecureSkipVerify: true}},
 			StreamEventBuffer: 128,
 		},
 	})

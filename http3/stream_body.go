@@ -28,6 +28,10 @@ func (c *Client) roundTripStream(ctx context.Context, stream quicStream, req *Re
 	br := &BodyReader{c: c, stream: stream, ctx: ctx, req: req}
 	br.rb.dec = &br.dec // per-request QPACK decoder (2d); its scratch aliases decoded slices
 	br.rb.streamID = stream.ID()
+	//nolint:fatcontext // Stored, not derived: rb.ctx is overwritten by whoever
+	// currently owns the read (here, then by each Next below), so no chain is
+	// built up. It exists because a QPACK-blocked decode has to be bounded by
+	// the caller that is waiting on it.
 	br.rb.ctx = ctx // bounds a blocked pre-head HEADERS decode (§2.1.3, Q4)
 	br.rb.onData = br.stashData
 	br.fr.SetMaxFrameLen(maxResponseBytes)
@@ -173,6 +177,9 @@ func (r *BodyReader) stashData(payload []byte) error {
 // on any error. After a clean end or an error, further calls return the same
 // terminal state.
 func (r *BodyReader) Next(ctx context.Context) (BodyEvent, error) {
+	//nolint:fatcontext // Overwrite, not derive: each Next replaces the field
+	// with its own ctx rather than wrapping the previous one, so repeated calls
+	// do not grow a context chain.
 	r.rb.ctx = ctx // this Next's ctx bounds a blocked trailer-section decode (§2.1.3, Q4)
 	for {
 		if r.havePending {

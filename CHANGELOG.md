@@ -46,6 +46,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `fieldalignment` was measured and deliberately left off; the reasoning is
   recorded next to the `disable:` entry in `.golangci.yml`.
 
+- **`//nolint` directives now have to earn their place** — `nolintlint` with
+  `require-explanation`, `require-specific` and `allow-unused: false`. The tree
+  had **67 directives; 46 of them suppressed nothing.** 30 bare
+  `//nolint:gosec` on `InsecureSkipVerify` in examples and tests were dead twice
+  over — G402 is excluded globally and `gosec` does not run on `_test.go` at all
+  — and another 23, these ones *with* explanations, had outlived what they
+  silenced: `//nolint:gocyclo` on functions since simplified below the
+  complexity floor, `//nolint:errcheck` in files the exclusion rules already
+  cover. All 46 are deleted. The 21 that remain each suppress a real finding and
+  each say why.
+
+  The one directive that turned out to be load-bearing is
+  `unsafeStringToBytes`: stripping it surfaced gosec G103, and it is back with
+  the audit G103 asks for — every caller passes a `*Request` field that outlives
+  the header block, and every consumer only reads.
+
+- **Six linters with small standing findings**, each fixed or annotated rather
+  than baselined: `wastedassign` (three dead initializers, in `conn`, `http1`
+  and `quic`), `recvcheck` (`rttStats.lossDelay` unified onto the pointer
+  receiver; `grpc.Status` keeps its split receiver, which is deliberate and now
+  documented), `nilerr` (five intentional drop-the-error sites, including the
+  one RFC 9001 §5.2 requires — a packet failing authentication must be discarded
+  silently, since surfacing that error would let an off-path attacker kill a
+  connection with one forged datagram), `fatcontext`, `makezero` (production
+  clean, fixture builders excluded), `nolintlint`.
+
 ## [v0.12.0] — 2026-08-10
 
 ### Added

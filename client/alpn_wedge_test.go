@@ -67,7 +67,7 @@ func TestConformance_ALPN_SilentH2PeerDoesNotWedgeClose(t *testing.T) {
 		Transport: client.TransportALPN,
 		ConnOpts: conn.ConnOptions{
 			Dialer: &conn.FlexDialer{Config: &tls.Config{
-				InsecureSkipVerify: true, //nolint:gosec // self-signed test cert
+				InsecureSkipVerify: true,
 			}},
 		},
 	})

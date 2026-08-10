@@ -73,7 +73,39 @@ linters:
     # bidichk: bidirectional-override runes can make a diff read differently
     # than it compiles. Cheap insurance for a module other people vendor.
     - bidichk
+    # ── Small standing findings ───────────────────────────────────────
+    # Unlike the ratchets above, these each had a handful of hits when they
+    # went in. Every one was either fixed or annotated; a new hit is a new
+    # finding, not a backlog item.
+    #
+    # nilerr: five sites return nil after an error, all deliberately —
+    # a refused push (§6.6), a failed AEAD open that MUST be discarded
+    # silently (RFC 9001 §5.2), a CONNECTION_CLOSE the caller reports.
+    # They now say so in a //nolint, which is the point: "we drop this
+    # error on purpose" is a claim that should be written down.
+    - nilerr
+    - wastedassign
+    # fatcontext: catches `ctx = context.WithX(ctx, …)` inside a loop, which
+    # grows the chain per iteration. Verified to fire on that shape; the two
+    # http3 hits are a struct field being overwritten, not derived.
+    - fatcontext
+    - recvcheck
+    # makezero: `make([]byte, n)` followed by append silently prefixes n zero
+    # bytes. In a wire codec that is a framing bug, not a style issue. The
+    # tests do it on purpose (fixed-prefix builders) and are excluded below.
+    - makezero
+    # nolintlint: this tree documents every lint exclusion in .golangci.yml
+    # with a paragraph of reasoning; a bare //nolint at a call site is the one
+    # place that convention was not enforced. allow-unused also earns its
+    # keep — 30 of the 32 bare //nolint:gosec directives it surfaced were
+    # suppressing nothing at all, because G402 is excluded globally and gosec
+    # does not run on _test.go. They are deleted rather than annotated.
+    - nolintlint
   settings:
+    nolintlint:
+      require-explanation: true
+      require-specific: true
+      allow-unused: false
     depguard:
       rules:
         from-scratch:
@@ -133,6 +165,13 @@ linters:
       # (e.g. w.Write in handler funcs, gzip.Writer.Close in setup code).
       - path: _test\.go$
         linters: [errcheck, gosec, errorlint]
+      # makezero: the fixture builders legitimately allocate a fixed-size
+      # prefix and append the variable part onto it — a 9-byte HTTP/2 frame
+      # header, QUIC's 24-byte preferred_address prefix. That is the shape
+      # makezero flags, and here it is the intent. Production code has no
+      # hits, which is where the check earns its place.
+      - path: _test\.go$
+        linters: [makezero]
 
 # golangci-lint v2 moved formatters out of `linters` into their own section,
 # and this file did not have one — so nothing checked gofmt, here or in CI.

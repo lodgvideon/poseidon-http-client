@@ -210,7 +210,7 @@ func TestConformance_RFC9000_Sec174_SpinBitRandomPerConnection(t *testing.T) {
 
 	// The value is actually drawn per connection, not hard-coded: over enough
 	// NewConn calls both values must appear.
-	tlsCfg := &tls.Config{InsecureSkipVerify: true, NextProtos: []string{"h3"}} //nolint:gosec // test-only
+	tlsCfg := &tls.Config{InsecureSkipVerify: true, NextProtos: []string{"h3"}}
 	var seenTrue, seenFalse bool
 	for i := 0; i < 64 && (!seenTrue || !seenFalse); i++ {
 		c, err := NewConn(&closePC{}, tlsCfg, nil)

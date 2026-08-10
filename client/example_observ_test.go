@@ -31,7 +31,7 @@ func ExampleHooks() {
 		},
 	}
 
-	dialer := &conn.TLSDialer{Config: &tls.Config{InsecureSkipVerify: true}} //nolint:gosec
+	dialer := &conn.TLSDialer{Config: &tls.Config{InsecureSkipVerify: true}}
 	c, err := client.NewSingleConnClient("example.com:443", dialer, client.WithHooks(hooks))
 	if err != nil {
 		log.Fatal(err)
@@ -50,7 +50,7 @@ func ExampleHooks() {
 // rate from the 2xx / non-2xx split (rather than conflating "got a
 // response" with "got a good response").
 func ExampleClient_MetricsSnapshot() {
-	dialer := &conn.TLSDialer{Config: &tls.Config{InsecureSkipVerify: true}} //nolint:gosec
+	dialer := &conn.TLSDialer{Config: &tls.Config{InsecureSkipVerify: true}}
 	c, err := client.NewSingleConnClient("example.com:443", dialer)
 	if err != nil {
 		log.Fatal(err)
@@ -92,7 +92,7 @@ func Example_serverPush() {
 		log.Printf("server pushed %s -> %d (%d bytes)", path, resp.Status, len(resp.Body))
 	}
 
-	dialer := &conn.TLSDialer{Config: &tls.Config{InsecureSkipVerify: true}} //nolint:gosec
+	dialer := &conn.TLSDialer{Config: &tls.Config{InsecureSkipVerify: true}}
 	c, err := client.NewSingleConnClient("example.com:443", dialer, client.WithPushHandler(push))
 	if err != nil {
 		log.Fatal(err)
@@ -110,7 +110,7 @@ func Example_serverPush() {
 // request. The HEADERS frame then carries the PRIORITY flag so the server
 // may weight response delivery — e.g. deliver a stylesheet ahead of images.
 func Example_requestPriority() {
-	dialer := &conn.TLSDialer{Config: &tls.Config{InsecureSkipVerify: true}} //nolint:gosec
+	dialer := &conn.TLSDialer{Config: &tls.Config{InsecureSkipVerify: true}}
 	c, err := client.NewSingleConnClient("example.com:443", dialer)
 	if err != nil {
 		log.Fatal(err)
@@ -138,7 +138,7 @@ func Example_requestPriority() {
 // to announce the trailer key names in the initial HEADERS frame, once to
 // send the values), so it must return the same key set both times.
 func Example_requestTrailers() {
-	dialer := &conn.TLSDialer{Config: &tls.Config{InsecureSkipVerify: true}} //nolint:gosec
+	dialer := &conn.TLSDialer{Config: &tls.Config{InsecureSkipVerify: true}}
 	c, err := client.NewSingleConnClient("example.com:443", dialer)
 	if err != nil {
 		log.Fatal(err)
@@ -165,7 +165,7 @@ func Example_requestTrailers() {
 // sentinel (here ErrClosed), while errors.As unwraps a typed
 // *client.StreamResetError to inspect the RST_STREAM code the peer sent.
 func Example_errorsIs() {
-	dialer := &conn.TLSDialer{Config: &tls.Config{InsecureSkipVerify: true}} //nolint:gosec
+	dialer := &conn.TLSDialer{Config: &tls.Config{InsecureSkipVerify: true}}
 	c, err := client.NewSingleConnClient("example.com:443", dialer)
 	if err != nil {
 		log.Fatal(err)

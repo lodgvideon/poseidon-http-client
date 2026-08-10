@@ -786,7 +786,6 @@ func (c *Conn) writeHeadersAndData(ctx context.Context, s *Stream, wantGen uint6
 		return c.writeHeadersWithPriority(ctx, s, fields, endStream, nil)
 	}
 
-	maxFrame := 0
 	padLen := c.opts.Padding.ForData()
 	padOverhead := 0
 	if padLen > 0 {
@@ -798,7 +797,10 @@ func (c *Conn) writeHeadersAndData(ctx context.Context, s *Stream, wantGen uint6
 	c.wbatch.leave()
 	c.assignStreamIDLocked(s, fields)
 
-	maxFrame = c.maxOutFrameSize()
+	// Read under wmu: maxOutFrameSize takes psMu, and a peer SETTINGS may have
+	// resized the frame budget between entering this function and acquiring the
+	// write lock.
+	maxFrame := c.maxOutFrameSize()
 	effective := maxFrame
 	if padOverhead > 0 && padOverhead < effective {
 		effective -= padOverhead

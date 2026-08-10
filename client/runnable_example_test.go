@@ -37,7 +37,7 @@ func exampleH2Server(handler http.HandlerFunc) (addr string, stop func()) {
 // exampleH2Server. InsecureSkipVerify is acceptable only because this is an
 // in-process test server; never do this against real backends.
 func exampleDialer() conn.Dialer {
-	return &conn.TLSDialer{Config: &tls.Config{InsecureSkipVerify: true}} //nolint:gosec
+	return &conn.TLSDialer{Config: &tls.Config{InsecureSkipVerify: true}}
 }
 
 // exampleDo wraps c.Do in a tiny bounded Retryer so the deterministic

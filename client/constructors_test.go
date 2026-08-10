@@ -13,7 +13,7 @@ import (
 )
 
 func insecureDialer() conn.Dialer {
-	return &conn.TLSDialer{Config: &tls.Config{InsecureSkipVerify: true}} //nolint:gosec
+	return &conn.TLSDialer{Config: &tls.Config{InsecureSkipVerify: true}}
 }
 
 func status204Server(t *testing.T) string {

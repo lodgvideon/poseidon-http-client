@@ -85,7 +85,7 @@ func TestInterop_ClientH3_GetStatusBody(t *testing.T) {
 				},
 			}
 			c, err := NewH3Client(srv.addr,
-				&tls.Config{ServerName: host, InsecureSkipVerify: true}, //nolint:gosec // interop test dials self-signed servers
+				&tls.Config{ServerName: host, InsecureSkipVerify: true},
 				WithHooks(hooks))
 			if err != nil {
 				t.Fatalf("NewH3Client(%s): %v", srv.addr, err)
@@ -149,7 +149,7 @@ func TestInterop_ClientH3_BBR_HugeTransfer(t *testing.T) {
 			c, err := NewClient(ClientOptions{
 				Addr:      srv.addr,
 				Transport: TransportH3,
-				TLSConfig: &tls.Config{ServerName: host, InsecureSkipVerify: true}, //nolint:gosec // interop dials self-signed servers
+				TLSConfig: &tls.Config{ServerName: host, InsecureSkipVerify: true},
 				H3ConnOptions: []quic.ConnOption{
 					quic.WithCongestionControl(quic.CCBBR),
 				},

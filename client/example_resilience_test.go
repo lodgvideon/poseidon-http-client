@@ -17,7 +17,7 @@ import (
 func ExampleClient_Retryer() {
 	ctx := context.Background()
 
-	dialer := &conn.TLSDialer{Config: &tls.Config{InsecureSkipVerify: true}} //nolint:gosec
+	dialer := &conn.TLSDialer{Config: &tls.Config{InsecureSkipVerify: true}}
 	c, err := client.NewSingleConnClient("api.example.com:443", dialer)
 	if err != nil {
 		log.Fatal(err)
@@ -51,7 +51,7 @@ func ExampleNewManagedClient() {
 		client.Address{Host: "10.0.0.3", Port: 443},
 	)
 
-	dialer := &conn.TLSDialer{Config: &tls.Config{InsecureSkipVerify: true}} //nolint:gosec
+	dialer := &conn.TLSDialer{Config: &tls.Config{InsecureSkipVerify: true}}
 	c, err := client.NewManagedClient(resolver, dialer,
 		client.WithSelector(client.RoundRobin()))
 	if err != nil {
@@ -86,7 +86,7 @@ func ExampleStaticResolver() {
 		log.Printf("backend %s", a.String())
 	}
 
-	dialer := &conn.TLSDialer{Config: &tls.Config{InsecureSkipVerify: true}} //nolint:gosec
+	dialer := &conn.TLSDialer{Config: &tls.Config{InsecureSkipVerify: true}}
 	c, err := client.NewManagedClient(resolver, dialer)
 	if err != nil {
 		log.Fatal(err)
@@ -99,7 +99,7 @@ func ExampleStaticResolver() {
 func Example_rateLimit() {
 	ctx := context.Background()
 
-	dialer := &conn.TLSDialer{Config: &tls.Config{InsecureSkipVerify: true}} //nolint:gosec
+	dialer := &conn.TLSDialer{Config: &tls.Config{InsecureSkipVerify: true}}
 	// 100 QPS sustained, bursts up to 20.
 	c, err := client.NewSingleConnClient("api.example.com:443", dialer,
 		client.WithRateLimit(100, 20))
@@ -123,7 +123,7 @@ func Example_rateLimit() {
 func Example_requestTimeout() {
 	ctx := context.Background()
 
-	dialer := &conn.TLSDialer{Config: &tls.Config{InsecureSkipVerify: true}} //nolint:gosec
+	dialer := &conn.TLSDialer{Config: &tls.Config{InsecureSkipVerify: true}}
 	c, err := client.NewSingleConnClient("api.example.com:443", dialer)
 	if err != nil {
 		log.Fatal(err)
@@ -150,7 +150,7 @@ func Example_requestTimeout() {
 func Example_idempotencyOverride() {
 	ctx := context.Background()
 
-	dialer := &conn.TLSDialer{Config: &tls.Config{InsecureSkipVerify: true}} //nolint:gosec
+	dialer := &conn.TLSDialer{Config: &tls.Config{InsecureSkipVerify: true}}
 	c, err := client.NewSingleConnClient("api.example.com:443", dialer)
 	if err != nil {
 		log.Fatal(err)
