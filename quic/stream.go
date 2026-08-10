@@ -177,17 +177,40 @@ func (s *Stream) recvLocked() []byte {
 // Finished reports whether the receive side is complete — either the FIN has
 // arrived with every byte contiguous (RFC 9000 §2.2), or the peer aborted the
 // stream with RESET_STREAM (§3.5).
-func (s *Stream) Finished() bool { return s.recvReset || s.recv.complete() }
+//
+// Takes conn.mu: the reader mutates recv and recvReset under it, so reading them
+// without it is a data race. This used to be lock-free, which put a racy way to
+// ask the question next to the rule forbidding it — and http3's control-stream
+// servicing took the racy one.
+func (s *Stream) Finished() bool {
+	s.conn.mu.Lock()
+	defer s.conn.mu.Unlock()
+	return s.recvReset || s.recv.complete()
+}
 
 // ResetReceived reports whether the peer aborted its send side with RESET_STREAM
 // (RFC 9000 §3.5) — an abrupt end that, unlike a clean FIN, may fall in the
 // middle of a frame. Callers distinguish it from a clean, complete receive.
-func (s *Stream) ResetReceived() bool { return s.recvReset }
+//
+// Takes conn.mu, as Finished does.
+func (s *Stream) ResetReceived() bool {
+	s.conn.mu.Lock()
+	defer s.conn.mu.Unlock()
+	return s.recvReset
+}
 
 // ResetCode returns the application error code the peer carried in its
 // RESET_STREAM (RFC 9000 §19.4); it is meaningful only when ResetReceived is
 // true. An HTTP/3 caller maps it to a request-level error (RFC 9114 §8.1).
-func (s *Stream) ResetCode() uint64 { return s.recvResetCode }
+//
+// Takes conn.mu, as Finished does. A caller that needs the reset flag and its
+// code to agree should use RecvState, which reads them in ONE locked section:
+// two separately-locked calls can straddle a reset arriving between them.
+func (s *Stream) ResetCode() uint64 {
+	s.conn.mu.Lock()
+	defer s.conn.mu.Unlock()
+	return s.recvResetCode
+}
 
 // maybeRetire drops a stream from the routing map once both directions have
 // reached a terminal state — the send side finished (FIN sent) or reset, and the
@@ -514,10 +537,12 @@ func (s *Stream) WaitSendable(ctx context.Context) error {
 // RecvState returns a locked snapshot of the receive side (docs/HTTP3_DESIGN.md
 // §3.3, fix F5): finished mirrors Finished (a clean complete FIN or a peer
 // RESET_STREAM), reset mirrors ResetReceived, and code is the reset's application
-// error code. The reader mutates recv.fin/finalSize/data and recvReset under
-// conn.mu in OnStream/OnResetStream, so a consumer must read them under the same
-// lock rather than via the individual lock-free accessors. Added in PR 2b for the
-// future Do read loop; not yet called by Do.
+// error code.
+//
+// The individual accessors are each safe on their own now, so this exists for
+// the other reason: it reads all three in ONE locked section. Calling them
+// separately can straddle a RESET_STREAM arriving in between and report a reset
+// with the code from before it, or a code with the flag from after.
 func (s *Stream) RecvState() (finished, reset bool, code uint64) {
 	s.conn.mu.Lock()
 	defer s.conn.mu.Unlock()
