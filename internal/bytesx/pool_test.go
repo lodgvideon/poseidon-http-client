@@ -58,33 +58,10 @@ func TestGetReadBuf_ServesTheFramerAsk(t *testing.T) {
 	}
 }
 
-// TestGetReadBuf_UndersizedBufferGoesBack pins the other half. When a caller
-// asks for more than the pooled buffer holds, the buffer it did not use must
-// return to the pool: dropping it discards a live allocation and leaves the pool
-// no fuller, so a run of oversized asks drains it one buffer at a time.
-func TestGetReadBuf_UndersizedBufferGoesBack(t *testing.T) {
-	// Seed a buffer that is deliberately smaller than the ask below.
-	small := make([]byte, 0, 128)
-	readBufPool.Put(&small)
-
-	big := GetReadBuf(1 << 20) // forces the too-small branch
-	if cap(*big) < 1<<20 {
-		t.Fatalf("GetReadBuf(1 MiB) returned cap %d", cap(*big))
-	}
-
-	// The seeded buffer must still be reachable. sync.Pool gives no ordering
-	// guarantee, so this asks only that SOMETHING is there to take, and takes a
-	// few to make a dropped buffer show up as an all-fresh sequence.
-	seenPooled := false
-	for i := 0; i < 4; i++ {
-		p := readBufPool.Get().(*[]byte)
-		if cap(*p) == 128 {
-			seenPooled = true
-			break
-		}
-	}
-	if !seenPooled {
-		t.Error("the undersized buffer was not returned to the pool; it was allocated, " +
-			"rejected, and dropped")
-	}
-}
+// There is deliberately NO test that the undersized buffer returns to the pool.
+// sync.Pool retention is not observable: the GC may empty a pool at any point,
+// and a goroutine may migrate between per-P caches, so a "the buffer is still
+// there" assertion passes or fails on timing rather than on the code. A first
+// draft of exactly that test went green locally and red on CI under -race. The
+// put-back is a strict improvement with no cost; the size above is the part that
+// is both load-bearing and checkable.
