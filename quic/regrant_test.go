@@ -1,6 +1,9 @@
 package quic
 
-import "testing"
+import (
+	"testing"
+	"time"
+)
 
 // A credit grant is queued once and never retransmitted, and the limit it carries
 // is applied to local state the moment it is queued. Lose that packet and the two
@@ -39,6 +42,24 @@ func grantedStream(t *testing.T) (*Conn, *Stream, uint64) {
 	staleLimit := DefaultStreamRecvWindow // what the peer still believes, the grant having been lost
 	c.pendingCtrl = c.pendingCtrl[:0]     // the grant's packet is lost
 	return c, s, staleLimit
+}
+
+// loseAPacket drives a real loss episode in the application space: four
+// ack-eliciting packets, the largest acknowledged, so the packet-threshold rule
+// declares pn 0 lost (RFC 9002 §6.1.1) and detectLost runs everything a genuine
+// loss runs.
+func loseAPacket(t *testing.T, c *Conn) {
+	t.Helper()
+	base := time.Unix(500, 0)
+	c.now = func() time.Time { return base }
+	for pn := uint64(0); pn <= 3; pn++ {
+		c.sent[spaceApp].onSent(pn, base, true, streamFrame(0, pn, "x"))
+	}
+	c.sent[spaceApp].ack(c, 3, 3)
+	c.detectLost(spaceApp)
+	if _, still := c.sent[spaceApp].packets[0]; still {
+		t.Fatal("the setup did not actually declare a packet lost")
+	}
 }
 
 // queuedCtrl decodes whatever is sitting in pendingCtrl.
@@ -164,10 +185,14 @@ func TestRegrant_DataBlockedResendsCurrentLimit(t *testing.T) {
 // dropped as readily as the grant it was meant to rescue. Measured, not argued —
 // with only the blocked-frame answer in place, a 1 MiB response through 10% loss
 // still deadlocked on the second run of thirty.
+// It drives detectLost rather than calling regrantAfterLoss, so that removing
+// the call from the loss path fails it. The first version called the function
+// directly and passed with the wiring deleted — a gate on a function nothing
+// reaches is not a gate.
 func TestRegrant_LossEpisodeResendsCurrentLimit(t *testing.T) {
 	c, s, _ := grantedStream(t)
 
-	c.regrantAfterLoss()
+	loseAPacket(t, c)
 
 	col := queuedCtrl(t, c)
 	got, ok := col.streamData[s.ID()]
@@ -189,7 +214,8 @@ func TestRegrant_LossEpisodeRepeatsUntilDelivered(t *testing.T) {
 
 	for episode := 1; episode <= 3; episode++ {
 		c.pendingCtrl = c.pendingCtrl[:0] // the previous re-grant was lost too
-		c.regrantAfterLoss()
+		c.sent[spaceApp] = sentSpace{}
+		loseAPacket(t, c)
 		col := queuedCtrl(t, c)
 		if got, ok := col.streamData[s.ID()]; !ok || got != s.recvMax {
 			t.Fatalf("loss episode %d re-sent %d (present=%v), want the current limit %d — "+
@@ -217,7 +243,7 @@ func TestRegrant_LossEpisodeQuietForUngrantedStreams(t *testing.T) {
 	}
 	c.pendingCtrl = c.pendingCtrl[:0]
 
-	c.regrantAfterLoss()
+	loseAPacket(t, c)
 
 	if len(c.pendingCtrl) != 0 {
 		t.Errorf("a loss episode queued %d bytes for streams that never got a grant, want none",
@@ -235,7 +261,7 @@ func TestRegrant_LossEpisodeDropsFinishedStreams(t *testing.T) {
 	}
 	s.recv.fin = true
 
-	c.regrantAfterLoss()
+	loseAPacket(t, c)
 
 	if _, still := c.grantedStreams[s.ID()]; still {
 		t.Error("a stream whose final size is known stayed in the granted set — the set " +
