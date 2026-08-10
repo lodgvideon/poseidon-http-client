@@ -208,5 +208,14 @@ func (s *singleConn) warmup(n int) {
 	s.mu.Unlock()
 	go func() {
 		_, _, _ = s.acquireConn(ctx)
+		// Release the timer and clear the latch, as the H1 and H3 single-conn
+		// transports do. Without this the field stays non-nil for the life of the
+		// client: a warmup whose dial failed can never be retried — the guard
+		// above turns every later Warmup into a no-op — and the 30-second timer
+		// stays armed until it fires.
+		cancel()
+		s.mu.Lock()
+		s.warmupCancel = nil
+		s.mu.Unlock()
 	}()
 }
