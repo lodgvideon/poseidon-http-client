@@ -101,7 +101,17 @@ linters:
     # suppressing nothing at all, because G402 is excluded globally and gosec
     # does not run on _test.go. They are deleted rather than annotated.
     - nolintlint
+    # exhaustive: this module is nine enum-shaped wire vocabularies — frame
+    # types, settings IDs, error codes, packet types, stream events. Adding a
+    # member and missing a switch is the characteristic bug here, and it is
+    # silent: the new value falls through and the code does nothing. Every
+    # switch that handles a subset on purpose now says so in an
+    # //exhaustive:ignore that gives the reason.
+    - exhaustive
   settings:
+    exhaustive:
+      # An explicit default arm is a deliberate catch-all; don't second-guess it.
+      default-signifies-exhaustive: true
     nolintlint:
       require-explanation: true
       require-specific: true
@@ -172,6 +182,12 @@ linters:
       # hits, which is where the check earns its place.
       - path: _test\.go$
         linters: [makezero]
+      # exhaustive: a test switches on the two or three enum values its
+      # scenario produces; demanding the other twelve error codes would turn
+      # every table test into a wall of unreachable arms. The check is here
+      # for production dispatch, which is where a missed member is silent.
+      - path: _test\.go$
+        linters: [exhaustive]
 
 # golangci-lint v2 moved formatters out of `linters` into their own section,
 # and this file did not have one — so nothing checked gofmt, here or in CI.

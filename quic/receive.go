@@ -60,6 +60,10 @@ func ProcessDatagram(datagram []byte, dcidLen int, ks *KeySet, largestAcked func
 		pkt := rest[:hdr.PacketLen]
 		rest = rest[hdr.PacketLen:]
 
+		//exhaustive:ignore // Retry and Version Negotiation carry no packet
+		// number and no AEAD-protected payload, so they leave before the open
+		// path below. Every other type goes through that path on purpose —
+		// listing them here would mean duplicating it per type.
 		switch hdr.Type {
 		case PacketRetry:
 			res.Retry = true

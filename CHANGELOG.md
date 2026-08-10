@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **A PUSH_PROMISE reaching either streaming read path leaked its header slab
+  back to the garbage collector instead of the pool.** A PUSH_PROMISE is
+  delivered on the *parent* stream, which is the stream `responseBodyReader` and
+  `StreamResponse.Recv` are draining, so it lands there whenever a `PushHandler`
+  is installed. `Client.Do`'s buffered path dispatches the promise and `grpc`'s
+  receive loop drops it with an explicit `putHeaderSlab`; these two switches had
+  no arm for it at all, so the event fell straight out while every neighbouring
+  skip arm — `EventHeaders`, `EventInterimHeaders` — recycled. Found by
+  `exhaustive`, which is the whole argument for enabling it: nothing failed, the
+  event was simply ignored. Pinned by `client/pushpromise_slab_test.go`, which
+  asserts on the slab rather than on the bytes the caller reads, and which fails
+  on the pre-fix code.
+
 ### Changed
 
 - **Formatting is now gated.** golangci-lint v2 moved formatters into their own
@@ -71,6 +86,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   silently, since surfacing that error would let an off-path attacker kill a
   connection with one forged datagram), `fatcontext`, `makezero` (production
   clean, fixture builders excluded), `nolintlint`.
+
+- **`exhaustive` guards the enum dispatch.** This module is nine enum-shaped
+  wire vocabularies — frame types, settings IDs, error codes, packet types,
+  stream events — and adding a member while missing a switch is both the
+  characteristic defect here and a silent one: the new value falls through and
+  the code does nothing, which is what the PUSH_PROMISE slab leak above was.
+  Ten production switches were reviewed; one was a bug, one is a deferred
+  finding, and the other eight now carry an `//exhaustive:ignore` that states
+  why handling a subset is correct. Tests are excluded — a table test switching
+  on the three codes its scenario produces should not have to spell out the
+  other twelve.
+
+  The deferred one is `TLSHandshake.Pump`: Go 1.26 adds `tls.QUICErrorEvent`,
+  which carries a fatal handshake error, and the loop drops it — turning a
+  failed handshake into a `Pump` that reports success. It cannot be fixed here,
+  because naming the constant does not compile under this module's declared
+  `go 1.25.0`; the reasoning and the trigger are recorded at the switch.
 
 ## [v0.12.0] — 2026-08-10
 

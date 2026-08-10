@@ -223,6 +223,10 @@ func (s *Stream) maxChunk() int {
 // limit value (RFC 9000 §4.1, §19.12-§19.13). These are informational and free
 // no credit; the send resumes when a MAX_* frame raises the limit.
 func (s *Stream) emitBlocked(kind blockKind) {
+	//exhaustive:ignore // Only the two flow-control blocks have a frame to
+	// announce. blockNone is not blocked; blockCong and blockPace are local
+	// sender state (congestion window, pacer) that the peer must not be told
+	// about — there is no MAX_* frame it could send to relieve them.
 	switch kind {
 	case blockStream:
 		if !s.sdBlockedSet || s.sdBlockedLimit != s.sendMax {

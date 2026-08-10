@@ -111,6 +111,15 @@ func (h *TLSHandshake) HandleCrypto(level tls.QUICEncryptionLevel, data []byte) 
 func (h *TLSHandshake) Pump(sink HandshakeSink) error {
 	for {
 		ev := h.conn.NextEvent()
+		//exhaustive:ignore // Covers every tls.QUICEventKind that exists at this
+		// module's Go version (1.25). Go 1.26 adds QUICErrorEvent, which carries
+		// a fatal handshake error and which this loop currently drops: dropping
+		// it turns a failed handshake into a Pump that reports success. Start and
+		// HandleData return the same error on the paths that go through them,
+		// which is why it has not surfaced as a failure — but a Pump not preceded
+		// by one of those has no other channel for it. Handle it (return ev.Err)
+		// when go.mod moves to 1.26; referencing the constant now does not
+		// compile on the toolchain CI builds with.
 		switch ev.Kind {
 		case tls.QUICNoEvent:
 			return nil
@@ -136,6 +145,13 @@ func (h *TLSHandshake) Pump(sink HandshakeSink) error {
 			if err := sink.HandshakeComplete(); err != nil {
 				return err
 			}
+		case tls.QUICResumeSession, tls.QUICStoreSession, tls.QUICRejectedEarlyData:
+			// Session resumption and 0-RTT are explicit non-goals (see
+			// docs/HTTP3_DESIGN.md): no session cache is installed, so a ticket
+			// is never stored and early data is never offered. Ignoring these
+			// is what "no 0-RTT" is made of; naming them keeps that a decision
+			// rather than a gap, and makes a future stdlib event kind a lint
+			// failure instead of silence.
 		}
 	}
 }

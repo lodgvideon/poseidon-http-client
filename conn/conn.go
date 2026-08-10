@@ -1587,6 +1587,10 @@ const (
 func checkPeerSettingValues(s frame.SettingsParams) error {
 	for i := 0; i < s.N; i++ {
 		p := s.Pairs[i]
+		//exhaustive:ignore // Only the two settings whose *range* RFC 7540 §6.5.2
+		// makes a connection error are checked here. The rest have no illegal
+		// value, and INITIAL_WINDOW_SIZE is a FLOW_CONTROL_ERROR checked at the
+		// apply sites (see the doc comment).
 		switch p.ID {
 		case frame.SettingEnablePush:
 			if p.Value != 0 {
@@ -1607,6 +1611,9 @@ func (c *Conn) applyInitialPeerSettings(peer frame.SettingsParams) error {
 	}
 	for i := 0; i < peer.N; i++ {
 		p := peer.Pairs[i]
+		//exhaustive:ignore // Only settings with a handshake-time side effect.
+		// The others are stored by the caller and read through lookupPeerSetting
+		// when they are needed, so there is nothing to do at apply time.
 		switch p.ID {
 		case frame.SettingHeaderTableSize:
 			c.enc.SetMaxDynamicTableSize(p.Value)
@@ -1656,6 +1663,9 @@ func (c *Conn) applyPeerSettings(s frame.SettingsParams) error {
 	oldInitial := settingValue(c.peerSettings, frame.SettingInitialWindowSize, connInitialRecvWindow)
 	for i := 0; i < s.N; i++ {
 		p := s.Pairs[i]
+		//exhaustive:ignore // Only the two settings needing work beyond the
+		// unconditional setPeerSetting below: a range check that is a
+		// FLOW_CONTROL_ERROR, and the HPACK table resize deferred past psMu.
 		switch p.ID {
 		case frame.SettingInitialWindowSize:
 			if int64(p.Value) > maxWindow {
