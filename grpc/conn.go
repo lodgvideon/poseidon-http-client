@@ -314,6 +314,44 @@ type callOptions struct {
 	discardMD bool
 }
 
+// applyCallOptions folds the caller's options into co and returns the result.
+//
+// By value in, by value out, and NOT called at all when there are no options —
+// both halves matter. CallOption.apply needs a pointer, and an interface call
+// hides what the callee does with it, so escape analysis gives up and heap-
+// allocates whatever struct had its address taken. That cost one allocation on
+// every RPC, including the overwhelmingly common case of no options, where the
+// loop body never ran.
+//
+// Escape analysis is static, so neither guarding the loop with len(opts) > 0 in
+// the caller nor returning early from inside this function would have helped:
+// the address is taken somewhere in the function, and that is all it looks at.
+// What works is keeping the address-taking out of the caller entirely and
+// skipping the call, so the zero-option path never reaches the escaping code.
+//
+// Two things keep the escape out of the caller, and they are ALTERNATIVES:
+// removing either one alone still measures 9 allocations per RPC, removing both
+// puts it back to 10. Measured, not reasoned — the escape-analysis output is not
+// a reliable guide here, since it reports three heap moves in a configuration
+// that allocates no more than the one that reports a single move.
+//
+//   - the directive below, so the compiler cannot inline this back into its
+//     callers and make their frame own the escaping copy;
+//   - the caller's len(opts) > 0 guard, so the zero-option path never reaches
+//     this function at all.
+//
+// Both are kept because each is cheap and the pair is what the gate measures;
+// dropping one would leave a change that looks harmless and is one edit away
+// from silently costing an allocation on every RPC.
+//
+//go:noinline
+func applyCallOptions(co callOptions, opts []CallOption) callOptions {
+	for _, o := range opts {
+		o.apply(&co)
+	}
+	return co
+}
+
 // DiscardMetadata tells the call it will not read response metadata, so the
 // header and trailer blocks are not copied out of the transport's pooled buffer.
 // Header and Trailer then return nil.
@@ -380,8 +418,8 @@ func (cc *ClientConn) NewStream(ctx context.Context, method string, md []conn.He
 		return nil, fmt.Errorf("%w: %q", ErrBadMethod, method)
 	}
 	co := callOptions{maxRecvMessageSize: cc.opts.MaxRecvMessageSize}
-	for _, o := range opts {
-		o.apply(&co)
+	if len(opts) > 0 {
+		co = applyCallOptions(co, opts)
 	}
 	// Caller-built metadata never went through AppendMetadata, so it is validated
 	// in full here. Neither conn nor hpack checks field syntax on the send path,
@@ -618,8 +656,8 @@ func (cc *ClientConn) InvokeInto(ctx context.Context, method string, req, dst []
 		return dst, fmt.Errorf("%w: %q", ErrBadMethod, method)
 	}
 	co := callOptions{maxRecvMessageSize: cc.opts.MaxRecvMessageSize}
-	for _, o := range opts {
-		o.apply(&co)
+	if len(opts) > 0 {
+		co = applyCallOptions(co, opts)
 	}
 	// The unary API returns neither block, so copying them is pure garbage.
 	// After the caller's options, so an explicit DiscardMetadata is not undone

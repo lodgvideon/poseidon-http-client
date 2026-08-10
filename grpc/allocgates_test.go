@@ -18,6 +18,16 @@ import (
 	"testing"
 )
 
+// unaryAllocCeiling is what one Invoke costs, and it is shared by every gate
+// that asserts on that number rather than restated per test. Two constants for
+// one measurement drift: DiscardMetadata and the callOptions escape fix landed
+// on separate branches, each lowered its own copy, and the pair reached main
+// reading 6 and 9 for a path that by then allocated 5.
+//
+// Both directions are errors. Above it, a per-RPC allocation came back; below
+// it, the path improved and the win is not locked in until this drops.
+const unaryAllocCeiling = 5
+
 // TestInvokeInto_AllocsPerCall gates the win against the allocating form on the
 // same connection.
 func TestInvokeInto_AllocsPerCall(t *testing.T) {
@@ -51,7 +61,6 @@ func TestInvokeInto_AllocsPerCall(t *testing.T) {
 	// DiscardMetadata from Invoke puts four allocations back per call and the
 	// comparison above never notices, because InvokeInto grows by the same four.
 	// Same shape as unaryTransportWrites — when the number improves, lower it.
-	const unaryAllocCeiling = 6
 	if withCopy > unaryAllocCeiling {
 		t.Errorf("Invoke allocates %.1f per call, ceiling %d — a per-RPC allocation came back",
 			withCopy, unaryAllocCeiling)
