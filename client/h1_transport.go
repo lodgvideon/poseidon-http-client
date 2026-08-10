@@ -191,7 +191,7 @@ type h1singleConn struct {
 // openExchange implements transport.openExchange for H1.1.
 // It acquires the connection and the in-flight slot, returns an h1Exchange
 // whose release function unlocks the slot and optionally recycles the conn.
-func (s *h1singleConn) openExchange(ctx context.Context) (protoStream, func(uint32) (conn.StreamRef, bool), func(), error) {
+func (s *h1singleConn) openExchange(ctx context.Context) (protoStream, pushLookuper, func(), error) {
 	// Acquire the single in-flight slot (serializes concurrent callers).
 	// We use a channel so context cancellation still works.
 	acquired := make(chan struct{})
@@ -422,7 +422,7 @@ func (a *alpnSingleConn) delegate() transport {
 	return a.delegateLocked()
 }
 
-func (a *alpnSingleConn) openExchange(ctx context.Context) (protoStream, func(uint32) (conn.StreamRef, bool), func(), error) {
+func (a *alpnSingleConn) openExchange(ctx context.Context) (protoStream, pushLookuper, func(), error) {
 	for {
 		a.mu.Lock()
 		if a.closed {
