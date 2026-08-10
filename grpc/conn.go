@@ -37,6 +37,20 @@ type Options struct {
 	// UserAgent overrides DefaultUserAgent.
 	UserAgent string
 
+	// ContentSubtype is the optional subtype of the request content-type. Empty
+	// sends "application/grpc"; "proto" sends "application/grpc+proto".
+	//
+	// The protocol defines it as
+	// "application/grpc" [("+proto" / "+json" / {custom})], and this package's
+	// receive side has always accepted a subtype from the server (validContentType).
+	// Being unable to SEND one meant a JSON or custom-codec client could not tell
+	// the server which encoding its message bytes were in, and a server routing on
+	// "+json" could not be talked to at all.
+	//
+	// It must be an RFC 9110 token; Dial and NewClientConn reject anything else,
+	// since a caller string reaching a header value unvalidated is an injection
+	// surface.
+	ContentSubtype string
 	// AllowReservedMetadata exempts specific metadata names from the rule that
 	// the whole "grpc-" namespace belongs to the protocol. Names are matched
 	// case-insensitively.
@@ -175,9 +189,13 @@ type ClientConn struct {
 	// []byte(string) conversion in buildHeaders escapes into the header slice
 	// and therefore allocates, and none of the three changes for the life of
 	// the connection.
-	scheme    []byte
-	authority []byte
-	userAgent []byte
+	// contentType is the rendered request content-type, built once for the same
+	// reason scheme/authority/userAgent are: a []byte(string) conversion in
+	// buildHeaders escapes into the header slice and allocates.
+	contentType []byte
+	scheme      []byte
+	authority   []byte
+	userAgent   []byte
 }
 
 // newClientConn builds a ClientConn with the per-connection header bytes
@@ -190,6 +208,7 @@ func newClientConn(c *conn.Conn, opts Options, owned bool) *ClientConn {
 		scheme:        []byte(opts.Scheme),
 		authority:     []byte(opts.Authority),
 		userAgent:     []byte(opts.UserAgent),
+		contentType:   contentTypeFor(opts.ContentSubtype),
 		allowReserved: reservedAllowSet(opts.AllowReservedMetadata),
 	}
 }
@@ -224,6 +243,9 @@ var _ Invoker = (*ClientConn)(nil)
 // for NewStream. The returned ClientConn owns the connection: Close closes it.
 func Dial(ctx context.Context, addr string, opts Options) (*ClientConn, error) {
 	opts = opts.defaulted()
+	if err := validContentSubtype(opts.ContentSubtype); err != nil {
+		return nil, err
+	}
 	if opts.Authority == "" {
 		// The dialled address doubles as :authority. Right for a name, wrong
 		// for a literal: dialling "10.0.0.7:443" sends ":authority:
@@ -253,6 +275,9 @@ func NewClientConn(c *conn.Conn, opts Options) (*ClientConn, error) {
 		return nil, errors.New("grpc: nil conn.Conn")
 	}
 	opts = opts.defaulted()
+	if err := validContentSubtype(opts.ContentSubtype); err != nil {
+		return nil, err
+	}
 	if opts.Authority == "" {
 		return nil, errors.New("grpc: Options.Authority is required when wrapping an existing conn.Conn")
 	}
@@ -285,6 +310,8 @@ type callOptions struct {
 	// positional argument rather than merged into it, so combining the two costs
 	// no copy — buildHeaders walks both.
 	md []conn.HeaderField
+	// discardMD skips copying the response header and trailer blocks.
+	discardMD bool
 }
 
 // applyCallOptions folds the caller's options into co and returns the result.
@@ -324,6 +351,23 @@ func applyCallOptions(co callOptions, opts []CallOption) callOptions {
 	}
 	return co
 }
+
+// DiscardMetadata tells the call it will not read response metadata, so the
+// header and trailer blocks are not copied out of the transport's pooled buffer.
+// Header and Trailer then return nil.
+//
+// Four allocations per RPC. The copy exists so the pooled slab can go straight
+// back and Stream carries no buffer-lifetime contract, which is the right
+// default — this is for a caller that knows it never asks.
+//
+// It does NOT affect the call's outcome: grpc-status and grpc-message are read
+// from the live block and copied out, so Status is identical either way. Invoke
+// sets it for itself, since the unary API exposes neither block.
+func DiscardMetadata() CallOption { return discardMDCallOption{} }
+
+type discardMDCallOption struct{}
+
+func (discardMDCallOption) apply(c *callOptions) { c.discardMD = true }
 
 // maxRecvCallOption implements CallOption for MaxRecvMessageSize.
 type maxRecvCallOption int
@@ -410,6 +454,7 @@ func (cc *ClientConn) openStream(ctx context.Context, method string, md []conn.H
 	st := &Stream{}
 	st.acquireBufs()
 	st.dec.max = co.maxRecvMessageSize
+	st.discardMD = co.discardMD
 
 	var body []byte
 	if fuse {
@@ -537,7 +582,7 @@ func (cc *ClientConn) buildHeaders(ctx context.Context, method string, md, optMD
 		conn.HeaderField{Name: hdrScheme, Value: cc.scheme},
 		conn.HeaderField{Name: hdrPath, Value: sc.path},
 		conn.HeaderField{Name: hdrAuthority, Value: cc.authority},
-		conn.HeaderField{Name: hdrContentType, Value: valApplicationGRPC},
+		conn.HeaderField{Name: hdrContentType, Value: cc.contentType},
 		conn.HeaderField{Name: hdrUserAgent, Value: cc.userAgent},
 		// te: trailers is mandatory: it tells the server this client
 		// understands the trailers that carry grpc-status. RFC 9113 §8.2.2
@@ -614,6 +659,10 @@ func (cc *ClientConn) InvokeInto(ctx context.Context, method string, req, dst []
 	if len(opts) > 0 {
 		co = applyCallOptions(co, opts)
 	}
+	// The unary API returns neither block, so copying them is pure garbage.
+	// After the caller's options, so an explicit DiscardMetadata is not undone
+	// and nothing a caller sets is overridden by it either.
+	co.discardMD = true
 	for _, src := range [2][]conn.HeaderField{md, co.md} {
 		for i := range src {
 			if err := validMetadata(src[i].Name, src[i].Value, cc.allowReserved); err != nil {

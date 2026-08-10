@@ -48,18 +48,17 @@ func TestCallOptions_NoOptionsDoesNotAllocate(t *testing.T) {
 	})
 	_ = sink
 
-	// Lower this when the number improves, as with unaryTransportWrites.
-	const noOptionAllocCeiling = 9
+	// Same constant as the other absolute gate: one number for one measurement.
 	t.Logf("Invoke with no call options: %.1f allocs", n)
-	if n > noOptionAllocCeiling {
+	if n > unaryAllocCeiling {
 		t.Errorf("Invoke with NO options allocates %.1f per call, ceiling %d — the "+
 			"callOptions struct is on the heap again: either applyCallOptions was "+
 			"inlined back into its caller, or the caller stopped skipping the call",
-			n, noOptionAllocCeiling)
+			n, unaryAllocCeiling)
 	}
-	if n < noOptionAllocCeiling {
+	if n < unaryAllocCeiling {
 		t.Errorf("Invoke allocates only %.1f, below the recorded %d — the path improved, "+
-			"lower noOptionAllocCeiling to lock it in", n, noOptionAllocCeiling)
+			"lower unaryAllocCeiling to lock it in", n, unaryAllocCeiling)
 	}
 }
 
