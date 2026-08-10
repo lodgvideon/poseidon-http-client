@@ -302,11 +302,20 @@ type callOptions struct {
 // What works is keeping the address-taking out of the caller entirely and
 // skipping the call, so the zero-option path never reaches the escaping code.
 //
-// go:noinline is load-bearing, not a hint. Without it the compiler inlines this
-// into its callers, the local copy becomes theirs, and it escapes right back
-// into the function this was meant to keep clean — measured, not assumed. The
-// cost is one real call on the path that passes options, against one heap
-// allocation on every RPC that does not.
+// Two things keep the escape out of the caller, and they are ALTERNATIVES:
+// removing either one alone still measures 9 allocations per RPC, removing both
+// puts it back to 10. Measured, not reasoned — the escape-analysis output is not
+// a reliable guide here, since it reports three heap moves in a configuration
+// that allocates no more than the one that reports a single move.
+//
+//   - the directive below, so the compiler cannot inline this back into its
+//     callers and make their frame own the escaping copy;
+//   - the caller's len(opts) > 0 guard, so the zero-option path never reaches
+//     this function at all.
+//
+// Both are kept because each is cheap and the pair is what the gate measures;
+// dropping one would leave a change that looks harmless and is one edit away
+// from silently costing an allocation on every RPC.
 //
 //go:noinline
 func applyCallOptions(co callOptions, opts []CallOption) callOptions {
