@@ -51,6 +51,26 @@ type Options struct {
 	// since a caller string reaching a header value unvalidated is an injection
 	// surface.
 	ContentSubtype string
+	// AllowReservedMetadata exempts specific metadata names from the rule that
+	// the whole "grpc-" namespace belongs to the protocol. Names are matched
+	// case-insensitively.
+	//
+	// The default refuses the prefix outright, because the specification reserves
+	// it for FUTURE protocol use, not only for the names in use today — so a
+	// caller's header could collide with a field gRPC adds later. That default is
+	// right for application metadata and wrong for one specific case: tracing.
+	// grpc-go's own instrumentation writes grpc-trace-bin and grpc-tags-bin, which
+	// are an integration convention rather than Custom-Metadata, and a client that
+	// cannot emit them cannot join a census-instrumented deployment's traces at all.
+	//
+	// It exempts a name from THAT CHECK ONLY. Name syntax is still validated, and
+	// the transport's own headers (content-type, te, grpc-timeout, the
+	// connection-specific fields HTTP/2 forbids, pseudo-headers) are still
+	// refused however they are spelled. Anything listed beyond tracing headers is
+	// the caller's own risk.
+	//
+	//	Options{AllowReservedMetadata: []string{"grpc-trace-bin"}}
+	AllowReservedMetadata []string
 
 	// MaxRecvMessageSize caps the size of a single received message.
 	// Zero means DefaultMaxMessageSize.
@@ -160,6 +180,10 @@ type ClientConn struct {
 	opts Options
 	// owned reports whether Close should also close the underlying conn.Conn.
 	owned bool
+	// allowReserved is Options.AllowReservedMetadata as a lowercase set, built
+	// once so the per-field send-path check is a map lookup. nil when empty,
+	// and a nil map reads as "nothing exempted".
+	allowReserved map[string]struct{}
 	// scheme, authority and userAgent are the byte forms of the Options fields
 	// of the same name. They are converted once here rather than per RPC: a
 	// []byte(string) conversion in buildHeaders escapes into the header slice
@@ -178,13 +202,14 @@ type ClientConn struct {
 // precomputed. opts must already have been through defaulted().
 func newClientConn(c *conn.Conn, opts Options, owned bool) *ClientConn {
 	return &ClientConn{
-		c:           c,
-		opts:        opts,
-		owned:       owned,
-		scheme:      []byte(opts.Scheme),
-		authority:   []byte(opts.Authority),
-		userAgent:   []byte(opts.UserAgent),
-		contentType: contentTypeFor(opts.ContentSubtype),
+		c:             c,
+		opts:          opts,
+		owned:         owned,
+		scheme:        []byte(opts.Scheme),
+		authority:     []byte(opts.Authority),
+		userAgent:     []byte(opts.UserAgent),
+		contentType:   contentTypeFor(opts.ContentSubtype),
+		allowReserved: reservedAllowSet(opts.AllowReservedMetadata),
 	}
 }
 
@@ -346,7 +371,7 @@ func (cc *ClientConn) NewStream(ctx context.Context, method string, md []conn.He
 	// after it.
 	for _, src := range [2][]conn.HeaderField{md, co.md} {
 		for i := range src {
-			if err := validMetadata(src[i].Name, src[i].Value); err != nil {
+			if err := validMetadata(src[i].Name, src[i].Value, cc.allowReserved); err != nil {
 				return nil, err
 			}
 		}
@@ -578,7 +603,7 @@ func (cc *ClientConn) InvokeInto(ctx context.Context, method string, req, dst []
 	}
 	for _, src := range [2][]conn.HeaderField{md, co.md} {
 		for i := range src {
-			if err := validMetadata(src[i].Name, src[i].Value); err != nil {
+			if err := validMetadata(src[i].Name, src[i].Value, cc.allowReserved); err != nil {
 				return dst, err
 			}
 		}
