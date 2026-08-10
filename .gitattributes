@@ -1,26 +1,15 @@
-# gofmt emits LF and only LF. With a CRLF working tree (git's autocrlf on
-# Windows) every file reads as unformatted locally, so the gofmt gate in
-# .golangci.yml can only ever be checked on CI — and any file a Windows editor
-# rewrites lands CRLF in the index and fails that gate. Pin the working tree to
-# LF for everything the build, the gate, or CI's bash actually reads.
+# gofmt emits LF and only LF, so the formatting gate in .golangci.yml can only
+# be checked against an LF working tree — on a CRLF checkout every file reports
+# as unformatted and the gate is useless locally. That is the reason this file
+# exists; the rest follows from the same place, since everything CI runs, it
+# runs on Linux or inside a container: the shell scripts under scripts/, the
+# Dockerfiles and nginx/Caddy configs under test/integration/, the Python
+# gates. A CRLF shebang line is a container-only failure that no local run
+# reproduces.
 #
-# The fuzz corpora under */testdata/fuzz/ are Go-quoted text (escapes, never a
-# raw CR), so normalizing them is safe — and it fixes a local-only trap: Go's
-# corpus parser is line-oriented, and a CRLF checkout appends \r to every seed.
-* text=auto
+# eol=lf on the catch-all rather than per-extension: the per-extension form is
+# what a new file type quietly falls through. text=auto still keeps git's
+# binary detection, and the one committed binary is pinned below.
+* text=auto eol=lf
 
-*.go       text eol=lf
-*.mod      text eol=lf
-*.sum      text eol=lf
-*.sh       text eol=lf
-*.yml      text eol=lf
-*.yaml     text eol=lf
-*.md       text eol=lf
-Makefile   text eol=lf
-Dockerfile text eol=lf
-
-# The file that pins LF should not itself be checked out as CRLF; same for the
-# other dotfiles CI reads.
-.gitattributes text eol=lf
-.gitignore     text eol=lf
-.dockerignore  text eol=lf
+*.pyc binary

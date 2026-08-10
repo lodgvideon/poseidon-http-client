@@ -35,10 +35,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
   The gate only holds on an LF tree, because gofmt emits LF unconditionally and
   a CRLF checkout reports every file as unformatted. A `.gitattributes` pins
-  `eol=lf` for the files the build, the gate and CI's bash read. That also fixes
-  a local-only trap on Windows checkouts: Go's fuzz-corpus parser is
-  line-oriented, so a CRLF working tree appended `\r` to every seed under
-  `*/testdata/fuzz/`.
+  `* text=auto eol=lf`, which also covers the parts of the tree CI only ever
+  runs on Linux or inside a container — `scripts/*.sh`, the Python gates, the
+  Dockerfiles and nginx/Caddy configs under `test/integration/` — where a CRLF
+  shebang is a container-only failure no local run reproduces.
 
 - **`depguard` enforces the from-scratch claim.** The premise of this module is
   that HTTP/1.1, HTTP/2, HPACK, QUIC, HTTP/3 and QPACK are implemented from the
