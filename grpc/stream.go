@@ -99,16 +99,40 @@ func (s *Stream) Send(ctx context.Context, msg []byte) error {
 	if s.sentEnd {
 		return ErrSendClosed
 	}
-	buf, err := AppendMessage(s.sendBuf[:0], msg)
-	if err != nil {
-		return err
-	}
-	s.sendBuf = buf
-	if err := s.s.SendData(ctx, buf, false); err != nil {
+	if err := s.writeMessage(ctx, msg, false); err != nil {
 		s.sendErr = err
 		return err
 	}
 	return nil
+}
+
+// writeMessage puts one length-prefixed message on the wire as a single gRPC
+// message, without copying the message to place its five-byte header in front of
+// it: the header and the caller's bytes travel as two buffers of one DATA
+// payload.
+//
+// Falls back to the copying form when the stream has no pooled scratch, so the
+// send path does not depend on the pool having handed one out.
+func (s *Stream) writeMessage(ctx context.Context, msg []byte, endStream bool) error {
+	if s.bufs == nil {
+		buf, err := AppendMessage(s.sendBuf[:0], msg)
+		if err != nil {
+			return err
+		}
+		s.sendBuf = buf
+		return s.s.SendData(ctx, buf, endStream)
+	}
+	prefix, err := AppendMessagePrefix(s.sendBuf[:0], len(msg))
+	if err != nil {
+		return err
+	}
+	s.sendBuf = prefix
+	s.bufs.vec[0], s.bufs.vec[1] = prefix, msg
+	serr := s.s.SendDataV(ctx, s.bufs.vec[:], endStream)
+	// Drop the caller's message before returning: the scratch outlives the call,
+	// and a stream parked between sends must not keep the last message alive.
+	s.bufs.vec[0], s.bufs.vec[1] = nil, nil
+	return serr
 }
 
 // SendLast writes the final message and half-closes the request side in the
@@ -140,16 +164,11 @@ func (s *Stream) SendLast(ctx context.Context, msg []byte) error {
 	if s.sentEnd {
 		return ErrSendClosed
 	}
-	buf, err := AppendMessage(s.sendBuf[:0], msg)
-	if err != nil {
-		return err
-	}
-	s.sendBuf = buf
 	// sentEnd is latched only on success, for the reason CloseSend gives: a
 	// failure partway through leaves DATA on the wire without END_STREAM, and
 	// recording the request as half-closed would stop a later CloseSend from
 	// finishing the job.
-	if err := s.s.SendData(ctx, buf, true); err != nil {
+	if err := s.writeMessage(ctx, msg, true); err != nil {
 		s.sendErr = err
 		return err
 	}
@@ -363,6 +382,15 @@ const maxPooledStreamBuf = 64 << 10
 type streamBufs struct {
 	send []byte
 	dec  []byte
+	// vec is the two-element vector every send builds: the five-byte prefix and
+	// the caller's message, handed to the transport as one DATA payload without
+	// joining them.
+	//
+	// It lives here rather than on Stream because Stream is deliberately NOT
+	// pooled — openStream does &Stream{} per RPC — so a slice field on it would
+	// start nil and its first append would allocate on every single call. An
+	// array on the pooled struct costs nothing per RPC and nothing per send.
+	vec [2][]byte
 }
 
 var streamBufPool = sync.Pool{New: func() any { return new(streamBufs) }}
@@ -393,6 +421,7 @@ func (s *Stream) releaseBufs() {
 	}
 	s.bufs = nil
 	b.send, b.dec = s.sendBuf[:0], s.dec.own[:0]
+	b.vec[0], b.vec[1] = nil, nil // never park a caller's message in the pool
 	if cap(b.send) > maxPooledStreamBuf {
 		b.send = nil
 	}

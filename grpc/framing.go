@@ -37,6 +37,35 @@ func AppendMessage(dst, msg []byte) ([]byte, error) {
 	return append(dst, msg...), nil
 }
 
+// messagePrefixLen is the gRPC message header: one compressed flag plus a
+// four-byte big-endian length.
+const messagePrefixLen = 5
+
+// AppendMessagePrefix appends only the five-byte header for a message of msgLen
+// bytes, leaving the message itself where it already is.
+//
+// It is the other half of AppendMessage, for a sender that can put two buffers
+// on the wire as one message rather than one contiguous buffer. The copy
+// AppendMessage performs is the entire message, every time, to place five bytes
+// in front of it; for a large message that is the dominant cost of sending, and
+// it is pure overhead — the bytes are already in memory in the right order,
+// just in a different allocation.
+func AppendMessagePrefix(dst []byte, msgLen int) ([]byte, error) {
+	if uint64(msgLen) > uint64(^uint32(0)) {
+		return nil, fmt.Errorf("%w: %d bytes", ErrMessageTooLarge, msgLen)
+	}
+	if cap(dst)-len(dst) < messagePrefixLen {
+		// Size it exactly rather than letting append pick. This buffer is pooled
+		// and now only ever holds a prefix, so the one allocation it makes should
+		// be the right one — append growing 1 → 2 → 4 → 8 would both allocate more
+		// than needed and do it several times on the first use of each pooled
+		// buffer.
+		dst = make([]byte, 0, messagePrefixLen)
+	}
+	dst = append(dst, 0) // compressed flag: identity
+	return binary.BigEndian.AppendUint32(dst, uint32(msgLen)), nil
+}
+
 // decoder reassembles length-prefixed gRPC messages from the DATA chunks a
 // conn.Stream delivers. A message may span any number of chunks, and one
 // chunk may carry any number of messages — neither boundary is aligned with

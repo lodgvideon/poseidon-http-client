@@ -116,6 +116,13 @@ type Conn struct {
 	// behaves as if group-commit were off.
 	wbatch *writeBatcher
 
+	// dvSegs is the reusable segment scratch for vectored DATA writes (datav.go).
+	// Guarded by wmu, which is exactly the section it is used in, so its capacity
+	// survives between frames without a per-frame allocation. emitDataV nils the
+	// elements before releasing wmu: reslicing alone would leave this Conn holding
+	// the last message's backing array for as long as it sits idle in a pool.
+	dvSegs [][]byte
+
 	smu     sync.Mutex // guards next stream id and streams map
 	nextID  uint32
 	streams map[uint32]*Stream

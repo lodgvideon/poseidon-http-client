@@ -456,15 +456,21 @@ func (cc *ClientConn) openStream(ctx context.Context, method string, md []conn.H
 	st.dec.max = co.maxRecvMessageSize
 	st.discardMD = co.discardMD
 
-	var body []byte
+	// The fused message is sent as [prefix, request]: two buffers, one DATA
+	// payload. Only the five-byte prefix goes through the stream's pooled send
+	// buffer, so a large request is neither copied nor mirrored there — and the
+	// buffer stays small enough to be worth pooling, where a copy of a 64 KiB
+	// request exceeded maxPooledStreamBuf and was thrown away every call.
+	var body [][]byte
 	if fuse {
-		buf, err := AppendMessage(st.sendBuf[:0], unaryReq)
+		prefix, err := AppendMessagePrefix(st.sendBuf[:0], len(unaryReq))
 		if err != nil {
 			st.releaseBufs()
 			return nil, err
 		}
-		st.sendBuf = buf
-		body = buf
+		st.sendBuf = prefix
+		st.bufs.vec[0], st.bufs.vec[1] = prefix, unaryReq
+		body = st.bufs.vec[:]
 	}
 
 	sc := headerScratchPool.Get().(*headerScratch)
@@ -479,7 +485,8 @@ func (cc *ClientConn) openStream(ctx context.Context, method string, md []conn.H
 	// Both send calls encode the block synchronously, so the scratch is free the
 	// moment they return — on the error path too.
 	if fuse {
-		err = s.SendHeadersAndData(ctx, hdrs, body, true)
+		err = s.SendHeadersAndDataV(ctx, hdrs, body, true)
+		st.bufs.vec[0], st.bufs.vec[1] = nil, nil // do not retain the caller's request
 	} else {
 		err = s.SendHeaders(ctx, hdrs, false)
 	}

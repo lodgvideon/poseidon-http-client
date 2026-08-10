@@ -152,6 +152,120 @@ func (f *Framer) WriteData(streamID uint32, endStream bool, data []byte) error {
 	return f.writeFrame(FrameHeader{Length: uint32(len(data)), Type: FrameData, Flags: flags, StreamID: streamID}, data)
 }
 
+// WriteDataV writes ONE DATA frame whose payload is the concatenation of bufs,
+// without joining them first. On the wire it is indistinguishable from
+// WriteData called with the pieces already concatenated — same single frame
+// header, same single Length — which is the point: an HTTP/2 sender cannot
+// simply emit two frames instead, because two DATA frames are a different thing
+// from one.
+//
+// It exists so a caller that has a small header and a large body in separate
+// buffers does not have to copy the body to put the header in front of it. gRPC
+// prepends a 5-byte length prefix to every message, and copying a 1 MiB message
+// to prepend five bytes is the whole cost this avoids.
+//
+// The saving is the copy, not a syscall: the buffers are handed to the
+// underlying writer one at a time, and writev through a TLS connection was
+// measured to be void in this repo's write-batching work. Nothing here reduces
+// the number of writes.
+//
+// Empty buffers are permitted and contribute nothing; a bufs that is empty or
+// all-empty writes a zero-length frame, exactly as WriteData(nil) does.
+func (f *Framer) WriteDataV(streamID uint32, endStream bool, bufs [][]byte) error {
+	if streamID == 0 {
+		return ErrInvalidStreamID
+	}
+	total, err := sumBufs(bufs)
+	if err != nil {
+		return err
+	}
+	if total > int(f.maxReadFrameSize) {
+		return ErrFrameTooLarge
+	}
+	flags := Flags(0)
+	if endStream {
+		flags |= FlagDataEndStream
+	}
+	if err := f.writeHeader(FrameHeader{
+		Length: uint32(total), Type: FrameData, Flags: flags, StreamID: streamID,
+	}); err != nil {
+		return err
+	}
+	return f.writeBufs(bufs)
+}
+
+// WriteDataVPadded is WriteDataV with the padding WriteDataPadded applies.
+func (f *Framer) WriteDataVPadded(streamID uint32, endStream bool, bufs [][]byte, padLen uint8) error {
+	if streamID == 0 {
+		return ErrInvalidStreamID
+	}
+	total, err := sumBufs(bufs)
+	if err != nil {
+		return err
+	}
+	flags := FlagDataPadded
+	if endStream {
+		flags |= FlagDataEndStream
+	}
+	totalLen := 1 + total + int(padLen)
+	if totalLen > int(f.maxReadFrameSize) {
+		return ErrFrameTooLarge
+	}
+	if err := f.writeHeader(FrameHeader{
+		Length: uint32(totalLen), Type: FrameData, Flags: flags, StreamID: streamID,
+	}); err != nil {
+		return err
+	}
+	f.smallBuf[0] = padLen
+	if _, err := f.w.Write(f.smallBuf[:1]); err != nil {
+		return err
+	}
+	if err := f.writeBufs(bufs); err != nil {
+		return err
+	}
+	if padLen > 0 {
+		if _, err := f.w.Write(paddingZeros[:padLen]); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// sumBufs totals the buffer lengths, refusing a sum that could not be described
+// by the frame header.
+//
+// The check is on the un-narrowed total on purpose. Length is a 24-bit field
+// written by WriteUint24, which truncates silently, so narrowing before the
+// comparison would let a sum of 2^32+n pass as n: the header would claim a small
+// frame and the writer would then emit gigabytes, and the peer would read the
+// declared count and start parsing the middle of the payload as a frame header.
+// One buffer that large cannot be produced, which is why the scalar path never
+// needed this; a SUM over caller-supplied buffers can.
+func sumBufs(bufs [][]byte) (int, error) {
+	total := 0
+	for _, b := range bufs {
+		total += len(b)
+		if total < 0 { // int overflow: only reachable from a corrupt slice header
+			return 0, ErrFrameTooLarge
+		}
+	}
+	return total, nil
+}
+
+// writeBufs writes each buffer in order, skipping empty ones so a caller that
+// passes a zero-length piece does not provoke a pointless Write call.
+func (f *Framer) writeBufs(bufs [][]byte) error {
+	for _, b := range bufs {
+		if len(b) == 0 {
+			continue
+		}
+		if _, err := f.w.Write(b); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // WriteDataPadded writes a DATA frame with the given padding length.
 func (f *Framer) WriteDataPadded(streamID uint32, endStream bool, data []byte, padLen uint8) error {
 	if streamID == 0 {
