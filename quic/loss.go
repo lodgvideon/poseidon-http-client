@@ -129,6 +129,12 @@ func (c *Conn) detectLost(sp int) {
 		delete(s.packets, pn) // safe to delete during range in Go
 	}
 	if anyLost {
+		// A lost packet may have carried a credit grant, which is queued once and
+		// never retransmitted, so re-send the current limits (RFC 9000 §13.3). Doing
+		// it here rather than per-frame is deliberate — see regrantAfterLoss.
+		if sp == spaceApp {
+			c.regrantAfterLoss()
+		}
 		c.onCongestionEvent(newestLost) // halve cwnd once for this loss episode
 		// If the lost ack-eliciting packets span longer than the persistent congestion
 		// duration and no packet inside that span was acknowledged, every packet across

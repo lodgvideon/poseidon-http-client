@@ -9,10 +9,30 @@ networks:
     driver: bridge
 
 services:
+  # The 1 MiB fixture HugeResponse asks for, generated exactly as the clean-path
+  # compose generates it. It is gitignored, so a clean checkout has no /srv/huge.txt
+  # and the request 404s — which is what a first CI run of this suite hit, while it
+  # passed locally on a file left behind by an earlier run of the other compose.
+  fixtures:
+    image: busybox
+    volumes:
+      - ./srv:/srv
+    command:
+      - sh
+      - -c
+      - |
+        printf '0123456789abcdef%.0s' $$(seq 1024) > /tmp/b
+        : > /srv/huge.txt
+        i=0; while [ $$i -lt 64 ]; do cat /tmp/b >> /srv/huge.txt; i=$$((i+1)); done
+    restart: "no"
+
   caddy:
     image: caddy:2
     hostname: h3caddy
     networks: [h3net]
+    depends_on:
+      fixtures:
+        condition: service_completed_successfully
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
       - ./srv:/srv:ro
@@ -54,9 +74,14 @@ services:
     environment:
       H3_INTEROP_ADDR: lossproxy:443
       GOFLAGS: -count=1
-    # Exclude HugeResponse: it is a clean-path throughput test (batch drain), not
-    # a loss-recovery test — 1 MiB through 10% loss would only add flakiness.
+    # HugeResponse was excluded here for a long time as "a clean-path throughput
+    # test, not a loss-recovery test — 1 MiB through 10% loss would only add
+    # flakiness". The flakiness was a deadlock: it is the only test whose response
+    # outgrows the receive window, so it is the only one that needs a credit grant,
+    # and a dropped grant used to hang the transfer for good (#471). It belongs
+    # here — it is the one test that exercises flow control under loss at all.
     command: >
       go test ./http3/ -tags interop
-      -run 'TestInterop_GET|TestInterop_POST|TestInterop_LargeResponse' -v -timeout 120s
+      -run 'TestInterop_GET|TestInterop_POST|TestInterop_LargeResponse|TestInterop_HugeResponse'
+      -v -timeout 120s
     restart: "no"

@@ -200,6 +200,13 @@ type Conn struct {
 	connRecvConsumed uint64 // total bytes the app has read across all streams (receive FC)
 	connRecvTotal    uint64 // sum of the highest received offset over all streams (receive FC, §4.1)
 	connRecvMax      uint64 // connection-level receive limit we advertise; raised via MAX_DATA
+	// grantedStreams / grantedConn name the receive limits a MAX_STREAM_DATA or
+	// MAX_DATA has already been sent for, so a loss episode can re-send the current
+	// value (RFC 9000 §13.3, regrantAfterLoss). Streams that never crossed a
+	// half-window of consumption never enter the set.
+	grantedStreams map[uint64]struct{}
+	grantedConn    bool
+
 	pendingCtrl      []byte // app-space control frames to send (MAX_DATA/MAX_STREAM_DATA)
 	pathRespPending  bool   // pendingCtrl holds a PATH_RESPONSE; its datagram must reach 1200 (§8.2.2)
 

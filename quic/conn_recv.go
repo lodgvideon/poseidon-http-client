@@ -729,13 +729,21 @@ func (h *connFrameHandler) OnCrypto(offset uint64, data []byte) error {
 
 func (h *connFrameHandler) OnPing() error { h.ackEliciting = true; return nil }
 
-// OnDataBlocked, OnStreamDataBlocked, and OnStreamsBlocked acknowledge the peer's
-// informational flow-control-blocked signals (RFC 9000 §19.12–§19.14). No action
-// is needed — the client advertises its receive limits via MAX_DATA /
-// MAX_STREAM_DATA / MAX_STREAMS — but these frames are ack-eliciting, so a packet
-// carrying only one of them must still be acknowledged (§13.2.1). The inherited
-// nop handlers left such a packet unacknowledged, so the peer retransmitted it.
-func (h *connFrameHandler) OnDataBlocked(uint64) error { h.ackEliciting = true; return nil }
+// OnDataBlocked, OnStreamDataBlocked, and OnStreamsBlocked handle the peer's
+// flow-control-blocked signals (RFC 9000 §19.12–§19.14). They are ack-eliciting, so
+// a packet carrying only one of them must still be acknowledged (§13.2.1); the
+// inherited nop handlers left such a packet unacknowledged, so the peer
+// retransmitted it.
+//
+// The two data-blocked signals are also acted on. Treating them as purely
+// informational is what let a lost credit grant deadlock a transfer outright, since
+// the grants are never retransmitted and the next one only follows more consumption
+// — see the note above regrantConnLimit in recvflow.go.
+func (h *connFrameHandler) OnDataBlocked(limit uint64) error {
+	h.ackEliciting = true
+	h.c.regrantConnLimit(limit)
+	return nil
+}
 
 // OnStreamsBlocked marks the packet ack-eliciting and rejects an out-of-range limit
 // (RFC 9000 §19.14): the Maximum Streams field cannot exceed 2^60, as a larger value
@@ -754,7 +762,7 @@ func (h *connFrameHandler) OnStreamsBlocked(_ bool, maximum uint64) error {
 // send-only stream (client-initiated unidirectional, id&0x3 == 0x2 — the peer has
 // no send side there) or for a locally initiated stream not yet created is a
 // STREAM_STATE_ERROR.
-func (h *connFrameHandler) OnStreamDataBlocked(id, _ uint64) error {
+func (h *connFrameHandler) OnStreamDataBlocked(id, limit uint64) error {
 	h.ackEliciting = true
 	if id&0x3 == 0x2 || h.c.localStreamNotCreated(id) {
 		return ErrStreamState
@@ -763,6 +771,7 @@ func (h *connFrameHandler) OnStreamDataBlocked(id, _ uint64) error {
 	if h.c.exceedsUniStreamLimit(id) {
 		return ErrTooManyUniStreams
 	}
+	h.c.regrantStreamLimit(id, limit)
 	return nil
 }
 
