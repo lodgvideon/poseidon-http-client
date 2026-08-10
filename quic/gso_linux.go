@@ -92,9 +92,9 @@ func NewGSOState() *GSOState {
 
 // setSegSize writes the segment size into the pre-built control message. The size
 // is a host-order u16 (a socket option, not something on the wire), so native byte
-// order is correct.
+// order is correct. The uint16 conversion cannot truncate: segSize is a datagram
+// length, bounded by maxDatagramSize well below 65535.
 func (g *GSOState) setSegSize(segSize int) {
-	//nolint:gosec // segSize is a bounded datagram length (<= maxDatagramSize), never overflows u16
 	binary.NativeEndian.PutUint16(g.oob[syscall.CmsgLen(0):], uint16(segSize))
 }
 
