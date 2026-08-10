@@ -9,10 +9,30 @@ networks:
     driver: bridge
 
 services:
+  # The 1 MiB fixture HugeResponse asks for, generated exactly as the clean-path
+  # compose generates it. It is gitignored, so a clean checkout has no /srv/huge.txt
+  # and the request 404s — which is what a first CI run of this suite hit, while it
+  # passed locally on a file left behind by an earlier run of the other compose.
+  fixtures:
+    image: busybox
+    volumes:
+      - ./srv:/srv
+    command:
+      - sh
+      - -c
+      - |
+        printf '0123456789abcdef%.0s' $$(seq 1024) > /tmp/b
+        : > /srv/huge.txt
+        i=0; while [ $$i -lt 64 ]; do cat /tmp/b >> /srv/huge.txt; i=$$((i+1)); done
+    restart: "no"
+
   caddy:
     image: caddy:2
     hostname: h3caddy
     networks: [h3net]
+    depends_on:
+      fixtures:
+        condition: service_completed_successfully
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
       - ./srv:/srv:ro
