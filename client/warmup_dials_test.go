@@ -107,3 +107,62 @@ func TestWarmup_Pool_RespectsMaxConnsPerHost(t *testing.T) {
 		t.Fatalf("warmup(10) opened %d conns with MaxConnsPerHost=2, want 2", got)
 	}
 }
+
+// TestWarmup_SingleConn_IsRepeatable pins that Warmup on the H2 single-conn
+// transport works more than once.
+//
+// warmup latches a cancel func to keep two warmups from racing, and the
+// goroutine used to return without clearing it. The latch then stayed set for
+// the life of the client, so every later Warmup returned immediately — including
+// the retry after a warmup whose dial had failed, which is the case the latch is
+// least entitled to block. The H1 and H3 single-conn transports already cleared
+// it; this one had drifted.
+func TestWarmup_SingleConn_IsRepeatable(t *testing.T) {
+	srv := startOneH2Server(t)
+	defer srv.Close()
+
+	c, err := NewClient(ClientOptions{
+		Addr:      srv.Listener.Addr().String(),
+		Transport: TransportSingleConn,
+		ConnOpts:  newConnOpts(),
+	})
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+	defer func() { _ = c.Close() }()
+
+	sc, ok := c.tr.(*singleConn)
+	if !ok {
+		t.Fatalf("transport is %T, want *singleConn", c.tr)
+	}
+
+	// First warmup: wait for the goroutine to finish by watching the latch clear.
+	sc.warmup(1)
+	if !waitLatchCleared(t, sc) {
+		t.Fatal("warmupCancel is still set after the first warmup finished — the goroutine " +
+			"never cleared it, so every later Warmup is a no-op and the 30s timer stays armed")
+	}
+
+	// Second warmup must actually run: it can only do so if the latch was cleared.
+	sc.warmup(1)
+	if !waitLatchCleared(t, sc) {
+		t.Error("warmupCancel is still set after the second warmup")
+	}
+}
+
+// waitLatchCleared polls warmupCancel under the lock, since the goroutine clears
+// it asynchronously. Reports whether it cleared within the deadline.
+func waitLatchCleared(t *testing.T, s *singleConn) bool {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		s.mu.Lock()
+		cleared := s.warmupCancel == nil
+		s.mu.Unlock()
+		if cleared {
+			return true
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+	return false
+}
