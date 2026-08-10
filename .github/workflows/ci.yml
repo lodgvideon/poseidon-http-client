@@ -36,7 +36,7 @@ jobs:
       # only thing standing between a per-RPC allocation and a green build, since
       # bench-gate's absolute zero-alloc rule covers neither package.
       - name: Allocation gates (not under -race)
-        run: go test -count=1 -run 'Allocs|DoesNotAllocate|IsNotCopied' ./grpc/
+        run: go test -count=1 -run 'Allocs|DoesNotAllocate|IsNotCopied' ./client/ ./grpc/
       # Keep the opt-in debug build (-tags poseidondebug) compilable so the
       # leak detector can't bitrot. Compile + vet only — its finalizer/GC tests
       # have non-deterministic timing, so they run via `make test-debug`.
