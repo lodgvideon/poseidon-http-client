@@ -120,6 +120,22 @@ var ErrInvalidStatusLine = errors.New("http1: invalid status line")
 // the peer considers the connection to be speaking another protocol entirely.
 var ErrUnsolicitedUpgrade = errors.New("http1: unsolicited 101 Switching Protocols")
 
+// ErrServerClosedIdle reports that the server closed the connection without
+// sending any part of a response — the first read of the status line returned
+// EOF with zero bytes.
+//
+// It is the one HTTP/1.1 failure carrying the guarantee the HTTP/2 and HTTP/3
+// retry signals carry (REFUSED_STREAM, GOAWAY, H3_REQUEST_REJECTED): the request
+// produced no response at all, so replaying it cannot duplicate an effect the
+// server already applied and observed. It is the ordinary end of a pooled
+// keep-alive connection, where the server's idle timeout fires between the
+// checkout probe and the write.
+//
+// Deliberately narrow. An EOF after ANY response byte has arrived means the
+// server was answering and stopped, which says nothing about whether it
+// processed the request, and is NOT this error.
+var ErrServerClosedIdle = errors.New("http1: server closed the connection without responding")
+
 const (
 	// readBufSize is the bufio.Reader buffer and therefore, by construction,
 	// the hard ceiling on one CRLF-terminated protocol line: readLine uses
@@ -354,6 +370,11 @@ type Exchange struct {
 	// deadline-less context hung forever mid-body against a silent peer, and the
 	// pool slot that exchange held was never released.
 	readCtx context.Context
+	// readConsumedNothing records that the last failing read consumed zero
+	// bytes, which is what separates "the server never answered" from "the
+	// server answered and stopped". Only ReadResponse's first status-line read
+	// acts on it; see ErrServerClosedIdle.
+	readConsumedNothing bool
 
 	// response side
 	statusCode int
@@ -1198,6 +1219,10 @@ func (ex *Exchange) readLine(what string) (string, error) {
 			ex.keepAlive = false
 			return "", fmt.Errorf("http1: %s exceeds %d bytes: %w", what, readBufSize, ErrResponseTooLarge)
 		}
+		// Record whether this failure arrived with nothing consumed. ReadResponse
+		// turns that — on the FIRST status-line read only — into ErrServerClosedIdle;
+		// nowhere else can tell "no response at all" from "a response that stopped".
+		ex.readConsumedNothing = len(line) == 0
 		return "", fmt.Errorf("http1: read %s: %w", what, err)
 	}
 	s := string(line[:len(line)-1]) // the delimiting LF
@@ -1251,12 +1276,22 @@ func (ex *Exchange) ReadResponse(ctx context.Context) (statusCode int, headers [
 
 	var respMinor int
 	var interim int
+	firstRead := true
 	for {
 		// Status line: "HTTP/1.x NNN Reason\r\n"
+		ex.readConsumedNothing = false
 		line, rerr := ex.readLine("status line")
 		if rerr != nil {
+			// Nothing of a response ever arrived on the first read: the server closed
+			// an idle keep-alive rather than answering. That is the one H1 failure a
+			// caller may safely replay, so it gets a type the retry classifier can
+			// match instead of an opaque wrapped EOF.
+			if firstRead && ex.readConsumedNothing && errors.Is(rerr, io.EOF) {
+				return 0, nil, fmt.Errorf("%w: %w", ErrServerClosedIdle, rerr)
+			}
 			return 0, nil, rerr
 		}
+		firstRead = false
 
 		parts := strings.SplitN(line, " ", 3)
 		if len(parts) < 2 {
