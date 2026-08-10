@@ -4,7 +4,6 @@ import (
 	"context"
 	"time"
 
-	"github.com/lodgvideon/poseidon-http-client/conn"
 )
 
 // h3ManagedTransport adapts *h3ManagedPool to the internal transport interface.
@@ -17,7 +16,7 @@ type h3ManagedTransport struct {
 // which fans across per-address HTTP/3 sub-pools via Selector, then wraps the
 // acquired client in a fresh h3Exchange. pushLookup is nil (HTTP/3 server push is
 // disabled).
-func (mt *h3ManagedTransport) openExchange(ctx context.Context) (protoStream, func(uint32) (conn.StreamRef, bool), func(), error) {
+func (mt *h3ManagedTransport) openExchange(ctx context.Context) (protoStream, pushLookuper, func(), error) {
 	cl, release, err := mt.mp.acquire(ctx)
 	if err != nil {
 		return nil, nil, nil, err

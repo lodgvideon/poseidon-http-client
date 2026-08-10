@@ -5,7 +5,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/lodgvideon/poseidon-http-client/conn"
 )
 
 // h1PoolTransport adapts *h1Pool to the internal transport interface consumed by
@@ -24,7 +23,7 @@ type h1PoolTransport struct {
 // http1.Exchange.KeepAlive() when the body ends, and Close passes false for every
 // error/abort path so a poisoned conn is discarded rather than pooled. This
 // mirrors how h1singleConn drives its in-flight slot.
-func (pt *h1PoolTransport) openExchange(ctx context.Context) (protoStream, func(uint32) (conn.StreamRef, bool), func(), error) {
+func (pt *h1PoolTransport) openExchange(ctx context.Context) (protoStream, pushLookuper, func(), error) {
 	mc, err := pt.p.acquire(ctx)
 	if err != nil {
 		return nil, nil, nil, err

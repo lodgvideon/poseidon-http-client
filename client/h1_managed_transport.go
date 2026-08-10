@@ -5,7 +5,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/lodgvideon/poseidon-http-client/conn"
 )
 
 // h1ManagedTransport adapts *h1ManagedPool to the internal transport interface.
@@ -22,7 +21,7 @@ type h1ManagedTransport struct {
 // As in h1PoolTransport, the transport-level release is a no-op and the keep-alive
 // verdict is threaded through h1Exchange.release instead — it is only known once
 // the exchange completes.
-func (mt *h1ManagedTransport) openExchange(ctx context.Context) (protoStream, func(uint32) (conn.StreamRef, bool), func(), error) {
+func (mt *h1ManagedTransport) openExchange(ctx context.Context) (protoStream, pushLookuper, func(), error) {
 	c, release, err := mt.mp.acquire(ctx)
 	if err != nil {
 		return nil, nil, nil, err

@@ -4,7 +4,6 @@ import (
 	"context"
 	"time"
 
-	"github.com/lodgvideon/poseidon-http-client/conn"
 )
 
 // h3PoolTransport adapts *h3Pool to the internal transport interface consumed by
@@ -27,7 +26,7 @@ type h3PoolTransport struct {
 // idle. The comment here used to claim the two behaved "exactly" alike; they do
 // not, and a reader unifying the two release paths needs to know which one they
 // are looking at.
-func (pt *h3PoolTransport) openExchange(ctx context.Context) (protoStream, func(uint32) (conn.StreamRef, bool), func(), error) {
+func (pt *h3PoolTransport) openExchange(ctx context.Context) (protoStream, pushLookuper, func(), error) {
 	mc, err := pt.p.acquire(ctx)
 	if err != nil {
 		return nil, nil, nil, err
