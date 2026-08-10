@@ -90,3 +90,36 @@ func dialAttempt[C any](env dialEnv, dial func(context.Context) (C, error)) (C, 
 	}
 	return c, err
 }
+
+// defaultDialTimeout is the ceiling every transport puts on one dial attempt.
+// The three pools floor PoolOptions.DialTimeout at this value; the
+// single-connection transports use it when ClientOptions.DialTimeout is unset.
+//
+// It exists as one constant because the alternative was two answers to the same
+// question: pooled dials were bounded and single-conn dials were not, so a
+// black-hole host — one that completes the TCP handshake and then says nothing,
+// or drops SYNs outright — hung a single-conn Do for as long as the caller's
+// context allowed.
+const defaultDialTimeout = 30 * time.Second
+
+// dialTimeoutOrDefault applies defaultDialTimeout to a zero or negative value,
+// matching what the pool constructors do with PoolOptions.DialTimeout.
+func dialTimeoutOrDefault(d time.Duration) time.Duration {
+	if d <= 0 {
+		return defaultDialTimeout
+	}
+	return d
+}
+
+// dialCtx bounds a dial attempt by timeout, deriving from the caller's ctx so a
+// cancelled request still aborts the dial promptly. The caller must call the
+// returned cancel.
+//
+// A non-positive timeout means the default, NOT "already expired". The default
+// is applied here rather than only at construction because these transports are
+// also built directly — every test does — and a zero field turning every dial
+// into an instant deadline is a failure mode worth making unreachable rather
+// than documenting.
+func dialCtx(ctx context.Context, timeout time.Duration) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(ctx, dialTimeoutOrDefault(timeout))
+}

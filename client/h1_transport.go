@@ -171,6 +171,8 @@ type h1singleConn struct {
 	addr    string
 	dialer  conn.Dialer
 	backoff time.Duration
+	// dialTimeout bounds one dial attempt (ClientOptions.DialTimeout, defaulted).
+	dialTimeout time.Duration
 
 	hooksRef *atomic.Pointer[Hooks]
 	metrics  *Metrics
@@ -286,7 +288,9 @@ func (s *h1singleConn) acquireConn(ctx context.Context) (*http1.Conn, error) {
 
 		dialStart := time.Now()
 		s.metrics.Counters.DialsAttempted.Add(1)
-		nc, dialErr := s.dialer.Dial(ctx, s.addr)
+		dctx, dcancel := dialCtx(ctx, s.dialTimeout)
+		nc, dialErr := s.dialer.Dial(dctx, s.addr)
+		dcancel()
 		if dialErr == nil {
 			if err := assertH1Conn(nc); err != nil {
 				_ = nc.Close()
@@ -399,6 +403,8 @@ type alpnSingleConn struct {
 	addr     string
 	connOpts conn.ConnOptions
 	backoff  time.Duration
+	// dialTimeout bounds one dial attempt (ClientOptions.DialTimeout, defaulted).
+	dialTimeout time.Duration
 
 	hooksRef *atomic.Pointer[Hooks]
 	metrics  *Metrics
@@ -492,7 +498,9 @@ func (a *alpnSingleConn) openExchange(ctx context.Context) (protoStream, pushLoo
 // the dialled connection as its current one; the caller stores it under the
 // lock.
 func (a *alpnSingleConn) detectDelegate(ctx context.Context) (transport, bool, error) {
-	nc, err := a.connOpts.Dialer.Dial(ctx, a.addr)
+	dctx, dcancel := dialCtx(ctx, a.dialTimeout)
+	nc, err := a.connOpts.Dialer.Dial(dctx, a.addr)
+	dcancel()
 	if err != nil {
 		return nil, false, &DialError{Addr: a.addr, Err: err}
 	}

@@ -390,6 +390,8 @@ type singleH3Conn struct {
 	addr      string
 	tlsConfig *tls.Config
 	backoff   time.Duration
+	// dialTimeout bounds one dial attempt (ClientOptions.DialTimeout, defaulted).
+	dialTimeout time.Duration
 
 	// dialFn dials a new h3Client. Production is h3DialFn (http3.Dial); tests
 	// substitute a fake so no live QUIC connection is required.
@@ -489,7 +491,9 @@ func (s *singleH3Conn) acquireClient(ctx context.Context) (h3Client, error) {
 func (s *singleH3Conn) dial(ctx context.Context) (h3Client, error) {
 	dialStart := time.Now()
 	s.metrics.Counters.DialsAttempted.Add(1)
-	cl, dialErr := s.dialFn(ctx, s.addr, s.tlsConfig)
+	dctx, dcancel := dialCtx(ctx, s.dialTimeout)
+	cl, dialErr := s.dialFn(dctx, s.addr, s.tlsConfig)
+	dcancel()
 	dur := time.Since(dialStart)
 	s.metrics.Latency.Dial.Observe(dur)
 	if dialErr != nil {

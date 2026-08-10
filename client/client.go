@@ -134,6 +134,17 @@ type ClientOptions struct {
 	// Used by TransportSingleConn. For TransportPool see PoolOptions.DialBackoff.
 	DialBackoff time.Duration
 
+	// DialTimeout bounds how long one dial attempt may block, and defaults to
+	// defaultDialTimeout. Used by the single-connection transports
+	// (TransportSingleConn, TransportH1SingleConn, TransportALPN, TransportH3);
+	// for TransportPool see PoolOptions.DialTimeout.
+	//
+	// Without it a host that accepts nothing and answers nothing held a dial open
+	// for as long as the caller's context allowed, while every pooled transport
+	// bounded the same dial at 30 seconds. Same lifecycle, two different answers
+	// depending on which transport the caller picked.
+	DialTimeout time.Duration
+
 	// Transport selects the transport strategy. Zero value =
 	// TransportSingleConn.
 	Transport TransportKind
@@ -404,6 +415,7 @@ func buildTransport(opts ClientOptions, hooksPtr *atomic.Pointer[Hooks], metrics
 			addr:     opts.Addr,
 			connOpts: opts.ConnOpts,
 			backoff:  opts.DialBackoff,
+			dialTimeout: dialTimeoutOrDefault(opts.DialTimeout),
 			hooksRef: hooksPtr,
 			metrics:  metrics,
 		}, nil
@@ -424,6 +436,7 @@ func buildTransport(opts ClientOptions, hooksPtr *atomic.Pointer[Hooks], metrics
 			addr:     opts.Addr,
 			dialer:   opts.ConnOpts.Dialer,
 			backoff:  opts.DialBackoff,
+			dialTimeout: dialTimeoutOrDefault(opts.DialTimeout),
 			hooksRef: hooksPtr,
 			metrics:  metrics,
 		}, nil
@@ -432,6 +445,7 @@ func buildTransport(opts ClientOptions, hooksPtr *atomic.Pointer[Hooks], metrics
 			addr:     opts.Addr,
 			connOpts: opts.ConnOpts,
 			backoff:  opts.DialBackoff,
+			dialTimeout: dialTimeoutOrDefault(opts.DialTimeout),
 			hooksRef: hooksPtr,
 			metrics:  metrics,
 		}, nil
@@ -440,6 +454,7 @@ func buildTransport(opts ClientOptions, hooksPtr *atomic.Pointer[Hooks], metrics
 			addr:      opts.Addr,
 			tlsConfig: opts.TLSConfig,
 			backoff:   opts.DialBackoff,
+			dialTimeout: dialTimeoutOrDefault(opts.DialTimeout),
 			dialFn:    makeH3DialFn(opts.H3ConnOptions),
 			hooksRef:  hooksPtr,
 			metrics:   metrics,
