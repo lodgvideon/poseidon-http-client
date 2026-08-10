@@ -139,8 +139,8 @@ func TestConformance_ALPN_ConcurrentFirstRequestsShareOneConn(t *testing.T) {
 	// missed — while still speaking HTTP/1.1, so the alpn transport builds an h1
 	// delegate around it.
 	c, err := client.NewClient(client.ClientOptions{
-		Addr:      ln.Addr().String(),
-		Transport: client.TransportALPN,
+		Addr:          ln.Addr().String(),
+		Transport:     client.TransportALPN,
 		DefaultScheme: "http",
 		ConnOpts: conn.ConnOptions{
 			Dialer: alpnPlainDialer(func(ctx context.Context, addr string) (net.Conn, error) {

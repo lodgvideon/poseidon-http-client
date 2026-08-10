@@ -69,9 +69,9 @@ func waitBlockedN(t *testing.T, c *Client, n uint64) {
 func dynSectionAt(abs uint64) []byte {
 	ric := abs + 1
 	s := hpack.EncodeInteger(nil, 8, 0x00, ric+1) // encoded Required Insert Count
-	s = append(s, 0x00)                            // Base sign 0, delta 0 → Base = ric
-	s = append(s, 0xD9)                            // Indexed Field Line, static, :status 200 (index 25)
-	s = hpack.EncodeInteger(s, 6, 0x80, 0)         // Indexed Field Line, dynamic, Base-relative index 0 → abs
+	s = append(s, 0x00)                           // Base sign 0, delta 0 → Base = ric
+	s = append(s, 0xD9)                           // Indexed Field Line, static, :status 200 (index 25)
+	s = hpack.EncodeInteger(s, 6, 0x80, 0)        // Indexed Field Line, dynamic, Base-relative index 0 → abs
 	return s
 }
 

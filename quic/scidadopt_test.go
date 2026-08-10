@@ -11,7 +11,7 @@ import (
 // Destination Connection ID), and once it is known, a long-header packet bearing a
 // different Source Connection ID is discarded.
 func TestConformance_RFC9000_Sec72_ServerCIDAdoptedOnlyWhenAuthenticated(t *testing.T) {
-	origDCID := []byte("origdcid")        // the client's first, random DCID
+	origDCID := []byte("origdcid")         // the client's first, random DCID
 	_, serverKeys := InitialKeys(origDCID) // the client opens server packets with these
 	realSCID := []byte{0xaa, 0xbb, 0xcc, 0xdd}
 	otherSCID := []byte{0x11, 0x22, 0x33, 0x44}

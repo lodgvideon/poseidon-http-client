@@ -304,13 +304,13 @@ func (d *deafHandler) OnSettings(fh frame.FrameHeader, _ frame.SettingsParams) e
 func (d *deafHandler) OnPushPromise(frame.FrameHeader, uint32, frame.HeaderBlock, uint8) error {
 	return nil
 }
-func (d *deafHandler) OnPing(frame.FrameHeader, [8]byte) error              { return nil }
+func (d *deafHandler) OnPing(frame.FrameHeader, [8]byte) error { return nil }
 func (d *deafHandler) OnGoAway(frame.FrameHeader, uint32, frame.ErrCode, []byte) error {
 	return nil
 }
-func (d *deafHandler) OnWindowUpdate(frame.FrameHeader, uint32) error      { return nil }
+func (d *deafHandler) OnWindowUpdate(frame.FrameHeader, uint32) error            { return nil }
 func (d *deafHandler) OnContinuation(frame.FrameHeader, frame.HeaderBlock) error { return nil }
-func (d *deafHandler) OnAltSvc(frame.FrameHeader, []frame.AltSvcEntry) error                 { return nil }
-func (d *deafHandler) OnOrigin(frame.FrameHeader, []string) error                 { return nil }
+func (d *deafHandler) OnAltSvc(frame.FrameHeader, []frame.AltSvcEntry) error     { return nil }
+func (d *deafHandler) OnOrigin(frame.FrameHeader, []string) error                { return nil }
 
 var _ frame.Handler = (*deafHandler)(nil)

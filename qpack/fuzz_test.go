@@ -25,12 +25,12 @@ func FuzzDecodeFieldSection(f *testing.F) {
 	})
 	f.Add(valid)
 
-	f.Add([]byte{})                 // empty: missing the prefix
-	f.Add([]byte{0x00, 0x00})       // valid prefix (RIC 0, Base 0), no field lines
-	f.Add([]byte{0x00, 0x00, 0xd1}) // static Indexed Field Line, :method GET (idx 17)
-	f.Add([]byte{0x00})             // RIC present, Base byte missing
-	f.Add([]byte{0x00, 0x00, 0x80}) // dynamic Indexed ref with an empty table -> reject
-	f.Add([]byte{0xff, 0x00})       // non-zero encoded RIC against a nil table -> reject
+	f.Add([]byte{})                             // empty: missing the prefix
+	f.Add([]byte{0x00, 0x00})                   // valid prefix (RIC 0, Base 0), no field lines
+	f.Add([]byte{0x00, 0x00, 0xd1})             // static Indexed Field Line, :method GET (idx 17)
+	f.Add([]byte{0x00})                         // RIC present, Base byte missing
+	f.Add([]byte{0x00, 0x00, 0x80})             // dynamic Indexed ref with an empty table -> reject
+	f.Add([]byte{0xff, 0x00})                   // non-zero encoded RIC against a nil table -> reject
 	f.Add([]byte{0x00, 0x00, 0x20, 0x00, 0x00}) // literal name+value, both empty
 
 	f.Fuzz(func(_ *testing.T, src []byte) {

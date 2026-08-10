@@ -26,9 +26,9 @@ func (c *Client) roundTripStream(ctx context.Context, stream quicStream, req *Re
 	}
 
 	br := &BodyReader{c: c, stream: stream, ctx: ctx, req: req}
-	br.rb.dec = &br.dec       // per-request QPACK decoder (2d); its scratch aliases decoded slices
+	br.rb.dec = &br.dec // per-request QPACK decoder (2d); its scratch aliases decoded slices
 	br.rb.streamID = stream.ID()
-	br.rb.ctx = ctx           // bounds a blocked pre-head HEADERS decode (§2.1.3, Q4)
+	br.rb.ctx = ctx // bounds a blocked pre-head HEADERS decode (§2.1.3, Q4)
 	br.rb.onData = br.stashData
 	br.fr.SetMaxFrameLen(maxResponseBytes)
 	// If an interim/final HEADERS referenced the dynamic table before a pre-head

@@ -138,5 +138,3 @@ func staticIndex(name, value []byte) (uint64, bool) {
 	}
 	return ent.first, false
 }
-
-

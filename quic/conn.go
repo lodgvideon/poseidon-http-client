@@ -207,8 +207,8 @@ type Conn struct {
 	grantedStreams map[uint64]struct{}
 	grantedConn    bool
 
-	pendingCtrl      []byte // app-space control frames to send (MAX_DATA/MAX_STREAM_DATA)
-	pathRespPending  bool   // pendingCtrl holds a PATH_RESPONSE; its datagram must reach 1200 (§8.2.2)
+	pendingCtrl     []byte // app-space control frames to send (MAX_DATA/MAX_STREAM_DATA)
+	pathRespPending bool   // pendingCtrl holds a PATH_RESPONSE; its datagram must reach 1200 (§8.2.2)
 
 	// armedReadDeadline is the read deadline the reader published before parking in
 	// the blocking pc.Read (docs/HTTP3_DESIGN.md §3.2). A Do-side send epilogue may

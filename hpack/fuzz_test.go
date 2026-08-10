@@ -24,7 +24,7 @@ import (
 // Seed corpus: the RFC 7541 Appendix C vectors.
 func FuzzHPACKDecode(f *testing.F) {
 	for _, hexStr := range []string{
-		"82",                                                   // C.2.4
+		"82", // C.2.4
 		"400a637573746f6d2d6b65790d637573746f6d2d686561646572", // C.2.1
 		"040c2f73616d706c652f70617468",                         // C.2.2
 		"100870617373776f726406736563726574",                   // C.2.3
@@ -102,10 +102,10 @@ func FuzzHuffmanRoundTrip(f *testing.F) {
 	f.Add([]byte("www.example.com"))
 	f.Add([]byte("no-cache"))
 	f.Add([]byte("custom-key"))
-	f.Add([]byte{0xf9})                            // sym 249, alone: raw is shorter, so nobody would code it
-	f.Add([]byte("aaaaaaaaaa\xf9aaaaaaaaaa"))      // sym 249 amid compressible ASCII: Huffman wins, and it broke
+	f.Add([]byte{0xf9})                       // sym 249, alone: raw is shorter, so nobody would code it
+	f.Add([]byte("aaaaaaaaaa\xf9aaaaaaaaaa")) // sym 249 amid compressible ASCII: Huffman wins, and it broke
 	f.Add([]byte{0x00, 0x01, 0x02, 0xfd, 0xfe, 0xff})
-	f.Add([]byte{0x0a, 0x0d, 0x16, 0x27})          // symbols with 30-bit codes, the table's longest
+	f.Add([]byte{0x0a, 0x0d, 0x16, 0x27}) // symbols with 30-bit codes, the table's longest
 
 	f.Fuzz(func(t *testing.T, src []byte) {
 		encoded := HuffmanEncode(nil, src)
@@ -136,11 +136,11 @@ func FuzzHuffmanRoundTrip(f *testing.F) {
 // 2^32-1 bound §5.1 sets; and decode(encode(v)) == v, since the pair must agree
 // on the encoding they share.
 func FuzzDecodeInteger(f *testing.F) {
-	f.Add([]byte{0x0a}, uint8(5))                   // C.1.1: 10 in a 5-bit prefix
-	f.Add([]byte{0x1f, 0x9a, 0x0a}, uint8(5))       // C.1.2: 1337, multi-byte
-	f.Add([]byte{0x2a}, uint8(8))                   // C.1.3: 42 in an 8-bit prefix
-	f.Add([]byte{0x1f}, uint8(5))                   // prefix full, continuation missing
-	f.Add([]byte{}, uint8(5))                       // empty
+	f.Add([]byte{0x0a}, uint8(5))                                                       // C.1.1: 10 in a 5-bit prefix
+	f.Add([]byte{0x1f, 0x9a, 0x0a}, uint8(5))                                           // C.1.2: 1337, multi-byte
+	f.Add([]byte{0x2a}, uint8(8))                                                       // C.1.3: 42 in an 8-bit prefix
+	f.Add([]byte{0x1f}, uint8(5))                                                       // prefix full, continuation missing
+	f.Add([]byte{}, uint8(5))                                                           // empty
 	f.Add([]byte{0xff, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80}, uint8(8)) // continuation that never ends
 	f.Add([]byte{0xff, 0xff, 0xff, 0xff, 0xff, 0x7f}, uint8(8))                         // over the 2^32-1 bound
 	f.Add([]byte{0x1f, 0x80, 0x80, 0x80, 0x80, 0x00}, uint8(5))                         // padded to overflow m

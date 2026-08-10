@@ -272,7 +272,7 @@ func (p *probeReader) Close() error { return nil }
 // allocations to the decode path.
 type nopCloserReader struct{ rd bytes.Reader }
 
-func (n *nopCloserReader) Reset(b []byte)            { n.rd.Reset(b) }
+func (n *nopCloserReader) Reset(b []byte)             { n.rd.Reset(b) }
 func (n *nopCloserReader) Read(p []byte) (int, error) { return n.rd.Read(p) }
 func (n *nopCloserReader) Close() error               { return nil }
 
@@ -883,10 +883,10 @@ func seedDecompressCorpus(f *testing.F) {
 	}
 	f.Add([]byte{})
 	f.Add([]byte{0x00})
-	f.Add([]byte{0x1f, 0x8b})                         // gzip magic, nothing else
-	f.Add([]byte{0x28, 0xb5, 0x2f, 0xfd})             // zstd magic, nothing else
-	f.Add([]byte{0x78, 0x9c})                         // zlib header, nothing else
-	f.Add([]byte{0xce, 0xb2, 0xcf, 0x81})             // brotli-ish noise
+	f.Add([]byte{0x1f, 0x8b})             // gzip magic, nothing else
+	f.Add([]byte{0x28, 0xb5, 0x2f, 0xfd}) // zstd magic, nothing else
+	f.Add([]byte{0x78, 0x9c})             // zlib header, nothing else
+	f.Add([]byte{0xce, 0xb2, 0xcf, 0x81}) // brotli-ish noise
 	f.Add(bytes.Repeat([]byte{0xff}, 64))
 }
 

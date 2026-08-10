@@ -8,15 +8,15 @@ import "testing"
 // (0, 0), and on a complete prefix it returns a value within the 62-bit varint
 // space that re-encodes and decodes back to itself.
 func FuzzReadVarint(f *testing.F) {
-	f.Add([]byte{})                                                 // empty
-	f.Add([]byte{0x00})                                             // 1-byte, value 0
-	f.Add([]byte{0x25})                                             // 1-byte, value 37
-	f.Add([]byte{0x40, 0x25})                                       // 2-byte
-	f.Add([]byte{0x80, 0x01, 0x02, 0x03})                           // 4-byte
-	f.Add([]byte{0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff})   // 8-byte, MaxVarint
-	f.Add([]byte{0x40})                                             // truncated 2-byte
-	f.Add([]byte{0x80, 0x01})                                       // truncated 4-byte
-	f.Add([]byte{0xc0, 0x00, 0x00, 0x00})                           // truncated 8-byte
+	f.Add([]byte{})                                               // empty
+	f.Add([]byte{0x00})                                           // 1-byte, value 0
+	f.Add([]byte{0x25})                                           // 1-byte, value 37
+	f.Add([]byte{0x40, 0x25})                                     // 2-byte
+	f.Add([]byte{0x80, 0x01, 0x02, 0x03})                         // 4-byte
+	f.Add([]byte{0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff}) // 8-byte, MaxVarint
+	f.Add([]byte{0x40})                                           // truncated 2-byte
+	f.Add([]byte{0x80, 0x01})                                     // truncated 4-byte
+	f.Add([]byte{0xc0, 0x00, 0x00, 0x00})                         // truncated 8-byte
 
 	f.Fuzz(func(t *testing.T, b []byte) {
 		v, n := ReadVarint(b)

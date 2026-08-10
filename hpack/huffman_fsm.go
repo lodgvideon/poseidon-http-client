@@ -42,11 +42,11 @@ var (
 )
 
 type hufTrieNode struct {
-	sym      int // -1 if not a leaf, 256 = EOS
-	left     *hufTrieNode
-	right    *hufTrieNode
-	depth    int  // distance from root in bits
-	allOnes  bool // path from root to this node is all 1-bits
+	sym     int // -1 if not a leaf, 256 = EOS
+	left    *hufTrieNode
+	right   *hufTrieNode
+	depth   int  // distance from root in bits
+	allOnes bool // path from root to this node is all 1-bits
 }
 
 func init() {

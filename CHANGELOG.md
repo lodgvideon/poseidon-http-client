@@ -7,6 +7,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **Formatting is now gated.** golangci-lint v2 moved formatters into their own
+  top-level `formatters:` section, and `.golangci.yml` never grew one — so
+  neither `make lint` nor the CI lint job ran `gofmt` at all, and neither ever
+  would have. 32 files had drifted, 8 of them production: misaligned
+  struct-field comments in `client/metrics.go` and `client/hooks.go`, trailing
+  blank lines in `hpack/static_table.go`, over-long one-line method bodies in
+  `quic/conn.go` and `http3/stream_body.go`. All 32 are reformatted here; the
+  change is whitespace only.
+
+  The gate only holds on an LF tree, because gofmt emits LF unconditionally and
+  a CRLF checkout reports every file as unformatted. A `.gitattributes` pins
+  `eol=lf` for the files the build, the gate and CI's bash read. That also fixes
+  a local-only trap on Windows checkouts: Go's fuzz-corpus parser is
+  line-oriented, so a CRLF working tree appended `\r` to every seed under
+  `*/testdata/fuzz/`.
+
+- **`depguard` enforces the from-scratch claim.** The premise of this module is
+  that HTTP/1.1, HTTP/2, HPACK, QUIC, HTTP/3 and QPACK are implemented from the
+  RFCs rather than wrapped around existing libraries, and that premise lived
+  only in prose. Production code may no longer import `net/http`,
+  `golang.org/x/net/http2` or `github.com/quic-go/quic-go`; test code still may,
+  since those are exactly the reference peers the conformance and interop suites
+  are written against. No production file imported any of them when the rule
+  went in — it is a ratchet, not a cleanup.
+
+- **Nine more zero-finding ratchets.** `durationcheck` (the RFC 9002 PTO/RTT/
+  pacing code does more `time.Duration` arithmetic than the rest of the tree,
+  and a unit error there surfaces as a stall rather than a compile failure),
+  `gocheckcompilerdirectives` (a misspelled `//go:noinline` is a plain comment,
+  and the alloc benchmarks depend on inlining decisions), `mirror`, `bodyclose`,
+  `usetesting`, `nilnesserr`, `asasalint`, `reassign`, `exptostd`, `bidichk`.
+  Each reported zero findings across the root module, `contrib/`, and all three
+  build tags when it was enabled.
+
+  `fieldalignment` was measured and deliberately left off; the reasoning is
+  recorded next to the `disable:` entry in `.golangci.yml`.
+
 ## [v0.12.0] — 2026-08-10
 
 ### Added

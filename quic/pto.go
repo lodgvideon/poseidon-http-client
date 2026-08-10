@@ -139,7 +139,7 @@ func (c *Conn) queueOldestProbe(sp int) bool {
 		return false
 	}
 	c.retransQueue[sp] = append(c.retransQueue[sp], oldest.frame) // found implies hasFrame
-	c.removeInFlight(oldest.size) // abandoned packet leaves flight; the resend re-counts (RFC 9002 §7)
+	c.removeInFlight(oldest.size)                                 // abandoned packet leaves flight; the resend re-counts (RFC 9002 §7)
 	delete(c.sent[sp].packets, oldestPN)
 	return true
 }

@@ -59,7 +59,7 @@ func fuzzResponseSection() []byte {
 // populated one that unlocks the dynamic index arithmetic.
 func FuzzDecodeResponseHeaders(f *testing.F) {
 	f.Add(fuzzResponseSection())
-	f.Add(dynRefSection()) // references dynamic absolute index 0
+	f.Add(dynRefSection())          // references dynamic absolute index 0
 	f.Add([]byte{0x00, 0x00, 0xd9}) // static Indexed Field Line: :status 200
 	f.Add([]byte{0x00, 0x00})       // well-formed prefix, no fields -> no :status
 	f.Add([]byte{})                 // empty: missing the prefix
@@ -200,13 +200,13 @@ func FuzzReadStreamType(f *testing.F) {
 	f.Add(appendV(nil, StreamTypeQPACKEncoder))
 	f.Add(appendV(nil, StreamTypeQPACKDecoder))
 	f.Add(appendV(nil, StreamTypePush))
-	f.Add(appendV(nil, 0x1f*7+0x21))       // a GREASE stream type (§6.2)
-	f.Add(appendV(nil, bytesx.MaxVarint))  // the top of the varint space
-	f.Add([]byte{})                        // nothing yet
-	f.Add([]byte{0x40})                    // 2-byte varint, one byte present
-	f.Add([]byte{0xc0, 0x00})              // 8-byte varint, two bytes present
-	f.Add([]byte{0x00, 0xff, 0xff})        // control type plus trailing stream bytes
-	f.Add([]byte{0x40, 0x00})              // 0 in non-minimal 2-byte form
+	f.Add(appendV(nil, 0x1f*7+0x21))      // a GREASE stream type (§6.2)
+	f.Add(appendV(nil, bytesx.MaxVarint)) // the top of the varint space
+	f.Add([]byte{})                       // nothing yet
+	f.Add([]byte{0x40})                   // 2-byte varint, one byte present
+	f.Add([]byte{0xc0, 0x00})             // 8-byte varint, two bytes present
+	f.Add([]byte{0x00, 0xff, 0xff})       // control type plus trailing stream bytes
+	f.Add([]byte{0x40, 0x00})             // 0 in non-minimal 2-byte form
 
 	f.Fuzz(func(t *testing.T, b []byte) {
 		typ, n, err := ReadStreamType(b)
@@ -261,10 +261,10 @@ func FuzzParseFrameHeader(f *testing.F) {
 	f.Add(AppendSettings(nil, []Setting{{ID: SettingQPACKMaxTableCapacity, Value: 4096}}))
 	f.Add(AppendGoaway(nil, 0))
 	f.Add([]byte{})
-	f.Add([]byte{0x00})                                                     // type only, length missing
-	f.Add([]byte{0x40})                                                     // truncated type varint
-	f.Add([]byte{0x00, 0x40})                                               // truncated length varint
-	f.Add([]byte{0x00, 0xc0, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff})     // a huge declared length
+	f.Add([]byte{0x00})                                                       // type only, length missing
+	f.Add([]byte{0x40})                                                       // truncated type varint
+	f.Add([]byte{0x00, 0x40})                                                 // truncated length varint
+	f.Add([]byte{0x00, 0xc0, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff})       // a huge declared length
 	f.Add([]byte{0xc0, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x00}) // a huge type, length 0
 
 	f.Fuzz(func(t *testing.T, b []byte) {
