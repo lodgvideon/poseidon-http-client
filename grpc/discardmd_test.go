@@ -6,6 +6,8 @@ import (
 	"net/http"
 	"sync"
 	"testing"
+
+	"github.com/lodgvideon/poseidon-http-client/conn"
 )
 
 // DiscardMetadata skips copying the response header and trailer blocks out of
@@ -16,6 +18,20 @@ import (
 // still a Status.
 //
 // So these test the outcome of failing calls, not just that Header() is nil.
+
+// benignSendLastErr reports whether a SendLast error is the ordinary race with a
+// server that answered and finished first, rather than a failure.
+//
+// There are two sentinels here and their names differ by a package qualifier:
+// grpc.ErrStreamClosed ("grpc: stream closed by the caller") and
+// conn.ErrStreamClosed ("conn: stream already closed"). The one that surfaces
+// depends on who noticed first — the gRPC layer, or the transport whose stream
+// the peer's END_STREAM already retired. These tests tolerated only the first, so
+// they passed locally and fataled on a loaded CI runner where the server usually
+// wins. grpc/conn.go's own send path has always tolerated both.
+func benignSendLastErr(err error) bool {
+	return errors.Is(err, ErrStreamClosed) || errors.Is(err, conn.ErrStreamClosed)
+}
 
 // TestDiscardMetadata_ErrorStatusStillArrives is the one that matters. The
 // status travels in trailers, which is exactly the block that is no longer
@@ -110,7 +126,7 @@ func TestDiscardMetadata_HeaderAndTrailerAreNil(t *testing.T) {
 		t.Fatalf("NewStream: %v", err)
 	}
 	defer func() { _ = s.Close() }()
-	if err := s.SendLast(ctx, []byte("q")); err != nil && !errors.Is(err, ErrStreamClosed) {
+	if err := s.SendLast(ctx, []byte("q")); err != nil && !benignSendLastErr(err) {
 		t.Fatalf("SendLast: %v", err)
 	}
 	// Drain to the end so the trailer block has been handled.
@@ -212,7 +228,7 @@ func TestDiscardMetadata_DefaultStillPopulates(t *testing.T) {
 		t.Fatalf("NewStream: %v", err)
 	}
 	defer func() { _ = s.Close() }()
-	if err := s.SendLast(ctx, []byte("q")); err != nil && !errors.Is(err, ErrStreamClosed) {
+	if err := s.SendLast(ctx, []byte("q")); err != nil && !benignSendLastErr(err) {
 		t.Fatalf("SendLast: %v", err)
 	}
 	hdr, err := s.Header(ctx)
@@ -230,5 +246,46 @@ func TestDiscardMetadata_DefaultStillPopulates(t *testing.T) {
 	}
 	if s.Trailer() == nil {
 		t.Error("Trailer() is nil by default — the trailer block must still be copied")
+	}
+}
+
+// TestSendLast_AfterServerFinished pins the tolerance itself, deterministically.
+//
+// The two tests above race the server: they call SendLast on a stream the server
+// may already have finished. On a fast machine the client usually wins and the
+// call succeeds, which is why tolerating only the gRPC-level sentinel passed here
+// for a long time and fataled on a loaded CI runner. This test waits for the
+// handler to return first, so the peer's END_STREAM is on its way and the error —
+// when there is one — comes from the transport, not from gRPC.
+func TestSendLast_AfterServerFinished(t *testing.T) {
+	done := make(chan struct{})
+	srv, cfg := startGRPCServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		srvBeginResponse(w)
+		srvFinish(w, OK, "")
+		close(done)
+	}))
+	defer srv.Close()
+
+	cc := dialGRPC(t, srv, cfg)
+	ctx := t.Context()
+	s, err := cc.NewStream(ctx, "/t.S/M", nil)
+	if err != nil {
+		t.Fatalf("NewStream: %v", err)
+	}
+	defer func() { _ = s.Close() }()
+
+	<-done // the server has answered and finished; our stream is being retired
+	// Give the client's reader the chance to process END_STREAM, so the send below
+	// meets a stream the transport has already closed.
+	for i := 0; i < 100; i++ {
+		if _, err := s.Recv(ctx); err != nil {
+			break
+		}
+	}
+
+	if err := s.SendLast(ctx, []byte("q")); err != nil && !benignSendLastErr(err) {
+		t.Fatalf("SendLast after the server finished returned %v — a send that loses "+
+			"this race is ordinary, and both layers have a sentinel for it: "+
+			"grpc.ErrStreamClosed and conn.ErrStreamClosed", err)
 	}
 }
