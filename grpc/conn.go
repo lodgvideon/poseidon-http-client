@@ -287,6 +287,35 @@ type callOptions struct {
 	md []conn.HeaderField
 }
 
+// applyCallOptions folds the caller's options into co and returns the result.
+//
+// By value in, by value out, and NOT called at all when there are no options —
+// both halves matter. CallOption.apply needs a pointer, and an interface call
+// hides what the callee does with it, so escape analysis gives up and heap-
+// allocates whatever struct had its address taken. That cost one allocation on
+// every RPC, including the overwhelmingly common case of no options, where the
+// loop body never ran.
+//
+// Escape analysis is static, so neither guarding the loop with len(opts) > 0 in
+// the caller nor returning early from inside this function would have helped:
+// the address is taken somewhere in the function, and that is all it looks at.
+// What works is keeping the address-taking out of the caller entirely and
+// skipping the call, so the zero-option path never reaches the escaping code.
+//
+// go:noinline is load-bearing, not a hint. Without it the compiler inlines this
+// into its callers, the local copy becomes theirs, and it escapes right back
+// into the function this was meant to keep clean — measured, not assumed. The
+// cost is one real call on the path that passes options, against one heap
+// allocation on every RPC that does not.
+//
+//go:noinline
+func applyCallOptions(co callOptions, opts []CallOption) callOptions {
+	for _, o := range opts {
+		o.apply(&co)
+	}
+	return co
+}
+
 // maxRecvCallOption implements CallOption for MaxRecvMessageSize.
 type maxRecvCallOption int
 
@@ -336,8 +365,8 @@ func (cc *ClientConn) NewStream(ctx context.Context, method string, md []conn.He
 		return nil, fmt.Errorf("%w: %q", ErrBadMethod, method)
 	}
 	co := callOptions{maxRecvMessageSize: cc.opts.MaxRecvMessageSize}
-	for _, o := range opts {
-		o.apply(&co)
+	if len(opts) > 0 {
+		co = applyCallOptions(co, opts)
 	}
 	// Caller-built metadata never went through AppendMetadata, so it is validated
 	// in full here. Neither conn nor hpack checks field syntax on the send path,
@@ -573,8 +602,8 @@ func (cc *ClientConn) InvokeInto(ctx context.Context, method string, req, dst []
 		return dst, fmt.Errorf("%w: %q", ErrBadMethod, method)
 	}
 	co := callOptions{maxRecvMessageSize: cc.opts.MaxRecvMessageSize}
-	for _, o := range opts {
-		o.apply(&co)
+	if len(opts) > 0 {
+		co = applyCallOptions(co, opts)
 	}
 	for _, src := range [2][]conn.HeaderField{md, co.md} {
 		for i := range src {
