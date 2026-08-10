@@ -11,6 +11,7 @@ import (
 
 	"github.com/lodgvideon/poseidon-http-client/conn"
 	"github.com/lodgvideon/poseidon-http-client/frame"
+	"github.com/lodgvideon/poseidon-http-client/http1"
 	"github.com/lodgvideon/poseidon-http-client/http3"
 )
 
@@ -77,6 +78,23 @@ func builtinShouldRetry(err error) bool {
 		return h3rst.Retryable()
 	}
 	if errors.Is(err, http3.ErrGoAway) {
+		return true
+	}
+	// HTTP/1.1: the server closed a pooled keep-alive connection without sending
+	// any part of a response (http1.ErrServerClosedIdle). It is the H1 analogue of
+	// REFUSED_STREAM and GOAWAY — the request produced no response, so replaying
+	// it cannot duplicate an effect the server already applied.
+	//
+	// This arm was missing entirely, so the canonical retryable H1 failure — an
+	// idle keep-alive reaped between the checkout probe and the write — was never
+	// retried by the built-ins while its H2 and H3 equivalents always were.
+	//
+	// Safe to classify on the error alone because canRetry has already refused
+	// anything non-idempotent and anything with a streaming body, so no arm here
+	// can cause a POST to be replayed. The http1 side is narrow on purpose: an EOF
+	// after any response byte is NOT this error, because a server that started
+	// answering may well have processed the request.
+	if errors.Is(err, http1.ErrServerClosedIdle) {
 		return true
 	}
 	var de *DialError
