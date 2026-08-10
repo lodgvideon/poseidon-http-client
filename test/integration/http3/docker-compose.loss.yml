@@ -54,9 +54,14 @@ services:
     environment:
       H3_INTEROP_ADDR: lossproxy:443
       GOFLAGS: -count=1
-    # Exclude HugeResponse: it is a clean-path throughput test (batch drain), not
-    # a loss-recovery test — 1 MiB through 10% loss would only add flakiness.
+    # HugeResponse was excluded here for a long time as "a clean-path throughput
+    # test, not a loss-recovery test — 1 MiB through 10% loss would only add
+    # flakiness". The flakiness was a deadlock: it is the only test whose response
+    # outgrows the receive window, so it is the only one that needs a credit grant,
+    # and a dropped grant used to hang the transfer for good (#471). It belongs
+    # here — it is the one test that exercises flow control under loss at all.
     command: >
       go test ./http3/ -tags interop
-      -run 'TestInterop_GET|TestInterop_POST|TestInterop_LargeResponse' -v -timeout 120s
+      -run 'TestInterop_GET|TestInterop_POST|TestInterop_LargeResponse|TestInterop_HugeResponse'
+      -v -timeout 120s
     restart: "no"
