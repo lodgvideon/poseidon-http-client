@@ -10,6 +10,12 @@ import "github.com/lodgvideon/poseidon-http-client/hpack"
 // event handed to the caller, so a server could put anything an HPACK literal can
 // encode into a response header and this client passed it on.
 //
+// "Rule for rule" is a claim that has already gone stale once and cost a real
+// divergence: this side grew the edge-whitespace check and the HTTP/3 side did
+// not, so " x " was a stream error here and an accepted value there (#481). The
+// two files are checked against each other now — see TestValidateMirror_* in
+// http3 — because a comment asserting a property is not the same as testing it.
+//
 // RFC 7540 §10.3, verbatim:
 //
 //	"Requests or responses containing invalid header field names MUST be treated

@@ -28,11 +28,44 @@ func validFieldName(name []byte) bool {
 	return true
 }
 
-// validFieldValue reports whether value contains no octet forbidden in a field
-// value (RFC 9110 §5.5): NUL, CR, or LF — the header-injection vectors.
+// validFieldValue reports whether value is a well-formed field value.
+//
+// Two rules, both from RFC 9110 §5.5, both reaching HTTP/3 through RFC 9114
+// §4.1.2's "the inclusion of invalid characters in field names or values" —
+// which makes the message malformed, and "Clients MUST NOT accept a malformed
+// response."
+//
+//   - No NUL, CR or LF. §5.5 calls values carrying them unsafe and has a
+//     recipient "either reject the message or replace each of those characters
+//     with SP"; this stack rejects.
+//   - No leading or trailing SP or HTAB. §5.5 states it plainly — "A field value
+//     does not include leading or trailing whitespace" — and its ABNF admits
+//     SP/HTAB only BETWEEN field-vchars: field-content = field-vchar
+//     [ 1*( SP / HTAB / field-vchar ) field-vchar ].
+//
+// The whitespace rule is the one this function was missing while the HTTP/2
+// mirror in conn/validate.go enforced it, so " x " was a stream error on one
+// transport and a value forwarded to the caller on the other. Same reserializing
+// caller, same smuggling hazard, different answer depending on which protocol
+// negotiated — see the peer-input policy in CONTRIBUTING.md.
+//
+// §5.5 also tells a parser to EXCLUDE such whitespace rather than reject, but
+// scopes that to "when a specific version of HTTP allows such whitespace to
+// appear in a message". HTTP/1.1 does, around the value; HTTP/3 does not encode
+// it at all, so its presence is a malformed message rather than something to
+// trim. RFC 9113 §8.2.1 spells out the same conclusion for HTTP/2 with an
+// explicit MUST NOT.
 func validFieldValue(value []byte) bool {
 	for _, c := range value {
 		if c == 0x00 || c == 0x0a || c == 0x0d {
+			return false
+		}
+	}
+	if n := len(value); n > 0 {
+		if first := value[0]; first == 0x20 || first == 0x09 {
+			return false
+		}
+		if last := value[n-1]; last == 0x20 || last == 0x09 {
 			return false
 		}
 	}
