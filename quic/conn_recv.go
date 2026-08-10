@@ -761,16 +761,16 @@ func (h *connFrameHandler) OnStreamsBlocked(_ bool, maximum uint64) error {
 }
 
 // OnStreamDataBlocked additionally validates the stream (RFC 9000 §19.13):
-// STREAM_DATA_BLOCKED is sent by a stream's sender, so receiving one for a
-// send-only stream (client-initiated unidirectional, id&0x3 == 0x2 — the peer has
-// no send side there) or for a locally initiated stream not yet created is a
+// STREAM_DATA_BLOCKED is sent by a stream's sender, so receiving one for a stream
+// only WE send on — a unidirectional stream this endpoint initiated, where the
+// peer has no send side — or for a locally initiated stream not yet created is a
 // STREAM_STATE_ERROR.
 func (h *connFrameHandler) OnStreamDataBlocked(id, limit uint64) error {
 	h.ackEliciting = true
-	if id&0x3 == 0x2 || h.c.localStreamNotCreated(id) {
+	if h.c.sendOnlyStream(id) || h.c.localStreamNotCreated(id) {
 		return ErrStreamState
 	}
-	// A server-uni stream past the advertised limit is a STREAM_LIMIT_ERROR (§4.6).
+	// A peer-uni stream past the advertised limit is a STREAM_LIMIT_ERROR (§4.6).
 	if h.c.exceedsUniStreamLimit(id) {
 		return ErrTooManyUniStreams
 	}
@@ -803,14 +803,39 @@ func (h *connFrameHandler) permitInSpace(typ uint64) error {
 	}
 }
 
-// exceedsUniStreamLimit reports whether id names a server-initiated unidirectional
-// stream (id&0x3 == 0x3) beyond the initial_max_streams_uni the client advertised.
-// Receiving any frame that references such an ID is a STREAM_LIMIT_ERROR (RFC 9000
-// §4.6): id>>2 is the stream's zero-based index among its type. acceptPeerUniStream
+// Stream-ID quadrants are relative to the endpoint reading them (RFC 9000 §2.1):
+// the low bit names the initiator and the second bit names directionality, so
+// which quadrant is "ours" flips between a client and a server Conn. Writing the
+// client's answer as a literal — id&0x3 == 0x2 for send-only, 0x3 for
+// receive-only — is correct exactly half the time, and the half it gets wrong is
+// a server rejecting conformant peer behaviour with a connection error.
+//
+// The two predicates below own that question so the five frame handlers do not
+// each answer it. OnStream already derived it role-aware; these are the same
+// derivation, named.
+
+// sendOnlyStream reports whether id names a unidirectional stream THIS endpoint
+// initiated. We are its only sender, so a frame that only a sender may send —
+// RESET_STREAM (§19.4), STREAM_DATA_BLOCKED (§19.13) — must never arrive for it.
+func (c *Conn) sendOnlyStream(id uint64) bool {
+	return id&0x2 != 0 && (id&0x1 == 1) == c.isServer
+}
+
+// recvOnlyStream reports whether id names a unidirectional stream the PEER
+// initiated. We have no send side there, so a frame addressed to a sender —
+// STOP_SENDING (§19.5), MAX_STREAM_DATA (§19.10) — must never arrive for it.
+func (c *Conn) recvOnlyStream(id uint64) bool {
+	return id&0x2 != 0 && (id&0x1 == 1) != c.isServer
+}
+
+// exceedsUniStreamLimit reports whether id names a peer-initiated unidirectional
+// stream beyond the initial_max_streams_uni this endpoint advertised. Receiving
+// any frame that references such an ID is a STREAM_LIMIT_ERROR (RFC 9000 §4.6):
+// id>>2 is the stream's zero-based index among its type. acceptPeerUniStream
 // applies the same bound when a STREAM frame opens the stream; this covers the
 // other frames that can reference one.
 func (c *Conn) exceedsUniStreamLimit(id uint64) bool {
-	return id&0x3 == 0x3 && id>>2 >= c.localMaxStreamsUni
+	return c.recvOnlyStream(id) && id>>2 >= c.localMaxStreamsUni
 }
 
 // localStreamNotCreated reports whether id names a locally initiated (client)
@@ -895,12 +920,12 @@ func (h *connFrameHandler) OnStream(id, offset uint64, fin bool, data []byte) er
 // received contiguously before the reset remains readable.
 func (h *connFrameHandler) OnResetStream(id, errCode, finalSize uint64) error {
 	h.ackEliciting = true
-	// A RESET_STREAM on a send-only stream — a client-initiated unidirectional
-	// stream (id&0x3 == 0x2) — is a STREAM_STATE_ERROR (RFC 9000 §19.4).
-	if id&0x3 == 0x2 {
+	// A RESET_STREAM on a stream only WE send on — a unidirectional stream this
+	// endpoint initiated — is a STREAM_STATE_ERROR (RFC 9000 §19.4).
+	if h.c.sendOnlyStream(id) {
 		return ErrStreamState
 	}
-	// A RESET_STREAM referencing a server-uni stream past the advertised limit is a
+	// A RESET_STREAM referencing a peer-uni stream past the advertised limit is a
 	// STREAM_LIMIT_ERROR, even though we never opened it (RFC 9000 §4.6).
 	if h.c.exceedsUniStreamLimit(id) {
 		return ErrTooManyUniStreams
@@ -948,10 +973,10 @@ func (h *connFrameHandler) OnResetStream(id, errCode, finalSize uint64) error {
 // application error code.
 func (h *connFrameHandler) OnStopSending(id, errCode uint64) error {
 	h.ackEliciting = true
-	// A STOP_SENDING on a receive-only stream — a server-initiated unidirectional
-	// stream (id&0x3 == 0x3) — is a STREAM_STATE_ERROR (RFC 9000 §19.5): the client
-	// has no send side there, so it must not reset one.
-	if id&0x3 == 0x3 {
+	// A STOP_SENDING on a stream we only RECEIVE on — a unidirectional stream the
+	// peer initiated — is a STREAM_STATE_ERROR (RFC 9000 §19.5): we have no send
+	// side there, so there is nothing to ask us to stop.
+	if h.c.recvOnlyStream(id) {
 		return ErrStreamState
 	}
 	if s := h.c.streams[id]; s != nil {
@@ -988,10 +1013,10 @@ func (h *connFrameHandler) OnMaxData(maximum uint64) error {
 
 func (h *connFrameHandler) OnMaxStreamData(streamID, maximum uint64) error {
 	h.ackEliciting = true
-	// A MAX_STREAM_DATA for a receive-only stream — a server-initiated
-	// unidirectional stream (id&0x3 == 0x3) — is a STREAM_STATE_ERROR (RFC 9000
-	// §19.10): the client has no send side there to credit.
-	if streamID&0x3 == 0x3 {
+	// A MAX_STREAM_DATA for a stream we only RECEIVE on — a unidirectional stream
+	// the peer initiated — is a STREAM_STATE_ERROR (RFC 9000 §19.10): we have no
+	// send side there to credit.
+	if h.c.recvOnlyStream(streamID) {
 		return ErrStreamState
 	}
 	if s := h.c.streams[streamID]; s != nil {
