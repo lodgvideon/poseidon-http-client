@@ -144,6 +144,25 @@ in which case the peer's own diagnosis wins: the truncation is a consequence of
 whatever it reported, and replacing `UNAVAILABLE` with `INTERNAL` would turn a
 retriable failure into a permanent one.
 
+## Content type
+
+The request content-type is `application/grpc` by default. The protocol allows an
+optional subtype, which a non-protobuf codec needs so the server knows what the
+message bytes are:
+
+```go
+cc, err := grpc.Dial(ctx, addr, grpc.Options{ContentSubtype: "json"})
+// sends: content-type: application/grpc+json
+```
+
+It must be an RFC 9110 token, checked at `Dial`/`NewClientConn` rather than at send
+time — the value reaches a header and neither `conn` nor `hpack` validates outbound
+fields, so a CR or LF there would be a request-splitting vector at any HTTP/1.1
+downgrading hop.
+
+The header stays owned by the transport: `content-type` remains in the reserved set,
+and this option is how a caller changes it, exactly as for every other reserved field.
+
 ## Metadata
 
 Build request metadata with `AppendMetadata`, which lowercases the key and
