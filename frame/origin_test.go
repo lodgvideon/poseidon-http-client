@@ -113,9 +113,9 @@ func (h *originRecordingHandler) OnData(FrameHeader, []byte, uint8) error { retu
 func (h *originRecordingHandler) OnHeaders(FrameHeader, HeaderBlock, *Priority, uint8) error {
 	return nil
 }
-func (h *originRecordingHandler) OnPriority(FrameHeader, Priority) error              { return nil }
-func (h *originRecordingHandler) OnRSTStream(FrameHeader, ErrCode) error              { return nil }
-func (h *originRecordingHandler) OnSettings(FrameHeader, SettingsParams) error        { return nil }
+func (h *originRecordingHandler) OnPriority(FrameHeader, Priority) error       { return nil }
+func (h *originRecordingHandler) OnRSTStream(FrameHeader, ErrCode) error       { return nil }
+func (h *originRecordingHandler) OnSettings(FrameHeader, SettingsParams) error { return nil }
 func (h *originRecordingHandler) OnPushPromise(FrameHeader, uint32, HeaderBlock, uint8) error {
 	return nil
 }

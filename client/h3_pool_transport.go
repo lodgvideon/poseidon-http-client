@@ -3,7 +3,6 @@ package client
 import (
 	"context"
 	"time"
-
 )
 
 // h3PoolTransport adapts *h3Pool to the internal transport interface consumed by

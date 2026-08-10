@@ -78,7 +78,10 @@ func (c *Conn) decryptPacket(sp int, pkt []byte, pnOffset int, isFirst bool, dat
 		return 0, nil, false, nil // keys for this level not yet installed
 	}
 	if pn, _, payload, err = op.Open(pkt, pnOffset, c.largestRecv[sp]); err != nil {
-		return 0, nil, false, nil // authentication failed; skip
+		//nolint:nilerr // RFC 9001 §5.2: a packet that fails authentication MUST
+		// be discarded without any signal to the peer. Surfacing err would let
+		// an off-path attacker kill the connection with one forged datagram.
+		return 0, nil, false, nil
 	}
 	return pn, payload, true, nil
 }

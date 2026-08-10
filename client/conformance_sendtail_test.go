@@ -122,7 +122,7 @@ func TestConformance_RFC9110_Sec8_6_UnverifiableContentLengthRefused(t *testing.
 			Headers: []conn.HeaderField{hf("content-length", "5")}}},
 		{"streaming body with declared length", &Request{Method: "POST", Path: "/",
 			BodyReader: strings.NewReader("hello"), ContentLength: 5,
-			Headers:    []conn.HeaderField{hf("content-length", "5")}}},
+			Headers: []conn.HeaderField{hf("content-length", "5")}}},
 		{"compressed body", &Request{Method: "POST", Path: "/", Body: []byte("hello"),
 			CompressBody: EncodingGzip,
 			Headers:      []conn.HeaderField{hf("content-length", "5")}}},

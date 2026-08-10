@@ -13,12 +13,12 @@ import (
 // gate a forged Initial carrying it would fake handshake completion.
 func TestConformance_RFC9000_Sec124_FrameTypePermittedBySpace(t *testing.T) {
 	handshakeDone := []byte{0x1e}
-	stream := []byte{0x08, 0x00}             // STREAM, stream 0
-	maxData := []byte{0x10, 0x40, 0x64}      // MAX_DATA 100
-	appClose := []byte{0x1d, 0x00, 0x00}     // application CONNECTION_CLOSE (0x1d)
-	ping := []byte{0x01}                     // PING
-	crypto := []byte{0x06, 0x00, 0x00}       // CRYPTO offset 0 length 0
-	ack := []byte{0x02, 0x00, 0x00, 0x00, 0x00} // ACK largest 0, no ranges
+	stream := []byte{0x08, 0x00}                     // STREAM, stream 0
+	maxData := []byte{0x10, 0x40, 0x64}              // MAX_DATA 100
+	appClose := []byte{0x1d, 0x00, 0x00}             // application CONNECTION_CLOSE (0x1d)
+	ping := []byte{0x01}                             // PING
+	crypto := []byte{0x06, 0x00, 0x00}               // CRYPTO offset 0 length 0
+	ack := []byte{0x02, 0x00, 0x00, 0x00, 0x00}      // ACK largest 0, no ranges
 	transportClose := []byte{0x1c, 0x00, 0x00, 0x00} // transport CONNECTION_CLOSE
 
 	// Frames NOT permitted in Initial/Handshake → PROTOCOL_VIOLATION.

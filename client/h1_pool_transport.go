@@ -4,7 +4,6 @@ import (
 	"context"
 	"sync"
 	"time"
-
 )
 
 // h1PoolTransport adapts *h1Pool to the internal transport interface consumed by

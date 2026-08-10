@@ -71,6 +71,16 @@ func (c Code) String() string {
 // Status is the terminal outcome of an RPC: the grpc-status code plus the
 // decoded grpc-message. A Status with code OK is the success case and is not
 // treated as an error by Err.
+//
+// Error takes a pointer receiver and Err a value receiver deliberately. Error
+// on the pointer keeps a Status value from satisfying error, so the only way
+// to turn one into an error is Err — the single place that returns a nil
+// error for code OK. Err takes a value so it can be called on one (a Status
+// returned from a function is not addressable) and copies before taking the
+// address, so the returned error never aliases the caller's struct. Unifying
+// the receivers either way gives up one of those three properties.
+//
+//nolint:recvcheck // the split receiver is the design; see above
 type Status struct {
 	// Code is the grpc-status value.
 	Code Code

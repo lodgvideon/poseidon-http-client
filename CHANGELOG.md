@@ -7,6 +7,103 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **A PUSH_PROMISE reaching either streaming read path leaked its header slab
+  back to the garbage collector instead of the pool.** A PUSH_PROMISE is
+  delivered on the *parent* stream, which is the stream `responseBodyReader` and
+  `StreamResponse.Recv` are draining, so it lands there whenever a `PushHandler`
+  is installed. `Client.Do`'s buffered path dispatches the promise and `grpc`'s
+  receive loop drops it with an explicit `putHeaderSlab`; these two switches had
+  no arm for it at all, so the event fell straight out while every neighbouring
+  skip arm — `EventHeaders`, `EventInterimHeaders` — recycled. Found by
+  `exhaustive`, which is the whole argument for enabling it: nothing failed, the
+  event was simply ignored. Pinned by `client/pushpromise_slab_test.go`, which
+  asserts on the slab rather than on the bytes the caller reads, and which fails
+  on the pre-fix code.
+
+### Changed
+
+- **Formatting is now gated.** golangci-lint v2 moved formatters into their own
+  top-level `formatters:` section, and `.golangci.yml` never grew one — so
+  neither `make lint` nor the CI lint job ran `gofmt` at all, and neither ever
+  would have. 32 files had drifted, 8 of them production: misaligned
+  struct-field comments in `client/metrics.go` and `client/hooks.go`, trailing
+  blank lines in `hpack/static_table.go`, over-long one-line method bodies in
+  `quic/conn.go` and `http3/stream_body.go`. All 32 are reformatted here; the
+  change is whitespace only.
+
+  The gate only holds on an LF tree, because gofmt emits LF unconditionally and
+  a CRLF checkout reports every file as unformatted. A `.gitattributes` pins
+  `* text=auto eol=lf`, which also covers the parts of the tree CI only ever
+  runs on Linux or inside a container — `scripts/*.sh`, the Python gates, the
+  Dockerfiles and nginx/Caddy configs under `test/integration/` — where a CRLF
+  shebang is a container-only failure no local run reproduces.
+
+- **`depguard` enforces the from-scratch claim.** The premise of this module is
+  that HTTP/1.1, HTTP/2, HPACK, QUIC, HTTP/3 and QPACK are implemented from the
+  RFCs rather than wrapped around existing libraries, and that premise lived
+  only in prose. Production code may no longer import `net/http`,
+  `golang.org/x/net/http2` or `github.com/quic-go/quic-go`; test code still may,
+  since those are exactly the reference peers the conformance and interop suites
+  are written against. No production file imported any of them when the rule
+  went in — it is a ratchet, not a cleanup.
+
+- **Nine more zero-finding ratchets.** `durationcheck` (the RFC 9002 PTO/RTT/
+  pacing code does more `time.Duration` arithmetic than the rest of the tree,
+  and a unit error there surfaces as a stall rather than a compile failure),
+  `gocheckcompilerdirectives` (a misspelled `//go:noinline` is a plain comment,
+  and the alloc benchmarks depend on inlining decisions), `mirror`, `bodyclose`,
+  `usetesting`, `nilnesserr`, `asasalint`, `reassign`, `exptostd`, `bidichk`.
+  Each reported zero findings across the root module, `contrib/`, and all three
+  build tags when it was enabled.
+
+  `fieldalignment` was measured and deliberately left off; the reasoning is
+  recorded next to the `disable:` entry in `.golangci.yml`.
+
+- **`//nolint` directives now have to earn their place** — `nolintlint` with
+  `require-explanation`, `require-specific` and `allow-unused: false`. The tree
+  had **67 directives; 46 of them suppressed nothing.** 30 bare
+  `//nolint:gosec` on `InsecureSkipVerify` in examples and tests were dead twice
+  over — G402 is excluded globally and `gosec` does not run on `_test.go` at all
+  — and another 23, these ones *with* explanations, had outlived what they
+  silenced: `//nolint:gocyclo` on functions since simplified below the
+  complexity floor, `//nolint:errcheck` in files the exclusion rules already
+  cover. All 46 are deleted. The 21 that remain each suppress a real finding and
+  each say why.
+
+  The one directive that turned out to be load-bearing is
+  `unsafeStringToBytes`: stripping it surfaced gosec G103, and it is back with
+  the audit G103 asks for — every caller passes a `*Request` field that outlives
+  the header block, and every consumer only reads.
+
+- **Six linters with small standing findings**, each fixed or annotated rather
+  than baselined: `wastedassign` (three dead initializers, in `conn`, `http1`
+  and `quic`), `recvcheck` (`rttStats.lossDelay` unified onto the pointer
+  receiver; `grpc.Status` keeps its split receiver, which is deliberate and now
+  documented), `nilerr` (five intentional drop-the-error sites, including the
+  one RFC 9001 §5.2 requires — a packet failing authentication must be discarded
+  silently, since surfacing that error would let an off-path attacker kill a
+  connection with one forged datagram), `fatcontext`, `makezero` (production
+  clean, fixture builders excluded), `nolintlint`.
+
+- **`exhaustive` guards the enum dispatch.** This module is nine enum-shaped
+  wire vocabularies — frame types, settings IDs, error codes, packet types,
+  stream events — and adding a member while missing a switch is both the
+  characteristic defect here and a silent one: the new value falls through and
+  the code does nothing, which is what the PUSH_PROMISE slab leak above was.
+  Ten production switches were reviewed; one was a bug, one is a deferred
+  finding, and the other eight now carry an `//exhaustive:ignore` that states
+  why handling a subset is correct. Tests are excluded — a table test switching
+  on the three codes its scenario produces should not have to spell out the
+  other twelve.
+
+  The deferred one is `TLSHandshake.Pump`: Go 1.26 adds `tls.QUICErrorEvent`,
+  which carries a fatal handshake error, and the loop drops it — turning a
+  failed handshake into a `Pump` that reports success. It cannot be fixed here,
+  because naming the constant does not compile under this module's declared
+  `go 1.25.0`; the reasoning and the trigger are recorded at the switch.
+
 ## [v0.12.0] — 2026-08-10
 
 ### Added

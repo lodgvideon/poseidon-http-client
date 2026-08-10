@@ -194,9 +194,9 @@ func FuzzParseEncoderInstructions(f *testing.F) {
 	f.Add(uint64(4096), setCap(64), []byte{0x40, 0x01, 'a', 0x01, 'b'}, []byte{0x00})
 	// Insert With Name Reference into the static table.
 	f.Add(uint64(4096), setCap(4096), []byte{0xc0 | 15, 0x03, 'a', 'b', 'c'}, []byte(nil))
-	f.Add(uint64(4096), setCap(4097), []byte(nil), []byte(nil)) // capacity above the maximum -> reject
-	f.Add(uint64(4096), []byte{0x80}, []byte(nil), []byte(nil)) // dynamic name ref into an empty table
-	f.Add(uint64(4096), []byte{0x00}, []byte(nil), []byte(nil)) // Duplicate of a nonexistent entry
+	f.Add(uint64(4096), setCap(4097), []byte(nil), []byte(nil))       // capacity above the maximum -> reject
+	f.Add(uint64(4096), []byte{0x80}, []byte(nil), []byte(nil))       // dynamic name ref into an empty table
+	f.Add(uint64(4096), []byte{0x00}, []byte(nil), []byte(nil))       // Duplicate of a nonexistent entry
 	f.Add(uint64(4096), []byte{0x40, 0x7f}, []byte(nil), []byte(nil)) // literal name, truncated length varint
 	// A literal name declaring a length near the top of the prefix-integer space.
 	f.Add(uint64(4096), []byte{0x40, 0x1f, 0xff, 0xff, 0xff, 0xff, 0xff, 0x7f}, []byte(nil), []byte(nil))

@@ -283,7 +283,7 @@ drain:
 
 // TestStartServerHandshake_FullHandshake checks the connected state of a server
 // connection built from a completed handshake against a real client.
-func TestStartServerHandshake_FullHandshake(t *testing.T) { //nolint:gocyclo // linear end-to-end handshake assertions — step count, not branching complexity
+func TestStartServerHandshake_FullHandshake(t *testing.T) {
 	client, sc, _, _ := setupServerConn(t)
 	if !client.handshakeComplete {
 		t.Fatal("client handshake did not complete")

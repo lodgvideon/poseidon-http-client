@@ -502,7 +502,7 @@ func FuzzDynamicIndexResolution(f *testing.F) {
 // and so never fires for an entry whose name and value are both empty: such an
 // entry costs 32 bytes of §3.2.1 accounting size but zero arena bytes.
 func TestQPACK_EncoderInstructions_RingBoundedByCapacity(t *testing.T) {
-	const capacity = 32 // exactly one empty ("", "") entry: every insert evicts
+	const capacity = 32                                  // exactly one empty ("", "") entry: every insert evicts
 	instr := hpack.EncodeInteger(nil, 5, 0x20, capacity) // Set Dynamic Table Capacity
 	instr = append(instr, 0x40, 0x00)                    // Insert With Literal Name ("", "")
 	const duplicates = 4096

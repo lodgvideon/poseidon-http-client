@@ -134,7 +134,7 @@ func ExampleHash() {
 // ExampleRandom spreads load uniformly across the resolved set. Pass your own
 // *rand.Rand (seeded deterministically here) so tests are reproducible.
 func ExampleRandom() {
-	sel := client.Random(rand.New(rand.NewSource(1))) //nolint:gosec // not security-sensitive
+	sel := client.Random(rand.New(rand.NewSource(1)))
 	resolver := client.StaticResolver(
 		client.Address{Host: "10.0.0.1", Port: 443},
 		client.Address{Host: "10.0.0.2", Port: 443},

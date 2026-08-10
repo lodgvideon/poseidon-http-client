@@ -3,7 +3,6 @@ package client
 import (
 	"context"
 	"time"
-
 )
 
 // managedTransport adapts *managedPool to the internal transport interface.

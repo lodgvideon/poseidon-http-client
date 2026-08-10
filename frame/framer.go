@@ -711,6 +711,9 @@ func (f *Framer) checkFieldBlockContinuity(fh FrameHeader) error {
 // without error: a HEADERS/PUSH_PROMISE without END_HEADERS opens a block on its
 // stream; a CONTINUATION with END_HEADERS closes it.
 func (f *Framer) trackFieldBlock(fh FrameHeader) {
+	//exhaustive:ignore // §6.10 continuity is a property of field-block frames
+	// only. Every other type leaves the state untouched by definition — a
+	// PING between a HEADERS and its CONTINUATION is already rejected upstream.
 	switch fh.Type {
 	case FrameHeaders:
 		f.expectContinuation = fh.Flags&FlagHeadersEndHeaders == 0

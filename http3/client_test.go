@@ -515,8 +515,8 @@ func TestConformance_RFC9114_Sec725_PushPromiseOnRequestStream(t *testing.T) {
 // response) is a H3_FRAME_ERROR connection error.
 func TestConformance_RFC9114_Sec71_TruncatedFrameAtStreamEnd(t *testing.T) {
 	headers := AppendHeaders(nil, encodeSection(hf(":status", "200")))
-	truncated := AppendFrameHeader(nil, FrameData, 10)      // declares 10 payload bytes
-	truncated = append(truncated, []byte("abc")...)         // but only 3 arrive, then FIN
+	truncated := AppendFrameHeader(nil, FrameData, 10) // declares 10 payload bytes
+	truncated = append(truncated, []byte("abc")...)    // but only 3 arrive, then FIN
 	conn := &fakeConn{req: &fakeStream{recvChunks: [][]byte{append(headers, truncated...)}, fin: true}}
 	client, _ := NewClientFake(conn, nil)
 	if _, _, err := client.Do(context.Background(), &Request{Method: "GET", Scheme: "https", Authority: "h", Path: "/"}); err != ErrH3Control {

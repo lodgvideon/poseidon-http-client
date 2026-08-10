@@ -17,7 +17,7 @@ import (
 // DoStream returns once the response HEADERS arrive; the caller then pumps
 // StreamResponse.Recv until ErrStreamEnded and MUST Close the stream.
 func ExampleClient_DoStream() {
-	dialer := &conn.TLSDialer{Config: &tls.Config{InsecureSkipVerify: true}} //nolint:gosec
+	dialer := &conn.TLSDialer{Config: &tls.Config{InsecureSkipVerify: true}}
 	c, err := client.NewSingleConnClient("api.example.com:443", dialer)
 	if err != nil {
 		log.Fatal(err)
@@ -61,7 +61,7 @@ func ExampleClient_DoStream() {
 // underlying StreamResponse for you — eliminating the most common DoStream
 // footgun of forgetting Close and leaking a connection slot.
 func ExampleClient_Stream() {
-	dialer := &conn.TLSDialer{Config: &tls.Config{InsecureSkipVerify: true}} //nolint:gosec
+	dialer := &conn.TLSDialer{Config: &tls.Config{InsecureSkipVerify: true}}
 	c, err := client.NewSingleConnClient("api.example.com:443", dialer)
 	if err != nil {
 		log.Fatal(err)
@@ -89,7 +89,7 @@ func ExampleClient_Stream() {
 // response trailers. WaitTrailers discards any remaining EventData events,
 // returning the trailer fields once EventTrailers arrives.
 func ExampleStreamResponse_WaitTrailers() {
-	dialer := &conn.TLSDialer{Config: &tls.Config{InsecureSkipVerify: true}} //nolint:gosec
+	dialer := &conn.TLSDialer{Config: &tls.Config{InsecureSkipVerify: true}}
 	c, err := client.NewSingleConnClient("grpc.example.com:443", dialer)
 	if err != nil {
 		log.Fatal(err)
@@ -121,7 +121,7 @@ func ExampleStreamResponse_WaitTrailers() {
 // Response.BodyReader. The caller MUST Close it (Response.Reset also closes
 // it) to release the connection slot.
 func Example_streamBodyReader() {
-	dialer := &conn.TLSDialer{Config: &tls.Config{InsecureSkipVerify: true}} //nolint:gosec
+	dialer := &conn.TLSDialer{Config: &tls.Config{InsecureSkipVerify: true}}
 	c, err := client.NewSingleConnClient("files.example.com:443", dialer)
 	if err != nil {
 		log.Fatal(err)
@@ -151,7 +151,7 @@ func Example_streamBodyReader() {
 // (respecting flow control); ContentLength, when > 0, emits a
 // content-length header in the initial HEADERS frame.
 func Example_uploadBody() {
-	dialer := &conn.TLSDialer{Config: &tls.Config{InsecureSkipVerify: true}} //nolint:gosec
+	dialer := &conn.TLSDialer{Config: &tls.Config{InsecureSkipVerify: true}}
 	c, err := client.NewSingleConnClient("upload.example.com:443", dialer)
 	if err != nil {
 		log.Fatal(err)

@@ -2167,7 +2167,10 @@ func (ex *Exchange) readChunkedChunk(buf []byte) (n int, done bool, err error) {
 		// accepted " 5", "5 " and "5\v" as sizes, and a chunk-size line is where
 		// a framing disagreement costs the most: every byte after it is data or
 		// not data depending on who parsed it.
-		size, ok := int64(0), false
+		var (
+			size int64
+			ok   bool
+		)
 		if semi := strings.IndexByte(line, ';'); semi >= 0 {
 			size, ok = parseChunkSize(strings.TrimRight(line[:semi], " \t"))
 		} else {

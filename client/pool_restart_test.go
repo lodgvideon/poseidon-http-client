@@ -58,7 +58,7 @@ func TestIntegration_Pool_RecoversAfterServerRestart(t *testing.T) {
 		},
 		ConnOpts: conn.ConnOptions{Dialer: &conn.TLSDialer{
 			Config: &tls.Config{
-				InsecureSkipVerify: true, //nolint:gosec // a test server's self-signed cert
+				InsecureSkipVerify: true,
 				NextProtos:         []string{"h2"},
 			},
 		}},

@@ -1017,7 +1017,7 @@ func TestDial_DialError(t *testing.T) {
 	defer cancel()
 	// 127.0.0.1:1 — always connection refused.
 	_, err := Dial(ctx, "127.0.0.1:1", ConnOptions{
-		Dialer: &TLSDialer{Config: &tls.Config{InsecureSkipVerify: true}}, //nolint:gosec
+		Dialer: &TLSDialer{Config: &tls.Config{InsecureSkipVerify: true}},
 	})
 	if err == nil {
 		t.Fatal("expected dial error")

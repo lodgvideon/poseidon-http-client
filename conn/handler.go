@@ -720,6 +720,9 @@ func (h *connHandler) handlePushPromiseBlock(parentStreamID, promisedStreamID ui
 	pushed, err := h.streams.reservePushedStream(promisedStreamID)
 	if err != nil {
 		_ = h.streams.rstStream(promisedStreamID, frame.ErrCodeRefusedStream)
+		//nolint:nilerr // Refusing the promised stream IS the handling; returning
+		// err here would propagate to the reader loop and tear down the
+		// connection over a stream-level refusal.
 		return nil
 	}
 

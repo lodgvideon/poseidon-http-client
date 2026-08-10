@@ -331,6 +331,13 @@ func (sr *StreamResponse) Recv(ctx context.Context) (StreamEvent, error) {
 				sr.drained = true
 			}
 			return out, nil
+		case conn.EventPushPromise:
+			// Delivered on the parent stream, which is this one. StreamResponse
+			// exposes no push surface (Client.Do's buffered path is the only one
+			// that dispatches to a push handler), so the promise is skipped —
+			// but its header slab goes back to the pool, as in the arms above.
+			recycleHeaderSlab(ev.Slab)
+			continue
 		case conn.EventReset:
 			sr.drained = true
 			return StreamEvent{
@@ -367,6 +374,9 @@ func (sr *StreamResponse) WaitTrailers(ctx context.Context) ([]conn.HeaderField,
 		if err != nil {
 			return nil, err
 		}
+		//exhaustive:ignore // EventNone is the zero value, which Recv never
+		// returns alongside a nil error: every arm of its switch either returns
+		// a typed event or continues the loop.
 		switch ev.Type {
 		case EventData:
 			continue

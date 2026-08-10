@@ -15,10 +15,13 @@ type expiryPC struct {
 	closed bool
 }
 
-func (p *expiryPC) Read([]byte) (int, error)          { return 0, timeoutError{} }
-func (p *expiryPC) Write(b []byte) (int, error)       { p.writes = append(p.writes, append([]byte(nil), b...)); return len(b), nil }
-func (p *expiryPC) Close() error                      { p.closed = true; return nil }
-func (p *expiryPC) SetReadDeadline(time.Time) error   { return nil }
+func (p *expiryPC) Read([]byte) (int, error) { return 0, timeoutError{} }
+func (p *expiryPC) Write(b []byte) (int, error) {
+	p.writes = append(p.writes, append([]byte(nil), b...))
+	return len(b), nil
+}
+func (p *expiryPC) Close() error                    { p.closed = true; return nil }
+func (p *expiryPC) SetReadDeadline(time.Time) error { return nil }
 
 // TestConn_Poll_IdleTimeoutCloses drives Poll into the read-timeout expiry branch
 // with the idle deadline already elapsed: handleExpiry must silently idle-close

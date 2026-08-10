@@ -29,7 +29,7 @@ func h2TestServer(t *testing.T, h http.HandlerFunc) string {
 }
 
 func insecureConnOpts() conn.ConnOptions {
-	return conn.ConnOptions{Dialer: &conn.TLSDialer{Config: &tls.Config{InsecureSkipVerify: true}}} //nolint:gosec
+	return conn.ConnOptions{Dialer: &conn.TLSDialer{Config: &tls.Config{InsecureSkipVerify: true}}}
 }
 
 // TestResolve_SuccessfulEmpty_DoesNotServeStale is a regression test for
@@ -149,7 +149,7 @@ func (d *rgTrackingDialer) Dial(ctx context.Context, addr string) (net.Conn, err
 // captured in-flight-dial count regardless of timing.
 func TestPoolClose_NoDialDoneLeak(t *testing.T) {
 	addr := h2TestServer(t, func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(200) })
-	inner := &conn.TLSDialer{Config: &tls.Config{InsecureSkipVerify: true}} //nolint:gosec
+	inner := &conn.TLSDialer{Config: &tls.Config{InsecureSkipVerify: true}}
 
 	var dialedCt, closedCt atomic.Int32
 

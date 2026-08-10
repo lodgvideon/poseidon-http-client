@@ -1,0 +1,15 @@
+# gofmt emits LF and only LF, so the formatting gate in .golangci.yml can only
+# be checked against an LF working tree — on a CRLF checkout every file reports
+# as unformatted and the gate is useless locally. That is the reason this file
+# exists; the rest follows from the same place, since everything CI runs, it
+# runs on Linux or inside a container: the shell scripts under scripts/, the
+# Dockerfiles and nginx/Caddy configs under test/integration/, the Python
+# gates. A CRLF shebang line is a container-only failure that no local run
+# reproduces.
+#
+# eol=lf on the catch-all rather than per-extension: the per-extension form is
+# what a new file type quietly falls through. text=auto still keeps git's
+# binary detection, and the one committed binary is pinned below.
+* text=auto eol=lf
+
+*.pyc binary

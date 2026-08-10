@@ -50,7 +50,7 @@ func TestConn_SmallAdvertisedWindow_StillCompletes(t *testing.T) {
 	for _, window := range []uint32{65535, 32768, 16384, 8192, 1024} {
 		t.Run(windowName(window), func(t *testing.T) {
 			d := &TLSDialer{Config: &tls.Config{
-				InsecureSkipVerify: true, //nolint:gosec // a test server's self-signed cert
+				InsecureSkipVerify: true,
 				NextProtos:         []string{"h2"},
 			}}
 			nc, err := d.Dial(t.Context(), srv.Listener.Addr().String())

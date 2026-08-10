@@ -183,7 +183,7 @@ func TestHasResidue_TLSQuietConn(t *testing.T) {
 	}()
 
 	tc, err := tls.Dial("tcp", ln.Addr().String(), &tls.Config{
-		InsecureSkipVerify: true, //nolint:gosec // test server with a self-signed cert
+		InsecureSkipVerify: true,
 		ClientSessionCache: tls.NewLRUClientSessionCache(4),
 	})
 	if err != nil {
@@ -232,7 +232,7 @@ func TestHasResidue_TLSUnsolicitedResponse(t *testing.T) {
 	}()
 
 	tc, err := tls.Dial("tcp", ln.Addr().String(), &tls.Config{
-		InsecureSkipVerify: true, //nolint:gosec // test server with a self-signed cert
+		InsecureSkipVerify: true,
 	})
 	if err != nil {
 		t.Fatalf("tls.Dial: %v", err)

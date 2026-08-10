@@ -346,6 +346,9 @@ func (c *Client) readControl() error {
 			// ignored (§9).
 		}
 	}
+	//nolint:nilerr // The loop above breaks on ErrNeedMore, which is not a
+	// failure: it means the buffered bytes hold no further complete frame.
+	// Every genuine violation returned c.connError before reaching here.
 	return nil
 }
 

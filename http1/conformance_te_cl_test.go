@@ -65,8 +65,8 @@ func TestConformance_RFC9112_Sec6_3_Rule5_ScopedToMessagesWithoutTE(t *testing.T
 			"so its discard path is out of scope; rule 4 frames this body", err)
 	}
 	if ex.KeepAlive() {
-		t.Errorf("KeepAlive() = true, want false — rule 3 says a message with both "+
-			"Transfer-Encoding and Content-Length ought to be handled as an error, "+
+		t.Errorf("KeepAlive() = true, want false — rule 3 says a message with both " +
+			"Transfer-Encoding and Content-Length ought to be handled as an error, " +
 			"so the socket must not be reused")
 	}
 }

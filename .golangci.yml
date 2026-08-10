@@ -32,7 +32,104 @@ linters:
     # == form (they construct the sentinel they compare against), so it is
     # excluded below alongside errcheck/gosec.
     - errorlint
+    # ── Ratchets ──────────────────────────────────────────────────────
+    # Everything below reported zero findings across the tree (root module
+    # and contrib/, all three build tags) when it was added. None of them is
+    # here to clean up a backlog; each one pins a property the code already
+    # has so a regression fails review instead of shipping.
+    #
+    # depguard: the headline claim of this module is that the HTTP/1.1,
+    # HTTP/2, HPACK, QUIC, HTTP/3 and QPACK stacks are implemented from the
+    # RFCs rather than wrapped around an existing one. Until now that claim
+    # lived only in prose. Production code imports none of the denied
+    # packages today; test code still may, because the reference peers
+    # (net/http, x/net/http2, quic-go) are exactly what the conformance and
+    # interop suites need to test against.
+    - depguard
+    # durationcheck: multiplying two time.Durations yields a nonsense unit.
+    # The loss-recovery and pacing code (RFC 9002) does more Duration
+    # arithmetic than the rest of the tree combined — PTO backoff, RTT
+    # smoothing, the pacer's inter-packet gap — and the result is a timer,
+    # so a unit error shows up as a mysterious stall, not a compile error.
+    - nilnesserr
+    - durationcheck
+    # gocheckcompilerdirectives: a misspelled //go:noinline or //go:norace is
+    # a plain comment. In a tree where the alloc benchmarks and the bench-gate
+    # depend on inlining decisions, a directive that silently does nothing is
+    # a benchmark that silently measures something else.
+    - gocheckcompilerdirectives
+    # mirror: []byte/string conversions that the bytes/strings mirror API
+    # avoids. Each one is an allocation on paths the bench-gate holds at zero.
+    - mirror
+    # bodyclose: the conformance and integration suites drive real net/http
+    # clients against httptest servers; an unclosed body leaks a connection
+    # into whatever test runs next.
+    - bodyclose
+    # usetesting: t.Context()/t.Setenv over the hand-rolled equivalents.
+    - usetesting
+    - asasalint
+    - reassign
+    - exptostd
+    # bidichk: bidirectional-override runes can make a diff read differently
+    # than it compiles. Cheap insurance for a module other people vendor.
+    - bidichk
+    # ── Small standing findings ───────────────────────────────────────
+    # Unlike the ratchets above, these each had a handful of hits when they
+    # went in. Every one was either fixed or annotated; a new hit is a new
+    # finding, not a backlog item.
+    #
+    # nilerr: five sites return nil after an error, all deliberately —
+    # a refused push (§6.6), a failed AEAD open that MUST be discarded
+    # silently (RFC 9001 §5.2), a CONNECTION_CLOSE the caller reports.
+    # They now say so in a //nolint, which is the point: "we drop this
+    # error on purpose" is a claim that should be written down.
+    - nilerr
+    - wastedassign
+    # fatcontext: catches `ctx = context.WithX(ctx, …)` inside a loop, which
+    # grows the chain per iteration. Verified to fire on that shape; the two
+    # http3 hits are a struct field being overwritten, not derived.
+    - fatcontext
+    - recvcheck
+    # makezero: `make([]byte, n)` followed by append silently prefixes n zero
+    # bytes. In a wire codec that is a framing bug, not a style issue. The
+    # tests do it on purpose (fixed-prefix builders) and are excluded below.
+    - makezero
+    # nolintlint: this tree documents every lint exclusion in .golangci.yml
+    # with a paragraph of reasoning; a bare //nolint at a call site is the one
+    # place that convention was not enforced. allow-unused also earns its
+    # keep — 30 of the 32 bare //nolint:gosec directives it surfaced were
+    # suppressing nothing at all, because G402 is excluded globally and gosec
+    # does not run on _test.go. They are deleted rather than annotated.
+    - nolintlint
+    # exhaustive: this module is nine enum-shaped wire vocabularies — frame
+    # types, settings IDs, error codes, packet types, stream events. Adding a
+    # member and missing a switch is the characteristic bug here, and it is
+    # silent: the new value falls through and the code does nothing. Every
+    # switch that handles a subset on purpose now says so in an
+    # //exhaustive:ignore that gives the reason.
+    - exhaustive
   settings:
+    exhaustive:
+      # An explicit default arm is a deliberate catch-all; don't second-guess it.
+      default-signifies-exhaustive: true
+    nolintlint:
+      require-explanation: true
+      require-specific: true
+      allow-unused: false
+    depguard:
+      rules:
+        from-scratch:
+          # Test files are exempt: the reference implementations are the
+          # peers the conformance suites are written against.
+          files:
+            - "!$test"
+          deny:
+            - pkg: net/http
+              desc: "client/, conn/ and http1/ implement HTTP themselves; net/http belongs to the test peers only"
+            - pkg: golang.org/x/net/http2
+              desc: "frame/, hpack/ and conn/ are the HTTP/2 implementation; x/net/http2 is a test peer only"
+            - pkg: github.com/quic-go/quic-go
+              desc: "quic/ implements RFC 9000/9001/9002 itself; quic-go belongs to the interop harness only"
     gocyclo:
       min-complexity: 25
     gosec:
@@ -53,6 +150,14 @@ linters:
     govet:
       enable-all: true
       disable:
+        # fieldalignment: measured, not assumed. It reports 81 production
+        # structs; repacking every one of them saves 442 bytes in total, and
+        # the two largest wins land on structs that are pooled (conn.Stream,
+        # 24 B) or per-connection (quic.Conn, 104 B) — neither shows up in the
+        # per-request allocation the bench-gate holds at zero. Against that,
+        # field order here carries information: wmu sits next to what it
+        # serializes, psMu next to peerSettings, and sorting by width deletes
+        # that. Run it as a one-shot audit if a specific struct ever matters.
         - fieldalignment
         - shadow
     revive:
@@ -70,6 +175,31 @@ linters:
       # (e.g. w.Write in handler funcs, gzip.Writer.Close in setup code).
       - path: _test\.go$
         linters: [errcheck, gosec, errorlint]
+      # makezero: the fixture builders legitimately allocate a fixed-size
+      # prefix and append the variable part onto it — a 9-byte HTTP/2 frame
+      # header, QUIC's 24-byte preferred_address prefix. That is the shape
+      # makezero flags, and here it is the intent. Production code has no
+      # hits, which is where the check earns its place.
+      - path: _test\.go$
+        linters: [makezero]
+      # exhaustive: a test switches on the two or three enum values its
+      # scenario produces; demanding the other twelve error codes would turn
+      # every table test into a wall of unreachable arms. The check is here
+      # for production dispatch, which is where a missed member is silent.
+      - path: _test\.go$
+        linters: [exhaustive]
+
+# golangci-lint v2 moved formatters out of `linters` into their own section,
+# and this file did not have one — so nothing checked gofmt, here or in CI.
+# 32 files had drifted, 8 of them production (misaligned struct-field
+# comments, trailing blank lines, over-long one-line method bodies).
+# `golangci-lint run` reports these; `golangci-lint fmt` fixes them.
+#
+# This only holds if the tree is LF: gofmt emits LF unconditionally, so a
+# CRLF checkout makes every file report as unformatted. See .gitattributes.
+formatters:
+  enable:
+    - gofmt
 
 issues:
   max-issues-per-linter: 0

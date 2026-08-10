@@ -148,7 +148,7 @@ func TestConn_ShutdownWithFullEventChannel_ReaderStillExits(t *testing.T) {
 	defer cancel()
 	c, err := Dial(ctx, srv.Listener.Addr().String(), ConnOptions{
 		Dialer: &TLSDialer{Config: &tls.Config{
-			InsecureSkipVerify: true, //nolint:gosec // a test server's self-signed cert
+			InsecureSkipVerify: true,
 			NextProtos:         []string{"h2"},
 		}},
 		// 1, not the default 8: the buffer size is what "full" means, so the

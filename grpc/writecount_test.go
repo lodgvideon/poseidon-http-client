@@ -9,8 +9,8 @@ import (
 // unaryTransportWrites is how many Write calls one unary RPC currently makes on
 // the transport:
 //
-//	1. HEADERS                — the request header block
-//	2. DATA(msg, END_STREAM)  — the request message, half-closing as it goes
+//  1. HEADERS                — the request header block
+//  2. DATA(msg, END_STREAM)  — the request message, half-closing as it goes
 //
 // Each is a separate syscall, a separate TLS record (~22 bytes of record header
 // and AEAD tag on top of the payload), and, since Go enables TCP_NODELAY,

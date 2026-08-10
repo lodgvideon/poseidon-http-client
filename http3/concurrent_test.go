@@ -35,7 +35,7 @@ import (
 type muxStream struct {
 	conn      *muxConn
 	id        uint64
-	seq       int  // unique per request; embedded in the response for cross-talk detection
+	seq       int // unique per request; embedded in the response for cross-talk detection
 	isControl bool
 
 	// send side (guarded by conn.mu)
@@ -330,8 +330,8 @@ func (c *muxConn) processBurstLocked() bool {
 		if !s.delivered && c.deliverOpen {
 			s.delivered = true
 			signalReady(s)
-			c.bidiLimit++           // the server closes the stream → grants a MAX_STREAMS credit
-			c.signalCreditLocked()  // wake an OpenStream parked on the limit
+			c.bidiLimit++          // the server closes the stream → grants a MAX_STREAMS credit
+			c.signalCreditLocked() // wake an OpenStream parked on the limit
 			progressed = true
 		}
 	}
@@ -506,7 +506,7 @@ func TestConcurrent_WavesExceedStreamLimit(t *testing.T) {
 // Responses are withheld until after the cancel, so the cancelled Do is genuinely
 // parked in WaitReadable when its context fires.
 func TestConcurrent_PerRequestCancel(t *testing.T) {
-	conn := newMuxConn(100) // ample stream credit; this test is about per-request cancel
+	conn := newMuxConn(100)  // ample stream credit; this test is about per-request cancel
 	conn.deliverOpen = false // hold every response until after the cancel
 	client, err := NewClientFake(conn, nil)
 	if err != nil {

@@ -11,7 +11,7 @@ const (
 // lossDelay is the time-threshold window for declaring a packet lost (RFC 9002
 // §6.1.2): 9/8 of the larger of the smoothed and latest RTT, floored at the
 // timer granularity. Before the first RTT sample it is the 1 ms floor.
-func (r rttStats) lossDelay() time.Duration {
+func (r *rttStats) lossDelay() time.Duration {
 	rtt := r.smoothedRTT
 	if r.latestRTT > rtt {
 		rtt = r.latestRTT

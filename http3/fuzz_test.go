@@ -88,11 +88,11 @@ func FuzzFrameReader(f *testing.F) {
 	f.Add(AppendGoaway(nil, 0))
 	// Two frames back to back, to exercise the consume-and-advance path.
 	f.Add(AppendData(AppendData(nil, []byte("a")), []byte("bb")))
-	f.Add([]byte{})                                                             // empty
-	f.Add([]byte{0x00})                                                         // type varint only, no length
-	f.Add([]byte{0x00, 0x40})                                                   // truncated length varint
-	f.Add([]byte{0x00, 0xc0, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff})         // header declaring a huge length
-	f.Add([]byte{0x40})                                                         // truncated type varint
+	f.Add([]byte{})                                                     // empty
+	f.Add([]byte{0x00})                                                 // type varint only, no length
+	f.Add([]byte{0x00, 0x40})                                           // truncated length varint
+	f.Add([]byte{0x00, 0xc0, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff}) // header declaring a huge length
+	f.Add([]byte{0x40})                                                 // truncated type varint
 
 	f.Fuzz(func(_ *testing.T, data []byte) {
 		var r FrameReader
@@ -115,12 +115,12 @@ func FuzzFrameReader(f *testing.F) {
 // panic. The huge-count defense is implicit: the loop advances by whole varints
 // and terminates when the payload is exhausted.
 func FuzzParseSettings(f *testing.F) {
-	f.Add([]byte{})                   // empty (valid: no settings)
-	f.Add([]byte{0x01, 0x40, 0x00})   // id=1, value=0 (2-byte value)
-	f.Add([]byte{0x06, 0x44, 0x00})   // MAX_FIELD_SECTION_SIZE
-	f.Add([]byte{0x40})               // truncated identifier varint
-	f.Add([]byte{0x01})               // identifier present, value missing
-	f.Add([]byte{0x02, 0x00})         // reserved h2 identifier -> H3_SETTINGS_ERROR
+	f.Add([]byte{})                       // empty (valid: no settings)
+	f.Add([]byte{0x01, 0x40, 0x00})       // id=1, value=0 (2-byte value)
+	f.Add([]byte{0x06, 0x44, 0x00})       // MAX_FIELD_SECTION_SIZE
+	f.Add([]byte{0x40})                   // truncated identifier varint
+	f.Add([]byte{0x01})                   // identifier present, value missing
+	f.Add([]byte{0x02, 0x00})             // reserved h2 identifier -> H3_SETTINGS_ERROR
 	f.Add([]byte{0x01, 0x00, 0x01, 0x00}) // duplicate identifier
 
 	f.Fuzz(func(_ *testing.T, payload []byte) {

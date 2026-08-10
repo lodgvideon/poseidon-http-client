@@ -25,12 +25,12 @@ func FuzzDecodeFieldSection(f *testing.F) {
 	})
 	f.Add(valid)
 
-	f.Add([]byte{})                 // empty: missing the prefix
-	f.Add([]byte{0x00, 0x00})       // valid prefix (RIC 0, Base 0), no field lines
-	f.Add([]byte{0x00, 0x00, 0xd1}) // static Indexed Field Line, :method GET (idx 17)
-	f.Add([]byte{0x00})             // RIC present, Base byte missing
-	f.Add([]byte{0x00, 0x00, 0x80}) // dynamic Indexed ref with an empty table -> reject
-	f.Add([]byte{0xff, 0x00})       // non-zero encoded RIC against a nil table -> reject
+	f.Add([]byte{})                             // empty: missing the prefix
+	f.Add([]byte{0x00, 0x00})                   // valid prefix (RIC 0, Base 0), no field lines
+	f.Add([]byte{0x00, 0x00, 0xd1})             // static Indexed Field Line, :method GET (idx 17)
+	f.Add([]byte{0x00})                         // RIC present, Base byte missing
+	f.Add([]byte{0x00, 0x00, 0x80})             // dynamic Indexed ref with an empty table -> reject
+	f.Add([]byte{0xff, 0x00})                   // non-zero encoded RIC against a nil table -> reject
 	f.Add([]byte{0x00, 0x00, 0x20, 0x00, 0x00}) // literal name+value, both empty
 
 	f.Fuzz(func(_ *testing.T, src []byte) {
@@ -38,14 +38,14 @@ func FuzzDecodeFieldSection(f *testing.F) {
 
 		// Static-only profile: dynamic references and any non-zero RIC must be
 		// rejected, never panic.
-		NewDecoder().DecodeFieldSection(src, nil, emit) //nolint:errcheck // panic/hang is the only failure mode under test
+		NewDecoder().DecodeFieldSection(src, nil, emit)
 
 		// Populated dynamic table: exercise the dynamic-reference resolution paths.
 		dt := NewDynamicTable(4096)
 		if err := dt.setCapacity(4096); err == nil {
 			dt.insert([]byte("custom-key"), []byte("custom-value"))
 			dt.insert([]byte("x-foo"), []byte("bar"))
-			NewDecoder().DecodeFieldSection(src, dt, emit) //nolint:errcheck // panic/hang is the only failure mode under test
+			NewDecoder().DecodeFieldSection(src, dt, emit)
 		}
 	})
 }

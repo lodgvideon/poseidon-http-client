@@ -53,7 +53,7 @@ type RequestCompleteEvent struct {
 	// It excludes HTTP/2 frame overhead and any trailer HEADERS frame.
 	// BytesRecv is the total DATA payload received.
 	BytesSent, BytesRecv int64
-	Attempt                 int
+	Attempt              int
 }
 
 // RetryEvent carries metadata for OnRetry.

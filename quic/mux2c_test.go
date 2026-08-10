@@ -214,7 +214,7 @@ type ackPeer struct {
 	dcidLen int // the client's Destination Connection ID length (for ParseHeader)
 
 	rwake  chan struct{} // cap 1; kicked when toClient grows
-	writes chan []byte    // client Write pushes datagrams here
+	writes chan []byte   // client Write pushes datagrams here
 	closed chan struct{}
 }
 

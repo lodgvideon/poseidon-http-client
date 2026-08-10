@@ -15,7 +15,6 @@ import (
 func appendCmsg(oob []byte, level, typ int32, body []byte) []byte {
 	start := len(oob)
 	oob = append(oob, make([]byte, syscall.CmsgSpace(len(body)))...)
-	//nolint:gosec // overlay cmsghdr on its own buffer, as the send path does
 	h := (*syscall.Cmsghdr)(unsafe.Pointer(&oob[start]))
 	h.Level = level
 	h.Type = typ
@@ -105,15 +104,12 @@ func TestParseGROSegmentSize_MalformedYieldsZero(t *testing.T) {
 	hdrLen := syscall.CmsgLen(0)
 
 	zeroLen := append([]byte(nil), full...)
-	//nolint:gosec // deliberately corrupting a header for the test
 	(*syscall.Cmsghdr)(unsafe.Pointer(&zeroLen[0])).Len = 0
 
 	hugeLen := append([]byte(nil), full...)
-	//nolint:gosec // deliberately corrupting a header for the test
 	(*syscall.Cmsghdr)(unsafe.Pointer(&hugeLen[0])).SetLen(1 << 30)
 
 	shortLen := append([]byte(nil), full...)
-	//nolint:gosec // deliberately corrupting a header for the test
 	(*syscall.Cmsghdr)(unsafe.Pointer(&shortLen[0])).SetLen(hdrLen - 1)
 
 	cases := []struct {

@@ -22,7 +22,7 @@ type capturePriorityHandler struct {
 	streamIDs  []uint32
 }
 
-func (c *capturePriorityHandler) OnData(_ frame.FrameHeader, _ []byte, _ uint8) error  { return nil }
+func (c *capturePriorityHandler) OnData(_ frame.FrameHeader, _ []byte, _ uint8) error { return nil }
 func (c *capturePriorityHandler) OnHeaders(_ frame.FrameHeader, _ frame.HeaderBlock, _ *frame.Priority, _ uint8) error {
 	return nil
 }
@@ -36,10 +36,12 @@ func (c *capturePriorityHandler) OnPriority(fh frame.FrameHeader, p frame.Priori
 func (c *capturePriorityHandler) OnContinuation(_ frame.FrameHeader, _ frame.HeaderBlock) error {
 	return nil
 }
-func (c *capturePriorityHandler) OnSettings(_ frame.FrameHeader, _ frame.SettingsParams) error { return nil }
-func (c *capturePriorityHandler) OnSettingsAck(_ frame.FrameHeader) error                     { return nil }
-func (c *capturePriorityHandler) OnPing(_ frame.FrameHeader, _ [8]byte) error                 { return nil }
-func (c *capturePriorityHandler) OnRSTStream(_ frame.FrameHeader, _ frame.ErrCode) error      { return nil }
+func (c *capturePriorityHandler) OnSettings(_ frame.FrameHeader, _ frame.SettingsParams) error {
+	return nil
+}
+func (c *capturePriorityHandler) OnSettingsAck(_ frame.FrameHeader) error                { return nil }
+func (c *capturePriorityHandler) OnPing(_ frame.FrameHeader, _ [8]byte) error            { return nil }
+func (c *capturePriorityHandler) OnRSTStream(_ frame.FrameHeader, _ frame.ErrCode) error { return nil }
 func (c *capturePriorityHandler) OnGoAway(_ frame.FrameHeader, _ uint32, _ frame.ErrCode, _ []byte) error {
 	return nil
 }
@@ -55,7 +57,7 @@ func (c *capturePriorityHandler) OnPushPromise(_ frame.FrameHeader, _ uint32, _ 
 // noopHandler discards all frames.
 type noopHandler struct{}
 
-func (noopHandler) OnData(_ frame.FrameHeader, _ []byte, _ uint8) error  { return nil }
+func (noopHandler) OnData(_ frame.FrameHeader, _ []byte, _ uint8) error { return nil }
 func (noopHandler) OnHeaders(_ frame.FrameHeader, _ frame.HeaderBlock, _ *frame.Priority, _ uint8) error {
 	return nil
 }
@@ -64,9 +66,9 @@ func (noopHandler) OnContinuation(_ frame.FrameHeader, _ frame.HeaderBlock) erro
 	return nil
 }
 func (noopHandler) OnSettings(_ frame.FrameHeader, _ frame.SettingsParams) error { return nil }
-func (noopHandler) OnSettingsAck(_ frame.FrameHeader) error                     { return nil }
-func (noopHandler) OnPing(_ frame.FrameHeader, _ [8]byte) error                 { return nil }
-func (noopHandler) OnRSTStream(_ frame.FrameHeader, _ frame.ErrCode) error      { return nil }
+func (noopHandler) OnSettingsAck(_ frame.FrameHeader) error                      { return nil }
+func (noopHandler) OnPing(_ frame.FrameHeader, _ [8]byte) error                  { return nil }
+func (noopHandler) OnRSTStream(_ frame.FrameHeader, _ frame.ErrCode) error       { return nil }
 func (noopHandler) OnGoAway(_ frame.FrameHeader, _ uint32, _ frame.ErrCode, _ []byte) error {
 	return nil
 }
@@ -337,10 +339,12 @@ func (s *statusCaptureHandler) OnPriority(_ frame.FrameHeader, _ frame.Priority)
 func (s *statusCaptureHandler) OnContinuation(_ frame.FrameHeader, _ frame.HeaderBlock) error {
 	return nil
 }
-func (s *statusCaptureHandler) OnSettings(_ frame.FrameHeader, _ frame.SettingsParams) error { return nil }
-func (s *statusCaptureHandler) OnSettingsAck(_ frame.FrameHeader) error                     { return nil }
-func (s *statusCaptureHandler) OnPing(_ frame.FrameHeader, _ [8]byte) error                 { return nil }
-func (s *statusCaptureHandler) OnRSTStream(_ frame.FrameHeader, _ frame.ErrCode) error      { return nil }
+func (s *statusCaptureHandler) OnSettings(_ frame.FrameHeader, _ frame.SettingsParams) error {
+	return nil
+}
+func (s *statusCaptureHandler) OnSettingsAck(_ frame.FrameHeader) error                { return nil }
+func (s *statusCaptureHandler) OnPing(_ frame.FrameHeader, _ [8]byte) error            { return nil }
+func (s *statusCaptureHandler) OnRSTStream(_ frame.FrameHeader, _ frame.ErrCode) error { return nil }
 func (s *statusCaptureHandler) OnGoAway(_ frame.FrameHeader, _ uint32, _ frame.ErrCode, _ []byte) error {
 	return nil
 }

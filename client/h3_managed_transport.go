@@ -3,7 +3,6 @@ package client
 import (
 	"context"
 	"time"
-
 )
 
 // h3ManagedTransport adapts *h3ManagedPool to the internal transport interface.

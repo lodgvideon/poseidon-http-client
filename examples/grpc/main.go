@@ -36,7 +36,7 @@ func main() {
 		Conn: conn.ConnOptions{
 			Dialer: &conn.TLSDialer{Config: &tls.Config{
 				NextProtos:         []string{"h2"},
-				InsecureSkipVerify: *insecure, //nolint:gosec // opt-in via -insecure
+				InsecureSkipVerify: *insecure,
 			}},
 			// gRPC servers enforce a minimum ping interval — grpc-go's default
 			// is 5 minutes, and it answers anything faster with

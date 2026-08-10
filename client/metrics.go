@@ -24,10 +24,10 @@ type Counters struct {
 	Responses2xx    atomic.Int64 // completed with a 2xx status
 	ResponsesNon2xx atomic.Int64 // completed with a non-2xx status (1xx/3xx/4xx/5xx)
 	Retries         atomic.Int64
-	DialsAttempted    atomic.Int64
-	DialsFailed       atomic.Int64
-	ConnsClosed       atomic.Int64 // sum across all CloseReason values
-	GoAwaysReceived   atomic.Int64
+	DialsAttempted  atomic.Int64
+	DialsFailed     atomic.Int64
+	ConnsClosed     atomic.Int64 // sum across all CloseReason values
+	GoAwaysReceived atomic.Int64
 }
 
 // CountersSnapshot is a frozen, value-copyable view of Counters.

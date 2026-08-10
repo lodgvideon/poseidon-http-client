@@ -357,8 +357,8 @@ func (c *Conn) flushControl() error {
 	c.pendingCtrl = c.pendingCtrl[:0]
 	// A PATH_RESPONSE that rode along MUST go out in a >=1200-byte datagram even when
 	// a Do-side Recv flushes it (BREAK3), so replicate flush's padding decision.
-	padPath := false
-	padPath, c.pathRespPending = c.pathRespPending, false
+	padPath := c.pathRespPending
+	c.pathRespPending = false
 	// Credit grants are self-healing (a later grant supersedes a lost one), so they
 	// are not retransmitted. The frames are ack-eliciting.
 	pkt, err := c.sealPacket(spaceApp, frames, true, nil, padPath)
@@ -403,7 +403,10 @@ func (c *Conn) drainBuffered() error {
 			return c.fail(err)
 		}
 		if c.peerClose != nil {
-			return nil // a CONNECTION_CLOSE arrived in the burst: stop draining (§10.2.2)
+			//nolint:nilerr // Not the error path: recvGRO returned nil here.
+			// c.peerClose records a CONNECTION_CLOSE, so draining stops
+			// (§10.2.2) and the caller surfaces it.
+			return nil
 		}
 	}
 	return nil
