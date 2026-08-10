@@ -17,6 +17,8 @@ type singleConn struct {
 	addr     string
 	connOpts conn.ConnOptions
 	backoff  time.Duration
+	// dialTimeout bounds one dial attempt (ClientOptions.DialTimeout, defaulted).
+	dialTimeout time.Duration
 
 	// hooksRef points at Client.hooks; metrics is shared with Client.
 	hooksRef *atomic.Pointer[Hooks]
@@ -95,7 +97,9 @@ func (s *singleConn) acquireConn(ctx context.Context) (*conn.Conn, func(), error
 
 		dialStart := time.Now()
 		s.metrics.Counters.DialsAttempted.Add(1)
-		dialed, dialErr := conn.Dial(ctx, s.addr, s.connOpts)
+		dialCtx, dialCancel := dialCtx(ctx, s.dialTimeout)
+		dialed, dialErr := conn.Dial(dialCtx, s.addr, s.connOpts)
+		dialCancel()
 		dur := time.Since(dialStart)
 		s.metrics.Latency.Dial.Observe(dur)
 		if dialErr != nil {

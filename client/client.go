@@ -134,6 +134,17 @@ type ClientOptions struct {
 	// Used by TransportSingleConn. For TransportPool see PoolOptions.DialBackoff.
 	DialBackoff time.Duration
 
+	// DialTimeout bounds how long one dial attempt may block, and defaults to
+	// defaultDialTimeout. Used by the single-connection transports
+	// (TransportSingleConn, TransportH1SingleConn, TransportALPN, TransportH3);
+	// for TransportPool see PoolOptions.DialTimeout.
+	//
+	// Without it a host that accepts nothing and answers nothing held a dial open
+	// for as long as the caller's context allowed, while every pooled transport
+	// bounded the same dial at 30 seconds. Same lifecycle, two different answers
+	// depending on which transport the caller picked.
+	DialTimeout time.Duration
+
 	// Transport selects the transport strategy. Zero value =
 	// TransportSingleConn.
 	Transport TransportKind
@@ -401,11 +412,12 @@ func buildTransport(opts ClientOptions, hooksPtr *atomic.Pointer[Hooks], metrics
 	switch opts.Transport {
 	case TransportSingleConn:
 		return &singleConn{
-			addr:     opts.Addr,
-			connOpts: opts.ConnOpts,
-			backoff:  opts.DialBackoff,
-			hooksRef: hooksPtr,
-			metrics:  metrics,
+			addr:        opts.Addr,
+			connOpts:    opts.ConnOpts,
+			backoff:     opts.DialBackoff,
+			dialTimeout: dialTimeoutOrDefault(opts.DialTimeout),
+			hooksRef:    hooksPtr,
+			metrics:     metrics,
 		}, nil
 	case TransportPool:
 		return newPoolTransport(opts.Addr, opts.ConnOpts, *opts.Pool, hooksPtr, metrics), nil
@@ -421,28 +433,31 @@ func buildTransport(opts ClientOptions, hooksPtr *atomic.Pointer[Hooks], metrics
 		return &managedTransport{mp: mp}, nil
 	case TransportH1SingleConn:
 		return &h1singleConn{
-			addr:     opts.Addr,
-			dialer:   opts.ConnOpts.Dialer,
-			backoff:  opts.DialBackoff,
-			hooksRef: hooksPtr,
-			metrics:  metrics,
+			addr:        opts.Addr,
+			dialer:      opts.ConnOpts.Dialer,
+			backoff:     opts.DialBackoff,
+			dialTimeout: dialTimeoutOrDefault(opts.DialTimeout),
+			hooksRef:    hooksPtr,
+			metrics:     metrics,
 		}, nil
 	case TransportALPN:
 		return &alpnSingleConn{
-			addr:     opts.Addr,
-			connOpts: opts.ConnOpts,
-			backoff:  opts.DialBackoff,
-			hooksRef: hooksPtr,
-			metrics:  metrics,
+			addr:        opts.Addr,
+			connOpts:    opts.ConnOpts,
+			backoff:     opts.DialBackoff,
+			dialTimeout: dialTimeoutOrDefault(opts.DialTimeout),
+			hooksRef:    hooksPtr,
+			metrics:     metrics,
 		}, nil
 	case TransportH3:
 		return &singleH3Conn{
-			addr:      opts.Addr,
-			tlsConfig: opts.TLSConfig,
-			backoff:   opts.DialBackoff,
-			dialFn:    makeH3DialFn(opts.H3ConnOptions),
-			hooksRef:  hooksPtr,
-			metrics:   metrics,
+			addr:        opts.Addr,
+			tlsConfig:   opts.TLSConfig,
+			backoff:     opts.DialBackoff,
+			dialTimeout: dialTimeoutOrDefault(opts.DialTimeout),
+			dialFn:      makeH3DialFn(opts.H3ConnOptions),
+			hooksRef:    hooksPtr,
+			metrics:     metrics,
 		}, nil
 	case TransportH3Pool:
 		return &h3PoolTransport{
