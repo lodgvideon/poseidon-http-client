@@ -230,3 +230,15 @@ func TestDecoder_Reset(t *testing.T) {
 		t.Fatalf("Pending after Reset = %d", d.Pending())
 	}
 }
+
+// Reset drops all pending bytes, keeping the allocated buffer for reuse.
+//
+// Test-only. It lived in framing.go with no production caller, and as a method
+// on the real decoder it was a footgun: it clears buf and off without ending a
+// borrow, so calling it mid-borrow would strand a pooled slab and truncate a
+// chunk the decoder does not own. Nothing in the package wants that; the tests
+// that use it never borrow.
+func (d *decoder) Reset() {
+	d.buf = d.buf[:0]
+	d.off = 0
+}

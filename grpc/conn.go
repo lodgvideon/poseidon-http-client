@@ -153,7 +153,7 @@ const maxEventBuffer = 512
 // can hold per stream, so that product is what has to be bounded.
 func eventBufferFor(maxMessage int, maxFrameSize uint32) int {
 	if maxFrameSize == 0 {
-		maxFrameSize = 16384 // conn's advertised default
+		maxFrameSize = conn.DefaultMaxFrameSize
 	}
 	budget := maxMessage + eventBufferSlackBytes
 	if budget > maxEventBufferBytes {
@@ -398,6 +398,28 @@ func (o metadataCallOption) apply(c *callOptions) { c.md = append(c.md, o.md...)
 // headers — the same rule the positional argument already carries.
 func WithMetadata(md []conn.HeaderField) CallOption { return metadataCallOption{md: md} }
 
+// validateAllMetadata checks both metadata sources a call can carry.
+//
+// Caller-built metadata never went through AppendMetadata, so it is validated in
+// full here. Neither conn nor hpack checks field syntax on the send path, which
+// makes this the last gate before the wire — and it has to cover BOTH sources,
+// which is why the call options are resolved before the check rather than after.
+//
+// One function because it was two identical loops, and a validation rule added
+// to one of them would have left the other accepting what the first rejected.
+// The callOptions resolution above each call site stays inline: its
+// len(opts) > 0 guard is load-bearing for escape analysis (see applyCallOptions).
+func (cc *ClientConn) validateAllMetadata(md, optMD []conn.HeaderField) error {
+	for _, src := range [2][]conn.HeaderField{md, optMD} {
+		for i := range src {
+			if err := validMetadata(src[i].Name, src[i].Value, cc.allowReserved); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
 // NewStream opens a gRPC call on cc. method is the fully-qualified path,
 // "/package.Service/Method". md carries request metadata built with
 // AppendMetadata; it may be nil.
@@ -426,12 +448,8 @@ func (cc *ClientConn) NewStream(ctx context.Context, method string, md []conn.He
 	// which makes this the last gate before the wire — and it has to cover BOTH
 	// sources, which is why the options are resolved before the check rather than
 	// after it.
-	for _, src := range [2][]conn.HeaderField{md, co.md} {
-		for i := range src {
-			if err := validMetadata(src[i].Name, src[i].Value, cc.allowReserved); err != nil {
-				return nil, err
-			}
-		}
+	if err := cc.validateAllMetadata(md, co.md); err != nil {
+		return nil, err
 	}
 	return cc.openStream(ctx, method, md, co, nil, false)
 }
@@ -670,12 +688,8 @@ func (cc *ClientConn) InvokeInto(ctx context.Context, method string, req, dst []
 	// After the caller's options, so an explicit DiscardMetadata is not undone
 	// and nothing a caller sets is overridden by it either.
 	co.discardMD = true
-	for _, src := range [2][]conn.HeaderField{md, co.md} {
-		for i := range src {
-			if err := validMetadata(src[i].Name, src[i].Value, cc.allowReserved); err != nil {
-				return dst, err
-			}
-		}
+	if err := cc.validateAllMetadata(md, co.md); err != nil {
+		return dst, err
 	}
 
 	// The request goes out WITH the headers, in one transport write. A unary

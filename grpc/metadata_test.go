@@ -194,3 +194,11 @@ func TestDecodeTimeout_Malformed(t *testing.T) {
 		}
 	}
 }
+
+// encodeTimeout renders d as a grpc-timeout field value. Test-only: the
+// production path appends into a caller's buffer (appendTimeout) precisely to
+// avoid this allocation, so a string-returning twin belongs with the tests that
+// want the convenience.
+func encodeTimeout(d time.Duration) string {
+	return string(appendTimeout(nil, d))
+}

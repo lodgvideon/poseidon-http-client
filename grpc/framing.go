@@ -37,10 +37,6 @@ func AppendMessage(dst, msg []byte) ([]byte, error) {
 	return append(dst, msg...), nil
 }
 
-// messagePrefixLen is the gRPC message header: one compressed flag plus a
-// four-byte big-endian length.
-const messagePrefixLen = 5
-
 // AppendMessagePrefix appends only the five-byte header for a message of msgLen
 // bytes, leaving the message itself where it already is.
 //
@@ -54,13 +50,13 @@ func AppendMessagePrefix(dst []byte, msgLen int) ([]byte, error) {
 	if uint64(msgLen) > uint64(^uint32(0)) {
 		return nil, fmt.Errorf("%w: %d bytes", ErrMessageTooLarge, msgLen)
 	}
-	if cap(dst)-len(dst) < messagePrefixLen {
+	if cap(dst)-len(dst) < prefixLen {
 		// Size it exactly rather than letting append pick. This buffer is pooled
 		// and now only ever holds a prefix, so the one allocation it makes should
 		// be the right one — append growing 1 → 2 → 4 → 8 would both allocate more
 		// than needed and do it several times on the first use of each pooled
 		// buffer.
-		dst = make([]byte, 0, messagePrefixLen)
+		dst = make([]byte, 0, prefixLen)
 	}
 	dst = append(dst, 0) // compressed flag: identity
 	return binary.BigEndian.AppendUint32(dst, uint32(msgLen)), nil
@@ -221,9 +217,3 @@ func (d *decoder) Next() (msg []byte, ok bool, err error) {
 // message. A non-zero value when the stream ends means the peer truncated a
 // message mid-flight.
 func (d *decoder) Pending() int { return len(d.buf) - d.off }
-
-// Reset drops all pending bytes, keeping the allocated buffer for reuse.
-func (d *decoder) Reset() {
-	d.buf = d.buf[:0]
-	d.off = 0
-}
