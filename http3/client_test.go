@@ -458,7 +458,7 @@ func TestClient_DataBeforeHeaders(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := client.Do(context.Background(), &Request{Method: "GET", Scheme: "https", Authority: "h", Path: "/"}); err != ErrH3Control {
+	if _, _, err := client.Do(context.Background(), &Request{Method: "GET", Scheme: "https", Authority: "h", Path: "/"}); !errors.Is(err, ErrH3Control) {
 		t.Fatalf("err = %v, want ErrH3Control (connection error)", err)
 	}
 	if conn.closeCode != H3FrameUnexpected {
@@ -472,7 +472,7 @@ func TestConformance_RFC9114_Sec724_SettingsOnRequestStream(t *testing.T) {
 	settings := AppendFrameHeader(nil, FrameSettings, 0) // empty SETTINGS
 	conn := &fakeConn{req: &fakeStream{recvChunks: [][]byte{settings}, fin: true}}
 	client, _ := NewClientFake(conn, nil)
-	if _, _, err := client.Do(context.Background(), &Request{Method: "GET", Scheme: "https", Authority: "h", Path: "/"}); err != ErrH3Control {
+	if _, _, err := client.Do(context.Background(), &Request{Method: "GET", Scheme: "https", Authority: "h", Path: "/"}); !errors.Is(err, ErrH3Control) {
 		t.Fatalf("err = %v, want ErrH3Control", err)
 	}
 	if conn.closeCode != H3FrameUnexpected {
@@ -487,7 +487,7 @@ func TestConformance_RFC9114_Sec728_ReservedFrameOnRequestStream(t *testing.T) {
 	reserved := AppendFrameHeader(nil, 0x02, 0)
 	conn := &fakeConn{req: &fakeStream{recvChunks: [][]byte{reserved}, fin: true}}
 	client, _ := NewClientFake(conn, nil)
-	if _, _, err := client.Do(context.Background(), &Request{Method: "GET", Scheme: "https", Authority: "h", Path: "/"}); err != ErrH3Control {
+	if _, _, err := client.Do(context.Background(), &Request{Method: "GET", Scheme: "https", Authority: "h", Path: "/"}); !errors.Is(err, ErrH3Control) {
 		t.Fatalf("err = %v, want ErrH3Control", err)
 	}
 	if conn.closeCode != H3FrameUnexpected {
@@ -502,7 +502,7 @@ func TestConformance_RFC9114_Sec725_PushPromiseOnRequestStream(t *testing.T) {
 	pp := AppendFrameHeader(nil, FramePushPromise, 0)
 	conn := &fakeConn{req: &fakeStream{recvChunks: [][]byte{pp}, fin: true}}
 	client, _ := NewClientFake(conn, nil)
-	if _, _, err := client.Do(context.Background(), &Request{Method: "GET", Scheme: "https", Authority: "h", Path: "/"}); err != ErrH3Control {
+	if _, _, err := client.Do(context.Background(), &Request{Method: "GET", Scheme: "https", Authority: "h", Path: "/"}); !errors.Is(err, ErrH3Control) {
 		t.Fatalf("err = %v, want ErrH3Control", err)
 	}
 	if conn.closeCode != H3IDError {
@@ -519,7 +519,7 @@ func TestConformance_RFC9114_Sec71_TruncatedFrameAtStreamEnd(t *testing.T) {
 	truncated = append(truncated, []byte("abc")...)    // but only 3 arrive, then FIN
 	conn := &fakeConn{req: &fakeStream{recvChunks: [][]byte{append(headers, truncated...)}, fin: true}}
 	client, _ := NewClientFake(conn, nil)
-	if _, _, err := client.Do(context.Background(), &Request{Method: "GET", Scheme: "https", Authority: "h", Path: "/"}); err != ErrH3Control {
+	if _, _, err := client.Do(context.Background(), &Request{Method: "GET", Scheme: "https", Authority: "h", Path: "/"}); !errors.Is(err, ErrH3Control) {
 		t.Fatalf("err = %v, want ErrH3Control", err)
 	}
 	if conn.closeCode != H3FrameError {
@@ -534,7 +534,7 @@ func TestConformance_RFC9114_Sec71_TruncatedHeaderAtStreamEnd(t *testing.T) {
 	// One byte: a frame type (HEADERS) with no length varint, then FIN.
 	conn := &fakeConn{req: &fakeStream{recvChunks: [][]byte{{byte(FrameHeaders)}}, fin: true}}
 	client, _ := NewClientFake(conn, nil)
-	if _, _, err := client.Do(context.Background(), &Request{Method: "GET", Scheme: "https", Authority: "h", Path: "/"}); err != ErrH3Control {
+	if _, _, err := client.Do(context.Background(), &Request{Method: "GET", Scheme: "https", Authority: "h", Path: "/"}); !errors.Is(err, ErrH3Control) {
 		t.Fatalf("err = %v, want ErrH3Control", err)
 	}
 	if conn.closeCode != H3FrameError {
@@ -669,7 +669,7 @@ func TestConformance_RFC9204_Sec22_DecompressionFailedClosesConn(t *testing.T) {
 	headers := AppendHeaders(nil, []byte{0x00, 0x00, 0x80})
 	conn := &fakeConn{req: &fakeStream{recvChunks: [][]byte{headers}, fin: true}}
 	client, _ := NewClientFake(conn, nil)
-	if _, _, err := client.Do(context.Background(), &Request{Method: "GET", Scheme: "https", Authority: "h", Path: "/"}); err != ErrH3Control {
+	if _, _, err := client.Do(context.Background(), &Request{Method: "GET", Scheme: "https", Authority: "h", Path: "/"}); !errors.Is(err, ErrH3Control) {
 		t.Fatalf("err = %v, want ErrH3Control (connection closed)", err)
 	}
 	if conn.closeCode != H3QpackDecompressionFailed {

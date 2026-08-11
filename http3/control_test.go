@@ -46,7 +46,7 @@ func TestConformance_RFC9114_Sec621_MissingSettings(t *testing.T) {
 	server := &fakeStream{id: 3, recvChunks: [][]byte{bad}}
 	conn := &fakeConn{req: &fakeStream{}, acceptQ: []quicStream{server}}
 	client, _ := NewClientFake(conn, nil)
-	if err := client.serviceControl(); err != ErrH3Control {
+	if err := client.serviceControl(); !errors.Is(err, ErrH3Control) {
 		t.Fatalf("serviceControl = %v, want ErrH3Control", err)
 	}
 	if !conn.closed || conn.closeCode != H3MissingSettings {
@@ -158,7 +158,7 @@ func TestConformance_RFC9114_Sec728_ForbiddenControlFrame(t *testing.T) {
 	server := &fakeStream{id: 3, recvChunks: [][]byte{bad}}
 	conn := &fakeConn{req: &fakeStream{}, acceptQ: []quicStream{server}}
 	client, _ := NewClientFake(conn, nil)
-	if err := client.serviceControl(); err != ErrH3Control {
+	if err := client.serviceControl(); !errors.Is(err, ErrH3Control) {
 		t.Fatalf("serviceControl = %v, want ErrH3Control", err)
 	}
 	if conn.closeCode != H3FrameUnexpected {
@@ -174,7 +174,7 @@ func TestConformance_RFC9114_Sec52_GoAwayMustNotIncrease(t *testing.T) {
 	server := &fakeStream{id: 3, recvChunks: [][]byte{ctrl}}
 	conn := &fakeConn{req: &fakeStream{}, acceptQ: []quicStream{server}}
 	client, _ := NewClientFake(conn, nil)
-	if err := client.serviceControl(); err != ErrH3Control {
+	if err := client.serviceControl(); !errors.Is(err, ErrH3Control) {
 		t.Fatalf("serviceControl = %v, want ErrH3Control", err)
 	}
 	if conn.closeCode != H3IDError {
@@ -191,7 +191,7 @@ func TestConformance_RFC9114_Sec726_GoAwayNonRequestStreamID(t *testing.T) {
 		server := &fakeStream{id: 3, recvChunks: [][]byte{ctrl}}
 		conn := &fakeConn{req: &fakeStream{}, acceptQ: []quicStream{server}}
 		client, _ := NewClientFake(conn, nil)
-		if err := client.serviceControl(); err != ErrH3Control {
+		if err := client.serviceControl(); !errors.Is(err, ErrH3Control) {
 			t.Fatalf("GOAWAY(%d): serviceControl = %v, want ErrH3Control", badID, err)
 		}
 		if conn.closeCode != H3IDError {
@@ -207,7 +207,7 @@ func TestConformance_RFC9114_Sec723_CancelPushRejected(t *testing.T) {
 	server := &fakeStream{id: 3, recvChunks: [][]byte{serverControl(nil, AppendCancelPush(nil, 0)...)}}
 	conn := &fakeConn{req: &fakeStream{}, acceptQ: []quicStream{server}}
 	client, _ := NewClientFake(conn, nil)
-	if err := client.serviceControl(); err != ErrH3Control {
+	if err := client.serviceControl(); !errors.Is(err, ErrH3Control) {
 		t.Fatalf("serviceControl = %v, want ErrH3Control", err)
 	}
 	if conn.closeCode != H3IDError {
@@ -222,7 +222,7 @@ func TestConformance_RFC9114_Sec71_CancelPushMalformed(t *testing.T) {
 	server := &fakeStream{id: 3, recvChunks: [][]byte{serverControl(nil, bad...)}}
 	conn := &fakeConn{req: &fakeStream{}, acceptQ: []quicStream{server}}
 	client, _ := NewClientFake(conn, nil)
-	if err := client.serviceControl(); err != ErrH3Control {
+	if err := client.serviceControl(); !errors.Is(err, ErrH3Control) {
 		t.Fatalf("serviceControl = %v, want ErrH3Control", err)
 	}
 	if conn.closeCode != H3FrameError {
@@ -236,7 +236,7 @@ func TestConformance_RFC9114_Sec625_PushStreamRejected(t *testing.T) {
 	push := &fakeStream{id: 3, recvChunks: [][]byte{{0x01}}} // stream type 0x01 = push
 	conn := &fakeConn{req: &fakeStream{}, acceptQ: []quicStream{push}}
 	client, _ := NewClientFake(conn, nil)
-	if err := client.serviceControl(); err != ErrH3Control {
+	if err := client.serviceControl(); !errors.Is(err, ErrH3Control) {
 		t.Fatalf("serviceControl = %v, want ErrH3Control", err)
 	}
 	if conn.closeCode != H3IDError {
@@ -251,7 +251,7 @@ func TestClient_ControlFrameTooLarge(t *testing.T) {
 	server := &fakeStream{id: 3, recvChunks: [][]byte{serverControl(nil, huge...)}}
 	conn := &fakeConn{req: &fakeStream{}, acceptQ: []quicStream{server}}
 	client, _ := NewClientFake(conn, nil)
-	if err := client.serviceControl(); err != ErrH3Control {
+	if err := client.serviceControl(); !errors.Is(err, ErrH3Control) {
 		t.Fatalf("serviceControl = %v, want ErrH3Control", err)
 	}
 	if conn.closeCode != H3ExcessiveLoad {
@@ -266,7 +266,7 @@ func TestConformance_RFC9114_Sec621_ControlStreamClosed(t *testing.T) {
 	server := &fakeStream{id: 3, recvChunks: [][]byte{serverControl([]Setting{{SettingMaxFieldSectionSize, 16384}})}, fin: true}
 	conn := &fakeConn{req: &fakeStream{}, acceptQ: []quicStream{server}}
 	client, _ := NewClientFake(conn, nil)
-	if err := client.serviceControl(); err != ErrH3Control {
+	if err := client.serviceControl(); !errors.Is(err, ErrH3Control) {
 		t.Fatalf("serviceControl = %v, want ErrH3Control", err)
 	}
 	if conn.closeCode != H3ClosedCriticalStream {
@@ -281,7 +281,7 @@ func TestConformance_RFC9204_Sec42_QPACKStreamClosed(t *testing.T) {
 	enc := &fakeStream{id: 7, recvChunks: [][]byte{appendV(nil, StreamTypeQPACKEncoder)}, fin: true}
 	conn := &fakeConn{req: &fakeStream{}, acceptQ: []quicStream{enc}}
 	client, _ := NewClientFake(conn, nil)
-	if err := client.serviceControl(); err != ErrH3Control {
+	if err := client.serviceControl(); !errors.Is(err, ErrH3Control) {
 		t.Fatalf("serviceControl = %v, want ErrH3Control", err)
 	}
 	if conn.closeCode != H3ClosedCriticalStream {
@@ -296,7 +296,7 @@ func TestConformance_RFC9204_Sec42_DuplicateQPACKStream(t *testing.T) {
 	s2 := &fakeStream{id: 11, recvChunks: [][]byte{appendV(nil, StreamTypeQPACKEncoder)}}
 	conn := &fakeConn{req: &fakeStream{}, acceptQ: []quicStream{s1, s2}}
 	client, _ := NewClientFake(conn, nil)
-	if err := client.serviceControl(); err != ErrH3Control {
+	if err := client.serviceControl(); !errors.Is(err, ErrH3Control) {
 		t.Fatalf("serviceControl = %v, want ErrH3Control", err)
 	}
 	if conn.closeCode != H3StreamCreationError {

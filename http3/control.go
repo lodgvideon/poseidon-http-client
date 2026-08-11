@@ -355,8 +355,13 @@ func (c *Client) readControl() error {
 // connError sends a CONNECTION_CLOSE with an HTTP/3 error code for a connection
 // error detected while servicing a stream — a control-stream violation (§6.2.1,
 // §5.2) or a frame that may not appear on a request stream (§7.2) — and returns
-// ErrH3Control.
+// it as a *H3ConnError.
+//
+// The code used to go on the wire and nowhere else: every violation returned the
+// bare ErrH3Control sentinel, so nothing above this layer could tell a peer's
+// framing bug from a local QPACK failure. errors.Is(err, ErrH3Control) still
+// matches, so only a direct == comparison had to change.
 func (c *Client) connError(code uint64) error {
 	_ = c.conn.CloseWithError(true, code, "")
-	return ErrH3Control
+	return &H3ConnError{Code: code}
 }

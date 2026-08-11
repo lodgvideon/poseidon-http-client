@@ -1,6 +1,10 @@
 package http3
 
-import "testing"
+import (
+	"errors"
+
+	"testing"
+)
 
 // TestConformance_RFC9204_Sec42_DecoderStreamCoalescedBytesNotDropped pins that
 // decoder-stream instruction bytes arriving COALESCED with the stream-type varint
@@ -28,7 +32,7 @@ func TestConformance_RFC9204_Sec42_DecoderStreamCoalescedBytesNotDropped(t *test
 	}
 
 	serr := client.serviceControl()
-	if serr != ErrH3Control {
+	if !errors.Is(serr, ErrH3Control) {
 		t.Fatalf("serviceControl = %v, want ErrH3Control — a coalesced Insert Count "+
 			"Increment past the insert count is a decoder-stream error (RFC 9204 §4.4.3), "+
 			"observable only if the coalesced bytes were not dropped", serr)

@@ -2,6 +2,7 @@ package http3
 
 import (
 	"context"
+	"errors"
 	"testing"
 
 	"github.com/lodgvideon/poseidon-http-client/qpack"
@@ -79,7 +80,7 @@ func TestClient_MessageOrderErrors(t *testing.T) {
 			t.Fatal(err)
 		}
 		_, _, err = client.Do(context.Background(), &Request{Method: "GET", Scheme: "https", Authority: "e.com", Path: "/"})
-		if err != ErrH3Control {
+		if !errors.Is(err, ErrH3Control) {
 			t.Fatalf("%s: err = %v, want ErrH3Control (connection error)", tc.name, err)
 		}
 		if conn.closeCode != H3FrameUnexpected {

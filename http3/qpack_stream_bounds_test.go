@@ -1,6 +1,7 @@
 package http3
 
 import (
+	"errors"
 	"testing"
 
 	"github.com/lodgvideon/poseidon-http-client/hpack"
@@ -66,7 +67,7 @@ func TestConformance_RFC9204_Sec42_EncoderStreamDribbleBounded(t *testing.T) {
 	}
 
 	serr := driveServiceControl(t, client, len(chunks))
-	if serr != ErrH3Control {
+	if !errors.Is(serr, ErrH3Control) {
 		t.Fatalf("serviceControl = %v after the server dribbled %d bytes of a declared 2 GiB literal, "+
 			"want ErrH3Control; the retained qpackEncBuf grew to %d bytes",
 			serr, dribble*passes, len(client.qpackEncBuf))
@@ -137,7 +138,7 @@ func TestConformance_RFC9204_Sec44_DecoderStreamTailIsSelfBounding(t *testing.T)
 				i, got, maxDecoderTail)
 		}
 	}
-	if serr != ErrH3Control {
+	if !errors.Is(serr, ErrH3Control) {
 		t.Fatalf("serviceControl = %v, want ErrH3Control: a never-ending prefix integer must be "+
 			"a typed error, not an ever-growing buffer (tail %d bytes)", serr, len(client.qpackDecBuf))
 	}

@@ -50,6 +50,66 @@ var ErrGoAway = errors.New("http3: server is going away")
 // already been sent.
 var ErrH3Control = errors.New("http3: connection error")
 
+// H3ConnError is a connection-level HTTP/3 error carrying the code that was put
+// on the wire (RFC 9114 §8.1) — H3_FRAME_ERROR, H3_SETTINGS_ERROR,
+// QPACK_DECOMPRESSION_FAILED and the rest.
+//
+// Every one of those used to collapse into the bare ErrH3Control sentinel, so a
+// peer's protocol violation and a local QPACK failure were indistinguishable to
+// a pool, a retry policy, a metric or a test — the code existed only on the wire
+// and nowhere in the returned error. The HTTP/2 engine types the same thing
+// (conn.ConnError), and this package already types the stream-level case
+// (StreamResetError).
+//
+// It matches errors.Is(err, ErrH3Control), so code written against the sentinel
+// keeps working; only a direct == comparison has to change.
+type H3ConnError struct{ Code uint64 }
+
+// Error implements error.
+func (e *H3ConnError) Error() string {
+	if name := h3ErrorCodeName(e.Code); name != "" {
+		return fmt.Sprintf("http3: connection error %s (%#x)", name, e.Code)
+	}
+	return fmt.Sprintf("http3: connection error %#x", e.Code)
+}
+
+// Is reports whether target is ErrH3Control, so errors.Is against the sentinel
+// still matches a typed connection error.
+func (e *H3ConnError) Is(target error) bool { return target == ErrH3Control }
+
+// h3ErrorCodeName returns the RFC 9114 §8.1 name for a known code, or "".
+func h3ErrorCodeName(code uint64) string {
+	switch code {
+	case H3NoError:
+		return "H3_NO_ERROR"
+	case H3InternalError:
+		return "H3_INTERNAL_ERROR"
+	case H3StreamCreationError:
+		return "H3_STREAM_CREATION_ERROR"
+	case H3ClosedCriticalStream:
+		return "H3_CLOSED_CRITICAL_STREAM"
+	case H3FrameUnexpected:
+		return "H3_FRAME_UNEXPECTED"
+	case H3FrameError:
+		return "H3_FRAME_ERROR"
+	case H3ExcessiveLoad:
+		return "H3_EXCESSIVE_LOAD"
+	case H3IDError:
+		return "H3_ID_ERROR"
+	case H3SettingsErrorCode:
+		return "H3_SETTINGS_ERROR"
+	case H3MissingSettings:
+		return "H3_MISSING_SETTINGS"
+	case H3RequestRejected:
+		return "H3_REQUEST_REJECTED"
+	case H3RequestCancelled:
+		return "H3_REQUEST_CANCELLED"
+	case H3MessageError:
+		return "H3_MESSAGE_ERROR"
+	}
+	return ""
+}
+
 // HTTP/3 error codes (RFC 9114 §8.1), carried in the QUIC application
 // CONNECTION_CLOSE frame.
 const (

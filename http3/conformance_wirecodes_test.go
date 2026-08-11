@@ -1,6 +1,7 @@
 package http3
 
 import (
+	"errors"
 	"testing"
 )
 
@@ -39,7 +40,7 @@ func TestConformance_RFC9114_Sec724_DuplicateServerSettingIsSettingsError(t *tes
 		t.Fatal(err)
 	}
 
-	if err := client.serviceControl(); err != ErrH3Control {
+	if err := client.serviceControl(); !errors.Is(err, ErrH3Control) {
 		t.Fatalf("serviceControl = %v, want ErrH3Control", err)
 	}
 	if !conn.closed {
@@ -77,7 +78,7 @@ func TestConformance_RFC9204_Sec43_MalformedEncoderInstructionIsEncoderStreamErr
 		t.Fatal(err)
 	}
 
-	if err := client.serviceControl(); err != ErrH3Control {
+	if err := client.serviceControl(); !errors.Is(err, ErrH3Control) {
 		t.Fatalf("serviceControl = %v, want ErrH3Control", err)
 	}
 	if !conn.closed {
