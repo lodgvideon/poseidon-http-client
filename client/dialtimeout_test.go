@@ -2,6 +2,7 @@ package client
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
 	"testing"
 	"time"
@@ -115,5 +116,75 @@ func TestSingleConn_DialTimeoutSurfacesAsAnError(t *testing.T) {
 	}
 	if !errors.Is(err, context.DeadlineExceeded) {
 		t.Logf("dial error is %v", err) // wrapped in a *DialError; the type is the contract
+	}
+}
+
+// The bound above is pinned for the HTTP/2 single connection only, and the fix
+// it guards landed in all three single-connection transports. That asymmetry is
+// how this family of divergences starts: one sibling carries the test, the other
+// two carry the behaviour until somebody edits them.
+//
+// So the same gate, for the other two.
+
+// TestH1SingleConn_DialIsBoundedByDialTimeout is the HTTP/1.1 sibling.
+func TestH1SingleConn_DialIsBoundedByDialTimeout(t *testing.T) {
+	s := &h1singleConn{
+		addr:        "black.hole:0",
+		dialer:      &hangingDialer{release: make(chan struct{})},
+		metrics:     &Metrics{},
+		dialTimeout: 150 * time.Millisecond,
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+
+	start := time.Now()
+	_, _, _, err := s.openExchange(ctx)
+	elapsed := time.Since(start)
+
+	if err == nil {
+		t.Fatal("openExchange against a black-hole host returned no error")
+	}
+	if elapsed > 5*time.Second {
+		t.Errorf("the dial ran for %v against a 150ms DialTimeout — it is bounded by the "+
+			"caller's context instead", elapsed)
+	}
+	if ctx.Err() != nil {
+		t.Error("the caller's context expired, so this measured the caller's deadline " +
+			"rather than the dial timeout")
+	}
+}
+
+// TestSingleH3Conn_DialIsBoundedByDialTimeout is the HTTP/3 sibling. It injects
+// a dialFn that blocks until its context is done, which is what a black-holed
+// QUIC handshake looks like from here.
+func TestSingleH3Conn_DialIsBoundedByDialTimeout(t *testing.T) {
+	s := &singleH3Conn{
+		addr:        "black.hole:0",
+		metrics:     &Metrics{},
+		dialTimeout: 150 * time.Millisecond,
+		dialFn: func(ctx context.Context, _ string, _ *tls.Config) (h3Client, error) {
+			<-ctx.Done()
+			return nil, ctx.Err()
+		},
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+
+	start := time.Now()
+	_, derr := s.dial(ctx)
+	elapsed := time.Since(start)
+
+	if derr == nil {
+		t.Fatal("dial against a black-hole host returned no error")
+	}
+	if elapsed > 5*time.Second {
+		t.Errorf("the dial ran for %v against a 150ms DialTimeout — it is bounded by the "+
+			"caller's context instead", elapsed)
+	}
+	if ctx.Err() != nil {
+		t.Error("the caller's context expired, so this measured the caller's deadline " +
+			"rather than the dial timeout")
 	}
 }

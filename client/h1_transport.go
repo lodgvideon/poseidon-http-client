@@ -286,27 +286,20 @@ func (s *h1singleConn) acquireConn(ctx context.Context) (*http1.Conn, error) {
 		ch := s.dialing
 		s.mu.Unlock()
 
-		dialStart := time.Now()
-		s.metrics.Counters.DialsAttempted.Add(1)
-		dctx, dcancel := dialCtx(ctx, s.dialTimeout)
-		nc, dialErr := s.dialer.Dial(dctx, s.addr)
-		dcancel()
-		if dialErr == nil {
-			if err := assertH1Conn(nc); err != nil {
-				_ = nc.Close()
-				nc, dialErr = nil, err
-			}
-		}
-		dur := time.Since(dialStart)
-		s.metrics.Latency.Dial.Observe(dur)
-		if dialErr != nil {
-			s.metrics.Counters.DialsFailed.Add(1)
-		}
-		if hr := s.hooksRef; hr != nil {
-			if h := hr.Load(); h != nil && h.OnDial != nil {
-				h.OnDial(DialEvent{Addr: s.addr, Err: dialErr, Duration: dur})
-			}
-		}
+		// assertH1Conn runs inside the timed section: a peer that answered h2 has
+		// cost a real dial, so the hook must see that attempt fail.
+		nc, dialErr := dialObserved(ctx, s.addr, s.dialTimeout, s.metrics, s.hooksRef,
+			func(dctx context.Context) (net.Conn, error) {
+				c, err := s.dialer.Dial(dctx, s.addr)
+				if err != nil {
+					return nil, err
+				}
+				if aerr := assertH1Conn(c); aerr != nil {
+					_ = c.Close()
+					return nil, aerr
+				}
+				return c, nil
+			})
 
 		s.mu.Lock()
 		s.lastDialAt = time.Now()
