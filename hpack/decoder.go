@@ -74,71 +74,21 @@ func (d *Decoder) guardedVisitor(visit FieldVisitor) FieldVisitor {
 	}
 }
 
+// decodeFragment decodes every representation in src, one after another.
+//
+// The representation switch itself lives in decodeOne. It used to live here too,
+// byte for byte — the same five cases (§6.1 indexed, §6.2.1, §6.3 size update,
+// §6.2.3 never-indexed, §6.2.2 without-indexing) written twice, differing only in
+// loop-versus-single control flow, with a comment in one pointing at the other as
+// the place to keep in sync by hand. A new representation, or a fix to a check,
+// had to land in both.
 func (d *Decoder) decodeFragment(src []byte, visit FieldVisitor) error {
 	for len(src) > 0 {
-		b := src[0]
-		switch {
-		case b&0x80 != 0:
-			// 6.1: indexed.
-			idx, n, err := DecodeInteger(src, 7)
-			if err != nil {
-				return err
-			}
-			src = src[n:]
-			name, value, err := d.lookup(idx)
-			if err != nil {
-				return err
-			}
-			if err := visit(HeaderField{Name: name, Value: value}); err != nil {
-				return err
-			}
-		case b&0xc0 == 0x40:
-			// 6.2.1: literal with incremental indexing.
-			name, value, n, err := d.parseLiteral(src, 6)
-			if err != nil {
-				return err
-			}
-			src = src[n:]
-			d.dt.add(name, value)
-			if err := visit(HeaderField{Name: name, Value: value}); err != nil {
-				return err
-			}
-		case b&0xe0 == 0x20:
-			// 6.3: dynamic table size update.
-			n, consumed, err := DecodeInteger(src, 5)
-			if err != nil {
-				return err
-			}
-			src = src[consumed:]
-			if uint32(n) > d.maxLocal {
-				return ErrTableSizeUpdate
-			}
-			d.dt.setMaxSize(uint32(n))
-		case b&0xf0 == 0x10:
-			// 6.2.3: never indexed.
-			name, value, n, err := d.parseLiteral(src, 4)
-			if err != nil {
-				return err
-			}
-			src = src[n:]
-			if err := visit(HeaderField{Name: name, Value: value, Indexing: IndexNever}); err != nil {
-				return err
-			}
-		case b&0xf0 == 0x00:
-			// 6.2.2: literal without indexing. Reported as IndexWithout so the
-			// representation the peer chose survives the decode; before
-			// IndexingMode existed this was indistinguishable from §6.2.1.
-			name, value, n, err := d.parseLiteral(src, 4)
-			if err != nil {
-				return err
-			}
-			src = src[n:]
-			if err := visit(HeaderField{Name: name, Value: value, Indexing: IndexWithout}); err != nil {
-				return err
-			}
-		default:
-			return ErrInvalidPrefix
+		n, err := d.decodeOne(src, visit)
+		if err != nil {
+			return err
 		}
+		src = src[n:]
 	}
 	return nil
 }
@@ -310,7 +260,9 @@ func (d *Decoder) decodeOne(src []byte, visit FieldVisitor) (int, error) {
 		}
 		return n, nil
 	case b&0xf0 == 0x00:
-		// 6.2.2: literal without indexing — see decodeFragment.
+		// 6.2.2: literal without indexing. Reported as IndexWithout so the
+		// representation the peer chose survives the decode; before IndexingMode
+		// existed this was indistinguishable from §6.2.1.
 		name, value, n, err := d.parseLiteral(src, 4)
 		if err != nil {
 			return 0, err
