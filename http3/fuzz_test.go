@@ -1,6 +1,7 @@
 package http3
 
 import (
+	"errors"
 	"testing"
 
 	"github.com/lodgvideon/poseidon-http-client/hpack"
@@ -63,7 +64,7 @@ func FuzzQPACKEncoderStreamBuffer(f *testing.F) {
 				continue
 			}
 			// Dead: the only error this path may produce is the typed connection error.
-			if err != ErrH3Control {
+			if !errors.Is(err, ErrH3Control) {
 				t.Fatalf("chunk %d: untyped error %v, want ErrH3Control", i, err)
 			}
 			if !conn.closed {
