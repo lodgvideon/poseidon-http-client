@@ -32,7 +32,7 @@ func TestStream_TerminalEmptyDataNeverShedsTheStream(t *testing.T) {
 	s.deliverEnd(StreamEvent{Type: EventData, EndStream: true}, true)
 
 	w.mu.Lock()
-	rst := w.rstCalls
+	rst := w.bestEffortRSTs
 	w.mu.Unlock()
 	if rst != 0 {
 		t.Fatalf("wrote %d RST_STREAM for a response the peer completed", rst)

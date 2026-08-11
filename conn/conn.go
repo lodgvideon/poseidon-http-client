@@ -444,7 +444,7 @@ func (c *Conn) reservePushedStream(id uint32) (*Stream, error) {
 
 // rstStream sends a RST_STREAM frame for the given stream ID.
 func (c *Conn) rstStream(id uint32, code frame.ErrCode) error {
-	return c.writeRSTStream(&Stream{id: id}, code)
+	return c.writeRSTStreamID(id, code)
 }
 
 // resetStreamOnError tears down the one stream a non-fatal *StreamError names
@@ -937,16 +937,29 @@ func (c *Conn) writeRSTStream(s *Stream, code frame.ErrCode) error {
 		c.releaseUnassignedInflight(s)
 		return nil
 	}
+	return c.writeRSTStreamID(s.id, code)
+}
+
+// writeRSTStreamID resets a stream by id. It is the primitive; the *Stream form
+// above is the wrapper that additionally handles a stream with no on-wire
+// identity yet.
+//
+// This way round because the id is all the frame needs. The other way round,
+// rstStream had to fabricate a &Stream{id: id} to call it — a struct that looks
+// like a live registered stream, is not one, allocates on the push-refusal path,
+// and would have been a real hazard the moment writeRSTStream read a second
+// field off it.
+func (c *Conn) writeRSTStreamID(id uint32, code frame.ErrCode) error {
 	if c.closed.Load() {
 		return ErrConnClosed
 	}
 	c.wmu.Lock()
 	defer c.wmu.Unlock()
-	if err := c.fr.WriteRSTStream(s.id, code); err != nil {
+	if err := c.fr.WriteRSTStream(id, code); err != nil {
 		return err
 	}
 	c.bumpFramesSent()
-	c.releaseInflight(s.id)
+	c.releaseInflight(id)
 	// Flush the RST_STREAM before the deferred Unlock releases wmu.
 	return c.flushWrite()
 }

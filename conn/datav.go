@@ -165,12 +165,7 @@ func (s *Stream) sendDataV(ctx context.Context, wantGen uint64, bufs [][]byte, e
 		return err
 	}
 	if endStream {
-		s.mu.Lock()
-		s.localEnded = true
-		s.mu.Unlock()
-		if c != nil {
-			c.markStreamDone(s.id)
-		}
+		s.endLocalAndRetire()
 	}
 	return nil
 }
@@ -210,10 +205,7 @@ func (s *Stream) sendHeadersAndDataV(ctx context.Context, wantGen uint64, fields
 		return err
 	}
 	if endStream {
-		s.mu.Lock()
-		s.localEnded = true
-		s.mu.Unlock()
-		c.markStreamDone(s.id)
+		s.endLocalAndRetire()
 	}
 	return nil
 }

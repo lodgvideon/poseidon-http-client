@@ -87,6 +87,20 @@ type streamWriter interface {
 	writeHeadersWithPriority(ctx context.Context, s *Stream, fields []header.Field, endStream bool, prio *frame.Priority) error
 	writeData(ctx context.Context, s *Stream, wantGen uint64, p []byte, endStream bool) error
 	writeRSTStream(s *Stream, code frame.ErrCode) error
+
+	// markStreamDone retires the stream's concurrency slot once its local side
+	// has ended. Reached by downcast until now, which meant a fake writer
+	// silently skipped it and every test built on one exercised a lifecycle
+	// production never runs: no slot release, no send-waiter wakeup, no recycle
+	// rendezvous. handler.go records the same pattern being purged from the
+	// dispatch path once already; this half regrew it.
+	markStreamDone(id uint32)
+
+	// writeRSTStreamBestEffort sends RST_STREAM under a short write deadline, for
+	// the fire-and-forget goroutine that cannot be allowed to block on a stuck
+	// transport. Same reason it belongs here: the downcast made it a no-op for a
+	// fake, so the overflow path under test was not the overflow path that ships.
+	writeRSTStreamBestEffort(s *Stream, code frame.ErrCode)
 }
 
 // Stream is one in-flight HTTP/2 stream.
@@ -621,11 +635,7 @@ func (s *Stream) pushLocked(e StreamEvent) bool {
 	go func() {
 		// Use best-effort write with a 5-second deadline so the goroutine
 		// cannot hang indefinitely on a stuck transport (F-P0-04).
-		if c, ok := s.w.(*Conn); ok {
-			c.writeRSTStreamBestEffort(s, frame.ErrCodeCancel)
-		} else {
-			_ = s.w.writeRSTStream(s, frame.ErrCodeCancel)
-		}
+		s.w.writeRSTStreamBestEffort(s, frame.ErrCodeCancel)
 	}()
 	// Try to deliver EventReset via channel; if full, signal via resetSignal.
 	select {
@@ -748,12 +758,7 @@ func (s *Stream) sendHeadersWithPriority(ctx context.Context, wantGen uint64, fi
 		return err
 	}
 	if endStream {
-		s.mu.Lock()
-		s.localEnded = true
-		s.mu.Unlock()
-		if c, ok := s.w.(*Conn); ok {
-			c.markStreamDone(s.id)
-		}
+		s.endLocalAndRetire()
 	}
 	return nil
 }
@@ -795,14 +800,26 @@ func (s *Stream) sendData(ctx context.Context, wantGen uint64, p []byte, endStre
 		return err
 	}
 	if endStream {
-		s.mu.Lock()
-		s.localEnded = true
-		s.mu.Unlock()
-		if c, ok := s.w.(*Conn); ok {
-			c.markStreamDone(s.id)
-		}
+		s.endLocalAndRetire()
 	}
 	return nil
+}
+
+// endLocalAndRetire latches the local end of the stream and retires its slot,
+// reading the id in the SAME s.mu section that sets localEnded.
+//
+// The snapshot is the point. conn.go's write path documents the rule — read the
+// id and the lifetime together, because a struct whose local and remote sides
+// have both ended can be recycled and handed to another request between the two
+// reads — and sendHeadersAndData followed it while its three siblings read
+// s.id bare after unlocking. A reader could not tell proven-safe from oversight.
+// Now there is one place that does it, and it does it under the lock.
+func (s *Stream) endLocalAndRetire() {
+	s.mu.Lock()
+	s.localEnded = true
+	id := s.id
+	s.mu.Unlock()
+	s.w.markStreamDone(id)
 }
 
 // Recv blocks until the next event for this stream is ready, the stream
