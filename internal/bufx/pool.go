@@ -1,4 +1,4 @@
-package bytesx
+package bufx
 
 import "sync"
 

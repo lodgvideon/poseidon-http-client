@@ -1,4 +1,4 @@
-package bytesx
+package bufx
 
 import (
 	"bytes"
@@ -35,12 +35,12 @@ func TestStripPadding(t *testing.T) {
 		{
 			name:    "padlen_exceeds_payload",
 			raw:     []byte{0x05, 0xaa},
-			wantErr: ErrInvalidPadding,
+			wantErr: errInvalidPadding,
 		},
 		{
 			name:    "empty",
 			raw:     []byte{},
-			wantErr: ErrInvalidPadding,
+			wantErr: errInvalidPadding,
 		},
 	}
 	for _, tc := range cases {

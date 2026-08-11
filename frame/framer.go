@@ -5,7 +5,7 @@ import (
 	"errors"
 	"io"
 
-	"github.com/lodgvideon/poseidon-http-client/internal/bytesx"
+	"github.com/lodgvideon/poseidon-http-client/internal/bufx"
 )
 
 const defaultMaxFrameSize uint32 = 16384
@@ -73,7 +73,7 @@ type Framer struct {
 // finalization (slower than reuse). Connection layers SHOULD call
 // Close as part of their own shutdown.
 func NewFramer(w io.Writer, r io.Reader) *Framer {
-	rb := bytesx.GetReadBuf(int(defaultMaxFrameSize) + FrameHeaderSize)
+	rb := bufx.GetReadBuf(int(defaultMaxFrameSize) + FrameHeaderSize)
 	return &Framer{
 		w:                w,
 		r:                r,
@@ -91,7 +91,7 @@ func (f *Framer) Close() {
 		return
 	}
 	*f.readBufPtr = f.readBuf
-	bytesx.PutReadBuf(f.readBufPtr)
+	bufx.PutReadBuf(f.readBufPtr)
 	f.readBufPtr = nil
 	f.readBuf = nil
 }
@@ -736,7 +736,7 @@ func (f *Framer) dispatchData(fh FrameHeader, payload []byte, h Handler) error {
 	var padLen uint8
 	if fh.Flags&FlagDataPadded != 0 {
 		var err error
-		data, padLen, err = bytesx.StripPadding(payload)
+		data, padLen, err = bufx.StripPadding(payload)
 		if err != nil {
 			return padErr(err)
 		}
@@ -752,7 +752,7 @@ func (f *Framer) dispatchHeaders(fh FrameHeader, payload []byte, h Handler) erro
 	var padLen uint8
 	if fh.Flags&FlagHeadersPadded != 0 {
 		var err error
-		body, padLen, err = bytesx.StripPadding(payload)
+		body, padLen, err = bufx.StripPadding(payload)
 		if err != nil {
 			return padErr(err)
 		}
@@ -860,7 +860,7 @@ func (f *Framer) dispatchPushPromise(fh FrameHeader, payload []byte, h Handler) 
 	var padLen uint8
 	if fh.Flags&FlagPushPromisePadded != 0 {
 		var err error
-		body, padLen, err = bytesx.StripPadding(payload)
+		body, padLen, err = bufx.StripPadding(payload)
 		if err != nil {
 			return padErr(err)
 		}
