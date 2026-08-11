@@ -238,10 +238,30 @@ Activate the WORKTREE, not `…/poseidon-http-client`. Worktrees live under
 `.claude/worktrees/` INSIDE the repo, so activating the root indexes the main checkout
 plus every worktree and yields duplicate symbols for every file.
 
-`create_text_file` requires an active project. Serena's onboarding memories for this
-project (`core`, `tech_stack`, `suggested_commands`, `conventions`, `task_completion`)
-live in `.serena/memories/` and are read with `mcp__serena__read_memory`; start from
-`core`. Serena line numbers are **0-based**.
+Serena's onboarding memories for this project (`core`, `tech_stack`,
+`suggested_commands`, `conventions`, `task_completion`) live in `.serena/memories/` and
+are read with `mcp__serena__read_memory`; start from `core`. Serena line numbers are
+**0-based**.
+
+**Context is `claude-code`** (`.mcp.json` passes `--context claude-code`; the default is
+`desktop-app`, which is wrong for a CLI agent). That context disables the tools Claude
+Code already has, so these Serena tools are **NOT available**: `read_file`,
+`create_text_file`, `execute_shell_command`, `list_dir`, `find_file`,
+`search_for_pattern`. Use Read / Write / Bash / Glob / Grep for those. It also sets
+`structured_tool_output: false` to dodge a Claude Code escaping bug.
+
+Two consequences worth knowing:
+
+- The old workaround for the `replace_symbol_body` `var (...)` bug was "rewrite the whole
+  file with `create_text_file`" — that tool is gone under this context. Use `Write`.
+- `--project` is deliberately NOT passed in `.mcp.json`, because that file is shared by
+  every worktree and would pin them all to one. `activate_project` therefore stays
+  available and must be called each session (see above). Do not add `--project`: the
+  context carries `single_project: true`, which disables `activate_project` as soon as a
+  project is supplied at startup.
+
+Serena is pinned to tag `v1.7.0`. Bump it deliberately; an unpinned MCP can change its
+tool surface under you.
 
 **Go `name_path` patterns** (pass to `find_symbol`, `replace_symbol_body`, etc.):
 
@@ -269,13 +289,14 @@ Pass `relative_path` to restrict search to one file (e.g. `conn/conn.go`).
 | `find_referencing_symbols` | All call-sites / uses of symbol |
 | `find_implementations` | Concrete types satisfying interface |
 | `get_diagnostics_for_file` | LSP errors/warnings after edit |
-| `create_text_file` | Create or fully overwrite file |
-| `search_for_pattern` | Regex/literal search across files |
-| `find_file` | Locate file by name glob |
+| `replace_content` | Regex/literal replace when no symbol fits |
+
+For creating a file, searching text, or globbing a filename, use `Write`, `Grep` and
+`Glob` — the Serena equivalents are disabled by the `claude-code` context.
 
 **Known caveat**: `replace_symbol_body` on `var (...)` sentinel block
 strips `var()` wrapper, produces invalid syntax. Workaround:
-rewrite whole file with `create_text_file`.
+rewrite the whole file with `Write`.
 
 **Serena memory** — project-scoped notes persisting across sessions.
 Stored inside serena project, not Claude's memory system.
