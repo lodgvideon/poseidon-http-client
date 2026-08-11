@@ -75,7 +75,8 @@ func TestStatusFromTransport_KeepsTheCause(t *testing.T) {
 	if !errors.As(err, &st) {
 		t.Fatal("not a *Status")
 	}
-	if st.Unwrap() != conn.ErrConnClosed { //nolint:errorlint // identity is the point
+	// Identity, not errors.Is: Unwrap must hand back the very error it was given.
+	if st.Unwrap() != conn.ErrConnClosed {
 		t.Errorf("Unwrap = %v, want the original error", st.Unwrap())
 	}
 }
