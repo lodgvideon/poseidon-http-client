@@ -1,7 +1,7 @@
 package http3
 
 import (
-	"github.com/lodgvideon/poseidon-http-client/hpack"
+	"github.com/lodgvideon/poseidon-http-client/header"
 	"github.com/lodgvideon/poseidon-http-client/qpack"
 )
 
@@ -11,9 +11,9 @@ import (
 // that followed the body, both in receive order (RFC 9114 §4.1).
 type Response struct {
 	Status   int
-	Headers  []hpack.HeaderField
+	Headers  []header.Field
 	Interim  []*Response
-	Trailers []hpack.HeaderField
+	Trailers []header.Field
 }
 
 // DecodeResponseHeaders QPACK-decodes a HEADERS field section into a Response,
@@ -60,7 +60,7 @@ func DecodeResponseHeaders(dec *qpack.Decoder, dt *qpack.DynamicTable, fieldSect
 			return ErrH3Message
 		}
 		sawRegular = true
-		resp.Headers = append(resp.Headers, hpack.HeaderField{
+		resp.Headers = append(resp.Headers, header.Field{
 			Name:  append([]byte(nil), name...),
 			Value: append([]byte(nil), value...),
 		})
@@ -87,8 +87,8 @@ func DecodeResponseHeaders(dec *qpack.Decoder, dt *qpack.DynamicTable, fieldSect
 // referenced the dynamic table, so the caller must send a Section Acknowledgment
 // (RFC 9204 §4.4.1). It returns ErrH3Message for a rule violation, or
 // qpack.ErrDecompressionFailed if the field section itself is malformed.
-func DecodeTrailers(dec *qpack.Decoder, dt *qpack.DynamicTable, fieldSection []byte) ([]hpack.HeaderField, uint64, error) {
-	var fields []hpack.HeaderField
+func DecodeTrailers(dec *qpack.Decoder, dt *qpack.DynamicTable, fieldSection []byte) ([]header.Field, uint64, error) {
+	var fields []header.Field
 	err := dec.DecodeFieldSection(fieldSection, dt, func(name, value []byte) error {
 		if len(name) == 0 || name[0] == ':' {
 			return ErrH3Message // trailers carry no pseudo-headers (§4.3)
@@ -96,7 +96,7 @@ func DecodeTrailers(dec *qpack.Decoder, dt *qpack.DynamicTable, fieldSection []b
 		if !validFieldName(name) || !validFieldValue(value) || forbiddenResponseField(name) {
 			return ErrH3Message
 		}
-		fields = append(fields, hpack.HeaderField{
+		fields = append(fields, header.Field{
 			Name:  append([]byte(nil), name...),
 			Value: append([]byte(nil), value...),
 		})
@@ -126,7 +126,7 @@ func canHaveContent(status int, method string) bool {
 // single non-negative integer, or repeated fields that all agree (RFC 9110 §8.6);
 // a non-numeric value or conflicting repeats make it invalid, which the caller
 // treats as a malformed message.
-func responseContentLength(headers []hpack.HeaderField) (n int64, present, valid bool) {
+func responseContentLength(headers []header.Field) (n int64, present, valid bool) {
 	for _, h := range headers {
 		if string(h.Name) != "content-length" {
 			continue

@@ -3,7 +3,7 @@ package http3
 import (
 	"testing"
 
-	"github.com/lodgvideon/poseidon-http-client/hpack"
+	"github.com/lodgvideon/poseidon-http-client/header"
 	"github.com/lodgvideon/poseidon-http-client/qpack"
 )
 
@@ -42,7 +42,7 @@ func TestConformance_RFC9114_Sec431_AuthorityRequired(t *testing.T) {
 		t.Fatalf("https without :authority or Host: err = %v, want ErrH3Message", err)
 	}
 
-	withHost := &Request{Method: "GET", Scheme: "https", Path: "/", Headers: []hpack.HeaderField{hf("host", "example.com")}}
+	withHost := &Request{Method: "GET", Scheme: "https", Path: "/", Headers: []header.Field{hf("host", "example.com")}}
 	if _, err := withHost.EncodeHeaders(&enc, nil, ^uint64(0)); err != nil {
 		t.Fatalf("https with a Host header: err = %v, want nil", err)
 	}
@@ -67,17 +67,17 @@ func TestConformance_RFC9114_Sec431_AuthorityUserinfoAndHostMatch(t *testing.T) 
 		t.Fatalf(":authority with userinfo: err = %v, want ErrH3Message", err)
 	}
 	// A Host header disagreeing with :authority → malformed.
-	mismatch := &Request{Method: "GET", Scheme: "https", Authority: "a.com", Path: "/", Headers: []hpack.HeaderField{hf("host", "b.com")}}
+	mismatch := &Request{Method: "GET", Scheme: "https", Authority: "a.com", Path: "/", Headers: []header.Field{hf("host", "b.com")}}
 	if _, err := mismatch.EncodeHeaders(enc2(), nil, ^uint64(0)); err != ErrH3Message {
 		t.Fatalf("Host != :authority: err = %v, want ErrH3Message", err)
 	}
 	// An empty Host header → malformed.
-	emptyHost := &Request{Method: "GET", Scheme: "https", Authority: "a.com", Path: "/", Headers: []hpack.HeaderField{hf("host", "")}}
+	emptyHost := &Request{Method: "GET", Scheme: "https", Authority: "a.com", Path: "/", Headers: []header.Field{hf("host", "")}}
 	if _, err := emptyHost.EncodeHeaders(enc2(), nil, ^uint64(0)); err != ErrH3Message {
 		t.Fatalf("empty Host header: err = %v, want ErrH3Message", err)
 	}
 	// A Host header equal to :authority → accepted.
-	same := &Request{Method: "GET", Scheme: "https", Authority: "a.com", Path: "/", Headers: []hpack.HeaderField{hf("host", "a.com")}}
+	same := &Request{Method: "GET", Scheme: "https", Authority: "a.com", Path: "/", Headers: []header.Field{hf("host", "a.com")}}
 	if _, err := same.EncodeHeaders(enc2(), nil, ^uint64(0)); err != nil {
 		t.Fatalf("Host == :authority: err = %v, want nil", err)
 	}

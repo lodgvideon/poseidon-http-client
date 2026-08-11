@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/lodgvideon/poseidon-http-client/hpack"
+	"github.com/lodgvideon/poseidon-http-client/header"
 )
 
 // TestStream_CloseDuringTerminalDelivery_NoRace drives the window between the
@@ -55,7 +55,7 @@ func TestStream_CloseDuringTerminalDelivery_NoRace(t *testing.T) {
 		}
 		// endStream=true: the send side is done before any response arrives, so
 		// remoteEnded alone decides bothEnded.
-		if err := s.SendHeaders(ctx, []hpack.HeaderField{
+		if err := s.SendHeaders(ctx, []header.Field{
 			{Name: []byte(":method"), Value: []byte("GET")},
 			{Name: []byte(":scheme"), Value: []byte("https")},
 			{Name: []byte(":authority"), Value: []byte("example.com")},
@@ -123,7 +123,7 @@ func TestStream_CloseAfterDrain_StillRecycles(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewStream: %v", err)
 	}
-	if err := s.SendHeaders(ctx, []hpack.HeaderField{
+	if err := s.SendHeaders(ctx, []header.Field{
 		{Name: []byte(":method"), Value: []byte("GET")},
 		{Name: []byte(":scheme"), Value: []byte("https")},
 		{Name: []byte(":authority"), Value: []byte("example.com")},
@@ -193,7 +193,7 @@ func TestStream_RecycleUnderInFlightRecv_NoRace(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewStream: %v", err)
 	}
-	if err := s.SendHeaders(ctx, []hpack.HeaderField{
+	if err := s.SendHeaders(ctx, []header.Field{
 		{Name: []byte(":method"), Value: []byte("GET")},
 		{Name: []byte(":scheme"), Value: []byte("https")},
 		{Name: []byte(":authority"), Value: []byte("example.com")},

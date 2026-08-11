@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/lodgvideon/poseidon-http-client/hpack"
+	"github.com/lodgvideon/poseidon-http-client/header"
 )
 
 // A pooled keep-alive connection whose server reaps it between the checkout
@@ -40,7 +40,7 @@ func writeSimpleRequest(t *testing.T, ex *Exchange, peer net.Conn) {
 		buf := make([]byte, 4096)
 		_, _ = peer.Read(buf) // drain the request; content does not matter here
 	}()
-	fields := []hpack.HeaderField{
+	fields := []header.Field{
 		{Name: []byte(":method"), Value: []byte("GET")},
 		{Name: []byte(":path"), Value: []byte("/")},
 		{Name: []byte(":authority"), Value: []byte("example.test")},

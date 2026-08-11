@@ -3,6 +3,7 @@ package qpack
 import (
 	"errors"
 
+	"github.com/lodgvideon/poseidon-http-client/header"
 	"github.com/lodgvideon/poseidon-http-client/hpack"
 )
 
@@ -121,7 +122,7 @@ func (e *Encoder) InsertCount() uint64 {
 // additionally references acknowledged dynamic-table entries and inserts new
 // repeated entries, producing encoder-stream instructions retrievable with
 // DrainEncoderInstructions. Field names MUST already be lowercase (RFC 9114 §4.2).
-func (e *Encoder) EncodeFieldSection(dst []byte, fields []hpack.HeaderField) []byte {
+func (e *Encoder) EncodeFieldSection(dst []byte, fields []header.Field) []byte {
 	if e.dt == nil {
 		dst = append(dst, 0x00, 0x00)
 		return appendStaticFieldLines(dst, fields)
@@ -132,7 +133,7 @@ func (e *Encoder) EncodeFieldSection(dst []byte, fields []hpack.HeaderField) []b
 // appendStaticFieldLines writes each field with a static or literal representation
 // (RFC 9204 §4.5.2/§4.5.4/§4.5.6). Shared by the static-only profile and the
 // dynamic profile's fallback for a field it does not reference dynamically.
-func appendStaticFieldLines(dst []byte, fields []hpack.HeaderField) []byte {
+func appendStaticFieldLines(dst []byte, fields []header.Field) []byte {
 	for i := range fields {
 		dst = appendStaticFieldLine(dst, fields[i].Name, fields[i].Value, fields[i].Sensitive())
 	}
@@ -177,7 +178,7 @@ func staticNameRefByte(sensitive bool) byte {
 // Count and Base (RFC 9204 §4.5.1). Base is chosen equal to the Required Insert
 // Count, so every dynamic reference is a plain Base-relative index (no post-Base
 // forms are needed).
-func (e *Encoder) encodeDynamicFieldSection(dst []byte, fields []hpack.HeaderField) []byte {
+func (e *Encoder) encodeDynamicFieldSection(dst []byte, fields []header.Field) []byte {
 	e.reps = e.reps[:0]
 	var maxRefAbs uint64
 	haveRef := false

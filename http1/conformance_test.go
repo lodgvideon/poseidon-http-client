@@ -14,7 +14,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/lodgvideon/poseidon-http-client/hpack"
+	"github.com/lodgvideon/poseidon-http-client/header"
 	"github.com/lodgvideon/poseidon-http-client/http1"
 )
 
@@ -45,7 +45,7 @@ func wireExchange(t *testing.T, method, serverResponse string) *http1.Exchange {
 
 	c := http1.NewConn(client)
 	ex := c.NewExchange()
-	fields := []hpack.HeaderField{
+	fields := []header.Field{
 		{Name: []byte(":method"), Value: []byte(method)},
 		{Name: []byte(":path"), Value: []byte("/")},
 		{Name: []byte(":authority"), Value: []byte("example.com")},
@@ -257,7 +257,7 @@ func TestConformance_RFC2616_Sec14_23_HostHeaderInRequest(t *testing.T) {
 
 	c := http1.NewConn(client)
 	ex := c.NewExchange()
-	fields := []hpack.HeaderField{
+	fields := []header.Field{
 		{Name: []byte(":method"), Value: []byte("GET")},
 		{Name: []byte(":path"), Value: []byte("/resource")},
 		{Name: []byte(":authority"), Value: []byte("example.com")},

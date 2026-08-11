@@ -14,7 +14,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/lodgvideon/poseidon-http-client/hpack"
+	"github.com/lodgvideon/poseidon-http-client/header"
 
 	"github.com/lodgvideon/poseidon-http-client/quic"
 )
@@ -149,7 +149,7 @@ func dialTimeout() time.Duration {
 
 // findHeader returns the value of the named response header (case-insensitive)
 // and whether it was present.
-func findHeader(headers []hpack.HeaderField, name string) (string, bool) {
+func findHeader(headers []header.Field, name string) (string, bool) {
 	for _, h := range headers {
 		if strings.EqualFold(string(h.Name), name) {
 			return string(h.Value), true

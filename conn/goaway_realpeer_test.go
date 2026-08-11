@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/lodgvideon/poseidon-http-client/hpack"
+	"github.com/lodgvideon/poseidon-http-client/header"
 )
 
 // TestConformance_RFC7540_Sec68_RealPeerGoAwayPartition pins RFC 7540 §6.8
@@ -57,7 +57,7 @@ func TestConformance_RFC7540_Sec68_RealPeerGoAwayPartition(t *testing.T) {
 			close(proceed)
 			t.Fatalf("NewStream %d: %v", i, err)
 		}
-		if err := s.SendHeaders(ctx, []hpack.HeaderField{
+		if err := s.SendHeaders(ctx, []header.Field{
 			{Name: []byte(":method"), Value: []byte("GET")},
 			{Name: []byte(":scheme"), Value: []byte("https")},
 			{Name: []byte(":authority"), Value: []byte("example.com")},

@@ -6,7 +6,7 @@ import (
 	"net"
 	"testing"
 
-	"github.com/lodgvideon/poseidon-http-client/hpack"
+	"github.com/lodgvideon/poseidon-http-client/header"
 	"github.com/lodgvideon/poseidon-http-client/http1"
 )
 
@@ -121,7 +121,7 @@ func TestConformance_RFC9112_Sec6_1_NoChunkedToObservedHttp10Peer(t *testing.T) 
 
 	c := http1.NewConn(cli)
 	first := c.NewExchange()
-	head := []hpack.HeaderField{
+	head := []header.Field{
 		{Name: []byte(":method"), Value: []byte("GET")},
 		{Name: []byte(":path"), Value: []byte("/")},
 		{Name: []byte(":authority"), Value: []byte("example.com")},
@@ -142,7 +142,7 @@ func TestConformance_RFC9112_Sec6_1_NoChunkedToObservedHttp10Peer(t *testing.T) 
 	// Same connection, a bodied request with no Content-Length — which would be
 	// framed chunked.
 	second := c.NewExchange()
-	err = second.WriteRequest(context.Background(), []hpack.HeaderField{
+	err = second.WriteRequest(context.Background(), []header.Field{
 		{Name: []byte(":method"), Value: []byte("POST")},
 		{Name: []byte(":path"), Value: []byte("/")},
 		{Name: []byte(":authority"), Value: []byte("example.com")},
@@ -153,7 +153,7 @@ func TestConformance_RFC9112_Sec6_1_NoChunkedToObservedHttp10Peer(t *testing.T) 
 
 	// Over-rejection guard: the same request with a Content-Length is fine.
 	third := c.NewExchange()
-	if err := third.WriteRequest(context.Background(), []hpack.HeaderField{
+	if err := third.WriteRequest(context.Background(), []header.Field{
 		{Name: []byte(":method"), Value: []byte("POST")},
 		{Name: []byte(":path"), Value: []byte("/")},
 		{Name: []byte(":authority"), Value: []byte("example.com")},

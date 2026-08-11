@@ -3,13 +3,12 @@ package qpack
 import (
 	"bytes"
 	"errors"
+	"github.com/lodgvideon/poseidon-http-client/header"
 	"testing"
-
-	"github.com/lodgvideon/poseidon-http-client/hpack"
 )
 
-func hf(name, value string) hpack.HeaderField {
-	return hpack.HeaderField{Name: []byte(name), Value: []byte(value)}
+func hf(name, value string) header.Field {
+	return header.Field{Name: []byte(name), Value: []byte(value)}
 }
 
 // TestStaticTable_Shape checks the table is the full 99 entries with the
@@ -39,7 +38,7 @@ func TestStaticTable_Shape(t *testing.T) {
 // determined (Encoded Field Section Prefix 0x00 0x00 + one Indexed Field Line
 // per field, §4.5.1–§4.5.2).
 func TestConformance_RFC9204_Sec45_StaticIndexedEncode(t *testing.T) {
-	fields := []hpack.HeaderField{
+	fields := []header.Field{
 		hf(":method", "GET"),   // static 17 -> 0xc0|17 = 0xd1
 		hf(":path", "/"),       // static 1  -> 0xc1
 		hf(":scheme", "https"), // static 23 -> 0xd7
@@ -58,7 +57,7 @@ func TestConformance_RFC9204_Sec454_LiteralNameRefDecode(t *testing.T) {
 	// prefix 00 00 | 0x50 (name ref static idx 0 = :authority) | value "example.com"
 	// raw: H=0, len=11 -> 0x0b, then the octets.
 	in := []byte{0x00, 0x00, 0x50, 0x0b, 'e', 'x', 'a', 'm', 'p', 'l', 'e', '.', 'c', 'o', 'm'}
-	want := []hpack.HeaderField{hf(":authority", "example.com")}
+	want := []header.Field{hf(":authority", "example.com")}
 	assertDecode(t, in, want)
 }
 
@@ -67,7 +66,7 @@ func TestConformance_RFC9204_Sec454_LiteralNameRefDecode(t *testing.T) {
 func TestConformance_RFC9204_Sec456_LiteralNameDecode(t *testing.T) {
 	// prefix 00 00 | 0x26 (001 N=0 H=0, name len 6) "x-test" | 0x01 (value len 1) "1"
 	in := []byte{0x00, 0x00, 0x26, 'x', '-', 't', 'e', 's', 't', 0x01, '1'}
-	want := []hpack.HeaderField{hf("x-test", "1")}
+	want := []header.Field{hf("x-test", "1")}
 	assertDecode(t, in, want)
 }
 
@@ -75,7 +74,7 @@ func TestConformance_RFC9204_Sec456_LiteralNameDecode(t *testing.T) {
 // representations (with Huffman on the longer values) through encode then
 // decode, and checks the fields survive.
 func TestQPACK_RoundTrip(t *testing.T) {
-	fields := []hpack.HeaderField{
+	fields := []header.Field{
 		hf(":method", "GET"),                          // indexed
 		hf(":path", "/index.html"),                    // name ref (:path)
 		hf(":scheme", "https"),                        // indexed
@@ -130,18 +129,18 @@ func TestConformance_RFC9204_Sec45_DecodeErrors(t *testing.T) {
 // TestDecode_EmitError propagates an error returned by the emit callback.
 func TestDecode_EmitError(t *testing.T) {
 	boom := errors.New("boom")
-	in := NewEncoder().EncodeFieldSection(nil, []hpack.HeaderField{hf(":method", "GET")})
+	in := NewEncoder().EncodeFieldSection(nil, []header.Field{hf(":method", "GET")})
 	err := NewDecoder().DecodeFieldSection(in, nil, func([]byte, []byte) error { return boom })
 	if !errors.Is(err, boom) {
 		t.Fatalf("err = %v, want boom", err)
 	}
 }
 
-func assertDecode(t *testing.T, in []byte, want []hpack.HeaderField) {
+func assertDecode(t *testing.T, in []byte, want []header.Field) {
 	t.Helper()
-	var got []hpack.HeaderField
+	var got []header.Field
 	err := NewDecoder().DecodeFieldSection(in, nil, func(name, value []byte) error {
-		got = append(got, hpack.HeaderField{
+		got = append(got, header.Field{
 			Name:  append([]byte(nil), name...),
 			Value: append([]byte(nil), value...),
 		})
@@ -161,7 +160,7 @@ func assertDecode(t *testing.T, in []byte, want []hpack.HeaderField) {
 	}
 }
 
-var benchFields = []hpack.HeaderField{
+var benchFields = []header.Field{
 	hf(":method", "GET"),
 	hf(":path", "/index.html"),
 	hf(":scheme", "https"),

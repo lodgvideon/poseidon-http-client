@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/lodgvideon/poseidon-http-client/hpack"
+	"github.com/lodgvideon/poseidon-http-client/header"
 )
 
 // TestStream_TerminalEmptyDataNeverShedsTheStream pins the shape behind #344.
@@ -77,7 +77,7 @@ func TestStream_TerminalTrailersStillShedWhenFull(t *testing.T) {
 	slab := make([]byte, 0)
 	if s.deliverEnd(StreamEvent{
 		Type:      EventTrailers,
-		Headers:   []hpack.HeaderField{{Name: []byte("grpc-status"), Value: []byte("0")}},
+		Headers:   []header.Field{{Name: []byte("grpc-status"), Value: []byte("0")}},
 		Slab:      &slab,
 		EndStream: true,
 	}, true) {

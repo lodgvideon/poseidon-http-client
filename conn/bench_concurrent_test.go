@@ -4,7 +4,7 @@ import (
 	"context"
 	"testing"
 
-	"github.com/lodgvideon/poseidon-http-client/hpack"
+	"github.com/lodgvideon/poseidon-http-client/header"
 )
 
 // BenchmarkConn_Roundtrip_Concurrent stresses the single-connection write path
@@ -19,7 +19,7 @@ import (
 func BenchmarkConn_Roundtrip_Concurrent(b *testing.B) {
 	c, teardown := benchSetup(b)
 	defer teardown()
-	hdrs := []hpack.HeaderField{
+	hdrs := []header.Field{
 		{Name: []byte(":method"), Value: []byte("GET")},
 		{Name: []byte(":scheme"), Value: []byte("https")},
 		{Name: []byte(":authority"), Value: []byte("example.com")},

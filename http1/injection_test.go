@@ -26,7 +26,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/lodgvideon/poseidon-http-client/hpack"
+	"github.com/lodgvideon/poseidon-http-client/header"
 	"github.com/lodgvideon/poseidon-http-client/http1"
 )
 
@@ -81,8 +81,8 @@ func rawCapture(t *testing.T) (*http1.Exchange, func() string) {
 }
 
 // fields builds a minimal valid H2-style field list and applies overrides.
-func fields(extra ...hpack.HeaderField) []hpack.HeaderField {
-	base := []hpack.HeaderField{
+func fields(extra ...header.Field) []header.Field {
+	base := []header.Field{
 		{Name: []byte(":method"), Value: []byte("GET")},
 		{Name: []byte(":path"), Value: []byte("/")},
 		{Name: []byte(":authority"), Value: []byte("example.com")},
@@ -108,7 +108,7 @@ func fields(extra ...hpack.HeaderField) []hpack.HeaderField {
 func TestConformance_RFC9110_Sec5_5_HeaderValueCRLF_NotWritten(t *testing.T) {
 	ex, capture := rawCapture(t)
 
-	err := ex.WriteRequest(context.Background(), fields(hpack.HeaderField{
+	err := ex.WriteRequest(context.Background(), fields(header.Field{
 		Name:  []byte("x-user"),
 		Value: []byte("bob\r\nX-Injected: pwned\r\nX-Evil: yes"),
 	}), true)
@@ -136,7 +136,7 @@ func TestConformance_RFC9110_Sec5_5_HeaderValueCRLF_NotWritten(t *testing.T) {
 func TestConformance_RFC9110_Sec5_5_HeaderValueNUL_NotWritten(t *testing.T) {
 	ex, capture := rawCapture(t)
 
-	err := ex.WriteRequest(context.Background(), fields(hpack.HeaderField{
+	err := ex.WriteRequest(context.Background(), fields(header.Field{
 		Name:  []byte("x-user"),
 		Value: []byte("bob\x00admin"),
 	}), true)
@@ -158,7 +158,7 @@ func TestConformance_RFC9110_Sec5_5_HeaderValueNUL_NotWritten(t *testing.T) {
 func TestConformance_RFC9110_Sec5_5_AuthorityCRLF_NotWritten(t *testing.T) {
 	ex, capture := rawCapture(t)
 
-	err := ex.WriteRequest(context.Background(), []hpack.HeaderField{
+	err := ex.WriteRequest(context.Background(), []header.Field{
 		{Name: []byte(":method"), Value: []byte("GET")},
 		{Name: []byte(":path"), Value: []byte("/")},
 		{Name: []byte(":authority"), Value: []byte("example.com\r\nX-Injected: pwned")},
@@ -193,7 +193,7 @@ func TestConformance_RFC9110_Sec5_6_2_HeaderNameToken_NotWritten(t *testing.T) {
 		t.Run(tc.desc, func(t *testing.T) {
 			ex, capture := rawCapture(t)
 
-			err := ex.WriteRequest(context.Background(), fields(hpack.HeaderField{
+			err := ex.WriteRequest(context.Background(), fields(header.Field{
 				Name:  []byte(tc.name),
 				Value: []byte("v"),
 			}), true)
@@ -235,7 +235,7 @@ func TestConformance_RFC9112_Sec3_RequestLine_NotWritten(t *testing.T) {
 		t.Run(tc.desc, func(t *testing.T) {
 			ex, capture := rawCapture(t)
 
-			err := ex.WriteRequest(context.Background(), []hpack.HeaderField{
+			err := ex.WriteRequest(context.Background(), []header.Field{
 				{Name: []byte(":method"), Value: []byte(tc.method)},
 				{Name: []byte(":path"), Value: []byte(tc.path)},
 				{Name: []byte(":authority"), Value: []byte("example.com")},
@@ -266,7 +266,7 @@ func TestConformance_RFC9112_Sec3_RequestLine_NotWritten(t *testing.T) {
 func TestConformance_RFC9112_Sec3_2_EmptyAuthorityEmptyHost(t *testing.T) {
 	ex, capture := rawCapture(t)
 
-	err := ex.WriteRequest(context.Background(), []hpack.HeaderField{
+	err := ex.WriteRequest(context.Background(), []header.Field{
 		{Name: []byte(":method"), Value: []byte("GET")},
 		{Name: []byte(":path"), Value: []byte("/")},
 		{Name: []byte(":authority"), Value: []byte("")},
@@ -293,9 +293,9 @@ func TestConformance_RFC9110_Sec5_5_LegalValuesUnaffected(t *testing.T) {
 	ex, capture := rawCapture(t)
 
 	err := ex.WriteRequest(context.Background(), fields(
-		hpack.HeaderField{Name: []byte("User-Agent"), Value: []byte("poseidon/1.0 (test)")},
-		hpack.HeaderField{Name: []byte("accept"), Value: []byte("text/html, application/json;q=0.9")},
-		hpack.HeaderField{Name: []byte("x-tab"), Value: []byte("a\tb")},
+		header.Field{Name: []byte("User-Agent"), Value: []byte("poseidon/1.0 (test)")},
+		header.Field{Name: []byte("accept"), Value: []byte("text/html, application/json;q=0.9")},
+		header.Field{Name: []byte("x-tab"), Value: []byte("a\tb")},
 	), true)
 	if err != nil {
 		t.Fatalf("legal request refused: %v", err)

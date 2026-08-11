@@ -1,5 +1,7 @@
 package hpack
 
+import "github.com/lodgvideon/poseidon-http-client/header"
+
 // initialEntryRing is the slot count the entry ring is first sized to; it then
 // doubles on demand. maxSize caps how many entries can be live, so the doubling
 // terminates regardless of how many headers a peer sends.
@@ -15,7 +17,7 @@ const initialEntryRing = 32
 // for field sections in RFC 9114 §4.2.2. Those are deliberately NOT this
 // constant — each is frozen by its own spec and by interop with the peer, so
 // they must be free to be reasoned about separately.
-const entryOverhead = 32
+const entryOverhead = header.EntryOverhead
 
 // dynEntry stores offsets into the arena. Each entry's RFC size is
 // nameLen + valueLen + entryOverhead (RFC 7541 §4.1).

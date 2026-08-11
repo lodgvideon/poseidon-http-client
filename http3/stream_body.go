@@ -4,7 +4,7 @@ import (
 	"context"
 	"errors"
 
-	"github.com/lodgvideon/poseidon-http-client/hpack"
+	"github.com/lodgvideon/poseidon-http-client/header"
 	"github.com/lodgvideon/poseidon-http-client/qpack"
 )
 
@@ -89,7 +89,7 @@ type ResponseBody interface {
 	Next(ctx context.Context) (BodyEvent, error)
 	// Trailers returns the trailing field section, or nil if none was sent. It is
 	// populated once Next has reported the trailer event or a clean End.
-	Trailers() []hpack.HeaderField
+	Trailers() []header.Field
 	// Close abandons the body, aborting the stream if it was not read to a clean end.
 	Close() error
 }
@@ -103,7 +103,7 @@ type ResponseBody interface {
 //   - Data nil, Trailers nil, End true → the body finished cleanly with no trailers.
 type BodyEvent struct {
 	Data     []byte
-	Trailers []hpack.HeaderField
+	Trailers []header.Field
 	End      bool
 }
 
@@ -293,7 +293,7 @@ func (r *BodyReader) abort(err error) {
 // Trailers returns the trailing field section received after the body, or nil if
 // the server sent none. It is populated once Next has reported the trailer event or
 // a clean End; before then it is nil.
-func (r *BodyReader) Trailers() []hpack.HeaderField {
+func (r *BodyReader) Trailers() []header.Field {
 	if r.resp == nil {
 		return nil
 	}

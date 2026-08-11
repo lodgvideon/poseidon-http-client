@@ -6,13 +6,13 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/lodgvideon/poseidon-http-client/hpack"
+	"github.com/lodgvideon/poseidon-http-client/header"
 	"github.com/lodgvideon/poseidon-http-client/http1"
 )
 
 // reqCL builds the pseudo-header prelude plus the given regular fields.
-func reqCL(method string, extra ...hpack.HeaderField) []hpack.HeaderField {
-	return append([]hpack.HeaderField{
+func reqCL(method string, extra ...header.Field) []header.Field {
+	return append([]header.Field{
 		{Name: []byte(":method"), Value: []byte(method)},
 		{Name: []byte(":path"), Value: []byte("/")},
 		{Name: []byte(":authority"), Value: []byte("example.com")},
@@ -30,7 +30,7 @@ func TestConformance_RFC9110_Sec8_6_ContentLengthWithoutBodyRejected(t *testing.
 		t.Run(cl, func(t *testing.T) {
 			ex, capture := rawCapture(t)
 			err := ex.WriteRequest(context.Background(),
-				reqCL("GET", hpack.HeaderField{Name: []byte("Content-Length"), Value: []byte(cl)}), true)
+				reqCL("GET", header.Field{Name: []byte("Content-Length"), Value: []byte(cl)}), true)
 			if !errors.Is(err, http1.ErrInvalidRequest) {
 				t.Fatalf("WriteRequest(endStream, Content-Length %q) err = %v, want ErrInvalidRequest (RFC 9110 §8.6)", cl, err)
 			}
@@ -55,8 +55,8 @@ func TestConformance_RFC9112_Sec6_1_DuplicateContentLengthRejected(t *testing.T)
 		t.Run(name, func(t *testing.T) {
 			ex, capture := rawCapture(t)
 			err := ex.WriteRequest(context.Background(), reqCL("GET",
-				hpack.HeaderField{Name: []byte("content-length"), Value: []byte(vals[0])},
-				hpack.HeaderField{Name: []byte("Content-Length"), Value: []byte(vals[1])},
+				header.Field{Name: []byte("content-length"), Value: []byte(vals[0])},
+				header.Field{Name: []byte("Content-Length"), Value: []byte(vals[1])},
 			), true)
 			if !errors.Is(err, http1.ErrInvalidRequest) {
 				t.Fatalf("WriteRequest(two Content-Length) err = %v, want ErrInvalidRequest", err)
@@ -77,7 +77,7 @@ func TestConformance_RFC9110_Sec8_6_ContentLengthEmitGuardsAccept(t *testing.T) 
 	t.Run("single CL with body follows", func(t *testing.T) {
 		ex, capture := rawCapture(t)
 		err := ex.WriteRequest(context.Background(),
-			reqCL("POST", hpack.HeaderField{Name: []byte("Content-Length"), Value: []byte("3")}), false)
+			reqCL("POST", header.Field{Name: []byte("Content-Length"), Value: []byte("3")}), false)
 		if err != nil {
 			t.Fatalf("WriteRequest = %v, want nil", err)
 		}
@@ -88,7 +88,7 @@ func TestConformance_RFC9110_Sec8_6_ContentLengthEmitGuardsAccept(t *testing.T) 
 	t.Run("explicit zero with no body", func(t *testing.T) {
 		ex, capture := rawCapture(t)
 		err := ex.WriteRequest(context.Background(),
-			reqCL("POST", hpack.HeaderField{Name: []byte("Content-Length"), Value: []byte("0")}), true)
+			reqCL("POST", header.Field{Name: []byte("Content-Length"), Value: []byte("0")}), true)
 		if err != nil {
 			t.Fatalf("WriteRequest(endStream, Content-Length 0) = %v, want nil", err)
 		}

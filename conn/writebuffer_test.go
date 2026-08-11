@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/lodgvideon/poseidon-http-client/hpack"
+	"github.com/lodgvideon/poseidon-http-client/header"
 )
 
 // writeCountingConn counts Write calls on the underlying socket. Over a real
@@ -84,7 +84,7 @@ func TestWriteBuffer_MultiChunkUpload_NoDeadlock(t *testing.T) {
 			done <- err
 			return
 		}
-		if err := s.SendHeaders(ctx, []hpack.HeaderField{
+		if err := s.SendHeaders(ctx, []header.Field{
 			{Name: []byte(":method"), Value: []byte("POST")},
 			{Name: []byte(":scheme"), Value: []byte("https")},
 			{Name: []byte(":authority"), Value: []byte("example.com")},
@@ -171,7 +171,7 @@ func TestWriteBuffer_FewerWriteSyscalls(t *testing.T) {
 	writesBefore := dialer.conn.writes.Load()
 	framesBefore := c.Stats().FramesSent
 
-	if err := s.SendHeaders(ctx, []hpack.HeaderField{
+	if err := s.SendHeaders(ctx, []header.Field{
 		{Name: []byte(":method"), Value: []byte("POST")},
 		{Name: []byte(":scheme"), Value: []byte("https")},
 		{Name: []byte(":authority"), Value: []byte("example.com")},

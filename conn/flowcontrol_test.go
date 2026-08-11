@@ -11,7 +11,7 @@ import (
 	"time"
 
 	"github.com/lodgvideon/poseidon-http-client/frame"
-	"github.com/lodgvideon/poseidon-http-client/hpack"
+	"github.com/lodgvideon/poseidon-http-client/header"
 )
 
 // TestIntegration_LargeBody_RefundsRecvWindow_NoStall fetches a body
@@ -42,7 +42,7 @@ func TestIntegration_LargeBody_RefundsRecvWindow_NoStall(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewStream: %v", err)
 	}
-	if err := s.SendHeaders(ctx, []hpack.HeaderField{
+	if err := s.SendHeaders(ctx, []header.Field{
 		{Name: []byte(":method"), Value: []byte("GET")},
 		{Name: []byte(":scheme"), Value: []byte("https")},
 		{Name: []byte(":authority"), Value: []byte("example.com")},
@@ -213,7 +213,7 @@ func TestIntegration_EventBufferOverflow_ReportsResetNotShortBody(t *testing.T) 
 	if err != nil {
 		t.Fatalf("NewStream: %v", err)
 	}
-	if err := s.SendHeaders(ctx, []hpack.HeaderField{
+	if err := s.SendHeaders(ctx, []header.Field{
 		{Name: []byte(":method"), Value: []byte("GET")},
 		{Name: []byte(":scheme"), Value: []byte("https")},
 		{Name: []byte(":authority"), Value: []byte("example.com")},

@@ -20,13 +20,13 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/lodgvideon/poseidon-http-client/hpack"
+	"github.com/lodgvideon/poseidon-http-client/header"
 	"github.com/lodgvideon/poseidon-http-client/http1"
 )
 
 // requestHead runs one WriteRequest against a pipe and returns the bytes the
 // client actually put on the wire, up to and including the blank line.
-func requestHead(t *testing.T, method string, endStream bool, extra ...hpack.HeaderField) string {
+func requestHead(t *testing.T, method string, endStream bool, extra ...header.Field) string {
 	t.Helper()
 	client, server := net.Pipe()
 	t.Cleanup(func() { _ = client.Close() })
@@ -46,7 +46,7 @@ func requestHead(t *testing.T, method string, endStream bool, extra ...hpack.Hea
 		headCh <- sb.String()
 	}()
 
-	fields := append([]hpack.HeaderField{
+	fields := append([]header.Field{
 		{Name: []byte(":method"), Value: []byte(method)},
 		{Name: []byte(":path"), Value: []byte("/")},
 		{Name: []byte(":authority"), Value: []byte("example.com")},
@@ -89,7 +89,7 @@ func TestConformance_RFC9112_Sec6_1_NoContentLengthWithTransferEncoding(t *testi
 	} {
 		t.Run(spelling, func(t *testing.T) {
 			head := requestHead(t, "POST", false,
-				hpack.HeaderField{Name: []byte(spelling), Value: []byte("5")})
+				header.Field{Name: []byte(spelling), Value: []byte("5")})
 			low := strings.ToLower(head)
 			hasCL := strings.Contains(low, "content-length:")
 			hasTE := strings.Contains(low, "transfer-encoding:")
@@ -123,7 +123,7 @@ func TestConformance_RFC9112_Sec6_1_SingleContentLengthOnBodylessPost(t *testing
 	for _, method := range []string{"POST", "PUT", "PATCH"} {
 		t.Run(method, func(t *testing.T) {
 			head := requestHead(t, method, true,
-				hpack.HeaderField{Name: []byte("Content-Length"), Value: []byte("0")})
+				header.Field{Name: []byte("Content-Length"), Value: []byte("0")})
 			if n := countFieldLines(head, "content-length"); n != 1 {
 				t.Errorf("%d Content-Length field lines, want 1:\n%s\n"+
 					"the client must not append its own Content-Length: 0 when the "+

@@ -3,20 +3,20 @@ package http3
 import (
 	"testing"
 
-	"github.com/lodgvideon/poseidon-http-client/hpack"
+	"github.com/lodgvideon/poseidon-http-client/header"
 	"github.com/lodgvideon/poseidon-http-client/qpack"
 )
 
-func hf(name, value string) hpack.HeaderField {
-	return hpack.HeaderField{Name: []byte(name), Value: []byte(value)}
+func hf(name, value string) header.Field {
+	return header.Field{Name: []byte(name), Value: []byte(value)}
 }
 
-func decodeAll(t *testing.T, section []byte) []hpack.HeaderField {
+func decodeAll(t *testing.T, section []byte) []header.Field {
 	t.Helper()
 	var dec qpack.Decoder
-	var out []hpack.HeaderField
+	var out []header.Field
 	err := dec.DecodeFieldSection(section, nil, func(name, value []byte) error {
-		out = append(out, hpack.HeaderField{Name: append([]byte(nil), name...), Value: append([]byte(nil), value...)})
+		out = append(out, header.Field{Name: append([]byte(nil), name...), Value: append([]byte(nil), value...)})
 		return nil
 	})
 	if err != nil {
@@ -26,7 +26,7 @@ func decodeAll(t *testing.T, section []byte) []hpack.HeaderField {
 }
 
 // encodeSection encodes a field section the way a server would, for decode tests.
-func encodeSection(fields ...hpack.HeaderField) []byte {
+func encodeSection(fields ...header.Field) []byte {
 	var enc qpack.Encoder
 	return enc.EncodeFieldSection(nil, fields)
 }
@@ -38,7 +38,7 @@ func TestConformance_RFC9114_Sec431_RequestPseudoHeadersFirst(t *testing.T) {
 	var enc qpack.Encoder
 	req := &Request{
 		Method: "GET", Scheme: "https", Authority: "example.com", Path: "/index.html",
-		Headers: []hpack.HeaderField{hf("accept", "text/html")},
+		Headers: []header.Field{hf("accept", "text/html")},
 	}
 	frame, err := req.EncodeHeaders(&enc, nil, ^uint64(0))
 	if err != nil {
@@ -77,7 +77,7 @@ func TestConformance_RFC9114_Sec431_RequestPseudoHeadersFirst(t *testing.T) {
 // header satisfies the §4.3.1 authority requirement so the request is well-formed.
 func TestRequest_OmitsEmptyAuthority(t *testing.T) {
 	var enc qpack.Encoder
-	req := &Request{Method: "GET", Scheme: "https", Path: "/", Headers: []hpack.HeaderField{hf("host", "example.com")}}
+	req := &Request{Method: "GET", Scheme: "https", Path: "/", Headers: []header.Field{hf("host", "example.com")}}
 	frame, err := req.EncodeHeaders(&enc, nil, ^uint64(0))
 	if err != nil {
 		t.Fatal(err)
@@ -102,9 +102,9 @@ func TestConformance_RFC9114_Sec42_RequestValidation(t *testing.T) {
 		{"missing_method", &Request{Scheme: "https", Path: "/"}},
 		{"missing_scheme", &Request{Method: "GET", Path: "/"}},
 		{"missing_path", &Request{Method: "GET", Scheme: "https"}},
-		{"uppercase_header", &Request{Method: "GET", Scheme: "https", Authority: "h", Path: "/", Headers: []hpack.HeaderField{hf("X-Foo", "1")}}},
-		{"connection_specific", &Request{Method: "GET", Scheme: "https", Authority: "h", Path: "/", Headers: []hpack.HeaderField{hf("connection", "keep-alive")}}},
-		{"crlf_value", &Request{Method: "GET", Scheme: "https", Authority: "h", Path: "/", Headers: []hpack.HeaderField{hf("x-h", "a\r\nb")}}},
+		{"uppercase_header", &Request{Method: "GET", Scheme: "https", Authority: "h", Path: "/", Headers: []header.Field{hf("X-Foo", "1")}}},
+		{"connection_specific", &Request{Method: "GET", Scheme: "https", Authority: "h", Path: "/", Headers: []header.Field{hf("connection", "keep-alive")}}},
+		{"crlf_value", &Request{Method: "GET", Scheme: "https", Authority: "h", Path: "/", Headers: []header.Field{hf("x-h", "a\r\nb")}}},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {

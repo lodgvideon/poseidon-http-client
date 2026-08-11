@@ -13,7 +13,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/lodgvideon/poseidon-http-client/hpack"
+	"github.com/lodgvideon/poseidon-http-client/header"
 )
 
 func gcTestServer(t *testing.T) (*httptest.Server, *tls.Config) {
@@ -34,8 +34,8 @@ func gcTestServer(t *testing.T) (*httptest.Server, *tls.Config) {
 	return srv, &tls.Config{RootCAs: pool, ServerName: "example.com"}
 }
 
-func gcHeaders() []hpack.HeaderField {
-	return []hpack.HeaderField{
+func gcHeaders() []header.Field {
+	return []header.Field{
 		{Name: []byte(":method"), Value: []byte("GET")},
 		{Name: []byte(":scheme"), Value: []byte("https")},
 		{Name: []byte(":authority"), Value: []byte("example.com")},

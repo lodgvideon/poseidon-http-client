@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/lodgvideon/poseidon-http-client/hpack"
+	"github.com/lodgvideon/poseidon-http-client/header"
 )
 
 // TestConn_SmallAdvertisedWindow_StillCompletes pins a download against every
@@ -150,8 +150,8 @@ func windowName(w uint32) string {
 	}
 }
 
-func getHeaders() []hpack.HeaderField {
-	return []hpack.HeaderField{
+func getHeaders() []header.Field {
+	return []header.Field{
 		{Name: []byte(":method"), Value: []byte("GET")},
 		{Name: []byte(":scheme"), Value: []byte("https")},
 		{Name: []byte(":authority"), Value: []byte("example.com")},

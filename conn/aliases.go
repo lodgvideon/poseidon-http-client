@@ -2,7 +2,7 @@ package conn
 
 import (
 	"github.com/lodgvideon/poseidon-http-client/frame"
-	"github.com/lodgvideon/poseidon-http-client/hpack"
+	"github.com/lodgvideon/poseidon-http-client/header"
 )
 
 // Re-exports of low-level types so the client package can avoid importing
@@ -13,11 +13,11 @@ type (
 	ErrCode = frame.ErrCode
 
 	// HeaderField is a decoded HPACK name/value pair.
-	HeaderField = hpack.HeaderField
+	HeaderField = header.Field
 
 	// IndexingMode selects a header field's HPACK literal representation, and
 	// therefore whether it enters the dynamic table.
-	IndexingMode = hpack.IndexingMode
+	IndexingMode = header.IndexingMode
 )
 
 const (
@@ -26,12 +26,12 @@ const (
 	ErrCodeRefusedStream = frame.ErrCodeRefusedStream
 
 	// IndexIncremental indexes the field into the dynamic table (the default).
-	IndexIncremental = hpack.IndexIncremental
+	IndexIncremental = header.IndexIncremental
 
 	// IndexWithout keeps a per-request-varying field out of the dynamic table
 	// without claiming any security meaning.
-	IndexWithout = hpack.IndexWithout
+	IndexWithout = header.IndexWithout
 
 	// IndexNever marks a field never-indexed, which intermediaries must honour.
-	IndexNever = hpack.IndexNever
+	IndexNever = header.IndexNever
 )

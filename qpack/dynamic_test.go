@@ -6,15 +6,16 @@ import (
 	"strconv"
 	"testing"
 
+	"github.com/lodgvideon/poseidon-http-client/header"
 	"github.com/lodgvideon/poseidon-http-client/hpack"
 )
 
 // assertDecodeDyn decodes in against dt and checks the emitted fields.
-func assertDecodeDyn(t *testing.T, dec *Decoder, in []byte, dt *DynamicTable, want []hpack.HeaderField) {
+func assertDecodeDyn(t *testing.T, dec *Decoder, in []byte, dt *DynamicTable, want []header.Field) {
 	t.Helper()
-	var got []hpack.HeaderField
+	var got []header.Field
 	err := dec.DecodeFieldSection(in, dt, func(name, value []byte) error {
-		got = append(got, hpack.HeaderField{
+		got = append(got, header.Field{
 			Name:  append([]byte(nil), name...),
 			Value: append([]byte(nil), value...),
 		})
@@ -55,7 +56,7 @@ func TestConformance_RFC9204_AppB_DynamicTable(t *testing.T) {
 	})
 	wantState(t, dt, "B.2", 2, 106)
 	// Request stream 4: RIC=2, Base=0, two Post-Base Indexed field lines.
-	assertDecodeDyn(t, dec, []byte{0x03, 0x81, 0x10, 0x11}, dt, []hpack.HeaderField{
+	assertDecodeDyn(t, dec, []byte{0x03, 0x81, 0x10, 0x11}, dt, []header.Field{
 		hf(":authority", "www.example.com"),
 		hf(":path", "/sample/path"),
 	})
@@ -75,7 +76,7 @@ func TestConformance_RFC9204_AppB_DynamicTable(t *testing.T) {
 	mustApply(t, dt, []byte{0x02}) // Duplicate, Relative Index 2
 	wantState(t, dt, "B.4", 4, 217)
 	// Request stream 8: RIC=4, Base=4; dynamic idx0->abs3, static :path, dynamic idx1->abs2.
-	assertDecodeDyn(t, dec, []byte{0x05, 0x00, 0x80, 0xc1, 0x81}, dt, []hpack.HeaderField{
+	assertDecodeDyn(t, dec, []byte{0x05, 0x00, 0x80, 0xc1, 0x81}, dt, []header.Field{
 		hf(":authority", "www.example.com"),
 		hf(":path", "/"),
 		hf("custom-key", "custom-value"),
@@ -153,7 +154,7 @@ func TestConformance_RFC9204_Sec452_IndexedDynamicDecode(t *testing.T) {
 	}
 	// RIC=2, Base=2 (Sign=0, Delta=0): prefix 03 00. Then Indexed dynamic idx 0
 	// -> abs Base(2)-0-1 = 1 = custom-b; idx 1 -> abs 0 = custom-a.
-	assertDecodeDyn(t, NewDecoder(), []byte{0x03, 0x00, 0x80, 0x81}, dt, []hpack.HeaderField{
+	assertDecodeDyn(t, NewDecoder(), []byte{0x03, 0x00, 0x80, 0x81}, dt, []header.Field{
 		hf("custom-b", "2"),
 		hf("custom-a", "1"),
 	})
@@ -168,7 +169,7 @@ func TestConformance_RFC9204_Sec453_LiteralNameRefDynamicDecode(t *testing.T) {
 	// RIC=1, Base=1 (prefix 02 00). Literal with Name Ref, dynamic (01N=0 T=0),
 	// idx 0 -> abs Base(1)-0-1 = 0 = name "x-token"; value "new" (len 3).
 	sec := []byte{0x02, 0x00, 0x40, 0x03, 'n', 'e', 'w'}
-	assertDecodeDyn(t, NewDecoder(), sec, dt, []hpack.HeaderField{hf("x-token", "new")})
+	assertDecodeDyn(t, NewDecoder(), sec, dt, []header.Field{hf("x-token", "new")})
 }
 
 // TestConformance_RFC9204_Sec455_PostBaseNameRefDecode decodes a Literal Field
@@ -180,7 +181,7 @@ func TestConformance_RFC9204_Sec455_PostBaseNameRefDecode(t *testing.T) {
 	// RIC=1, Base=0 (Sign=1, Delta=0: prefix 02 80). Literal Post-Base Name Ref
 	// (0000 N=0, 3-bit idx 0) -> abs Base(0)+0 = 0 name "x-post"; value "b".
 	sec := []byte{0x02, 0x80, 0x00, 0x01, 'b'}
-	assertDecodeDyn(t, NewDecoder(), sec, dt, []hpack.HeaderField{hf("x-post", "b")})
+	assertDecodeDyn(t, NewDecoder(), sec, dt, []header.Field{hf("x-post", "b")})
 }
 
 // TestQPACK_RequiredInsertCount_Decode covers the §4.5.1.1 reconstruction,
@@ -374,7 +375,7 @@ func TestConformance_RFC9204_Sec212_RequiredInsertCountSmallerThanExpected(t *te
 // literal representations (RIC=0) decodes identically whether a dynamic table is
 // present or nil — the INERT path is unaffected.
 func TestQPACK_StaticOnly_WithTable(t *testing.T) {
-	fields := []hpack.HeaderField{
+	fields := []header.Field{
 		hf(":method", "GET"),
 		hf(":path", "/index.html"),
 		hf("x-custom-header", "custom-value"),

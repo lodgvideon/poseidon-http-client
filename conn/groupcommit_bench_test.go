@@ -12,7 +12,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/lodgvideon/poseidon-http-client/hpack"
+	"github.com/lodgvideon/poseidon-http-client/header"
 )
 
 // flushCountConn counts Write calls to the transport. Each Write is exactly one
@@ -84,7 +84,7 @@ func benchSetupCounting(b *testing.B, groupCommit bool) (*Conn, *flushCountConn,
 func benchConcurrentWrite(b *testing.B, groupCommit bool, workers int) {
 	c, cc, teardown := benchSetupCounting(b, groupCommit)
 	defer teardown()
-	hdrs := []hpack.HeaderField{
+	hdrs := []header.Field{
 		{Name: []byte(":method"), Value: []byte("GET")},
 		{Name: []byte(":scheme"), Value: []byte("https")},
 		{Name: []byte(":authority"), Value: []byte("example.com")},

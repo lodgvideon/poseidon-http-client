@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/lodgvideon/poseidon-http-client/hpack"
+	"github.com/lodgvideon/poseidon-http-client/header"
 )
 
 // TestConn_AbandonCloseDuringResponse_NoRace is a -race regression guard for a
@@ -66,7 +66,7 @@ func TestConn_AbandonCloseDuringResponse_NoRace(t *testing.T) {
 					cancel()
 					continue
 				}
-				if err := s.SendHeaders(ctx, []hpack.HeaderField{
+				if err := s.SendHeaders(ctx, []header.Field{
 					{Name: []byte(":method"), Value: []byte("GET")},
 					{Name: []byte(":scheme"), Value: []byte("https")},
 					{Name: []byte(":authority"), Value: []byte("example.com")},
@@ -132,7 +132,7 @@ func TestConn_TwoCompleterRecycle_NoRace(t *testing.T) {
 				}
 				// Open with a body still to come (endStream=false), then send
 				// the body and half-close from the app goroutine.
-				if err := s.SendHeaders(ctx, []hpack.HeaderField{
+				if err := s.SendHeaders(ctx, []header.Field{
 					{Name: []byte(":method"), Value: []byte("POST")},
 					{Name: []byte(":scheme"), Value: []byte("https")},
 					{Name: []byte(":authority"), Value: []byte("example.com")},

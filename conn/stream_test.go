@@ -8,7 +8,7 @@ import (
 	"time"
 
 	"github.com/lodgvideon/poseidon-http-client/frame"
-	"github.com/lodgvideon/poseidon-http-client/hpack"
+	"github.com/lodgvideon/poseidon-http-client/header"
 )
 
 func TestStreamEventType_String(t *testing.T) {
@@ -31,7 +31,7 @@ func TestStreamEventType_String(t *testing.T) {
 }
 
 func TestStreamEvent_TypeDispatch(t *testing.T) {
-	headers := []hpack.HeaderField{{Name: []byte(":status"), Value: []byte("200")}}
+	headers := []header.Field{{Name: []byte(":status"), Value: []byte("200")}}
 	e := StreamEvent{Type: EventHeaders, Headers: headers, EndStream: false}
 	if e.Type != EventHeaders || len(e.Headers) != 1 {
 		t.Fatalf("event = %+v", e)
@@ -51,7 +51,7 @@ type fakeStreamWriter struct {
 	lastRSTCode frame.ErrCode
 }
 
-func (w *fakeStreamWriter) writeHeadersWithPriority(_ context.Context, _ *Stream, _ []hpack.HeaderField, _ bool, _ *frame.Priority) error {
+func (w *fakeStreamWriter) writeHeadersWithPriority(_ context.Context, _ *Stream, _ []header.Field, _ bool, _ *frame.Priority) error {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	w.headerCalls++
@@ -95,7 +95,7 @@ func TestStream_ID(t *testing.T) {
 func TestStream_SendHeaders_DelegatesToWriter(t *testing.T) {
 	s, w := newTestStream(8)
 	err := s.ref().SendHeaders(context.Background(),
-		[]hpack.HeaderField{{Name: []byte(":method"), Value: []byte("GET")}},
+		[]header.Field{{Name: []byte(":method"), Value: []byte("GET")}},
 		true)
 	if err != nil {
 		t.Fatalf("SendHeaders: %v", err)

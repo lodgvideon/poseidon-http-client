@@ -5,7 +5,7 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/lodgvideon/poseidon-http-client/hpack"
+	"github.com/lodgvideon/poseidon-http-client/header"
 	"github.com/lodgvideon/poseidon-http-client/http1"
 )
 
@@ -20,7 +20,7 @@ func TestConformance_RFC9110_Sec4_2_4_AuthorityUserinfoRejected(t *testing.T) {
 	for _, auth := range []string{"user@example.com", "user:pass@example.com", "u@example.com:8443"} {
 		t.Run(auth, func(t *testing.T) {
 			ex, capture := rawCapture(t)
-			err := ex.WriteRequest(context.Background(), []hpack.HeaderField{
+			err := ex.WriteRequest(context.Background(), []header.Field{
 				{Name: []byte(":method"), Value: []byte("GET")},
 				{Name: []byte(":path"), Value: []byte("/")},
 				{Name: []byte(":authority"), Value: []byte(auth)},
@@ -43,7 +43,7 @@ func TestConformance_RFC9110_Sec4_2_4_BareAuthorityAccepted(t *testing.T) {
 	for _, auth := range []string{"example.com", "example.com:8443", "[::1]:443", ""} {
 		t.Run(auth, func(t *testing.T) {
 			ex, _ := rawCapture(t)
-			err := ex.WriteRequest(context.Background(), []hpack.HeaderField{
+			err := ex.WriteRequest(context.Background(), []header.Field{
 				{Name: []byte(":method"), Value: []byte("GET")},
 				{Name: []byte(":path"), Value: []byte("/")},
 				{Name: []byte(":authority"), Value: []byte(auth)},

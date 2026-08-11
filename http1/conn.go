@@ -15,7 +15,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/lodgvideon/poseidon-http-client/hpack"
+	"github.com/lodgvideon/poseidon-http-client/header"
 )
 
 // ErrResponseTooLarge reports that the server sent more than the client will
@@ -171,7 +171,7 @@ const (
 	maxHeaderListBytes = 8 << 20 // 8 MiB
 
 	// hpackFieldOverhead is the per-field accounting overhead from RFC 7541
-	// §4.1, matching hpack.HeaderField.Size(). Charging it per line is what
+	// §4.1, matching header.Field.Size(). Charging it per line is what
 	// makes a flood of tiny lines cost something: without it, "a: b\r\n"
 	// repeated forever would be charged only its wire bytes and a server could
 	// buy an unbounded field count very cheaply.
@@ -834,7 +834,7 @@ func hasConnectionOption(value, opt string) bool {
 // net.Buffers would put the good prefix of a poisoned request on the wire and
 // leave the stream mid-message, which is a worse outcome than either sending it
 // or refusing it.
-func validateFields(method, path, authority string, fields []hpack.HeaderField) error {
+func validateFields(method, path, authority string, fields []header.Field) error {
 	if !validToken(method) {
 		return fmt.Errorf("%w: method %q is not a token (RFC 9110 §9.1)", ErrInvalidRequest, method)
 	}
@@ -910,7 +910,7 @@ func validateFields(method, path, authority string, fields []hpack.HeaderField) 
 //
 // Assembles the whole head into the connection's reusable buffer and writes it
 // once — see Conn.headBuf for why not net.Buffers.
-func (ex *Exchange) WriteRequest(ctx context.Context, fields []hpack.HeaderField, endStream bool) error {
+func (ex *Exchange) WriteRequest(ctx context.Context, fields []header.Field, endStream bool) error {
 	// Checked synchronously: armDeadline's watchdog is asynchronous, so a short
 	// write can complete before it observes an already-dead context.
 	if err := ctx.Err(); err != nil {
@@ -1249,9 +1249,9 @@ func (ex *Exchange) readLine(what string) (string, error) {
 // ReadResponse reads the HTTP/1.1 response status line and headers.
 // It skips 1xx informational responses automatically and blocks until a
 // final (≥200) status is received.
-// Returns the response headers as []hpack.HeaderField. The first element is
+// Returns the response headers as []header.Field. The first element is
 // always the ":status" pseudo-header for compatibility with the client layer.
-func (ex *Exchange) ReadResponse(ctx context.Context) (statusCode int, headers []hpack.HeaderField, err error) {
+func (ex *Exchange) ReadResponse(ctx context.Context) (statusCode int, headers []header.Field, err error) {
 	// Any failure reading the head leaves the stream position unknown, so the
 	// connection must not be pooled. Several exits (a truncated or stalled header
 	// block, a cancelled read) returned with keepAlive still true; deciding it
@@ -1364,9 +1364,9 @@ func (ex *Exchange) ReadResponse(ctx context.Context) (statusCode int, headers [
 	ex.c.peerMinor, ex.c.peerMinorKnown = respMinor, true
 	ex.contentLen = -1
 
-	headers = make([]hpack.HeaderField, 0, 12)
+	headers = make([]header.Field, 0, 12)
 	// Prepend :status for compatibility with the H2-style client layer.
-	headers = append(headers, hpack.HeaderField{
+	headers = append(headers, header.Field{
 		Name:  []byte(":status"),
 		Value: []byte(strconv.Itoa(statusCode)),
 	})
@@ -1821,7 +1821,7 @@ func parseChunkSize(s string) (int64, bool) {
 // its wire length plus the RFC 7541 §4.1 per-field overhead, which is what
 // stops a server that sends endlessly many short, individually legal header
 // lines — the one vector here that no per-line cap can see.
-func (ex *Exchange) consumeHeaders(out *[]hpack.HeaderField, parseBody bool) error {
+func (ex *Exchange) consumeHeaders(out *[]header.Field, parseBody bool) error {
 	var listSize uint64
 
 	// field holds the current logical field line. A line cannot be interpreted
@@ -1929,7 +1929,7 @@ func (ex *Exchange) consumeHeaders(out *[]hpack.HeaderField, parseBody bool) err
 // commitHeaderLine interprets one complete logical field line — obs-folds
 // already joined — appending it to out and, when parseBody, feeding the framing
 // switch.
-func (ex *Exchange) commitHeaderLine(line string, have bool, out *[]hpack.HeaderField, parseBody bool) error {
+func (ex *Exchange) commitHeaderLine(line string, have bool, out *[]header.Field, parseBody bool) error {
 	if !have {
 		return nil
 	}
@@ -2052,7 +2052,7 @@ func (ex *Exchange) commitHeaderLine(line string, have bool, out *[]hpack.Header
 		}
 
 		if out != nil {
-			*out = append(*out, hpack.HeaderField{
+			*out = append(*out, header.Field{
 				Name:  []byte(name),
 				Value: []byte(value),
 			})
