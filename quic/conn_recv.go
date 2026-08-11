@@ -56,9 +56,6 @@ func (c *Conn) Establish(ctx context.Context) error {
 // lock → leading flush (retransmits) → publish+arm the read deadline → arm→recheck
 // ctx → UNLOCK → blocking read → relock → timestamp after reacquiring → process.
 // Every error return latches terminateLocked so a blocked Do wakes.
-// leading flush (retransmits) → publish+arm the read deadline → arm→recheck ctx →
-// UNLOCK → blocking read → relock → timestamp after reacquiring → process. Every
-// error return latches terminateLocked so a blocked Do wakes.
 //
 // POSTCONDITION: Poll never returns holding c.mu — serviceControl and the H3
 // control servicing on the reader goroutine rely on this.

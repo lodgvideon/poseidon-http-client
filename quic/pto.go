@@ -238,14 +238,16 @@ func (c *Conn) readWithPTO(ctx context.Context, buf []byte) (int, error) {
 	}
 	for {
 		if hasDeadline {
-			deadline, _ := c.lossDetectionDeadline()
-			if idleDL, ok := c.idleDeadline(); ok && idleDL.Before(deadline) {
-				deadline = idleDL // idle timeout may be nearer than a probe (§10.1)
-			}
-			if d, ok := ctx.Deadline(); ok && d.Before(deadline) {
-				deadline = d // honor a nearer context deadline
-			}
-			_ = dl.SetReadDeadline(deadline)
+			// computeReadDeadline, not a second copy of the same min: this used to
+			// inline the loss/idle/ctx comparison and the engine owned another one.
+			deadline := c.computeReadDeadline(ctx)
+			c.armedLossDeadline = deadline
+			// Establish runs before application keys exist, so there is no deferred
+			// Application-space ACK to arm for and handleExpiry's armedForAck branch
+			// cannot apply here. Set explicitly rather than left to the zero value,
+			// because it is a claim about this path, not an accident.
+			c.armedForAck = false
+			c.setReadDeadline(deadline)
 		}
 		// Re-check after arming: a cancel between arming and Read would otherwise
 		// be masked by the freshly-armed future deadline (deadline-clobber race).
@@ -264,25 +266,15 @@ func (c *Conn) readWithPTO(ctx context.Context, buf []byte) (int, error) {
 		if !hasDeadline || !isTimeout(err) {
 			return 0, err // real error, or a transport without deadlines
 		}
-		// The connection is silently closed once it has been idle for the negotiated
-		// max_idle_timeout (RFC 9000 §10.1), checked before probing so a due idle
-		// close is not masked by a probe.
-		if idleDL, ok := c.idleDeadline(); ok && !idleDL.After(c.clock()) {
-			return 0, c.idleClose()
-		}
-		// A time-threshold loss timer expiry runs loss detection; otherwise the
-		// probe timeout resends (RFC 9002 §6.2). With neither a pending loss nor a
-		// probe to send, the idle bound elapsed with nothing to do.
-		switch lt, sp, ok := c.earliestLossTime(); {
-		case ok && !lt.After(c.clock()):
-			c.detectLost(sp)
-		case (c.hasInFlight() || c.handshakeAntiDeadlock()) && c.ptoCount < maxPTOBackoff:
-			c.onPTO()
-		default:
-			return 0, err // idle timeout or probe backoff exhausted
-		}
-		if err := c.flush(); err != nil {
-			return 0, err
+		// One expiry engine, shared with Poll. This used to be its own copy of the
+		// idle-close / loss-timer / PTO switch, and the two had already diverged:
+		// handleExpiry grew the deferred-ACK guard and this did not. The next
+		// loss-timer fix now lands in one place instead of needing to be
+		// hand-mirrored into a path only the handshake takes.
+		//
+		// nil means "re-poll" — arm and read again — which is exactly this loop.
+		if e := c.handleExpiry(c.clock(), err); e != nil {
+			return 0, e
 		}
 	}
 }
