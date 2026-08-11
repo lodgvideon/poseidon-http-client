@@ -1974,6 +1974,24 @@ func (ex *Exchange) commitHeaderLine(line string, have bool, out *[]header.Field
 				"containing CR, LF or NUL: %w", truncateForError(name), ErrInvalidHeaderBlock)
 		}
 
+		// Connection is hop-by-hop and scoped to the CONNECTION, not to the message
+		// carrying it (RFC 9110 §7.6.1), and "close" means the sender will close
+		// after this response (RFC 9112 §9.6). So it is interpreted on EVERY head,
+		// including an interim 1xx — unlike the framing fields below, which a 1xx
+		// cannot carry at all (RFC 9110 §15.2) and which stay gated.
+		//
+		// It used to sit inside that gate, so a "close" on a 1xx was read off the
+		// wire and discarded, and the socket went back to the pool. Not a desync —
+		// the 1xx is fully drained — but the next request went out on a connection
+		// the server had said it was closing, racing the FIN.
+		if name == "connection" {
+			if hasConnectionOption(value, "close") {
+				ex.condemn()
+			} else if hasConnectionOption(value, "keep-alive") && !ex.condemned {
+				ex.keepAlive = true
+			}
+		}
+
 		if parseBody {
 			switch name {
 			case "content-length":
@@ -2041,12 +2059,6 @@ func (ex *Exchange) commitHeaderLine(line string, have bool, out *[]header.Field
 					// closes the connection.
 					ex.respChunked = false
 					ex.contentLen = -1
-				}
-			case "connection":
-				if hasConnectionOption(value, "close") {
-					ex.condemn()
-				} else if hasConnectionOption(value, "keep-alive") && !ex.condemned {
-					ex.keepAlive = true
 				}
 			}
 		}
