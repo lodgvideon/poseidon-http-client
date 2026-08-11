@@ -2,9 +2,14 @@ package client
 
 import (
 	"context"
+	"net/http"
+	"net/http/httptest"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/lodgvideon/poseidon-http-client/conn"
 )
 
 // OnConnClose is documented as firing for every connection this client closes.
@@ -93,42 +98,50 @@ func TestH1SingleConn_CloseIsObservable(t *testing.T) {
 // TestH1SingleConn_NotReusableIsObservable covers the case the issue calls out
 // specifically: ordinary "Connection: close" churn, which on this transport is
 // most of the connection lifecycle and was entirely silent.
+//
+// It drives a real response through the public client, because that is the only
+// way to reach the path. The first version of this test called the transport's
+// release and then close() — both of which report CloseManual — so it passed
+// without ever touching the churn path it was named for. A mutation that
+// deleted the churn call site went uncaught, which is how I found it.
 func TestH1SingleConn_NotReusableIsObservable(t *testing.T) {
-	r := newCloseRecorder()
-	s := &h1singleConn{
-		addr:        "h:80",
-		dialer:      newH1FakeDialer(),
-		metrics:     r.metrics,
-		hooksRef:    r.ref,
-		dialTimeout: 5 * time.Second,
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	_, _, release, err := s.openExchange(ctx)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Connection", "close")
+		_, _ = w.Write([]byte("ok"))
+	}))
+	defer srv.Close()
+
+	var mu sync.Mutex
+	var reasons []CloseReason
+	c, err := NewClient(ClientOptions{
+		Addr:      srv.Listener.Addr().String(),
+		Transport: TransportH1SingleConn,
+		ConnOpts:  conn.ConnOptions{Dialer: &conn.PlaintextDialer{}},
+		Hooks: &Hooks{OnConnClose: func(e ConnCloseEvent) {
+			mu.Lock()
+			reasons = append(reasons, e.Reason)
+			mu.Unlock()
+		}},
+	})
 	if err != nil {
-		t.Fatalf("openExchange: %v", err)
+		t.Fatalf("NewClient: %v", err)
 	}
-	release() // the h1 transports hand back a no-op release
+	defer func() { _ = c.Close() }()
 
-	// Drop the conn as not reusable, which is what a "Connection: close"
-	// response does through h1Exchange's own release.
-	s.mu.Lock()
-	cur := s.cur
-	s.mu.Unlock()
-	if cur == nil {
-		t.Skip("no cached conn to drop on this build")
+	var resp Response
+	if err := c.Do(context.Background(), &Request{Method: "GET", Path: "/"}, &resp); err != nil {
+		t.Fatalf("Do: %v", err)
 	}
 
-	before := r.metrics.Counters.ConnsClosed.Load()
-	_ = s.close()
-	if r.metrics.Counters.ConnsClosed.Load() <= before {
-		t.Error("dropping an HTTP/1.1 connection did not reach the counter")
-	}
-	for _, e := range r.events {
-		if e.Reason != CloseManual && e.Reason != CloseNotReusable {
-			t.Errorf("unexpected close reason %v", e.Reason)
+	mu.Lock()
+	defer mu.Unlock()
+	for _, r := range reasons {
+		if r == CloseNotReusable {
+			return
 		}
 	}
+	t.Errorf("a Connection: close response produced reasons %v, none of them "+
+		"CloseNotReusable — the ordinary HTTP/1.1 churn is still invisible", reasons)
 }
 
 // TestCloseReason_NotReusableHasALabel keeps the new value out of the "unknown"
