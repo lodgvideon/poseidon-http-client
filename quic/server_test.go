@@ -186,6 +186,14 @@ func TestSealPacket_BadPNLen(t *testing.T) {
 // and the in-memory datagram channels between them.
 func setupServerConn(t *testing.T) (*Conn, *Conn, chan []byte, chan []byte) {
 	t.Helper()
+	return setupServerConnWith(t, nil)
+}
+
+// setupServerConnWith is setupServerConn with a hook that may wrap the client's
+// PacketConn before the handshake starts, so a test can inject datagram faults
+// (see faultpc_test.go). A nil wrap is the plain, fault-free path.
+func setupServerConnWith(t *testing.T, wrap func(PacketConn) PacketConn) (*Conn, *Conn, chan []byte, chan []byte) {
+	t.Helper()
 	cert, pool := genServerCert(t)
 	clientTP := concat(
 		tpInt(tpInitialMaxData, 1<<20),
@@ -197,7 +205,10 @@ func setupServerConn(t *testing.T) (*Conn, *Conn, chan []byte, chan []byte) {
 
 	toServer := make(chan []byte, 16)
 	fromServer := make(chan []byte, 16)
-	clientPC := &chanPC{rx: fromServer, tx: toServer}
+	var clientPC PacketConn = &chanPC{rx: fromServer, tx: toServer}
+	if wrap != nil {
+		clientPC = wrap(clientPC)
+	}
 
 	client, err := NewConn(clientPC, &tls.Config{ServerName: "example.com", RootCAs: pool}, clientTP)
 	if err != nil {
