@@ -43,6 +43,17 @@ type dataVec struct {
 	i    int // index of the buffer the cursor sits in
 	off  int // offset within bufs[i]
 	rem  int // bytes not yet handed out
+
+	// single holds the scalar caller's buffer, and bufs is nil in that case.
+	//
+	// A separate field rather than a one-element array inside this struct: the
+	// array form makes bufs point INTO the vec, and escape analysis then cannot
+	// prove the segments handed to the frame writer do not alias it — so the vec
+	// went to the heap and every DATA frame paid an allocation. Measured, and
+	// caught by TestWriteData_DoesNotAllocate. Sub-slicing this field instead
+	// yields a slice whose data pointer is the caller's buffer, which is what the
+	// analyzer needs to see.
+	single []byte
 }
 
 // newDataVec seats a cursor at the start of bufs.
@@ -57,6 +68,14 @@ func newDataVec(bufs [][]byte) (dataVec, error) {
 	return dataVec{bufs: bufs, rem: total}, nil
 }
 
+// seatSingle points a cursor at one contiguous buffer. bufs stays nil, which is
+// what next branches on.
+func (v *dataVec) seatSingle(p []byte) {
+	v.single = p
+	v.bufs = nil
+	v.i, v.off, v.rem = 0, 0, len(p)
+}
+
 // next appends the pieces covering the next n bytes to dst and returns it with
 // the byte count it actually covers. A short return means the cursor ran out
 // early, which the caller must treat as fatal rather than write.
@@ -66,6 +85,18 @@ func newDataVec(bufs [][]byte) (dataVec, error) {
 // explicitly rather than by defer, and an index panic there would strand it for
 // the life of the process.
 func (v *dataVec) next(n int, dst [][]byte) ([][]byte, int) {
+	if v.bufs == nil { // scalar: one contiguous buffer, walked by offset
+		take := n
+		if take > v.rem {
+			take = v.rem
+		}
+		if take > 0 {
+			dst = append(dst, v.single[v.off:v.off+take])
+			v.off += take
+			v.rem -= take
+		}
+		return dst, take
+	}
 	got := 0
 	for got < n && v.i < len(v.bufs) {
 		b := v.bufs[v.i]
@@ -232,21 +263,26 @@ func (c *Conn) emitDataV(v *dataVec, id uint32, n int, last bool, padLen uint8, 
 	return segs, nil
 }
 
-// writeDataV is writeData with a cursor instead of a slice. Every invariant it
-// keeps is writeData's: wmu is never held across a park on credit, the buffer is
-// flushed before parking so the peer can see what it is being asked to grant
-// credit for, id and lifetime are read in one s.mu section, and the padding
-// overhead is charged alongside the data bytes.
-func (c *Conn) writeDataV(ctx context.Context, s *Stream, wantGen uint64, bufs [][]byte, endStream bool) error {
+// writeDataVec is the DATA send loop: chunk at the effective frame size, take
+// credit for each chunk, emit it, flush. Both entry points are wrappers around
+// it, so the invariants live in one place.
+//
+// That matters more here than deduplication usually does. This loop's history is
+// invariant fixes — the stale-generation gate, the flush before parking, the
+// padding debit — and while there were two copies each fix had to be replicated
+// by hand into the other. A missed copy silently reinstates a race that was
+// already shipped once.
+//
+// v is taken by pointer and never retained, so the caller's cursor stays on its
+// stack; that is what lets writeData pass a single-buffer cursor without
+// allocating a slice header array per frame.
+func (c *Conn) writeDataVec(ctx context.Context, s *Stream, wantGen uint64, v *dataVec, endStream bool) error {
 	if c.closed.Load() {
 		return ErrConnClosed
 	}
 	if s.id == 0 {
+		// SendHeaders has not run; the stream has no on-wire identity.
 		return ErrStreamClosed
-	}
-	v, err := newDataVec(bufs)
-	if err != nil {
-		return err
 	}
 	padLen := c.opts.Padding.ForData()
 	padOverhead := 0
@@ -324,7 +360,7 @@ func (c *Conn) writeDataV(ctx context.Context, s *Stream, wantGen uint64, bufs [
 		// from the pre-advance len(p): this is the last frame when the credit just
 		// granted covers everything still uncovered.
 		last := endStream && n == v.rem
-		segs, werr := c.emitDataV(&v, id, n, last, padLen, c.dvSegs)
+		segs, werr := c.emitDataV(v, id, n, last, padLen, c.dvSegs)
 		c.dvSegs = segs
 		if werr != nil {
 			c.wmu.Unlock()
@@ -339,19 +375,45 @@ func (c *Conn) writeDataV(ctx context.Context, s *Stream, wantGen uint64, bufs [
 	return nil
 }
 
+// writeData sends p as DATA. It is writeDataVec over a single buffer.
+func (c *Conn) writeData(ctx context.Context, s *Stream, wantGen uint64, p []byte, endStream bool) error {
+	var v dataVec
+	v.seatSingle(p)
+	return c.writeDataVec(ctx, s, wantGen, &v, endStream)
+}
+
+// writeDataV sends the concatenation of bufs as DATA without joining them.
+func (c *Conn) writeDataV(ctx context.Context, s *Stream, wantGen uint64, bufs [][]byte, endStream bool) error {
+	v, err := newDataVec(bufs)
+	if err != nil {
+		return err
+	}
+	return c.writeDataVec(ctx, s, wantGen, &v, endStream)
+}
+
 // writeHeadersAndDataV is writeHeadersAndData with a vectored body. It keeps the
 // group-commit handling exactly as the scalar form has it: wbatch.enter/leave
 // around wmu and commitFrame at the end, NOT flushWrite. This path never parks
 // after committing credit, so deferring its flush is safe — and replacing
 // commitFrame with a bare flush would leave a writer parked in the batcher's
 // condition variable with nothing left to wake it.
+// writeHeadersAndDataV sends HEADERS and the concatenation of bufs as one write.
 func (c *Conn) writeHeadersAndDataV(ctx context.Context, s *Stream, wantGen uint64, fields []hpack.HeaderField, bufs [][]byte, endStream bool) error {
-	if c.closed.Load() {
-		return ErrConnClosed
-	}
 	v, err := newDataVec(bufs)
 	if err != nil {
 		return err
+	}
+	return c.writeHeadersAndDataVec(ctx, s, wantGen, fields, &v, endStream)
+}
+
+// writeHeadersAndDataVec is the fused one-shot: HEADERS and the whole body in a
+// single write when the credit for all of it is available up front. Both fused
+// entry points are wrappers around it, for the reason writeDataVec exists — the
+// credit-commit boundary here is the one place in this file where a mistake is
+// unrecoverable rather than stream-fatal, and it should exist once.
+func (c *Conn) writeHeadersAndDataVec(ctx context.Context, s *Stream, wantGen uint64, fields []hpack.HeaderField, v *dataVec, endStream bool) error {
+	if c.closed.Load() {
+		return ErrConnClosed
 	}
 	if v.rem == 0 {
 		return c.writeHeadersWithPriority(ctx, s, fields, endStream, nil)
@@ -374,7 +436,7 @@ func (c *Conn) writeHeadersAndDataV(ctx context.Context, s *Stream, wantGen uint
 	}
 	if effective <= 0 {
 		c.wmu.Unlock()
-		return c.slowHeadersThenDataV(ctx, s, wantGen, fields, bufs, endStream)
+		return c.slowHeadersThenDataVec(ctx, s, wantGen, fields, v, endStream)
 	}
 	frames := (v.rem + effective - 1) / effective
 	ok, err := c.tryAcquireSendCreditsAll(s, wantGen, v.rem, padOverhead*frames)
@@ -384,7 +446,7 @@ func (c *Conn) writeHeadersAndDataV(ctx context.Context, s *Stream, wantGen uint
 	}
 	if !ok {
 		c.wmu.Unlock()
-		return c.slowHeadersThenDataV(ctx, s, wantGen, fields, bufs, endStream)
+		return c.slowHeadersThenDataVec(ctx, s, wantGen, fields, v, endStream)
 	}
 
 	// Committed: the credit is spent, and the connection-level half of it has no
@@ -418,7 +480,7 @@ func (c *Conn) writeHeadersAndDataV(ctx context.Context, s *Stream, wantGen uint
 			n = effective
 		}
 		last := endStream && n == v.rem
-		segs, werr := c.emitDataV(&v, id, n, last, padLen, c.dvSegs)
+		segs, werr := c.emitDataV(v, id, n, last, padLen, c.dvSegs)
 		c.dvSegs = segs
 		if werr != nil {
 			return werr
@@ -427,11 +489,17 @@ func (c *Conn) writeHeadersAndDataV(ctx context.Context, s *Stream, wantGen uint
 	return c.commitFrame()
 }
 
-// slowHeadersThenDataV is the fallback when the one-shot cannot run, matching
-// slowHeadersThenData. Assumes wmu is NOT held.
-func (c *Conn) slowHeadersThenDataV(ctx context.Context, s *Stream, wantGen uint64, fields []hpack.HeaderField, bufs [][]byte, endStream bool) error {
+// slowHeadersThenDataVec is the fallback when the one-shot cannot run: the
+// ordinary two-write path. It is reached only BEFORE any credit is committed and
+// before any byte is emitted, so the cursor is still seated at the start and can
+// simply be walked by the normal send loop.
+//
+// One fallback rather than the two this file used to carry, for the same reason
+// the loops merged: it sits on the path a credit-commit failure takes, and that
+// path should not have two implementations.
+func (c *Conn) slowHeadersThenDataVec(ctx context.Context, s *Stream, wantGen uint64, fields []hpack.HeaderField, v *dataVec, endStream bool) error {
 	if err := c.writeHeadersWithPriority(ctx, s, fields, false, nil); err != nil {
 		return err
 	}
-	return c.writeDataV(ctx, s, wantGen, bufs, endStream)
+	return c.writeDataVec(ctx, s, wantGen, v, endStream)
 }
