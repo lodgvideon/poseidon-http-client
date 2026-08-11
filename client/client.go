@@ -768,59 +768,18 @@ func (c *Client) do(ctx context.Context, req *Request, resp *Response) error {
 			release()
 			return fmt.Errorf("client: BodyStream requires a non-nil *Response")
 		}
-		rs, err := beginRespStream(ctx, s)
-		if err != nil {
-			_ = s.Close()
-			release()
-			return preferSendCut(err, sendCut)
-		}
-		ev, err := recvFinalHeaders(ctx, rs)
-		if err != nil {
-			_ = rs.Close()
-			release()
-			return preferSendCut(err, sendCut)
-		}
-		n, perr := parseStatus(ev.Headers, &resp.Headers)
-		if perr != nil {
-			_ = rs.Close()
-			release()
-			return perr
-		}
-		resp.Status = n
-		if ev.Slab != nil {
-			resp.slabs = append(resp.slabs, ev.Slab)
-		}
-		// The reader gets its own cancellable context, not the caller's ctx
-		// directly. Close cancels it, which is what unblocks a Read parked in
-		// Recv: closing the stream alone does not wake that goroutine, so an
-		// abort through the io.ReadCloser left the reader hanging until the
-		// caller's own deadline fired.
-		bodyCtx, bodyCancel := context.WithCancel(ctx)
-		resp.BodyReader = &responseBodyReader{
-			ctx:     bodyCtx,
-			cancel:  bodyCancel,
-			stream:  rs,
-			release: release,
-			resp:    resp,
-			// A response that ended on its HEADERS frame — 204/304, a HEAD, or
-			// any status-only reply — has no DATA or trailer event to end the
-			// body on, so without this the reader pumps one event too many. It
-			// then blocks until ctx (no reset), or reports a benign
-			// RST_STREAM(NO_ERROR) as a *StreamResetError (§8.1, the very thing
-			// this release fixes on the buffered path). doStream sets the same
-			// flag on StreamResponse; this literal was the sibling that did not.
-			done: ev.EndStream,
-			lg:   armLeakGuard("Response.BodyReader"),
+		if err := c.beginStreaming(ctx, s, release, sendCut, resp); err != nil {
+			return err
 		}
 		if !req.DisableDecompression {
 			enc := detectEncoding(resp.Headers)
 			if enc != EncodingIdentity {
 				dr, derr := newDecompressingReader(enc, resp.BodyReader)
 				if derr != nil {
-					// Release via the responseBodyReader: its closeOnce makes
-					// the single stream.Close()+release() idempotent against the
-					// caller's later resp.Reset(). Clearing BodyReader drops the
-					// now-dead reference.
+					// Release via the responseBodyReader: its closeOnce makes the
+					// single stream.Close()+release() idempotent against the caller's
+					// later resp.Reset(). Clearing BodyReader drops the now-dead
+					// reference.
 					_ = resp.BodyReader.Close()
 					resp.BodyReader = nil
 					return derr
@@ -893,42 +852,7 @@ func (c *Client) doStream(ctx context.Context, req *Request, sr *StreamResponse)
 		return err
 	}
 
-	rs, err := beginRespStream(ctx, s)
-	if err != nil {
-		_ = s.Close()
-		release()
-		return preferSendCut(err, sendCut)
-	}
-	ev, err := recvFinalHeaders(ctx, rs)
-	if err != nil {
-		_ = rs.Close()
-		release()
-		return preferSendCut(err, sendCut)
-	}
-	n, perr := parseStatus(ev.Headers, &sr.Headers)
-	if perr != nil {
-		_ = rs.Close()
-		release()
-		return perr
-	}
-	sr.Status = n
-	if ev.Slab != nil {
-		sr.slabs = append(sr.slabs, ev.Slab) // transfer slab ownership
-	}
-	sr.stream = rs
-	sr.release = release
-	// Pre-merge the caller's context with an abort Close can fire. conn.Stream
-	// Recv parks on the event channel and the stream's own signals, so closing
-	// the stream does not wake a reader already blocked in it; this is what
-	// does. Building it here rather than per Recv keeps the streaming path
-	// allocation-free for a caller that passes this same context back.
-	sr.doCtx = ctx
-	sr.recvCtx, sr.abortCancel = context.WithCancel(ctx)
-	sr.lg = armLeakGuard("StreamResponse")
-	if ev.EndStream {
-		sr.drained = true
-	}
-	return nil
+	return c.beginStreaming(ctx, s, release, sendCut, sr)
 }
 
 // beginRespStream selects the incremental streaming reader for a protoStream,
