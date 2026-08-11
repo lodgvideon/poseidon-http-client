@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/lodgvideon/poseidon-http-client/hpack"
+	"github.com/lodgvideon/poseidon-http-client/header"
 	"github.com/lodgvideon/poseidon-http-client/http1"
 )
 
@@ -49,7 +49,7 @@ func TestExchange_WriteRequest_HeadIsOneWrite(t *testing.T) {
 	ex := c.NewExchange()
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	err := ex.WriteRequest(ctx, []hpack.HeaderField{
+	err := ex.WriteRequest(ctx, []header.Field{
 		{Name: []byte(":method"), Value: []byte("GET")},
 		{Name: []byte(":path"), Value: []byte("/r")},
 		{Name: []byte(":authority"), Value: []byte("example.com")},
@@ -99,7 +99,7 @@ func TestExchange_WriteRequest_HeadBufReuse(t *testing.T) {
 
 	// First: a long path so headBuf grows.
 	ex1 := c.NewExchange()
-	if err := ex1.WriteRequest(ctx, []hpack.HeaderField{
+	if err := ex1.WriteRequest(ctx, []header.Field{
 		{Name: []byte(":method"), Value: []byte("GET")},
 		{Name: []byte(":path"), Value: []byte("/a-deliberately-long-first-path-to-grow-the-buffer")},
 		{Name: []byte(":authority"), Value: []byte("example.com")},
@@ -117,7 +117,7 @@ func TestExchange_WriteRequest_HeadBufReuse(t *testing.T) {
 	// Second: a short path. If the buffer were not truncated, the long first
 	// path's tail would leak into this head.
 	ex2 := c.NewExchange()
-	if err := ex2.WriteRequest(ctx, []hpack.HeaderField{
+	if err := ex2.WriteRequest(ctx, []header.Field{
 		{Name: []byte(":method"), Value: []byte("GET")},
 		{Name: []byte(":path"), Value: []byte("/b")},
 		{Name: []byte(":authority"), Value: []byte("example.com")},

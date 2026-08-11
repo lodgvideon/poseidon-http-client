@@ -6,7 +6,7 @@ import (
 	"sync/atomic"
 
 	"github.com/lodgvideon/poseidon-http-client/frame"
-	"github.com/lodgvideon/poseidon-http-client/hpack"
+	"github.com/lodgvideon/poseidon-http-client/header"
 )
 
 // StreamEventType discriminates the StreamEvent variants.
@@ -57,10 +57,10 @@ func (t StreamEventType) String() string {
 // returns the pointer to conn.GetHeaderSlabPool() in Response.Reset / sr.Close.
 type StreamEvent struct {
 	Type      StreamEventType
-	Headers   []hpack.HeaderField // EventHeaders / EventTrailers / EventInterimHeaders
-	Data      []byte              // EventData
-	EndStream bool                // any event closing the response side
-	RSTCode   frame.ErrCode       // EventReset
+	Headers   []header.Field // EventHeaders / EventTrailers / EventInterimHeaders
+	Data      []byte         // EventData
+	EndStream bool           // any event closing the response side
+	RSTCode   frame.ErrCode  // EventReset
 
 	// PushStreamID is the promised (even) stream ID for EventPushPromise.
 	PushStreamID uint32 // EventPushPromise
@@ -84,7 +84,7 @@ type StreamEvent struct {
 // streamWriter is the narrow surface a *Stream needs from its owner Conn.
 // Tests fake this out; production code wires it to *Conn.
 type streamWriter interface {
-	writeHeadersWithPriority(ctx context.Context, s *Stream, fields []hpack.HeaderField, endStream bool, prio *frame.Priority) error
+	writeHeadersWithPriority(ctx context.Context, s *Stream, fields []header.Field, endStream bool, prio *frame.Priority) error
 	writeData(ctx context.Context, s *Stream, wantGen uint64, p []byte, endStream bool) error
 	writeRSTStream(s *Stream, code frame.ErrCode) error
 }
@@ -668,7 +668,7 @@ func (s *Stream) pushLocked(e StreamEvent) bool {
 // Falls back to the two separate calls when the writer is not a real Conn (tests
 // fake streamWriter), which keeps this a pure optimisation rather than a second
 // code path with its own semantics.
-func (s *Stream) sendHeadersAndData(ctx context.Context, wantGen uint64, fields []hpack.HeaderField, p []byte, endStream bool) error {
+func (s *Stream) sendHeadersAndData(ctx context.Context, wantGen uint64, fields []header.Field, p []byte, endStream bool) error {
 	c, ok := s.w.(*Conn)
 	if !ok {
 		if err := s.sendHeadersWithPriority(ctx, wantGen, fields, false, nil); err != nil {
@@ -717,7 +717,7 @@ func (s *Stream) sendHeadersAndData(ctx context.Context, wantGen uint64, fields 
 // priority payload. StreamID 0 in prio means root stream (no
 // parent). When prio is nil the frame is emitted identically to
 // SendHeaders.
-func (s *Stream) sendHeadersWithPriority(ctx context.Context, wantGen uint64, fields []hpack.HeaderField, endStream bool, prio *frame.Priority) error {
+func (s *Stream) sendHeadersWithPriority(ctx context.Context, wantGen uint64, fields []header.Field, endStream bool, prio *frame.Priority) error {
 	s.mu.Lock()
 	if s.gen.Load() != wantGen {
 		s.mu.Unlock()
@@ -1066,7 +1066,7 @@ func (r StreamRef) SendData(ctx context.Context, p []byte, endStream bool) error
 }
 
 // SendHeaders sends a HEADERS frame for this lifetime.
-func (r StreamRef) SendHeaders(ctx context.Context, fields []hpack.HeaderField, endStream bool) error {
+func (r StreamRef) SendHeaders(ctx context.Context, fields []header.Field, endStream bool) error {
 	return r.SendHeadersWithPriority(ctx, fields, endStream, nil)
 }
 
@@ -1078,7 +1078,7 @@ func (r StreamRef) SendHeaders(ctx context.Context, fields []hpack.HeaderField, 
 // credit for the whole body is not immediately available, or the writer is not a
 // real Conn, it does exactly those two calls instead. Never blocks for credit
 // while holding the write lock.
-func (r StreamRef) SendHeadersAndData(ctx context.Context, fields []hpack.HeaderField, p []byte, endStream bool) error {
+func (r StreamRef) SendHeadersAndData(ctx context.Context, fields []header.Field, p []byte, endStream bool) error {
 	if r.s == nil {
 		return ErrStaleStream
 	}
@@ -1086,7 +1086,7 @@ func (r StreamRef) SendHeadersAndData(ctx context.Context, fields []hpack.Header
 }
 
 // SendHeadersWithPriority is SendHeaders with PRIORITY fields embedded.
-func (r StreamRef) SendHeadersWithPriority(ctx context.Context, fields []hpack.HeaderField, endStream bool, prio *frame.Priority) error {
+func (r StreamRef) SendHeadersWithPriority(ctx context.Context, fields []header.Field, endStream bool, prio *frame.Priority) error {
 	if r.s == nil {
 		return ErrStaleStream
 	}

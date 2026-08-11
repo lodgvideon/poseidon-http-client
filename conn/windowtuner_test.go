@@ -10,7 +10,7 @@ import (
 	"time"
 
 	"github.com/lodgvideon/poseidon-http-client/frame"
-	"github.com/lodgvideon/poseidon-http-client/hpack"
+	"github.com/lodgvideon/poseidon-http-client/header"
 )
 
 // tunerFor builds a tuner and the Conn it publishes into, both bare, so the
@@ -384,7 +384,7 @@ func TestIntegration_AutoTuneRecvWindow_RealPeerCompletes(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewStream: %v", err)
 	}
-	if err := s.SendHeaders(ctx, []hpack.HeaderField{
+	if err := s.SendHeaders(ctx, []header.Field{
 		{Name: []byte(":method"), Value: []byte("GET")},
 		{Name: []byte(":scheme"), Value: []byte("https")},
 		{Name: []byte(":authority"), Value: []byte("example.com")},
@@ -426,7 +426,7 @@ func TestIntegration_AutoTuneRecvWindow_OffLeavesTheWindowAlone(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewStream: %v", err)
 	}
-	if err := s.SendHeaders(ctx, []hpack.HeaderField{
+	if err := s.SendHeaders(ctx, []header.Field{
 		{Name: []byte(":method"), Value: []byte("GET")},
 		{Name: []byte(":scheme"), Value: []byte("https")},
 		{Name: []byte(":authority"), Value: []byte("example.com")},

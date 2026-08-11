@@ -3,7 +3,7 @@ package conn
 import (
 	"testing"
 
-	"github.com/lodgvideon/poseidon-http-client/hpack"
+	"github.com/lodgvideon/poseidon-http-client/header"
 )
 
 // Every header field delivered to a caller is a view into one shared byte slab.
@@ -21,7 +21,7 @@ import (
 // does what a caller is entitled to do — append to a header it was given — and
 // checks the neighbour is untouched.
 func TestCopyFieldsToSlab_AppendCannotReachTheNextField(t *testing.T) {
-	in := []hpack.HeaderField{
+	in := []header.Field{
 		{Name: []byte("first"), Value: []byte("AAAA")},
 		{Name: []byte("second"), Value: []byte("BBBB")},
 		{Name: []byte("third"), Value: []byte("CCCC")},
@@ -48,7 +48,7 @@ func TestCopyFieldsToSlab_AppendCannotReachTheNextField(t *testing.T) {
 // TestCopyFieldsToSlab_CapacityIsClamped states the same requirement directly,
 // so a failure names the cause rather than the symptom.
 func TestCopyFieldsToSlab_CapacityIsClamped(t *testing.T) {
-	in := []hpack.HeaderField{
+	in := []header.Field{
 		{Name: []byte("a"), Value: []byte("bb")},
 		{Name: []byte("ccc"), Value: []byte("dddd")},
 	}
@@ -70,9 +70,9 @@ func TestCopyFieldsToSlab_CapacityIsClamped(t *testing.T) {
 // divergence: the push path set only Name and Value, so a promised header
 // arrived with its indexing disposition zeroed.
 func TestCopyFieldsToSlab_PreservesIndexing(t *testing.T) {
-	in := []hpack.HeaderField{
+	in := []header.Field{
 		{Name: []byte("plain"), Value: []byte("1")},
-		{Name: []byte("sensitive"), Value: []byte("2"), Indexing: hpack.IndexNever},
+		{Name: []byte("sensitive"), Value: []byte("2"), Indexing: header.IndexNever},
 	}
 	copied, slabPtr := copyFieldsToSlab(in)
 	defer func() { *slabPtr = (*slabPtr)[:0]; headerSlabPool.Put(slabPtr) }()
@@ -91,7 +91,7 @@ func TestCopyFieldsToSlab_PreservesIndexing(t *testing.T) {
 func TestCopyFieldsToSlab_CopiesTheBytes(t *testing.T) {
 	name := []byte("k")
 	value := []byte("v")
-	copied, slabPtr := copyFieldsToSlab([]hpack.HeaderField{{Name: name, Value: value}})
+	copied, slabPtr := copyFieldsToSlab([]header.Field{{Name: name, Value: value}})
 	defer func() { *slabPtr = (*slabPtr)[:0]; headerSlabPool.Put(slabPtr) }()
 
 	name[0] = 'Z'

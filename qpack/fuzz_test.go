@@ -2,8 +2,6 @@ package qpack
 
 import (
 	"testing"
-
-	"github.com/lodgvideon/poseidon-http-client/hpack"
 )
 
 // FuzzDecodeFieldSection feeds arbitrary bytes to the QPACK field-section decoder
@@ -18,7 +16,7 @@ import (
 func FuzzDecodeFieldSection(f *testing.F) {
 	// A valid static-only field section built by the encoder (:method GET, :path /).
 	enc := NewEncoder()
-	valid := enc.EncodeFieldSection(nil, []hpack.HeaderField{
+	valid := enc.EncodeFieldSection(nil, []header.Field{
 		{Name: []byte(":method"), Value: []byte("GET")},
 		{Name: []byte(":path"), Value: []byte("/")},
 		{Name: []byte("x-custom"), Value: []byte("value")},

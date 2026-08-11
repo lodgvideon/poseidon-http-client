@@ -5,7 +5,7 @@ import (
 	"errors"
 
 	"github.com/lodgvideon/poseidon-http-client/frame"
-	"github.com/lodgvideon/poseidon-http-client/hpack"
+	"github.com/lodgvideon/poseidon-http-client/header"
 )
 
 // Vectored DATA: send a body that lives in several buffers as the same frames a
@@ -130,7 +130,7 @@ func (r StreamRef) SendDataV(ctx context.Context, bufs [][]byte, endStream bool)
 
 // SendHeadersAndDataV is SendHeadersAndData with a vectored body — the shape
 // every unary gRPC call takes, so it is the one that matters most.
-func (r StreamRef) SendHeadersAndDataV(ctx context.Context, fields []hpack.HeaderField, bufs [][]byte, endStream bool) error {
+func (r StreamRef) SendHeadersAndDataV(ctx context.Context, fields []header.Field, bufs [][]byte, endStream bool) error {
 	if r.s == nil {
 		return ErrStaleStream
 	}
@@ -176,7 +176,7 @@ func (s *Stream) sendDataV(ctx context.Context, wantGen uint64, bufs [][]byte, e
 }
 
 // sendHeadersAndDataV mirrors sendHeadersAndData.
-func (s *Stream) sendHeadersAndDataV(ctx context.Context, wantGen uint64, fields []hpack.HeaderField, bufs [][]byte, endStream bool) error {
+func (s *Stream) sendHeadersAndDataV(ctx context.Context, wantGen uint64, fields []header.Field, bufs [][]byte, endStream bool) error {
 	c, ok := s.w.(*Conn)
 	if !ok {
 		if err := s.sendHeadersWithPriority(ctx, wantGen, fields, false, nil); err != nil {
@@ -398,7 +398,7 @@ func (c *Conn) writeDataV(ctx context.Context, s *Stream, wantGen uint64, bufs [
 // commitFrame with a bare flush would leave a writer parked in the batcher's
 // condition variable with nothing left to wake it.
 // writeHeadersAndDataV sends HEADERS and the concatenation of bufs as one write.
-func (c *Conn) writeHeadersAndDataV(ctx context.Context, s *Stream, wantGen uint64, fields []hpack.HeaderField, bufs [][]byte, endStream bool) error {
+func (c *Conn) writeHeadersAndDataV(ctx context.Context, s *Stream, wantGen uint64, fields []header.Field, bufs [][]byte, endStream bool) error {
 	v, err := newDataVec(bufs)
 	if err != nil {
 		return err
@@ -411,7 +411,7 @@ func (c *Conn) writeHeadersAndDataV(ctx context.Context, s *Stream, wantGen uint
 // entry points are wrappers around it, for the reason writeDataVec exists — the
 // credit-commit boundary here is the one place in this file where a mistake is
 // unrecoverable rather than stream-fatal, and it should exist once.
-func (c *Conn) writeHeadersAndDataVec(ctx context.Context, s *Stream, wantGen uint64, fields []hpack.HeaderField, v *dataVec, endStream bool) error {
+func (c *Conn) writeHeadersAndDataVec(ctx context.Context, s *Stream, wantGen uint64, fields []header.Field, v *dataVec, endStream bool) error {
 	if c.closed.Load() {
 		return ErrConnClosed
 	}
@@ -497,7 +497,7 @@ func (c *Conn) writeHeadersAndDataVec(ctx context.Context, s *Stream, wantGen ui
 // One fallback rather than the two this file used to carry, for the same reason
 // the loops merged: it sits on the path a credit-commit failure takes, and that
 // path should not have two implementations.
-func (c *Conn) slowHeadersThenDataVec(ctx context.Context, s *Stream, wantGen uint64, fields []hpack.HeaderField, v *dataVec, endStream bool) error {
+func (c *Conn) slowHeadersThenDataVec(ctx context.Context, s *Stream, wantGen uint64, fields []header.Field, v *dataVec, endStream bool) error {
 	if err := c.writeHeadersWithPriority(ctx, s, fields, false, nil); err != nil {
 		return err
 	}

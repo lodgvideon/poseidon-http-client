@@ -19,7 +19,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/lodgvideon/poseidon-http-client/hpack"
+	"github.com/lodgvideon/poseidon-http-client/header"
 	"github.com/lodgvideon/poseidon-http-client/http1"
 )
 
@@ -389,7 +389,7 @@ func TestConformance_RFC9112_Sec6_WriteBodyWithoutFramingRefused(t *testing.T) {
 // that many octets.
 func TestConformance_RFC9112_Sec6_WriteBodyWithFramingStillWorks(t *testing.T) {
 	ex, capture := rawCapture(t)
-	fields := reqCL("POST", hpack.HeaderField{Name: []byte("content-length"), Value: []byte("5")})
+	fields := reqCL("POST", header.Field{Name: []byte("content-length"), Value: []byte("5")})
 	if err := ex.WriteRequest(context.Background(), fields, false); err != nil {
 		t.Fatalf("WriteRequest: %v", err)
 	}

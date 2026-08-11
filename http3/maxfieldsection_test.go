@@ -5,7 +5,7 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/lodgvideon/poseidon-http-client/hpack"
+	"github.com/lodgvideon/poseidon-http-client/header"
 	"github.com/lodgvideon/poseidon-http-client/qpack"
 )
 
@@ -34,7 +34,7 @@ func TestConformance_RFC9114_Sec422_ExtraHeaderCounted(t *testing.T) {
 	var enc qpack.Encoder
 	req := &Request{
 		Method: "GET", Scheme: "https", Authority: "h", Path: "/",
-		Headers: []hpack.HeaderField{{Name: []byte("accept"), Value: []byte("text/html")}},
+		Headers: []header.Field{{Name: []byte("accept"), Value: []byte("text/html")}},
 	}
 	const base = (7 + 3 + 32) + (7 + 5 + 32) + (10 + 1 + 32) + (5 + 1 + 32) // 167
 	const extra = 6 + 9 + 32                                                // accept: text/html = 47

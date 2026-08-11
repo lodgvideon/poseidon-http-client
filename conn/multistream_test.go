@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/lodgvideon/poseidon-http-client/hpack"
+	"github.com/lodgvideon/poseidon-http-client/header"
 )
 
 // TestConn_NewStream_ConcurrentAllocation_UniqueOddIDs verifies that
@@ -120,7 +120,7 @@ func TestIntegration_TenConcurrentStreams_Echo(t *testing.T) {
 			}
 			body := []byte(fmt.Sprintf("hello-from-%d", i))
 			cl := fmt.Sprintf("%d", len(body))
-			if err := s.SendHeaders(ctx, []hpack.HeaderField{
+			if err := s.SendHeaders(ctx, []header.Field{
 				{Name: []byte(":method"), Value: []byte("POST")},
 				{Name: []byte(":scheme"), Value: []byte("https")},
 				{Name: []byte(":authority"), Value: []byte("example.com")},

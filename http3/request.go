@@ -4,7 +4,7 @@ import (
 	"errors"
 	"strings"
 
-	"github.com/lodgvideon/poseidon-http-client/hpack"
+	"github.com/lodgvideon/poseidon-http-client/header"
 	"github.com/lodgvideon/poseidon-http-client/qpack"
 )
 
@@ -26,7 +26,7 @@ type Request struct {
 	Scheme    string
 	Authority string // omitted from the field section when empty
 	Path      string
-	Headers   []hpack.HeaderField
+	Headers   []header.Field
 	Body      []byte // optional request body, sent in a DATA frame after HEADERS
 }
 
@@ -38,7 +38,7 @@ func requiresAuthority(scheme string) bool {
 
 // hostHeaderValue returns the value of the Host header (lowercase "host" in
 // HTTP/3) among the regular fields, and whether one is present.
-func hostHeaderValue(headers []hpack.HeaderField) (string, bool) {
+func hostHeaderValue(headers []header.Field) (string, bool) {
 	for i := range headers {
 		if string(headers[i].Name) == "host" {
 			return string(headers[i].Value), true
@@ -50,7 +50,7 @@ func hostHeaderValue(headers []hpack.HeaderField) (string, bool) {
 // defaultSensitiveField reports whether a field name carries credentials by
 // convention and so must not enter the QPACK dynamic table, a compression context
 // shared by every request on the connection (RFC 9114 §10.3, RFC 9204 §7.1). The
-// caller can mark any other field with hpack.HeaderField.Sensitive; this is the
+// caller can mark any other field with header.Field.Sensitive; this is the
 // floor, not the ceiling, because a caller who never sets the flag would otherwise
 // get the default-path exposure the rule exists to prevent. Names are already
 // lowercase — validFieldName rejects uppercase (§4.2).
@@ -99,15 +99,15 @@ func (r *Request) EncodeHeaders(enc *qpack.Encoder, dst []byte, maxFieldSection 
 			return nil, ErrH3Message
 		}
 	}
-	fields := make([]hpack.HeaderField, 0, 4+len(r.Headers))
+	fields := make([]header.Field, 0, 4+len(r.Headers))
 	fields = append(fields,
-		hpack.HeaderField{Name: []byte(":method"), Value: []byte(r.Method)},
-		hpack.HeaderField{Name: []byte(":scheme"), Value: []byte(r.Scheme)},
+		header.Field{Name: []byte(":method"), Value: []byte(r.Method)},
+		header.Field{Name: []byte(":scheme"), Value: []byte(r.Scheme)},
 	)
 	if r.Authority != "" {
-		fields = append(fields, hpack.HeaderField{Name: []byte(":authority"), Value: []byte(r.Authority)})
+		fields = append(fields, header.Field{Name: []byte(":authority"), Value: []byte(r.Authority)})
 	}
-	fields = append(fields, hpack.HeaderField{Name: []byte(":path"), Value: []byte(r.Path)})
+	fields = append(fields, header.Field{Name: []byte(":path"), Value: []byte(r.Path)})
 
 	for i := range r.Headers {
 		h := r.Headers[i]
@@ -115,7 +115,7 @@ func (r *Request) EncodeHeaders(enc *qpack.Encoder, dst []byte, maxFieldSection 
 			return nil, ErrH3Message
 		}
 		if defaultSensitiveField(h.Name) {
-			h.Indexing = hpack.IndexNever
+			h.Indexing = header.IndexNever
 		}
 		fields = append(fields, h)
 	}

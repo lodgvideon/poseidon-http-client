@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/lodgvideon/poseidon-http-client/hpack"
+	"github.com/lodgvideon/poseidon-http-client/header"
 	"github.com/lodgvideon/poseidon-http-client/http1"
 )
 
@@ -23,7 +23,7 @@ func TestConformance_RFC9110_Sec8_6_BodyMustMatchDeclaredContentLength(t *testin
 	t.Run("over-run refused before the excess reaches the wire", func(t *testing.T) {
 		ex, capture := rawCapture(t)
 		if err := ex.WriteRequest(context.Background(),
-			reqCL("POST", hpack.HeaderField{Name: []byte("Content-Length"), Value: []byte("5")}), false); err != nil {
+			reqCL("POST", header.Field{Name: []byte("Content-Length"), Value: []byte("5")}), false); err != nil {
 			t.Fatalf("WriteRequest: %v", err)
 		}
 		err := ex.WriteBody(context.Background(), []byte("0123456789"), true)
@@ -38,7 +38,7 @@ func TestConformance_RFC9110_Sec8_6_BodyMustMatchDeclaredContentLength(t *testin
 	t.Run("under-run refused at fin", func(t *testing.T) {
 		ex, _ := rawCapture(t)
 		if err := ex.WriteRequest(context.Background(),
-			reqCL("POST", hpack.HeaderField{Name: []byte("Content-Length"), Value: []byte("5")}), false); err != nil {
+			reqCL("POST", header.Field{Name: []byte("Content-Length"), Value: []byte("5")}), false); err != nil {
 			t.Fatalf("WriteRequest: %v", err)
 		}
 		err := ex.WriteBody(context.Background(), []byte("abc"), true)
@@ -50,7 +50,7 @@ func TestConformance_RFC9110_Sec8_6_BodyMustMatchDeclaredContentLength(t *testin
 	t.Run("exact match accepted", func(t *testing.T) {
 		ex, capture := rawCapture(t)
 		if err := ex.WriteRequest(context.Background(),
-			reqCL("POST", hpack.HeaderField{Name: []byte("Content-Length"), Value: []byte("5")}), false); err != nil {
+			reqCL("POST", header.Field{Name: []byte("Content-Length"), Value: []byte("5")}), false); err != nil {
 			t.Fatalf("WriteRequest: %v", err)
 		}
 		if err := ex.WriteBody(context.Background(), []byte("HELLO"), true); err != nil {
@@ -64,7 +64,7 @@ func TestConformance_RFC9110_Sec8_6_BodyMustMatchDeclaredContentLength(t *testin
 	t.Run("split writes summing to the declaration accepted", func(t *testing.T) {
 		ex, _ := rawCapture(t)
 		if err := ex.WriteRequest(context.Background(),
-			reqCL("POST", hpack.HeaderField{Name: []byte("Content-Length"), Value: []byte("5")}), false); err != nil {
+			reqCL("POST", header.Field{Name: []byte("Content-Length"), Value: []byte("5")}), false); err != nil {
 			t.Fatalf("WriteRequest: %v", err)
 		}
 		if err := ex.WriteBody(context.Background(), []byte("HE"), false); err != nil {
@@ -100,7 +100,7 @@ func TestConformance_RFC9110_Sec8_6_RequestContentLengthMustBe1DIGIT(t *testing.
 		t.Run(cl, func(t *testing.T) {
 			ex, capture := rawCapture(t)
 			err := ex.WriteRequest(context.Background(),
-				reqCL("POST", hpack.HeaderField{Name: []byte("Content-Length"), Value: []byte(cl)}), false)
+				reqCL("POST", header.Field{Name: []byte("Content-Length"), Value: []byte(cl)}), false)
 			if !errors.Is(err, http1.ErrInvalidRequest) {
 				t.Fatalf("WriteRequest(Content-Length %q) = %v, want ErrInvalidRequest", cl, err)
 			}
@@ -115,7 +115,7 @@ func TestConformance_RFC9110_Sec8_6_RequestContentLengthMustBe1DIGIT(t *testing.
 		t.Run("accepted "+cl, func(t *testing.T) {
 			ex, _ := rawCapture(t)
 			if err := ex.WriteRequest(context.Background(),
-				reqCL("POST", hpack.HeaderField{Name: []byte("Content-Length"), Value: []byte(cl)}), false); err != nil {
+				reqCL("POST", header.Field{Name: []byte("Content-Length"), Value: []byte(cl)}), false); err != nil {
 				t.Fatalf("WriteRequest(Content-Length %q) = %v, want nil", cl, err)
 			}
 		})

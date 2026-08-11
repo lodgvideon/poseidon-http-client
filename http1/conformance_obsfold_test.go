@@ -25,11 +25,11 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/lodgvideon/poseidon-http-client/hpack"
+	"github.com/lodgvideon/poseidon-http-client/header"
 	"github.com/lodgvideon/poseidon-http-client/http1"
 )
 
-func fieldValue(hdrs []hpack.HeaderField, name string) (string, bool) {
+func fieldValue(hdrs []header.Field, name string) (string, bool) {
 	for _, h := range hdrs {
 		if string(h.Name) == name {
 			return string(h.Value), true

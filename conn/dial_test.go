@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/lodgvideon/poseidon-http-client/hpack"
+	"github.com/lodgvideon/poseidon-http-client/header"
 )
 
 // startH2CServer starts an H2C (cleartext HTTP/2) server on a random
@@ -53,7 +53,7 @@ func TestPlaintextDialer_H2C(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewStream: %v", err)
 	}
-	if err := s.SendHeaders(ctx, []hpack.HeaderField{
+	if err := s.SendHeaders(ctx, []header.Field{
 		{Name: []byte(":method"), Value: []byte("GET")},
 		{Name: []byte(":scheme"), Value: []byte("http")},
 		{Name: []byte(":authority"), Value: []byte(addr)},

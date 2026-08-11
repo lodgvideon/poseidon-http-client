@@ -4,6 +4,7 @@ import (
 	"errors"
 	"testing"
 
+	"github.com/lodgvideon/poseidon-http-client/header"
 	"github.com/lodgvideon/poseidon-http-client/hpack"
 )
 
@@ -178,7 +179,7 @@ func FuzzParseEncoderInstructions(f *testing.F) {
 	if err != nil {
 		f.Fatalf("NewDynamicEncoder: %v", err)
 	}
-	enc.EncodeFieldSection(nil, []hpack.HeaderField{
+	enc.EncodeFieldSection(nil, []header.Field{
 		{Name: []byte("x-custom"), Value: []byte("value")},
 		{Name: []byte("cookie"), Value: []byte("a=b")},
 	})
@@ -294,7 +295,7 @@ func FuzzParseDecoderInstructions(f *testing.F) {
 				t.Fatalf("NewDynamicEncoder: %v", err)
 			}
 			for i := uint64(0); i < nInserts%16; i++ {
-				e.EncodeFieldSection(nil, []hpack.HeaderField{
+				e.EncodeFieldSection(nil, []header.Field{
 					{Name: []byte("x-fuzz"), Value: []byte{byte('a' + i)}},
 				})
 			}

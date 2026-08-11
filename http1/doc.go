@@ -11,7 +11,7 @@
 // Exchange is the unit of one request/response pair. It translates the H2-style
 // pseudo-header API (":method", ":path", ":authority", ":scheme") to HTTP/1.1
 // wire format, writes the request using net.Buffers (writev syscall when the
-// OS supports it), and parses the response back into hpack.HeaderField slices.
+// OS supports it), and parses the response back into header.Field slices.
 //
 // At most one Exchange is in-flight per Conn (no pipelining). The caller
 // must serialize exchanges — typically by wiring Conn into a transport that

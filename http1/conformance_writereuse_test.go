@@ -14,7 +14,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/lodgvideon/poseidon-http-client/hpack"
+	"github.com/lodgvideon/poseidon-http-client/header"
 	"github.com/lodgvideon/poseidon-http-client/http1"
 )
 
@@ -90,7 +90,7 @@ func TestConformance_RFC9112_Sec9_3_PartialWriteNotPoolable(t *testing.T) {
 		nc := &halfDeadConn{okBytes: 4096, resp: []byte(resp)}
 		c := http1.NewConn(nc)
 		ex := c.NewExchange()
-		fields := reqCL("POST", hpack.HeaderField{
+		fields := reqCL("POST", header.Field{
 			Name: []byte("content-length"), Value: []byte("5"),
 		})
 		if err := ex.WriteRequest(context.Background(), fields, false); err != nil {
@@ -120,7 +120,7 @@ func TestConformance_RFC9112_Sec9_3_AbandonedUploadNotPoolable(t *testing.T) {
 	srv, ex := bodyExchange(t, "HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n")
 	defer srv.Close()
 
-	fields := reqCL("POST", hpack.HeaderField{
+	fields := reqCL("POST", header.Field{
 		Name: []byte("content-length"), Value: []byte("5"),
 	})
 	if err := ex.WriteRequest(context.Background(), fields, false); err != nil {
@@ -151,7 +151,7 @@ func TestConformance_RFC9112_Sec9_3_CompleteUploadStillPoolable(t *testing.T) {
 	srv, ex := bodyExchange(t, "HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n")
 	defer srv.Close()
 
-	fields := reqCL("POST", hpack.HeaderField{
+	fields := reqCL("POST", header.Field{
 		Name: []byte("content-length"), Value: []byte("5"),
 	})
 	if err := ex.WriteRequest(context.Background(), fields, false); err != nil {

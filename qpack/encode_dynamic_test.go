@@ -6,6 +6,7 @@ import (
 	"strconv"
 	"testing"
 
+	"github.com/lodgvideon/poseidon-http-client/header"
 	"github.com/lodgvideon/poseidon-http-client/hpack"
 )
 
@@ -36,7 +37,7 @@ func TestConformance_RFC9204_Sec21_EncodeReferenceAfterAck(t *testing.T) {
 		t.Fatalf("server table capacity = %d, want %d", server.Capacity(), serverMax)
 	}
 
-	fields := []hpack.HeaderField{
+	fields := []header.Field{
 		hf(":method", "GET"),
 		hf(":scheme", "https"),
 		hf(":authority", "example.com"),
@@ -102,7 +103,7 @@ func TestConformance_RFC9204_Sec214_ReferenceOnlyAcknowledged(t *testing.T) {
 	}
 	server := NewDynamicTable(serverMax)
 	mustApply(t, server, enc.DrainEncoderInstructions(nil))
-	fields := []hpack.HeaderField{
+	fields := []header.Field{
 		hf(":authority", "example.com"),
 		hf("cookie", "sess=abc"),
 	}
@@ -160,7 +161,7 @@ func TestConformance_RFC9204_Sec71_SensitiveNeverIndexed(t *testing.T) {
 		t.Fatalf("NewDynamicEncoder: %v", err)
 	}
 	enc.DrainEncoderInstructions(nil) // drop the Set Dynamic Table Capacity instruction
-	secret := []hpack.HeaderField{{Name: []byte("authorization"), Value: []byte("Bearer s3cr3t"), Indexing: hpack.IndexNever}}
+	secret := []header.Field{{Name: []byte("authorization"), Value: []byte("Bearer s3cr3t"), Indexing: hpack.IndexNever}}
 	// Encode it three times: without the sensitive flag the second pass would
 	// insert it and the third would reference it Base-relative.
 	for round := 0; round < 3; round++ {
@@ -181,7 +182,7 @@ func TestConformance_RFC9204_Sec71_SensitiveNeverIndexed(t *testing.T) {
 		}
 	}
 	// Control: the same field without the flag is inserted and then referenced.
-	plain := []hpack.HeaderField{{Name: []byte("authorization"), Value: []byte("Bearer s3cr3t")}}
+	plain := []header.Field{{Name: []byte("authorization"), Value: []byte("Bearer s3cr3t")}}
 	enc2, err := NewDynamicEncoder(4096, 4096)
 	if err != nil {
 		t.Fatalf("NewDynamicEncoder: %v", err)
@@ -201,7 +202,7 @@ func TestConformance_RFC9204_Sec44_ParseDecoderInstructions(t *testing.T) {
 		}
 		enc.DrainEncoderInstructions(nil) // discard the Set Capacity instruction
 		if inserts > 0 {
-			fields := make([]hpack.HeaderField, inserts)
+			fields := make([]header.Field, inserts)
 			for i := range fields {
 				fields[i] = hf("x-h"+strconv.Itoa(i), "v")
 			}
@@ -269,7 +270,7 @@ func TestConformance_RFC9204_Sec322_EncoderNeverEvicts(t *testing.T) {
 	}
 	server := NewDynamicTable(capacity)
 	mustApply(t, server, enc.DrainEncoderInstructions(nil))
-	fields := make([]hpack.HeaderField, 50)
+	fields := make([]header.Field, 50)
 	for i := range fields {
 		fields[i] = hf("x-key-"+strconv.Itoa(i), "value-"+strconv.Itoa(i))
 	}

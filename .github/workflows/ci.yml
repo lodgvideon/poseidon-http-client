@@ -37,6 +37,22 @@ jobs:
       # bench-gate's absolute zero-alloc rule covers neither package.
       - name: Allocation gates (not under -race)
         run: go test -count=1 -run 'Allocs|DoesNotAllocate|IsNotCopied' ./client/ ./grpc/
+      # http1 is RFC 9112 and http3 is RFC 9114; neither compresses headers, and
+      # both used to import hpack — RFC 7541 — for nothing but the field struct.
+      # The shared vocabulary lives in ./header now, and this keeps the edge from
+      # coming back.
+      #
+      # DIRECT imports, not `go list -deps`: http3 reaches hpack transitively
+      # through qpack, whose use of the prefixed-integer codec and the Huffman
+      # table is reuse QPACK specifies for itself and is meant to stay.
+      - name: http1 and http3 do not import hpack
+        run: |
+          for pkg in ./http1 ./http3; do
+            if go list -f '{{join .Imports " "}}' "$pkg" | grep -q 'poseidon-http-client/hpack'; then
+              echo "$pkg imports hpack directly; the shared header vocabulary is in ./header" >&2
+              exit 1
+            fi
+          done
       # Keep the opt-in debug build (-tags poseidondebug) compilable so the
       # leak detector can't bitrot. Compile + vet only — its finalizer/GC tests
       # have non-deterministic timing, so they run via `make test-debug`.

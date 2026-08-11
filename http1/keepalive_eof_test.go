@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/lodgvideon/poseidon-http-client/hpack"
+	"github.com/lodgvideon/poseidon-http-client/header"
 	"github.com/lodgvideon/poseidon-http-client/http1"
 )
 
@@ -32,7 +32,7 @@ func TestReadBodyChunk_CoalescedEOF_KeepAlive_NotReusable(t *testing.T) {
 	ex := http1.NewConn(nc).NewExchange()
 	ctx := context.Background()
 
-	if err := ex.WriteRequest(ctx, []hpack.HeaderField{
+	if err := ex.WriteRequest(ctx, []header.Field{
 		{Name: []byte(":method"), Value: []byte("GET")},
 		{Name: []byte(":path"), Value: []byte("/")},
 		{Name: []byte(":authority"), Value: []byte("example.com")},

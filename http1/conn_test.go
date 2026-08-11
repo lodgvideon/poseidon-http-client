@@ -12,7 +12,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/lodgvideon/poseidon-http-client/hpack"
+	"github.com/lodgvideon/poseidon-http-client/header"
 	"github.com/lodgvideon/poseidon-http-client/http1"
 )
 
@@ -29,14 +29,14 @@ func roundTrip(t *testing.T, srv *httptest.Server, method, path string, body str
 
 	ex := c.NewExchange()
 	host := srv.Listener.Addr().String()
-	fields := []hpack.HeaderField{
+	fields := []header.Field{
 		{Name: []byte(":method"), Value: []byte(method)},
 		{Name: []byte(":path"), Value: []byte(path)},
 		{Name: []byte(":authority"), Value: []byte(host)},
 		{Name: []byte(":scheme"), Value: []byte("http")},
 	}
 	if body != "" {
-		fields = append(fields, hpack.HeaderField{
+		fields = append(fields, header.Field{
 			Name:  []byte("content-length"),
 			Value: []byte(strings.Repeat("x", len([]byte(body)))), // wrong; test will use chunked
 		})
@@ -112,7 +112,7 @@ func TestHTTP1_WriteRequest_SkipsHopByHopHeaders(t *testing.T) {
 	ctx := context.Background()
 	ex := c.NewExchange()
 	host := srv.Listener.Addr().String()
-	fields := []hpack.HeaderField{
+	fields := []header.Field{
 		{Name: []byte(":method"), Value: []byte("GET")},
 		{Name: []byte(":path"), Value: []byte("/")},
 		{Name: []byte(":authority"), Value: []byte(host)},
@@ -164,7 +164,7 @@ func TestHTTP1_POST_Echo(t *testing.T) {
 	ex := c.NewExchange()
 	host := srv.Listener.Addr().String()
 	payload := "ping"
-	fields := []hpack.HeaderField{
+	fields := []header.Field{
 		{Name: []byte(":method"), Value: []byte("POST")},
 		{Name: []byte(":path"), Value: []byte("/echo")},
 		{Name: []byte(":authority"), Value: []byte(host)},
@@ -271,7 +271,7 @@ func TestHTTP1_KeepAlive_TwoRequests(t *testing.T) {
 
 	ctx := context.Background()
 	host := srv.Listener.Addr().String()
-	fields := []hpack.HeaderField{
+	fields := []header.Field{
 		{Name: []byte(":method"), Value: []byte("GET")},
 		{Name: []byte(":path"), Value: []byte("/")},
 		{Name: []byte(":authority"), Value: []byte(host)},
@@ -322,7 +322,7 @@ func TestHTTP1_ParseStatus(t *testing.T) {
 
 	ctx := context.Background()
 	ex := c.NewExchange()
-	fields := []hpack.HeaderField{
+	fields := []header.Field{
 		{Name: []byte(":method"), Value: []byte("GET")},
 		{Name: []byte(":path"), Value: []byte("/")},
 		{Name: []byte(":authority"), Value: []byte(srv.Listener.Addr().String())},
@@ -408,7 +408,7 @@ func TestHTTP1_POST_EndStream(t *testing.T) {
 
 			ctx := context.Background()
 			ex := c.NewExchange()
-			fields := []hpack.HeaderField{
+			fields := []header.Field{
 				{Name: []byte(":method"), Value: []byte(method)},
 				{Name: []byte(":path"), Value: []byte("/")},
 				{Name: []byte(":authority"), Value: []byte(srv.Listener.Addr().String())},
@@ -448,7 +448,7 @@ func TestHTTP1_WriteBody_NonChunked(t *testing.T) {
 
 	ctx := context.Background()
 	ex := c.NewExchange()
-	fields := []hpack.HeaderField{
+	fields := []header.Field{
 		{Name: []byte(":method"), Value: []byte("POST")},
 		{Name: []byte(":path"), Value: []byte("/")},
 		{Name: []byte(":authority"), Value: []byte(srv.Listener.Addr().String())},
@@ -504,7 +504,7 @@ func TestHTTP1_WriteBody_EmptyChunkNonFinal(t *testing.T) {
 
 	ctx := context.Background()
 	ex := c.NewExchange()
-	fields := []hpack.HeaderField{
+	fields := []header.Field{
 		{Name: []byte(":method"), Value: []byte("POST")},
 		{Name: []byte(":path"), Value: []byte("/")},
 		{Name: []byte(":authority"), Value: []byte(srv.Listener.Addr().String())},
@@ -563,7 +563,7 @@ func TestHTTP1_1xx_Response(t *testing.T) {
 
 	ctx := context.Background()
 	ex := c.NewExchange()
-	fields := []hpack.HeaderField{
+	fields := []header.Field{
 		{Name: []byte(":method"), Value: []byte("GET")},
 		{Name: []byte(":path"), Value: []byte("/")},
 		{Name: []byte(":authority"), Value: []byte(ln.Addr().String())},
@@ -609,7 +609,7 @@ func TestHTTP1_MalformedStatusLine(t *testing.T) {
 
 	ctx := context.Background()
 	ex := c.NewExchange()
-	fields := []hpack.HeaderField{
+	fields := []header.Field{
 		{Name: []byte(":method"), Value: []byte("GET")},
 		{Name: []byte(":path"), Value: []byte("/")},
 		{Name: []byte(":authority"), Value: []byte(ln.Addr().String())},
@@ -653,7 +653,7 @@ func TestHTTP1_ConnectionClose(t *testing.T) {
 
 	ctx := context.Background()
 	ex := c.NewExchange()
-	fields := []hpack.HeaderField{
+	fields := []header.Field{
 		{Name: []byte(":method"), Value: []byte("GET")},
 		{Name: []byte(":path"), Value: []byte("/")},
 		{Name: []byte(":authority"), Value: []byte(ln.Addr().String())},
@@ -705,7 +705,7 @@ func TestHTTP1_WriteRequest_Deadline(t *testing.T) {
 	defer cancel()
 
 	ex := c.NewExchange()
-	fields := []hpack.HeaderField{
+	fields := []header.Field{
 		{Name: []byte(":method"), Value: []byte("GET")},
 		{Name: []byte(":path"), Value: []byte("/")},
 		{Name: []byte(":authority"), Value: []byte(srv.Listener.Addr().String())},
@@ -744,7 +744,7 @@ func TestHTTP1_WriteBody_Deadline(t *testing.T) {
 	defer cancel()
 
 	ex := c.NewExchange()
-	fields := []hpack.HeaderField{
+	fields := []header.Field{
 		{Name: []byte(":method"), Value: []byte("POST")},
 		{Name: []byte(":path"), Value: []byte("/")},
 		{Name: []byte(":authority"), Value: []byte(srv.Listener.Addr().String())},
@@ -799,7 +799,7 @@ func TestHTTP1_ChunkExtensions(t *testing.T) {
 
 	ctx := context.Background()
 	ex := c.NewExchange()
-	fields := []hpack.HeaderField{
+	fields := []header.Field{
 		{Name: []byte(":method"), Value: []byte("GET")},
 		{Name: []byte(":path"), Value: []byte("/")},
 		{Name: []byte(":authority"), Value: []byte(ln.Addr().String())},

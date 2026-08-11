@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/lodgvideon/poseidon-http-client/hpack"
+	"github.com/lodgvideon/poseidon-http-client/header"
 	"github.com/lodgvideon/poseidon-http-client/http1"
 )
 
@@ -43,7 +43,7 @@ func scriptExchange(t *testing.T, method string, script []byte) *http1.Exchange 
 	t.Helper()
 	c := http1.NewConn(&scriptConn{script: script})
 	ex := c.NewExchange()
-	fields := []hpack.HeaderField{
+	fields := []header.Field{
 		{Name: []byte(":method"), Value: []byte(method)},
 		{Name: []byte(":path"), Value: []byte("/")},
 		{Name: []byte(":authority"), Value: []byte("example.com")},

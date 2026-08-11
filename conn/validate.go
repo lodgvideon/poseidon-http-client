@@ -1,6 +1,6 @@
 package conn
 
-import "github.com/lodgvideon/poseidon-http-client/hpack"
+import "github.com/lodgvideon/poseidon-http-client/header"
 
 // Validation of decoded response fields.
 //
@@ -162,7 +162,7 @@ func forbiddenRequestField(name, value []byte) bool {
 // forbidden bytes; classifyHeaderBlock does not run on this path, but the
 // promised request is a directive the caller acts on, not a response body, so
 // the field-injection bytes are what matter here.
-func validatePromisedRequestFields(fields []hpack.HeaderField) bool {
+func validatePromisedRequestFields(fields []header.Field) bool {
 	for i := range fields {
 		name, value := fields[i].Name, fields[i].Value
 		if len(name) > 0 && name[0] == ':' {
@@ -191,7 +191,7 @@ func pushMethodSafeCacheable(m []byte) bool {
 // disagree, make it present-but-invalid — RFC 9110 §8.6 defines it as 1*DIGIT,
 // and a self-contradictory declaration cannot be believed. Mirrors
 // http3/response.go's function of the same shape.
-func responseContentLength(fields []hpack.HeaderField) (n int64, present, valid bool) {
+func responseContentLength(fields []header.Field) (n int64, present, valid bool) {
 	for i := range fields {
 		if string(fields[i].Name) != "content-length" {
 			continue

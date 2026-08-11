@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/lodgvideon/poseidon-http-client/hpack"
+	"github.com/lodgvideon/poseidon-http-client/header"
 	"github.com/lodgvideon/poseidon-http-client/http1"
 )
 
@@ -30,7 +30,7 @@ func TestWriteBody_CtxCancelUnblocksWedgedWrite(t *testing.T) {
 	t.Cleanup(cancel)
 
 	// No Content-Length → chunked framing, so nothing reconciles the length.
-	if err := ex.WriteRequest(ctx, []hpack.HeaderField{
+	if err := ex.WriteRequest(ctx, []header.Field{
 		{Name: []byte(":method"), Value: []byte("POST")},
 		{Name: []byte(":path"), Value: []byte("/")},
 		{Name: []byte(":authority"), Value: []byte("example.com")},
@@ -111,7 +111,7 @@ func (c *wedgeConn) Close() error                    { return nil }
 // without depending on socket buffers filling.
 func TestWriteBody_AlreadyCancelledCtxFailsFast(t *testing.T) {
 	ex, _ := rawCapture(t)
-	if err := ex.WriteRequest(context.Background(), []hpack.HeaderField{
+	if err := ex.WriteRequest(context.Background(), []header.Field{
 		{Name: []byte(":method"), Value: []byte("POST")},
 		{Name: []byte(":path"), Value: []byte("/")},
 		{Name: []byte(":authority"), Value: []byte("example.com")},
@@ -140,7 +140,7 @@ func TestWriteBody_AlreadyCancelledCtxFailsFast(t *testing.T) {
 func TestWriteBody_NoDeadlineNoCancelStillWrites(t *testing.T) {
 	ex, capture := rawCapture(t)
 	if err := ex.WriteRequest(context.Background(), reqCL("POST",
-		hpack.HeaderField{Name: []byte("Content-Length"), Value: []byte("5")}), false); err != nil {
+		header.Field{Name: []byte("Content-Length"), Value: []byte("5")}), false); err != nil {
 		t.Fatalf("WriteRequest: %v", err)
 	}
 	if err := ex.WriteBody(context.Background(), []byte("HELLO"), true); err != nil {

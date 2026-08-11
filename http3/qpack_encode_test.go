@@ -6,7 +6,7 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/lodgvideon/poseidon-http-client/hpack"
+	"github.com/lodgvideon/poseidon-http-client/header"
 	"github.com/lodgvideon/poseidon-http-client/qpack"
 )
 
@@ -45,7 +45,7 @@ func serverMirrorTable(t *testing.T, conn *fakeConn, capacity uint64) *qpack.Dyn
 // decodeRequestSection extracts the field section from a HEADERS frame, decodes it
 // against the server-mirror table, checks it reproduces want, and returns the
 // section's Required Insert Count.
-func decodeRequestSection(t *testing.T, server *qpack.DynamicTable, frame []byte, want []hpack.HeaderField) uint64 {
+func decodeRequestSection(t *testing.T, server *qpack.DynamicTable, frame []byte, want []header.Field) uint64 {
 	t.Helper()
 	var fr FrameReader
 	fr.SetMaxFrameLen(1 << 20)
@@ -58,9 +58,9 @@ func decodeRequestSection(t *testing.T, server *qpack.DynamicTable, frame []byte
 	if rerr != nil {
 		t.Fatalf("RequiredInsertCount: %v", rerr)
 	}
-	var got []hpack.HeaderField
+	var got []header.Field
 	derr := qpack.NewDecoder().DecodeFieldSection(payload, server, func(n, v []byte) error {
-		got = append(got, hpack.HeaderField{Name: append([]byte(nil), n...), Value: append([]byte(nil), v...)})
+		got = append(got, header.Field{Name: append([]byte(nil), n...), Value: append([]byte(nil), v...)})
 		return nil
 	})
 	if derr != nil {
@@ -79,15 +79,15 @@ func decodeRequestSection(t *testing.T, server *qpack.DynamicTable, frame []byte
 
 // sampleRequest is a repeated request whose field list EncodeHeaders builds as
 // :method / :scheme / :authority / :path then the regular headers.
-func sampleRequest() (*Request, []hpack.HeaderField) {
+func sampleRequest() (*Request, []header.Field) {
 	req := &Request{
 		Method:    "GET",
 		Scheme:    "https",
 		Authority: "example.com",
 		Path:      "/",
-		Headers:   []hpack.HeaderField{{Name: []byte("user-agent"), Value: []byte("poseidon/1")}},
+		Headers:   []header.Field{{Name: []byte("user-agent"), Value: []byte("poseidon/1")}},
 	}
-	want := []hpack.HeaderField{
+	want := []header.Field{
 		{Name: []byte(":method"), Value: []byte("GET")},
 		{Name: []byte(":scheme"), Value: []byte("https")},
 		{Name: []byte(":authority"), Value: []byte("example.com")},
@@ -257,7 +257,7 @@ func TestConcurrent_QPACKEncoderDynamic_UnderRace(t *testing.T) {
 			// references to already-inserted entries are exercised concurrently.
 			req := &Request{
 				Method: "GET", Scheme: "https", Authority: "example.com", Path: "/",
-				Headers: []hpack.HeaderField{
+				Headers: []header.Field{
 					{Name: []byte("cookie"), Value: []byte("shared=1")},
 					{Name: []byte("x-worker"), Value: []byte(strconv.Itoa(g))},
 				},
@@ -291,7 +291,7 @@ func TestConformance_RFC9114_Sec103_CredentialFieldsNeverIndexed(t *testing.T) {
 	enc.DrainEncoderInstructions(nil) // drop Set Dynamic Table Capacity
 	req := &Request{
 		Method: "GET", Scheme: "https", Authority: "e", Path: "/",
-		Headers: []hpack.HeaderField{
+		Headers: []header.Field{
 			{Name: []byte("authorization"), Value: []byte("Bearer s3cr3t")},
 			{Name: []byte("cookie"), Value: []byte("sid=deadbeef")},
 			{Name: []byte("proxy-authorization"), Value: []byte("Basic zzz")},
@@ -318,7 +318,7 @@ func TestConformance_RFC9114_Sec103_CredentialFieldsNeverIndexed(t *testing.T) {
 		t.Fatalf("NewDynamicEncoder: %v", err)
 	}
 	plain := *req
-	plain.Headers = []hpack.HeaderField{
+	plain.Headers = []header.Field{
 		{Name: []byte("x-a"), Value: []byte("Bearer s3cr3t")},
 		{Name: []byte("x-b"), Value: []byte("sid=deadbeef")},
 		{Name: []byte("x-c"), Value: []byte("Basic zzz")},

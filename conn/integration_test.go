@@ -11,7 +11,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/lodgvideon/poseidon-http-client/hpack"
+	"github.com/lodgvideon/poseidon-http-client/header"
 )
 
 func startH2TestServer(t *testing.T, h http.Handler) (*httptest.Server, *tls.Config) {
@@ -100,7 +100,7 @@ func TestIntegration_EmptyGET(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewStream: %v", err)
 	}
-	if err := s.SendHeaders(ctx, []hpack.HeaderField{
+	if err := s.SendHeaders(ctx, []header.Field{
 		{Name: []byte(":method"), Value: []byte("GET")},
 		{Name: []byte(":scheme"), Value: []byte("https")},
 		{Name: []byte(":authority"), Value: []byte("example.com")},
@@ -155,7 +155,7 @@ func TestIntegration_POST_1KB_Echo(t *testing.T) {
 	for i := range body {
 		body[i] = byte(i)
 	}
-	if err := s.SendHeaders(ctx, []hpack.HeaderField{
+	if err := s.SendHeaders(ctx, []header.Field{
 		{Name: []byte(":method"), Value: []byte("POST")},
 		{Name: []byte(":scheme"), Value: []byte("https")},
 		{Name: []byte(":authority"), Value: []byte("example.com")},
@@ -205,7 +205,7 @@ func TestIntegration_ContextCancel_TearsDownStream(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewStream: %v", err)
 	}
-	if err := s.SendHeaders(outerCtx, []hpack.HeaderField{
+	if err := s.SendHeaders(outerCtx, []header.Field{
 		{Name: []byte(":method"), Value: []byte("GET")},
 		{Name: []byte(":scheme"), Value: []byte("https")},
 		{Name: []byte(":authority"), Value: []byte("example.com")},
@@ -260,7 +260,7 @@ func TestConformance_RFC7540_Sec6_5_2_MaxFrameSize_FramerReadLimit(t *testing.T)
 	if err != nil {
 		t.Fatalf("NewStream: %v", err)
 	}
-	if err := s.SendHeaders(ctx, []hpack.HeaderField{
+	if err := s.SendHeaders(ctx, []header.Field{
 		{Name: []byte(":method"), Value: []byte("GET")},
 		{Name: []byte(":scheme"), Value: []byte("https")},
 		{Name: []byte(":authority"), Value: []byte("example.com")},

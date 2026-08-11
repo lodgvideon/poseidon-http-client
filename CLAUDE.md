@@ -44,6 +44,10 @@ HTTP/1.1 + HTTP/2 stack (A→B→C):
                      #   []byte. See docs/GRPC_GUIDE.md
   frame/             # A-layer: HTTP/2 frame codec (parser + writer + Framer)
   hpack/             # A-layer: RFC 7541 HPACK encoder/decoder
+header/            # RFC-neutral header vocabulary (Field, IndexingMode).
+                     #   hpack.HeaderField is an ALIAS of header.Field, so no
+                     #   caller broke. http1/http3 import THIS, not hpack — a
+                     #   CI step keeps that edge from returning.
 
 HTTP/3 stack (standalone — see Phase status):
   http3/             # RFC 9114: control stream, SETTINGS, request/response mapping.

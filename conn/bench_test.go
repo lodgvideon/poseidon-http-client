@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/lodgvideon/poseidon-http-client/hpack"
+	"github.com/lodgvideon/poseidon-http-client/header"
 )
 
 func benchSetup(b *testing.B) (*Conn, func()) {
@@ -44,7 +44,7 @@ func benchSetup(b *testing.B) (*Conn, func()) {
 func BenchmarkConn_Roundtrip_Empty(b *testing.B) {
 	c, teardown := benchSetup(b)
 	defer teardown()
-	hdrs := []hpack.HeaderField{
+	hdrs := []header.Field{
 		{Name: []byte(":method"), Value: []byte("GET")},
 		{Name: []byte(":scheme"), Value: []byte("https")},
 		{Name: []byte(":authority"), Value: []byte("example.com")},

@@ -5,7 +5,7 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/lodgvideon/poseidon-http-client/hpack"
+	"github.com/lodgvideon/poseidon-http-client/header"
 )
 
 // TestConformance_RFC9113_Sec5_1_SendOnPushedStreamRejected pins RFC 9113 §5.1
@@ -23,7 +23,7 @@ func TestConformance_RFC9113_Sec5_1_SendOnPushedStreamRejected(t *testing.T) {
 		return s
 	}
 	ctx := context.Background()
-	fields := []hpack.HeaderField{{Name: []byte(":status"), Value: []byte("200")}}
+	fields := []header.Field{{Name: []byte(":status"), Value: []byte("200")}}
 
 	t.Run("SendHeaders", func(t *testing.T) {
 		if err := newPushed().ref().SendHeaders(ctx, fields, false); !errors.Is(err, ErrPushedStreamReadOnly) {
@@ -43,7 +43,7 @@ func TestConformance_RFC9113_Sec5_1_SendOnPushedStreamRejected(t *testing.T) {
 // request path.
 func TestConformance_RFC9113_Sec5_1_SendOnClientStreamStillWorks(t *testing.T) {
 	ctx := context.Background()
-	fields := []hpack.HeaderField{
+	fields := []header.Field{
 		{Name: []byte(":method"), Value: []byte("GET")},
 		{Name: []byte(":path"), Value: []byte("/")},
 		{Name: []byte(":scheme"), Value: []byte("https")},

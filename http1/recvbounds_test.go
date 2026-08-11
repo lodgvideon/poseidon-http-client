@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/lodgvideon/poseidon-http-client/hpack"
+	"github.com/lodgvideon/poseidon-http-client/header"
 	"github.com/lodgvideon/poseidon-http-client/http1"
 )
 
@@ -75,7 +75,7 @@ func hostileExchange(t *testing.T, hc *hostileConn) *http1.Exchange {
 	c := http1.NewConn(hc)
 	t.Cleanup(func() { _ = c.Close() })
 	ex := c.NewExchange()
-	fields := []hpack.HeaderField{
+	fields := []header.Field{
 		{Name: []byte(":method"), Value: []byte("GET")},
 		{Name: []byte(":path"), Value: []byte("/")},
 		{Name: []byte(":authority"), Value: []byte("example.com")},

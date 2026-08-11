@@ -5,7 +5,7 @@ import (
 	"io"
 	"testing"
 
-	"github.com/lodgvideon/poseidon-http-client/hpack"
+	"github.com/lodgvideon/poseidon-http-client/header"
 	"github.com/lodgvideon/poseidon-http-client/internal/bytesx"
 	"github.com/lodgvideon/poseidon-http-client/qpack"
 )
@@ -37,7 +37,7 @@ func fuzzPopulatedTable(tb testing.TB) *qpack.DynamicTable {
 // that already decode rather than from malformed noise the decoder rejects at byte
 // zero.
 func fuzzResponseSection() []byte {
-	return qpack.NewEncoder().EncodeFieldSection(nil, []hpack.HeaderField{
+	return qpack.NewEncoder().EncodeFieldSection(nil, []header.Field{
 		{Name: []byte(":status"), Value: []byte("200")},
 		{Name: []byte("content-type"), Value: []byte("text/plain")},
 	})
@@ -135,7 +135,7 @@ func FuzzDecodeResponseHeaders(f *testing.F) {
 // are typed (ErrH3Message / qpack.ErrDecompressionFailed), and every accepted
 // field is a valid, non-pseudo, non-forbidden regular header.
 func FuzzDecodeTrailers(f *testing.F) {
-	f.Add(qpack.NewEncoder().EncodeFieldSection(nil, []hpack.HeaderField{
+	f.Add(qpack.NewEncoder().EncodeFieldSection(nil, []header.Field{
 		{Name: []byte("x-checksum"), Value: []byte("abc123")},
 	}))
 	f.Add([]byte{0x00, 0x00})       // well-formed prefix, no fields (a valid empty trailer section)
