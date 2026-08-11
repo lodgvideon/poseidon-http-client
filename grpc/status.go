@@ -1,6 +1,8 @@
 package grpc
 
 import (
+	"context"
+	"errors"
 	"strconv"
 	"strings"
 
@@ -86,7 +88,21 @@ type Status struct {
 	Code Code
 	// Message is the grpc-message value, percent-decoded.
 	Message string
+
+	// cause is the transport error a connection-level failure was mapped from.
+	// It is unexported because a Status built from the wire has none: the peer
+	// sends a code and a message, not a Go error. Set only by
+	// statusFromTransport, and reachable through Unwrap so a caller that still
+	// wants to ask errors.Is(err, conn.ErrConnClosed) can.
+	cause error
 }
+
+// Unwrap returns the transport error this Status was mapped from, or nil for a
+// Status the peer sent. It is what keeps the mapping additive: a connection
+// death now answers errors.As(&Status) AND the errors.Is check a caller may
+// already have written against the conn-level sentinel.
+
+func (s *Status) Unwrap() error { return s.cause }
 
 // Error implements the error interface so a non-OK Status can be returned
 // directly from Recv.
@@ -219,4 +235,38 @@ func unhex(c byte) (byte, bool) {
 		return c - 'A' + 10, true
 	}
 	return 0, false
+}
+
+// statusFromTransport maps a transport-level failure to the *Status family, so a
+// caller has ONE way to classify a failed RPC.
+//
+// A peer resetting the stream already became a *Status; a connection dying under
+// it — GOAWAY, conn.ErrConnClosed, a cancelled context — leaked the transport
+// error verbatim. Which of the two a caller got depended on whether conn
+// delivered the failure as an event or as an error from Recv, an implementation
+// detail of the transport that no caller should have to know. Retry
+// classification needed errors.As(*Status) AND errors.Is(conn.ErrConnClosed) to
+// be complete, and nothing said so.
+//
+// The context codes are separated from Unavailable deliberately: a deadline the
+// CALLER set is not the server being unavailable, and conflating them makes a
+// retry policy retry a request whose deadline has already passed.
+//
+// The original error stays reachable through Unwrap, so this adds a family
+// rather than replacing one.
+func statusFromTransport(err error) error {
+	if err == nil {
+		return nil
+	}
+	switch {
+	case errors.Is(err, context.Canceled):
+		return &Status{Code: Canceled, Message: err.Error(), cause: err}
+	case errors.Is(err, context.DeadlineExceeded):
+		return &Status{Code: DeadlineExceeded, Message: err.Error(), cause: err}
+	}
+	// Everything else the transport can hand back — the connection closed, the
+	// peer went away, the stream handle went stale — means this RPC did not
+	// complete and another connection might serve it. That is Unavailable in
+	// grpc's model.
+	return &Status{Code: Unavailable, Message: err.Error(), cause: err}
 }
