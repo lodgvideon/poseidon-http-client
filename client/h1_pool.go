@@ -413,6 +413,12 @@ func (p *h1Pool) handleDialDone(rs *h1RunState, dr h1DialResult) {
 		// This perturbs FIFO for ERRORS ONLY. Successful service stays strictly
 		// in arrival order through serveWaiters, which is what the rest of this
 		// pool assumes of the waiter queue.
+		// BACK of the queue, unlike the multiplexing H2/H3 pools, which refuse the
+		// FRONT (pool.go, h3_pool.go). The reservation guard is why: under
+		// exclusive checkout a front waiter may already be covered by an idle conn
+		// on its way to it, so refusing the front would fail a request that was
+		// about to succeed. Stated on both sides because the difference is
+		// invisible from either one.
 		if n := len(rs.waiters); n > h1CountReservedIdle(rs.conns) {
 			req := rs.waiters[n-1]
 			rs.waiters = rs.waiters[:n-1]

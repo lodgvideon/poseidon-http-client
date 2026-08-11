@@ -423,6 +423,14 @@ func (p *Pool) handleDialDone(rs *runState, dr dialResult) {
 	rs.inFlightDials--
 	if dr.err != nil {
 		rs.lastDialErrAt = time.Now()
+		// FRONT of the queue, unlike the HTTP/1.1 pool, which refuses the BACK
+		// behind a reserved-idle guard (h1_pool.go). Not an oversight on either
+		// side: under exclusive checkout a front waiter may already be covered by
+		// an idle conn about to be handed to it, so refusing the front there would
+		// fail a request that was about to succeed. This pool multiplexes, so a
+		// waiter is waiting on capacity rather than on one specific conn, and the
+		// arrival order the rest of the queue assumes is preserved by taking the
+		// head. Stated here because the difference is invisible from either file.
 		if len(rs.waiters) > 0 {
 			req := rs.waiters[0]
 			rs.waiters = rs.waiters[1:]

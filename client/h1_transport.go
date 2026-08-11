@@ -219,19 +219,31 @@ func (s *h1singleConn) openExchange(ctx context.Context) (protoStream, pushLooku
 	}
 
 	ex := nc.NewExchange()
+	// sync.Once for the same reason the two pooled h1 transports use one, and
+	// with more at stake: their double-release returns a connection to the pool
+	// twice, this one calls Unlock on an already-unlocked sync.Mutex, which is a
+	// process-wide panic rather than a pool accounting error.
+	//
+	// What kept it to one call was the e.done contract — Recv sets it on the
+	// terminal chunk and Close returns early once set — which is a convention
+	// spread across two files, not a structural guard. client.go says as much
+	// where it explains why the streaming path is safe here.
+	var once sync.Once
 	release := func(keepAlive bool) {
-		if !keepAlive {
-			// The ordinary "Connection: close" churn. Silent until now, which is
-			// most of the connection lifecycle on this transport.
-			notifyConnClose(s.addr, CloseNotReusable, s.metrics, s.hooksRef)
-			_ = nc.Close()
-			s.mu.Lock()
-			if s.cur == nc {
-				s.cur = nil
+		once.Do(func() {
+			if !keepAlive {
+				// The ordinary "Connection: close" churn. Silent until now, which is
+				// most of the connection lifecycle on this transport.
+				notifyConnClose(s.addr, CloseNotReusable, s.metrics, s.hooksRef)
+				_ = nc.Close()
+				s.mu.Lock()
+				if s.cur == nc {
+					s.cur = nil
+				}
+				s.mu.Unlock()
 			}
-			s.mu.Unlock()
-		}
-		s.inFlight.Unlock()
+			s.inFlight.Unlock()
+		})
 	}
 	h1ex := &h1Exchange{ex: ex, nc: nc, release: release}
 	return h1ex, nil, func() {}, nil
