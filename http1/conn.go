@@ -360,8 +360,26 @@ type Exchange struct {
 	// still pooled afterwards.
 	reqContentLen  int64
 	reqBodyWritten int64
-	// condemned latches a request-side decision that this connection must not be
-	// reused, so ReadResponse's version-derived persistence cannot undo it.
+	// condemned latches, one way, that this connection must not be reused.
+	//
+	// One latch, because it used to be three — condemned for the request side,
+	// closeSeen for an explicit Connection: close, noReuse for an indeterminate
+	// body boundary — plus keepAlive itself, and every new condemnation site had
+	// to remember which subset to set. The comments on the old fields narrated
+	// that: each was added to stop a LATER header line from undoing an earlier
+	// verdict, which is a property that belongs to the decision, not to the
+	// reason for it.
+	//
+	// Order-safety is now structural. Several condemnations are safe today only
+	// by PLACEMENT — the Content-Length ones run after the last field line, so
+	// the keep-alive resurrection below cannot reach them — and moving any of
+	// them per-line, as the Transfer-Encoding check already is, would have
+	// reopened the hole the three latches were patching.
+	//
+	// What must NOT route through here is the HTTP/1.0 default at the top of
+	// ReadResponse: that false is reversible by design, by a Connection:
+	// keep-alive on the same response (RFC 2616 §8.1.2.1), and latching it would
+	// cost a connection per HTTP/1.0 response.
 	condemned bool
 
 	// readCtx is the context of the ReadResponse that opened this response, kept
@@ -378,19 +396,13 @@ type Exchange struct {
 
 	// response side
 	statusCode int
-	keepAlive  bool
-	// closeSeen latches once any Connection field line carried a "close"
-	// option. RFC 9110 §5.3 combines repeated Connection field lines into one
-	// value, so "close" then "keep-alive" arriving on separate lines means
-	// "close, keep-alive" — close wins and the connection must not be reused.
-	// Without this latch, a later "keep-alive" line would overwrite the earlier
-	// "close" verdict (the same order-independence problem clSeen/clErr solve
-	// for Content-Length).
-	closeSeen bool
-	// noReuse latches a RESPONSE-side framing condemnation (an indeterminate body
-	// boundary) so a later header line cannot undo it. closeSeen does that job for
-	// an explicit Connection: close; condemned does it for the request side.
-	noReuse     bool
+	// keepAlive is the POSITIVE persistence signal, derived from the response
+	// version and then possibly raised by a Connection: keep-alive. It is written
+	// at exactly two places and is not where condemnations live — those latch
+	// condemned. RFC 9110 §5.3 combines repeated Connection field lines into one
+	// value, so "close" then "keep-alive" on separate lines means "close,
+	// keep-alive" and close wins; the latch is what makes that order-independent.
+	keepAlive   bool
 	respChunked bool
 	// clSeen, clValue and clErr accumulate the Content-Length decision across
 	// the header block instead of committing to it line by line. RFC 9112 §6.3
@@ -1095,7 +1107,7 @@ func (ex *Exchange) writeHead(ctx context.Context, head []byte) error {
 	defer ex.c.releaseDeadline(writeDeadline, armed)
 	_, err := ex.c.nc.Write(head)
 	if err != nil {
-		ex.keepAlive, ex.condemned = false, true
+		ex.condemn()
 	}
 	return err
 }
@@ -1132,7 +1144,7 @@ func (ex *Exchange) WriteBody(ctx context.Context, p []byte, fin bool) error {
 		if err != nil {
 			// Same as the head: a partial chunk leaves the peer's chunked decoder
 			// mid-frame, so the octet boundary is no longer agreed.
-			ex.keepAlive, ex.condemned = false, true
+			ex.condemn()
 		}
 		return err
 	}
@@ -1157,12 +1169,12 @@ func (ex *Exchange) WriteBody(ctx context.Context, p []byte, fin bool) error {
 	// already covered because their declared 0 made the over-run check below fire
 	// — the guard existed, the value it keyed on just wasn't always there.
 	if len(p) > 0 && ex.reqContentLen < 0 {
-		ex.keepAlive, ex.condemned = false, true
+		ex.condemn()
 		return fmt.Errorf("%w: request body written after a head that declared no "+
 			"Content-Length and no chunked framing (RFC 9112 §6)", ErrInvalidRequest)
 	}
 	if ex.reqContentLen >= 0 && ex.reqBodyWritten+int64(len(p)) > ex.reqContentLen {
-		ex.keepAlive, ex.condemned = false, true
+		ex.condemn()
 		return fmt.Errorf("%w: request body exceeds its declared Content-Length %d (RFC 9110 §8.6)",
 			ErrInvalidRequest, ex.reqContentLen)
 	}
@@ -1172,12 +1184,12 @@ func (ex *Exchange) WriteBody(ctx context.Context, p []byte, fin bool) error {
 		if err != nil {
 			// A short write under a declared Content-Length owes the peer octets
 			// it will block waiting for.
-			ex.keepAlive, ex.condemned = false, true
+			ex.condemn()
 			return err
 		}
 	}
 	if fin && ex.reqContentLen >= 0 && ex.reqBodyWritten != ex.reqContentLen {
-		ex.keepAlive, ex.condemned = false, true
+		ex.condemn()
 		return fmt.Errorf("%w: request body is %d octets but declared Content-Length %d (RFC 9110 §8.6)",
 			ErrInvalidRequest, ex.reqBodyWritten, ex.reqContentLen)
 	}
@@ -1216,7 +1228,7 @@ func (ex *Exchange) readLine(what string) (string, error) {
 			// Refusing the line leaves the stream mid-line and its position
 			// indeterminate: resynchronising would mean reading exactly the
 			// bytes being refused. The connection must not be pooled.
-			ex.keepAlive = false
+			ex.condemn()
 			return "", fmt.Errorf("http1: %s exceeds %d bytes: %w", what, readBufSize, ErrResponseTooLarge)
 		}
 		// Record whether this failure arrived with nothing consumed. ReadResponse
@@ -1228,7 +1240,7 @@ func (ex *Exchange) readLine(what string) (string, error) {
 	s := string(line[:len(line)-1]) // the delimiting LF
 	s = strings.TrimSuffix(s, "\r")
 	if strings.HasSuffix(s, "\r") {
-		ex.keepAlive = false
+		ex.condemn()
 		return "", fmt.Errorf("http1: %s ends with a bare CR: %w", what, ErrInvalidHeaderBlock)
 	}
 	return s, nil
@@ -1246,7 +1258,7 @@ func (ex *Exchange) ReadResponse(ctx context.Context) (statusCode int, headers [
 	// once here is the same "no exit path has to remember" the body reader uses.
 	defer func() {
 		if err != nil {
-			ex.keepAlive = false
+			ex.condemn()
 		}
 	}()
 	// Install this exchange's read deadline unconditionally — a deadline when
@@ -1312,7 +1324,7 @@ func (ex *Exchange) ReadResponse(ctx context.Context) (statusCode int, headers [
 		// asked for, and continuing to read the socket for a "final" status line
 		// is what let a server fabricate a response for it.
 		if code == 101 {
-			ex.keepAlive = false
+			ex.condemn()
 			return 0, nil, fmt.Errorf("%w (the client sends no Upgrade)", ErrUnsolicitedUpgrade)
 		}
 		// Gated on the 1xx range itself, not on "not final". This is the loop the
@@ -1328,7 +1340,7 @@ func (ex *Exchange) ReadResponse(ctx context.Context) (statusCode int, headers [
 		// 1xx informational: drain its headers and loop back for the real response.
 		interim++
 		if interim > maxInterimResponses {
-			ex.keepAlive = false
+			ex.condemn()
 			return 0, nil, fmt.Errorf("http1: more than %d interim responses: %w",
 				maxInterimResponses, ErrResponseTooLarge)
 		}
@@ -1350,7 +1362,6 @@ func (ex *Exchange) ReadResponse(ctx context.Context) (statusCode int, headers [
 	// The only evidence the client has of what the peer speaks; WriteRequest
 	// consults it before framing a request body as chunked (RFC 9112 §6.1).
 	ex.c.peerMinor, ex.c.peerMinorKnown = respMinor, true
-	ex.closeSeen = false
 	ex.contentLen = -1
 
 	headers = make([]hpack.HeaderField, 0, 12)
@@ -1389,7 +1400,7 @@ func (ex *Exchange) ReadResponse(ctx context.Context) (statusCode int, headers [
 	// handleRelease evicts any conn released with it rather than returning it to
 	// the idle set.
 	if ex.respTE && ex.respCL {
-		ex.keepAlive = false
+		ex.condemn()
 	}
 
 	// RFC 9112 §6.1: a recipient of an HTTP/1.0 message carrying Transfer-Encoding
@@ -1402,7 +1413,7 @@ func (ex *Exchange) ReadResponse(ctx context.Context) (statusCode int, headers [
 	// The body is still chunk-decoded (chunked is self-delimiting, so the caller
 	// gets its bytes); only reuse is refused.
 	if ex.respTE && respMinor == 0 {
-		ex.keepAlive = false
+		ex.condemn()
 	}
 
 	// A status that RFC 9112 §6.3 rule 1 makes bodyless, whose head nevertheless
@@ -1458,7 +1469,7 @@ func (ex *Exchange) checkBodylessStatusFraming() {
 		// `ex.respTE` term below evicts regardless. So clValue is only inspected
 		// when the parse succeeded, and testing the value is sound.
 		if ex.respTE || (ex.respCL && ex.clValue != 0) {
-			ex.keepAlive = false
+			ex.condemn()
 		}
 	case 304:
 		// Content-Length on a 304 is explicitly permitted and must NOT cost the
@@ -1477,7 +1488,7 @@ func (ex *Exchange) checkBodylessStatusFraming() {
 		// body to frame — so its presence says the server intends bytes we are
 		// required not to read.
 		if ex.respTE {
-			ex.keepAlive = false
+			ex.condemn()
 		}
 	}
 }
@@ -1661,7 +1672,7 @@ func (ex *Exchange) resolveContentLength() error {
 		// is what closes the connection rather than pooling it, since the body
 		// boundary this response claimed cannot be believed and the stream
 		// position is therefore indeterminate.
-		ex.keepAlive = false
+		ex.condemn()
 		return ex.clErr
 	}
 	if ex.clSeen {
@@ -1866,7 +1877,7 @@ func (ex *Exchange) consumeHeaders(out *[]hpack.HeaderField, parseBody bool) err
 		// would spin here forever for free.
 		listSize += uint64(len(line)) + hpackFieldOverhead
 		if listSize > maxHeaderListBytes {
-			ex.keepAlive = false
+			ex.condemn()
 			return fmt.Errorf("http1: header list exceeds %d bytes: %w",
 				maxHeaderListBytes, ErrResponseTooLarge)
 		}
@@ -1892,7 +1903,7 @@ func (ex *Exchange) consumeHeaders(out *[]hpack.HeaderField, parseBody bool) err
 				// A fold with nothing to fold into: obs-fold is OWS CRLF RWS,
 				// which only exists after a field line. The block is malformed
 				// and its remainder cannot be trusted to be fields at all.
-				ex.keepAlive = false
+				ex.condemn()
 				return fmt.Errorf("http1: obs-fold with no preceding field line: %w", ErrInvalidHeaderBlock)
 			}
 			if folded == nil {
@@ -1958,7 +1969,7 @@ func (ex *Exchange) commitHeaderLine(line string, have bool, out *[]hpack.Header
 		// condemn the connection: the block is not a well-formed field sequence,
 		// so the stream position cannot be trusted.
 		if !validToken(name) || !validFieldValue([]byte(value)) {
-			ex.keepAlive = false
+			ex.condemn()
 			return fmt.Errorf("http1: response header %q has an invalid name or a value "+
 				"containing CR, LF or NUL: %w", truncateForError(name), ErrInvalidHeaderBlock)
 		}
@@ -1987,13 +1998,12 @@ func (ex *Exchange) commitHeaderLine(line string, have bool, out *[]hpack.Header
 					// pooled for the next response to resynchronise on.
 					ex.respChunked = false
 					ex.contentLen = -1
-					ex.keepAlive = false
-					// Latched, not merely cleared: the "connection" case below
-					// re-sets keepAlive on a keep-alive option, and header lines
-					// arrive in whatever order the peer chose — so without this a
-					// server could undo a framing condemnation just by putting
+					// condemn, not a bare clear: the "connection" case below re-sets
+					// keepAlive on a keep-alive option, and header lines arrive in
+					// whatever order the peer chose — so without the latch a server
+					// could undo a framing condemnation just by putting
 					// Connection: keep-alive after its malformed Transfer-Encoding.
-					ex.noReuse = true
+					ex.condemn()
 					break
 				}
 				if coding == "" {
@@ -2034,10 +2044,8 @@ func (ex *Exchange) commitHeaderLine(line string, have bool, out *[]hpack.Header
 				}
 			case "connection":
 				if hasConnectionOption(value, "close") {
-					ex.keepAlive = false
-					ex.closeSeen = true
-				} else if hasConnectionOption(value, "keep-alive") && !ex.closeSeen &&
-					!ex.noReuse && !ex.condemned {
+					ex.condemn()
+				} else if hasConnectionOption(value, "keep-alive") && !ex.condemned {
 					ex.keepAlive = true
 				}
 			}
@@ -2087,11 +2095,11 @@ func (ex *Exchange) ReadBodyChunk(buf []byte) (n int, done bool, err error) {
 	// remember" true.
 	defer func() {
 		if err != nil {
-			ex.keepAlive = false
+			ex.condemn()
 			return
 		}
 		if done && ex.keepAlive && ex.c.br.Buffered() > 0 {
-			ex.keepAlive = false
+			ex.condemn()
 		}
 	}()
 	// Body reads honour the ReadResponse ctx: a blocking Read cannot be selected
@@ -2146,7 +2154,7 @@ func (ex *Exchange) ReadBodyChunk(buf []byte) (n int, done bool, err error) {
 		// whatever the deadline says, so the verdict no longer depends on winning
 		// a race with the watchdog. It is also ~0.5µs rather than ~1ms.
 		if bypassed && done && err == nil && ex.keepAlive && ex.c.HasResidue() {
-			ex.keepAlive = false
+			ex.condemn()
 		}
 		if err == io.EOF {
 			if !done {
@@ -2158,7 +2166,7 @@ func (ex *Exchange) ReadBodyChunk(buf []byte) (n int, done bool, err error) {
 				// to be safe because h1Exchange.Close forces release(false), but
 				// http1 is a public package and a direct caller trusting
 				// KeepAlive() would have pooled a truncated stream.
-				ex.keepAlive = false
+				ex.condemn()
 				return n, true, fmt.Errorf("http1: premature EOF: got %d of %d bytes", ex.bodyRead, ex.contentLen)
 			}
 			// Final body bytes arrived coalesced with io.EOF in a single
@@ -2167,7 +2175,7 @@ func (ex *Exchange) ReadBodyChunk(buf []byte) (n int, done bool, err error) {
 			// complete, so surface the bytes with a nil error instead of
 			// discarding n. The EOF means the peer closed the socket, so the
 			// connection is no longer reusable — do not let it be pooled.
-			ex.keepAlive = false
+			ex.condemn()
 			err = nil
 		}
 		return n, done, err
@@ -2176,7 +2184,7 @@ func (ex *Exchange) ReadBodyChunk(buf []byte) (n int, done bool, err error) {
 	// contentLen == -1: read until connection close.
 	n, err = ex.c.br.Read(buf)
 	if err == io.EOF {
-		ex.keepAlive = false
+		ex.condemn()
 		return n, true, nil
 	}
 	return n, false, err
@@ -2222,7 +2230,7 @@ func (ex *Exchange) readChunkedChunk(buf []byte) (n int, done bool, err error) {
 			// caller honouring KeepAlive()'s documented contract pooled a
 			// mid-stream connection and read an attacker-chosen response on it.
 			// Same corrupt framing, same indeterminate position, opposite verdict.
-			ex.keepAlive = false
+			ex.condemn()
 			return 0, false, fmt.Errorf("http1: invalid chunk size %q: %w", truncateForError(line), ErrInvalidChunkSize)
 		}
 		if size == 0 {
@@ -2235,7 +2243,7 @@ func (ex *Exchange) readChunkedChunk(buf []byte) (n int, done bool, err error) {
 					// body is already complete, so the response is good even
 					// though the trailer section never arrived — but the socket
 					// is gone, so it must not be pooled.
-					ex.keepAlive = false
+					ex.condemn()
 				} else {
 					// Anything else — a read deadline, a too-large block, a
 					// malformed fold — means the trailer section is
@@ -2251,7 +2259,7 @@ func (ex *Exchange) readChunkedChunk(buf []byte) (n int, done bool, err error) {
 					// tolerance said "typically EOF" — and for EOF it was sound,
 					// because a dead socket merely fails on next use. The
 					// predicate was "any error"; a deadline is not EOF.
-					ex.keepAlive = false
+					ex.condemn()
 					return 0, false, terr
 				}
 			}
@@ -2286,13 +2294,25 @@ func (ex *Exchange) readChunkedChunk(buf []byte) (n int, done bool, err error) {
 			return n, false, lerr
 		}
 		if term != "" {
-			ex.keepAlive = false
+			ex.condemn()
 			return n, false, fmt.Errorf("http1: chunk-data not followed by CRLF, got %q: %w",
 				truncateForError(term), ErrInvalidChunkSize)
 		}
 	}
 
 	return n, false, nil
+}
+
+// condemn latches that this connection must not be reused. One way: nothing
+// clears it for the life of the Exchange, and an Exchange is one request/response
+// pair.
+//
+// keepAlive is cleared alongside so the two cheap guards that read it — the
+// leftover-octet check and the residue probe — keep short-circuiting on a
+// condemned exchange rather than paying a syscall to re-learn it.
+func (ex *Exchange) condemn() {
+	ex.keepAlive = false
+	ex.condemned = true
 }
 
 // KeepAlive reports whether the underlying connection should be returned to
