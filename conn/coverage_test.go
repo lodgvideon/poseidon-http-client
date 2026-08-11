@@ -462,7 +462,7 @@ func TestStream_Push_Overflow_SendsRST(t *testing.T) {
 	deadline := time.Now().Add(time.Second)
 	for time.Now().Before(deadline) {
 		w.mu.Lock()
-		rst := w.rstCalls
+		rst := w.bestEffortRSTs
 		w.mu.Unlock()
 		if rst > 0 {
 			break
@@ -471,8 +471,8 @@ func TestStream_Push_Overflow_SendsRST(t *testing.T) {
 	}
 
 	w.mu.Lock()
-	rstCalls := w.rstCalls
-	code := w.lastRSTCode
+	rstCalls := w.bestEffortRSTs
+	code := w.lastBestEffortC
 	w.mu.Unlock()
 
 	if rstCalls == 0 {
@@ -507,7 +507,7 @@ func TestStream_Push_Overflow_IsIdempotent(t *testing.T) {
 	time.Sleep(60 * time.Millisecond)
 
 	w.mu.Lock()
-	rstCalls := w.rstCalls
+	rstCalls := w.bestEffortRSTs
 	w.mu.Unlock()
 
 	if rstCalls != 1 {

@@ -163,7 +163,7 @@ func TestStream_PushOverflow_EmitsCancelEverywhere(t *testing.T) {
 		deadline := time.Now().Add(2 * time.Second)
 		for time.Now().Before(deadline) {
 			w.mu.Lock()
-			n := w.rstCalls
+			n := w.bestEffortRSTs
 			w.mu.Unlock()
 			if n > 0 {
 				break
@@ -171,7 +171,7 @@ func TestStream_PushOverflow_EmitsCancelEverywhere(t *testing.T) {
 			time.Sleep(2 * time.Millisecond)
 		}
 		w.mu.Lock()
-		calls, code := w.rstCalls, w.lastRSTCode
+		calls, code := w.bestEffortRSTs, w.lastBestEffortC
 		w.mu.Unlock()
 		if calls == 0 {
 			t.Fatal("no RST_STREAM written after overflow")

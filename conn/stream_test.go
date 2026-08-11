@@ -49,6 +49,28 @@ type fakeStreamWriter struct {
 	dataCalls   int
 	rstCalls    int
 	lastRSTCode frame.ErrCode
+	// doneCalls and bestEffortRSTs count the two calls Stream used to reach by
+	// downcasting to *Conn, which made them silent no-ops here. A fake that
+	// cannot observe them is a fake that certifies a lifecycle production does
+	// not run.
+	doneCalls       int
+	lastDoneID      uint32
+	bestEffortRSTs  int
+	lastBestEffortC frame.ErrCode
+}
+
+func (w *fakeStreamWriter) markStreamDone(id uint32) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.doneCalls++
+	w.lastDoneID = id
+}
+
+func (w *fakeStreamWriter) writeRSTStreamBestEffort(_ *Stream, code frame.ErrCode) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.bestEffortRSTs++
+	w.lastBestEffortC = code
 }
 
 func (w *fakeStreamWriter) writeHeadersWithPriority(_ context.Context, _ *Stream, _ []header.Field, _ bool, _ *frame.Priority) error {
