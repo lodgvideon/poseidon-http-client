@@ -9,31 +9,5 @@
     "ORCHESTKIT_AGENT_BROWSER_ALLOW_LOCALHOST": "1",
     "ORCHESTKIT_PERF_SNAPSHOT_ENABLED": "1",
     "ORCHESTKIT_LOG_LEVEL": "warn"
-  },
-  "hooks": {
-    "SessionStart": [
-      {
-        "matcher": "startup|clear|compact",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "bash -c 'node \"$(git rev-parse --show-toplevel)/.claude/hooks/caveman-activate.js\"'",
-            "timeout": 5,
-            "statusMessage": "Loading caveman mode..."
-          }
-        ]
-      }
-    ],
-    "UserPromptSubmit": [
-      {
-        "hooks": [
-          {
-            "type": "command",
-            "command": "bash -c 'node \"$(git rev-parse --show-toplevel)/.claude/hooks/caveman-mode-tracker.js\"'",
-            "timeout": 5
-          }
-        ]
-      }
-    ]
   }
 }
