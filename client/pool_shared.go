@@ -120,6 +120,43 @@ func dialTimeoutOrDefault(d time.Duration) time.Duration {
 // also built directly — every test does — and a zero field turning every dial
 // into an instant deadline is a failure mode worth making unreachable rather
 // than documenting.
+// dialObserved runs one dial with the observability every dial in this package
+// carries — bounded by timeout, timed, counted, reported to OnDial — on the
+// CALLER's context.
+//
+// It is dialAttempt's sibling for the single-connection transports, and the
+// difference is the context, which is why they are not one function.
+// dialAttempt deliberately roots its context at Background so a pool dial
+// outlives the request that triggered it and is cancelled by the POOL closing;
+// a single-conn transport dials for one caller, so cancelling that caller must
+// cancel the dial. Merging them would have to pick one of those, and both are
+// right for their own side.
+//
+// dial runs INSIDE the timed section on purpose, the same reason dialAttempt
+// gives: HTTP/1.1 validates the negotiated ALPN there, and a peer that answered
+// h2 has cost a real dial, so the hook should see that attempt fail rather than
+// see it succeed and the caller then get a DialError from nowhere.
+func dialObserved[C any](ctx context.Context, addr string, timeout time.Duration,
+	metrics *Metrics, hooksRef *atomic.Pointer[Hooks], dial func(context.Context) (C, error),
+) (C, error) {
+	start := time.Now()
+	metrics.Counters.DialsAttempted.Add(1)
+	dctx, dcancel := dialCtx(ctx, timeout)
+	c, err := dial(dctx)
+	dcancel()
+	dur := time.Since(start)
+	metrics.Latency.Dial.Observe(dur)
+	if err != nil {
+		metrics.Counters.DialsFailed.Add(1)
+	}
+	if hooksRef != nil {
+		if h := hooksRef.Load(); h != nil && h.OnDial != nil {
+			h.OnDial(DialEvent{Addr: addr, Err: err, Duration: dur})
+		}
+	}
+	return c, err
+}
+
 func dialCtx(ctx context.Context, timeout time.Duration) (context.Context, context.CancelFunc) {
 	return context.WithTimeout(ctx, dialTimeoutOrDefault(timeout))
 }

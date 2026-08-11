@@ -489,21 +489,10 @@ func (s *singleH3Conn) acquireClient(ctx context.Context) (h3Client, error) {
 // dial performs one dial attempt outside the lock, recording the dial metrics
 // and firing the OnDial hook exactly like singleConn.
 func (s *singleH3Conn) dial(ctx context.Context) (h3Client, error) {
-	dialStart := time.Now()
-	s.metrics.Counters.DialsAttempted.Add(1)
-	dctx, dcancel := dialCtx(ctx, s.dialTimeout)
-	cl, dialErr := s.dialFn(dctx, s.addr, s.tlsConfig)
-	dcancel()
-	dur := time.Since(dialStart)
-	s.metrics.Latency.Dial.Observe(dur)
-	if dialErr != nil {
-		s.metrics.Counters.DialsFailed.Add(1)
-	}
-	if hr := s.hooksRef; hr != nil {
-		if h := hr.Load(); h != nil && h.OnDial != nil {
-			h.OnDial(DialEvent{Addr: s.addr, Err: dialErr, Duration: dur})
-		}
-	}
+	cl, dialErr := dialObserved(ctx, s.addr, s.dialTimeout, s.metrics, s.hooksRef,
+		func(dctx context.Context) (h3Client, error) {
+			return s.dialFn(dctx, s.addr, s.tlsConfig)
+		})
 	return cl, dialErr
 }
 

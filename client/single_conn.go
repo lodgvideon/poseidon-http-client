@@ -95,21 +95,10 @@ func (s *singleConn) acquireConn(ctx context.Context) (*conn.Conn, func(), error
 		ch := s.dialing
 		s.mu.Unlock()
 
-		dialStart := time.Now()
-		s.metrics.Counters.DialsAttempted.Add(1)
-		dialCtx, dialCancel := dialCtx(ctx, s.dialTimeout)
-		dialed, dialErr := conn.Dial(dialCtx, s.addr, s.connOpts)
-		dialCancel()
-		dur := time.Since(dialStart)
-		s.metrics.Latency.Dial.Observe(dur)
-		if dialErr != nil {
-			s.metrics.Counters.DialsFailed.Add(1)
-		}
-		if hr := s.hooksRef; hr != nil {
-			if h := hr.Load(); h != nil && h.OnDial != nil {
-				h.OnDial(DialEvent{Addr: s.addr, Err: dialErr, Duration: dur})
-			}
-		}
+		dialed, dialErr := dialObserved(ctx, s.addr, s.dialTimeout, s.metrics, s.hooksRef,
+			func(dctx context.Context) (*conn.Conn, error) {
+				return conn.Dial(dctx, s.addr, s.connOpts)
+			})
 
 		s.mu.Lock()
 		s.lastDialAt = time.Now()
