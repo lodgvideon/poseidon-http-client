@@ -130,11 +130,15 @@ bandwidth + queue» реальным числом с указанием ячей
 
 Размер: S. Самая дешёвая позиция в списке.
 
-`quic.NewConn` принимает `PacketConn` **интерфейсом**
-([quic/conn.go:28](quic/conn.go:28) — три метода: `Write`, `Read`, `Close`),
-значит обёртка с drop/reorder/blackhole
+`quic.NewConn` ([quic/conn.go:272](quic/conn.go:272)) принимает `PacketConn`
+**интерфейсом** — три метода, `Write`/`Read`/`Close`
+([quic/conn.go:28](quic/conn.go:28)), значит обёртка с drop/reorder/blackhole
 по seeded RNG даёт loss-recovery прямо в юнит-тесте — без Docker, без WSL,
 детерминированно, с воспроизведением по seed.
+
+Внутрипроцессный пир тоже есть готовый: `AcceptInitial`
+([quic/server.go:51](quic/server.go:51)) и `StartServerHandshake`
+([quic/server.go:258](quic/server.go:258)) экспортированы.
 
 Критерий приёмки: взять один существующий кейс из loss-сьюта, воспроизвести
 его in-process, получить тот же вердикт за время меньше 5 секунд.
