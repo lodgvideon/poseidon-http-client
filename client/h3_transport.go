@@ -556,10 +556,5 @@ func (s *singleH3Conn) warmup(n int) {
 // HTTP/3 client's teardown is observable to the same hook/metric surface as a
 // pooled H2 conn.
 func (s *singleH3Conn) notifyClose() {
-	s.metrics.Counters.ConnsClosed.Add(1)
-	if hr := s.hooksRef; hr != nil {
-		if h := hr.Load(); h != nil && h.OnConnClose != nil {
-			h.OnConnClose(ConnCloseEvent{Addr: s.addr, Reason: CloseManual})
-		}
-	}
+	notifyConnClose(s.addr, CloseManual, s.metrics, s.hooksRef)
 }

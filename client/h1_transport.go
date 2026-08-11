@@ -221,6 +221,9 @@ func (s *h1singleConn) openExchange(ctx context.Context) (protoStream, pushLooku
 	ex := nc.NewExchange()
 	release := func(keepAlive bool) {
 		if !keepAlive {
+			// The ordinary "Connection: close" churn. Silent until now, which is
+			// most of the connection lifecycle on this transport.
+			notifyConnClose(s.addr, CloseNotReusable, s.metrics, s.hooksRef)
 			_ = nc.Close()
 			s.mu.Lock()
 			if s.cur == nc {
@@ -263,6 +266,7 @@ func (s *h1singleConn) acquireConn(ctx context.Context) (*http1.Conn, error) {
 			// and dial a fresh one on the next turn of the loop.
 			s.cur = nil
 			s.mu.Unlock()
+			notifyConnClose(s.addr, CloseNotReusable, s.metrics, s.hooksRef)
 			_ = c.Close()
 			continue
 		}
@@ -342,6 +346,7 @@ func (s *h1singleConn) close() error {
 		cancel()
 	}
 	if cur != nil {
+		notifyConnClose(s.addr, CloseManual, s.metrics, s.hooksRef)
 		return cur.Close()
 	}
 	return nil
