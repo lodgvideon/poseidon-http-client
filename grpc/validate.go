@@ -88,16 +88,14 @@ func defaultSensitiveField(name []byte) bool {
 }
 
 // isTChar reports whether c is an RFC 9110 §5.6.2 token character.
+//
+// Derived from tokenChar rather than restating the set. tokenChar is the same
+// list minus the uppercase letters, and the two were written out separately a
+// few lines apart, so a correction to the punctuation would have had to land in
+// both to stay true. Uppercase is the entire difference: a field name must be
+// lowercase (RFC 9113 §8.2.1), a content-type subtype need not be.
 func isTChar(c byte) bool {
-	switch {
-	case c >= 'a' && c <= 'z', c >= 'A' && c <= 'Z', c >= '0' && c <= '9':
-		return true
-	}
-	switch c {
-	case '!', '#', '$', '%', '&', '\'', '*', '+', '-', '.', '^', '_', '`', '|', '~':
-		return true
-	}
-	return false
+	return tokenChar[c] || (c >= 'A' && c <= 'Z')
 }
 
 // validContentSubtype checks Options.ContentSubtype. Empty is valid and means

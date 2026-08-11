@@ -231,8 +231,3 @@ func appendTimeout(dst []byte, d time.Duration) []byte {
 	}
 	return append(strconv.AppendInt(dst, maxTimeoutDigits, 10), 'H')
 }
-
-// encodeTimeout renders d as a grpc-timeout field value.
-func encodeTimeout(d time.Duration) string {
-	return string(appendTimeout(nil, d))
-}

@@ -1334,8 +1334,20 @@ func (c *Conn) onWindowUpdate(streamID uint32, increment uint32) error {
 // of type FLOW_CONTROL_ERROR.
 const maxInitialWindowSize = int64(1)<<31 - 1
 
+// DefaultMaxFrameSize is SETTINGS_MAX_FRAME_SIZE's initial value (RFC 9113
+// §6.5.2), which is what a connection advertises and assumes of a peer until a
+// SETTINGS frame says otherwise.
+//
+// Exported because a caller that sizes buffers per frame has to know it, and the
+// alternative is what grpc did: re-hardcode 16384 with a comment saying "conn's
+// advertised default", so a change here would have silently mis-sized another
+// package's per-stream memory budget.
+const DefaultMaxFrameSize uint32 = 1 << 14
+
 // frameSizeFloor and frameSizeCeil bound SETTINGS_MAX_FRAME_SIZE (RFC 9113
-// §6.5.2): the initial/minimum value 2^14 and the maximum 2^24-1.
+// §6.5.2): the initial/minimum value 2^14 and the maximum 2^24-1. The floor is
+// the same number as the initial value, which is why DefaultMaxFrameSize is
+// defined separately rather than aliased — they are different rules that agree.
 const (
 	frameSizeFloor uint32 = 1 << 14   // 16384
 	frameSizeCeil  uint32 = 1<<24 - 1 // 16777215
