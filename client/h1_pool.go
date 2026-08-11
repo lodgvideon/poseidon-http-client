@@ -1003,9 +1003,37 @@ func (p *h1Pool) release(mc *h1ManagedConn, keepAlive bool) {
 	}
 }
 
+// h1WarmupProbeTimeout bounds one warm-up acquire. It is short on purpose: a
+// warm-up dial that has not completed quickly is already in flight and will
+// finish on its own — the pool records it — so waiting longer buys nothing and
+// only delays the next one. Named rather than a literal because it is a policy
+// number, not an arithmetic one.
+const h1WarmupProbeTimeout = 50 * time.Millisecond
+
 // warmup pre-dials up to n conns in the background. Idempotent. n is capped at
 // MaxConnsPerHost. Returns immediately; dial errors surface via the OnDial hook.
+//
+// The dialing runs on its own goroutine. It used to run on the caller's: a
+// Stats round-trip plus up to MaxConnsPerHost sequential acquires, each bounded
+// by h1WarmupProbeTimeout. Against a black-holed host at MaxConnsPerHost 64 that
+// is ~3.2 seconds inside a call this contract — and Client.Warmup, and the
+// transport interface — all document as returning immediately. The H2 and H3
+// pools hand n to their actor and return; this is the same promise kept a
+// different way.
+//
+// Not by adding a warmupCh like the siblings: their handleWarmup starts dials
+// directly on actor state, while this pool warms through acquire on purpose, to
+// get exclusive checkout. Calling acquire from inside the actor would deadlock
+// against the actor that serves it.
 func (p *h1Pool) warmup(n int) {
+	if n <= 0 {
+		return
+	}
+	go p.warmupDials(n)
+}
+
+// warmupDials is warmup's body, off the caller's goroutine.
+func (p *h1Pool) warmupDials(n int) {
 	if n <= 0 {
 		return
 	}
@@ -1025,7 +1053,16 @@ func (p *h1Pool) warmup(n int) {
 	// `need` is capped at MaxConnsPerHost, so holding them cannot self-deadlock.
 	held := make([]*h1ManagedConn, 0, need)
 	for i := 0; i < need; i++ {
-		ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+		select {
+		case <-p.closedCh:
+			// The pool is gone; release what is held and stop dialing into nothing.
+			for _, mc := range held {
+				p.release(mc, true)
+			}
+			return
+		default:
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), h1WarmupProbeTimeout)
 		mc, err := p.acquire(ctx)
 		cancel()
 		if err != nil {
