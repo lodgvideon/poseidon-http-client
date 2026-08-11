@@ -25,6 +25,51 @@ go test ./conn/ -run TestIntegration_TenConcurrentStreams_Echo -v
 
 Pre-commit hook (optional): `git config core.hooksPath .githooks`.
 
+## Where to run commands (Windows host)
+
+**Run Go work in WSL, not PowerShell.** The host is Windows, but the Linux
+toolchain is what CI runs, and PowerShell quoting mangles anything with
+`$(...)`, `$((...))`, or nested quotes. Invoke WSL from the **Bash** tool:
+
+```bash
+wsl -e bash -lc 'cd /mnt/c/Users/<user>/work/source/poseidon-http-client/... && go test ./conn/'
+```
+
+Two mechanical traps, both verified:
+
+- **Keep every `/mnt/...` path INSIDE the quoted `-lc '…'` string.** Git-Bash
+  rewrites a bare `/mnt/c/...` *argument* into `C:/Program Files/Git/mnt/c/...`
+  (MSYS path conversion) and the command dies with `No such file or directory`.
+  For anything long, write a `.sh` file and run `wsl -e bash -lc 'bash -l /mnt/c/…/x.sh'`.
+- **git does NOT work from WSL in a worktree.** A worktree's `.git` file points
+  at a *Windows* absolute path (`C:/Users/...`), which WSL's git cannot resolve —
+  every command fails with `fatal: not a git repository`. Run git (and `gh`) from
+  the Windows side.
+
+WSL's *installed* Go is older than the repo requires; `go.mod` makes it fetch the
+matching toolchain, so `go version` reports the repo's version, not the installed
+one. `GOTOOLCHAIN=local` exposes the difference. Both `go vet` under each build
+tag and `GOOS=linux golangci-lint run` are meaningful only on the Linux side —
+`_linux.go` files are never analysed on the Windows host.
+
+### rtk (token-reducing CLI proxy, WSL-only)
+
+`rtk` wraps commands and compresses their output. Measured on this repo:
+`go test -v ./frame/` goes from 17.9 KB to 34 B, and real test failures survive
+with `file:line` and the assertion message intact.
+
+**Use it for `go test`. Do not use it for `golangci-lint` or `git`:**
+
+| Command | Verdict |
+|---|---|
+| `rtk go test ./...` | **Use.** Failures kept with detail; exit code correct. On `[build failed]` it drops the compiler line — re-run raw to see *why*. |
+| `rtk golangci-lint run` | **Do not use.** Returns **exit 0 while findings exist** (raw returns 1), misattributes the file, and drops the message. Confirmed 2/2 runs. |
+| `rtk git …` | Moot — git does not run from WSL here (see above). |
+
+Do **not** run `rtk init` / install its auto-rewrite hook: there is no Windows
+`rtk` binary for Claude Code to exec, and the hook would rewrite `golangci-lint`
+into the form whose exit code lies.
+
 ## Architecture
 
 ```
@@ -181,12 +226,42 @@ this repo. (1) symbol-aware — understands Go structure, not just text;
 (2) bypasses `tdd-guard` PreToolUse hook that fires on `Edit`/`Write`
 and currently errors out against `z.ai` endpoint.
 
-**Session start**: call `mcp__serena__initial_instructions` once, then
-activate project:
+**Session start**: call `mcp__serena__initial_instructions` once, then activate the
+project by passing the **current working directory** — which in a worktree session is the
+worktree, not the repo root:
+
 ```
-mcp__plugin_serena_serena__activate_project  projectPath=/Users/ivanprikhodko/work/source/poseidon-http-client
+mcp__serena__activate_project  project=<absolute path of the cwd>
 ```
-`create_text_file` requires active project.
+
+Activate the WORKTREE, not `…/poseidon-http-client`. Worktrees live under
+`.claude/worktrees/` INSIDE the repo, so activating the root indexes the main checkout
+plus every worktree and yields duplicate symbols for every file.
+
+Serena's onboarding memories for this project (`core`, `tech_stack`,
+`suggested_commands`, `conventions`, `task_completion`) live in `.serena/memories/` and
+are read with `mcp__serena__read_memory`; start from `core`. Serena line numbers are
+**0-based**.
+
+**Context is `claude-code`** (`.mcp.json` passes `--context claude-code`; the default is
+`desktop-app`, which is wrong for a CLI agent). That context disables the tools Claude
+Code already has, so these Serena tools are **NOT available**: `read_file`,
+`create_text_file`, `execute_shell_command`, `list_dir`, `find_file`,
+`search_for_pattern`. Use Read / Write / Bash / Glob / Grep for those. It also sets
+`structured_tool_output: false` to dodge a Claude Code escaping bug.
+
+Two consequences worth knowing:
+
+- The old workaround for the `replace_symbol_body` `var (...)` bug was "rewrite the whole
+  file with `create_text_file`" — that tool is gone under this context. Use `Write`.
+- `--project` is deliberately NOT passed in `.mcp.json`, because that file is shared by
+  every worktree and would pin them all to one. `activate_project` therefore stays
+  available and must be called each session (see above). Do not add `--project`: the
+  context carries `single_project: true`, which disables `activate_project` as soon as a
+  project is supplied at startup.
+
+Serena is pinned to tag `v1.7.0`. Bump it deliberately; an unpinned MCP can change its
+tool surface under you.
 
 **Go `name_path` patterns** (pass to `find_symbol`, `replace_symbol_body`, etc.):
 
@@ -214,13 +289,14 @@ Pass `relative_path` to restrict search to one file (e.g. `conn/conn.go`).
 | `find_referencing_symbols` | All call-sites / uses of symbol |
 | `find_implementations` | Concrete types satisfying interface |
 | `get_diagnostics_for_file` | LSP errors/warnings after edit |
-| `create_text_file` | Create or fully overwrite file |
-| `search_for_pattern` | Regex/literal search across files |
-| `find_file` | Locate file by name glob |
+| `replace_content` | Regex/literal replace when no symbol fits |
+
+For creating a file, searching text, or globbing a filename, use `Write`, `Grep` and
+`Glob` — the Serena equivalents are disabled by the `claude-code` context.
 
 **Known caveat**: `replace_symbol_body` on `var (...)` sentinel block
 strips `var()` wrapper, produces invalid syntax. Workaround:
-rewrite whole file with `create_text_file`.
+rewrite the whole file with `Write`.
 
 **Serena memory** — project-scoped notes persisting across sessions.
 Stored inside serena project, not Claude's memory system.
