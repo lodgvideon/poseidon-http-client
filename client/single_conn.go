@@ -143,6 +143,7 @@ func (s *singleConn) close() error {
 	s.cur = nil
 	s.mu.Unlock()
 	if cur != nil {
+		notifyConnClose(s.addr, CloseManual, s.metrics, s.hooksRef)
 		return cur.Close()
 	}
 	return nil

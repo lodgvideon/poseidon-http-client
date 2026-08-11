@@ -841,6 +841,9 @@ func (c *Client) DoStream(ctx context.Context, req *Request, sr *StreamResponse)
 	if err == nil {
 		status = sr.Status
 	}
+	// BytesRecv is 0 and Latency is time-to-headers: this fires when the headers
+	// have arrived and the caller has not read any body yet. See
+	// RequestCompleteEvent.BytesRecv for why the event stays here.
 	c.observeDone(req, authority, status, int64(len(req.Body)), 0, err, time.Since(start))
 	return err
 }

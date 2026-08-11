@@ -157,6 +157,23 @@ func dialObserved[C any](ctx context.Context, addr string, timeout time.Duration
 	return c, err
 }
 
+// notifyConnClose counts a closed connection and reports it to OnConnClose.
+//
+// Every transport that closes a connection calls this, which is the point: the
+// hook's contract is "every close this client performs", and it was previously
+// honoured by the pools and by the HTTP/3 single conn while the HTTP/2 and
+// HTTP/1.1 single conns closed silently.
+func notifyConnClose(addr string, reason CloseReason, metrics *Metrics, hooksRef *atomic.Pointer[Hooks]) {
+	if metrics != nil {
+		metrics.Counters.ConnsClosed.Add(1)
+	}
+	if hooksRef != nil {
+		if h := hooksRef.Load(); h != nil && h.OnConnClose != nil {
+			h.OnConnClose(ConnCloseEvent{Addr: addr, Reason: reason})
+		}
+	}
+}
+
 func dialCtx(ctx context.Context, timeout time.Duration) (context.Context, context.CancelFunc) {
 	return context.WithTimeout(ctx, dialTimeoutOrDefault(timeout))
 }

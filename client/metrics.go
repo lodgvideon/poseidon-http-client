@@ -26,7 +26,7 @@ type Counters struct {
 	Retries         atomic.Int64
 	DialsAttempted  atomic.Int64
 	DialsFailed     atomic.Int64
-	ConnsClosed     atomic.Int64 // sum across all CloseReason values
+	ConnsClosed     atomic.Int64 // sum across all CloseReason values, every transport
 	GoAwaysReceived atomic.Int64
 }
 
