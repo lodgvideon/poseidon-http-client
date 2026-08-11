@@ -4,7 +4,7 @@
 // sync.Pool-backed byte-buffer pool, and RFC 7540 §6.1 padding stripping. Not
 // part of the public API. (hpack does not import this package — it carries its
 // own prefixed-integer codec.)
-package bytesx
+package bufx
 
 // ReadUint24 reads a big-endian 24-bit unsigned integer from b[:3].
 // b MUST have length >= 3 — caller is responsible for the bound.

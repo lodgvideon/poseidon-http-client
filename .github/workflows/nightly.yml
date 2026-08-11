@@ -22,6 +22,7 @@ jobs:
       matrix:
         include:
           - pkg: ./internal/bytesx
+          - pkg: ./internal/bufx
             target: FuzzReadVarint
           - pkg: ./conn
             target: FuzzConnReader

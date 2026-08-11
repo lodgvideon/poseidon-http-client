@@ -52,9 +52,11 @@ HTTP/3 stack (standalone — see Phase status):
                      #   handshake, AEAD protection, key update, loss recovery, NewReno CC
   qpack/             # RFC 9204: static-table-only QPACK codec
 
-internal/bytesx/     # Shared low-level: QUIC varint codec, buffer pool,
-                     #   big-endian uint24/uint31, RFC 7540 padding strip
-                     #   (used by frame, quic, http3 — NOT hpack)
+internal/bytesx/     # QUIC varint codec (RFC 9000 §16) — used by quic, http3
+internal/bufx/       # HTTP/2 byte helpers: read-buffer pool, big-endian
+                     #   uint24/uint31, RFC 7540 padding strip — used by frame
+                     #   ONLY. Split from bytesx because the two sets had zero
+                     #   overlapping consumers.
 docs/                # RFC_COVERAGE.md (authoritative test-to-RFC map),
                      #   HTTP3_DESIGN.md, CLIENT_GUIDE.md, GRPC_GUIDE.md,
                      #   BENCH_BASELINE.md, COVERAGE.md

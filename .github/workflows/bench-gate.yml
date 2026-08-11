@@ -15,11 +15,11 @@ jobs:
         # whose zero-alloc invariant must hold.
         # ./qpack and ./http3 are HEAD-only here until they exist on the base
         # branch; the absolute zero-alloc gate below runs on head.txt.
-        run: go test -bench=. -benchmem -benchtime=2s -count=5 -run=^$ ./frame ./hpack ./internal/bytesx ./qpack ./quic ./http3 | tee head.txt
+        run: go test -bench=. -benchmem -benchtime=2s -count=5 -run=^$ ./frame ./hpack ./internal/bytesx ./internal/bufx ./qpack ./quic ./http3 | tee head.txt
       - name: Bench base
         run: |
           git checkout ${{ github.base_ref }}
-          go test -bench=. -benchmem -benchtime=2s -count=5 -run=^$ ./frame ./hpack ./internal/bytesx | tee base.txt
+          go test -bench=. -benchmem -benchtime=2s -count=5 -run=^$ ./frame ./hpack ./internal/bytesx ./internal/bufx | tee base.txt
           git checkout -
       - name: benchstat (informational)
         run: |
