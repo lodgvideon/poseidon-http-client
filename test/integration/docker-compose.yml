@@ -54,3 +54,35 @@ services:
     environment:
       - JAVA_OPTS=-XX:+UseG1GC -Xmx512m
     restart: "no"
+
+  # ── Toxiproxy — fault injection in front of the peers above ─────
+  #
+  # Transparent TCP proxy with a runtime HTTP API, so toxics are applied per
+  # test rather than globally for the compose run (#552). It terminates TCP,
+  # not TLS: bytes pass through untouched, so h2-over-TLS works and the
+  # existing suite's tls.Config needs no change.
+  #
+  # Deliberately NOT given a proxy definition here. Proxies are created over
+  # the API by the test that needs one and removed afterwards, so a leftover
+  # toxic cannot leak into an unrelated test.
+  toxiproxy:
+    image: ghcr.io/shopify/toxiproxy:2.12.0
+    container_name: poseidon-it-toxiproxy
+    hostname: toxiproxy
+    networks:
+      h2net:
+        ipv4_address: 172.30.0.13
+    # 18474 is the control API; 18085/18086 are the listen ports a test binds a
+    # proxy to (nginx TLS and undertow h2c respectively).
+    ports:
+      - "127.0.0.1:18474:8474"
+      - "127.0.0.1:18085:18085"
+      - "127.0.0.1:18086:18086"
+    command: ["-host", "0.0.0.0"]
+    healthcheck:
+      test: ["CMD", "/toxiproxy-cli", "list"]
+      interval: 1s
+      timeout: 2s
+      retries: 30
+      start_period: 1s
+    restart: "no"
