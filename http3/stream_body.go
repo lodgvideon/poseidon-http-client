@@ -49,37 +49,20 @@ func (c *Client) roundTripStream(ctx context.Context, stream quicStream, req *Re
 	// enforced in dispatchFrame), so no body bytes are consumed here; any DATA or
 	// trailer frames delivered in the same burst stay buffered for the BodyReader.
 	for {
-		if data := stream.Recv(); len(data) > 0 {
-			br.fr.Feed(data)
-		}
 		if err := c.consumeUntilResponse(&br.fr, &br.rb); err != nil {
 			return nil, nil, err
 		}
 		if br.rb.resp != nil {
 			break
 		}
-		finished, reset, code := stream.RecvState()
-		if !finished {
-			// Park until the reader signals more response data, ctx is cancelled, or
-			// the connection terminates (docs/HTTP3_DESIGN.md §3.3).
-			if err := stream.WaitReadable(ctx); err != nil {
-				return nil, nil, err
-			}
-			continue
+		ended, rerr := c.recvStep(ctx, stream, &br.fr)
+		if rerr != nil {
+			return nil, nil, rerr
 		}
-		// Finished before a final response: drain once more (the reader is async, so
-		// finished can flip after the top-of-loop Recv), then classify.
-		if data := stream.Recv(); len(data) > 0 {
-			br.fr.Feed(data)
-			continue
+		if ended {
+			// The stream finished cleanly without ever carrying a final response.
+			return nil, nil, ErrH3Message // RFC 9114 §4.1.2
 		}
-		if reset {
-			return nil, nil, &StreamResetError{Code: code}
-		}
-		if br.fr.Buffered() > 0 {
-			return nil, nil, c.connError(H3FrameError) // truncated final frame (§7.1)
-		}
-		return nil, nil, ErrH3Message // no final (non-1xx) response (RFC 9114 §4.1.2)
 	}
 	br.resp = br.rb.resp
 	br.resp.Interim = br.rb.interim
@@ -91,20 +74,9 @@ func (c *Client) roundTripStream(ctx context.Context, stream quicStream, req *Re
 // past the final HEADERS (a DATA or trailer frame delivered in the same burst) in
 // fr for the BodyReader to read. Errors are the same scoped connection/stream
 // errors dispatchFrame returns.
+// consumeUntilResponse parses buffered frames until the final response arrives.
 func (c *Client) consumeUntilResponse(fr *FrameReader, rb *respBuilder) error {
-	for rb.resp == nil {
-		typ, payload, rerr := fr.ReadFrame()
-		if errors.Is(rerr, ErrNeedMore) {
-			return nil // wait for more stream bytes
-		}
-		if rerr != nil {
-			return ErrResponseTooLarge // an oversized frame — abort rather than buffer it
-		}
-		if err := c.dispatchFrame(rb, typ, payload); err != nil {
-			return err
-		}
-	}
-	return nil
+	return c.consume(fr, rb, true)
 }
 
 // ResponseBody is the incremental body of a streaming HTTP/3 response, returned by
@@ -224,35 +196,60 @@ func (r *BodyReader) Next(ctx context.Context) (BodyEvent, error) {
 	}
 }
 
-// refill reads more stream bytes into the frame reader. It returns ended=true when
-// the stream has finished cleanly with no more frames buffered, and a non-nil error
-// for a server reset or a truncated final frame (RFC 9114 §7.1). It mirrors the
-// tail of the buffered roundTrip receive loop.
-func (r *BodyReader) refill(ctx context.Context) (ended bool, err error) {
-	if data := r.stream.Recv(); len(data) > 0 {
-		r.fr.Feed(data)
+// recvStep advances a stream's receive side by exactly one step: drain what the
+// reader has delivered, or park until it delivers more, or conclude.
+//
+// It returns ended=true only when the stream finished cleanly with nothing left
+// buffered. Otherwise it returns (false, nil) — the caller re-parses and calls
+// again — or an error for a server reset or a truncated final frame (RFC 9114
+// §7.1).
+//
+// This tail was written three times nearly line for line: the buffered roundTrip
+// loop, the wait-for-response loop, and BodyReader.refill, whose own comment said
+// it "mirrors the tail of the buffered roundTrip receive loop". The async-finished
+// re-drain below was a bug fix, and a fix in machinery that exists in triplicate
+// is one copy away from being half-applied. (All three did carry it by the time
+// this merge happened — the divergence #497 describes had already been closed by
+// hand, which is the cost this removes rather than a bug it fixes.)
+func (c *Client) recvStep(ctx context.Context, stream quicStream, fr *FrameReader) (ended bool, err error) {
+	if data := stream.Recv(); len(data) > 0 {
+		fr.Feed(data)
 		return false, nil
 	}
-	finished, reset, code := r.stream.RecvState()
+	// One locked snapshot of the receive side (docs/HTTP3_DESIGN.md §3.4, F5).
+	finished, reset, code := stream.RecvState()
 	if !finished {
-		if werr := r.stream.WaitReadable(ctx); werr != nil {
+		// Park until the reader signals more data, ctx is cancelled, or the
+		// connection terminates (§3.3). Level-triggered: the caller re-reads the
+		// predicate on the next step.
+		if werr := stream.WaitReadable(ctx); werr != nil {
 			return false, werr
 		}
 		return false, nil
 	}
-	// Finished: drain once more before concluding — the FIN is in, so no bytes can
-	// arrive after this drain.
-	if data := r.stream.Recv(); len(data) > 0 {
-		r.fr.Feed(data)
+	// Finished. The reader is asynchronous, so finished can flip between the drain
+	// above and this point; drain once more before concluding. finished means the
+	// FIN is in, so nothing can arrive after this.
+	if data := stream.Recv(); len(data) > 0 {
+		fr.Feed(data)
 		return false, nil
 	}
 	if reset {
-		return false, &StreamResetError{Code: code} // server aborted (RFC 9000 §3.5)
+		// The server aborted with RESET_STREAM (RFC 9000 §3.5); surface it so the
+		// caller can tell a rejected (retryable) request from a completed one
+		// (RFC 9114 §4.1.1).
+		return false, &StreamResetError{Code: code}
 	}
-	if r.fr.Buffered() > 0 {
-		return false, r.c.connError(H3FrameError) // truncated final frame (§7.1)
+	if fr.Buffered() > 0 {
+		return false, c.connError(H3FrameError) // truncated final frame (§7.1)
 	}
 	return true, nil
+}
+
+// refill reads more stream bytes into the frame reader — one recvStep against
+// this reader's own stream.
+func (r *BodyReader) refill(ctx context.Context) (ended bool, err error) {
+	return r.c.recvStep(ctx, r.stream, &r.fr)
 }
 
 // finish validates the completed body (the content-length equality check, RFC 9114

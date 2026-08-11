@@ -1064,41 +1064,16 @@ func (c *Client) roundTrip(ctx context.Context, stream quicStream, req *Request)
 		}
 	}()
 	for {
-		if data := stream.Recv(); len(data) > 0 {
-			fr.Feed(data)
-		}
 		if err := c.consumeFrames(&fr, &rb); err != nil {
 			return nil, nil, err
 		}
-		// One locked snapshot of the receive side (docs/HTTP3_DESIGN.md §3.4, F5).
-		finished, reset, code := stream.RecvState()
-		if !finished {
-			// Park until the reader signals this stream has more response data, the
-			// per-request context is cancelled, or the connection terminates (§3.3).
-			// Level-triggered: the next iteration re-reads the predicate under c.mu.
-			if err := stream.WaitReadable(ctx); err != nil {
-				return nil, nil, err
-			}
-			continue
+		ended, rerr := c.recvStep(ctx, stream, &fr)
+		if rerr != nil {
+			return nil, nil, rerr
 		}
-		// The stream is finished. The reader is asynchronous, so finished can flip
-		// between the Recv at the top of this iteration and now; drain once more to
-		// feed any bytes delivered in that window before concluding — since finished
-		// means the FIN is in, no further bytes can arrive after this drain.
-		if data := stream.Recv(); len(data) > 0 {
-			fr.Feed(data)
-			continue // re-parse the newly drained bytes before concluding
+		if ended {
+			break
 		}
-		if reset {
-			// The server aborted with RESET_STREAM (RFC 9000 §3.5); surface it so the
-			// caller can tell a rejected (retryable) request from a completed one (§4.1.1).
-			return nil, nil, &StreamResetError{Code: code}
-		}
-		if fr.Buffered() > 0 {
-			// The stream ended cleanly mid-frame, truncating the last frame (§7.1).
-			return nil, nil, c.connError(H3FrameError)
-		}
-		break
 	}
 	return finalizeResponse(rb.resp, rb.body, req, rb.interim)
 }
@@ -1144,8 +1119,12 @@ type respBuilder struct {
 // bytes (ErrNeedMore) or after the buffer drains, and a non-nil error — already
 // scoped to the right connection/stream level — on any protocol violation or an
 // oversized frame (mapped to ErrResponseTooLarge).
-func (c *Client) consumeFrames(fr *FrameReader, rb *respBuilder) error {
-	for {
+// consume parses every frame the reader has buffered, dispatching each. It stops
+// early once the final response has arrived when untilResponse is set — the only
+// difference between the two call sites, which were otherwise the same loop
+// written twice.
+func (c *Client) consume(fr *FrameReader, rb *respBuilder, untilResponse bool) error {
+	for !untilResponse || rb.resp == nil {
 		typ, payload, rerr := fr.ReadFrame()
 		if errors.Is(rerr, ErrNeedMore) {
 			return nil // wait for more stream bytes
@@ -1158,6 +1137,12 @@ func (c *Client) consumeFrames(fr *FrameReader, rb *respBuilder) error {
 			return err
 		}
 	}
+	return nil
+}
+
+// consumeFrames parses every buffered frame.
+func (c *Client) consumeFrames(fr *FrameReader, rb *respBuilder) error {
+	return c.consume(fr, rb, false)
 }
 
 // ackDynamicSection, when the just-decoded field section referenced the shared
