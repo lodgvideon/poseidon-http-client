@@ -1,6 +1,7 @@
 package http3
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"strings"
@@ -75,5 +76,46 @@ func TestH3ConnError_DistinguishesCauses(t *testing.T) {
 	// died" is unaffected by the added detail.
 	if !errors.Is(peerFraming, ErrH3Control) || !errors.Is(localQPACK, ErrH3Control) {
 		t.Error("a caller matching the sentinel stopped seeing one of them")
+	}
+}
+
+// TestH3ConnError_RealPathCarriesTheCode drives an actual connection-level
+// violation and reads the code off the RETURNED error.
+//
+// The other tests in this file construct an H3ConnError themselves, so they pass
+// whether or not connError ever produces one — reverting connError to the bare
+// sentinel left every one of them green. This is the gate that fails: it asserts
+// the code the client put on the wire is the code the caller can read, which is
+// the entire claim.
+func TestH3ConnError_RealPathCarriesTheCode(t *testing.T) {
+	cases := []struct {
+		name  string
+		frame []byte
+		code  uint64
+	}{
+		{"SETTINGS on a request stream", AppendFrameHeader(nil, FrameSettings, 0), H3FrameUnexpected},
+		{"reserved frame type", AppendFrameHeader(nil, 0x02, 0), H3FrameUnexpected},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			conn := &fakeConn{req: &fakeStream{recvChunks: [][]byte{tc.frame}, fin: true}}
+			client, _ := NewClientFake(conn, nil)
+			_, _, err := client.Do(context.Background(),
+				&Request{Method: "GET", Scheme: "https", Authority: "h", Path: "/"})
+
+			var ce *H3ConnError
+			if !errors.As(err, &ce) {
+				t.Fatalf("err = %v (%T), want a *H3ConnError — the code is on the wire "+
+					"(close code %#x) but not in the error the caller gets",
+					err, err, conn.closeCode)
+			}
+			if ce.Code != tc.code {
+				t.Errorf("error carries %#x, want %#x", ce.Code, tc.code)
+			}
+			if ce.Code != conn.closeCode {
+				t.Errorf("error carries %#x but %#x went on the wire; the two must agree",
+					ce.Code, conn.closeCode)
+			}
+		})
 	}
 }
