@@ -131,7 +131,8 @@ bandwidth + queue» реальным числом с указанием ячей
 Размер: S. Самая дешёвая позиция в списке.
 
 `quic.NewConn` принимает `PacketConn` **интерфейсом**
-([quic/conn.go:272](quic/conn.go:272)), значит обёртка с drop/reorder/blackhole
+([quic/conn.go:28](quic/conn.go:28) — три метода: `Write`, `Read`, `Close`),
+значит обёртка с drop/reorder/blackhole
 по seeded RNG даёт loss-recovery прямо в юнит-тесте — без Docker, без WSL,
 детерминированно, с воспроизведением по seed.
 
