@@ -1,6 +1,7 @@
 package qpack
 
 import (
+	"github.com/lodgvideon/poseidon-http-client/header"
 	"testing"
 )
 

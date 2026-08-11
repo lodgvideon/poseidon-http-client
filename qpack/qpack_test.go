@@ -3,6 +3,7 @@ package qpack
 import (
 	"bytes"
 	"errors"
+	"github.com/lodgvideon/poseidon-http-client/header"
 	"testing"
 )
 
