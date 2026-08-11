@@ -468,7 +468,11 @@ func (s *Stream) fail(err error) error {
 func (s *Stream) pump(ctx context.Context) error {
 	ev, err := s.s.Recv(ctx)
 	if err != nil {
-		return s.fail(err)
+		// Map the transport's error into the *Status family here, at the one
+		// boundary every connection-level failure crosses, so a caller does not
+		// have to know which failures conn delivers as events and which as errors.
+		// The original is still reachable through Unwrap.
+		return s.fail(statusFromTransport(err))
 	}
 	switch ev.Type {
 	case conn.EventInterimHeaders:
