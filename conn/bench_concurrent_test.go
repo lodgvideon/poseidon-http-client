@@ -21,7 +21,7 @@ func BenchmarkConn_Roundtrip_Concurrent(b *testing.B) {
 	defer teardown()
 	hdrs := []header.Field{
 		{Name: []byte(":method"), Value: []byte("GET")},
-		{Name: []byte(":scheme"), Value: []byte("https")},
+		{Name: []byte(":scheme"), Value: []byte("http")},
 		{Name: []byte(":authority"), Value: []byte("example.com")},
 		{Name: []byte(":path"), Value: []byte("/")},
 	}
@@ -42,15 +42,13 @@ func BenchmarkConn_Roundtrip_Concurrent(b *testing.B) {
 				b.Errorf("SendHeaders: %v", err)
 				return
 			}
-			for {
-				ev, err := s.Recv(ctx)
-				if err != nil {
-					b.Errorf("Recv: %v", err)
-					return
-				}
-				if ev.EndStream {
-					break
-				}
+			// benchDrain closes the stream and returns the pooled buffers, so
+			// streamPool and headerSlabPool are exercised as hits rather than
+			// misses. This loop used to do neither, which is most of why it
+			// reported 34 allocs/op.
+			if err := benchDrain(ctx, s); err != nil {
+				b.Errorf("drain: %v", err)
+				return
 			}
 		}
 	})

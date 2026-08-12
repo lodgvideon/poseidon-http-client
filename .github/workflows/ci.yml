@@ -27,16 +27,34 @@ jobs:
           go-version: '1.25'
           cache: true
       - run: go test -race -count=1 ./...
-      # The allocation gates in conn and grpc are //go:build !race, because the
-      # race detector allocates as it instruments and swamps a difference of one
-      # allocation. Every other job here runs -race, and the two that do not
-      # filter by name (-run=Fuzz, -run=Conformance), so without this step those
-      # gates never execute in CI at all: `go test -race -run TestInvokeInto_
-      # AllocsPerCall ./grpc/` prints "no tests to run" and passes. They are the
-      # only thing standing between a per-RPC allocation and a green build, since
-      # bench-gate's absolute zero-alloc rule covers neither package.
+      # The allocation gates in conn, client and grpc are //go:build !race,
+      # because the race detector allocates as it instruments and swamps a
+      # difference of one allocation. Every other job here runs -race, and the two
+      # that do not filter by name (-run=Fuzz, -run=Conformance), so without this
+      # step those gates never execute in CI at all: `go test -race -run
+      # TestInvokeInto_AllocsPerCall ./grpc/` prints "no tests to run" and passes.
+      # They are the only thing standing between a per-RPC allocation and a green
+      # build, since bench-gate's absolute zero-alloc rule covers none of the three.
+      #
+      # This step has TWO ways to silently cover nothing, and both had bitten by
+      # 2026-08-12. A !race test escapes CI entirely if EITHER its package is
+      # missing from the list below OR its name misses the -run pattern.
+      #
+      #   1. ./conn/ was absent, so TestWriteData_DoesNotAllocate and
+      #      TestWriteDataV_DoesNotAllocate never ran — the comment above named
+      #      conn, the command did not.
+      #   2. TestCallOptions_AreStillApplied and _EndToEndStillHonoured matched
+      #      no alternative in the pattern, so they never ran either. Those two
+      #      are the correctness half of the callopts gate: the tests that exist
+      #      precisely so the allocation ceiling cannot pass on a helper nothing
+      #      calls any more. The guard against a vacuous gate was itself vacuous.
+      #
+      # Both verified before fixing: each printed "[no tests to run]" and passed
+      # green. When adding a !race test, check it against BOTH lists:
+      #   grep -rl '//go:build !race' --include='*_test.go' .   # package present?
+      #   go test -count=1 -v -run '<pattern>' ./...            # name matches?
       - name: Allocation gates (not under -race)
-        run: go test -count=1 -run 'Allocs|DoesNotAllocate|IsNotCopied' ./client/ ./grpc/
+        run: go test -count=1 -run 'Allocs|DoesNotAllocate|IsNotCopied|CallOptions' ./conn/ ./client/ ./grpc/
       # http1 is RFC 9112 and http3 is RFC 9114; neither compresses headers, and
       # both used to import hpack — RFC 7541 — for nothing but the field struct.
       # The shared vocabulary lives in ./header now, and this keeps the edge from
