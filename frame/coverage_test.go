@@ -86,7 +86,7 @@ func TestFramer_ReadFrame_MaxFrameSizeViolation(t *testing.T) {
 	var buf bytes.Buffer
 	fr := NewFramer(&buf, &buf)
 	// Write a 100-byte frame without enforcing size on write.
-	fr.maxReadFrameSize = 16384 // temporarily large for write
+	fr.maxFrameSize = 16384 // temporarily large for write
 	if err := fr.WriteData(1, false, make([]byte, 100)); err != nil {
 		t.Fatalf("WriteData: %v", err)
 	}
