@@ -106,6 +106,33 @@ func (b *writeBatcher) commit() error {
 		// Spurious wakeup (or the queued writer errored before flushing):
 		// fall through and flush ourselves so we always make progress.
 	}
+	return b.flushNowLocked()
+}
+
+// flushNowLocked flushes immediately — never deferring — and completes the
+// bookkeeping a convoy depends on: it advances seq, records the sticky error,
+// and wakes anyone blocked in commit.
+//
+// It exists for the frames that MUST leave now and therefore cannot go through
+// commit: a WINDOW_UPDATE the peer is waiting on for send credit, a PING ACK, a
+// best-effort RST, and above all the BDP tuner's PING, whose whole measurement
+// is the DATA that arrives before its ACK — deferring it would time the write
+// buffer instead of the link.
+//
+// Those sites used to call Conn.flushWrite directly, which pushes a deferring
+// writer's bytes to the socket while advancing nothing. The convoy is then
+// defeated twice over: the deferred frame has already gone out in this flush, so
+// the writer that was supposed to carry it flushes a second time, and the
+// deferring writer stays parked until that unrelated writer happens to commit
+// rather than being released by the flush that actually carried its bytes.
+// AutoTuneRecvWindow makes the BDP PING frequent, so with both options on the
+// batching this is all for is undone regularly.
+//
+// MUST hold wmu.
+func (b *writeBatcher) flushNowLocked() error {
+	if !b.enabled {
+		return b.flush()
+	}
 	err := b.flush()
 	b.seq++
 	if err != nil && b.err == nil {
