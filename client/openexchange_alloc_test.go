@@ -64,8 +64,21 @@ func TestPoolTransport_OpenExchangeAllocs(t *testing.T) {
 	// pointer that already exists on the heap allocates nothing.
 	//
 	// What is left is the stream, the exchange's Close, and one allocation on
-	// openExchange's return line, which is NOT the closure — it was measured
-	// separately and survives the closure's removal.
+	// openExchange's return line that is NOT a closure — it is conn.StreamRef
+	// being boxed into protoStream. StreamRef is {s *Stream; gen uint64}, two
+	// words, and an interface can only store a single pointer inline, so a
+	// two-word value has to go to the heap for the interface to point at it.
+	// Measured three ways: 1 object per call flat on that line, 16 bytes each
+	// (202 calls x 16 = the 3.16 KiB pprof reports), and `-gcflags=-m` naming
+	// `stream escapes to heap` at exactly that column.
+	//
+	// It is not removable at a price worth paying, which is recorded here so the
+	// next reader does not re-derive it. The generation word is the whole point
+	// of StreamRef — it is what refuses a handle to a recycled pooled Stream —
+	// so the value cannot be made one word. Handing out a *StreamRef instead
+	// only moves the allocation, unless the pointee is reused across lifetimes,
+	// which is precisely the use-after-recycle bug StreamRef exists to prevent.
+	// Sixteen bytes per request is what that guard costs.
 	const openExchangeAllocCeiling = 6
 	t.Logf("openExchange + release: %.1f allocs", n)
 	if n > openExchangeAllocCeiling {
