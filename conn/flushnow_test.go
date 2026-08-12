@@ -2,9 +2,12 @@ package conn
 
 import (
 	"bufio"
+	"bytes"
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/lodgvideon/poseidon-http-client/frame"
 )
 
 // The control frames that must leave immediately — WINDOW_UPDATE, PING ACK,
@@ -80,6 +83,55 @@ func gcDeferFixture(t *testing.T) (wmu *sync.Mutex, b *writeBatcher, wb *bufio.W
 	}
 }
 
+// connDeferFixture is gcDeferFixture one layer up: a real Conn wired to a real
+// batcher over a real buffered writer, with one writer parked in commit behind
+// it. It is what makes the call sites testable — the batcher-level fixture
+// cannot tell whether writeBDPPing calls flushNow or flushWrite.
+func connDeferFixture(t *testing.T) (c *Conn, parked <-chan struct{}, release func()) {
+	t.Helper()
+	wb := bufio.NewWriterSize(&countingSink{}, writeBufferSize)
+	c = &Conn{
+		fr:      frame.NewFramer(wb, bytes.NewReader(nil)),
+		streams: map[uint32]*Stream{},
+	}
+	c.wbatch = newWriteBatcher(true, &c.wmu, wb)
+	c.wbatch.enter() // a queued writer, so the next commit defers
+
+	done := make(chan struct{})
+	go func() {
+		c.wmu.Lock()
+		_, _ = wb.WriteString("deferred frame")
+		_ = c.wbatch.commit()
+		c.wmu.Unlock()
+		close(done)
+	}()
+
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		c.wmu.Lock()
+		d := c.wbatch.deferring
+		c.wmu.Unlock()
+		if d == 1 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the writer never parked in commit; the fixture is not testing deferral")
+		}
+		time.Sleep(time.Millisecond)
+	}
+
+	return c, done, func() {
+		c.wmu.Lock()
+		_ = c.wbatch.flushNowLocked()
+		c.wmu.Unlock()
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+			t.Error("parked writer never released")
+		}
+	}
+}
+
 // countingSink is an io.Writer that records how many times it was written to,
 // which is the socket-write count a convoy exists to reduce.
 type countingSink struct {
@@ -113,6 +165,56 @@ func TestFlushNow_ReleasesDeferringWriter(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("the deferring writer was not released by the flush that carried its bytes; " +
 			"it is still waiting for some unrelated writer to commit")
+	}
+
+	// Released by THIS flush, not by falling through and flushing itself. The
+	// distinction is the whole convoy protocol: a waiter returns early only when
+	// seq reached the target it sampled. If seq never advances, every deferring
+	// writer falls through, and group commit silently stops batching while all
+	// the tests above still pass.
+	wmu.Lock()
+	seq := b.seq
+	wmu.Unlock()
+	if seq != 1 {
+		t.Errorf("batcher seq = %d, want 1 — the flush did not record itself, so the "+
+			"waiter was woken but had to flush again instead of returning", seq)
+	}
+}
+
+// TestFlushNow_ControlFrameWritersUseIt covers the call sites rather than the
+// batcher, which the batcher-level tests above do not: reverting any one of
+// these writers to flushWrite leaves them all passing.
+//
+// Each writer is driven on a Conn with a real batcher and a parked writer behind
+// it, and must release that writer. writeBDPPing is the one #455 item 4 names —
+// AutoTuneRecvWindow makes it frequent — but the others are the same shape and
+// regress the same way.
+func TestFlushNow_ControlFrameWritersUseIt(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		write func(c *Conn) error
+	}{
+		{"writeBDPPing", func(c *Conn) error { return c.writeBDPPing() }},
+		{"writeWindowUpdate", func(c *Conn) error { return c.writeWindowUpdate(0, 1024) }},
+		{"writePingAck", func(c *Conn) error { return c.writePingAck([8]byte{1}) }},
+		{"writeSettingsAck", func(c *Conn) error { return c.writeSettingsAck() }},
+		{"writeRSTStreamID", func(c *Conn) error { return c.writeRSTStreamID(1, frame.ErrCodeCancel) }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c, parked, release := connDeferFixture(t)
+			defer release()
+
+			if err := tc.write(c); err != nil {
+				t.Fatalf("%s: %v", tc.name, err)
+			}
+			select {
+			case <-parked:
+			case <-time.After(2 * time.Second):
+				t.Fatalf("%s did not release the writer deferring behind it — it flushed "+
+					"that writer's bytes to the socket and left it parked, which is what "+
+					"calling flushWrite instead of flushNow does", tc.name)
+			}
+		})
 	}
 }
 
