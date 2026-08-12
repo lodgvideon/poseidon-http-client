@@ -113,8 +113,23 @@ func (f *Framer) SetMaxFrameSize(n uint32) { f.maxFrameSize = n }
 // Deprecated: the limit was never read-only. Use SetMaxFrameSize.
 func (f *Framer) SetMaxReadFrameSize(n uint32) { f.SetMaxFrameSize(n) }
 
-// SetReadBuffer overrides the internal read buffer (useful for pooling).
-func (f *Framer) SetReadBuffer(buf []byte) { f.readBuf = buf }
+// SetReadBuffer overrides the internal read buffer with one the caller owns and
+// keeps owning: the Framer will not return it to the shared pool.
+//
+// It hands back the pooled buffer it was holding first. Without that, the pool
+// handle from NewFramer still pointed at the framer, and Close — which writes
+// whatever readBuf currently is back through that handle — donated the CALLER's
+// buffer to the shared pool. The next Framer to draw from the pool then shared
+// an array with a caller still writing into it, and nothing anywhere reported it
+// (#515). The pooled buffer being dropped in the same moment was the smaller
+// half of that.
+func (f *Framer) SetReadBuffer(buf []byte) {
+	if f.readBufPtr != nil {
+		bufx.PutReadBuf(f.readBufPtr)
+		f.readBufPtr = nil
+	}
+	f.readBuf = buf
+}
 
 // paddingZeros provides a constant zero buffer for padded writes.
 var paddingZeros [256]byte
