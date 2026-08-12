@@ -41,6 +41,11 @@ def route(path):
     even for HEAD, where the bytes themselves are suppressed)."""
     if path == "/":
         return 200, CANNED
+    if path == "/sink":
+        # Upload target for the congestion-control benchmark. This server already
+        # waits for stream_ended before answering, so it drains by construction —
+        # unlike Caddy's canned `respond` and nginx's `return` (#564).
+        return 204, None
     if path == "/status/204":
         return 204, None
     if path == "/status/304":
@@ -67,6 +72,7 @@ class H3Server(QuicConnectionProtocol):
         self._http = None
         self._method = {}  # stream_id -> request method
         self._path = {}    # stream_id -> request :path
+        self._recv = {}    # stream_id -> request body bytes received
 
     def quic_event_received(self, event):
         if isinstance(event, ProtocolNegotiated) and event.alpn_protocol == "h3":
@@ -86,17 +92,25 @@ class H3Server(QuicConnectionProtocol):
                     self._path[e.stream_id] = value.decode()
             if e.stream_ended:  # a bodyless request (GET/HEAD): answer now
                 self._respond(e.stream_id)
-        elif isinstance(e, DataReceived) and e.stream_ended:
-            # A request with a body (POST): the body is consumed and ignored; the
-            # response is sent once the request stream is complete.
-            self._respond(e.stream_id)
+        elif isinstance(e, DataReceived):
+            # Count EVERY DataReceived, not just the final one: the benchmark
+            # asserts the echoed total against what it sent, which is what turns
+            # "did this peer drain?" into a per-request fact instead of an
+            # assumption about the config (#564).
+            self._recv[e.stream_id] = self._recv.get(e.stream_id, 0) + len(e.data)
+            if e.stream_ended:
+                # The response is sent once the request stream is complete.
+                self._respond(e.stream_id)
 
     def _respond(self, stream_id):
         method = self._method.pop(stream_id, "GET")
         path = self._path.pop(stream_id, "/")
         status, body = route(path)
 
+        received = self._recv.pop(stream_id, 0)
         headers = [(b":status", str(status).encode())]
+        if path == "/sink":
+            headers.append((b"x-sink-received", str(received).encode()))
         if body is not None:
             headers.append((b"content-length", str(len(body)).encode()))
             headers.append((b"content-type", b"text/plain"))
