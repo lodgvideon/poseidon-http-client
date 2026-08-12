@@ -35,7 +35,7 @@ func (pt *h1PoolTransport) openExchange(ctx context.Context) (protoStream, pushL
 	release := func(keepAlive bool) {
 		once.Do(func() { pt.p.release(mc, keepAlive) })
 	}
-	return &h1Exchange{ex: mc.c.NewExchange(), nc: mc.c, release: release}, nil, func() {}, nil
+	return &h1Exchange{ex: mc.c.NewExchange(), release: release}, nil, func() {}, nil
 }
 
 // close implements transport.close. Idempotent.

@@ -32,7 +32,7 @@ func (mt *h1ManagedTransport) openExchange(ctx context.Context) (protoStream, pu
 	rel := func(keepAlive bool) {
 		once.Do(func() { release(keepAlive) })
 	}
-	return &h1Exchange{ex: c.NewExchange(), nc: c, release: rel}, nil, func() {}, nil
+	return &h1Exchange{ex: c.NewExchange(), release: rel}, nil, func() {}, nil
 }
 
 // close implements transport.close. Idempotent.
