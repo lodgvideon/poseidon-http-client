@@ -1079,15 +1079,10 @@ func (c *Conn) onDataReceived(s *Stream, length uint32) error {
 		return &StreamError{StreamID: s.id, Code: frame.ErrCodeFlowControlError}
 	}
 
-	if streamRefund > 0 {
-		if err := c.writeWindowUpdate(s.id, streamRefund); err != nil {
-			return err
-		}
-	}
-	if connRefund > 0 {
-		if err := c.writeWindowUpdate(0, connRefund); err != nil {
-			return err
-		}
+	// One lock, one flush, both refunds: on a single-stream download these two
+	// thresholds trip on the same frame every time.
+	if err := c.writeWindowUpdatePair(s.id, streamRefund, connRefund); err != nil {
+		return err
 	}
 	// Feed the frame to the window tuner and open a new sample when it asks. A
 	// failed probe is not escalated: it is an optimization, the transport error
@@ -1194,6 +1189,43 @@ func (c *Conn) writeWindowUpdate(streamID uint32, increment uint32) error {
 	c.bumpFramesSent()
 	// Flush the WINDOW_UPDATE before the deferred Unlock so the peer's send
 	// window is replenished promptly.
+	return c.flushNow()
+}
+
+// writeWindowUpdatePair emits the stream-level and connection-level refunds a
+// single DATA frame produced, under ONE wmu hold and ONE flush. Either
+// increment may be zero. Order matters as little as it looks: both name
+// different windows, and the peer applies them independently.
+//
+// The two used to go through writeWindowUpdate separately, which is two lock
+// acquisitions and two socket writes. That is not an occasional coincidence —
+// on a single-stream download it is every refund. Both counters are advanced by
+// the same `length` on every frame and both thresholds are
+// recvWindowRefundThreshold by default, so they cross together (they decouple
+// only once several streams share the connection and the connection counter runs
+// ahead). Halving the write syscalls on the receive path matters for a client
+// whose measured bottleneck is the syscall rate (#438, #455 item 1).
+func (c *Conn) writeWindowUpdatePair(streamID, streamInc, connInc uint32) error {
+	if streamInc == 0 && connInc == 0 {
+		return nil
+	}
+	if c.closed.Load() {
+		return ErrConnClosed
+	}
+	c.wmu.Lock()
+	defer c.wmu.Unlock()
+	if streamInc > 0 {
+		if err := c.fr.WriteWindowUpdate(streamID, streamInc); err != nil {
+			return err
+		}
+		c.bumpFramesSent()
+	}
+	if connInc > 0 {
+		if err := c.fr.WriteWindowUpdate(0, connInc); err != nil {
+			return err
+		}
+		c.bumpFramesSent()
+	}
 	return c.flushNow()
 }
 
