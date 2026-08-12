@@ -61,7 +61,7 @@ func (s AdvertisedSettings) defaulted() AdvertisedSettings {
 		s.InitialWindowSize = 65535
 	}
 	if s.MaxFrameSize == 0 {
-		s.MaxFrameSize = 16384
+		s.MaxFrameSize = DefaultMaxFrameSize
 	}
 	// RFC 9113 §6.5.2: "The value advertised by an endpoint MUST be between this
 	// initial value and the maximum allowed frame size ... inclusive." Clamp a

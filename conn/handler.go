@@ -43,7 +43,7 @@ var dataBufPool = sync.Pool{
 	New: func() any {
 		// Sized to the default SETTINGS_MAX_FRAME_SIZE so a typical DATA frame
 		// never forces a warm-up regrow before the buffer settles in the pool.
-		b := make([]byte, 0, 16384)
+		b := make([]byte, 0, DefaultMaxFrameSize)
 		return &b
 	},
 }
