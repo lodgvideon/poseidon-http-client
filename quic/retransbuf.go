@@ -35,6 +35,26 @@ const retransFreeMax = 64
 // retransCopy returns a copy of src to retain for retransmission, drawn from the
 // connection's free list when one fits. The result always has its own backing
 // array: src is the reused frame scratch and is overwritten by the next frame.
+//
+// The fallback allocates with make at an EXACT capacity rather than letting
+// append pick one, and that is the whole of #475's item 2.
+//
+// append([]byte(nil), src...) for a full 1200-byte datagram returns a slice whose
+// cap is 1280 — the allocator's size class, not the length asked for. retransPut
+// then refuses it, because its guard is cap(b) > maxDatagramSize and 1280 > 1200.
+// So a full-datagram copy was NEVER recycled: the free list could only ever hold
+// buffers from frames short enough that their rounded capacity stayed under a
+// datagram, while the send path of a bulk transfer produces almost nothing else.
+// Measured: after one full-datagram copy and put, the free list held 0 entries.
+// That is the 67,796 objects (10.21% of the HTTP/3 arm) the issue attributes to
+// this line.
+//
+// make gives back exactly the capacity requested, so the buffer passes the guard
+// and is recycled. It also makes every entry the same size, which keeps the
+// top-of-stack check enough — no entry can be too short for a later request.
+//
+// The underlying heap object is the same 1280-byte size class either way; only
+// the reported cap differs, and it is the reported cap the guard reads.
 func (c *Conn) retransCopy(src []byte) []byte {
 	if len(src) == 0 {
 		return nil
@@ -45,6 +65,12 @@ func (c *Conn) retransCopy(src []byte) []byte {
 		c.retransFree = c.retransFree[:n]
 		return append(b[:0], src...)
 	}
+	if len(src) <= maxDatagramSize {
+		return append(make([]byte, 0, maxDatagramSize), src...)
+	}
+	// A CRYPTO flight. retransPut drops these whatever their capacity, so there
+	// is nothing to be gained by rounding one up — and plenty to lose: keeping a
+	// multi-KiB buffer alive is what that guard exists to prevent.
 	return append([]byte(nil), src...)
 }
 
