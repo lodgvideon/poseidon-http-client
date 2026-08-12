@@ -1,0 +1,50 @@
+name: Install golangci-lint
+description: >
+  Installs a pinned, checksum-verified golangci-lint from its GitHub release
+  asset, without the tag lookup the upstream install script performs.
+
+# Two jobs need this, and the version and its checksum have to move together, so
+# they live here once rather than being duplicated per job. Bumping the linter is
+# one edit: the version and the sha256 from
+# golangci-lint-<version>-checksums.txt.
+#
+# Why not `curl … install.sh | sh -s -- v<version>`, which this replaces: that
+# script resolves the tag through an UNAUTHENTICATED GitHub API call on every
+# job, and Actions runners share source IPs. On 2026-08-12 it failed three times
+# in one afternoon across two jobs, in two different ways — exit 56 mid-transfer
+# twice, then `crit unable to find 'v2.5.0'` with the release sitting there
+# perfectly intact (#585). Each failure lands on the INSTALL step, so it is
+# reported against the pull request's code and reads exactly like a real lint
+# failure until you open the log.
+#
+# The asset URL below is a direct download, so nothing queries the API. The
+# checksum makes the result verifiable rather than trusted, which the piped
+# script never was: it is fetched from `master` while the tool version is
+# pinned, so the installer itself was unpinned.
+#
+# Verified equivalent before switching: the extracted binary is byte-identical
+# (sha256) to the one the old step produced, reports the same version string,
+# enables the same 113 linters, and gives the same verdict on this tree.
+
+runs:
+  using: composite
+  steps:
+    - name: Install golangci-lint
+      shell: bash
+      env:
+        GOLANGCI_VERSION: 2.5.0
+        GOLANGCI_SHA256: c77313a77e19b06123962c411d9943cc0d092bbec76b956104d18964e274902e
+      run: |
+        set -euo pipefail
+        tarball="golangci-lint-${GOLANGCI_VERSION}-linux-amd64.tar.gz"
+        url="https://github.com/golangci/golangci-lint/releases/download/v${GOLANGCI_VERSION}/${tarball}"
+        tmp="$(mktemp -d)"
+        # --retry-all-errors is what covers the transient exit 56; the direct
+        # asset URL is what covers the tag-lookup failure, which no retry helps.
+        curl -sSfL --retry 3 --retry-all-errors --retry-delay 2 -o "${tmp}/${tarball}" "${url}"
+        echo "${GOLANGCI_SHA256}  ${tmp}/${tarball}" | sha256sum -c -
+        tar -xzf "${tmp}/${tarball}" -C "${tmp}"
+        sudo install -m 0755 \
+          "${tmp}/golangci-lint-${GOLANGCI_VERSION}-linux-amd64/golangci-lint" \
+          /usr/local/bin/golangci-lint
+        golangci-lint --version
