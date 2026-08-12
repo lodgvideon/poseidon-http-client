@@ -873,6 +873,20 @@ func (c *Conn) commitFrame() error {
 	return c.wbatch.commit()
 }
 
+// flushNow flushes under wmu for a frame that must leave immediately and so
+// cannot be deferred into a convoy — control frames and the BDP tuner's PING.
+//
+// It is NOT flushWrite: it also advances the batcher's sequence and wakes any
+// writer deferring behind it, so the flush that carries a deferred frame's bytes
+// is the one that releases it. See writeBatcher.flushNowLocked for what calling
+// flushWrite directly here costs. MUST hold c.wmu.
+func (c *Conn) flushNow() error {
+	if c.wbatch == nil {
+		return c.flushWrite()
+	}
+	return c.wbatch.flushNowLocked()
+}
+
 // maxOutFrameSize returns the largest frame payload we may emit: the
 // minimum of the peer's advertised SETTINGS_MAX_FRAME_SIZE and our own,
 // floored at the RFC default (16384). Mirrors the bound used by writeData.
@@ -979,7 +993,7 @@ func (c *Conn) writeRSTStreamID(id uint32, code frame.ErrCode) error {
 	c.bumpFramesSent()
 	c.releaseInflight(id)
 	// Flush the RST_STREAM before the deferred Unlock releases wmu.
-	return c.flushWrite()
+	return c.flushNow()
 }
 
 // writeRSTStreamBestEffort sends RST_STREAM under a short write deadline so
@@ -1004,7 +1018,7 @@ func (c *Conn) writeRSTStreamBestEffort(s *Stream, code frame.ErrCode) {
 	}
 	if err := c.fr.WriteRSTStream(s.id, code); err == nil {
 		// Best-effort: flush under the same deadline; ignore the error.
-		_ = c.flushWrite()
+		_ = c.flushNow()
 		c.bumpFramesSent()
 	}
 	if dl, ok := c.transport.(deadliner); ok {
@@ -1180,7 +1194,7 @@ func (c *Conn) writeWindowUpdate(streamID uint32, increment uint32) error {
 	c.bumpFramesSent()
 	// Flush the WINDOW_UPDATE before the deferred Unlock so the peer's send
 	// window is replenished promptly.
-	return c.flushWrite()
+	return c.flushNow()
 }
 
 // tryAcquireSendCreditsAll is acquireSendCredits without the wait, and
@@ -1563,7 +1577,7 @@ func (c *Conn) writeSettingsAck() error {
 	}
 	c.bumpFramesSent()
 	// Flush the SETTINGS ACK before the deferred Unlock releases wmu.
-	return c.flushWrite()
+	return c.flushNow()
 }
 
 // onGoAwayReceived stores the peer's GOAWAY state and resets every
@@ -1709,7 +1723,7 @@ func (c *Conn) writePingAck(payload [8]byte) error {
 	}
 	c.bumpFramesSent()
 	// Flush the PING ACK before the deferred Unlock releases wmu.
-	return c.flushWrite()
+	return c.flushNow()
 }
 
 // writeBDPPing opens a bandwidth-delay-product sample by writing the tuner's
@@ -1727,7 +1741,7 @@ func (c *Conn) writeBDPPing() error {
 		return err
 	}
 	c.bumpFramesSent()
-	return c.flushWrite()
+	return c.flushNow()
 }
 
 // deliverPingAck signals any Ping call waiting for payload.
@@ -1787,7 +1801,7 @@ func (c *Conn) Ping(ctx context.Context) (time.Duration, error) {
 		// Flush the PING to the wire before releasing wmu — we are about to
 		// block waiting for its ACK, which never arrives if the frame is left
 		// buffered.
-		if ferr := c.flushWrite(); ferr != nil {
+		if ferr := c.flushNow(); ferr != nil {
 			err = ferr
 		} else {
 			c.bumpFramesSent()
