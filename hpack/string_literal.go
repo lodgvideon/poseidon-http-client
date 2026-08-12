@@ -3,6 +3,11 @@ package hpack
 // encodeStringLiteral appends the HPACK string-literal form of s to dst
 // (RFC 7541 §5.2): {H?: 1 bit}{Length: 7-bit prefix int}{Length bytes}.
 // huffman selects coding mode.
+//
+// The Encoder always passes false — see the policy note on Encoder for the
+// measurement behind that, and do not read this parameter as dead. It is what
+// the decoder round-trip tests drive to produce Huffman-coded input, and it is
+// the switch if the policy is ever revisited.
 func encodeStringLiteral(dst, s []byte, huffman bool) []byte {
 	if huffman {
 		hlen := HuffmanEncodedLen(s)
