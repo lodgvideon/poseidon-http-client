@@ -7,6 +7,7 @@ import (
 
 	"os"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 )
@@ -67,10 +68,9 @@ func TestInterop_CCGoodput(t *testing.T) {
 		cc = "newreno(default)"
 	}
 	if uploadPath() == "" {
-		t.Skip("H3_CC_PATH is unset: this benchmark needs a peer that consumes the " +
-			"request body before responding, and the interop peers do not. Run it " +
-			"through test/integration/http3/docker-compose.cc.yml, which provides the " +
-			"sink and sets the path (#564).")
+		t.Skip("H3_CC_PATH is unset. Set it to a path the peer DRAINS — the harnesses " +
+			"under test/integration/http3/ point it at /sink, which every peer there " +
+			"now serves (#564).")
 	}
 	size := ccTransferBytes()
 	body := make([]byte, size)
@@ -98,6 +98,17 @@ func TestInterop_CCGoodput(t *testing.T) {
 			if resp.Status != 200 && resp.Status != 204 {
 				t.Fatalf("upload %d: status = %d", i, resp.Status)
 			}
+			// Proof, per request, that this peer actually consumed the payload.
+			// Without it a peer that answers on the request headers reports a
+			// spectacular goodput for a transfer that never happened — which is
+			// what Caddy and nginx did for as long as this benchmark existed
+			// (#564). Asserting the echoed count makes "did it drain?" a
+			// measured fact rather than a property assumed of the config.
+			if got := sinkReceived(resp); got != size {
+				t.Fatalf("upload %d: peer echoed X-Sink-Received=%d for a %d-byte body; "+
+					"a peer that did not consume the payload cannot produce a meaningful "+
+					"time, so this measurement is void", i, got, size)
+			}
 			total += elapsed
 			if best == 0 || elapsed < best {
 				best = elapsed
@@ -111,6 +122,22 @@ func TestInterop_CCGoodput(t *testing.T) {
 			float64(mean.Microseconds())/1000, float64(best.Microseconds())/1000,
 			mibps(size, mean), mibps(size, best))
 	})
+}
+
+// sinkReceived reads the byte count the peer says it consumed, or -1 when the
+// header is absent — which is itself the signal that the peer answered without
+// draining.
+func sinkReceived(resp *Response) int {
+	for _, f := range resp.Headers {
+		if strings.EqualFold(string(f.Name), "x-sink-received") {
+			n, err := strconv.Atoi(string(f.Value))
+			if err != nil {
+				return -1
+			}
+			return n
+		}
+	}
+	return -1
 }
 
 func mibps(n int, d time.Duration) float64 {
@@ -135,9 +162,16 @@ func doUpload(t *testing.T, client *Client, host string, body []byte) (*Response
 // closes on a response that arrived while the payload was still buffered and
 // what gets measured is a header round trip (#564).
 //
-// There is no default. This benchmark is only meaningful against a draining
-// peer, and the interop matrix's peers do not drain — Caddy's "/" is a canned
-// `respond`, and nginx and aioquic have no such route at all. Running it there
-// is how it passed vacuously against three servers at once for as long as it
-// existed. The CC harness sets H3_CC_PATH; everywhere else the test skips.
+// There is no default, because whether a peer drains is a property of the peer
+// and cannot be guessed. Measured on the old configuration (path "/"), at 1 MiB
+// and 8 MiB:
+//
+//	h3caddy    0.5 ms -> 0.6 ms   flat: answers on the headers
+//	h3nginx    0.4 ms -> 0.3 ms   flat: answers on the headers
+//	h3aioquic  112.6 ms -> 411.5 ms   scales: it waits for stream_ended
+//
+// So two of the three were reporting a header round trip as goodput, and the
+// third was producing real numbers all along. All three now serve /sink, and
+// the assertion on X-Sink-Received above proves per request which case applies
+// rather than trusting this comment to stay true.
 func uploadPath() string { return os.Getenv("H3_CC_PATH") }

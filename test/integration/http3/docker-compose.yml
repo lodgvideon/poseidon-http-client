@@ -50,6 +50,28 @@ services:
   # nginx:1.27 tags are re-published (a silent server upgrade could mask or
   # introduce a client interop regression). Refresh with:
   #   docker buildx imagetools inspect caddy:2   (resolved 2026-07-14)
+  # Upload target that consumes the request body and echoes the byte count it
+  # received (X-Sink-Received). Caddy and nginx are fronted onto it for /sink,
+  # because neither reads a body it has no use for: Caddy's canned `respond` and
+  # nginx's `return` both answer on the request headers, which made the
+  # congestion-control benchmark time a round trip instead of the transfer
+  # (#564). aioquic needs no proxy — it waits for stream_ended by construction.
+  sink:
+    image: golang:1.25
+    hostname: sink
+    networks: [h3net]
+    working_dir: /src/test/integration/http3/sink
+    volumes:
+      - ../../..:/src
+    command: go run .
+    healthcheck:
+      test: ["CMD", "bash", "-c", "echo > /dev/tcp/127.0.0.1/8080"]
+      interval: 1s
+      timeout: 2s
+      retries: 60
+      start_period: 3s
+    restart: "no"
+
   caddy:
     image: caddy:2@sha256:af5fdcd76f2db5e4e974ee92f96ee8c0fc3edb55bd4ba5032547cbf3f65e486d
     hostname: h3caddy
@@ -57,6 +79,8 @@ services:
     depends_on:
       fixtures:
         condition: service_completed_successfully
+      sink:
+        condition: service_healthy
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
       - ./srv:/srv:ro
@@ -80,6 +104,8 @@ services:
         condition: service_completed_successfully
       certs:
         condition: service_completed_successfully
+      sink:
+        condition: service_healthy
     volumes:
       - ./nginx.conf:/etc/nginx/nginx.conf:ro
       - ./srv:/srv:ro
@@ -136,6 +162,13 @@ services:
     environment:
       # name=host:port pairs — the interop tests run every scenario against each.
       H3_INTEROP_ADDRS: "caddy=h3caddy:443,nginx=h3nginx:443,aioquic=h3aioquic:443"
+      # All three peers now drain this path, so the goodput benchmark measures a
+      # real transfer against each of them rather than being skipped (#564).
+      H3_CC_PATH: "/sink"
+      # Small: the interop matrix is about correctness across peers, and the CC
+      # harness (docker-compose.cc.yml) is where the sizes are turned up.
+      H3_CC_BYTES: "262144"
+      H3_CC_REPEATS: "1"
       GOFLAGS: -count=1
     command: >
       go test ./http3/ ./client/ -tags interop -run TestInterop -v -timeout 120s

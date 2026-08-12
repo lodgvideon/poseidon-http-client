@@ -22,6 +22,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"strconv"
 )
 
 func main() {
@@ -37,6 +38,12 @@ func main() {
 			http.Error(w, "short read", http.StatusBadRequest)
 			return
 		}
+		// Report the count back to the caller, not just to the log. The
+		// benchmark asserts this against what it sent, which is what makes
+		// "did this peer actually drain?" a per-request fact rather than a
+		// property assumed from the compose file. A peer that answers early
+		// cannot forge it: the header only exists if the body arrived here.
+		w.Header().Set("X-Sink-Received", strconv.FormatInt(n, 10))
 		log.Printf("SINK received=%d", n)
 		w.WriteHeader(http.StatusNoContent)
 	})
