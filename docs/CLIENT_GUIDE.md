@@ -2166,7 +2166,53 @@ if err := c.Do(context.Background(), req, &resp); err != nil {
 // resp.Body holds raw (still-compressed) bytes; resp.BytesReceived == len(resp.Body).
 ```
 
-### 8. Error model
+### 8. Congestion control on HTTP/3 (NewReno vs BBR)
+
+HTTP/3 connections use NewReno (RFC 9002 §7) by default. BBR is opt-in, per
+client, through `H3ConnOptions`:
+
+```go
+c, err := client.NewClient(client.ClientOptions{
+	Transport: client.TransportH3,
+	Addr:      "example.com:443",
+	TLSConfig: &tls.Config{ServerName: "example.com"},
+	// Ignored by the H1/H2 transports, which do not dial QUIC.
+	H3ConnOptions: []quic.ConnOption{quic.WithCongestionControl(quic.CCBBR)},
+})
+```
+
+**Choose by the path, not by preference.** Measured with `scripts/cc-matrix.sh`
+over two independent runs (512 KiB upload, 3 samples per arm):
+
+| path | verdict |
+|---|---|
+| Clean link, any RTT | **Tie.** Nothing to gain, and BBR is the noisier of the two. |
+| 2% loss, 50 ms RTT | **BBR wins by ~an order of magnitude.** |
+| 5% loss, 50 ms RTT | **BBR wins several-fold.** |
+| 2% loss, 200 ms RTT | **BBR ~3.4× faster.** |
+| Bottleneck with a **deep** queue | **BBR ~1.5× faster** — the bufferbloat case. |
+| Same bottleneck, **shallow** queue | **Tie.** The advantage is the queue, not the controller. |
+
+The last two rows are the useful pair. A loss-based controller fills a deep
+queue and pays the standing delay; a model-based one holds near the
+bandwidth-delay product. When the queue is shallow there is nothing to hold back
+from, and the two converge — so a BBR win that appears at *both* depths is not a
+bufferbloat win and means something else is going on.
+
+**Two honest caveats.** BBR's advantage on lossy paths is unambiguous in
+direction but not in magnitude: its own run-to-run spread in those cells reaches
+67–101%, against 0.6–6% for NewReno. And BBR keeps more in flight, so at the
+same configured loss rate it absorbs more drops — the cells are equal in
+configured loss, not in absorbed loss.
+
+**Recommendation.** Keep the default on paths you control or that are clean.
+Enable BBR when the path is lossy, long, or known to be deeply buffered — mobile
+uplinks and congested transit being the usual cases. If you are unsure, measure:
+the matrix and its two arithmetic gates (`scripts/cc-scale-check.sh`,
+`scripts/cc-ratio-check.sh`) exist so the question can be answered rather than
+argued.
+
+### 9. Error model
 
 The client exposes sentinel errors (compare with `errors.Is`) and two typed
 error structs (inspect with `errors.As`).
@@ -2347,7 +2393,7 @@ func (e *DialError) Unwrap() error // returns e.Err — errors.Is reaches the ne
 cause); it exists only for structural symmetry so `errors.Is`/`errors.As` work
 uniformly across client errors. `DialError.Unwrap()` exposes the underlying dial
 cause, so `errors.Is(err, someNetError)` matches through it. See
-[the error-model walkthrough](#8-error-model) above for the full
+[the error-model walkthrough](#9-error-model) above for the full
 `errors.Is`/`errors.As` dispatch example.
 
 ## Convenience helpers
