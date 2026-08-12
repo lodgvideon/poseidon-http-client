@@ -18,4 +18,15 @@ var (
 	ErrHeaderListTooLarge = errors.New("poseidon/hpack: header list exceeds max size")
 	// ErrInvalidPrefix is returned when a representation prefix byte is malformed.
 	ErrInvalidPrefix = errors.New("poseidon/hpack: invalid representation prefix")
+	// ErrNotStreaming is returned by Feed or Finish when no streaming decode is
+	// open — Begin was not called, or Finish already closed it.
+	//
+	// It exists because both used to report this through ErrInvalidPrefix, a
+	// wire-format sentinel meaning the peer sent a malformed representation byte.
+	// The two say opposite things about who is at fault: one is the caller's
+	// sequencing mistake, entirely local, and the other is a peer's bytes and a
+	// connection error under RFC 7541 §5. Anyone mapping sentinels to RFC
+	// sections — the way conn's dispatch does — was told a local bug came off
+	// the wire.
+	ErrNotStreaming = errors.New("poseidon/hpack: no streaming decode in progress")
 )
