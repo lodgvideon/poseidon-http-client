@@ -186,6 +186,13 @@ type Conn struct {
 	// whose id is ≤ goAwayLastStreamID continue.
 	goAwayReceived     atomic.Bool
 	goAwayLastStreamID atomic.Uint32
+	// goAwayCode is the peer's reason from the most recent GOAWAY, surfaced to
+	// callers through GoAwayError. It is what tells a graceful drain (NO_ERROR)
+	// apart from a demand to back off (ENHANCE_YOUR_CALM) and from the peer
+	// rejecting us outright — three situations that call for opposite responses
+	// and used to arrive as one sentinel. Held as a uint32 because there is no
+	// atomic for frame.ErrCode.
+	goAwayCode atomic.Uint32
 	// goAwaySentLast is the last-stream-id advertised in the last GOAWAY we
 	// SENT (goAwayNoneSent until the first). RFC 9113 §6.8 forbids a later
 	// GOAWAY from advertising a larger id, so each send clamps to this.
@@ -513,7 +520,10 @@ func (c *Conn) NewStream(_ context.Context) (StreamRef, error) {
 		return StreamRef{}, ErrConnDraining
 	}
 	if c.goAwayReceived.Load() {
-		return StreamRef{}, ErrGoAway
+		return StreamRef{}, &GoAwayError{
+			LastStreamID: c.goAwayLastStreamID.Load(),
+			Code:         frame.ErrCode(c.goAwayCode.Load()),
+		}
 	}
 	// Read peer setting OUTSIDE smu (lock order: psMu before smu in
 	// applyPeerSettings, so we must not invert here).
@@ -1555,7 +1565,7 @@ func (c *Conn) writeSettingsAck() error {
 // they observe the GOAWAY-induced flow termination via subsequent
 // SendData calls (which still go through, until the peer closes the
 // transport).
-func (c *Conn) onGoAwayReceived(lastStreamID uint32, _ frame.ErrCode) {
+func (c *Conn) onGoAwayReceived(lastStreamID uint32, code frame.ErrCode) {
 	// RFC 9113 §6.8: a peer MUST NOT raise the last-stream-id across successive
 	// GOAWAYs. Defensively clamp a second GOAWAY that tries to — never widen the
 	// set of streams we treat as accepted by the peer. Single-goroutine (reader)
@@ -1565,6 +1575,14 @@ func (c *Conn) onGoAwayReceived(lastStreamID uint32, _ frame.ErrCode) {
 			lastStreamID = prev
 		}
 	}
+	// The code is NOT clamped the way the id is. §6.8 explicitly provides for a
+	// second GOAWAY that reports a more specific error after an initial
+	// NO_ERROR drain, so the newest reason is the accurate one — only the set of
+	// streams the peer claims to have processed may not grow.
+	//
+	// Stored before goAwayReceived, as the id is: a reader that observes the
+	// flag must not then read a stale reason.
+	c.goAwayCode.Store(uint32(code))
 	c.goAwayLastStreamID.Store(lastStreamID)
 	c.goAwayReceived.Store(true)
 
@@ -1962,9 +1980,15 @@ func (c *Conn) emitConnGoAwayIfTyped(err error) {
 		_ = dl.SetWriteDeadline(time.Now().Add(closeGoAwayDeadline))
 	}
 	c.wmu.Lock()
-	_ = c.fr.WriteGoAway(c.goAwayLastStreamIDToSend(), ce.Code, nil)
+	last := c.goAwayLastStreamIDToSend()
+	_ = c.fr.WriteGoAway(last, ce.Code, nil)
 	_ = c.flushWrite()
 	c.wmu.Unlock()
+	// Record on the error what was put on the wire, so ConnError.Error() reports
+	// the id the peer was actually given rather than a constant 0. Safe to
+	// mutate here: this runs on the reader goroutine before shutdownStreams
+	// publishes the teardown, so no other goroutine has the error yet.
+	ce.Last = last
 }
 
 func (c *Conn) shutdownStreams(reason error) {
