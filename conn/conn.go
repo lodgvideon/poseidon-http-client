@@ -380,14 +380,19 @@ func originAuthority(origin string) string {
 }
 
 // authorityOf returns the :authority pseudo-header value from a request field
-// list, or "" when it is absent.
-func authorityOf(fields []hpack.HeaderField) string {
+// list, or nil when it is absent.
+//
+// The result ALIASES fields and is only valid until the caller returns —
+// converting it to a string here was one allocation per request. Every caller
+// must copy it into storage it owns; the sole caller copies into the stream's
+// own authorityBuf.
+func authorityOf(fields []hpack.HeaderField) []byte {
 	for i := range fields {
 		if string(fields[i].Name) == ":authority" {
-			return string(fields[i].Value)
+			return fields[i].Value
 		}
 	}
-	return ""
+	return nil
 }
 
 // pushSupport reports whether server push is enabled and returns the
@@ -849,7 +854,10 @@ func (c *Conn) assignStreamIDLocked(s *Stream, fields []hpack.HeaderField) {
 	c.streams[s.id] = s
 	s.mu.Lock()
 	s.sendWindow = int32(initial)
-	s.reqAuthority = authorityOf(fields)
+	// Copied into the stream's own buffer, never aliased: see authorityBuf.
+	// append onto a truncated slice reuses the pooled capacity, so this
+	// allocates only for a Stream that has not carried one before.
+	s.authorityBuf = append(s.authorityBuf[:0], authorityOf(fields)...)
 	s.mu.Unlock()
 	c.smu.Unlock()
 	c.psMu.RUnlock()

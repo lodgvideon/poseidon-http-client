@@ -726,7 +726,7 @@ func (h *connHandler) handlePushPromiseBlock(parentStreamID, promisedStreamID ui
 	// is not authoritative for. This is a stream-level refusal — the connection
 	// and the parent stream survive — done before reservePushedStream so no
 	// stream is half-reserved on the refusal path.
-	if !h.validatePushedRequest(parent.requestAuthority()) {
+	if !h.validatePushedRequest(parent) {
 		_ = h.streams.rstStream(promisedStreamID, frame.ErrCodeProtocolError)
 		return nil
 	}
@@ -780,7 +780,10 @@ func (h *connHandler) handlePushPromiseBlock(parentStreamID, promisedStreamID ui
 // server is authoritative for — matching the request that triggered the push
 // (answered over the cert-validated connection), or an ORIGIN-frame authority.
 // A false return means the promised stream must be reset with PROTOCOL_ERROR.
-func (h *connHandler) validatePushedRequest(parentAuthority string) bool {
+// It takes the parent stream rather than its authority so the comparison can
+// happen behind the stream's own mutex: the parent is pooled, and a slice of its
+// buffer handed out here would outlive the lock that protects it.
+func (h *connHandler) validatePushedRequest(parent *Stream) bool {
 	var method, authority []byte
 	for i := range h.scratch {
 		switch string(h.scratch[i].Name) {
@@ -802,7 +805,7 @@ func (h *connHandler) validatePushedRequest(parentAuthority string) bool {
 	if len(authority) == 0 {
 		return false // incomplete header set (§8.3.1): a request needs :authority
 	}
-	return string(authority) == parentAuthority || h.streams.isKnownOrigin(authority)
+	return parent.hasRequestAuthority(authority) || h.streams.isKnownOrigin(authority)
 }
 
 // OnPing implements frame.Handler. Non-ACK PING frames are echoed

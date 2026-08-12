@@ -22,7 +22,7 @@ func TestConformance_RFC7540_Sec6_6_PushPromiseSpanningContinuation_Reassembled(
 	// The push accept path checks the promise's :authority against the request
 	// that triggered it (RFC 9113 §8.4); a real parent carries this from its
 	// request HEADERS, so mirror that for the fake.
-	parent.reqAuthority = "example.com"
+	parent.authorityBuf = []byte("example.com")
 
 	enc := hpack.NewEncoder()
 	block := enc.EncodeBlock(nil, []hpack.HeaderField{

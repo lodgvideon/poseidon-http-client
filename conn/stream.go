@@ -1,6 +1,7 @@
 package conn
 
 import (
+	"bytes"
 	"context"
 	"sync"
 	"sync/atomic"
@@ -153,12 +154,23 @@ type Stream struct {
 	// mu; reset by recycleStream.
 	connDone bool
 
-	// reqAuthority is the :authority pseudo-header of the request this stream
+	// authorityBuf holds the :authority pseudo-header of the request this stream
 	// carries, captured when the request HEADERS are written. The push accept
 	// path compares a PUSH_PROMISE's :authority against it — a server is
 	// authoritative for what it already answered over the cert-validated
 	// connection (RFC 9113 §8.4 / §10.1). Guarded by mu.
-	reqAuthority string
+	//
+	// A private buffer rather than the caller's bytes, and the copy is
+	// load-bearing: fields belongs to the application — it is the slice passed to
+	// SendHeaders — and nothing in that interface forbids reusing it once the
+	// call returns. Aliasing it would let an ordinary caller reusing its own
+	// header buffer silently rewrite the reference value a cross-origin push
+	// check compares against.
+	//
+	// It used to be a string, which copied on every request. Stream is pooled, so
+	// a buffer that resetForPoolLocked TRUNCATES rather than nils keeps its
+	// capacity across lifetimes and the steady state allocates nothing.
+	authorityBuf []byte
 
 	// headersReceived is set once a *final* (non-informational) response
 	// HEADERS block for this stream is delivered. The reader goroutine
@@ -446,7 +458,9 @@ func (s *Stream) resetForPoolLocked() {
 	s.pushed = false
 	s.appClosed = false
 	s.connDone = false
-	s.reqAuthority = ""
+	// Truncated, NOT nilled: nilling would throw the capacity away and make the
+	// next request allocate again, which is the whole point of the buffer.
+	s.authorityBuf = s.authorityBuf[:0]
 	s.headersReceived = false
 	s.interimCount = 0
 	// The Content-Length check's per-response state, reset so a pooled Stream
@@ -552,11 +566,18 @@ func (s *Stream) hasRemoteEnded() bool {
 	return s.remoteEnded
 }
 
-// requestAuthority returns the :authority the request on this stream carried.
-func (s *Stream) requestAuthority() string {
+// hasRequestAuthority reports whether the request on this stream carried
+// exactly this :authority.
+//
+// It compares rather than returning the value on purpose. Handing back a
+// []byte aliasing authorityBuf would publish a pooled Stream's memory past the
+// lock: the reader goroutine validates a push against the parent while a
+// concurrent Close may recycle that parent and truncate the buffer underneath
+// the comparison. Keeping the bytes behind the mutex makes that unexpressible.
+func (s *Stream) hasRequestAuthority(authority []byte) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.reqAuthority
+	return bytes.Equal(s.authorityBuf, authority)
 }
 
 // push delivers an event from the reader goroutine. Non-blocking under
