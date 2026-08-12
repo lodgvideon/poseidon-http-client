@@ -364,15 +364,7 @@ func (f *Framer) WriteHeaders(p WriteHeadersParams) error {
 		}
 	}
 	if p.Priority != nil {
-		dep := p.Priority.StreamDep
-		if p.Priority.Exclusive {
-			dep |= 0x80000000
-		}
-		f.smallBuf[0] = byte(dep >> 24)
-		f.smallBuf[1] = byte(dep >> 16)
-		f.smallBuf[2] = byte(dep >> 8)
-		f.smallBuf[3] = byte(dep)
-		f.smallBuf[4] = p.Priority.Weight
+		putPriority(f.smallBuf[:5], *p.Priority)
 		if _, err := f.w.Write(f.smallBuf[:5]); err != nil {
 			return err
 		}
@@ -400,20 +392,41 @@ func (f *Framer) WriteContinuation(streamID uint32, endHeaders bool, blockFragme
 	return f.writeFrame(FrameHeader{Length: uint32(len(blockFragment)), Type: FrameContinuation, Flags: flags, StreamID: streamID}, blockFragment)
 }
 
+// putPriority encodes p into the 5-byte priority section b[:5]: a 31-bit stream
+// dependency with the E flag in the top bit, then the weight (RFC 7540 §6.3).
+//
+// WriteUint31 is what masks StreamDep, and that is the point of the helper. Both
+// call sites used to OR the E bit into an UNMASKED StreamDep, so a dependency
+// with its high bit set — out of range for a 31-bit field, and reachable because
+// Priority.StreamDep is a public uint32 — put E=1 on the wire whatever Exclusive
+// said, and the round trip came back with a different Priority than it was given.
+// Every other 31-bit field in this codec masks; these two were the drift.
+func putPriority(b []byte, p Priority) {
+	_ = b[4] // BCE hint
+	bufx.WriteUint31(b[:4], p.StreamDep)
+	if p.Exclusive {
+		b[0] |= 0x80
+	}
+	b[4] = p.Weight
+}
+
+// parsePriority decodes a 5-byte priority section. The inverse of putPriority,
+// and next to it so the two cannot drift the way the four hand-rolled copies did.
+func parsePriority(b []byte) Priority {
+	_ = b[4] // BCE hint
+	return Priority{
+		StreamDep: bufx.ReadUint31(b[:4]),
+		Exclusive: b[0]&0x80 != 0,
+		Weight:    b[4],
+	}
+}
+
 // WritePriority writes a PRIORITY frame.
 func (f *Framer) WritePriority(streamID uint32, p Priority) error {
 	if streamID == 0 {
 		return ErrInvalidStreamID
 	}
-	dep := p.StreamDep
-	if p.Exclusive {
-		dep |= 0x80000000
-	}
-	f.smallBuf[0] = byte(dep >> 24)
-	f.smallBuf[1] = byte(dep >> 16)
-	f.smallBuf[2] = byte(dep >> 8)
-	f.smallBuf[3] = byte(dep)
-	f.smallBuf[4] = p.Weight
+	putPriority(f.smallBuf[:5], p)
 	return f.writeFrame(FrameHeader{Length: 5, Type: FramePriority, StreamID: streamID}, f.smallBuf[:5])
 }
 
@@ -762,12 +775,7 @@ func (f *Framer) dispatchHeaders(fh FrameHeader, payload []byte, h Handler) erro
 		if len(body) < 5 {
 			return ErrShortRead
 		}
-		dep := uint32(body[0])<<24 | uint32(body[1])<<16 | uint32(body[2])<<8 | uint32(body[3])
-		p := Priority{
-			StreamDep: dep & 0x7fffffff,
-			Exclusive: dep&0x80000000 != 0,
-			Weight:    body[4],
-		}
+		p := parsePriority(body[:5])
 		prio = &p
 		body = body[5:]
 	}
@@ -781,13 +789,7 @@ func (f *Framer) dispatchPriority(fh FrameHeader, payload []byte, h Handler) err
 	if fh.Length != 5 {
 		return ErrPriorityWrongLength
 	}
-	dep := uint32(payload[0])<<24 | uint32(payload[1])<<16 | uint32(payload[2])<<8 | uint32(payload[3])
-	p := Priority{
-		StreamDep: dep & 0x7fffffff,
-		Exclusive: dep&0x80000000 != 0,
-		Weight:    payload[4],
-	}
-	return h.OnPriority(fh, p)
+	return h.OnPriority(fh, parsePriority(payload[:5]))
 }
 
 func (f *Framer) dispatchRSTStream(fh FrameHeader, payload []byte, h Handler) error {
