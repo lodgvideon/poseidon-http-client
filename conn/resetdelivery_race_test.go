@@ -16,9 +16,9 @@ import (
 // and it is still in the registry for the reader to find).
 //
 // remoteEnded is set directly rather than by feeding a real HEADERS frame. That
-// is the only synthetic step; markRemoteEnd does exactly this and nothing else
-// that matters here, and the application half of each test drives the real
-// public API.
+// is the only synthetic step; the production path (deliverEnd) sets the same
+// flag and additionally enqueues the event, which nothing here reads, and the
+// application half of each test drives the real public API.
 func newResetRaceStream(t *testing.T) (*Conn, *Stream) {
 	t.Helper()
 	var buf bytes.Buffer

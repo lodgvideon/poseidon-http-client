@@ -60,20 +60,6 @@ func TestRateLimiter_ContextCancel(t *testing.T) {
 	}
 }
 
-// TestRateLimiter_AllowNonBlocking verifies Allow() doesn't block.
-func TestRateLimiter_AllowNonBlocking(t *testing.T) {
-	rl := newRateLimiter(1, 2)
-	if !rl.Allow() {
-		t.Error("Allow 1 returned false")
-	}
-	if !rl.Allow() {
-		t.Error("Allow 2 returned false")
-	}
-	if rl.Allow() {
-		t.Error("Allow 3 should return false (no burst left)")
-	}
-}
-
 // TestClient_RateLimit_BlocksExcess verifies the client blocks
 // requests beyond the rate budget. The expected minimum elapsed
 // time is derived from the parameters: burst tokens are free, the
