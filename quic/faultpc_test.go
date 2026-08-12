@@ -240,3 +240,39 @@ func TestFaultPC_ReadDeadlineIsHonoured(t *testing.T) {
 			"engine would treat it as a hard error instead of a probe trigger", err)
 	}
 }
+
+// dropRange returns a predicate discarding writes from..to inclusive (1-based),
+// i.e. a blackhole over a run of consecutive datagrams rather than a scattered
+// loss. The Docker relay cannot stage this: it rolls one uniform die per
+// datagram, so at any workable rate a long consecutive run essentially never
+// occurs.
+func dropRange(from, to int) func(int) bool {
+	return func(n int) bool { return n >= from && n <= to }
+}
+
+// TestConformance_RFC9002_Sec622_PTOBackoffBlackhole walks the ladder two rungs
+// up: three consecutive losses cost 2+4+8 kInitialRtt. That the total is the
+// sum of a doubling series, and not three equal waits, is the whole content of
+// "exponential" — and it is only observable when the losses are consecutive.
+func TestConformance_RFC9002_Sec622_PTOBackoffBlackhole(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		start := time.Now()
+		client, fp := withFaults(t, dropRange(1, 3))
+		elapsed := time.Since(start)
+
+		if !client.handshakeComplete {
+			t.Fatal("handshake did not complete after a three-datagram blackhole")
+		}
+		writes, drops := fp.counts()
+		if drops != 3 {
+			t.Fatalf("discarded %d datagrams, want exactly 3", drops)
+		}
+		if writes < 4 {
+			t.Fatalf("client wrote %d datagrams, want at least 4", writes)
+		}
+		if want := 14 * kInitialRtt; elapsed != want {
+			t.Errorf("recovered after %v, want exactly %v — 2+4+8 kInitialRtt, the sum of "+
+				"a doubling series rather than three equal waits", elapsed, want)
+		}
+	})
+}
