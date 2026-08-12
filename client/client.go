@@ -540,9 +540,6 @@ func (c *Client) PoolStats() Stats {
 	return Stats{}
 }
 
-// Do issues a synchronous request and writes the result into resp.
-// The caller must allocate resp once and call resp.Reset() before each reuse.
-// On error, resp fields are undefined; call resp.Reset() before reuse regardless.
 // observeStart fires the OnRequestStart hook and increments RequestsStarted.
 func (c *Client) observeStart(req *Request, authority string) {
 	if h := c.hooksPtr.Load(); h != nil && h.OnRequestStart != nil {
@@ -577,7 +574,12 @@ func (c *Client) observeDone(req *Request, authority string, status int, bytesSe
 	}
 }
 
-// Do executes a synchronous HTTP/2 request, populating resp on success.
+// Do issues a synchronous request and writes the result into resp. The transport
+// decides the protocol — this is the entry point for H1, H2 and H3 alike.
+//
+// The caller must allocate resp once and call resp.Reset() before each reuse.
+// On error, resp fields are undefined; call resp.Reset() before reuse regardless.
+// DoStream differs here: it resets its StreamResponse internally.
 func (c *Client) Do(ctx context.Context, req *Request, resp *Response) error {
 	if err := validateRequest(req); err != nil {
 		return err
@@ -620,11 +622,6 @@ func (c *Client) Do(ctx context.Context, req *Request, resp *Response) error {
 	c.observeDone(req, authority, status, int64(len(req.Body)), bytesRecv, err, time.Since(start))
 	return err
 }
-
-// do is the inner request transport, without hook/metric wrapping.
-// sendRequest (defined just above do) returns (s, cn, release, err)
-// by value; the caller unpacks them and is responsible for calling
-// release() and s.Close().
 
 // sendRequest opens a protocol exchange, builds and sends request headers,
 // writes the body and trailers, and returns the exchange ready for response
@@ -756,6 +753,7 @@ func preferSendCut(respErr, sendCut error) error {
 	return fmt.Errorf("%w (the upload was cut short and the response then failed: %s)", sendCut, respErr.Error())
 }
 
+// do is the inner request transport, without hook or metric wrapping.
 func (c *Client) do(ctx context.Context, req *Request, resp *Response) error {
 	s, pushLookup, release, sendCut, err := c.sendRequest(ctx, req)
 	if err != nil {

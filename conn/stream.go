@@ -650,22 +650,6 @@ func (s *Stream) pushLocked(e StreamEvent) bool {
 	return false
 }
 
-// SendHeaders sends a HEADERS frame with the given fields. Always emits
-// END_HEADERS=true (B.1 does not split into CONTINUATION). When endStream
-// is true the request side is half-closed.
-// SendHeaders sends a HEADERS frame with the given fields. When called
-// for the first time on a Stream, the connection assigns the stream ID
-// under the writer mutex, ensuring the on-wire ID order matches RFC
-// 7540 §5.1.1's monotonic-id rule. Always emits END_HEADERS=true (B.1
-// does not split into CONTINUATION). When endStream is true the request
-// side is half-closed.
-// SendHeaders sends a HEADERS frame with the given fields. When called
-// for the first time on a Stream, the connection assigns the stream ID
-// under the writer mutex, ensuring the on-wire ID order matches RFC
-// 7540 §5.1.1's monotonic-id rule. Always emits END_HEADERS=true (B.1
-// does not split into CONTINUATION). When endStream is true the request
-// side is half-closed.
-
 // sendHeadersAndData is SendHeaders followed by SendData, fused into one
 // transport write when the connection can do it (#451).
 //
@@ -762,17 +746,6 @@ func (s *Stream) sendHeadersWithPriority(ctx context.Context, wantGen uint64, fi
 	}
 	return nil
 }
-
-// SendData sends a single DATA frame. The caller is responsible for
-// chunking p to fit the peer's MaxFrameSize. When endStream is true the
-// request side is half-closed.
-// SendData sends a single DATA frame. The caller must call SendHeaders
-// first; the request side is half-closed when endStream is true.
-// SendData sends a DATA frame, automatically chunking the payload to
-// the peer's MAX_FRAME_SIZE and respecting both per-stream and
-// connection-level outbound flow control (RFC 7540 §6.9). Blocks until
-// enough send-window credit is available, the context is cancelled, or
-// the connection closes. The caller must call SendHeaders first.
 
 // sendData is SendData with the caller's lifetime presented.
 //
@@ -1073,8 +1046,11 @@ func (r StreamRef) Recv(ctx context.Context) (StreamEvent, error) {
 	return r.s.recv(ctx, r.gen)
 }
 
-// SendData sends DATA for this lifetime, chunked and flow-controlled as
-// Stream.SendData describes.
+// SendData sends DATA for this lifetime, chunking the payload to the peer's
+// MAX_FRAME_SIZE and respecting both per-stream and connection-level outbound
+// flow control (RFC 7540 §6.9). It blocks until enough send-window credit is
+// available, the context is cancelled, or the connection closes. SendHeaders
+// must have been called first; endStream half-closes the request side.
 func (r StreamRef) SendData(ctx context.Context, p []byte, endStream bool) error {
 	if r.s == nil {
 		return ErrStaleStream
@@ -1082,7 +1058,11 @@ func (r StreamRef) SendData(ctx context.Context, p []byte, endStream bool) error
 	return r.s.sendData(ctx, r.gen, p, endStream)
 }
 
-// SendHeaders sends a HEADERS frame for this lifetime.
+// SendHeaders sends a HEADERS frame for this lifetime. The first call on a
+// stream is where the connection assigns its ID, under the writer mutex, so the
+// on-wire order matches RFC 7540 §5.1.1's monotonic-id rule. It always emits
+// END_HEADERS (this codec does not split into CONTINUATION); endStream
+// half-closes the request side.
 func (r StreamRef) SendHeaders(ctx context.Context, fields []header.Field, endStream bool) error {
 	return r.SendHeadersWithPriority(ctx, fields, endStream, nil)
 }
