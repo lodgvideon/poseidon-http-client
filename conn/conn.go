@@ -2003,6 +2003,15 @@ func (c *Conn) shutdownStreams(reason error) {
 	}
 }
 
+// wakeSendWaiters broadcasts the outbound flow-control condition so every writer
+// blocked in acquireSendCredits re-checks its stream and connection state. Holds
+// only fcOutMu, so it is safe to call with no other lock held.
+func (c *Conn) wakeSendWaiters() {
+	c.fcOutMu.Lock()
+	c.fcOutCond.Broadcast()
+	c.fcOutMu.Unlock()
+}
+
 // markStreamDone is called by the connHandler when a stream's response
 // side closes (END_STREAM observed or RST received), and from local
 // SendHeaders/SendData when END_STREAM goes out. It releases the
@@ -2017,15 +2026,6 @@ func (c *Conn) shutdownStreams(reason error) {
 // A future "release smu earlier to cut contention" refactor would let both in,
 // re-open the double-recycle this fix closes, and reintroduce the data race
 // against recycleStream. Do not narrow the hold without moving the guard.
-// wakeSendWaiters broadcasts the outbound flow-control condition so every writer
-// blocked in acquireSendCredits re-checks its stream and connection state. Holds
-// only fcOutMu, so it is safe to call with no other lock held.
-func (c *Conn) wakeSendWaiters() {
-	c.fcOutMu.Lock()
-	c.fcOutCond.Broadcast()
-	c.fcOutMu.Unlock()
-}
-
 func (c *Conn) markStreamDone(id uint32) {
 	c.smu.Lock()
 	s, ok := c.streams[id]

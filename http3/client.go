@@ -997,8 +997,6 @@ func abortStream(stream quicStream, err error) {
 	_ = stream.Reset(code)
 }
 
-// roundTrip sends the request on stream and reads the response. Its caller aborts
-// the stream on a non-nil error.
 // sendRequest writes the request's HEADERS — ending the stream immediately when
 // there is no body — and then the body in a DATA frame carrying the FIN (RFC 9114
 // §4.1). If the server aborts reading the request with STOP_SENDING (surfaced as
@@ -1036,6 +1034,8 @@ func (c *Client) sendRequest(ctx context.Context, stream quicStream, req *Reques
 	return nil
 }
 
+// roundTrip sends the request on stream and reads the response. Its caller aborts
+// the stream on a non-nil error.
 func (c *Client) roundTrip(ctx context.Context, stream quicStream, req *Request) (resp *Response, body []byte, err error) {
 	// Per-request QPACK decoder (docs/HTTP3_DESIGN.md §5, PR 2d): its Huffman scratch
 	// is stack-local, so N concurrent Do never share it (a shared decoder would let
