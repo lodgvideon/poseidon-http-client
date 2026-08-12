@@ -2,7 +2,6 @@ package client
 
 import (
 	"context"
-	"sync"
 	"time"
 )
 
@@ -27,15 +26,11 @@ func (pt *h1PoolTransport) openExchange(ctx context.Context) (protoStream, pushL
 	if err != nil {
 		return nil, nil, nil, err
 	}
-	// h1Exchange.release is contractually called exactly once. The sync.Once makes
-	// that structural rather than contractual: a double release would decrement
-	// the conn's active count twice and break the MaxConnsPerHost invariant that
-	// bounds this pool's concurrency.
-	var once sync.Once
-	release := func(keepAlive bool) {
-		once.Do(func() { pt.p.release(mc, keepAlive) })
-	}
-	return &h1Exchange{ex: mc.c.NewExchange(), release: release}, nil, noRelease, nil
+	// mc IS the releaser: it already exists on the heap and knows its pool, so no
+	// closure is built per exchange (#476). Exactly-once — which protects the
+	// conn's active count and hence this pool's MaxConnsPerHost bound — is
+	// enforced by h1Exchange.release rather than by a per-exchange sync.Once.
+	return &h1Exchange{ex: mc.c.NewExchange(), rel: mc}, nil, noRelease, nil
 }
 
 // close implements transport.close. Idempotent.

@@ -53,12 +53,52 @@ func assertH1Conn(nc net.Conn) error {
 // OnData has always used and is per-connection-agnostic: nothing has to be
 // scoped to the exchange at all.
 type h1Exchange struct {
-	ex      *http1.Exchange
-	release func(keepAlive bool) // called exactly once
+	ex  *http1.Exchange
+	rel h1Releaser
+
+	// released makes "release happens exactly once" structural. All three H1
+	// transports used to own that guarantee themselves, each with a sync.Once
+	// built per exchange and a closure wrapping the real release in once.Do —
+	// three copies of one idea, and three allocations on a path that already
+	// allocates this struct. The guarantee belongs here because this is the
+	// object every release flows through: Recv and Close are its only callers.
+	released atomic.Bool
 
 	// response state
 	headersSent bool // Recv has returned EventHeaders
 	done        bool // EndStream delivered
+}
+
+// h1Releaser hands an HTTP/1.1 connection back to whatever owns it, carrying the
+// keep-alive verdict — which, unlike H2's releaser, is only known once the
+// exchange finishes, so it cannot be decided at openExchange time.
+//
+// It is an interface rather than a func for the reason given on releaser
+// (#476): the pooled transport's release needs the pool and the connection, and
+// a closure capturing both allocates on every request. *h1ManagedConn already
+// holds both and already lives on the heap, so it satisfies this directly and
+// boxes for free.
+type h1Releaser interface {
+	releaseExchange(keepAlive bool)
+}
+
+// h1ReleaseFunc adapts an existing release func to h1Releaser, for the
+// transports whose acquire already hands one back. A func value is
+// pointer-shaped, so the conversion allocates nothing.
+type h1ReleaseFunc func(keepAlive bool)
+
+func (f h1ReleaseFunc) releaseExchange(keepAlive bool) { f(keepAlive) }
+
+// release returns the connection, at most once however many times it is called.
+//
+// A CAS rather than a sync.Once: the loser of the race has nothing to wait for
+// here, since no caller reads state that releasing mutates, and the flag costs a
+// byte on a struct that already exists instead of a pointer to one that does
+// not.
+func (e *h1Exchange) release(keepAlive bool) {
+	if e.released.CompareAndSwap(false, true) {
+		e.rel.releaseExchange(keepAlive)
+	}
 }
 
 // h1BodyChunkSize is the ReadBodyChunk granularity, and the floor on the pooled
@@ -218,33 +258,30 @@ func (s *h1singleConn) openExchange(ctx context.Context) (protoStream, pushLooku
 	}
 
 	ex := nc.NewExchange()
-	// sync.Once for the same reason the two pooled h1 transports use one, and
-	// with more at stake: their double-release returns a connection to the pool
-	// twice, this one calls Unlock on an already-unlocked sync.Mutex, which is a
-	// process-wide panic rather than a pool accounting error.
+	// This one closure is the whole release: it needs both s and this particular
+	// nc, so unlike the pooled transports there is no existing heap object that
+	// is already the releaser.
 	//
-	// What kept it to one call was the e.done contract — Recv sets it on the
-	// terminal chunk and Close returns early once set — which is a convention
-	// spread across two files, not a structural guard. client.go says as much
-	// where it explains why the streaming path is safe here.
-	var once sync.Once
+	// Exactly-once matters more here than in the pools — their double-release
+	// returns a connection twice and mis-counts, this one calls Unlock on an
+	// already-unlocked sync.Mutex, which is a process-wide panic. It is enforced
+	// by h1Exchange.release, which is the only caller; the sync.Once this used to
+	// build per exchange was a third copy of that guarantee.
 	release := func(keepAlive bool) {
-		once.Do(func() {
-			if !keepAlive {
-				// The ordinary "Connection: close" churn. Silent until now, which is
-				// most of the connection lifecycle on this transport.
-				notifyConnClose(s.addr, CloseNotReusable, s.metrics, s.hooksRef)
-				_ = nc.Close()
-				s.mu.Lock()
-				if s.cur == nc {
-					s.cur = nil
-				}
-				s.mu.Unlock()
+		if !keepAlive {
+			// The ordinary "Connection: close" churn. Silent until now, which is
+			// most of the connection lifecycle on this transport.
+			notifyConnClose(s.addr, CloseNotReusable, s.metrics, s.hooksRef)
+			_ = nc.Close()
+			s.mu.Lock()
+			if s.cur == nc {
+				s.cur = nil
 			}
-			s.inFlight.Unlock()
-		})
+			s.mu.Unlock()
+		}
+		s.inFlight.Unlock()
 	}
-	h1ex := &h1Exchange{ex: ex, release: release}
+	h1ex := &h1Exchange{ex: ex, rel: h1ReleaseFunc(release)}
 	return h1ex, nil, noRelease, nil
 }
 

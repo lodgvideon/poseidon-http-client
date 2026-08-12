@@ -34,10 +34,11 @@ type transport interface {
 	// exchange is fully drained or has errored. release is safe to call
 	// from any goroutine.
 	//
-	// For H2 transports: s is a *conn.Stream and pushLookup is the
-	// connection itself, enabling server-push handling. For H1.1
-	// transports: s is a *h1Exchange and pushLookup is nil (H1.1 has no
-	// server push).
+	// For H2 transports: s is a conn.StreamRef — a handle to one lifetime
+	// of a pooled stream, by value, not a *conn.Stream — and pushLookup is
+	// the connection itself, enabling server-push handling. For H1.1
+	// transports: s is a *h1Exchange and for H3 an *h3Exchange, and
+	// pushLookup is nil for both (neither has server push here).
 	//
 	// Errors include ErrClosed, ErrRedialBackoff, *DialError, and ctx errors.
 	openExchange(ctx context.Context) (s protoStream, pushLookup pushLookuper, rel releaser, err error)
