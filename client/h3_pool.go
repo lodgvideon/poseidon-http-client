@@ -49,7 +49,6 @@ type h3ManagedConn struct {
 	cl       h3Client
 	active   int
 	lastUsed time.Time
-	dialedAt time.Time
 	// streamCap caches effectiveStreamCap(local, 0). Computed on dial completion
 	// and refreshed on each health-check tick. HTTP/3's per-conn cap is a pool
 	// policy (MaxStreamsPerConn); the peer's QUIC stream limit is enforced
@@ -484,7 +483,7 @@ func (p *h3Pool) dialOne() {
 		p.dialDoneCh <- h3DialResult{err: &DialError{Addr: p.addr, Err: err}}
 		return
 	}
-	p.dialDoneCh <- h3DialResult{mc: &h3ManagedConn{cl: cl, dialedAt: time.Now(), lastUsed: time.Now()}}
+	p.dialDoneCh <- h3DialResult{mc: &h3ManagedConn{cl: cl, lastUsed: time.Now()}}
 }
 
 // serveWaiters hands as many waiters as possible a live mc.

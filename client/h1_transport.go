@@ -54,7 +54,6 @@ func assertH1Conn(nc net.Conn) error {
 // scoped to the exchange at all.
 type h1Exchange struct {
 	ex      *http1.Exchange
-	nc      *http1.Conn
 	release func(keepAlive bool) // called exactly once
 
 	// response state
@@ -245,7 +244,7 @@ func (s *h1singleConn) openExchange(ctx context.Context) (protoStream, pushLooku
 			s.inFlight.Unlock()
 		})
 	}
-	h1ex := &h1Exchange{ex: ex, nc: nc, release: release}
+	h1ex := &h1Exchange{ex: ex, release: release}
 	return h1ex, nil, func() {}, nil
 }
 

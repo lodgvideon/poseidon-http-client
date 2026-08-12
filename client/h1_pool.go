@@ -79,7 +79,6 @@ type h1ManagedConn struct {
 	c        *http1.Conn
 	active   int // 0 or 1 — see h1ConnStreamCap
 	lastUsed time.Time
-	dialedAt time.Time
 	// probing means the health sweep is reading this conn's socket right now.
 	// The actor sets it before handing the conn to the sweep goroutine and
 	// clears it when the result comes back; while it is set the conn is not a
@@ -574,7 +573,7 @@ func (p *h1Pool) dialOne() {
 		p.dialDoneCh <- h1DialResult{err: &DialError{Addr: p.addr, Err: err}}
 		return
 	}
-	p.dialDoneCh <- h1DialResult{mc: &h1ManagedConn{c: http1.NewConn(nc), dialedAt: time.Now(), lastUsed: time.Now()}}
+	p.dialDoneCh <- h1DialResult{mc: &h1ManagedConn{c: http1.NewConn(nc), lastUsed: time.Now()}}
 }
 
 // serveWaiters hands as many queued waiters as possible an idle conn.

@@ -25,7 +25,7 @@ func (c *Client) roundTripStream(ctx context.Context, stream quicStream, req *Re
 		return nil, nil, serr
 	}
 
-	br := &BodyReader{c: c, stream: stream, ctx: ctx, req: req}
+	br := &BodyReader{c: c, stream: stream, req: req}
 	br.rb.dec = &br.dec // per-request QPACK decoder (2d); its scratch aliases decoded slices
 	br.rb.streamID = stream.ID()
 	//nolint:fatcontext // Stored, not derived: rb.ctx is overwritten by whoever
@@ -114,7 +114,6 @@ type BodyEvent struct {
 type BodyReader struct {
 	c      *Client
 	stream quicStream
-	ctx    context.Context
 	req    *Request
 	resp   *Response
 
