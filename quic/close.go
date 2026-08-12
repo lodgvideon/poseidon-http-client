@@ -5,6 +5,36 @@ import (
 	"errors"
 )
 
+// connCloseCodes pairs every sentinel that IS a connection error with the
+// transport error code to signal for it (RFC 9000 §20.1).
+//
+// A table rather than a switch because this is a registration point, and as a
+// switch it was a hidden one: a new connection-error sentinel that nobody
+// remembered to add here does not fail anything — the connection simply closes
+// carrying no code, and the peer is told nothing about why. errors_table_test.go
+// turns "remembered to add it" into a test failure by requiring every sentinel
+// in errors.go to appear either here or in that test's explicit list of
+// sentinels which deliberately have no code.
+//
+// Several sentinels may share a code; STREAM_LIMIT_ERROR covers three.
+var connCloseCodes = []struct {
+	err  error
+	code uint64
+}{
+	{ErrFrameEncoding, ErrCodeFrameEncodingError},
+	{ErrTransportParameter, ErrCodeTransportParameterError},
+	{ErrFlowControl, ErrCodeFlowControlError},
+	{ErrFinalSize, ErrCodeFinalSizeError},
+	{ErrCryptoBufferExceeded, ErrCodeCryptoBufferExceeded},
+	{ErrTooManyUniStreams, ErrCodeStreamLimitError},
+	{ErrTooManyBidiStreams, ErrCodeStreamLimitError},
+	{ErrServerBidiStream, ErrCodeStreamLimitError},
+	{ErrStreamState, ErrCodeStreamStateError},
+	{ErrAEADLimit, ErrCodeAEADLimitReached},
+	{ErrProtocolViolation, ErrCodeProtocolViolation},
+	{ErrConnectionIDLimit, ErrCodeConnectionIDLimitError},
+}
+
 // closeCodeFor maps a local protocol-violation error to the transport error code
 // to signal in a CONNECTION_CLOSE (RFC 9000 §10.2, §20.1). The bool is false for
 // errors that are not connection errors to signal — I/O failures, read timeouts,
@@ -12,34 +42,18 @@ import (
 func closeCodeFor(err error) (uint64, bool) {
 	// A TLS handshake failure surfaces as a tls.AlertError; RFC 9001 §4.8 turns it
 	// into a CRYPTO_ERROR whose code is 0x0100 plus the one-byte alert description.
+	// Checked before the table: an alert carries its own code in its value, so it
+	// cannot be enumerated as a sentinel.
 	var alert tls.AlertError
 	if errors.As(err, &alert) {
 		return ErrCodeCryptoBase + uint64(alert), true
 	}
-	switch {
-	case errors.Is(err, ErrFrameEncoding):
-		return ErrCodeFrameEncodingError, true
-	case errors.Is(err, ErrTransportParameter):
-		return ErrCodeTransportParameterError, true
-	case errors.Is(err, ErrFlowControl):
-		return ErrCodeFlowControlError, true
-	case errors.Is(err, ErrFinalSize):
-		return ErrCodeFinalSizeError, true
-	case errors.Is(err, ErrCryptoBufferExceeded):
-		return ErrCodeCryptoBufferExceeded, true
-	case errors.Is(err, ErrTooManyUniStreams), errors.Is(err, ErrTooManyBidiStreams), errors.Is(err, ErrServerBidiStream):
-		return ErrCodeStreamLimitError, true
-	case errors.Is(err, ErrStreamState):
-		return ErrCodeStreamStateError, true
-	case errors.Is(err, ErrAEADLimit):
-		return ErrCodeAEADLimitReached, true
-	case errors.Is(err, ErrProtocolViolation):
-		return ErrCodeProtocolViolation, true
-	case errors.Is(err, ErrConnectionIDLimit):
-		return ErrCodeConnectionIDLimitError, true
-	default:
-		return 0, false
+	for _, e := range connCloseCodes {
+		if errors.Is(err, e.err) {
+			return e.code, true
+		}
 	}
+	return 0, false
 }
 
 // fail handles a local error from the receive path: if it is a protocol violation

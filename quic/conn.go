@@ -5,7 +5,6 @@ import (
 	"context"
 	"crypto/rand"
 	"crypto/tls"
-	"errors"
 	"sync"
 	"time"
 )
@@ -18,10 +17,6 @@ const (
 	spaceApp
 	numSpaces
 )
-
-// ErrNoClientHello is returned when the TLS handshake did not produce a
-// ClientHello to send (an internal invariant failure).
-var ErrNoClientHello = errors.New("quic: handshake produced no ClientHello")
 
 // PacketConn is the datagram transport a Conn sends and receives on — typically
 // a connected *net.UDPConn. Read and Write operate on whole QUIC datagrams.
