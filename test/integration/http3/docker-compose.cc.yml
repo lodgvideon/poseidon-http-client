@@ -46,11 +46,42 @@ services:
       REORDER_PCT: "${REORDER_PCT:-0}"
       # One-way delay; the round trip grows by twice this.
       DELAY_MS: "${DELAY_MS:-0}"
-      # There is deliberately NO bandwidth/queue knob here. One was written and
-      # removed because it did not bind — see the note in scripts/cc-matrix.sh.
-      # Without it these cells cannot reach the bufferbloat case BBR exists for.
       SEED: "${SEED:-1}"
-    command: go run test/integration/http3/lossproxy.go
+      # Bandwidth bottleneck. Empty means unshaped, which is the old behaviour.
+      #
+      # This is `tc tbf` in the kernel, NOT the hand-written token bucket that
+      # was removed for not binding (scripts/cc-matrix.sh:31). It is applied
+      # here, on the relay, because a bufferbloat scenario needs the queue at an
+      # INTERMEDIATE hop — shaping the sender's own NIC instead would let its
+      # pacer see the limit directly and no standing queue would form.
+      #
+      # Nothing may be concluded from a shaped run until scripts/cc-ratio-check.sh
+      # passes: halving RATE must double completion time.
+      RATE: "${RATE:-}"
+      # Queue depth at the bottleneck, as tbf latency. This is the axis the
+      # bufferbloat case actually turns on, so it is a knob rather than a
+      # constant.
+      QUEUE: "${QUEUE:-500ms}"
+    cap_add:
+      - NET_ADMIN
+    command:
+      - sh
+      - -c
+      - |
+        if [ -n "$${RATE}" ]; then
+          apt-get update -qq >/dev/null 2>&1
+          apt-get install -y -qq iproute2 >/dev/null 2>&1
+          command -v tc >/dev/null || { echo "SHAPER: tc missing, REFUSING to run unshaped"; exit 1; }
+          tc qdisc add dev eth0 root tbf rate "$${RATE}" burst 32kbit latency "$${QUEUE}" || {
+            echo "SHAPER: tc failed, REFUSING to run unshaped"; exit 1; }
+          # Print what actually got installed. A run that silently went unshaped
+          # is the exact artefact this whole exercise exists to avoid, so the
+          # qdisc is evidence in the log rather than an assumption.
+          echo "SHAPER: $$(tc qdisc show dev eth0 | head -1)"
+        else
+          echo "SHAPER: none (RATE unset)"
+        fi
+        exec go run test/integration/http3/lossproxy.go
     restart: "no"
 
   runner:
