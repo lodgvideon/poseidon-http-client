@@ -47,7 +47,7 @@ func TestPoolTransport_OpenExchangeAllocs(t *testing.T) {
 		t.Fatalf("warm-up openExchange: %v", err)
 	}
 	_ = s.Close()
-	release()
+	release.release()
 
 	n := testing.AllocsPerRun(200, func() {
 		st, _, rel, oerr := pt.openExchange(ctx)
@@ -55,14 +55,18 @@ func TestPoolTransport_OpenExchangeAllocs(t *testing.T) {
 			t.Fatalf("openExchange: %v", oerr)
 		}
 		_ = st.Close()
-		rel()
+		rel.release()
 	})
 
 	// Lower this when the number improves, as the other absolute gates in this
-	// repo do. What is left is the stream, the exchange's Close, and the release
-	// closure — that closure is the second half of the same finding and is still
-	// to be dealt with.
-	const openExchangeAllocCeiling = 7
+	// repo do. The release closure is gone as of the releaser interface (#476):
+	// the pool's managedConn IS the releaser now, and an interface holding a
+	// pointer that already exists on the heap allocates nothing.
+	//
+	// What is left is the stream, the exchange's Close, and one allocation on
+	// openExchange's return line, which is NOT the closure — it was measured
+	// separately and survives the closure's removal.
+	const openExchangeAllocCeiling = 6
 	t.Logf("openExchange + release: %.1f allocs", n)
 	if n > openExchangeAllocCeiling {
 		t.Errorf("openExchange allocates %.1f per request, ceiling %d — the most likely "+

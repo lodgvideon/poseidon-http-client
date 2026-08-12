@@ -41,7 +41,7 @@ type singleConn struct {
 }
 
 // openExchange implements transport.openExchange.
-func (s *singleConn) openExchange(ctx context.Context) (protoStream, pushLookuper, func(), error) {
+func (s *singleConn) openExchange(ctx context.Context) (protoStream, pushLookuper, releaser, error) {
 	cn, release, err := s.acquireConn(ctx)
 	if err != nil {
 		return nil, nil, nil, err
@@ -51,7 +51,7 @@ func (s *singleConn) openExchange(ctx context.Context) (protoStream, pushLookupe
 		release()
 		return nil, nil, nil, serr
 	}
-	return stream, cn, release, nil
+	return stream, cn, funcReleaser(release), nil
 }
 
 // acquireConn returns a healthy *conn.Conn and a no-op release func.

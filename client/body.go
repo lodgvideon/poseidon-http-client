@@ -15,7 +15,7 @@ type responseBodyReader struct {
 	ctx     context.Context
 	cancel  context.CancelFunc // cancels ctx in Close, waking a parked Read
 	stream  respStream
-	release func()    // returns conn to pool; called exactly once in Close
+	release releaser  // returns conn to pool; called exactly once in Close
 	resp    *Response // written with trailers when EventTrailers arrives
 
 	// mu guards every field below it. This is an io.ReadCloser handed to the
@@ -172,7 +172,7 @@ func (r *responseBodyReader) Close() error {
 		// afterwards sees closed and hands its own slab straight back.
 		r.recycleDataLocked()
 		r.mu.Unlock()
-		r.release()
+		r.release.release()
 	})
 	return err
 }

@@ -40,7 +40,7 @@ type transport interface {
 	// server push).
 	//
 	// Errors include ErrClosed, ErrRedialBackoff, *DialError, and ctx errors.
-	openExchange(ctx context.Context) (s protoStream, pushLookup pushLookuper, release func(), err error)
+	openExchange(ctx context.Context) (s protoStream, pushLookup pushLookuper, rel releaser, err error)
 
 	// close prevents further exchange opens and closes any underlying
 	// conn(s). Idempotent.
@@ -58,3 +58,35 @@ type transport interface {
 	// transport's MaxConnsPerHost.
 	warmup(n int)
 }
+
+// releaser hands an exchange's connection back to whatever owns it. It is an
+// interface rather than a func() because the pool transports' release captures
+// both the pool and the connection, and a capturing closure allocates on every
+// request — 2 of the 7 allocations openExchange was measured at (#476). An
+// interface holding a pointer that already exists on the heap costs nothing,
+// which is the same move that removed cn.LookupStream in #477.
+type releaser interface {
+	// release returns the exchange's connection. It MUST be called exactly
+	// once, when the exchange is fully drained or has errored, and is safe to
+	// call from any goroutine.
+	release()
+}
+
+// noopReleaser is for transports that own their connection for their whole
+// lifetime and have nothing to hand back per exchange. A zero-size struct
+// converts to an interface without allocating, so noRelease is free to return.
+type noopReleaser struct{}
+
+func (noopReleaser) release() {}
+
+// noRelease is the shared value every no-op site returns.
+var noRelease releaser = noopReleaser{}
+
+// funcReleaser adapts an existing release func to releaser, for the transports
+// whose acquire helper already hands one back. A func value is pointer-shaped,
+// so it goes into the interface without allocating — the wrapper costs nothing
+// and keeps this change to the transport boundary rather than rewriting every
+// acquire helper's signature.
+type funcReleaser func()
+
+func (f funcReleaser) release() { f() }

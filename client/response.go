@@ -161,7 +161,7 @@ type StreamResponse struct {
 	Headers []conn.HeaderField
 
 	stream    respStream
-	release   func()
+	release   releaser
 	closeOnce sync.Once
 	drained   bool
 	trailers  []conn.HeaderField // cached when Recv delivers EventTrailers
@@ -417,7 +417,7 @@ func (sr *StreamResponse) Close() error {
 		sr.recycleData()
 		sr.mu.Unlock()
 		if sr.release != nil {
-			sr.release()
+			sr.release.release()
 		}
 	})
 	return closeErr
