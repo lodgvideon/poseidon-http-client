@@ -8,11 +8,27 @@ jobs:
         with: { fetch-depth: 0 }
       - uses: actions/setup-go@v7
         with: { go-version: '1.25' }
-      - name: Bench HEAD (Phase A only)
-        # B.1 conn benches are intentionally non-zero-alloc per the
-        # B.1 design spec; their zero-alloc work is deferred to B.2.
-        # Until then, bench-gate runs only against the codec packages
-        # whose zero-alloc invariant must hold.
+      - name: Bench HEAD (codec packages only)
+        # Scope is every package that CAN hold an absolute zero: synchronous,
+        # no goroutine, no channel, no context.Context, and the caller supplies
+        # the buffer. conn, client and grpc are none of those things and are
+        # deliberately out of scope — see below.
+        #
+        # This used to read "conn benches are intentionally non-zero-alloc per
+        # the B.1 design spec; their zero-alloc work is deferred to B.2". B.2
+        # shipped long ago and the deferral was never redeemed, so the note had
+        # turned into a plan that did not exist. The reason conn is absent is
+        # not a pending task, it is structural: conn multiplexes N streams over
+        # one socket, so it has a reader goroutine, per-stream event channels
+        # and a *Stream whose lifetime three parties share. Removing those is
+        # not an optimisation, it is ceasing to be conn.
+        #
+        # What conn can hold is a steady-state per-request zero, on pools. As of
+        # 2026-08-12 it is measured at 2 allocs/op — one string(f.Value) in
+        # authorityOf, one make([]HeaderField) in copyFieldsToSlab. That number
+        # is guarded by conn's own benchmarks, not by this gate; the allocation
+        # gates in .github/workflows/ci.yml are the ones with teeth there.
+        #
         # ./qpack and ./http3 are HEAD-only here until they exist on the base
         # branch; the absolute zero-alloc gate below runs on head.txt.
         run: go test -bench=. -benchmem -benchtime=2s -count=5 -run=^$ ./frame ./hpack ./internal/bytesx ./internal/bufx ./qpack ./quic ./http3 | tee head.txt
