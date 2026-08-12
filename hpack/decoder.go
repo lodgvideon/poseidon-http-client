@@ -163,9 +163,13 @@ func (d *Decoder) Begin() {
 
 // Feed appends fragment, then decodes and emits as many complete
 // representations as possible. Truncated tail remains buffered.
+//
+// Returns ErrNotStreaming if Begin has not opened a session — a caller
+// sequencing error, distinct from the wire-format errors the decode itself
+// returns.
 func (d *Decoder) Feed(fragment []byte, visit FieldVisitor) error {
 	if !d.streaming {
-		return ErrInvalidPrefix
+		return ErrNotStreaming
 	}
 	d.pending = append(d.pending, fragment...)
 	consumed, err := d.decodePartial(d.pending, d.guardedVisitor(visit))
@@ -177,9 +181,13 @@ func (d *Decoder) Feed(fragment []byte, visit FieldVisitor) error {
 }
 
 // Finish validates that the streaming buffer is drained and resets state.
+//
+// Returns ErrNotStreaming if no session is open, and ErrTruncated if one is but
+// the peer's field block ended mid-representation — the first is the caller's
+// mistake, the second is the wire's.
 func (d *Decoder) Finish() error {
 	if !d.streaming {
-		return ErrInvalidPrefix
+		return ErrNotStreaming
 	}
 	defer func() {
 		d.streaming = false
