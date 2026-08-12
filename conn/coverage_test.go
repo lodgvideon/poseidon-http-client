@@ -205,7 +205,7 @@ func TestConn_ShutdownStreams_ClosesOpenStreams(t *testing.T) {
 	s.id = 1
 	c.streams[1] = s
 
-	c.shutdownStreams(&ConnError{Code: frame.ErrCodeInternalError, Reason: "transport died"})
+	c.shutdownStreams()
 
 	// First receive: should get the EventReset that was sent before close.
 	select {
@@ -226,7 +226,7 @@ func TestConn_ShutdownStreams_EOF_ChannelClosed(t *testing.T) {
 	s.id = 1
 	c.streams[1] = s
 
-	c.shutdownStreams(io.EOF)
+	c.shutdownStreams()
 
 	done := make(chan struct{})
 	go func() {

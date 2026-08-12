@@ -3,7 +3,6 @@ package conn
 import (
 	"context"
 	"errors"
-	"io"
 	"testing"
 	"time"
 
@@ -36,7 +35,7 @@ func TestConn_AcquireSendCredits_WakesOnReaderDeath(t *testing.T) {
 	}
 
 	// Reader dies (transport error). shutdownStreams runs on that path.
-	c.shutdownStreams(io.EOF)
+	c.shutdownStreams()
 
 	select {
 	case err := <-out:

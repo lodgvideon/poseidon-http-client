@@ -3,7 +3,6 @@ package conn
 import (
 	"bytes"
 	"context"
-	"io"
 	"sync"
 	"testing"
 
@@ -126,7 +125,7 @@ func TestRecycleStream_SurvivesShutdownThenReuse(t *testing.T) {
 	c.streams[5] = s
 	c.inflight = 1
 
-	c.shutdownStreams(io.EOF) // reader dies: event queued, channel closed
+	c.shutdownStreams() // reader dies: event queued, channel closed
 
 	if err := s.ref().SendData(context.Background(), nil, true); err != nil {
 		t.Fatalf("SendData(END_STREAM): %v", err)

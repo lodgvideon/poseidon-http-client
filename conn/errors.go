@@ -49,9 +49,6 @@ var (
 	// drainResponse. Laundering a use-after-recycle through any of those turns a
 	// programming error into a hang or a silently wrong result.
 	ErrStaleStream = errors.New("conn: stale stream handle used after the stream was recycled")
-	// ErrFlowControlExhausted is reserved for future explicit
-	// non-blocking write paths; B.2.3 always blocks instead.
-	ErrFlowControlExhausted = errors.New("conn: send window too small for payload")
 	// ErrUnexpectedPushPromise is surfaced when the peer sends a
 	// PUSH_PROMISE despite our handshake advertising ENABLE_PUSH=0.
 	ErrUnexpectedPushPromise = errors.New("conn: peer sent PUSH_PROMISE while ENABLE_PUSH=0")
