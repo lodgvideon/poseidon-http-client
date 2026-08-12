@@ -62,3 +62,37 @@ func TestConformance_RFC9113_Sec6_8_GoAwayReceivedClampsRaisedLastID(t *testing.
 		t.Errorf("a lowered GOAWAY set last-stream-id to %d, want 3", got)
 	}
 }
+
+// TestConformance_RFC9113_Sec6_8_SecondGoAwayRefinesCodeWithoutRaisingLastID
+// pins the asymmetry between the two fields of a repeated GOAWAY.
+//
+// §6.8 provides for exactly this sequence: an endpoint that wants a graceful
+// shutdown sends NO_ERROR first and "MAY" follow it with a second GOAWAY
+// carrying a real error code. So the REASON must track the newest frame, while
+// the last-stream-id must never grow — the set of streams the peer claims to
+// have processed can only shrink.
+//
+// Clamping both, which is the easy mistake, would leave a client reading
+// NO_ERROR while the peer is telling it the connection died of a protocol
+// error.
+func TestConformance_RFC9113_Sec6_8_SecondGoAwayRefinesCodeWithoutRaisingLastID(t *testing.T) {
+	c := &Conn{streams: map[uint32]*Stream{}}
+	c.fcOutCond = sync.NewCond(&c.fcOutMu)
+
+	c.onGoAwayReceived(5, frame.ErrCodeNoError)
+	if got := frame.ErrCode(c.goAwayCode.Load()); got != frame.ErrCodeNoError {
+		t.Fatalf("first GOAWAY code = %v, want NO_ERROR", got)
+	}
+
+	// The peer escalates: same shutdown, now with a diagnosis, and an id it is
+	// not allowed to raise.
+	c.onGoAwayReceived(9, frame.ErrCodeProtocolError)
+	if got := frame.ErrCode(c.goAwayCode.Load()); got != frame.ErrCodeProtocolError {
+		t.Errorf("second GOAWAY code = %v, want PROTOCOL_ERROR — the refined reason "+
+			"must replace the initial NO_ERROR (§6.8)", got)
+	}
+	if got := c.goAwayLastStreamID.Load(); got != 5 {
+		t.Errorf("last-stream-id = %d, want 5 — a second GOAWAY may refine the code "+
+			"but MUST NOT raise the id", got)
+	}
+}

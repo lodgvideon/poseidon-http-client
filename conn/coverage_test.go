@@ -164,6 +164,34 @@ func TestConn_EmitConnGoAwayIfTyped_ConnError(t *testing.T) {
 	}
 }
 
+// TestConn_EmitConnGoAwayIfTyped_PopulatesLast pins that ConnError.Last reports
+// the id actually advertised. Nothing assigned the field, so every connection
+// error printed last=0 while its doc comment described a case ("0 if originated
+// locally") that was the reverse of the truth: a peer GOAWAY never builds a
+// ConnError at all, and the only GOAWAY one accompanies IS the local diagnosis.
+//
+// lastPromisedID is seeded so the advertised id is non-zero, and goAwaySentLast
+// is set to its real constructor value. Without both, the expected value would
+// be 0 — which is exactly what the unfixed code produces, so the test would
+// pass against the bug.
+func TestConn_EmitConnGoAwayIfTyped_PopulatesLast(t *testing.T) {
+	var buf bytes.Buffer
+	c := &Conn{
+		fr:      frame.NewFramer(&buf, bytes.NewReader(nil)),
+		streams: map[uint32]*Stream{},
+	}
+	c.goAwaySentLast.Store(goAwayNoneSent)
+	c.lastPromisedID = 4
+
+	ce := &ConnError{Code: frame.ErrCodeProtocolError, Reason: "test"}
+	c.emitConnGoAwayIfTyped(ce)
+
+	if ce.Last != 4 {
+		t.Fatalf("ConnError.Last = %d, want 4 — the id advertised in the GOAWAY "+
+			"just written is not recorded on the error the caller receives", ce.Last)
+	}
+}
+
 // ---------------------------------------------------------------------------
 // shutdownStreams
 // ---------------------------------------------------------------------------

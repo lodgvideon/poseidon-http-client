@@ -86,12 +86,59 @@ var (
 	ErrPushedStreamReadOnly = errors.New("conn: cannot send on a server-pushed stream (receive-only)")
 )
 
+// GoAwayError reports that the peer sent GOAWAY, and carries the two things the
+// frame actually says: how much of our work the peer accepted, and why it is
+// going away.
+//
+// The reason used to be discarded at the boundary, so every GOAWAY reached the
+// caller as the bare ErrGoAway sentinel. That collapses three situations which
+// call for opposite responses — NO_ERROR is a peer draining gracefully, so
+// redial elsewhere and keep the load profile; ENHANCE_YOUR_CALM is a demand to
+// back off, where redialling immediately makes it worse; PROTOCOL_ERROR and
+// friends mean the peer is rejecting this client, so a redial fails identically
+// and the right move is to report it. RFC 9113 §6.8 puts the code in the frame
+// precisely so the receiver can tell them apart.
+//
+// It is returned by NewStream in place of ErrGoAway, which it still matches
+// under errors.Is, so callers that only ask "is this a GOAWAY" are unaffected.
+// Callers that want the detail use errors.As.
+type GoAwayError struct {
+	// LastStreamID is the highest stream id the peer says it processed or may
+	// yet process. Streams above it were never accepted and are safe to retry
+	// on a fresh connection; the Conn has already reset them with
+	// REFUSED_STREAM.
+	LastStreamID uint32
+	// Code is the peer's stated reason (RFC 9113 §6.8). When a peer sends more
+	// than one GOAWAY this is the newest reason, which §6.8 allows to become
+	// more specific than an initial NO_ERROR.
+	Code frame.ErrCode
+}
+
+// Error returns a string describing the peer's GOAWAY.
+func (e *GoAwayError) Error() string {
+	return fmt.Sprintf("conn: peer sent GOAWAY code=%v last=%d; no new streams",
+		e.Code, e.LastStreamID)
+}
+
+// Is reports whether target is ErrGoAway, so that errors.Is(err, ErrGoAway)
+// keeps holding now that the sentinel has been replaced by this type. The
+// retry path depends on it.
+func (e *GoAwayError) Is(target error) bool { return target == ErrGoAway }
+
 // ConnError is connection-fatal. After it is returned the Conn is dead
 // and all Streams created from it return ErrConnClosed.
 type ConnError struct {
 	Code   frame.ErrCode
 	Reason string
-	Last   uint32 // last-stream-id from the GOAWAY (0 if originated locally)
+	// Last is the last-stream-id advertised in the GOAWAY sent for this error.
+	//
+	// It is set only on the path that actually sends one — the reader loop
+	// diagnosing a connection error, which is by definition local. The comment
+	// here used to say "0 if originated locally", which had it backwards and
+	// described a case no code path could produce: a GOAWAY *received* from the
+	// peer never builds a ConnError at all, it produces a GoAwayError. Nothing
+	// assigned this field, so every connection error printed last=0.
+	Last uint32
 }
 
 // Error returns a string describing the connection-fatal error.

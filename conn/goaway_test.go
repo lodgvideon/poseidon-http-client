@@ -14,6 +14,10 @@ import (
 
 // TestOnGoAway_BlocksNewStream verifies that after a GOAWAY frame is
 // received, NewStream returns ErrGoAway (RFC 7540 §6.8).
+//
+// errors.Is rather than ==: NewStream now returns a *GoAwayError carrying the
+// peer's reason, and that type reports itself as ErrGoAway. The sentinel is
+// still the contract, the equality is not.
 func TestOnGoAway_BlocksNewStream(t *testing.T) {
 	c := newGoAwayConn()
 	h := newConnHandler(c, hpack.NewDecoder())
@@ -23,8 +27,56 @@ func TestOnGoAway_BlocksNewStream(t *testing.T) {
 	if !c.goAwayReceived.Load() {
 		t.Fatalf("goAwayReceived flag not set")
 	}
-	if _, err := c.NewStream(context.Background()); err != ErrGoAway {
+	if _, err := c.NewStream(context.Background()); !errors.Is(err, ErrGoAway) {
 		t.Fatalf("NewStream err = %v, want ErrGoAway", err)
+	}
+}
+
+// TestOnGoAway_SurfacesPeerCodeAndLastStreamID is the gate on #570: the peer's
+// reason must reach the caller.
+//
+// It used to be dropped at onGoAwayReceived's signature, so a graceful drain
+// (NO_ERROR), a demand to back off (ENHANCE_YOUR_CALM) and an outright
+// rejection all arrived as one sentinel — and those three call for opposite
+// responses from a load generator, which is this library's stated user.
+//
+// The table drives distinct codes on purpose: a fix that hard-coded any single
+// value, or that stored the code but reported a zero one, passes a one-code
+// test.
+func TestOnGoAway_SurfacesPeerCodeAndLastStreamID(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		code frame.ErrCode
+		last uint32
+	}{
+		{"graceful drain", frame.ErrCodeNoError, 0},
+		{"back off", frame.ErrCodeEnhanceYourCalm, 7},
+		{"peer rejects us", frame.ErrCodeProtocolError, 3},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c := newGoAwayConn()
+			h := newConnHandler(c, hpack.NewDecoder())
+			if err := h.OnGoAway(frame.FrameHeader{}, tc.last, tc.code, nil); err != nil {
+				t.Fatalf("OnGoAway: %v", err)
+			}
+
+			_, err := c.NewStream(context.Background())
+			// The sentinel is still the contract for callers that only ask
+			// "was this a GOAWAY" — client/retry.go is one of them.
+			if !errors.Is(err, ErrGoAway) {
+				t.Fatalf("NewStream err = %v, want it to match ErrGoAway", err)
+			}
+			var ge *GoAwayError
+			if !errors.As(err, &ge) {
+				t.Fatalf("NewStream err = %T (%v), want a *GoAwayError carrying the peer's reason", err, err)
+			}
+			if ge.Code != tc.code {
+				t.Errorf("Code = %v, want %v — the peer's reason was discarded", ge.Code, tc.code)
+			}
+			if ge.LastStreamID != tc.last {
+				t.Errorf("LastStreamID = %d, want %d", ge.LastStreamID, tc.last)
+			}
+		})
 	}
 }
 

@@ -7,7 +7,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed (breaking)
+
+- **`conn.Conn.NewStream` now returns a `*conn.GoAwayError` after a peer GOAWAY,
+  instead of the bare `conn.ErrGoAway` sentinel.** The peer's error code was
+  taken by `onGoAwayReceived` and dropped at its own signature, and nothing
+  anywhere recorded it, so a graceful drain (`NO_ERROR`), a demand to back off
+  (`ENHANCE_YOUR_CALM`) and the peer rejecting this client outright
+  (`PROTOCOL_ERROR`) all arrived as one value. Those call for opposite responses
+  from a load generator — redial elsewhere, slow down, or stop and report — and
+  RFC 9113 §6.8 puts the code in the frame precisely so the receiver can tell
+  them apart. The new error carries `Code` and `LastStreamID`.
+
+  **Migration:** `errors.Is(err, conn.ErrGoAway)` is unaffected — `GoAwayError`
+  reports itself as that sentinel, which is why the retry classifier needed no
+  change. Only a direct comparison, `err == conn.ErrGoAway`, stops matching;
+  switch it to `errors.Is`. Use `errors.As` to read the code.
+
 ### Fixed
+
+- **`conn.ConnError.Last` was never assigned, so every connection error printed
+  `last=0`.** Its doc comment ("0 if originated locally") described the reverse
+  of the truth: a GOAWAY *received* from the peer builds no `ConnError` at all,
+  and the only GOAWAY one ever accompanies is the local diagnosis the reader
+  loop sends. It is now set to the id actually advertised, on that path, and the
+  comment says so.
 
 - **A PUSH_PROMISE reaching either streaming read path leaked its header slab
   back to the garbage collector instead of the pool.** A PUSH_PROMISE is
