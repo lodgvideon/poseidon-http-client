@@ -76,6 +76,11 @@ const h1ProbeIdleAfter = 250 * time.Millisecond
 // that field and would send anyone unifying these pools looking for a lock
 // that is not needed — or hiding a field the transport requires.
 type h1ManagedConn struct {
+	// p is the owning pool, so this record can be handed to an exchange AS its
+	// releaser instead of a closure capturing (pool, conn) being built per
+	// request (#476). Set once at construction and never reassigned; reading it
+	// off the value acquire returns is the same exception the conn handle is.
+	p        *h1Pool
 	c        *http1.Conn
 	active   int // 0 or 1 — see h1ConnStreamCap
 	lastUsed time.Time
@@ -573,7 +578,7 @@ func (p *h1Pool) dialOne() {
 		p.dialDoneCh <- h1DialResult{err: &DialError{Addr: p.addr, Err: err}}
 		return
 	}
-	p.dialDoneCh <- h1DialResult{mc: &h1ManagedConn{c: http1.NewConn(nc), lastUsed: time.Now()}}
+	p.dialDoneCh <- h1DialResult{mc: &h1ManagedConn{p: p, c: http1.NewConn(nc), lastUsed: time.Now()}}
 }
 
 // serveWaiters hands as many queued waiters as possible an idle conn.
@@ -993,6 +998,10 @@ func (p *h1Pool) acquireOnce(ctx context.Context) (*h1ManagedConn, error) {
 // release returns mc to the pool. keepAlive=false discards the connection instead
 // of pooling it — pass false whenever http1.Exchange.KeepAlive() is false or the
 // exchange errored. Must be called exactly once per acquire.
+// releaseExchange implements h1Releaser, so a checked-out record can be handed
+// to its exchange directly instead of a closure being built to capture it.
+func (mc *h1ManagedConn) releaseExchange(keepAlive bool) { mc.p.release(mc, keepAlive) }
+
 func (p *h1Pool) release(mc *h1ManagedConn, keepAlive bool) {
 	if mc == nil {
 		return

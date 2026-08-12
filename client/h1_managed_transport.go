@@ -2,7 +2,6 @@ package client
 
 import (
 	"context"
-	"sync"
 	"time"
 )
 
@@ -25,14 +24,12 @@ func (mt *h1ManagedTransport) openExchange(ctx context.Context) (protoStream, pu
 	if err != nil {
 		return nil, nil, nil, err
 	}
-	// See h1PoolTransport.openExchange: the Once turns "release is called exactly
-	// once" from a contract into an invariant, protecting the sub-pool's
-	// active-count and hence its MaxConnsPerHost bound.
-	var once sync.Once
-	rel := func(keepAlive bool) {
-		once.Do(func() { release(keepAlive) })
-	}
-	return &h1Exchange{ex: c.NewExchange(), release: rel}, nil, noRelease, nil
+	// acquire already hands back a release func, and a func value boxes into
+	// h1Releaser for free, so nothing extra is built per exchange. Exactly-once —
+	// which protects the sub-pool's active count and hence its MaxConnsPerHost
+	// bound — is enforced by h1Exchange.release rather than by a per-exchange
+	// sync.Once.
+	return &h1Exchange{ex: c.NewExchange(), rel: h1ReleaseFunc(release)}, nil, noRelease, nil
 }
 
 // close implements transport.close. Idempotent.
