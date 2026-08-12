@@ -501,11 +501,7 @@ func (f *Framer) WritePushPromise(streamID, promisedID uint32, blockFragment []b
 			return err
 		}
 	}
-	pid := promisedID & 0x7fffffff
-	f.smallBuf[0] = byte(pid >> 24)
-	f.smallBuf[1] = byte(pid >> 16)
-	f.smallBuf[2] = byte(pid >> 8)
-	f.smallBuf[3] = byte(pid)
+	bufx.WriteUint31(f.smallBuf[:4], promisedID)
 	if _, err := f.w.Write(f.smallBuf[:4]); err != nil {
 		return err
 	}
@@ -545,11 +541,7 @@ func (f *Framer) WriteGoAway(lastStreamID uint32, code ErrCode, debug []byte) er
 	if totalLen > f.maxReadFrameSize {
 		return ErrFrameTooLarge
 	}
-	last := lastStreamID & 0x7fffffff
-	f.smallBuf[0] = byte(last >> 24)
-	f.smallBuf[1] = byte(last >> 16)
-	f.smallBuf[2] = byte(last >> 8)
-	f.smallBuf[3] = byte(last)
+	bufx.WriteUint31(f.smallBuf[:4], lastStreamID)
 	f.smallBuf[4] = byte(code >> 24)
 	f.smallBuf[5] = byte(code >> 16)
 	f.smallBuf[6] = byte(code >> 8)
@@ -602,14 +594,21 @@ func (f *Framer) WriteAltSvc(streamID uint32, entries []AltSvcEntry) error {
 
 // WriteWindowUpdate writes a WINDOW_UPDATE frame.
 func (f *Framer) WriteWindowUpdate(streamID uint32, increment uint32) error {
-	if increment == 0 {
+	// Mask BEFORE the zero check, not after. The high bit is the reserved R bit
+	// (RFC 7540 §6.9), so an increment carrying it is out of range for the field
+	// and is masked off exactly as the promised id and last-stream-id are
+	// elsewhere in this file — and as this framer's own reader does.
+	//
+	// Checking first was the bug: 0x80000000 is non-zero, so it passed the guard,
+	// and then masked to 0 on the way out. The frame written was a WINDOW_UPDATE
+	// with a zero increment, which §6.9 obliges the receiver to treat as an error
+	// — and which dispatchWindowUpdate here rejects, so this framer produced a
+	// frame its own reader refuses.
+	inc := increment & 0x7fffffff
+	if inc == 0 {
 		return ErrZeroIncrement
 	}
-	inc := increment & 0x7fffffff
-	f.smallBuf[0] = byte(inc >> 24)
-	f.smallBuf[1] = byte(inc >> 16)
-	f.smallBuf[2] = byte(inc >> 8)
-	f.smallBuf[3] = byte(inc)
+	bufx.WriteUint31(f.smallBuf[:4], inc)
 	return f.writeFrame(FrameHeader{Length: 4, Type: FrameWindowUpdate, StreamID: streamID}, f.smallBuf[:4])
 }
 
@@ -872,8 +871,7 @@ func (f *Framer) dispatchPushPromise(fh FrameHeader, payload []byte, h Handler) 
 	if len(body) < 4 {
 		return ErrShortRead
 	}
-	pid := uint32(body[0])<<24 | uint32(body[1])<<16 | uint32(body[2])<<8 | uint32(body[3])
-	pid &= 0x7fffffff
+	pid := bufx.ReadUint31(body[:4])
 	return h.OnPushPromise(fh, pid, HeaderBlock(body[4:]), padLen)
 }
 
@@ -896,8 +894,7 @@ func (f *Framer) dispatchGoAway(fh FrameHeader, payload []byte, h Handler) error
 	if fh.Length < 8 {
 		return ErrShortRead
 	}
-	last := uint32(payload[0])<<24 | uint32(payload[1])<<16 | uint32(payload[2])<<8 | uint32(payload[3])
-	last &= 0x7fffffff
+	last := bufx.ReadUint31(payload[:4])
 	code := ErrCode(uint32(payload[4])<<24 | uint32(payload[5])<<16 | uint32(payload[6])<<8 | uint32(payload[7]))
 	return h.OnGoAway(fh, last, code, payload[8:])
 }
@@ -906,8 +903,7 @@ func (f *Framer) dispatchWindowUpdate(fh FrameHeader, payload []byte, h Handler)
 	if fh.Length != 4 {
 		return ErrWindowWrongLength
 	}
-	inc := uint32(payload[0])<<24 | uint32(payload[1])<<16 | uint32(payload[2])<<8 | uint32(payload[3])
-	inc &= 0x7fffffff
+	inc := bufx.ReadUint31(payload[:4])
 	if inc == 0 {
 		return ErrZeroIncrement
 	}
