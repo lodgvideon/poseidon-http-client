@@ -15,9 +15,35 @@ networks:
     driver: bridge
 
 services:
+  # Upload target that consumes the body. See sink/main.go and #564: the
+  # benchmark previously posted to a canned `respond` route that never read the
+  # request, so it timed a header round trip instead of the transfer.
+  sink:
+    image: golang:1.25
+    hostname: sink
+    networks: [h3net]
+    working_dir: /src/test/integration/http3/sink
+    volumes:
+      - ../../..:/src
+    command: go run .
+    healthcheck:
+      # The golang image is Debian-based, so bash's /dev/tcp is available and no
+      # extra tooling has to be installed just to answer "is it listening yet".
+      test: ["CMD", "bash", "-c", "echo > /dev/tcp/127.0.0.1/8080"]
+      interval: 1s
+      timeout: 2s
+      retries: 60
+      start_period: 3s
+    restart: "no"
+
   caddy:
     image: caddy:2
     hostname: h3caddy
+    depends_on:
+      # Without this the sink never starts — nothing else references it — and
+      # every upload comes back 502 from reverse_proxy.
+      sink:
+        condition: service_healthy
     networks: [h3net]
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro

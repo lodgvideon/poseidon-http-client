@@ -28,6 +28,16 @@ h3caddy:443, localhost:443, lossproxy:443 {
 		respond "boom" 500
 	}
 
+	# /sink is the upload target for the congestion-control benchmark. It MUST
+	# go through reverse_proxy: `respond` and `file_server` both answer without
+	# reading the request body, which is exactly the bug in #564 — the timer
+	# closed on the response while the payload was still buffered. reverse_proxy
+	# has to forward the bytes, so the upload becomes real.
+	@sink path /sink
+	handle @sink {
+		reverse_proxy sink:8080
+	}
+
 	# "/" (and a POST to it) get a small canned response; other paths are served
 	# from /srv (e.g. /big.txt, a 16 KiB body for the large-response test).
 	@root path /

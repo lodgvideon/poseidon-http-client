@@ -120,6 +120,21 @@ func doUpload(t *testing.T, client *Client, host string, body []byte) (*Response
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
 	return client.Do(ctx, &Request{
-		Method: "POST", Scheme: "https", Authority: host, Path: "/", Body: body,
+		Method: "POST", Scheme: "https", Authority: host, Path: uploadPath(), Body: body,
 	})
+}
+
+// uploadPath is the target the measured upload is sent to. It must be an
+// endpoint that CONSUMES the request body before responding, or the timer
+// closes on a response that arrived while the payload was still buffered and
+// the measurement is of a header round trip (#564: "/" is a canned Caddy
+// `respond`, and elapsed came out independent of payload size).
+//
+// Overridable so a peer without the sink route can still be pointed somewhere
+// that drains, but the default is the route that does.
+func uploadPath() string {
+	if p := os.Getenv("H3_CC_PATH"); p != "" {
+		return p
+	}
+	return "/sink"
 }
