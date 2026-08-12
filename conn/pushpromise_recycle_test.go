@@ -37,7 +37,7 @@ func TestHandlePushPromise_RecycledParentIsNotAnnounced(t *testing.T) {
 	// The authority the promise carries. Without it validatePushedRequest refuses
 	// the promise on its own path — with an RST on the same stream — and the
 	// handler never reaches the delivery this test is about.
-	parent.reqAuthority = "example.com"
+	parent.authorityBuf = []byte("example.com")
 	c.streams[1] = parent
 	c.inflight = 1
 

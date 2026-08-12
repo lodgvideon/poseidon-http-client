@@ -32,14 +32,14 @@ func TestIsKnownOrigin_StripsScheme(t *testing.T) {
 // request's :authority into the next request on a reused connection.
 func TestRecycleStream_ResetsReqAuthority(t *testing.T) {
 	s := newStream(1, 8, nil, 65535)
-	s.reqAuthority = "example.com"
+	s.authorityBuf = []byte("example.com")
 	s.localEnded, s.remoteEnded = true, true
 	recycleStream(s)
 	// recycleStream clears the fields in place before pooling s, so assert on s
 	// directly. Going back through a pool is flaky: sync.Pool may return nil
 	// (the GC can drop a pooled item), which is not what this test is checking.
 	// s.w is nil here, so nothing is pooled at all — the reset is the point.
-	if s.reqAuthority != "" {
-		t.Errorf("recycled Stream.reqAuthority = %q, want empty", s.reqAuthority)
+	if len(s.authorityBuf) != 0 {
+		t.Errorf("recycled Stream.authorityBuf = %q, want empty", s.authorityBuf)
 	}
 }

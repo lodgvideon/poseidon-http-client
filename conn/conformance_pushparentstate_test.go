@@ -46,7 +46,7 @@ func TestConformance_RFC9113_Sec6_6_PushPromiseOnHalfClosedRemoteParent_ConnErro
 	s := m.addStream(1)
 	s.remoteEnded = true // server sent END_STREAM
 	s.localEnded = false // client upload still open -> stream stays registered
-	s.reqAuthority = "example.com"
+	s.authorityBuf = []byte("example.com")
 
 	err := h.OnPushPromise(pushPromiseHeader(1), 2, validPromiseFor(t, "example.com"), 0)
 	var ce *ConnError
@@ -80,7 +80,7 @@ func TestConformance_RFC9113_Sec6_6_PushPromiseOnValidParentStates_Accepted(t *t
 			s := m.addStream(1)
 			s.localEnded = tc.localEnded
 			s.remoteEnded = false // server half open — a valid PP target
-			s.reqAuthority = "example.com"
+			s.authorityBuf = []byte("example.com")
 
 			if err := h.OnPushPromise(pushPromiseHeader(1), 2, validPromiseFor(t, "example.com"), 0); err != nil {
 				t.Errorf("%s parent: PUSH_PROMISE rejected (%v) — a parent with the server half still "+
