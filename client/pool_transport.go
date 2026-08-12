@@ -32,7 +32,7 @@ func newPoolTransportFromPool(p *Pool) *poolTransport {
 // PoolOptions.HealthCheckPeriod (default 30s). Newly arriving acquires
 // also skip dead conns via pickLeastLoaded's IsAlive() guard, so a
 // transient dead conn won't be picked between ticks.
-func (pt *poolTransport) openExchange(ctx context.Context) (protoStream, pushLookuper, func(), error) {
+func (pt *poolTransport) openExchange(ctx context.Context) (protoStream, pushLookuper, releaser, error) {
 	mc, err := pt.p.acquire(ctx)
 	if err != nil {
 		return nil, nil, nil, err
@@ -43,8 +43,9 @@ func (pt *poolTransport) openExchange(ctx context.Context) (protoStream, pushLoo
 		pt.p.release(mc)
 		return nil, nil, nil, serr
 	}
-	release := func() { pt.p.release(mc) }
-	return stream, cn, release, nil
+	// mc IS the releaser: it already exists on the heap and knows its pool,
+	// so no closure is built per request (#476).
+	return stream, cn, mc, nil
 }
 
 // close implements transport.close. Idempotent.

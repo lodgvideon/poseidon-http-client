@@ -49,6 +49,9 @@ type h3ManagedConn struct {
 	cl       h3Client
 	active   int
 	lastUsed time.Time
+
+	// p is the owning pool, so this struct can BE the releaser (#476).
+	p *h3Pool
 	// streamCap caches effectiveStreamCap(local, 0). Computed on dial completion
 	// and refreshed on each health-check tick. HTTP/3's per-conn cap is a pool
 	// policy (MaxStreamsPerConn); the peer's QUIC stream limit is enforced
@@ -483,7 +486,7 @@ func (p *h3Pool) dialOne() {
 		p.dialDoneCh <- h3DialResult{err: &DialError{Addr: p.addr, Err: err}}
 		return
 	}
-	p.dialDoneCh <- h3DialResult{mc: &h3ManagedConn{cl: cl, lastUsed: time.Now()}}
+	p.dialDoneCh <- h3DialResult{mc: &h3ManagedConn{cl: cl, lastUsed: time.Now(), p: p}}
 }
 
 // serveWaiters hands as many waiters as possible a live mc.
@@ -789,3 +792,6 @@ func (p *h3Pool) handleWarmup(rs *h3RunState, n int) {
 		go p.dialOne()
 	}
 }
+
+// release implements releaser: it hands this conn back to its pool.
+func (mc *h3ManagedConn) release() { mc.p.release(mc) }

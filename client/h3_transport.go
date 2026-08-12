@@ -414,12 +414,12 @@ type singleH3Conn struct {
 // shared client and returns a fresh h3Exchange. pushLookup is nil (HTTP/3 server
 // push is disabled — the client never sends MAX_PUSH_ID) and release is a no-op
 // (the client is shared, like an H2 conn; the exchange holds no per-request slot).
-func (s *singleH3Conn) openExchange(ctx context.Context) (protoStream, pushLookuper, func(), error) {
+func (s *singleH3Conn) openExchange(ctx context.Context) (protoStream, pushLookuper, releaser, error) {
 	cl, err := s.acquireClient(ctx)
 	if err != nil {
 		return nil, nil, nil, err
 	}
-	return getH3Exchange(cl), nil, func() {}, nil
+	return getH3Exchange(cl), nil, noRelease, nil
 }
 
 // acquireClient returns the cached h3Client, lazy-dialling one if needed. It

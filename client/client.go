@@ -647,8 +647,8 @@ func (c *Client) Do(ctx context.Context, req *Request, resp *Response) error {
 // Avoids heap-escaping the implicit struct: escape analysis confirmed via
 // -gcflags=-m that returning fields by value keeps them on the stack
 // (verified 2026-06-15 for the H2 hot path).
-func (c *Client) sendRequest(ctx context.Context, req *Request) (s protoStream, pushLookup pushLookuper, release func(), sendCut error, err error) {
-	s, pushLookup, release, err = c.tr.openExchange(ctx)
+func (c *Client) sendRequest(ctx context.Context, req *Request) (s protoStream, pushLookup pushLookuper, rel releaser, sendCut error, err error) {
+	s, pushLookup, rel, err = c.tr.openExchange(ctx)
 	if err != nil {
 		return nil, nil, nil, nil, err
 	}
@@ -661,7 +661,7 @@ func (c *Client) sendRequest(ctx context.Context, req *Request) (s protoStream, 
 	if hasTrailers(req) {
 		if _, verr := resolveTrailers(req); verr != nil {
 			_ = s.Close()
-			release()
+			rel.release()
 			return nil, nil, nil, nil, verr
 		}
 	}
@@ -674,7 +674,7 @@ func (c *Client) sendRequest(ctx context.Context, req *Request) (s protoStream, 
 		*sp = (*sp)[:0]
 		hdrSlicePool.Put(sp)
 		_ = s.Close()
-		release()
+		rel.release()
 		return nil, nil, nil, nil, err
 	}
 	*sp = (*sp)[:0]
@@ -709,7 +709,7 @@ func (c *Client) sendRequest(ctx context.Context, req *Request) (s protoStream, 
 		if err = writeRequestBody(ctx, s, req, !trailers); err != nil {
 			if !errors.Is(err, conn.ErrStreamClosed) {
 				_ = s.Close()
-				release()
+				rel.release()
 				return nil, nil, nil, nil, err
 			}
 			sendCut = err
@@ -717,7 +717,7 @@ func (c *Client) sendRequest(ctx context.Context, req *Request) (s protoStream, 
 			if err = writeRequestTrailers(ctx, s, req); err != nil {
 				if !errors.Is(err, conn.ErrStreamClosed) {
 					_ = s.Close()
-					release()
+					rel.release()
 					return nil, nil, nil, nil, err
 				}
 				sendCut = err
@@ -725,7 +725,7 @@ func (c *Client) sendRequest(ctx context.Context, req *Request) (s protoStream, 
 		}
 	}
 
-	return s, pushLookup, release, sendCut, nil
+	return s, pushLookup, rel, sendCut, nil
 }
 
 // preferSendCut picks which failure to report when the response path failed on
@@ -763,7 +763,7 @@ func (c *Client) do(ctx context.Context, req *Request, resp *Response) error {
 	if req.BodyMode == BodyStream {
 		if resp == nil {
 			_ = s.Close()
-			release()
+			release.release()
 			return fmt.Errorf("client: BodyStream requires a non-nil *Response")
 		}
 		if err := c.beginStreaming(ctx, s, release, sendCut, resp); err != nil {
@@ -790,7 +790,7 @@ func (c *Client) do(ctx context.Context, req *Request, resp *Response) error {
 
 	err = drainResponse(ctx, pushLookup, s, req, resp, c.pushHandler, c.maxDecompressedSize, c.maxResponseBodySize)
 	_ = s.Close()
-	release()
+	release.release()
 	return preferSendCut(err, sendCut)
 }
 

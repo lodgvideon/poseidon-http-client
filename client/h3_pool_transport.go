@@ -25,13 +25,14 @@ type h3PoolTransport struct {
 // idle. The comment here used to claim the two behaved "exactly" alike; they do
 // not, and a reader unifying the two release paths needs to know which one they
 // are looking at.
-func (pt *h3PoolTransport) openExchange(ctx context.Context) (protoStream, pushLookuper, func(), error) {
+func (pt *h3PoolTransport) openExchange(ctx context.Context) (protoStream, pushLookuper, releaser, error) {
 	mc, err := pt.p.acquire(ctx)
 	if err != nil {
 		return nil, nil, nil, err
 	}
-	release := func() { pt.p.release(mc) }
-	return getH3Exchange(mc.cl), nil, release, nil
+
+	// mc IS the releaser, so no closure is built per request (#476).
+	return getH3Exchange(mc.cl), nil, mc, nil
 }
 
 // close implements transport.close. Idempotent.

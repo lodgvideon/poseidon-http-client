@@ -20,7 +20,7 @@ type h1ManagedTransport struct {
 // As in h1PoolTransport, the transport-level release is a no-op and the keep-alive
 // verdict is threaded through h1Exchange.release instead — it is only known once
 // the exchange completes.
-func (mt *h1ManagedTransport) openExchange(ctx context.Context) (protoStream, pushLookuper, func(), error) {
+func (mt *h1ManagedTransport) openExchange(ctx context.Context) (protoStream, pushLookuper, releaser, error) {
 	c, release, err := mt.mp.acquire(ctx)
 	if err != nil {
 		return nil, nil, nil, err
@@ -32,7 +32,7 @@ func (mt *h1ManagedTransport) openExchange(ctx context.Context) (protoStream, pu
 	rel := func(keepAlive bool) {
 		once.Do(func() { release(keepAlive) })
 	}
-	return &h1Exchange{ex: c.NewExchange(), release: rel}, nil, func() {}, nil
+	return &h1Exchange{ex: c.NewExchange(), release: rel}, nil, noRelease, nil
 }
 
 // close implements transport.close. Idempotent.

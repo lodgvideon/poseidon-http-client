@@ -102,6 +102,10 @@ type managedConn struct {
 	active   int
 	lastUsed time.Time
 
+	// p is the owning pool, so this struct can BE the releaser rather than
+	// having one built around it per request (#476).
+	p *Pool
+
 	// streamCap caches effectiveStreamCap(local, peer). Computed when the
 	// dial completes and refreshed on every health-check tick so peer
 	// SETTINGS_MAX_CONCURRENT_STREAMS changes are picked up. Without this
@@ -625,7 +629,7 @@ func (p *Pool) dialOne() {
 		p.dialDoneCh <- dialResult{err: &DialError{Addr: p.addr, Err: err}}
 		return
 	}
-	p.dialDoneCh <- dialResult{mc: &managedConn{c: c, lastUsed: time.Now()}}
+	p.dialDoneCh <- dialResult{mc: &managedConn{c: c, lastUsed: time.Now(), p: p}}
 }
 
 // serveWaiters hands as many waiters as possible a live mc.
@@ -985,3 +989,6 @@ func (p *Pool) handleWarmup(rs *runState, n int) {
 		go p.dialOne()
 	}
 }
+
+// release implements releaser: it hands this conn back to its pool.
+func (mc *managedConn) release() { mc.p.release(mc) }

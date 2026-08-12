@@ -22,7 +22,7 @@ type h1PoolTransport struct {
 // http1.Exchange.KeepAlive() when the body ends, and Close passes false for every
 // error/abort path so a poisoned conn is discarded rather than pooled. This
 // mirrors how h1singleConn drives its in-flight slot.
-func (pt *h1PoolTransport) openExchange(ctx context.Context) (protoStream, pushLookuper, func(), error) {
+func (pt *h1PoolTransport) openExchange(ctx context.Context) (protoStream, pushLookuper, releaser, error) {
 	mc, err := pt.p.acquire(ctx)
 	if err != nil {
 		return nil, nil, nil, err
@@ -35,7 +35,7 @@ func (pt *h1PoolTransport) openExchange(ctx context.Context) (protoStream, pushL
 	release := func(keepAlive bool) {
 		once.Do(func() { pt.p.release(mc, keepAlive) })
 	}
-	return &h1Exchange{ex: mc.c.NewExchange(), release: release}, nil, func() {}, nil
+	return &h1Exchange{ex: mc.c.NewExchange(), release: release}, nil, noRelease, nil
 }
 
 // close implements transport.close. Idempotent.

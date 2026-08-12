@@ -84,7 +84,7 @@ func TestH1SingleConn_CloseIsObservable(t *testing.T) {
 	if err != nil {
 		t.Fatalf("openExchange: %v", err)
 	}
-	release()
+	release.release()
 	_ = s.close()
 
 	if got := r.metrics.Counters.ConnsClosed.Load(); got == 0 {
