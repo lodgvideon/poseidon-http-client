@@ -115,14 +115,10 @@ type connOps interface {
 	bumpFramesReceived()
 }
 
-// streamLookup is retained as the legacy alias for tests that only
-// fake the lookup behavior; production wiring uses connOps.
-type streamLookup = connOps
-
 // connHandler bridges Phase A's frame.Handler interface into per-stream
 // StreamEvent pushes.
 type connHandler struct {
-	streams streamLookup
+	streams connOps
 	dec     *hpack.Decoder
 
 	// scratch holds a slice of decoded HeaderField values for the current
@@ -159,7 +155,7 @@ type connHandler struct {
 // advertised. Generous for legitimate headers; bounds CONTINUATION floods.
 const defaultMaxHeaderBytes = 8 << 20 // 8 MiB
 
-func newConnHandler(streams streamLookup, dec *hpack.Decoder) *connHandler {
+func newConnHandler(streams connOps, dec *hpack.Decoder) *connHandler {
 	return &connHandler{
 		streams:        streams,
 		dec:            dec,

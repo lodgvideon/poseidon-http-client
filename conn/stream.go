@@ -580,17 +580,6 @@ func (s *Stream) hasRequestAuthority(authority []byte) bool {
 	return bytes.Equal(s.authorityBuf, authority)
 }
 
-// push delivers an event from the reader goroutine. Non-blocking under
-// the channel's capacity; documented as part of the public contract.
-// On overflow: marks stream closed, dispatches the RST send to a
-// background goroutine (so the reader is never blocked on wmu), and
-// signals via resetSignal so a blocked Recv unblocks immediately.
-func (s *Stream) push(e StreamEvent) bool {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.pushLocked(e)
-}
-
 // pushIfID is push gated on the stream still being the one the caller looked up.
 //
 // A *Stream is pooled, so a caller that resolved it by id and then did any work
