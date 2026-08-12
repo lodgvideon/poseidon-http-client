@@ -30,7 +30,6 @@ var (
 	ErrFrameTooLarge       = errors.New("poseidon/frame: frame exceeds SETTINGS_MAX_FRAME_SIZE")
 	ErrInvalidStreamID     = errors.New("poseidon/frame: stream id violates RFC 7540 rules")
 	ErrInvalidPadding      = errors.New("poseidon/frame: pad length exceeds payload")
-	ErrUnknownFrameType    = errors.New("poseidon/frame: unknown frame type")
 	ErrSettingsAck         = errors.New("poseidon/frame: SETTINGS ACK with non-empty payload")
 	ErrPriorityWrongLength = errors.New("poseidon/frame: PRIORITY frame length != 5")
 	ErrRSTWrongLength      = errors.New("poseidon/frame: RST_STREAM frame length != 4")

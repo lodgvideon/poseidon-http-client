@@ -13,7 +13,6 @@ func TestSentinelsAreDistinct(t *testing.T) {
 		ErrTooManyStreams,
 		ErrConnClosed,
 		ErrStreamClosed,
-		ErrFlowControlExhausted,
 		ErrUnexpectedPushPromise,
 	}
 	for i, a := range all {

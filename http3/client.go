@@ -128,9 +128,13 @@ const (
 	H3MessageError         uint64 = 0x010e // H3_MESSAGE_ERROR
 
 	// QPACK error codes (RFC 9204 §6), carried in the same HTTP/3 CONNECTION_CLOSE.
-	H3QpackDecompressionFailed uint64 = 0x0200 // QPACK_DECOMPRESSION_FAILED
-	H3QpackEncoderStreamError  uint64 = 0x0201 // QPACK_ENCODER_STREAM_ERROR
-	H3QpackDecoderStreamError  uint64 = 0x0202 // QPACK_DECODER_STREAM_ERROR
+	// Aliases, not copies. The same three wire values were spelled out here and
+	// again in qpack/errors.go, which is two names per constant and a drift
+	// waiting to happen — the qpack trio had no references at all, so the copy
+	// that was actually used could have moved without the other noticing.
+	H3QpackDecompressionFailed = qpack.ErrCodeDecompressionFailed
+	H3QpackEncoderStreamError  = qpack.ErrCodeEncoderStreamError
+	H3QpackDecoderStreamError  = qpack.ErrCodeDecoderStreamError
 )
 
 // maxInterimResponses bounds the 1xx informational responses buffered before the

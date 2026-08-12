@@ -5,7 +5,6 @@ import (
 	"context"
 	"encoding/binary"
 	"errors"
-	"io"
 	"net"
 	"strings"
 	"sync"
@@ -1960,7 +1959,7 @@ func (c *Conn) readerLoop() {
 				continue
 			}
 			c.emitConnGoAwayIfTyped(err)
-			c.shutdownStreams(err)
+			c.shutdownStreams()
 			// RFC 9113 §5.4.1: after sending a GOAWAY for an error condition the
 			// endpoint must close the TCP connection, so the peer is not left with a
 			// half-alive socket. emitConnGoAwayIfTyped writes a GOAWAY only for a
@@ -2055,7 +2054,7 @@ func (c *Conn) emitConnGoAwayIfTyped(err error) {
 	ce.Last = last
 }
 
-func (c *Conn) shutdownStreams(reason error) {
+func (c *Conn) shutdownStreams() {
 	c.smu.Lock()
 	defer c.smu.Unlock()
 	for _, s := range c.streams {
@@ -2086,9 +2085,6 @@ func (c *Conn) shutdownStreams(reason error) {
 		c.fcOutCond.Broadcast()
 	}
 	c.fcOutMu.Unlock()
-	if errors.Is(reason, io.EOF) {
-		return
-	}
 }
 
 // wakeSendWaiters broadcasts the outbound flow-control condition so every writer
