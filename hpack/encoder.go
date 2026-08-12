@@ -4,6 +4,41 @@ import "bytes"
 
 // Encoder encodes HPACK header blocks. Holds a dynamic table per HTTP/2
 // connection. NOT goroutine-safe.
+//
+// # String literals are never Huffman-coded, deliberately
+//
+// This is policy, not an oversight, and it is the one place the two codecs in
+// this repository disagree on purpose: qpack applies a shorter-wins heuristic
+// (qpack/encoder.go), hpack always emits plain literals. RFC 7541 §5.2 makes
+// Huffman optional for a sender, so both are conformant, and the decoder here
+// accepts either — the H bit is honoured on the way in.
+//
+// The trade was measured rather than argued, per request on a WARM connection,
+// which is where a load generator spends essentially all of its time. See
+// huffman_policy_test.go; re-run it before reopening this.
+//
+//	fixed path      0 bytes saved   — every field is an index, nothing is literal
+//	varying :path   15 bytes saved  — 3.1ns -> 105ns per request
+//	cold, 1st req   95 bytes saved  — 27ns -> 727ns, once per connection
+//
+// The 26% saving on literals is real; what makes it not worth taking is where
+// those bytes sit. #438 profiled this exact workload: syscalls are 61.7% of CPU
+// (socket writes alone 44.2%), the whole HPACK encode is 1.4%, and a warm
+// 7-field request set encodes to 7 bytes because everything is indexed. Fewer
+// bytes per write does not remove a write, and the write count is the cost —
+// the same reason precoded static header blocks were measured and refuted in
+// that issue.
+//
+// Two things would overturn this, and neither is hypothetical:
+//
+//   - a bandwidth-constrained link, where header bytes stop being free;
+//   - fidelity, if the point is to exercise the server's Huffman decoder the
+//     way real clients do. That argues for an encoder option, not a new default.
+//
+// The mechanism is already there: encodeStringLiteral takes a huffman bool and
+// HuffmanEncodedLen gives the oracle, so adopting qpack's heuristic is a
+// two-line change that stays allocation-free (both benchmarks above are
+// 0 allocs/op).
 type Encoder struct {
 	dt          *dynamicTable
 	peerMaxSize uint32 // most recent SETTINGS_HEADER_TABLE_SIZE from peer
