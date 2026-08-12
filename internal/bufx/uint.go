@@ -1,9 +1,14 @@
-// Package bytesx provides private byte-level helpers shared across the wire
-// codecs: big-endian fixed-width uint24/uint31 (RFC 7540, used by frame), the
-// QUIC variable-length-integer codec (RFC 9000 §16, used by quic and http3), a
-// sync.Pool-backed byte-buffer pool, and RFC 7540 §6.1 padding stripping. Not
-// part of the public API. (hpack does not import this package — it carries its
-// own prefixed-integer codec.)
+// Package bufx provides the private byte-level helpers of the HTTP/2 wire
+// codec: big-endian fixed-width uint24/uint31 (RFC 7540 §4.1), RFC 7540 §6.1
+// padding stripping, and a sync.Pool-backed read-buffer pool. Used by frame
+// only, and not part of the public API. (hpack does not import it — it carries
+// its own prefixed-integer codec.)
+//
+// The QUIC variable-length-integer codec is NOT here; it lives in bytesx, whose
+// consumers are quic and http3. The two sets were split because they had no
+// overlapping consumers, and this comment used to name that package and claim
+// its codec — worth stating plainly, because "which package has the varints" is
+// exactly what a reader comes here to settle.
 package bufx
 
 // ReadUint24 reads a big-endian 24-bit unsigned integer from b[:3].
