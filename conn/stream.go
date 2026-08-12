@@ -495,14 +495,6 @@ func (s *Stream) resetForPoolLocked() {
 // ID returns the HTTP/2 stream identifier.
 func (s *Stream) ID() uint32 { return s.id }
 
-// markRemoteEnd is called by the connection-level frame.Handler when
-// END_STREAM is observed for this stream.
-func (s *Stream) markRemoteEnd() {
-	s.mu.Lock()
-	s.remoteEnded = true
-	s.mu.Unlock()
-}
-
 // deliverEnd delivers e and, when end is true, marks the remote side ended —
 // both under one s.mu hold.
 //

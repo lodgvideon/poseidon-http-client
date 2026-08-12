@@ -97,15 +97,3 @@ func (rl *rateLimiter) Take(ctx context.Context) error {
 		}
 	}
 }
-
-// Allow reports whether a token is available right now (non-blocking).
-func (rl *rateLimiter) Allow() bool {
-	rl.mu.Lock()
-	defer rl.mu.Unlock()
-	rl.refillLocked()
-	if rl.tokens >= 1 {
-		rl.tokens--
-		return true
-	}
-	return false
-}

@@ -179,7 +179,11 @@ func TestStream_Close_SendsRSTOnce(t *testing.T) {
 
 func TestStream_Close_AfterEndStream_DoesNotSendRST(t *testing.T) {
 	s, w := newTestStream(8)
-	s.markRemoteEnd() // simulate END_STREAM observed
+	// Simulate END_STREAM observed. The field is set directly, as every other
+	// test that needs this state does: the production path (deliverEnd) also
+	// enqueues an event, and this test wants the flag and nothing else. Nothing
+	// else touches s yet, so the write needs no lock.
+	s.remoteEnded = true
 	if err := s.ref().SendHeaders(context.Background(), nil, true); err != nil {
 		t.Fatalf("SendHeaders: %v", err)
 	}
