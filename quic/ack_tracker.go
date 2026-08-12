@@ -17,7 +17,16 @@ const maxAckRanges = 32
 // descending by upper bound, non-overlapping and non-adjacent. One tracker per
 // space (Initial, Handshake, Application).
 type ackTracker struct {
-	ranges  []pnRange
+	ranges []pnRange
+	// extra is buildACK's scratch for the ACK Range section, reused across calls.
+	// It used to start from nil on every ACK, which allocated once per ACK sent —
+	// 65,153 objects, 9.81% of the HTTP/3 arm (#475). Its length is bounded by
+	// ranges, which already lives here, so the scratch can too.
+	//
+	// Safe to reuse because AppendAck only reads it to encode varints into dst and
+	// keeps no reference, and because each packet-number space has its own
+	// tracker (Conn.acks is [numSpaces]ackTracker), so two spaces cannot share it.
+	extra   []AckRange
 	pending bool // an ack-eliciting packet has been received but not yet acked
 	// Deferred-ACK state (RFC 9000 §13.2.1), consumed only for the Application
 	// (1-RTT) space, where an ACK may be delayed up to max_ack_delay. immediate is
@@ -165,14 +174,16 @@ func (a *ackTracker) buildACK(dst []byte, ackDelay uint64) []byte {
 	}
 	largest := a.ranges[0].hi
 	firstRange := a.ranges[0].hi - a.ranges[0].lo
-	var extra []AckRange
+	// Truncated, not re-made: the count written on the wire comes from len(extra),
+	// so a shorter ACK than the last one cannot carry stale ranges.
+	a.extra = a.extra[:0]
 	for i := 1; i < len(a.ranges); i++ {
 		// Gap = unacknowledged packets between this range and the previous one
 		// (RFC 9000 §19.3.1): (prev.lo - 1) - (cur.hi + 1).
 		gap := a.ranges[i-1].lo - a.ranges[i].hi - 2
-		extra = append(extra, AckRange{Gap: gap, Length: a.ranges[i].hi - a.ranges[i].lo})
+		a.extra = append(a.extra, AckRange{Gap: gap, Length: a.ranges[i].hi - a.ranges[i].lo})
 	}
-	return AppendAck(dst, largest, ackDelay, firstRange, extra)
+	return AppendAck(dst, largest, ackDelay, firstRange, a.extra)
 }
 
 // appendACK builds the ACK frame and marks it sent (acked()), the common path when
