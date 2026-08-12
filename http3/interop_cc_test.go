@@ -66,6 +66,12 @@ func TestInterop_CCGoodput(t *testing.T) {
 	if cc == "" {
 		cc = "newreno(default)"
 	}
+	if uploadPath() == "" {
+		t.Skip("H3_CC_PATH is unset: this benchmark needs a peer that consumes the " +
+			"request body before responding, and the interop peers do not. Run it " +
+			"through test/integration/http3/docker-compose.cc.yml, which provides the " +
+			"sink and sets the path (#564).")
+	}
 	size := ccTransferBytes()
 	body := make([]byte, size)
 	for i := range body { // not all-zero: a compressing middlebox would flatter us
@@ -124,17 +130,14 @@ func doUpload(t *testing.T, client *Client, host string, body []byte) (*Response
 	})
 }
 
-// uploadPath is the target the measured upload is sent to. It must be an
-// endpoint that CONSUMES the request body before responding, or the timer
+// uploadPath is the target the measured upload is sent to. It MUST be an
+// endpoint that consumes the request body before responding, or the timer
 // closes on a response that arrived while the payload was still buffered and
-// the measurement is of a header round trip (#564: "/" is a canned Caddy
-// `respond`, and elapsed came out independent of payload size).
+// what gets measured is a header round trip (#564).
 //
-// Overridable so a peer without the sink route can still be pointed somewhere
-// that drains, but the default is the route that does.
-func uploadPath() string {
-	if p := os.Getenv("H3_CC_PATH"); p != "" {
-		return p
-	}
-	return "/sink"
-}
+// There is no default. This benchmark is only meaningful against a draining
+// peer, and the interop matrix's peers do not drain — Caddy's "/" is a canned
+// `respond`, and nginx and aioquic have no such route at all. Running it there
+// is how it passed vacuously against three servers at once for as long as it
+// existed. The CC harness sets H3_CC_PATH; everywhere else the test skips.
+func uploadPath() string { return os.Getenv("H3_CC_PATH") }
