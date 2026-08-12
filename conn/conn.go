@@ -893,14 +893,14 @@ func (c *Conn) flushNow() error {
 // Caller may hold c.wmu; this takes c.psMu (the established wmu→psMu order).
 func (c *Conn) maxOutFrameSize() int {
 	c.psMu.RLock()
-	peerMax := settingValue(c.peerSettings, frame.SettingMaxFrameSize, 16384)
+	peerMax := settingValue(c.peerSettings, frame.SettingMaxFrameSize, DefaultMaxFrameSize)
 	c.psMu.RUnlock()
 	maxFrame := int(peerMax)
 	if ourMax := int(c.opts.Settings.MaxFrameSize); ourMax < maxFrame {
 		maxFrame = ourMax
 	}
 	if maxFrame <= 0 {
-		maxFrame = 16384
+		maxFrame = int(frameSizeFloor)
 	}
 	return maxFrame
 }
@@ -1364,11 +1364,10 @@ func (c *Conn) acquireSendCredits(ctx context.Context, s *Stream, wantGen uint64
 // would push us past that, the stream is RST'd or the connection is
 // closed with FLOW_CONTROL_ERROR depending on scope.
 func (c *Conn) onWindowUpdate(streamID uint32, increment uint32) error {
-	const maxWindow = int32(1<<31 - 1)
 	if streamID == 0 {
 		c.fcOutMu.Lock()
 		newVal := int64(c.peerConnSendWindow) + int64(increment)
-		if newVal > int64(maxWindow) {
+		if newVal > maxFlowWindow {
 			c.fcOutMu.Unlock()
 			return &ConnError{Code: frame.ErrCodeFlowControlError, Reason: "WINDOW_UPDATE overflowed connection send window"}
 		}
@@ -1389,7 +1388,7 @@ func (c *Conn) onWindowUpdate(streamID uint32, increment uint32) error {
 	}
 	s.mu.Lock()
 	newVal := int64(s.sendWindow) + int64(increment)
-	if newVal > int64(maxWindow) {
+	if newVal > maxFlowWindow {
 		s.mu.Unlock()
 		return &StreamError{StreamID: streamID, Code: frame.ErrCodeFlowControlError}
 	}
@@ -1406,10 +1405,22 @@ func (c *Conn) onWindowUpdate(streamID uint32, increment uint32) error {
 // only the connection-scoped knobs (HPACK table size) need to be
 // propagated; the per-stream INITIAL_WINDOW_SIZE will be picked up
 // when the first stream calls writeHeaders.
-// maxInitialWindowSize is the RFC 7540 §6.9.1 ceiling on a flow-control window,
-// 2^31-1. §6.5.2 makes a SETTINGS_INITIAL_WINDOW_SIZE above it a connection error
-// of type FLOW_CONTROL_ERROR.
-const maxInitialWindowSize = int64(1)<<31 - 1
+// maxFlowWindow is the RFC 7540 §6.9.1 ceiling on a flow-control window, 2^31-1.
+// Exceeding it is a FLOW_CONTROL_ERROR on every path that can: §6.5.2 for a
+// SETTINGS_INITIAL_WINDOW_SIZE above it, §6.9.1 for a WINDOW_UPDATE that would
+// push a window past it, §6.9.2 for the retroactive INITIAL_WINDOW_SIZE delta.
+//
+// One declaration because there used to be three, and two of them were both
+// named maxWindow in this same file with DIFFERENT types — int32 in
+// onWindowUpdate, int64 in applyPeerSettings. That was only ever a reading
+// hazard rather than a bug (every comparison widens to int64 before testing, so
+// the int32 spelling could not truncate an overflow), but a reader has to prove
+// that to themselves at each site, and a future edit that dropped a widening
+// would be invisible.
+//
+// int64 on purpose: a window is held as int32, so the sum being checked has to be
+// computed in a wider type or the overflow it is looking for happens first.
+const maxFlowWindow = int64(1)<<31 - 1
 
 // DefaultMaxFrameSize is SETTINGS_MAX_FRAME_SIZE's initial value (RFC 9113
 // §6.5.2), which is what a connection advertises and assumes of a peer until a
@@ -1482,7 +1493,7 @@ func (c *Conn) applyInitialPeerSettings(peer frame.SettingsParams) error {
 			// deeply negative. acquireSendCredits' `avail > padOverhead` is then
 			// never true, and a body-bearing request blocks in fcOutCond.Wait
 			// forever (with a non-cancellable context) instead of failing fast.
-			if int64(p.Value) > maxInitialWindowSize {
+			if int64(p.Value) > maxFlowWindow {
 				return &ConnError{Code: frame.ErrCodeFlowControlError, Reason: "SETTINGS_INITIAL_WINDOW_SIZE exceeds 2^31-1"}
 			}
 		}
@@ -1498,7 +1509,6 @@ func (c *Conn) applyInitialPeerSettings(peer frame.SettingsParams) error {
 // INITIAL_WINDOW_SIZE delta would push any stream's send window past
 // 2^31-1 (RFC 7540 §6.9.2).
 func (c *Conn) applyPeerSettings(s frame.SettingsParams) error {
-	const maxWindow = int64(1<<31 - 1)
 
 	// Reject ENABLE_PUSH != 0 and an out-of-range MAX_FRAME_SIZE (both connection
 	// errors of type PROTOCOL_ERROR) before any value is merged or applied.
@@ -1526,7 +1536,7 @@ func (c *Conn) applyPeerSettings(s frame.SettingsParams) error {
 		// FLOW_CONTROL_ERROR, and the HPACK table resize deferred past psMu.
 		switch p.ID {
 		case frame.SettingInitialWindowSize:
-			if int64(p.Value) > maxWindow {
+			if int64(p.Value) > maxFlowWindow {
 				c.psMu.Unlock()
 				return &ConnError{Code: frame.ErrCodeFlowControlError, Reason: "SETTINGS_INITIAL_WINDOW_SIZE exceeds 2^31-1"}
 			}
@@ -1545,7 +1555,7 @@ func (c *Conn) applyPeerSettings(s frame.SettingsParams) error {
 		for _, st := range c.streams {
 			st.mu.Lock()
 			newWin := int64(st.sendWindow) + delta
-			if newWin > maxWindow {
+			if newWin > maxFlowWindow {
 				st.mu.Unlock()
 				overflow = true
 				break
