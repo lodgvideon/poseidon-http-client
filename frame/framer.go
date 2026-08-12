@@ -43,7 +43,7 @@ type Framer struct {
 	w io.Writer
 	r io.Reader
 
-	maxReadFrameSize uint32
+	maxFrameSize uint32
 
 	readBuf    []byte
 	readBufPtr *[]byte // pool handle (nil after Close)
@@ -75,11 +75,11 @@ type Framer struct {
 func NewFramer(w io.Writer, r io.Reader) *Framer {
 	rb := bufx.GetReadBuf(int(defaultMaxFrameSize) + FrameHeaderSize)
 	return &Framer{
-		w:                w,
-		r:                r,
-		maxReadFrameSize: defaultMaxFrameSize,
-		readBuf:          *rb,
-		readBufPtr:       rb,
+		w:            w,
+		r:            r,
+		maxFrameSize: defaultMaxFrameSize,
+		readBuf:      *rb,
+		readBufPtr:   rb,
 	}
 }
 
@@ -96,12 +96,22 @@ func (f *Framer) Close() {
 	f.readBuf = nil
 }
 
-// SetMaxReadFrameSize sets the maximum frame payload length the Framer
-// will accept on read AND emit on write. Per RFC 7540 §6.5.2 the
-// receiver advertises this via SETTINGS_MAX_FRAME_SIZE; the SENDER
-// must independently respect the PEER's advertised value, which lives
-// outside the framer (callers track peer settings separately).
-func (f *Framer) SetMaxReadFrameSize(n uint32) { f.maxReadFrameSize = n }
+// SetMaxFrameSize sets the maximum frame payload length the Framer will accept
+// on read AND emit on write. Per RFC 7540 §6.5.2 the receiver advertises this
+// via SETTINGS_MAX_FRAME_SIZE; the SENDER must independently respect the PEER's
+// advertised value, which lives outside the framer (callers track peer settings
+// separately).
+//
+// It was SetMaxReadFrameSize, and the doc above spent its first sentence
+// explaining the name away: the limit is checked at eight write sites as well as
+// on read, so "Read" named half of what it does. That alias is kept below.
+func (f *Framer) SetMaxFrameSize(n uint32) { f.maxFrameSize = n }
+
+// SetMaxReadFrameSize sets the maximum frame payload length for reads and
+// writes alike.
+//
+// Deprecated: the limit was never read-only. Use SetMaxFrameSize.
+func (f *Framer) SetMaxReadFrameSize(n uint32) { f.SetMaxFrameSize(n) }
 
 // SetReadBuffer overrides the internal read buffer (useful for pooling).
 func (f *Framer) SetReadBuffer(buf []byte) { f.readBuf = buf }
@@ -123,7 +133,7 @@ func (f *Framer) writeHeader(h FrameHeader) error {
 }
 
 func (f *Framer) writeFrame(h FrameHeader, payload []byte) error {
-	if h.Length > f.maxReadFrameSize {
+	if h.Length > f.maxFrameSize {
 		return ErrFrameTooLarge
 	}
 	if err := f.writeHeader(h); err != nil {
@@ -179,7 +189,7 @@ func (f *Framer) WriteDataV(streamID uint32, endStream bool, bufs [][]byte) erro
 	if err != nil {
 		return err
 	}
-	if total > int(f.maxReadFrameSize) {
+	if total > int(f.maxFrameSize) {
 		return ErrFrameTooLarge
 	}
 	flags := Flags(0)
@@ -208,7 +218,7 @@ func (f *Framer) WriteDataVPadded(streamID uint32, endStream bool, bufs [][]byte
 		flags |= FlagDataEndStream
 	}
 	totalLen := 1 + total + int(padLen)
-	if totalLen > int(f.maxReadFrameSize) {
+	if totalLen > int(f.maxFrameSize) {
 		return ErrFrameTooLarge
 	}
 	if err := f.writeHeader(FrameHeader{
@@ -276,7 +286,7 @@ func (f *Framer) WriteDataPadded(streamID uint32, endStream bool, data []byte, p
 		flags |= FlagDataEndStream
 	}
 	totalLen := uint32(1 + len(data) + int(padLen))
-	if totalLen > f.maxReadFrameSize {
+	if totalLen > f.maxFrameSize {
 		return ErrFrameTooLarge
 	}
 	if err := f.writeHeader(FrameHeader{Length: totalLen, Type: FrameData, Flags: flags, StreamID: streamID}); err != nil {
@@ -340,7 +350,7 @@ func (f *Framer) WriteHeaders(p WriteHeadersParams) error {
 	if p.Priority != nil {
 		totalLen += 5
 	}
-	if totalLen > f.maxReadFrameSize {
+	if totalLen > f.maxFrameSize {
 		return ErrFrameTooLarge
 	}
 	// Fast path: no padding, no priority, header+payload fit in f.writeBuf.
@@ -489,7 +499,7 @@ func (f *Framer) WritePushPromise(streamID, promisedID uint32, blockFragment []b
 	if padLen > 0 {
 		totalLen++
 	}
-	if totalLen > f.maxReadFrameSize {
+	if totalLen > f.maxFrameSize {
 		return ErrFrameTooLarge
 	}
 	if err := f.writeHeader(FrameHeader{Length: totalLen, Type: FramePushPromise, Flags: flags, StreamID: streamID}); err != nil {
@@ -538,7 +548,7 @@ func (f *Framer) WritePing(ack bool, data [8]byte) error {
 // is written directly via the underlying io.Writer without copying.
 func (f *Framer) WriteGoAway(lastStreamID uint32, code ErrCode, debug []byte) error {
 	totalLen := uint32(8 + len(debug))
-	if totalLen > f.maxReadFrameSize {
+	if totalLen > f.maxFrameSize {
 		return ErrFrameTooLarge
 	}
 	bufx.WriteUint31(f.smallBuf[:4], lastStreamID)
@@ -586,7 +596,7 @@ func (f *Framer) WriteAltSvc(streamID uint32, entries []AltSvcEntry) error {
 	buf = append(buf, byte(len(e.Origin)>>8), byte(len(e.Origin)))
 	buf = append(buf, e.Origin...)
 	buf = append(buf, e.AltValue...)
-	if uint32(len(buf)) > f.maxReadFrameSize {
+	if uint32(len(buf)) > f.maxFrameSize {
 		return ErrFrameTooLarge
 	}
 	return f.writeFrame(FrameHeader{Length: uint32(len(buf)), Type: FrameAltSvc, StreamID: streamID}, buf)
@@ -638,7 +648,7 @@ func (f *Framer) ReadFrame(ctx context.Context, h Handler) (FrameHeader, error) 
 	if err != nil {
 		return FrameHeader{}, err
 	}
-	if fh.Length > f.maxReadFrameSize {
+	if fh.Length > f.maxFrameSize {
 		return fh, ErrFrameTooLarge
 	}
 	if cap(f.readBuf) < int(fh.Length) {

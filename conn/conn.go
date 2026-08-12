@@ -283,7 +283,7 @@ func NewClientConn(ctx context.Context, transport net.Conn, opts ConnOptions) (*
 	// Sync Framer read limit to our advertised MaxFrameSize. Default Framer
 	// cap is 16384; peers honouring our SETTINGS may send frames up to the
 	// advertised value, which would be rejected as ErrFrameTooLarge otherwise.
-	c.fr.SetMaxReadFrameSize(opts.Settings.MaxFrameSize)
+	c.fr.SetMaxFrameSize(opts.Settings.MaxFrameSize)
 	// Enforce our advertised SETTINGS_MAX_HEADER_LIST_SIZE on the decode path.
 	// This bounds the decompressed field list (HPACK expansion bomb defense,
 	// RFC 7540 §10.5.1); the Framer/handler byte caps only bound the compressed

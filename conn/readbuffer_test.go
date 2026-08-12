@@ -91,7 +91,7 @@ func countReadSyscalls(t *testing.T, nframes int, buffered bool) int64 {
 		r = bufio.NewReaderSize(counter, readBufferSize)
 	}
 	cf := frame.NewFramer(io.Discard, r)
-	cf.SetMaxReadFrameSize(1 << 20)
+	cf.SetMaxFrameSize(1 << 20)
 
 	select {
 	case <-ready:
