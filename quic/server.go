@@ -3,7 +3,6 @@ package quic
 import (
 	"context"
 	"crypto/tls"
-	"errors"
 	"time"
 )
 
@@ -13,10 +12,6 @@ import (
 // handshake primitives. AcceptInitial is the first step a server takes for an
 // inbound connection: it turns a client's first datagram into the ClientHello
 // and connection IDs needed to start a server-side handshake (NewServerHandshake).
-
-// ErrNotInitial is returned by AcceptInitial when the datagram does not begin
-// with a QUIC v1 Initial packet.
-var ErrNotInitial = errors.New("quic: datagram is not an Initial packet")
 
 // ClientInitial is what a server extracts from a client's first Initial packet
 // (RFC 9000 §17.2.2): the client's connection IDs, any address-validation token,
@@ -351,7 +346,7 @@ func (f *ServerFlight) HandleClientHandshake(cryptoData []byte) error {
 // handshake is assumed already acknowledged; see docs/QUIC_SERVER_DESIGN.md.
 func NewServerConn(pc PacketConn, f *ServerFlight, clientDCID, clientSCID []byte) (*Conn, error) {
 	if f == nil || !f.Complete {
-		return nil, errors.New("quic: server handshake not complete")
+		return nil, ErrServerFlightIncomplete
 	}
 	peer, err := ParseTransportParams(f.PeerTransportParams)
 	if err != nil {

@@ -177,3 +177,16 @@ var ErrAEADLimit = errors.New("quic: AEAD usage limit reached")
 // connection (e.g. a CONNECTION_CLOSE for a TLS alert) before the handshake
 // completes.
 var ErrHandshakeClosed = errors.New("quic: connection closed during handshake")
+
+// ErrNoClientHello is returned when the TLS handshake did not produce a
+// ClientHello to send (an internal invariant failure).
+var ErrNoClientHello = errors.New("quic: handshake produced no ClientHello")
+
+// ErrNotInitial is returned by AcceptInitial when the datagram does not begin
+// with a QUIC v1 Initial packet.
+var ErrNotInitial = errors.New("quic: datagram is not an Initial packet")
+
+// ErrServerFlightIncomplete is returned by NewServerConn when the ServerFlight
+// it is handed is nil or has not finished the handshake, so there are no 1-RTT
+// keys to seed the connection with.
+var ErrServerFlightIncomplete = errors.New("quic: server handshake not complete")
