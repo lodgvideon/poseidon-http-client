@@ -447,10 +447,12 @@ func (f *Framer) WriteRSTStream(streamID uint32, code ErrCode) error {
 // bytes = 96 bytes — fits comfortably below the heap-escape threshold
 // for a same-package call).
 func (f *Framer) WriteSettings(s SettingsParams) error {
-	if s.N > 16 {
+	if s.N > maxSettingsPairs {
 		return ErrSettingsLength
 	}
-	var scratch [96]byte
+	// Sized from the same two constants the bound above uses, so the array cannot
+	// be outgrown by a larger Pairs without the compiler resizing it too.
+	var scratch [maxSettingsPairs * settingsPairWireSize]byte
 	off := 0
 	for i := 0; i < s.N; i++ {
 		p := s.Pairs[i]
@@ -460,7 +462,7 @@ func (f *Framer) WriteSettings(s SettingsParams) error {
 		scratch[off+3] = byte(p.Value >> 16)
 		scratch[off+4] = byte(p.Value >> 8)
 		scratch[off+5] = byte(p.Value)
-		off += 6
+		off += settingsPairWireSize
 	}
 	payload := scratch[:off]
 	return f.writeFrame(FrameHeader{Length: uint32(len(payload)), Type: FrameSettings, StreamID: 0}, payload)

@@ -74,13 +74,33 @@ type SettingPair struct {
 	Value uint32
 }
 
+// maxSettingsPairs bounds SettingsParams.Pairs, and settingsPairWireSize is what
+// one pair costs on the wire — a 16-bit identifier and a 32-bit value (RFC 7540
+// §6.5.1).
+//
+// Named because WriteSettings sizes its scratch array from their product. Both
+// used to be literals in two files, 16 here and [96]byte there, with nothing
+// saying 96 was 16*6. Raising the array without noticing the second one is an
+// index-out-of-range in a wire writer; tying them together makes that
+// unexpressible rather than a thing to remember.
+const (
+	maxSettingsPairs     = 16
+	settingsPairWireSize = 6
+)
+
 // SettingsParams holds the current value of each DEFINED SETTINGS parameter
-// (zero-alloc, no map). Sized to the number of identifiers this implementation
-// understands (7), not to any wire limit: RFC 7540 §6.5 says a receiver keeps
-// only "the current value of its parameters", so the decoder stores one slot per
-// identifier with the last value seen, never one slot per wire occurrence.
+// (zero-alloc, no map), NOT one slot per wire occurrence: RFC 7540 §6.5 says a
+// receiver keeps only "the current value of its parameters", so the decoder
+// stores one slot per identifier with the last value seen.
+//
+// N is therefore bounded by the number of identifiers this implementation
+// understands — seven today (0x1-0x6 and RFC 8441's 0x8) — and never by how many
+// parameters, repeats included, a peer chooses to send. Pairs is
+// maxSettingsPairs so that adding an identifier does not need this type resized;
+// the comment here used to claim the array was sized to the identifier count,
+// which it never was.
 type SettingsParams struct {
-	Pairs [16]SettingPair
+	Pairs [maxSettingsPairs]SettingPair
 	N     int
 }
 
