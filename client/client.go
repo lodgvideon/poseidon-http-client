@@ -730,11 +730,14 @@ func (c *Client) sendRequest(ctx context.Context, req *Request) (s protoStream, 
 
 // preferSendCut picks which failure to report when the response path failed on
 // a request whose upload had already been cut short. sendCut came first and
-// names the real cause; respErr may be conn's own forged
-// RST_STREAM(REFUSED_STREAM) from an event-buffer overflow, which the retry
-// layer reads as "the server did not process this request" and would replay.
-// A nil respErr means the response arrived despite the cut — the §8.1 case
-// this all exists for — and nothing is reported.
+// names the real cause. A nil respErr means the response arrived despite the
+// cut — the §8.1 case this all exists for — and nothing is reported.
+//
+// respErr used to be the sharper reason to prefer sendCut: conn shed an
+// unbuffered response with a forged RST_STREAM(REFUSED_STREAM), which the retry
+// layer reads as "the server did not process this request" and replayed. conn
+// sends CANCEL there now, so keeping respErr out of the chain is no longer what
+// prevents that replay — reporting the earlier and more accurate cause is.
 //
 // respErr is folded into the message rather than the chain on purpose: wrapping
 // it would put a *StreamResetError back where errors.As can reach it, and the
