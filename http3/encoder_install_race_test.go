@@ -1,6 +1,7 @@
 package http3
 
 import (
+	"os"
 	"sync"
 	"testing"
 
@@ -156,7 +157,19 @@ func TestQPACKEncoderInstall_StaticFrameIsSelfContained(t *testing.T) {
 // wraps the identical encode in encMu the way this function did before. Both arms
 // do the same work; the only difference is the mutex. Against a server advertising
 // QPACK capacity 0 this path serves every request for the connection's whole life.
+//
+// It is env-guarded for the same reason quic's send benchmarks are (see
+// requireSendBench there): the request-header encode allocates today — 14 allocs/op,
+// tracked separately — and the absolute zero-alloc bench-gate scans every Benchmark
+// line emitted by ./http3, which IS one of the seven packages it benchmarks
+// (.github/workflows/bench-gate.yml, scripts/bench-gate.sh). A skipped benchmark
+// prints no B/op columns, so the gate ignores it. Run it with:
+//
+//	POSEIDON_BENCH_ENCODE=1 go test -run=^$ -bench=EncodeRequestHeaders -benchmem -cpu=8 ./http3
 func BenchmarkEncodeRequestHeaders_StaticOnly(b *testing.B) {
+	if os.Getenv("POSEIDON_BENCH_ENCODE") == "" {
+		b.Skip("header-encode bench allocates; set POSEIDON_BENCH_ENCODE=1 to run (kept out of the zero-alloc bench-gate)")
+	}
 	conn := &fakeConn{req: &fakeStream{}}
 	client, err := NewClientFake(conn, defaultSettings)
 	if err != nil {

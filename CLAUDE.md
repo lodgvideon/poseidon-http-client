@@ -13,7 +13,7 @@ control, pooling.
 make tidy        # go mod tidy
 make lint        # golangci-lint v2.5
 make test-race   # go test -race ./... (default verification)
-make bench       # benches with bench-gate (0 B/op, 0 allocs/op enforced on frame + hpack)
+make bench       # benches with bench-gate (see below — it is NOT just frame + hpack)
 ```
 
 Single-package iteration:
@@ -157,6 +157,18 @@ section behavior.
 
 ## Gotchas
 
+- **`bench-gate` covers seven packages, not two.**
+  `.github/workflows/bench-gate.yml` benchmarks
+  `./frame ./hpack ./internal/bytesx ./internal/bufx ./qpack ./quic ./http3`
+  and `scripts/bench-gate.sh` scans that raw output with **no package
+  scoping at all**: any `Benchmark` line reporting non-zero `B/op` or
+  non-zero `allocs/op` fails the job. So adding an honest benchmark of an
+  allocating path to any of those seven turns CI red. The repo's answer is
+  an env guard — see `requireSendBench` in `quic/bench_throughput_test.go`
+  and `POSEIDON_BENCH_ENCODE` in `http3/encoder_install_race_test.go`; a
+  skipped benchmark prints no `B/op` columns, so the gate ignores it.
+  (`conn`, `client`, `grpc` and `http1` are genuinely outside it and use
+  their own `//go:build !race` `AllocsPerRun` gates instead.)
 - `frame.NewFramer(w io.Writer, r io.Reader)` — **writer first**, then
   reader. Easy to get backwards.
 - `Stream.id == 0` until first `SendHeaders` writes HEADERS frame
