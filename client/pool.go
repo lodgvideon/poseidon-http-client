@@ -326,18 +326,70 @@ func (p *Pool) handleAcquire(rs *runState, req acquireReq) {
 // Deliberately not called from handleStats: that path only removes conns which
 // were already not live, so it cannot create the terminal state, and a metrics
 // scrape must not open connections.
+// It dials for the whole uncovered batch rather than one at a time, which is
+// the same correction #411 made on h1Pool — and for the same reason: a mass
+// eviction leaves k waiters here at once, and one dial per call serialises them
+// into k sequential round trips, each dial starting only after the previous
+// conn was handed to a single waiter.
+//
+// The arithmetic is NOT h1's, and copying it would be a regression rather than
+// a port. h1 carries one caller per connection, so "waiters minus coverage" is
+// the dial count. Here a connection covers streamCap waiters, so that expression
+// opens a socket per waiter for a batch one connection could serve. Nothing in
+// this repo defaults IdleTimeout, so evictIdle is off and a surplus socket
+// ratchets to the cap and stays — the serial ramp would be traded for permanent
+// over-allocation.
+//
+// So: subtract the spare stream capacity already live, subtract what the dials
+// in flight are expected to bring, and divide the remainder by that same
+// expectation. With MaxStreamsPerConn 1 — how a load generator gives each
+// request its own connection — this is h1's formula exactly, because there the
+// divisor is 1.
+//
+// The expectation is the LOCAL cap, not any peer's: a connection that does not
+// exist yet has no SETTINGS. A peer advertising fewer streams than we asked for
+// leaves the batch short, and the next call through this path re-dials for
+// whoever is still queued.
 func (p *Pool) ensureDialForWaiters(rs *runState) {
 	if len(rs.waiters) == 0 {
 		return
 	}
-	if countLive(rs.conns)+rs.inFlightDials >= p.opts.MaxConnsPerHost {
+	room := p.opts.MaxConnsPerHost - countLive(rs.conns) - rs.inFlightDials
+	if room <= 0 {
 		return
 	}
 	if inDialBackoff(rs.lastDialErrAt, p.opts.DialBackoff) {
 		return
 	}
-	rs.inFlightDials++
-	go p.dialOne()
+	perConn := effectiveStreamCap(p.opts.MaxStreamsPerConn, 0)
+	uncovered := len(rs.waiters) - spareStreamCapacity(rs.conns) - rs.inFlightDials*perConn
+	if uncovered <= 0 {
+		return
+	}
+	need := (uncovered + perConn - 1) / perConn // round up: a partial batch still needs a conn
+	for n := min(need, room); n > 0; n-- {
+		rs.inFlightDials++
+		go p.dialOne()
+	}
+}
+
+// spareStreamCapacity is how many more callers the live connections can take
+// right now — the coverage a queued waiter already has, and so the part of the
+// queue that needs no new socket.
+//
+// Matches pickLeastLoaded's admission test (alive, and active below streamCap)
+// so this cannot count capacity serveWaiters would then refuse to use.
+func spareStreamCapacity(conns []*managedConn) int {
+	n := 0
+	for _, mc := range conns {
+		if !mc.c.IsAlive() {
+			continue
+		}
+		if spare := mc.streamCap - mc.active; spare > 0 {
+			n += spare
+		}
+	}
+	return n
 }
 
 // flushStrandedWaiters refuses every queued waiter when the pool holds nothing

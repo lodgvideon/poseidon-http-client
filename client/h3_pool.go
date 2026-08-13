@@ -599,15 +599,51 @@ func (p *h3Pool) evictDeadSilent(conns []*h3ManagedConn) []*h3ManagedConn {
 // tick that shrinks nothing because the pool is already empty, both leave waiters
 // with no dialer. Respects MaxConnsPerHost and the dial backoff exactly as
 // handleAcquire does. Actor goroutine only.
+// It dials for the whole uncovered batch, not one connection per call. See
+// Pool.ensureDialForWaiters for why the batch is divided by expected
+// per-connection capacity instead of following h1's waiters-minus-coverage
+// arithmetic: h1 carries one caller per connection, these two multiplex, and
+// the h1 expression would open a socket per waiter for a batch one connection
+// could serve.
 func (p *h3Pool) dialForWaiters(rs *h3RunState) {
 	if len(rs.waiters) == 0 || inDialBackoff(rs.lastDialErrAt, p.opts.DialBackoff) {
 		return
 	}
-	if h3CountLive(rs.conns)+rs.inFlightDials >= p.opts.MaxConnsPerHost {
+	room := p.opts.MaxConnsPerHost - h3CountLive(rs.conns) - rs.inFlightDials
+	if room <= 0 {
 		return
 	}
-	rs.inFlightDials++
-	go p.dialOne()
+	perConn := effectiveStreamCap(p.opts.MaxStreamsPerConn, 0)
+	uncovered := len(rs.waiters) - h3SpareStreamCapacity(rs.conns) - rs.inFlightDials*perConn
+	if uncovered <= 0 {
+		return
+	}
+	need := (uncovered + perConn - 1) / perConn
+	for n := min(need, room); n > 0; n-- {
+		rs.inFlightDials++
+		go p.dialOne()
+	}
+}
+
+// h3SpareStreamCapacity mirrors spareStreamCapacity, matching this pool's own
+// pickLeastLoaded admission test so it cannot count capacity serveWaiters would
+// then refuse to use.
+//
+// The GoingAway term is the difference from the H2 helper and it is load-bearing
+// here: a drained connection is Alive but refuses every new request (RFC 9114
+// §5.2), so counting its idle stream slots as coverage would suppress exactly
+// the dial the GOAWAY made necessary.
+func h3SpareStreamCapacity(conns []*h3ManagedConn) int {
+	n := 0
+	for _, mc := range conns {
+		if !mc.cl.Alive() || mc.cl.GoingAway() {
+			continue
+		}
+		if spare := mc.streamCap - mc.active; spare > 0 {
+			n += spare
+		}
+	}
+	return n
 }
 
 // h3SumActive sums active stream counts across conns.
