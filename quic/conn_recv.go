@@ -356,6 +356,28 @@ func (c *Conn) ensureReadWatchdog(ctx context.Context) {
 	}()
 }
 
+// takePendingCtrl appends the queued app-space control frames to dst, empties the
+// queue, and reports whether the resulting datagram must be padded to 1200 bytes
+// because a PATH_RESPONSE rode along (RFC 9000 §8.2.2).
+//
+// The two are taken together on purpose. pathRespPending describes what is IN
+// pendingCtrl, so draining one without clearing the other leaves the flag set with
+// nothing behind it — the next unrelated control packet would be padded to 1200
+// bytes for no reason — while clearing it without emitting the frames loses the
+// padding obligation on a PATH_RESPONSE that does go out. Both flush (conn_seal.go)
+// and flushControl drain this queue, on different goroutines, and each carried its
+// own copy of the pair; one helper is one place to keep them in step.
+//
+// dst lets flush coalesce the grants after an already-built ACK while flushControl
+// starts from nothing. Assumes c.mu is held.
+func (c *Conn) takePendingCtrl(dst []byte) ([]byte, bool) {
+	dst = append(dst, c.pendingCtrl...)
+	c.pendingCtrl = c.pendingCtrl[:0]
+	padPath := c.pathRespPending
+	c.pathRespPending = false
+	return dst, padPath
+}
+
 // flushControl emits the app-space credit grants (MAX_DATA / MAX_STREAM_DATA) and a
 // PATH_RESPONSE queued in pendingCtrl, on the CONSUMER's goroutine, before it
 // releases c.mu (docs/HTTP3_DESIGN.md §4 INV-3): the goroutine that consumed
@@ -371,13 +393,10 @@ func (c *Conn) flushControl() error {
 	if c.closed || c.sealerFor(spaceApp) == nil {
 		return nil // draining, or 1-RTT keys not yet installed
 	}
-	var frames []byte
-	frames = append(frames, c.pendingCtrl...)
-	c.pendingCtrl = c.pendingCtrl[:0]
 	// A PATH_RESPONSE that rode along MUST go out in a >=1200-byte datagram even when
-	// a Do-side Recv flushes it (BREAK3), so replicate flush's padding decision.
-	padPath := c.pathRespPending
-	c.pathRespPending = false
+	// a Do-side Recv flushes it (BREAK3), which is why the padding decision comes out
+	// of the same helper flush uses rather than being replicated here.
+	frames, padPath := c.takePendingCtrl(nil)
 	// Credit grants are self-healing (a later grant supersedes a lost one), so they
 	// are not retransmitted. The frames are ack-eliciting.
 	pkt, err := c.sealPacket(spaceApp, frames, true, nil, padPath)
