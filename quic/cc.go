@@ -196,20 +196,22 @@ func (c *Conn) pacingRefillDelay() time.Duration {
 	if c.cwnd == 0 || c.rtt.smoothedRTT <= 0 {
 		return time.Millisecond
 	}
+	// BBR states its rate in bytes/second (bbr.go); NewReno states it as N*cwnd
+	// bytes per smoothed-RTT. Same quantity, different period.
 	if c.pacingRate != 0 {
-		// BBR pacing (bbr.go): the rate is in bytes/second, so one datagram of credit
-		// accrues in maxDatagramSize/pacing_rate seconds.
-		d := time.Duration(uint64(maxDatagramSize) * uint64(time.Second) / c.pacingRate)
-		if d <= 0 {
-			return time.Millisecond
-		}
-		return d
+		return pacingDelayFor(c.pacingRate, time.Second)
 	}
-	rate := 5 * c.cwnd / 4 // bytes per smoothed-RTT
+	return pacingDelayFor(5*c.cwnd/4, c.rtt.smoothedRTT)
+}
+
+// pacingDelayFor is how long one datagram of credit takes to accrue at rate
+// bytes per period. A zero or sub-nanosecond answer becomes a millisecond: the
+// caller arms a timer with it, and a zero-length timer is a spin.
+func pacingDelayFor(rate uint64, period time.Duration) time.Duration {
 	if rate == 0 {
 		return time.Millisecond
 	}
-	d := time.Duration(uint64(maxDatagramSize) * uint64(c.rtt.smoothedRTT) / rate)
+	d := time.Duration(uint64(maxDatagramSize) * uint64(period) / rate)
 	if d <= 0 {
 		return time.Millisecond
 	}
@@ -241,30 +243,31 @@ func (c *Conn) pacingCredit() uint64 {
 		c.pacingBudget, c.pacingLast = kInitialWindow, now
 		return c.pacingBudget
 	}
+	// BBR refills the same bucket from the model's bytes/second rate (bbr.go);
+	// NewReno from N*cwnd bytes per smoothed-RTT (N = 1.25 as 5/4). elapsed is
+	// bounded below one second by the branch above, so rate*elapsed cannot overflow
+	// uint64 for either.
 	if c.pacingRate != 0 {
-		// BBR pacing (bbr.go): refill the same token bucket from the model's
-		// bytes/second rate. elapsed is bounded below one second by the branch above,
-		// so pacing_rate·elapsed cannot overflow uint64 for any realistic rate.
-		add := c.pacingRate * uint64(elapsed) / uint64(time.Second)
-		if add == 0 {
-			return c.pacingBudget // sub-byte elapsed: accumulate the time into a later refill
-		}
-		consumed := time.Duration(add * uint64(time.Second) / c.pacingRate)
-		c.pacingLast = c.pacingLast.Add(consumed)
-		c.pacingBudget = min(kInitialWindow, c.pacingBudget+add)
-		return c.pacingBudget
+		return c.refillPacingBucket(elapsed, c.pacingRate, time.Second)
 	}
-	rate := 5 * c.cwnd / 4 // N·cwnd bytes per smoothed-RTT (N = 1.25 as 5/4)
-	add := rate * uint64(elapsed) / uint64(c.rtt.smoothedRTT)
+	return c.refillPacingBucket(elapsed, 5*c.cwnd/4, c.rtt.smoothedRTT)
+}
+
+// refillPacingBucket credits the whole bytes that elapsed earns at rate bytes per
+// period, and returns the resulting budget.
+//
+// The sub-byte case is why this is not a one-liner. When elapsed is too short to
+// earn a whole byte, pacingLast is left alone so the time accumulates into a
+// later refill; advancing it would discard that time, and a caller retrying
+// faster than one byte per call would starve the bucket to a standstill. For the
+// same reason pacingLast advances only by the time that produced those whole
+// bytes, carrying the remainder forward so the long-run rate stays rate/period.
+func (c *Conn) refillPacingBucket(elapsed time.Duration, rate uint64, period time.Duration) uint64 {
+	add := rate * uint64(elapsed) / uint64(period)
 	if add == 0 {
-		// Sub-byte elapsed: leave pacingLast so this time accumulates into a later
-		// refill. Advancing it here would discard the time and let a fast retry loop
-		// starve the bucket to a standstill.
 		return c.pacingBudget
 	}
-	// Advance pacingLast only by the time that produced `add` whole bytes, carrying
-	// the sub-byte remainder forward so the long-run rate stays N·cwnd/smoothed_rtt.
-	consumed := time.Duration(add * uint64(c.rtt.smoothedRTT) / rate)
+	consumed := time.Duration(add * uint64(period) / rate)
 	c.pacingLast = c.pacingLast.Add(consumed)
 	c.pacingBudget = min(kInitialWindow, c.pacingBudget+add)
 	return c.pacingBudget

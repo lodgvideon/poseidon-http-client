@@ -140,3 +140,40 @@ func TestConformance_RFC9002_Sec77_NoPacingWithoutRTT(t *testing.T) {
 		t.Fatalf("without an RTT sample the send should not be paced; got %d bytes", n)
 	}
 }
+
+// TestConformance_RFC9002_Sec77_PacingCarriesTheWholeByteRemainder is the other
+// half of the carry, and the half nothing covered.
+//
+// PacingSubQuantumNoStarve pins the case where a step earns NO whole byte. This
+// pins the case where it earns some: the leftover fraction has to survive too, or
+// the long-run rate drifts below the one 7.7 asks for. The two are different
+// branches -- one returns before touching pacingLast, the other advances it by
+// the time that minted the whole bytes rather than by the whole step.
+//
+// At 2.5 bytes/microsecond a 600 ns step earns exactly 1.5 bytes. Truncating each
+// step to 1 byte and discarding the rest costs a third of the rate: 1000 bytes
+// where 7.7 wants 1500. That is the gap this asserts, and it is what a
+// refillPacingBucket advancing pacingLast by the full elapsed produces.
+func TestConformance_RFC9002_Sec77_PacingCarriesTheWholeByteRemainder(t *testing.T) {
+	c, _, clk := pacingConn(t)
+	c.pacingBudget, c.pacingLast = 0, *clk
+
+	const steps = 1000
+	for i := 0; i < steps; i++ {
+		*clk = clk.Add(600 * time.Nanosecond)
+		c.pacingCredit()
+	}
+
+	// 600 microseconds at 2.5 bytes/microsecond. Well under kInitialWindow, so the
+	// budget cap is not what this measures.
+	const want = 1500
+	if c.pacingBudget < want-50 {
+		t.Fatalf("1000 steps of 1.5 bytes each minted %d bytes, want about %d: the "+
+			"sub-byte remainder is being discarded, so the long-run pacing rate sits "+
+			"below N*cwnd/smoothed_rtt (RFC 9002 §7.7)", c.pacingBudget, want)
+	}
+	if c.pacingBudget > want+50 {
+		t.Fatalf("1000 steps of 1.5 bytes each minted %d bytes, want about %d: more "+
+			"time was credited than elapsed", c.pacingBudget, want)
+	}
+}
