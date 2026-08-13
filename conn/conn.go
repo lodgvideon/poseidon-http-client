@@ -583,20 +583,49 @@ func (c *Conn) Close() error {
 	// Best-effort GOAWAY (NO_ERROR). Bound the write so an unresponsive
 	// peer cannot wedge Close indefinitely (e.g. net.Pipe with no
 	// active reader, or a real TCP peer that has stopped reading).
-	if dl, ok := c.transport.(interface{ SetWriteDeadline(time.Time) error }); ok {
-		_ = dl.SetWriteDeadline(time.Now().Add(closeGoAwayDeadline))
-	}
-	c.wmu.Lock()
-	_ = c.fr.WriteGoAway(c.goAwayLastStreamIDToSend(), frame.ErrCodeNoError, nil)
-	_ = c.flushWrite()
+	c.writeGoAwayBestEffort(frame.ErrCodeNoError)
 	// Wake any group-commit writer deferring on a flush; it re-checks and
 	// flushes itself against the now-closing transport rather than hanging.
+	//
+	// Only this path wakes them, and that is deliberate rather than an omission
+	// the shared helper forgot. A writer defers only while another writer is
+	// queued for wmu (writebatcher.go), and that writer's own commit broadcasts,
+	// so nobody is ever stranded; this is belt-and-braces for the one path that
+	// closes the transport out from under the convoy. Shutdown leaves the
+	// transport live and its in-flight streams flowing, so waking there would
+	// break up a convoy for nothing.
+	c.wmu.Lock()
 	c.wbatch.wakeAllLocked()
 	c.wmu.Unlock()
 	_ = c.transport.Close()
 	<-c.readerDone
 	c.fr.Close()
 	return nil
+}
+
+// deadliner is the optional transport capability every best-effort write here
+// depends on: a bounded write deadline, so an unresponsive peer cannot wedge a
+// teardown. A transport without it (net.Pipe in a unit test) simply writes
+// unbounded, which is why each caller ignores the outcome.
+type deadliner interface {
+	SetWriteDeadline(time.Time) error
+}
+
+// writeGoAwayBestEffort writes one GOAWAY under a bounded deadline and flushes
+// it, discarding every error: all three callers are already tearing the
+// connection down and have nothing to do with a failure. It returns the
+// last-stream-id it advertised, which the connection-error path records on the
+// error it surfaces to the application.
+func (c *Conn) writeGoAwayBestEffort(code frame.ErrCode) uint32 {
+	if dl, ok := c.transport.(deadliner); ok {
+		_ = dl.SetWriteDeadline(time.Now().Add(closeGoAwayDeadline))
+	}
+	c.wmu.Lock()
+	defer c.wmu.Unlock()
+	last := c.goAwayLastStreamIDToSend()
+	_ = c.fr.WriteGoAway(last, code, nil)
+	_ = c.flushWrite()
+	return last
 }
 
 // closeGoAwayDeadline bounds the GOAWAY write during Close so an
@@ -627,13 +656,7 @@ func (c *Conn) Shutdown(gracefulTimeout time.Duration) error {
 	// Send GOAWAY with our last issued client stream ID. The peer
 	// will see this and stop opening new streams; existing streams
 	// keep flowing.
-	if dl, ok := c.transport.(interface{ SetWriteDeadline(time.Time) error }); ok {
-		_ = dl.SetWriteDeadline(time.Now().Add(closeGoAwayDeadline))
-	}
-	c.wmu.Lock()
-	_ = c.fr.WriteGoAway(c.goAwayLastStreamIDToSend(), frame.ErrCodeNoError, nil)
-	_ = c.flushWrite()
-	c.wmu.Unlock()
+	c.writeGoAwayBestEffort(frame.ErrCodeNoError)
 	// Wake any writers blocked in acquireSendCredits so they observe
 	// the draining flag and surface ErrConnDraining to their callers.
 	c.fcOutMu.Lock()
@@ -1010,7 +1033,6 @@ func (c *Conn) writeRSTStreamBestEffort(s *Stream, code frame.ErrCode) {
 	if c.closed.Load() {
 		return
 	}
-	type deadliner interface{ SetWriteDeadline(time.Time) error }
 	c.wmu.Lock()
 	if dl, ok := c.transport.(deadliner); ok {
 		_ = dl.SetWriteDeadline(time.Now().Add(rstTimeout))
@@ -2039,14 +2061,7 @@ func (c *Conn) emitConnGoAwayIfTyped(err error) {
 	if !errors.As(err, &ce) {
 		return
 	}
-	if dl, ok := c.transport.(interface{ SetWriteDeadline(time.Time) error }); ok {
-		_ = dl.SetWriteDeadline(time.Now().Add(closeGoAwayDeadline))
-	}
-	c.wmu.Lock()
-	last := c.goAwayLastStreamIDToSend()
-	_ = c.fr.WriteGoAway(last, ce.Code, nil)
-	_ = c.flushWrite()
-	c.wmu.Unlock()
+	last := c.writeGoAwayBestEffort(ce.Code)
 	// Record on the error what was put on the wire, so ConnError.Error() reports
 	// the id the peer was actually given rather than a constant 0. Safe to
 	// mutate here: this runs on the reader goroutine before shutdownStreams
