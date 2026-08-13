@@ -22,13 +22,17 @@ const (
 // frame in a new packet (RFC 9000 §13.3): the payload bytes and where they
 // belong on their stream. data is a private copy, so mutation or reuse of the
 // original send buffer cannot corrupt a later retransmission.
+// The word-sized fields come first and the two byte-sized ones last. That is not
+// cosmetic: this struct is embedded by value in sentPacket, one of which is
+// stored per sent packet, and interleaving the bools cost 14 bytes of padding.
+// See TestRetransFrameSize.
 type retransFrame struct {
-	kind     retransKind
 	streamID uint64 // stream frames; offset doubles as the final size for retransReset
 	offset   uint64
-	fin      bool   // retransStream: the FIN flag; retransStreamsBlocked: the uni scope
 	errCode  uint64 // retransReset / retransStopSending only
 	data     []byte
+	kind     retransKind
+	fin      bool // retransStream: the FIN flag; retransStreamsBlocked: the uni scope
 }
 
 // encode appends the frame to dst (STREAM/CRYPTO at their original offset).
