@@ -29,6 +29,44 @@ import (
 //     different programs and each file says why. They are different step
 //     LISTS, not different step bodies, so a shared skeleton would be three
 //     functions wearing one signature.
+//
+// That last exclusion is about the THREE-way comparison, and H1 is what makes
+// it true. #480 measured the two-way H2/H3 case and found ten methods identical
+// after substituting type names alone — run, handleAcquire, handleWarmup,
+// flushStrandedWaiters, serveWaiters, handleStats, warmup, notifyClose, Close
+// and dialEnv. Re-measured on this tree, all ten still match H2 to H3, while
+// run, handleAcquire, serveWaiters and warmup differ H2 to H1 and handleWarmup
+// does not exist there at all. Both statements are true of different
+// comparisons; neither refutes the other.
+//
+// Applying the bar above to those ten, method by method, only notifyClose
+// clears it — and it did not even need a new helper: notifyConnClose was
+// already here, serving the single-conn and transport close paths, while the
+// three pools each carried their own byte-identical copy. They delegate to it
+// now. The rest, and why they stay put:
+//
+//   - run is a select over SEVEN channels dispatching to SEVEN handlers, and
+//     the channel element types differ per protocol. Sharing 25 lines would
+//     mean injecting about fifteen things. This is the clearest failure of the
+//     bar in the package.
+//   - handleAcquire needs pickLeastLoaded, countLive, replyAcquire, dialOne,
+//     two opts fields and the conn record's active/lastUsed — eight injections
+//     for 23 lines, and the call site reads worse for it.
+//   - serveWaiters, flushStrandedWaiters and handleStats are the same shape,
+//     smaller: four to five injections for 9-15 lines.
+//   - warmup is nine lines behind a three-argument signature and is shared by
+//     only two of the three pools, H1 having gone straight to warmupDials. Too
+//     marginal to be worth the indirection.
+//   - Close is five lines over three fields. The signature would be the body.
+//
+// The ten identical bodies are identical BECAUSE the divergence was pushed
+// into the helpers they call, and at least one of those differs in behaviour
+// rather than name: spareStreamCapacity skips conns failing IsAlive, while
+// h3SpareStreamCapacity also skips those draining after GOAWAY. Any future
+// attempt at this must check countLive/h3CountLive and sumActive/h3SumActive
+// the same way — a dedup that hands one protocol the other's liveness rule is
+// a behaviour change wearing a refactor's clothes, and an invisible one,
+// because those ten call sites read identically either way.
 
 // dialEnv is the slice of a pool that a dial needs: when to give up, who to
 // tell, and what to count. It exists so dialAttempt takes two arguments

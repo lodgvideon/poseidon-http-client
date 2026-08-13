@@ -598,12 +598,7 @@ func (p *h1Pool) serveWaiters(conns []*h1ManagedConn, waiters []h1AcquireReq) []
 
 // notifyClose increments ConnsClosed and fires OnConnClose.
 func (p *h1Pool) notifyClose(reason CloseReason) {
-	p.metrics.Counters.ConnsClosed.Add(1)
-	if hr := p.hooksRef; hr != nil {
-		if h := hr.Load(); h != nil && h.OnConnClose != nil {
-			h.OnConnClose(ConnCloseEvent{Addr: p.addr, Reason: reason})
-		}
-	}
+	notifyConnClose(p.addr, reason, p.metrics, p.hooksRef)
 }
 
 // evict removes target from conns, notifies close, and closes the conn.
