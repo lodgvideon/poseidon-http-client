@@ -129,9 +129,7 @@ func (c *Conn) flush() error {
 		if hasCtrl {
 			// MAX_DATA / MAX_STREAM_DATA credit grants (§4.1). Not retransmitted:
 			// a later grant supersedes a lost one, so recovery is self-healing.
-			frames = append(frames, c.pendingCtrl...)
-			c.pendingCtrl = c.pendingCtrl[:0]
-			padPath, c.pathRespPending = c.pathRespPending, false // §8.2.2 pad if a PATH_RESPONSE rode along
+			frames, padPath = c.takePendingCtrl(frames)
 		}
 		if hasProbe {
 			// A PTO probe with nothing else to resend (RFC 9002 §6.2.4, §6.2.2.1): a
