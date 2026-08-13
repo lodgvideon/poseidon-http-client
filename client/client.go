@@ -874,14 +874,20 @@ func (c *Client) doStream(ctx context.Context, req *Request, sr *StreamResponse)
 //
 // Releasing the connection stays with h1Exchange: its release fires on the
 // terminal chunk or on Close, and the release the streaming caller holds is the
-// no-op both h1 transports return for exactly this reason, so there is one owner
-// either way.
+// no-op all three h1 transports return for exactly this reason, so there is one
+// owner either way.
 //
-// Correcting what this comment said when the case was added: that release is
-// sync.Once-guarded only on the POOL transport. On h1singleConn it is a plain
-// closure, and calling it twice would double-unlock the in-flight mutex. What
-// keeps it to one call there is the e.done contract — Recv sets it on the
-// terminal chunk and Close returns early once set — not a structural guard.
+// Exactly-once is structural and applies to every h1 transport, h1singleConn
+// included: h1Exchange.release is the only caller of any of their releasers and
+// gates on a released atomic.Bool CAS. That matters most on h1singleConn, whose
+// releaser Unlocks an in-flight sync.Mutex — a second call there is a
+// process-wide panic, not a mis-count.
+//
+// This comment used to say the opposite twice over, and the correction is worth
+// leaving visible: it claimed the guarantee was a sync.Once on the pool
+// transport only, and that on h1singleConn nothing structural held the call to
+// one — only the e.done contract. Three per-transport sync.Once copies did exist
+// once; #575 replaced them with the single CAS above.
 func beginRespStream(ctx context.Context, s protoStream) (respStream, error) {
 	switch v := s.(type) {
 	case conn.StreamRef:
