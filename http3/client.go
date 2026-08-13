@@ -298,10 +298,16 @@ type Client struct {
 	// across a wait): a Do holds it to encode one request, the reader holds it to
 	// apply the server's decoder-stream acknowledgments (advancing the Known
 	// Received Count) and to install the encoder when SETTINGS arrive.
+	//
+	// The POINTER is atomic, while everything it points at stays under encMu. That
+	// is what lets the static-only path — the whole life of a connection to a server
+	// advertising capacity 0 — encode without touching the lock at all
+	// (encodeRequestHeaders). It is written exactly once, nil to non-nil, and never
+	// cleared, so a non-nil load is stable for the rest of the connection.
 	encMu         sync.Mutex
-	qpackEncoder  *qpack.Encoder // nil ⇒ static-only encoding (pre-SETTINGS or server capacity 0)
-	encWriteBuf   []byte         // encoder-stream bytes accepted for send but not yet flushed (flow-control residue)
-	encHasResidue atomic.Bool    // true when encWriteBuf holds unflushed bytes — lets the reader skip the lock otherwise
+	qpackEncoder  atomic.Pointer[qpack.Encoder] // nil ⇒ static-only encoding (pre-SETTINGS or server capacity 0)
+	encWriteBuf   []byte                        // encoder-stream bytes accepted for send but not yet flushed (flow-control residue)
+	encHasResidue atomic.Bool                   // true when encWriteBuf holds unflushed bytes — lets the reader skip the lock otherwise
 
 	// Shared connection-scoped QPACK dynamic table (RFC 9204 §3.2). This is the
 	// ONE piece of QPACK state shared across goroutines: the reader WRITES it
@@ -667,14 +673,14 @@ func (c *Client) enableEncoderDynamic(serverMaxCapacity uint64) {
 	}
 	c.encMu.Lock()
 	defer c.encMu.Unlock()
-	if c.qpackEncoder != nil {
+	if c.qpackEncoder.Load() != nil {
 		return // already installed (SETTINGS is processed once)
 	}
 	enc, err := qpack.NewDynamicEncoder(serverMaxCapacity, chosen)
 	if err != nil {
 		return // stay static-only rather than risk a malformed encoder table
 	}
-	c.qpackEncoder = enc
+	c.qpackEncoder.Store(enc)
 	c.encWriteBuf = enc.DrainEncoderInstructions(c.encWriteBuf) // the Set Dynamic Table Capacity instruction
 	c.flushEncWriteLocked()
 }
@@ -700,25 +706,39 @@ func (c *Client) flushQPACKEncoderStream() {
 // encodeRequestHeaders builds req's HEADERS frame. When the server enabled dynamic
 // QPACK it uses the connection's shared encoder dynamic table (Q5): repeated header
 // entries are inserted (with the resulting Insert instructions queued on our
-// encoder stream, in insertion order) and acknowledged entries are referenced. It
-// holds encMu for the whole encode so concurrent Do calls serialize their table
-// inserts and encoder-stream writes; the encode is CPU-only and the encoder-stream
-// flush is best-effort, so encMu is never held across a wait. When the encoder is
-// static-only (pre-SETTINGS or server capacity 0) it produces exactly the
-// static-table output — byte-for-byte today's encoding — via a throwaway encoder.
+// encoder stream, in insertion order) and acknowledged entries are referenced. That
+// path holds encMu for the whole encode, so concurrent Do calls serialize their
+// table inserts and encoder-stream writes; the encode is CPU-only and the
+// encoder-stream flush is best-effort, so encMu is never held across a wait.
+//
+// The static-only path takes NO lock. It produces exactly the static-table output —
+// byte-for-byte the dynamic-disabled encoding — through a throwaway encoder that
+// shares nothing: the only connection state it reads is the atomic maxFieldSection.
+// A server is free to advertise SETTINGS_QPACK_MAX_TABLE_CAPACITY: 0, and against
+// one that does this is EVERY request for the connection's whole life, so taking
+// encMu there would serialize every concurrent Do behind a mutex guarding nothing
+// they touch.
+//
+// Loading qpackEncoder outside encMu is sound because it is written once, nil to
+// non-nil, and never cleared (enableEncoderDynamic) — so a non-nil load is stable,
+// and the race can only be lost in one direction: a request that loads nil while
+// the encoder is being installed encodes static-only. That is always legal, and it
+// emits no encoder instructions, so it cannot perturb the instruction ordering the
+// server's decoder table depends on. The encoder's own state stays under encMu.
 func (c *Client) encodeRequestHeaders(req *Request) ([]byte, error) {
+	enc := c.qpackEncoder.Load()
+	if enc == nil {
+		var static qpack.Encoder // static-only profile (nil dynamic table)
+		return req.EncodeHeaders(&static, nil, c.maxFieldSection.Load())
+	}
 	c.encMu.Lock()
 	defer c.encMu.Unlock()
-	if c.qpackEncoder == nil {
-		var enc qpack.Encoder // static-only profile (nil dynamic table)
-		return req.EncodeHeaders(&enc, nil, c.maxFieldSection.Load())
-	}
-	frame, err := req.EncodeHeaders(c.qpackEncoder, nil, c.maxFieldSection.Load())
+	frame, err := req.EncodeHeaders(enc, nil, c.maxFieldSection.Load())
 	if err != nil {
 		return nil, err
 	}
 	before := len(c.encWriteBuf)
-	c.encWriteBuf = c.qpackEncoder.DrainEncoderInstructions(c.encWriteBuf)
+	c.encWriteBuf = enc.DrainEncoderInstructions(c.encWriteBuf)
 	if len(c.encWriteBuf) > before {
 		c.flushEncWriteLocked()
 	}
