@@ -147,37 +147,70 @@ func TestConformance_RFC9001_Sec57_ZeroRTTDiscardedNotDecrypted(t *testing.T) {
 // discard a newly unprotected packet unless it is certain that it has not processed
 // another packet with the same packet number from the same packet number space." A
 // replayed datagram authenticates — the AEAD nonce derives from the packet number —
-// so the duplicate must be dropped before its frames reach the handlers. Observable:
-// after the owed ACK is consumed, the replay must not oblige a fresh one.
+// so the duplicate must be dropped before its frames reach the handlers.
+//
+// Every delivery gets a FRESH COPY of the captured bytes, and that copy is the
+// whole test. recvDatagram removes header protection IN PLACE — byte 0 of this
+// packet goes 0xca -> 0xc3 — so handing it the same slice a second time replays a
+// packet that no longer authenticates. That one is dropped at the "no keys, or
+// authentication failed" skip in the datagram loop, long before the dedup check,
+// and leaves no ACK owed for entirely the wrong reason. This test did exactly that
+// and passed with the dedup check disabled (#636); an off-path attacker replays
+// the bytes as they went over the wire, which is what the copy reproduces.
+//
+// Two observables, because a duplicate that reaches the handlers costs both:
+// the ACK owed (§13.2.1 — one ACK per replay is attacker-driven work), and the
+// idle timer (§10.1 — a captured datagram replayed forever would postpone the
+// idle timeout without the peer ever sending anything new).
 func TestConformance_RFC9000_Sec123_ReplayedPacketDiscarded(t *testing.T) {
 	origDCID := []byte("origdcid")
 	_, serverKeys := InitialKeys(origDCID)
 
 	c := newInitialConn(t, origDCID)
-	pkt := craftServerInitial(t, serverKeys, nil, []byte{0xaa}, 7, appendPing(nil))
+	start := time.Unix(1700000000, 0)
+	now := start
+	c.now = func() time.Time { return now }
+	c.lastActivity = start.Add(-time.Hour)
 
-	if err := c.recvDatagram(pkt); err != nil {
+	captured := craftServerInitial(t, serverKeys, nil, []byte{0xaa}, 7, appendPing(nil))
+	deliver := func(pkt []byte) error { return c.recvDatagram(append([]byte(nil), pkt...)) }
+
+	if err := deliver(captured); err != nil {
 		t.Fatalf("first recvDatagram = %v, want nil", err)
 	}
 	if !c.acks[spaceInitial].ackPending() {
 		t.Fatal("an ack-eliciting packet should leave an ACK owed")
 	}
+	if !c.lastActivity.Equal(start) {
+		t.Fatalf("a processed packet must reset the idle timer: lastActivity = %v, want %v",
+			c.lastActivity, start)
+	}
 	c.acks[spaceInitial].acked() // the ACK went out
+	now = start.Add(time.Minute) // time passes before the replay arrives
 
-	if err := c.recvDatagram(pkt); err != nil {
+	if err := deliver(captured); err != nil {
 		t.Fatalf("replayed recvDatagram = %v, want nil (discarded)", err)
 	}
 	if c.acks[spaceInitial].ackPending() {
-		t.Fatal("a replayed packet was processed again: its PING re-owed an ACK")
+		t.Error("a replayed packet was processed again: its PING re-owed an ACK")
+	}
+	if !c.lastActivity.Equal(start) {
+		t.Errorf("a replayed packet advanced the idle timer to %v, want it left at %v",
+			c.lastActivity, start)
 	}
 
-	// Control: a genuinely new packet number is still processed.
+	// Control: a genuinely new packet number is still processed, and still does
+	// both of the things the replay must not.
 	fresh := craftServerInitial(t, serverKeys, nil, []byte{0xaa}, 8, appendPing(nil))
-	if err := c.recvDatagram(fresh); err != nil {
+	if err := deliver(fresh); err != nil {
 		t.Fatalf("fresh recvDatagram = %v, want nil", err)
 	}
 	if !c.acks[spaceInitial].ackPending() {
 		t.Fatal("control: a new packet number must still be processed")
+	}
+	if !c.lastActivity.Equal(now) {
+		t.Fatalf("control: a new packet must reset the idle timer: lastActivity = %v, want %v",
+			c.lastActivity, now)
 	}
 }
 
