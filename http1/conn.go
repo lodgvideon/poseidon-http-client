@@ -310,9 +310,9 @@ func (c *Conn) ProbeIdle() bool {
 	//
 	// A timeout means healthy; a byte means unsolicited data; any other error
 	// (EOF, reset) means the peer is gone.
-	_ = c.nc.SetReadDeadline(time.Now().Add(time.Millisecond))
-	_, err := c.br.Peek(1)
-	_ = c.nc.SetReadDeadline(time.Time{})
+	//
+	// FUTURE deadline: this asks the socket, and it has to.
+	err := c.peekUnder(time.Now().Add(probeWindow))
 	if err == nil {
 		return false
 	}
@@ -525,6 +525,44 @@ func validRequestTarget(s string) bool {
 		}
 	}
 	return true
+}
+
+// probeWindow is how long a future-deadline probe waits for the socket to say
+// something. A healthy idle connection costs the whole window, so it is the
+// price of every such probe, not a timeout that rarely fires.
+const probeWindow = time.Millisecond
+
+// peekUnder runs the one-byte probe under deadline t and clears the read
+// deadline again afterwards, whatever the outcome. It returns Peek's error: nil
+// means a byte is available, a net.Error with Timeout() means none was, and
+// anything else (EOF, reset) means the peer is gone.
+//
+// Four call sites ran these three lines with the deadline as their only
+// difference, and that difference is the whole decision — which is why it stays
+// at the call site with its own reason, and only the mechanism lives here:
+//
+//   - A deadline in the FUTURE asks the SOCKET. A past one would return a
+//     timeout immediately without ever issuing a recv, so an already-arrived
+//     byte or FIN would be missed — a probe that fails open.
+//   - A deadline in the PAST asks crypto/tls's own input buffer instead.
+//     crypto/tls checks no deadline itself, so the read decrypts a record it has
+//     already buffered and returns the plaintext without touching the socket,
+//     and reports a timeout the moment it would have to.
+//
+// The restore is defence in depth rather than the thing that prevents a stale
+// deadline, and it is worth being exact about which: every read path arms its
+// own deadline on entry — ReadResponse from its ctx, ReadBodyChunk through
+// armCancel, both setting the zero time when there is no ctx deadline — so a
+// deadline left behind here is overwritten before anything could read under it.
+// Removing the restore leaves the whole http1 suite green, verified twice; it is
+// kept because that argument holds only as long as every future read path keeps
+// arming on entry, and the line costs one syscall on a path that already made
+// two.
+func (c *Conn) peekUnder(t time.Time) error {
+	_ = c.nc.SetReadDeadline(t)
+	_, err := c.br.Peek(1)
+	_ = c.nc.SetReadDeadline(time.Time{})
+	return err
 }
 
 // deadlineLongPast is the "release any blocked I/O now" deadline: unambiguously
