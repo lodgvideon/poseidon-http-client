@@ -16,7 +16,7 @@ import (
 // large body without inter-chunk delays. Before the resetSignal fix,
 // this test would block until context deadline (15s+).
 //
-// The stream will get RST(REFUSED_STREAM) via signalReset, and Recv()
+// The stream will get RST(CANCEL) via signalReset, and Recv()
 // returns EventReset immediately instead of hanging.
 func TestIT_ResetSignal_OverflowNoHang(t *testing.T) {
 	srv := requireServer(t, ServerGoHTTP)

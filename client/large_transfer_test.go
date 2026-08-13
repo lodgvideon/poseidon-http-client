@@ -154,7 +154,7 @@ func ltH2Client(t *testing.T, addr string) *client.Client {
 // It is NOT sampled mid-transfer, and that is a real limitation rather than an
 // oversight: runtime.GC()'s stop-the-world pause is long enough that the caller
 // misses more than StreamEventBuffer frames, conn's push() drops them and
-// resets the stream (REFUSED_STREAM), and the transfer dies before it can be
+// resets the stream (CANCEL), and the transfer dies before it can be
 // measured. So this test would not catch a receive path that ballooned during
 // the transfer and freed at END_STREAM. See the EventReset branch below.
 //
@@ -198,9 +198,9 @@ func TestIT_H2_StreamedDownload_RetentionStaysBounded(t *testing.T) {
 		}
 		if ev.Type == client.EventReset {
 			// Not a silent break: conn resets a stream whose caller falls
-			// behind (REFUSED_STREAM past StreamEventBuffer events). Treating
-			// that as a normal end would let this test "pass" on a transfer
-			// that was killed rather than streamed.
+			// behind (CANCEL past StreamEventBuffer events). Treating that as
+			// a normal end would let this test "pass" on a transfer that was
+			// killed rather than streamed.
 			t.Fatalf("stream reset (%v) after %d of %d bytes — the caller fell behind the reader; nothing was measured",
 				ev.ResetCode, consumed, ltBodyBytes)
 		}
@@ -253,7 +253,7 @@ func TestIT_H2_StreamedDownload_RetentionStaysBounded(t *testing.T) {
 // (conn/conn.go:869-925), not when the application consumes it, so the window
 // never applies application backpressure. Backpressure is instead
 // Stream.push() dropping past StreamEventBuffer events and sending
-// RST_STREAM(REFUSED_STREAM). Hence the served > ltStreamWindow assertion
+// RST_STREAM(CANCEL). Hence the served > ltStreamWindow assertion
 // below: a peer that was being held by flow control could not have exceeded it.
 func TestIT_H2_StreamedDownload_NonConsumerIsRefused(t *testing.T) {
 	var served atomic.Int64

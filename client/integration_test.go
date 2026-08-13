@@ -351,7 +351,7 @@ func TestIntegration_Client_DoStream_LargeResponse(t *testing.T) {
 	// Larger StreamEventBuffer so the stream's events channel can absorb
 	// up to 256 inbound DATA frames if the test goroutine drains slowly
 	// under the race detector or shared-CI scheduling. The default of 8
-	// risks a silent RST_STREAM(REFUSED_STREAM) when the channel fills,
+	// risks a silent RST_STREAM(CANCEL) when the channel fills,
 	// after which Recv blocks until the context deadline.
 	c, err := client.NewClient(client.ClientOptions{
 		Addr: addr,
@@ -503,7 +503,7 @@ func TestIntegration_Client_BodyStream_Large(t *testing.T) {
 		w.WriteHeader(200)
 		_, _ = w.Write(want)
 	}))
-	// Large StreamEventBuffer prevents RST_STREAM(REFUSED_STREAM) on slow
+	// Large StreamEventBuffer prevents RST_STREAM(CANCEL) on slow
 	// CI runners where the server sends many DATA frames before the body
 	// reader goroutine is scheduled. 1 MiB / 16 KiB frames = ~64 events max.
 	c, err := client.NewClient(client.ClientOptions{

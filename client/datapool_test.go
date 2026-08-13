@@ -49,7 +49,7 @@ func streamPatternServer(t *testing.T, pattern []byte, chunk int) string {
 // frame RECEIPT, not on consumer read, so the connection reader buffers frames
 // independently of how fast the consumer drains. StreamEventBuffer is therefore
 // sized to absorb every in-flight frame; a smaller channel would drop a frame
-// via push() overflow and surface a spurious RST_STREAM(REFUSED_STREAM) under
+// via push() overflow and surface a spurious RST_STREAM(CANCEL) under
 // slow CI scheduling (same reasoning as the StreamEventBuffer=1024 large-body
 // integration tests).
 //

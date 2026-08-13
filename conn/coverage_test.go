@@ -9,7 +9,7 @@ package conn
 //   - handler.go: OnContinuation, OnPriority
 //   - settings.go: settingsRecorder preface guard (RFC 9113 §3.4) — every
 //     handler rejects a frame received before the server's SETTINGS preface
-//   - stream.go: push overflow path → RST_STREAM(REFUSED_STREAM)
+//   - stream.go: push overflow path → RST_STREAM(CANCEL)
 
 import (
 	"bytes"
@@ -469,7 +469,7 @@ func TestHandler_OnPriority_IsNoop(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// stream.go: push overflow → RST_STREAM(REFUSED_STREAM)
+// stream.go: push overflow → RST_STREAM(CANCEL)
 // ---------------------------------------------------------------------------
 
 // TestStream_Push_Overflow_SendsRST exercises the buffer-full path in
