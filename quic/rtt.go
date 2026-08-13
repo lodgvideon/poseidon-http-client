@@ -75,10 +75,18 @@ func absDuration(d time.Duration) time.Duration {
 // per-packet snapshot (draft-cheng-iccrg-delivery-rate-estimation), written by
 // onPacketSent only when BBR is the active controller (bbr.go). Under NewReno
 // they stay zero and are never read, so NewReno accounting is unchanged.
+// Field order is load-bearing. One of these is stored per sent packet in
+// sentSpace.packets, and Go stores a map element larger than 128 bytes out of
+// line — a separate heap allocation on every insert. With the three bools
+// interleaved among the wide fields this struct was 152 bytes and every sent
+// packet allocated; grouped at the end it is 128 and none do. No field changed
+// type or meaning. TestSentPacketStaysInlineInMap holds the line and carries the
+// measurements.
 type sentPacket struct {
-	timeSent     time.Time
-	ackEliciting bool
-	size         int // on-wire packet length in bytes, for congestion control (RFC 9002 §7)
+	timeSent      time.Time
+	deliveredTime time.Time // C.delivered_time snapshot at send (BBR delivery-rate sampler)
+	delivered     uint64    // C.delivered snapshot at send (BBR delivery-rate sampler)
+	size          int       // on-wire packet length in bytes, for congestion control (RFC 9002 §7)
 
 	// frame is the retransmittable frame this packet carries; hasFrame says
 	// whether there is one.
@@ -88,12 +96,11 @@ type sentPacket struct {
 	// frame into a packet of its own — so the one-element slice this used to be
 	// was allocated per datagram and never held more than one thing. Turn it back
 	// into a slice if a change ever coalesces several lost frames into one packet.
-	frame    retransFrame
-	hasFrame bool
+	frame retransFrame
 
-	delivered     uint64    // C.delivered snapshot at send (BBR delivery-rate sampler)
-	deliveredTime time.Time // C.delivered_time snapshot at send (BBR delivery-rate sampler)
-	appLimited    bool      // sender was application-limited at send (BBR: sample may be skipped)
+	ackEliciting bool
+	hasFrame     bool
+	appLimited   bool // sender was application-limited at send (BBR: sample may be skipped)
 }
 
 // sentSpace tracks the unacknowledged packets sent in one packet-number space.
