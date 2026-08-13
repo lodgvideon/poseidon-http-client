@@ -232,13 +232,13 @@ func (s *Stream) emitBlocked(kind blockKind) {
 		if !s.sdBlockedSet || s.sdBlockedLimit != s.sendMax {
 			s.sdBlockedSet = true
 			s.sdBlockedLimit = s.sendMax
-			_ = s.conn.writeAppFrames(AppendStreamDataBlocked(nil, s.id, s.sendMax), nil)
+			_ = s.conn.writeAppFrames(appendStreamDataBlocked(nil, s.id, s.sendMax), nil)
 		}
 	case blockConn:
 		if !s.conn.dataBlockedSet || s.conn.dataBlockedLimit != s.conn.connMax {
 			s.conn.dataBlockedSet = true
 			s.conn.dataBlockedLimit = s.conn.connMax
-			_ = s.conn.writeAppFrames(AppendDataBlocked(nil, s.conn.connMax), nil)
+			_ = s.conn.writeAppFrames(appendDataBlocked(nil, s.conn.connMax), nil)
 		}
 	}
 }
@@ -286,7 +286,7 @@ func (c *Conn) emitStreamsBlocked(uni bool, limit uint64) {
 	// loss (RFC 9000 §13.3) — a dropped datagram is not a write error, so the latch
 	// alone would not cover it.
 	retrans := &retransFrame{kind: retransStreamsBlocked, offset: limit, fin: uni}
-	if err := c.writeAppFrames(AppendStreamsBlocked(nil, uni, limit), retrans); err != nil {
+	if err := c.writeAppFrames(appendStreamsBlocked(nil, uni, limit), retrans); err != nil {
 		return
 	}
 	c.streamsBlockedSet[i] = true

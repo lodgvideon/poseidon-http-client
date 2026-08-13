@@ -69,10 +69,10 @@ type TLSHandshake struct {
 	tp   []byte
 }
 
-// NewClientHandshake creates a client-side QUIC TLS handshake. cfg must set
+// newClientHandshake creates a client-side QUIC TLS handshake. cfg must set
 // ServerName; it is cloned and forced to TLS 1.3 with ALPN "h3" when unset. tp
 // is the client's serialized QUIC transport parameters (RFC 9000 §7.4).
-func NewClientHandshake(cfg *tls.Config, tp []byte) *TLSHandshake {
+func newClientHandshake(cfg *tls.Config, tp []byte) *TLSHandshake {
 	c := cfg.Clone()
 	c.MinVersion = tls.VersionTLS13
 	if len(c.NextProtos) == 0 {
@@ -85,7 +85,7 @@ func NewClientHandshake(cfg *tls.Config, tp []byte) *TLSHandshake {
 // the server's certificate(s); it is cloned and forced to TLS 1.3, with ALPN
 // "h3" filled in when unset. tp is the server's serialized QUIC transport
 // parameters (RFC 9000 §7.4), which crypto/tls emits in the EncryptedExtensions.
-// It is the server-role counterpart to NewClientHandshake: the transport engine
+// It is the server-role counterpart to newClientHandshake: the transport engine
 // feeds it the client's Initial CRYPTO and pumps events the same way.
 func NewServerHandshake(cfg *tls.Config, tp []byte) *TLSHandshake {
 	c := cfg.Clone()

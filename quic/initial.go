@@ -7,7 +7,7 @@ import "github.com/lodgvideon/poseidon-http-client/internal/bytesx"
 // anti-amplification limit is large enough to send its whole flight.
 const InitialDatagramMinSize = 1200
 
-// BuildInitialPacket assembles and protects a client Initial packet carrying
+// buildInitialPacket assembles and protects a client Initial packet carrying
 // cryptoData (the TLS ClientHello) in a CRYPTO frame, padded with PADDING frames
 // so the datagram is at least minSize bytes (use InitialDatagramMinSize for the
 // first flight). dcid is the server's connection ID (the client's random
@@ -15,7 +15,7 @@ const InitialDatagramMinSize = 1200
 // empty). token is the Retry/NEW_TOKEN token (nil for a first Initial). pn is
 // the Initial packet number, pnLen its on-wire length (1–4). It appends the
 // protected packet to dst.
-func BuildInitialPacket(dst []byte, s *Sealer, dcid, scid, token []byte, pn uint64, pnLen int, cryptoOffset uint64, cryptoData []byte, minSize int) ([]byte, error) {
+func buildInitialPacket(dst []byte, s *Sealer, dcid, scid, token []byte, pn uint64, pnLen int, cryptoOffset uint64, cryptoData []byte, minSize int) ([]byte, error) {
 	payload := AppendCrypto(nil, cryptoOffset, cryptoData)
 
 	// Header length assuming a 2-byte Length varint (true for any datagram near

@@ -66,7 +66,7 @@ type Conn struct {
 	initialSealer   *Sealer
 	handshakeSealer *Sealer
 	oneRTTSealer    *Sealer    // current-generation 1-RTT send Sealer (ratcheted on key update)
-	keys            KeySet     // receive Openers per level (OneRTT = current 1-RTT read gen)
+	keys            keySet     // receive Openers per level (OneRTT = current 1-RTT read gen)
 	ku              *keyUpdate // RFC 9001 §6 key-update state (nil until app keys installed)
 
 	sendPN        [numSpaces]uint64 // next packet number to send per space
@@ -280,7 +280,7 @@ func NewConn(pc PacketConn, tlsConfig *tls.Config, transportParams []byte, opts 
 	}
 	c := &Conn{
 		pc:            pc,
-		hs:            NewClientHandshake(tlsConfig, transportParams),
+		hs:            newClientHandshake(tlsConfig, transportParams),
 		dcid:          dcid,
 		origDCID:      append([]byte(nil), dcid...), // the first Initial's DCID, for §7.3
 		initialSealer: is,
@@ -687,10 +687,10 @@ func (c *Conn) sendInitialFlight(ctx context.Context) error {
 	}
 	ch := c.pendingCrypto[spaceInitial]
 	if len(ch) == 0 {
-		return ErrNoClientHello
+		return errNoClientHello
 	}
 	pn := c.sendPN[spaceInitial]
-	pkt, err := BuildInitialPacket(c.sendBuf[:0], c.initialSealer, c.dcid, c.scid, nil,
+	pkt, err := buildInitialPacket(c.sendBuf[:0], c.initialSealer, c.dcid, c.scid, nil,
 		pn, 4, c.cryptoOffset[spaceInitial], ch, InitialDatagramMinSize)
 	if err != nil {
 		return err

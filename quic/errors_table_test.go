@@ -49,9 +49,9 @@ var sentinelsByName = map[string]error{
 	"ErrProtocolViolation":      ErrProtocolViolation,
 	"ErrAEADLimit":              ErrAEADLimit,
 	"ErrHandshakeClosed":        ErrHandshakeClosed,
-	"ErrNoClientHello":          ErrNoClientHello,
+	"errNoClientHello":          errNoClientHello,
 	"ErrNotInitial":             ErrNotInitial,
-	"ErrServerFlightIncomplete": ErrServerFlightIncomplete,
+	"errServerFlightIncomplete": errServerFlightIncomplete,
 }
 
 // noCloseCode lists the sentinels that carry no transport error code, with why.
@@ -73,9 +73,9 @@ var noCloseCode = map[string]string{
 	"ErrTooManyStreams":         "our OpenStream hit the peer's advertised limit — we are the one being limited",
 	"ErrNotEstablished":         "local API misuse: application data before the handshake completed",
 	"ErrHandshakeClosed":        "the peer closed first; answering a close with a close is not a thing",
-	"ErrNoClientHello":          "internal invariant failure in our own TLS stack",
+	"errNoClientHello":          "internal invariant failure in our own TLS stack",
 	"ErrNotInitial":             "AcceptInitial rejected a datagram before any connection exists to close",
-	"ErrServerFlightIncomplete": "local API misuse by the caller of NewServerConn; no connection exists yet",
+	"errServerFlightIncomplete": "local API misuse by the caller of NewServerConn; no connection exists yet",
 }
 
 // TestCloseCodeFor_EverySentinelIsClassified reads errors.go and requires each
@@ -162,7 +162,15 @@ func sentinelNamesInSource(t *testing.T, file string) []string {
 				continue
 			}
 			for i, id := range vs.Names {
-				if !strings.HasPrefix(id.Name, "Err") || i >= len(vs.Values) {
+				// Unexported sentinels count too. Whether a sentinel maps to a
+				// CONNECTION_CLOSE code is a question about what the connection does
+				// when it is raised, not about who can name it — #478 unexported two
+				// of these and a capital-only prefix would have silently stopped
+				// classifying them.
+				if !strings.HasPrefix(id.Name, "Err") && !strings.HasPrefix(id.Name, "err") {
+					continue
+				}
+				if i >= len(vs.Values) {
 					continue
 				}
 				call, ok := vs.Values[i].(*ast.CallExpr)

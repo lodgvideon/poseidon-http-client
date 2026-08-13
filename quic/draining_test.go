@@ -46,7 +46,7 @@ func TestConformance_RFC9000_Sec1022_NoAppSendAfterClose(t *testing.T) {
 	pc := &closePC{}
 	c := &Conn{pc: pc, dcid: []byte("draintst"), oneRTTSealer: sealer, closed: true}
 
-	if err := c.writeAppFrames(AppendPing(nil), nil); err != ErrConnClosed {
+	if err := c.writeAppFrames(appendPing(nil), nil); err != ErrConnClosed {
 		t.Fatalf("writeAppFrames after close = %v, want ErrConnClosed", err)
 	}
 	if len(pc.writes) != 0 {

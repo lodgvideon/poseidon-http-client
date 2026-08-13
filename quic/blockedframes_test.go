@@ -12,10 +12,10 @@ func TestConformance_RFC9000_Sec1321_BlockedFramesAckEliciting(t *testing.T) {
 		name  string
 		frame []byte
 	}{
-		{"data-blocked", AppendDataBlocked(nil, 100)},
-		{"stream-data-blocked", AppendStreamDataBlocked(nil, 0, 100)},
-		{"streams-blocked-bidi", AppendStreamsBlocked(nil, false, 5)},
-		{"streams-blocked-uni", AppendStreamsBlocked(nil, true, 5)},
+		{"data-blocked", appendDataBlocked(nil, 100)},
+		{"stream-data-blocked", appendStreamDataBlocked(nil, 0, 100)},
+		{"streams-blocked-bidi", appendStreamsBlocked(nil, false, 5)},
+		{"streams-blocked-uni", appendStreamsBlocked(nil, true, 5)},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -184,7 +184,7 @@ func TestConformance_RFC9000_Sec133_StreamsBlockedRetransmitRestatesLimit(t *tes
 	if !blocked || limit != 4 {
 		t.Fatalf("streamsBlockedNow = (%d, %v), want (4, true)", limit, blocked)
 	}
-	if got := string(retransFrame{kind: retransStreamsBlocked, offset: limit}.encode(nil)); got != string(AppendStreamsBlocked(nil, false, 4)) {
+	if got := string(retransFrame{kind: retransStreamsBlocked, offset: limit}.encode(nil)); got != string(appendStreamsBlocked(nil, false, 4)) {
 		t.Fatalf("re-encoded frame = %x, want the frame for limit 4", got)
 	}
 }

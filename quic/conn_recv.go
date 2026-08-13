@@ -439,7 +439,7 @@ func (c *Conn) prefilterPacket(hdr Header, pkt []byte) (skip bool, err error) {
 		// Opener: Initial keys derive from the observable connection ID with a public
 		// salt, so an on-path forger could seal a 0-RTT-typed packet that
 		// authenticates and have its frames processed and its SCID adopted. The
-		// exported ProcessDatagram helper has always skipped it (KeySet.openerFor
+		// exported processDatagram helper has always skipped it (keySet.openerFor
 		// returns nil for this type); the live path had not.
 		return true, nil
 	case hdr.Type == PacketRetry:
@@ -1084,7 +1084,7 @@ const maxPendingCtrl = 900
 func (h *connFrameHandler) OnPathChallenge(data *[8]byte) error {
 	h.ackEliciting = true
 	if len(h.c.pendingCtrl) < maxPendingCtrl {
-		h.c.pendingCtrl = AppendPathResponse(h.c.pendingCtrl, *data)
+		h.c.pendingCtrl = appendPathResponse(h.c.pendingCtrl, *data)
 		h.c.pathRespPending = true // its datagram MUST be expanded to 1200 (§8.2.2)
 	}
 	return nil

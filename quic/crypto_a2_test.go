@@ -41,7 +41,7 @@ func TestConformance_RFC9001_AppA2_ClientInitial(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	pkt, err := BuildInitialPacket(nil, sealer, dcid, nil, nil, 2, 4, 0, ch, 1200)
+	pkt, err := buildInitialPacket(nil, sealer, dcid, nil, nil, 2, 4, 0, ch, 1200)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -1,16 +1,16 @@
 package quic
 
-// KeySet holds the receive-side Openers for each encryption level. The
+// keySet holds the receive-side Openers for each encryption level. The
 // connection installs each as the TLS handshake surfaces the corresponding read
 // secret (RFC 9001 §4). A nil Opener means keys for that level are not yet
 // available, so packets at that level are buffered/skipped.
-type KeySet struct {
+type keySet struct {
 	Initial   *Opener
 	Handshake *Opener
 	OneRTT    *Opener
 }
 
-func (k *KeySet) openerFor(t PacketType) *Opener {
+func (k *keySet) openerFor(t PacketType) *Opener {
 	switch t {
 	case PacketInitial:
 		return k.Initial
@@ -23,15 +23,15 @@ func (k *KeySet) openerFor(t PacketType) *Opener {
 	}
 }
 
-// DatagramResult reports what ProcessDatagram did with one UDP datagram.
-type DatagramResult struct {
+// datagramResult reports what processDatagram did with one UDP datagram.
+type datagramResult struct {
 	Processed          int  // packets decrypted and dispatched to the handler
 	Skipped            int  // packets skipped: keys unavailable, or decryption failed
 	Retry              bool // a Retry packet was present
 	VersionNegotiation bool
 }
 
-// ProcessDatagram parses every QUIC packet coalesced in a single UDP datagram
+// processDatagram parses every QUIC packet coalesced in a single UDP datagram
 // (RFC 9000 §12.2), removes protection with the matching level's Opener, and
 // dispatches each packet's frames to h in order. dcidLen is the local
 // connection-ID length (to locate a short-header DCID). largestAcked returns the
@@ -49,8 +49,8 @@ type DatagramResult struct {
 // parses with the caller's handler for any space. The live Conn receive path
 // (recvDatagram) uses a space-aware handler that gates frames; this exported entry
 // point is not on that path.
-func ProcessDatagram(datagram []byte, dcidLen int, ks *KeySet, largestAcked func(PacketType) uint64, h FrameHandler) (DatagramResult, error) {
-	var res DatagramResult
+func processDatagram(datagram []byte, dcidLen int, ks *keySet, largestAcked func(PacketType) uint64, h FrameHandler) (datagramResult, error) {
+	var res datagramResult
 	rest := datagram
 	for len(rest) > 0 {
 		hdr, err := ParseHeader(rest, dcidLen)

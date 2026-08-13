@@ -113,7 +113,7 @@ func (c *cryptoReassembler) assembled() []byte { return c.buf[:c.end] }
 // the full packet number and pnLen its on-wire length (1–4).
 //
 // The payload is padded with PADDING frames when it is too short for header
-// protection to sample (RFC 9001 §5.4.2). Unlike BuildInitialPacket it does not
+// protection to sample (RFC 9001 §5.4.2). Unlike buildInitialPacket it does not
 // pad to the 1200-byte anti-amplification floor — a server bounds its early
 // flights to 3× the bytes it has received, so that padding is the caller's call.
 // It is the send-side counterpart to AcceptInitial, used to assemble the server's
@@ -346,7 +346,7 @@ func (f *ServerFlight) HandleClientHandshake(cryptoData []byte) error {
 // handshake is assumed already acknowledged; see docs/QUIC_SERVER_DESIGN.md.
 func NewServerConn(pc PacketConn, f *ServerFlight, clientDCID, clientSCID []byte) (*Conn, error) {
 	if f == nil || !f.Complete {
-		return nil, ErrServerFlightIncomplete
+		return nil, errServerFlightIncomplete
 	}
 	peer, err := ParseTransportParams(f.PeerTransportParams)
 	if err != nil {
@@ -392,7 +392,7 @@ func NewServerConn(pc PacketConn, f *ServerFlight, clientDCID, clientSCID []byte
 	// never confirms — it holds its Handshake keys and cannot run a key update.
 	// Queue it as an app-space control frame; the connection's first flush sends it.
 	c.handshakeConfirmed = true
-	c.pendingCtrl = AppendHandshakeDone(c.pendingCtrl)
+	c.pendingCtrl = appendHandshakeDone(c.pendingCtrl)
 
 	c.lastActivity = c.now()
 	return c, nil

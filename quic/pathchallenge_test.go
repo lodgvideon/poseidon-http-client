@@ -26,7 +26,7 @@ func TestConformance_RFC9000_Sec822_PathChallengeEchoed(t *testing.T) {
 	if !h.ackEliciting {
 		t.Fatal("a PATH_CHALLENGE is ack-eliciting")
 	}
-	if want := AppendPathResponse(nil, *challenge); !bytes.Equal(c.pendingCtrl, want) {
+	if want := appendPathResponse(nil, *challenge); !bytes.Equal(c.pendingCtrl, want) {
 		t.Fatalf("pendingCtrl = %x, want a PATH_RESPONSE echoing the challenge %x", c.pendingCtrl, want)
 	}
 }

@@ -11,8 +11,8 @@ func TestConformance_RFC9000_Sec1321_NewTokenPathResponseAckEliciting(t *testing
 		name  string
 		frame []byte
 	}{
-		{"new-token", AppendNewToken(nil, []byte("tok"))},
-		{"path-response", AppendPathResponse(nil, [8]byte{1, 2, 3, 4, 5, 6, 7, 8})},
+		{"new-token", appendNewToken(nil, []byte("tok"))},
+		{"path-response", appendPathResponse(nil, [8]byte{1, 2, 3, 4, 5, 6, 7, 8})},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
