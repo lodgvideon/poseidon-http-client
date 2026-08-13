@@ -158,49 +158,108 @@ func TestConformance_RFC9001_Sec57_ZeroRTTDiscardedNotDecrypted(t *testing.T) {
 // and passed with the dedup check disabled (#636); an off-path attacker replays
 // the bytes as they went over the wire, which is what the copy reproduces.
 //
-// Both packet-number spaces, because the check is per-space and dedup is what
-// stops a replay: narrowing it to `sp != spaceApp` left the whole quic suite green
-// while 1-RTT replays sailed through.
+// ALL THREE packet-number spaces, because c.acks is per-space and so is any
+// defect in a per-space check: narrowing the dedup to `sp != spaceApp` left the
+// whole quic suite green while 1-RTT replays sailed through, and `sp !=
+// spaceHandshake` did the same until the Handshake arm below existed.
 func TestConformance_RFC9000_Sec123_ReplayedPacketDiscarded(t *testing.T) {
-	t.Run("initial_ack_and_idle_timer", testReplayInitialDiscarded)
+	for _, arm := range replayLongHeaderArms() {
+		t.Run(arm.name, func(t *testing.T) { testReplayDiscarded(t, arm) })
+	}
 	t.Run("app_frame_dispatch", testReplayAppFramesNotDispatched)
 }
 
-// testReplayInitialDiscarded is the Initial-space arm: the two costs a duplicate
-// that reaches the handlers imposes on this end regardless of what it carries —
-// the ACK owed (§13.2.1, one ACK per replay is attacker-driven work) and the idle
-// timer (§10.1, a captured datagram replayed forever would postpone the idle
-// timeout without the peer ever sending anything new).
-func testReplayInitialDiscarded(t *testing.T) {
-	origDCID := []byte("origdcid")
-	_, serverKeys := InitialKeys(origDCID)
+// replayArm is one long-header packet-number space's fixture for
+// testReplayDiscarded: a Conn already holding that space's read keys, and a way
+// to seal a server packet into that space carrying one ack-eliciting PING.
+// Initial and Handshake differ in nothing else, so they share the arm body rather
+// than duplicating it — and running that one body per space is what makes a dedup
+// check narrowed to skip a single space fail on exactly that space's run.
+type replayArm struct {
+	name  string
+	space int
+	setup func(t *testing.T) (c *Conn, craft func(pn uint64) []byte)
+}
 
-	c := newInitialConn(t, origDCID)
+// replayLongHeaderArms builds the Initial and Handshake fixtures.
+//
+// The Handshake arm's starting state is one the connection really passes
+// through, not a convenience: c.keys.Handshake goes in at
+// SetReadKeys(QUICEncryptionLevelHandshake) and the only thing that takes it away
+// is discardSpace(spaceHandshake), whose sole non-test caller is OnHandshakeDone
+// — the server's HANDSHAKE_DONE (RFC 9001 §4.9.2). handshakeComplete is already
+// true because TLS completion sets it (Conn.HandshakeComplete) without discarding
+// the space. So the replay window spans the whole server Handshake flight, and
+// every packet of it stays replayable until HANDSHAKE_DONE lands.
+//
+// The payload is a PING because §12.4 Table 3 permits only PADDING, PING, ACK,
+// CRYPTO and a transport CONNECTION_CLOSE in these two spaces — the 1-RTT arm's
+// PATH_CHALLENGE would be a PROTOCOL_VIOLATION here, which is why frame dispatch
+// is observed there and the per-packet costs are observed here.
+func replayLongHeaderArms() []replayArm {
+	return []replayArm{{
+		name:  "initial_ack_and_idle_timer",
+		space: spaceInitial,
+		setup: func(t *testing.T) (*Conn, func(uint64) []byte) {
+			origDCID := []byte("origdcid")
+			_, serverKeys := InitialKeys(origDCID)
+			return newInitialConn(t, origDCID), func(pn uint64) []byte {
+				return craftServerInitial(t, serverKeys, nil, []byte{0xaa}, pn, appendPing(nil))
+			}
+		},
+	}, {
+		name:  "handshake_ack_and_idle_timer",
+		space: spaceHandshake,
+		setup: func(t *testing.T) (*Conn, func(uint64) []byte) {
+			scid := []byte{0xaa}
+			sealer, opener := closeTestSealerOpener(t, 0x5c)
+			c := &Conn{
+				pc: &closePC{}, dcid: []byte("replayhs"), handshakeComplete: true,
+				// The server's Initial arrived long before its Handshake flight,
+				// so its connection ID is already adopted (§7.2).
+				gotServerCID: true, serverSCID: scid,
+			}
+			c.keys.Handshake = opener
+			return c, func(pn uint64) []byte {
+				return sealServerPacket(t, sealer, PacketHandshake, nil, scid, pn, appendPing(nil))
+			}
+		},
+	}}
+}
+
+// testReplayDiscarded is the long-header arm, run once per space: the two costs a
+// duplicate that reaches the handlers imposes on this end regardless of what it
+// carries — the ACK owed (§13.2.1, one ACK per replay is attacker-driven work)
+// and the idle timer (§10.1, a captured datagram replayed forever would postpone
+// the idle timeout without the peer ever sending anything new).
+func testReplayDiscarded(t *testing.T, arm replayArm) {
+	sp := arm.space
+	c, craft := arm.setup(t)
 	start := time.Unix(1700000000, 0)
 	now := start
 	c.now = func() time.Time { return now }
 	c.lastActivity = start.Add(-time.Hour)
 
-	captured := craftServerInitial(t, serverKeys, nil, []byte{0xaa}, 7, appendPing(nil))
+	captured := craft(7)
 	deliver := func(pkt []byte) error { return c.recvDatagram(append([]byte(nil), pkt...)) }
 
 	if err := deliver(captured); err != nil {
 		t.Fatalf("first recvDatagram = %v, want nil", err)
 	}
-	if !c.acks[spaceInitial].ackPending() {
+	if !c.acks[sp].ackPending() {
 		t.Fatal("an ack-eliciting packet should leave an ACK owed")
 	}
 	if !c.lastActivity.Equal(start) {
 		t.Fatalf("a processed packet must reset the idle timer: lastActivity = %v, want %v",
 			c.lastActivity, start)
 	}
-	c.acks[spaceInitial].acked() // the ACK went out
+	c.acks[sp].acked()           // the ACK went out
 	now = start.Add(time.Minute) // time passes before the replay arrives
 
 	if err := deliver(captured); err != nil {
 		t.Fatalf("replayed recvDatagram = %v, want nil (discarded)", err)
 	}
-	if c.acks[spaceInitial].ackPending() {
+	if c.acks[sp].ackPending() {
 		t.Error("a replayed packet was processed again: its PING re-owed an ACK")
 	}
 	if !c.lastActivity.Equal(start) {
@@ -210,11 +269,10 @@ func testReplayInitialDiscarded(t *testing.T) {
 
 	// Control: a genuinely new packet number is still processed, and still does
 	// both of the things the replay must not.
-	fresh := craftServerInitial(t, serverKeys, nil, []byte{0xaa}, 8, appendPing(nil))
-	if err := deliver(fresh); err != nil {
+	if err := deliver(craft(8)); err != nil {
 		t.Fatalf("fresh recvDatagram = %v, want nil", err)
 	}
-	if !c.acks[spaceInitial].ackPending() {
+	if !c.acks[sp].ackPending() {
 		t.Fatal("control: a new packet number must still be processed")
 	}
 	if !c.lastActivity.Equal(now) {
@@ -226,7 +284,7 @@ func testReplayInitialDiscarded(t *testing.T) {
 // testReplayAppFramesNotDispatched is the 1-RTT arm, and it observes FRAME
 // DISPATCH itself — which neither the owed ACK nor the idle timer does, since both
 // are bookkeeping that processPacket runs after ParseFrames returns. Moving the
-// dedup check to just below ParseFrames therefore left the arm above green while
+// dedup check to just below ParseFrames therefore left the arms above green while
 // every replayed frame ran a second time.
 //
 // A PATH_CHALLENGE is the observable: the handler answers it by queueing a
