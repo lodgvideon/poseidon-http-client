@@ -88,11 +88,27 @@ func benchSendConnPC(b testing.TB, pc PacketConn) (*Conn, *Stream) {
 // sent-packet map at a reused key (no map growth per op) and keeps the AEAD
 // confidentiality counter below its limit (RFC 9001 §6.6), so the steady-state
 // allocation figure reflects the seal path alone rather than bookkeeping growth.
+//
+// The packet-number half of that has a consequence worth stating, because it is
+// invisible from the numbers these benchmarks print: a reused key means every
+// onSent OVERWRITES one map entry, and overwriting an existing key costs nothing
+// however large the element is. Per-packet bookkeeping that scales with DISTINCT
+// packet numbers is therefore inexpressible here and will report no change when
+// it moves. BenchmarkQUICSend_MonotonicPN is where that cost is visible.
 func resetSend(c *Conn, s *Stream) {
+	resetSendKeepingPN(c, s)
+	c.sendPN[spaceApp] = 0
+}
+
+// resetSendKeepingPN is resetSend without the packet-number rewind, for the one
+// benchmark that wants packet numbers to advance the way they do on a live
+// connection. The AEAD counter is still reset, so a long run cannot trip the
+// confidentiality limit (RFC 9001 §6.6) and drag a key update into the
+// measurement.
+func resetSendKeepingPN(c *Conn, s *Stream) {
 	s.sendOffset = 0
 	s.finSent = false
 	c.connSent = 0
-	c.sendPN[spaceApp] = 0
 	c.appSendCount = 0
 }
 
@@ -130,6 +146,62 @@ func BenchmarkQUICSend(b *testing.B) {
 		}
 	}
 	b.StopTimer()
+	b.ReportMetric(float64(pc.datagrams.Load())/float64(b.N), "datagrams/op")
+}
+
+// benchInFlight is how many unacknowledged packets BenchmarkQUICSend_MonotonicPN
+// keeps in the sent-packet map. On a live connection that bound is the
+// congestion window; here it is a constant, because the point is a stable window
+// rather than a realistic one.
+const benchInFlight = 64
+
+// BenchmarkQUICSend_MonotonicPN is BenchmarkQUICSend with the packet number left
+// to advance, which is the one thing resetSend holds still.
+//
+// It exists because the difference is not cosmetic. With the packet number
+// pinned, every onSent overwrites a single map entry, and overwriting an
+// existing key allocates nothing regardless of the element's size. Shrinking
+// sentPacket from 152 to 128 bytes removed exactly one allocation per sent
+// packet on the real path (#475, #599) and BenchmarkQUICSend reported the same
+// 1 allocs/op before and after — not because the fix did nothing, but because
+// the benchmark sends one packet number over and over, and that is the single
+// shape where the cost does not exist.
+//
+// So this measures send plus one map delete, and the delete is deliberate: it
+// stands in for the acknowledgement path, which is what bounds the sent-packet
+// map on a live connection. Without it the map would grow to b.N entries and
+// this would measure map growth, which is the failure mode resetSend was written
+// to avoid in the first place.
+//
+// Read it against BenchmarkQUICSend, not on its own: the gap between the two is
+// the per-distinct-packet bookkeeping cost, and it is the only place that gap is
+// visible.
+func BenchmarkQUICSend_MonotonicPN(b *testing.B) {
+	requireSendBench(b)
+	c, s, pc := benchSendConn(b)
+	req := []byte("GET / HTTP/3\r\nhost: h3.example\r\naccept: */*\r\n\r\n")
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		resetSendKeepingPN(c, s)
+		if _, err := s.Send(req, false); err != nil {
+			b.Fatal(err)
+		}
+		// Retire the packet that just left the window. sendPN was already
+		// incremented past the packet this iteration sent.
+		if pn := c.sendPN[spaceApp]; pn > benchInFlight {
+			delete(c.sent[spaceApp].packets, pn-benchInFlight-1)
+		}
+	}
+	b.StopTimer()
+	// A window that drifted means the prune fell behind the sends — several
+	// packets per op, say — and the run measured map growth rather than
+	// steady-state insertion. That is the exact confusion this benchmark exists
+	// to remove, so it fails loudly instead of reporting a number.
+	if got, want := len(c.sent[spaceApp].packets), min(b.N, benchInFlight+1); got > want {
+		b.Fatalf("sent-packet map holds %d entries, want at most %d: the window "+
+			"drifted, so this measured growth and not per-packet bookkeeping", got, want)
+	}
 	b.ReportMetric(float64(pc.datagrams.Load())/float64(b.N), "datagrams/op")
 }
 
