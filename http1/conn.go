@@ -334,7 +334,49 @@ func (c *Conn) NewExchange() *Exchange {
 var (
 	crlf       = []byte("\r\n")
 	finalChunk = []byte("0\r\n\r\n")
+	// statusName is the :status field name ReadResponse synthesises for the
+	// H2-style client layer. It is fixed, so it is built once here rather than
+	// converted from its literal on every response — the same treatment
+	// client/client.go and grpc/conn.go already give their pseudo-header names.
+	statusName = []byte(":status")
 )
+
+// statusDigits holds the three ASCII digits of every status code 100-999, so the
+// synthesised :status VALUE costs no allocation either. A package-level array is
+// zero-initialised data, not a heap object, so the whole table is free.
+var statusDigits = buildStatusDigits()
+
+func buildStatusDigits() [3000]byte {
+	var d [3000]byte
+	for code := 100; code <= 999; code++ {
+		i := code * 3
+		d[i] = byte('0' + code/100)
+		d[i+1] = byte('0' + (code/10)%10)
+		d[i+2] = byte('0' + code%10)
+	}
+	return d
+}
+
+// statusValue returns code rendered as three ASCII digits, without allocating.
+//
+// The result is shared and immutable: it aliases statusDigits, which nothing
+// writes to after construction. That is safe here only because nothing mutates a
+// header field's value in place — the returned fields reach the caller through
+// StreamEvent, and every consumer reads them (client/request.go copies via
+// strings.ToLower(string(...)), conn/handler.go compares bytes). The capacity is
+// capped to the three digits so that if a consumer ever DOES append to a value,
+// it reallocates instead of scribbling over the next code's digits.
+//
+// A code outside 100-999 cannot come from readStatusLine, which rejects anything
+// that is not three digits, but the fallback keeps this total rather than making
+// the caller prove that.
+func statusValue(code int) []byte {
+	if code < 100 || code > 999 {
+		return []byte(strconv.Itoa(code))
+	}
+	i := code * 3
+	return statusDigits[i : i+3 : i+3]
+}
 
 // Exchange is one HTTP/1.1 request/response pair.
 //
@@ -1420,8 +1462,8 @@ func (ex *Exchange) ReadResponse(ctx context.Context) (statusCode int, headers [
 	headers = make([]header.Field, 0, 12)
 	// Prepend :status for compatibility with the H2-style client layer.
 	headers = append(headers, header.Field{
-		Name:  []byte(":status"),
-		Value: []byte(strconv.Itoa(statusCode)),
+		Name:  statusName,
+		Value: statusValue(statusCode),
 	})
 
 	// Drop the partial block on error rather than handing it back beside the
