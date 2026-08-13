@@ -1031,18 +1031,21 @@ func (ex *Exchange) WriteRequest(ctx context.Context, fields []header.Field, end
 	h = append(h, "\r\n"...)
 
 	for _, f := range fields {
-		name := string(f.Name)
-		if len(name) == 0 || name[0] == ':' {
+		if len(f.Name) == 0 || f.Name[0] == ':' {
 			continue // skip pseudo-headers
 		}
-		lower := strings.ToLower(name)
-		switch lower {
-		case "host", "connection", "transfer-encoding", "te",
-			"proxy-connection", "keep-alive", "upgrade":
-			// H2 forbidden / hop-by-hop headers; we manage them ourselves.
+		// H2 forbidden / hop-by-hop headers; we manage them ourselves.
+		if isConnectionManagedName(f.Name) {
 			continue
 		}
-		h = append(h, lower...)
+		// Byte-wise, for the reason stated at the Content-Length probe above:
+		// the name is peer- or caller-supplied and this runs per header per
+		// request. string(f.Name) plus strings.ToLower cost one allocation for
+		// every name spelled with a capital — which is how RFC 9110 spells them,
+		// so the canonical shape was the expensive one. Measured before the
+		// change on eight fields, five of them capitalised: 16 allocs/op against
+		// 11 for the same request with the names already lower-case.
+		h = appendASCIILower(h, f.Name)
 		h = append(h, ": "...)
 		h = append(h, f.Value...)
 		h = append(h, "\r\n"...)
@@ -1515,6 +1518,48 @@ func asciiEqualFold(name []byte, lower string) bool {
 		}
 	}
 	return true
+}
+
+// appendASCIILower appends name to dst, folding A-Z on the way. RFC 9110 §5.1
+// makes field names case-insensitive, so the wire spelling is ours to choose and
+// lower-case is what this client has always emitted.
+//
+// ASCII-only, like asciiEqualFold and asciiLowerHeaderName and for the same
+// reason: strings.ToLower is Unicode-aware, so it re-encodes bytes that are not
+// valid UTF-8 rather than leaving them alone, and RFC 9112 §5.6.2 confines a
+// token to ASCII anyway.
+func appendASCIILower(dst, name []byte) []byte {
+	for _, c := range name {
+		if c >= 'A' && c <= 'Z' {
+			c += 'a' - 'A'
+		}
+		dst = append(dst, c)
+	}
+	return dst
+}
+
+// isConnectionManagedName reports whether a caller-supplied field name is one
+// this client manages itself: the hop-by-hop set plus Host, which WriteRequest
+// writes from the authority.
+//
+// Switching on the length first means the common case — a name that is none of
+// these — costs one integer comparison rather than seven folds.
+func isConnectionManagedName(name []byte) bool {
+	switch len(name) {
+	case 2:
+		return asciiEqualFold(name, "te")
+	case 4:
+		return asciiEqualFold(name, "host")
+	case 7:
+		return asciiEqualFold(name, "upgrade")
+	case 10:
+		return asciiEqualFold(name, "connection") || asciiEqualFold(name, "keep-alive")
+	case 16:
+		return asciiEqualFold(name, "proxy-connection")
+	case 17:
+		return asciiEqualFold(name, "transfer-encoding")
+	}
+	return false
 }
 
 // asciiLowerHeaderName lowercases a response header name over ASCII only,

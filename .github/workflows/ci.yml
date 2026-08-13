@@ -52,8 +52,13 @@ jobs:
       # green. When adding a !race test, check it against BOTH lists:
       #   grep -rl '//go:build !race' --include='*_test.go' .   # package present?
       #   go test -count=1 -v -run '<pattern>' ./...            # name matches?
+      #
+      #   3. ./http1/ was absent when TestWriteRequest_CaseFoldingDoesNotAllocate
+      #      was added (#511). That one hit BOTH failure modes at once — the
+      #      package was missing here AND its first name, ...CostsNoAllocations,
+      #      did not match "Allocs" either. Renamed and listed.
       - name: Allocation gates (not under -race)
-        run: go test -count=1 -run 'Allocs|DoesNotAllocate|IsNotCopied|CallOptions' ./conn/ ./client/ ./grpc/
+        run: go test -count=1 -run 'Allocs|DoesNotAllocate|IsNotCopied|CallOptions' ./conn/ ./client/ ./grpc/ ./http1/
       # http1 is RFC 9112 and http3 is RFC 9114; neither compresses headers, and
       # both used to import hpack — RFC 7541 — for nothing but the field struct.
       # The shared vocabulary lives in ./header now, and this keeps the edge from
