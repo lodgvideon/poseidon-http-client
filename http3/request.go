@@ -62,6 +62,17 @@ func defaultSensitiveField(name []byte) bool {
 	return false
 }
 
+// The request pseudo-header names are fixed by RFC 9114 §4.3.1, so they are built
+// once here rather than converted from a string literal on every encode. The QPACK
+// encoder only reads field names, and the dynamic table copies what it inserts into
+// its own arena, so nothing retains or mutates these.
+var (
+	pseudoMethod    = []byte(":method")
+	pseudoScheme    = []byte(":scheme")
+	pseudoAuthority = []byte(":authority")
+	pseudoPath      = []byte(":path")
+)
+
 // EncodeHeaders QPACK-encodes the request's field section — the request pseudo-
 // headers first, then the regular headers (RFC 9114 §4.3.1) — and appends it to
 // dst wrapped in a HEADERS frame (§7.2.2). It returns ErrH3Message if a required
@@ -101,13 +112,13 @@ func (r *Request) EncodeHeaders(enc *qpack.Encoder, dst []byte, maxFieldSection 
 	}
 	fields := make([]header.Field, 0, 4+len(r.Headers))
 	fields = append(fields,
-		header.Field{Name: []byte(":method"), Value: []byte(r.Method)},
-		header.Field{Name: []byte(":scheme"), Value: []byte(r.Scheme)},
+		header.Field{Name: pseudoMethod, Value: []byte(r.Method)},
+		header.Field{Name: pseudoScheme, Value: []byte(r.Scheme)},
 	)
 	if r.Authority != "" {
-		fields = append(fields, header.Field{Name: []byte(":authority"), Value: []byte(r.Authority)})
+		fields = append(fields, header.Field{Name: pseudoAuthority, Value: []byte(r.Authority)})
 	}
-	fields = append(fields, header.Field{Name: []byte(":path"), Value: []byte(r.Path)})
+	fields = append(fields, header.Field{Name: pseudoPath, Value: []byte(r.Path)})
 
 	for i := range r.Headers {
 		h := r.Headers[i]
