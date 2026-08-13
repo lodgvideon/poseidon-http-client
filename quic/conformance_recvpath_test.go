@@ -150,19 +150,28 @@ func TestConformance_RFC9001_Sec57_ZeroRTTDiscardedNotDecrypted(t *testing.T) {
 // so the duplicate must be dropped before its frames reach the handlers.
 //
 // Every delivery gets a FRESH COPY of the captured bytes, and that copy is the
-// whole test. recvDatagram removes header protection IN PLACE — byte 0 of this
-// packet goes 0xca -> 0xc3 — so handing it the same slice a second time replays a
+// whole test. recvDatagram removes header protection IN PLACE — byte 0 of an
+// Initial goes 0xca -> 0xc3 — so handing it the same slice a second time replays a
 // packet that no longer authenticates. That one is dropped at the "no keys, or
 // authentication failed" skip in the datagram loop, long before the dedup check,
 // and leaves no ACK owed for entirely the wrong reason. This test did exactly that
 // and passed with the dedup check disabled (#636); an off-path attacker replays
 // the bytes as they went over the wire, which is what the copy reproduces.
 //
-// Two observables, because a duplicate that reaches the handlers costs both:
-// the ACK owed (§13.2.1 — one ACK per replay is attacker-driven work), and the
-// idle timer (§10.1 — a captured datagram replayed forever would postpone the
-// idle timeout without the peer ever sending anything new).
+// Both packet-number spaces, because the check is per-space and dedup is what
+// stops a replay: narrowing it to `sp != spaceApp` left the whole quic suite green
+// while 1-RTT replays sailed through.
 func TestConformance_RFC9000_Sec123_ReplayedPacketDiscarded(t *testing.T) {
+	t.Run("initial_ack_and_idle_timer", testReplayInitialDiscarded)
+	t.Run("app_frame_dispatch", testReplayAppFramesNotDispatched)
+}
+
+// testReplayInitialDiscarded is the Initial-space arm: the two costs a duplicate
+// that reaches the handlers imposes on this end regardless of what it carries —
+// the ACK owed (§13.2.1, one ACK per replay is attacker-driven work) and the idle
+// timer (§10.1, a captured datagram replayed forever would postpone the idle
+// timeout without the peer ever sending anything new).
+func testReplayInitialDiscarded(t *testing.T) {
 	origDCID := []byte("origdcid")
 	_, serverKeys := InitialKeys(origDCID)
 
@@ -211,6 +220,79 @@ func TestConformance_RFC9000_Sec123_ReplayedPacketDiscarded(t *testing.T) {
 	if !c.lastActivity.Equal(now) {
 		t.Fatalf("control: a new packet must reset the idle timer: lastActivity = %v, want %v",
 			c.lastActivity, now)
+	}
+}
+
+// testReplayAppFramesNotDispatched is the 1-RTT arm, and it observes FRAME
+// DISPATCH itself — which neither the owed ACK nor the idle timer does, since both
+// are bookkeeping that processPacket runs after ParseFrames returns. Moving the
+// dedup check to just below ParseFrames therefore left the arm above green while
+// every replayed frame ran a second time.
+//
+// A PATH_CHALLENGE is the observable: the handler answers it by queueing a
+// PATH_RESPONSE in pendingCtrl (§8.2.2), so a replay whose frames run appends nine
+// bytes the peer never asked for — echo traffic an off-path attacker gets to
+// generate from one captured datagram. pendingCtrl is the harness's existing view
+// of queued outbound bytes; the flushed datagram is not, since §8.2.2 pads it to
+// 1200 whether it carries one PATH_RESPONSE or two.
+//
+// The replayed number is deliberately NOT the largest received, so a check keyed on
+// largestRecv rather than on the tracker's per-number ranges fails here as well.
+func testReplayAppFramesNotDispatched(t *testing.T) {
+	sealer, opener := closeTestSealerOpener(t, 0x9d)
+	c := &Conn{pc: &closePC{}, dcid: []byte("replay1r"), oneRTTSealer: sealer, handshakeComplete: true}
+	c.keys.OneRTT = opener
+
+	craft := func(pn uint64, data [8]byte) []byte {
+		return sealServerPacket(t, sealer, PacketShort, nil, nil, pn,
+			append([]byte{byte(FramePathChallenge)}, data[:]...))
+	}
+	deliver := func(pkt []byte) error { return c.recvDatagram(append([]byte(nil), pkt...)) }
+	var want []byte // the PATH_RESPONSEs dispatch is allowed to have queued so far
+	check := func(stage string) {
+		t.Helper()
+		if !bytes.Equal(c.pendingCtrl, want) {
+			t.Errorf("%s: pendingCtrl = %x, want %x (%d PATH_RESPONSEs)",
+				stage, c.pendingCtrl, want, len(want)/9)
+		}
+	}
+
+	lowData := [8]byte{'l', 'o', 'w', 'c', 'h', 'a', 'l', 'l'}
+	low := craft(5, lowData)
+	if err := deliver(low); err != nil {
+		t.Fatalf("recvDatagram(pn=5) = %v, want nil", err)
+	}
+	want = appendPathResponse(want, lowData)
+	check("first delivery")
+
+	// A higher number lands next, so the replay below is no longer the largest
+	// received and a largest-only dedup would wave it through.
+	highData := [8]byte{'h', 'i', 'g', 'h', 'c', 'h', 'a', 'l'}
+	if err := deliver(craft(9, highData)); err != nil {
+		t.Fatalf("recvDatagram(pn=9) = %v, want nil", err)
+	}
+	want = appendPathResponse(want, highData)
+	check("higher packet number")
+	c.acks[spaceApp].acked() // both ACKs went out
+
+	if err := deliver(low); err != nil {
+		t.Fatalf("replayed recvDatagram = %v, want nil (discarded)", err)
+	}
+	check("after the replay: its PATH_CHALLENGE was dispatched a second time")
+	if c.acks[spaceApp].ackPending() {
+		t.Error("a replayed packet was processed again: it re-owed an ACK")
+	}
+
+	// Control: a genuinely new packet number in the same space still dispatches,
+	// so the arm is not passing merely because nothing ever reaches the handlers.
+	freshData := [8]byte{'f', 'r', 'e', 's', 'h', 'c', 'h', 'l'}
+	if err := deliver(craft(10, freshData)); err != nil {
+		t.Fatalf("fresh recvDatagram = %v, want nil", err)
+	}
+	want = appendPathResponse(want, freshData)
+	check("control")
+	if !c.acks[spaceApp].ackPending() {
+		t.Fatal("control: a new packet number must still be processed")
 	}
 }
 
