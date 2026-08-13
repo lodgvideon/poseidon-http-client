@@ -134,10 +134,9 @@ func (c *Conn) HasResidue() bool {
 		// data. One bounded read settles it and drains the post-handshake records
 		// either way: plaintext means residue, a timeout means the connection was
 		// clean and is now clean and quiet.
-		_ = c.nc.SetReadDeadline(time.Now().Add(time.Millisecond))
-		_, err := c.br.Peek(1)
-		_ = c.nc.SetReadDeadline(time.Time{})
-		return err == nil
+		//
+		// FUTURE deadline: the question is about the socket.
+		return c.peekUnder(time.Now().Add(probeWindow)) == nil
 	}
 
 	if !known {
@@ -153,10 +152,7 @@ func (c *Conn) HasResidue() bool {
 		// the socket the real question. It costs ~1ms, which is why it is not the
 		// primary path; being slow on an exotic transport is a price worth paying,
 		// being blind on one is not.
-		_ = c.nc.SetReadDeadline(time.Now().Add(time.Millisecond))
-		_, err := c.br.Peek(1)
-		_ = c.nc.SetReadDeadline(time.Time{})
-		return err == nil
+		return c.peekUnder(time.Now().Add(probeWindow)) == nil
 	}
 
 	// The socket is empty and this is a layered transport, which does not settle
@@ -167,8 +163,5 @@ func (c *Conn) HasResidue() bool {
 	// moment it would have to. (This is the exact opposite of ProbeIdle's future
 	// deadline, and of the fallback above, which are asking the socket a question
 	// this one deliberately avoids.)
-	_ = c.nc.SetReadDeadline(deadlineLongPast)
-	_, err := c.br.Peek(1)
-	_ = c.nc.SetReadDeadline(time.Time{})
-	return err == nil
+	return c.peekUnder(deadlineLongPast) == nil
 }
