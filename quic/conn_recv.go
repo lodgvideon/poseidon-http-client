@@ -220,10 +220,32 @@ func (c *Conn) computeReadDeadline(ctx context.Context) time.Time {
 	return dl
 }
 
+// deadlineSetter is the one optional PacketConn capability this package depends
+// on: the receive path uses it to drain without blocking, the ACK timer to fire
+// within max_ack_delay, and PTO to bound a probe wait. A transport without it (a
+// plain pipe in a unit test) degrades to blocking one-datagram reads, which every
+// caller handles.
+//
+// It is asserted per call rather than resolved once into a Conn field, and that
+// is deliberate. 206 struct literals across 69 test files build &Conn{pc: ...}
+// directly, 57 of them with a deadline-capable transport; a field populated only
+// by NewConn and NewServerConn would read as nil for all of them and silently
+// switch off the behaviour those tests exercise. Asserting to a single-method
+// interface is an itab lookup the runtime caches.
+type deadlineSetter interface {
+	SetReadDeadline(time.Time) error
+}
+
+// readDeadliner returns the transport's deadline setter, if it has one.
+func (c *Conn) readDeadliner() (deadlineSetter, bool) {
+	dl, ok := c.pc.(deadlineSetter)
+	return dl, ok
+}
+
 // setReadDeadline arms the PacketConn read deadline when the transport supports it
 // (a no-op otherwise, preserving the plain-Read behavior of deadline-less pipes).
 func (c *Conn) setReadDeadline(t time.Time) {
-	if dl, ok := c.pc.(interface{ SetReadDeadline(time.Time) error }); ok {
+	if dl, ok := c.readDeadliner(); ok {
 		_ = dl.SetReadDeadline(t)
 	}
 }
@@ -234,7 +256,7 @@ func (c *Conn) setReadDeadline(t time.Time) {
 // cannot schedule the fallback, so an ACK is never deferred there — it is sent
 // immediately, preserving the pre-deferral behavior and never risking a stall.
 func (c *Conn) canScheduleAckTimer() bool {
-	_, ok := c.pc.(interface{ SetReadDeadline(time.Time) error })
+	_, ok := c.readDeadliner()
 	return ok
 }
 
@@ -322,7 +344,7 @@ func (c *Conn) ensureReadWatchdog(ctx context.Context) {
 	if c.readWatchdogStarted || ctx.Done() == nil {
 		return
 	}
-	dl, ok := c.pc.(interface{ SetReadDeadline(time.Time) error })
+	dl, ok := c.readDeadliner()
 	if !ok {
 		c.readWatchdogStarted = true // no deadline support: nothing to watch
 		return
@@ -381,7 +403,7 @@ const maxDrainBurst = 512
 // have no non-blocking read), preserving their one-datagram-per-Poll behavior.
 // Assumes c.mu is held (called from the Poll receive path).
 func (c *Conn) drainBuffered() error {
-	dl, ok := c.pc.(interface{ SetReadDeadline(time.Time) error })
+	dl, ok := c.readDeadliner()
 	if !ok {
 		return nil
 	}

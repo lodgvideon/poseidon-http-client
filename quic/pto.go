@@ -219,7 +219,7 @@ func (c *Conn) readWithPTO(ctx context.Context, buf []byte) (int, error) {
 	if err := ctx.Err(); err != nil {
 		return 0, err
 	}
-	dl, hasDeadline := c.pc.(interface{ SetReadDeadline(time.Time) error })
+	dl, hasDeadline := c.readDeadliner()
 	if hasDeadline && ctx.Done() != nil {
 		// Watchdog: on context cancel or deadline, poke the read deadline into the
 		// past to unblock the in-flight Read. SetReadDeadline is safe to call
