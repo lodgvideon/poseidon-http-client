@@ -100,7 +100,7 @@ func TestTLSHandshake_InMemory(t *testing.T) {
 	cert, pool := genServerCert(t)
 	tp := []byte{0x01, 0x02, 0x03}
 
-	client := NewClientHandshake(&tls.Config{ServerName: "example.com", RootCAs: pool}, tp)
+	client := newClientHandshake(&tls.Config{ServerName: "example.com", RootCAs: pool}, tp)
 	// Construct the server via the public constructor with a bare config: this
 	// also proves NewServerHandshake fills in TLS 1.3 + ALPN "h3" (asserted below).
 	server := NewServerHandshake(&tls.Config{Certificates: []tls.Certificate{cert}}, tp)

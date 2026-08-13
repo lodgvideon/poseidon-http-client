@@ -65,7 +65,7 @@ func TestConformance_RFC9000_Sec141_InitialFlight(t *testing.T) {
 
 	// Drive a real handshake far enough to produce the ClientHello.
 	_, pool := genServerCert(t)
-	hs := NewClientHandshake(&tls.Config{ServerName: "example.com", RootCAs: pool}, []byte{0x01, 0x02, 0x03})
+	hs := newClientHandshake(&tls.Config{ServerName: "example.com", RootCAs: pool}, []byte{0x01, 0x02, 0x03})
 	if err := hs.Start(context.Background()); err != nil {
 		t.Fatal(err)
 	}
@@ -77,9 +77,9 @@ func TestConformance_RFC9000_Sec141_InitialFlight(t *testing.T) {
 		t.Fatal("handshake produced no ClientHello")
 	}
 
-	pkt, err := BuildInitialPacket(nil, sealer, dcid, scid, nil, 0, 4, 0, cc.initial, InitialDatagramMinSize)
+	pkt, err := buildInitialPacket(nil, sealer, dcid, scid, nil, 0, 4, 0, cc.initial, InitialDatagramMinSize)
 	if err != nil {
-		t.Fatalf("BuildInitialPacket: %v", err)
+		t.Fatalf("buildInitialPacket: %v", err)
 	}
 	if len(pkt) < InitialDatagramMinSize {
 		t.Fatalf("Initial datagram = %d bytes, want >= %d", len(pkt), InitialDatagramMinSize)

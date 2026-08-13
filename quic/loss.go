@@ -43,11 +43,11 @@ func (rf retransFrame) encode(dst []byte) []byte {
 	case retransReset:
 		return AppendResetStream(dst, rf.streamID, rf.errCode, rf.offset)
 	case retransStopSending:
-		return AppendStopSending(dst, rf.streamID, rf.errCode)
+		return appendStopSending(dst, rf.streamID, rf.errCode)
 	case retransRetire:
-		return AppendRetireConnectionID(dst, rf.offset)
+		return appendRetireConnectionID(dst, rf.offset)
 	case retransStreamsBlocked:
-		return AppendStreamsBlocked(dst, rf.fin, rf.offset)
+		return appendStreamsBlocked(dst, rf.fin, rf.offset)
 	default:
 		return AppendCrypto(dst, rf.offset, rf.data)
 	}

@@ -58,9 +58,9 @@ func FuzzParseFrames(f *testing.F) {
 	f.Add(AppendStream(nil, 4, 0, true, []byte("hello")))
 	f.Add(AppendStream(nil, 8, 100, false, nil))
 	f.Add(AppendCrypto(nil, 0, []byte("crypto-bytes")))
-	f.Add(AppendPing(nil))
+	f.Add(appendPing(nil))
 	f.Add(AppendAck(nil, 10, 3, 4, []AckRange{{Gap: 1, Length: 2}}))
-	f.Add(AppendPathResponse(nil, [8]byte{1, 2, 3, 4, 5, 6, 7, 8}))
+	f.Add(appendPathResponse(nil, [8]byte{1, 2, 3, 4, 5, 6, 7, 8}))
 	f.Add([]byte{0x40})                                                             // truncated 2-byte varint frame type
 	f.Add([]byte{0x08, 0x40})                                                       // STREAM with a truncated stream-id varint
 	f.Add([]byte{0x02, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff})             // ACK: huge largest, no more bytes
@@ -115,7 +115,7 @@ func fuzzClientInitial(tb testing.TB, dcid []byte) []byte {
 		InitialMaxStreamDataUni:       1 << 20,
 		InitialMaxStreamsUni:          4,
 	})
-	hs := NewClientHandshake(&tls.Config{ServerName: "example.com"}, tp)
+	hs := newClientHandshake(&tls.Config{ServerName: "example.com"}, tp)
 	// crypto/tls runs the handshake on its own goroutine; close it here since only
 	// the ClientHello is wanted (the sink copies it) and it never completes.
 	defer func() { _ = hs.Close() }()
@@ -131,10 +131,10 @@ func fuzzClientInitial(tb testing.TB, dcid []byte) []byte {
 	if err != nil {
 		tb.Fatalf("NewSealer: %v", err)
 	}
-	pkt, err := BuildInitialPacket(nil, sealer, dcid, nil, nil, 0, 4, 0,
+	pkt, err := buildInitialPacket(nil, sealer, dcid, nil, nil, 0, 4, 0,
 		sink.crypto[tls.QUICEncryptionLevelInitial], InitialDatagramMinSize)
 	if err != nil {
-		tb.Fatalf("BuildInitialPacket: %v", err)
+		tb.Fatalf("buildInitialPacket: %v", err)
 	}
 	return pkt
 }

@@ -138,7 +138,7 @@ func (c *Conn) flush() error {
 			// bare PING to elicit an ACK. Not retransmitted — a later PTO re-probes.
 			// At most one probe flag is ever set (onPTO chooses one), so clearing
 			// both here is safe once this space's probe is emitted.
-			frames = AppendPing(frames)
+			frames = appendPing(frames)
 			c.probePending, c.handshakeProbe = false, false
 		}
 		var retrans *retransFrame

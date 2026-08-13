@@ -9,19 +9,19 @@ func appendV(dst []byte, v uint64) []byte {
 	return append(dst, b[:n]...)
 }
 
-// AppendPadding appends n PADDING frames (n zero bytes).
-func AppendPadding(dst []byte, n int) []byte {
+// appendPadding appends n PADDING frames (n zero bytes).
+func appendPadding(dst []byte, n int) []byte {
 	for i := 0; i < n; i++ {
 		dst = append(dst, 0x00)
 	}
 	return dst
 }
 
-// AppendPing appends a PING frame.
-func AppendPing(dst []byte) []byte { return append(dst, byte(FramePing)) }
+// appendPing appends a PING frame.
+func appendPing(dst []byte) []byte { return append(dst, byte(FramePing)) }
 
-// AppendHandshakeDone appends a HANDSHAKE_DONE frame (server-only in practice).
-func AppendHandshakeDone(dst []byte) []byte { return append(dst, byte(FrameHandshakeDone)) }
+// appendHandshakeDone appends a HANDSHAKE_DONE frame (server-only in practice).
+func appendHandshakeDone(dst []byte) []byte { return append(dst, byte(FrameHandshakeDone)) }
 
 // AppendAck appends an ACK frame (RFC 9000 §19.3). ranges are the additional
 // ranges after First ACK Range, in wire order.
@@ -46,8 +46,8 @@ func AppendResetStream(dst []byte, streamID, errCode, finalSize uint64) []byte {
 	return appendV(dst, finalSize)
 }
 
-// AppendStopSending appends a STOP_SENDING frame.
-func AppendStopSending(dst []byte, streamID, errCode uint64) []byte {
+// appendStopSending appends a STOP_SENDING frame.
+func appendStopSending(dst []byte, streamID, errCode uint64) []byte {
 	dst = append(dst, byte(FrameStopSending))
 	dst = appendV(dst, streamID)
 	return appendV(dst, errCode)
@@ -61,8 +61,8 @@ func AppendCrypto(dst []byte, offset uint64, data []byte) []byte {
 	return append(dst, data...)
 }
 
-// AppendNewToken appends a NEW_TOKEN frame.
-func AppendNewToken(dst []byte, token []byte) []byte {
+// appendNewToken appends a NEW_TOKEN frame.
+func appendNewToken(dst []byte, token []byte) []byte {
 	dst = append(dst, byte(FrameNewToken))
 	dst = appendV(dst, uint64(len(token)))
 	return append(dst, token...)
@@ -111,21 +111,21 @@ func AppendMaxStreams(dst []byte, uni bool, maximum uint64) []byte {
 	return appendV(dst, maximum)
 }
 
-// AppendDataBlocked appends a DATA_BLOCKED frame.
-func AppendDataBlocked(dst []byte, limit uint64) []byte {
+// appendDataBlocked appends a DATA_BLOCKED frame.
+func appendDataBlocked(dst []byte, limit uint64) []byte {
 	dst = append(dst, byte(FrameDataBlocked))
 	return appendV(dst, limit)
 }
 
-// AppendStreamDataBlocked appends a STREAM_DATA_BLOCKED frame.
-func AppendStreamDataBlocked(dst []byte, streamID, limit uint64) []byte {
+// appendStreamDataBlocked appends a STREAM_DATA_BLOCKED frame.
+func appendStreamDataBlocked(dst []byte, streamID, limit uint64) []byte {
 	dst = append(dst, byte(FrameStreamDataBlocked))
 	dst = appendV(dst, streamID)
 	return appendV(dst, limit)
 }
 
-// AppendStreamsBlocked appends a STREAMS_BLOCKED frame (bidirectional unless uni).
-func AppendStreamsBlocked(dst []byte, uni bool, limit uint64) []byte {
+// appendStreamsBlocked appends a STREAMS_BLOCKED frame (bidirectional unless uni).
+func appendStreamsBlocked(dst []byte, uni bool, limit uint64) []byte {
 	if uni {
 		dst = append(dst, byte(FrameStreamsBlockedUni))
 	} else {
@@ -134,14 +134,14 @@ func AppendStreamsBlocked(dst []byte, uni bool, limit uint64) []byte {
 	return appendV(dst, limit)
 }
 
-// AppendRetireConnectionID appends a RETIRE_CONNECTION_ID frame.
-func AppendRetireConnectionID(dst []byte, seq uint64) []byte {
+// appendRetireConnectionID appends a RETIRE_CONNECTION_ID frame.
+func appendRetireConnectionID(dst []byte, seq uint64) []byte {
 	dst = append(dst, byte(FrameRetireConnectionID))
 	return appendV(dst, seq)
 }
 
-// AppendPathResponse appends a PATH_RESPONSE frame echoing an 8-byte challenge.
-func AppendPathResponse(dst []byte, data [8]byte) []byte {
+// appendPathResponse appends a PATH_RESPONSE frame echoing an 8-byte challenge.
+func appendPathResponse(dst []byte, data [8]byte) []byte {
 	dst = append(dst, byte(FramePathResponse))
 	return append(dst, data[:]...)
 }

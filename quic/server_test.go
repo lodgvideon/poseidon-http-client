@@ -7,7 +7,7 @@ import (
 	"testing"
 )
 
-// TestAcceptInitial_RoundTrip builds a real client Initial with BuildInitialPacket
+// TestAcceptInitial_RoundTrip builds a real client Initial with buildInitialPacket
 // (sealed with the client's Initial keys), then checks AcceptInitial derives the
 // same keys from the DCID, decrypts it, and recovers the connection IDs and the
 // ClientHello CRYPTO bytes through the PADDING that pads the datagram to 1200.
@@ -22,9 +22,9 @@ func TestAcceptInitial_RoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewSealer: %v", err)
 	}
-	pkt, err := BuildInitialPacket(nil, sealer, dcid, scid, nil, 0, 4, 0, clientHello, InitialDatagramMinSize)
+	pkt, err := buildInitialPacket(nil, sealer, dcid, scid, nil, 0, 4, 0, clientHello, InitialDatagramMinSize)
 	if err != nil {
-		t.Fatalf("BuildInitialPacket: %v", err)
+		t.Fatalf("buildInitialPacket: %v", err)
 	}
 
 	ci, err := AcceptInitial(pkt)
@@ -325,9 +325,9 @@ func TestServerConn_RequestResponseRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("seal client 1-RTT request: %v", err)
 	}
-	res, err := ProcessDatagram(pkt, len(sc.scid), &sc.keys, func(PacketType) uint64 { return 0 }, &connFrameHandler{c: sc, space: spaceApp})
+	res, err := processDatagram(pkt, len(sc.scid), &sc.keys, func(PacketType) uint64 { return 0 }, &connFrameHandler{c: sc, space: spaceApp})
 	if err != nil {
-		t.Fatalf("server ProcessDatagram: %v", err)
+		t.Fatalf("server processDatagram: %v", err)
 	}
 	if res.Processed != 1 {
 		t.Fatalf("server processed %d packets, want 1 (%+v)", res.Processed, res)
@@ -357,9 +357,9 @@ func TestServerConn_RequestResponseRoundTrip(t *testing.T) {
 		t.Fatalf("server Send response: %v", err)
 	}
 	respDg := <-fromServer
-	rres, err := ProcessDatagram(respDg, len(client.scid), &client.keys, func(PacketType) uint64 { return 0 }, &connFrameHandler{c: client, space: spaceApp})
+	rres, err := processDatagram(respDg, len(client.scid), &client.keys, func(PacketType) uint64 { return 0 }, &connFrameHandler{c: client, space: spaceApp})
 	if err != nil {
-		t.Fatalf("client ProcessDatagram(response): %v", err)
+		t.Fatalf("client processDatagram(response): %v", err)
 	}
 	if rres.Processed != 1 {
 		t.Fatalf("client processed %d response packets, want 1 (%+v)", rres.Processed, rres)

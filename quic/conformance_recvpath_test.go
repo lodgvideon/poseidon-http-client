@@ -37,7 +37,7 @@ func TestConformance_RFC9000_Sec52_ForeignVersionDiscarded(t *testing.T) {
 	for _, version := range []uint32{0x00000002, 0x6b3343cf /* a GREASE version */, QUICVersion1 + 1} {
 		c := newInitialConn(t, origDCID)
 		pkt := craftServerInitialVersion(t, serverKeys, nil, forgedSCID, 0,
-			AppendPing(nil), version)
+			appendPing(nil), version)
 		if err := c.recvDatagram(pkt); err != nil {
 			t.Fatalf("version %#x: recvDatagram = %v, want nil (silently discarded)", version, err)
 		}
@@ -55,7 +55,7 @@ func TestConformance_RFC9000_Sec52_ForeignVersionDiscarded(t *testing.T) {
 	// Control: the same packet at version 1 IS processed, so the test is not
 	// passing merely because the fixture never decrypts.
 	c := newInitialConn(t, origDCID)
-	ok := craftServerInitial(t, serverKeys, nil, forgedSCID, 0, AppendPing(nil))
+	ok := craftServerInitial(t, serverKeys, nil, forgedSCID, 0, appendPing(nil))
 	if err := c.recvDatagram(ok); err != nil {
 		t.Fatalf("control: recvDatagram = %v, want nil", err)
 	}
@@ -75,8 +75,8 @@ func TestConformance_RFC9000_Sec122_CoalescedForeignDCIDIgnored(t *testing.T) {
 
 	// Packet 1 addresses the client's (empty) connection ID; packet 2 carries a
 	// different DCID and must be ignored even though it authenticates.
-	p1 := craftServerInitial(t, serverKeys, nil, scid, 1, AppendPing(nil))
-	p2 := craftServerInitial(t, serverKeys, []byte{0x09, 0x09, 0x09, 0x09}, scid, 2, AppendPing(nil))
+	p1 := craftServerInitial(t, serverKeys, nil, scid, 1, appendPing(nil))
+	p2 := craftServerInitial(t, serverKeys, []byte{0x09, 0x09, 0x09, 0x09}, scid, 2, appendPing(nil))
 
 	c := newInitialConn(t, origDCID)
 	if err := c.recvDatagram(append(append([]byte{}, p1...), p2...)); err != nil {
@@ -120,7 +120,7 @@ func TestConformance_RFC9001_Sec57_ZeroRTTDiscardedNotDecrypted(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	payload := AppendPing(make([]byte, 0, 32))
+	payload := appendPing(make([]byte, 0, 32))
 	pnLen := 4
 	hdr, pnOff := AppendLongHeader(nil, PacketZeroRTT, QUICVersion1, nil, forgedSCID, nil, pnLen, uint64(pnLen+len(payload)+16))
 	for i := pnLen - 1; i >= 0; i-- {
@@ -154,7 +154,7 @@ func TestConformance_RFC9000_Sec123_ReplayedPacketDiscarded(t *testing.T) {
 	_, serverKeys := InitialKeys(origDCID)
 
 	c := newInitialConn(t, origDCID)
-	pkt := craftServerInitial(t, serverKeys, nil, []byte{0xaa}, 7, AppendPing(nil))
+	pkt := craftServerInitial(t, serverKeys, nil, []byte{0xaa}, 7, appendPing(nil))
 
 	if err := c.recvDatagram(pkt); err != nil {
 		t.Fatalf("first recvDatagram = %v, want nil", err)
@@ -172,7 +172,7 @@ func TestConformance_RFC9000_Sec123_ReplayedPacketDiscarded(t *testing.T) {
 	}
 
 	// Control: a genuinely new packet number is still processed.
-	fresh := craftServerInitial(t, serverKeys, nil, []byte{0xaa}, 8, AppendPing(nil))
+	fresh := craftServerInitial(t, serverKeys, nil, []byte{0xaa}, 8, appendPing(nil))
 	if err := c.recvDatagram(fresh); err != nil {
 		t.Fatalf("fresh recvDatagram = %v, want nil", err)
 	}
@@ -195,7 +195,7 @@ func TestConformance_RFC9000_Sec174_SpinBitRandomPerConnection(t *testing.T) {
 			t.Fatal(err)
 		}
 		c := &Conn{pc: &closePC{}, dcid: dcid, oneRTTSealer: sealer, spin: spin, now: func() time.Time { return time.Unix(9, 0) }}
-		pkt, err := c.sealPacket(spaceApp, AppendPing(nil), true, nil, false)
+		pkt, err := c.sealPacket(spaceApp, appendPing(nil), true, nil, false)
 		if err != nil {
 			t.Fatalf("sealPacket: %v", err)
 		}
@@ -240,11 +240,11 @@ func TestConformance_RFC9000_Sec123_ReorderedPacketNotDiscarded(t *testing.T) {
 
 	c := newInitialConn(t, origDCID)
 	// pn 1 overtakes pn 0 on the wire.
-	if err := c.recvDatagram(craftServerInitial(t, serverKeys, nil, []byte{0xaa}, 1, AppendPing(nil))); err != nil {
+	if err := c.recvDatagram(craftServerInitial(t, serverKeys, nil, []byte{0xaa}, 1, appendPing(nil))); err != nil {
 		t.Fatalf("recvDatagram(pn=1) = %v", err)
 	}
 	c.acks[spaceInitial].acked()
-	if err := c.recvDatagram(craftServerInitial(t, serverKeys, nil, []byte{0xaa}, 0, AppendPing(nil))); err != nil {
+	if err := c.recvDatagram(craftServerInitial(t, serverKeys, nil, []byte{0xaa}, 0, appendPing(nil))); err != nil {
 		t.Fatalf("recvDatagram(pn=0) = %v", err)
 	}
 	if !c.acks[spaceInitial].ackPending() {

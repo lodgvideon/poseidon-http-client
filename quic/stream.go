@@ -312,7 +312,7 @@ func (s *Stream) stopSendingLocked(errCode uint64) error {
 	s.conn.maybeRetire(s) // receive side terminal; if our FIN is also sent, drop from the map
 	// Retransmitted until acknowledged (§13.3): it has no self-healing successor.
 	rf := retransFrame{kind: retransStopSending, streamID: s.id, errCode: errCode}
-	return s.conn.writeAppFrames(AppendStopSending(nil, s.id, errCode), &rf)
+	return s.conn.writeAppFrames(appendStopSending(nil, s.id, errCode), &rf)
 }
 
 // streamChunk is a run of received stream bytes buffered until the bytes before

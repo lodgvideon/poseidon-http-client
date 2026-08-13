@@ -67,7 +67,7 @@ func clientHelloInitial(t *testing.T, pool *x509.CertPool, dcid []byte) []byte {
 		InitialMaxStreamDataUni:       1 << 20,
 		InitialMaxStreamsUni:          4,
 	})
-	hs := NewClientHandshake(&tls.Config{ServerName: "example.com", RootCAs: pool}, tp)
+	hs := newClientHandshake(&tls.Config{ServerName: "example.com", RootCAs: pool}, tp)
 	// Release it here, not at test end: only the ClientHello bytes are wanted (the
 	// sink copies them), and a lingering handshake would be counted by the
 	// goroutine-leak test below.
@@ -88,9 +88,9 @@ func clientHelloInitial(t *testing.T, pool *x509.CertPool, dcid []byte) []byte {
 	if err != nil {
 		t.Fatalf("NewSealer: %v", err)
 	}
-	pkt, err := BuildInitialPacket(nil, sealer, dcid, nil, nil, 0, 4, 0, hello, InitialDatagramMinSize)
+	pkt, err := buildInitialPacket(nil, sealer, dcid, nil, nil, 0, 4, 0, hello, InitialDatagramMinSize)
 	if err != nil {
-		t.Fatalf("BuildInitialPacket: %v", err)
+		t.Fatalf("buildInitialPacket: %v", err)
 	}
 	return pkt
 }

@@ -35,14 +35,14 @@ func craftServerInitialVersion(t *testing.T, serverKeys PacketKeys, dcid, scid [
 	return sealed
 }
 
-func serverInitialKeySet(t *testing.T, dcid []byte) *KeySet {
+func serverInitialKeySet(t *testing.T, dcid []byte) *keySet {
 	t.Helper()
 	_, server := InitialKeys(dcid)
 	op, err := NewOpener(server)
 	if err != nil {
 		t.Fatal(err)
 	}
-	return &KeySet{Initial: op}
+	return &keySet{Initial: op}
 }
 
 // TestProcessDatagram_ServerInitial decrypts a server Initial packet and
@@ -56,9 +56,9 @@ func TestProcessDatagram_ServerInitial(t *testing.T) {
 	dg := craftServerInitial(t, server, nil, []byte{0xaa}, 1, payload)
 
 	var rec recHandler
-	res, err := ProcessDatagram(dg, 0, serverInitialKeySet(t, dcid), zeroLargest, &rec)
+	res, err := processDatagram(dg, 0, serverInitialKeySet(t, dcid), zeroLargest, &rec)
 	if err != nil {
-		t.Fatalf("ProcessDatagram: %v", err)
+		t.Fatalf("processDatagram: %v", err)
 	}
 	if res.Processed != 1 || res.Skipped != 0 {
 		t.Fatalf("result = %+v, want 1 processed", res)
@@ -75,14 +75,14 @@ func TestProcessDatagram_Coalesced(t *testing.T) {
 	dcid := []byte{1, 2, 3, 4, 5, 6, 7, 8}
 	_, server := InitialKeys(dcid)
 
-	p1 := craftServerInitial(t, server, nil, []byte{0xaa}, 1, AppendPing(make([]byte, 0, 32)))
+	p1 := craftServerInitial(t, server, nil, []byte{0xaa}, 1, appendPing(make([]byte, 0, 32)))
 	p2 := craftServerInitial(t, server, nil, []byte{0xaa}, 2, AppendMaxData(make([]byte, 0, 32), 4096))
 	dg := append(append([]byte{}, p1...), p2...)
 
 	var rec recHandler
-	res, err := ProcessDatagram(dg, 0, serverInitialKeySet(t, dcid), zeroLargest, &rec)
+	res, err := processDatagram(dg, 0, serverInitialKeySet(t, dcid), zeroLargest, &rec)
 	if err != nil {
-		t.Fatalf("ProcessDatagram: %v", err)
+		t.Fatalf("processDatagram: %v", err)
 	}
 	if res.Processed != 2 {
 		t.Fatalf("processed %d, want 2 (%+v)", res.Processed, res)
@@ -95,7 +95,7 @@ func TestProcessDatagram_Coalesced(t *testing.T) {
 func TestProcessDatagram_SkipNoKeys(t *testing.T) {
 	shortPkt := []byte{0x40, 0x11, 0x22, 0x33} // short header, dcidLen 0
 	var rec recHandler
-	res, err := ProcessDatagram(shortPkt, 0, &KeySet{}, zeroLargest, &rec)
+	res, err := processDatagram(shortPkt, 0, &keySet{}, zeroLargest, &rec)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -111,11 +111,11 @@ func TestProcessDatagram_SkipNoKeys(t *testing.T) {
 func TestProcessDatagram_AuthFailure(t *testing.T) {
 	dcid := []byte{9, 9, 9, 9, 9, 9, 9, 9}
 	_, server := InitialKeys(dcid)
-	dg := craftServerInitial(t, server, nil, []byte{0xaa}, 1, AppendPing(make([]byte, 0, 32)))
+	dg := craftServerInitial(t, server, nil, []byte{0xaa}, 1, appendPing(make([]byte, 0, 32)))
 	dg[len(dg)-1] ^= 0xff // corrupt the tag
 
 	var rec recHandler
-	res, err := ProcessDatagram(dg, 0, serverInitialKeySet(t, dcid), zeroLargest, &rec)
+	res, err := processDatagram(dg, 0, serverInitialKeySet(t, dcid), zeroLargest, &rec)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -132,7 +132,7 @@ func TestProcessDatagram_Retry(t *testing.T) {
 		pkt = append(pkt, 0xcc)
 	}
 	var rec recHandler
-	res, err := ProcessDatagram(pkt, 0, &KeySet{}, zeroLargest, &rec)
+	res, err := processDatagram(pkt, 0, &keySet{}, zeroLargest, &rec)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -143,7 +143,7 @@ func TestProcessDatagram_Retry(t *testing.T) {
 
 // TestProcessDatagram_Malformed stops on a structurally invalid header.
 func TestProcessDatagram_Malformed(t *testing.T) {
-	if _, err := ProcessDatagram([]byte{0xc0, 0x00}, 0, &KeySet{}, zeroLargest, &recHandler{}); !errors.Is(err, ErrPacketEncoding) {
+	if _, err := processDatagram([]byte{0xc0, 0x00}, 0, &keySet{}, zeroLargest, &recHandler{}); !errors.Is(err, ErrPacketEncoding) {
 		t.Fatal("want ErrPacketEncoding")
 	}
 }

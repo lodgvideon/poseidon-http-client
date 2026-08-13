@@ -80,7 +80,7 @@ func eq(t *testing.T, got, want []string) {
 // parses it back, and checks each frame survives in order.
 func TestFrames_RoundTrip(t *testing.T) {
 	var b []byte
-	b = AppendPing(b)
+	b = appendPing(b)
 	b = AppendCrypto(b, 0, []byte("hello"))
 	b = AppendStream(b, 4, 0, false, []byte("GET"))
 	b = AppendStream(b, 8, 100, true, []byte("body"))
@@ -88,18 +88,18 @@ func TestFrames_RoundTrip(t *testing.T) {
 	b = AppendMaxData(b, 1<<20)
 	b = AppendMaxStreamData(b, 4, 65535)
 	b = AppendMaxStreams(b, true, 100)
-	b = AppendDataBlocked(b, 42)
-	b = AppendStreamDataBlocked(b, 4, 7)
-	b = AppendStreamsBlocked(b, false, 5)
+	b = appendDataBlocked(b, 42)
+	b = appendStreamDataBlocked(b, 4, 7)
+	b = appendStreamsBlocked(b, false, 5)
 	b = AppendResetStream(b, 4, 0x10e, 12)
-	b = AppendStopSending(b, 8, 0x101)
-	b = AppendNewToken(b, []byte{0xde, 0xad})
-	b = AppendRetireConnectionID(b, 3)
-	b = AppendPathResponse(b, [8]byte{1, 2, 3, 4, 5, 6, 7, 8})
+	b = appendStopSending(b, 8, 0x101)
+	b = appendNewToken(b, []byte{0xde, 0xad})
+	b = appendRetireConnectionID(b, 3)
+	b = appendPathResponse(b, [8]byte{1, 2, 3, 4, 5, 6, 7, 8})
 	b = AppendConnectionClose(b, false, ErrCodeProtocolViolation, FrameStreamBase, []byte("bad"))
 	b = AppendConnectionClose(b, true, 0x100, 0, nil)
-	b = AppendHandshakeDone(b)
-	b = AppendPadding(b, 4)
+	b = appendHandshakeDone(b)
+	b = appendPadding(b, 4)
 
 	want := []string{
 		"ping",

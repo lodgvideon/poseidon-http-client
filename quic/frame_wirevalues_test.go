@@ -67,16 +67,16 @@ func TestConformance_RFC9000_Sec19_FrameTypeEncodesToLiteralByte(t *testing.T) {
 		want byte
 	}{
 		{"RESET_STREAM", AppendResetStream(nil, 4, 0x10e, 12), 0x04},
-		{"STOP_SENDING", AppendStopSending(nil, 8, 0x101), 0x05},
+		{"STOP_SENDING", appendStopSending(nil, 8, 0x101), 0x05},
 		{"MAX_DATA", AppendMaxData(nil, 100), 0x10},
 		{"MAX_STREAM_DATA", AppendMaxStreamData(nil, 4, 100), 0x11},
 		{"MAX_STREAMS bidi", AppendMaxStreams(nil, false, 100), 0x12},
 		{"MAX_STREAMS uni", AppendMaxStreams(nil, true, 100), 0x13},
-		{"DATA_BLOCKED", AppendDataBlocked(nil, 42), 0x14},
-		{"STREAM_DATA_BLOCKED", AppendStreamDataBlocked(nil, 4, 7), 0x15},
-		{"STREAMS_BLOCKED bidi", AppendStreamsBlocked(nil, false, 5), 0x16},
-		{"STREAMS_BLOCKED uni", AppendStreamsBlocked(nil, true, 5), 0x17},
-		{"RETIRE_CONNECTION_ID", AppendRetireConnectionID(nil, 3), 0x19},
+		{"DATA_BLOCKED", appendDataBlocked(nil, 42), 0x14},
+		{"STREAM_DATA_BLOCKED", appendStreamDataBlocked(nil, 4, 7), 0x15},
+		{"STREAMS_BLOCKED bidi", appendStreamsBlocked(nil, false, 5), 0x16},
+		{"STREAMS_BLOCKED uni", appendStreamsBlocked(nil, true, 5), 0x17},
+		{"RETIRE_CONNECTION_ID", appendRetireConnectionID(nil, 3), 0x19},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
