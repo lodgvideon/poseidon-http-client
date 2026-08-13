@@ -541,62 +541,8 @@ func (c *Conn) recvDatagram(datagram []byte) error {
 		if !ok {
 			continue // no keys yet, or authentication failed; skip this packet
 		}
-		// "A receiver MUST discard a newly unprotected packet unless it is certain
-		// that it has not processed another packet with the same packet number from
-		// the same packet number space" (RFC 9000 §12.3). A bit-identical replayed
-		// datagram authenticates — the AEAD nonce derives from the packet number — so
-		// without this its frames would be dispatched a second time. Individual frame
-		// handlers absorb most duplicates, but the requirement is on the packet.
-		//
-		// A consequence worth naming: a duplicate no longer marks an ACK owed. That is
-		// safe only because QUIC never reuses a packet number — a peer whose ACK was
-		// lost re-sends the frames under a NEW number, which is decidably new here. Any
-		// future dedup keyed on something other than the packet number would break it.
-		if c.acks[sp].seen(pn) {
-			continue
-		}
-		// Adopt the server's connection ID from the first AUTHENTICATED long-header
-		// packet (RFC 9000 §7.2). Deferring adoption until after the AEAD succeeds
-		// keeps a forged or garbage Initial — which anyone can build, since Initial
-		// keys derive from the on-wire connection ID — from poisoning our
-		// Destination Connection ID and stalling the handshake.
-		if !c.gotServerCID && len(hdr.SCID) > 0 {
-			c.dcid = append(c.dcid[:0], hdr.SCID...)
-			c.serverSCID = append(c.serverSCID[:0], hdr.SCID...)
-			c.gotServerCID = true
-		}
-		// The header's reserved bits MUST be zero once protection is removed from
-		// an authenticated packet (RFC 9000 §17.2 long header, §17.3.1 short
-		// header); a non-zero value is a PROTOCOL_VIOLATION. pkt[0] was unmasked by
-		// the open path above, and the AEAD success authenticated it.
-		reserved := byte(0x0c) // long header (Initial/Handshake)
-		if sp == spaceApp {
-			reserved = 0x18 // short header (1-RTT)
-		}
-		if pkt[0]&reserved != 0 {
-			return ErrProtocolViolation
-		}
-		// "An endpoint MUST treat receipt of a packet containing no frames as a
-		// connection error of type PROTOCOL_VIOLATION" (RFC 9000 §12.4). The packet
-		// authenticated, so unlike the skips above this is the peer's own violation.
-		if len(payload) == 0 {
-			return ErrProtocolViolation
-		}
-		fh := &c.fh
-		fh.reset(c, sp)
-		if err := ParseFrames(payload, fh); err != nil {
+		if err := c.processPacket(sp, hdr.SCID, pkt, pn, payload); err != nil {
 			return err
-		}
-		c.acks[sp].receive(pn, fh.ackEliciting)
-		c.lastActivity = c.clock() // a processed packet resets the idle timer (§10.1)
-		if !c.haveRecv[sp] || pn > c.largestRecv[sp] {
-			c.largestRecv[sp] = pn
-			c.haveRecv[sp] = true
-		}
-		// An ACK removed acknowledged packets and updated the RTT during parsing;
-		// now run loss detection with the fresh RTT (RFC 9002 §6.1, §A.7 order).
-		if fh.sawAck {
-			c.detectLost(sp)
 		}
 	}
 	fedCrypto := false
@@ -612,6 +558,84 @@ func (c *Conn) recvDatagram(datagram []byte) error {
 	// (e.g. a post-handshake session ticket); otherwise there is nothing to do.
 	if fedCrypto || !c.handshakeComplete {
 		return c.hs.Pump(c)
+	}
+	return nil
+}
+
+// processPacket runs everything recvDatagram does with ONE authenticated packet,
+// after prefilterPacket and decryptPacket have accepted it: replay dedup, the
+// server-CID adoption that must wait for authentication, the two post-decrypt
+// protocol checks, frame dispatch, and the ACK / idle-timer / largest-received
+// bookkeeping that follows it.
+//
+// Splitting it out is what lets the recvDatagram loop read as its actual stages —
+// parse header, apply the coalescing rules, prefilter, decrypt, process — instead
+// of ten phases inline. Nothing follows this call in the loop body, so a duplicate
+// returns nil rather than needing a skip signal back to the caller.
+//
+// It takes the header's SCID rather than the Header itself: the only field it
+// needs is that one, and Header is ~112 bytes of mostly slice headers, which is a
+// copy per received packet for nothing. Passing &hdr instead would make the
+// caller's header escape to the heap, which is worse.
+//
+// Assumes c.mu is held, as everything on the receive path does.
+func (c *Conn) processPacket(sp int, scid, pkt []byte, pn uint64, payload []byte) error {
+	// "A receiver MUST discard a newly unprotected packet unless it is certain
+	// that it has not processed another packet with the same packet number from
+	// the same packet number space" (RFC 9000 §12.3). A bit-identical replayed
+	// datagram authenticates — the AEAD nonce derives from the packet number — so
+	// without this its frames would be dispatched a second time. Individual frame
+	// handlers absorb most duplicates, but the requirement is on the packet.
+	//
+	// A consequence worth naming: a duplicate no longer marks an ACK owed. That is
+	// safe only because QUIC never reuses a packet number — a peer whose ACK was
+	// lost re-sends the frames under a NEW number, which is decidably new here. Any
+	// future dedup keyed on something other than the packet number would break it.
+	if c.acks[sp].seen(pn) {
+		return nil
+	}
+	// Adopt the server's connection ID from the first AUTHENTICATED long-header
+	// packet (RFC 9000 §7.2). Deferring adoption until after the AEAD succeeds
+	// keeps a forged or garbage Initial — which anyone can build, since Initial
+	// keys derive from the on-wire connection ID — from poisoning our
+	// Destination Connection ID and stalling the handshake.
+	if !c.gotServerCID && len(scid) > 0 {
+		c.dcid = append(c.dcid[:0], scid...)
+		c.serverSCID = append(c.serverSCID[:0], scid...)
+		c.gotServerCID = true
+	}
+	// The header's reserved bits MUST be zero once protection is removed from
+	// an authenticated packet (RFC 9000 §17.2 long header, §17.3.1 short
+	// header); a non-zero value is a PROTOCOL_VIOLATION. pkt[0] was unmasked by
+	// the open path above, and the AEAD success authenticated it.
+	reserved := byte(0x0c) // long header (Initial/Handshake)
+	if sp == spaceApp {
+		reserved = 0x18 // short header (1-RTT)
+	}
+	if pkt[0]&reserved != 0 {
+		return ErrProtocolViolation
+	}
+	// "An endpoint MUST treat receipt of a packet containing no frames as a
+	// connection error of type PROTOCOL_VIOLATION" (RFC 9000 §12.4). The packet
+	// authenticated, so unlike the skips above this is the peer's own violation.
+	if len(payload) == 0 {
+		return ErrProtocolViolation
+	}
+	fh := &c.fh
+	fh.reset(c, sp)
+	if err := ParseFrames(payload, fh); err != nil {
+		return err
+	}
+	c.acks[sp].receive(pn, fh.ackEliciting)
+	c.lastActivity = c.clock() // a processed packet resets the idle timer (§10.1)
+	if !c.haveRecv[sp] || pn > c.largestRecv[sp] {
+		c.largestRecv[sp] = pn
+		c.haveRecv[sp] = true
+	}
+	// An ACK removed acknowledged packets and updated the RTT during parsing;
+	// now run loss detection with the fresh RTT (RFC 9002 §6.1, §A.7 order).
+	if fh.sawAck {
+		c.detectLost(sp)
 	}
 	return nil
 }
