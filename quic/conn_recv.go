@@ -909,28 +909,51 @@ func (h *connFrameHandler) OnStream(id, offset uint64, fin bool, data []byte) er
 			return nil
 		}
 	}
-	// Receive flow control (RFC 9000 §4.1): the peer must not send past the
-	// per-stream or connection receive limit we advertised. connRecvMax == 0 is
-	// the disabled sentinel used by hand-built test connections.
-	if h.c.connRecvMax != 0 {
-		end := offset + uint64(len(data))
-		if end > s.recvMax {
-			return ErrFlowControl // per-stream limit exceeded
-		}
-		if end > s.recvHighest {
-			delta := end - s.recvHighest
-			if h.c.connRecvTotal+delta > h.c.connRecvMax {
-				return ErrFlowControl // connection limit exceeded
-			}
-			h.c.connRecvTotal += delta
-			s.recvHighest = end
-		}
+	if err := h.c.chargeRecv(s, offset+uint64(len(data))); err != nil {
+		return err
 	}
 	if err := s.recv.receive(offset, data, fin); err != nil { // §4.5 final-size checks
 		return err
 	}
 	h.c.signalReady(s) // response data / fin arrived — wake a blocked reader (§3.3)
 	h.c.maybeRetire(s) // fully received + our FIN sent → drop from the routing map
+	return nil
+}
+
+// chargeRecv applies RFC 9000 §4.1 receive flow control for a stream whose data
+// now extends to end: the peer must not have sent past the per-stream or the
+// connection receive limit we advertised, and any advance of the stream's highest
+// received offset is charged to the connection receiver.
+//
+// It is shared by OnStream and OnResetStream, which arrive at end differently —
+// one from offset+len(data), the other from a RESET_STREAM's final size — but
+// account for it identically. Keeping one copy is what makes the connection
+// counter and the two limits impossible to update in one path and not the other.
+//
+// connRecvMax == 0 is the disabled sentinel used by hand-built test connections,
+// and it disables the per-stream bound as well, exactly as both call sites did
+// when they carried their own copy.
+//
+// An end at or below recvHighest is not an error: on the STREAM path that is
+// ordinary retransmission of bytes already accounted for, and on the reset path
+// a final size equal to what was already received. Either way there is nothing
+// new to charge.
+func (c *Conn) chargeRecv(s *Stream, end uint64) error {
+	if c.connRecvMax == 0 {
+		return nil
+	}
+	if end > s.recvMax {
+		return ErrFlowControl // per-stream limit exceeded
+	}
+	if end <= s.recvHighest {
+		return nil
+	}
+	delta := end - s.recvHighest
+	if c.connRecvTotal+delta > c.connRecvMax {
+		return ErrFlowControl // connection limit exceeded
+	}
+	c.connRecvTotal += delta
+	s.recvHighest = end
 	return nil
 }
 
@@ -963,22 +986,18 @@ func (h *connFrameHandler) OnResetStream(id, errCode, finalSize uint64) error {
 		return ErrFinalSize
 	}
 	// The final size accounts for every byte the peer sent on the stream (RFC 9000
-	// §4.5): it may not fall below data already received, may not exceed the
-	// per-stream or connection limit (§4.1), and its increment counts against the
-	// connection receiver. Gated on the FC-enabled sentinel like OnStream.
-	if h.c.connRecvMax != 0 {
-		if finalSize < s.recvHighest {
-			return ErrFinalSize
-		}
-		if finalSize > s.recvMax {
-			return ErrFlowControl
-		}
-		delta := finalSize - s.recvHighest
-		if h.c.connRecvTotal+delta > h.c.connRecvMax {
-			return ErrFlowControl
-		}
-		h.c.connRecvTotal += delta
-		s.recvHighest = finalSize
+	// §4.5), so it may not fall below data already received. This one stays here
+	// rather than moving into chargeRecv: it is a final-size rule, not a
+	// flow-control one, and OnStream has no equivalent — an offset below the
+	// highest received is ordinary retransmission there. It keeps the FC-enabled
+	// gating it has always had, so a hand-built test connection is unaffected.
+	if h.c.connRecvMax != 0 && finalSize < s.recvHighest {
+		return ErrFinalSize
+	}
+	// The rest is the same §4.1 accounting OnStream does: bound the new end
+	// against both limits and charge the increment to the connection receiver.
+	if err := h.c.chargeRecv(s, finalSize); err != nil {
+		return err
 	}
 	s.recvReset = true
 	s.recvResetCode = errCode // surfaced to the application (RFC 9114 §8.1 request error)
