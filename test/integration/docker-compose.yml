@@ -55,6 +55,49 @@ services:
       - JAVA_OPTS=-XX:+UseG1GC -Xmx512m
     restart: "no"
 
+  # ── nghttpx — nghttp2's proxy, h2 + h2c ─────────────────────────
+  #
+  # A third conforming peer, and the only one whose HTTP/2 comes from the
+  # nghttp2 library — the same implementation curl and h2load use, so it is the
+  # closest thing here to a reference encoder.
+  #
+  # It is a proxy, so it has no fixtures: it forwards to Undertow's h2c
+  # listener, which already serves the whole set. See fixtures/nghttpx.conf for
+  # what that means when a test fails.
+  nghttpx:
+    build:
+      context: .
+      dockerfile: Dockerfile.nghttp2
+    image: poseidon-it/nghttpx:local
+    container_name: poseidon-it-nghttpx
+    hostname: nghttp2
+    networks:
+      h2net:
+        ipv4_address: 172.30.0.12
+    ports:
+      - "127.0.0.1:18083:8443"
+      - "127.0.0.1:18084:8080"
+    volumes:
+      - ./fixtures/certs:/etc/nghttpx/certs:ro
+      - ./fixtures/nghttpx.conf:/etc/nghttpx/nghttpx.conf:ro
+    command: ["--conf=/etc/nghttpx/nghttpx.conf"]
+    # Undertow is this peer's origin, so nghttpx is useless until it answers.
+    # Waiting on health rather than start avoids a window where nghttpx accepts
+    # a connection and 503s, which reads as a poseidon failure.
+    depends_on:
+      undertow:
+        condition: service_healthy
+    # Probes the h2c frontend, which proves both hops: nghttpx is listening AND
+    # its backend answers. A frontend-only check would pass while every request
+    # 503s.
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://127.0.0.1:8080/healthz"]
+      interval: 1s
+      timeout: 2s
+      retries: 30
+      start_period: 3s
+    restart: "no"
+
   # ── Toxiproxy — fault injection in front of the peers above ─────
   #
   # Transparent TCP proxy with a runtime HTTP API, so toxics are applied per

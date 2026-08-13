@@ -25,10 +25,19 @@ RUN autoreconf -i && \
 
 FROM alpine:3.20
 
+# libssl3 + libcrypto3, not "openssl-libs": Alpine has never had a package by
+# that name, so this stage could not build. It went unnoticed because no compose
+# service referenced this Dockerfile until now.
 RUN apk add --no-cache \
-    openssl-libs zlib libev libevent jansson libxml2 \
+    libssl3 libcrypto3 zlib libev libevent jansson libxml2 \
     c-ares brotli libstdc++ wget
 
 COPY --from=builder /usr/local/bin/nghttpx /usr/local/bin/nghttpx
+# nghttpx links against the libnghttp2 the builder stage just installed, which
+# lives in the builder and not in Alpine's repositories. Without it the binary
+# builds, ships, and dies on start with ~60 "symbol not found" relocations --
+# every one of them an nghttp2_* symbol. musl's default search path includes
+# /usr/local/lib, so no ldconfig is needed.
+COPY --from=builder /usr/local/lib/libnghttp2.so* /usr/local/lib/
 
 ENTRYPOINT ["nghttpx"]
