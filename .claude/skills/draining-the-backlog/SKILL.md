@@ -82,10 +82,12 @@ Open an issue with a reproduction for everything you turn up — report every
 finding, the small ones and the ones you are unsure of included; filtering
 happens separately. Fixing it on the spot does not excuse you from filing it.
 
-Close the iteration with a one-line disposition for everything you noticed:
-filed as #N, fixed here, or dropped with the reason. A finding you neither filed
-nor listed leaves no trace anywhere, and no trace is the same signal as a test
-run that executed nothing.
+Close the iteration with a one-line disposition for everything you noticed, and
+every line carries a number: filed as #N, or filed as #N and closed by this
+batch. The single exception is a thing you checked and found not to be a defect,
+which needs the command that shows it — "probably nothing" is not that command.
+A finding you neither filed nor listed leaves no trace anywhere, and no trace is
+the same signal as a test run that executed nothing.
 
 ## Features go through /ork:implement
 
@@ -114,9 +116,11 @@ slash-only and ends in a browser report a human picks from. File architectural
 friction as an issue naming the module; running it is the user's move.
 
 `/ork:implement` carries the same slash-only flag, which is worth knowing before
-a feature ticket stalls the night. Try the call; if it comes back refused, that
-blocker is scoped to the ticket, not to the session: write it into the ticket,
-leave it open, take a different one. The end-of-turn rule stops the whole run
+a feature ticket stalls the night. Try the call once; if it comes back refused,
+that blocker is scoped to the ticket, not to the session: label the ticket for
+the user's morning, leave it open, take a different one — and do not spend a
+later iteration rediscovering the same refusal, since nothing between one
+iteration and the next changes that flag. The end-of-turn rule stops the whole run
 for a blocker that would stop every ticket — a usage limit, a repository you
 cannot write to — and this is not one of those. Building the feature by hand
 instead defeats the routing rule, which exists so features get the heavier
@@ -177,9 +181,11 @@ have helped. Orient from the architecture map in CLAUDE.md and from the code
 graph before opening whole files, and re-derive only the lines the current
 ticket actually names.
 
-The graph is indexed per directory and per commit, so confirm one exists for the
-worktree you are actually in before trusting an answer from it, and rebuild it
-after a batch lands. An index built against another commit replies with line
+The graph is indexed per directory and per commit. Before trusting an answer,
+confirm an index exists for the worktree you are actually in AND that the
+`head_sha` it is stamped with is your current HEAD — existence alone proves
+nothing, and the listing exposes both. Re-index the same root after a batch
+lands. An index built against another commit replies with line
 numbers that have since moved — the same stale premise this loop exists to
 catch, arriving through a tool instead of a ticket. Read its degrees precisely:
 in-degree counts distinct calling functions, not call sites, so a lower number
@@ -205,8 +211,11 @@ finished work to a subagent for a second pass over it.
 run. Every few iterations, examine what a subagent produced with fresh context —
 against the specification, not against your memory of it.
 
-Either branch: a verifier's assignment is to refute, and three to five workers is
-the ceiling. Past that the orchestrator burns more context reading summaries than
+Either branch: a verifier's assignment is to refute one named claim you are about
+to publish, with fresh context and the claim alone — that is not the same thing
+as handing over your finished work for a general pass, which is what the Opus
+rule forbids and what returns opinions instead of counter-evidence. Five workers
+is the ceiling for a single fan-out, and the refuter does not count against it. Past that the orchestrator burns more context reading summaries than
 the workers spend working, and each extra agent adds coordination faster than it
 adds coverage. Before any fan-out, price the single pass you are replacing — a
 fan-out that never beat one careful pass is not a win, it is a bill. The shape of
@@ -217,8 +226,9 @@ the return itself belongs to `running-long-autonomous-loops`.
 Go runs only through `wsl -e bash -lc '…'`, POSIX paths inside the quotes. git
 and gh run from the Bash tool on the Windows side — not WSL, where a worktree's
 `.git` points at a Windows path its git cannot resolve and every command dies
-with `fatal: not a git repository`, and not PowerShell, which turns git's stderr
-progress into a NativeCommandError block on every branch operation. `rtk go test`
+with `fatal: not a git repository`. PowerShell runs them, but git writes progress
+to stderr and PowerShell can render that as an error record, so the Bash tool is
+the one that reports git's own exit code and nothing else. `rtk go test`
 is fine, `rtk golangci-lint` is not — it returns 0 while findings are live. Run
 vet under each build tag, and the linter as `GOOS=linux golangci-lint run`: the
 `_linux.go` files are never analysed on the Windows host, so a local green says
@@ -266,4 +276,4 @@ run twice, with the number of tests that ran printed beside it. A control arm an
 an injection count behind anything timing-shaped. The spread inside one variant
 before any claim of a difference between two. CI's own allocation filter rather
 than a shorter one. The batch closed with a commit, a PR, and a memory entry, and
-every finding of the night either filed, fixed, or dropped out loud.
+every finding of the night carrying an issue number.
