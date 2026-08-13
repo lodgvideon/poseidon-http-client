@@ -60,6 +60,65 @@ func TestRateLimiter_ContextCancel(t *testing.T) {
 	}
 }
 
+// TestRateLimiter_RefillStopsAtBurst pins refillLocked's ceiling, which no other
+// test reaches. burst does two jobs: newRateLimiter uses it as the number of
+// tokens the bucket starts with, and refillLocked uses it as the cap it clamps
+// to. Every other test in this file exercises the first job only, so raising the
+// cap alone — leaving the initial fill untouched — passed the whole suite.
+//
+// The two jobs come apart after an idle period. If the cap exceeded the
+// configured burst, a limiter that had been quiet would hand out more
+// back-to-back requests than it was configured for, which is the shape a load
+// test never produces because it never lets the bucket sit idle.
+//
+// Timings are derived rather than tuned: at 5 rps a token is 200ms, so the 800ms
+// idle is 4 tokens against a burst of 3 — enough for the clamp to bite — and the
+// 60ms deadline on the last Take is well inside one token interval, so it can
+// only succeed if a fourth token was really there.
+func TestRateLimiter_RefillStopsAtBurst(t *testing.T) {
+	const (
+		rps           = 5.0
+		burst         = 3
+		tokenInterval = time.Second / rps
+		idle          = 4 * tokenInterval // enough refill to overshoot the cap
+	)
+
+	rl := newRateLimiter(rps, burst)
+	for i := 0; i < burst; i++ {
+		if err := rl.Take(context.Background()); err != nil {
+			t.Fatalf("draining the initial burst, Take %d: %v", i+1, err)
+		}
+	}
+
+	time.Sleep(idle)
+
+	// The bucket has been idle long enough to refill past burst. Exactly burst
+	// tokens must be available, not the 4 that elapsed time alone would produce.
+	start := time.Now()
+	for i := 0; i < burst; i++ {
+		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Millisecond)
+		err := rl.Take(ctx)
+		cancel()
+		if err != nil {
+			t.Fatalf("after %v idle, Take %d/%d failed: %v — the bucket did not "+
+				"refill to its full burst", idle, i+1, burst, err)
+		}
+	}
+	if elapsed := time.Since(start); elapsed > tokenInterval/2 {
+		t.Fatalf("draining the refilled burst took %v, more than half a token "+
+			"interval (%v) — the process stalled, so the next assertion cannot "+
+			"distinguish a capped bucket from a freshly refilled one",
+			elapsed, tokenInterval)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Millisecond)
+	defer cancel()
+	if err := rl.Take(ctx); err == nil {
+		t.Errorf("a %d+1st token was available after %v idle: refillLocked let the "+
+			"bucket grow past its burst of %d", burst, idle, burst)
+	}
+}
+
 // TestClient_RateLimit_BlocksExcess verifies the client blocks
 // requests beyond the rate budget. The expected minimum elapsed
 // time is derived from the parameters: burst tokens are free, the
