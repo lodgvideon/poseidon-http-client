@@ -20,7 +20,7 @@ import (
 func allReadyServers(t *testing.T) []*TestServer {
 	t.Helper()
 	var out []*TestServer
-	for k := ServerGoHTTP; k <= ServerUndertow; k++ {
+	for k := ServerGoHTTP; k < serverKindCount; k++ {
 		if srv, ok := allServers[k]; ok && srv.Ready {
 			out = append(out, srv)
 		}
@@ -45,6 +45,46 @@ func TestMatrix_Healthz(t *testing.T) {
 				t.Fatalf("body: got %q, want %q", body, "ok")
 			}
 		})
+	}
+}
+
+// TestMatrix_TLS_Healthz exercises the h2-over-TLS leg of every peer that has
+// one, which no other matrix test reaches: newTestClient prefers h2c wherever a
+// peer offers it, so Undertow and nghttpx were only ever driven over cleartext
+// and nginx was the sole peer negotiating ALPN.
+//
+// The count assertion is the point of the test as much as the requests are. Peers
+// are discovered at runtime, so "every peer with a TLS address" is a set that can
+// quietly become empty — and an empty loop passes.
+func TestMatrix_TLS_Healthz(t *testing.T) {
+	tested := 0
+	for _, srv := range allReadyServers(t) {
+		if srv.TLSAddr == "" {
+			continue // the in-process Go reference is h2c only
+		}
+		tested++
+		t.Run(srv.Kind.String(), func(t *testing.T) {
+			c := newTestClientTLS(t, srv)
+			status, body := doGET(t, c, "/healthz", true)
+			if status != 200 {
+				t.Fatalf("status: got %d, want 200", status)
+			}
+			if string(body) != "ok" {
+				t.Fatalf("body: got %q, want %q", body, "ok")
+			}
+		})
+	}
+	if tested == 0 {
+		// With POSEIDON_IT_SKIP_REMOTE (make it-test-fast) only the in-process Go
+		// reference exists and it is h2c-only, so having nothing to test is the
+		// expected outcome rather than a failure. Without it, every TLS peer
+		// vanishing means the compose stack is not up and a silent pass would be
+		// the worst answer available.
+		if skipRemote {
+			t.Skip("POSEIDON_IT_SKIP_REMOTE: no TLS peers by design")
+		}
+		t.Fatal("no peer advertised a TLS address, so nothing here ran over TLS: " +
+			"this test would otherwise have passed without testing anything")
 	}
 }
 

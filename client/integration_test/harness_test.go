@@ -20,10 +20,16 @@ import (
 // ServerKind identifies which HTTP/2 server implementation is under test.
 type ServerKind int
 
+// New kinds go at the END: allReadyServers ranges from ServerGoHTTP to the last
+// kind, so the order is load-bearing and a kind inserted in the middle would
+// silently drop the ones after it from every matrix test.
 const (
 	ServerGoHTTP ServerKind = iota
 	ServerNginx
 	ServerUndertow
+	ServerNghttpx
+
+	serverKindCount // must stay last; bounds the matrix range
 )
 
 func (k ServerKind) String() string {
@@ -34,6 +40,8 @@ func (k ServerKind) String() string {
 		return "nginx"
 	case ServerUndertow:
 		return "undertow"
+	case ServerNghttpx:
+		return "nghttpx"
 	default:
 		return "unknown"
 	}
@@ -116,6 +124,7 @@ func discoverRemoteServers() {
 	defs := []srvDef{
 		{ServerNginx, envOr("POSEIDON_IT_NGINX_TLS", "127.0.0.1:18080"), ""},
 		{ServerUndertow, envOr("POSEIDON_IT_UNDERTOW_TLS", "127.0.0.1:18081"), envOr("POSEIDON_IT_UNDERTOW_H2C", "127.0.0.1:18082")},
+		{ServerNghttpx, envOr("POSEIDON_IT_NGHTTPX_TLS", "127.0.0.1:18083"), envOr("POSEIDON_IT_NGHTTPX_H2C", "127.0.0.1:18084")},
 	}
 
 	var mu sync.Mutex
@@ -203,6 +212,26 @@ func newTestClient(t *testing.T, srv *TestServer) *client.Client {
 		scheme = "https"
 		dialer = &conn.TLSDialer{Config: tlsConfig()}
 	}
+
+	return newTestClientAt(t, srv, addr, scheme, dialer)
+}
+
+// newTestClientTLS is newTestClient pinned to the TLS leg.
+//
+// newTestClient prefers h2c whenever a peer offers it, so for every dual-mode
+// peer — Undertow and nghttpx — the matrix would otherwise never negotiate ALPN
+// at all. nginx, having no h2c port, was the only peer whose TLS path was
+// exercised. Returns nil when srv has no TLS address.
+func newTestClientTLS(t *testing.T, srv *TestServer) *client.Client {
+	t.Helper()
+	if srv.TLSAddr == "" {
+		return nil
+	}
+	return newTestClientAt(t, srv, srv.TLSAddr, "https", &conn.TLSDialer{Config: tlsConfig()})
+}
+
+func newTestClientAt(t *testing.T, srv *TestServer, addr, scheme string, dialer conn.Dialer) *client.Client {
+	t.Helper()
 
 	c, err := client.NewClient(client.ClientOptions{
 		Addr:          addr,
