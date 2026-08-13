@@ -418,9 +418,11 @@ type Exchange struct {
 	// Content-Length in the response head, independent of their values and of
 	// the order they arrived in. RFC 9112 §6.3 rule 3 keys on both being
 	// present, and either can be parsed first.
-	respTE         bool
-	respCL         bool
-	contentLen     int64 // -1 = read until connection close
+	respTE bool
+	respCL bool
+	// contentLen is the response body's byte count, or contentLenUnknown when it
+	// is not a byte count at all.
+	contentLen     int64
 	bodyRead       int64
 	chunkRemaining int64
 	chunkFinal     bool // terminal 0-chunk received
@@ -526,6 +528,16 @@ func validRequestTarget(s string) bool {
 	}
 	return true
 }
+
+// contentLenUnknown marks a response body whose length is not a byte count.
+//
+// Two cases share the value, and deliberately: chunked framing, and §6.3 rule
+// 4's read-until-close. ReadBodyChunk asks ex.respChunked first and only then
+// whether contentLen >= 0, so the two never need telling apart by this field —
+// and nothing else reads it. A second sentinel (-2, "chunked overrides
+// content-length") sat here for exactly one write and no read, contradicting the
+// field's own documented -1 while no code could observe the difference.
+const contentLenUnknown = -1
 
 // probeWindow is how long a future-deadline probe waits for the socket to say
 // something. A healthy idle connection costs the whole window, so it is the
@@ -1403,7 +1415,7 @@ func (ex *Exchange) ReadResponse(ctx context.Context) (statusCode int, headers [
 	// The only evidence the client has of what the peer speaks; WriteRequest
 	// consults it before framing a request body as chunked (RFC 9112 §6.1).
 	ex.c.peerMinor, ex.c.peerMinorKnown = respMinor, true
-	ex.contentLen = -1
+	ex.contentLen = contentLenUnknown
 
 	headers = make([]header.Field, 0, 12)
 	// Prepend :status for compatibility with the H2-style client layer.
@@ -2098,7 +2110,7 @@ func (ex *Exchange) commitHeaderLine(line string, have bool, out *[]header.Field
 					// body boundary is indeterminate, so the socket must not be
 					// pooled for the next response to resynchronise on.
 					ex.respChunked = false
-					ex.contentLen = -1
+					ex.contentLen = contentLenUnknown
 					// condemn, not a bare clear: the "connection" case below re-sets
 					// keepAlive on a keep-alive option, and header lines arrive in
 					// whatever order the peer chose — so without the latch a server
@@ -2135,13 +2147,13 @@ func (ex *Exchange) commitHeaderLine(line string, have bool, out *[]header.Field
 				// Content-Length that arrived first.
 				if coding == "chunked" {
 					ex.respChunked = true
-					ex.contentLen = -2 // sentinel: chunked overrides content-length
+					ex.contentLen = contentLenUnknown
 				} else {
 					// §6.3 rule 4: chunked is not the final encoding, so the
 					// body length is determined by reading until the server
 					// closes the connection.
 					ex.respChunked = false
-					ex.contentLen = -1
+					ex.contentLen = contentLenUnknown
 				}
 			}
 		}
@@ -2276,7 +2288,8 @@ func (ex *Exchange) ReadBodyChunk(buf []byte) (n int, done bool, err error) {
 		return n, done, err
 	}
 
-	// contentLen == -1: read until connection close.
+	// contentLen is contentLenUnknown and the body is not chunked: §6.3 rule 4,
+	// read until the connection closes.
 	n, err = ex.c.br.Read(buf)
 	if err == io.EOF {
 		ex.condemn()
