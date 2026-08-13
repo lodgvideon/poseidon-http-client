@@ -119,7 +119,7 @@ func TestConformance_RFC9204_Sec21_EncodeSideDynamicTable(t *testing.T) {
 	if err := client.serviceControl(); err != nil {
 		t.Fatalf("serviceControl (settings): %v", err)
 	}
-	if client.qpackEncoder == nil {
+	if client.qpackEncoder.Load() == nil {
 		t.Fatal("encoder must be enabled once the server advertises a non-zero capacity")
 	}
 	server := serverMirrorTable(t, conn, serverCap)
@@ -149,7 +149,7 @@ func TestConformance_RFC9204_Sec21_EncodeSideDynamicTable(t *testing.T) {
 	if err := client.serviceControl(); err != nil {
 		t.Fatalf("serviceControl (ack): %v", err)
 	}
-	if got := client.qpackEncoder.KnownReceivedCount(); got != server.InsertCount() {
+	if got := client.qpackEncoder.Load().KnownReceivedCount(); got != server.InsertCount() {
 		t.Fatalf("Known Received Count = %d, want %d after the server's Insert Count Increment", got, server.InsertCount())
 	}
 
@@ -186,7 +186,7 @@ func TestConformance_RFC9204_Sec21_EncodeStaticFallbackServerCapZero(t *testing.
 	if err := client.serviceControl(); err != nil {
 		t.Fatalf("serviceControl: %v", err)
 	}
-	if client.qpackEncoder != nil {
+	if client.qpackEncoder.Load() != nil {
 		t.Fatal("a server capacity of 0 must keep the encoder static-only")
 	}
 
@@ -239,7 +239,7 @@ func TestConcurrent_QPACKEncoderDynamic_UnderRace(t *testing.T) {
 			default:
 			}
 			client.encMu.Lock()
-			if enc := client.qpackEncoder; enc != nil {
+			if enc := client.qpackEncoder.Load(); enc != nil {
 				if ic, kr := enc.InsertCount(), enc.KnownReceivedCount(); ic > kr {
 					_, _ = enc.ParseDecoderInstructions(qpack.AppendInsertCountIncrement(nil, ic-kr))
 				}

@@ -249,12 +249,13 @@ func (c *Client) readQPACKDecoder() error {
 		return nil
 	}
 	c.encMu.Lock()
-	if c.qpackEncoder == nil {
+	enc := c.qpackEncoder.Load()
+	if enc == nil {
 		c.qpackDecBuf = c.qpackDecBuf[:0] // nothing to acknowledge yet; discard
 		c.encMu.Unlock()
 		return nil
 	}
-	n, perr := c.qpackEncoder.ParseDecoderInstructions(c.qpackDecBuf)
+	n, perr := enc.ParseDecoderInstructions(c.qpackDecBuf)
 	c.encMu.Unlock()
 	if n > 0 {
 		c.qpackDecBuf = append(c.qpackDecBuf[:0], c.qpackDecBuf[n:]...) // drop applied bytes; keep the partial tail
