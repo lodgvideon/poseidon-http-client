@@ -2028,142 +2028,140 @@ func (ex *Exchange) commitHeaderLine(line string, have bool, out *[]header.Field
 	if !have {
 		return nil
 	}
-	{
-		colon := strings.IndexByte(line, ':')
-		if colon < 0 {
-			return nil // skip malformed header lines
-		}
-		// The field name is NOT trimmed. §5.1: "No whitespace is allowed between
-		// the field name and colon. In the past, differences in the handling of
-		// such whitespace have led to security vulnerabilities in request routing
-		// and response handling." Trimming it silently normalised
-		// "Content-Length : 5" into a Content-Length this client then framed the
-		// body by, while §5.1 obliges a proxy to "remove any such whitespace from
-		// a response message before forwarding" — so the hop in front of us may
-		// well have seen no Content-Length at all. Leaving the space in the name
-		// makes validToken below reject the line, which is the outcome that cannot
-		// disagree with anyone. (A LEADING space cannot reach here: consumeHeaders
-		// has already routed such a line to the obs-fold branch.)
-		name := asciiLowerHeaderName(line[:colon])
-		// OWS is SP / HTAB (RFC 9110 §5.6.3). strings.TrimSpace is Unicode-aware
-		// and also ate VT, FF and NEL, so "Content-Length: 5\v" — which §2.2
-		// requires be parsed as octets, not characters — became a valid 5 here and
-		// an invalid field elsewhere. Same divergence, same class of bug as the
-		// name above; parseRequestContentLength already made this call on the send
-		// side.
-		value := strings.Trim(line[colon+1:], " \t")
+	colon := strings.IndexByte(line, ':')
+	if colon < 0 {
+		return nil // skip malformed header lines
+	}
+	// The field name is NOT trimmed. §5.1: "No whitespace is allowed between
+	// the field name and colon. In the past, differences in the handling of
+	// such whitespace have led to security vulnerabilities in request routing
+	// and response handling." Trimming it silently normalised
+	// "Content-Length : 5" into a Content-Length this client then framed the
+	// body by, while §5.1 obliges a proxy to "remove any such whitespace from
+	// a response message before forwarding" — so the hop in front of us may
+	// well have seen no Content-Length at all. Leaving the space in the name
+	// makes validToken below reject the line, which is the outcome that cannot
+	// disagree with anyone. (A LEADING space cannot reach here: consumeHeaders
+	// has already routed such a line to the obs-fold branch.)
+	name := asciiLowerHeaderName(line[:colon])
+	// OWS is SP / HTAB (RFC 9110 §5.6.3). strings.TrimSpace is Unicode-aware
+	// and also ate VT, FF and NEL, so "Content-Length: 5\v" — which §2.2
+	// requires be parsed as octets, not characters — became a valid 5 here and
+	// an invalid field elsewhere. Same divergence, same class of bug as the
+	// name above; parseRequestContentLength already made this call on the send
+	// side.
+	value := strings.Trim(line[colon+1:], " \t")
 
-		// A response field must be a token name with a value free of CR, LF and
-		// NUL (RFC 9110 §5.6.2, §5.5). This mirrors what WriteRequest enforces on
-		// the SEND side and what conn/http3 enforce on their receive sides — http1
-		// validated outgoing request fields but handed an incoming response field
-		// to the caller verbatim, so a NUL or a bare CR the server put in a value
-		// reached whatever copied it into an HTTP/1.1 message, a log, or a header
-		// of its own. §5.5: a recipient of such a byte "MUST either reject the
-		// message or replace each of those characters with SP". We reject and
-		// condemn the connection: the block is not a well-formed field sequence,
-		// so the stream position cannot be trusted.
-		if !validToken(name) || !validFieldValue([]byte(value)) {
+	// A response field must be a token name with a value free of CR, LF and
+	// NUL (RFC 9110 §5.6.2, §5.5). This mirrors what WriteRequest enforces on
+	// the SEND side and what conn/http3 enforce on their receive sides — http1
+	// validated outgoing request fields but handed an incoming response field
+	// to the caller verbatim, so a NUL or a bare CR the server put in a value
+	// reached whatever copied it into an HTTP/1.1 message, a log, or a header
+	// of its own. §5.5: a recipient of such a byte "MUST either reject the
+	// message or replace each of those characters with SP". We reject and
+	// condemn the connection: the block is not a well-formed field sequence,
+	// so the stream position cannot be trusted.
+	if !validToken(name) || !validFieldValue([]byte(value)) {
+		ex.condemn()
+		return fmt.Errorf("http1: response header %q has an invalid name or a value "+
+			"containing CR, LF or NUL: %w", truncateForError(name), ErrInvalidHeaderBlock)
+	}
+
+	// Connection is hop-by-hop and scoped to the CONNECTION, not to the message
+	// carrying it (RFC 9110 §7.6.1), and "close" means the sender will close
+	// after this response (RFC 9112 §9.6). So it is interpreted on EVERY head,
+	// including an interim 1xx — unlike the framing fields below, which a 1xx
+	// cannot carry at all (RFC 9110 §15.2) and which stay gated.
+	//
+	// It used to sit inside that gate, so a "close" on a 1xx was read off the
+	// wire and discarded, and the socket went back to the pool. Not a desync —
+	// the 1xx is fully drained — but the next request went out on a connection
+	// the server had said it was closing, racing the FIN.
+	if name == "connection" {
+		if hasConnectionOption(value, "close") {
 			ex.condemn()
-			return fmt.Errorf("http1: response header %q has an invalid name or a value "+
-				"containing CR, LF or NUL: %w", truncateForError(name), ErrInvalidHeaderBlock)
+		} else if hasConnectionOption(value, "keep-alive") && !ex.condemned {
+			ex.keepAlive = true
 		}
+	}
 
-		// Connection is hop-by-hop and scoped to the CONNECTION, not to the message
-		// carrying it (RFC 9110 §7.6.1), and "close" means the sender will close
-		// after this response (RFC 9112 §9.6). So it is interpreted on EVERY head,
-		// including an interim 1xx — unlike the framing fields below, which a 1xx
-		// cannot carry at all (RFC 9110 §15.2) and which stay gated.
-		//
-		// It used to sit inside that gate, so a "close" on a 1xx was read off the
-		// wire and discarded, and the socket went back to the pool. Not a desync —
-		// the 1xx is fully drained — but the next request went out on a connection
-		// the server had said it was closing, racing the FIN.
-		if name == "connection" {
-			if hasConnectionOption(value, "close") {
+	if parseBody {
+		switch name {
+		case "content-length":
+			ex.respCL = true
+			ex.noteContentLength(value)
+		case "transfer-encoding":
+			ex.respTE = true
+			// RFC 9112 §6.1: the field value is an ordered, comma-separated
+			// list of transfer-coding (element grammar in RFC 9110 §10.1.4).
+			// Only "chunked" as the *final* coding gives chunked framing; a
+			// substring match instead reads "not-chunked" and "chunked, gzip"
+			// as chunked and then desyncs on the first body byte.
+			coding, wellFormed := lastTransferCoding(value)
+			if !wellFormed {
+				// An unterminated quoted-string makes the Transfer-Encoding
+				// malformed (RFC 9110 §10.1.4), and the runaway quote may have
+				// swallowed the real final coding — `chunked;x=", gzip` reads
+				// as final coding "chunked" only because the unclosed quote ate
+				// the comma. The framing verdict cannot be trusted, so fall to
+				// §6.3 rule 4's read-until-close AND condemn the connection: the
+				// body boundary is indeterminate, so the socket must not be
+				// pooled for the next response to resynchronise on.
+				ex.respChunked = false
+				ex.contentLen = contentLenUnknown
+				// condemn, not a bare clear: the "connection" case below re-sets
+				// keepAlive on a keep-alive option, and header lines arrive in
+				// whatever order the peer chose — so without the latch a server
+				// could undo a framing condemnation just by putting
+				// Connection: keep-alive after its malformed Transfer-Encoding.
 				ex.condemn()
-			} else if hasConnectionOption(value, "keep-alive") && !ex.condemned {
-				ex.keepAlive = true
+				break
+			}
+			if coding == "" {
+				// This field line contributes no codings, so it cannot move
+				// the verdict — earlier lines still decide.
+				//
+				// Repeated field lines are ONE list: RFC 9110 §5.3 defines
+				// them by appending each value "to the initial field line
+				// value in order, separated by a comma", so
+				//
+				//	Transfer-Encoding: chunked
+				//	Transfer-Encoding:
+				//
+				// is the message "Transfer-Encoding: chunked, " — whose empty
+				// final element §5.6.1.2 requires a recipient to ignore,
+				// leaving chunked as the final coding. Letting each line
+				// overwrite the verdict made the second line win and turned a
+				// chunked body into read-until-close: the same message spelled
+				// on one line ("chunked, ") parsed correctly, which is what
+				// isolates this to the multi-line path rather than to
+				// lastTransferCoding, whose own contract already skips empty
+				// elements.
+				break
+			}
+			// Either branch overrides any Content-Length parsed so far
+			// (§6.3 rule 3), which is why contentLen is assigned
+			// unconditionally here: this is the only place that can undo a
+			// Content-Length that arrived first.
+			if coding == "chunked" {
+				ex.respChunked = true
+				ex.contentLen = contentLenUnknown
+			} else {
+				// §6.3 rule 4: chunked is not the final encoding, so the
+				// body length is determined by reading until the server
+				// closes the connection.
+				ex.respChunked = false
+				ex.contentLen = contentLenUnknown
 			}
 		}
+	}
 
-		if parseBody {
-			switch name {
-			case "content-length":
-				ex.respCL = true
-				ex.noteContentLength(value)
-			case "transfer-encoding":
-				ex.respTE = true
-				// RFC 9112 §6.1: the field value is an ordered, comma-separated
-				// list of transfer-coding (element grammar in RFC 9110 §10.1.4).
-				// Only "chunked" as the *final* coding gives chunked framing; a
-				// substring match instead reads "not-chunked" and "chunked, gzip"
-				// as chunked and then desyncs on the first body byte.
-				coding, wellFormed := lastTransferCoding(value)
-				if !wellFormed {
-					// An unterminated quoted-string makes the Transfer-Encoding
-					// malformed (RFC 9110 §10.1.4), and the runaway quote may have
-					// swallowed the real final coding — `chunked;x=", gzip` reads
-					// as final coding "chunked" only because the unclosed quote ate
-					// the comma. The framing verdict cannot be trusted, so fall to
-					// §6.3 rule 4's read-until-close AND condemn the connection: the
-					// body boundary is indeterminate, so the socket must not be
-					// pooled for the next response to resynchronise on.
-					ex.respChunked = false
-					ex.contentLen = contentLenUnknown
-					// condemn, not a bare clear: the "connection" case below re-sets
-					// keepAlive on a keep-alive option, and header lines arrive in
-					// whatever order the peer chose — so without the latch a server
-					// could undo a framing condemnation just by putting
-					// Connection: keep-alive after its malformed Transfer-Encoding.
-					ex.condemn()
-					break
-				}
-				if coding == "" {
-					// This field line contributes no codings, so it cannot move
-					// the verdict — earlier lines still decide.
-					//
-					// Repeated field lines are ONE list: RFC 9110 §5.3 defines
-					// them by appending each value "to the initial field line
-					// value in order, separated by a comma", so
-					//
-					//	Transfer-Encoding: chunked
-					//	Transfer-Encoding:
-					//
-					// is the message "Transfer-Encoding: chunked, " — whose empty
-					// final element §5.6.1.2 requires a recipient to ignore,
-					// leaving chunked as the final coding. Letting each line
-					// overwrite the verdict made the second line win and turned a
-					// chunked body into read-until-close: the same message spelled
-					// on one line ("chunked, ") parsed correctly, which is what
-					// isolates this to the multi-line path rather than to
-					// lastTransferCoding, whose own contract already skips empty
-					// elements.
-					break
-				}
-				// Either branch overrides any Content-Length parsed so far
-				// (§6.3 rule 3), which is why contentLen is assigned
-				// unconditionally here: this is the only place that can undo a
-				// Content-Length that arrived first.
-				if coding == "chunked" {
-					ex.respChunked = true
-					ex.contentLen = contentLenUnknown
-				} else {
-					// §6.3 rule 4: chunked is not the final encoding, so the
-					// body length is determined by reading until the server
-					// closes the connection.
-					ex.respChunked = false
-					ex.contentLen = contentLenUnknown
-				}
-			}
-		}
-
-		if out != nil {
-			*out = append(*out, header.Field{
-				Name:  []byte(name),
-				Value: []byte(value),
-			})
-		}
+	if out != nil {
+		*out = append(*out, header.Field{
+			Name:  []byte(name),
+			Value: []byte(value),
+		})
 	}
 	return nil
 }
