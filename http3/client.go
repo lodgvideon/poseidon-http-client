@@ -610,19 +610,33 @@ func (c *Client) qpackDecWrite(instr []byte) {
 // flushDecWriteLocked sends as much of decWriteBuf as the decoder stream will
 // accept without blocking, retaining any unsent tail. Assumes decWMu is held.
 func (c *Client) flushDecWriteLocked() {
-	if c.clientQPACKDec == nil || len(c.decWriteBuf) == 0 {
-		return
+	c.decWriteBuf = flushInstrStream(c.clientQPACKDec, c.decWriteBuf, &c.decHasResidue)
+}
+
+// flushInstrStream writes as much of buf as the stream accepts and returns what
+// is left, recording in residue whether anything is. The caller holds whichever
+// mutex owns that buffer -- decWMu for the decoder stream, encMu for the encoder
+// stream -- which is why the lock is not in here: encMu guards the encoder and
+// its dynamic table too, and folding it into this type would widen it.
+//
+// A write error returns the buffer untouched: the stream or connection is gone
+// and the reader teardown handles it, so retrying the same bytes later is both
+// harmless and the only way to preserve QPACK instruction order if it is not.
+func flushInstrStream(s quicStream, buf []byte, residue *atomic.Bool) []byte {
+	if s == nil || len(buf) == 0 {
+		return buf
 	}
-	n, err := c.clientQPACKDec.Send(c.decWriteBuf, false)
+	n, err := s.Send(buf, false)
 	if err != nil {
-		return // stream/connection error; the reader teardown handles it
+		return buf
 	}
-	if n >= len(c.decWriteBuf) {
-		c.decWriteBuf = c.decWriteBuf[:0]
+	if n >= len(buf) {
+		buf = buf[:0]
 	} else {
-		c.decWriteBuf = append(c.decWriteBuf[:0], c.decWriteBuf[n:]...) // left-shift the residue
+		buf = append(buf[:0], buf[n:]...) // left-shift the residue
 	}
-	c.decHasResidue.Store(len(c.decWriteBuf) > 0)
+	residue.Store(len(buf) > 0)
+	return buf
 }
 
 // flushQPACKDecoder flushes any flow-control residue on the decoder stream. The
@@ -671,19 +685,7 @@ func (c *Client) enableEncoderDynamic(serverMaxCapacity uint64) {
 // so encMu is never held across a wait, and the retained residue preserves the
 // insertion order the byte stream requires.
 func (c *Client) flushEncWriteLocked() {
-	if c.clientQPACKEnc == nil || len(c.encWriteBuf) == 0 {
-		return
-	}
-	n, err := c.clientQPACKEnc.Send(c.encWriteBuf, false)
-	if err != nil {
-		return // stream/connection error; the reader teardown handles it
-	}
-	if n >= len(c.encWriteBuf) {
-		c.encWriteBuf = c.encWriteBuf[:0]
-	} else {
-		c.encWriteBuf = append(c.encWriteBuf[:0], c.encWriteBuf[n:]...) // left-shift the residue
-	}
-	c.encHasResidue.Store(len(c.encWriteBuf) > 0)
+	c.encWriteBuf = flushInstrStream(c.clientQPACKEnc, c.encWriteBuf, &c.encHasResidue)
 }
 
 // flushQPACKEncoderStream flushes any flow-control residue on our encoder stream.
@@ -1197,7 +1199,7 @@ func (c *Client) dispatchFrame(rb *respBuilder, typ uint64, payload []byte) erro
 				return e
 			})
 			if derr != nil {
-				_, _, e := c.decodeError(derr)
+				e := c.decodeError(derr)
 				return e
 			}
 			c.ackDynamicSection(rb, ric)
@@ -1221,7 +1223,7 @@ func (c *Client) dispatchFrame(rb *respBuilder, typ uint64, payload []byte) erro
 				return nil
 			})
 			if derr != nil {
-				_, _, e := c.decodeError(derr)
+				e := c.decodeError(derr)
 				return e
 			}
 			c.ackDynamicSection(rb, ric)
@@ -1325,9 +1327,9 @@ func contentLengthMatches(resp *Response, method string, bodyLen int64) bool {
 // QPACK_DECOMPRESSION_FAILED), so it closes the connection, while a message-rule
 // violation (ErrH3Message) stays a stream error the caller aborts the request
 // with.
-func (c *Client) decodeError(err error) (*Response, []byte, error) {
+func (c *Client) decodeError(err error) error {
 	if errors.Is(err, qpack.ErrDecompressionFailed) {
-		return nil, nil, c.connError(H3QpackDecompressionFailed)
+		return c.connError(H3QpackDecompressionFailed)
 	}
-	return nil, nil, err
+	return err
 }
