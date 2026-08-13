@@ -353,6 +353,21 @@ func (p *h3Pool) handleTick(rs *h3RunState) {
 	for _, mc := range rs.conns {
 		p.refreshStreamCap(mc)
 	}
+	// No serveWaiters here, unlike the H2 tick, and the asymmetry is load-bearing
+	// in both directions.
+	//
+	// H2 serves on every tick because its per-conn capacity is dynamic: a peer
+	// that raises SETTINGS_MAX_CONCURRENT_STREAMS makes existing conns able to
+	// take waiters that had nothing to wait for a moment ago, and no other tick
+	// path offers them. Here streamCap is pool policy — refreshStreamCap
+	// recomputes it from MaxStreamsPerConn with no peer term at all — so it never
+	// rises, and a tick cannot uncover capacity that handleRelease and
+	// handleDialDone have not already offered.
+	//
+	// So adding the call here would be a no-op walk of the queue, and deleting
+	// H2's would strand its waiters until the next release. Stated here because
+	// #480 reads the two ticks as the same program with one line missing, and
+	// this is the line.
 	rs.waiters = h3PruneExpiredWaiters(rs.waiters)
 	p.dialForWaiters(rs)
 	// Either eviction above can take the last live conn while waiters queued
