@@ -68,6 +68,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **An HTTP/3 response body no longer costs several times its own size to
+  receive.** The buffered `Do` path allocated 75 KB to deliver a 16 KiB body and
+  276 KB to deliver a 64 KiB one, arriving at QUIC packet granularity. Two things
+  caused it, and neither could be fixed alone. `FrameReader.ReadFrame` re-sliced
+  its buffer past each frame it handed out, which put the consumed capacity out
+  of reach, so every response climbed a fresh `append` growth ladder from
+  nothing; and the body then *adopted* the reader's first DATA payload rather
+  than copying it, which made that array caller-owned and therefore impossible to
+  reuse. The reader now tracks the consumed prefix as an offset and reclaims it
+  when its tail runs out, its backing array is recycled between requests, and the
+  body is copied into one exact-sized allocation. A response costs two
+  allocations at roughly its own size, whatever the body size and however the
+  bytes were chopped up on the wire:
+
+  | body | delivered in | before | after |
+  |---|---|---:|---:|
+  | 4 KiB | 1200-byte bursts | 8,913 B / 4 allocs | 4,179 B / 2 allocs |
+  | 16 KiB | 1200-byte bursts | 75,346 B / 9 allocs | 16,596 B / 2 allocs |
+  | 64 KiB | 1200-byte bursts | 276,050 B / 13 allocs | 66,428 B / 2 allocs |
+  | 64 KiB | one burst | 73,810 B / 2 allocs | 65,932 B / 2 allocs |
+  | 64 KiB, 8 DATA frames | 1200-byte bursts | 379,091 B / 44 allocs | 174,249 B / 6 allocs |
+
+  A 256-byte body pays 25 bytes more than before (394 vs 369), the copy it now
+  makes with nothing large enough to amortize it. `make bench-alloc` reports all
+  of these, and carries the unpooled reader as its own case so the trade stays
+  visible: the copy alone, without reuse, is a regression, which is why neither
+  half of this could ship without the other.
+
+  Nothing in the public surface moves. A buffered response already owned its
+  bytes — headers and trailers were copied at the QPACK decode — and the body
+  now does too. The payload `FrameReader.ReadFrame` returns is still documented
+  as valid only until the next `Feed` or `ReadFrame`; that lifetime is now
+  enforced by reuse rather than merely stated, so a caller that held one past it
+  and got away with it will not any more. `BodyReader` (`DoStream`) is unchanged:
+  it hands payloads that alias its reader out to its caller, so its buffer stays
+  per-request rather than being recycled.
+
 - **Formatting is now gated.** golangci-lint v2 moved formatters into their own
   top-level `formatters:` section, and `.golangci.yml` never grew one — so
   neither `make lint` nor the CI lint job ran `gofmt` at all, and neither ever
