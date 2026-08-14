@@ -1,18 +1,65 @@
 name: bench-gate
-on: [pull_request]
+on:
+  pull_request:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+# WHY THIS IS SPLIT IN TWO (measured 2026-08-14 — do not collapse it back
+# without re-measuring; the numbers below are reproducible in ~11 minutes).
+#
+# The single full sweep WAS the pull-request wall clock: 16m56s, while every
+# other job finished by 4m (ci 4m06, integration 3m25, security 1m33,
+# conformance 39s). Inside those 17 minutes: HEAD bench 10m11, base-branch
+# bench 6m36, and the gate script itself under a second. The base bench existed
+# only to feed a benchstat ns/op diff that was explicitly labelled
+# informational and gated nothing — so more than a third of the PR wait bought
+# no enforcement at all.
+#
+# What this workflow enforces is not a performance measurement. It is a boolean:
+# scripts/bench-gate.sh fails if ANY `Benchmark` line in the raw output reports
+# non-zero B/op or non-zero allocs/op. A boolean does not need 2s per benchmark
+# to be true. Measured over all 43 benchmarks in these seven packages, with
+# verdicts taken from the real gate script and compared against the 2s reference:
+#
+#   -benchtime=1x      11 of 43 flip to a false failure
+#   -benchtime=10x     the same 11 flip (allocs/op reaches 0, B/op has not)
+#   -benchtime=100x     5 flip — frame ReadFrame_DATA_1KB and WriteData_1KB,
+#                       hpack HuffmanPolicy_WarmRequest_Plain and _ShorterWins,
+#                       bufx ReadBufPool_GetPut
+#   -benchtime=100ms    0 flip — 43/43 verdicts identical to the 2s reference,
+#                       green on 4 of 4 runs, tightest margin 563x iterations
+#
+# The flips are one-time setup (pool warm-up, table construction) charged to
+# iteration 1. A fixed iteration count cannot amortise that; a fixed duration
+# can, because 100ms still buys thousands of iterations everywhere. That is why
+# 100ms is safe where 100x is not — it is not "less benchmark", it is enough
+# benchmark to divide the constant away.
+#
+# So pull requests keep a REAL gate — same script, same seven packages, same
+# assertion — at 100ms/count=5: 41.6s locally, roughly 2 minutes here. The only
+# thing PRs lose is the informational ns/op diff, which gated nothing before and
+# now runs at tag time. A no-alloc speed regression was already unenforced.
+#
+# NOT IN SCOPE, and never was: conn, client, grpc, http1. They are guarded by
+# their own `//go:build !race` AllocsPerRun tests in the normal test job, which
+# are fast and unaffected by any of this. Several of those are two-sided —
+# beating the ceiling fails too — so do not "fix" them by widening a bound.
+
 jobs:
-  bench:
+  # ---------------------------------------------------------------- PULL REQUESTS
+  alloc-gate:
+    if: github.event_name == 'pull_request'
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7
-        with: { fetch-depth: 0 }
       - uses: actions/setup-go@v7
         with: { go-version: '1.25' }
-      - name: Bench HEAD (codec packages only)
+      - name: Bench HEAD (short — zero-alloc assertion only)
         # Scope is every package that CAN hold an absolute zero: synchronous,
         # no goroutine, no channel, no context.Context, and the caller supplies
         # the buffer. conn, client and grpc are none of those things and are
-        # deliberately out of scope — see below.
+        # deliberately out of scope.
         #
         # This used to read "conn benches are intentionally non-zero-alloc per
         # the B.1 design spec; their zero-alloc work is deferred to B.2". B.2
@@ -29,17 +76,66 @@ jobs:
         # is guarded by conn's own benchmarks, not by this gate; the allocation
         # gates in .github/workflows/ci.yml are the ones with teeth there.
         #
-        # ./qpack and ./http3 are HEAD-only here until they exist on the base
-        # branch; the absolute zero-alloc gate below runs on head.txt.
-        run: go test -bench=. -benchmem -benchtime=2s -count=5 -run=^$ ./frame ./hpack ./internal/bytesx ./internal/bufx ./qpack ./quic ./http3 | tee head.txt
-      - name: Bench base
-        run: |
-          git checkout ${{ github.base_ref }}
-          go test -bench=. -benchmem -benchtime=2s -count=5 -run=^$ ./frame ./hpack ./internal/bytesx ./internal/bufx | tee base.txt
-          git checkout -
-      - name: benchstat (informational)
-        run: |
-          go install golang.org/x/perf/cmd/benchstat@latest
-          benchstat -alpha 0.05 base.txt head.txt | tee diff.txt
+        # No `| tee` here: GitHub's default step shell is `bash -e` WITHOUT
+        # pipefail, so a pipeline reports tee's exit status and a failing or
+        # non-building `go test` would sail through as success. Redirect, then
+        # cat.
+        run: go test -bench=. -benchmem -benchtime=100ms -count=5 -run=^$ ./frame ./hpack ./internal/bytesx ./internal/bufx ./qpack ./quic ./http3 > head.txt
+      - name: Show bench output
+        run: cat head.txt
       - name: Absolute zero-alloc gate
         run: ./scripts/bench-gate.sh head.txt
+
+  # -------------------------------------------------------- TAGS / MANUAL RUNS
+  # The full 2s sweep plus the ns/op comparison. Runs on `v*` tag pushes, and on
+  # workflow_dispatch so the numbers are available on demand without cutting a
+  # release. Deliberately NOT on pushes to main: that would put the 17 minutes
+  # back on every merge, which is the thing this split exists to remove.
+  bench-full:
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+        with: { fetch-depth: 0 }
+      - uses: actions/setup-go@v7
+        with: { go-version: '1.25' }
+      - name: Bench HEAD (full)
+        run: go test -bench=. -benchmem -benchtime=2s -count=5 -run=^$ ./frame ./hpack ./internal/bytesx ./internal/bufx ./qpack ./quic ./http3 > head.txt
+      - name: Show bench output
+        run: cat head.txt
+      - name: Absolute zero-alloc gate
+        run: ./scripts/bench-gate.sh head.txt
+      - name: benchstat vs previous release (informational)
+        # github.base_ref is EMPTY on a tag push, so the old `git checkout
+        # ${{ github.base_ref }}` cannot be reused here — it would check out the
+        # empty string. The meaningful baseline for a release is the previous
+        # release, so ask git for it.
+        #
+        # The package set drifts between releases (internal/bufx does not exist
+        # at v0.9.0 — it was split out of internal/bytesx afterwards), so bench
+        # only the packages that actually exist at the base ref. This step is
+        # informational and gates nothing, hence continue-on-error: the gate
+        # above is what has teeth.
+        continue-on-error: true
+        run: |
+          head_sha=$(git rev-parse HEAD)
+          base=$(git describe --tags --abbrev=0 "${head_sha}^" 2>/dev/null || true)
+          if [ -z "$base" ]; then
+            echo "no previous release tag reachable from HEAD — skipping ns/op diff"
+            exit 0
+          fi
+          pkgs=""
+          for p in frame hpack internal/bytesx internal/bufx qpack quic http3; do
+            if git cat-file -e "$base:$p" 2>/dev/null; then pkgs="$pkgs ./$p"; fi
+          done
+          if [ -z "$pkgs" ]; then
+            echo "none of the benched packages exist at $base — skipping ns/op diff"
+            exit 0
+          fi
+          echo "base=$base packages=$pkgs"
+          git checkout --detach "$base"
+          go test -bench=. -benchmem -benchtime=2s -count=5 -run=^$ $pkgs > base.txt
+          git checkout --detach "$head_sha"
+          go install golang.org/x/perf/cmd/benchstat@latest
+          benchstat -alpha 0.05 base.txt head.txt > diff.txt
+          cat diff.txt
