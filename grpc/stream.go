@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -58,6 +59,16 @@ type Stream struct {
 	// the live one rather than the copy — and copies grpc-status and grpc-message
 	// out of it, so status handling is identical either way.
 	discardMD bool
+
+	// borrowMD takes the copy out of the pooled metadata arena instead of fresh
+	// memory, which is what makes Header and Trailer cost nothing per RPC. Set by
+	// BorrowMetadata. Ignored when discardMD is set, which copies nothing at all
+	// and is strictly cheaper.
+	//
+	// It is the whole of the lifetime contract that option documents: with it
+	// off, every field the caller sees is on the heap and outlives the Stream by
+	// as long as the caller keeps it.
+	borrowMD bool
 
 	// Receive-side state. Owned by the single receiving goroutine.
 	header      []conn.HeaderField
@@ -382,6 +393,25 @@ const maxPooledStreamBuf = 64 << 10
 type streamBufs struct {
 	send []byte
 	dec  []byte
+
+	// md and mdFields are the metadata arena: the bytes of every copied header
+	// and trailer field, and the field headers viewing them. Used only when the
+	// call opted into BorrowMetadata; otherwise both stay empty and every copy
+	// comes from the heap.
+	//
+	// Two buffers rather than one because a []conn.HeaderField cannot be carved
+	// out of a []byte: the field headers are pointers, and pointers stored in a
+	// pointer-free allocation are invisible to the garbage collector. Pooling
+	// them side by side gets the same zero per-RPC cost without that.
+	//
+	// One arena for BOTH blocks, not one each. A response's headers and trailers
+	// are copied at different moments, so the trailer copy may find the arena
+	// short and grow it — which leaves the header copy viewing the old array. It
+	// stays correct, because that array is kept alive by the very slices viewing
+	// it; it just is not the one that goes back to the pool. After the first few
+	// RPCs the capacity fits both blocks and neither grows again.
+	md       []byte
+	mdFields []conn.HeaderField
 	// vec is the two-element vector every send builds: the five-byte prefix and
 	// the caller's message, handed to the transport as one DATA payload without
 	// joining them.
@@ -405,6 +435,7 @@ func (s *Stream) acquireBufs() {
 	s.sendBuf = b.send[:0]
 	s.dec.own = b.dec[:0]
 	s.dec.buf = s.dec.own
+	b.md, b.mdFields = b.md[:0], b.mdFields[:0]
 }
 
 // releaseBufs returns the buffers, dropping either one that grew past the cap.
@@ -427,6 +458,37 @@ func (s *Stream) releaseBufs() {
 	}
 	if cap(b.dec) > maxPooledStreamBuf {
 		b.dec = nil
+	}
+	// Clear the field headers before parking them. They are pointers into the
+	// metadata arena, and the arena carries whatever the peer sent — an
+	// authorization or cookie value among it. Truncating alone would leave a
+	// pooled struct holding live references to those bytes for as long as it sat
+	// unclaimed; zeroing bounds their reachability by the RPC that produced them,
+	// which is the rule the arena is allowed to exist under.
+	//
+	// The bytes themselves are truncated rather than zeroed, and that is not an
+	// oversight. Nothing can read them: every Name and Value is a three-index
+	// slice clamped to its own length, so the next RPC's fields view only what
+	// that RPC appended. Zeroing would also be inconsistent theatre next to
+	// b.send and b.dec, which are recycled the same way and carry entire request
+	// and response message bodies rather than a few header values.
+	clear(b.mdFields)
+	b.md, b.mdFields = b.md[:0], b.mdFields[:0]
+	if cap(b.md) > maxPooledStreamBuf {
+		b.md = nil
+	}
+	if cap(b.mdFields) > maxMetadataFields {
+		b.mdFields = nil
+	}
+	// Borrowed metadata dies with the stream, so drop the Stream's own view of it
+	// too. Header already refuses after Close, but Trailer is a plain field read
+	// with no guard — without this it would keep answering, out of an arena
+	// another RPC is by then writing into. Returning nil turns the one shape this
+	// option can get wrong into a visible empty answer instead of another call's
+	// metadata. A caller that did not opt in owns its copies outright and keeps
+	// them.
+	if s.borrowMD {
+		s.header, s.trailer = nil, nil
 	}
 	// Drop this stream's own view of them first: after the Put they belong to
 	// whoever draws them next, and a stale reference must not be able to reach
@@ -502,7 +564,7 @@ func (s *Stream) pump(ctx context.Context) error {
 		// so it can run on the live fields when the clone is skipped.
 		live := ev.Headers
 		if !s.discardMD {
-			s.trailer = cloneFields(live)
+			s.trailer = s.copyFields(live)
 			live = s.trailer
 		}
 		s.finish(live)
@@ -546,7 +608,7 @@ func (s *Stream) onHeaders(ev conn.StreamEvent) {
 	defer putHeaderSlab(ev.Slab)
 	live := ev.Headers
 	if !s.discardMD {
-		s.header = cloneFields(live)
+		s.header = s.copyFields(live)
 		live = s.header
 	}
 	s.headersSeen = true
@@ -557,7 +619,7 @@ func (s *Stream) onHeaders(ev conn.StreamEvent) {
 		// caller mutating what Header() returned cannot change what Trailer()
 		// returns.
 		if !s.discardMD {
-			s.trailer = append([]conn.HeaderField(nil), s.header...)
+			s.trailer = s.dupFields(s.header)
 		}
 		s.finish(live)
 		return
@@ -629,10 +691,80 @@ func (s *Stream) finish(fields []conn.HeaderField) {
 	}
 }
 
+// copyFields copies a decoded header block out of conn's pooled slab into
+// memory this Stream controls, and is the single place either block is copied.
+// It picks the arena when the call opted into BorrowMetadata and the heap
+// otherwise, so the lifetime rule is decided once rather than at each block.
+func (s *Stream) copyFields(src []conn.HeaderField) []conn.HeaderField {
+	if s.borrowMD && s.bufs != nil {
+		return s.borrowFields(src)
+	}
+	return cloneFields(src)
+}
+
+// dupFields makes a second view of a block this Stream has already copied,
+// for the Trailers-Only shape where one block is both the headers and the
+// trailers. Only the field headers are duplicated: the bytes are already ours
+// and both views may share them, since neither view can reach past its own
+// field's length.
+//
+// It copies rather than aliasing src so that a caller mutating what Header()
+// returned cannot change what Trailer() returns.
+func (s *Stream) dupFields(src []conn.HeaderField) []conn.HeaderField {
+	if s.borrowMD && s.bufs != nil {
+		start := len(s.bufs.mdFields)
+		s.bufs.mdFields = append(s.bufs.mdFields, src...)
+		return s.bufs.mdFields[start:len(s.bufs.mdFields):len(s.bufs.mdFields)]
+	}
+	return append([]conn.HeaderField(nil), src...)
+}
+
+// borrowFields is copyFields' arena half: the block is appended to the pooled
+// metadata arena, and what comes back is valid until Close.
+//
+// Both arenas are grown to fit the whole block BEFORE anything is appended, so
+// one block is never split across two backing arrays by a reallocation halfway
+// through it. That is not required for correctness — a split block stays
+// readable, since each field keeps its own array alive — but a block that lives
+// in one array is the thing the three-index clamp below is easy to reason
+// about, and it costs one call to arrange.
+func (s *Stream) borrowFields(src []conn.HeaderField) []conn.HeaderField {
+	if len(src) == 0 {
+		return nil
+	}
+	if len(src) > maxMetadataFields {
+		src = src[:maxMetadataFields]
+	}
+	n := 0
+	for i := range src {
+		n += len(src[i].Name) + len(src[i].Value)
+	}
+	b := s.bufs
+	b.md = slices.Grow(b.md, n)
+	b.mdFields = slices.Grow(b.mdFields, len(src))
+
+	start := len(b.mdFields)
+	for i := range src {
+		nameOff := len(b.md)
+		b.md = append(b.md, src[i].Name...)
+		valOff := len(b.md)
+		b.md = append(b.md, src[i].Value...)
+		endOff := len(b.md)
+		b.mdFields = append(b.mdFields, conn.HeaderField{
+			Name:  b.md[nameOff:valOff:valOff],
+			Value: b.md[valOff:endOff:endOff],
+		})
+	}
+	return b.mdFields[start:len(b.mdFields):len(b.mdFields)]
+}
+
 // cloneFields copies a decoded header block out of conn's pooled slab into
 // caller-owned memory, using one backing array for the whole block. Copying
 // here is what lets the slab go back to the pool immediately, which in turn
 // keeps the Stream free of any buffer-lifetime contract.
+//
+// Two allocations per block, four per RPC, and that is the price of owing the
+// caller nothing. BorrowMetadata is the way to stop paying it (#455 item 2).
 func cloneFields(src []conn.HeaderField) []conn.HeaderField {
 	if len(src) == 0 {
 		return nil

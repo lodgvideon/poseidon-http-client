@@ -312,6 +312,9 @@ type callOptions struct {
 	md []conn.HeaderField
 	// discardMD skips copying the response header and trailer blocks.
 	discardMD bool
+	// borrowMD takes those copies from the stream's pooled arena rather than the
+	// heap, binding their lifetime to Close.
+	borrowMD bool
 }
 
 // applyCallOptions folds the caller's options into co and returns the result.
@@ -358,7 +361,9 @@ func applyCallOptions(co callOptions, opts []CallOption) callOptions {
 //
 // Four allocations per RPC. The copy exists so the pooled slab can go straight
 // back and Stream carries no buffer-lifetime contract, which is the right
-// default — this is for a caller that knows it never asks.
+// default — this is for a caller that knows it never asks. A caller that does
+// ask can still drop the four with BorrowMetadata, at the price of that
+// contract.
 //
 // It does NOT affect the call's outcome: grpc-status and grpc-message are read
 // from the live block and copied out, so Status is identical either way. Invoke
@@ -368,6 +373,37 @@ func DiscardMetadata() CallOption { return discardMDCallOption{} }
 type discardMDCallOption struct{}
 
 func (discardMDCallOption) apply(c *callOptions) { c.discardMD = true }
+
+// BorrowMetadata takes the response header and trailer copies from the stream's
+// pooled buffers instead of the heap, removing the four allocations per RPC that
+// DiscardMetadata describes — for a caller that does read the metadata and so
+// cannot discard it.
+//
+// OWNERSHIP RULE. What Header and Trailer return is BORROWED:
+//   - it is valid until Close, and not one statement after it;
+//   - keeping any part of it — a Value, or a string built by aliasing one —
+//     past Close reads memory the next RPC on that connection is writing;
+//   - to keep a field, copy it out before Close. string(f.Value) is a copy;
+//     f.Value is not.
+//
+// Close nils Header's and Trailer's results rather than leaving them pointing
+// into the recycled arena, so the ordinary mistake surfaces as an empty answer
+// instead of another call's metadata. That is a courtesy and not the contract:
+// a slice the caller already took a copy of the header of is beyond its reach.
+//
+// Without this option the copies are ordinary heap memory that outlives the
+// Stream for as long as the caller keeps it, which stays the default because it
+// is the answer that cannot be got wrong. This is for the load-generator case —
+// metadata read and acted on inside the call, at a rate where four allocations
+// per RPC is a measurable share of the total (#455).
+//
+// DiscardMetadata wins when both are set: it copies nothing at all, which is
+// cheaper still, and Header and Trailer then return nil.
+func BorrowMetadata() CallOption { return borrowMDCallOption{} }
+
+type borrowMDCallOption struct{}
+
+func (borrowMDCallOption) apply(c *callOptions) { c.borrowMD = true }
 
 // maxRecvCallOption implements CallOption for MaxRecvMessageSize.
 type maxRecvCallOption int
@@ -473,6 +509,7 @@ func (cc *ClientConn) openStream(ctx context.Context, method string, md []conn.H
 	st.acquireBufs()
 	st.dec.max = co.maxRecvMessageSize
 	st.discardMD = co.discardMD
+	st.borrowMD = co.borrowMD
 
 	// The fused message is sent as [prefix, request]: two buffers, one DATA
 	// payload. Only the five-byte prefix goes through the stream's pooled send
