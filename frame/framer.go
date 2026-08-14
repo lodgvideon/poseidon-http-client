@@ -6,6 +6,7 @@ import (
 	"io"
 
 	"github.com/lodgvideon/poseidon-http-client/internal/bufx"
+	"github.com/lodgvideon/poseidon-http-client/trace"
 )
 
 const defaultMaxFrameSize uint32 = 16384
@@ -63,6 +64,13 @@ type Framer struct {
 	// a CONTINUATION with no block open — is a connection error PROTOCOL_ERROR.
 	expectContinuation bool
 	continuationStream uint32
+
+	// tracer observes every frame in both directions; nil (the default) is the
+	// off switch, and the only cost tracing has when off. traceParams is the
+	// SETTINGS scratch it reports through, allocated by SetTracer so that
+	// FrameInfo.Params never points at a stack local. See trace.go.
+	tracer      trace.Tracer
+	traceParams *trace.Params
 }
 
 // NewFramer constructs a Framer over the given writer and reader.
@@ -141,17 +149,24 @@ func (f *Framer) WriteClientPreface() error {
 	return err
 }
 
-func (f *Framer) writeHeader(h FrameHeader) error {
+// writeHeader emits the 9-byte frame header and reports the frame to the
+// tracer. detail is the frame's logical payload — padding excluded — when the
+// caller has it contiguously in hand, and nil when it does not; it is read only
+// to fill in the type-specific fields of the trace event and is never written.
+func (f *Framer) writeHeader(h FrameHeader, detail []byte) error {
 	WriteFrameHeader(f.hdrBuf[:], h)
-	_, err := f.w.Write(f.hdrBuf[:])
-	return err
+	if _, err := f.w.Write(f.hdrBuf[:]); err != nil {
+		return err
+	}
+	f.traceOut(h, detail)
+	return nil
 }
 
 func (f *Framer) writeFrame(h FrameHeader, payload []byte) error {
 	if h.Length > f.maxFrameSize {
 		return ErrFrameTooLarge
 	}
-	if err := f.writeHeader(h); err != nil {
+	if err := f.writeHeader(h, payload); err != nil {
 		return err
 	}
 	if len(payload) > 0 {
@@ -213,7 +228,7 @@ func (f *Framer) WriteDataV(streamID uint32, endStream bool, bufs [][]byte) erro
 	}
 	if err := f.writeHeader(FrameHeader{
 		Length: uint32(total), Type: FrameData, Flags: flags, StreamID: streamID,
-	}); err != nil {
+	}, nil); err != nil {
 		return err
 	}
 	return f.writeBufs(bufs)
@@ -238,7 +253,7 @@ func (f *Framer) WriteDataVPadded(streamID uint32, endStream bool, bufs [][]byte
 	}
 	if err := f.writeHeader(FrameHeader{
 		Length: uint32(totalLen), Type: FrameData, Flags: flags, StreamID: streamID,
-	}); err != nil {
+	}, nil); err != nil {
 		return err
 	}
 	f.smallBuf[0] = padLen
@@ -304,7 +319,7 @@ func (f *Framer) WriteDataPadded(streamID uint32, endStream bool, data []byte, p
 	if totalLen > f.maxFrameSize {
 		return ErrFrameTooLarge
 	}
-	if err := f.writeHeader(FrameHeader{Length: totalLen, Type: FrameData, Flags: flags, StreamID: streamID}); err != nil {
+	if err := f.writeHeader(FrameHeader{Length: totalLen, Type: FrameData, Flags: flags, StreamID: streamID}, nil); err != nil {
 		return err
 	}
 	f.smallBuf[0] = padLen
@@ -377,9 +392,13 @@ func (f *Framer) WriteHeaders(p WriteHeadersParams) error {
 		if _, err := f.w.Write(f.writeBuf[:9+len(p.BlockFragment)]); err != nil {
 			return err
 		}
+		// The one write path that does not go through writeHeader: it coalesces
+		// header and block into a single Write, so it has to report the frame
+		// itself or the fast path would be invisible to a tracer.
+		f.traceOut(h, nil)
 		return nil
 	}
-	if err := f.writeHeader(FrameHeader{Length: totalLen, Type: FrameHeaders, Flags: flags, StreamID: p.StreamID}); err != nil {
+	if err := f.writeHeader(FrameHeader{Length: totalLen, Type: FrameHeaders, Flags: flags, StreamID: p.StreamID}, nil); err != nil {
 		return err
 	}
 	if p.PadLength > 0 {
@@ -517,16 +536,20 @@ func (f *Framer) WritePushPromise(streamID, promisedID uint32, blockFragment []b
 	if totalLen > f.maxFrameSize {
 		return ErrFrameTooLarge
 	}
-	if err := f.writeHeader(FrameHeader{Length: totalLen, Type: FramePushPromise, Flags: flags, StreamID: streamID}); err != nil {
+	// The promised id is encoded before the header goes out, and the pad-length
+	// byte parked past it at smallBuf[4] rather than at [0], so that the header
+	// write can hand the tracer the promised id as this frame's logical payload.
+	// Wire order below is unchanged: pad length first (§6.6), then the id.
+	bufx.WriteUint31(f.smallBuf[:4], promisedID)
+	if err := f.writeHeader(FrameHeader{Length: totalLen, Type: FramePushPromise, Flags: flags, StreamID: streamID}, f.smallBuf[:4]); err != nil {
 		return err
 	}
 	if padLen > 0 {
-		f.smallBuf[0] = padLen
-		if _, err := f.w.Write(f.smallBuf[:1]); err != nil {
+		f.smallBuf[4] = padLen
+		if _, err := f.w.Write(f.smallBuf[4:5]); err != nil {
 			return err
 		}
 	}
-	bufx.WriteUint31(f.smallBuf[:4], promisedID)
 	if _, err := f.w.Write(f.smallBuf[:4]); err != nil {
 		return err
 	}
@@ -571,7 +594,7 @@ func (f *Framer) WriteGoAway(lastStreamID uint32, code ErrCode, debug []byte) er
 	f.smallBuf[5] = byte(code >> 16)
 	f.smallBuf[6] = byte(code >> 8)
 	f.smallBuf[7] = byte(code)
-	if err := f.writeHeader(FrameHeader{Length: totalLen, Type: FrameGoAway, StreamID: 0}); err != nil {
+	if err := f.writeHeader(FrameHeader{Length: totalLen, Type: FrameGoAway, StreamID: 0}, f.smallBuf[:8]); err != nil {
 		return err
 	}
 	if _, err := f.w.Write(f.smallBuf[:8]); err != nil {
@@ -664,6 +687,11 @@ func (f *Framer) ReadFrame(ctx context.Context, h Handler) (FrameHeader, error) 
 		return FrameHeader{}, err
 	}
 	if fh.Length > f.maxFrameSize {
+		// Reported without a payload, because there is not going to be one: the
+		// frame is refused here and the connection torn down. ErrFrameTooLarge
+		// names neither the type nor the size, and "which frame did the peer
+		// oversend, and how far over" is the question that follows it.
+		f.traceIn(fh, nil)
 		return fh, ErrFrameTooLarge
 	}
 	if cap(f.readBuf) < int(fh.Length) {
@@ -675,6 +703,11 @@ func (f *Framer) ReadFrame(ctx context.Context, h Handler) (FrameHeader, error) 
 			return fh, err
 		}
 	}
+
+	// Report the frame before it is validated, not after: a frame that violates
+	// §6.10 or fails its length check is exactly the one a frame log exists to
+	// show, and dispatch below may never be reached.
+	f.traceIn(fh, payload)
 
 	// RFC 9113 §6.10: enforce field-block continuity before dispatch, so an
 	// interleaving frame (or a stray CONTINUATION) is rejected rather than

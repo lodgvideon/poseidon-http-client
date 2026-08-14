@@ -17,6 +17,7 @@ import (
 
 	"github.com/lodgvideon/poseidon-http-client/conn"
 	"github.com/lodgvideon/poseidon-http-client/quic"
+	"github.com/lodgvideon/poseidon-http-client/trace"
 )
 
 // TransportKind selects which transport strategy a Client uses.
@@ -122,6 +123,23 @@ type ClientOptions struct {
 	// TransportH3 and ignored by every other transport (which dial via
 	// ConnOpts.Dialer).
 	TLSConfig *tls.Config
+
+	// Tracer observes frames on the wire, below the request level Hooks
+	// describes. Setting it here switches it on for every connection the client
+	// dials, which is the point: a load generator that has to be told which
+	// connection to watch is a load generator that has already lost the bug.
+	//
+	// It is forwarded to ConnOpts.Tracer, overriding anything set there
+	// directly. Today that reaches the HTTP/2 transports only —
+	// TransportSingleConn, TransportPool, TransportManaged and the HTTP/2 half
+	// of TransportALPN. The HTTP/1.1 and HTTP/3 stacks have no emit sites yet
+	// (issue #610 splits them into their own steps), so setting this alongside
+	// TransportH1* or TransportH3* is currently a no-op rather than an error —
+	// it will start producing output when those seams land, without an API
+	// change.
+	//
+	// The callback must not block; see trace.Tracer.
+	Tracer trace.Tracer
 
 	// H3ConnOptions are forwarded to every QUIC connection dialled by the
 	// HTTP/3 transports (TransportH3, TransportH3Pool, TransportH3Managed) —
@@ -263,6 +281,9 @@ func NewClient(opts ClientOptions) (*Client, error) {
 	}
 	if opts.PushHandler != nil {
 		opts.ConnOpts.EnablePush = true
+	}
+	if opts.Tracer != nil {
+		opts.ConnOpts.Tracer = opts.Tracer
 	}
 	if opts.ConnOpts.StreamEventBuffer <= 0 {
 		opts.ConnOpts.StreamEventBuffer = defaultStreamEventBuffer(opts.ConnOpts.Settings.MaxFrameSize)

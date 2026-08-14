@@ -20,6 +20,13 @@
 //
 // TLS certificates are verified by default; -insecure turns that off, which the
 // self-signed servers under test/integration need.
+//
+// Set POSEIDON_DEBUG=frames to have every HTTP/2 frame written to stderr as it
+// crosses the wire. It is an environment variable rather than a flag or a build
+// tag on purpose: a shipped binary can be made loud without being rebuilt, and
+// a run that went wrong can be repeated verbatim with the log turned on. Expect
+// tens of thousands of lines a second — the tracer buffers, and says so when it
+// has to drop.
 package main
 
 import (
@@ -28,12 +35,14 @@ import (
 	"flag"
 	"log"
 	"net/url"
+	"os"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	"github.com/lodgvideon/poseidon-http-client/client"
 	"github.com/lodgvideon/poseidon-http-client/conn"
+	"github.com/lodgvideon/poseidon-http-client/trace"
 )
 
 func main() {
@@ -48,6 +57,18 @@ func main() {
 			"skip TLS certificate verification (needed for the self-signed test servers)")
 	)
 	flag.Parse()
+
+	tracer, tracerCloser, err := trace.FromEnv(os.Stderr)
+	if err != nil {
+		log.Fatalf("loadgen: %s: %v", trace.EnvVar, err)
+	}
+	if tracerCloser != nil {
+		// Closed before the summary prints, so the frame log is complete and
+		// ahead of it rather than interleaved with it.
+		defer func() { _ = tracerCloser.Close() }()
+		log.Printf("loadgen: frame tracing on (%s); expect a lot of output", trace.EnvVar)
+	}
+
 	if *transport != "h2" && *transport != "h3" {
 		log.Fatalf("loadgen: -transport must be h2 or h3, got %q", *transport)
 	}
@@ -104,11 +125,13 @@ func main() {
 			TLSConfig:          tlsCfg,
 			Hooks:              hooks,
 			RateLimitPerSecond: *rps,
+			Tracer:             tracer,
 		})
 	} else {
 		c, err = client.NewPoolClient(addr, dialer, pool,
 			client.WithRateLimit(*rps, 0),
 			client.WithHooks(hooks),
+			client.WithTracer(tracer),
 		)
 	}
 	if err != nil {
