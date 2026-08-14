@@ -1029,18 +1029,26 @@ func (h *connFrameHandler) OnResetStream(id, errCode, finalSize uint64) error {
 		return ErrFinalSize
 	}
 	// The final size accounts for every byte the peer sent on the stream (RFC 9000
-	// §4.5), so it may not fall below data already received. This one stays here
-	// rather than moving into chargeRecv: it is a final-size rule, not a
+	// §4.5), so it may not fall below the peer's highest offset so far. This one
+	// stays here rather than moving into chargeRecv: it is a final-size rule, not a
 	// flow-control one, and OnStream has no equivalent — an offset below the
-	// highest received is ordinary retransmission there. It keeps the FC-enabled
-	// gating it has always had, so a hand-built test connection is unaffected.
-	if h.c.connRecvMax != 0 && finalSize < s.recvHighest {
+	// highest received is ordinary retransmission there. It reads s.recv.highest,
+	// not the s.recvHighest chargeRecv keeps: the latter is flow-control
+	// accounting, so on a connection with the receive limit disabled it never
+	// advances and the comparison could not fire.
+	if finalSize < s.recv.highest {
 		return ErrFinalSize
 	}
 	// The rest is the same §4.1 accounting OnStream does: bound the new end
 	// against both limits and charge the increment to the connection receiver.
 	if err := h.c.chargeRecv(s, finalSize); err != nil {
 		return err
+	}
+	// The final size names the peer's last byte, so learning it fixes the stream's
+	// highest offset (§4.5) — which is what makes the check above reject a later
+	// RESET_STREAM that shrinks it, however the first one was learned.
+	if finalSize > s.recv.highest {
+		s.recv.highest = finalSize
 	}
 	s.recvReset = true
 	s.recvResetCode = errCode // surfaced to the application (RFC 9114 §8.1 request error)

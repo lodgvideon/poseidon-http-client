@@ -55,6 +55,66 @@ func TestConformance_RFC9000_Sec45_ResetFinalSizeBelow(t *testing.T) {
 	}
 }
 
+// TestConformance_RFC9000_Sec45_ResetFinalSizeBelowUnderNoFlowControl checks that
+// the rule above holds with receive flow control disabled: a RESET_STREAM final
+// size below data already received is still a FINAL_SIZE_ERROR, and one equal to
+// the data received is still accepted (RFC 9000 §4.5). The final-size rule is not
+// a flow-control rule, so the connection's receive limit does not gate it.
+func TestConformance_RFC9000_Sec45_ResetFinalSizeBelowUnderNoFlowControl(t *testing.T) {
+	// connRecvMax is left at 0 — the disabled sentinel — so no byte on this
+	// connection is charged to receive flow control.
+	c := &Conn{peer: TransportParams{InitialMaxStreamsBidi: 1}}
+	s, _ := c.OpenStream()
+	h := &connFrameHandler{c: c}
+	if err := h.OnStream(s.ID(), 0, false, make([]byte, 100)); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.OnResetStream(s.ID(), 0, 50); err != ErrFinalSize { // 50 < the 100 received
+		t.Fatalf("reset final size below received = %v, want ErrFinalSize", err)
+	}
+
+	// A final size equal to the data received names that same last byte and is legal.
+	c2 := &Conn{peer: TransportParams{InitialMaxStreamsBidi: 1}}
+	s2, _ := c2.OpenStream()
+	h2 := &connFrameHandler{c: c2}
+	if err := h2.OnStream(s2.ID(), 0, false, make([]byte, 100)); err != nil {
+		t.Fatal(err)
+	}
+	if err := h2.OnResetStream(s2.ID(), 0, 100); err != nil {
+		t.Fatalf("reset final size equal to received = %v, want nil", err)
+	}
+}
+
+// TestConformance_RFC9000_Sec45_SecondResetBelowFirst checks that a final size
+// learned from a RESET_STREAM is itself fixed: a later RESET_STREAM declaring a
+// smaller one is a FINAL_SIZE_ERROR, while an identical retransmit is accepted
+// (RFC 9000 §4.5). Both arms run with receive flow control enabled and disabled,
+// because the rule does not depend on it.
+func TestConformance_RFC9000_Sec45_SecondResetBelowFirst(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		connRecvMax uint64
+	}{
+		{"FlowControlOn", DefaultConnRecvWindow},
+		{"FlowControlOff", 0}, // the disabled sentinel
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c := &Conn{peer: TransportParams{InitialMaxStreamsBidi: 1}, connRecvMax: tc.connRecvMax}
+			s, _ := c.OpenStream()
+			h := &connFrameHandler{c: c}
+			if err := h.OnResetStream(s.ID(), 0, 1000); err != nil { // final size 1000
+				t.Fatal(err)
+			}
+			if err := h.OnResetStream(s.ID(), 0, 1000); err != nil { // identical retransmit
+				t.Fatalf("identical RESET_STREAM retransmit should be accepted: %v", err)
+			}
+			if err := h.OnResetStream(s.ID(), 0, 500); err != ErrFinalSize {
+				t.Fatalf("second reset with a smaller final size = %v, want ErrFinalSize", err)
+			}
+		})
+	}
+}
+
 // TestConformance_RFC9000_Sec45_ResetFinalSizePastLimit checks that a RESET_STREAM
 // final size past the per-stream limit is a FLOW_CONTROL_ERROR.
 func TestConformance_RFC9000_Sec45_ResetFinalSizePastLimit(t *testing.T) {
