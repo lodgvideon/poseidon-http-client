@@ -2,6 +2,7 @@ package quic
 
 import (
 	"bytes"
+	"context"
 	"crypto/tls"
 	"errors"
 	"testing"
@@ -147,36 +148,331 @@ func TestConformance_RFC9001_Sec57_ZeroRTTDiscardedNotDecrypted(t *testing.T) {
 // discard a newly unprotected packet unless it is certain that it has not processed
 // another packet with the same packet number from the same packet number space." A
 // replayed datagram authenticates — the AEAD nonce derives from the packet number —
-// so the duplicate must be dropped before its frames reach the handlers. Observable:
-// after the owed ACK is consumed, the replay must not oblige a fresh one.
+// so the duplicate must be dropped before its frames reach the handlers.
+//
+// Every delivery gets a FRESH COPY of the captured bytes, and that copy is the
+// whole test. recvDatagram removes header protection IN PLACE — byte 0 of an
+// Initial goes 0xca -> 0xc3 — so handing it the same slice a second time replays a
+// packet that no longer authenticates. That one is dropped at the "no keys, or
+// authentication failed" skip in the datagram loop, long before the dedup check,
+// and leaves no ACK owed for entirely the wrong reason. This test did exactly that
+// and passed with the dedup check disabled (#636); an off-path attacker replays
+// the bytes as they went over the wire, which is what the copy reproduces.
+//
+// ALL THREE packet-number spaces, because c.acks is per-space and so is any
+// defect in a per-space check: narrowing the dedup to `sp != spaceApp` left the
+// whole quic suite green while 1-RTT replays sailed through, and `sp !=
+// spaceHandshake` did the same until the Handshake arm below existed.
+//
+// And BOTH KINDS OF PACKET, because the check can only discard what processPacket
+// recorded: `c.acks[sp].receive(pn, fh.ackEliciting)` records every authenticated
+// packet, and recording only the ack-eliciting ones was equally green — every arm
+// carried an ack-eliciting frame (a PING, or the 1-RTT arm's PATH_CHALLENGE) until
+// the ack_only arm below existed. A replayed non-ack-eliciting packet is the
+// stealthier of the two anyway: it owes no ACK, so the idle timer it keeps pushing
+// out is the only thing on this end that moves at all.
+//
+// And BOTH HANDSHAKE STATES, because every other arm's Conn has handshakeComplete
+// already true: gating the dedup on it — `c.handshakeComplete && c.acks[sp].seen(pn)`,
+// the shape a "post-handshake only" narrowing would take — left the whole quic suite
+// green. That gate would disable dedup over exactly the window Initial packets exist
+// in. Installing Handshake write keys discards the Initial space (RFC 9001 §4.9.1),
+// and that happens well before TLS completes, so on the live path a server Initial can
+// only ever be opened with the handshake still running; the in_flight arm below is the
+// one that puts the fixture in that state, and the arm above it is the synthetic one.
 func TestConformance_RFC9000_Sec123_ReplayedPacketDiscarded(t *testing.T) {
-	origDCID := []byte("origdcid")
-	_, serverKeys := InitialKeys(origDCID)
+	for _, arm := range replayLongHeaderArms() {
+		t.Run(arm.name, func(t *testing.T) { testReplayDiscarded(t, arm) })
+	}
+	t.Run("app_frame_dispatch", testReplayAppFramesNotDispatched)
+}
 
-	c := newInitialConn(t, origDCID)
-	pkt := craftServerInitial(t, serverKeys, nil, []byte{0xaa}, 7, appendPing(nil))
+// replayArm is one long-header fixture for testReplayDiscarded: a Conn already
+// holding that space's read keys, and a way to seal a server packet into that
+// space. The arms differ in nothing but the space, the keys, and the payload, so
+// they share the arm body rather than duplicating it — and running that one body
+// per arm is what makes a defect confined to one space, or to one kind of packet,
+// fail on exactly that arm's run.
+type replayArm struct {
+	name  string
+	space int
+	// ackEliciting is whether the crafted packet carries an ack-eliciting frame
+	// (RFC 9000 §13.2.1), which the arm body asserts against rather than assumes.
+	// It is not a convenience switch: false is the case processPacket's
+	// receive(pn, fh.ackEliciting) can drop on the floor, so the arm that sets it
+	// is the point of the field.
+	ackEliciting bool
+	setup        func(t *testing.T) (c *Conn, craft func(pn uint64) []byte)
+}
 
-	if err := c.recvDatagram(pkt); err != nil {
+// replayLongHeaderArms builds the two Initial fixtures and the two Handshake ones.
+//
+// The two Initial arms differ in nothing but handshakeComplete, which is the whole
+// point of the second: the first is the cheap fixture, the second is the state the
+// connection is really in when a server Initial arrives (see the test's doc comment
+// on §4.9.1). Both are worth keeping — the pair is what makes a dedup narrowed to
+// one handshake state fail on exactly one of them.
+//
+// The Handshake arms' starting state is one the connection really passes
+// through, not a convenience: c.keys.Handshake goes in at
+// SetReadKeys(QUICEncryptionLevelHandshake) and the only thing that takes it away
+// is discardSpace(spaceHandshake), whose sole non-test caller is OnHandshakeDone
+// — the server's HANDSHAKE_DONE (RFC 9001 §4.9.2). handshakeComplete is already
+// true because TLS completion sets it (Conn.HandshakeComplete) without discarding
+// the space. So the replay window spans the whole server Handshake flight, and
+// every packet of it stays replayable until HANDSHAKE_DONE lands.
+//
+// §12.4 Table 3 permits only PADDING, PING, ACK, CRYPTO and a transport
+// CONNECTION_CLOSE in these two spaces, so the 1-RTT arm's PATH_CHALLENGE would be
+// a PROTOCOL_VIOLATION here — which is why frame dispatch is observed there and
+// the per-packet costs are observed here. Table 3 does leave one ack-eliciting
+// payload this fixture can craft cheaply (PING) and one that is not (ACK), and
+// both are on the wire: the ack_only arm replays the server's ACK of our own
+// Finished, which is the ordinary next Handshake packet after the flight the ping
+// arm replays, since HANDSHAKE_DONE is a 1-RTT frame and leaves the server nothing
+// else to put in a Handshake packet.
+func replayLongHeaderArms() []replayArm {
+	return []replayArm{{
+		name:         "initial_ping_ack_and_idle_timer",
+		space:        spaceInitial,
+		ackEliciting: true,
+		setup: func(t *testing.T) (*Conn, func(uint64) []byte) {
+			origDCID := []byte("origdcid")
+			_, serverKeys := InitialKeys(origDCID)
+			return newInitialConn(t, origDCID), func(pn uint64) []byte {
+				return craftServerInitial(t, serverKeys, nil, []byte{0xaa}, pn, appendPing(nil))
+			}
+		},
+	}, {
+		name:         "initial_ping_handshake_in_flight",
+		space:        spaceInitial,
+		ackEliciting: true,
+		setup:        newMidHandshakeReplayConn,
+	}, {
+		name:         "handshake_ping_ack_and_idle_timer",
+		space:        spaceHandshake,
+		ackEliciting: true,
+		setup: func(t *testing.T) (*Conn, func(uint64) []byte) {
+			c, seal := newHandshakeReplayConn(t, 0x5c, "replayhs")
+			return c, func(pn uint64) []byte { return seal(pn, appendPing(nil)) }
+		},
+	}, {
+		name:  "handshake_ack_only_idle_timer",
+		space: spaceHandshake,
+		setup: func(t *testing.T) (*Conn, func(uint64) []byte) {
+			c, seal := newHandshakeReplayConn(t, 0x3e, "replayao")
+			// OnAck rejects a Largest Acknowledged at or above sendPN as a §13.1
+			// never-sent, so the ACK of packet 0 below needs one Handshake packet
+			// already sent. handshakeComplete implies it: tls.QUICHandshakeDone
+			// arrives only after the client's Finished was written at handshake
+			// level, and sealPacket advances sendPN[spaceHandshake] when that
+			// CRYPTO goes out. sealServerPacket pads the 5-byte ACK out to the
+			// 20-byte minimum with PADDING, which §13.2.1 also makes
+			// non-ack-eliciting, so the whole packet is.
+			c.sendPN[spaceHandshake] = 1
+			return c, func(pn uint64) []byte { return seal(pn, AppendAck(nil, 0, 0, 0, nil)) }
+		},
+	}}
+}
+
+// newHandshakeReplayConn builds the fixture the two Handshake arms share: a client
+// Conn holding this space's read keys, with the server's connection ID already
+// adopted because its Initial arrived long before its Handshake flight (§7.2), and
+// a way to seal a server Handshake packet to it. seed keys the AEAD and dcid names
+// the connection, so two arms in one run stay independent.
+func newHandshakeReplayConn(t *testing.T, seed byte, dcid string) (*Conn, func(pn uint64, frames []byte) []byte) {
+	t.Helper()
+	scid := []byte{0xaa}
+	sealer, opener := closeTestSealerOpener(t, seed)
+	c := &Conn{
+		pc: &closePC{}, dcid: []byte(dcid), handshakeComplete: true,
+		gotServerCID: true, serverSCID: scid,
+	}
+	c.keys.Handshake = opener
+	return c, func(pn uint64, frames []byte) []byte {
+		return sealServerPacket(t, sealer, PacketHandshake, nil, scid, pn, frames)
+	}
+}
+
+// newMidHandshakeReplayConn builds the fixture whose replay lands while the handshake
+// is still running: the production NewConn constructor plus Start, which is exactly
+// where a client sits once it has written its ClientHello and is waiting for the
+// server's Initial flight. Nothing about the state is set by hand — handshakeComplete
+// is false because nothing has completed it, and c.keys.Initial is the Opener NewConn
+// derived from the connection ID it drew, which is why the crafted packets are sealed
+// with InitialKeys(c.origDCID) rather than a fixed one.
+//
+// The live TLS client is load-bearing, not decoration: recvDatagram ends in
+// c.hs.Pump(c) on every datagram while the handshake is unfinished, so this state
+// cannot be faked by clearing the flag on a hand-built Conn with a nil hs. The first
+// Pump drains Start's ClientHello into pendingCrypto, which no delivery here flushes.
+//
+// The payload is a PING rather than the CRYPTO(ServerHello) a real capture would hold:
+// §12.4 Table 3 admits PING in an Initial, and CRYPTO would buy nothing — the
+// reassembler drops a repeat of an offset it has already consumed, so a re-dispatched
+// CRYPTO frame is invisible, and the owed ACK and the idle timer are the observables
+// either way. Frame dispatch itself stays the 1-RTT arm's job.
+func newMidHandshakeReplayConn(t *testing.T) (*Conn, func(pn uint64) []byte) {
+	t.Helper()
+	_, pool := genServerCert(t)
+	tp := concat(
+		tpInt(tpInitialMaxData, 1<<20),
+		tpInt(tpInitialMaxStreamsBidi, 16),
+	)
+	c, err := NewConn(&closePC{}, &tls.Config{ServerName: "example.com", RootCAs: pool}, tp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := c.hs.Start(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	// Asserted, not assumed: the arm is worth nothing if the fixture is complete.
+	if c.handshakeComplete {
+		t.Fatal("the in-flight fixture must start with the handshake unfinished")
+	}
+	_, serverKeys := InitialKeys(c.origDCID)
+	return c, func(pn uint64) []byte {
+		return craftServerInitial(t, serverKeys, nil, []byte{0xaa}, pn, appendPing(nil))
+	}
+}
+
+// testReplayDiscarded is the long-header arm, run once per fixture: the costs a
+// duplicate that reaches the handlers imposes on this end regardless of what it
+// carries — the ACK owed (§13.2.1, one ACK per replay is attacker-driven work)
+// and the idle timer (§10.1, a captured datagram replayed forever would postpone
+// the idle timeout without the peer ever sending anything new).
+//
+// The idle timer is the whole of the ack_only arm, because §13.2.1 leaves a
+// non-ack-eliciting packet owing no ACK either way and its ACK frame re-dispatched
+// is idempotent — the packets it names were removed from c.sent by the first
+// delivery. That is the point rather than a weakness: a replay nothing else on
+// this end reacts to still holds the connection open forever, and §12.3 is what
+// stops it.
+func testReplayDiscarded(t *testing.T, arm replayArm) {
+	sp := arm.space
+	c, craft := arm.setup(t)
+	start := time.Unix(1700000000, 0)
+	now := start
+	c.now = func() time.Time { return now }
+	c.lastActivity = start.Add(-time.Hour)
+
+	// Asserted against the arm, not assumed: an arm that claims to replay a
+	// non-ack-eliciting packet has to prove the packet is one, or a payload that
+	// quietly became ack-eliciting would leave the untested case untested again.
+	ackOwed := func(stage string) {
+		t.Helper()
+		if got := c.acks[sp].ackPending(); got != arm.ackEliciting {
+			t.Fatalf("%s: ACK owed = %v, want %v (the packet is ack-eliciting: %v)",
+				stage, got, arm.ackEliciting, arm.ackEliciting)
+		}
+	}
+
+	captured := craft(7)
+	deliver := func(pkt []byte) error { return c.recvDatagram(append([]byte(nil), pkt...)) }
+
+	if err := deliver(captured); err != nil {
 		t.Fatalf("first recvDatagram = %v, want nil", err)
 	}
-	if !c.acks[spaceInitial].ackPending() {
-		t.Fatal("an ack-eliciting packet should leave an ACK owed")
+	ackOwed("first delivery")
+	if !c.lastActivity.Equal(start) {
+		t.Fatalf("a processed packet must reset the idle timer: lastActivity = %v, want %v",
+			c.lastActivity, start)
 	}
-	c.acks[spaceInitial].acked() // the ACK went out
+	c.acks[sp].acked()           // the ACK went out
+	now = start.Add(time.Minute) // time passes before the replay arrives
 
-	if err := c.recvDatagram(pkt); err != nil {
+	if err := deliver(captured); err != nil {
 		t.Fatalf("replayed recvDatagram = %v, want nil (discarded)", err)
 	}
-	if c.acks[spaceInitial].ackPending() {
-		t.Fatal("a replayed packet was processed again: its PING re-owed an ACK")
+	if c.acks[sp].ackPending() {
+		t.Error("a replayed packet was processed again: it re-owed an ACK")
+	}
+	if !c.lastActivity.Equal(start) {
+		t.Errorf("a replayed packet advanced the idle timer to %v, want it left at %v",
+			c.lastActivity, start)
 	}
 
-	// Control: a genuinely new packet number is still processed.
-	fresh := craftServerInitial(t, serverKeys, nil, []byte{0xaa}, 8, appendPing(nil))
-	if err := c.recvDatagram(fresh); err != nil {
+	// Control: a genuinely new packet number is still processed, and still does
+	// what the replay must not.
+	if err := deliver(craft(8)); err != nil {
 		t.Fatalf("fresh recvDatagram = %v, want nil", err)
 	}
-	if !c.acks[spaceInitial].ackPending() {
+	ackOwed("control")
+	if !c.lastActivity.Equal(now) {
+		t.Fatalf("control: a new packet must reset the idle timer: lastActivity = %v, want %v",
+			c.lastActivity, now)
+	}
+}
+
+// testReplayAppFramesNotDispatched is the 1-RTT arm, and it observes FRAME
+// DISPATCH itself — which neither the owed ACK nor the idle timer does, since both
+// are bookkeeping that processPacket runs after ParseFrames returns. Moving the
+// dedup check to just below ParseFrames therefore left the arms above green while
+// every replayed frame ran a second time.
+//
+// A PATH_CHALLENGE is the observable: the handler answers it by queueing a
+// PATH_RESPONSE in pendingCtrl (§8.2.2), so a replay whose frames run appends nine
+// bytes the peer never asked for — echo traffic an off-path attacker gets to
+// generate from one captured datagram. pendingCtrl is the harness's existing view
+// of queued outbound bytes; the flushed datagram is not, since §8.2.2 pads it to
+// 1200 whether it carries one PATH_RESPONSE or two.
+//
+// The replayed number is deliberately NOT the largest received, so a check keyed on
+// largestRecv rather than on the tracker's per-number ranges fails here as well.
+func testReplayAppFramesNotDispatched(t *testing.T) {
+	sealer, opener := closeTestSealerOpener(t, 0x9d)
+	c := &Conn{pc: &closePC{}, dcid: []byte("replay1r"), oneRTTSealer: sealer, handshakeComplete: true}
+	c.keys.OneRTT = opener
+
+	craft := func(pn uint64, data [8]byte) []byte {
+		return sealServerPacket(t, sealer, PacketShort, nil, nil, pn,
+			append([]byte{byte(FramePathChallenge)}, data[:]...))
+	}
+	deliver := func(pkt []byte) error { return c.recvDatagram(append([]byte(nil), pkt...)) }
+	var want []byte // the PATH_RESPONSEs dispatch is allowed to have queued so far
+	check := func(stage string) {
+		t.Helper()
+		if !bytes.Equal(c.pendingCtrl, want) {
+			t.Errorf("%s: pendingCtrl = %x, want %x (%d PATH_RESPONSEs)",
+				stage, c.pendingCtrl, want, len(want)/9)
+		}
+	}
+
+	lowData := [8]byte{'l', 'o', 'w', 'c', 'h', 'a', 'l', 'l'}
+	low := craft(5, lowData)
+	if err := deliver(low); err != nil {
+		t.Fatalf("recvDatagram(pn=5) = %v, want nil", err)
+	}
+	want = appendPathResponse(want, lowData)
+	check("first delivery")
+
+	// A higher number lands next, so the replay below is no longer the largest
+	// received and a largest-only dedup would wave it through.
+	highData := [8]byte{'h', 'i', 'g', 'h', 'c', 'h', 'a', 'l'}
+	if err := deliver(craft(9, highData)); err != nil {
+		t.Fatalf("recvDatagram(pn=9) = %v, want nil", err)
+	}
+	want = appendPathResponse(want, highData)
+	check("higher packet number")
+	c.acks[spaceApp].acked() // both ACKs went out
+
+	if err := deliver(low); err != nil {
+		t.Fatalf("replayed recvDatagram = %v, want nil (discarded)", err)
+	}
+	check("after the replay: its PATH_CHALLENGE was dispatched a second time")
+	if c.acks[spaceApp].ackPending() {
+		t.Error("a replayed packet was processed again: it re-owed an ACK")
+	}
+
+	// Control: a genuinely new packet number in the same space still dispatches,
+	// so the arm is not passing merely because nothing ever reaches the handlers.
+	freshData := [8]byte{'f', 'r', 'e', 's', 'h', 'c', 'h', 'l'}
+	if err := deliver(craft(10, freshData)); err != nil {
+		t.Fatalf("fresh recvDatagram = %v, want nil", err)
+	}
+	want = appendPathResponse(want, freshData)
+	check("control")
+	if !c.acks[spaceApp].ackPending() {
 		t.Fatal("control: a new packet number must still be processed")
 	}
 }

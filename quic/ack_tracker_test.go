@@ -99,6 +99,61 @@ func TestAckTracker_BoundedRanges(t *testing.T) {
 	}
 }
 
+// TestAckTracker_SeenSpansWholeRange pins that seen() decides membership of a
+// RANGE, not of its endpoints. Every §12.3 replay arm in
+// conformance_recvpath_test.go replays a packet number that is its own singleton
+// range, where lo == hi and the two are indistinguishable, so judging membership by
+// either endpoint alone — `pn == r.lo` or `pn == r.hi` in place of `pn >= r.lo &&
+// pn <= r.hi` — left the whole quic suite green while every interior number of a
+// contiguous run read as new and its packet was processed a second time. A
+// contiguous run is the ordinary shape on the wire: an unreordered flight fills one
+// range, and the number an attacker replays out of it is usually not an end of it.
+//
+// Dropping one of the two bounds instead (`pn >= r.lo` alone, `pn <= r.hi` alone) is
+// already caught by TestConformance_RFC9000_Sec123_ReorderedPacketNotDiscarded,
+// whose gap-inside-the-retained-window assertion those over-discard. So is the
+// truncation floor below the retained window, which is why nothing here truncates —
+// asserted, so that every false below means "provably new", never "undecidable".
+//
+// The identical containment test in receive() is NOT under-pinned the same way and
+// is deliberately not duplicated here: mutating it to either endpoint alone breaks
+// insert()'s no-overlap precondition, which TestAckTracker_OrderedInsertMatchesOracle_Random
+// and TestAckTracker_InsertKeepsInvariant both catch (verified in both directions).
+func TestAckTracker_SeenSpansWholeRange(t *testing.T) {
+	var a ackTracker
+	// 4..8 arrives out of order so insert's merge cases build the run rather than a
+	// single append; 12,13 is a two-wide range and 20 the singleton the arms use.
+	for _, pn := range []uint64{6, 7, 5, 8, 4, 13, 12, 20} {
+		a.receive(pn, true)
+	}
+	if a.truncated {
+		t.Fatal("the fixture must not truncate: every want=false below is meant to be provably new")
+	}
+	if got, want := len(a.ranges), 3; got != want {
+		t.Fatalf("ranges = %v, want %d ranges ([20,20] [12,13] [4,8])", a.ranges, want)
+	}
+	for pn, want := range map[uint64]bool{
+		3:  false, // below every range, and nothing was discarded: provably new
+		4:  true,  // lower endpoint of the run
+		5:  true,  // interior
+		6:  true,  // interior
+		7:  true,  // interior
+		8:  true,  // upper endpoint of the run
+		9:  false, // gap above the run
+		11: false, // gap below the next range
+		12: true,  // lower endpoint of the two-wide range
+		13: true,  // upper endpoint of the two-wide range
+		14: false, // gap
+		19: false, // gap
+		20: true,  // the singleton
+		21: false, // above the largest received
+	} {
+		if got := a.seen(pn); got != want {
+			t.Errorf("seen(%d) = %v, want %v (ranges %v)", pn, got, want, a.ranges)
+		}
+	}
+}
+
 func TestAckTracker_PendingAndLargest(t *testing.T) {
 	var a ackTracker
 	if _, ok := a.largest(); ok || a.ackPending() {
