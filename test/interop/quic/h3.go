@@ -49,7 +49,18 @@ func h3Get(ctx context.Context, client *http3.Client, u *url.URL, dir string) er
 	if resp.Status != 200 {
 		return fmt.Errorf("GET %s: status %d", u.Path, resp.Status)
 	}
-	if err := os.WriteFile(downloadPath(dir, u), body, 0o600); err != nil {
+	// 0o644, not the 0o600 gosec's G306 wants: the runner's _check_files step
+	// reads these back from the host, where it runs as the invoking user while
+	// this container runs as root, and an owner-only file fails the comparison
+	// with EACCES before a single byte is diffed. The HTTP/0.9 path reaches the
+	// same mode through os.Create (0o666 & ^umask) and never had the problem, so
+	// this is the two download paths agreeing rather than a relaxation. Nothing
+	// secret is written here — the bodies are the runner's own random fixture
+	// files, fetched to be compared byte-for-byte against the server's copies.
+	// The SSLKEYLOGFILE in openKeyLog does hold TLS secrets and stays 0o600.
+	//nolint:gosec // G306: see above — the harness must read these back as a
+	// non-root user, and the content is a throwaway fixture, not a secret.
+	if err := os.WriteFile(downloadPath(dir, u), body, 0o644); err != nil {
 		return fmt.Errorf("write download for %s: %w", u.Path, err)
 	}
 	return nil
