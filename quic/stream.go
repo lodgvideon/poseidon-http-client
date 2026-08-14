@@ -339,12 +339,24 @@ type streamChunk struct {
 // so the contiguous prefix's extent is base+len(data), never len(data) alone;
 // there is no other place the consumed byte count is recorded.
 type recvStream struct {
-	data      []byte        // contiguous unread bytes, starting at absolute offset base
-	pending   []streamChunk // buffered chunks beyond base+len(data), sorted by offset
-	base      uint64        // absolute stream offset of data[0] = bytes already returned by read
-	highest   uint64        // highest byte offset the peer has sent (a STREAM's offset+len, or a RESET_STREAM's final size), for §4.5 checks
-	fin       bool
-	finalSize uint64
+	data    []byte        // contiguous unread bytes, starting at absolute offset base
+	pending []streamChunk // buffered chunks beyond base+len(data), sorted by offset
+	base    uint64        // absolute stream offset of data[0] = bytes already returned by read
+	highest uint64        // highest byte offset the peer has sent (a STREAM's offset+len, or a RESET_STREAM's final size), for §4.5 checks
+	// fin records a CLEAN end of stream: a STREAM frame carrying the FIN bit
+	// arrived. It gates complete(), which means "every byte was delivered", so a
+	// RESET_STREAM must not set it — a reset ends the receive side abnormally.
+	fin bool
+	// finalKnown records that the final size is fixed, whichever frame fixed it:
+	// a FIN-bearing STREAM frame or a RESET_STREAM. RFC 9000 §4.5 states the rule
+	// for both carriers in one breath — "If a RESET_STREAM or STREAM frame is
+	// received indicating a change in the final size ... FINAL_SIZE_ERROR" — so
+	// the §4.5 checks key off this and not off fin. Keeping the two apart is what
+	// lets a reset fix the size without also claiming the stream was cleanly and
+	// fully received; folding them into one flag would make complete() true for a
+	// reset whose final size happens to equal the prefix already received.
+	finalKnown bool
+	finalSize  uint64
 }
 
 // receive incorporates a STREAM frame's data at the given stream offset. fin
@@ -354,14 +366,14 @@ type recvStream struct {
 // already received.
 func (r *recvStream) receive(offset uint64, data []byte, fin bool) error {
 	end := offset + uint64(len(data))
-	if r.fin && (end > r.finalSize || (fin && end != r.finalSize)) {
+	if r.finalKnown && (end > r.finalSize || (fin && end != r.finalSize)) {
 		return ErrFinalSize // beyond, or inconsistent with, a fixed final size
 	}
 	if fin {
 		if end < r.highest {
 			return ErrFinalSize // a FIN below data already received
 		}
-		r.fin, r.finalSize = true, end
+		r.fin, r.finalKnown, r.finalSize = true, true, end
 	}
 	if end > r.highest {
 		r.highest = end

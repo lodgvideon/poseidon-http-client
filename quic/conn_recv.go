@@ -1022,10 +1022,16 @@ func (h *connFrameHandler) OnResetStream(id, errCode, finalSize uint64) error {
 	if s.recv.complete() {
 		return nil // the whole stream was already received; a later reset has no effect (§3.5)
 	}
-	// A final size already fixed by a received FIN cannot change (RFC 9000 §4.5): a
-	// RESET_STREAM declaring a different final size is a FINAL_SIZE_ERROR. This is
-	// independent of flow control, so it is checked before the FC-gated bounds.
-	if s.recv.fin && finalSize != s.recv.finalSize {
+	// A final size already fixed — by a received FIN or by an earlier RESET_STREAM
+	// — cannot change (RFC 9000 §4.5): a RESET_STREAM declaring a different one is
+	// a FINAL_SIZE_ERROR. This is independent of flow control, so it is checked
+	// before the FC-gated bounds.
+	//
+	// The comparison is inequality, not "below": §4.5's "it cannot change" is
+	// symmetric, and a larger second value is the harmful direction — it re-opens a
+	// stream the peer already declared finished and inflates the flow-control
+	// credit the connection must account for.
+	if s.recv.finalKnown && finalSize != s.recv.finalSize {
 		return ErrFinalSize
 	}
 	// The final size accounts for every byte the peer sent on the stream (RFC 9000
@@ -1044,9 +1050,21 @@ func (h *connFrameHandler) OnResetStream(id, errCode, finalSize uint64) error {
 	if err := h.c.chargeRecv(s, finalSize); err != nil {
 		return err
 	}
-	// The final size names the peer's last byte, so learning it fixes the stream's
-	// highest offset (§4.5) — which is what makes the check above reject a later
-	// RESET_STREAM that shrinks it, however the first one was learned.
+	// The RESET_STREAM carries the stream's final size (RFC 9000 §4.5), so record
+	// that it is now fixed. Without this the size learned from a reset bound
+	// nothing: every §4.5 check keyed off the FIN flag, which a reset never sets,
+	// so a second RESET_STREAM — or a later STREAM frame — could restate it freely.
+	// Recorded after chargeRecv so a frame rejected on flow-control grounds does
+	// not fix a final size, and it does NOT set s.recv.fin: this is an abnormal
+	// end, not a clean one (see recvStream).
+	s.recv.finalKnown, s.recv.finalSize = true, finalSize
+	// The final size also names the peer's last byte, so it advances the stream's
+	// highest received offset — the invariant recvStream.highest documents, and the
+	// value the check above compares a first reset against. What rejects a LATER
+	// reset naming a different size is the §4.5 fixedness check, not this: that one
+	// is symmetric, so the high-water mark is no longer the mechanism that catches
+	// a shrinking second reset. This keeps highest honest about how far the peer
+	// got, whichever frame carried the news.
 	if finalSize > s.recv.highest {
 		s.recv.highest = finalSize
 	}
