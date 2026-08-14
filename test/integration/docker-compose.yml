@@ -115,12 +115,15 @@ services:
     networks:
       h2net:
         ipv4_address: 172.30.0.13
-    # 18474 is the control API; 18085/18086 are the listen ports a test binds a
-    # proxy to (nginx TLS and undertow h2c respectively).
+    # 18474 is the control API; 18085 is the listen port every test in
+    # client/integration_test/toxiproxy_test.go binds its proxy to, upstream
+    # nginx TLS. 18086 was published alongside it from the first commit and
+    # bound by nothing, ever — a published port with no listener behind it reads
+    # as coverage that exists, so it is gone rather than reserved. Publishing
+    # another is one line if a second upstream is ever wanted.
     ports:
       - "127.0.0.1:18474:8474"
       - "127.0.0.1:18085:18085"
-      - "127.0.0.1:18086:18086"
     command: ["-host", "0.0.0.0"]
     healthcheck:
       test: ["CMD", "/toxiproxy-cli", "list"]
