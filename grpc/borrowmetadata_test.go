@@ -240,34 +240,45 @@ func TestBorrowMetadata_TrailersOnlyGivesTwoIndependentBlocks(t *testing.T) {
 
 	cc := dialGRPC(t, srv, cfg)
 	ctx := t.Context()
-	s, err := cc.NewStream(ctx, "/t.S/M", nil, BorrowMetadata())
-	if err != nil {
-		t.Fatalf("NewStream: %v", err)
-	}
-	defer func() { _ = s.Close() }()
-	if err := s.SendLast(ctx, []byte("q")); err != nil && !benignSendLastErr(err) {
-		t.Fatalf("SendLast: %v", err)
-	}
-	drain(t, s)
 
-	hdr, err := s.Header(ctx)
-	if err != nil {
-		t.Fatalf("Header: %v", err)
-	}
-	trl := s.Trailer()
-	if len(hdr) == 0 || len(trl) == 0 {
-		t.Fatalf("Trailers-Only gave header=%d trailer=%d fields, want both populated",
-			len(hdr), len(trl))
-	}
-	if v, ok := findField(trl, "x-served-by"); !ok || string(v) != "poseidon" {
-		t.Errorf("the trailer view lost the block's fields: %q (present=%v)", v, ok)
-	}
-	// The two are separate field slices, so overwriting one entry of the header
-	// view must leave the trailer view intact.
-	hdr[0] = conn.HeaderField{Name: []byte("clobbered"), Value: []byte("clobbered")}
-	if string(trl[0].Name) == "clobbered" {
-		t.Error("Header() and Trailer() share one field slice — mutating what Header " +
-			"returned changed what Trailer returns")
+	// Repeated on one connection on purpose. This shape makes the trailer view by
+	// appending the header view to the very slice it was carved from, and the two
+	// halves of self-append behave differently: the first RPC grows the arena and
+	// copies out of the old array, while a later one finds it already big enough
+	// and writes in place. Only a warm arena reaches the second.
+	for i := 0; i < 4; i++ {
+		s, err := cc.NewStream(ctx, "/t.S/M", nil, BorrowMetadata())
+		if err != nil {
+			t.Fatalf("round %d: NewStream: %v", i, err)
+		}
+		if err := s.SendLast(ctx, []byte("q")); err != nil && !benignSendLastErr(err) {
+			t.Fatalf("round %d: SendLast: %v", i, err)
+		}
+		drain(t, s)
+
+		hdr, err := s.Header(ctx)
+		if err != nil {
+			t.Fatalf("round %d: Header: %v", i, err)
+		}
+		trl := s.Trailer()
+		if len(hdr) == 0 || len(trl) == 0 {
+			t.Fatalf("round %d: Trailers-Only gave header=%d trailer=%d fields, want both populated",
+				i, len(hdr), len(trl))
+		}
+		if v, ok := findField(hdr, "x-served-by"); !ok || string(v) != "poseidon" {
+			t.Errorf("round %d: the header view lost the block's fields: %q (present=%v)", i, v, ok)
+		}
+		if v, ok := findField(trl, "x-served-by"); !ok || string(v) != "poseidon" {
+			t.Errorf("round %d: the trailer view lost the block's fields: %q (present=%v)", i, v, ok)
+		}
+		// The two are separate field slices, so overwriting one entry of the header
+		// view must leave the trailer view intact.
+		hdr[0] = conn.HeaderField{Name: []byte("clobbered"), Value: []byte("clobbered")}
+		if string(trl[0].Name) == "clobbered" {
+			t.Errorf("round %d: Header() and Trailer() share one field slice — mutating what "+
+				"Header returned changed what Trailer returns", i)
+		}
+		_ = s.Close()
 	}
 }
 

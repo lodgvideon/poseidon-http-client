@@ -7,6 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`grpc.BorrowMetadata()`, a call option that takes the response header and
+  trailer copies from the stream's pooled buffers instead of the heap.** Both
+  blocks arrive in a buffer the transport reclaims as soon as the event is
+  handled, so `grpc` copies each one out: two allocations a block, four an RPC.
+  `DiscardMetadata` already removed them for a caller that never reads the
+  metadata, and `Invoke` sets it for itself; a caller that *does* read `Header`
+  or `Trailer` had no way out and paid all four. With this option a
+  metadata-reading RPC costs exactly what a metadata-discarding one costs —
+  measured against the in-process peer, 10 allocations per streaming RPC become
+  6, matching `DiscardMetadata` exactly while still returning the metadata.
+
+  It is opt-in because the saving is bought with a lifetime rule: what `Header`
+  and `Trailer` return is then valid only until `Close`, since those buffers go
+  back to a pool the next RPC on the connection draws from. Copy out anything
+  you keep — `string(f.Value)` is a copy, `f.Value` is not. `Close` nils both
+  views rather than leaving them pointing into the recycled arena, so reading
+  `Trailer()` after `Close` comes back empty instead of carrying another call's
+  metadata; that is a backstop, not permission. The default is unchanged and
+  remains the answer that cannot be got wrong. `DiscardMetadata` wins when both
+  are set. `Status()` is unaffected either way — its message is copied out of
+  the live block. See `docs/GRPC_GUIDE.md`.
+
 ### Changed (breaking)
 
 - **`conn.Conn.NewStream` now returns a `*conn.GoAwayError` after a peer GOAWAY,

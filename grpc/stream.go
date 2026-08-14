@@ -710,6 +710,12 @@ func (s *Stream) copyFields(src []conn.HeaderField) []conn.HeaderField {
 //
 // It copies rather than aliasing src so that a caller mutating what Header()
 // returned cannot change what Trailer() returns.
+//
+// On the arena path src IS the front of the slice being appended to, since the
+// only caller passes the header view this Stream just carved. Appending a slice
+// to itself is well defined either way round: growing copies out of the old
+// array before writing, and not growing writes to mdFields[len:] which cannot
+// overlap the src range that ends at len.
 func (s *Stream) dupFields(src []conn.HeaderField) []conn.HeaderField {
 	if s.borrowMD && s.bufs != nil {
 		start := len(s.bufs.mdFields)

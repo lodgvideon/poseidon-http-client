@@ -104,34 +104,47 @@ func TestBorrowMetadata_AllocsPerCall(t *testing.T) {
 	}
 }
 
-// TestBorrowMetadata_ArenaIsReused is the mechanism half. The gate above measures
-// the outcome, and an implementation that allocated a fresh arena per RPC and
-// happened to hide it inside a pooled struct would still have to fail this one.
-func TestBorrowMetadata_ArenaIsReused(t *testing.T) {
-	first := &Stream{borrowMD: true}
-	first.acquireBufs()
-	first.header = first.copyFields([]conn.HeaderField{
+// TestBorrowMetadata_ReleaseParksTheCapacity covers the half of "the arena is
+// reused" that the gate above cannot see on its own.
+//
+// The gate catches the acquire side: nilling the arena there makes every RPC
+// regrow it, and the count goes straight back to the heap copy's. The release
+// side is quieter. Nilling a buffer instead of truncating it on the way into the
+// pool is still CORRECT — the next RPC allocates and carries on — so no
+// behavioural test can fail on it, and the gate above cannot either, because the
+// two arms would regrow equally and its comparisons are all relative. Only a
+// capacity check catches it, which is the same reason conn's
+// roundtripAllocCeiling exists next to its aliasing test.
+//
+// It reads the streamBufs struct through the pointer this test kept, so it never
+// depends on sync.Pool handing the same one back.
+func TestBorrowMetadata_ReleaseParksTheCapacity(t *testing.T) {
+	s := &Stream{borrowMD: true}
+	s.acquireBufs()
+	b := s.bufs
+	if b == nil {
+		t.Fatal("acquireBufs attached no buffers")
+	}
+
+	s.header = s.copyFields([]conn.HeaderField{
 		{Name: []byte("x-request-id"), Value: []byte("0123456789abcdef")},
 		{Name: []byte("content-type"), Value: []byte("application/grpc")},
 	})
-	grown := cap(first.bufs.md)
-	if grown == 0 {
-		t.Fatal("the arena has no capacity after a copy went into it")
+	bytesGrown, fieldsGrown := cap(b.md), cap(b.mdFields)
+	if bytesGrown == 0 || fieldsGrown == 0 {
+		t.Fatalf("the arena has capacity %d/%d after a copy went into it, want both non-zero",
+			bytesGrown, fieldsGrown)
 	}
-	first.releaseBufs()
 
-	// sync.Pool hands back what was most recently Put on the same P in the
-	// overwhelming majority of cases, and this test asserts only that the
-	// capacity is not rebuilt from nothing when it does.
-	second := &Stream{borrowMD: true}
-	second.acquireBufs()
-	defer second.releaseBufs()
-	if cap(second.bufs.md) == 0 && cap(second.bufs.mdFields) == 0 {
-		t.Skip("the pool handed out a fresh struct; nothing to say about reuse")
+	s.releaseBufs()
+
+	if cap(b.md) < bytesGrown {
+		t.Errorf("the arena went into the pool with byte capacity %d, want the %d it grew to "+
+			"— releaseBufs is nilling it instead of truncating, so the next RPC regrows it",
+			cap(b.md), bytesGrown)
 	}
-	if cap(second.bufs.md) < grown {
-		t.Errorf("the reused arena came back with capacity %d, want at least the %d it grew "+
-			"to — acquireBufs is nilling it instead of truncating, so every RPC regrows it",
-			cap(second.bufs.md), grown)
+	if cap(b.mdFields) < fieldsGrown {
+		t.Errorf("the arena went into the pool with field capacity %d, want the %d it grew to "+
+			"— releaseBufs is nilling it instead of truncating", cap(b.mdFields), fieldsGrown)
 	}
 }
