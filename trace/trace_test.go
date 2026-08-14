@@ -157,7 +157,7 @@ func TestTextTracer_DropsRatherThanBlocks(t *testing.T) {
 	for range 40_000 {
 		tr.TraceFrame(info)
 	}
-	if tr.dropped == 0 {
+	if tr.dropped.Load() == 0 {
 		t.Fatalf("buffered %d bytes without dropping; cap is %d", len(tr.buf), textMaxBuffered)
 	}
 	if err := tr.Flush(); err != nil {

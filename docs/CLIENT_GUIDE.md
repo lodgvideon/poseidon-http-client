@@ -1995,6 +1995,18 @@ Two contract points, both load-bearing:
   the framer reuses for the next frame. Every other field is a scalar or a
   constant string and is safe to keep.
 
+**Locks.** None on the emit path: `frame` holds no mutex, and each connection's
+tracer state is its own. `TextTracer` has one, and holds it only for a buffer
+copy — the line is rendered into a stack buffer before the lock is taken,
+because a tracer shared by every connection turns its critical section into a
+cross-connection serialization point. `BenchmarkTextTracer_TraceFrameParallel`
+measures it flat at ~270-360 ns/frame from 2 to 8 contending goroutines with
+zero allocations; once the backlog saturates, the drop path is ~17 ns and takes
+no lock at all. Those benchmarks report a `drop-frac` metric alongside ns/op, and
+you should read it: a benchmark drives frames faster than any writer drains
+them, so a tracer left unattended saturates and then reports the drop path's
+16 ns as though it were the cost of tracing.
+
 **Cost when off.** One nil check per frame. `frame`'s benchmarks are held at 0
 B/op, 0 allocs/op by the bench-gate with the tracer installed and discarding,
 and `TestFramer_Trace_AddsNoAllocations` requires the traced and untraced

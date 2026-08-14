@@ -41,6 +41,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `authorization` and `cookie` live in the header block, and a debug log is the
   thing people paste into a public issue.
 
+  No lock is taken on the emit path: `frame` has no mutex at all, and a
+  `Framer`'s tracer state is per-connection. The one lock in the design is
+  `TextTracer`'s, and it is held only for a buffer copy — the line is rendered
+  into a stack buffer first, because a tracer shared by every connection makes
+  its critical section a cross-connection serialization point. Measured flat at
+  ~270-360 ns/frame from 2 to 8 contending goroutines, 0 allocs; under backlog
+  the drop path is ~17 ns and takes no lock at all.
+
   Zero cost when off is enforced, not asserted: one nil check per frame, and the
   bench-gate holds `frame` at 0 B/op with a tracer installed and discarding
   (`BenchmarkFramer_WriteData_Traced`, `BenchmarkFramer_ReadFrame_Traced`),
