@@ -1,0 +1,10 @@
+# Build context trimming for test/interop/quic/Dockerfile, the only image built
+# from the repository root. The integration-test images use test/integration as
+# their context and are unaffected.
+.git
+.github
+.claude
+website
+docs
+cover.out
+*.test
