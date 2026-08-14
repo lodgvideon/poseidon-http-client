@@ -115,15 +115,21 @@ services:
     networks:
       h2net:
         ipv4_address: 172.30.0.13
-    # 18474 is the control API; 18085 is the listen port every test in
-    # client/integration_test/toxiproxy_test.go binds its proxy to, upstream
-    # nginx TLS. 18086 was published alongside it from the first commit and
-    # bound by nothing, ever — a published port with no listener behind it reads
-    # as coverage that exists, so it is gone rather than reserved. Publishing
-    # another is one line if a second upstream is ever wanted.
+    # 18474 is the control API. 18085 and 18086 are listen ports that tests in
+    # client/integration_test/toxiproxy_test.go bind proxies to, both upstream
+    # nginx TLS on 172.30.0.10:8443 — 18085 carries the h2 leg, 18086 the
+    # HTTP/1.1 one. The two protocols need two ports because a Toxiproxy proxy
+    # is one listen address with one upstream and the ALPN token is chosen per
+    # connection by the client; one shared port would let an h2 test's toxic
+    # bite an h1 connection when the packages run in parallel.
+    #
+    # 18086 was published from the first commit and bound by nothing until the
+    # HTTP/1.1 leg existed, so #654 removed it rather than leave a published
+    # port that read as coverage. It is back now with a listener behind it.
     ports:
       - "127.0.0.1:18474:8474"
       - "127.0.0.1:18085:18085"
+      - "127.0.0.1:18086:18086"
     command: ["-host", "0.0.0.0"]
     healthcheck:
       test: ["CMD", "/toxiproxy-cli", "list"]
