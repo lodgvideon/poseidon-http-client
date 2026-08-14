@@ -654,7 +654,7 @@ const (
 > **Aliasing / recycle contract (critical).**
 > `StreamEvent.Data` aliases a pooled connection-layer buffer that is **recycled on the next `Recv` or on `Close`**. `StreamEvent.Trailers` alias the response's header-slab memory, valid only **until `Close`**. If you need to retain either past that point, **copy the bytes** (e.g. `append([]byte(nil), ev.Data...)`). Never hold an `ev.Data` slice across a subsequent `Recv`/`Close` — the underlying bytes will be overwritten by a later DATA frame.
 
-> **Close contract (critical).** `StreamResponse.Close` MUST be called if you do not drain the stream all the way to `EndStream`. It is idempotent (guarded by `sync.Once`), returns pooled header slabs and the current data buffer, and sends `RST_STREAM(CANCEL)` when neither side reached END_STREAM. `defer sr.Close()` is the safe idiom — it is harmless even after a full drain.
+> **Close contract (critical).** `StreamResponse.Close` MUST be called if you do not drain the stream all the way to `EndStream`. It is idempotent (guarded by `sync.Once`), releases pooled header blocks and returns the current data buffer, and sends `RST_STREAM(CANCEL)` when neither side reached END_STREAM. `defer sr.Close()` is the safe idiom — it is harmless even after a full drain.
 
 ##### Download-stream example (write each chunk to a file as it arrives)
 
@@ -2328,7 +2328,7 @@ idempotent.
   pool and sends `RST_STREAM(CANCEL)` if the body was not fully drained.
 
 - **`StreamResponse.Close()`** (the `DoStream` path) — you MUST call it whenever
-  you do not drain the stream to `EndStream`. It returns pooled header slabs and
+  you do not drain the stream to `EndStream`. It releases pooled header blocks and
   the current data buffer and sends `RST_STREAM(CANCEL)` when neither side
   reached END_STREAM. `defer sr.Close()` is the safe idiom; it is harmless after
   a full drain. (The `Client.Stream` convenience helper does this for you.)

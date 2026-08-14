@@ -74,11 +74,13 @@ func TestStream_TerminalTrailersStillShedWhenFull(t *testing.T) {
 	s := newStream(1, 1, w, 65535)
 	s.push(StreamEvent{Type: EventHeaders})
 
-	slab := make([]byte, 0)
+	// Built the way emitHeaderBlock builds it, so the event under test carries
+	// the same owned storage a real trailer block does.
+	blk := copyFieldsToBlock([]header.Field{{Name: []byte("grpc-status"), Value: []byte("0")}})
 	if s.deliverEnd(StreamEvent{
 		Type:      EventTrailers,
-		Headers:   []header.Field{{Name: []byte("grpc-status"), Value: []byte("0")}},
-		Slab:      &slab,
+		Headers:   blk.Fields(),
+		Block:     blk,
 		EndStream: true,
 	}, true) {
 		t.Fatal("trailers were enqueued into a full channel")

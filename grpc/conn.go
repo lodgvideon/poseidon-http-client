@@ -359,7 +359,7 @@ func applyCallOptions(co callOptions, opts []CallOption) callOptions {
 // header and trailer blocks are not copied out of the transport's pooled buffer.
 // Header and Trailer then return nil.
 //
-// Four allocations per RPC. The copy exists so the pooled slab can go straight
+// Four allocations per RPC. The copy exists so the pooled block can go straight
 // back and Stream carries no buffer-lifetime contract, which is the right
 // default — this is for a caller that knows it never asks. A caller that does
 // ask can still drop the four with BorrowMetadata, at the price of that

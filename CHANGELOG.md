@@ -7,6 +7,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed (breaking)
+
+- **`conn.StreamEvent.Slab *[]byte` is now `conn.StreamEvent.Block
+  *conn.HeaderBlock`, released with `StreamEvent.Release`, and
+  `conn.GetHeaderSlabPool` is gone.** A decoded header block used to be two
+  things with one owner: the bytes, a pooled `*[]byte` the consumer had to Put
+  into a pool it fetched through an exported accessor, and the field slice, a
+  plain `make([]header.Field, len(fields))` on the heap. "How not to leak" was
+  therefore part of the interface, and all three consumers reimplemented it —
+  `client`, `grpc`, and `conn`'s own benchmarks, which got it wrong and
+  silently misreported every allocation figure `conn` had ever published about
+  itself (#574).
+
+  `HeaderBlock` owns both. That costs one allocation less per header block —
+  one per request in `conn`, two per RPC in `grpc`, since a gRPC response
+  carries HEADERS and TRAILERS — and it is safe precisely because the two
+  already had the same required lifetime everywhere: every `Name` and `Value`
+  points into the bytes, so a consumer keeping the fields had to keep the bytes
+  anyway. `TestConn_Roundtrip_AllocsPerRequest` is now **0 allocs/request**
+  (was 1) and `grpc`'s `unaryAllocCeiling` **2** (was 4).
+
+  **Migration:** replace `conn.GetHeaderSlabPool().Put(ev.Slab)` — and any
+  nil-check around it — with `ev.Release()`. It is nil-safe, so it is correct
+  on every arm of a receive loop including those that carry no headers, and it
+  nils the event's own pointer so a second call is a no-op rather than a
+  double-Put. To retain a block past the event, keep the `*conn.HeaderBlock`
+  and `Release` it when done, as `client` does for trailers. Code synthesising
+  its own `StreamEvent` can build one with `conn.NewHeaderBlock`, or leave
+  `Block` nil and point `Headers` at storage it owns — `client`'s HTTP/1.1
+  transport does the latter.
+
+  The lifetime rule is unchanged: everything reachable through `Headers` is
+  valid until release and belongs to the next drawer of that block afterwards.
+  `DataSlab` and `GetDataBufPool` are deliberately untouched — see the note on
+  `StreamEvent.Release` for why.
+
 ### Added
 
 - **`grpc.BorrowMetadata()`, a call option that takes the response header and

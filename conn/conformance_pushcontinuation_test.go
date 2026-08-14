@@ -59,7 +59,5 @@ func TestConformance_RFC7540_Sec6_6_PushPromiseSpanningContinuation_Reassembled(
 		t.Fatalf("promised header count = %d, want 4 — the reassembled block decoded short",
 			len(ev.Headers))
 	}
-	if ev.Slab != nil {
-		GetHeaderSlabPool().Put(ev.Slab)
-	}
+	ev.Release()
 }

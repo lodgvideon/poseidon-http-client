@@ -1255,22 +1255,22 @@ func drainResponse(ctx context.Context, pushLookup pushLookuper, s protoStream, 
 			// final response — matching http1 (ReadResponse skips 1xx) and
 			// http3 (h3_transport drops resp.Interim) — so drop it and keep
 			// pumping. Raw conn callers still see EventInterimHeaders.
-			recycleHeaderSlab(ev.Slab)
+			ev.Release()
 		case conn.EventTrailers:
 			if req.WantTrailers {
 				// Overwrite rather than accumulate: a response has at most one
 				// trailer section. conn enforces §8.1's END_STREAM requirement
 				// on trailers, so a second block cannot arrive; the [:0] keeps
 				// Trailers bounded regardless, matching body.go's handling of
-				// the same event. Slabs stay in resp.slabs and are returned as
-				// one batch by Response.Reset — never Put twice.
+				// the same event. Blocks stay in resp.blocks and are released as
+				// one batch by Response.Reset — never released twice.
 				resp.Trailers = append(resp.Trailers[:0], ev.Headers...)
-				if ev.Slab != nil {
-					resp.slabs = append(resp.slabs, ev.Slab)
+				if ev.Block != nil {
+					resp.blocks = append(resp.blocks, ev.Block)
 				}
 			} else {
-				// Trailers unwanted: return the slab instead of dropping it.
-				recycleHeaderSlab(ev.Slab)
+				// Trailers unwanted: release the block instead of dropping it.
+				ev.Release()
 			}
 			if ev.EndStream {
 				return nil
@@ -1280,8 +1280,8 @@ func drainResponse(ctx context.Context, pushLookup pushLookuper, s protoStream, 
 		case conn.EventPushPromise:
 			if h != nil && pushLookup != nil && ev.PushStreamID > 0 {
 				if ps, ok := pushLookup.LookupStream(ev.PushStreamID); ok {
-					// Copy promised headers to decouple from the slab
-					// lifetime (slab is returned when parent resp is Reset).
+					// Copy promised headers to decouple from the block
+					// lifetime (released when the parent resp is Reset).
 					hdrs := copyHeaders(ev.Headers)
 					go drainPushedStream(ctx, pushLookup, h, hdrs, ps, maxDecompressed, maxBody)
 				}
@@ -1304,24 +1304,13 @@ func recvFinalHeaders(ctx context.Context, rs respStream) (conn.StreamEvent, err
 			return conn.StreamEvent{}, err
 		}
 		if ev.Type == conn.EventInterimHeaders {
-			recycleHeaderSlab(ev.Slab)
+			ev.Release()
 			continue
 		}
 		if ev.Type != conn.EventHeaders {
 			return conn.StreamEvent{}, fmt.Errorf("client: expected initial HEADERS, got %s", ev.Type)
 		}
 		return ev, nil
-	}
-}
-
-// recycleHeaderSlab returns a header slab to conn's pool. nil-safe. Used for
-// header blocks the client layer decodes but does not retain (informational
-// 1xx, unwanted trailers) — dropping them would still be correct (sync.Pool
-// tolerates buffers that are never Put) but would forfeit the reuse.
-func recycleHeaderSlab(slab *[]byte) {
-	if slab != nil {
-		*slab = (*slab)[:0]
-		conn.GetHeaderSlabPool().Put(slab)
 	}
 }
 
@@ -1332,8 +1321,8 @@ func handleHeadersEvent(ev conn.StreamEvent, req *Request, resp *Response, gotHe
 		// Unreachable via conn: a second non-informational block after the
 		// final status is classified as trailers (RFC 7540 §8.1). Kept as a
 		// guard for other protoStream implementations; the final status set
-		// below must win, so never re-parse — just release the slab.
-		recycleHeaderSlab(ev.Slab)
+		// below must win, so never re-parse — just release the block.
+		ev.Release()
 		return ev.EndStream, nil
 	}
 	n, perr := parseStatus(ev.Headers, &resp.Headers)
@@ -1341,8 +1330,8 @@ func handleHeadersEvent(ev conn.StreamEvent, req *Request, resp *Response, gotHe
 		return false, perr
 	}
 	resp.Status = n
-	if ev.Slab != nil {
-		resp.slabs = append(resp.slabs, ev.Slab)
+	if ev.Block != nil {
+		resp.blocks = append(resp.blocks, ev.Block)
 	}
 	if !req.DisableDecompression {
 		*enc = detectEncoding(resp.Headers)
@@ -1390,7 +1379,7 @@ func drainPushedStream(ctx context.Context, pushLookup pushLookuper, h PushHandl
 }
 
 // copyHeaders returns a deep copy of the header fields, duplicating the
-// Name and Value byte slices so the result does not alias slab memory.
+// Name and Value byte slices so the result does not alias the block's memory.
 func copyHeaders(in []conn.HeaderField) []conn.HeaderField {
 	if len(in) == 0 {
 		return nil

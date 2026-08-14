@@ -64,7 +64,7 @@ func drain(t *testing.T, s *Stream) {
 
 // TestBorrowMetadata_MatchesTheCopy is the correctness gate: borrowing changes
 // where the bytes live and nothing else. A borrowed block that dropped a field,
-// truncated a value or aliased the transport's slab would show up here as a
+// truncated a value or aliased the transport's block would show up here as a
 // disagreement with the same call made the ordinary way.
 func TestBorrowMetadata_MatchesTheCopy(t *testing.T) {
 	cc := mdServer(t)

@@ -127,18 +127,18 @@ func (r *responseBodyReader) Read(p []byte) (int, error) {
 			// Do() consumed the final HEADERS before handing this reader over,
 			// so a 1xx can only appear here on a peer that interleaves them
 			// after the final status; skip it either way.
-			recycleHeaderSlab(ev.Slab)
+			ev.Release()
 			continue
 		case conn.EventHeaders:
-			recycleHeaderSlab(ev.Slab)
+			ev.Release()
 			continue // spurious mid-stream HEADERS; skip
 		case conn.EventPushPromise:
 			// A PUSH_PROMISE arrives on the parent stream, which is the one this
 			// reader is draining. Client.Do's buffered path dispatches it to the
 			// push handler; a body reader has no handler to dispatch to, so the
-			// promise is dropped — but its header slab still has to go back, the
+			// promise is dropped — but its header block still has to go back, the
 			// same as the two skip arms above.
-			recycleHeaderSlab(ev.Slab)
+			ev.Release()
 			continue
 		}
 	}

@@ -98,7 +98,7 @@ func (r *Response) CopyBody() []byte {
 
 // Clone returns a detached deep copy of the response (Status, Headers, Body,
 // Trailers, BytesReceived) backed by its own memory, safe to retain after the
-// source Response is Reset or reused. The streaming BodyReader and pooled slabs
+// source Response is Reset or reused. The streaming BodyReader and pooled blocks
 // are not carried over.
 func (r *Response) Clone() *Response {
 	return &Response{

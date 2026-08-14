@@ -197,7 +197,7 @@ func (e *h3Exchange) Recv(ctx context.Context) (conn.StreamEvent, error) {
 // Informational 1xx responses (resp.Interim) are intentionally dropped, not
 // replayed, for parity with the buffered H2 Do path — which exposes no interim
 // surface either: client.Response has no Interim field, and drainResponse drops
-// conn.EventInterimHeaders after returning its slab (RFC 7540 §8.1). H1.1
+// conn.EventInterimHeaders after releasing its block (RFC 7540 §8.1). H1.1
 // agrees: http1's ReadResponse skips 1xx without surfacing them. So all three
 // protocols show Client.Do callers only the final response.
 //

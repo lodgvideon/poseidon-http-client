@@ -53,9 +53,10 @@ func (t StreamEventType) String() string {
 // StreamEvent is one observation about an in-flight stream. The Type
 // field tells the caller which other fields are populated.
 //
-// When Slab is non-nil, all Headers[i].Name and .Value byte slices are
-// sub-slices of *Slab. Ownership transfers to the client layer, which
-// returns the pointer to conn.GetHeaderSlabPool() in Response.Reset / sr.Close.
+// When Block is non-nil it owns Headers — the field slice AND the bytes behind
+// every Name and Value. Ownership transfers to the consumer, which gives it
+// back with Release. Everything reachable through Headers is valid until then
+// and belongs to the next drawer of that block afterwards.
 type StreamEvent struct {
 	Type      StreamEventType
 	Headers   []header.Field // EventHeaders / EventTrailers / EventInterimHeaders
@@ -66,11 +67,16 @@ type StreamEvent struct {
 	// PushStreamID is the promised (even) stream ID for EventPushPromise.
 	PushStreamID uint32 // EventPushPromise
 
-	// Slab is the pooled backing buffer pointer for all Headers[i].Name
-	// and .Value slices. nil for non-headers events and when the pool is
-	// cold (first request). The client layer must return this pointer to
-	// conn.GetHeaderSlabPool(), not the slice value, to avoid heap escape.
-	Slab *[]byte
+	// Block owns Headers: the field slice and the bytes every Name and Value
+	// points into. nil for non-headers events, and on events this package did
+	// not decode — client's HTTP/1.1 transport synthesises EventHeaders whose
+	// fields come from the http1 parser and are owned by nobody here.
+	//
+	// Return it with StreamEvent.Release rather than reaching for a pool. It
+	// used to be a *[]byte holding only the bytes, which the consumer had to Put
+	// into a pool it fetched through an exported accessor — a rule each of the
+	// three consumers reimplemented, and one of them got wrong.
+	Block *HeaderBlock
 
 	// DataSlab is the pooled buffer backing Data (EventData). nil for
 	// non-data events and when the pool is cold. The client returns it to
@@ -80,6 +86,28 @@ type StreamEvent struct {
 	// Buffers of events still queued at stream/connection teardown are
 	// dropped to GC rather than pooled (see recycleStream).
 	DataSlab *[]byte
+}
+
+// Release gives back what this event owns: its header Block. It is nil-safe and
+// idempotent per event value, so `defer ev.Release()` on every arm of a receive
+// loop is correct whether or not that arm carried headers.
+//
+// After it returns, Headers and every Name and Value in it belong to whoever
+// draws that block next. A consumer keeping any of it past Release must copy it
+// out first — string(f.Value) is a copy, f.Value is not.
+//
+// DataSlab is deliberately NOT in this. The DATA buffer has a second minter
+// outside this package — client's HTTP/1.1 transport has no framing layer below
+// it and takes its own from GetDataBufPool — and the client funnels every return
+// through one instrumented site so a cross-package ledger test can pin
+// gets == puts per pointer. Folding those returns in here would move them out
+// from under that ledger to buy uniformity, which is a bad trade: the DATA side
+// already has exactly one return site per buffer and a test that proves it,
+// which is the property the header side lacked.
+func (e *StreamEvent) Release() {
+	e.Block.Release()
+	e.Block = nil
+	e.Headers = nil
 }
 
 // streamWriter is the narrow surface a *Stream needs from its owner Conn.
@@ -417,7 +445,7 @@ func (s *Stream) putLocked() {
 func (s *Stream) resetForPoolLocked() {
 	// Drop any events still buffered on the old channel. Their pooled DATA
 	// buffers (DataSlab) are abandoned to GC here, matching shutdownStreams
-	// and the header-slab teardown path: sync.Pool tolerates buffers that are
+	// and the header-block teardown path: sync.Pool tolerates buffers that are
 	// never Put back. These events were never delivered to a consumer, so
 	// dropping them keeps exactly one return site per buffer — the consumer on
 	// the next Recv/Close for delivered frames, or OnData itself for frames

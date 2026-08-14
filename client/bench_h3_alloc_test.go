@@ -81,7 +81,7 @@ func BenchmarkDo_H3(b *testing.B) {
 	ctx := context.Background()
 
 	var res Response
-	res.Reset() // preallocate Headers/Trailers/slabs backing
+	res.Reset() // preallocate Headers/Trailers/blocks backing
 
 	b.ResetTimer()
 	b.ReportAllocs()

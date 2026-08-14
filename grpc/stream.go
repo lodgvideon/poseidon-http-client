@@ -51,7 +51,7 @@ type Stream struct {
 	sendErr error
 
 	// discardMD skips cloning the response header and trailer blocks out of
-	// conn's pooled slab. Set by DiscardMetadata, and by Invoke for itself: the
+	// conn's pooled block. Set by DiscardMetadata, and by Invoke for itself: the
 	// unary path calls neither Header nor Trailer, so those four allocations per
 	// RPC are garbage the moment the call returns.
 	//
@@ -539,7 +539,7 @@ func (s *Stream) pump(ctx context.Context) error {
 	switch ev.Type {
 	case conn.EventInterimHeaders:
 		// A 1xx is not a gRPC response; the final HEADERS still follows.
-		putHeaderSlab(ev.Slab)
+		ev.Release()
 
 	case conn.EventHeaders:
 		s.onHeaders(ev)
@@ -568,7 +568,7 @@ func (s *Stream) pump(ctx context.Context) error {
 			live = s.trailer
 		}
 		s.finish(live)
-		putHeaderSlab(ev.Slab)
+		ev.Release()
 
 	case conn.EventReset:
 		s.status = Status{
@@ -579,7 +579,7 @@ func (s *Stream) pump(ctx context.Context) error {
 
 	case conn.EventPushPromise:
 		// Push is disabled by default and meaningless for gRPC; drop it.
-		putHeaderSlab(ev.Slab)
+		ev.Release()
 	}
 	return nil
 }
@@ -597,7 +597,7 @@ func (s *Stream) onHeaders(ev conn.StreamEvent) {
 		// the worst possible failure mode if that classification ever changes.
 		return
 	}
-	// live is the decoded block, pointing into conn's pooled slab. The slab goes
+	// live is the decoded block, pointing into conn's pooled block. It goes
 	// back when this function returns — deferred rather than returned inline,
 	// because everything below reads the block and an early return would
 	// otherwise leave one path reading memory the pool had already handed on.
@@ -605,7 +605,7 @@ func (s *Stream) onHeaders(ev conn.StreamEvent) {
 	// Everything read from it here copies what it keeps: pseudoStatus returns an
 	// int, finish converts the two fields it reads with string(), and
 	// validContentType compares. Only the clone outlives this call.
-	defer putHeaderSlab(ev.Slab)
+	defer ev.Release()
 	live := ev.Headers
 	if !s.discardMD {
 		s.header = s.copyFields(live)
@@ -691,7 +691,7 @@ func (s *Stream) finish(fields []conn.HeaderField) {
 	}
 }
 
-// copyFields copies a decoded header block out of conn's pooled slab into
+// copyFields copies a decoded header block out of conn's pooled block into
 // memory this Stream controls, and is the single place either block is copied.
 // It picks the arena when the call opted into BorrowMetadata and the heap
 // otherwise, so the lifetime rule is decided once rather than at each block.
@@ -764,9 +764,9 @@ func (s *Stream) borrowFields(src []conn.HeaderField) []conn.HeaderField {
 	return b.mdFields[start:len(b.mdFields):len(b.mdFields)]
 }
 
-// cloneFields copies a decoded header block out of conn's pooled slab into
+// cloneFields copies a decoded header block out of conn's pooled block into
 // caller-owned memory, using one backing array for the whole block. Copying
-// here is what lets the slab go back to the pool immediately, which in turn
+// here is what lets the block go back to the pool immediately, which in turn
 // keeps the Stream free of any buffer-lifetime contract.
 //
 // Two allocations per block, four per RPC, and that is the price of owing the
@@ -795,16 +795,6 @@ func cloneFields(src []conn.HeaderField) []conn.HeaderField {
 		}
 	}
 	return out
-}
-
-// putHeaderSlab returns a decoded header slab to conn's pool. It is the single
-// return site for header slabs in this package, which is what rules out a
-// double-Put. nil-safe.
-func putHeaderSlab(slab *[]byte) {
-	if slab != nil {
-		*slab = (*slab)[:0]
-		conn.GetHeaderSlabPool().Put(slab)
-	}
 }
 
 // putDataSlab returns a DATA payload buffer to conn's pool. Safe to call as

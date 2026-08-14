@@ -14,7 +14,7 @@ import (
 // the handler to the ungated push passes the entire conn suite without this.
 //
 // handlePushPromiseBlock resolves the parent by id and then reserves the
-// promised stream, takes a header slab from the pool and copies every field
+// promised stream, takes a header block from the pool and copies every field
 // before delivering. A *Stream is pooled, so in that window the application can
 // finish the parent, Close it, and the next NewStream can claim the struct. The
 // promise must not be announced to whoever owns it now, and the promised stream

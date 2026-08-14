@@ -15,13 +15,16 @@ import (
 // allocation came back; below it, the path improved and the win is not locked
 // in until this drops.
 //
-// What the remaining one is, so nobody hunts for it twice: the field slice in
-// copyFieldsToSlab, a plain make([]hpack.HeaderField, len(fields)) per header
-// block. Measured with -memprofilerate=1 it is 2001 objects over 2000
-// iterations — exactly one per request — and it is #577, which wants the slice
-// carved from the slab it already describes.
+// It is ZERO, and that is the whole number: a warm connection now completes a
+// request and a response without reaching the heap at all.
 //
-// The other one used to be the :authority: authorityOf ended in
+// The last one was the field slice in copyFieldsToSlab, a plain
+// make([]hpack.HeaderField, len(fields)) per header block — 2001 objects over
+// 2000 iterations, exactly one per request. #577 removed it by pooling the
+// fields alongside the bytes they view, as HeaderBlock, rather than rebuilding
+// the slice from the heap while the bytes came from a pool.
+//
+// The one before that was the :authority: authorityOf ended in
 // string(fields[i].Value), and converting []byte to string copies by definition
 // of the language (#578). The value still IS copied — the push accept path
 // compares a PUSH_PROMISE's authority against it, so it must not alias the
@@ -33,7 +36,7 @@ import (
 // test next to it. Nilling the buffer on reset is still CORRECT — every request
 // would simply allocate again — so no behavioural test can fail on it. Only a
 // count can.
-const roundtripAllocCeiling = 1
+const roundtripAllocCeiling = 0
 
 // TestConn_Roundtrip_AllocsPerRequest gates the per-request allocation count of
 // a full request/response against the in-process peer.
@@ -92,8 +95,8 @@ func TestConn_Roundtrip_AllocsPerRequest(t *testing.T) {
 			"way to cause this: still correct, just allocating again every request",
 			n, roundtripAllocCeiling)
 	}
-	if n < roundtripAllocCeiling {
-		t.Errorf("a round trip allocates only %.1f, below the recorded %d — the path "+
-			"improved; lower roundtripAllocCeiling to lock it in", n, roundtripAllocCeiling)
-	}
+	// No lower check: the ceiling is zero and a count cannot go below it. The
+	// pair is kept everywhere else in the repo because "the path improved and
+	// nobody lowered the constant" is a real way to lose a win silently; here
+	// there is nothing left to win.
 }

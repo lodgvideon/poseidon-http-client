@@ -11,7 +11,7 @@ import (
 )
 
 // DiscardMetadata skips copying the response header and trailer blocks out of
-// conn's pooled slab. The risk it creates is precise: grpc-status and
+// conn's pooled block. The risk it creates is precise: grpc-status and
 // grpc-message are then read from the LIVE block, which the pool reclaims when
 // the event handler returns. Get that wrong and a failing call reports a garbage
 // diagnosis instead of the server's — quietly, because the shape of a Status is
@@ -56,7 +56,7 @@ func TestDiscardMetadata_ErrorStatusStillArrives(t *testing.T) {
 	}
 	if st.Message != msg {
 		t.Errorf("message = %q, want %q — grpc-message is read from the live block and "+
-			"must be copied out of it before the slab returns", st.Message, msg)
+			"must be copied out of it before the block returns", st.Message, msg)
 	}
 }
 
@@ -148,17 +148,17 @@ func TestDiscardMetadata_HeaderAndTrailerAreNil(t *testing.T) {
 
 // TestDiscardMetadata_ConcurrentStatusesDoNotCross is the gate for the hazard
 // this option creates: with no copy, finish reads a block that belongs to a
-// pooled slab, and returning that slab one line too early is invisible in a
+// pooled block, and releasing that block one line too early is invisible in a
 // single-threaded test — the bytes are still there because nothing has reused
 // them yet.
 //
 // Many concurrent calls on one connection make the pool actually recycle, so a
-// slab returned before it is read gets overwritten by another call's block and
+// block released before it is read gets overwritten by another call's and
 // one RPC reports another's message.
 func TestDiscardMetadata_ConcurrentStatusesDoNotCross(t *testing.T) {
 	srv, cfg := startGRPCServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// Echo the caller's marker back as the status message, so every call has
-		// a distinct one and a crossed slab is visible as a mismatch.
+		// a distinct one and a crossed block is visible as a mismatch.
 		marker := r.Header.Get("x-marker")
 		srvBeginResponse(w)
 		srvFinish(w, PermissionDenied, "denied-for-"+marker)
@@ -190,7 +190,7 @@ func TestDiscardMetadata_ConcurrentStatusesDoNotCross(t *testing.T) {
 				}
 				if want := "denied-for-" + marker; st.Message != want {
 					errs <- fmt.Errorf("%s: got status message %q, want %q — a pooled header "+
-						"slab was read after it went back", marker, st.Message, want)
+						"block was read after it went back", marker, st.Message, want)
 				}
 			}
 		}(w)

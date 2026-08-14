@@ -7,7 +7,7 @@ import (
 // TestPushIfID_RefusesRecycledParent pins the id gate on PUSH_PROMISE delivery.
 //
 // handlePushPromiseBlock resolves the parent by id and then does real work
-// before delivering — reserving the promised stream, taking a slab from the
+// before delivering — reserving the promised stream, taking a block from the
 // pool, copying every header field. A *Stream is pooled, so in that window the
 // application can finish the parent request, Close it, and a fresh NewStream can
 // claim the struct. An ungated push then announces the promise to whichever
