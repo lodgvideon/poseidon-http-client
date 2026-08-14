@@ -170,6 +170,7 @@ type Conn struct {
 	localMaxStreamsUni  uint64             // uni streams the peer may open toward us (we advertised, §4.6)
 	localMaxStreamsBidi uint64             // bidi streams the peer may open toward us (server role; we advertised, §4.6)
 	localMaxIdle        time.Duration      // max_idle_timeout we advertised (§10.1); 0 = none
+	handshakeTimeout    time.Duration      // whole-handshake bound Establish applies (WithHandshakeTimeout); 0 = defaultHandshakeTimeout
 	lastActivity        time.Time          // last received packet, for the idle timer; the timer starts at NewConn and resets on receipt, so §10.1's "restart on send if not already running" is a no-op (§10.1)
 	acceptedUni         []*Stream          // accepted server-initiated uni streams awaiting AcceptUniStream
 	acceptedBidi        []*Stream          // accepted client-initiated bidi streams awaiting AcceptBidiStream (server role)
