@@ -1,5 +1,6 @@
 .PHONY: lint test test-race test-debug bench bench-alloc bench-gate fuzz-replay coverage coverage-gate tidy contrib-test
 .PHONY: it-up it-down it-logs it-test it-test-fast it-certs h3-interop h3-interop-loss h3-interop-reorder h3-interop-fault h3-interop-chacha h3-soak
+.PHONY: qns-image qns-image-multi
 
 # Minimum overall and per-package statement coverage. CI fails below this.
 COVERAGE_MIN ?= 80
@@ -11,15 +12,21 @@ BENCHSTAT ?= benchstat
 # Nested modules. The root `./...` never reaches them, so every target that
 # should cover them has to iterate explicitly.
 CONTRIB_MODULES ?= contrib/prometheus
+# test/interop/quic is nested for a different reason than contrib: it is a `main`
+# package with no tests, and the per-package coverage gate below would fail it
+# inside the root module. It still has to be vetted and linted, and above all it
+# has to keep compiling against this tree — that is the whole point of its
+# replace directive.
+NESTED_MODULES = $(CONTRIB_MODULES) test/interop/quic
 
 tidy:
 	$(GO) mod tidy
-	@for m in $(CONTRIB_MODULES); do $(GO) -C $$m mod tidy; done
+	@for m in $(NESTED_MODULES); do $(GO) -C $$m mod tidy; done
 
 lint:
 	$(GO) vet ./...
 	$(GOLANGCI_LINT) run
-	@for m in $(CONTRIB_MODULES); do \
+	@for m in $(NESTED_MODULES); do \
 		$(GO) -C $$m vet ./... && (cd $$m && $(GOLANGCI_LINT) run); \
 	done
 
@@ -165,3 +172,22 @@ h3-soak:
 	  -e POSEIDON_SOAK_DURATION=$${POSEIDON_SOAK_DURATION:-120s} \
 	  -e POSEIDON_SOAK_WORKERS=$${POSEIDON_SOAK_WORKERS:-64} \
 	  runner go test ./client/ -tags soak -run TestSoak_H3 -v -timeout 15m
+
+# ── quic-interop-runner endpoint image ───────────────────────────
+# See test/interop/quic/README.md. The build context is the repository root
+# because the client is a nested module whose replace points at the parent.
+QNS_IMAGE     ?= poseidon-interop:local
+QNS_DOCKERFILE = test/interop/quic/Dockerfile
+QNS_PLATFORMS ?= linux/amd64,linux/arm64
+
+# One platform, loaded into the local image store, for running the interop
+# runner against a locally built tag (`run.py -r poseidon=$(QNS_IMAGE)`).
+qns-image:
+	docker buildx build --platform linux/amd64 --load -f $(QNS_DOCKERFILE) -t $(QNS_IMAGE) .
+
+# Both platforms the online runner requires. No --load: buildx cannot load a
+# multi-platform manifest into the local store, so this proves the build and
+# leaves the result in the build cache. Publishing is a separate, manual step —
+# see the README.
+qns-image-multi:
+	docker buildx build --platform $(QNS_PLATFORMS) -f $(QNS_DOCKERFILE) -t $(QNS_IMAGE) .
