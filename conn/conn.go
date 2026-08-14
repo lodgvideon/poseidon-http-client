@@ -27,18 +27,33 @@ import (
 // extra copy.
 const readBufferSize = 16 * 1024
 
-// writeBufferSize is the size of the buffered writer wrapping the transport on
-// the send path. The Framer emits each DATA/HEADERS frame as a 9-byte header
-// Write followed by a separate payload Write; over an unbuffered transport (and
-// especially over TLS, where each Write becomes its own record + syscall) that
-// is two syscalls per frame. Wrapping the transport writer in a bufio.Writer
-// lets the header and payload coalesce into one flush — one syscall per frame.
-// The buffer is flushed under wmu before releasing the write lock in every
-// frame-writing method, so a buffered frame is always on the wire before the
-// writer blocks (avoiding a deadlock where the peer never sees the frame). The
-// buffer is not goroutine-safe; wmu already serializes all writers to it.
+// defaultWriteBufferSize is the size of the buffered writer wrapping the
+// transport on the send path when ConnOptions.WriteBufferSize is zero. The
+// Framer emits each DATA/HEADERS frame as a 9-byte header Write followed by a
+// separate payload Write; over an unbuffered transport (and especially over
+// TLS, where each Write becomes its own record + syscall) that is two syscalls
+// per frame. Wrapping the transport writer in a bufio.Writer lets the header
+// and payload coalesce into one flush — one syscall per frame. The buffer is
+// flushed under wmu before releasing the write lock in every frame-writing
+// method, so a buffered frame is always on the wire before the writer blocks
+// (avoiding a deadlock where the peer never sees the frame). The buffer is not
+// goroutine-safe; wmu already serializes all writers to it.
 // 16 KiB matches the default max frame size.
-const writeBufferSize = 16 * 1024
+const defaultWriteBufferSize = 16 * 1024
+
+// minWriteBufferSize and maxWriteBufferSize bound ConnOptions.WriteBufferSize.
+//
+// The floor is the RFC 7540 minimum frame payload plus a frame header, which is
+// the smallest buffer that can still hold one whole maximum-size frame — below
+// it the header/payload coalescing described above stops working and every
+// frame costs two writes again, which is the opposite of what any caller sets
+// this for. The ceiling is arbitrary but finite: the buffer is per connection
+// and is allocated for the connection's whole life, so a pool of 10k
+// connections at 1 MiB is already 10 GiB.
+const (
+	minWriteBufferSize = int(frameSizeFloor) + frame.FrameHeaderSize
+	maxWriteBufferSize = 1 << 20
+)
 
 // encBufPool recycles the HPACK block-fragment buffer used by writeHeaders.
 // The buffer is returned immediately after Framer.WriteHeaders — the call
@@ -255,7 +270,7 @@ type ConnStats struct {
 // NewClientConn wraps an already-handshaken transport.
 func NewClientConn(ctx context.Context, transport net.Conn, opts ConnOptions) (*Conn, error) {
 	opts = opts.defaulted()
-	wb := bufio.NewWriterSize(transport, writeBufferSize)
+	wb := bufio.NewWriterSize(transport, opts.WriteBufferSize)
 	c := &Conn{
 		transport:          transport,
 		wb:                 wb,
@@ -278,7 +293,7 @@ func NewClientConn(ctx context.Context, transport net.Conn, opts ConnOptions) (*
 	c.tuner = newRecvWindowTuner(opts, opts.Settings.InitialWindowSize)
 	c.goAwaySentLast.Store(goAwayNoneSent)
 	c.fcOutCond = sync.NewCond(&c.fcOutMu)
-	c.wbatch = newWriteBatcher(opts.GroupCommit, &c.wmu, wb)
+	c.wbatch = newWriteBatcher(opts.GroupCommit, &c.wmu, wb, opts.WriteBufferSize/2)
 	// Sync Framer read limit to our advertised MaxFrameSize. Default Framer
 	// cap is 16384; peers honouring our SETTINGS may send frames up to the
 	// advertised value, which would be rejected as ErrFrameTooLarge otherwise.
@@ -621,7 +636,8 @@ type deadliner interface {
 // last-stream-id it advertised, which the connection-error path records on the
 // error it surfaces to the application.
 func (c *Conn) writeGoAwayBestEffort(code frame.ErrCode) uint32 {
-	if dl, ok := c.transport.(deadliner); ok {
+	dl, hasDeadline := c.transport.(deadliner)
+	if hasDeadline {
 		_ = dl.SetWriteDeadline(time.Now().Add(closeGoAwayDeadline))
 	}
 	c.wmu.Lock()
@@ -629,6 +645,16 @@ func (c *Conn) writeGoAwayBestEffort(code frame.ErrCode) uint32 {
 	last := c.goAwayLastStreamIDToSend()
 	_ = c.fr.WriteGoAway(last, code, nil)
 	_ = c.flushWrite()
+	// Disarm, the way writeRSTStreamBestEffort does. The deadline bounds THIS
+	// write, not the connection: Close destroys the transport straight after, so
+	// leaving it armed was invisible there — but Shutdown deliberately keeps the
+	// connection alive for gracefulTimeout with in-flight streams still writing,
+	// and every one of their writes inherited a deadline 200ms after the GOAWAY.
+	// A graceful drain longer than 200ms therefore failed every send it was
+	// supposed to be letting finish, with the transport's own i/o timeout.
+	if hasDeadline {
+		_ = dl.SetWriteDeadline(time.Time{})
+	}
 	return last
 }
 

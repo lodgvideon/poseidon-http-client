@@ -25,7 +25,7 @@ import (
 func wuPairConn(t *testing.T) (*Conn, *Stream, *countingSink) {
 	t.Helper()
 	sink := &countingSink{}
-	wb := bufio.NewWriterSize(sink, writeBufferSize)
+	wb := bufio.NewWriterSize(sink, defaultWriteBufferSize)
 	c := &Conn{
 		fr:      frame.NewFramer(wb, bytes.NewReader(nil)),
 		streams: map[uint32]*Stream{},
@@ -33,7 +33,7 @@ func wuPairConn(t *testing.T) (*Conn, *Stream, *countingSink) {
 			Settings: AdvertisedSettings{InitialWindowSize: 65535, MaxConcurrentStreams: 100},
 		}.defaulted(),
 	}
-	c.wbatch = newWriteBatcher(false, &c.wmu, wb)
+	c.wbatch = newWriteBatcher(false, &c.wmu, wb, defaultWriteBufferSize/2)
 	c.connRecvWindow = 1 << 20
 
 	s := &Stream{id: 1, recvWindow: 1 << 20}
@@ -68,7 +68,7 @@ func TestOnDataReceived_BothRefunds_OneWrite(t *testing.T) {
 // and look like an improvement.
 func TestOnDataReceived_BothRefunds_EmitsBoth(t *testing.T) {
 	sink := &captureSink{}
-	wb := bufio.NewWriterSize(sink, writeBufferSize)
+	wb := bufio.NewWriterSize(sink, defaultWriteBufferSize)
 	c := &Conn{
 		fr:      frame.NewFramer(wb, bytes.NewReader(nil)),
 		streams: map[uint32]*Stream{},
@@ -76,7 +76,7 @@ func TestOnDataReceived_BothRefunds_EmitsBoth(t *testing.T) {
 			Settings: AdvertisedSettings{InitialWindowSize: 65535, MaxConcurrentStreams: 100},
 		}.defaulted(),
 	}
-	c.wbatch = newWriteBatcher(false, &c.wmu, wb)
+	c.wbatch = newWriteBatcher(false, &c.wmu, wb, defaultWriteBufferSize/2)
 	c.connRecvWindow = 1 << 20
 	s := &Stream{id: 1, recvWindow: 1 << 20}
 	c.streams[1] = s

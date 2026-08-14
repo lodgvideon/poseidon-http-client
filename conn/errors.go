@@ -81,6 +81,17 @@ var (
 	// in the "reserved (remote)" state, and the client only ever receives the
 	// promised response — it never sends application data on a pushed stream.
 	ErrPushedStreamReadOnly = errors.New("conn: cannot send on a server-pushed stream (receive-only)")
+
+	// ErrNoCredit reports that a SendBatch entry's body did not fit in the
+	// peer's send windows, and SendBatch does not wait for credit.
+	//
+	// It is the one entry outcome that is not a failure, and what it leaves
+	// behind is deterministic: the entry's HEADERS went out if it had any, its
+	// body did not, and END_STREAM was not sent — so the stream is open and the
+	// request is half-made. Finish it with StreamRef.SendDataV, which blocks for
+	// credit, or resubmit the body in a later batch once a WINDOW_UPDATE has
+	// arrived. Never retry the fields: they are already on the wire.
+	ErrNoCredit = errors.New("conn: send window has no credit for this batch entry")
 )
 
 // GoAwayError reports that the peer sent GOAWAY, and carries the two things the

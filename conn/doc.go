@@ -48,6 +48,44 @@
 // wakes and again before each frame reaches the wire, because that park can
 // outlast the stream it was authorised for.
 //
+// # Pooled buffers are handed to the caller, and the caller returns them
+//
+// A StreamEvent can carry ownership of pooled memory, and this package does NOT
+// reclaim it. There are two, returned two different ways:
+//
+//   - EventHeaders / EventInterimHeaders / EventTrailers / EventPushPromise
+//     carry Block, which owns the field slice AND the bytes every
+//     Headers[i].Name and .Value points into. Return it with ev.Release().
+//   - EventData carries DataSlab, the pooled buffer backing Data. Return the
+//     POINTER with GetDataBufPool().Put(ev.DataSlab).
+//
+// Release is nil-safe, so it needs no guard; DataSlab does:
+//
+//	ev, err := s.Recv(ctx)
+//	// ...
+//	ev.Release()
+//	if ev.DataSlab != nil {
+//	    conn.GetDataBufPool().Put(ev.DataSlab)
+//	}
+//
+// Put the POINTER the event carries, not the slice it names: a []byte handed to
+// an interface parameter escapes to the heap, which costs the allocation the
+// pool exists to avoid. Release exists partly so the header half of this rule
+// cannot be got wrong — it used to be a pool accessor and a *[]byte, and of the
+// three callers that reimplemented it, the one that got it wrong was this
+// package's own benchmark suite.
+//
+// Return them only once the bytes have been consumed — copied out, or read —
+// because the next Get hands the same memory to another frame. Everything
+// reachable from a block belongs to whoever draws it next.
+//
+// Callers of the client package need none of this: Response.Reset and
+// StreamResponse.Close do it. It matters for code written straight against
+// *Conn, which is the audience for NewStream and SendBatch. Forgetting is not a
+// crash and not a leak; it is a fresh allocation per header block and a fresh
+// 16 KiB one per DATA frame, quietly, forever. The DATA half was measured at
+// 17153 B/op against an expected 2 allocs/op.
+//
 // For a higher-level request/response API, see the client package
 // (Phase C.1), which builds Do and DoStream on top of *Conn.
 package conn
