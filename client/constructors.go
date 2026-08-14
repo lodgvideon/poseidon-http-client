@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/lodgvideon/poseidon-http-client/conn"
+	"github.com/lodgvideon/poseidon-http-client/trace"
 )
 
 // Focused constructors. ClientOptions is a flat struct with an implicit
@@ -55,6 +56,15 @@ func WithSelector(s Selector) Option { return func(o *ClientOptions) { o.Selecto
 // WithDrainMode sets the managed-transport sub-pool drain behavior when the
 // resolver drops an address. No effect on single-conn/pool clients.
 func WithDrainMode(d DrainMode) Option { return func(o *ClientOptions) { o.DrainMode = d } }
+
+// WithTracer installs a frame tracer on every connection the client dials. See
+// ClientOptions.Tracer for what it observes and which transports honour it
+// today; nil turns it off.
+//
+//	tr := trace.NewTextTracer(os.Stderr)
+//	defer tr.Close()
+//	c, err := client.NewPoolClient(addr, dialer, pool, client.WithTracer(tr))
+func WithTracer(t trace.Tracer) Option { return func(o *ClientOptions) { o.Tracer = t } }
 
 // WithConnOptions mutates the underlying conn.ConnOptions in place (Settings,
 // KeepaliveInterval, EnablePush, …) without clobbering the dialer the

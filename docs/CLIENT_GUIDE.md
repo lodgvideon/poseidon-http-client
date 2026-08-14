@@ -134,7 +134,7 @@ c, err := client.NewSingleConnClient(addr, dialer,
 )
 ```
 
-Available options: `WithHooks`, `WithPushHandler`, `WithDefaultScheme`, `WithRateLimit`, `WithMaxResponseBodySize`, `WithMaxDecompressedSize`, `WithDialBackoff`, `WithSelector` (managed), `WithDrainMode` (managed), and `WithConnOptions` (escape hatch to mutate the underlying `conn.ConnOptions`). Drop to `NewClient(ClientOptions{...})` when you need full control — the sections below document every field it accepts.
+Available options: `WithHooks`, `WithPushHandler`, `WithDefaultScheme`, `WithRateLimit`, `WithMaxResponseBodySize`, `WithMaxDecompressedSize`, `WithDialBackoff`, `WithSelector` (managed), `WithDrainMode` (managed), `WithTracer` (per-frame wire log), and `WithConnOptions` (escape hatch to mutate the underlying `conn.ConnOptions`). Drop to `NewClient(ClientOptions{...})` when you need full control — the sections below document every field it accepts.
 
 ### `ClientOptions` — every field
 
@@ -149,6 +149,7 @@ type ClientOptions struct {
     Selector             client.Selector      // managed only; nil → RoundRobin()
     DrainMode            client.DrainMode     // managed only; zero value = DrainGraceful
     Hooks                *client.Hooks        // optional lifecycle callbacks; nil = no hooks; replaceable via Client.SetHooks
+    Tracer               trace.Tracer         // per-frame wire observer; nil = off. HTTP/2 transports today — see "Frame tracing"
     PushHandler          client.PushHandler   // server-push callback; non-nil auto-sets ConnOpts.EnablePush=true
     DefaultScheme        string             // :scheme when Request.Scheme empty; "" → "https"; set "http" for H2C
     RateLimitPerSecond   float64            // token-bucket QPS cap; 0 = disabled
@@ -1633,8 +1634,8 @@ to 100 streams, pre-warmed before the burst, with a single reused `Request` and
 
 ## Observability & Advanced Protocol
 
-This section covers the client's instrumentation surface (Hooks and Metrics),
-HTTP/2 server push, request prioritization, extended CONNECT (RFC 8441),
+This section covers the client's instrumentation surface (Hooks, Metrics and
+the per-frame Tracer), HTTP/2 server push, request prioritization, extended CONNECT (RFC 8441),
 request trailers, response-decompression control, and the typed error model.
 Every symbol referenced below lives in package
 `github.com/lodgvideon/poseidon-http-client/client`; HTTP/2 wire types such as
@@ -1924,7 +1925,101 @@ func newInstrumentedClient() (*client.Client, error) {
 }
 ```
 
-### 3. Server push (PUSH_PROMISE)
+### 3. Frame tracing (`Tracer`, `POSEIDON_DEBUG`)
+
+Hooks and Metrics describe *requests*. A `trace.Tracer` describes *framing* —
+every HTTP/2 frame in both directions, with the fields that make a flow-control
+or GOAWAY question answerable in one read.
+
+```go
+import "github.com/lodgvideon/poseidon-http-client/trace"
+
+tr := trace.NewTextTracer(os.Stderr)
+defer tr.Close() // stops the flusher and writes what is left
+
+c, err := client.NewPoolClient(addr, dialer, pool, client.WithTracer(tr))
+```
+
+`ClientOptions.Tracer` is the same knob for the `NewClient` path, and
+`conn.ConnOptions.Tracer` sets it on a single connection built directly through
+`conn.Dial`. Output is one line per frame:
+
+```
+21:41:41.433574 h2 -> SETTINGS stream=0 len=36 params=HEADER_TABLE_SIZE=4096,ENABLE_PUSH=0,MAX_CONCURRENT_STREAMS=100,INITIAL_WINDOW_SIZE=65535,MAX_FRAME_SIZE=16384,MAX_HEADER_LIST_SIZE=8388608
+21:41:41.433734 h2 <- SETTINGS stream=0 len=30 params=MAX_FRAME_SIZE=1048576,MAX_CONCURRENT_STREAMS=250,INITIAL_WINDOW_SIZE=1048576
+21:41:41.433739 h2 -> SETTINGS stream=0 len=0 flags=ACK
+21:41:41.433997 h2 <- WINDOW_UPDATE stream=0 len=4 incr=983041
+21:41:41.434055 h2 -> HEADERS stream=1 len=16 flags=END_STREAM|END_HEADERS
+21:41:41.434382 h2 <- HEADERS stream=1 len=48 flags=END_HEADERS
+21:41:41.434495 h2 <- DATA stream=1 len=16384
+21:41:41.434566 h2 -> WINDOW_UPDATE stream=1 len=4 incr=32768
+21:41:41.434636 h2 <- DATA stream=1 len=0 flags=END_STREAM
+21:41:41.434702 h2 -> GOAWAY stream=0 len=8 last_stream=0 code=NO_ERROR
+```
+
+**Turning it on without a rebuild.** `examples/loadgen` reads `POSEIDON_DEBUG`,
+so a binary that already shipped can be made loud:
+
+```
+POSEIDON_DEBUG=frames ./loadgen -url https://localhost:8443/ -duration 5s
+```
+
+`frames` is the category this build implements; `all`, `1` and `true` are
+aliases for it. `streams` and `flow` parse and select nothing — they name the
+connection-level seam, which is a later step of #610. An unrecognised name is a
+startup error, not a silent fallback to off. Wire it into your own binary with
+`trace.FromEnv(os.Stderr)`.
+
+**What is not in the log, and why.** Header field values and DATA payloads are
+absent by design: `authorization` and `cookie` live in the header block, and a
+frame log is the thing people paste into a public issue. The framing layer only
+ever sees the compressed HPACK bytes in any case.
+
+**Writing your own.** The interface is one method, and the event is a value
+struct — write a JSON or qlog tracer by implementing it:
+
+```go
+type Tracer interface {
+	TraceFrame(FrameInfo)
+}
+```
+
+Two contract points, both load-bearing:
+
+- **It must not block.** `TraceFrame` fires on the connection's reader goroutine
+  and, outbound, while the connection's write lock is held. A tracer that waits
+  on a slow writer does not lag — it stalls the connection it is observing.
+  `TextTracer` buffers into memory, writes from a background goroutine, and
+  drops (reporting the count) rather than waiting.
+- **`FrameInfo.Params` must not be retained** past the call; it aliases storage
+  the framer reuses for the next frame. Every other field is a scalar or a
+  constant string and is safe to keep.
+
+**Locks.** None on the emit path: `frame` holds no mutex, and each connection's
+tracer state is its own. `TextTracer` has one, and holds it only for a buffer
+copy — the line is rendered into a stack buffer before the lock is taken,
+because a tracer shared by every connection turns its critical section into a
+cross-connection serialization point. `BenchmarkTextTracer_TraceFrameParallel`
+measures it flat at ~270-360 ns/frame from 2 to 8 contending goroutines with
+zero allocations; once the backlog saturates, the drop path is ~17 ns and takes
+no lock at all. Those benchmarks report a `drop-frac` metric alongside ns/op, and
+you should read it: a benchmark drives frames faster than any writer drains
+them, so a tracer left unattended saturates and then reports the drop path's
+16 ns as though it were the cost of tracing.
+
+**Cost when off.** One nil check per frame. `frame`'s benchmarks are held at 0
+B/op, 0 allocs/op by the bench-gate with the tracer installed and discarding,
+and `TestFramer_Trace_AddsNoAllocations` requires the traced and untraced
+allocation counts to be equal on every frame type.
+
+**Scope today.** The emit sites are in `frame.Framer`, so the HTTP/2 transports
+(`TransportSingleConn`, `TransportPool`, `TransportManaged`, and the HTTP/2 half
+of `TransportALPN`) are traced. The HTTP/1.1 and HTTP/3 stacks have no emit
+sites yet — issue #610 splits them into their own steps — so setting a tracer
+alongside `TransportH1*` or `TransportH3*` is a no-op for now, and will start
+producing output without an API change.
+
+### 4. Server push (PUSH_PROMISE)
 
 Server push is opt-in via `ClientOptions.PushHandler`. When you set a non-nil
 handler, `NewClient` automatically flips `ConnOpts.EnablePush = true` so the
@@ -1986,7 +2081,7 @@ if err := c.Do(context.Background(), req, &resp); err != nil {
 // asynchronously while/after this Do returns.
 ```
 
-### 4. Request priority (RFC 7540 §5.3)
+### 5. Request priority (RFC 7540 §5.3)
 
 `Request.Priority` is a `*frame.Priority`. When non-nil, the HEADERS frame
 carries the PRIORITY flag and a 5-byte priority payload. The field type:
@@ -2020,7 +2115,7 @@ resp.Reset()
 _ = c.Do(context.Background(), req, &resp)
 ```
 
-### 5. Extended CONNECT (RFC 8441) — WebSockets over HTTP/2
+### 6. Extended CONNECT (RFC 8441) — WebSockets over HTTP/2
 
 `Request.Protocol` is the `:protocol` pseudo-header for extended CONNECT. When
 non-empty, `Method` **MUST** be `"CONNECT"` (validated up front:
@@ -2078,7 +2173,7 @@ for {
 }
 ```
 
-### 6. Request trailers
+### 7. Request trailers
 
 There are two ways to attach request trailers, both `[]conn.HeaderField`:
 `Request.Trailers` (a static slice) and `Request.TrailerFunc` (computed after the
@@ -2131,7 +2226,7 @@ for _, t := range resp.Trailers {
 }
 ```
 
-### 7. Disabling response decompression
+### 8. Disabling response decompression
 
 By default the client sends `accept-encoding: gzip` (unless your `Headers`
 already include an `accept-encoding`) and transparently decodes
@@ -2166,7 +2261,7 @@ if err := c.Do(context.Background(), req, &resp); err != nil {
 // resp.Body holds raw (still-compressed) bytes; resp.BytesReceived == len(resp.Body).
 ```
 
-### 8. Congestion control on HTTP/3 (NewReno vs BBR)
+### 9. Congestion control on HTTP/3 (NewReno vs BBR)
 
 HTTP/3 connections use NewReno (RFC 9002 §7) by default. BBR is opt-in, per
 client, through `H3ConnOptions`:
@@ -2212,7 +2307,7 @@ the matrix and its two arithmetic gates (`scripts/cc-scale-check.sh`,
 `scripts/cc-ratio-check.sh`) exist so the question can be answered rather than
 argued.
 
-### 9. Error model
+### 10. Error model
 
 The client exposes sentinel errors (compare with `errors.Is`) and two typed
 error structs (inspect with `errors.As`).
@@ -2393,7 +2488,7 @@ func (e *DialError) Unwrap() error // returns e.Err — errors.Is reaches the ne
 cause); it exists only for structural symmetry so `errors.Is`/`errors.As` work
 uniformly across client errors. `DialError.Unwrap()` exposes the underlying dial
 cause, so `errors.Is(err, someNetError)` matches through it. See
-[the error-model walkthrough](#9-error-model) above for the full
+[the error-model walkthrough](#10-error-model) above for the full
 `errors.Is`/`errors.As` dispatch example.
 
 ## Convenience helpers

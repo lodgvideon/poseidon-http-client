@@ -9,6 +9,81 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **A frame tracer: `trace.Tracer`, wired through HTTP/2 end to end.** There was
+  no way to watch what the client was doing on the wire. `client.Hooks` is
+  request-level and `conn.ConnOptions` had no callback at all, so a bug report
+  could carry a description of the symptom and nothing else — for HTTP/2 the
+  answer was tcpdump plus a way to decrypt TLS, and for HTTP/3 not even that,
+  since the QUIC handshake is ours and exposes no keylog. The seam was already
+  there and simply not exposed: every inbound frame funnels through
+  `frame.Framer.ReadFrame` and every outbound one through its `writeHeader`.
+
+  New package `trace` holds the vocabulary — `Tracer`, the `FrameInfo` value
+  struct it receives, and `TextTracer`, a buffered one-line-per-frame renderer.
+  It is protocol-neutral for the same reason `header` is: the HTTP/1.1 and
+  HTTP/3 seams are later steps, and neither should have to import RFC 7540 to
+  borrow a `Direction` constant. Set it via `client.ClientOptions.Tracer`,
+  `client.WithTracer`, or `conn.ConnOptions.Tracer`:
+
+  ```
+  21:41:41.434055 h2 -> HEADERS stream=1 len=16 flags=END_STREAM|END_HEADERS
+  21:41:41.434495 h2 <- DATA stream=1 len=16384
+  21:41:41.434566 h2 -> WINDOW_UPDATE stream=1 len=4 incr=32768
+  21:41:41.434702 h2 -> GOAWAY stream=0 len=8 last_stream=0 code=NO_ERROR
+  ```
+
+  Three things it deliberately does. It reports frames **before** they are
+  validated, so a frame that fails its length check or violates §6.10 — the one
+  worth seeing — still produces a line. It carries a `Detail` bitmask saying
+  which type-specific fields were filled, so a GOAWAY with `NO_ERROR` prints its
+  code instead of being indistinguishable from one whose code was never decoded
+  (the shape of #570). And it reports **no header values and no DATA payloads**:
+  `authorization` and `cookie` live in the header block, and a debug log is the
+  thing people paste into a public issue.
+
+  No lock is taken on the emit path: `frame` has no mutex at all, and a
+  `Framer`'s tracer state is per-connection. The one lock in the design is
+  `TextTracer`'s, and it is held only for a buffer copy — the line is rendered
+  into a stack buffer first, because a tracer shared by every connection makes
+  its critical section a cross-connection serialization point. Measured flat at
+  ~270-360 ns/frame from 2 to 8 contending goroutines, 0 allocs; under backlog
+  the drop path is ~17 ns and takes no lock at all.
+
+  Zero cost when off is enforced, not asserted: one nil check per frame, and the
+  bench-gate holds `frame` at 0 B/op with a tracer installed and discarding
+  (`BenchmarkFramer_WriteData_Traced`, `BenchmarkFramer_ReadFrame_Traced`),
+  while `TestFramer_Trace_AddsNoAllocations` requires the traced and untraced
+  allocation counts to match on every frame type. A tracer must not block —
+  it fires on the reader goroutine and under the write lock — so `TextTracer`
+  buffers, writes from a background goroutine, and drops with a reported count
+  rather than waiting on a slow writer.
+
+  Scope: the emit sites are in `frame`, so the HTTP/2 transports are traced.
+  The HTTP/1.1 and HTTP/3 seams are separate steps of the same issue; a tracer
+  set alongside `TransportH1*`/`TransportH3*` is a no-op today and will start
+  producing output without an API change. (#610)
+
+- **`POSEIDON_DEBUG=frames` turns the frame log on in a binary that already
+  shipped.** `-tags poseidondebug` exists but is a *build* tag carrying one
+  thing, the `Close()`-leak finalizer. `trace.FromEnv` reads the environment
+  instead, and `examples/loadgen` honours it. `all`/`1`/`true` are aliases;
+  `streams` and `flow` parse and select nothing, reserved for the
+  connection-level seam; anything else is a startup error rather than a silent
+  fallback to off. (#610)
+
+- **Names for the wire vocabularies.** `frame.FrameType`, `frame.ErrCode` and
+  `frame.SettingID` grew `String()`, `frame.FrameType` grew
+  `FlagNames(Flags)`, and `http3.FrameTypeName`, `http3.SettingName` and
+  `quic.FrameTypeName` name their own registries. Before this, exactly one
+  `String()` existed across `frame`, `hpack`, `conn`, `http1`, `http3`, `quic`
+  and `qpack` in non-test code. Beyond the tracer it improves error messages for
+  free: `conn.ConnError`, `GoAwayError` and `StreamError` format their code with
+  `%v` and now print `code=PROTOCOL_ERROR` instead of `code=1`.
+
+  Flag naming hangs off `FrameType`, not `Flags`, because a flag bit has no
+  meaning on its own — `0x1` is `END_STREAM` on DATA and `ACK` on SETTINGS, so a
+  `Flags.String()` would have to pick one and be wrong about half the
+  connection. (#610)
 - **`grpc.BorrowMetadata()`, a call option that takes the response header and
   trailer copies from the stream's pooled buffers instead of the heap.** Both
   blocks arrive in a buffer the transport reclaims as soon as the event is
