@@ -141,7 +141,6 @@ type Conn struct {
 	resetTokens        map[uint64][16]byte // stateless reset token per active peer CID sequence (§10.3)
 	handshakeComplete  bool                // TLS handshake finished (drives Establish + TLS pump)
 	handshakeConfirmed bool                // QUIC HANDSHAKE_DONE received (RFC 9001 §4.1.2; gates key update §6.1)
-	sendBuf            []byte
 
 	// Per-Conn send scratch, reused across seals to keep the send path alloc-lean
 	// instead of allocating a fresh header/frame/seal-output buffer per packet.
@@ -685,26 +684,21 @@ func (c *Conn) sendInitialFlight(ctx context.Context) error {
 	if err := c.hs.Pump(c); err != nil {
 		return err
 	}
-	ch := c.pendingCrypto[spaceInitial]
-	if len(ch) == 0 {
+	if len(c.pendingCrypto[spaceInitial]) == 0 {
 		return errNoClientHello
 	}
-	pn := c.sendPN[spaceInitial]
-	pkt, err := buildInitialPacket(c.sendBuf[:0], c.initialSealer, c.dcid, c.scid, nil,
-		pn, 4, c.cryptoOffset[spaceInitial], ch, InitialDatagramMinSize)
-	if err != nil {
-		return err
-	}
-	// Record the Initial as ack-eliciting and retransmittable: its CRYPTO bytes
-	// (a private copy) at their offset, so a lost ClientHello can be resent.
-	c.sent[spaceInitial].onSent(pn, c.clock(), true, &retransFrame{
-		kind: retransCrypto, offset: c.cryptoOffset[spaceInitial], data: append([]byte(nil), ch...),
-	})
-	c.onPacketSent(spaceInitial, pn, true, len(pkt)) // count toward bytes_in_flight (RFC 9002 §7)
-	c.cryptoOffset[spaceInitial] += uint64(len(ch))
-	c.pendingCrypto[spaceInitial] = c.pendingCrypto[spaceInitial][:0]
-	c.sendPN[spaceInitial]++
-	_, err = c.pc.Write(pkt)
-	c.sendBuf = pkt[:0] // reuse the datagram backing next flight
-	return err
+	// The flight itself is an ordinary flush of the Initial space: its arm frames
+	// the pumped CRYPTO, advances cryptoOffset, drains pendingCrypto, and seals
+	// through sealPacket — which pads the datagram to 1200 (§14.1), records the
+	// packet as ack-eliciting with a private copy of the ClientHello so a lost one
+	// can be resent (§13.3), and charges it to bytes_in_flight (RFC 9002 §7). Only
+	// the Initial space has a sealer and pending data at this point, so exactly one
+	// datagram goes out.
+	//
+	// sealPacket puts c.retryToken in the header where this used to hard-code an
+	// empty token. Not a behavior change: a Retry can only be processed from a
+	// received datagram, and Establish calls this before reading any, so the token
+	// is still empty here. Any later Initial — including a retransmit of this one —
+	// already went through sealPacket and already carried the token (§8.1.2).
+	return c.flush()
 }

@@ -15,6 +15,11 @@ const InitialDatagramMinSize = 1200
 // empty). token is the Retry/NEW_TOKEN token (nil for a first Initial). pn is
 // the Initial packet number, pnLen its on-wire length (1–4). It appends the
 // protected packet to dst.
+//
+// The client's own Initials are built by sealPacket (quic/conn_seal.go), which
+// takes its inputs from the Conn; this standalone builder exists for tests and
+// fixtures that need a client Initial without one — the fuzz corpus, the RFC
+// 9001 A.2 vector, and the server-side accept tests.
 func buildInitialPacket(dst []byte, s *Sealer, dcid, scid, token []byte, pn uint64, pnLen int, cryptoOffset uint64, cryptoData []byte, minSize int) ([]byte, error) {
 	payload := AppendCrypto(nil, cryptoOffset, cryptoData)
 
