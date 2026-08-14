@@ -184,6 +184,43 @@ func TestPickLeastLoaded_RotatesAcrossIdleConns(t *testing.T) {
 	}
 }
 
+// TestPickLeastLoaded_H2RotatesAcrossIdleConns is the same property for the
+// HTTP/2 pool, which had no rotation test at all: pinning the cursor assignment
+// in Pool.pickLeastLoaded left the whole client package green, while the same
+// mutation in h3Pool.pickLeastLoaded failed the test above (#655).
+//
+// A frozen cursor still satisfies "return an idle connection when one exists",
+// which is all TestPickLeastLoaded_H2ContractHolds asserts, so the contract test
+// stays green while every request piles onto conns[0] and the rest of the pool
+// goes cold — the whole-pool scan that #448 removed, minus its spread.
+//
+// Only the fixture differs from the H3 twin: h3ManagedConn holds a mockable
+// h3Client, managedConn holds a concrete *conn.Conn whose liveness flags are
+// unexported, so a hand-built one reads alive — the same trick the H2 contract
+// test uses. What is asserted is what pickLeastLoaded's caller sees, the
+// connections it hands back, not p.pickCursor: the cursor is how the spread is
+// implemented, the spread is what is promised.
+func TestPickLeastLoaded_H2RotatesAcrossIdleConns(t *testing.T) {
+	p := &Pool{}
+	conns := make([]*managedConn, 4)
+	for i := range conns {
+		conns[i] = &managedConn{c: &conn.Conn{}, streamCap: 8}
+	}
+
+	seen := map[*managedConn]int{}
+	for i := 0; i < len(conns); i++ {
+		got := p.pickLeastLoaded(conns)
+		if got == nil {
+			t.Fatalf("pick %d returned nil", i)
+		}
+		seen[got]++
+	}
+	if len(seen) != len(conns) {
+		t.Errorf("four picks over four idle connections touched %d of them, want all %d — "+
+			"the cursor is not rotating", len(seen), len(conns))
+	}
+}
+
 // TestPickLeastLoaded_CursorSurvivesAShrinkingPool pins the modulus: the cursor
 // persists across calls while the slice length changes as connections are
 // retired, so a stale cursor must not index out of range.
