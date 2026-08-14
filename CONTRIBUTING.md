@@ -13,7 +13,8 @@ you what those gates are and how to pass them locally before you push.
   HTTP/3 interop suites (`make it-test`, `make h3-interop*`). Unit and
   conformance tests need no Docker.
 - **benchstat** (optional) — `go install golang.org/x/perf/cmd/benchstat@latest`
-  if you want the same before/after bench comparison CI prints.
+  if you want a before/after bench comparison locally. CI prints one only on
+  `v*` tags and manual `bench-gate` runs, not on pull requests.
 
 ## Build and test
 
@@ -157,10 +158,21 @@ covered paths) must benchmark at **0 B/op and 0 allocs/op**. The
 `bench-gate` CI job runs the benchmarks on your branch and fails on any
 non-zero allocation figure (`scripts/bench-gate.sh`). If your change adds
 an allocation to a gated path, CI rejects it — there is no override.
-Reproduce locally:
+
+On a **pull request** the gate runs at `-benchtime=100ms` (~2 min). That is
+the same script over the same seven packages: nothing is exempted, and all
+43 benchmarks were measured to return verdicts identical to the full sweep.
+On a **`v*` tag** — or on demand via `workflow_dispatch` — the full
+`-benchtime=2s` sweep runs, plus a benchstat ns/op comparison against the
+previous release. The comparison is informational and gates nothing; it is
+not run on pull requests. See the comment at the top of
+`.github/workflows/bench-gate.yml` for the measurements behind the split.
+
+Reproduce locally (the PR setting; use `-benchtime=2s` for the tag sweep):
 
 ```bash
-go test -bench=. -benchmem -benchtime=2s -count=5 -run=^$ ./frame ./hpack ./qpack | tee head.txt
+go test -bench=. -benchmem -benchtime=100ms -count=5 -run=^$ \
+  ./frame ./hpack ./internal/bytesx ./internal/bufx ./qpack ./quic ./http3 > head.txt
 ./scripts/bench-gate.sh head.txt
 ```
 
