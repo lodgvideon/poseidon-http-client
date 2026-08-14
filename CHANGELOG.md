@@ -26,6 +26,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **An HTTP/1.1 request that timed out did not fail with
+  `context.DeadlineExceeded`, so the retry layer replayed it.** `Request.Timeout`
+  promises "the request fails with `context.DeadlineExceeded`" and
+  `docs/CLIENT_GUIDE.md` repeats it, including the consequence that such a
+  request is *never* retried. Over HTTP/2 that held. Over HTTP/1.1 it did not:
+  `http1.Exchange.ReadResponse` installs the context's deadline on the socket and
+  a peer that accepts the request and then goes silent trips it, so the failure
+  came back as the socket's own `os.ErrDeadlineExceeded` — which does not match
+  `context.DeadlineExceeded`. `client`'s `isHardStop` reads exactly that, so it
+  missed the case, and a user `IsRetryable` written the ordinary way ("a
+  `net.Error` whose `Timeout()` is true is transient") replayed a request that
+  had already spent its entire budget, against the same silent peer. A read
+  deadline on an `http1.Conn` can only have come from the exchange's own context
+  — `ReadResponse` installs one on every entry, the watchdog installs one in the
+  past on cancellation — so a timeout is now reported as that context's error,
+  keeping the socket error as a second cause for logs. Cancelling a read reports
+  `context.Canceled` for the same reason, where it used to say `i/o timeout`.
+  Pinned end to end against a stalled peer by
+  `client/integration_test/toxiproxy_test.go`.
+
 - **`conn.ConnError.Last` was never assigned, so every connection error printed
   `last=0`.** Its doc comment ("0 if originated locally") described the reverse
   of the truth: a GOAWAY *received* from the peer builds no `ConnError` at all,

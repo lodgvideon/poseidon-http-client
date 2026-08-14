@@ -2,6 +2,7 @@ package http1_test
 
 import (
 	"context"
+	"errors"
 	"net"
 	"testing"
 	"time"
@@ -78,6 +79,14 @@ func TestReadResponse_CtxCancelUnblocksSilentPeer(t *testing.T) {
 		if err == nil {
 			t.Fatal("ReadResponse returned nil after cancellation; want an error")
 		}
+		// The mechanism that unblocks the read is a deadline in the past, so the
+		// socket reports `i/o timeout` — a word this caller never used. Saying so
+		// verbatim tells a caller its request timed out when in fact the caller
+		// cancelled it, and it is what put a cancellation outside isHardStop's
+		// reach one layer up. See deadlineCause.
+		if !errors.Is(err, context.Canceled) {
+			t.Errorf("ReadResponse after cancellation = %v, want context.Canceled", err)
+		}
 	case <-time.After(15 * time.Second):
 		t.Fatal("ReadResponse did not return after ctx cancellation — a cancellable " +
 			"context with no deadline must still unwind a silent peer")
@@ -100,6 +109,9 @@ func TestReadResponse_AlreadyCancelledCtxFailsFast(t *testing.T) {
 	case err := <-done:
 		if err == nil {
 			t.Error("ReadResponse with an already-cancelled context returned nil, want an error")
+		}
+		if !errors.Is(err, context.Canceled) {
+			t.Errorf("ReadResponse with an already-cancelled context = %v, want context.Canceled", err)
 		}
 	case <-time.After(10 * time.Second):
 		t.Fatal("ReadResponse hung on an already-cancelled context")

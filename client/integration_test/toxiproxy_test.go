@@ -5,8 +5,10 @@ package integration_test
 import (
 	"context"
 	"crypto/tls"
+	"errors"
 	"fmt"
 	"net"
+	"os"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -171,15 +173,26 @@ func h2Through(t *testing.T, addr string) *client.Client {
 	return c
 }
 
-// get issues one GET through c and returns status, body length and error.
-func get(c *client.Client, path string) (int, int, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+// getWithin issues one GET through c under a budget of its own and returns
+// status, body length, how long it took, and the error. Every test above wants
+// a budget generous enough never to be the thing that fails; the stall tests at
+// the bottom of this file want the budget to BE the subject, and want to read
+// back how much of it was spent.
+func getWithin(c *client.Client, path string, budget time.Duration) (int, int, time.Duration, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), budget)
 	defer cancel()
 
 	var resp client.Response
 	resp.Reset()
+	start := time.Now()
 	err := c.Do(ctx, &client.Request{Method: "GET", Path: path, BodyMode: client.BodyBuffer}, &resp)
-	return resp.Status, len(resp.Body), err
+	return resp.Status, len(resp.Body), time.Since(start), err
+}
+
+// get issues one GET through c and returns status, body length and error.
+func get(c *client.Client, path string) (int, int, error) {
+	status, n, _, err := getWithin(c, path, 15*time.Second)
+	return status, n, err
 }
 
 // TestIT_Toxi_ControlPathIsClean is the control. Every assertion below is about
@@ -639,4 +652,202 @@ func TestIT_ToxiH1_CutConnectionIsNotReused(t *testing.T) {
 			"survived the truncation and no damaged conn was ever offered back to the " +
 			"pool — this test proved nothing")
 	}
+}
+
+// ── the stalled peer ────────────────────────────────────────────────
+//
+// Every fault above ends the connection: limit_data cuts it, disabling the proxy
+// drops it, reset_peer RSTs it. Each one gives the client an event to react to.
+// The shape none of them can make is the absence of one — a socket that stays
+// open, healthy and completely silent, where nothing arrives and nothing ends,
+// and the only thing that can finish the request is the caller's own budget.
+//
+// That is the path through http1.Exchange.ReadResponse's read deadline, and it
+// was the one leg of the three that reported the outcome differently: over
+// HTTP/2 a stalled peer surfaced as context.DeadlineExceeded, over HTTP/1.1 as
+// the socket's own os.ErrDeadlineExceeded, which does not match it.
+
+// stallForever is the timeout toxic's "hold the socket open and send nothing".
+// Toxiproxy closes the connection after `timeout` milliseconds and 0 means never,
+// so this is the only attribute value that produces silence rather than an
+// ending — a nonzero one is just another way to spell the cut that limit_data
+// already covers on this leg.
+const stallForever = `{"timeout":0}`
+
+// warmH1 puts one established, idle HTTP/1.1 connection in c's pool and proves
+// it landed.
+//
+// This is the lever for both stall tests below, not a convenience. Measured
+// against this fixture: with the timeout toxic already installed, a FRESH
+// connection stalls inside the TLS handshake, so the request dies in the dialer
+// under the dialer's own context, completes no dial, and never enters http1 at
+// all — and that failure already reports context.DeadlineExceeded. A test that
+// skipped the warm-up would therefore assert exactly what it asserts now and
+// prove nothing about the response read. The connection has to exist before the
+// silence starts.
+func warmH1(t *testing.T, c *client.Client, dials *atomic.Int64) {
+	t.Helper()
+	status, n, _, err := getWithin(c, "/healthz", 15*time.Second)
+	if err != nil {
+		t.Fatalf("warm-up request on a clean path failed: %v", err)
+	}
+	if status != 200 || n == 0 {
+		t.Fatalf("warm-up: status=%d bodyLen=%d, want 200 with a body", status, n)
+	}
+	if got := dials.Load(); got != 1 {
+		t.Fatalf("warm-up completed %d dials, want exactly 1; without one connection "+
+			"already established the toxic below stalls the TLS handshake instead of "+
+			"the response read", got)
+	}
+}
+
+// assertStalledInTheResponseRead is the fixture check both stall tests need, and
+// it is two questions rather than one: did the request really spend its whole
+// budget waiting, and did it wait in http1 rather than in the dialer.
+//
+// os.ErrDeadlineExceeded is what separates them. A read that blocked on an
+// established socket carries the socket's own timeout underneath whatever the
+// client layer says about it; the dialer's handshake stall does not — it fails
+// on its context and reports that alone. Measured both ways against this
+// fixture before either assertion below was written.
+func assertStalledInTheResponseRead(t *testing.T, err error, elapsed, budget time.Duration) {
+	t.Helper()
+	if elapsed < budget {
+		t.Fatalf("failed after %v of a %v budget: %v\n"+
+			"a socket that sends nothing can only end the request when the budget does, "+
+			"so this failed for some other reason", elapsed, budget, err)
+	}
+	if !errors.Is(err, os.ErrDeadlineExceeded) {
+		t.Fatalf("failure carries no socket timeout: %v\n"+
+			"the response read never blocked on an established connection — the same "+
+			"toxic stalls the TLS handshake when there is no warm connection, and that "+
+			"fails in the dialer, so the claim below would hold without http1 being "+
+			"reached at all", err)
+	}
+}
+
+// TestIT_ToxiH1_StalledPeer_IsAContextDeadline pins what a caller is told when
+// an HTTP/1.1 peer accepts the request and then says nothing.
+//
+// The budget is spent inside http1.Exchange.ReadResponse, blocked on the status
+// line under the read deadline it installs from ctx. The socket reports that as
+// `i/o timeout`, and reported verbatim it is wrong in the way that matters:
+// os.ErrDeadlineExceeded does not match context.DeadlineExceeded, so the one
+// thing every caller of this client is told to test for was false. Request.Timeout
+// promises "the request fails with context.DeadlineExceeded" and CLIENT_GUIDE
+// repeats it three times; over HTTP/2 it was true and only this leg disagreed.
+func TestIT_ToxiH1_StalledPeer_IsAContextDeadline(t *testing.T) {
+	x := newToxi(t)
+	x.proxy(proxyH1, toxiH1Addr)
+
+	var dials atomic.Int64
+	c := h1PoolThrough(t, toxiH1Addr, 1, &dials)
+	warmH1(t, c, &dials)
+
+	remove := x.addToxic(proxyH1, "stall", "timeout", "downstream", stallForever)
+	defer remove()
+
+	const budget = 300 * time.Millisecond
+	status, n, elapsed, err := getWithin(c, "/healthz", budget)
+	if err == nil {
+		t.Fatalf("a request through a peer sending nothing succeeded: status=%d bodyLen=%d — "+
+			"the toxic did not bite, so this test proved nothing", status, n)
+	}
+	assertStalledInTheResponseRead(t, err, elapsed, budget)
+
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("a request that spent its whole %v budget on a silent peer failed with %v, "+
+			"which is not a context.DeadlineExceeded.\n"+
+			"That is the error Request.Timeout and CLIENT_GUIDE both promise, and the one "+
+			"client.isHardStop reads to refuse a replay; an HTTP/1.1 stall reported only as "+
+			"a net.Error timeout looks transient to every caller that classifies it",
+			budget, err)
+	}
+	t.Logf("stall surfaced as: %v (after %v)", err, elapsed)
+}
+
+// TestIT_ToxiH1_StalledPeer_IsNotReplayed is the consequence, and the reason the
+// classification above is worth a test of its own rather than a doc fix.
+//
+// A load generator's IsRetryable is written against the standard library's
+// vocabulary — "a net.Error whose Timeout() is true is transient, try again" —
+// and that predicate is correct for a dial timeout or a stalled connect. The
+// retry layer is what keeps it from also firing on a request that already spent
+// its entire budget: shouldRetryErr asks isHardStop first, and a hard stop means
+// the user predicate is never consulted at all. An HTTP/1.1 stall arriving as a
+// bare socket timeout walked straight past that gate, so a request with a 300ms
+// budget was replayed against the same silent peer — spending the budget again,
+// and again, for an answer that was never coming.
+//
+// The assertion is that the predicate is never asked, not that no retry
+// happened. It is the same fact one step earlier, and it cannot be reached by
+// any route other than isHardStop: a count of zero says the classifier
+// recognised this error itself.
+func TestIT_ToxiH1_StalledPeer_IsNotReplayed(t *testing.T) {
+	x := newToxi(t)
+	x.proxy(proxyH1, toxiH1Addr)
+
+	var dials atomic.Int64
+	c := h1PoolThrough(t, toxiH1Addr, 1, &dials)
+	warmH1(t, c, &dials)
+
+	remove := x.addToxic(proxyH1, "stall", "timeout", "downstream", stallForever)
+	defer remove()
+
+	// consulted counts calls made ABOUT AN ERROR. Retryer also consults the
+	// predicate about a successful response, which is a different question and
+	// would make the count say something else.
+	var consulted atomic.Int64
+	r := client.NewRetryer(c, client.RetryOptions{
+		MaxAttempts: 3,
+		Backoff:     func(int) time.Duration { return 0 },
+		IsRetryable: func(err error, _ *client.Response) bool {
+			if err == nil {
+				return false
+			}
+			consulted.Add(1)
+			var ne net.Error
+			return errors.As(err, &ne) && ne.Timeout()
+		},
+	})
+
+	// A budget on the REQUEST, not on ctx: Retryer derives a fresh one per
+	// attempt, so a replay is visible as time spent rather than hidden behind a
+	// single outer deadline that would end the loop by itself.
+	const budget = 300 * time.Millisecond
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	var resp client.Response
+	resp.Reset()
+	start := time.Now()
+	err := r.Do(ctx, &client.Request{
+		Method: "GET", Path: "/healthz", BodyMode: client.BodyBuffer, Timeout: budget,
+	}, &resp)
+	elapsed := time.Since(start)
+
+	if err == nil {
+		t.Fatalf("a retried request through a peer sending nothing succeeded: status=%d — "+
+			"the toxic did not bite, so this test proved nothing", resp.Status)
+	}
+	// The claim goes first here, unlike the test above, because a replay changes
+	// which attempt's error comes back last: the second one dies in the dialer
+	// against the same stalled proxy, so the fixture check below would fire first
+	// and report the wrong thing about the right failure.
+	if got := consulted.Load(); got != 0 {
+		t.Fatalf("IsRetryable was asked about the error %d times, want 0 "+
+			"(the call took %v against a per-attempt budget of %v).\n"+
+			"A request that spent its whole budget is a hard stop, so shouldRetryErr "+
+			"must refuse it before the user predicate is reached. Asking a predicate "+
+			"written for net.Error timeouts hands it an exhausted budget dressed as a "+
+			"transient failure, and it replays the request against the same silent peer "+
+			"(err was: %v)", got, elapsed, budget, err)
+	}
+	// After the claim, not before it — but it still has to run: a zero count also
+	// comes out of a request that never reached the response read at all, since
+	// the dialer's own timeout is a hard stop too and would short-circuit the
+	// predicate for a completely different reason.
+	assertStalledInTheResponseRead(t, err, elapsed, budget)
+
+	t.Logf("stalled retry stopped after %v with: %v", elapsed, err)
 }

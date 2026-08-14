@@ -8,6 +8,7 @@ import (
 	"io"
 	"math"
 	"net"
+	"os"
 	"strconv"
 	"strings"
 	"sync"
@@ -810,6 +811,51 @@ func (c *Conn) releaseDeadline(k deadlineKind, armed bool) {
 	_ = c.setDeadline(k, time.Time{})
 }
 
+// deadlineCause reports the context error that explains err, or nil when err is
+// not a deadline timeout or ctx does not explain it.
+//
+// Everything above is the reason this can be answered at all: a read deadline on
+// this connection comes from exactly two places, and both belong to the
+// exchange's own context. ReadResponse installs ctx's deadline on entry (the
+// zero value when it has none), and the watchdog installs one in the PAST when
+// ctx is cancelled. So `i/o timeout` on a read is not a fact about the peer —
+// it is this context ending, reported in the socket's vocabulary.
+//
+// Reported that way it was misfiled. os.ErrDeadlineExceeded does not match
+// context.DeadlineExceeded, so a request that spent its entire budget waiting on
+// a peer that never answered came back as an ordinary net.Error whose Timeout()
+// is true — the shape a load generator's IsRetryable calls transient. The
+// client's isHardStop is the classifier that matters here and it reads
+// context.DeadlineExceeded, so it missed this and the request was replayed,
+// against the promise Request.Timeout makes. Over HTTP/2 the same stall already
+// arrived as context.DeadlineExceeded; only this leg disagreed.
+//
+// ctx.Err() alone would race. The socket deadline and the context's timer are
+// two runtime timers armed for the SAME instant, and the read can return before
+// the context's cancel func has run, so the answer would depend on which fired
+// first. The second branch settles it from the deadline itself, which races
+// nothing.
+//
+// A context with neither a deadline nor a cancellation matches neither branch
+// and gets nil, which is the case worth being deliberate about: it means a
+// deadline left on the socket by an EARLIER exchange, a bug this file guards
+// against by arming on every entry. That must keep surfacing as the raw i/o
+// timeout rather than being dressed up as this request's own budget expiring —
+// see TestReadDeadline_DoesNotLeakToTheNextExchange, which reads exactly that to
+// report an inherited deadline.
+func deadlineCause(ctx context.Context, err error) error {
+	if ctx == nil || !errors.Is(err, os.ErrDeadlineExceeded) {
+		return nil
+	}
+	if cerr := ctx.Err(); cerr != nil {
+		return cerr
+	}
+	if dl, ok := ctx.Deadline(); ok && !time.Now().Before(dl) {
+		return context.DeadlineExceeded
+	}
+	return nil
+}
+
 // parseRequestContentLength parses a caller-supplied Content-Length value as RFC
 // 9110 §8.6's `Content-Length = 1*DIGIT`.
 //
@@ -1330,6 +1376,13 @@ func (ex *Exchange) readLine(what string) (string, error) {
 		// turns that — on the FIRST status-line read only — into ErrServerClosedIdle;
 		// nowhere else can tell "no response at all" from "a response that stopped".
 		ex.readConsumedNothing = len(line) == 0
+		// A socket deadline elapsing here is this exchange's own context running
+		// out, so say so — see deadlineCause. The original error is kept as the
+		// second cause: it names the socket, which is what a log needs, while the
+		// first is what a caller classifies on.
+		if cause := deadlineCause(ex.readCtx, err); cause != nil {
+			return "", fmt.Errorf("http1: read %s: %w: %w", what, cause, err)
+		}
 		return "", fmt.Errorf("http1: read %s: %w", what, err)
 	}
 	s := string(line[:len(line)-1]) // the delimiting LF
