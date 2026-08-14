@@ -342,7 +342,7 @@ type recvStream struct {
 	data      []byte        // contiguous unread bytes, starting at absolute offset base
 	pending   []streamChunk // buffered chunks beyond base+len(data), sorted by offset
 	base      uint64        // absolute stream offset of data[0] = bytes already returned by read
-	highest   uint64        // highest byte offset received (offset+len), for §4.5 checks
+	highest   uint64        // highest byte offset the peer has sent (a STREAM's offset+len, or a RESET_STREAM's final size), for §4.5 checks
 	fin       bool
 	finalSize uint64
 }
