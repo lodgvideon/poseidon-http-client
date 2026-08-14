@@ -89,37 +89,68 @@ crosstraffic; `multiconnect` covers handshakeloss and handshakecorruption;
 feature is missing — `connectionmigration` in particular arrives as a plain
 `transfer` and simply fails, because the client never migrates.
 
-## Publishing — the manual steps
+## Publishing — the maintainer's handoff
 
-Neither of these is done by the repository or by CI.
+**Nothing below has been done.** No image exists on any registry, no upstream PR
+is open, and no registry credentials were ever handled by the work that produced
+this directory. Every step is the maintainer's, run under **his own** Docker Hub
+account, in this order.
 
-### 1. Push the image to Docker Hub
+Read [Verification runs](#verification-runs) first — step 0 is a judgement call,
+not a command.
+
+### Step 0 — decide whether to publish at all
+
+Issue [#555](https://github.com/lodgvideon/poseidon-http-client/issues/555) says
+registration "records the value; it does not authorise the publication", and that
+appearing on the public matrix makes our failures public too. The local numbers
+below are **PARTIAL**, and one of the failures may be ours rather than the host.
+Publishing is still a decision at this point, not a formality.
+
+### Step 1 — log in to your own Docker Hub account
+
+```sh
+docker login                       # your own account; nothing here assumes one
+```
+
+Substitute your namespace for `<dockerhub-user>` in every command below. The
+placeholder is deliberate — no account name is baked into this repository.
+
+### Step 2 — build and push the multi-platform image
 
 Multi-platform is required by the online runner; a single-arch image is rejected.
 `--push` is what makes buildx assemble the manifest list, so build and push are
 one command:
 
 ```sh
-docker login                       # your Docker Hub account
 docker buildx build --pull --push \
   --platform linux/amd64,linux/arm64 \
   -f test/interop/quic/Dockerfile \
   -t <dockerhub-user>/poseidon-interop:latest .
 ```
 
-Verify the manifest carries both platforms before opening the PR:
+Run it from the repository root — the nested module's `replace` needs the parent
+in the build context.
+
+### Step 3 — verify the manifest carries both platforms
 
 ```sh
 docker buildx imagetools inspect <dockerhub-user>/poseidon-interop:latest
 ```
 
-The runner pulls `:latest` on every run, so re-pushing that tag is how a fix
+Both `linux/amd64` and `linux/arm64` must appear before the upstream PR is
+opened. The multi-arch manifest was built and inspected locally during
+verification and **was** correct on both platforms — but it was never pushed, so
+this has to be re-confirmed against the pushed tag.
+
+The runner pulls `:latest` on every run, so re-pushing that tag is how a later fix
 reaches the matrix.
 
-### 2. The `implementations_quic.json` entry
+### Step 4 — open the upstream PR with this entry
 
-Append to the object in the upstream repository. Three fields, all required, no
-optional ones:
+Append to the object in `implementations_quic.json` in
+[quic-interop/quic-interop-runner][runner]. Three fields, all required, no
+optional ones — paste-ready:
 
 ```json
   "poseidon": {
@@ -129,21 +160,67 @@ optional ones:
   }
 ```
 
-Only `image` is yours to decide — it has to match what was pushed in step 1.
+Only `image` is yours to decide — it has to match what was pushed in step 2.
 `role` must be `client`: the runner builds its client and server lists from this
 field, so a `client` entry is never asked to serve and its server-side compliance
 check is never run. `chrome` is the existing client-only precedent.
 
-The entry is already on the fork at
-`https://github.com/lodgvideon/quic-interop-runner`, branch
-`poseidon-interop-entry`, spelled `lodgvideon/poseidon-interop:latest`. Change
-that string if the image goes somewhere else.
+**The entry already exists on the fork.** Branch `poseidon-interop-entry` of
+`https://github.com/lodgvideon/quic-interop-runner` carries it, spelled
+`lodgvideon/poseidon-interop:latest`. If step 2 pushed to a different namespace,
+change that string on the fork branch before opening the PR from it.
 
-## Observed locally
+## Verification runs
 
-Against `quic-go` as the server, the whole non-measurement matrix, on one
-machine. Not a substitute for the public matrix, which runs against every other
-implementation, but it is what the client has actually been through.
+Two local runs, on the same WSL2 host. Neither is a substitute for the public
+matrix. Read the confound at the end of this section before quoting any number.
+
+### The three-server run — verdict PARTIAL
+
+The five supported test cases against `quic-go`, `ngtcp2` and `aioquic` as
+servers. This is the broader and more recent of the two runs.
+
+| Case | Result |
+|---|---|
+| `handshake` | pass 3/3 servers |
+| `retry` | pass 3/3 servers |
+| `http3` | pass on quic-go and ngtcp2; fail on aioquic |
+| `transfer` | **10 of 14 runs** — quic-go 4/6, ngtcp2 6/7, aioquic 0/1 |
+| `multiconnect` | pass on ngtcp2; **fail on quic-go and aioquic** |
+
+All seven declined cases recorded **UNSUPPORTED**, not FAILED — the exit-127
+contract works as intended.
+
+Three readings that the table does not carry:
+
+- The `http3` failure on aioquic is a harness artefact, not a protocol result:
+  that server booted **40 s after the client dialled**, so there was nothing to
+  talk to.
+- The `multiconnect` failures are a **10 s handshake timeout hit on 7 of 50
+  connections**. That is `handshakeTimeout` in `quic/pto.go`, our own per-
+  connection cap — so unlike the idle-timeout stalls, **this one may well be
+  ours rather than the host's.** It is the reason the verdict is PARTIAL rather
+  than pass-with-noise, and it should not be written off as environmental.
+- The multi-arch manifest (amd64 + arm64) was built and inspected in this run.
+  **Nothing was pushed to any registry.**
+
+### The confound, which is not optional reading
+
+**Every idle-timeout failure in this run shows a VM-wide backwards clock step in
+_both_ endpoints' logs** — ours and the peer's. A backwards wall clock breaks
+exactly the timers these failures are attributed to. Reliability therefore
+**cannot be settled on this WSL2 host**: the `transfer` shortfall in particular is
+unresolved between "our bug" and "the host", and re-running it here produces more
+of the same evidence rather than better evidence. It needs a machine hosting the
+runner natively.
+
+Note this does *not* cover the `multiconnect` failure above, which fails on a
+timeout of ours, on a count, rather than on an idle timer.
+
+### The earlier full-matrix sweep, against quic-go only
+
+The whole non-measurement matrix against a single server. Superseded on the five
+cases above, kept because it is the only run that exercised the wider cells.
 
 | Result | Cases |
 |---|---|
@@ -195,7 +272,12 @@ came back empty because the loop drained the stream before reading its state.
 - **`connectionmigration` cannot be declined** (see above). It came back
   UNSUPPORTED locally rather than red, but the client does not migrate, so do not
   count on that.
-- **The handshake has a hard 10 s cap** (`handshakeTimeout`, `quic/pto.go`), and
-  `handshakecorruption` hits it on the 13th of 50 connections.
-- **`transfer` stalls intermittently** — see above. This one should be settled
-  before the image is published, because it decides a dozen cells.
+- **The handshake has a hard 10 s cap** (`handshakeTimeout`, `quic/pto.go`). The
+  quic-go-only sweep hit it on the 13th of 50 `handshakecorruption` connections;
+  the three-server run hit it on 7 of 50 in `multiconnect`, against two servers
+  out of three. **This is the gap most likely to be ours**, and it is not
+  explained by the clock-step confound.
+- **`transfer` stalls intermittently** — 10 of 14 runs across three servers, 3 of
+  5 in the earlier sweep. It decides a dozen matrix cells, so it is the biggest
+  risk to a green public matrix. Unresolved between client bug and host artefact;
+  see the confound above.
