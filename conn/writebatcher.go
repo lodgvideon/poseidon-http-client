@@ -6,12 +6,13 @@ import (
 	"sync/atomic"
 )
 
-// groupCommitFlushBytes bounds a group-commit convoy: once this many bytes are
-// buffered, the next writer flushes instead of deferring, so the convoy size
-// (and any deferring writer's wait) stays bounded and flushes happen regularly
-// under sustained load. Half the write buffer, leaving headroom below the
-// bufio auto-flush boundary.
-const groupCommitFlushBytes = writeBufferSize / 2
+// The convoy byte threshold used to be `const groupCommitFlushBytes =
+// writeBufferSize / 2`, which was correct only while the write buffer was
+// itself a constant. ConnOptions.WriteBufferSize made it a per-connection
+// value, and a threshold that did not follow it would leave a 256 KiB-buffered
+// connection convoying at 8 KiB — and a small-buffered one convoying past its
+// own bufio auto-flush boundary, which is the exact hazard the threshold
+// exists to avoid. It is a field on the batcher now; see flushBytes.
 
 // writeBatcher implements the opt-in group-commit write optimization
 // (ConnOptions.GroupCommit). When enabled, a HEADERS writer that finds another
@@ -40,6 +41,12 @@ type writeBatcher struct {
 	// convoy byte-threshold check and the flush itself; nil for hand-constructed
 	// test Conns, in which case the flush is a no-op.
 	wb *bufio.Writer
+	// flushBytes bounds a convoy: once this many bytes are buffered, the next
+	// writer flushes instead of deferring, so the convoy size (and any deferring
+	// writer's wait) stays bounded and flushes happen regularly under sustained
+	// load. Half the write buffer, leaving headroom below the bufio auto-flush
+	// boundary. Immutable after construction.
+	flushBytes int
 	// cond is broadcast after each flush; its locker is the Conn's wmu.
 	cond *sync.Cond
 	// waiters counts writers queued on wmu: incremented right before wmu.Lock,
@@ -58,9 +65,10 @@ type writeBatcher struct {
 }
 
 // newWriteBatcher builds a batcher whose cond is locked by wmu and which flushes
-// wb. enabled comes from ConnOptions.GroupCommit.
-func newWriteBatcher(enabled bool, wmu *sync.Mutex, wb *bufio.Writer) *writeBatcher {
-	return &writeBatcher{enabled: enabled, wb: wb, cond: sync.NewCond(wmu)}
+// wb. enabled comes from ConnOptions.GroupCommit; flushBytes is the convoy
+// threshold, half the write buffer.
+func newWriteBatcher(enabled bool, wmu *sync.Mutex, wb *bufio.Writer, flushBytes int) *writeBatcher {
+	return &writeBatcher{enabled: enabled, wb: wb, flushBytes: flushBytes, cond: sync.NewCond(wmu)}
 }
 
 // enter increments the queued-writer count. Called right before wmu.Lock so a
@@ -95,7 +103,7 @@ func (b *writeBatcher) commit() error {
 	if !b.enabled {
 		return b.flush()
 	}
-	if b.waiters.Load() > 0 && b.wb != nil && b.wb.Buffered() < groupCommitFlushBytes {
+	if b.waiters.Load() > 0 && b.wb != nil && b.wb.Buffered() < b.flushBytes {
 		target := b.seq + 1
 		b.deferring++
 		b.cond.Wait() // atomically releases + reacquires wmu

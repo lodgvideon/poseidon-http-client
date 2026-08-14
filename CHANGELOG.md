@@ -142,6 +142,69 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   are set. `Status()` is unaffected either way — its message is copied out of
   the live block. See `docs/GRPC_GUIDE.md`.
 
+- **`conn.Conn.SendBatch` — several streams' frames in one transport write.**
+  Every send takes the connection's write lock, emits, flushes and releases, so N
+  concurrent requests on one connection cost N writes and, over TLS, N records.
+  At load-generator concurrency that write is the largest single item in the
+  profile: 44% of CPU in the measurements recorded in
+  [docs/H2_RAW_FRAMES_DESIGN.md](docs/H2_RAW_FRAMES_DESIGN.md) §7a. `SendBatch`
+  emits a `[]BatchEntry` under one hold of the lock and flushes once, so a batch
+  is one write while its bytes fit in the write buffer. Measured on the h2c
+  harness: 2.002 writes/req for `SendHeaders`+`SendData`, 1.002 for the fused
+  `SendHeadersAndData`, **0.033 for a batch of 32** — with `wirebytes/req`
+  identical to two decimal places across all three, which is the point stated as
+  an invariant. End to end through `examples/h2gen`, a batch of 32 raised
+  throughput 74% *and* lowered p50 from 962 µs to 555 µs.
+
+  It never waits. Credit for an entry's body is taken without blocking, because
+  blocking under the write lock stalls every other stream and a frame left
+  buffered while its writer waits is a deadlock against the peer's
+  WINDOW_UPDATE; an entry the windows cannot cover reports the new
+  `conn.ErrNoCredit`, having emitted its HEADERS (which are not flow-controlled)
+  and not its body, so the caller finishes it with `SendDataV`. It does not defer
+  either: it ends in the immediate flush, not the group-commit one, so #360's
+  waiting mechanism is not in the path — while still releasing any group-commit
+  writer parked behind it.
+
+  It takes requests, not frames, which is a deliberate departure from the design
+  sketch this comes from (#438 proposed `WriteFrames(ctx, []FrameChunks)` with
+  caller-built wire bytes). Caller-encoded HPACK was that design's premise and
+  its own R0 measurements refuted it — +77 bytes per request to save 1.4% of CPU
+  — while a caller-chosen stream id cannot advance `nextID` (so a later
+  `NewStream` reissues it, an RFC 9113 §5.1.1 violation) and a caller-chosen
+  frame type escapes the connection's bookkeeping (a raw RST_STREAM leaks a
+  `MAX_CONCURRENT_STREAMS` slot, a raw PING steals a real `Ping`'s ACK). The
+  measured win was coalescing all along, and coalescing needs a submission point
+  rather than caller-built bytes. §7b of the design doc records this in full.
+
+- **`conn.ConnOptions.WriteBufferSize`**, previously a 16 KiB constant. It is
+  what bounds a coalesced write: a batch is one write while it fits and splits
+  into `ceil(bytes/WriteBufferSize)` writes when it does not, so a generator
+  batching many streams per write is the caller that needs to raise it. Zero
+  keeps the old value; values outside [16393, 1 MiB] are clamped, the floor
+  being one maximum-size frame plus its header, below which the header/payload
+  coalescing the buffer exists for stops working. The group-commit convoy
+  threshold was `const groupCommitFlushBytes = writeBufferSize / 2`, evaluated at
+  compile time; it now follows the option, since a fixed 8 KiB threshold against
+  a 256 KiB buffer — or against a small one — is the exact hazard the threshold
+  exists to avoid.
+
+- **`examples/h2gen`**, a framer-shaped load generator built directly on `conn`.
+  It exists as the acceptance test for the seam set rather than as a tool: N
+  workers per connection hand requests to one sender goroutine that coalesces
+  them into a single `SendBatch`, which is ozontech/framer's architecture minus
+  the parts poseidon's own measurements refuted. `-batch 1` turns the coalescing
+  off and is the control; it prints writes/req either way.
+
+- **`conn/bench_loadgen_test.go`**, the load-generator-shaped benchmark harness
+  the numbers above come from: h2c, one connection, N concurrent streams,
+  response drained and discarded, against a zero-allocation `frame.Framer` peer.
+  The existing `conn` benchmarks measure a TLS round trip against an in-process
+  `net/http2` server, which charges the client's `B/op` with every allocation the
+  server makes. `BenchmarkLoadGen_Fused_*` also pins the fused one-shot send at
+  1.002 writes/req, which nothing did before — every previous harness used the
+  split send.
+
 ### Changed (breaking)
 
 - **`conn.Conn.NewStream` now returns a `*conn.GoAwayError` after a peer GOAWAY,
@@ -160,6 +223,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   switch it to `errors.Is`. Use `errors.As` to read the code.
 
 ### Fixed
+
+- **`Shutdown` armed a 200 ms write deadline on the transport and never cleared
+  it, so every send in the graceful drain failed with `i/o timeout`.**
+  `writeGoAwayBestEffort` bounds its own write with `closeGoAwayDeadline` so an
+  unresponsive peer cannot wedge a teardown, exactly as its sibling
+  `writeRSTStreamBestEffort` does — but the sibling clears the deadline again
+  inside the same lock hold and this one did not. Under `Close` that was
+  invisible: the transport dies immediately afterwards. Under `Shutdown` it was
+  the opposite of the contract, whose whole promise is that the connection stays
+  alive for `gracefulTimeout` so in-flight streams can finish; every one of those
+  writes inherited a deadline 200 ms after the GOAWAY, so any drain worth asking
+  for failed the very sends it existed to permit. Pinned by
+  `TestShutdown_DoesNotStrandAWriteDeadline`, which waits four times the deadline
+  before writing and fails on the pre-fix code.
 
 - **An HTTP/1.1 request that timed out did not fail with
   `context.DeadlineExceeded`, so the retry layer replayed it.** `Request.Timeout`

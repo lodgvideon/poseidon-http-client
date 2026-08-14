@@ -166,6 +166,28 @@ type ConnOptions struct {
 	// buffers and drops rather than waiting; anything hand-rolled has to do
 	// something equivalent.
 	Tracer trace.Tracer
+
+	// WriteBufferSize is the size of the buffered writer wrapping the transport
+	// on the send path. Zero means 16 KiB, which is the default max frame size
+	// and the value this was a constant at.
+	//
+	// It is what bounds a coalesced write. Every frame-writing method fills this
+	// buffer under the write lock and flushes once before releasing it, so a
+	// send whose frames fit here costs one transport write — and one TLS record
+	// — no matter how many frames it emitted. SendBatch is the API that makes
+	// that reachable across streams: a batch of N requests is one write while
+	// its bytes fit, and splits into ceil(bytes/WriteBufferSize) writes when
+	// they do not. A load generator batching many streams per write is the
+	// caller that needs to raise this; nothing else does.
+	//
+	// It also sets the group-commit convoy threshold (half this value), so
+	// raising it lets GroupCommit convoys grow in proportion.
+	//
+	// Values below 16393 (one maximum-size frame plus its header) are raised to
+	// it, and values above 1 MiB are lowered to it. Below the floor the
+	// header/payload coalescing this buffer exists for stops working and every
+	// frame costs two writes again.
+	WriteBufferSize int
 }
 
 func (o ConnOptions) defaulted() ConnOptions {
@@ -175,6 +197,14 @@ func (o ConnOptions) defaulted() ConnOptions {
 	o.Settings = o.Settings.defaulted()
 	if o.StreamEventBuffer <= 0 {
 		o.StreamEventBuffer = 8
+	}
+	switch {
+	case o.WriteBufferSize <= 0:
+		o.WriteBufferSize = defaultWriteBufferSize
+	case o.WriteBufferSize < minWriteBufferSize:
+		o.WriteBufferSize = minWriteBufferSize
+	case o.WriteBufferSize > maxWriteBufferSize:
+		o.WriteBufferSize = maxWriteBufferSize
 	}
 	return o
 }

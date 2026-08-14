@@ -37,8 +37,8 @@ import (
 func gcDeferFixture(t *testing.T) (wmu *sync.Mutex, b *writeBatcher, wb *bufio.Writer, parked <-chan struct{}, commitErr *error, release func()) {
 	t.Helper()
 	wmu = &sync.Mutex{}
-	wb = bufio.NewWriterSize(&countingSink{}, writeBufferSize)
-	b = newWriteBatcher(true, wmu, wb)
+	wb = bufio.NewWriterSize(&countingSink{}, defaultWriteBufferSize)
+	b = newWriteBatcher(true, wmu, wb, defaultWriteBufferSize/2)
 
 	// A queued writer is what makes commit defer rather than flush. Simulating
 	// it with enter() keeps the test deterministic: a real second goroutine
@@ -89,12 +89,12 @@ func gcDeferFixture(t *testing.T) (wmu *sync.Mutex, b *writeBatcher, wb *bufio.W
 // cannot tell whether writeBDPPing calls flushNow or flushWrite.
 func connDeferFixture(t *testing.T) (c *Conn, parked <-chan struct{}, release func()) {
 	t.Helper()
-	wb := bufio.NewWriterSize(&countingSink{}, writeBufferSize)
+	wb := bufio.NewWriterSize(&countingSink{}, defaultWriteBufferSize)
 	c = &Conn{
 		fr:      frame.NewFramer(wb, bytes.NewReader(nil)),
 		streams: map[uint32]*Stream{},
 	}
-	c.wbatch = newWriteBatcher(true, &c.wmu, wb)
+	c.wbatch = newWriteBatcher(true, &c.wmu, wb, defaultWriteBufferSize/2)
 	c.wbatch.enter() // a queued writer, so the next commit defers
 
 	done := make(chan struct{})
@@ -251,8 +251,8 @@ func TestFlushNow_PlainFlushLeavesWriterParked(t *testing.T) {
 // remain exactly a flush.
 func TestFlushNow_DisabledBatcherStillFlushes(t *testing.T) {
 	sink := &countingSink{}
-	wb := bufio.NewWriterSize(sink, writeBufferSize)
-	b := newWriteBatcher(false, &sync.Mutex{}, wb)
+	wb := bufio.NewWriterSize(sink, defaultWriteBufferSize)
+	b := newWriteBatcher(false, &sync.Mutex{}, wb, defaultWriteBufferSize/2)
 
 	if _, err := wb.WriteString("WINDOW_UPDATE"); err != nil {
 		t.Fatalf("Write: %v", err)
