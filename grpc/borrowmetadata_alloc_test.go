@@ -104,8 +104,8 @@ func TestBorrowMetadata_AllocsPerCall(t *testing.T) {
 	}
 }
 
-// TestBorrowMetadata_ReleaseParksTheCapacity covers the half of "the arena is
-// reused" that the gate above cannot see on its own.
+// TestBorrowMetadata_ReleaseParksCapacitySoTheNextRPCDoesNotAllocate covers the
+// half of "the arena is reused" that the gate above cannot see on its own.
 //
 // The gate catches the acquire side: nilling the arena there makes every RPC
 // regrow it, and the count goes straight back to the heap copy's. The release
@@ -118,7 +118,14 @@ func TestBorrowMetadata_AllocsPerCall(t *testing.T) {
 //
 // It reads the streamBufs struct through the pointer this test kept, so it never
 // depends on sync.Pool handing the same one back.
-func TestBorrowMetadata_ReleaseParksTheCapacity(t *testing.T) {
+//
+// The name is long because it has to carry "DoesNotAllocate": ci.yml runs the
+// !race gates by name, and a test whose name matches no alternative in that
+// pattern compiles, passes locally and never executes in CI. That comment
+// records the trap catching the repo three times already; matching the whole
+// BorrowMetadata family in the pattern would be the durable fix and wants a
+// commit with workflow scope.
+func TestBorrowMetadata_ReleaseParksCapacitySoTheNextRPCDoesNotAllocate(t *testing.T) {
 	s := &Stream{borrowMD: true}
 	s.acquireBufs()
 	b := s.bufs
