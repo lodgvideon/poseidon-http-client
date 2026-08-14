@@ -186,13 +186,13 @@ var flowControlModes = []struct {
 // is one flag short of true, and the only thing holding it false is that a
 // RESET_STREAM sets finalKnown but NOT fin. OnResetStream drops a reset outright
 // when complete() is true — RFC 9000 §3.2 allows that: "It is possible that all
-// stream data has already been received when a RESET_STREAM is received (that
-// is, in the 'Data Recvd' state) ... An implementation is free to manage this
-// situation as it chooses." So a reset that also set fin would send the second,
-// contradicting RESET_STREAM straight down that early return and SWALLOW the
-// §4.5 FINAL_SIZE_ERROR — the very error the rule exists to raise, lost through
-// a different path. NoDataBefore cannot express that: the contiguous prefix is
-// zero there, so complete() stays false whatever fin holds.
+// stream data has already been received when a RESET_STREAM is received ... An
+// implementation is free to manage this situation as it chooses." The elided
+// parenthetical puts that case in the Data Recvd state. So a reset that also set
+// fin would send the second, contradicting RESET_STREAM straight down that early
+// return and SWALLOW the §4.5 FINAL_SIZE_ERROR — the very error the rule exists
+// to raise, lost through a different path. NoDataBefore cannot express that: the
+// contiguous prefix is zero there, so complete() stays false whatever fin holds.
 var resetPrefixModes = []struct {
 	name   string
 	prefix uint64 // bytes received at offset 0, without FIN, before the reset
