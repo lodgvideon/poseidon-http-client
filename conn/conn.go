@@ -279,6 +279,10 @@ func NewClientConn(ctx context.Context, transport net.Conn, opts ConnOptions) (*
 	c.goAwaySentLast.Store(goAwayNoneSent)
 	c.fcOutCond = sync.NewCond(&c.fcOutMu)
 	c.wbatch = newWriteBatcher(opts.GroupCommit, &c.wmu, wb)
+	// Installed before handshakeSettings so the preface SETTINGS exchange — the
+	// first thing that goes wrong when a peer is not the peer you think it is —
+	// is in the trace like every other frame.
+	c.fr.SetTracer(opts.Tracer)
 	// Sync Framer read limit to our advertised MaxFrameSize. Default Framer
 	// cap is 16384; peers honouring our SETTINGS may send frames up to the
 	// advertised value, which would be rejected as ErrFrameTooLarge otherwise.

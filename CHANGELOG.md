@@ -7,6 +7,67 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **A debug-logging mode: every HTTP/2 frame, both directions, at runtime.**
+  There was no way to watch what the client was doing on the wire. A bug report
+  could carry a description of the symptom and nothing else, and the stack was
+  opaque by construction at three levels — `client.Hooks` stops at the request,
+  `conn.ConnOptions` had no callback field at all, and exactly one `String()`
+  existed across `frame`, `hpack`, `conn`, `http1`, `http3`, `quic` and `qpack`,
+  so every wire enum was a bare integer. For HTTP/2 the answer was tcpdump plus
+  a way to decrypt TLS. (#610)
+
+  - `frame.Tracer` is the seam, installed with `Framer.SetTracer` and reached
+    from `conn.ConnOptions.Tracer`, `client.ClientOptions.Tracer` or
+    `client.WithTracer`. It sees both directions, including the handshake
+    SETTINGS exchange, and including the frames no `Handler` ever sees: unknown
+    extension types that RFC 7540 §5.5 obliges the codec to drop, and the frame
+    that trips a §6.10 field-block-continuity teardown.
+  - `frame.FrameInfo` is a value struct — header plus the decoded scalar of
+    whichever frame type carries one (RST_STREAM and GOAWAY codes, GOAWAY's
+    last-stream-id, WINDOW_UPDATE increments, PUSH_PROMISE's promised id, PING
+    payload, SETTINGS parameters) — so a consumer that wants qlog or JSON writes
+    its own tracer rather than parsing text.
+  - The new `trace` package holds the human-facing half: `trace.New` writes one
+    line per frame to an `io.Writer`, and `trace.FromEnv` builds one from
+    `POSEIDON_DEBUG=frames`. An environment variable rather than a build tag,
+    because `-tags poseidondebug` cannot make a binary somebody already shipped
+    loud. `streams` and `flow` parse and are documented as emitting nothing yet;
+    an unrecognised category is an error, not a silent no-op.
+  - **Zero cost when off, and measured when on.** A nil `Tracer` is one nil
+    compare per frame — the pre-existing `frame` benchmarks are unchanged. The
+    event structs live on the `Framer` and are passed by pointer, so a tracer
+    that is installed still allocates nothing: `BenchmarkFramer_*_Traced` puts
+    that on the CI bench-gate, and `TestTextTracer_DoesNotAllocatePerFrame`
+    (added to the allocation-gate step in `ci.yml`) holds the built-in tracer to
+    the same standard.
+  - **Header values and payloads are off by default.** `authorization` and
+    `cookie` live in the field block and a debug log is the thing people paste
+    into a public issue. `FrameInfo.Payload` is populated on receive only, the
+    text tracer never renders it unless asked, and `POSEIDON_DEBUG=all` does
+    *not* turn it on — `payload` has to be typed out.
+  - HTTP/1.1 and HTTP/3 accept the option and ignore it; those seams are staged
+    separately, and the field is documented as such rather than rejected, so the
+    same configuration starts working when they land.
+
+- **The HTTP/2, HTTP/3 and QUIC wire vocabularies now name themselves.**
+  `String()` on `frame.FrameType`, `frame.Flags` (plus `StringFor`/`AppendFor`,
+  which take the frame type — 0x1 is END_STREAM on DATA and ACK on SETTINGS),
+  `frame.ErrCode`, `frame.SettingID` and `frame.FrameHeader`; and
+  `http3.FrameTypeName`, `http3.SettingName`, `http3.ErrorCodeName`,
+  `quic.FrameTypeName` for the stacks whose constants are bare `uint64`.
+  Unknown values render as `NAME(0x…)` rather than being swallowed — an
+  extension frame type or a GREASE setting is a thing you want to see.
+
+  This changes error message text for free, which is the point: `conn.ConnError`,
+  `conn.StreamError`, `conn.GoAwayError` and `client.StreamResetError` all format
+  their code with `%v`, so they now read `code=FLOW_CONTROL_ERROR` instead of
+  `code=3`. Nothing in the repo asserts on those strings, but a downstream caller
+  matching on the numeral will need `%d` or an explicit conversion. The same
+  applies to `%x` and `%q`, which `fmt` also routes through `Stringer`: `%#x` on
+  a `frame.SettingID` now hex-encodes its name, so convert to `uint16` first.
+
 ### Changed (breaking)
 
 - **`conn.Conn.NewStream` now returns a `*conn.GoAwayError` after a peer GOAWAY,

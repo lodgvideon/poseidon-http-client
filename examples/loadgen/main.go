@@ -20,6 +20,16 @@
 //
 // TLS certificates are verified by default; -insecure turns that off, which the
 // self-signed servers under test/integration need.
+//
+// Set POSEIDON_DEBUG to watch the wire. It is read at startup and needs no
+// rebuild, which is the point — a run that goes wrong in an environment you did
+// not build is the case this exists for:
+//
+//	POSEIDON_DEBUG=frames go run ./examples/loadgen -url … 2>frames.log
+//
+// Every HTTP/2 frame in both directions lands on stderr, one line each. It
+// costs throughput; at a few thousand RPS it is fine, at a hundred thousand it
+// is the measurement. See the trace package for the category list.
 package main
 
 import (
@@ -28,12 +38,15 @@ import (
 	"flag"
 	"log"
 	"net/url"
+	"os"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	"github.com/lodgvideon/poseidon-http-client/client"
 	"github.com/lodgvideon/poseidon-http-client/conn"
+	"github.com/lodgvideon/poseidon-http-client/trace"
 )
 
 func main() {
@@ -50,6 +63,28 @@ func main() {
 	flag.Parse()
 	if *transport != "h2" && *transport != "h3" {
 		log.Fatalf("loadgen: -transport must be h2 or h3, got %q", *transport)
+	}
+
+	// POSEIDON_DEBUG makes an already-built binary loud without a rebuild — see
+	// the trace package. Frames go to stderr so the summary on stdout stays
+	// pipeable.
+	tracer, err := trace.FromEnv(os.Stderr)
+	if err != nil {
+		log.Fatalf("loadgen: %v", err)
+	}
+	defer func() { _ = tracer.Close() }()
+	if tracer != nil {
+		log.Printf("loadgen: frame tracing on (%s=%s) — expect this to cost throughput",
+			trace.EnvVar, os.Getenv(trace.EnvVar))
+	}
+	// Categories the parser accepts but nothing yet emits. Saying so beats
+	// letting the user conclude the build is broken when `streams` prints
+	// nothing.
+	if spec, perr := trace.ParseSpec(os.Getenv(trace.EnvVar)); perr == nil {
+		if pending := spec.Pending(); len(pending) > 0 {
+			log.Printf("loadgen: %s categories not implemented yet, ignoring: %s",
+				trace.EnvVar, strings.Join(pending, ", "))
+		}
 	}
 
 	u, err := url.Parse(*target)
@@ -104,11 +139,16 @@ func main() {
 			TLSConfig:          tlsCfg,
 			Hooks:              hooks,
 			RateLimitPerSecond: *rps,
+			// Carried even though the HTTP/3 transports do not honour it yet
+			// (#610 stages the QUIC seam separately), so that the day they do,
+			// this arm needs no change.
+			Tracer: tracer.Tracer(),
 		})
 	} else {
 		c, err = client.NewPoolClient(addr, dialer, pool,
 			client.WithRateLimit(*rps, 0),
 			client.WithHooks(hooks),
+			client.WithTracer(tracer.Tracer()),
 		)
 	}
 	if err != nil {

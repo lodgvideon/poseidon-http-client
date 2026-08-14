@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/lodgvideon/poseidon-http-client/conn"
+	"github.com/lodgvideon/poseidon-http-client/frame"
 )
 
 // Focused constructors. ClientOptions is a flat struct with an implicit
@@ -21,6 +22,12 @@ type Option func(*ClientOptions)
 
 // WithHooks sets lifecycle callbacks (replaceable later via Client.SetHooks).
 func WithHooks(h *Hooks) Option { return func(o *ClientOptions) { o.Hooks = h } }
+
+// WithTracer installs a wire-level frame tracer on every HTTP/2 connection the
+// client dials — see ClientOptions.Tracer for what it reaches and what it does
+// not, and frame.Tracer for the contract it must keep. trace.New is the
+// built-in text implementation; trace.FromEnv builds one from POSEIDON_DEBUG.
+func WithTracer(t frame.Tracer) Option { return func(o *ClientOptions) { o.Tracer = t } }
 
 // WithPushHandler enables server push and routes PUSH_PROMISE responses to h.
 func WithPushHandler(h PushHandler) Option { return func(o *ClientOptions) { o.PushHandler = h } }

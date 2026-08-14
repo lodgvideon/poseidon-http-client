@@ -141,7 +141,7 @@ Available options: `WithHooks`, `WithPushHandler`, `WithDefaultScheme`, `WithRat
 ```go
 type ClientOptions struct {
     Addr                 string             // "host:port"; required except for TransportManaged
-    ConnOpts             conn.ConnOptions   // forwarded verbatim to conn.Dial; ConnOpts.Dialer REQUIRED
+    ConnOpts             conn.ConnOptions   // forwarded to conn.Dial by the four HTTP/2 transports; ConnOpts.Dialer REQUIRED (H1 uses only .Dialer; H3 ignores it)
     DialBackoff          time.Duration      // single-conn: suppress redial within this window after a failed dial; 0 = immediate retry
     Transport            client.TransportKind // strategy; zero value = TransportSingleConn
     Pool                 *client.PoolOptions  // required iff Transport==TransportPool; MUST be nil otherwise
@@ -149,6 +149,7 @@ type ClientOptions struct {
     Selector             client.Selector      // managed only; nil → RoundRobin()
     DrainMode            client.DrainMode     // managed only; zero value = DrainGraceful
     Hooks                *client.Hooks        // optional lifecycle callbacks; nil = no hooks; replaceable via Client.SetHooks
+    Tracer               frame.Tracer         // optional per-frame wire tracer; nil = off; HTTP/2 transports only (§10)
     PushHandler          client.PushHandler   // server-push callback; non-nil auto-sets ConnOpts.EnablePush=true
     DefaultScheme        string             // :scheme when Request.Scheme empty; "" → "https"; set "http" for H2C
     RateLimitPerSecond   float64            // token-bucket QPS cap; 0 = disabled
@@ -1633,9 +1634,10 @@ to 100 streams, pre-warmed before the burst, with a single reused `Request` and
 
 ## Observability & Advanced Protocol
 
-This section covers the client's instrumentation surface (Hooks and Metrics),
-HTTP/2 server push, request prioritization, extended CONNECT (RFC 8441),
-request trailers, response-decompression control, and the typed error model.
+This section covers the client's instrumentation surface (Hooks, Metrics and
+frame tracing), HTTP/2 server push, request prioritization, extended CONNECT
+(RFC 8441), request trailers, response-decompression control, and the typed
+error model.
 Every symbol referenced below lives in package
 `github.com/lodgvideon/poseidon-http-client/client`; HTTP/2 wire types such as
 `HeaderField`, `ErrCode`, and the per-frame `Priority` come from
@@ -2302,6 +2304,116 @@ if err == nil && ev.Type == client.EventReset {
 	fmt.Printf("peer reset stream: %v\n", ev.ResetCode) // conn.ErrCode
 }
 ```
+
+### 10. Frame tracing (`ClientOptions.Tracer`, `POSEIDON_DEBUG`)
+
+Hooks and Metrics describe *requests*. `Tracer` is the layer underneath: every
+HTTP/2 frame the client reads or writes, in both directions, including the
+SETTINGS exchange of the handshake. It is what answers "what did the peer
+actually send, and when" without tcpdump and a TLS key log.
+
+```go
+tracer := trace.New(os.Stderr)          // .../trace
+defer tracer.Close()                    // REQUIRED — see below
+
+c, err := client.NewPoolClient(addr, dialer, pool, client.WithTracer(tracer))
+```
+
+Output is one line per frame:
+
+```
+   0.000412 -> SETTINGS stream=0 len=18 [SETTINGS_ENABLE_PUSH=0 SETTINGS_INITIAL_WINDOW_SIZE=65535]
+   0.001880 <- SETTINGS stream=0 len=24 [SETTINGS_MAX_CONCURRENT_STREAMS=250]
+   0.002233 -> HEADERS stream=1 len=54 flags=END_STREAM|END_HEADERS
+   0.019004 <- HEADERS stream=1 len=91 flags=END_HEADERS
+   0.019055 <- DATA stream=1 len=1024
+   0.019102 -> WINDOW_UPDATE stream=0 len=4 inc=32768
+   0.031200 <- GOAWAY stream=0 len=8 last=1 code=NO_ERROR
+```
+
+The leading column is seconds since the tracer was created, not wall clock:
+the question a frame log answers is how long *after* the request the peer did
+something.
+
+#### Turning it on without a rebuild
+
+`trace.FromEnv` reads `POSEIDON_DEBUG`, so a binary that is already deployed can
+be made loud. `examples/loadgen` wires it up; copy the four lines:
+
+```go
+tracer, err := trace.FromEnv(os.Stderr)   // nil, nil when the variable is unset
+if err != nil {
+	return err
+}
+defer tracer.Close()                      // nil-safe
+opts.Tracer = tracer.Tracer()             // nil-safe: a true nil interface when off
+```
+
+Use `tracer.Tracer()`, not `tracer`, on that last line. A nil `*TextTracer`
+assigned straight into a `frame.Tracer` field is a non-nil interface holding a
+nil pointer, which passes every emit site's nil check — tracing would be "on",
+calling into a no-op, on a build that asked for none.
+
+`POSEIDON_DEBUG` is a comma-separated category list:
+
+| Value | Effect |
+|---|---|
+| `frames` (or `frame`, `1`, `true`, `on`) | Per-frame tracing. The only category with a seam behind it today. |
+| `streams` | **Accepted, emits nothing yet.** The stream-lifecycle seam lives in `conn` and is staged separately. |
+| `flow` | **Accepted, emits nothing yet.** WINDOW_UPDATE frames are already visible under `frames`; what is missing is the running window balance. |
+| `all` | `frames,streams,flow`. Deliberately **not** payload. |
+| `payload`, `payload=N` | `frames`, plus N bytes (default 64) of each received payload as hex. See the warning below. |
+
+An unrecognised token is an **error**, not a silent no-op — a typo in a debug
+switch that turns nothing on is the worst failure this feature has. Call
+`trace.ParseSpec` and report `Spec.Pending()` if you want to tell your user that
+`streams` and `flow` parsed but did nothing.
+
+#### Three things to know before you turn it on
+
+**It does not cover HTTP/1.1 or HTTP/3.** `ClientOptions.Tracer` reaches
+`TransportSingleConn`, `TransportPool`, `TransportManaged` and the HTTP/2 half
+of `TransportALPN` — every transport that dials a `*conn.Conn`. The HTTP/1.1 and
+HTTP/3 transports accept the field and ignore it. That is not an error, so the
+same config keeps working when those seams land, but today it produces no
+output.
+
+**Payloads are off by default because they contain secrets.** A HEADERS payload
+is an HPACK-coded field block — `authorization` and `cookie` are in there — and
+a DATA payload is the body. Nothing from either reaches the log unless you write
+`payload` explicitly, and a debug log is the thing people paste into a public
+issue. Frame *names*, stream ids, lengths, flags, error codes and SETTINGS
+values are always safe.
+
+**A slow tracer stalls the connection.** `TraceFrame` fires on the connection's
+reader goroutine and under its write lock, so whatever it does is time the
+connection is not moving bytes. The built-in tracer buffers 64 KiB and flushes
+in the background for exactly this reason, but that bounds the cost, it does not
+remove it: point it at a file or a pipe, never at a network logger. If you write
+your own, the contract in `frame.Tracer` is that it must not block, must not
+retain the `*FrameInfo` or any slice reachable from it past the call, and must
+be safe for concurrent use — one tracer serves every connection the client
+dials, from two goroutines each.
+
+`Close` is required when you construct with `trace.New`: it stops the background
+flusher (a goroutine, like `time.Ticker`) and writes the tail, which on a hang
+is the interesting part. It returns the first write error the tracer ever saw.
+
+#### Reading the wire without a tracer
+
+The naming that makes the tracer readable is on the types themselves, so it
+improves error messages too. `frame.FrameType`, `frame.Flags`, `frame.ErrCode`,
+`frame.SettingID` and `frame.FrameHeader` all render as their RFC 7540 registry
+names under `%v`, and `conn.ConnError` / `conn.StreamError` / `conn.GoAwayError`
+/ `client.StreamResetError` therefore now say `code=FLOW_CONTROL_ERROR` where
+they used to say `code=3`. `http3.FrameTypeName`, `http3.SettingName`,
+`http3.ErrorCodeName` and `quic.FrameTypeName` are the equivalents for the
+HTTP/3 stack, which uses bare `uint64` constants and so takes functions rather
+than methods.
+
+One trap if you print these yourself: `fmt` routes `%x` and `%q` through
+`Stringer` just as it does `%v`, so `%#x` on a `frame.SettingID` now hex-encodes
+its *name*. Convert first — `%#x` with `uint16(id)`.
 
 ## Required-call contracts
 

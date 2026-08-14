@@ -48,6 +48,12 @@
 // wakes and again before each frame reaches the wire, because that park can
 // outlast the stream it was authorised for.
 //
+// ConnOptions.Tracer installs a frame.Tracer on the connection's Framer before
+// the handshake, so every frame the connection reads or writes — the preface
+// SETTINGS exchange included — is observable. It is the layer below
+// client.Hooks: hooks describe requests, this describes the wire. nil, the
+// default, costs one nil compare per frame.
+//
 // For a higher-level request/response API, see the client package
 // (Phase C.1), which builds Do and DoStream on top of *Conn.
 package conn

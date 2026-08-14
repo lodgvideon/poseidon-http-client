@@ -38,7 +38,20 @@ type WriteHeadersParams struct {
 }
 
 // Framer reads and writes HTTP/2 frames over an io.Reader / io.Writer.
-// NOT goroutine-safe.
+//
+// NOT goroutine-safe, with one exception that a caller may rely on: the read
+// half and the write half touch disjoint state, so ONE goroutine in ReadFrame
+// may run concurrently with ONE goroutine in a Write method. Two readers, or
+// two writers, are a data race.
+//
+// That is not a new liberty, it is the arrangement conn has always used — its
+// reader goroutine calls ReadFrame continuously while application goroutines
+// write under the connection's write lock — and it was documented nowhere,
+// which made every scratch buffer added here a coin flip. Keeping it true is a
+// constraint on this file: a field reached from ReadFrame and its dispatch
+// helpers must not be reached from a Write method, and vice versa. The one
+// field both sides read is maxFrameSize, which SetMaxFrameSize is expected to
+// set before either goroutine starts.
 type Framer struct {
 	w io.Writer
 	r io.Reader
@@ -54,6 +67,22 @@ type Framer struct {
 	// so that escape analysis does not promote it to the heap when
 	// io.Writer.Write is called with a sub-slice.
 	writeBuf [256]byte
+
+	// tracer, when non-nil, observes every frame in both directions (#610).
+	// traceIn and traceOut are the reusable event structs handed to it — one per
+	// direction, because conn drives ReadFrame from its reader goroutine while
+	// another goroutine writes under the connection's write lock, so a single
+	// shared scratch would race. Reusing them is what keeps tracing free of
+	// allocation: an event built on the stack and passed to an interface method
+	// escapes, and these are already part of the heap-resident Framer.
+	//
+	// traceOut doubles as the staging area for decoded send-side detail — the
+	// error code of an outbound RST_STREAM and so on — which the Write method
+	// knows and the single emit site in writeHeader does not. emitSend clears it
+	// after every frame.
+	tracer   Tracer
+	traceIn  FrameInfo
+	traceOut FrameInfo
 
 	// expectContinuation tracks the RFC 9113 §6.10 field-block-continuity
 	// invariant on the READ side: a HEADERS or PUSH_PROMISE frame without
@@ -141,7 +170,13 @@ func (f *Framer) WriteClientPreface() error {
 	return err
 }
 
+// writeHeader emits the 9-byte prefix, and is the one funnel every frame this
+// Framer writes passes through — bar the WriteHeaders fast path, which coalesces
+// the prefix into its own scratch and therefore emits its own trace event.
 func (f *Framer) writeHeader(h FrameHeader) error {
+	if f.tracer != nil {
+		f.emitSend(h)
+	}
 	WriteFrameHeader(f.hdrBuf[:], h)
 	_, err := f.w.Write(f.hdrBuf[:])
 	return err
@@ -149,6 +184,16 @@ func (f *Framer) writeHeader(h FrameHeader) error {
 
 func (f *Framer) writeFrame(h FrameHeader, payload []byte) error {
 	if h.Length > f.maxFrameSize {
+		// The frame is not written, so no event fires — and the detail the Write
+		// method staged for that event must not be left behind for the NEXT
+		// frame to claim. Every other staging site does its own size check first;
+		// this is the one rejection that can happen after staging, reachable when
+		// a caller has driven MaxFrameSize below the RFC's 16384 floor (which
+		// SetMaxFrameSize permits) so that even a 4-byte control frame is
+		// oversized.
+		if f.tracer != nil {
+			f.traceOut.clearDetail()
+		}
 		return ErrFrameTooLarge
 	}
 	if err := f.writeHeader(h); err != nil {
@@ -371,6 +416,12 @@ func (f *Framer) WriteHeaders(p WriteHeadersParams) error {
 	// Fast path: no padding, no priority, header+payload fit in f.writeBuf.
 	if p.PadLength == 0 && p.Priority == nil && 9+totalLen <= uint32(len(f.writeBuf)) {
 		h := FrameHeader{Length: totalLen, Type: FrameHeaders, Flags: flags, StreamID: p.StreamID}
+		// The one write path that does not go through writeHeader, so it carries
+		// its own emit. Without it the most common frame the client sends would
+		// be the one frame missing from every trace.
+		if f.tracer != nil {
+			f.emitSend(h)
+		}
 		WriteFrameHeader(f.hdrBuf[:], h)
 		copy(f.writeBuf[:9], f.hdrBuf[:9])
 		copy(f.writeBuf[9:9+len(p.BlockFragment)], p.BlockFragment)
@@ -460,6 +511,9 @@ func (f *Framer) WriteRSTStream(streamID uint32, code ErrCode) error {
 	if streamID == 0 {
 		return ErrInvalidStreamID
 	}
+	if f.tracer != nil {
+		f.traceOut.ErrCode = code
+	}
 	f.smallBuf[0] = byte(code >> 24)
 	f.smallBuf[1] = byte(code >> 16)
 	f.smallBuf[2] = byte(code >> 8)
@@ -474,6 +528,9 @@ func (f *Framer) WriteRSTStream(streamID uint32, code ErrCode) error {
 func (f *Framer) WriteSettings(s SettingsParams) error {
 	if s.N > maxSettingsPairs {
 		return ErrSettingsLength
+	}
+	if f.tracer != nil {
+		f.traceOut.Settings = s
 	}
 	// Sized from the same two constants the bound above uses, so the array cannot
 	// be outgrown by a larger Pairs without the compiler resizing it too.
@@ -517,6 +574,9 @@ func (f *Framer) WritePushPromise(streamID, promisedID uint32, blockFragment []b
 	if totalLen > f.maxFrameSize {
 		return ErrFrameTooLarge
 	}
+	if f.tracer != nil {
+		f.traceOut.PromisedID = promisedID & 0x7fffffff
+	}
 	if err := f.writeHeader(FrameHeader{Length: totalLen, Type: FramePushPromise, Flags: flags, StreamID: streamID}); err != nil {
 		return err
 	}
@@ -555,6 +615,9 @@ func (f *Framer) WritePing(ack bool, data [8]byte) error {
 	// WriteWindowUpdate builds its payload. Safe under the single-writer
 	// contract wmu enforces: the Write completes before this returns.
 	copy(f.smallBuf[:8], data[:])
+	if f.tracer != nil {
+		f.traceOut.Ping = data
+	}
 	return f.writeFrame(FrameHeader{Length: 8, Type: FramePing, Flags: flags, StreamID: 0}, f.smallBuf[:8])
 }
 
@@ -565,6 +628,10 @@ func (f *Framer) WriteGoAway(lastStreamID uint32, code ErrCode, debug []byte) er
 	totalLen := uint32(8 + len(debug))
 	if totalLen > f.maxFrameSize {
 		return ErrFrameTooLarge
+	}
+	if f.tracer != nil {
+		f.traceOut.ErrCode = code
+		f.traceOut.LastStreamID = lastStreamID & 0x7fffffff
 	}
 	bufx.WriteUint31(f.smallBuf[:4], lastStreamID)
 	f.smallBuf[4] = byte(code >> 24)
@@ -633,6 +700,9 @@ func (f *Framer) WriteWindowUpdate(streamID uint32, increment uint32) error {
 	if inc == 0 {
 		return ErrZeroIncrement
 	}
+	if f.tracer != nil {
+		f.traceOut.WindowIncrement = inc
+	}
 	bufx.WriteUint31(f.smallBuf[:4], inc)
 	return f.writeFrame(FrameHeader{Length: 4, Type: FrameWindowUpdate, StreamID: streamID}, f.smallBuf[:4])
 }
@@ -674,6 +744,10 @@ func (f *Framer) ReadFrame(ctx context.Context, h Handler) (FrameHeader, error) 
 		if _, err := io.ReadFull(f.r, payload); err != nil {
 			return fh, err
 		}
+	}
+
+	if f.tracer != nil {
+		f.emitRecv(fh, payload)
 	}
 
 	// RFC 9113 §6.10: enforce field-block continuity before dispatch, so an

@@ -5,22 +5,35 @@
 Per-package statement coverage gate is **80%**, enforced by
 `scripts/coverage-gate.sh` from the `coverage` CI job.
 
+The table below is every package the gate sees, measured 2026-08-14. It used to
+list six of them — `http3`, `quic`, `qpack`, `grpc`, `header` and
+`internal/bufx` had shipped without ever being added, so a reader checking
+whether a package was covered got no answer for four of the largest. The gate
+itself was never fooled: `coverage-gate.sh` enumerates packages from `go list`
+and fails any non-`examples` one with no test files, so the omission was in the
+documentation only.
+
 | Package                 | Current | Floor |
 |-------------------------|--------:|------:|
-| `internal/bytesx`       |   96.9% |   70% |
-| `frame`                 |   92.8% |   80% |
-| `hpack`                 |   95.9% |   80% |
-| `conn`                  |   90.2% |   80% |
+| `header`                |  100.0% |   80% |
+| `internal/bytesx`       |  100.0% |   70% |
+| `hpack`                 |   97.3% |   80% |
+| `http1`                 |   97.1% |   80% |
+| `internal/bufx`         |   96.9% |   80% |
+| `frame`                 |   94.7% |   80% |
+| `grpc`                  |   93.5% |   80% |
+| `quic`                  |   90.8% |   80% |
 | `client`                |   90.1% |   80% |
-| `http1`                 |   90.2% |   80% |
+| `trace`                 |   89.9% |   80% |
+| `qpack`                 |   87.7% |   80% |
+| `http3`                 |   87.6% |   80% |
+| `conn`                  |   85.5% |   80% |
 
-All packages at or above both the ≥80% CI gate **and** the ≥90% spec
-acceptance bar. The `conn`, `client`, and `http1` packages were
-restored to ≥90% after the F.1 HTTP/1.1 fallback additions (targeted
-tests for the new transport code paths: H1.1 concurrent-dial
-cancellation, singleConn/managedPool warmup guards, pool GOAWAY close,
-rate-limiter no-Done slow path, Shutdown timer drain, hop-by-hop
-header skip).
+Every package clears the ≥80% CI gate. Four sit below the ≥90% spec acceptance
+bar — `trace`, `qpack`, `http3` and `conn` — which the bar's own scope explains
+for three of them: it was written for the Phase A/B/C packages, and the HTTP/3
+stack and the tracer arrived after it. `conn` is the one that genuinely drifted,
+from 90.2%.
 
 ## Spec target (acceptance criterion)
 

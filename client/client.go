@@ -16,6 +16,7 @@ import (
 	"unsafe"
 
 	"github.com/lodgvideon/poseidon-http-client/conn"
+	"github.com/lodgvideon/poseidon-http-client/frame"
 	"github.com/lodgvideon/poseidon-http-client/quic"
 )
 
@@ -170,6 +171,29 @@ type ClientOptions struct {
 	// fire. May be replaced at runtime via Client.SetHooks.
 	Hooks *Hooks
 
+	// Tracer, when non-nil, is handed every HTTP/2 frame the client reads or
+	// writes on every connection it dials, in both directions (#610). It is the
+	// layer below Hooks: Hooks describes requests, this describes the wire.
+	//
+	// Setting it here is a convenience that overrides ConnOpts.Tracer, so one
+	// field switches tracing on whichever transport is configured. It reaches
+	// TransportSingleConn, TransportPool, TransportManaged and the HTTP/2 half
+	// of TransportALPN — i.e. everything that dials a *conn.Conn.
+	//
+	// IT IS IGNORED BY THE HTTP/1.1 AND HTTP/3 TRANSPORTS. Those stacks do not
+	// speak HTTP/2 frames and have no seam yet; #610 stages them as separate
+	// work. A tracer set alongside them is not an error — it is a config that
+	// starts working when that lands — but it will produce no output today.
+	//
+	// ONE Tracer serves EVERY connection this client dials, and the fan-out is
+	// larger than it looks: a managed transport multiplies resolved addresses by
+	// MaxConnsPerHost, and each connection calls in from two goroutines (its
+	// reader, and whichever writer holds its write lock). Read frame.Tracer
+	// before writing one — it must not block, must not retain what it is handed,
+	// and must be safe for concurrent use. trace.New is the built-in text
+	// implementation; trace.FromEnv builds one from POSEIDON_DEBUG.
+	Tracer frame.Tracer
+
 	// PushHandler is invoked when the server sends a PUSH_PROMISE frame
 	// (RFC 7540 §8.2). When non-nil, ConnOpts.EnablePush is automatically
 	// set to true at client construction so the peer knows push is allowed.
@@ -263,6 +287,12 @@ func NewClient(opts ClientOptions) (*Client, error) {
 	}
 	if opts.PushHandler != nil {
 		opts.ConnOpts.EnablePush = true
+	}
+	// The client-wide tracer wins over the per-connection one, the same way
+	// PushHandler wins over ConnOpts.EnablePush: the outer field is the one a
+	// caller reaches for, and two knobs that disagree should not both be live.
+	if opts.Tracer != nil {
+		opts.ConnOpts.Tracer = opts.Tracer
 	}
 	if opts.ConnOpts.StreamEventBuffer <= 0 {
 		opts.ConnOpts.StreamEventBuffer = defaultStreamEventBuffer(opts.ConnOpts.Settings.MaxFrameSize)

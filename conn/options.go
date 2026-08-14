@@ -3,6 +3,7 @@ package conn
 import (
 	"time"
 
+	"github.com/lodgvideon/poseidon-http-client/frame"
 	"github.com/lodgvideon/poseidon-http-client/hpack"
 )
 
@@ -149,6 +150,20 @@ type ConnOptions struct {
 	// Values above 64 MiB are clamped, and a value below the window already in
 	// effect is ignored.
 	MaxRecvWindow uint32
+
+	// Tracer, when non-nil, is handed every HTTP/2 frame this connection reads
+	// or writes, in both directions and including the SETTINGS exchange of the
+	// handshake (#610). nil — the default — costs one nil compare per frame.
+	//
+	// It is the layer BELOW client.Hooks: hooks describe requests, this
+	// describes the wire. Read frame.Tracer before writing one — the callback
+	// fires on the reader goroutine and under the connection write lock, so a
+	// tracer that blocks stalls the connection, and nothing it is handed may be
+	// retained past the call.
+	//
+	// trace.New is the built-in text implementation, and trace.FromEnv builds
+	// one from POSEIDON_DEBUG.
+	Tracer frame.Tracer
 }
 
 func (o ConnOptions) defaulted() ConnOptions {

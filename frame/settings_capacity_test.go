@@ -49,8 +49,13 @@ func TestWriteSettings_ScratchFitsAFullTable(t *testing.T) {
 	gotID := SettingID(last[0])<<8 | SettingID(last[1])
 	gotVal := uint32(last[2])<<24 | uint32(last[3])<<16 | uint32(last[4])<<8 | uint32(last[5])
 	if gotID != wantID || gotVal != wantVal {
+		// uint16 conversions, not bare %#x on the SettingID. fmt routes x/X/q
+		// through a Stringer just as it does v/s, so once SettingID names
+		// itself, %#x on one hex-encodes the NAME — id 0x5 prints as
+		// 0x53455454494e47535f... and the diagnostic becomes unreadable at
+		// exactly the moment it is needed.
 		t.Errorf("last entry on the wire = id %#x value %d, want id %#x value %d",
-			gotID, gotVal, wantID, wantVal)
+			uint16(gotID), gotVal, uint16(wantID), wantVal)
 	}
 }
 
