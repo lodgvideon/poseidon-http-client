@@ -118,3 +118,52 @@ func TestErrServerClosedIdle_NotAfterAPartialResponse(t *testing.T) {
 		})
 	}
 }
+
+// TestErrServerClosedIdle_NotAfterAnInterimResponse is the half of that boundary
+// the truncation cases above cannot express, and it is the one the guard's
+// firstRead conjunct exists for.
+//
+// Every case above is cut mid-message, so the failing read consumed something
+// and readConsumedNothing alone rejects it. A 1xx is different: it is a COMPLETE
+// message, ReadResponse drains it and loops back for the final status line, and
+// nothing obliges the peer to send one — closing after an interim is legal. That
+// second trip round the loop meets an EOF having consumed nothing on that read,
+// so readConsumedNothing is true again and errors.Is(rerr, io.EOF) holds again.
+// Only firstRead separates it from a server that never answered at all.
+//
+// Getting that wrong is not cosmetic. ErrServerClosedIdle is the one H1 failure
+// client/retry.go replays (see builtinShouldRetry), and its licence is that no
+// part of a response ever arrived. A 100 Continue is the server saying it has
+// the request head and wants the body — the strongest evidence available on this
+// connection that it is acting on the request — so replaying it duplicates work
+// the peer has already begun.
+func TestErrServerClosedIdle_NotAfterAnInterimResponse(t *testing.T) {
+	ex, peer := exchangeOverPipe(t)
+	writeSimpleRequest(t, ex, peer)
+
+	go func() {
+		// net.Pipe's Write returns only once the reader has consumed every byte,
+		// so the close below cannot race the interim: the client has it before
+		// the socket goes away, and ReadResponse is already back at the top of
+		// the loop reading a status line that will never arrive.
+		_, _ = peer.Write([]byte("HTTP/1.1 100 Continue\r\n\r\n"))
+		_ = peer.Close()
+	}()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	_, _, err := ex.ReadResponse(ctx)
+
+	if err == nil {
+		t.Fatal("ReadResponse returned no error after the peer closed following a 1xx")
+	}
+	if errors.Is(err, ErrServerClosedIdle) {
+		t.Errorf("error is %v, want anything but ErrServerClosedIdle — the server sent "+
+			"100 Continue and only then closed, so it had the request and had begun "+
+			"answering it; classifying that as \"never responded\" is what makes the "+
+			"retry classifier replay a request the peer already acted on", err)
+	}
+	if !errors.Is(err, io.EOF) {
+		t.Errorf("error is %v; it should still wrap the underlying EOF for diagnosis", err)
+	}
+}
