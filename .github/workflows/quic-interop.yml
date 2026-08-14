@@ -1,0 +1,320 @@
+# The quic-interop-runner matrix as a quality gate.
+#
+# WHAT IT ASSERTS. Not "the matrix passed". The observed matrix is compared
+# against the partition committed in .github/interop/expected.json, cell for
+# cell, in both directions:
+#
+#   * every cell we declare supported must come back `succeeded`;
+#   * every cell we declare unsupported must come back exactly `unsupported`,
+#     which is the runner's reading of our exit code 127.
+#
+# The second half is the half a "no failures" check cannot do. The runner does
+# not count `unsupported` as a failure, so a supported case that starts exiting
+# 127 - a capability regression - passes such a check silently. In the other
+# direction, if key update or ECN is implemented and nobody removes the row from
+# the support table in test/interop/quic/main.go, we keep publishing "cannot do
+# it" about a client that can. Both are one-line edits to expected.json once the
+# code is right, and both are red until someone makes them.
+#
+# WHERE IT RUNS.
+#
+#   pull_request   short leg: two servers x handshake, transfer, retry.
+#   tags v* and    full leg: the pinned runner's whole non-measurement matrix
+#   workflow_dispatch  plus the exit-127 partition assertion.
+#
+# The three h3-interop* jobs in integration.yml are unaffected: they are fast,
+# they run on every PR, and they test the library's own HTTP/3 client against
+# real servers rather than this endpoint binary.
+#
+# IT REALLY RUNS ON A GITHUB RUNNER, AND THIS WAS MEASURED. quic-interop-runner
+# needs docker, ns-3 and privileged container networking. Upstream's own public
+# matrix (quic-interop/quic-interop-runner, .github/workflows/interop-test.yml)
+# runs on ubuntu-latest every twelve hours, and the four setup steps this file
+# copies from it - a pinned Docker engine, `modprobe ip6table_filter`, tshark
+# >= 4.5.0 and the Python requirements - are what make that work. Verified here
+# rather than assumed: on ubuntu-24.04 the job log names every case as it runs
+# ("Server: quic-go. Client: poseidon. Running test case: handshake"), tshark
+# resolves to 4.6.6 from the wireshark-dev/stable PPA, the short leg finishes in
+# 2m45s wall clock and the full leg in about 13 minutes with the two servers in
+# parallel. Nothing here is allowed to skip: every step that could no-op fails
+# loudly instead. See "SILENT-SKIP GUARDS" below.
+#
+# AGAINST FLAKINESS. Every third-party image is pinned by digest and the runner
+# itself by commit, so nobody else's release can move this gate. There is no
+# retry: a retry that hides a regression is worse than no gate.
+#
+# Stability was measured, not hoped for, and measured three times rather than
+# twice. Three independent full-matrix runs agreed on 19 of 22 cells against
+# both servers. The three that did not are all network fault injection:
+# handshakeloss and handshakecorruption - the same 50-connection multiconnect
+# case under 30% loss and under 30% corruption, each connection against the hard
+# 10s cap in quic/pto.go - and rebind-addr against quic-go. Those five
+# (cell, server) pairs are declared not-asserted in expected.json, with the
+# per-run outcomes and the root cause, and are still printed on every run. That
+# is the whole tolerance in this gate, and none of the five is a capability the
+# client claims.
+#
+# Two runs were NOT enough to see this. After two, two of those cells looked
+# stable on one server each and expected.json briefly asserted them; the third
+# run contradicted it on both servers. Collect more than two samples before
+# tightening any of them back up.
+#
+# None of the five appears in the PR leg, which was green on every clean run.
+#
+# If the PR leg ever does start to flake, the honest fix is to move it to
+# nightly, not to re-run it until it is green.
+#
+# SILENT-SKIP GUARDS, in the order a run would hit them:
+#
+#   1. tshark's version is asserted, not just installed. Too old and the
+#      trace-based checks (retry, multiplexing, the rebinds) fail for a reason
+#      that has nothing to do with this client.
+#   2. The endpoint image is built from this tree in the job. It depends on
+#      nothing published to any registry - publication is the maintainer's
+#      separate decision (#555) and is not a prerequisite for the gate.
+#   3. run.py's exit status is recorded and then ignored on purpose: it is the
+#      FAILED count, which is legitimately non-zero while expected.json declares
+#      a known failure, and it is zero when the compliance check rejected the
+#      endpoint and every pairing was skipped. The verdict comes only from the
+#      partition job.
+#   4. The result file is uploaded with if-no-files-found: error, so a run.py
+#      that died before writing it cannot pass as an empty success.
+#   5. assert_partition.py treats a null cell - what a skipped pairing writes -
+#      as a hard error, and requires the set of cells that ran to be exactly the
+#      set being asserted.
+name: quic-interop
+
+on:
+  pull_request:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  # One place for the leg decision, so the matrix job and the assertion cannot
+  # disagree about which cells were meant to run.
+  config:
+    runs-on: ubuntu-24.04
+    outputs:
+      leg: ${{ steps.leg.outputs.leg }}
+      tests: ${{ steps.leg.outputs.tests }}
+      only: ${{ steps.leg.outputs.only }}
+      timeout: ${{ steps.leg.outputs.timeout }}
+      runner_commit: ${{ steps.leg.outputs.runner_commit }}
+    steps:
+      - uses: actions/checkout@v7
+      - id: leg
+        run: |
+          EXPECTED=.github/interop/expected.json
+          echo "runner_commit=$(jq -r .runner.commit "$EXPECTED")" >> "$GITHUB_OUTPUT"
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            SHORT=$(jq -r '.short_leg_tests | join(",")' "$EXPECTED")
+            {
+              echo "leg=short"
+              echo "tests=$SHORT"
+              echo "only=$SHORT"
+              echo "timeout=30"
+            } >> "$GITHUB_OUTPUT"
+          else
+            # onlyTests is the runner's own name for "every test case, no
+            # measurements". The measurements (goodput, crosstraffic) repeat ten
+            # times each and need a second pair of iperf containers; they measure
+            # throughput rather than conformance, which is not what this gates.
+            {
+              echo "leg=full"
+              echo "tests=onlyTests"
+              echo "only="
+              echo "timeout=90"
+            } >> "$GITHUB_OUTPUT"
+          fi
+      - run: cat "$GITHUB_OUTPUT"
+
+  matrix:
+    name: "interop: ${{ matrix.server }}"
+    needs: config
+    runs-on: ubuntu-24.04
+    timeout-minutes: ${{ fromJSON(needs.config.outputs.timeout) }}
+    strategy:
+      # Both servers always run: one server being unreachable should not hide
+      # the other's verdict.
+      fail-fast: false
+      matrix:
+        # Small and stable on purpose. These two are the servers the endpoint
+        # was verified against locally (test/interop/quic/README.md); every
+        # server added here is another third party whose release can turn this
+        # gate red.
+        server: [quic-go, ngtcp2]
+    steps:
+      - uses: actions/checkout@v7
+
+      # First, because it replaces the daemon and everything pulled or built
+      # before it would be lost. The runner's compose file uses the
+      # `interface_name` network key, which needs Docker Engine >= 28.1;
+      # upstream pins the same way and notes it can go when the hosted image
+      # ships a new enough engine.
+      - uses: docker/setup-docker-action@v5
+        with:
+          version: version=v28.3.0
+
+      # The simulator's networks are dual-stack and the ipv6 cell is a real
+      # matrix cell. Without the module the compose stack fails to come up.
+      - name: Enable IPv6 for the simulator networks
+        run: sudo modprobe ip6table_filter
+
+      - name: Check out the pinned quic-interop-runner
+        uses: actions/checkout@v7
+        with:
+          repository: quic-interop/quic-interop-runner
+          ref: ${{ needs.config.outputs.runner_commit }}
+          path: runner
+
+      # Pinned by digest and then tagged back to the name the runner's compose
+      # file and our Dockerfile hardcode. Tagging rather than editing their
+      # files keeps the pin here, in one committed place, instead of in a patch
+      # that has to be rebased every time upstream moves.
+      - name: Pull the pinned simulator and endpoint base images
+        run: |
+          SIM=$(jq -r .sim_image .github/interop/expected.json)
+          BASE=$(jq -r .endpoint_base_image .github/interop/expected.json)
+          docker pull "$SIM"
+          docker tag "$SIM" martenseemann/quic-network-simulator:latest
+          docker pull "$BASE"
+          docker tag "$BASE" martenseemann/quic-network-simulator-endpoint:latest
+
+      # Built from this tree, with the classic builder rather than a buildx
+      # container, because the Dockerfile's FROM must resolve to the digest
+      # tagged above out of the local image store.
+      - name: Build the poseidon endpoint image from this tree
+        run: |
+          IMAGE=$(jq -r .client.image .github/interop/expected.json)
+          docker build -f test/interop/quic/Dockerfile -t "$IMAGE" .
+          docker image inspect "$IMAGE" --format 'built {{.Id}}'
+
+      # Two entries only: this client and the one server this job pairs it with.
+      # One server per job keeps interop.py::_postprocess_results out of the
+      # picture - it rewrites FAILED to UNSUPPORTED for a client that failed a
+      # test against every server, which would launder exactly the regression
+      # this gate exists to catch. `-n poseidon` below says the same thing
+      # explicitly rather than relying on the pair count.
+      - name: Generate implementations_quic.json
+        env:
+          SERVER: ${{ matrix.server }}
+        run: |
+          python3 - "$SERVER" <<'PY'
+          import json, sys
+
+          server = sys.argv[1]
+          e = json.load(open(".github/interop/expected.json"))
+          client = e["client"]
+          out = {
+              client["name"]: {
+                  "image": client["image"],
+                  "url": client["url"],
+                  "role": "client",
+              },
+              server: {
+                  "image": e["servers"][server]["image"],
+                  "url": e["servers"][server]["url"],
+                  "role": "server",
+              },
+          }
+          with open("runner/implementations_quic.json", "w") as f:
+              json.dump(out, f, indent=2)
+          print(json.dumps(out, indent=2))
+          PY
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+
+      # The runner decrypts the simulator's captures with pyshark, and its
+      # trace-based checks need a QUIC dissector no older than 4.5.0 - newer
+      # than Ubuntu 24.04's own tshark. The version is asserted rather than
+      # assumed: too old and cells like retry and the rebinds fail for a reason
+      # that is not this client's.
+      - name: Install tshark and assert its version
+        run: |
+          sudo add-apt-repository -y ppa:wireshark-dev/stable
+          sudo apt-get update
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends tshark
+          tshark --version | head -1
+          MIN=4.5.0
+          V=$(tshark --version | head -1 | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)
+          if [ "$(printf '%s\n%s\n' "$MIN" "$V" | sort -V | head -1)" != "$MIN" ]; then
+            echo "tshark $V is older than $MIN; the runner's trace checks would fail for the wrong reason" >&2
+            exit 1
+          fi
+
+      - name: Install the runner's Python requirements
+        working-directory: runner
+        run: |
+          python3 -m pip install -U pip
+          python3 -m pip install -r requirements.txt
+
+      # run.py's exit status is the FAILED count. It is recorded and then not
+      # acted on: expected.json legitimately declares known failures, and a run
+      # whose compliance check rejected the endpoint exits 0 having run nothing.
+      # The verdict is the partition job.
+      - name: Run the matrix (${{ needs.config.outputs.leg }} leg)
+        working-directory: runner
+        env:
+          SERVER: ${{ matrix.server }}
+          TESTS: ${{ needs.config.outputs.tests }}
+        run: |
+          set +e
+          python3 run.py \
+            --client poseidon \
+            --server "$SERVER" \
+            --test "$TESTS" \
+            --no-auto-unsupported poseidon \
+            --log-dir logs \
+            --json "$GITHUB_WORKSPACE/interop-$SERVER.json" 2>&1 | tee "$GITHUB_WORKSPACE/run-$SERVER.txt"
+          code=${PIPESTATUS[0]}
+          set -e
+          echo "run.py exited $code (informational only - see the partition job)"
+
+      # if-no-files-found: error is the guard against a run.py that died before
+      # writing anything passing as an empty success.
+      - name: Upload the observed matrix
+        uses: actions/upload-artifact@v7
+        with:
+          name: interop-result-${{ matrix.server }}
+          path: interop-${{ matrix.server }}.json
+          if-no-files-found: error
+
+      - name: Upload the runner logs
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: interop-logs-${{ matrix.server }}
+          path: |
+            runner/logs
+            run-${{ matrix.server }}.txt
+          if-no-files-found: warn
+          retention-days: 7
+
+  # The gate. Everything above only produces evidence.
+  partition:
+    name: "partition assertion (${{ needs.config.outputs.leg }})"
+    needs: [config, matrix]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: interop-result-*
+          merge-multiple: true
+      - run: ls -l interop-*.json
+      - name: Observed matrix vs the declared partition
+        run: |
+          python3 .github/interop/assert_partition.py \
+            --expected .github/interop/expected.json \
+            --only "${{ needs.config.outputs.only }}" \
+            interop-*.json
