@@ -283,6 +283,10 @@ func NewClientConn(ctx context.Context, transport net.Conn, opts ConnOptions) (*
 	// cap is 16384; peers honouring our SETTINGS may send frames up to the
 	// advertised value, which would be rejected as ErrFrameTooLarge otherwise.
 	c.fr.SetMaxFrameSize(opts.Settings.MaxFrameSize)
+	// Installed before the handshake below, so the SETTINGS exchange that opens
+	// every connection is in the log too — it is where half the flow-control
+	// questions a frame log gets asked are answered.
+	c.fr.SetTracer(opts.Tracer)
 	// Enforce our advertised SETTINGS_MAX_HEADER_LIST_SIZE on the decode path.
 	// This bounds the decompressed field list (HPACK expansion bomb defense,
 	// RFC 7540 §10.5.1); the Framer/handler byte caps only bound the compressed

@@ -89,6 +89,10 @@ HTTP/1.1 + HTTP/2 stack (A→B→C):
                      #   []byte. See docs/GRPC_GUIDE.md
   frame/             # A-layer: HTTP/2 frame codec (parser + writer + Framer)
   hpack/             # A-layer: RFC 7541 HPACK encoder/decoder
+  trace/             # RFC-neutral wire-observation vocabulary (Tracer, FrameInfo,
+                     #   TextTracer, POSEIDON_DEBUG). frame emits into it; http1
+                     #   and http3/quic seams are follow-ups (#610). Imports
+                     #   nothing but stdlib — everything else may import IT.
 header/            # RFC-neutral header vocabulary (Field, IndexingMode).
                      #   hpack.HeaderField is an ALIAS of header.Field, so no
                      #   caller broke. http1/http3 import THIS, not hpack — a
@@ -112,7 +116,7 @@ docs/                # RFC_COVERAGE.md (authoritative test-to-RFC map),
 ```
 
 Public packages: `client`, `conn`, `frame`, `grpc`, `hpack`, `http1`, `http3`,
-`quic`, `qpack`. `cmd/` does not exist — library only; the one binary is
+`quic`, `qpack`, `trace`. `cmd/` does not exist — library only; the one binary is
 `examples/loadgen`. Each HTTP/2 `Conn` owns one `*frame.Framer` + one
 `*hpack.Encoder` + one `*hpack.Decoder`, serializing writes via `wmu`.
 
@@ -171,6 +175,11 @@ section behavior.
   their own `//go:build !race` `AllocsPerRun` gates instead.)
 - `frame.NewFramer(w io.Writer, r io.Reader)` — **writer first**, then
   reader. Easy to get backwards.
+- `Framer.writeHeader(h, detail)` is the outbound trace funnel — every write
+  path goes through it EXCEPT the `WriteHeaders` fast path, which coalesces
+  header+block into one `Write` and calls `traceOut` itself. A new write method
+  that hand-rolls its header is invisible to the tracer. `detail` is the frame's
+  *logical* payload (padding excluded) or nil.
 - `Stream.id == 0` until first `SendHeaders` writes HEADERS frame
   under `wmu` (B.2.1 deferred allocation; preserves §5.1.1
   monotonic-id ordering across concurrent `NewStream` callers). Don't

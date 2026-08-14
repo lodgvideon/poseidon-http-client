@@ -4,6 +4,7 @@ import (
 	"time"
 
 	"github.com/lodgvideon/poseidon-http-client/hpack"
+	"github.com/lodgvideon/poseidon-http-client/trace"
 )
 
 // AdvertisedSettings is what we send to the peer in our SETTINGS frame.
@@ -149,6 +150,22 @@ type ConnOptions struct {
 	// Values above 64 MiB are clamped, and a value below the window already in
 	// effect is ignored.
 	MaxRecvWindow uint32
+
+	// Tracer observes every HTTP/2 frame this connection reads or writes,
+	// including the SETTINGS exchange in the handshake. nil (the default)
+	// disables it, and costs one nil check per frame — see
+	// TestFramer_Trace_AddsNoAllocations for what "costs nothing" is measured
+	// to mean.
+	//
+	// It is the seam below Hooks: client.Hooks describes requests, a Tracer
+	// describes framing. Header field values and DATA payloads are deliberately
+	// not reported; a frame log is the thing people paste into a public issue.
+	//
+	// The callback fires on the connection's reader goroutine and, outbound,
+	// while the write lock is held, so it MUST NOT block. trace.TextTracer
+	// buffers and drops rather than waiting; anything hand-rolled has to do
+	// something equivalent.
+	Tracer trace.Tracer
 }
 
 func (o ConnOptions) defaulted() ConnOptions {
