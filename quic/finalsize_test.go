@@ -177,13 +177,44 @@ var flowControlModes = []struct {
 	{"FlowControlOff", 0}, // 0 is the disabled sentinel
 }
 
-// resetStreamAt is a Conn with one open stream whose peer has just sent
-// RESET_STREAM with final size resetFirst, ready for a contradicting frame.
-func resetStreamAt(t *testing.T, connRecvMax uint64) (*Stream, *connFrameHandler) {
+// resetPrefixModes varies how much of the stream had already arrived when the
+// first RESET_STREAM fixed the final size.
+//
+// AllDataBefore is the case that pins the separation between recvStream's fin
+// and finalKnown flags. With every byte the final size names already received
+// contiguously, complete() — fin && base+len(data) == finalSize && no pending —
+// is one flag short of true, and the only thing holding it false is that a
+// RESET_STREAM sets finalKnown but NOT fin. OnResetStream drops a reset outright
+// when complete() is true — RFC 9000 §3.2 allows that: "It is possible that all
+// stream data has already been received when a RESET_STREAM is received (that
+// is, in the 'Data Recvd' state) ... An implementation is free to manage this
+// situation as it chooses." So a reset that also set fin would send the second,
+// contradicting RESET_STREAM straight down that early return and SWALLOW the
+// §4.5 FINAL_SIZE_ERROR — the very error the rule exists to raise, lost through
+// a different path. NoDataBefore cannot express that: the contiguous prefix is
+// zero there, so complete() stays false whatever fin holds.
+var resetPrefixModes = []struct {
+	name   string
+	prefix uint64 // bytes received at offset 0, without FIN, before the reset
+}{
+	{"NoDataBefore", 0},
+	{"AllDataBefore", resetFirst},
+}
+
+// resetStreamAt is a Conn with one open stream whose peer has sent prefix bytes
+// and then RESET_STREAM with final size resetFirst, ready for a contradicting
+// frame. prefix must not exceed resetFirst — a reset below the data already
+// received is a different rule, tested by ResetFinalSizeBelow.
+func resetStreamAt(t *testing.T, connRecvMax, prefix uint64) (*Stream, *connFrameHandler) {
 	t.Helper()
 	c := &Conn{peer: TransportParams{InitialMaxStreamsBidi: 1}, connRecvMax: connRecvMax}
 	s, _ := c.OpenStream()
 	h := &connFrameHandler{c: c}
+	if prefix > 0 {
+		if err := h.OnStream(s.ID(), 0, false, make([]byte, prefix)); err != nil {
+			t.Fatalf("%d bytes before the reset = %v, want nil", prefix, err)
+		}
+	}
 	if err := h.OnResetStream(s.ID(), 0, resetFirst); err != nil {
 		t.Fatalf("first RESET_STREAM (final size %d) = %v, want nil", resetFirst, err)
 	}
@@ -202,16 +233,27 @@ func resetStreamAt(t *testing.T, connRecvMax uint64) (*Stream, *connFrameHandler
 // as a floor — rejecting only a smaller second value — leaves the growing case
 // accepted, which is the direction that inflates the stream's flow-control
 // charge and lets a peer keep a supposedly finished stream alive.
+//
+// Every case also runs with the stream's whole prefix already received before
+// the reset (resetPrefixModes). That mode is what keeps the error observable at
+// all: in it, a reset that recorded the FIN flag along with the final size would
+// make the receive side look complete, and the second RESET_STREAM would be
+// dropped at OnResetStream's already-complete early return instead of raising
+// the §4.5 error. The observable asserted here is the error the connection
+// raises, not the flags behind it, so a future path that reaches the same early
+// return some other way fails here too.
 func TestConformance_RFC9000_Sec45_ResetFinalSizeIsFixed(t *testing.T) {
 	for _, fc := range flowControlModes {
-		for _, tc := range finalSizeChangeCases {
-			t.Run(fc.name+"/"+tc.name, func(t *testing.T) {
-				s, h := resetStreamAt(t, fc.connRecvMax)
-				if err := h.OnResetStream(s.ID(), 0, tc.second); err != tc.want {
-					t.Fatalf("second RESET_STREAM final size %d after %d = %v, want %v",
-						tc.second, resetFirst, err, tc.want)
-				}
-			})
+		for _, pm := range resetPrefixModes {
+			for _, tc := range finalSizeChangeCases {
+				t.Run(fc.name+"/"+pm.name+"/"+tc.name, func(t *testing.T) {
+					s, h := resetStreamAt(t, fc.connRecvMax, pm.prefix)
+					if err := h.OnResetStream(s.ID(), 0, tc.second); err != tc.want {
+						t.Fatalf("second RESET_STREAM final size %d after %d (%d bytes received first) = %v, want %v",
+							tc.second, resetFirst, pm.prefix, err, tc.want)
+					}
+				})
+			}
 		}
 	}
 }
@@ -230,7 +272,7 @@ func TestConformance_RFC9000_Sec45_FinAfterResetFinalSize(t *testing.T) {
 	for _, fc := range flowControlModes {
 		for _, tc := range finalSizeChangeCases {
 			t.Run(fc.name+"/"+tc.name, func(t *testing.T) {
-				s, h := resetStreamAt(t, fc.connRecvMax)
+				s, h := resetStreamAt(t, fc.connRecvMax, 0)
 				// A zero-length STREAM frame with FIN at offset n declares final size n.
 				if err := h.OnStream(s.ID(), tc.second, true, nil); err != tc.want {
 					t.Fatalf("FIN declaring final size %d after RESET_STREAM %d = %v, want %v",
@@ -265,7 +307,7 @@ func TestConformance_RFC9000_Sec45_DataAfterResetFinalSize(t *testing.T) {
 			{"BeyondFinalSize", resetFirst + 50, 1, ErrFinalSize},
 		} {
 			t.Run(fc.name+"/"+tc.name, func(t *testing.T) {
-				s, h := resetStreamAt(t, fc.connRecvMax)
+				s, h := resetStreamAt(t, fc.connRecvMax, 0)
 				if err := h.OnStream(s.ID(), tc.offset, false, make([]byte, tc.n)); err != tc.want {
 					t.Fatalf("%d bytes at offset %d after RESET_STREAM final size %d = %v, want %v",
 						tc.n, tc.offset, resetFirst, err, tc.want)
