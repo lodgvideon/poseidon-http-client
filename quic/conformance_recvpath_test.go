@@ -180,6 +180,23 @@ func TestConformance_RFC9001_Sec57_ZeroRTTDiscardedNotDecrypted(t *testing.T) {
 // and that happens well before TLS completes, so on the live path a server Initial can
 // only ever be opened with the handshake still running; the in_flight arm below is the
 // one that puts the fixture in that state, and the arm above it is the synthetic one.
+//
+// And AT PACKET NUMBER ZERO, because every other long-header arm replays 7 (the 1-RTT
+// arm 5), and exempting zero — `pn != 0 && c.acks[sp].seen(pn)` — left the whole quic
+// suite green 2/2 (#642). "Packet numbers in each space start at packet number 0"
+// (§12.3), so 0 is not an arbitrary corner: it is the one number every space is
+// guaranteed to use, and in the Initial space it is the server's first Initial,
+// ordinarily the packet carrying CRYPTO(ServerHello). The reordering guard below is the
+// only other test that feeds a 0, and it delivers that 0 exactly once and asserts it IS
+// processed, so it is a false-reject guard the exemption satisfies rather than fails.
+//
+// The two together pin the decision at 0 in BOTH directions, which is the point of
+// putting the zero case in this table rather than beside that guard: the over-discarding
+// form `pn == 0 || c.acks[sp].seen(pn)` fails the guard AND fails this arm's own
+// first-delivery assertion, since a first delivery that gets discarded owes no ACK and
+// leaves the idle timer where it was. That first-delivery check is what keeps the arm
+// from passing vacuously — it has to prove the packet is processed once before it can
+// mean anything by the replay not being processed twice.
 func TestConformance_RFC9000_Sec123_ReplayedPacketDiscarded(t *testing.T) {
 	for _, arm := range replayLongHeaderArms() {
 		t.Run(arm.name, func(t *testing.T) { testReplayDiscarded(t, arm) })
@@ -196,6 +213,13 @@ func TestConformance_RFC9000_Sec123_ReplayedPacketDiscarded(t *testing.T) {
 type replayArm struct {
 	name  string
 	space int
+	// pn is the packet number this arm delivers, then replays; the arm body's
+	// control packet is pn+1. Every arm states it explicitly instead of leaning on
+	// the zero value, because 0 is itself a case under test (see the pn_zero arm),
+	// so an omitted field would quietly BE that case rather than fall back to a
+	// default — and if every arm omitted it, the non-zero case would be the one
+	// that vanished.
+	pn uint64
 	// ackEliciting is whether the crafted packet carries an ack-eliciting frame
 	// (RFC 9000 §13.2.1), which the arm body asserts against rather than assumes.
 	// It is not a convenience switch: false is the case processPacket's
@@ -205,13 +229,22 @@ type replayArm struct {
 	setup        func(t *testing.T) (c *Conn, craft func(pn uint64) []byte)
 }
 
-// replayLongHeaderArms builds the two Initial fixtures and the two Handshake ones.
+// replayLongHeaderArms builds the three Initial fixtures and the two Handshake ones.
 //
-// The two Initial arms differ in nothing but handshakeComplete, which is the whole
-// point of the second: the first is the cheap fixture, the second is the state the
-// connection is really in when a server Initial arrives (see the test's doc comment
+// The first two Initial arms differ in nothing but handshakeComplete, which is the
+// whole point of the second: the first is the cheap fixture, the second is the state
+// the connection is really in when a server Initial arrives (see the test's doc comment
 // on §4.9.1). Both are worth keeping — the pair is what makes a dedup narrowed to
 // one handshake state fail on exactly one of them.
+//
+// The third differs from the second in nothing but the packet number, and for the same
+// reason: 7 and 0 are the two cases of a dedup narrowed to skip 0, so the pair is what
+// makes that narrowing fail on exactly one of them. It reuses the in-flight fixture
+// rather than the cheap one because pn 0 and an unfinished handshake are the same
+// moment on the live path — §12.3 starts every space at 0, so the server's first
+// Initial is packet number 0, and §4.9.1 puts the handshake mid-flight when it lands.
+// Its payload is that fixture's PING, not CRYPTO: the arm observes the per-packet costs
+// (owed ACK, idle timer), and frame dispatch stays the 1-RTT arm's job.
 //
 // The Handshake arms' starting state is one the connection really passes
 // through, not a convenience: c.keys.Handshake goes in at
@@ -235,6 +268,7 @@ func replayLongHeaderArms() []replayArm {
 	return []replayArm{{
 		name:         "initial_ping_ack_and_idle_timer",
 		space:        spaceInitial,
+		pn:           7,
 		ackEliciting: true,
 		setup: func(t *testing.T) (*Conn, func(uint64) []byte) {
 			origDCID := []byte("origdcid")
@@ -246,11 +280,19 @@ func replayLongHeaderArms() []replayArm {
 	}, {
 		name:         "initial_ping_handshake_in_flight",
 		space:        spaceInitial,
+		pn:           7,
+		ackEliciting: true,
+		setup:        newMidHandshakeReplayConn,
+	}, {
+		name:         "initial_ping_pn_zero",
+		space:        spaceInitial,
+		pn:           0,
 		ackEliciting: true,
 		setup:        newMidHandshakeReplayConn,
 	}, {
 		name:         "handshake_ping_ack_and_idle_timer",
 		space:        spaceHandshake,
+		pn:           7,
 		ackEliciting: true,
 		setup: func(t *testing.T) (*Conn, func(uint64) []byte) {
 			c, seal := newHandshakeReplayConn(t, 0x5c, "replayhs")
@@ -259,6 +301,7 @@ func replayLongHeaderArms() []replayArm {
 	}, {
 		name:  "handshake_ack_only_idle_timer",
 		space: spaceHandshake,
+		pn:    7,
 		setup: func(t *testing.T) (*Conn, func(uint64) []byte) {
 			c, seal := newHandshakeReplayConn(t, 0x3e, "replayao")
 			// OnAck rejects a Largest Acknowledged at or above sendPN as a §13.1
@@ -367,7 +410,7 @@ func testReplayDiscarded(t *testing.T, arm replayArm) {
 		}
 	}
 
-	captured := craft(7)
+	captured := craft(arm.pn)
 	deliver := func(pkt []byte) error { return c.recvDatagram(append([]byte(nil), pkt...)) }
 
 	if err := deliver(captured); err != nil {
@@ -394,7 +437,7 @@ func testReplayDiscarded(t *testing.T, arm replayArm) {
 
 	// Control: a genuinely new packet number is still processed, and still does
 	// what the replay must not.
-	if err := deliver(craft(8)); err != nil {
+	if err := deliver(craft(arm.pn + 1)); err != nil {
 		t.Fatalf("fresh recvDatagram = %v, want nil", err)
 	}
 	ackOwed("control")
