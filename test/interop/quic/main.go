@@ -30,6 +30,8 @@ package main
 import (
 	"context"
 	"crypto/tls"
+	"crypto/x509"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -56,6 +58,7 @@ const (
 const (
 	defaultDownloadsDir = "/downloads"
 	logFilePath         = "/logs/client.log"
+	caCertPath          = "/certs/ca.pem"
 )
 
 // job is what a test case is handed: the TLS template each connection is cloned
@@ -152,12 +155,21 @@ func run() int {
 		log.Printf("QLOGDIR=%s: qlog is not implemented, the directory stays empty", dir)
 	}
 
+	roots, err := trustPool()
+	if err != nil {
+		log.Printf("trust anchors: %v", err)
+		return exitFailed
+	}
+
 	tlsConfig := &tls.Config{
-		// The runner regenerates its CA on every run and mounts it read-only
-		// at /certs; chain validation is not what the interop matrix measures,
-		// and the reference client (quic-go) skips it the same way. MinVersion
-		// and NextProtos are set per connection by the protocol that dials.
-		InsecureSkipVerify: true,
+		// The server's certificate chain is verified, hostname included. The
+		// runner mounts its per-run CA read-only at /certs for the client as
+		// well as the server (docker-compose.yml, the client service), and the
+		// leaf it signs carries every host name the request URLs use, so there
+		// is a real chain to check — see trustPool. MinVersion and NextProtos
+		// are set per connection by the protocol that dials, as is ServerName,
+		// which is the URL's host and so what the leaf's SAN is matched against.
+		RootCAs: roots,
 		// Pinned to X25519 to keep the ClientHello small, which is a workaround
 		// for a library limitation rather than a preference.
 		//
@@ -253,6 +265,43 @@ func openKeyLog() (*os.File, error) {
 	//nolint:gosec // G304: the path is $SSLKEYLOGFILE, which the runner sets to a
 	// literal /logs/keys.log in its own compose file; there is no untrusted input.
 	return os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0o600)
+}
+
+// trustPool returns the roots the server's certificate chain is verified against.
+// A nil pool is not a failure and not a bypass: it is tls.Config.RootCAs' own
+// spelling of "the host's system roots", which is what a by-hand run outside the
+// runner wants. Verification is on down every path through here.
+//
+// Inside the runner the file is always there. certs.sh regenerates a chain per
+// run and renames its root to ca.pem, docker-compose.yml mounts that directory
+// read-only at /certs for the CLIENT service and not only for the server, and
+// interop.py exports CERTS for every test case as well as for the compliance
+// check. The leaf is signed with subjectAltName DNS:server, server4, server6 and
+// server46 — precisely the hosts the runner puts in the request URLs (its
+// urlprefix is https://server4:443/, overridden to server6 for the IPv6-only
+// transfer and server46 for the dual-stack one), so hostname verification has a
+// name to match rather than something to be waived. The amplification case signs
+// a 9-certificate chain; the server presents the intermediates and ca.pem is
+// still the anchor, so depth changes nothing here.
+//
+// quic-go's interop client sets InsecureSkipVerify instead. That establishes the
+// harness tolerates skipping, not that it requires it — and an interop result is
+// only worth having if the handshake it measures is the one a real caller gets.
+func trustPool() (*x509.CertPool, error) {
+	pem, err := os.ReadFile(caCertPath)
+	if errors.Is(err, os.ErrNotExist) {
+		log.Printf("no CA at %s; verifying against the system roots", caCertPath)
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("read CA %s: %w", caCertPath, err)
+	}
+	pool := x509.NewCertPool()
+	if !pool.AppendCertsFromPEM(pem) {
+		return nil, fmt.Errorf("CA %s: no PEM certificate in %d bytes", caCertPath, len(pem))
+	}
+	log.Printf("verifying the server chain against %s", caCertPath)
+	return pool, nil
 }
 
 // downloadPath is where the body of u is written. The runner compares /downloads
