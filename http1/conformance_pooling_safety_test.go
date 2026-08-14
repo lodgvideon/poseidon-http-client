@@ -183,3 +183,29 @@ func TestConformance_RFC9110_Sec7_6_1_ConnectionIsATokenList(t *testing.T) {
 		})
 	}
 }
+
+// TestReadResponse_TruncatedHeaderBlockIsNotPoolable pins that a response whose
+// header block ends without its blank line leaves the connection unusable.
+//
+// This is the exit ReadResponse's deferred condemn exists for, and nothing
+// pinned it. The status line parses first, so persistence is already seeded from
+// the version — keepAlive is true by the time the block is read. consumeHeaders
+// then hits EOF mid-block and returns that error unchanged; readLine condemns
+// only for a line longer than the buffer or a bare CR, and a truncated block is
+// neither. So no site on this path clears keepAlive and the deferred condemn is
+// the only thing that does.
+//
+// Without it a caller honouring KeepAlive()'s documented contract pools a socket
+// whose stream position is indeterminate: the block was cut at a point nobody
+// knows, so whatever the peer sends next is what a later request would parse as
+// its own status line.
+func TestReadResponse_TruncatedHeaderBlockIsNotPoolable(t *testing.T) {
+	ex := wireExchange(t, "GET", "HTTP/1.1 200 OK\r\nX-Cut-Here: no blank line follows\r\n")
+	if _, _, err := ex.ReadResponse(context.Background()); err == nil {
+		t.Fatal("a header block ending without its blank line must report an error")
+	}
+	if ex.KeepAlive() {
+		t.Error("KeepAlive() = true after a truncated header block, want false — the " +
+			"block was cut at an unknown point, so the connection must not be reused")
+	}
+}
