@@ -422,13 +422,13 @@ func (c *Conn) terminateLocked(err error) { // c.mu held
 func (s *Stream) RecvState() (finished, reset bool, code uint64) // takes c.mu
 ```
 
-`Stream.ID()` stays lock-free (immutable after `OpenStream` returns). The `Recv` byte slice returned to the `Do` is safe unsynchronized: `insert`/`absorb` only extend past the returned prefix and `FrameReader.Feed` copies (`http3/stream.go:55`) — append-only-disjoint, verified not a race.
+`Stream.ID()` stays lock-free (immutable after `OpenStream` returns). The `Recv` byte slice returned to the `Do` is safe unsynchronized: `insert`/`absorb` only extend past the returned prefix and `FrameReader.Feed` copies (`http3/stream.go`) — append-only-disjoint, verified not a race.
 
 ### 3.5 Ownership table & lock ordering
 
 **Goroutine-safe (any `Do`, concurrently):** `Send`, `Recv`, `OpenStream`/`OpenUniStream`, `Reset`, `StopSending`, `CloseWithError`, `WaitReadable`, `WaitSendable`, `RecvState`, and H3 `Do`.
 **Reader-owned (never a `Do`):** `Poll`, `serviceControl`, receive dispatch, loss/PTO/idle, key-update, ACK flush, the whole H3 control-state block.
-**Writer-owned (Do):** the per-`Do` request/response `FrameReader` (already local), and — after PR 2d — a **stack-local** `qpack.Encoder`/`Decoder` per request.
+**Writer-owned (Do):** the per-`Do` request/response `FrameReader` (already local; its backing array comes from a pool and goes back at the end of the exchange, which is safe precisely because nothing the exchange returns aliases it), and — after PR 2d — a **stack-local** `qpack.Encoder`/`Decoder` per request.
 
 Primitives: (1) `c.mu` — the one mutex, guards all state + wire; (2) `s.ready` cap-1; (3) `c.streamCredit` cap-1; (4) `c.done` + `c.closeErr` (happens-before via the channel close); (5) H3 `maxFieldSection atomic.Uint64` (init `^uint64(0)`); (6) H3 `goaway atomic.Uint64` (init `^uint64(0)` = "none", so `streamID >= load(goaway)` is false until a real GOAWAY lands — one atomic, no `haveGoaway` bool).
 

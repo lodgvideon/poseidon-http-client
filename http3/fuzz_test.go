@@ -1,6 +1,7 @@
 package http3
 
 import (
+	"bytes"
 	"errors"
 	"testing"
 
@@ -95,19 +96,68 @@ func FuzzFrameReader(f *testing.F) {
 	f.Add([]byte{0x00, 0xc0, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff}) // header declaring a huge length
 	f.Add([]byte{0x40})                                                 // truncated type varint
 
-	f.Fuzz(func(_ *testing.T, data []byte) {
-		var r FrameReader
-		r.SetMaxFrameLen(1 << 20) // bound buffering so a huge declared length cannot OOM
-		r.Feed(data)
-		// Drain until a frame is not yet complete (ErrNeedMore) or is rejected
-		// (ErrH3FrameTooLarge). The iteration cap is a belt-and-suspenders guard on
-		// top of the guaranteed >=2-byte-per-frame progress.
-		for i := 0; i < 4096; i++ {
-			if _, _, err := r.ReadFrame(); err != nil {
-				return
+	f.Fuzz(func(t *testing.T, data []byte) {
+		want := frameSeq(data, 0) // fed whole
+		// The same bytes cut into pieces, drained between each, must yield the same
+		// frames. Chopping is what the peer controls — a QUIC stream delivers
+		// whatever the packets happened to carry — and it is also what drives Feed's
+		// compaction, which moves the live window back over already-consumed bytes.
+		// A compaction that mis-measures the window loses or duplicates stream bytes,
+		// and this is the property that catches it.
+		for _, chunk := range []int{1, 3, 64} {
+			got := frameSeq(data, chunk)
+			if len(got) != len(want) {
+				t.Fatalf("chunk=%d yielded %d frames, feeding whole yielded %d", chunk, len(got), len(want))
+			}
+			for i := range got {
+				if got[i].typ != want[i].typ || !bytes.Equal(got[i].payload, want[i].payload) {
+					t.Fatalf("chunk=%d frame %d = (%#x, %d bytes), want (%#x, %d bytes)",
+						chunk, i, got[i].typ, len(got[i].payload), want[i].typ, len(want[i].payload))
+				}
 			}
 		}
 	})
+}
+
+// fuzzFrame is one frame FrameReader handed out, with its payload copied so it
+// survives the feeds that follow.
+type fuzzFrame struct {
+	typ     uint64
+	payload []byte
+}
+
+// frameSeq plays data through a reader — all at once when chunk <= 0, otherwise
+// in chunk-byte pieces with a drain after each — and returns the frames read. It
+// stops at the first rejected frame (ErrH3FrameTooLarge), as a real stream reader
+// does. The frame count is capped as a belt-and-suspenders guard on top of the
+// guaranteed >=2-byte-per-frame progress.
+func frameSeq(data []byte, chunk int) []fuzzFrame {
+	var r FrameReader
+	r.SetMaxFrameLen(1 << 20) // bound buffering so a huge declared length cannot OOM
+	var out []fuzzFrame
+	// drain reports whether reading may continue: false once a frame is rejected.
+	drain := func() bool {
+		for len(out) < 4096 {
+			typ, payload, err := r.ReadFrame()
+			if err != nil {
+				return errors.Is(err, ErrNeedMore)
+			}
+			out = append(out, fuzzFrame{typ: typ, payload: append([]byte(nil), payload...)})
+		}
+		return false
+	}
+	if chunk <= 0 {
+		r.Feed(data)
+		drain()
+		return out
+	}
+	for off := 0; off < len(data); off += chunk {
+		r.Feed(data[off:min(off+chunk, len(data))])
+		if !drain() {
+			break
+		}
+	}
+	return out
 }
 
 // FuzzParseSettings feeds arbitrary bytes to the HTTP/3 SETTINGS payload parser
