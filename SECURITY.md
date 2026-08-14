@@ -7,7 +7,9 @@ patched; upgrade to the newest release before reporting an issue against it.
 
 The library requires Go 1.25 or later. Security-relevant fixes in the Go
 standard library (in particular `crypto/tls`) reach you through your Go
-toolchain, not through this module — keep your toolchain current.
+toolchain, not through this module — keep your toolchain current. See
+[Go toolchain advisories](#go-toolchain-advisories) for the patch floor that
+currently matters.
 
 ## Reporting a vulnerability
 
@@ -38,15 +40,33 @@ Parsers for untrusted input (frame, HPACK, QPACK, QUIC packets) are fuzzed and
 covered by RFC-keyed conformance tests, but the library has not had a formal
 third-party security audit.
 
-## GO-2026-5856 (Encrypted Client Hello in crypto/tls)
+## Go toolchain advisories
 
-Vulnerability scanners may flag GO-2026-5856, an Encrypted Client Hello (ECH)
-advisory in the Go standard library's `crypto/tls`. poseidon-http-client does
-not enable ECH — the vulnerable code path is not reachable through this
-library, so the advisory is not exploitable via poseidon.
+This library targets the **Go 1.25 line** (`go.mod` declares `go 1.25.0`), so
+the patch releases that matter here are the 1.25 ones.
 
-To clear the advisory entirely (including in `govulncheck` output), build with
-Go 1.26.5 or later, which contains the upstream fix.
+**Build with go1.25.13 or later.** As of 2026-08-14 that is the floor which
+clears every standard-library advisory `govulncheck ./...` reports as reachable
+from this module — scanned on go1.25.0, that is 20 advisories, the oldest of
+them fixed in 1.25.2. The three most recent:
+
+| Advisory | Standard-library package | Fixed on 1.25 | Fixed on 1.26 |
+|---|---|---|---|
+| [GO-2026-6090](https://pkg.go.dev/vuln/GO-2026-6090) | `crypto/tls` — unbounded post-handshake handshake messages | 1.25.13 | 1.26.6 |
+| [GO-2026-5972](https://pkg.go.dev/vuln/GO-2026-5972) | `encoding/asn1` — stack exhaustion on deeply nested input | 1.25.13 | 1.26.6 |
+| [GO-2026-5856](https://pkg.go.dev/vuln/GO-2026-5856) | `crypto/tls` — Encrypted Client Hello privacy leak | 1.25.12 | 1.26.5 |
+
+If you build on the 1.26 line instead, the equivalent floor is **go1.26.6**.
+Do not treat go1.26.5 as patched: it carries the ECH fix only, and still
+contains GO-2026-6090 and GO-2026-5972.
+
+### GO-2026-5856 is flagged by scanners, but is not exploitable here
+
+`govulncheck` reports GO-2026-5856 as reachable, because it resolves symbols
+and every TLS dial in this library enters `crypto/tls`. The privacy leak itself
+requires Encrypted Client Hello to be *configured*, which poseidon-http-client
+never does — so the advisory is not exploitable via poseidon. Upgrading the
+toolchain clears it from scanner output; it is not a live exposure.
 
 ## Disclaimer
 
