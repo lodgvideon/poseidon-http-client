@@ -2,6 +2,7 @@ package quic
 
 import (
 	"bytes"
+	"context"
 	"crypto/tls"
 	"errors"
 	"testing"
@@ -170,6 +171,15 @@ func TestConformance_RFC9001_Sec57_ZeroRTTDiscardedNotDecrypted(t *testing.T) {
 // the ack_only arm below existed. A replayed non-ack-eliciting packet is the
 // stealthier of the two anyway: it owes no ACK, so the idle timer it keeps pushing
 // out is the only thing on this end that moves at all.
+//
+// And BOTH HANDSHAKE STATES, because every other arm's Conn has handshakeComplete
+// already true: gating the dedup on it — `c.handshakeComplete && c.acks[sp].seen(pn)`,
+// the shape a "post-handshake only" narrowing would take — left the whole quic suite
+// green. That gate would disable dedup over exactly the window Initial packets exist
+// in. Installing Handshake write keys discards the Initial space (RFC 9001 §4.9.1),
+// and that happens well before TLS completes, so on the live path a server Initial can
+// only ever be opened with the handshake still running; the in_flight arm below is the
+// one that puts the fixture in that state, and the arm above it is the synthetic one.
 func TestConformance_RFC9000_Sec123_ReplayedPacketDiscarded(t *testing.T) {
 	for _, arm := range replayLongHeaderArms() {
 		t.Run(arm.name, func(t *testing.T) { testReplayDiscarded(t, arm) })
@@ -195,7 +205,13 @@ type replayArm struct {
 	setup        func(t *testing.T) (c *Conn, craft func(pn uint64) []byte)
 }
 
-// replayLongHeaderArms builds the Initial fixture and the two Handshake ones.
+// replayLongHeaderArms builds the two Initial fixtures and the two Handshake ones.
+//
+// The two Initial arms differ in nothing but handshakeComplete, which is the whole
+// point of the second: the first is the cheap fixture, the second is the state the
+// connection is really in when a server Initial arrives (see the test's doc comment
+// on §4.9.1). Both are worth keeping — the pair is what makes a dedup narrowed to
+// one handshake state fail on exactly one of them.
 //
 // The Handshake arms' starting state is one the connection really passes
 // through, not a convenience: c.keys.Handshake goes in at
@@ -227,6 +243,11 @@ func replayLongHeaderArms() []replayArm {
 				return craftServerInitial(t, serverKeys, nil, []byte{0xaa}, pn, appendPing(nil))
 			}
 		},
+	}, {
+		name:         "initial_ping_handshake_in_flight",
+		space:        spaceInitial,
+		ackEliciting: true,
+		setup:        newMidHandshakeReplayConn,
 	}, {
 		name:         "handshake_ping_ack_and_idle_timer",
 		space:        spaceHandshake,
@@ -270,6 +291,48 @@ func newHandshakeReplayConn(t *testing.T, seed byte, dcid string) (*Conn, func(p
 	c.keys.Handshake = opener
 	return c, func(pn uint64, frames []byte) []byte {
 		return sealServerPacket(t, sealer, PacketHandshake, nil, scid, pn, frames)
+	}
+}
+
+// newMidHandshakeReplayConn builds the fixture whose replay lands while the handshake
+// is still running: the production NewConn constructor plus Start, which is exactly
+// where a client sits once it has written its ClientHello and is waiting for the
+// server's Initial flight. Nothing about the state is set by hand — handshakeComplete
+// is false because nothing has completed it, and c.keys.Initial is the Opener NewConn
+// derived from the connection ID it drew, which is why the crafted packets are sealed
+// with InitialKeys(c.origDCID) rather than a fixed one.
+//
+// The live TLS client is load-bearing, not decoration: recvDatagram ends in
+// c.hs.Pump(c) on every datagram while the handshake is unfinished, so this state
+// cannot be faked by clearing the flag on a hand-built Conn with a nil hs. The first
+// Pump drains Start's ClientHello into pendingCrypto, which no delivery here flushes.
+//
+// The payload is a PING rather than the CRYPTO(ServerHello) a real capture would hold:
+// §12.4 Table 3 admits PING in an Initial, and CRYPTO would buy nothing — the
+// reassembler drops a repeat of an offset it has already consumed, so a re-dispatched
+// CRYPTO frame is invisible, and the owed ACK and the idle timer are the observables
+// either way. Frame dispatch itself stays the 1-RTT arm's job.
+func newMidHandshakeReplayConn(t *testing.T) (*Conn, func(pn uint64) []byte) {
+	t.Helper()
+	_, pool := genServerCert(t)
+	tp := concat(
+		tpInt(tpInitialMaxData, 1<<20),
+		tpInt(tpInitialMaxStreamsBidi, 16),
+	)
+	c, err := NewConn(&closePC{}, &tls.Config{ServerName: "example.com", RootCAs: pool}, tp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := c.hs.Start(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	// Asserted, not assumed: the arm is worth nothing if the fixture is complete.
+	if c.handshakeComplete {
+		t.Fatal("the in-flight fixture must start with the handshake unfinished")
+	}
+	_, serverKeys := InitialKeys(c.origDCID)
+	return c, func(pn uint64) []byte {
+		return craftServerInitial(t, serverKeys, nil, []byte{0xaa}, pn, appendPing(nil))
 	}
 }
 
