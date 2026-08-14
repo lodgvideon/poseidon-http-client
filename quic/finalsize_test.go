@@ -87,29 +87,50 @@ func TestConformance_RFC9000_Sec45_ResetFinalSizeBelowUnderNoFlowControl(t *test
 
 // TestConformance_RFC9000_Sec45_SecondResetBelowFirst checks that a final size
 // learned from a RESET_STREAM is itself fixed: a later RESET_STREAM declaring a
-// smaller one is a FINAL_SIZE_ERROR, while an identical retransmit is accepted
-// (RFC 9000 §4.5). Both arms run with receive flow control enabled and disabled,
-// because the rule does not depend on it.
+// smaller one is a FINAL_SIZE_ERROR, while one equal to it — an ordinary
+// retransmit, since RESET_STREAM is resent until acknowledged — is accepted
+// (RFC 9000 §4.5).
+//
+// Where the accept/reject edge sits comes straight from §4.5's definition: the
+// final size is "one higher than the offset of the byte with the largest offset
+// sent on the stream", and an endpoint "MUST NOT send data on a stream at or
+// beyond the final size". So a final size equal to the high-water mark names
+// that same last byte and changes nothing, while one byte below it would put the
+// peer's own last byte AT the final size, which §4.5 forbids. The table pins
+// both sides of that edge: a check written with an off-by-one still rejects a
+// wildly low final size, so the far-below case alone cannot tell a correct
+// comparison from a shifted one.
+//
+// Every case runs with receive flow control enabled and disabled, because the
+// rule is a final-size rule and does not depend on flow control — and because
+// the two modes reach the check with different state: chargeRecv returns early
+// when connRecvMax is the disabled sentinel, so s.recvHighest stays 0 there and
+// only the s.recv.highest the check actually reads has advanced.
 func TestConformance_RFC9000_Sec45_SecondResetBelowFirst(t *testing.T) {
+	const first = 1000 // the final size the first RESET_STREAM fixes
 	for _, tc := range []struct {
 		name        string
 		connRecvMax uint64
+		second      uint64
+		want        error
 	}{
-		{"FlowControlOn", DefaultConnRecvWindow},
-		{"FlowControlOff", 0}, // the disabled sentinel
+		{"FlowControlOn/Equal", DefaultConnRecvWindow, first, nil},
+		{"FlowControlOn/OneByteBelow", DefaultConnRecvWindow, first - 1, ErrFinalSize},
+		{"FlowControlOn/FarBelow", DefaultConnRecvWindow, first / 2, ErrFinalSize},
+		{"FlowControlOff/Equal", 0, first, nil}, // 0 is the disabled sentinel
+		{"FlowControlOff/OneByteBelow", 0, first - 1, ErrFinalSize},
+		{"FlowControlOff/FarBelow", 0, first / 2, ErrFinalSize},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			c := &Conn{peer: TransportParams{InitialMaxStreamsBidi: 1}, connRecvMax: tc.connRecvMax}
 			s, _ := c.OpenStream()
 			h := &connFrameHandler{c: c}
-			if err := h.OnResetStream(s.ID(), 0, 1000); err != nil { // final size 1000
-				t.Fatal(err)
+			if err := h.OnResetStream(s.ID(), 0, first); err != nil {
+				t.Fatalf("first RESET_STREAM (final size %d) = %v, want nil", first, err)
 			}
-			if err := h.OnResetStream(s.ID(), 0, 1000); err != nil { // identical retransmit
-				t.Fatalf("identical RESET_STREAM retransmit should be accepted: %v", err)
-			}
-			if err := h.OnResetStream(s.ID(), 0, 500); err != ErrFinalSize {
-				t.Fatalf("second reset with a smaller final size = %v, want ErrFinalSize", err)
+			if err := h.OnResetStream(s.ID(), 0, tc.second); err != tc.want {
+				t.Fatalf("second RESET_STREAM final size %d after %d = %v, want %v",
+					tc.second, first, err, tc.want)
 			}
 		})
 	}
