@@ -1079,6 +1079,12 @@ func (c *Client) roundTrip(ctx context.Context, stream quicStream, req *Request)
 	}
 
 	var fr FrameReader
+	// The reader's array is recycled between requests (see frameBufPool). Nothing
+	// this function returns aliases it: dispatchFrame copies the body out, and the
+	// QPACK decode copies every header and trailer field. Pinned by
+	// TestRespBuilder_BodyDoesNotAliasReaderBuffer and TestClient_PooledFrameBuffer.
+	fr.acquire()
+	defer fr.release()
 	fr.SetMaxFrameLen(maxResponseBytes) // refuse a frame larger than the whole budget before buffering it
 	rb := respBuilder{dec: &dec, streamID: stream.ID(), ctx: ctx}
 	// On any abort of a stream that referenced the dynamic table, notify the encoder
@@ -1270,24 +1276,20 @@ func (c *Client) dispatchFrame(rb *respBuilder, typ uint64, payload []byte) erro
 			return ErrResponseTooLarge
 		}
 		if rb.body == nil {
-			// The overwhelmingly common shape is one DATA frame, and copying it
-			// here doubles what the response costs: the reader has already
-			// assembled the whole payload contiguously, so the append below only
-			// grows a second buffer to the same size. Adopt the reader's bytes
-			// instead. Two properties of FrameReader make this safe, and both are
-			// pinned by TestRespBuilder_AdoptedBodyIsSafeToAlias:
+			// One exact-sized allocation for the overwhelmingly common shape —
+			// a response whose body is one DATA frame. len(payload) is bytes
+			// already received, not a length the peer declared, so it needs no
+			// bound of its own beyond the maxResponseBytes check above.
 			//
-			//   1. ReadFrame caps the payload at its own length (stream.go's
-			//      three-index slice), so the append below — reached as soon as a
-			//      second DATA frame arrives — must allocate rather than write
-			//      into the reader's buffer.
-			//   2. Feed only ever appends at the tail and ReadFrame only ever
-			//      slides the window forward, so no consumed region is written
-			//      again. A compacting Feed would break this silently.
-			//
-			// fr is a per-request local (see roundTrip), so the array outlives the
-			// exchange and belongs to the caller afterwards.
-			rb.body = payload
+			// This copy replaced adopting the reader's bytes outright, which was
+			// cheaper per response but forced the reader's array to be
+			// caller-owned and therefore per-request. Paying one copy buys the
+			// array back for the pool (roundTrip's acquire/release), and the
+			// growth chain that array climbs from nothing on every response costs
+			// several times the body's own size — see BenchmarkRecvPath_*.
+			// Copying is also what makes the reader free to compact in Feed.
+			rb.body = make([]byte, len(payload))
+			copy(rb.body, payload)
 			return nil
 		}
 		rb.body = append(rb.body, payload...)

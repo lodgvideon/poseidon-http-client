@@ -84,6 +84,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   meaning on its own — `0x1` is `END_STREAM` on DATA and `ACK` on SETTINGS, so a
   `Flags.String()` would have to pick one and be wrong about half the
   connection. (#610)
+- **`grpc.BorrowMetadata()`, a call option that takes the response header and
+  trailer copies from the stream's pooled buffers instead of the heap.** Both
+  blocks arrive in a buffer the transport reclaims as soon as the event is
+  handled, so `grpc` copies each one out: two allocations a block, four an RPC.
+  `DiscardMetadata` already removed them for a caller that never reads the
+  metadata, and `Invoke` sets it for itself; a caller that *does* read `Header`
+  or `Trailer` had no way out and paid all four. With this option a
+  metadata-reading RPC costs exactly what a metadata-discarding one costs —
+  measured against the in-process peer, 10 allocations per streaming RPC become
+  6, matching `DiscardMetadata` exactly while still returning the metadata.
+
+  It is opt-in because the saving is bought with a lifetime rule: what `Header`
+  and `Trailer` return is then valid only until `Close`, since those buffers go
+  back to a pool the next RPC on the connection draws from. Copy out anything
+  you keep — `string(f.Value)` is a copy, `f.Value` is not. `Close` nils both
+  views rather than leaving them pointing into the recycled arena, so reading
+  `Trailer()` after `Close` comes back empty instead of carrying another call's
+  metadata; that is a backstop, not permission. The default is unchanged and
+  remains the answer that cannot be got wrong. `DiscardMetadata` wins when both
+  are set. `Status()` is unaffected either way — its message is copied out of
+  the live block. See `docs/GRPC_GUIDE.md`.
 
 ### Changed (breaking)
 
@@ -145,6 +166,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   on the pre-fix code.
 
 ### Changed
+
+- **An HTTP/3 response body no longer costs several times its own size to
+  receive.** The buffered `Do` path allocated 75 KB to deliver a 16 KiB body and
+  276 KB to deliver a 64 KiB one, arriving at QUIC packet granularity. Two things
+  caused it, and neither could be fixed alone. `FrameReader.ReadFrame` re-sliced
+  its buffer past each frame it handed out, which put the consumed capacity out
+  of reach, so every response climbed a fresh `append` growth ladder from
+  nothing; and the body then *adopted* the reader's first DATA payload rather
+  than copying it, which made that array caller-owned and therefore impossible to
+  reuse. The reader now tracks the consumed prefix as an offset and reclaims it
+  when its tail runs out, its backing array is recycled between requests, and the
+  body is copied into one exact-sized allocation. A response costs two
+  allocations at roughly its own size, whatever the body size and however the
+  bytes were chopped up on the wire:
+
+  | body | delivered in | before | after |
+  |---|---|---:|---:|
+  | 4 KiB | 1200-byte bursts | 8,913 B / 4 allocs | 4,179 B / 2 allocs |
+  | 16 KiB | 1200-byte bursts | 75,346 B / 9 allocs | 16,596 B / 2 allocs |
+  | 64 KiB | 1200-byte bursts | 276,050 B / 13 allocs | 66,428 B / 2 allocs |
+  | 64 KiB | one burst | 73,810 B / 2 allocs | 65,932 B / 2 allocs |
+  | 64 KiB, 8 DATA frames | 1200-byte bursts | 379,091 B / 44 allocs | 174,249 B / 6 allocs |
+
+  A 256-byte body pays 25 bytes more than before (394 vs 369), the copy it now
+  makes with nothing large enough to amortize it. `make bench-alloc` reports all
+  of these, and carries the unpooled reader as its own case so the trade stays
+  visible: the copy alone, without reuse, is a regression, which is why neither
+  half of this could ship without the other.
+
+  Nothing in the public surface moves. A buffered response already owned its
+  bytes — headers and trailers were copied at the QPACK decode — and the body
+  now does too. The payload `FrameReader.ReadFrame` returns is still documented
+  as valid only until the next `Feed` or `ReadFrame`; that lifetime is now
+  enforced by reuse rather than merely stated, so a caller that held one past it
+  and got away with it will not any more. `BodyReader` (`DoStream`) is unchanged:
+  it hands payloads that alias its reader out to its caller, so its buffer stays
+  per-request rather than being recycled.
 
 - **Formatting is now gated.** golangci-lint v2 moved formatters into their own
   top-level `formatters:` section, and `.golangci.yml` never grew one — so

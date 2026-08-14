@@ -231,6 +231,52 @@ md := []conn.HeaderField{
 field. Without `IndexNever` a bearer token would be indexed once and then
 emitted as a one-byte reference on every later call over the same connection.
 
+### What the response blocks cost
+
+Both response blocks arrive in a buffer the transport pools and reclaims as soon
+as the event is handled, so by default each is copied into memory of your own:
+two allocations a block, four an RPC. That default owes you nothing — what
+`Header` and `Trailer` return is ordinary heap memory that lives exactly as long
+as you keep it — and it is the right one until the four show up in a profile.
+
+Two options remove them, and which one applies depends on whether you read the
+metadata at all:
+
+```go
+// Never reads Header or Trailer: skip the copy entirely, both return nil.
+s, err := cc.NewStream(ctx, "/pkg.Svc/Method", md, grpc.DiscardMetadata())
+
+// Reads them, inside the call: take the copy from the stream's pooled buffers.
+s, err := cc.NewStream(ctx, "/pkg.Svc/Method", md, grpc.BorrowMetadata())
+```
+
+`Invoke` and `InvokeInto` set `DiscardMetadata` for themselves — the unary API
+exposes neither block — so this is a decision only the streaming calls make.
+
+`BorrowMetadata` costs exactly what `DiscardMetadata` costs while still giving
+you the metadata, and it buys that with a lifetime rule: **what `Header` and
+`Trailer` return is valid until `Close`, and not one statement after it.** Those
+buffers go back to a pool the next RPC on the connection draws from. To keep a
+field past `Close`, copy it out first — `string(f.Value)` is a copy, `f.Value` is
+not:
+
+```go
+s, err := cc.NewStream(ctx, "/pkg.Svc/Method", md, grpc.BorrowMetadata())
+defer s.Close()
+hdr, err := s.Header(ctx)
+region, _, _ := grpc.MetadataValue(hdr, "x-region") // returns a string: safe to keep
+```
+
+`Close` nils what `Header` and `Trailer` returned rather than leaving them
+pointing into the recycled arena, so the ordinary version of this mistake —
+reading `Trailer()` after `Close` — comes back empty instead of carrying another
+call's metadata. Treat that as a backstop, not as permission: a slice you
+already copied the header of is past the point where the package can help.
+
+`Status()` is not metadata and is unaffected by either option. Its code and
+message are read out of the live block and copied, so a finished call reports
+the same outcome whichever way the blocks were handled.
+
 ## Message framing
 
 Every gRPC message is a 1-byte compressed flag plus a 4-byte big-endian length
