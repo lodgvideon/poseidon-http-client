@@ -172,9 +172,7 @@ func TestConformance_RFC9113_Sec5_1_DataOnHalfClosedRemote_StreamClosed(t *testi
 	if ev.Type != EventHeaders {
 		t.Fatalf("event = %s, want EventHeaders", ev.Type)
 	}
-	if ev.Slab != nil {
-		GetHeaderSlabPool().Put(ev.Slab)
-	}
+	ev.Release()
 	if code := recvCode(t, "RST_STREAM", probe.rst); code != frame.ErrCodeStreamClosed {
 		t.Errorf("RST_STREAM code = %v, want STREAM_CLOSED", code)
 	}

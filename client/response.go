@@ -48,10 +48,10 @@ type Response struct {
 	// every Read after it returns io.EOF.
 	BodyReader io.ReadCloser
 
-	// slabs holds pooled slab pointers that back Headers and Trailers
-	// field bytes. Storing *[]byte (not []byte) avoids heap escape when
-	// returning to conn.GetHeaderSlabPool() via Put. Returned on Reset().
-	slabs []*[]byte
+	// blocks holds the pooled header blocks backing Headers and Trailers —
+	// both the field slices and the bytes their Names and Values point into.
+	// Released on Reset().
+	blocks []*conn.HeaderBlock
 }
 
 // Reset clears all exported fields for reuse, retaining backing arrays.
@@ -59,18 +59,17 @@ type Response struct {
 // must not be used after Reset returns.
 //
 // On the first call after a zero-value Response, the first Reset preallocates
-// Headers and slabs backing arrays (cap=8 / cap=2) so subsequent appends in
+// Headers and blocks backing arrays (cap=8 / cap=2) so subsequent appends in
 // parseStatus and drainResponse do not allocate.
 func (r *Response) Reset() {
 	if r.BodyReader != nil {
 		_ = r.BodyReader.Close()
 		r.BodyReader = nil
 	}
-	for _, sp := range r.slabs {
-		*sp = (*sp)[:0]
-		conn.GetHeaderSlabPool().Put(sp)
+	for _, b := range r.blocks {
+		b.Release()
 	}
-	r.slabs = r.slabs[:0]
+	r.blocks = r.blocks[:0]
 	r.Status = 0
 	if r.Headers == nil {
 		r.Headers = make([]conn.HeaderField, 0, 8)
@@ -82,8 +81,8 @@ func (r *Response) Reset() {
 	} else {
 		r.Trailers = r.Trailers[:0]
 	}
-	if cap(r.slabs) == 0 {
-		r.slabs = make([]*[]byte, 0, 2)
+	if cap(r.blocks) == 0 {
+		r.blocks = make([]*conn.HeaderBlock, 0, 2)
 	}
 	r.Body = r.Body[:0]
 	r.BytesReceived = 0
@@ -128,7 +127,7 @@ func (t EventType) String() string {
 // StreamEvent is one chunk of a streaming response.
 //
 // Data aliases a pooled connection-layer buffer that is recycled on the next
-// Recv or Close; Trailers alias the response's header-slab buffer, valid until
+// Recv or Close; Trailers alias the response's header block, valid until
 // Close. Copy these slices if you need to retain the bytes past then — do NOT
 // hold them across a Recv/Close.
 type StreamEvent struct {
@@ -137,7 +136,7 @@ type StreamEvent struct {
 	// Data is the DATA payload for EventData. It aliases a pooled buffer that is
 	// recycled on the next Recv/Close; copy it to retain the bytes past then.
 	Data []byte
-	// Trailers is populated for EventTrailers; aliases header-slab memory that
+	// Trailers is populated for EventTrailers; aliases header-block memory that
 	// is valid until Close.
 	Trailers []conn.HeaderField
 	// ResetCode is populated for EventReset.
@@ -152,7 +151,7 @@ type StreamEvent struct {
 // it is idempotent and sends RST_STREAM(CANCEL) when needed.
 //
 // Callers may allocate StreamResponse once and reuse across DoStream calls;
-// sr.Close() handles slab cleanup automatically.
+// sr.Close() handles header-block cleanup automatically.
 type StreamResponse struct {
 	// Status is the integer value parsed from :status.
 	Status int
@@ -166,9 +165,9 @@ type StreamResponse struct {
 	drained   bool
 	trailers  []conn.HeaderField // cached when Recv delivers EventTrailers
 
-	// slabs holds pooled slab pointers that back Headers field bytes.
-	// Storing *[]byte avoids heap escape on return to HeaderSlabPool.
-	slabs []*[]byte
+	// blocks holds the pooled header blocks backing Headers — the field slice
+	// and the bytes behind it. Released on Close().
+	blocks []*conn.HeaderBlock
 
 	// doCtx is the context DoStream was called with. recvCtx is that context
 	// merged with this StreamResponse's own abort, and abortCancel fires the
@@ -258,7 +257,7 @@ func (sr *StreamResponse) reset() {
 	sr.doCtx = nil
 	sr.recvCtx = nil
 	sr.abortCancel = nil
-	// slabs are cleaned up in Close(); reset() is only called for a
+	// blocks are cleaned up in Close(); reset() is only called for a
 	// struct that has been properly closed already.
 }
 
@@ -288,12 +287,12 @@ func (sr *StreamResponse) Recv(ctx context.Context) (StreamEvent, error) {
 			// final HEADERS to fill Status, so a 1xx reaching Recv is a peer
 			// oddity; skip it and keep pumping. StreamResponse exposes no
 			// interim surface, matching Client.Do across all three protocols.
-			recycleHeaderSlab(ev.Slab)
+			ev.Release()
 			continue
 		case conn.EventHeaders:
 			// Spurious post-initial HEADERS without trailer detection —
 			// protocol oddity from peer. Skip and keep pumping.
-			recycleHeaderSlab(ev.Slab)
+			ev.Release()
 			continue
 		case conn.EventData:
 			out := StreamEvent{
@@ -335,8 +334,8 @@ func (sr *StreamResponse) Recv(ctx context.Context) (StreamEvent, error) {
 			// Delivered on the parent stream, which is this one. StreamResponse
 			// exposes no push surface (Client.Do's buffered path is the only one
 			// that dispatches to a push handler), so the promise is skipped —
-			// but its header slab goes back to the pool, as in the arms above.
-			recycleHeaderSlab(ev.Slab)
+			// but its header block goes back to the pool, as in the arms above.
+			ev.Release()
 			continue
 		case conn.EventReset:
 			sr.drained = true
@@ -388,17 +387,16 @@ func (sr *StreamResponse) WaitTrailers(ctx context.Context) ([]conn.HeaderField,
 	}
 }
 
-// Close releases the stream and returns any pooled header slabs.
+// Close releases the stream and returns any pooled header blocks.
 // If neither side reached END_STREAM, RST_STREAM(CANCEL) is sent. Idempotent.
 func (sr *StreamResponse) Close() error {
 	var closeErr error
 	sr.closeOnce.Do(func() {
 		sr.lg.disarm()
-		for _, sp := range sr.slabs {
-			*sp = (*sp)[:0]
-			conn.GetHeaderSlabPool().Put(sp)
+		for _, b := range sr.blocks {
+			b.Release()
 		}
-		sr.slabs = sr.slabs[:0]
+		sr.blocks = sr.blocks[:0]
 		// Both outside mu on purpose: they release a Recv parked in the stream,
 		// and holding the lock across them would make the abort wait for the
 		// very read it is aborting.

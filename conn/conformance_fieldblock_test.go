@@ -159,9 +159,7 @@ func TestConformance_RFC9113_Sec6_10_SplitHeaderBlock_Accepted(t *testing.T) {
 	if ev.Type != EventHeaders {
 		t.Fatalf("event = %s, want EventHeaders from a split header block", ev.Type)
 	}
-	if ev.Slab != nil {
-		GetHeaderSlabPool().Put(ev.Slab)
-	}
+	ev.Release()
 	if !c.IsAlive() {
 		t.Error("connection died on a conformant split header block")
 	}

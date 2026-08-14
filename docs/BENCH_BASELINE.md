@@ -149,3 +149,29 @@ non-zero one-time construction and would be a false positive under the gate.
 Note: warm encode (~886 ns) is dominated by the O(n) linear `dynamicLookup`
 (`bytes.Equal` scan over dynamic-table entries), not by string work — a CPU
 (not allocation) consideration for very large dynamic tables.
+
+## conn per-request allocations (2026-08-14)
+
+`TestConn_Roundtrip_AllocsPerRequest` gates a full request/response on a warm
+connection against the in-process peer. It is now **0 allocs/request**, and the
+gate is checked in both directions so the number cannot drift either way
+unnoticed.
+
+Getting there took three changes, each removing exactly one allocation. The
+first two are recorded above and in the changelog; the last is #577:
+
+| Was | Removed by |
+|---|---|
+| conn's own benchmarks never returned the pooled buffers, so the pools missed every iteration and the reported figure was inflated by the pool's `New` | #574 (`benchDrain`) |
+| `authorityOf` ended in `string(fields[i].Value)`, and `[]byte`→`string` copies by definition of the language | #578 (copies into the pooled `Stream`'s own `authorityBuf`) |
+| `copyFieldsToSlab` built the field slice with a plain `make([]header.Field, len(fields))` per header block, while the bytes it viewed came from a pool | #577 (`HeaderBlock` pools the fields alongside the bytes) |
+
+The D.1 breakdown above is a record of what the path cost in 2026-06 and is
+left as written; `conn.HeaderSlabPool` named a real thing then. It no longer
+exists — `HeaderBlock` owns the bytes and the field slice together, and
+consumers give it back with `StreamEvent.Release` rather than Putting a pointer
+into an exported pool.
+
+Downstream, `grpc`'s `unaryAllocCeiling` fell 4 → 2 for the same reason: a gRPC
+response carries two header blocks, HEADERS and TRAILERS, so conn was
+allocating a field slice twice per RPC.

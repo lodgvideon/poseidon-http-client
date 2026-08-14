@@ -183,9 +183,7 @@ func TestConformance_RFC7540_Sec8122_PushPromiseTETrailers_Accepted(t *testing.T
 	if ev.Type != EventPushPromise {
 		t.Fatalf("event = %s, want EventPushPromise (te: trailers is a legal request field)", ev.Type)
 	}
-	if ev.Slab != nil {
-		GetHeaderSlabPool().Put(ev.Slab)
-	}
+	ev.Release()
 	if _, ok := c.LookupStream(2); !ok {
 		t.Fatal("promised stream 2 not registered; legal push was refused")
 	}

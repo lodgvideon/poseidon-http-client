@@ -142,9 +142,7 @@ func openParentStream(ctx context.Context, t *testing.T, c *Conn) StreamRef {
 	if ev.Type != EventHeaders {
 		t.Fatalf("parent event = %s, want EventHeaders", ev.Type)
 	}
-	if ev.Slab != nil {
-		GetHeaderSlabPool().Put(ev.Slab)
-	}
+	ev.Release()
 	return s
 }
 
@@ -214,9 +212,7 @@ func TestConformance_RFC7540_Sec512_PushedStreamDoesNotFreeOurSlot(t *testing.T)
 		if ev.Type != EventPushPromise {
 			t.Fatalf("event %d = %s, want EventPushPromise", i, ev.Type)
 		}
-		if ev.Slab != nil {
-			GetHeaderSlabPool().Put(ev.Slab)
-		}
+		ev.Release()
 	}
 	for _, id := range []uint32{2, 4} {
 		p, ok := c.LookupStream(id)
@@ -298,9 +294,7 @@ func TestConformance_RFC7540_Sec512_PushedStreamCloseKeepsShutdownBlocking(t *te
 	if ev.Type != EventPushPromise {
 		t.Fatalf("event = %s, want EventPushPromise", ev.Type)
 	}
-	if ev.Slab != nil {
-		GetHeaderSlabPool().Put(ev.Slab)
-	}
+	ev.Release()
 	pushed, ok := c.LookupStream(2)
 	if !ok {
 		t.Fatal("pushed stream 2 not registered")
@@ -408,9 +402,7 @@ func TestConformance_RFC7540_Sec66_PushRegistryBoundedByOurMaxStreams(t *testing
 	for {
 		select {
 		case ev := <-parent.Stream().events:
-			if ev.Slab != nil {
-				GetHeaderSlabPool().Put(ev.Slab)
-			}
+			ev.Release()
 			if ev.Type == EventPushPromise {
 				delivered++
 			}
@@ -531,9 +523,7 @@ func TestConformance_RFC7540_Sec66_IllegalPromisedIDIsProtocolError(t *testing.T
 				if err != nil {
 					break
 				}
-				if ev.Slab != nil {
-					GetHeaderSlabPool().Put(ev.Slab)
-				}
+				ev.Release()
 				if ev.Type == EventReset {
 					break
 				}
@@ -756,9 +746,7 @@ func TestConn_PushPromise_DeliveredToParentStream(t *testing.T) {
 	if ev.Type != EventHeaders {
 		t.Fatalf("expected EventHeaders, got %s", ev.Type)
 	}
-	if ev.Slab != nil {
-		GetHeaderSlabPool().Put(ev.Slab)
-	}
+	ev.Release()
 
 	// Event 2: push promise.
 	ev, err = s.Recv(ctx)
@@ -781,9 +769,7 @@ func TestConn_PushPromise_DeliveredToParentStream(t *testing.T) {
 	if !found {
 		t.Fatalf("promised headers missing :path=/style.css")
 	}
-	if ev.Slab != nil {
-		GetHeaderSlabPool().Put(ev.Slab)
-	}
+	ev.Release()
 
 	// Pushed stream (ID=2) should be registered.
 	pushed := c.lookupStream(2)
@@ -802,9 +788,7 @@ func TestConn_PushPromise_DeliveredToParentStream(t *testing.T) {
 	if !pev.EndStream {
 		t.Fatal("expected END_STREAM on pushed stream headers")
 	}
-	if pev.Slab != nil {
-		GetHeaderSlabPool().Put(pev.Slab)
-	}
+	pev.Release()
 }
 
 // TestConn_PushPromise_DisabledReturnsProtocolError verifies that when
@@ -877,8 +861,6 @@ func TestConn_PushPromise_DisabledReturnsProtocolError(t *testing.T) {
 		if ev.Type == EventReset {
 			return // stream reset — also acceptable
 		}
-		if ev.Slab != nil {
-			GetHeaderSlabPool().Put(ev.Slab)
-		}
+		ev.Release()
 	}
 }

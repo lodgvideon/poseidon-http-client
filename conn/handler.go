@@ -20,21 +20,6 @@ func headerDecodeConnError(err error) *ConnError {
 	return &ConnError{Code: frame.ErrCodeCompressionError, Reason: err.Error()}
 }
 
-// headerSlabPool recycles the byte backing for HPACK-decoded header
-// fields. The client layer transfers slab ownership via StreamEvent.Slab
-// and returns slabs here via GetHeaderSlabPool().Put in Response.Reset /
-// StreamResponse.Close.
-var headerSlabPool = sync.Pool{
-	New: func() any {
-		b := make([]byte, 0, 512)
-		return &b
-	},
-}
-
-// GetHeaderSlabPool returns the shared pool for header-slab byte buffers.
-// The client package calls this to return slabs after use.
-func GetHeaderSlabPool() *sync.Pool { return &headerSlabPool }
-
 // dataBufPool recycles the per-DATA-frame payload copy. OnData copies the
 // framer's reused read buffer into a pooled buffer rather than a fresh heap
 // allocation; the client transfers ownership via StreamEvent.DataSlab and
@@ -446,40 +431,6 @@ func (h *connHandler) checkContentLength(s *Stream) error {
 	return nil
 }
 
-// copyFieldsToSlab copies fields into one pooled byte slab and returns the
-// field slice viewing it, together with the slab so the caller can hand
-// ownership to the client (StreamEvent.Slab) or return it to the pool.
-//
-// Every Name and Value is a THREE-index slice, capacity clamped to its own
-// length. That is the load-bearing detail: the bytes of every field share one
-// backing array, so a two-index slice would leave capacity running to the end of
-// the slab, and a caller appending to one header's value would silently
-// overwrite the next header's bytes — no copy, no error, just another request's
-// headers rewritten in place.
-//
-// It exists because that clamp was applied to the response path and not to the
-// push-promise path, which was written as "same pattern as emitHeaderBlock" and
-// then diverged in two ways: two-index slices, and Indexing dropped on the
-// floor. One function, so the third caller cannot pick the wrong one to imitate.
-func copyFieldsToSlab(fields []hpack.HeaderField) ([]hpack.HeaderField, *[]byte) {
-	slabPtr := headerSlabPool.Get().(*[]byte)
-	*slabPtr = (*slabPtr)[:0]
-	copied := make([]hpack.HeaderField, len(fields))
-	for i, f := range fields {
-		nameOff := len(*slabPtr)
-		*slabPtr = append(*slabPtr, f.Name...)
-		valOff := len(*slabPtr)
-		*slabPtr = append(*slabPtr, f.Value...)
-		endOff := len(*slabPtr)
-		copied[i] = hpack.HeaderField{
-			Name:     (*slabPtr)[nameOff:valOff:valOff],
-			Value:    (*slabPtr)[valOff:endOff:endOff],
-			Indexing: f.Indexing,
-		}
-	}
-	return copied, slabPtr
-}
-
 func (h *connHandler) emitHeaderBlock(s *Stream, hb []byte, endStream bool) error {
 	h.scratch = h.scratch[:0]
 	err := h.dec.DecodeBlock(hb, func(f hpack.HeaderField) error {
@@ -513,20 +464,20 @@ func (h *connHandler) emitHeaderBlock(s *Stream, hb []byte, endStream bool) erro
 	// recycleStream zeroes s.id — reading it afterwards is the same race one
 	// field over.
 	streamID := s.id
-	// Build one slab for all header bytes, one slice for all fields.
-	// Ownership of the slab transfers to the client via StreamEvent.Slab;
-	// the client returns it to headerSlabPool in Response.Reset / sr.Close.
-	copied, slabPtr := copyFieldsToSlab(h.scratch)
+	// One pooled block for the whole header block: the bytes and the fields
+	// viewing them. Ownership transfers to the consumer, which gives it back
+	// with StreamEvent.Release.
+	blk := copyFieldsToBlock(h.scratch)
 	// Delivered and marked ended in one s.mu section — see Stream.deliverEnd.
 	if !s.deliverEnd(StreamEvent{
 		Type:      evType,
-		Headers:   copied,
-		Slab:      slabPtr,
+		Headers:   blk.fields,
+		Block:     blk,
 		EndStream: endStream,
 	}, endStream) {
-		// push dropped the event (channel overflow); return slab to pool.
-		*slabPtr = (*slabPtr)[:0]
-		headerSlabPool.Put(slabPtr)
+		// push dropped the event (channel overflow); nobody was delivered it, so
+		// this is still the only owner.
+		blk.Release()
 	}
 	if endStream {
 		h.streams.markStreamDone(streamID)
@@ -742,11 +693,11 @@ func (h *connHandler) handlePushPromiseBlock(parentStreamID, promisedStreamID ui
 		return nil
 	}
 
-	copied, slabPtr := copyFieldsToSlab(h.scratch)
+	blk := copyFieldsToBlock(h.scratch)
 
 	// Deliver the push event on the parent stream, gated on it still being the
 	// stream looked up above. A *Stream is pooled and the work between that
-	// lookup and here — reserving the promised stream, taking a slab from the
+	// lookup and here — reserving the promised stream, taking a block from the
 	// pool, copying every header field — is a window in which the application
 	// can finish the parent request, Close it, and a fresh NewStream can claim
 	// the struct. An ungated push would then announce this promise to whichever
@@ -758,11 +709,11 @@ func (h *connHandler) handlePushPromiseBlock(parentStreamID, promisedStreamID ui
 	// RFC 9113 §8.4.2 sanctions REFUSED_STREAM for declining a promise.
 	if !parent.pushIfID(parentStreamID, StreamEvent{
 		Type:         EventPushPromise,
-		Headers:      copied,
+		Headers:      blk.fields,
 		PushStreamID: promisedStreamID,
-		Slab:         slabPtr,
+		Block:        blk,
 	}) {
-		headerSlabPool.Put(slabPtr)
+		blk.Release()
 		_ = h.streams.rstStream(promisedStreamID, frame.ErrCodeRefusedStream)
 		return nil
 	}

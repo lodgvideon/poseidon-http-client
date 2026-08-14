@@ -227,10 +227,10 @@ var _ frame.Handler = (*benchPeerHandler)(nil)
 // benchDrain reads a stream to its end and returns every pooled buffer the
 // events carried, the way client.Response.Reset and StreamResponse.Close do in
 // production. Skipping it is not a small inaccuracy: conn hands pooled buffers
-// out through StreamEvent.Slab and StreamEvent.DataSlab and never reclaims them
-// itself, so a benchmark that drops them misses headerSlabPool on every request
-// and reports the pool's New function as if it were the path's own cost. The
-// old harness did exactly that, for 2 allocations per request.
+// out through StreamEvent.Release and StreamEvent.DataSlab and never reclaims
+// them itself, so a benchmark that drops them misses the header-block pool on
+// every request and reports the pool's New function as if it were the path's own
+// cost. The old harness did exactly that, for 2 allocations per request.
 //
 // It closes the stream too. Without Close the appClosed/connDone handshake
 // never completes, the stream is never recycled, and streamPool's hit rate is
@@ -243,10 +243,8 @@ func benchDrain(ctx context.Context, s StreamRef) error {
 			return err
 		}
 		// Return the buffers before inspecting anything that aliases them:
-		// ev.Headers points into ev.Slab, so this must be the last use of both.
-		if ev.Slab != nil {
-			GetHeaderSlabPool().Put(ev.Slab)
-		}
+		// ev.Headers is owned by ev.Block, so this must be the last use of both.
+		ev.Release()
 		if ev.DataSlab != nil {
 			GetDataBufPool().Put(ev.DataSlab)
 		}

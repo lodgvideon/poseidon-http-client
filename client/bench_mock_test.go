@@ -198,7 +198,7 @@ func BenchmarkDo_MockTransport(b *testing.B) {
 	ctx := context.Background()
 
 	var res client.Response
-	res.Reset() // preallocate Headers/Trailers/slabs backing
+	res.Reset() // preallocate Headers/Trailers/blocks backing
 
 	b.ResetTimer()
 	b.ReportAllocs()

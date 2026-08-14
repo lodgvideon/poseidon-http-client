@@ -24,8 +24,10 @@ const metadataCopyAllocs = 4
 // with Header and Trailer read, and folding two different measurements into one
 // constant is the drift allocgates_test.go already had to unpick once.
 //
-// Both directions are errors, same as every other gate here.
-const streamMetadataAllocCeiling = 6
+// Both directions are errors, same as every other gate here. Lowered 6 -> 4 by
+// #577, which stopped conn allocating a field slice per decoded header block —
+// two blocks per RPC, and this gate sits on top of conn.
+const streamMetadataAllocCeiling = 4
 
 // measureStreamRPC runs the full streaming shape — open, send, drain, read both
 // metadata blocks, close — and returns its steady-state allocation count.

@@ -194,9 +194,9 @@ func TestCloneFields_CopiesOutOfTheSlab(t *testing.T) {
 	backing := []byte("nameVALUE")
 	src := []conn.HeaderField{{Name: backing[:4], Value: backing[4:]}}
 	got := cloneFields(src)
-	copy(backing, "XXXXXXXXX") // simulate the slab being reused after the Put
+	copy(backing, "XXXXXXXXX") // simulate the block being reused after release
 	if string(got[0].Name) != "name" || string(got[0].Value) != "VALUE" {
-		t.Fatalf("cloneFields aliased the slab: %q / %q", got[0].Name, got[0].Value)
+		t.Fatalf("cloneFields aliased the block: %q / %q", got[0].Name, got[0].Value)
 	}
 }
 

@@ -35,8 +35,9 @@ type streamTarget interface {
 	// benign RST_STREAM(NO_ERROR) as a *StreamResetError. Missing this on one of
 	// the two paths is the bug that motivated this interface.
 	//
-	// slab may be nil; when it is not, the target takes ownership of it.
-	beginResponse(ctx context.Context, rs respStream, rel releaser, status int, slab *[]byte, endedOnHeaders bool)
+	// blk may be nil; when it is not, the target takes ownership of it and is
+	// responsible for releasing it.
+	beginResponse(ctx context.Context, rs respStream, rel releaser, status int, blk *conn.HeaderBlock, endedOnHeaders bool)
 }
 
 // beginStreaming runs everything the two streaming entry points share: open the
@@ -64,7 +65,7 @@ func (c *Client) beginStreaming(ctx context.Context, s protoStream, rel releaser
 		rel.release()
 		return perr
 	}
-	target.beginResponse(ctx, rs, rel, status, ev.Slab, ev.EndStream)
+	target.beginResponse(ctx, rs, rel, status, ev.Block, ev.EndStream)
 	return nil
 }
 
@@ -73,10 +74,10 @@ func (r *Response) headersOut() *[]conn.HeaderField { return &r.Headers }
 
 // beginResponse implements streamTarget: it wires the incremental body reader
 // the caller reads through Response.BodyReader.
-func (r *Response) beginResponse(ctx context.Context, rs respStream, rel releaser, status int, slab *[]byte, endedOnHeaders bool) {
+func (r *Response) beginResponse(ctx context.Context, rs respStream, rel releaser, status int, blk *conn.HeaderBlock, endedOnHeaders bool) {
 	r.Status = status
-	if slab != nil {
-		r.slabs = append(r.slabs, slab)
+	if blk != nil {
+		r.blocks = append(r.blocks, blk)
 	}
 	// The reader gets its own cancellable context, not the caller's ctx directly.
 	// Close cancels it, which is what unblocks a Read parked in Recv: closing the
@@ -98,10 +99,10 @@ func (r *Response) beginResponse(ctx context.Context, rs respStream, rel release
 func (sr *StreamResponse) headersOut() *[]conn.HeaderField { return &sr.Headers }
 
 // beginResponse implements streamTarget.
-func (sr *StreamResponse) beginResponse(ctx context.Context, rs respStream, rel releaser, status int, slab *[]byte, endedOnHeaders bool) {
+func (sr *StreamResponse) beginResponse(ctx context.Context, rs respStream, rel releaser, status int, blk *conn.HeaderBlock, endedOnHeaders bool) {
 	sr.Status = status
-	if slab != nil {
-		sr.slabs = append(sr.slabs, slab) // transfer slab ownership
+	if blk != nil {
+		sr.blocks = append(sr.blocks, blk) // transfer block ownership
 	}
 	sr.stream = rs
 	sr.release = rel

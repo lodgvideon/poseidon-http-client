@@ -27,12 +27,16 @@ import (
 // Both directions are errors. Above it, a per-RPC allocation came back; below
 // it, the path improved and the win is not locked in until this drops.
 // Lowered 5 -> 4 when conn stopped copying :authority into a string on every
-// request (#578). Nothing in grpc changed: the RPC path sits on conn, so a
-// conn-level allocation is a grpc-level one, and this gate is why that showed up
-// as a build failure instead of going unnoticed. The lesson is in which
-// direction the check has to run — changing a package means running the
-// allocation gates of everything BUILT ON it, not only its own.
-const unaryAllocCeiling = 4
+// request (#578), then 4 -> 2 when conn stopped allocating the field slice for
+// each decoded header block (#577). Nothing in grpc changed either time: the RPC
+// path sits on conn, so a conn-level allocation is a grpc-level one, and this
+// gate is why both showed up as a build failure instead of going unnoticed. The
+// lesson is in which direction the check has to run — changing a package means
+// running the allocation gates of everything BUILT ON it, not only its own.
+//
+// Two per RPC rather than one because a gRPC response carries TWO header blocks,
+// HEADERS and TRAILERS, and conn decoded a field slice for each.
+const unaryAllocCeiling = 2
 
 // TestInvokeInto_AllocsPerCall gates the win against the allocating form on the
 // same connection.
