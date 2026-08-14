@@ -1,9 +1,11 @@
 package http1_test
 
 import (
+	"bufio"
 	"context"
 	"errors"
 	"net"
+	"os"
 	"testing"
 	"time"
 
@@ -185,5 +187,115 @@ func TestReadBodyChunk_CtxCancelUnblocks(t *testing.T) {
 		}
 	case <-time.After(15 * time.Second):
 		t.Fatal("ReadBodyChunk did not return after ctx cancellation")
+	}
+}
+
+// deadlineCtx carries a deadline and nothing else: Done returns nil, so it can
+// never be cancelled. context.Context allows exactly this — "Done may return nil
+// if this context can never be canceled" — and a caller is entitled to have the
+// deadline it declares enforced either way.
+//
+// It exists to separate the two mechanisms that can end a stalled read, which a
+// context.WithTimeout cannot. ReadResponse installs ctx's deadline on the socket;
+// the watchdog independently installs one in the past when ctx is cancelled, and
+// a context.WithTimeout is cancelled at its deadline. So against a WithTimeout
+// either mechanism ALONE finishes the read with the same error, and a test using
+// one cannot tell which did the work — deleting the socket-deadline arming
+// outright leaves the whole http1 and client suites green.
+//
+// armWatch declines a context whose Done() is nil, so with this one there is no
+// watchdog and exactly one thing left that can end the read: the deadline
+// ReadResponse puts on the socket.
+type deadlineCtx struct{ dl time.Time }
+
+func (c deadlineCtx) Deadline() (time.Time, bool) { return c.dl, true }
+func (c deadlineCtx) Done() <-chan struct{}       { return nil }
+func (c deadlineCtx) Err() error                  { return nil }
+func (c deadlineCtx) Value(any) any               { return nil }
+
+// TestReadResponse_StalledPeerIsThisContextsDeadline pins the promise a caller
+// was given: a peer that accepts the request and then says nothing ends the
+// request at the caller's own budget, reported as context.DeadlineExceeded.
+//
+// This is the mechanism the fix for a stalled read rests on, and nothing pinned
+// it. Request.Timeout promises context.DeadlineExceeded and CLIENT_GUIDE repeats
+// that such a request is never retried; the socket says `i/o timeout`, which does
+// not match it, so isHardStop missed the case and a load generator's IsRetryable
+// — a net.Error whose Timeout() is true is transient — replayed a request that
+// had already spent its whole budget against the same silent peer.
+//
+// Both halves are asserted, as the integration leg does: the error still names
+// the socket so a log can say what stalled, AND it classifies as this context's
+// deadline so a retry classifier stops. Checking only the second would also pass
+// for a request that failed before reaching http1 at all.
+func TestReadResponse_StalledPeerIsThisContextsDeadline(t *testing.T) {
+	ex := silentPeer(t).NewExchange()
+	ctx := deadlineCtx{dl: time.Now().Add(300 * time.Millisecond)}
+
+	if err := ex.WriteRequest(ctx, getFields(), true); err != nil {
+		t.Fatalf("WriteRequest: %v", err)
+	}
+
+	done := make(chan error, 1)
+	go func() {
+		_, _, rerr := ex.ReadResponse(ctx)
+		done <- rerr
+	}()
+
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("ReadResponse against a peer that never answers returned nil, want an error")
+		}
+		if !errors.Is(err, os.ErrDeadlineExceeded) {
+			t.Errorf("ReadResponse against a stalled peer = %v, want the socket error kept "+
+				"as a cause — a log needs to name what stalled", err)
+		}
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Errorf("ReadResponse against a stalled peer = %v, want context.DeadlineExceeded — "+
+				"a read deadline on this connection can only be this exchange's own budget "+
+				"running out, and a caller classifies retries on that", err)
+		}
+	case <-time.After(15 * time.Second):
+		t.Fatal("ReadResponse never returned against a silent peer: the deadline its " +
+			"context carries was never installed on the socket, so nothing bounds the read")
+	}
+}
+
+// TestReadResponse_ClearsADeadlineItsContextDoesNotCarry pins the other half of
+// the same unconditional arming: an exchange whose context has NO deadline must
+// run without one, whatever was on the socket before it.
+//
+// TestReadDeadline_DoesNotLeakToTheNextExchange covers a deadline this package
+// installed itself and so cannot fail once the arming is gone — with nothing
+// installing a deadline there is nothing left to leak. The deadline here arrives
+// from outside instead: a caller that set one for its own dial or handshake
+// bookkeeping and handed the net.Conn over without clearing it. Only the zero
+// value written on entry rescues that request.
+func TestReadResponse_ClearsADeadlineItsContextDoesNotCarry(t *testing.T) {
+	client, server := net.Pipe()
+	t.Cleanup(func() { _ = client.Close() })
+	go func() {
+		defer server.Close()
+		br := bufio.NewReader(server)
+		drainReqHead(br)
+		time.Sleep(150 * time.Millisecond) // let the caller's stale deadline lapse first
+		_, _ = server.Write([]byte("HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok"))
+		time.Sleep(100 * time.Millisecond)
+	}()
+
+	// The caller's leftover, elapsing well before the response arrives.
+	if err := client.SetReadDeadline(time.Now().Add(50 * time.Millisecond)); err != nil {
+		t.Fatalf("SetReadDeadline: %v", err)
+	}
+
+	ex := http1.NewConn(client).NewExchange()
+	if err := ex.WriteRequest(context.Background(), getFields(), true); err != nil {
+		t.Fatalf("WriteRequest: %v", err)
+	}
+	if _, _, err := ex.ReadResponse(context.Background()); err != nil {
+		t.Fatalf("ReadResponse with a context carrying no deadline = %v, want nil — "+
+			"a deadline this exchange never asked for ended it at an instant that had "+
+			"nothing to do with it", err)
 	}
 }

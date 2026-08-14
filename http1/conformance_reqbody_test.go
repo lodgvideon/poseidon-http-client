@@ -126,8 +126,13 @@ func TestConformance_RFC9110_Sec8_6_RequestContentLengthMustBe1DIGIT(t *testing.
 // that ends before its Content-Length is satisfied leaves the connection
 // unusable. RFC 9112 §6.3 rule 6 makes the message incomplete; the stream
 // position is then indeterminate, so reuse would begin the next response
-// somewhere inside this one. Every other framing-defect path here clears
-// keepAlive, and KeepAlive()'s contract promises it.
+// somewhere inside this one, and KeepAlive()'s contract promises it does not.
+//
+// What this holds down is ReadBodyChunk's deferred condemn, which fires on any
+// non-nil err. Worth naming, because it did not use to hold down anything: the
+// premature-EOF branch condemned a second time on its own, so the assertion
+// below passed with either site deleted and caught neither. The duplicate is
+// gone; deleting what remains fails this test.
 func TestConformance_RFC9112_Sec6_3_Rule6_PrematureEOFNotPoolable(t *testing.T) {
 	ex := wireExchange(t, "GET", "HTTP/1.1 200 OK\r\nContent-Length: 10\r\n\r\nHELLO")
 	if _, _, err := ex.ReadResponse(context.Background()); err != nil {

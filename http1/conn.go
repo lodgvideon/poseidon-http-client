@@ -2361,12 +2361,19 @@ func (ex *Exchange) ReadBodyChunk(buf []byte) (n int, done bool, err error) {
 				// Premature EOF before Content-Length satisfied. RFC 9112 §6.3
 				// rule 6 makes the message incomplete, and this connection's
 				// stream position is now indeterminate, so it must not be reused —
-				// every other framing-defect path in this file clears keepAlive,
-				// and KeepAlive()'s documented contract says so. client/ happened
-				// to be safe because h1Exchange.Close forces release(false), but
-				// http1 is a public package and a direct caller trusting
-				// KeepAlive() would have pooled a truncated stream.
-				ex.condemn()
+				// KeepAlive()'s documented contract says so, and client/ only
+				// happened to be safe because h1Exchange.Close forces
+				// release(false); http1 is a public package and a direct caller
+				// trusting KeepAlive() would have pooled a truncated stream.
+				//
+				// The condemning is the deferred one at the top of this function,
+				// which fires on any non-nil err. This path returns one, so a
+				// condemn here as well was a second spelling of the same decision —
+				// and the cost of that was not the call, it was that
+				// TestConformance_RFC9112_Sec6_3_Rule6_PrematureEOFNotPoolable
+				// still passed with EITHER site removed, so neither was pinned.
+				// With one left the test fails when it goes, which is the whole
+				// point of "no exit path has to remember".
 				return n, true, fmt.Errorf("http1: premature EOF: got %d of %d bytes", ex.bodyRead, ex.contentLen)
 			}
 			// Final body bytes arrived coalesced with io.EOF in a single
