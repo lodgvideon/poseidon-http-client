@@ -1,0 +1,196 @@
+{
+  "_doc": [
+    "The declared partition of the quic-interop-runner matrix for this client.",
+    "It is the expected side of the comparison performed by assert_partition.py;",
+    "the observed side is the runner's own --json output. Every cell is asserted",
+    "in BOTH directions: a 'succeeded' row that comes back 'unsupported' is a",
+    "capability regression, and an 'unsupported' row that comes back 'succeeded'",
+    "means the exit-127 table in test/interop/quic/main.go now lies about us.",
+    "Either way the fix is a code change plus one edit here, never a retry.",
+    "",
+    "'expect' is one result for every server, or an object keyed by server when",
+    "the partition genuinely differs - see rebind-port and connectionmigration,",
+    "where the outcome is decided by how strict the peer is.",
+    "",
+    "An 'expect' of null - for a whole cell, or for one server inside the object",
+    "- declares the cell deliberately NOT asserted. It is still printed with",
+    "whatever it actually did, on every run, so it can never go unnoticed; it",
+    "just does not decide the verdict. That is the only tolerance in this file,",
+    "it costs a named cell and a stated reason, and today it is spent on exactly",
+    "two (cell, server) pairs whose outcome was measured to be probabilistic.",
+    "",
+    "'testcase' is the TESTCASE string the runner hands the container, which is",
+    "NOT the matrix cell name: TestCase.testname() maps many cells onto one.",
+    "It is recorded so a row can be traced to its entry in main.go's support map.",
+    "",
+    "Third-party images are pinned by digest. A tag would let someone else's",
+    "release move this gate with no commit of ours.",
+    "",
+    "BASELINE. Every value below was observed on GitHub-hosted ubuntu-24.04",
+    "runners, in THREE independent full-matrix runs of this workflow (actions",
+    "runs 31852258646, 31853006121 and 31854123137). Nineteen of the twenty-two",
+    "cells were identical in all three runs against both servers.",
+    "",
+    "The third run is the reason this file says what it says. After two runs the",
+    "three fault-injection cells looked stable on one server each, and this file",
+    "briefly asserted that. The third run contradicted it on both servers, so",
+    "n=2 was simply not enough to tell a stable cell from a coin flip. Anyone",
+    "tempted to tighten a not-asserted row back up should collect more samples",
+    "than that, and should note that all five not-asserted pairs are network",
+    "fault injection - none of them is a capability the client claims."
+  ],
+
+  "runner": {
+    "repo": "https://github.com/quic-interop/quic-interop-runner",
+    "commit": "1d6f6554ac8e3b7c4cca0e3d40fd69f661420673"
+  },
+
+  "client": {
+    "name": "poseidon",
+    "image": "poseidon-interop:ci",
+    "url": "https://github.com/lodgvideon/poseidon-http-client"
+  },
+
+  "servers": {
+    "quic-go": {
+      "image": "martenseemann/quic-go-interop@sha256:10c414b17913fbe6f1303c686547443fa636328e8e00a214753da0988e4ea77b",
+      "url": "https://github.com/quic-go/quic-go"
+    },
+    "ngtcp2": {
+      "image": "ghcr.io/ngtcp2/ngtcp2-interop@sha256:236354cf9f338478ba62107122de7243ebbaf9d1303b2ffa16201f9835c62da3",
+      "url": "https://github.com/ngtcp2/ngtcp2"
+    }
+  },
+
+  "sim_image": "martenseemann/quic-network-simulator@sha256:c23d82a55caffe681b1bdae65d4d30d23e1283141a414a7f02ee56cf15f9c6b9",
+  "endpoint_base_image": "martenseemann/quic-network-simulator-endpoint@sha256:3b2b9e6fa317da238c8140a7b6d2bf8d4d45a8464b873eecac3ff2a32520b71a",
+
+  "short_leg_tests": ["handshake", "transfer", "retry"],
+
+  "cases": {
+    "handshake": {
+      "testcase": "handshake",
+      "expect": "succeeded",
+      "why": "the base case: one connection, one file"
+    },
+    "longrtt": {
+      "testcase": "handshake",
+      "expect": "succeeded",
+      "why": "the handshake case again, with a long RTT"
+    },
+    "transfer": {
+      "testcase": "transfer",
+      "expect": "succeeded",
+      "why": "several streams in flight on one connection"
+    },
+    "multiplexing": {
+      "testcase": "transfer",
+      "expect": "succeeded",
+      "why": "enough streams to hit the peer's limit and resume on MAX_STREAMS"
+    },
+    "retry": {
+      "testcase": "retry",
+      "expect": "succeeded",
+      "why": "the server forces a Retry; the token is echoed in a second Initial"
+    },
+    "http3": {
+      "testcase": "http3",
+      "expect": "succeeded",
+      "why": "the only cell that uses ALPN h3 and the http3 package"
+    },
+    "blackhole": {
+      "testcase": "transfer",
+      "expect": "succeeded",
+      "why": "a transfer that survives the link going dark"
+    },
+    "amplificationlimit": {
+      "testcase": "transfer",
+      "expect": "succeeded",
+      "why": "a 9-certificate chain, so the server is held at the anti-amplification limit"
+    },
+    "transferloss": {
+      "testcase": "transfer",
+      "expect": "succeeded",
+      "why": "a transfer under 30% packet loss"
+    },
+    "transfercorruption": {
+      "testcase": "transfer",
+      "expect": "succeeded",
+      "why": "a transfer under 30% packet corruption"
+    },
+    "ipv6": {
+      "testcase": "transfer",
+      "expect": "succeeded",
+      "why": "the same transfer over IPv6 only"
+    },
+    "rebind-port": {
+      "testcase": "transfer",
+      "expect": {
+        "quic-go": "succeeded",
+        "ngtcp2": "failed"
+      },
+      "why": "the simulator rewrites the client's source port mid-transfer. Against quic-go the transfer completes; against ngtcp2 it stalls and the client gives up with 'read udp 193.167.0.100:...->193.167.100.100:443: i/o timeout'. Stable across both baseline runs on both servers, so this is a property of the pairing and not noise. The mechanism has not been diagnosed - the client does answer PATH_CHALLENGE (quic/conn_recv.go, OnPathChallenge) and does track peer connection IDs (quic/connid.go), so do not assume either is the cause; the pcaps are in the run's interop-logs-ngtcp2 artifact."
+    },
+    "rebind-addr": {
+      "testcase": "transfer",
+      "expect": {
+        "quic-go": null,
+        "ngtcp2": "failed"
+      },
+      "why": "the same as rebind-port, with the source address rewritten as well as the port. Deterministic against ngtcp2 - failed in all three baseline runs, the same i/o timeout - so that half is asserted. NOT ASSERTED against quic-go: it succeeded in the first two baseline runs and failed in the third, so the same stall this client has against ngtcp2 is reachable against quic-go too, just not every time."
+    },
+    "connectionmigration": {
+      "testcase": "transfer",
+      "expect": {
+        "quic-go": "unsupported",
+        "ngtcp2": "failed"
+      },
+      "why": "the cell reaches the CLIENT as a plain 'transfer', so the support table cannot decline it, and this client never performs an active migration. The two servers disagree about the cell rather than about us: quic-go's server exits 127 for TESTCASE=connectionmigration, which the runner reads as unsupported for the whole cell, while ngtcp2 serves it - the transfer then completes ('Check of downloaded files succeeded' in the log) and the runner still fails the cell, because no migration appears in the trace."
+    },
+    "handshakeloss": {
+      "testcase": "multiconnect",
+      "expect": null,
+      "why": "NOT ASSERTED on either server: measured probabilistic. 50 sequential handshakes under 30% packet loss, each against the hard 10s per-connection cap (handshakeTimeout, quic/pto.go) - the first baseline failure logged 'connection 3/50: handshake: context deadline exceeded'. Over three baseline runs it went F/S/S against quic-go and S/S/F against ngtcp2. Asserting any value would make the tag gate red for a reason that is neither a regression nor a fix, and a gate that flakes gets switched off. Raise the cap or make it adaptive and this becomes assertable; until then the observed value is printed on every run."
+    },
+    "handshakecorruption": {
+      "testcase": "multiconnect",
+      "expect": null,
+      "why": "NOT ASSERTED on either server, for exactly the reason handshakeloss is not: the same 50 connections against the same 10s cap, with 30% corruption instead of loss. S/F/F against quic-go and S/S/F against ngtcp2 over the three baseline runs. Note this does not match test/interop/quic/README.md, which records it as a deterministic failure; that measurement came from a WSL2 host whose clock stepped backwards mid-run, and the truth is that it is neither reliably pass nor reliably fail."
+    },
+    "chacha20": {
+      "testcase": "chacha20",
+      "expect": "unsupported",
+      "why": "the ClientHello must offer TLS_CHACHA20_POLY1305_SHA256 alone; crypto/tls ignores Config.CipherSuites for TLS 1.3"
+    },
+    "keyupdate": {
+      "testcase": "keyupdate",
+      "expect": "unsupported",
+      "why": "the client never initiates a key update - it stops at the AEAD confidentiality limit and closes (quic/conn_seal.go)"
+    },
+    "resumption": {
+      "testcase": "resumption",
+      "expect": "unsupported",
+      "why": "session resumption is an explicit non-goal: no session cache is installed (quic/handshake.go)"
+    },
+    "zerortt": {
+      "testcase": "zerortt",
+      "expect": "unsupported",
+      "why": "0-RTT is an explicit non-goal, for the same reason resumption is (quic/handshake.go)"
+    },
+    "ecn": {
+      "testcase": "ecn",
+      "expect": "unsupported",
+      "why": "outgoing packets are not ECN-marked and ACK_ECN counts are parsed but discarded (quic/frame.go)"
+    },
+    "v2": {
+      "testcase": "v2",
+      "expect": "unsupported",
+      "why": "QUIC v1 only: the version_information transport parameter is not sent, so compatible version negotiation never starts"
+    },
+    "versionnegotiation": {
+      "testcase": "versionnegotiation",
+      "expect": null,
+      "why": "NOT ASSERTED because it never runs: it is declared in main.go's support table, but TestCaseVersionNegotiation is absent from the pinned runner's TESTCASES_QUIC list, so the matrix does not ask for it. Kept here so the declared set stays the set main.go declares."
+    }
+  }
+}
