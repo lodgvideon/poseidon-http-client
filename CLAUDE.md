@@ -200,8 +200,9 @@ specific section behavior.
   intended, not a flake. Same split as the bench gate: `pull_request` runs a
   short leg (two servers × `handshake`, `transfer`, `retry`, ~2m45s), `v*` tags
   and `workflow_dispatch` run the whole non-measurement matrix (~13 min). There
-  is no retry; the only tolerance is five `(cell, server)` pairs with
-  `"expect": null`, all network fault injection, none in the PR leg. The three
+  is no retry; the only tolerance is `"expect": null`, spent on five
+  `(cell, server)` pairs of network fault injection — none of them in the PR leg
+  — plus `versionnegotiation`, which the pinned runner never asks for. The three
   `h3-interop*` jobs in `integration.yml` are unrelated — they test the library's
   own HTTP/3 client against real servers, not this endpoint binary.
 - `frame.NewFramer(w io.Writer, r io.Reader)` — **writer first**, then
