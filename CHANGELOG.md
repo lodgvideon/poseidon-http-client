@@ -619,6 +619,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **The QUIC varint decoder now inlines at every call site.** RFC 9000 §16
+  varints are read roughly nine times per packet — packet numbers, frame types,
+  stream IDs, offsets, lengths — and `bytesx.ReadVarint` cost 169 against the
+  compiler's inlining budget of 80, so it was never inlined at any of its twelve
+  call sites. Reading the 2-, 4- and 8-byte forms through `encoding/binary`
+  (one load and a byte swap, instead of a hand-rolled shift-and-or chain) brings
+  the cost to 74 and all twelve sites inline.
+
+  Measured v0.12.0 → this release, interleaved `-count=24` with an A/A control
+  in the same session: `quic.ParseFrames` **−15.6%**, `http3.ParseFrameHeader`
+  **−6.2%**, `bytesx.ReadVarint_1` **−40.2%**, `_2` **−16.6%**, all at p≤0.001.
+  The 4- and 8-byte forms are unchanged — those are bound by the switch dispatch,
+  not by the load.
+
+  **The trade is `http3.ReadStreamType`, which stops inlining and costs +54%.**
+  It runs about three times per connection against a saving on every packet, so
+  the exchange is lopsided in the right direction, but it is a real cost and is
+  recorded rather than netted out. (#695)
+
 - **`BenchmarkStaticIndex_Hit` measured the one input the static-table lookup is
   worst at, and it was the only `staticIndex` benchmark there was.** It pinned
   `:method`/`GET` — table index 2, which the linear scan #459 replaced resolved
