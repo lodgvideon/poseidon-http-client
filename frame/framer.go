@@ -153,7 +153,29 @@ func (f *Framer) WriteClientPreface() error {
 // tracer. detail is the frame's logical payload — padding excluded — when the
 // caller has it contiguously in hand, and nil when it does not; it is read only
 // to fill in the type-specific fields of the trace event and is never written.
+//
+// The tracer check is up here, and the traced case is a separate function, for
+// a reason that does not show in the source. h and detail arrive in registers,
+// and reporting them AFTER the write makes them live across both calls below —
+// so the compiler spills all eight registers to the stack in the prologue, on
+// every frame, whether or not anyone is watching. Hoisting the check leaves the
+// untraced path with nothing to keep alive but f, and the spills sink into the
+// branch that actually needs them. This is the whole of #686; the traced body
+// is unchanged, and both paths still funnel through here.
 func (f *Framer) writeHeader(h FrameHeader, detail []byte) error {
+	if f.tracer != nil {
+		return f.writeHeaderTraced(h, detail)
+	}
+	WriteFrameHeader(f.hdrBuf[:], h)
+	_, err := f.w.Write(f.hdrBuf[:])
+	return err
+}
+
+// writeHeaderTraced is writeHeader's body from before the split, reached only
+// when a tracer is installed. It re-checks the tracer through traceOut rather
+// than calling emit directly, so that the reporting decision is still made
+// after the write completes, exactly as it was.
+func (f *Framer) writeHeaderTraced(h FrameHeader, detail []byte) error {
 	WriteFrameHeader(f.hdrBuf[:], h)
 	if _, err := f.w.Write(f.hdrBuf[:]); err != nil {
 		return err
