@@ -9,6 +9,8 @@ package bytesx
 // byte order. This is a DIFFERENT encoding from the HPACK/QPACK prefixed
 // integer (RFC 7541 §5.1, see hpack/integer.go) — do not conflate the two.
 
+import "encoding/binary"
+
 // MaxVarint is the largest value a QUIC varint can encode (2^62 - 1).
 const MaxVarint uint64 = (1 << 62) - 1
 
@@ -70,31 +72,37 @@ func WriteVarint(b []byte, v uint64) int {
 // The decode is faithful to the on-wire length and does NOT reject non-minimal
 // encodings (RFC 9000 §16 permits them). A caller whose field requires the
 // minimal encoding compares n against VarintLen(v) itself.
+//
+// The multi-byte cases assemble the value with encoding/binary instead of a
+// byte-at-a-time shift-or chain. The compiler lowers each BigEndian.UintNN to
+// one wide load plus BSWAP, and clearing the two length bits from the assembled
+// integer is exactly equivalent to clearing them from the first byte. That
+// matters for more than instruction count: the shift-or form cost 169 against
+// the inliner's budget of 80, so every decode was a real call, and QUIC and
+// HTTP/3 decode several varints per packet. This form costs 74 and is inlined
+// into its callers — TestReadVarintIsInlinable fails if an edit pushes it back
+// over the budget.
 func ReadVarint(b []byte) (v uint64, n int) {
 	if len(b) == 0 {
 		return 0, 0
 	}
 	switch b[0] >> 6 {
 	case 0:
-		return uint64(b[0] & 0x3f), 1
+		return uint64(b[0]), 1
 	case 1:
 		if len(b) < 2 {
 			return 0, 0
 		}
-		_ = b[1]
-		return uint64(b[0]&0x3f)<<8 | uint64(b[1]), 2
+		return uint64(binary.BigEndian.Uint16(b) & 0x3fff), 2
 	case 2:
 		if len(b) < 4 {
 			return 0, 0
 		}
-		_ = b[3]
-		return uint64(b[0]&0x3f)<<24 | uint64(b[1])<<16 | uint64(b[2])<<8 | uint64(b[3]), 4
+		return uint64(binary.BigEndian.Uint32(b) & 0x3fff_ffff), 4
 	default:
 		if len(b) < 8 {
 			return 0, 0
 		}
-		_ = b[7]
-		return uint64(b[0]&0x3f)<<56 | uint64(b[1])<<48 | uint64(b[2])<<40 | uint64(b[3])<<32 |
-			uint64(b[4])<<24 | uint64(b[5])<<16 | uint64(b[6])<<8 | uint64(b[7]), 8
+		return binary.BigEndian.Uint64(b) & 0x3fff_ffff_ffff_ffff, 8
 	}
 }
