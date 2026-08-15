@@ -447,8 +447,14 @@ func (c *Conn) maybeBroadcastSendWindow() {
 // records the first terminating error and closes c.done exactly once so every
 // blocked WaitReadable / WaitSendable wakes. Idempotent and first-error-wins —
 // later callers (there are several independent teardown paths) no-op. Assumes
-// c.mu is held. PR 2b calls it only from closeWithErrorLocked as the latch;
-// rerouting the other teardown paths through it is PR 2c.
+// c.mu is held.
+//
+// Every terminal path now funnels here: closeWithErrorLocked (which covers
+// Close, fail's CONNECTION_CLOSE and sealPacket's AEAD-limit close), idleClose,
+// the stateless-reset detection, Poll's reader fatals, and Establish's
+// abandoned handshake. Nothing outside this file may latch by hand — see
+// TestConn_Establish_LatchesOnEveryErrorPath for why the Establish one is a
+// wrapper around the body rather than a call at each return.
 func (c *Conn) terminateLocked(err error) {
 	if c.terminated {
 		return

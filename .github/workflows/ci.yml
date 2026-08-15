@@ -81,6 +81,41 @@ jobs:
       - name: Compile-check debug build tag
         run: go build -tags poseidondebug ./... && go vet -tags poseidondebug ./...
 
+  # The QUIC handshake rides on crypto/tls's QUICConn, whose handshake goroutine
+  # changed shape in Go 1.26: 1.25 wires its escape hatch to the context passed to
+  # QUICConn.Start (`c.quic.cancelc = handshakeCtx.Done()`), 1.26 does an
+  # unconditional `c.quic.blockedc <- struct{}{}` that only QUICConn.Close drains.
+  # A teardown path that forgets hs.Close therefore leaks a goroutine on 1.26 and
+  # is invisible on 1.25 — #683 was exactly that, and the `test` job above could
+  # not have caught it at any effort. This job is the second pair of eyes.
+  #
+  # Scoped to quic and http3 on purpose: this is about one stdlib surface, not
+  # about being an early-adopter gate for the whole module.
+  quic-next-toolchain:
+    runs-on: ubuntu-24.04
+    # go.mod pins `toolchain go1.25.13` (#640, two stdlib CVEs) and that pin
+    # stays. But the directive would make the 1.26 installed below switch BACK to
+    # 1.25.13, and this job would then silently re-run what `test` already ran —
+    # green, and covering nothing, which is the failure mode the `test` job's own
+    # comment above documents twice. GOTOOLCHAIN=local forbids the switch, and
+    # the assertion step fails the job if the switch happened anyway.
+    env:
+      GOTOOLCHAIN: local
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version: '1.26'
+          cache: true
+      - name: Assert this job really runs Go 1.26
+        run: |
+          v=$(go env GOVERSION)
+          case "$v" in
+            go1.26*) echo "running $v" ;;
+            *) echo "expected go1.26.x, got $v: GOTOOLCHAIN=local is not holding and go.mod's toolchain directive won, so this job covers nothing" >&2; exit 1 ;;
+          esac
+      - run: go test -race -count=1 ./quic/ ./http3/
+
   fuzz-corpus-replay:
     runs-on: ubuntu-24.04
     steps:

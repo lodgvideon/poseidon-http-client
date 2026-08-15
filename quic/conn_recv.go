@@ -14,6 +14,10 @@ import (
 // anti-deadlock PTO (§6.2.2.1) cannot probe a server that acknowledges but never
 // completes forever; the bound is WithHandshakeTimeout's value, defaulting to 10
 // seconds, and the caller's ctx deadline, if nearer, still applies.
+//
+// An abandoned handshake is a terminal path, so every error return latches
+// terminateLocked — the connection reports itself terminated and crypto/tls's
+// handshake goroutine is released. The caller must discard the Conn.
 func (c *Conn) Establish(ctx context.Context) error {
 	// Hold c.mu for the whole handshake so its calls to fail (and the send/recv
 	// helpers) are unconditionally assume-held internals — one convention with no
@@ -30,6 +34,27 @@ func (c *Conn) Establish(ctx context.Context) error {
 	}
 	ctx, cancel := context.WithTimeout(ctx, hsTimeout)
 	defer cancel()
+	err := c.handshakeLocked(ctx)
+	if err != nil {
+		// Catch-all latch, the shape Poll already uses: terminateLocked is where
+		// c.hs.Close() runs, and crypto/tls parks a QUICConn's handshake on its own
+		// goroutine that nothing else releases — a handshake given up on leaks it,
+		// plus the tls.QUICConn and its buffers, for the process lifetime. Wrapping
+		// the body rather than latching at each return is the point: the latch "must
+		// not miss", and a per-return list is something a later error return can be
+		// added to without anyone noticing. Idempotent and first-error-wins, so a
+		// path that already closed (fail's CONNECTION_CLOSE) keeps its own error,
+		// and a caller that also calls Close afterwards is a no-op.
+		c.terminateLocked(err)
+	}
+	return err
+}
+
+// handshakeLocked is Establish's body: the client's Initial flight, then the
+// read-and-drive loop until the handshake completes. Assumes c.mu is held and
+// that ctx already carries the whole-handshake bound. Its error returns are
+// latched by Establish, which is why none of them latch here.
+func (c *Conn) handshakeLocked(ctx context.Context) error {
 	if err := c.sendInitialFlight(ctx); err != nil {
 		return err
 	}
@@ -76,6 +101,9 @@ func (c *Conn) Poll(ctx context.Context) error {
 		return err
 	}
 	if err := ctx.Err(); err != nil {
+		// ctx here is the connection-lifetime ctx (both callers pass connCtx), so
+		// its cancel IS the connection ending — latched like every other return.
+		c.terminateLocked(err)
 		c.mu.Unlock()
 		return err
 	}
@@ -105,6 +133,7 @@ func (c *Conn) Poll(ctx context.Context) error {
 	// Arm→recheck guard: a cancel that fired before we armed must not be masked by
 	// the freshly-armed future deadline (the deadline-clobber race).
 	if err := ctx.Err(); err != nil {
+		c.terminateLocked(err)
 		c.mu.Unlock()
 		return err
 	}

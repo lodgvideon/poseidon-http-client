@@ -255,6 +255,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`quic.Conn.Establish` did not latch `terminateLocked`, so an abandoned
+  handshake leaked the `crypto/tls` handshake goroutine.** `terminateLocked` is
+  the single-close latch, and its own doc says it "runs once on every terminal
+  path, which makes it the one place that must not miss" — `Establish` was a
+  path it missed. All five of its error returns went straight back to the
+  caller, so `c.hs.Close()` never ran. `crypto/tls` parks a `QUICConn`'s
+  handshake on a goroutine that only `Close` releases, so every handshake given
+  up on stranded that goroutine plus the `tls.QUICConn` and its buffers, for the
+  process lifetime. A client dialling an unreachable or brownout peer
+  accumulated one per attempt, and `http3.Dial` is such a caller: it closes the
+  socket on a failed `Establish` and nothing else.
+
+  `Establish` now latches by wrapping its body rather than by a call at each
+  return, so a future error return cannot be added outside the latch. Nothing
+  observable changes for a successful handshake; for a failed one the connection
+  reports itself terminated, which is what it always claimed to be. Two smaller
+  gaps of the same shape went with it: `Poll`'s doc promised "every error return
+  latches `terminateLocked`" while its two `ctx.Err()` returns did not, and the
+  "rerouting the other teardown paths through it is PR 2c" notes in `conn.go`
+  and `close.go` described work that had since been done everywhere but here.
+
+  On Go 1.25 the leak is invisible: `crypto/tls` wires the handshake goroutine's
+  escape hatch to the context handed to `QUICConn.Start`, which is the one
+  `Establish` cancels on its way out, so the goroutine is released either way.
+  Go 1.26 replaced that with an unconditional channel send, and the leak became
+  permanent and deterministic — it is what turned `#678`'s own
+  `TestConn_HandshakeTimeout_RescuesALiveHandshake` into a `synctest` deadlock
+  panic there. `TestConn_Establish_LatchesOnEveryErrorPath` therefore asserts the
+  toolchain-independent half of the same single call — after a failed
+  `Establish` a caller parked on the connection wakes carrying the handshake's
+  error instead of hanging — with one row per error return, and the new
+  `quic-next-toolchain` CI job runs `quic` and `http3` under Go 1.26 so the
+  goroutine itself stays watched.
+
 - **`Shutdown` armed a 200 ms write deadline on the transport and never cleared
   it, so every send in the graceful drain failed with `i/o timeout`.**
   `writeGoAwayBestEffort` bounds its own write with `closeGoAwayDeadline` so an
