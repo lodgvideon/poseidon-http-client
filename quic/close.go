@@ -93,9 +93,10 @@ func (c *Conn) CloseWithError(app bool, code uint64, reason string) error {
 func (c *Conn) closeWithErrorLocked(app bool, code uint64, reason string) error {
 	// Latch the single-close state (docs/HTTP3_DESIGN.md §3.3): record the
 	// terminating error once and close c.done so any blocked WaitReadable /
-	// WaitSendable wakes. Idempotent and first-error-wins. PR 2b wires the latch
-	// here only; routing the other teardown paths (idleClose, statelessReset, the
-	// AEAD-limit close, the reader's fatal) through it is PR 2c.
+	// WaitSendable wakes. Idempotent and first-error-wins, so this is a no-op when
+	// a teardown that latched first (idleClose, statelessReset, a Poll fatal, an
+	// abandoned Establish) got here — and their error, not ErrConnClosed, is the
+	// one the caller reads back.
 	c.terminateLocked(ErrConnClosed)
 	if c.closed {
 		return c.pc.Close()
