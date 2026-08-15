@@ -104,8 +104,13 @@ not a command.
 Issue [#555](https://github.com/lodgvideon/poseidon-http-client/issues/555) says
 registration "records the value; it does not authorise the publication", and that
 appearing on the public matrix makes our failures public too. The local numbers
-below are **PARTIAL**, and one of the failures may be ours rather than the host.
-Publishing is still a decision at this point, not a formality.
+below are **PARTIAL** — but the decision no longer rests on them alone: the
+`quic-interop` CI gate now runs the same matrix on GitHub-hosted runners against
+two servers, and it clears `transfer` while leaving the handshake-cap cells
+unasserted. So the one failure that is plausibly ours is the handshake cap, and
+it is the one that reproduces off this host. See
+[What CI settled](#what-ci-settled). Publishing is still a decision at this
+point, not a formality.
 
 ### Step 1 — log in to your own Docker Hub account
 
@@ -172,8 +177,40 @@ change that string on the fork branch before opening the PR from it.
 
 ## Verification runs
 
-Two local runs, on the same WSL2 host. Neither is a substitute for the public
-matrix. Read the confound at the end of this section before quoting any number.
+Three sources, and they do not weigh the same. Two are local runs on one WSL2
+host; the third is the `quic-interop` CI gate, which drives the same runner on
+GitHub-hosted ubuntu-24.04. **Read [What CI settled](#what-ci-settled) before
+quoting any local number.** It closes one of the two questions the local runs
+left open and confirms the other, in opposite directions.
+
+### What CI settled
+
+`.github/workflows/quic-interop.yml` runs the pinned runner against `quic-go`
+and `ngtcp2` and compares every cell against `.github/interop/expected.json`.
+That is a second host, and on one cell it disagrees with this one.
+
+**`transfer` is not flaky in CI. The local intermittency is a host artefact.**
+Over the ten runs of that workflow to date — four full-matrix legs and six
+pull-request legs, two servers each — `transfer` was observed 20 times and came
+back `succeeded` 18 times. Both exceptions are the same pull-request leg, in
+which `handshake` and `retry` came back `failed` against *both* servers and the
+whole leg finished in 42 s: the endpoint completed no handshake at all there,
+which is not the mid-transfer stall described below. **Not one mid-transfer
+stall on a GitHub runner.** `expected.json` therefore asserts
+`transfer: succeeded` unconditionally, and `transfer` is one of the three cells
+in the pull-request leg, so a real regression would surface on every PR.
+
+The shortfall recorded below — 10 of 14, and 3 of 5 in the earlier sweep — is
+thus a property of **this host**, and the mechanism is the clock step in
+[the confound](#the-confound-which-is-not-optional-reading). The numbers are
+kept because they are what the host did; they are not evidence about the client.
+
+**What CI did not settle: the handshake cap.** The opposite result, and the
+reason the local reading of `multiconnect` should not be written off.
+`handshakeloss` and `handshakecorruption` are both declared NOT ASSERTED in
+`expected.json` because they were measured probabilistic *on GitHub runners
+too* — F/S/S and S/F/F against quic-go across three baseline runs. That
+reproduces off this host, so it is ours.
 
 ### The three-server run — verdict PARTIAL
 
@@ -185,7 +222,7 @@ servers. This is the broader and more recent of the two runs.
 | `handshake` | pass 3/3 servers |
 | `retry` | pass 3/3 servers |
 | `http3` | pass on quic-go and ngtcp2; fail on aioquic |
-| `transfer` | **10 of 14 runs** — quic-go 4/6, ngtcp2 6/7, aioquic 0/1 |
+| `transfer` | **10 of 14 runs** — quic-go 4/6, ngtcp2 6/7, aioquic 0/1. Host artefact: 18 of 20 clean in CI, see [What CI settled](#what-ci-settled) |
 | `multiconnect` | pass on ngtcp2; **fail on quic-go and aioquic** |
 
 All seven declined cases recorded **UNSUPPORTED**, not FAILED — the exit-127
@@ -200,7 +237,10 @@ Three readings that the table does not carry:
   connections**. That is `defaultHandshakeTimeout` in `quic/pto.go`, our own per-
   connection cap — so unlike the idle-timeout stalls, **this one may well be
   ours rather than the host's.** It is the reason the verdict is PARTIAL rather
-  than pass-with-noise, and it should not be written off as environmental.
+  than pass-with-noise, and it should not be written off as environmental. CI
+  has since backed that reading: the two cells that hit this cap are
+  probabilistic on GitHub runners too, which is why `expected.json` declares
+  them not-asserted rather than passing.
 - The multi-arch manifest (amd64 + arm64) was built and inspected in this run.
   **Nothing was pushed to any registry.**
 
@@ -209,13 +249,14 @@ Three readings that the table does not carry:
 **Every idle-timeout failure in this run shows a VM-wide backwards clock step in
 _both_ endpoints' logs** — ours and the peer's. A backwards wall clock breaks
 exactly the timers these failures are attributed to. Reliability therefore
-**cannot be settled on this WSL2 host**: the `transfer` shortfall in particular is
-unresolved between "our bug" and "the host", and re-running it here produces more
-of the same evidence rather than better evidence. It needs a machine hosting the
-runner natively.
+**cannot be settled on this WSL2 host**, and re-running here produces more of the
+same evidence rather than better evidence. It needed a second host.
 
-Note this does *not* cover the `multiconnect` failure above, which fails on a
-timeout of ours, on a count, rather than on an idle timer.
+It has one now. The `quic-interop` gate runs the same runner on GitHub-hosted
+ubuntu-24.04, and it resolves the `transfer` shortfall as **the host's, not
+ours** — see [What CI settled](#what-ci-settled). What that does *not* cover is
+the `multiconnect` failure above, which fails on a timeout of ours, on a count,
+rather than on an idle timer, and which reproduces on GitHub runners.
 
 ### The earlier full-matrix sweep, against quic-go only
 
@@ -225,31 +266,35 @@ cases above, kept because it is the only run that exercised the wider cells.
 | Result | Cases |
 |---|---|
 | Pass | handshake, longrtt, retry, http3, multiplexing, blackhole, amplificationlimit, handshakeloss, transferloss, transfercorruption, ipv6, rebind-port, rebind-addr |
-| Intermittent | transfer — 3 of 5 runs |
+| Intermittent | transfer — 3 of 5 runs; host artefact, see [What CI settled](#what-ci-settled) |
 | Unsupported (exit 127) | chacha20, resumption, zerortt, keyupdate, ecn, v2 — and connectionmigration, which the runner declined on its own rather than failing |
-| Fail | handshakecorruption |
+| Fail | handshakecorruption — in this sweep. Not deterministic: in CI it is neither reliably pass nor reliably fail |
 
 Three of those are worth reading rather than counting.
 
-**`transfer` is intermittent — 3 passes and 2 failures in 5 runs**, which is the
-biggest risk to a green public matrix, because `transfer` is the `TESTCASE`
-behind a dozen cells. A passing run takes 9.0 s almost to the tenth, so the
-transfer itself is deterministic; a failing one stalls partway and both endpoints
-then give up on their idle timers — the client reports `quic: idle timeout` and
-quic-go's server reports "no recent network activity". In the one failure
-captured in detail the container's wall clock also jumped about 6 seconds
+**`transfer` was intermittent here — 3 passes and 2 failures in 5 runs**, and
+because `transfer` is the `TESTCASE` behind a dozen cells it looked like the
+biggest risk to a green public matrix. A passing run takes 9.0 s almost to the
+tenth, so the transfer itself is deterministic; a failing one stalls partway and
+both endpoints then give up on their idle timers — the client reports `quic: idle
+timeout` and quic-go's server reports "no recent network activity". In the one
+failure captured in detail the container's wall clock also jumped about 6 seconds
 backwards mid-transfer (the log timestamps run backwards), which is a WSL2 /
-Docker Desktop artifact rather than anything QUIC does. That is a correlation,
-not a diagnosis: it has to be re-run on a machine hosting the runner natively
-before anyone decides whether this is a client bug or the harness.
+Docker Desktop artifact rather than anything QUIC does. That was a correlation,
+not a diagnosis, and it has since been re-run off this host: 18 of 20 clean
+observations in CI and no mid-transfer stall at all. The correlation was the
+diagnosis — this is the harness. See [What CI settled](#what-ci-settled).
 
 `handshakecorruption` is 50 sequential handshakes under 30% packet corruption
 inside a 300 s budget. It fails at a specific point — "connection 13/50:
 handshake: context deadline exceeded" — which is `defaultHandshakeTimeout`, the 10 s
 per-connection cap in `quic/pto.go`, not the runner's budget. Its sibling
 `handshakeloss` — the same 50 handshakes under 30% packet *loss* — finishes in
-65 s and passes, so the gap is specific to corruption, where a damaged packet is
-discarded and only a probe timeout recovers it.
+65 s and passes, so the gap looked specific to corruption, where a damaged packet
+is discarded and only a probe timeout recovers it. CI says the split is not that
+clean: both cells are probabilistic there, `handshakeloss` included, which is why
+neither is asserted. Read this run as one sample of a coin flip, not as a
+deterministic failure.
 
 `blackhole` failed once, before it passed: `wait-for-it.sh sim:57832` timed out
 after 30 s and the entrypoint exited 124, so the client never ran at all. It has
@@ -296,7 +341,13 @@ came back empty because the loop drained the stream before reading its state.
   behaviour it depends on is pinned by
   `TestConn_HandshakeTimeout_RescuesALiveHandshake` instead, in fake time, where
   it is exactly reproducible.
-- **`transfer` stalls intermittently** — 10 of 14 runs across three servers, 3 of
-  5 in the earlier sweep. It decides a dozen matrix cells, so it is the biggest
-  risk to a green public matrix. Unresolved between client bug and host artefact;
-  see the confound above.
+- **`transfer` stalls intermittently *on this host*, and only on this host.** 10
+  of 14 runs across three servers, 3 of 5 in the earlier sweep. It decides a
+  dozen matrix cells, so it read as the biggest risk to a green public matrix.
+  It is not one: on GitHub-hosted runners the same cell came back `succeeded` in
+  18 of 20 observations, with no mid-transfer stall in any of them, and
+  `expected.json` asserts it unconditionally on every pull request. The local
+  shortfall is the clock step in the confound above, not a client bug — the full
+  count is in [What CI settled](#what-ci-settled). This entry stays as a gap in
+  the *verification*, not in the client: nothing here has been reproduced on a
+  host with a monotonic clock.

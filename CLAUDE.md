@@ -187,6 +187,23 @@ specific section behavior.
   PRs therefore keep the real zero-alloc gate but print no ns/op comparison;
   the benchstat baseline at tag time is the **previous release tag**, not
   `main`, and it is `continue-on-error` — it gates nothing.
+- **`quic-interop` gates a partition, not a pass count.**
+  `.github/workflows/quic-interop.yml` runs the pinned quic-interop-runner
+  against `quic-go` and `ngtcp2` and hands the result to
+  `.github/interop/assert_partition.py`, which compares every cell against
+  `.github/interop/expected.json` **in both directions**: a cell declared
+  `succeeded` that comes back `unsupported` is a capability regression, and a
+  cell declared `unsupported` that comes back `succeeded` means the exit-127
+  support table in `test/interop/quic/main.go` now lies about us. So
+  implementing a declined feature (key update, ECN, chacha20…) turns this red
+  until **both** the support table and `expected.json` are edited — that is
+  intended, not a flake. Same split as the bench gate: `pull_request` runs a
+  short leg (two servers × `handshake`, `transfer`, `retry`, ~2m45s), `v*` tags
+  and `workflow_dispatch` run the whole non-measurement matrix (~13 min). There
+  is no retry; the only tolerance is five `(cell, server)` pairs with
+  `"expect": null`, all network fault injection, none in the PR leg. The three
+  `h3-interop*` jobs in `integration.yml` are unrelated — they test the library's
+  own HTTP/3 client against real servers, not this endpoint binary.
 - `frame.NewFramer(w io.Writer, r io.Reader)` — **writer first**, then
   reader. Easy to get backwards.
 - `Framer.writeHeader(h, detail)` is the outbound trace funnel — every write
