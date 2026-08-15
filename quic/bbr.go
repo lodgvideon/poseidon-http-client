@@ -11,9 +11,15 @@ import "time"
 // SAME send gate as NewReno by writing c.cwnd and c.pacingRate; when CCBBR is not
 // selected none of this runs and NewReno's arithmetic is byte-for-byte unchanged.
 //
-// Throughput benefit over NewReno on a bufferbloated or lossy WAN path is real in
-// principle but is NOT quantified here: it requires a netem/tc lab and is out of
-// scope for the unit suite, which pins the model's mechanics, not its performance.
+// Throughput benefit over NewReno on a bufferbloated or lossy WAN path is not
+// quantified in THIS suite, which pins the model's mechanics, not its performance
+// — but it is quantified (#362). The shaped lab it needed exists: `tc tbf` on the
+// relay in test/integration/http3/docker-compose.cc.yml, driven by
+// scripts/cc-matrix.sh, with scripts/cc-ratio-check.sh and cc-scale-check.sh
+// gating that the knob binds before any row is read. Result, per path: a tie on a
+// clean link, a wide but noisy win on loss, and ~1.5x on a deep queue against a
+// TIE on a shallow one — the pair that makes the bufferbloat claim falsifiable.
+// The numbers and the caveats are in docs/CLIENT_GUIDE.md; NewReno stays default.
 
 // CongestionControlAlgorithm selects a connection's congestion controller.
 type CongestionControlAlgorithm int

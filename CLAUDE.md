@@ -98,9 +98,10 @@ header/            # RFC-neutral header vocabulary (Field, IndexingMode).
                      #   caller broke. http1/http3 import THIS, not hpack — a
                      #   CI step keeps that edge from returning.
 
-HTTP/3 stack (standalone — see Phase status):
+HTTP/3 stack (reachable through client.Do — see Phase status):
   http3/             # RFC 9114: control stream, SETTINGS, request/response mapping.
-                     #   Public entry: http3.Dial(ctx, addr, tls) → *Client, then Client.Do
+                     #   Public entry: http3.Dial(ctx, addr, tls) → *Client, then Client.Do;
+                     #   or client.TransportH3 / H3Pool / H3Managed via client.Do
   quic/              # RFC 9000/9001/9002: full QUIC v1 transport — packets, TLS 1.3
                      #   handshake, AEAD protection, key update, loss recovery, NewReno CC
   qpack/             # RFC 9204: static-table-only QPACK codec
@@ -124,7 +125,8 @@ Public packages: `client`, `conn`, `frame`, `grpc`, `hpack`, `http1`, `http3`,
 
 Read [CHANGELOG.md](CHANGELOG.md), [conn/doc.go](conn/doc.go), and
 [docs/HTTP3_DESIGN.md](docs/HTTP3_DESIGN.md) for detail. **Phases A, B, C,
-and G all shipped** (latest release **v0.9.0**, 2026-07-11):
+and G all shipped** (latest release **v0.12.0**, 2026-08-10; a v0.13.0 cycle
+is in progress, so `main` is well ahead of the tag):
 
 - **A** (`frame`, `hpack`) + **B** (`conn`, `http1`): HTTP/2 codec +
   connection engine — multi-stream, full bidirectional flow control,
@@ -134,12 +136,13 @@ and G all shipped** (latest release **v0.9.0**, 2026-07-11):
   managed-pool, retry/backoff, DNS + static service discovery, selectors,
   rate limiting, hooks, metrics. Documented in
   [docs/CLIENT_GUIDE.md](docs/CLIENT_GUIDE.md) (HTTP/1.1 + HTTP/2).
-- **G** (`quic`, `http3`, `qpack`): from-scratch HTTP/3 over QUIC.
-  **Standalone** — reached via `http3.Dial`, NOT yet wired into
-  `client.Do` (no `TransportH3`); `http3.Client` is currently
-  one-request-in-flight-per-conn with no pooling. Next H3 work: concurrent
-  multiplexing → pooling → retry/metrics parity → `TransportH3` under
-  `client.Do` → zero-alloc/bench-gate perf parity.
+- **G** (`quic`, `http3`, `qpack`): from-scratch HTTP/3 over QUIC, **fully
+  wired into `client.Do`**. `http3.Client` multiplexes concurrent `Do` calls
+  over one conn and is safe for concurrent use; `client` exposes
+  `TransportH3` (single lazy-dialled conn), `TransportH3Pool` and
+  `TransportH3Managed` (resolver + selector), so H3→H2 transport parity is
+  complete. `http3.Dial` remains the lower-level entry point. Documented in
+  [docs/HTTP3_GUIDE.md](docs/HTTP3_GUIDE.md).
 
 ## Code-style gates (golangci-lint v2.5, see `.golangci.yml`)
 
@@ -154,14 +157,18 @@ and G all shipped** (latest release **v0.9.0**, 2026-07-11):
 
 Every new conformance test MUST add row to
 [docs/RFC_COVERAGE.md](docs/RFC_COVERAGE.md) keyed on RFC section.
-`conformance-gate` CI job greps for `TestConformance_RFC7540_*`
-and `TestConformance_RFC7541_*`, fails on regressions. Integration
-and negative tests also belong in matrix when pinning specific
-section behavior.
+`conformance-gate` CI job runs `go test -run=Conformance ./...` and then
+`scripts/rfc-coverage-gate.sh`, which requires at least one passing
+`TestConformance_<TAG>_*` for every tag in its list — currently RFC2616,
+7540, 7541, 7838, 8441, 9000, 9001, 9002, 9110, 9112, 9113, 9204, 9114,
+not just the two HTTP/2 ones. The same job runs `scripts/rfc-quote-check.py`,
+which requires every span a comment presents as an RFC quotation to be
+verbatim. Integration and negative tests also belong in matrix when pinning
+specific section behavior.
 
 ## Gotchas
 
-- **`bench-gate` covers seven packages, not two.**
+- **`bench-gate` covers seven packages, not two — and it is two jobs, not one.**
   `.github/workflows/bench-gate.yml` benchmarks
   `./frame ./hpack ./internal/bytesx ./internal/bufx ./qpack ./quic ./http3`
   and `scripts/bench-gate.sh` scans that raw output with **no package
@@ -173,6 +180,31 @@ section behavior.
   skipped benchmark prints no `B/op` columns, so the gate ignores it.
   (`conn`, `client`, `grpc` and `http1` are genuinely outside it and use
   their own `//go:build !race` `AllocsPerRun` gates instead.)
+  Since the 2026-08-14 split, **pull requests run `alloc-gate`** — the same
+  script over the same seven packages at `-benchtime=100ms -count=5`, ~45s —
+  and the full `-benchtime=2s` sweep plus the informational benchstat ns/op
+  diff runs as **`bench-full`, on `v*` tags and `workflow_dispatch` only**.
+  PRs therefore keep the real zero-alloc gate but print no ns/op comparison;
+  the benchstat baseline at tag time is the **previous release tag**, not
+  `main`, and it is `continue-on-error` — it gates nothing.
+- **`quic-interop` gates a partition, not a pass count.**
+  `.github/workflows/quic-interop.yml` runs the pinned quic-interop-runner
+  against `quic-go` and `ngtcp2` and hands the result to
+  `.github/interop/assert_partition.py`, which compares every cell against
+  `.github/interop/expected.json` **in both directions**: a cell declared
+  `succeeded` that comes back `unsupported` is a capability regression, and a
+  cell declared `unsupported` that comes back `succeeded` means the exit-127
+  support table in `test/interop/quic/main.go` now lies about us. So
+  implementing a declined feature (key update, ECN, chacha20…) turns this red
+  until **both** the support table and `expected.json` are edited — that is
+  intended, not a flake. Same split as the bench gate: `pull_request` runs a
+  short leg (two servers × `handshake`, `transfer`, `retry`, ~2m45s), `v*` tags
+  and `workflow_dispatch` run the whole non-measurement matrix (~13 min). There
+  is no retry; the only tolerance is `"expect": null`, spent on five
+  `(cell, server)` pairs of network fault injection — none of them in the PR leg
+  — plus `versionnegotiation`, which the pinned runner never asks for. The three
+  `h3-interop*` jobs in `integration.yml` are unrelated — they test the library's
+  own HTTP/3 client against real servers, not this endpoint binary.
 - `frame.NewFramer(w io.Writer, r io.Reader)` — **writer first**, then
   reader. Easy to get backwards.
 - `Framer.writeHeader(h, detail)` is the outbound trace funnel — every write

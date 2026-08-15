@@ -25,7 +25,7 @@ All hot-path benchmarks: **0 B/op, 0 allocs/op**. Bench gate enforces this.
 ## Notes
 
 - `BenchmarkHuffmanDecode_path` uses the 4-bit nibble FSM built from the RFC 7541 App. B canonical table (implemented in `hpack/huffman_fsm.go`). Result: ~45 ns/op, well under the 80 ns/op target. 0 allocs/op.
-- GitHub Actions ubuntu-24.04 runners are noisier than this baseline; the bench-gate workflow uses **relative** comparison (benchstat alpha=0.05) against `main` to avoid false-positive flakes.
+- GitHub Actions ubuntu-24.04 runners are noisier than this baseline, so what CI enforces is not a relative ns/op comparison at all. The gate is **absolute**: `scripts/bench-gate.sh` fails if any `Benchmark` line reports non-zero `B/op` or non-zero `allocs/op`, and a noisy runner cannot move a zero. On pull requests that is the `alloc-gate` job (`-benchtime=100ms -count=5`); the benchstat comparison (alpha=0.05) runs only in `bench-full`, on `v*` tags and manual dispatch, against the **previous release tag** rather than `main` — and it is `continue-on-error`, so it is informational and gates nothing. See the header of `.github/workflows/bench-gate.yml` for the measurements behind the split.
 
 ## C.4 — observability path
 

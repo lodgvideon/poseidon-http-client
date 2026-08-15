@@ -1,6 +1,15 @@
 # HTTP/3 (Phase G) — Design & Roadmap
 
-**Status:** design proposal, for review. No code yet.
+**Status:** **shipped.** This is the design that was executed, kept as the
+as-built rationale for `quic/` + `http3/` + `qpack/` — not a live roadmap. The
+stack is complete and reachable through `client.Do` via `TransportH3`,
+`TransportH3Pool` and `TransportH3Managed`. For what the client does *today*
+read [HTTP3_GUIDE.md](HTTP3_GUIDE.md) (usage), the `RFC 9114`/`9000` rows of
+[RFC_COVERAGE.md](RFC_COVERAGE.md) (test-to-RFC map), and
+[rfc-analysis/HTTP3_RECONCILIATION.md](rfc-analysis/HTTP3_RECONCILIATION.md)
+(the audited conformance residue). Where this document's forward-looking notes
+disagree with those, they are the record of a plan and those are the record of
+the code.
 **Goal:** a from-scratch HTTP/3 client conformant to **RFC 9114**, which in
 practice means conformance to the whole stack it sits on: **RFC 9000** (QUIC
 transport), **RFC 9001** (QUIC-TLS), **RFC 9002** (loss detection / congestion
@@ -227,7 +236,11 @@ Drawn from the RFC extractions; these are the traps that most threaten conforman
    frames, static QPACK) but fights the packet engine (AEAD, packet assembly,
    ack-range structures). *Mitigation:* add only `quic/` (codec), `qpack/`,
    `internal/bytesx` to `bench-gate.yml`; the QUIC engine + `http3/` are **exempt
-   like `conn/`** today.
+   like `conn/`** today. **As built this went further than the mitigation:**
+   `./quic` and `./http3` are both inside the gate's seven packages, and an
+   allocating benchmark in either is kept out of the gate's sight by an env
+   guard that skips it (`requireSendBench`, `POSEIDON_BENCH_ENCODE`) rather
+   than by excluding the package. `conn/` is still genuinely outside.
 7. **RFC-coverage gate blindness.** `scripts/rfc-coverage-gate.sh` hardcodes
    `for tag in RFC7540 RFC7541`. *Mitigation:* extend the loop with
    `RFC9000 RFC9001 RFC9002 RFC9114 RFC9204` in G.2, or conformance tests rot
