@@ -21,8 +21,16 @@ jobs:
       fail-fast: false # one crashing target must not cancel the others
       matrix:
         include:
+          # The QUIC varint decoder underlies every packet and frame field, so it
+          # sees peer bytes before anything else does. It lives in bytesx; a cell
+          # here previously omitted `target` (making the step `-fuzz '^$'`, which
+          # matches no target) and a second cell looked for it in bufx, which has
+          # no fuzz target at all. Both exited 0 in milliseconds, so the job
+          # reported green for a decoder it had never fuzzed. bufx is not listed:
+          # its only peer-input parser is StripPadding, reached from all three
+          # frame.dispatch* padded paths and so already covered by
+          # FuzzFramerReadFrame below.
           - pkg: ./internal/bytesx
-          - pkg: ./internal/bufx
             target: FuzzReadVarint
           - pkg: ./conn
             target: FuzzConnReader
@@ -58,6 +66,18 @@ jobs:
 
       - uses: actions/setup-go@v7
         with: { go-version: '1.25' }
+
+      # `go test -fuzz` exits 0 when its pattern matches no target -- it prints
+      # "no fuzz tests to fuzz" to stdout and passes -- so a misspelled or
+      # misplaced target name is indistinguishable from a clean 5-minute run in
+      # the job summary. Resolve the name against the package first and fail
+      # loudly when it is absent, so a cell can never again report green while
+      # fuzzing nothing.
+      - name: Verify ${{ matrix.target }} exists in ${{ matrix.pkg }}
+        run: |
+          go test -list '^${{ matrix.target }}$' ${{ matrix.pkg }} \
+            | grep -qx '${{ matrix.target }}' \
+            || { echo "::error::fuzz target ${{ matrix.target }} not found in ${{ matrix.pkg }}"; exit 1; }
 
       # -run '^$' keeps the unit tests out of the way so the whole budget goes to
       # mutation.
