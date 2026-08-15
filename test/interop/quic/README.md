@@ -190,8 +190,9 @@ and `ngtcp2` and compares every cell against `.github/interop/expected.json`.
 That is a second host, and on one cell it disagrees with this one.
 
 **`transfer` is not flaky in CI. The local intermittency is a host artefact.**
-Over the ten runs of that workflow to date — four full-matrix legs and six
-pull-request legs, two servers each — `transfer` was observed 20 times and came
+Over the workflow's first ten runs, on 2026-08-15 while #679 was in review —
+four full-matrix legs and six pull-request legs, two servers each — `transfer`
+was observed 20 times and came
 back `succeeded` 18 times. Both exceptions come from one pull-request leg, in
 which `handshake` and `retry` came back `failed` against *both* servers and the
 whole leg finished in 42 s: the endpoint completed no handshake at all there,
@@ -222,7 +223,7 @@ servers. This is the broader and more recent of the two runs.
 | `handshake` | pass 3/3 servers |
 | `retry` | pass 3/3 servers |
 | `http3` | pass on quic-go and ngtcp2; fail on aioquic |
-| `transfer` | **10 of 14 runs** — quic-go 4/6, ngtcp2 6/7, aioquic 0/1. Host artefact: 18 of 20 clean in CI, see [What CI settled](#what-ci-settled) |
+| `transfer` | **10 of 14 runs** — quic-go 4/6, ngtcp2 6/7, aioquic 0/1. Host artefact: 18 of the first 20 CI observations were clean, see [What CI settled](#what-ci-settled) |
 | `multiconnect` | pass on ngtcp2; **fail on quic-go and aioquic** |
 
 All seven declined cases recorded **UNSUPPORTED**, not FAILED — the exit-127
@@ -281,8 +282,8 @@ timeout` and quic-go's server reports "no recent network activity". In the one
 failure captured in detail the container's wall clock also jumped about 6 seconds
 backwards mid-transfer (the log timestamps run backwards), which is a WSL2 /
 Docker Desktop artifact rather than anything QUIC does. That was a correlation,
-not a diagnosis, and it has since been re-run off this host: 18 of 20 clean
-observations in CI and no mid-transfer stall at all. The correlation was the
+not a diagnosis, and it has since been re-run off this host: 18 of the first 20
+CI observations clean, and no mid-transfer stall at all. The correlation was the
 diagnosis — this is the harness. See [What CI settled](#what-ci-settled).
 
 `handshakecorruption` is 50 sequential handshakes under 30% packet corruption
@@ -345,7 +346,7 @@ came back empty because the loop drained the stream before reading its state.
   of 14 runs across three servers, 3 of 5 in the earlier sweep. It decides a
   dozen matrix cells, so it read as the biggest risk to a green public matrix.
   It is not one: on GitHub-hosted runners the same cell came back `succeeded` in
-  18 of 20 observations, with no mid-transfer stall in any of them, and
+  18 of the first 20 observations, with no mid-transfer stall in any of them, and
   `expected.json` asserts it unconditionally on every pull request. The local
   shortfall is the clock step in the confound above, not a client bug — the full
   count is in [What CI settled](#what-ci-settled). This entry stays as a gap in
