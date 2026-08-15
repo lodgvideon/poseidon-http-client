@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [v0.13.0] — 2026-08-15
+
 ### Changed (breaking)
 
 - **`conn.StreamEvent.Slab *[]byte` is now `conn.StreamEvent.Block
@@ -42,6 +44,70 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   valid until release and belongs to the next drawer of that block afterwards.
   `DataSlab` and `GetDataBufPool` are deliberately untouched — see the note on
   `StreamEvent.Release` for why.
+
+- **`conn.Conn.NewStream` now returns a `*conn.GoAwayError` after a peer GOAWAY,
+  instead of the bare `conn.ErrGoAway` sentinel.** The peer's error code was
+  taken by `onGoAwayReceived` and dropped at its own signature, and nothing
+  anywhere recorded it, so a graceful drain (`NO_ERROR`), a demand to back off
+  (`ENHANCE_YOUR_CALM`) and the peer rejecting this client outright
+  (`PROTOCOL_ERROR`) all arrived as one value. Those call for opposite responses
+  from a load generator — redial elsewhere, slow down, or stop and report — and
+  RFC 9113 §6.8 puts the code in the frame precisely so the receiver can tell
+  them apart. The new error carries `Code` and `LastStreamID`.
+
+  **Migration:** `errors.Is(err, conn.ErrGoAway)` is unaffected — `GoAwayError`
+  reports itself as that sentinel, which is why the retry classifier needed no
+  change. Only a direct comparison, `err == conn.ErrGoAway`, stops matching;
+  switch it to `errors.Is`. Use `errors.As` to read the code.
+
+- **17 `quic` symbols are unexported.** Ten frame builders —
+  `AppendDataBlocked`, `AppendHandshakeDone`, `AppendNewToken`, `AppendPadding`,
+  `AppendPathResponse`, `AppendPing`, `AppendRetireConnectionID`,
+  `AppendStopSending`, `AppendStreamDataBlocked`, `AppendStreamsBlocked` — plus
+  `BuildInitialPacket`, `NewClientHandshake`, `ProcessDatagram` with the
+  `KeySet` and `DatagramResult` types that exist only as its parameter and
+  return, and the `ErrNoClientHello` sentinel.
+
+  This is the uncontested tranche of a full audit of the package's 134 orphaned
+  exports, classified against `quic/doc.go` and `docs/QUIC_SERVER_DESIGN.md`:
+  104 came back as contract and 13 of the remaining 30 were disputed. These are
+  what nobody argued for. The builders go because the package emits those
+  frames *reactively*, from paths a caller cannot stand in for — PATH_RESPONSE
+  from the PATH_CHALLENGE handler, DATA_BLOCKED when connection credit runs out
+  — and three had no production caller at all. `BuildInitialPacket` was a
+  client-side convenience over the exported `SealPacket`, driven from one site.
+
+  **Migration:** none was needed in practice — no reference to any of the 17
+  existed outside `quic/`. A caller building packets by hand uses `SealPacket`;
+  a caller opening a connection uses `NewConn`. `ErrNoClientHello` is the one
+  judgement call: it does reach an external caller through `Establish`, but the
+  package's own docs call it an internal invariant failure and no caller action
+  differs from any other handshake failure. Exports 154 → 137, orphans 134 →
+  117, with `TestExportedSurfaceDoesNotLeakUnexportedTypes` confirming no
+  exported symbol still names any of them — a check `go build` alone does not
+  perform. (#611, #609)
+
+- **`conn.ErrFlowControlExhausted` and `frame.ErrUnknownFrameType` are deleted.**
+  Neither was ever returned by anything. `ErrFlowControlExhausted` was
+  "reserved for future explicit non-blocking write paths" — in a file whose
+  sentinels are documented as stable across releases, which made it a
+  compatibility promise about a value that did not exist. `ErrUnknownFrameType`
+  is not returned either: RFC 7540 §5.5 says unknown frame types are ignored,
+  which is exactly what the codec does. Any `errors.Is` against either was
+  unreachable code; it now fails to compile instead of silently never matching.
+  (#594)
+
+- **`hpack.Decoder.Feed` and `Finish`, called without `Begin`, now return the
+  new `hpack.ErrNotStreaming` instead of `ErrInvalidPrefix`.** The two say
+  opposite things about who is at fault: `ErrInvalidPrefix` is the sentinel for
+  a malformed representation byte *from the peer*, which RFC 7541 §5 makes a
+  connection error, while calling `Feed` without `Begin` is the caller's own
+  sequencing and entirely local. Anyone mapping sentinels to RFC sections — the
+  way `conn`'s dispatch does — was told a local bug came off the wire.
+  `ErrNotStreaming` deliberately does **not** match `ErrInvalidPrefix` under
+  `errors.Is`: a dedicated sentinel that still matched would look like a fix
+  while misinforming the same caller. Narrow in practice — `ErrInvalidPrefix`
+  is referenced nowhere outside `hpack`. (#589)
 
 ### Added
 
@@ -236,22 +302,138 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   1.002 writes/req, which nothing did before — every previous harness used the
   split send.
 
-### Changed (breaking)
+- **A vectored and fused send path.** `SendBatch` above is the coalescing
+  submission point; these are the per-stream primitives it and its callers are
+  built from. `conn.StreamRef` gains `SendDataV`, `SendHeadersAndData` and
+  `SendHeadersAndDataV`; `frame.Framer` gains `WriteDataV` and
+  `WriteDataVPadded`. The fused one-shot send is 1.002 writes/req against
+  `SendHeaders`+`SendData`'s 2.002. Two new sentinels come with them:
+  `conn.ErrNoCredit`, reported by a batch entry the flow-control windows cannot
+  cover, and `conn.ErrVecUnderrun`, when a vectored write returns fewer bytes
+  than were credited. `conn.DefaultMaxFrameSize` names the 16 KiB constant
+  those paths chunk at, which was an unnamed literal in four places (#590).
 
-- **`conn.Conn.NewStream` now returns a `*conn.GoAwayError` after a peer GOAWAY,
-  instead of the bare `conn.ErrGoAway` sentinel.** The peer's error code was
-  taken by `onGoAwayReceived` and dropped at its own signature, and nothing
-  anywhere recorded it, so a graceful drain (`NO_ERROR`), a demand to back off
-  (`ENHANCE_YOUR_CALM`) and the peer rejecting this client outright
-  (`PROTOCOL_ERROR`) all arrived as one value. Those call for opposite responses
-  from a load generator — redial elsewhere, slow down, or stop and report — and
-  RFC 9113 §6.8 puts the code in the frame precisely so the receiver can tell
-  them apart. The new error carries `Code` and `LastStreamID`.
+- **A new top-level `header` package — the RFC-neutral header vocabulary.**
+  `http1` imported `hpack` for one symbol and `http3` for two, so RFC 9112 and
+  RFC 9114 both appeared, from their import lists alone, to depend on RFC 7541
+  header compression. Neither does; they borrowed a struct, because HTTP/2 was
+  written first and there was nothing else to share one with. `header` holds
+  `Field`, `IndexingMode`, and the dynamic-table entry-size rule — the same
+  formula and the same 32 bytes in RFC 7541 §4.1 and RFC 9204 §3.2.1, now named
+  `header.EntryOverhead`.
 
-  **Migration:** `errors.Is(err, conn.ErrGoAway)` is unaffected — `GoAwayError`
-  reports itself as that sentinel, which is why the retry classifier needed no
-  change. Only a direct comparison, `err == conn.ErrGoAway`, stops matching;
-  switch it to `errors.Is`. Use `errors.As` to read the code.
+  **Nothing breaks.** `hpack.HeaderField` and `hpack.IndexingMode` are
+  **aliases** of the `header` types and the mode constants are re-exported, so
+  every existing caller compiles and every existing value stays assignable. The
+  signatures that now read `[]header.Field` —
+  `hpack.Encoder.EncodeFieldSection`, `http1.Exchange.WriteRequest` and
+  `ReadResponse`, `conn.StreamRef.SendHeaders` and
+  `SendHeadersWithPriority`, `http3.BodyReader.Trailers`,
+  `http3.DecodeTrailers` — are the same type spelled differently. `Size()` and
+  `Sensitive()` moved onto `header.Field`, since methods cannot be declared on
+  an alias to a non-local type. `conn` and `qpack` keep their `hpack` imports
+  on purpose: `conn` *is* HTTP/2, and `qpack` reuses the prefixed-integer codec
+  and the Huffman table that QPACK specifies for itself. A CI step checks
+  direct imports, because `go list -deps` still shows `hpack` under `http3`
+  transitively through `qpack` — the edge that is meant to stay. (#543)
+
+- **`grpc` grows four caller-facing options.**
+
+  `DiscardMetadata()` declines the response header and trailer copies for a
+  call that never reads them — four allocations per RPC that no caller could
+  previously refuse. `Invoke` is the whole unary path and calls neither
+  `Header` nor `Trailer`, so it sets the option for itself, after applying the
+  caller's options so nothing asked for is overridden: `Invoke` goes 10 → 6
+  allocs/RPC and `InvokeInto` 9 → 5. (`BorrowMetadata()`, above, is the other
+  half of the same question — the option for a caller that *does* read the
+  metadata.) (#469)
+
+  `Options.ContentSubtype` sends the subtype in `application/grpc+proto` /
+  `+json` / a custom codec's. The asymmetry it fixes is the sharp part:
+  `validContentType` has always *accepted* a subtype from the server, so the
+  package accepted from a peer exactly the thing it had no way to say itself,
+  and a server routing on `+json` could not be talked to at all. Validated as
+  an RFC 9110 token at `Dial`/`NewClientConn` rather than silently at send
+  time — neither `conn` nor `hpack` validates outbound fields, so this is the
+  only gate between a caller's string and the wire, and a CR or LF there is a
+  request-splitting vector at any HTTP/1.1 downgrading hop. Rendered once per
+  connection, so `BenchmarkGRPC_BuildHeaders` stays at 0 B/op. (#468)
+
+  `Options.AllowReservedMetadata` exempts named keys from the `grpc-` namespace
+  check, and `(*ClientConn).AppendMetadata` is its connection-bound sibling.
+  Refusing the whole prefix is right by the specification — it is reserved for
+  *future* protocol use, not only today's names — and wrong for one case:
+  `grpc-trace-bin` and `grpc-tags-bin` are written by grpc-go's own
+  instrumentation, so a poseidon client pointed at a census-instrumented
+  deployment produced orphan spans with no way not to. An allowlist rather than
+  two hard-coded names, so one tracing ecosystem's vocabulary is not baked into
+  a transport that knows nothing about tracing. It exempts keys from **that
+  check only**: the pseudo-header and reserved-key gates run first, pinned by a
+  test that allowlists `content-type`, `te`, `grpc-timeout` and `:method` and
+  requires every one to still be refused. (#467)
+
+- **Transport failures now arrive as `*grpc.Status`.** A peer resetting the
+  stream already became a `*Status`; a connection-level failure that `conn`
+  reports by returning an error from `Recv` — a cancelled context, the
+  connection closed before the stream was reset — leaked the transport error
+  verbatim. Which family a caller got depended on whether `conn` delivered the
+  failure as an event or as an error, an implementation detail no caller should
+  have to know: complete retry classification needed `errors.As(*Status)` *and*
+  `errors.Is(conn.ErrConnClosed)`, and nothing said so. `Status` gains an
+  unexported cause and `Unwrap`, so this **adds** a family rather than
+  replacing one and the transport error stays reachable through `errors.Is`.
+  Context codes stay distinct from `Unavailable` on purpose: a deadline the
+  caller set is not the server being unavailable, and conflating them retries a
+  request whose deadline has already passed. A `Status` the peer sent has no
+  cause — it carried a code and a message, not a Go error. (#532)
+
+- **`http3.H3ConnError` carries the RFC 9114 §8.1 code.** `connError` put the
+  code on the wire and returned the bare `ErrH3Control` sentinel, so
+  `H3_FRAME_ERROR`, `H3_SETTINGS_ERROR`, `QPACK_DECOMPRESSION_FAILED` and the
+  rest were one error above this layer — a pool, a retry policy, a metric or a
+  test could not tell a peer's framing bug from a local QPACK failure. The
+  HTTP/2 engine already typed this (`conn.ConnError`) and this package already
+  typed the stream-level case (`StreamResetError`); only the connection-level
+  case was untyped. `errors.Is(err, ErrH3Control)` still matches, so code
+  written against the sentinel keeps working; direct `==` comparison does not.
+  (#531)
+
+- **`http1.ErrServerClosedIdle`, and an H1 arm in the retry classifier.**
+  `builtinShouldRetry` had an H2 arm and an H3 arm and no H1 arm — no `http1`
+  import at all — so the canonical retryable HTTP/1.1 failure, a pooled
+  keep-alive the server reaps between the checkout probe and the write,
+  surfaced as an opaque wrapped EOF and was never retried, while
+  `REFUSED_STREAM`, GOAWAY and `H3_REQUEST_REJECTED` always were. The new
+  sentinel names the one H1 failure carrying the same guarantee those signals
+  carry: the first status-line read returned EOF having consumed nothing, so no
+  response existed and replaying cannot duplicate an applied effect. Narrow on
+  purpose — an EOF after *any* response byte means the server was answering and
+  stopped, which is no evidence about processing, and three boundary cases pin
+  that it is not this error. Classifying on the error alone is sound because
+  `canRetry` already refuses non-idempotent requests and streaming bodies
+  before any classification runs. (#530)
+
+- **`test/interop/quic` — the client endpoint of the quic-interop-runner
+  matrix.** A nested module holding the Go binary, its entrypoint script and a
+  multi-platform Dockerfile, which the gate below builds from this tree.
+
+  Two wire protocols, because the runner uses two: everything except the
+  `http3` case is HTTP/0.9 over QUIC with ALPN `hq-interop`, driven through the
+  exported `quic.Conn`/`Stream` API, since the runner's servers offer no other
+  ALPN there. `http3` goes through `http3.Dial`. Test-case dispatch is one map
+  — every string the runner can send is a row carrying either a function or the
+  reason it exits 127, and an absent name exits 127 too, which is what the
+  runner's compliance check sends.
+
+  The ClientHello is pinned to X25519. Go also offers X25519MLKEM768 by
+  default, whose ~1.2 KB key share made the ClientHello ~1.4 KB; the initial
+  flight puts the whole thing in one Initial packet, so the datagram came out
+  at 1522 bytes and was IP-fragmented, which RFC 9000 §14 forbids and the
+  simulator does not deliver. Every handshake timed out until this was pinned.
+  Splitting a large ClientHello across Initial packets is a library-side fix
+  not attempted here. The server certificate chain is verified against the
+  runner's own CA at `/certs/ca.pem`, falling back to the system roots when
+  absent; no path disables verification. (#646, #663)
 
 ### Fixed
 
@@ -342,6 +524,86 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   event was simply ignored. Pinned by `client/pushpromise_slab_test.go`, which
   asserts on the slab rather than on the bytes the caller reads, and which fails
   on the pre-fix code.
+
+- **A pushed header's value could be appended over the next header's bytes.**
+  Every header field handed to a caller views one shared slab. The response
+  path clamps each `Name` and `Value` with a three-index slice; the
+  push-promise copy, written as "same pattern as `emitHeaderBlock`", used
+  two-index slices, so capacity ran to the end of the slab. A caller appending
+  to a pushed header's value overwrote its neighbour in place — no copy, no
+  error. (#522)
+
+- **Four QUIC correctness fixes, three of them RFC-cited.** A stream's final
+  size could change after it was known: RFC 9000 §4.5 requires
+  `FINAL_SIZE_ERROR` on a RESET_STREAM or STREAM frame that reports a different
+  one, and the companion rule — the final size may not fall below data already
+  received — was live but gated behind `connRecvMax != 0`, a condition
+  inherited from the flow-control accounting it sits next to and unrelated to
+  the check (#645, #643). Stream-quadrant checks were role-blind: quadrants are
+  relative to the endpoint reading them (RFC 9000 §2.1), so which quadrant is
+  send-only flips between a client and a server `Conn`, and five frame handlers
+  had the client's answer written in as a literal (#524). A MAX_DATA /
+  MAX_STREAM_DATA grant was queued once and never retransmitted, on the
+  reasoning that a later grant supersedes a lost one — but a later grant is
+  only produced by consuming more data, and the peer stops sending the moment
+  it reaches the limit the lost grant would have raised, so there is no later
+  grant and the transfer stalls (#472). And `Finished`, `ResetReceived` and
+  `ResetCode` read fields the reader goroutine mutates under `conn.mu` without
+  taking it; `RecvState`'s doc three lines away already said a consumer must
+  take the lock "rather than via the individual lock-free accessors", so the
+  type offered both the rule and the way around it, and `http3`'s control-stream
+  servicing took the way around it (#525).
+
+- **Three `frame` codec bugs, all the same shape: a 31-bit field checked before
+  it was masked.** `WriteWindowUpdate` rejected a zero increment and *then*
+  masked, so `0x80000000` was non-zero, passed the guard, and went out as an
+  increment of zero — which the reader, who masks first, treats as a
+  PROTOCOL_ERROR (#592). Both priority write sites OR'd the E flag into an
+  unmasked `StreamDep`, so a dependency with its high bit set — out of range for
+  the field — forged the exclusive flag (#584). And `SetReadBuffer` replaced
+  `readBuf` while leaving the pool handle `NewFramer` had taken, so the two
+  described different buffers and `Close` donated the **caller's** buffer to the
+  shared pool (#595).
+
+- **`Encoder.Reset` did not restore the dynamic table's own cap.**
+  `dynamicTable.clear` reset the entries and the arena but not `maxSize`, so
+  `Reset` put `localLimit` back to the default while the table went on evicting
+  at whatever cap was last set. The encoder then indexed against a budget of
+  4096 into a table holding far less: compression degraded for the life of the
+  connection, with no size update pending to explain it. (#523)
+
+- **A CONNECTION_CLOSE could carry no transport error code.** `closeCodeFor`
+  was a switch, and a switch is a registration point nobody is forced to visit
+  — a connection-error sentinel nobody remembered to add there failed nothing,
+  and the peer was simply told nothing about why the connection went away. It
+  is now a table the test walks, and it sees 29 sentinels where it saw 27.
+  (#583)
+
+- **Five client and HTTP/1.1 lifecycle fixes.** A single-conn dial was not
+  bounded by `DialTimeout` (#528). The single-conn warmup latched a cancel func
+  and never cleared it, so every later `Warmup` returned immediately —
+  including the retry after a warmup whose dial failed, the case the latch is
+  least entitled to block — and left a 30-second timer armed (#527); warmup
+  also ran on the caller's goroutine (#538) and its release needed a
+  `sync.Once` (#549). A pool re-dial woke one waiter instead of the whole batch
+  (#606). `Connection: close` on an *interim* response was ignored, so the
+  connection went back to the pool (#548). And `http3`'s field-value validation
+  had drifted from `conn`'s: the two call themselves deliberate mirrors, rule
+  for rule, but HTTP/2 grew the edge-whitespace rule and HTTP/3 kept only the
+  NUL/CR/LF check, so a value of `" x "` was a stream error on one transport
+  and handed to the caller on the other (#529).
+
+- **A must-flush control frame no longer strands the group-commit convoy.**
+  WINDOW_UPDATE, PING ACK, RST_STREAM, SETTINGS ACK and the BDP tuner's PING
+  cannot be deferred and flushed the buffered writer directly, which pushes a
+  deferring writer's bytes out without releasing the writer waiting on them.
+  (#581)
+
+- **Connection observability gaps.** Not every connection close was reported to
+  the hooks (#540), and the read-buffer pool was sized to a round 16 KiB while
+  its one production consumer, `frame.NewFramer`, asks for a whole maximum
+  HTTP/2 frame — 16384 payload bytes plus the 9-byte header. Nine bytes short,
+  so `New` could never satisfy a request and the pool missed every time (#526).
 
 ### Changed
 
@@ -436,6 +698,127 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and got away with it will not any more. `BodyReader` (`DoStream`) is unchanged:
   it hands payloads that alias its reader out to its caller, so its buffer stays
   per-request rather than being recycled.
+
+- **The build toolchain is pinned to go1.25.13, and that is the documented
+  patch floor.** `govulncheck` had been red on every open PR since 2026-08-13,
+  on two standard-library advisories rather than on anything in this repo:
+  GO-2026-6090 (`crypto/tls`, KeyUpdate handshake-message DoS, CVE-2026-56862,
+  reachable from `quic.TLSHandshake`, `conn.FlexDialer.Dial` and
+  `http1.Exchange`) and GO-2026-5972 (`encoding/asn1`, stack exhaustion,
+  CVE-2026-33818, reached via `client.StreamResponse.Close`). Both are fixed in
+  go1.25.13 and go1.26.6.
+
+  Five whys on the red check: the scan found them in go1.26.5; the job ran
+  1.26.5 because it asked `setup-go` for `stable`; `stable` resolves only
+  through the `actions/go-versions` manifest; that manifest lags a Go security
+  release by days — so the job that exists to catch a fresh advisory was
+  structurally guaranteed to run on the last unpatched toolchain for exactly as
+  long as the advisory was newest. No code change could have cleared it. The
+  scan now takes its toolchain from `go.mod`, which `setup-go` will fetch from
+  go.dev/dl when the manifest lacks it, so an exact patch version is always
+  installable and a future bump is a one-line edit.
+
+  **The `go` directive stays at 1.25.0.** That is this library's compatibility
+  promise to importers, and `toolchain` applies only when this module is the
+  main one — our builds and CI move to 1.25.13, consumers are not forced to.
+  `SECURITY.md` previously told readers to build with "Go 1.26.5 or later",
+  which was wrong twice: it named the wrong release line (every other version
+  claim in the repo targets 1.25) and go1.26.5 is not a patched toolchain — it
+  carries both of the advisories above. The section now names go1.25.13 as the
+  floor, with go1.26.6 as the 1.26 equivalent and an explicit warning not to
+  read go1.26.5 as patched. (#640, #641)
+
+- **The full benchmark sweep moved to tags; pull requests get a fast allocation
+  gate.** `bench-gate` *was* the pull-request wall clock — 16m56s while every
+  other job finished by 4m — and more than a third of that bought no
+  enforcement: the base-branch bench existed only to feed a benchstat `ns/op`
+  diff that was explicitly labelled informational and gated nothing.
+
+  What the job enforces is a boolean, not a measurement: `bench-gate.sh` fails
+  on any `Benchmark` line reporting non-zero `B/op` or `allocs/op`. A boolean
+  does not need 2s per benchmark to be true — but it does need a *duration*
+  rather than a fixed iteration count, because a fixed count cannot amortise
+  the one-time setup charged to iteration 1. Measured over all 43 benchmarks in
+  the seven gated packages, with verdicts taken from the real gate script:
+
+  | benchtime | benchmarks flipping to a false failure |
+  |---|---:|
+  | `1x` | 11 of 43 |
+  | `10x` | 11 of 43 |
+  | `100x` | 5 of 43 |
+  | `100ms` | **0 of 43** — identical verdicts, green 4/4 runs, 563× margin |
+
+  So pull requests keep the real gate at `-benchtime=100ms -count=5` over all
+  seven packages (~2 min in CI) and lose only the informational diff. The full
+  2s sweep plus that diff now runs on `v*` tags and on `workflow_dispatch`,
+  with the previous release as its baseline — `github.base_ref` is empty on a
+  tag push — and the package list filtered to what exists at that tag, since
+  `internal/bufx` does not exist at v0.12.0. The `//go:build !race`
+  `AllocsPerRun` gates in `conn`, `client`, `grpc` and `http1` are untouched;
+  they run in the test job and are the only defence there. (#664)
+
+  **What a contributor sees:** a PR no longer reports `ns/op` deltas against
+  its base branch. Allocation regressions still fail the PR exactly as before.
+  To get the numbers back on a branch, dispatch `bench-gate` manually.
+
+- **A new `quic-interop` gate asserts the supported/unsupported partition in
+  both directions.** The gate is not "the matrix passed". The observed matrix
+  is compared, cell for cell, against a partition committed at
+  `.github/interop/expected.json`: every cell declared supported must come back
+  `succeeded`, and every cell declared unsupported must come back exactly
+  `unsupported`.
+
+  The second half is the half a "no failures" check cannot do. The runner does
+  not count `unsupported` as a failure, so a supported case that starts exiting
+  127 — a capability regression — passes such a check silently. In the other
+  direction, if key update or ECN ever lands and nobody removes the row from
+  the support table, we keep publishing "cannot do it" about a client that can.
+  Both are red here until someone edits the table.
+
+  Pull requests get a short leg (two servers × handshake, transfer, retry,
+  2m45s); tags and `workflow_dispatch` get the whole non-measurement matrix
+  plus the exit-127 assertion, about 13 minutes. The partition is per server
+  where it genuinely is — `rebind-port` passes against quic-go and fails
+  against ngtcp2, and the two servers disagree about `connectionmigration`
+  rather than disagreeing about us.
+
+  Against flakiness: every third-party image is pinned by digest and the runner
+  by commit, so nobody else's release moves this gate, and there is no retry.
+  Three full-matrix runs agreed on 19 of 22 cells against both servers; the
+  five `(cell, server)` pairs that did not are all network fault injection, are
+  declared not-asserted with their per-run outcomes, and are still printed every
+  run. Two runs were not enough to establish that — after two, two of those
+  cells looked stable, and the third run contradicted it. Five silent-skip
+  guards exist because a workflow that no-ops is worse than no workflow:
+  tshark's version is asserted rather than assumed, `run.py`'s exit status is
+  deliberately ignored (it is the FAILED count, which is zero when the
+  compliance check skipped every pairing), the result file is uploaded with
+  `if-no-files-found: error`, a null cell is a hard error, and the set of cells
+  that ran must equal the set being asserted. The endpoint image is built from
+  this tree in the job, so the gate depends on nothing published to any
+  registry. The three `h3-interop*` jobs are untouched. (#679)
+
+- **`internal/bytesx` is split into `internal/bytesx` and `internal/bufx`.**
+  One directory held two unrelated utility sets with **zero** overlapping
+  consumers: `frame` uses the read-buffer pool, the big-endian uint24/uint31
+  helpers and the RFC 7540 padding strip; `quic` and `http3` use the QUIC
+  varint codec. They shared a directory because both are "low-level byte
+  stuff", which describes the files rather than any consumer. `bytesx` keeps
+  the varint codec — the thing its name most suggests, and the half with the
+  most importers — and `bufx` takes the HTTP/2 helpers. Both are `internal/`,
+  so no public API moves. `bench-gate` and `nightly` list their packages
+  explicitly and now name `./internal/bufx`; without that the read-buffer
+  pool's zero-alloc benchmark would have kept passing by not being run, which
+  looks identical to passing. (#542)
+
+- **`frame.Framer.SetMaxReadFrameSize` is renamed `SetMaxFrameSize`, with the
+  old name kept as a deprecated alias.** The limit bounds reads *and* every
+  write — `writeFrame` checks it and eight more write paths check it directly —
+  and the old doc comment spent its first sentence explaining the name away,
+  which is the tell. No caller breaks; the alias is pinned by behaviour rather
+  than by compiling, since the test drives a too-large frame through the write
+  path under both names, and the write half is exactly what the old name
+  denied. (#593)
 
 - **Formatting is now gated.** golangci-lint v2 moved formatters into their own
   top-level `formatters:` section, and `.golangci.yml` never grew one — so
