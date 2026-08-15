@@ -14,12 +14,34 @@ const (
 	kInitialRtt   = 333 * time.Millisecond // §6.2.2 initial RTT before any sample
 	maxPTOBackoff = 8                      // give up after this many doublings
 	idleTimeout   = 10 * time.Second       // give-up bound when nothing is in flight to probe
-	// handshakeTimeout bounds the whole handshake. The anti-deadlock PTO (§6.2.2.1)
-	// keeps probing while the handshake is incomplete, and a server that
+	// defaultHandshakeTimeout bounds the whole handshake. The anti-deadlock PTO
+	// (§6.2.2.1) keeps probing while the handshake is incomplete, and a server that
 	// acknowledges each probe but never completes would otherwise reset the backoff
-	// and idle timers forever; this caps that.
-	handshakeTimeout = 10 * time.Second
+	// and idle timers forever; this caps that. WithHandshakeTimeout overrides it.
+	defaultHandshakeTimeout = 10 * time.Second
 )
+
+// WithHandshakeTimeout sets the bound on the whole handshake — the wall-clock
+// budget Establish has to reach a completed handshake, counted from its first
+// Initial packet. A non-positive d selects the default, 10 seconds.
+//
+// Raise it for a lossy path. The bound has to cover the PTO backoff ladder (RFC
+// 9002 §6.2.1), which doubles per probe, so a handshake whose first flight is
+// repeatedly lost spends 0.67s, then 1.33s, then 2.67s, then 5.33s waiting —
+// over 10 seconds after only four probes, before any RTT sample has shrunk the
+// base. Bulk clients that dial repeatedly across a high-loss path (the
+// quic-interop-runner handshakeloss case is 50 handshakes at 30% loss) need more
+// than the default; without it a handshake that is still legitimately probing is
+// abandoned as though the server were gone.
+//
+// The bound is absolute, not idle-based, because the failure it must survive
+// makes no progress to reset on: the flight is lost, nothing arrives, and the
+// client probes into silence. It composes with the ctx passed to Establish —
+// whichever expires first wins — so a caller that wants a tighter bound than the
+// default can still impose one through ctx alone.
+func WithHandshakeTimeout(d time.Duration) ConnOption {
+	return func(c *Conn) { c.handshakeTimeout = d }
+}
 
 // ptoBase is the un-backed-off probe timeout (RFC 9002 §6.2.1): smoothed_rtt +
 // max(4*rttvar, granularity) + max_ack_delay. Before any RTT sample it is

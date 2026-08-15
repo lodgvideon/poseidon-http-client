@@ -10,10 +10,10 @@ import (
 // Establish sends the client's Initial flight, then reads datagrams and drives
 // the handshake — feeding inbound CRYPTO to TLS, installing keys, and sending
 // the client's responding flights and acknowledgements — until the handshake
-// completes (RFC 9000 §7, RFC 9001 §4). The whole handshake is bounded by
-// handshakeTimeout so an anti-deadlock PTO (§6.2.2.1) cannot probe a server that
-// acknowledges but never completes forever; the caller's ctx deadline, if nearer,
-// still applies.
+// completes (RFC 9000 §7, RFC 9001 §4). The whole handshake is bounded, so an
+// anti-deadlock PTO (§6.2.2.1) cannot probe a server that acknowledges but never
+// completes forever; the bound is WithHandshakeTimeout's value, defaulting to 10
+// seconds, and the caller's ctx deadline, if nearer, still applies.
 func (c *Conn) Establish(ctx context.Context) error {
 	// Hold c.mu for the whole handshake so its calls to fail (and the send/recv
 	// helpers) are unconditionally assume-held internals — one convention with no
@@ -21,7 +21,14 @@ func (c *Conn) Establish(ctx context.Context) error {
 	// the lock across the handshake reads costs nothing.
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	ctx, cancel := context.WithTimeout(ctx, handshakeTimeout)
+	// Resolved here rather than in NewConn: the 200-odd &Conn{} literals in this
+	// package's tests never run an option, and a zero field must mean the default
+	// for them rather than an already-expired deadline.
+	hsTimeout := c.handshakeTimeout
+	if hsTimeout <= 0 {
+		hsTimeout = defaultHandshakeTimeout
+	}
+	ctx, cancel := context.WithTimeout(ctx, hsTimeout)
 	defer cancel()
 	if err := c.sendInitialFlight(ctx); err != nil {
 		return err

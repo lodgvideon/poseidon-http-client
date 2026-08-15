@@ -45,6 +45,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`quic.WithHandshakeTimeout` — the whole-handshake bound is no longer
+  hardcoded.** `Establish` wrapped its context in a fixed 10-second timeout, so
+  the bound could only ever be *lowered* (by handing it a context with a nearer
+  deadline) and never raised. On a lossy path 10 seconds is too tight: the PTO
+  ladder doubles per probe (RFC 9002 §6.2.1) and, before any RTT sample has
+  shrunk the base, exactly four probes fit inside it — 0.67 + 1.33 + 2.67 +
+  5.33 = 9.99 s. A handshake still legitimately probing under
+  §6.2.2.1's anti-deadlock rule was abandoned as though the server were gone,
+  which is what the interop runner's `handshakeloss` and `handshakecorruption`
+  cells hit (50 sequential handshakes at 30% loss).
+
+  ```go
+  conn, err := quic.NewConn(pc, tlsCfg, tp, quic.WithHandshakeTimeout(60*time.Second))
+  // or, through the HTTP/3 client:
+  client.ClientOptions{H3ConnOptions: []quic.ConnOption{quic.WithHandshakeTimeout(60 * time.Second)}}
+  ```
+
+  **The default is unchanged at 10 seconds**, and a non-positive value selects
+  it, so no existing caller moves. The option composes with the caller's
+  context — whichever expires first wins — so a *tighter* bound is still
+  expressible through the context alone.
+
+  The bound stays **absolute rather than idle-based** (quic-go's
+  `HandshakeIdleTimeout` shape). That is a measured choice, not a preference:
+  the failure it has to survive makes no progress to reset on. During the
+  outage no ACK, no CRYPTO and no packet of any kind arrives, so an idle bound
+  of 10 seconds would expire at the same instant the absolute one does.
+  `TestConn_HandshakeTimeout_RescuesALiveHandshake` stages exactly that — a
+  live server behind a 15-second outage, abandoned at 10 s under the default
+  and completing at 20.6 s when the bound is raised.
+
 - **A frame tracer: `trace.Tracer`, wired through HTTP/2 end to end.** There was
   no way to watch what the client was doing on the wire. `client.Hooks` is
   request-level and `conn.ConnOptions` had no callback at all, so a bug report

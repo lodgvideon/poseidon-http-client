@@ -197,7 +197,7 @@ Three readings that the table does not carry:
   that server booted **40 s after the client dialled**, so there was nothing to
   talk to.
 - The `multiconnect` failures are a **10 s handshake timeout hit on 7 of 50
-  connections**. That is `handshakeTimeout` in `quic/pto.go`, our own per-
+  connections**. That is `defaultHandshakeTimeout` in `quic/pto.go`, our own per-
   connection cap — so unlike the idle-timeout stalls, **this one may well be
   ours rather than the host's.** It is the reason the verdict is PARTIAL rather
   than pass-with-noise, and it should not be written off as environmental.
@@ -245,7 +245,7 @@ before anyone decides whether this is a client bug or the harness.
 
 `handshakecorruption` is 50 sequential handshakes under 30% packet corruption
 inside a 300 s budget. It fails at a specific point — "connection 13/50:
-handshake: context deadline exceeded" — which is `handshakeTimeout`, the 10 s
+handshake: context deadline exceeded" — which is `defaultHandshakeTimeout`, the 10 s
 per-connection cap in `quic/pto.go`, not the runner's budget. Its sibling
 `handshakeloss` — the same 50 handshakes under 30% packet *loss* — finishes in
 65 s and passes, so the gap is specific to corruption, where a damaged packet is
@@ -272,11 +272,30 @@ came back empty because the loop drained the stream before reading its state.
 - **`connectionmigration` cannot be declined** (see above). It came back
   UNSUPPORTED locally rather than red, but the client does not migrate, so do not
   count on that.
-- **The handshake has a hard 10 s cap** (`handshakeTimeout`, `quic/pto.go`). The
-  quic-go-only sweep hit it on the 13th of 50 `handshakecorruption` connections;
-  the three-server run hit it on 7 of 50 in `multiconnect`, against two servers
-  out of three. **This is the gap most likely to be ours**, and it is not
-  explained by the clock-step confound.
+- **The handshake's 10 s cap is no longer hard — but this endpoint still uses
+  it.** The cap (`defaultHandshakeTimeout`, `quic/pto.go`) is what the quic-go-only
+  sweep hit on the 13th of 50 `handshakecorruption` connections, and what the
+  three-server run hit on 7 of 50 in `multiconnect`. It is now a per-connection
+  option, `quic.WithHandshakeTimeout`, so this client *can* be given a larger
+  budget for the lossy cells — and deliberately is not, yet, because the raise
+  could not be shown to help here.
+
+  Six `handshakecorruption` runs against quic-go on the WSL2 host, three at the
+  10 s default and three with a 60 s bound, came back **1/3 and 0/3**. The
+  failures do not share a mechanism: one baseline run blew the runner's 300 s
+  budget having completed 31 of 50 connections, another completed **4 in 338 s**
+  — about 85 s per connection, which nothing in a handshake capped at 10 s can
+  produce — while the raised arm failed once on a handshake that exhausted even
+  the 60 s bound (connection 17/50), once on a plain read timeout mid-download
+  (connection 7/50), and once on the 300 s budget again. Five failures, four
+  distinct mechanisms, only one of them the handshake bound. Those are host
+  stalls landing on whichever timer happens to be armed, an order of magnitude
+  larger than the effect under test, so **the arms are not distinguishable here
+  and the 60 s trial is not evidence either way.** Setting the option for this
+  endpoint belongs on a machine that hosts the runner natively; the library-side
+  behaviour it depends on is pinned by
+  `TestConn_HandshakeTimeout_RescuesALiveHandshake` instead, in fake time, where
+  it is exactly reproducible.
 - **`transfer` stalls intermittently** — 10 of 14 runs across three servers, 3 of
   5 in the earlier sweep. It decides a dozen matrix cells, so it is the biggest
   risk to a green public matrix. Unresolved between client bug and host artefact;
