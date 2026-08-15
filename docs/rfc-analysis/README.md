@@ -16,8 +16,9 @@ REVIEW 17 over 232 obligations).
 HTTP/3 was built against current RFCs from day one, so there is no version
 delta; instead the whole dependency chain is catalogued — RFC 9114 (HTTP/3),
 9204 (QPACK), and the QUIC trio 9000 / 9001 / 9002 — 2698 verified facts
-distilled into a 666-item client checklist, with the code reconciliation still
-outstanding.
+distilled into a 666-item client checklist, and the code reconciliation is now
+done too (672 judged: PASS 405 · FAIL 30 · PARTIAL 25 · UNTESTED 46 · REVIEW 59
+· N/A 107).
 
 ## Method (how these were produced)
 
@@ -108,10 +109,15 @@ to audit a client that also implements its own QUIC.
 | [RFC9001_QUIC_TLS_FACTS.md](RFC9001_QUIC_TLS_FACTS.md) | Normative facts of **QUIC-TLS** (RFC 9001) → `quic/` crypto path | 318 facts | 314 confirmed, 4 disputes |
 | [RFC9002_QUIC_RECOVERY_FACTS.md](RFC9002_QUIC_RECOVERY_FACTS.md) | Normative facts of **QUIC loss detection + congestion control** (RFC 9002, incl. both pseudocode appendices) → `quic/` | 328 facts | 324 confirmed, 4 disputes |
 | [HTTP3_CLIENT_CHECKLIST.md](HTTP3_CLIENT_CHECKLIST.md) | The **666 client-relevant obligations** (484 MUST-family, 182 SHOULD-family) distilled from all five catalogs, bucketed by RFC section for reconciliation | 666 items | derived from verified facts |
+| [HTTP3_RECONCILIATION.md](HTTP3_RECONCILIATION.md) | The implementation **audited** against the checklist (judge + 2 adversarial verifiers) | 672 judged | PASS 405 · FAIL 30 · PARTIAL 25 · UNTESTED 46 · REVIEW 59 · N/A 107 |
 
 2698 facts total. The code reconciliation against `http3/` + `qpack/` + `quic/`
-is the next step — the checklist is already bucketed (50 buckets) for the
-judge + adversarial-verifier pass.
+**is done** — 693 agents over the 50 buckets, judge plus adversarial-verifier
+pass, with `file:line` evidence on every verdict. The unchecked `[ ]` boxes in
+HTTP3_CLIENT_CHECKLIST.md are the raw obligation catalog and are deliberately
+left unticked; the verdicts live in HTTP3_RECONCILIATION.md, which is the file
+to read. Its residue — 30 confirmed gaps that two verifiers could not overturn,
+plus 46 UNTESTED and 59 REVIEW — is the open surface, not the whole checklist.
 
 ### What the HTTP/3 disputes caught
 
