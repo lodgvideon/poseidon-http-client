@@ -345,6 +345,61 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **`BenchmarkStaticIndex_Hit` measured the one input the static-table lookup is
+  worst at, and it was the only `staticIndex` benchmark there was.** It pinned
+  `:method`/`GET` — table index 2, which the linear scan #459 replaced resolved
+  in two comparisons — so it reported the map index as a 51.7% regression while
+  the change was worth 2.9× on every real field set. It is renamed
+  `BenchmarkStaticIndex_Hit_BestCaseForScan`, body unchanged so the historical
+  numbers still compare, and joined by `BenchmarkStaticIndex_ScanVsMap` (eleven
+  probes across the table, each run through both the map and the pre-#459 scan
+  kept as the correctness oracle) and `BenchmarkStaticIndex_RequestSet` (one
+  iteration = one request's worth of lookups). `TestStaticIndex_FixtureDistribution`
+  pins the distribution the fixtures claim to model, so the rationale fails CI
+  rather than going stale (#685).
+
+  Two structural facts drive the whole picture. Only static-table rows 2..16
+  carry a non-empty value, so a field with a non-empty value can never full-match
+  past index 16; and the scan returned early **only** on a full match, walking all
+  61 rows for a name-only match or a miss. A real request therefore gets two early
+  exits — `:method` and `:scheme` — against seven to ten full table walks.
+
+  Measured on the honest distribution, map vs scan in one binary, `-count=24`,
+  three independent repetitions (so the comparison does not ride on this host's
+  release-to-release noise):
+
+  | lookups | scan | map | delta |
+  |---|---:|---:|---:|
+  | browser request set, 12 fields | 643.7–677.8 ns | 95.7–101.3 ns | **−84.8% to −85.9%** |
+  | gRPC request set, 9 fields | 439.1–459.9 ns | 64.6–67.8 ns | **−85.2% to −86.0%** |
+
+  All at p=0.000, n=24, reproduced in all three repetitions. That reconciles the
+  encoder number independently: the lookup saves 546–581 ns per browser request
+  set, and `BenchmarkEncoder_RealRequest_Warm` moved 866.6 → 301.0 ns, a 566 ns
+  drop. The static-table lookup accounts for essentially all of that −65%.
+
+  **The crossover is between full-match index 4 and index 7.** The scan is ahead
+  only where it exits almost immediately: index 2 by 39–55%, index 4 by 12–22%,
+  index 3 indistinguishable (the sign flips across repetitions). By index 7 —
+  `:scheme`/`https`, which every request sends — the map is 38–44% ahead, and on
+  name-only matches and misses it is 76–87% ahead regardless of position. The
+  scan's remaining advantage is confined to `:method`/`GET` and, marginally,
+  `:path`/`/`.
+
+  A hybrid — scan the first N rows for a full match, fall through to the map —
+  was measured and rejected, at every N. The prefix scan is paid in full by every
+  field that does *not* short-circuit, and that is 10 of 12 fields on the browser
+  set and 8 of 9 on the gRPC one: N=2 costs +61 ns per request against a 97.6 ns
+  base, N=4 costs +78 ns, and N=7 costs +157 ns because `:scheme` at index 7 is
+  already slower to scan than to hash. No N repairs that, so no change is
+  proposed to `staticIndex`.
+
+  The one weak spot the new benchmarks do expose is `:status`: seven rows share
+  the name, and walking that value list costs 22.2 ns against 6.6–9.0 ns for
+  every other name. It is still 3.9× faster than the scan's 91.7 ns, and this
+  client encodes `:status` only when acting as a server, so it is recorded rather
+  than acted on.
+
 - **An HTTP/3 response body no longer costs several times its own size to
   receive.** The buffered `Do` path allocated 75 KB to deliver a 16 KiB body and
   276 KB to deliver a 64 KiB one, arriving at QUIC packet granularity. Two things

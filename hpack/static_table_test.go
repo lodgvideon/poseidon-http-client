@@ -63,11 +63,5 @@ func TestStaticIndex_NoMatch(t *testing.T) {
 	}
 }
 
-func BenchmarkStaticIndex_Hit(b *testing.B) {
-	name := []byte(":method")
-	value := []byte("GET")
-	b.ReportAllocs()
-	for i := 0; i < b.N; i++ {
-		_, _ = staticIndex(name, value)
-	}
-}
+// The staticIndex benchmarks live in staticindex_bench_test.go, next to the
+// fixture rationale that says which of them is representative.

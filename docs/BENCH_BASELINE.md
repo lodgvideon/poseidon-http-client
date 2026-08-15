@@ -16,7 +16,7 @@ BenchmarkEncoder_EncodeBlock_3req_static   ~46 ns/op   0 B/op   0 allocs/op
 BenchmarkHuffmanEncode_path                ~18 ns/op   0 B/op   0 allocs/op
 BenchmarkHuffmanDecode_path                ~45 ns/op   0 B/op   0 allocs/op
 BenchmarkDecodeInteger_Max                 ~4 ns/op    0 B/op   0 allocs/op
-BenchmarkStaticIndex_Hit                   ~9 ns/op    0 B/op   0 allocs/op
+BenchmarkStaticIndex_Hit_BestCaseForScan   ~9 ns/op    0 B/op   0 allocs/op
 BenchmarkReadBufPool_GetPut                ~8 ns/op    0 B/op   0 allocs/op
 ```
 
@@ -25,6 +25,7 @@ All hot-path benchmarks: **0 B/op, 0 allocs/op**. Bench gate enforces this.
 ## Notes
 
 - `BenchmarkHuffmanDecode_path` uses the 4-bit nibble FSM built from the RFC 7541 App. B canonical table (implemented in `hpack/huffman_fsm.go`). Result: ~45 ns/op, well under the 80 ns/op target. 0 allocs/op.
+- `BenchmarkStaticIndex_Hit_BestCaseForScan` (renamed from `BenchmarkStaticIndex_Hit` in #685) is **not** the representative static-table lookup cost. It pins `:method`/`GET`, table index 2, which is the cheapest input the lookup has and the one the pre-#459 linear scan was fastest at — so its number moves the wrong way for a change that is a large net win. `BenchmarkStaticIndex_RequestSet` measures one request's worth of lookups and is the number to read; `BenchmarkStaticIndex_ScanVsMap` runs each probe through both the map and the pre-#459 scan in one binary. See the CHANGELOG entry for #685 for the distribution and the crossover.
 - GitHub Actions ubuntu-24.04 runners are noisier than this baseline, so what CI enforces is not a relative ns/op comparison at all. The gate is **absolute**: `scripts/bench-gate.sh` fails if any `Benchmark` line reports non-zero `B/op` or non-zero `allocs/op`, and a noisy runner cannot move a zero. On pull requests that is the `alloc-gate` job (`-benchtime=100ms -count=5`); the benchstat comparison (alpha=0.05) runs only in `bench-full`, on `v*` tags and manual dispatch, against the **previous release tag** rather than `main` — and it is `continue-on-error`, so it is informational and gates nothing. See the header of `.github/workflows/bench-gate.yml` for the measurements behind the split.
 
 ## C.4 — observability path
