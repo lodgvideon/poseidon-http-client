@@ -192,7 +192,7 @@ That is a second host, and on one cell it disagrees with this one.
 **`transfer` is not flaky in CI. The local intermittency is a host artefact.**
 Over the ten runs of that workflow to date — four full-matrix legs and six
 pull-request legs, two servers each — `transfer` was observed 20 times and came
-back `succeeded` 18 times. Both exceptions are the same pull-request leg, in
+back `succeeded` 18 times. Both exceptions come from one pull-request leg, in
 which `handshake` and `retry` came back `failed` against *both* servers and the
 whole leg finished in 42 s: the endpoint completed no handshake at all there,
 which is not the mid-transfer stall described below. **Not one mid-transfer
@@ -349,5 +349,5 @@ came back empty because the loop drained the stream before reading its state.
   `expected.json` asserts it unconditionally on every pull request. The local
   shortfall is the clock step in the confound above, not a client bug — the full
   count is in [What CI settled](#what-ci-settled). This entry stays as a gap in
-  the *verification*, not in the client: nothing here has been reproduced on a
-  host with a monotonic clock.
+  the *local verification*, not in the client: nothing recorded here has been
+  reproduced on a host whose wall clock does not step backwards.
