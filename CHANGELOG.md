@@ -182,14 +182,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ~270-360 ns/frame from 2 to 8 contending goroutines, 0 allocs; under backlog
   the drop path is ~17 ns and takes no lock at all.
 
-  Zero cost when off is enforced, not asserted: one nil check per frame, and the
-  bench-gate holds `frame` at 0 B/op with a tracer installed and discarding
+  Zero *allocation* cost when off is enforced, not asserted: the bench-gate holds
+  `frame` at 0 B/op with a tracer installed and discarding
   (`BenchmarkFramer_WriteData_Traced`, `BenchmarkFramer_ReadFrame_Traced`),
   while `TestFramer_Trace_AddsNoAllocations` requires the traced and untraced
-  allocation counts to match on every frame type. A tracer must not block —
-  it fires on the reader goroutine and under the write lock — so `TextTracer`
-  buffers, writes from a background goroutine, and drops with a reported count
-  rather than waiting on a slow writer.
+  allocation counts to match on every frame type.
+
+  It is not free in wall-clock terms, and the allocation gate does not speak to
+  that. Every write path now ends in `writeHeader`'s unconditional `traceOut`
+  call, which is a nil check when no tracer is installed but is still a call on
+  a path that had none. Measured v0.12.0 → this release, `-count=24`, two
+  independent repetitions: `BenchmarkFramer_WritePing` goes 9.82 → 11.08 and
+  11.14 ns/op, +12.8% / +13.4%, p=0.000, non-overlapping. That is real, not
+  noise — the same-binary-against-itself floor on this machine is ±4.2% — and
+  it is ~1.3 ns against an in-memory `bytes.Buffer`, roughly 0.1% of a real
+  TLS-plus-socket frame write. Recorded because it is a measured cost of this
+  release, not because it is expected to be visible on a socket. (#686)
+
+  A tracer must not block — it fires on the reader goroutine and under the write
+  lock — so `TextTracer` buffers, writes from a background goroutine, and drops
+  with a reported count rather than waiting on a slow writer.
 
   Scope: the emit sites are in `frame`, so the HTTP/2 transports are traced.
   The HTTP/1.1 and HTTP/3 seams are separate steps of the same issue; a tracer
@@ -662,6 +674,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   client encodes `:status` only when acting as a server, so it is recorded rather
   than acted on.
 
+- **`hpack` indexes the static table by name instead of scanning it.**
+  `staticIndex` walked all 61 rows for every field, so a nine-field gRPC request
+  cost roughly 549 `bytes.Equal` calls — the bulk of a warm encode. Keyed by
+  name only, deliberately: a name+value key would have to be built per lookup
+  and concatenating two byte slices allocates, which this package's absolute
+  zero-allocation gate forbids, whereas `m[string(name)]` does not allocate
+  because the compiler elides the conversion for a map read. The ordering rules
+  are pinned directly — a name-only match returns the lowest index carrying that
+  name and a full match returns that value's own row, which matters most for
+  `:status`, the one header every response carries and the only name with seven
+  rows.
+
+  Measured v0.12.0 → this release, `-count=24`:
+  `BenchmarkEncoder_RealRequest_Warm` 866.6 → 301.0 ns/op, **−65%**.
+
+  It is slower in exactly one benchmark — the best case for a linear scan — and
+  that is the expected trade. The entry above records the crossover, the rejected
+  hybrid and the fixture test that now pins the distribution. (#459, #685)
+
 - **An HTTP/3 response body no longer costs several times its own size to
   receive.** The buffered `Do` path allocated 75 KB to deliver a 16 KiB body and
   276 KB to deliver a 64 KiB one, arriving at QUIC packet granularity. Two things
@@ -797,6 +828,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   that ran must equal the set being asserted. The endpoint image is built from
   this tree in the job, so the gate depends on nothing published to any
   registry. The three `h3-interop*` jobs are untouched. (#679)
+
+- **Two of the nightly fuzz job's sixteen cells were fuzzing nothing, and the
+  job reported them green.** `go test -fuzz` exits 0 when its pattern matches no
+  target — it prints `no fuzz tests to fuzz` and passes — so a misplaced or
+  misspelled target name is indistinguishable from a clean five-minute run in
+  the job summary. The `./internal/bytesx` cell carried no `target` key at all,
+  which expanded to `-fuzz '^$'`; the `./internal/bufx` cell named
+  `FuzzReadVarint`, which lives in `bytesx`. Both exited 0 in 0.007s. The
+  practical consequence is that the QUIC varint decoder — which parses peer
+  bytes ahead of every packet and frame field — had never been mutation-fuzzed,
+  for as long as those cells existed.
+
+  All sixteen were checked mechanically rather than by eye, by walking every
+  `func Fuzz*` in the module and resolving each cell against it: 14 OK, 2
+  broken, none naming a target absent from the whole repo. `bytesx` gets its
+  real target; the `bufx` cell is dropped rather than given a ceremonial one,
+  since its only peer-input parser is `StripPadding`, already reached by
+  `FuzzFramerReadFrame` through all three `frame.dispatch*` padded paths. The
+  matrix goes 16 → 15.
+
+  The actual fix is the **new guard step**, which resolves each target with
+  `go test -list` before fuzzing and fails loudly when it is absent — this is
+  the defect that hid both cells, and it was invisible in the job summary. The
+  campaign that should have been running all along was then run: 10m00s,
+  356,116,126 executions on `FuzzReadVarint`, PASS, no crash and no reproducer.
+  Honestly caveated — the corpus saturated at 12 entries in the first three
+  seconds and never grew, so that is many draws from a small space rather than
+  broad exploration. The newly-wired cell was proved to have teeth by mutating
+  the 8-byte bounds guard, which it caught in 0.10s. No product code changed,
+  and no defect was found; the gap predates this release. (#682)
 
 - **`internal/bytesx` is split into `internal/bytesx` and `internal/bufx`.**
   One directory held two unrelated utility sets with **zero** overlapping
