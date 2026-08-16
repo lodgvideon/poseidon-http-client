@@ -39,6 +39,32 @@ own words and drops precisely that middle. A fresh copy costs a couple of
 thousand tokens and puts the rules back at the end, where they are visible. If
 you and this file disagree, the file is right.
 
+## What you may move, and what moves you
+
+Everything below assumes the things that judge the work sit outside the work.
+Alone at 4am with a ticket that will not go green, the cheapest exit is always to
+adjust the thing doing the judging, and it does not feel like cheating — it feels
+like fixing a bad test. Know which side of the line you are on before you touch
+anything:
+
+| Surface | Here that means | Rule |
+|---|---|---|
+| **Locked** | Test assertions, CI's own filters, `bench-gate`, the allocation gates behind `!race`, the mutation bar, this file | Read freely, propose changes in the open — never change one and then cite the green it produced |
+| **Editable** | The ticket's code, the tests you are adding, the batch's diff | This is the work; move it |
+| **Append-only** | The memory checkpoint, the issues you file, the night's disposition list, lesson files | Add; do not rewrite what an earlier iteration recorded |
+| **Human-controlled** | Merging your own PR, releases, weakening any gate above, anything irreversible | Prepare it, describe it, stop |
+
+Changing a locked surface is sometimes right — a test really can be wrong. What
+is never right is changing it and reporting the result as verification. Do it as
+its own visible act, in its own commit, and say in the PR body that the evidence
+now rests on a check you rewrote. An agent that quietly moves the bar and then
+truthfully reports clearing it has produced a night of work that means nothing,
+and nothing in the log will say so.
+
+The env guard that skips a benchmark is the local shape of this, already living
+in the repo. It is a legitimate answer to a gate that cannot express an honest
+allocating benchmark. It is not an answer to a benchmark you did not want to fix.
+
 ## The iteration
 
 Merge the PRs that are ready, take ONE ticket, close the batch with a commit, a
@@ -201,6 +227,25 @@ Keep lesson files: one lesson per file, the substance in the first line, and why
 it matters. Do not restate what the repository or its history already holds, and
 delete a lesson that turns out wrong.
 
+**Record what you tried and abandoned, not only what you shipped.** A dead end
+leaves no trace anywhere today: the issue log holds findings, the checkpoint holds
+derivations, and the approach you spent forty minutes on before discarding it is
+in neither. So iteration eleven tries it again, at full price, and discards it
+again for the same reason. One line per abandonment — what you tried, what killed
+it, the command that showed it — is enough to stop that, and it is the cheapest
+line in the checkpoint. It is also the one an agent skips, because abandoning
+something feels like nothing happened.
+
+**Prune across batches, not only within one.** `/simplify` runs over the diff you
+just produced, which catches accretion inside a batch and is blind to accretion
+across ten of them: a guard added in batch three, a second guard in batch six that
+subsumes it, a helper from batch eight with one caller left. Nothing here removes
+any of that, because every individual addition was justified when it landed. Every
+fifth iteration, take one stack you have added to more than twice and try removing
+its oldest member — if the suite stays green and the mutation still dies, it was
+scaffolding. Equal quality with less code is an improvement, and it is the only
+kind this loop will never propose on its own.
+
 ## Subagents
 
 **Under Opus 5:** delegate only large, independent tracks. Do not delegate what
@@ -220,6 +265,49 @@ the workers spend working, and each extra agent adds coordination faster than it
 adds coverage. Before any fan-out, price the single pass you are replacing — a
 fan-out that never beat one careful pass is not a win, it is a bill. The shape of
 the return itself belongs to `running-long-autonomous-loops`.
+
+## Against Anthropic's Opus 5 guidance — one confirmation, two open tensions
+
+Checked against Anthropic's Opus 5 prompting guide on 2026-08-16. Recorded here
+rather than silently resolved, because two of these are judgement calls the next
+run should make deliberately.
+
+**Confirmed.** "Report every finding, the small ones and the ones you are unsure
+of included; filtering happens separately" is exactly what the guide prescribes:
+a review prompt saying *"only report high-severity issues"* or *"be conservative"*
+gets followed literally and returns less, so the guide's own advice is to report
+everything and filter in a separate pass. Keep that rule as written; it is not a
+stylistic preference, it is a countermeasure.
+
+**Tension 1 — the refuter.** The Subagents section keeps one narrow delegation:
+a verifier assigned to refute one named claim, with fresh context and the claim
+alone. The guide rules out delegating any review of one's own output to a
+subagent, flatly and without a carve-out, and says separately that instructed
+re-checks *"compound with the model's own behavior and add cost without improving
+results"*. (Its exact phrasing is not reproduced here: this file ships a gate that
+bans those substrings outright, and the gate is a substring match that cannot tell
+a quotation from an instruction. It failed this section once, correctly.) The distinction
+this file draws — targeted refutation of a single published claim, versus handing
+over finished work for a general pass — is real, but it is this file's
+distinction, not the guide's. Treat the refuter as on probation: use it only for a
+claim that will be published and is expensive to retract, and if a run's refuters
+mostly return agreement, drop the construct rather than defending it.
+
+**Tension 2 — the lost middle.** "Working alone" justifies re-loading this skill
+each iteration on the grounds that the first copy ends up mid-context "where
+attention reaches worst". The guide states that on Opus 5, across a 1M-token
+window, *"instruction following, tool calling, and reasoning stay consistent
+throughout the window"*. If that holds here, the stated reason for the re-load is
+weaker than written. The re-load is cheap insurance and worth keeping, but the
+*justification* should be the honest one — compaction retells these rules in its
+own words and drops detail, and a fresh copy is immune to that — rather than an
+attention claim the model's own documentation contradicts.
+
+**Also worth acting on.** The guide reports that `low` and `medium` effort hold
+quality at a fraction of the tokens, and that review accuracy in particular holds
+at lower effort. Nothing in this file sets effort per stage. Premise re-derivation,
+mutation runs, and issue drafting are candidates for `low`/`medium`; the causal
+chain and the design forks are not.
 
 ## Environment
 
@@ -277,3 +365,28 @@ an injection count behind anything timing-shaped. The spread inside one variant
 before any claim of a difference between two. CI's own allocation filter rather
 than a shorter one. The batch closed with a commit, a PR, and a memory entry, and
 every finding of the night carrying an issue number.
+
+And the one that hides best, because clearing it feels like progress: no green
+cited from a check you edited this session. If you loosened an assertion, widened
+a tolerance, narrowed a filter or guarded a gate, that was a change to a locked
+surface — it belongs in the PR body in those words, and the run after it verifies
+nothing.
+
+<!--
+Copied from poseidon-http-client @ main on 2026-08-16 (SKILL.md + check-skill.py),
+then extended the same day. check-skill.py is unmodified.
+
+DIVERGED FROM THE CLIENT REPO. Additions, not upstream text:
+  - "What you may move, and what moves you" (surface table)
+  - the abandonment log and the cross-batch pruning rule (in Against degradation)
+  - the closing paragraph of "What gets lost first"
+Source: `context-engineering:harness-engineering`. Upstream already resisted
+metric gaming in practice (mutation testing, control arms, CI's own filter) but
+never named the principle, and kept no record of discarded approaches.
+-->
+
+<!--
+Second pass, 2026-08-16: reconciled against Anthropic's "Prompting Claude Opus 5"
+guide (platform.claude.com/docs/en/build-with-claude/prompt-engineering/prompting-claude-opus-5).
+The section naming Opus 5 explicitly is from that pass.
+-->

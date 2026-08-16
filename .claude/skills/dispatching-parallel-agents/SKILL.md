@@ -81,6 +81,28 @@ When agents return:
 - Run full test suite
 - Integrate all changes
 
+**Do not re-summarize a summary.** The dominant failure of this step is the
+telephone game: the dispatcher paraphrases what each agent reported, loses the
+detail that mattered, and reports its own paraphrase upward. Measured on
+supervisor architectures, this costs roughly half the achievable quality — not a
+rounding error, the single largest loss in the pattern.
+
+Two rules prevent it:
+
+- **Forward, don't retell.** When an agent's result is already final and complete,
+  pass it through verbatim rather than restating it. Reserve your own words for
+  synthesis across agents — the part no single agent could write.
+- **Constrain the return so there is nothing to paraphrase.** An agent that
+  returns a verdict, a severity, and one sentence gives you nothing to garble. An
+  agent that returns three paragraphs guarantees you will compress them, badly.
+  Full reasoning goes to a file; the return carries the decision and the path.
+
+**Validate before consuming, not after integrating.** One agent's wrong
+conclusion becomes the next step's premise, and downstream there is no way to
+tell an upstream hallucination from a fact. Check each result against something
+outside the agent that produced it — the diff, the test run, the file — before
+any of it feeds the next decision.
+
 ## Agent Prompt Structure
 
 Good agent prompts are:
@@ -123,6 +145,46 @@ Return: Summary of what you found and what you fixed.
 **❌ Vague output:** "Fix it" - you don't know what changed
 **✅ Specific:** "Return summary of root cause and changes"
 
+## On Claude Opus 5, the default already leans toward dispatching
+
+This skill was written to encourage fan-out. On Opus 5 the model's own bias runs
+the same direction, so the skill and the model now push the same way and nothing
+pushes back. Anthropic's Opus 5 prompting guide:
+
+> Claude Opus 5 delegates to subagents more readily than prior models. Delegation
+> pays off on genuinely independent, sizeable tracks of work, but it multiplies
+> cost and time when applied to small tasks.
+
+Its recommended instruction, which belongs in the harness rather than in your head:
+
+> Delegate to a subagent only for large tasks that are genuinely independent and
+> parallelizable, such as a wide multi-file investigation. Do not delegate work
+> you can finish yourself in a handful of tool calls, and do not use subagents to
+> verify or double-check your own work. If one subagent can complete the task, use
+> one rather than several, and keep spawn counts low.
+
+Two of those clauses contradict habits this file otherwise encourages, so read
+them as amendments:
+
+- **"Work you can finish in a handful of tool calls" is not a fan-out candidate**,
+  even when the tasks are genuinely independent. Independence is what makes
+  dispatch *possible*; size is what makes it *worth it*. The three-test-file
+  example below is close to the line, not comfortably past it.
+- **Never spawn an agent to verify your own finished work.** The guide names this
+  specifically, and Opus 5 self-corrects well enough that the second pass mostly
+  buys a second opinion at full price. A subagent asked to *refute one named
+  claim* with fresh context is a different construct — but if you find yourself
+  handing over a finished result for a general review, that is the pattern being
+  warned about.
+
+**Prefer deterministic caps to self-restraint.** Under Claude Code or the Agent
+SDK the limits are `CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH`,
+`CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS`, and the SDK's `max_budget_usd` (Claude
+Code 2.1.217+). A cap that the harness enforces survives the 3am judgement call
+that a soft rule does not. Note also that Claude Code only injects its own
+delegation instruction when using the `claude_code` system prompt preset — with a
+custom or omitted system prompt, the instruction above is yours to add.
+
 ## When NOT to Use
 
 **Related failures:** Fixing one might fix others - investigate together first
@@ -157,12 +219,47 @@ Agent 3 → Fix tool-approval-race-conditions.test.ts
 
 **Time saved:** 3 problems solved in parallel vs sequentially
 
+**What this example does not show:** nobody ran the same six failures through one
+agent, so "time saved" here is an estimate against an unmeasured baseline. Wall
+clock fell; total tokens almost certainly rose. Both numbers are worth having
+before citing a session like this as evidence that fan-out was the right call.
+
 ## Key Benefits
 
 1. **Parallelization** - Multiple investigations happen simultaneously
 2. **Focus** - Each agent has narrow scope, less context to track
 3. **Independence** - Agents don't interfere with each other
 4. **Speed** - 3 problems solved in time of 1
+
+## What it costs — price this before dispatching
+
+The benefits above are real and they are not free. A fan-out runs on the order of
+**15x the tokens** of the single-agent baseline it replaces: every agent carries
+its own system prompt and tool definitions, and the dispatcher pays again for
+instructions, returns, retries, and integration. Teams underbudget this
+consistently, because they estimate per-agent cost and forget the coordination.
+
+So the decision is not "are these tasks independent" — that is necessary, not
+sufficient. It is **"would one careful pass have done this"**. Price that pass
+first. A fan-out that never beat it is not a win, it is a bill.
+
+**The real reason to fan out is context isolation, not role-play.** Agents are
+worth their cost when a single context genuinely cannot hold the problem without
+degrading — not because "a testing agent and a security agent" sounds like a
+team. If all the work fits in one window with attention to spare, one pass wins.
+
+Three limits that follow:
+
+- **Cap a single fan-out at 3–5 workers.** Past that the dispatcher spends more
+  tokens reading summaries than the workers spend working, and each additional
+  agent adds communication paths faster than it adds coverage. If you need more,
+  add a tier rather than widening one.
+- **Do not over-decompose.** A ten-step pipeline with ten agents spends more on
+  handoffs than on work. Split only where a subtask genuinely benefits from its
+  own context.
+- **Prefer a shared file over message-passing for shared state.** State that
+  several agents must read faithfully degrades every time it is retold. Put it in
+  a file and pass the path.
 
 ## Verification
 
@@ -180,3 +277,21 @@ From debugging session (2025-10-03):
 - All investigations completed concurrently
 - All fixes integrated successfully
 - Zero conflicts between agent changes
+
+<!--
+Copied from poseidon-http-client @ main on 2026-08-16, then extended the same day.
+
+DIVERGED FROM THE CLIENT REPO. Additions, not upstream text:
+  - "Do not re-summarize a summary" / "Validate before consuming" (in step 4)
+  - "What it costs — price this before dispatching"
+  - the baseline caveat under Real Example
+Source: the `context-engineering:multi-agent-patterns` skill. Upstream listed
+only the benefits of fan-out; the telephone game and the ~15x token multiplier
+are the two facts that decide whether it was worth doing.
+-->
+
+<!--
+Second pass, 2026-08-16: reconciled against Anthropic's "Prompting Claude Opus 5"
+guide (platform.claude.com/docs/en/build-with-claude/prompt-engineering/prompting-claude-opus-5).
+The section naming Opus 5 explicitly is from that pass.
+-->
