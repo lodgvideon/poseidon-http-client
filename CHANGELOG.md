@@ -7,6 +7,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **A server reaping an idle HTTP/1.1 keep-alive is now recognised on Windows,
+  so the request is replayed instead of failing.** `ErrServerClosedIdle` — the
+  one H1 failure `client`'s retry classifier is allowed to replay, because no
+  part of a response ever arrived — was raised only for `io.EOF`. HTTP/1.1 has
+  no protocol signal for a reaped keep-alive, so what the caller sees is
+  whatever the local stack reports for a socket the peer has already destroyed,
+  and that differs by platform: Linux delivers the queued FIN ahead of the RST
+  the next write provokes and the read ends in `io.EOF`, while Windows reports
+  `WSAECONNABORTED` and no EOF ever arrives. On Windows the classification
+  therefore never fired and the caller got a failed request where every other
+  platform transparently reused the connection — on both the pooled and the
+  single-connection transports, neither of which probes inside
+  `h1ProbeIdleAfter` by design, so replay is the only recovery there is (#684).
+
+  The guard's boundary is unchanged: `firstRead` and `readConsumedNothing` are
+  what carry "no part of a response arrived", and neither depends on the errno,
+  so an abort arriving after the server began answering is still not replayed.
+
+  Note for anyone writing a similar check: `syscall.ECONNRESET` and
+  `syscall.ECONNABORTED` are defined on Windows as synthetic
+  `APPLICATION_ERROR` values that no socket call ever returns, so a
+  portable-looking `errors.Is` against them compiles and matches nothing. The
+  Winsock codes are needed, which is why this is per-platform.
+
 ## [v0.13.0] — 2026-08-15
 
 ### Changed (breaking)
