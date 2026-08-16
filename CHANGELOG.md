@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Performance
+
+- **A standalone ACK no longer allocates.** `flush` built the frame payload for a
+  packet carrying no STREAM data from a nil slice, so the standalone-ACK path
+  allocated once per ACK on a lossless in-order connection and up to four times as
+  ACK ranges accumulate under loss — measured with `buildACK` from a nil
+  destination: 1.00 allocs/op at one and two ranges, 2.00 at six, 4.00 at twenty,
+  against 0.00 for a reused destination (#689).
+
+  This is a different site from the one #475 fixed beside it. That scratch is the
+  ACK Range section, which is empty when a single contiguous range is
+  acknowledged — which is why it measured 0.00 → 0.00 on a clean path and only paid
+  under loss. This one is the frame payload buffer, which has to exist for every
+  ACK however few ranges it carries, so it pays on the lossless path too. The
+  existing gate could not see it because it hands `buildACK` a pre-allocated
+  destination, so it measures the Range scratch and not the caller's `nil`.
+
 ### Fixed
 
 - **A server reaping an idle HTTP/1.1 keep-alive is now recognised on Windows,
