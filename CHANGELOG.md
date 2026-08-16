@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Tests
+
+- **An interim-then-close request is now proven un-replayed end to end.**
+  `ErrServerClosedIdle` means no part of a response ever arrived, which is what
+  makes replaying safe; an interim response is the opposite, since `100 Continue`
+  is the server saying it has the request head and wants the body — the strongest
+  evidence available on that connection that it is acting on the request. `http1`
+  pinned the classification over a pipe and `client` pinned how the retry
+  classifier reads the error value, but neither drove the retry loop, so nothing
+  proved what happens to such a request in practice (#677).
+
+  Driven with GET rather than POST on purpose: `canRetry` refuses a non-idempotent
+  method outright, so a POST would be un-replayed for a reason unrelated to the
+  interim and the gate would pass with the classification broken. A control arm —
+  same fixture, same method, same `Retryer`, differing only in whether any part of
+  a response arrived — asserts the replay *does* happen there, without which the
+  gate is satisfied by a client that never retries anything.
+
 ## [v0.13.0] — 2026-08-15
 
 ### Changed (breaking)
