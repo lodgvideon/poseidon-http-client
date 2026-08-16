@@ -86,19 +86,28 @@ func TestErrServerClosedIdle_PeerAbortBeforeAnyByte(t *testing.T) {
 	}
 }
 
-// TestErrServerClosedIdle_NotAfterAPartialResponse_PeerAbort is the boundary. An abort
-// arriving after the server began answering is no evidence the request went
-// unprocessed, so widening the errno must not widen what "nothing came back" means:
-// readConsumedNothing is what carries that, and it is errno-independent.
+// TestErrServerClosedIdle_NotAfterAPartialResponse_PeerAbort is the boundary, and it
+// is the half that decides correctness: an abort arriving after the server began
+// answering is no evidence at all that the request went unprocessed, so replaying it
+// would duplicate work the peer may already have done.
+//
+// The status line is cut mid-token rather than ended, which is what puts this on the
+// guard's own path: a complete line is consumed successfully and the abort then lands
+// on the header-block read, which the guard does not cover, so such a fixture asserts
+// nothing about it. Here the failing read IS the status-line read, with firstRead
+// still true — readConsumedNothing is the only conjunct left to reject it. That makes
+// this the one arm which fails if the abort branch is ever hoisted out of the guard
+// rather than added inside it; no test built on io.EOF can express it, since none of
+// them produce an abort.
 func TestErrServerClosedIdle_NotAfterAPartialResponse_PeerAbort(t *testing.T) {
-	nc := &partialThenAbortConn{sent: []byte("HTTP/1.1 200 OK\r\n"), errno: testAbortErrno}
+	nc := &partialThenAbortConn{sent: []byte("HTTP/1.1 20"), errno: testAbortErrno}
 	err := readResponseOver(t, nc)
 
 	if err == nil {
 		t.Fatal("ReadResponse returned no error on a response truncated by an abort")
 	}
 	if errors.Is(err, ErrServerClosedIdle) {
-		t.Errorf("a response truncated by %v was classified as ErrServerClosedIdle — the "+
+		t.Errorf("a status line truncated by %v was classified as ErrServerClosedIdle — the "+
 			"server had started answering, so it may have processed the request, and the "+
 			"caller would replay it", testAbortErrno)
 	}
