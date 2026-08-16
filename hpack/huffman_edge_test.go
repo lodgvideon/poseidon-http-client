@@ -7,9 +7,11 @@
 package hpack
 
 import (
-	"errors"
 	"strings"
 	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // TestHuffmanDecode_InvalidCode_ReturnsErrInvalidHuffman feeds the
@@ -22,13 +24,11 @@ func TestConformance_RFC7541_C5_2_HuffmanDecode_InvalidCode(t *testing.T) {
 	// valid code is 30 bits; the EOS symbol is 30 ones followed by
 	// a 1-bit = 0x3fffffff, but a bare 0xff is not a valid prefix).
 	src := []byte{0xff, 0xff, 0xff, 0xff}
+
 	out, err := HuffmanDecode(nil, src)
-	if err == nil {
-		t.Fatalf("expected ErrInvalidHuffman, got nil (out=%x)", out)
-	}
-	if !errors.Is(err, ErrInvalidHuffman) {
-		t.Fatalf("err = %v, want ErrInvalidHuffman", err)
-	}
+
+	require.ErrorIsf(t, err, ErrInvalidHuffman,
+		"decoded %x instead of erroring — §5.2 forbids EOS in the encoded data, and a decoder that walks through it emits symbols the peer never sent", out)
 }
 
 // TestHuffmanDecode_PrefixOfEosIsInvalid confirms that a sequence
@@ -39,22 +39,23 @@ func TestConformance_RFC7541_C5_2_HuffmanDecode_PrefixOfEos(t *testing.T) {
 	// 0xff, 0xff, 0xff, 0x00 = 32 bits starting with 24 ones.
 	// This is not the EOS code (which is 30 ones, then 2 bits 11).
 	src := []byte{0xff, 0xff, 0xff, 0x00}
+
 	_, err := HuffmanDecode(nil, src)
-	if !errors.Is(err, ErrInvalidHuffman) {
-		t.Fatalf("err = %v, want ErrInvalidHuffman", err)
-	}
+
+	require.ErrorIs(t, err, ErrInvalidHuffman,
+		"a run of ones that is not a complete valid code must be refused, not accepted as a near-miss of EOS")
 }
 
 // TestHuffmanDecode_EmptyInput is a sanity check: empty input must
 // not return an error.
 func TestConformance_RFC7541_C5_2_HuffmanDecode_EmptyInput(t *testing.T) {
-	out, err := HuffmanDecode(nil, nil)
-	if err != nil {
-		t.Fatalf("empty input err = %v, want nil", err)
-	}
-	if len(out) != 0 {
-		t.Fatalf("empty input produced %x, want empty", out)
-	}
+	var src []byte
+
+	out, err := HuffmanDecode(nil, src)
+
+	require.NoError(t, err,
+		"an empty Huffman body is a legal zero-length string; rejecting it turns an empty header value into a connection error")
+	assert.Empty(t, out, "an empty body must decode to no bytes at all")
 }
 
 // TestHuffmanDecode_LongString_RoundTrip checks that round-tripping
@@ -65,12 +66,11 @@ func TestConformance_RFC7541_C5_2_HuffmanDecode_LongString_RoundTrip(t *testing.
 	// 1024-byte string: 256 'a' segments, exercising the multi-byte
 	// integer prefix encoding on the string-literal length field.
 	src := []byte(strings.Repeat("abcdefgh", 128)) // 1024 bytes
+
 	enc := HuffmanEncode(nil, src)
 	dec, err := HuffmanDecode(nil, enc)
-	if err != nil {
-		t.Fatalf("decode err = %v", err)
-	}
-	if string(dec) != string(src) {
-		t.Fatalf("roundtrip mismatch: len(enc)=%d len(dec)=%d", len(enc), len(dec))
-	}
+
+	require.NoErrorf(t, err, "decoding our own %d-byte encoding must succeed", len(enc))
+	assert.Equalf(t, string(src), string(dec),
+		"round-trip mismatch: len(enc)=%d len(dec)=%d — a body long enough to cross the bit-accumulator's refill boundary must survive intact", len(enc), len(dec))
 }
