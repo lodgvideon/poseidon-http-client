@@ -2,8 +2,10 @@ package grpc
 
 import (
 	"context"
-	"errors"
 	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	"github.com/lodgvideon/poseidon-http-client/conn"
 )
@@ -25,9 +27,7 @@ func allowConn(t *testing.T, allow ...string) *ClientConn {
 		Authority:             "bench.local",
 		AllowReservedMetadata: allow,
 	})
-	if err != nil {
-		t.Fatalf("Dial: %v", err)
-	}
+	require.NoError(t, err, "Dial")
 	t.Cleanup(func() { _ = cc.Close() })
 	return cc
 }
@@ -37,13 +37,15 @@ func allowConn(t *testing.T, allow ...string) *ClientConn {
 func TestAllowReserved_DefaultStillRefusesTheNamespace(t *testing.T) {
 	cc := dialMockPeer(t, newMockGRPCPeer(t), nil)
 	md := []conn.HeaderField{{Name: []byte("grpc-trace-bin"), Value: []byte("x")}}
-	if _, err := cc.NewStream(context.Background(), "/t.S/M", md); !errors.Is(err, ErrReservedMetadata) {
-		t.Errorf("grpc-trace-bin with no allowlist = %v, want ErrReservedMetadata", err)
-	}
-	if _, err := AppendMetadata(nil, "grpc-trace-bin", []byte("x")); !errors.Is(err, ErrReservedMetadata) {
-		t.Errorf("package AppendMetadata = %v, want ErrReservedMetadata — it cannot see a "+
-			"connection's allowlist and must stay strict", err)
-	}
+
+	_, streamErr := cc.NewStream(context.Background(), "/t.S/M", md)
+	_, appendErr := AppendMetadata(nil, "grpc-trace-bin", []byte("x"))
+
+	assert.ErrorIsf(t, streamErr, ErrReservedMetadata,
+		"grpc-trace-bin with no allowlist = %v, want ErrReservedMetadata", streamErr)
+	assert.ErrorIsf(t, appendErr, ErrReservedMetadata,
+		"package AppendMetadata = %v, want ErrReservedMetadata — it cannot see a "+
+			"connection's allowlist and must stay strict", appendErr)
 }
 
 // TestAllowReserved_ExemptsOnlyTheListedName is the point of the feature, and
@@ -51,18 +53,16 @@ func TestAllowReserved_DefaultStillRefusesTheNamespace(t *testing.T) {
 func TestAllowReserved_ExemptsOnlyTheListedName(t *testing.T) {
 	cc := allowConn(t, "grpc-trace-bin")
 	ctx := context.Background()
-
-	ok := []conn.HeaderField{{Name: []byte("grpc-trace-bin"), Value: []byte("dHJhY2U=")}}
-	s, err := cc.NewStream(ctx, "/t.S/M", ok)
-	if err != nil {
-		t.Fatalf("the allowlisted name was refused: %v", err)
-	}
-	_ = s.Close()
-
+	listed := []conn.HeaderField{{Name: []byte("grpc-trace-bin"), Value: []byte("dHJhY2U=")}}
 	notListed := []conn.HeaderField{{Name: []byte("grpc-tags-bin"), Value: []byte("dA==")}}
-	if _, err := cc.NewStream(ctx, "/t.S/M", notListed); !errors.Is(err, ErrReservedMetadata) {
-		t.Errorf("a grpc- name that is NOT listed = %v, want ErrReservedMetadata", err)
-	}
+
+	s, listedErr := cc.NewStream(ctx, "/t.S/M", listed)
+	_, notListedErr := cc.NewStream(ctx, "/t.S/M", notListed)
+
+	require.NoError(t, listedErr, "the allowlisted name was refused")
+	defer func() { _ = s.Close() }()
+	assert.ErrorIsf(t, notListedErr, ErrReservedMetadata,
+		"a grpc- name that is NOT listed = %v, want ErrReservedMetadata", notListedErr)
 }
 
 // TestAllowReserved_CannotForgeTransportHeaders is the security bound. Every one
@@ -75,35 +75,37 @@ func TestAllowReserved_CannotForgeTransportHeaders(t *testing.T) {
 		"user-agent", "connection", "host", ":method", ":path",
 	)
 	ctx := context.Background()
-
-	// Transport-owned names: refused by the reservedKeys gate.
-	for _, name := range []string{
+	transportOwned := []string{
 		"content-type", "te", "grpc-timeout", "grpc-encoding", "grpc-accept-encoding",
 		"user-agent", "connection", "keep-alive", "proxy-connection",
 		"transfer-encoding", "upgrade", "host",
-	} {
-		md := []conn.HeaderField{{Name: []byte(name), Value: []byte("v")}}
-		if _, err := cc.NewStream(ctx, "/t.S/M", md); !errors.Is(err, ErrReservedMetadata) {
-			t.Errorf("%q was accepted because it appeared in the allowlist: %v — the "+
-				"exemption must apply to the grpc- prefix check ONLY", name, err)
-		}
 	}
-
 	// Pseudo-headers are refused one gate EARLIER, by name syntax: a colon is not
 	// a legal character in a field name, so validMetadataName rejects them before
 	// checkMetadataKey ever runs. Worth pinning as its own case rather than
 	// folding into the above — the two sentinels are not interchangeable, and a
 	// future reshuffle that made a pseudo-header reach the allowlist would show
 	// up here as a changed error rather than as silence.
-	for _, name := range []string{":method", ":path", ":authority", ":scheme"} {
+	pseudoHeaders := []string{":method", ":path", ":authority", ":scheme"}
+
+	// Transport-owned names: refused by the reservedKeys gate.
+	for _, name := range transportOwned {
 		md := []conn.HeaderField{{Name: []byte(name), Value: []byte("v")}}
+
 		_, err := cc.NewStream(ctx, "/t.S/M", md)
-		if !errors.Is(err, ErrInvalidMetadata) {
-			t.Errorf("%q = %v, want ErrInvalidMetadata from the name-syntax gate", name, err)
-		}
-		if errors.Is(err, nil) {
-			t.Errorf("%q was accepted", name)
-		}
+
+		assert.ErrorIsf(t, err, ErrReservedMetadata,
+			"%q was accepted because it appeared in the allowlist: %v — the "+
+				"exemption must apply to the grpc- prefix check ONLY", name, err)
+	}
+	for _, name := range pseudoHeaders {
+		md := []conn.HeaderField{{Name: []byte(name), Value: []byte("v")}}
+
+		_, err := cc.NewStream(ctx, "/t.S/M", md)
+
+		assert.ErrorIsf(t, err, ErrInvalidMetadata,
+			"%q = %v, want ErrInvalidMetadata from the name-syntax gate", name, err)
+		assert.Errorf(t, err, "%q was accepted", name)
 	}
 }
 
@@ -113,17 +115,18 @@ func TestAllowReserved_CannotForgeTransportHeaders(t *testing.T) {
 func TestAllowReserved_SyntaxIsStillChecked(t *testing.T) {
 	cc := allowConn(t, "grpc-trace-bin", "grpc-Bad")
 	ctx := context.Background()
-
 	// Uppercase in the name: not a lowercase token.
-	bad := []conn.HeaderField{{Name: []byte("grpc-Bad"), Value: []byte("v")}}
-	if _, err := cc.NewStream(ctx, "/t.S/M", bad); !errors.Is(err, ErrInvalidMetadata) {
-		t.Errorf("an uppercase allowlisted name = %v, want ErrInvalidMetadata", err)
-	}
+	uppercase := []conn.HeaderField{{Name: []byte("grpc-Bad"), Value: []byte("v")}}
 	// CRLF in the value of an exempted name.
 	inject := []conn.HeaderField{{Name: []byte("grpc-trace-bin"), Value: []byte("a\r\nx-evil: 1")}}
-	if _, err := cc.NewStream(ctx, "/t.S/M", inject); !errors.Is(err, ErrInvalidMetadata) {
-		t.Errorf("CRLF in an exempted value = %v, want ErrInvalidMetadata", err)
-	}
+
+	_, uppercaseErr := cc.NewStream(ctx, "/t.S/M", uppercase)
+	_, injectErr := cc.NewStream(ctx, "/t.S/M", inject)
+
+	assert.ErrorIsf(t, uppercaseErr, ErrInvalidMetadata,
+		"an uppercase allowlisted name = %v, want ErrInvalidMetadata", uppercaseErr)
+	assert.ErrorIsf(t, injectErr, ErrInvalidMetadata,
+		"CRLF in an exempted value = %v, want ErrInvalidMetadata", injectErr)
 }
 
 // TestAllowReserved_MatchesCaseInsensitively pins the documented matching rule,
@@ -132,10 +135,11 @@ func TestAllowReserved_SyntaxIsStillChecked(t *testing.T) {
 func TestAllowReserved_MatchesCaseInsensitively(t *testing.T) {
 	cc := allowConn(t, "GRPC-Trace-Bin")
 	md := []conn.HeaderField{{Name: []byte("grpc-trace-bin"), Value: []byte("dA==")}}
+
 	s, err := cc.NewStream(context.Background(), "/t.S/M", md)
-	if err != nil {
-		t.Fatalf("an allowlist entry in mixed case did not match the lowercase name: %v", err)
-	}
+
+	require.NoError(t, err,
+		"an allowlist entry in mixed case did not match the lowercase name")
 	_ = s.Close()
 }
 
@@ -146,22 +150,18 @@ func TestAllowReserved_ConnAppendMetadataEncodesBin(t *testing.T) {
 	cc := allowConn(t, "grpc-trace-bin")
 
 	md, err := cc.AppendMetadata(nil, "grpc-trace-bin", []byte{0x00, 0xFF, 0x10})
-	if err != nil {
-		t.Fatalf("(*ClientConn).AppendMetadata: %v", err)
-	}
-	if len(md) != 1 || string(md[0].Name) != "grpc-trace-bin" {
-		t.Fatalf("built %d fields: %+v", len(md), md)
-	}
-	got, ok, err := MetadataValue(md, "grpc-trace-bin")
-	if err != nil || !ok {
-		t.Fatalf("MetadataValue = (ok=%v, err=%v) — the value is not valid base64", ok, err)
-	}
-	if len(got) != 3 || got[0] != 0x00 || got[1] != 0xFF || got[2] != 0x10 {
-		t.Errorf("round-tripped % x, want 00 ff 10", got)
-	}
-
 	// Still bound by the same rules as everything else.
-	if _, err := cc.AppendMetadata(nil, "content-type", []byte("x")); !errors.Is(err, ErrReservedMetadata) {
-		t.Errorf("(*ClientConn).AppendMetadata(content-type) = %v, want ErrReservedMetadata", err)
-	}
+	_, reservedErr := cc.AppendMetadata(nil, "content-type", []byte("x"))
+
+	require.NoError(t, err, "(*ClientConn).AppendMetadata")
+	require.Lenf(t, md, 1, "built %d fields: %+v", len(md), md)
+	require.Equalf(t, "grpc-trace-bin", string(md[0].Name), "built %d fields: %+v", len(md), md)
+	got, ok, valueErr := MetadataValue(md, "grpc-trace-bin")
+	require.NoErrorf(t, valueErr,
+		"MetadataValue = (ok=%v, err=%v) — the value is not valid base64", ok, valueErr)
+	require.Truef(t, ok,
+		"MetadataValue = (ok=%v, err=%v) — the value is not valid base64", ok, valueErr)
+	assert.Equalf(t, []byte{0x00, 0xFF, 0x10}, got, "round-tripped % x, want 00 ff 10", got)
+	assert.ErrorIsf(t, reservedErr, ErrReservedMetadata,
+		"(*ClientConn).AppendMetadata(content-type) = %v, want ErrReservedMetadata", reservedErr)
 }
