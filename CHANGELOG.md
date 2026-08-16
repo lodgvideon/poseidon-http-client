@@ -52,8 +52,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   granting receive credit on the consumer's goroutine, so the gate is on the
   return value and that caller's choice is left alone.
 
-### Tests
-
 - **Requests are now correlated with their own responses under concurrency, so
   stream mixing can fail a test.** The suite checked that a response came back,
   not that it was *this* request's response: every concurrent test fired the
