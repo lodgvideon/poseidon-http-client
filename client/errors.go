@@ -126,7 +126,16 @@ var (
 	ErrNoAddresses = errors.New("client: resolver returned no addresses")
 
 	// ErrInvalidOptions is returned by NewClient when ClientOptions are
-	// internally inconsistent (e.g. both Addr and Resolver supplied).
+	// internally inconsistent (e.g. both Addr and Resolver supplied) or are
+	// missing a field the chosen transport requires (Addr, ConnOpts.Dialer,
+	// or TLSConfig for an HTTP/3 transport).
+	//
+	// It is not the only sentinel NewClient rejects options with: a Pool that
+	// does not match the transport carries ErrInvalidPoolOptions, a dialer
+	// asserting an unusable ALPN carries ErrALPNProtocolMismatch, and an
+	// undefined kind carries ErrInvalidTransportKind. A caller wanting "any
+	// option was rejected" should test for all four; the split exists so the
+	// common cases can be told apart without parsing the message.
 	ErrInvalidOptions = errors.New("client: invalid ClientOptions")
 
 	// ErrBodyTooLarge is returned when the response body (compressed or

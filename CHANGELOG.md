@@ -7,6 +7,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **Three `NewClient` option errors are classifiable again.** A missing or
+  whitespace-bearing `Addr`, a missing `ConnOpts.Dialer`, and a missing
+  `TLSConfig` on an HTTP/3 transport were built with a bare `fmt.Errorf` and
+  wrapped no sentinel at all, so the documented `errors.Is(err,
+  client.ErrInvalidOptions)` check missed them and a caller fell through to
+  whatever its generic branch was — treating an unusable configuration as a
+  transport failure. Their siblings in the same validation path already wrapped
+  it (#713).
+
+  Their messages change shape accordingly, from
+  `client: ClientOptions.Addr must be …` to
+  `client: invalid ClientOptions: Addr must be …`. Nothing in the tree matched on
+  the old text; `errors.Is` was always the supported check and now works.
+
+  `ErrInvalidOptions`' own doc comment said "internally inconsistent", which
+  never described these three — they are missing required fields — so it now
+  covers both, and names the three sibling sentinels (`ErrInvalidPoolOptions`,
+  `ErrALPNProtocolMismatch`, `ErrInvalidTransportKind`) that the other validation
+  paths return, since "any option was rejected" means testing for all four.
+  `docs/CLIENT_GUIDE.md` claimed this whole family "returns a wrapped sentinel
+  error" while quoting one of the three unwrapped messages verbatim; it now names
+  the sentinel per path and documents the HTTP/3 `TLSConfig` requirement it
+  omitted entirely.
+
 ### Added
 
 - **`conn.ConnOptions.ReadBufferSize` and `conn.ConnOptions.StaticConnWindowSize`.**

@@ -264,7 +264,7 @@ func NewClient(opts ClientOptions) (*Client, error) {
 	// an Addr; every other transport requires one.
 	if !isManagedTransport(opts.Transport) {
 		if opts.Addr == "" || containsAnyWhitespace(opts.Addr) {
-			return nil, fmt.Errorf("client: ClientOptions.Addr must be a non-empty host:port without whitespace")
+			return nil, fmt.Errorf("%w: Addr must be a non-empty host:port without whitespace", ErrInvalidOptions)
 		}
 	}
 	// HTTP/3 transports own their own QUIC dialing and need a *tls.Config, not a
@@ -272,10 +272,10 @@ func NewClient(opts ClientOptions) (*Client, error) {
 	// TLS config instead.
 	if isH3Transport(opts.Transport) {
 		if opts.TLSConfig == nil {
-			return nil, fmt.Errorf("client: ClientOptions.TLSConfig is required for HTTP/3 transports")
+			return nil, fmt.Errorf("%w: TLSConfig is required for HTTP/3 transports", ErrInvalidOptions)
 		}
 	} else if opts.ConnOpts.Dialer == nil {
-		return nil, fmt.Errorf("client: ClientOptions.ConnOpts.Dialer is required")
+		return nil, fmt.Errorf("%w: ConnOpts.Dialer is required", ErrInvalidOptions)
 	} else if err := validateDialerALPN(opts.Transport, opts.ConnOpts.Dialer); err != nil {
 		return nil, err
 	}
