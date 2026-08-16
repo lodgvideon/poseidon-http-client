@@ -1,13 +1,12 @@
 package qpack
 
 import (
-	"bytes"
-	"errors"
 	"strconv"
 	"testing"
 
 	"github.com/lodgvideon/poseidon-http-client/header"
 	"github.com/lodgvideon/poseidon-http-client/hpack"
+	"github.com/stretchr/testify/require"
 )
 
 // These tests exercise the ENCODE-side dynamic table (RFC 9204 §2.1, Q5): the
@@ -23,19 +22,19 @@ import (
 // insert-then-reference-after-ack strategy: the first request inserts and stays
 // static; after the peer's Insert Count Increment the second request references the
 // dynamic entries. Both round-trip to the identical headers.
+//
+// The three steps share one encoder deliberately: reference-after-ack is a state
+// machine, and step 3's expected output exists only because steps 1 and 2 ran.
 func TestConformance_RFC9204_Sec21_EncodeReferenceAfterAck(t *testing.T) {
 	const serverMax = 4096
 	enc, err := NewDynamicEncoder(serverMax, serverMax)
-	if err != nil {
-		t.Fatalf("NewDynamicEncoder: %v", err)
-	}
+	require.NoError(t, err, "NewDynamicEncoder with a capacity that fits entries must succeed")
 	// A mirror of the dynamic table the peer maintains as our decoder, driven only
 	// by the encoder-stream instructions we produce.
 	server := NewDynamicTable(serverMax)
 	mustApply(t, server, enc.DrainEncoderInstructions(nil)) // Set Dynamic Table Capacity (§4.3.1)
-	if server.Capacity() != serverMax {
-		t.Fatalf("server table capacity = %d, want %d", server.Capacity(), serverMax)
-	}
+	require.Equal(t, uint64(serverMax), server.Capacity(),
+		"the first encoder-stream instruction must size the peer's table, or every later insert is measured against the wrong capacity")
 
 	fields := []header.Field{
 		hf(":method", "GET"),
@@ -48,47 +47,42 @@ func TestConformance_RFC9204_Sec21_EncodeReferenceAfterAck(t *testing.T) {
 	// --- Request 1: nothing acknowledged, so the section is static-only and the two
 	// non-static fields are inserted for future requests (RFC 9204 §2.1). ---
 	sec1 := enc.EncodeFieldSection(nil, fields)
-	if want := NewEncoder().EncodeFieldSection(nil, fields); !bytes.Equal(sec1, want) {
-		t.Fatalf("request-1 section = %x, want byte-identical static output %x", sec1, want)
-	}
 	insts1 := enc.DrainEncoderInstructions(nil)
-	if len(insts1) == 0 {
-		t.Fatal("request 1 must emit Insert instructions for the repeated headers")
-	}
+
+	require.Equal(t, NewEncoder().EncodeFieldSection(nil, fields), sec1,
+		"with nothing acknowledged the encoder may reference nothing, so request 1 must be byte-identical to the static-only profile — anything else is a reference the peer cannot resolve yet")
+	require.NotEmpty(t, insts1,
+		"request 1 must emit Insert instructions for the repeated headers, or the dynamic table is never populated and the whole strategy is inert")
 	// The first insert is Insert With Name Reference to the static table (§4.3.2):
 	// name ":authority" is static index 0, so the byte is 0xc0 (1T=11, index 0).
-	if insts1[0]&0x80 == 0 || insts1[0]&0x40 == 0 || insts1[0] != 0xc0 {
-		t.Fatalf("first Insert instruction = %#x, want Insert With Name Reference static idx 0 (0xc0)", insts1[0])
-	}
+	require.Equalf(t, byte(0xc0), insts1[0],
+		"first Insert instruction = %#x, want Insert With Name Reference static idx 0: re-encoding a name the static table already carries wastes encoder-stream bytes on every connection", insts1[0])
 	mustApply(t, server, insts1)
-	if server.InsertCount() != 2 {
-		t.Fatalf("server insert count = %d, want 2 (:authority, cookie)", server.InsertCount())
-	}
+	require.Equal(t, uint64(2), server.InsertCount(),
+		"exactly the two non-static fields (:authority, cookie) are insert candidates")
 	wantEntry(t, server, 0, ":authority", "example.com")
 	wantEntry(t, server, 1, "cookie", "sess=abc")
 	assertDecodeDyn(t, NewDecoder(), sec1, server, fields) // RIC 0 (static)
 
 	// --- Peer acknowledges the two inserts with an Insert Count Increment (§4.4.3). ---
-	if _, aerr := enc.ParseDecoderInstructions(AppendInsertCountIncrement(nil, 2)); aerr != nil {
-		t.Fatalf("ParseDecoderInstructions(ICI+2): %v", aerr)
-	}
-	if enc.KnownReceivedCount() != 2 {
-		t.Fatalf("Known Received Count = %d, want 2", enc.KnownReceivedCount())
-	}
+	_, aerr := enc.ParseDecoderInstructions(AppendInsertCountIncrement(nil, 2))
+
+	require.NoError(t, aerr, "ParseDecoderInstructions(ICI+2)")
+	require.Equal(t, uint64(2), enc.KnownReceivedCount(),
+		"the Known Received Count (§2.1.4) is the only thing that makes an entry referenceable; if it does not advance, the encoder stays static forever")
 
 	// --- Request 2: the same headers now reference the dynamic table. ---
 	sec2 := enc.EncodeFieldSection(nil, fields)
-	if extra := enc.DrainEncoderInstructions(nil); len(extra) != 0 {
-		t.Fatalf("request 2 must not insert again, got %x", extra)
-	}
+
+	require.Empty(t, enc.DrainEncoderInstructions(nil),
+		"the entries are already in the peer's table, so re-inserting them would duplicate state and burn encoder-stream bytes")
 	ric, rerr := RequiredInsertCount(sec2, server)
-	if rerr != nil || ric != 2 {
-		t.Fatalf("request-2 Required Insert Count = %d (%v), want 2", ric, rerr)
-	}
+	require.NoError(t, rerr, "RequiredInsertCount on a section this encoder just produced")
+	require.Equal(t, uint64(2), ric,
+		"both acknowledged entries are referenced, so §2.1.2 fixes the Required Insert Count at the largest referenced absolute index plus one")
 	assertDecodeDyn(t, NewDecoder(), sec2, server, fields) // dynamic references, must round-trip
-	if len(sec2) >= len(sec1) {
-		t.Fatalf("dynamic section (%d bytes) not smaller than static (%d bytes)", len(sec2), len(sec1))
-	}
+	require.Lessf(t, len(sec2), len(sec1),
+		"dynamic section (%d bytes) not smaller than static (%d bytes): referencing the table is the entire reason to maintain it", len(sec2), len(sec1))
 }
 
 // TestConformance_RFC9204_Sec214_ReferenceOnlyAcknowledged proves the encoder
@@ -98,9 +92,7 @@ func TestConformance_RFC9204_Sec21_EncodeReferenceAfterAck(t *testing.T) {
 func TestConformance_RFC9204_Sec214_ReferenceOnlyAcknowledged(t *testing.T) {
 	const serverMax = 4096
 	enc, err := NewDynamicEncoder(serverMax, serverMax)
-	if err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, err, "NewDynamicEncoder")
 	server := NewDynamicTable(serverMax)
 	mustApply(t, server, enc.DrainEncoderInstructions(nil))
 	fields := []header.Field{
@@ -110,22 +102,18 @@ func TestConformance_RFC9204_Sec214_ReferenceOnlyAcknowledged(t *testing.T) {
 	_ = enc.EncodeFieldSection(nil, fields) // inserts abs 0 and abs 1
 	mustApply(t, server, enc.DrainEncoderInstructions(nil))
 	// Acknowledge only the first insert.
-	if _, err := enc.ParseDecoderInstructions(AppendInsertCountIncrement(nil, 1)); err != nil {
-		t.Fatal(err)
-	}
+	_, err = enc.ParseDecoderInstructions(AppendInsertCountIncrement(nil, 1))
+	require.NoError(t, err, "ParseDecoderInstructions(ICI+1)")
+
 	sec := enc.EncodeFieldSection(nil, fields)
+
 	ric, rerr := RequiredInsertCount(sec, server)
-	if rerr != nil || ric != 1 {
-		t.Fatalf("Required Insert Count = %d (%v), want 1 (only abs 0 acknowledged)", ric, rerr)
-	}
+	require.NoError(t, rerr, "RequiredInsertCount")
+	require.Equal(t, uint64(1), ric,
+		"only abs 0 is acknowledged; a Required Insert Count of 2 would name an insertion the peer has not confirmed receiving, and that section blocks its request stream")
 	assertDecodeDyn(t, NewDecoder(), sec, server, fields)
 }
 
-// TestConformance_RFC9204_Sec44_ParseDecoderInstructions covers the encode-side
-// consumption of the peer's decoder stream (§4.4): an Insert Count Increment
-// advances the Known Received Count, a zero increment or one past the inserts made
-// is a QPACK_DECODER_STREAM_ERROR, Section Acknowledgment / Stream Cancellation are
-// consumed as no-ops, and a partial instruction is left for the next call.
 // TestConformance_RFC9204_Sec411_Integer62Bit pins the §4.1.1 MUST that a QPACK
 // implementation decode prefixed integers up to and including 62 bits long. The
 // shared HPACK reader stops at 2^32-1, which is enough for HTTP/2 but false-rejects
@@ -135,17 +123,23 @@ func TestConformance_RFC9204_Sec411_Integer62Bit(t *testing.T) {
 	const max62 = uint64(1)<<62 - 1
 	for _, prefix := range []uint8{3, 4, 5, 6, 7, 8} {
 		t.Run(strconv.Itoa(int(prefix)), func(t *testing.T) {
-			buf := hpack.EncodeInteger(nil, prefix, 0x00, max62)
-			got, n, err := decodeInt(buf, prefix)
-			if err != nil || got != max62 || n != len(buf) {
-				t.Fatalf("decodeInt(%x, %d) = %d, %d, %v; want %d, %d, nil",
-					buf, prefix, got, n, err, max62, len(buf))
-			}
-			// 2^62 is past the ceiling and must still be rejected.
-			over := hpack.EncodeInteger(nil, prefix, 0x00, uint64(1)<<62)
-			if _, _, err := decodeInt(over, prefix); !errors.Is(err, hpack.ErrIntegerOverflow) {
-				t.Fatalf("decodeInt(2^62) err = %v, want ErrIntegerOverflow", err)
-			}
+			t.Run("at_the_ceiling", func(t *testing.T) {
+				buf := hpack.EncodeInteger(nil, prefix, 0x00, max62)
+
+				got, n, err := decodeInt(buf, prefix)
+
+				require.NoErrorf(t, err, "decodeInt(%x, %d): 2^62-1 is a legal QUIC stream ID, so rejecting it false-rejects a conformant peer", buf, prefix)
+				require.Equalf(t, max62, got, "decodeInt(%x, %d) value", buf, prefix)
+				require.Equalf(t, len(buf), n, "decodeInt(%x, %d) must consume the whole encoding, or the next instruction is parsed from the middle of this one", buf, prefix)
+			})
+			t.Run("past_the_ceiling", func(t *testing.T) {
+				over := hpack.EncodeInteger(nil, prefix, 0x00, uint64(1)<<62)
+
+				_, _, err := decodeInt(over, prefix)
+
+				require.ErrorIs(t, err, hpack.ErrIntegerOverflow,
+					"2^62 is past what §4.1.1 requires and past what QUIC can carry; accepting it would let a peer drive an unbounded value into an index or length")
+			})
 		})
 	}
 }
@@ -157,49 +151,50 @@ func TestConformance_RFC9204_Sec411_Integer62Bit(t *testing.T) {
 // by every request on the connection, so an indexed secret is the BREACH opening.
 func TestConformance_RFC9204_Sec71_SensitiveNeverIndexed(t *testing.T) {
 	enc, err := NewDynamicEncoder(4096, 4096)
-	if err != nil {
-		t.Fatalf("NewDynamicEncoder: %v", err)
-	}
+	require.NoError(t, err, "NewDynamicEncoder")
 	enc.DrainEncoderInstructions(nil) // drop the Set Dynamic Table Capacity instruction
 	secret := []header.Field{{Name: []byte("authorization"), Value: []byte("Bearer s3cr3t"), Indexing: hpack.IndexNever}}
+
 	// Encode it three times: without the sensitive flag the second pass would
 	// insert it and the third would reference it Base-relative.
 	for round := 0; round < 3; round++ {
 		buf := enc.EncodeFieldSection(nil, secret)
-		if enc.InsertCount() != 0 {
-			t.Fatalf("round %d: InsertCount = %d, want 0 — the secret entered the dynamic table", round, enc.InsertCount())
-		}
-		if got := enc.DrainEncoderInstructions(nil); len(got) != 0 {
-			t.Fatalf("round %d: encoder instructions %x, want none", round, got)
-		}
-		if buf[0] != 0x00 || buf[1] != 0x00 {
-			t.Fatalf("round %d: prefix %x %x, want RIC 0 Base 0", round, buf[0], buf[1])
-		}
-		// "authorization" is static index 23 (name-only match), so the field line is
+
+		require.Equalf(t, uint64(0), enc.InsertCount(),
+			"round %d: the secret entered the dynamic table, which every request on this connection shares — that is the BREACH opening §10.3 forbids", round)
+		require.Emptyf(t, enc.DrainEncoderInstructions(nil),
+			"round %d: an encoder-stream Insert would put the secret in the peer's table too", round)
+		require.Equalf(t, []byte{0x00, 0x00}, buf[:2],
+			"round %d: prefix must stay Required Insert Count 0, Base 0 — a dynamic reference here means the secret is indexed somewhere", round)
+		// "authorization" is static index 84 (name-only match), so the field line is
 		// a Literal with static Name Reference: 01 N=1 T=1 -> the N bit must be set.
-		if line := buf[2]; line&0xf0 != 0x70 {
-			t.Fatalf("round %d: field line %#x, want 01 N=1 T=1 (0x7x)", round, line)
-		}
+		require.Equalf(t, byte(0x70), buf[2]&0xf0,
+			"round %d: field line %#x must carry N=1, or an intermediary is free to index the secret into its own table", round, buf[2])
 	}
-	// Control: the same field without the flag is inserted and then referenced.
+
+	// Control: the same field without the flag is inserted and then referenced, so
+	// the three rounds above pin the sensitive flag rather than an encoder that
+	// never inserts anything.
 	plain := []header.Field{{Name: []byte("authorization"), Value: []byte("Bearer s3cr3t")}}
 	enc2, err := NewDynamicEncoder(4096, 4096)
-	if err != nil {
-		t.Fatalf("NewDynamicEncoder: %v", err)
-	}
+	require.NoError(t, err, "NewDynamicEncoder")
+
 	enc2.EncodeFieldSection(nil, plain)
-	if enc2.InsertCount() == 0 {
-		t.Fatal("control: a non-sensitive repeated field was never inserted, so the test proves nothing")
-	}
+
+	require.NotZero(t, enc2.InsertCount(),
+		"control: a non-sensitive repeated field was never inserted, so the rounds above prove nothing about the sensitive flag")
 }
 
+// TestConformance_RFC9204_Sec44_ParseDecoderInstructions covers the encode-side
+// consumption of the peer's decoder stream (§4.4): an Insert Count Increment
+// advances the Known Received Count, a zero increment or one past the inserts made
+// is a QPACK_DECODER_STREAM_ERROR, Section Acknowledgment / Stream Cancellation are
+// consumed as no-ops, and a partial instruction is left for the next call.
 func TestConformance_RFC9204_Sec44_ParseDecoderInstructions(t *testing.T) {
 	newEnc := func(t *testing.T, inserts int) *Encoder {
 		t.Helper()
 		enc, err := NewDynamicEncoder(4096, 4096)
-		if err != nil {
-			t.Fatal(err)
-		}
+		require.NoError(t, err, "NewDynamicEncoder")
 		enc.DrainEncoderInstructions(nil) // discard the Set Capacity instruction
 		if inserts > 0 {
 			fields := make([]header.Field, inserts)
@@ -208,53 +203,65 @@ func TestConformance_RFC9204_Sec44_ParseDecoderInstructions(t *testing.T) {
 			}
 			enc.EncodeFieldSection(nil, fields)
 			enc.DrainEncoderInstructions(nil)
-			if enc.InsertCount() != uint64(inserts) {
-				t.Fatalf("setup inserted %d, want %d (raise capacity)", enc.InsertCount(), inserts)
-			}
+			require.Equalf(t, uint64(inserts), enc.InsertCount(),
+				"setup inserted %d, want %d (raise capacity)", enc.InsertCount(), inserts)
 		}
 		return enc
 	}
 	t.Run("ICI_advances_known", func(t *testing.T) {
 		enc := newEnc(t, 3)
+
 		n, err := enc.ParseDecoderInstructions(AppendInsertCountIncrement(nil, 3))
-		if err != nil || n == 0 || enc.KnownReceivedCount() != 3 {
-			t.Fatalf("ICI+3: n=%d err=%v known=%d, want known 3", n, err, enc.KnownReceivedCount())
-		}
+
+		require.NoError(t, err, "ICI+3")
+		require.NotZero(t, n, "ICI+3 must be consumed, or it is re-applied on the next call and double-counts")
+		require.Equal(t, uint64(3), enc.KnownReceivedCount(),
+			"the Known Received Count gates every dynamic reference; if it lags, the encoder never references anything it inserted")
 	})
 	t.Run("zero_increment_error", func(t *testing.T) {
 		enc := newEnc(t, 1)
-		if _, err := enc.ParseDecoderInstructions([]byte{0x00}); !errors.Is(err, ErrDecoderStream) {
-			t.Fatalf("ICI 0: err=%v, want ErrDecoderStream", err)
-		}
+
+		_, err := enc.ParseDecoderInstructions([]byte{0x00})
+
+		require.ErrorIs(t, err, ErrDecoderStream,
+			"§4.4.3 forbids a zero increment; accepting it hides a peer whose decoder stream is desynchronised from ours")
 	})
 	t.Run("increment_past_inserts_error", func(t *testing.T) {
 		enc := newEnc(t, 1)
-		if _, err := enc.ParseDecoderInstructions(AppendInsertCountIncrement(nil, 2)); !errors.Is(err, ErrDecoderStream) {
-			t.Fatalf("ICI past inserts: err=%v, want ErrDecoderStream", err)
-		}
+
+		_, err := enc.ParseDecoderInstructions(AppendInsertCountIncrement(nil, 2))
+
+		require.ErrorIs(t, err, ErrDecoderStream,
+			"the peer cannot have received more insertions than we sent; taking its word for it would let it mark unsent entries referenceable")
 	})
 	t.Run("section_ack_and_cancel_noop", func(t *testing.T) {
 		enc := newEnc(t, 2)
 		buf := AppendSectionAcknowledgment(nil, 4)
 		buf = AppendStreamCancellation(buf, 8)
+
 		n, err := enc.ParseDecoderInstructions(buf)
-		if err != nil || n != len(buf) || enc.KnownReceivedCount() != 0 {
-			t.Fatalf("SectionAck+Cancel: n=%d/%d err=%v known=%d, want full consume with known 0",
-				n, len(buf), err, enc.KnownReceivedCount())
-		}
+
+		require.NoError(t, err, "SectionAck+Cancel")
+		require.Equal(t, len(buf), n,
+			"both instructions must be consumed whole; a byte left behind is re-read as the start of a different instruction")
+		require.Equal(t, uint64(0), enc.KnownReceivedCount(),
+			"neither instruction acknowledges an insertion, so treating one as an increment would make unacknowledged entries referenceable")
 	})
 	t.Run("partial_instruction_retained", func(t *testing.T) {
 		enc := newEnc(t, 64)
 		full := AppendInsertCountIncrement(nil, 64) // 6-bit prefix overflows → 2 bytes
-		if len(full) < 2 {
-			t.Fatalf("expected a multi-byte increment, got %x", full)
-		}
-		if n, err := enc.ParseDecoderInstructions(full[:len(full)-1]); err != nil || n != 0 {
-			t.Fatalf("partial ICI: n=%d err=%v, want 0 consumed and no error", n, err)
-		}
-		if n, err := enc.ParseDecoderInstructions(full); err != nil || n != len(full) || enc.KnownReceivedCount() != 64 {
-			t.Fatalf("resumed ICI: n=%d err=%v known=%d, want full consume with known 64", n, err, enc.KnownReceivedCount())
-		}
+		require.GreaterOrEqualf(t, len(full), 2,
+			"fixture: expected a multi-byte increment, got %x — with a single byte there is no partial form to test", full)
+
+		nPartial, errPartial := enc.ParseDecoderInstructions(full[:len(full)-1])
+		nFull, errFull := enc.ParseDecoderInstructions(full)
+
+		require.NoError(t, errPartial, "a truncated instruction is not malformed; the decoder stream arrives in arbitrary pieces")
+		require.Zero(t, nPartial, "no byte of an incomplete instruction may be consumed, or the retained prefix is lost")
+		require.NoError(t, errFull, "resumed ICI")
+		require.Equal(t, len(full), nFull, "the complete instruction must be consumed whole on the retry")
+		require.Equal(t, uint64(64), enc.KnownReceivedCount(),
+			"the increment must apply exactly once across the split, not zero times and not twice")
 	})
 }
 
@@ -265,26 +272,23 @@ func TestConformance_RFC9204_Sec44_ParseDecoderInstructions(t *testing.T) {
 func TestConformance_RFC9204_Sec322_EncoderNeverEvicts(t *testing.T) {
 	const capacity = 256
 	enc, err := NewDynamicEncoder(capacity, capacity)
-	if err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, err, "NewDynamicEncoder")
 	server := NewDynamicTable(capacity)
 	mustApply(t, server, enc.DrainEncoderInstructions(nil))
 	fields := make([]header.Field, 50)
 	for i := range fields {
 		fields[i] = hf("x-key-"+strconv.Itoa(i), "value-"+strconv.Itoa(i))
 	}
+
 	sec := enc.EncodeFieldSection(nil, fields)
+
 	mustApply(t, server, enc.DrainEncoderInstructions(nil)) // fails if any insert forced an eviction
-	if enc.InsertCount() == 0 {
-		t.Fatal("expected at least one header to fit and be inserted")
-	}
-	if server.Len() != int(server.InsertCount()) {
-		t.Fatalf("eviction occurred: live=%d, inserted=%d", server.Len(), server.InsertCount())
-	}
-	if server.Size() > capacity {
-		t.Fatalf("table size %d exceeds capacity %d", server.Size(), capacity)
-	}
+	require.NotZero(t, enc.InsertCount(),
+		"at least one header must fit and be inserted, or this test would pass against an encoder that never uses the table at all")
+	require.Equal(t, int(server.InsertCount()), server.Len(),
+		"an eviction occurred: an entry an in-flight request already references would then be gone from the peer's table, and that request fails to decode")
+	require.LessOrEqual(t, server.Size(), uint64(capacity),
+		"the mirror must stay within the capacity it was told about")
 	assertDecodeDyn(t, NewDecoder(), sec, server, fields) // still round-trips (RIC 0, nothing acked)
 }
 
@@ -292,9 +296,12 @@ func TestConformance_RFC9204_Sec322_EncoderNeverEvicts(t *testing.T) {
 // peer advertises a capacity too small to hold any entry (below 32, MaxEntries 0):
 // the caller falls back to the static-only NewEncoder.
 func TestNewDynamicEncoder_RejectsTinyCapacity(t *testing.T) {
-	for _, cap := range []uint64{0, 16, 31} {
-		if _, err := NewDynamicEncoder(cap, cap); !errors.Is(err, ErrEncoderStream) {
-			t.Fatalf("NewDynamicEncoder(%d): err=%v, want ErrEncoderStream", cap, err)
-		}
+	for _, maxCapacity := range []uint64{0, 16, 31} {
+		t.Run(strconv.FormatUint(maxCapacity, 10), func(t *testing.T) {
+			_, err := NewDynamicEncoder(maxCapacity, maxCapacity)
+
+			require.ErrorIsf(t, err, ErrEncoderStream,
+				"NewDynamicEncoder(%d): no entry fits below 32 bytes and MaxEntries would be 0, so the Required Insert Count encoding has no window — the caller must fall back to NewEncoder instead of getting a table it can never use", maxCapacity)
+		})
 	}
 }
