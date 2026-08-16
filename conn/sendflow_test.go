@@ -15,6 +15,23 @@ import (
 	"github.com/lodgvideon/poseidon-http-client/header"
 )
 
+// firstDiff returns the index of the first differing byte, or -1 when the prefixes
+// they share are equal. It names where an upload went wrong, which for a 200 KiB body
+// split across many DATA frames is the difference between a usable failure and "not
+// equal".
+func firstDiff(a, b []byte) int {
+	n := len(a)
+	if len(b) < n {
+		n = len(b)
+	}
+	for i := 0; i < n; i++ {
+		if a[i] != b[i] {
+			return i
+		}
+	}
+	return -1
+}
+
 // TestIntegration_LargePOST_RespectsPeerSendWindow uploads a body
 // significantly larger than the default 65535-byte send window. It
 // would have either deadlocked (peer never granted more credit) or
@@ -28,8 +45,19 @@ func TestIntegration_LargePOST_RespectsPeerSendWindow(t *testing.T) {
 	}
 	srv, cfg := startH2TestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		got, _ := io.ReadAll(r.Body)
-		if len(got) != len(body) {
-			t.Errorf("server received %d bytes, want %d", len(got), len(body))
+		// Compare the bytes, not the count. The body is 200 KiB of rand.Read, and it
+		// crosses the send window, so it is chunked, credited, and reassembled across
+		// many DATA frames — the one upload in the suite where a chunking or
+		// flow-control off-by-one could reorder or duplicate content. A length check
+		// passes through all of that unchanged, which made this the closest thing to
+		// an upload-corruption detector that could not detect corruption (#651).
+		if !bytes.Equal(got, body) {
+			if len(got) != len(body) {
+				t.Errorf("server received %d bytes, want %d", len(got), len(body))
+			} else {
+				t.Errorf("server received %d bytes of the right length but the wrong content: "+
+					"first difference at offset %d", len(got), firstDiff(got, body))
+			}
 		}
 		_, _ = w.Write([]byte("ok"))
 	}))

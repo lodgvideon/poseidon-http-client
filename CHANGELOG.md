@@ -7,6 +7,101 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **A server reaping an idle HTTP/1.1 keep-alive is now recognised on Windows,
+  so the request is replayed instead of failing.** `ErrServerClosedIdle` — the
+  one H1 failure `client`'s retry classifier is allowed to replay, because no
+  part of a response ever arrived — was raised only for `io.EOF`. HTTP/1.1 has
+  no protocol signal for a reaped keep-alive, so what the caller sees is
+  whatever the local stack reports for a socket the peer has already destroyed,
+  and that differs by platform: Linux delivers the queued FIN ahead of the RST
+  the next write provokes and the read ends in `io.EOF`, while Windows reports
+  `WSAECONNABORTED` and no EOF ever arrives. On Windows the classification
+  therefore never fired and the caller got a failed request where every other
+  platform transparently reused the connection — on both the pooled and the
+  single-connection transports, neither of which probes inside
+  `h1ProbeIdleAfter` by design, so replay is the only recovery there is (#684).
+
+  The guard's boundary is unchanged: `firstRead` and `readConsumedNothing` are
+  what carry "no part of a response arrived", and neither depends on the errno,
+  so an abort arriving after the server began answering is still not replayed.
+
+  Note for anyone writing a similar check: `syscall.ECONNRESET` and
+  `syscall.ECONNABORTED` are defined on Windows as synthetic
+  `APPLICATION_ERROR` values that no socket call ever returns, so a
+  portable-looking `errors.Is` against them compiles and matches nothing. The
+  Winsock codes are needed, which is why this is per-platform.
+
+### Tests
+
+- **The three remaining `pc.Write` sites in `quic` are gated against a failing
+  socket.** A datagram that never left the host is not a lost packet: loss is
+  self-healing, since the peer's missing ACK arms a PTO and the frame is resent,
+  so a swallowed local write error is the one send failure the transport cannot
+  repair, and it presents as a connection that simply waits. #674 gated
+  `conn_seal.go`'s and left the `failWritePC` fixture behind; the mutation
+  battery that found it deferred the rest under a one-round budget (#676).
+
+  All three propagate correctly today — these are the gates that keep them doing
+  so, since deleting any of the checks left the whole `quic` and `http3` suites
+  green. They sit where each site is actually observable, which is not uniform:
+  `flushBatch` (`gso.go`) through the `Stream.Send` path, `writeAppFrames`
+  (`send.go`) through `Stream.Reset`, and `flushControl` (`conn_recv.go`) through
+  nothing at all — its only non-test caller discards the error deliberately when
+  granting receive credit on the consumer's goroutine, so the gate is on the
+  return value and that caller's choice is left alone.
+
+- **Requests are now correlated with their own responses under concurrency, so
+  stream mixing can fail a test.** The suite checked that a response came back,
+  not that it was *this* request's response: every concurrent test fired the
+  identical `GET /healthz` and asserted only the status, so every reply was the
+  same two bytes and delivering stream A's response to stream B left both
+  assertions passing. The tests were structurally incapable of failing on mixing
+  (#651).
+
+  That matters more here than in most clients, because this one pools buffers and
+  decodes header blocks into reused storage — the failure mode is not a crash but
+  a response, or a header value, belonging to a neighbouring request, and nothing
+  above `conn/multistream_test.go` (10 streams, 13-byte bodies, below `client` and
+  the pool) could see it.
+
+  Two matrix tests give every in-flight request a distinct identity on both
+  channels a response can carry and make each prove it got its own back. Shown to
+  discriminate rather than merely to pass: with all responses sharing one body
+  buffer, the new test reports 119 mismatches across the four peers while both
+  pre-existing concurrency tests stay green; with one header set aliased across
+  streams, the header test reports 28 while the existing header tests stay green.
+
+- **`X-Echo-Headers` is implemented by every peer that claims it.**
+  `fixtures/CONTRACT.md` has specified it for `/echo` since it was written, and
+  only Undertow implemented it — repo-wide the string occurred exactly twice, the
+  contract line and that implementation, so no test had ever read a request header
+  back. Added to the Go fixture and to nginx; nghttpx inherits it from Undertow,
+  its origin.
+
+- **`conn/sendflow_test.go` compares the uploaded bytes, not their count.** It is
+  the one upload in the suite that crosses the send window, so it is chunked,
+  credited and reassembled across many DATA frames — and a length check passes
+  through all of that unchanged, which made the closest thing to an
+  upload-corruption detector unable to detect corruption.
+
+- **An interim-then-close request is now proven un-replayed end to end.**
+  `ErrServerClosedIdle` means no part of a response ever arrived, which is what
+  makes replaying safe; an interim response is the opposite, since `100 Continue`
+  is the server saying it has the request head and wants the body — the strongest
+  evidence available on that connection that it is acting on the request. `http1`
+  pinned the classification over a pipe and `client` pinned how the retry
+  classifier reads the error value, but neither drove the retry loop, so nothing
+  proved what happens to such a request in practice (#677).
+
+  Driven with GET rather than POST on purpose: `canRetry` refuses a non-idempotent
+  method outright, so a POST would be un-replayed for a reason unrelated to the
+  interim and the gate would pass with the classification broken. A control arm —
+  same fixture, same method, same `Retryer`, differing only in whether any part of
+  a response arrived — asserts the replay *does* happen there, without which the
+  gate is satisfied by a client that never retries anything.
+
 ### Tests
 
 - **The TCP path now has the leak gate that guards HTTP/3.** The H3 soak exists
