@@ -67,6 +67,44 @@ var ErrTransportParameter = errors.New("quic: transport parameter error")
 // (RFC 9000 §10.1). No CONNECTION_CLOSE is sent; the state is discarded.
 var ErrIdleTimeout = errors.New("quic: idle timeout")
 
+// ErrNoProgress is returned when a read deadline expires with nothing left to
+// do: no packet in flight to probe, no loss timer due, no ACK owed, and either
+// no idle timeout in effect or the probe backoff exhausted. The connection ends
+// because waiting longer cannot change anything — the peer has stopped
+// responding.
+//
+// It is distinct from ErrIdleTimeout, which reports the negotiated
+// max_idle_timeout elapsing (RFC 9000 §10.1): ErrNoProgress can end a
+// connection well before that bound, or on one that negotiated no idle timeout
+// at all. Before this existed the receive path surfaced the transport's raw read
+// error here, so a caller could not tell "the peer went quiet" from "the socket
+// broke" without matching on the message text.
+//
+// The error carrying it keeps the old surface intact: it reports Timeout() true
+// like the net.Error it replaces, and unwraps to the underlying read error, so
+// errors.Is(err, os.ErrDeadlineExceeded) and errors.As into net.Error both still
+// succeed.
+var ErrNoProgress = errors.New("quic: gave up waiting for the peer")
+
+// noProgressError is what the receive path actually returns for ErrNoProgress.
+// It exists rather than a plain fmt.Errorf wrap because the engine's own
+// isTimeout classifies with a direct type assertion, not errors.As: a wrapped
+// error would stop reporting Timeout() and silently change what every caller
+// doing the same assertion sees. Unwrap returns both the sentinel and the cause,
+// so errors.Is matches either.
+type noProgressError struct{ cause error }
+
+func (e noProgressError) Error() string {
+	return ErrNoProgress.Error() + ": " + e.cause.Error()
+}
+
+// Unwrap exposes both the sentinel and the transport error underneath it.
+func (e noProgressError) Unwrap() []error { return []error{ErrNoProgress, e.cause} }
+
+// Timeout reports true: this error is only ever constructed from a read
+// deadline that expired, so it stands in for the net.Error it wraps.
+func (e noProgressError) Timeout() bool { return true }
+
 // ErrConnClosed is returned by the send path when the connection is closed — by a
 // received CONNECTION_CLOSE (draining), a local close, or an idle timeout — so no
 // further packets may be sent (RFC 9000 §10.2).

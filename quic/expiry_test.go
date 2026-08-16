@@ -2,6 +2,7 @@ package quic
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 )
@@ -122,12 +123,59 @@ func TestConn_HandleExpiry_DeclaresLostOnLossTimer(t *testing.T) {
 // the handshake complete, no idle timeout, nothing in flight, and no pending
 // loss, an expiry has nothing to probe and must surface the timeout to end the
 // connection rather than re-arm forever (RFC 9002 §6.2).
+//
+// This asserted identity with the read error until #717: the give-up branch now
+// reports ErrNoProgress instead, because a caller receiving *net.OpError out of
+// Do could not tell "the peer went quiet" from "the socket broke". The three
+// checks below are what identity used to stand for, and are strictly stronger —
+// they pin the sentinel, the preserved cause, and the timeout surface separately,
+// so dropping any one of the three fails here.
 func TestConn_HandleExpiry_GivesUpWhenNothingToProbe(t *testing.T) {
 	base := time.Unix(40000, 0)
 	sentinel := timeoutError{}
 	c := &Conn{now: func() time.Time { return base }, handshakeComplete: true}
 
-	if err := c.handleExpiry(base, sentinel); err != sentinel {
-		t.Fatalf("handleExpiry = %v, want the give-up timeout sentinel returned unchanged", err)
+	err := c.handleExpiry(base, sentinel)
+	if err == nil {
+		t.Fatal("handleExpiry = nil, want the give-up error that ends the connection")
+	}
+	if !errors.Is(err, ErrNoProgress) {
+		t.Fatalf("handleExpiry = %v, want an error matching ErrNoProgress", err)
+	}
+	if !errors.Is(err, sentinel) {
+		t.Fatalf("handleExpiry = %v, dropped the underlying read error (%v) a caller needs for diagnosis", err, sentinel)
+	}
+	if !isTimeout(err) {
+		t.Fatalf("handleExpiry = %v, which isTimeout rejects; the engine and any caller "+
+			"asserting net.Error classify with a direct type assertion, so this must keep reporting Timeout()", err)
+	}
+}
+
+// TestConn_Poll_NoProgressReachesTheCaller is the end-to-end half: the give-up
+// error must survive Poll's teardown path, since that is where a parked Do wakes
+// (Poll latches it through terminateLocked). The white-box test above pins what
+// handleExpiry builds; this pins that nothing between there and the caller
+// replaces it — which is the surface #717 was actually reported against.
+func TestConn_Poll_NoProgressReachesTheCaller(t *testing.T) {
+	base := time.Unix(50000, 0)
+	pc := &expiryPC{}
+	// No localMaxIdle, so no idle deadline is in effect and the expiry reaches the
+	// give-up branch instead of idleClose — the arm TestConn_Poll_IdleTimeoutCloses
+	// covers, and the one that must NOT be reported as ErrIdleTimeout.
+	c := &Conn{
+		pc:                pc,
+		now:               func() time.Time { return base },
+		handshakeComplete: true,
+	}
+
+	err := c.Poll(context.Background())
+	if !errors.Is(err, ErrNoProgress) {
+		t.Fatalf("Poll = %v, want an error matching ErrNoProgress", err)
+	}
+	if errors.Is(err, ErrIdleTimeout) {
+		t.Fatalf("Poll = %v, reported as an idle timeout; no idle timeout was negotiated and none elapsed", err)
+	}
+	if !isTimeout(err) {
+		t.Fatalf("Poll = %v, which isTimeout rejects", err)
 	}
 }

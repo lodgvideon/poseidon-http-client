@@ -74,6 +74,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`quic.ErrNoProgress`: giving up on an unresponsive peer is no longer reported
+  as a raw socket error.** When a read deadline expired with nothing left to do —
+  no packet in flight to probe, no loss timer due, no ACK owed, and either no idle
+  timeout in effect or the probe backoff exhausted — the receive path returned the
+  transport's own read error verbatim. A caller therefore received
+  `*net.OpError` ("read udp …: i/o timeout") out of `Do` and could not tell "the
+  peer went quiet" from "the socket broke" without matching on the message text
+  (#717).
+
+  That branch now reports `ErrNoProgress`, distinct from `ErrIdleTimeout`, which
+  means the negotiated `max_idle_timeout` elapsed (RFC 9000 §10.1) — a different
+  event that can be much later, or never, since a connection may negotiate no idle
+  timeout at all.
+
+  **Nothing that classified this error before stops working.** The value returned
+  still reports `Timeout() true` and unwraps to the original read error, so
+  `errors.As` into `net.Error` and `errors.Is(err, os.ErrDeadlineExceeded)` both
+  still succeed. That is why it is a small error type rather than a `fmt.Errorf`
+  wrap: the engine's own `isTimeout` classifies with a direct type assertion, not
+  `errors.As`, and a plain wrap would have silently changed what every caller doing
+  the same assertion sees.
+
+  Only the error surface is addressed. Whether that branch was reached correctly in
+  the incident that prompted the report is unreproduced and remains open on #717.
+
 - **Three `NewClient` option errors are classifiable again.** A missing or
   whitespace-bearing `Addr`, a missing `ConnOpts.Dialer`, and a missing
   `TLSConfig` on an HTTP/3 transport were built with a bare `fmt.Errorf` and
