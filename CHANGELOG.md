@@ -7,6 +7,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`conn.ConnOptions.ReadBufferSize` and `conn.ConnOptions.StaticConnWindowSize`.**
+  Two receive-path parameters could not be set from outside the package, and both
+  are parameters a cross-library comparison has to pin before its numbers mean
+  anything (#696).
+
+  `ReadBufferSize` is the counterpart to `WriteBufferSize`, replacing the
+  compile-time constant that sized the buffered reader. Its floor is a page rather
+  than the write side's frame-plus-header: a writer smaller than a frame cannot
+  coalesce the header with its payload so every frame costs two writes, while a
+  reader has no such cliff — `bufio` refills transparently — so a smaller buffer
+  costs syscalls in proportion rather than doubling them.
+
+  `StaticConnWindowSize` raises the connection-level receive window without
+  enabling the tuner. `SETTINGS_INITIAL_WINDOW_SIZE` cannot express this: it
+  governs per-stream windows only, and the connection window moves only by
+  `WINDOW_UPDATE` on stream 0, which previously only `AutoTuneRecvWindow` would
+  send — so a caller wanting a larger static window had to accept a tuner whose
+  algorithm, ceiling and probe policy are all its own. It matters outside
+  benchmarking too: one 65535-byte window per round trip for the whole connection
+  is about 6.5 MB/s at 10 ms RTT however fast the link is. Ignored when
+  `AutoTuneRecvWindow` is set, because one value written by two policies is the
+  state worth not having.
+
+  **Defaults are unchanged.** Zero on either field reproduces the previous
+  constants, and a connection that sets neither refunds exactly what it spent.
+
 ### Performance
 
 - **A standalone ACK no longer allocates.** `flush` built the frame payload for a

@@ -188,6 +188,53 @@ type ConnOptions struct {
 	// header/payload coalescing this buffer exists for stops working and every
 	// frame costs two writes again.
 	WriteBufferSize int
+
+	// ReadBufferSize is the size of the buffered reader wrapping the transport on
+	// the receive path. Zero means 16 KiB, which is the default max frame size and
+	// the value this was a constant at.
+	//
+	// It is the receive-side counterpart of WriteBufferSize, and it bounds how many
+	// frames one socket read can drain: the Framer reads a 9-byte header and then a
+	// payload, so over an unbuffered transport that is two read(2) calls per frame.
+	// Over TLS the win is smaller, because crypto/tls already buffers a whole record
+	// per syscall.
+	//
+	// It exists because it could not be set at all, which made a cross-library
+	// comparison unable to equalise bytes-per-syscall except by moving the other
+	// library down to this one's value — and buffer size lands directly in the CPU
+	// column (#696).
+	//
+	// Values below 4 KiB are raised to it and values above 1 MiB are lowered to it.
+	// The floor is a page rather than the write side's frame-plus-header, because a
+	// reader has no coalescing cliff: bufio refills transparently, so a smaller
+	// buffer costs syscalls in proportion rather than doubling them.
+	ReadBufferSize int
+
+	// StaticConnWindowSize raises the connection-level receive window to a fixed
+	// size, without enabling the tuner. Zero leaves it at the RFC 7540 §6.9.2
+	// initial value of 65535 octets.
+	//
+	// SETTINGS cannot carry this: SETTINGS_INITIAL_WINDOW_SIZE governs per-stream
+	// windows only, and the connection window moves only by WINDOW_UPDATE on stream
+	// 0. Before this field the only way to send that update was AutoTuneRecvWindow,
+	// whose algorithm, ceiling, growth rule and probe policy are all its own — so a
+	// caller who wanted a larger static window had to accept a tuner instead, and a
+	// comparison against another implementation could not pin the window on both
+	// sides (#696).
+	//
+	// It matters outside benchmarking too: one 65535-byte window per round trip for
+	// the whole connection is about 6.5 MB/s at 10 ms RTT however fast the link is.
+	//
+	// IGNORED when AutoTuneRecvWindow is set — the tuner owns the target then, and
+	// two things writing one value with different policies is the bug this avoids.
+	// Values below 65535 are raised to it, because credit already advertised at
+	// handshake cannot be withdrawn; values above 2^31-1 are lowered to the RFC
+	// maximum.
+	//
+	// The window is not resized by a separate handshake frame. The target is seeded
+	// here and the ordinary refund path emits the larger WINDOW_UPDATE on its first
+	// cycle, which is the same mechanism the tuner uses to grow it.
+	StaticConnWindowSize uint32
 }
 
 func (o ConnOptions) defaulted() ConnOptions {
@@ -205,6 +252,25 @@ func (o ConnOptions) defaulted() ConnOptions {
 		o.WriteBufferSize = minWriteBufferSize
 	case o.WriteBufferSize > maxWriteBufferSize:
 		o.WriteBufferSize = maxWriteBufferSize
+	}
+	switch {
+	case o.ReadBufferSize <= 0:
+		o.ReadBufferSize = readBufferSize
+	case o.ReadBufferSize < minReadBufferSize:
+		o.ReadBufferSize = minReadBufferSize
+	case o.ReadBufferSize > maxReadBufferSize:
+		o.ReadBufferSize = maxReadBufferSize
+	}
+	// A window below the handshake value is not expressible: credit already
+	// advertised cannot be withdrawn. Zero stays zero — that is "unset", not "as
+	// small as possible" — and the ceiling is RFC 7540 §6.9.1's maximum.
+	if o.StaticConnWindowSize != 0 {
+		switch {
+		case o.StaticConnWindowSize < connInitialRecvWindow:
+			o.StaticConnWindowSize = connInitialRecvWindow
+		case int64(o.StaticConnWindowSize) > maxFlowWindow:
+			o.StaticConnWindowSize = uint32(maxFlowWindow)
+		}
 	}
 	return o
 }
