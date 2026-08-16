@@ -173,6 +173,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Tests
 
+- **The suite is migrating to Arrange–Act–Assert with `testify` assertions, and
+  `header` is the first package through.** `CLAUDE.md` requires both of new and
+  edited tests; #722 tracks bringing the existing 2427 across, one issue per
+  package. `header/header_test.go` is converted in full — four tests, three
+  visible blocks each, `t.Errorf` mapped to `assert` and not to `require` so a run
+  reports every mismatch rather than the first, and each original failure message
+  carried over as `msgAndArgs`, because `testify` prints expected-vs-actual and
+  nothing about why the property matters.
+
+  **`github.com/stretchr/testify` v1.11.1 therefore enters `go.mod`.** Only
+  `_test.go` files import it, so it reaches no consumer binary, but it is a direct
+  requirement and does appear in an importer's module graph.
+
+  The rewrite was checked by mutation rather than by reading, since an assertion
+  that still passes but no longer catches is the failure mode a mass conversion
+  produces. Dropping the value length from `Field.Size`, moving `EntryOverhead`
+  off 32, pointing `Sensitive` at the wrong mode, and taking the zero value away
+  from `IndexIncremental` are each caught 2/2. A fifth, widening `Sensitive` to
+  `>=`, survives — a gap in the cases rather than in the conversion, filed as
+  #739. This entry covers the sweep; later batches do not each add one.
+
 - **A gRPC conformance test no longer infers a reset from `io.EOF`.**
   `TestConformance_RFC9113_Sec8_1_SendAfterBenignResetStillFails` drained to
   `io.EOF` and then sent, on the stated assumption that "the reset follows the

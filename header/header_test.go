@@ -1,6 +1,10 @@
 package header
 
-import "testing"
+import (
+	"testing"
+
+	"github.com/stretchr/testify/assert"
+)
 
 // TestField_Size pins the dynamic-table entry-size rule. The same formula and
 // the same 32 bytes appear in RFC 7541 §4.1 and RFC 9204 §3.2.1, which is why
@@ -18,10 +22,13 @@ func TestField_Size(t *testing.T) {
 		{"both", Field{Name: []byte("content-type"), Value: []byte("text/plain")}, EntryOverhead + 22},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := tc.f.Size(); got != tc.want {
-				t.Errorf("Size() = %d, want %d (name %d + value %d + %d overhead)",
-					got, tc.want, len(tc.f.Name), len(tc.f.Value), EntryOverhead)
-			}
+			f := tc.f
+
+			got := f.Size()
+
+			assert.Equalf(t, tc.want, got,
+				"Size() must be name %d + value %d + %d overhead; a table accounting with anything else disagrees with the peer about when an eviction happens",
+				len(f.Name), len(f.Value), EntryOverhead)
 		})
 	}
 }
@@ -30,9 +37,12 @@ func TestField_Size(t *testing.T) {
 // specifications state 32, and a table that accounts with a different number
 // disagrees with the peer about when an eviction happens.
 func TestEntryOverhead(t *testing.T) {
-	if EntryOverhead != 32 {
-		t.Errorf("EntryOverhead = %d, want 32 (RFC 7541 §4.1, RFC 9204 §3.2.1)", EntryOverhead)
-	}
+	const perSpec = 32
+
+	got := EntryOverhead
+
+	assert.Equal(t, perSpec, got,
+		"EntryOverhead is fixed at 32 by RFC 7541 §4.1 and RFC 9204 §3.2.1; it is not a tuning knob")
 }
 
 // TestField_Sensitive covers the never-indexed mark, which is the one indexing
@@ -40,16 +50,23 @@ func TestEntryOverhead(t *testing.T) {
 // field either and must preserve the representation when forwarding.
 func TestField_Sensitive(t *testing.T) {
 	for _, tc := range []struct {
+		name string
 		mode IndexingMode
 		want bool
 	}{
-		{IndexIncremental, false},
-		{IndexWithout, false},
-		{IndexNever, true},
+		{"incremental", IndexIncremental, false},
+		{"without", IndexWithout, false},
+		{"never", IndexNever, true},
 	} {
-		if got := (Field{Indexing: tc.mode}).Sensitive(); got != tc.want {
-			t.Errorf("Field{Indexing: %v}.Sensitive() = %v, want %v", tc.mode, got, tc.want)
-		}
+		t.Run(tc.name, func(t *testing.T) {
+			f := Field{Indexing: tc.mode}
+
+			got := f.Sensitive()
+
+			assert.Equalf(t, tc.want, got,
+				"Sensitive() must be true for IndexNever alone (%v here); a field wrongly reported sensitive is dropped from the dynamic table for no reason, and one wrongly reported insensitive is handed to an intermediary that may index it",
+				tc.mode)
+		})
 	}
 }
 
@@ -59,7 +76,9 @@ func TestField_Sensitive(t *testing.T) {
 // gets.
 func TestIndexIncrementalIsTheZeroValue(t *testing.T) {
 	var f Field
-	if f.Indexing != IndexIncremental {
-		t.Errorf("zero Field has Indexing %v, want IndexIncremental", f.Indexing)
-	}
+
+	got := f.Indexing
+
+	assert.Equal(t, IndexIncremental, got,
+		"the zero Field must index incrementally; every caller that builds a Field literal without naming a mode gets this one")
 }
