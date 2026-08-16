@@ -33,6 +33,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   portable-looking `errors.Is` against them compiles and matches nothing. The
   Winsock codes are needed, which is why this is per-platform.
 
+### Tests
+
+- **The three remaining `pc.Write` sites in `quic` are gated against a failing
+  socket.** A datagram that never left the host is not a lost packet: loss is
+  self-healing, since the peer's missing ACK arms a PTO and the frame is resent,
+  so a swallowed local write error is the one send failure the transport cannot
+  repair, and it presents as a connection that simply waits. #674 gated
+  `conn_seal.go`'s and left the `failWritePC` fixture behind; the mutation
+  battery that found it deferred the rest under a one-round budget (#676).
+
+  All three propagate correctly today — these are the gates that keep them doing
+  so, since deleting any of the checks left the whole `quic` and `http3` suites
+  green. They sit where each site is actually observable, which is not uniform:
+  `flushBatch` (`gso.go`) through the `Stream.Send` path, `writeAppFrames`
+  (`send.go`) through `Stream.Reset`, and `flushControl` (`conn_recv.go`) through
+  nothing at all — its only non-test caller discards the error deliberately when
+  granting receive credit on the consumer's goroutine, so the gate is on the
+  return value and that caller's choice is left alone.
+
 ## [v0.13.0] — 2026-08-15
 
 ### Changed (breaking)
