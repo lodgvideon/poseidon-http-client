@@ -35,6 +35,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   **Defaults are unchanged.** Zero on either field reproduces the previous
   constants, and a connection that sets neither refunds exactly what it spent.
 
+- **`quic.Conn.RemoteAddr() net.Addr`.** A `Listener` knew every accepted
+  connection's peer address and kept it private, so nothing built on the server
+  role could learn it: an HTTP/3 server could not populate
+  `http.Request.RemoteAddr`, and any IP-keyed policy above it — per-client rate
+  limiting, allowlists, abuse logging — was blind. `Listener.Addr()` is the local
+  socket, and `tls.ClientHelloInfo.Conn` is nil under QUIC, so neither was a
+  substitute (#710).
+
+  Implemented as a type assertion on the connection's `PacketConn` rather than by
+  widening the `PacketConn` interface, which would have broken every in-memory
+  transport in the tree. `connPacketConn` — the listener's per-connection view of
+  its shared socket, and the only thing that knows the peer, since the shared
+  socket is unconnected — now answers it. The client role is unchanged and gets
+  the method for free: a `*net.UDPConn` from `net.DialUDP` already reports its
+  peer. A transport that cannot report one yields nil rather than panicking.
+
+  Documented as "the peer's address as last observed": connection migration
+  (RFC 9000 §9) is not implemented, so the value is fixed for the connection's
+  life today, and that wording keeps the door open.
+
 ### Performance
 
 - **A standalone ACK no longer allocates.** `flush` built the frame payload for a
