@@ -161,8 +161,10 @@ type ClientOptions struct {
 
 Validation enforced by `NewClient` (returns a wrapped sentinel error):
 
-- `ConnOpts.Dialer == nil` → `"client: ClientOptions.ConnOpts.Dialer is required"`.
-- For `TransportSingleConn` / `TransportPool` / `TransportH1SingleConn` / `TransportALPN`: `Addr` must be a non-empty `host:port` with no whitespace, else error.
+- `ConnOpts.Dialer == nil` (every non-HTTP/3 transport) → `ErrInvalidOptions`.
+- For every non-managed kind: `Addr` must be a non-empty `host:port` with no whitespace → `ErrInvalidOptions`.
+- For `TransportH3` / `TransportH3Pool` / `TransportH3Managed`: `TLSConfig` is required → `ErrInvalidOptions`. These dial via `http3.Dial` and take no `ConnOpts.Dialer`.
+- A `ConnOpts.Dialer` asserting an ALPN the transport cannot speak → `ErrALPNProtocolMismatch`.
 - `Pool != nil` with any non-`TransportPool` kind → `ErrInvalidPoolOptions`. `Pool == nil` with `TransportPool` → `ErrInvalidPoolOptions`.
 - `TransportManaged`: `Resolver` required (`ErrInvalidOptions` if nil) and `Addr` **must be empty** (`ErrInvalidOptions` otherwise — the Resolver owns addressing).
 - Unknown `Transport` value → `ErrInvalidTransportKind`.
