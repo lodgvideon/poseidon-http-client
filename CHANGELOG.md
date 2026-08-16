@@ -102,6 +102,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   a response arrived — asserts the replay *does* happen there, without which the
   gate is satisfied by a client that never retries anything.
 
+- **The TCP path now has the leak gate that guards HTTP/3.** The H3 soak exists
+  because receive-path resource exhaustion was a bug class here; the TCP path has
+  its own long-lived-connection state that nothing soaked — the stream registry,
+  the pooled `conn.Stream` free list, the pool's sweep — and its bug history is
+  that same shape (the pooled-stream reset class, the conn recycle race). A pooled
+  `Stream` keeping one field of the previous response is invisible to a
+  request-count assertion and shows up only as a footprint that grows with elapsed
+  load (#649).
+
+  `TestSoak_H2ConnStability` and `TestSoak_H2PoolConnStability` mirror the H3 pair
+  behind the same `soak` build tag, with a `make h2-soak` target against the
+  integration stack. Off the PR path, like `h3-soak`. Shown to discriminate: a
+  goroutine leaked per request takes the count from 101,906 to 307,929 and trips
+  the ceiling, and a retained-body heap leak trips the heap ceiling at the default
+  duration.
+
 ### CI
 
 - **The nightly mutation-fuzz matrix now covers every `http3` and `qpack` parser.**

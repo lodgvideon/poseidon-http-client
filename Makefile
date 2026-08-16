@@ -1,5 +1,5 @@
 .PHONY: lint test test-race test-debug bench bench-alloc bench-gate fuzz-replay coverage coverage-gate tidy contrib-test
-.PHONY: it-up it-down it-logs it-test it-test-fast it-certs h3-interop h3-interop-loss h3-interop-reorder h3-interop-fault h3-interop-chacha h3-soak
+.PHONY: it-up it-down it-logs it-test it-test-fast it-certs h3-interop h3-interop-loss h3-interop-reorder h3-interop-fault h3-interop-chacha h3-soak h2-soak
 .PHONY: qns-image qns-image-multi
 
 # Minimum overall and per-package statement coverage. CI fails below this.
@@ -172,6 +172,22 @@ h3-soak:
 	  -e POSEIDON_SOAK_DURATION=$${POSEIDON_SOAK_DURATION:-120s} \
 	  -e POSEIDON_SOAK_WORKERS=$${POSEIDON_SOAK_WORKERS:-64} \
 	  runner go test ./client/ -tags soak -run TestSoak_H3 -v -timeout 15m
+
+# HTTP/2 soak: the TCP path's sibling to h3-soak. Same duration and worker knobs,
+# same goroutine/heap ceilings, driven against the integration stack's Undertow h2c
+# port. The TCP path has its own long-lived-connection state (stream registry,
+# pooled Stream free list, the pool's sweep) and its own bug history of that shape,
+# and nothing soaked it. Not part of CI (long-running), like h3-soak.
+#
+# Runs on the host rather than in a compose service: the integration stack publishes
+# its ports, so the client needs no container of its own.
+h2-soak:
+	@trap '$(MAKE) -s it-down 2>/dev/null' EXIT; \
+	$(MAKE) it-up && \
+	POSEIDON_SOAK_DURATION=$${POSEIDON_SOAK_DURATION:-120s} \
+	POSEIDON_SOAK_WORKERS=$${POSEIDON_SOAK_WORKERS:-64} \
+	POSEIDON_SOAK_H2_ADDR=$${POSEIDON_SOAK_H2_ADDR:-127.0.0.1:18082} \
+	  $(GO) test ./client/ -tags soak -run TestSoak_H2 -v -timeout 15m
 
 # ── quic-interop-runner endpoint image ───────────────────────────
 # See test/interop/quic/README.md. The build context is the repository root
