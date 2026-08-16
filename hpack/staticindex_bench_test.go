@@ -1,6 +1,10 @@
 package hpack
 
-import "testing"
+import (
+	"testing"
+
+	"github.com/stretchr/testify/assert"
+)
 
 // staticindex_bench_test.go measures staticIndex against the input distribution
 // the encoder actually feeds it, rather than against one pinned field.
@@ -118,19 +122,19 @@ func TestStaticIndex_FixtureDistribution(t *testing.T) {
 	// the scan's early exit unreachable for almost every real field.
 	const lastValued = 16
 	for i := lastValued + 1; i <= staticTableLen; i++ {
-		if len(staticTable[i].value) != 0 {
-			t.Errorf("row %d (%q) carries value %q — the benchmark rationale assumes "+
+		assert.Emptyf(t, staticTable[i].value,
+			"row %d (%q) carries value %q — the benchmark rationale assumes "+
 				"no row past %d has one", i, staticTable[i].name, staticTable[i].value, lastValued)
-		}
 	}
 
 	// Claim: each probe's label names the position it actually resolves to.
 	for _, p := range staticProbes {
 		idx, full := staticIndex(p.name, p.value)
-		if idx != p.wantIdx || full != p.wantFull {
-			t.Errorf("probe %s: staticIndex(%q, %q) = (%d, %v), want (%d, %v)",
-				p.label, p.name, p.value, idx, full, p.wantIdx, p.wantFull)
-		}
+
+		assert.Equalf(t, p.wantIdx, idx,
+			"probe %s: staticIndex(%q, %q) index = %d, want %d", p.label, p.name, p.value, idx, p.wantIdx)
+		assert.Equalf(t, p.wantFull, full,
+			"probe %s: staticIndex(%q, %q) full = %v, want %v", p.label, p.name, p.value, full, p.wantFull)
 	}
 
 	// Claim: the two request sets are two early exits against seven to ten full
@@ -156,10 +160,15 @@ func TestStaticIndex_FixtureDistribution(t *testing.T) {
 				gotMiss++
 			}
 		}
-		if gotFull != s.wantFull || gotNameOnly != s.wantNameOnly || gotMiss != s.wantMiss {
-			t.Errorf("%s: %d full / %d name-only / %d miss, want %d / %d / %d",
-				s.name, gotFull, gotNameOnly, gotMiss, s.wantFull, s.wantNameOnly, s.wantMiss)
-		}
+		assert.Equalf(t, s.wantFull, gotFull,
+			"%s: %d full / %d name-only / %d miss, want %d / %d / %d",
+			s.name, gotFull, gotNameOnly, gotMiss, s.wantFull, s.wantNameOnly, s.wantMiss)
+		assert.Equalf(t, s.wantNameOnly, gotNameOnly,
+			"%s: %d full / %d name-only / %d miss, want %d / %d / %d",
+			s.name, gotFull, gotNameOnly, gotMiss, s.wantFull, s.wantNameOnly, s.wantMiss)
+		assert.Equalf(t, s.wantMiss, gotMiss,
+			"%s: %d full / %d name-only / %d miss, want %d / %d / %d",
+			s.name, gotFull, gotNameOnly, gotMiss, s.wantFull, s.wantNameOnly, s.wantMiss)
 	}
 }
 
