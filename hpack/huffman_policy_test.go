@@ -3,6 +3,8 @@ package hpack
 import (
 	"fmt"
 	"testing"
+
+	"github.com/stretchr/testify/assert"
 )
 
 // #518 asks whether hpack's encoder never emitting Huffman is policy or a gap,
@@ -70,9 +72,9 @@ func TestHuffmanPolicy_MeasuredSavings(t *testing.T) {
 		// "Use Huffman only when strictly shorter" means the encoded form can
 		// never exceed the plain one. TestHuffmanEncodedLenMatchesEncode owns
 		// the oracle in general; here it is the premise of the policy.
-		if got := len(HuffmanEncode(nil, s)); got != hl {
-			t.Errorf("%s: HuffmanEncodedLen=%d but HuffmanEncode produced %d", tc.what, hl, got)
-		}
+		assert.Equalf(t, hl, len(HuffmanEncode(nil, s)),
+			"%s: HuffmanEncodedLen=%d but HuffmanEncode produced %d — the shorter-wins heuristic decides from the oracle, so a disagreement makes the decision on a length that never lands on the wire",
+			tc.what, hl, len(HuffmanEncode(nil, s)))
 	}
 	t.Logf("cold connection, all literals: plain=%d shorter-wins=%d (%.1f%% saved)",
 		plain, huff, 100.0*float64(plain-huff)/float64(plain))

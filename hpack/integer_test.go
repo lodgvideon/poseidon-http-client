@@ -1,9 +1,11 @@
 package hpack
 
 import (
-	"bytes"
-	"errors"
+	"fmt"
 	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // RFC 7541 §5.1 examples.
@@ -26,10 +28,13 @@ func TestEncodeInteger_RFCExamples(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got := EncodeInteger(nil, tc.n, tc.prefixByte, tc.i)
-			if !bytes.Equal(got, tc.want) {
-				t.Fatalf("EncodeInteger(%d, %d, %#x) = %x, want %x", tc.i, tc.n, tc.prefixByte, got, tc.want)
-			}
+			i, n, prefixByte := tc.i, tc.n, tc.prefixByte
+
+			got := EncodeInteger(nil, n, prefixByte, i)
+
+			assert.Equalf(t, tc.want, got,
+				"EncodeInteger(%d, n=%d, prefix=%#x) — §5.1 fixes this byte string, and the peer's decoder reads it literally; a value of exactly 2^N-1 must still spend a continuation octet or it decodes as an unfinished integer",
+				i, n, prefixByte)
 		})
 	}
 }
@@ -48,13 +53,14 @@ func TestDecodeInteger_RFCExamples(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got, n, err := DecodeInteger(tc.src, tc.n)
-			if err != nil {
-				t.Fatalf("err: %v", err)
-			}
-			if got != tc.wantVal || n != tc.wantConsumed {
-				t.Fatalf("DecodeInteger = (%d, %d), want (%d, %d)", got, n, tc.wantVal, tc.wantConsumed)
-			}
+			src, n := tc.src, tc.n
+
+			got, consumed, err := DecodeInteger(src, n)
+
+			require.NoErrorf(t, err, "DecodeInteger(%x, n=%d) on a §5.1 example", src, n)
+			assert.Equalf(t, tc.wantVal, got, "DecodeInteger(%x, n=%d) value", src, n)
+			assert.Equalf(t, tc.wantConsumed, consumed,
+				"DecodeInteger(%x, n=%d) consumed count; a wrong count leaves the next representation to be parsed from the middle of this one", src, n)
 		})
 	}
 }
@@ -68,32 +74,40 @@ func TestDecodeInteger_Truncated(t *testing.T) {
 		{0x1f, 0xff, 0xff},
 	}
 	for _, src := range cases {
-		_, _, err := DecodeInteger(src, 5)
-		if !errors.Is(err, ErrTruncated) {
-			t.Fatalf("DecodeInteger(%x) err = %v, want ErrTruncated", src, err)
-		}
+		t.Run(fmt.Sprintf("%x", src), func(t *testing.T) {
+			in := src
+
+			_, _, err := DecodeInteger(in, 5)
+
+			require.ErrorIsf(t, err, ErrTruncated,
+				"DecodeInteger(%x): an integer whose continuation run runs off the end of the buffer is truncation, not a value to guess at", in)
+		})
 	}
 }
 
 func TestDecodeInteger_Overflow(t *testing.T) {
 	src := []byte{0x1f, 0xff, 0xff, 0xff, 0xff, 0xff, 0x00}
+
 	_, _, err := DecodeInteger(src, 5)
-	if !errors.Is(err, ErrIntegerOverflow) {
-		t.Fatalf("err = %v, want ErrIntegerOverflow", err)
-	}
+
+	require.ErrorIs(t, err, ErrIntegerOverflow,
+		"a §5.1 integer above 2^32-1 must be refused; letting it wrap hands the caller a length or index the peer never sent")
 }
 
 func TestEncodeDecodeInteger_RoundTrip(t *testing.T) {
 	for _, n := range []uint8{1, 4, 5, 6, 7, 8} {
 		for _, v := range []uint64{0, 1, 2, 30, 31, 100, 1000, 1 << 20, 1 << 31, 1<<32 - 1} {
-			enc := EncodeInteger(nil, n, 0, v)
-			dec, _, err := DecodeInteger(enc, n)
-			if err != nil {
-				t.Fatalf("v=%d n=%d: err=%v", v, n, err)
-			}
-			if dec != v {
-				t.Fatalf("v=%d n=%d: dec=%d", v, n, dec)
-			}
+			t.Run(fmt.Sprintf("n%d_v%d", n, v), func(t *testing.T) {
+				prefixBits, value := n, v
+
+				enc := EncodeInteger(nil, prefixBits, 0, value)
+				dec, _, err := DecodeInteger(enc, prefixBits)
+
+				require.NoErrorf(t, err, "decoding our own encoding of %d in an %d-bit prefix", value, prefixBits)
+				assert.Equalf(t, value, dec,
+					"%d in an %d-bit prefix encoded to %x and read back as %d; the prefix width changes where the continuation starts, so each width is its own encoding",
+					value, prefixBits, enc, dec)
+			})
 		}
 	}
 }

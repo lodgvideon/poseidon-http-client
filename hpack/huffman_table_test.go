@@ -1,6 +1,11 @@
 package hpack
 
-import "testing"
+import (
+	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+)
 
 // codeBits renders a table entry as its bit string, most-significant bit first.
 // The table stores a code right-aligned in a uint32, so nbits — not the value's
@@ -31,14 +36,18 @@ func TestHuffmanTableIsPrefixFree(t *testing.T) {
 	for i := range huffmanCodes {
 		codes[i] = codeBits(huffmanCodes[i])
 	}
+
+	// The comparison is quadratic over 257 symbols, so the assertion is called
+	// only on a violation rather than once per pair.
 	for i, a := range codes {
 		for j, b := range codes {
 			if i == j || len(a) >= len(b) {
 				continue
 			}
 			if b[:len(a)] == a {
-				t.Errorf("sym %d (%s) is a prefix of sym %d (%s): the table is not a prefix code, "+
-					"so sym %d cannot be decoded", i, a, j, b, j)
+				assert.Failf(t, "table is not a prefix code",
+					"sym %d (%s) is a prefix of sym %d (%s): the table is not a prefix code, "+
+						"so sym %d cannot be decoded", i, a, j, b, j)
 			}
 		}
 	}
@@ -48,12 +57,15 @@ func TestHuffmanTableIsPrefixFree(t *testing.T) {
 // bits, and a code must fit the width it declares.
 func TestHuffmanTableWidths(t *testing.T) {
 	t.Parallel()
+
 	for i, c := range huffmanCodes {
-		if c.nbits < 5 || c.nbits > 30 {
-			t.Errorf("sym %d: nbits = %d, outside the 5..30 range RFC 7541 Appendix B uses", i, c.nbits)
-		}
-		if c.nbits < 32 && c.code>>c.nbits != 0 {
-			t.Errorf("sym %d: code %#x does not fit in its declared %d bits", i, c.code, c.nbits)
+		assert.GreaterOrEqualf(t, c.nbits, uint8(5),
+			"sym %d: nbits = %d, outside the 5..30 range RFC 7541 Appendix B uses", i, c.nbits)
+		assert.LessOrEqualf(t, c.nbits, uint8(30),
+			"sym %d: nbits = %d, outside the 5..30 range RFC 7541 Appendix B uses", i, c.nbits)
+		if c.nbits < 32 {
+			assert.Zerof(t, c.code>>c.nbits,
+				"sym %d: code %#x does not fit in its declared %d bits", i, c.code, c.nbits)
 		}
 	}
 }
@@ -67,16 +79,16 @@ func TestHuffmanTableWidths(t *testing.T) {
 // exactly this reason, and no sampled test would have picked it.
 func TestHuffmanRoundTripsEverySymbol(t *testing.T) {
 	t.Parallel()
+
 	for b := 0; b < 256; b++ {
 		in := []byte{byte(b)}
+
 		got, err := HuffmanDecode(nil, HuffmanEncode(nil, in))
-		if err != nil {
-			t.Errorf("sym %d (%#x): decode after encode: %v", b, b, err)
+
+		if !assert.NoErrorf(t, err, "sym %d (%#x): decode after encode", b, b) {
 			continue
 		}
-		if len(got) != 1 || got[0] != byte(b) {
-			t.Errorf("sym %d (%#x): round trip returned %#x, want %#x", b, b, got, in)
-		}
+		assert.Equalf(t, in, got, "sym %d (%#x): round trip returned %#x, want %#x", b, b, got, in)
 	}
 
 	// Every symbol in one string: catches a code whose bits are right in isolation
@@ -85,13 +97,12 @@ func TestHuffmanRoundTripsEverySymbol(t *testing.T) {
 	for i := range all {
 		all[i] = byte(i)
 	}
+
 	got, err := HuffmanDecode(nil, HuffmanEncode(nil, all))
-	if err != nil {
-		t.Fatalf("decoding all 256 symbols: %v", err)
-	}
-	if string(got) != string(all) {
-		t.Errorf("round trip over all 256 symbols returned %d bytes, want 256", len(got))
-	}
+
+	require.NoError(t, err, "decoding all 256 symbols")
+	assert.Equalf(t, string(all), string(got),
+		"round trip over all 256 symbols returned %d bytes, want 256", len(got))
 }
 
 // TestHuffmanEncodedLenMatchesEncode keeps the length oracle honest: callers size
@@ -104,13 +115,18 @@ func TestHuffmanEncodedLenMatchesEncode(t *testing.T) {
 	for i := range all {
 		all[i] = byte(i)
 	}
+
 	for b := 0; b < 256; b++ {
 		in := []byte{byte(b)}
-		if got, want := HuffmanEncodedLen(in), len(HuffmanEncode(nil, in)); got != want {
-			t.Errorf("sym %d: HuffmanEncodedLen = %d, but HuffmanEncode produced %d bytes", b, got, want)
-		}
+
+		got, want := HuffmanEncodedLen(in), len(HuffmanEncode(nil, in))
+
+		assert.Equalf(t, want, got,
+			"sym %d: HuffmanEncodedLen = %d, but HuffmanEncode produced %d bytes", b, got, want)
 	}
-	if got, want := HuffmanEncodedLen(all), len(HuffmanEncode(nil, all)); got != want {
-		t.Errorf("all 256 symbols: HuffmanEncodedLen = %d, but HuffmanEncode produced %d bytes", got, want)
-	}
+
+	got, want := HuffmanEncodedLen(all), len(HuffmanEncode(nil, all))
+
+	assert.Equalf(t, want, got,
+		"all 256 symbols: HuffmanEncodedLen = %d, but HuffmanEncode produced %d bytes", got, want)
 }
