@@ -1446,7 +1446,21 @@ func (ex *Exchange) ReadResponse(ctx context.Context) (statusCode int, headers [
 			// an idle keep-alive rather than answering. That is the one H1 failure a
 			// caller may safely replay, so it gets a type the retry classifier can
 			// match instead of an opaque wrapped EOF.
-			if firstRead && ex.readConsumedNothing && errors.Is(rerr, io.EOF) {
+			//
+			// The event is "no part of a response came back", and a graceful close is
+			// only one of the ways it reaches us. HTTP/1.1 has no protocol signal for
+			// a peer reaping an idle keep-alive, so what the caller sees is whatever
+			// the local stack reports for a socket the peer has already destroyed —
+			// and that differs by platform. Linux delivers the queued FIN ahead of the
+			// RST our second write provokes, so the read ends in io.EOF; Windows
+			// reports the abort itself and no EOF is ever seen. isPeerAbort is that
+			// second shape.
+			//
+			// Widening the match cannot weaken the boundary serverclosed_test.go pins:
+			// firstRead and readConsumedNothing are what carry "no part of a response",
+			// and neither depends on the errno. Only which flavours of "nothing came
+			// back" are recognised changes.
+			if firstRead && ex.readConsumedNothing && (errors.Is(rerr, io.EOF) || isPeerAbort(rerr)) {
 				return 0, nil, fmt.Errorf("%w: %w", ErrServerClosedIdle, rerr)
 			}
 			return 0, nil, rerr
