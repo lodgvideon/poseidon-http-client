@@ -4,6 +4,8 @@ import (
 	"testing"
 
 	"github.com/lodgvideon/poseidon-http-client/client"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // snapshotWith builds a HistogramSnapshot with the given per-bucket counts,
@@ -18,25 +20,24 @@ func snapshotWith(counts map[int]int64) client.HistogramSnapshot {
 }
 
 func TestLog2Histogram_BoundariesLandOnLog2Edges(t *testing.T) {
-	_, _, buckets := log2Histogram(client.HistogramSnapshot{})
+	snapshot := client.HistogramSnapshot{}
 
-	if got, want := len(buckets), MaxBucketExp-MinBucketExp+1; got != want {
-		t.Fatalf("bucket count = %d, want %d", got, want)
-	}
+	_, _, buckets := log2Histogram(snapshot)
+
+	require.Len(t, buckets, MaxBucketExp-MinBucketExp+1,
+		"exactly the [MinBucketExp, MaxBucketExp] window is published; the rest of the client's 64 log2 buckets is dead weight")
 	// The boundary for exponent e is the upper edge of client bucket e-1,
-	// i.e. 2^e-1 nanoseconds expressed in seconds.
+	// i.e. 2^e-1 nanoseconds expressed in seconds. Computed here rather than
+	// via boundarySeconds so the test does not re-derive its own subject.
 	for _, e := range []int{MinBucketExp, 20, MaxBucketExp} {
 		want := float64(int64(1)<<e-1) / 1e9
-		if _, ok := buckets[want]; !ok {
-			t.Errorf("no boundary for exponent %d (le=%v)", e, want)
-		}
+		assert.Containsf(t, buckets, want,
+			"no boundary for exponent %d (le=%v); Prometheus bucket edges must sit on the client's log2 edges or the counts stop being exact", e, want)
 	}
-	if _, ok := buckets[boundarySeconds(MinBucketExp-1)]; ok {
-		t.Errorf("boundary below MinBucketExp should not be published")
-	}
-	if _, ok := buckets[boundarySeconds(MaxBucketExp+1)]; ok {
-		t.Errorf("boundary above MaxBucketExp should not be published")
-	}
+	assert.NotContains(t, buckets, boundarySeconds(MinBucketExp-1),
+		"a boundary below MinBucketExp must not be published; sub-microsecond buckets never fill")
+	assert.NotContains(t, buckets, boundarySeconds(MaxBucketExp+1),
+		"a boundary above MaxBucketExp must not be published; those buckets describe durations no request survives")
 }
 
 func TestLog2Histogram_CumulativeCountsAreExact(t *testing.T) {
@@ -44,16 +45,6 @@ func TestLog2Histogram_CumulativeCountsAreExact(t *testing.T) {
 	// three in bucket 30.
 	s := snapshotWith(map[int]int64{10: 1, 20: 2, 30: 3})
 	s.Sum = 5_000_000_000 // 5s
-
-	count, sum, buckets := log2Histogram(s)
-
-	if count != 6 {
-		t.Errorf("count = %d, want 6", count)
-	}
-	if sum != 5 {
-		t.Errorf("sum = %v seconds, want 5", sum)
-	}
-
 	// A bucket at exponent e accumulates client buckets 0..e-1, so the
 	// observation in bucket 10 is counted from exponent 11 onward.
 	cases := []struct {
@@ -68,14 +59,16 @@ func TestLog2Histogram_CumulativeCountsAreExact(t *testing.T) {
 		{31, 6}, // + the three in bucket 30
 		{MaxBucketExp, 6},
 	}
+
+	count, sum, buckets := log2Histogram(s)
+
+	assert.Equal(t, uint64(6), count, "count must be the total observation count, independent of the published window")
+	assert.Equal(t, float64(5), sum, "sum must be converted from nanoseconds to the seconds Prometheus expects")
 	for _, c := range cases {
 		got, ok := buckets[boundarySeconds(c.exp)]
-		if !ok {
-			t.Fatalf("exponent %d: no such boundary", c.exp)
-		}
-		if got != c.want {
-			t.Errorf("exponent %d: cumulative = %d, want %d", c.exp, got, c.want)
-		}
+		require.Truef(t, ok, "exponent %d: no such boundary", c.exp)
+		assert.Equalf(t, c.want, got,
+			"exponent %d: cumulative counts are exact — bucket e must be the sum of client buckets 0..e-1", c.exp)
 	}
 }
 
@@ -86,9 +79,8 @@ func TestLog2Histogram_FastObservationsFoldIntoFirstBucket(t *testing.T) {
 
 	_, _, buckets := log2Histogram(s)
 
-	if got := buckets[boundarySeconds(MinBucketExp)]; got != 7 {
-		t.Errorf("first bucket = %d, want 7 (sub-microsecond observations fold here)", got)
-	}
+	assert.Equal(t, uint64(7), buckets[boundarySeconds(MinBucketExp)],
+		"sub-microsecond observations fold into the first published bucket rather than being dropped")
 }
 
 func TestLog2Histogram_SlowObservationsCountedOnlyByInf(t *testing.T) {
@@ -97,24 +89,21 @@ func TestLog2Histogram_SlowObservationsCountedOnlyByInf(t *testing.T) {
 
 	count, _, buckets := log2Histogram(s)
 
-	if count != 2 {
-		t.Errorf("count = %d, want 2", count)
-	}
-	if got := buckets[boundarySeconds(MaxBucketExp)]; got != 0 {
-		t.Errorf("last finite bucket = %d, want 0; the observation belongs to +Inf only", got)
-	}
+	assert.Equal(t, uint64(2), count,
+		"an observation past the published window must still reach the count; Prometheus derives +Inf from count minus the last bucket")
+	assert.Equal(t, uint64(0), buckets[boundarySeconds(MaxBucketExp)],
+		"the last finite bucket must not claim an observation slower than its boundary")
 }
 
 func TestLog2Histogram_EmptyIsAllZero(t *testing.T) {
-	count, sum, buckets := log2Histogram(client.HistogramSnapshot{})
+	snapshot := client.HistogramSnapshot{}
 
-	if count != 0 || sum != 0 {
-		t.Errorf("count/sum = %d/%v, want 0/0", count, sum)
-	}
+	count, sum, buckets := log2Histogram(snapshot)
+
+	assert.Equal(t, uint64(0), count, "an unobserved histogram reports a zero count, not a missing one")
+	assert.Equal(t, float64(0), sum, "an unobserved histogram reports a zero sum, not a missing one")
 	for le, n := range buckets {
-		if n != 0 {
-			t.Errorf("bucket le=%v = %d, want 0", le, n)
-		}
+		assert.Equalf(t, uint64(0), n, "bucket le=%v must be 0 before any observation", le)
 	}
 }
 
@@ -125,10 +114,8 @@ func TestLog2Histogram_NegativeInputClampsToZero(t *testing.T) {
 
 	count, sum, _ := log2Histogram(s)
 
-	if count != 0 {
-		t.Errorf("count = %d, want 0", count)
-	}
-	if sum != 0 {
-		t.Errorf("sum = %v, want 0", sum)
-	}
+	assert.Equal(t, uint64(0), count,
+		"a negative count must clamp to 0, not wrap to 18446744073709551615 and poison the scrape")
+	assert.Equal(t, float64(0), sum,
+		"a negative sum must clamp to 0 rather than be republished as a negative duration")
 }
