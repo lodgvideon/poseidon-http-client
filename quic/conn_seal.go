@@ -124,7 +124,7 @@ func (c *Conn) flush() error {
 		// We are building a packet for this space anyway, so coalesce any owed ACK —
 		// even one still inside its deferral window — clearing the deferral. Sending
 		// early on a packet we must send is always within max_ack_delay (§13.2.1).
-		frames := c.takePendingAck(sp, nil)
+		frames := c.takePendingAck(sp, c.ackScratch[:0])
 		padPath := false
 		if hasCtrl {
 			// MAX_DATA / MAX_STREAM_DATA credit grants (§4.1). Not retransmitted:
@@ -149,6 +149,12 @@ func (c *Conn) flush() error {
 			c.pendingCrypto[sp] = c.pendingCrypto[sp][:0]
 			retrans = &retransFrame{kind: retransCrypto, offset: off, data: data}
 		}
+		// Retain the grown backing array for the next flush. Safe for the same reason
+		// hdrScratch and sealScratch are (see their doc on Conn): c.mu is held across
+		// the whole build+seal+write, and nothing downstream keeps these bytes — the
+		// seal copies them into sealScratch, and a retransmit re-seals from the
+		// retained retransFrame descriptors, whose data is a private copy.
+		c.ackScratch = frames
 		// A packet carrying CRYPTO, a credit grant, or a PING probe is ack-eliciting.
 		pkt, err := c.sealPacket(sp, frames, hasCrypto || hasCtrl || hasProbe, retrans, padPath)
 		if err != nil {

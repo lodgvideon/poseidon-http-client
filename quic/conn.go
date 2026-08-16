@@ -154,6 +154,16 @@ type Conn struct {
 	hdrScratch   []byte // long/short header + packet number (sealPacket)
 	frameScratch []byte // STREAM frame bytes (writeStreamFrame)
 	sealScratch  []byte // AEAD seal output = the on-wire datagram (sealPacket)
+	// ackScratch holds the frame payload flush builds for a packet that carries no
+	// STREAM data — an owed ACK, credit grants, a PTO probe, CRYPTO. It started from
+	// nil on every call, so that path allocated once per ACK at a single contiguous
+	// range and up to four times as ranges accumulate under loss (#689).
+	//
+	// Kept separate from frameScratch rather than shared with it: both are only ever
+	// touched under c.mu, but they are filled by different paths (the reader's flush
+	// versus writeStreamFrame's send loop) and one buffer for two would make their
+	// lifetimes a thing to reason about instead of a thing that cannot arise.
+	ackScratch []byte
 
 	// gsoBatch is the reused backing array for a GSO send batch (quic/gso.go): a
 	// multi-datagram STREAM burst or same-size retransmit run is sealed one packet
