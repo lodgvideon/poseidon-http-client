@@ -313,11 +313,7 @@ func NewClientConn(ctx context.Context, transport net.Conn, opts ConnOptions) (*
 	// is exactly how the tuner grows it, minus the sampling. The tuner wins when
 	// both are set, because it owns the target from then on and two writers with
 	// different policies is the thing worth not having.
-	connTarget := uint32(connInitialRecvWindow)
-	if opts.StaticConnWindowSize > connTarget && !opts.AutoTuneRecvWindow {
-		connTarget = opts.StaticConnWindowSize
-	}
-	c.connRecvTarget.Store(connTarget)
+	c.connRecvTarget.Store(initialConnRecvTarget(opts))
 	c.streamRecvTarget.Store(opts.Settings.InitialWindowSize)
 	c.tuner = newRecvWindowTuner(opts, opts.Settings.InitialWindowSize)
 	c.goAwaySentLast.Store(goAwayNoneSent)
@@ -1207,6 +1203,26 @@ func (c *Conn) debitConnRecv(length uint32) (uint32, error) {
 		return refund, nil
 	}
 	return 0, nil
+}
+
+// initialConnRecvTarget is the connection-level receive-window target a new Conn
+// starts with: the RFC 7540 §6.9.2 handshake value, or ConnOptions.StaticConnWindowSize
+// when that is larger and the tuner is off.
+//
+// A function rather than four lines inside NewClientConn so the precedence is
+// reachable from a test without standing up a transport. A test that re-derived it
+// would be asserting against its own copy: the first version of this one did exactly
+// that and passed with the tuner check deleted from the constructor.
+func initialConnRecvTarget(opts ConnOptions) uint32 {
+	// The tuner owns the target once it exists, so the static size yields to it
+	// rather than seeding a value the tuner would then grow by a different rule.
+	if opts.AutoTuneRecvWindow {
+		return connInitialRecvWindow
+	}
+	if opts.StaticConnWindowSize > connInitialRecvWindow {
+		return opts.StaticConnWindowSize
+	}
+	return connInitialRecvWindow
 }
 
 // refundIncrement is the WINDOW_UPDATE increment that restores a receive window

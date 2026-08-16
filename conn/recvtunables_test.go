@@ -79,15 +79,17 @@ func TestDefaulted_StaticConnWindowSize(t *testing.T) {
 
 // newConnForTunables builds a Conn the way NewClientConn does, without dialing or
 // handshaking: the constructor's transport work is not what these assert.
+//
+// It calls initialConnRecvTarget rather than re-deriving the target. That is the
+// whole reason the function exists — an earlier version of this helper carried its
+// own copy of the precedence rule, so deleting the tuner check from the constructor
+// left every test below green. A helper that reimplements what it is testing is
+// testing itself.
 func newConnForTunables(t *testing.T, opts ConnOptions) *Conn {
 	t.Helper()
 	opts = opts.defaulted()
 	c := &Conn{opts: opts, connRecvWindow: int32(connInitialRecvWindow)}
-	connTarget := uint32(connInitialRecvWindow)
-	if opts.StaticConnWindowSize > connTarget && !opts.AutoTuneRecvWindow {
-		connTarget = opts.StaticConnWindowSize
-	}
-	c.connRecvTarget.Store(connTarget)
+	c.connRecvTarget.Store(initialConnRecvTarget(opts))
 	c.tuner = newRecvWindowTuner(opts, opts.Settings.InitialWindowSize)
 	return c
 }
