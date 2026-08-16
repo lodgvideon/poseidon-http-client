@@ -1,10 +1,12 @@
 package qpack
 
 import (
-	"bytes"
 	"errors"
-	"github.com/lodgvideon/poseidon-http-client/header"
 	"testing"
+
+	"github.com/lodgvideon/poseidon-http-client/header"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func hf(name, value string) header.Field {
@@ -14,9 +16,6 @@ func hf(name, value string) header.Field {
 // TestStaticTable_Shape checks the table is the full 99 entries with the
 // RFC 9204 Appendix A anchor indices.
 func TestStaticTable_Shape(t *testing.T) {
-	if len(staticTable) != 99 {
-		t.Fatalf("static table has %d entries, want 99", len(staticTable))
-	}
 	anchors := map[int]staticEntry{
 		0:  {":authority", ""},
 		1:  {":path", "/"},
@@ -26,10 +25,14 @@ func TestStaticTable_Shape(t *testing.T) {
 		25: {":status", "200"},
 		98: {"x-frame-options", "sameorigin"},
 	}
+
+	size := len(staticTable)
+
+	require.Equal(t, 99, size,
+		"RFC 9204 Appendix A fixes the static table at 99 entries; a different length moves every index a peer sends")
 	for i, want := range anchors {
-		if staticTable[i] != want {
-			t.Errorf("staticTable[%d] = %v, want %v", i, staticTable[i], want)
-		}
+		assert.Equalf(t, want, staticTable[i],
+			"staticTable[%d] is an Appendix A anchor index; a shift here silently rewrites the header behind that index and every one after it", i)
 	}
 }
 
@@ -45,10 +48,11 @@ func TestConformance_RFC9204_Sec45_StaticIndexedEncode(t *testing.T) {
 		hf(":authority", ""),   // static 0  -> 0xc0
 	}
 	want := []byte{0x00, 0x00, 0xd1, 0xc1, 0xd7, 0xc0}
+
 	got := NewEncoder().EncodeFieldSection(nil, fields)
-	if !bytes.Equal(got, want) {
-		t.Fatalf("EncodeFieldSection = %x, want %x", got, want)
-	}
+
+	require.Equal(t, want, got,
+		"with every field an exact static match the section is fully determined by §4.5.1–§4.5.2; any other byte string is a representation the peer resolves to different headers")
 }
 
 // TestConformance_RFC9204_Sec454_LiteralNameRefDecode decodes a Literal Field
@@ -58,6 +62,7 @@ func TestConformance_RFC9204_Sec454_LiteralNameRefDecode(t *testing.T) {
 	// raw: H=0, len=11 -> 0x0b, then the octets.
 	in := []byte{0x00, 0x00, 0x50, 0x0b, 'e', 'x', 'a', 'm', 'p', 'l', 'e', '.', 'c', 'o', 'm'}
 	want := []header.Field{hf(":authority", "example.com")}
+
 	assertDecode(t, in, want)
 }
 
@@ -67,6 +72,7 @@ func TestConformance_RFC9204_Sec456_LiteralNameDecode(t *testing.T) {
 	// prefix 00 00 | 0x26 (001 N=0 H=0, name len 6) "x-test" | 0x01 (value len 1) "1"
 	in := []byte{0x00, 0x00, 0x26, 'x', '-', 't', 'e', 's', 't', 0x01, '1'}
 	want := []header.Field{hf("x-test", "1")}
+
 	assertDecode(t, in, want)
 }
 
@@ -84,16 +90,18 @@ func TestQPACK_RoundTrip(t *testing.T) {
 		hf("x-custom-header", "custom-value-1234567"), // literal name + value
 		hf("content-type", "application/json"),        // indexed
 	}
+
 	buf := NewEncoder().EncodeFieldSection(nil, fields)
+
 	assertDecode(t, buf, fields)
 }
 
 // TestQPACK_EmptySection round-trips a zero-field section (just the prefix).
 func TestQPACK_EmptySection(t *testing.T) {
 	buf := NewEncoder().EncodeFieldSection(nil, nil)
-	if !bytes.Equal(buf, []byte{0x00, 0x00}) {
-		t.Fatalf("empty section = %x, want 0000", buf)
-	}
+
+	require.Equal(t, []byte{0x00, 0x00}, buf,
+		"a zero-field section is exactly the §4.5.1 prefix (Required Insert Count 0, Base 0); a trailing byte would be read as a field line")
 	assertDecode(t, buf, nil)
 }
 
@@ -118,10 +126,12 @@ func TestConformance_RFC9204_Sec45_DecodeErrors(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			err := NewDecoder().DecodeFieldSection(tc.in, nil, func([]byte, []byte) error { return nil })
-			if !errors.Is(err, ErrDecompressionFailed) {
-				t.Fatalf("DecodeFieldSection(%x) err = %v, want ErrDecompressionFailed", tc.in, err)
-			}
+			dec := NewDecoder()
+
+			err := dec.DecodeFieldSection(tc.in, nil, func([]byte, []byte) error { return nil })
+
+			require.ErrorIsf(t, err, ErrDecompressionFailed,
+				"DecodeFieldSection(%x): at SETTINGS_QPACK_MAX_TABLE_CAPACITY 0 this is unresolvable, and a caller that cannot classify it as QPACK_DECOMPRESSION_FAILED cannot close the connection with the right code", tc.in)
 		})
 	}
 }
@@ -130,14 +140,16 @@ func TestConformance_RFC9204_Sec45_DecodeErrors(t *testing.T) {
 func TestDecode_EmitError(t *testing.T) {
 	boom := errors.New("boom")
 	in := NewEncoder().EncodeFieldSection(nil, []header.Field{hf(":method", "GET")})
+
 	err := NewDecoder().DecodeFieldSection(in, nil, func([]byte, []byte) error { return boom })
-	if !errors.Is(err, boom) {
-		t.Fatalf("err = %v, want boom", err)
-	}
+
+	require.ErrorIs(t, err, boom,
+		"the caller's own rejection must reach it unchanged; swallowing it turns a refused header into a silently accepted one")
 }
 
 func assertDecode(t *testing.T, in []byte, want []header.Field) {
 	t.Helper()
+
 	var got []header.Field
 	err := NewDecoder().DecodeFieldSection(in, nil, func(name, value []byte) error {
 		got = append(got, header.Field{
@@ -146,17 +158,15 @@ func assertDecode(t *testing.T, in []byte, want []header.Field) {
 		})
 		return nil
 	})
-	if err != nil {
-		t.Fatalf("DecodeFieldSection(%x): %v", in, err)
-	}
-	if len(got) != len(want) {
-		t.Fatalf("decoded %d fields, want %d: %v", len(got), len(want), got)
-	}
+
+	require.NoErrorf(t, err, "DecodeFieldSection(%x)", in)
+	require.Lenf(t, got, len(want),
+		"decoded %d fields from %x, want %d — a field-count mismatch means a representation boundary was misread, so no per-field comparison below would mean anything", len(got), in, len(want))
 	for i := range want {
-		if !bytes.Equal(got[i].Name, want[i].Name) || !bytes.Equal(got[i].Value, want[i].Value) {
-			t.Errorf("field %d = {%s: %s}, want {%s: %s}", i,
-				got[i].Name, got[i].Value, want[i].Name, want[i].Value)
-		}
+		assert.Equalf(t, want[i].Name, got[i].Name,
+			"field %d name: the decoder resolved a different table entry or literal than the encoder wrote", i)
+		assert.Equalf(t, want[i].Value, got[i].Value,
+			"field %d (%s) value: the decoder resolved a different table entry or literal than the encoder wrote", i, got[i].Name)
 	}
 }
 
