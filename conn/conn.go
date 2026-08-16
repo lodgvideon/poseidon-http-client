@@ -25,7 +25,24 @@ import (
 // per-frame header reads and small control/response frames, while payloads at
 // or above this size pass through bufio's direct-read fast path without an
 // extra copy.
+// It is the default rather than the fixed value: ConnOptions.ReadBufferSize
+// overrides it, so a cross-library comparison can equalise bytes-per-syscall
+// against a peer whose own read buffer is a different size (#696).
 const readBufferSize = 16 * 1024
+
+// minReadBufferSize and maxReadBufferSize bound ConnOptions.ReadBufferSize.
+//
+// The floor is not the write side's "one maximum-size frame plus its header".
+// That bound exists because a writer smaller than a frame cannot coalesce the
+// header with its payload, so every frame costs two writes; a reader has no
+// such cliff, because bufio.Reader refills transparently and hands payloads at
+// or above the buffer size straight through. A small read buffer therefore
+// costs syscalls in proportion, not a step change — so the floor is one page,
+// enough to hold many frame headers, rather than a frame.
+const (
+	minReadBufferSize = 4 * 1024
+	maxReadBufferSize = 1 << 20
+)
 
 // defaultWriteBufferSize is the size of the buffered writer wrapping the
 // transport on the send path when ConnOptions.WriteBufferSize is zero. The
@@ -274,7 +291,7 @@ func NewClientConn(ctx context.Context, transport net.Conn, opts ConnOptions) (*
 	c := &Conn{
 		transport:          transport,
 		wb:                 wb,
-		fr:                 frame.NewFramer(wb, bufio.NewReaderSize(transport, readBufferSize)),
+		fr:                 frame.NewFramer(wb, bufio.NewReaderSize(transport, opts.ReadBufferSize)),
 		enc:                hpack.NewEncoder(),
 		dec:                hpack.NewDecoder(),
 		opts:               opts,
@@ -288,7 +305,19 @@ func NewClientConn(ctx context.Context, transport net.Conn, opts ConnOptions) (*
 	}
 	// The targets start at the windows already in effect, so with auto-tuning
 	// off the refund arithmetic reduces exactly to "give back what was spent".
-	c.connRecvTarget.Store(connInitialRecvWindow)
+	//
+	// StaticConnWindowSize is the one exception, and it needs no separate
+	// handshake frame: seeding a larger target here makes refundIncrement return
+	// target-minus-window on the first refund cycle, so the ordinary WINDOW_UPDATE
+	// that path already sends carries the connection up to the requested size. That
+	// is exactly how the tuner grows it, minus the sampling. The tuner wins when
+	// both are set, because it owns the target from then on and two writers with
+	// different policies is the thing worth not having.
+	connTarget := uint32(connInitialRecvWindow)
+	if opts.StaticConnWindowSize > connTarget && !opts.AutoTuneRecvWindow {
+		connTarget = opts.StaticConnWindowSize
+	}
+	c.connRecvTarget.Store(connTarget)
 	c.streamRecvTarget.Store(opts.Settings.InitialWindowSize)
 	c.tuner = newRecvWindowTuner(opts, opts.Settings.InitialWindowSize)
 	c.goAwaySentLast.Store(goAwayNoneSent)
