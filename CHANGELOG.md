@@ -62,6 +62,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   **Defaults are unchanged.** Zero on either field reproduces the previous
   constants, and a connection that sets neither refunds exactly what it spent.
 
+- **`quic.Conn.RemoteAddr() net.Addr`.** A `Listener` knew every accepted
+  connection's peer address and kept it private, so nothing built on the server
+  role could learn it: an HTTP/3 server could not populate
+  `http.Request.RemoteAddr`, and any IP-keyed policy above it — per-client rate
+  limiting, allowlists, abuse logging — was blind. `Listener.Addr()` is the local
+  socket, and `tls.ClientHelloInfo.Conn` is nil under QUIC, so neither was a
+  substitute (#710).
+
+  Implemented as a type assertion on the connection's `PacketConn` rather than by
+  widening the `PacketConn` interface, which would have broken every in-memory
+  transport in the tree. `connPacketConn` — the listener's per-connection view of
+  its shared socket, and the only thing that knows the peer, since the shared
+  socket is unconnected — now answers it. The client role is unchanged and gets
+  the method for free: a `*net.UDPConn` from `net.DialUDP` already reports its
+  peer. A transport that cannot report one yields nil rather than panicking.
+
+  Documented as "the peer's address as last observed": connection migration
+  (RFC 9000 §9) is not implemented, so the value is fixed for the connection's
+  life today, and that wording keeps the door open.
+
 ### Performance
 
 - **A standalone ACK no longer allocates.** `flush` built the frame payload for a
@@ -80,6 +100,54 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   destination, so it measures the Range scratch and not the caller's `nil`.
 
 ### Fixed
+
+- **Three `NewClient` option errors are classifiable again.** A missing or
+  whitespace-bearing `Addr`, a missing `ConnOpts.Dialer`, and a missing
+  `TLSConfig` on an HTTP/3 transport were built with a bare `fmt.Errorf` and
+  wrapped no sentinel at all, so the documented `errors.Is(err,
+  client.ErrInvalidOptions)` check missed them and a caller fell through to
+  whatever its generic branch was — treating an unusable configuration as a
+  transport failure. Their siblings in the same validation path already wrapped
+  it (#713).
+
+  Their messages change shape accordingly, from
+  `client: ClientOptions.Addr must be …` to
+  `client: invalid ClientOptions: Addr must be …`. Nothing in the tree matched on
+  the old text; `errors.Is` was always the supported check and now works.
+
+  `ErrInvalidOptions`' own doc comment said "internally inconsistent", which
+  never described these three — they are missing required fields — so it now
+  covers both, and names the three sibling sentinels (`ErrInvalidPoolOptions`,
+  `ErrALPNProtocolMismatch`, `ErrInvalidTransportKind`) that the other validation
+  paths return, since "any option was rejected" means testing for all four.
+  `docs/CLIENT_GUIDE.md` claimed this whole family "returns a wrapped sentinel
+  error" while quoting one of the three unwrapped messages verbatim; it now names
+  the sentinel per path and documents the HTTP/3 `TLSConfig` requirement it
+  omitted entirely.
+- **A `quic.Listener` that refuses a client's certificate now says so.** When the
+  server's TLS handshake failed — a rejected client certificate under
+  `ClientAuth: RequireAndVerifyClientCert` being the ordinary case — the listener
+  dropped the half-open connection without sending anything. The failure was
+  silent at both ends: `Accept` blocked forever, and the client's `Establish`
+  returned success, because a TLS 1.3 client is finished once it sends its own
+  Finished and never learns its certificate was refused. An operator saw clients
+  dial successfully and no requests arrive, with no error anywhere (#711).
+
+  The listener now seals a transport `CONNECTION_CLOSE` (0x1c) carrying
+  `CRYPTO_ERROR` — `0x0100` plus the TLS alert, per RFC 9001 §4.8 — into the
+  Handshake packet-number space before abandoning the connection, so the client
+  surfaces it from `Poll` as a `*PeerClosedError`. The mapping is `closeCodeFor`,
+  the one the client role already used from `Conn.fail`; only the server role had
+  no sender for it.
+
+  Scoped deliberately to the one abandonment where the peer has proved it holds
+  the Handshake keys. A malformed Initial still gets no reply, and a handshake
+  that fails before Handshake keys exist (an ALPN mismatch, say) is still silent —
+  that path needs an Initial-level close and is tracked in #715.
+
+  **mutual TLS itself was never broken**: a client presenting a certificate valid
+  for client authentication completes the handshake and is accepted, before this
+  change and after it.
 
 - **A server reaping an idle HTTP/1.1 keep-alive is now recognised on Windows,
   so the request is replayed instead of failing.** `ErrServerClosedIdle` — the
@@ -106,6 +174,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Winsock codes are needed, which is why this is per-platform.
 
 ### Tests
+
+- **A gRPC conformance test no longer infers a reset from `io.EOF`.**
+  `TestConformance_RFC9113_Sec8_1_SendAfterBenignResetStillFails` drained to
+  `io.EOF` and then sent, on the stated assumption that "the reset follows the
+  trailers on the wire, so the stream is latched closed by the time EOF is
+  reported". `io.EOF` reports END_STREAM being *consumed*; `RST_STREAM` is the
+  next frame, and nothing orders the two — so on a loaded runner the send reached
+  a stream the reader had not torn down yet, and succeeded (#709).
+
+  It now waits for `EventReset` on the transport stream underneath. That orders
+  the send for a concrete reason: `endWithReset` pushes the event and sets the
+  stream's closed flag inside one `s.mu` section, and `sendData` takes the same
+  mutex before testing that flag. The assertion is unchanged — a send after a
+  benign reset must still fail. Reproduced deterministically before fixing, by
+  delaying the reader's RST handling 50 ms: the old form fails 3/3 and the new
+  one passes 3/3, while both pass without the delay.
 
 - **The three remaining `pc.Write` sites in `quic` are gated against a failing
   socket.** A datagram that never left the host is not a lost packet: loss is

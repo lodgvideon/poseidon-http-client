@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/rand"
 	"crypto/tls"
+	"net"
 	"sync"
 	"time"
 )
@@ -605,6 +606,30 @@ func (c *Conn) SetWriteKeys(level tls.QUICEncryptionLevel, suite uint16, secret 
 // progressed enough to populate it (ALPN, negotiated cipher suite, peer
 // certificates). It is a snapshot of the underlying crypto/tls state.
 func (c *Conn) ConnectionState() tls.ConnectionState { return c.hs.ConnectionState() }
+
+// RemoteAddr returns the peer's address as last observed, or nil when the
+// transport cannot report one.
+//
+// A server-role connection accepted by a Listener reports the address its
+// datagrams are sent to, which is what an HTTP/3 server needs to populate
+// http.Request.RemoteAddr and what any IP-keyed policy above it — rate limiting,
+// allowlists, abuse logging — has to key on. A client-role connection reports
+// whatever its PacketConn does: a *net.UDPConn from net.DialUDP gives the dialed
+// peer, an unconnected socket or an in-memory test transport gives nil.
+//
+// "As last observed" is deliberate. Connection migration (RFC 9000 §9) is not
+// implemented, so today the value is fixed for the connection's life; when it
+// lands, this reports the current path rather than the original one.
+//
+// Read without c.mu: pc is assigned once at construction (NewConn,
+// NewServerConn) and never reassigned. If migration ever changes that, this
+// needs the lock.
+func (c *Conn) RemoteAddr() net.Addr {
+	if ra, ok := c.pc.(interface{ RemoteAddr() net.Addr }); ok {
+		return ra.RemoteAddr()
+	}
+	return nil
+}
 
 // discardSpace drops all state for a packet-number space when its keys are
 // discarded (RFC 9001 §4.9): it un-counts the space's in-flight bytes from the

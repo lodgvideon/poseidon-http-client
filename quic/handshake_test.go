@@ -14,7 +14,20 @@ import (
 	"time"
 )
 
+// genServerCert returns a self-signed certificate usable as a server identity,
+// with the pool that trusts it. Its leaf carries ExtKeyUsageServerAuth ONLY, so
+// presenting it as a client certificate to a verifying server is refused by
+// x509 — see genCertForUsage's callers.
 func genServerCert(t *testing.T) (tls.Certificate, *x509.CertPool) {
+	t.Helper()
+	return genCertForUsage(t, x509.ExtKeyUsageServerAuth)
+}
+
+// genCertForUsage returns a self-signed certificate carrying exactly eku, with
+// the pool that trusts it. The extended key usage is the parameter because it
+// is what decides whether a peer will accept the certificate in a given role,
+// and a test that gets it wrong measures its own fixture rather than the code.
+func genCertForUsage(t *testing.T, eku ...x509.ExtKeyUsage) (tls.Certificate, *x509.CertPool) {
 	t.Helper()
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
@@ -27,7 +40,7 @@ func genServerCert(t *testing.T) (tls.Certificate, *x509.CertPool) {
 		NotBefore:             time.Now().Add(-time.Hour),
 		NotAfter:              time.Now().Add(time.Hour),
 		KeyUsage:              x509.KeyUsageDigitalSignature | x509.KeyUsageCertSign,
-		ExtKeyUsage:           []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+		ExtKeyUsage:           eku,
 		BasicConstraintsValid: true,
 		IsCA:                  true,
 	}

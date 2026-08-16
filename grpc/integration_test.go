@@ -1024,14 +1024,37 @@ func TestConformance_RFC9113_Sec8_1_SendAfterBenignResetStillFails(t *testing.T)
 	}
 	defer func() { _ = s.Close() }()
 
-	// Drain to io.EOF without ever sending: the reset follows the trailers on
-	// the wire, so the stream is latched closed by the time EOF is reported.
+	// Drain to io.EOF without ever sending. EOF reports END_STREAM being
+	// CONSUMED; the peer's RST_STREAM is a separate frame that follows it, so EOF
+	// says nothing about the stream being latched closed yet. Inferring that was
+	// the race in #709 — on a loaded runner the Send below reached a stream the
+	// reader had not torn down, and succeeded.
 	if _, err := s.Recv(ctx); err != nil {
 		t.Fatalf("Recv: %v", err)
 	}
 	if _, err := s.Recv(ctx); !errors.Is(err, io.EOF) {
 		t.Fatalf("second Recv = %v, want io.EOF", err)
 	}
+
+	// Wait for the reset itself, on the transport stream underneath — grpc's own
+	// Recv stopped at the trailers, so the reset event is still queued or still
+	// in flight, and this blocks until the reader delivers it.
+	//
+	// That is enough to order the Send, and the reason is a single mutex section:
+	// conn's endWithReset (conn/stream.go) pushes this event AND sets the
+	// stream's closed flag while holding s.mu, releasing it only after both,
+	// while sendData takes the same s.mu before testing closed. So a Send issued
+	// after this event is observed cannot slip in front of the flag — at worst it
+	// blocks on the mutex the reader still holds and sees closed the instant it
+	// is released. Waiting on EOF had no such ordering.
+	ev, err := s.s.Recv(ctx)
+	if err != nil {
+		t.Fatalf("waiting for the peer's RST_STREAM: %v", err)
+	}
+	if ev.Type != conn.EventReset {
+		t.Fatalf("stream event = %v, want EventReset (the benign reset that follows the trailers)", ev.Type)
+	}
+
 	if err := s.Send(ctx, []byte("late")); err == nil {
 		t.Fatal("Send after a benign reset = nil; the message never reached the server")
 	}
