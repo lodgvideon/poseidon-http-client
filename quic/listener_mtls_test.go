@@ -121,7 +121,15 @@ func TestConformance_RFC9001_Sec48_ListenerClosesOnRejectedClientCert(t *testing
 
 	pollCtx, pollCancel := context.WithTimeout(ctx, 5*time.Second)
 	defer pollCancel()
-	perr := client.Poll(pollCtx)
+	// Nothing orders the client's first Poll against the server's rejection: they
+	// are separate goroutines over a real UDP socket. Poll is one step of the
+	// connection event loop, so nil means "made progress", not "the peer closed".
+	// Poll until a terminal error arrives; pollCtx bounds the wait, and Poll
+	// returns its expiry, so a genuinely silent server still fails here.
+	var perr error
+	for perr == nil {
+		perr = client.Poll(pollCtx)
+	}
 
 	var closed *PeerClosedError
 	if !errors.As(perr, &closed) {
