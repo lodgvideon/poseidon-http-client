@@ -3,8 +3,10 @@ package frame
 import (
 	"bytes"
 	"context"
-	"errors"
 	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 type recordingHandler struct {
@@ -99,118 +101,100 @@ func newFramerWithBuffer() (*Framer, *bytes.Buffer) {
 
 func TestFramer_Data_Roundtrip(t *testing.T) {
 	fr, _ := newFramerWithBuffer()
-	if err := fr.WriteData(1, true, []byte("hello")); err != nil {
-		t.Fatalf("write: %v", err)
-	}
+	require.NoError(t, fr.WriteData(1, true, []byte("hello")), "write")
 	h := &recordingHandler{}
+
 	fh, err := fr.ReadFrame(context.Background(), h)
-	if err != nil {
-		t.Fatalf("read: %v", err)
-	}
-	if fh.Type != FrameData || fh.StreamID != 1 || fh.Flags&FlagDataEndStream == 0 {
-		t.Fatalf("hdr: %+v", fh)
-	}
-	if string(h.dataPayload) != "hello" {
-		t.Fatalf("data: %q", h.dataPayload)
-	}
+
+	require.NoErrorf(t, err, "read: %v", err)
+	assert.Equalf(t, FrameData, fh.Type, "hdr: %+v", fh)
+	assert.EqualValuesf(t, 1, fh.StreamID, "hdr: %+v", fh)
+	assert.NotZerof(t, fh.Flags&FlagDataEndStream, "hdr: %+v", fh)
+	assert.Equalf(t, "hello", string(h.dataPayload), "data: %q", h.dataPayload)
 }
 
 func TestFramer_DataPadded_Roundtrip(t *testing.T) {
 	fr, _ := newFramerWithBuffer()
-	if err := fr.WriteDataPadded(3, false, []byte("xy"), 4); err != nil {
-		t.Fatalf("write: %v", err)
-	}
+	require.NoError(t, fr.WriteDataPadded(3, false, []byte("xy"), 4), "write")
 	h := &recordingHandler{}
-	if _, err := fr.ReadFrame(context.Background(), h); err != nil {
-		t.Fatalf("read: %v", err)
-	}
-	if string(h.dataPayload) != "xy" || h.dataPad != 4 {
-		t.Fatalf("got %q pad=%d", h.dataPayload, h.dataPad)
-	}
+
+	_, err := fr.ReadFrame(context.Background(), h)
+
+	require.NoErrorf(t, err, "read: %v", err)
+	assert.Equalf(t, "xy", string(h.dataPayload), "got %q pad=%d", h.dataPayload, h.dataPad)
+	assert.EqualValuesf(t, 4, h.dataPad, "got %q pad=%d", h.dataPayload, h.dataPad)
 }
 
 func TestFramer_Headers_RoundTrip(t *testing.T) {
 	fr, _ := newFramerWithBuffer()
-	if err := fr.WriteHeaders(WriteHeadersParams{
+	require.NoError(t, fr.WriteHeaders(WriteHeadersParams{
 		StreamID: 1, BlockFragment: []byte{0x82, 0x84}, EndStream: true, EndHeaders: true,
-	}); err != nil {
-		t.Fatalf("write: %v", err)
-	}
+	}), "write")
 	h := &recordingHandler{}
+
 	fh, err := fr.ReadFrame(context.Background(), h)
-	if err != nil {
-		t.Fatalf("read: %v", err)
-	}
-	if fh.Type != FrameHeaders || fh.Flags&FlagHeadersEndStream == 0 || fh.Flags&FlagHeadersEndHeaders == 0 {
-		t.Fatalf("hdr flags: %+v", fh)
-	}
-	if !bytes.Equal(h.hb, []byte{0x82, 0x84}) {
-		t.Fatalf("hb: %x", h.hb)
-	}
-	if h.prio != nil {
-		t.Fatalf("unexpected prio")
-	}
+
+	require.NoErrorf(t, err, "read: %v", err)
+	assert.Equalf(t, FrameHeaders, fh.Type, "hdr flags: %+v", fh)
+	assert.NotZerof(t, fh.Flags&FlagHeadersEndStream, "hdr flags: %+v", fh)
+	assert.NotZerof(t, fh.Flags&FlagHeadersEndHeaders, "hdr flags: %+v", fh)
+	assert.Truef(t, bytes.Equal(h.hb, []byte{0x82, 0x84}), "hb: %x", h.hb)
+	assert.Nil(t, h.prio, "unexpected prio")
 }
 
 func TestFramer_HeadersWithPriority_RoundTrip(t *testing.T) {
 	fr, _ := newFramerWithBuffer()
 	prio := &Priority{StreamDep: 7, Exclusive: true, Weight: 16}
-	if err := fr.WriteHeaders(WriteHeadersParams{
+	require.NoError(t, fr.WriteHeaders(WriteHeadersParams{
 		StreamID: 1, BlockFragment: []byte{0x82}, Priority: prio, EndHeaders: true,
-	}); err != nil {
-		t.Fatalf("write: %v", err)
-	}
+	}), "write")
 	h := &recordingHandler{}
-	if _, err := fr.ReadFrame(context.Background(), h); err != nil {
-		t.Fatalf("read: %v", err)
-	}
-	if h.prio == nil || h.prio.StreamDep != 7 || !h.prio.Exclusive || h.prio.Weight != 16 {
-		t.Fatalf("prio: %+v", h.prio)
-	}
+
+	_, err := fr.ReadFrame(context.Background(), h)
+
+	require.NoErrorf(t, err, "read: %v", err)
+	require.NotNilf(t, h.prio, "prio: %+v", h.prio)
+	assert.EqualValuesf(t, 7, h.prio.StreamDep, "prio: %+v", h.prio)
+	assert.Truef(t, h.prio.Exclusive, "prio: %+v", h.prio)
+	assert.EqualValuesf(t, 16, h.prio.Weight, "prio: %+v", h.prio)
 }
 
 func TestFramer_HeadersPadded_RoundTrip(t *testing.T) {
 	fr, _ := newFramerWithBuffer()
-	if err := fr.WriteHeaders(WriteHeadersParams{
+	require.NoError(t, fr.WriteHeaders(WriteHeadersParams{
 		StreamID: 1, BlockFragment: []byte{0x82}, PadLength: 3, EndHeaders: true,
-	}); err != nil {
-		t.Fatalf("write: %v", err)
-	}
+	}), "write")
 	h := &recordingHandler{}
-	if _, err := fr.ReadFrame(context.Background(), h); err != nil {
-		t.Fatalf("read: %v", err)
-	}
-	if h.hbPad != 3 || !bytes.Equal(h.hb, []byte{0x82}) {
-		t.Fatalf("pad=%d hb=%x", h.hbPad, h.hb)
-	}
+
+	_, err := fr.ReadFrame(context.Background(), h)
+
+	require.NoErrorf(t, err, "read: %v", err)
+	assert.EqualValuesf(t, 3, h.hbPad, "pad=%d hb=%x", h.hbPad, h.hb)
+	assert.Truef(t, bytes.Equal(h.hb, []byte{0x82}), "pad=%d hb=%x", h.hbPad, h.hb)
 }
 
 func TestFramer_Priority_RoundTrip(t *testing.T) {
 	fr, _ := newFramerWithBuffer()
-	if err := fr.WritePriority(1, Priority{StreamDep: 9, Exclusive: false, Weight: 32}); err != nil {
-		t.Fatalf("write: %v", err)
-	}
+	require.NoError(t, fr.WritePriority(1, Priority{StreamDep: 9, Exclusive: false, Weight: 32}), "write")
 	h := &recordingHandler{}
-	if _, err := fr.ReadFrame(context.Background(), h); err != nil {
-		t.Fatalf("read: %v", err)
-	}
-	if h.priorityVal.StreamDep != 9 || h.priorityVal.Exclusive || h.priorityVal.Weight != 32 {
-		t.Fatalf("prio: %+v", h.priorityVal)
-	}
+
+	_, err := fr.ReadFrame(context.Background(), h)
+
+	require.NoErrorf(t, err, "read: %v", err)
+	assert.EqualValuesf(t, 9, h.priorityVal.StreamDep, "prio: %+v", h.priorityVal)
+	assert.Falsef(t, h.priorityVal.Exclusive, "prio: %+v", h.priorityVal)
+	assert.EqualValuesf(t, 32, h.priorityVal.Weight, "prio: %+v", h.priorityVal)
 }
 
 func TestFramer_RSTStream_RoundTrip(t *testing.T) {
 	fr, _ := newFramerWithBuffer()
-	if err := fr.WriteRSTStream(2, ErrCodeCancel); err != nil {
-		t.Fatalf("write: %v", err)
-	}
+	require.NoError(t, fr.WriteRSTStream(2, ErrCodeCancel), "write")
 	h := &recordingHandler{}
-	if _, err := fr.ReadFrame(context.Background(), h); err != nil {
-		t.Fatalf("read: %v", err)
-	}
-	if h.rstCode != ErrCodeCancel {
-		t.Fatalf("code: %v", h.rstCode)
-	}
+
+	_, err := fr.ReadFrame(context.Background(), h)
+
+	require.NoErrorf(t, err, "read: %v", err)
+	assert.Equalf(t, ErrCodeCancel, h.rstCode, "code: %v", h.rstCode)
 }
 
 func TestFramer_Settings_RoundTrip(t *testing.T) {
@@ -218,155 +202,140 @@ func TestFramer_Settings_RoundTrip(t *testing.T) {
 	s := SettingsParams{N: 2}
 	s.Pairs[0] = SettingPair{ID: SettingMaxConcurrentStreams, Value: 100}
 	s.Pairs[1] = SettingPair{ID: SettingInitialWindowSize, Value: 65535}
-	if err := fr.WriteSettings(s); err != nil {
-		t.Fatalf("write: %v", err)
-	}
+	require.NoError(t, fr.WriteSettings(s), "write")
 	h := &recordingHandler{}
-	if _, err := fr.ReadFrame(context.Background(), h); err != nil {
-		t.Fatalf("read: %v", err)
-	}
-	if h.settings.N != 2 ||
-		h.settings.Pairs[0].ID != SettingMaxConcurrentStreams || h.settings.Pairs[0].Value != 100 ||
-		h.settings.Pairs[1].ID != SettingInitialWindowSize || h.settings.Pairs[1].Value != 65535 {
-		t.Fatalf("settings: %+v", h.settings)
-	}
+
+	_, err := fr.ReadFrame(context.Background(), h)
+
+	require.NoErrorf(t, err, "read: %v", err)
+	require.Equalf(t, 2, h.settings.N, "settings: %+v", h.settings)
+	assert.Equalf(t, SettingMaxConcurrentStreams, h.settings.Pairs[0].ID, "settings: %+v", h.settings)
+	assert.EqualValuesf(t, 100, h.settings.Pairs[0].Value, "settings: %+v", h.settings)
+	assert.Equalf(t, SettingInitialWindowSize, h.settings.Pairs[1].ID, "settings: %+v", h.settings)
+	assert.EqualValuesf(t, 65535, h.settings.Pairs[1].Value, "settings: %+v", h.settings)
 }
 
 func TestFramer_SettingsAck_RoundTrip(t *testing.T) {
 	fr, _ := newFramerWithBuffer()
-	if err := fr.WriteSettingsAck(); err != nil {
-		t.Fatalf("write: %v", err)
-	}
+	require.NoError(t, fr.WriteSettingsAck(), "write")
 	h := &recordingHandler{}
+
 	fh, err := fr.ReadFrame(context.Background(), h)
-	if err != nil {
-		t.Fatalf("read: %v", err)
-	}
-	if fh.Flags&FlagSettingsAck == 0 || fh.Length != 0 {
-		t.Fatalf("ack: %+v", fh)
-	}
+
+	require.NoErrorf(t, err, "read: %v", err)
+	assert.NotZerof(t, fh.Flags&FlagSettingsAck, "ack: %+v", fh)
+	assert.Zerof(t, fh.Length, "ack: %+v", fh)
 }
 
 func TestFramer_Ping_RoundTrip(t *testing.T) {
 	fr, _ := newFramerWithBuffer()
 	data := [8]byte{1, 2, 3, 4, 5, 6, 7, 8}
-	if err := fr.WritePing(false, data); err != nil {
-		t.Fatalf("write: %v", err)
-	}
+	require.NoError(t, fr.WritePing(false, data), "write")
 	h := &recordingHandler{}
-	if _, err := fr.ReadFrame(context.Background(), h); err != nil {
-		t.Fatalf("read: %v", err)
-	}
-	if h.pingData != data {
-		t.Fatalf("data: %v", h.pingData)
-	}
+
+	_, err := fr.ReadFrame(context.Background(), h)
+
+	require.NoErrorf(t, err, "read: %v", err)
+	assert.Equalf(t, data, h.pingData, "data: %v", h.pingData)
 }
 
 func TestFramer_GoAway_RoundTrip(t *testing.T) {
 	fr, _ := newFramerWithBuffer()
-	if err := fr.WriteGoAway(7, ErrCodeProtocolError, []byte("oops")); err != nil {
-		t.Fatalf("write: %v", err)
-	}
+	require.NoError(t, fr.WriteGoAway(7, ErrCodeProtocolError, []byte("oops")), "write")
 	h := &recordingHandler{}
-	if _, err := fr.ReadFrame(context.Background(), h); err != nil {
-		t.Fatalf("read: %v", err)
-	}
-	if h.goLastID != 7 || h.goCode != ErrCodeProtocolError || string(h.goDebug) != "oops" {
-		t.Fatalf("got last=%d code=%v debug=%q", h.goLastID, h.goCode, h.goDebug)
-	}
+
+	_, err := fr.ReadFrame(context.Background(), h)
+
+	require.NoErrorf(t, err, "read: %v", err)
+	assert.EqualValuesf(t, 7, h.goLastID, "got last=%d code=%v debug=%q", h.goLastID, h.goCode, h.goDebug)
+	assert.Equalf(t, ErrCodeProtocolError, h.goCode,
+		"got last=%d code=%v debug=%q", h.goLastID, h.goCode, h.goDebug)
+	assert.Equalf(t, "oops", string(h.goDebug),
+		"got last=%d code=%v debug=%q", h.goLastID, h.goCode, h.goDebug)
 }
 
 func TestFramer_WindowUpdate_RoundTrip(t *testing.T) {
 	fr, _ := newFramerWithBuffer()
-	if err := fr.WriteWindowUpdate(1, 1024); err != nil {
-		t.Fatalf("write: %v", err)
-	}
+	require.NoError(t, fr.WriteWindowUpdate(1, 1024), "write")
 	h := &recordingHandler{}
-	if _, err := fr.ReadFrame(context.Background(), h); err != nil {
-		t.Fatalf("read: %v", err)
-	}
-	if h.winInc != 1024 {
-		t.Fatalf("inc: %d", h.winInc)
-	}
+
+	_, err := fr.ReadFrame(context.Background(), h)
+
+	require.NoErrorf(t, err, "read: %v", err)
+	assert.EqualValuesf(t, 1024, h.winInc, "inc: %d", h.winInc)
 }
 
 func TestFramer_WindowUpdate_ZeroIncrementRejected(t *testing.T) {
 	fr, _ := newFramerWithBuffer()
-	if err := fr.WriteWindowUpdate(1, 0); !errors.Is(err, ErrZeroIncrement) {
-		t.Fatalf("err = %v, want ErrZeroIncrement", err)
-	}
+
+	err := fr.WriteWindowUpdate(1, 0)
+
+	require.ErrorIsf(t, err, ErrZeroIncrement, "err = %v, want ErrZeroIncrement", err)
 }
 
 func TestFramer_Continuation_RoundTrip(t *testing.T) {
 	fr, _ := newFramerWithBuffer()
 	// RFC 9113 §6.10: a CONTINUATION is valid only after a HEADERS/PUSH_PROMISE
 	// without END_HEADERS opens a field block on the same stream. Open one first.
-	if err := fr.WriteHeaders(WriteHeadersParams{StreamID: 1, BlockFragment: []byte{0x82}, EndHeaders: false}); err != nil {
-		t.Fatalf("write HEADERS: %v", err)
-	}
-	if err := fr.WriteContinuation(1, true, []byte{0x82, 0x84}); err != nil {
-		t.Fatalf("write CONTINUATION: %v", err)
-	}
+	require.NoError(t,
+		fr.WriteHeaders(WriteHeadersParams{StreamID: 1, BlockFragment: []byte{0x82}, EndHeaders: false}),
+		"write HEADERS")
+	require.NoError(t, fr.WriteContinuation(1, true, []byte{0x82, 0x84}), "write CONTINUATION")
 	h := &recordingHandler{}
-	if _, err := fr.ReadFrame(context.Background(), h); err != nil {
-		t.Fatalf("read HEADERS: %v", err)
-	}
-	if _, err := fr.ReadFrame(context.Background(), h); err != nil {
-		t.Fatalf("read CONTINUATION: %v", err)
-	}
-	if !bytes.Equal(h.contHB, []byte{0x82, 0x84}) {
-		t.Fatalf("hb: %x", h.contHB)
-	}
+	_, err := fr.ReadFrame(context.Background(), h)
+	require.NoErrorf(t, err, "read HEADERS: %v", err)
+
+	_, err = fr.ReadFrame(context.Background(), h)
+
+	require.NoErrorf(t, err, "read CONTINUATION: %v", err)
+	assert.Truef(t, bytes.Equal(h.contHB, []byte{0x82, 0x84}), "hb: %x", h.contHB)
 }
 
 func TestFramer_PushPromise_RoundTrip(t *testing.T) {
 	fr, _ := newFramerWithBuffer()
-	if err := fr.WritePushPromise(1, 4, []byte{0x82}, true, 0); err != nil {
-		t.Fatalf("write: %v", err)
-	}
+	require.NoError(t, fr.WritePushPromise(1, 4, []byte{0x82}, true, 0), "write")
 	h := &recordingHandler{}
-	if _, err := fr.ReadFrame(context.Background(), h); err != nil {
-		t.Fatalf("read: %v", err)
-	}
-	if h.promID != 4 || !bytes.Equal(h.hb, []byte{0x82}) {
-		t.Fatalf("got promID=%d hb=%x", h.promID, h.hb)
-	}
+
+	_, err := fr.ReadFrame(context.Background(), h)
+
+	require.NoErrorf(t, err, "read: %v", err)
+	assert.EqualValuesf(t, 4, h.promID, "got promID=%d hb=%x", h.promID, h.hb)
+	assert.Truef(t, bytes.Equal(h.hb, []byte{0x82}), "got promID=%d hb=%x", h.promID, h.hb)
 }
 
 func TestFramer_ClientPreface(t *testing.T) {
 	var buf bytes.Buffer
 	fr := NewFramer(&buf, nil)
-	if err := fr.WriteClientPreface(); err != nil {
-		t.Fatalf("write: %v", err)
-	}
+
+	err := fr.WriteClientPreface()
+
+	require.NoErrorf(t, err, "write: %v", err)
 	want := "PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n"
-	if buf.String() != want {
-		t.Fatalf("got %q, want %q", buf.String(), want)
-	}
+	assert.Equalf(t, want, buf.String(), "got %q, want %q", buf.String(), want)
 }
 
 func TestFramer_DataStreamID0Rejected(t *testing.T) {
 	fr, _ := newFramerWithBuffer()
-	if err := fr.WriteData(0, false, []byte("x")); !errors.Is(err, ErrInvalidStreamID) {
-		t.Fatalf("err = %v, want ErrInvalidStreamID", err)
-	}
+
+	err := fr.WriteData(0, false, []byte("x"))
+
+	require.ErrorIsf(t, err, ErrInvalidStreamID, "err = %v, want ErrInvalidStreamID", err)
 }
 
 func TestFramer_FrameTooLargeOnRead(t *testing.T) {
 	fr, _ := newFramerWithBuffer()
 	fr.SetMaxReadFrameSize(2)
-	if err := fr.WriteData(1, false, []byte("hello")); err != nil {
+
+	writeErr := fr.WriteData(1, false, []byte("hello"))
+
+	if writeErr != nil {
 		// write side may also reject when over its own limit; that's acceptable
-		if errors.Is(err, ErrFrameTooLarge) {
-			return
-		}
-		t.Fatalf("write: %v", err)
+		require.ErrorIsf(t, writeErr, ErrFrameTooLarge, "write: %v", writeErr)
+		return
 	}
 	h := &recordingHandler{}
 	_, err := fr.ReadFrame(context.Background(), h)
-	if !errors.Is(err, ErrFrameTooLarge) {
-		t.Fatalf("err = %v, want ErrFrameTooLarge", err)
-	}
+	require.ErrorIsf(t, err, ErrFrameTooLarge, "err = %v, want ErrFrameTooLarge", err)
 }
 
 // === Bench gates ===
@@ -451,21 +420,16 @@ func TestFramer_WriteHeaders_PayloadNearBufBoundary(t *testing.T) {
 	for _, blockLen := range []int{247, 248, 256, 257} {
 		fr, _ := newFramerWithBuffer()
 		block := bytes.Repeat([]byte{0x00}, blockLen)
-		if err := fr.WriteHeaders(WriteHeadersParams{
+		require.NoErrorf(t, fr.WriteHeaders(WriteHeadersParams{
 			StreamID: 1, BlockFragment: block, EndStream: true, EndHeaders: true,
-		}); err != nil {
-			t.Fatalf("blockLen=%d: write: %v", blockLen, err)
-		}
+		}), "blockLen=%d: write", blockLen)
 		h := &recordingHandler{}
+
 		fh, err := fr.ReadFrame(context.Background(), h)
-		if err != nil {
-			t.Fatalf("blockLen=%d: read: %v", blockLen, err)
-		}
-		if fh.Type != FrameHeaders {
-			t.Fatalf("blockLen=%d: type=%v", blockLen, fh.Type)
-		}
-		if len(h.hb) != blockLen {
-			t.Fatalf("blockLen=%d: round-tripped %d bytes, want %d", blockLen, len(h.hb), blockLen)
-		}
+
+		require.NoErrorf(t, err, "blockLen=%d: read: %v", blockLen, err)
+		assert.Equalf(t, FrameHeaders, fh.Type, "blockLen=%d: type=%v", blockLen, fh.Type)
+		assert.Lenf(t, h.hb, blockLen,
+			"blockLen=%d: round-tripped %d bytes, want %d", blockLen, len(h.hb), blockLen)
 	}
 }
