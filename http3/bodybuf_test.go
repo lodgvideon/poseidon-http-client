@@ -4,6 +4,9 @@ import (
 	"bytes"
 	"context"
 	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // The buffered Do path copies each response body out of the frame reader and
@@ -34,13 +37,12 @@ func TestFrameReader_PayloadCapIsItsLength(t *testing.T) {
 	fr.Feed(wire)
 
 	typ, payload, err := fr.ReadFrame()
-	if err != nil || typ != FrameData {
-		t.Fatalf("ReadFrame = (%#x, %v), want a DATA frame", typ, err)
-	}
-	if cap(payload) != len(payload) {
-		t.Fatalf("payload has len %d cap %d — appending to a body built on it would write "+
+
+	require.NoError(t, err, "ReadFrame on two complete buffered DATA frames")
+	require.Equal(t, FrameData, typ, "the first buffered frame is a DATA frame")
+	require.Equalf(t, len(payload), cap(payload),
+		"payload has len %d cap %d — appending to a body built on it would write "+
 			"into the reader's next buffered frame", len(payload), cap(payload))
-	}
 }
 
 // TestRespBuilder_BodyDoesNotAliasReaderBuffer pins the property that makes
@@ -51,28 +53,25 @@ func TestFrameReader_PayloadCapIsItsLength(t *testing.T) {
 func TestRespBuilder_BodyDoesNotAliasReaderBuffer(t *testing.T) {
 	c := &Client{}
 	want := bytes.Repeat([]byte{'x'}, 1024)
-
 	var fr FrameReader
 	fr.Feed(AppendData(nil, want))
 	typ, payload, err := fr.ReadFrame()
-	if err != nil || typ != FrameData {
-		t.Fatalf("ReadFrame = (%#x, %v), want a DATA frame", typ, err)
-	}
+	require.NoError(t, err, "ReadFrame on one complete buffered DATA frame")
+	require.Equal(t, FrameData, typ, "the buffered frame is a DATA frame")
 	rb := &respBuilder{resp: &Response{Status: 200}}
-	if derr := c.dispatchFrame(rb, typ, payload); derr != nil {
-		t.Fatalf("dispatchFrame: %v", derr)
-	}
 
+	derr := c.dispatchFrame(rb, typ, payload)
 	// Scribble over the reader's whole array the way a recycled buffer's next
 	// user does. A body that aliased it would change under this.
 	for i := range fr.buf[:cap(fr.buf)] {
 		fr.buf[:cap(fr.buf)][i] = 'Z'
 	}
-	if !bytes.Equal(rb.body, want) {
-		t.Fatalf("the body changed when the reader's array was overwritten — it aliases the "+
+
+	require.NoError(t, derr, "dispatchFrame of a well-formed DATA frame")
+	assert.Truef(t, bytes.Equal(rb.body, want),
+		"the body changed when the reader's array was overwritten — it aliases the "+
 			"reader, so pooling that array corrupts bodies across requests: got %d bytes "+
 			"starting %q", len(rb.body), rb.body[:min(8, len(rb.body))])
-	}
 }
 
 // TestRespBuilder_BodySurvivesReaderRecycling drives the real dispatchFrame over
@@ -86,12 +85,12 @@ func TestRespBuilder_BodySurvivesReaderRecycling(t *testing.T) {
 	t.Run("single frame", func(t *testing.T) {
 		want := bytes.Repeat([]byte{'x'}, 1024)
 		rb := &respBuilder{resp: &Response{Status: 200}}
-		if err := c.dispatchFrame(rb, FrameData, want); err != nil {
-			t.Fatalf("dispatchFrame: %v", err)
-		}
-		if !bytes.Equal(rb.body, want) {
-			t.Fatalf("body = %d bytes, want %d", len(rb.body), len(want))
-		}
+
+		err := c.dispatchFrame(rb, FrameData, want)
+
+		require.NoError(t, err, "dispatchFrame of a well-formed DATA frame")
+		assert.Truef(t, bytes.Equal(rb.body, want),
+			"body = %d bytes, want %d", len(rb.body), len(want))
 	})
 
 	t.Run("three frames concatenate", func(t *testing.T) {
@@ -109,19 +108,18 @@ func TestRespBuilder_BodySurvivesReaderRecycling(t *testing.T) {
 			wire = AppendData(wire, p)
 			want = append(want, p...)
 		}
-
 		var fr FrameReader
 		rb := &respBuilder{resp: &Response{Status: 200}}
+
 		// Feed in small bursts so frames straddle, as they do on the wire.
 		feedInBursts(&fr, wire, 512, func(typ uint64, payload []byte) {
-			if derr := c.dispatchFrame(rb, typ, payload); derr != nil {
-				t.Fatalf("dispatchFrame: %v", derr)
-			}
+			require.NoError(t, c.dispatchFrame(rb, typ, payload),
+				"dispatchFrame of a well-formed DATA frame")
 		})
-		if !bytes.Equal(rb.body, want) {
-			t.Fatalf("body = %d bytes, want %d — an earlier frame's bytes were corrupted "+
+
+		assert.Truef(t, bytes.Equal(rb.body, want),
+			"body = %d bytes, want %d — an earlier frame's bytes were corrupted "+
 				"by the feeds that followed", len(rb.body), len(want))
-		}
 	})
 
 	t.Run("body survives the reader being recycled", func(t *testing.T) {
@@ -135,29 +133,24 @@ func TestRespBuilder_BodySurvivesReaderRecycling(t *testing.T) {
 		fr.acquire()
 		rb := &respBuilder{resp: &Response{Status: 200}}
 		feedInBursts(&fr, AppendData(nil, first), 512, func(typ uint64, payload []byte) {
-			if derr := c.dispatchFrame(rb, typ, payload); derr != nil {
-				t.Fatalf("dispatchFrame: %v", derr)
-			}
+			require.NoError(t, c.dispatchFrame(rb, typ, payload),
+				"dispatchFrame of the first response's DATA frame")
 		})
 		fr.release()
-
 		var fr2 FrameReader
 		fr2.acquire()
 		defer fr2.release()
 		rb2 := &respBuilder{resp: &Response{Status: 200}}
 		feedInBursts(&fr2, AppendData(nil, second), 512, func(typ uint64, payload []byte) {
-			if derr := c.dispatchFrame(rb2, typ, payload); derr != nil {
-				t.Fatalf("dispatchFrame: %v", derr)
-			}
+			require.NoError(t, c.dispatchFrame(rb2, typ, payload),
+				"dispatchFrame of the second response's DATA frame")
 		})
 
-		if !bytes.Equal(rb.body, first) {
-			t.Fatalf("the first response's body changed once its reader's array was recycled "+
+		assert.Truef(t, bytes.Equal(rb.body, first),
+			"the first response's body changed once its reader's array was recycled "+
 				"and reused: got %d bytes starting %q", len(rb.body), rb.body[:min(8, len(rb.body))])
-		}
-		if !bytes.Equal(rb2.body, second) {
-			t.Fatalf("the second response's body is wrong: got %d bytes", len(rb2.body))
-		}
+		assert.Truef(t, bytes.Equal(rb2.body, second),
+			"the second response's body is wrong: got %d bytes", len(rb2.body))
 	})
 }
 
@@ -206,24 +199,19 @@ func TestClient_PooledFrameBuffer(t *testing.T) {
 			fin:        true,
 		}}
 		client, err := NewClientFake(conn, []Setting{{SettingQPACKMaxTableCapacity, 0}})
-		if err != nil {
-			t.Fatalf("request %d: NewClientFake: %v", i, err)
-		}
+		require.NoErrorf(t, err, "request %d: NewClientFake", i)
 		resp, gotBody, err := client.Do(context.Background(),
 			&Request{Method: "GET", Scheme: "https", Authority: "example.com", Path: "/"})
-		if err != nil {
-			t.Fatalf("request %d: Do: %v", i, err)
-		}
+		require.NoErrorf(t, err, "request %d: Do", i)
 		results = append(results, got{resp: resp, body: gotBody})
 	}
 
 	for i, r := range results {
 		wantBody := bytes.Repeat(fills[i:i+1], 6000+i)
-		if !bytes.Equal(r.body, wantBody) {
-			t.Errorf("request %d: body = %d bytes starting %q, want %d of %q — a later "+
+		assert.Truef(t, bytes.Equal(r.body, wantBody),
+			"request %d: body = %d bytes starting %q, want %d of %q — a later "+
 				"request overwrote it through the recycled frame buffer",
-				i, len(r.body), r.body[:min(8, len(r.body))], len(wantBody), fills[i:i+1])
-		}
+			i, len(r.body), r.body[:min(8, len(r.body))], len(wantBody), fills[i:i+1])
 		wantEtag := bytes.Repeat(fills[i:i+1], 200)
 		var etag []byte
 		for _, f := range r.resp.Headers {
@@ -231,11 +219,10 @@ func TestClient_PooledFrameBuffer(t *testing.T) {
 				etag = f.Value
 			}
 		}
-		if !bytes.Equal(etag, wantEtag) {
-			t.Errorf("request %d: etag = %d bytes starting %q, want %d of %q — the header "+
+		assert.Truef(t, bytes.Equal(etag, wantEtag),
+			"request %d: etag = %d bytes starting %q, want %d of %q — the header "+
 				"value aliases the recycled frame buffer",
-				i, len(etag), etag[:min(8, len(etag))], len(wantEtag), fills[i:i+1])
-		}
+			i, len(etag), etag[:min(8, len(etag))], len(wantEtag), fills[i:i+1])
 	}
 }
 
@@ -247,26 +234,35 @@ func TestClient_PooledFrameBuffer(t *testing.T) {
 // which abandoned the capacity behind the window — every response reallocated
 // its way back up from nothing.
 func TestFrameReader_FeedReclaimsConsumedCapacity(t *testing.T) {
+	const rounds = 64
 	var fr FrameReader
 	fr.acquire()
 	defer fr.release()
-
 	frame := AppendData(nil, bytes.Repeat([]byte{'a'}, 4096))
-	var array *byte
-	for i := 0; i < 64; i++ {
+	type seen struct {
+		typ   uint64
+		bytes int
+	}
+	arrays := make([]*byte, 0, rounds)
+	frames := make([]seen, 0, rounds)
+	caps := make([]int, 0, rounds)
+
+	for i := 0; i < rounds; i++ {
 		feedInBursts(&fr, frame, 1200, func(typ uint64, payload []byte) {
-			if typ != FrameData || len(payload) != 4096 {
-				t.Fatalf("round %d: frame = (%#x, %d bytes)", i, typ, len(payload))
-			}
+			frames = append(frames, seen{typ, len(payload)})
 		})
-		if i == 0 {
-			array = &fr.buf[:cap(fr.buf)][0]
-			continue
-		}
-		if got := &fr.buf[:cap(fr.buf)][0]; got != array {
-			t.Fatalf("round %d reallocated the reader's array (cap %d) — consumed capacity "+
-				"is not being reclaimed", i, cap(fr.buf))
-		}
+		arrays = append(arrays, &fr.buf[:cap(fr.buf)][0])
+		caps = append(caps, cap(fr.buf))
+	}
+
+	require.Len(t, frames, rounds, "each round must yield exactly one reassembled frame")
+	for i, f := range frames {
+		require.Equalf(t, seen{FrameData, 4096}, f, "round %d: frame = (%#x, %d bytes)", i, f.typ, f.bytes)
+	}
+	for i, a := range arrays {
+		assert.Samef(t, arrays[0], a,
+			"round %d reallocated the reader's array (cap %d) — consumed capacity "+
+				"is not being reclaimed", i, caps[i])
 	}
 }
 
@@ -275,81 +271,101 @@ func TestFrameReader_FeedReclaimsConsumedCapacity(t *testing.T) {
 // runs out, so the live window slides back over consumed bytes with a partial
 // frame header inside it.
 func TestFrameReader_CompactionPreservesAStraddlingFrame(t *testing.T) {
+	// Fill the array with small frames first so the tail is nearly spent and the
+	// large frames below are guaranteed to straddle a compaction. The reader
+	// state is deliberately carried from case to case: each size runs against the
+	// window position the previous one left behind.
 	var fr FrameReader
 	fr.acquire()
 	defer fr.release()
-
-	// Fill the array with small frames first so the tail is nearly spent and the
-	// large frame below is guaranteed to straddle a compaction.
 	filler := AppendData(nil, bytes.Repeat([]byte{'.'}, 64))
 	for i := 0; i < 8; i++ {
 		fr.Feed(filler)
-		if _, _, err := fr.ReadFrame(); err != nil {
-			t.Fatalf("filler %d: %v", i, err)
-		}
+		_, _, err := fr.ReadFrame()
+		require.NoErrorf(t, err, "filler %d must parse as a complete frame", i)
+	}
+	sizes := []int{100, 4096, frameBufSize * 3}
+	wants := make([][]byte, len(sizes))
+	gots := make([][]byte, len(sizes))
+	types := make([][]uint64, len(sizes))
+
+	for i, size := range sizes {
+		wants[i] = bytes.Repeat([]byte{'w'}, size)
+		feedInBursts(&fr, AppendData(nil, wants[i]), 7, func(typ uint64, payload []byte) {
+			types[i] = append(types[i], typ)
+			gots[i] = append(gots[i], payload...)
+		})
 	}
 
-	for _, size := range []int{100, 4096, frameBufSize * 3} {
-		want := bytes.Repeat([]byte{'w'}, size)
-		var got []byte
-		feedInBursts(&fr, AppendData(nil, want), 7, func(typ uint64, payload []byte) {
-			if typ != FrameData {
-				t.Fatalf("frame type %#x, want DATA", typ)
-			}
-			got = append(got, payload...)
-		})
-		if !bytes.Equal(got, want) {
-			t.Fatalf("size %d: reassembled %d bytes, want %d — compaction moved the live "+
-				"window incorrectly", size, len(got), len(want))
+	for i, size := range sizes {
+		for _, typ := range types[i] {
+			assert.Equalf(t, FrameData, typ, "size %d: frame type %#x, want DATA", size, typ)
 		}
+		assert.Truef(t, bytes.Equal(gots[i], wants[i]),
+			"size %d: reassembled %d bytes, want %d — compaction moved the live "+
+				"window incorrectly", size, len(gots[i]), len(wants[i]))
 	}
 }
 
 // TestFrameReader_ReleaseIsIdempotent pins that release can be deferred next to
 // an early return without risking the same array being handed to two readers.
 func TestFrameReader_ReleaseIsIdempotent(t *testing.T) {
-	var fr FrameReader
-	fr.acquire()
-	fr.Feed(AppendData(nil, []byte("body")))
-	fr.release()
-	if fr.Buffered() != 0 || fr.buf != nil || fr.bufp != nil {
-		t.Fatalf("release left the reader non-empty: buffered=%d buf=%v bufp=%v",
-			fr.Buffered(), fr.buf != nil, fr.bufp != nil)
-	}
-	fr.release() // must not put the array back a second time
-	fr.release()
+	t.Run("release empties the reader and may be repeated", func(t *testing.T) {
+		var fr FrameReader
+		fr.acquire()
+		fr.Feed(AppendData(nil, []byte("body")))
 
-	var a, b FrameReader
-	a.acquire()
-	b.acquire()
-	if a.bufp == b.bufp {
-		t.Fatal("two live readers acquired the same array")
-	}
-	a.release()
-	b.release()
+		fr.release()
+		fr.release() // must not put the array back a second time
+		fr.release()
+
+		assert.Zerof(t, fr.Buffered(), "release left %d bytes buffered", fr.Buffered())
+		assert.Truef(t, fr.buf == nil, "release left the reader's slice set (buf non-nil)")
+		assert.Truef(t, fr.bufp == nil, "release left the pooled array header set (bufp non-nil)")
+	})
+
+	t.Run("two live readers never share an array", func(t *testing.T) {
+		var a, b FrameReader
+
+		a.acquire()
+		b.acquire()
+		defer a.release()
+		defer b.release()
+
+		assert.NotSame(t, a.bufp, b.bufp, "two live readers acquired the same array")
+	})
 }
 
 // TestFrameReader_OutsizedBufferIsNotPooled pins that an array grown past
 // maxPooledFrameBuf is dropped rather than circulated, so one large response
 // cannot pin that footprint in the pool for every small request after it.
 func TestFrameReader_OutsizedBufferIsNotPooled(t *testing.T) {
+	const draws = 8
 	var fr FrameReader
 	fr.acquire()
 	fr.Feed(make([]byte, maxPooledFrameBuf+1))
 	grown := &fr.buf[0]
 	fr.release()
+	heads := make([]*byte, 0, draws)
+	caps := make([]int, 0, draws)
 
 	// A pooled buffer is not reachable by identity, so check the next few the
 	// pool hands out: none may be the outsized array.
-	for i := 0; i < 8; i++ {
+	for i := 0; i < draws; i++ {
 		var next FrameReader
 		next.acquire()
-		if cap(next.buf) > 0 && &next.buf[:cap(next.buf)][0] == grown {
-			t.Fatal("the outsized array came back out of the pool")
+		if cap(next.buf) > 0 {
+			heads = append(heads, &next.buf[:cap(next.buf)][0])
+		} else {
+			heads = append(heads, nil)
 		}
-		if cap(next.buf) > maxPooledFrameBuf {
-			t.Fatalf("pool handed out a %d-byte array, over the %d cap", cap(next.buf), maxPooledFrameBuf)
-		}
+		caps = append(caps, cap(next.buf))
 		next.release()
+	}
+
+	for i, head := range heads {
+		assert.NotSamef(t, grown, head, "draw %d: the outsized array came back out of the pool", i)
+		assert.LessOrEqualf(t, caps[i], maxPooledFrameBuf,
+			"draw %d: pool handed out a %d-byte array, over the %d cap", i, caps[i], maxPooledFrameBuf)
 	}
 }
