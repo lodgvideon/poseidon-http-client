@@ -3,6 +3,9 @@ package hpack
 import (
 	"encoding/hex"
 	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // RFC 7541 Appendix C.3 and C.4, the requests AFTER the first.
@@ -34,25 +37,21 @@ func runSequence(t *testing.T, name string, steps []struct {
 	d := NewDecoder()
 	for i, step := range steps {
 		block, err := hex.DecodeString(step.hexBlock)
-		if err != nil {
-			t.Fatalf("%s step %d: hex decode: %v", name, i+1, err)
-		}
+		require.NoErrorf(t, err, "%s step %d: hex decode of the fixture", name, i+1)
 		var got []fxField
-		if err := d.DecodeBlock(block, func(f HeaderField) error {
+
+		err = d.DecodeBlock(block, func(f HeaderField) error {
 			got = append(got, fxField{name: string(f.Name), value: string(f.Value), sensitive: f.Sensitive()})
 			return nil
-		}); err != nil {
-			t.Fatalf("%s step %d: decode: %v", name, i+1, err)
-		}
-		if len(got) != len(step.want) {
-			t.Fatalf("%s step %d: %d fields, want %d (%+v)", name, i+1, len(got), len(step.want), got)
-		}
+		})
+
+		require.NoErrorf(t, err, "%s step %d: decode", name, i+1)
+		require.Lenf(t, got, len(step.want), "%s step %d: decoded %+v", name, i+1, got)
 		for j := range got {
-			if got[j] != step.want[j] {
-				t.Fatalf("%s step %d field[%d]: got %+v, want %+v;\n"+
+			assert.Equalf(t, step.want[j], got[j],
+				"%s step %d field[%d];\n"+
 					"a dynamic-table index that decodes to the wrong field means this codec numbers "+
-					"the static and dynamic tables differently from every peer", name, i+1, j, got[j], step.want[j])
-			}
+					"the static and dynamic tables differently from every peer", name, i+1, j)
 		}
 	}
 }

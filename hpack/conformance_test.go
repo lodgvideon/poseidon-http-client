@@ -1,9 +1,11 @@
 package hpack
 
 import (
-	"bytes"
 	"encoding/hex"
 	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // RFC 7541 Appendix C — conformance vectors. Names follow the pattern
@@ -21,23 +23,19 @@ func runVector(t *testing.T, name string, blockHex string, want []fxField, table
 		d.SetMaxDynamicTableSize(tableSize)
 	}
 	block, err := hex.DecodeString(blockHex)
-	if err != nil {
-		t.Fatalf("hex decode: %v", err)
-	}
+	require.NoError(t, err, "hex decode of the fixture")
 	var got []fxField
-	if err := d.DecodeBlock(block, func(f HeaderField) error {
+
+	err = d.DecodeBlock(block, func(f HeaderField) error {
 		got = append(got, fxField{name: string(f.Name), value: string(f.Value), sensitive: f.Sensitive()})
 		return nil
-	}); err != nil {
-		t.Fatalf("%s decode: %v", name, err)
-	}
-	if len(got) != len(want) {
-		t.Fatalf("%s: len got=%d want=%d (%+v vs %+v)", name, len(got), len(want), got, want)
-	}
+	})
+
+	require.NoErrorf(t, err, "%s decode", name)
+	require.Lenf(t, got, len(want), "%s: decoded %+v, want %+v", name, got, want)
 	for i := range got {
-		if got[i] != want[i] {
-			t.Fatalf("%s field[%d]: got %+v, want %+v", name, i, got[i], want[i])
-		}
+		assert.Equalf(t, want[i], got[i],
+			"%s field[%d]; the Appendix C vectors are the only external check that this codec reads what every other peer writes", name, i)
 	}
 }
 
@@ -52,24 +50,21 @@ func runEncodeRoundtrip(t *testing.T, name string, fields []fxField) {
 		}
 		hf[i] = HeaderField{Name: []byte(f.name), Value: []byte(f.value), Indexing: mode}
 	}
-	block := enc.EncodeBlock(nil, hf)
 	dec := NewDecoder()
 	var got []fxField
-	if err := dec.DecodeBlock(block, func(f HeaderField) error {
+
+	block := enc.EncodeBlock(nil, hf)
+	err := dec.DecodeBlock(block, func(f HeaderField) error {
 		got = append(got, fxField{name: string(f.Name), value: string(f.Value), sensitive: f.Sensitive()})
 		return nil
-	}); err != nil {
-		t.Fatalf("%s roundtrip decode: %v", name, err)
-	}
-	if len(got) != len(fields) {
-		t.Fatalf("%s roundtrip len mismatch: got %d want %d", name, len(got), len(fields))
-	}
+	})
+
+	require.NoErrorf(t, err, "%s roundtrip decode", name)
+	require.Lenf(t, got, len(fields), "%s roundtrip: decoded %+v", name, got)
 	for i := range got {
-		if got[i] != fields[i] {
-			t.Fatalf("%s roundtrip field[%d]: got %+v, want %+v", name, i, got[i], fields[i])
-		}
+		assert.Equalf(t, fields[i], got[i],
+			"%s roundtrip field[%d]; what this encoder writes, this decoder must read back unchanged", name, i)
 	}
-	_ = bytes.NewReader(nil) // keep import
 }
 
 // C.2.1: Literal Header Field with Indexing
@@ -158,26 +153,25 @@ func TestConformance_RFC7541_RoundTrip_RequestSequence(t *testing.T) {
 			{name: "custom-key", value: "custom-value"},
 		},
 	}
+
 	for i, req := range requests {
 		hf := make([]HeaderField, len(req))
 		for j, f := range req {
 			hf[j] = HeaderField{Name: []byte(f.name), Value: []byte(f.value)}
 		}
-		block := enc.EncodeBlock(nil, hf)
 		var got []fxField
-		if err := dec.DecodeBlock(block, func(f HeaderField) error {
+
+		block := enc.EncodeBlock(nil, hf)
+		err := dec.DecodeBlock(block, func(f HeaderField) error {
 			got = append(got, fxField{name: string(f.Name), value: string(f.Value)})
 			return nil
-		}); err != nil {
-			t.Fatalf("req %d decode: %v", i, err)
-		}
-		if len(got) != len(req) {
-			t.Fatalf("req %d len mismatch: got %d want %d", i, len(got), len(req))
-		}
+		})
+
+		require.NoErrorf(t, err, "req %d decode", i)
+		require.Lenf(t, got, len(req), "req %d: decoded %+v", i, got)
 		for j := range got {
-			if got[j] != req[j] {
-				t.Fatalf("req %d field[%d]: got %+v, want %+v", i, j, got[j], req[j])
-			}
+			assert.Equalf(t, req[j], got[j],
+				"req %d field[%d]; one encoder and one decoder share table state across the sequence, so a mismatch here is a table-state divergence, not a single-block bug", i, j)
 		}
 	}
 }
