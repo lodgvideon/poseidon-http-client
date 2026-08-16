@@ -100,6 +100,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Tests
 
+- **A gRPC conformance test no longer infers a reset from `io.EOF`.**
+  `TestConformance_RFC9113_Sec8_1_SendAfterBenignResetStillFails` drained to
+  `io.EOF` and then sent, on the stated assumption that "the reset follows the
+  trailers on the wire, so the stream is latched closed by the time EOF is
+  reported". `io.EOF` reports END_STREAM being *consumed*; `RST_STREAM` is the
+  next frame, and nothing orders the two — so on a loaded runner the send reached
+  a stream the reader had not torn down yet, and succeeded (#709).
+
+  It now waits for `EventReset` on the transport stream underneath. That orders
+  the send for a concrete reason: `endWithReset` pushes the event and sets the
+  stream's closed flag inside one `s.mu` section, and `sendData` takes the same
+  mutex before testing that flag. The assertion is unchanged — a send after a
+  benign reset must still fail. Reproduced deterministically before fixing, by
+  delaying the reader's RST handling 50 ms: the old form fails 3/3 and the new
+  one passes 3/3, while both pass without the delay.
+
 - **The three remaining `pc.Write` sites in `quic` are gated against a failing
   socket.** A datagram that never left the host is not a lost packet: loss is
   self-healing, since the peer's missing ACK arms a PTO and the frame is resent,
