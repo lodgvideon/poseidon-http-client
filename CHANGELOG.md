@@ -52,8 +52,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   granting receive credit on the consumer's goroutine, so the gate is on the
   return value and that caller's choice is left alone.
 
-### Tests
-
 - **An interim-then-close request is now proven un-replayed end to end.**
   `ErrServerClosedIdle` means no part of a response ever arrived, which is what
   makes replaying safe; an interim response is the opposite, since `100 Continue`
