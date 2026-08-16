@@ -1,10 +1,11 @@
 package bytesx
 
 import (
-	"bytes"
 	"os/exec"
-	"strings"
+	"strconv"
 	"testing"
+
+	"github.com/stretchr/testify/require"
 )
 
 // varintCases pairs values with their minimal QUIC varint encodings, including
@@ -35,18 +36,20 @@ var varintCases = []struct {
 func TestConformance_RFC9000_Sec16_VarintRoundTrip(t *testing.T) {
 	for _, tc := range varintCases {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := VarintLen(tc.v); got != len(tc.enc) {
-				t.Fatalf("VarintLen(%d) = %d, want %d", tc.v, got, len(tc.enc))
-			}
 			var buf [8]byte
+
+			gotLen := VarintLen(tc.v)
 			n := WriteVarint(buf[:], tc.v)
-			if !bytes.Equal(buf[:n], tc.enc) {
-				t.Fatalf("WriteVarint(%d) = %x, want %x", tc.v, buf[:n], tc.enc)
-			}
-			v, m := ReadVarint(tc.enc)
-			if v != tc.v || m != len(tc.enc) {
-				t.Fatalf("ReadVarint(%x) = (%d, %d), want (%d, %d)", tc.enc, v, m, tc.v, len(tc.enc))
-			}
+			gotV, gotN := ReadVarint(tc.enc)
+
+			require.Equalf(t, len(tc.enc), gotLen,
+				"VarintLen(%d) must report the minimal on-wire length; a caller sizes its buffer and its frame-length field from this, so a wrong answer writes the wrong number of bytes into the packet", tc.v)
+			require.Equalf(t, tc.enc, buf[:n],
+				"WriteVarint(%d) must emit exactly the RFC 9000 §16 encoding %x, length prefix included; one byte off is a packet no conformant peer can parse", tc.v, tc.enc)
+			require.Equalf(t, tc.v, gotV,
+				"ReadVarint(%x) must recover the encoded value; a decoder that disagrees with the encoder corrupts every length, stream ID, offset and frame type on the wire", tc.enc)
+			require.Equalf(t, len(tc.enc), gotN,
+				"ReadVarint(%x) must consume exactly the bytes its length prefix claims; a wrong count desynchronises the parse of everything after it in the packet", tc.enc)
 		})
 	}
 }
@@ -55,19 +58,23 @@ func TestConformance_RFC9000_Sec16_VarintRoundTrip(t *testing.T) {
 // non-minimally-encoded varint faithfully (RFC 9000 §16 permits them): the
 // two-byte form 0x4025 decodes to 37, the same value 0x25 encodes minimally.
 func TestConformance_RFC9000_Sec16_NonMinimalDecode(t *testing.T) {
-	v, n := ReadVarint([]byte{0x40, 0x25})
-	if v != 37 || n != 2 {
-		t.Fatalf("ReadVarint(0x4025) = (%d, %d), want (37, 2)", v, n)
-	}
-	if VarintLen(37) != 1 {
-		t.Fatalf("VarintLen(37) = %d, want 1 (minimal)", VarintLen(37))
-	}
+	nonMinimal := []byte{0x40, 0x25} // 37, spelled in the two-byte form
+
+	v, n := ReadVarint(nonMinimal)
+	minimalLen := VarintLen(37)
+
+	require.Equalf(t, uint64(37), v,
+		"ReadVarint(%x) must decode the non-minimal two-byte form to 37; RFC 9000 §16 permits non-minimal encodings, so a decoder that mis-reads them drops legal peer traffic", nonMinimal)
+	require.Equalf(t, 2, n,
+		"ReadVarint(%x) must consume the two bytes its length prefix claims, not the one the minimal form would have used; consuming fewer leaves a stray byte that reparses as a bogus frame", nonMinimal)
+	require.Equal(t, 1, minimalLen,
+		"VarintLen(37) must still report the minimal length 1. A caller whose field requires minimality detects a non-minimal encoding by comparing ReadVarint's n against this, and that check only works while the two disagree here")
 }
 
 // TestConformance_RFC9000_Sec16_IncompleteInput checks the streaming-parser
 // contract: input shorter than the first byte's length prefix returns (0, 0).
 func TestConformance_RFC9000_Sec16_IncompleteInput(t *testing.T) {
-	cases := []struct {
+	for _, tc := range []struct {
 		name string
 		in   []byte
 	}{
@@ -75,12 +82,16 @@ func TestConformance_RFC9000_Sec16_IncompleteInput(t *testing.T) {
 		{"two_byte_prefix_one_byte", []byte{0x40}},
 		{"four_byte_prefix_three_bytes", []byte{0x80, 0x00, 0x40}},
 		{"eight_byte_prefix_two_bytes", []byte{0xc0, 0x00}},
-	}
-	for _, tc := range cases {
+	} {
 		t.Run(tc.name, func(t *testing.T) {
-			if v, n := ReadVarint(tc.in); v != 0 || n != 0 {
-				t.Fatalf("ReadVarint(%x) = (%d, %d), want (0, 0)", tc.in, v, n)
-			}
+			in := tc.in
+
+			v, n := ReadVarint(in)
+
+			require.Equalf(t, 0, n,
+				"ReadVarint(%x) must report 0 bytes consumed when the input is shorter than its length prefix claims; a streaming parser reads that as \"need more bytes\" and retries, and any other count makes it advance over bytes that have not arrived", in)
+			require.Equalf(t, uint64(0), v,
+				"ReadVarint(%x) must pair the incomplete signal with a zero value; a caller that checks only the value would otherwise act on a half-read integer assembled from absent bytes", in)
 		})
 	}
 }
@@ -91,15 +102,20 @@ func TestVarint_ExhaustiveRoundTrip(t *testing.T) {
 	vals := []uint64{0, 1, 62, 63, 64, 65, 16382, 16383, 16384, 16385,
 		(1 << 30) - 2, (1 << 30) - 1, 1 << 30, (1 << 30) + 1, MaxVarint - 1, MaxVarint}
 	for _, v := range vals {
-		var buf [8]byte
-		n := WriteVarint(buf[:], v)
-		if n != VarintLen(v) {
-			t.Fatalf("WriteVarint(%d) wrote %d, VarintLen=%d", v, n, VarintLen(v))
-		}
-		got, m := ReadVarint(buf[:n])
-		if got != v || m != n {
-			t.Fatalf("round-trip %d: ReadVarint = (%d, %d), want (%d, %d)", v, got, m, v, n)
-		}
+		t.Run(strconv.FormatUint(v, 10), func(t *testing.T) {
+			var buf [8]byte
+			wantLen := VarintLen(v)
+
+			n := WriteVarint(buf[:], v)
+			got, m := ReadVarint(buf[:n])
+
+			require.Equalf(t, wantLen, n,
+				"WriteVarint(%d) must write exactly VarintLen(%d) bytes; when the two disagree a caller that reserved space from VarintLen either truncates the value or leaves a gap in the packet", v, v)
+			require.Equalf(t, v, got,
+				"round-trip of %d must recover the value; every QUIC frame length, stream ID and offset passes through this pair, so a value that survives encoding but not decoding is silent wire corruption", v)
+			require.Equalf(t, n, m,
+				"round-trip of %d must consume exactly the bytes the encoder wrote; a mismatch desynchronises the parse of everything after it", v)
+		})
 	}
 }
 
@@ -111,15 +127,16 @@ func TestVarint_ExhaustiveRoundTrip(t *testing.T) {
 // correct, it just silently becomes a real call again and every caller pays for
 // it. The shift-or form it replaced cost 169 and was never inlined.
 func TestReadVarintIsInlinable(t *testing.T) {
-	out, err := exec.Command("go", "build", "-gcflags=-m", ".").CombinedOutput()
+	cmd := exec.Command("go", "build", "-gcflags=-m", ".")
+
+	out, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Skipf("go build unavailable here (%v); cannot check inlining", err)
 	}
-	if !strings.Contains(string(out), "can inline ReadVarint") {
-		t.Fatalf("ReadVarint is no longer inlinable: every QUIC/HTTP-3 varint decode "+
-			"is a function call again. Bring its inline cost back under budget.\n"+
-			"go build -gcflags=-m reported:\n%s", out)
-	}
+
+	require.Containsf(t, string(out), "can inline ReadVarint",
+		"ReadVarint is no longer inlinable: every QUIC/HTTP-3 varint decode is a function call again. "+
+			"Bring its inline cost back under the budget of 80.\ngo build -gcflags=-m reported:\n%s", out)
 }
 
 func BenchmarkWriteVarint_1(b *testing.B) { benchWrite(b, 37) }
