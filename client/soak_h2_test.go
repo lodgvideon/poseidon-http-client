@@ -187,6 +187,14 @@ func runH2Soak(t *testing.T, c *Client, label string) {
 	}
 	// Heap ceiling: after a GC settle, live heap must return near the steady-state
 	// baseline. 2x + 8 MiB tolerates fragmentation without hiding unbounded growth.
+	//
+	// This arm's sensitivity is duration-dependent and the 8 MiB term is why, which
+	// matters when checking that the arm still works. Measured by retaining every
+	// response body forever: at POSEIDON_SOAK_DURATION=15s the leak reached 6.1 ->
+	// 13.9 MiB and PASSED, because the growth had not yet cleared the fixed slack;
+	// at the 60s default the same leak reached 10.2 -> 50.5 MiB and failed. So a
+	// short run cannot exercise this ceiling, and a leak that survives one is not
+	// evidence the check is dead. Verify it at the default duration or longer.
 	if finalHeap > baseHeap*2+(8<<20) {
 		t.Errorf("soak: heap growth suggests a leak: baseline %.1fMiB, final %.1fMiB",
 			float64(baseHeap)/(1<<20), float64(finalHeap)/(1<<20))
