@@ -334,6 +334,37 @@ func (f *ServerFlight) HandleClientHandshake(cryptoData []byte) error {
 	return nil
 }
 
+// handshakeClosePN is the Handshake packet number a closing packet is sent
+// under. StartServerHandshake sends the server's whole Handshake flight as a
+// single packet numbered 0 and nothing else is sent in that space before the
+// connection is accepted, so 1 is the next unused number. Reusing 0 would reach
+// the peer as a duplicate.
+const handshakeClosePN = 1
+
+// closeDatagram seals a CONNECTION_CLOSE reporting err to the client, addressed
+// to dcid (the client's source connection ID), or returns nil when there is
+// nothing to send: an error that is not a connection error to signal, or a
+// handshake that failed before Handshake keys existed.
+//
+// RFC 9001 §4.8: "A TLS alert is converted into a QUIC connection error. The
+// AlertDescription value is added to 0x0100 to produce a QUIC error code from
+// the range reserved for CRYPTO_ERROR", and "The resulting value is sent in a
+// QUIC CONNECTION_CLOSE frame of type 0x1c" — the transport variant, so the
+// frame is built with app=false. closeCodeFor does the mapping, the same one the
+// client role uses from Conn.fail.
+func (f *ServerFlight) closeDatagram(dcid []byte, err error) []byte {
+	code, ok := closeCodeFor(err)
+	if !ok || f.HandshakeSealer == nil {
+		return nil
+	}
+	frames := AppendConnectionClose(nil, false, code, 0, nil)
+	dg, sealErr := SealPacket(nil, f.HandshakeSealer, PacketHandshake, dcid, f.SCID, nil, handshakeClosePN, 4, frames)
+	if sealErr != nil {
+		return nil
+	}
+	return dg
+}
+
 // NewServerConn builds a connected server-role Conn from a completed server
 // handshake (f.Complete must be true). pc is the per-connection datagram
 // transport; clientDCID is the Destination Connection ID from the client's first
