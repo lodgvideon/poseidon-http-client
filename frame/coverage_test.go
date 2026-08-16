@@ -6,6 +6,9 @@ import (
 	"errors"
 	"io"
 	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // errWriter is an io.Writer that always returns an error after writing n bytes.
@@ -42,10 +45,10 @@ func (alwaysErrWriter) Write(_ []byte) (int, error) {
 // the underlying writer fails during header write.
 func TestFramer_writeFrame_ErrorOnHeaderWrite(t *testing.T) {
 	fr := NewFramer(alwaysErrWriter{}, nil)
+
 	err := fr.WritePriority(1, Priority{StreamDep: 1, Weight: 10})
-	if err == nil {
-		t.Fatal("expected error, got nil")
-	}
+
+	require.Error(t, err, "expected error, got nil")
 }
 
 // TestFramer_writeFrame_ErrorOnPayloadWrite exercises the writeFrame path when
@@ -54,10 +57,10 @@ func TestFramer_writeFrame_ErrorOnPayloadWrite(t *testing.T) {
 	// Accept exactly 9 bytes (frame header) then fail.
 	ew := &errWriter{n: FrameHeaderSize}
 	fr := NewFramer(ew, nil)
+
 	err := fr.WritePriority(1, Priority{StreamDep: 1, Weight: 10})
-	if err == nil {
-		t.Fatal("expected error on payload write, got nil")
-	}
+
+	require.Error(t, err, "expected error on payload write, got nil")
 }
 
 // === ReadFrame: unknown frame type ===
@@ -70,13 +73,11 @@ func TestFramer_ReadFrame_UnknownFrameType(t *testing.T) {
 	raw := frameBytes(uint32(len(payload)), FrameType(0xFF), 0, 1, payload)
 	fr := NewFramer(nil, bytes.NewReader(raw))
 	h := &recordingHandler{}
+
 	fh, err := fr.ReadFrame(context.Background(), h)
-	if err != nil {
-		t.Fatalf("expected no error for unknown frame type, got: %v", err)
-	}
-	if fh.Type != FrameType(0xFF) {
-		t.Fatalf("unexpected frame type: %v", fh.Type)
-	}
+
+	require.NoErrorf(t, err, "expected no error for unknown frame type, got: %v", err)
+	require.Equalf(t, FrameType(0xFF), fh.Type, "unexpected frame type: %v", fh.Type)
 }
 
 // TestFramer_ReadFrame_MaxFrameSizeViolation verifies ErrFrameTooLarge when
@@ -87,26 +88,31 @@ func TestFramer_ReadFrame_MaxFrameSizeViolation(t *testing.T) {
 	fr := NewFramer(&buf, &buf)
 	// Write a 100-byte frame without enforcing size on write.
 	fr.maxFrameSize = 16384 // temporarily large for write
-	if err := fr.WriteData(1, false, make([]byte, 100)); err != nil {
-		t.Fatalf("WriteData: %v", err)
-	}
+	require.NoError(t, fr.WriteData(1, false, make([]byte, 100)), "WriteData")
 	fr.SetMaxReadFrameSize(50) // now smaller than the written frame
+
 	_, err := fr.ReadFrame(context.Background(), &recordingHandler{})
-	if !errors.Is(err, ErrFrameTooLarge) {
-		t.Fatalf("err = %v, want ErrFrameTooLarge", err)
-	}
+
+	require.ErrorIsf(t, err, ErrFrameTooLarge, "err = %v, want ErrFrameTooLarge", err)
 }
 
 // TestFramer_ReadFrame_CancelledContext verifies that a pre-cancelled context
 // causes ReadFrame to return immediately.
+//
+// The assertion names context.Canceled rather than "some error". The reader here
+// is empty, so removing the ctx.Err() check entirely still produces a non-nil
+// error — io.EOF — and the earlier `err == nil` form passed under exactly that
+// mutation. Two mechanisms could satisfy it; only one is the property.
 func TestFramer_ReadFrame_CancelledContext(t *testing.T) {
 	fr := NewFramer(nil, bytes.NewReader([]byte{}))
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
+
 	_, err := fr.ReadFrame(ctx, &recordingHandler{})
-	if err == nil {
-		t.Fatal("expected context error, got nil")
-	}
+
+	require.ErrorIsf(t, err, context.Canceled,
+		"err = %v, want context.Canceled — a pre-cancelled ctx must be what stops the read, "+
+			"not the reader running dry", err)
 }
 
 // === dispatchRSTStream error: wrong length ===
@@ -117,10 +123,10 @@ func TestFramer_dispatchRSTStream_TruncatedPayload(t *testing.T) {
 	// RST_STREAM with length=3 instead of required 4.
 	raw := frameBytes(3, FrameRSTStream, 0, 1, []byte{0x00, 0x00, 0x08})
 	fr := NewFramer(nil, bytes.NewReader(raw))
+
 	_, err := fr.ReadFrame(context.Background(), &recordingHandler{})
-	if !errors.Is(err, ErrRSTWrongLength) {
-		t.Fatalf("err = %v, want ErrRSTWrongLength", err)
-	}
+
+	require.ErrorIsf(t, err, ErrRSTWrongLength, "err = %v, want ErrRSTWrongLength", err)
 }
 
 // === CONTINUATION with no open field block (RFC 9113 §6.10) ===
@@ -133,10 +139,10 @@ func TestFramer_dispatchRSTStream_TruncatedPayload(t *testing.T) {
 func TestFramer_Continuation_NoOpenBlock_Rejected(t *testing.T) {
 	raw := frameBytes(2, FrameContinuation, FlagContinuationEndHeaders, 0, []byte{0x82, 0x84})
 	fr := NewFramer(nil, bytes.NewReader(raw))
+
 	_, err := fr.ReadFrame(context.Background(), &recordingHandler{})
-	if !errors.Is(err, ErrUnexpectedContinuation) {
-		t.Fatalf("err = %v, want ErrUnexpectedContinuation", err)
-	}
+
+	require.ErrorIsf(t, err, ErrUnexpectedContinuation, "err = %v, want ErrUnexpectedContinuation", err)
 }
 
 // === WriteDataPadded error paths ===
@@ -147,10 +153,10 @@ func TestFramer_WriteDataPadded_ErrorOnPadLenWrite(t *testing.T) {
 	// Allow only the 9-byte header through.
 	ew := &errWriter{n: FrameHeaderSize}
 	fr := NewFramer(ew, nil)
+
 	err := fr.WriteDataPadded(1, false, []byte("hi"), 4)
-	if err == nil {
-		t.Fatal("expected error when writing pad-length byte, got nil")
-	}
+
+	require.Error(t, err, "expected error when writing pad-length byte, got nil")
 }
 
 // TestFramer_WriteDataPadded_ErrorOnDataWrite verifies the error when writing
@@ -159,10 +165,10 @@ func TestFramer_WriteDataPadded_ErrorOnDataWrite(t *testing.T) {
 	// Allow header (9) + pad-length byte (1) = 10 bytes.
 	ew := &errWriter{n: FrameHeaderSize + 1}
 	fr := NewFramer(ew, nil)
+
 	err := fr.WriteDataPadded(1, false, []byte("hello"), 4)
-	if err == nil {
-		t.Fatal("expected error when writing data, got nil")
-	}
+
+	require.Error(t, err, "expected error when writing data, got nil")
 }
 
 // TestFramer_WriteDataPadded_ErrorOnPaddingWrite verifies error when writing
@@ -171,10 +177,10 @@ func TestFramer_WriteDataPadded_ErrorOnPaddingWrite(t *testing.T) {
 	// Allow header (9) + pad-length (1) + data (2) = 12 bytes.
 	ew := &errWriter{n: FrameHeaderSize + 1 + 2}
 	fr := NewFramer(ew, nil)
+
 	err := fr.WriteDataPadded(1, false, []byte("hi"), 4)
-	if err == nil {
-		t.Fatal("expected error when writing padding, got nil")
-	}
+
+	require.Error(t, err, "expected error when writing padding, got nil")
 }
 
 // === dispatchPriority: wrong length ===
@@ -184,10 +190,10 @@ func TestFramer_WriteDataPadded_ErrorOnPaddingWrite(t *testing.T) {
 func TestFramer_dispatchPriority_TruncatedPayload(t *testing.T) {
 	raw := frameBytes(4, FramePriority, 0, 1, []byte{0x00, 0x00, 0x00, 0x09})
 	fr := NewFramer(nil, bytes.NewReader(raw))
+
 	_, err := fr.ReadFrame(context.Background(), &recordingHandler{})
-	if !errors.Is(err, ErrPriorityWrongLength) {
-		t.Fatalf("err = %v, want ErrPriorityWrongLength", err)
-	}
+
+	require.ErrorIsf(t, err, ErrPriorityWrongLength, "err = %v, want ErrPriorityWrongLength", err)
 }
 
 // === dispatchPing: wrong length ===
@@ -197,10 +203,10 @@ func TestFramer_dispatchPriority_TruncatedPayload(t *testing.T) {
 func TestFramer_dispatchPing_TruncatedPayload(t *testing.T) {
 	raw := frameBytes(4, FramePing, 0, 0, []byte{1, 2, 3, 4})
 	fr := NewFramer(nil, bytes.NewReader(raw))
+
 	_, err := fr.ReadFrame(context.Background(), &recordingHandler{})
-	if !errors.Is(err, ErrPingWrongLength) {
-		t.Fatalf("err = %v, want ErrPingWrongLength", err)
-	}
+
+	require.ErrorIsf(t, err, ErrPingWrongLength, "err = %v, want ErrPingWrongLength", err)
 }
 
 // === dispatchWindowUpdate: wrong length ===
@@ -210,10 +216,10 @@ func TestFramer_dispatchPing_TruncatedPayload(t *testing.T) {
 func TestFramer_dispatchWindowUpdate_TruncatedPayload(t *testing.T) {
 	raw := frameBytes(3, FrameWindowUpdate, 0, 1, []byte{0x00, 0x00, 0x04})
 	fr := NewFramer(nil, bytes.NewReader(raw))
+
 	_, err := fr.ReadFrame(context.Background(), &recordingHandler{})
-	if !errors.Is(err, ErrWindowWrongLength) {
-		t.Fatalf("err = %v, want ErrWindowWrongLength", err)
-	}
+
+	require.ErrorIsf(t, err, ErrWindowWrongLength, "err = %v, want ErrWindowWrongLength", err)
 }
 
 // === dispatchSettings error paths ===
@@ -223,10 +229,10 @@ func TestFramer_dispatchWindowUpdate_TruncatedPayload(t *testing.T) {
 func TestFramer_dispatchSettings_OddSizedPayload(t *testing.T) {
 	raw := frameBytes(5, FrameSettings, 0, 0, []byte{0x00, 0x03, 0x00, 0x00, 0x00})
 	fr := NewFramer(nil, bytes.NewReader(raw))
+
 	_, err := fr.ReadFrame(context.Background(), &recordingHandler{})
-	if !errors.Is(err, ErrSettingsLength) {
-		t.Fatalf("err = %v, want ErrSettingsLength", err)
-	}
+
+	require.ErrorIsf(t, err, ErrSettingsLength, "err = %v, want ErrSettingsLength", err)
 }
 
 // TestFramer_dispatchSettings_AckWithNonEmptyPayload sends SETTINGS ACK with
@@ -234,14 +240,14 @@ func TestFramer_dispatchSettings_OddSizedPayload(t *testing.T) {
 func TestFramer_dispatchSettings_AckWithNonEmptyPayload(t *testing.T) {
 	raw := frameBytes(6, FrameSettings, FlagSettingsAck, 0, []byte{0x00, 0x03, 0x00, 0x00, 0x00, 0x64})
 	fr := NewFramer(nil, bytes.NewReader(raw))
+
 	_, err := fr.ReadFrame(context.Background(), &recordingHandler{})
-	if !errors.Is(err, ErrSettingsAck) {
-		t.Fatalf("err = %v, want ErrSettingsAck", err)
-	}
+
+	require.ErrorIsf(t, err, ErrSettingsAck, "err = %v, want ErrSettingsAck", err)
 }
 
-// TestFramer_dispatchSettings_TooManyPairs sends SETTINGS with more than 16
-// pairs and expects ErrSettingsLength.
+// TestFramer_dispatchSettings_ManyPairsAccepted sends SETTINGS with more than 16
+// pairs and expects it to be accepted, not rejected.
 func TestFramer_dispatchSettings_ManyPairsAccepted(t *testing.T) {
 	// 17 pairs × 6 bytes = 102 bytes. RFC 7540 §6.5 sets no upper bound on the
 	// parameter count, so a 17-parameter frame is legal and must NOT be rejected.
@@ -251,9 +257,10 @@ func TestFramer_dispatchSettings_ManyPairsAccepted(t *testing.T) {
 	raw := frameBytes(uint32(len(payload)), FrameSettings, 0, 0, payload)
 	fr := NewFramer(nil, bytes.NewReader(raw))
 	fr.SetMaxReadFrameSize(16384)
-	if _, err := fr.ReadFrame(context.Background(), &recordingHandler{}); err != nil {
-		t.Fatalf("err = %v, want nil — a 17-parameter SETTINGS frame is legal", err)
-	}
+
+	_, err := fr.ReadFrame(context.Background(), &recordingHandler{})
+
+	require.NoErrorf(t, err, "err = %v, want nil — a 17-parameter SETTINGS frame is legal", err)
 }
 
 // === WritePing error path ===
@@ -262,10 +269,10 @@ func TestFramer_dispatchSettings_ManyPairsAccepted(t *testing.T) {
 // underlying writer surfaces correctly.
 func TestFramer_WritePing_ErrorOnWrite(t *testing.T) {
 	fr := NewFramer(alwaysErrWriter{}, nil)
+
 	err := fr.WritePing(false, [8]byte{1, 2, 3, 4, 5, 6, 7, 8})
-	if err == nil {
-		t.Fatal("expected error, got nil")
-	}
+
+	require.Error(t, err, "expected error, got nil")
 }
 
 // === WriteGoAway error paths ===
@@ -274,10 +281,10 @@ func TestFramer_WritePing_ErrorOnWrite(t *testing.T) {
 // error when the header write fails.
 func TestFramer_WriteGoAway_ErrorOnHeaderWrite(t *testing.T) {
 	fr := NewFramer(alwaysErrWriter{}, nil)
+
 	err := fr.WriteGoAway(1, ErrCodeNoError, nil)
-	if err == nil {
-		t.Fatal("expected error, got nil")
-	}
+
+	require.Error(t, err, "expected error, got nil")
 }
 
 // TestFramer_WriteGoAway_ErrorOnFixedPayloadWrite verifies WriteGoAway returns
@@ -285,10 +292,10 @@ func TestFramer_WriteGoAway_ErrorOnHeaderWrite(t *testing.T) {
 func TestFramer_WriteGoAway_ErrorOnFixedPayloadWrite(t *testing.T) {
 	ew := &errWriter{n: FrameHeaderSize}
 	fr := NewFramer(ew, nil)
+
 	err := fr.WriteGoAway(1, ErrCodeNoError, nil)
-	if err == nil {
-		t.Fatal("expected error writing goaway fixed payload, got nil")
-	}
+
+	require.Error(t, err, "expected error writing goaway fixed payload, got nil")
 }
 
 // TestFramer_WriteGoAway_ErrorOnDebugWrite verifies WriteGoAway returns an
@@ -297,10 +304,10 @@ func TestFramer_WriteGoAway_ErrorOnDebugWrite(t *testing.T) {
 	// Allow header (9) + fixed 8 bytes = 17 bytes.
 	ew := &errWriter{n: FrameHeaderSize + 8}
 	fr := NewFramer(ew, nil)
+
 	err := fr.WriteGoAway(1, ErrCodeNoError, []byte("debug info"))
-	if err == nil {
-		t.Fatal("expected error writing goaway debug data, got nil")
-	}
+
+	require.Error(t, err, "expected error writing goaway debug data, got nil")
 }
 
 // TestFramer_WriteGoAway_TooLarge verifies WriteGoAway returns ErrFrameTooLarge
@@ -309,10 +316,10 @@ func TestFramer_WriteGoAway_TooLarge(t *testing.T) {
 	var buf bytes.Buffer
 	fr := NewFramer(&buf, nil)
 	fr.SetMaxReadFrameSize(10) // too small for 8-byte fixed + any debug
+
 	err := fr.WriteGoAway(1, ErrCodeNoError, []byte("debug"))
-	if !errors.Is(err, ErrFrameTooLarge) {
-		t.Fatalf("err = %v, want ErrFrameTooLarge", err)
-	}
+
+	require.ErrorIsf(t, err, ErrFrameTooLarge, "err = %v, want ErrFrameTooLarge", err)
 }
 
 // === dispatchGoAway error: truncated ===
@@ -322,10 +329,10 @@ func TestFramer_WriteGoAway_TooLarge(t *testing.T) {
 func TestFramer_dispatchGoAway_TruncatedPayload(t *testing.T) {
 	raw := frameBytes(4, FrameGoAway, 0, 0, []byte{0x00, 0x00, 0x00, 0x07})
 	fr := NewFramer(nil, bytes.NewReader(raw))
+
 	_, err := fr.ReadFrame(context.Background(), &recordingHandler{})
-	if !errors.Is(err, ErrShortRead) {
-		t.Fatalf("err = %v, want ErrShortRead", err)
-	}
+
+	require.ErrorIsf(t, err, ErrShortRead, "err = %v, want ErrShortRead", err)
 }
 
 // === dispatchData: padding error ===
@@ -337,10 +344,10 @@ func TestFramer_dispatchData_ErrorInvalidPadding(t *testing.T) {
 	payload := []byte{0x0A, 0x01} // padLen=10, only 1 byte remaining
 	raw := frameBytes(uint32(len(payload)), FrameData, FlagDataPadded, 1, payload)
 	fr := NewFramer(nil, bytes.NewReader(raw))
+
 	_, err := fr.ReadFrame(context.Background(), &recordingHandler{})
-	if err == nil {
-		t.Fatal("expected padding error, got nil")
-	}
+
+	require.Error(t, err, "expected padding error, got nil")
 }
 
 // === WritePriority error path ===
@@ -349,10 +356,10 @@ func TestFramer_dispatchData_ErrorInvalidPadding(t *testing.T) {
 // errors from the underlying writer.
 func TestFramer_WritePriority_ErrorOnWrite(t *testing.T) {
 	fr := NewFramer(alwaysErrWriter{}, nil)
+
 	err := fr.WritePriority(1, Priority{StreamDep: 1, Weight: 10})
-	if err == nil {
-		t.Fatal("expected error, got nil")
-	}
+
+	require.Error(t, err, "expected error, got nil")
 }
 
 // === WriteContinuation error path ===
@@ -361,10 +368,10 @@ func TestFramer_WritePriority_ErrorOnWrite(t *testing.T) {
 // propagates write errors.
 func TestFramer_WriteContinuation_ErrorOnWrite(t *testing.T) {
 	fr := NewFramer(alwaysErrWriter{}, nil)
+
 	err := fr.WriteContinuation(1, true, []byte{0x82})
-	if err == nil {
-		t.Fatal("expected error, got nil")
-	}
+
+	require.Error(t, err, "expected error, got nil")
 }
 
 // === dispatchHeaders error paths ===
@@ -374,10 +381,10 @@ func TestFramer_WriteContinuation_ErrorOnWrite(t *testing.T) {
 func TestFramer_dispatchHeaders_ErrorStreamID0(t *testing.T) {
 	raw := frameBytes(1, FrameHeaders, 0, 0, []byte{0x82})
 	fr := NewFramer(nil, bytes.NewReader(raw))
+
 	_, err := fr.ReadFrame(context.Background(), &recordingHandler{})
-	if !errors.Is(err, ErrInvalidStreamID) {
-		t.Fatalf("err = %v, want ErrInvalidStreamID", err)
-	}
+
+	require.ErrorIsf(t, err, ErrInvalidStreamID, "err = %v, want ErrInvalidStreamID", err)
 }
 
 // TestFramer_dispatchHeaders_PriorityTruncated sends a HEADERS frame with
@@ -387,10 +394,10 @@ func TestFramer_dispatchHeaders_PriorityTruncated(t *testing.T) {
 	payload := []byte{0x00, 0x00, 0x00, 0x09}
 	raw := frameBytes(uint32(len(payload)), FrameHeaders, FlagHeadersPriority, 1, payload)
 	fr := NewFramer(nil, bytes.NewReader(raw))
+
 	_, err := fr.ReadFrame(context.Background(), &recordingHandler{})
-	if !errors.Is(err, ErrShortRead) {
-		t.Fatalf("err = %v, want ErrShortRead", err)
-	}
+
+	require.ErrorIsf(t, err, ErrShortRead, "err = %v, want ErrShortRead", err)
 }
 
 // TestFramer_dispatchHeaders_InvalidPadding sends a HEADERS frame with a pad
@@ -400,10 +407,10 @@ func TestFramer_dispatchHeaders_InvalidPadding(t *testing.T) {
 	payload := []byte{0x0A, 0x82}
 	raw := frameBytes(uint32(len(payload)), FrameHeaders, FlagHeadersPadded, 1, payload)
 	fr := NewFramer(nil, bytes.NewReader(raw))
+
 	_, err := fr.ReadFrame(context.Background(), &recordingHandler{})
-	if err == nil {
-		t.Fatal("expected padding error, got nil")
-	}
+
+	require.Error(t, err, "expected padding error, got nil")
 }
 
 // === WriteHeaders error paths ===
@@ -413,15 +420,15 @@ func TestFramer_dispatchHeaders_InvalidPadding(t *testing.T) {
 func TestFramer_WriteHeaders_ErrorOnPadLenWrite(t *testing.T) {
 	ew := &errWriter{n: FrameHeaderSize}
 	fr := NewFramer(ew, nil)
+
 	err := fr.WriteHeaders(WriteHeadersParams{
 		StreamID:      1,
 		BlockFragment: []byte{0x82},
 		PadLength:     4,
 		EndHeaders:    true,
 	})
-	if err == nil {
-		t.Fatal("expected error on pad-length write, got nil")
-	}
+
+	require.Error(t, err, "expected error on pad-length write, got nil")
 }
 
 // TestFramer_WriteHeaders_ErrorOnPriorityWrite verifies that WriteHeaders
@@ -429,15 +436,15 @@ func TestFramer_WriteHeaders_ErrorOnPadLenWrite(t *testing.T) {
 func TestFramer_WriteHeaders_ErrorOnPriorityWrite(t *testing.T) {
 	ew := &errWriter{n: FrameHeaderSize}
 	fr := NewFramer(ew, nil)
+
 	err := fr.WriteHeaders(WriteHeadersParams{
 		StreamID:      1,
 		BlockFragment: []byte{0x82},
 		Priority:      &Priority{StreamDep: 3, Weight: 10},
 		EndHeaders:    true,
 	})
-	if err == nil {
-		t.Fatal("expected error on priority write, got nil")
-	}
+
+	require.Error(t, err, "expected error on priority write, got nil")
 }
 
 // TestFramer_WriteHeaders_ErrorOnBlockWrite verifies that WriteHeaders returns
@@ -446,14 +453,14 @@ func TestFramer_WriteHeaders_ErrorOnBlockWrite(t *testing.T) {
 	// Allow header (9) only; block fragment write fails.
 	ew := &errWriter{n: FrameHeaderSize}
 	fr := NewFramer(ew, nil)
+
 	err := fr.WriteHeaders(WriteHeadersParams{
 		StreamID:      1,
 		BlockFragment: []byte{0x82},
 		EndHeaders:    true,
 	})
-	if err == nil {
-		t.Fatal("expected error on block write, got nil")
-	}
+
+	require.Error(t, err, "expected error on block write, got nil")
 }
 
 // TestFramer_WriteHeaders_ErrorOnPaddingWrite verifies that WriteHeaders
@@ -462,15 +469,15 @@ func TestFramer_WriteHeaders_ErrorOnPaddingWrite(t *testing.T) {
 	// Allow header (9) + pad-length byte (1) + block (1) = 11 bytes.
 	ew := &errWriter{n: FrameHeaderSize + 1 + 1}
 	fr := NewFramer(ew, nil)
+
 	err := fr.WriteHeaders(WriteHeadersParams{
 		StreamID:      1,
 		BlockFragment: []byte{0x82},
 		PadLength:     4,
 		EndHeaders:    true,
 	})
-	if err == nil {
-		t.Fatal("expected error on padding write, got nil")
-	}
+
+	require.Error(t, err, "expected error on padding write, got nil")
 }
 
 // === WritePushPromise error paths ===
@@ -480,17 +487,15 @@ func TestFramer_WriteHeaders_ErrorOnPaddingWrite(t *testing.T) {
 func TestFramer_WritePushPromise_WithPadding(t *testing.T) {
 	var buf bytes.Buffer
 	fr := NewFramer(&buf, &buf)
-	err := fr.WritePushPromise(1, 4, []byte{0x82}, true, 3)
-	if err != nil {
-		t.Fatalf("WritePushPromise with padding: %v", err)
-	}
+	require.NoError(t, fr.WritePushPromise(1, 4, []byte{0x82}, true, 3), "WritePushPromise with padding")
 	h := &recordingHandler{}
-	if _, err := fr.ReadFrame(context.Background(), h); err != nil {
-		t.Fatalf("ReadFrame: %v", err)
-	}
-	if h.promID != 4 || len(h.hb) != 1 || h.hb[0] != 0x82 || h.promPad != 3 {
-		t.Fatalf("got promID=%d hb=%x pad=%d", h.promID, h.hb, h.promPad)
-	}
+
+	_, err := fr.ReadFrame(context.Background(), h)
+
+	require.NoError(t, err, "ReadFrame")
+	assert.EqualValuesf(t, 4, h.promID, "got promID=%d hb=%x pad=%d", h.promID, h.hb, h.promPad)
+	assert.Equalf(t, []byte{0x82}, h.hb, "got promID=%d hb=%x pad=%d", h.promID, h.hb, h.promPad)
+	assert.EqualValuesf(t, 3, h.promPad, "got promID=%d hb=%x pad=%d", h.promID, h.hb, h.promPad)
 }
 
 // TestFramer_WritePushPromise_TooLarge verifies that WritePushPromise rejects
@@ -499,10 +504,10 @@ func TestFramer_WritePushPromise_TooLarge(t *testing.T) {
 	var buf bytes.Buffer
 	fr := NewFramer(&buf, nil)
 	fr.SetMaxReadFrameSize(10)
+
 	err := fr.WritePushPromise(1, 4, make([]byte, 100), true, 0)
-	if !errors.Is(err, ErrFrameTooLarge) {
-		t.Fatalf("err = %v, want ErrFrameTooLarge", err)
-	}
+
+	require.ErrorIsf(t, err, ErrFrameTooLarge, "err = %v, want ErrFrameTooLarge", err)
 }
 
 // TestFramer_WritePushPromise_ErrorOnPadLenWrite tests error when writing pad-
@@ -510,10 +515,10 @@ func TestFramer_WritePushPromise_TooLarge(t *testing.T) {
 func TestFramer_WritePushPromise_ErrorOnPadLenWrite(t *testing.T) {
 	ew := &errWriter{n: FrameHeaderSize}
 	fr := NewFramer(ew, nil)
+
 	err := fr.WritePushPromise(1, 4, []byte{0x82}, true, 3)
-	if err == nil {
-		t.Fatal("expected error on pad-length write, got nil")
-	}
+
+	require.Error(t, err, "expected error on pad-length write, got nil")
 }
 
 // TestFramer_WritePushPromise_ErrorOnPromisedIDWrite tests error when writing
@@ -522,10 +527,10 @@ func TestFramer_WritePushPromise_ErrorOnPromisedIDWrite(t *testing.T) {
 	// No padding: allow header (9) only; promised-ID write fails.
 	ew := &errWriter{n: FrameHeaderSize}
 	fr := NewFramer(ew, nil)
+
 	err := fr.WritePushPromise(1, 4, []byte{0x82}, true, 0)
-	if err == nil {
-		t.Fatal("expected error on promised-ID write, got nil")
-	}
+
+	require.Error(t, err, "expected error on promised-ID write, got nil")
 }
 
 // TestFramer_WritePushPromise_ErrorOnBlockWrite tests error when writing the
@@ -534,10 +539,10 @@ func TestFramer_WritePushPromise_ErrorOnBlockWrite(t *testing.T) {
 	// Allow header (9) + promised-ID (4) = 13 bytes.
 	ew := &errWriter{n: FrameHeaderSize + 4}
 	fr := NewFramer(ew, nil)
+
 	err := fr.WritePushPromise(1, 4, []byte{0x82}, true, 0)
-	if err == nil {
-		t.Fatal("expected error on block write, got nil")
-	}
+
+	require.Error(t, err, "expected error on block write, got nil")
 }
 
 // TestFramer_WritePushPromise_ErrorOnPaddingWrite tests error when writing the
@@ -546,10 +551,10 @@ func TestFramer_WritePushPromise_ErrorOnPaddingWrite(t *testing.T) {
 	// With padding: header (9) + pad-len (1) + promised-ID (4) + block (1) = 15.
 	ew := &errWriter{n: FrameHeaderSize + 1 + 4 + 1}
 	fr := NewFramer(ew, nil)
+
 	err := fr.WritePushPromise(1, 4, []byte{0x82}, true, 3)
-	if err == nil {
-		t.Fatal("expected error on padding write, got nil")
-	}
+
+	require.Error(t, err, "expected error on padding write, got nil")
 }
 
 // === dispatchPushPromise error paths ===
@@ -559,10 +564,10 @@ func TestFramer_WritePushPromise_ErrorOnPaddingWrite(t *testing.T) {
 func TestFramer_dispatchPushPromise_TruncatedPayload(t *testing.T) {
 	raw := frameBytes(3, FramePushPromise, FlagPushPromiseEndHeaders, 1, []byte{0x00, 0x00, 0x04})
 	fr := NewFramer(nil, bytes.NewReader(raw))
+
 	_, err := fr.ReadFrame(context.Background(), &recordingHandler{})
-	if !errors.Is(err, ErrShortRead) {
-		t.Fatalf("err = %v, want ErrShortRead", err)
-	}
+
+	require.ErrorIsf(t, err, ErrShortRead, "err = %v, want ErrShortRead", err)
 }
 
 // TestFramer_dispatchPushPromise_InvalidPadding sends a padded PUSH_PROMISE
@@ -573,10 +578,10 @@ func TestFramer_dispatchPushPromise_InvalidPadding(t *testing.T) {
 	raw := frameBytes(uint32(len(payload)), FramePushPromise,
 		FlagPushPromisePadded|FlagPushPromiseEndHeaders, 1, payload)
 	fr := NewFramer(nil, bytes.NewReader(raw))
+
 	_, err := fr.ReadFrame(context.Background(), &recordingHandler{})
-	if err == nil {
-		t.Fatal("expected padding error, got nil")
-	}
+
+	require.Error(t, err, "expected padding error, got nil")
 }
 
 // === WriteSettings error path ===
@@ -587,10 +592,10 @@ func TestFramer_WriteSettings_ErrorOnWrite(t *testing.T) {
 	fr := NewFramer(alwaysErrWriter{}, nil)
 	s := SettingsParams{N: 1}
 	s.Pairs[0] = SettingPair{ID: SettingMaxConcurrentStreams, Value: 100}
+
 	err := fr.WriteSettings(s)
-	if err == nil {
-		t.Fatal("expected error, got nil")
-	}
+
+	require.Error(t, err, "expected error, got nil")
 }
 
 // === ReadFrame: no reader ===
@@ -599,10 +604,10 @@ func TestFramer_WriteSettings_ErrorOnWrite(t *testing.T) {
 // Framer has no reader configured.
 func TestFramer_ReadFrame_NoReader(t *testing.T) {
 	fr := NewFramer(&bytes.Buffer{}, nil)
+
 	_, err := fr.ReadFrame(context.Background(), &recordingHandler{})
-	if err == nil {
-		t.Fatal("expected error for nil reader, got nil")
-	}
+
+	require.Error(t, err, "expected error for nil reader, got nil")
 }
 
 // === ReadFrame: EOF on header read ===
@@ -611,10 +616,11 @@ func TestFramer_ReadFrame_NoReader(t *testing.T) {
 // reader is empty.
 func TestFramer_ReadFrame_EOFOnHeader(t *testing.T) {
 	fr := NewFramer(nil, bytes.NewReader([]byte{}))
+
 	_, err := fr.ReadFrame(context.Background(), &recordingHandler{})
-	if !errors.Is(err, io.EOF) && !errors.Is(err, io.ErrUnexpectedEOF) {
-		t.Fatalf("err = %v, want io.EOF or io.ErrUnexpectedEOF", err)
-	}
+
+	require.Truef(t, errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF),
+		"err = %v, want io.EOF or io.ErrUnexpectedEOF", err)
 }
 
 // TestFramer_dispatchWindowUpdate_ZeroIncrement sends a WINDOW_UPDATE with
@@ -624,8 +630,8 @@ func TestFramer_dispatchWindowUpdate_ZeroIncrement(t *testing.T) {
 	payload := []byte{0x00, 0x00, 0x00, 0x00}
 	raw := frameBytes(4, FrameWindowUpdate, 0, 1, payload)
 	fr := NewFramer(nil, bytes.NewReader(raw))
+
 	_, err := fr.ReadFrame(context.Background(), &recordingHandler{})
-	if !errors.Is(err, ErrZeroIncrement) {
-		t.Fatalf("err = %v, want ErrZeroIncrement", err)
-	}
+
+	require.ErrorIsf(t, err, ErrZeroIncrement, "err = %v, want ErrZeroIncrement", err)
 }
