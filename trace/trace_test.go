@@ -5,6 +5,9 @@ import (
 	"strings"
 	"sync"
 	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // render runs one FrameInfo through a TextTracer and returns the line with the
@@ -12,17 +15,17 @@ import (
 // about what time the test ran.
 func render(t *testing.T, info FrameInfo) string {
 	t.Helper()
+
 	var buf bytes.Buffer
 	tr := NewTextTracer(&buf)
+
 	tr.TraceFrame(info)
-	if err := tr.Close(); err != nil {
-		t.Fatalf("Close: %v", err)
-	}
+	err := tr.Close()
+
+	require.NoError(t, err, "Close is what flushes the buffered line; without it there is nothing to assert on")
 	line := strings.TrimSuffix(buf.String(), "\n")
 	_, rest, ok := strings.Cut(line, " ")
-	if !ok {
-		t.Fatalf("line %q has no timestamp prefix", line)
-	}
+	require.Truef(t, ok, "line %q has no timestamp prefix", line)
 	return rest
 }
 
@@ -100,9 +103,12 @@ func TestTextTracer_RendersFrames(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := render(t, tc.info); got != tc.want {
-				t.Errorf("\n got %q\nwant %q", got, tc.want)
-			}
+			info := tc.info
+
+			got := render(t, info)
+
+			assert.Equalf(t, tc.want, got,
+				"the rendered line is the whole contract: it is what somebody pastes into an issue, and a field the renderer silently omits is a field nobody knows to ask about")
 		})
 	}
 }
@@ -117,27 +123,39 @@ func TestTextTracer_RendersSettingsParams(t *testing.T) {
 		Proto: ProtoH2, Dir: DirIn, TypeName: "SETTINGS", Length: 18,
 		Detail: DetailParams, Params: &p,
 	})
-	want := "h2 <- SETTINGS stream=0 len=18 params=INITIAL_WINDOW_SIZE=1048576,MAX_FRAME_SIZE=16384,0xff=7"
-	if got != want {
-		t.Errorf("\n got %q\nwant %q", got, want)
-	}
+
+	assert.Equal(t,
+		"h2 <- SETTINGS stream=0 len=18 params=INITIAL_WINDOW_SIZE=1048576,MAX_FRAME_SIZE=16384,0xff=7",
+		got,
+		"an identifier the emitter does not recognise must still reach the log as its number; dropping it hides exactly the setting whose meaning is in dispute")
 }
 
 func TestParams_AddStopsAtCapacity(t *testing.T) {
 	var p Params
+
 	for i := range MaxParams + 5 {
 		p.Add(uint64(i), "", uint64(i))
 	}
-	if got := len(p.All()); got != MaxParams {
-		t.Fatalf("held %d params, want the cap of %d", got, MaxParams)
+
+	require.Lenf(t, p.All(), MaxParams,
+		"held %d params, want the cap of %d: a debug path must not panic on a peer that sends more identifiers than this implementation knows about",
+		len(p.All()), MaxParams)
+	assert.Equalf(t, uint64(MaxParams-1), p.P[MaxParams-1].ID,
+		"last param = %+v, want the %dth added: the overflow must be dropped, not wrapped over a parameter already held",
+		p.P[MaxParams-1], MaxParams)
+}
+
+func TestParams_ResetEmpties(t *testing.T) {
+	var p Params
+	for i := range MaxParams {
+		p.Add(uint64(i), "", uint64(i))
 	}
-	if p.P[MaxParams-1].ID != MaxParams-1 {
-		t.Errorf("last param = %+v, want the %dth added, not an overwrite", p.P[MaxParams-1], MaxParams)
-	}
+
 	p.Reset()
-	if len(p.All()) != 0 {
-		t.Errorf("Reset left %d params", len(p.All()))
-	}
+
+	assert.Emptyf(t, p.All(),
+		"Reset left %d params; the emitter reuses one Params for every settings frame, so a stale tail would be attributed to the next frame",
+		len(p.All()))
 }
 
 // TestTextTracer_DropsRatherThanBlocks builds the tracer without its flusher so
@@ -154,46 +172,56 @@ func TestTextTracer_DropsRatherThanBlocks(t *testing.T) {
 		finished: make(chan struct{}),
 	}
 	info := FrameInfo{Proto: ProtoH2, Dir: DirOut, TypeName: "DATA", StreamID: 1, Length: 1024}
+
 	for range 40_000 {
 		tr.TraceFrame(info)
 	}
-	if tr.dropped.Load() == 0 {
-		t.Fatalf("buffered %d bytes without dropping; cap is %d", len(tr.buf), textMaxBuffered)
-	}
-	if err := tr.Flush(); err != nil {
-		t.Fatalf("Flush: %v", err)
-	}
-	if !strings.Contains(buf.String(), "frames dropped (tracer backlog)") {
-		t.Error("flushed output does not report the dropped frames")
-	}
+	// Both are read before Flush: drain swaps the counter to zero and hands the
+	// filled buffer away, so after it neither value says anything.
+	dropped, buffered := tr.dropped.Load(), len(tr.buf)
+	flushErr := tr.Flush()
+
+	require.NotZerof(t, dropped,
+		"buffered %d bytes without dropping; the cap is %d, and a tracer that waits on its writer instead stalls the connection it is observing",
+		buffered, textMaxBuffered)
+	require.NoError(t, flushErr, "Flush writes what the tracer buffered")
+	assert.Containsf(t, buf.String(), "frames dropped (tracer backlog)",
+		"the flushed output does not report the %d dropped frames; a gap in a debug log that does not say it is a gap is worse than the missing lines",
+		dropped)
 }
 
 func TestTextTracer_CloseIsIdempotent(t *testing.T) {
 	var buf bytes.Buffer
 	tr := NewTextTracer(&buf)
 	tr.TraceFrame(FrameInfo{Proto: ProtoH2, Dir: DirOut, TypeName: "PING", Length: 8})
+
+	var errs []error
 	for range 3 {
-		if err := tr.Close(); err != nil {
-			t.Fatalf("Close: %v", err)
-		}
+		errs = append(errs, tr.Close())
 	}
-	if n := strings.Count(buf.String(), "PING"); n != 1 {
-		t.Errorf("PING appears %d times after three Closes, want 1", n)
+
+	for i, err := range errs {
+		require.NoErrorf(t, err, "Close #%d of 3", i+1)
 	}
+	assert.Equalf(t, 1, strings.Count(buf.String(), "PING"),
+		"PING appears %d times after three Closes, want 1: a second Close must neither re-emit the batch nor close an already-closed channel",
+		strings.Count(buf.String(), "PING"))
 }
 
 // TestTextTracer_ConcurrentEmit is the -race half of "one Tracer is shared by
 // every connection a client owns, and a connection's reader and writer are
 // different goroutines".
 func TestTextTracer_ConcurrentEmit(t *testing.T) {
+	const goroutines, perGoroutine = 8, 200
 	var buf bytes.Buffer
 	tr := NewTextTracer(&buf)
+
 	var wg sync.WaitGroup
-	for g := range 8 {
+	for g := range goroutines {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			for i := range 200 {
+			for i := range perGoroutine {
 				tr.TraceFrame(FrameInfo{
 					Proto: ProtoH2, Dir: DirOut, TypeName: "DATA",
 					StreamID: uint64(g*1000 + i), Length: 8,
@@ -202,33 +230,86 @@ func TestTextTracer_ConcurrentEmit(t *testing.T) {
 		}()
 	}
 	wg.Wait()
-	if err := tr.Close(); err != nil {
-		t.Fatalf("Close: %v", err)
+	closeErr := tr.Close()
+
+	require.NoError(t, closeErr, "Close flushes the final batch")
+	assert.Equalf(t, goroutines*perGoroutine, strings.Count(buf.String(), "\n"),
+		"wrote %d lines, want %d: every connection sharing this tracer appends under the same lock, and a lost line is a frame nobody can prove crossed the wire",
+		strings.Count(buf.String(), "\n"), goroutines*perGoroutine)
+}
+
+func TestDirection_String(t *testing.T) {
+	tests := []struct {
+		name string
+		dir  Direction
+		want string
+	}{
+		{name: "inbound", dir: DirIn, want: "<-"},
+		{name: "outbound", dir: DirOut, want: "->"},
 	}
-	if n := strings.Count(buf.String(), "\n"); n != 8*200 {
-		t.Errorf("wrote %d lines, want %d", n, 8*200)
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := tc.dir
+
+			got := dir.String()
+
+			assert.Equalf(t, tc.want, got,
+				"Direction(%d) renders as %q; the arrow is the only thing in the line that says which endpoint sent the frame",
+				uint8(dir), got)
+		})
 	}
 }
 
-func TestDirectionAndProtocol_String(t *testing.T) {
-	if DirIn.String() != "<-" || DirOut.String() != "->" {
-		t.Errorf("directions render as %q/%q", DirIn, DirOut)
+func TestProtocol_String(t *testing.T) {
+	tests := []struct {
+		name  string
+		proto Protocol
+		want  string
+	}{
+		{name: "h1", proto: ProtoH1, want: "h1"},
+		{name: "h2", proto: ProtoH2, want: "h2"},
+		{name: "h3", proto: ProtoH3, want: "h3"},
+		{name: "quic", proto: ProtoQUIC, want: "quic"},
+		{name: "undefined value", proto: Protocol(9), want: "?"},
 	}
-	for p, want := range map[Protocol]string{
-		ProtoH1: "h1", ProtoH2: "h2", ProtoH3: "h3", ProtoQUIC: "quic", Protocol(9): "?",
-	} {
-		if got := p.String(); got != want {
-			t.Errorf("Protocol(%d).String() = %q, want %q", uint8(p), got, want)
-		}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			proto := tc.proto
+
+			got := proto.String()
+
+			assert.Equalf(t, tc.want, got,
+				"Protocol(%d).String() = %q, want %q: one Tracer serves a client speaking several protocols at once, so the tag is what separates their frames in one log",
+				uint8(proto), got, tc.want)
+		})
 	}
 }
 
 func TestDetail_Has(t *testing.T) {
-	d := DetailErrCode | DetailParams
-	if !d.Has(DetailErrCode) || !d.Has(DetailErrCode|DetailParams) {
-		t.Error("Has reports a set bit as unset")
+	const have = DetailErrCode | DetailParams
+
+	tests := []struct {
+		name string
+		want Detail
+		ok   bool
+	}{
+		{name: "one bit that is set", want: DetailErrCode, ok: true},
+		{name: "both bits that are set", want: DetailErrCode | DetailParams, ok: true},
+		{name: "one bit that is unset", want: DetailIncrement, ok: false},
+		{name: "one set bit and one unset bit", want: DetailErrCode | DetailIncrement, ok: false},
 	}
-	if d.Has(DetailIncrement) || d.Has(DetailErrCode|DetailIncrement) {
-		t.Error("Has reports an unset bit as set")
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			d := Detail(have)
+
+			got := d.Has(tc.want)
+
+			assert.Equalf(t, tc.ok, got,
+				"Detail(%b).Has(%b) = %v: Has means every bit, not any bit, and an emitter that filled one of two fields must not read as having filled both",
+				d, tc.want, got)
+		})
 	}
 }
