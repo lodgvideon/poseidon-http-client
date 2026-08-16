@@ -270,6 +270,56 @@ specific section behavior.
   `TestHandler_*`, `TestApplyPeerSettings_*`, `TestOnGoAway_*`,
   `TestOnPing_*`.
 
+### Test structure and assertions (mandatory for new and edited tests)
+
+**Arrange–Act–Assert.** Every test is three visible blocks in that order: build the
+fixture, perform the one action under test, assert the outcome. Separate them with a
+blank line. A test that interleaves acting and asserting is describing a scenario, not
+a property — split it into several tests or a table.
+
+**Assert with `testify`, not hand-rolled comparisons.** Do not write
+`if got != want { t.Fatalf(...) }`. Use:
+
+- `require.*` where the test cannot meaningfully continue — a constructor that must
+  succeed, a non-nil pointer about to be dereferenced. It aborts, like `t.Fatalf`.
+- `assert.*` where it can — independent field checks, so one run reports every
+  mismatch instead of only the first.
+
+**The mapping is not cosmetic: `t.Fatalf` → `require`, `t.Errorf` → `assert`.**
+Swapping a `t.Fatalf` for `assert` lets the test run on with invalid state and turns a
+clean failure into a nil-dereference panic several lines later.
+
+**Keep the failure message.** This suite's messages explain *why* the property matters
+and what breaks without it — that is deliberate and worth more than the assertion
+syntax. `testify`'s defaults print only expected-vs-actual, so carry the explanation
+over as the `msgAndArgs` argument rather than dropping it:
+
+```go
+require.NoError(t, err, "Establish against the listener")
+assert.Truef(t, errors.Is(err, ErrInvalidOptions),
+    "NewClient error = %v; a caller classifying this cannot tell it from a transport failure", err)
+```
+
+**Two places `testify` must not go:**
+
+- inside an `AllocsPerRun` closure or any body an allocation gate measures — it
+  reflects and allocates, and the gate counts the whole process;
+- in `//go:build !race` alloc gates and the bench-gate packages, for the same reason.
+  Assert outside the measured closure.
+
+`testify` is not in `go.mod` yet, and `make tidy` strips an unused requirement — so it
+arrives with the first test that imports it, not before.
+
+**Scope.** The rule binds new tests and any test you touch. The existing 2427 test
+functions are being migrated separately and deliberately, not in passing — tracking
+issue **#722**, one issue per package (#723-#737), batched by whole files.
+
+**Run the `reviewing-tests` skill after writing or changing any test**, not only when a
+review is asked for. It carries the full bar in three passes: can the test fail at all
+(mutate it and watch it go red), were its cases designed by a functional-testing
+technique — equivalence classes, boundary values, decision tables, state transitions,
+negative cases — or hand-picked, and only then the AAA/`testify` structure above.
+
 ## Tooling notes
 
 ### Serena — primary code editor (always prefer over Edit/Write)
