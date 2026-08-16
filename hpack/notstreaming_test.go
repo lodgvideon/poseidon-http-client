@@ -1,8 +1,10 @@
 package hpack
 
 import (
-	"errors"
 	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // Feed and Finish used to report "you never called Begin" through
@@ -30,15 +32,15 @@ func TestDecoder_FeedWithoutBegin_IsNotAWireError(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			d := NewDecoder()
+
 			err := tc.call(d)
-			if !errors.Is(err, ErrNotStreaming) {
-				t.Errorf("%s without Begin returned %v, want ErrNotStreaming", tc.name, err)
-			}
-			if errors.Is(err, ErrInvalidPrefix) {
-				t.Errorf("%s without Begin still reports ErrInvalidPrefix — a caller "+
+
+			assert.ErrorIsf(t, err, ErrNotStreaming,
+				"%s without Begin returned %v, want ErrNotStreaming", tc.name, err)
+			assert.NotErrorIsf(t, err, ErrInvalidPrefix,
+				"%s without Begin still reports ErrInvalidPrefix — a caller "+
 					"sequencing error is being attributed to a malformed byte from the peer",
-					tc.name)
-			}
+				tc.name)
 		})
 	}
 }
@@ -49,12 +51,12 @@ func TestDecoder_FeedWithoutBegin_IsNotAWireError(t *testing.T) {
 func TestDecoder_FinishAfterFinish_IsNotStreaming(t *testing.T) {
 	d := NewDecoder()
 	d.Begin()
-	if err := d.Finish(); err != nil {
-		t.Fatalf("first Finish: %v", err)
-	}
-	if err := d.Finish(); !errors.Is(err, ErrNotStreaming) {
-		t.Errorf("second Finish returned %v, want ErrNotStreaming", err)
-	}
+	require.NoError(t, d.Finish(), "first Finish on a drained session")
+
+	err := d.Finish()
+
+	assert.ErrorIs(t, err, ErrNotStreaming,
+		"a session already closed by Finish is closed; reporting the second call as a wire error blames the peer for the caller's sequencing")
 }
 
 // TestDecoder_TruncatedBlockIsStillAWireError is the over-correction guard: a
@@ -65,14 +67,13 @@ func TestDecoder_TruncatedBlockIsStillAWireError(t *testing.T) {
 	d.Begin()
 	// A literal-with-incremental-indexing prefix promising a name that never
 	// arrives: the block ends mid-representation.
-	if err := d.Feed([]byte{0x40, 0x05, 'a'}, func(HeaderField) error { return nil }); err != nil {
-		t.Fatalf("Feed of a partial representation should buffer, not fail: %v", err)
-	}
+	require.NoError(t, d.Feed([]byte{0x40, 0x05, 'a'}, func(HeaderField) error { return nil }),
+		"Feed of a partial representation should buffer, not fail")
+
 	err := d.Finish()
-	if !errors.Is(err, ErrTruncated) {
-		t.Errorf("Finish on a truncated block returned %v, want ErrTruncated", err)
-	}
-	if errors.Is(err, ErrNotStreaming) {
-		t.Error("a truncated block is being reported as caller misuse")
-	}
+
+	assert.ErrorIs(t, err, ErrTruncated,
+		"a block that ends mid-representation is the wire's mistake and stays ErrTruncated")
+	assert.NotErrorIs(t, err, ErrNotStreaming,
+		"a truncated block is being reported as caller misuse")
 }

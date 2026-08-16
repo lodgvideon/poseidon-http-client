@@ -1,37 +1,40 @@
 package hpack
 
 import (
-	"bytes"
 	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestDynamicTable_AddAndAt(t *testing.T) {
 	dt := newDynamicTable(4096)
+
 	dt.add([]byte("custom-key"), []byte("custom-header"))
-	if dt.len() != 1 {
-		t.Fatalf("len = %d, want 1", dt.len())
-	}
+
+	require.Equal(t, 1, dt.len(), "one add must produce one entry")
 	name, value := dt.at(1)
-	if !bytes.Equal(name, []byte("custom-key")) || !bytes.Equal(value, []byte("custom-header")) {
-		t.Fatalf("at(1) = (%q, %q), want (custom-key, custom-header)", name, value)
-	}
-	if dt.byteSize() != uint32(10+13+32) {
-		t.Fatalf("byteSize = %d, want %d", dt.byteSize(), 10+13+32)
-	}
+	assert.Equal(t, "custom-key", string(name), "at(1) must be the most recently added entry (§2.3.3)")
+	assert.Equal(t, "custom-header", string(value), "at(1) must return the value stored with that name")
+	assert.Equal(t, uint32(10+13+32), dt.byteSize(),
+		"§4.1 charges name + value + 32 per entry; any other accounting disagrees with the peer about when an eviction happens")
 }
 
 func TestDynamicTable_FIFOAddOrder(t *testing.T) {
 	dt := newDynamicTable(4096)
+
 	dt.add([]byte("a"), []byte("1"))
 	dt.add([]byte("b"), []byte("2"))
 	dt.add([]byte("c"), []byte("3"))
-	got := func(i int) string {
+
+	entry := func(i int) string {
 		n, v := dt.at(i)
 		return string(n) + "=" + string(v)
 	}
-	if got(1) != "c=3" || got(2) != "b=2" || got(3) != "a=1" {
-		t.Fatalf("ordering wrong: 1=%s, 2=%s, 3=%s", got(1), got(2), got(3))
-	}
+	// §2.3.3: index 1 is the NEWEST entry, so the table reads newest-first.
+	assert.Equal(t, "c=3", entry(1), "index 1 must be the newest entry (§2.3.3)")
+	assert.Equal(t, "b=2", entry(2), "index 2 must be the second-newest entry")
+	assert.Equal(t, "a=1", entry(3), "index 3 must be the oldest entry; a table read oldest-first resolves every peer index to the wrong field")
 }
 
 func TestDynamicTable_EvictOnSize(t *testing.T) {
@@ -39,24 +42,24 @@ func TestDynamicTable_EvictOnSize(t *testing.T) {
 	dt := newDynamicTable(70)
 	dt.add([]byte("a"), []byte("1"))
 	dt.add([]byte("b"), []byte("2"))
+
 	dt.add([]byte("c"), []byte("3")) // evicts oldest (a=1)
-	if dt.len() != 2 {
-		t.Fatalf("len = %d, want 2", dt.len())
-	}
+
+	require.Equal(t, 2, dt.len(), "a third 34-byte entry does not fit in 70 bytes, so exactly one must be evicted")
 	n, v := dt.at(2)
-	if string(n) != "b" || string(v) != "2" {
-		t.Fatalf("oldest should be b=2, got %s=%s", n, v)
-	}
+	assert.Equal(t, "b", string(n), "the OLDEST entry is the one evicted (§4.4 FIFO), leaving b as the oldest survivor")
+	assert.Equal(t, "2", string(v), "the surviving oldest entry keeps its value")
 }
 
 func TestDynamicTable_AddOversizedClearsAll(t *testing.T) {
 	dt := newDynamicTable(50)
 	dt.add([]byte("x"), []byte("1"))
 	bigVal := make([]byte, 100)
+
 	dt.add([]byte("big"), bigVal)
-	if dt.len() != 0 {
-		t.Fatalf("len = %d, want 0 (oversized add clears)", dt.len())
-	}
+
+	assert.Equal(t, 0, dt.len(),
+		"§4.4: an entry larger than the maximum size empties the table; leaving the earlier entries in place keeps indices alive that the peer's encoder has already discarded")
 }
 
 func TestDynamicTable_SetMaxSizeShrinks(t *testing.T) {
@@ -64,10 +67,11 @@ func TestDynamicTable_SetMaxSizeShrinks(t *testing.T) {
 	dt.add([]byte("a"), []byte("1"))
 	dt.add([]byte("b"), []byte("2"))
 	dt.add([]byte("c"), []byte("3"))
+
 	dt.setMaxSize(35) // holds at most 1 entry of size 34
-	if dt.len() != 1 {
-		t.Fatalf("len after shrink = %d, want 1", dt.len())
-	}
+
+	assert.Equal(t, 1, dt.len(),
+		"shrinking the cap must evict down to it immediately (§4.3); entries kept above the new cap are indexable at a size we no longer advertise")
 }
 
 func TestDynamicTable_CompactArena_TriggersOnGrowth(t *testing.T) {
@@ -75,26 +79,28 @@ func TestDynamicTable_CompactArena_TriggersOnGrowth(t *testing.T) {
 	// compactArena. Entry size 34 (1+1+32). Cap 70 keeps 2 entries; many
 	// adds churn the arena.
 	dt := newDynamicTable(70)
+
 	for i := 0; i < 200; i++ {
 		dt.add([]byte{byte('a' + i%26)}, []byte{byte('0' + i%10)})
 	}
-	if dt.len() != 2 {
-		t.Fatalf("len = %d, want 2 after churn", dt.len())
-	}
+
+	require.Equal(t, 2, dt.len(), "the cap still holds exactly 2 entries after 200 adds")
 	// Most-recently-added entry must still resolve correctly.
 	n, v := dt.at(1)
-	last := 199
-	if n[0] != byte('a'+last%26) || v[0] != byte('0'+last%10) {
-		t.Fatalf("at(1) = %s=%s, want %s=%s",
-			n, v, []byte{byte('a' + last%26)}, []byte{byte('0' + last%10)})
-	}
+	const last = 199
+	assert.Equal(t, string([]byte{byte('a' + last%26)}), string(n),
+		"compaction rewrites the arena and the entry offsets together; a name that reads back wrong means an offset was left pointing into the old layout")
+	assert.Equal(t, string([]byte{byte('0' + last%10)}), string(v),
+		"compaction rewrites the arena and the entry offsets together; a value that reads back wrong means an offset was left pointing into the old layout")
 }
 
 func TestDynamicTable_Clear(t *testing.T) {
 	dt := newDynamicTable(200)
 	dt.add([]byte("a"), []byte("1"))
+
 	dt.clear()
-	if dt.len() != 0 || dt.byteSize() != 0 {
-		t.Fatalf("after clear len=%d size=%d, want 0/0", dt.len(), dt.byteSize())
-	}
+
+	assert.Equal(t, 0, dt.len(), "clear must drop every entry")
+	assert.Equal(t, uint32(0), dt.byteSize(),
+		"clear must zero the running size too; a size left behind makes the table evict as though entries it no longer holds were still there")
 }

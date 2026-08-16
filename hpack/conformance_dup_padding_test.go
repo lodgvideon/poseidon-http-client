@@ -5,8 +5,10 @@ package hpack
 // padding that is not the EOS most-significant bits is a decoding error (§5.2).
 
 import (
-	"errors"
 	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // TestConformance_RFC7541_Sec2_3_2_DuplicateDynamicTableEntriesNotError pins
@@ -19,8 +21,8 @@ func TestConformance_RFC7541_Sec2_3_2_DuplicateDynamicTableEntriesNotError(t *te
 	// then name "x-a" (len 3, not Huffman) and value "b" (len 1).
 	one := []byte{0x40, 0x03, 'x', '-', 'a', 0x01, 'b'}
 	block := append(append([]byte{}, one...), one...)
-
 	var got []HeaderField
+
 	err := dec.DecodeBlock(block, func(f HeaderField) error {
 		got = append(got, HeaderField{
 			Name:  append([]byte(nil), f.Name...),
@@ -28,20 +30,17 @@ func TestConformance_RFC7541_Sec2_3_2_DuplicateDynamicTableEntriesNotError(t *te
 		})
 		return nil
 	})
-	if err != nil {
-		t.Fatalf("decode of duplicate entries: %v — §2.3.2: duplicate entries MUST NOT be treated as an error by a decoder", err)
-	}
-	if len(got) != 2 {
-		t.Fatalf("decoded %d fields, want 2", len(got))
-	}
+
+	require.NoError(t, err,
+		"decode of duplicate entries must succeed — §2.3.2: duplicate entries MUST NOT be treated as an error by a decoder")
+	require.Len(t, got, 2,
+		"both representations must be emitted; collapsing them would silently drop a field the peer sent")
 	for i, f := range got {
-		if string(f.Name) != "x-a" || string(f.Value) != "b" {
-			t.Errorf("field %d = %q:%q, want x-a:b", i, f.Name, f.Value)
-		}
+		assert.Equalf(t, "x-a", string(f.Name), "field %d name", i)
+		assert.Equalf(t, "b", string(f.Value), "field %d value", i)
 	}
-	if dec.dt.len() != 2 {
-		t.Errorf("dynamic table has %d entries, want 2 (both duplicates inserted)", dec.dt.len())
-	}
+	assert.Equal(t, 2, dec.dt.len(),
+		"dynamic table must hold both duplicates; a decoder that inserts only one renumbers every later index relative to the peer's table")
 }
 
 // TestConformance_RFC7541_Sec5_2_HuffmanPaddingNotEosMSBs_Error pins §5.2: "A
@@ -57,14 +56,16 @@ func TestConformance_RFC7541_Sec2_3_2_DuplicateDynamicTableEntriesNotError(t *te
 func TestConformance_RFC7541_Sec5_2_HuffmanPaddingNotEosMSBs_Error(t *testing.T) {
 	// Sanity: '0' really is the 5-bit code 0x00, so 0x00's leading 5 bits decode
 	// cleanly and the failure is genuinely in the 3-bit trailing padding.
-	if c := huffmanCodes['0']; c.nbits != 5 || c.code != 0x00 {
-		t.Fatalf("huffmanCodes['0'] = {code:%#x nbits:%d}, want {0x0 5} — test premise broken", c.code, c.nbits)
-	}
+	c := huffmanCodes['0']
+	require.Equalf(t, uint8(5), c.nbits,
+		"huffmanCodes['0'] = {code:%#x nbits:%d}, want {0x0 5} — test premise broken", c.code, c.nbits)
+	require.Equalf(t, uint32(0x00), c.code,
+		"huffmanCodes['0'] = {code:%#x nbits:%d}, want {0x0 5} — test premise broken", c.code, c.nbits)
+
 	_, err := HuffmanDecode(nil, []byte{0x00})
-	if !errors.Is(err, ErrInvalidHuffman) {
-		t.Fatalf("err = %v, want ErrInvalidHuffman — §5.2: a padding not corresponding to the "+
-			"most significant bits of the code for the EOS symbol MUST be treated as a decoding error", err)
-	}
+
+	require.ErrorIs(t, err, ErrInvalidHuffman,
+		"§5.2: a padding not corresponding to the most significant bits of the code for the EOS symbol MUST be treated as a decoding error")
 }
 
 // TestConformance_RFC7541_Sec5_2_PaddingLongerThanSevenBits_Error is the sibling
@@ -78,27 +79,32 @@ func TestConformance_RFC7541_Sec5_2_HuffmanPaddingNotEosMSBs_Error(t *testing.T)
 // rule does not fire, and they emit no symbol — a whole byte carrying nothing
 // but padding, which is precisely what the length rule exists to reject.
 func TestConformance_RFC7541_Sec5_2_PaddingLongerThanSevenBits_Error(t *testing.T) {
-	if _, err := HuffmanDecode(nil, []byte{0xff}); !errors.Is(err, ErrInvalidHuffman) {
-		t.Fatalf("HuffmanDecode(0xff) err = %v, want ErrInvalidHuffman — §5.2: a padding "+
-			"strictly longer than 7 bits MUST be treated as a decoding error", err)
-	}
+	t.Run("eight pad bits rejected", func(t *testing.T) {
+		src := []byte{0xff}
+
+		_, err := HuffmanDecode(nil, src)
+
+		require.ErrorIs(t, err, ErrInvalidHuffman,
+			"§5.2: a padding strictly longer than 7 bits MUST be treated as a decoding error")
+	})
 
 	// The boundary must still decode. A rule that also rejected exactly 7 bits
 	// would turn well-formed peer output into an error, which is the worse
 	// failure of the two. Symbol 199 is a 25-bit code, so its encoding occupies
 	// 4 bytes and leaves exactly 7 pad bits — the longest padding that is legal.
-	const sym = 199
-	if c := huffmanCodes[sym]; c.nbits != 25 {
-		t.Fatalf("huffmanCodes[%d].nbits = %d, want 25 — test premise broken", sym, c.nbits)
-	}
-	enc := HuffmanEncode(nil, []byte{sym})
-	if len(enc)*8-25 != 7 {
-		t.Fatalf("encoding of symbol %d is %d bytes, leaving %d pad bits, want 7",
-			sym, len(enc), len(enc)*8-25)
-	}
-	got, err := HuffmanDecode(nil, enc)
-	if err != nil || len(got) != 1 || got[0] != sym {
-		t.Fatalf("HuffmanDecode(% x) = (% x, %v), want ([%02x], nil) — exactly 7 pad bits is legal",
-			enc, got, err, sym)
-	}
+	t.Run("exactly seven pad bits accepted", func(t *testing.T) {
+		const sym = 199
+		require.Equalf(t, uint8(25), huffmanCodes[sym].nbits,
+			"huffmanCodes[%d].nbits = %d, want 25 — test premise broken", sym, huffmanCodes[sym].nbits)
+		enc := HuffmanEncode(nil, []byte{sym})
+		require.Equalf(t, 7, len(enc)*8-25,
+			"encoding of symbol %d is %d bytes, leaving %d pad bits, want 7", sym, len(enc), len(enc)*8-25)
+
+		got, err := HuffmanDecode(nil, enc)
+
+		require.NoErrorf(t, err,
+			"HuffmanDecode(% x) must succeed — exactly 7 pad bits is legal, and rejecting it turns well-formed peer output into an error", enc)
+		assert.Equalf(t, []byte{sym}, got,
+			"HuffmanDecode(% x) must round-trip symbol %d", enc, sym)
+	})
 }

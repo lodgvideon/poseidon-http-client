@@ -1,9 +1,11 @@
 package hpack
 
 import (
-	"bytes"
 	"strconv"
 	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // TestConformance_RFC7541_Sec622_LiteralWithoutIndexing pins that IndexWithout
@@ -11,14 +13,15 @@ import (
 // inserts nothing into the dynamic table.
 func TestConformance_RFC7541_Sec622_LiteralWithoutIndexing(t *testing.T) {
 	enc := NewEncoder()
+
 	// :method has static index 2, so the name index fits the 4-bit prefix.
 	dst := enc.WriteField(nil, []byte(":method"), []byte("VARIES"), IndexWithout)
-	if dst[0] != 0x02 {
-		t.Fatalf("prefix = %#x, want 0x02 (0000 + name index 2)", dst[0])
-	}
-	if enc.dt.len() != 0 {
-		t.Fatalf("dyn table len = %d, want 0 — without-indexing must not insert", enc.dt.len())
-	}
+
+	require.NotEmpty(t, dst, "the field must be encoded to something")
+	assert.Equalf(t, byte(0x02), dst[0],
+		"prefix = %#x, want 0x02 (0000 + name index 2); any other prefix tells the peer to parse a different §6.2 representation", dst[0])
+	assert.Equal(t, 0, enc.dt.len(),
+		"without-indexing must not insert; an insert here evicts entries the peer still indexes and desynchronises the two tables")
 }
 
 // TestConformance_RFC7541_Sec622_NoEvictionUnderChurn is the reason the mode
@@ -31,21 +34,20 @@ func TestConformance_RFC7541_Sec622_NoEvictionUnderChurn(t *testing.T) {
 		enc := NewEncoder()
 		// Seed an entry that later requests would want to keep matching.
 		enc.WriteField(nil, []byte("cookie"), []byte("session=stable"), IndexIncremental)
-		seeded := enc.dt.len()
-		if seeded != 1 {
-			t.Fatalf("seed failed: dyn table len = %d, want 1", seeded)
-		}
+		require.Equal(t, 1, enc.dt.len(), "seed failed: the entry later requests want to keep matching must be in the table")
 		for i := 0; i < 200; i++ {
 			enc.WriteField(nil, []byte("grpc-timeout"), []byte(strconv.Itoa(i)+"m"), mode)
 		}
 		return enc.dt.len()
 	}
-	if got := churn(IndexWithout); got != 1 {
-		t.Fatalf("IndexWithout left dyn table len = %d, want 1 (only the seed)", got)
-	}
-	if got := churn(IndexIncremental); got <= 1 {
-		t.Fatalf("IndexIncremental left dyn table len = %d; the churn baseline must exceed the seed", got)
-	}
+
+	withoutIndexing := churn(IndexWithout)
+	incremental := churn(IndexIncremental)
+
+	assert.Equal(t, 1, withoutIndexing,
+		"IndexWithout must leave only the seed; that is the whole point of the mode — a per-request value inserted 200 times evicts everything worth indexing")
+	assert.Greaterf(t, incremental, 1,
+		"IndexIncremental left dyn table len = %d; the churn baseline must exceed the seed, or the comparison above is measuring nothing", incremental)
 }
 
 // TestConformance_RFC7541_Sec622_FullMatchStillIndexed pins that a field that
@@ -54,14 +56,13 @@ func TestConformance_RFC7541_Sec622_NoEvictionUnderChurn(t *testing.T) {
 // so it honours the caller's intent while being strictly smaller.
 func TestConformance_RFC7541_Sec622_FullMatchStillIndexed(t *testing.T) {
 	enc := NewEncoder()
+
 	// :method GET is static index 2 — a full match.
 	dst := enc.WriteField(nil, []byte(":method"), []byte("GET"), IndexWithout)
-	if len(dst) != 1 || dst[0] != 0x82 {
-		t.Fatalf("full static match = %#v, want single indexed byte 0x82", dst)
-	}
-	if enc.dt.len() != 0 {
-		t.Fatalf("dyn table len = %d, want 0", enc.dt.len())
-	}
+
+	assert.Equalf(t, []byte{0x82}, dst,
+		"full static match = %#v, want the single indexed byte 0x82; referencing an entry inserts and evicts nothing, so IndexWithout has no reason to spend a literal", dst)
+	assert.Equal(t, 0, enc.dt.len(), "collapsing to an index must not add anything to the table either")
 }
 
 // TestConformance_RFC7541_Sec713_NeverIndexedNotCollapsed pins the exception:
@@ -69,13 +70,14 @@ func TestConformance_RFC7541_Sec622_FullMatchStillIndexed(t *testing.T) {
 // never-indexed field is NOT collapsed to an index even on a full match.
 func TestConformance_RFC7541_Sec713_NeverIndexedNotCollapsed(t *testing.T) {
 	enc := NewEncoder()
+
 	dst := enc.WriteField(nil, []byte(":method"), []byte("GET"), IndexNever)
-	if len(dst) == 1 {
-		t.Fatal("never-indexed field collapsed to an index; §7.1.3 requires the representation be preserved")
-	}
-	if dst[0]&0xf0 != 0x10 {
-		t.Fatalf("prefix = %#x, want 0001 (never indexed)", dst[0])
-	}
+
+	require.NotEmpty(t, dst, "the field must be encoded to something")
+	require.NotEqual(t, 1, len(dst),
+		"never-indexed field collapsed to an index; §7.1.3 requires the representation be preserved so an intermediary is told not to index it either")
+	assert.Equalf(t, byte(0x10), dst[0]&0xf0,
+		"prefix = %#x, want 0001 (never indexed)", dst[0])
 }
 
 // TestConformance_RFC7541_Sec622_DecoderReportsMode pins the decode direction:
@@ -88,35 +90,32 @@ func TestConformance_RFC7541_Sec622_DecoderReportsMode(t *testing.T) {
 	block = enc.WriteField(block, []byte("custom"), []byte("indexed"), IndexIncremental)
 	block = enc.WriteField(block, []byte("grpc-timeout"), []byte("1m"), IndexWithout)
 	block = enc.WriteField(block, []byte("authorization"), []byte("Bearer x"), IndexNever)
-
-	var got []HeaderField
 	dec := NewDecoder()
-	if err := dec.DecodeBlock(block, func(f HeaderField) error {
+	var got []HeaderField
+
+	err := dec.DecodeBlock(block, func(f HeaderField) error {
 		got = append(got, HeaderField{
 			Name:     append([]byte(nil), f.Name...),
 			Value:    append([]byte(nil), f.Value...),
 			Indexing: f.Indexing,
 		})
 		return nil
-	}); err != nil {
-		t.Fatalf("decode: %v", err)
-	}
+	})
+
 	want := []IndexingMode{IndexIncremental, IndexWithout, IndexNever}
-	if len(got) != len(want) {
-		t.Fatalf("decoded %d fields, want %d", len(got), len(want))
-	}
+	require.NoError(t, err, "decode of a block carrying all three §6.2 representations")
+	require.Len(t, got, len(want), "each representation must emit exactly one field")
 	for i := range want {
-		if got[i].Indexing != want[i] {
-			t.Errorf("field %d (%q) Indexing = %d, want %d", i, got[i].Name, got[i].Indexing, want[i])
-		}
+		assert.Equalf(t, want[i], got[i].Indexing,
+			"field %d (%q) Indexing = %d, want %d; the representation the peer chose has to survive the decode or a caller cannot forward it faithfully",
+			i, got[i].Name, got[i].Indexing, want[i])
 	}
 	// Only the incrementally-indexed field entered the decoder's table.
-	if dec.dt.len() != 1 {
-		t.Fatalf("decoder dyn table len = %d, want 1", dec.dt.len())
-	}
-	if !bytes.Equal(got[2].Name, []byte("authorization")) || !got[2].Sensitive() {
-		t.Fatal("never-indexed field lost its Sensitive() reading")
-	}
+	assert.Equal(t, 1, dec.dt.len(),
+		"only the §6.2.1 field may enter the decoder's table; inserting the other two shifts every index the peer's encoder assigned")
+	assert.Equal(t, "authorization", string(got[2].Name), "the never-indexed field is the third one")
+	assert.True(t, got[2].Sensitive(),
+		"never-indexed field lost its Sensitive() reading, so an intermediary would be free to index a credential it was told never to")
 }
 
 // BenchmarkEncoder_WriteFieldWithoutIndexing keeps the new representation inside

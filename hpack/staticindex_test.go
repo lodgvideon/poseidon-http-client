@@ -3,6 +3,9 @@ package hpack
 import (
 	"bytes"
 	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // staticIndex went from a linear scan of all 61 rows to a name-keyed map. The
@@ -62,12 +65,14 @@ func TestStaticIndex_MatchesTheLinearScan(t *testing.T) {
 	}
 
 	for _, p := range probes {
-		gotIdx, gotFull := staticIndex(p.name, p.value)
 		wantIdx, wantFull := refStaticIndex(p.name, p.value)
-		if gotIdx != wantIdx || gotFull != wantFull {
-			t.Errorf("staticIndex(%q, %q) = (%d, %v), linear scan = (%d, %v)",
-				p.name, p.value, gotIdx, gotFull, wantIdx, wantFull)
-		}
+
+		gotIdx, gotFull := staticIndex(p.name, p.value)
+
+		assert.Equalf(t, wantIdx, gotIdx,
+			"staticIndex(%q, %q) index disagrees with the linear scan the map replaced", p.name, p.value)
+		assert.Equalf(t, wantFull, gotFull,
+			"staticIndex(%q, %q) full-match flag disagrees with the linear scan the map replaced", p.name, p.value)
 	}
 }
 
@@ -84,21 +89,24 @@ func TestStaticIndex_LowestIndexWins(t *testing.T) {
 			break
 		}
 	}
-	if first == 0 {
-		t.Fatal(":status not in the static table — test premise broken")
-	}
-	if idx, full := staticIndex([]byte(":status"), []byte("599")); idx != first || full {
-		t.Errorf("staticIndex(:status, 599) = (%d, %v), want (%d, false) — a name-only "+
-			"match must return the LOWEST index carrying the name", idx, full, first)
-	}
-	// And a full match returns that value's own row, not the first :status row.
-	idx, full := staticIndex([]byte(":status"), []byte("404"))
-	if !full {
-		t.Fatalf("staticIndex(:status, 404) reported no full match")
-	}
-	if string(staticTable[idx].value) != "404" {
-		t.Errorf("staticIndex(:status, 404) = index %d, which holds %q", idx, staticTable[idx].value)
-	}
+	require.NotZero(t, first, ":status not in the static table — test premise broken")
+
+	t.Run("name-only match returns the lowest index", func(t *testing.T) {
+		idx, full := staticIndex([]byte(":status"), []byte("599"))
+
+		assert.False(t, full, "staticIndex(:status, 599) reported a full match; 599 is not a value the table carries")
+		assert.Equalf(t, first, idx,
+			"staticIndex(:status, 599) = %d, want %d — a name-only match must return the LOWEST index carrying the name", idx, first)
+	})
+
+	t.Run("full match returns that value's own row", func(t *testing.T) {
+		idx, full := staticIndex([]byte(":status"), []byte("404"))
+
+		require.True(t, full, "staticIndex(:status, 404) reported no full match")
+		assert.Equalf(t, "404", string(staticTable[idx].value),
+			"staticIndex(:status, 404) = index %d, which holds %q — a full match must land on the row carrying that value, not on the first row sharing the name",
+			idx, staticTable[idx].value)
+	})
 }
 
 // TestStaticIndex_DoesNotAllocate pins what forced the design: a name+value key
@@ -108,11 +116,14 @@ func TestStaticIndex_LowestIndexWins(t *testing.T) {
 func TestStaticIndex_DoesNotAllocate(t *testing.T) {
 	name, value := []byte(":status"), []byte("404")
 	miss := []byte("x-not-in-table")
-	if n := testing.AllocsPerRun(200, func() {
+
+	// The closure stays free of testify: it reflects and allocates, and
+	// AllocsPerRun charges the whole process. Assert outside.
+	n := testing.AllocsPerRun(200, func() {
 		_, _ = staticIndex(name, value)
 		_, _ = staticIndex(name, []byte("599")) // name-only path
 		_, _ = staticIndex(miss, value)         // miss path
-	}); n != 0 {
-		t.Errorf("staticIndex allocates %.1f times per lookup set, want 0", n)
-	}
+	})
+
+	assert.Zerof(t, n, "staticIndex allocates %.1f times per lookup set, want 0", n)
 }
