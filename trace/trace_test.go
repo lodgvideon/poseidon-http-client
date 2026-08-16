@@ -195,7 +195,7 @@ func TestTextTracer_CloseIsIdempotent(t *testing.T) {
 	tr := NewTextTracer(&buf)
 	tr.TraceFrame(FrameInfo{Proto: ProtoH2, Dir: DirOut, TypeName: "PING", Length: 8})
 
-	var errs []error
+	errs := make([]error, 0, 3)
 	for range 3 {
 		errs = append(errs, tr.Close())
 	}
@@ -303,7 +303,7 @@ func TestDetail_Has(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			d := Detail(have)
+			d := have
 
 			got := d.Has(tc.want)
 
