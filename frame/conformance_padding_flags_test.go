@@ -10,6 +10,9 @@ import (
 	"bytes"
 	"context"
 	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // TestConformance_RFC9113_Sec6_1_PaddedDataPaddingOctetsZero pins §6.1: "Padding
@@ -19,18 +22,16 @@ func TestConformance_RFC9113_Sec6_1_PaddedDataPaddingOctetsZero(t *testing.T) {
 	var buf bytes.Buffer
 	fr := NewFramer(&buf, nil)
 	const padLen = 9
-	if err := fr.WriteDataPadded(1, false, []byte("hello"), padLen); err != nil {
-		t.Fatalf("WriteDataPadded: %v", err)
-	}
+
+	err := fr.WriteDataPadded(1, false, []byte("hello"), padLen)
+
+	require.NoError(t, err, "WriteDataPadded")
 	raw := buf.Bytes()
 	// wire: 9-byte header, pad-length byte, data, then padLen padding octets (tail).
-	if raw[9] != padLen {
-		t.Fatalf("pad-length byte = %d, want %d", raw[9], padLen)
-	}
+	require.EqualValuesf(t, padLen, raw[9], "pad-length byte = %d, want %d", raw[9], padLen)
 	for i, b := range raw[len(raw)-padLen:] {
-		if b != 0 {
-			t.Errorf("DATA padding octet %d = 0x%02x, want 0x00 (§6.1 Padding octets MUST be set to zero when sending)", i, b)
-		}
+		assert.Zerof(t, b,
+			"DATA padding octet %d = 0x%02x, want 0x00 (§6.1 Padding octets MUST be set to zero when sending)", i, b)
 	}
 }
 
@@ -40,19 +41,17 @@ func TestConformance_RFC9113_Sec6_2_PaddedHeadersPaddingOctetsZero(t *testing.T)
 	var buf bytes.Buffer
 	fr := NewFramer(&buf, nil)
 	const padLen = 9
-	if err := fr.WriteHeaders(WriteHeadersParams{
+
+	err := fr.WriteHeaders(WriteHeadersParams{
 		StreamID: 1, BlockFragment: []byte{0x82}, EndHeaders: true, PadLength: padLen,
-	}); err != nil {
-		t.Fatalf("WriteHeaders: %v", err)
-	}
+	})
+
+	require.NoError(t, err, "WriteHeaders")
 	raw := buf.Bytes()
-	if raw[9] != padLen {
-		t.Fatalf("pad-length byte = %d, want %d", raw[9], padLen)
-	}
+	require.EqualValuesf(t, padLen, raw[9], "pad-length byte = %d, want %d", raw[9], padLen)
 	for i, b := range raw[len(raw)-padLen:] {
-		if b != 0 {
-			t.Errorf("HEADERS padding octet %d = 0x%02x, want 0x00 (§6.2 Padding octets MUST be set to zero when sending)", i, b)
-		}
+		assert.Zerof(t, b,
+			"HEADERS padding octet %d = 0x%02x, want 0x00 (§6.2 Padding octets MUST be set to zero when sending)", i, b)
 	}
 }
 
@@ -66,15 +65,13 @@ func TestConformance_RFC9113_Sec4_1_UnusedFlagsIgnoredOnReceipt(t *testing.T) {
 	raw := frameBytes(5, FrameData, unused, 1, []byte("hello"))
 	fr := NewFramer(nil, bytes.NewReader(raw))
 	h := &recordingHandler{}
-	if _, err := fr.ReadFrame(context.Background(), h); err != nil {
-		t.Fatalf("ReadFrame: %v — an unused flag bit must be ignored, not an error (§4.1)", err)
-	}
-	if !bytes.Equal(h.dataPayload, []byte("hello")) {
-		t.Errorf("data = %q, want \"hello\" — the unused bit was not ignored (misparsed as PADDED?)", h.dataPayload)
-	}
-	if h.dataPad != 0 {
-		t.Errorf("dataPad = %d, want 0 — the unused bit must not be read as PADDED", h.dataPad)
-	}
+
+	_, err := fr.ReadFrame(context.Background(), h)
+
+	require.NoErrorf(t, err, "ReadFrame: %v — an unused flag bit must be ignored, not an error (§4.1)", err)
+	assert.Truef(t, bytes.Equal(h.dataPayload, []byte("hello")),
+		"data = %q, want \"hello\" — the unused bit was not ignored (misparsed as PADDED?)", h.dataPayload)
+	assert.Zerof(t, h.dataPad, "dataPad = %d, want 0 — the unused bit must not be read as PADDED", h.dataPad)
 }
 
 // TestConformance_RFC9113_Sec4_1_UnusedFlagsUnsetWhenSending pins §4.1: "Unused
@@ -92,13 +89,14 @@ func TestConformance_RFC9113_Sec4_1_UnusedFlagsUnsetWhenSending(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			var buf bytes.Buffer
 			fr := NewFramer(&buf, nil)
-			if err := fr.WriteData(1, tc.endStream, []byte("x")); err != nil {
-				t.Fatalf("WriteData: %v", err)
-			}
+
+			err := fr.WriteData(1, tc.endStream, []byte("x"))
+
+			require.NoError(t, err, "WriteData")
 			// Flags byte is at offset 4 of the 9-byte frame header.
-			if flags := buf.Bytes()[4]; flags != tc.want {
-				t.Errorf("DATA flags = 0x%02x, want 0x%02x — no unused flag bits when sending (§4.1)", flags, tc.want)
-			}
+			flags := buf.Bytes()[4]
+			assert.Equalf(t, tc.want, flags,
+				"DATA flags = 0x%02x, want 0x%02x — no unused flag bits when sending (§4.1)", flags, tc.want)
 		})
 	}
 }
