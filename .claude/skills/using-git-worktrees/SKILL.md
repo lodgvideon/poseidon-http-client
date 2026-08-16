@@ -206,6 +206,39 @@ Ready to implement auth feature
 - Auto-detect and run project setup
 - Verify clean test baseline
 
+## In an autonomous loop
+
+The steps above describe a one-time setup for a human-driven feature branch. When
+an unattended loop is the caller, the worktree stops being a convenience and
+becomes part of the control system, and three things matter that do not matter
+otherwise.
+
+**The worktree is the rollback surface.** An autonomous loop needs discarding a
+failed attempt to be cheap, or it will keep bad work rather than pay to undo it.
+A worktree makes discard a directory removal instead of a surgical revert against
+a tree someone else is also using. Decide before the loop starts what "discard"
+means — drop the worktree, or reset the branch inside it — and write it down; a
+loop that has to invent its recovery policy mid-failure invents a bad one.
+
+**The baseline is a locked surface, not a formality.** Step 4 exists so a later
+failure can be attributed to the loop rather than to what it inherited. That only
+holds if the tests establishing the baseline are the same tests, unmodified, that
+run at the end. A loop that adjusts a test it inherited has destroyed its own
+control, and the green at the end no longer means what step 4 promised. If a
+baseline test genuinely has to change, record that the baseline moved and why.
+
+**One `.git` is shared mutable state.** Worktrees isolate working trees; they do
+not isolate the repository. Concurrent loops contend on the index lock, on
+`git gc`, and on ref updates, and the symptom is an intermittent
+`index.lock exists` that reads like a bug in whatever ran at the time. Serialize
+the git operations, or give genuinely concurrent runs their own clone.
+
+**Worktrees leak.** A loop that creates one per iteration and reports success
+leaves them all behind, and disk fills silently over a long run. Prune finished
+worktrees as part of closing a batch, not at the end of the session that may never
+arrive: `git worktree list` to see what accumulated, `git worktree prune` after
+removing directories by hand.
+
 ## Integration
 
 **Called by:**
@@ -216,3 +249,13 @@ Ready to implement auth feature
 
 **Pairs with:**
 - **finishing-a-development-branch** - REQUIRED for cleanup after work complete
+
+<!--
+Copied from poseidon-http-client @ main on 2026-08-16, then extended the same day.
+
+DIVERGED FROM THE CLIENT REPO. Addition, not upstream text:
+  - "In an autonomous loop"
+Source: `context-engineering:harness-engineering`. Upstream treated a worktree as
+one-time human setup; under a loop it is also the rollback surface, the baseline
+control, and a contended `.git`.
+-->
