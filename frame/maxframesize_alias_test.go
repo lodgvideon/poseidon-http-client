@@ -1,6 +1,10 @@
 package frame
 
-import "testing"
+import (
+	"testing"
+
+	"github.com/stretchr/testify/assert"
+)
 
 // The limit is checked on read AND at eight write sites, so SetMaxReadFrameSize
 // named half of what it did — its own doc comment spent a sentence explaining
@@ -18,19 +22,23 @@ func TestSetMaxFrameSize_DeprecatedAliasDrivesTheSameLimit(t *testing.T) {
 	t.Run("new name bounds writes", func(t *testing.T) {
 		fr, _ := newFramerWithBuffer()
 		fr.SetMaxFrameSize(32)
-		if err := fr.WriteData(1, false, payload); err != ErrFrameTooLarge {
-			t.Errorf("WriteData over the limit = %v, want ErrFrameTooLarge — the limit "+
+
+		err := fr.WriteData(1, false, payload)
+
+		assert.ErrorIsf(t, err, ErrFrameTooLarge,
+			"WriteData over the limit = %v, want ErrFrameTooLarge — the limit "+
 				"is not applied on write", err)
-		}
 	})
 
 	t.Run("deprecated alias bounds writes identically", func(t *testing.T) {
 		fr, _ := newFramerWithBuffer()
 		fr.SetMaxReadFrameSize(32)
-		if err := fr.WriteData(1, false, payload); err != ErrFrameTooLarge {
-			t.Errorf("WriteData over the limit set via the alias = %v, want "+
+
+		err := fr.WriteData(1, false, payload)
+
+		assert.ErrorIsf(t, err, ErrFrameTooLarge,
+			"WriteData over the limit set via the alias = %v, want "+
 				"ErrFrameTooLarge — the alias no longer drives the same field", err)
-		}
 	})
 
 	t.Run("either name lets a frame under the limit through", func(t *testing.T) {
@@ -40,9 +48,10 @@ func TestSetMaxFrameSize_DeprecatedAliasDrivesTheSameLimit(t *testing.T) {
 		} {
 			fr, _ := newFramerWithBuffer()
 			set(fr, 128)
-			if err := fr.WriteData(1, false, payload); err != nil {
-				t.Errorf("%s(128) then a 64-byte frame: %v", name, err)
-			}
+
+			err := fr.WriteData(1, false, payload)
+
+			assert.NoErrorf(t, err, "%s(128) then a 64-byte frame: %v", name, err)
 		}
 	})
 }

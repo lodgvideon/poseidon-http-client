@@ -3,11 +3,12 @@ package frame
 import (
 	"bytes"
 	"context"
-	"errors"
 	"strings"
 	"testing"
 
 	"github.com/lodgvideon/poseidon-http-client/trace"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // recorder keeps every frame reported to it. Params is copied, not kept: the
@@ -24,9 +25,7 @@ func (r *recorder) TraceFrame(info trace.FrameInfo) {
 
 func (r *recorder) only(t *testing.T) trace.FrameInfo {
 	t.Helper()
-	if len(r.got) != 1 {
-		t.Fatalf("traced %d frames, want exactly 1: %+v", len(r.got), r.got)
-	}
+	require.Lenf(t, r.got, 1, "traced %d frames, want exactly 1: %+v", len(r.got), r.got)
 	return r.got[0]
 }
 
@@ -158,9 +157,10 @@ func TestFramer_TraceOut_ReportsEveryFrameType(t *testing.T) {
 			var buf bytes.Buffer
 			rec := &recorder{}
 			f := tracedFramer(&buf, nil, rec)
-			if err := tc.write(f); err != nil {
-				t.Fatalf("write: %v", err)
-			}
+
+			err := tc.write(f)
+
+			require.NoErrorf(t, err, "write: %v", err)
 			got := rec.only(t)
 			tc.want.Proto, tc.want.Dir = trace.ProtoH2, trace.DirOut
 			assertFrameInfo(t, got, tc.want)
@@ -174,32 +174,26 @@ func TestFramer_TraceOut_SettingsParams(t *testing.T) {
 	var buf bytes.Buffer
 	rec := &recorder{}
 	f := tracedFramer(&buf, nil, rec)
-
 	var s SettingsParams
 	s.set(SettingInitialWindowSize, 1<<20)
 	s.set(SettingMaxFrameSize, 16384)
 	s.set(SettingID(0xff), 7) // outside the registry
-	if err := f.WriteSettings(s); err != nil {
-		t.Fatalf("WriteSettings: %v", err)
-	}
 
+	err := f.WriteSettings(s)
+
+	require.NoErrorf(t, err, "WriteSettings: %v", err)
 	got := rec.only(t)
-	if !got.Detail.Has(trace.DetailParams) || got.Params == nil {
-		t.Fatalf("SETTINGS reported without parameters: %+v", got)
-	}
+	require.Truef(t, got.Detail.Has(trace.DetailParams), "SETTINGS reported without parameters: %+v", got)
+	require.NotNilf(t, got.Params, "SETTINGS reported without parameters: %+v", got)
 	want := []trace.Param{
 		{ID: 0x4, Name: "INITIAL_WINDOW_SIZE", Value: 1 << 20},
 		{ID: 0x5, Name: "MAX_FRAME_SIZE", Value: 16384},
 		{ID: 0xff, Name: "", Value: 7}, // unregistered: number, not the word UNKNOWN
 	}
-	if gotP := got.Params.All(); len(gotP) != len(want) {
-		t.Fatalf("params = %+v, want %+v", gotP, want)
-	} else {
-		for i := range want {
-			if gotP[i] != want[i] {
-				t.Errorf("param %d = %+v, want %+v", i, gotP[i], want[i])
-			}
-		}
+	gotP := got.Params.All()
+	require.Lenf(t, gotP, len(want), "params = %+v, want %+v", gotP, want)
+	for i := range want {
+		assert.Equalf(t, want[i], gotP[i], "param %d = %+v, want %+v", i, gotP[i], want[i])
 	}
 }
 
@@ -207,48 +201,38 @@ func TestFramer_TraceIn_ReportsReceivedFrames(t *testing.T) {
 	// Build a wire stream with a peer-side Framer, then read it back traced.
 	var wire bytes.Buffer
 	peer := NewFramer(&wire, nil)
-	if err := peer.WriteHeaders(WriteHeadersParams{
+	require.NoError(t, peer.WriteHeaders(WriteHeadersParams{
 		StreamID: 1, BlockFragment: []byte{0x88}, EndHeaders: true,
-	}); err != nil {
-		t.Fatalf("peer HEADERS: %v", err)
-	}
-	if err := peer.WriteData(1, true, []byte("body")); err != nil {
-		t.Fatalf("peer DATA: %v", err)
-	}
-	if err := peer.WriteGoAway(1, ErrCodeEnhanceYourCalm, []byte("slow down")); err != nil {
-		t.Fatalf("peer GOAWAY: %v", err)
-	}
-
+	}), "peer HEADERS")
+	require.NoError(t, peer.WriteData(1, true, []byte("body")), "peer DATA")
+	require.NoError(t, peer.WriteGoAway(1, ErrCodeEnhanceYourCalm, []byte("slow down")), "peer GOAWAY")
 	rec := &recorder{}
 	f := tracedFramer(nil, bytes.NewReader(wire.Bytes()), rec)
 	h := dropHandler{}
+
 	for range 3 {
-		if _, err := f.ReadFrame(context.Background(), h); err != nil {
-			t.Fatalf("ReadFrame: %v", err)
-		}
+		_, err := f.ReadFrame(context.Background(), h)
+		require.NoError(t, err, "ReadFrame")
 	}
 
-	if len(rec.got) != 3 {
-		t.Fatalf("traced %d frames, want 3", len(rec.got))
-	}
+	require.Lenf(t, rec.got, 3, "traced %d frames, want 3", len(rec.got))
 	for i, got := range rec.got {
-		if got.Dir != trace.DirIn || got.Proto != trace.ProtoH2 {
-			t.Errorf("frame %d: dir/proto = %v/%v, want in/h2", i, got.Dir, got.Proto)
-		}
+		assert.Equalf(t, trace.DirIn, got.Dir, "frame %d: dir/proto = %v/%v, want in/h2", i, got.Dir, got.Proto)
+		assert.Equalf(t, trace.ProtoH2, got.Proto, "frame %d: dir/proto = %v/%v, want in/h2", i, got.Dir, got.Proto)
 	}
-	if got := rec.got[0]; got.TypeName != "HEADERS" || got.StreamID != 1 {
-		t.Errorf("frame 0 = %+v, want HEADERS on stream 1", got)
-	}
-	if got := rec.got[1]; got.TypeName != "DATA" || got.FlagNames != "END_STREAM" {
-		t.Errorf("frame 1 = %+v, want DATA END_STREAM", got)
-	}
+	assert.Equalf(t, "HEADERS", rec.got[0].TypeName, "frame 0 = %+v, want HEADERS on stream 1", rec.got[0])
+	assert.EqualValuesf(t, 1, rec.got[0].StreamID, "frame 0 = %+v, want HEADERS on stream 1", rec.got[0])
+	assert.Equalf(t, "DATA", rec.got[1].TypeName, "frame 1 = %+v, want DATA END_STREAM", rec.got[1])
+	assert.Equalf(t, "END_STREAM", rec.got[1].FlagNames, "frame 1 = %+v, want DATA END_STREAM", rec.got[1])
 	goaway := rec.got[2]
-	if goaway.TypeName != "GOAWAY" || goaway.ErrCodeName != "ENHANCE_YOUR_CALM" || goaway.LastStreamID != 1 {
-		t.Errorf("frame 2 = %+v, want GOAWAY ENHANCE_YOUR_CALM last=1", goaway)
-	}
-	if !goaway.Detail.Has(trace.DetailErrCode | trace.DetailLastStreamID) {
-		t.Errorf("GOAWAY detail = %b, want code and last-stream set", goaway.Detail)
-	}
+	assert.Equalf(t, "GOAWAY", goaway.TypeName,
+		"frame 2 = %+v, want GOAWAY ENHANCE_YOUR_CALM last=1", goaway)
+	assert.Equalf(t, "ENHANCE_YOUR_CALM", goaway.ErrCodeName,
+		"frame 2 = %+v, want GOAWAY ENHANCE_YOUR_CALM last=1", goaway)
+	assert.EqualValuesf(t, 1, goaway.LastStreamID,
+		"frame 2 = %+v, want GOAWAY ENHANCE_YOUR_CALM last=1", goaway)
+	assert.Truef(t, goaway.Detail.Has(trace.DetailErrCode|trace.DetailLastStreamID),
+		"GOAWAY detail = %b, want code and last-stream set", goaway.Detail)
 }
 
 // TestFramer_TraceIn_ReportsFrameThatFailsDispatch is the reason the emit sits
@@ -257,19 +241,19 @@ func TestFramer_TraceIn_ReportsReceivedFrames(t *testing.T) {
 func TestFramer_TraceIn_ReportsFrameThatFailsDispatch(t *testing.T) {
 	// RST_STREAM with a 5-byte payload: §6.4 makes it a FRAME_SIZE_ERROR.
 	wire := []byte{0, 0, 5, byte(FrameRSTStream), 0, 0, 0, 0, 1, 0, 0, 0, 8, 0}
-
 	rec := &recorder{}
 	f := tracedFramer(nil, bytes.NewReader(wire), rec)
-	if _, err := f.ReadFrame(context.Background(), dropHandler{}); err == nil {
-		t.Fatal("ReadFrame accepted a 5-byte RST_STREAM")
-	}
+
+	_, err := f.ReadFrame(context.Background(), dropHandler{})
+
+	require.Error(t, err, "ReadFrame accepted a 5-byte RST_STREAM")
 	got := rec.only(t)
-	if got.TypeName != "RST_STREAM" || got.Length != 5 {
-		t.Errorf("traced %+v, want the malformed RST_STREAM as it arrived", got)
-	}
-	if got.ErrCodeName != "CANCEL" {
-		t.Errorf("code = %q, want CANCEL decoded from the leading four bytes", got.ErrCodeName)
-	}
+	assert.Equalf(t, "RST_STREAM", got.TypeName,
+		"traced %+v, want the malformed RST_STREAM as it arrived", got)
+	assert.EqualValuesf(t, 5, got.Length,
+		"traced %+v, want the malformed RST_STREAM as it arrived", got)
+	assert.Equalf(t, "CANCEL", got.ErrCodeName,
+		"code = %q, want CANCEL decoded from the leading four bytes", got.ErrCodeName)
 }
 
 // TestFramer_TraceIn_UnknownTypeIsReported: §5.5 obliges us to ignore frame
@@ -277,32 +261,30 @@ func TestFramer_TraceIn_ReportsFrameThatFailsDispatch(t *testing.T) {
 // something rather than nothing.
 func TestFramer_TraceIn_UnknownTypeIsReported(t *testing.T) {
 	wire := []byte{0, 0, 2, 0x1f, 0, 0, 0, 0, 0, 0xaa, 0xbb}
-
 	rec := &recorder{}
 	f := tracedFramer(nil, bytes.NewReader(wire), rec)
-	if _, err := f.ReadFrame(context.Background(), dropHandler{}); err != nil {
-		t.Fatalf("ReadFrame rejected an unknown type: %v", err)
-	}
+
+	_, err := f.ReadFrame(context.Background(), dropHandler{})
+
+	require.NoErrorf(t, err, "ReadFrame rejected an unknown type: %v", err)
 	got := rec.only(t)
-	if got.Type != 0x1f || got.TypeName != trace.UnknownName || got.Length != 2 {
-		t.Errorf("traced %+v, want type 0x1f reported as %s", got, trace.UnknownName)
-	}
+	assert.EqualValuesf(t, 0x1f, got.Type, "traced %+v, want type 0x1f reported as %s", got, trace.UnknownName)
+	assert.Equalf(t, trace.UnknownName, got.TypeName,
+		"traced %+v, want type 0x1f reported as %s", got, trace.UnknownName)
+	assert.EqualValuesf(t, 2, got.Length, "traced %+v, want type 0x1f reported as %s", got, trace.UnknownName)
 }
 
 func TestFramer_SetTracer_NilTurnsTracingOff(t *testing.T) {
 	var buf bytes.Buffer
 	rec := &recorder{}
 	f := tracedFramer(&buf, nil, rec)
-	if err := f.WritePing(false, [8]byte{}); err != nil {
-		t.Fatalf("WritePing: %v", err)
-	}
+	require.NoError(t, f.WritePing(false, [8]byte{}), "WritePing")
+
 	f.SetTracer(nil)
-	if err := f.WritePing(false, [8]byte{}); err != nil {
-		t.Fatalf("WritePing: %v", err)
-	}
-	if len(rec.got) != 1 {
-		t.Fatalf("traced %d frames after SetTracer(nil), want 1", len(rec.got))
-	}
+	err := f.WritePing(false, [8]byte{})
+
+	require.NoError(t, err, "WritePing")
+	require.Lenf(t, rec.got, 1, "traced %d frames after SetTracer(nil), want 1", len(rec.got))
 }
 
 // TestFramer_TraceOut_NotReportedWhenWriteFails: the event says a frame went
@@ -311,12 +293,11 @@ func TestFramer_TraceOut_NotReportedWhenWriteFails(t *testing.T) {
 	rec := &recorder{}
 	f := NewFramer(errWriterAt{0}, nil)
 	f.SetTracer(rec)
-	if err := f.WritePing(false, [8]byte{}); err == nil {
-		t.Fatal("WritePing succeeded on a failing writer")
-	}
-	if len(rec.got) != 0 {
-		t.Fatalf("traced %d frames for a write that failed: %+v", len(rec.got), rec.got)
-	}
+
+	err := f.WritePing(false, [8]byte{})
+
+	require.Error(t, err, "WritePing succeeded on a failing writer")
+	require.Emptyf(t, rec.got, "traced %d frames for a write that failed: %+v", len(rec.got), rec.got)
 }
 
 // errWriterAt fails after n bytes.
@@ -338,9 +319,7 @@ func (errShortWriteType) Error() string { return "short write" }
 func assertFrameInfo(t *testing.T, got, want trace.FrameInfo) {
 	t.Helper()
 	got.Params = nil // compared separately where it matters
-	if got != want {
-		t.Errorf("frame info mismatch\n got %+v\nwant %+v", got, want)
-	}
+	assert.Equalf(t, want, got, "frame info mismatch\n got %+v\nwant %+v", got, want)
 }
 
 // === Naming ===
@@ -354,9 +333,9 @@ func TestFrameType_String(t *testing.T) {
 		FrameAltSvc: "ALTSVC", FrameOrigin: "ORIGIN",
 		FrameType(0xfe): trace.UnknownName,
 	} {
-		if got := typ.String(); got != want {
-			t.Errorf("FrameType(%#x).String() = %q, want %q", uint8(typ), got, want)
-		}
+		got := typ.String()
+
+		assert.Equalf(t, want, got, "FrameType(%#x).String() = %q, want %q", uint8(typ), got, want)
 	}
 }
 
@@ -371,9 +350,9 @@ func TestErrCode_String(t *testing.T) {
 		ErrCodeInadequateSecurity: "INADEQUATE_SECURITY", ErrCodeHTTP11Required: "HTTP_1_1_REQUIRED",
 		ErrCode(0xdead): trace.UnknownName,
 	} {
-		if got := code.String(); got != want {
-			t.Errorf("ErrCode(%#x).String() = %q, want %q", uint32(code), got, want)
-		}
+		got := code.String()
+
+		assert.Equalf(t, want, got, "ErrCode(%#x).String() = %q, want %q", uint32(code), got, want)
 	}
 }
 
@@ -387,9 +366,9 @@ func TestSettingID_String(t *testing.T) {
 		SettingEnableConnectProtocol: "ENABLE_CONNECT_PROTOCOL",
 		SettingID(0x99):              trace.UnknownName,
 	} {
-		if got := id.String(); got != want {
-			t.Errorf("SettingID(%#x).String() = %q, want %q", uint16(id), got, want)
-		}
+		got := id.String()
+
+		assert.Equalf(t, want, got, "SettingID(%#x).String() = %q, want %q", uint16(id), got, want)
 	}
 }
 
@@ -433,9 +412,10 @@ func TestFrameType_FlagNames_MatchBits(t *testing.T) {
 				}
 			}
 			want := strings.Join(parts, "|")
-			if got := typ.FlagNames(f); got != want {
-				t.Errorf("%s.FlagNames(%#x) = %q, want %q", typ, uint8(f), got, want)
-			}
+
+			got := typ.FlagNames(f)
+
+			assert.Equalf(t, want, got, "%s.FlagNames(%#x) = %q, want %q", typ, uint8(f), got, want)
 		}
 	}
 }
@@ -503,17 +483,18 @@ func (r *repeatReader) Read(p []byte) (int, error) {
 func TestFramer_TraceIn_ReportsOversizedFrame(t *testing.T) {
 	// A SETTINGS header claiming 1 MiB, against the default 16384 read limit.
 	wire := []byte{0x10, 0x00, 0x00, byte(FrameSettings), 0, 0, 0, 0, 0}
-
 	rec := &recorder{}
 	f := tracedFramer(nil, bytes.NewReader(wire), rec)
-	if _, err := f.ReadFrame(context.Background(), dropHandler{}); !errors.Is(err, ErrFrameTooLarge) {
-		t.Fatalf("ReadFrame err = %v, want ErrFrameTooLarge", err)
-	}
+
+	_, err := f.ReadFrame(context.Background(), dropHandler{})
+
+	require.ErrorIsf(t, err, ErrFrameTooLarge, "ReadFrame err = %v, want ErrFrameTooLarge", err)
 	got := rec.only(t)
-	if got.TypeName != "SETTINGS" || got.Length != 0x100000 || got.Dir != trace.DirIn {
-		t.Errorf("traced %+v, want the inbound oversized SETTINGS with its claimed length", got)
-	}
-	if got.Detail != 0 {
-		t.Errorf("detail = %b, want none — no payload was read", got.Detail)
-	}
+	assert.Equalf(t, "SETTINGS", got.TypeName,
+		"traced %+v, want the inbound oversized SETTINGS with its claimed length", got)
+	assert.EqualValuesf(t, 0x100000, got.Length,
+		"traced %+v, want the inbound oversized SETTINGS with its claimed length", got)
+	assert.Equalf(t, trace.DirIn, got.Dir,
+		"traced %+v, want the inbound oversized SETTINGS with its claimed length", got)
+	assert.Zerof(t, got.Detail, "detail = %b, want none — no payload was read", got.Detail)
 }

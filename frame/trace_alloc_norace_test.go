@@ -8,6 +8,8 @@ import (
 	"testing"
 
 	"github.com/lodgvideon/poseidon-http-client/trace"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // TestFramer_Trace_AddsNoAllocations measures each frame path twice — once with
@@ -28,6 +30,11 @@ import (
 // !race because the detector adds allocations of its own, unevenly across the
 // two sides; the client and conn alloc gates are split by this tag for the same
 // reason.
+//
+// NOTHING inside an AllocsPerRun closure asserts, and no *testing.T reaches one:
+// testify reflects and allocates, and this gate counts the whole process. Each
+// closure records its error in a local and the assertions run after the measured
+// window closes.
 func TestFramer_Trace_AddsNoAllocations(t *testing.T) {
 	var settings SettingsParams
 	settings.set(SettingInitialWindowSize, 1<<20)
@@ -37,31 +44,44 @@ func TestFramer_Trace_AddsNoAllocations(t *testing.T) {
 
 	cases := []struct {
 		name string
-		run  func(*testing.T, *Framer)
+		run  func(*Framer) error
 	}{
-		{"DATA", func(t *testing.T, f *Framer) { mustWrite(t, f.WriteData(1, false, payload)) }},
-		{"HEADERS", func(t *testing.T, f *Framer) {
-			mustWrite(t, f.WriteHeaders(WriteHeadersParams{StreamID: 1, BlockFragment: block, EndHeaders: true}))
+		{"DATA", func(f *Framer) error { return f.WriteData(1, false, payload) }},
+		{"HEADERS", func(f *Framer) error {
+			return f.WriteHeaders(WriteHeadersParams{StreamID: 1, BlockFragment: block, EndHeaders: true})
 		}},
-		{"SETTINGS", func(t *testing.T, f *Framer) { mustWrite(t, f.WriteSettings(settings)) }},
-		{"RST_STREAM", func(t *testing.T, f *Framer) { mustWrite(t, f.WriteRSTStream(1, ErrCodeCancel)) }},
-		{"GOAWAY", func(t *testing.T, f *Framer) { mustWrite(t, f.WriteGoAway(1, ErrCodeNoError, nil)) }},
-		{"WINDOW_UPDATE", func(t *testing.T, f *Framer) { mustWrite(t, f.WriteWindowUpdate(1, 4096)) }},
-		{"PING", func(t *testing.T, f *Framer) { mustWrite(t, f.WritePing(false, [8]byte{})) }},
-		{"PUSH_PROMISE", func(t *testing.T, f *Framer) { mustWrite(t, f.WritePushPromise(1, 2, block, true, 0)) }},
+		{"SETTINGS", func(f *Framer) error { return f.WriteSettings(settings) }},
+		{"RST_STREAM", func(f *Framer) error { return f.WriteRSTStream(1, ErrCodeCancel) }},
+		{"GOAWAY", func(f *Framer) error { return f.WriteGoAway(1, ErrCodeNoError, nil) }},
+		{"WINDOW_UPDATE", func(f *Framer) error { return f.WriteWindowUpdate(1, 4096) }},
+		{"PING", func(f *Framer) error { return f.WritePing(false, [8]byte{}) }},
+		{"PUSH_PROMISE", func(f *Framer) error { return f.WritePushPromise(1, 2, block, true, 0) }},
 	}
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			write := func(tr trace.Tracer) float64 {
+			write := func(tr trace.Tracer) (float64, error) {
 				f := NewFramer(discardWriter{}, nil)
 				f.SetTracer(tr)
-				tc.run(t, f) // warm one-shot growth out of the measured window
-				return testing.AllocsPerRun(200, func() { tc.run(t, f) })
+				if err := tc.run(f); err != nil { // warm one-shot growth out of the measured window
+					return 0, err
+				}
+				var runErr error
+				n := testing.AllocsPerRun(200, func() {
+					if err := tc.run(f); err != nil {
+						runErr = err
+					}
+				})
+				return n, runErr
 			}
-			if traced, plain := write(discardTracer{}), write(nil); traced != plain {
-				t.Errorf("%v allocs traced vs %v untraced — tracing must be free", traced, plain)
-			}
+
+			traced, tracedErr := write(discardTracer{})
+			plain, plainErr := write(nil)
+
+			require.NoError(t, tracedErr, "write with a tracer installed")
+			require.NoError(t, plainErr, "write with no tracer")
+			assert.Equalf(t, plain, traced,
+				"%v allocs traced vs %v untraced — tracing must be free", traced, plain)
 		})
 	}
 
@@ -70,29 +90,29 @@ func TestFramer_Trace_AddsNoAllocations(t *testing.T) {
 		// not a scalar, so it is the one that could plausibly allocate.
 		var wire bytes.Buffer
 		peer := NewFramer(&wire, nil)
-		mustWrite(t, peer.WriteSettings(settings))
+		require.NoError(t, peer.WriteSettings(settings), "write")
 		one := bytes.Clone(wire.Bytes())
 
-		read := func(tr trace.Tracer) float64 {
+		read := func(tr trace.Tracer) (float64, error) {
 			f := NewFramer(nil, &repeatReader{buf: one})
 			f.SetTracer(tr)
 			h := dropHandler{}
 			ctx := context.Background()
-			return testing.AllocsPerRun(200, func() {
+			var runErr error
+			n := testing.AllocsPerRun(200, func() {
 				if _, err := f.ReadFrame(ctx, h); err != nil {
-					t.Fatal(err)
+					runErr = err
 				}
 			})
+			return n, runErr
 		}
-		if traced, plain := read(discardTracer{}), read(nil); traced != plain {
-			t.Errorf("%v allocs traced vs %v untraced — tracing must be free", traced, plain)
-		}
-	})
-}
 
-func mustWrite(t *testing.T, err error) {
-	t.Helper()
-	if err != nil {
-		t.Fatalf("write: %v", err)
-	}
+		traced, tracedErr := read(discardTracer{})
+		plain, plainErr := read(nil)
+
+		require.NoError(t, tracedErr, "read with a tracer installed")
+		require.NoError(t, plainErr, "read with no tracer")
+		assert.Equalf(t, plain, traced,
+			"%v allocs traced vs %v untraced — tracing must be free", traced, plain)
+	})
 }

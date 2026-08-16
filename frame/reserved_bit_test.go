@@ -1,6 +1,11 @@
 package frame
 
-import "testing"
+import (
+	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+)
 
 // The 31-bit id fields — the promised id in PUSH_PROMISE and the last-stream-id
 // in GOAWAY — share their word with a reserved bit that RFC 7540 §4.1 requires a
@@ -21,22 +26,23 @@ func TestWriter_ReservedBitStaysClear(t *testing.T) {
 
 	t.Run("GOAWAY last-stream-id", func(t *testing.T) {
 		fr, buf := newFramerWithBuffer()
-		if err := fr.WriteGoAway(outOfRange, ErrCodeNoError, nil); err != nil {
-			t.Fatalf("WriteGoAway: %v", err)
-		}
-		if b := buf.Bytes()[hdr]; b&0x80 != 0 {
-			t.Errorf("first payload byte = %#02x: the reserved bit is set on the wire, "+
+
+		err := fr.WriteGoAway(outOfRange, ErrCodeNoError, nil)
+
+		require.NoError(t, err, "WriteGoAway")
+		b := buf.Bytes()[hdr]
+		assert.Zerof(t, b&0x80,
+			"first payload byte = %#02x: the reserved bit is set on the wire, "+
 				"which RFC 7540 §4.1 forbids a sender to do", b)
-		}
 	})
 
 	t.Run("PUSH_PROMISE promised id", func(t *testing.T) {
 		fr, buf := newFramerWithBuffer()
-		if err := fr.WritePushPromise(1, outOfRange, []byte{0x82}, true, 0); err != nil {
-			t.Fatalf("WritePushPromise: %v", err)
-		}
-		if b := buf.Bytes()[hdr]; b&0x80 != 0 {
-			t.Errorf("first payload byte = %#02x: the reserved bit is set on the wire", b)
-		}
+
+		err := fr.WritePushPromise(1, outOfRange, []byte{0x82}, true, 0)
+
+		require.NoError(t, err, "WritePushPromise")
+		b := buf.Bytes()[hdr]
+		assert.Zerof(t, b&0x80, "first payload byte = %#02x: the reserved bit is set on the wire", b)
 	})
 }

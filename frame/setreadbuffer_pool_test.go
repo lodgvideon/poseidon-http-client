@@ -1,6 +1,11 @@
 package frame
 
-import "testing"
+import (
+	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+)
 
 // NewFramer draws its read buffer from a shared pool and remembers the handle;
 // Close writes whatever readBuf currently is back through that handle and returns
@@ -28,31 +33,26 @@ func sameArray(a, b []byte) bool {
 func TestSetReadBuffer_DoesNotDonateTheCallersBufferToThePool(t *testing.T) {
 	fr := NewFramer(nil, nil)
 	handle := fr.readBufPtr
-	if handle == nil {
-		t.Fatal("NewFramer did not take a pooled buffer; the test cannot observe the donation")
-	}
+	require.NotNil(t, handle,
+		"NewFramer did not take a pooled buffer; the test cannot observe the donation")
 	pooled := *handle
 	// GetReadBuf hands back a slice of LENGTH ZERO with capacity to spare, so
 	// sizing the caller's buffer from len(pooled) makes it cap-0 — and sameArray
 	// then answers false whatever happened, which is how the first version of
 	// this test passed against the unfixed code.
-	if cap(pooled) == 0 {
-		t.Fatal("the pooled buffer has no capacity; nothing to distinguish it from the caller's")
-	}
-
+	require.NotZero(t, cap(pooled),
+		"the pooled buffer has no capacity; nothing to distinguish it from the caller's")
 	mine := make([]byte, 0, cap(pooled))
-	if sameArray(mine, pooled) {
-		t.Fatal("the caller's buffer and the pooled one are the same array; the test proves nothing")
-	}
+	require.False(t, sameArray(mine, pooled),
+		"the caller's buffer and the pooled one are the same array; the test proves nothing")
 
 	fr.SetReadBuffer(mine)
 	fr.Close()
 
-	if sameArray(*handle, mine) {
-		t.Error("after SetReadBuffer, Close wrote the CALLER's buffer into the pooled " +
-			"handle and returned it to the shared pool — the next Framer to draw from " +
+	assert.False(t, sameArray(*handle, mine),
+		"after SetReadBuffer, Close wrote the CALLER's buffer into the pooled "+
+			"handle and returned it to the shared pool — the next Framer to draw from "+
 			"that pool shares an array with a caller that still owns it")
-	}
 }
 
 // TestSetReadBuffer_TheFramerActuallyUsesIt is the control: not donating the
@@ -61,10 +61,10 @@ func TestSetReadBuffer_DoesNotDonateTheCallersBufferToThePool(t *testing.T) {
 func TestSetReadBuffer_TheFramerActuallyUsesIt(t *testing.T) {
 	fr := NewFramer(nil, nil)
 	mine := make([]byte, 8192)
+
 	fr.SetReadBuffer(mine)
-	if !sameArray(fr.readBuf, mine) {
-		t.Error("SetReadBuffer did not install the caller's buffer")
-	}
+
+	assert.True(t, sameArray(fr.readBuf, mine), "SetReadBuffer did not install the caller's buffer")
 }
 
 // TestClose_StillReturnsThePooledBufferWhenUntouched is the other control: the
@@ -74,12 +74,10 @@ func TestClose_StillReturnsThePooledBufferWhenUntouched(t *testing.T) {
 	fr := NewFramer(nil, nil)
 	handle := fr.readBufPtr
 	original := fr.readBuf
+
 	fr.Close()
 
-	if fr.readBufPtr != nil {
-		t.Error("Close did not release the pool handle")
-	}
-	if !sameArray(*handle, original) {
-		t.Error("Close did not write the framer's own buffer back through the handle")
-	}
+	assert.Nil(t, fr.readBufPtr, "Close did not release the pool handle")
+	assert.True(t, sameArray(*handle, original),
+		"Close did not write the framer's own buffer back through the handle")
 }

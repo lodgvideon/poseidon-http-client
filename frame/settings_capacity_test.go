@@ -2,6 +2,9 @@ package frame
 
 import (
 	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // WriteSettings sizes a scratch array from maxSettingsPairs * settingsPairWireSize
@@ -29,18 +32,16 @@ func TestWriteSettings_ScratchFitsAFullTable(t *testing.T) {
 	for i := 0; i < maxSettingsPairs; i++ {
 		s.Pairs[i] = SettingPair{ID: SettingID(i + 1), Value: uint32(i) * 1000}
 	}
-	if err := fr.WriteSettings(s); err != nil {
-		t.Fatalf("WriteSettings with a full table: %v", err)
-	}
 
+	err := fr.WriteSettings(s)
+
+	require.NoErrorf(t, err, "WriteSettings with a full table: %v", err)
 	// 9-byte frame header, then one entry per pair.
 	const hdr = 9
 	wantPayload := maxSettingsPairs * settingsPairWireSize
-	if got := buf.Len() - hdr; got != wantPayload {
-		t.Fatalf("payload = %d bytes, want %d (%d pairs x %d) — the scratch did not "+
-			"hold a full table", got, wantPayload, maxSettingsPairs, settingsPairWireSize)
-	}
-
+	require.Equalf(t, wantPayload, buf.Len()-hdr,
+		"payload = %d bytes, want %d (%d pairs x %d) — the scratch did not "+
+			"hold a full table", buf.Len()-hdr, wantPayload, maxSettingsPairs, settingsPairWireSize)
 	// The last entry is the one a too-small scratch loses first, so it is the one
 	// worth decoding by hand.
 	last := buf.Bytes()[hdr+(maxSettingsPairs-1)*settingsPairWireSize:]
@@ -48,10 +49,10 @@ func TestWriteSettings_ScratchFitsAFullTable(t *testing.T) {
 	wantVal := uint32(maxSettingsPairs-1) * 1000
 	gotID := SettingID(last[0])<<8 | SettingID(last[1])
 	gotVal := uint32(last[2])<<24 | uint32(last[3])<<16 | uint32(last[4])<<8 | uint32(last[5])
-	if gotID != wantID || gotVal != wantVal {
-		t.Errorf("last entry on the wire = id %#x value %d, want id %#x value %d",
-			gotID, gotVal, wantID, wantVal)
-	}
+	assert.Equalf(t, wantID, gotID,
+		"last entry on the wire = id %#x value %d, want id %#x value %d", gotID, gotVal, wantID, wantVal)
+	assert.Equalf(t, wantVal, gotVal,
+		"last entry on the wire = id %#x value %d, want id %#x value %d", gotID, gotVal, wantID, wantVal)
 }
 
 // TestWriteSettings_RefusesMoreThanTheTable is the bound itself: N past the array
@@ -60,9 +61,11 @@ func TestWriteSettings_RefusesMoreThanTheTable(t *testing.T) {
 	fr, _ := newFramerWithBuffer()
 	var s SettingsParams
 	s.N = maxSettingsPairs + 1
-	if err := fr.WriteSettings(s); err != ErrSettingsLength {
-		t.Errorf("WriteSettings with N=%d returned %v, want ErrSettingsLength", s.N, err)
-	}
+
+	err := fr.WriteSettings(s)
+
+	assert.ErrorIsf(t, err, ErrSettingsLength,
+		"WriteSettings with N=%d returned %v, want ErrSettingsLength", s.N, err)
 }
 
 // TestSettingsPairWireSize is the RFC anchor: §6.5.1 gives each entry a 16-bit
@@ -70,8 +73,9 @@ func TestWriteSettings_RefusesMoreThanTheTable(t *testing.T) {
 // against the constant, so the constant cannot drift and take the scratch with
 // it.
 func TestSettingsPairWireSize(t *testing.T) {
-	if settingsPairWireSize != 2+4 {
-		t.Errorf("settingsPairWireSize = %d, want 6 (a 16-bit identifier plus a "+
-			"32-bit value, RFC 7540 §6.5.1)", settingsPairWireSize)
-	}
+	got := settingsPairWireSize
+
+	assert.Equalf(t, 2+4, got,
+		"settingsPairWireSize = %d, want 6 (a 16-bit identifier plus a "+
+			"32-bit value, RFC 7540 §6.5.1)", got)
 }
