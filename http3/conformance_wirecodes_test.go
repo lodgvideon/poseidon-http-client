@@ -1,8 +1,10 @@
 package http3
 
 import (
-	"errors"
 	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // The two RFC-named connection error codes whose WIRE value no test observed.
@@ -36,21 +38,16 @@ func TestConformance_RFC9114_Sec724_DuplicateServerSettingIsSettingsError(t *tes
 	server := &fakeStream{id: 3, recvChunks: [][]byte{dup}}
 	conn := &fakeConn{req: &fakeStream{}, acceptQ: []quicStream{server}}
 	client, err := NewClientFake(conn, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, err, "NewClientFake over the fake transport")
 
-	if err := client.serviceControl(); !errors.Is(err, ErrH3Control) {
-		t.Fatalf("serviceControl = %v, want ErrH3Control", err)
-	}
-	if !conn.closed {
-		t.Fatal("connection not closed after a duplicate setting identifier")
-	}
-	if conn.closeCode != H3SettingsErrorCode {
-		t.Fatalf("close code = %#x, want H3_SETTINGS_ERROR (%#x);\n"+
+	serr := client.serviceControl()
+
+	assert.ErrorIsf(t, serr, ErrH3Control, "serviceControl = %v, want ErrH3Control", serr)
+	assert.True(t, conn.closed, "connection not closed after a duplicate setting identifier")
+	assert.Equalf(t, H3SettingsErrorCode, conn.closeCode,
+		"close code = %#x, want H3_SETTINGS_ERROR (%#x);\n"+
 			"the parser error is not the requirement — the code the peer reads is",
-			conn.closeCode, H3SettingsErrorCode)
-	}
+		conn.closeCode, H3SettingsErrorCode)
 }
 
 // TestConformance_RFC9204_Sec43_MalformedEncoderInstructionIsEncoderStreamError
@@ -69,25 +66,19 @@ func TestConformance_RFC9204_Sec43_MalformedEncoderInstructionIsEncoderStreamErr
 	// 0xff: Insert With Name Reference (1...), T=1 static, 6-bit prefix all ones
 	// so the index continues; 0x89 0x01 encodes the remainder, giving index 200.
 	encoderStream := []byte{byte(StreamTypeQPACKEncoder), 0xff, 0x89, 0x01}
-
 	server := &fakeStream{id: 3, recvChunks: [][]byte{serverControl(nil)}}
 	encoder := &fakeStream{id: 7, recvChunks: [][]byte{encoderStream}}
 	conn := &fakeConn{req: &fakeStream{}, acceptQ: []quicStream{server, encoder}}
 	client, err := NewClientFake(conn, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, err, "NewClientFake over the fake transport")
 
-	if err := client.serviceControl(); !errors.Is(err, ErrH3Control) {
-		t.Fatalf("serviceControl = %v, want ErrH3Control", err)
-	}
-	if !conn.closed {
-		t.Fatal("connection not closed after a malformed encoder instruction")
-	}
-	if conn.closeCode != H3QpackEncoderStreamError {
-		t.Fatalf("close code = %#x, want QPACK_ENCODER_STREAM_ERROR (%#x);\n"+
+	serr := client.serviceControl()
+
+	assert.ErrorIsf(t, serr, ErrH3Control, "serviceControl = %v, want ErrH3Control", serr)
+	assert.True(t, conn.closed, "connection not closed after a malformed encoder instruction")
+	assert.Equalf(t, H3QpackEncoderStreamError, conn.closeCode,
+		"close code = %#x, want QPACK_ENCODER_STREAM_ERROR (%#x);\n"+
 			"H3_EXCESSIVE_LOAD is the branch next to this one — returning it here would "+
 			"tell the peer its stream was too large rather than malformed",
-			conn.closeCode, H3QpackEncoderStreamError)
-	}
+		conn.closeCode, H3QpackEncoderStreamError)
 }

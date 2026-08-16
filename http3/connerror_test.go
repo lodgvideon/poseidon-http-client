@@ -4,8 +4,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"strings"
 	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // Every connection-level HTTP/3 violation used to collapse into the bare
@@ -19,14 +21,14 @@ import (
 // against errors.Is(err, ErrH3Control) must keep working.
 func TestH3ConnError_MatchesTheSentinel(t *testing.T) {
 	err := error(&H3ConnError{Code: H3FrameError})
-	if !errors.Is(err, ErrH3Control) {
-		t.Error("a typed connection error no longer matches ErrH3Control; every existing " +
+
+	wrapped := fmt.Errorf("do: %w", err)
+
+	assert.ErrorIs(t, err, ErrH3Control,
+		"a typed connection error no longer matches ErrH3Control; every existing "+
 			"errors.Is check against the sentinel would stop firing")
-	}
 	// Wrapped, as a caller several layers up sees it.
-	if !errors.Is(fmt.Errorf("do: %w", err), ErrH3Control) {
-		t.Error("the match does not survive wrapping")
-	}
+	assert.ErrorIs(t, wrapped, ErrH3Control, "the match does not survive wrapping")
 }
 
 // TestH3ConnError_CarriesTheCode is the point of the change: the code the peer
@@ -37,26 +39,28 @@ func TestH3ConnError_CarriesTheCode(t *testing.T) {
 		H3MissingSettings, H3IDError, 0x0200, // QPACK_DECOMPRESSION_FAILED
 	} {
 		err := error(&H3ConnError{Code: code})
+
 		var ce *H3ConnError
-		if !errors.As(err, &ce) {
-			t.Fatalf("code %#x: errors.As failed", code)
-		}
-		if ce.Code != code {
-			t.Errorf("code %#x survived as %#x", code, ce.Code)
-		}
+		ok := errors.As(err, &ce)
+
+		require.Truef(t, ok, "code %#x: errors.As failed", code)
+		assert.Equalf(t, code, ce.Code, "code %#x survived as %#x", code, ce.Code)
 	}
 }
 
 // TestH3ConnError_MessageNamesKnownCodes keeps the diagnosis readable: a bare
 // hex code in a log is the thing this change exists to improve on.
 func TestH3ConnError_MessageNamesKnownCodes(t *testing.T) {
-	if got := (&H3ConnError{Code: H3FrameError}).Error(); !strings.Contains(got, "H3_FRAME_ERROR") {
-		t.Errorf("Error() = %q, want it to name H3_FRAME_ERROR", got)
-	}
+	known := &H3ConnError{Code: H3FrameError}
+	unknown := &H3ConnError{Code: 0xdead}
+
+	gotKnown, gotUnknown := known.Error(), unknown.Error()
+
+	assert.Containsf(t, gotKnown, "H3_FRAME_ERROR",
+		"Error() = %q, want it to name H3_FRAME_ERROR", gotKnown)
 	// An unknown code still renders, in hex, rather than being swallowed.
-	if got := (&H3ConnError{Code: 0xdead}).Error(); !strings.Contains(got, "0xdead") {
-		t.Errorf("Error() = %q, want the raw code for an unknown value", got)
-	}
+	assert.Containsf(t, gotUnknown, "0xdead",
+		"Error() = %q, want the raw code for an unknown value", gotUnknown)
 }
 
 // TestH3ConnError_DistinguishesCauses is the failure the issue describes, stated
@@ -66,17 +70,15 @@ func TestH3ConnError_DistinguishesCauses(t *testing.T) {
 	localQPACK := error(&H3ConnError{Code: 0x0200}) // QPACK_DECOMPRESSION_FAILED
 
 	var a, b *H3ConnError
-	if !errors.As(peerFraming, &a) || !errors.As(localQPACK, &b) {
-		t.Fatal("errors.As failed")
-	}
-	if a.Code == b.Code {
-		t.Fatal("the two causes carry the same code")
-	}
+	okA, okB := errors.As(peerFraming, &a), errors.As(localQPACK, &b)
+
+	require.True(t, okA, "errors.As failed on the peer-framing error")
+	require.True(t, okB, "errors.As failed on the local QPACK error")
+	assert.NotEqual(t, a.Code, b.Code, "the two causes carry the same code")
 	// Both still answer to the sentinel, so a caller that only wants "connection
 	// died" is unaffected by the added detail.
-	if !errors.Is(peerFraming, ErrH3Control) || !errors.Is(localQPACK, ErrH3Control) {
-		t.Error("a caller matching the sentinel stopped seeing one of them")
-	}
+	assert.ErrorIs(t, peerFraming, ErrH3Control, "a caller matching the sentinel stopped seeing the peer-framing error")
+	assert.ErrorIs(t, localQPACK, ErrH3Control, "a caller matching the sentinel stopped seeing the local QPACK error")
 }
 
 // TestH3ConnError_RealPathCarriesTheCode drives an actual connection-level
@@ -99,23 +101,21 @@ func TestH3ConnError_RealPathCarriesTheCode(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			conn := &fakeConn{req: &fakeStream{recvChunks: [][]byte{tc.frame}, fin: true}}
-			client, _ := NewClientFake(conn, nil)
+			client, cerr := NewClientFake(conn, nil)
+			require.NoError(t, cerr, "NewClientFake over the fake transport")
+
 			_, _, err := client.Do(context.Background(),
 				&Request{Method: "GET", Scheme: "https", Authority: "h", Path: "/"})
 
 			var ce *H3ConnError
-			if !errors.As(err, &ce) {
-				t.Fatalf("err = %v (%T), want a *H3ConnError — the code is on the wire "+
+			require.Truef(t, errors.As(err, &ce),
+				"err = %v (%T), want a *H3ConnError — the code is on the wire "+
 					"(close code %#x) but not in the error the caller gets",
-					err, err, conn.closeCode)
-			}
-			if ce.Code != tc.code {
-				t.Errorf("error carries %#x, want %#x", ce.Code, tc.code)
-			}
-			if ce.Code != conn.closeCode {
-				t.Errorf("error carries %#x but %#x went on the wire; the two must agree",
-					ce.Code, conn.closeCode)
-			}
+				err, err, conn.closeCode)
+			assert.Equalf(t, tc.code, ce.Code, "error carries %#x, want %#x", ce.Code, tc.code)
+			assert.Equalf(t, conn.closeCode, ce.Code,
+				"error carries %#x but %#x went on the wire; the two must agree",
+				ce.Code, conn.closeCode)
 		})
 	}
 }

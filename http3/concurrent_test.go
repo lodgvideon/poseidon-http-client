@@ -3,11 +3,13 @@ package http3
 import (
 	"bytes"
 	"context"
-	"errors"
 	"strconv"
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	"github.com/lodgvideon/poseidon-http-client/quic"
 )
@@ -381,9 +383,8 @@ func waitSentN(t *testing.T, c *muxConn, n int) {
 	t.Helper()
 	deadline := time.Now().Add(5 * time.Second)
 	for c.sentCount() < n {
-		if time.Now().After(deadline) {
-			t.Fatalf("only %d of %d requests were sent", c.sentCount(), n)
-		}
+		require.Falsef(t, time.Now().After(deadline),
+			"only %d of %d requests were sent", c.sentCount(), n)
 		time.Sleep(time.Millisecond)
 	}
 }
@@ -423,22 +424,22 @@ func headerValue(resp *Response, name string) string {
 // mismatch these (and trip -race first).
 func checkResponse(t *testing.T, r doResult) {
 	t.Helper()
-	if r.err != nil {
-		t.Errorf("Do: %v", r.err)
+	if !assert.NoErrorf(t, r.err, "Do: %v", r.err) {
 		return
 	}
-	if r.resp == nil || r.resp.Status != 200 {
-		t.Errorf("resp = %+v, want status 200", r.resp)
+	if !assert.Truef(t, r.resp != nil, "resp = %+v, want status 200", r.resp) {
+		return
+	}
+	if !assert.Equalf(t, 200, r.resp.Status, "resp = %+v, want status 200", r.resp) {
 		return
 	}
 	seq := headerValue(r.resp, "x-seq")
-	if seq == "" {
-		t.Errorf("response missing x-seq header: %+v", r.resp.Headers)
+	if !assert.NotEmptyf(t, seq, "response missing x-seq header: %+v", r.resp.Headers) {
 		return
 	}
-	if want := []byte("seq=" + seq); !bytes.Equal(r.body, want) {
-		t.Errorf("body = %q, want %q (QPACK cross-talk between concurrent Do?)", r.body, want)
-	}
+	want := []byte("seq=" + seq)
+	assert.Truef(t, bytes.Equal(r.body, want),
+		"body = %q, want %q (QPACK cross-talk between concurrent Do?)", r.body, want)
 }
 
 // TestConcurrent_ManyStreamsUnderRace is the acid test: 64 concurrent Do on one
@@ -449,16 +450,14 @@ func checkResponse(t *testing.T, r doResult) {
 func TestConcurrent_ManyStreamsUnderRace(t *testing.T) {
 	conn := newMuxConn(8) // small initial stream limit forces the credit wake
 	client, err := NewClientFake(conn, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, err, "NewClientFake over the multi-stream fake transport")
 	defer client.Close()
-
 	const n = 64
 	body := bytes.Repeat([]byte("x"), 13000) // > 12 KiB: exercises the send/cwnd wake under contention
 	results := make([]doResult, n)
 	var wg sync.WaitGroup
 	wg.Add(n)
+
 	for i := 0; i < n; i++ {
 		go func(i int) {
 			defer wg.Done()
@@ -479,15 +478,13 @@ func TestConcurrent_ManyStreamsUnderRace(t *testing.T) {
 func TestConcurrent_WavesExceedStreamLimit(t *testing.T) {
 	conn := newMuxConn(8) // 8 slots; 24 requests => 16 must wait for credit
 	client, err := NewClientFake(conn, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, err, "NewClientFake over the multi-stream fake transport")
 	defer client.Close()
-
 	const n = 24
 	results := make([]doResult, n)
 	var wg sync.WaitGroup
 	wg.Add(n)
+
 	for i := 0; i < n; i++ {
 		go func(i int) {
 			defer wg.Done()
@@ -509,11 +506,8 @@ func TestConcurrent_PerRequestCancel(t *testing.T) {
 	conn := newMuxConn(100)  // ample stream credit; this test is about per-request cancel
 	conn.deliverOpen = false // hold every response until after the cancel
 	client, err := NewClientFake(conn, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, err, "NewClientFake over the multi-stream fake transport")
 	defer client.Close()
-
 	const others = 7
 	results := make([]doResult, others)
 	var wg sync.WaitGroup
@@ -537,11 +531,11 @@ func TestConcurrent_PerRequestCancel(t *testing.T) {
 
 	select {
 	case r := <-res0:
-		if !errors.Is(r.err, context.Canceled) {
-			t.Fatalf("cancelled Do err = %v, want context.Canceled", r.err)
-		}
+		assert.ErrorIsf(t, r.err, context.Canceled,
+			"cancelled Do err = %v, want context.Canceled — only the cancelled "+
+				"exchange may fail, and it must fail with its own context's error", r.err)
 	case <-time.After(5 * time.Second):
-		t.Fatal("cancelled Do did not return")
+		require.Fail(t, "cancelled Do did not return")
 	}
 
 	conn.openDelivery() // let the remaining seven complete
@@ -553,9 +547,7 @@ func TestConcurrent_PerRequestCancel(t *testing.T) {
 	conn.mu.Lock()
 	closed := conn.closed
 	conn.mu.Unlock()
-	if closed {
-		t.Fatal("a per-request cancel must not close the connection")
-	}
+	assert.False(t, closed, "a per-request cancel must not close the connection")
 }
 
 // TestConcurrent_CloseMidFlight checks that Close while many Do are in flight fails
@@ -565,10 +557,7 @@ func TestConcurrent_CloseMidFlight(t *testing.T) {
 	conn := newMuxConn(100)
 	conn.deliverOpen = false // nothing ever completes; every Do is left parked
 	client, err := NewClientFake(conn, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-
+	require.NoError(t, err, "NewClientFake over the multi-stream fake transport")
 	const n = 32
 	results := make([]doResult, n)
 	var wg sync.WaitGroup
@@ -581,14 +570,12 @@ func TestConcurrent_CloseMidFlight(t *testing.T) {
 	}
 	waitSentN(t, conn, n) // all 32 parked in WaitReadable
 
-	if err := client.Close(); err != nil {
-		t.Fatalf("Close: %v", err)
-	}
+	closeErr := client.Close()
 	wg.Wait()
 
+	require.NoErrorf(t, closeErr, "Close: %v", closeErr)
 	for i := range results {
-		if !errors.Is(results[i].err, quic.ErrConnClosed) {
-			t.Fatalf("in-flight Do %d woke with %v, want quic.ErrConnClosed (graceful)", i, results[i].err)
-		}
+		assert.ErrorIsf(t, results[i].err, quic.ErrConnClosed,
+			"in-flight Do %d woke with %v, want quic.ErrConnClosed (graceful)", i, results[i].err)
 	}
 }
