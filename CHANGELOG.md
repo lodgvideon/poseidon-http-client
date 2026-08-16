@@ -52,6 +52,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   granting receive credit on the consumer's goroutine, so the gate is on the
   return value and that caller's choice is left alone.
 
+- **Requests are now correlated with their own responses under concurrency, so
+  stream mixing can fail a test.** The suite checked that a response came back,
+  not that it was *this* request's response: every concurrent test fired the
+  identical `GET /healthz` and asserted only the status, so every reply was the
+  same two bytes and delivering stream A's response to stream B left both
+  assertions passing. The tests were structurally incapable of failing on mixing
+  (#651).
+
+  That matters more here than in most clients, because this one pools buffers and
+  decodes header blocks into reused storage — the failure mode is not a crash but
+  a response, or a header value, belonging to a neighbouring request, and nothing
+  above `conn/multistream_test.go` (10 streams, 13-byte bodies, below `client` and
+  the pool) could see it.
+
+  Two matrix tests give every in-flight request a distinct identity on both
+  channels a response can carry and make each prove it got its own back. Shown to
+  discriminate rather than merely to pass: with all responses sharing one body
+  buffer, the new test reports 119 mismatches across the four peers while both
+  pre-existing concurrency tests stay green; with one header set aliased across
+  streams, the header test reports 28 while the existing header tests stay green.
+
+- **`X-Echo-Headers` is implemented by every peer that claims it.**
+  `fixtures/CONTRACT.md` has specified it for `/echo` since it was written, and
+  only Undertow implemented it — repo-wide the string occurred exactly twice, the
+  contract line and that implementation, so no test had ever read a request header
+  back. Added to the Go fixture and to nginx; nghttpx inherits it from Undertow,
+  its origin.
+
+- **`conn/sendflow_test.go` compares the uploaded bytes, not their count.** It is
+  the one upload in the suite that crosses the send window, so it is chunked,
+  credited and reassembled across many DATA frames — and a length check passes
+  through all of that unchanged, which made the closest thing to an
+  upload-corruption detector unable to detect corruption.
+
 - **An interim-then-close request is now proven un-replayed end to end.**
   `ErrServerClosedIdle` means no part of a response ever arrived, which is what
   makes replaying safe; an interim response is the opposite, since `100 Continue`

@@ -5,9 +5,26 @@ package integration_test
 import (
 	"io"
 	"net/http"
+	"sort"
 	"strconv"
+	"strings"
 	"time"
 )
+
+// echoHeaderSummary renders the request headers as "name: value" joined by "; ", the
+// shape Undertow already produces (test/integration/undertow-server/.../Main.java), so
+// one assertion reads the same thing from every peer. Sorted, because Go's header map
+// iterates in random order and a test comparing whole values would flake.
+func echoHeaderSummary(h http.Header) string {
+	parts := make([]string, 0, len(h))
+	for name, vals := range h {
+		for _, v := range vals {
+			parts = append(parts, name+": "+v)
+		}
+	}
+	sort.Strings(parts)
+	return strings.Join(parts, "; ")
+}
 
 // registerFixtures installs all test endpoint handlers on the given mux.
 // All four servers (Go, nginx, Undertow, nghttpx) implement the same contract.
@@ -22,8 +39,12 @@ func registerFixtures(mux *http.ServeMux) {
 		_, _ = io.WriteString(w, "hello from go-http")
 	})
 
+	// X-Echo-Headers is half of what CONTRACT.md has always specified for /echo. It
+	// was implemented only by Undertow, so no cross-peer test could read a request
+	// header back and the header channel was unverifiable here (#651).
 	mux.HandleFunc("/echo", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/plain")
+		w.Header().Set("X-Echo-Headers", echoHeaderSummary(r.Header))
 		body, _ := io.ReadAll(r.Body)
 		_, _ = w.Write(body)
 	})
