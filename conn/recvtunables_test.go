@@ -1,8 +1,11 @@
 package conn
 
 import (
-	"bufio"
+	"context"
+	"io"
+	"net"
 	"testing"
+	"time"
 )
 
 // Two receive-path parameters could not be set from outside the package, and both
@@ -148,16 +151,51 @@ func TestStaticConnWindow_IgnoredWhenTuning(t *testing.T) {
 
 // TestReadBufferSize_ReachesTheReader pins the other half: the option has to size the
 // bufio.Reader the Framer reads through, not merely survive defaulted().
+//
+// It observes the real transport rather than building a reader of its own. An earlier
+// version did the latter — `bufio.NewReaderSize(fake, opts.ReadBufferSize)` — and so
+// asserted that bufio honours its own size argument, which it does regardless of what
+// the constructor passes: replacing opts.ReadBufferSize with the old constant inside
+// NewClientConn left it green.
+//
+// A bufio.Reader hands its whole buffer to the transport's Read, so the length of the
+// slice the transport sees IS the buffer size. NewClientConn fails right after (the
+// fake never returns a frame), which is fine: the read has already happened, and the
+// constructor's error is not what is under test.
 func TestReadBufferSize_ReachesTheReader(t *testing.T) {
 	for _, size := range []int{minReadBufferSize, 64 * 1024} {
-		opts := (ConnOptions{ReadBufferSize: size}).defaulted()
-		br := bufio.NewReaderSize(nopReader{}, opts.ReadBufferSize)
-		if got := br.Size(); got != size {
-			t.Errorf("a reader built from ReadBufferSize %d has size %d", size, got)
+		tr := &readSizeConn{}
+		_, _ = NewClientConn(context.Background(), tr, ConnOptions{
+			ReadBufferSize: size,
+			Dialer:         &PlaintextDialer{},
+		})
+		if tr.maxRead == 0 {
+			t.Fatalf("the transport was never read from, so nothing was observed for size %d", size)
+		}
+		if tr.maxRead != size {
+			t.Errorf("the transport was handed a %d-byte read buffer, want %d — "+
+				"ConnOptions.ReadBufferSize is not sizing the reader the Framer reads through",
+				tr.maxRead, size)
 		}
 	}
 }
 
-type nopReader struct{}
+// readSizeConn records the largest slice its Read is handed, which is the size of the
+// bufio.Reader wrapping it, and then fails so the handshake does not block.
+type readSizeConn struct {
+	net.Conn
+	maxRead int
+}
 
-func (nopReader) Read([]byte) (int, error) { return 0, nil }
+func (c *readSizeConn) Read(p []byte) (int, error) {
+	if len(p) > c.maxRead {
+		c.maxRead = len(p)
+	}
+	return 0, io.EOF
+}
+
+func (c *readSizeConn) Write(p []byte) (int, error)      { return len(p), nil }
+func (c *readSizeConn) Close() error                     { return nil }
+func (c *readSizeConn) SetReadDeadline(time.Time) error  { return nil }
+func (c *readSizeConn) SetWriteDeadline(time.Time) error { return nil }
+func (c *readSizeConn) SetDeadline(time.Time) error      { return nil }
