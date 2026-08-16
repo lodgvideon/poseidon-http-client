@@ -61,6 +61,13 @@ func (c *connPacketConn) Write(p []byte) (int, error) {
 	return c.shared.WriteToUDP(p, c.remote)
 }
 
+// RemoteAddr returns the peer this view's datagrams are addressed to. It is what
+// makes Conn.RemoteAddr work for an accepted connection: the shared socket's own
+// RemoteAddr is nil (it is unconnected, serving every peer), so the per-connection
+// view is the only thing that knows. Set once by newConnPacketConn and never
+// reassigned.
+func (c *connPacketConn) RemoteAddr() net.Addr { return c.remote }
+
 // Read returns the next datagram the listener routed to this connection. It
 // honours the read deadline, returning os.ErrDeadlineExceeded (a net.Error whose
 // Timeout reports true) when it expires, and net.ErrClosed after Close.
