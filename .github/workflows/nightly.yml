@@ -48,10 +48,35 @@ jobs:
             target: FuzzRequiredInsertCount
           - pkg: ./qpack
             target: FuzzDynamicIndexResolution
+          # The two QPACK instruction streams. Both are read from unidirectional
+          # streams the peer opens, so they parse unauthenticated bytes with no
+          # framing above them to constrain what arrives.
+          - pkg: ./qpack
+            target: FuzzParseEncoderInstructions
+          - pkg: ./qpack
+            target: FuzzParseDecoderInstructions
           - pkg: ./http3
             target: FuzzFrameReader
           - pkg: ./http3
             target: FuzzParseSettings
+          # The rest of http3's peer-facing parsers. This package and qpack are the
+          # two sitting closest to unauthenticated peer bytes that the matrix
+          # under-covered relative to quic and frame (#687), so they are the first
+          # slice of the 19 targets whose seed corpus CI replays but which nothing
+          # was mutating. Deliberately staged: the remaining 12 (client 4, grpc 3,
+          # http1 3, hpack 1, quic 1) are further from peer input and wait until
+          # these have run a while, because a target that finds something at 3am
+          # needs someone to triage it.
+          - pkg: ./http3
+            target: FuzzParseFrameHeader
+          - pkg: ./http3
+            target: FuzzReadStreamType
+          - pkg: ./http3
+            target: FuzzDecodeResponseHeaders
+          - pkg: ./http3
+            target: FuzzDecodeTrailers
+          - pkg: ./http3
+            target: FuzzQPACKEncoderStreamBuffer
           - pkg: ./quic
             target: FuzzParseFrames
           - pkg: ./quic

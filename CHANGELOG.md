@@ -102,6 +102,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   a response arrived — asserts the replay *does* happen there, without which the
   gate is satisfied by a client that never retries anything.
 
+### CI
+
+- **The nightly mutation-fuzz matrix now covers every `http3` and `qpack` parser.**
+  The module has 34 `Fuzz` targets and the matrix listed 15. The other 19 were not
+  unrun — ordinary CI replays their seed corpus — but nothing mutated them, so they
+  proved the parsers still handle the inputs we already thought of while searching
+  for none we had not (#687).
+
+  This is the first slice: `http3` 2 → 7 and `qpack` 3 → 5, the two packages closest
+  to unauthenticated peer bytes that the matrix under-covered relative to `quic` and
+  `frame`. Each was fuzzed locally before being listed rather than added blind, and
+  every one found inputs its seed corpus never reached. The remaining 12 (`client`
+  4, `grpc` 3, `http1` 3, `hpack` 1, `quic` 1) are staged deliberately: a target
+  that finds something at 3am needs an owner, and adding all 19 at once risks a red
+  nightly nobody reads.
+
 ## [v0.13.0] — 2026-08-15
 
 ### Changed (breaking)
