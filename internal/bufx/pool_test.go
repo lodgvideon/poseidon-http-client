@@ -2,32 +2,40 @@ package bufx
 
 import (
 	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestReadBufPool_RoundTrip(t *testing.T) {
-	p := GetReadBuf(4096)
-	if cap(*p) < 4096 {
-		t.Fatalf("cap = %d, want >= 4096", cap(*p))
-	}
-	*p = (*p)[:4096]
+	const ask = 4096
+
+	p := GetReadBuf(ask)
+	require.GreaterOrEqualf(t, cap(*p), ask,
+		"cap = %d, want >= %d — a buffer smaller than the ask is not usable by the caller at all", cap(*p), ask)
+	*p = (*p)[:ask]
 	for i := range *p {
 		(*p)[i] = byte(i)
 	}
 	PutReadBuf(p)
 
-	p2 := GetReadBuf(4096)
-	if cap(*p2) < 4096 {
-		t.Fatalf("cap after reuse = %d, want >= 4096", cap(*p2))
-	}
-	PutReadBuf(p2)
+	p2 := GetReadBuf(ask)
+	defer PutReadBuf(p2)
+
+	require.GreaterOrEqualf(t, cap(*p2), ask,
+		"cap after reuse = %d, want >= %d — a recycled buffer that no longer satisfies the ask makes the pool worse than allocating outright",
+		cap(*p2), ask)
 }
 
 func TestReadBufPool_GrowsWhenSmaller(t *testing.T) {
-	p := GetReadBuf(64 << 10)
-	if cap(*p) < 64<<10 {
-		t.Fatalf("cap = %d, want >= %d", cap(*p), 64<<10)
-	}
-	PutReadBuf(p)
+	const ask = 64 << 10 // past defaultReadBufSize, so nothing recycled can serve it
+
+	p := GetReadBuf(ask)
+	defer PutReadBuf(p)
+
+	require.GreaterOrEqualf(t, cap(*p), ask,
+		"cap = %d, want >= %d — an ask the pool cannot serve must be satisfied by a fresh allocation, not by handing back a short buffer the caller will overrun",
+		cap(*p), ask)
 }
 
 func BenchmarkReadBufPool_GetPut(b *testing.B) {
@@ -44,7 +52,7 @@ func BenchmarkReadBufPool_GetPut(b *testing.B) {
 // nine bytes short of that can never satisfy it: every cold Get allocated, threw
 // the result away, and allocated again.
 //
-// The constant is duplicated here rather than imported: internal/bytesx must not
+// The constant is duplicated here rather than imported: internal/bufx must not
 // depend on frame, so the test states the demand it is sized for and fails if
 // either side moves.
 func TestGetReadBuf_ServesTheFramerAsk(t *testing.T) {
@@ -52,10 +60,10 @@ func TestGetReadBuf_ServesTheFramerAsk(t *testing.T) {
 
 	// A buffer straight from New, with nothing recycled to mask the size.
 	fresh := readBufPool.New().(*[]byte)
-	if cap(*fresh) < framerAsk {
-		t.Errorf("the pool's New yields cap %d, below the %d its only consumer asks for — "+
+
+	assert.GreaterOrEqualf(t, cap(*fresh), framerAsk,
+		"the pool's New yields cap %d, below the %d its only consumer asks for — "+
 			"every cold NewFramer pays two allocations", cap(*fresh), framerAsk)
-	}
 }
 
 // There is deliberately NO test that the undersized buffer returns to the pool.

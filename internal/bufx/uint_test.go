@@ -1,8 +1,9 @@
 package bufx
 
 import (
-	"bytes"
 	"testing"
+
+	"github.com/stretchr/testify/require"
 )
 
 func TestReadUint24(t *testing.T) {
@@ -17,10 +18,13 @@ func TestReadUint24(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got := ReadUint24(tc.in)
-			if got != tc.want {
-				t.Fatalf("ReadUint24(%x) = %#x, want %#x", tc.in, got, tc.want)
-			}
+			in := tc.in
+
+			got := ReadUint24(in)
+
+			require.Equalf(t, tc.want, got,
+				"ReadUint24(%x) = %#x, want %#x — the frame length is big-endian (RFC 7540 §4.1), and a byte-order slip here mis-frames every frame after it",
+				in, got, tc.want)
 		})
 	}
 }
@@ -39,10 +43,12 @@ func TestWriteUint24(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			var buf [3]byte
+
 			WriteUint24(buf[:], tc.in)
-			if !bytes.Equal(buf[:], tc.want) {
-				t.Fatalf("WriteUint24(%#x) = %x, want %x", tc.in, buf, tc.want)
-			}
+
+			require.Equalf(t, tc.want, buf[:],
+				"WriteUint24(%#x) = %x, want %x — the field is three bytes wide, so anything above 24 bits is dropped silently and the reader must still see the low three",
+				tc.in, buf[:], tc.want)
 		})
 	}
 }
@@ -60,10 +66,13 @@ func TestReadUint31(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got := ReadUint31(tc.in)
-			if got != tc.want {
-				t.Fatalf("ReadUint31(%x) = %#x, want %#x", tc.in, got, tc.want)
-			}
+			in := tc.in
+
+			got := ReadUint31(in)
+
+			require.Equalf(t, tc.want, got,
+				"ReadUint31(%x) = %#x, want %#x — RFC 7540 §4.1 makes the high bit reserved and requires a receiver to ignore it; carrying it through turns stream 1 into stream 0x80000001",
+				in, got, tc.want)
 		})
 	}
 }
@@ -81,10 +90,12 @@ func TestWriteUint31(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			var buf [4]byte
+
 			WriteUint31(buf[:], tc.in)
-			if !bytes.Equal(buf[:], tc.want) {
-				t.Fatalf("WriteUint31(%#x) = %x, want %x", tc.in, buf, tc.want)
-			}
+
+			require.Equalf(t, tc.want, buf[:],
+				"WriteUint31(%#x) = %x, want %x — RFC 7540 §4.1 requires the reserved bit to be sent unset, and a peer is entitled to treat a set one as a protocol error",
+				tc.in, buf[:], tc.want)
 		})
 	}
 }
