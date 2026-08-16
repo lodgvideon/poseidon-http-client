@@ -361,6 +361,17 @@ func (l *Listener) handshake(initial []byte, remote *net.UDPAddr) {
 
 	// Read the client's Handshake flight (its Finished) and complete the handshake.
 	if err := l.completeHandshake(pc, flight); err != nil {
+		// A TLS failure here — a rejected client certificate, say — is the one
+		// abandonment the peer can and must be told about (RFC 9001 §4.8), and it is
+		// the only one where the peer is not merely unauthenticated: it has proved it
+		// holds the Handshake keys. Without the close the client is left believing it
+		// is connected, because a TLS 1.3 client finishes when it sends its own
+		// Finished and never learns its certificate was refused, while Accept never
+		// produces a connection. Best-effort: an unsendable close still drops the
+		// half-open connection below.
+		if dg := flight.closeDatagram(ci.SCID, err); dg != nil {
+			_, _ = pc.Write(dg)
+		}
 		return
 	}
 
