@@ -234,8 +234,15 @@ func (c *Conn) handleExpiry(now time.Time, timeout error) error {
 			// Nothing to probe. If an ACK is not owed either, the idle bound elapsed
 			// with nothing to do / the backoff is exhausted → surface the timeout to
 			// end the connection; otherwise fall through to flush the owed ACK.
+			//
+			// Reported as ErrNoProgress rather than the transport's raw read error:
+			// this is a decision the engine made — it gave up — not an I/O failure,
+			// and a caller receiving *net.OpError from Do could not tell the two
+			// apart without matching on the message. The cause is kept underneath,
+			// and Timeout() still reports true, so nothing that classified this
+			// before stops working.
 			if !c.ackDue(spaceApp) {
-				return timeout
+				return noProgressError{cause: timeout}
 			}
 		}
 	}
