@@ -7,20 +7,29 @@ import (
 
 	"github.com/lodgvideon/poseidon-http-client/client"
 	prom "github.com/prometheus/client_golang/prometheus"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestHookMetrics_HooksSetsEveryCallback(t *testing.T) {
-	h := NewHookMetrics().Hooks()
+	hm := NewHookMetrics()
 
-	if h.OnRequestStart == nil || h.OnRequestComplete == nil || h.OnRetry == nil ||
-		h.OnDial == nil || h.OnConnClose == nil || h.OnResolverUpdate == nil {
-		t.Fatalf("Hooks() left a callback nil: %+v", h)
-	}
+	h := hm.Hooks()
+
+	// assert, not require: nothing below dereferences these, so reporting
+	// every unset callback in one run beats aborting on the first.
+	assert.NotNil(t, h.OnRequestStart, "Hooks() must set OnRequestStart; an unset callback silently drops that series")
+	assert.NotNil(t, h.OnRequestComplete, "Hooks() must set OnRequestComplete; an unset callback silently drops that series")
+	assert.NotNil(t, h.OnRetry, "Hooks() must set OnRetry; an unset callback silently drops that series")
+	assert.NotNil(t, h.OnDial, "Hooks() must set OnDial; an unset callback silently drops that series")
+	assert.NotNil(t, h.OnConnClose, "Hooks() must set OnConnClose; an unset callback silently drops that series")
+	assert.NotNil(t, h.OnResolverUpdate, "Hooks() must set OnResolverUpdate; an unset callback silently drops that series")
 }
 
 func TestHookMetrics_RequestLifecycle(t *testing.T) {
 	hm := NewHookMetrics()
 	h := hm.Hooks()
+	host := map[string]string{"host": "api:443", "method": "GET"}
 
 	h.OnRequestStart(client.RequestStartEvent{Method: "GET", Path: "/a", Authority: "api:443"})
 	h.OnRequestComplete(client.RequestCompleteEvent{
@@ -30,32 +39,23 @@ func TestHookMetrics_RequestLifecycle(t *testing.T) {
 	})
 
 	f := gather(t, hm)
-	host := map[string]string{"host": "api:443", "method": "GET"}
-
-	if got := labelledValue(t, f, "poseidon_http_requests_total",
-		map[string]string{"host": "api:443", "method": "GET", "status": "200"}); got != 1 {
-		t.Errorf("requests_total{status=200} = %v, want 1", got)
-	}
-	if got := labelledValue(t, f, "poseidon_http_requests_in_flight", host); got != 0 {
-		t.Errorf("in_flight = %v, want 0 after completion", got)
-	}
-	if got := labelledValue(t, f, "poseidon_http_request_body_bytes_total", host); got != 10 {
-		t.Errorf("request body bytes = %v, want 10", got)
-	}
-	if got := labelledValue(t, f, "poseidon_http_response_body_bytes_total", host); got != 2048 {
-		t.Errorf("response body bytes = %v, want 2048", got)
-	}
+	assert.Equal(t, float64(1), labelledValue(t, f, "poseidon_http_requests_total",
+		map[string]string{"host": "api:443", "method": "GET", "status": "200"}),
+		`requests_total{status="200"}: a completed request must be counted under its real status code`)
+	assert.Equal(t, float64(0), labelledValue(t, f, "poseidon_http_requests_in_flight", host),
+		"in_flight must return to 0 after completion; start and complete are paired one-to-one so the gauge cannot drift")
+	assert.Equal(t, float64(10), labelledValue(t, f, "poseidon_http_request_body_bytes_total", host),
+		"request body bytes must report BytesSent, excluding framing overhead")
+	assert.Equal(t, float64(2048), labelledValue(t, f, "poseidon_http_response_body_bytes_total", host),
+		"response body bytes must report BytesRecv, excluding framing overhead")
 
 	fam := f["poseidon_http_request_duration_seconds"]
-	if fam == nil {
-		t.Fatalf("duration histogram not exposed")
-	}
-	if got := fam.GetMetric()[0].GetHistogram().GetSampleCount(); got != 1 {
-		t.Errorf("duration observations = %d, want 1", got)
-	}
+	require.NotNil(t, fam, "duration histogram not exposed")
+	assert.Equal(t, uint64(1), fam.GetMetric()[0].GetHistogram().GetSampleCount(),
+		"exactly one latency observation per completed request")
 }
 
-func TestHookMetrics_InFlightRisesBetweenStartAndComplete(t *testing.T) {
+func TestHookMetrics_InFlightCountsOpenRequests(t *testing.T) {
 	hm := NewHookMetrics()
 	h := hm.Hooks()
 	host := map[string]string{"host": "api:443", "method": "POST"}
@@ -63,15 +63,21 @@ func TestHookMetrics_InFlightRisesBetweenStartAndComplete(t *testing.T) {
 	h.OnRequestStart(client.RequestStartEvent{Method: "POST", Authority: "api:443"})
 	h.OnRequestStart(client.RequestStartEvent{Method: "POST", Authority: "api:443"})
 
-	if got := labelledValue(t, gather(t, hm), "poseidon_http_requests_in_flight", host); got != 2 {
-		t.Fatalf("in_flight = %v, want 2 while both are open", got)
-	}
+	assert.Equal(t, float64(2), labelledValue(t, gather(t, hm), "poseidon_http_requests_in_flight", host),
+		"in_flight must count every started-but-unfinished request, not just the latest")
+}
+
+func TestHookMetrics_InFlightFallsOnCompletion(t *testing.T) {
+	hm := NewHookMetrics()
+	h := hm.Hooks()
+	host := map[string]string{"host": "api:443", "method": "POST"}
+	h.OnRequestStart(client.RequestStartEvent{Method: "POST", Authority: "api:443"})
+	h.OnRequestStart(client.RequestStartEvent{Method: "POST", Authority: "api:443"})
 
 	h.OnRequestComplete(client.RequestCompleteEvent{Method: "POST", Authority: "api:443", Status: 204})
 
-	if got := labelledValue(t, gather(t, hm), "poseidon_http_requests_in_flight", host); got != 1 {
-		t.Errorf("in_flight = %v, want 1 after one completion", got)
-	}
+	assert.Equal(t, float64(1), labelledValue(t, gather(t, hm), "poseidon_http_requests_in_flight", host),
+		"one completion must decrement in_flight by exactly one, leaving the still-open request counted")
 }
 
 // A transport failure reports status 0, which would read as a real status
@@ -87,14 +93,12 @@ func TestHookMetrics_FailedRequestIsLabelledError(t *testing.T) {
 	})
 
 	f := gather(t, hm)
-	if got := labelledValue(t, f, "poseidon_http_requests_total",
-		map[string]string{"host": "api:443", "method": "GET", "status": StatusError}); got != 1 {
-		t.Errorf(`requests_total{status="error"} = %v, want 1`, got)
-	}
-	if got := labelledValue(t, f, "poseidon_http_requests_in_flight",
-		map[string]string{"host": "api:443", "method": "GET"}); got != 0 {
-		t.Errorf("in_flight = %v, want 0; a failed request must still decrement", got)
-	}
+	assert.Equal(t, float64(1), labelledValue(t, f, "poseidon_http_requests_total",
+		map[string]string{"host": "api:443", "method": "GET", "status": StatusError}),
+		`requests_total{status="error"}: a request that never got a response must not be labelled status="0", which reads as a real code`)
+	assert.Equal(t, float64(0), labelledValue(t, f, "poseidon_http_requests_in_flight",
+		map[string]string{"host": "api:443", "method": "GET"}),
+		"in_flight must be 0; a failed request must still decrement or the gauge leaks upward forever")
 }
 
 func TestHookMetrics_NonZeroStatusWithNoBodyBytes(t *testing.T) {
@@ -107,9 +111,8 @@ func TestHookMetrics_NonZeroStatusWithNoBodyBytes(t *testing.T) {
 	h.OnRequestComplete(client.RequestCompleteEvent{Method: "GET", Authority: "api:443", Status: 200})
 
 	f := gather(t, hm)
-	if _, ok := f["poseidon_http_response_body_bytes_total"]; ok {
-		t.Errorf("response byte counter should not be created for a zero-byte report")
-	}
+	assert.NotContains(t, f, "poseidon_http_response_body_bytes_total",
+		"a zero-byte report must not create a series; DoStream reports BytesRecv == 0 for every request and would otherwise fill the counter with meaningless zeroes")
 }
 
 func TestHookMetrics_Retry(t *testing.T) {
@@ -119,15 +122,12 @@ func TestHookMetrics_Retry(t *testing.T) {
 	h.OnRetry(client.RetryEvent{Method: "GET", Path: "/a", Attempt: 1, Backoff: time.Second})
 	h.OnRetry(client.RetryEvent{Method: "GET", Path: "/b", Attempt: 2, Backoff: 2 * time.Second})
 
-	// Path must never become a label — it is unbounded.
 	f := gather(t, hm)
-	if got := labelledValue(t, f, "poseidon_http_retries_total", map[string]string{"method": "GET"}); got != 2 {
-		t.Errorf("retries_total = %v, want 2 (both paths in one series)", got)
-	}
+	assert.Equal(t, float64(2), labelledValue(t, f, "poseidon_http_retries_total", map[string]string{"method": "GET"}),
+		"both paths must land in one series: retries are labelled by method only")
 	for _, lp := range f["poseidon_http_retries_total"].GetMetric()[0].GetLabel() {
-		if lp.GetName() == "path" {
-			t.Errorf("path must not be a label")
-		}
+		assert.NotEqual(t, "path", lp.GetName(),
+			"path must never become a label — a load generator walks an unbounded path space and would explode cardinality")
 	}
 }
 
@@ -139,17 +139,15 @@ func TestHookMetrics_DialOutcomes(t *testing.T) {
 	h.OnDial(client.DialEvent{Addr: "10.0.0.1:443", Err: errors.New("refused"), Duration: time.Millisecond})
 
 	f := gather(t, hm)
-	if got := labelledValue(t, f, "poseidon_http_dials_total",
-		map[string]string{"addr": "10.0.0.1:443", "outcome": "ok"}); got != 1 {
-		t.Errorf("dials ok = %v, want 1", got)
-	}
-	if got := labelledValue(t, f, "poseidon_http_dials_total",
-		map[string]string{"addr": "10.0.0.1:443", "outcome": "error"}); got != 1 {
-		t.Errorf("dials error = %v, want 1", got)
-	}
-	if got := f["poseidon_http_dial_duration_seconds"].GetMetric()[0].GetHistogram().GetSampleCount(); got != 2 {
-		t.Errorf("dial duration observations = %d, want 2 (both outcomes timed)", got)
-	}
+	assert.Equal(t, float64(1), labelledValue(t, f, "poseidon_http_dials_total",
+		map[string]string{"addr": "10.0.0.1:443", "outcome": "ok"}),
+		`dials_total{outcome="ok"}: a dial with no error must be counted as ok`)
+	assert.Equal(t, float64(1), labelledValue(t, f, "poseidon_http_dials_total",
+		map[string]string{"addr": "10.0.0.1:443", "outcome": "error"}),
+		`dials_total{outcome="error"}: a failed dial must be split out, not folded into ok`)
+	assert.Equal(t, uint64(2),
+		f["poseidon_http_dial_duration_seconds"].GetMetric()[0].GetHistogram().GetSampleCount(),
+		"both outcomes must be timed; a failed dial's latency is the interesting one")
 }
 
 func TestHookMetrics_ConnCloseReasonLabel(t *testing.T) {
@@ -161,14 +159,12 @@ func TestHookMetrics_ConnCloseReasonLabel(t *testing.T) {
 	h.OnConnClose(client.ConnCloseEvent{Addr: "a:443", Reason: client.CloseGoAway})
 
 	f := gather(t, hm)
-	if got := labelledValue(t, f, "poseidon_http_conns_closed_total",
-		map[string]string{"addr": "a:443", "reason": "idle"}); got != 1 {
-		t.Errorf("closed idle = %v, want 1", got)
-	}
-	if got := labelledValue(t, f, "poseidon_http_conns_closed_total",
-		map[string]string{"addr": "a:443", "reason": "goaway"}); got != 2 {
-		t.Errorf("closed goaway = %v, want 2", got)
-	}
+	assert.Equal(t, float64(1), labelledValue(t, f, "poseidon_http_conns_closed_total",
+		map[string]string{"addr": "a:443", "reason": "idle"}),
+		`conns_closed_total{reason="idle"}: close reasons must stay in separate series or the cause of churn is unreadable`)
+	assert.Equal(t, float64(2), labelledValue(t, f, "poseidon_http_conns_closed_total",
+		map[string]string{"addr": "a:443", "reason": "goaway"}),
+		`conns_closed_total{reason="goaway"}: repeated closes for one reason must accumulate in that reason's series`)
 }
 
 func TestHookMetrics_ResolverUpdate(t *testing.T) {
@@ -182,15 +178,12 @@ func TestHookMetrics_ResolverUpdate(t *testing.T) {
 	})
 
 	f := gather(t, hm)
-	if got := singleValue(t, f, "poseidon_http_resolver_addresses"); got != 4 {
-		t.Errorf("resolver addresses = %v, want 4", got)
-	}
-	if got := labelledValue(t, f, "poseidon_http_resolver_changes_total", map[string]string{"op": "added"}); got != 2 {
-		t.Errorf("added = %v, want 2", got)
-	}
-	if got := labelledValue(t, f, "poseidon_http_resolver_changes_total", map[string]string{"op": "removed"}); got != 1 {
-		t.Errorf("removed = %v, want 1", got)
-	}
+	assert.Equal(t, float64(4), singleValue(t, f, "poseidon_http_resolver_addresses"),
+		"resolver_addresses is a gauge of the latest resolved set size, not a delta")
+	assert.Equal(t, float64(2), labelledValue(t, f, "poseidon_http_resolver_changes_total", map[string]string{"op": "added"}),
+		`resolver_changes_total{op="added"} must count the Added entries, not the Removed ones`)
+	assert.Equal(t, float64(1), labelledValue(t, f, "poseidon_http_resolver_changes_total", map[string]string{"op": "removed"}),
+		`resolver_changes_total{op="removed"} must count the Removed entries, not the Added ones`)
 }
 
 // Collector and HookMetrics must be registerable side by side: their names
@@ -198,15 +191,14 @@ func TestHookMetrics_ResolverUpdate(t *testing.T) {
 func TestHookMetrics_CoexistsWithCollector(t *testing.T) {
 	reg := prom.NewPedanticRegistry()
 
-	if err := reg.Register(NewCollector(&fakeSource{})); err != nil {
-		t.Fatalf("register collector: %v", err)
-	}
-	if err := reg.Register(NewHookMetrics()); err != nil {
-		t.Fatalf("register hook metrics alongside collector: %v", err)
-	}
-	if _, err := reg.Gather(); err != nil {
-		t.Fatalf("gather both: %v", err)
-	}
+	errCollector := reg.Register(NewCollector(&fakeSource{}))
+	errHooks := reg.Register(NewHookMetrics())
+	_, errGather := reg.Gather()
+
+	require.NoError(t, errCollector, "register collector")
+	require.NoError(t, errHooks,
+		"HookMetrics must register alongside Collector; the http subsystem exists so the two name spaces cannot collide")
+	require.NoError(t, errGather, "gather both collectors from one registry")
 }
 
 func TestHookMetrics_CustomDurationBuckets(t *testing.T) {
@@ -220,24 +212,20 @@ func TestHookMetrics_CustomDurationBuckets(t *testing.T) {
 
 	f := gather(t, hm)
 	buckets := f["poseidon_http_request_duration_seconds"].GetMetric()[0].GetHistogram().GetBucket()
-	if len(buckets) != 2 {
-		t.Fatalf("bucket count = %d, want 2", len(buckets))
-	}
-	if got := buckets[0].GetCumulativeCount(); got != 0 {
-		t.Errorf("le=0.001 count = %d, want 0 (5ms is slower)", got)
-	}
-	if got := buckets[1].GetCumulativeCount(); got != 1 {
-		t.Errorf("le=0.01 count = %d, want 1", got)
-	}
+	require.Len(t, buckets, 2, "WithDurationBuckets must replace the default boundaries, not extend them")
+	assert.Equal(t, uint64(0), buckets[0].GetCumulativeCount(),
+		"le=0.001 must not count the 5ms observation")
+	assert.Equal(t, uint64(1), buckets[1].GetCumulativeCount(),
+		"le=0.01 must count the 5ms observation")
 }
 
 func TestHookMetrics_NamespaceApplies(t *testing.T) {
 	hm := NewHookMetrics(WithNamespace("lg"))
 	h := hm.Hooks()
+
 	h.OnConnClose(client.ConnCloseEvent{Addr: "a:443", Reason: client.CloseManual})
 
 	f := gather(t, hm)
-	if _, ok := f["lg_http_conns_closed_total"]; !ok {
-		t.Errorf("namespace not applied; got %v", familyNames(f))
-	}
+	assert.Containsf(t, f, "lg_http_conns_closed_total",
+		"namespace not applied to the hook series; got %v", familyNames(f))
 }
