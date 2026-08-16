@@ -31,12 +31,29 @@ import (
 // These give every in-flight request a distinct identity on both channels a response
 // can carry — the body and a header — and make each one prove it got its own back.
 
-// idBody builds this request's unique body. Long enough to span more than one DATA
-// frame's worth of copying at the sizes the pool works in, and self-describing so a
-// failure message names the request the bytes actually came from.
+// idBodySize keeps N concurrent in-flight request bodies inside the 65535-byte
+// connection-level send window that RFC 9113 §6.9.2 mandates at handshake.
+//
+// This is a peer constraint, not a client one, and it was measured rather than
+// guessed. nginx stops granting connection-level credit once concurrent request
+// bodies fill that window, and every request still in flight then stalls forever;
+// the cutoff tracks total bytes crossing 65535 exactly and is independent of stream
+// count (21 of 30 3006-byte bodies complete = 63126 bytes, then nothing). It is not
+// this client's defect: curl/nghttp2 1.59.0 fails the same way against the same
+// nginx, 29 of 30 requests dead, while go-http, Undertow and nghttpx all serve the
+// oversized load without complaint. Filed separately.
+//
+// The body only has to be unique and long enough to make a mix unmistakable, so
+// sizing it under the window costs the test nothing — the mutation that crosses two
+// responses is still caught, which was re-confirmed at this size.
+const idBodySize = 1500
+
+// idBody builds this request's unique body: self-describing, so a failure message
+// can name the request the bytes actually came from rather than only reporting that
+// they are wrong.
 func idBody(i int) []byte {
 	var b bytes.Buffer
-	for b.Len() < 3000 {
+	for b.Len() < idBodySize {
 		fmt.Fprintf(&b, "req-%04d-seq-%04d;", i, b.Len())
 	}
 	return b.Bytes()
