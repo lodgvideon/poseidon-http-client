@@ -3,6 +3,9 @@ package frame
 import (
 	"context"
 	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // RFC 7540 §6.3 gives PRIORITY a 1-bit E flag and a 31-bit Stream Dependency in
@@ -28,51 +31,47 @@ func TestFramer_Priority_HighBitStreamDep_DoesNotForgeExclusive(t *testing.T) {
 
 	t.Run("WritePriority", func(t *testing.T) {
 		fr, _ := newFramerWithBuffer()
-		if err := fr.WritePriority(1, Priority{StreamDep: outOfRangeDep, Exclusive: false, Weight: 32}); err != nil {
-			t.Fatalf("write: %v", err)
-		}
+		require.NoError(t,
+			fr.WritePriority(1, Priority{StreamDep: outOfRangeDep, Exclusive: false, Weight: 32}),
+			"write")
 		h := &recordingHandler{}
-		if _, err := fr.ReadFrame(context.Background(), h); err != nil {
-			t.Fatalf("read: %v", err)
-		}
-		if h.priorityVal.Exclusive {
-			t.Errorf("Exclusive came back true for a frame written with Exclusive=false — "+
+
+		_, err := fr.ReadFrame(context.Background(), h)
+
+		require.NoErrorf(t, err, "read: %v", err)
+		assert.Falsef(t, h.priorityVal.Exclusive,
+			"Exclusive came back true for a frame written with Exclusive=false — "+
 				"the high bit of StreamDep (%#x) was written into the E flag's position",
-				uint32(outOfRangeDep))
-		}
-		if got := h.priorityVal.StreamDep; got != outOfRangeDep&0x7fffffff {
-			t.Errorf("StreamDep = %#x, want %#x (masked to 31 bits)", got, uint32(outOfRangeDep&0x7fffffff))
-		}
+			uint32(outOfRangeDep))
+		assert.EqualValuesf(t, outOfRangeDep&0x7fffffff, h.priorityVal.StreamDep,
+			"StreamDep = %#x, want %#x (masked to 31 bits)",
+			h.priorityVal.StreamDep, uint32(outOfRangeDep&0x7fffffff))
 	})
 
 	t.Run("HEADERS priority section", func(t *testing.T) {
 		fr, _ := newFramerWithBuffer()
 		p := Priority{StreamDep: outOfRangeDep, Exclusive: false, Weight: 32}
-		if err := fr.WriteHeaders(WriteHeadersParams{
+		require.NoError(t, fr.WriteHeaders(WriteHeadersParams{
 			StreamID:      1,
 			EndHeaders:    true,
 			Priority:      &p,
 			BlockFragment: []byte{0x82},
-		}); err != nil {
-			t.Fatalf("write: %v", err)
-		}
+		}), "write")
 		h := &recordingHandler{}
-		if _, err := fr.ReadFrame(context.Background(), h); err != nil {
-			t.Fatalf("read: %v", err)
-		}
+
+		_, err := fr.ReadFrame(context.Background(), h)
+
+		require.NoErrorf(t, err, "read: %v", err)
 		// OnHeaders records into h.prio; priorityVal is only set by OnPriority.
 		// Reading the wrong field here made this subtest fail against a zero
 		// Priority — a failure that looked like evidence and was not.
-		if h.prio == nil {
-			t.Fatal("the HEADERS frame carried no priority section")
-		}
-		if h.prio.Exclusive {
-			t.Errorf("Exclusive came back true for a HEADERS priority section written with " +
+		require.NotNil(t, h.prio, "the HEADERS frame carried no priority section")
+		assert.False(t, h.prio.Exclusive,
+			"Exclusive came back true for a HEADERS priority section written with "+
 				"Exclusive=false — the high bit of StreamDep was written into the E flag")
-		}
-		if got := h.prio.StreamDep; got != outOfRangeDep&0x7fffffff {
-			t.Errorf("StreamDep = %#x, want %#x (masked to 31 bits)", got, uint32(outOfRangeDep&0x7fffffff))
-		}
+		assert.EqualValuesf(t, outOfRangeDep&0x7fffffff, h.prio.StreamDep,
+			"StreamDep = %#x, want %#x (masked to 31 bits)",
+			h.prio.StreamDep, uint32(outOfRangeDep&0x7fffffff))
 	})
 }
 
@@ -81,17 +80,16 @@ func TestFramer_Priority_HighBitStreamDep_DoesNotForgeExclusive(t *testing.T) {
 // did ask for it.
 func TestFramer_Priority_ExclusiveStillRoundTrips(t *testing.T) {
 	fr, _ := newFramerWithBuffer()
-	if err := fr.WritePriority(1, Priority{StreamDep: 9, Exclusive: true, Weight: 7}); err != nil {
-		t.Fatalf("write: %v", err)
-	}
+	require.NoError(t, fr.WritePriority(1, Priority{StreamDep: 9, Exclusive: true, Weight: 7}), "write")
 	h := &recordingHandler{}
-	if _, err := fr.ReadFrame(context.Background(), h); err != nil {
-		t.Fatalf("read: %v", err)
-	}
-	if !h.priorityVal.Exclusive {
-		t.Error("Exclusive was dropped: a masked StreamDep must not clear the E flag")
-	}
-	if h.priorityVal.StreamDep != 9 || h.priorityVal.Weight != 7 {
-		t.Errorf("prio = %+v, want StreamDep 9 weight 7", h.priorityVal)
-	}
+
+	_, err := fr.ReadFrame(context.Background(), h)
+
+	require.NoErrorf(t, err, "read: %v", err)
+	assert.True(t, h.priorityVal.Exclusive,
+		"Exclusive was dropped: a masked StreamDep must not clear the E flag")
+	assert.EqualValuesf(t, 9, h.priorityVal.StreamDep,
+		"prio = %+v, want StreamDep 9 weight 7", h.priorityVal)
+	assert.EqualValuesf(t, 7, h.priorityVal.Weight,
+		"prio = %+v, want StreamDep 9 weight 7", h.priorityVal)
 }

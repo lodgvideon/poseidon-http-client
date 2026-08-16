@@ -17,8 +17,9 @@ package frame
 import (
 	"bytes"
 	"context"
-	"errors"
 	"testing"
+
+	"github.com/stretchr/testify/require"
 )
 
 // TestConformance_RFC9113_Sec6_1_DataFrameOnStreamZero_FramerRejects pins §6.1:
@@ -27,9 +28,10 @@ import (
 func TestConformance_RFC9113_Sec6_1_DataFrameOnStreamZero_FramerRejects(t *testing.T) {
 	raw := frameBytes(1, FrameData, 0, 0, []byte{0x00})
 	fr := NewFramer(nil, bytes.NewReader(raw))
-	if _, err := fr.ReadFrame(context.Background(), &recordingHandler{}); !errors.Is(err, ErrInvalidStreamID) {
-		t.Fatalf("DATA on stream 0: err = %v, want ErrInvalidStreamID", err)
-	}
+
+	_, err := fr.ReadFrame(context.Background(), &recordingHandler{})
+
+	require.ErrorIsf(t, err, ErrInvalidStreamID, "DATA on stream 0: err = %v, want ErrInvalidStreamID", err)
 }
 
 // TestConformance_RFC9113_Sec6_3_PriorityFrameOnStreamZero_FramerRejects pins
@@ -38,9 +40,10 @@ func TestConformance_RFC9113_Sec6_1_DataFrameOnStreamZero_FramerRejects(t *testi
 func TestConformance_RFC9113_Sec6_3_PriorityFrameOnStreamZero_FramerRejects(t *testing.T) {
 	raw := frameBytes(5, FramePriority, 0, 0, []byte{0, 0, 0, 0, 0})
 	fr := NewFramer(nil, bytes.NewReader(raw))
-	if _, err := fr.ReadFrame(context.Background(), &recordingHandler{}); !errors.Is(err, ErrInvalidStreamID) {
-		t.Fatalf("PRIORITY on stream 0: err = %v, want ErrInvalidStreamID", err)
-	}
+
+	_, err := fr.ReadFrame(context.Background(), &recordingHandler{})
+
+	require.ErrorIsf(t, err, ErrInvalidStreamID, "PRIORITY on stream 0: err = %v, want ErrInvalidStreamID", err)
 }
 
 // TestConformance_RFC9113_Sec6_4_RSTStreamFrameOnStreamZero_FramerRejects pins
@@ -48,9 +51,10 @@ func TestConformance_RFC9113_Sec6_3_PriorityFrameOnStreamZero_FramerRejects(t *t
 func TestConformance_RFC9113_Sec6_4_RSTStreamFrameOnStreamZero_FramerRejects(t *testing.T) {
 	raw := frameBytes(4, FrameRSTStream, 0, 0, []byte{0, 0, 0, 0})
 	fr := NewFramer(nil, bytes.NewReader(raw))
-	if _, err := fr.ReadFrame(context.Background(), &recordingHandler{}); !errors.Is(err, ErrInvalidStreamID) {
-		t.Fatalf("RST_STREAM on stream 0: err = %v, want ErrInvalidStreamID", err)
-	}
+
+	_, err := fr.ReadFrame(context.Background(), &recordingHandler{})
+
+	require.ErrorIsf(t, err, ErrInvalidStreamID, "RST_STREAM on stream 0: err = %v, want ErrInvalidStreamID", err)
 }
 
 // TestConformance_RFC9113_Sec6_7_PingFrameOnNonzeroStream_FramerRejects pins
@@ -59,9 +63,10 @@ func TestConformance_RFC9113_Sec6_4_RSTStreamFrameOnStreamZero_FramerRejects(t *
 func TestConformance_RFC9113_Sec6_7_PingFrameOnNonzeroStream_FramerRejects(t *testing.T) {
 	raw := frameBytes(8, FramePing, 0, 1, make([]byte, 8))
 	fr := NewFramer(nil, bytes.NewReader(raw))
-	if _, err := fr.ReadFrame(context.Background(), &recordingHandler{}); !errors.Is(err, ErrInvalidStreamID) {
-		t.Fatalf("PING on stream 1: err = %v, want ErrInvalidStreamID", err)
-	}
+
+	_, err := fr.ReadFrame(context.Background(), &recordingHandler{})
+
+	require.ErrorIsf(t, err, ErrInvalidStreamID, "PING on stream 1: err = %v, want ErrInvalidStreamID", err)
 }
 
 // TestConformance_RFC9113_Sec6_8_GoAwayFrameOnNonzeroStream_FramerRejects pins
@@ -70,7 +75,8 @@ func TestConformance_RFC9113_Sec6_7_PingFrameOnNonzeroStream_FramerRejects(t *te
 func TestConformance_RFC9113_Sec6_8_GoAwayFrameOnNonzeroStream_FramerRejects(t *testing.T) {
 	raw := frameBytes(8, FrameGoAway, 0, 1, make([]byte, 8))
 	fr := NewFramer(nil, bytes.NewReader(raw))
-	if _, err := fr.ReadFrame(context.Background(), &recordingHandler{}); !errors.Is(err, ErrInvalidStreamID) {
-		t.Fatalf("GOAWAY on stream 1: err = %v, want ErrInvalidStreamID", err)
-	}
+
+	_, err := fr.ReadFrame(context.Background(), &recordingHandler{})
+
+	require.ErrorIsf(t, err, ErrInvalidStreamID, "GOAWAY on stream 1: err = %v, want ErrInvalidStreamID", err)
 }

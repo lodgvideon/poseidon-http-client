@@ -9,8 +9,9 @@ package frame
 import (
 	"bytes"
 	"context"
-	"errors"
 	"testing"
+
+	"github.com/stretchr/testify/require"
 )
 
 // ppOpenBlock is a PUSH_PROMISE on stream 1 promising id 2, WITHOUT END_HEADERS:
@@ -27,13 +28,13 @@ func TestConformance_RFC9113_Sec6_10_PushPromiseBlockInterleave_Rejected(t *test
 	data := frameBytes(1, FrameData, 0, 1, []byte{0x00}) // a DATA frame, not the required CONTINUATION
 	fr := NewFramer(nil, bytes.NewReader(append(ppOpenBlock(), data...)))
 	h := &recordingHandler{}
+	_, err := fr.ReadFrame(context.Background(), h)
+	require.NoError(t, err, "PUSH_PROMISE (opens block)")
 
-	if _, err := fr.ReadFrame(context.Background(), h); err != nil {
-		t.Fatalf("PUSH_PROMISE (opens block): %v", err)
-	}
-	if _, err := fr.ReadFrame(context.Background(), h); !errors.Is(err, ErrContinuationExpected) {
-		t.Fatalf("interleaved DATA after an open PUSH_PROMISE block: err = %v, want ErrContinuationExpected (§6.10)", err)
-	}
+	_, err = fr.ReadFrame(context.Background(), h)
+
+	require.ErrorIsf(t, err, ErrContinuationExpected,
+		"interleaved DATA after an open PUSH_PROMISE block: err = %v, want ErrContinuationExpected (§6.10)", err)
 }
 
 // TestConformance_RFC9113_Sec6_10_PushPromiseBlockContinuation_Accepted is the
@@ -43,11 +44,11 @@ func TestConformance_RFC9113_Sec6_10_PushPromiseBlockContinuation_Accepted(t *te
 	cont := frameBytes(1, FrameContinuation, FlagContinuationEndHeaders, 1, []byte{0x82})
 	fr := NewFramer(nil, bytes.NewReader(append(ppOpenBlock(), cont...)))
 	h := &recordingHandler{}
+	_, err := fr.ReadFrame(context.Background(), h)
+	require.NoError(t, err, "PUSH_PROMISE")
 
-	if _, err := fr.ReadFrame(context.Background(), h); err != nil {
-		t.Fatalf("PUSH_PROMISE: %v", err)
-	}
-	if _, err := fr.ReadFrame(context.Background(), h); err != nil {
-		t.Fatalf("CONTINUATION on the same stream: %v — a conformant spanning PUSH_PROMISE block must be accepted", err)
-	}
+	_, err = fr.ReadFrame(context.Background(), h)
+
+	require.NoErrorf(t, err,
+		"CONTINUATION on the same stream: %v — a conformant spanning PUSH_PROMISE block must be accepted", err)
 }

@@ -4,6 +4,9 @@ import (
 	"bytes"
 	"context"
 	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // settingsCapture records the SettingsParams a SETTINGS frame decodes to.
@@ -35,12 +38,9 @@ func readSettings(t *testing.T, payload []byte) SettingsParams {
 	fr := NewFramer(nil, bytes.NewReader(raw))
 	fr.SetMaxReadFrameSize(16384)
 	h := &settingsCapture{}
-	if _, err := fr.ReadFrame(context.Background(), h); err != nil {
-		t.Fatalf("ReadFrame: %v (a legal SETTINGS frame must not error)", err)
-	}
-	if !h.called {
-		t.Fatal("OnSettings was not called")
-	}
+	_, err := fr.ReadFrame(context.Background(), h)
+	require.NoErrorf(t, err, "ReadFrame: %v (a legal SETTINGS frame must not error)", err)
+	require.True(t, h.called, "OnSettings was not called")
 	return h.got
 }
 
@@ -70,43 +70,46 @@ func TestConformance_RFC7540_Sec6_5_ManyParametersAccepted(t *testing.T) {
 	pairs = append(pairs, SettingPair{ID: SettingInitialWindowSize, Value: 4096})
 
 	s := readSettings(t, settingPayload(pairs...))
+
 	v, ok := lookup(s, SettingInitialWindowSize)
-	if !ok || v != 4096 {
-		t.Fatalf("InitialWindowSize = (%d,%v), want (4096,true) — a defined setting after "+
-			"20 unknown ids must not be crowded out of the store", v, ok)
-	}
+	require.Truef(t, ok, "InitialWindowSize = (%d,%v), want (4096,true) — a defined setting after "+
+		"20 unknown ids must not be crowded out of the store", v, ok)
+	assert.EqualValuesf(t, 4096, v, "InitialWindowSize = (%d,%v), want (4096,true) — a defined setting after "+
+		"20 unknown ids must not be crowded out of the store", v, ok)
 }
 
 // TestConformance_RFC7540_Sec6_5_LastValueWins pins RFC 7540 §6.5: "the value of
 // a SETTINGS parameter is the last value that is seen by a receiver." A repeated
 // identifier must resolve to its LAST occurrence, and must occupy a single slot.
 func TestConformance_RFC7540_Sec6_5_LastValueWins(t *testing.T) {
-	s := readSettings(t, settingPayload(
+	payload := settingPayload(
 		SettingPair{ID: SettingMaxFrameSize, Value: 16384},
 		SettingPair{ID: SettingMaxFrameSize, Value: 32768},
 		SettingPair{ID: SettingMaxFrameSize, Value: 65536},
-	))
+	)
+
+	s := readSettings(t, payload)
+
 	v, ok := lookup(s, SettingMaxFrameSize)
-	if !ok || v != 65536 {
-		t.Fatalf("MaxFrameSize = (%d,%v), want (65536,true) — last value must win", v, ok)
-	}
-	if s.N != 1 {
-		t.Fatalf("N = %d, want 1 — a repeated identifier occupies one slot, not three", s.N)
-	}
+	require.Truef(t, ok, "MaxFrameSize = (%d,%v), want (65536,true) — last value must win", v, ok)
+	assert.EqualValuesf(t, 65536, v, "MaxFrameSize = (%d,%v), want (65536,true) — last value must win", v, ok)
+	assert.Equalf(t, 1, s.N, "N = %d, want 1 — a repeated identifier occupies one slot, not three", s.N)
 }
 
 // TestConformance_RFC7540_Sec6_5_2_UnknownIgnored pins RFC 7540 §6.5.2: an
 // "unsupported identifier MUST ignore that setting." An unknown id contributes
 // no slot; a defined one alongside it is still recorded.
 func TestConformance_RFC7540_Sec6_5_2_UnknownIgnored(t *testing.T) {
-	s := readSettings(t, settingPayload(
+	payload := settingPayload(
 		SettingPair{ID: SettingID(0xffff), Value: 123}, // GREASE / reserved
 		SettingPair{ID: SettingEnablePush, Value: 0},
-	))
-	if _, ok := lookup(s, SettingID(0xffff)); ok {
-		t.Fatal("unknown identifier 0xffff was stored; §6.5.2 requires it be ignored")
-	}
-	if v, ok := lookup(s, SettingEnablePush); !ok || v != 0 {
-		t.Fatalf("EnablePush = (%d,%v), want (0,true)", v, ok)
-	}
+	)
+
+	s := readSettings(t, payload)
+
+	_, stored := lookup(s, SettingID(0xffff))
+	assert.False(t, stored, "unknown identifier 0xffff was stored; §6.5.2 requires it be ignored")
+	v, ok := lookup(s, SettingEnablePush)
+	require.Truef(t, ok, "EnablePush = (%d,%v), want (0,true)", v, ok)
+	assert.Zerof(t, v, "EnablePush = (%d,%v), want (0,true)", v, ok)
 }

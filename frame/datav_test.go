@@ -4,6 +4,9 @@ import (
 	"bytes"
 	"math/rand"
 	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // WriteDataV exists to remove a copy, so the one thing it must never do is
@@ -54,20 +57,17 @@ func TestWriteDataV_MatchesWriteData(t *testing.T) {
 		for i := 0; i+1 < len(cuts); i++ {
 			bufs = append(bufs, p[cuts[i]:cuts[i+1]])
 		}
-
 		endStream := rng.Intn(2) == 0
-
 		var vec, ref bytes.Buffer
-		if err := NewFramer(&vec, nil).WriteDataV(7, endStream, bufs); err != nil {
-			t.Fatalf("trial %d: WriteDataV: %v", trial, err)
-		}
-		if err := NewFramer(&ref, nil).WriteData(7, endStream, joinBufs(bufs)); err != nil {
-			t.Fatalf("trial %d: WriteData: %v", trial, err)
-		}
-		if !bytes.Equal(vec.Bytes(), ref.Bytes()) {
-			t.Fatalf("trial %d: split %v of %d bytes (endStream=%v) produced different wire bytes\n vec %x\n ref %x",
-				trial, cuts, n, endStream, vec.Bytes(), ref.Bytes())
-		}
+
+		vecErr := NewFramer(&vec, nil).WriteDataV(7, endStream, bufs)
+		refErr := NewFramer(&ref, nil).WriteData(7, endStream, joinBufs(bufs))
+
+		require.NoErrorf(t, vecErr, "trial %d: WriteDataV: %v", trial, vecErr)
+		require.NoErrorf(t, refErr, "trial %d: WriteData: %v", trial, refErr)
+		require.Truef(t, bytes.Equal(vec.Bytes(), ref.Bytes()),
+			"trial %d: split %v of %d bytes (endStream=%v) produced different wire bytes\n vec %x\n ref %x",
+			trial, cuts, n, endStream, vec.Bytes(), ref.Bytes())
 	}
 }
 
@@ -87,18 +87,16 @@ func TestWriteDataVPadded_MatchesWriteDataPadded(t *testing.T) {
 		bufs := [][]byte{p[:cut], p[cut:]}
 		padLen := uint8(rng.Intn(8))
 		endStream := rng.Intn(2) == 0
-
 		var vec, ref bytes.Buffer
-		if err := NewFramer(&vec, nil).WriteDataVPadded(3, endStream, bufs, padLen); err != nil {
-			t.Fatalf("trial %d: WriteDataVPadded: %v", trial, err)
-		}
-		if err := NewFramer(&ref, nil).WriteDataPadded(3, endStream, joinBufs(bufs), padLen); err != nil {
-			t.Fatalf("trial %d: WriteDataPadded: %v", trial, err)
-		}
-		if !bytes.Equal(vec.Bytes(), ref.Bytes()) {
-			t.Fatalf("trial %d: cut %d of %d, padLen %d: different wire bytes\n vec %x\n ref %x",
-				trial, cut, n, padLen, vec.Bytes(), ref.Bytes())
-		}
+
+		vecErr := NewFramer(&vec, nil).WriteDataVPadded(3, endStream, bufs, padLen)
+		refErr := NewFramer(&ref, nil).WriteDataPadded(3, endStream, joinBufs(bufs), padLen)
+
+		require.NoErrorf(t, vecErr, "trial %d: WriteDataVPadded: %v", trial, vecErr)
+		require.NoErrorf(t, refErr, "trial %d: WriteDataPadded: %v", trial, refErr)
+		require.Truef(t, bytes.Equal(vec.Bytes(), ref.Bytes()),
+			"trial %d: cut %d of %d, padLen %d: different wire bytes\n vec %x\n ref %x",
+			trial, cut, n, padLen, vec.Bytes(), ref.Bytes())
 	}
 }
 
@@ -121,15 +119,14 @@ func TestWriteDataV_EdgeShapes(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			var vec, ref bytes.Buffer
-			if err := NewFramer(&vec, nil).WriteDataV(1, true, tc.bufs); err != nil {
-				t.Fatalf("WriteDataV: %v", err)
-			}
-			if err := NewFramer(&ref, nil).WriteData(1, true, joinBufs(tc.bufs)); err != nil {
-				t.Fatalf("WriteData: %v", err)
-			}
-			if !bytes.Equal(vec.Bytes(), ref.Bytes()) {
-				t.Errorf("wire bytes differ\n vec %x\n ref %x", vec.Bytes(), ref.Bytes())
-			}
+
+			vecErr := NewFramer(&vec, nil).WriteDataV(1, true, tc.bufs)
+			refErr := NewFramer(&ref, nil).WriteData(1, true, joinBufs(tc.bufs))
+
+			require.NoError(t, vecErr, "WriteDataV")
+			require.NoError(t, refErr, "WriteData")
+			assert.Truef(t, bytes.Equal(vec.Bytes(), ref.Bytes()),
+				"wire bytes differ\n vec %x\n ref %x", vec.Bytes(), ref.Bytes())
 		})
 	}
 }
@@ -138,15 +135,13 @@ func TestWriteDataV_EdgeShapes(t *testing.T) {
 // vectored write must not be a way around the validation the scalar one does.
 func TestWriteDataV_RejectsZeroStreamID(t *testing.T) {
 	var buf bytes.Buffer
-	if err := NewFramer(&buf, nil).WriteDataV(0, false, [][]byte{[]byte("x")}); err != ErrInvalidStreamID {
-		t.Errorf("WriteDataV(streamID 0) = %v, want ErrInvalidStreamID", err)
-	}
-	if err := NewFramer(&buf, nil).WriteDataVPadded(0, false, [][]byte{[]byte("x")}, 1); err != ErrInvalidStreamID {
-		t.Errorf("WriteDataVPadded(streamID 0) = %v, want ErrInvalidStreamID", err)
-	}
-	if buf.Len() != 0 {
-		t.Errorf("a rejected write emitted %d bytes, want none", buf.Len())
-	}
+
+	vErr := NewFramer(&buf, nil).WriteDataV(0, false, [][]byte{[]byte("x")})
+	vpErr := NewFramer(&buf, nil).WriteDataVPadded(0, false, [][]byte{[]byte("x")}, 1)
+
+	assert.ErrorIsf(t, vErr, ErrInvalidStreamID, "WriteDataV(streamID 0) = %v, want ErrInvalidStreamID", vErr)
+	assert.ErrorIsf(t, vpErr, ErrInvalidStreamID, "WriteDataVPadded(streamID 0) = %v, want ErrInvalidStreamID", vpErr)
+	assert.Zerof(t, buf.Len(), "a rejected write emitted %d bytes, want none", buf.Len())
 }
 
 // TestWriteDataV_RejectsOversizeTotal pins that the limit applies to the SUM.
@@ -155,33 +150,36 @@ func TestWriteDataV_RejectsZeroStreamID(t *testing.T) {
 func TestWriteDataV_RejectsOversizeTotal(t *testing.T) {
 	half := make([]byte, defaultMaxFrameSize/2+1)
 	var buf bytes.Buffer
+
 	err := NewFramer(&buf, nil).WriteDataV(1, false, [][]byte{half, half})
-	if err != ErrFrameTooLarge {
-		t.Errorf("two half-max buffers = %v, want ErrFrameTooLarge — the cap is on the "+
-			"frame, and splitting the payload must not evade it", err)
-	}
-	if buf.Len() != 0 {
-		t.Errorf("a rejected write emitted %d bytes, want none", buf.Len())
-	}
+
+	assert.ErrorIsf(t, err, ErrFrameTooLarge, "two half-max buffers = %v, want ErrFrameTooLarge — the cap is on the "+
+		"frame, and splitting the payload must not evade it", err)
+	assert.Zerof(t, buf.Len(), "a rejected write emitted %d bytes, want none", buf.Len())
 }
 
 // TestWriteDataV_DoesNotAllocate is the gate that keeps the point of the change.
 // A vectored write that allocates per frame would have traded a copy for an
 // allocation, which on the send path is the worse of the two.
+//
+// Nothing inside the measured closure asserts: testify reflects and allocates,
+// and AllocsPerRun counts the whole process. The write error is captured and
+// checked afterwards instead.
 func TestWriteDataV_DoesNotAllocate(t *testing.T) {
 	fr := NewFramer(discardWriter{}, nil)
 	prefix := []byte{0, 0, 0, 4, 0}
 	body := make([]byte, 16000)
 	bufs := [][]byte{prefix, body}
+	var writeErr error
 
 	n := testing.AllocsPerRun(100, func() {
 		if err := fr.WriteDataV(1, false, bufs); err != nil {
-			t.Fatalf("WriteDataV: %v", err)
+			writeErr = err
 		}
 	})
-	if n != 0 {
-		t.Errorf("WriteDataV allocates %.1f per frame, want 0", n)
-	}
+
+	require.NoError(t, writeErr, "WriteDataV")
+	assert.Zerof(t, n, "WriteDataV allocates %.1f per frame, want 0", n)
 }
 
 // discardWriter is an io.Writer that keeps nothing, so the allocation gate

@@ -9,6 +9,9 @@ import (
 	"bytes"
 	"context"
 	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // TestConformance_RFC9113_Sec7_UnknownErrorCodeSurfacedUnchanged pins that an
@@ -20,12 +23,13 @@ func TestConformance_RFC9113_Sec7_UnknownErrorCodeSurfacedUnchanged(t *testing.T
 		raw := frameBytes(4, FrameRSTStream, 0, 1, []byte{0xde, 0xad, 0xbe, 0xef})
 		fr := NewFramer(nil, bytes.NewReader(raw))
 		h := &recordingHandler{}
-		if _, err := fr.ReadFrame(context.Background(), h); err != nil {
-			t.Fatalf("RST_STREAM with unknown code: %v — §7: unknown codes must not trigger special behavior", err)
-		}
-		if h.rstCode != unknown {
-			t.Errorf("OnRSTStream code = 0x%x, want 0x%x (surfaced unchanged)", uint32(h.rstCode), uint32(unknown))
-		}
+
+		_, err := fr.ReadFrame(context.Background(), h)
+
+		require.NoErrorf(t, err,
+			"RST_STREAM with unknown code: %v — §7: unknown codes must not trigger special behavior", err)
+		assert.Equalf(t, unknown, h.rstCode,
+			"OnRSTStream code = 0x%x, want 0x%x (surfaced unchanged)", uint32(h.rstCode), uint32(unknown))
 	})
 
 	t.Run("GOAWAY", func(t *testing.T) {
@@ -33,11 +37,12 @@ func TestConformance_RFC9113_Sec7_UnknownErrorCodeSurfacedUnchanged(t *testing.T
 		raw := frameBytes(8, FrameGoAway, 0, 0, []byte{0, 0, 0, 0, 0xde, 0xad, 0xbe, 0xef})
 		fr := NewFramer(nil, bytes.NewReader(raw))
 		h := &recordingHandler{}
-		if _, err := fr.ReadFrame(context.Background(), h); err != nil {
-			t.Fatalf("GOAWAY with unknown code: %v — §7: unknown codes must not trigger special behavior", err)
-		}
-		if h.goCode != unknown {
-			t.Errorf("OnGoAway code = 0x%x, want 0x%x (surfaced unchanged)", uint32(h.goCode), uint32(unknown))
-		}
+
+		_, err := fr.ReadFrame(context.Background(), h)
+
+		require.NoErrorf(t, err,
+			"GOAWAY with unknown code: %v — §7: unknown codes must not trigger special behavior", err)
+		assert.Equalf(t, unknown, h.goCode,
+			"OnGoAway code = 0x%x, want 0x%x (surfaced unchanged)", uint32(h.goCode), uint32(unknown))
 	})
 }

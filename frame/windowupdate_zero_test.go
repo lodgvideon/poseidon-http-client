@@ -3,6 +3,9 @@ package frame
 import (
 	"context"
 	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // RFC 7540 §6.9 makes a WINDOW_UPDATE whose increment is 0 an error the receiver
@@ -30,27 +33,24 @@ import (
 func TestWriteWindowUpdate_HighBitIncrement(t *testing.T) {
 	t.Run("masks to zero: refused", func(t *testing.T) {
 		fr, buf := newFramerWithBuffer()
-		if err := fr.WriteWindowUpdate(1, 0x80000000); err != ErrZeroIncrement {
-			t.Errorf("WriteWindowUpdate(1, 0x80000000) = %v, want ErrZeroIncrement — it "+
+
+		err := fr.WriteWindowUpdate(1, 0x80000000)
+
+		assert.ErrorIsf(t, err, ErrZeroIncrement,
+			"WriteWindowUpdate(1, 0x80000000) = %v, want ErrZeroIncrement — it "+
 				"masks to a zero increment, the frame §6.9 obliges a receiver to reject", err)
-		}
-		if buf.Len() != 0 {
-			t.Errorf("a refused WINDOW_UPDATE still wrote %d bytes to the wire", buf.Len())
-		}
+		assert.Zerof(t, buf.Len(), "a refused WINDOW_UPDATE still wrote %d bytes to the wire", buf.Len())
 	})
 
 	t.Run("masks to nonzero: written masked", func(t *testing.T) {
 		fr, _ := newFramerWithBuffer()
-		if err := fr.WriteWindowUpdate(1, 0x80000005); err != nil {
-			t.Fatalf("WriteWindowUpdate: %v", err)
-		}
+		require.NoError(t, fr.WriteWindowUpdate(1, 0x80000005), "WriteWindowUpdate")
 		h := &recordingHandler{}
-		if _, err := fr.ReadFrame(context.Background(), h); err != nil {
-			t.Fatalf("the framer wrote a frame its own reader rejects: %v", err)
-		}
-		if h.winInc != 5 {
-			t.Errorf("increment = %d, want 5 (the reserved bit masked off)", h.winInc)
-		}
+
+		_, err := fr.ReadFrame(context.Background(), h)
+
+		require.NoErrorf(t, err, "the framer wrote a frame its own reader rejects: %v", err)
+		assert.EqualValuesf(t, 5, h.winInc, "increment = %d, want 5 (the reserved bit masked off)", h.winInc)
 	})
 }
 
@@ -59,12 +59,11 @@ func TestWriteWindowUpdate_HighBitIncrement(t *testing.T) {
 // actually states.
 func TestWriteWindowUpdate_ZeroStillRefused(t *testing.T) {
 	fr, buf := newFramerWithBuffer()
-	if err := fr.WriteWindowUpdate(1, 0); err != ErrZeroIncrement {
-		t.Errorf("WriteWindowUpdate(1, 0) = %v, want ErrZeroIncrement", err)
-	}
-	if buf.Len() != 0 {
-		t.Errorf("a refused WINDOW_UPDATE still wrote %d bytes", buf.Len())
-	}
+
+	err := fr.WriteWindowUpdate(1, 0)
+
+	assert.ErrorIsf(t, err, ErrZeroIncrement, "WriteWindowUpdate(1, 0) = %v, want ErrZeroIncrement", err)
+	assert.Zerof(t, buf.Len(), "a refused WINDOW_UPDATE still wrote %d bytes", buf.Len())
 }
 
 // TestWriteWindowUpdate_LegalIncrementRoundTrips is the over-correction guard: an
@@ -72,14 +71,11 @@ func TestWriteWindowUpdate_ZeroStillRefused(t *testing.T) {
 func TestWriteWindowUpdate_LegalIncrementRoundTrips(t *testing.T) {
 	fr, _ := newFramerWithBuffer()
 	const inc = 65535
-	if err := fr.WriteWindowUpdate(3, inc); err != nil {
-		t.Fatalf("WriteWindowUpdate: %v", err)
-	}
+	require.NoError(t, fr.WriteWindowUpdate(3, inc), "WriteWindowUpdate")
 	h := &recordingHandler{}
-	if _, err := fr.ReadFrame(context.Background(), h); err != nil {
-		t.Fatalf("read: %v", err)
-	}
-	if h.winInc != inc {
-		t.Errorf("increment = %d, want %d", h.winInc, inc)
-	}
+
+	_, err := fr.ReadFrame(context.Background(), h)
+
+	require.NoErrorf(t, err, "read: %v", err)
+	assert.EqualValuesf(t, inc, h.winInc, "increment = %d, want %d", h.winInc, inc)
 }

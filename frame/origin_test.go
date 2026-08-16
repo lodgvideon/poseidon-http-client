@@ -3,8 +3,10 @@ package frame
 import (
 	"bytes"
 	"context"
-	"errors"
 	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestDispatchOrigin_Valid(t *testing.T) {
@@ -21,21 +23,15 @@ func TestDispatchOrigin_Valid(t *testing.T) {
 
 	raw := frameBytes(uint32(len(payload)), FrameOrigin, 0, 0, payload)
 	fr := NewFramer(nil, bytes.NewReader(raw))
-
 	rh := &originRecordingHandler{}
+
 	fh, err := fr.ReadFrame(context.Background(), rh)
-	if err != nil {
-		t.Fatalf("ReadFrame error: %v", err)
-	}
-	if fh.Type != FrameOrigin {
-		t.Fatalf("type = %v, want FrameOrigin", fh.Type)
-	}
-	if len(rh.origins) != 2 {
-		t.Fatalf("expected 2 origins, got %d", len(rh.origins))
-	}
-	if rh.origins[0] != o1 || rh.origins[1] != o2 {
-		t.Fatalf("origins = %v", rh.origins)
-	}
+
+	require.NoErrorf(t, err, "ReadFrame error: %v", err)
+	assert.Equalf(t, FrameOrigin, fh.Type, "type = %v, want FrameOrigin", fh.Type)
+	require.Lenf(t, rh.origins, 2, "expected 2 origins, got %d", len(rh.origins))
+	assert.Equalf(t, o1, rh.origins[0], "origins = %v", rh.origins)
+	assert.Equalf(t, o2, rh.origins[1], "origins = %v", rh.origins)
 }
 
 func TestDispatchOrigin_IgnoresNonZeroStream(t *testing.T) {
@@ -47,14 +43,13 @@ func TestDispatchOrigin_IgnoresNonZeroStream(t *testing.T) {
 	// frame. So ReadFrame must return nil and OnOrigin must NOT fire.
 	raw := frameBytes(0, FrameOrigin, 0, 1, nil)
 	fr := NewFramer(nil, bytes.NewReader(raw))
-
 	rh := &originRecordingHandler{}
-	if _, err := fr.ReadFrame(context.Background(), rh); err != nil {
-		t.Fatalf("expected nil (frame ignored), got %v", err)
-	}
-	if rh.called {
-		t.Fatal("OnOrigin fired for an ORIGIN frame on a non-zero stream; it must be ignored")
-	}
+
+	_, err := fr.ReadFrame(context.Background(), rh)
+
+	require.NoErrorf(t, err, "expected nil (frame ignored), got %v", err)
+	assert.False(t, rh.called,
+		"OnOrigin fired for an ORIGIN frame on a non-zero stream; it must be ignored")
 }
 
 func TestDispatchOrigin_MalformedTrailingByte(t *testing.T) {
@@ -63,12 +58,11 @@ func TestDispatchOrigin_MalformedTrailingByte(t *testing.T) {
 	payload := []byte{0x00}
 	raw := frameBytes(uint32(len(payload)), FrameOrigin, 0, 0, payload)
 	fr := NewFramer(nil, bytes.NewReader(raw))
-
 	rh := &originRecordingHandler{}
+
 	_, err := fr.ReadFrame(context.Background(), rh)
-	if !errors.Is(err, ErrProtocolError) {
-		t.Fatalf("expected ErrProtocolError, got %v", err)
-	}
+
+	require.ErrorIsf(t, err, ErrProtocolError, "expected ErrProtocolError, got %v", err)
 }
 
 func TestDispatchOrigin_LengthOverflow(t *testing.T) {
@@ -77,12 +71,11 @@ func TestDispatchOrigin_LengthOverflow(t *testing.T) {
 	payload := []byte{0x00, 99, 'a', 'b', 'c'}
 	raw := frameBytes(uint32(len(payload)), FrameOrigin, 0, 0, payload)
 	fr := NewFramer(nil, bytes.NewReader(raw))
-
 	rh := &originRecordingHandler{}
+
 	_, err := fr.ReadFrame(context.Background(), rh)
-	if !errors.Is(err, ErrProtocolError) {
-		t.Fatalf("expected ErrProtocolError, got %v", err)
-	}
+
+	require.ErrorIsf(t, err, ErrProtocolError, "expected ErrProtocolError, got %v", err)
 }
 
 func TestDispatchOrigin_Empty(t *testing.T) {
@@ -90,18 +83,13 @@ func TestDispatchOrigin_Empty(t *testing.T) {
 
 	raw := frameBytes(0, FrameOrigin, 0, 0, nil)
 	fr := NewFramer(nil, bytes.NewReader(raw))
-
 	rh := &originRecordingHandler{}
+
 	fh, err := fr.ReadFrame(context.Background(), rh)
-	if err != nil {
-		t.Fatalf("ReadFrame error: %v", err)
-	}
-	if fh.Type != FrameOrigin {
-		t.Fatalf("type = %v, want FrameOrigin", fh.Type)
-	}
-	if len(rh.origins) != 0 {
-		t.Fatalf("expected 0 origins, got %d", len(rh.origins))
-	}
+
+	require.NoErrorf(t, err, "ReadFrame error: %v", err)
+	assert.Equalf(t, FrameOrigin, fh.Type, "type = %v, want FrameOrigin", fh.Type)
+	assert.Emptyf(t, rh.origins, "expected 0 origins, got %d", len(rh.origins))
 }
 
 type originRecordingHandler struct {

@@ -4,6 +4,9 @@ import (
 	"bytes"
 	"context"
 	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // altSvcCaptureHandler records ALTSVC entries for verification.
@@ -38,23 +41,20 @@ func TestFramer_AltSvc_RoundTrip(t *testing.T) {
 	want := AltSvcEntry{Origin: "https://example.com", AltValue: `h2=":443"`}
 	var buf bytes.Buffer
 	fw := NewFramer(&buf, &buf)
-	if err := fw.WriteAltSvc(0, []AltSvcEntry{want}); err != nil {
-		t.Fatalf("WriteAltSvc: %v", err)
-	}
+	require.NoError(t, fw.WriteAltSvc(0, []AltSvcEntry{want}), "WriteAltSvc")
 	fr := NewFramer(&buf, &buf)
 	h := &altSvcCaptureHandler{}
-	if _, err := fr.ReadFrame(context.Background(), h); err != nil {
-		t.Fatalf("ReadFrame: %v", err)
-	}
-	if len(h.entries) != 1 {
-		t.Fatalf("got %d entries, want 1", len(h.entries))
-	}
-	if h.entries[0].Origin != want.Origin || h.entries[0].AltValue != want.AltValue {
-		t.Errorf("entry = %+v, want %+v", h.entries[0], want)
-	}
-	if h.hdr.Type != FrameAltSvc || h.hdr.StreamID != 0 {
-		t.Errorf("frame = (type %d, stream %d), want (%d, 0)", h.hdr.Type, h.hdr.StreamID, FrameAltSvc)
-	}
+
+	_, err := fr.ReadFrame(context.Background(), h)
+
+	require.NoError(t, err, "ReadFrame")
+	require.Lenf(t, h.entries, 1, "got %d entries, want 1", len(h.entries))
+	assert.Equalf(t, want.Origin, h.entries[0].Origin, "entry = %+v, want %+v", h.entries[0], want)
+	assert.Equalf(t, want.AltValue, h.entries[0].AltValue, "entry = %+v, want %+v", h.entries[0], want)
+	assert.Equalf(t, FrameAltSvc, h.hdr.Type,
+		"frame = (type %d, stream %d), want (%d, 0)", h.hdr.Type, h.hdr.StreamID, FrameAltSvc)
+	assert.Zerof(t, h.hdr.StreamID,
+		"frame = (type %d, stream %d), want (%d, 0)", h.hdr.Type, h.hdr.StreamID, FrameAltSvc)
 }
 
 func TestFramer_AltSvc_PerStream_RoundTrip(t *testing.T) {
@@ -62,39 +62,30 @@ func TestFramer_AltSvc_PerStream_RoundTrip(t *testing.T) {
 	want := AltSvcEntry{Origin: "", AltValue: `h2="alt.example.com:443"`}
 	var buf bytes.Buffer
 	fw := NewFramer(&buf, &buf)
-	if err := fw.WriteAltSvc(5, []AltSvcEntry{want}); err != nil {
-		t.Fatalf("WriteAltSvc: %v", err)
-	}
+	require.NoError(t, fw.WriteAltSvc(5, []AltSvcEntry{want}), "WriteAltSvc")
 	fr := NewFramer(&buf, &buf)
 	h := &altSvcCaptureHandler{}
-	if _, err := fr.ReadFrame(context.Background(), h); err != nil {
-		t.Fatalf("ReadFrame: %v", err)
-	}
-	if len(h.entries) != 1 {
-		t.Fatalf("got %d entries, want 1", len(h.entries))
-	}
-	if h.entries[0].AltValue != want.AltValue {
-		t.Errorf("alt value: got %q, want %q", h.entries[0].AltValue, want.AltValue)
-	}
-	if h.hdr.StreamID != 5 {
-		t.Errorf("stream ID: got %d, want 5", h.hdr.StreamID)
-	}
+
+	_, err := fr.ReadFrame(context.Background(), h)
+
+	require.NoError(t, err, "ReadFrame")
+	require.Lenf(t, h.entries, 1, "got %d entries, want 1", len(h.entries))
+	assert.Equalf(t, want.AltValue, h.entries[0].AltValue,
+		"alt value: got %q, want %q", h.entries[0].AltValue, want.AltValue)
+	assert.EqualValuesf(t, 5, h.hdr.StreamID, "stream ID: got %d, want 5", h.hdr.StreamID)
 }
 
 func TestFramer_AltSvc_EmptyClears(t *testing.T) {
 	var buf bytes.Buffer
 	fw := NewFramer(&buf, &buf)
-	if err := fw.WriteAltSvc(0, nil); err != nil {
-		t.Fatalf("WriteAltSvc(empty): %v", err)
-	}
+	require.NoError(t, fw.WriteAltSvc(0, nil), "WriteAltSvc(empty)")
 	fr := NewFramer(&buf, &buf)
 	h := &altSvcCaptureHandler{}
-	if _, err := fr.ReadFrame(context.Background(), h); err != nil {
-		t.Fatalf("ReadFrame: %v", err)
-	}
-	if h.entries != nil {
-		t.Errorf("got %d entries, want nil", len(h.entries))
-	}
+
+	_, err := fr.ReadFrame(context.Background(), h)
+
+	require.NoError(t, err, "ReadFrame")
+	assert.Nilf(t, h.entries, "got %d entries, want nil", len(h.entries))
 }
 
 // TestFramer_AltSvc_RejectsMultipleEntries pins that the writer refuses to
@@ -103,13 +94,13 @@ func TestFramer_AltSvc_EmptyClears(t *testing.T) {
 func TestFramer_AltSvc_RejectsMultipleEntries(t *testing.T) {
 	var buf bytes.Buffer
 	fw := NewFramer(&buf, &buf)
+
 	err := fw.WriteAltSvc(0, []AltSvcEntry{
 		{Origin: "https://a.example", AltValue: `h2=":443"`},
 		{Origin: "https://b.example", AltValue: `h2=":443"`},
 	})
-	if err != ErrTooManyAltSvc {
-		t.Fatalf("WriteAltSvc(2 entries) = %v, want ErrTooManyAltSvc", err)
-	}
+
+	require.ErrorIsf(t, err, ErrTooManyAltSvc, "WriteAltSvc(2 entries) = %v, want ErrTooManyAltSvc", err)
 }
 
 func TestDispatchAltSvc_OriginOverflow(t *testing.T) {
@@ -118,9 +109,10 @@ func TestDispatchAltSvc_OriginOverflow(t *testing.T) {
 	var buf bytes.Buffer
 	fr := NewFramer(&buf, &buf)
 	h := &altSvcCaptureHandler{}
-	if err := fr.dispatchAltSvc(FrameHeader{Type: FrameAltSvc}, payload, h); err == nil {
-		t.Fatal("expected error for origin overflow, got nil")
-	}
+
+	err := fr.dispatchAltSvc(FrameHeader{Type: FrameAltSvc}, payload, h)
+
+	require.Error(t, err, "expected error for origin overflow, got nil")
 }
 
 // TestConformance_RFC7838_Sec4_AltSvcWireFormat pins the RFC 7838 §4 ALTSVC
@@ -142,12 +134,15 @@ func TestConformance_RFC7838_Sec4_AltSvcWireFormat(t *testing.T) {
 		payload := append([]byte{byte(len(origin) >> 8), byte(len(origin))}, origin...)
 		payload = append(payload, value...)
 		h := &altSvcCaptureHandler{}
-		if err := fr.dispatchAltSvc(FrameHeader{Type: FrameAltSvc, StreamID: 0}, payload, h); err != nil {
-			t.Fatalf("dispatchAltSvc(compliant frame) = %v, want nil", err)
-		}
-		if len(h.entries) != 1 || h.entries[0].Origin != origin || h.entries[0].AltValue != value {
-			t.Fatalf("entries = %+v, want one {%q, %q}", h.entries, origin, value)
-		}
+
+		err := fr.dispatchAltSvc(FrameHeader{Type: FrameAltSvc, StreamID: 0}, payload, h)
+
+		require.NoErrorf(t, err, "dispatchAltSvc(compliant frame) = %v, want nil", err)
+		require.Lenf(t, h.entries, 1, "entries = %+v, want one {%q, %q}", h.entries, origin, value)
+		assert.Equalf(t, origin, h.entries[0].Origin,
+			"entries = %+v, want one {%q, %q}", h.entries, origin, value)
+		assert.Equalf(t, value, h.entries[0].AltValue,
+			"entries = %+v, want one {%q, %q}", h.entries, origin, value)
 	})
 
 	t.Run("field value is the opaque remainder, not length-prefixed", func(t *testing.T) {
@@ -156,23 +151,25 @@ func TestConformance_RFC7838_Sec4_AltSvcWireFormat(t *testing.T) {
 		value := `h3=":443"`
 		payload := append([]byte{0x00, 0x00}, value...)
 		h := &altSvcCaptureHandler{}
-		if err := fr.dispatchAltSvc(FrameHeader{Type: FrameAltSvc, StreamID: 5}, payload, h); err != nil {
-			t.Fatalf("dispatchAltSvc(per-stream frame) = %v, want nil (a valid frame, not ErrProtocolError)", err)
-		}
-		if len(h.entries) != 1 || h.entries[0].AltValue != value {
-			t.Fatalf("entries = %+v, want the field value %q delivered intact", h.entries, value)
-		}
+
+		err := fr.dispatchAltSvc(FrameHeader{Type: FrameAltSvc, StreamID: 5}, payload, h)
+
+		require.NoErrorf(t, err,
+			"dispatchAltSvc(per-stream frame) = %v, want nil (a valid frame, not ErrProtocolError)", err)
+		require.Lenf(t, h.entries, 1, "entries = %+v, want the field value %q delivered intact", h.entries, value)
+		assert.Equalf(t, value, h.entries[0].AltValue,
+			"entries = %+v, want the field value %q delivered intact", h.entries, value)
 	})
 
 	t.Run("stream-0 empty-origin frame is ignored", func(t *testing.T) {
 		payload := append([]byte{0x00, 0x00}, []byte(`h2=":443"`)...)
 		h := &altSvcCaptureHandler{}
-		if err := fr.dispatchAltSvc(FrameHeader{Type: FrameAltSvc, StreamID: 0}, payload, h); err != nil {
-			t.Fatalf("dispatchAltSvc = %v, want nil (ignored)", err)
-		}
-		if h.entries != nil {
-			t.Fatalf("entries = %+v, want none — a stream-0 frame with empty Origin is ignored (§4)", h.entries)
-		}
+
+		err := fr.dispatchAltSvc(FrameHeader{Type: FrameAltSvc, StreamID: 0}, payload, h)
+
+		require.NoErrorf(t, err, "dispatchAltSvc = %v, want nil (ignored)", err)
+		require.Nilf(t, h.entries,
+			"entries = %+v, want none — a stream-0 frame with empty Origin is ignored (§4)", h.entries)
 	})
 
 	t.Run("non-zero-stream non-empty-origin frame is ignored", func(t *testing.T) {
@@ -180,12 +177,12 @@ func TestConformance_RFC7838_Sec4_AltSvcWireFormat(t *testing.T) {
 		payload := append([]byte{byte(len(origin) >> 8), byte(len(origin))}, origin...)
 		payload = append(payload, []byte(`h2=":443"`)...)
 		h := &altSvcCaptureHandler{}
-		if err := fr.dispatchAltSvc(FrameHeader{Type: FrameAltSvc, StreamID: 5}, payload, h); err != nil {
-			t.Fatalf("dispatchAltSvc = %v, want nil (ignored)", err)
-		}
-		if h.entries != nil {
-			t.Fatalf("entries = %+v, want none — a non-zero-stream frame with non-empty Origin is ignored (§4)", h.entries)
-		}
+
+		err := fr.dispatchAltSvc(FrameHeader{Type: FrameAltSvc, StreamID: 5}, payload, h)
+
+		require.NoErrorf(t, err, "dispatchAltSvc = %v, want nil (ignored)", err)
+		require.Nilf(t, h.entries,
+			"entries = %+v, want none — a non-zero-stream frame with non-empty Origin is ignored (§4)", h.entries)
 	})
 
 	t.Run("writer emits the RFC 7838 layout", func(t *testing.T) {
@@ -193,16 +190,15 @@ func TestConformance_RFC7838_Sec4_AltSvcWireFormat(t *testing.T) {
 		fw := NewFramer(&wbuf, &wbuf)
 		origin := "https://example.com"
 		value := `h2=":443"`
-		if err := fw.WriteAltSvc(0, []AltSvcEntry{{Origin: origin, AltValue: value}}); err != nil {
-			t.Fatalf("WriteAltSvc: %v", err)
-		}
+
+		err := fw.WriteAltSvc(0, []AltSvcEntry{{Origin: origin, AltValue: value}})
+
+		require.NoError(t, err, "WriteAltSvc")
 		// Skip the 9-byte frame header; the payload must be Origin-Len, Origin,
 		// value-as-remainder with no length prefix on the value.
 		wantPayload := append([]byte{byte(len(origin) >> 8), byte(len(origin))}, origin...)
 		wantPayload = append(wantPayload, value...)
 		got := wbuf.Bytes()[9:]
-		if !bytes.Equal(got, wantPayload) {
-			t.Fatalf("payload = % x, want % x", got, wantPayload)
-		}
+		require.Truef(t, bytes.Equal(got, wantPayload), "payload = % x, want % x", got, wantPayload)
 	})
 }

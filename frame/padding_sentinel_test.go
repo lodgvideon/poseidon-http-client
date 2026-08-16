@@ -3,10 +3,10 @@ package frame_test
 import (
 	"bytes"
 	"context"
-	"errors"
 	"testing"
 
 	"github.com/lodgvideon/poseidon-http-client/frame"
+	"github.com/stretchr/testify/require"
 )
 
 // TestConformance_RFC9113_Sec61_PaddingErrorIsMatchable pins that a padding
@@ -33,15 +33,14 @@ func TestConformance_RFC9113_Sec61_PaddingErrorIsMatchable(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			fr := frame.NewFramer(nil, bytes.NewReader(tc.raw))
+
 			_, err := fr.ReadFrame(context.Background(), discardHandler{})
-			if err == nil {
-				t.Fatal("pad length past the payload was accepted")
-			}
-			if !errors.Is(err, frame.ErrInvalidPadding) {
-				t.Fatalf("errors.Is(err, frame.ErrInvalidPadding) = false; err = %v\n"+
+
+			require.Error(t, err, "pad length past the payload was accepted")
+			require.ErrorIsf(t, err, frame.ErrInvalidPadding,
+				"errors.Is(err, frame.ErrInvalidPadding) = false; err = %v\n"+
 					"the exported sentinel is what consumers are told to match, so a "+
 					"receiver cannot classify this as PROTOCOL_ERROR (§6.1)", err)
-			}
 		})
 	}
 }

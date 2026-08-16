@@ -16,8 +16,9 @@ package frame
 import (
 	"bytes"
 	"context"
-	"errors"
 	"testing"
+
+	"github.com/stretchr/testify/require"
 )
 
 // TestConformance_RFC9113_Sec6_5_SettingsFrameOnNonzeroStream_FramerRejects
@@ -27,9 +28,10 @@ import (
 func TestConformance_RFC9113_Sec6_5_SettingsFrameOnNonzeroStream_FramerRejects(t *testing.T) {
 	raw := frameBytes(6, FrameSettings, 0, 1, []byte{0x00, 0x03, 0x00, 0x00, 0x00, 0x64})
 	fr := NewFramer(nil, bytes.NewReader(raw))
-	if _, err := fr.ReadFrame(context.Background(), &recordingHandler{}); !errors.Is(err, ErrInvalidStreamID) {
-		t.Fatalf("SETTINGS on stream 1: err = %v, want ErrInvalidStreamID", err)
-	}
+
+	_, err := fr.ReadFrame(context.Background(), &recordingHandler{})
+
+	require.ErrorIsf(t, err, ErrInvalidStreamID, "SETTINGS on stream 1: err = %v, want ErrInvalidStreamID", err)
 }
 
 // TestConformance_RFC9113_Sec6_6_PushPromiseFrameOnStreamZero_FramerRejects
@@ -39,9 +41,10 @@ func TestConformance_RFC9113_Sec6_5_SettingsFrameOnNonzeroStream_FramerRejects(t
 func TestConformance_RFC9113_Sec6_6_PushPromiseFrameOnStreamZero_FramerRejects(t *testing.T) {
 	raw := frameBytes(4, FramePushPromise, FlagPushPromiseEndHeaders, 0, []byte{0x00, 0x00, 0x00, 0x02})
 	fr := NewFramer(nil, bytes.NewReader(raw))
-	if _, err := fr.ReadFrame(context.Background(), &recordingHandler{}); !errors.Is(err, ErrInvalidStreamID) {
-		t.Fatalf("PUSH_PROMISE on stream 0: err = %v, want ErrInvalidStreamID", err)
-	}
+
+	_, err := fr.ReadFrame(context.Background(), &recordingHandler{})
+
+	require.ErrorIsf(t, err, ErrInvalidStreamID, "PUSH_PROMISE on stream 0: err = %v, want ErrInvalidStreamID", err)
 }
 
 // No CONTINUATION-on-stream-0 test, deliberately.
