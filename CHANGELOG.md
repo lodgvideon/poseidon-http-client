@@ -102,8 +102,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   a response arrived — asserts the replay *does* happen there, without which the
   gate is satisfied by a client that never retries anything.
 
-### Tests
-
 - **The TCP path now has the leak gate that guards HTTP/3.** The H3 soak exists
   because receive-path resource exhaustion was a bug class here; the TCP path has
   its own long-lived-connection state that nothing soaked — the stream registry,
