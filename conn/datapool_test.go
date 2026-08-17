@@ -6,6 +6,7 @@ import (
 
 	"github.com/lodgvideon/poseidon-http-client/frame"
 	"github.com/lodgvideon/poseidon-http-client/hpack"
+	"github.com/stretchr/testify/require"
 )
 
 // TestOnData_PooledZeroAlloc proves the per-DATA-frame payload copy is served
@@ -13,21 +14,19 @@ import (
 // replacing the previous `append([]byte(nil), p...)` that allocated every
 // frame. GC is disabled for the measurement so a pool eviction cannot evict the
 // warmed buffer mid-run and report a spurious alloc.
+//
+// Nothing from testify may appear inside the measured closure: it reflects and
+// allocates, and AllocsPerRun would count that instead of the path under test.
 func TestOnData_PooledZeroAlloc(t *testing.T) {
 	defer debug.SetGCPercent(debug.SetGCPercent(-1))
-
 	m := newFakeStreamMap()
 	h := newConnHandler(m, hpack.NewDecoder())
 	s := m.addStream(1)
 	s.headersReceived = true // response HEADERS received; DATA is valid body
-
 	payload := make([]byte, 4096)
 	fh := frame.FrameHeader{Type: frame.FrameData, Length: uint32(len(payload)), StreamID: 1}
-
 	// Warm the pool so the buffer reaches the payload size before measuring.
-	if err := h.OnData(fh, payload, 0); err != nil {
-		t.Fatalf("OnData warmup: %v", err)
-	}
+	require.NoErrorf(t, h.OnData(fh, payload, 0), "OnData warmup")
 	if ev := <-s.events; ev.DataSlab != nil {
 		dataBufPool.Put(ev.DataSlab)
 	}
@@ -40,9 +39,8 @@ func TestOnData_PooledZeroAlloc(t *testing.T) {
 			dataBufPool.Put(ev.DataSlab) // consumer returns the pooled buffer
 		}
 	})
-	if allocs != 0 {
-		t.Fatalf("OnData data-copy allocs/op = %v, want 0 (pooled)", allocs)
-	}
+
+	require.Zerof(t, allocs, "OnData data-copy allocs/op = %v, want 0 (pooled)", allocs)
 }
 
 // TestOnData_DataMatchesPayload confirms the pooled copy delivers the exact
@@ -52,23 +50,19 @@ func TestOnData_DataMatchesPayload(t *testing.T) {
 	h := newConnHandler(m, hpack.NewDecoder())
 	s := m.addStream(1)
 	s.headersReceived = true // response HEADERS received; DATA is valid body
-
 	payload := []byte("hello-poseidon-data-frame")
 	fh := frame.FrameHeader{Type: frame.FrameData, Length: uint32(len(payload)), StreamID: 1}
-	if err := h.OnData(fh, payload, 0); err != nil {
-		t.Fatalf("OnData: %v", err)
-	}
+
+	require.NoErrorf(t, h.OnData(fh, payload, 0), "OnData")
+
 	ev := <-s.events
-	if string(ev.Data) != string(payload) {
-		t.Fatalf("Data = %q, want %q", ev.Data, payload)
-	}
+	require.Equalf(t, string(payload), string(ev.Data), "Data = %q, want %q", ev.Data, payload)
 	// Mutating the caller's source buffer must not affect the delivered copy.
 	for i := range payload {
 		payload[i] = 0
 	}
-	if string(ev.Data) != "hello-poseidon-data-frame" {
-		t.Fatalf("Data aliased the source buffer: %q", ev.Data)
-	}
+	require.Equalf(t, "hello-poseidon-data-frame", string(ev.Data),
+		"Data aliased the source buffer: %q", ev.Data)
 	if ev.DataSlab != nil {
 		dataBufPool.Put(ev.DataSlab)
 	}
@@ -83,24 +77,16 @@ func TestOnData_DistinctBuffersWhileOutstanding(t *testing.T) {
 	h := newConnHandler(m, hpack.NewDecoder())
 	s := m.addStream(1)
 	s.headersReceived = true // response HEADERS received; DATA is valid body
-
 	fh := frame.FrameHeader{Type: frame.FrameData, Length: 4, StreamID: 1}
-	if err := h.OnData(fh, []byte("AAAA"), 0); err != nil {
-		t.Fatalf("OnData A: %v", err)
-	}
-	ev1 := <-s.events // hold ev1; deliberately do NOT return its DataSlab yet
 
-	if err := h.OnData(fh, []byte("BBBB"), 0); err != nil {
-		t.Fatalf("OnData B: %v", err)
-	}
+	require.NoErrorf(t, h.OnData(fh, []byte("AAAA"), 0), "OnData A")
+	ev1 := <-s.events // hold ev1; deliberately do NOT return its DataSlab yet
+	require.NoErrorf(t, h.OnData(fh, []byte("BBBB"), 0), "OnData B")
 	ev2 := <-s.events
 
-	if string(ev1.Data) != "AAAA" {
-		t.Fatalf("ev1.Data corrupted by the second OnData: %q (pool handed back an outstanding buffer)", ev1.Data)
-	}
-	if string(ev2.Data) != "BBBB" {
-		t.Fatalf("ev2.Data = %q, want BBBB", ev2.Data)
-	}
+	require.Equalf(t, "AAAA", string(ev1.Data),
+		"ev1.Data corrupted by the second OnData: %q (pool handed back an outstanding buffer)", ev1.Data)
+	require.Equalf(t, "BBBB", string(ev2.Data), "ev2.Data = %q, want BBBB", ev2.Data)
 	if ev1.DataSlab != nil {
 		dataBufPool.Put(ev1.DataSlab)
 	}
