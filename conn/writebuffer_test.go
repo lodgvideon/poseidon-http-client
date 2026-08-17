@@ -191,14 +191,14 @@ func TestWriteBuffer_FewerWriteSyscalls(t *testing.T) {
 	t.Logf("unbuffered baseline ~2 writes/frame = %d; buffered ~1/frame = %d",
 		2*framesDelta, framesDelta)
 
-	require.GreaterOrEqualf(t, int64(framesDelta), int64(nchunk),
+	require.GreaterOrEqualf(t, framesDelta, int64(nchunk),
 		"frames sent = %d, want >= %d", framesDelta, nchunk)
 	// Below the 2-per-frame unbuffered baseline: coalescing is working.
-	assert.Lessf(t, writesDelta, int64(2*framesDelta),
+	assert.Lessf(t, writesDelta, 2*framesDelta,
 		"write coalescing ineffective: %d writes for %d frames (want < 2/frame)",
 		writesDelta, framesDelta)
 	// And it is ~1 write/frame (small slack for any concurrent control frame
 	// the reader goroutine flushes between the two snapshots).
-	assert.LessOrEqualf(t, writesDelta, int64(framesDelta+4),
+	assert.LessOrEqualf(t, writesDelta, framesDelta+4,
 		"expected ~1 write/frame, got %d writes for %d frames", writesDelta, framesDelta)
 }

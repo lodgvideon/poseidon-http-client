@@ -3,10 +3,10 @@ package conn
 import (
 	"context"
 	"net"
-	"github.com/stretchr/testify/require"
-
 	"testing"
 	"time"
+
+	"github.com/stretchr/testify/require"
 )
 
 // TestConn_Shutdown_InflightReadIsSynchronized is a -race regression guard for
