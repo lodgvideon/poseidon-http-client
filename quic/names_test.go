@@ -3,11 +3,13 @@ package quic
 import (
 	"testing"
 
+	"github.com/stretchr/testify/assert"
+
 	"github.com/lodgvideon/poseidon-http-client/trace"
 )
 
 func TestFrameTypeName(t *testing.T) {
-	for typ, want := range map[uint64]string{
+	want := map[uint64]string{
 		FramePadding: "PADDING", FramePing: "PING", FrameACK: "ACK", FrameACKECN: "ACK_ECN",
 		FrameResetStream: "RESET_STREAM", FrameStopSending: "STOP_SENDING",
 		FrameCrypto: "CRYPTO", FrameNewToken: "NEW_TOKEN",
@@ -20,10 +22,12 @@ func TestFrameTypeName(t *testing.T) {
 		FrameConnectionClose: "CONNECTION_CLOSE", FrameConnectionCloseApp: "CONNECTION_CLOSE_APP",
 		FrameHandshakeDone: "HANDSHAKE_DONE",
 		0x1f:               trace.UnknownName,
-	} {
-		if got := FrameTypeName(typ); got != want {
-			t.Errorf("FrameTypeName(%#x) = %q, want %q", typ, got, want)
-		}
+	}
+
+	for typ, name := range want {
+		got := FrameTypeName(typ)
+
+		assert.Equalf(t, name, got, "FrameTypeName(%#x) = %q, want %q", typ, got, name)
 	}
 }
 
@@ -31,11 +35,13 @@ func TestFrameTypeName(t *testing.T) {
 // with OFF/LEN/FIN in the low three bits. All eight are one frame type.
 func TestFrameTypeName_StreamRange(t *testing.T) {
 	for typ := FrameStreamBase; typ <= FrameStreamMax; typ++ {
-		if got := FrameTypeName(typ); got != "STREAM" {
-			t.Errorf("FrameTypeName(%#x) = %q, want STREAM", typ, got)
-		}
+		got := FrameTypeName(typ)
+
+		assert.Equalf(t, "STREAM", got, "FrameTypeName(%#x) = %q, want STREAM", typ, got)
 	}
-	if got := FrameTypeName(FrameStreamMax + 1); got == "STREAM" {
-		t.Errorf("FrameTypeName(%#x) = STREAM; the range ends at %#x", FrameStreamMax+1, FrameStreamMax)
-	}
+
+	pastRange := FrameTypeName(FrameStreamMax + 1)
+
+	assert.NotEqualf(t, "STREAM", pastRange,
+		"FrameTypeName(%#x) = STREAM; the range ends at %#x", FrameStreamMax+1, FrameStreamMax)
 }

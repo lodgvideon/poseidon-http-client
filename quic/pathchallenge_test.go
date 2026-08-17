@@ -3,6 +3,9 @@ package quic
 import (
 	"bytes"
 	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // pathCapture records the data of a PATH_RESPONSE frame.
@@ -20,15 +23,14 @@ func TestConformance_RFC9000_Sec822_PathChallengeEchoed(t *testing.T) {
 	c := &Conn{}
 	h := &connFrameHandler{c: c}
 	challenge := &[8]byte{1, 2, 3, 4, 5, 6, 7, 8}
-	if err := h.OnPathChallenge(challenge); err != nil {
-		t.Fatal(err)
-	}
-	if !h.ackEliciting {
-		t.Fatal("a PATH_CHALLENGE is ack-eliciting")
-	}
-	if want := appendPathResponse(nil, *challenge); !bytes.Equal(c.pendingCtrl, want) {
-		t.Fatalf("pendingCtrl = %x, want a PATH_RESPONSE echoing the challenge %x", c.pendingCtrl, want)
-	}
+
+	err := h.OnPathChallenge(challenge)
+
+	require.NoError(t, err, "OnPathChallenge")
+	assert.True(t, h.ackEliciting, "a PATH_CHALLENGE is ack-eliciting")
+	want := appendPathResponse(nil, *challenge)
+	assert.Truef(t, bytes.Equal(c.pendingCtrl, want),
+		"pendingCtrl = %x, want a PATH_RESPONSE echoing the challenge %x", c.pendingCtrl, want)
 }
 
 // TestConn_PathChallenge_FloodBounded checks that a flood of PATH_CHALLENGE
@@ -37,17 +39,15 @@ func TestConformance_RFC9000_Sec822_PathChallengeEchoed(t *testing.T) {
 func TestConn_PathChallenge_FloodBounded(t *testing.T) {
 	c := &Conn{}
 	h := &connFrameHandler{c: c}
+
 	for i := 0; i < 100000; i++ {
-		if err := h.OnPathChallenge(&[8]byte{byte(i), byte(i >> 8)}); err != nil {
-			t.Fatal(err)
-		}
+		require.NoErrorf(t, h.OnPathChallenge(&[8]byte{byte(i), byte(i >> 8)}),
+			"OnPathChallenge %d", i)
 	}
-	if len(c.pendingCtrl) == 0 {
-		t.Fatal("at least one PATH_RESPONSE should be queued")
-	}
-	if len(c.pendingCtrl) > maxPendingCtrl+16 { // + one frame's slack past the cap
-		t.Fatalf("pendingCtrl grew to %d bytes under a flood, want ≈ %d", len(c.pendingCtrl), maxPendingCtrl)
-	}
+
+	assert.NotEmpty(t, c.pendingCtrl, "at least one PATH_RESPONSE should be queued")
+	assert.LessOrEqualf(t, len(c.pendingCtrl), maxPendingCtrl+16, // + one frame's slack past the cap
+		"pendingCtrl grew to %d bytes under a flood, want ≈ %d", len(c.pendingCtrl), maxPendingCtrl)
 }
 
 // TestConn_PathChallenge_SentByFlush checks that the queued PATH_RESPONSE is
@@ -58,31 +58,19 @@ func TestConn_PathChallenge_SentByFlush(t *testing.T) {
 	c := &Conn{pc: pc, dcid: []byte("pathtst0"), oneRTTSealer: sealer}
 	h := &connFrameHandler{c: c}
 	challenge := &[8]byte{9, 8, 7, 6, 5, 4, 3, 2}
-	if err := h.OnPathChallenge(challenge); err != nil {
-		t.Fatal(err)
-	}
-	if err := c.flush(); err != nil {
-		t.Fatalf("flush: %v", err)
-	}
-	if len(pc.writes) != 1 {
-		t.Fatalf("wrote %d packets, want 1 (the PATH_RESPONSE)", len(pc.writes))
-	}
+	require.NoError(t, h.OnPathChallenge(challenge), "OnPathChallenge queues the response")
+
+	err := c.flush()
+
+	require.NoError(t, err, "flush")
+	require.Lenf(t, pc.writes, 1, "wrote %d packets, want 1 (the PATH_RESPONSE)", len(pc.writes))
 	hdr, err := ParseHeader(pc.writes[0], len(c.dcid))
-	if err != nil {
-		t.Fatalf("ParseHeader: %v", err)
-	}
+	require.NoError(t, err, "ParseHeader on the PATH_RESPONSE datagram")
 	_, _, payload, err := opener.Open(pc.writes[0], hdr.PNOffset, 0)
-	if err != nil {
-		t.Fatalf("Open: %v", err)
-	}
+	require.NoError(t, err, "Open the PATH_RESPONSE datagram")
 	var resp pathCapture
-	if err := ParseFrames(payload, &resp); err != nil {
-		t.Fatalf("ParseFrames: %v", err)
-	}
-	if !resp.got {
-		t.Fatal("no PATH_RESPONSE on the wire")
-	}
-	if resp.data != *challenge {
-		t.Fatalf("PATH_RESPONSE data = %x, want %x", resp.data, *challenge)
-	}
+	require.NoError(t, ParseFrames(payload, &resp), "ParseFrames on the payload")
+	assert.True(t, resp.got, "no PATH_RESPONSE on the wire")
+	assert.Equalf(t, *challenge, resp.data,
+		"PATH_RESPONSE data = %x, want %x", resp.data, *challenge)
 }

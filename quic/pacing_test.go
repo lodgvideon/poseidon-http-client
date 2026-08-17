@@ -3,6 +3,9 @@ package quic
 import (
 	"testing"
 	"time"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // pacingConn returns a sealable connection wired for pacing: a large congestion
@@ -29,32 +32,23 @@ func TestConformance_RFC9002_Sec77_Pacing(t *testing.T) {
 	// A single send of far more than the congestion window: pacing admits only an
 	// initial-window burst of on-wire bytes, never the whole window back-to-back.
 	n, err := s.Send(make([]byte, 200000), false)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if uint64(n) >= c.cwnd {
-		t.Fatalf("burst admitted %d payload bytes >= cwnd %d — pacing did not limit the burst", n, c.cwnd)
-	}
-	// The burst is bounded in on-wire bytes to the initial window; the admitted
-	// payload is that minus a datagram of framing/AEAD overhead per packet.
-	if lo := int(kInitialWindow) - 2*maxDatagramSize; n < lo || uint64(n) > kInitialWindow {
-		t.Fatalf("burst = %d payload bytes, want ≈ initial window %d (§7.7 burst limit)", n, kInitialWindow)
-	}
-
 	// The bucket is empty and the clock has not moved: nothing more is admitted.
-	if n2, _ := s.Send(make([]byte, 200000), false); n2 != 0 {
-		t.Fatalf("second immediate send admitted %d bytes, want 0 (empty pacing bucket)", n2)
-	}
-
+	n2, _ := s.Send(make([]byte, 200000), false)
 	// A full smoothed-RTT of wall-clock refills the bucket for another burst.
 	*clk = clk.Add(100 * time.Millisecond)
-	n3, err := s.Send(make([]byte, 200000), false)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if n3 == 0 || uint64(n3) > kInitialWindow {
-		t.Fatalf("post-refill send = %d bytes, want a fresh ≈initial-window burst", n3)
-	}
+	n3, err3 := s.Send(make([]byte, 200000), false)
+
+	require.NoError(t, err, "the first paced Send")
+	assert.Lessf(t, uint64(n), c.cwnd,
+		"burst admitted %d payload bytes >= cwnd %d — pacing did not limit the burst", n, c.cwnd)
+	// The burst is bounded in on-wire bytes to the initial window; the admitted
+	// payload is that minus a datagram of framing/AEAD overhead per packet.
+	assert.Truef(t, n >= int(kInitialWindow)-2*maxDatagramSize && uint64(n) <= kInitialWindow,
+		"burst = %d payload bytes, want ≈ initial window %d (§7.7 burst limit)", n, kInitialWindow)
+	assert.Zerof(t, n2, "second immediate send admitted %d bytes, want 0 (empty pacing bucket)", n2)
+	require.NoError(t, err3, "the post-refill Send")
+	assert.Truef(t, n3 != 0 && uint64(n3) <= kInitialWindow,
+		"post-refill send = %d bytes, want a fresh ≈initial-window burst", n3)
 }
 
 // TestConformance_RFC9002_Sec77_PacingRate checks the refill rate is exactly the
@@ -65,9 +59,11 @@ func TestConformance_RFC9002_Sec77_PacingRate(t *testing.T) {
 	c.pacingBudget, c.pacingLast = 0, *clk
 
 	*clk = clk.Add(time.Millisecond)
-	if got := c.pacingCredit(); got != 2500 {
-		t.Fatalf("pacingCredit after 1 ms = %d, want 2500 (rate 1.25·cwnd/srtt)", got)
-	}
+
+	got := c.pacingCredit()
+
+	assert.Equalf(t, uint64(2500), got,
+		"pacingCredit after 1 ms = %d, want 2500 (rate 1.25·cwnd/srtt)", got)
 }
 
 // TestConformance_RFC9002_Sec77_PacingSubQuantumNoStarve is the regression for a
@@ -84,9 +80,10 @@ func TestConformance_RFC9002_Sec77_PacingSubQuantumNoStarve(t *testing.T) {
 		*clk = clk.Add(100 * time.Nanosecond)
 		c.pacingCredit()
 	}
-	if c.pacingBudget < 1000 {
-		t.Fatalf("500 µs of sub-quantum steps minted %d bytes, want ≈1250 — time was discarded (livelock)", c.pacingBudget)
-	}
+
+	assert.GreaterOrEqualf(t, c.pacingBudget, uint64(1000),
+		"500 µs of sub-quantum steps minted %d bytes, want ≈1250 — time was discarded (livelock)",
+		c.pacingBudget)
 }
 
 // TestConformance_RFC9002_Sec77_PacingBoundsSmallWrites checks that the burst
@@ -104,25 +101,24 @@ func TestConformance_RFC9002_Sec77_PacingBoundsSmallWrites(t *testing.T) {
 	count := 0
 	for {
 		n, err := s.Send([]byte{0xAA}, false)
-		if err != nil {
-			t.Fatal(err)
-		}
+		require.NoError(t, err, "a one-byte Send inside the burst")
 		if n == 0 {
 			break // pacing bucket empty
 		}
 		count++
-		if count > 5000 {
-			t.Fatal("one-byte writes not bounded — pacing debit is not counting wire bytes")
-		}
+		require.LessOrEqual(t, count, 5000,
+			"one-byte writes not bounded — pacing debit is not counting wire bytes")
 	}
 
 	wire := 0
 	for _, p := range pc.pkts {
 		wire += len(p)
 	}
-	if uint64(wire) > kInitialWindow+maxDatagramSize || uint64(wire) < kInitialWindow-maxDatagramSize {
-		t.Fatalf("one-byte-write burst = %d wire bytes over %d packets, want ≈ initial window %d", wire, count, kInitialWindow)
-	}
+
+	assert.Truef(t,
+		uint64(wire) <= kInitialWindow+maxDatagramSize && uint64(wire) >= kInitialWindow-maxDatagramSize,
+		"one-byte-write burst = %d wire bytes over %d packets, want ≈ initial window %d",
+		wire, count, kInitialWindow)
 }
 
 // TestConformance_RFC9002_Sec77_NoPacingWithoutRTT checks that before any RTT
@@ -133,12 +129,10 @@ func TestConformance_RFC9002_Sec77_NoPacingWithoutRTT(t *testing.T) {
 	c.rtt.smoothedRTT = 0 // no RTT sample yet
 
 	n, err := s.Send(make([]byte, 200000), false)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if uint64(n) <= kInitialWindow {
-		t.Fatalf("without an RTT sample the send should not be paced; got %d bytes", n)
-	}
+
+	require.NoError(t, err, "Send before any RTT sample")
+	assert.Greaterf(t, uint64(n), kInitialWindow,
+		"without an RTT sample the send should not be paced; got %d bytes", n)
 }
 
 // TestConformance_RFC9002_Sec77_PacingCarriesTheWholeByteRemainder is the other
@@ -159,6 +153,7 @@ func TestConformance_RFC9002_Sec77_PacingCarriesTheWholeByteRemainder(t *testing
 	c.pacingBudget, c.pacingLast = 0, *clk
 
 	const steps = 1000
+
 	for i := 0; i < steps; i++ {
 		*clk = clk.Add(600 * time.Nanosecond)
 		c.pacingCredit()
@@ -167,13 +162,11 @@ func TestConformance_RFC9002_Sec77_PacingCarriesTheWholeByteRemainder(t *testing
 	// 600 microseconds at 2.5 bytes/microsecond. Well under kInitialWindow, so the
 	// budget cap is not what this measures.
 	const want = 1500
-	if c.pacingBudget < want-50 {
-		t.Fatalf("1000 steps of 1.5 bytes each minted %d bytes, want about %d: the "+
+	assert.GreaterOrEqualf(t, c.pacingBudget, uint64(want-50),
+		"1000 steps of 1.5 bytes each minted %d bytes, want about %d: the "+
 			"sub-byte remainder is being discarded, so the long-run pacing rate sits "+
 			"below N*cwnd/smoothed_rtt (RFC 9002 §7.7)", c.pacingBudget, want)
-	}
-	if c.pacingBudget > want+50 {
-		t.Fatalf("1000 steps of 1.5 bytes each minted %d bytes, want about %d: more "+
+	assert.LessOrEqualf(t, c.pacingBudget, uint64(want+50),
+		"1000 steps of 1.5 bytes each minted %d bytes, want about %d: more "+
 			"time was credited than elapsed", c.pacingBudget, want)
-	}
 }
