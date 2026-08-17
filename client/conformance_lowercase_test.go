@@ -3,6 +3,8 @@ package client
 import (
 	"testing"
 
+	"github.com/stretchr/testify/assert"
+
 	"github.com/lodgvideon/poseidon-http-client/conn"
 )
 
@@ -20,13 +22,15 @@ func TestConformance_RFC9113_Sec8_2_1_LowercasesCallerHeaderNames(t *testing.T) 
 		},
 	}
 	sp := hdrSlicePool.Get().(*[]conn.HeaderField)
-	hdrs := buildHeaders(req, "default", "https", sp)
 	defer func() { *sp = (*sp)[:0]; hdrSlicePool.Put(sp) }()
+
+	hdrs := buildHeaders(req, "default", "https", sp)
 
 	for _, h := range hdrs {
 		for _, b := range h.Name {
 			if b >= 'A' && b <= 'Z' {
-				t.Errorf("field name %q emitted with an uppercase letter (RFC 9113 §8.2.1)", h.Name)
+				assert.Failf(t, "uppercase field name on the wire",
+					"field name %q emitted with an uppercase letter (RFC 9113 §8.2.1)", h.Name)
 				break
 			}
 		}
@@ -38,9 +42,7 @@ func TestConformance_RFC9113_Sec8_2_1_LowercasesCallerHeaderNames(t *testing.T) 
 		}
 	}
 	for name, seen := range want {
-		if !seen {
-			t.Errorf("expected lowercased header %q not present on the wire", name)
-		}
+		assert.Truef(t, seen, "expected lowercased header %q not present on the wire", name)
 	}
 }
 
@@ -48,13 +50,13 @@ func TestConformance_RFC9113_Sec8_2_1_LowercasesCallerHeaderNames(t *testing.T) 
 // fast path for an already-lowercase name.
 func TestLowerHeaderName(t *testing.T) {
 	in := []byte("x-already-lower")
-	if got := lowerHeaderName(in); &got[0] != &in[0] {
-		t.Error("lowerHeaderName copied an already-lowercase name instead of returning it unchanged")
-	}
-	if got := string(lowerHeaderName([]byte("Content-Type"))); got != "content-type" {
-		t.Errorf("lowerHeaderName(Content-Type) = %q, want content-type", got)
-	}
-	if got := string(lowerHeaderName([]byte("X-ÀB"))); got != "x-Àb" {
-		t.Errorf("lowerHeaderName folds only ASCII A-Z, got %q", got)
-	}
+
+	sameBacking := lowerHeaderName(in)
+	folded := string(lowerHeaderName([]byte("Content-Type")))
+	nonASCII := string(lowerHeaderName([]byte("X-ÀB")))
+
+	assert.True(t, &sameBacking[0] == &in[0],
+		"lowerHeaderName copied an already-lowercase name instead of returning it unchanged")
+	assert.Equalf(t, "content-type", folded, "lowerHeaderName(Content-Type) = %q, want content-type", folded)
+	assert.Equalf(t, "x-Àb", nonASCII, "lowerHeaderName folds only ASCII A-Z, got %q", nonASCII)
 }
