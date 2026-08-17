@@ -6,6 +6,8 @@ import (
 	"testing"
 
 	"github.com/lodgvideon/poseidon-http-client/frame"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // TestLookupPeerSetting_PresentVsAbsent verifies the present/absent
@@ -13,22 +15,17 @@ import (
 // MAX_CONCURRENT_STREAMS" from "peer advertised the value zero".
 func TestLookupPeerSetting_PresentVsAbsent(t *testing.T) {
 	var p frame.SettingsParams
-	if _, ok := lookupPeerSetting(p, frame.SettingMaxConcurrentStreams); ok {
-		t.Fatalf("lookup of absent ID returned ok=true")
-	}
+
+	_, absentOK := lookupPeerSetting(p, frame.SettingMaxConcurrentStreams)
 	setPeerSetting(&p, frame.SettingMaxConcurrentStreams, 0)
-	v, ok := lookupPeerSetting(p, frame.SettingMaxConcurrentStreams)
-	if !ok {
-		t.Fatalf("lookup of zero-valued ID returned ok=false")
-	}
-	if v != 0 {
-		t.Fatalf("v = %d, want 0", v)
-	}
+	zeroV, zeroOK := lookupPeerSetting(p, frame.SettingMaxConcurrentStreams)
 	setPeerSetting(&p, frame.SettingMaxConcurrentStreams, 5)
-	v, ok = lookupPeerSetting(p, frame.SettingMaxConcurrentStreams)
-	if !ok || v != 5 {
-		t.Fatalf("got (%d, %v), want (5, true)", v, ok)
-	}
+	fiveV, fiveOK := lookupPeerSetting(p, frame.SettingMaxConcurrentStreams)
+
+	require.False(t, absentOK, "lookup of absent ID returned ok=true")
+	require.True(t, zeroOK, "lookup of zero-valued ID returned ok=false")
+	assert.EqualValuesf(t, 0, zeroV, "v = %d, want 0", zeroV)
+	assert.Truef(t, fiveOK && fiveV == 5, "got (%d, %v), want (5, true)", fiveV, fiveOK)
 }
 
 // TestNewStream_PeerLimitTighterThanLocal_Wins confirms that when the
@@ -37,15 +34,15 @@ func TestLookupPeerSetting_PresentVsAbsent(t *testing.T) {
 func TestNewStream_PeerLimitTighterThanLocal_Wins(t *testing.T) {
 	c := newPeerLimitConn(10) // local cap 10
 	setPeerSetting(&c.peerSettings, frame.SettingMaxConcurrentStreams, 2)
-
 	for i := 0; i < 2; i++ {
-		if _, err := c.NewStream(context.Background()); err != nil {
-			t.Fatalf("NewStream %d: %v", i, err)
-		}
+		_, err := c.NewStream(context.Background())
+		require.NoErrorf(t, err, "NewStream %d", i)
 	}
-	if _, err := c.NewStream(context.Background()); err != ErrTooManyStreams {
-		t.Fatalf("3rd NewStream err = %v, want ErrTooManyStreams (peer cap 2)", err)
-	}
+
+	_, err := c.NewStream(context.Background())
+
+	require.ErrorIsf(t, err, ErrTooManyStreams,
+		"3rd NewStream err = %v, want ErrTooManyStreams (peer cap 2)", err)
 }
 
 // TestNewStream_PeerLimitAbsent_FallsThroughToLocal confirms that
@@ -54,13 +51,14 @@ func TestNewStream_PeerLimitTighterThanLocal_Wins(t *testing.T) {
 func TestNewStream_PeerLimitAbsent_FallsThroughToLocal(t *testing.T) {
 	c := newPeerLimitConn(3)
 	for i := 0; i < 3; i++ {
-		if _, err := c.NewStream(context.Background()); err != nil {
-			t.Fatalf("NewStream %d: %v", i, err)
-		}
+		_, err := c.NewStream(context.Background())
+		require.NoErrorf(t, err, "NewStream %d", i)
 	}
-	if _, err := c.NewStream(context.Background()); err != ErrTooManyStreams {
-		t.Fatalf("4th NewStream err = %v, want ErrTooManyStreams (local cap 3)", err)
-	}
+
+	_, err := c.NewStream(context.Background())
+
+	require.ErrorIsf(t, err, ErrTooManyStreams,
+		"4th NewStream err = %v, want ErrTooManyStreams (local cap 3)", err)
 }
 
 // TestNewStream_PeerLimitLargerThanLocal_LocalWins confirms the
@@ -68,15 +66,15 @@ func TestNewStream_PeerLimitAbsent_FallsThroughToLocal(t *testing.T) {
 func TestNewStream_PeerLimitLargerThanLocal_LocalWins(t *testing.T) {
 	c := newPeerLimitConn(2)
 	setPeerSetting(&c.peerSettings, frame.SettingMaxConcurrentStreams, 100)
-
 	for i := 0; i < 2; i++ {
-		if _, err := c.NewStream(context.Background()); err != nil {
-			t.Fatalf("NewStream %d: %v", i, err)
-		}
+		_, err := c.NewStream(context.Background())
+		require.NoErrorf(t, err, "NewStream %d", i)
 	}
-	if _, err := c.NewStream(context.Background()); err != ErrTooManyStreams {
-		t.Fatalf("3rd NewStream err = %v, want ErrTooManyStreams (local cap 2 < peer 100)", err)
-	}
+
+	_, err := c.NewStream(context.Background())
+
+	require.ErrorIsf(t, err, ErrTooManyStreams,
+		"3rd NewStream err = %v, want ErrTooManyStreams (local cap 2 < peer 100)", err)
 }
 
 // TestNewStream_PeerLimitZero_BlocksAllNewStreams confirms peer's
@@ -86,9 +84,10 @@ func TestNewStream_PeerLimitZero_BlocksAllNewStreams(t *testing.T) {
 	c := newPeerLimitConn(10)
 	setPeerSetting(&c.peerSettings, frame.SettingMaxConcurrentStreams, 0)
 
-	if _, err := c.NewStream(context.Background()); err != ErrTooManyStreams {
-		t.Fatalf("NewStream err = %v, want ErrTooManyStreams (peer cap 0)", err)
-	}
+	_, err := c.NewStream(context.Background())
+
+	require.ErrorIsf(t, err, ErrTooManyStreams,
+		"NewStream err = %v, want ErrTooManyStreams (peer cap 0)", err)
 }
 
 // TestApplyPeerSettings_LowerMaxConcurrent_DoesNotCloseExistingStreams
@@ -98,31 +97,23 @@ func TestNewStream_PeerLimitZero_BlocksAllNewStreams(t *testing.T) {
 func TestApplyPeerSettings_LowerMaxConcurrent_DoesNotCloseExistingStreams(t *testing.T) {
 	c := newPeerLimitConn(10)
 	setPeerSetting(&c.peerSettings, frame.SettingMaxConcurrentStreams, 5)
-
 	// Open three streams under the original cap of 5.
-	streams := make([]StreamRef, 3)
-	for i := range streams {
-		s, err := c.NewStream(context.Background())
-		if err != nil {
-			t.Fatalf("seed NewStream %d: %v", i, err)
-		}
-		streams[i] = s
+	for i := 0; i < 3; i++ {
+		_, err := c.NewStream(context.Background())
+		require.NoErrorf(t, err, "seed NewStream %d", i)
 	}
-
 	// Peer drops the cap to 2 mid-flight.
 	var update frame.SettingsParams
 	setPeerSetting(&update, frame.SettingMaxConcurrentStreams, 2)
-	if err := c.applyPeerSettings(update); err != nil {
-		t.Fatalf("applyPeerSettings: %v", err)
-	}
 
+	err := c.applyPeerSettings(update)
+
+	require.NoErrorf(t, err, "applyPeerSettings")
 	// Open streams remain in the registry; new allocation refused.
-	if c.inflight != 3 {
-		t.Fatalf("inflight = %d, want 3 (existing streams preserved)", c.inflight)
-	}
-	if _, err := c.NewStream(context.Background()); err != ErrTooManyStreams {
-		t.Fatalf("NewStream after lowered cap = %v, want ErrTooManyStreams", err)
-	}
+	assert.EqualValuesf(t, 3, c.inflight, "inflight = %d, want 3 (existing streams preserved)", c.inflight)
+	_, nsErr := c.NewStream(context.Background())
+	assert.ErrorIsf(t, nsErr, ErrTooManyStreams,
+		"NewStream after lowered cap = %v, want ErrTooManyStreams", nsErr)
 }
 
 // newPeerLimitConn builds a *Conn that supports NewStream + dynamic

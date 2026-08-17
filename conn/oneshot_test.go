@@ -1,8 +1,10 @@
 package conn
 
 import (
-	"errors"
 	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // writeHeadersAndData fuses HEADERS and the body into one transport write, but
@@ -49,20 +51,19 @@ func TestOneShotCredit_RefusesWhenShort(t *testing.T) {
 			s := oneShotStream(c, tc.stream)
 
 			ok, err := c.tryAcquireSendCreditsAll(s, s.gen.Load(), 64, 0)
-			if err != nil {
-				t.Fatalf("err = %v, want nil", err)
-			}
-			if ok {
-				t.Fatal("granted 64 bytes against a smaller window — the fused path would " +
-					"emit more than the peer allows")
-			}
+
+			require.NoErrorf(t, err, "err = %v, want nil", err)
+			require.False(t, ok, "granted 64 bytes against a smaller window — the fused path would "+
+				"emit more than the peer allows")
 			s.mu.Lock()
 			got := s.sendWindow
 			s.mu.Unlock()
-			if got != tc.stream || c.peerConnSendWindow != tc.connWn {
-				t.Errorf("a refused acquire debited the windows: stream=%d conn=%d, want %d and %d",
-					got, c.peerConnSendWindow, tc.stream, tc.connWn)
-			}
+			assert.Equalf(t, tc.stream, got,
+				"a refused acquire debited the windows: stream=%d conn=%d, want %d and %d",
+				got, c.peerConnSendWindow, tc.stream, tc.connWn)
+			assert.Equalf(t, tc.connWn, c.peerConnSendWindow,
+				"a refused acquire debited the windows: stream=%d conn=%d, want %d and %d",
+				got, c.peerConnSendWindow, tc.stream, tc.connWn)
 		})
 	}
 }
@@ -75,15 +76,16 @@ func TestOneShotCredit_GrantsTheWholeAmount(t *testing.T) {
 	s := oneShotStream(c, 100)
 
 	ok, err := c.tryAcquireSendCreditsAll(s, s.gen.Load(), 40, 0)
-	if err != nil || !ok {
-		t.Fatalf("tryAcquireSendCreditsAll = (%v, %v), want (true, nil)", ok, err)
-	}
+
+	require.NoErrorf(t, err, "tryAcquireSendCreditsAll = (%v, %v), want (true, nil)", ok, err)
+	require.Truef(t, ok, "tryAcquireSendCreditsAll = (%v, %v), want (true, nil)", ok, err)
 	s.mu.Lock()
 	got := s.sendWindow
 	s.mu.Unlock()
-	if got != 60 || c.peerConnSendWindow != 60 {
-		t.Errorf("after granting 40: stream=%d conn=%d, want 60 and 60", got, c.peerConnSendWindow)
-	}
+	assert.EqualValuesf(t, 60, got,
+		"after granting 40: stream=%d conn=%d, want 60 and 60", got, c.peerConnSendWindow)
+	assert.EqualValuesf(t, 60, c.peerConnSendWindow,
+		"after granting 40: stream=%d conn=%d, want 60 and 60", got, c.peerConnSendWindow)
 }
 
 // TestOneShotCredit_ChargesPadding pins that the padding overhead is part of the
@@ -96,23 +98,29 @@ func TestOneShotCredit_ChargesPadding(t *testing.T) {
 
 	// 40 data + 10 overhead exactly fills a 50-byte window.
 	ok, err := c.tryAcquireSendCreditsAll(s, s.gen.Load(), 40, 10)
-	if err != nil || !ok {
-		t.Fatalf("exact fit = (%v, %v), want (true, nil)", ok, err)
-	}
+
+	require.NoErrorf(t, err, "exact fit = (%v, %v), want (true, nil)", ok, err)
+	require.Truef(t, ok, "exact fit = (%v, %v), want (true, nil)", ok, err)
 	s.mu.Lock()
 	got := s.sendWindow
 	s.mu.Unlock()
-	if got != 0 || c.peerConnSendWindow != 0 {
-		t.Errorf("after 40+10: stream=%d conn=%d, want 0 and 0", got, c.peerConnSendWindow)
-	}
+	assert.EqualValuesf(t, 0, got, "after 40+10: stream=%d conn=%d, want 0 and 0", got, c.peerConnSendWindow)
+	assert.EqualValuesf(t, 0, c.peerConnSendWindow,
+		"after 40+10: stream=%d conn=%d, want 0 and 0", got, c.peerConnSendWindow)
+}
 
-	// One byte more than the window, counting overhead, must be refused.
-	c2 := oneShotConn(50)
-	s2 := oneShotStream(c2, 50)
-	if ok, err := c2.tryAcquireSendCreditsAll(s2, s2.gen.Load(), 41, 10); err != nil || ok {
-		t.Errorf("41+10 against a 50-byte window = (%v, %v), want (false, nil) — padding is "+
-			"not being charged", ok, err)
-	}
+// TestOneShotCredit_RefusesOnePastTheWindow is the other side of the exact fit
+// above: one byte more than the window, counting overhead, must be refused.
+func TestOneShotCredit_RefusesOnePastTheWindow(t *testing.T) {
+	c := oneShotConn(50)
+	s := oneShotStream(c, 50)
+
+	ok, err := c.tryAcquireSendCreditsAll(s, s.gen.Load(), 41, 10)
+
+	assert.NoErrorf(t, err, "41+10 against a 50-byte window = (%v, %v), want (false, nil) — "+
+		"padding is not being charged", ok, err)
+	assert.Falsef(t, ok, "41+10 against a 50-byte window = (%v, %v), want (false, nil) — "+
+		"padding is not being charged", ok, err)
 }
 
 // TestOneShotCredit_RefusesAStaleLifetime pins that the fused path honours the
@@ -125,15 +133,11 @@ func TestOneShotCredit_RefusesAStaleLifetime(t *testing.T) {
 	s.gen.Add(1) // the struct now belongs to a later request
 
 	ok, err := c.tryAcquireSendCreditsAll(s, stale, 10, 0)
-	if !errors.Is(err, ErrStaleStream) {
-		t.Fatalf("err = %v, want ErrStaleStream", err)
-	}
-	if ok {
-		t.Error("a stale lifetime was granted credit")
-	}
-	if c.peerConnSendWindow != 1000 {
-		t.Errorf("a stale acquire debited the connection window: %d, want 1000", c.peerConnSendWindow)
-	}
+
+	require.ErrorIsf(t, err, ErrStaleStream, "err = %v, want ErrStaleStream", err)
+	assert.False(t, ok, "a stale lifetime was granted credit")
+	assert.EqualValuesf(t, 1000, c.peerConnSendWindow,
+		"a stale acquire debited the connection window: %d, want 1000", c.peerConnSendWindow)
 }
 
 // TestOneShotCredit_RefusesAClosedStream pins RFC 9113 §6.4: once a stream is
@@ -147,10 +151,7 @@ func TestOneShotCredit_RefusesAClosedStream(t *testing.T) {
 	s.mu.Unlock()
 
 	ok, err := c.tryAcquireSendCreditsAll(s, s.gen.Load(), 10, 0)
-	if !errors.Is(err, ErrStreamClosed) {
-		t.Fatalf("err = %v, want ErrStreamClosed", err)
-	}
-	if ok {
-		t.Error("a closed stream was granted credit")
-	}
+
+	require.ErrorIsf(t, err, ErrStreamClosed, "err = %v, want ErrStreamClosed", err)
+	assert.False(t, ok, "a closed stream was granted credit")
 }

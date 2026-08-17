@@ -4,7 +4,6 @@ import (
 	"context"
 	"crypto/tls"
 	"crypto/x509"
-	"errors"
 	"io"
 	"net"
 	"net/http"
@@ -14,6 +13,8 @@ import (
 	"time"
 
 	"github.com/lodgvideon/poseidon-http-client/frame"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // startPingServer is identical to startH2TestServer in integration_test.go.
@@ -40,9 +41,7 @@ func dialPingServer(t *testing.T, srv *httptest.Server, cfg *tls.Config, opts Co
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 	c, err := Dial(ctx, srv.Listener.Addr().String(), opts)
-	if err != nil {
-		t.Fatalf("Dial: %v", err)
-	}
+	require.NoErrorf(t, err, "Dial")
 	t.Cleanup(func() { _ = c.Close() })
 	return c
 }
@@ -51,37 +50,31 @@ func TestConn_Ping_RTT(t *testing.T) {
 	srv, cfg := startPingServer(t, http.HandlerFunc(func(_ http.ResponseWriter, _ *http.Request) {}))
 	defer srv.Close()
 	c := dialPingServer(t, srv, cfg, ConnOptions{})
-
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
+
 	rtt, err := c.Ping(ctx)
-	if err != nil {
-		t.Fatalf("Ping: %v", err)
-	}
+
+	require.NoErrorf(t, err, "Ping")
 	// A zero RTT is a legitimate measurement, not a failure. On coarse-resolution
 	// monotonic clocks (notably Windows) a fast in-memory loopback ping round-trip
 	// can complete within a single clock tick, so time.Since(start) rounds to
 	// exactly 0. Only a negative RTT would signal a real bug (a clock running
 	// backwards). The upper bound below still proves an RTT was measured in
 	// loopback range.
-	if rtt < 0 {
-		t.Errorf("RTT = %v, want >= 0", rtt)
-	}
-	if rtt >= time.Second {
-		t.Errorf("RTT = %v, want < 1s (loopback server)", rtt)
-	}
+	assert.GreaterOrEqualf(t, rtt, time.Duration(0), "RTT = %v, want >= 0", rtt)
+	assert.Lessf(t, rtt, time.Second, "RTT = %v, want < 1s (loopback server)", rtt)
 }
 
 func TestConn_Ping_ConcurrentSafe(t *testing.T) {
 	srv, cfg := startPingServer(t, http.HandlerFunc(func(_ http.ResponseWriter, _ *http.Request) {}))
 	defer srv.Close()
 	c := dialPingServer(t, srv, cfg, ConnOptions{})
-
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-
 	const n = 20
 	errs := make([]error, n)
+
 	var wg sync.WaitGroup
 	for i := 0; i < n; i++ {
 		i := i
@@ -92,10 +85,9 @@ func TestConn_Ping_ConcurrentSafe(t *testing.T) {
 		}()
 	}
 	wg.Wait()
+
 	for i, err := range errs {
-		if err != nil {
-			t.Errorf("goroutine %d: Ping = %v", i, err)
-		}
+		assert.NoErrorf(t, err, "goroutine %d: Ping = %v", i, err)
 	}
 }
 
@@ -120,14 +112,13 @@ func TestConn_Ping_CtxCancelledBeforeACK(t *testing.T) {
 		if err == nil {
 			continue // ACK arrived before select — OK
 		}
-		if !errors.Is(err, context.DeadlineExceeded) {
-			t.Fatalf("iteration %d: Ping = %v, want nil or context.DeadlineExceeded", i, err)
-		}
+		require.ErrorIsf(t, err, context.DeadlineExceeded,
+			"iteration %d: Ping = %v, want nil or context.DeadlineExceeded", i, err)
 		gotCtxErr = true
 	}
-	if !gotCtxErr {
-		t.Fatal("never observed context.DeadlineExceeded in 50 iterations with pre-expired ctx")
-	}
+
+	require.True(t, gotCtxErr,
+		"never observed context.DeadlineExceeded in 50 iterations with pre-expired ctx")
 }
 
 func TestConn_Ping_AfterClose(t *testing.T) {
@@ -135,13 +126,12 @@ func TestConn_Ping_AfterClose(t *testing.T) {
 	defer srv.Close()
 	c := dialPingServer(t, srv, cfg, ConnOptions{})
 	_ = c.Close()
-
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
+
 	_, err := c.Ping(ctx)
-	if !errors.Is(err, ErrConnClosed) {
-		t.Fatalf("Ping after Close = %v, want ErrConnClosed", err)
-	}
+
+	require.ErrorIsf(t, err, ErrConnClosed, "Ping after Close = %v, want ErrConnClosed", err)
 }
 
 func TestConn_Keepalive_HealthyConn(t *testing.T) {
@@ -152,9 +142,8 @@ func TestConn_Keepalive_HealthyConn(t *testing.T) {
 
 	// Wait 3 keepalive intervals; conn must remain alive.
 	time.Sleep(100 * time.Millisecond)
-	if !c.IsAlive() {
-		t.Fatal("keepalive closed a healthy connection")
-	}
+
+	require.True(t, c.IsAlive(), "keepalive closed a healthy connection")
 }
 
 func TestConn_Keepalive_ClosesDeadConn(t *testing.T) {
@@ -173,26 +162,24 @@ func TestConn_Keepalive_ClosesDeadConn(t *testing.T) {
 		}
 		time.Sleep(5 * time.Millisecond)
 	}
-	t.Fatal("conn still alive 200ms after server closed — keepalive did not detect dead conn")
+	require.FailNow(t, "conn still alive 200ms after server closed — keepalive did not detect dead conn")
 }
 
 func TestConn_Keepalive_PingTimeout(t *testing.T) {
 	addr := startDeafH2Server(t)
-
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
+
+	// Server completes H2 handshake but never echoes PINGs.
+	// keepalive must close the connection within ~interval+timeout.
 	c, err := Dial(ctx, addr, ConnOptions{
 		Dialer:            &PlaintextDialer{},
 		KeepaliveInterval: 50 * time.Millisecond,
 		KeepaliveTimeout:  150 * time.Millisecond,
 	})
-	if err != nil {
-		t.Fatalf("Dial: %v", err)
-	}
-	t.Cleanup(func() { _ = c.Close() })
 
-	// Server completes H2 handshake but never echoes PINGs.
-	// keepalive must close the connection within ~interval+timeout.
+	require.NoErrorf(t, err, "Dial")
+	t.Cleanup(func() { _ = c.Close() })
 	deadline := time.Now().Add(time.Second)
 	for time.Now().Before(deadline) {
 		if !c.IsAlive() {
@@ -200,30 +187,26 @@ func TestConn_Keepalive_PingTimeout(t *testing.T) {
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
-	t.Fatal("conn still alive 1s after start — keepalive did not detect ping timeout")
+	require.FailNow(t, "conn still alive 1s after start — keepalive did not detect ping timeout")
 }
 
 func TestConn_DeliverPingAck_UnsolicitedIsNoop(t *testing.T) {
 	srv, cfg := startPingServer(t, http.HandlerFunc(func(_ http.ResponseWriter, _ *http.Request) {}))
 	defer srv.Close()
 	c := dialPingServer(t, srv, cfg, ConnOptions{})
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
 
 	// deliverPingAck with a payload no Ping call is waiting for must not
 	// panic or corrupt state; a subsequent real Ping must still succeed.
 	c.deliverPingAck([8]byte{0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF})
 
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
 	rtt, err := c.Ping(ctx)
-	if err != nil {
-		t.Fatalf("Ping after unsolicited ACK delivery: %v", err)
-	}
+	require.NoErrorf(t, err, "Ping after unsolicited ACK delivery")
 	// See TestConn_Ping_RTT: a zero RTT is valid on coarse-resolution clocks;
 	// only a negative RTT indicates a bug. The err == nil check above is what
 	// proves the unsolicited ACK was a no-op (a real Ping still succeeded).
-	if rtt < 0 {
-		t.Errorf("RTT = %v, want >= 0", rtt)
-	}
+	assert.GreaterOrEqualf(t, rtt, time.Duration(0), "RTT = %v, want >= 0", rtt)
 }
 
 // startDeafH2Server starts a minimal plaintext HTTP/2 server that completes
@@ -232,9 +215,7 @@ func TestConn_DeliverPingAck_UnsolicitedIsNoop(t *testing.T) {
 func startDeafH2Server(t *testing.T) string {
 	t.Helper()
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("listen: %v", err)
-	}
+	require.NoErrorf(t, err, "listen")
 	t.Cleanup(func() { _ = ln.Close() })
 
 	go func() {
