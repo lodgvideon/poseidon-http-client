@@ -2,8 +2,10 @@ package grpc
 
 import (
 	"context"
-	"errors"
 	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // unaryTransportWrites is how many Write calls one unary RPC currently makes on
@@ -43,35 +45,31 @@ func TestUnaryTransportWriteCount(t *testing.T) {
 	var wc writeCounter
 	cc := dialMockPeer(t, newMockGRPCPeer(t), &wc)
 	ctx := context.Background()
-
 	// Warm up past the handshake and the cold HPACK table, then zero the
 	// counter so only steady-state RPCs are measured.
-	if _, err := cc.Invoke(ctx, "/bench.Svc/Echo", []byte("hello"), nil); err != nil {
-		t.Fatalf("warmup: %v", err)
-	}
+	_, err := cc.Invoke(ctx, "/bench.Svc/Echo", []byte("hello"), nil)
+	require.NoError(t, err, "warmup")
 	wc.writes.Store(0)
 	wc.bytes.Store(0)
 
 	for i := 0; i < unaryWriteCountRPCs; i++ {
-		if _, err := cc.Invoke(ctx, "/bench.Svc/Echo", []byte("hello"), nil); err != nil {
-			t.Fatalf("Invoke %d: %v", i, err)
-		}
+		_, err := cc.Invoke(ctx, "/bench.Svc/Echo", []byte("hello"), nil)
+		require.NoErrorf(t, err, "Invoke %d", i)
 	}
 
 	writes := wc.writes.Load()
 	perRPC := float64(writes) / unaryWriteCountRPCs
 	t.Logf("unary RPC: %.3f transport writes, %.1f bytes (n=%d)",
 		perRPC, float64(wc.bytes.Load())/unaryWriteCountRPCs, unaryWriteCountRPCs)
-
-	if want := int64(unaryTransportWrites) * unaryWriteCountRPCs; writes > want+writeCountSlack {
-		t.Errorf("unary RPC costs %.3f transport writes, want at most %d: the send path "+
+	want := int64(unaryTransportWrites) * unaryWriteCountRPCs
+	assert.LessOrEqualf(t, writes, want+writeCountSlack,
+		"unary RPC costs %.3f transport writes, want at most %d: the send path "+
 			"regressed, or a frame is being flushed that used to ride along with another",
-			perRPC, unaryTransportWrites)
-	} else if writes < want-writeCountSlack {
-		t.Errorf("unary RPC costs %.3f transport writes, fewer than the recorded %d: "+
+		perRPC, unaryTransportWrites)
+	assert.GreaterOrEqualf(t, writes, want-writeCountSlack,
+		"unary RPC costs %.3f transport writes, fewer than the recorded %d: "+
 			"the send path improved — lower unaryTransportWrites to %.0f to lock the win in",
-			perRPC, unaryTransportWrites, perRPC)
-	}
+		perRPC, unaryTransportWrites, perRPC)
 }
 
 // TestUnaryEndStreamRidesTheMessage pins the shape behind the write count: one
@@ -83,22 +81,19 @@ func TestUnaryEndStreamRidesTheMessage(t *testing.T) {
 	p := newMockGRPCPeer(t)
 	cc := dialMockPeer(t, p, nil)
 	ctx := context.Background()
-
-	if _, err := cc.Invoke(ctx, "/bench.Svc/Echo", []byte("hello"), nil); err != nil {
-		t.Fatalf("warmup: %v", err)
-	}
+	_, err := cc.Invoke(ctx, "/bench.Svc/Echo", []byte("hello"), nil)
+	require.NoError(t, err, "warmup")
 	p.dataFrames.Store(0)
-
 	const rpcs = 20
+
 	for i := 0; i < rpcs; i++ {
-		if _, err := cc.Invoke(ctx, "/bench.Svc/Echo", []byte("hello"), nil); err != nil {
-			t.Fatalf("Invoke %d: %v", i, err)
-		}
+		_, err := cc.Invoke(ctx, "/bench.Svc/Echo", []byte("hello"), nil)
+		require.NoErrorf(t, err, "Invoke %d", i)
 	}
-	if got := p.dataFrames.Load(); got != rpcs {
-		t.Errorf("server saw %d DATA frames for %d unary RPCs, want %d: the message and "+
-			"the half-close are no longer sharing a frame", got, rpcs, rpcs)
-	}
+
+	assert.Equalf(t, int64(rpcs), p.dataFrames.Load(),
+		"server saw %d DATA frames for %d unary RPCs, want %d: the message and "+
+			"the half-close are no longer sharing a frame", p.dataFrames.Load(), rpcs, rpcs)
 }
 
 // TestSendLastRejectsASecondSend pins that SendLast really half-closes: a Send
@@ -108,22 +103,16 @@ func TestSendLastRejectsASecondSend(t *testing.T) {
 	cc := dialMockPeer(t, newMockGRPCPeer(t), nil)
 	ctx := context.Background()
 	s, err := cc.NewStream(ctx, "/bench.Svc/Echo", nil)
-	if err != nil {
-		t.Fatalf("NewStream: %v", err)
-	}
+	require.NoError(t, err, "NewStream")
 	defer func() { _ = s.Close() }()
 
-	if err := s.SendLast(ctx, []byte("one")); err != nil {
-		t.Fatalf("SendLast: %v", err)
-	}
-	if err := s.Send(ctx, []byte("two")); !errors.Is(err, ErrSendClosed) {
-		t.Errorf("Send after SendLast = %v, want ErrSendClosed", err)
-	}
-	if err := s.SendLast(ctx, []byte("two")); !errors.Is(err, ErrSendClosed) {
-		t.Errorf("second SendLast = %v, want ErrSendClosed", err)
-	}
+	require.NoError(t, s.SendLast(ctx, []byte("one")), "SendLast")
+	sendErr := s.Send(ctx, []byte("two"))
+	sendLastErr := s.SendLast(ctx, []byte("two"))
+	closeSendErr := s.CloseSend(ctx)
+
+	assert.ErrorIsf(t, sendErr, ErrSendClosed, "Send after SendLast = %v, want ErrSendClosed", sendErr)
+	assert.ErrorIsf(t, sendLastErr, ErrSendClosed, "second SendLast = %v, want ErrSendClosed", sendLastErr)
 	// CloseSend stays idempotent: SendLast already did what it would do.
-	if err := s.CloseSend(ctx); err != nil {
-		t.Errorf("CloseSend after SendLast = %v, want nil", err)
-	}
+	assert.NoErrorf(t, closeSendErr, "CloseSend after SendLast = %v, want nil", closeSendErr)
 }
