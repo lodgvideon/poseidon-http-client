@@ -4,6 +4,9 @@ import (
 	"net"
 	"testing"
 
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
 	"github.com/lodgvideon/poseidon-http-client/http1"
 )
 
@@ -26,9 +29,7 @@ type opaqueConn struct{ net.Conn }
 // rather than ~0.5µs, and correct.
 func TestHasResidue_OpaqueWrapperStillDetects(t *testing.T) {
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("Listen: %v", err)
-	}
+	require.NoError(t, err, "Listen")
 	defer ln.Close()
 
 	type accepted struct {
@@ -42,27 +43,19 @@ func TestHasResidue_OpaqueWrapperStillDetects(t *testing.T) {
 	}()
 
 	cli, err := net.Dial("tcp", ln.Addr().String())
-	if err != nil {
-		t.Fatalf("Dial: %v", err)
-	}
+	require.NoError(t, err, "Dial")
 	defer cli.Close()
 	a := <-ch
-	if a.err != nil {
-		t.Fatalf("Accept: %v", a.err)
-	}
+	require.NoError(t, a.err, "Accept")
 	defer a.nc.Close()
-
 	c := http1.NewConn(&opaqueConn{Conn: cli})
-	if c.HasResidue() {
-		t.Fatal("HasResidue() = true on a quiet wrapped socket")
-	}
+	require.False(t, c.HasResidue(), "HasResidue() = true on a quiet wrapped socket")
 
-	if _, err := a.nc.Write([]byte("HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nPWNED")); err != nil {
-		t.Fatalf("peer write: %v", err)
-	}
-	if !waitResidue(c, true) {
-		t.Error("HasResidue() = false on a wrapped conn with a complete unsolicited " +
-			"response waiting — the check is blind on this transport, so every " +
+	_, err = a.nc.Write([]byte("HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nPWNED"))
+	require.NoError(t, err, "peer write")
+
+	assert.True(t, waitResidue(c, true),
+		"HasResidue() = false on a wrapped conn with a complete unsolicited "+
+			"response waiting — the check is blind on this transport, so every "+
 			"connection it guards is reusable no matter what the peer sent")
-	}
 }
