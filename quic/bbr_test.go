@@ -286,7 +286,7 @@ func TestBBR_DrivesCwndAndPacingThroughSeam(t *testing.T) {
 	assert.Equalf(t, wantPacing, c.pacingRate, "pacingRate=%d, want %d (pacing_gain·btlbw)",
 		c.pacingRate, wantPacing)
 	assert.NotZerof(t, c.pacingRate, "pacingRate=%d, want %d (pacing_gain·btlbw)", c.pacingRate, wantPacing)
-	assert.NotEqualf(t, uint64(kInitialWindow), c.cwnd,
+	assert.NotEqualf(t, kInitialWindow, c.cwnd,
 		"cwnd left at the initial window: BBR did not drive the gate")
 }
 

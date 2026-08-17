@@ -97,7 +97,7 @@ func TestKeysFromSecret_ChaCha20(t *testing.T) {
 	require.NoErrorf(t, err, "KeysFromSecret(ChaCha20): %v, want keys", err)
 	assert.Falsef(t, len(keys.Key) != 32 || len(keys.IV) != 12 || len(keys.HP) != 32,
 		"key/iv/hp lengths = %d/%d/%d, want 32/12/32", len(keys.Key), len(keys.IV), len(keys.HP))
-	assert.Equalf(t, uint16(tls.TLS_CHACHA20_POLY1305_SHA256), keys.Suite,
+	assert.Equalf(t, tls.TLS_CHACHA20_POLY1305_SHA256, keys.Suite,
 		"Suite = %#x, want TLS_CHACHA20_POLY1305_SHA256", keys.Suite)
 }
 
