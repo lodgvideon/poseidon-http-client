@@ -4,6 +4,9 @@ import (
 	"context"
 	"testing"
 	"time"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // The PR 2d mandatory QUIC-level test (docs/HTTP3_DESIGN.md §5): OpenStreamContext
@@ -19,9 +22,7 @@ func newCreditConn(t *testing.T) *Conn {
 	dcid := []byte("credtest")
 	keys, _ := InitialKeys(dcid)
 	sealer, err := NewSealer(keys)
-	if err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, err, "NewSealer for the credit-test connection")
 	return &Conn{
 		pc: &capturePC{}, dcid: dcid, oneRTTSealer: sealer,
 		now:          time.Now,
@@ -37,49 +38,42 @@ func newCreditConn(t *testing.T) *Conn {
 // only once the peer's MAX_STREAMS raises it (RFC 9000 §4.6).
 func TestMux2d_OpenStreamWaitsOnStreamCredit(t *testing.T) {
 	c := newCreditConn(t)
-
-	if _, err := c.OpenStreamContext(context.Background()); err != nil {
-		t.Fatalf("first OpenStreamContext: %v", err) // fills the limit of 1
-	}
-
+	_, err := c.OpenStreamContext(context.Background()) // fills the limit of 1
+	require.NoError(t, err, "first OpenStreamContext")
 	opened := make(chan *Stream, 1)
 	errc := make(chan error, 1)
 	go func() {
-		s, err := c.OpenStreamContext(context.Background())
-		if err != nil {
-			errc <- err
+		s, oerr := c.OpenStreamContext(context.Background())
+		if oerr != nil {
+			errc <- oerr
 			return
 		}
 		opened <- s
 	}()
-
 	// Parked: no stream yet, no error yet, at the cumulative limit.
 	select {
 	case s := <-opened:
-		t.Fatalf("OpenStreamContext returned stream %d before MAX_STREAMS raised the limit", s.ID())
-	case err := <-errc:
-		t.Fatalf("OpenStreamContext errored while it should be parked: %v", err)
+		require.Failf(t, "the second opener did not park",
+			"OpenStreamContext returned stream %d before MAX_STREAMS raised the limit", s.ID())
+	case perr := <-errc:
+		require.NoError(t, perr, "OpenStreamContext errored while it should be parked")
 	case <-time.After(50 * time.Millisecond):
 	}
 
 	// The peer raises the limit; OnMaxStreams signals the parked opener.
-	h := &connFrameHandler{c: c}
 	c.mu.Lock()
-	err := h.OnMaxStreams(false, 4)
+	err = (&connFrameHandler{c: c}).OnMaxStreams(false, 4)
 	c.mu.Unlock()
-	if err != nil {
-		t.Fatalf("OnMaxStreams: %v", err)
-	}
 
+	require.NoError(t, err, "OnMaxStreams(bidi, 4)")
 	select {
 	case s := <-opened:
-		if s.ID() != 4 {
-			t.Fatalf("woken stream id = %d, want 4 (the next client bidi id)", s.ID())
-		}
-	case err := <-errc:
-		t.Fatalf("OpenStreamContext = %v, want success after MAX_STREAMS", err)
+		assert.Equalf(t, uint64(4), s.ID(),
+			"woken stream id = %d, want 4 (the next client bidi id)", s.ID())
+	case werr := <-errc:
+		require.NoErrorf(t, werr, "OpenStreamContext = %v, want success after MAX_STREAMS", werr)
 	case <-time.After(2 * time.Second):
-		t.Fatal("OpenStreamContext did not wake on the MAX_STREAMS credit grant")
+		require.Fail(t, "OpenStreamContext did not wake on the MAX_STREAMS credit grant")
 	}
 }
 
@@ -88,18 +82,16 @@ func TestMux2d_OpenStreamWaitsOnStreamCredit(t *testing.T) {
 // turn, not just one (openStreamLocked re-signals while credit remains).
 func TestMux2d_OpenStreamCreditWakesManyWaiters(t *testing.T) {
 	c := newCreditConn(t)
-	if _, err := c.OpenStreamContext(context.Background()); err != nil {
-		t.Fatalf("first OpenStreamContext: %v", err) // fills the limit of 1
-	}
-
+	_, err := c.OpenStreamContext(context.Background()) // fills the limit of 1
+	require.NoError(t, err, "first OpenStreamContext")
 	const waiters = 5
 	got := make(chan uint64, waiters)
 	errc := make(chan error, waiters)
 	for i := 0; i < waiters; i++ {
 		go func() {
-			s, err := c.OpenStreamContext(context.Background())
-			if err != nil {
-				errc <- err
+			s, oerr := c.OpenStreamContext(context.Background())
+			if oerr != nil {
+				errc <- oerr
 				return
 			}
 			got <- s.ID()
@@ -108,26 +100,22 @@ func TestMux2d_OpenStreamCreditWakesManyWaiters(t *testing.T) {
 
 	// One MAX_STREAMS granting exactly enough slots for every waiter (1 already
 	// open + 5 waiting = 6).
-	h := &connFrameHandler{c: c}
 	c.mu.Lock()
-	err := h.OnMaxStreams(false, 1+waiters)
+	err = (&connFrameHandler{c: c}).OnMaxStreams(false, 1+waiters)
 	c.mu.Unlock()
-	if err != nil {
-		t.Fatalf("OnMaxStreams: %v", err)
-	}
 
+	require.NoError(t, err, "OnMaxStreams(bidi, 6)")
 	seen := map[uint64]bool{}
 	for i := 0; i < waiters; i++ {
 		select {
 		case id := <-got:
-			if seen[id] {
-				t.Fatalf("duplicate stream id %d handed out", id)
-			}
+			require.Falsef(t, seen[id], "duplicate stream id %d handed out", id)
 			seen[id] = true
-		case err := <-errc:
-			t.Fatalf("a parked OpenStreamContext errored: %v", err)
+		case werr := <-errc:
+			require.NoErrorf(t, werr, "a parked OpenStreamContext errored: %v", werr)
 		case <-time.After(2 * time.Second):
-			t.Fatalf("only %d of %d waiters woke from a single MAX_STREAMS grant (baton-pass broken)", i, waiters)
+			require.Failf(t, "the baton-pass stalled",
+				"only %d of %d waiters woke from a single MAX_STREAMS grant", i, waiters)
 		}
 	}
 }
@@ -137,26 +125,24 @@ func TestMux2d_OpenStreamCreditWakesManyWaiters(t *testing.T) {
 // is never wedged waiting on a peer that never raises the limit.
 func TestMux2d_OpenStreamContext_CtxCancelWakes(t *testing.T) {
 	c := newCreditConn(t)
-	if _, err := c.OpenStreamContext(context.Background()); err != nil {
-		t.Fatalf("first OpenStreamContext: %v", err)
-	}
-
+	_, err := c.OpenStreamContext(context.Background())
+	require.NoError(t, err, "first OpenStreamContext")
 	ctx, cancel := context.WithCancel(context.Background())
 	errc := make(chan error, 1)
 	go func() {
-		_, err := c.OpenStreamContext(ctx)
-		errc <- err
+		_, oerr := c.OpenStreamContext(ctx)
+		errc <- oerr
 	}()
 	time.Sleep(20 * time.Millisecond) // let it park at the limit
+
 	cancel()
 
 	select {
-	case err := <-errc:
-		if err != context.Canceled {
-			t.Fatalf("OpenStreamContext = %v, want context.Canceled", err)
-		}
+	case werr := <-errc:
+		assert.Equalf(t, context.Canceled, werr,
+			"OpenStreamContext = %v, want context.Canceled", werr)
 	case <-time.After(2 * time.Second):
-		t.Fatal("cancel did not wake the parked OpenStreamContext")
+		require.Fail(t, "cancel did not wake the parked OpenStreamContext")
 	}
 }
 
@@ -165,14 +151,12 @@ func TestMux2d_OpenStreamContext_CtxCancelWakes(t *testing.T) {
 // terminates (terminateLocked).
 func TestMux2d_OpenStreamContext_CloseWakes(t *testing.T) {
 	c := newCreditConn(t)
-	if _, err := c.OpenStreamContext(context.Background()); err != nil {
-		t.Fatalf("first OpenStreamContext: %v", err)
-	}
-
+	_, err := c.OpenStreamContext(context.Background())
+	require.NoError(t, err, "first OpenStreamContext")
 	errc := make(chan error, 1)
 	go func() {
-		_, err := c.OpenStreamContext(context.Background())
-		errc <- err
+		_, oerr := c.OpenStreamContext(context.Background())
+		errc <- oerr
 	}()
 	time.Sleep(20 * time.Millisecond) // let it park at the limit
 
@@ -181,11 +165,9 @@ func TestMux2d_OpenStreamContext_CloseWakes(t *testing.T) {
 	c.mu.Unlock()
 
 	select {
-	case err := <-errc:
-		if err != ErrConnClosed {
-			t.Fatalf("OpenStreamContext = %v, want ErrConnClosed", err)
-		}
+	case werr := <-errc:
+		assert.Equalf(t, ErrConnClosed, werr, "OpenStreamContext = %v, want ErrConnClosed", werr)
 	case <-time.After(2 * time.Second):
-		t.Fatal("connection close did not wake the parked OpenStreamContext")
+		require.Fail(t, "connection close did not wake the parked OpenStreamContext")
 	}
 }

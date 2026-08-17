@@ -7,6 +7,9 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // publicWrappers are the lock-taking public entry points on Conn/Stream. Each
@@ -34,19 +37,16 @@ var publicWrappers = map[string]bool{
 // internals precisely so this test passes.
 func TestLockDiscipline_LockedNeverCallsPublicWrapper(t *testing.T) {
 	files, err := filepath.Glob("*.go")
-	if err != nil {
-		t.Fatalf("glob: %v", err)
-	}
+	require.NoError(t, err, "glob the package's source files")
 	fset := token.NewFileSet()
 	lockedFns := 0
+
 	for _, file := range files {
 		if strings.HasSuffix(file, "_test.go") {
 			continue
 		}
 		f, err := parser.ParseFile(fset, file, nil, 0)
-		if err != nil {
-			t.Fatalf("parse %s: %v", file, err)
-		}
+		require.NoErrorf(t, err, "parse %s", file)
 		for _, decl := range f.Decls {
 			fn, ok := decl.(*ast.FuncDecl)
 			if !ok || fn.Body == nil || !strings.HasSuffix(fn.Name.Name, "Locked") {
@@ -63,15 +63,14 @@ func TestLockDiscipline_LockedNeverCallsPublicWrapper(t *testing.T) {
 				if !ok {
 					return true
 				}
-				if publicWrappers[sel.Sel.Name] {
-					t.Errorf("%s: %s (a …Locked internal) calls public wrapper %s(...), which re-takes c.mu and self-deadlocks; call the %sLocked internal instead",
-						fset.Position(call.Pos()), enclosing, sel.Sel.Name, sel.Sel.Name)
-				}
+				assert.Falsef(t, publicWrappers[sel.Sel.Name],
+					"%s: %s (a …Locked internal) calls public wrapper %s(...), which re-takes c.mu and self-deadlocks; call the %sLocked internal instead",
+					fset.Position(call.Pos()), enclosing, sel.Sel.Name, sel.Sel.Name)
 				return true
 			})
 		}
 	}
-	if lockedFns == 0 {
-		t.Fatal("found no …Locked functions to scan — the c.mu split is missing or the scan is broken")
-	}
+
+	assert.NotZero(t, lockedFns,
+		"found no …Locked functions to scan — the c.mu split is missing or the scan is broken")
 }

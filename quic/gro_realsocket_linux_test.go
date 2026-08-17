@@ -8,6 +8,9 @@ import (
 	"syscall"
 	"testing"
 	"time"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // realUDP returns a bound receive socket and a sender connected to it, with the
@@ -16,14 +19,10 @@ import (
 func realUDP(t *testing.T) (rx *net.UDPConn, rxRC syscall.RawConn, tx *net.UDPConn, txRC syscall.RawConn) {
 	t.Helper()
 	rx, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
-	if err != nil {
-		t.Fatalf("ListenUDP: %v", err)
-	}
+	require.NoError(t, err, "ListenUDP for the receive socket")
 	t.Cleanup(func() { _ = rx.Close() })
 	tx, err = net.DialUDP("udp", nil, rx.LocalAddr().(*net.UDPAddr))
-	if err != nil {
-		t.Fatalf("DialUDP: %v", err)
-	}
+	require.NoError(t, err, "DialUDP for the send socket")
 	t.Cleanup(func() { _ = tx.Close() })
 	if rxRC, err = rx.SyscallConn(); err != nil {
 		t.Skipf("no RawConn on the receive socket: %v", err)
@@ -63,40 +62,30 @@ func TestGRO_RealSocketRoundTrip(t *testing.T) {
 	_ = EnableGRO(rxRC) // best-effort: without it the read simply is not coalesced
 
 	gso := NewGSOState()
-	n, err := SendGSO(gso, txRC, tx, payload, segSize)
-	if err != nil {
-		t.Fatalf("SendGSO: %v", err)
-	}
-	if n != len(payload) {
-		t.Errorf("SendGSO wrote %d bytes, want %d", n, len(payload))
-	}
-
 	gro := NewGROState(128)
 	got := make([]byte, 0, len(payload))
 	buf := make([]byte, 64*1024)
-	if err := rx.SetReadDeadline(time.Now().Add(5 * time.Second)); err != nil {
-		t.Fatalf("SetReadDeadline: %v", err)
-	}
+
+	n, err := SendGSO(gso, txRC, tx, payload, segSize)
+
+	require.NoError(t, err, "SendGSO over a real socket")
+	assert.Equalf(t, len(payload), n, "SendGSO wrote %d bytes, want %d", n, len(payload))
+	require.NoError(t, rx.SetReadDeadline(time.Now().Add(5*time.Second)), "SetReadDeadline")
 	for len(got) < len(payload) {
 		rn, seg, rerr := RecvGRO(gro, rxRC, rx, buf)
-		if rerr != nil {
-			t.Fatalf("RecvGRO after %d of %d bytes: %v", len(got), len(payload), rerr)
-		}
-		if rn == 0 {
-			t.Fatalf("RecvGRO returned 0 bytes after %d of %d", len(got), len(payload))
-		}
+		require.NoErrorf(t, rerr, "RecvGRO after %d of %d bytes", len(got), len(payload))
+		require.NotZerof(t, rn, "RecvGRO returned 0 bytes after %d of %d", len(got), len(payload))
 		// A reported segment size must describe the read it came with: either it
 		// is 0 (not coalesced) or it divides the read into datagrams.
-		if seg != 0 && seg > rn {
-			t.Errorf("segSize %d exceeds the %d bytes read", seg, rn)
+		if seg != 0 {
+			assert.LessOrEqualf(t, seg, rn, "segSize %d exceeds the %d bytes read", seg, rn)
 		}
 		got = append(got, buf[:rn]...)
 		t.Logf("read %d bytes, segSize %d", rn, seg)
 	}
-	if !bytes.Equal(got, payload) {
-		t.Errorf("payload round-tripped wrong: got %d bytes, want %d (equal=%v)",
-			len(got), len(payload), bytes.Equal(got, payload))
-	}
+	assert.Truef(t, bytes.Equal(got, payload),
+		"payload round-tripped wrong: got %d bytes, want %d — every byte must arrive, "+
+			"in order, exactly once, whether or not the kernel coalesced", len(got), len(payload))
 }
 
 // TestGRO_RealSocketSingleDatagram covers the un-coalesced shape against a real
@@ -106,27 +95,21 @@ func TestGRO_RealSocketSingleDatagram(t *testing.T) {
 	_ = EnableGRO(rxRC)
 
 	want := []byte("one datagram, no segmentation")
+	buf := make([]byte, 2048)
 	// segSize >= len(buf) takes SendGSO's own single-datagram path, which is the
 	// plain write — the shape a request smaller than the MTU takes in production.
-	if _, err := SendGSO(NewGSOState(), txRC, tx, want, len(want)); err != nil {
-		t.Fatalf("SendGSO: %v", err)
-	}
+	_, err := SendGSO(NewGSOState(), txRC, tx, want, len(want))
+	require.NoError(t, err, "SendGSO on the single-datagram path")
+	require.NoError(t, rx.SetReadDeadline(time.Now().Add(5*time.Second)), "SetReadDeadline")
 
-	if err := rx.SetReadDeadline(time.Now().Add(5 * time.Second)); err != nil {
-		t.Fatalf("SetReadDeadline: %v", err)
-	}
-	buf := make([]byte, 2048)
 	n, seg, err := RecvGRO(NewGROState(128), rxRC, rx, buf)
-	if err != nil {
-		t.Fatalf("RecvGRO: %v", err)
-	}
-	if !bytes.Equal(buf[:n], want) {
-		t.Errorf("read %q, want %q", buf[:n], want)
-	}
+
+	require.NoError(t, err, "RecvGRO of the single datagram")
+	assert.Equalf(t, want, buf[:n], "read %q, want %q", buf[:n], want)
 	// Not coalesced, so the kernel reports no segment size — or one that covers
 	// the whole read, which means the same thing to the caller.
-	if seg != 0 && seg < n {
-		t.Errorf("segSize %d splits a single %d-byte datagram", seg, n)
+	if seg != 0 {
+		assert.GreaterOrEqualf(t, seg, n, "segSize %d splits a single %d-byte datagram", seg, n)
 	}
 }
 
@@ -145,19 +128,16 @@ func TestGRO_StateReusedAcrossReads(t *testing.T) {
 
 	for i := 0; i < 5; i++ {
 		want := bytes.Repeat([]byte{byte('a' + i)}, 64+i)
-		if _, err := SendGSO(gso, txRC, tx, want, len(want)); err != nil {
-			t.Fatalf("round %d SendGSO: %v", i, err)
-		}
-		if err := rx.SetReadDeadline(time.Now().Add(5 * time.Second)); err != nil {
-			t.Fatalf("SetReadDeadline: %v", err)
-		}
-		n, _, err := RecvGRO(gro, rxRC, rx, buf)
-		if err != nil {
-			t.Fatalf("round %d RecvGRO: %v", i, err)
-		}
-		if !bytes.Equal(buf[:n], want) {
-			t.Errorf("round %d: read %d bytes, want %d", i, n, len(want))
-		}
+		_, serr := SendGSO(gso, txRC, tx, want, len(want))
+		require.NoErrorf(t, serr, "round %d SendGSO", i)
+		require.NoErrorf(t, rx.SetReadDeadline(time.Now().Add(5*time.Second)), "round %d SetReadDeadline", i)
+
+		n, _, rerr := RecvGRO(gro, rxRC, rx, buf)
+
+		require.NoErrorf(t, rerr, "round %d RecvGRO", i)
+		assert.Equalf(t, want, buf[:n],
+			"round %d: read %d bytes, want %d — a state object that only worked once "+
+				"would fail here rather than in production", i, n, len(want))
 	}
 }
 
@@ -168,21 +148,17 @@ func TestGRO_StateReleasesCallerBuffers(t *testing.T) {
 	rx, rxRC, tx, txRC := realUDP(t)
 
 	gso := NewGSOState()
-	if _, err := SendGSO(gso, txRC, tx, []byte("payload"), len("payload")); err != nil {
-		t.Fatalf("SendGSO: %v", err)
-	}
-	if gso.buf != nil {
-		t.Errorf("GSOState still holds the caller's send buffer after the call")
-	}
-
 	gro := NewGROState(128)
-	if err := rx.SetReadDeadline(time.Now().Add(5 * time.Second)); err != nil {
-		t.Fatalf("SetReadDeadline: %v", err)
-	}
-	if _, _, err := RecvGRO(gro, rxRC, rx, make([]byte, 2048)); err != nil {
-		t.Fatalf("RecvGRO: %v", err)
-	}
-	if gro.buf != nil {
-		t.Errorf("GROState still holds the caller's read buffer after the call")
-	}
+
+	_, serr := SendGSO(gso, txRC, tx, []byte("payload"), len("payload"))
+	require.NoError(t, serr, "SendGSO")
+	require.NoError(t, rx.SetReadDeadline(time.Now().Add(5*time.Second)), "SetReadDeadline")
+	_, _, rerr := RecvGRO(gro, rxRC, rx, make([]byte, 2048))
+
+	require.NoError(t, rerr, "RecvGRO")
+	assert.Nil(t, gso.buf,
+		"GSOState still holds the caller's send buffer after the call — it would pin it "+
+			"for the life of the connection")
+	assert.Nil(t, gro.buf,
+		"GROState still holds the caller's read buffer after the call — the read buffer is 64 KiB")
 }

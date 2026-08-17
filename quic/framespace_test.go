@@ -3,6 +3,8 @@ package quic
 import (
 	"errors"
 	"testing"
+
+	"github.com/stretchr/testify/assert"
 )
 
 // TestConformance_RFC9000_Sec124_FrameTypePermittedBySpace checks that a frame
@@ -20,6 +22,7 @@ func TestConformance_RFC9000_Sec124_FrameTypePermittedBySpace(t *testing.T) {
 	crypto := []byte{0x06, 0x00, 0x00}               // CRYPTO offset 0 length 0
 	ack := []byte{0x02, 0x00, 0x00, 0x00, 0x00}      // ACK largest 0, no ranges
 	transportClose := []byte{0x1c, 0x00, 0x00, 0x00} // transport CONNECTION_CLOSE
+	unknown := []byte{0x30}                          // 0x30 is not a QUIC v1 frame type
 
 	// Frames NOT permitted in Initial/Handshake → PROTOCOL_VIOLATION.
 	for _, sp := range []int{spaceInitial, spaceHandshake} {
@@ -33,9 +36,11 @@ func TestConformance_RFC9000_Sec124_FrameTypePermittedBySpace(t *testing.T) {
 			{"app-connection-close", appClose},
 		} {
 			h := &connFrameHandler{c: &Conn{}, space: sp}
-			if err := ParseFrames(tc.frame, h); !errors.Is(err, ErrProtocolViolation) {
-				t.Fatalf("space %d %s: ParseFrames = %v, want ErrProtocolViolation", sp, tc.name, err)
-			}
+
+			err := ParseFrames(tc.frame, h)
+
+			assert.Truef(t, errors.Is(err, ErrProtocolViolation),
+				"space %d %s: ParseFrames = %v, want ErrProtocolViolation", sp, tc.name, err)
 		}
 	}
 
@@ -53,24 +58,25 @@ func TestConformance_RFC9000_Sec124_FrameTypePermittedBySpace(t *testing.T) {
 		c := &Conn{}
 		c.sendPN[spaceInitial] = 1 // so the ACK of packet 0 is not a §13.1 never-sent
 		h := &connFrameHandler{c: c, space: spaceInitial}
-		if err := ParseFrames(tc.frame, h); err != nil {
-			t.Fatalf("Initial %s: ParseFrames = %v, want nil (permitted §12.4)", tc.name, err)
-		}
+
+		err := ParseFrames(tc.frame, h)
+
+		assert.NoErrorf(t, err, "Initial %s: ParseFrames = %v, want nil (permitted §12.4)", tc.name, err)
 	}
 
 	// An UNKNOWN frame type in Initial/Handshake is a FRAME_ENCODING_ERROR, not a
 	// PROTOCOL_VIOLATION (RFC 9000 §12.4 unknown-type rule takes precedence).
-	unknown := []byte{0x30} // 0x30 is not a QUIC v1 frame type
-	if err := ParseFrames(unknown, &connFrameHandler{c: &Conn{}, space: spaceInitial}); !errors.Is(err, ErrFrameEncoding) {
-		t.Fatalf("unknown frame type in Initial: ParseFrames = %v, want ErrFrameEncoding", err)
-	}
+	unknownErr := ParseFrames(unknown, &connFrameHandler{c: &Conn{}, space: spaceInitial})
+
+	assert.Truef(t, errors.Is(unknownErr, ErrFrameEncoding),
+		"unknown frame type in Initial: ParseFrames = %v, want ErrFrameEncoding", unknownErr)
 
 	// HANDSHAKE_DONE is permitted in the 1-RTT (application) space.
 	h := &connFrameHandler{c: &Conn{}, space: spaceApp}
-	if err := ParseFrames(handshakeDone, h); err != nil {
-		t.Fatalf("app-space HANDSHAKE_DONE: ParseFrames = %v, want nil", err)
-	}
-	if !h.c.handshakeConfirmed {
-		t.Fatal("HANDSHAKE_DONE in the 1-RTT space should still confirm the handshake")
-	}
+
+	appErr := ParseFrames(handshakeDone, h)
+
+	assert.NoErrorf(t, appErr, "app-space HANDSHAKE_DONE: ParseFrames = %v, want nil", appErr)
+	assert.True(t, h.c.handshakeConfirmed,
+		"HANDSHAKE_DONE in the 1-RTT space should still confirm the handshake")
 }

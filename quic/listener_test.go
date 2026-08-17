@@ -10,6 +10,9 @@ import (
 	"runtime"
 	"testing"
 	"time"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // startListener starts a Listener with a self-signed certificate and returns it
@@ -19,9 +22,7 @@ func startListener(t *testing.T) (*Listener, *x509.CertPool) {
 	cert, pool := genServerCert(t)
 	l, err := Listen("127.0.0.1:0", &tls.Config{Certificates: []tls.Certificate{cert}},
 		ServerTransportParams{MaxStreamsBidi: 16, MaxStreamsUni: 4})
-	if err != nil {
-		t.Fatalf("Listen: %v", err)
-	}
+	require.NoError(t, err, "Listen on the loopback")
 	t.Cleanup(func() { _ = l.Close() })
 	return l, pool
 }
@@ -31,9 +32,7 @@ func startListener(t *testing.T) (*Listener, *x509.CertPool) {
 func dialListener(t *testing.T, ctx context.Context, l *Listener, pool *x509.CertPool) (*Conn, *Conn) {
 	t.Helper()
 	uc, err := net.DialUDP("udp", nil, l.Addr().(*net.UDPAddr))
-	if err != nil {
-		t.Fatalf("dial: %v", err)
-	}
+	require.NoError(t, err, "dial the listener over UDP")
 	t.Cleanup(func() { _ = uc.Close() })
 
 	clientTP := AppendTransportParams(nil, LocalTransportParams{
@@ -43,16 +42,10 @@ func dialListener(t *testing.T, ctx context.Context, l *Listener, pool *x509.Cer
 		InitialMaxStreamsUni:          4,
 	})
 	client, err := NewConn(uc, &tls.Config{ServerName: "example.com", RootCAs: pool}, clientTP)
-	if err != nil {
-		t.Fatalf("NewConn: %v", err)
-	}
-	if err := client.Establish(ctx); err != nil {
-		t.Fatalf("client Establish against listener: %v", err)
-	}
+	require.NoError(t, err, "NewConn against the listener")
+	require.NoError(t, client.Establish(ctx), "client Establish against listener")
 	sc, err := l.Accept(ctx)
-	if err != nil {
-		t.Fatalf("Accept: %v", err)
-	}
+	require.NoError(t, err, "Accept the established connection")
 	return client, sc
 }
 
@@ -72,26 +65,16 @@ func clientHelloInitial(t *testing.T, pool *x509.CertPool, dcid []byte) []byte {
 	// sink copies them), and a lingering handshake would be counted by the
 	// goroutine-leak test below.
 	defer func() { _ = hs.Close() }()
-	if err := hs.Start(context.Background()); err != nil {
-		t.Fatalf("client handshake Start: %v", err)
-	}
+	require.NoError(t, hs.Start(context.Background()), "client handshake Start")
 	sink := newMemSink()
-	if err := hs.Pump(sink); err != nil {
-		t.Fatalf("client handshake Pump: %v", err)
-	}
+	require.NoError(t, hs.Pump(sink), "client handshake Pump")
 	hello := sink.crypto[tls.QUICEncryptionLevelInitial]
-	if len(hello) == 0 {
-		t.Fatal("client handshake produced no ClientHello")
-	}
+	require.NotEmpty(t, hello, "client handshake produced no ClientHello")
 	clientKeys, _ := InitialKeys(dcid)
 	sealer, err := NewSealer(clientKeys)
-	if err != nil {
-		t.Fatalf("NewSealer: %v", err)
-	}
+	require.NoError(t, err, "NewSealer for the client Initial keys")
 	pkt, err := buildInitialPacket(nil, sealer, dcid, nil, nil, 0, 4, 0, hello, InitialDatagramMinSize)
-	if err != nil {
-		t.Fatalf("buildInitialPacket: %v", err)
-	}
+	require.NoError(t, err, "buildInitialPacket carrying the ClientHello")
 	return pkt
 }
 
@@ -101,14 +84,10 @@ func loopbackPair(t *testing.T) (shared, peer *net.UDPConn) {
 	t.Helper()
 	addr := &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 0}
 	shared, err := net.ListenUDP("udp", addr)
-	if err != nil {
-		t.Fatalf("listen shared: %v", err)
-	}
+	require.NoError(t, err, "listen on the shared (listener) socket")
 	t.Cleanup(func() { _ = shared.Close() })
 	peer, err = net.ListenUDP("udp", addr)
-	if err != nil {
-		t.Fatalf("listen peer: %v", err)
-	}
+	require.NoError(t, err, "listen on the peer socket")
 	t.Cleanup(func() { _ = peer.Close() })
 	return shared, peer
 }
@@ -123,9 +102,9 @@ func TestListener_AcceptAndRoundTrip(t *testing.T) {
 	defer cancel()
 	l, pool := startListener(t)
 	client, sc := dialListener(t, ctx, l, pool)
-	if !sc.isServer || sc.oneRTTSealer == nil {
-		t.Fatal("accepted connection is not an established server connection")
-	}
+	require.Truef(t, sc.isServer && sc.oneRTTSealer != nil,
+		"accepted connection is not an established server connection (isServer=%v, 1-RTT sealer present=%v)",
+		sc.isServer, sc.oneRTTSealer != nil)
 
 	// The server serves exactly one request: poll until a request stream arrives,
 	// read it, answer it.
@@ -152,38 +131,28 @@ func TestListener_AcceptAndRoundTrip(t *testing.T) {
 	}()
 
 	reqStream, err := client.OpenStream()
-	if err != nil {
-		t.Fatalf("client OpenStream: %v", err)
-	}
-	if _, err := reqStream.Send([]byte("GET /"), true); err != nil {
-		t.Fatalf("client Send request: %v", err)
-	}
-	if err := <-served; err != nil {
-		t.Fatalf("server: %v", err)
-	}
+	require.NoError(t, err, "client OpenStream")
 
+	_, err = reqStream.Send([]byte("GET /"), true)
+	require.NoError(t, err, "client Send request")
+	require.NoError(t, <-served, "server side of the round trip")
 	// Poll the client until the response lands on its stream.
 	var got string
 	for deadline := time.Now().Add(10 * time.Second); time.Now().Before(deadline); {
-		if err := client.Poll(ctx); err != nil {
-			t.Fatalf("client Poll: %v", err)
-		}
+		require.NoError(t, client.Poll(ctx), "client Poll while waiting for the response")
 		if got = string(reqStream.Recv()); got != "" {
 			break
 		}
 	}
-	if got != want {
-		t.Fatalf("client read response %q, want %q", got, want)
-	}
 
+	assert.Equalf(t, want, got, "client read response %q, want %q", got, want)
 	// The server confirms the handshake with HANDSHAKE_DONE (RFC 9001 §4.1.2).
 	// Until the client sees it, it holds its Handshake keys and cannot key-update.
 	client.mu.Lock()
 	confirmed := client.handshakeConfirmed
 	client.mu.Unlock()
-	if !confirmed {
-		t.Error("client never confirmed the handshake: the server sent no HANDSHAKE_DONE")
-	}
+	assert.True(t, confirmed,
+		"client never confirmed the handshake: the server sent no HANDSHAKE_DONE")
 }
 
 // TestListener_DropsRouteWhenConnectionCloses pins a routing table that otherwise
@@ -196,21 +165,18 @@ func TestListener_DropsRouteWhenConnectionCloses(t *testing.T) {
 	_, sc := dialListener(t, ctx, l, pool)
 
 	l.mu.Lock()
-	routes := len(l.conns)
+	routesUp := len(l.conns)
 	l.mu.Unlock()
-	if routes != 1 {
-		t.Fatalf("listener holds %d routes with one connection up, want 1", routes)
-	}
 
-	if err := sc.Close(); err != nil {
-		t.Fatalf("server Close: %v", err)
-	}
+	err := sc.Close()
+
+	require.NoError(t, err, "server Close")
 	l.mu.Lock()
-	routes = len(l.conns)
+	routesAfter := len(l.conns)
 	l.mu.Unlock()
-	if routes != 0 {
-		t.Fatalf("listener still holds %d routes after the connection closed, want 0", routes)
-	}
+	assert.Equalf(t, 1, routesUp, "listener holds %d routes with one connection up, want 1", routesUp)
+	assert.Zerof(t, routesAfter,
+		"listener still holds %d routes after the connection closed, want 0", routesAfter)
 }
 
 // TestListener_CloseIsPromptWithHandshakeInFlight pins Close waking a half-open
@@ -218,26 +184,22 @@ func TestListener_DropsRouteWhenConnectionCloses(t *testing.T) {
 func TestListener_CloseIsPromptWithHandshakeInFlight(t *testing.T) {
 	l, pool := startListener(t)
 	uc, err := net.DialUDP("udp", nil, l.Addr().(*net.UDPAddr))
-	if err != nil {
-		t.Fatalf("dial: %v", err)
-	}
+	require.NoError(t, err, "dial the listener over UDP")
 	defer func() { _ = uc.Close() }()
-
 	// A genuine ClientHello starts the server handshake; then we go silent, so it
 	// parks waiting for a Finished that never arrives.
-	if _, err := uc.Write(clientHelloInitial(t, pool, []byte{1, 2, 3, 4, 5, 6, 7, 8})); err != nil {
-		t.Fatalf("write Initial: %v", err)
-	}
+	_, err = uc.Write(clientHelloInitial(t, pool, []byte{1, 2, 3, 4, 5, 6, 7, 8}))
+	require.NoError(t, err, "write the Initial that starts a half-open handshake")
 	time.Sleep(300 * time.Millisecond) // let the listener park in completeHandshake
 
 	start := time.Now()
-	if err := l.Close(); err != nil {
-		t.Fatalf("Close: %v", err)
-	}
-	if d := time.Since(start); d > 3*time.Second {
-		t.Fatalf("Close took %v with a handshake in flight: it waited out the %v handshake timeout instead of waking it",
-			d, listenerHandshakeTimeout)
-	}
+	err = l.Close()
+	elapsed := time.Since(start)
+
+	require.NoError(t, err, "Close with a handshake in flight")
+	assert.LessOrEqualf(t, elapsed, 3*time.Second,
+		"Close took %v with a handshake in flight: it waited out the %v handshake timeout instead of waking it",
+		elapsed, listenerHandshakeTimeout)
 }
 
 // TestListener_AbandonedHandshakesDoNotLeak pins the crypto/tls handshake
@@ -247,34 +209,32 @@ func TestListener_CloseIsPromptWithHandshakeInFlight(t *testing.T) {
 func TestListener_AbandonedHandshakesDoNotLeak(t *testing.T) {
 	l, pool := startListener(t)
 	uc, err := net.DialUDP("udp", nil, l.Addr().(*net.UDPAddr))
-	if err != nil {
-		t.Fatalf("dial: %v", err)
-	}
+	require.NoError(t, err, "dial the listener over UDP")
 	defer func() { _ = uc.Close() }()
-
 	runtime.GC()
 	base := runtime.NumGoroutine()
-
 	const n = 10
+
 	for i := 0; i < n; i++ {
 		dcid := []byte{byte(i), 2, 3, 4, 5, 6, 7, 8} // a distinct connection each time
-		if _, err := uc.Write(clientHelloInitial(t, pool, dcid)); err != nil {
-			t.Fatalf("write Initial %d: %v", i, err)
-		}
+		_, werr := uc.Write(clientHelloInitial(t, pool, dcid))
+		require.NoErrorf(t, werr, "write Initial %d", i)
 	}
 	time.Sleep(500 * time.Millisecond) // let the handshakes start and park
-	if err := l.Close(); err != nil {  // wakes them: every one is abandoned
-		t.Fatalf("Close: %v", err)
-	}
-
-	for i := 0; i < 50; i++ { // let the abandoned handshakes release
+	err = l.Close()                    // wakes them: every one is abandoned
+	settled := false
+	for i := 0; i < 50 && !settled; i++ { // let the abandoned handshakes release
 		runtime.GC()
 		if runtime.NumGoroutine() <= base+2 {
-			return
+			settled = true
+			break
 		}
 		time.Sleep(100 * time.Millisecond)
 	}
-	t.Fatalf("goroutines did not settle after %d abandoned handshakes: %d now vs %d before — the TLS handshakes leak",
+
+	require.NoError(t, err, "Close with abandoned handshakes parked")
+	assert.Truef(t, settled,
+		"goroutines did not settle after %d abandoned handshakes: %d now vs %d before — the TLS handshakes leak",
 		n, runtime.NumGoroutine(), base)
 }
 
@@ -284,20 +244,17 @@ func TestConnPacketConn_WriteReachesPeer(t *testing.T) {
 	shared, peer := loopbackPair(t)
 	c := newConnPacketConn(shared, peer.LocalAddr().(*net.UDPAddr), 4)
 
-	if _, err := c.Write([]byte("hello")); err != nil {
-		t.Fatalf("Write: %v", err)
-	}
 	buf := make([]byte, 64)
-	if err := peer.SetReadDeadline(time.Now().Add(2 * time.Second)); err != nil {
-		t.Fatal(err)
-	}
-	n, err := peer.Read(buf)
-	if err != nil {
-		t.Fatalf("peer Read: %v", err)
-	}
-	if got := string(buf[:n]); got != "hello" {
-		t.Fatalf("peer read %q, want %q", got, "hello")
-	}
+	require.NoError(t, peer.SetReadDeadline(time.Now().Add(2*time.Second)), "peer SetReadDeadline")
+
+	_, err := c.Write([]byte("hello"))
+
+	require.NoError(t, err, "Write out of the shared socket")
+	n, rerr := peer.Read(buf)
+	require.NoError(t, rerr, "peer Read")
+	assert.Equalf(t, "hello", string(buf[:n]),
+		"peer read %q, want %q — the write must be addressed to this connection's peer",
+		string(buf[:n]), "hello")
 }
 
 // TestConnPacketConn_DeliverThenRead checks a demuxed datagram is handed to the
@@ -306,15 +263,13 @@ func TestConnPacketConn_DeliverThenRead(t *testing.T) {
 	shared, peer := loopbackPair(t)
 	c := newConnPacketConn(shared, peer.LocalAddr().(*net.UDPAddr), 4)
 
-	c.deliver([]byte("datagram"))
 	buf := make([]byte, 64)
+
+	c.deliver([]byte("datagram"))
 	n, err := c.Read(buf)
-	if err != nil {
-		t.Fatalf("Read: %v", err)
-	}
-	if got := string(buf[:n]); got != "datagram" {
-		t.Fatalf("Read = %q, want %q", got, "datagram")
-	}
+
+	require.NoError(t, err, "Read a demuxed datagram")
+	assert.Equalf(t, "datagram", string(buf[:n]), "Read = %q, want %q", string(buf[:n]), "datagram")
 }
 
 // TestConnPacketConn_ReadDeadlineExpired returns a timeout when the deadline is
@@ -323,17 +278,15 @@ func TestConnPacketConn_ReadDeadlineExpired(t *testing.T) {
 	shared, peer := loopbackPair(t)
 	c := newConnPacketConn(shared, peer.LocalAddr().(*net.UDPAddr), 4)
 
-	if err := c.SetReadDeadline(time.Now().Add(-time.Second)); err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, c.SetReadDeadline(time.Now().Add(-time.Second)), "SetReadDeadline into the past")
+
 	_, err := c.Read(make([]byte, 64))
-	if !errors.Is(err, os.ErrDeadlineExceeded) {
-		t.Fatalf("Read = %v, want os.ErrDeadlineExceeded", err)
-	}
+
+	assert.Truef(t, errors.Is(err, os.ErrDeadlineExceeded),
+		"Read = %v, want os.ErrDeadlineExceeded", err)
 	var ne net.Error
-	if !errors.As(err, &ne) || !ne.Timeout() {
-		t.Fatalf("Read error %v does not report Timeout()", err)
-	}
+	assert.Truef(t, errors.As(err, &ne) && ne.Timeout(),
+		"Read error %v does not report Timeout() — the PTO path classifies on it", err)
 }
 
 // TestConnPacketConn_DeadlineWakesParkedRead pins the net.Conn contract the
@@ -350,16 +303,14 @@ func TestConnPacketConn_DeadlineWakesParkedRead(t *testing.T) {
 	}()
 	time.Sleep(20 * time.Millisecond) // let the Read park with no deadline
 
-	if err := c.SetReadDeadline(time.Now().Add(-time.Second)); err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, c.SetReadDeadline(time.Now().Add(-time.Second)), "poke the deadline into the past")
+
 	select {
 	case err := <-done:
-		if !errors.Is(err, os.ErrDeadlineExceeded) {
-			t.Fatalf("parked Read = %v, want os.ErrDeadlineExceeded", err)
-		}
+		assert.Truef(t, errors.Is(err, os.ErrDeadlineExceeded),
+			"parked Read = %v, want os.ErrDeadlineExceeded", err)
 	case <-time.After(2 * time.Second):
-		t.Fatal("parked Read did not wake when the deadline was poked into the past")
+		require.Fail(t, "parked Read did not wake when the deadline was poked into the past")
 	}
 }
 
@@ -374,20 +325,18 @@ func TestConnPacketConn_CloseUnblocksRead(t *testing.T) {
 		done <- err
 	}()
 	time.Sleep(20 * time.Millisecond)
-	if err := c.Close(); err != nil {
-		t.Fatalf("Close: %v", err)
-	}
+
+	err := c.Close()
+
+	require.NoError(t, err, "Close with a Read parked")
 	select {
-	case err := <-done:
-		if !errors.Is(err, net.ErrClosed) {
-			t.Fatalf("parked Read after Close = %v, want net.ErrClosed", err)
-		}
+	case rerr := <-done:
+		assert.Truef(t, errors.Is(rerr, net.ErrClosed),
+			"parked Read after Close = %v, want net.ErrClosed", rerr)
 	case <-time.After(2 * time.Second):
-		t.Fatal("Close did not unblock a parked Read")
+		require.Fail(t, "Close did not unblock a parked Read")
 	}
-	if err := c.Close(); err != nil { // idempotent
-		t.Fatalf("second Close: %v", err)
-	}
+	assert.NoError(t, c.Close(), "second Close must be idempotent")
 }
 
 // TestConnPacketConn_DeliverDropsWhenFull checks the demux loop is never stalled
@@ -396,17 +345,15 @@ func TestConnPacketConn_DeliverDropsWhenFull(t *testing.T) {
 	shared, peer := loopbackPair(t)
 	c := newConnPacketConn(shared, peer.LocalAddr().(*net.UDPAddr), 1)
 
+	buf := make([]byte, 64)
+
 	c.deliver([]byte("first"))
 	c.deliver([]byte("dropped")) // queue is full; must not block
-	buf := make([]byte, 64)
 	n, err := c.Read(buf)
-	if err != nil {
-		t.Fatalf("Read: %v", err)
-	}
-	if got := string(buf[:n]); got != "first" {
-		t.Fatalf("Read = %q, want %q", got, "first")
-	}
-	if len(c.in) != 0 {
-		t.Fatalf("queue holds %d datagrams, want 0 (the second was dropped)", len(c.in))
-	}
+
+	require.NoError(t, err, "Read the one queued datagram")
+	assert.Equalf(t, "first", string(buf[:n]), "Read = %q, want %q", string(buf[:n]), "first")
+	assert.Emptyf(t, c.in,
+		"queue holds %d datagrams, want 0 (the second was dropped, as a kernel receive buffer would)",
+		len(c.in))
 }
