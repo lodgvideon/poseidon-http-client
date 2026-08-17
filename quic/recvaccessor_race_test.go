@@ -2,7 +2,12 @@ package quic
 
 import (
 	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // Stream.Finished / ResetReceived / ResetCode read fields the reader goroutine
@@ -29,10 +34,14 @@ func racingRecvConn(t *testing.T) (*Conn, *Stream) {
 // TestStreamRecvAccessors_NoRaceWithReader is the gate. The writer mutates under
 // conn.mu, as OnResetStream does; the readers call the accessors. With the
 // accessors lock-free this is a textbook data race and -race reports it.
+//
+// The verdict is the race detector's, so the two counters matter: a run where the
+// writer never mutated, or the readers never polled, reports "no race" for the
+// same reason a correct implementation does.
 func TestStreamRecvAccessors_NoRaceWithReader(t *testing.T) {
 	c, s := racingRecvConn(t)
-
 	const rounds = 500
+	var mutations, polls int64
 	var wg sync.WaitGroup
 	stop := make(chan struct{})
 
@@ -49,10 +58,10 @@ func TestStreamRecvAccessors_NoRaceWithReader(t *testing.T) {
 			s.recvReset = false
 			s.recvResetCode = 0
 			c.mu.Unlock()
+			atomic.AddInt64(&mutations, 2)
 		}
 		close(stop)
 	}()
-
 	for r := 0; r < 3; r++ {
 		wg.Add(1)
 		go func() {
@@ -67,10 +76,18 @@ func TestStreamRecvAccessors_NoRaceWithReader(t *testing.T) {
 				_ = s.ResetReceived()
 				_ = s.ResetCode()
 				_, _, _ = s.RecvState()
+				atomic.AddInt64(&polls, 1)
 			}
 		}()
 	}
 	wg.Wait()
+
+	assert.EqualValuesf(t, 2*rounds, atomic.LoadInt64(&mutations),
+		"the writer performed %d mutations, want %d — with no injection a lock-free "+
+			"accessor reports no race for the same reason a correct one does",
+		atomic.LoadInt64(&mutations), 2*rounds)
+	assert.NotZero(t, atomic.LoadInt64(&polls),
+		"no reader goroutine polled an accessor, so nothing raced the writer at all")
 }
 
 // TestStreamRecvAccessors_AgreeWithRecvState pins that the accessors and the
@@ -79,31 +96,24 @@ func TestStreamRecvAccessors_NoRaceWithReader(t *testing.T) {
 func TestStreamRecvAccessors_AgreeWithRecvState(t *testing.T) {
 	c, s := racingRecvConn(t)
 
-	// Clean, nothing received.
-	if fin, reset, code := s.RecvState(); fin != s.Finished() || reset != s.ResetReceived() || code != s.ResetCode() {
-		t.Errorf("fresh stream: RecvState (%v,%v,%d) disagrees with the accessors (%v,%v,%d)",
-			fin, reset, code, s.Finished(), s.ResetReceived(), s.ResetCode())
-	}
-
-	// After a peer reset.
+	freshFin, freshReset, freshCode := s.RecvState()
+	freshAccessors := [3]any{s.Finished(), s.ResetReceived(), s.ResetCode()}
 	c.mu.Lock()
 	s.recvReset = true
 	s.recvResetCode = 42
 	c.mu.Unlock()
-
-	if !s.Finished() {
-		t.Error("Finished() is false after a peer RESET_STREAM; a reset ends the receive side")
-	}
-	if !s.ResetReceived() {
-		t.Error("ResetReceived() is false after a peer RESET_STREAM")
-	}
-	if got := s.ResetCode(); got != 42 {
-		t.Errorf("ResetCode() = %d, want 42", got)
-	}
 	fin, reset, code := s.RecvState()
-	if !fin || !reset || code != 42 {
-		t.Errorf("RecvState = (%v,%v,%d), want (true,true,42)", fin, reset, code)
-	}
+	resetAccessors := [3]any{s.Finished(), s.ResetReceived(), s.ResetCode()}
+
+	assert.Equalf(t, freshAccessors, [3]any{freshFin, freshReset, freshCode},
+		"fresh stream: RecvState (%v,%v,%d) disagrees with the accessors %v",
+		freshFin, freshReset, freshCode, freshAccessors)
+	assert.True(t, resetAccessors[0].(bool),
+		"Finished() is false after a peer RESET_STREAM; a reset ends the receive side")
+	assert.True(t, resetAccessors[1].(bool), "ResetReceived() is false after a peer RESET_STREAM")
+	assert.Equalf(t, uint64(42), resetAccessors[2], "ResetCode() = %v, want 42", resetAccessors[2])
+	assert.Equalf(t, [3]any{true, true, uint64(42)}, [3]any{fin, reset, code},
+		"RecvState = (%v,%v,%d), want (true,true,42)", fin, reset, code)
 }
 
 // TestStreamRecvAccessors_DoNotDeadlockUnderPoll guards the risk the fix
@@ -115,11 +125,23 @@ func TestStreamRecvAccessors_AgreeWithRecvState(t *testing.T) {
 func TestStreamRecvAccessors_DoNotDeadlockUnderPoll(t *testing.T) {
 	_, s := racingRecvConn(t)
 	done := make(chan struct{})
+
 	go func() {
 		_ = s.Finished()
 		_ = s.ResetReceived()
 		_ = s.ResetCode()
 		close(done)
 	}()
-	<-done // a deadlock here hangs the test binary, which is the failure
+	var returned bool
+	select {
+	case <-done:
+		returned = true
+	case <-time.After(10 * time.Second):
+	}
+
+	// Bounded rather than left to hang the binary: a deadlock that kills the whole
+	// run on the package timeout prints no --- FAIL line for this test.
+	require.True(t, returned,
+		"the accessors did not return from an unlocked context — an exported accessor "+
+			"that takes conn.mu must be callable by a caller that does not hold it")
 }
