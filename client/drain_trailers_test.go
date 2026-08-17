@@ -4,6 +4,9 @@ import (
 	"context"
 	"testing"
 
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
 	"github.com/lodgvideon/poseidon-http-client/conn"
 	"github.com/lodgvideon/poseidon-http-client/frame"
 	"github.com/lodgvideon/poseidon-http-client/hpack"
@@ -66,19 +69,17 @@ func TestDrainResponse_TrailerFlood_Bounded(t *testing.T) {
 	var resp Response
 	resp.Reset()
 	req := &Request{Method: "GET", Path: "/", WantTrailers: true}
+
 	err := drainResponse(context.Background(), nil, &scriptedStream{events: events},
 		req, &resp, nil, 1<<20, 1<<20)
-	if err != nil {
-		t.Fatalf("drainResponse: %v", err)
-	}
+
+	require.NoError(t, err, "drainResponse over a trailer flood must complete, not fail")
 	// One trailer section per response: the last block wins, nothing accumulates.
-	if len(resp.Trailers) != 1 {
-		t.Fatalf("Trailers grew to %d fields across %d blocks; want 1 (no accumulation)",
-			len(resp.Trailers), floodBlocks+1)
-	}
-	if got := string(resp.Trailers[0].Name); got != "x-final" {
-		t.Errorf("Trailers[0].Name = %q, want x-final (last block must win)", got)
-	}
+	require.Lenf(t, resp.Trailers, 1,
+		"Trailers grew to %d fields across %d blocks; want 1 (no accumulation)",
+		len(resp.Trailers), floodBlocks+1)
+	assert.Equal(t, "x-final", string(resp.Trailers[0].Name),
+		"Trailers[0].Name must come from the last block (last block must win)")
 }
 
 // TestDrainResponse_InterimHeaders_Dropped pins that Client.Do surfaces only
@@ -97,19 +98,15 @@ func TestDrainResponse_InterimHeaders_Dropped(t *testing.T) {
 	var resp Response
 	resp.Reset()
 	req := &Request{Method: "GET", Path: "/", BodyMode: BodyBuffer}
-	if err := drainResponse(context.Background(), nil, &scriptedStream{events: events},
-		req, &resp, nil, 1<<20, 1<<20); err != nil {
-		t.Fatalf("drainResponse: %v", err)
-	}
-	if resp.Status != 200 {
-		t.Errorf("Status = %d, want 200", resp.Status)
-	}
+
+	err := drainResponse(context.Background(), nil, &scriptedStream{events: events},
+		req, &resp, nil, 1<<20, 1<<20)
+
+	require.NoError(t, err, "drainResponse must pump past an interim block, not fail on it")
+	assert.Equal(t, 200, resp.Status, "the final status must win over the 103 that preceded it")
 	for _, f := range resp.Headers {
-		if string(f.Name) == "link" {
-			t.Error("interim 1xx header leaked into Response.Headers")
-		}
+		assert.NotEqual(t, "link", string(f.Name),
+			"interim 1xx header leaked into Response.Headers")
 	}
-	if string(resp.Body) != "body" {
-		t.Errorf("Body = %q, want body", resp.Body)
-	}
+	assert.Equal(t, "body", string(resp.Body), "the final response body must survive the interim block")
 }
