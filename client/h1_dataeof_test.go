@@ -9,6 +9,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
 	"github.com/lodgvideon/poseidon-http-client/client"
 	"github.com/lodgvideon/poseidon-http-client/conn"
 )
@@ -42,9 +45,7 @@ func TestH1_ContentLength_DataEOFCoalesced(t *testing.T) {
 			return mc, nil
 		})},
 	})
-	if err != nil {
-		t.Fatalf("NewClient: %v", err)
-	}
+	require.NoError(t, err, "NewClient")
 	defer c.Close()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -52,17 +53,15 @@ func TestH1_ContentLength_DataEOFCoalesced(t *testing.T) {
 
 	var resp client.Response
 	resp.Reset()
+
 	derr := c.Do(ctx, &client.Request{Method: "GET", Path: "/", BodyMode: client.BodyBuffer}, &resp)
 
-	if !mc.eofRidden() {
-		t.Fatalf("test premise not exercised: server did not deliver final bytes coalesced with io.EOF")
-	}
-	if derr != nil {
-		t.Fatalf("Do returned %v; want nil (final bytes + io.EOF must not be dropped)", derr)
-	}
-	if len(resp.Body) != bodyLen {
-		t.Fatalf("body truncated: got %d bytes, want %d", len(resp.Body), bodyLen)
-	}
+	// CONTROL first: without the coalesced (n>0, io.EOF) read the rest of this
+	// test passes trivially against a client that never had the bug.
+	require.True(t, mc.eofRidden(),
+		"test premise not exercised: server did not deliver final bytes coalesced with io.EOF")
+	require.NoError(t, derr, "final bytes arriving with io.EOF must not be dropped")
+	assert.Len(t, resp.Body, bodyLen, "body truncated: the coalesced final read was discarded")
 }
 
 type h1eofDialer func(ctx context.Context, addr string) (net.Conn, error)

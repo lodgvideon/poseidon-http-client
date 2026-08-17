@@ -7,6 +7,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
 	"github.com/lodgvideon/poseidon-http-client/client"
 	"github.com/lodgvideon/poseidon-http-client/conn"
 )
@@ -56,9 +59,7 @@ func TestConformance_RFC9112_Sec6_3_Rule5_PoisonedConnNotPooled(t *testing.T) {
 		"ok"
 
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("Listen: %v", err)
-	}
+	require.NoError(t, err, "Listen")
 	defer ln.Close()
 
 	var accepted atomic.Int64
@@ -98,9 +99,7 @@ func TestConformance_RFC9112_Sec6_3_Rule5_PoisonedConnNotPooled(t *testing.T) {
 		client.PoolOptions{MaxConnsPerHost: 1},
 		client.WithDefaultScheme("http"),
 	)
-	if err != nil {
-		t.Fatalf("NewH1PoolClient: %v", err)
-	}
+	require.NoError(t, err, "NewH1PoolClient")
 	defer c.Close()
 
 	// Each Do gets its own fresh deadline rather than one budget spanning both:
@@ -115,26 +114,21 @@ func TestConformance_RFC9112_Sec6_3_Rule5_PoisonedConnNotPooled(t *testing.T) {
 	}
 
 	var resp1 client.Response
-	if err := do(&resp1); err == nil {
-		t.Error("request 1: Do returned nil error; a response whose two Content-Length " +
-			"values disagree has no trustworthy body boundary and must not be a success")
-	}
-
+	err1 := do(&resp1)
 	var resp2 client.Response
-	if err := do(&resp2); err != nil {
-		t.Fatalf("request 2: Do = %v; want success on a fresh connection", err)
-	}
-	if got := string(resp2.Body); got != "ok" {
-		t.Errorf("request 2: body = %q, want %q — anything else means it resumed the "+
-			"poisoned socket and read the smuggled response out of request 1's body", got, "ok")
-	}
+	err2 := do(&resp2)
 
+	assert.Error(t, err1, "request 1: a response whose two Content-Length values disagree "+
+		"has no trustworthy body boundary and must not be a success")
+	require.NoError(t, err2, "request 2: want success on a fresh connection")
+	assert.Equal(t, "ok", string(resp2.Body),
+		"request 2 body — anything else means it resumed the poisoned socket and read the "+
+			"smuggled response out of request 1's body")
 	// The assertion this test exists for. 1 == the poisoned conn was pooled and
 	// reused; 2 == it was evicted and request 2 dialled fresh.
-	if n := accepted.Load(); n != 2 {
-		t.Errorf("accepted %d connections, want 2 — the connection poisoned by the "+
-			"conflicting Content-Length was returned to the pool and reused", n)
-	}
+	assert.EqualValues(t, 2, accepted.Load(),
+		"want 2 accepted connections — anything less means the connection poisoned by the "+
+			"conflicting Content-Length was returned to the pool and reused")
 }
 
 type h1clDialer func(ctx context.Context, addr string) (net.Conn, error)
