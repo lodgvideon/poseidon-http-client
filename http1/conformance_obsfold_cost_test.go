@@ -21,6 +21,9 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // foldedResponse builds a response whose single header value is continued over
@@ -39,16 +42,21 @@ func foldedResponse(n int) string {
 }
 
 // allocsForFolds returns bytes allocated parsing a response with n folds.
+//
+// The assertion is deliberately OUTSIDE the ReadMemStats window: testify
+// reflects and allocates, and this measures the whole process, so an assertion
+// inside would be charged to the parse it is meant to be judging.
 func allocsForFolds(t *testing.T, n int) uint64 {
 	t.Helper()
 	var m0, m1 runtime.MemStats
+
 	runtime.GC()
 	runtime.ReadMemStats(&m0)
 	ex := wireExchange(t, "GET", foldedResponse(n))
-	if _, _, err := ex.ReadResponse(context.Background()); err != nil {
-		t.Fatalf("ReadResponse with %d folds: %v", n, err)
-	}
+	_, _, err := ex.ReadResponse(context.Background())
 	runtime.ReadMemStats(&m1)
+
+	require.NoErrorf(t, err, "ReadResponse with %d folds: %v", n, err)
 	return m1.TotalAlloc - m0.TotalAlloc
 }
 
@@ -64,16 +72,15 @@ func TestObsFoldAccumulation_IsLinearInBytesReceived(t *testing.T) {
 	a := allocsForFolds(t, small)
 	b := allocsForFolds(t, large)
 	ratio := float64(b) / float64(a)
+
 	t.Logf("%d folds: %d KiB   %d folds: %d KiB   ratio=%.2fx (linear ~2.0, quadratic ~4.0)",
 		small, a>>10, large, b>>10, ratio)
-
-	if ratio > 2.5 {
-		t.Errorf("allocations grew %.2fx for a 2x larger folded header (%d KiB -> %d KiB); "+
+	assert.LessOrEqualf(t, ratio, 2.5,
+		"allocations grew %.2fx for a 2x larger folded header (%d KiB -> %d KiB); "+
 			"want <= 2.5x. Joining N continuations must cost O(total bytes), not O(N x total): "+
 			"maxHeaderListBytes caps the bytes a server sends, so a superlinear join lets a "+
 			"legal, capped response buy unbounded work",
-			ratio, a>>10, b>>10)
-	}
+		ratio, a>>10, b>>10)
 }
 
 // TestObsFoldAccumulation_UnfoldsCorrectlyAtScale is the control: the cheap path
@@ -82,18 +89,15 @@ func TestObsFoldAccumulation_IsLinearInBytesReceived(t *testing.T) {
 func TestObsFoldAccumulation_UnfoldsCorrectlyAtScale(t *testing.T) {
 	const n = 1000
 	ex := wireExchange(t, "GET", foldedResponse(n))
+
 	_, hdrs, err := ex.ReadResponse(context.Background())
-	if err != nil {
-		t.Fatalf("ReadResponse: %v", err)
-	}
+
+	require.NoError(t, err, "ReadResponse")
 	got, ok := fieldValue(hdrs, "x-a")
-	if !ok {
-		t.Fatal("x-a missing")
-	}
+	require.True(t, ok, "x-a missing")
 	want := "v" + strings.Repeat(" "+strings.Repeat("p", 40), n)
-	if got != want {
-		t.Errorf("x-a length = %d, want %d — the folds were not all joined "+
+	assert.Equalf(t, want, got,
+		"x-a length = %d, want %d — the folds were not all joined "+
 			"(first divergence matters more than the bytes: "+strconv.Itoa(len(got))+" vs "+
 			strconv.Itoa(len(want))+")", len(got), len(want))
-	}
 }
