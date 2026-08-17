@@ -1,6 +1,10 @@
 package quic
 
-import "testing"
+import (
+	"testing"
+
+	"github.com/stretchr/testify/require"
+)
 
 // The numeric frame types of RFC 9000 §19, pinned against literal bytes.
 //
@@ -52,7 +56,9 @@ func TestConformance_RFC9000_Sec19_FrameTypeDecodesFromLiteralBytes(t *testing.T
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			eq(t, parse(t, c.in), []string{c.want})
+			got := parse(t, c.in)
+
+			eq(t, got, []string{c.want})
 		})
 	}
 }
@@ -80,14 +86,12 @@ func TestConformance_RFC9000_Sec19_FrameTypeEncodesToLiteralByte(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			if len(c.got) == 0 {
-				t.Fatalf("%s encoded to nothing", c.name)
-			}
-			if c.got[0] != c.want {
-				t.Fatalf("%s frame type = 0x%02x, want 0x%02x (RFC 9000 §19);\n"+
+			require.NotEmptyf(t, c.got, "%s encoded to nothing", c.name)
+
+			require.Equalf(t, c.want, c.got[0],
+				"%s frame type = 0x%02x, want 0x%02x (RFC 9000 §19);\n"+
 					"a peer reads this octet to decide what the frame IS — a round-trip "+
 					"through our own parser cannot see this", c.name, c.got[0], c.want)
-			}
 		})
 	}
 }

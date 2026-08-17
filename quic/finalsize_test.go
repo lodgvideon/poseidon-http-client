@@ -1,44 +1,45 @@
 package quic
 
-import "testing"
+import (
+	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+)
 
 // TestConformance_RFC9000_Sec45_DataPastFinalSize checks that data received past a
 // declared final size is a FINAL_SIZE_ERROR.
 func TestConformance_RFC9000_Sec45_DataPastFinalSize(t *testing.T) {
 	var r recvStream
-	if err := r.receive(0, []byte("hello"), true); err != nil { // FIN → final size 5
-		t.Fatal(err)
-	}
-	if err := r.receive(5, []byte("x"), false); err != ErrFinalSize { // byte at offset 5
-		t.Fatalf("data past final size = %v, want ErrFinalSize", err)
-	}
+	require.NoError(t, r.receive(0, []byte("hello"), true)) // FIN → final size 5
+
+	err := r.receive(5, []byte("x"), false) // byte at offset 5
+
+	assert.Equalf(t, ErrFinalSize, err, "data past final size = %v, want ErrFinalSize", err)
 }
 
 // TestConformance_RFC9000_Sec45_FinBelowReceived checks that a FIN whose final
 // size is below data already received is a FINAL_SIZE_ERROR.
 func TestConformance_RFC9000_Sec45_FinBelowReceived(t *testing.T) {
 	var r recvStream
-	if err := r.receive(0, make([]byte, 500), false); err != nil { // highest 500, no FIN
-		t.Fatal(err)
-	}
-	if err := r.receive(100, nil, true); err != ErrFinalSize { // FIN claims final size 100 < 500
-		t.Fatalf("FIN below received = %v, want ErrFinalSize", err)
-	}
+	require.NoError(t, r.receive(0, make([]byte, 500), false)) // highest 500, no FIN
+
+	err := r.receive(100, nil, true) // FIN claims final size 100 < 500
+
+	assert.Equalf(t, ErrFinalSize, err, "FIN below received = %v, want ErrFinalSize", err)
 }
 
 // TestConformance_RFC9000_Sec45_ConflictingFin checks that a second FIN with a
 // different final size is a FINAL_SIZE_ERROR, while an identical retransmit is ok.
 func TestConformance_RFC9000_Sec45_ConflictingFin(t *testing.T) {
 	var r recvStream
-	if err := r.receive(0, []byte("hello"), true); err != nil { // final size 5
-		t.Fatal(err)
-	}
-	if err := r.receive(0, []byte("hello"), true); err != nil { // identical retransmit
-		t.Fatalf("identical FIN retransmit should be accepted: %v", err)
-	}
-	if err := r.receive(0, []byte("hi"), true); err != ErrFinalSize { // final size 2 ≠ 5
-		t.Fatalf("conflicting final size = %v, want ErrFinalSize", err)
-	}
+	require.NoError(t, r.receive(0, []byte("hello"), true)) // final size 5
+
+	retransmit := r.receive(0, []byte("hello"), true) // identical retransmit
+	conflicting := r.receive(0, []byte("hi"), true)   // final size 2 ≠ 5
+
+	assert.NoErrorf(t, retransmit, "identical FIN retransmit should be accepted: %v", retransmit)
+	assert.Equalf(t, ErrFinalSize, conflicting, "conflicting final size = %v, want ErrFinalSize", conflicting)
 }
 
 // TestConformance_RFC9000_Sec45_ResetFinalSizeBelow checks that a RESET_STREAM
@@ -47,12 +48,11 @@ func TestConformance_RFC9000_Sec45_ResetFinalSizeBelow(t *testing.T) {
 	c := &Conn{peer: TransportParams{InitialMaxStreamsBidi: 1}, connRecvMax: DefaultConnRecvWindow}
 	s, _ := c.OpenStream()
 	h := &connFrameHandler{c: c}
-	if err := h.OnStream(s.ID(), 0, false, make([]byte, 100)); err != nil {
-		t.Fatal(err)
-	}
-	if err := h.OnResetStream(s.ID(), 0, 50); err != ErrFinalSize { // 50 < the 100 received
-		t.Fatalf("reset final size below received = %v, want ErrFinalSize", err)
-	}
+	require.NoError(t, h.OnStream(s.ID(), 0, false, make([]byte, 100)))
+
+	err := h.OnResetStream(s.ID(), 0, 50) // 50 < the 100 received
+
+	assert.Equalf(t, ErrFinalSize, err, "reset final size below received = %v, want ErrFinalSize", err)
 }
 
 // TestConformance_RFC9000_Sec45_ResetFinalSizeBelowUnderNoFlowControl checks that
@@ -66,23 +66,18 @@ func TestConformance_RFC9000_Sec45_ResetFinalSizeBelowUnderNoFlowControl(t *test
 	c := &Conn{peer: TransportParams{InitialMaxStreamsBidi: 1}}
 	s, _ := c.OpenStream()
 	h := &connFrameHandler{c: c}
-	if err := h.OnStream(s.ID(), 0, false, make([]byte, 100)); err != nil {
-		t.Fatal(err)
-	}
-	if err := h.OnResetStream(s.ID(), 0, 50); err != ErrFinalSize { // 50 < the 100 received
-		t.Fatalf("reset final size below received = %v, want ErrFinalSize", err)
-	}
-
-	// A final size equal to the data received names that same last byte and is legal.
+	require.NoError(t, h.OnStream(s.ID(), 0, false, make([]byte, 100)))
+	// A second, identical connection for the accepting side of the edge.
 	c2 := &Conn{peer: TransportParams{InitialMaxStreamsBidi: 1}}
 	s2, _ := c2.OpenStream()
 	h2 := &connFrameHandler{c: c2}
-	if err := h2.OnStream(s2.ID(), 0, false, make([]byte, 100)); err != nil {
-		t.Fatal(err)
-	}
-	if err := h2.OnResetStream(s2.ID(), 0, 100); err != nil {
-		t.Fatalf("reset final size equal to received = %v, want nil", err)
-	}
+	require.NoError(t, h2.OnStream(s2.ID(), 0, false, make([]byte, 100)))
+
+	below := h.OnResetStream(s.ID(), 0, 50)    // 50 < the 100 received
+	equal := h2.OnResetStream(s2.ID(), 0, 100) // names that same last byte, so legal
+
+	assert.Equalf(t, ErrFinalSize, below, "reset final size below received = %v, want ErrFinalSize", below)
+	assert.NoErrorf(t, equal, "reset final size equal to received = %v, want nil", equal)
 }
 
 // TestConformance_RFC9000_Sec45_SecondResetBelowFirst checks that a final size
@@ -125,13 +120,13 @@ func TestConformance_RFC9000_Sec45_SecondResetBelowFirst(t *testing.T) {
 			c := &Conn{peer: TransportParams{InitialMaxStreamsBidi: 1}, connRecvMax: tc.connRecvMax}
 			s, _ := c.OpenStream()
 			h := &connFrameHandler{c: c}
-			if err := h.OnResetStream(s.ID(), 0, first); err != nil {
-				t.Fatalf("first RESET_STREAM (final size %d) = %v, want nil", first, err)
-			}
-			if err := h.OnResetStream(s.ID(), 0, tc.second); err != tc.want {
-				t.Fatalf("second RESET_STREAM final size %d after %d = %v, want %v",
-					tc.second, first, err, tc.want)
-			}
+			require.NoErrorf(t, h.OnResetStream(s.ID(), 0, first),
+				"first RESET_STREAM (final size %d) must be accepted", first)
+
+			err := h.OnResetStream(s.ID(), 0, tc.second)
+
+			assert.Equalf(t, tc.want, err, "second RESET_STREAM final size %d after %d = %v, want %v",
+				tc.second, first, err, tc.want)
 		})
 	}
 }
@@ -211,13 +206,11 @@ func resetStreamAt(t *testing.T, connRecvMax, prefix uint64) (*Stream, *connFram
 	s, _ := c.OpenStream()
 	h := &connFrameHandler{c: c}
 	if prefix > 0 {
-		if err := h.OnStream(s.ID(), 0, false, make([]byte, prefix)); err != nil {
-			t.Fatalf("%d bytes before the reset = %v, want nil", prefix, err)
-		}
+		require.NoErrorf(t, h.OnStream(s.ID(), 0, false, make([]byte, prefix)),
+			"%d bytes before the reset must be accepted", prefix)
 	}
-	if err := h.OnResetStream(s.ID(), 0, resetFirst); err != nil {
-		t.Fatalf("first RESET_STREAM (final size %d) = %v, want nil", resetFirst, err)
-	}
+	require.NoErrorf(t, h.OnResetStream(s.ID(), 0, resetFirst),
+		"first RESET_STREAM (final size %d) must be accepted", resetFirst)
 	return s, h
 }
 
@@ -248,10 +241,12 @@ func TestConformance_RFC9000_Sec45_ResetFinalSizeIsFixed(t *testing.T) {
 			for _, tc := range finalSizeChangeCases {
 				t.Run(fc.name+"/"+pm.name+"/"+tc.name, func(t *testing.T) {
 					s, h := resetStreamAt(t, fc.connRecvMax, pm.prefix)
-					if err := h.OnResetStream(s.ID(), 0, tc.second); err != tc.want {
-						t.Fatalf("second RESET_STREAM final size %d after %d (%d bytes received first) = %v, want %v",
-							tc.second, resetFirst, pm.prefix, err, tc.want)
-					}
+
+					err := h.OnResetStream(s.ID(), 0, tc.second)
+
+					assert.Equalf(t, tc.want, err,
+						"second RESET_STREAM final size %d after %d (%d bytes received first) = %v, want %v",
+						tc.second, resetFirst, pm.prefix, err, tc.want)
 				})
 			}
 		}
@@ -273,11 +268,13 @@ func TestConformance_RFC9000_Sec45_FinAfterResetFinalSize(t *testing.T) {
 		for _, tc := range finalSizeChangeCases {
 			t.Run(fc.name+"/"+tc.name, func(t *testing.T) {
 				s, h := resetStreamAt(t, fc.connRecvMax, 0)
+
 				// A zero-length STREAM frame with FIN at offset n declares final size n.
-				if err := h.OnStream(s.ID(), tc.second, true, nil); err != tc.want {
-					t.Fatalf("FIN declaring final size %d after RESET_STREAM %d = %v, want %v",
-						tc.second, resetFirst, err, tc.want)
-				}
+				err := h.OnStream(s.ID(), tc.second, true, nil)
+
+				assert.Equalf(t, tc.want, err,
+					"FIN declaring final size %d after RESET_STREAM %d = %v, want %v",
+					tc.second, resetFirst, err, tc.want)
 			})
 		}
 	}
@@ -308,10 +305,12 @@ func TestConformance_RFC9000_Sec45_DataAfterResetFinalSize(t *testing.T) {
 		} {
 			t.Run(fc.name+"/"+tc.name, func(t *testing.T) {
 				s, h := resetStreamAt(t, fc.connRecvMax, 0)
-				if err := h.OnStream(s.ID(), tc.offset, false, make([]byte, tc.n)); err != tc.want {
-					t.Fatalf("%d bytes at offset %d after RESET_STREAM final size %d = %v, want %v",
-						tc.n, tc.offset, resetFirst, err, tc.want)
-				}
+
+				err := h.OnStream(s.ID(), tc.offset, false, make([]byte, tc.n))
+
+				assert.Equalf(t, tc.want, err,
+					"%d bytes at offset %d after RESET_STREAM final size %d = %v, want %v",
+					tc.n, tc.offset, resetFirst, err, tc.want)
 			})
 		}
 	}
@@ -323,9 +322,10 @@ func TestConformance_RFC9000_Sec45_ResetFinalSizePastLimit(t *testing.T) {
 	c := &Conn{peer: TransportParams{InitialMaxStreamsBidi: 1}, connRecvMax: DefaultConnRecvWindow}
 	s, _ := c.OpenStream()
 	h := &connFrameHandler{c: c}
-	if err := h.OnResetStream(s.ID(), 0, DefaultStreamRecvWindow+1); err != ErrFlowControl {
-		t.Fatalf("reset final size past limit = %v, want ErrFlowControl", err)
-	}
+
+	err := h.OnResetStream(s.ID(), 0, DefaultStreamRecvWindow+1)
+
+	assert.Equalf(t, ErrFlowControl, err, "reset final size past limit = %v, want ErrFlowControl", err)
 }
 
 // TestConformance_RFC9000_Sec35_ResetAfterCompleteIgnored checks that a
@@ -336,21 +336,14 @@ func TestConformance_RFC9000_Sec35_ResetAfterCompleteIgnored(t *testing.T) {
 	c := &Conn{peer: TransportParams{InitialMaxStreamsBidi: 1}, connRecvMax: DefaultConnRecvWindow}
 	s, _ := c.OpenStream()
 	h := &connFrameHandler{c: c}
-	if err := h.OnStream(s.ID(), 0, true, []byte("hello")); err != nil { // FIN → complete, final size 5
-		t.Fatal(err)
-	}
-	if !s.recv.complete() {
-		t.Fatal("stream should be complete after the FIN")
-	}
-	if err := h.OnResetStream(s.ID(), 42, 5); err != nil { // a late reset, code 42
-		t.Fatal(err)
-	}
-	if s.recvReset {
-		t.Fatal("a RESET_STREAM after a complete receive must be ignored (§3.5)")
-	}
-	if s.ResetCode() != 0 {
-		t.Fatalf("reset code = %d, want 0 (reset ignored)", s.ResetCode())
-	}
+	require.NoError(t, h.OnStream(s.ID(), 0, true, []byte("hello"))) // FIN → complete, final size 5
+	require.True(t, s.recv.complete(), "stream should be complete after the FIN")
+
+	err := h.OnResetStream(s.ID(), 42, 5) // a late reset, code 42
+
+	require.NoError(t, err)
+	assert.False(t, s.recvReset, "a RESET_STREAM after a complete receive must be ignored (§3.5)")
+	assert.Zerof(t, s.ResetCode(), "reset code = %d, want 0 (reset ignored)", s.ResetCode())
 }
 
 // TestConn_ResetFinalSize_CreditsConn checks that a RESET_STREAM's final size is
@@ -359,13 +352,11 @@ func TestConn_ResetFinalSize_CreditsConn(t *testing.T) {
 	c := &Conn{peer: TransportParams{InitialMaxStreamsBidi: 1}, connRecvMax: DefaultConnRecvWindow}
 	s, _ := c.OpenStream()
 	h := &connFrameHandler{c: c}
-	if err := h.OnResetStream(s.ID(), 0, 1000); err != nil {
-		t.Fatal(err)
-	}
-	if c.connRecvTotal != 1000 {
-		t.Fatalf("connRecvTotal = %d, want 1000 (final size credited to conn FC)", c.connRecvTotal)
-	}
-	if !s.recvReset {
-		t.Fatal("recvReset should be set")
-	}
+
+	err := h.OnResetStream(s.ID(), 0, 1000)
+
+	require.NoError(t, err)
+	assert.Equalf(t, uint64(1000), c.connRecvTotal,
+		"connRecvTotal = %d, want 1000 (final size credited to conn FC)", c.connRecvTotal)
+	assert.True(t, s.recvReset, "recvReset should be set")
 }
