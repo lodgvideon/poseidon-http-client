@@ -11,8 +11,10 @@ package http1_test
 
 import (
 	"context"
-	"errors"
 	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	"github.com/lodgvideon/poseidon-http-client/http1"
 )
@@ -29,16 +31,13 @@ func TestConformance_RFC9110_Sec5_5_ResponseFieldValueCRNUL_Rejected(t *testing.
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			ex := wireExchange(t, "GET", tc.resp)
+
 			_, _, err := ex.ReadResponse(context.Background())
-			if err == nil {
-				t.Fatalf("accepted a malformed response field; want rejection (RFC 9110 §5.5)")
-			}
-			if !errors.Is(err, http1.ErrInvalidHeaderBlock) {
-				t.Errorf("error = %v, want it to wrap ErrInvalidHeaderBlock", err)
-			}
-			if ex.KeepAlive() {
-				t.Error("KeepAlive() = true after a malformed response field, want false")
-			}
+
+			require.Error(t, err, "accepted a malformed response field; want rejection (RFC 9110 §5.5)")
+			assert.ErrorIsf(t, err, http1.ErrInvalidHeaderBlock,
+				"error = %v, want it to wrap ErrInvalidHeaderBlock", err)
+			assert.False(t, ex.KeepAlive(), "KeepAlive() = true after a malformed response field, want false")
 		})
 	}
 }
@@ -57,11 +56,11 @@ func TestConformance_RFC9110_Sec5_5_LegalResponseFieldsAccepted(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			ex := wireExchange(t, "GET", tc.resp)
-			if _, _, err := ex.ReadResponse(context.Background()); err != nil {
-				t.Errorf("rejected a legal response: %v — §5.5 forbids only CR, LF and NUL", err)
-			} else if !ex.KeepAlive() {
-				t.Error("KeepAlive() = false for a legal response, want true")
-			}
+
+			_, _, err := ex.ReadResponse(context.Background())
+
+			assert.NoErrorf(t, err, "rejected a legal response: %v — §5.5 forbids only CR, LF and NUL", err)
+			assert.True(t, ex.KeepAlive(), "KeepAlive() = false for a legal response, want true")
 		})
 	}
 }
