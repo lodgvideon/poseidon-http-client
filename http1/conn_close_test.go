@@ -4,6 +4,8 @@ import (
 	"net"
 	"testing"
 
+	"github.com/stretchr/testify/require"
+
 	"github.com/lodgvideon/poseidon-http-client/http1"
 )
 
@@ -29,18 +31,14 @@ func (c *recordConn) Close() error {
 func TestConformance_RFC9112_Sec9_8_CloseDelegatesToUnderlyingConn(t *testing.T) {
 	inner, peer := net.Pipe()
 	t.Cleanup(func() { _ = peer.Close() })
-
 	rc := &recordConn{Conn: inner}
 	c := http1.NewConn(rc)
 
-	if err := c.Close(); err != nil {
-		t.Fatalf("Close: %v", err)
-	}
-	if rc.closes != 1 {
-		t.Fatalf("Close delegated to the underlying conn %d times, want exactly 1 "+
+	err := c.Close()
+
+	require.NoError(t, err, "Close")
+	require.Equalf(t, 1, rc.closes,
+		"Close delegated to the underlying conn %d times, want exactly 1 "+
 			"(a bare-TCP-close bypass would skip it)", rc.closes)
-	}
-	if c.IsAlive() {
-		t.Fatal("IsAlive() is true after Close()")
-	}
+	require.False(t, c.IsAlive(), "IsAlive() is true after Close()")
 }
