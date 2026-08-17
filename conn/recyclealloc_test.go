@@ -6,6 +6,9 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
 	"github.com/lodgvideon/poseidon-http-client/frame"
 )
 
@@ -22,22 +25,20 @@ func TestRecycleStream_ReusesTheEventChannel(t *testing.T) {
 	before := s.events
 	s.push(StreamEvent{Type: EventHeaders})
 
+	// No testify inside the measured closure: it reflects and allocates, and
+	// AllocsPerRun counts the whole process. Every assertion is outside it.
 	got := testing.AllocsPerRun(50, func() {
 		s.mu.Lock()
 		s.resetForPoolLocked()
 		s.mu.Unlock()
 	})
-	if got != 0 {
-		t.Fatalf("resetForPoolLocked allocates %.0f times per recycle on a healthy stream", got)
-	}
-	if s.events != before {
-		t.Fatal("the event channel was replaced although nothing closed it")
-	}
+
+	require.Zerof(t, got,
+		"resetForPoolLocked allocates %.0f times per recycle on a healthy stream", got)
+	assert.True(t, s.events == before, "the event channel was replaced although nothing closed it")
 	// The drain still happened: the pushed event must not survive into the
 	// next lifetime.
-	if n := len(s.events); n != 0 {
-		t.Fatalf("%d event(s) survived the recycle", n)
-	}
+	assert.Emptyf(t, s.events, "%d event(s) survived the recycle", len(s.events))
 }
 
 // TestRecycleStream_ReplacesAChannelShutdownClosed is the other half, and the
@@ -56,17 +57,13 @@ func TestRecycleStream_ReplacesAChannelShutdownClosed(t *testing.T) {
 	s.resetForPoolLocked()
 	s.mu.Unlock()
 
-	if s.events == before {
-		t.Fatal("a closed channel was carried into the next lifetime")
-	}
-	if s.eventsClosed.Load() {
-		t.Fatal("eventsClosed was not re-armed for the new lifetime")
-	}
+	require.False(t, s.events == before, "a closed channel was carried into the next lifetime")
+	assert.False(t, s.eventsClosed.Load(), "eventsClosed was not re-armed for the new lifetime")
 	// Usable again: a send must neither block nor panic.
 	select {
 	case s.events <- StreamEvent{Type: EventHeaders}:
 	default:
-		t.Fatal("the replacement channel would not accept an event")
+		assert.Fail(t, "the replacement channel would not accept an event")
 	}
 }
 
@@ -76,30 +73,26 @@ func TestRecycleStream_ReplacesAChannelShutdownClosed(t *testing.T) {
 func TestRecycleStream_ReplacesSignalChannelsOnlyWhenClosed(t *testing.T) {
 	s := newStream(1, 4, nil, 65535)
 	reset, end := s.resetSignal, s.endSignal
+
 	s.mu.Lock()
 	s.resetForPoolLocked()
 	s.mu.Unlock()
-	if s.resetSignal != reset || s.endSignal != end {
-		t.Fatal("an unclosed signal channel was replaced")
-	}
+
+	assert.True(t, s.resetSignal == reset, "an unclosed resetSignal was replaced")
+	assert.True(t, s.endSignal == end, "an unclosed endSignal was replaced")
 
 	s.signalReset(frame.ErrCodeCancel)
 	s.signalEnd()
 	s.mu.Lock()
 	s.resetForPoolLocked()
 	s.mu.Unlock()
-	if s.resetSignal == reset {
-		t.Fatal("a closed resetSignal was carried into the next lifetime")
-	}
-	if s.endSignal == end {
-		t.Fatal("a closed endSignal was carried into the next lifetime")
-	}
-	if s.resetSignalled.Load() || s.endSignalled.Load() {
-		t.Fatal("the signal flags were not re-armed")
-	}
-	if code := frame.ErrCode(s.resetCode.Load()); code != 0 {
-		t.Fatalf("resetCode = %v, want cleared", code)
-	}
+
+	assert.False(t, s.resetSignal == reset, "a closed resetSignal was carried into the next lifetime")
+	assert.False(t, s.endSignal == end, "a closed endSignal was carried into the next lifetime")
+	assert.False(t, s.resetSignalled.Load(), "the reset signal flag was not re-armed")
+	assert.False(t, s.endSignalled.Load(), "the end signal flag was not re-armed")
+	assert.Equalf(t, frame.ErrCode(0), frame.ErrCode(s.resetCode.Load()),
+		"resetCode = %v, want cleared", frame.ErrCode(s.resetCode.Load()))
 }
 
 // TestRecycleStream_SurvivesShutdownThenReuse drives the real path end to end,
@@ -127,33 +120,24 @@ func TestRecycleStream_SurvivesShutdownThenReuse(t *testing.T) {
 
 	c.shutdownStreams() // reader dies: event queued, channel closed
 
-	if err := s.ref().SendData(context.Background(), nil, true); err != nil {
-		t.Fatalf("SendData(END_STREAM): %v", err)
-	}
-	if err := s.ref().Close(); err != nil {
-		t.Fatalf("Close: %v", err)
-	}
+	require.NoError(t, s.ref().SendData(context.Background(), nil, true), "SendData(END_STREAM)")
+	require.NoError(t, s.ref().Close(), "Close")
 
 	// The struct is pooled now. A receive on a closed empty channel completes
 	// at once with ok=false; on an open one it blocks, so default fires.
 	select {
 	case _, ok := <-s.events:
-		if !ok {
-			t.Fatal("the recycled struct carries a closed events channel: the next request's first Recv would report ErrStreamClosed before anything was sent")
-		}
-		t.Fatal("a dead lifetime's event survived the recycle")
+		require.Truef(t, ok,
+			"the recycled struct carries a closed events channel: the next request's first "+
+				"Recv would report ErrStreamClosed before anything was sent")
+		require.FailNow(t, "a dead lifetime's event survived the recycle")
 	default:
 	}
 
 	// And the next lifetime can actually be delivered to. A send on a closed
 	// channel panics, and this runs on the connection reader goroutine.
 	s.id = 7
-	defer func() {
-		if r := recover(); r != nil {
-			t.Fatalf("delivering the next request's response panicked: %v", r)
-		}
-	}()
-	if !s.push(StreamEvent{Type: EventHeaders}) {
-		t.Fatal("push into the next lifetime failed")
-	}
+	require.NotPanicsf(t, func() {
+		assert.True(t, s.push(StreamEvent{Type: EventHeaders}), "push into the next lifetime failed")
+	}, "delivering the next request's response panicked")
 }

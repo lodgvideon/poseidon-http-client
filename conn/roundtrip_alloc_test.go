@@ -7,6 +7,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
 	"github.com/lodgvideon/poseidon-http-client/header"
 )
 
@@ -52,9 +55,7 @@ func TestConn_Roundtrip_AllocsPerRequest(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	c, err := Dial(ctx, p.addr(), ConnOptions{Dialer: &PlaintextDialer{}})
-	if err != nil {
-		t.Fatalf("Dial: %v", err)
-	}
+	require.NoError(t, err, "Dial")
 	defer func() { _ = c.Close() }()
 
 	hdrs := []header.Field{
@@ -64,6 +65,9 @@ func TestConn_Roundtrip_AllocsPerRequest(t *testing.T) {
 		{Name: []byte(":path"), Value: []byte("/")},
 	}
 
+	// This closure is what AllocsPerRun measures, so it uses plain t.Fatalf
+	// rather than require: testify reflects and allocates, and the gate counts
+	// the whole process. The assertion on the resulting count is outside it.
 	do := func() {
 		s, nerr := c.NewStream(ctx)
 		if nerr != nil {
@@ -88,13 +92,13 @@ func TestConn_Roundtrip_AllocsPerRequest(t *testing.T) {
 	}
 
 	n := testing.AllocsPerRun(200, do)
+
 	t.Logf("conn round trip: %.1f allocs/request", n)
-	if n > roundtripAllocCeiling {
-		t.Errorf("a round trip allocates %.1f, ceiling %d — a per-request allocation is "+
+	assert.LessOrEqualf(t, n, float64(roundtripAllocCeiling),
+		"a round trip allocates %.1f, ceiling %d — a per-request allocation is "+
 			"back. A pooled buffer nilled instead of truncated on reset is the quiet "+
 			"way to cause this: still correct, just allocating again every request",
-			n, roundtripAllocCeiling)
-	}
+		n, roundtripAllocCeiling)
 	// No lower check: the ceiling is zero and a count cannot go below it. The
 	// pair is kept everywhere else in the repo because "the path improved and
 	// nobody lowered the constant" is a real way to lose a win silently; here
