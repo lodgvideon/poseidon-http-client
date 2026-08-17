@@ -1,8 +1,9 @@
 package client
 
 import (
-	"errors"
 	"testing"
+
+	"github.com/stretchr/testify/require"
 
 	"github.com/lodgvideon/poseidon-http-client/conn"
 )
@@ -35,10 +36,11 @@ func TestConformance_RFC9110_Sec5_6_2_OutgoingHeaderName_MustBeToken(t *testing.
 		t.Run("reject/"+tc.name, func(t *testing.T) {
 			req := base()
 			req.Headers = []conn.HeaderField{{Name: []byte(tc.hn), Value: []byte("v")}}
-			if err := validateRequest(req); !errors.Is(err, ErrInvalidRequest) {
-				t.Fatalf("validateRequest = %v, want ErrInvalidRequest — a non-token header "+
-					"name must never reach the encoder (RFC 9110 §5.6.2)", err)
-			}
+
+			err := validateRequest(req)
+
+			require.ErrorIs(t, err, ErrInvalidRequest,
+				"a non-token header name must never reach the encoder (RFC 9110 §5.6.2)")
 		})
 	}
 
@@ -46,9 +48,10 @@ func TestConformance_RFC9110_Sec5_6_2_OutgoingHeaderName_MustBeToken(t *testing.
 	t.Run("reject/trailer name CRLF", func(t *testing.T) {
 		req := base()
 		req.Trailers = []conn.HeaderField{{Name: []byte("x\r\ny"), Value: []byte("v")}}
-		if err := validateRequest(req); !errors.Is(err, ErrInvalidRequest) {
-			t.Fatalf("validateRequest = %v, want ErrInvalidRequest for a non-token trailer name", err)
-		}
+
+		err := validateRequest(req)
+
+		require.ErrorIs(t, err, ErrInvalidRequest, "expected ErrInvalidRequest for a non-token trailer name")
 	})
 
 	// Over-rejection guard: ordinary names — including upper case (tokens are
@@ -58,9 +61,10 @@ func TestConformance_RFC9110_Sec5_6_2_OutgoingHeaderName_MustBeToken(t *testing.
 		t.Run("accept/"+hn, func(t *testing.T) {
 			req := base()
 			req.Headers = []conn.HeaderField{{Name: []byte(hn), Value: []byte("v")}}
-			if err := validateRequest(req); err != nil {
-				t.Fatalf("validateRequest = %v, want nil — %q is a valid token name", err, hn)
-			}
+
+			err := validateRequest(req)
+
+			require.NoErrorf(t, err, "%q is a valid token name and must be accepted", hn)
 		})
 	}
 }

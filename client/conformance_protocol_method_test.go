@@ -14,9 +14,11 @@ package client
 
 import (
 	"context"
-	"errors"
 	"testing"
 	"time"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	"github.com/lodgvideon/poseidon-http-client/conn"
 	"github.com/lodgvideon/poseidon-http-client/frame"
@@ -65,17 +67,13 @@ func protocolReproServer(stopSrv <-chan struct{}) func(*frame.Framer) {
 func TestConformance_RFC8441_Sec4_ProtocolRequiresConnectMethod(t *testing.T) {
 	stopSrv := make(chan struct{})
 	t.Cleanup(func() { close(stopSrv) })
-
 	d := &fakeDialer{srvAfter: protocolReproServer(stopSrv)}
 	c, err := NewClient(ClientOptions{
 		Addr:     "fake:0",
 		ConnOpts: conn.ConnOptions{Dialer: d},
 	})
-	if err != nil {
-		t.Fatalf("NewClient: %v", err)
-	}
+	require.NoError(t, err, "NewClient")
 	defer c.Close()
-
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 
@@ -86,12 +84,11 @@ func TestConformance_RFC8441_Sec4_ProtocolRequiresConnectMethod(t *testing.T) {
 		Path:     "/",
 		Protocol: "websocket",
 	}, &resp)
-	if err == nil {
-		t.Fatalf("GET + Protocol:websocket accepted; must be rejected per RFC 8441 §4 (status=%d)", resp.Status)
-	}
-	if !errors.Is(err, ErrInvalidRequest) {
-		t.Fatalf("expected ErrInvalidRequest, got %v", err)
-	}
+
+	require.Errorf(t, err,
+		"GET + Protocol:websocket accepted; must be rejected per RFC 8441 §4 (status=%d)", resp.Status)
+	require.ErrorIs(t, err, ErrInvalidRequest,
+		"a :protocol on a non-CONNECT method is malformed, not a transport failure")
 }
 
 // TestRepro_Protocol_EmptyOnConnect_OK: a CONNECT with empty Protocol
@@ -100,17 +97,13 @@ func TestConformance_RFC8441_Sec4_ProtocolRequiresConnectMethod(t *testing.T) {
 func TestConformance_RFC8441_Sec4_Protocol_EmptyOnConnect_OK(t *testing.T) {
 	stopSrv := make(chan struct{})
 	t.Cleanup(func() { close(stopSrv) })
-
 	d := &fakeDialer{srvAfter: protocolReproServer(stopSrv)}
 	c, err := NewClient(ClientOptions{
 		Addr:     "fake:0",
 		ConnOpts: conn.ConnOptions{Dialer: d},
 	})
-	if err != nil {
-		t.Fatalf("NewClient: %v", err)
-	}
+	require.NoError(t, err, "NewClient")
 	defer c.Close()
-
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 
@@ -119,12 +112,9 @@ func TestConformance_RFC8441_Sec4_Protocol_EmptyOnConnect_OK(t *testing.T) {
 		Method:    "CONNECT",
 		Authority: "example.com:443", // authority-form target; :path omitted (RFC 9113 §8.5)
 	}, &resp)
-	if err != nil {
-		t.Fatalf("CONNECT without Protocol should be allowed; got %v", err)
-	}
-	if resp.Status != 200 {
-		t.Errorf("status = %d, want 200", resp.Status)
-	}
+
+	require.NoError(t, err, "CONNECT without Protocol should be allowed")
+	assert.Equal(t, 200, resp.Status, "status = %d, want 200", resp.Status)
 }
 
 // TestRepro_Protocol_NonEmptyOnConnect_OK: a CONNECT with Protocol set
@@ -135,17 +125,13 @@ func TestConformance_RFC8441_Sec4_Protocol_EmptyOnConnect_OK(t *testing.T) {
 func TestConformance_RFC8441_Sec4_Protocol_NonEmptyOnConnect_OK(t *testing.T) {
 	stopSrv := make(chan struct{})
 	t.Cleanup(func() { close(stopSrv) })
-
 	d := &fakeDialer{srvAfter: protocolReproServer(stopSrv)}
 	c, err := NewClient(ClientOptions{
 		Addr:     "fake:0",
 		ConnOpts: conn.ConnOptions{Dialer: d},
 	})
-	if err != nil {
-		t.Fatalf("NewClient: %v", err)
-	}
+	require.NoError(t, err, "NewClient")
 	defer c.Close()
-
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 
@@ -155,10 +141,7 @@ func TestConformance_RFC8441_Sec4_Protocol_NonEmptyOnConnect_OK(t *testing.T) {
 		Path:     "/chat",
 		Protocol: "websocket",
 	}, &resp)
-	if err != nil {
-		t.Fatalf("CONNECT + Protocol should be allowed at client layer; got %v", err)
-	}
-	if resp.Status != 200 {
-		t.Errorf("status = %d, want 200", resp.Status)
-	}
+
+	require.NoError(t, err, "CONNECT + Protocol should be allowed at client layer")
+	assert.Equal(t, 200, resp.Status, "status = %d, want 200", resp.Status)
 }
