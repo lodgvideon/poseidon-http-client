@@ -1,8 +1,9 @@
 package quic
 
 import (
-	"errors"
 	"testing"
+
+	"github.com/stretchr/testify/assert"
 )
 
 // TestConformance_RFC9000_Sec11_1_TooManyGaps_ProtocolViolation pins the cap on
@@ -15,6 +16,7 @@ import (
 func TestConformance_RFC9000_Sec11_1_TooManyGaps_ProtocolViolation(t *testing.T) {
 	r := &recvStream{}
 	var err error
+
 	// 1-byte frames at increasing even offsets; offset 0 is never sent, so
 	// nothing absorbs and every frame adds a fresh, non-adjacent range.
 	for i := 0; i <= maxRecvGapChunks+2; i++ {
@@ -22,10 +24,9 @@ func TestConformance_RFC9000_Sec11_1_TooManyGaps_ProtocolViolation(t *testing.T)
 			break
 		}
 	}
-	if !errors.Is(err, ErrProtocolViolation) {
-		t.Fatalf("err = %v, want ErrProtocolViolation once retained ranges exceed %d",
-			err, maxRecvGapChunks)
-	}
+
+	assert.ErrorIsf(t, err, ErrProtocolViolation,
+		"err = %v, want ErrProtocolViolation once retained ranges exceed %d", err, maxRecvGapChunks)
 }
 
 // TestConformance_RFC9000_Sec11_1_NormalReorderingAccepted is the over-rejection
@@ -33,9 +34,10 @@ func TestConformance_RFC9000_Sec11_1_TooManyGaps_ProtocolViolation(t *testing.T)
 // under the cap and must be accepted.
 func TestConformance_RFC9000_Sec11_1_NormalReorderingAccepted(t *testing.T) {
 	r := &recvStream{}
+
 	for i := 0; i < 64; i++ {
-		if err := r.receive(uint64(2*i+2), []byte{'x'}, false); err != nil {
-			t.Fatalf("receive gap %d: %v, want nil — normal reordering must be accepted", i, err)
-		}
+		err := r.receive(uint64(2*i+2), []byte{'x'}, false)
+
+		assert.NoErrorf(t, err, "receive gap %d: %v, want nil — normal reordering must be accepted", i, err)
 	}
 }

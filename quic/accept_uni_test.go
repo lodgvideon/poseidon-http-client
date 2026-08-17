@@ -20,7 +20,8 @@ func TestConformance_RFC9000_Sec21_AcceptServerUniStream(t *testing.T) {
 	s := c.AcceptUniStream()
 	require.NotNilf(t, s, "AcceptUniStream = %v, want stream 3", s)
 	assert.Equalf(t, uint64(3), s.ID(), "AcceptUniStream = %v, want stream 3", s)
-	assert.Equalf(t, []byte{0x00, 0x04}, s.recv.bytes(), "delivered %x, want 0004", s.recv.bytes())
+	delivered := s.recv.bytes()
+	assert.Equalf(t, []byte{0x00, 0x04}, delivered, "delivered %x, want 0004", delivered)
 	assert.Nil(t, c.AcceptUniStream(), "only one uni stream should be queued")
 
 	// A later frame on the now-known stream is delivered without re-accepting.
@@ -28,8 +29,8 @@ func TestConformance_RFC9000_Sec21_AcceptServerUniStream(t *testing.T) {
 
 	require.NoError(t, err)
 	assert.Nil(t, c.AcceptUniStream(), "an already-accepted stream must not be re-queued")
-	assert.Equalf(t, []byte{0x00, 0x04, 0x07}, s.recv.bytes(),
-		"reassembled %x, want 000407", s.recv.bytes())
+	reassembled := s.recv.bytes()
+	assert.Equalf(t, []byte{0x00, 0x04, 0x07}, reassembled, "reassembled %x, want 000407", reassembled)
 }
 
 // TestConformance_RFC9000_Sec46_UniStreamLimit checks that a server uni stream
