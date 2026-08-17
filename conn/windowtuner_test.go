@@ -9,6 +9,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
 	"github.com/lodgvideon/poseidon-http-client/frame"
 	"github.com/lodgvideon/poseidon-http-client/header"
 )
@@ -27,9 +30,8 @@ func tunerFor(t *testing.T, maxWindow uint32) (*recvWindowTuner, *Conn) {
 // sampleBytes delivered while it is outstanding, then the ACK.
 func sample(t *testing.T, tn *recvWindowTuner, c *Conn, sampleBytes uint32) {
 	t.Helper()
-	if !tn.onData(uint32(tn.probeThreshold)) {
-		t.Fatalf("onData(%d) did not open a sample at threshold %d", tn.probeThreshold, tn.probeThreshold)
-	}
+	require.Truef(t, tn.onData(uint32(tn.probeThreshold)),
+		"onData(%d) did not open a sample at threshold %d", tn.probeThreshold, tn.probeThreshold)
 	if sampleBytes > 0 {
 		tn.onData(sampleBytes)
 	}
@@ -44,12 +46,10 @@ func TestRecvWindowTuner_TargetsTwiceTheSample(t *testing.T) {
 	const s = 256 << 10
 	sample(t, tn, c, s)
 
-	if got := c.connRecvTarget.Load(); got != 2*s {
-		t.Errorf("connRecvTarget = %d, want %d", got, 2*s)
-	}
-	if got := c.streamRecvTarget.Load(); got != 2*s {
-		t.Errorf("streamRecvTarget = %d, want %d", got, 2*s)
-	}
+	assert.Equalf(t, uint32(2*s), c.connRecvTarget.Load(),
+		"connRecvTarget = %d, want %d", c.connRecvTarget.Load(), 2*s)
+	assert.Equalf(t, uint32(2*s), c.streamRecvTarget.Load(),
+		"streamRecvTarget = %d, want %d", c.streamRecvTarget.Load(), 2*s)
 }
 
 // TestRecvWindowTuner_ClampsToCeiling pins that the ceiling is a hard bound, not
@@ -59,12 +59,10 @@ func TestRecvWindowTuner_ClampsToCeiling(t *testing.T) {
 	tn, c := tunerFor(t, ceiling)
 	sample(t, tn, c, 4<<20) // asks for 8 MiB
 
-	if got := c.connRecvTarget.Load(); got != ceiling {
-		t.Errorf("connRecvTarget = %d, want the ceiling %d", got, ceiling)
-	}
-	if got := c.streamRecvTarget.Load(); got != ceiling {
-		t.Errorf("streamRecvTarget = %d, want the ceiling %d", got, ceiling)
-	}
+	assert.Equalf(t, uint32(ceiling), c.connRecvTarget.Load(),
+		"connRecvTarget = %d, want the ceiling %d", c.connRecvTarget.Load(), ceiling)
+	assert.Equalf(t, uint32(ceiling), c.streamRecvTarget.Load(),
+		"streamRecvTarget = %d, want the ceiling %d", c.streamRecvTarget.Load(), ceiling)
 }
 
 // TestRecvWindowTuner_NeverShrinks pins that a later, smaller sample cannot pull
@@ -74,13 +72,12 @@ func TestRecvWindowTuner_NeverShrinks(t *testing.T) {
 	tn, c := tunerFor(t, 8<<20)
 	sample(t, tn, c, 512<<10)
 	high := c.connRecvTarget.Load()
-	if high != 1<<20 {
-		t.Fatalf("setup: connRecvTarget = %d, want %d", high, 1<<20)
-	}
+	require.Equalf(t, uint32(1<<20), high, "setup: connRecvTarget = %d, want %d", high, 1<<20)
+
 	sample(t, tn, c, 1<<10) // a trickle
-	if got := c.connRecvTarget.Load(); got != high {
-		t.Errorf("connRecvTarget = %d after a small sample, want it held at %d", got, high)
-	}
+
+	assert.Equalf(t, high, c.connRecvTarget.Load(),
+		"connRecvTarget = %d after a small sample, want it held at %d", c.connRecvTarget.Load(), high)
 }
 
 // TestRecvWindowTuner_BacksOffWhenNothingGrew pins that a sample which taught us
@@ -89,21 +86,20 @@ func TestRecvWindowTuner_NeverShrinks(t *testing.T) {
 func TestRecvWindowTuner_BacksOffWhenNothingGrew(t *testing.T) {
 	tn, c := tunerFor(t, 8<<20)
 	sample(t, tn, c, 512<<10)
-	if tn.probeThreshold != minProbeBytes {
-		t.Fatalf("after growth probeThreshold = %d, want it reset to %d", tn.probeThreshold, minProbeBytes)
-	}
+	require.EqualValuesf(t, minProbeBytes, tn.probeThreshold,
+		"after growth probeThreshold = %d, want it reset to %d", tn.probeThreshold, minProbeBytes)
 	before := tn.probeThreshold
+
 	sample(t, tn, c, 1<<10)
-	if tn.probeThreshold != before*2 {
-		t.Errorf("after a sample that grew nothing probeThreshold = %d, want %d", tn.probeThreshold, before*2)
-	}
+
+	assert.EqualValuesf(t, before*2, tn.probeThreshold,
+		"after a sample that grew nothing probeThreshold = %d, want %d", tn.probeThreshold, before*2)
 	// And it is bounded.
 	for i := 0; i < 40; i++ {
 		sample(t, tn, c, 1<<10)
 	}
-	if tn.probeThreshold != maxProbeBytes {
-		t.Errorf("probeThreshold = %d, want it capped at %d", tn.probeThreshold, maxProbeBytes)
-	}
+	assert.EqualValuesf(t, maxProbeBytes, tn.probeThreshold,
+		"probeThreshold = %d, want it capped at %d", tn.probeThreshold, maxProbeBytes)
 }
 
 // TestRecvWindowTuner_UnsolicitedAckCannotGrowTheWindow is the peer-input case.
@@ -118,18 +114,15 @@ func TestRecvWindowTuner_UnsolicitedAckCannotGrowTheWindow(t *testing.T) {
 	for i := 0; i < 100; i++ {
 		tn.onAck(c) // no sample outstanding
 	}
-	if got := c.connRecvTarget.Load(); got != before {
-		t.Errorf("connRecvTarget = %d after 100 unsolicited ACKs, want %d", got, before)
-	}
+	assert.Equalf(t, before, c.connRecvTarget.Load(),
+		"connRecvTarget = %d after 100 unsolicited ACKs, want %d", c.connRecvTarget.Load(), before)
 
 	// Mid-sample: the peer ACKs immediately, before any DATA has been counted.
-	if !tn.onData(uint32(tn.probeThreshold)) {
-		t.Fatal("no sample opened")
-	}
+	require.True(t, tn.onData(uint32(tn.probeThreshold)), "no sample opened")
 	tn.onAck(c)
-	if got := c.connRecvTarget.Load(); got != before {
-		t.Errorf("connRecvTarget = %d after an ACK with an empty sample, want %d", got, before)
-	}
+
+	assert.Equalf(t, before, c.connRecvTarget.Load(),
+		"connRecvTarget = %d after an ACK with an empty sample, want %d", c.connRecvTarget.Load(), before)
 }
 
 // TestRecvWindowTuner_ProbeFailedReopensSampling pins that a PING the transport
@@ -137,18 +130,16 @@ func TestRecvWindowTuner_UnsolicitedAckCannotGrowTheWindow(t *testing.T) {
 // able to open a fresh sample.
 func TestRecvWindowTuner_ProbeFailedReopensSampling(t *testing.T) {
 	tn, c := tunerFor(t, 8<<20)
-	if !tn.onData(uint32(tn.probeThreshold)) {
-		t.Fatal("no sample opened")
-	}
+	require.True(t, tn.onData(uint32(tn.probeThreshold)), "no sample opened")
+
 	tn.probeFailed()
-	if !tn.onData(uint32(tn.probeThreshold)) {
-		t.Fatal("probeFailed left the tuner unable to sample again")
-	}
+
+	require.True(t, tn.onData(uint32(tn.probeThreshold)),
+		"probeFailed left the tuner unable to sample again")
 	tn.onData(256 << 10)
 	tn.onAck(c)
-	if got := c.connRecvTarget.Load(); got != 512<<10 {
-		t.Errorf("connRecvTarget = %d, want %d", got, 512<<10)
-	}
+	assert.Equalf(t, uint32(512<<10), c.connRecvTarget.Load(),
+		"connRecvTarget = %d, want %d", c.connRecvTarget.Load(), 512<<10)
 }
 
 // TestRecvWindowCeiling pins where the default bound comes from: one stream's
@@ -194,9 +185,9 @@ func TestRecvWindowCeiling(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			if got := recvWindowCeiling(c.opts, c.floor); got != c.want {
-				t.Errorf("recvWindowCeiling = %d, want %d", got, c.want)
-			}
+			got := recvWindowCeiling(c.opts, c.floor)
+
+			assert.Equalf(t, c.want, got, "recvWindowCeiling = %d, want %d", got, c.want)
 		})
 	}
 }
@@ -220,10 +211,10 @@ func TestRefundIncrement(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			if got := refundIncrement(c.target, c.window, c.spent); got != c.want {
-				t.Errorf("refundIncrement(%d, %d, %d) = %d, want %d",
-					c.target, c.window, c.spent, got, c.want)
-			}
+			got := refundIncrement(c.target, c.window, c.spent)
+
+			assert.Equalf(t, c.want, got, "refundIncrement(%d, %d, %d) = %d, want %d",
+				c.target, c.window, c.spent, got, c.want)
 		})
 	}
 }
@@ -232,13 +223,13 @@ func TestRefundIncrement(t *testing.T) {
 // the option there is no tuner, and with no tuner nothing about the flow-control
 // path changes.
 func TestNewRecvWindowTuner_OffByDefault(t *testing.T) {
-	if tn := newRecvWindowTuner(ConnOptions{}.defaulted(), 65535); tn != nil {
-		t.Errorf("newRecvWindowTuner returned %+v with AutoTuneRecvWindow unset, want nil", tn)
-	}
 	opts := ConnOptions{AutoTuneRecvWindow: true}.defaulted()
-	if tn := newRecvWindowTuner(opts, 65535); tn == nil {
-		t.Error("newRecvWindowTuner returned nil with AutoTuneRecvWindow set")
-	}
+
+	off := newRecvWindowTuner(ConnOptions{}.defaulted(), 65535)
+	on := newRecvWindowTuner(opts, 65535)
+
+	assert.Nilf(t, off, "newRecvWindowTuner returned %+v with AutoTuneRecvWindow unset, want nil", off)
+	assert.NotNil(t, on, "newRecvWindowTuner returned nil with AutoTuneRecvWindow set")
 }
 
 // hasBDPPing reports whether a raw frame stream contains the tuner's PING: a

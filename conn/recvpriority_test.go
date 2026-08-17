@@ -5,6 +5,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
 	"github.com/lodgvideon/poseidon-http-client/frame"
 )
 
@@ -27,6 +30,7 @@ import (
 // path when the response filled the buffer.
 func TestConformance_RFC9113_Sec8_1_RecvPrefersBufferedEventsOverReset(t *testing.T) {
 	const trials = 2000
+
 	resetFirst := 0
 	for i := 0; i < trials; i++ {
 		s := newStream(1, 4, &fakeStreamWriter{}, 65535)
@@ -38,16 +42,15 @@ func TestConformance_RFC9113_Sec8_1_RecvPrefersBufferedEventsOverReset(t *testin
 		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 		ev, err := s.ref().Recv(ctx)
 		cancel()
-		if err != nil {
-			t.Fatalf("Recv: %v", err)
-		}
+		require.NoErrorf(t, err, "Recv on trial %d", i)
 		if ev.Type == EventReset {
 			resetFirst++
 		}
 	}
-	if resetFirst != 0 {
-		t.Fatalf("the reset preempted buffered events %d/%d times; a complete response is discarded that often", resetFirst, trials)
-	}
+
+	assert.Zerof(t, resetFirst,
+		"the reset preempted buffered events %d/%d times; a complete response is discarded that often",
+		resetFirst, trials)
 }
 
 // TestConformance_RFC9113_Sec8_1_RecvStillReportsResetWhenDrained is the
@@ -57,25 +60,20 @@ func TestConformance_RFC9113_Sec8_1_RecvStillReportsResetWhenDrained(t *testing.
 	s := newStream(1, 4, &fakeStreamWriter{}, 65535)
 	s.push(StreamEvent{Type: EventHeaders})
 	s.signalReset(frame.ErrCodeEnhanceYourCalm)
-
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
-	if ev, err := s.ref().Recv(ctx); err != nil || ev.Type != EventHeaders {
-		t.Fatalf("first Recv = %v, %v; want the buffered headers", ev.Type, err)
-	}
-	ev, err := s.ref().Recv(ctx)
-	if err != nil {
-		t.Fatalf("second Recv: %v", err)
-	}
-	if ev.Type != EventReset {
-		t.Fatalf("second Recv = %v, want the reset once the buffer is empty", ev.Type)
-	}
-	if ev.RSTCode != frame.ErrCodeEnhanceYourCalm {
-		t.Fatalf("reset code = %v, want ENHANCE_YOUR_CALM", ev.RSTCode)
-	}
-	if !ev.EndStream {
-		t.Fatal("reset event did not carry EndStream")
-	}
+
+	first, ferr := s.ref().Recv(ctx)
+	second, serr := s.ref().Recv(ctx)
+
+	require.NoError(t, ferr, "first Recv")
+	require.Equal(t, EventHeaders, first.Type, "first Recv must yield the buffered headers, not the reset")
+	require.NoError(t, serr, "second Recv")
+	assert.Equalf(t, EventReset, second.Type,
+		"second Recv = %v, want the reset once the buffer is empty", second.Type)
+	assert.Equalf(t, frame.ErrCodeEnhanceYourCalm, second.RSTCode,
+		"reset code = %v, want ENHANCE_YOUR_CALM", second.RSTCode)
+	assert.True(t, second.EndStream, "reset event did not carry EndStream")
 }
 
 // TestStream_SignalReset_NoErrorIsIdempotent pins the guard on
@@ -87,16 +85,16 @@ func TestConformance_RFC9113_Sec8_1_RecvStillReportsResetWhenDrained(t *testing.
 // contract was the common one.
 func TestStream_SignalReset_NoErrorIsIdempotent(t *testing.T) {
 	s := newStream(1, 1, &fakeStreamWriter{}, 65535)
+
 	s.signalReset(frame.ErrCodeNoError)
 	s.signalReset(frame.ErrCodeCancel) // must not close a second time
 	s.signalReset(frame.ErrCodeNoError)
 
-	if got := frame.ErrCode(s.resetCode.Load()); got != frame.ErrCodeNoError {
-		t.Fatalf("resetCode = %v, want the first signal's NO_ERROR", got)
-	}
+	assert.Equalf(t, frame.ErrCodeNoError, frame.ErrCode(s.resetCode.Load()),
+		"resetCode = %v, want the first signal's NO_ERROR", frame.ErrCode(s.resetCode.Load()))
 	select {
 	case <-s.resetSignal:
 	default:
-		t.Fatal("resetSignal was never closed")
+		assert.Fail(t, "resetSignal was never closed")
 	}
 }

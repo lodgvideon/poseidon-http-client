@@ -8,6 +8,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
 	"github.com/lodgvideon/poseidon-http-client/frame"
 	"github.com/lodgvideon/poseidon-http-client/hpack"
 )
@@ -129,19 +132,11 @@ func promiseBlock(enc *hpack.Encoder, path string) []byte {
 func openParentStream(ctx context.Context, t *testing.T, c *Conn) StreamRef {
 	t.Helper()
 	s, err := c.NewStream(ctx)
-	if err != nil {
-		t.Fatalf("NewStream: %v", err)
-	}
-	if err := s.SendHeaders(ctx, reqHeaders(), true); err != nil {
-		t.Fatalf("SendHeaders: %v", err)
-	}
+	require.NoError(t, err, "NewStream")
+	require.NoError(t, s.SendHeaders(ctx, reqHeaders(), true), "SendHeaders")
 	ev, err := s.Recv(ctx)
-	if err != nil {
-		t.Fatalf("parent Recv: %v", err)
-	}
-	if ev.Type != EventHeaders {
-		t.Fatalf("parent event = %s, want EventHeaders", ev.Type)
-	}
+	require.NoError(t, err, "parent Recv")
+	require.Equalf(t, EventHeaders, ev.Type, "parent event = %s, want EventHeaders", ev.Type)
 	ev.Release()
 	return s
 }
@@ -196,51 +191,38 @@ func TestConformance_RFC7540_Sec512_PushedStreamDoesNotFreeOurSlot(t *testing.T)
 		StreamEventBuffer: 16,
 		EnablePush:        true,
 	})
-	if err != nil {
-		t.Fatalf("NewClientConn: %v", err)
-	}
+	require.NoError(t, err, "NewClientConn")
 	defer c.Close()
-
 	parent := openParentStream(ctx, t, c)
-
 	// Both promises must land before we close them.
 	for i := 0; i < 2; i++ {
-		ev, err := parent.Recv(ctx)
-		if err != nil {
-			t.Fatalf("push promise %d: %v", i, err)
-		}
-		if ev.Type != EventPushPromise {
-			t.Fatalf("event %d = %s, want EventPushPromise", i, ev.Type)
-		}
+		ev, rerr := parent.Recv(ctx)
+		require.NoErrorf(t, rerr, "push promise %d", i)
+		require.Equalf(t, EventPushPromise, ev.Type, "event %d = %s, want EventPushPromise", i, ev.Type)
 		ev.Release()
 	}
+
 	for _, id := range []uint32{2, 4} {
 		p, ok := c.LookupStream(id)
-		if !ok {
-			t.Fatalf("pushed stream %d not registered", id)
-		}
-		if err := p.Close(); err != nil {
-			t.Fatalf("pushed %d Close: %v", id, err)
-		}
+		require.Truef(t, ok, "pushed stream %d not registered", id)
+		require.NoErrorf(t, p.Close(), "pushed %d Close", id)
 	}
-
 	// The request stream is still open, so exactly gate-1 more may open.
 	opened := 1
 	var lastErr error
 	for i := 0; i < gate+2; i++ {
-		if _, err := c.NewStream(ctx); err != nil {
-			lastErr = err
+		if _, nerr := c.NewStream(ctx); nerr != nil {
+			lastErr = nerr
 			break
 		}
 		opened++
 	}
-	if !errors.Is(lastErr, ErrTooManyStreams) {
-		t.Fatalf("NewStream past the gate returned %v, want ErrTooManyStreams", lastErr)
-	}
-	if opened != gate {
-		t.Fatalf("closing 2 pushed streams let %d concurrent request streams open against a peer gate of %d; "+
+
+	assert.Truef(t, errors.Is(lastErr, ErrTooManyStreams),
+		"NewStream past the gate returned %v, want ErrTooManyStreams", lastErr)
+	assert.Equalf(t, gate, opened,
+		"closing 2 pushed streams let %d concurrent request streams open against a peer gate of %d; "+
 			"pushed streams must not return an inflight slot they never took (RFC 7540 §5.1.2)", opened, gate)
-	}
 }
 
 // TestConformance_RFC7540_Sec512_PushedStreamCloseKeepsShutdownBlocking is the
@@ -280,38 +262,26 @@ func TestConformance_RFC7540_Sec512_PushedStreamCloseKeepsShutdownBlocking(t *te
 		StreamEventBuffer: 16,
 		EnablePush:        true,
 	})
-	if err != nil {
-		t.Fatalf("NewClientConn: %v", err)
-	}
+	require.NoError(t, err, "NewClientConn")
 	defer c.Close()
-
 	parent := openParentStream(ctx, t, c)
-
 	ev, err := parent.Recv(ctx)
-	if err != nil {
-		t.Fatalf("push promise: %v", err)
-	}
-	if ev.Type != EventPushPromise {
-		t.Fatalf("event = %s, want EventPushPromise", ev.Type)
-	}
+	require.NoError(t, err, "push promise")
+	require.Equalf(t, EventPushPromise, ev.Type, "event = %s, want EventPushPromise", ev.Type)
 	ev.Release()
 	pushed, ok := c.LookupStream(2)
-	if !ok {
-		t.Fatal("pushed stream 2 not registered")
-	}
-	if err := pushed.Close(); err != nil {
-		t.Fatalf("pushed Close: %v", err)
-	}
+	require.True(t, ok, "pushed stream 2 not registered")
 
+	require.NoError(t, pushed.Close(), "pushed Close")
 	// Stream 1 never ends, so Shutdown must burn its full graceful timeout.
 	const graceful = 300 * time.Millisecond
 	start := time.Now()
 	_ = c.Shutdown(graceful)
 	elapsed := time.Since(start)
-	if elapsed < graceful {
-		t.Fatalf("Shutdown(%v) returned after %v with the request stream still open; "+
+
+	assert.GreaterOrEqualf(t, elapsed, graceful,
+		"Shutdown(%v) returned after %v with the request stream still open; "+
 			"a pushed Close must not zero the drain count (measured before fix: ~0s)", graceful, elapsed)
-	}
 }
 
 // TestConformance_RFC7540_Sec66_PushRegistryBoundedByOurMaxStreams pins the
@@ -374,29 +344,18 @@ func TestConformance_RFC7540_Sec66_PushRegistryBoundedByOurMaxStreams(t *testing
 		StreamEventBuffer: 16,
 		EnablePush:        true,
 	})
-	if err != nil {
-		t.Fatalf("NewClientConn: %v", err)
-	}
+	require.NoError(t, err, "NewClientConn")
 	defer c.Close()
-
 	parent := openParentStream(ctx, t, c)
 
 	select {
 	case <-probe.pingAck:
 	case <-ctx.Done():
-		t.Fatal("timed out waiting for the PING ACK barrier")
+		require.FailNow(t, "timed out waiting for the PING ACK barrier")
 	}
-
 	c.smu.Lock()
 	registry := len(c.streams)
 	c.smu.Unlock()
-	// 1 request stream + at most ourCap pushed streams.
-	if registry > ourCap+1 {
-		t.Fatalf("%d PUSH_PROMISEs grew the stream registry to %d entries; "+
-			"our advertised SETTINGS_MAX_CONCURRENT_STREAMS=%d bounds server-initiated "+
-			"streams (RFC 7540 §6.5.2), so want at most %d", promises, registry, ourCap, ourCap+1)
-	}
-
 	// The accepted promises — and only those — reach the parent.
 	delivered := 0
 	for {
@@ -411,11 +370,6 @@ func TestConformance_RFC7540_Sec66_PushRegistryBoundedByOurMaxStreams(t *testing
 		}
 		break
 	}
-	if delivered > ourCap {
-		t.Fatalf("%d PUSH_PROMISEs delivered %d events to the parent, want at most %d",
-			promises, delivered, ourCap)
-	}
-
 	stop()
 	<-drained
 	refused := 0
@@ -424,11 +378,19 @@ func TestConformance_RFC7540_Sec66_PushRegistryBoundedByOurMaxStreams(t *testing
 			refused++
 		}
 	}
-	if refused != promises-ourCap {
-		t.Fatalf("client sent %d RST_STREAM(REFUSED_STREAM) for %d over-cap promises; "+
+
+	// 1 request stream + at most ourCap pushed streams.
+	assert.LessOrEqualf(t, registry, ourCap+1,
+		"%d PUSH_PROMISEs grew the stream registry to %d entries; "+
+			"our advertised SETTINGS_MAX_CONCURRENT_STREAMS=%d bounds server-initiated "+
+			"streams (RFC 7540 §6.5.2), so want at most %d", promises, registry, ourCap, ourCap+1)
+	assert.LessOrEqualf(t, delivered, ourCap,
+		"%d PUSH_PROMISEs delivered %d events to the parent, want at most %d",
+		promises, delivered, ourCap)
+	assert.Equalf(t, promises-ourCap, refused,
+		"client sent %d RST_STREAM(REFUSED_STREAM) for %d over-cap promises; "+
 			"RFC 7540 §6.6 rejects a promised stream by RST_STREAM on the promised id (got codes %v)",
-			refused, promises-ourCap, probe.rstCodes)
-	}
+		refused, promises-ourCap, probe.rstCodes)
 }
 
 // TestConformance_RFC7540_Sec66_IllegalPromisedIDIsProtocolError pins RFC 7540
@@ -504,23 +466,19 @@ func TestConformance_RFC7540_Sec66_IllegalPromisedIDIsProtocolError(t *testing.T
 				StreamEventBuffer: 16,
 				EnablePush:        true,
 			})
-			if err != nil {
-				t.Fatalf("NewClientConn: %v", err)
-			}
+			require.NoError(t, err, "NewClientConn")
 			defer c.Close()
-
 			parent := openParentStream(ctx, t, c)
-			close(ready)
 
+			close(ready)
 			// Only the final id in each case is illegal; any leading ids are
 			// legal promises that must be accepted normally. The illegal one
 			// tears the connection down, so the parent's Recv ends in an
 			// error / reset rather than one more push event.
-			legal := len(tc.ids) - 1
 			accepted := 0
 			for {
-				ev, err := parent.Recv(ctx)
-				if err != nil {
+				ev, rerr := parent.Recv(ctx)
+				if rerr != nil {
 					break
 				}
 				ev.Release()
@@ -529,24 +487,22 @@ func TestConformance_RFC7540_Sec66_IllegalPromisedIDIsProtocolError(t *testing.T
 				}
 				if ev.Type == EventPushPromise {
 					accepted++
-					if accepted > legal {
-						t.Fatalf("promised ids %v: %d accepted, want %d; §6.6 requires a "+
-							"connection error of type PROTOCOL_ERROR for an id that is not idle",
-							tc.ids, accepted, legal)
-					}
 				}
 			}
-
 			stop()
 			<-drained
-			if !probe.goAwayHit {
-				t.Fatalf("promised id %v produced no GOAWAY; §6.6 requires a connection "+
+
+			legal := len(tc.ids) - 1
+			assert.LessOrEqualf(t, accepted, legal,
+				"promised ids %v: %d accepted, want %d; §6.6 requires a "+
+					"connection error of type PROTOCOL_ERROR for an id that is not idle",
+				tc.ids, accepted, legal)
+			require.Truef(t, probe.goAwayHit,
+				"promised id %v produced no GOAWAY; §6.6 requires a connection "+
 					"error of type PROTOCOL_ERROR", tc.ids)
-			}
-			if probe.goAwayErr != frame.ErrCodeProtocolError {
-				t.Fatalf("promised id %v produced GOAWAY(%v), want GOAWAY(PROTOCOL_ERROR) per §6.6",
-					tc.ids, probe.goAwayErr)
-			}
+			assert.Equalf(t, frame.ErrCodeProtocolError, probe.goAwayErr,
+				"promised id %v produced GOAWAY(%v), want GOAWAY(PROTOCOL_ERROR) per §6.6",
+				tc.ids, probe.goAwayErr)
 		})
 	}
 }
@@ -570,67 +526,66 @@ func TestConn_ReservePushedStream_RejectsIllegalIDs(t *testing.T) {
 		ours := newStream(1, 8, c, 65535)
 		c.streams[1] = ours
 
-		if err := c.notePromisedID(1); !errors.Is(err, ErrIllegalPromisedID) {
-			t.Fatalf("notePromisedID(1) err = %v, want ErrIllegalPromisedID", err)
-		}
-		if got := c.streams[1]; got != ours {
-			t.Fatal("a promise for our own stream 1 replaced it in the registry")
-		}
-		if c.pushInflight != 0 {
-			t.Fatalf("pushInflight = %d after a rejected promise, want 0", c.pushInflight)
-		}
+		err := c.notePromisedID(1)
+
+		assert.Truef(t, errors.Is(err, ErrIllegalPromisedID),
+			"notePromisedID(1) err = %v, want ErrIllegalPromisedID", err)
+		assert.Same(t, ours, c.streams[1], "a promise for our own stream 1 replaced it in the registry")
+		assert.Zerof(t, c.pushInflight, "pushInflight = %d after a rejected promise, want 0", c.pushInflight)
 	})
 
 	t.Run("illegal ids", func(t *testing.T) {
+		// Equivalence classes of an illegal promised id (RFC 9113 §5.1.1):
+		// zero, an odd id that collides with one of ours, and odd ids we never
+		// opened. All three are "not idle" in §6.6's sense.
 		for _, id := range []uint32{0, 1, 3, 7} {
 			c := newConn()
-			if err := c.notePromisedID(id); !errors.Is(err, ErrIllegalPromisedID) {
-				t.Fatalf("notePromisedID(%d) err = %v, want ErrIllegalPromisedID", id, err)
-			}
-			if len(c.streams) != 0 {
-				t.Fatalf("notePromisedID(%d) registered %d streams, want 0", id, len(c.streams))
-			}
+
+			err := c.notePromisedID(id)
+
+			assert.Truef(t, errors.Is(err, ErrIllegalPromisedID),
+				"notePromisedID(%d) err = %v, want ErrIllegalPromisedID", id, err)
+			assert.Emptyf(t, c.streams,
+				"notePromisedID(%d) registered %d streams, want 0", id, len(c.streams))
 		}
 	})
 
 	t.Run("ids must strictly increase", func(t *testing.T) {
 		c := newConn()
-		if err := c.notePromisedID(4); err != nil {
-			t.Fatalf("notePromisedID(4): %v", err)
-		}
+		require.NoError(t, c.notePromisedID(4), "notePromisedID(4)")
+
 		for _, id := range []uint32{4, 2} {
-			if err := c.notePromisedID(id); !errors.Is(err, ErrIllegalPromisedID) {
-				t.Fatalf("notePromisedID(%d) after 4: err = %v, want ErrIllegalPromisedID", id, err)
-			}
+			err := c.notePromisedID(id)
+
+			assert.Truef(t, errors.Is(err, ErrIllegalPromisedID),
+				"notePromisedID(%d) after 4: err = %v, want ErrIllegalPromisedID", id, err)
 		}
-		if err := c.notePromisedID(6); err != nil {
-			t.Fatalf("notePromisedID(6) after 4: %v", err)
-		}
+		assert.NoError(t, c.notePromisedID(6),
+			"6 exceeds the floor of 4, so it must still be accepted — a gate that refused "+
+				"everything after the first promise would satisfy the refusals above")
 	})
 
 	t.Run("a refused id still advances the promised-id floor", func(t *testing.T) {
 		c := newConn()
 		c.opts.Settings.MaxConcurrentStreams = 1
-		if err := c.notePromisedID(2); err != nil {
-			t.Fatalf("notePromisedID(2): %v", err)
-		}
-		if _, err := c.reservePushedStream(2); err != nil {
-			t.Fatalf("reservePushedStream(2): %v", err)
-		}
+		require.NoError(t, c.notePromisedID(2), "notePromisedID(2)")
+		_, rerr := c.reservePushedStream(2)
+		require.NoError(t, rerr, "reservePushedStream(2)")
+
 		// 4 is spent on the wire even though the cap will refuse it: notePromisedID
 		// advances the promised-id floor before the cap check, so the server's
 		// raced pushed-response frames on stream 4 resolve to a closed stream
 		// (discarded), not an idle one (which would kill the connection, §5.1).
-		if err := c.notePromisedID(4); err != nil {
-			t.Fatalf("notePromisedID(4): %v", err)
-		}
-		if _, err := c.reservePushedStream(4); !errors.Is(err, ErrPushRefused) {
-			t.Fatalf("reservePushedStream(4) at cap 1: err = %v, want ErrPushRefused", err)
-		}
+		noteErr := c.notePromisedID(4)
+		_, capErr := c.reservePushedStream(4)
+		repeatErr := c.notePromisedID(4)
+
+		assert.NoError(t, noteErr, "notePromisedID(4)")
+		assert.Truef(t, errors.Is(capErr, ErrPushRefused),
+			"reservePushedStream(4) at cap 1: err = %v, want ErrPushRefused", capErr)
 		// The floor advanced past 4, so a repeat promise for it is illegal.
-		if err := c.notePromisedID(4); !errors.Is(err, ErrIllegalPromisedID) {
-			t.Fatalf("notePromisedID(4) repeat: err = %v, want ErrIllegalPromisedID", err)
-		}
+		assert.Truef(t, errors.Is(repeatErr, ErrIllegalPromisedID),
+			"notePromisedID(4) repeat: err = %v, want ErrIllegalPromisedID", repeatErr)
 	})
 }
 
@@ -642,23 +597,16 @@ func TestConn_ReservePushedStream_ReleasesToItsOwnCounter(t *testing.T) {
 	c.inflight = 3 // pretend three request streams are open
 
 	s, err := c.reservePushedStream(2)
-	if err != nil {
-		t.Fatalf("reservePushedStream(2): %v", err)
-	}
-	if c.pushInflight != 1 {
-		t.Fatalf("pushInflight = %d after reserve, want 1", c.pushInflight)
-	}
-	if c.inflight != 3 {
-		t.Fatalf("reserving a pushed stream moved the request gate to %d, want 3", c.inflight)
-	}
-
+	require.NoError(t, err, "reservePushedStream(2)")
+	afterReservePush, afterReserveReq := c.pushInflight, c.inflight
 	c.releaseInflight(s.id)
-	if c.pushInflight != 0 {
-		t.Fatalf("pushInflight = %d after release, want 0", c.pushInflight)
-	}
-	if c.inflight != 3 {
-		t.Fatalf("releasing a pushed stream freed a request slot: inflight = %d, want 3", c.inflight)
-	}
+
+	assert.Equalf(t, uint32(1), afterReservePush, "pushInflight = %d after reserve, want 1", afterReservePush)
+	assert.Equalf(t, uint32(3), afterReserveReq,
+		"reserving a pushed stream moved the request gate to %d, want 3", afterReserveReq)
+	assert.Zerof(t, c.pushInflight, "pushInflight = %d after release, want 0", c.pushInflight)
+	assert.Equalf(t, uint32(3), c.inflight,
+		"releasing a pushed stream freed a request slot: inflight = %d, want 3", c.inflight)
 }
 
 // TestConn_PushPromise_DeliveredToParentStream verifies that when
@@ -719,46 +667,29 @@ func TestConn_PushPromise_DeliveredToParentStream(t *testing.T) {
 		StreamEventBuffer: 16,
 		EnablePush:        true,
 	})
-	if err != nil {
-		t.Fatalf("NewClientConn: %v", err)
-	}
+	require.NoError(t, err, "NewClientConn")
 	defer c.Close()
-
 	s, err := c.NewStream(ctx)
-	if err != nil {
-		t.Fatalf("NewStream: %v", err)
-	}
+	require.NoError(t, err, "NewStream")
 
-	if err := s.SendHeaders(ctx, []hpack.HeaderField{
+	require.NoError(t, s.SendHeaders(ctx, []hpack.HeaderField{
 		{Name: []byte(":method"), Value: []byte("GET")},
 		{Name: []byte(":path"), Value: []byte("/")},
 		{Name: []byte(":scheme"), Value: []byte("https")},
 		{Name: []byte(":authority"), Value: []byte("example.com")},
-	}, true); err != nil {
-		t.Fatalf("SendHeaders: %v", err)
-	}
+	}, true), "SendHeaders")
 
 	// Event 1: response headers.
 	ev, err := s.Recv(ctx)
-	if err != nil {
-		t.Fatalf("expected EventHeaders, got error: %v", err)
-	}
-	if ev.Type != EventHeaders {
-		t.Fatalf("expected EventHeaders, got %s", ev.Type)
-	}
+	require.NoError(t, err, "expected EventHeaders")
+	require.Equalf(t, EventHeaders, ev.Type, "expected EventHeaders, got %s", ev.Type)
 	ev.Release()
 
 	// Event 2: push promise.
 	ev, err = s.Recv(ctx)
-	if err != nil {
-		t.Fatalf("expected EventPushPromise, got error: %v", err)
-	}
-	if ev.Type != EventPushPromise {
-		t.Fatalf("expected EventPushPromise, got %s", ev.Type)
-	}
-	if ev.PushStreamID != 2 {
-		t.Fatalf("expected PushStreamID=2, got %d", ev.PushStreamID)
-	}
+	require.NoError(t, err, "expected EventPushPromise")
+	require.Equalf(t, EventPushPromise, ev.Type, "expected EventPushPromise, got %s", ev.Type)
+	assert.Equalf(t, uint32(2), ev.PushStreamID, "expected PushStreamID=2, got %d", ev.PushStreamID)
 	// Verify promised headers.
 	found := false
 	for _, h := range ev.Headers {
@@ -766,63 +697,76 @@ func TestConn_PushPromise_DeliveredToParentStream(t *testing.T) {
 			found = true
 		}
 	}
-	if !found {
-		t.Fatalf("promised headers missing :path=/style.css")
-	}
+	assert.True(t, found, "promised headers missing :path=/style.css")
 	ev.Release()
 
 	// Pushed stream (ID=2) should be registered.
 	pushed := c.lookupStream(2)
-	if pushed == nil {
-		t.Fatal("pushed stream (ID=2) not registered")
-	}
+	require.NotNil(t, pushed, "pushed stream (ID=2) not registered")
 
 	// Read pushed response.
 	pev, err := pushed.ref().Recv(ctx)
-	if err != nil {
-		t.Fatalf("pushed stream Recv error: %v", err)
-	}
-	if pev.Type != EventHeaders {
-		t.Fatalf("expected EventHeaders on pushed stream, got %s", pev.Type)
-	}
-	if !pev.EndStream {
-		t.Fatal("expected END_STREAM on pushed stream headers")
-	}
+	require.NoError(t, err, "pushed stream Recv")
+	assert.Equalf(t, EventHeaders, pev.Type, "expected EventHeaders on pushed stream, got %s", pev.Type)
+	assert.True(t, pev.EndStream, "expected END_STREAM on pushed stream headers")
 	pev.Release()
 }
 
 // TestConn_PushPromise_DisabledReturnsProtocolError verifies that when
-// EnablePush is false, a PUSH_PROMISE triggers a connection error.
+// EnablePush is false, a PUSH_PROMISE triggers a connection error of type
+// PROTOCOL_ERROR, which RFC 9113 §8.4 requires of a client that advertised
+// SETTINGS_ENABLE_PUSH=0.
+//
+// THIS TEST COULD NOT FAIL before this change. Its body was a Recv loop in
+// which every branch returned — an error returned, a reset returned, "any other
+// error is fine too" returned, and the ctx deadline produced an error and
+// returned as well. Nothing was asserted, so deleting the ENABLE_PUSH gate from
+// connHandler.OnPushPromise left it green: measured, exit=0 ran=1 pass=1 with
+// the gate removed. (The gate is not unguarded — handler_test.go's
+// TestHandler_OnPushPromise_ReturnsConnError kills that mutant — but the wire
+// path this test names had no coverage at all.)
+//
+// What it observes now is the GOAWAY on the wire, which is the only place the
+// connection error is visible to the peer, and the same evidence
+// TestConformance_RFC7540_Sec66_IllegalPromisedIDIsProtocolError rests on.
 func TestConn_PushPromise_DisabledReturnsProtocolError(t *testing.T) {
 	cli, srv := net.Pipe()
 	defer cli.Close()
 
+	probe := newPushProbe()
+	drained := make(chan struct{})
+	finish, stop := newFinish()
+	defer stop()
+	// The promise tears the connection down, closing every stream's
+	// resetSignal. Hold it until the parent's response is in hand so Recv is
+	// not choosing between a buffered header event and a reset.
+	ready := make(chan struct{})
+
 	go pipeServer(t, srv, func(srvFr *frame.Framer) {
-		srvFr.ReadFrame(context.Background(), &nilHandler{})
+		if !awaitRequest(t, srvFr) {
+			return
+		}
+		d := drainFrames(srvFr, probe)
 
 		enc := hpack.NewEncoder()
-		respBlock := enc.EncodeBlock(nil, []hpack.HeaderField{
-			{Name: []byte(":status"), Value: []byte("200")},
-		})
 		<-asyncWrite(func() error {
 			return srvFr.WriteHeaders(frame.WriteHeadersParams{
 				StreamID:      1,
-				BlockFragment: respBlock,
+				BlockFragment: enc.EncodeBlock(nil, []hpack.HeaderField{{Name: []byte(":status"), Value: []byte("200")}}),
 				EndHeaders:    true,
 			})
 		})
-
-		pushBlock := enc.EncodeBlock(nil, []hpack.HeaderField{
-			{Name: []byte(":method"), Value: []byte("GET")},
-		})
+		<-ready
 		<-asyncWrite(func() error {
-			return srvFr.WritePushPromise(1, 2, pushBlock, true, 0)
+			return srvFr.WritePushPromise(1, 2, promiseBlock(enc, "/a.css"), true, 0)
 		})
-
-		time.Sleep(200 * time.Millisecond)
+		<-finish
+		srv.Close()
+		<-d
+		close(drained)
 	})
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
 	c, err := NewClientConn(ctx, cli, ConnOptions{
@@ -830,37 +774,35 @@ func TestConn_PushPromise_DisabledReturnsProtocolError(t *testing.T) {
 		StreamEventBuffer: 16,
 		EnablePush:        false,
 	})
-	if err != nil {
-		t.Fatalf("NewClientConn: %v", err)
-	}
+	require.NoError(t, err, "NewClientConn")
 	defer c.Close()
+	parent := openParentStream(ctx, t, c)
 
-	s, err := c.NewStream(ctx)
-	if err != nil {
-		t.Fatalf("NewStream: %v", err)
-	}
-
-	if err := s.SendHeaders(ctx, []hpack.HeaderField{
-		{Name: []byte(":method"), Value: []byte("GET")},
-		{Name: []byte(":path"), Value: []byte("/")},
-		{Name: []byte(":scheme"), Value: []byte("https")},
-		{Name: []byte(":authority"), Value: []byte("example.com")},
-	}, true); err != nil {
-		t.Fatalf("SendHeaders: %v", err)
-	}
-
-	// PUSH_PROMISE with ENABLE_PUSH=0 → PROTOCOL_ERROR → conn closes.
+	close(ready)
+	// Drain the parent until the connection error ends it. No promise may be
+	// announced: we told the server not to push.
+	promises := 0
 	for {
-		ev, err := s.Recv(ctx)
-		if err != nil {
-			if errors.Is(err, ErrStreamClosed) {
-				return // connection closed — expected
-			}
-			return // any other error is fine too
-		}
-		if ev.Type == EventReset {
-			return // stream reset — also acceptable
+		ev, rerr := parent.Recv(ctx)
+		if rerr != nil {
+			break
 		}
 		ev.Release()
+		if ev.Type == EventPushPromise {
+			promises++
+		}
+		if ev.Type == EventReset {
+			break
+		}
 	}
+	stop()
+	<-drained
+
+	assert.Zerof(t, promises,
+		"%d PUSH_PROMISE(s) were announced to a client that advertised ENABLE_PUSH=0", promises)
+	require.True(t, probe.goAwayHit,
+		"a PUSH_PROMISE against ENABLE_PUSH=0 produced no GOAWAY; RFC 9113 §8.4 requires a "+
+			"connection error, not a silently ignored frame")
+	assert.Equalf(t, frame.ErrCodeProtocolError, probe.goAwayErr,
+		"GOAWAY(%v), want GOAWAY(PROTOCOL_ERROR) per RFC 9113 §8.4", probe.goAwayErr)
 }

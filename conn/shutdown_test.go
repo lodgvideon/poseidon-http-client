@@ -5,6 +5,9 @@ import (
 	"net"
 	"testing"
 	"time"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // TestConn_Shutdown_NoInflightImmediate verifies that Shutdown on a
@@ -16,18 +19,16 @@ func TestConn_Shutdown_NoInflightImmediate(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 	c, err := NewClientConn(ctx, cli, ConnOptions{}.defaulted())
-	if err != nil {
-		t.Fatalf("NewClientConn: %v", err)
-	}
+	require.NoError(t, err, "NewClientConn")
 
 	start := time.Now()
-	if err := c.Shutdown(5 * time.Second); err != nil {
-		t.Fatalf("Shutdown: %v", err)
-	}
+	sdErr := c.Shutdown(5 * time.Second)
 	elapsed := time.Since(start)
-	if elapsed > 1*time.Second {
-		t.Errorf("Shutdown took %v, expected < 1s with no inflight", elapsed)
-	}
+
+	require.NoError(t, sdErr, "Shutdown")
+	assert.Lessf(t, elapsed, 1*time.Second,
+		"Shutdown took %v, expected < 1s with no inflight — it waited on a drain that had nothing to drain",
+		elapsed)
 }
 
 // TestConn_Shutdown_RejectsNewStreams verifies that after Shutdown
@@ -39,17 +40,15 @@ func TestConn_Shutdown_RejectsNewStreams(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 	c, err := NewClientConn(ctx, cli, ConnOptions{}.defaulted())
-	if err != nil {
-		t.Fatalf("NewClientConn: %v", err)
-	}
+	require.NoError(t, err, "NewClientConn")
 	defer c.Close()
-
 	// Set draining without closing (simulate Shutdown in progress).
 	c.draining.Store(true)
 
-	if _, err := c.NewStream(context.Background()); err != ErrConnDraining {
-		t.Errorf("NewStream after draining: err = %v, want ErrConnDraining", err)
-	}
+	_, nerr := c.NewStream(context.Background())
+
+	assert.Equalf(t, ErrConnDraining, nerr,
+		"NewStream after draining: err = %v, want ErrConnDraining", nerr)
 }
 
 // TestConn_Shutdown_Idempotent verifies calling Shutdown twice is safe.
@@ -60,17 +59,14 @@ func TestConn_Shutdown_Idempotent(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 	c, err := NewClientConn(ctx, cli, ConnOptions{}.defaulted())
-	if err != nil {
-		t.Fatalf("NewClientConn: %v", err)
-	}
+	require.NoError(t, err, "NewClientConn")
 
-	if err := c.Shutdown(100 * time.Millisecond); err != nil {
-		t.Fatalf("Shutdown 1: %v", err)
-	}
+	first := c.Shutdown(100 * time.Millisecond)
 	// Second call should be a no-op.
-	if err := c.Shutdown(100 * time.Millisecond); err != nil {
-		t.Errorf("Shutdown 2: %v", err)
-	}
+	second := c.Shutdown(100 * time.Millisecond)
+
+	require.NoError(t, first, "Shutdown 1")
+	assert.NoError(t, second, "Shutdown 2 — a repeat Shutdown must be a no-op, not an error")
 }
 
 // TestConn_Shutdown_WaitsForInflight verifies that Shutdown blocks
@@ -82,10 +78,7 @@ func TestConn_Shutdown_WaitsForInflight(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 	c, err := NewClientConn(ctx, cli, ConnOptions{}.defaulted())
-	if err != nil {
-		t.Fatalf("NewClientConn: %v", err)
-	}
-
+	require.NoError(t, err, "NewClientConn")
 	// Manually bump inflight to simulate an active stream.
 	c.smu.Lock()
 	c.inflight = 3
@@ -97,12 +90,9 @@ func TestConn_Shutdown_WaitsForInflight(t *testing.T) {
 	_ = c.Shutdown(100 * time.Millisecond)
 	elapsed := time.Since(start)
 
-	if elapsed < 80*time.Millisecond {
-		t.Errorf("Shutdown returned in %v, expected ~100ms wait", elapsed)
-	}
-	if elapsed > 1*time.Second {
-		t.Errorf("Shutdown took %v, expected ~100ms", elapsed)
-	}
+	assert.GreaterOrEqualf(t, elapsed, 80*time.Millisecond,
+		"Shutdown returned in %v, expected ~100ms wait — it did not drain at all", elapsed)
+	assert.Lessf(t, elapsed, 1*time.Second, "Shutdown took %v, expected ~100ms", elapsed)
 }
 
 // TestConn_Shutdown_WithInflightStream verifies the timer block in Shutdown
@@ -124,10 +114,7 @@ func TestConn_Shutdown_WithInflightStream(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 	c, err := NewClientConn(ctx, cli, ConnOptions{}.defaulted())
-	if err != nil {
-		t.Fatalf("NewClientConn: %v", err)
-	}
-
+	require.NoError(t, err, "NewClientConn")
 	// Set inflight = 1 before calling Shutdown. Because the net.Pipe
 	// pipeServer finishes the handshake and then returns (no concurrent
 	// reader in flight at this point), no other goroutine writes to
@@ -144,12 +131,9 @@ func TestConn_Shutdown_WithInflightStream(t *testing.T) {
 	_ = c.Shutdown(100 * time.Millisecond)
 	elapsed := time.Since(start)
 
-	if elapsed < 80*time.Millisecond {
-		t.Errorf("Shutdown returned in %v, want ≥ 80ms (timer path)", elapsed)
-	}
-	if elapsed > 1*time.Second {
-		t.Errorf("Shutdown took %v, want ≤ 1s", elapsed)
-	}
+	assert.GreaterOrEqualf(t, elapsed, 80*time.Millisecond,
+		"Shutdown returned in %v, want ≥ 80ms (timer path) — it never entered the drain select", elapsed)
+	assert.Lessf(t, elapsed, 1*time.Second, "Shutdown took %v, want ≤ 1s", elapsed)
 }
 
 // -- helpers (none currently needed; helpers were for h2 server tests

@@ -9,6 +9,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
 	"github.com/lodgvideon/poseidon-http-client/frame"
 )
 
@@ -35,17 +38,17 @@ func (c *countingConn) Read(p []byte) (int, error) {
 // frames; net.Pipe delivers exactly one Write per Read and could not show this.
 func TestReadBuffer_FewerSyscalls(t *testing.T) {
 	const frames = 256
+
 	raw := countReadSyscalls(t, frames, false)
 	buffered := countReadSyscalls(t, frames, true)
+
 	t.Logf("socket reads to drain %d frames: raw=%d buffered=%d", frames, raw, buffered)
-	if buffered >= raw {
-		t.Fatalf("buffered reader did not reduce reads: raw=%d buffered=%d", raw, buffered)
-	}
+	require.Lessf(t, buffered, raw,
+		"buffered reader did not reduce reads: raw=%d buffered=%d", raw, buffered)
 	// The win must be large, not marginal: raw is ~2 reads/frame, buffered
 	// should be a small constant once the burst is in the kernel buffer.
-	if buffered > raw/4 {
-		t.Fatalf("buffered reads %d not < raw/4 (%d): batching ineffective", buffered, raw/4)
-	}
+	assert.LessOrEqualf(t, buffered, raw/4,
+		"buffered reads %d not < raw/4 (%d): batching ineffective", buffered, raw/4)
 }
 
 // countReadSyscalls writes nframes small DATA frames into a TCP socket, then
@@ -54,9 +57,7 @@ func TestReadBuffer_FewerSyscalls(t *testing.T) {
 func countReadSyscalls(t *testing.T, nframes int, buffered bool) int64 {
 	t.Helper()
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("listen: %v", err)
-	}
+	require.NoError(t, err, "listen")
 	defer func() { _ = ln.Close() }()
 
 	payload := make([]byte, 64) // small frames -> batching matters most
@@ -80,9 +81,7 @@ func countReadSyscalls(t *testing.T, nframes int, buffered bool) int64 {
 	}()
 
 	cc, err := net.Dial("tcp", ln.Addr().String())
-	if err != nil {
-		t.Fatalf("dial: %v", err)
-	}
+	require.NoError(t, err, "dial")
 	defer func() { _ = cc.Close() }()
 	counter := &countingConn{Conn: cc}
 
@@ -96,15 +95,14 @@ func countReadSyscalls(t *testing.T, nframes int, buffered bool) int64 {
 	select {
 	case <-ready:
 	case <-time.After(5 * time.Second):
-		t.Fatal("server did not finish writing in time")
+		require.FailNow(t, "server did not finish writing in time")
 	}
 
 	_ = cc.SetReadDeadline(time.Now().Add(10 * time.Second))
 	var h nilHandler
 	for got := 0; got < nframes; got++ {
-		if _, rerr := cf.ReadFrame(context.Background(), &h); rerr != nil {
-			t.Fatalf("ReadFrame %d/%d: %v", got, nframes, rerr)
-		}
+		_, rerr := cf.ReadFrame(context.Background(), &h)
+		require.NoErrorf(t, rerr, "ReadFrame %d/%d", got, nframes)
 	}
 	return counter.reads.Load()
 }

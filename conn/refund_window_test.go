@@ -9,6 +9,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
 	"github.com/lodgvideon/poseidon-http-client/header"
 )
 
@@ -54,9 +57,7 @@ func TestConn_SmallAdvertisedWindow_StillCompletes(t *testing.T) {
 				NextProtos:         []string{"h2"},
 			}}
 			nc, err := d.Dial(t.Context(), srv.Listener.Addr().String())
-			if err != nil {
-				t.Fatalf("dial: %v", err)
-			}
+			require.NoError(t, err, "dial")
 			opts := ConnOptions{}
 			opts.Settings.InitialWindowSize = window
 			// Size the event buffer to the whole download.
@@ -80,18 +81,11 @@ func TestConn_SmallAdvertisedWindow_StillCompletes(t *testing.T) {
 			// non-factor rather than a coin flip.
 			opts.StreamEventBuffer = 512
 			c, err := NewClientConn(t.Context(), nc, opts)
-			if err != nil {
-				t.Fatalf("NewClientConn: %v", err)
-			}
+			require.NoError(t, err, "NewClientConn")
 			defer func() { _ = c.Close() }()
-
 			s, err := c.NewStream(t.Context())
-			if err != nil {
-				t.Fatalf("NewStream: %v", err)
-			}
-			if err := s.SendHeaders(t.Context(), getHeaders(), true); err != nil {
-				t.Fatalf("SendHeaders: %v", err)
-			}
+			require.NoError(t, err, "NewStream")
+			require.NoError(t, s.SendHeaders(t.Context(), getHeaders(), true), "SendHeaders")
 
 			// Bound every Recv on its own, not the whole loop: the deadlock this
 			// pins is a *stall* — a Recv that never returns because the window is
@@ -105,12 +99,10 @@ func TestConn_SmallAdvertisedWindow_StillCompletes(t *testing.T) {
 				recvCtx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 				ev, err := s.Recv(recvCtx)
 				cancel()
-				if err != nil {
-					t.Fatalf("stalled after %d of %d bytes with InitialWindowSize=%d: %v — "+
-						"the peer spent its window and is waiting for a WINDOW_UPDATE that a "+
-						"refund threshold larger than the window can never send",
-						got, bodyLen, window, err)
-				}
+				require.NoErrorf(t, err, "stalled after %d of %d bytes with InitialWindowSize=%d — "+
+					"the peer spent its window and is waiting for a WINDOW_UPDATE that a "+
+					"refund threshold larger than the window can never send",
+					got, bodyLen, window)
 				if ev.Type == EventData {
 					got += len(ev.Data)
 					GetDataBufPool().Put(ev.DataSlab)
@@ -119,22 +111,18 @@ func TestConn_SmallAdvertisedWindow_StillCompletes(t *testing.T) {
 				// indistinguishable from a clean finish at the check below — the
 				// short read would then be blamed on the refund threshold, which
 				// is not what happened. Name the real cause instead.
-				if ev.Type == EventReset {
-					t.Fatalf("stream reset (code %v) after %d of %d bytes with "+
-						"InitialWindowSize=%d — this is NOT the refund bug: the client "+
-						"reset its own stream, which push() does when the event buffer "+
-						"fills and this loop has fallen behind the reader",
-						ev.RSTCode, got, bodyLen, window)
-				}
+				require.NotEqualf(t, EventReset, ev.Type, "stream reset (code %v) after %d of %d bytes with "+
+					"InitialWindowSize=%d — this is NOT the refund bug: the client "+
+					"reset its own stream, which push() does when the event buffer "+
+					"fills and this loop has fallen behind the reader",
+					ev.RSTCode, got, bodyLen, window)
 				if ev.EndStream {
 					break
 				}
 			}
-			if got != bodyLen {
-				t.Errorf("received %d of %d bytes with InitialWindowSize=%d; the peer is waiting for a "+
-					"WINDOW_UPDATE that a refund threshold larger than the window can never send",
-					got, bodyLen, window)
-			}
+			assert.Equalf(t, bodyLen, got, "received %d of %d bytes with InitialWindowSize=%d; the peer is waiting for a "+
+				"WINDOW_UPDATE that a refund threshold larger than the window can never send",
+				got, bodyLen, window)
 		})
 	}
 }

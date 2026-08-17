@@ -6,6 +6,9 @@ import (
 	"net"
 	"testing"
 	"time"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // Two receive-path parameters could not be set from outside the package, and both
@@ -34,9 +37,9 @@ func TestDefaulted_ReadBufferSize(t *testing.T) {
 		{"above the ceiling is lowered", maxReadBufferSize + 1, maxReadBufferSize},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := (ConnOptions{ReadBufferSize: tc.in}).defaulted().ReadBufferSize; got != tc.want {
-				t.Errorf("ReadBufferSize %d defaulted to %d, want %d", tc.in, got, tc.want)
-			}
+			got := (ConnOptions{ReadBufferSize: tc.in}).defaulted().ReadBufferSize
+
+			assert.Equalf(t, tc.want, got, "ReadBufferSize %d defaulted to %d, want %d", tc.in, got, tc.want)
 		})
 	}
 }
@@ -52,10 +55,10 @@ func TestDefaulted_ReadBufferSize(t *testing.T) {
 func TestDefaulted_ReadBufferSizeDefaultIsNotRaised(t *testing.T) {
 	implicit := (ConnOptions{}).defaulted().ReadBufferSize
 	explicit := (ConnOptions{ReadBufferSize: readBufferSize}).defaulted().ReadBufferSize
-	if implicit != explicit {
-		t.Errorf("leaving ReadBufferSize zero gives %d but passing the default gives %d — "+
+
+	assert.Equalf(t, implicit, explicit,
+		"leaving ReadBufferSize zero gives %d but passing the default gives %d — "+
 			"the floor is above the default, so the two disagree", implicit, explicit)
-	}
 }
 
 // TestDefaulted_StaticConnWindowSize covers its clamp. Zero stays zero because it
@@ -73,9 +76,9 @@ func TestDefaulted_StaticConnWindowSize(t *testing.T) {
 		{"above the RFC maximum is lowered", 1 << 31, uint32(maxFlowWindow)},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := (ConnOptions{StaticConnWindowSize: tc.in}).defaulted().StaticConnWindowSize; got != tc.want {
-				t.Errorf("StaticConnWindowSize %d defaulted to %d, want %d", tc.in, got, tc.want)
-			}
+			got := (ConnOptions{StaticConnWindowSize: tc.in}).defaulted().StaticConnWindowSize
+
+			assert.Equalf(t, tc.want, got, "StaticConnWindowSize %d defaulted to %d, want %d", tc.in, got, tc.want)
 		})
 	}
 }
@@ -108,26 +111,23 @@ func newConnForTunables(t *testing.T, opts ConnOptions) *Conn {
 // handshake frame.
 func TestStaticConnWindow_ReachesTheRefundIncrement(t *testing.T) {
 	const want = 1 << 20
-	c := newConnForTunables(t, ConnOptions{StaticConnWindowSize: want})
-
-	if got := c.connRecvTarget.Load(); got != want {
-		t.Fatalf("connRecvTarget = %d, want %d", got, want)
-	}
-	// Spend some window, then ask what the refund would be.
 	const spent = 32 * 1024
-	inc := refundIncrement(c.connRecvTarget.Load(), c.connRecvWindow-spent, spent)
-	if wantInc := uint32(want) - (connInitialRecvWindow - spent); inc != wantInc {
-		t.Errorf("refund increment = %d, want %d — the static window must reach the "+
-			"increment, since that is the only thing that widens the connection", inc, wantInc)
-	}
+	c := newConnForTunables(t, ConnOptions{StaticConnWindowSize: want})
+	def := newConnForTunables(t, ConnOptions{})
 
+	target := c.connRecvTarget.Load()
+	inc := refundIncrement(c.connRecvTarget.Load(), c.connRecvWindow-spent, spent)
+	defInc := refundIncrement(def.connRecvTarget.Load(), def.connRecvWindow-spent, spent)
+
+	require.Equalf(t, uint32(want), target, "connRecvTarget = %d, want %d", target, want)
+	assert.Equalf(t, uint32(want)-(connInitialRecvWindow-spent), inc,
+		"refund increment = %d — the static window must reach the increment, since that is "+
+			"the only thing that widens the connection", inc)
 	// The default connection is unchanged: target equals the window, so the refund is
 	// exactly what was spent.
-	def := newConnForTunables(t, ConnOptions{})
-	if got := refundIncrement(def.connRecvTarget.Load(), def.connRecvWindow-spent, spent); got != spent {
-		t.Errorf("a default connection refunds %d for %d spent, want %d — the new option "+
-			"changed behaviour for callers who did not set it", got, spent, spent)
-	}
+	assert.Equalf(t, uint32(spent), defInc,
+		"a default connection refunds %d for %d spent, want %d — the new option "+
+			"changed behaviour for callers who did not set it", defInc, spent, spent)
 }
 
 // TestStaticConnWindow_IgnoredWhenTuning pins the documented precedence. Both writing
@@ -138,15 +138,15 @@ func TestStaticConnWindow_IgnoredWhenTuning(t *testing.T) {
 		StaticConnWindowSize: 1 << 20,
 		AutoTuneRecvWindow:   true,
 	})
-	if got := c.connRecvTarget.Load(); got != connInitialRecvWindow {
-		t.Errorf("connRecvTarget = %d with the tuner on, want the handshake window %d — "+
+
+	got := c.connRecvTarget.Load()
+
+	require.NotNil(t, c.tuner, "no tuner was built, so this test is not exercising the case it names")
+	assert.Equalf(t, uint32(connInitialRecvWindow), got,
+		"connRecvTarget = %d with the tuner on, want the handshake window %d — "+
 			"the static size is documented as ignored there, and letting it seed the "+
 			"target hands one value to two writers with different growth policies",
-			got, connInitialRecvWindow)
-	}
-	if c.tuner == nil {
-		t.Fatal("no tuner was built, so this test is not exercising the case it names")
-	}
+		got, connInitialRecvWindow)
 }
 
 // TestReadBufferSize_ReachesTheReader pins the other half: the option has to size the
@@ -165,18 +165,18 @@ func TestStaticConnWindow_IgnoredWhenTuning(t *testing.T) {
 func TestReadBufferSize_ReachesTheReader(t *testing.T) {
 	for _, size := range []int{minReadBufferSize, 64 * 1024} {
 		tr := &readSizeConn{}
+
 		_, _ = NewClientConn(context.Background(), tr, ConnOptions{
 			ReadBufferSize: size,
 			Dialer:         &PlaintextDialer{},
 		})
-		if tr.maxRead == 0 {
-			t.Fatalf("the transport was never read from, so nothing was observed for size %d", size)
-		}
-		if tr.maxRead != size {
-			t.Errorf("the transport was handed a %d-byte read buffer, want %d — "+
+
+		require.NotZerof(t, tr.maxRead,
+			"the transport was never read from, so nothing was observed for size %d", size)
+		assert.Equalf(t, size, tr.maxRead,
+			"the transport was handed a %d-byte read buffer, want %d — "+
 				"ConnOptions.ReadBufferSize is not sizing the reader the Framer reads through",
-				tr.maxRead, size)
-		}
+			tr.maxRead, size)
 	}
 }
 

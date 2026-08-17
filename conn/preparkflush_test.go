@@ -7,6 +7,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/require"
+
 	"github.com/lodgvideon/poseidon-http-client/frame"
 )
 
@@ -58,29 +60,32 @@ func TestWriteData_ReachesTheWireBeforeParkingOnCredit(t *testing.T) {
 	c.peerConnSendWindow = chunk
 
 	payload := make([]byte, chunk*2)
+
 	done := make(chan error, 1)
 	go func() {
 		done <- c.writeData(context.Background(), s, s.gen.Load(), payload, false)
 	}()
-
-	// The writer is now parked on credit for the second chunk. The first must
-	// already be on the wire.
+	// The writer is now parked on credit for the second chunk. Wait until either
+	// something reaches the wire or the writer returns (which would mean it never
+	// parked, and the property is not being exercised).
+	var early error
+	returnedEarly := false
 	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) {
-		if sink.len() > 0 {
-			break
-		}
+	for time.Now().Before(deadline) && sink.len() == 0 && !returnedEarly {
 		select {
-		case err := <-done:
-			t.Fatalf("writeData returned early: %v", err)
+		case early = <-done:
+			returnedEarly = true
 		default:
+			time.Sleep(time.Millisecond)
 		}
-		time.Sleep(time.Millisecond)
 	}
-	if got := sink.len(); got == 0 {
-		t.Fatal("nothing reached the wire while the writer is parked waiting for credit — " +
+	onWire := sink.len()
+
+	require.Falsef(t, returnedEarly,
+		"writeData returned (%v) instead of parking on credit, so the pre-park flush is not being exercised at all", early)
+	require.NotZerof(t, onWire,
+		"nothing reached the wire while the writer is parked waiting for credit — "+
 			"the peer cannot see the frame it would grant credit for, and both sides wait")
-	}
 
 	// Release the writer so the test does not leak a goroutine: grant the credit
 	// the way an inbound WINDOW_UPDATE would, then wake the parked writer.

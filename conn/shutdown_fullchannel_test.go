@@ -10,6 +10,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
 	"github.com/lodgvideon/poseidon-http-client/frame"
 	"github.com/lodgvideon/poseidon-http-client/header"
 )
@@ -46,17 +49,13 @@ func openParkedStream(t *testing.T, c *Conn) StreamRef {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	s, err := c.NewStream(ctx)
-	if err != nil {
-		t.Fatalf("NewStream: %v", err)
-	}
-	if err := s.SendHeaders(ctx, []header.Field{
+	require.NoError(t, err, "NewStream")
+	require.NoError(t, s.SendHeaders(ctx, []header.Field{
 		{Name: []byte(":method"), Value: []byte("GET")},
 		{Name: []byte(":scheme"), Value: []byte("https")},
 		{Name: []byte(":authority"), Value: []byte("example.com")},
 		{Name: []byte(":path"), Value: []byte("/")},
-	}, true); err != nil {
-		t.Fatalf("SendHeaders: %v", err)
-	}
+	}, true), "SendHeaders")
 	return s
 }
 
@@ -158,9 +157,7 @@ func TestConn_ShutdownWithFullEventChannel_ReaderStillExits(t *testing.T) {
 		// stream from the registry before shutdownStreams ever saw it.
 		StreamEventBuffer: 1,
 	})
-	if err != nil {
-		t.Fatalf("Dial: %v", err)
-	}
+	require.NoError(t, err, "Dial")
 	defer func() { _ = c.Close() }()
 
 	// sStuck: nobody calls Recv, so its HEADERS sits in the channel and fills
@@ -209,23 +206,23 @@ func TestConn_ShutdownWithFullEventChannel_ReaderStillExits(t *testing.T) {
 	for len(sStuck.Stream().events) < cap(sStuck.Stream().events) && time.Now().Before(deadline) {
 		time.Sleep(5 * time.Millisecond)
 	}
-	if got, want := len(sStuck.Stream().events), cap(sStuck.Stream().events); got != want {
-		t.Fatalf("sStuck event channel is %d/%d full; shutdownStreams would take its send arm and the default: branch would go untested", got, want)
-	}
+	require.Equalf(t, cap(sStuck.Stream().events), len(sStuck.Stream().events),
+		"sStuck event channel is %d/%d full; shutdownStreams would take its send arm and the default: branch would go untested",
+		len(sStuck.Stream().events), cap(sStuck.Stream().events))
 	// And sLive's must be drained — genuinely drained, which means waiting for
 	// the consumer to say it got the HEADERS rather than only observing an
 	// empty channel.
 	select {
 	case <-liveHeaders:
 	case <-time.After(5 * time.Second):
-		t.Fatal("sLive never received its response HEADERS; killing the connection now would test the empty-channel path, not the drained one")
+		require.FailNow(t, "sLive never received its response HEADERS; killing the connection now would test the empty-channel path, not the drained one")
 	}
 	for len(sLive.Stream().events) > 0 && time.Now().Before(deadline) {
 		time.Sleep(5 * time.Millisecond)
 	}
-	if got := len(sLive.Stream().events); got != 0 {
-		t.Fatalf("sLive event channel holds %d events; it must be drained for its shutdown to take the send arm", got)
-	}
+	require.Emptyf(t, sLive.Stream().events,
+		"sLive event channel holds %d events; it must be drained for its shutdown to take the send arm",
+		len(sLive.Stream().events))
 
 	// Control 2 — both streams must still be registered. shutdownStreams
 	// iterates c.streams; a stream already evicted is never visited, and every
@@ -235,9 +232,9 @@ func TestConn_ShutdownWithFullEventChannel_ReaderStillExits(t *testing.T) {
 	_, liveReg := c.streams[sLive.Stream().id]
 	nreg := len(c.streams)
 	c.smu.Unlock()
-	if !stuckReg || !liveReg || nreg != 2 {
-		t.Fatalf("registry holds %d streams (sStuck=%v sLive=%v); shutdownStreams only visits registered streams", nreg, stuckReg, liveReg)
-	}
+	require.Truef(t, stuckReg && liveReg && nreg == 2,
+		"registry holds %d streams (sStuck=%v sLive=%v); shutdownStreams only visits registered streams",
+		nreg, stuckReg, liveReg)
 
 	srv.CloseClientConnections()
 
@@ -249,19 +246,18 @@ func TestConn_ShutdownWithFullEventChannel_ReaderStillExits(t *testing.T) {
 	select {
 	case <-c.readerDone:
 	case <-time.After(5 * time.Second):
-		t.Fatal("readerDone still open 5s after the peer died: the reader is wedged inside shutdownStreams on a full event channel, holding c.smu — the connection will never report itself dead")
+		require.FailNow(t, "readerDone still open 5s after the peer died: the reader is wedged inside shutdownStreams on a full event channel, holding c.smu — the connection will never report itself dead")
 	}
 
 	// Assertion 2 — the fan-out reached the pump-drained stream too.
 	select {
 	case err := <-liveTerm:
-		if err == nil {
-			t.Error("sLive: nil terminal after the connection died")
-		} else if !isTerminalConnDeath(err) {
-			t.Errorf("sLive: terminal %v is outside the set conn delivers on connection death", err)
+		if assert.Error(t, err, "sLive: nil terminal after the connection died") {
+			assert.Truef(t, isTerminalConnDeath(err),
+				"sLive: terminal %v is outside the set conn delivers on connection death", err)
 		}
 	case <-time.After(5 * time.Second):
-		t.Error("sLive never terminated after the connection died")
+		assert.Fail(t, "sLive never terminated after the connection died")
 	}
 
 	// Assertion 3 — the slow consumer is not stranded. It comes back late, as
@@ -270,13 +266,9 @@ func TestConn_ShutdownWithFullEventChannel_ReaderStillExits(t *testing.T) {
 	stuckCtx, stuckCancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer stuckCancel()
 	term, clean := terminalOf(stuckCtx, sStuck)
-	if clean {
-		t.Fatal("sStuck: clean END_STREAM after the connection died — the server never finished this response")
-	}
-	if errors.Is(term, context.DeadlineExceeded) {
-		t.Fatal("sStuck: the slow consumer hung; its terminal was never delivered")
-	}
-	if !isTerminalConnDeath(term) {
-		t.Errorf("sStuck: terminal %v is outside the set conn delivers on connection death", term)
-	}
+	require.False(t, clean, "sStuck: clean END_STREAM after the connection died — the server never finished this response")
+	require.Falsef(t, errors.Is(term, context.DeadlineExceeded),
+		"sStuck: the slow consumer hung; its terminal was never delivered")
+	assert.Truef(t, isTerminalConnDeath(term),
+		"sStuck: terminal %v is outside the set conn delivers on connection death", term)
 }

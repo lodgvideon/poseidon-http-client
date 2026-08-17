@@ -8,6 +8,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
 	"github.com/lodgvideon/poseidon-http-client/frame"
 )
 
@@ -83,9 +86,7 @@ func retireAndRecycle(t *testing.T, s *Stream) {
 	s.mu.Lock()
 	s.connDone = true
 	s.mu.Unlock()
-	if err := s.ref().Close(); err != nil {
-		t.Fatalf("Close: %v", err)
-	}
+	require.NoError(t, s.ref().Close(), "Close")
 }
 
 // TestStaleRef_RecvReachesTheNextRequest pins the receive-side hole: a reference
@@ -100,9 +101,8 @@ func TestStaleRef_RecvReachesTheNextRequest(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
-	if _, err := refA.Recv(ctx); err != nil {
-		t.Fatalf("first Recv: %v", err)
-	}
+	_, err := refA.Recv(ctx)
+	require.NoError(t, err, "first Recv")
 	retireAndRecycle(t, s)
 
 	// Request B claims the same struct.
@@ -111,11 +111,10 @@ func TestStaleRef_RecvReachesTheNextRequest(t *testing.T) {
 
 	rctx, rcancel := context.WithTimeout(context.Background(), time.Second)
 	defer rcancel()
-	ev, err := refA.Recv(rctx) // the STALE handle, from request A
-	if err == nil {
-		t.Errorf("stale Recv returned %v with no error: request A's reader is being handed "+
-			"request B's events", ev.Type)
-	}
+	ev, staleErr := refA.Recv(rctx) // the STALE handle, from request A
+
+	assert.Errorf(t, staleErr, "stale Recv returned %v with no error: request A's reader is being handed "+
+		"request B's events", ev.Type)
 }
 
 // TestStaleRef_CloseResetsTheNextRequest pins the destructive hole, and it needs
@@ -139,16 +138,13 @@ func TestStaleRef_CloseResetsTheNextRequest(t *testing.T) {
 	_ = refA.Close() // the STALE Close, from request A
 
 	for _, fh := range parseFrameHeaders(t, out.snapshot()[before:]) {
-		if fh.ftype == 0x3 { // RST_STREAM
-			t.Errorf("a stale Close sent RST_STREAM on stream %d — request A tore down request B", fh.streamID)
-		}
+		assert.NotEqualf(t, byte(0x3), fh.ftype, // RST_STREAM
+			"a stale Close sent RST_STREAM on stream %d — request A tore down request B", fh.streamID)
 	}
 	s.mu.Lock()
 	closed := s.closed
 	s.mu.Unlock()
-	if closed {
-		t.Error("a stale Close marked the next request's stream closed")
-	}
+	assert.False(t, closed, "a stale Close marked the next request's stream closed")
 }
 
 // TestStaleRef_ParkedWriterWakesOntoTheNextRequest pins the send-side hole that
@@ -188,7 +184,7 @@ func TestStaleRef_ParkedWriterWakesOntoTheNextRequest(t *testing.T) {
 			break
 		}
 		if time.Now().After(deadline) {
-			t.Fatal("the writer never emitted its first chunk; it is not parked on credit")
+			require.FailNow(t, "the writer never emitted its first chunk; it is not parked on credit")
 		}
 		time.Sleep(time.Millisecond)
 	}
@@ -211,14 +207,13 @@ func TestStaleRef_ParkedWriterWakesOntoTheNextRequest(t *testing.T) {
 	select {
 	case <-done:
 	case <-time.After(5 * time.Second):
-		t.Fatal("the parked writer never returned")
+		require.FailNow(t, "the parked writer never returned")
 	}
 
 	for _, fh := range parseDataFrames(t, out.snapshot()[before:]) {
-		if fh.streamID == 7 {
-			t.Errorf("request A's parked writer emitted DATA on stream 7: its body bytes were " +
+		assert.NotEqual(t, uint32(7), fh.streamID,
+			"request A's parked writer emitted DATA on stream 7: its body bytes were "+
 				"spliced into request B's stream")
-		}
 	}
 
 	// The second consequence, and the one the wake-loop check exists for on its
@@ -231,10 +226,9 @@ func TestStaleRef_ParkedWriterWakesOntoTheNextRequest(t *testing.T) {
 	c.fcOutMu.Lock()
 	connWindowAfter := c.peerConnSendWindow
 	c.fcOutMu.Unlock()
-	if connWindowAfter != connWindowBefore {
-		t.Errorf("connection send window went %d -> %d: the woken writer debited shared credit "+
+	assert.Equalf(t, connWindowBefore, connWindowAfter,
+		"connection send window went %d -> %d: the woken writer debited shared credit "+
 			"for a stream that no longer exists", connWindowBefore, connWindowAfter)
-	}
 }
 
 // TestStaleRef_GenerationOnlyEverIncreases guards the trap the generation field
@@ -254,27 +248,22 @@ func TestStaleRef_GenerationOnlyEverIncreases(t *testing.T) {
 	s := c.allocStream(4, 65535)
 
 	seen := []uint64{s.gen.Load()}
-	if seen[0] == 0 {
-		t.Fatal("a fresh stream has generation 0; the zero StreamRef would match it")
-	}
+	require.NotZero(t, seen[0], "a fresh stream has generation 0; the zero StreamRef would match it")
 	for i := 0; i < 4; i++ {
 		reallocInPlace(c, s, uint32(5+2*i), 65535)
 		refBefore := s.ref()
 		retireAndRecycle(t, s)
 		g := s.gen.Load()
-		if g <= seen[len(seen)-1] {
-			t.Fatalf("recycle %d left generation %d, previous %d — it must strictly increase, "+
+		require.Greaterf(t, g, seen[len(seen)-1],
+			"recycle %d left generation %d, previous %d — it must strictly increase, "+
 				"or two lifetimes share a value and a stale handle passes",
-				i, g, seen[len(seen)-1])
-		}
-		if g == 0 {
-			t.Fatalf("recycle %d zeroed the generation", i)
-		}
+			i, g, seen[len(seen)-1])
+		require.NotZerof(t, g, "recycle %d zeroed the generation", i)
 		seen = append(seen, g)
 		// And the handle from the lifetime just retired stays refused, however
 		// many recycles have happened.
-		if _, err := refBefore.Recv(t.Context()); !errors.Is(err, ErrStaleStream) {
-			t.Fatalf("recycle %d: handle from the retired lifetime = %v, want ErrStaleStream", i, err)
-		}
+		_, rerr := refBefore.Recv(t.Context())
+		require.Truef(t, errors.Is(rerr, ErrStaleStream),
+			"recycle %d: handle from the retired lifetime = %v, want ErrStaleStream", i, rerr)
 	}
 }
