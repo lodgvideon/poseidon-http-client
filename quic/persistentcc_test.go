@@ -3,6 +3,8 @@ package quic
 import (
 	"testing"
 	"time"
+
+	"github.com/stretchr/testify/require"
 )
 
 // pcTestConn builds a Conn whose RTT is sampled (smoothed 100 ms, rttvar 25 ms →
@@ -41,15 +43,12 @@ func TestConformance_RFC9002_Sec76_PersistentCongestionCollapse(t *testing.T) {
 
 	c.detectLost(spaceApp)
 
-	if c.cwnd != kMinimumWindow {
-		t.Fatalf("cwnd = %d, want kMinimumWindow %d (persistent congestion collapse)", c.cwnd, kMinimumWindow)
-	}
-	if !c.recoveryStart.IsZero() {
-		t.Fatal("recoveryStart must be cleared to zero on persistent congestion (§7.6.1)")
-	}
-	if !c.rtt.resetMin {
-		t.Fatal("min_rtt must be armed for reset after persistent congestion (§5.2)")
-	}
+	require.Equalf(t, kMinimumWindow, c.cwnd,
+		"cwnd = %d, want kMinimumWindow %d (persistent congestion collapse)", c.cwnd, kMinimumWindow)
+	require.True(t, c.recoveryStart.IsZero(),
+		"recoveryStart must be cleared to zero on persistent congestion (§7.6.1)")
+	require.True(t, c.rtt.resetMin,
+		"min_rtt must be armed for reset after persistent congestion (§5.2)")
 }
 
 // TestConformance_RFC9002_Sec76_ShortSpanHalvesOnly checks that a loss whose
@@ -63,15 +62,10 @@ func TestConformance_RFC9002_Sec76_ShortSpanHalvesOnly(t *testing.T) {
 
 	c.detectLost(spaceApp)
 
-	if c.cwnd != 10000 {
-		t.Fatalf("cwnd = %d, want 10000 (halved, not collapsed)", c.cwnd)
-	}
-	if c.recoveryStart != base {
-		t.Fatal("recoveryStart should be set (ordinary recovery, no collapse)")
-	}
-	if c.rtt.resetMin {
-		t.Fatal("min_rtt must not be reset without persistent congestion")
-	}
+	require.Equalf(t, uint64(10000), c.cwnd, "cwnd = %d, want 10000 (halved, not collapsed)", c.cwnd)
+	require.Equal(t, base, c.recoveryStart,
+		"recoveryStart should be set (ordinary recovery, no collapse)")
+	require.False(t, c.rtt.resetMin, "min_rtt must not be reset without persistent congestion")
 }
 
 // TestConformance_RFC9002_Sec76_AckedPacketInSpanNoCollapse checks that an
@@ -91,12 +85,10 @@ func TestConformance_RFC9002_Sec76_AckedPacketInSpanNoCollapse(t *testing.T) {
 
 	c.detectLost(spaceApp)
 
-	if c.cwnd != 10000 {
-		t.Fatalf("cwnd = %d, want 10000 (an acked packet in the span blocks collapse)", c.cwnd)
-	}
-	if !c.recoveryStart.Equal(base) {
-		t.Fatal("recoveryStart should be set (ordinary halving, no collapse)")
-	}
+	require.Equalf(t, uint64(10000), c.cwnd,
+		"cwnd = %d, want 10000 (an acked packet in the span blocks collapse)", c.cwnd)
+	require.True(t, c.recoveryStart.Equal(base),
+		"recoveryStart should be set (ordinary halving, no collapse)")
 }
 
 // TestConformance_RFC9002_Sec76_RequiresRTTSample checks that persistent
@@ -110,9 +102,8 @@ func TestConformance_RFC9002_Sec76_RequiresRTTSample(t *testing.T) {
 
 	c.detectLost(spaceApp)
 
-	if c.cwnd != 10000 {
-		t.Fatalf("cwnd = %d, want 10000 (no collapse without an RTT sample)", c.cwnd)
-	}
+	require.Equalf(t, uint64(10000), c.cwnd,
+		"cwnd = %d, want 10000 (no collapse without an RTT sample)", c.cwnd)
 }
 
 // TestConn_PersistentCongestion_ResetsMinRTT checks that after persistent
@@ -123,14 +114,12 @@ func TestConn_PersistentCongestion_ResetsMinRTT(t *testing.T) {
 	r.resetMin = true
 
 	r.update(200*time.Millisecond, 0)
-	if r.minRTT != 200*time.Millisecond {
-		t.Fatalf("min_rtt = %v, want 200ms (reset adopts the larger sample)", r.minRTT)
-	}
-	if r.resetMin {
-		t.Fatal("resetMin must be consumed after one sample")
-	}
+	afterReset, stillArmed := r.minRTT, r.resetMin
 	r.update(80*time.Millisecond, 0)
-	if r.minRTT != 80*time.Millisecond {
-		t.Fatalf("min_rtt = %v, want 80ms (normal lowering resumes)", r.minRTT)
-	}
+
+	require.Equalf(t, 200*time.Millisecond, afterReset,
+		"min_rtt = %v, want 200ms (reset adopts the larger sample)", afterReset)
+	require.False(t, stillArmed, "resetMin must be consumed after one sample")
+	require.Equalf(t, 80*time.Millisecond, r.minRTT,
+		"min_rtt = %v, want 80ms (normal lowering resumes)", r.minRTT)
 }

@@ -4,6 +4,9 @@ package quic
 
 import (
 	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // The retransmit free list has the right mechanism and missed almost every time:
@@ -18,7 +21,9 @@ import (
 // their rounded capacity stayed under a datagram.
 //
 // Behind !race for the reason the other allocation gates are: the detector
-// allocates as it instruments.
+// allocates as it instruments. For the same reason no testify call may appear
+// inside an AllocsPerRun closure — it reflects and allocates, and the gate counts
+// the whole process. Every assertion below sits outside the measured body.
 
 // TestRetransPut_KeepsAFullDatagramCopy is the gate on the defect itself, and the
 // one that fails loudest: a full-size copy must reach the free list.
@@ -29,13 +34,14 @@ import (
 // statistic.
 func TestRetransPut_KeepsAFullDatagramCopy(t *testing.T) {
 	c := &Conn{}
+
 	c.retransPut(c.retransCopy(make([]byte, maxDatagramSize)))
-	if len(c.retransFree) != 1 {
-		t.Errorf("free list has %d entries after one full-datagram copy, want 1 — the "+
+
+	assert.Lenf(t, c.retransFree, 1,
+		"free list has %d entries after one full-datagram copy, want 1 — the "+
 			"copy's capacity was rounded up to a size class above maxDatagramSize, so "+
 			"retransPut dropped exactly the buffer a bulk transfer produces most",
-			len(c.retransFree))
-	}
+		len(c.retransFree))
 }
 
 // TestRetransCopy_SmallBufferOnTopDoesNotBlockReuse is the gate. It alternates a
@@ -49,7 +55,6 @@ func TestRetransCopy_SmallBufferOnTopDoesNotBlockReuse(t *testing.T) {
 	c := &Conn{}
 	small := make([]byte, 40)
 	large := make([]byte, maxDatagramSize)
-
 	// Warm the list so steady state is measured, not the first fill.
 	for i := 0; i < 8; i++ {
 		c.retransPut(c.retransCopy(large))
@@ -63,12 +68,11 @@ func TestRetransCopy_SmallBufferOnTopDoesNotBlockReuse(t *testing.T) {
 		c.retransPut(c.retransCopy(large))
 	})
 
-	if n != 0 {
-		t.Errorf("retransCopy allocates %.1f per small+large pair, want 0 — a buffer "+
+	assert.Zerof(t, n,
+		"retransCopy allocates %.1f per small+large pair, want 0 — a buffer "+
 			"too short for the request is on top of the free list, so the large copy "+
 			"takes the allocating fallback while datagram-sized buffers sit underneath",
-			n)
-	}
+		n)
 }
 
 // TestRetransCopy_ReusesTheBufferItWasGiven is the control: serving from the free
@@ -84,9 +88,9 @@ func TestRetransCopy_ReusesTheBufferItWasGiven(t *testing.T) {
 	c.retransPut(first)
 
 	second := c.retransCopy(make([]byte, 100))
-	if got := &second[:cap(second)][0]; got != want {
-		t.Error("retransCopy did not reuse the buffer just returned to the free list")
-	}
+
+	assert.Same(t, want, &second[:cap(second)][0],
+		"retransCopy did not reuse the buffer just returned to the free list")
 }
 
 // TestRetransCopy_OversizeStillGetsItsOwnBuffer guards the other direction: a
@@ -99,19 +103,14 @@ func TestRetransCopy_OversizeStillGetsItsOwnBuffer(t *testing.T) {
 	for i := range src {
 		src[i] = byte(i)
 	}
+
 	got := c.retransCopy(src)
-	if len(got) != len(src) {
-		t.Fatalf("len = %d, want %d", len(got), len(src))
-	}
-	for i := range got {
-		if got[i] != src[i] {
-			t.Fatalf("byte %d = %d, want %d", i, got[i], src[i])
-		}
-	}
 	c.retransPut(got)
-	if len(c.retransFree) != 0 {
-		t.Errorf("an oversize buffer was kept: free list has %d entries, want 0 — "+
+
+	require.Lenf(t, got, len(src), "len = %d, want %d", len(got), len(src))
+	assert.Equal(t, src, got, "an oversize payload must be copied byte for byte")
+	assert.Emptyf(t, c.retransFree,
+		"an oversize buffer was kept: free list has %d entries, want 0 — "+
 			"the list's memory bound assumes every entry is at most a datagram",
-			len(c.retransFree))
-	}
+		len(c.retransFree))
 }
