@@ -3,6 +3,9 @@ package quic
 import (
 	"testing"
 	"time"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // TestConformance_RFC9002_Sec51_RTTSampleWhenLargestNonEliciting checks that an
@@ -16,12 +19,11 @@ func TestConformance_RFC9002_Sec51_RTTSampleWhenLargestNonEliciting(t *testing.T
 	s.onSent(6, base.Add(-10*time.Millisecond), false, nil) // pure ACK, the largest
 
 	sendTime, hasRTT := s.ack(nil, 5, 6)
-	if !hasRTT {
-		t.Fatal("an RTT sample must be generated when a newly-acked packet is ack-eliciting (§5.1)")
-	}
-	if !sendTime.Equal(base.Add(-10 * time.Millisecond)) {
-		t.Fatalf("sample send time = %v, want the largest acked (pn 6) send time", sendTime)
-	}
+
+	require.True(t, hasRTT,
+		"an RTT sample must be generated when a newly-acked packet is ack-eliciting (§5.1)")
+	assert.Truef(t, sendTime.Equal(base.Add(-10*time.Millisecond)),
+		"sample send time = %v, want the largest acked (pn 6) send time", sendTime)
 }
 
 // TestConformance_RFC9002_Sec51_NoRTTSampleWithoutAckEliciting checks that no RTT
@@ -33,7 +35,8 @@ func TestConformance_RFC9002_Sec51_NoRTTSampleWithoutAckEliciting(t *testing.T) 
 	s.onSent(5, base, false, nil) // pure ACK
 	s.onSent(6, base, false, nil) // pure ACK, the largest
 
-	if _, hasRTT := s.ack(nil, 5, 6); hasRTT {
-		t.Fatal("no RTT sample when no newly-acked packet is ack-eliciting (§5.1)")
-	}
+	_, hasRTT := s.ack(nil, 5, 6)
+
+	assert.False(t, hasRTT,
+		"no RTT sample when no newly-acked packet is ack-eliciting (§5.1)")
 }

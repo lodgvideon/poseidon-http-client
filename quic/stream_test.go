@@ -3,6 +3,9 @@ package quic
 import (
 	"bytes"
 	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // feed applies a sequence of (offset, data, fin) frames to a fresh recvStream
@@ -22,16 +25,16 @@ type streamFrameInput struct {
 }
 
 func TestRecvStream_InOrder(t *testing.T) {
-	r := feed(
-		streamFrameInput{0, []byte("hello "), false},
-		streamFrameInput{6, []byte("world"), true},
-	)
-	if got := r.bytes(); !bytes.Equal(got, []byte("hello world")) {
-		t.Fatalf("bytes = %q", got)
+	frames := []streamFrameInput{
+		{0, []byte("hello "), false},
+		{6, []byte("world"), true},
 	}
-	if !r.complete() {
-		t.Fatal("expected complete after FIN")
-	}
+
+	r := feed(frames...)
+
+	assert.Equal(t, "hello world", string(r.bytes()),
+		"in-order frames must reassemble to the sent byte stream")
+	assert.True(t, r.complete(), "expected complete after FIN")
 }
 
 // TestConformance_RFC9000_Sec2_StreamReassembly verifies that STREAM data
@@ -40,19 +43,17 @@ func TestRecvStream_InOrder(t *testing.T) {
 // (RFC 9000 §2.2).
 func TestConformance_RFC9000_Sec2_StreamReassembly(t *testing.T) {
 	// FIN arrives (offset 6) before the bytes that precede it (offset 0).
-	r := feed(
-		streamFrameInput{6, []byte("world"), true},
-		streamFrameInput{0, []byte("hello "), false},
-	)
-	if r.finalSize != 11 {
-		t.Fatalf("finalSize = %d, want 11", r.finalSize)
+	frames := []streamFrameInput{
+		{6, []byte("world"), true},
+		{0, []byte("hello "), false},
 	}
-	if got := r.bytes(); !bytes.Equal(got, []byte("hello world")) {
-		t.Fatalf("bytes = %q, want %q", got, "hello world")
-	}
-	if !r.complete() {
-		t.Fatal("expected complete once the gap before the FIN is filled")
-	}
+
+	r := feed(frames...)
+
+	assert.EqualValuesf(t, 11, r.finalSize, "finalSize = %d, want 11", r.finalSize)
+	assert.Equalf(t, "hello world", string(r.bytes()),
+		"bytes = %q, want %q", r.bytes(), "hello world")
+	assert.True(t, r.complete(), "expected complete once the gap before the FIN is filled")
 }
 
 func TestRecvStream_GapNotComplete(t *testing.T) {
@@ -61,46 +62,44 @@ func TestRecvStream_GapNotComplete(t *testing.T) {
 		streamFrameInput{0, []byte("AB"), false},
 		streamFrameInput{4, []byte("EF"), true},
 	)
-	if r.complete() {
-		t.Fatal("must not be complete while [2,4) is missing")
-	}
-	if got := r.bytes(); !bytes.Equal(got, []byte("AB")) {
-		t.Fatalf("bytes = %q, want %q", got, "AB")
-	}
+	gappedComplete := r.complete()
+	gappedBytes := string(r.bytes())
+
 	// Fill the gap; now the buffered tail should fold in and complete.
 	_ = r.receive(2, []byte("CD"), false)
-	if got := r.bytes(); !bytes.Equal(got, []byte("ABCDEF")) {
-		t.Fatalf("bytes = %q, want %q", got, "ABCDEF")
-	}
-	if !r.complete() {
-		t.Fatal("expected complete after gap filled")
-	}
+
+	assert.False(t, gappedComplete, "must not be complete while [2,4) is missing")
+	assert.Equalf(t, "AB", gappedBytes, "bytes = %q, want %q", gappedBytes, "AB")
+	assert.Equalf(t, "ABCDEF", string(r.bytes()), "bytes = %q, want %q", r.bytes(), "ABCDEF")
+	assert.True(t, r.complete(), "expected complete after gap filled")
 }
 
 func TestRecvStream_DuplicateAndOverlap(t *testing.T) {
-	r := feed(
-		streamFrameInput{0, []byte("hello"), false},
-		streamFrameInput{0, []byte("hel"), false},      // wholly duplicate
-		streamFrameInput{3, []byte("lo world"), false}, // overlaps [3,5) then extends
-	)
-	if got := r.bytes(); !bytes.Equal(got, []byte("hello world")) {
-		t.Fatalf("bytes = %q, want %q", got, "hello world")
+	frames := []streamFrameInput{
+		{0, []byte("hello"), false},
+		{0, []byte("hel"), false},      // wholly duplicate
+		{3, []byte("lo world"), false}, // overlaps [3,5) then extends
 	}
+
+	r := feed(frames...)
+
+	assert.Equalf(t, "hello world", string(r.bytes()),
+		"bytes = %q, want %q", r.bytes(), "hello world")
 }
 
 func TestRecvStream_MultipleBufferedChunks(t *testing.T) {
 	// Deliver strictly in reverse; only the last frame unblocks all of them.
-	r := feed(
-		streamFrameInput{8, []byte("IJKL"), true},
-		streamFrameInput{4, []byte("EFGH"), false},
-		streamFrameInput{0, []byte("ABCD"), false},
-	)
-	if got := r.bytes(); !bytes.Equal(got, []byte("ABCDEFGHIJKL")) {
-		t.Fatalf("bytes = %q, want %q", got, "ABCDEFGHIJKL")
+	frames := []streamFrameInput{
+		{8, []byte("IJKL"), true},
+		{4, []byte("EFGH"), false},
+		{0, []byte("ABCD"), false},
 	}
-	if !r.complete() {
-		t.Fatal("expected complete")
-	}
+
+	r := feed(frames...)
+
+	assert.Equalf(t, "ABCDEFGHIJKL", string(r.bytes()),
+		"bytes = %q, want %q", r.bytes(), "ABCDEFGHIJKL")
+	assert.True(t, r.complete(), "expected complete")
 }
 
 // TestRecvStream_GappedResendDoesNotGrow: a peer resending the same gapped frame
@@ -109,31 +108,38 @@ func TestRecvStream_MultipleBufferedChunks(t *testing.T) {
 // rejects it, so the reassembly buffer itself must dedup.
 func TestRecvStream_GappedResendDoesNotGrow(t *testing.T) {
 	r := &recvStream{}
+
 	for i := 0; i < 1000; i++ {
 		_ = r.receive(100, []byte("PAYLOAD"), false) // same gap, 1000 times
 	}
-	if len(r.pending) != 1 {
-		t.Fatalf("pending chunks = %d, want 1 (duplicate gaps must merge)", len(r.pending))
-	}
-	var buffered int
-	for _, c := range r.pending {
-		buffered += len(c.data)
-	}
-	if buffered != len("PAYLOAD") {
-		t.Fatalf("buffered bytes = %d, want %d (no duplicate storage)", buffered, len("PAYLOAD"))
-	}
+	chunksAfterDuplicates, bufferedAfterDuplicates := len(r.pending), bufferedBytes(r)
 	// Overlapping resends that each extend by one byte also stay a single chunk.
 	for i := 1; i <= 50; i++ {
 		_ = r.receive(200, bytes.Repeat([]byte("x"), i), false)
 	}
+
+	assert.Equalf(t, 1, chunksAfterDuplicates,
+		"pending chunks = %d, want 1 (duplicate gaps must merge)", chunksAfterDuplicates)
+	assert.Equalf(t, len("PAYLOAD"), bufferedAfterDuplicates,
+		"buffered bytes = %d, want %d (no duplicate storage)",
+		bufferedAfterDuplicates, len("PAYLOAD"))
 	for _, c := range r.pending {
-		if c.offset == 200 && len(c.data) != 50 {
-			t.Fatalf("overlapping chunk at 200 = %d bytes, want 50 (merged, not accumulated)", len(c.data))
+		if c.offset == 200 {
+			assert.Lenf(t, c.data, 50,
+				"overlapping chunk at 200 = %d bytes, want 50 (merged, not accumulated)", len(c.data))
 		}
 	}
-	if len(r.pending) != 2 {
-		t.Fatalf("pending chunks = %d, want 2 (one per distinct gap)", len(r.pending))
+	assert.Lenf(t, r.pending, 2,
+		"pending chunks = %d, want 2 (one per distinct gap)", len(r.pending))
+}
+
+// bufferedBytes totals the bytes held in a recvStream's pending gap buffer.
+func bufferedBytes(r *recvStream) int {
+	var n int
+	for _, c := range r.pending {
+		n += len(c.data)
 	}
+	return n
 }
 
 // TestRecvStream_OverlappingGapsMerge: chunks that overlap or abut in the pending
@@ -141,43 +147,37 @@ func TestRecvStream_GappedResendDoesNotGrow(t *testing.T) {
 // preceding gap is filled (already-held bytes win on overlap, RFC 9000 §2.2).
 func TestRecvStream_OverlappingGapsMerge(t *testing.T) {
 	r := &recvStream{}
+
 	_ = r.receive(4, []byte("EFGH"), false) // [4,8)
 	_ = r.receive(6, []byte("GHIJ"), false) // [6,10) overlaps [4,8), extends to 10
 	_ = r.receive(2, []byte("CD"), false)   // [2,4) abuts [4,10)
-	if len(r.pending) != 1 {
-		t.Fatalf("pending chunks = %d, want 1 (all fused)", len(r.pending))
-	}
+	fusedChunks := len(r.pending)
 	_ = r.receive(0, []byte("AB"), false) // fills the gap to offset 0
-	if got := r.bytes(); !bytes.Equal(got, []byte("ABCDEFGHIJ")) {
-		t.Fatalf("bytes = %q, want %q", got, "ABCDEFGHIJ")
-	}
+
+	assert.Equalf(t, 1, fusedChunks, "pending chunks = %d, want 1 (all fused)", fusedChunks)
+	assert.Equalf(t, "ABCDEFGHIJ", string(r.bytes()),
+		"bytes = %q, want %q", r.bytes(), "ABCDEFGHIJ")
 }
 
 func TestConn_OnStream_DeliversToOpenStream(t *testing.T) {
 	c := &Conn{peer: TransportParams{InitialMaxStreamsBidi: 4}}
 	s, err := c.OpenStream() // stream 0
-	if err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, err, "OpenStream")
 	h := &connFrameHandler{c: c}
-	if err := h.OnStream(s.ID(), 0, true, []byte("response body")); err != nil {
-		t.Fatal(err)
-	}
-	if !h.ackEliciting {
-		t.Fatal("STREAM frame must mark the packet ack-eliciting")
-	}
-	if got := s.recv.bytes(); !bytes.Equal(got, []byte("response body")) {
-		t.Fatalf("delivered %q, want %q", got, "response body")
-	}
-	if !s.recv.complete() {
-		t.Fatal("stream should be complete after FIN")
-	}
+
+	errDeliver := h.OnStream(s.ID(), 0, true, []byte("response body"))
 	// A STREAM for a locally initiated stream we have not yet created (id&3==0, and
 	// stream 8 is above our high-water mark of 4) is a STREAM_STATE_ERROR (§19.8).
 	// Server-initiated streams are classified separately (see accept_uni_test.go).
-	if err := h.OnStream(8, 0, false, []byte("x")); err != ErrStreamState {
-		t.Fatalf("STREAM on a not-yet-created client stream = %v, want ErrStreamState", err)
-	}
+	errNotCreated := h.OnStream(8, 0, false, []byte("x"))
+
+	require.NoError(t, errDeliver, "OnStream for the open stream")
+	assert.True(t, h.ackEliciting, "STREAM frame must mark the packet ack-eliciting")
+	assert.Equalf(t, "response body", string(s.recv.bytes()),
+		"delivered %q, want %q", s.recv.bytes(), "response body")
+	assert.True(t, s.recv.complete(), "stream should be complete after FIN")
+	assert.Truef(t, errNotCreated == ErrStreamState,
+		"STREAM on a not-yet-created client stream = %v, want ErrStreamState", errNotCreated)
 }
 
 // TestConnFrameHandler_OnCrypto_ReassemblesByOffset pins the fix for the real
@@ -190,19 +190,16 @@ func TestConnFrameHandler_OnCrypto_ReassemblesByOffset(t *testing.T) {
 	h := &connFrameHandler{c: c, space: spaceInitial}
 
 	// A later CRYPTO frame arrives before the bytes preceding it.
-	if err := h.OnCrypto(6, []byte("world")); err != nil {
-		t.Fatal(err)
-	}
-	if got := c.cryptoRecv[spaceInitial].read(); len(got) != 0 {
-		t.Fatalf("gapped CRYPTO must not be readable yet, got %q", got)
-	}
+	errLate := h.OnCrypto(6, []byte("world"))
+	gapped := c.cryptoRecv[spaceInitial].read()
 	// The gap fills; the whole prefix becomes available in order.
-	if err := h.OnCrypto(0, []byte("hello ")); err != nil {
-		t.Fatal(err)
-	}
-	if got := string(c.cryptoRecv[spaceInitial].read()); got != "hello world" {
-		t.Fatalf("reassembled CRYPTO = %q, want %q", got, "hello world")
-	}
+	errFill := h.OnCrypto(0, []byte("hello "))
+
+	require.NoError(t, errLate, "OnCrypto for the later fragment")
+	assert.Emptyf(t, gapped, "gapped CRYPTO must not be readable yet, got %q", gapped)
+	require.NoError(t, errFill, "OnCrypto for the fragment that fills the gap")
+	assert.Equalf(t, "hello world", string(c.cryptoRecv[spaceInitial].read()),
+		"reassembled CRYPTO = %q, want %q", c.cryptoRecv[spaceInitial].read(), "hello world")
 }
 
 // TestConnFrameHandler_OnCrypto_BufferCap: CRYPTO has no flow-control window, so
@@ -212,36 +209,32 @@ func TestConnFrameHandler_OnCrypto_BufferCap(t *testing.T) {
 	c := &Conn{}
 	h := &connFrameHandler{c: c, space: spaceInitial}
 
-	// A gapped frame within the cap is buffered.
-	if err := h.OnCrypto(maxCryptoBuffer-1, []byte("x")); err != nil {
-		t.Fatalf("CRYPTO within the cap = %v, want nil", err)
-	}
-	// One byte past the cap is refused.
-	if err := h.OnCrypto(maxCryptoBuffer, []byte("x")); err != ErrCryptoBufferExceeded {
-		t.Fatalf("CRYPTO past the cap = %v, want ErrCryptoBufferExceeded", err)
-	}
-	if code, ok := closeCodeFor(ErrCryptoBufferExceeded); !ok || code != ErrCodeCryptoBufferExceeded {
-		t.Fatalf("closeCodeFor = %#x,%v, want CRYPTO_BUFFER_EXCEEDED", code, ok)
-	}
+	// A gapped frame within the cap is buffered; one byte past the cap is refused.
+	errWithin := h.OnCrypto(maxCryptoBuffer-1, []byte("x"))
+	errPast := h.OnCrypto(maxCryptoBuffer, []byte("x"))
+	code, ok := closeCodeFor(ErrCryptoBufferExceeded)
+
+	assert.NoErrorf(t, errWithin, "CRYPTO within the cap = %v, want nil", errWithin)
+	assert.Truef(t, errPast == ErrCryptoBufferExceeded,
+		"CRYPTO past the cap = %v, want ErrCryptoBufferExceeded", errPast)
+	assert.Truef(t, ok && code == ErrCodeCryptoBufferExceeded,
+		"closeCodeFor = %#x,%v, want CRYPTO_BUFFER_EXCEEDED", code, ok)
 }
 
 func TestConn_OpenUniStream_IDs(t *testing.T) {
 	c := &Conn{peer: TransportParams{InitialMaxStreamsUni: 3, InitialMaxStreamDataUni: 5000}}
+
 	for _, want := range []uint64{2, 6, 10} {
 		s, err := c.OpenUniStream()
-		if err != nil {
-			t.Fatalf("OpenUniStream: %v", err)
-		}
-		if s.ID() != want {
-			t.Fatalf("uni stream ID = %d, want %d", s.ID(), want)
-		}
-		if s.sendMax != 5000 {
-			t.Fatalf("uni sendMax = %d, want 5000 (initial_max_stream_data_uni)", s.sendMax)
-		}
+
+		require.NoError(t, err, "OpenUniStream")
+		assert.Equalf(t, want, s.ID(), "uni stream ID = %d, want %d", s.ID(), want)
+		assert.EqualValuesf(t, 5000, s.sendMax,
+			"uni sendMax = %d, want 5000 (initial_max_stream_data_uni)", s.sendMax)
 	}
-	if _, err := c.OpenUniStream(); err != ErrTooManyStreams {
-		t.Fatalf("4th uni stream err = %v, want ErrTooManyStreams", err)
-	}
+	_, err := c.OpenUniStream()
+	assert.Truef(t, err == ErrTooManyStreams,
+		"4th uni stream err = %v, want ErrTooManyStreams", err)
 }
 
 // TestStream_RecvAndFinished feeds a stream in two chunks (the second with FIN)
@@ -250,48 +243,34 @@ func TestConn_OpenUniStream_IDs(t *testing.T) {
 func TestStream_RecvAndFinished(t *testing.T) {
 	c := &Conn{peer: TransportParams{InitialMaxStreamsBidi: 1}}
 	s, err := c.OpenStream()
-	if err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, err, "OpenStream")
 	h := &connFrameHandler{c: c}
 
-	if err := h.OnStream(s.ID(), 0, false, []byte("hello ")); err != nil {
-		t.Fatal(err)
-	}
-	if got := string(s.Recv()); got != "hello " {
-		t.Fatalf("Recv 1 = %q, want %q", got, "hello ")
-	}
-	if got := string(s.Recv()); got != "" {
-		t.Fatalf("Recv with nothing new = %q, want empty", got)
-	}
-	if s.Finished() {
-		t.Fatal("stream must not be finished before FIN")
-	}
+	errFirst := h.OnStream(s.ID(), 0, false, []byte("hello "))
+	firstRecv := string(s.Recv())
+	emptyRecv := string(s.Recv())
+	finishedBeforeFin := s.Finished()
+	errSecond := h.OnStream(s.ID(), 6, true, []byte("world"))
+	secondRecv := string(s.Recv())
 
-	if err := h.OnStream(s.ID(), 6, true, []byte("world")); err != nil {
-		t.Fatal(err)
-	}
-	if got := string(s.Recv()); got != "world" {
-		t.Fatalf("Recv 2 = %q, want %q", got, "world")
-	}
-	if !s.Finished() {
-		t.Fatal("stream should be finished after FIN with all bytes present")
-	}
+	require.NoError(t, errFirst, "the first STREAM frame")
+	assert.Equalf(t, "hello ", firstRecv, "Recv 1 = %q, want %q", firstRecv, "hello ")
+	assert.Equalf(t, "", emptyRecv, "Recv with nothing new = %q, want empty", emptyRecv)
+	assert.False(t, finishedBeforeFin, "stream must not be finished before FIN")
+	require.NoError(t, errSecond, "the second STREAM frame carrying the FIN")
+	assert.Equalf(t, "world", secondRecv, "Recv 2 = %q, want %q", secondRecv, "world")
+	assert.True(t, s.Finished(), "stream should be finished after FIN with all bytes present")
 }
 
 func TestConn_OpenStream_IDs(t *testing.T) {
 	c := &Conn{peer: TransportParams{InitialMaxStreamsBidi: 4}}
+
 	for want := uint64(0); want < 16; want += 4 {
 		s, err := c.OpenStream()
-		if err != nil {
-			t.Fatalf("OpenStream: %v", err)
-		}
-		if s.ID() != want {
-			t.Fatalf("stream ID = %d, want %d", s.ID(), want)
-		}
-		if c.streams[want] != s {
-			t.Fatalf("stream %d not registered", want)
-		}
+
+		require.NoError(t, err, "OpenStream")
+		assert.Equalf(t, want, s.ID(), "stream ID = %d, want %d", s.ID(), want)
+		assert.Samef(t, s, c.streams[want], "stream %d not registered", want)
 	}
 }
 
@@ -301,19 +280,18 @@ func TestConn_OpenStream_IDs(t *testing.T) {
 // ErrTooManyStreams.
 func TestConformance_RFC9000_Sec46_StreamLimit(t *testing.T) {
 	c := &Conn{peer: TransportParams{InitialMaxStreamsBidi: 2}}
-	if _, err := c.OpenStream(); err != nil {
-		t.Fatalf("stream 1: %v", err)
-	}
-	if _, err := c.OpenStream(); err != nil {
-		t.Fatalf("stream 2: %v", err)
-	}
-	if _, err := c.OpenStream(); err != ErrTooManyStreams {
-		t.Fatalf("stream 3 err = %v, want ErrTooManyStreams", err)
-	}
-
-	// A peer that advertises no bidi streams forbids even the first (§18.2).
 	zero := &Conn{peer: TransportParams{InitialMaxStreamsBidi: 0}}
-	if _, err := zero.OpenStream(); err != ErrTooManyStreams {
-		t.Fatalf("zero-limit err = %v, want ErrTooManyStreams", err)
-	}
+
+	_, err1 := c.OpenStream()
+	_, err2 := c.OpenStream()
+	_, err3 := c.OpenStream()
+	// A peer that advertises no bidi streams forbids even the first (§18.2).
+	_, errZero := zero.OpenStream()
+
+	require.NoError(t, err1, "stream 1")
+	require.NoError(t, err2, "stream 2")
+	assert.Truef(t, err3 == ErrTooManyStreams,
+		"stream 3 err = %v, want ErrTooManyStreams", err3)
+	assert.Truef(t, errZero == ErrTooManyStreams,
+		"zero-limit err = %v, want ErrTooManyStreams", errZero)
 }

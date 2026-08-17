@@ -7,6 +7,9 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // The wake vocabulary added in PR 2b (docs/HTTP3_DESIGN.md §3.3) is additive and
@@ -37,7 +40,6 @@ const waitTimeout = 2 * time.Second
 func TestSignalReady_WakesWaitReadable(t *testing.T) {
 	c := newWakeConn()
 	s := &Stream{id: 0, conn: c, ready: make(chan struct{}, 1)}
-
 	got := make(chan error, 1)
 	go func() { got <- s.WaitReadable(context.Background()) }()
 
@@ -47,11 +49,9 @@ func TestSignalReady_WakesWaitReadable(t *testing.T) {
 
 	select {
 	case err := <-got:
-		if err != nil {
-			t.Fatalf("WaitReadable = %v, want nil", err)
-		}
+		require.NoErrorf(t, err, "WaitReadable = %v, want nil", err)
 	case <-time.After(waitTimeout):
-		t.Fatal("WaitReadable did not wake on signalReady")
+		require.Fail(t, "WaitReadable did not wake on signalReady")
 	}
 }
 
@@ -62,30 +62,23 @@ func TestMaybeBroadcastSendWindow_WakesWaitSendable(t *testing.T) {
 	c := newWakeConn()
 	s := &Stream{id: 0, conn: c, ready: make(chan struct{}, 1), sendBlock: blockCong}
 	c.streams = map[uint64]*Stream{0: s}
-
 	got := make(chan error, 1)
 	go func() { got <- s.WaitSendable(context.Background()) }()
 
 	c.mu.Lock()
 	c.removeInFlight(0) // the flight-freeing choke point sets sendWindowGrew
-	if !c.sendWindowGrew {
-		c.mu.Unlock()
-		t.Fatal("removeInFlight did not set sendWindowGrew")
-	}
+	flagged := c.sendWindowGrew
 	c.maybeBroadcastSendWindow() // end-of-burst sweep signals every open stream
-	if c.sendWindowGrew {
-		c.mu.Unlock()
-		t.Fatal("maybeBroadcastSendWindow did not clear sendWindowGrew")
-	}
+	stillFlagged := c.sendWindowGrew
 	c.mu.Unlock()
 
+	require.True(t, flagged, "removeInFlight did not set sendWindowGrew")
+	require.False(t, stillFlagged, "maybeBroadcastSendWindow did not clear sendWindowGrew")
 	select {
 	case err := <-got:
-		if err != nil {
-			t.Fatalf("WaitSendable = %v, want nil", err)
-		}
+		require.NoErrorf(t, err, "WaitSendable = %v, want nil", err)
 	case <-time.After(waitTimeout):
-		t.Fatal("WaitSendable did not wake on the cwnd broadcast")
+		require.Fail(t, "WaitSendable did not wake on the cwnd broadcast")
 	}
 }
 
@@ -104,14 +97,11 @@ func TestWaitSendable_PaceTimerFires(t *testing.T) {
 
 	select {
 	case err := <-got:
-		if err != nil {
-			t.Fatalf("WaitSendable(blockPace) = %v, want nil (timer)", err)
-		}
-		if elapsed := time.Since(start); elapsed > waitTimeout {
-			t.Fatalf("pacing timer took %v, want prompt", elapsed)
-		}
+		require.NoErrorf(t, err, "WaitSendable(blockPace) = %v, want nil (timer)", err)
+		elapsed := time.Since(start)
+		require.LessOrEqualf(t, elapsed, waitTimeout, "pacing timer took %v, want prompt", elapsed)
 	case <-time.After(waitTimeout):
-		t.Fatal("WaitSendable(blockPace) did not fire its pacing timer with no signal")
+		require.Fail(t, "WaitSendable(blockPace) did not fire its pacing timer with no signal")
 	}
 }
 
@@ -126,16 +116,20 @@ func TestSignalReady_Coalesces(t *testing.T) {
 		c.signalReady(s)
 	}
 
+	var first, second bool
 	select {
 	case <-s.ready:
+		first = true
 	default:
-		t.Fatal("expected exactly one buffered token after repeated signalReady, found none")
 	}
 	select {
 	case <-s.ready:
-		t.Fatal("expected exactly one token, found a second (no coalescing)")
+		second = true
 	default:
 	}
+	require.True(t, first,
+		"expected exactly one buffered token after repeated signalReady, found none")
+	require.False(t, second, "expected exactly one token, found a second (no coalescing)")
 }
 
 // TestSignalReady_NilChannelIsNoOp checks that signalReady on a stream with no
@@ -144,7 +138,9 @@ func TestSignalReady_Coalesces(t *testing.T) {
 func TestSignalReady_NilChannelIsNoOp(t *testing.T) {
 	c := newWakeConn()
 	s := &Stream{id: 0, conn: c} // ready is nil
-	c.signalReady(s)             // must not panic or block
+
+	assert.NotPanics(t, func() { c.signalReady(s) },
+		"signalReady on a stream with no ready channel must not panic or block")
 }
 
 var errTestTerminate = errors.New("quic: test terminate")
@@ -167,11 +163,10 @@ func TestTerminateLocked_WakesAllWaiters(t *testing.T) {
 	for i := 0; i < n; i++ {
 		select {
 		case err := <-got:
-			if !errors.Is(err, errTestTerminate) {
-				t.Fatalf("waiter %d got %v, want errTestTerminate", i, err)
-			}
+			require.Truef(t, errors.Is(err, errTestTerminate),
+				"waiter %d got %v, want errTestTerminate", i, err)
 		case <-time.After(waitTimeout):
-			t.Fatal("a waiter did not wake on terminateLocked")
+			require.Fail(t, "a waiter did not wake on terminateLocked")
 		}
 	}
 }
@@ -197,20 +192,18 @@ func TestTerminateLocked_IdempotentConcurrent(t *testing.T) {
 
 	// done closed exactly once: a receive succeeds and a second close would have
 	// panicked before reaching here.
+	var doneClosed bool
 	select {
 	case <-c.done:
+		doneClosed = true
 	default:
-		t.Fatal("c.done was not closed after terminateLocked")
 	}
 	c.mu.Lock()
 	terminated, closeErr := c.terminated, c.closeErr
 	c.mu.Unlock()
-	if !terminated {
-		t.Fatal("terminated flag not set")
-	}
-	if closeErr == nil {
-		t.Fatal("closeErr not set (first error should win)")
-	}
+	require.True(t, doneClosed, "c.done was not closed after terminateLocked")
+	require.True(t, terminated, "terminated flag not set")
+	require.Error(t, closeErr, "closeErr not set (first error should win)")
 }
 
 // TestRecvState_LockedSnapshot checks that RecvState mirrors Finished /
@@ -219,17 +212,15 @@ func TestRecvState_LockedSnapshot(t *testing.T) {
 	c := newWakeConn()
 	s := &Stream{id: 0, conn: c, ready: make(chan struct{}, 1)}
 
-	if fin, reset, code := s.RecvState(); fin || reset || code != 0 {
-		t.Fatalf("fresh RecvState = (%v,%v,%d), want (false,false,0)", fin, reset, code)
-	}
-
+	freshFin, freshReset, freshCode := s.RecvState()
 	c.mu.Lock()
 	s.recvReset = true
 	s.recvResetCode = 0x0107
 	c.mu.Unlock()
-
 	fin, reset, code := s.RecvState()
-	if !fin || !reset || code != 0x0107 {
-		t.Fatalf("reset RecvState = (%v,%v,%#x), want (true,true,0x0107)", fin, reset, code)
-	}
+
+	require.Truef(t, !freshFin && !freshReset && freshCode == 0,
+		"fresh RecvState = (%v,%v,%d), want (false,false,0)", freshFin, freshReset, freshCode)
+	require.Truef(t, fin && reset && code == 0x0107,
+		"reset RecvState = (%v,%v,%#x), want (true,true,0x0107)", fin, reset, code)
 }

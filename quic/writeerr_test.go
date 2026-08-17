@@ -3,6 +3,9 @@ package quic
 import (
 	"errors"
 	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // Every send path ends in a pc.Write whose error must reach the caller: a datagram
@@ -50,15 +53,13 @@ func TestConn_FlushControl_WriteErrorIsReturned(t *testing.T) {
 	err := c.flushControl()
 	c.mu.Unlock()
 
-	if !errors.Is(err, errSendFailed) {
-		t.Fatalf("flushControl = %v, want the transport's send error %v: the credit grant "+
+	assert.Truef(t, errors.Is(err, errSendFailed),
+		"flushControl = %v, want the transport's send error %v: the credit grant "+
 			"never left the host, and reporting success means a peer that is still blocked "+
 			"looks like a peer that has been unblocked", err, errSendFailed)
-	}
-	if pc.writes != 1 {
-		t.Fatalf("transport saw %d writes, want 1 — the failing write is the one being gated, "+
+	assert.Equalf(t, 1, pc.writes,
+		"transport saw %d writes, want 1 — the failing write is the one being gated, "+
 			"so a different count means this test proved something else", pc.writes)
-	}
 }
 
 // TestStream_Reset_WriteErrorReachesCaller gates quic/send.go's pc.Write, through
@@ -75,14 +76,11 @@ func TestStream_Reset_WriteErrorReachesCaller(t *testing.T) {
 
 	err := s.Reset(0x10)
 
-	if !errors.Is(err, errSendFailed) {
-		t.Fatalf("Stream.Reset = %v, want the transport's send error %v: the RESET_STREAM "+
+	assert.Truef(t, errors.Is(err, errSendFailed),
+		"Stream.Reset = %v, want the transport's send error %v: the RESET_STREAM "+
 			"never left the host while the send side was already marked aborted locally, so "+
 			"the caller believes the peer was told", err, errSendFailed)
-	}
-	if pc.writes != 1 {
-		t.Fatalf("transport saw %d writes, want 1", pc.writes)
-	}
+	assert.Equalf(t, 1, pc.writes, "transport saw %d writes, want 1", pc.writes)
 }
 
 // TestConn_FlushBatch_WriteErrorReachesCaller gates quic/gso.go's lone-datagram
@@ -91,20 +89,15 @@ func TestStream_Reset_WriteErrorReachesCaller(t *testing.T) {
 func TestConn_FlushBatch_WriteErrorReachesCaller(t *testing.T) {
 	c, pc := failWriteConn(1)
 	b := c.newBatch()
-	if err := c.addToBatch(&b, make([]byte, 1200)); err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, c.addToBatch(&b, make([]byte, 1200)), "addToBatch")
 
 	err := c.flushBatch(&b)
 
-	if !errors.Is(err, errSendFailed) {
-		t.Fatalf("flushBatch = %v, want the transport's send error %v: the datagram was "+
+	assert.Truef(t, errors.Is(err, errSendFailed),
+		"flushBatch = %v, want the transport's send error %v: the datagram was "+
 			"sealed and recorded in flight, so swallowing this reports a packet as sent that "+
 			"the host never handed to the network", err, errSendFailed)
-	}
-	if pc.writes != 1 {
-		t.Fatalf("transport saw %d writes, want 1", pc.writes)
-	}
+	assert.Equalf(t, 1, pc.writes, "transport saw %d writes, want 1", pc.writes)
 }
 
 // TestConn_FlushBatch_WriteErrorReachesCaller_Fallback is the same gate on the
@@ -117,21 +110,16 @@ func TestConn_FlushBatch_WriteErrorReachesCaller_Fallback(t *testing.T) {
 	c, pc := failWriteConn(2)
 	b := c.newBatch()
 	for i := 0; i < 3; i++ {
-		if err := c.addToBatch(&b, make([]byte, 1200)); err != nil {
-			t.Fatal(err)
-		}
+		require.NoErrorf(t, c.addToBatch(&b, make([]byte, 1200)), "addToBatch %d", i)
 	}
 
 	err := c.flushBatch(&b)
 
-	if !errors.Is(err, errSendFailed) {
-		t.Fatalf("flushBatch = %v, want the transport's send error %v", err, errSendFailed)
-	}
-	if pc.writes != 2 {
-		t.Fatalf("transport saw %d writes, want 2 — the loop must stop at the failing "+
+	assert.Truef(t, errors.Is(err, errSendFailed),
+		"flushBatch = %v, want the transport's send error %v", err, errSendFailed)
+	assert.Equalf(t, 2, pc.writes,
+		"transport saw %d writes, want 2 — the loop must stop at the failing "+
 			"datagram, and a different count means the abort happened somewhere else", pc.writes)
-	}
-	if len(pc.written) != 1 {
-		t.Fatalf("%d datagrams were delivered, want the 1 that preceded the failure", len(pc.written))
-	}
+	assert.Lenf(t, pc.written, 1,
+		"%d datagrams were delivered, want the 1 that preceded the failure", len(pc.written))
 }

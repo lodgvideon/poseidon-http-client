@@ -1,6 +1,11 @@
 package quic
 
-import "testing"
+import (
+	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+)
 
 // newRetireConn returns a Conn with one bidi stream credit and receive flow
 // control enabled, plus an open stream and a frame handler, for exercising
@@ -9,9 +14,7 @@ func newRetireConn(t *testing.T) (*Conn, *Stream, *connFrameHandler) {
 	t.Helper()
 	c := &Conn{peer: TransportParams{InitialMaxStreamsBidi: 1}, connRecvMax: DefaultConnRecvWindow}
 	s, err := c.OpenStream()
-	if err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, err, "OpenStream on the retirement fixture")
 	return c, s, &connFrameHandler{c: c}
 }
 
@@ -20,24 +23,24 @@ func newRetireConn(t *testing.T) (*Conn, *Stream, *connFrameHandler) {
 func TestConn_StreamRetire_GracefulBothDirs(t *testing.T) {
 	c, s, h := newRetireConn(t)
 	s.finSent = true // request FIN sent
-	if err := h.OnStream(s.ID(), 0, true, []byte("resp")); err != nil {
-		t.Fatal(err)
-	}
-	if _, ok := c.streams[s.ID()]; ok {
-		t.Fatal("stream should be retired once both directions are done")
-	}
+
+	err := h.OnStream(s.ID(), 0, true, []byte("resp"))
+
+	require.NoError(t, err, "the response STREAM frame with FIN")
+	_, stillRouted := c.streams[s.ID()]
+	assert.False(t, stillRouted, "stream should be retired once both directions are done")
 }
 
 // TestConn_StreamRetire_KeptUntilFinSent checks that a stream whose response is
 // complete but whose FIN has not been sent stays in the map.
 func TestConn_StreamRetire_KeptUntilFinSent(t *testing.T) {
 	c, s, h := newRetireConn(t)
-	if err := h.OnStream(s.ID(), 0, true, []byte("resp")); err != nil { // recv complete, finSent false
-		t.Fatal(err)
-	}
-	if _, ok := c.streams[s.ID()]; !ok {
-		t.Fatal("stream must remain until its send side also finishes")
-	}
+
+	err := h.OnStream(s.ID(), 0, true, []byte("resp")) // recv complete, finSent false
+
+	require.NoError(t, err, "the response STREAM frame with FIN")
+	_, stillRouted := c.streams[s.ID()]
+	assert.True(t, stillRouted, "stream must remain until its send side also finishes")
 }
 
 // TestConn_StreamRetire_OnPeerReset checks that a stream is retired when the peer
@@ -45,12 +48,12 @@ func TestConn_StreamRetire_KeptUntilFinSent(t *testing.T) {
 func TestConn_StreamRetire_OnPeerReset(t *testing.T) {
 	c, s, h := newRetireConn(t)
 	s.finSent = true
-	if err := h.OnResetStream(s.ID(), 0, 100); err != nil { // RESET_STREAM, final size 100
-		t.Fatal(err)
-	}
-	if _, ok := c.streams[s.ID()]; ok {
-		t.Fatal("stream should be retired after FIN sent + peer RESET_STREAM")
-	}
+
+	err := h.OnResetStream(s.ID(), 0, 100) // RESET_STREAM, final size 100
+
+	require.NoError(t, err, "the peer's RESET_STREAM")
+	_, stillRouted := c.streams[s.ID()]
+	assert.False(t, stillRouted, "stream should be retired after FIN sent + peer RESET_STREAM")
 }
 
 // TestConn_StreamRetire_EvictsResetStream checks that a stream reset on the send
@@ -62,12 +65,13 @@ func TestConn_StreamRetire_OnPeerReset(t *testing.T) {
 func TestConn_StreamRetire_EvictsResetStream(t *testing.T) {
 	c, s, h := newRetireConn(t)
 	s.sendReset = true // send side aborted, finSent stays false
-	if err := h.OnResetStream(s.ID(), 0, 0); err != nil {
-		t.Fatal(err)
-	}
-	if _, ok := c.streams[s.ID()]; ok {
-		t.Fatal("a stream terminal on both sides (send reset + recv reset) must be retired")
-	}
+
+	err := h.OnResetStream(s.ID(), 0, 0)
+
+	require.NoError(t, err, "the peer's RESET_STREAM")
+	_, stillRouted := c.streams[s.ID()]
+	assert.False(t, stillRouted,
+		"a stream terminal on both sides (send reset + recv reset) must be retired")
 }
 
 // TestConn_StreamRetire_LateFrameIgnored checks that a STREAM frame arriving for a
@@ -75,10 +79,10 @@ func TestConn_StreamRetire_EvictsResetStream(t *testing.T) {
 func TestConn_StreamRetire_LateFrameIgnored(t *testing.T) {
 	_, s, h := newRetireConn(t)
 	s.finSent = true
-	if err := h.OnStream(s.ID(), 0, true, []byte("resp")); err != nil {
-		t.Fatal(err)
-	}
-	if err := h.OnStream(s.ID(), 0, false, []byte("late retransmit")); err != nil {
-		t.Fatalf("late frame for a retired stream = %v, want nil (ignored)", err)
-	}
+	require.NoError(t, h.OnStream(s.ID(), 0, true, []byte("resp")),
+		"the response that retires the stream")
+
+	err := h.OnStream(s.ID(), 0, false, []byte("late retransmit"))
+
+	assert.NoErrorf(t, err, "late frame for a retired stream = %v, want nil (ignored)", err)
 }
