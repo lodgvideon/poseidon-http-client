@@ -6,6 +6,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
 	"github.com/lodgvideon/poseidon-http-client/frame"
 	"github.com/lodgvideon/poseidon-http-client/hpack"
 )
@@ -89,11 +92,8 @@ func TestConformance_RFC7540_Sec1030_PushPromiseMalformedFields_Rejected(t *test
 				StreamEventBuffer: 16,
 				EnablePush:        true,
 			})
-			if err != nil {
-				t.Fatalf("NewClientConn: %v", err)
-			}
+			require.NoError(t, err, "NewClientConn")
 			defer c.Close()
-
 			parent := openParentStream(ctx, t, c)
 
 			// Wait for the ping ACK: after it, the malformed promise has been
@@ -101,29 +101,24 @@ func TestConformance_RFC7540_Sec1030_PushPromiseMalformedFields_Rejected(t *test
 			select {
 			case <-probe.pingAck:
 			case <-ctx.Done():
-				t.Fatal("timed out waiting for ping ACK barrier")
+				require.FailNow(t, "timed out waiting for ping ACK barrier")
 			}
 
-			if _, ok := c.LookupStream(2); ok {
-				t.Fatal("promised stream 2 was registered; malformed promise must be refused")
-			}
-
+			_, registered := c.LookupStream(2)
+			assert.False(t, registered, "promised stream 2 was registered; malformed promise must be refused")
 			var sawProto bool
 			for _, code := range probe.rstCodes {
 				if code == frame.ErrCodeProtocolError {
 					sawProto = true
 				}
 			}
-			if !sawProto {
-				t.Fatalf("no RST_STREAM(PROTOCOL_ERROR); got codes %v", probe.rstCodes)
-			}
-
+			assert.Truef(t, sawProto, "no RST_STREAM(PROTOCOL_ERROR); got codes %v", probe.rstCodes)
 			// The parent stream survives: a stream-level refusal leaves the
 			// connection usable. A pending event would be the malformed promise
 			// leaking through, so there must be none buffered.
-			if got := len(parent.Stream().events); got != 0 {
-				t.Fatalf("parent has %d buffered events; malformed promise leaked to caller", got)
-			}
+			assert.Emptyf(t, parent.Stream().events,
+				"parent has %d buffered events; malformed promise leaked to caller",
+				len(parent.Stream().events))
 		})
 	}
 }
@@ -169,22 +164,16 @@ func TestConformance_RFC7540_Sec8122_PushPromiseTETrailers_Accepted(t *testing.T
 		StreamEventBuffer: 16,
 		EnablePush:        true,
 	})
-	if err != nil {
-		t.Fatalf("NewClientConn: %v", err)
-	}
+	require.NoError(t, err, "NewClientConn")
 	defer c.Close()
-
 	parent := openParentStream(ctx, t, c)
 
-	ev, err := parent.Recv(ctx)
-	if err != nil {
-		t.Fatalf("parent Recv: %v", err)
-	}
-	if ev.Type != EventPushPromise {
-		t.Fatalf("event = %s, want EventPushPromise (te: trailers is a legal request field)", ev.Type)
-	}
+	ev, rerr := parent.Recv(ctx)
+
+	require.NoError(t, rerr, "parent Recv")
+	require.Equalf(t, EventPushPromise, ev.Type,
+		"event = %s, want EventPushPromise (te: trailers is a legal request field)", ev.Type)
 	ev.Release()
-	if _, ok := c.LookupStream(2); !ok {
-		t.Fatal("promised stream 2 not registered; legal push was refused")
-	}
+	_, registered := c.LookupStream(2)
+	assert.True(t, registered, "promised stream 2 not registered; legal push was refused")
 }

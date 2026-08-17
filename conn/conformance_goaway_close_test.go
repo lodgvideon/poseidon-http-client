@@ -5,6 +5,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
 	"github.com/lodgvideon/poseidon-http-client/frame"
 
 	"net"
@@ -40,17 +43,15 @@ func TestConformance_RFC9113_Sec5_4_1_ErrorGoAwayClosesTransport(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	c, err := NewClientConn(ctx, cli, ConnOptions{}.defaulted())
-	if err != nil {
-		t.Fatalf("NewClientConn: %v", err)
-	}
+	require.NoError(t, err, "NewClientConn")
 
-	if code := recvCode(t, "GOAWAY", probe.away); code != frame.ErrCodeProtocolError {
-		t.Errorf("GOAWAY code = %v, want PROTOCOL_ERROR", code)
-	}
+	code := recvCode(t, "GOAWAY", probe.away)
+
+	assert.Equalf(t, frame.ErrCodeProtocolError, code, "GOAWAY code = %v, want PROTOCOL_ERROR", code)
 	select {
 	case <-drainDone:
 	case <-time.After(3 * time.Second):
-		t.Error("client did not close the transport after an error-condition GOAWAY (RFC 9113 §5.4.1)")
+		assert.Fail(t, "client did not close the transport after an error-condition GOAWAY (RFC 9113 §5.4.1)")
 	}
 	release()
 	_ = c.Close()

@@ -3,6 +3,9 @@ package conn
 import (
 	"testing"
 
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
 	"github.com/lodgvideon/poseidon-http-client/frame"
 	"github.com/lodgvideon/poseidon-http-client/hpack"
 )
@@ -31,25 +34,22 @@ func TestConformance_RFC7541_Sec2_2_EvictedStreamHeaderBlockKeepsDecoderSynced(t
 	// Stream 1 is NOT registered — the evicted/reset case. Its block inserts
 	// x-cached into the encoder's (and, once decoded, the decoder's) dynamic table.
 	block1 := enc.EncodeBlock(nil, headers())
-	if err := h.OnHeaders(frame.FrameHeader{
+	require.NoError(t, h.OnHeaders(frame.FrameHeader{
 		Type: frame.FrameHeaders, StreamID: 1,
 		Flags: frame.FlagHeadersEndHeaders | frame.FlagHeadersEndStream,
-	}, block1, nil, 0); err != nil {
-		t.Fatalf("evicted-stream HEADERS returned error: %v", err)
-	}
-
+	}, block1, nil, 0), "evicted-stream HEADERS returned error")
 	// Live stream 3. The encoder now references x-cached by dynamic index; the
 	// decoder can resolve it only if it decoded block1.
 	s := m.addStream(3)
 	block2 := enc.EncodeBlock(nil, headers())
-	if err := h.OnHeaders(frame.FrameHeader{
+
+	err := h.OnHeaders(frame.FrameHeader{
 		Type: frame.FrameHeaders, StreamID: 3,
 		Flags: frame.FlagHeadersEndHeaders | frame.FlagHeadersEndStream,
-	}, block2, nil, 0); err != nil {
-		t.Fatalf("live-stream HEADERS returned error: %v — the decoder desynced because "+
-			"the evicted stream's block was dropped undecoded", err)
-	}
+	}, block2, nil, 0)
 
+	require.NoErrorf(t, err, "live-stream HEADERS returned error: %v — the decoder desynced because "+
+		"the evicted stream's block was dropped undecoded", err)
 	ev := <-s.events
 	var found bool
 	for _, f := range ev.Headers {
@@ -57,8 +57,6 @@ func TestConformance_RFC7541_Sec2_2_EvictedStreamHeaderBlockKeepsDecoderSynced(t
 			found = true
 		}
 	}
-	if !found {
-		t.Fatalf("x-cached: yes missing from stream 3 response — the dynamic-index "+
-			"reference resolved wrongly, so the decoder was out of sync: %+v", ev.Headers)
-	}
+	assert.Truef(t, found, "x-cached: yes missing from stream 3 response — the dynamic-index "+
+		"reference resolved wrongly, so the decoder was out of sync: %+v", ev.Headers)
 }

@@ -3,6 +3,9 @@ package conn
 import (
 	"testing"
 
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
 	"github.com/lodgvideon/poseidon-http-client/frame"
 	"github.com/lodgvideon/poseidon-http-client/hpack"
 )
@@ -34,30 +37,22 @@ func TestConformance_RFC7540_Sec6_6_PushPromiseSpanningContinuation_Reassembled(
 	mid := len(block) / 2
 
 	// PUSH_PROMISE fragment without END_HEADERS — must buffer, not decode.
-	if err := h.OnPushPromise(frame.FrameHeader{
+	require.NoError(t, h.OnPushPromise(frame.FrameHeader{
 		Type: frame.FramePushPromise, StreamID: 1, Flags: 0,
-	}, 2, frame.HeaderBlock(block[:mid]), 0); err != nil {
-		t.Fatalf("PUSH_PROMISE fragment returned error: %v (it must be buffered, not decoded)", err)
-	}
+	}, 2, frame.HeaderBlock(block[:mid]), 0),
+		"PUSH_PROMISE fragment returned error (it must be buffered, not decoded)")
 
 	// CONTINUATION completes the block.
-	if err := h.OnContinuation(frame.FrameHeader{
+	err := h.OnContinuation(frame.FrameHeader{
 		Type: frame.FrameContinuation, StreamID: 1, Flags: frame.FlagContinuationEndHeaders,
-	}, frame.HeaderBlock(block[mid:])); err != nil {
-		t.Fatalf("PUSH_PROMISE CONTINUATION returned error: %v — a spanning promise must "+
-			"reassemble, not decode truncated and tear the connection down", err)
-	}
+	}, frame.HeaderBlock(block[mid:]))
 
+	require.NoErrorf(t, err, "PUSH_PROMISE CONTINUATION returned error: %v — a spanning promise must "+
+		"reassemble, not decode truncated and tear the connection down", err)
 	ev := <-parent.events
-	if ev.Type != EventPushPromise {
-		t.Fatalf("event = %s, want EventPushPromise", ev.Type)
-	}
-	if ev.PushStreamID != 2 {
-		t.Fatalf("PushStreamID = %d, want 2", ev.PushStreamID)
-	}
-	if len(ev.Headers) != 4 {
-		t.Fatalf("promised header count = %d, want 4 — the reassembled block decoded short",
-			len(ev.Headers))
-	}
+	require.Equalf(t, EventPushPromise, ev.Type, "event = %s, want EventPushPromise", ev.Type)
+	assert.EqualValuesf(t, 2, ev.PushStreamID, "PushStreamID = %d, want 2", ev.PushStreamID)
+	assert.Lenf(t, ev.Headers, 4,
+		"promised header count = %d, want 4 — the reassembled block decoded short", len(ev.Headers))
 	ev.Release()
 }
