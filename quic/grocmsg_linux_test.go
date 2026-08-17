@@ -8,6 +8,9 @@ import (
 	"syscall"
 	"testing"
 	"unsafe"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // appendCmsg appends one control message {level, typ} carrying body, laid out
@@ -66,9 +69,12 @@ func TestParseGROSegmentSize_MatchesStdlib(t *testing.T) {
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			want := stdlibGROSegmentSize(t, c.oob)
-			if got := parseGROSegmentSize(c.oob); got != want {
-				t.Errorf("parseGROSegmentSize = %d, stdlib walk = %d", got, want)
-			}
+
+			got := parseGROSegmentSize(c.oob)
+
+			assert.Equalf(t, want, got,
+				"parseGROSegmentSize = %d, stdlib walk = %d — the hand-walk replaced "+
+					"syscall.ParseSocketControlMessage and must agree with it", got, want)
 		})
 	}
 }
@@ -126,9 +132,11 @@ func TestParseGROSegmentSize_MalformedYieldsZero(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			if got := parseGROSegmentSize(c.oob); got != 0 {
-				t.Errorf("parseGROSegmentSize = %d on a malformed buffer, want 0", got)
-			}
+			got := parseGROSegmentSize(c.oob)
+
+			assert.Zerof(t, got,
+				"parseGROSegmentSize = %d on a malformed buffer, want 0 — the parse reads a "+
+					"length out of kernel-filled memory, so every bounds check has to hold", got)
 		})
 	}
 }
@@ -139,12 +147,14 @@ func TestParseGROSegmentSize_MalformedYieldsZero(t *testing.T) {
 // allocation just to learn the segment size. Measured at 1.00 before, 0 after.
 func TestParseGROSegmentSize_DoesNotAllocate(t *testing.T) {
 	oob := groCmsg(1200)
-	if got := parseGROSegmentSize(oob); got != 1200 {
-		t.Fatalf("setup: parseGROSegmentSize = %d, want 1200", got)
-	}
-	if n := testing.AllocsPerRun(500, func() { sinkSegSize = parseGROSegmentSize(oob) }); n != 0 {
-		t.Errorf("parseGROSegmentSize allocates %.2f times per coalesced recvmsg, want 0", n)
-	}
+	// testify never runs inside the measured closure below: it reflects and
+	// allocates, and AllocsPerRun counts the whole process.
+	require.Equal(t, 1200, parseGROSegmentSize(oob), "setup: the fixture must parse to 1200")
+
+	n := testing.AllocsPerRun(500, func() { sinkSegSize = parseGROSegmentSize(oob) })
+
+	assert.Zerof(t, n,
+		"parseGROSegmentSize allocates %.2f times per coalesced recvmsg, want 0", n)
 }
 
 // sinkSegSize keeps the measured call from being optimised away.

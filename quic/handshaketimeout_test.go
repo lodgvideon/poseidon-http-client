@@ -6,6 +6,9 @@ import (
 	"testing"
 	"testing/synctest"
 	"time"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // The whole-handshake bound (WithHandshakeTimeout), measured rather than
@@ -49,9 +52,7 @@ func blackholeConn(t *testing.T, opts ...ConnOption) *Conn {
 	}
 	tp := AppendTransportParams(nil, LocalTransportParams{InitialMaxData: 1 << 20})
 	c, err := NewConn(pc, &tls.Config{ServerName: "example.com"}, tp, opts...)
-	if err != nil {
-		t.Fatalf("NewConn: %v", err)
-	}
+	require.NoError(t, err, "NewConn over the blackhole transport")
 	return c
 }
 
@@ -84,9 +85,7 @@ func lossyHandshake(t *testing.T, outage time.Duration, opts ...ConnOption) (tim
 		dropWrite: func(int) bool { return time.Now().Before(pathUp) }}
 
 	client, err := NewConn(pc, &tls.Config{ServerName: "example.com", RootCAs: pool}, clientTP, opts...)
-	if err != nil {
-		t.Fatalf("NewConn: %v", err)
-	}
+	require.NoError(t, err, "NewConn over the lossy path")
 	serverTP := concat(clientTP,
 		tpBytes(tpInitialSourceConnectionID, serverSCID),
 		tpBytes(tpOriginalDestinationConnectionID, client.origDCID))
@@ -171,44 +170,38 @@ func TestConn_HandshakeTimeout_RescuesALiveHandshake(t *testing.T) {
 	t.Run("control: a shorter outage completes under the default", func(t *testing.T) {
 		synctest.Test(t, func(t *testing.T) {
 			elapsed, err := lossyHandshake(t, shortenedOutage)
-			if err != nil {
-				t.Fatalf("handshake failed after %v across a %v outage: %v — the peer must "+
-					"answer here, or the experiment below fails for the wrong reason",
-					elapsed, shortenedOutage, err)
-			}
-			if elapsed >= defaultHandshakeTimeout {
-				t.Errorf("completed in %v, at or past the %v default — the control has to "+
+
+			require.NoErrorf(t, err, "handshake failed after %v across a %v outage — the peer must "+
+				"answer here, or the experiment below fails for the wrong reason",
+				elapsed, shortenedOutage)
+			assert.Lessf(t, elapsed, defaultHandshakeTimeout,
+				"completed in %v, at or past the %v default — the control has to "+
 					"land inside the default bound to be a control", elapsed, defaultHandshakeTimeout)
-			}
 		})
 	})
 
 	t.Run("default bound abandons it", func(t *testing.T) {
 		synctest.Test(t, func(t *testing.T) {
 			elapsed, err := lossyHandshake(t, outage)
-			if err == nil {
-				t.Fatalf("handshake completed in %v under the default bound; then this "+
-					"test no longer stages the cut-off it exists to measure", elapsed)
-			}
-			if elapsed != defaultHandshakeTimeout {
-				t.Errorf("gave up after %v, want exactly %v — it must be the bound that "+
+
+			require.Errorf(t, err, "handshake completed in %v under the default bound; then this "+
+				"test no longer stages the cut-off it exists to measure", elapsed)
+			assert.Equalf(t, defaultHandshakeTimeout, elapsed,
+				"gave up after %v, want exactly %v — it must be the bound that "+
 					"ends this, not some other timer", elapsed, defaultHandshakeTimeout)
-			}
 		})
 	})
 
 	t.Run("raised bound completes the same handshake", func(t *testing.T) {
 		synctest.Test(t, func(t *testing.T) {
 			elapsed, err := lossyHandshake(t, outage, WithHandshakeTimeout(60*time.Second))
-			if err != nil {
-				t.Fatalf("handshake failed after %v with a 60s bound: %v — the peer is "+
-					"alive and answers once the path is back, so only the bound could "+
-					"have stopped it", elapsed, err)
-			}
-			if elapsed <= defaultHandshakeTimeout {
-				t.Errorf("completed in %v, inside the %v default — then the raised bound "+
+
+			require.NoErrorf(t, err, "handshake failed after %v with a 60s bound — the peer is "+
+				"alive and answers once the path is back, so only the bound could "+
+				"have stopped it", elapsed)
+			assert.Greaterf(t, elapsed, defaultHandshakeTimeout,
+				"completed in %v, inside the %v default — then the raised bound "+
 					"bought nothing and this proves nothing", elapsed, defaultHandshakeTimeout)
-			}
 		})
 	})
 }
@@ -271,18 +264,12 @@ func TestConn_HandshakeTimeout_BoundIsHonoured(t *testing.T) {
 				err := c.Establish(ctx)
 				elapsed := time.Since(start)
 
-				if err == nil {
-					t.Fatal("Establish succeeded against a blackhole; it can only end by " +
-						"running its bound out, so the measurement below would be meaningless")
-				}
-				if !isTimeout(err) {
-					t.Fatalf("Establish returned %v, which isTimeout rejects — the bound "+
-						"expired, so the caller must see a timeout", err)
-				}
-				if elapsed != tc.want {
-					t.Errorf("handshake gave up after %v, want exactly %v (%s)",
-						elapsed, tc.want, tc.explain)
-				}
+				require.Error(t, err, "Establish succeeded against a blackhole; it can only end by "+
+					"running its bound out, so the measurement below would be meaningless")
+				require.Truef(t, isTimeout(err), "Establish returned %v, which isTimeout rejects — "+
+					"the bound expired, so the caller must see a timeout", err)
+				assert.Equalf(t, tc.want, elapsed, "handshake gave up after %v, want exactly %v (%s)",
+					elapsed, tc.want, tc.explain)
 			})
 		})
 	}

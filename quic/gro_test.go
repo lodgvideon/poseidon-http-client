@@ -6,6 +6,9 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // groPC is a batched-receive PacketConn: it implements groReader, so the QUIC
@@ -53,12 +56,10 @@ func groServerKit(t *testing.T) (sealer *Sealer, opener *Opener, dcid []byte) {
 	dcid = []byte("grotest0")
 	keys, _ := InitialKeys(dcid)
 	var err error
-	if sealer, err = NewSealer(keys); err != nil {
-		t.Fatal(err)
-	}
-	if opener, err = NewOpener(keys); err != nil {
-		t.Fatal(err)
-	}
+	sealer, err = NewSealer(keys)
+	require.NoError(t, err, "NewSealer for the server's 1-RTT keys")
+	opener, err = NewOpener(keys)
+	require.NoError(t, err, "NewOpener for the client's 1-RTT receive keys")
 	return sealer, opener, dcid
 }
 
@@ -76,9 +77,7 @@ func groRecvConn(t *testing.T, pc PacketConn, opener *Opener, dcid []byte, seale
 	}
 	c.keys.OneRTT = opener
 	s, err := c.OpenStream() // stream 0 — the one the server replies on
-	if err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, err, "OpenStream for the request the server replies on")
 	return c, s
 }
 
@@ -106,12 +105,13 @@ func concatBurst(t *testing.T, pkts [][]byte) (burst []byte, segSize int) {
 	t.Helper()
 	segSize = len(pkts[0])
 	for i, p := range pkts {
-		if i < len(pkts)-1 && len(p) != segSize {
-			t.Fatalf("packet %d is %d bytes, want segSize %d (GRO coalesces same-size datagrams; only the last may be shorter)", i, len(p), segSize)
+		if i < len(pkts)-1 {
+			require.Lenf(t, p, segSize,
+				"packet %d is %d bytes, want segSize %d (GRO coalesces same-size datagrams; only the last may be shorter)",
+				i, len(p), segSize)
 		}
-		if len(p) > segSize {
-			t.Fatalf("packet %d is %d bytes, exceeds segSize %d", i, len(p), segSize)
-		}
+		require.LessOrEqualf(t, len(p), segSize,
+			"packet %d is %d bytes, exceeds segSize %d", i, len(p), segSize)
 		burst = append(burst, p...)
 	}
 	return burst, segSize
@@ -130,21 +130,16 @@ func TestGRO_CoalescedBurstIsOneReadGRO(t *testing.T) {
 	pc := &groPC{burst: burst, segSize: segSize}
 	c, s := groRecvConn(t, pc, opener, dcid, sealer)
 
-	if err := c.Poll(context.Background()); err != nil {
-		t.Fatalf("Poll: %v", err)
-	}
-	if got, want := string(s.Recv()), "aaaabbbbccccddddeeee"; got != want {
-		t.Fatalf("Recv = %q, want %q (GRO split must reassemble every coalesced datagram in order)", got, want)
-	}
-	if !s.Finished() {
-		t.Fatal("stream should be finished after the FIN datagram in the burst")
-	}
-	if pc.dataReads != 1 {
-		t.Fatalf("dataReads = %d, want 1 (%d datagrams delivered by ONE ReadGRO)", pc.dataReads, len(pkts))
-	}
-	if len(pc.written) != 1 {
-		t.Fatalf("wrote %d packets, want 1 (single batched ACK for the whole burst)", len(pc.written))
-	}
+	err := c.Poll(context.Background())
+
+	require.NoError(t, err, "Poll must drain the coalesced burst")
+	assert.Equalf(t, "aaaabbbbccccddddeeee", string(s.Recv()),
+		"GRO split must reassemble every coalesced datagram in order")
+	assert.True(t, s.Finished(), "stream should be finished after the FIN datagram in the burst")
+	assert.Equalf(t, 1, pc.dataReads,
+		"dataReads = %d, want 1 (%d datagrams delivered by ONE ReadGRO)", pc.dataReads, len(pkts))
+	assert.Lenf(t, pc.written, 1,
+		"wrote %d packets, want 1 (single batched ACK for the whole burst)", len(pc.written))
 	t.Logf("reads/op: %d datagrams via %d ReadGRO (a non-GRO transport needs %d Reads)", len(pkts), pc.dataReads, len(pkts))
 }
 
@@ -161,21 +156,18 @@ func TestGRO_CoalescedBurstShorterLastSegment(t *testing.T) {
 	chunks := []string{big, "y"}
 	pkts := groStreamBurst(t, sealer, chunks)
 	burst, segSize := concatBurst(t, pkts)
-	if len(pkts[len(pkts)-1]) >= segSize {
-		t.Fatalf("test setup: last packet %d not shorter than segSize %d", len(pkts[len(pkts)-1]), segSize)
-	}
+	require.Lessf(t, len(pkts[len(pkts)-1]), segSize,
+		"test setup: last packet %d not shorter than segSize %d — then this does not stage the tail clamp",
+		len(pkts[len(pkts)-1]), segSize)
 	pc := &groPC{burst: burst, segSize: segSize}
 	c, s := groRecvConn(t, pc, opener, dcid, sealer)
 
-	if err := c.Poll(context.Background()); err != nil {
-		t.Fatalf("Poll: %v", err)
-	}
-	if got, want := string(s.Recv()), big+"y"; got != want {
-		t.Fatalf("Recv = %q, want %q (a shorter final segment must reassemble correctly)", got, want)
-	}
-	if pc.dataReads != 1 {
-		t.Fatalf("dataReads = %d, want 1", pc.dataReads)
-	}
+	err := c.Poll(context.Background())
+
+	require.NoError(t, err, "Poll must drain the burst whose last segment is short")
+	assert.Equalf(t, big+"y", string(s.Recv()),
+		"a shorter final segment must reassemble correctly")
+	assert.Equalf(t, 1, pc.dataReads, "dataReads = %d, want 1", pc.dataReads)
 }
 
 // TestGRO_SingleDatagramSegSizeZero proves the segSize==0 path is the unchanged
@@ -188,18 +180,13 @@ func TestGRO_SingleDatagramSegSizeZero(t *testing.T) {
 	pc := &groPC{burst: pkt, segSize: 0} // segSize 0 = one datagram
 	c, s := groRecvConn(t, pc, opener, dcid, sealer)
 
-	if err := c.Poll(context.Background()); err != nil {
-		t.Fatalf("Poll: %v", err)
-	}
-	if got := string(s.Recv()); got != "response body" {
-		t.Fatalf("Recv = %q, want %q", got, "response body")
-	}
-	if !s.Finished() {
-		t.Fatal("stream should be finished")
-	}
-	if pc.dataReads != 1 {
-		t.Fatalf("dataReads = %d, want 1", pc.dataReads)
-	}
+	err := c.Poll(context.Background())
+
+	require.NoError(t, err, "Poll on the un-coalesced (segSize 0) path")
+	assert.Equal(t, "response body", string(s.Recv()),
+		"segSize 0 must take the unchanged single-datagram receive")
+	assert.True(t, s.Finished(), "stream should be finished")
+	assert.Equalf(t, 1, pc.dataReads, "dataReads = %d, want 1", pc.dataReads)
 }
 
 // TestGRO_FallbackNonGROOneReadPerDatagram proves the pre-GRO behavior is
@@ -213,15 +200,13 @@ func TestGRO_FallbackNonGROOneReadPerDatagram(t *testing.T) {
 	pc := &drainingPC{pkts: pkts} // no ReadGRO method → non-GRO fallback path
 	c, s := groRecvConn(t, pc, opener, dcid, sealer)
 
-	if err := c.Poll(context.Background()); err != nil {
-		t.Fatalf("Poll: %v", err)
-	}
-	if got, want := string(s.Recv()), "aaaabbbbccccdddd"; got != want {
-		t.Fatalf("Recv = %q, want %q", got, want)
-	}
-	if pc.i != len(pkts) {
-		t.Fatalf("non-GRO reads = %d, want %d (one Read per datagram, unchanged)", pc.i, len(pkts))
-	}
+	err := c.Poll(context.Background())
+
+	require.NoError(t, err, "Poll on the non-GRO fallback path")
+	assert.Equal(t, "aaaabbbbccccdddd", string(s.Recv()),
+		"the fallback path must reassemble the same stream GRO does")
+	assert.Equalf(t, len(pkts), pc.i,
+		"non-GRO reads = %d, want %d (one Read per datagram, unchanged)", pc.i, len(pkts))
 }
 
 // TestGRO_RecvGROFallbackSingleDatagram exercises the transport primitive's
@@ -232,23 +217,19 @@ func TestGRO_FallbackNonGROOneReadPerDatagram(t *testing.T) {
 func TestGRO_RecvGROFallbackSingleDatagram(t *testing.T) {
 	want := []byte("one whole datagram")
 	buf := make([]byte, 64)
+
 	n, seg, err := RecvGRO(nil, nil, bytes.NewReader(want), buf)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if seg != 0 {
-		t.Fatalf("segSize = %d, want 0 (a plain read is one datagram)", seg)
-	}
-	if !bytes.Equal(buf[:n], want) {
-		t.Fatalf("read %q, want %q", buf[:n], want)
-	}
+
+	require.NoError(t, err, "RecvGRO with a nil RawConn must fall back, not fail")
+	assert.Zerof(t, seg, "segSize = %d, want 0 (a plain read is one datagram)", seg)
+	assert.Equalf(t, want, buf[:n], "read %q, want %q", buf[:n], want)
 }
 
 // TestGRO_EnableGRONilIsNoop checks the enable primitive is a harmless no-op when
 // there is no raw fd — the best-effort contract (a failure to enable GRO must never
 // break receiving; the path just stays single-datagram).
 func TestGRO_EnableGRONilIsNoop(t *testing.T) {
-	if err := EnableGRO(nil); err != nil {
-		t.Fatalf("EnableGRO(nil) = %v, want nil", err)
-	}
+	err := EnableGRO(nil)
+
+	assert.NoErrorf(t, err, "EnableGRO(nil) = %v, want nil (best-effort: it must never break receiving)", err)
 }
