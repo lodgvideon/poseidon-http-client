@@ -19,6 +19,9 @@ import (
 	"errors"
 	"testing"
 
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
 	"github.com/lodgvideon/poseidon-http-client/frame"
 	"github.com/lodgvideon/poseidon-http-client/hpack"
 )
@@ -55,19 +58,14 @@ func drain(s *Stream) {
 // wantCLStreamError asserts the §8.1.2.6 remedy: a STREAM PROTOCOL_ERROR.
 func wantCLStreamError(t *testing.T, err error, what string) {
 	t.Helper()
-	if err == nil {
-		t.Fatalf("%s: accepted, want a stream error — RFC 7540 §8.1.2.6: a response "+
-			"whose Content-Length does not equal the DATA received is malformed and "+
-			"\"Clients MUST NOT accept a malformed response\"", what)
-	}
+	require.Errorf(t, err, "%s: accepted, want a stream error — RFC 7540 §8.1.2.6: a response "+
+		"whose Content-Length does not equal the DATA received is malformed and "+
+		"\"Clients MUST NOT accept a malformed response\"", what)
 	var se *StreamError
-	if !errors.As(err, &se) {
-		t.Fatalf("%s: error = %v (%T), want *StreamError — §8.1.2.6 requires a STREAM "+
+	require.Truef(t, errors.As(err, &se),
+		"%s: error = %v (%T), want *StreamError — §8.1.2.6 requires a STREAM "+
 			"error, so one malformed response does not kill the pooled connection", what, err, err)
-	}
-	if se.Code != frame.ErrCodeProtocolError {
-		t.Errorf("%s: code = %v, want PROTOCOL_ERROR", what, se.Code)
-	}
+	assert.Equalf(t, frame.ErrCodeProtocolError, se.Code, "%s: code = %v, want PROTOCOL_ERROR", what, se.Code)
 }
 
 // TestConformance_RFC7540_Sec8_1_2_6_ContentLengthMismatch_Malformed pins that a
@@ -78,12 +76,13 @@ func TestConformance_RFC7540_Sec8_1_2_6_ContentLengthMismatch_Malformed(t *testi
 		m.bufSize = 64
 		h := newConnHandler(m, hpack.NewDecoder())
 		s := m.addStream(1)
-		if err := deliverBlock(t, h, 1, respFields("200", "content-length", "5"), false); err != nil {
-			t.Fatalf("headers: %v", err)
-		}
+		require.NoError(t, deliverBlock(t, h, 1, respFields("200", "content-length", "5"), false), "headers")
 		drain(s)
+
 		// Declared 5, send 10 with END_STREAM.
-		wantCLStreamError(t, deliverData(h, 1, make([]byte, 10), true), "declared 5, received 10")
+		err := deliverData(h, 1, make([]byte, 10), true)
+
+		wantCLStreamError(t, err, "declared 5, received 10")
 	})
 
 	t.Run("short_body_truncation", func(t *testing.T) {
@@ -91,11 +90,12 @@ func TestConformance_RFC7540_Sec8_1_2_6_ContentLengthMismatch_Malformed(t *testi
 		m.bufSize = 64
 		h := newConnHandler(m, hpack.NewDecoder())
 		s := m.addStream(1)
-		if err := deliverBlock(t, h, 1, respFields("200", "content-length", "10"), false); err != nil {
-			t.Fatalf("headers: %v", err)
-		}
+		require.NoError(t, deliverBlock(t, h, 1, respFields("200", "content-length", "10"), false), "headers")
 		drain(s)
-		wantCLStreamError(t, deliverData(h, 1, make([]byte, 5), true), "declared 10, received 5")
+
+		err := deliverData(h, 1, make([]byte, 5), true)
+
+		wantCLStreamError(t, err, "declared 10, received 5")
 	})
 
 	t.Run("declared_body_but_empty", func(t *testing.T) {
@@ -103,9 +103,11 @@ func TestConformance_RFC7540_Sec8_1_2_6_ContentLengthMismatch_Malformed(t *testi
 		m.bufSize = 64
 		h := newConnHandler(m, hpack.NewDecoder())
 		m.addStream(1)
+
 		// END_STREAM on the HEADERS block: 0 DATA bytes, Content-Length 5.
-		wantCLStreamError(t, deliverBlock(t, h, 1, respFields("200", "content-length", "5"), true),
-			"declared 5, received 0")
+		err := deliverBlock(t, h, 1, respFields("200", "content-length", "5"), true)
+
+		wantCLStreamError(t, err, "declared 5, received 0")
 	})
 
 	t.Run("invalid_content_length_with_body", func(t *testing.T) {
@@ -116,11 +118,12 @@ func TestConformance_RFC7540_Sec8_1_2_6_ContentLengthMismatch_Malformed(t *testi
 		m.bufSize = 64
 		h := newConnHandler(m, hpack.NewDecoder())
 		s := m.addStream(1)
-		if err := deliverBlock(t, h, 1, respFields("200", "content-length", "notanumber"), false); err != nil {
-			t.Fatalf("headers: %v", err)
-		}
+		require.NoError(t, deliverBlock(t, h, 1, respFields("200", "content-length", "notanumber"), false), "headers")
 		drain(s)
-		wantCLStreamError(t, deliverData(h, 1, make([]byte, 5), true), "content-length notanumber")
+
+		err := deliverData(h, 1, make([]byte, 5), true)
+
+		wantCLStreamError(t, err, "content-length notanumber")
 	})
 }
 
@@ -132,13 +135,12 @@ func TestConformance_RFC7540_Sec8_1_2_6_ContentLengthMatch_Accepted(t *testing.T
 		m.bufSize = 64
 		h := newConnHandler(m, hpack.NewDecoder())
 		s := m.addStream(1)
-		if err := deliverBlock(t, h, 1, respFields("200", "content-length", "5"), false); err != nil {
-			t.Fatalf("headers: %v", err)
-		}
+		require.NoError(t, deliverBlock(t, h, 1, respFields("200", "content-length", "5"), false), "headers")
 		drain(s)
-		if err := deliverData(h, 1, make([]byte, 5), true); err != nil {
-			t.Errorf("declared 5, received 5: %v — an exact match is not malformed", err)
-		}
+
+		err := deliverData(h, 1, make([]byte, 5), true)
+
+		assert.NoErrorf(t, err, "declared 5, received 5: %v — an exact match is not malformed", err)
 	})
 
 	t.Run("no_content_length", func(t *testing.T) {
@@ -146,13 +148,12 @@ func TestConformance_RFC7540_Sec8_1_2_6_ContentLengthMatch_Accepted(t *testing.T
 		m.bufSize = 64
 		h := newConnHandler(m, hpack.NewDecoder())
 		s := m.addStream(1)
-		if err := deliverBlock(t, h, 1, respFields("200"), false); err != nil {
-			t.Fatalf("headers: %v", err)
-		}
+		require.NoError(t, deliverBlock(t, h, 1, respFields("200"), false), "headers")
 		drain(s)
-		if err := deliverData(h, 1, make([]byte, 12345), true); err != nil {
-			t.Errorf("no Content-Length: %v — nothing to check against", err)
-		}
+
+		err := deliverData(h, 1, make([]byte, 12345), true)
+
+		assert.NoErrorf(t, err, "no Content-Length: %v — nothing to check against", err)
 	})
 
 	t.Run("204_with_content_length_exempt", func(t *testing.T) {
@@ -160,11 +161,13 @@ func TestConformance_RFC7540_Sec8_1_2_6_ContentLengthMatch_Accepted(t *testing.T
 		m.bufSize = 64
 		h := newConnHandler(m, hpack.NewDecoder())
 		m.addStream(1)
+
 		// §8.1.2.6: a no-payload status "can have a non-zero content-length header
 		// field, even though no content is included in DATA frames".
-		if err := deliverBlock(t, h, 1, respFields("204", "content-length", "5"), true); err != nil {
-			t.Errorf("204 + Content-Length: %v — no-payload statuses are exempt from the DATA check", err)
-		}
+		err := deliverBlock(t, h, 1, respFields("204", "content-length", "5"), true)
+
+		assert.NoErrorf(t, err,
+			"204 + Content-Length: %v — no-payload statuses are exempt from the DATA check", err)
 	})
 
 	t.Run("head_response_content_length_exempt", func(t *testing.T) {
@@ -173,9 +176,11 @@ func TestConformance_RFC7540_Sec8_1_2_6_ContentLengthMatch_Accepted(t *testing.T
 		h := newConnHandler(m, hpack.NewDecoder())
 		s := m.addStream(1)
 		s.reqIsHead = true // the request was HEAD (RFC 9110 §9.3.2)
+
 		// A HEAD response carries the GET Content-Length but no body.
-		if err := deliverBlock(t, h, 1, respFields("200", "content-length", "100"), true); err != nil {
-			t.Errorf("HEAD response + Content-Length 100, no body: %v — HEAD responses are exempt", err)
-		}
+		err := deliverBlock(t, h, 1, respFields("200", "content-length", "100"), true)
+
+		assert.NoErrorf(t, err,
+			"HEAD response + Content-Length 100, no body: %v — HEAD responses are exempt", err)
 	})
 }

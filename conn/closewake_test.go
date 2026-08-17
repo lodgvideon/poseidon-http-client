@@ -8,6 +8,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/require"
+
 	"github.com/lodgvideon/poseidon-http-client/frame"
 )
 
@@ -53,12 +55,11 @@ func TestStream_CloseWakesASenderParkedOnCredit(t *testing.T) {
 	time.Sleep(100 * time.Millisecond)
 
 	_ = s.ref().Close()
+
 	select {
 	case err := <-done:
-		if !errors.Is(err, ErrStreamClosed) {
-			t.Fatalf("Send = %v, want ErrStreamClosed", err)
-		}
+		require.Truef(t, errors.Is(err, ErrStreamClosed), "Send = %v, want ErrStreamClosed", err)
 	case <-time.After(3 * time.Second):
-		t.Fatal("Send still parked 3s after Close; only its own context would free it")
+		require.FailNow(t, "Send still parked 3s after Close; only its own context would free it")
 	}
 }

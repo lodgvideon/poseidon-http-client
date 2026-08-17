@@ -3,6 +3,9 @@ package conn
 import (
 	"testing"
 
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
 	"github.com/lodgvideon/poseidon-http-client/frame"
 	"github.com/lodgvideon/poseidon-http-client/hpack"
 )
@@ -21,7 +24,9 @@ func TestConformance_RFC7540_Sec8_1_DataBeforeResponseHeaders_Malformed(t *testi
 	m.addStream(1) // fresh stream: no response HEADERS received yet
 
 	fh := frame.FrameHeader{Type: frame.FrameData, StreamID: 1, Length: 5, Flags: frame.FlagDataEndStream}
+
 	err := h.OnData(fh, []byte("hello"), 0)
+
 	wantStreamProtocolError(t, err, "DATA before response HEADERS")
 }
 
@@ -33,17 +38,16 @@ func TestConformance_RFC7540_Sec8_1_DataAfterResponseHeaders_Accepted(t *testing
 	h := newConnHandler(m, hpack.NewDecoder())
 	s := m.addStream(1)
 
-	if err := deliverBlock(t, h, 1, []hpack.HeaderField{{Name: []byte(":status"), Value: []byte("200")}}, false); err != nil {
-		t.Fatalf("response HEADERS rejected: %v", err)
-	}
+	require.NoError(t,
+		deliverBlock(t, h, 1, []hpack.HeaderField{{Name: []byte(":status"), Value: []byte("200")}}, false),
+		"response HEADERS rejected")
 	<-s.events // consume the EventHeaders
-
 	fh := frame.FrameHeader{Type: frame.FrameData, StreamID: 1, Length: 5, Flags: frame.FlagDataEndStream}
-	if err := h.OnData(fh, []byte("hello"), 0); err != nil {
-		t.Fatalf("DATA after response HEADERS rejected: %v — a body following the response is valid", err)
-	}
+
+	err := h.OnData(fh, []byte("hello"), 0)
+
+	require.NoErrorf(t, err,
+		"DATA after response HEADERS rejected: %v — a body following the response is valid", err)
 	ev := <-s.events
-	if ev.Type != EventData {
-		t.Fatalf("event = %s, want EventData", ev.Type)
-	}
+	assert.Equalf(t, EventData, ev.Type, "event = %s, want EventData", ev.Type)
 }

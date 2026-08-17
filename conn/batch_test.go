@@ -9,6 +9,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
 	"github.com/lodgvideon/poseidon-http-client/frame"
 	"github.com/lodgvideon/poseidon-http-client/header"
 	"github.com/lodgvideon/poseidon-http-client/hpack"
@@ -69,9 +72,7 @@ func TestSendBatch_OneTransportWriteForNStreams(t *testing.T) {
 	batch := make([]BatchEntry, streams)
 	for i := range batch {
 		ref, err := c.NewStream(ctx)
-		if err != nil {
-			t.Fatalf("NewStream %d: %v", i, err)
-		}
+		require.NoErrorf(t, err, "NewStream %d", i)
 		batch[i] = BatchEntry{
 			Stream:    ref,
 			Fields:    lgRequestFields("batch.local"),
@@ -79,28 +80,23 @@ func TestSendBatch_OneTransportWriteForNStreams(t *testing.T) {
 			EndStream: true,
 		}
 	}
-
 	wc.writes.Store(0)
-	if err := c.SendBatch(ctx, batch); err != nil {
-		t.Fatalf("SendBatch: %v", err)
-	}
+
+	err := c.SendBatch(ctx, batch)
+
+	require.NoError(t, err, "SendBatch")
 	for i := range batch {
-		if batch[i].Err != nil {
-			t.Fatalf("entry %d: %v", i, batch[i].Err)
-		}
+		require.NoErrorf(t, batch[i].Err, "entry %d", i)
 	}
-	if got := wc.writes.Load(); got != 1 {
-		t.Errorf("%d streams cost %d transport writes, want exactly 1", streams, got)
-	}
+	assert.EqualValuesf(t, 1, wc.writes.Load(),
+		"%d streams cost %d transport writes, want exactly 1", streams, wc.writes.Load())
 
 	// Drain, so the assertion is about a batch the peer actually answered rather
 	// than about bytes that never made sense to it.
 	for i := range batch {
 		for {
-			ev, err := batch[i].Stream.Recv(ctx)
-			if err != nil {
-				t.Fatalf("stream %d recv: %v", i, err)
-			}
+			ev, rerr := batch[i].Stream.Recv(ctx)
+			require.NoErrorf(t, rerr, "stream %d recv", i)
 			ev.Release()
 			if ev.DataSlab != nil {
 				dataBufPool.Put(ev.DataSlab)
@@ -109,9 +105,7 @@ func TestSendBatch_OneTransportWriteForNStreams(t *testing.T) {
 				break
 			}
 		}
-		if err := batch[i].Stream.Close(); err != nil {
-			t.Errorf("stream %d close: %v", i, err)
-		}
+		assert.NoErrorf(t, batch[i].Stream.Close(), "stream %d close", i)
 	}
 }
 
@@ -131,29 +125,24 @@ func TestSendBatch_BeatsPerStreamSends(t *testing.T) {
 	refs := make([]StreamRef, streams)
 	for i := range refs {
 		ref, err := c.NewStream(ctx)
-		if err != nil {
-			t.Fatalf("NewStream %d: %v", i, err)
-		}
+		require.NoErrorf(t, err, "NewStream %d", i)
 		refs[i] = ref
 	}
-
 	wc.writes.Store(0)
+
 	for i := range refs {
-		if err := refs[i].SendHeadersAndData(ctx, lgRequestFields("batch.local"), body, true); err != nil {
-			t.Fatalf("SendHeadersAndData %d: %v", i, err)
-		}
+		require.NoErrorf(t, refs[i].SendHeadersAndData(ctx, lgRequestFields("batch.local"), body, true),
+			"SendHeadersAndData %d", i)
 	}
-	if got := wc.writes.Load(); got != streams {
-		t.Errorf("%d individual sends cost %d writes, want %d — the comparison "+
-			"SendBatch's gate rests on is not what it claims", streams, got, streams)
-	}
+
+	assert.EqualValuesf(t, streams, wc.writes.Load(),
+		"%d individual sends cost %d writes, want %d — the comparison "+
+			"SendBatch's gate rests on is not what it claims", streams, wc.writes.Load(), streams)
 
 	for i := range refs {
 		for {
 			ev, err := refs[i].Recv(ctx)
-			if err != nil {
-				t.Fatalf("stream %d recv: %v", i, err)
-			}
+			require.NoErrorf(t, err, "stream %d recv", i)
 			ev.Release()
 			if ev.DataSlab != nil {
 				dataBufPool.Put(ev.DataSlab)
@@ -183,28 +172,22 @@ func TestConformance_RFC9113_Sec511_BatchStreamIDsIncreaseInEmitOrder(t *testing
 	for i := range batch {
 		batch[i] = BatchEntry{Stream: batchStream(c, 65535).ref(), Fields: batchFields, EndStream: true}
 	}
-	if err := c.SendBatch(context.Background(), batch); err != nil {
-		t.Fatalf("SendBatch: %v", err)
-	}
 
+	err := c.SendBatch(context.Background(), batch)
+
+	require.NoError(t, err, "SendBatch")
 	var ids []uint32
 	for _, fh := range parseFrameHeaders(t, buf.Bytes()) {
 		if fh.ftype == byte(frame.FrameHeaders) {
 			ids = append(ids, fh.streamID)
 		}
 	}
-	if len(ids) != len(batch) {
-		t.Fatalf("got %d HEADERS frames, want %d", len(ids), len(batch))
-	}
+	require.Lenf(t, ids, len(batch), "got %d HEADERS frames, want %d", len(ids), len(batch))
 	for i := 1; i < len(ids); i++ {
-		if ids[i] <= ids[i-1] {
-			t.Fatalf("stream ids reached the wire out of order: %v", ids)
-		}
+		require.Greaterf(t, ids[i], ids[i-1], "stream ids reached the wire out of order: %v", ids)
 	}
-	if ids[0] != 1 || c.nextID != uint32(1+2*len(batch)) {
-		t.Errorf("ids = %v, nextID = %d; want ids from 1 and nextID = %d",
-			ids, c.nextID, 1+2*len(batch))
-	}
+	assert.EqualValuesf(t, 1, ids[0], "ids = %v; want them to start at 1", ids)
+	assert.EqualValuesf(t, 1+2*len(batch), c.nextID, "nextID = %d, want %d", c.nextID, 1+2*len(batch))
 }
 
 // TestSendBatch_RefusesAStaleLifetime pins the check that makes a generator's
@@ -222,18 +205,17 @@ func TestSendBatch_RefusesAStaleLifetime(t *testing.T) {
 		{Stream: staleRef, Fields: batchFields, EndStream: true},
 		{Stream: live.ref(), Fields: batchFields, EndStream: true},
 	}
-	if err := c.SendBatch(context.Background(), batch); err != nil {
-		t.Fatalf("SendBatch: %v", err)
-	}
-	if !errors.Is(batch[0].Err, ErrStaleStream) {
-		t.Errorf("stale entry Err = %v, want ErrStaleStream", batch[0].Err)
-	}
-	if batch[1].Err != nil {
-		t.Errorf("live entry Err = %v; one bad entry must not fail its neighbours", batch[1].Err)
-	}
-	if got := len(parseFrameHeaders(t, buf.Bytes())); got != 1 {
-		t.Errorf("emitted %d frames, want 1 — the stale entry put bytes on the wire", got)
-	}
+
+	err := c.SendBatch(context.Background(), batch)
+
+	require.NoError(t, err, "SendBatch")
+	assert.Truef(t, errors.Is(batch[0].Err, ErrStaleStream),
+		"stale entry Err = %v, want ErrStaleStream", batch[0].Err)
+	assert.NoErrorf(t, batch[1].Err,
+		"live entry Err = %v; one bad entry must not fail its neighbours", batch[1].Err)
+	assert.Lenf(t, parseFrameHeaders(t, buf.Bytes()), 1,
+		"emitted %d frames, want 1 — the stale entry put bytes on the wire",
+		len(parseFrameHeaders(t, buf.Bytes())))
 }
 
 // TestSendBatch_RefusesAClosedStreamMidBatch is the case the generation check
@@ -258,15 +240,13 @@ func TestSendBatch_RefusesAClosedStreamMidBatch(t *testing.T) {
 		{Stream: reset.ref(), Fields: batchFields, Body: []byte("payload"), EndStream: true},
 		{Stream: last.ref(), Fields: batchFields, EndStream: true},
 	}
-	if err := c.SendBatch(context.Background(), batch); err != nil {
-		t.Fatalf("SendBatch: %v", err)
-	}
-	if !errors.Is(batch[1].Err, ErrStreamClosed) {
-		t.Errorf("reset entry Err = %v, want ErrStreamClosed", batch[1].Err)
-	}
-	if batch[0].Err != nil || batch[2].Err != nil {
-		t.Errorf("neighbours failed with the reset stream: %v / %v", batch[0].Err, batch[2].Err)
-	}
+	err := c.SendBatch(context.Background(), batch)
+
+	require.NoError(t, err, "SendBatch")
+	assert.Truef(t, errors.Is(batch[1].Err, ErrStreamClosed),
+		"reset entry Err = %v, want ErrStreamClosed", batch[1].Err)
+	assert.NoErrorf(t, batch[0].Err, "neighbour failed with the reset stream: %v", batch[0].Err)
+	assert.NoErrorf(t, batch[2].Err, "neighbour failed with the reset stream: %v", batch[2].Err)
 
 	// Counting the frames, not just looking for DATA. tryAcquireSendCreditsAll
 	// reports ErrStreamClosed too, so an implementation that dropped the door
@@ -274,27 +254,21 @@ func TestSendBatch_RefusesAClosedStreamMidBatch(t *testing.T) {
 	// its HEADERS onto a stream the peer had already reset. Only the frame count
 	// tells those two apart, and §5.1 permits nothing but PRIORITY there.
 	frames := parseFrameHeaders(t, buf.Bytes())
-	if len(frames) != 2 {
-		t.Fatalf("emitted %d frames, want 2 (one HEADERS for each live stream): %+v",
-			len(frames), frames)
-	}
+	require.Lenf(t, frames, 2,
+		"emitted %d frames, want 2 (one HEADERS for each live stream): %+v", len(frames), frames)
 	for _, fh := range frames {
-		if fh.ftype == byte(frame.FrameData) {
-			t.Fatal("DATA emitted on a stream the peer had reset (RFC 9113 §6.4)")
-		}
+		require.NotEqual(t, byte(frame.FrameData), fh.ftype,
+			"DATA emitted on a stream the peer had reset (RFC 9113 §6.4)")
 	}
 	reset.mu.Lock()
 	resetID := reset.id
 	reset.mu.Unlock()
-	if resetID != 0 {
-		t.Errorf("the reset stream was assigned id %d; an id that never reaches the wire "+
+	assert.EqualValuesf(t, 0, resetID,
+		"the reset stream was assigned id %d; an id that never reaches the wire "+
 			"can never be used, because §5.1.1 requires every later id to exceed it", resetID)
-	}
-	if c.peerConnSendWindow != 65535 {
-		t.Errorf("connection send window debited %d bytes for a stream that emitted nothing; "+
-			"the connection half of a debit has no refund path",
-			65535-c.peerConnSendWindow)
-	}
+	assert.EqualValuesf(t, 65535, c.peerConnSendWindow,
+		"connection send window debited %d bytes for a stream that emitted nothing; "+
+			"the connection half of a debit has no refund path", 65535-c.peerConnSendWindow)
 }
 
 // hookWriter runs fn on the first write and then behaves as a buffer. It is a
@@ -356,19 +330,18 @@ func TestSendBatch_StaleGenerationDuringTheHeaderWriteIsRefused(t *testing.T) {
 	c.fr = frame.NewFramer(hw, nil) // writer first
 
 	batch := []BatchEntry{{Stream: s.ref(), Fields: batchFields, EndStream: true}}
-	if err := c.SendBatch(context.Background(), batch); err != nil {
-		t.Fatalf("SendBatch: %v", err)
-	}
-	if !errors.Is(batch[0].Err, ErrStaleStream) {
-		t.Errorf("recycled entry Err = %v, want ErrStaleStream", batch[0].Err)
-	}
+
+	err := c.SendBatch(context.Background(), batch)
+
+	require.NoError(t, err, "SendBatch")
+	assert.Truef(t, errors.Is(batch[0].Err, ErrStaleStream),
+		"recycled entry Err = %v, want ErrStaleStream", batch[0].Err)
 	s.mu.Lock()
 	localEnded := s.localEnded
 	s.mu.Unlock()
-	if localEnded {
-		t.Fatal("the batch half-closed the request that claimed the struct next; " +
+	require.False(t, localEnded,
+		"the batch half-closed the request that claimed the struct next; "+
 			"a finished entry retired a stranger's stream")
-	}
 }
 
 // TestSendBatch_NoCreditEmitsHeadersAndReports pins the one entry outcome that
@@ -390,30 +363,23 @@ func TestSendBatch_NoCreditEmitsHeadersAndReports(t *testing.T) {
 		Body:      []byte("a body that does not fit"),
 		EndStream: true,
 	}}
-	if err := c.SendBatch(context.Background(), batch); err != nil {
-		t.Fatalf("SendBatch: %v", err)
-	}
-	if !errors.Is(batch[0].Err, ErrNoCredit) {
-		t.Fatalf("Err = %v, want ErrNoCredit", batch[0].Err)
-	}
 
+	err := c.SendBatch(context.Background(), batch)
+
+	require.NoError(t, err, "SendBatch")
+	require.Truef(t, errors.Is(batch[0].Err, ErrNoCredit), "Err = %v, want ErrNoCredit", batch[0].Err)
 	frames := parseFrameHeaders(t, buf.Bytes())
-	if len(frames) != 1 || frames[0].ftype != byte(frame.FrameHeaders) {
-		t.Fatalf("emitted %+v, want exactly one HEADERS frame", frames)
-	}
-	if frames[0].flags&byte(frame.FlagHeadersEndStream) != 0 {
-		t.Error("END_STREAM rode the HEADERS although the body was not sent")
-	}
-	if c.peerConnSendWindow != 4 {
-		t.Errorf("connection window = %d, want 4 — a refused entry must not debit",
-			c.peerConnSendWindow)
-	}
+	require.Lenf(t, frames, 1, "emitted %+v, want exactly one HEADERS frame", frames)
+	require.Equalf(t, byte(frame.FrameHeaders), frames[0].ftype,
+		"emitted %+v, want exactly one HEADERS frame", frames)
+	assert.Zero(t, frames[0].flags&byte(frame.FlagHeadersEndStream),
+		"END_STREAM rode the HEADERS although the body was not sent")
+	assert.EqualValuesf(t, 4, c.peerConnSendWindow,
+		"connection window = %d, want 4 — a refused entry must not debit", c.peerConnSendWindow)
 	s.mu.Lock()
 	localEnded := s.localEnded
 	s.mu.Unlock()
-	if localEnded {
-		t.Error("the stream was half-closed although END_STREAM never went out")
-	}
+	assert.False(t, localEnded, "the stream was half-closed although END_STREAM never went out")
 }
 
 // TestSendBatch_BodyOnlyBeforeHeadersIsRefused: a stream with no HEADERS on the
@@ -422,15 +388,13 @@ func TestSendBatch_BodyOnlyBeforeHeadersIsRefused(t *testing.T) {
 	c, buf := batchFixture()
 
 	batch := []BatchEntry{{Stream: batchStream(c, 65535).ref(), Body: []byte("x"), EndStream: true}}
-	if err := c.SendBatch(context.Background(), batch); err != nil {
-		t.Fatalf("SendBatch: %v", err)
-	}
-	if !errors.Is(batch[0].Err, ErrStreamClosed) {
-		t.Errorf("Err = %v, want ErrStreamClosed", batch[0].Err)
-	}
-	if buf.Len() != 0 {
-		t.Errorf("emitted %d bytes for a stream with no id", buf.Len())
-	}
+
+	err := c.SendBatch(context.Background(), batch)
+
+	require.NoError(t, err, "SendBatch")
+	assert.Truef(t, errors.Is(batch[0].Err, ErrStreamClosed),
+		"Err = %v, want ErrStreamClosed", batch[0].Err)
+	assert.Zerof(t, buf.Len(), "emitted %d bytes for a stream with no id", buf.Len())
 }
 
 // TestSendBatch_BodyOnlyContinuesAnOpenStream is the positive half: once
@@ -441,24 +405,24 @@ func TestSendBatch_BodyOnlyContinuesAnOpenStream(t *testing.T) {
 	s := batchStream(c, 65535)
 
 	head := []BatchEntry{{Stream: s.ref(), Fields: batchFields}}
-	if err := c.SendBatch(context.Background(), head); err != nil || head[0].Err != nil {
-		t.Fatalf("headers batch: %v / %v", err, head[0].Err)
-	}
+	herr := c.SendBatch(context.Background(), head)
+	require.NoError(t, herr, "headers batch")
+	require.NoError(t, head[0].Err, "headers batch entry")
 	buf.Reset()
 
 	body := []BatchEntry{{Stream: s.ref(), Body: []byte("payload"), EndStream: true}}
-	if err := c.SendBatch(context.Background(), body); err != nil || body[0].Err != nil {
-		t.Fatalf("body batch: %v / %v", err, body[0].Err)
-	}
+	err := c.SendBatch(context.Background(), body)
 
+	require.NoError(t, err, "body batch")
+	require.NoError(t, body[0].Err, "body batch entry")
 	frames := parseFrameHeaders(t, buf.Bytes())
-	if len(frames) != 1 || frames[0].ftype != byte(frame.FrameData) ||
-		frames[0].flags&byte(frame.FlagDataEndStream) == 0 {
-		t.Fatalf("emitted %+v, want one DATA frame carrying END_STREAM", frames)
-	}
-	if frames[0].streamID != 1 {
-		t.Errorf("DATA on stream %d, want the id the HEADERS opened (1)", frames[0].streamID)
-	}
+	require.Lenf(t, frames, 1, "emitted %+v, want one DATA frame carrying END_STREAM", frames)
+	require.Equalf(t, byte(frame.FrameData), frames[0].ftype,
+		"emitted %+v, want one DATA frame carrying END_STREAM", frames)
+	require.NotZerof(t, frames[0].flags&byte(frame.FlagDataEndStream),
+		"emitted %+v, want one DATA frame carrying END_STREAM", frames)
+	assert.EqualValuesf(t, 1, frames[0].streamID,
+		"DATA on stream %d, want the id the HEADERS opened (1)", frames[0].streamID)
 }
 
 // TestSendBatch_VectoredBodyMatchesJoined pins that BodyV produces exactly the
@@ -470,20 +434,19 @@ func TestSendBatch_VectoredBodyMatchesJoined(t *testing.T) {
 
 	c1, buf1 := batchFixture()
 	b1 := []BatchEntry{{Stream: batchStream(c1, 65535).ref(), Fields: batchFields, BodyV: pieces, EndStream: true}}
-	if err := c1.SendBatch(context.Background(), b1); err != nil || b1[0].Err != nil {
-		t.Fatalf("vectored: %v / %v", err, b1[0].Err)
-	}
-
 	c2, buf2 := batchFixture()
 	b2 := []BatchEntry{{Stream: batchStream(c2, 65535).ref(), Fields: batchFields, Body: joined, EndStream: true}}
-	if err := c2.SendBatch(context.Background(), b2); err != nil || b2[0].Err != nil {
-		t.Fatalf("scalar: %v / %v", err, b2[0].Err)
-	}
 
-	if !bytes.Equal(buf1.Bytes(), buf2.Bytes()) {
-		t.Errorf("vectored body produced different wire bytes than the joined one:\n%x\n%x",
-			buf1.Bytes(), buf2.Bytes())
-	}
+	verr := c1.SendBatch(context.Background(), b1)
+	serr := c2.SendBatch(context.Background(), b2)
+
+	require.NoError(t, verr, "vectored")
+	require.NoError(t, b1[0].Err, "vectored entry")
+	require.NoError(t, serr, "scalar")
+	require.NoError(t, b2[0].Err, "scalar entry")
+	assert.Equalf(t, buf2.Bytes(), buf1.Bytes(),
+		"vectored body produced different wire bytes than the joined one:\n%x\n%x",
+		buf1.Bytes(), buf2.Bytes())
 }
 
 // TestSendBatch_EndStreamHalfCloses pins the bookkeeping that runs after the
@@ -494,23 +457,20 @@ func TestSendBatch_EndStreamHalfCloses(t *testing.T) {
 	s := batchStream(c, 65535)
 
 	batch := []BatchEntry{{Stream: s.ref(), Fields: batchFields, Body: []byte("x"), EndStream: true}}
-	if err := c.SendBatch(context.Background(), batch); err != nil || batch[0].Err != nil {
-		t.Fatalf("SendBatch: %v / %v", err, batch[0].Err)
-	}
+	ferr := c.SendBatch(context.Background(), batch)
+	require.NoError(t, ferr, "SendBatch")
+	require.NoError(t, batch[0].Err, "SendBatch entry")
+
+	again := []BatchEntry{{Stream: s.ref(), Body: []byte("y"), EndStream: true}}
+	err := c.SendBatch(context.Background(), again)
+
+	require.NoError(t, err, "second SendBatch")
 	s.mu.Lock()
 	localEnded := s.localEnded
 	s.mu.Unlock()
-	if !localEnded {
-		t.Fatal("END_STREAM went out but the stream was not half-closed")
-	}
-
-	again := []BatchEntry{{Stream: s.ref(), Body: []byte("y"), EndStream: true}}
-	if err := c.SendBatch(context.Background(), again); err != nil {
-		t.Fatalf("second SendBatch: %v", err)
-	}
-	if !errors.Is(again[0].Err, ErrStreamClosed) {
-		t.Errorf("sending after END_STREAM = %v, want ErrStreamClosed", again[0].Err)
-	}
+	assert.True(t, localEnded, "END_STREAM went out but the stream was not half-closed")
+	assert.Truef(t, errors.Is(again[0].Err, ErrStreamClosed),
+		"sending after END_STREAM = %v, want ErrStreamClosed", again[0].Err)
 }
 
 // TestSendBatch_ChargesPaddingOverhead: a padded DATA frame puts its data bytes
@@ -524,24 +484,22 @@ func TestSendBatch_ChargesPaddingOverhead(t *testing.T) {
 	s := batchStream(c, 65535)
 	body := make([]byte, 100)
 	batch := []BatchEntry{{Stream: s.ref(), Fields: batchFields, Body: body, EndStream: true}}
-	if err := c.SendBatch(context.Background(), batch); err != nil || batch[0].Err != nil {
-		t.Fatalf("SendBatch: %v / %v", err, batch[0].Err)
-	}
 
+	err := c.SendBatch(context.Background(), batch)
+
+	require.NoError(t, err, "SendBatch")
+	require.NoError(t, batch[0].Err, "SendBatch entry")
 	const padOverhead = 1 + 8
 	want := int32(65535 - (len(body) + padOverhead))
-	if c.peerConnSendWindow != want {
-		t.Errorf("connection window = %d, want %d (body + pad octet + padding)",
-			c.peerConnSendWindow, want)
-	}
+	assert.Equalf(t, want, c.peerConnSendWindow,
+		"connection window = %d, want %d (body + pad octet + padding)", c.peerConnSendWindow, want)
 	for _, fh := range parseFrameHeaders(t, buf.Bytes()) {
 		if fh.ftype != byte(frame.FrameData) {
 			continue
 		}
-		if fh.length != uint32(len(body)+padOverhead) {
-			t.Errorf("DATA length %d, want %d — the debit and the wire disagree",
-				fh.length, len(body)+padOverhead)
-		}
+		assert.EqualValuesf(t, len(body)+padOverhead, fh.length,
+			"DATA length %d, want %d — the debit and the wire disagree",
+			fh.length, len(body)+padOverhead)
 	}
 }
 
@@ -556,9 +514,11 @@ func TestSendBatch_ClosedConnIsBatchFatal(t *testing.T) {
 		{Stream: batchStream(c, 65535).ref(), Fields: batchFields},
 		{Stream: batchStream(c, 65535).ref(), Fields: batchFields},
 	}
-	if err := c.SendBatch(context.Background(), batch); !errors.Is(err, ErrConnClosed) {
-		t.Fatalf("SendBatch on a closed conn = %v, want ErrConnClosed", err)
-	}
+
+	err := c.SendBatch(context.Background(), batch)
+
+	require.Truef(t, errors.Is(err, ErrConnClosed),
+		"SendBatch on a closed conn = %v, want ErrConnClosed", err)
 }
 
 // TestSendBatch_CancelledContextEmitsNothing: the context is checked before any
@@ -569,15 +529,14 @@ func TestSendBatch_CancelledContextEmitsNothing(t *testing.T) {
 	cancel()
 
 	batch := []BatchEntry{{Stream: batchStream(c, 65535).ref(), Fields: batchFields, Body: []byte("x")}}
-	if err := c.SendBatch(ctx, batch); !errors.Is(err, context.Canceled) {
-		t.Fatalf("SendBatch with a cancelled context = %v, want context.Canceled", err)
-	}
-	if buf.Len() != 0 {
-		t.Errorf("emitted %d bytes under a cancelled context", buf.Len())
-	}
-	if c.peerConnSendWindow != 65535 {
-		t.Error("credit was spent under a cancelled context, and it cannot be refunded")
-	}
+
+	err := c.SendBatch(ctx, batch)
+
+	require.Truef(t, errors.Is(err, context.Canceled),
+		"SendBatch with a cancelled context = %v, want context.Canceled", err)
+	assert.Zerof(t, buf.Len(), "emitted %d bytes under a cancelled context", buf.Len())
+	assert.EqualValues(t, 65535, c.peerConnSendWindow,
+		"credit was spent under a cancelled context, and it cannot be refunded")
 }
 
 // TestSendBatch_ReleasesDeferringWriter is the #360 boundary. SendBatch must
@@ -621,9 +580,8 @@ func TestSendBatch_ReleasesDeferringWriter(t *testing.T) {
 		if d == 1 {
 			break
 		}
-		if time.Now().After(deadline) {
-			t.Fatal("the writer never parked; the fixture is not testing deferral")
-		}
+		require.False(t, time.Now().After(deadline),
+			"the writer never parked; the fixture is not testing deferral")
 		time.Sleep(time.Millisecond)
 	}
 
@@ -636,17 +594,15 @@ func TestSendBatch_ReleasesDeferringWriter(t *testing.T) {
 	go func() { sent <- c.SendBatch(context.Background(), batch) }()
 	select {
 	case err := <-sent:
-		if err != nil {
-			t.Fatalf("SendBatch: %v", err)
-		}
+		require.NoError(t, err, "SendBatch")
 	case <-time.After(5 * time.Second):
-		t.Fatal("SendBatch never returned: it deferred into the convoy instead of " +
+		require.FailNow(t, "SendBatch never returned: it deferred into the convoy instead of "+
 			"flushing, and is waiting for a writer that is waiting for it")
 	}
 	select {
 	case <-parked:
 	case <-time.After(5 * time.Second):
-		t.Fatal("SendBatch did not release the writer deferring behind it; " +
+		require.FailNow(t, "SendBatch did not release the writer deferring behind it; "+
 			"it ended in a plain flush instead of flushNow")
 	}
 }
@@ -684,35 +640,29 @@ func TestSendBatch_SplitsAtTheWriteBufferBoundary(t *testing.T) {
 			EndStream: true,
 		}
 	}
-	if err := c.SendBatch(context.Background(), batch); err != nil {
-		t.Fatalf("SendBatch: %v", err)
-	}
-	for i := range batch {
-		if batch[i].Err != nil {
-			t.Fatalf("entry %d: %v", i, batch[i].Err)
-		}
-	}
+	err := c.SendBatch(context.Background(), batch)
 
+	require.NoError(t, err, "SendBatch")
+	for i := range batch {
+		require.NoErrorf(t, batch[i].Err, "entry %d", i)
+	}
 	// 8 x 4 KiB of body plus headers against a ~16 KiB buffer: several writes,
 	// but far fewer than one per entry, which is the property that matters.
 	got := sink.writes
-	if got < 2 {
-		t.Errorf("a batch %d bytes larger than the buffer cost %d writes; "+
+	assert.GreaterOrEqualf(t, got, 2,
+		"a batch %d bytes larger than the buffer cost %d writes; "+
 			"it cannot have reached the wire", entries*bodySize, got)
-	}
-	if got >= entries {
-		t.Errorf("%d writes for %d entries — the batch is not coalescing at all", got, entries)
-	}
+	assert.Lessf(t, got, entries,
+		"%d writes for %d entries — the batch is not coalescing at all", got, entries)
 }
 
 // TestSendBatch_EmptyIsANoOp guards the trivial edge so a caller draining an
 // empty queue does not pay a lock acquisition or a flush.
 func TestSendBatch_EmptyIsANoOp(t *testing.T) {
 	c, buf := batchFixture()
-	if err := c.SendBatch(context.Background(), nil); err != nil {
-		t.Fatalf("SendBatch(nil) = %v, want nil", err)
-	}
-	if buf.Len() != 0 {
-		t.Errorf("an empty batch emitted %d bytes", buf.Len())
-	}
+
+	err := c.SendBatch(context.Background(), nil)
+
+	require.NoErrorf(t, err, "SendBatch(nil) = %v, want nil", err)
+	assert.Zerof(t, buf.Len(), "an empty batch emitted %d bytes", buf.Len())
 }
