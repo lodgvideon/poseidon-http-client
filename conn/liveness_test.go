@@ -1,6 +1,11 @@
 package conn
 
-import "testing"
+import (
+	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+)
 
 // IsAlive reads atomics rather than selecting on readerDone, because the pool
 // calls it once per connection per request. See http3/liveness_test.go for the
@@ -13,10 +18,11 @@ import "testing"
 // number of unit tests silently start seeing their Conn as dead.
 func TestIsAlive_HandBuiltConnWithNoReader(t *testing.T) {
 	c := &Conn{}
-	if !c.IsAlive() {
-		t.Error("a hand-built Conn with no reader reports dead; it must fall through " +
-			"to the closed/goaway flags exactly as it did with a nil readerDone")
-	}
+
+	got := c.IsAlive()
+
+	assert.True(t, got, "a hand-built Conn with no reader reports dead; it must fall through "+
+		"to the closed/goaway flags exactly as it did with a nil readerDone")
 }
 
 // TestIsAlive_ReaderExitMarksDead is the invariant tying the flag to the channel:
@@ -24,17 +30,14 @@ func TestIsAlive_HandBuiltConnWithNoReader(t *testing.T) {
 // connection whose reader has gone must never read as alive.
 func TestIsAlive_ReaderExitMarksDead(t *testing.T) {
 	c := &Conn{readerDone: make(chan struct{})}
-	if !c.IsAlive() {
-		t.Fatal("a fresh Conn reports dead")
-	}
+	require.True(t, c.IsAlive(), "a fresh Conn reports dead")
+
 	// Exactly what readerLoop's deferred exit does.
 	c.readerExited.Store(true)
 	close(c.readerDone)
 
-	if c.IsAlive() {
-		t.Error("the reader has exited but IsAlive still reports true — the pool would " +
-			"keep handing out this connection")
-	}
+	assert.False(t, c.IsAlive(), "the reader has exited but IsAlive still reports true — the pool would "+
+		"keep handing out this connection")
 }
 
 // TestIsAlive_FlagsStillIndependentlyKill pins that adding readerExited did not
@@ -43,16 +46,16 @@ func TestIsAlive_ReaderExitMarksDead(t *testing.T) {
 func TestIsAlive_FlagsStillIndependentlyKill(t *testing.T) {
 	t.Run("closed", func(t *testing.T) {
 		c := &Conn{readerDone: make(chan struct{})}
+
 		c.closed.Store(true)
-		if c.IsAlive() {
-			t.Error("a closed Conn reports alive")
-		}
+
+		assert.False(t, c.IsAlive(), "a closed Conn reports alive")
 	})
 	t.Run("goaway", func(t *testing.T) {
 		c := &Conn{readerDone: make(chan struct{})}
+
 		c.goAwayReceived.Store(true)
-		if c.IsAlive() {
-			t.Error("a Conn that received GOAWAY reports alive")
-		}
+
+		assert.False(t, c.IsAlive(), "a Conn that received GOAWAY reports alive")
 	})
 }

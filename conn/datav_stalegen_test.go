@@ -3,12 +3,13 @@ package conn
 import (
 	"bytes"
 	"context"
-	"errors"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/lodgvideon/poseidon-http-client/frame"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // TestWriteDataVec_StaleGenerationAfterCreditIsRefused covers the re-check that
@@ -43,19 +44,20 @@ import (
 //	re-reads s.gen -> stale
 //
 // No production code changes and no sleeps decide the outcome; the ordering is
-// carried entirely by the lock the loop already takes.
+// carried entirely by the lock the loop already takes. Arrange, act and assert
+// interleave here because the property under test IS an ordering: the recycle
+// has to happen inside a window the test holds open, so the steps cannot be
+// hoisted into separate blocks without destroying what is being measured.
 func TestWriteDataVec_StaleGenerationAfterCreditIsRefused(t *testing.T) {
 	var buf bytes.Buffer
 	c := &Conn{streams: map[uint32]*Stream{}, opts: ConnOptions{}.defaulted()}
 	c.fcOutCond = sync.NewCond(&c.fcOutMu)
 	c.fr = frame.NewFramer(&buf, nil) // writer first
 	c.peerConnSendWindow = 0          // no credit yet: the writer must park
-
 	s := newStream(1, 8, c, 65535)
 	s.sendWindow = 65535 // stream credit is fine; the conn window is the gate
 	c.streams[1] = s
 	gen := s.gen.Load()
-
 	// A context far longer than the test, so a pass cannot come from it expiring.
 	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
 	defer cancel()
@@ -68,9 +70,8 @@ func TestWriteDataVec_StaleGenerationAfterCreditIsRefused(t *testing.T) {
 	// Wait for the writer to be parked on credit rather than racing the lock
 	// against its entry. Parked is observable: it holds no wmu and the conn
 	// window it is waiting on is still zero.
-	if !waitParked(t, c) {
-		t.Fatal("writer never parked on credit; the rest of this test would prove nothing")
-	}
+	require.True(t, waitParked(t, c),
+		"writer never parked on credit; the rest of this test would prove nothing")
 
 	// Own the window. From here the writer cannot get past c.wmu.Lock().
 	c.wmu.Lock()
@@ -78,9 +79,9 @@ func TestWriteDataVec_StaleGenerationAfterCreditIsRefused(t *testing.T) {
 	// Grant credit. acquireSendCredits wakes, re-checks the generation — still
 	// valid — and returns with credit, then blocks on the lock held above.
 	const grant = 4096
-	if err := c.onWindowUpdate(0, grant); err != nil {
-		c.wmu.Unlock()
-		t.Fatalf("onWindowUpdate: %v", err)
+	if wuErr := c.onWindowUpdate(0, grant); wuErr != nil {
+		c.wmu.Unlock() // release before aborting; a stranded wmu wedges the package
+		require.NoErrorf(t, wuErr, "onWindowUpdate")
 	}
 
 	// Wait until the credit has actually been DEBITED before recycling.
@@ -93,11 +94,13 @@ func TestWriteDataVec_StaleGenerationAfterCreditIsRefused(t *testing.T) {
 	//
 	// The debit is observable and the writer cannot proceed past it, because the
 	// next thing it does is take the c.wmu held above.
-	if !waitCreditTaken(t, c, grant) {
+	debited := waitCreditTaken(t, c, grant)
+	if !debited {
 		c.wmu.Unlock()
-		t.Fatal("credit was granted but never debited; the writer is not parked on " +
-			"c.wmu, so the re-check under test would not be the one exercised")
 	}
+	require.True(t, debited,
+		"credit was granted but never debited; the writer is not parked on "+
+			"c.wmu, so the re-check under test would not be the one exercised")
 
 	// The recycle, inside the window this test owns.
 	s.gen.Add(1)
@@ -105,23 +108,20 @@ func TestWriteDataVec_StaleGenerationAfterCreditIsRefused(t *testing.T) {
 
 	select {
 	case err := <-done:
-		if !errors.Is(err, ErrStaleStream) {
-			t.Fatalf("SendDataV = %v, want ErrStaleStream — the stream was recycled "+
+		require.ErrorIsf(t, err, ErrStaleStream,
+			"SendDataV = %v, want ErrStaleStream — the stream was recycled "+
 				"after credit was granted, so this write belongs to a request that no "+
 				"longer owns the struct", err)
-		}
 	case <-time.After(5 * time.Second):
-		t.Fatal("SendDataV never returned after the generation changed")
+		require.FailNow(t, "SendDataV never returned after the generation changed")
 	}
 
 	// Nothing may have reached the wire: emitting here would carry the next
 	// request's stream id.
-	if buf.Len() != 0 {
-		t.Errorf("wrote %d bytes for a recycled stream, want none: %q", buf.Len(), buf.Bytes())
-	}
-	if got := s.gen.Load(); got == gen {
-		t.Fatal("the generation never changed; the recycle this test simulates did not happen")
-	}
+	assert.Zerof(t, buf.Len(),
+		"wrote %d bytes for a recycled stream, want none: %q", buf.Len(), buf.Bytes())
+	require.NotEqual(t, gen, s.gen.Load(),
+		"the generation never changed; the recycle this test simulates did not happen")
 }
 
 // waitParked reports whether a writer reached cond.Wait inside

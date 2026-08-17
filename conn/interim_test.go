@@ -2,7 +2,6 @@ package conn
 
 import (
 	"context"
-	"errors"
 	"io"
 	"net/http"
 	"testing"
@@ -10,6 +9,8 @@ import (
 
 	"github.com/lodgvideon/poseidon-http-client/frame"
 	"github.com/lodgvideon/poseidon-http-client/hpack"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // earlyHintsHandler replies 103 Early Hints (with a Link header, as
@@ -44,17 +45,13 @@ func statusOf(hdrs []hpack.HeaderField) string {
 func getStream(t *testing.T, ctx context.Context, c *Conn) StreamRef {
 	t.Helper()
 	s, err := c.NewStream(ctx)
-	if err != nil {
-		t.Fatalf("NewStream: %v", err)
-	}
-	if err := s.SendHeaders(ctx, []hpack.HeaderField{
+	require.NoErrorf(t, err, "NewStream")
+	require.NoErrorf(t, s.SendHeaders(ctx, []hpack.HeaderField{
 		{Name: []byte(":method"), Value: []byte("GET")},
 		{Name: []byte(":scheme"), Value: []byte("https")},
 		{Name: []byte(":authority"), Value: []byte("example.com")},
 		{Name: []byte(":path"), Value: []byte("/")},
-	}, true); err != nil {
-		t.Fatalf("SendHeaders: %v", err)
-	}
+	}, true), "SendHeaders")
 	return s
 }
 
@@ -68,39 +65,29 @@ func TestConformance_RFC7540_Sec8_1_InterimHeadersNotTrailers(t *testing.T) {
 	defer srv.Close()
 	c := dialServer(t, srv, cfg)
 	defer c.Close()
-
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	s := getStream(t, ctx, c)
 
+	first, err1 := s.Recv(ctx)
+	second, err2 := s.Recv(ctx)
+
 	// First block: the 103 informational response, surfaced as its own event
 	// so it can never be mistaken for the final response.
-	ev, err := s.Recv(ctx)
-	if err != nil {
-		t.Fatalf("Recv 1: %v", err)
-	}
-	if ev.Type != EventInterimHeaders {
-		t.Fatalf("interim event type = %v, want EventInterimHeaders", ev.Type)
-	}
-	if got := statusOf(ev.Headers); got != "103" {
-		t.Fatalf("interim status = %q, want 103", got)
-	}
-	if ev.EndStream {
-		t.Fatal("interim response must not carry END_STREAM")
-	}
+	require.NoErrorf(t, err1, "Recv 1")
+	require.Equalf(t, EventInterimHeaders, first.Type,
+		"interim event type = %v, want EventInterimHeaders", first.Type)
+	assert.Equalf(t, "103", statusOf(first.Headers),
+		"interim status = %q, want 103", statusOf(first.Headers))
+	assert.False(t, first.EndStream, "interim response must not carry END_STREAM")
 
 	// Second block: the final 200. Must be EventHeaders, NOT EventTrailers.
-	ev, err = s.Recv(ctx)
-	if err != nil {
-		t.Fatalf("Recv 2: %v", err)
-	}
-	if ev.Type != EventHeaders {
-		t.Fatalf("final event type = %v, want EventHeaders (final response "+
-			"misclassified as trailers)", ev.Type)
-	}
-	if got := statusOf(ev.Headers); got != "200" {
-		t.Fatalf("final status = %q, want 200", got)
-	}
+	require.NoErrorf(t, err2, "Recv 2")
+	require.Equalf(t, EventHeaders, second.Type,
+		"final event type = %v, want EventHeaders (final response misclassified as trailers)",
+		second.Type)
+	assert.Equalf(t, "200", statusOf(second.Headers),
+		"final status = %q, want 200", statusOf(second.Headers))
 }
 
 // deliverBlock feeds one complete HEADERS block (END_HEADERS set) for stream
@@ -135,24 +122,17 @@ func TestConformance_RFC7540_Sec8_1_TrailersWithoutEndStream_StreamError(t *test
 	m := newFakeStreamMap()
 	h := newConnHandler(m, hpack.NewDecoder())
 	s := m.addStream(1)
+	require.NoErrorf(t, deliverBlock(t, h, 1, status("200"), false), "final HEADERS")
 
-	if err := deliverBlock(t, h, 1, status("200"), false); err != nil {
-		t.Fatalf("final HEADERS: %v", err)
-	}
 	// A trailer block that does not terminate the stream is malformed.
 	err := deliverBlock(t, h, 1, []hpack.HeaderField{
 		{Name: []byte("x-trailer"), Value: []byte("v")},
 	}, false)
+
 	var se *StreamError
-	if !errors.As(err, &se) {
-		t.Fatalf("err = %v (%T), want *StreamError", err, err)
-	}
-	if se.Code != frame.ErrCodeProtocolError {
-		t.Errorf("code = %v, want PROTOCOL_ERROR", se.Code)
-	}
-	if se.StreamID != s.id {
-		t.Errorf("StreamID = %d, want %d", se.StreamID, s.id)
-	}
+	require.ErrorAsf(t, err, &se, "err = %v (%T), want *StreamError", err, err)
+	assert.Equalf(t, frame.ErrCodeProtocolError, se.Code, "code = %v, want PROTOCOL_ERROR", se.Code)
+	assert.Equalf(t, s.id, se.StreamID, "StreamID = %d, want %d", se.StreamID, s.id)
 }
 
 // TestConformance_RFC7540_Sec8_1_TrailersWithEndStream_Accepted is the
@@ -161,23 +141,17 @@ func TestConformance_RFC7540_Sec8_1_TrailersWithEndStream_Accepted(t *testing.T)
 	m := newFakeStreamMap()
 	h := newConnHandler(m, hpack.NewDecoder())
 	s := m.addStream(1)
+	require.NoErrorf(t, deliverBlock(t, h, 1, status("200"), false), "final HEADERS")
 
-	if err := deliverBlock(t, h, 1, status("200"), false); err != nil {
-		t.Fatalf("final HEADERS: %v", err)
-	}
-	if err := deliverBlock(t, h, 1, []hpack.HeaderField{
+	err := deliverBlock(t, h, 1, []hpack.HeaderField{
 		{Name: []byte("x-trailer"), Value: []byte("v")},
-	}, true); err != nil {
-		t.Fatalf("trailers: %v", err)
-	}
+	}, true)
+
+	require.NoErrorf(t, err, "trailers")
 	<-s.events // the 200
 	ev := <-s.events
-	if ev.Type != EventTrailers {
-		t.Fatalf("type = %v, want EventTrailers", ev.Type)
-	}
-	if !ev.EndStream {
-		t.Error("trailers must carry END_STREAM")
-	}
+	require.Equalf(t, EventTrailers, ev.Type, "type = %v, want EventTrailers", ev.Type)
+	assert.True(t, ev.EndStream, "trailers must carry END_STREAM")
 }
 
 // TestConformance_RFC7540_Sec8_1_InterimFlood_Bounded pins that a peer cannot
@@ -196,17 +170,14 @@ func TestConformance_RFC7540_Sec8_1_InterimFlood_Bounded(t *testing.T) {
 		}
 		sent++
 	}
+
 	var se *StreamError
-	if !errors.As(err, &se) {
-		t.Fatalf("accepted %d interim responses with err=%v; want a *StreamError past the %d cap",
-			sent, err, maxInterimResponses)
-	}
-	if se.Code != frame.ErrCodeEnhanceYourCalm {
-		t.Errorf("code = %v, want ENHANCE_YOUR_CALM", se.Code)
-	}
-	if sent != maxInterimResponses {
-		t.Errorf("accepted %d interim responses, want exactly %d", sent, maxInterimResponses)
-	}
+	require.ErrorAsf(t, err, &se,
+		"accepted %d interim responses with err=%v; want a *StreamError past the %d cap",
+		sent, err, maxInterimResponses)
+	assert.Equalf(t, frame.ErrCodeEnhanceYourCalm, se.Code, "code = %v, want ENHANCE_YOUR_CALM", se.Code)
+	assert.Equalf(t, maxInterimResponses, sent,
+		"accepted %d interim responses, want exactly %d", sent, maxInterimResponses)
 }
 
 // TestConformance_RFC7540_Sec8_1_InterimWithEndStream_StreamError pins that a
@@ -219,11 +190,8 @@ func TestConformance_RFC7540_Sec8_1_InterimWithEndStream_StreamError(t *testing.
 	m.addStream(1)
 
 	err := deliverBlock(t, h, 1, status("103"), true)
+
 	var se *StreamError
-	if !errors.As(err, &se) {
-		t.Fatalf("err = %v (%T), want *StreamError", err, err)
-	}
-	if se.Code != frame.ErrCodeProtocolError {
-		t.Errorf("code = %v, want PROTOCOL_ERROR", se.Code)
-	}
+	require.ErrorAsf(t, err, &se, "err = %v (%T), want *StreamError", err, err)
+	assert.Equalf(t, frame.ErrCodeProtocolError, se.Code, "code = %v, want PROTOCOL_ERROR", se.Code)
 }

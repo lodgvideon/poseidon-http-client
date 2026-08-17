@@ -7,6 +7,8 @@ import (
 	"testing"
 
 	"github.com/lodgvideon/poseidon-http-client/frame"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // The vectored DATA path must be indistinguishable on the wire from the scalar
@@ -19,6 +21,11 @@ import (
 // Hand-written expectations would only cover the splits somebody thought of. The
 // split that breaks a cursor is the one nobody thought of, so the oracle drives
 // random ones and compares bytes.
+//
+// The oracle's reach is bounded, and knowing where matters: since the two loops
+// merged into writeDataVec, both arms share everything except dataVec.next's two
+// branches, so a fault in the shared loop moves both arms the same way and the
+// comparison stays green. That is what the direct cursor tests below are for.
 
 // vecConn builds a Conn whose framer writes into buf, with enough send window
 // for the payloads here.
@@ -47,7 +54,6 @@ func TestWriteDataV_MatchesWriteData(t *testing.T) {
 	for trial := 0; trial < 300; trial++ {
 		n := rng.Intn(len(payload) + 1)
 		p := payload[:n]
-
 		pieces := rng.Intn(5) + 1
 		cuts := []int{0}
 		for i := 0; i < pieces-1; i++ {
@@ -63,25 +69,22 @@ func TestWriteDataV_MatchesWriteData(t *testing.T) {
 		for i := 0; i+1 < len(cuts); i++ {
 			bufs = append(bufs, p[cuts[i]:cuts[i+1]])
 		}
-
 		// A frame size small enough that most trials span several frames, so the
 		// cursor is exercised across boundaries rather than only within one.
 		maxFrame := uint32(rng.Intn(2000) + 16)
 		endStream := rng.Intn(2) == 0
-
 		var vecBuf, refBuf bytes.Buffer
 		vc, vs := vecConn(t, &vecBuf, maxFrame)
-		if err := vc.writeDataV(ctx, vs, vs.gen.Load(), bufs, endStream); err != nil {
-			t.Fatalf("trial %d: writeDataV: %v", trial, err)
-		}
 		rc, rs := vecConn(t, &refBuf, maxFrame)
-		if err := rc.writeData(ctx, rs, rs.gen.Load(), p, endStream); err != nil {
-			t.Fatalf("trial %d: writeData: %v", trial, err)
-		}
-		if !bytes.Equal(vecBuf.Bytes(), refBuf.Bytes()) {
-			t.Fatalf("trial %d: %d bytes split at %v, maxFrame %d, endStream %v: wire bytes differ\n vec %x\n ref %x",
-				trial, n, cuts, maxFrame, endStream, vecBuf.Bytes(), refBuf.Bytes())
-		}
+
+		verr := vc.writeDataV(ctx, vs, vs.gen.Load(), bufs, endStream)
+		rerr := rc.writeData(ctx, rs, rs.gen.Load(), p, endStream)
+
+		require.NoErrorf(t, verr, "trial %d: writeDataV", trial)
+		require.NoErrorf(t, rerr, "trial %d: writeData", trial)
+		require.Truef(t, bytes.Equal(vecBuf.Bytes(), refBuf.Bytes()),
+			"trial %d: %d bytes split at %v, maxFrame %d, endStream %v: wire bytes differ\n vec %x\n ref %x",
+			trial, n, cuts, maxFrame, endStream, vecBuf.Bytes(), refBuf.Bytes())
 	}
 }
 
@@ -102,22 +105,20 @@ func TestWriteDataV_MatchesWriteDataPadded(t *testing.T) {
 		cut := rng.Intn(n + 1)
 		bufs := [][]byte{p[:cut], p[cut:]}
 		endStream := rng.Intn(2) == 0
-
 		var vecBuf, refBuf bytes.Buffer
 		vc, vs := vecConn(t, &vecBuf, 1024)
 		vc.opts.Padding = PaddingStrategy{Min: 4, Max: 4, DataOnly: true}
-		if err := vc.writeDataV(ctx, vs, vs.gen.Load(), bufs, endStream); err != nil {
-			t.Fatalf("trial %d: writeDataV: %v", trial, err)
-		}
 		rc, rs := vecConn(t, &refBuf, 1024)
 		rc.opts.Padding = PaddingStrategy{Min: 4, Max: 4, DataOnly: true}
-		if err := rc.writeData(ctx, rs, rs.gen.Load(), p, endStream); err != nil {
-			t.Fatalf("trial %d: writeData: %v", trial, err)
-		}
-		if !bytes.Equal(vecBuf.Bytes(), refBuf.Bytes()) {
-			t.Fatalf("trial %d: %d bytes cut at %d, endStream %v: padded wire bytes differ\n vec %x\n ref %x",
-				trial, n, cut, endStream, vecBuf.Bytes(), refBuf.Bytes())
-		}
+
+		verr := vc.writeDataV(ctx, vs, vs.gen.Load(), bufs, endStream)
+		rerr := rc.writeData(ctx, rs, rs.gen.Load(), p, endStream)
+
+		require.NoErrorf(t, verr, "trial %d: writeDataV", trial)
+		require.NoErrorf(t, rerr, "trial %d: writeData", trial)
+		require.Truef(t, bytes.Equal(vecBuf.Bytes(), refBuf.Bytes()),
+			"trial %d: %d bytes cut at %d, endStream %v: padded wire bytes differ\n vec %x\n ref %x",
+			trial, n, cut, endStream, vecBuf.Bytes(), refBuf.Bytes())
 	}
 }
 
@@ -137,17 +138,16 @@ func TestWriteDataV_EmptyShapes(t *testing.T) {
 			t.Run(tc.name, func(t *testing.T) {
 				var vecBuf, refBuf bytes.Buffer
 				vc, vs := vecConn(t, &vecBuf, 16384)
-				if err := vc.writeDataV(ctx, vs, vs.gen.Load(), tc.bufs, end); err != nil {
-					t.Fatalf("writeDataV: %v", err)
-				}
 				rc, rs := vecConn(t, &refBuf, 16384)
-				if err := rc.writeData(ctx, rs, rs.gen.Load(), nil, end); err != nil {
-					t.Fatalf("writeData: %v", err)
-				}
-				if !bytes.Equal(vecBuf.Bytes(), refBuf.Bytes()) {
-					t.Errorf("endStream=%v: wire bytes differ\n vec %x\n ref %x",
-						end, vecBuf.Bytes(), refBuf.Bytes())
-				}
+
+				verr := vc.writeDataV(ctx, vs, vs.gen.Load(), tc.bufs, end)
+				rerr := rc.writeData(ctx, rs, rs.gen.Load(), nil, end)
+
+				require.NoErrorf(t, verr, "writeDataV")
+				require.NoErrorf(t, rerr, "writeData")
+				assert.Truef(t, bytes.Equal(vecBuf.Bytes(), refBuf.Bytes()),
+					"endStream=%v: wire bytes differ\n vec %x\n ref %x",
+					end, vecBuf.Bytes(), refBuf.Bytes())
 			})
 		}
 	}
@@ -161,35 +161,27 @@ func TestWriteDataV_EmptyShapes(t *testing.T) {
 func TestDataVec_NextIsTotal(t *testing.T) {
 	bufs := [][]byte{[]byte("abc"), {}, []byte("de")}
 	v, err := newDataVec(bufs)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if v.rem != 5 {
-		t.Fatalf("rem = %d, want 5", v.rem)
-	}
-
+	require.NoError(t, err)
+	require.Equalf(t, 5, v.rem, "rem = %d, want 5", v.rem)
 	var dst [][]byte
+
 	dst, got := v.next(4, dst[:0])
-	if got != 4 {
-		t.Fatalf("next(4) produced %d bytes, want 4", got)
-	}
-	if joined := string(bytes.Join(dst, nil)); joined != "abcd" {
-		t.Errorf("next(4) covered %q, want \"abcd\"", joined)
-	}
+
+	require.Equalf(t, 4, got, "next(4) produced %d bytes, want 4", got)
+	assert.Equalf(t, "abcd", string(bytes.Join(dst, nil)),
+		"next(4) covered %q, want \"abcd\"", string(bytes.Join(dst, nil)))
 
 	dst, got = v.next(4, dst[:0])
-	if got != 1 {
-		t.Errorf("next(4) at the tail produced %d, want 1 — a cursor that reported 4 here "+
-			"would have the writer declare a 4-byte frame and emit one byte", got)
-	}
-	if joined := string(bytes.Join(dst, nil)); joined != "e" {
-		t.Errorf("tail covered %q, want \"e\"", joined)
-	}
+
+	assert.Equalf(t, 1, got, "next(4) at the tail produced %d, want 1 — a cursor that reported 4 here "+
+		"would have the writer declare a 4-byte frame and emit one byte", got)
+	assert.Equalf(t, "e", string(bytes.Join(dst, nil)),
+		"tail covered %q, want \"e\"", string(bytes.Join(dst, nil)))
 
 	// Past the end: still total, still honest.
-	if _, got = v.next(1, dst[:0]); got != 0 {
-		t.Errorf("next past the end produced %d, want 0", got)
-	}
+	_, got = v.next(1, dst[:0])
+
+	assert.Equalf(t, 0, got, "next past the end produced %d, want 0", got)
 }
 
 // TestDataVec_NextSkipsEmpties pins that zero-length members cost nothing and
@@ -197,21 +189,17 @@ func TestDataVec_NextIsTotal(t *testing.T) {
 // shape a caller building [prefix, msg] with an empty message produces.
 func TestDataVec_NextSkipsEmpties(t *testing.T) {
 	v, err := newDataVec([][]byte{{}, {}, []byte("xy"), {}, []byte("z"), {}})
-	if err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, err)
 	var dst [][]byte
+
 	dst, got := v.next(3, dst[:0])
-	if got != 3 {
-		t.Fatalf("next(3) produced %d, want 3", got)
-	}
-	if joined := string(bytes.Join(dst, nil)); joined != "xyz" {
-		t.Errorf("covered %q, want \"xyz\"", joined)
-	}
+
+	require.Equalf(t, 3, got, "next(3) produced %d, want 3", got)
+	assert.Equalf(t, "xyz", string(bytes.Join(dst, nil)),
+		"covered %q, want \"xyz\"", string(bytes.Join(dst, nil)))
 	for _, seg := range dst {
-		if len(seg) == 0 {
-			t.Error("an empty segment reached the frame writer; it should have been skipped")
-		}
+		assert.NotEmpty(t, seg,
+			"an empty segment reached the frame writer; it should have been skipped")
 	}
 }
 
@@ -224,19 +212,17 @@ func TestEmitDataV_ClearsScratch(t *testing.T) {
 	c, _ := vecConn(t, &buf, 16384)
 	body := make([]byte, 512)
 	v, err := newDataVec([][]byte{[]byte("hdr"), body})
-	if err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, err)
+
 	segs, err := c.emitDataV(&v, 1, 515, true, 0, c.dvSegs)
-	if err != nil {
-		t.Fatalf("emitDataV: %v", err)
-	}
+
+	require.NoErrorf(t, err, "emitDataV")
 	c.dvSegs = segs
-	for i := range c.dvSegs[:cap(c.dvSegs)] {
-		if c.dvSegs[:cap(c.dvSegs)][i] != nil {
-			t.Fatalf("scratch slot %d still points at caller memory after the write — an "+
+	full := c.dvSegs[:cap(c.dvSegs)]
+	for i := range full {
+		require.Truef(t, full[i] == nil,
+			"scratch slot %d still points at caller memory after the write — an "+
 				"idle pooled connection would pin the whole message", i)
-		}
 	}
 }
 
@@ -249,16 +235,17 @@ func TestEmitDataV_UnderrunDoesNotWrite(t *testing.T) {
 	var buf bytes.Buffer
 	c, _ := vecConn(t, &buf, 16384)
 	v, err := newDataVec([][]byte{[]byte("short")})
-	if err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, err)
+
 	segs, err := c.emitDataV(&v, 1, 100, false, 0, c.dvSegs) // ask for more than exists
+
 	c.dvSegs = segs
-	if err != ErrVecUnderrun {
-		t.Fatalf("emitDataV with a short cursor = %v, want ErrVecUnderrun", err)
-	}
-	if buf.Len() != 0 {
-		t.Errorf("a frame was written anyway (%d bytes); the header would have declared "+
+	// Identity, not errors.Is: the caller distinguishes this from a transport
+	// error by comparing the sentinel directly, so a future wrap would be a
+	// behaviour change this test must still see.
+	require.Truef(t, err == ErrVecUnderrun,
+		"emitDataV with a short cursor = %v, want ErrVecUnderrun", err)
+	assert.Zerof(t, buf.Len(),
+		"a frame was written anyway (%d bytes); the header would have declared "+
 			"100 bytes and 5 would have followed", buf.Len())
-	}
 }

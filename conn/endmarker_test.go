@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/lodgvideon/poseidon-http-client/header"
+	"github.com/stretchr/testify/require"
 )
 
 // TestStream_TerminalEmptyDataNeverShedsTheStream pins the shape behind #344.
@@ -24,9 +25,10 @@ func TestStream_TerminalEmptyDataNeverShedsTheStream(t *testing.T) {
 	s := newStream(1, 2, w, 65535)
 	s.push(StreamEvent{Type: EventHeaders})
 	s.push(StreamEvent{Type: EventData, Data: []byte("body")})
-	if got, want := len(s.events), cap(s.events); got != want {
-		t.Fatalf("channel is %d/%d; the test needs it full", got, want)
-	}
+	require.Equalf(t, cap(s.events), len(s.events),
+		"channel is %d/%d; the test needs it full", len(s.events), cap(s.events))
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
 
 	// The terminal marker: END_STREAM, no payload, no room.
 	s.deliverEnd(StreamEvent{Type: EventData, EndStream: true}, true)
@@ -34,35 +36,18 @@ func TestStream_TerminalEmptyDataNeverShedsTheStream(t *testing.T) {
 	w.mu.Lock()
 	rst := w.bestEffortRSTs
 	w.mu.Unlock()
-	if rst != 0 {
-		t.Fatalf("wrote %d RST_STREAM for a response the peer completed", rst)
-	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
-	want := []StreamEventType{EventHeaders, EventData}
-	for i, wantType := range want {
+	require.Zerof(t, rst, "wrote %d RST_STREAM for a response the peer completed", rst)
+	for i, wantType := range []StreamEventType{EventHeaders, EventData} {
 		ev, err := s.ref().Recv(ctx)
-		if err != nil {
-			t.Fatalf("Recv %d: %v", i, err)
-		}
-		if ev.Type != wantType {
-			t.Fatalf("event %d = %v, want %v", i, ev.Type, wantType)
-		}
-		if ev.Type == EventReset {
-			t.Fatalf("event %d is a reset; the response was complete", i)
-		}
+		require.NoErrorf(t, err, "Recv %d", i)
+		require.Equalf(t, wantType, ev.Type,
+			"event %d = %v, want %v — a reset here would mean the response was shed", i, ev.Type, wantType)
 	}
 	ev, err := s.ref().Recv(ctx)
-	if err != nil {
-		t.Fatalf("terminal Recv: %v", err)
-	}
-	if ev.Type == EventReset {
-		t.Fatalf("terminal event is a reset (code %v); the response was complete", ev.RSTCode)
-	}
-	if !ev.EndStream {
-		t.Fatalf("terminal event = %v without EndStream", ev.Type)
-	}
+	require.NoErrorf(t, err, "terminal Recv")
+	require.NotEqualf(t, EventReset, ev.Type,
+		"terminal event is a reset (code %v); the response was complete", ev.RSTCode)
+	require.Truef(t, ev.EndStream, "terminal event = %v without EndStream", ev.Type)
 }
 
 // TestStream_TerminalTrailersStillShedWhenFull is the scope guard. A trailer
@@ -73,22 +58,21 @@ func TestStream_TerminalTrailersStillShedWhenFull(t *testing.T) {
 	w := &fakeStreamWriter{}
 	s := newStream(1, 1, w, 65535)
 	s.push(StreamEvent{Type: EventHeaders})
-
 	// Built the way emitHeaderBlock builds it, so the event under test carries
 	// the same owned storage a real trailer block does.
 	blk := copyFieldsToBlock([]header.Field{{Name: []byte("grpc-status"), Value: []byte("0")}})
-	if s.deliverEnd(StreamEvent{
+
+	enqueued := s.deliverEnd(StreamEvent{
 		Type:      EventTrailers,
 		Headers:   blk.Fields(),
 		Block:     blk,
 		EndStream: true,
-	}, true) {
-		t.Fatal("trailers were enqueued into a full channel")
-	}
+	}, true)
+
+	require.False(t, enqueued, "trailers were enqueued into a full channel")
 	s.mu.Lock()
 	closed := s.closed
 	s.mu.Unlock()
-	if !closed {
-		t.Fatal("a trailer block that could not be delivered must still shed the stream, not vanish")
-	}
+	require.True(t, closed,
+		"a trailer block that could not be delivered must still shed the stream, not vanish")
 }

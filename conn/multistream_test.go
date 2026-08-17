@@ -10,11 +10,10 @@ import (
 	"time"
 
 	"github.com/lodgvideon/poseidon-http-client/header"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
-// TestConn_NewStream_ConcurrentAllocation_UniqueOddIDs verifies that
-// concurrent NewStream callers each receive a distinct odd stream ID
-// (RFC 7540 §5.1.1) and the inflight counter matches the allocations.
 // TestConn_NewStream_ConcurrentAllocation_RespectsCap verifies that
 // concurrent NewStream callers race the inflight counter without
 // exceeding the advertised MaxConcurrentStreams. ID assignment itself
@@ -23,10 +22,10 @@ import (
 func TestConn_NewStream_ConcurrentAllocation_RespectsCap(t *testing.T) {
 	const cap = 8
 	c := newFakeConn(cap)
-
-	var wg sync.WaitGroup
 	successes := make(chan struct{}, cap*2)
 	tooMany := make(chan struct{}, cap*2)
+
+	var wg sync.WaitGroup
 	for i := 0; i < cap*2; i++ {
 		wg.Add(1)
 		go func() {
@@ -38,45 +37,36 @@ func TestConn_NewStream_ConcurrentAllocation_RespectsCap(t *testing.T) {
 			case ErrTooManyStreams:
 				tooMany <- struct{}{}
 			default:
-				t.Errorf("unexpected err: %v", err)
+				// assert, not require: FailNow from a non-test goroutine is
+				// undefined, and the counts below report the outcome anyway.
+				assert.Failf(t, "unexpected NewStream error", "unexpected err: %v", err)
 			}
 		}()
 	}
 	wg.Wait()
+
 	close(successes)
 	close(tooMany)
-	if len(successes) != cap {
-		t.Fatalf("successes = %d, want %d", len(successes), cap)
-	}
-	if len(tooMany) != cap {
-		t.Fatalf("ErrTooManyStreams count = %d, want %d", len(tooMany), cap)
-	}
+	require.Lenf(t, successes, cap, "successes = %d, want %d", len(successes), cap)
+	require.Lenf(t, tooMany, cap, "ErrTooManyStreams count = %d, want %d", len(tooMany), cap)
 }
 
-// TestConn_NewStream_AfterRelease_ReusesSlot verifies that a stream
-// whose both ends have closed frees its slot, allowing subsequent
-// NewStream calls up to the advertised limit.
 // TestConn_NewStream_AfterRelease_ReusesSlot verifies that a stream
 // allocated via NewStream but never written to (e.g. cancelled before
 // SendHeaders) frees its slot via releaseUnassignedInflight.
 func TestConn_NewStream_AfterRelease_ReusesSlot(t *testing.T) {
 	c := newFakeConn(2)
 	s1, err := c.NewStream(context.Background())
-	if err != nil {
-		t.Fatalf("NewStream 1: %v", err)
-	}
-	s2, err := c.NewStream(context.Background())
-	if err != nil {
-		t.Fatalf("NewStream 2: %v", err)
-	}
-	if _, err := c.NewStream(context.Background()); err != ErrTooManyStreams {
-		t.Fatalf("NewStream 3 err = %v, want ErrTooManyStreams", err)
-	}
+	require.NoErrorf(t, err, "NewStream 1")
+	_, err = c.NewStream(context.Background())
+	require.NoErrorf(t, err, "NewStream 2")
+	_, err = c.NewStream(context.Background())
+	require.ErrorIsf(t, err, ErrTooManyStreams, "NewStream 3 err = %v, want ErrTooManyStreams", err)
+
 	c.releaseUnassignedInflight(s1.Stream())
-	if _, err := c.NewStream(context.Background()); err != nil {
-		t.Fatalf("NewStream after release: %v", err)
-	}
-	_ = s2
+
+	_, err = c.NewStream(context.Background())
+	require.NoErrorf(t, err, "NewStream after release")
 }
 
 // newFakeConn builds a *Conn wired only enough to exercise NewStream
@@ -100,13 +90,12 @@ func TestIntegration_TenConcurrentStreams_Echo(t *testing.T) {
 		_, _ = w.Write(body)
 	}))
 	defer srv.Close()
-
 	c := dialServer(t, srv, cfg)
 	defer c.Close()
-
 	const n = 10
-	var wg sync.WaitGroup
 	errs := make(chan error, n)
+
+	var wg sync.WaitGroup
 	for i := 0; i < n; i++ {
 		wg.Add(1)
 		go func(i int) {
@@ -155,8 +144,9 @@ func TestIntegration_TenConcurrentStreams_Echo(t *testing.T) {
 		}(i)
 	}
 	wg.Wait()
+
 	close(errs)
 	for err := range errs {
-		t.Errorf("%v", err)
+		assert.NoError(t, err, "a concurrent stream did not round-trip its own body")
 	}
 }

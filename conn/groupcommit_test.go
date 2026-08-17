@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/lodgvideon/poseidon-http-client/header"
+	"github.com/stretchr/testify/require"
 )
 
 func gcTestServer(t *testing.T) (*httptest.Server, *tls.Config) {
@@ -52,16 +53,12 @@ func TestGroupCommit_ConcurrentGETs_NoDeadlock(t *testing.T) {
 	t.Parallel()
 	srv, cfg := gcTestServer(t)
 	defer srv.Close()
-
 	dialer := &countingDialer{inner: &TLSDialer{Config: cfg}}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	c, err := Dial(ctx, srv.Listener.Addr().String(), ConnOptions{Dialer: dialer, GroupCommit: true})
-	if err != nil {
-		t.Fatalf("Dial: %v", err)
-	}
+	require.NoErrorf(t, err, "Dial")
 	defer func() { _ = c.Close() }()
-
 	const (
 		workers = 32
 		perWork = 200
@@ -74,19 +71,19 @@ func TestGroupCommit_ConcurrentGETs_NoDeadlock(t *testing.T) {
 	for w := 0; w < workers; w++ {
 		go func() {
 			for i := 0; i < perWork; i++ {
-				s, err := c.NewStream(ctx)
-				if err != nil {
-					done <- err
+				s, serr := c.NewStream(ctx)
+				if serr != nil {
+					done <- serr
 					return
 				}
-				if err := s.SendHeaders(ctx, hdrs, true); err != nil {
-					done <- err
+				if herr := s.SendHeaders(ctx, hdrs, true); herr != nil {
+					done <- herr
 					return
 				}
 				for {
-					ev, err := s.Recv(ctx)
-					if err != nil {
-						done <- err
+					ev, rerr := s.Recv(ctx)
+					if rerr != nil {
+						done <- rerr
 						return
 					}
 					if ev.EndStream {
@@ -101,15 +98,12 @@ func TestGroupCommit_ConcurrentGETs_NoDeadlock(t *testing.T) {
 	deadline := time.After(25 * time.Second)
 	for w := 0; w < workers; w++ {
 		select {
-		case err := <-done:
-			if err != nil {
-				t.Fatalf("worker failed: %v", err)
-			}
+		case werr := <-done:
+			require.NoErrorf(t, werr, "worker failed")
 		case <-deadline:
-			t.Fatal("timeout: group-commit deadlocked under concurrent GETs")
+			require.FailNow(t, "timeout: group-commit deadlocked under concurrent GETs")
 		}
 	}
-
 	frames := c.atomicFramesSent.Load() - framesBefore
 	writes := dialer.cc.writes.Load() - writesBefore
 	if writes > 0 {
@@ -154,16 +148,12 @@ func TestGroupCommit_WriteError_SurfacesNoHang(t *testing.T) {
 	t.Parallel()
 	srv, cfg := gcTestServer(t)
 	defer srv.Close()
-
 	dialer := &faultDialer{inner: &TLSDialer{Config: cfg}}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	c, err := Dial(ctx, srv.Listener.Addr().String(), ConnOptions{Dialer: dialer, GroupCommit: true})
-	if err != nil {
-		t.Fatalf("Dial: %v", err)
-	}
+	require.NoErrorf(t, err, "Dial")
 	defer func() { _ = c.Close() }()
-
 	hdrs := gcHeaders()
 	const workers = 16
 	var errSeen atomic.Int64
@@ -179,18 +169,18 @@ func TestGroupCommit_WriteError_SurfacesNoHang(t *testing.T) {
 					return
 				default:
 				}
-				s, err := c.NewStream(ctx)
-				if err != nil {
+				s, serr := c.NewStream(ctx)
+				if serr != nil {
 					errSeen.Add(1)
 					return
 				}
-				if err := s.SendHeaders(ctx, hdrs, true); err != nil {
+				if herr := s.SendHeaders(ctx, hdrs, true); herr != nil {
 					errSeen.Add(1)
 					return
 				}
 				for {
-					ev, err := s.Recv(ctx)
-					if err != nil {
+					ev, rerr := s.Recv(ctx)
+					if rerr != nil {
 						errSeen.Add(1)
 						return
 					}
@@ -201,9 +191,9 @@ func TestGroupCommit_WriteError_SurfacesNoHang(t *testing.T) {
 			}
 		}()
 	}
-
 	// Let some traffic flow, then break the transport mid-flight.
 	time.Sleep(20 * time.Millisecond)
+
 	dialer.fc.fail.Store(true)
 
 	waited := make(chan struct{})
@@ -212,9 +202,7 @@ func TestGroupCommit_WriteError_SurfacesNoHang(t *testing.T) {
 	case <-waited:
 	case <-time.After(20 * time.Second):
 		close(stop)
-		t.Fatal("timeout: a group-commit writer hung after a transport write error")
+		require.FailNow(t, "timeout: a group-commit writer hung after a transport write error")
 	}
-	if errSeen.Load() == 0 {
-		t.Fatal("expected the injected write failure to surface as an error")
-	}
+	require.NotZero(t, errSeen.Load(), "expected the injected write failure to surface as an error")
 }
