@@ -617,7 +617,14 @@ func TestPool_CountLive_IndirectCoverage(t *testing.T) {
 	}
 	st := c.PoolStats()
 
-	assert.Truef(t, st.ActiveConns >= 0, "ActiveConns = %d, want ≥ 0", st.ActiveConns)
+	// >= 1, not >= 0. ActiveConns is a count of live conns and is never
+	// negative, so the original ">= 0" was an assertion that could not fire:
+	// countLive could return anything, or not be reached at all, and this test
+	// stayed green. Two requests have just completed against a pool with
+	// MaxConnsPerHost=2 and no idle eviction configured, so at least one conn
+	// must still be live at this point.
+	assert.GreaterOrEqualf(t, st.ActiveConns, 1,
+		"ActiveConns = %d after two completed requests, want >= 1 — countLive is not seeing the pool's live conns", st.ActiveConns)
 }
 
 // ---------------------------------------------------------------------------
@@ -1464,12 +1471,13 @@ func TestHistogramSnapshot_Quantile_HighBucket(t *testing.T) {
 	assert.NotZerof(t, q50, "Quantile(0.5) on single 1s observation = 0, want non-zero")
 	assert.NotZerof(t, q99, "Quantile(0.99) = 0, want non-zero")
 
-	// p > 1 clamped to 1.
+	// p > 1 clamped to 1. This was an `if q2 != q99` whose body was EMPTY, so
+	// a Quantile that stopped clamping — or returned anything at all here —
+	// passed unremarked. With a single observation every quantile lands in the
+	// same bucket, so the clamp to p=1 is exactly "q2 equals q99".
 	q2 := snap.Quantile(2.0)
-	if q2 != q99 {
-		// q99 = q100 = same bucket since only 1 observation
-		_ = q2 // just check no panic
-	}
+	assert.Equalf(t, q99, q2,
+		"Quantile(2.0) = %v, want Quantile(0.99) = %v — p > 1 must clamp to 1 rather than run off the bucket array", q2, q99)
 }
 
 // ---------------------------------------------------------------------------
