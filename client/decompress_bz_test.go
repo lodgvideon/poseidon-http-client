@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"compress/gzip"
 	"compress/zlib"
-	"errors"
 	"io"
 	"runtime"
 	"strings"
@@ -13,6 +12,8 @@ import (
 
 	"github.com/andybalholm/brotli"
 	"github.com/klauspost/compress/zstd"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	"github.com/lodgvideon/poseidon-http-client/conn"
 )
@@ -22,12 +23,10 @@ func gzipCompress(t testing.TB, raw []byte) []byte {
 	t.Helper()
 	var buf bytes.Buffer
 	gw := gzip.NewWriter(&buf)
-	if _, err := gw.Write(raw); err != nil {
-		t.Fatalf("gzip write: %v", err)
-	}
-	if err := gw.Close(); err != nil {
-		t.Fatalf("gzip close: %v", err)
-	}
+	_, err := gw.Write(raw)
+	require.NoErrorf(t, err, "gzip write: %v", err)
+	err = gw.Close()
+	require.NoErrorf(t, err, "gzip close: %v", err)
 	return buf.Bytes()
 }
 
@@ -37,12 +36,10 @@ func zlibCompress(t testing.TB, raw []byte) []byte {
 	t.Helper()
 	var buf bytes.Buffer
 	zw := zlib.NewWriter(&buf)
-	if _, err := zw.Write(raw); err != nil {
-		t.Fatalf("zlib write: %v", err)
-	}
-	if err := zw.Close(); err != nil {
-		t.Fatalf("zlib close: %v", err)
-	}
+	_, err := zw.Write(raw)
+	require.NoErrorf(t, err, "zlib write: %v", err)
+	err = zw.Close()
+	require.NoErrorf(t, err, "zlib close: %v", err)
 	return buf.Bytes()
 }
 
@@ -51,12 +48,10 @@ func brotliCompress(t testing.TB, raw []byte) []byte {
 	t.Helper()
 	var buf bytes.Buffer
 	bw := brotli.NewWriter(&buf)
-	if _, err := bw.Write(raw); err != nil {
-		t.Fatalf("brotli write: %v", err)
-	}
-	if err := bw.Close(); err != nil {
-		t.Fatalf("brotli close: %v", err)
-	}
+	_, err := bw.Write(raw)
+	require.NoErrorf(t, err, "brotli write: %v", err)
+	err = bw.Close()
+	require.NoErrorf(t, err, "brotli close: %v", err)
 	return buf.Bytes()
 }
 
@@ -65,15 +60,11 @@ func zstdCompress(t testing.TB, raw []byte) []byte {
 	t.Helper()
 	var buf bytes.Buffer
 	zw, err := zstd.NewWriter(&buf, zstd.WithEncoderConcurrency(1))
-	if err != nil {
-		t.Fatalf("zstd writer: %v", err)
-	}
-	if _, err := zw.Write(raw); err != nil {
-		t.Fatalf("zstd write: %v", err)
-	}
-	if err := zw.Close(); err != nil {
-		t.Fatalf("zstd close: %v", err)
-	}
+	require.NoErrorf(t, err, "zstd writer: %v", err)
+	_, err = zw.Write(raw)
+	require.NoErrorf(t, err, "zstd write: %v", err)
+	err = zw.Close()
+	require.NoErrorf(t, err, "zstd close: %v", err)
 	return buf.Bytes()
 }
 
@@ -100,9 +91,9 @@ func TestDetectEncoding_BrotliZstd(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := detectEncoding(tc.headers); got != tc.want {
-				t.Errorf("detectEncoding = %v, want %v", got, tc.want)
-			}
+			got := detectEncoding(tc.headers)
+
+			assert.Equalf(t, tc.want, got, "detectEncoding = %v, want %v", got, tc.want)
 		})
 	}
 }
@@ -121,10 +112,9 @@ func TestContentEncoding_ConstantsStable(t *testing.T) {
 		{EncodingBrotli, 3},
 		{EncodingZstd, 4},
 	}
+
 	for _, tc := range cases {
-		if int(tc.enc) != tc.want {
-			t.Errorf("ContentEncoding = %d, want %d", int(tc.enc), tc.want)
-		}
+		assert.Equalf(t, tc.want, int(tc.enc), "ContentEncoding = %d, want %d", int(tc.enc), tc.want)
 	}
 }
 
@@ -160,13 +150,12 @@ func TestDecompressFully_BrotliZstd_RoundTrip(t *testing.T) {
 		} {
 			t.Run(enc.name+"/"+payload.name, func(t *testing.T) {
 				compressed := enc.comp(t, payload.raw)
+
 				out, err := decompressFully(enc.enc, compressed, DefaultMaxDecompressedSize)
-				if err != nil {
-					t.Fatalf("decompressFully: %v", err)
-				}
-				if !bytes.Equal(out, payload.raw) {
-					t.Errorf("mismatch: got %d bytes, want %d", len(out), len(payload.raw))
-				}
+
+				require.NoErrorf(t, err, "decompressFully: %v", err)
+				assert.Truef(t, bytes.Equal(out, payload.raw),
+					"mismatch: got %d bytes, want %d", len(out), len(payload.raw))
 			})
 		}
 	}
@@ -186,25 +175,19 @@ func TestNewDecompressingReader_BrotliZstd_RoundTrip(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			src := io.NopCloser(bytes.NewReader(tc.comp(t, raw)))
+
 			dr, err := newDecompressingReader(tc.enc, src)
-			if err != nil {
-				t.Fatalf("newDecompressingReader: %v", err)
-			}
+			require.NoErrorf(t, err, "newDecompressingReader: %v", err)
 			out, err := io.ReadAll(dr)
-			if err != nil {
-				t.Fatalf("ReadAll: %v", err)
-			}
-			if err := dr.Close(); err != nil {
-				t.Fatalf("Close: %v", err)
-			}
-			if !bytes.Equal(out, raw) {
-				t.Errorf("mismatch: got %d bytes, want %d", len(out), len(raw))
-			}
+			require.NoErrorf(t, err, "ReadAll: %v", err)
+			err = dr.Close()
+			require.NoErrorf(t, err, "Close: %v", err)
+
+			assert.Truef(t, bytes.Equal(out, raw), "mismatch: got %d bytes, want %d", len(out), len(raw))
 			// Close must be idempotent: drainResponse and the caller can both
 			// reach it, and a double Put would alias a pooled decoder.
-			if err := dr.Close(); err != nil {
-				t.Errorf("second Close: %v", err)
-			}
+			err = dr.Close()
+			assert.NoErrorf(t, err, "second Close: %v", err)
 		})
 	}
 }
@@ -223,18 +206,14 @@ func TestNewDecompressingReader_BrotliZstd_ClosesSource(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			src := &countingCloser{Reader: bytes.NewReader(tc.comp(t, []byte("x")))}
 			dr, err := newDecompressingReader(tc.enc, src)
-			if err != nil {
-				t.Fatalf("newDecompressingReader: %v", err)
-			}
+			require.NoErrorf(t, err, "newDecompressingReader: %v", err)
 			_, _ = io.ReadAll(dr)
+
 			_ = dr.Close()
-			if src.closes != 1 {
-				t.Errorf("source closes = %d, want 1", src.closes)
-			}
+
+			assert.Equalf(t, 1, src.closes, "source closes = %d, want 1", src.closes)
 			_ = dr.Close()
-			if src.closes != 1 {
-				t.Errorf("after second Close: source closes = %d, want 1", src.closes)
-			}
+			assert.Equalf(t, 1, src.closes, "after second Close: source closes = %d, want 1", src.closes)
 		})
 	}
 }
@@ -301,20 +280,16 @@ func TestDecompressFully_BrotliZstd_BombGuard(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			bomb := tc.comp(t, zeroes)
 			ratio := float64(bombSize) / float64(len(bomb))
-			if ratio < 1000 {
-				t.Fatalf("not a bomb: %d -> %d bytes (ratio %.0f), test is not exercising the guard",
-					len(bomb), bombSize, ratio)
-			}
+			require.GreaterOrEqualf(t, ratio, 1000.0,
+				"not a bomb: %d -> %d bytes (ratio %.0f), test is not exercising the guard",
+				len(bomb), bombSize, ratio)
 			t.Logf("%s bomb: %d compressed bytes -> %d decompressed (ratio %.0f:1)",
 				tc.name, len(bomb), bombSize, ratio)
 
 			out, err := decompressFully(tc.enc, bomb, bombLimit)
-			if err == nil {
-				t.Fatalf("bomb accepted: got %d bytes, want ErrBodyTooLarge", len(out))
-			}
-			if !errors.Is(err, ErrBodyTooLarge) {
-				t.Fatalf("err = %v, want ErrBodyTooLarge", err)
-			}
+
+			require.Errorf(t, err, "bomb accepted: got %d bytes, want ErrBodyTooLarge", len(out))
+			require.ErrorIsf(t, err, ErrBodyTooLarge, "err = %v, want ErrBodyTooLarge", err)
 		})
 	}
 }
@@ -333,19 +308,19 @@ func TestDecompressFully_BrotliZstd_AtLimit(t *testing.T) {
 		{"zstd", EncodingZstd, zstdCompress},
 	} {
 		t.Run(tc.name+"/exactly-at-limit", func(t *testing.T) {
-			out, err := decompressFully(tc.enc, tc.comp(t, bytes.Repeat([]byte("a"), limit)), limit)
-			if err != nil {
-				t.Fatalf("payload of exactly maxBytes rejected: %v", err)
-			}
-			if len(out) != limit {
-				t.Errorf("len = %d, want %d", len(out), limit)
-			}
+			compressed := tc.comp(t, bytes.Repeat([]byte("a"), limit))
+
+			out, err := decompressFully(tc.enc, compressed, limit)
+
+			require.NoErrorf(t, err, "payload of exactly maxBytes rejected: %v", err)
+			assert.Lenf(t, out, limit, "len = %d, want %d", len(out), limit)
 		})
 		t.Run(tc.name+"/one-over-limit", func(t *testing.T) {
-			_, err := decompressFully(tc.enc, tc.comp(t, bytes.Repeat([]byte("a"), limit+1)), limit)
-			if !errors.Is(err, ErrBodyTooLarge) {
-				t.Fatalf("err = %v, want ErrBodyTooLarge", err)
-			}
+			compressed := tc.comp(t, bytes.Repeat([]byte("a"), limit+1))
+
+			_, err := decompressFully(tc.enc, compressed, limit)
+
+			require.ErrorIsf(t, err, ErrBodyTooLarge, "err = %v, want ErrBodyTooLarge", err)
 		})
 	}
 }
@@ -396,9 +371,8 @@ func TestDecompress_Zstd_PooledNoGoroutineGrowth(t *testing.T) {
 
 	// Warm the pool so first-use allocation is not counted as growth.
 	for i := 0; i < 4; i++ {
-		if _, err := decompressFully(EncodingZstd, compressed, DefaultMaxDecompressedSize); err != nil {
-			t.Fatalf("warmup: %v", err)
-		}
+		_, err := decompressFully(EncodingZstd, compressed, DefaultMaxDecompressedSize)
+		require.NoErrorf(t, err, "warmup: %v", err)
 	}
 
 	const iterations = 200
@@ -406,39 +380,35 @@ func TestDecompress_Zstd_PooledNoGoroutineGrowth(t *testing.T) {
 	t.Run("buffered-path", func(t *testing.T) {
 		base := goroutineBaseline()
 		t.Logf("baseline goroutines: %d", base)
+
 		for i := 0; i < iterations; i++ {
 			out, err := decompressFully(EncodingZstd, compressed, DefaultMaxDecompressedSize)
-			if err != nil {
-				t.Fatalf("iter %d: %v", i, err)
-			}
-			if len(out) != len(raw) {
-				t.Fatalf("iter %d: len = %d, want %d", i, len(out), len(raw))
-			}
+			require.NoErrorf(t, err, "iter %d: %v", i, err)
+			require.Lenf(t, out, len(raw), "iter %d: len = %d, want %d", i, len(out), len(raw))
 		}
-		if got := settleGoroutines(base, 2*time.Second); got > base {
-			t.Errorf("goroutines grew across %d pooled decompressions: %d -> %d", iterations, base, got)
-		}
+		got := settleGoroutines(base, 2*time.Second)
+
+		assert.LessOrEqualf(t, got, base,
+			"goroutines grew across %d pooled decompressions: %d -> %d", iterations, base, got)
 	})
 
 	t.Run("streaming-path", func(t *testing.T) {
 		base := goroutineBaseline()
 		t.Logf("baseline goroutines: %d", base)
+
 		for i := 0; i < iterations; i++ {
 			src := io.NopCloser(bytes.NewReader(compressed))
 			dr, err := newDecompressingReader(EncodingZstd, src)
-			if err != nil {
-				t.Fatalf("iter %d: %v", i, err)
-			}
-			if _, err := io.Copy(io.Discard, dr); err != nil {
-				t.Fatalf("iter %d: copy: %v", i, err)
-			}
-			if err := dr.Close(); err != nil {
-				t.Fatalf("iter %d: close: %v", i, err)
-			}
+			require.NoErrorf(t, err, "iter %d: %v", i, err)
+			_, err = io.Copy(io.Discard, dr)
+			require.NoErrorf(t, err, "iter %d: copy: %v", i, err)
+			err = dr.Close()
+			require.NoErrorf(t, err, "iter %d: close: %v", i, err)
 		}
-		if got := settleGoroutines(base, 2*time.Second); got > base {
-			t.Errorf("goroutines grew across %d pooled stream decodes: %d -> %d", iterations, base, got)
-		}
+		got := settleGoroutines(base, 2*time.Second)
+
+		assert.LessOrEqualf(t, got, base,
+			"goroutines grew across %d pooled stream decodes: %d -> %d", iterations, base, got)
 	})
 
 	// The subtests above prove nothing is *leaked*, but they pass even without
@@ -455,29 +425,22 @@ func TestDecompress_Zstd_PooledNoGoroutineGrowth(t *testing.T) {
 		t.Logf("baseline goroutines: %d", base)
 		probe := &probeReader{}
 		probe.rd.Reset(compressed)
+
 		dr, err := newDecompressingReader(EncodingZstd, probe)
-		if err != nil {
-			t.Fatalf("newDecompressingReader: %v", err)
-		}
+		require.NoErrorf(t, err, "newDecompressingReader: %v", err)
 		n, err := io.Copy(io.Discard, dr)
-		if err != nil {
-			t.Fatalf("copy: %v", err)
-		}
-		if err := dr.Close(); err != nil {
-			t.Fatalf("close: %v", err)
-		}
-		if n != int64(len(raw)) {
-			t.Fatalf("decoded %d bytes, want %d", n, len(raw))
-		}
-		if probe.reads < 2 {
-			t.Fatalf("source read %d times: payload too small to observe a running pipeline", probe.reads)
-		}
+		require.NoErrorf(t, err, "copy: %v", err)
+		err = dr.Close()
+		require.NoErrorf(t, err, "close: %v", err)
+
+		require.Equalf(t, int64(len(raw)), n, "decoded %d bytes, want %d", n, len(raw))
+		require.GreaterOrEqualf(t, probe.reads, 2,
+			"source read %d times: payload too small to observe a running pipeline", probe.reads)
 		t.Logf("peak goroutines during decode: %d (%d source reads)", probe.peak, probe.reads)
-		if probe.peak > base {
-			t.Errorf("decode ran %d extra goroutines (peak %d, baseline %d): "+
+		assert.LessOrEqualf(t, probe.peak, base,
+			"decode ran %d extra goroutines (peak %d, baseline %d): "+
 				"the pooled decoder is not synchronous — is WithDecoderConcurrency(1) still set?",
-				probe.peak-base, probe.peak, base)
-		}
+			probe.peak-base, probe.peak, base)
 	})
 
 	// A decoder abandoned without Close (caller drops the body) must not
@@ -486,19 +449,19 @@ func TestDecompress_Zstd_PooledNoGoroutineGrowth(t *testing.T) {
 	t.Run("abandoned-without-close", func(t *testing.T) {
 		base := goroutineBaseline()
 		t.Logf("baseline goroutines: %d", base)
+
 		for i := 0; i < iterations; i++ {
 			src := io.NopCloser(bytes.NewReader(compressed))
 			dr, err := newDecompressingReader(EncodingZstd, src)
-			if err != nil {
-				t.Fatalf("iter %d: %v", i, err)
-			}
+			require.NoErrorf(t, err, "iter %d: %v", i, err)
 			// Read one byte, then abandon.
 			var b [1]byte
 			_, _ = dr.Read(b[:])
 		}
-		if got := settleGoroutines(base, 2*time.Second); got > base {
-			t.Errorf("goroutines stranded by %d abandoned decoders: %d -> %d", iterations, base, got)
-		}
+		got := settleGoroutines(base, 2*time.Second)
+
+		assert.LessOrEqualf(t, got, base,
+			"goroutines stranded by %d abandoned decoders: %d -> %d", iterations, base, got)
 	})
 }
 
@@ -513,17 +476,16 @@ func TestDecompress_Zstd_PooledDecoderReusable(t *testing.T) {
 		[]byte(""),
 		bytes.Repeat([]byte("fourth "), 50_000),
 	}
+
 	// Sequential decodes: each Get is likely to draw the decoder the previous
 	// iteration returned, so a poisoned decoder surfaces immediately.
 	for round := 0; round < 50; round++ {
 		for i, raw := range payloads {
 			out, err := decompressFully(EncodingZstd, zstdCompress(t, raw), DefaultMaxDecompressedSize)
-			if err != nil {
-				t.Fatalf("round %d payload %d: %v", round, i, err)
-			}
-			if !bytes.Equal(out, raw) {
-				t.Fatalf("round %d payload %d: mismatch (got %d bytes, want %d)", round, i, len(out), len(raw))
-			}
+
+			require.NoErrorf(t, err, "round %d payload %d: %v", round, i, err)
+			require.Truef(t, bytes.Equal(out, raw),
+				"round %d payload %d: mismatch (got %d bytes, want %d)", round, i, len(out), len(raw))
 		}
 	}
 }
@@ -544,16 +506,14 @@ func TestDecompress_PooledDecoderReuseAfterError(t *testing.T) {
 			raw := []byte("valid payload after a poisoned decode")
 			good := tc.comp(t, raw)
 			garbage := []byte("this is definitely not a compressed frame at all")
+
 			for i := 0; i < 50; i++ {
 				// Poison, then immediately reuse.
 				_, _ = decompressFully(tc.enc, garbage, DefaultMaxDecompressedSize)
 				out, err := decompressFully(tc.enc, good, DefaultMaxDecompressedSize)
-				if err != nil {
-					t.Fatalf("iter %d: decode after error: %v", i, err)
-				}
-				if !bytes.Equal(out, raw) {
-					t.Fatalf("iter %d: mismatch after error: got %q", i, out)
-				}
+
+				require.NoErrorf(t, err, "iter %d: decode after error: %v", i, err)
+				require.Truef(t, bytes.Equal(out, raw), "iter %d: mismatch after error: got %q", i, out)
 			}
 		})
 	}
@@ -596,17 +556,14 @@ func TestDecompress_PooledReaderNotPoisonedByPartialRead(t *testing.T) {
 			for i := 0; i < 30; i++ {
 				// Trip the guard: stops reading mid-stream, leaving the
 				// decoder with buffered input.
-				if _, err := decompressFully(tc.enc, bomb, smallLimit); !errors.Is(err, ErrBodyTooLarge) {
-					t.Fatalf("iter %d: bomb err = %v, want ErrBodyTooLarge", i, err)
-				}
+				_, err := decompressFully(tc.enc, bomb, smallLimit)
+				require.ErrorIsf(t, err, ErrBodyTooLarge, "iter %d: bomb err = %v, want ErrBodyTooLarge", i, err)
+
 				// Immediately reuse: a poisoned reader corrupts this decode.
 				out, err := decompressFully(tc.enc, good, DefaultMaxDecompressedSize)
-				if err != nil {
-					t.Fatalf("iter %d: decode after aborted decode: %v", i, err)
-				}
-				if !bytes.Equal(out, raw) {
-					t.Fatalf("iter %d: poisoned reader: got %q, want %q", i, out, raw)
-				}
+
+				require.NoErrorf(t, err, "iter %d: decode after aborted decode: %v", i, err)
+				require.Truef(t, bytes.Equal(out, raw), "iter %d: poisoned reader: got %q, want %q", i, out, raw)
 			}
 		})
 	}
@@ -636,25 +593,19 @@ func TestDecompress_PooledReaderNotPoisonedByPartialStream(t *testing.T) {
 				// Read one small chunk, then close: the decoder still holds
 				// buffered input and undelivered output.
 				dr, err := newDecompressingReader(tc.enc, io.NopCloser(bytes.NewReader(compressed)))
-				if err != nil {
-					t.Fatalf("iter %d: %v", i, err)
-				}
+				require.NoErrorf(t, err, "iter %d: %v", i, err)
 				var b [8]byte
-				if _, err := io.ReadFull(dr, b[:]); err != nil {
-					t.Fatalf("iter %d: short read: %v", i, err)
-				}
-				if err := dr.Close(); err != nil {
-					t.Fatalf("iter %d: close: %v", i, err)
-				}
+				_, err = io.ReadFull(dr, b[:])
+				require.NoErrorf(t, err, "iter %d: short read: %v", i, err)
+				err = dr.Close()
+				require.NoErrorf(t, err, "iter %d: close: %v", i, err)
 
 				// Next request draws from the same pool and must be intact.
 				out, err := decompressFully(tc.enc, compressed, DefaultMaxDecompressedSize)
-				if err != nil {
-					t.Fatalf("iter %d: decode after partial stream: %v", i, err)
-				}
-				if !bytes.Equal(out, raw) {
-					t.Fatalf("iter %d: poisoned reader: got %d bytes, want %d", i, len(out), len(raw))
-				}
+
+				require.NoErrorf(t, err, "iter %d: decode after partial stream: %v", i, err)
+				require.Truef(t, bytes.Equal(out, raw),
+					"iter %d: poisoned reader: got %d bytes, want %d", i, len(out), len(raw))
 			}
 		})
 	}
@@ -681,23 +632,23 @@ func TestDecompress_PoolReuse_NoPerRequestReaderAlloc(t *testing.T) {
 			compressed := tc.comp(t, bytes.Repeat([]byte("pool reuse payload "), 200))
 			// Warm.
 			for i := 0; i < 10; i++ {
-				if _, err := decompressFully(tc.enc, compressed, DefaultMaxDecompressedSize); err != nil {
-					t.Fatalf("warmup: %v", err)
-				}
+				_, err := decompressFully(tc.enc, compressed, DefaultMaxDecompressedSize)
+				require.NoErrorf(t, err, "warmup: %v", err)
 			}
+
 			const iterations = 100
 			got := testing.AllocsPerRun(iterations, func() {
 				if _, err := decompressFully(tc.enc, compressed, DefaultMaxDecompressedSize); err != nil {
 					t.Fatalf("decompressFully: %v", err)
 				}
 			})
+
 			// A fresh decoder per call would be orders of magnitude above this.
 			const maxAllocs = 20
 			t.Logf("%s: %.1f allocs/op (pooled)", tc.name, got)
-			if got > maxAllocs {
-				t.Errorf("%.1f allocs/op exceeds %d — pooled reader is likely not being reused",
-					got, maxAllocs)
-			}
+			assert.LessOrEqualf(t, got, float64(maxAllocs),
+				"%.1f allocs/op exceeds %d — pooled reader is likely not being reused",
+				got, maxAllocs)
 		})
 	}
 }
@@ -748,9 +699,11 @@ func TestDecompress_BrotliZstd_MalformedInput(t *testing.T) {
 		// Truncation specifically must be reported, never silently accepted as
 		// a short body — that would let a peer truncate a response undetected.
 		t.Run(tc.name+"/truncated-is-an-error", func(t *testing.T) {
-			if _, err := decompressFully(tc.enc, full[:len(full)/2], DefaultMaxDecompressedSize); err == nil {
-				t.Error("truncated stream accepted, want error")
-			}
+			truncated := full[:len(full)/2]
+
+			_, err := decompressFully(tc.enc, truncated, DefaultMaxDecompressedSize)
+
+			assert.Error(t, err, "truncated stream accepted, want error")
 		})
 	}
 }
@@ -767,12 +720,11 @@ func flipByte(b []byte, i int) []byte {
 
 func TestAcceptEncodingValue_AdvertisesAllDecodable(t *testing.T) {
 	got := string(acceptEncodingValue)
+
 	// Every coding we can decode must be advertised: a server that picks one
 	// we cannot decode would hand us an undecodable body.
 	for _, want := range []string{"gzip", "deflate", "br", "zstd"} {
-		if !strings.Contains(got, want) {
-			t.Errorf("accept-encoding %q missing %q", got, want)
-		}
+		assert.Containsf(t, got, want, "accept-encoding %q missing %q", got, want)
 	}
 	// Conversely, every advertised coding must be decodable.
 	for _, tok := range strings.Split(got, ",") {
@@ -780,9 +732,8 @@ func TestAcceptEncodingValue_AdvertisesAllDecodable(t *testing.T) {
 		enc := detectEncoding([]conn.HeaderField{
 			{Name: []byte("content-encoding"), Value: []byte(tok)},
 		})
-		if enc == EncodingIdentity {
-			t.Errorf("advertised %q but detectEncoding does not recognise it", tok)
-		}
+		assert.NotEqualf(t, EncodingIdentity, enc,
+			"advertised %q but detectEncoding does not recognise it", tok)
 	}
 }
 
@@ -802,9 +753,9 @@ func TestShouldSendAcceptEncoding(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := shouldSendAcceptEncoding(tc.req); got != tc.want {
-				t.Errorf("shouldSendAcceptEncoding = %v, want %v", got, tc.want)
-			}
+			got := shouldSendAcceptEncoding(tc.req)
+
+			assert.Equalf(t, tc.want, got, "shouldSendAcceptEncoding = %v, want %v", got, tc.want)
 		})
 	}
 }
@@ -832,9 +783,8 @@ func FuzzDecompressFully(f *testing.F) {
 			if err != nil {
 				continue
 			}
-			if int64(len(out)) > maxBytes {
-				t.Fatalf("enc %v: guard breached: %d bytes decoded, limit %d", enc, len(out), maxBytes)
-			}
+			require.LessOrEqualf(t, int64(len(out)), int64(maxBytes),
+				"enc %v: guard breached: %d bytes decoded, limit %d", enc, len(out), maxBytes)
 		}
 	})
 }

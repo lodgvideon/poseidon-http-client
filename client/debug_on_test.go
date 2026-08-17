@@ -6,6 +6,8 @@ import (
 	"runtime"
 	"testing"
 	"time"
+
+	"github.com/stretchr/testify/require"
 )
 
 // These tests run only under `-tags poseidondebug` (the build that compiles in
@@ -32,14 +34,12 @@ func TestLeakGuard_FiresOnGCWithoutClose(t *testing.T) {
 		runtime.GC()
 		select {
 		case what := <-got:
-			if what != "test-object" {
-				t.Fatalf("leak report = %q, want test-object", what)
-			}
+			require.Equalf(t, "test-object", what, "leak report = %q, want test-object", what)
 			return
 		case <-time.After(50 * time.Millisecond):
 		}
 		if time.Now().After(deadline) {
-			t.Fatal("leak guard did not fire within deadline")
+			require.Fail(t, "leak guard did not fire within deadline")
 		}
 	}
 }
@@ -66,9 +66,13 @@ func TestLeakGuard_SilentWhenDisarmed(t *testing.T) {
 		runtime.GC()
 		time.Sleep(20 * time.Millisecond)
 	}
+
+	var reported string
+	fired := false
 	select {
-	case what := <-got:
-		t.Fatalf("disarmed guard still reported a leak: %q", what)
+	case reported = <-got:
+		fired = true
 	default:
 	}
+	require.Falsef(t, fired, "disarmed guard still reported a leak: %q", reported)
 }
