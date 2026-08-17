@@ -173,6 +173,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Tests
 
+- **The mTLS rejection conformance test waits for the close instead of racing
+  it.** `TestConformance_RFC9001_Sec48_ListenerClosesOnRejectedClientCert` called
+  `Poll` once and required that one call to have observed the server's
+  `CONNECTION_CLOSE`. `Poll` is one step of the connection event loop, so `nil`
+  means "made progress", not "the peer closed", and nothing orders the client's
+  first `Poll` against the server's rejection — so on a loaded runner the poll won
+  and the `rfc` gate went red on unrelated pull requests (#785). It now polls
+  until a terminal error arrives, bounded by the same 5-second context, whose
+  expiry `Poll` returns — a silent server still fails, and with a truer message.
+  The assertions are unchanged.
+
 - **The suite is migrating to Arrange–Act–Assert with `testify` assertions, and
   `header` is the first package through.** `CLAUDE.md` requires both of new and
   edited tests; #722 tracks bringing the existing 2427 across, one issue per
