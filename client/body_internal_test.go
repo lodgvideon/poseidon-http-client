@@ -1,6 +1,10 @@
 package client
 
-import "testing"
+import (
+	"testing"
+
+	"github.com/stretchr/testify/assert"
+)
 
 // TestRecycleDataLocked_ClearsAliasingBuf pins that returning the pooled DATA
 // slab also drops buf.
@@ -13,14 +17,11 @@ import "testing"
 func TestRecycleDataLocked_ClearsAliasingBuf(t *testing.T) {
 	slab := getDataSlab()
 	*slab = append((*slab)[:0], "payload"...)
-
 	r := &responseBodyReader{curData: slab, buf: (*slab)[3:]}
+
 	r.recycleDataLocked()
 
-	if r.curData != nil {
-		t.Error("curData not cleared after recycle")
-	}
-	if r.buf != nil {
-		t.Errorf("buf still aliases the recycled slab (%d bytes) — the alias outlived the buffer", len(r.buf))
-	}
+	assert.True(t, r.curData == nil, "curData not cleared after recycle")
+	assert.Truef(t, r.buf == nil,
+		"buf still aliases the recycled slab (%d bytes) — the alias outlived the buffer", len(r.buf))
 }
