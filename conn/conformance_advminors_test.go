@@ -2,6 +2,8 @@ package conn
 
 import (
 	"testing"
+
+	"github.com/stretchr/testify/assert"
 )
 
 // Regression guards for two adversarial-round minors on the push accept path.
@@ -12,7 +14,7 @@ import (
 // compared the whole serialized origin, so the ORIGIN allowance never matched.
 func TestIsKnownOrigin_StripsScheme(t *testing.T) {
 	c := &Conn{origins: []string{"https://example.com", "https://cdn.example.com:8443"}}
-	for _, tc := range []struct {
+	cases := []struct {
 		auth string
 		want bool
 	}{
@@ -20,10 +22,12 @@ func TestIsKnownOrigin_StripsScheme(t *testing.T) {
 		{"cdn.example.com:8443", true},
 		{"evil.com", false},
 		{"https://example.com", false}, // a :authority never carries a scheme
-	} {
-		if got := c.isKnownOrigin([]byte(tc.auth)); got != tc.want {
-			t.Errorf("isKnownOrigin(%q) = %v, want %v", tc.auth, got, tc.want)
-		}
+	}
+
+	for _, tc := range cases {
+		got := c.isKnownOrigin([]byte(tc.auth))
+
+		assert.Equalf(t, tc.want, got, "isKnownOrigin(%q) = %v, want %v", tc.auth, got, tc.want)
 	}
 }
 
@@ -34,12 +38,12 @@ func TestRecycleStream_ResetsReqAuthority(t *testing.T) {
 	s := newStream(1, 8, nil, 65535)
 	s.authorityBuf = []byte("example.com")
 	s.localEnded, s.remoteEnded = true, true
+
 	recycleStream(s)
+
 	// recycleStream clears the fields in place before pooling s, so assert on s
 	// directly. Going back through a pool is flaky: sync.Pool may return nil
 	// (the GC can drop a pooled item), which is not what this test is checking.
 	// s.w is nil here, so nothing is pooled at all — the reset is the point.
-	if len(s.authorityBuf) != 0 {
-		t.Errorf("recycled Stream.authorityBuf = %q, want empty", s.authorityBuf)
-	}
+	assert.Emptyf(t, s.authorityBuf, "recycled Stream.authorityBuf = %q, want empty", s.authorityBuf)
 }

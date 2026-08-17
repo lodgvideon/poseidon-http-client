@@ -3,6 +3,8 @@ package conn
 import (
 	"crypto/tls"
 	"testing"
+
+	"github.com/stretchr/testify/assert"
 )
 
 // TestConformance_RFC9113_Sec9_2_TLS12Floor pins RFC 9113 §9.2: "Implementations
@@ -28,22 +30,16 @@ func TestConformance_RFC9113_Sec9_2_TLS12Floor(t *testing.T) {
 				origMin = tc.in.MinVersion
 			}
 			d := &TLSDialer{Config: tc.in}
+
 			got := d.tlsClientConfig()
-			if got.MinVersion != tc.want {
-				t.Errorf("MinVersion = 0x%04x, want 0x%04x (RFC 9113 §9.2 TLS 1.2 floor)", got.MinVersion, tc.want)
+
+			assert.Equalf(t, tc.want, got.MinVersion,
+				"MinVersion = 0x%04x, want 0x%04x (RFC 9113 §9.2 TLS 1.2 floor)", got.MinVersion, tc.want)
+			if tc.in != nil {
+				assert.Equal(t, origMin, tc.in.MinVersion,
+					"tlsClientConfig mutated the caller's tls.Config MinVersion")
 			}
-			if tc.in != nil && tc.in.MinVersion != origMin {
-				t.Error("tlsClientConfig mutated the caller's tls.Config MinVersion")
-			}
-			h2 := false
-			for _, p := range got.NextProtos {
-				if p == "h2" {
-					h2 = true
-				}
-			}
-			if !h2 {
-				t.Errorf("NextProtos = %v, missing h2", got.NextProtos)
-			}
+			assert.Containsf(t, got.NextProtos, "h2", "NextProtos = %v, missing h2", got.NextProtos)
 		})
 	}
 }

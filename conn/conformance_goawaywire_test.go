@@ -6,6 +6,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
 	"github.com/lodgvideon/poseidon-http-client/frame"
 )
 
@@ -47,9 +50,7 @@ func TestConformance_RFC9113_Sec6_8_ClientEmitsGoAwayBeforeClose(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	c, err := NewClientConn(ctx, cli, ConnOptions{}.defaulted())
-	if err != nil {
-		t.Fatalf("NewClientConn: %v", err)
-	}
+	require.NoError(t, err, "NewClientConn")
 
 	// WriteGoAway blocks on the synchronous pipe until the server reads it, so run
 	// Close concurrently with the server's ReadFrame.
@@ -58,16 +59,12 @@ func TestConformance_RFC9113_Sec6_8_ClientEmitsGoAwayBeforeClose(t *testing.T) {
 
 	select {
 	case g := <-got:
-		if g.code != frame.ErrCodeNoError {
-			t.Errorf("Close GOAWAY code = %v, want NO_ERROR (graceful close, §6.8)", g.code)
-		}
-		if g.last != 0 {
-			t.Errorf("Close GOAWAY last-stream-id = %d, want 0 (no server push; §6.8 peer-initiated scope)", g.last)
-		}
+		assert.Equalf(t, frame.ErrCodeNoError, g.code,
+			"Close GOAWAY code = %v, want NO_ERROR (graceful close, §6.8)", g.code)
+		assert.EqualValuesf(t, 0, g.last,
+			"Close GOAWAY last-stream-id = %d, want 0 (no server push; §6.8 peer-initiated scope)", g.last)
 	case <-time.After(3 * time.Second):
-		t.Fatal("client did not emit a GOAWAY before closing (§6.8: Endpoints SHOULD always send a GOAWAY frame before closing a connection)")
+		require.FailNow(t, "client did not emit a GOAWAY before closing (§6.8: Endpoints SHOULD always send a GOAWAY frame before closing a connection)")
 	}
-	if err := <-closeDone; err != nil {
-		t.Errorf("Close: %v", err)
-	}
+	assert.NoError(t, <-closeDone, "Close")
 }

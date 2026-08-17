@@ -6,6 +6,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
 	"github.com/lodgvideon/poseidon-http-client/frame"
 	"github.com/lodgvideon/poseidon-http-client/hpack"
 )
@@ -40,17 +43,14 @@ func assertIdleStreamConnError(t *testing.T, send func(srvFr *frame.Framer, srv 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	c, err := NewClientConn(ctx, cli, ConnOptions{}.defaulted())
-	if err != nil {
-		t.Fatalf("NewClientConn: %v", err)
-	}
+	require.NoError(t, err, "NewClientConn")
 	defer c.Close()
 
-	if code := recvCode(t, "GOAWAY", probe.away); code != frame.ErrCodeProtocolError {
-		t.Errorf("GOAWAY code = %v, want PROTOCOL_ERROR", code)
-	}
-	if aliveWithin(c, false, 2*time.Second) {
-		t.Error("connection still alive after a frame on an idle stream")
-	}
+	code := recvCode(t, "GOAWAY", probe.away)
+
+	assert.Equalf(t, frame.ErrCodeProtocolError, code, "GOAWAY code = %v, want PROTOCOL_ERROR", code)
+	assert.False(t, aliveWithin(c, false, 2*time.Second),
+		"connection still alive after a frame on an idle stream")
 	release()
 }
 
@@ -103,20 +103,17 @@ func TestConformance_RFC9113_Sec5_1_PriorityOnIdleStream_Accepted(t *testing.T) 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	c, err := NewClientConn(ctx, cli, ConnOptions{}.defaulted())
-	if err != nil {
-		t.Fatalf("NewClientConn: %v", err)
-	}
+	require.NoError(t, err, "NewClientConn")
 	defer c.Close()
 
 	// No GOAWAY should arrive; the connection stays alive.
 	select {
 	case code := <-probe.away:
-		t.Errorf("connection torn down (GOAWAY %v) by a PRIORITY on an idle stream", code)
+		assert.Failf(t, "connection torn down",
+			"GOAWAY %v from a PRIORITY on an idle stream", code)
 	case <-time.After(300 * time.Millisecond):
 	}
-	if !c.IsAlive() {
-		t.Error("connection died after a PRIORITY frame on an idle stream")
-	}
+	assert.True(t, c.IsAlive(), "connection died after a PRIORITY frame on an idle stream")
 	release()
 }
 
@@ -150,34 +147,23 @@ func TestConformance_RFC9113_Sec5_1_DataOnHalfClosedRemote_StreamClosed(t *testi
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	c, err := NewClientConn(ctx, cli, ConnOptions{}.defaulted())
-	if err != nil {
-		t.Fatalf("NewClientConn: %v", err)
-	}
+	require.NoError(t, err, "NewClientConn")
 	defer c.Close()
-
 	s, err := c.NewStream(ctx)
-	if err != nil {
-		t.Fatalf("NewStream: %v", err)
-	}
+	require.NoError(t, err, "NewStream")
+
 	// endStream=false leaves our upload open → half-closed(remote) after the
 	// server's END_STREAM, not fully closed.
-	if err := s.SendHeaders(ctx, reqHeaders(), false); err != nil {
-		t.Fatalf("SendHeaders: %v", err)
-	}
+	require.NoError(t, s.SendHeaders(ctx, reqHeaders(), false), "SendHeaders")
+
 	// First the response headers (END_STREAM), then a reset for the late DATA.
-	ev, err := s.Recv(ctx)
-	if err != nil {
-		t.Fatalf("Recv headers: %v", err)
-	}
-	if ev.Type != EventHeaders {
-		t.Fatalf("event = %s, want EventHeaders", ev.Type)
-	}
+	ev, rerr := s.Recv(ctx)
+	require.NoError(t, rerr, "Recv headers")
+	require.Equalf(t, EventHeaders, ev.Type, "event = %s, want EventHeaders", ev.Type)
 	ev.Release()
-	if code := recvCode(t, "RST_STREAM", probe.rst); code != frame.ErrCodeStreamClosed {
-		t.Errorf("RST_STREAM code = %v, want STREAM_CLOSED", code)
-	}
-	if !c.IsAlive() {
-		t.Error("connection died after a DATA frame on a half-closed(remote) stream; §5.1 makes it a stream error")
-	}
+	code := recvCode(t, "RST_STREAM", probe.rst)
+	assert.Equalf(t, frame.ErrCodeStreamClosed, code, "RST_STREAM code = %v, want STREAM_CLOSED", code)
+	assert.True(t, c.IsAlive(),
+		"connection died after a DATA frame on a half-closed(remote) stream; §5.1 makes it a stream error")
 	release()
 }

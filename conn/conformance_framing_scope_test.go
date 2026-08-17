@@ -7,6 +7,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
 	"github.com/lodgvideon/poseidon-http-client/frame"
 )
 
@@ -74,7 +77,7 @@ func recvCode(t *testing.T, what string, ch chan frame.ErrCode) frame.ErrCode {
 	case c := <-ch:
 		return c
 	case <-time.After(3 * time.Second):
-		t.Fatalf("timed out waiting for %s", what)
+		require.FailNowf(t, "timed out", "timed out waiting for %s", what)
 		return 0
 	}
 }
@@ -85,12 +88,8 @@ func recvCode(t *testing.T, what string, ch chan frame.ErrCode) frame.ErrCode {
 func openHalfClosedStream(ctx context.Context, t *testing.T, c *Conn) StreamRef {
 	t.Helper()
 	s, err := c.NewStream(ctx)
-	if err != nil {
-		t.Fatalf("NewStream: %v", err)
-	}
-	if err := s.SendHeaders(ctx, reqHeaders(), true); err != nil {
-		t.Fatalf("SendHeaders: %v", err)
-	}
+	require.NoError(t, err, "NewStream")
+	require.NoError(t, s.SendHeaders(ctx, reqHeaders(), true), "SendHeaders")
 	return s
 }
 
@@ -118,25 +117,21 @@ func TestConformance_RFC9113_Sec6_9_1_StreamWindowUpdateZero_StreamError(t *test
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	c, err := NewClientConn(ctx, cli, ConnOptions{}.defaulted())
-	if err != nil {
-		t.Fatalf("NewClientConn: %v", err)
-	}
+	require.NoError(t, err, "NewClientConn")
 	defer c.Close()
-
 	s := openHalfClosedStream(ctx, t, c)
-	ev, err := s.Recv(ctx)
-	if err != nil {
-		t.Fatalf("Recv: %v", err)
-	}
-	if ev.Type != EventReset || ev.RSTCode != frame.ErrCodeProtocolError {
-		t.Fatalf("event = {%s code=%v}, want EventReset PROTOCOL_ERROR", ev.Type, ev.RSTCode)
-	}
-	if code := recvCode(t, "RST_STREAM", probe.rst); code != frame.ErrCodeProtocolError {
-		t.Errorf("RST_STREAM code = %v, want PROTOCOL_ERROR", code)
-	}
-	if !c.IsAlive() {
-		t.Error("connection died after a single-stream WINDOW_UPDATE fault; a stream error must not kill the connection")
-	}
+
+	ev, rerr := s.Recv(ctx)
+
+	require.NoError(t, rerr, "Recv")
+	require.Equalf(t, EventReset, ev.Type,
+		"event = {%s code=%v}, want EventReset PROTOCOL_ERROR", ev.Type, ev.RSTCode)
+	require.Equalf(t, frame.ErrCodeProtocolError, ev.RSTCode,
+		"event = {%s code=%v}, want EventReset PROTOCOL_ERROR", ev.Type, ev.RSTCode)
+	rstCode := recvCode(t, "RST_STREAM", probe.rst)
+	assert.Equalf(t, frame.ErrCodeProtocolError, rstCode, "RST_STREAM code = %v, want PROTOCOL_ERROR", rstCode)
+	assert.True(t, c.IsAlive(),
+		"connection died after a single-stream WINDOW_UPDATE fault; a stream error must not kill the connection")
 	release()
 }
 
@@ -160,17 +155,14 @@ func TestConformance_RFC9113_Sec6_9_ConnWindowUpdateZero_ConnError(t *testing.T)
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	c, err := NewClientConn(ctx, cli, ConnOptions{}.defaulted())
-	if err != nil {
-		t.Fatalf("NewClientConn: %v", err)
-	}
+	require.NoError(t, err, "NewClientConn")
 	defer c.Close()
 
-	if code := recvCode(t, "GOAWAY", probe.away); code != frame.ErrCodeProtocolError {
-		t.Errorf("GOAWAY code = %v, want PROTOCOL_ERROR", code)
-	}
-	if aliveWithin(c, false, 2*time.Second) {
-		t.Error("connection still alive after a connection-scoped WINDOW_UPDATE fault")
-	}
+	code := recvCode(t, "GOAWAY", probe.away)
+
+	assert.Equalf(t, frame.ErrCodeProtocolError, code, "GOAWAY code = %v, want PROTOCOL_ERROR", code)
+	assert.False(t, aliveWithin(c, false, 2*time.Second),
+		"connection still alive after a connection-scoped WINDOW_UPDATE fault")
 	release()
 }
 
@@ -196,25 +188,21 @@ func TestConformance_RFC9113_Sec6_3_PriorityWrongLength_StreamError(t *testing.T
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	c, err := NewClientConn(ctx, cli, ConnOptions{}.defaulted())
-	if err != nil {
-		t.Fatalf("NewClientConn: %v", err)
-	}
+	require.NoError(t, err, "NewClientConn")
 	defer c.Close()
-
 	s := openHalfClosedStream(ctx, t, c)
-	ev, err := s.Recv(ctx)
-	if err != nil {
-		t.Fatalf("Recv: %v", err)
-	}
-	if ev.Type != EventReset || ev.RSTCode != frame.ErrCodeFrameSizeError {
-		t.Fatalf("event = {%s code=%v}, want EventReset FRAME_SIZE_ERROR", ev.Type, ev.RSTCode)
-	}
-	if code := recvCode(t, "RST_STREAM", probe.rst); code != frame.ErrCodeFrameSizeError {
-		t.Errorf("RST_STREAM code = %v, want FRAME_SIZE_ERROR", code)
-	}
-	if !c.IsAlive() {
-		t.Error("connection died after a wrong-length PRIORITY; §6.3 makes it a stream error, not a connection error")
-	}
+
+	ev, rerr := s.Recv(ctx)
+
+	require.NoError(t, rerr, "Recv")
+	require.Equalf(t, EventReset, ev.Type,
+		"event = {%s code=%v}, want EventReset FRAME_SIZE_ERROR", ev.Type, ev.RSTCode)
+	require.Equalf(t, frame.ErrCodeFrameSizeError, ev.RSTCode,
+		"event = {%s code=%v}, want EventReset FRAME_SIZE_ERROR", ev.Type, ev.RSTCode)
+	rstCode := recvCode(t, "RST_STREAM", probe.rst)
+	assert.Equalf(t, frame.ErrCodeFrameSizeError, rstCode, "RST_STREAM code = %v, want FRAME_SIZE_ERROR", rstCode)
+	assert.True(t, c.IsAlive(),
+		"connection died after a wrong-length PRIORITY; §6.3 makes it a stream error, not a connection error")
 	release()
 }
 
@@ -237,17 +225,14 @@ func TestConformance_RFC9113_Sec6_1_DataOnStreamZero_ConnError(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	c, err := NewClientConn(ctx, cli, ConnOptions{}.defaulted())
-	if err != nil {
-		t.Fatalf("NewClientConn: %v", err)
-	}
+	require.NoError(t, err, "NewClientConn")
 	defer c.Close()
 
-	if code := recvCode(t, "GOAWAY", probe.away); code != frame.ErrCodeProtocolError {
-		t.Errorf("GOAWAY code = %v, want PROTOCOL_ERROR", code)
-	}
-	if aliveWithin(c, false, 2*time.Second) {
-		t.Error("connection still alive after DATA on stream 0")
-	}
+	code := recvCode(t, "GOAWAY", probe.away)
+
+	assert.Equalf(t, frame.ErrCodeProtocolError, code, "GOAWAY code = %v, want PROTOCOL_ERROR", code)
+	assert.False(t, aliveWithin(c, false, 2*time.Second),
+		"connection still alive after DATA on stream 0")
 	release()
 }
 

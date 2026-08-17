@@ -4,6 +4,9 @@ import (
 	"errors"
 	"testing"
 
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
 	"github.com/lodgvideon/poseidon-http-client/frame"
 	"github.com/lodgvideon/poseidon-http-client/hpack"
 )
@@ -49,14 +52,12 @@ func TestConformance_RFC9113_Sec6_6_PushPromiseOnHalfClosedRemoteParent_ConnErro
 	s.authorityBuf = []byte("example.com")
 
 	err := h.OnPushPromise(pushPromiseHeader(1), 2, validPromiseFor(t, "example.com"), 0)
+
 	var ce *ConnError
-	if !errors.As(err, &ce) {
-		t.Fatalf("err = %v (%T), want *ConnError — §6.6: a PUSH_PROMISE on a stream neither open nor "+
+	require.Truef(t, errors.As(err, &ce),
+		"err = %v (%T), want *ConnError — §6.6: a PUSH_PROMISE on a stream neither open nor "+
 			"half-closed(local) MUST be a connection error PROTOCOL_ERROR", err, err)
-	}
-	if ce.Code != frame.ErrCodeProtocolError {
-		t.Errorf("code = %v, want PROTOCOL_ERROR (§6.6)", ce.Code)
-	}
+	assert.Equalf(t, frame.ErrCodeProtocolError, ce.Code, "code = %v, want PROTOCOL_ERROR (§6.6)", ce.Code)
 }
 
 // TestConformance_RFC9113_Sec6_6_PushPromiseOnValidParentStates_Accepted is the
@@ -82,10 +83,10 @@ func TestConformance_RFC9113_Sec6_6_PushPromiseOnValidParentStates_Accepted(t *t
 			s.remoteEnded = false // server half open — a valid PP target
 			s.authorityBuf = []byte("example.com")
 
-			if err := h.OnPushPromise(pushPromiseHeader(1), 2, validPromiseFor(t, "example.com"), 0); err != nil {
-				t.Errorf("%s parent: PUSH_PROMISE rejected (%v) — a parent with the server half still "+
-					"open is a valid target (§6.6)", tc.name, err)
-			}
+			err := h.OnPushPromise(pushPromiseHeader(1), 2, validPromiseFor(t, "example.com"), 0)
+
+			assert.NoErrorf(t, err, "%s parent: PUSH_PROMISE rejected (%v) — a parent with the server "+
+				"half still open is a valid target (§6.6)", tc.name, err)
 		})
 	}
 }

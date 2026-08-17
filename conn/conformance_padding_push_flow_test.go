@@ -3,6 +3,9 @@ package conn
 import (
 	"context"
 	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // TestConformance_RFC7540_Sec6_1_PaddedDataDebitsPaddingOverhead pins that a
@@ -22,19 +25,14 @@ func TestConformance_RFC7540_Sec6_1_PaddedDataDebitsPaddingOverhead(t *testing.T
 		// 100 data bytes with a 10-byte padding overhead (1 pad-length octet + 9
 		// padding). The frame's flow-controlled cost is 110.
 		n, err := c.acquireSendCredits(context.Background(), s, s.gen.Load(), 100, 10)
-		if err != nil {
-			t.Fatalf("acquireSendCredits: %v", err)
-		}
-		if n != 100 {
-			t.Fatalf("n = %d, want 100 data bytes", n)
-		}
-		if c.peerConnSendWindow != 1000-110 {
-			t.Fatalf("conn send window = %d, want %d — a padded frame debits data + pad "+
+
+		require.NoError(t, err, "acquireSendCredits")
+		assert.Equalf(t, 100, n, "n = %d, want 100 data bytes", n)
+		assert.EqualValuesf(t, 1000-110, c.peerConnSendWindow,
+			"conn send window = %d, want %d — a padded frame debits data + pad "+
 				"octet + padding (RFC 7540 §6.9.1)", c.peerConnSendWindow, 1000-110)
-		}
-		if s.sendWindow != 1000-110 {
-			t.Fatalf("stream send window = %d, want %d", s.sendWindow, 1000-110)
-		}
+		assert.EqualValuesf(t, 1000-110, s.sendWindow,
+			"stream send window = %d, want %d", s.sendWindow, 1000-110)
 	})
 
 	t.Run("data capped by window minus padding", func(t *testing.T) {
@@ -45,16 +43,15 @@ func TestConformance_RFC7540_Sec6_1_PaddedDataDebitsPaddingOverhead(t *testing.T
 
 		// Window 50, padding 10 → at most 40 data bytes fit (40+10=50).
 		n, err := c.acquireSendCredits(context.Background(), s, s.gen.Load(), 100, 10)
-		if err != nil {
-			t.Fatalf("acquireSendCredits: %v", err)
-		}
-		if n != 40 {
-			t.Fatalf("n = %d, want 40 — data is capped so data+padding fits the window", n)
-		}
-		if c.peerConnSendWindow != 0 || s.sendWindow != 0 {
-			t.Fatalf("windows = (%d,%d), want (0,0) — the whole 50-byte frame is debited",
-				c.peerConnSendWindow, s.sendWindow)
-		}
+
+		require.NoError(t, err, "acquireSendCredits")
+		assert.Equalf(t, 40, n, "n = %d, want 40 — data is capped so data+padding fits the window", n)
+		assert.EqualValuesf(t, 0, c.peerConnSendWindow,
+			"windows = (%d,%d), want (0,0) — the whole 50-byte frame is debited",
+			c.peerConnSendWindow, s.sendWindow)
+		assert.EqualValuesf(t, 0, s.sendWindow,
+			"windows = (%d,%d), want (0,0) — the whole 50-byte frame is debited",
+			c.peerConnSendWindow, s.sendWindow)
 	})
 }
 
@@ -70,11 +67,10 @@ func TestConformance_RFC7540_Sec6_9_PushedStreamRecvWindow_FromInitialWindowSize
 	c.connRecvWindow = 5000                    // connection window, debited low — must NOT be the seed
 
 	pushed, err := c.reservePushedStream(2)
-	if err != nil {
-		t.Fatalf("reservePushedStream: %v", err)
-	}
-	if pushed.recvWindow != 100000 {
-		t.Fatalf("pushed recvWindow = %d, want 100000 (SETTINGS_INITIAL_WINDOW_SIZE), "+
+
+	require.NoError(t, err, "reservePushedStream")
+	require.NotNil(t, pushed, "reservePushedStream returned no stream")
+	assert.EqualValuesf(t, 100000, pushed.recvWindow,
+		"pushed recvWindow = %d, want 100000 (SETTINGS_INITIAL_WINDOW_SIZE), "+
 			"not the connection window %d", pushed.recvWindow, c.connRecvWindow)
-	}
 }

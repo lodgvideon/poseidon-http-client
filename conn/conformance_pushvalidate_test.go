@@ -6,6 +6,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
 	"github.com/lodgvideon/poseidon-http-client/frame"
 	"github.com/lodgvideon/poseidon-http-client/hpack"
 )
@@ -51,17 +54,14 @@ func assertPromiseRejected(t *testing.T, promise []hpack.HeaderField) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	c, err := NewClientConn(ctx, cli, ConnOptions{Settings: AdvertisedSettings{}.defaulted(), StreamEventBuffer: 16, EnablePush: true})
-	if err != nil {
-		t.Fatalf("NewClientConn: %v", err)
-	}
+	require.NoError(t, err, "NewClientConn")
 	defer c.Close()
+	_ = openParentStream(ctx, t, c)
 
-	parent := openParentStream(ctx, t, c)
-	_ = parent
 	select {
 	case <-probe.pingAck:
 	case <-ctx.Done():
-		t.Fatal("timed out waiting for the PING ACK barrier")
+		require.FailNow(t, "timed out waiting for the PING ACK barrier")
 	}
 
 	found := false
@@ -70,15 +70,12 @@ func assertPromiseRejected(t *testing.T, promise []hpack.HeaderField) {
 			found = true
 		}
 	}
-	if !found {
-		t.Errorf("promised stream not reset with PROTOCOL_ERROR; got RST codes %v", probe.rstCodes)
-	}
-	if probe.goAwayHit {
-		t.Errorf("connection torn down (GOAWAY %v); a bad push is a stream refusal, not a connection error", probe.goAwayErr)
-	}
-	if !c.IsAlive() {
-		t.Error("connection died on a bad PUSH_PROMISE; it must survive a stream-level refusal")
-	}
+	assert.Truef(t, found,
+		"promised stream not reset with PROTOCOL_ERROR; got RST codes %v", probe.rstCodes)
+	assert.Falsef(t, probe.goAwayHit,
+		"connection torn down (GOAWAY %v); a bad push is a stream refusal, not a connection error", probe.goAwayErr)
+	assert.True(t, c.IsAlive(),
+		"connection died on a bad PUSH_PROMISE; it must survive a stream-level refusal")
 	stop()
 }
 
@@ -179,17 +176,14 @@ func assertRefusedPushSurvives(t *testing.T, promise []hpack.HeaderField) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	c, err := NewClientConn(ctx, cli, ConnOptions{Settings: AdvertisedSettings{}.defaulted(), StreamEventBuffer: 16, EnablePush: true})
-	if err != nil {
-		t.Fatalf("NewClientConn: %v", err)
-	}
+	require.NoError(t, err, "NewClientConn")
 	defer c.Close()
+	_ = openParentStream(ctx, t, c)
 
-	parent := openParentStream(ctx, t, c)
-	_ = parent
 	select {
 	case <-probe.pingAck:
 	case <-ctx.Done():
-		t.Fatal("timed out waiting for the PING ACK barrier (connection likely torn down by the pushed response)")
+		require.FailNow(t, "timed out waiting for the PING ACK barrier (connection likely torn down by the pushed response)")
 	}
 
 	refused := false
@@ -198,15 +192,11 @@ func assertRefusedPushSurvives(t *testing.T, promise []hpack.HeaderField) {
 			refused = true
 		}
 	}
-	if !refused {
-		t.Errorf("push not refused with PROTOCOL_ERROR; RST codes %v", probe.rstCodes)
-	}
-	if probe.goAwayHit {
-		t.Errorf("connection torn down (GOAWAY %v) by a pushed response on a refused promised stream", probe.goAwayErr)
-	}
-	if !c.IsAlive() {
-		t.Error("connection died from an in-flight pushed response on a refused promised stream")
-	}
+	assert.Truef(t, refused, "push not refused with PROTOCOL_ERROR; RST codes %v", probe.rstCodes)
+	assert.Falsef(t, probe.goAwayHit,
+		"connection torn down (GOAWAY %v) by a pushed response on a refused promised stream", probe.goAwayErr)
+	assert.True(t, c.IsAlive(),
+		"connection died from an in-flight pushed response on a refused promised stream")
 	stop()
 }
 
@@ -236,16 +226,13 @@ func TestConformance_RFC9113_Sec6_5_2_PushPromiseOnIdleParent_ConnError(t *testi
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	c, err := NewClientConn(ctx, cli, ConnOptions{Settings: AdvertisedSettings{}.defaulted(), StreamEventBuffer: 16, EnablePush: true})
-	if err != nil {
-		t.Fatalf("NewClientConn: %v", err)
-	}
+	require.NoError(t, err, "NewClientConn")
 	defer c.Close()
 
-	if code := recvCode(t, "GOAWAY", probe.away); code != frame.ErrCodeProtocolError {
-		t.Errorf("GOAWAY code = %v, want PROTOCOL_ERROR", code)
-	}
-	if aliveWithin(c, false, 2*time.Second) {
-		t.Error("connection still alive after a PUSH_PROMISE on an idle parent stream")
-	}
+	code := recvCode(t, "GOAWAY", probe.away)
+
+	assert.Equalf(t, frame.ErrCodeProtocolError, code, "GOAWAY code = %v, want PROTOCOL_ERROR", code)
+	assert.False(t, aliveWithin(c, false, 2*time.Second),
+		"connection still alive after a PUSH_PROMISE on an idle parent stream")
 	release()
 }

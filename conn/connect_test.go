@@ -3,17 +3,19 @@ package conn
 import (
 	"testing"
 
+	"github.com/stretchr/testify/assert"
+
 	"github.com/lodgvideon/poseidon-http-client/frame"
 )
 
 func TestConn_ConnectProtocolSupported_False(t *testing.T) {
 	t.Parallel()
 
-	c := &Conn{}
-	// peerSettings is zero-value — no SETTINGS_ENABLE_CONNECT_PROTOCOL
-	if c.ConnectProtocolSupported() {
-		t.Error("expected false when peer did not advertise connect protocol")
-	}
+	c := &Conn{} // peerSettings is zero-value — no SETTINGS_ENABLE_CONNECT_PROTOCOL
+
+	got := c.ConnectProtocolSupported()
+
+	assert.False(t, got, "expected false when peer did not advertise connect protocol")
 }
 
 func TestConn_ConnectProtocolSupported_True(t *testing.T) {
@@ -26,9 +28,10 @@ func TestConn_ConnectProtocolSupported_True(t *testing.T) {
 		},
 		N: 1,
 	}
-	if !c.ConnectProtocolSupported() {
-		t.Error("expected true when peer advertised SETTINGS_ENABLE_CONNECT_PROTOCOL=1")
-	}
+
+	got := c.ConnectProtocolSupported()
+
+	assert.True(t, got, "expected true when peer advertised SETTINGS_ENABLE_CONNECT_PROTOCOL=1")
 }
 
 func TestConn_ConnectProtocolSupported_ZeroValue(t *testing.T) {
@@ -41,7 +44,8 @@ func TestConn_ConnectProtocolSupported_ZeroValue(t *testing.T) {
 		},
 		N: 1,
 	}
-	if c.ConnectProtocolSupported() {
-		t.Error("expected false when value is 0 (explicitly disabled)")
-	}
+
+	got := c.ConnectProtocolSupported()
+
+	assert.False(t, got, "expected false when value is 0 (explicitly disabled)")
 }

@@ -6,6 +6,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
 	"github.com/lodgvideon/poseidon-http-client/frame"
 )
 
@@ -30,7 +33,7 @@ func TestConn_AcquireSendCredits_WakesOnReaderDeath(t *testing.T) {
 	// Let it park in fcOutCond.Wait.
 	select {
 	case r := <-out:
-		t.Fatalf("acquireSendCredits returned before reader death: %v", r)
+		require.FailNowf(t, "returned early", "acquireSendCredits returned before reader death: %v", r)
 	case <-time.After(50 * time.Millisecond):
 	}
 
@@ -39,11 +42,10 @@ func TestConn_AcquireSendCredits_WakesOnReaderDeath(t *testing.T) {
 
 	select {
 	case err := <-out:
-		if !errors.Is(err, ErrConnClosed) {
-			t.Fatalf("acquireSendCredits = %v, want ErrConnClosed on reader death", err)
-		}
+		require.Truef(t, errors.Is(err, ErrConnClosed),
+			"acquireSendCredits = %v, want ErrConnClosed on reader death", err)
 	case <-time.After(2 * time.Second):
-		t.Fatal("acquireSendCredits did not wake on reader death — SendData hangs forever")
+		require.FailNow(t, "acquireSendCredits did not wake on reader death — SendData hangs forever")
 	}
 }
 
@@ -59,17 +61,19 @@ func TestConformance_RFC7540_Sec6_5_2_HandshakeOversizedInitialWindow_FlowContro
 	var oversized frame.SettingsParams
 	oversized.Pairs[0] = frame.SettingPair{ID: frame.SettingInitialWindowSize, Value: 0x80000000} // 2^31 > 2^31-1
 	oversized.N = 1
-	err := c.applyInitialPeerSettings(oversized)
-	var ce *ConnError
-	if !errors.As(err, &ce) || ce.Code != frame.ErrCodeFlowControlError {
-		t.Fatalf("applyInitialPeerSettings(2^31) = %v, want ConnError FLOW_CONTROL_ERROR", err)
-	}
-
 	// The exact limit is accepted.
 	var atLimit frame.SettingsParams
 	atLimit.Pairs[0] = frame.SettingPair{ID: frame.SettingInitialWindowSize, Value: 1<<31 - 1}
 	atLimit.N = 1
-	if err := c.applyInitialPeerSettings(atLimit); err != nil {
-		t.Fatalf("applyInitialPeerSettings(2^31-1) = %v, want nil — the value at the ceiling is legal", err)
-	}
+
+	err := c.applyInitialPeerSettings(oversized)
+	atLimitErr := c.applyInitialPeerSettings(atLimit)
+
+	var ce *ConnError
+	require.Truef(t, errors.As(err, &ce),
+		"applyInitialPeerSettings(2^31) = %v, want ConnError FLOW_CONTROL_ERROR", err)
+	assert.Equalf(t, frame.ErrCodeFlowControlError, ce.Code,
+		"applyInitialPeerSettings(2^31) = %v, want ConnError FLOW_CONTROL_ERROR", err)
+	assert.NoErrorf(t, atLimitErr,
+		"applyInitialPeerSettings(2^31-1) = %v, want nil — the value at the ceiling is legal", atLimitErr)
 }

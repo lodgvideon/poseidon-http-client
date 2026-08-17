@@ -7,6 +7,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
 	"github.com/lodgvideon/poseidon-http-client/frame"
 )
 
@@ -46,14 +49,14 @@ func assertPrefaceRefused(t *testing.T, send func(*frame.Framer) error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 	c, err := NewClientConn(ctx, cli, ConnOptions{}.defaulted())
+
 	if err == nil {
 		_ = c.Close()
-		t.Fatal("NewClientConn accepted a server whose first frame was not a non-ACK SETTINGS")
 	}
+	require.Error(t, err, "NewClientConn accepted a server whose first frame was not a non-ACK SETTINGS")
 	var ce *ConnError
-	if !errors.As(err, &ce) || ce.Code != frame.ErrCodeProtocolError {
-		t.Errorf("err = %v, want ConnError PROTOCOL_ERROR", err)
-	}
+	require.Truef(t, errors.As(err, &ce), "err = %v, want ConnError PROTOCOL_ERROR", err)
+	assert.Equalf(t, frame.ErrCodeProtocolError, ce.Code, "err = %v, want ConnError PROTOCOL_ERROR", err)
 }
 
 // TestConformance_RFC9113_Sec3_4_NonSettingsFirstFrame_Refused pins that a
@@ -101,12 +104,9 @@ func TestConformance_RFC9113_Sec3_4_SettingsFirstFrame_Accepted(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 	c, err := NewClientConn(ctx, cli, ConnOptions{}.defaulted())
-	if err != nil {
-		t.Fatalf("NewClientConn refused a conformant SETTINGS-first preface: %v", err)
-	}
-	if !c.IsAlive() {
-		t.Error("connection not alive after a conformant handshake")
-	}
+
+	require.NoError(t, err, "NewClientConn refused a conformant SETTINGS-first preface")
+	assert.True(t, c.IsAlive(), "connection not alive after a conformant handshake")
 	// Retire the peer before Close. A server still parked in `after` leaves
 	// nobody reading the pipe, so Close's best-effort GOAWAY would block until
 	// its full closeGoAwayDeadline expires — 200ms of pure wall-clock per run.

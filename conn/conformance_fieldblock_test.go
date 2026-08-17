@@ -6,6 +6,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
 	"github.com/lodgvideon/poseidon-http-client/frame"
 	"github.com/lodgvideon/poseidon-http-client/hpack"
 )
@@ -42,17 +45,14 @@ func assertFieldBlockViolation(t *testing.T, interleave func(srvFr *frame.Framer
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	c, err := NewClientConn(ctx, cli, ConnOptions{}.defaulted())
-	if err != nil {
-		t.Fatalf("NewClientConn: %v", err)
-	}
+	require.NoError(t, err, "NewClientConn")
 	defer c.Close()
 
-	if code := recvCode(t, "GOAWAY", probe.away); code != frame.ErrCodeProtocolError {
-		t.Errorf("GOAWAY code = %v, want PROTOCOL_ERROR", code)
-	}
-	if aliveWithin(c, false, 2*time.Second) {
-		t.Error("connection still alive after a §6.10 field-block violation")
-	}
+	code := recvCode(t, "GOAWAY", probe.away)
+
+	assert.Equalf(t, frame.ErrCodeProtocolError, code, "GOAWAY code = %v, want PROTOCOL_ERROR", code)
+	assert.False(t, aliveWithin(c, false, 2*time.Second),
+		"connection still alive after a field-block continuity violation (RFC 9113 §6.10)")
 	release()
 }
 
@@ -99,17 +99,14 @@ func TestConformance_RFC9113_Sec6_10_UnexpectedContinuation_ConnError(t *testing
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	c, err := NewClientConn(ctx, cli, ConnOptions{}.defaulted())
-	if err != nil {
-		t.Fatalf("NewClientConn: %v", err)
-	}
+	require.NoError(t, err, "NewClientConn")
 	defer c.Close()
 
-	if code := recvCode(t, "GOAWAY", probe.away); code != frame.ErrCodeProtocolError {
-		t.Errorf("GOAWAY code = %v, want PROTOCOL_ERROR", code)
-	}
-	if aliveWithin(c, false, 2*time.Second) {
-		t.Error("connection still alive after an unexpected CONTINUATION")
-	}
+	code := recvCode(t, "GOAWAY", probe.away)
+
+	assert.Equalf(t, frame.ErrCodeProtocolError, code, "GOAWAY code = %v, want PROTOCOL_ERROR", code)
+	assert.False(t, aliveWithin(c, false, 2*time.Second),
+		"connection still alive after an unexpected CONTINUATION")
 	release()
 }
 
@@ -140,29 +137,19 @@ func TestConformance_RFC9113_Sec6_10_SplitHeaderBlock_Accepted(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	c, err := NewClientConn(ctx, cli, ConnOptions{}.defaulted())
-	if err != nil {
-		t.Fatalf("NewClientConn: %v", err)
-	}
+	require.NoError(t, err, "NewClientConn")
 	defer c.Close()
-
 	s, err := c.NewStream(ctx)
-	if err != nil {
-		t.Fatalf("NewStream: %v", err)
-	}
-	if err := s.SendHeaders(ctx, reqHeaders(), true); err != nil {
-		t.Fatalf("SendHeaders: %v", err)
-	}
-	ev, err := s.Recv(ctx)
-	if err != nil {
-		t.Fatalf("Recv: %v", err)
-	}
-	if ev.Type != EventHeaders {
-		t.Fatalf("event = %s, want EventHeaders from a split header block", ev.Type)
-	}
+	require.NoError(t, err, "NewStream")
+
+	require.NoError(t, s.SendHeaders(ctx, reqHeaders(), true), "SendHeaders")
+
+	ev, rerr := s.Recv(ctx)
+	require.NoError(t, rerr, "Recv")
+	require.Equalf(t, EventHeaders, ev.Type,
+		"event = %s, want EventHeaders from a split header block", ev.Type)
 	ev.Release()
-	if !c.IsAlive() {
-		t.Error("connection died on a conformant split header block")
-	}
+	assert.True(t, c.IsAlive(), "connection died on a conformant split header block")
 }
 
 // TestConformance_RFC9113_Sec6_10_SplitBlockStreamError_ConnSurvives is the
@@ -205,34 +192,27 @@ func TestConformance_RFC9113_Sec6_10_SplitBlockStreamError_ConnSurvives(t *testi
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	c, err := NewClientConn(ctx, cli, ConnOptions{}.defaulted())
-	if err != nil {
-		t.Fatalf("NewClientConn: %v", err)
-	}
+	require.NoError(t, err, "NewClientConn")
 	defer c.Close()
-
 	s, err := c.NewStream(ctx)
-	if err != nil {
-		t.Fatalf("NewStream: %v", err)
-	}
-	if err := s.SendHeaders(ctx, reqHeaders(), true); err != nil {
-		t.Fatalf("SendHeaders: %v", err)
-	}
-	ev, err := s.Recv(ctx)
-	if err != nil {
-		t.Fatalf("Recv: %v", err)
-	}
-	if ev.Type != EventReset || ev.RSTCode != frame.ErrCodeProtocolError {
-		t.Fatalf("event = {%s %v}, want EventReset PROTOCOL_ERROR for the malformed response", ev.Type, ev.RSTCode)
-	}
+	require.NoError(t, err, "NewStream")
+
+	require.NoError(t, s.SendHeaders(ctx, reqHeaders(), true), "SendHeaders")
+
+	ev, rerr := s.Recv(ctx)
+	require.NoError(t, rerr, "Recv")
+	require.Equalf(t, EventReset, ev.Type,
+		"event = {%s %v}, want EventReset PROTOCOL_ERROR for the malformed response", ev.Type, ev.RSTCode)
+	require.Equalf(t, frame.ErrCodeProtocolError, ev.RSTCode,
+		"event = {%s %v}, want EventReset PROTOCOL_ERROR for the malformed response", ev.Type, ev.RSTCode)
 	// The malformed response cost one stream; the connection — and the frame after
 	// it — must survive.
 	select {
 	case code := <-probe.away:
-		t.Errorf("connection torn down (GOAWAY %v) after a stream error on a CONTINUATION-completed block", code)
+		assert.Failf(t, "connection torn down",
+			"GOAWAY %v after a stream error on a CONTINUATION-completed block", code)
 	case <-time.After(300 * time.Millisecond):
 	}
-	if !c.IsAlive() {
-		t.Error("connection died after a stream-scoped malformed split response")
-	}
+	assert.True(t, c.IsAlive(), "connection died after a stream-scoped malformed split response")
 	release()
 }

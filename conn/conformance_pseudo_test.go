@@ -11,6 +11,8 @@ package conn
 import (
 	"testing"
 
+	"github.com/stretchr/testify/require"
+
 	"github.com/lodgvideon/poseidon-http-client/hpack"
 )
 
@@ -38,7 +40,9 @@ func TestConformance_RFC7540_Sec8_1_2_1_ResponsePseudoHeaders_Malformed(t *testi
 			m := newFakeStreamMap()
 			h := newConnHandler(m, hpack.NewDecoder())
 			m.addStream(1)
+
 			err := deliverBlock(t, h, 1, tc.fields, false)
+
 			wantStreamProtocolError(t, err, tc.name)
 		})
 	}
@@ -53,12 +57,13 @@ func TestConformance_RFC7540_Sec8_1_2_1_PseudoHeaderInTrailer_Malformed(t *testi
 	h := newConnHandler(m, hpack.NewDecoder())
 	s := m.addStream(1)
 
-	if err := deliverBlock(t, h, 1, []hpack.HeaderField{hf(":status", "200")}, false); err != nil {
-		t.Fatalf("valid header block rejected: %v", err)
-	}
+	require.NoError(t, deliverBlock(t, h, 1, []hpack.HeaderField{hf(":status", "200")}, false),
+		"valid header block rejected")
 	<-s.events // consume the EventHeaders
+
 	// Trailer section carrying :status — a pseudo-header, forbidden in trailers.
 	err := deliverBlock(t, h, 1, []hpack.HeaderField{hf(":status", "200"), hf("x-checksum", "abc")}, true)
+
 	wantStreamProtocolError(t, err, "pseudo-header in trailer")
 }
 
@@ -70,20 +75,21 @@ func TestConformance_RFC7540_Sec8_1_2_1_WellFormedResponseAccepted(t *testing.T)
 		m := newFakeStreamMap()
 		h := newConnHandler(m, hpack.NewDecoder())
 		m.addStream(1)
-		if err := deliverBlock(t, h, 1, []hpack.HeaderField{hf(":status", "200"), hf("content-type", "text/plain")}, false); err != nil {
-			t.Fatalf("well-formed response rejected: %v", err)
-		}
+
+		err := deliverBlock(t, h, 1, []hpack.HeaderField{hf(":status", "200"), hf("content-type", "text/plain")}, false)
+
+		require.NoError(t, err, "well-formed response rejected")
 	})
 	t.Run("trailer without pseudo", func(t *testing.T) {
 		m := newFakeStreamMap()
 		h := newConnHandler(m, hpack.NewDecoder())
 		s := m.addStream(1)
-		if err := deliverBlock(t, h, 1, []hpack.HeaderField{hf(":status", "200")}, false); err != nil {
-			t.Fatalf("header block rejected: %v", err)
-		}
+		require.NoError(t, deliverBlock(t, h, 1, []hpack.HeaderField{hf(":status", "200")}, false),
+			"header block rejected")
 		<-s.events // consume the EventHeaders
-		if err := deliverBlock(t, h, 1, []hpack.HeaderField{hf("x-checksum", "abc")}, true); err != nil {
-			t.Fatalf("well-formed trailer rejected: %v", err)
-		}
+
+		err := deliverBlock(t, h, 1, []hpack.HeaderField{hf("x-checksum", "abc")}, true)
+
+		require.NoError(t, err, "well-formed trailer rejected")
 	})
 }

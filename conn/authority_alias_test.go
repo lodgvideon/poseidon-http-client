@@ -5,6 +5,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
 	"github.com/lodgvideon/poseidon-http-client/header"
 )
 
@@ -39,9 +42,7 @@ func TestStream_RequestAuthority_DoesNotAliasCallerFields(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	c, err := Dial(ctx, p.addr(), ConnOptions{Dialer: &PlaintextDialer{}})
-	if err != nil {
-		t.Fatalf("Dial: %v", err)
-	}
+	require.NoError(t, err, "Dial the in-process peer")
 	defer func() { _ = c.Close() }()
 
 	for _, tc := range []struct {
@@ -62,13 +63,8 @@ func TestStream_RequestAuthority_DoesNotAliasCallerFields(t *testing.T) {
 			}
 
 			ref, nerr := c.NewStream(ctx)
-			if nerr != nil {
-				t.Fatalf("NewStream: %v", nerr)
-			}
-			if serr := ref.SendHeaders(ctx, hdrs, true); serr != nil {
-				t.Fatalf("SendHeaders: %v", serr)
-			}
-
+			require.NoError(t, nerr, "NewStream")
+			require.NoError(t, ref.SendHeaders(ctx, hdrs, true), "SendHeaders")
 			// The caller reuses its own buffer, which it is entitled to do the
 			// moment SendHeaders returns.
 			for i := range authority {
@@ -76,22 +72,18 @@ func TestStream_RequestAuthority_DoesNotAliasCallerFields(t *testing.T) {
 			}
 
 			s := ref.Stream()
-			if !s.hasRequestAuthority([]byte(tc.authority)) {
-				t.Errorf("after the caller overwrote its own header buffer, the stream no "+
+			assert.Truef(t, s.hasRequestAuthority([]byte(tc.authority)),
+				"after the caller overwrote its own header buffer, the stream no "+
 					"longer reports the authority the request was sent with (%q) — the "+
 					"stored value aliases the caller's bytes, so a cross-origin push check "+
 					"now compares against whatever the caller last wrote", tc.authority)
-			}
-			if s.hasRequestAuthority(authority) {
-				t.Errorf("the stream reports the caller's MUTATED bytes (%q) as the "+
+			assert.Falsef(t, s.hasRequestAuthority(authority),
+				"the stream reports the caller's MUTATED bytes (%q) as the "+
 					"request authority", authority)
-			}
 
 			// Drain and close so the struct goes back to the pool and the next
 			// subtest runs on a recycled one.
-			if derr := benchDrain(ctx, ref); derr != nil {
-				t.Fatalf("drain: %v", derr)
-			}
+			require.NoError(t, benchDrain(ctx, ref), "drain the response")
 		})
 	}
 }

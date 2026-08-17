@@ -7,6 +7,8 @@ import (
 	"context"
 	"testing"
 
+	"github.com/stretchr/testify/assert"
+
 	"github.com/lodgvideon/poseidon-http-client/frame"
 	"github.com/lodgvideon/poseidon-http-client/hpack"
 )
@@ -56,6 +58,9 @@ func TestSendBatch_DoesNotAllocate(t *testing.T) {
 	c, batch := batchAllocConn(t, 8)
 	ctx := context.Background()
 
+	// testify reflects and allocates, and AllocsPerRun counts the whole process,
+	// so the in-closure checks stay hand-rolled and every assertion is made
+	// outside the measured body.
 	n := testing.AllocsPerRun(200, func() {
 		if err := c.SendBatch(ctx, batch); err != nil {
 			t.Fatalf("SendBatch: %v", err)
@@ -66,10 +71,9 @@ func TestSendBatch_DoesNotAllocate(t *testing.T) {
 			}
 		}
 	})
-	if n != 0 {
-		t.Errorf("SendBatch allocates %.1f per call over %d entries, want 0 — a dataVec "+
-			"or a segment scratch built per entry would do exactly this", n, len(batch))
-	}
+
+	assert.Zerof(t, n, "SendBatch allocates %.1f per call over %d entries, want 0 — a dataVec "+
+		"or a segment scratch built per entry would do exactly this", n, len(batch))
 }
 
 // TestSendBatchV_DoesNotAllocate pins the same for a vectored body, whose
@@ -89,7 +93,6 @@ func TestSendBatchV_DoesNotAllocate(t *testing.T) {
 			t.Fatalf("SendBatch: %v", err)
 		}
 	})
-	if n != 0 {
-		t.Errorf("SendBatch with a vectored body allocates %.1f per call, want 0", n)
-	}
+
+	assert.Zerof(t, n, "SendBatch with a vectored body allocates %.1f per call, want 0", n)
 }

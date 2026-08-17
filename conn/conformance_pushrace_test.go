@@ -3,6 +3,9 @@ package conn
 import (
 	"testing"
 
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
 	"github.com/lodgvideon/poseidon-http-client/frame"
 	"github.com/lodgvideon/poseidon-http-client/hpack"
 )
@@ -55,14 +58,14 @@ func TestConformance_RFC9113_Sec6_6_PushPromiseAfterParentRST_CancelsPromised(t 
 		Flags:    frame.FlagPushPromiseEndHeaders,
 	}
 
-	if err := h.OnPushPromise(fh, 2, block, 0); err != nil {
-		t.Fatalf("PUSH_PROMISE after parent RST: %v — §6.6 requires handling it as a stream-level "+
-			"CANCEL, not a connection error", err)
-	}
-	if len(rec.rsts) != 1 {
-		t.Fatalf("rstStream called %d times, want 1 (a single CANCEL on the promised stream)", len(rec.rsts))
-	}
-	if rec.rsts[0].id != 2 || rec.rsts[0].code != frame.ErrCodeCancel {
-		t.Errorf("rstStream(%d, %v), want (2, CANCEL)", rec.rsts[0].id, rec.rsts[0].code)
-	}
+	err := h.OnPushPromise(fh, 2, block, 0)
+
+	require.NoErrorf(t, err, "PUSH_PROMISE after parent RST: %v — §6.6 requires handling it as a "+
+		"stream-level CANCEL, not a connection error", err)
+	require.Lenf(t, rec.rsts, 1,
+		"rstStream called %d times, want 1 (a single CANCEL on the promised stream)", len(rec.rsts))
+	assert.EqualValuesf(t, 2, rec.rsts[0].id,
+		"rstStream(%d, %v), want (2, CANCEL)", rec.rsts[0].id, rec.rsts[0].code)
+	assert.Equalf(t, frame.ErrCodeCancel, rec.rsts[0].code,
+		"rstStream(%d, %v), want (2, CANCEL)", rec.rsts[0].id, rec.rsts[0].code)
 }

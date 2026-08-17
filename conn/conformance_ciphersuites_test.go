@@ -3,6 +3,9 @@ package conn
 import (
 	"crypto/tls"
 	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // allowedH2TLS12 is the exact set of TLS 1.2 cipher suites an h2-only dialer may
@@ -43,28 +46,24 @@ func TestConformance_RFC9113_Sec9_2_2_TLS12CipherSuitesProhibited(t *testing.T) 
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			d := &TLSDialer{Config: tc.in}
+
 			got := d.tlsClientConfig()
-			if len(got.CipherSuites) == 0 {
-				t.Fatal("CipherSuites left unset; an h2-only dialer must pin the AEAD allowlist (§9.2.2)")
-			}
+
+			require.NotEmpty(t, got.CipherSuites,
+				"CipherSuites left unset; an h2-only dialer must pin the AEAD allowlist (§9.2.2)")
 			mandatoryPresent := false
 			for _, cs := range got.CipherSuites {
-				if !allowedH2TLS12[cs] {
-					t.Errorf("offered prohibited/unknown TLS 1.2 suite 0x%04x (§9.2.2 Appendix A)", cs)
-				}
+				assert.Truef(t, allowedH2TLS12[cs],
+					"offered prohibited/unknown TLS 1.2 suite 0x%04x (§9.2.2 Appendix A)", cs)
 				if cs == tls.TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256 {
 					mandatoryPresent = true
 				}
 			}
-			if !mandatoryPresent {
-				t.Error("missing the §9.2.2-mandated TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256")
-			}
+			assert.True(t, mandatoryPresent,
+				"missing the §9.2.2-mandated TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256")
 			for _, p := range prohibited {
-				for _, cs := range got.CipherSuites {
-					if cs == p {
-						t.Errorf("prohibited suite 0x%04x is offered (§9.2.2 Appendix A)", p)
-					}
-				}
+				assert.NotContainsf(t, got.CipherSuites, p,
+					"prohibited suite 0x%04x is offered (§9.2.2 Appendix A)", p)
 			}
 		})
 	}
@@ -77,10 +76,11 @@ func TestConformance_RFC9113_Sec9_2_2_TLS12CipherSuitesProhibited(t *testing.T) 
 func TestConformance_RFC9113_Sec9_2_2_ExplicitCipherSuitesRespected(t *testing.T) {
 	caller := []uint16{tls.TLS_ECDHE_RSA_WITH_AES_128_CBC_SHA}
 	d := &TLSDialer{Config: &tls.Config{CipherSuites: caller}}
+
 	got := d.tlsClientConfig()
-	if len(got.CipherSuites) != 1 || got.CipherSuites[0] != tls.TLS_ECDHE_RSA_WITH_AES_128_CBC_SHA {
-		t.Errorf("caller CipherSuites overridden: got %#x, want the caller's explicit [0xc013]", got.CipherSuites)
-	}
+
+	assert.Equalf(t, caller, got.CipherSuites,
+		"caller CipherSuites overridden: got %#x, want the caller's explicit [0xc013]", got.CipherSuites)
 }
 
 // TestH2TLS12CipherSuites_FreshSlicePerCall guards the aliasing note in the
@@ -89,11 +89,11 @@ func TestConformance_RFC9113_Sec9_2_2_ExplicitCipherSuitesRespected(t *testing.T
 func TestH2TLS12CipherSuites_FreshSlicePerCall(t *testing.T) {
 	a := h2TLS12CipherSuites()
 	b := h2TLS12CipherSuites()
-	if len(a) == 0 || len(b) == 0 {
-		t.Fatal("empty cipher list")
-	}
+	require.NotEmpty(t, a, "empty cipher list")
+	require.NotEmpty(t, b, "empty cipher list")
+
 	a[0] = 0xdead
-	if b[0] == 0xdead {
-		t.Error("h2TLS12CipherSuites returned an aliased backing array; mutating one call corrupted another")
-	}
+
+	assert.NotEqualf(t, uint16(0xdead), b[0],
+		"h2TLS12CipherSuites returned an aliased backing array; mutating one call corrupted another")
 }
