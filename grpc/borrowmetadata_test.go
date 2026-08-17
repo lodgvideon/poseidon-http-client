@@ -6,6 +6,9 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
 	"github.com/lodgvideon/poseidon-http-client/conn"
 )
 
@@ -69,21 +72,16 @@ func drain(t *testing.T, s *Stream) {
 func TestBorrowMetadata_MatchesTheCopy(t *testing.T) {
 	cc := mdServer(t)
 	ctx := t.Context()
-
 	call := func(opts ...CallOption) (map[string]string, map[string]string) {
 		t.Helper()
 		s, err := cc.NewStream(ctx, "/t.S/M", nil, opts...)
-		if err != nil {
-			t.Fatalf("NewStream: %v", err)
-		}
+		require.NoError(t, err, "NewStream")
 		defer func() { _ = s.Close() }()
 		if err := s.SendLast(ctx, []byte("q")); err != nil && !benignSendLastErr(err) {
-			t.Fatalf("SendLast: %v", err)
+			require.NoError(t, err, "SendLast")
 		}
 		hdr, err := s.Header(ctx)
-		if err != nil {
-			t.Fatalf("Header: %v", err)
-		}
+		require.NoError(t, err, "Header")
 		// mdMap copies every byte into strings, which is exactly what a caller
 		// keeping borrowed metadata past Close has to do.
 		h := mdMap(hdr)
@@ -95,28 +93,19 @@ func TestBorrowMetadata_MatchesTheCopy(t *testing.T) {
 	gotHdr, gotTrl := call(BorrowMetadata())
 
 	for k, want := range wantHdr {
-		if got := gotHdr[k]; got != want {
-			t.Errorf("borrowed header %q = %q, want %q", k, got, want)
-		}
+		assert.Equalf(t, want, gotHdr[k], "borrowed header %q = %q, want %q", k, gotHdr[k], want)
 	}
-	if len(gotHdr) != len(wantHdr) {
-		t.Errorf("borrowed header has %d fields, the copy has %d: %v vs %v",
-			len(gotHdr), len(wantHdr), gotHdr, wantHdr)
-	}
+	assert.Lenf(t, gotHdr, len(wantHdr), "borrowed header has %d fields, the copy has %d: %v vs %v",
+		len(gotHdr), len(wantHdr), gotHdr, wantHdr)
 	for k, want := range wantTrl {
-		if got := gotTrl[k]; got != want {
-			t.Errorf("borrowed trailer %q = %q, want %q", k, got, want)
-		}
+		assert.Equalf(t, want, gotTrl[k], "borrowed trailer %q = %q, want %q", k, gotTrl[k], want)
 	}
-	if len(gotTrl) != len(wantTrl) {
-		t.Errorf("borrowed trailer has %d fields, the copy has %d: %v vs %v",
-			len(gotTrl), len(wantTrl), gotTrl, wantTrl)
-	}
+	assert.Lenf(t, gotTrl, len(wantTrl), "borrowed trailer has %d fields, the copy has %d: %v vs %v",
+		len(gotTrl), len(wantTrl), gotTrl, wantTrl)
 	// The fields the server set must actually be among them, or the comparison
 	// above could agree on two equally empty blocks.
-	if gotHdr["x-served-by"] != "poseidon" || gotTrl["x-trailer-note"] != "done-here" {
-		t.Errorf("the server's own fields are missing: header %v, trailer %v", gotHdr, gotTrl)
-	}
+	assert.Truef(t, gotHdr["x-served-by"] == "poseidon" && gotTrl["x-trailer-note"] == "done-here",
+		"the server's own fields are missing: header %v, trailer %v", gotHdr, gotTrl)
 }
 
 // TestBorrowMetadata_CloseNilsTheView pins the courtesy the option documents.
@@ -126,40 +115,36 @@ func TestBorrowMetadata_MatchesTheCopy(t *testing.T) {
 func TestBorrowMetadata_CloseNilsTheView(t *testing.T) {
 	cc := mdServer(t)
 	ctx := t.Context()
-
 	after := func(opts ...CallOption) ([]conn.HeaderField, Status) {
 		t.Helper()
 		s, err := cc.NewStream(ctx, "/t.S/M", nil, opts...)
-		if err != nil {
-			t.Fatalf("NewStream: %v", err)
-		}
+		require.NoError(t, err, "NewStream")
 		if err := s.SendLast(ctx, []byte("q")); err != nil && !benignSendLastErr(err) {
-			t.Fatalf("SendLast: %v", err)
+			require.NoError(t, err, "SendLast")
 		}
 		drain(t, s)
-		if s.Trailer() == nil {
-			t.Fatal("Trailer() is nil BEFORE Close — the block was never copied")
-		}
+		require.NotNil(t, s.Trailer(), "Trailer() is nil BEFORE Close — the block was never copied")
 		_ = s.Close()
 		return s.Trailer(), s.Status()
 	}
 
-	if tr, _ := after(BorrowMetadata()); tr != nil {
-		t.Errorf("Trailer() returned %d fields after Close under BorrowMetadata, want nil — "+
-			"those fields point into an arena another RPC now owns", len(tr))
-	}
+	borrowedTrl, borrowedStatus := after(BorrowMetadata())
+	defaultTrl, _ := after()
+
+	assert.Nilf(t, borrowedTrl,
+		"Trailer() returned %d fields after Close under BorrowMetadata, want nil — "+
+			"those fields point into an arena another RPC now owns", len(borrowedTrl))
 	// The default is the contrast that keeps the check honest: without the option
 	// the copies are the caller's outright and Close must not take them away.
-	if tr, _ := after(); tr == nil {
-		t.Error("Trailer() went nil after Close WITHOUT BorrowMetadata — those copies are " +
+	assert.NotNil(t, defaultTrl,
+		"Trailer() went nil after Close WITHOUT BorrowMetadata — those copies are "+
 			"heap memory the caller owns and Close has no business dropping them")
-	}
 	// Status is not metadata. Its Message is built with string(), which copies, so
 	// it survives Close under either mode — and a caller reading the outcome of a
 	// finished call is the ordinary thing to do.
-	if _, st := after(BorrowMetadata()); st.Code != OK {
-		t.Errorf("Status() after Close = %v, want OK — Status must not depend on the arena", st.Code)
-	}
+	assert.Equalf(t, OK, borrowedStatus.Code,
+		"Status() after Close = %v, want OK — Status must not depend on the arena",
+		borrowedStatus.Code)
 }
 
 // TestBorrowMetadata_ClampsEachFieldToItsOwnBytes pins the three-index clamp on
@@ -179,18 +164,15 @@ func TestBorrowMetadata_ClampsEachFieldToItsOwnBytes(t *testing.T) {
 		{Name: []byte("x-first"), Value: []byte("one")},
 		{Name: []byte("x-second"), Value: []byte("two")},
 	})
-	if len(got) != 2 {
-		t.Fatalf("copyFields returned %d fields, want 2", len(got))
-	}
+	require.Lenf(t, got, 2, "copyFields returned %d fields, want 2", len(got))
 	_ = append(got[0].Value, "OVERRUN"...)
 	_ = append(got[0].Name, "OVERRUN"...)
-	if string(got[1].Name) != "x-second" || string(got[1].Value) != "two" {
-		t.Errorf("appending to field 0 rewrote field 1: %q / %q — the three-index clamp is gone",
-			got[1].Name, got[1].Value)
-	}
-	if string(got[0].Name) != "x-first" || string(got[0].Value) != "one" {
-		t.Errorf("field 0 corrupted itself: %q / %q", got[0].Name, got[0].Value)
-	}
+
+	assert.Truef(t, string(got[1].Name) == "x-second" && string(got[1].Value) == "two",
+		"appending to field 0 rewrote field 1: %q / %q — the three-index clamp is gone",
+		got[1].Name, got[1].Value)
+	assert.Truef(t, string(got[0].Name) == "x-first" && string(got[0].Value) == "one",
+		"field 0 corrupted itself: %q / %q", got[0].Name, got[0].Value)
 }
 
 // TestBorrowMetadata_ReleaseClearsTheFieldHeaders pins the rule the arena is
@@ -202,27 +184,20 @@ func TestBorrowMetadata_ReleaseClearsTheFieldHeaders(t *testing.T) {
 	s := &Stream{borrowMD: true}
 	s.acquireBufs()
 	b := s.bufs
-
 	s.header = s.copyFields([]conn.HeaderField{
 		{Name: []byte("authorization"), Value: []byte("Bearer hunter2")},
 	})
-	if len(s.header) != 1 {
-		t.Fatalf("copyFields returned %d fields, want 1", len(s.header))
-	}
+	require.Lenf(t, s.header, 1, "copyFields returned %d fields, want 1", len(s.header))
+
 	s.releaseBufs()
 
-	if len(b.mdFields) != 0 {
-		t.Errorf("mdFields kept length %d after release, want 0", len(b.mdFields))
-	}
+	assert.Lenf(t, b.mdFields, 0, "mdFields kept length %d after release, want 0", len(b.mdFields))
 	for i, f := range b.mdFields[:cap(b.mdFields)] {
-		if f.Name != nil || f.Value != nil {
-			t.Errorf("pooled mdFields[%d] still points at %q/%q — a parked struct is holding "+
+		assert.Truef(t, f.Name == nil && f.Value == nil,
+			"pooled mdFields[%d] still points at %q/%q — a parked struct is holding "+
 				"the last RPC's metadata alive", i, f.Name, f.Value)
-		}
 	}
-	if s.header != nil {
-		t.Errorf("s.header survived release as %v, want nil", s.header)
-	}
+	assert.Nilf(t, s.header, "s.header survived release as %v, want nil", s.header)
 }
 
 // TestBorrowMetadata_TrailersOnlyGivesTwoIndependentBlocks covers the shape
@@ -237,7 +212,6 @@ func TestBorrowMetadata_TrailersOnlyGivesTwoIndependentBlocks(t *testing.T) {
 		w.WriteHeader(http.StatusOK)
 	}))
 	defer srv.Close()
-
 	cc := dialGRPC(t, srv, cfg)
 	ctx := t.Context()
 
@@ -248,36 +222,30 @@ func TestBorrowMetadata_TrailersOnlyGivesTwoIndependentBlocks(t *testing.T) {
 	// and writes in place. Only a warm arena reaches the second.
 	for i := 0; i < 4; i++ {
 		s, err := cc.NewStream(ctx, "/t.S/M", nil, BorrowMetadata())
-		if err != nil {
-			t.Fatalf("round %d: NewStream: %v", i, err)
-		}
+		require.NoErrorf(t, err, "round %d: NewStream", i)
 		if err := s.SendLast(ctx, []byte("q")); err != nil && !benignSendLastErr(err) {
-			t.Fatalf("round %d: SendLast: %v", i, err)
+			require.NoErrorf(t, err, "round %d: SendLast", i)
 		}
 		drain(t, s)
-
 		hdr, err := s.Header(ctx)
-		if err != nil {
-			t.Fatalf("round %d: Header: %v", i, err)
-		}
+		require.NoErrorf(t, err, "round %d: Header", i)
 		trl := s.Trailer()
-		if len(hdr) == 0 || len(trl) == 0 {
-			t.Fatalf("round %d: Trailers-Only gave header=%d trailer=%d fields, want both populated",
-				i, len(hdr), len(trl))
-		}
-		if v, ok := findField(hdr, "x-served-by"); !ok || string(v) != "poseidon" {
-			t.Errorf("round %d: the header view lost the block's fields: %q (present=%v)", i, v, ok)
-		}
-		if v, ok := findField(trl, "x-served-by"); !ok || string(v) != "poseidon" {
-			t.Errorf("round %d: the trailer view lost the block's fields: %q (present=%v)", i, v, ok)
-		}
+
+		require.Truef(t, len(hdr) != 0 && len(trl) != 0,
+			"round %d: Trailers-Only gave header=%d trailer=%d fields, want both populated",
+			i, len(hdr), len(trl))
+		hdrServedBy, hdrOK := findField(hdr, "x-served-by")
+		assert.Truef(t, hdrOK && string(hdrServedBy) == "poseidon",
+			"round %d: the header view lost the block's fields: %q (present=%v)", i, hdrServedBy, hdrOK)
+		trlServedBy, trlOK := findField(trl, "x-served-by")
+		assert.Truef(t, trlOK && string(trlServedBy) == "poseidon",
+			"round %d: the trailer view lost the block's fields: %q (present=%v)", i, trlServedBy, trlOK)
 		// The two are separate field slices, so overwriting one entry of the header
 		// view must leave the trailer view intact.
 		hdr[0] = conn.HeaderField{Name: []byte("clobbered"), Value: []byte("clobbered")}
-		if string(trl[0].Name) == "clobbered" {
-			t.Errorf("round %d: Header() and Trailer() share one field slice — mutating what "+
+		assert.NotEqualf(t, "clobbered", string(trl[0].Name),
+			"round %d: Header() and Trailer() share one field slice — mutating what "+
 				"Header returned changed what Trailer returns", i)
-		}
 		_ = s.Close()
 	}
 }
@@ -288,24 +256,20 @@ func TestBorrowMetadata_TrailersOnlyGivesTwoIndependentBlocks(t *testing.T) {
 func TestBorrowMetadata_DiscardWins(t *testing.T) {
 	cc := mdServer(t)
 	ctx := t.Context()
+
 	s, err := cc.NewStream(ctx, "/t.S/M", nil, BorrowMetadata(), DiscardMetadata())
-	if err != nil {
-		t.Fatalf("NewStream: %v", err)
-	}
+	require.NoError(t, err, "NewStream")
 	defer func() { _ = s.Close() }()
 	if err := s.SendLast(ctx, []byte("q")); err != nil && !benignSendLastErr(err) {
-		t.Fatalf("SendLast: %v", err)
+		require.NoError(t, err, "SendLast")
 	}
 	drain(t, s)
-	if h, _ := s.Header(ctx); h != nil {
-		t.Errorf("Header() returned %d fields with both options set, want nil", len(h))
-	}
-	if tr := s.Trailer(); tr != nil {
-		t.Errorf("Trailer() returned %d fields with both options set, want nil", len(tr))
-	}
-	if s.Status().Code != OK {
-		t.Errorf("status = %v, want OK", s.Status().Code)
-	}
+	hdr, _ := s.Header(ctx)
+	trl := s.Trailer()
+
+	assert.Nilf(t, hdr, "Header() returned %d fields with both options set, want nil", len(hdr))
+	assert.Nilf(t, trl, "Trailer() returned %d fields with both options set, want nil", len(trl))
+	assert.Equalf(t, OK, s.Status().Code, "status = %v, want OK", s.Status().Code)
 }
 
 // TestBorrowFields_CapsFieldCount mirrors the cap on the allocating path. The
@@ -319,9 +283,11 @@ func TestBorrowFields_CapsFieldCount(t *testing.T) {
 	s := &Stream{borrowMD: true}
 	s.acquireBufs()
 	defer s.releaseBufs()
-	if got := s.copyFields(src); len(got) != maxMetadataFields {
-		t.Fatalf("borrowFields kept %d fields, want the cap of %d", len(got), maxMetadataFields)
-	}
+
+	got := s.copyFields(src)
+
+	require.Lenf(t, got, maxMetadataFields,
+		"borrowFields kept %d fields, want the cap of %d", len(got), maxMetadataFields)
 }
 
 // TestBorrowMetadata_ConcurrentCallsDoNotCross is the gate for the hazard the
@@ -342,12 +308,11 @@ func TestBorrowMetadata_ConcurrentCallsDoNotCross(t *testing.T) {
 		srvFinish(w, OK, "")
 	}))
 	defer srv.Close()
-
 	cc := dialGRPC(t, srv, cfg)
 	ctx := t.Context()
-
 	const workers, perWorker = 8, 25
 	errs := make(chan error, 2*workers*perWorker)
+
 	var wg sync.WaitGroup
 	wg.Add(workers)
 	for w := 0; w < workers; w++ {
@@ -395,14 +360,13 @@ func TestBorrowMetadata_ConcurrentCallsDoNotCross(t *testing.T) {
 	}
 	wg.Wait()
 	close(errs)
+
 	n := 0
 	for err := range errs {
 		if n < 5 {
-			t.Error(err)
+			assert.NoError(t, err, "a concurrent borrowed-metadata call crossed arenas")
 		}
 		n++
 	}
-	if n > 5 {
-		t.Errorf("... and %d more", n-5)
-	}
+	assert.LessOrEqualf(t, n, 5, "... and %d more", n-5)
 }

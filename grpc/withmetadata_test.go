@@ -5,6 +5,9 @@ import (
 	"errors"
 	"testing"
 
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
 	"github.com/lodgvideon/poseidon-http-client/conn"
 )
 
@@ -31,12 +34,12 @@ func buildWith(t *testing.T, md, optMD []conn.HeaderField) []conn.HeaderField {
 // TestWithMetadata_ReachesTheHeaderBlock is the point of the option: a call
 // expressed entirely as (ctx, ..., opts...) still sends its metadata.
 func TestWithMetadata_ReachesTheHeaderBlock(t *testing.T) {
-	hdrs := buildWith(t, nil, []conn.HeaderField{
-		{Name: []byte("x-tenant"), Value: []byte("acme")},
-	})
-	if got, ok := hdrValue(hdrs, "x-tenant"); !ok || got != "acme" {
-		t.Errorf("x-tenant = %q (present=%v), want \"acme\"", got, ok)
-	}
+	optMD := []conn.HeaderField{{Name: []byte("x-tenant"), Value: []byte("acme")}}
+
+	hdrs := buildWith(t, nil, optMD)
+
+	got, ok := hdrValue(hdrs, "x-tenant")
+	assert.Truef(t, ok && got == "acme", "x-tenant = %q (present=%v), want \"acme\"", got, ok)
 }
 
 // TestWithMetadata_CoexistsWithPositional pins that the option adds to the
@@ -47,10 +50,12 @@ func TestWithMetadata_CoexistsWithPositional(t *testing.T) {
 		[]conn.HeaderField{{Name: []byte("x-from-arg"), Value: []byte("1")}},
 		[]conn.HeaderField{{Name: []byte("x-from-opt"), Value: []byte("2")}},
 	)
+
 	for _, want := range []struct{ name, val string }{{"x-from-arg", "1"}, {"x-from-opt", "2"}} {
-		if got, ok := hdrValue(hdrs, want.name); !ok || got != want.val {
-			t.Errorf("%s = %q (present=%v), want %q", want.name, got, ok, want.val)
-		}
+		got, ok := hdrValue(hdrs, want.name)
+
+		assert.Truef(t, ok && got == want.val,
+			"%s = %q (present=%v), want %q", want.name, got, ok, want.val)
 	}
 }
 
@@ -59,20 +64,20 @@ func TestWithMetadata_CoexistsWithPositional(t *testing.T) {
 // did not author.
 func TestWithMetadata_Accumulates(t *testing.T) {
 	co := callOptions{}
-	for _, o := range []CallOption{
+	opts := []CallOption{
 		WithMetadata([]conn.HeaderField{{Name: []byte("a"), Value: []byte("1")}}),
 		WithMetadata([]conn.HeaderField{{Name: []byte("b"), Value: []byte("2")}}),
-	} {
+	}
+
+	for _, o := range opts {
 		o.apply(&co)
 	}
-	if len(co.md) != 2 {
-		t.Fatalf("two WithMetadata options produced %d fields, want 2", len(co.md))
-	}
+
+	require.Lenf(t, co.md, 2, "two WithMetadata options produced %d fields, want 2", len(co.md))
 	hdrs := buildWith(t, nil, co.md)
 	for _, name := range []string{"a", "b"} {
-		if _, ok := hdrValue(hdrs, name); !ok {
-			t.Errorf("%q missing: a later WithMetadata replaced an earlier one", name)
-		}
+		_, ok := hdrValue(hdrs, name)
+		assert.Truef(t, ok, "%q missing: a later WithMetadata replaced an earlier one", name)
 	}
 }
 
@@ -82,12 +87,15 @@ func TestWithMetadata_Accumulates(t *testing.T) {
 // metadata has to get the same treatment as positional, or the option becomes a
 // way to bypass it.
 func TestWithMetadata_CredentialsMarkedSensitive(t *testing.T) {
-	hdrs := buildWith(t, nil, []conn.HeaderField{
+	optMD := []conn.HeaderField{
 		{Name: []byte("authorization"), Value: []byte("Bearer secret")},
 		{Name: []byte("cookie"), Value: []byte("session=abc")},
 		{Name: []byte("x-request-id"), Value: []byte("req-1")},
-	})
+	}
 	want := map[string]bool{"authorization": true, "cookie": true, "x-request-id": false}
+
+	hdrs := buildWith(t, nil, optMD)
+
 	seen := map[string]bool{}
 	for _, h := range hdrs {
 		n := string(h.Name)
@@ -95,14 +103,11 @@ func TestWithMetadata_CredentialsMarkedSensitive(t *testing.T) {
 			continue
 		}
 		seen[n] = true
-		if h.Sensitive() != want[n] {
-			t.Errorf("%q via WithMetadata: Sensitive = %v, want %v", n, h.Sensitive(), want[n])
-		}
+		assert.Equalf(t, want[n], h.Sensitive(),
+			"%q via WithMetadata: Sensitive = %v, want %v", n, h.Sensitive(), want[n])
 	}
 	for n := range want {
-		if !seen[n] {
-			t.Errorf("%q missing from the header block", n)
-		}
+		assert.Truef(t, seen[n], "%q missing from the header block", n)
 	}
 }
 
@@ -114,7 +119,6 @@ func TestWithMetadata_IsValidated(t *testing.T) {
 	p := newMockGRPCPeer(t)
 	cc := dialMockPeer(t, p, nil)
 	ctx := context.Background()
-
 	bad := []struct {
 		name string
 		md   []conn.HeaderField
@@ -124,21 +128,21 @@ func TestWithMetadata_IsValidated(t *testing.T) {
 		{"pseudo-header", []conn.HeaderField{{Name: []byte(":method"), Value: []byte("GET")}}},
 		{"newline in value", []conn.HeaderField{{Name: []byte("x-ok"), Value: []byte("a\r\nb")}}},
 	}
+
 	for _, c := range bad {
 		t.Run(c.name, func(t *testing.T) {
 			_, err := cc.NewStream(ctx, "/t.S/M", nil, WithMetadata(c.md))
-			if err == nil {
-				t.Fatal("NewStream accepted invalid metadata supplied through WithMetadata")
-			}
+
+			require.Error(t, err, "NewStream accepted invalid metadata supplied through WithMetadata")
 		})
 	}
 
 	// And the same value passed positionally is rejected identically, so the two
 	// doors cannot drift apart.
 	for _, c := range bad {
-		if _, err := cc.NewStream(ctx, "/t.S/M", c.md); err == nil {
-			t.Errorf("%s: rejected via WithMetadata but accepted positionally", c.name)
-		}
+		_, err := cc.NewStream(ctx, "/t.S/M", c.md)
+
+		assert.Errorf(t, err, "%s: rejected via WithMetadata but accepted positionally", c.name)
 	}
 }
 
@@ -148,25 +152,22 @@ func TestWithMetadata_IsValidated(t *testing.T) {
 func TestWithMetadata_EndToEnd(t *testing.T) {
 	cc := dialMockPeer(t, newMockGRPCPeer(t), nil)
 	ctx := context.Background()
+
 	got, err := cc.Invoke(ctx, "/bench.Svc/Echo", []byte("hello"), nil,
 		WithMetadata([]conn.HeaderField{{Name: []byte("x-tenant"), Value: []byte("acme")}}))
-	if err != nil {
-		t.Fatalf("Invoke: %v", err)
-	}
-	if string(got) != "hello" {
-		t.Errorf("echo = %q, want \"hello\"", got)
-	}
+
+	require.NoError(t, err, "Invoke")
+	assert.Equalf(t, "hello", string(got), "echo = %q, want \"hello\"", got)
 }
 
 // TestWithMetadata_NilIsHarmless pins the shape generated code will emit when a
 // caller passes no metadata at all.
 func TestWithMetadata_NilIsHarmless(t *testing.T) {
 	cc := dialMockPeer(t, newMockGRPCPeer(t), nil)
+
 	s, err := cc.NewStream(context.Background(), "/t.S/M", nil, WithMetadata(nil))
-	if err != nil {
-		t.Fatalf("NewStream with WithMetadata(nil): %v", err)
-	}
-	if err := s.Close(); err != nil && !errors.Is(err, ErrStreamClosed) {
-		t.Fatalf("Close: %v", err)
-	}
+
+	require.NoError(t, err, "NewStream with WithMetadata(nil)")
+	closeErr := s.Close()
+	assert.Truef(t, closeErr == nil || errors.Is(closeErr, ErrStreamClosed), "Close: %v", closeErr)
 }

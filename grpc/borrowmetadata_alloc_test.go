@@ -6,11 +6,17 @@ import (
 	"context"
 	"testing"
 
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
 	"github.com/lodgvideon/poseidon-http-client/conn"
 )
 
 // Behind !race for the reason allocgates_test.go gives at length: the detector
 // allocates as it instruments, and these gates turn on a handful of allocations.
+// The same file explains why no testify assertion may appear inside a measured
+// closure; measureStreamRPC's `do` therefore keeps plain t.Fatalf and every
+// assertion sits outside the measurement.
 
 // metadataCopyAllocs is what copying the response header and trailer blocks onto
 // the heap costs per RPC: two allocations — the bytes and the field headers —
@@ -79,31 +85,27 @@ func TestBorrowMetadata_AllocsPerCall(t *testing.T) {
 	onHeap := measureStreamRPC(t, cc, MaxRecvMessageSize(1<<20))
 	borrowed := measureStreamRPC(t, cc, BorrowMetadata())
 	discarded := measureStreamRPC(t, cc, DiscardMetadata())
+
 	t.Logf("streaming RPC: heap copy %.1f allocs, borrowed %.1f, discarded %.1f",
 		onHeap, borrowed, discarded)
-
-	if got := onHeap - borrowed; got != metadataCopyAllocs {
-		t.Errorf("borrowing saves %.1f allocations per RPC, want exactly %d — the arena "+
+	assert.Equalf(t, float64(metadataCopyAllocs), onHeap-borrowed,
+		"borrowing saves %.1f allocations per RPC, want exactly %d — the arena "+
 			"is not carrying both blocks any more, or the heap copy changed shape",
-			got, metadataCopyAllocs)
-	}
+		onHeap-borrowed, metadataCopyAllocs)
 	// Borrowing must reach parity with discarding. Discarding copies nothing at
 	// all, so it is the floor: anything above it is metadata still on the heap.
-	if borrowed != discarded {
-		t.Errorf("borrowed %.1f allocs against discarded %.1f — borrowing is meant to cost "+
+	assert.Equalf(t, discarded, borrowed,
+		"borrowed %.1f allocs against discarded %.1f — borrowing is meant to cost "+
 			"exactly what not copying costs, since neither touches the heap", borrowed, discarded)
-	}
 	// The absolute ceiling catches a regression that hurts every arm equally,
 	// which both comparisons above would sail straight past.
-	if borrowed > streamMetadataAllocCeiling {
-		t.Errorf("a borrowed-metadata RPC allocates %.1f, ceiling %d — a per-RPC allocation "+
+	assert.LessOrEqualf(t, borrowed, float64(streamMetadataAllocCeiling),
+		"a borrowed-metadata RPC allocates %.1f, ceiling %d — a per-RPC allocation "+
 			"came back somewhere every arm shares", borrowed, streamMetadataAllocCeiling)
-	}
-	if borrowed < streamMetadataAllocCeiling {
-		t.Errorf("a borrowed-metadata RPC allocates only %.1f, below the recorded %d — the "+
+	assert.GreaterOrEqualf(t, borrowed, float64(streamMetadataAllocCeiling),
+		"a borrowed-metadata RPC allocates only %.1f, below the recorded %d — the "+
 			"path improved; lower streamMetadataAllocCeiling to lock the win in",
-			borrowed, streamMetadataAllocCeiling)
-	}
+		borrowed, streamMetadataAllocCeiling)
 }
 
 // TestBorrowMetadata_ReleaseParksCapacitySoTheNextRPCDoesNotAllocate covers the
@@ -131,29 +133,23 @@ func TestBorrowMetadata_ReleaseParksCapacitySoTheNextRPCDoesNotAllocate(t *testi
 	s := &Stream{borrowMD: true}
 	s.acquireBufs()
 	b := s.bufs
-	if b == nil {
-		t.Fatal("acquireBufs attached no buffers")
-	}
-
+	require.NotNil(t, b, "acquireBufs attached no buffers")
 	s.header = s.copyFields([]conn.HeaderField{
 		{Name: []byte("x-request-id"), Value: []byte("0123456789abcdef")},
 		{Name: []byte("content-type"), Value: []byte("application/grpc")},
 	})
 	bytesGrown, fieldsGrown := cap(b.md), cap(b.mdFields)
-	if bytesGrown == 0 || fieldsGrown == 0 {
-		t.Fatalf("the arena has capacity %d/%d after a copy went into it, want both non-zero",
-			bytesGrown, fieldsGrown)
-	}
+	require.Truef(t, bytesGrown != 0 && fieldsGrown != 0,
+		"the arena has capacity %d/%d after a copy went into it, want both non-zero",
+		bytesGrown, fieldsGrown)
 
 	s.releaseBufs()
 
-	if cap(b.md) < bytesGrown {
-		t.Errorf("the arena went into the pool with byte capacity %d, want the %d it grew to "+
+	assert.GreaterOrEqualf(t, cap(b.md), bytesGrown,
+		"the arena went into the pool with byte capacity %d, want the %d it grew to "+
 			"— releaseBufs is nilling it instead of truncating, so the next RPC regrows it",
-			cap(b.md), bytesGrown)
-	}
-	if cap(b.mdFields) < fieldsGrown {
-		t.Errorf("the arena went into the pool with field capacity %d, want the %d it grew to "+
+		cap(b.md), bytesGrown)
+	assert.GreaterOrEqualf(t, cap(b.mdFields), fieldsGrown,
+		"the arena went into the pool with field capacity %d, want the %d it grew to "+
 			"— releaseBufs is nilling it instead of truncating", cap(b.mdFields), fieldsGrown)
-	}
 }

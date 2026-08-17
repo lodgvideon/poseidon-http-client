@@ -1,52 +1,43 @@
 package grpc
 
 import (
-	"errors"
 	"testing"
 	"time"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	"github.com/lodgvideon/poseidon-http-client/conn"
 )
 
 func TestAppendMetadata_TextAndBinary(t *testing.T) {
 	md, err := AppendMetadata(nil, "X-Request-Id", []byte("abc"))
-	if err != nil {
-		t.Fatalf("AppendMetadata: %v", err)
-	}
-	if string(md[0].Name) != "x-request-id" {
-		t.Fatalf("name = %q, want it lowercased", md[0].Name)
-	}
-	if string(md[0].Value) != "abc" {
-		t.Fatalf("value = %q, want it sent verbatim", md[0].Value)
-	}
+	require.NoError(t, err, "AppendMetadata")
+	require.Equalf(t, "x-request-id", string(md[0].Name), "name = %q, want it lowercased", md[0].Name)
+	require.Equalf(t, "abc", string(md[0].Value), "value = %q, want it sent verbatim", md[0].Value)
 
 	md, err = AppendMetadata(md, "trace-bin", []byte{0x00, 0xff, 0x10})
-	if err != nil {
-		t.Fatalf("AppendMetadata(-bin): %v", err)
-	}
-	if string(md[1].Value) != "AP8Q" {
-		t.Fatalf("binary value = %q, want base64", md[1].Value)
-	}
+
+	require.NoError(t, err, "AppendMetadata(-bin)")
+	require.Equalf(t, "AP8Q", string(md[1].Value), "binary value = %q, want base64", md[1].Value)
 	got, ok, err := MetadataValue(md, "trace-bin")
-	if !ok || err != nil {
-		t.Fatalf("MetadataValue(-bin): ok=%v err=%v", ok, err)
-	}
-	if string(got) != "\x00\xff\x10" {
-		t.Fatalf("decoded = % x", got)
-	}
+	require.NoErrorf(t, err, "MetadataValue(-bin): ok=%v", ok)
+	require.Truef(t, ok, "MetadataValue(-bin): ok=%v err=%v", ok, err)
+	require.Equalf(t, "\x00\xff\x10", string(got), "decoded = % x", got)
 }
 
 func TestMetadataValue_UnpaddedBinaryAccepted(t *testing.T) {
 	// gRPC permits a peer to omit base64 padding; the read side must cope.
-	md := []conn.HeaderField{{Name: []byte("k-bin"), Value: []byte("AP8Q")}}
-	if _, ok, err := MetadataValue(md, "k-bin"); !ok || err != nil {
-		t.Fatalf("padded form rejected: ok=%v err=%v", ok, err)
-	}
-	md = []conn.HeaderField{{Name: []byte("k-bin"), Value: []byte("YQ")}}
-	got, ok, err := MetadataValue(md, "k-bin")
-	if !ok || err != nil || string(got) != "a" {
-		t.Fatalf("unpadded decode = %q ok=%v err=%v", got, ok, err)
-	}
+	padded := []conn.HeaderField{{Name: []byte("k-bin"), Value: []byte("AP8Q")}}
+	unpadded := []conn.HeaderField{{Name: []byte("k-bin"), Value: []byte("YQ")}}
+
+	_, paddedOK, paddedErr := MetadataValue(padded, "k-bin")
+	got, ok, err := MetadataValue(unpadded, "k-bin")
+
+	require.NoErrorf(t, paddedErr, "padded form rejected: ok=%v", paddedOK)
+	require.Truef(t, paddedOK, "padded form rejected: ok=%v err=%v", paddedOK, paddedErr)
+	require.NoErrorf(t, err, "unpadded decode = %q ok=%v", got, ok)
+	require.Truef(t, ok && string(got) == "a", "unpadded decode = %q ok=%v err=%v", got, ok, err)
 }
 
 // TestMetadataValue_MalformedBinaryIsNotAbsent pins the difference between "the
@@ -56,39 +47,41 @@ func TestMetadataValue_UnpaddedBinaryAccepted(t *testing.T) {
 // peer corrupted on purpose — fail-open on peer input.
 func TestMetadataValue_MalformedBinaryIsNotAbsent(t *testing.T) {
 	md := []conn.HeaderField{{Name: []byte("sig-bin"), Value: []byte("!!!not base64!!!")}}
+
 	v, ok, err := MetadataValue(md, "sig-bin")
-	if !ok {
-		t.Fatal("ok = false — a present-but-corrupt value must not read as absent")
-	}
-	if err == nil {
-		t.Fatal("err = nil, want a decode failure")
-	}
-	if v != nil {
-		t.Fatalf("value = %q, want nil alongside the error", v)
-	}
-	if _, ok, err := MetadataValue(md, "missing-bin"); ok || err != nil {
-		t.Fatalf("absent key = ok=%v err=%v, want false/nil", ok, err)
-	}
+	missingV, missingOK, missingErr := MetadataValue(md, "missing-bin")
+
+	require.True(t, ok, "ok = false — a present-but-corrupt value must not read as absent")
+	require.Error(t, err, "err = nil, want a decode failure")
+	require.Nilf(t, v, "value = %q, want nil alongside the error", v)
+	assert.Falsef(t, missingOK, "absent key = ok=%v err=%v, want false/nil", missingOK, missingErr)
+	assert.NoErrorf(t, missingErr, "absent key = ok=%v err=%v, want false/nil", missingOK, missingErr)
+	assert.Nil(t, missingV, "an absent key must yield no value")
 }
 
 func TestAppendMetadata_RejectsReservedAndPseudo(t *testing.T) {
 	// Owned by the transport, forbidden in HTTP/2 outright, or inside the
 	// grpc- namespace the protocol reserves for itself.
-	for _, k := range []string{
+	reserved := []string{
 		"content-type", "TE", "grpc-timeout", "user-agent", "grpc-accept-encoding",
 		"connection", "keep-alive", "proxy-connection", "transfer-encoding", "upgrade", "host",
 		"grpc-status", "grpc-message", "grpc-anything-future",
-	} {
-		if _, err := AppendMetadata(nil, k, []byte("x")); !errors.Is(err, ErrReservedMetadata) {
-			t.Errorf("AppendMetadata(%q) = %v, want ErrReservedMetadata", k, err)
-		}
 	}
 	// Not a legal field name at all. A pseudo-header's colon is not a token
 	// character, so these fail the syntax gate before the reserved-name gate.
-	for _, k := range []string{":path", ":authority", "", "bad key", "x\r\ny: 1", "tab\tkey"} {
-		if _, err := AppendMetadata(nil, k, []byte("x")); !errors.Is(err, ErrInvalidMetadata) {
-			t.Errorf("AppendMetadata(%q) = %v, want ErrInvalidMetadata", k, err)
-		}
+	malformed := []string{":path", ":authority", "", "bad key", "x\r\ny: 1", "tab\tkey"}
+
+	for _, k := range reserved {
+		_, err := AppendMetadata(nil, k, []byte("x"))
+
+		assert.ErrorIsf(t, err, ErrReservedMetadata,
+			"AppendMetadata(%q) = %v, want ErrReservedMetadata", k, err)
+	}
+	for _, k := range malformed {
+		_, err := AppendMetadata(nil, k, []byte("x"))
+
+		assert.ErrorIsf(t, err, ErrInvalidMetadata,
+			"AppendMetadata(%q) = %v, want ErrInvalidMetadata", k, err)
 	}
 }
 
@@ -98,30 +91,32 @@ func TestAppendMetadata_RejectsReservedAndPseudo(t *testing.T) {
 // CR and LF *are* the delimiters and a value carrying them becomes several
 // fields and, past a blank line, an injected request.
 func TestAppendMetadata_RejectsInjectionValues(t *testing.T) {
-	for _, v := range []string{
+	bad := []string{
 		"bob\r\nx-admin: true", "a\nb", "cr\rhere", "nul\x00byte", " leading", "trailing ", "\ttab",
-	} {
-		if _, err := AppendMetadata(nil, "x-user", []byte(v)); !errors.Is(err, ErrInvalidMetadata) {
-			t.Errorf("AppendMetadata(value=%q) = %v, want ErrInvalidMetadata", v, err)
-		}
 	}
-	if _, err := AppendMetadata(nil, "x-user", []byte("plain-value")); err != nil {
-		t.Errorf("AppendMetadata(legal value) = %v, want nil", err)
+
+	for _, v := range bad {
+		_, err := AppendMetadata(nil, "x-user", []byte(v))
+
+		assert.ErrorIsf(t, err, ErrInvalidMetadata,
+			"AppendMetadata(value=%q) = %v, want ErrInvalidMetadata", v, err)
 	}
+	_, err := AppendMetadata(nil, "x-user", []byte("plain-value"))
+
+	assert.NoErrorf(t, err, "AppendMetadata(legal value) = %v, want nil", err)
 }
 
 // TestDefaultSensitiveField pins the credential list this package refuses to let
 // into the HPACK dynamic table.
 func TestDefaultSensitiveField(t *testing.T) {
-	for _, n := range []string{"authorization", "proxy-authorization", "cookie"} {
-		if !defaultSensitiveField([]byte(n)) {
-			t.Errorf("%q not treated as sensitive", n)
-		}
+	sensitive := []string{"authorization", "proxy-authorization", "cookie"}
+	ordinary := []string{"x-request-id", "authorization-scheme", "", "auth"}
+
+	for _, n := range sensitive {
+		assert.Truef(t, defaultSensitiveField([]byte(n)), "%q not treated as sensitive", n)
 	}
-	for _, n := range []string{"x-request-id", "authorization-scheme", "", "auth"} {
-		if defaultSensitiveField([]byte(n)) {
-			t.Errorf("%q wrongly treated as sensitive", n)
-		}
+	for _, n := range ordinary {
+		assert.Falsef(t, defaultSensitiveField([]byte(n)), "%q wrongly treated as sensitive", n)
 	}
 }
 
@@ -153,45 +148,48 @@ func TestEncodeTimeout_RoundsUp(t *testing.T) {
 		{40 * time.Hour, "144000S"},
 		{100000 * time.Hour, "6000000M"},
 	}
+
 	for _, c := range cases {
-		if got := encodeTimeout(c.in); got != c.want {
-			t.Errorf("encodeTimeout(%v) = %q, want %q", c.in, got, c.want)
-		}
+		got := encodeTimeout(c.in)
+
+		assert.Equalf(t, c.want, got, "encodeTimeout(%v) = %q, want %q", c.in, got, c.want)
 	}
 }
 
 func TestEncodeTimeout_RoundTrip(t *testing.T) {
-	for _, d := range []time.Duration{
+	durations := []time.Duration{
 		time.Nanosecond, time.Microsecond, 250 * time.Millisecond,
 		30 * time.Second, 5 * time.Minute, 3 * time.Hour,
-	} {
+	}
+
+	for _, d := range durations {
 		v := encodeTimeout(d)
 		got, err := decodeTimeout(v)
-		if err != nil {
-			t.Fatalf("decodeTimeout(%q): %v", v, err)
-		}
-		if got < d {
-			t.Fatalf("encodeTimeout(%v) = %q decoded to %v — shorter than requested", d, v, got)
-		}
+
+		require.NoErrorf(t, err, "decodeTimeout(%q)", v)
+		require.GreaterOrEqualf(t, got, d,
+			"encodeTimeout(%v) = %q decoded to %v — shorter than requested", d, v, got)
 	}
 }
 
 func TestEncodeTimeout_ValueNeverExceedsEightDigits(t *testing.T) {
-	for _, d := range []time.Duration{
-		time.Nanosecond, time.Second, time.Hour, 1 << 62,
-	} {
+	durations := []time.Duration{time.Nanosecond, time.Second, time.Hour, 1 << 62}
+
+	for _, d := range durations {
 		v := encodeTimeout(d)
-		if len(v)-1 > 8 {
-			t.Fatalf("encodeTimeout(%v) = %q — value part exceeds the 8 digits the spec allows", d, v)
-		}
+
+		require.LessOrEqualf(t, len(v)-1, 8,
+			"encodeTimeout(%v) = %q — value part exceeds the 8 digits the spec allows", d, v)
 	}
 }
 
 func TestDecodeTimeout_Malformed(t *testing.T) {
-	for _, v := range []string{"", "S", "abcS", "10x", "-5S"} {
-		if _, err := decodeTimeout(v); err == nil {
-			t.Errorf("decodeTimeout(%q) = nil error, want failure", v)
-		}
+	malformed := []string{"", "S", "abcS", "10x", "-5S"}
+
+	for _, v := range malformed {
+		_, err := decodeTimeout(v)
+
+		assert.Errorf(t, err, "decodeTimeout(%q) = nil error, want failure", v)
 	}
 }
 

@@ -5,6 +5,9 @@ import (
 	"context"
 	"errors"
 	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // TestStreamBufs_NoContentLeaksBetweenRPCs is the reuse test the issue asks for,
@@ -17,33 +20,23 @@ import (
 func TestStreamBufs_NoContentLeaksBetweenRPCs(t *testing.T) {
 	cc := dialMockPeer(t, newMockGRPCPeer(t), nil)
 	ctx := context.Background()
-
 	// Call 1: send a distinctive payload, then abandon the stream early so its
 	// buffers go back to the pool mid-conversation.
 	first := bytes.Repeat([]byte{'A'}, 4096)
 	s1, err := cc.NewStream(ctx, "/bench.Svc/Echo", nil)
-	if err != nil {
-		t.Fatalf("NewStream 1: %v", err)
-	}
-	if err := s1.SendLast(ctx, first); err != nil && !errors.Is(err, ErrStreamClosed) {
-		t.Fatalf("SendLast 1: %v", err)
-	}
-	if err := s1.Close(); err != nil {
-		t.Fatalf("Close 1: %v", err)
-	}
+	require.NoError(t, err, "NewStream 1")
+	sendErr := s1.SendLast(ctx, first)
+	require.Truef(t, sendErr == nil || errors.Is(sendErr, ErrStreamClosed), "SendLast 1: %v", sendErr)
+	require.NoError(t, s1.Close(), "Close 1")
 
 	// Call 2 draws the same buffers.
 	second := []byte("second")
 	got, err := cc.Invoke(ctx, "/bench.Svc/Echo", second, nil)
-	if err != nil {
-		t.Fatalf("Invoke 2: %v", err)
-	}
-	if !bytes.Equal(got, second) {
-		t.Fatalf("second call returned %q, want %q", got, second)
-	}
-	if bytes.ContainsRune(got, 'A') {
-		t.Error("the first call's payload surfaced in the second call's response")
-	}
+
+	require.NoError(t, err, "Invoke 2")
+	require.Truef(t, bytes.Equal(got, second), "second call returned %q, want %q", got, second)
+	assert.NotContains(t, string(got), "A",
+		"the first call's payload surfaced in the second call's response")
 }
 
 // TestStreamBufs_ReleaseKeepsCapacity pins the mechanism the pool depends on:
@@ -60,11 +53,8 @@ func TestStreamBufs_NoContentLeaksBetweenRPCs(t *testing.T) {
 func TestStreamBufs_ReleaseKeepsCapacity(t *testing.T) {
 	cc := dialMockPeer(t, newMockGRPCPeer(t), nil)
 	ctx := context.Background()
-
 	s, err := cc.NewStream(ctx, "/bench.Svc/Echo", nil)
-	if err != nil {
-		t.Fatalf("NewStream: %v", err)
-	}
+	require.NoError(t, err, "NewStream")
 	// Grow both buffers the way a real call does, staying under the pool cap.
 	// The decoder grows through Push rather than by assigning its field: which
 	// field carries the pooled capacity is an internal detail that has already
@@ -73,20 +63,17 @@ func TestStreamBufs_ReleaseKeepsCapacity(t *testing.T) {
 	s.sendBuf = append(s.sendBuf[:0], bytes.Repeat([]byte{'x'}, 2048)...)
 	s.dec.Push(bytes.Repeat([]byte{'y'}, 4096))
 	wantSend, wantDec := cap(s.sendBuf), cap(s.dec.own)
-
 	b := s.bufs
+
 	_ = s.Close()
 
-	if cap(b.send) != wantSend {
-		t.Errorf("released send buffer has capacity %d, want %d", cap(b.send), wantSend)
-	}
-	if cap(b.dec) != wantDec {
-		t.Errorf("released decoder buffer has capacity %d, want %d", cap(b.dec), wantDec)
-	}
-	if len(b.send) != 0 || len(b.dec) != 0 {
-		t.Errorf("released buffers carry length %d/%d, want 0 — the next owner would read stale bytes",
-			len(b.send), len(b.dec))
-	}
+	assert.Equalf(t, wantSend, cap(b.send),
+		"released send buffer has capacity %d, want %d", cap(b.send), wantSend)
+	assert.Equalf(t, wantDec, cap(b.dec),
+		"released decoder buffer has capacity %d, want %d", cap(b.dec), wantDec)
+	assert.Truef(t, len(b.send) == 0 && len(b.dec) == 0,
+		"released buffers carry length %d/%d, want 0 — the next owner would read stale bytes",
+		len(b.send), len(b.dec))
 }
 
 // TestStreamBufs_AcquireAttachesUsableBuffers pins the other half: a stream
@@ -94,18 +81,15 @@ func TestStreamBufs_ReleaseKeepsCapacity(t *testing.T) {
 // pair or minted one.
 func TestStreamBufs_AcquireAttachesUsableBuffers(t *testing.T) {
 	cc := dialMockPeer(t, newMockGRPCPeer(t), nil)
+
 	s, err := cc.NewStream(context.Background(), "/bench.Svc/Echo", nil)
-	if err != nil {
-		t.Fatalf("NewStream: %v", err)
-	}
+
+	require.NoError(t, err, "NewStream")
 	defer func() { _ = s.Close() }()
-	if s.bufs == nil {
-		t.Fatal("stream came up with no pooled pair attached")
-	}
-	if len(s.sendBuf) != 0 || len(s.dec.buf) != 0 {
-		t.Errorf("stream came up with %d/%d bytes already in its buffers",
-			len(s.sendBuf), len(s.dec.buf))
-	}
+	require.NotNil(t, s.bufs, "stream came up with no pooled pair attached")
+	assert.Truef(t, len(s.sendBuf) == 0 && len(s.dec.buf) == 0,
+		"stream came up with %d/%d bytes already in its buffers",
+		len(s.sendBuf), len(s.dec.buf))
 }
 
 // TestStreamBufs_CloseIsTheOnlyReturn pins that the buffers go back exactly
@@ -115,20 +99,16 @@ func TestStreamBufs_AcquireAttachesUsableBuffers(t *testing.T) {
 func TestStreamBufs_CloseIsTheOnlyReturn(t *testing.T) {
 	cc := dialMockPeer(t, newMockGRPCPeer(t), nil)
 	s, err := cc.NewStream(context.Background(), "/bench.Svc/Echo", nil)
-	if err != nil {
-		t.Fatalf("NewStream: %v", err)
-	}
-	if s.bufs == nil {
-		t.Fatal("stream came up with no pooled buffers")
-	}
+	require.NoError(t, err, "NewStream")
+	require.NotNil(t, s.bufs, "stream came up with no pooled buffers")
+
 	_ = s.Close()
-	if s.bufs != nil {
-		t.Error("Close left the pooled pair attached")
-	}
+	attachedAfterClose := s.bufs
 	_ = s.Close() // must be inert
-	if s.sendBuf != nil || s.dec.buf != nil {
-		t.Error("Close left this stream pointing at buffers it no longer owns")
-	}
+
+	assert.Nil(t, attachedAfterClose, "Close left the pooled pair attached")
+	assert.Truef(t, s.sendBuf == nil && s.dec.buf == nil,
+		"Close left this stream pointing at buffers it no longer owns")
 }
 
 // TestStreamBufs_StaleStreamCannotReachThem is why the Stream struct itself is
@@ -142,17 +122,12 @@ func TestStreamBufs_CloseIsTheOnlyReturn(t *testing.T) {
 func TestStreamBufs_StaleStreamCannotReachThem(t *testing.T) {
 	cc := dialMockPeer(t, newMockGRPCPeer(t), nil)
 	ctx := context.Background()
-
 	stale, err := cc.NewStream(ctx, "/bench.Svc/Echo", nil)
-	if err != nil {
-		t.Fatalf("NewStream: %v", err)
-	}
+	require.NoError(t, err, "NewStream")
 	_ = stale.Close()
-
 	// Another RPC now owns whatever the pool handed on.
-	if _, err := cc.Invoke(ctx, "/bench.Svc/Echo", []byte("live"), nil); err != nil {
-		t.Fatalf("Invoke: %v", err)
-	}
+	_, err = cc.Invoke(ctx, "/bench.Svc/Echo", []byte("live"), nil)
+	require.NoError(t, err, "Invoke")
 
 	for _, c := range []struct {
 		name string
@@ -165,9 +140,10 @@ func TestStreamBufs_StaleStreamCannotReachThem(t *testing.T) {
 		{"RecvInto", func() error { _, err := stale.RecvInto(ctx, nil); return err }},
 		{"Header", func() error { _, err := stale.Header(ctx); return err }},
 	} {
-		if err := c.call(); !errors.Is(err, ErrStreamClosed) {
-			t.Errorf("%s on a closed stream = %v, want ErrStreamClosed", c.name, err)
-		}
+		err := c.call()
+
+		assert.ErrorIsf(t, err, ErrStreamClosed,
+			"%s on a closed stream = %v, want ErrStreamClosed", c.name, err)
 	}
 }
 
@@ -176,19 +152,16 @@ func TestStreamBufs_StaleStreamCannotReachThem(t *testing.T) {
 func TestStreamBufs_OversizeIsNotPooled(t *testing.T) {
 	cc := dialMockPeer(t, newMockGRPCPeer(t), nil)
 	s, err := cc.NewStream(context.Background(), "/bench.Svc/Echo", nil)
-	if err != nil {
-		t.Fatalf("NewStream: %v", err)
-	}
+	require.NoError(t, err, "NewStream")
 	// Simulate the outlier directly: grow both buffers past the cap, then close.
 	s.sendBuf = make([]byte, 0, maxPooledStreamBuf+1)
 	s.dec.buf = make([]byte, 0, maxPooledStreamBuf+1)
 	b := s.bufs
+
 	_ = s.Close()
-	if b == nil {
-		t.Fatal("no pooled pair to inspect")
-	}
-	if cap(b.send) > maxPooledStreamBuf || cap(b.dec) > maxPooledStreamBuf {
-		t.Errorf("an oversize buffer was pooled: send cap %d, dec cap %d, limit %d",
-			cap(b.send), cap(b.dec), maxPooledStreamBuf)
-	}
+
+	require.NotNil(t, b, "no pooled pair to inspect")
+	assert.Truef(t, cap(b.send) <= maxPooledStreamBuf && cap(b.dec) <= maxPooledStreamBuf,
+		"an oversize buffer was pooled: send cap %d, dec cap %d, limit %d",
+		cap(b.send), cap(b.dec), maxPooledStreamBuf)
 }

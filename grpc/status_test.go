@@ -4,33 +4,29 @@ import (
 	"errors"
 	"testing"
 
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
 	"github.com/lodgvideon/poseidon-http-client/frame"
 )
 
 func TestCode_String(t *testing.T) {
-	if got := Unauthenticated.String(); got != "UNAUTHENTICATED" {
-		t.Fatalf("Unauthenticated = %q", got)
-	}
-	if got := Code(99).String(); got != "CODE(99)" {
-		t.Fatalf("Code(99) = %q", got)
-	}
+	named := Unauthenticated.String()
+	outOfRange := Code(99).String()
+
+	require.Equalf(t, "UNAUTHENTICATED", named, "Unauthenticated = %q", named)
+	require.Equalf(t, "CODE(99)", outOfRange, "Code(99) = %q", outOfRange)
 }
 
 func TestStatus_ErrIsNilForOK(t *testing.T) {
-	if err := (Status{Code: OK}).Err(); err != nil {
-		t.Fatalf("OK.Err() = %v, want nil", err)
-	}
+	okErr := (Status{Code: OK}).Err()
 	err := Status{Code: NotFound, Message: "no such user"}.Err()
+
+	require.NoErrorf(t, okErr, "OK.Err() = %v, want nil", okErr)
 	var st *Status
-	if !errors.As(err, &st) {
-		t.Fatalf("Err() = %T, want *Status", err)
-	}
-	if st.Code != NotFound {
-		t.Fatalf("code = %v", st.Code)
-	}
-	if err.Error() != "grpc: NOT_FOUND: no such user" {
-		t.Fatalf("Error() = %q", err.Error())
-	}
+	require.Truef(t, errors.As(err, &st), "Err() = %T, want *Status", err)
+	require.Equalf(t, NotFound, st.Code, "code = %v", st.Code)
+	require.Equalf(t, "grpc: NOT_FOUND: no such user", err.Error(), "Error() = %q", err.Error())
 }
 
 // TestStatusFromHTTP pins the mapping table from the gRPC over HTTP/2
@@ -49,10 +45,11 @@ func TestStatusFromHTTP(t *testing.T) {
 		418: Unknown,
 		500: Unknown,
 	}
+
 	for httpStatus, want := range cases {
-		if got := statusFromHTTP(httpStatus); got != want {
-			t.Errorf("statusFromHTTP(%d) = %v, want %v", httpStatus, got, want)
-		}
+		got := statusFromHTTP(httpStatus)
+
+		assert.Equalf(t, want, got, "statusFromHTTP(%d) = %v, want %v", httpStatus, got, want)
 	}
 }
 
@@ -65,23 +62,22 @@ func TestStatusFromRST(t *testing.T) {
 		frame.ErrCodeProtocolError:      Internal,
 		frame.ErrCodeNoError:            Internal,
 	}
+
 	for rst, want := range cases {
-		if got := statusFromRST(rst); got != want {
-			t.Errorf("statusFromRST(%d) = %v, want %v", rst, got, want)
-		}
+		got := statusFromRST(rst)
+
+		assert.Equalf(t, want, got, "statusFromRST(%d) = %v, want %v", rst, got, want)
 	}
 }
 
 func TestParseStatusCode_MalformedIsUnknown(t *testing.T) {
-	if got := parseStatusCode("not-a-number"); got != Unknown {
-		t.Fatalf("parseStatusCode(garbage) = %v, want UNKNOWN", got)
-	}
-	if got := parseStatusCode(""); got != Unknown {
-		t.Fatalf("parseStatusCode(empty) = %v, want UNKNOWN", got)
-	}
-	if got := parseStatusCode("14"); got != Unavailable {
-		t.Fatalf("parseStatusCode(14) = %v", got)
-	}
+	garbage := parseStatusCode("not-a-number")
+	empty := parseStatusCode("")
+	valid := parseStatusCode("14")
+
+	require.Equalf(t, Unknown, garbage, "parseStatusCode(garbage) = %v, want UNKNOWN", garbage)
+	require.Equalf(t, Unknown, empty, "parseStatusCode(empty) = %v, want UNKNOWN", empty)
+	require.Equalf(t, Unavailable, valid, "parseStatusCode(14) = %v", valid)
 }
 
 func TestDecodeMessage(t *testing.T) {
@@ -95,9 +91,10 @@ func TestDecodeMessage(t *testing.T) {
 		"bad%zz":        "bad%zz",
 		"mixed%20a%zzb": "mixed a%zzb",
 	}
+
 	for in, want := range cases {
-		if got := decodeMessage(in); got != want {
-			t.Errorf("decodeMessage(%q) = %q, want %q", in, got, want)
-		}
+		got := decodeMessage(in)
+
+		assert.Equalf(t, want, got, "decodeMessage(%q) = %q, want %q", in, got, want)
 	}
 }

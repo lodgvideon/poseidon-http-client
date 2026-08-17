@@ -3,6 +3,9 @@ package grpc
 import (
 	"bytes"
 	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // PushBorrowed makes the decoder alias a caller's DATA chunk instead of copying
@@ -15,24 +18,20 @@ import (
 // aliased — aliasing would throw the earlier bytes away.
 func TestBorrow_RefusedWhileBytesArePending(t *testing.T) {
 	whole, err := AppendMessage(nil, bytes.Repeat([]byte{'a'}, 100))
-	if err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, err, "AppendMessage")
 	var d decoder
 	d.Push(whole[:20]) // a partial message is now pending
 
-	if d.PushBorrowed(whole[20:], nil) {
-		t.Fatal("borrowed while bytes were pending — the pending prefix would be lost")
-	}
-	d.Push(whole[20:])
+	borrowed := d.PushBorrowed(whole[20:], nil)
 
+	require.False(t, borrowed, "borrowed while bytes were pending — the pending prefix would be lost")
+	// The documented fallback must then reassemble the message intact.
+	d.Push(whole[20:])
 	msg, ok, err := d.Next()
-	if err != nil || !ok {
-		t.Fatalf("Next after the fallback = (ok=%v, err=%v)", ok, err)
-	}
-	if !bytes.Equal(msg, bytes.Repeat([]byte{'a'}, 100)) {
-		t.Error("the message reassembled from two chunks is wrong")
-	}
+	require.NoErrorf(t, err, "Next after the fallback = (ok=%v, err=%v)", ok, err)
+	require.Truef(t, ok, "Next after the fallback = (ok=%v, err=%v)", ok, err)
+	assert.Equal(t, bytes.Repeat([]byte{'a'}, 100), msg,
+		"the message reassembled from two chunks is wrong")
 }
 
 // TestBorrow_EndsOnTheNextPush pins the release rule: the undelivered remainder
@@ -40,27 +39,17 @@ func TestBorrow_RefusedWhileBytesArePending(t *testing.T) {
 // caller is free to reuse the chunk the moment the borrow ends.
 func TestBorrow_EndsOnTheNextPush(t *testing.T) {
 	first, err := AppendMessage(nil, []byte("first-message"))
-	if err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, err, "AppendMessage(first)")
 	// A chunk holding one whole message plus the head of a second.
 	second, err := AppendMessage(nil, []byte("second-message"))
-	if err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, err, "AppendMessage(second)")
 	chunk := append(append([]byte(nil), first...), second[:6]...)
-
 	var d decoder
-	if !d.PushBorrowed(chunk, nil) {
-		t.Fatal("an empty decoder refused to borrow")
-	}
+	require.True(t, d.PushBorrowed(chunk, nil), "an empty decoder refused to borrow")
 	msg, ok, err := d.Next()
-	if err != nil || !ok {
-		t.Fatalf("first Next = (ok=%v, err=%v)", ok, err)
-	}
-	if string(msg) != "first-message" {
-		t.Fatalf("first message = %q", msg)
-	}
+	require.NoErrorf(t, err, "first Next = (ok=%v, err=%v)", ok, err)
+	require.Truef(t, ok, "first Next = (ok=%v, err=%v)", ok, err)
+	require.Equalf(t, "first-message", string(msg), "first message = %q", msg)
 
 	// The next Push ends the borrow. Scribble over the borrowed chunk first:
 	// if the remainder were still aliasing it, the second message would come
@@ -72,13 +61,11 @@ func TestBorrow_EndsOnTheNextPush(t *testing.T) {
 	}
 
 	msg, ok, err = d.Next()
-	if err != nil || !ok {
-		t.Fatalf("second Next = (ok=%v, err=%v)", ok, err)
-	}
-	if string(msg) != "second-message" {
-		t.Errorf("second message = %q, want \"second-message\" — the borrowed remainder "+
+	require.NoErrorf(t, err, "second Next = (ok=%v, err=%v)", ok, err)
+	require.Truef(t, ok, "second Next = (ok=%v, err=%v)", ok, err)
+	assert.Equalf(t, "second-message", string(msg),
+		"second message = %q, want \"second-message\" — the borrowed remainder "+
 			"was not copied out before the borrow ended", msg)
-	}
 }
 
 // TestBorrow_ReturnsTheSlabExactlyOnce is the pooling half. The decoder owns the
@@ -87,28 +74,20 @@ func TestBorrow_EndsOnTheNextPush(t *testing.T) {
 // in the pool twice and hand it to two owners.
 func TestBorrow_ReturnsTheSlabExactlyOnce(t *testing.T) {
 	whole, err := AppendMessage(nil, []byte("x"))
-	if err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, err, "AppendMessage")
 	slab := new([]byte)
 	*slab = make([]byte, 0, 64)
-
 	var d decoder
-	if !d.PushBorrowed(whole, slab) {
-		t.Fatal("empty decoder refused to borrow")
-	}
-	if d.borrowed != slab {
-		t.Fatal("the decoder did not take the slab")
-	}
+	require.True(t, d.PushBorrowed(whole, slab), "empty decoder refused to borrow")
+	require.Same(t, slab, d.borrowed, "the decoder did not take the slab")
+
 	d.Push([]byte{0}) // ends the borrow
-	if d.borrowed != nil || d.borrowing {
-		t.Error("the borrow did not end on Push")
-	}
+
+	require.Truef(t, d.borrowed == nil && !d.borrowing, "the borrow did not end on Push")
 	// A second end must be inert.
 	d.release()
-	if d.borrowed != nil || d.borrowing {
-		t.Error("release after the borrow already ended re-armed it")
-	}
+	assert.Truef(t, d.borrowed == nil && !d.borrowing,
+		"release after the borrow already ended re-armed it")
 }
 
 // TestBorrow_ReleaseEndsAHeldBorrow pins what Close depends on: a decoder still
@@ -116,18 +95,14 @@ func TestBorrow_ReturnsTheSlabExactlyOnce(t *testing.T) {
 // buffer never returns to the pool.
 func TestBorrow_ReleaseEndsAHeldBorrow(t *testing.T) {
 	whole, err := AppendMessage(nil, []byte("held"))
-	if err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, err, "AppendMessage")
 	slab := new([]byte)
 	var d decoder
-	if !d.PushBorrowed(whole, slab) {
-		t.Fatal("empty decoder refused to borrow")
-	}
+	require.True(t, d.PushBorrowed(whole, slab), "empty decoder refused to borrow")
+
 	d.release()
-	if d.borrowing || d.borrowed != nil {
-		t.Error("release left the borrow in place")
-	}
+
+	assert.Truef(t, !d.borrowing && d.borrowed == nil, "release left the borrow in place")
 }
 
 // TestBorrow_CloseReleasesAHeldBorrow is the leak gate, and it exists because a
@@ -138,17 +113,11 @@ func TestBorrow_ReleaseEndsAHeldBorrow(t *testing.T) {
 func TestBorrow_CloseReleasesAHeldBorrow(t *testing.T) {
 	cc := dialMockPeer(t, newMockGRPCPeer(t), nil)
 	ctx := t.Context()
-
 	s, err := cc.NewStream(ctx, "/bench.Svc/Echo", nil)
-	if err != nil {
-		t.Fatalf("NewStream: %v", err)
-	}
-	if err := s.SendLast(ctx, bytes.Repeat([]byte{'q'}, 64)); err != nil {
-		t.Fatalf("SendLast: %v", err)
-	}
-	if _, err := s.Recv(ctx); err != nil {
-		t.Fatalf("Recv: %v", err)
-	}
+	require.NoError(t, err, "NewStream")
+	require.NoError(t, s.SendLast(ctx, bytes.Repeat([]byte{'q'}, 64)), "SendLast")
+	_, err = s.Recv(ctx)
+	require.NoError(t, err, "Recv")
 	// The response arrived in one DATA frame, so the decoder is aliasing it and
 	// nothing has ended the borrow yet.
 	if !s.dec.borrowing {
@@ -156,9 +125,9 @@ func TestBorrow_CloseReleasesAHeldBorrow(t *testing.T) {
 	}
 
 	_ = s.Close()
-	if s.dec.borrowing || s.dec.borrowed != nil {
-		t.Error("Close left a borrow held — the pooled DATA slab never returns to the pool")
-	}
+
+	assert.Truef(t, !s.dec.borrowing && s.dec.borrowed == nil,
+		"Close left a borrow held — the pooled DATA slab never returns to the pool")
 }
 
 // TestBorrow_EndToEndOverAReusedConn is the integration check: the borrow path
@@ -168,18 +137,17 @@ func TestBorrow_CloseReleasesAHeldBorrow(t *testing.T) {
 func TestBorrow_EndToEndOverAReusedConn(t *testing.T) {
 	cc := dialMockPeer(t, newMockGRPCPeer(t), nil)
 	ctx := t.Context()
-
 	var dst []byte
+
 	for i := 0; i < 40; i++ {
 		want := bytes.Repeat([]byte{byte('a' + i%26)}, 512+i)
+
 		got, err := cc.InvokeInto(ctx, "/bench.Svc/Echo", want, dst, nil)
-		if err != nil {
-			t.Fatalf("call %d: %v", i, err)
-		}
-		if !bytes.Equal(got, want) {
-			t.Fatalf("call %d returned %d bytes that do not match the request — a borrowed "+
+
+		require.NoErrorf(t, err, "call %d", i)
+		require.Truef(t, bytes.Equal(got, want),
+			"call %d returned %d bytes that do not match the request — a borrowed "+
 				"chunk was reused under the decoder", i, len(got))
-		}
 		dst = got
 	}
 }

@@ -6,6 +6,9 @@ import (
 	"fmt"
 	"testing"
 
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
 	"github.com/lodgvideon/poseidon-http-client/conn"
 )
 
@@ -22,21 +25,21 @@ import (
 
 // TestStatusFromTransport_ConnectionDeathIsUnavailable is the main mapping.
 func TestStatusFromTransport_ConnectionDeathIsUnavailable(t *testing.T) {
-	for _, base := range []error{
+	bases := []error{
 		conn.ErrConnClosed,
 		conn.ErrStaleStream,
 		conn.ErrStreamClosed,
 		errors.New("some transport failure"),
-	} {
+	}
+
+	for _, base := range bases {
 		err := statusFromTransport(base)
+
 		var st *Status
-		if !errors.As(err, &st) {
-			t.Fatalf("%v mapped to %T, want *Status", base, err)
-		}
-		if st.Code != Unavailable {
-			t.Errorf("%v mapped to %v, want Unavailable — the RPC did not complete and "+
+		require.Truef(t, errors.As(err, &st), "%v mapped to %T, want *Status", base, err)
+		assert.Equalf(t, Unavailable, st.Code,
+			"%v mapped to %v, want Unavailable — the RPC did not complete and "+
 				"another connection might serve it", base, st.Code)
-		}
 	}
 }
 
@@ -52,14 +55,13 @@ func TestStatusFromTransport_ContextCodesAreNotUnavailable(t *testing.T) {
 		{context.DeadlineExceeded, DeadlineExceeded},
 		{fmt.Errorf("conn: %w", context.DeadlineExceeded), DeadlineExceeded},
 	}
+
 	for _, tc := range cases {
+		mapped := statusFromTransport(tc.err)
+
 		var st *Status
-		if !errors.As(statusFromTransport(tc.err), &st) {
-			t.Fatalf("%v did not map to a *Status", tc.err)
-		}
-		if st.Code != tc.want {
-			t.Errorf("%v mapped to %v, want %v", tc.err, st.Code, tc.want)
-		}
+		require.Truef(t, errors.As(mapped, &st), "%v did not map to a *Status", tc.err)
+		assert.Equalf(t, tc.want, st.Code, "%v mapped to %v, want %v", tc.err, st.Code, tc.want)
 	}
 }
 
@@ -67,26 +69,26 @@ func TestStatusFromTransport_ContextCodesAreNotUnavailable(t *testing.T) {
 // that already wrote errors.Is against the transport sentinel must keep working.
 func TestStatusFromTransport_KeepsTheCause(t *testing.T) {
 	err := statusFromTransport(conn.ErrConnClosed)
-	if !errors.Is(err, conn.ErrConnClosed) {
-		t.Error("the transport error is no longer reachable; the mapping replaced a family " +
+
+	assert.ErrorIs(t, err, conn.ErrConnClosed,
+		"the transport error is no longer reachable; the mapping replaced a family "+
 			"instead of folding it in, and existing errors.Is checks stop firing")
-	}
 	var st *Status
-	if !errors.As(err, &st) {
-		t.Fatal("not a *Status")
-	}
+	require.True(t, errors.As(err, &st), "not a *Status")
 	// Identity, not errors.Is: Unwrap must hand back the very error it was given.
-	if st.Unwrap() != conn.ErrConnClosed {
-		t.Errorf("Unwrap = %v, want the original error", st.Unwrap())
-	}
+	assert.Equalf(t, conn.ErrConnClosed, st.Unwrap(), "Unwrap = %v, want the original error", st.Unwrap())
 }
 
 // TestStatusFromTransport_NilStaysNil guards the boundary: pump calls this on
 // every Recv error, and a nil must not become a spurious Unavailable.
 func TestStatusFromTransport_NilStaysNil(t *testing.T) {
-	if err := statusFromTransport(nil); err != nil {
-		t.Errorf("statusFromTransport(nil) = %v, want nil", err)
-	}
+	err := statusFromTransport(nil)
+
+	// Deliberately `== nil` rather than assert.Nil: this value is an interface,
+	// and reflection-based nilness would also accept a typed nil *Status inside
+	// it — which is exactly the regression a caller's `if err != nil` would trip
+	// over.
+	assert.Truef(t, err == nil, "statusFromTransport(nil) = %v, want nil", err)
 }
 
 // TestStatusFromWire_HasNoCause pins that a Status the PEER sent carries no
@@ -95,12 +97,11 @@ func TestStatusFromTransport_NilStaysNil(t *testing.T) {
 // happened.
 func TestStatusFromWire_HasNoCause(t *testing.T) {
 	st := &Status{Code: PermissionDenied, Message: "no"}
-	if st.Unwrap() != nil {
-		t.Errorf("a wire Status unwraps to %v, want nil", st.Unwrap())
-	}
-	if errors.Is(st, conn.ErrConnClosed) {
-		t.Error("a wire Status matched a transport sentinel")
-	}
+
+	cause := st.Unwrap()
+
+	assert.Truef(t, cause == nil, "a wire Status unwraps to %v, want nil", cause)
+	assert.False(t, errors.Is(st, conn.ErrConnClosed), "a wire Status matched a transport sentinel")
 }
 
 // TestRecv_TransportErrorIsAStatus drives the real path. The tests above call
@@ -120,29 +121,21 @@ func TestStatusFromWire_HasNoCause(t *testing.T) {
 func TestRecv_TransportErrorIsAStatus(t *testing.T) {
 	cc := dialMockPeer(t, newMockGRPCPeer(t), nil)
 	ctx, cancel := context.WithCancel(t.Context())
-
 	s, err := cc.NewStream(ctx, "/bench.Svc/Echo", nil)
-	if err != nil {
-		t.Fatalf("NewStream: %v", err)
-	}
+	require.NoError(t, err, "NewStream")
 	defer func() { _ = s.Close() }()
 
 	cancel()
-
 	_, rerr := s.Recv(ctx)
-	if rerr == nil {
-		t.Fatal("Recv returned no error after the context was cancelled")
-	}
+
+	require.Error(t, rerr, "Recv returned no error after the context was cancelled")
 	var st *Status
-	if !errors.As(rerr, &st) {
-		t.Fatalf("Recv returned %T (%v), want a *Status — a caller classifying failures "+
+	require.Truef(t, errors.As(rerr, &st),
+		"Recv returned %T (%v), want a *Status — a caller classifying failures "+
 			"would need a second error family for exactly this case", rerr, rerr)
-	}
-	if st.Code != Canceled {
-		t.Errorf("a cancelled context mapped to %v, want Canceled; Unavailable here would "+
+	assert.Equalf(t, Canceled, st.Code,
+		"a cancelled context mapped to %v, want Canceled; Unavailable here would "+
 			"have a retry policy replay a request the caller already gave up on", st.Code)
-	}
-	if !errors.Is(rerr, context.Canceled) {
-		t.Error("the original context error is no longer reachable through the Status")
-	}
+	assert.ErrorIs(t, rerr, context.Canceled,
+		"the original context error is no longer reachable through the Status")
 }

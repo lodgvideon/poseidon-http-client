@@ -4,6 +4,9 @@ import (
 	"errors"
 	"net/http"
 	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // The send path no longer copies a message to put its five-byte header in front
@@ -33,25 +36,20 @@ func TestSendVec_LargeMessageIsNotCopied(t *testing.T) {
 		srvFinish(w, OK, "")
 	}))
 	defer srv.Close()
-
 	cc := dialGRPC(t, srv, cfg)
 	ctx := t.Context()
 	s, err := cc.NewStream(ctx, "/t.S/M", nil)
-	if err != nil {
-		t.Fatalf("NewStream: %v", err)
-	}
+	require.NoError(t, err, "NewStream")
 	defer func() { _ = s.Close() }()
-
 	const msgSize = 1 << 20
-	if err := s.SendLast(ctx, make([]byte, msgSize)); err != nil && !benignSendLastErr(err) {
-		t.Fatalf("SendLast: %v", err)
-	}
 
-	if got := cap(s.sendBuf); got > prefixBufCeiling {
-		t.Errorf("after sending %d bytes the stream's send buffer has capacity %d, want at "+
+	sendErr := s.SendLast(ctx, make([]byte, msgSize))
+
+	require.Truef(t, sendErr == nil || benignSendLastErr(sendErr), "SendLast: %v", sendErr)
+	assert.LessOrEqualf(t, cap(s.sendBuf), prefixBufCeiling,
+		"after sending %d bytes the stream's send buffer has capacity %d, want at "+
 			"most %d — the message was copied into it, which is the whole cost this "+
-			"change removes", msgSize, got, prefixBufCeiling)
-	}
+			"change removes", msgSize, cap(s.sendBuf), prefixBufCeiling)
 }
 
 // TestSendVec_StreamingMessagesAreNotCopied covers Send as well as SendLast, and
@@ -63,26 +61,24 @@ func TestSendVec_StreamingMessagesAreNotCopied(t *testing.T) {
 		srvFinish(w, OK, "")
 	}))
 	defer srv.Close()
-
 	cc := dialGRPC(t, srv, cfg)
 	ctx := t.Context()
 	s, err := cc.NewStream(ctx, "/t.S/M", nil)
-	if err != nil {
-		t.Fatalf("NewStream: %v", err)
-	}
+	require.NoError(t, err, "NewStream")
 	defer func() { _ = s.Close() }()
 
 	for i, size := range []int{1 << 10, 1 << 16, 1 << 20, 8} {
-		if err := s.Send(ctx, make([]byte, size)); err != nil {
+		err := s.Send(ctx, make([]byte, size))
+
+		if err != nil {
 			if errors.Is(err, ErrStreamClosed) || benignSendLastErr(err) {
 				break // the server finished early; the caps below are still meaningful
 			}
-			t.Fatalf("Send %d (%d bytes): %v", i, size, err)
+			require.NoErrorf(t, err, "Send %d (%d bytes)", i, size)
 		}
-		if got := cap(s.sendBuf); got > prefixBufCeiling {
-			t.Fatalf("send %d of %d bytes grew the send buffer to %d, want at most %d",
-				i, size, got, prefixBufCeiling)
-		}
+		require.LessOrEqualf(t, cap(s.sendBuf), prefixBufCeiling,
+			"send %d of %d bytes grew the send buffer to %d, want at most %d",
+			i, size, cap(s.sendBuf), prefixBufCeiling)
 	}
 }
 
@@ -96,26 +92,21 @@ func TestSendVec_DoesNotRetainTheMessage(t *testing.T) {
 		srvFinish(w, OK, "")
 	}))
 	defer srv.Close()
-
 	cc := dialGRPC(t, srv, cfg)
 	ctx := t.Context()
 	s, err := cc.NewStream(ctx, "/t.S/M", nil)
-	if err != nil {
-		t.Fatalf("NewStream: %v", err)
-	}
+	require.NoError(t, err, "NewStream")
 	defer func() { _ = s.Close() }()
 
-	if err := s.Send(ctx, make([]byte, 1<<20)); err != nil && !benignSendLastErr(err) &&
-		!errors.Is(err, ErrStreamClosed) {
-		t.Fatalf("Send: %v", err)
-	}
+	sendErr := s.Send(ctx, make([]byte, 1<<20))
+
+	require.Truef(t, sendErr == nil || benignSendLastErr(sendErr) || errors.Is(sendErr, ErrStreamClosed),
+		"Send: %v", sendErr)
 	if s.bufs == nil {
 		t.Skip("no pooled scratch on this stream")
 	}
 	for i, v := range s.bufs.vec {
-		if v != nil {
-			t.Errorf("vec[%d] still points at %d bytes after the send returned", i, len(v))
-		}
+		assert.Nilf(t, v, "vec[%d] still points at %d bytes after the send returned", i, len(v))
 	}
 }
 
@@ -137,17 +128,15 @@ func TestSendVec_MessagesStillArriveIntact(t *testing.T) {
 		for i := range msg {
 			msg[i] = byte(i*7 + size)
 		}
+
 		got, err := cc.Invoke(ctx, "/bench.Svc/Echo", msg, nil)
-		if err != nil {
-			t.Fatalf("size %d: Invoke: %v", size, err)
-		}
-		if len(got) != size {
-			t.Errorf("size %d: echoed %d bytes back", size, len(got))
+
+		require.NoErrorf(t, err, "size %d: Invoke", size)
+		if !assert.Lenf(t, got, size, "size %d: echoed %d bytes back", size, len(got)) {
 			continue
 		}
 		for i := range msg {
-			if got[i] != msg[i] {
-				t.Errorf("size %d: echo differs at byte %d", size, i)
+			if !assert.Equalf(t, msg[i], got[i], "size %d: echo differs at byte %d", size, i) {
 				break
 			}
 		}

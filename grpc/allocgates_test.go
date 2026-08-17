@@ -11,11 +11,20 @@ package grpc
 // passing every run without it. A gate that reports the detector rather than the
 // change is worse than no gate, so these run in the ordinary suite — which CI
 // also runs — and sit out the instrumented one.
+//
+// For the same reason no testify assertion may appear INSIDE a measured
+// closure: require/assert reflect over their arguments and box them into an
+// interface slice, and AllocsPerRun counts the whole process, so one call in
+// there would be charged to every iteration and the gate would be measuring the
+// assertion library. The closures keep plain t.Fatalf; every assertion sits
+// outside the measurement.
 
 import (
 	"bytes"
 	"context"
 	"testing"
+
+	"github.com/stretchr/testify/assert"
 )
 
 // unaryAllocCeiling is what one Invoke costs, and it is shared by every gate
@@ -44,15 +53,15 @@ func TestInvokeInto_AllocsPerCall(t *testing.T) {
 	cc := dialMockPeer(t, newMockGRPCPeer(t), nil)
 	ctx := context.Background()
 	req := bytes.Repeat([]byte{'q'}, 256)
-
 	buf := make([]byte, 0, 256)
+	var sink []byte
+
 	withReuse := testing.AllocsPerRun(50, func() {
 		var err error
 		if buf, err = cc.InvokeInto(ctx, "/bench.Svc/Echo", req, buf[:0], nil); err != nil {
 			t.Fatalf("InvokeInto: %v", err)
 		}
 	})
-	var sink []byte
 	withCopy := testing.AllocsPerRun(50, func() {
 		var err error
 		if sink, err = cc.Invoke(ctx, "/bench.Svc/Echo", req, nil); err != nil {
@@ -60,25 +69,23 @@ func TestInvokeInto_AllocsPerCall(t *testing.T) {
 		}
 	})
 	_ = sink
+
 	t.Logf("per unary call: Invoke %.1f allocs, InvokeInto %.1f allocs", withCopy, withReuse)
-	if withReuse >= withCopy {
-		t.Errorf("InvokeInto allocates %.1f per call against Invoke's %.1f — dst is not being reused",
-			withReuse, withCopy)
-	}
+	assert.Lessf(t, withReuse, withCopy,
+		"InvokeInto allocates %.1f per call against Invoke's %.1f — dst is not being reused",
+		withReuse, withCopy)
 
 	// An absolute ceiling as well as the relative check. Without it the gate
 	// passes on any regression that hurts both forms equally: dropping
 	// DiscardMetadata from Invoke puts four allocations back per call and the
 	// comparison above never notices, because InvokeInto grows by the same four.
 	// Same shape as unaryTransportWrites — when the number improves, lower it.
-	if withCopy > unaryAllocCeiling {
-		t.Errorf("Invoke allocates %.1f per call, ceiling %d — a per-RPC allocation came back",
-			withCopy, unaryAllocCeiling)
-	}
-	if withCopy < unaryAllocCeiling {
-		t.Errorf("Invoke allocates only %.1f per call, below the recorded %d: the path improved "+
+	assert.LessOrEqualf(t, withCopy, float64(unaryAllocCeiling),
+		"Invoke allocates %.1f per call, ceiling %d — a per-RPC allocation came back",
+		withCopy, unaryAllocCeiling)
+	assert.GreaterOrEqualf(t, withCopy, float64(unaryAllocCeiling),
+		"Invoke allocates only %.1f per call, below the recorded %d: the path improved "+
 			"— lower unaryAllocCeiling to lock the win in", withCopy, unaryAllocCeiling)
-	}
 }
 
 // TestRecvInto_AllocsPerMessage is the gate. AllocsPerRun counts the whole
@@ -87,7 +94,6 @@ func TestInvokeInto_AllocsPerCall(t *testing.T) {
 func TestRecvInto_AllocsPerMessage(t *testing.T) {
 	cc := dialMockPeer(t, newMockGRPCPeer(t), nil)
 	const msgs, size = 64, 256
-
 	measure := func(reuse bool) float64 {
 		s := streamOf(t, cc, msgs, size)
 		ctx := context.Background()
@@ -106,11 +112,12 @@ func TestRecvInto_AllocsPerMessage(t *testing.T) {
 			}
 		})
 	}
+
 	withCopy := measure(false)
 	withReuse := measure(true)
+
 	t.Logf("per message: Recv %.2f allocs, RecvInto %.2f allocs", withCopy, withReuse)
-	if withReuse >= withCopy {
-		t.Errorf("RecvInto allocates %.2f per message against Recv's %.2f — it is not reusing dst",
-			withReuse, withCopy)
-	}
+	assert.Lessf(t, withReuse, withCopy,
+		"RecvInto allocates %.2f per message against Recv's %.2f — it is not reusing dst",
+		withReuse, withCopy)
 }
