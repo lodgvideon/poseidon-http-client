@@ -16,6 +16,9 @@ package http1_test
 import (
 	"context"
 	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // TestConformance_RFC9112_Sec6_3_Rule4_TENotFinalIgnoresValidCL pins that a
@@ -35,14 +38,15 @@ import (
 func TestConformance_RFC9112_Sec6_3_Rule4_TENotFinalIgnoresValidCL(t *testing.T) {
 	ex := wireExchange(t, "GET",
 		"HTTP/1.1 200 OK\r\nTransfer-Encoding: gzip\r\nContent-Length: 5\r\n\r\nhelloEXTRA")
-	if _, _, err := ex.ReadResponse(context.Background()); err != nil {
-		t.Fatalf("ReadResponse: %v", err)
-	}
-	if body := drainUntilClose(t, ex); body != "helloEXTRA" {
-		t.Errorf("body = %q, want %q — a Content-Length must not re-frame a body "+
+	_, _, err := ex.ReadResponse(context.Background())
+	require.NoError(t, err, "ReadResponse")
+
+	body := drainUntilClose(t, ex)
+
+	assert.Equalf(t, "helloEXTRA", body,
+		"body = %q, want %q — a Content-Length must not re-frame a body "+
 			"whose length rule 4 hands to connection close; %d bytes were left on "+
 			"the wire", body, "helloEXTRA", len("helloEXTRA")-len(body))
-	}
 }
 
 // TestConformance_RFC9112_Sec6_3_Rule5_ScopedToMessagesWithoutTE pins the
@@ -58,17 +62,16 @@ func TestConformance_RFC9112_Sec6_3_Rule4_TENotFinalIgnoresValidCL(t *testing.T)
 func TestConformance_RFC9112_Sec6_3_Rule5_ScopedToMessagesWithoutTE(t *testing.T) {
 	ex := wireExchange(t, "GET",
 		"HTTP/1.1 200 OK\r\nTransfer-Encoding: gzip\r\nContent-Length: not-a-number\r\n\r\nhello")
+
 	_, _, err := ex.ReadResponse(context.Background())
-	if err != nil {
-		t.Errorf("ReadResponse err = %v, want nil — RFC 9112 §6.3 rule 5 is scoped to "+
-			"a message received WITHOUT Transfer-Encoding, and the field is present, "+
-			"so its discard path is out of scope; rule 4 frames this body", err)
-	}
-	if ex.KeepAlive() {
-		t.Errorf("KeepAlive() = true, want false — rule 3 says a message with both " +
-			"Transfer-Encoding and Content-Length ought to be handled as an error, " +
+
+	assert.NoErrorf(t, err, "ReadResponse err = %v, want nil — RFC 9112 §6.3 rule 5 is scoped to "+
+		"a message received WITHOUT Transfer-Encoding, and the field is present, "+
+		"so its discard path is out of scope; rule 4 frames this body", err)
+	assert.False(t, ex.KeepAlive(),
+		"KeepAlive() = true, want false — rule 3 says a message with both "+
+			"Transfer-Encoding and Content-Length ought to be handled as an error, "+
 			"so the socket must not be reused")
-	}
 }
 
 // TestConformance_RFC9112_Sec6_3_Rule5_InvalidCLWithoutTEStillRejected is the
@@ -77,6 +80,7 @@ func TestConformance_RFC9112_Sec6_3_Rule5_ScopedToMessagesWithoutTE(t *testing.T
 func TestConformance_RFC9112_Sec6_3_Rule5_InvalidCLWithoutTEStillRejected(t *testing.T) {
 	ex, err := readResponseErr(t,
 		"HTTP/1.1 200 OK\r\nContent-Length: not-a-number\r\n\r\nhello")
+
 	wantRejected(t, ex, err, "invalid Content-Length, no Transfer-Encoding")
 }
 

@@ -5,6 +5,9 @@ import (
 	"net"
 	"testing"
 
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
 	"github.com/lodgvideon/poseidon-http-client/header"
 	"github.com/lodgvideon/poseidon-http-client/http1"
 )
@@ -28,9 +31,7 @@ import (
 func serveOnce(t *testing.T, raw string) net.Listener {
 	t.Helper()
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, err, "listen")
 	t.Cleanup(func() { _ = ln.Close() })
 	go func() {
 		c, aerr := ln.Accept()
@@ -48,32 +49,24 @@ func serveOnce(t *testing.T, raw string) net.Listener {
 func readOnce(t *testing.T, ln net.Listener) (status int, keepAlive bool) {
 	t.Helper()
 	nc, err := net.Dial("tcp", ln.Addr().String())
-	if err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, err, "dial")
 	c := http1.NewConn(nc)
 	t.Cleanup(func() { _ = c.Close() })
 
 	ctx := context.Background()
 	ex := c.NewExchange()
-	if werr := ex.WriteRequest(ctx, []header.Field{
+	require.NoError(t, ex.WriteRequest(ctx, []header.Field{
 		{Name: []byte(":method"), Value: []byte("GET")},
 		{Name: []byte(":path"), Value: []byte("/")},
 		{Name: []byte(":authority"), Value: []byte(ln.Addr().String())},
 		{Name: []byte(":scheme"), Value: []byte("http")},
-	}, true); werr != nil {
-		t.Fatalf("WriteRequest: %v", werr)
-	}
+	}, true), "WriteRequest")
 	code, _, rerr := ex.ReadResponse(ctx)
-	if rerr != nil {
-		t.Fatalf("ReadResponse: %v", rerr)
-	}
+	require.NoError(t, rerr, "ReadResponse")
 	buf := make([]byte, 256)
 	for {
 		_, done, berr := ex.ReadBodyChunk(buf)
-		if berr != nil {
-			t.Fatalf("ReadBodyChunk: %v", berr)
-		}
+		require.NoError(t, berr, "ReadBodyChunk")
 		if done {
 			break
 		}
@@ -88,13 +81,11 @@ func TestConformance_RFC9112_Sec9_6_CloseOnInterimBindsTheConnection(t *testing.
 		"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok")
 
 	status, keepAlive := readOnce(t, ln)
-	if status != 200 {
-		t.Fatalf("status = %d, want 200 — the interim must still be skipped", status)
-	}
-	if keepAlive {
-		t.Error("the connection is poolable after a 1xx carried Connection: close — the " +
+
+	require.Equalf(t, 200, status, "status = %d, want 200 — the interim must still be skipped", status)
+	assert.False(t, keepAlive,
+		"the connection is poolable after a 1xx carried Connection: close — the "+
 			"server said it is closing, and the next request would race the FIN")
-	}
 }
 
 // TestConformance_RFC9112_Sec9_6_InterimWithoutCloseStaysPoolable is the control.
@@ -105,11 +96,9 @@ func TestConformance_RFC9112_Sec9_6_InterimWithoutCloseStaysPoolable(t *testing.
 		"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok")
 
 	status, keepAlive := readOnce(t, ln)
-	if status != 200 {
-		t.Fatalf("status = %d, want 200", status)
-	}
-	if !keepAlive {
-		t.Error("an interim response with an ordinary field made the connection " +
+
+	require.Equalf(t, 200, status, "status = %d, want 200", status)
+	assert.True(t, keepAlive,
+		"an interim response with an ordinary field made the connection "+
 			"unpoolable; only Connection: close should")
-	}
 }

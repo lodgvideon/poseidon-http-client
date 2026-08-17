@@ -7,6 +7,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/require"
+
 	"github.com/lodgvideon/poseidon-http-client/header"
 	"github.com/lodgvideon/poseidon-http-client/http1"
 )
@@ -43,12 +45,12 @@ func TestExchange_WriteRequest_HeadIsOneWrite(t *testing.T) {
 		_, _ = server.Read(buf)
 		_, _ = server.Write([]byte("HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n"))
 	}()
-
 	cc := &countingConn{Conn: client}
 	c := http1.NewConn(cc)
 	ex := c.NewExchange()
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
+
 	err := ex.WriteRequest(ctx, []header.Field{
 		{Name: []byte(":method"), Value: []byte("GET")},
 		{Name: []byte(":path"), Value: []byte("/r")},
@@ -56,24 +58,19 @@ func TestExchange_WriteRequest_HeadIsOneWrite(t *testing.T) {
 		{Name: []byte("accept"), Value: []byte("application/json")},
 		{Name: []byte("user-agent"), Value: []byte("poseidon")},
 	}, true)
-	if err != nil {
-		t.Fatalf("WriteRequest: %v", err)
-	}
 
+	require.NoError(t, err, "WriteRequest")
 	cc.mu.Lock()
 	writes, wire := cc.writes, string(cc.bytes)
 	cc.mu.Unlock()
-	if writes != 1 {
-		t.Fatalf("head took %d Writes, want 1 (each extra is a TLS record + syscall)", writes)
-	}
+	require.Equalf(t, 1, writes,
+		"head took %d Writes, want 1 (each extra is a TLS record + syscall)", writes)
 	want := "GET /r HTTP/1.1\r\n" +
 		"Host: example.com\r\n" +
 		"accept: application/json\r\n" +
 		"user-agent: poseidon\r\n" +
 		"\r\n"
-	if wire != want {
-		t.Fatalf("head bytes:\n%q\nwant:\n%q", wire, want)
-	}
+	require.Equalf(t, want, wire, "head bytes:\n%q\nwant:\n%q", wire, want)
 }
 
 // TestExchange_WriteRequest_HeadBufReuse drives two exchanges on one Conn so the
@@ -91,25 +88,19 @@ func TestExchange_WriteRequest_HeadBufReuse(t *testing.T) {
 			_, _ = server.Write([]byte("HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n"))
 		}
 	}()
-
 	cc := &countingConn{Conn: client}
 	c := http1.NewConn(cc)
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-
 	// First: a long path so headBuf grows.
 	ex1 := c.NewExchange()
-	if err := ex1.WriteRequest(ctx, []header.Field{
+	require.NoError(t, ex1.WriteRequest(ctx, []header.Field{
 		{Name: []byte(":method"), Value: []byte("GET")},
 		{Name: []byte(":path"), Value: []byte("/a-deliberately-long-first-path-to-grow-the-buffer")},
 		{Name: []byte(":authority"), Value: []byte("example.com")},
-	}, true); err != nil {
-		t.Fatalf("first WriteRequest: %v", err)
-	}
-	if _, _, err := ex1.ReadResponse(ctx); err != nil {
-		t.Fatalf("first ReadResponse: %v", err)
-	}
-
+	}, true), "first WriteRequest")
+	_, _, err := ex1.ReadResponse(ctx)
+	require.NoError(t, err, "first ReadResponse")
 	cc.mu.Lock()
 	cc.bytes = nil
 	cc.mu.Unlock()
@@ -117,19 +108,16 @@ func TestExchange_WriteRequest_HeadBufReuse(t *testing.T) {
 	// Second: a short path. If the buffer were not truncated, the long first
 	// path's tail would leak into this head.
 	ex2 := c.NewExchange()
-	if err := ex2.WriteRequest(ctx, []header.Field{
+	err = ex2.WriteRequest(ctx, []header.Field{
 		{Name: []byte(":method"), Value: []byte("GET")},
 		{Name: []byte(":path"), Value: []byte("/b")},
 		{Name: []byte(":authority"), Value: []byte("example.com")},
-	}, true); err != nil {
-		t.Fatalf("second WriteRequest: %v", err)
-	}
+	}, true)
 
+	require.NoError(t, err, "second WriteRequest")
 	cc.mu.Lock()
 	wire := string(cc.bytes)
 	cc.mu.Unlock()
 	want := "GET /b HTTP/1.1\r\nHost: example.com\r\n\r\n"
-	if wire != want {
-		t.Fatalf("second head:\n%q\nwant:\n%q", wire, want)
-	}
+	require.Equalf(t, want, wire, "second head:\n%q\nwant:\n%q", wire, want)
 }

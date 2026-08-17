@@ -2,11 +2,13 @@ package http1
 
 import (
 	"context"
-	"errors"
 	"io"
 	"net"
 	"testing"
 	"time"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	"github.com/lodgvideon/poseidon-http-client/header"
 )
@@ -45,9 +47,7 @@ func writeSimpleRequest(t *testing.T, ex *Exchange, peer net.Conn) {
 		{Name: []byte(":path"), Value: []byte("/")},
 		{Name: []byte(":authority"), Value: []byte("example.test")},
 	}
-	if err := ex.WriteRequest(context.Background(), fields, true); err != nil {
-		t.Fatalf("WriteRequest: %v", err)
-	}
+	require.NoError(t, ex.WriteRequest(context.Background(), fields, true), "WriteRequest")
 }
 
 // TestErrServerClosedIdle_ClosedBeforeAnyByte is the gate. The server accepts
@@ -55,27 +55,22 @@ func writeSimpleRequest(t *testing.T, ex *Exchange, peer net.Conn) {
 func TestErrServerClosedIdle_ClosedBeforeAnyByte(t *testing.T) {
 	ex, peer := exchangeOverPipe(t)
 	writeSimpleRequest(t, ex, peer)
-
 	go func() {
 		time.Sleep(5 * time.Millisecond)
 		_ = peer.Close()
 	}()
-
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
+
 	_, _, err := ex.ReadResponse(ctx)
 
-	if err == nil {
-		t.Fatal("ReadResponse returned no error after the peer closed without responding")
-	}
-	if !errors.Is(err, ErrServerClosedIdle) {
-		t.Errorf("error is %v, want ErrServerClosedIdle — without the type the client's "+
+	require.Error(t, err, "ReadResponse returned no error after the peer closed without responding")
+	assert.ErrorIsf(t, err, ErrServerClosedIdle,
+		"error is %v, want ErrServerClosedIdle — without the type the client's "+
 			"retry classifier cannot tell this from any other read failure, and the one "+
 			"safely retryable H1 failure goes unretried", err)
-	}
-	if !errors.Is(err, io.EOF) {
-		t.Errorf("error is %v; it should still wrap the underlying EOF for diagnosis", err)
-	}
+	assert.ErrorIsf(t, err, io.EOF,
+		"error is %v; it should still wrap the underlying EOF for diagnosis", err)
 }
 
 // TestErrServerClosedIdle_NotAfterAPartialResponse is the boundary, and it is
@@ -95,26 +90,22 @@ func TestErrServerClosedIdle_NotAfterAPartialResponse(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			ex, peer := exchangeOverPipe(t)
 			writeSimpleRequest(t, ex, peer)
-
 			go func() {
 				_, _ = peer.Write([]byte(tc.sent))
 				time.Sleep(5 * time.Millisecond)
 				_ = peer.Close()
 			}()
-
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancel()
+
 			_, _, err := ex.ReadResponse(ctx)
 
-			if err == nil {
-				t.Fatal("ReadResponse returned no error on a truncated response")
-			}
-			if errors.Is(err, ErrServerClosedIdle) {
-				t.Errorf("a response truncated after %q was classified as "+
+			require.Error(t, err, "ReadResponse returned no error on a truncated response")
+			assert.NotErrorIsf(t, err, ErrServerClosedIdle,
+				"a response truncated after %q was classified as "+
 					"ErrServerClosedIdle — the server had started answering, so it may "+
 					"have processed the request, and the caller would replay it",
-					tc.sent)
-			}
+				tc.sent)
 		})
 	}
 }
@@ -140,7 +131,6 @@ func TestErrServerClosedIdle_NotAfterAPartialResponse(t *testing.T) {
 func TestErrServerClosedIdle_NotAfterAnInterimResponse(t *testing.T) {
 	ex, peer := exchangeOverPipe(t)
 	writeSimpleRequest(t, ex, peer)
-
 	go func() {
 		// net.Pipe's Write returns only once the reader has consumed every byte,
 		// so the close below cannot race the interim: the client has it before
@@ -149,21 +139,17 @@ func TestErrServerClosedIdle_NotAfterAnInterimResponse(t *testing.T) {
 		_, _ = peer.Write([]byte("HTTP/1.1 100 Continue\r\n\r\n"))
 		_ = peer.Close()
 	}()
-
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
+
 	_, _, err := ex.ReadResponse(ctx)
 
-	if err == nil {
-		t.Fatal("ReadResponse returned no error after the peer closed following a 1xx")
-	}
-	if errors.Is(err, ErrServerClosedIdle) {
-		t.Errorf("error is %v, want anything but ErrServerClosedIdle — the server sent "+
+	require.Error(t, err, "ReadResponse returned no error after the peer closed following a 1xx")
+	assert.NotErrorIsf(t, err, ErrServerClosedIdle,
+		"error is %v, want anything but ErrServerClosedIdle — the server sent "+
 			"100 Continue and only then closed, so it had the request and had begun "+
 			"answering it; classifying that as \"never responded\" is what makes the "+
 			"retry classifier replay a request the peer already acted on", err)
-	}
-	if !errors.Is(err, io.EOF) {
-		t.Errorf("error is %v; it should still wrap the underlying EOF for diagnosis", err)
-	}
+	assert.ErrorIsf(t, err, io.EOF,
+		"error is %v; it should still wrap the underlying EOF for diagnosis", err)
 }

@@ -7,6 +7,9 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // deadlineLog is a net.Conn stand-in that records, in order, every deadline
@@ -89,26 +92,21 @@ func TestWatchdog_ReleaseWaitsForWatchdogBeforeClearing(t *testing.T) {
 	for i := 0; i < iterations; i++ {
 		dl := &deadlineLog{slowPast: true}
 		c := NewConn(dl)
-
 		ctx, cancel := context.WithCancel(context.Background())
 		armed := c.armDeadline(ctx, writeDeadline)
-		if !armed {
-			t.Fatalf("iteration %d: a cancellable context did not arm the watchdog", i)
-		}
+		require.Truef(t, armed, "iteration %d: a cancellable context did not arm the watchdog", i)
 		// Cancel with the arming still live: the blocked-call window.
 		cancel()
+
 		c.releaseDeadline(writeDeadline, armed)
 
 		got, ok := dl.last(writeDeadline)
-		if !ok {
-			t.Fatalf("iteration %d: no write deadline was ever installed", i)
-		}
-		if !got.IsZero() {
-			t.Fatalf("iteration %d: connection left carrying write deadline %v after release "+
+		require.Truef(t, ok, "iteration %d: no write deadline was ever installed", i)
+		require.Truef(t, got.IsZero(),
+			"iteration %d: connection left carrying write deadline %v after release "+
 				"(want the zero time) — a cancellation landed behind the clear, so this "+
 				"connection would be pooled with a deadline already in the past",
-				i, got)
-		}
+			i, got)
 		_ = c.Close()
 	}
 }
@@ -125,28 +123,25 @@ func TestWatchdog_ArmsWhenCtxHasDeadlineAndCancel(t *testing.T) {
 	dl := &deadlineLog{}
 	c := NewConn(dl)
 	defer func() { _ = c.Close() }()
-
 	ctx, cancel := context.WithTimeout(context.Background(), time.Hour)
 	defer cancel()
 
 	armed := c.armDeadline(ctx, writeDeadline)
-	if !armed {
-		t.Fatal("a context with both a deadline and a cancel did not arm the watchdog")
-	}
-	if got, _ := dl.last(writeDeadline); got.IsZero() || !got.After(time.Now()) {
-		t.Fatalf("write deadline is %v, want the context's own (in the future)", got)
-	}
 
+	require.True(t, armed, "a context with both a deadline and a cancel did not arm the watchdog")
+	got, _ := dl.last(writeDeadline)
+	require.Truef(t, !got.IsZero() && got.After(time.Now()),
+		"write deadline is %v, want the context's own (in the future)", got)
 	cancel()
-	if !waitFor(func() bool {
-		got, ok := dl.last(writeDeadline)
-		return ok && got.Equal(deadlineLongPast)
-	}, 5*time.Second) {
-		got, _ := dl.last(writeDeadline)
-		t.Fatalf("write deadline after cancellation is %v, want %v — nothing released the "+
+	fired := waitFor(func() bool {
+		g, ok := dl.last(writeDeadline)
+		return ok && g.Equal(deadlineLongPast)
+	}, 5*time.Second)
+	got, _ = dl.last(writeDeadline)
+	require.Truef(t, fired,
+		"write deadline after cancellation is %v, want %v — nothing released the "+
 			"blocked call, so it would hang until the context's own deadline",
-			got, deadlineLongPast)
-	}
+		got, deadlineLongPast)
 	c.releaseDeadline(writeDeadline, armed)
 }
 
@@ -159,10 +154,8 @@ func TestWatchdog_OneGoroutinePerConnAcrossManyArmings(t *testing.T) {
 	dl := &deadlineLog{}
 	c := NewConn(dl)
 	defer func() { _ = c.Close() }()
-
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-
 	// One arming first, so the lazily-started goroutine is already counted in
 	// the baseline and the test measures growth rather than the constant.
 	c.disarmWatch(c.armCancel(ctx, readDeadline))
@@ -175,10 +168,10 @@ func TestWatchdog_OneGoroutinePerConnAcrossManyArmings(t *testing.T) {
 
 	// Settle: goroutines left over from earlier tests exit on their own
 	// schedule, so a single sample can be off by a few in either direction.
-	if !waitFor(func() bool { return runtime.NumGoroutine() <= before }, 2*time.Second) {
-		t.Errorf("500 armings grew the goroutine count from %d to %d — the watchdog is "+
+	settled := waitFor(func() bool { return runtime.NumGoroutine() <= before }, 2*time.Second)
+	assert.Truef(t, settled,
+		"500 armings grew the goroutine count from %d to %d — the watchdog is "+
 			"still per call, not per connection", before, runtime.NumGoroutine())
-	}
 }
 
 // TestWatchdog_ArmDisarmAllocatesNothing is the tripwire on the reported
@@ -193,20 +186,21 @@ func TestWatchdog_ArmDisarmAllocatesNothing(t *testing.T) {
 	dl := &deadlineLog{}
 	c := NewConn(dl)
 	defer func() { _ = c.Close() }()
-
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	if got := testing.AllocsPerRun(200, func() {
+	// testify is deliberately ABSENT from these closures: AllocsPerRun measures
+	// the whole process, and require/assert reflect and allocate.
+	cancelAllocs := testing.AllocsPerRun(200, func() {
 		c.disarmWatch(c.armCancel(ctx, readDeadline))
-	}); got != 0 {
-		t.Errorf("armCancel + disarmWatch allocates %v objects per call, want 0", got)
-	}
-	if got := testing.AllocsPerRun(200, func() {
+	})
+	deadlineAllocs := testing.AllocsPerRun(200, func() {
 		c.releaseDeadline(writeDeadline, c.armDeadline(ctx, writeDeadline))
-	}); got != 0 {
-		t.Errorf("armDeadline + releaseDeadline allocates %v objects per call, want 0", got)
-	}
+	})
+
+	assert.Zerof(t, cancelAllocs, "armCancel + disarmWatch allocates %v objects per call, want 0", cancelAllocs)
+	assert.Zerof(t, deadlineAllocs,
+		"armDeadline + releaseDeadline allocates %v objects per call, want 0", deadlineAllocs)
 }
 
 // TestWatchdog_ReArmsAfterFiring guards the state machine across a firing: the
@@ -223,17 +217,17 @@ func TestWatchdog_ReArmsAfterFiring(t *testing.T) {
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
 		armed := c.armCancel(ctx, readDeadline)
-		if !armed {
-			t.Fatalf("round %d: arming did not take", round)
-		}
+		require.Truef(t, armed, "round %d: arming did not take", round)
+
 		cancel()
-		if !waitFor(func() bool {
+
+		fired := waitFor(func() bool {
 			got, ok := dl.last(readDeadline)
 			return ok && got.Equal(deadlineLongPast)
-		}, 5*time.Second) {
-			got, _ := dl.last(readDeadline)
-			t.Fatalf("round %d: read deadline after cancellation is %v, want %v", round, got, deadlineLongPast)
-		}
+		}, 5*time.Second)
+		got, _ := dl.last(readDeadline)
+		require.Truef(t, fired,
+			"round %d: read deadline after cancellation is %v, want %v", round, got, deadlineLongPast)
 		c.disarmWatch(armed)
 		// Clear the trace so the next round cannot pass on this round's set.
 		dl.mu.Lock()
@@ -258,21 +252,20 @@ func TestWatchdog_CloseRetiresGoroutine(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	c.disarmWatch(c.armCancel(ctx, readDeadline))
-
-	if !c.wd.started.Load() {
-		t.Fatal("the watchdog goroutine never started, so this test proves nothing")
-	}
+	require.True(t, c.wd.started.Load(),
+		"the watchdog goroutine never started, so this test proves nothing")
 	select {
 	case <-c.wd.gone:
-		t.Fatal("the watchdog left before Close")
+		require.Fail(t, "the watchdog left before Close")
 	default:
 	}
 
 	_ = c.Close()
+
 	select {
 	case <-c.wd.gone:
 	case <-time.After(5 * time.Second):
-		t.Error("the watchdog goroutine is still running after Close — it outlived its connection")
+		assert.Fail(t, "the watchdog goroutine is still running after Close — it outlived its connection")
 	}
 }
 
@@ -287,7 +280,6 @@ func TestWatchdog_ArmAfterCloseDoesNotBlock(t *testing.T) {
 	c := NewConn(dl)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-
 	// Start the goroutine, then retire it.
 	c.disarmWatch(c.armCancel(ctx, readDeadline))
 	_ = c.Close()
@@ -297,10 +289,11 @@ func TestWatchdog_ArmAfterCloseDoesNotBlock(t *testing.T) {
 		defer close(done)
 		c.disarmWatch(c.armCancel(ctx, readDeadline))
 	}()
+
 	select {
 	case <-done:
 	case <-time.After(10 * time.Second):
-		t.Fatal("arm/disarm blocked after Close — a call still unwinding on a discarded " +
+		require.Fail(t, "arm/disarm blocked after Close — a call still unwinding on a discarded "+
 			"connection must not be held here")
 	}
 }
@@ -319,10 +312,11 @@ func TestWatchdog_ArmOnFreshClosedConnDoesNotBlock(t *testing.T) {
 		defer close(done)
 		c.disarmWatch(c.armCancel(ctx, readDeadline))
 	}()
+
 	select {
 	case <-done:
 	case <-time.After(10 * time.Second):
-		t.Fatal("arming blocked on a connection closed before it was ever armed")
+		require.Fail(t, "arming blocked on a connection closed before it was ever armed")
 	}
 }
 
@@ -334,15 +328,12 @@ func TestWatchdog_NonCancellableCtxStartsNothing(t *testing.T) {
 	c := NewConn(dl)
 	defer func() { _ = c.Close() }()
 
-	if armed := c.armDeadline(context.Background(), writeDeadline); armed {
-		t.Error("a context with no Done channel armed the watchdog")
-	}
-	if c.wd.started.Load() {
-		t.Error("a context with no Done channel started the watchdog goroutine")
-	}
+	armed := c.armDeadline(context.Background(), writeDeadline)
+
+	assert.False(t, armed, "a context with no Done channel armed the watchdog")
+	assert.False(t, c.wd.started.Load(), "a context with no Done channel started the watchdog goroutine")
 	// The deadline handling itself is unchanged: nothing is left latched.
 	c.releaseDeadline(writeDeadline, false)
-	if got, ok := dl.last(writeDeadline); !ok || !got.IsZero() {
-		t.Errorf("write deadline after release is %v (set=%v), want the zero time", got, ok)
-	}
+	got, ok := dl.last(writeDeadline)
+	assert.Truef(t, ok && got.IsZero(), "write deadline after release is %v (set=%v), want the zero time", got, ok)
 }

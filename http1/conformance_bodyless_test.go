@@ -18,6 +18,9 @@ package http1_test
 import (
 	"context"
 	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // bodylessKeepAlive drives one response head and reports whether the socket
@@ -27,12 +30,13 @@ func bodylessKeepAlive(t *testing.T, head string) bool {
 	// The bytes after the head are a complete response: what a pooled socket
 	// would hand to the next request.
 	ex := wireExchange(t, "GET", head+"HTTP/1.1 200 OK\r\nContent-Length: 3\r\n\r\npwn")
-	if _, _, err := ex.ReadResponse(context.Background()); err != nil {
-		t.Fatalf("ReadResponse: %v", err)
-	}
-	if n, done, err := ex.ReadBodyChunk(make([]byte, 64)); n != 0 || !done || err != nil {
-		t.Fatalf("rule 1 broken: n=%d done=%v err=%v — a 204/304 ends at the blank line", n, done, err)
-	}
+	_, _, err := ex.ReadResponse(context.Background())
+	require.NoError(t, err, "ReadResponse")
+
+	n, done, err := ex.ReadBodyChunk(make([]byte, 64))
+
+	require.Truef(t, n == 0 && done && err == nil,
+		"rule 1 broken: n=%d done=%v err=%v — a 204/304 ends at the blank line", n, done, err)
 	return ex.KeepAlive()
 }
 
@@ -52,14 +56,15 @@ func TestConformance_RFC9112_Sec6_3_Rule1_BodylessStatusDeclaringBodyNotPooled(t
 		{"304_transfer_encoding", "HTTP/1.1 304 Not Modified\r\nTransfer-Encoding: chunked\r\n\r\n"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			if bodylessKeepAlive(t, tc.head) {
-				t.Errorf("KeepAlive() = true — the head declared a body that §6.3 rule 1 " +
-					"says must not be read, so the declared bytes stay on the socket. " +
-					"Pooling it makes the next request read them as its status line, which " +
-					"§6.3 forbids: \"A client MUST NOT process, cache, or forward such extra " +
-					"data as a separate response, since such behavior would be vulnerable to " +
+			poolable := bodylessKeepAlive(t, tc.head)
+
+			assert.False(t, poolable,
+				"KeepAlive() = true — the head declared a body that §6.3 rule 1 "+
+					"says must not be read, so the declared bytes stay on the socket. "+
+					"Pooling it makes the next request read them as its status line, which "+
+					"§6.3 forbids: \"A client MUST NOT process, cache, or forward such extra "+
+					"data as a separate response, since such behavior would be vulnerable to "+
 					"cache poisoning.\"")
-			}
 		})
 	}
 }
@@ -80,17 +85,16 @@ func TestConformance_RFC9112_Sec6_3_Rule1_BodylessStatusDeclaringBodyNotPooled(t
 // on their own — see TestConformance_RFC9112_Sec6_3_ExtraOctetsAfterResponse.)
 func TestConformance_RFC9110_Sec8_6_ContentLengthOn304StaysPoolable(t *testing.T) {
 	ex := wireExchange(t, "GET", "HTTP/1.1 304 Not Modified\r\nContent-Length: 38\r\n\r\n")
-	if _, _, err := ex.ReadResponse(context.Background()); err != nil {
-		t.Fatalf("ReadResponse: %v", err)
-	}
-	if _, done, err := ex.ReadBodyChunk(make([]byte, 64)); !done || err != nil {
-		t.Fatalf("304 should end immediately: done=%v err=%v", done, err)
-	}
-	if !ex.KeepAlive() {
-		t.Error("KeepAlive() = false for a 304 with Content-Length, want true — §8.6 " +
-			"explicitly permits it on a conditional GET, where it describes the " +
+	_, _, err := ex.ReadResponse(context.Background())
+	require.NoError(t, err, "ReadResponse")
+
+	_, done, err := ex.ReadBodyChunk(make([]byte, 64))
+
+	require.Truef(t, done && err == nil, "304 should end immediately: done=%v err=%v", done, err)
+	assert.True(t, ex.KeepAlive(),
+		"KeepAlive() = false for a 304 with Content-Length, want true — §8.6 "+
+			"explicitly permits it on a conditional GET, where it describes the "+
 			"representation rather than a body")
-	}
 }
 
 // TestConformance_RFC9110_Sec9_3_2_ContentLengthOnHeadStaysPoolable is the other
@@ -104,15 +108,14 @@ func TestConformance_RFC9110_Sec8_6_ContentLengthOn304StaysPoolable(t *testing.T
 // after every HEAD.
 func TestConformance_RFC9110_Sec9_3_2_ContentLengthOnHeadStaysPoolable(t *testing.T) {
 	ex := wireExchange(t, "HEAD", "HTTP/1.1 200 OK\r\nContent-Length: 38\r\n\r\n")
-	if _, _, err := ex.ReadResponse(context.Background()); err != nil {
-		t.Fatalf("ReadResponse: %v", err)
-	}
-	if _, done, err := ex.ReadBodyChunk(make([]byte, 64)); !done || err != nil {
-		t.Fatalf("HEAD response should end immediately: done=%v err=%v", done, err)
-	}
-	if !ex.KeepAlive() {
-		t.Error("KeepAlive() = false after a HEAD with Content-Length, want true — " +
-			"§9.3.2 makes that field normal on a HEAD response; evicting would cost a " +
+	_, _, err := ex.ReadResponse(context.Background())
+	require.NoError(t, err, "ReadResponse")
+
+	_, done, err := ex.ReadBodyChunk(make([]byte, 64))
+
+	require.Truef(t, done && err == nil, "HEAD response should end immediately: done=%v err=%v", done, err)
+	assert.True(t, ex.KeepAlive(),
+		"KeepAlive() = false after a HEAD with Content-Length, want true — "+
+			"§9.3.2 makes that field normal on a HEAD response; evicting would cost a "+
 			"connection after every HEAD")
-	}
 }

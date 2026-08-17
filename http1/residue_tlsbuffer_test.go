@@ -5,6 +5,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
 	"github.com/lodgvideon/poseidon-http-client/http1"
 )
 
@@ -30,9 +33,7 @@ import (
 func TestHasResidue_TLSBufferedRecordWithDrainedSocket(t *testing.T) {
 	cert := selfSignedCert(t)
 	ln, err := tls.Listen("tcp", "127.0.0.1:0", &tls.Config{Certificates: []tls.Certificate{cert}})
-	if err != nil {
-		t.Fatalf("tls.Listen: %v", err)
-	}
+	require.NoError(t, err, "tls.Listen")
 	defer ln.Close()
 
 	const payload = "HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nPWNED"
@@ -50,37 +51,30 @@ func TestHasResidue_TLSBufferedRecordWithDrainedSocket(t *testing.T) {
 	}()
 
 	tc, err := tls.Dial("tcp", ln.Addr().String(), &tls.Config{InsecureSkipVerify: true})
-	if err != nil {
-		t.Fatalf("tls.Dial: %v", err)
-	}
+	require.NoError(t, err, "tls.Dial")
 	defer tc.Close()
-	if err := tc.Handshake(); err != nil {
-		t.Fatalf("Handshake: %v", err)
-	}
-
+	require.NoError(t, tc.Handshake(), "Handshake")
 	// Let the session tickets a TLS 1.3 server emits after the handshake arrive
 	// along with the payload, so the single read below consumes them too and
 	// leaves nothing on the socket to be found by the cheaper check.
 	time.Sleep(100 * time.Millisecond)
-
 	one := make([]byte, 1)
 	_ = tc.SetReadDeadline(time.Now().Add(3 * time.Second))
 	n, err := tc.Read(one)
-	if err != nil || n != 1 {
-		t.Fatalf("priming read from the TLS conn: n=%d err=%v — without it the residue "+
+	require.Truef(t, err == nil && n == 1,
+		"priming read from the TLS conn: n=%d err=%v — without it the residue "+
 			"is on the socket rather than inside crypto/tls, and this test would be "+
 			"exercising the branch above", n, err)
-	}
 	_ = tc.SetReadDeadline(time.Time{})
 
 	c := http1.NewConn(tc)
-	if !c.HasResidue() {
-		t.Errorf("HasResidue() = false with %d bytes of an unsolicited response decrypted "+
+
+	assert.Truef(t, c.HasResidue(),
+		"HasResidue() = false with %d bytes of an unsolicited response decrypted "+
 			"and held inside crypto/tls while the socket is drained.\n"+
 			"The checkout-time guard has failed open: the connection goes back to the "+
 			"pool and the next request parses the peer's leftovers as its own response "+
 			"(RFC 9112 §6.3).", len(payload)-1)
-	}
 }
 
 // TestHasResidue_TLSDrainedRecordIsClean is the control. Same setup, but the
@@ -91,9 +85,7 @@ func TestHasResidue_TLSBufferedRecordWithDrainedSocket(t *testing.T) {
 func TestHasResidue_TLSDrainedRecordIsClean(t *testing.T) {
 	cert := selfSignedCert(t)
 	ln, err := tls.Listen("tcp", "127.0.0.1:0", &tls.Config{Certificates: []tls.Certificate{cert}})
-	if err != nil {
-		t.Fatalf("tls.Listen: %v", err)
-	}
+	require.NoError(t, err, "tls.Listen")
 	defer ln.Close()
 
 	const payload = "HTTP/1.1 204 No Content\r\n\r\n"
@@ -111,15 +103,10 @@ func TestHasResidue_TLSDrainedRecordIsClean(t *testing.T) {
 	}()
 
 	tc, err := tls.Dial("tcp", ln.Addr().String(), &tls.Config{InsecureSkipVerify: true})
-	if err != nil {
-		t.Fatalf("tls.Dial: %v", err)
-	}
+	require.NoError(t, err, "tls.Dial")
 	defer tc.Close()
-	if err := tc.Handshake(); err != nil {
-		t.Fatalf("Handshake: %v", err)
-	}
+	require.NoError(t, tc.Handshake(), "Handshake")
 	time.Sleep(100 * time.Millisecond)
-
 	// Consume the whole payload, so nothing is left in either buffer.
 	got := make([]byte, 0, len(payload))
 	tmp := make([]byte, 64)
@@ -127,15 +114,13 @@ func TestHasResidue_TLSDrainedRecordIsClean(t *testing.T) {
 	for len(got) < len(payload) {
 		n, rerr := tc.Read(tmp)
 		got = append(got, tmp[:n]...)
-		if rerr != nil {
-			t.Fatalf("draining the payload: %v", rerr)
-		}
+		require.NoError(t, rerr, "draining the payload")
 	}
 	_ = tc.SetReadDeadline(time.Time{})
 
 	c := http1.NewConn(tc)
-	if c.HasResidue() {
-		t.Error("HasResidue() = true on a TLS connection whose payload was fully consumed: " +
+
+	assert.False(t, c.HasResidue(),
+		"HasResidue() = true on a TLS connection whose payload was fully consumed: "+
 			"a false positive here evicts a healthy connection on every checkout")
-	}
 }

@@ -6,6 +6,9 @@ import (
 	"context"
 	"testing"
 
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
 	"github.com/lodgvideon/poseidon-http-client/header"
 	"github.com/lodgvideon/poseidon-http-client/http1"
 )
@@ -66,6 +69,9 @@ func BenchmarkWriteRequest_CanonicalHeaders(b *testing.B) {
 func TestWriteRequest_CaseFoldingDoesNotAllocate(t *testing.T) {
 	ctx := context.Background()
 
+	// testify is deliberately ABSENT from this closure: AllocsPerRun measures the
+	// whole process, and require/assert reflect and allocate, so an assertion
+	// inside would be charged to the request assembly it is meant to be judging.
 	measure := func(fields []header.Field) float64 {
 		c := http1.NewConn(sinkConn{})
 		return testing.AllocsPerRun(200, func() {
@@ -87,18 +93,16 @@ func TestWriteRequest_CaseFoldingDoesNotAllocate(t *testing.T) {
 			}
 		}
 	}
-	if capitals == 0 {
-		t.Fatal("the canonical fixture has no upper-case letter, so this test " +
-			"compares a request with itself and cannot fail")
-	}
+	require.NotZero(t, capitals, "the canonical fixture has no upper-case letter, so this test "+
+		"compares a request with itself and cannot fail")
 
 	got, want := measure(canonical), measure(lower)
-	if got != want {
-		t.Errorf("canonical header names cost %.1f allocations against %.1f for the "+
+
+	assert.Equalf(t, want, got,
+		"canonical header names cost %.1f allocations against %.1f for the "+
 			"same request already lower-cased: folding a name is allocating again.\n"+
 			"string(f.Name) and strings.ToLower are what this path avoids; see "+
 			"appendASCIILower in conn.go.", got, want)
-	}
 }
 
 // BenchmarkWriteRequest_LowerCaseHeaders is the control: the same request with

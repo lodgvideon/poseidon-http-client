@@ -7,6 +7,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
 	"github.com/lodgvideon/poseidon-http-client/header"
 )
 
@@ -95,30 +98,26 @@ func exactBufferExchange(t *testing.T, tail string) bool {
 
 	ex := NewConn(script).NewExchange()
 	ctx := context.Background()
-	if err := ex.WriteRequest(ctx, []header.Field{
+	require.NoError(t, ex.WriteRequest(ctx, []header.Field{
 		{Name: []byte(":method"), Value: []byte("GET")},
 		{Name: []byte(":path"), Value: []byte("/")},
 		{Name: []byte(":authority"), Value: []byte("example.com")},
-	}, true); err != nil {
-		t.Fatalf("WriteRequest: %v", err)
-	}
-	if _, _, err := ex.ReadResponse(ctx); err != nil {
-		t.Fatalf("ReadResponse: %v", err)
-	}
+	}, true), "WriteRequest")
+	_, _, err := ex.ReadResponse(ctx)
+	require.NoError(t, err, "ReadResponse")
 
 	// EXACTLY readBufSize. One byte more and the mutation this pins survives:
 	// a larger slice bypasses under `>` as well.
 	buf := make([]byte, readBufSize)
 	n, done, err := ex.ReadBodyChunk(buf)
-	if err != nil {
-		t.Fatalf("ReadBodyChunk: %v", err)
-	}
-	if n != readBufSize || !done {
-		t.Fatalf("premise not exercised: first ReadBodyChunk returned n=%d done=%v, "+
+
+	require.NoError(t, err, "ReadBodyChunk")
+	require.Truef(t, n == readBufSize && done,
+		"premise not exercised: first ReadBodyChunk returned n=%d done=%v, "+
 			"want n=%d done=true — the body must complete in the one read that still "+
 			"carries a full-sized slice, or the bypass boundary is never reached",
-			n, done, readBufSize)
-	}
+		n, done, readBufSize)
+
 	return ex.KeepAlive()
 }
 
@@ -126,13 +125,16 @@ func exactBufferExchange(t *testing.T, tail string) bool {
 // of exactly readBufSize the read bypasses the reader, so the appended response
 // is invisible to Buffered() and only the socket can be asked.
 func TestReadBodyChunk_BypassAtExactBufferSize_NotPoolable(t *testing.T) {
-	if exactBufferExchange(t, "HTTP/1.1 200 OK\r\nContent-Length: 3\r\n\r\npwn") {
-		t.Error("KeepAlive() = true after a body read of exactly readBufSize bytes left " +
-			"an unsolicited response on the socket — the read bypassed the reader, so " +
-			"Buffered() sees nothing, and the connection goes back to the pool with a " +
-			"peer-chosen response the next request parses as its own status line " +
+	const tail = "HTTP/1.1 200 OK\r\nContent-Length: 3\r\n\r\npwn"
+
+	poolable := exactBufferExchange(t, tail)
+
+	assert.False(t, poolable,
+		"KeepAlive() = true after a body read of exactly readBufSize bytes left "+
+			"an unsolicited response on the socket — the read bypassed the reader, so "+
+			"Buffered() sees nothing, and the connection goes back to the pool with a "+
+			"peer-chosen response the next request parses as its own status line "+
 			"(RFC 9112 §6.3)")
-	}
 }
 
 // TestReadBodyChunk_BypassAtExactBufferSize_CleanStaysPoolable is the
@@ -141,8 +143,11 @@ func TestReadBodyChunk_BypassAtExactBufferSize_NotPoolable(t *testing.T) {
 // "always condemn on the bypass path" would pass the gate above and cost a
 // connection per request at exactly the buffer size the fast path uses.
 func TestReadBodyChunk_BypassAtExactBufferSize_CleanStaysPoolable(t *testing.T) {
-	if !exactBufferExchange(t, "") {
-		t.Error("KeepAlive() = false after a body read of exactly readBufSize bytes with " +
+	const tail = ""
+
+	poolable := exactBufferExchange(t, tail)
+
+	assert.True(t, poolable,
+		"KeepAlive() = false after a body read of exactly readBufSize bytes with "+
 			"nothing left on the socket, want true")
-	}
 }

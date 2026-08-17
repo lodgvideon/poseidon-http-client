@@ -22,8 +22,10 @@ package http1_test
 
 import (
 	"context"
-	"errors"
 	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	"github.com/lodgvideon/poseidon-http-client/header"
 	"github.com/lodgvideon/poseidon-http-client/http1"
@@ -49,24 +51,24 @@ func fieldValue(hdrs []header.Field, name string) (string, bool) {
 func TestConformance_RFC9112_Sec5_2_ObsFoldDoesNotSmuggleContentLength(t *testing.T) {
 	ex := wireExchange(t, "GET",
 		"HTTP/1.1 200 OK\r\nX-Junk: a\r\n\tContent-Length: 5\r\n\r\nhelloEXTRA")
+
 	_, hdrs, err := ex.ReadResponse(context.Background())
-	if err != nil {
-		t.Fatalf("ReadResponse: %v", err)
-	}
-	if v, ok := fieldValue(hdrs, "content-length"); ok {
-		t.Errorf("a content-length field appeared with value %q — the wire had none; "+
+
+	require.NoError(t, err, "ReadResponse")
+	v, ok := fieldValue(hdrs, "content-length")
+	assert.Falsef(t, ok,
+		"a content-length field appeared with value %q — the wire had none; "+
 			"the obs-fold continuation was read as a field line of its own", v)
-	}
-	if v, _ := fieldValue(hdrs, "x-junk"); v != "a Content-Length: 5" {
-		t.Errorf("x-junk = %q, want %q — the fold must be replaced by SP and joined "+
-			"to the previous field's value", v, "a Content-Length: 5")
-	}
-	if body := readAllTolerant(ex); body != "helloEXTRA" {
-		t.Errorf("body = %q, want %q — with no Content-Length the body runs to "+
+	junk, _ := fieldValue(hdrs, "x-junk")
+	assert.Equalf(t, "a Content-Length: 5", junk,
+		"x-junk = %q, want %q — the fold must be replaced by SP and joined "+
+			"to the previous field's value", junk, "a Content-Length: 5")
+	body := readAllTolerant(ex)
+	assert.Equalf(t, "helloEXTRA", body,
+		"body = %q, want %q — with no Content-Length the body runs to "+
 			"connection close; %d octets were left on the wire for the next "+
 			"response to parse as a status line (KeepAlive()=%v)",
-			body, "helloEXTRA", len("helloEXTRA")-len(body), ex.KeepAlive())
-	}
+		body, "helloEXTRA", len("helloEXTRA")-len(body), ex.KeepAlive())
 }
 
 // TestConformance_RFC9112_Sec5_2_ObsFoldDoesNotSmuggleTransferEncoding is the
@@ -74,17 +76,15 @@ func TestConformance_RFC9112_Sec5_2_ObsFoldDoesNotSmuggleContentLength(t *testin
 func TestConformance_RFC9112_Sec5_2_ObsFoldDoesNotSmuggleTransferEncoding(t *testing.T) {
 	ex := wireExchange(t, "GET",
 		"HTTP/1.1 200 OK\r\nContent-Length: 5\r\nX-Junk: a\r\n Transfer-Encoding: chunked\r\n\r\nhelloEXTRA")
+
 	_, hdrs, err := ex.ReadResponse(context.Background())
-	if err != nil {
-		t.Fatalf("ReadResponse: %v", err)
-	}
-	if _, ok := fieldValue(hdrs, "transfer-encoding"); ok {
-		t.Error("a transfer-encoding field appeared; the wire had none, only a fold")
-	}
+
+	require.NoError(t, err, "ReadResponse")
+	_, ok := fieldValue(hdrs, "transfer-encoding")
+	assert.False(t, ok, "a transfer-encoding field appeared; the wire had none, only a fold")
 	// The real Content-Length: 5 governs, so exactly "hello" and no more.
-	if body := drainBody(t, ex); body != "hello" {
-		t.Errorf("body = %q, want %q (the genuine Content-Length: 5 frames it)", body, "hello")
-	}
+	body := drainBody(t, ex)
+	assert.Equalf(t, "hello", body, "body = %q, want %q (the genuine Content-Length: 5 frames it)", body, "hello")
 }
 
 // TestConformance_RFC9112_Sec5_2_ObsFoldUnfoldsToSP pins the unfolding itself,
@@ -102,17 +102,13 @@ func TestConformance_RFC9112_Sec5_2_ObsFoldUnfoldsToSP(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			ex := wireExchange(t, "GET", "HTTP/1.1 200 OK\r\n"+tc.wire+"Content-Length: 0\r\n\r\n")
+
 			_, hdrs, err := ex.ReadResponse(context.Background())
-			if err != nil {
-				t.Fatalf("ReadResponse: %v", err)
-			}
+
+			require.NoError(t, err, "ReadResponse")
 			got, ok := fieldValue(hdrs, "x-a")
-			if !ok {
-				t.Fatalf("x-a field missing entirely")
-			}
-			if got != tc.want {
-				t.Errorf("x-a = %q, want %q", got, tc.want)
-			}
+			require.True(t, ok, "x-a field missing entirely")
+			assert.Equalf(t, tc.want, got, "x-a = %q, want %q", got, tc.want)
 		})
 	}
 }
@@ -125,16 +121,12 @@ func TestConformance_RFC9112_Sec5_2_ObsFoldUnfoldsToSP(t *testing.T) {
 func TestConformance_RFC9112_Sec5_2_ObsFoldWithNoPrecedingField(t *testing.T) {
 	ex := wireExchange(t, "GET",
 		"HTTP/1.1 200 OK\r\n Content-Length: 5\r\n\r\nhello")
+
 	_, _, err := ex.ReadResponse(context.Background())
-	if err == nil {
-		t.Fatal("ReadResponse returned nil error for a header block opening with a fold")
-	}
-	if !errors.Is(err, http1.ErrInvalidHeaderBlock) {
-		t.Errorf("error = %v, want it to wrap ErrInvalidHeaderBlock", err)
-	}
-	if ex.KeepAlive() {
-		t.Error("KeepAlive() = true after an uninterpretable header block, want false")
-	}
+
+	require.Error(t, err, "ReadResponse returned nil error for a header block opening with a fold")
+	assert.ErrorIsf(t, err, http1.ErrInvalidHeaderBlock, "error = %v, want it to wrap ErrInvalidHeaderBlock", err)
+	assert.False(t, ex.KeepAlive(), "KeepAlive() = true after an uninterpretable header block, want false")
 }
 
 // TestConformance_RFC9112_Sec5_2_ObsFoldInTrailerSection covers the other block
@@ -155,10 +147,10 @@ func TestConformance_RFC9112_Sec5_2_ObsFoldInTrailerSection(t *testing.T) {
 		ex := wireExchange(t, "GET",
 			"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n"+
 				"5\r\nhello\r\n0\r\n Content-Length: 99\r\n\r\n")
-		if _, _, err := ex.ReadResponse(context.Background()); err != nil {
-			t.Fatalf("ReadResponse: %v", err)
-		}
+		_, _, rerr := ex.ReadResponse(context.Background())
+		require.NoError(t, rerr, "ReadResponse")
 		buf := make([]byte, 64)
+
 		var err error
 		for {
 			_, done, e := ex.ReadBodyChunk(buf)
@@ -167,13 +159,11 @@ func TestConformance_RFC9112_Sec5_2_ObsFoldInTrailerSection(t *testing.T) {
 				break
 			}
 		}
-		if !errors.Is(err, http1.ErrInvalidHeaderBlock) {
-			t.Errorf("error = %v, want it to wrap ErrInvalidHeaderBlock — a trailer "+
+
+		assert.ErrorIsf(t, err, http1.ErrInvalidHeaderBlock,
+			"error = %v, want it to wrap ErrInvalidHeaderBlock — a trailer "+
 				"section opening with a fold has no field line to continue", err)
-		}
-		if ex.KeepAlive() {
-			t.Error("KeepAlive() = true after an uninterpretable trailer section, want false")
-		}
+		assert.False(t, ex.KeepAlive(), "KeepAlive() = true after an uninterpretable trailer section, want false")
 	})
 
 	t.Run("well_formed_folded_trailer_stays_poolable", func(t *testing.T) {
@@ -183,15 +173,14 @@ func TestConformance_RFC9112_Sec5_2_ObsFoldInTrailerSection(t *testing.T) {
 		ex := wireExchange(t, "GET",
 			"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n"+
 				"5\r\nhello\r\n0\r\nX-Trailer: a\r\n\tcontinued\r\n\r\n")
-		if _, _, err := ex.ReadResponse(context.Background()); err != nil {
-			t.Fatalf("ReadResponse: %v", err)
-		}
-		if body := drainBody(t, ex); body != "hello" {
-			t.Errorf("body = %q, want %q", body, "hello")
-		}
-		if !ex.KeepAlive() {
-			t.Error("KeepAlive() = false — a well-formed chunked response with a folded " +
+		_, _, err := ex.ReadResponse(context.Background())
+		require.NoError(t, err, "ReadResponse")
+
+		body := drainBody(t, ex)
+
+		assert.Equalf(t, "hello", body, "body = %q, want %q", body, "hello")
+		assert.True(t, ex.KeepAlive(),
+			"KeepAlive() = false — a well-formed chunked response with a folded "+
 				"trailer is reusable; over-condemning it costs a connection per response")
-		}
 	})
 }

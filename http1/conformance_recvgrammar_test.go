@@ -15,9 +15,11 @@ package http1_test
 
 import (
 	"context"
-	"errors"
 	"strings"
 	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	"github.com/lodgvideon/poseidon-http-client/header"
 	"github.com/lodgvideon/poseidon-http-client/http1"
@@ -29,16 +31,12 @@ import (
 // to ErrInvalidContentLength — these defects are grammar, not framing values.
 func wantHeadRejected(t *testing.T, ex *http1.Exchange, err error, what string) {
 	t.Helper()
-	if err == nil {
-		t.Fatalf("%s accepted; want the response discarded", what)
-	}
-	if !errors.Is(err, http1.ErrInvalidHeaderBlock) {
-		t.Errorf("%s: error = %v, want it to wrap ErrInvalidHeaderBlock so a caller can classify it", what, err)
-	}
-	if ex.KeepAlive() {
-		t.Errorf("%s: KeepAlive() = true; the head is not a well-formed field sequence, "+
+	require.Errorf(t, err, "%s accepted; want the response discarded", what)
+	assert.ErrorIsf(t, err, http1.ErrInvalidHeaderBlock,
+		"%s: error = %v, want it to wrap ErrInvalidHeaderBlock so a caller can classify it", what, err)
+	assert.Falsef(t, ex.KeepAlive(),
+		"%s: KeepAlive() = true; the head is not a well-formed field sequence, "+
 			"so the stream position cannot be trusted and the connection must not be pooled", what)
-	}
 }
 
 // TestConformance_RFC9112_Sec4_StatusCodeMustBe3DIGIT pins `status-code = 3DIGIT`.
@@ -66,17 +64,16 @@ func TestConformance_RFC9112_Sec4_StatusCodeMustBe3DIGIT(t *testing.T) {
 	for _, code := range []string{"-5", "+99", "99", "1", "0", "0000200", "1234", "2e2", "0x64", " 200", "２００"} {
 		t.Run(code, func(t *testing.T) {
 			ex, err := readResponseErr(t, "HTTP/1.1 "+code+" x\r\n\r\n"+fabricated)
+
 			// The sentinel, not just "some error": a status line rejected for an
 			// unrelated reason would satisfy err != nil while leaving a caller that
 			// classifies failure modes looking at the wrong one.
-			if !errors.Is(err, http1.ErrInvalidStatusLine) {
-				t.Fatalf("status code %q: err = %v, want ErrInvalidStatusLine — 3DIGIT is the whole grammar, "+
+			require.ErrorIsf(t, err, http1.ErrInvalidStatusLine,
+				"status code %q: err = %v, want ErrInvalidStatusLine — 3DIGIT is the whole grammar, "+
 					"and anything under 200 that gets through is a free 'read another response' step", code, err)
-			}
-			if ex.KeepAlive() {
-				t.Errorf("status code %q: KeepAlive() = true; a status line that is not a status line "+
+			assert.Falsef(t, ex.KeepAlive(),
+				"status code %q: KeepAlive() = true; a status line that is not a status line "+
 					"leaves the stream position indeterminate, so the connection must not be pooled", code)
-			}
 		})
 	}
 }
@@ -106,13 +103,11 @@ func TestConformance_RFC9112_Sec4_ValidStatusCodesStillParse(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			ex := wireExchange(t, "GET", tc.wire)
+
 			code, _, err := ex.ReadResponse(context.Background())
-			if err != nil {
-				t.Fatalf("ReadResponse = %v, want a clean parse", err)
-			}
-			if code != tc.want {
-				t.Errorf("status = %d, want %d", code, tc.want)
-			}
+
+			require.NoErrorf(t, err, "ReadResponse = %v, want a clean parse", err)
+			assert.Equalf(t, tc.want, code, "status = %d, want %d", code, tc.want)
 		})
 	}
 }
@@ -137,18 +132,17 @@ func TestConformance_RFC9110_Sec15_1_UnrecognisedClassIsFinal(t *testing.T) {
 		t.Run(code, func(t *testing.T) {
 			ex := wireExchange(t, "GET",
 				"HTTP/1.1 "+code+" x\r\nContent-Length: 2\r\n\r\nok"+fabricated)
+
 			got, _, err := ex.ReadResponse(context.Background())
-			if err != nil {
-				t.Fatalf("ReadResponse = %v; §15.1 has an unrecognised status processed, not refused", err)
-			}
+
+			require.NoErrorf(t, err, "ReadResponse = %v; §15.1 has an unrecognised status processed, not refused", err)
 			want := 0
 			for i := 0; i < 3; i++ {
 				want = want*10 + int(code[i]-'0')
 			}
-			if got != want {
-				t.Errorf("status = %d, want %d — the response behind this one was drained "+
+			assert.Equalf(t, want, got,
+				"status = %d, want %d — the response behind this one was drained "+
 					"into and returned instead", got, want)
-			}
 		})
 	}
 }
@@ -173,6 +167,7 @@ func TestConformance_RFC9112_Sec2_2_BareCRRejected(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			ex, err := readResponseErr(t, tc.wire)
+
 			wantHeadRejected(t, ex, err, "a bare CR")
 		})
 	}
@@ -184,13 +179,11 @@ func TestConformance_RFC9112_Sec2_2_BareCRRejected(t *testing.T) {
 // lines into errors.
 func TestConformance_RFC9112_Sec2_2_LoneLFStillTerminates(t *testing.T) {
 	ex := wireExchange(t, "GET", "HTTP/1.1 200 OK\nContent-Length: 5\n\nHELLO")
+
 	code, _, err := ex.ReadResponse(context.Background())
-	if err != nil {
-		t.Fatalf("ReadResponse = %v; §2.2 permits a lone LF as the line terminator", err)
-	}
-	if code != 200 {
-		t.Errorf("status = %d, want 200", code)
-	}
+
+	require.NoErrorf(t, err, "ReadResponse = %v; §2.2 permits a lone LF as the line terminator", err)
+	assert.Equalf(t, 200, code, "status = %d, want 200", code)
 }
 
 // TestConformance_RFC9112_Sec5_1_NoWhitespaceBeforeColon pins the rule §5.1
@@ -215,6 +208,7 @@ func TestConformance_RFC9112_Sec5_1_NoWhitespaceBeforeColon(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			ex, err := readResponseErr(t, tc.wire)
+
 			wantHeadRejected(t, ex, err, "whitespace between field name and colon")
 		})
 	}
@@ -234,15 +228,17 @@ func TestConformance_RFC9112_Sec5_1_FieldValueTrimIsOWSOnly(t *testing.T) {
 	for _, ws := range []string{"\v", "\f", "\u0085"} {
 		t.Run(strings.TrimSpace(quoteWS(ws)), func(t *testing.T) {
 			ex, err := readResponseErr(t, "HTTP/1.1 200 OK\r\nContent-Length: 5"+ws+"\r\n\r\nHELLOEXTRA")
+
 			wantRejected(t, ex, err, "a non-OWS octet in the Content-Length value")
 		})
 	}
 
 	t.Run("OWS is still trimmed", func(t *testing.T) {
 		ex := wireExchange(t, "GET", "HTTP/1.1 200 OK\r\nContent-Length: \t5 \t\r\n\r\nHELLO")
-		if _, _, err := ex.ReadResponse(context.Background()); err != nil {
-			t.Fatalf("ReadResponse = %v; §5.1 excludes leading and trailing OWS from the value", err)
-		}
+
+		_, _, err := ex.ReadResponse(context.Background())
+
+		require.NoErrorf(t, err, "ReadResponse = %v; §5.1 excludes leading and trailing OWS from the value", err)
 	})
 }
 
@@ -275,17 +271,16 @@ func TestConformance_RFC9112_Sec7_1_ChunkSizeGrammar(t *testing.T) {
 		t.Run("reject "+quoteWS(size), func(t *testing.T) {
 			ex := wireExchange(t, "GET",
 				"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n"+size+"\r\n"+tail)
-			if _, _, err := ex.ReadResponse(context.Background()); err != nil {
-				t.Fatalf("ReadResponse = %v, want the head to parse", err)
-			}
+			_, _, err := ex.ReadResponse(context.Background())
+			require.NoErrorf(t, err, "ReadResponse = %v, want the head to parse", err)
 			buf := make([]byte, 64)
-			if _, _, err := ex.ReadBodyChunk(buf); err == nil {
-				t.Fatalf("chunk-size %q accepted; 1*HEXDIG admits no surrounding whitespace", size)
-			}
-			if ex.KeepAlive() {
-				t.Error("KeepAlive() = true after a malformed chunk-size; the stream position is " +
+
+			_, _, err = ex.ReadBodyChunk(buf)
+
+			require.Errorf(t, err, "chunk-size %q accepted; 1*HEXDIG admits no surrounding whitespace", size)
+			assert.False(t, ex.KeepAlive(),
+				"KeepAlive() = true after a malformed chunk-size; the stream position is "+
 					"indeterminate, so the connection must not be pooled")
-			}
 		})
 	}
 
@@ -295,12 +290,13 @@ func TestConformance_RFC9112_Sec7_1_ChunkSizeGrammar(t *testing.T) {
 		t.Run("accept "+ok, func(t *testing.T) {
 			ex := wireExchange(t, "GET",
 				"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n"+ok+"\r\n"+tail)
-			if _, _, err := ex.ReadResponse(context.Background()); err != nil {
-				t.Fatalf("ReadResponse = %v", err)
-			}
-			if got := readAllTolerant(ex); got != "hello" {
-				t.Errorf("body = %q, want %q — BWS before the chunk-ext ';' is §7.1.1 grammar", got, "hello")
-			}
+			_, _, err := ex.ReadResponse(context.Background())
+			require.NoErrorf(t, err, "ReadResponse = %v", err)
+
+			got := readAllTolerant(ex)
+
+			assert.Equalf(t, "hello", got,
+				"body = %q, want %q — BWS before the chunk-ext ';' is §7.1.1 grammar", got, "hello")
 		})
 	}
 }
@@ -324,10 +320,9 @@ func TestConformance_RFC9112_Sec7_1_ChunkDataTerminatorMustBeCRLF(t *testing.T) 
 		t.Run(tc.name, func(t *testing.T) {
 			ex := wireExchange(t, "GET",
 				"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n"+tc.wire)
-			if _, _, err := ex.ReadResponse(context.Background()); err != nil {
-				t.Fatalf("ReadResponse = %v", err)
-			}
-			var err error
+			_, _, err := ex.ReadResponse(context.Background())
+			require.NoErrorf(t, err, "ReadResponse = %v", err)
+
 			buf := make([]byte, 64)
 			for i := 0; i < 4 && err == nil; i++ {
 				var done bool
@@ -336,12 +331,9 @@ func TestConformance_RFC9112_Sec7_1_ChunkDataTerminatorMustBeCRLF(t *testing.T) 
 					break
 				}
 			}
-			if err == nil {
-				t.Fatalf("chunk-data terminated by %q accepted; §7.1 requires exactly CRLF", tc.wire)
-			}
-			if ex.KeepAlive() {
-				t.Error("KeepAlive() = true after a malformed chunk terminator")
-			}
+
+			require.Errorf(t, err, "chunk-data terminated by %q accepted; §7.1 requires exactly CRLF", tc.wire)
+			assert.False(t, ex.KeepAlive(), "KeepAlive() = true after a malformed chunk terminator")
 		})
 	}
 }
@@ -361,25 +353,21 @@ func TestConformance_RFC9112_Sec7_1_ChunkDataTerminatorMustBeCRLF(t *testing.T) 
 // and the over-run check keyed on it never fired. POST, PUT and PATCH were
 // already covered for that reason and are included as the control.
 func TestConformance_RFC9112_Sec6_WriteBodyWithoutFramingRefused(t *testing.T) {
-	const smuggled = "GET /admin HTTP/1.1\r\nHost: evil\r\n\r\n"
+	const smuggledReq = "GET /admin HTTP/1.1\r\nHost: evil\r\n\r\n"
 
 	for _, m := range []string{"GET", "HEAD", "DELETE", "OPTIONS", "POST", "PUT", "PATCH"} {
 		t.Run(m, func(t *testing.T) {
 			ex, capture := rawCapture(t)
-			if err := ex.WriteRequest(context.Background(), reqCL(m), true); err != nil {
-				t.Fatalf("WriteRequest: %v", err)
-			}
-			err := ex.WriteBody(context.Background(), []byte(smuggled), true)
-			if err == nil {
-				t.Errorf("WriteBody after a bodyless head = nil, want a refusal")
-			}
-			if wire := capture(); strings.Contains(wire, "/admin") {
-				t.Errorf("the unframed octets reached the wire: %q\n"+
+			require.NoError(t, ex.WriteRequest(context.Background(), reqCL(m), true), "WriteRequest")
+
+			err := ex.WriteBody(context.Background(), []byte(smuggledReq), true)
+
+			assert.Error(t, err, "WriteBody after a bodyless head = nil, want a refusal")
+			wire := capture()
+			assert.NotContainsf(t, wire, "/admin",
+				"the unframed octets reached the wire: %q\n"+
 					"the peer parses them as a second request the caller never issued", wire)
-			}
-			if ex.KeepAlive() {
-				t.Error("KeepAlive() = true after an unframed body write")
-			}
+			assert.False(t, ex.KeepAlive(), "KeepAlive() = true after an unframed body write")
 		})
 	}
 }
@@ -390,13 +378,12 @@ func TestConformance_RFC9112_Sec6_WriteBodyWithoutFramingRefused(t *testing.T) {
 func TestConformance_RFC9112_Sec6_WriteBodyWithFramingStillWorks(t *testing.T) {
 	ex, capture := rawCapture(t)
 	fields := reqCL("POST", header.Field{Name: []byte("content-length"), Value: []byte("5")})
-	if err := ex.WriteRequest(context.Background(), fields, false); err != nil {
-		t.Fatalf("WriteRequest: %v", err)
-	}
-	if err := ex.WriteBody(context.Background(), []byte("HELLO"), true); err != nil {
-		t.Fatalf("WriteBody = %v, want the declared 5 octets to be accepted", err)
-	}
-	if wire := capture(); !strings.HasSuffix(wire, "\r\n\r\nHELLO") {
-		t.Errorf("wire = %q, want it to end with the declared body", wire)
-	}
+	require.NoError(t, ex.WriteRequest(context.Background(), fields, false), "WriteRequest")
+
+	err := ex.WriteBody(context.Background(), []byte("HELLO"), true)
+
+	require.NoErrorf(t, err, "WriteBody = %v, want the declared 5 octets to be accepted", err)
+	wire := capture()
+	assert.Truef(t, strings.HasSuffix(wire, "\r\n\r\nHELLO"),
+		"wire = %q, want it to end with the declared body", wire)
 }
