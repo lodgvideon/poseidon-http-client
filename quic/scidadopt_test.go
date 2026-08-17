@@ -3,6 +3,9 @@ package quic
 import (
 	"bytes"
 	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // TestConformance_RFC9000_Sec72_ServerCIDAdoptedOnlyWhenAuthenticated checks the
@@ -29,27 +32,27 @@ func TestConformance_RFC9000_Sec72_ServerCIDAdoptedOnlyWhenAuthenticated(t *test
 		_, wrongKeys := InitialKeys([]byte("wrongdci")) // keys the client does not hold
 		garbage := craftServerInitial(t, wrongKeys, nil, otherSCID, 0, make([]byte, 20))
 		c := newConn()
-		if err := c.recvDatagram(garbage); err != nil {
-			t.Fatalf("recvDatagram(garbage Initial) = %v, want nil (skipped)", err)
-		}
-		if c.gotServerCID {
-			t.Fatal("an unauthenticated Initial must not adopt the server connection ID")
-		}
-		if !bytes.Equal(c.dcid, origDCID) {
-			t.Fatalf("DCID poisoned: got %x, want the original %x", c.dcid, origDCID)
-		}
+
+		err := c.recvDatagram(garbage)
+
+		require.NoErrorf(t, err, "recvDatagram(garbage Initial) = %v, want nil (skipped)", err)
+		assert.False(t, c.gotServerCID,
+			"an unauthenticated Initial must not adopt the server connection ID")
+		assert.Truef(t, bytes.Equal(c.dcid, origDCID),
+			"DCID poisoned: got %x, want the original %x", c.dcid, origDCID)
 	})
 
 	// A valid server Initial adopts its SCID.
 	t.Run("authenticated-adopts", func(t *testing.T) {
 		pkt := craftServerInitial(t, serverKeys, nil, realSCID, 0, make([]byte, 20)) // PADDING payload
 		c := newConn()
-		if err := c.recvDatagram(pkt); err != nil {
-			t.Fatalf("recvDatagram(valid Initial) = %v, want nil", err)
-		}
-		if !c.gotServerCID || !bytes.Equal(c.dcid, realSCID) || !bytes.Equal(c.serverSCID, realSCID) {
-			t.Fatalf("adopt: gotServerCID=%v dcid=%x serverSCID=%x, want dcid/serverSCID=%x", c.gotServerCID, c.dcid, c.serverSCID, realSCID)
-		}
+
+		err := c.recvDatagram(pkt)
+
+		require.NoErrorf(t, err, "recvDatagram(valid Initial) = %v, want nil", err)
+		assert.Truef(t, c.gotServerCID && bytes.Equal(c.dcid, realSCID) && bytes.Equal(c.serverSCID, realSCID),
+			"adopt: gotServerCID=%v dcid=%x serverSCID=%x, want dcid/serverSCID=%x",
+			c.gotServerCID, c.dcid, c.serverSCID, realSCID)
 	})
 
 	// Once the server CID is known, a long-header packet with the SAME SCID is
@@ -61,17 +64,21 @@ func TestConformance_RFC9000_Sec72_ServerCIDAdoptedOnlyWhenAuthenticated(t *test
 		c.gotServerCID, c.serverSCID = true, append([]byte(nil), realSCID...)
 		c.dcid = append(c.dcid[:0], realSCID...)
 		pkt := craftServerInitial(t, serverKeys, nil, realSCID, 1, streamInInitial)
-		if err := c.recvDatagram(pkt); err != ErrProtocolViolation {
-			t.Fatalf("matching-SCID Initial with a STREAM frame = %v, want ErrProtocolViolation (it was processed)", err)
-		}
+
+		err := c.recvDatagram(pkt)
+
+		assert.Truef(t, err == ErrProtocolViolation,
+			"matching-SCID Initial with a STREAM frame = %v, want ErrProtocolViolation (it was processed)", err)
 	})
 	t.Run("mismatched-scid-discarded", func(t *testing.T) {
 		c := newConn()
 		c.gotServerCID, c.serverSCID = true, append([]byte(nil), realSCID...)
 		c.dcid = append(c.dcid[:0], realSCID...)
 		pkt := craftServerInitial(t, serverKeys, nil, otherSCID, 1, streamInInitial)
-		if err := c.recvDatagram(pkt); err != nil {
-			t.Fatalf("mismatched-SCID Initial = %v, want nil (discarded before decrypt, §7.2)", err)
-		}
+
+		err := c.recvDatagram(pkt)
+
+		assert.Truef(t, err == nil,
+			"mismatched-SCID Initial = %v, want nil (discarded before decrypt, §7.2)", err)
 	})
 }
