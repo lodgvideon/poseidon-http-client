@@ -4,9 +4,11 @@ import (
 	"bytes"
 	"context"
 	"crypto/tls"
-	"errors"
 	"testing"
 	"time"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // newInitialConn builds a client Conn that can open server Initial packets keyed
@@ -16,9 +18,7 @@ func newInitialConn(t *testing.T, origDCID []byte) *Conn {
 	_, serverKeys := InitialKeys(origDCID)
 	c := &Conn{pc: &closePC{}, dcid: append([]byte(nil), origDCID...), handshakeComplete: true}
 	op, err := NewOpener(serverKeys)
-	if err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, err)
 	c.keys.Initial = op
 	return c
 }
@@ -39,30 +39,28 @@ func TestConformance_RFC9000_Sec52_ForeignVersionDiscarded(t *testing.T) {
 		c := newInitialConn(t, origDCID)
 		pkt := craftServerInitialVersion(t, serverKeys, nil, forgedSCID, 0,
 			appendPing(nil), version)
-		if err := c.recvDatagram(pkt); err != nil {
-			t.Fatalf("version %#x: recvDatagram = %v, want nil (silently discarded)", version, err)
-		}
-		if c.gotServerCID {
-			t.Fatalf("version %#x: adopted the server connection ID from a foreign-version packet", version)
-		}
-		if !bytes.Equal(c.dcid, origDCID) {
-			t.Fatalf("version %#x: DCID poisoned: %x, want %x", version, c.dcid, origDCID)
-		}
-		if c.haveRecv[spaceInitial] {
-			t.Fatalf("version %#x: a foreign-version packet was processed", version)
-		}
+
+		err := c.recvDatagram(pkt)
+
+		require.NoErrorf(t, err, "version %#x: recvDatagram = %v, want nil (silently discarded)", version, err)
+		assert.Falsef(t, c.gotServerCID,
+			"version %#x: adopted the server connection ID from a foreign-version packet", version)
+		assert.Truef(t, bytes.Equal(c.dcid, origDCID),
+			"version %#x: DCID poisoned: %x, want %x", version, c.dcid, origDCID)
+		assert.Falsef(t, c.haveRecv[spaceInitial],
+			"version %#x: a foreign-version packet was processed", version)
 	}
 
 	// Control: the same packet at version 1 IS processed, so the test is not
 	// passing merely because the fixture never decrypts.
 	c := newInitialConn(t, origDCID)
 	ok := craftServerInitial(t, serverKeys, nil, forgedSCID, 0, appendPing(nil))
-	if err := c.recvDatagram(ok); err != nil {
-		t.Fatalf("control: recvDatagram = %v, want nil", err)
-	}
-	if !c.gotServerCID || !c.haveRecv[spaceInitial] {
-		t.Fatal("control: a valid v1 Initial was not processed, so the fixture proves nothing")
-	}
+
+	err := c.recvDatagram(ok)
+
+	require.NoErrorf(t, err, "control: recvDatagram = %v, want nil", err)
+	assert.Truef(t, c.gotServerCID && c.haveRecv[spaceInitial],
+		"control: a valid v1 Initial was not processed, so the fixture proves nothing")
 }
 
 // TestConformance_RFC9000_Sec122_CoalescedForeignDCIDIgnored pins "Receivers SHOULD
@@ -80,15 +78,14 @@ func TestConformance_RFC9000_Sec122_CoalescedForeignDCIDIgnored(t *testing.T) {
 	p2 := craftServerInitial(t, serverKeys, []byte{0x09, 0x09, 0x09, 0x09}, scid, 2, appendPing(nil))
 
 	c := newInitialConn(t, origDCID)
-	if err := c.recvDatagram(append(append([]byte{}, p1...), p2...)); err != nil {
-		t.Fatalf("recvDatagram = %v, want nil", err)
-	}
-	if !c.haveRecv[spaceInitial] {
-		t.Fatal("the first packet was not processed, so the test proves nothing")
-	}
-	if got := c.largestRecv[spaceInitial]; got != 1 {
-		t.Fatalf("largestRecv = %d, want 1 — the foreign-DCID packet was processed", got)
-	}
+
+	err := c.recvDatagram(append(append([]byte{}, p1...), p2...))
+
+	require.NoErrorf(t, err, "recvDatagram = %v, want nil", err)
+	require.True(t, c.haveRecv[spaceInitial],
+		"the first packet was not processed, so the test proves nothing")
+	assert.EqualValuesf(t, 1, c.largestRecv[spaceInitial],
+		"largestRecv = %d, want 1 — the foreign-DCID packet was processed", c.largestRecv[spaceInitial])
 }
 
 // TestConformance_RFC9000_Sec124_EmptyPacketIsProtocolViolation pins "An endpoint
@@ -101,9 +98,11 @@ func TestConformance_RFC9000_Sec124_EmptyPacketIsProtocolViolation(t *testing.T)
 
 	c := newInitialConn(t, origDCID)
 	empty := craftServerInitial(t, serverKeys, nil, []byte{0xaa}, 0, nil)
-	if err := c.recvDatagram(empty); !errors.Is(err, ErrProtocolViolation) {
-		t.Fatalf("recvDatagram(zero-frame packet) = %v, want ErrProtocolViolation", err)
-	}
+
+	err := c.recvDatagram(empty)
+
+	assert.ErrorIsf(t, err, ErrProtocolViolation,
+		"recvDatagram(zero-frame packet) = %v, want ErrProtocolViolation", err)
 }
 
 // TestConformance_RFC9001_Sec57_ZeroRTTDiscardedNotDecrypted pins "a client MUST NOT
@@ -118,9 +117,7 @@ func TestConformance_RFC9001_Sec57_ZeroRTTDiscardedNotDecrypted(t *testing.T) {
 	forgedSCID := []byte{0x11, 0x22, 0x33, 0x44}
 
 	sealer, err := NewSealer(serverKeys)
-	if err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, err)
 	payload := appendPing(make([]byte, 0, 32))
 	pnLen := 4
 	hdr, pnOff := AppendLongHeader(nil, PacketZeroRTT, QUICVersion1, nil, forgedSCID, nil, pnLen, uint64(pnLen+len(payload)+16))
@@ -128,20 +125,16 @@ func TestConformance_RFC9001_Sec57_ZeroRTTDiscardedNotDecrypted(t *testing.T) {
 		hdr = append(hdr, 0)
 	}
 	pkt, err := sealer.Seal(nil, hdr, pnOff, pnLen, 0, payload)
-	if err != nil {
-		t.Fatalf("Seal: %v", err)
-	}
-
+	require.NoErrorf(t, err, "Seal: %v", err)
 	c := newInitialConn(t, origDCID)
-	if err := c.recvDatagram(pkt); err != nil {
-		t.Fatalf("recvDatagram(0-RTT) = %v, want nil (discarded)", err)
-	}
-	if c.gotServerCID {
-		t.Fatal("a 0-RTT packet must not be decrypted, let alone have its SCID adopted")
-	}
-	if c.haveRecv[spaceInitial] {
-		t.Fatal("a 0-RTT packet was processed in the Initial packet-number space")
-	}
+
+	err = c.recvDatagram(pkt)
+
+	require.NoErrorf(t, err, "recvDatagram(0-RTT) = %v, want nil (discarded)", err)
+	assert.False(t, c.gotServerCID,
+		"a 0-RTT packet must not be decrypted, let alone have its SCID adopted")
+	assert.False(t, c.haveRecv[spaceInitial],
+		"a 0-RTT packet was processed in the Initial packet-number space")
 }
 
 // TestConformance_RFC9000_Sec123_ReplayedPacketDiscarded pins "A receiver MUST
@@ -363,16 +356,11 @@ func newMidHandshakeReplayConn(t *testing.T) (*Conn, func(pn uint64) []byte) {
 		tpInt(tpInitialMaxStreamsBidi, 16),
 	)
 	c, err := NewConn(&closePC{}, &tls.Config{ServerName: "example.com", RootCAs: pool}, tp)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := c.hs.Start(context.Background()); err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, err)
+	require.NoError(t, c.hs.Start(context.Background()))
 	// Asserted, not assumed: the arm is worth nothing if the fixture is complete.
-	if c.handshakeComplete {
-		t.Fatal("the in-flight fixture must start with the handshake unfinished")
-	}
+	require.False(t, c.handshakeComplete,
+		"the in-flight fixture must start with the handshake unfinished")
 	_, serverKeys := InitialKeys(c.origDCID)
 	return c, func(pn uint64) []byte {
 		return craftServerInitial(t, serverKeys, nil, []byte{0xaa}, pn, appendPing(nil))
@@ -404,47 +392,37 @@ func testReplayDiscarded(t *testing.T, arm replayArm) {
 	// quietly became ack-eliciting would leave the untested case untested again.
 	ackOwed := func(stage string) {
 		t.Helper()
-		if got := c.acks[sp].ackPending(); got != arm.ackEliciting {
-			t.Fatalf("%s: ACK owed = %v, want %v (the packet is ack-eliciting: %v)",
-				stage, got, arm.ackEliciting, arm.ackEliciting)
-		}
+		got := c.acks[sp].ackPending()
+		require.Equalf(t, arm.ackEliciting, got,
+			"%s: ACK owed = %v, want %v (the packet is ack-eliciting: %v)",
+			stage, got, arm.ackEliciting, arm.ackEliciting)
 	}
-
 	captured := craft(arm.pn)
 	deliver := func(pkt []byte) error { return c.recvDatagram(append([]byte(nil), pkt...)) }
-
-	if err := deliver(captured); err != nil {
-		t.Fatalf("first recvDatagram = %v, want nil", err)
-	}
+	require.NoError(t, deliver(captured), "first recvDatagram")
 	ackOwed("first delivery")
-	if !c.lastActivity.Equal(start) {
-		t.Fatalf("a processed packet must reset the idle timer: lastActivity = %v, want %v",
-			c.lastActivity, start)
-	}
+	require.Truef(t, c.lastActivity.Equal(start),
+		"a processed packet must reset the idle timer: lastActivity = %v, want %v",
+		c.lastActivity, start)
 	c.acks[sp].acked()           // the ACK went out
 	now = start.Add(time.Minute) // time passes before the replay arrives
 
-	if err := deliver(captured); err != nil {
-		t.Fatalf("replayed recvDatagram = %v, want nil (discarded)", err)
-	}
-	if c.acks[sp].ackPending() {
-		t.Error("a replayed packet was processed again: it re-owed an ACK")
-	}
-	if !c.lastActivity.Equal(start) {
-		t.Errorf("a replayed packet advanced the idle timer to %v, want it left at %v",
-			c.lastActivity, start)
-	}
+	err := deliver(captured)
+
+	require.NoErrorf(t, err, "replayed recvDatagram = %v, want nil (discarded)", err)
+	assert.False(t, c.acks[sp].ackPending(),
+		"a replayed packet was processed again: it re-owed an ACK")
+	assert.Truef(t, c.lastActivity.Equal(start),
+		"a replayed packet advanced the idle timer to %v, want it left at %v",
+		c.lastActivity, start)
 
 	// Control: a genuinely new packet number is still processed, and still does
 	// what the replay must not.
-	if err := deliver(craft(arm.pn + 1)); err != nil {
-		t.Fatalf("fresh recvDatagram = %v, want nil", err)
-	}
+	require.NoError(t, deliver(craft(arm.pn+1)), "fresh recvDatagram")
 	ackOwed("control")
-	if !c.lastActivity.Equal(now) {
-		t.Fatalf("control: a new packet must reset the idle timer: lastActivity = %v, want %v",
-			c.lastActivity, now)
-	}
+	require.Truef(t, c.lastActivity.Equal(now),
+		"control: a new packet must reset the idle timer: lastActivity = %v, want %v",
+		c.lastActivity, now)
 }
 
 // testReplayAppFramesNotDispatched is the 1-RTT arm, and it observes FRAME
@@ -475,49 +453,38 @@ func testReplayAppFramesNotDispatched(t *testing.T) {
 	var want []byte // the PATH_RESPONSEs dispatch is allowed to have queued so far
 	check := func(stage string) {
 		t.Helper()
-		if !bytes.Equal(c.pendingCtrl, want) {
-			t.Errorf("%s: pendingCtrl = %x, want %x (%d PATH_RESPONSEs)",
-				stage, c.pendingCtrl, want, len(want)/9)
-		}
+		assert.Truef(t, bytes.Equal(c.pendingCtrl, want),
+			"%s: pendingCtrl = %x, want %x (%d PATH_RESPONSEs)",
+			stage, c.pendingCtrl, want, len(want)/9)
 	}
-
 	lowData := [8]byte{'l', 'o', 'w', 'c', 'h', 'a', 'l', 'l'}
 	low := craft(5, lowData)
-	if err := deliver(low); err != nil {
-		t.Fatalf("recvDatagram(pn=5) = %v, want nil", err)
-	}
+	require.NoError(t, deliver(low), "recvDatagram(pn=5)")
 	want = appendPathResponse(want, lowData)
 	check("first delivery")
-
 	// A higher number lands next, so the replay below is no longer the largest
 	// received and a largest-only dedup would wave it through.
 	highData := [8]byte{'h', 'i', 'g', 'h', 'c', 'h', 'a', 'l'}
-	if err := deliver(craft(9, highData)); err != nil {
-		t.Fatalf("recvDatagram(pn=9) = %v, want nil", err)
-	}
+	require.NoError(t, deliver(craft(9, highData)), "recvDatagram(pn=9)")
 	want = appendPathResponse(want, highData)
 	check("higher packet number")
 	c.acks[spaceApp].acked() // both ACKs went out
 
-	if err := deliver(low); err != nil {
-		t.Fatalf("replayed recvDatagram = %v, want nil (discarded)", err)
-	}
+	err := deliver(low)
+
+	require.NoErrorf(t, err, "replayed recvDatagram = %v, want nil (discarded)", err)
 	check("after the replay: its PATH_CHALLENGE was dispatched a second time")
-	if c.acks[spaceApp].ackPending() {
-		t.Error("a replayed packet was processed again: it re-owed an ACK")
-	}
+	assert.False(t, c.acks[spaceApp].ackPending(),
+		"a replayed packet was processed again: it re-owed an ACK")
 
 	// Control: a genuinely new packet number in the same space still dispatches,
 	// so the arm is not passing merely because nothing ever reaches the handlers.
 	freshData := [8]byte{'f', 'r', 'e', 's', 'h', 'c', 'h', 'l'}
-	if err := deliver(craft(10, freshData)); err != nil {
-		t.Fatalf("fresh recvDatagram = %v, want nil", err)
-	}
+	require.NoError(t, deliver(craft(10, freshData)), "fresh recvDatagram")
 	want = appendPathResponse(want, freshData)
 	check("control")
-	if !c.acks[spaceApp].ackPending() {
-		t.Fatal("control: a new packet number must still be processed")
-	}
+	require.True(t, c.acks[spaceApp].ackPending(),
+		"control: a new packet number must still be processed")
 }
 
 // TestConformance_RFC9000_Sec174_SpinBitRandomPerConnection pins §17.4's
@@ -530,41 +497,33 @@ func TestConformance_RFC9000_Sec174_SpinBitRandomPerConnection(t *testing.T) {
 		dcid := []byte("spinbit0")
 		keys, _ := InitialKeys(dcid)
 		sealer, err := NewSealer(keys)
-		if err != nil {
-			t.Fatal(err)
-		}
+		require.NoError(t, err)
 		c := &Conn{pc: &closePC{}, dcid: dcid, oneRTTSealer: sealer, spin: spin, now: func() time.Time { return time.Unix(9, 0) }}
 		pkt, err := c.sealPacket(spaceApp, appendPing(nil), true, nil, false)
-		if err != nil {
-			t.Fatalf("sealPacket: %v", err)
-		}
+		require.NoErrorf(t, err, "sealPacket: %v", err)
 		return pkt[0]
 	}
-	if got := seal(true) & 0x20; got == 0 {
-		t.Fatal("spin=true must set bit 0x20 on the short header")
-	}
-	if got := seal(false) & 0x20; got != 0 {
-		t.Fatal("spin=false must leave bit 0x20 clear")
-	}
+	tlsCfg := &tls.Config{InsecureSkipVerify: true, NextProtos: []string{"h3"}}
 
+	setBit := seal(true) & 0x20
+	clearBit := seal(false) & 0x20
 	// The value is actually drawn per connection, not hard-coded: over enough
 	// NewConn calls both values must appear.
-	tlsCfg := &tls.Config{InsecureSkipVerify: true, NextProtos: []string{"h3"}}
 	var seenTrue, seenFalse bool
 	for i := 0; i < 64 && (!seenTrue || !seenFalse); i++ {
 		c, err := NewConn(&closePC{}, tlsCfg, nil)
-		if err != nil {
-			t.Fatalf("NewConn: %v", err)
-		}
+		require.NoErrorf(t, err, "NewConn: %v", err)
 		if c.spin {
 			seenTrue = true
 		} else {
 			seenFalse = true
 		}
 	}
-	if !seenTrue || !seenFalse {
-		t.Fatalf("spin bit is not random per connection: sawTrue=%v sawFalse=%v", seenTrue, seenFalse)
-	}
+
+	assert.NotZero(t, setBit, "spin=true must set bit 0x20 on the short header")
+	assert.Zero(t, clearBit, "spin=false must leave bit 0x20 clear")
+	assert.Truef(t, seenTrue && seenFalse,
+		"spin bit is not random per connection: sawTrue=%v sawFalse=%v", seenTrue, seenFalse)
 }
 
 // TestConformance_RFC9000_Sec123_ReorderedPacketNotDiscarded is the false-reject
@@ -579,37 +538,31 @@ func TestConformance_RFC9000_Sec123_ReorderedPacketNotDiscarded(t *testing.T) {
 
 	c := newInitialConn(t, origDCID)
 	// pn 1 overtakes pn 0 on the wire.
-	if err := c.recvDatagram(craftServerInitial(t, serverKeys, nil, []byte{0xaa}, 1, appendPing(nil))); err != nil {
-		t.Fatalf("recvDatagram(pn=1) = %v", err)
-	}
+	require.NoError(t, c.recvDatagram(craftServerInitial(t, serverKeys, nil, []byte{0xaa}, 1, appendPing(nil))),
+		"recvDatagram(pn=1)")
 	c.acks[spaceInitial].acked()
-	if err := c.recvDatagram(craftServerInitial(t, serverKeys, nil, []byte{0xaa}, 0, appendPing(nil))); err != nil {
-		t.Fatalf("recvDatagram(pn=0) = %v", err)
-	}
-	if !c.acks[spaceInitial].ackPending() {
-		t.Fatal("a reordered lower packet number was discarded as a duplicate")
-	}
+
+	err := c.recvDatagram(craftServerInitial(t, serverKeys, nil, []byte{0xaa}, 0, appendPing(nil)))
+
+	require.NoErrorf(t, err, "recvDatagram(pn=0) = %v", err)
+	assert.True(t, c.acks[spaceInitial].ackPending(),
+		"a reordered lower packet number was discarded as a duplicate")
 
 	// Only actual truncation closes the floor. Force >maxAckRanges gaps, then a
 	// number under the retained window becomes undecidable and is discarded.
 	var a ackTracker
+
 	for i := 0; i <= maxAckRanges; i++ {
 		a.receive(uint64(100+2*i), true) // permanent gaps: one range per packet
 	}
-	if !a.truncated {
-		t.Fatalf("expected truncation after %d gapped packets", maxAckRanges+1)
-	}
+
+	require.Truef(t, a.truncated, "expected truncation after %d gapped packets", maxAckRanges+1)
 	// 100 is inside the range that truncation dropped: genuinely undecidable.
-	if !a.seen(100) {
-		t.Fatal("a number inside a dropped range must count as seen")
-	}
+	assert.True(t, a.seen(100), "a number inside a dropped range must count as seen")
 	// 101 was never received and sits above the dropped range, so it is still
 	// provably new — the floor must not be raised to the last retained range's lo.
-	if a.seen(101) {
-		t.Fatalf("lowWater = %d over-discards: 101 was never received and is provably new", a.lowWater)
-	}
+	assert.Falsef(t, a.seen(101),
+		"lowWater = %d over-discards: 101 was never received and is provably new", a.lowWater)
 	// And a gap inside the retained window stays new.
-	if a.seen(103) {
-		t.Fatal("a gap inside the retained window is still decidably new")
-	}
+	assert.False(t, a.seen(103), "a gap inside the retained window is still decidably new")
 }

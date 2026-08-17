@@ -5,6 +5,9 @@ package quic
 import (
 	"bytes"
 	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // buildACK's ACK Range section started from a nil slice on every ACK, so a
@@ -17,7 +20,12 @@ import (
 // the allocation.
 //
 // Behind !race for the reason the other allocation gates are: the detector
-// allocates as it instruments.
+// allocates as it instruments. For the same reason no testify assertion may
+// appear INSIDE the measured closure: require/assert reflect over their
+// arguments and box them into an interface slice, and AllocsPerRun counts the
+// whole process, so one call in there would be charged to every iteration and
+// the gate would be measuring the assertion library instead of buildACK. Every
+// assertion below sits outside the measurement.
 
 // ackTrackerWithGaps returns a tracker holding n disjoint ranges, so buildACK has
 // n-1 extra ACK ranges to encode. Descending because ranges[0] is the largest.
@@ -39,10 +47,9 @@ func TestBuildACK_NoAllocPerACK(t *testing.T) {
 	n := testing.AllocsPerRun(200, func() {
 		_ = a.buildACK(dst[:0], 0)
 	})
-	if n != 0 {
-		t.Errorf("buildACK allocates %.1f per ACK, want 0 — the ACK Range scratch is "+
-			"being rebuilt from nil on every call", n)
-	}
+
+	assert.Zerof(t, n, "buildACK allocates %.1f per ACK, want 0 — the ACK Range scratch is "+
+		"being rebuilt from nil on every call", n)
 }
 
 // TestBuildACK_ShorterACKDoesNotCarryStaleRanges is the hazard the scratch
@@ -56,19 +63,17 @@ func TestBuildACK_NoAllocPerACK(t *testing.T) {
 func TestBuildACK_ShorterACKDoesNotCarryStaleRanges(t *testing.T) {
 	warm := ackTrackerWithGaps(8)
 	_ = warm.buildACK(nil, 0) // fill the scratch with 7 extra ranges
+	fresh := ackTrackerWithGaps(8)
 
 	// Now the same tracker reports far fewer ranges.
 	warm.ranges = warm.ranges[:2]
 	got := warm.buildACK(nil, 0)
-
-	fresh := ackTrackerWithGaps(8)
 	fresh.ranges = fresh.ranges[:2]
 	want := fresh.buildACK(nil, 0)
 
-	if !bytes.Equal(got, want) {
-		t.Errorf("an ACK built after a longer one differs from the same ACK built fresh:\n"+
+	assert.Truef(t, bytes.Equal(got, want),
+		"an ACK built after a longer one differs from the same ACK built fresh:\n"+
 			" got %x\nwant %x\nthe reused scratch leaked the previous ACK's ranges", got, want)
-	}
 }
 
 // TestBuildACK_ScratchIsPerTracker pins that the scratch belongs to the tracker
@@ -88,16 +93,15 @@ func TestBuildACK_ShorterACKDoesNotCarryStaleRanges(t *testing.T) {
 func TestBuildACK_ScratchIsPerTracker(t *testing.T) {
 	a := ackTrackerWithGaps(6)
 	b := ackTrackerWithGaps(3)
+
 	_ = a.buildACK(nil, 0)
 	_ = b.buildACK(nil, 0)
 
-	if len(a.extra) == 0 || len(b.extra) == 0 {
-		t.Fatalf("scratch not populated (a=%d b=%d); the test cannot observe sharing",
-			len(a.extra), len(b.extra))
-	}
-	if &a.extra[0] == &b.extra[0] {
-		t.Error("two trackers' ACK Range scratches share a backing array — the scratch " +
-			"is package-level, so every connection and every packet-number space writes " +
+	require.Falsef(t, len(a.extra) == 0 || len(b.extra) == 0,
+		"scratch not populated (a=%d b=%d); the test cannot observe sharing",
+		len(a.extra), len(b.extra))
+	assert.NotSame(t, &a.extra[0], &b.extra[0],
+		"two trackers' ACK Range scratches share a backing array — the scratch "+
+			"is package-level, so every connection and every packet-number space writes "+
 			"into the same slice")
-	}
 }
