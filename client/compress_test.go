@@ -13,6 +13,8 @@ import (
 	"time"
 
 	"github.com/klauspost/compress/zstd"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	"github.com/lodgvideon/poseidon-http-client/conn"
 	"github.com/lodgvideon/poseidon-http-client/http3"
@@ -61,9 +63,7 @@ func countHeader(hs []conn.HeaderField, name string) int {
 func decodeWith(t testing.TB, enc ContentEncoding, data []byte) []byte {
 	t.Helper()
 	out, err := decompressFully(enc, data, DefaultMaxDecompressedSize)
-	if err != nil {
-		t.Fatalf("decompress %v: %v", enc, err)
-	}
+	require.NoErrorf(t, err, "decompress %v: what this client encoded must be decodable", enc)
 	return out
 }
 
@@ -89,15 +89,11 @@ func TestPrepareCompressedRequest_IdentityIsTheSameRequest(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			got, release, err := prepareCompressedRequest(tc.req)
-			if err != nil {
-				t.Fatalf("prepareCompressedRequest: %v", err)
-			}
-			if got != tc.req {
-				t.Errorf("returned a copy; identity must return the caller's own request unchanged")
-			}
-			if release != nil {
-				t.Errorf("identity path allocated a release func; want nil")
-			}
+
+			require.NoError(t, err, "prepareCompressedRequest")
+			assert.Same(t, tc.req, got,
+				"returned a copy; identity must return the caller's own request unchanged")
+			assert.True(t, release == nil, "identity path allocated a release func; want nil")
 		})
 	}
 }
@@ -159,9 +155,9 @@ func TestCompress_Identity_H1WireBytesUnchanged(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			got := string(captureH1Request(t, tc.req()))
-			if got != tc.want {
-				t.Errorf("CompressBody: EncodingIdentity changed the wire.\n got: %q\nwant: %q", got, tc.want)
-			}
+
+			assert.Equalf(t, tc.want, got,
+				"CompressBody: EncodingIdentity changed the wire.\n got: %q\nwant: %q", got, tc.want)
 		})
 	}
 }
@@ -181,19 +177,17 @@ func TestPrepareCompressedRequest_ManualHeaderAloneIsUntouched(t *testing.T) {
 			{Name: []byte("content-length"), Value: []byte(strconv.Itoa(len(precompressed)))},
 		},
 	}
+
 	got, _, err := prepareCompressedRequest(req)
-	if err != nil {
-		t.Fatalf("prepareCompressedRequest: %v", err)
-	}
-	if !bytes.Equal(got.Body, precompressed) {
-		t.Errorf("body was re-encoded: got %d bytes, want the caller's %d", len(got.Body), len(precompressed))
-	}
-	if v, _ := headerValue(got.Headers, "content-length"); v != strconv.Itoa(len(precompressed)) {
-		t.Errorf("content-length = %q, want the caller's %d", v, len(precompressed))
-	}
-	if countHeader(got.Headers, "content-encoding") != 1 {
-		t.Errorf("content-encoding count = %d, want 1", countHeader(got.Headers, "content-encoding"))
-	}
+
+	require.NoError(t, err, "prepareCompressedRequest")
+	assert.Truef(t, bytes.Equal(got.Body, precompressed),
+		"body was re-encoded: got %d bytes, want the caller's %d", len(got.Body), len(precompressed))
+	v, _ := headerValue(got.Headers, "content-length")
+	assert.Equalf(t, strconv.Itoa(len(precompressed)), v,
+		"content-length = %q, want the caller's %d", v, len(precompressed))
+	assert.Equalf(t, 1, countHeader(got.Headers, "content-encoding"),
+		"content-encoding count = %d, want 1", countHeader(got.Headers, "content-encoding"))
 }
 
 // ── conflicts and unknown codings ────────────────────────────────
@@ -210,23 +204,21 @@ func TestCompressBody_ConflictsWithManualHeader(t *testing.T) {
 				CompressBody: EncodingGzip,
 				Headers:      []conn.HeaderField{{Name: []byte(hdr), Value: []byte("gzip")}},
 			}
-			_, _, err := prepareCompressedRequest(req)
-			if !errors.Is(err, ErrConflictingContentEncoding) {
-				t.Errorf("prepareCompressedRequest err = %v, want ErrConflictingContentEncoding", err)
-			}
+			_, _, prepErr := prepareCompressedRequest(req)
+			validateErr := validateRequest(req)
+
+			assert.ErrorIsf(t, prepErr, ErrConflictingContentEncoding,
+				"prepareCompressedRequest err = %v, want ErrConflictingContentEncoding", prepErr)
 			// validateRequest must reject it too, so Do fails before a
 			// connection is opened.
-			if err := validateRequest(req); !errors.Is(err, ErrConflictingContentEncoding) {
-				t.Errorf("validateRequest err = %v, want ErrConflictingContentEncoding", err)
-			}
+			assert.ErrorIsf(t, validateErr, ErrConflictingContentEncoding,
+				"validateRequest err = %v, want ErrConflictingContentEncoding", validateErr)
 			// A conflicting request can never succeed, so it must also be a
 			// hard stop: retrying it is pure waste.
-			if err := validateRequest(req); !errors.Is(err, ErrInvalidRequest) {
-				t.Errorf("validateRequest err = %v, want it to wrap ErrInvalidRequest", err)
-			}
-			if !isHardStop(validateRequest(req)) {
-				t.Error("conflicting content-encoding is retryable; want hard stop")
-			}
+			assert.ErrorIsf(t, validateErr, ErrInvalidRequest,
+				"validateRequest err = %v, want it to wrap ErrInvalidRequest", validateErr)
+			assert.True(t, isHardStop(validateErr),
+				"conflicting content-encoding is retryable; want hard stop")
 		})
 	}
 }
@@ -238,13 +230,14 @@ func TestCompressBody_UnknownEncodingIsAnError(t *testing.T) {
 	for _, enc := range []ContentEncoding{99, -1, EncodingZstd + 1} {
 		t.Run(strconv.Itoa(int(enc)), func(t *testing.T) {
 			req := &Request{Method: "POST", Path: "/", Body: []byte("payload"), CompressBody: enc}
-			_, _, err := prepareCompressedRequest(req)
-			if !errors.Is(err, ErrUnsupportedContentEncoding) {
-				t.Errorf("prepareCompressedRequest err = %v, want ErrUnsupportedContentEncoding", err)
-			}
-			if err := validateRequest(req); !errors.Is(err, ErrUnsupportedContentEncoding) {
-				t.Errorf("validateRequest err = %v, want ErrUnsupportedContentEncoding", err)
-			}
+
+			_, _, prepErr := prepareCompressedRequest(req)
+			validateErr := validateRequest(req)
+
+			assert.ErrorIsf(t, prepErr, ErrUnsupportedContentEncoding,
+				"prepareCompressedRequest err = %v, want ErrUnsupportedContentEncoding", prepErr)
+			assert.ErrorIsf(t, validateErr, ErrUnsupportedContentEncoding,
+				"validateRequest err = %v, want ErrUnsupportedContentEncoding", validateErr)
 		})
 	}
 }
@@ -267,54 +260,42 @@ func TestPrepareCompressedRequest_Buffered(t *testing.T) {
 				CompressBody:  tc.enc,
 				Headers:       []conn.HeaderField{{Name: []byte("x-test"), Value: []byte("1")}},
 			}
+
 			eff, release, err := prepareCompressedRequest(req)
-			if err != nil {
-				t.Fatalf("prepareCompressedRequest: %v", err)
-			}
+
+			require.NoError(t, err, "prepareCompressedRequest")
 			if release != nil {
 				defer release()
 			}
-
 			// The caller's request must not be mutated.
-			if req.CompressBody != tc.enc || !bytes.Equal(req.Body, raw) || len(req.Headers) != 1 {
-				t.Error("caller's Request was mutated")
-			}
-
+			assert.Equal(t, tc.enc, req.CompressBody, "caller's Request.CompressBody was mutated")
+			assert.True(t, bytes.Equal(req.Body, raw), "caller's Request.Body was mutated")
+			assert.Len(t, req.Headers, 1, "caller's Request.Headers was mutated")
 			// The client sets content-encoding itself.
-			if v, ok := headerValue(eff.Headers, "content-encoding"); !ok || v != tc.token {
-				t.Errorf("content-encoding = %q (present=%v), want %q", v, ok, tc.token)
-			}
+			ce, ceOK := headerValue(eff.Headers, "content-encoding")
+			assert.Truef(t, ceOK && ce == tc.token,
+				"content-encoding = %q (present=%v), want %q", ce, ceOK, tc.token)
 			// content-length must be the compressed size, not the caller's.
 			v, ok := headerValue(eff.Headers, "content-length")
-			if !ok {
-				t.Fatal("content-length absent; a buffered compressed body has a knowable length")
-			}
-			if v != strconv.Itoa(len(eff.Body)) {
-				t.Errorf("content-length = %q, want %d (the compressed size)", v, len(eff.Body))
-			}
-			if v == strconv.Itoa(len(raw)) {
-				t.Errorf("content-length = %q is the caller's uncompressed size", v)
-			}
+			require.True(t, ok, "content-length absent; a buffered compressed body has a knowable length")
+			assert.Equalf(t, strconv.Itoa(len(eff.Body)), v,
+				"content-length = %q, want %d (the compressed size)", v, len(eff.Body))
+			assert.NotEqualf(t, strconv.Itoa(len(raw)), v,
+				"content-length = %q is the caller's uncompressed size", v)
 			// Caller headers survive.
-			if hv, _ := headerValue(eff.Headers, "x-test"); hv != "1" {
-				t.Error("caller's headers were dropped")
-			}
+			hv, _ := headerValue(eff.Headers, "x-test")
+			assert.Equal(t, "1", hv, "caller's headers were dropped")
 			// The effective request must be inert: a second prepare is a no-op,
 			// which is what makes the retry hoist safe.
-			if eff.CompressBody != EncodingIdentity {
-				t.Error("effective request still asks for compression; a second prepare would double-compress")
-			}
-			if eff.BodyReader != nil {
-				t.Error("buffered body became a stream")
-			}
-
+			assert.Equal(t, EncodingIdentity, eff.CompressBody,
+				"effective request still asks for compression; a second prepare would double-compress")
+			assert.True(t, eff.BodyReader == nil, "buffered body became a stream")
 			// The bytes on the wire must decompress back to the original.
-			if got := decodeWith(t, tc.enc, eff.Body); !bytes.Equal(got, raw) {
-				t.Errorf("round trip mismatch: got %d bytes, want %d", len(got), len(raw))
-			}
-			if len(eff.Body) >= len(raw) {
-				t.Errorf("compressed %d -> %d bytes: not actually compressing", len(raw), len(eff.Body))
-			}
+			got := decodeWith(t, tc.enc, eff.Body)
+			assert.Truef(t, bytes.Equal(got, raw),
+				"round trip mismatch: got %d bytes, want %d", len(got), len(raw))
+			assert.Lessf(t, len(eff.Body), len(raw),
+				"compressed %d -> %d bytes: not actually compressing", len(raw), len(eff.Body))
 		})
 	}
 }
@@ -333,19 +314,18 @@ func TestPrepareCompressedRequest_BufferedStripsCallerContentLength(t *testing.T
 			{Name: []byte("Content-Length"), Value: []byte(strconv.Itoa(len(raw)))},
 		},
 	}
+
 	eff, release, err := prepareCompressedRequest(req)
-	if err != nil {
-		t.Fatalf("prepareCompressedRequest: %v", err)
-	}
+
+	require.NoError(t, err, "prepareCompressedRequest")
 	if release != nil {
 		defer release()
 	}
-	if n := countHeader(eff.Headers, "content-length"); n != 1 {
-		t.Fatalf("content-length count = %d, want exactly 1", n)
-	}
-	if v, _ := headerValue(eff.Headers, "content-length"); v != strconv.Itoa(len(eff.Body)) {
-		t.Errorf("content-length = %q, want %d (compressed)", v, len(eff.Body))
-	}
+	require.Equalf(t, 1, countHeader(eff.Headers, "content-length"),
+		"content-length count = %d, want exactly 1 — two disagreeing values would frame the "+
+			"HTTP/1.1 body at the wrong length", countHeader(eff.Headers, "content-length"))
+	v, _ := headerValue(eff.Headers, "content-length")
+	assert.Equalf(t, strconv.Itoa(len(eff.Body)), v, "content-length = %q, want %d (compressed)", v, len(eff.Body))
 }
 
 // TestPrepareCompressedRequest_NoBodyIsUntouched pins the bodyless case: there
@@ -356,16 +336,13 @@ func TestPrepareCompressedRequest_NoBodyIsUntouched(t *testing.T) {
 	for _, tc := range allCodecs {
 		t.Run(tc.name, func(t *testing.T) {
 			req := &Request{Method: "GET", Path: "/", CompressBody: tc.enc}
+
 			eff, _, err := prepareCompressedRequest(req)
-			if err != nil {
-				t.Fatalf("prepareCompressedRequest: %v", err)
-			}
-			if eff != req {
-				t.Error("bodyless request was rewritten")
-			}
-			if _, ok := headerValue(eff.Headers, "content-encoding"); ok {
-				t.Error("content-encoding set on a request with no body")
-			}
+
+			require.NoError(t, err, "prepareCompressedRequest")
+			assert.Same(t, req, eff, "bodyless request was rewritten")
+			_, ok := headerValue(eff.Headers, "content-encoding")
+			assert.False(t, ok, "content-encoding set on a request with no body")
 		})
 	}
 }
@@ -389,40 +366,30 @@ func TestPrepareCompressedRequest_Streaming(t *testing.T) {
 					{Name: []byte("content-length"), Value: []byte(strconv.Itoa(len(raw)))},
 				},
 			}
-			eff, release, err := prepareCompressedRequest(req)
-			if err != nil {
-				t.Fatalf("prepareCompressedRequest: %v", err)
-			}
-			if release == nil {
-				t.Fatal("streaming path returned no release; the pooled writer would leak")
-			}
-			defer release()
 
-			if v, ok := headerValue(eff.Headers, "content-encoding"); !ok || v != tc.token {
-				t.Errorf("content-encoding = %q (present=%v), want %q", v, ok, tc.token)
-			}
+			eff, release, err := prepareCompressedRequest(req)
+
+			require.NoError(t, err, "prepareCompressedRequest")
+			require.True(t, release != nil, "streaming path returned no release; the pooled writer would leak")
+			defer release()
+			ce, ceOK := headerValue(eff.Headers, "content-encoding")
+			assert.Truef(t, ceOK && ce == tc.token,
+				"content-encoding = %q (present=%v), want %q", ce, ceOK, tc.token)
 			// Both routes to a content-length must be shut off: the header the
 			// caller set, and the ContentLength field buildHeaders reads.
-			if v, ok := headerValue(eff.Headers, "content-length"); ok {
-				t.Errorf("content-length = %q present; the compressed length is unknowable up front", v)
-			}
-			if eff.ContentLength != 0 {
-				t.Errorf("ContentLength = %d, want 0 so buildHeaders emits no length", eff.ContentLength)
-			}
-			if eff.BodyReader == nil {
-				t.Fatal("BodyReader is nil")
-			}
-
+			cl, clOK := headerValue(eff.Headers, "content-length")
+			assert.Falsef(t, clOK,
+				"content-length = %q present; the compressed length is unknowable up front", cl)
+			assert.EqualValuesf(t, 0, eff.ContentLength,
+				"ContentLength = %d, want 0 so buildHeaders emits no length", eff.ContentLength)
+			require.True(t, eff.BodyReader != nil, "BodyReader is nil")
 			out, err := io.ReadAll(eff.BodyReader)
-			if err != nil {
-				t.Fatalf("read compressed stream: %v", err)
-			}
-			if got := decodeWith(t, tc.enc, out); !bytes.Equal(got, raw) {
-				t.Errorf("round trip mismatch: got %d bytes, want %d", len(got), len(raw))
-			}
-			if len(out) >= len(raw) {
-				t.Errorf("compressed %d -> %d bytes: not actually compressing", len(raw), len(out))
-			}
+			require.NoError(t, err, "read compressed stream")
+			got := decodeWith(t, tc.enc, out)
+			assert.Truef(t, bytes.Equal(got, raw),
+				"round trip mismatch: got %d bytes, want %d", len(got), len(raw))
+			assert.Lessf(t, len(out), len(raw),
+				"compressed %d -> %d bytes: not actually compressing", len(raw), len(out))
 		})
 	}
 }
@@ -439,18 +406,17 @@ func TestPrepareCompressedRequest_StreamingEmpty(t *testing.T) {
 				BodyReader:   bytes.NewReader(nil),
 				CompressBody: tc.enc,
 			}
+
 			eff, release, err := prepareCompressedRequest(req)
-			if err != nil {
-				t.Fatalf("prepareCompressedRequest: %v", err)
-			}
+
+			require.NoError(t, err, "prepareCompressedRequest")
 			defer release()
 			out, err := io.ReadAll(eff.BodyReader)
-			if err != nil {
-				t.Fatalf("read: %v", err)
-			}
-			if got := decodeWith(t, tc.enc, out); len(got) != 0 {
-				t.Errorf("empty stream decoded to %d bytes, want 0", len(got))
-			}
+			require.NoError(t, err, "read")
+			got := decodeWith(t, tc.enc, out)
+			assert.Emptyf(t, got,
+				"empty stream decoded to %d bytes, want 0 — an empty body must still be a valid "+
+					"frame the peer can decode, not zero bytes claiming to be one", len(got))
 		})
 	}
 }
@@ -485,14 +451,13 @@ func TestPrepareCompressedRequest_StreamingSourceError(t *testing.T) {
 				CompressBody: tc.enc,
 			}
 			eff, release, err := prepareCompressedRequest(req)
-			if err != nil {
-				t.Fatalf("prepareCompressedRequest: %v", err)
-			}
+			require.NoError(t, err, "prepareCompressedRequest")
 			defer release()
+
 			_, err = io.ReadAll(eff.BodyReader)
-			if !errors.Is(err, sentinel) {
-				t.Errorf("err = %v, want the source's own error", err)
-			}
+
+			assert.ErrorIsf(t, err, sentinel,
+				"err = %v, want the source's own error — wrapping it opaquely breaks the caller's errors.Is", err)
 		})
 	}
 }
@@ -512,25 +477,19 @@ func TestCompress_H1_BufferedUsesCompressedContentLength(t *testing.T) {
 				CompressBody: tc.enc,
 			}))
 			head, body, ok := strings.Cut(wire, "\r\n\r\n")
-			if !ok {
-				t.Fatalf("malformed request: %q", wire)
-			}
-			if !strings.Contains(head, "content-encoding: "+tc.token+"\r\n") {
-				t.Errorf("head missing content-encoding: %s\n%s", tc.token, head)
-			}
-			if strings.Contains(head, "Transfer-Encoding: chunked") {
-				t.Errorf("chunked used for a body of known length:\n%s", head)
-			}
+
+			require.Truef(t, ok, "malformed request: %q", wire)
+			assert.Containsf(t, head, "content-encoding: "+tc.token+"\r\n",
+				"head missing content-encoding: %s\n%s", tc.token, head)
+			assert.NotContainsf(t, head, "Transfer-Encoding: chunked",
+				"chunked used for a body of known length:\n%s", head)
 			cl := contentLengthOf(head + "\r\n")
-			if cl != len(body) {
-				t.Errorf("Content-Length = %d but %d body bytes followed", cl, len(body))
-			}
-			if cl >= len(raw) {
-				t.Errorf("Content-Length = %d >= uncompressed %d: looks like the caller's length", cl, len(raw))
-			}
-			if got := decodeWith(t, tc.enc, []byte(body)); !bytes.Equal(got, raw) {
-				t.Errorf("server-side decode mismatch: got %d bytes, want %d", len(got), len(raw))
-			}
+			assert.Equalf(t, len(body), cl, "Content-Length = %d but %d body bytes followed", cl, len(body))
+			assert.Lessf(t, cl, len(raw),
+				"Content-Length = %d >= uncompressed %d: looks like the caller's length", cl, len(raw))
+			got := decodeWith(t, tc.enc, []byte(body))
+			assert.Truef(t, bytes.Equal(got, raw),
+				"server-side decode mismatch: got %d bytes, want %d", len(got), len(raw))
 		})
 	}
 }
@@ -550,21 +509,17 @@ func TestCompress_H1_StreamingUsesChunked(t *testing.T) {
 				CompressBody:  tc.enc,
 			}))
 			head, body, ok := strings.Cut(wire, "\r\n\r\n")
-			if !ok {
-				t.Fatalf("malformed request: %q", wire)
-			}
-			if !strings.Contains(head, "content-encoding: "+tc.token+"\r\n") {
-				t.Errorf("head missing content-encoding: %s\n%s", tc.token, head)
-			}
-			if !strings.Contains(head, "Transfer-Encoding: chunked") {
-				t.Errorf("compressed stream not chunked:\n%s", head)
-			}
-			if strings.Contains(strings.ToLower(head), "content-length") {
-				t.Errorf("compressed stream carries a content-length:\n%s", head)
-			}
-			if got := decodeWith(t, tc.enc, dechunk(t, body)); !bytes.Equal(got, raw) {
-				t.Errorf("server-side decode mismatch: got %d bytes, want %d", len(got), len(raw))
-			}
+
+			require.Truef(t, ok, "malformed request: %q", wire)
+			assert.Containsf(t, head, "content-encoding: "+tc.token+"\r\n",
+				"head missing content-encoding: %s\n%s", tc.token, head)
+			assert.Containsf(t, head, "Transfer-Encoding: chunked",
+				"compressed stream not chunked:\n%s", head)
+			assert.NotContainsf(t, strings.ToLower(head), "content-length",
+				"compressed stream carries a content-length:\n%s", head)
+			got := decodeWith(t, tc.enc, dechunk(t, body))
+			assert.Truef(t, bytes.Equal(got, raw),
+				"server-side decode mismatch: got %d bytes, want %d", len(got), len(raw))
 		})
 	}
 }
@@ -576,19 +531,13 @@ func dechunk(t testing.TB, body string) []byte {
 	rest := body
 	for {
 		line, tail, ok := strings.Cut(rest, "\r\n")
-		if !ok {
-			t.Fatalf("truncated chunk header in %q", rest)
-		}
+		require.Truef(t, ok, "truncated chunk header in %q", rest)
 		n, err := strconv.ParseInt(line, 16, 64)
-		if err != nil {
-			t.Fatalf("bad chunk size %q: %v", line, err)
-		}
+		require.NoErrorf(t, err, "bad chunk size %q", line)
 		if n == 0 {
 			return out.Bytes()
 		}
-		if int64(len(tail)) < n+2 {
-			t.Fatalf("truncated chunk body")
-		}
+		require.GreaterOrEqual(t, int64(len(tail)), n+2, "truncated chunk body")
 		out.WriteString(tail[:n])
 		rest = tail[n+2:]
 	}
@@ -634,35 +583,28 @@ func TestCompress_H2_EndToEnd(t *testing.T) {
 					req.BodyReader = bytes.NewReader(raw)
 					req.ContentLength = int64(len(raw))
 				}
+
 				var resp Response
-				if err := c.Do(context.Background(), req, &resp); err != nil {
-					t.Fatalf("Do: %v", err)
-				}
-				if resp.Status != http.StatusNoContent {
-					t.Fatalf("status = %d", resp.Status)
-				}
+				err := c.Do(context.Background(), req, &resp)
+
+				require.NoError(t, err, "Do")
+				require.Equalf(t, http.StatusNoContent, resp.Status, "status = %d", resp.Status)
 				r := <-got
-				if r.proto != "HTTP/2.0" {
-					t.Fatalf("proto = %q, want HTTP/2.0", r.proto)
-				}
-				if r.contentEncoding != tc.token {
-					t.Errorf("server saw content-encoding = %q, want %q", r.contentEncoding, tc.token)
-				}
+				require.Equalf(t, "HTTP/2.0", r.proto,
+					"proto = %q, want HTTP/2.0 — this must be the h2 path, not an h1 fallback", r.proto)
+				assert.Equalf(t, tc.token, r.contentEncoding,
+					"server saw content-encoding = %q, want %q", r.contentEncoding, tc.token)
 				switch mode {
 				case "buffered":
-					if r.contentLength != strconv.Itoa(len(r.body)) {
-						t.Errorf("server saw content-length = %q, want %d (compressed size)",
-							r.contentLength, len(r.body))
-					}
+					assert.Equalf(t, strconv.Itoa(len(r.body)), r.contentLength,
+						"server saw content-length = %q, want %d (compressed size)", r.contentLength, len(r.body))
 				case "streaming":
-					if r.contentLength != "" {
-						t.Errorf("server saw content-length = %q on a compressed stream, want none",
-							r.contentLength)
-					}
+					assert.Emptyf(t, r.contentLength,
+						"server saw content-length = %q on a compressed stream, want none", r.contentLength)
 				}
-				if out := decodeWith(t, tc.enc, r.body); !bytes.Equal(out, raw) {
-					t.Errorf("server-side body mismatch: got %d bytes, want %d", len(out), len(raw))
-				}
+				out := decodeWith(t, tc.enc, r.body)
+				assert.Truef(t, bytes.Equal(out, raw),
+					"server-side body mismatch: got %d bytes, want %d", len(out), len(raw))
 			})
 		}
 	}
@@ -699,30 +641,28 @@ func TestCompress_H3_EndToEnd(t *testing.T) {
 					req.BodyReader = bytes.NewReader(raw)
 					req.ContentLength = int64(len(raw))
 				}
+
 				var resp Response
-				if err := c.Do(context.Background(), req, &resp); err != nil {
-					t.Fatalf("Do: %v", err)
-				}
+				err := c.Do(context.Background(), req, &resp)
+
+				require.NoError(t, err, "Do")
 				got := fake.gotReq
-				if got == nil {
-					t.Fatal("HTTP/3 layer saw no request")
-				}
-				if v, ok := headerValue(got.Headers, "content-encoding"); !ok || v != tc.token {
-					t.Errorf("h3 request content-encoding = %q (present=%v), want %q", v, ok, tc.token)
-				}
+				require.True(t, got != nil, "HTTP/3 layer saw no request")
+				ce, ceOK := headerValue(got.Headers, "content-encoding")
+				assert.Truef(t, ceOK && ce == tc.token,
+					"h3 request content-encoding = %q (present=%v), want %q", ce, ceOK, tc.token)
 				switch mode {
 				case "buffered":
-					if v, _ := headerValue(got.Headers, "content-length"); v != strconv.Itoa(len(got.Body)) {
-						t.Errorf("h3 content-length = %q, want %d (compressed size)", v, len(got.Body))
-					}
+					v, _ := headerValue(got.Headers, "content-length")
+					assert.Equalf(t, strconv.Itoa(len(got.Body)), v,
+						"h3 content-length = %q, want %d (compressed size)", v, len(got.Body))
 				case "streaming":
-					if v, ok := headerValue(got.Headers, "content-length"); ok {
-						t.Errorf("h3 content-length = %q on a compressed stream, want none", v)
-					}
+					v, ok := headerValue(got.Headers, "content-length")
+					assert.Falsef(t, ok, "h3 content-length = %q on a compressed stream, want none", v)
 				}
-				if out := decodeWith(t, tc.enc, got.Body); !bytes.Equal(out, raw) {
-					t.Errorf("h3 body mismatch: got %d bytes, want %d", len(out), len(raw))
-				}
+				out := decodeWith(t, tc.enc, got.Body)
+				assert.Truef(t, bytes.Equal(out, raw),
+					"h3 body mismatch: got %d bytes, want %d", len(out), len(raw))
 			})
 		}
 	}
@@ -801,43 +741,36 @@ func TestRetry_CompressedBodyIsCompressedOnce(t *testing.T) {
 				Body:         raw,
 				CompressBody: tc.enc,
 			}
+
 			var resp Response
-			if err := r.Do(context.Background(), req, &resp); err != nil {
-				t.Fatalf("Do: %v", err)
-			}
-			if len(d.attempts) != 3 {
-				t.Fatalf("attempts = %d, want 3", len(d.attempts))
-			}
+			err := r.Do(context.Background(), req, &resp)
+
+			require.NoError(t, err, "Do")
+			require.Lenf(t, d.attempts, 3, "attempts = %d, want 3", len(d.attempts))
 			first := d.attempts[0]
-			if first.bodyData == nil {
-				t.Fatal("attempt 0 carried no body")
-			}
+			require.True(t, first.bodyData != nil, "attempt 0 carried no body")
 			for i, got := range d.attempts {
 				// The single proof of "compressed once": same request, same
 				// bytes, not merely equal ones.
-				if got.req != first.req {
-					t.Errorf("attempt %d got a different *Request: the body was re-prepared per attempt", i)
-				}
-				if got.bodyData != first.bodyData {
-					t.Errorf("attempt %d got a freshly allocated body: it was re-compressed per attempt", i)
-				}
+				assert.Samef(t, first.req, got.req,
+					"attempt %d got a different *Request: the body was re-prepared per attempt", i)
+				assert.Truef(t, got.bodyData == first.bodyData,
+					"attempt %d got a freshly allocated body: it was re-compressed per attempt", i)
 				// Inert on arrival, so Client.Do's own prepare is a no-op and
 				// cannot double-encode it.
-				if got.encoding != EncodingIdentity {
-					t.Errorf("attempt %d still asks for %v: Client.Do would compress it again", i, got.encoding)
-				}
-				if out := decodeWith(t, tc.enc, got.body); !bytes.Equal(out, raw) {
-					t.Errorf("attempt %d does not decode back to the original: got %d bytes, want %d",
-						i, len(out), len(raw))
-				}
-				if v, _ := headerValue(got.headers, "content-length"); v != strconv.Itoa(len(got.body)) {
-					t.Errorf("attempt %d content-length = %q, want %d", i, v, len(got.body))
-				}
+				assert.Equalf(t, EncodingIdentity, got.encoding,
+					"attempt %d still asks for %v: Client.Do would compress it again", i, got.encoding)
+				out := decodeWith(t, tc.enc, got.body)
+				assert.Truef(t, bytes.Equal(out, raw),
+					"attempt %d does not decode back to the original: got %d bytes, want %d",
+					i, len(out), len(raw))
+				v, _ := headerValue(got.headers, "content-length")
+				assert.Equalf(t, strconv.Itoa(len(got.body)), v,
+					"attempt %d content-length = %q, want %d", i, v, len(got.body))
 			}
 			// The caller's request is untouched, so it stays reusable.
-			if !bytes.Equal(req.Body, raw) || req.CompressBody != tc.enc {
-				t.Error("Retryer mutated the caller's request")
-			}
+			assert.True(t, bytes.Equal(req.Body, raw), "Retryer mutated the caller's request body")
+			assert.Equal(t, tc.enc, req.CompressBody, "Retryer mutated the caller's CompressBody")
 		})
 	}
 }
@@ -853,20 +786,15 @@ func TestRetry_UncompressedBodyIsUnaffected(t *testing.T) {
 		opts: RetryOptions{MaxAttempts: 3, Backoff: func(int) time.Duration { return 0 }},
 	}
 	req := &Request{Method: "PUT", Path: "/", Body: raw}
+
 	var resp Response
-	if err := r.Do(context.Background(), req, &resp); err != nil {
-		t.Fatalf("Do: %v", err)
-	}
-	if len(d.attempts) != 3 {
-		t.Fatalf("attempts = %d, want 3", len(d.attempts))
-	}
+	err := r.Do(context.Background(), req, &resp)
+
+	require.NoError(t, err, "Do")
+	require.Lenf(t, d.attempts, 3, "attempts = %d, want 3", len(d.attempts))
 	for i, got := range d.attempts {
-		if got.req != req {
-			t.Errorf("attempt %d did not get the caller's own request", i)
-		}
-		if !bytes.Equal(got.body, raw) {
-			t.Errorf("attempt %d body = %q, want %q", i, got.body, raw)
-		}
+		assert.Samef(t, req, got.req, "attempt %d did not get the caller's own request", i)
+		assert.Truef(t, bytes.Equal(got.body, raw), "attempt %d body = %q, want %q", i, got.body, raw)
 	}
 }
 
@@ -883,9 +811,10 @@ func TestRetry_StreamingBodyStillNotRetried(t *testing.T) {
 				CompressBody: enc,
 			}
 			r := &Retryer{opts: RetryOptions{MaxAttempts: 3}}
-			if r.canRetry(req) {
-				t.Error("a streaming body is retryable; the replay would be truncated")
-			}
+
+			got := r.canRetry(req)
+
+			assert.False(t, got, "a streaming body is retryable; the replay would be truncated")
 		})
 	}
 }
@@ -904,14 +833,15 @@ func TestRetry_ConflictIsNotRetried(t *testing.T) {
 		CompressBody: EncodingGzip,
 		Headers:      []conn.HeaderField{{Name: []byte("content-encoding"), Value: []byte("gzip")}},
 	}
+
 	var resp Response
 	err := r.Do(context.Background(), req, &resp)
-	if !errors.Is(err, ErrConflictingContentEncoding) {
-		t.Errorf("err = %v, want ErrConflictingContentEncoding", err)
-	}
-	if len(d.attempts) != 0 {
-		t.Errorf("transport saw %d attempts, want 0", len(d.attempts))
-	}
+
+	assert.ErrorIsf(t, err, ErrConflictingContentEncoding,
+		"err = %v, want ErrConflictingContentEncoding", err)
+	assert.Emptyf(t, d.attempts,
+		"transport saw %d attempts, want 0 — a request that can never succeed must not burn the budget",
+		len(d.attempts))
 }
 
 // ── pooled writer hygiene ────────────────────────────────────────
@@ -939,23 +869,18 @@ func TestCompress_PooledWriterNotPoisonedByError(t *testing.T) {
 					CompressBody: tc.enc,
 				}
 				eff, release, err := prepareCompressedRequest(req)
-				if err != nil {
-					t.Fatalf("iter %d: prepare: %v", i, err)
-				}
-				if _, err := io.Copy(io.Discard, eff.BodyReader); !errors.Is(err, sentinel) {
-					t.Fatalf("iter %d: err = %v, want the source error", i, err)
-				}
+				require.NoErrorf(t, err, "iter %d: prepare", i)
+				_, cerr := io.Copy(io.Discard, eff.BodyReader)
+				require.ErrorIsf(t, cerr, sentinel, "iter %d: err = %v, want the source error", i, cerr)
 				release() // returns the half-used writer to the pool
 
 				// The very next request must draw a clean writer.
 				good := &Request{Method: "POST", Path: "/", Body: raw, CompressBody: tc.enc}
 				geff, grel, err := prepareCompressedRequest(good)
-				if err != nil {
-					t.Fatalf("iter %d: prepare after abort: %v", i, err)
-				}
-				if out := decodeWith(t, tc.enc, geff.Body); !bytes.Equal(out, raw) {
-					t.Fatalf("iter %d: poisoned writer: got %q, want %q", i, out, raw)
-				}
+				require.NoErrorf(t, err, "iter %d: prepare after abort", i)
+				out := decodeWith(t, tc.enc, geff.Body)
+				require.Truef(t, bytes.Equal(out, raw),
+					"iter %d: poisoned writer: got %q, want %q", i, out, raw)
 				if grel != nil {
 					grel()
 				}
@@ -980,23 +905,18 @@ func TestCompress_PooledWriterNotPoisonedByPartialRead(t *testing.T) {
 					CompressBody: tc.enc,
 				}
 				eff, release, err := prepareCompressedRequest(req)
-				if err != nil {
-					t.Fatalf("iter %d: prepare: %v", i, err)
-				}
+				require.NoErrorf(t, err, "iter %d: prepare", i)
 				var b [8]byte
-				if _, err := io.ReadFull(eff.BodyReader, b[:]); err != nil {
-					t.Fatalf("iter %d: short read: %v", i, err)
-				}
+				_, rerr := io.ReadFull(eff.BodyReader, b[:])
+				require.NoErrorf(t, rerr, "iter %d: short read", i)
 				release() // mid-stream: unflushed input, never Closed
 
 				good := &Request{Method: "POST", Path: "/", Body: small, CompressBody: tc.enc}
 				geff, grel, err := prepareCompressedRequest(good)
-				if err != nil {
-					t.Fatalf("iter %d: prepare after partial: %v", i, err)
-				}
-				if out := decodeWith(t, tc.enc, geff.Body); !bytes.Equal(out, small) {
-					t.Fatalf("iter %d: poisoned writer: got %q, want %q", i, out, small)
-				}
+				require.NoErrorf(t, err, "iter %d: prepare after partial", i)
+				out := decodeWith(t, tc.enc, geff.Body)
+				require.Truef(t, bytes.Equal(out, small),
+					"iter %d: poisoned writer: got %q, want %q", i, out, small)
 				if grel != nil {
 					grel()
 				}
@@ -1021,13 +941,11 @@ func TestCompress_PooledWriterSequentialReuse(t *testing.T) {
 				for i, raw := range payloads {
 					req := &Request{Method: "POST", Path: "/", Body: raw, CompressBody: tc.enc}
 					eff, release, err := prepareCompressedRequest(req)
-					if err != nil {
-						t.Fatalf("round %d payload %d: %v", round, i, err)
-					}
-					if out := decodeWith(t, tc.enc, eff.Body); !bytes.Equal(out, raw) {
-						t.Fatalf("round %d payload %d: mismatch (got %d bytes, want %d)",
-							round, i, len(out), len(raw))
-					}
+					require.NoErrorf(t, err, "round %d payload %d", round, i)
+					out := decodeWith(t, tc.enc, eff.Body)
+					require.Truef(t, bytes.Equal(out, raw),
+						"round %d payload %d: mismatch (got %d bytes, want %d)",
+						round, i, len(out), len(raw))
 					if release != nil {
 						release()
 					}
@@ -1047,10 +965,9 @@ func TestCompress_ReleaseIsIdempotent(t *testing.T) {
 		CompressBody: EncodingGzip,
 	}
 	eff, release, err := prepareCompressedRequest(req)
-	if err != nil {
-		t.Fatalf("prepare: %v", err)
-	}
+	require.NoError(t, err, "prepare")
 	_, _ = io.ReadAll(eff.BodyReader)
+
 	release()
 	release() // must not double-Put
 	release()
@@ -1058,12 +975,9 @@ func TestCompress_ReleaseIsIdempotent(t *testing.T) {
 	// The pool must still hand out working writers.
 	good := &Request{Method: "POST", Path: "/", Body: []byte("still fine"), CompressBody: EncodingGzip}
 	geff, _, err := prepareCompressedRequest(good)
-	if err != nil {
-		t.Fatalf("prepare after double release: %v", err)
-	}
-	if out := decodeWith(t, EncodingGzip, geff.Body); string(out) != "still fine" {
-		t.Errorf("got %q, want %q", out, "still fine")
-	}
+	require.NoError(t, err, "prepare after double release")
+	out := decodeWith(t, EncodingGzip, geff.Body)
+	assert.Equalf(t, "still fine", string(out), "got %q, want %q", out, "still fine")
 }
 
 // ── zstd encoder goroutine lifecycle ─────────────────────────────
@@ -1119,9 +1033,8 @@ func TestCompress_Zstd_PooledEncoderIsSynchronous(t *testing.T) {
 
 	// Warm the pool so first-use construction is not read as growth.
 	for i := 0; i < 4; i++ {
-		if _, err := compressBody(EncodingZstd, []byte("warm")); err != nil {
-			t.Fatalf("warmup: %v", err)
-		}
+		_, err := compressBody(EncodingZstd, []byte("warm"))
+		require.NoError(t, err, "warmup")
 	}
 
 	t.Run("negative-control", func(t *testing.T) {
@@ -1131,70 +1044,60 @@ func TestCompress_Zstd_PooledEncoderIsSynchronous(t *testing.T) {
 		base := goroutineBaseline()
 		probe := &probeSink{}
 		zw, err := zstd.NewWriter(probe) // default concurrency: the bad case
-		if err != nil {
-			t.Fatalf("zstd.NewWriter: %v", err)
-		}
-		if _, err := zw.Write(raw); err != nil {
-			t.Fatalf("write: %v", err)
-		}
-		if err := zw.Close(); err != nil {
-			t.Fatalf("close: %v", err)
-		}
+		require.NoError(t, err, "zstd.NewWriter")
+
+		_, err = zw.Write(raw)
+		require.NoError(t, err, "write")
+		require.NoError(t, zw.Close(), "close")
+
 		t.Logf("async encoder: peak %d goroutines during %d sink writes (baseline %d)",
 			probe.peak, probe.writes, base)
-		if probe.peak <= base {
-			t.Fatalf("probe saw no extra goroutines from a default-concurrency encoder "+
+		require.Greaterf(t, probe.peak, base,
+			"probe saw no extra goroutines from a default-concurrency encoder "+
 				"(peak %d, baseline %d): the probe has no teeth, so the pooled-encoder "+
 				"assertion below proves nothing", probe.peak, base)
-		}
 	})
 
 	t.Run("pooled-encoder-spawns-nothing", func(t *testing.T) {
 		base := goroutineBaseline()
 		probe := &probeSink{}
 		w, err := getCompressWriter(EncodingZstd, probe)
-		if err != nil {
-			t.Fatalf("getCompressWriter: %v", err)
-		}
-		if _, err := w.Write(raw); err != nil {
-			t.Fatalf("write: %v", err)
-		}
-		if err := w.Close(); err != nil {
-			t.Fatalf("close: %v", err)
-		}
+		require.NoError(t, err, "getCompressWriter")
+
+		_, err = w.Write(raw)
+		require.NoError(t, err, "write")
+		require.NoError(t, w.Close(), "close")
 		putCompressWriter(w)
-		if probe.writes < 2 {
-			t.Fatalf("sink written %d times: payload too small to observe a pipeline", probe.writes)
-		}
+
+		require.GreaterOrEqualf(t, probe.writes, 2,
+			"sink written %d times: payload too small to observe a pipeline", probe.writes)
 		t.Logf("pooled encoder: peak %d goroutines during %d sink writes (baseline %d)",
 			probe.peak, probe.writes, base)
-		if probe.peak > base {
-			t.Errorf("pooled zstd encoder ran %d extra goroutines (peak %d, baseline %d): "+
+		assert.LessOrEqualf(t, probe.peak, base,
+			"pooled zstd encoder ran %d extra goroutines (peak %d, baseline %d): "+
 				"is WithEncoderConcurrency(1) still set?", probe.peak-base, probe.peak, base)
-		}
 	})
 
 	t.Run("no-growth-across-requests", func(t *testing.T) {
 		base := goroutineBaseline()
 		const iterations = 200
 		body := bytes.Repeat([]byte("steady state "), 20_000)
+
 		for i := 0; i < iterations; i++ {
 			out, err := compressBody(EncodingZstd, body)
-			if err != nil {
-				t.Fatalf("iter %d: %v", i, err)
-			}
-			if len(out) == 0 {
-				t.Fatalf("iter %d: empty output", i)
-			}
+			require.NoErrorf(t, err, "iter %d", i)
+			require.NotEmptyf(t, out, "iter %d: empty output", i)
 		}
-		if got := settleGoroutines(base, 2*time.Second); got > base {
-			t.Errorf("goroutines grew across %d pooled compressions: %d -> %d", iterations, base, got)
-		}
+
+		got := settleGoroutines(base, 2*time.Second)
+		assert.LessOrEqualf(t, got, base,
+			"goroutines grew across %d pooled compressions: %d -> %d", iterations, base, got)
 	})
 
 	t.Run("abandoned-streams-strand-nothing", func(t *testing.T) {
 		base := goroutineBaseline()
 		const iterations = 200
+
 		for i := 0; i < iterations; i++ {
 			req := &Request{
 				Method: "POST", Path: "/",
@@ -1202,17 +1105,16 @@ func TestCompress_Zstd_PooledEncoderIsSynchronous(t *testing.T) {
 				CompressBody: EncodingZstd,
 			}
 			eff, release, err := prepareCompressedRequest(req)
-			if err != nil {
-				t.Fatalf("iter %d: %v", i, err)
-			}
+			require.NoErrorf(t, err, "iter %d", i)
 			var b [1]byte
 			_, _ = eff.BodyReader.Read(b[:])
 			// Abandon without release: nothing may be stranded.
 			_ = release
 		}
-		if got := settleGoroutines(base, 2*time.Second); got > base {
-			t.Errorf("goroutines stranded by %d abandoned encoders: %d -> %d", iterations, base, got)
-		}
+
+		got := settleGoroutines(base, 2*time.Second)
+		assert.LessOrEqualf(t, got, base,
+			"goroutines stranded by %d abandoned encoders: %d -> %d", iterations, base, got)
 	})
 }
 
@@ -1222,15 +1124,20 @@ func TestCompress_Zstd_PooledEncoderIsSynchronous(t *testing.T) {
 // nothing: the common path must not pay for a feature it does not use.
 func TestCompress_Identity_IsAllocationFree(t *testing.T) {
 	req := &Request{Method: "POST", Path: "/", Body: []byte("payload")}
+	// testify must stay OUT of the measured closure: it reflects and allocates,
+	// and AllocsPerRun counts everything the closure does. The closure only
+	// latches a flag; the assertion runs after the measurement.
+	misbehaved := false
+
 	got := testing.AllocsPerRun(100, func() {
 		eff, release, err := prepareCompressedRequest(req)
 		if err != nil || eff != req || release != nil {
-			t.Fatal("identity path misbehaved")
+			misbehaved = true
 		}
 	})
-	if got != 0 {
-		t.Errorf("identity path allocates %.1f/op, want 0", got)
-	}
+
+	require.False(t, misbehaved, "identity path misbehaved, so the alloc figure describes the wrong path")
+	assert.Zerof(t, got, "identity path allocates %.1f/op, want 0", got)
 }
 
 // TestCompress_PoolReuse_NoPerRequestWriterAlloc asserts the encoders really are
@@ -1241,22 +1148,24 @@ func TestCompress_PoolReuse_NoPerRequestWriterAlloc(t *testing.T) {
 	for _, tc := range allCodecs {
 		t.Run(tc.name, func(t *testing.T) {
 			for i := 0; i < 10; i++ {
-				if _, err := compressBody(tc.enc, raw); err != nil {
-					t.Fatalf("warmup: %v", err)
-				}
+				_, err := compressBody(tc.enc, raw)
+				require.NoError(t, err, "warmup")
 			}
+			// As above: nothing from testify inside the measured closure.
+			var compressErr error
+
 			got := testing.AllocsPerRun(100, func() {
 				if _, err := compressBody(tc.enc, raw); err != nil {
-					t.Fatalf("compressBody: %v", err)
+					compressErr = err
 				}
 			})
+
+			require.NoError(t, compressErr, "compressBody")
 			// A fresh encoder per call would be orders of magnitude above this.
 			const maxAllocs = 20
 			t.Logf("%s: %.1f allocs/op (pooled)", tc.name, got)
-			if got > maxAllocs {
-				t.Errorf("%.1f allocs/op exceeds %d — pooled writer is likely not being reused",
-					got, maxAllocs)
-			}
+			assert.LessOrEqualf(t, got, float64(maxAllocs),
+				"%.1f allocs/op exceeds %d — pooled writer is likely not being reused", got, maxAllocs)
 		})
 	}
 }

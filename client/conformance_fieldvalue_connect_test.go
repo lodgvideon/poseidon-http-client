@@ -3,6 +3,8 @@ package client
 import (
 	"testing"
 
+	"github.com/stretchr/testify/assert"
+
 	"github.com/lodgvideon/poseidon-http-client/conn"
 )
 
@@ -34,9 +36,10 @@ func TestConformance_RFC9113_Sec8_2_1_FieldValueEdgeWhitespace_Rejected(t *testi
 		t.Run(tc.name, func(t *testing.T) {
 			r := baseReq()
 			r.Headers = []conn.HeaderField{{Name: []byte("x-test"), Value: []byte(tc.val)}}
-			if err := validateRequest(r); err == nil {
-				t.Errorf("validateRequest accepted a field value %q with edge whitespace", tc.val)
-			}
+
+			err := validateRequest(r)
+
+			assert.Errorf(t, err, "validateRequest accepted a field value %q with edge whitespace", tc.val)
 		})
 	}
 }
@@ -46,9 +49,10 @@ func TestConformance_RFC9113_Sec8_2_1_FieldValueEdgeWhitespace_Rejected(t *testi
 func TestConformance_RFC9113_Sec8_2_1_InternalWhitespace_Accepted(t *testing.T) {
 	r := baseReq()
 	r.Headers = []conn.HeaderField{{Name: []byte("x-test"), Value: []byte("a b\tc")}}
-	if err := validateRequest(r); err != nil {
-		t.Errorf("validateRequest rejected legal internal whitespace: %v", err)
-	}
+
+	err := validateRequest(r)
+
+	assert.NoError(t, err, "validateRequest rejected legal internal whitespace")
 }
 
 // TestConformance_RFC9113_Sec8_2_1_TrailerEdgeWhitespace_Rejected pins the same
@@ -56,9 +60,10 @@ func TestConformance_RFC9113_Sec8_2_1_InternalWhitespace_Accepted(t *testing.T) 
 func TestConformance_RFC9113_Sec8_2_1_TrailerEdgeWhitespace_Rejected(t *testing.T) {
 	r := baseReq()
 	r.Trailers = []conn.HeaderField{{Name: []byte("x-trailer"), Value: []byte("v ")}}
-	if err := validateRequest(r); err == nil {
-		t.Error("validateRequest accepted a trailer value ending with SP")
-	}
+
+	err := validateRequest(r)
+
+	assert.Error(t, err, "validateRequest accepted a trailer value ending with SP")
 }
 
 // TestConformance_RFC9113_Sec8_5_ConnectOmitsSchemeAndPath pins that a regular
@@ -67,28 +72,25 @@ func TestConformance_RFC9113_Sec8_2_1_TrailerEdgeWhitespace_Rejected(t *testing.
 func TestConformance_RFC9113_Sec8_5_ConnectOmitsSchemeAndPath(t *testing.T) {
 	req := &Request{Method: "CONNECT", Authority: "example.com:443"}
 	sp := hdrSlicePool.Get().(*[]conn.HeaderField)
-	hdrs := buildHeaders(req, "default.example.com:443", "https", sp)
 	defer func() { *sp = (*sp)[:0]; hdrSlicePool.Put(sp) }()
+
+	hdrs := buildHeaders(req, "default.example.com:443", "https", sp)
 
 	var method, authority bool
 	for _, h := range hdrs {
 		switch string(h.Name) {
 		case ":scheme":
-			t.Error(":scheme must be omitted for a regular CONNECT (RFC 9113 §8.5)")
+			assert.Fail(t, ":scheme must be omitted for a regular CONNECT (RFC 9113 §8.5)")
 		case ":path":
-			t.Error(":path must be omitted for a regular CONNECT (RFC 9113 §8.5)")
+			assert.Fail(t, ":path must be omitted for a regular CONNECT (RFC 9113 §8.5)")
 		case ":method":
 			method = true
-			if string(h.Value) != "CONNECT" {
-				t.Errorf(":method = %q, want CONNECT", h.Value)
-			}
+			assert.Equalf(t, "CONNECT", string(h.Value), ":method = %q, want CONNECT", h.Value)
 		case ":authority":
 			authority = true
 		}
 	}
-	if !method || !authority {
-		t.Error(":method and :authority are required for a CONNECT request")
-	}
+	assert.True(t, method && authority, ":method and :authority are required for a CONNECT request")
 }
 
 // TestConformance_RFC9113_Sec8_5_ExtendedConnectKeepsSchemeAndPath is the
@@ -96,8 +98,9 @@ func TestConformance_RFC9113_Sec8_5_ConnectOmitsSchemeAndPath(t *testing.T) {
 func TestConformance_RFC9113_Sec8_5_ExtendedConnectKeepsSchemeAndPath(t *testing.T) {
 	req := &Request{Method: "CONNECT", Scheme: "https", Authority: "example.com", Path: "/chat", Protocol: "websocket"}
 	sp := hdrSlicePool.Get().(*[]conn.HeaderField)
-	hdrs := buildHeaders(req, "d", "https", sp)
 	defer func() { *sp = (*sp)[:0]; hdrSlicePool.Put(sp) }()
+
+	hdrs := buildHeaders(req, "d", "https", sp)
 
 	var scheme, path bool
 	for _, h := range hdrs {
@@ -108,25 +111,20 @@ func TestConformance_RFC9113_Sec8_5_ExtendedConnectKeepsSchemeAndPath(t *testing
 			path = true
 		}
 	}
-	if !scheme || !path {
-		t.Error("extended CONNECT must keep :scheme and :path (RFC 8441 §4)")
-	}
+	assert.True(t, scheme && path, "extended CONNECT must keep :scheme and :path (RFC 8441 §4)")
 }
 
 // TestConformance_RFC9113_Sec8_5_ConnectRequestValidation pins the validateRequest
 // rules for a regular CONNECT: a :path must be omitted (empty), :authority is
 // required, and extended CONNECT still follows the normal path rules.
 func TestConformance_RFC9113_Sec8_5_ConnectRequestValidation(t *testing.T) {
-	if err := validateRequest(&Request{Method: "CONNECT", Authority: "h:443", Path: "/x"}); err == nil {
-		t.Error("a regular CONNECT with a Path was accepted; :path must be omitted (RFC 9113 §8.5)")
-	}
-	if err := validateRequest(&Request{Method: "CONNECT", Authority: "h:443"}); err != nil {
-		t.Errorf("a regular CONNECT with omitted path + authority was rejected: %v", err)
-	}
-	if err := validateRequest(&Request{Method: "CONNECT"}); err == nil {
-		t.Error("a CONNECT with no authority was accepted; :authority is required (RFC 9113 §8.5)")
-	}
-	if err := validateRequest(&Request{Method: "CONNECT", Scheme: "https", Authority: "h", Path: "/ws", Protocol: "websocket"}); err != nil {
-		t.Errorf("an extended CONNECT with a path was rejected: %v", err)
-	}
+	withPath := validateRequest(&Request{Method: "CONNECT", Authority: "h:443", Path: "/x"})
+	pathOmitted := validateRequest(&Request{Method: "CONNECT", Authority: "h:443"})
+	noAuthority := validateRequest(&Request{Method: "CONNECT"})
+	extended := validateRequest(&Request{Method: "CONNECT", Scheme: "https", Authority: "h", Path: "/ws", Protocol: "websocket"})
+
+	assert.Error(t, withPath, "a regular CONNECT with a Path was accepted; :path must be omitted (RFC 9113 §8.5)")
+	assert.NoError(t, pathOmitted, "a regular CONNECT with omitted path + authority was rejected")
+	assert.Error(t, noAuthority, "a CONNECT with no authority was accepted; :authority is required (RFC 9113 §8.5)")
+	assert.NoError(t, extended, "an extended CONNECT with a path was rejected")
 }
