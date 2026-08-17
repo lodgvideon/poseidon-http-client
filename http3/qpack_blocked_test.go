@@ -2,12 +2,14 @@ package http3
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"strconv"
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	"github.com/lodgvideon/poseidon-http-client/hpack"
 	"github.com/lodgvideon/poseidon-http-client/qpack"
@@ -37,9 +39,7 @@ func newBlockedClient(t *testing.T, maxBlocked uint64) (*Client, *fakeConn) {
 		{SettingQPACKMaxTableCapacity, 65536},
 		{SettingQPACKBlockedStreams, maxBlocked},
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, err, "NewClientFake with the dynamic table and blocked streams enabled")
 	t.Cleanup(func() { _ = client.Close() })
 	return client, conn
 }
@@ -51,9 +51,8 @@ func waitBlockedN(t *testing.T, c *Client, n uint64) {
 	t.Helper()
 	deadline := time.Now().Add(5 * time.Second)
 	for c.qpackBlocked.Load() < n {
-		if time.Now().After(deadline) {
-			t.Fatalf("only %d of %d decodes blocked", c.qpackBlocked.Load(), n)
-		}
+		require.Falsef(t, time.Now().After(deadline),
+			"only %d of %d decodes blocked", c.qpackBlocked.Load(), n)
 		time.Sleep(time.Millisecond)
 	}
 }
@@ -90,36 +89,29 @@ func TestConformance_RFC9204_Sec213_BlockedDecodeWaitsForInsert(t *testing.T) {
 	chunk = appendInsertLiteral(chunk, "x-dyn", "yes")
 	enc := &fakeStream{id: 7, conn: conn, directRead: true, recvChunks: [][]byte{chunk}, ready: make(chan struct{}, 1)}
 	client.qpackEnc = enc
-
 	var dec qpack.Decoder
 	rb := respBuilder{dec: &dec, streamID: 4, ctx: context.Background()}
 	done := make(chan error, 1)
 	go func() { done <- client.dispatchFrame(&rb, FrameHeaders, dynSectionAt(0)) }()
-
 	waitBlockedN(t, client, 1) // the decode has genuinely parked as a blocked stream
 
 	// The reader delivers the promised insert: insert count 0 → 1, then broadcast.
-	if err := client.readQPACKEncoder(); err != nil {
-		t.Fatalf("readQPACKEncoder: %v", err)
-	}
+	rerr := client.readQPACKEncoder()
 
+	require.NoErrorf(t, rerr, "readQPACKEncoder: %v", rerr)
 	select {
 	case err := <-done:
-		if err != nil {
-			t.Fatalf("blocked decode did not resolve: %v", err)
-		}
+		require.NoErrorf(t, err, "blocked decode did not resolve: %v", err)
 	case <-time.After(5 * time.Second):
-		t.Fatal("blocked decode did not unblock after the insert arrived (lost wake?)")
+		require.FailNow(t, "blocked decode did not unblock after the insert arrived (lost wake?)")
 	}
-	if rb.resp == nil || rb.resp.Status != 200 || !hasHeader(rb.resp.Headers, "x-dyn", "yes") {
-		t.Fatalf("resp = %+v, want status 200 + x-dyn:yes from the dynamic table", rb.resp)
-	}
-	if !rb.refDynamic {
-		t.Fatal("refDynamic must be set for a section that referenced the dynamic table")
-	}
-	if got := client.qpackBlocked.Load(); got != 0 {
-		t.Fatalf("blocked-stream count = %d, want 0 after the decode resolved", got)
-	}
+	require.NotNil(t, rb.resp, "the resolved decode produced no response at all")
+	assert.Equalf(t, 200, rb.resp.Status, "resp = %+v, want status 200", rb.resp)
+	assert.Truef(t, hasHeader(rb.resp.Headers, "x-dyn", "yes"),
+		"resp = %+v, want x-dyn:yes resolved from the dynamic table", rb.resp)
+	assert.True(t, rb.refDynamic, "refDynamic must be set for a section that referenced the dynamic table")
+	assert.Equalf(t, uint64(0), client.qpackBlocked.Load(),
+		"blocked-stream count = %d, want 0 after the decode resolved", client.qpackBlocked.Load())
 }
 
 // TestConformance_RFC9204_Sec213_BlockedDecodeCtxTimeout proves the no-hang
@@ -136,19 +128,18 @@ func TestConformance_RFC9204_Sec213_BlockedDecodeCtxTimeout(t *testing.T) {
 	var dec qpack.Decoder
 	rb := respBuilder{dec: &dec, streamID: 4, ctx: ctx}
 	done := make(chan error, 1)
+
 	go func() { done <- client.dispatchFrame(&rb, FrameHeaders, dynSectionAt(0)) }()
 
 	select {
 	case err := <-done:
-		if !errors.Is(err, context.DeadlineExceeded) {
-			t.Fatalf("blocked decode err = %v, want context.DeadlineExceeded", err)
-		}
+		assert.ErrorIsf(t, err, context.DeadlineExceeded,
+			"blocked decode err = %v, want context.DeadlineExceeded", err)
 	case <-time.After(5 * time.Second):
-		t.Fatal("blocked decode hung: it did not return on the ctx deadline")
+		require.FailNow(t, "blocked decode hung: it did not return on the ctx deadline")
 	}
-	if got := client.qpackBlocked.Load(); got != 0 {
-		t.Fatalf("blocked-stream count = %d, want 0 after the blocked decode gave up", got)
-	}
+	assert.Equalf(t, uint64(0), client.qpackBlocked.Load(),
+		"blocked-stream count = %d, want 0 after the blocked decode gave up", client.qpackBlocked.Load())
 }
 
 // TestConformance_RFC9204_Sec212_BlockedStreamLimitEnforced proves the M-blocked
@@ -159,7 +150,6 @@ func TestConformance_RFC9204_Sec213_BlockedDecodeCtxTimeout(t *testing.T) {
 func TestConformance_RFC9204_Sec212_BlockedStreamLimitEnforced(t *testing.T) {
 	const maxBlocked = 2
 	client, conn := newBlockedClient(t, maxBlocked)
-
 	// Two decodes block on Required Insert Count 1 (insert count 0, no encoder applied),
 	// filling both blocked-stream slots. They wake and exit only when Close tears the
 	// connection down at the end.
@@ -179,12 +169,11 @@ func TestConformance_RFC9204_Sec212_BlockedStreamLimitEnforced(t *testing.T) {
 	var dec qpack.Decoder
 	rb := respBuilder{dec: &dec, streamID: 99, ctx: context.Background()}
 	err := client.dispatchFrame(&rb, FrameHeaders, dynSectionAt(0))
-	if !errors.Is(err, ErrH3Control) {
-		t.Fatalf("over-limit blocked section = %v, want ErrH3Control (QPACK_DECOMPRESSION_FAILED)", err)
-	}
-	if conn.closeCode != H3QpackDecompressionFailed {
-		t.Fatalf("close code = %#x, want QPACK_DECOMPRESSION_FAILED (%#x)", conn.closeCode, H3QpackDecompressionFailed)
-	}
+
+	assert.ErrorIsf(t, err, ErrH3Control,
+		"over-limit blocked section = %v, want ErrH3Control (QPACK_DECOMPRESSION_FAILED)", err)
+	assert.Equalf(t, H3QpackDecompressionFailed, conn.closeCode,
+		"close code = %#x, want QPACK_DECOMPRESSION_FAILED (%#x)", conn.closeCode, H3QpackDecompressionFailed)
 
 	// The connError closed the connection; connCtx is cancelled (by the reader's fatal
 	// and by Close), waking the two parked decodes so their goroutines exit — no hang.
@@ -216,6 +205,8 @@ func TestConcurrent_QPACKBlockedStreams_UnderRace(t *testing.T) {
 	}
 	enc := &fakeStream{id: 7, conn: conn, directRead: true, recvChunks: chunks, ready: make(chan struct{}, 1)}
 	client.qpackEnc = enc
+	const perEntry = 10
+	errCh := make(chan error, entries*perEntry)
 
 	var wg sync.WaitGroup
 	// The reader: apply the inserts one at a time, advancing the insert count and
@@ -225,15 +216,12 @@ func TestConcurrent_QPACKBlockedStreams_UnderRace(t *testing.T) {
 		defer wg.Done()
 		for i := 0; i < entries; i++ {
 			if err := client.readQPACKEncoder(); err != nil {
-				t.Errorf("readQPACKEncoder: %v", err)
+				assert.NoErrorf(t, err, "readQPACKEncoder: %v", err)
 				return
 			}
 			time.Sleep(time.Millisecond)
 		}
 	}()
-
-	const perEntry = 10
-	errCh := make(chan error, entries*perEntry)
 	for abs := 0; abs < entries; abs++ {
 		for k := 0; k < perEntry; k++ {
 			wg.Add(1)
@@ -254,13 +242,12 @@ func TestConcurrent_QPACKBlockedStreams_UnderRace(t *testing.T) {
 	}
 	wg.Wait()
 	close(errCh)
+
 	for err := range errCh {
-		t.Error(err)
+		assert.NoError(t, err)
 	}
-	if got := client.qpackBlocked.Load(); got != 0 {
-		t.Fatalf("blocked-stream count = %d, want 0 after every decode resolved", got)
-	}
-	if got := client.qpackDyn.InsertCount(); got != entries {
-		t.Fatalf("final InsertCount = %d, want %d", got, entries)
-	}
+	assert.Equalf(t, uint64(0), client.qpackBlocked.Load(),
+		"blocked-stream count = %d, want 0 after every decode resolved", client.qpackBlocked.Load())
+	assert.Equalf(t, uint64(entries), client.qpackDyn.InsertCount(),
+		"final InsertCount = %d, want %d", client.qpackDyn.InsertCount(), entries)
 }

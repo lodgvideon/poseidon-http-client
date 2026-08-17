@@ -3,6 +3,9 @@ package http3
 import (
 	"testing"
 	"time"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // Alive reads an atomic flag rather than selecting on readerDone, because the
@@ -15,20 +18,20 @@ import (
 // closed, Alive must be false — on every path that can close it.
 func TestAlive_FlagAgreesWithReaderDone(t *testing.T) {
 	c := &Client{readerDone: make(chan struct{})}
-	if !c.Alive() {
-		t.Fatal("a fresh client reports dead")
-	}
+	require.True(t, c.Alive(),
+		"a fresh client reports dead, so nothing markDead does below could be told apart from the fixture")
+
 	c.markDead()
 
+	closed := false
 	select {
 	case <-c.readerDone:
+		closed = true
 	default:
-		t.Fatal("markDead did not close readerDone")
 	}
-	if c.Alive() {
-		t.Error("readerDone is closed but Alive still reports true — the pool would " +
-			"keep handing out this connection")
-	}
+	assert.True(t, closed, "markDead did not close readerDone")
+	assert.False(t, c.Alive(), "readerDone is closed but Alive still reports true — the pool would "+
+		"keep handing out this connection")
 }
 
 // TestAlive_FlagIsVisibleBeforeTheChannelCloses pins the ordering, which is the
@@ -44,14 +47,15 @@ func TestAlive_FlagIsVisibleBeforeTheChannelCloses(t *testing.T) {
 			<-c.readerDone
 			observed <- c.Alive()
 		}()
+
 		c.markDead()
+
 		select {
 		case alive := <-observed:
-			if alive {
-				t.Fatalf("iteration %d: a waiter woken by readerDone saw Alive() == true", i)
-			}
+			require.Falsef(t, alive,
+				"iteration %d: a waiter woken by readerDone saw Alive() == true", i)
 		case <-time.After(2 * time.Second):
-			t.Fatalf("iteration %d: waiter never woke", i)
+			require.FailNowf(t, "waiter never woke", "iteration %d", i)
 		}
 	}
 }
