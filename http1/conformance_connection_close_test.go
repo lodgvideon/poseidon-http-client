@@ -13,6 +13,8 @@ package http1_test
 import (
 	"context"
 	"testing"
+
+	"github.com/stretchr/testify/require"
 )
 
 // keepAliveAfter reads a full response (head + body) from a raw server reply
@@ -20,15 +22,14 @@ import (
 func keepAliveAfter(t *testing.T, rawResponse string) bool {
 	t.Helper()
 	ex := wireExchange(t, "GET", rawResponse)
-	if _, _, err := ex.ReadResponse(context.Background()); err != nil {
-		t.Fatalf("ReadResponse: %v", err)
-	}
+	_, _, err := ex.ReadResponse(context.Background())
+	require.NoError(t, err, "ReadResponse")
 	// Drain the body so the verdict reflects a fully consumed exchange (an
 	// unconsumed body condemns the connection on its own).
 	buf := make([]byte, 256)
 	for {
-		_, done, err := ex.ReadBodyChunk(buf)
-		if err != nil || done {
+		_, done, rerr := ex.ReadBodyChunk(buf)
+		if rerr != nil || done {
 			break
 		}
 	}
@@ -53,10 +54,10 @@ func TestConformance_RFC9110_Sec5_3_ConnectionCloseIsSticky(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			got := keepAliveAfter(t, "HTTP/1.1 200 OK\r\n"+tc.conn+body)
-			if got != tc.wantKA {
-				t.Fatalf("KeepAlive() = %v, want %v — RFC 9110 §5.3 makes these Connection "+
+
+			require.Equalf(t, tc.wantKA, got,
+				"KeepAlive() = %v, want %v — RFC 9110 §5.3 makes these Connection "+
 					"lines one value; a close option must win:\n%s", got, tc.wantKA, tc.conn)
-			}
 		})
 	}
 }

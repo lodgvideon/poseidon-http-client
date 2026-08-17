@@ -15,8 +15,10 @@ package http1_test
 
 import (
 	"context"
-	"errors"
 	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	"github.com/lodgvideon/poseidon-http-client/http1"
 )
@@ -46,17 +48,13 @@ func readResponseErr(t *testing.T, resp string) (*http1.Exchange, error) {
 // admitted it could not trust.
 func wantRejected(t *testing.T, ex *http1.Exchange, err error, what string) {
 	t.Helper()
-	if err == nil {
-		t.Fatalf("%s: ReadResponse returned nil error, want ErrInvalidContentLength", what)
-	}
-	if !errors.Is(err, http1.ErrInvalidContentLength) {
-		t.Errorf("%s: error = %v, want it to wrap ErrInvalidContentLength", what, err)
-	}
-	if ex.KeepAlive() {
-		t.Errorf("%s: KeepAlive() = true, want false — RFC 9112 §6.3 rule 5 requires "+
+	require.Errorf(t, err, "%s: ReadResponse returned nil error, want ErrInvalidContentLength", what)
+	assert.ErrorIsf(t, err, http1.ErrInvalidContentLength,
+		"%s: error = %v, want it to wrap ErrInvalidContentLength", what, err)
+	assert.Falsef(t, ex.KeepAlive(),
+		"%s: KeepAlive() = true, want false — RFC 9112 §6.3 rule 5 requires "+
 			"the user agent to close the connection, and a pooled conn would start "+
 			"the next response mid-body", what)
-	}
 }
 
 // TestConformance_RFC9112_Sec6_3_Rule5_ConflictingContentLengthsRejected is the
@@ -73,7 +71,9 @@ func TestConformance_RFC9112_Sec6_3_Rule5_ConflictingContentLengthsRejected(t *t
 		"Content-Length: 10\r\n" +
 		"\r\n" +
 		clDesyncBody
+
 	ex, err := readResponseErr(t, resp)
+
 	wantRejected(t, ex, err, "Content-Length: 5 + Content-Length: 10")
 }
 
@@ -87,7 +87,9 @@ func TestConformance_RFC9112_Sec6_3_Rule5_CommaListDifferingValuesRejected(t *te
 		"Content-Length: 5, 10\r\n" +
 		"\r\n" +
 		clDesyncBody
+
 	ex, err := readResponseErr(t, resp)
+
 	wantRejected(t, ex, err, "Content-Length: 5, 10")
 }
 
@@ -104,7 +106,9 @@ func TestConformance_RFC9112_Sec6_3_Rule5_NonNumericContentLengthRejected(t *tes
 		"Content-Length: abc\r\n" +
 		"\r\n" +
 		clDesyncBody
+
 	ex, err := readResponseErr(t, resp)
+
 	wantRejected(t, ex, err, "Content-Length: abc")
 }
 
@@ -124,7 +128,9 @@ func TestConformance_RFC9110_Sec8_6_SignedContentLengthRejected(t *testing.T) {
 				"Content-Length: " + value + "\r\n" +
 				"\r\n" +
 				clDesyncBody
+
 			ex, err := readResponseErr(t, resp)
+
 			wantRejected(t, ex, err, "Content-Length: "+value)
 		})
 	}
@@ -152,7 +158,9 @@ func TestConformance_RFC9110_Sec8_6_OverflowContentLengthRejected(t *testing.T) 
 				"Content-Length: " + value + "\r\n" +
 				"\r\n" +
 				clDesyncBody
+
 			ex, err := readResponseErr(t, resp)
+
 			wantRejected(t, ex, err, "Content-Length: "+value)
 		})
 	}
@@ -168,13 +176,12 @@ func TestConformance_RFC9110_Sec8_6_MaxInt64ContentLengthAccepted(t *testing.T) 
 	resp := "HTTP/1.1 200 OK\r\n" +
 		"Content-Length: 9223372036854775807\r\n" +
 		"\r\n"
+
 	ex, err := readResponseErr(t, resp)
-	if err != nil {
-		t.Fatalf("Content-Length: MaxInt64 is valid 1*DIGIT, got error: %v", err)
-	}
-	if !ex.KeepAlive() {
-		t.Error("KeepAlive() = false, want true — a valid Content-Length is not a framing error")
-	}
+
+	require.NoErrorf(t, err, "Content-Length: MaxInt64 is valid 1*DIGIT, got error: %v", err)
+	assert.True(t, ex.KeepAlive(),
+		"KeepAlive() = false, want true — a valid Content-Length is not a framing error")
 }
 
 // TestConformance_RFC9112_Sec6_3_Rule5_IdenticalDuplicatesAccepted pins the
@@ -202,15 +209,13 @@ func TestConformance_RFC9112_Sec6_3_Rule5_IdenticalDuplicatesAccepted(t *testing
 		// this test is about: that identical values do not condemn it.
 		"HELLO"
 	ex := wireExchange(t, "GET", resp)
-	if _, _, err := ex.ReadResponse(context.Background()); err != nil {
-		t.Fatalf("identical duplicate Content-Length must be accepted, got: %v", err)
-	}
-	if body := drainBody(t, ex); body != "HELLO" {
-		t.Errorf("body = %q, want %q — the single value 5 must delimit the body", body, "HELLO")
-	}
-	if !ex.KeepAlive() {
-		t.Error("KeepAlive() = false, want true — the body ended at a known boundary")
-	}
+
+	_, _, err := ex.ReadResponse(context.Background())
+
+	require.NoErrorf(t, err, "identical duplicate Content-Length must be accepted, got: %v", err)
+	body := drainBody(t, ex)
+	assert.Equalf(t, "HELLO", body, "body = %q, want %q — the single value 5 must delimit the body", body, "HELLO")
+	assert.True(t, ex.KeepAlive(), "KeepAlive() = false, want true — the body ended at a known boundary")
 }
 
 // TestConformance_RFC9112_Sec6_3_Rule5_CommaListIdenticalValuesAccepted is the
@@ -223,15 +228,13 @@ func TestConformance_RFC9112_Sec6_3_Rule5_CommaListIdenticalValuesAccepted(t *te
 		"\r\n" +
 		"HELLO"
 	ex := wireExchange(t, "GET", resp)
-	if _, _, err := ex.ReadResponse(context.Background()); err != nil {
-		t.Fatalf("identical comma-list Content-Length must be accepted, got: %v", err)
-	}
-	if body := drainBody(t, ex); body != "HELLO" {
-		t.Errorf("body = %q, want %q — the single value 5 must delimit the body", body, "HELLO")
-	}
-	if !ex.KeepAlive() {
-		t.Error("KeepAlive() = false, want true — the body ended at a known boundary")
-	}
+
+	_, _, err := ex.ReadResponse(context.Background())
+
+	require.NoErrorf(t, err, "identical comma-list Content-Length must be accepted, got: %v", err)
+	body := drainBody(t, ex)
+	assert.Equalf(t, "HELLO", body, "body = %q, want %q — the single value 5 must delimit the body", body, "HELLO")
+	assert.True(t, ex.KeepAlive(), "KeepAlive() = false, want true — the body ended at a known boundary")
 }
 
 // TestConformance_RFC9112_Sec6_3_Rule3_InvalidContentLengthIgnoredWhenChunked
@@ -262,12 +265,12 @@ func TestConformance_RFC9112_Sec6_3_Rule3_InvalidContentLengthIgnoredWhenChunked
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
 			ex := wireExchange(t, "GET", resp)
-			if _, _, err := ex.ReadResponse(context.Background()); err != nil {
-				t.Fatalf("chunked framing must ignore Content-Length, got: %v", err)
-			}
-			if body := drainBody(t, ex); body != "hello" {
-				t.Errorf("body = %q, want %q", body, "hello")
-			}
+
+			_, _, err := ex.ReadResponse(context.Background())
+
+			require.NoErrorf(t, err, "chunked framing must ignore Content-Length, got: %v", err)
+			body := drainBody(t, ex)
+			assert.Equalf(t, "hello", body, "body = %q, want %q", body, "hello")
 		})
 	}
 }
@@ -283,6 +286,8 @@ func TestConformance_RFC9112_Sec6_3_Rule5_ConflictingContentLengthsRejectedOrder
 		"Content-Length: 5\r\n" +
 		"\r\n" +
 		clDesyncBody
+
 	ex, err := readResponseErr(t, resp)
+
 	wantRejected(t, ex, err, "Content-Length: 10 then 5, separated")
 }
