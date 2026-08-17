@@ -1,6 +1,10 @@
 package quic
 
-import "testing"
+import (
+	"testing"
+
+	"github.com/stretchr/testify/assert"
+)
 
 // TestConformance_RFC9000_Sec46_FrameOverUniStreamLimit checks that a received
 // frame referencing a server-initiated unidirectional stream whose ID exceeds the
@@ -12,24 +16,23 @@ func TestConformance_RFC9000_Sec46_FrameOverUniStreamLimit(t *testing.T) {
 	// the third, past the limit.
 	newConn := func() *Conn { return &Conn{localMaxStreamsUni: 2} }
 
-	if err := (&connFrameHandler{c: newConn()}).OnResetStream(11, 0, 0); err != ErrTooManyUniStreams {
-		t.Fatalf("RESET_STREAM on an over-limit server-uni stream = %v, want ErrTooManyUniStreams", err)
-	}
-	if err := (&connFrameHandler{c: newConn()}).OnStreamDataBlocked(11, 0); err != ErrTooManyUniStreams {
-		t.Fatalf("STREAM_DATA_BLOCKED on an over-limit server-uni stream = %v, want ErrTooManyUniStreams", err)
-	}
-
+	errResetOver := (&connFrameHandler{c: newConn()}).OnResetStream(11, 0, 0)
+	errBlockedOver := (&connFrameHandler{c: newConn()}).OnStreamDataBlocked(11, 0)
 	// Within the limit, an uncreated server-uni stream's RESET_STREAM/STREAM_DATA_BLOCKED
 	// is handled without a limit error.
-	if err := (&connFrameHandler{c: newConn()}).OnResetStream(3, 0, 0); err != nil {
-		t.Fatalf("RESET_STREAM on an in-limit server-uni stream = %v, want nil", err)
-	}
-	if err := (&connFrameHandler{c: newConn()}).OnStreamDataBlocked(3, 0); err != nil {
-		t.Fatalf("STREAM_DATA_BLOCKED on an in-limit server-uni stream = %v, want nil", err)
-	}
+	errResetIn := (&connFrameHandler{c: newConn()}).OnResetStream(3, 0, 0)
+	errBlockedIn := (&connFrameHandler{c: newConn()}).OnStreamDataBlocked(3, 0)
+	code, ok := closeCodeFor(ErrTooManyUniStreams)
 
+	assert.Truef(t, errResetOver == ErrTooManyUniStreams,
+		"RESET_STREAM on an over-limit server-uni stream = %v, want ErrTooManyUniStreams", errResetOver)
+	assert.Truef(t, errBlockedOver == ErrTooManyUniStreams,
+		"STREAM_DATA_BLOCKED on an over-limit server-uni stream = %v, want ErrTooManyUniStreams", errBlockedOver)
+	assert.NoErrorf(t, errResetIn,
+		"RESET_STREAM on an in-limit server-uni stream = %v, want nil", errResetIn)
+	assert.NoErrorf(t, errBlockedIn,
+		"STREAM_DATA_BLOCKED on an in-limit server-uni stream = %v, want nil", errBlockedIn)
 	// ErrTooManyUniStreams maps to the STREAM_LIMIT_ERROR transport code.
-	if code, ok := closeCodeFor(ErrTooManyUniStreams); !ok || code != ErrCodeStreamLimitError {
-		t.Fatalf("closeCodeFor(ErrTooManyUniStreams) = (%#x, %v), want (%#x, true)", code, ok, ErrCodeStreamLimitError)
-	}
+	assert.Truef(t, ok && code == ErrCodeStreamLimitError,
+		"closeCodeFor(ErrTooManyUniStreams) = (%#x, %v), want (%#x, true)", code, ok, ErrCodeStreamLimitError)
 }
