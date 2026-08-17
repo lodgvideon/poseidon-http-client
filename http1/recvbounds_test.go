@@ -8,6 +8,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/require"
+
 	"github.com/lodgvideon/poseidon-http-client/header"
 	"github.com/lodgvideon/poseidon-http-client/http1"
 )
@@ -80,9 +82,7 @@ func hostileExchange(t *testing.T, hc *hostileConn) *http1.Exchange {
 		{Name: []byte(":path"), Value: []byte("/")},
 		{Name: []byte(":authority"), Value: []byte("example.com")},
 	}
-	if err := ex.WriteRequest(context.Background(), fields, true); err != nil {
-		t.Fatalf("WriteRequest: %v", err)
-	}
+	require.NoError(t, ex.WriteRequest(context.Background(), fields, true), "WriteRequest")
 	return ex
 }
 
@@ -93,24 +93,17 @@ func hostileExchange(t *testing.T, hc *hostileConn) *http1.Exchange {
 func assertBounded(t *testing.T, ex *http1.Exchange, hc *hostileConn, err error, maxServed int64) {
 	t.Helper()
 	served := hc.served.Load()
-	if errors.Is(err, errBudget) {
-		t.Fatalf("UNBOUNDED: client consumed the entire %d B budget and was still reading; "+
+	require.NotErrorIsf(t, err, errBudget,
+		"UNBOUNDED: client consumed the entire %d B budget and was still reading; "+
 			"a real server would not have stopped at all (served=%d B)", hc.budget, served)
-	}
-	if err == nil {
-		t.Fatalf("hostile response accepted with no error (served=%d B)", served)
-	}
-	if !errors.Is(err, http1.ErrResponseTooLarge) {
-		t.Fatalf("err = %v; want it to wrap ErrResponseTooLarge so a caller can classify it", err)
-	}
-	if served > maxServed {
-		t.Fatalf("client consumed %d B before erroring; want <= %d B (err=%v)", served, maxServed, err)
-	}
+	require.Errorf(t, err, "hostile response accepted with no error (served=%d B)", served)
+	require.ErrorIsf(t, err, http1.ErrResponseTooLarge,
+		"err = %v; want it to wrap ErrResponseTooLarge so a caller can classify it", err)
+	require.LessOrEqualf(t, served, maxServed,
+		"client consumed %d B before erroring; want <= %d B (err=%v)", served, maxServed, err)
 	// The stream is left mid-line and unresynchronisable; reusing it would
 	// feed a later exchange the tail of this one.
-	if ex.KeepAlive() {
-		t.Fatalf("connection still reported as poolable after %v", err)
-	}
+	require.Falsef(t, ex.KeepAlive(), "connection still reported as poolable after %v", err)
 	t.Logf("bounded: served=%d B, err=%v", served, err)
 }
 
@@ -132,6 +125,7 @@ func TestReadResponse_StatusLineNeverDelimited_Bounded(t *testing.T) {
 	ex := hostileExchange(t, hc)
 
 	_, _, err := ex.ReadResponse(context.Background())
+
 	assertBounded(t, ex, hc, err, maxLineServed)
 }
 
@@ -146,6 +140,7 @@ func TestReadResponse_HeaderLineNeverDelimited_Bounded(t *testing.T) {
 	ex := hostileExchange(t, hc)
 
 	_, _, err := ex.ReadResponse(context.Background())
+
 	assertBounded(t, ex, hc, err, maxLineServed)
 }
 
@@ -166,6 +161,7 @@ func TestReadResponse_EndlessHeaders_Bounded(t *testing.T) {
 	ex := hostileExchange(t, hc)
 
 	_, _, err := ex.ReadResponse(context.Background())
+
 	// The cap is on accounted header bytes, so the wire bytes needed to reach
 	// it are larger than the block itself; allow the whole budget minus a
 	// margin, and let errBudget be the thing that fails the test.
@@ -183,13 +179,12 @@ func TestReadChunkedChunk_SizeLineNeverDelimited_Bounded(t *testing.T) {
 		budget: 32 << 20,
 	}
 	ex := hostileExchange(t, hc)
-
-	if _, _, err := ex.ReadResponse(context.Background()); err != nil {
-		t.Fatalf("ReadResponse: %v", err)
-	}
-
+	_, _, err := ex.ReadResponse(context.Background())
+	require.NoError(t, err, "ReadResponse")
 	buf := make([]byte, 4096)
-	_, _, err := ex.ReadBodyChunk(buf)
+
+	_, _, err = ex.ReadBodyChunk(buf)
+
 	assertBounded(t, ex, hc, err, maxLineServed)
 }
 
@@ -215,6 +210,6 @@ func TestReadResponse_InterimFlood_Bounded(t *testing.T) {
 	case err := <-done:
 		assertBounded(t, ex, hc, err, maxLineServed)
 	case <-time.After(30 * time.Second):
-		t.Fatalf("ReadResponse did not return within 30s: the 1xx drain loop is unbounded")
+		require.Fail(t, "ReadResponse did not return within 30s: the 1xx drain loop is unbounded")
 	}
 }

@@ -3,11 +3,13 @@ package http1_test
 import (
 	"bufio"
 	"context"
-	"errors"
 	"net"
 	"os"
 	"testing"
 	"time"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	"github.com/lodgvideon/poseidon-http-client/header"
 	"github.com/lodgvideon/poseidon-http-client/http1"
@@ -18,9 +20,7 @@ import (
 func silentPeer(t *testing.T) *http1.Conn {
 	t.Helper()
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("listen: %v", err)
-	}
+	require.NoError(t, err, "listen")
 	t.Cleanup(func() { _ = ln.Close() })
 
 	accepted := make(chan net.Conn, 1)
@@ -34,14 +34,10 @@ func silentPeer(t *testing.T) *http1.Conn {
 	}()
 
 	cli, err := net.Dial("tcp", ln.Addr().String())
-	if err != nil {
-		t.Fatalf("dial: %v", err)
-	}
+	require.NoError(t, err, "dial")
 	t.Cleanup(func() { _ = cli.Close() })
 	srv := <-accepted
-	if srv == nil {
-		t.Fatal("accept failed")
-	}
+	require.NotNil(t, srv, "accept failed")
 	t.Cleanup(func() { _ = srv.Close() })
 	return http1.NewConn(cli)
 }
@@ -58,39 +54,32 @@ func TestReadResponse_CtxCancelUnblocksSilentPeer(t *testing.T) {
 	ex := silentPeer(t).NewExchange()
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
-
-	if err := ex.WriteRequest(ctx, []header.Field{
+	require.NoError(t, ex.WriteRequest(ctx, []header.Field{
 		{Name: []byte(":method"), Value: []byte("GET")},
 		{Name: []byte(":path"), Value: []byte("/")},
 		{Name: []byte(":authority"), Value: []byte("example.com")},
-	}, true); err != nil {
-		t.Fatalf("WriteRequest: %v", err)
-	}
-
+	}, true), "WriteRequest")
 	done := make(chan error, 1)
 	go func() {
 		_, _, rerr := ex.ReadResponse(ctx)
 		done <- rerr
 	}()
-
 	time.Sleep(100 * time.Millisecond) // let the read actually block
+
 	cancel()
 
 	select {
 	case err := <-done:
-		if err == nil {
-			t.Fatal("ReadResponse returned nil after cancellation; want an error")
-		}
+		require.Error(t, err, "ReadResponse returned nil after cancellation; want an error")
 		// The mechanism that unblocks the read is a deadline in the past, so the
 		// socket reports `i/o timeout` — a word this caller never used. Saying so
 		// verbatim tells a caller its request timed out when in fact the caller
 		// cancelled it, and it is what put a cancellation outside isHardStop's
 		// reach one layer up. See deadlineCause.
-		if !errors.Is(err, context.Canceled) {
-			t.Errorf("ReadResponse after cancellation = %v, want context.Canceled", err)
-		}
+		assert.ErrorIsf(t, err, context.Canceled,
+			"ReadResponse after cancellation = %v, want context.Canceled", err)
 	case <-time.After(15 * time.Second):
-		t.Fatal("ReadResponse did not return after ctx cancellation — a cancellable " +
+		require.Fail(t, "ReadResponse did not return after ctx cancellation — a cancellable "+
 			"context with no deadline must still unwind a silent peer")
 	}
 }
@@ -107,16 +96,14 @@ func TestReadResponse_AlreadyCancelledCtxFailsFast(t *testing.T) {
 		_, _, rerr := ex.ReadResponse(ctx)
 		done <- rerr
 	}()
+
 	select {
 	case err := <-done:
-		if err == nil {
-			t.Error("ReadResponse with an already-cancelled context returned nil, want an error")
-		}
-		if !errors.Is(err, context.Canceled) {
-			t.Errorf("ReadResponse with an already-cancelled context = %v, want context.Canceled", err)
-		}
+		assert.Error(t, err, "ReadResponse with an already-cancelled context returned nil, want an error")
+		assert.ErrorIsf(t, err, context.Canceled,
+			"ReadResponse with an already-cancelled context = %v, want context.Canceled", err)
 	case <-time.After(10 * time.Second):
-		t.Fatal("ReadResponse hung on an already-cancelled context")
+		require.Fail(t, "ReadResponse hung on an already-cancelled context")
 	}
 }
 
@@ -124,9 +111,7 @@ func TestReadResponse_AlreadyCancelledCtxFailsFast(t *testing.T) {
 // no ctx parameter of its own and so reuses the one ReadResponse was given.
 func TestReadBodyChunk_CtxCancelUnblocks(t *testing.T) {
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("listen: %v", err)
-	}
+	require.NoError(t, err, "listen")
 	t.Cleanup(func() { _ = ln.Close() })
 
 	accepted := make(chan net.Conn, 1)
@@ -143,50 +128,36 @@ func TestReadBodyChunk_CtxCancelUnblocks(t *testing.T) {
 	}()
 
 	cli, err := net.Dial("tcp", ln.Addr().String())
-	if err != nil {
-		t.Fatalf("dial: %v", err)
-	}
+	require.NoError(t, err, "dial")
 	t.Cleanup(func() { _ = cli.Close() })
 	srv := <-accepted
-	if srv == nil {
-		t.Fatal("accept failed")
-	}
+	require.NotNil(t, srv, "accept failed")
 	t.Cleanup(func() { _ = srv.Close() })
-
 	ex := http1.NewConn(cli).NewExchange()
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
-
-	if err := ex.WriteRequest(ctx, []header.Field{
+	require.NoError(t, ex.WriteRequest(ctx, []header.Field{
 		{Name: []byte(":method"), Value: []byte("GET")},
 		{Name: []byte(":path"), Value: []byte("/")},
 		{Name: []byte(":authority"), Value: []byte("example.com")},
-	}, true); err != nil {
-		t.Fatalf("WriteRequest: %v", err)
-	}
-	if _, _, err := ex.ReadResponse(ctx); err != nil {
-		t.Fatalf("ReadResponse: %v", err)
-	}
-
+	}, true), "WriteRequest")
+	_, _, err = ex.ReadResponse(ctx)
+	require.NoError(t, err, "ReadResponse")
 	done := make(chan error, 1)
 	go func() {
 		_, _, berr := ex.ReadBodyChunk(make([]byte, 64))
 		done <- berr
 	}()
-
 	time.Sleep(100 * time.Millisecond)
+
 	cancel()
 
 	select {
-	case err := <-done:
-		if err == nil {
-			t.Fatal("ReadBodyChunk returned nil after cancellation; want an error")
-		}
-		if ex.KeepAlive() {
-			t.Error("KeepAlive() = true after a failed body read, want false")
-		}
+	case berr := <-done:
+		require.Error(t, berr, "ReadBodyChunk returned nil after cancellation; want an error")
+		assert.False(t, ex.KeepAlive(), "KeepAlive() = true after a failed body read, want false")
 	case <-time.After(15 * time.Second):
-		t.Fatal("ReadBodyChunk did not return after ctx cancellation")
+		require.Fail(t, "ReadBodyChunk did not return after ctx cancellation")
 	}
 }
 
@@ -231,10 +202,7 @@ func (c deadlineCtx) Value(any) any               { return nil }
 func TestReadResponse_StalledPeerIsThisContextsDeadline(t *testing.T) {
 	ex := silentPeer(t).NewExchange()
 	ctx := deadlineCtx{dl: time.Now().Add(300 * time.Millisecond)}
-
-	if err := ex.WriteRequest(ctx, getFields(), true); err != nil {
-		t.Fatalf("WriteRequest: %v", err)
-	}
+	require.NoError(t, ex.WriteRequest(ctx, getFields(), true), "WriteRequest")
 
 	done := make(chan error, 1)
 	go func() {
@@ -244,20 +212,16 @@ func TestReadResponse_StalledPeerIsThisContextsDeadline(t *testing.T) {
 
 	select {
 	case err := <-done:
-		if err == nil {
-			t.Fatal("ReadResponse against a peer that never answers returned nil, want an error")
-		}
-		if !errors.Is(err, os.ErrDeadlineExceeded) {
-			t.Errorf("ReadResponse against a stalled peer = %v, want the socket error kept "+
+		require.Error(t, err, "ReadResponse against a peer that never answers returned nil, want an error")
+		assert.ErrorIsf(t, err, os.ErrDeadlineExceeded,
+			"ReadResponse against a stalled peer = %v, want the socket error kept "+
 				"as a cause — a log needs to name what stalled", err)
-		}
-		if !errors.Is(err, context.DeadlineExceeded) {
-			t.Errorf("ReadResponse against a stalled peer = %v, want context.DeadlineExceeded — "+
+		assert.ErrorIsf(t, err, context.DeadlineExceeded,
+			"ReadResponse against a stalled peer = %v, want context.DeadlineExceeded — "+
 				"a read deadline on this connection can only be this exchange's own budget "+
 				"running out, and a caller classifies retries on that", err)
-		}
 	case <-time.After(15 * time.Second):
-		t.Fatal("ReadResponse never returned against a silent peer: the deadline its " +
+		require.Fail(t, "ReadResponse never returned against a silent peer: the deadline its "+
 			"context carries was never installed on the socket, so nothing bounds the read")
 	}
 }
@@ -283,19 +247,14 @@ func TestReadResponse_ClearsADeadlineItsContextDoesNotCarry(t *testing.T) {
 		_, _ = server.Write([]byte("HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok"))
 		time.Sleep(100 * time.Millisecond)
 	}()
-
 	// The caller's leftover, elapsing well before the response arrives.
-	if err := client.SetReadDeadline(time.Now().Add(50 * time.Millisecond)); err != nil {
-		t.Fatalf("SetReadDeadline: %v", err)
-	}
-
+	require.NoError(t, client.SetReadDeadline(time.Now().Add(50*time.Millisecond)), "SetReadDeadline")
 	ex := http1.NewConn(client).NewExchange()
-	if err := ex.WriteRequest(context.Background(), getFields(), true); err != nil {
-		t.Fatalf("WriteRequest: %v", err)
-	}
-	if _, _, err := ex.ReadResponse(context.Background()); err != nil {
-		t.Fatalf("ReadResponse with a context carrying no deadline = %v, want nil — "+
-			"a deadline this exchange never asked for ended it at an instant that had "+
-			"nothing to do with it", err)
-	}
+	require.NoError(t, ex.WriteRequest(context.Background(), getFields(), true), "WriteRequest")
+
+	_, _, err := ex.ReadResponse(context.Background())
+
+	require.NoErrorf(t, err, "ReadResponse with a context carrying no deadline = %v, want nil — "+
+		"a deadline this exchange never asked for ended it at an instant that had "+
+		"nothing to do with it", err)
 }

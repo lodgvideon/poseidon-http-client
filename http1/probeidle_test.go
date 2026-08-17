@@ -5,6 +5,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/require"
+
 	"github.com/lodgvideon/poseidon-http-client/http1"
 )
 
@@ -15,9 +17,7 @@ import (
 func probePair(t *testing.T) (*http1.Conn, net.Conn) {
 	t.Helper()
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("listen: %v", err)
-	}
+	require.NoError(t, err, "listen")
 	t.Cleanup(func() { _ = ln.Close() })
 
 	accepted := make(chan net.Conn, 1)
@@ -31,15 +31,11 @@ func probePair(t *testing.T) (*http1.Conn, net.Conn) {
 	}()
 
 	cli, err := net.Dial("tcp", ln.Addr().String())
-	if err != nil {
-		t.Fatalf("dial: %v", err)
-	}
+	require.NoError(t, err, "dial")
 	t.Cleanup(func() { _ = cli.Close() })
 
 	srv := <-accepted
-	if srv == nil {
-		t.Fatal("accept failed")
-	}
+	require.NotNil(t, srv, "accept failed")
 	t.Cleanup(func() { _ = srv.Close() })
 	return http1.NewConn(cli), srv
 }
@@ -62,10 +58,11 @@ func probeBecomesFalse(c *http1.Conn) bool {
 // later real read is unaffected.
 func TestProbeIdle_HealthySocketReusable(t *testing.T) {
 	c, _ := probePair(t)
+
 	for i := 0; i < 3; i++ {
-		if !c.ProbeIdle() {
-			t.Fatalf("probe %d: healthy idle conn reported not reusable", i)
-		}
+		reusable := c.ProbeIdle()
+
+		require.Truef(t, reusable, "probe %d: healthy idle conn reported not reusable", i)
 	}
 }
 
@@ -75,12 +72,12 @@ func TestProbeIdle_HealthySocketReusable(t *testing.T) {
 // consume it as its status line.
 func TestProbeIdle_UnsolicitedDataEvicts(t *testing.T) {
 	c, srv := probePair(t)
-	if _, err := srv.Write([]byte("HTTP/1.1 200 OK\r\n\r\n")); err != nil {
-		t.Fatalf("server write: %v", err)
-	}
-	if !probeBecomesFalse(c) {
-		t.Fatal("unsolicited data on an idle conn was not detected")
-	}
+	_, err := srv.Write([]byte("HTTP/1.1 200 OK\r\n\r\n"))
+	require.NoError(t, err, "server write")
+
+	evicted := probeBecomesFalse(c)
+
+	require.True(t, evicted, "unsolicited data on an idle conn was not detected")
 }
 
 // TestProbeIdle_PeerCloseEvicts pins that a peer FIN on an idle connection probes
@@ -88,9 +85,10 @@ func TestProbeIdle_UnsolicitedDataEvicts(t *testing.T) {
 func TestProbeIdle_PeerCloseEvicts(t *testing.T) {
 	c, srv := probePair(t)
 	_ = srv.Close()
-	if !probeBecomesFalse(c) {
-		t.Fatal("peer FIN on an idle conn was not detected")
-	}
+
+	evicted := probeBecomesFalse(c)
+
+	require.True(t, evicted, "peer FIN on an idle conn was not detected")
 }
 
 // TestProbeIdle_ClosedConn pins that a locally closed conn probes false without
@@ -98,7 +96,8 @@ func TestProbeIdle_PeerCloseEvicts(t *testing.T) {
 func TestProbeIdle_ClosedConn(t *testing.T) {
 	c, _ := probePair(t)
 	_ = c.Close()
-	if c.ProbeIdle() {
-		t.Fatal("a closed conn must not be reported reusable")
-	}
+
+	reusable := c.ProbeIdle()
+
+	require.False(t, reusable, "a closed conn must not be reported reusable")
 }

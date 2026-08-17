@@ -9,6 +9,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
 	"github.com/lodgvideon/poseidon-http-client/header"
 	"github.com/lodgvideon/poseidon-http-client/http1"
 )
@@ -28,16 +31,12 @@ func TestWriteBody_CtxCancelUnblocksWedgedWrite(t *testing.T) {
 	ex := http1.NewConn(wc).NewExchange()
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
-
 	// No Content-Length → chunked framing, so nothing reconciles the length.
-	if err := ex.WriteRequest(ctx, []header.Field{
+	require.NoError(t, ex.WriteRequest(ctx, []header.Field{
 		{Name: []byte(":method"), Value: []byte("POST")},
 		{Name: []byte(":path"), Value: []byte("/")},
 		{Name: []byte(":authority"), Value: []byte("example.com")},
-	}, false); err != nil {
-		t.Fatalf("WriteRequest: %v", err)
-	}
-
+	}, false), "WriteRequest")
 	wc.arm()
 	done := make(chan error, 1)
 	go func() { done <- ex.WriteBody(ctx, []byte("wedged"), true) }()
@@ -49,11 +48,9 @@ func TestWriteBody_CtxCancelUnblocksWedgedWrite(t *testing.T) {
 
 	select {
 	case err := <-done:
-		if err == nil {
-			t.Fatal("WriteBody returned nil after cancellation; want an error")
-		}
+		require.Error(t, err, "WriteBody returned nil after cancellation; want an error")
 	case <-time.After(15 * time.Second):
-		t.Fatal("WriteBody did not return after ctx cancellation — a cancellable " +
+		require.Fail(t, "WriteBody did not return after ctx cancellation — a cancellable "+
 			"context with no deadline must still unwind a wedged upload")
 	}
 }
@@ -111,26 +108,22 @@ func (c *wedgeConn) Close() error                    { return nil }
 // without depending on socket buffers filling.
 func TestWriteBody_AlreadyCancelledCtxFailsFast(t *testing.T) {
 	ex, _ := rawCapture(t)
-	if err := ex.WriteRequest(context.Background(), []header.Field{
+	require.NoError(t, ex.WriteRequest(context.Background(), []header.Field{
 		{Name: []byte(":method"), Value: []byte("POST")},
 		{Name: []byte(":path"), Value: []byte("/")},
 		{Name: []byte(":authority"), Value: []byte("example.com")},
-	}, false); err != nil {
-		t.Fatalf("WriteRequest: %v", err)
-	}
-
+	}, false), "WriteRequest")
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
 	done := make(chan error, 1)
 	go func() { done <- ex.WriteBody(ctx, []byte("hello"), true) }()
+
 	select {
 	case err := <-done:
-		if err == nil {
-			t.Error("WriteBody with an already-cancelled context returned nil, want an error")
-		}
+		assert.Error(t, err, "WriteBody with an already-cancelled context returned nil, want an error")
 	case <-time.After(10 * time.Second):
-		t.Fatal("WriteBody hung on an already-cancelled context")
+		require.Fail(t, "WriteBody hung on an already-cancelled context")
 	}
 }
 
@@ -139,14 +132,11 @@ func TestWriteBody_AlreadyCancelledCtxFailsFast(t *testing.T) {
 // latched onto the connection by the arming helper.
 func TestWriteBody_NoDeadlineNoCancelStillWrites(t *testing.T) {
 	ex, capture := rawCapture(t)
-	if err := ex.WriteRequest(context.Background(), reqCL("POST",
-		header.Field{Name: []byte("Content-Length"), Value: []byte("5")}), false); err != nil {
-		t.Fatalf("WriteRequest: %v", err)
-	}
-	if err := ex.WriteBody(context.Background(), []byte("HELLO"), true); err != nil {
-		t.Fatalf("WriteBody: %v", err)
-	}
-	if wire := capture(); wire == "" {
-		t.Error("nothing reached the wire")
-	}
+	require.NoError(t, ex.WriteRequest(context.Background(), reqCL("POST",
+		header.Field{Name: []byte("Content-Length"), Value: []byte("5")}), false), "WriteRequest")
+
+	err := ex.WriteBody(context.Background(), []byte("HELLO"), true)
+
+	require.NoError(t, err, "WriteBody")
+	assert.NotEmpty(t, capture(), "nothing reached the wire")
 }
