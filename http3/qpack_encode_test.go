@@ -1,10 +1,12 @@
 package http3
 
 import (
-	"bytes"
 	"strconv"
 	"sync"
 	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	"github.com/lodgvideon/poseidon-http-client/header"
 	"github.com/lodgvideon/poseidon-http-client/qpack"
@@ -28,17 +30,13 @@ import (
 func serverMirrorTable(t *testing.T, conn *fakeConn, capacity uint64) *qpack.DynamicTable {
 	t.Helper()
 	sent := conn.clientQEnc.sent
-	if len(sent) == 0 || sent[0] != byte(StreamTypeQPACKEncoder) {
-		t.Fatalf("encoder stream must lead with its type byte (0x02): %x", sent)
-	}
+	require.NotEmptyf(t, sent, "encoder stream must lead with its type byte (0x02): %x", sent)
+	require.Equalf(t, byte(StreamTypeQPACKEncoder), sent[0],
+		"encoder stream must lead with its type byte (0x02): %x", sent)
 	dt := qpack.NewDynamicTable(capacity)
 	n, err := dt.ParseEncoderInstructions(sent[1:])
-	if err != nil {
-		t.Fatalf("apply encoder stream: %v", err)
-	}
-	if n != len(sent)-1 {
-		t.Fatalf("encoder stream partially consumed: %d/%d bytes", n, len(sent)-1)
-	}
+	require.NoErrorf(t, err, "apply encoder stream: %v", err)
+	require.Equalf(t, len(sent)-1, n, "encoder stream partially consumed: %d/%d bytes", n, len(sent)-1)
 	return dt
 }
 
@@ -51,28 +49,22 @@ func decodeRequestSection(t *testing.T, server *qpack.DynamicTable, frame []byte
 	fr.SetMaxFrameLen(1 << 20)
 	fr.Feed(frame)
 	typ, payload, err := fr.ReadFrame()
-	if err != nil || typ != FrameHeaders {
-		t.Fatalf("expected a HEADERS frame: typ=%d err=%v", typ, err)
-	}
+	require.NoErrorf(t, err, "expected a HEADERS frame: typ=%d err=%v", typ, err)
+	require.Equalf(t, FrameHeaders, typ, "expected a HEADERS frame: typ=%d", typ)
 	ric, rerr := qpack.RequiredInsertCount(payload, server)
-	if rerr != nil {
-		t.Fatalf("RequiredInsertCount: %v", rerr)
-	}
+	require.NoErrorf(t, rerr, "RequiredInsertCount: %v", rerr)
 	var got []header.Field
 	derr := qpack.NewDecoder().DecodeFieldSection(payload, server, func(n, v []byte) error {
 		got = append(got, header.Field{Name: append([]byte(nil), n...), Value: append([]byte(nil), v...)})
 		return nil
 	})
-	if derr != nil {
-		t.Fatalf("DecodeFieldSection: %v", derr)
-	}
-	if len(got) != len(want) {
-		t.Fatalf("decoded %d fields, want %d: %v", len(got), len(want), got)
-	}
+	require.NoErrorf(t, derr, "DecodeFieldSection: %v", derr)
+	require.Lenf(t, got, len(want), "decoded %d fields, want %d: %v", len(got), len(want), got)
 	for i := range want {
-		if !bytes.Equal(got[i].Name, want[i].Name) || !bytes.Equal(got[i].Value, want[i].Value) {
-			t.Fatalf("field %d = {%s:%s}, want {%s:%s}", i, got[i].Name, got[i].Value, want[i].Name, want[i].Value)
-		}
+		assert.Equalf(t, string(want[i].Name), string(got[i].Name),
+			"field %d = {%s:%s}, want {%s:%s}", i, got[i].Name, got[i].Value, want[i].Name, want[i].Value)
+		assert.Equalf(t, string(want[i].Value), string(got[i].Value),
+			"field %d = {%s:%s}, want {%s:%s}", i, got[i].Name, got[i].Value, want[i].Name, want[i].Value)
 	}
 	return ric
 }
@@ -109,63 +101,50 @@ func TestConformance_RFC9204_Sec21_EncodeSideDynamicTable(t *testing.T) {
 	dec := &fakeStream{id: 11, recvChunks: [][]byte{appendV(nil, StreamTypeQPACKDecoder)}}
 	conn := &fakeConn{req: &fakeStream{}, acceptQ: []quicStream{ctrl, dec}}
 	client, err := NewClientFake(conn, defaultSettings)
-	if err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, err, "NewClientFake with the production settings")
 	defer client.Close()
 
 	// Pass 1: read the server SETTINGS → the encoder dynamic table is installed and
 	// Set Dynamic Table Capacity goes out on our encoder stream.
-	if err := client.serviceControl(); err != nil {
-		t.Fatalf("serviceControl (settings): %v", err)
-	}
-	if client.qpackEncoder.Load() == nil {
-		t.Fatal("encoder must be enabled once the server advertises a non-zero capacity")
-	}
+	require.NoError(t, client.serviceControl(), "serviceControl (settings)")
+
+	require.Truef(t, client.qpackEncoder.Load() != nil,
+		"encoder must be enabled once the server advertises a non-zero capacity")
 	server := serverMirrorTable(t, conn, serverCap)
-	if server.Capacity() != serverCap {
-		t.Fatalf("Set Capacity did not reach the server: capacity=%d, want %d", server.Capacity(), serverCap)
-	}
+	require.Equalf(t, uint64(serverCap), server.Capacity(),
+		"Set Capacity did not reach the server: capacity=%d, want %d", server.Capacity(), serverCap)
 
 	req, want := sampleRequest()
 
 	// Request 1: nothing acknowledged → the section is static and the repeated
 	// headers are inserted on the encoder stream.
-	frame1, err := client.encodeRequestHeaders(req)
-	if err != nil {
-		t.Fatalf("encodeRequestHeaders 1: %v", err)
-	}
+	frame1, err1 := client.encodeRequestHeaders(req)
+
+	require.NoErrorf(t, err1, "encodeRequestHeaders 1: %v", err1)
 	server = serverMirrorTable(t, conn, serverCap)
-	if server.InsertCount() == 0 {
-		t.Fatal("request 1 must insert the repeated headers on the encoder stream")
-	}
-	if ric := decodeRequestSection(t, server, frame1, want); ric != 0 {
-		t.Fatalf("request-1 Required Insert Count = %d, want 0 (static, nothing acknowledged)", ric)
-	}
+	require.NotZero(t, server.InsertCount(),
+		"request 1 must insert the repeated headers on the encoder stream")
+	ric1 := decodeRequestSection(t, server, frame1, want)
+	assert.Equalf(t, uint64(0), ric1,
+		"request-1 Required Insert Count = %d, want 0 (static, nothing acknowledged)", ric1)
 
 	// The server acknowledges the inserts with an Insert Count Increment on its
 	// decoder stream; pass 2 advances our Known Received Count.
 	dec.recvChunks = append(dec.recvChunks, qpack.AppendInsertCountIncrement(nil, server.InsertCount()))
-	if err := client.serviceControl(); err != nil {
-		t.Fatalf("serviceControl (ack): %v", err)
-	}
-	if got := client.qpackEncoder.Load().KnownReceivedCount(); got != server.InsertCount() {
-		t.Fatalf("Known Received Count = %d, want %d after the server's Insert Count Increment", got, server.InsertCount())
-	}
+	require.NoError(t, client.serviceControl(), "serviceControl (ack)")
+	require.Equalf(t, server.InsertCount(), client.qpackEncoder.Load().KnownReceivedCount(),
+		"Known Received Count = %d, want %d after the server's Insert Count Increment",
+		client.qpackEncoder.Load().KnownReceivedCount(), server.InsertCount())
 
 	// Request 2: the same headers now reference the dynamic table.
-	frame2, err := client.encodeRequestHeaders(req)
-	if err != nil {
-		t.Fatalf("encodeRequestHeaders 2: %v", err)
-	}
+	frame2, err2 := client.encodeRequestHeaders(req)
+
+	require.NoErrorf(t, err2, "encodeRequestHeaders 2: %v", err2)
 	server = serverMirrorTable(t, conn, serverCap)
-	ric := decodeRequestSection(t, server, frame2, want)
-	if ric == 0 {
-		t.Fatal("request 2 must reference the dynamic table (Required Insert Count > 0)")
-	}
-	if len(frame2) >= len(frame1) {
-		t.Fatalf("dynamic request (%d bytes) not smaller than the static one (%d bytes)", len(frame2), len(frame1))
-	}
+	ric2 := decodeRequestSection(t, server, frame2, want)
+	assert.NotZero(t, ric2, "request 2 must reference the dynamic table (Required Insert Count > 0)")
+	assert.Lessf(t, len(frame2), len(frame1),
+		"dynamic request (%d bytes) not smaller than the static one (%d bytes)", len(frame2), len(frame1))
 }
 
 // TestConformance_RFC9204_Sec21_EncodeStaticFallbackServerCapZero proves the static
@@ -178,34 +157,21 @@ func TestConformance_RFC9204_Sec21_EncodeStaticFallbackServerCapZero(t *testing.
 	dec := &fakeStream{id: 11, recvChunks: [][]byte{appendV(nil, StreamTypeQPACKDecoder)}}
 	conn := &fakeConn{req: &fakeStream{}, acceptQ: []quicStream{ctrl, dec}}
 	client, err := NewClientFake(conn, defaultSettings)
-	if err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, err, "NewClientFake with the production settings")
 	defer client.Close()
-
-	if err := client.serviceControl(); err != nil {
-		t.Fatalf("serviceControl: %v", err)
-	}
-	if client.qpackEncoder.Load() != nil {
-		t.Fatal("a server capacity of 0 must keep the encoder static-only")
-	}
-
+	require.NoError(t, client.serviceControl(), "serviceControl over a server capacity of 0")
 	req, _ := sampleRequest()
-	frame, err := client.encodeRequestHeaders(req)
-	if err != nil {
-		t.Fatalf("encodeRequestHeaders: %v", err)
-	}
+
+	frame, ferr := client.encodeRequestHeaders(req)
+
+	require.NoErrorf(t, ferr, "encodeRequestHeaders: %v", ferr)
+	assert.Truef(t, client.qpackEncoder.Load() == nil, "a server capacity of 0 must keep the encoder static-only")
 	var static qpack.Encoder
 	wantFrame, werr := req.EncodeHeaders(&static, nil, client.maxFieldSection.Load())
-	if werr != nil {
-		t.Fatalf("static EncodeHeaders: %v", werr)
-	}
-	if !bytes.Equal(frame, wantFrame) {
-		t.Fatalf("static fallback frame differs:\n got %x\nwant %x", frame, wantFrame)
-	}
-	if sent := conn.clientQEnc.sent; len(sent) != 1 || sent[0] != byte(StreamTypeQPACKEncoder) {
-		t.Fatalf("encoder stream must carry only its type byte at capacity 0: %x", sent)
-	}
+	require.NoErrorf(t, werr, "static EncodeHeaders: %v", werr)
+	assert.Equalf(t, wantFrame, frame, "static fallback frame differs:\n got %x\nwant %x", frame, wantFrame)
+	assert.Equalf(t, []byte{byte(StreamTypeQPACKEncoder)}, conn.clientQEnc.sent,
+		"encoder stream must carry only its type byte at capacity 0: %x", conn.clientQEnc.sent)
 }
 
 // TestConcurrent_QPACKEncoderDynamic_UnderRace is the encode-side acid test: N
@@ -218,12 +184,9 @@ func TestConcurrent_QPACKEncoderDynamic_UnderRace(t *testing.T) {
 	const serverCap = 65536
 	conn := &fakeConn{req: &fakeStream{}}
 	client, err := NewClientFake(conn, defaultSettings)
-	if err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, err, "NewClientFake with the production settings")
 	defer client.Close()
 	client.enableEncoderDynamic(serverCap) // as the server's SETTINGS would
-
 	stop := make(chan struct{})
 	var ackWG, encWG sync.WaitGroup
 
@@ -247,7 +210,6 @@ func TestConcurrent_QPACKEncoderDynamic_UnderRace(t *testing.T) {
 			client.encMu.Unlock()
 		}
 	}()
-
 	const encoders = 8
 	for g := 0; g < encoders; g++ {
 		encWG.Add(1)
@@ -265,7 +227,8 @@ func TestConcurrent_QPACKEncoderDynamic_UnderRace(t *testing.T) {
 			for i := 0; i < 200; i++ {
 				frame, err := client.encodeRequestHeaders(req)
 				if err != nil || len(frame) == 0 {
-					t.Errorf("encodeRequestHeaders: frame=%d err=%v", len(frame), err)
+					assert.Failf(t, "encodeRequestHeaders produced no frame",
+						"encodeRequestHeaders: frame=%d err=%v", len(frame), err)
 					return
 				}
 			}
@@ -285,9 +248,7 @@ func TestConcurrent_QPACKEncoderDynamic_UnderRace(t *testing.T) {
 // on its second use. Credential-bearing names are now sensitive by default.
 func TestConformance_RFC9114_Sec103_CredentialFieldsNeverIndexed(t *testing.T) {
 	enc, err := qpack.NewDynamicEncoder(4096, 4096)
-	if err != nil {
-		t.Fatalf("NewDynamicEncoder: %v", err)
-	}
+	require.NoErrorf(t, err, "NewDynamicEncoder: %v", err)
 	enc.DrainEncoderInstructions(nil) // drop Set Dynamic Table Capacity
 	req := &Request{
 		Method: "GET", Scheme: "https", Authority: "e", Path: "/",
@@ -298,25 +259,23 @@ func TestConformance_RFC9114_Sec103_CredentialFieldsNeverIndexed(t *testing.T) {
 			{Name: []byte("x-run-id"), Value: []byte("load-test-42")},
 		},
 	}
+
 	for round := 0; round < 3; round++ {
-		if _, err := req.EncodeHeaders(enc, nil, ^uint64(0)); err != nil {
-			t.Fatalf("round %d: EncodeHeaders: %v", round, err)
-		}
+		_, rerr := req.EncodeHeaders(enc, nil, ^uint64(0))
+		require.NoErrorf(t, rerr, "round %d: EncodeHeaders: %v", round, rerr)
 	}
+
 	// The instruction stream is Huffman-coded, so scanning it for the plaintext
 	// proves nothing. Count insertions instead. Exactly two fields may enter the
 	// table: :authority (a static NAME match, so a new entry) and x-run-id. None of
 	// the three credential fields may.
-	if got := enc.InsertCount(); got != 2 {
-		t.Fatalf("InsertCount = %d, want 2 (:authority + x-run-id) — a credential was indexed", got)
-	}
+	assert.Equalf(t, uint64(2), enc.InsertCount(),
+		"InsertCount = %d, want 2 (:authority + x-run-id) — a credential was indexed", enc.InsertCount())
 
 	// Control: give the same three values ordinary names and they DO get inserted,
 	// so the assertion above is about the names, not about an inert table.
-	ctl, err := qpack.NewDynamicEncoder(4096, 4096)
-	if err != nil {
-		t.Fatalf("NewDynamicEncoder: %v", err)
-	}
+	ctl, cerr := qpack.NewDynamicEncoder(4096, 4096)
+	require.NoErrorf(t, cerr, "NewDynamicEncoder: %v", cerr)
 	plain := *req
 	plain.Headers = []header.Field{
 		{Name: []byte("x-a"), Value: []byte("Bearer s3cr3t")},
@@ -325,11 +284,9 @@ func TestConformance_RFC9114_Sec103_CredentialFieldsNeverIndexed(t *testing.T) {
 		{Name: []byte("x-run-id"), Value: []byte("load-test-42")},
 	}
 	for round := 0; round < 3; round++ {
-		if _, err := plain.EncodeHeaders(ctl, nil, ^uint64(0)); err != nil {
-			t.Fatalf("control round %d: %v", round, err)
-		}
+		_, perr := plain.EncodeHeaders(ctl, nil, ^uint64(0))
+		require.NoErrorf(t, perr, "control round %d: %v", round, perr)
 	}
-	if got := ctl.InsertCount(); got != 5 {
-		t.Fatalf("control InsertCount = %d, want 5 — the fixture does not exercise insertion", got)
-	}
+	require.Equalf(t, uint64(5), ctl.InsertCount(),
+		"control InsertCount = %d, want 5 — the fixture does not exercise insertion", ctl.InsertCount())
 }

@@ -10,6 +10,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/stretchr/testify/require"
 )
 
 // Congestion-control A/B measurement (#362).
@@ -82,9 +84,8 @@ func TestInterop_CCGoodput(t *testing.T) {
 		// One warm-up transfer, not measured: the first upload on a fresh
 		// connection pays the handshake and starts from the initial window, so
 		// including it would measure slow-start ramp rather than steady state.
-		if _, _, err := doUpload(t, client, host, body); err != nil {
-			t.Fatalf("warm-up upload: %v", err)
-		}
+		_, _, warmErr := doUpload(t, client, host, body)
+		require.NoError(t, warmErr, "warm-up upload")
 
 		var best, total time.Duration
 		n := ccRepeats()
@@ -92,23 +93,20 @@ func TestInterop_CCGoodput(t *testing.T) {
 			start := time.Now()
 			resp, _, err := doUpload(t, client, host, body)
 			elapsed := time.Since(start)
-			if err != nil {
-				t.Fatalf("upload %d: %v", i, err)
-			}
-			if resp.Status != 200 && resp.Status != 204 {
-				t.Fatalf("upload %d: status = %d", i, resp.Status)
-			}
+
+			require.NoErrorf(t, err, "upload %d", i)
+			require.Containsf(t, []int{200, 204}, resp.Status, "upload %d: status = %d", i, resp.Status)
 			// Proof, per request, that this peer actually consumed the payload.
 			// Without it a peer that answers on the request headers reports a
 			// spectacular goodput for a transfer that never happened — which is
 			// what Caddy and nginx did for as long as this benchmark existed
 			// (#564). Asserting the echoed count makes "did it drain?" a
 			// measured fact rather than a property assumed of the config.
-			if got := sinkReceived(resp); got != size {
-				t.Fatalf("upload %d: peer echoed X-Sink-Received=%d for a %d-byte body; "+
+			got := sinkReceived(resp)
+			require.Equalf(t, size, got,
+				"upload %d: peer echoed X-Sink-Received=%d for a %d-byte body; "+
 					"a peer that did not consume the payload cannot produce a meaningful "+
 					"time, so this measurement is void", i, got, size)
-			}
 			total += elapsed
 			if best == 0 || elapsed < best {
 				best = elapsed

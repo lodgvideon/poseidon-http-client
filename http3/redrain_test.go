@@ -3,6 +3,9 @@ package http3
 import (
 	"context"
 	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // lateDeliveryStream reproduces the window recvStep's second drain exists for.
@@ -49,39 +52,36 @@ func (s *lateDeliveryStream) WaitReadable(context.Context) error { return nil }
 func TestRecvStep_DrainsAgainAfterFinishedFlips(t *testing.T) {
 	payload := AppendFrameHeader(nil, FrameData, 3)
 	payload = append(payload, 'a', 'b', 'c')
-
 	conn := &fakeConn{req: &fakeStream{}}
-	client, _ := NewClientFake(conn, nil)
+	client, err := NewClientFake(conn, nil)
+	require.NoError(t, err, "NewClientFake over the fake transport")
 	stream := &lateDeliveryStream{payload: payload}
-
 	var fr FrameReader
+
 	ended, err := client.recvStep(context.Background(), stream, &fr)
-	if err != nil {
-		t.Fatalf("recvStep: %v", err)
-	}
-	if ended {
-		t.Fatal("recvStep reported the stream ended while bytes were still undelivered — " +
-			"finished flipped between the first drain and the snapshot, and without the " +
+
+	require.NoError(t, err, "recvStep over a stream that finished with bytes still undelivered")
+	require.False(t, ended,
+		"recvStep reported the stream ended while bytes were still undelivered — "+
+			"finished flipped between the first drain and the snapshot, and without the "+
 			"second drain those bytes are lost")
-	}
-	if fr.Buffered() == 0 {
-		t.Error("no bytes were fed to the frame reader; the second drain did not run")
-	}
+	assert.Positive(t, fr.Buffered(),
+		"no bytes were fed to the frame reader; the second drain did not run")
 }
 
 // TestRecvStep_EndsOnceEverythingIsDrained is the other side: after the late
 // bytes have been taken, the next step must conclude rather than spin.
 func TestRecvStep_EndsOnceEverythingIsDrained(t *testing.T) {
 	conn := &fakeConn{req: &fakeStream{}}
-	client, _ := NewClientFake(conn, nil)
+	client, err := NewClientFake(conn, nil)
+	require.NoError(t, err, "NewClientFake over the fake transport")
 	stream := &lateDeliveryStream{payload: nil, firstDone: true, delivered: true}
-
 	var fr FrameReader
+
 	ended, err := client.recvStep(context.Background(), stream, &fr)
-	if err != nil {
-		t.Fatalf("recvStep: %v", err)
-	}
-	if !ended {
-		t.Error("recvStep did not conclude on a finished, fully drained stream")
-	}
+
+	require.NoError(t, err, "recvStep over a finished, fully drained stream")
+	assert.True(t, ended,
+		"recvStep did not conclude on a finished, fully drained stream — a caller that "+
+			"never sees ended re-parses the same empty buffer forever")
 }

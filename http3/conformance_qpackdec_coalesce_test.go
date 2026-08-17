@@ -1,9 +1,10 @@
 package http3
 
 import (
-	"errors"
-
 	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // TestConformance_RFC9204_Sec42_DecoderStreamCoalescedBytesNotDropped pins that
@@ -27,17 +28,14 @@ func TestConformance_RFC9204_Sec42_DecoderStreamCoalescedBytesNotDropped(t *test
 	server := &fakeStream{id: 7, recvChunks: [][]byte{qpackUniStream(StreamTypeQPACKDecoder, 0x01)}}
 	conn := &fakeConn{req: &fakeStream{}, acceptQ: []quicStream{control, server}}
 	client, err := NewClientFake(conn, []Setting{{SettingQPACKMaxTableCapacity, qpackDynamicTableCapacity}})
-	if err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, err, "NewClientFake over the fake transport")
 
 	serr := client.serviceControl()
-	if !errors.Is(serr, ErrH3Control) {
-		t.Fatalf("serviceControl = %v, want ErrH3Control — a coalesced Insert Count "+
+
+	assert.ErrorIsf(t, serr, ErrH3Control,
+		"serviceControl = %v, want ErrH3Control — a coalesced Insert Count "+
 			"Increment past the insert count is a decoder-stream error (RFC 9204 §4.4.3), "+
 			"observable only if the coalesced bytes were not dropped", serr)
-	}
-	if conn.closeCode != H3QpackDecoderStreamError {
-		t.Fatalf("close code = %#x, want QPACK_DECODER_STREAM_ERROR (%#x)", conn.closeCode, H3QpackDecoderStreamError)
-	}
+	assert.Equalf(t, H3QpackDecoderStreamError, conn.closeCode,
+		"close code = %#x, want QPACK_DECODER_STREAM_ERROR (%#x)", conn.closeCode, H3QpackDecoderStreamError)
 }

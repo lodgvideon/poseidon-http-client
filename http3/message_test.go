@@ -3,6 +3,9 @@ package http3
 import (
 	"testing"
 
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
 	"github.com/lodgvideon/poseidon-http-client/header"
 	"github.com/lodgvideon/poseidon-http-client/qpack"
 )
@@ -19,9 +22,7 @@ func decodeAll(t *testing.T, section []byte) []header.Field {
 		out = append(out, header.Field{Name: append([]byte(nil), name...), Value: append([]byte(nil), value...)})
 		return nil
 	})
-	if err != nil {
-		t.Fatalf("decode: %v", err)
-	}
+	require.NoErrorf(t, err, "decode: %v", err)
 	return out
 }
 
@@ -40,33 +41,28 @@ func TestConformance_RFC9114_Sec431_RequestPseudoHeadersFirst(t *testing.T) {
 		Method: "GET", Scheme: "https", Authority: "example.com", Path: "/index.html",
 		Headers: []header.Field{hf("accept", "text/html")},
 	}
-	frame, err := req.EncodeHeaders(&enc, nil, ^uint64(0))
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	typ, length, n, err := ParseFrameHeader(frame)
-	if err != nil || typ != FrameHeaders {
-		t.Fatalf("frame header = (%#x,%v)", typ, err)
-	}
-	fields := decodeAll(t, frame[n:n+int(length)])
-
 	want := []struct{ name, value string }{
 		{":method", "GET"}, {":scheme", "https"}, {":authority", "example.com"},
 		{":path", "/index.html"}, {"accept", "text/html"},
 	}
-	if len(fields) != len(want) {
-		t.Fatalf("got %d fields, want %d", len(fields), len(want))
-	}
+
+	frame, err := req.EncodeHeaders(&enc, nil, ^uint64(0))
+
+	require.NoError(t, err, "EncodeHeaders on a well-formed request")
+	typ, length, n, perr := ParseFrameHeader(frame)
+	require.NoErrorf(t, perr, "frame header = (%#x,%v)", typ, perr)
+	require.Equalf(t, FrameHeaders, typ, "frame type = %#x, want HEADERS (%#x)", typ, FrameHeaders)
+	fields := decodeAll(t, frame[n:n+int(length)])
+	require.Lenf(t, fields, len(want), "got %d fields, want %d", len(fields), len(want))
 	sawRegular := false
 	for i, w := range want {
-		if string(fields[i].Name) != w.name || string(fields[i].Value) != w.value {
-			t.Fatalf("field %d = %s:%s, want %s:%s", i, fields[i].Name, fields[i].Value, w.name, w.value)
-		}
-		if fields[i].Name[0] == ':' && sawRegular {
-			t.Fatalf("pseudo-header %q after a regular header", w.name)
-		}
-		if fields[i].Name[0] != ':' {
+		assert.Equalf(t, w.name, string(fields[i].Name),
+			"field %d = %s:%s, want %s:%s", i, fields[i].Name, fields[i].Value, w.name, w.value)
+		assert.Equalf(t, w.value, string(fields[i].Value),
+			"field %d = %s:%s, want %s:%s", i, fields[i].Name, fields[i].Value, w.name, w.value)
+		if fields[i].Name[0] == ':' {
+			assert.Falsef(t, sawRegular, "pseudo-header %q after a regular header", w.name)
+		} else {
 			sawRegular = true
 		}
 	}
@@ -78,15 +74,15 @@ func TestConformance_RFC9114_Sec431_RequestPseudoHeadersFirst(t *testing.T) {
 func TestRequest_OmitsEmptyAuthority(t *testing.T) {
 	var enc qpack.Encoder
 	req := &Request{Method: "GET", Scheme: "https", Path: "/", Headers: []header.Field{hf("host", "example.com")}}
+
 	frame, err := req.EncodeHeaders(&enc, nil, ^uint64(0))
-	if err != nil {
-		t.Fatal(err)
-	}
-	_, length, n, _ := ParseFrameHeader(frame)
+
+	require.NoError(t, err, "EncodeHeaders on a request whose authority comes from the Host header")
+	_, length, n, perr := ParseFrameHeader(frame)
+	require.NoErrorf(t, perr, "the encoded HEADERS frame must parse: %v", perr)
 	for _, f := range decodeAll(t, frame[n:n+int(length)]) {
-		if string(f.Name) == ":authority" {
-			t.Fatal(":authority must be omitted when empty")
-		}
+		assert.NotEqual(t, ":authority", string(f.Name),
+			":authority must be omitted when empty rather than sent with an empty value")
 	}
 }
 
@@ -108,9 +104,10 @@ func TestConformance_RFC9114_Sec42_RequestValidation(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			if _, err := c.req.EncodeHeaders(&enc, nil, ^uint64(0)); err != ErrH3Message {
-				t.Fatalf("err = %v, want ErrH3Message", err)
-			}
+			_, err := c.req.EncodeHeaders(&enc, nil, ^uint64(0))
+
+			assert.Equalf(t, ErrH3Message, err,
+				"err = %v, want ErrH3Message: the client would put a malformed request on the wire", err)
 		})
 	}
 }
@@ -121,17 +118,14 @@ func TestConformance_RFC9114_Sec412_ResponseDecode(t *testing.T) {
 	// TestConformance_RFC9114_Sec4_2_ResponseTETrailers_Malformed pins that.
 	section := encodeSection(hf(":status", "200"), hf("content-type", "text/plain"))
 	var dec qpack.Decoder
+
 	resp, _, err := DecodeResponseHeaders(&dec, nil, section)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if resp.Status != 200 {
-		t.Fatalf("status = %d, want 200", resp.Status)
-	}
-	if len(resp.Headers) != 1 || string(resp.Headers[0].Name) != "content-type" ||
-		string(resp.Headers[0].Value) != "text/plain" {
-		t.Fatalf("headers = %+v", resp.Headers)
-	}
+
+	require.NoError(t, err, "DecodeResponseHeaders on a well-formed response")
+	assert.Equalf(t, 200, resp.Status, "status = %d, want 200", resp.Status)
+	require.Lenf(t, resp.Headers, 1, "headers = %+v, want exactly the one regular field", resp.Headers)
+	assert.Equalf(t, "content-type", string(resp.Headers[0].Name), "headers = %+v", resp.Headers)
+	assert.Equalf(t, "text/plain", string(resp.Headers[0].Value), "headers = %+v", resp.Headers)
 }
 
 // TestConformance_RFC9114_Sec412_MalformedResponse rejects each way a response
@@ -158,9 +152,11 @@ func TestConformance_RFC9114_Sec412_MalformedResponse(t *testing.T) {
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			var dec qpack.Decoder
-			if _, _, err := DecodeResponseHeaders(&dec, nil, c.section); err != ErrH3Message {
-				t.Fatalf("err = %v, want ErrH3Message", err)
-			}
+
+			_, _, err := DecodeResponseHeaders(&dec, nil, c.section)
+
+			assert.Equalf(t, ErrH3Message, err,
+				"err = %v, want ErrH3Message: a malformed response must not reach the caller", err)
 		})
 	}
 }

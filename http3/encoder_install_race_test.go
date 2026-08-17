@@ -5,6 +5,9 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
 	"github.com/lodgvideon/poseidon-http-client/header"
 	"github.com/lodgvideon/poseidon-http-client/qpack"
 )
@@ -32,9 +35,7 @@ func TestConcurrent_QPACKEncoderInstall_UnderRace(t *testing.T) {
 	const serverCap = 65536
 	conn := &fakeConn{req: &fakeStream{}}
 	client, err := NewClientFake(conn, defaultSettings)
-	if err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, err, "NewClientFake over the fake transport")
 	defer client.Close()
 
 	req, want := sampleRequest()
@@ -65,8 +66,7 @@ func TestConcurrent_QPACKEncoderInstall_UnderRace(t *testing.T) {
 			defer encWG.Done()
 			for {
 				frame, eerr := client.encodeRequestHeaders(req)
-				if eerr != nil {
-					t.Errorf("encodeRequestHeaders: %v", eerr)
+				if !assert.NoError(t, eerr, "encodeRequestHeaders while the install races") {
 					return
 				}
 				collect(frame)
@@ -75,8 +75,7 @@ func TestConcurrent_QPACKEncoderInstall_UnderRace(t *testing.T) {
 				case <-installed:
 					// One more encode after the install is fully visible, then stop.
 					frame, eerr = client.encodeRequestHeaders(req)
-					if eerr != nil {
-						t.Errorf("encodeRequestHeaders after install: %v", eerr)
+					if !assert.NoError(t, eerr, "encodeRequestHeaders after install") {
 						return
 					}
 					collect(frame)
@@ -92,29 +91,26 @@ func TestConcurrent_QPACKEncoderInstall_UnderRace(t *testing.T) {
 	close(installed)
 	encWG.Wait()
 
-	if client.qpackEncoder.Load() == nil {
-		t.Fatal("encoder was never installed: the race under test never happened")
-	}
-	if len(frames) < encoders {
-		t.Fatalf("collected %d frames from %d goroutines, want at least one each", len(frames), encoders)
-	}
+	require.NotNil(t, client.qpackEncoder.Load(),
+		"encoder was never installed: the race under test never happened")
+	require.GreaterOrEqualf(t, len(frames), encoders,
+		"collected %d frames from %d goroutines, want at least one each", len(frames), encoders)
 
 	// Rebuilding the server's table is itself the ordering check: serverMirrorTable
 	// fails unless our encoder stream parses whole, from the type byte on, with no
 	// byte left over. That is what a torn or reordered install would break.
 	server := serverMirrorTable(t, conn, serverCap)
-	if server.InsertCount() == 0 {
-		t.Fatal("the server's table holds no entry: no encode ran after the install, " +
+	require.NotZero(t, server.InsertCount(),
+		"the server's table holds no entry: no encode ran after the install, "+
 			"so this exercised only the static path and proves nothing about the race")
-	}
 	for i, f := range frames {
 		// Nothing acknowledges an insert in this fixture, so no section may reference
 		// the dynamic table (RFC 9204 §2.1.3) — every frame is self-contained,
 		// whichever side of the install it was encoded on, and must decode to the
 		// same headers.
-		if ric := decodeRequestSection(t, server, f, want); ric != 0 {
-			t.Fatalf("frame %d has Required Insert Count %d, want 0: nothing acknowledged an insert", i, ric)
-		}
+		ric := decodeRequestSection(t, server, f, want)
+		require.Zerof(t, ric,
+			"frame %d has Required Insert Count %d, want 0: nothing acknowledged an insert", i, ric)
 	}
 }
 
@@ -127,29 +123,23 @@ func TestQPACKEncoderInstall_StaticFrameIsSelfContained(t *testing.T) {
 	const serverCap = 4096
 	conn := &fakeConn{req: &fakeStream{}}
 	client, err := NewClientFake(conn, defaultSettings)
-	if err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, err, "NewClientFake over the fake transport")
 	defer client.Close()
-
 	req, want := sampleRequest()
-	frame, err := client.encodeRequestHeaders(req) // encoder still nil
-	if err != nil {
-		t.Fatalf("encodeRequestHeaders: %v", err)
-	}
-	beforeInstall := len(conn.clientQEnc.sent)
 
+	frame, encErr := client.encodeRequestHeaders(req) // encoder still nil
+	beforeInstall := len(conn.clientQEnc.sent)
 	client.enableEncoderDynamic(serverCap)
 
+	require.NoError(t, encErr, "encodeRequestHeaders on the static-only path")
 	// The static encode wrote nothing to the encoder stream, so everything on it is
 	// the install's own Set Dynamic Table Capacity.
-	if beforeInstall != 1 {
-		t.Fatalf("static encode put %d bytes on the encoder stream, want only the type byte", beforeInstall)
-	}
+	require.Equalf(t, 1, beforeInstall,
+		"static encode put %d bytes on the encoder stream, want only the type byte", beforeInstall)
 	server := serverMirrorTable(t, conn, serverCap)
-	if ric := decodeRequestSection(t, server, frame, want); ric != 0 {
-		t.Errorf("static frame has Required Insert Count %d, want 0: it must reference no dynamic entry", ric)
-	}
+	ric := decodeRequestSection(t, server, frame, want)
+	assert.Zerof(t, ric,
+		"static frame has Required Insert Count %d, want 0: it must reference no dynamic entry", ric)
 }
 
 // BenchmarkEncodeRequestHeaders_StaticOnly measures what the atomic pointer buys on

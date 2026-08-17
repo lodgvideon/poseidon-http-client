@@ -6,6 +6,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
 	"github.com/lodgvideon/poseidon-http-client/quic"
 )
 
@@ -22,9 +25,7 @@ func waitSent(t *testing.T, c *fakeConn) {
 		if sent {
 			return
 		}
-		if time.Now().After(deadline) {
-			t.Fatal("request was never sent")
-		}
+		require.False(t, time.Now().After(deadline), "request was never sent")
 		time.Sleep(time.Millisecond)
 	}
 }
@@ -34,18 +35,17 @@ func waitSent(t *testing.T, c *fakeConn) {
 func TestClientDo_ContextAlreadyCancelled(t *testing.T) {
 	conn := &fakeConn{req: &fakeStream{}}
 	client, err := NewClientFake(conn, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, err, "NewClientFake over the fake transport")
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	req := &Request{Method: "GET", Scheme: "https", Authority: "e.com", Path: "/"}
-	if _, _, err := client.Do(ctx, req); err != context.Canceled {
-		t.Fatalf("Do with a cancelled context = %v, want context.Canceled", err)
-	}
-	if conn.req.finSent {
-		t.Fatal("no request should have been sent for an already-cancelled context")
-	}
+
+	_, _, doErr := client.Do(ctx, req)
+
+	assert.Equalf(t, context.Canceled, doErr,
+		"Do with a cancelled context = %v, want context.Canceled", doErr)
+	assert.False(t, conn.req.finSent,
+		"no request should have been sent for an already-cancelled context")
 }
 
 // TestClientDo_ContextCancelMidRequest: a per-request context cancelled while the
@@ -54,32 +54,30 @@ func TestClientDo_ContextAlreadyCancelled(t *testing.T) {
 func TestClientDo_ContextCancelMidRequest(t *testing.T) {
 	conn := &fakeConn{req: &fakeStream{}} // never finishes (no chunks, fin=false)
 	client, err := NewClientFake(conn, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, err, "NewClientFake over the fake transport")
 	ctx, cancel := context.WithCancel(context.Background())
 	go func() {
 		time.Sleep(20 * time.Millisecond)
 		cancel()
 	}()
 	req := &Request{Method: "GET", Scheme: "https", Authority: "e.com", Path: "/"}
-	if _, _, err := client.Do(ctx, req); err != context.Canceled {
-		t.Fatalf("Do cancelled mid-request = %v, want context.Canceled", err)
-	}
+
+	_, _, doErr := client.Do(ctx, req)
+
+	assert.Equalf(t, context.Canceled, doErr,
+		"Do cancelled mid-request = %v, want context.Canceled", doErr)
 	// The abandoned request stream is aborted so the server frees it.
-	if !conn.req.stopped || !conn.req.reset {
-		t.Fatalf("cancelled Do must abort the stream: stopped=%v reset=%v", conn.req.stopped, conn.req.reset)
-	}
-	if conn.req.stopCode != H3RequestCancelled || conn.req.resetCode != H3RequestCancelled {
-		t.Fatalf("abort codes = stop %#x reset %#x, want H3_REQUEST_CANCELLED", conn.req.stopCode, conn.req.resetCode)
-	}
+	assert.Truef(t, conn.req.stopped && conn.req.reset,
+		"cancelled Do must abort the stream: stopped=%v reset=%v", conn.req.stopped, conn.req.reset)
+	assert.Equalf(t, H3RequestCancelled, conn.req.stopCode,
+		"abort stop code = %#x, want H3_REQUEST_CANCELLED", conn.req.stopCode)
+	assert.Equalf(t, H3RequestCancelled, conn.req.resetCode,
+		"abort reset code = %#x, want H3_REQUEST_CANCELLED", conn.req.resetCode)
 	// The connection survives a per-request cancel: only the stream was aborted.
 	conn.mu.Lock()
 	closed := conn.closed
 	conn.mu.Unlock()
-	if closed {
-		t.Fatal("a per-request cancel must not close the connection")
-	}
+	assert.False(t, closed, "a per-request cancel must not close the connection")
 }
 
 // TestClient_CloseWakesInflightDo: Close during an in-flight Do wakes it with the
@@ -88,10 +86,7 @@ func TestClientDo_ContextCancelMidRequest(t *testing.T) {
 func TestClient_CloseWakesInflightDo(t *testing.T) {
 	conn := &fakeConn{req: &fakeStream{}} // never finishes
 	client, err := NewClientFake(conn, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-
+	require.NoError(t, err, "NewClientFake over the fake transport")
 	done := make(chan error, 1)
 	go func() {
 		_, _, err := client.Do(context.Background(), &Request{Method: "GET", Scheme: "https", Authority: "e.com", Path: "/"})
@@ -99,15 +94,14 @@ func TestClient_CloseWakesInflightDo(t *testing.T) {
 	}()
 	waitSent(t, conn) // the Do is now parked in WaitReadable
 
-	if err := client.Close(); err != nil {
-		t.Fatalf("Close: %v", err)
-	}
+	closeErr := client.Close()
+
+	require.NoError(t, closeErr, "Close on a connection with one in-flight Do")
 	select {
-	case err := <-done:
-		if !errors.Is(err, quic.ErrConnClosed) {
-			t.Fatalf("in-flight Do woke with %v, want quic.ErrConnClosed (graceful, not context.Canceled)", err)
-		}
+	case doErr := <-done:
+		assert.Truef(t, errors.Is(doErr, quic.ErrConnClosed),
+			"in-flight Do woke with %v, want quic.ErrConnClosed (graceful, not context.Canceled)", doErr)
 	case <-time.After(2 * time.Second):
-		t.Fatal("Close did not wake the in-flight Do")
+		require.Fail(t, "Close did not wake the in-flight Do")
 	}
 }

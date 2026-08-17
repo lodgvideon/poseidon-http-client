@@ -4,6 +4,9 @@ import (
 	"bytes"
 	"io"
 	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // TestConformance_RFC9114_Sec72_FrameRoundTrip writes each frame a client emits
@@ -25,18 +28,14 @@ func TestConformance_RFC9114_Sec72_FrameRoundTrip(t *testing.T) {
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			typ, length, n, err := ParseFrameHeader(c.encoded)
-			if err != nil {
-				t.Fatalf("ParseFrameHeader: %v", err)
-			}
-			if typ != c.typ {
-				t.Fatalf("type = %#x, want %#x", typ, c.typ)
-			}
-			if length != uint64(len(c.payload)) {
-				t.Fatalf("length = %d, want %d", length, len(c.payload))
-			}
-			if got := c.encoded[n : n+int(length)]; !bytes.Equal(got, c.payload) {
-				t.Fatalf("payload = %x, want %x", got, c.payload)
-			}
+
+			require.NoError(t, err, "ParseFrameHeader over a frame this client just wrote")
+			assert.Equalf(t, c.typ, typ, "type = %#x, want %#x", typ, c.typ)
+			// Fatal, not just reported: the payload slice below is cut with this
+			// length, so a wrong one is a panic rather than a diagnosis.
+			require.Equalf(t, uint64(len(c.payload)), length, "length = %d, want %d", length, len(c.payload))
+			got := c.encoded[n : n+int(length)]
+			assert.Truef(t, bytes.Equal(got, c.payload), "payload = %x, want %x", got, c.payload)
 		})
 	}
 }
@@ -50,23 +49,16 @@ func TestConformance_RFC9114_Sec724_SettingsRoundTrip(t *testing.T) {
 	frame := AppendSettings(nil, settings)
 
 	typ, length, n, err := ParseFrameHeader(frame)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if typ != FrameSettings {
-		t.Fatalf("type = %#x, want SETTINGS", typ)
-	}
-	got, err := ParseSettings(frame[n : n+int(length)])
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(got) != len(settings) {
-		t.Fatalf("got %d settings, want %d", len(got), len(settings))
-	}
+	require.NoError(t, err, "ParseFrameHeader over a SETTINGS frame this client just wrote")
+	require.LessOrEqualf(t, n+int(length), len(frame),
+		"the declared length %d overruns the %d-byte frame we wrote", length, len(frame))
+	got, parseErr := ParseSettings(frame[n : n+int(length)])
+
+	assert.Equalf(t, FrameSettings, typ, "type = %#x, want SETTINGS", typ)
+	require.NoError(t, parseErr, "ParseSettings over our own SETTINGS payload")
+	require.Lenf(t, got, len(settings), "got %d settings, want %d", len(got), len(settings))
 	for i, s := range settings {
-		if got[i] != s {
-			t.Fatalf("setting %d = %+v, want %+v", i, got[i], s)
-		}
+		assert.Equalf(t, s, got[i], "setting %d = %+v, want %+v", i, got[i], s)
 	}
 }
 
@@ -74,26 +66,39 @@ func TestConformance_RFC9114_Sec724_SettingsRoundTrip(t *testing.T) {
 // SETTINGS identifier is rejected (H3_SETTINGS_ERROR).
 func TestConformance_RFC9114_Sec724_DuplicateSetting(t *testing.T) {
 	payload := AppendSettings(nil, []Setting{{SettingQPACKBlockedStreams, 1}, {SettingQPACKBlockedStreams, 2}})
-	_, length, n, _ := ParseFrameHeader(payload)
-	if _, err := ParseSettings(payload[n : n+int(length)]); err != ErrH3Settings {
-		t.Fatalf("err = %v, want ErrH3Settings", err)
-	}
+	_, length, n, hdrErr := ParseFrameHeader(payload)
+	require.NoError(t, hdrErr, "ParseFrameHeader over the hand-built duplicate-setting frame")
+
+	_, err := ParseSettings(payload[n : n+int(length)])
+
+	assert.Equalf(t, ErrH3Settings, err,
+		"err = %v, want ErrH3Settings: §7.2.4 forbids repeating an identifier, and an "+
+			"endpoint that accepts one silently applies whichever value it saw last", err)
 }
 
 // TestParseFrameHeader_Incomplete verifies that a header split across stream
 // reads signals a benign io.ErrUnexpectedEOF, not the fatal H3_FRAME_ERROR — so
 // a stream reader buffers more bytes instead of killing the connection.
 func TestParseFrameHeader_Incomplete(t *testing.T) {
-	if _, _, _, err := ParseFrameHeader(nil); err != io.ErrUnexpectedEOF {
-		t.Fatalf("empty: err = %v, want io.ErrUnexpectedEOF", err)
+	cases := []struct {
+		name string
+		b    []byte
+	}{
+		{"empty", nil},
+		// Type present (0x04) but the length varint is absent.
+		{"no-length", []byte{0x04}},
+		// A 2-byte varint length with only its first byte present.
+		{"truncated-length", []byte{0x00, 0x40}},
 	}
-	// Type present (0x04) but the length varint is absent.
-	if _, _, _, err := ParseFrameHeader([]byte{0x04}); err != io.ErrUnexpectedEOF {
-		t.Fatalf("no-length: err = %v, want io.ErrUnexpectedEOF", err)
-	}
-	// A 2-byte varint length with only its first byte present.
-	if _, _, _, err := ParseFrameHeader([]byte{0x00, 0x40}); err != io.ErrUnexpectedEOF {
-		t.Fatalf("truncated-length: err = %v, want io.ErrUnexpectedEOF", err)
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			_, _, _, err := ParseFrameHeader(c.b)
+
+			assert.Equalf(t, io.ErrUnexpectedEOF, err,
+				"%s: err = %v, want io.ErrUnexpectedEOF — a header split across stream reads "+
+					"must read as 'need more bytes', or the reader kills a healthy connection",
+				c.name, err)
+		})
 	}
 }
 
@@ -101,13 +106,23 @@ func TestParseFrameHeader_Incomplete(t *testing.T) {
 // SETTINGS payload whose identifier/value is cut off by the frame length is an
 // H3_FRAME_ERROR (RFC 9114 §7.1), not an H3_SETTINGS_ERROR.
 func TestConformance_RFC9114_Sec71_SettingsTruncatedIsFrameError(t *testing.T) {
-	// An identifier with no value.
-	if _, err := ParseSettings([]byte{0x06}); err != ErrH3Frame {
-		t.Fatalf("truncated setting: err = %v, want ErrH3Frame", err)
+	cases := []struct {
+		name    string
+		payload []byte
+	}{
+		{"identifier with no value", []byte{0x06}},
+		// 0x40 begins a 2-byte varint whose second byte the frame length cuts off.
+		{"value varint cut off mid-encoding", []byte{0x06, 0x40}},
 	}
-	// A value varint cut off mid-encoding (0x40 begins a 2-byte varint).
-	if _, err := ParseSettings([]byte{0x06, 0x40}); err != ErrH3Frame {
-		t.Fatalf("truncated value: err = %v, want ErrH3Frame", err)
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			_, err := ParseSettings(c.payload)
+
+			assert.Equalf(t, ErrH3Frame, err,
+				"%s: err = %v, want ErrH3Frame — a field cut off by the frame length is a "+
+					"framing fault (§7.1), and reporting it as H3_SETTINGS_ERROR sends the "+
+					"peer the wrong close code", c.name, err)
+		})
 	}
 }
 
@@ -119,9 +134,12 @@ func TestConformance_RFC9114_Sec7241_ReservedSetting(t *testing.T) {
 		// Hand-build a SETTINGS payload with the reserved id (AppendSettings
 		// would compute a valid frame; we only need the payload pairs).
 		payload := append(appendV(nil, id), appendV(nil, 1)...)
-		if _, err := ParseSettings(payload); err != ErrH3Settings {
-			t.Fatalf("reserved id %#x: err = %v, want ErrH3Settings", id, err)
-		}
+
+		_, err := ParseSettings(payload)
+
+		assert.Equalf(t, ErrH3Settings, err,
+			"reserved id %#x: err = %v, want ErrH3Settings — §7.2.4.1 makes every "+
+				"HTTP/2-carryover identifier in 0x02-0x05 a MUST-reject", id, err)
 	}
 }
 

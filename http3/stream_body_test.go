@@ -5,6 +5,9 @@ import (
 	"context"
 	"errors"
 	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // doStreamHead drives DoStream against a fake conn carrying the given response
@@ -13,13 +16,10 @@ import (
 func doStreamHead(t *testing.T, conn *fakeConn, req *Request) (*Response, ResponseBody) {
 	t.Helper()
 	client, err := NewClientFake(conn, []Setting{{SettingQPACKMaxTableCapacity, 0}})
-	if err != nil {
-		t.Fatalf("NewClientFake: %v", err)
-	}
+	require.NoError(t, err, "NewClientFake over the fake transport")
+
 	resp, body, err := client.DoStream(context.Background(), req)
-	if err != nil {
-		t.Fatalf("DoStream: %v", err)
-	}
+	require.NoError(t, err, "DoStream up to the response head")
 	return resp, body
 }
 
@@ -31,33 +31,39 @@ func TestClient_DoStream_IncrementalBody(t *testing.T) {
 	d1 := AppendData(nil, []byte("chunk-one"))
 	d2 := AppendData(nil, []byte("chunk-two"))
 	conn := &fakeConn{req: &fakeStream{recvChunks: [][]byte{headers, d1, d2}, fin: true}}
-
 	resp, body := doStreamHead(t, conn, &Request{Method: "GET", Scheme: "https", Authority: "h", Path: "/"})
 	defer func() { _ = body.Close() }()
-	if resp.Status != 200 {
-		t.Fatalf("status = %d, want 200", resp.Status)
-	}
-
+	// The buffered-body accumulator lives on the concrete reader, and reading it is
+	// the only proof that the whole body is not retained.
+	br, isReader := body.(*BodyReader)
+	require.Truef(t, isReader, "DoStream returned %T, not *BodyReader — the accumulator "+
+		"check below cannot see whether the body was buffered whole", body)
 	ctx := context.Background()
-	ev1, err := body.Next(ctx)
-	if err != nil || !bytes.Equal(ev1.Data, []byte("chunk-one")) || ev1.End {
-		t.Fatalf("Next#1 = {%q end=%v} err=%v, want {chunk-one end=false}", ev1.Data, ev1.End, err)
-	}
-	// The buffered-body accumulator must stay empty on the streaming path — the
-	// proof that the whole body is not retained.
-	if br, ok := body.(*BodyReader); ok {
-		if br.rb.body != nil {
-			t.Fatalf("streaming path buffered %d body bytes, want 0", len(br.rb.body))
-		}
-	}
-	ev2, err := body.Next(ctx)
-	if err != nil || !bytes.Equal(ev2.Data, []byte("chunk-two")) {
-		t.Fatalf("Next#2 = {%q} err=%v, want chunk-two", ev2.Data, err)
-	}
-	ev3, err := body.Next(ctx)
-	if err != nil || ev3.Data != nil || ev3.Trailers != nil || !ev3.End {
-		t.Fatalf("Next#3 = {data=%q trailers=%v end=%v} err=%v, want clean End", ev3.Data, ev3.Trailers, ev3.End, err)
-	}
+
+	// Each payload is copied as it arrives: a DATA chunk aliases the frame reader's
+	// buffer and is valid only until the next Next call.
+	ev1, err1 := body.Next(ctx)
+	got1 := append([]byte(nil), ev1.Data...)
+	buffered := len(br.rb.body)
+	ev2, err2 := body.Next(ctx)
+	got2 := append([]byte(nil), ev2.Data...)
+	ev3, err3 := body.Next(ctx)
+	got3 := append([]byte(nil), ev3.Data...)
+
+	require.Equalf(t, 200, resp.Status, "status = %d, want 200", resp.Status)
+	require.NoErrorf(t, err1, "Next#1 = {%q end=%v} err=%v, want {chunk-one end=false}", got1, ev1.End, err1)
+	assert.Equalf(t, []byte("chunk-one"), got1,
+		"Next#1 = {%q end=%v}, want {chunk-one end=false}", got1, ev1.End)
+	assert.Falsef(t, ev1.End, "Next#1 = {%q end=%v}, want end=false", got1, ev1.End)
+	assert.Zerof(t, buffered,
+		"streaming path buffered %d body bytes, want 0 — peak retained memory must be one "+
+			"frame, not the whole body", buffered)
+	require.NoErrorf(t, err2, "Next#2 = {%q} err=%v, want chunk-two", got2, err2)
+	assert.Equalf(t, []byte("chunk-two"), got2, "Next#2 = {%q}, want chunk-two", got2)
+	require.NoErrorf(t, err3, "Next#3 = {data=%q trailers=%v end=%v} err=%v, want clean End",
+		got3, ev3.Trailers, ev3.End, err3)
+	assert.Truef(t, got3 == nil && ev3.Trailers == nil && ev3.End,
+		"Next#3 = {data=%q trailers=%v end=%v}, want clean End", got3, ev3.Trailers, ev3.End)
 }
 
 // TestClient_DoStream_Trailers checks the streaming path surfaces a trailer field
@@ -67,28 +73,30 @@ func TestClient_DoStream_Trailers(t *testing.T) {
 	data := AppendData(nil, []byte("payload"))
 	trailer := AppendHeaders(nil, encodeSection(hf("x-checksum", "abc")))
 	conn := &fakeConn{req: &fakeStream{recvChunks: [][]byte{headers, data, trailer}, fin: true}}
-
 	_, body := doStreamHead(t, conn, &Request{Method: "GET", Scheme: "https", Authority: "h", Path: "/"})
 	defer func() { _ = body.Close() }()
 	ctx := context.Background()
 
-	ev, err := body.Next(ctx)
-	if err != nil || !bytes.Equal(ev.Data, []byte("payload")) {
-		t.Fatalf("Next(data) = {%q} err=%v, want payload", ev.Data, err)
-	}
-	ev, err = body.Next(ctx)
-	if err != nil {
-		t.Fatalf("Next(trailers): %v", err)
-	}
-	if len(ev.Trailers) != 1 || string(ev.Trailers[0].Name) != "x-checksum" || string(ev.Trailers[0].Value) != "abc" {
-		t.Fatalf("trailers = %+v, want x-checksum=abc", ev.Trailers)
-	}
-	if !ev.End {
-		t.Fatal("trailer event End = false, want true")
-	}
-	if tr := body.Trailers(); len(tr) != 1 || string(tr[0].Name) != "x-checksum" {
-		t.Fatalf("Trailers() = %+v, want x-checksum", tr)
-	}
+	// The DATA payload is copied at once — it aliases the reader's buffer. Trailers
+	// own their backing memory, so they survive the next call.
+	dataEv, dataErr := body.Next(ctx)
+	gotData := append([]byte(nil), dataEv.Data...)
+	trailerEv, trailerErr := body.Next(ctx)
+	viaAccessor := body.Trailers()
+
+	require.NoErrorf(t, dataErr, "Next(data) = {%q} err=%v, want payload", gotData, dataErr)
+	assert.Equalf(t, []byte("payload"), gotData, "Next(data) = {%q}, want payload", gotData)
+	require.NoError(t, trailerErr, "Next(trailers) after the body")
+	require.Lenf(t, trailerEv.Trailers, 1, "trailers = %+v, want x-checksum=abc", trailerEv.Trailers)
+	assert.Equalf(t, "x-checksum", string(trailerEv.Trailers[0].Name),
+		"trailers = %+v, want x-checksum=abc", trailerEv.Trailers)
+	assert.Equalf(t, "abc", string(trailerEv.Trailers[0].Value),
+		"trailers = %+v, want x-checksum=abc", trailerEv.Trailers)
+	assert.True(t, trailerEv.End,
+		"trailer event End = false, want true — trailers are the last thing on the stream, "+
+			"so a caller draining until End would block on a body that already finished")
+	require.Lenf(t, viaAccessor, 1, "Trailers() = %+v, want x-checksum", viaAccessor)
+	assert.Equalf(t, "x-checksum", string(viaAccessor[0].Name), "Trailers() = %+v, want x-checksum", viaAccessor)
 }
 
 // TestClient_DoStream_Reset checks that a server RESET_STREAM mid-body surfaces
@@ -103,28 +111,33 @@ func TestClient_DoStream_Reset(t *testing.T) {
 		recvReset:     true,
 		recvResetCode: H3RequestRejected,
 	}}
-
 	_, body := doStreamHead(t, conn, &Request{Method: "GET", Scheme: "https", Authority: "h", Path: "/"})
 	defer func() { _ = body.Close() }()
 
 	// The declared-but-incomplete DATA frame is not yet a full frame, so Next drives
 	// the loop into the reset.
-	var rst *StreamResetError
+	var termErr error
+	cleanEnd := false
 	for {
 		ev, err := body.Next(context.Background())
 		if err != nil {
-			if !errors.As(err, &rst) {
-				t.Fatalf("Next err = %v, want *StreamResetError", err)
-			}
+			termErr = err
 			break
 		}
 		if ev.End {
-			t.Fatal("clean End on a reset stream, want *StreamResetError")
+			cleanEnd = true
+			break
 		}
 	}
-	if rst.Code != H3RequestRejected || !rst.Retryable() {
-		t.Fatalf("reset code = %#x retryable=%v, want H3_REQUEST_REJECTED retryable", rst.Code, rst.Retryable())
-	}
+
+	require.False(t, cleanEnd, "clean End on a reset stream, want *StreamResetError")
+	var rst *StreamResetError
+	require.Truef(t, errors.As(termErr, &rst), "Next err = %v, want *StreamResetError", termErr)
+	assert.Equalf(t, H3RequestRejected, rst.Code,
+		"reset code = %#x, want H3_REQUEST_REJECTED (%#x)", rst.Code, H3RequestRejected)
+	assert.Truef(t, rst.Retryable(),
+		"reset code = %#x retryable=%v, want H3_REQUEST_REJECTED retryable — a request the "+
+			"server never processed is the one case a retry is safe", rst.Code, rst.Retryable())
 }
 
 // TestClient_DoStream_ContentLengthMismatch checks that the streaming path applies
@@ -135,20 +148,21 @@ func TestClient_DoStream_ContentLengthMismatch(t *testing.T) {
 	headers := AppendHeaders(nil, encodeSection(hf(":status", "200"), hf("content-length", "5")))
 	data := AppendData(nil, []byte("abc")) // 3 bytes ≠ declared 5
 	conn := &fakeConn{req: &fakeStream{recvChunks: [][]byte{headers, data}, fin: true}}
-
 	_, body := doStreamHead(t, conn, &Request{Method: "GET", Scheme: "https", Authority: "h", Path: "/"})
 	defer func() { _ = body.Close() }()
 
 	// First event is the 3-byte DATA chunk; the mismatch is only detectable at end.
-	if ev, err := body.Next(context.Background()); err != nil || !bytes.Equal(ev.Data, []byte("abc")) {
-		t.Fatalf("Next(data) = {%q} err=%v, want abc", ev.Data, err)
-	}
-	if _, err := body.Next(context.Background()); !errors.Is(err, ErrH3Message) {
-		t.Fatalf("Next(end) err = %v, want ErrH3Message", err)
-	}
-	if conn.req.resetCode != H3MessageError {
-		t.Fatalf("abort code = %#x, want H3_MESSAGE_ERROR", conn.req.resetCode)
-	}
+	dataEv, dataErr := body.Next(context.Background())
+	gotData := append([]byte(nil), dataEv.Data...)
+	_, endErr := body.Next(context.Background())
+
+	require.NoErrorf(t, dataErr, "Next(data) = {%q} err=%v, want abc", gotData, dataErr)
+	assert.Equalf(t, []byte("abc"), gotData, "Next(data) = {%q}, want abc", gotData)
+	require.ErrorIsf(t, endErr, ErrH3Message,
+		"Next(end) err = %v, want ErrH3Message — a short body must be malformed on the "+
+			"streaming path exactly as it is on the buffered one", endErr)
+	assert.Equalf(t, H3MessageError, conn.req.resetCode,
+		"abort code = %#x, want H3_MESSAGE_ERROR (%#x)", conn.req.resetCode, H3MessageError)
 }
 
 // TestClient_DoStream_CloseAbortsStream checks that abandoning the body before the
@@ -157,23 +171,23 @@ func TestClient_DoStream_CloseAbortsStream(t *testing.T) {
 	headers := AppendHeaders(nil, encodeSection(hf(":status", "200")))
 	data := AppendData(nil, []byte("streamed-body"))
 	conn := &fakeConn{req: &fakeStream{recvChunks: [][]byte{headers, data}, fin: true}}
-
 	_, body := doStreamHead(t, conn, &Request{Method: "GET", Scheme: "https", Authority: "h", Path: "/"})
 
 	// Read one chunk then abandon.
-	if _, err := body.Next(context.Background()); err != nil {
-		t.Fatalf("Next: %v", err)
-	}
-	if err := body.Close(); err != nil {
-		t.Fatalf("Close: %v", err)
-	}
-	if !conn.req.reset || conn.req.resetCode != H3RequestCancelled {
-		t.Fatalf("Close abort = (reset=%v code=%#x), want reset with H3_REQUEST_CANCELLED", conn.req.reset, conn.req.resetCode)
-	}
-	// Idempotent.
-	if err := body.Close(); err != nil {
-		t.Fatalf("second Close: %v", err)
-	}
+	_, nextErr := body.Next(context.Background())
+	closeErr := body.Close()
+	reset, resetCode := conn.req.reset, conn.req.resetCode
+	secondCloseErr := body.Close()
+
+	require.NoError(t, nextErr, "Next over the first body chunk")
+	require.NoError(t, closeErr, "Close over an abandoned body")
+	assert.Truef(t, reset,
+		"Close abort = (reset=%v code=%#x), want reset with H3_REQUEST_CANCELLED — an "+
+			"abandoned body leaves the server sending until the stream is reset", reset, resetCode)
+	assert.Equalf(t, H3RequestCancelled, resetCode,
+		"Close abort = (reset=%v code=%#x), want reset with H3_REQUEST_CANCELLED (%#x)",
+		reset, resetCode, H3RequestCancelled)
+	assert.NoError(t, secondCloseErr, "second Close: Close is documented idempotent")
 }
 
 // TestClient_DoStream_NoFinalResponse checks that a request stream that ends with
@@ -183,12 +197,14 @@ func TestClient_DoStream_NoFinalResponse(t *testing.T) {
 	interim := AppendHeaders(nil, encodeSection(hf(":status", "100")))
 	conn := &fakeConn{req: &fakeStream{recvChunks: [][]byte{interim}, fin: true}}
 	client, err := NewClientFake(conn, []Setting{{SettingQPACKMaxTableCapacity, 0}})
-	if err != nil {
-		t.Fatalf("NewClientFake: %v", err)
-	}
-	if _, _, err := client.DoStream(context.Background(), &Request{Method: "GET", Scheme: "https", Authority: "h", Path: "/"}); !errors.Is(err, ErrH3Message) {
-		t.Fatalf("DoStream err = %v, want ErrH3Message", err)
-	}
+	require.NoError(t, err, "NewClientFake over the fake transport")
+
+	_, _, doErr := client.DoStream(context.Background(),
+		&Request{Method: "GET", Scheme: "https", Authority: "h", Path: "/"})
+
+	assert.ErrorIsf(t, doErr, ErrH3Message,
+		"DoStream err = %v, want ErrH3Message — a stream that ends after only an "+
+			"informational response carries no response head to hand back", doErr)
 }
 
 // TestClient_DoStream_MatchesBufferedBody checks the streaming body reassembled
@@ -200,27 +216,31 @@ func TestClient_DoStream_MatchesBufferedBody(t *testing.T) {
 		d2 := AppendData(nil, []byte("world"))
 		return &fakeConn{req: &fakeStream{recvChunks: [][]byte{headers, d1, d2}, fin: true}}
 	}
-
-	bufClient, _ := NewClientFake(makeConn(), []Setting{{SettingQPACKMaxTableCapacity, 0}})
-	_, want, err := bufClient.Do(context.Background(), &Request{Method: "GET", Scheme: "https", Authority: "h", Path: "/"})
-	if err != nil {
-		t.Fatalf("buffered Do: %v", err)
-	}
-
-	_, body := doStreamHead(t, makeConn(), &Request{Method: "GET", Scheme: "https", Authority: "h", Path: "/"})
+	req := &Request{Method: "GET", Scheme: "https", Authority: "h", Path: "/"}
+	bufClient, err := NewClientFake(makeConn(), []Setting{{SettingQPACKMaxTableCapacity, 0}})
+	require.NoError(t, err, "NewClientFake for the buffered arm")
+	_, want, err := bufClient.Do(context.Background(), req)
+	require.NoError(t, err, "buffered Do, the reference the streamed body is compared against")
+	_, body := doStreamHead(t, makeConn(), req)
 	defer func() { _ = body.Close() }()
+
+	// append copies each chunk out before the next Next invalidates it.
 	var got []byte
+	var drainErr error
 	for {
-		ev, err := body.Next(context.Background())
-		if err != nil {
-			t.Fatalf("Next: %v", err)
+		ev, nerr := body.Next(context.Background())
+		if nerr != nil {
+			drainErr = nerr
+			break
 		}
 		got = append(got, ev.Data...)
 		if ev.End {
 			break
 		}
 	}
-	if !bytes.Equal(got, want) {
-		t.Fatalf("streamed body = %q, want %q (buffered)", got, want)
-	}
+
+	require.NoError(t, drainErr, "Next while draining the streamed body")
+	assert.Truef(t, bytes.Equal(got, want),
+		"streamed body = %q, want %q (buffered) — the two entry points must not disagree "+
+			"about the bytes a response carried", got, want)
 }

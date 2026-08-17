@@ -1,6 +1,11 @@
 package http3
 
-import "testing"
+import (
+	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+)
 
 // TestConformance_DoStream_StreamedBodyNotCappedByRetainedLimit pins that a
 // DATA chunk handed off on the streaming path (DoStream) does not count against
@@ -22,13 +27,13 @@ func TestConformance_DoStream_StreamedBodyNotCappedByRetainedLimit(t *testing.T)
 
 	// A DATA frame that would push rb.total past maxResponseBytes if it were
 	// counted — but on the streaming path it is handed off, not retained.
-	if err := c.dispatchFrame(rb, FrameData, make([]byte, 1000)); err != nil {
-		t.Fatalf("dispatchFrame(streaming DATA past the retained cap) = %v, want nil — a "+
+	err := c.dispatchFrame(rb, FrameData, make([]byte, 1000))
+
+	require.NoErrorf(t, err,
+		"dispatchFrame(streaming DATA past the retained cap) = %v, want nil — a "+
 			"handed-off chunk is not retained and must not count toward maxResponseBytes", err)
-	}
-	if streamed != 1000 {
-		t.Fatalf("streamed = %d bytes, want 1000 handed to the BodyReader", streamed)
-	}
+	assert.Equalf(t, 1000, streamed,
+		"streamed = %d bytes, want 1000 handed to the BodyReader", streamed)
 }
 
 // TestConformance_Do_BufferedBodyStillCapped is the guard for the other half: the
@@ -38,8 +43,9 @@ func TestConformance_Do_BufferedBodyStillCapped(t *testing.T) {
 	c := &Client{}
 	rb := &respBuilder{resp: &Response{Status: 200}, total: maxResponseBytes - 10} // onData nil: buffered
 
-	if err := c.dispatchFrame(rb, FrameData, make([]byte, 1000)); err != ErrResponseTooLarge {
-		t.Fatalf("dispatchFrame(buffered DATA past the cap) = %v, want ErrResponseTooLarge — "+
+	err := c.dispatchFrame(rb, FrameData, make([]byte, 1000))
+
+	assert.Equalf(t, ErrResponseTooLarge, err,
+		"dispatchFrame(buffered DATA past the cap) = %v, want ErrResponseTooLarge — "+
 			"the buffered body is retained and must stay capped", err)
-	}
 }

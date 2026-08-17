@@ -8,6 +8,9 @@ import (
 	"sync/atomic"
 	"testing"
 
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
 	"github.com/lodgvideon/poseidon-http-client/quic"
 )
 
@@ -309,52 +312,42 @@ func TestClient_RequestResponse(t *testing.T) {
 	headersFrame := AppendHeaders(nil, encodeSection(hf(":status", "200"), hf("content-type", "text/plain")))
 	dataFrame := AppendData(nil, []byte("hello world"))
 	conn := &fakeConn{req: &fakeStream{recvChunks: [][]byte{headersFrame, dataFrame}, fin: true}}
-
 	client, err := NewClientFake(conn, []Setting{{SettingQPACKMaxTableCapacity, 0}})
-	if err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, err, "NewClientFake over the fake transport")
+	req := &Request{Method: "GET", Scheme: "https", Authority: "example.com", Path: "/"}
 
+	resp, body, err := client.Do(context.Background(), req)
+
+	require.NoError(t, err, "Do against a well-formed HEADERS+DATA response")
 	// Control stream: type 0x00 then a SETTINGS frame (§6.2.1).
-	styp, n, err := ReadStreamType(conn.control.sent)
-	if err != nil || styp != StreamTypeControl {
-		t.Fatalf("control stream type = (%#x,%v)", styp, err)
-	}
+	styp, n, serr := ReadStreamType(conn.control.sent)
+	require.NoError(t, serr, "the control stream must open with a stream-type varint")
+	require.Equalf(t, StreamTypeControl, styp, "control stream type = %#x, want 0x00", styp)
 	var cfr FrameReader
 	cfr.Feed(conn.control.sent[n:])
-	if ftyp, _, ferr := cfr.ReadFrame(); ferr != nil || ftyp != FrameSettings {
-		t.Fatalf("first control frame = (%#x,%v), want SETTINGS", ftyp, ferr)
-	}
-
-	req := &Request{Method: "GET", Scheme: "https", Authority: "example.com", Path: "/"}
-	resp, body, err := client.Do(context.Background(), req)
-	if err != nil {
-		t.Fatalf("Do: %v", err)
-	}
-
+	ftyp, _, ferr := cfr.ReadFrame()
+	require.NoError(t, ferr, "the control stream's first frame must be complete")
+	assert.Equalf(t, FrameSettings, ftyp,
+		"first control frame = %#x, want SETTINGS — §6.2.1 requires it first", ftyp)
 	// The request stream carried a single HEADERS frame, sent with FIN.
-	if !conn.req.finSent {
-		t.Fatal("request must be sent with FIN")
-	}
-	rtyp, rlen, rn, err := ParseFrameHeader(conn.req.sent)
-	if err != nil || rtyp != FrameHeaders {
-		t.Fatalf("request frame = (%#x,%v), want HEADERS", rtyp, err)
-	}
+	assert.True(t, conn.req.finSent, "request must be sent with FIN")
+	rtyp, rlen, rn, perr := ParseFrameHeader(conn.req.sent)
+	require.NoError(t, perr, "the request stream must carry a parseable frame header")
+	require.Equalf(t, FrameHeaders, rtyp, "request frame = %#x, want HEADERS", rtyp)
 	reqFields := decodeAll(t, conn.req.sent[rn:rn+int(rlen)])
-	if len(reqFields) < 4 || string(reqFields[0].Name) != ":method" || string(reqFields[0].Value) != "GET" {
-		t.Fatalf("request fields = %+v", reqFields)
-	}
-
+	require.GreaterOrEqualf(t, len(reqFields), 4,
+		"request must carry all four pseudo-headers, got %+v", reqFields)
+	assert.Equalf(t, ":method", string(reqFields[0].Name),
+		"the first request field must be :method, got %+v", reqFields)
+	assert.Equalf(t, "GET", string(reqFields[0].Value),
+		"the :method value must be the request's method, got %+v", reqFields)
 	// The response decoded correctly, and the body required a Poll.
-	if resp.Status != 200 {
-		t.Fatalf("status = %d, want 200", resp.Status)
-	}
-	if !bytes.Equal(body, []byte("hello world")) {
-		t.Fatalf("body = %q, want %q", body, "hello world")
-	}
-	if conn.polls.Load() == 0 {
-		t.Fatal("expected at least one Poll to receive the body")
-	}
+	assert.Equal(t, 200, resp.Status, "status decoded off the response HEADERS frame")
+	assert.Truef(t, bytes.Equal(body, []byte("hello world")),
+		"body = %q, want %q", body, "hello world")
+	assert.NotZero(t, conn.polls.Load(),
+		"expected at least one Poll to receive the body — a body delivered without one "+
+			"means the fixture handed it over before Do could park")
 }
 
 // TestConformance_RFC9114_Sec41_ResponseReadAfterStopSending checks that when the
@@ -365,16 +358,16 @@ func TestConformance_RFC9114_Sec41_ResponseReadAfterStopSending(t *testing.T) {
 	headersFrame := AppendHeaders(nil, encodeSection(hf(":status", "200")))
 	conn := &fakeConn{req: &fakeStream{recvChunks: [][]byte{headersFrame}, fin: true, sendResetErr: true}}
 	client, err := NewClientFake(conn, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	resp, _, err := client.Do(context.Background(), &Request{Method: "POST", Scheme: "https", Authority: "h", Path: "/", Body: []byte("aborted request body")})
-	if err != nil {
-		t.Fatalf("Do after STOP_SENDING = %v, want the response still delivered", err)
-	}
-	if resp.Status != 200 {
-		t.Fatalf("status = %d, want 200", resp.Status)
-	}
+	require.NoError(t, err, "NewClientFake over the fake transport")
+	req := &Request{Method: "POST", Scheme: "https", Authority: "h", Path: "/", Body: []byte("aborted request body")}
+
+	resp, _, doErr := client.Do(context.Background(), req)
+
+	require.NoErrorf(t, doErr,
+		"Do after STOP_SENDING = %v, want the response still delivered — §4.1 makes the "+
+			"receive side independent of the aborted send side", doErr)
+	assert.Equal(t, 200, resp.Status,
+		"the response the server sent must survive its own STOP_SENDING on the request")
 }
 
 // TestClient_RequestWithBody verifies a request body is sent as a DATA frame
@@ -383,33 +376,24 @@ func TestClient_RequestWithBody(t *testing.T) {
 	headersFrame := AppendHeaders(nil, encodeSection(hf(":status", "200")))
 	conn := &fakeConn{req: &fakeStream{recvChunks: [][]byte{headersFrame}, fin: true}}
 	client, err := NewClientFake(conn, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, err, "NewClientFake over the fake transport")
 	body := []byte("field=value&x=1")
-	resp, _, err := client.Do(context.Background(), &Request{Method: "POST", Scheme: "https", Authority: "h", Path: "/", Body: body})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if resp.Status != 200 {
-		t.Fatalf("status = %d, want 200", resp.Status)
-	}
-	if !conn.req.finSent {
-		t.Fatal("FIN must be sent on the DATA frame")
-	}
+
+	resp, _, doErr := client.Do(context.Background(), &Request{Method: "POST", Scheme: "https", Authority: "h", Path: "/", Body: body})
+
+	require.NoError(t, doErr, "Do for a POST carrying a request body")
+	assert.Equal(t, 200, resp.Status, "status decoded off the response HEADERS frame")
+	assert.True(t, conn.req.finSent, "FIN must be sent on the DATA frame")
 	// The request stream carried a HEADERS frame then a DATA frame with the body.
-	htyp, hlen, hn, err := ParseFrameHeader(conn.req.sent)
-	if err != nil || htyp != FrameHeaders {
-		t.Fatalf("first frame = (%#x, %v), want HEADERS", htyp, err)
-	}
+	htyp, hlen, hn, herr := ParseFrameHeader(conn.req.sent)
+	require.NoError(t, herr, "the request stream must open with a parseable frame header")
+	require.Equalf(t, FrameHeaders, htyp, "first frame = %#x, want HEADERS", htyp)
 	rest := conn.req.sent[hn+int(hlen):]
-	dtyp, dlen, dn, err := ParseFrameHeader(rest)
-	if err != nil || dtyp != FrameData {
-		t.Fatalf("second frame = (%#x, %v), want DATA", dtyp, err)
-	}
-	if got := rest[dn : dn+int(dlen)]; !bytes.Equal(got, body) {
-		t.Fatalf("DATA payload = %q, want %q", got, body)
-	}
+	dtyp, dlen, dn, derr := ParseFrameHeader(rest)
+	require.NoError(t, derr, "the body must follow in a parseable second frame")
+	require.Equalf(t, FrameData, dtyp, "second frame = %#x, want DATA", dtyp)
+	got := rest[dn : dn+int(dlen)]
+	assert.Truef(t, bytes.Equal(got, body), "DATA payload = %q, want %q", got, body)
 }
 
 // TestClient_SendDrainsUnderFlowControl forces both the control and request
@@ -424,28 +408,24 @@ func TestClient_SendDrainsUnderFlowControl(t *testing.T) {
 		req:        &fakeStream{sendCap: 3, recvChunks: [][]byte{headersFrame}, fin: true},
 	}
 	client, err := NewClientFake(conn, settings)
-	if err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, err, "NewClientFake over a transport that accepts 3 bytes per Send")
 
-	if want := AppendClientControlStream(nil, settings); !bytes.Equal(conn.control.sent, want) {
-		t.Fatalf("control stream truncated: got %d bytes, want %d", len(conn.control.sent), len(want))
-	}
+	resp, _, doErr := client.Do(context.Background(), &Request{Method: "GET", Scheme: "https", Authority: "h", Path: "/"})
 
-	resp, _, err := client.Do(context.Background(), &Request{Method: "GET", Scheme: "https", Authority: "h", Path: "/"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if resp.Status != 204 {
-		t.Fatalf("status = %d, want 204", resp.Status)
-	}
-	if !conn.req.finSent {
-		t.Fatal("FIN must be sent once the whole HEADERS frame is drained")
-	}
-	rtyp, rlen, rn, _ := ParseFrameHeader(conn.req.sent)
-	if rtyp != FrameHeaders || rn+int(rlen) != len(conn.req.sent) {
-		t.Fatalf("request HEADERS frame truncated: %d bytes on the wire", len(conn.req.sent))
-	}
+	require.NoError(t, doErr, "Do over a transport that accepts 3 bytes per Send")
+	wantControl := AppendClientControlStream(nil, settings)
+	assert.Truef(t, bytes.Equal(conn.control.sent, wantControl),
+		"control stream truncated: got %d bytes, want %d — a partial Send must be "+
+			"retried until the whole SETTINGS frame is on the wire",
+		len(conn.control.sent), len(wantControl))
+	assert.Equal(t, 204, resp.Status, "status decoded off the response HEADERS frame")
+	assert.True(t, conn.req.finSent, "FIN must be sent once the whole HEADERS frame is drained")
+	rtyp, rlen, rn, perr := ParseFrameHeader(conn.req.sent)
+	require.NoError(t, perr, "the request stream must carry a parseable frame header")
+	assert.Equalf(t, FrameHeaders, rtyp, "request frame = %#x, want HEADERS", rtyp)
+	assert.Equalf(t, len(conn.req.sent), rn+int(rlen),
+		"request HEADERS frame truncated: %d bytes on the wire, frame declares %d",
+		len(conn.req.sent), rn+int(rlen))
 }
 
 // TestClient_DataBeforeHeaders rejects a response that sends DATA before any
@@ -455,15 +435,15 @@ func TestClient_DataBeforeHeaders(t *testing.T) {
 	dataFrame := AppendData(nil, []byte("body"))
 	conn := &fakeConn{req: &fakeStream{recvChunks: [][]byte{dataFrame}, fin: true}}
 	client, err := NewClientFake(conn, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, _, err := client.Do(context.Background(), &Request{Method: "GET", Scheme: "https", Authority: "h", Path: "/"}); !errors.Is(err, ErrH3Control) {
-		t.Fatalf("err = %v, want ErrH3Control (connection error)", err)
-	}
-	if conn.closeCode != H3FrameUnexpected {
-		t.Fatalf("close code = %#x, want H3_FRAME_UNEXPECTED", conn.closeCode)
-	}
+	require.NoError(t, err, "NewClientFake over the fake transport")
+
+	_, _, doErr := client.Do(context.Background(), &Request{Method: "GET", Scheme: "https", Authority: "h", Path: "/"})
+
+	assert.ErrorIsf(t, doErr, ErrH3Control,
+		"err = %v, want ErrH3Control (connection error) — a DATA frame before any "+
+			"HEADERS is an invalid frame sequence, not a per-stream fault", doErr)
+	assert.Equalf(t, H3FrameUnexpected, conn.closeCode,
+		"close code = %#x, want H3_FRAME_UNEXPECTED", conn.closeCode)
 }
 
 // TestConformance_RFC9114_Sec724_SettingsOnRequestStream checks that a SETTINGS
@@ -471,13 +451,16 @@ func TestClient_DataBeforeHeaders(t *testing.T) {
 func TestConformance_RFC9114_Sec724_SettingsOnRequestStream(t *testing.T) {
 	settings := AppendFrameHeader(nil, FrameSettings, 0) // empty SETTINGS
 	conn := &fakeConn{req: &fakeStream{recvChunks: [][]byte{settings}, fin: true}}
-	client, _ := NewClientFake(conn, nil)
-	if _, _, err := client.Do(context.Background(), &Request{Method: "GET", Scheme: "https", Authority: "h", Path: "/"}); !errors.Is(err, ErrH3Control) {
-		t.Fatalf("err = %v, want ErrH3Control", err)
-	}
-	if conn.closeCode != H3FrameUnexpected {
-		t.Fatalf("close code = %#x, want H3_FRAME_UNEXPECTED", conn.closeCode)
-	}
+	client, err := NewClientFake(conn, nil)
+	require.NoError(t, err, "NewClientFake over the fake transport")
+
+	_, _, doErr := client.Do(context.Background(), &Request{Method: "GET", Scheme: "https", Authority: "h", Path: "/"})
+
+	assert.ErrorIsf(t, doErr, ErrH3Control,
+		"err = %v, want ErrH3Control — a control-stream-only frame on a request "+
+			"stream is a connection error, not a per-stream fault", doErr)
+	assert.Equalf(t, H3FrameUnexpected, conn.closeCode,
+		"close code = %#x, want H3_FRAME_UNEXPECTED", conn.closeCode)
 }
 
 // TestConformance_RFC9114_Sec728_ReservedFrameOnRequestStream checks that a
@@ -486,13 +469,16 @@ func TestConformance_RFC9114_Sec724_SettingsOnRequestStream(t *testing.T) {
 func TestConformance_RFC9114_Sec728_ReservedFrameOnRequestStream(t *testing.T) {
 	reserved := AppendFrameHeader(nil, 0x02, 0)
 	conn := &fakeConn{req: &fakeStream{recvChunks: [][]byte{reserved}, fin: true}}
-	client, _ := NewClientFake(conn, nil)
-	if _, _, err := client.Do(context.Background(), &Request{Method: "GET", Scheme: "https", Authority: "h", Path: "/"}); !errors.Is(err, ErrH3Control) {
-		t.Fatalf("err = %v, want ErrH3Control", err)
-	}
-	if conn.closeCode != H3FrameUnexpected {
-		t.Fatalf("close code = %#x, want H3_FRAME_UNEXPECTED", conn.closeCode)
-	}
+	client, err := NewClientFake(conn, nil)
+	require.NoError(t, err, "NewClientFake over the fake transport")
+
+	_, _, doErr := client.Do(context.Background(), &Request{Method: "GET", Scheme: "https", Authority: "h", Path: "/"})
+
+	assert.ErrorIsf(t, doErr, ErrH3Control,
+		"err = %v, want ErrH3Control — a reserved HTTP/2-carryover frame type must "+
+			"be a connection error, never silently ignored as GREASE is", doErr)
+	assert.Equalf(t, H3FrameUnexpected, conn.closeCode,
+		"close code = %#x, want H3_FRAME_UNEXPECTED", conn.closeCode)
 }
 
 // TestConformance_RFC9114_Sec725_PushPromiseOnRequestStream checks that a
@@ -501,13 +487,17 @@ func TestConformance_RFC9114_Sec728_ReservedFrameOnRequestStream(t *testing.T) {
 func TestConformance_RFC9114_Sec725_PushPromiseOnRequestStream(t *testing.T) {
 	pp := AppendFrameHeader(nil, FramePushPromise, 0)
 	conn := &fakeConn{req: &fakeStream{recvChunks: [][]byte{pp}, fin: true}}
-	client, _ := NewClientFake(conn, nil)
-	if _, _, err := client.Do(context.Background(), &Request{Method: "GET", Scheme: "https", Authority: "h", Path: "/"}); !errors.Is(err, ErrH3Control) {
-		t.Fatalf("err = %v, want ErrH3Control", err)
-	}
-	if conn.closeCode != H3IDError {
-		t.Fatalf("close code = %#x, want H3_ID_ERROR", conn.closeCode)
-	}
+	client, err := NewClientFake(conn, nil)
+	require.NoError(t, err, "NewClientFake over the fake transport")
+
+	_, _, doErr := client.Do(context.Background(), &Request{Method: "GET", Scheme: "https", Authority: "h", Path: "/"})
+
+	assert.ErrorIsf(t, doErr, ErrH3Control,
+		"err = %v, want ErrH3Control — a push the client never enabled is a "+
+			"connection error, not something to ignore", doErr)
+	assert.Equalf(t, H3IDError, conn.closeCode,
+		"close code = %#x, want H3_ID_ERROR — the distinct code is what tells the "+
+			"server it exceeded a push id we never granted", conn.closeCode)
 }
 
 // TestConformance_RFC9114_Sec71_TruncatedFrameAtStreamEnd checks that a stream
@@ -518,13 +508,16 @@ func TestConformance_RFC9114_Sec71_TruncatedFrameAtStreamEnd(t *testing.T) {
 	truncated := AppendFrameHeader(nil, FrameData, 10) // declares 10 payload bytes
 	truncated = append(truncated, []byte("abc")...)    // but only 3 arrive, then FIN
 	conn := &fakeConn{req: &fakeStream{recvChunks: [][]byte{append(headers, truncated...)}, fin: true}}
-	client, _ := NewClientFake(conn, nil)
-	if _, _, err := client.Do(context.Background(), &Request{Method: "GET", Scheme: "https", Authority: "h", Path: "/"}); !errors.Is(err, ErrH3Control) {
-		t.Fatalf("err = %v, want ErrH3Control", err)
-	}
-	if conn.closeCode != H3FrameError {
-		t.Fatalf("close code = %#x, want H3_FRAME_ERROR", conn.closeCode)
-	}
+	client, err := NewClientFake(conn, nil)
+	require.NoError(t, err, "NewClientFake over the fake transport")
+
+	_, _, doErr := client.Do(context.Background(), &Request{Method: "GET", Scheme: "https", Authority: "h", Path: "/"})
+
+	assert.ErrorIsf(t, doErr, ErrH3Control,
+		"err = %v, want ErrH3Control — a FIN mid-payload must not read back as a "+
+			"short but successful body", doErr)
+	assert.Equalf(t, H3FrameError, conn.closeCode,
+		"close code = %#x, want H3_FRAME_ERROR", conn.closeCode)
 }
 
 // TestConformance_RFC9114_Sec71_TruncatedHeaderAtStreamEnd checks that a stream
@@ -533,13 +526,16 @@ func TestConformance_RFC9114_Sec71_TruncatedFrameAtStreamEnd(t *testing.T) {
 func TestConformance_RFC9114_Sec71_TruncatedHeaderAtStreamEnd(t *testing.T) {
 	// One byte: a frame type (HEADERS) with no length varint, then FIN.
 	conn := &fakeConn{req: &fakeStream{recvChunks: [][]byte{{byte(FrameHeaders)}}, fin: true}}
-	client, _ := NewClientFake(conn, nil)
-	if _, _, err := client.Do(context.Background(), &Request{Method: "GET", Scheme: "https", Authority: "h", Path: "/"}); !errors.Is(err, ErrH3Control) {
-		t.Fatalf("err = %v, want ErrH3Control", err)
-	}
-	if conn.closeCode != H3FrameError {
-		t.Fatalf("close code = %#x, want H3_FRAME_ERROR", conn.closeCode)
-	}
+	client, err := NewClientFake(conn, nil)
+	require.NoError(t, err, "NewClientFake over the fake transport")
+
+	_, _, doErr := client.Do(context.Background(), &Request{Method: "GET", Scheme: "https", Authority: "h", Path: "/"})
+
+	assert.ErrorIsf(t, doErr, ErrH3Control,
+		"err = %v, want ErrH3Control — a FIN inside a frame header must not read "+
+			"back as a clean end of stream", doErr)
+	assert.Equalf(t, H3FrameError, conn.closeCode,
+		"close code = %#x, want H3_FRAME_ERROR", conn.closeCode)
 }
 
 // TestConformance_RFC9114_Sec411_RequestReset checks that a server RESET_STREAM
@@ -552,36 +548,42 @@ func TestConformance_RFC9114_Sec411_RequestReset(t *testing.T) {
 	partial := AppendFrameHeader(nil, FrameData, 10) // declares 10 bytes
 	partial = append(partial, []byte("abc")...)      // only 3 arrive, then a reset
 	conn := &fakeConn{req: &fakeStream{recvChunks: [][]byte{append(headers, partial...)}, recvReset: true, recvResetCode: H3RequestRejected}}
-	client, _ := NewClientFake(conn, nil)
-	_, _, err := client.Do(context.Background(), &Request{Method: "GET", Scheme: "https", Authority: "h", Path: "/"})
+	client, err := NewClientFake(conn, nil)
+	require.NoError(t, err, "NewClientFake over the fake transport")
+
+	_, _, doErr := client.Do(context.Background(), &Request{Method: "GET", Scheme: "https", Authority: "h", Path: "/"})
+
 	var rst *StreamResetError
-	if !errors.As(err, &rst) {
-		t.Fatalf("err = %v, want *StreamResetError", err)
-	}
-	if rst.Code != H3RequestRejected {
-		t.Fatalf("reset code = %#x, want H3_REQUEST_REJECTED", rst.Code)
-	}
-	if !rst.Retryable() {
-		t.Fatal("H3_REQUEST_REJECTED should be reported retryable")
-	}
-	if conn.closeCode == H3FrameError {
-		t.Fatalf("connection torn down with H3_FRAME_ERROR on a reset (%#x)", conn.closeCode)
-	}
+	require.Truef(t, errors.As(doErr, &rst),
+		"err = %v, want *StreamResetError — a peer reset must not be reported as "+
+			"the §7.1 truncation error nor as a short success", doErr)
+	assert.Equalf(t, H3RequestRejected, rst.Code,
+		"reset code = %#x, want H3_REQUEST_REJECTED", rst.Code)
+	assert.True(t, rst.Retryable(),
+		"H3_REQUEST_REJECTED should be reported retryable — §4.1.1 makes it the one "+
+			"code that guarantees the request was not processed")
+	assert.NotEqualf(t, H3FrameError, conn.closeCode,
+		"connection torn down with H3_FRAME_ERROR on a reset (%#x) — a stream reset "+
+			"must not kill the connection", conn.closeCode)
 }
 
 // TestClient_RequestReset_NonRetryable checks that a reset with a code other than
 // H3_REQUEST_REJECTED is surfaced but not reported retryable.
 func TestClient_RequestReset_NonRetryable(t *testing.T) {
 	conn := &fakeConn{req: &fakeStream{recvReset: true, recvResetCode: H3RequestCancelled}}
-	client, _ := NewClientFake(conn, nil)
-	_, _, err := client.Do(context.Background(), &Request{Method: "GET", Scheme: "https", Authority: "h", Path: "/"})
+	client, err := NewClientFake(conn, nil)
+	require.NoError(t, err, "NewClientFake over the fake transport")
+
+	_, _, doErr := client.Do(context.Background(), &Request{Method: "GET", Scheme: "https", Authority: "h", Path: "/"})
+
 	var rst *StreamResetError
-	if !errors.As(err, &rst) || rst.Code != H3RequestCancelled {
-		t.Fatalf("err = %v, want *StreamResetError{H3_REQUEST_CANCELLED}", err)
-	}
-	if rst.Retryable() {
-		t.Fatal("H3_REQUEST_CANCELLED must not be reported retryable")
-	}
+	require.Truef(t, errors.As(doErr, &rst),
+		"err = %v, want *StreamResetError{H3_REQUEST_CANCELLED}", doErr)
+	require.Equalf(t, H3RequestCancelled, rst.Code,
+		"err = %v, want *StreamResetError{H3_REQUEST_CANCELLED}", doErr)
+	assert.False(t, rst.Retryable(),
+		"H3_REQUEST_CANCELLED must not be reported retryable — replaying a request "+
+			"the server may already have processed is not safe")
 }
 
 // TestConformance_RFC9114_Sec412_ContentLengthMismatch checks that a response
@@ -591,13 +593,17 @@ func TestConformance_RFC9114_Sec412_ContentLengthMismatch(t *testing.T) {
 	headers := AppendHeaders(nil, encodeSection(hf(":status", "200"), hf("content-length", "5")))
 	data := AppendData(nil, []byte("abc")) // 3 bytes ≠ declared 5
 	conn := &fakeConn{req: &fakeStream{recvChunks: [][]byte{append(headers, data...)}, fin: true}}
-	client, _ := NewClientFake(conn, nil)
-	if _, _, err := client.Do(context.Background(), &Request{Method: "GET", Scheme: "https", Authority: "h", Path: "/"}); err != ErrH3Message {
-		t.Fatalf("err = %v, want ErrH3Message", err)
-	}
-	if conn.req.resetCode != H3MessageError {
-		t.Fatalf("abort code = %#x, want H3_MESSAGE_ERROR", conn.req.resetCode)
-	}
+	client, err := NewClientFake(conn, nil)
+	require.NoError(t, err, "NewClientFake over the fake transport")
+
+	_, _, doErr := client.Do(context.Background(), &Request{Method: "GET", Scheme: "https", Authority: "h", Path: "/"})
+
+	assert.Equalf(t, ErrH3Message, doErr,
+		"err = %v, want ErrH3Message — a body shorter than the declared "+
+			"Content-Length must not be handed to the caller as complete", doErr)
+	assert.Equalf(t, H3MessageError, conn.req.resetCode,
+		"abort code = %#x, want H3_MESSAGE_ERROR — a malformed message is a stream "+
+			"error, so the connection stays up", conn.req.resetCode)
 }
 
 // TestConformance_RFC9114_Sec412_ContentLengthMatch checks that a Content-Length
@@ -606,14 +612,16 @@ func TestConformance_RFC9114_Sec412_ContentLengthMatch(t *testing.T) {
 	headers := AppendHeaders(nil, encodeSection(hf(":status", "200"), hf("content-length", "3")))
 	data := AppendData(nil, []byte("abc"))
 	conn := &fakeConn{req: &fakeStream{recvChunks: [][]byte{append(headers, data...)}, fin: true}}
-	client, _ := NewClientFake(conn, nil)
-	resp, body, err := client.Do(context.Background(), &Request{Method: "GET", Scheme: "https", Authority: "h", Path: "/"})
-	if err != nil {
-		t.Fatalf("Do: %v", err)
-	}
-	if resp.Status != 200 || string(body) != "abc" {
-		t.Fatalf("status=%d body=%q", resp.Status, body)
-	}
+	client, err := NewClientFake(conn, nil)
+	require.NoError(t, err, "NewClientFake over the fake transport")
+
+	resp, body, doErr := client.Do(context.Background(), &Request{Method: "GET", Scheme: "https", Authority: "h", Path: "/"})
+
+	require.NoErrorf(t, doErr,
+		"Do = %v; a Content-Length equal to the received body is well-formed and "+
+			"must not be rejected", doErr)
+	assert.Equalf(t, 200, resp.Status, "status=%d body=%q", resp.Status, body)
+	assert.Equalf(t, "abc", string(body), "status=%d body=%q", resp.Status, body)
 }
 
 // TestClient_ContentLength_NoContentStatusExempt checks that a 204 with a
@@ -622,14 +630,14 @@ func TestConformance_RFC9114_Sec412_ContentLengthMatch(t *testing.T) {
 func TestClient_ContentLength_NoContentStatusExempt(t *testing.T) {
 	headers := AppendHeaders(nil, encodeSection(hf(":status", "204"), hf("content-length", "100")))
 	conn := &fakeConn{req: &fakeStream{recvChunks: [][]byte{headers}, fin: true}}
-	client, _ := NewClientFake(conn, nil)
-	resp, _, err := client.Do(context.Background(), &Request{Method: "GET", Scheme: "https", Authority: "h", Path: "/"})
-	if err != nil {
-		t.Fatalf("204 with anticipatory content-length must not be malformed: %v", err)
-	}
-	if resp.Status != 204 {
-		t.Fatalf("status = %d, want 204", resp.Status)
-	}
+	client, err := NewClientFake(conn, nil)
+	require.NoError(t, err, "NewClientFake over the fake transport")
+
+	resp, _, doErr := client.Do(context.Background(), &Request{Method: "GET", Scheme: "https", Authority: "h", Path: "/"})
+
+	require.NoErrorf(t, doErr,
+		"204 with anticipatory content-length must not be malformed: %v", doErr)
+	assert.Equalf(t, 204, resp.Status, "status = %d, want 204", resp.Status)
 }
 
 // TestClient_ContentLength_OverflowMalformed checks that a Content-Length value
@@ -641,10 +649,14 @@ func TestClient_ContentLength_OverflowMalformed(t *testing.T) {
 	headers := AppendHeaders(nil, encodeSection(hf(":status", "200"), hf("content-length", "18446744073709551619")))
 	data := AppendData(nil, []byte("abc"))
 	conn := &fakeConn{req: &fakeStream{recvChunks: [][]byte{append(headers, data...)}, fin: true}}
-	client, _ := NewClientFake(conn, nil)
-	if _, _, err := client.Do(context.Background(), &Request{Method: "GET", Scheme: "https", Authority: "h", Path: "/"}); err != ErrH3Message {
-		t.Fatalf("overflowing content-length: err = %v, want ErrH3Message", err)
-	}
+	client, err := NewClientFake(conn, nil)
+	require.NoError(t, err, "NewClientFake over the fake transport")
+
+	_, _, doErr := client.Do(context.Background(), &Request{Method: "GET", Scheme: "https", Authority: "h", Path: "/"})
+
+	assert.Equalf(t, ErrH3Message, doErr,
+		"overflowing content-length: err = %v, want ErrH3Message — a value that "+
+			"wrapped to 3 would spuriously match the 3-byte body", doErr)
 }
 
 // TestClient_ContentLength_ConflictingMalformed checks that two Content-Length
@@ -653,10 +665,14 @@ func TestClient_ContentLength_ConflictingMalformed(t *testing.T) {
 	headers := AppendHeaders(nil, encodeSection(hf(":status", "200"), hf("content-length", "3"), hf("content-length", "5")))
 	data := AppendData(nil, []byte("abc"))
 	conn := &fakeConn{req: &fakeStream{recvChunks: [][]byte{append(headers, data...)}, fin: true}}
-	client, _ := NewClientFake(conn, nil)
-	if _, _, err := client.Do(context.Background(), &Request{Method: "GET", Scheme: "https", Authority: "h", Path: "/"}); err != ErrH3Message {
-		t.Fatalf("conflicting content-length: err = %v, want ErrH3Message", err)
-	}
+	client, err := NewClientFake(conn, nil)
+	require.NoError(t, err, "NewClientFake over the fake transport")
+
+	_, _, doErr := client.Do(context.Background(), &Request{Method: "GET", Scheme: "https", Authority: "h", Path: "/"})
+
+	assert.Equalf(t, ErrH3Message, doErr,
+		"conflicting content-length: err = %v, want ErrH3Message — picking either "+
+			"value lets a peer disagree with an intermediary about the body length", doErr)
 }
 
 // TestConformance_RFC9204_Sec22_DecompressionFailedClosesConn checks that a QPACK
@@ -668,16 +684,18 @@ func TestConformance_RFC9204_Sec22_DecompressionFailedClosesConn(t *testing.T) {
 	// Line referencing the dynamic table (T=0, byte 0x80) — unresolvable at cap 0.
 	headers := AppendHeaders(nil, []byte{0x00, 0x00, 0x80})
 	conn := &fakeConn{req: &fakeStream{recvChunks: [][]byte{headers}, fin: true}}
-	client, _ := NewClientFake(conn, nil)
-	if _, _, err := client.Do(context.Background(), &Request{Method: "GET", Scheme: "https", Authority: "h", Path: "/"}); !errors.Is(err, ErrH3Control) {
-		t.Fatalf("err = %v, want ErrH3Control (connection closed)", err)
-	}
-	if conn.closeCode != H3QpackDecompressionFailed {
-		t.Fatalf("close code = %#x, want QPACK_DECOMPRESSION_FAILED %#x", conn.closeCode, H3QpackDecompressionFailed)
-	}
-	if !conn.closeApp {
-		t.Fatal("a QPACK error is an application-layer (HTTP/3) CONNECTION_CLOSE")
-	}
+	client, err := NewClientFake(conn, nil)
+	require.NoError(t, err, "NewClientFake over the fake transport")
+
+	_, _, doErr := client.Do(context.Background(), &Request{Method: "GET", Scheme: "https", Authority: "h", Path: "/"})
+
+	assert.ErrorIsf(t, doErr, ErrH3Control,
+		"err = %v, want ErrH3Control (connection closed) — a failed decode leaves "+
+			"the shared table state ambiguous, so it cannot be a per-stream error", doErr)
+	assert.Equalf(t, H3QpackDecompressionFailed, conn.closeCode,
+		"close code = %#x, want QPACK_DECOMPRESSION_FAILED %#x", conn.closeCode, H3QpackDecompressionFailed)
+	assert.True(t, conn.closeApp,
+		"a QPACK error is an application-layer (HTTP/3) CONNECTION_CLOSE")
 }
 
 // TestClient_Close checks that Close sends an application CONNECTION_CLOSE with
@@ -685,16 +703,17 @@ func TestConformance_RFC9204_Sec22_DecompressionFailedClosesConn(t *testing.T) {
 func TestClient_Close(t *testing.T) {
 	conn := &fakeConn{req: &fakeStream{}}
 	client, err := NewClientFake(conn, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := client.Close(); err != nil {
-		t.Fatalf("Close: %v", err)
-	}
-	if !conn.closed || !conn.closeApp || conn.closeCode != H3NoError {
-		t.Fatalf("Close: closed=%v app=%v code=%#x, want true/true/%#x",
-			conn.closed, conn.closeApp, conn.closeCode, H3NoError)
-	}
+	require.NoError(t, err, "NewClientFake over the fake transport")
+
+	closeErr := client.Close()
+
+	require.NoErrorf(t, closeErr, "Close: %v", closeErr)
+	assert.Truef(t, conn.closed, "Close: closed=%v, want true", conn.closed)
+	assert.Truef(t, conn.closeApp,
+		"Close: app=%v, want true — §8.1 makes this an application CONNECTION_CLOSE, "+
+			"not a transport one", conn.closeApp)
+	assert.Equalf(t, H3NoError, conn.closeCode,
+		"Close: code=%#x, want %#x", conn.closeCode, H3NoError)
 }
 
 // NewClientFake constructs a Client over a fake quicConn (test-only shim around

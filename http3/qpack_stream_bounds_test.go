@@ -1,8 +1,10 @@
 package http3
 
 import (
-	"errors"
 	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	"github.com/lodgvideon/poseidon-http-client/hpack"
 )
@@ -58,27 +60,23 @@ func TestConformance_RFC9204_Sec42_EncoderStreamDribbleBounded(t *testing.T) {
 	for i := 0; i < passes; i++ {
 		chunks = append(chunks, make([]byte, dribble))
 	}
-
 	server := &fakeStream{id: 3, recvChunks: chunks}
 	conn := &fakeConn{req: &fakeStream{}, acceptQ: []quicStream{server}}
 	client, err := NewClientFake(conn, []Setting{{SettingQPACKMaxTableCapacity, qpackDynamicTableCapacity}})
-	if err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, err, "NewClientFake with the production table capacity")
 
 	serr := driveServiceControl(t, client, len(chunks))
-	if !errors.Is(serr, ErrH3Control) {
-		t.Fatalf("serviceControl = %v after the server dribbled %d bytes of a declared 2 GiB literal, "+
+
+	assert.ErrorIsf(t, serr, ErrH3Control,
+		"serviceControl = %v after the server dribbled %d bytes of a declared 2 GiB literal, "+
 			"want ErrH3Control; the retained qpackEncBuf grew to %d bytes",
-			serr, dribble*passes, len(client.qpackEncBuf))
-	}
+		serr, dribble*passes, len(client.qpackEncBuf))
 	// A well-formed instruction we refuse to buffer is not a decode failure — RFC 9204
 	// §6 scopes QPACK_ENCODER_STREAM_ERROR to "failed to interpret an encoder
 	// instruction". Refusing an unbounded resource commitment is H3_EXCESSIVE_LOAD
 	// (RFC 9114 §8.1), the same code the control stream's frame cap already uses.
-	if conn.closeCode != H3ExcessiveLoad {
-		t.Fatalf("close code = %#x, want H3_EXCESSIVE_LOAD (%#x)", conn.closeCode, H3ExcessiveLoad)
-	}
+	assert.Equalf(t, H3ExcessiveLoad, conn.closeCode,
+		"close code = %#x, want H3_EXCESSIVE_LOAD (%#x)", conn.closeCode, H3ExcessiveLoad)
 }
 
 // TestConformance_RFC9204_Sec44_DecoderStreamTailIsSelfBounding is the counterpart
@@ -112,7 +110,6 @@ func TestConformance_RFC9204_Sec44_DecoderStreamTailIsSelfBounding(t *testing.T)
 		}
 		chunks = append(chunks, chunk)
 	}
-
 	// The decoder stream is only parsed once the encode-side dynamic table exists, so
 	// the server's SETTINGS must enable it first (applyServerSettings → enableEncoderDynamic).
 	control := &fakeStream{id: 3, recvChunks: [][]byte{
@@ -121,9 +118,7 @@ func TestConformance_RFC9204_Sec44_DecoderStreamTailIsSelfBounding(t *testing.T)
 	server := &fakeStream{id: 7, recvChunks: chunks}
 	conn := &fakeConn{req: &fakeStream{}, acceptQ: []quicStream{control, server}}
 	client, err := NewClientFake(conn, []Setting{{SettingQPACKMaxTableCapacity, qpackDynamicTableCapacity}})
-	if err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, err, "NewClientFake with the production table capacity")
 
 	// Drive one pass per chunk, asserting after EVERY pass that the retained tail has
 	// not grown — a cap-style check would only catch growth after the fact.
@@ -132,21 +127,19 @@ func TestConformance_RFC9204_Sec44_DecoderStreamTailIsSelfBounding(t *testing.T)
 		if serr = client.serviceControl(); serr != nil {
 			break
 		}
-		if got := len(client.qpackDecBuf); got > maxDecoderTail {
-			t.Fatalf("pass %d: qpackDecBuf retained %d bytes, want <= %d: the decoder stream "+
+		require.LessOrEqualf(t, len(client.qpackDecBuf), maxDecoderTail,
+			"pass %d: qpackDecBuf retained %d bytes, want <= %d: the decoder stream "+
 				"now buffers a declared length and needs the cap the encoder stream has",
-				i, got, maxDecoderTail)
-		}
+			i, len(client.qpackDecBuf), maxDecoderTail)
 	}
-	if !errors.Is(serr, ErrH3Control) {
-		t.Fatalf("serviceControl = %v, want ErrH3Control: a never-ending prefix integer must be "+
+
+	assert.ErrorIsf(t, serr, ErrH3Control,
+		"serviceControl = %v, want ErrH3Control: a never-ending prefix integer must be "+
 			"a typed error, not an ever-growing buffer (tail %d bytes)", serr, len(client.qpackDecBuf))
-	}
-	if conn.closeCode != H3QpackDecoderStreamError {
-		t.Fatalf("close code = %#x, want QPACK_DECODER_STREAM_ERROR (%#x): an integer the decoder "+
+	assert.Equalf(t, H3QpackDecoderStreamError, conn.closeCode,
+		"close code = %#x, want QPACK_DECODER_STREAM_ERROR (%#x): an integer the decoder "+
 			"cannot interpret is a decode failure (RFC 9204 §6), not excessive load",
-			conn.closeCode, H3QpackDecoderStreamError)
-	}
+		conn.closeCode, H3QpackDecoderStreamError)
 }
 
 // TestQPACKEncoderStream_WholeInstructionBurstAccepted is the counterweight to the
@@ -169,28 +162,22 @@ func TestQPACKEncoderStream_WholeInstructionBurstAccepted(t *testing.T) {
 		instr = hpack.EncodeInteger(instr, 7, 0x00, 1) // 1-octet value
 		instr = append(instr, byte('a'+i%26))
 	}
-	if cap := qpackEncoderInstrCap(qpackDynamicTableCapacity); uint64(len(instr)) <= cap {
-		t.Fatalf("burst of %d bytes does not exceed the cap %d; the test would not "+
-			"distinguish a tail cap from a received-bytes cap", len(instr), cap)
-	}
-
+	require.Greaterf(t, uint64(len(instr)), qpackEncoderInstrCap(qpackDynamicTableCapacity),
+		"burst of %d bytes does not exceed the cap %d; the test would not "+
+			"distinguish a tail cap from a received-bytes cap",
+		len(instr), qpackEncoderInstrCap(qpackDynamicTableCapacity))
 	server := &fakeStream{id: 3, recvChunks: [][]byte{qpackUniStream(StreamTypeQPACKEncoder, instr...)}}
 	conn := &fakeConn{req: &fakeStream{}, acceptQ: []quicStream{server}}
 	client, err := NewClientFake(conn, []Setting{{SettingQPACKMaxTableCapacity, qpackDynamicTableCapacity}})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := client.serviceControl(); err != nil {
-		t.Fatalf("serviceControl on a %d-byte burst of WHOLE instructions = %v, want nil: "+
-			"the cap must bound the retained partial instruction, not the bytes received",
-			len(instr), err)
-	}
-	if got := len(client.qpackEncBuf); got != 0 {
-		t.Fatalf("qpackEncBuf retained %d bytes after a burst of whole instructions, want 0", got)
-	}
-	if client.qpackDyn.InsertCount() == 0 {
-		t.Fatal("no inserts applied: the burst was not actually parsed")
-	}
+	require.NoError(t, err, "NewClientFake with the production table capacity")
+
+	serr := client.serviceControl()
+
+	require.NoErrorf(t, serr, "serviceControl on a %d-byte burst of WHOLE instructions = %v, want nil: "+
+		"the cap must bound the retained partial instruction, not the bytes received", len(instr), serr)
+	assert.Equalf(t, 0, len(client.qpackEncBuf),
+		"qpackEncBuf retained %d bytes after a burst of whole instructions, want 0", len(client.qpackEncBuf))
+	assert.NotZero(t, client.qpackDyn.InsertCount(), "no inserts applied: the burst was not actually parsed")
 }
 
 // TestQPACKEncoderStream_MaximalLegitimateInsertAccepted pins the cap against the
@@ -201,8 +188,7 @@ func TestQPACKEncoderStream_WholeInstructionBurstAccepted(t *testing.T) {
 // the cap admits it even when it is retained across every service pass.
 func TestQPACKEncoderStream_MaximalLegitimateInsertAccepted(t *testing.T) {
 	const nameLen = 8
-	valLen := int(qpackDynamicTableCapacity) - 32 - nameLen // the largest insertable entry
-
+	valLen := int(qpackDynamicTableCapacity) - 32 - nameLen               // the largest insertable entry
 	instr := hpack.EncodeInteger(nil, 5, 0x20, qpackDynamicTableCapacity) // Set Capacity
 	instr = append(instr, hpack.EncodeInteger(nil, 5, 0x40, nameLen)...)  // Insert With Literal Name
 	instr = append(instr, []byte("x-bigval")...)
@@ -210,7 +196,6 @@ func TestQPACKEncoderStream_MaximalLegitimateInsertAccepted(t *testing.T) {
 	for i := 0; i < valLen; i++ {
 		instr = append(instr, 'v')
 	}
-
 	// One byte per chunk: the whole instruction sits in the retained tail until its
 	// last byte lands, which is precisely the state the cap governs.
 	chunks := [][]byte{qpackUniStream(StreamTypeQPACKEncoder)}
@@ -220,16 +205,15 @@ func TestQPACKEncoderStream_MaximalLegitimateInsertAccepted(t *testing.T) {
 	server := &fakeStream{id: 3, recvChunks: chunks}
 	conn := &fakeConn{req: &fakeStream{}, acceptQ: []quicStream{server}}
 	client, err := NewClientFake(conn, []Setting{{SettingQPACKMaxTableCapacity, qpackDynamicTableCapacity}})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := driveServiceControl(t, client, len(chunks)); err != nil {
-		t.Fatalf("serviceControl while dribbling the largest insertable entry (%d-byte instruction) = %v, "+
-			"want nil: the cap rejects an entry a conforming server may send", len(instr), err)
-	}
-	if client.qpackDyn.InsertCount() != 1 {
-		t.Fatalf("InsertCount = %d, want 1: the maximal entry was not inserted", client.qpackDyn.InsertCount())
-	}
+	require.NoError(t, err, "NewClientFake with the production table capacity")
+
+	serr := driveServiceControl(t, client, len(chunks))
+
+	require.NoErrorf(t, serr,
+		"serviceControl while dribbling the largest insertable entry (%d-byte instruction) = %v, "+
+			"want nil: the cap rejects an entry a conforming server may send", len(instr), serr)
+	assert.Equalf(t, uint64(1), client.qpackDyn.InsertCount(),
+		"InsertCount = %d, want 1: the maximal entry was not inserted", client.qpackDyn.InsertCount())
 }
 
 // TestQPACKEncoderInstrCap_AdmitsEveryInsertOurSettingsInvite pins the cap to the
@@ -239,6 +223,7 @@ func TestQPACKEncoderStream_MaximalLegitimateInsertAccepted(t *testing.T) {
 func TestQPACKEncoderInstrCap_AdmitsEveryInsertOurSettingsInvite(t *testing.T) {
 	for _, capacity := range []uint64{0, 32, 4096, 1 << 16, 1 << 20} {
 		got := qpackEncoderInstrCap(capacity)
+
 		// A conforming encoder's largest insert: name+value == capacity-32 decoded
 		// (RFC 9204 §3.2.1/§3.2.2), at most 3.75x that on the wire if it Huffman-codes
 		// bytes it should have sent raw (the longest RFC 7541 code is 30 bits).
@@ -246,14 +231,15 @@ func TestQPACKEncoderInstrCap_AdmitsEveryInsertOurSettingsInvite(t *testing.T) {
 		if capacity > 32 {
 			largestLegit = (capacity-32)*30/8 + qpackInstrOverhead
 		}
-		if got < largestLegit {
-			t.Errorf("capacity %d: cap %d is below the largest instruction a conforming "+
+		assert.GreaterOrEqualf(t, got, largestLegit,
+			"capacity %d: cap %d is below the largest instruction a conforming "+
 				"encoder may send (%d): a real server would be refused", capacity, got, largestLegit)
-		}
 	}
+
 	// The clamp keeps an absurd advertised capacity from overflowing the multiply
 	// into a cap so small it refuses everything.
-	if got := qpackEncoderInstrCap(^uint64(0)); got < qpackEncoderInstrCap(1<<20) {
-		t.Errorf("cap for an absurd capacity = %d, want >= the cap for a sane one: the multiply overflowed", got)
-	}
+	absurd := qpackEncoderInstrCap(^uint64(0))
+
+	assert.GreaterOrEqualf(t, absurd, qpackEncoderInstrCap(1<<20),
+		"cap for an absurd capacity = %d, want >= the cap for a sane one: the multiply overflowed", absurd)
 }
