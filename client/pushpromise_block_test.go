@@ -6,6 +6,8 @@ import (
 	"testing"
 
 	"github.com/lodgvideon/poseidon-http-client/conn"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // scriptedRespStream replays a fixed event sequence. respStream is Recv+Close,
@@ -63,18 +65,17 @@ func TestBodyReader_PushPromise_ReleasesBlock(t *testing.T) {
 			{Type: conn.EventData, Data: []byte("body"), EndStream: true},
 		}},
 	}
-
 	buf := make([]byte, 16)
+
 	n, err := r.Read(buf)
-	if err != nil && err != io.EOF {
-		t.Fatalf("Read: %v", err)
+
+	if err != nil {
+		require.ErrorIsf(t, err, io.EOF, "Read: %v", err)
 	}
-	if got := string(buf[:n]); got != "body" {
-		t.Errorf("Read = %q, want %q — the promise must be skipped, not surfaced", got, "body")
-	}
-	if n := len(blk.Fields()); n != 0 {
-		t.Errorf("promise block still holds %d fields: it was never released", n)
-	}
+	assert.Equalf(t, "body", string(buf[:n]),
+		"Read = %q, want %q — the promise must be skipped, not surfaced", string(buf[:n]), "body")
+	assert.Lenf(t, blk.Fields(), 0,
+		"promise block still holds %d fields: it was never released", len(blk.Fields()))
 }
 
 // TestStreamResponse_PushPromise_ReleasesBlock is the same pin for
@@ -92,13 +93,10 @@ func TestStreamResponse_PushPromise_ReleasesBlock(t *testing.T) {
 	}
 
 	ev, err := sr.Recv(context.Background())
-	if err != nil {
-		t.Fatalf("Recv: %v", err)
-	}
-	if ev.Type != EventData {
-		t.Errorf("Recv returned %v, want EventData — the promise must be skipped, not surfaced", ev.Type)
-	}
-	if n := len(blk.Fields()); n != 0 {
-		t.Errorf("promise block still holds %d fields: it was never released", n)
-	}
+
+	require.NoError(t, err, "Recv on a stream whose first event is a PUSH_PROMISE")
+	assert.Equalf(t, EventData, ev.Type,
+		"Recv returned %v, want EventData — the promise must be skipped, not surfaced", ev.Type)
+	assert.Lenf(t, blk.Fields(), 0,
+		"promise block still holds %d fields: it was never released", len(blk.Fields()))
 }
