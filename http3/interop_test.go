@@ -197,7 +197,7 @@ func TestInteropChaCha_GET(t *testing.T) {
 	require.NoError(t, err, "Do over a ChaCha20-Poly1305-only connection")
 	require.Equalf(t, 200, resp.Status, "status = %d, want 200", resp.Status)
 	assert.NotEmpty(t, body, "GET / body is empty, want the server's canned response")
-	assert.Equalf(t, uint16(tls.TLS_CHACHA20_POLY1305_SHA256), cipher,
+	assert.Equalf(t, tls.TLS_CHACHA20_POLY1305_SHA256, cipher,
 		"negotiated cipher suite = %#x, want TLS_CHACHA20_POLY1305_SHA256 (%#x): only that "+
 			"suite proves the ChaCha packet-protection path ran on the wire",
 		cipher, tls.TLS_CHACHA20_POLY1305_SHA256)
