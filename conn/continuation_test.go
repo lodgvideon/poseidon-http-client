@@ -9,6 +9,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
 	"github.com/lodgvideon/poseidon-http-client/frame"
 	"github.com/lodgvideon/poseidon-http-client/hpack"
 )
@@ -81,34 +84,27 @@ func TestConformance_RFC7540_Sec6_2_HeadersSplitIntoContinuation(t *testing.T) {
 	c.nextID = 1
 
 	fields := bigFields(20, 60) // encoded block well over 256 bytes
-	if err := c.writeHeadersWithPriority(context.Background(), s, fields, true, nil); err != nil {
-		t.Fatalf("writeHeadersWithPriority: %v", err)
-	}
 
+	err := c.writeHeadersWithPriority(context.Background(), s, fields, true, nil)
+
+	require.NoError(t, err, "writeHeadersWithPriority")
 	frames := parseBlockFrames(t, buf.Bytes())
-	if len(frames) < 2 {
-		t.Fatalf("got %d frames, want HEADERS + >=1 CONTINUATION", len(frames))
-	}
-	if frames[0].ftype != byte(frame.FrameHeaders) {
-		t.Fatalf("frame 0 type = %d, want HEADERS", frames[0].ftype)
-	}
-	if frames[0].flags&byte(frame.FlagHeadersEndHeaders) != 0 {
-		t.Fatalf("frame 0 must NOT set END_HEADERS when split")
-	}
-	if frames[0].flags&byte(frame.FlagHeadersEndStream) == 0 {
-		t.Fatalf("frame 0 must carry END_STREAM")
-	}
+	require.GreaterOrEqualf(t, len(frames), 2, "got %d frames, want HEADERS + >=1 CONTINUATION", len(frames))
+	require.Equalf(t, byte(frame.FrameHeaders), frames[0].ftype,
+		"frame 0 type = %d, want HEADERS", frames[0].ftype)
+	assert.Zero(t, frames[0].flags&byte(frame.FlagHeadersEndHeaders),
+		"frame 0 must NOT set END_HEADERS when split")
+	assert.NotZero(t, frames[0].flags&byte(frame.FlagHeadersEndStream),
+		"frame 0 must carry END_STREAM")
 	for i := 1; i < len(frames); i++ {
-		if frames[i].ftype != byte(frame.FrameContinuation) {
-			t.Fatalf("frame %d type = %d, want CONTINUATION", i, frames[i].ftype)
-		}
+		require.Equalf(t, byte(frame.FrameContinuation), frames[i].ftype,
+			"frame %d type = %d, want CONTINUATION", i, frames[i].ftype)
 		endH := frames[i].flags&byte(frame.FlagContinuationEndHeaders) != 0
-		if i == len(frames)-1 && !endH {
-			t.Fatalf("last CONTINUATION must set END_HEADERS")
+		if i == len(frames)-1 {
+			assert.True(t, endH, "last CONTINUATION must set END_HEADERS")
+			continue
 		}
-		if i != len(frames)-1 && endH {
-			t.Fatalf("non-final CONTINUATION %d must NOT set END_HEADERS", i)
-		}
+		assert.Falsef(t, endH, "non-final CONTINUATION %d must NOT set END_HEADERS", i)
 	}
 	var block []byte
 	for _, f := range frames {
@@ -116,15 +112,11 @@ func TestConformance_RFC7540_Sec6_2_HeadersSplitIntoContinuation(t *testing.T) {
 	}
 	dec := hpack.NewDecoder()
 	count := 0
-	if err := dec.DecodeBlock(block, func(hpack.HeaderField) error {
+	require.NoError(t, dec.DecodeBlock(block, func(hpack.HeaderField) error {
 		count++
 		return nil
-	}); err != nil {
-		t.Fatalf("DecodeBlock reassembled block: %v", err)
-	}
-	if count != len(fields) {
-		t.Fatalf("decoded %d fields, want %d", count, len(fields))
-	}
+	}), "DecodeBlock reassembled block")
+	assert.Equalf(t, len(fields), count, "decoded %d fields, want %d", count, len(fields))
 }
 
 func TestConformance_RFC7540_Sec6_10_ContinuationFlagsAndPadding(t *testing.T) {
@@ -136,27 +128,19 @@ func TestConformance_RFC7540_Sec6_10_ContinuationFlagsAndPadding(t *testing.T) {
 
 	prio := &frame.Priority{StreamDep: 0, Weight: 15}
 	fields := bigFields(20, 60)
-	if err := c.writeHeadersWithPriority(context.Background(), s, fields, false, prio); err != nil {
-		t.Fatalf("writeHeadersWithPriority: %v", err)
-	}
 
+	err := c.writeHeadersWithPriority(context.Background(), s, fields, false, prio)
+
+	require.NoError(t, err, "writeHeadersWithPriority")
 	frames := parseBlockFrames(t, buf.Bytes())
-	if len(frames) < 2 {
-		t.Fatalf("got %d frames, want split", len(frames))
-	}
-	if frames[0].flags&byte(frame.FlagHeadersPadded) == 0 {
-		t.Fatalf("HEADERS frame must carry PADDED")
-	}
-	if frames[0].flags&byte(frame.FlagHeadersPriority) == 0 {
-		t.Fatalf("HEADERS frame must carry PRIORITY")
-	}
+	require.GreaterOrEqualf(t, len(frames), 2, "got %d frames, want split", len(frames))
+	assert.NotZero(t, frames[0].flags&byte(frame.FlagHeadersPadded), "HEADERS frame must carry PADDED")
+	assert.NotZero(t, frames[0].flags&byte(frame.FlagHeadersPriority), "HEADERS frame must carry PRIORITY")
 	for i := 1; i < len(frames); i++ {
-		if frames[i].flags&byte(frame.FlagHeadersPadded) != 0 {
-			t.Fatalf("CONTINUATION %d must not be padded", i)
-		}
-		if frames[i].flags&byte(frame.FlagHeadersPriority) != 0 {
-			t.Fatalf("CONTINUATION %d must not carry priority", i)
-		}
+		assert.Zerof(t, frames[i].flags&byte(frame.FlagHeadersPadded),
+			"CONTINUATION %d must not be padded", i)
+		assert.Zerof(t, frames[i].flags&byte(frame.FlagHeadersPriority),
+			"CONTINUATION %d must not carry priority", i)
 	}
 }
 
@@ -172,19 +156,15 @@ func TestConn_WriteHeaders_BlockFits_SingleFrame(t *testing.T) {
 		{Name: []byte(":authority"), Value: []byte("example.com")},
 		{Name: []byte(":path"), Value: []byte("/")},
 	}
-	if err := c.writeHeadersWithPriority(context.Background(), s, fields, true, nil); err != nil {
-		t.Fatalf("writeHeadersWithPriority: %v", err)
-	}
+	err := c.writeHeadersWithPriority(context.Background(), s, fields, true, nil)
+
+	require.NoError(t, err, "writeHeadersWithPriority")
 	frames := parseBlockFrames(t, buf.Bytes())
-	if len(frames) != 1 {
-		t.Fatalf("got %d frames, want 1 (no split for small block)", len(frames))
-	}
-	if frames[0].ftype != byte(frame.FrameHeaders) {
-		t.Fatalf("frame type = %d, want HEADERS", frames[0].ftype)
-	}
-	if frames[0].flags&byte(frame.FlagHeadersEndHeaders) == 0 {
-		t.Fatalf("single HEADERS frame must set END_HEADERS")
-	}
+	require.Lenf(t, frames, 1, "got %d frames, want 1 (no split for small block)", len(frames))
+	assert.Equalf(t, byte(frame.FrameHeaders), frames[0].ftype,
+		"frame type = %d, want HEADERS", frames[0].ftype)
+	assert.NotZero(t, frames[0].flags&byte(frame.FlagHeadersEndHeaders),
+		"single HEADERS frame must set END_HEADERS")
 }
 
 // fixedPadding returns a PaddingStrategy that always pads HEADERS by n.
@@ -214,23 +194,15 @@ func TestIntegration_LargeHeaders_SplitAcrossContinuation(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 	s, err := c.NewStream(ctx)
-	if err != nil {
-		t.Fatalf("NewStream: %v", err)
-	}
-
+	require.NoError(t, err, "NewStream")
 	// ~40 headers of ~600 bytes each → block well over one 16384 frame.
 	fields := bigFields(40, 600)
-	if err := s.SendHeaders(ctx, fields, true); err != nil {
-		t.Fatalf("SendHeaders: %v", err)
-	}
 
-	ev, err := s.Recv(ctx)
-	if err != nil {
-		t.Fatalf("Recv: %v", err)
-	}
-	if ev.Type != EventHeaders {
-		t.Fatalf("event type = %v, want EventHeaders", ev.Type)
-	}
+	require.NoError(t, s.SendHeaders(ctx, fields, true), "SendHeaders")
+
+	ev, rerr := s.Recv(ctx)
+	require.NoError(t, rerr, "Recv")
+	require.Equalf(t, EventHeaders, ev.Type, "event type = %v, want EventHeaders", ev.Type)
 	var status, recv string
 	for _, f := range ev.Headers {
 		switch string(f.Name) {
@@ -240,10 +212,6 @@ func TestIntegration_LargeHeaders_SplitAcrossContinuation(t *testing.T) {
 			recv = string(f.Value)
 		}
 	}
-	if status != "200" {
-		t.Fatalf("status = %q, want 200 (CONTINUATION reassembly failed?)", status)
-	}
-	if recv != "40" {
-		t.Fatalf("server received x-recv-count=%q big headers, want 40", recv)
-	}
+	assert.Equalf(t, "200", status, "status = %q, want 200 (CONTINUATION reassembly failed?)", status)
+	assert.Equalf(t, "40", recv, "server received x-recv-count=%q big headers, want 40", recv)
 }

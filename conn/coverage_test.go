@@ -25,6 +25,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
 	"github.com/lodgvideon/poseidon-http-client/frame"
 	"github.com/lodgvideon/poseidon-http-client/hpack"
 )
@@ -42,49 +45,35 @@ func TestConn_Stats_AfterRequest(t *testing.T) {
 	defer srv.Close()
 	c := dialServer(t, srv, cfg)
 	defer c.Close()
-
-	// Zero-check before any request.
-	before := c.Stats()
-	if before.StreamsOpened != 0 {
-		t.Fatalf("StreamsOpened before = %d, want 0", before.StreamsOpened)
-	}
-
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 
+	// Zero-check before any request.
+	before := c.Stats()
+	require.Zerof(t, before.StreamsOpened, "StreamsOpened before = %d, want 0", before.StreamsOpened)
+
 	s, err := c.NewStream(ctx)
-	if err != nil {
-		t.Fatalf("NewStream: %v", err)
-	}
-	if err := s.SendHeaders(ctx, []hpack.HeaderField{
+	require.NoError(t, err, "NewStream")
+	err = s.SendHeaders(ctx, []hpack.HeaderField{
 		{Name: []byte(":method"), Value: []byte("GET")},
 		{Name: []byte(":scheme"), Value: []byte("https")},
 		{Name: []byte(":authority"), Value: []byte("example.com")},
 		{Name: []byte(":path"), Value: []byte("/")},
-	}, true); err != nil {
-		t.Fatalf("SendHeaders: %v", err)
-	}
+	}, true)
+	require.NoError(t, err, "SendHeaders")
 	// Drain response.
 	for {
-		ev, err := s.Recv(ctx)
-		if err != nil {
-			t.Fatalf("Recv: %v", err)
-		}
+		ev, rerr := s.Recv(ctx)
+		require.NoError(t, rerr, "Recv")
 		if ev.EndStream {
 			break
 		}
 	}
 
 	after := c.Stats()
-	if after.StreamsOpened == 0 {
-		t.Fatalf("StreamsOpened after = 0, want > 0")
-	}
-	if after.FramesSent == 0 {
-		t.Fatalf("FramesSent after = 0, want > 0")
-	}
-	if after.FramesReceived == 0 {
-		t.Fatalf("FramesReceived after = 0, want > 0")
-	}
+	require.NotZero(t, after.StreamsOpened, "StreamsOpened after = 0, want > 0")
+	require.NotZero(t, after.FramesSent, "FramesSent after = 0, want > 0")
+	require.NotZero(t, after.FramesReceived, "FramesReceived after = 0, want > 0")
 }
 
 // ---------------------------------------------------------------------------
@@ -100,9 +89,9 @@ func TestConn_GoAwayReceived_FalseByDefault(t *testing.T) {
 	c := dialServer(t, srv, cfg)
 	defer c.Close()
 
-	if c.GoAwayReceived() {
-		t.Fatalf("GoAwayReceived() = true before any GOAWAY, want false")
-	}
+	got := c.GoAwayReceived()
+
+	require.False(t, got, "GoAwayReceived() = true before any GOAWAY, want false")
 }
 
 // TestConn_GoAwayReceived_TrueAfterPeerGoAway exercises the flag via a
@@ -116,19 +105,20 @@ func TestConn_GoAwayReceived_TrueAfterPeerGoAway(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 	c, err := NewClientConn(ctx, cli, ConnOptions{})
-	if err != nil {
-		t.Fatalf("NewClientConn: %v", err)
-	}
+	require.NoError(t, err, "NewClientConn")
 	defer c.Close()
 
+	var seen bool
 	deadline := time.Now().Add(time.Second)
 	for time.Now().Before(deadline) {
 		if c.GoAwayReceived() {
-			return
+			seen = true
+			break
 		}
 		time.Sleep(5 * time.Millisecond)
 	}
-	t.Fatalf("GoAwayReceived() still false after peer GOAWAY")
+
+	require.True(t, seen, "GoAwayReceived() still false after peer GOAWAY")
 }
 
 // ---------------------------------------------------------------------------
@@ -143,10 +133,10 @@ func TestConn_EmitConnGoAwayIfTyped_NonConnError(t *testing.T) {
 		fr:      frame.NewFramer(&buf, bytes.NewReader(nil)),
 		streams: map[uint32]*Stream{},
 	}
+
 	c.emitConnGoAwayIfTyped(io.EOF)
-	if buf.Len() != 0 {
-		t.Fatalf("expected no bytes written for EOF, got %d", buf.Len())
-	}
+
+	require.Zerof(t, buf.Len(), "expected no bytes written for EOF, got %d", buf.Len())
 }
 
 // TestConn_EmitConnGoAwayIfTyped_ConnError checks that a *ConnError causes
@@ -158,10 +148,10 @@ func TestConn_EmitConnGoAwayIfTyped_ConnError(t *testing.T) {
 		streams: map[uint32]*Stream{},
 	}
 	ce := &ConnError{Code: frame.ErrCodeProtocolError, Reason: "test"}
+
 	c.emitConnGoAwayIfTyped(ce)
-	if buf.Len() == 0 {
-		t.Fatalf("expected GOAWAY bytes written, got 0")
-	}
+
+	require.NotZero(t, buf.Len(), "expected GOAWAY bytes written, got 0")
 }
 
 // TestConn_EmitConnGoAwayIfTyped_PopulatesLast pins that ConnError.Last reports
@@ -182,14 +172,13 @@ func TestConn_EmitConnGoAwayIfTyped_PopulatesLast(t *testing.T) {
 	}
 	c.goAwaySentLast.Store(goAwayNoneSent)
 	c.lastPromisedID = 4
-
 	ce := &ConnError{Code: frame.ErrCodeProtocolError, Reason: "test"}
+
 	c.emitConnGoAwayIfTyped(ce)
 
-	if ce.Last != 4 {
-		t.Fatalf("ConnError.Last = %d, want 4 — the id advertised in the GOAWAY "+
+	require.Equalf(t, uint32(4), ce.Last,
+		"ConnError.Last = %d, want 4 — the id advertised in the GOAWAY "+
 			"just written is not recorded on the error the caller receives", ce.Last)
-	}
 }
 
 // ---------------------------------------------------------------------------
@@ -207,15 +196,26 @@ func TestConn_ShutdownStreams_ClosesOpenStreams(t *testing.T) {
 
 	c.shutdownStreams()
 
-	// First receive: should get the EventReset that was sent before close.
+	// The receive used to be guarded by `if ok && ev.Type != EventReset`, which
+	// disabled the assertion in exactly the failure it was written for: had
+	// shutdownStreams closed the channel without ever sending the reset, ok would
+	// be false and the test would still pass. Require the delivery first, then
+	// check the event, then check that the channel really was closed behind it.
 	select {
 	case ev, ok := <-s.events:
-		if ok && ev.Type != EventReset {
-			t.Fatalf("expected EventReset, got %v", ev.Type)
-		}
+		require.True(t, ok, "events channel closed without delivering the reset — "+
+			"a caller blocked in Recv learns nothing about why the connection died")
+		assert.Equalf(t, EventReset, ev.Type, "expected EventReset, got %v", ev.Type)
+		assert.Equalf(t, frame.ErrCodeInternalError, ev.RSTCode,
+			"RSTCode = %v, want INTERNAL_ERROR — a teardown diagnosed locally is not "+
+				"a code the peer chose", ev.RSTCode)
 	case <-time.After(time.Second):
-		t.Fatalf("events channel not closed within 1s")
+		require.FailNow(t, "no event delivered within 1s")
 	}
+
+	_, ok2 := <-s.events
+	assert.False(t, ok2, "events channel not closed after shutdownStreams — a caller "+
+		"ranging over it would never see the stream end")
 }
 
 // TestConn_ShutdownStreams_EOF_ChannelClosed verifies that even with an
@@ -238,7 +238,7 @@ func TestConn_ShutdownStreams_EOF_ChannelClosed(t *testing.T) {
 	select {
 	case <-done:
 	case <-time.After(time.Second):
-		t.Fatalf("events channel not closed after EOF shutdown")
+		require.FailNow(t, "events channel not closed after EOF shutdown")
 	}
 }
 
@@ -253,12 +253,9 @@ func TestConn_WriteWindowUpdate_ClosedConn(t *testing.T) {
 	c.closed.Store(true)
 
 	err := c.writeWindowUpdate(1, 1024)
-	if err != ErrConnClosed {
-		t.Fatalf("writeWindowUpdate on closed conn = %v, want ErrConnClosed", err)
-	}
-	if buf.Len() != 0 {
-		t.Fatalf("expected no bytes written, got %d", buf.Len())
-	}
+
+	require.Equalf(t, ErrConnClosed, err, "writeWindowUpdate on closed conn = %v, want ErrConnClosed", err)
+	require.Zerof(t, buf.Len(), "expected no bytes written, got %d", buf.Len())
 }
 
 // ---------------------------------------------------------------------------
@@ -272,9 +269,8 @@ func TestConn_WriteSettingsAck_ClosedConn(t *testing.T) {
 	c.closed.Store(true)
 
 	err := c.writeSettingsAck()
-	if err != ErrConnClosed {
-		t.Fatalf("writeSettingsAck on closed conn = %v, want ErrConnClosed", err)
-	}
+
+	require.Equalf(t, ErrConnClosed, err, "writeSettingsAck on closed conn = %v, want ErrConnClosed", err)
 }
 
 // ---------------------------------------------------------------------------
@@ -288,9 +284,8 @@ func TestConn_WritePingAck_ClosedConn(t *testing.T) {
 	c.closed.Store(true)
 
 	err := c.writePingAck([8]byte{})
-	if err != ErrConnClosed {
-		t.Fatalf("writePingAck on closed conn = %v, want ErrConnClosed", err)
-	}
+
+	require.Equalf(t, ErrConnClosed, err, "writePingAck on closed conn = %v, want ErrConnClosed", err)
 }
 
 // ---------------------------------------------------------------------------
@@ -310,9 +305,8 @@ func TestConn_WriteData_ClosedConn(t *testing.T) {
 	s.sendWindow = 65535
 
 	err := c.writeData(context.Background(), s, s.gen.Load(), []byte("hello"), false)
-	if err != ErrConnClosed {
-		t.Fatalf("writeData on closed conn = %v, want ErrConnClosed", err)
-	}
+
+	require.Equalf(t, ErrConnClosed, err, "writeData on closed conn = %v, want ErrConnClosed", err)
 }
 
 // TestConn_WriteData_NoIDReturnsErrStreamClosed verifies that writeData with
@@ -326,9 +320,8 @@ func TestConn_WriteData_NoIDReturnsErrStreamClosed(t *testing.T) {
 	s.sendWindow = 65535
 
 	err := c.writeData(context.Background(), s, s.gen.Load(), []byte("data"), false)
-	if err != ErrStreamClosed {
-		t.Fatalf("writeData id=0 = %v, want ErrStreamClosed", err)
-	}
+
+	require.Equalf(t, ErrStreamClosed, err, "writeData id=0 = %v, want ErrStreamClosed", err)
 }
 
 // ---------------------------------------------------------------------------
@@ -356,14 +349,12 @@ func TestHandler_OnContinuation_CompletesHeaderBlock(t *testing.T) {
 		StreamID: 1,
 		Length:   uint32(len(block1)),
 	}
-	if err := h.OnHeaders(fhHeaders, frame.HeaderBlock(block1), nil, 0); err != nil {
-		t.Fatalf("OnHeaders: %v", err)
-	}
+	require.NoError(t, h.OnHeaders(fhHeaders, frame.HeaderBlock(block1), nil, 0), "OnHeaders")
 
 	// No event yet — block is still pending CONTINUATION.
 	select {
 	case <-s.events:
-		t.Fatalf("event pushed before CONTINUATION completes the block")
+		require.FailNow(t, "event pushed before CONTINUATION completes the block")
 	default:
 	}
 
@@ -373,20 +364,14 @@ func TestHandler_OnContinuation_CompletesHeaderBlock(t *testing.T) {
 		Flags:    frame.FlagContinuationEndHeaders,
 		StreamID: 1,
 	}
-	if err := h.OnContinuation(fhCont, frame.HeaderBlock(nil)); err != nil {
-		t.Fatalf("OnContinuation: %v", err)
-	}
+	require.NoError(t, h.OnContinuation(fhCont, frame.HeaderBlock(nil)), "OnContinuation")
 
 	select {
 	case ev := <-s.events:
-		if ev.Type != EventHeaders {
-			t.Fatalf("event type = %v, want EventHeaders", ev.Type)
-		}
-		if !ev.EndStream {
-			t.Fatalf("EndStream not set")
-		}
+		require.Equalf(t, EventHeaders, ev.Type, "event type = %v, want EventHeaders", ev.Type)
+		require.True(t, ev.EndStream, "EndStream not set")
 	case <-time.After(time.Second):
-		t.Fatalf("event not delivered after CONTINUATION")
+		require.FailNow(t, "event not delivered after CONTINUATION")
 	}
 }
 
@@ -400,9 +385,10 @@ func TestHandler_OnContinuation_UnknownStream(t *testing.T) {
 		Flags:    frame.FlagContinuationEndHeaders,
 		StreamID: 99,
 	}
-	if err := h.OnContinuation(fh, nil); err != nil {
-		t.Fatalf("OnContinuation unknown stream: %v", err)
-	}
+
+	err := h.OnContinuation(fh, nil)
+
+	require.NoError(t, err, "OnContinuation unknown stream")
 }
 
 // TestHandler_OnContinuation_WrongPendingStream verifies that a CONTINUATION
@@ -419,9 +405,10 @@ func TestHandler_OnContinuation_WrongPendingStream(t *testing.T) {
 		Flags:    frame.FlagContinuationEndHeaders,
 		StreamID: 3, // mismatch → should be silently dropped
 	}
-	if err := h.OnContinuation(fh, []byte{0x82}); err != nil {
-		t.Fatalf("OnContinuation wrong pending stream: %v", err)
-	}
+
+	err := h.OnContinuation(fh, []byte{0x82})
+
+	require.NoError(t, err, "OnContinuation wrong pending stream")
 }
 
 // TestHandler_OnContinuation_Partial verifies that a CONTINUATION without
@@ -440,14 +427,14 @@ func TestHandler_OnContinuation_Partial(t *testing.T) {
 		Flags:    0, // no END_HEADERS
 		StreamID: 1,
 	}
-	if err := h.OnContinuation(fh, []byte{0x84}); err != nil {
-		t.Fatalf("OnContinuation partial: %v", err)
-	}
 
+	err := h.OnContinuation(fh, []byte{0x84})
+
+	require.NoError(t, err, "OnContinuation partial")
 	// No event must have been pushed.
 	select {
 	case ev := <-s.events:
-		t.Fatalf("unexpected event after partial CONTINUATION: %+v", ev)
+		require.FailNowf(t, "unexpected event after partial CONTINUATION", "%+v", ev)
 	default:
 	}
 }
@@ -463,9 +450,10 @@ func TestHandler_OnPriority_IsNoop(t *testing.T) {
 	h := newConnHandler(m, hpack.NewDecoder())
 	fh := frame.FrameHeader{Type: frame.FramePriority, StreamID: 1}
 	p := frame.Priority{StreamDep: 0, Exclusive: false, Weight: 15}
-	if err := h.OnPriority(fh, p); err != nil {
-		t.Fatalf("OnPriority: %v", err)
-	}
+
+	err := h.OnPriority(fh, p)
+
+	require.NoError(t, err, "OnPriority")
 }
 
 // ---------------------------------------------------------------------------
@@ -503,18 +491,15 @@ func TestStream_Push_Overflow_SendsRST(t *testing.T) {
 	code := w.lastBestEffortC
 	w.mu.Unlock()
 
-	if rstCalls == 0 {
-		t.Fatalf("writeRSTStream not called after push overflow")
-	}
+	require.NotZero(t, rstCalls, "writeRSTStream not called after push overflow")
 	// CANCEL, not REFUSED_STREAM: this reset is the client giving up on a
 	// response it cannot buffer, which is RFC 9113 §7's "the stream is no
 	// longer needed". REFUSED_STREAM would assert §8.7's "closed prior to any
 	// processing having occurred ... can be safely retried", which is false —
 	// the server answered. client's retry classifier and grpc's status map both
 	// read the code literally, so the wrong one replayed executed requests.
-	if code != frame.ErrCodeCancel {
-		t.Fatalf("RST code = %v, want CANCEL: a locally-shed response is not a request the server declined", code)
-	}
+	require.Equalf(t, frame.ErrCodeCancel, code,
+		"RST code = %v, want CANCEL: a locally-shed response is not a request the server declined", code)
 }
 
 // TestStream_Push_Overflow_IsIdempotent confirms that subsequent overflows
@@ -538,9 +523,7 @@ func TestStream_Push_Overflow_IsIdempotent(t *testing.T) {
 	rstCalls := w.bestEffortRSTs
 	w.mu.Unlock()
 
-	if rstCalls != 1 {
-		t.Fatalf("writeRSTStream called %d times, want exactly 1 (idempotent)", rstCalls)
-	}
+	require.Equalf(t, 1, rstCalls, "writeRSTStream called %d times, want exactly 1 (idempotent)", rstCalls)
 }
 
 // ---------------------------------------------------------------------------
@@ -550,10 +533,10 @@ func TestStream_Push_Overflow_IsIdempotent(t *testing.T) {
 // TestStreamEventType_String_Unknown exercises the default branch.
 func TestStreamEventType_String_Unknown(t *testing.T) {
 	var unknown StreamEventType = 255
+
 	got := unknown.String()
-	if got != "unknown" {
-		t.Fatalf("String(255) = %q, want %q", got, "unknown")
-	}
+
+	require.Equalf(t, "unknown", got, "String(255) = %q, want %q", got, "unknown")
 }
 
 // ---------------------------------------------------------------------------
@@ -564,17 +547,13 @@ func TestStreamEventType_String_Unknown(t *testing.T) {
 // PUSH_PROMISE during the handshake phase is rejected with a ConnError.
 func TestSettingsRecorder_OnPushPromise_ReturnsError(t *testing.T) {
 	r := &settingsRecorder{}
+
 	err := r.OnPushPromise(frame.FrameHeader{}, 4, nil, 0)
-	if err == nil {
-		t.Fatalf("expected ConnError, got nil")
-	}
+
+	require.Error(t, err, "expected ConnError, got nil")
 	ce, ok := err.(*ConnError)
-	if !ok {
-		t.Fatalf("err type = %T, want *ConnError", err)
-	}
-	if ce.Code != frame.ErrCodeProtocolError {
-		t.Fatalf("code = %v, want ErrCodeProtocolError", ce.Code)
-	}
+	require.Truef(t, ok, "err type = %T, want *ConnError", err)
+	require.Equalf(t, frame.ErrCodeProtocolError, ce.Code, "code = %v, want ErrCodeProtocolError", ce.Code)
 }
 
 // ---------------------------------------------------------------------------
@@ -594,9 +573,7 @@ func TestConn_Ping_ReaderDoneClosesConn(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 	c, err := NewClientConn(ctx, cli, ConnOptions{})
-	if err != nil {
-		t.Fatalf("NewClientConn: %v", err)
-	}
+	require.NoError(t, err, "NewClientConn")
 	t.Cleanup(func() { _ = c.Close() })
 
 	// Wait briefly so the reader loop observes the peer close.
@@ -605,9 +582,8 @@ func TestConn_Ping_ReaderDoneClosesConn(t *testing.T) {
 	pingCtx, pingCancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer pingCancel()
 	_, err = c.Ping(pingCtx)
-	if err == nil {
-		t.Fatalf("Ping after reader exit: expected error, got nil")
-	}
+
+	require.Error(t, err, "Ping after reader exit: expected error, got nil")
 	// Accept either ErrConnClosed or "use of closed" transport error.
 }
 
@@ -627,12 +603,9 @@ func TestConn_WriteData_EmptyNoEndStream(t *testing.T) {
 	s.sendWindow = 65535
 
 	err := c.writeData(context.Background(), s, s.gen.Load(), nil, false)
-	if err != nil {
-		t.Fatalf("writeData(empty, noEndStream) = %v, want nil", err)
-	}
-	if buf.Len() != 0 {
-		t.Fatalf("expected no bytes written for empty no-endstream, got %d", buf.Len())
-	}
+
+	require.NoErrorf(t, err, "writeData(empty, noEndStream) = %v, want nil", err)
+	require.Zerof(t, buf.Len(), "expected no bytes written for empty no-endstream, got %d", buf.Len())
 }
 
 // TestConn_WriteData_EmptyEndStream verifies that an empty payload with
@@ -647,12 +620,9 @@ func TestConn_WriteData_EmptyEndStream(t *testing.T) {
 	s.sendWindow = 65535
 
 	err := c.writeData(context.Background(), s, s.gen.Load(), nil, true)
-	if err != nil {
-		t.Fatalf("writeData(empty, endStream) = %v, want nil", err)
-	}
-	if buf.Len() == 0 {
-		t.Fatalf("expected DATA frame bytes for empty+endStream, got 0")
-	}
+
+	require.NoErrorf(t, err, "writeData(empty, endStream) = %v, want nil", err)
+	require.NotZero(t, buf.Len(), "expected DATA frame bytes for empty+endStream, got 0")
 }
 
 // TestConn_WriteData_WithPadding verifies writeData uses WriteDataPadded when
@@ -669,12 +639,10 @@ func TestConn_WriteData_WithPadding(t *testing.T) {
 	s.sendWindow = 65535
 
 	// Non-empty data with padding enabled.
-	if err := c.writeData(context.Background(), s, s.gen.Load(), []byte("hi"), true); err != nil {
-		t.Fatalf("writeData with padding: %v", err)
-	}
-	if buf.Len() == 0 {
-		t.Fatal("expected DATA frame in output")
-	}
+	err := c.writeData(context.Background(), s, s.gen.Load(), []byte("hi"), true)
+
+	require.NoError(t, err, "writeData with padding")
+	require.NotZero(t, buf.Len(), "expected DATA frame in output")
 }
 
 // TestConn_WriteData_EmptyWithPadding covers the padLen > 0 branch inside the
@@ -690,12 +658,10 @@ func TestConn_WriteData_EmptyWithPadding(t *testing.T) {
 	s.id = 1
 	s.sendWindow = 65535
 
-	if err := c.writeData(context.Background(), s, s.gen.Load(), nil, true); err != nil {
-		t.Fatalf("writeData(empty,padding): %v", err)
-	}
-	if buf.Len() == 0 {
-		t.Fatal("expected padded DATA frame bytes")
-	}
+	err := c.writeData(context.Background(), s, s.gen.Load(), nil, true)
+
+	require.NoError(t, err, "writeData(empty,padding)")
+	require.NotZero(t, buf.Len(), "expected padded DATA frame bytes")
 }
 
 // TestStream_Push_Overflow_Integration exercises the overflow path via an
@@ -721,23 +687,18 @@ func TestStream_Push_Overflow_Integration(t *testing.T) {
 		StreamEventBuffer: 1,
 	}
 	c, err := Dial(ctx, srv.Listener.Addr().String(), opts)
-	if err != nil {
-		t.Fatalf("Dial: %v", err)
-	}
+	require.NoError(t, err, "Dial")
 	defer c.Close()
 
 	s, err := c.NewStream(ctx)
-	if err != nil {
-		t.Fatalf("NewStream: %v", err)
-	}
-	if err := s.SendHeaders(ctx, []hpack.HeaderField{
+	require.NoError(t, err, "NewStream")
+	err = s.SendHeaders(ctx, []hpack.HeaderField{
 		{Name: []byte(":method"), Value: []byte("GET")},
 		{Name: []byte(":scheme"), Value: []byte("https")},
 		{Name: []byte(":authority"), Value: []byte("example.com")},
 		{Name: []byte(":path"), Value: []byte("/overflow")},
-	}, true); err != nil {
-		t.Fatalf("SendHeaders: %v", err)
-	}
+	}, true)
+	require.NoError(t, err, "SendHeaders")
 
 	// Do NOT drain immediately — let the buffer fill, then read one event.
 	time.Sleep(200 * time.Millisecond)
@@ -767,38 +728,34 @@ func TestConn_LookupStream_FoundAndNotFound(t *testing.T) {
 	defer c.Close()
 
 	// Before any stream: ID 1 should not exist.
-	if _, ok := c.LookupStream(1); ok {
-		t.Fatal("stream 1 should not exist before any SendHeaders")
-	}
+	_, existsBefore := c.LookupStream(1)
+	require.False(t, existsBefore, "stream 1 should not exist before any SendHeaders")
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
 	// Create and send a stream; after SendHeaders it has ID 1.
 	s, err := c.NewStream(ctx)
-	if err != nil {
-		t.Fatalf("NewStream: %v", err)
-	}
-	if err := s.SendHeaders(ctx, []hpack.HeaderField{
+	require.NoError(t, err, "NewStream")
+	err = s.SendHeaders(ctx, []hpack.HeaderField{
 		{Name: []byte(":method"), Value: []byte("GET")},
 		{Name: []byte(":scheme"), Value: []byte("https")},
 		{Name: []byte(":authority"), Value: []byte("example.com")},
 		{Name: []byte(":path"), Value: []byte("/")},
-	}, true); err != nil {
-		t.Fatalf("SendHeaders: %v", err)
-	}
+	}, true)
+	require.NoError(t, err, "SendHeaders")
 
 	// Stream 1 now registered — server is still blocked on gate so no eviction.
-	if _, ok := c.LookupStream(s.ID()); !ok {
-		close(gate) // unblock server before fatalf so defer srv.Close() doesn't hang
-		t.Fatalf("LookupStream(%d) = false, want true", s.ID())
-	}
+	// The lookup result is captured *before* the gate is released so the
+	// assertion can abort without leaving the handler parked and defer
+	// srv.Close() hanging on it.
+	_, found := c.LookupStream(s.ID())
 	close(gate) // unblock server
+	require.Truef(t, found, "LookupStream(%d) = false, want true", s.ID())
 
 	// Unknown ID returns false.
-	if _, ok := c.LookupStream(999); ok {
-		t.Fatal("LookupStream(999) should return false for unknown ID")
-	}
+	_, foundUnknown := c.LookupStream(999)
+	require.False(t, foundUnknown, "LookupStream(999) should return false for unknown ID")
 }
 
 // ---------------------------------------------------------------------------
@@ -811,9 +768,8 @@ func TestConn_AltSvcEntries_StoreAndRetrieve(t *testing.T) {
 
 	c := &Conn{}
 	// Initially nil.
-	if got := c.AltSvcEntries(); got != nil {
-		t.Fatalf("expected nil before any ALTSVC, got %v", got)
-	}
+	initial := c.AltSvcEntries()
+	require.Nilf(t, initial, "expected nil before any ALTSVC, got %v", initial)
 
 	entries := []frame.AltSvcEntry{
 		{Origin: "https://example.com", AltValue: `h2=":8080"`},
@@ -822,19 +778,14 @@ func TestConn_AltSvcEntries_StoreAndRetrieve(t *testing.T) {
 	c.storeAltSvc(entries)
 
 	got := c.AltSvcEntries()
-	if len(got) != 2 {
-		t.Fatalf("expected 2 entries, got %d", len(got))
-	}
-	if got[0].Origin != "https://example.com" {
-		t.Fatalf("entry[0].Origin = %q, want https://example.com", got[0].Origin)
-	}
+	require.Lenf(t, got, 2, "expected 2 entries, got %d", len(got))
+	require.Equalf(t, "https://example.com", got[0].Origin,
+		"entry[0].Origin = %q, want https://example.com", got[0].Origin)
 
 	// Verify it's a copy.
 	got[0].Origin = "modified"
 	again := c.AltSvcEntries()
-	if again[0].Origin != "https://example.com" {
-		t.Error("AltSvcEntries() must return a copy")
-	}
+	assert.Equal(t, "https://example.com", again[0].Origin, "AltSvcEntries() must return a copy")
 }
 
 // TestConn_AltSvcEntries_ClearedByEmptySlice verifies that storing empty
@@ -844,10 +795,11 @@ func TestConn_AltSvcEntries_ClearedByEmptySlice(t *testing.T) {
 
 	c := &Conn{}
 	c.storeAltSvc([]frame.AltSvcEntry{{Origin: "https://a.com", AltValue: "h2=:443"}})
+
 	c.storeAltSvc(nil) // clear
-	if got := c.AltSvcEntries(); got != nil {
-		t.Fatalf("expected nil after clearing, got %v", got)
-	}
+
+	got := c.AltSvcEntries()
+	require.Nilf(t, got, "expected nil after clearing, got %v", got)
 }
 
 // ---------------------------------------------------------------------------
@@ -878,30 +830,23 @@ func TestSettingsRecorder_PrefaceGuard(t *testing.T) {
 	// Before the preface: every one is a connection error PROTOCOL_ERROR.
 	for name, call := range calls {
 		var ce *ConnError
-		if err := call(&settingsRecorder{}); !errors.As(err, &ce) || ce.Code != frame.ErrCodeProtocolError {
-			t.Errorf("%s before preface = %v, want ConnError PROTOCOL_ERROR", name, err)
-		}
+		err := call(&settingsRecorder{})
+		assert.Truef(t, errors.As(err, &ce) && ce.Code == frame.ErrCodeProtocolError,
+			"%s before preface = %v, want ConnError PROTOCOL_ERROR", name, err)
 	}
-	if err := (&settingsRecorder{}).OnPushPromise(fh, 0, nil, 0); err == nil {
-		t.Error("OnPushPromise during handshake = nil, want PROTOCOL_ERROR")
-	}
+	assert.Error(t, (&settingsRecorder{}).OnPushPromise(fh, 0, nil, 0),
+		"OnPushPromise during handshake = nil, want PROTOCOL_ERROR")
 	ackHdr := frame.FrameHeader{Flags: frame.FlagSettingsAck}
-	if err := (&settingsRecorder{}).OnSettings(ackHdr, frame.SettingsParams{}); err == nil {
-		t.Error("SETTINGS ACK before preface = nil, want PROTOCOL_ERROR")
-	}
+	assert.Error(t, (&settingsRecorder{}).OnSettings(ackHdr, frame.SettingsParams{}),
+		"SETTINGS ACK before preface = nil, want PROTOCOL_ERROR")
 
 	// After the preface SETTINGS arrives (peerSeen), the same frames are no-ops.
 	for name, call := range calls {
 		r := &settingsRecorder{}
-		if err := r.OnSettings(frame.FrameHeader{}, frame.SettingsParams{}); err != nil {
-			t.Fatalf("OnSettings(preface): %v", err)
-		}
-		if !r.peerSeen {
-			t.Fatal("peerSeen not set after a non-ACK SETTINGS")
-		}
-		if err := call(r); err != nil {
-			t.Errorf("%s after preface = %v, want nil", name, err)
-		}
+		require.NoError(t, r.OnSettings(frame.FrameHeader{}, frame.SettingsParams{}), "OnSettings(preface)")
+		require.True(t, r.peerSeen, "peerSeen not set after a non-ACK SETTINGS")
+		err := call(r)
+		assert.NoErrorf(t, err, "%s after preface = %v, want nil", name, err)
 	}
 }
 
@@ -921,12 +866,10 @@ func TestStream_Recv_ResetSignal(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
 	ev, err := s.ref().Recv(ctx)
-	if err != nil {
-		t.Fatalf("Recv error: %v", err)
-	}
-	if ev.Type != EventReset || ev.RSTCode != frame.ErrCodeCancel {
-		t.Fatalf("event = %+v", ev)
-	}
+
+	require.NoError(t, err, "Recv error")
+	require.Equalf(t, EventReset, ev.Type, "event = %+v", ev)
+	require.Equalf(t, frame.ErrCodeCancel, ev.RSTCode, "event = %+v", ev)
 }
 
 // ---------------------------------------------------------------------------
@@ -940,9 +883,7 @@ func TestProxyDialer_BufferedConn(t *testing.T) {
 	t.Parallel()
 
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, err)
 	defer ln.Close()
 
 	go func() {
@@ -961,16 +902,13 @@ func TestProxyDialer_BufferedConn(t *testing.T) {
 	proxyURL := &url.URL{Scheme: "http", Host: ln.Addr().String()}
 	d := &ProxyDialer{ProxyURL: proxyURL}
 	tc, err := d.Dial(context.Background(), "example.com:443")
-	if err != nil {
-		t.Fatalf("Dial: %v", err)
-	}
+	require.NoError(t, err, "Dial")
 	defer tc.Close()
 
 	out := make([]byte, 5)
 	n, _ := tc.Read(out)
-	if string(out[:n]) != "hello" {
-		t.Fatalf("bufferedConn.Read = %q, want %q", out[:n], "hello")
-	}
+
+	require.Equalf(t, "hello", string(out[:n]), "bufferedConn.Read = %q, want %q", out[:n], "hello")
 }
 
 // TestProxyTLSDialer_NilURL verifies ProxyTLSDialer.Dial propagates the
@@ -978,10 +916,10 @@ func TestProxyDialer_BufferedConn(t *testing.T) {
 func TestProxyTLSDialer_NilURL(t *testing.T) {
 	t.Parallel()
 	d := &ProxyTLSDialer{}
+
 	_, err := d.Dial(context.Background(), "example.com:443")
-	if err == nil {
-		t.Fatal("expected error for nil ProxyURL")
-	}
+
+	require.Error(t, err, "expected error for nil ProxyURL")
 }
 
 // TestTLSDialer_ALPNFailure verifies ErrALPNFailed when the server does not
@@ -1010,9 +948,7 @@ func TestTLSDialer_ALPNFailure(t *testing.T) {
 
 	// Spin up our own raw TLS listener using the same cert.
 	ln, err := tls.Listen("tcp", "127.0.0.1:0", srv.TLS)
-	if err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, err)
 	defer ln.Close()
 	go func() {
 		c, cerr := ln.Accept()
@@ -1032,6 +968,10 @@ func TestTLSDialer_ALPNFailure(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 	_, err = d.Dial(ctx, ln.Addr().String())
+
+	// Deliberately NOT an assertion: anything other than ErrALPNFailed means the
+	// TLS stack refused the ALPN mismatch at handshake time, which this test
+	// cannot distinguish from the branch it wants to reach.
 	if err != ErrALPNFailed {
 		t.Skipf("TLS ALPN behaviour: err = %v (not ErrALPNFailed — skip)", err)
 	}
@@ -1043,13 +983,13 @@ func TestDial_DialError(t *testing.T) {
 	t.Parallel()
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
+
 	// 127.0.0.1:1 — always connection refused.
 	_, err := Dial(ctx, "127.0.0.1:1", ConnOptions{
 		Dialer: &TLSDialer{Config: &tls.Config{InsecureSkipVerify: true}},
 	})
-	if err == nil {
-		t.Fatal("expected dial error")
-	}
+
+	require.Error(t, err, "expected dial error")
 }
 
 // TestDial_NewClientConnError covers the `transport.Close(); return nil, err`
@@ -1057,9 +997,7 @@ func TestDial_DialError(t *testing.T) {
 // sending HTTP/2 SETTINGS).
 func TestDial_NewClientConnError(t *testing.T) {
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, err)
 	defer ln.Close()
 	go func() {
 		c, cerr := ln.Accept()
@@ -1074,9 +1012,8 @@ func TestDial_NewClientConnError(t *testing.T) {
 	_, err = Dial(ctx, ln.Addr().String(), ConnOptions{
 		Dialer: &PlaintextDialer{},
 	})
-	if err == nil {
-		t.Fatal("expected error from NewClientConn")
-	}
+
+	require.Error(t, err, "expected error from NewClientConn")
 }
 
 // TestProxyDialer_NoPortInURL verifies that a proxy URL without a port gets
@@ -1088,11 +1025,11 @@ func TestProxyDialer_NoPortInURL(t *testing.T) {
 	d := &ProxyDialer{ProxyURL: &url.URL{Scheme: "http", Host: "127.0.0.1"}}
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
+
 	_, err := d.Dial(ctx, "example.com:443")
+
 	// We expect a connection error (port 80 refused), not a panic.
-	if err == nil {
-		t.Fatal("expected connection error")
-	}
+	require.Error(t, err, "expected connection error")
 }
 
 // TestConn_Ping_ClosedConn verifies Ping returns ErrConnClosed immediately
@@ -1102,10 +1039,10 @@ func TestConn_Ping_ClosedConn(t *testing.T) {
 	c := &Conn{}
 	c.closed.Store(true)
 	ctx := context.Background()
+
 	_, err := c.Ping(ctx)
-	if err != ErrConnClosed {
-		t.Fatalf("Ping on closed conn = %v, want ErrConnClosed", err)
-	}
+
+	require.Equalf(t, ErrConnClosed, err, "Ping on closed conn = %v, want ErrConnClosed", err)
 }
 
 // ---------------------------------------------------------------------------
@@ -1138,7 +1075,7 @@ func TestConn_MarkStreamDone_DrainsDone(t *testing.T) {
 	case <-c.drainDone:
 		// expected
 	case <-time.After(time.Second):
-		t.Fatal("drainDone not closed after markStreamDone")
+		require.FailNow(t, "drainDone not closed after markStreamDone")
 	}
 }
 
@@ -1160,10 +1097,20 @@ func TestConn_Shutdown_AlreadyDraining(t *testing.T) {
 	c.drainDone = make(chan struct{})
 	// Close drainDone immediately so the waiting branch exits.
 	close(c.drainDone)
+	// Precondition, so the IsAlive assertion below cannot pass on a conn that was
+	// already dead for some other reason.
+	require.True(t, c.IsAlive(), "fixture must start from a live conn")
 
-	if err := c.Shutdown(10 * time.Millisecond); err != nil {
-		t.Logf("Shutdown (already-draining): %v", err)
-	}
+	err := c.Shutdown(10 * time.Millisecond)
+
+	// The outcome used to be only t.Logf'd, so this test asserted nothing at all
+	// and could not fail. The already-draining branch waits on the (already
+	// closed) drainDone and then returns c.Close(), so both outcomes below are
+	// required behaviour rather than observations: a nil error, and a connection
+	// that really was closed rather than returned from early.
+	require.NoError(t, err, "Shutdown (already-draining) must still report success")
+	assert.False(t, c.IsAlive(),
+		"Shutdown's already-draining branch must fall through to Close, not return early")
 }
 
 // ---------------------------------------------------------------------------
@@ -1178,12 +1125,10 @@ func TestConn_rstStream_WritesFrame(t *testing.T) {
 	var buf bytes.Buffer
 	c.fr = frame.NewFramer(&buf, bytes.NewReader(nil))
 
-	if err := c.rstStream(5, frame.ErrCodeCancel); err != nil {
-		t.Fatalf("rstStream: %v", err)
-	}
-	if buf.Len() == 0 {
-		t.Fatal("expected RST_STREAM frame in output")
-	}
+	err := c.rstStream(5, frame.ErrCodeCancel)
+
+	require.NoError(t, err, "rstStream")
+	require.NotZero(t, buf.Len(), "expected RST_STREAM frame in output")
 }
 
 // TestStream_SendHeadersWithPriority_ClosedStream verifies that calling
@@ -1195,10 +1140,10 @@ func TestStream_SendHeadersWithPriority_ClosedStream(t *testing.T) {
 	s.mu.Lock()
 	s.closed = true
 	s.mu.Unlock()
+
 	err := s.ref().SendHeadersWithPriority(context.Background(), nil, false, nil)
-	if err != ErrStreamClosed {
-		t.Fatalf("err = %v, want ErrStreamClosed", err)
-	}
+
+	require.Equalf(t, ErrStreamClosed, err, "err = %v, want ErrStreamClosed", err)
 }
 
 // TestStream_SendHeadersWithPriority_LocalEnded verifies that a half-closed
@@ -1210,10 +1155,10 @@ func TestStream_SendHeadersWithPriority_LocalEnded(t *testing.T) {
 	s.mu.Lock()
 	s.localEnded = true
 	s.mu.Unlock()
+
 	err := s.ref().SendHeadersWithPriority(context.Background(), nil, false, nil)
-	if err != ErrStreamClosed {
-		t.Fatalf("err = %v, want ErrStreamClosed", err)
-	}
+
+	require.Equalf(t, ErrStreamClosed, err, "err = %v, want ErrStreamClosed", err)
 }
 
 // ---------------------------------------------------------------------------
@@ -1227,10 +1172,10 @@ func TestConn_WriteRSTStream_ClosedConn(t *testing.T) {
 	c := newGoAwayConn()
 	c.closed.Store(true)
 	s := &Stream{id: 1}
+
 	err := c.writeRSTStream(s, frame.ErrCodeCancel)
-	if err != ErrConnClosed {
-		t.Fatalf("writeRSTStream on closed conn = %v, want ErrConnClosed", err)
-	}
+
+	require.Equalf(t, ErrConnClosed, err, "writeRSTStream on closed conn = %v, want ErrConnClosed", err)
 }
 
 // ---------------------------------------------------------------------------
@@ -1247,8 +1192,8 @@ func (errWriter) Write([]byte) (int, error) { return 0, io.ErrClosedPipe }
 func TestHandshakeSettings_WriteClientPrefaceError(t *testing.T) {
 	t.Parallel()
 	fr := frame.NewFramer(errWriter{}, bytes.NewReader(nil))
+
 	_, err := handshakeSettings(context.Background(), fr, func() error { return nil }, AdvertisedSettings{}, false)
-	if err == nil {
-		t.Fatal("expected error from failed WriteClientPreface")
-	}
+
+	require.Error(t, err, "expected error from failed WriteClientPreface")
 }
