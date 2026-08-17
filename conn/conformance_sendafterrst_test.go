@@ -6,6 +6,9 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // TestConformance_RFC9113_Sec6_4_AcquireSendCreditsBailsOnResetStream pins RFC
@@ -33,11 +36,10 @@ func TestConformance_RFC9113_Sec6_4_AcquireSendCreditsBailsOnResetStream(t *test
 
 	select {
 	case err := <-done:
-		if !errors.Is(err, ErrStreamClosed) {
-			t.Errorf("acquireSendCredits on a reset stream = %v, want ErrStreamClosed (§6.4: no DATA after RST)", err)
-		}
+		assert.Truef(t, errors.Is(err, ErrStreamClosed),
+			"acquireSendCredits on a reset stream = %v, want ErrStreamClosed (§6.4: no DATA after RST)", err)
 	case <-time.After(2 * time.Second):
-		t.Fatal("acquireSendCredits blocked on a reset stream instead of bailing (§6.4)")
+		require.FailNow(t, "acquireSendCredits blocked on a reset stream instead of bailing (§6.4)")
 	}
 }
 
@@ -72,12 +74,11 @@ func TestConformance_RFC9113_Sec6_4_ResetWakesBlockedSender(t *testing.T) {
 	for {
 		select {
 		case err := <-done:
-			if !errors.Is(err, ErrStreamClosed) {
-				t.Errorf("woken writer on a reset stream = %v, want ErrStreamClosed", err)
-			}
+			assert.Truef(t, errors.Is(err, ErrStreamClosed),
+				"woken writer on a reset stream = %v, want ErrStreamClosed", err)
 			return
 		case <-deadline:
-			t.Fatal("wakeSendWaiters did not release the blocked writer after reset (§6.4)")
+			require.FailNow(t, "wakeSendWaiters did not release the blocked writer after reset (§6.4)")
 		case <-tick.C:
 			c.wakeSendWaiters()
 		}

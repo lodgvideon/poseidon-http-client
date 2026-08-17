@@ -4,6 +4,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
 	"github.com/lodgvideon/poseidon-http-client/frame"
 	"github.com/lodgvideon/poseidon-http-client/hpack"
 )
@@ -33,25 +36,19 @@ func TestConformance_RFC7540_Sec51_PeerRSTReleasesInflightSlot(t *testing.T) {
 	c.inflight++
 
 	fh := frame.FrameHeader{Type: frame.FrameRSTStream, StreamID: 1}
-	if err := h.OnRSTStream(fh, frame.ErrCodeCancel); err != nil {
-		t.Fatalf("OnRSTStream: %v", err)
-	}
 
-	if c.inflight != 0 {
-		t.Fatalf("inflight = %d, want 0 — a peer RST_STREAM on a half-open stream must "+
-			"release its slot, not hold it until Stream.Close()", c.inflight)
-	}
-	if _, ok := c.streams[1]; ok {
-		t.Fatalf("stream 1 still registered after RST_STREAM; want evicted")
-	}
+	err := h.OnRSTStream(fh, frame.ErrCodeCancel)
 
+	require.NoError(t, err, "OnRSTStream")
+	assert.Zerof(t, c.inflight, "inflight = %d, want 0 — a peer RST_STREAM on a half-open stream must "+
+		"release its slot, not hold it until Stream.Close()", c.inflight)
+	assert.NotContains(t, c.streams, uint32(1), "stream 1 still registered after RST_STREAM; want evicted")
 	// The caller still observes the reset.
 	select {
 	case ev := <-s.events:
-		if ev.Type != EventReset || ev.RSTCode != frame.ErrCodeCancel {
-			t.Fatalf("event = %+v, want EventReset(CANCEL)", ev)
-		}
+		assert.Equalf(t, EventReset, ev.Type, "event = %+v, want EventReset(CANCEL)", ev)
+		assert.Equalf(t, frame.ErrCodeCancel, ev.RSTCode, "event = %+v, want EventReset(CANCEL)", ev)
 	case <-time.After(time.Second):
-		t.Fatalf("no reset event delivered")
+		assert.Fail(t, "no reset event delivered")
 	}
 }

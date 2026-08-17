@@ -30,6 +30,9 @@ import (
 	"errors"
 	"testing"
 
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
 	"github.com/lodgvideon/poseidon-http-client/frame"
 	"github.com/lodgvideon/poseidon-http-client/hpack"
 )
@@ -39,19 +42,15 @@ import (
 // one malformed response kill every other stream on a pooled connection.
 func wantStreamProtocolError(t *testing.T, err error, what string) {
 	t.Helper()
-	if err == nil {
-		t.Fatalf("%s: accepted, want a stream error — RFC 7540 §8.1.2.6: "+
-			"\"Clients MUST NOT accept a malformed response.\"", what)
-	}
+	require.Errorf(t, err, "%s: accepted, want a stream error — RFC 7540 §8.1.2.6: "+
+		"\"Clients MUST NOT accept a malformed response.\"", what)
 	var se *StreamError
-	if !errors.As(err, &se) {
-		t.Fatalf("%s: error = %v (%T), want *StreamError — §8.1.2.6 requires a "+
+	require.Truef(t, errors.As(err, &se),
+		"%s: error = %v (%T), want *StreamError — §8.1.2.6 requires a "+
 			"STREAM error, not a connection error: one malformed response must not "+
 			"kill the other streams on a pooled connection", what, err, err)
-	}
-	if se.Code != frame.ErrCodeProtocolError {
-		t.Errorf("%s: code = %v, want PROTOCOL_ERROR (§8.1.2.6)", what, se.Code)
-	}
+	assert.Equalf(t, frame.ErrCodeProtocolError, se.Code,
+		"%s: code = %v, want PROTOCOL_ERROR (§8.1.2.6)", what, se.Code)
 }
 
 func fields(kv ...string) []hpack.HeaderField {
@@ -77,6 +76,7 @@ func TestConformance_RFC7540_Sec10_3_ResponseFieldValueCRLFNUL_Malformed(t *test
 			m := newFakeStreamMap()
 			h := newConnHandler(m, hpack.NewDecoder())
 			m.addStream(1)
+
 			err := deliverBlock(t, h, 1, fields("x-junk", tc.value), false)
 			wantStreamProtocolError(t, err, "value "+tc.name)
 		})
@@ -103,6 +103,7 @@ func TestConformance_RFC7540_Sec10_3_ResponseFieldNameInvalid_Malformed(t *testi
 			m := newFakeStreamMap()
 			h := newConnHandler(m, hpack.NewDecoder())
 			m.addStream(1)
+
 			err := deliverBlock(t, h, 1, fields(tc.field, "v"), false)
 			wantStreamProtocolError(t, err, "name "+tc.name)
 		})
@@ -135,6 +136,7 @@ func TestConformance_RFC7540_Sec8_1_2_2_ConnectionSpecificResponseField_Malforme
 			m := newFakeStreamMap()
 			h := newConnHandler(m, hpack.NewDecoder())
 			m.addStream(1)
+
 			err := deliverBlock(t, h, 1, fields(tc.field, tc.value), false)
 			wantStreamProtocolError(t, err, tc.name)
 		})
@@ -164,11 +166,12 @@ func TestConformance_RFC7540_Sec10_3_LegalResponseFieldsAccepted(t *testing.T) {
 			m := newFakeStreamMap()
 			h := newConnHandler(m, hpack.NewDecoder())
 			m.addStream(1)
-			if err := deliverBlock(t, h, 1, fields(tc.field, tc.value), false); err != nil {
-				t.Errorf("%s: rejected a legal field (%q: %q): %v — over-rejection here "+
-					"breaks ordinary responses, which is a worse failure than the one "+
-					"this validation prevents", tc.name, tc.field, tc.value, err)
-			}
+
+			err := deliverBlock(t, h, 1, fields(tc.field, tc.value), false)
+
+			assert.NoErrorf(t, err, "%s: rejected a legal field (%q: %q): %v — over-rejection here "+
+				"breaks ordinary responses, which is a worse failure than the one "+
+				"this validation prevents", tc.name, tc.field, tc.value, err)
 		})
 	}
 }
@@ -193,6 +196,7 @@ func TestConformance_RFC9113_Sec8_2_1_ResponseFieldValueEdgeWhitespace_Malformed
 			m := newFakeStreamMap()
 			h := newConnHandler(m, hpack.NewDecoder())
 			m.addStream(1)
+
 			err := deliverBlock(t, h, 1, fields("x-junk", tc.value), false)
 			wantStreamProtocolError(t, err, "edge-whitespace value "+tc.name)
 		})
@@ -215,10 +219,11 @@ func TestConformance_RFC9113_Sec8_2_1_InternalWhitespaceValueAccepted(t *testing
 			m := newFakeStreamMap()
 			h := newConnHandler(m, hpack.NewDecoder())
 			m.addStream(1)
-			if err := deliverBlock(t, h, 1, fields("x-junk", tc.value), false); err != nil {
-				t.Errorf("%s: rejected a legal value (%q): %v — internal whitespace is "+
-					"legal, only leading/trailing SP/HTAB is malformed (§8.2.1)", tc.name, tc.value, err)
-			}
+
+			err := deliverBlock(t, h, 1, fields("x-junk", tc.value), false)
+
+			assert.NoErrorf(t, err, "%s: rejected a legal value (%q): %v — internal whitespace is "+
+				"legal, only leading/trailing SP/HTAB is malformed (§8.2.1)", tc.name, tc.value, err)
 		})
 	}
 }

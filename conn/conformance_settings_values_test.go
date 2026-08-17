@@ -7,6 +7,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
 	"github.com/lodgvideon/poseidon-http-client/frame"
 )
 
@@ -43,17 +46,14 @@ func TestConformance_RFC9113_Sec6_5_2_ServerEnablePushOne_ConnError(t *testing.T
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	c, err := NewClientConn(ctx, cli, ConnOptions{}.defaulted())
-	if err != nil {
-		t.Fatalf("NewClientConn: %v", err)
-	}
+	require.NoError(t, err, "NewClientConn")
 	defer c.Close()
 
-	if code := recvCode(t, "GOAWAY", probe.away); code != frame.ErrCodeProtocolError {
-		t.Errorf("GOAWAY code = %v, want PROTOCOL_ERROR", code)
-	}
-	if aliveWithin(c, false, 2*time.Second) {
-		t.Error("connection alive after server SETTINGS_ENABLE_PUSH=1")
-	}
+	code := recvCode(t, "GOAWAY", probe.away)
+
+	assert.Equalf(t, frame.ErrCodeProtocolError, code, "GOAWAY code = %v, want PROTOCOL_ERROR", code)
+	assert.False(t, aliveWithin(c, false, 2*time.Second),
+		"connection alive after server SETTINGS_ENABLE_PUSH=1")
 	release()
 }
 
@@ -85,17 +85,14 @@ func TestConformance_RFC9113_Sec6_5_2_MaxFrameSizeOutOfRange_ConnError(t *testin
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancel()
 			c, err := NewClientConn(ctx, cli, ConnOptions{}.defaulted())
-			if err != nil {
-				t.Fatalf("NewClientConn: %v", err)
-			}
+			require.NoError(t, err, "NewClientConn")
 			defer c.Close()
 
-			if code := recvCode(t, "GOAWAY", probe.away); code != frame.ErrCodeProtocolError {
-				t.Errorf("GOAWAY code = %v, want PROTOCOL_ERROR", code)
-			}
-			if aliveWithin(c, false, 2*time.Second) {
-				t.Errorf("connection alive after MAX_FRAME_SIZE=%d", tc.val)
-			}
+			code := recvCode(t, "GOAWAY", probe.away)
+
+			assert.Equalf(t, frame.ErrCodeProtocolError, code, "GOAWAY code = %v, want PROTOCOL_ERROR", code)
+			assert.Falsef(t, aliveWithin(c, false, 2*time.Second),
+				"connection alive after MAX_FRAME_SIZE=%d", tc.val)
 			release()
 		})
 	}
@@ -113,14 +110,14 @@ func TestConformance_RFC9113_Sec6_5_2_HandshakeEnablePushOne_Refused(t *testing.
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 	c, err := NewClientConn(ctx, cli, ConnOptions{}.defaulted())
+
 	if err == nil {
 		_ = c.Close()
-		t.Fatal("NewClientConn accepted a server preface with SETTINGS_ENABLE_PUSH=1")
 	}
+	require.Error(t, err, "NewClientConn accepted a server preface with SETTINGS_ENABLE_PUSH=1")
 	var ce *ConnError
-	if !errors.As(err, &ce) || ce.Code != frame.ErrCodeProtocolError {
-		t.Errorf("err = %v, want ConnError PROTOCOL_ERROR", err)
-	}
+	require.Truef(t, errors.As(err, &ce), "err = %v, want ConnError PROTOCOL_ERROR", err)
+	assert.Equalf(t, frame.ErrCodeProtocolError, ce.Code, "err = %v, want ConnError PROTOCOL_ERROR", err)
 }
 
 // TestCheckPeerSettingValues covers the validator directly, including the
@@ -143,15 +140,16 @@ func TestCheckPeerSettingValues(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			err := checkPeerSettingValues(tc.s)
-			if (err != nil) != tc.wantErr {
-				t.Fatalf("checkPeerSettingValues = %v, wantErr=%v", err, tc.wantErr)
-			}
-			if err != nil {
+
+			if tc.wantErr {
+				require.Errorf(t, err, "checkPeerSettingValues = %v, wantErr=%v", err, tc.wantErr)
 				var ce *ConnError
-				if !errors.As(err, &ce) || ce.Code != frame.ErrCodeProtocolError {
-					t.Errorf("err = %v, want ConnError PROTOCOL_ERROR", err)
-				}
+				require.Truef(t, errors.As(err, &ce), "err = %v, want ConnError PROTOCOL_ERROR", err)
+				assert.Equalf(t, frame.ErrCodeProtocolError, ce.Code,
+					"err = %v, want ConnError PROTOCOL_ERROR", err)
+				return
 			}
+			require.NoErrorf(t, err, "checkPeerSettingValues = %v, wantErr=%v", err, tc.wantErr)
 		})
 	}
 }
@@ -169,8 +167,8 @@ func TestConformance_RFC9113_Sec6_5_2_AdvertisedMaxFrameSizeClamped(t *testing.T
 		{1 << 30, 16777215},  // far above → ceil
 	} {
 		got := AdvertisedSettings{MaxFrameSize: tc.in}.defaulted().MaxFrameSize
-		if got != tc.want {
-			t.Errorf("MaxFrameSize %d defaulted to %d, want %d (RFC 9113 §6.5.2 range)", tc.in, got, tc.want)
-		}
+
+		assert.Equalf(t, tc.want, got,
+			"MaxFrameSize %d defaulted to %d, want %d (RFC 9113 §6.5.2 range)", tc.in, got, tc.want)
 	}
 }

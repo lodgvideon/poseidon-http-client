@@ -8,6 +8,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
 	"github.com/lodgvideon/poseidon-http-client/frame"
 	"github.com/lodgvideon/poseidon-http-client/hpack"
 )
@@ -69,10 +72,9 @@ func TestConn_HandshakeAndIdle(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 	c, err := NewClientConn(ctx, cli, ConnOptions{}.defaulted())
-	if err != nil {
-		t.Fatalf("NewClientConn: %v", err)
-	}
-	_ = c.Close()
+
+	require.NoError(t, err, "NewClientConn")
+	assert.NoError(t, c.Close(), "Close after an idle handshake")
 	<-done
 }
 
@@ -88,20 +90,16 @@ func TestConn_NewStream_RespectsAdvertisedLimit(t *testing.T) {
 	defer cancel()
 	opts := ConnOptions{Settings: AdvertisedSettings{MaxConcurrentStreams: 2}}.defaulted()
 	c, err := NewClientConn(ctx, cli, opts)
-	if err != nil {
-		t.Fatalf("NewClientConn: %v", err)
-	}
+	require.NoError(t, err, "NewClientConn")
 	defer c.Close()
 
-	if _, err := c.NewStream(ctx); err != nil {
-		t.Fatalf("NewStream 1: %v", err)
-	}
-	if _, err := c.NewStream(ctx); err != nil {
-		t.Fatalf("NewStream 2: %v", err)
-	}
-	if _, err := c.NewStream(ctx); err != ErrTooManyStreams {
-		t.Fatalf("NewStream 3 err = %v, want ErrTooManyStreams", err)
-	}
+	_, first := c.NewStream(ctx)
+	_, second := c.NewStream(ctx)
+	_, third := c.NewStream(ctx)
+
+	require.NoError(t, first, "NewStream 1")
+	require.NoError(t, second, "NewStream 2")
+	assert.Equalf(t, ErrTooManyStreams, third, "NewStream 3 err = %v, want ErrTooManyStreams", third)
 }
 
 func TestConn_StreamSendHeaders_AndPeerEcho(t *testing.T) {
@@ -133,30 +131,22 @@ func TestConn_StreamSendHeaders_AndPeerEcho(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 	c, err := NewClientConn(ctx, cli, ConnOptions{}.defaulted())
-	if err != nil {
-		t.Fatalf("NewClientConn: %v", err)
-	}
+	require.NoError(t, err, "NewClientConn")
 	defer c.Close()
-
 	s, err := c.NewStream(ctx)
-	if err != nil {
-		t.Fatalf("NewStream: %v", err)
-	}
-	if err := s.SendHeaders(ctx, []hpack.HeaderField{
+	require.NoError(t, err, "NewStream")
+
+	require.NoError(t, s.SendHeaders(ctx, []hpack.HeaderField{
 		{Name: []byte(":method"), Value: []byte("GET")},
 		{Name: []byte(":scheme"), Value: []byte("http")},
 		{Name: []byte(":authority"), Value: []byte("example.com")},
 		{Name: []byte(":path"), Value: []byte("/")},
-	}, true); err != nil {
-		t.Fatalf("SendHeaders: %v", err)
-	}
-	ev, err := s.Recv(ctx)
-	if err != nil {
-		t.Fatalf("Recv: %v", err)
-	}
-	if ev.Type != EventHeaders || !ev.EndStream {
-		t.Fatalf("event = %+v", ev)
-	}
+	}, true), "SendHeaders")
+
+	ev, rerr := s.Recv(ctx)
+	require.NoError(t, rerr, "Recv")
+	assert.Equalf(t, EventHeaders, ev.Type, "event = %+v", ev)
+	assert.Truef(t, ev.EndStream, "event = %+v", ev)
 }
 
 func TestConn_TwoSequentialStreams(t *testing.T) {
@@ -186,31 +176,23 @@ func TestConn_TwoSequentialStreams(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 	c, err := NewClientConn(ctx, cli, ConnOptions{}.defaulted())
-	if err != nil {
-		t.Fatalf("NewClientConn: %v", err)
-	}
+	require.NoError(t, err, "NewClientConn")
 	defer c.Close()
 
 	for i := 0; i < 2; i++ {
-		s, err := c.NewStream(ctx)
-		if err != nil {
-			t.Fatalf("NewStream %d: %v", i, err)
-		}
-		if err := s.SendHeaders(ctx, []hpack.HeaderField{
+		s, nerr := c.NewStream(ctx)
+		require.NoErrorf(t, nerr, "NewStream %d", i)
+
+		require.NoErrorf(t, s.SendHeaders(ctx, []hpack.HeaderField{
 			{Name: []byte(":method"), Value: []byte("GET")},
 			{Name: []byte(":scheme"), Value: []byte("http")},
 			{Name: []byte(":authority"), Value: []byte("x")},
 			{Name: []byte(":path"), Value: []byte("/")},
-		}, true); err != nil {
-			t.Fatalf("SendHeaders %d: %v", i, err)
-		}
-		ev, err := s.Recv(ctx)
-		if err != nil {
-			t.Fatalf("Recv %d: %v", i, err)
-		}
-		if !ev.EndStream {
-			t.Fatalf("event %d not end-of-stream: %+v", i, ev)
-		}
+		}, true), "SendHeaders %d", i)
+
+		ev, rerr := s.Recv(ctx)
+		require.NoErrorf(t, rerr, "Recv %d", i)
+		assert.Truef(t, ev.EndStream, "event %d not end-of-stream: %+v", i, ev)
 		_ = s.Close()
 	}
 }
@@ -225,13 +207,12 @@ func TestConn_NewStream_AfterClose_ReturnsErrConnClosed(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 	c, err := NewClientConn(ctx, cli, ConnOptions{}.defaulted())
-	if err != nil {
-		t.Fatalf("NewClientConn: %v", err)
-	}
+	require.NoError(t, err, "NewClientConn")
 	_ = c.Close()
-	if _, err := c.NewStream(ctx); err != ErrConnClosed {
-		t.Fatalf("err = %v, want ErrConnClosed", err)
-	}
+
+	_, nerr := c.NewStream(ctx)
+
+	assert.Equalf(t, ErrConnClosed, nerr, "err = %v, want ErrConnClosed", nerr)
 	<-done
 }
 
@@ -264,15 +245,13 @@ func TestConn_Close_IsIdempotent(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 	c, err := NewClientConn(ctx, cli, ConnOptions{}.defaulted())
-	if err != nil {
-		t.Fatalf("NewClientConn: %v", err)
-	}
-	if err := c.Close(); err != nil {
-		t.Fatalf("Close 1: %v", err)
-	}
-	if err := c.Close(); err != nil {
-		t.Fatalf("Close 2: %v", err)
-	}
+	require.NoError(t, err, "NewClientConn")
+
+	first := c.Close()
+	second := c.Close()
+
+	assert.NoError(t, first, "Close 1")
+	assert.NoError(t, second, "Close 2")
 }
 
 func TestConn_Close_RacedFromTwoGoroutines(t *testing.T) {
@@ -281,15 +260,20 @@ func TestConn_Close_RacedFromTwoGoroutines(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 	c, err := NewClientConn(ctx, cli, ConnOptions{}.defaulted())
-	if err != nil {
-		t.Fatalf("NewClientConn: %v", err)
-	}
+	require.NoError(t, err, "NewClientConn")
+	errs := make([]error, 4)
+
 	var wg sync.WaitGroup
 	for i := 0; i < 4; i++ {
 		wg.Add(1)
-		go func() { defer wg.Done(); _ = c.Close() }()
+		go func() { defer wg.Done(); errs[i] = c.Close() }()
 	}
 	wg.Wait()
+
+	for i, cerr := range errs {
+		assert.NoErrorf(t, cerr, "concurrent Close %d — every racing Close must be a clean no-op", i)
+	}
+	assert.False(t, c.IsAlive(), "connection still alive after four concurrent Close calls")
 }
 
 func TestConn_IsAlive_FreshConnTrue(t *testing.T) {
@@ -310,14 +294,10 @@ func TestConn_IsAlive_FreshConnTrue(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 	c, err := NewClientConn(ctx, cli, ConnOptions{})
-	if err != nil {
-		t.Fatalf("NewClientConn: %v", err)
-	}
-	defer c.Close()
 
-	if !c.IsAlive() {
-		t.Fatal("fresh conn must be alive")
-	}
+	require.NoError(t, err, "NewClientConn")
+	defer c.Close()
+	assert.True(t, c.IsAlive(), "fresh conn must be alive")
 }
 
 func TestConn_IsAlive_AfterCloseFalse(t *testing.T) {
@@ -327,13 +307,11 @@ func TestConn_IsAlive_AfterCloseFalse(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 	c, err := NewClientConn(ctx, cli, ConnOptions{})
-	if err != nil {
-		t.Fatalf("NewClientConn: %v", err)
-	}
+	require.NoError(t, err, "NewClientConn")
+
 	_ = c.Close()
-	if c.IsAlive() {
-		t.Fatal("closed conn must not be alive")
-	}
+
+	assert.False(t, c.IsAlive(), "closed conn must not be alive")
 }
 
 func TestConn_IsAlive_AfterPeerGoAwayFalse(t *testing.T) {
@@ -345,28 +323,22 @@ func TestConn_IsAlive_AfterPeerGoAwayFalse(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 	c, err := NewClientConn(ctx, cli, ConnOptions{})
-	if err != nil {
-		t.Fatalf("NewClientConn: %v", err)
-	}
+	require.NoError(t, err, "NewClientConn")
 	defer c.Close()
 
 	// Wait for the reader to observe GOAWAY.
-	deadline := time.Now().Add(1 * time.Second)
-	for time.Now().Before(deadline) {
-		if !c.IsAlive() {
-			return
-		}
-		time.Sleep(5 * time.Millisecond)
-	}
-	t.Fatal("conn still alive after peer GOAWAY")
+	alive := aliveWithin(c, false, time.Second)
+
+	assert.False(t, alive, "conn still alive after peer GOAWAY")
 }
 
 func TestConn_PeerMaxConcurrentStreams_Default(t *testing.T) {
 	t.Parallel()
 	c := &Conn{}
-	if got := c.PeerMaxConcurrentStreams(); got != 0 {
-		t.Fatalf("PeerMaxConcurrentStreams empty peerSettings = %d, want 0", got)
-	}
+
+	got := c.PeerMaxConcurrentStreams()
+
+	assert.Zerof(t, got, "PeerMaxConcurrentStreams empty peerSettings = %d, want 0", got)
 }
 
 func TestConn_PeerMaxConcurrentStreams_AfterSettings(t *testing.T) {
@@ -375,7 +347,8 @@ func TestConn_PeerMaxConcurrentStreams_AfterSettings(t *testing.T) {
 	c.psMu.Lock()
 	setPeerSetting(&c.peerSettings, frame.SettingMaxConcurrentStreams, 250)
 	c.psMu.Unlock()
-	if got := c.PeerMaxConcurrentStreams(); got != 250 {
-		t.Fatalf("PeerMaxConcurrentStreams after SETTINGS = %d, want 250", got)
-	}
+
+	got := c.PeerMaxConcurrentStreams()
+
+	assert.EqualValuesf(t, 250, got, "PeerMaxConcurrentStreams after SETTINGS = %d, want 250", got)
 }
