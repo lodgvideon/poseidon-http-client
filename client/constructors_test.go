@@ -9,6 +9,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
 	"github.com/lodgvideon/poseidon-http-client/conn"
 )
 
@@ -22,37 +25,31 @@ func status204Server(t *testing.T) string {
 
 func TestNewSingleConnClient_E2E(t *testing.T) {
 	c, err := NewSingleConnClient(status204Server(t), insecureDialer())
-	if err != nil {
-		t.Fatalf("NewSingleConnClient: %v", err)
-	}
+	require.NoError(t, err, "NewSingleConnClient")
 	defer c.Close()
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	var resp Response
-	if err := c.Do(ctx, GET("/"), &resp); err != nil {
-		t.Fatalf("Do: %v", err)
-	}
-	if resp.Status != 204 {
-		t.Fatalf("status = %d, want 204", resp.Status)
-	}
+
+	err = c.Do(ctx, GET("/"), &resp)
+
+	require.NoError(t, err, "Do")
+	require.Equalf(t, 204, resp.Status, "status = %d, want 204", resp.Status)
 }
 
 func TestNewPoolClient_E2E(t *testing.T) {
 	c, err := NewPoolClient(status204Server(t), insecureDialer(),
 		PoolOptions{MaxConnsPerHost: 2, MaxStreamsPerConn: 10})
-	if err != nil {
-		t.Fatalf("NewPoolClient: %v", err)
-	}
+	require.NoError(t, err, "NewPoolClient")
 	defer c.Close()
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	var resp Response
-	if err := c.Do(ctx, GET("/"), &resp); err != nil {
-		t.Fatalf("Do: %v", err)
-	}
-	if resp.Status != 204 {
-		t.Fatalf("status = %d, want 204", resp.Status)
-	}
+
+	err = c.Do(ctx, GET("/"), &resp)
+
+	require.NoError(t, err, "Do")
+	require.Equalf(t, 204, resp.Status, "status = %d, want 204", resp.Status)
 }
 
 func TestNewManagedClient_Construction(t *testing.T) {
@@ -61,34 +58,32 @@ func TestNewManagedClient_Construction(t *testing.T) {
 	port, _ := strconv.Atoi(portStr)
 	r := StaticResolver(Address{Host: host, Port: port})
 
+	// A resolver plus an explicit selector is the supported construction.
 	c, err := NewManagedClient(r, insecureDialer(), WithSelector(RoundRobin()))
-	if err != nil {
-		t.Fatalf("NewManagedClient: %v", err)
-	}
+
+	require.NoError(t, err, "NewManagedClient")
 	defer c.Close()
 
 	// Resolver is required for the managed transport.
-	if _, err := NewManagedClient(nil, insecureDialer()); err == nil {
-		t.Fatal("NewManagedClient(nil resolver) should error")
-	}
+	_, err = NewManagedClient(nil, insecureDialer())
+
+	require.Error(t, err, "NewManagedClient(nil resolver) should error")
 }
 
 func TestConstructors_NilDialerErrors(t *testing.T) {
-	if _, err := NewSingleConnClient("h:1", nil); err == nil {
-		t.Error("NewSingleConnClient(nil dialer) should error")
-	}
-	if _, err := NewPoolClient("h:1", nil, PoolOptions{MaxConnsPerHost: 1}); err == nil {
-		t.Error("NewPoolClient(nil dialer) should error")
-	}
-	if _, err := NewManagedClient(StaticResolver(Address{Host: "h", Port: 1}), nil); err == nil {
-		t.Error("NewManagedClient(nil dialer) should error")
-	}
+	_, errSingleConn := NewSingleConnClient("h:1", nil)
+	_, errPool := NewPoolClient("h:1", nil, PoolOptions{MaxConnsPerHost: 1})
+	_, errManaged := NewManagedClient(StaticResolver(Address{Host: "h", Port: 1}), nil)
+
+	assert.Error(t, errSingleConn, "NewSingleConnClient(nil dialer) should error")
+	assert.Error(t, errPool, "NewPoolClient(nil dialer) should error")
+	assert.Error(t, errManaged, "NewManagedClient(nil dialer) should error")
 }
 
 func TestOptions_Apply(t *testing.T) {
 	var o ClientOptions
 	hooks := &Hooks{}
-	for _, opt := range []Option{
+	opts := []Option{
 		WithHooks(hooks),
 		WithDefaultScheme("http"),
 		WithRateLimit(10, 5),
@@ -97,25 +92,18 @@ func TestOptions_Apply(t *testing.T) {
 		WithDialBackoff(2 * time.Second),
 		WithSelector(RoundRobin()),
 		WithConnOptions(func(co *conn.ConnOptions) { co.EnablePush = true }),
-	} {
+	}
+
+	for _, opt := range opts {
 		opt(&o)
 	}
-	switch {
-	case o.Hooks != hooks:
-		t.Error("WithHooks not applied")
-	case o.DefaultScheme != "http":
-		t.Error("WithDefaultScheme not applied")
-	case o.RateLimitPerSecond != 10 || o.RateLimitBurst != 5:
-		t.Error("WithRateLimit not applied")
-	case o.MaxResponseBodySize != 123:
-		t.Error("WithMaxResponseBodySize not applied")
-	case o.MaxDecompressedSize != 456:
-		t.Error("WithMaxDecompressedSize not applied")
-	case o.DialBackoff != 2*time.Second:
-		t.Error("WithDialBackoff not applied")
-	case o.Selector == nil:
-		t.Error("WithSelector not applied")
-	case !o.ConnOpts.EnablePush:
-		t.Error("WithConnOptions not applied")
-	}
+
+	assert.True(t, o.Hooks == hooks, "WithHooks not applied")
+	assert.Equal(t, "http", o.DefaultScheme, "WithDefaultScheme not applied")
+	assert.True(t, o.RateLimitPerSecond == 10 && o.RateLimitBurst == 5, "WithRateLimit not applied")
+	assert.Equal(t, int64(123), o.MaxResponseBodySize, "WithMaxResponseBodySize not applied")
+	assert.Equal(t, int64(456), o.MaxDecompressedSize, "WithMaxDecompressedSize not applied")
+	assert.Equal(t, 2*time.Second, o.DialBackoff, "WithDialBackoff not applied")
+	assert.True(t, o.Selector != nil, "WithSelector not applied")
+	assert.True(t, o.ConnOpts.EnablePush, "WithConnOptions not applied")
 }

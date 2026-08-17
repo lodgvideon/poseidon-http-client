@@ -3,6 +3,9 @@ package client
 import (
 	"testing"
 
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
 	"github.com/lodgvideon/poseidon-http-client/conn"
 )
 
@@ -17,21 +20,18 @@ func TestBuildHeaders_ProtocolExtendedConnect(t *testing.T) {
 		Protocol:  "websocket",
 	}
 	sp := hdrSlicePool.Get().(*[]conn.HeaderField)
-	hdrs := buildHeaders(req, "default.example.com", "https", sp)
 	defer func() { *sp = (*sp)[:0]; hdrSlicePool.Put(sp) }()
+
+	hdrs := buildHeaders(req, "default.example.com", "https", sp)
 
 	var foundProtocol bool
 	for _, h := range hdrs {
 		if string(h.Name) == ":protocol" {
 			foundProtocol = true
-			if string(h.Value) != "websocket" {
-				t.Errorf(":protocol value = %q, want websocket", h.Value)
-			}
+			assert.Equalf(t, "websocket", string(h.Value), ":protocol value = %q, want websocket", h.Value)
 		}
 	}
-	if !foundProtocol {
-		t.Error("expected :protocol pseudo-header in output")
-	}
+	assert.True(t, foundProtocol, "expected :protocol pseudo-header in output")
 }
 
 func TestBuildHeaders_NoProtocolWhenEmpty(t *testing.T) {
@@ -44,13 +44,13 @@ func TestBuildHeaders_NoProtocolWhenEmpty(t *testing.T) {
 		Path:      "/",
 	}
 	sp := hdrSlicePool.Get().(*[]conn.HeaderField)
-	hdrs := buildHeaders(req, "default.example.com", "https", sp)
 	defer func() { *sp = (*sp)[:0]; hdrSlicePool.Put(sp) }()
 
+	hdrs := buildHeaders(req, "default.example.com", "https", sp)
+
 	for _, h := range hdrs {
-		if string(h.Name) == ":protocol" {
-			t.Fatal(":protocol should not be emitted when Protocol is empty")
-		}
+		require.NotEqual(t, ":protocol", string(h.Name),
+			":protocol should not be emitted when Protocol is empty")
 	}
 }
 
@@ -68,8 +68,9 @@ func TestBuildHeaders_ProtocolOrdering(t *testing.T) {
 		},
 	}
 	sp := hdrSlicePool.Get().(*[]conn.HeaderField)
-	hdrs := buildHeaders(req, "default.example.com", "https", sp)
 	defer func() { *sp = (*sp)[:0]; hdrSlicePool.Put(sp) }()
+
+	hdrs := buildHeaders(req, "default.example.com", "https", sp)
 
 	// :protocol must appear after :path but before regular headers
 	protoIdx := -1
@@ -85,19 +86,11 @@ func TestBuildHeaders_ProtocolOrdering(t *testing.T) {
 			regularIdx = i
 		}
 	}
-	if protoIdx < 0 {
-		t.Fatal(":protocol not found")
-	}
-	if pathIdx < 0 {
-		t.Fatal(":path not found")
-	}
-	if regularIdx < 0 {
-		t.Fatal("regular header not found")
-	}
-	if protoIdx < pathIdx {
-		t.Errorf(":protocol (idx %d) should come after :path (idx %d)", protoIdx, pathIdx)
-	}
-	if protoIdx > regularIdx {
-		t.Errorf(":protocol (idx %d) should come before regular headers (idx %d)", protoIdx, regularIdx)
-	}
+	require.GreaterOrEqual(t, protoIdx, 0, ":protocol not found")
+	require.GreaterOrEqual(t, pathIdx, 0, ":path not found")
+	require.GreaterOrEqual(t, regularIdx, 0, "regular header not found")
+	assert.GreaterOrEqualf(t, protoIdx, pathIdx,
+		":protocol (idx %d) should come after :path (idx %d)", protoIdx, pathIdx)
+	assert.LessOrEqualf(t, protoIdx, regularIdx,
+		":protocol (idx %d) should come before regular headers (idx %d)", protoIdx, regularIdx)
 }
