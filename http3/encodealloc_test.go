@@ -5,6 +5,9 @@ package http3
 import (
 	"testing"
 
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
 	"github.com/lodgvideon/poseidon-http-client/header"
 )
 
@@ -50,9 +53,7 @@ const encodeHeadersAllocCeiling = 10
 func TestEncodeRequestHeaders_AllocsPerCall(t *testing.T) {
 	conn := &fakeConn{req: &fakeStream{}}
 	client, err := NewClientFake(conn, defaultSettings)
-	if err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, err, "NewClientFake over the fake transport")
 	defer client.Close()
 
 	req := &Request{
@@ -62,28 +63,27 @@ func TestEncodeRequestHeaders_AllocsPerCall(t *testing.T) {
 
 	// Encode once outside the count so any one-time lazy initialisation inside the
 	// encoder is not charged to the steady state.
-	if _, err := client.encodeRequestHeaders(req); err != nil {
-		t.Fatalf("encodeRequestHeaders: %v", err)
-	}
-	if enc := client.qpackEncoder.Load(); enc != nil {
-		t.Fatal("fixture is wrong: this gate must measure the static-only path, " +
+	_, err = client.encodeRequestHeaders(req)
+	require.NoError(t, err, "encodeRequestHeaders")
+	require.Truef(t, client.qpackEncoder.Load() == nil,
+		"fixture is wrong: this gate must measure the static-only path, "+
 			"but a dynamic encoder is installed")
-	}
 
+	// Nothing from testify goes inside this closure: AllocsPerRun charges the
+	// measurement every allocation the body makes, and testify reflects and
+	// allocates. Everything below is asserted after it returns.
 	got := testing.AllocsPerRun(2000, func() {
 		if _, err := client.encodeRequestHeaders(req); err != nil {
 			t.Fatalf("encodeRequestHeaders: %v", err)
 		}
 	})
 
-	if int(got) > encodeHeadersAllocCeiling {
-		t.Errorf("static header encode allocates %.0f/call, ceiling %d: a per-request "+
+	assert.LessOrEqualf(t, int(got), encodeHeadersAllocCeiling,
+		"static header encode allocates %.0f/call, ceiling %d: a per-request "+
 			"allocation came back on the path every request takes against a "+
 			"capacity-0 server", got, encodeHeadersAllocCeiling)
-	}
-	if int(got) < encodeHeadersAllocCeiling {
-		t.Errorf("static header encode allocates %.0f/call, below the ceiling of %d: "+
+	assert.GreaterOrEqualf(t, int(got), encodeHeadersAllocCeiling,
+		"static header encode allocates %.0f/call, below the ceiling of %d: "+
 			"the path improved — lower encodeHeadersAllocCeiling to %.0f to lock the win in",
-			got, encodeHeadersAllocCeiling, got)
-	}
+		got, encodeHeadersAllocCeiling, got)
 }

@@ -2,8 +2,10 @@ package http3
 
 import (
 	"context"
-	"errors"
 	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	"github.com/lodgvideon/poseidon-http-client/qpack"
 )
@@ -12,16 +14,19 @@ import (
 // headers and rejects any pseudo-header (RFC 9114 §4.1/§4.3).
 func TestDecodeTrailers(t *testing.T) {
 	var dec qpack.Decoder
-	fields, _, err := DecodeTrailers(&dec, nil, encodeSection(hf("x-checksum", "abc"), hf("x-count", "3")))
-	if err != nil {
-		t.Fatalf("DecodeTrailers: %v", err)
-	}
-	if len(fields) != 2 || string(fields[0].Name) != "x-checksum" || string(fields[1].Value) != "3" {
-		t.Fatalf("trailer fields = %+v", fields)
-	}
-	if _, _, err := DecodeTrailers(&dec, nil, encodeSection(hf(":status", "200"))); err != ErrH3Message {
-		t.Fatalf("pseudo-header in trailers: err = %v, want ErrH3Message", err)
-	}
+	regular := encodeSection(hf("x-checksum", "abc"), hf("x-count", "3"))
+	pseudo := encodeSection(hf(":status", "200"))
+
+	fields, _, err := DecodeTrailers(&dec, nil, regular)
+	_, _, pseudoErr := DecodeTrailers(&dec, nil, pseudo)
+
+	require.NoError(t, err, "DecodeTrailers over a well-formed trailer section")
+	require.Lenf(t, fields, 2, "trailer fields = %+v, want the two the section carried", fields)
+	assert.Equalf(t, "x-checksum", string(fields[0].Name), "trailer fields = %+v", fields)
+	assert.Equalf(t, "3", string(fields[1].Value), "trailer fields = %+v", fields)
+	assert.Equalf(t, ErrH3Message, pseudoErr,
+		"pseudo-header in trailers: err = %v, want ErrH3Message — §4.3 admits no "+
+			"pseudo-header in a trailer section", pseudoErr)
 }
 
 // TestClient_InterimAndTrailers drives the full response message sequence
@@ -34,25 +39,22 @@ func TestClient_InterimAndTrailers(t *testing.T) {
 	trailers := AppendHeaders(nil, encodeSection(hf("x-checksum", "abc")))
 	conn := &fakeConn{req: &fakeStream{recvChunks: [][]byte{interim, final, data, trailers}, fin: true}}
 	client, err := NewClientFake(conn, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	resp, body, err := client.Do(context.Background(), &Request{Method: "GET", Scheme: "https", Authority: "e.com", Path: "/"})
-	if err != nil {
-		t.Fatalf("Do: %v", err)
-	}
-	if resp.Status != 200 {
-		t.Fatalf("status = %d, want 200", resp.Status)
-	}
-	if string(body) != "hi" {
-		t.Fatalf("body = %q, want %q", body, "hi")
-	}
-	if len(resp.Interim) != 1 || resp.Interim[0].Status != 103 {
-		t.Fatalf("interim = %+v, want one 103", resp.Interim)
-	}
-	if len(resp.Trailers) != 1 || string(resp.Trailers[0].Name) != "x-checksum" {
-		t.Fatalf("trailers = %+v", resp.Trailers)
-	}
+	require.NoError(t, err, "NewClientFake over the fake transport")
+
+	resp, body, doErr := client.Do(context.Background(),
+		&Request{Method: "GET", Scheme: "https", Authority: "e.com", Path: "/"})
+
+	require.NoError(t, doErr, "Do over the full §4.1 response sequence")
+	require.NotNil(t, resp, "Do returned no response alongside a nil error")
+	assert.Equalf(t, 200, resp.Status,
+		"status = %d, want 200: the final response, not the 103, is what Do returns", resp.Status)
+	assert.Equalf(t, "hi", string(body), "body = %q, want %q", body, "hi")
+	require.Lenf(t, resp.Interim, 1, "interim = %+v, want one 103", resp.Interim)
+	assert.Equalf(t, 103, resp.Interim[0].Status,
+		"interim = %+v, want one 103: an informational response must be surfaced, not dropped",
+		resp.Interim)
+	require.Lenf(t, resp.Trailers, 1, "trailers = %+v, want the one field the section carried", resp.Trailers)
+	assert.Equalf(t, "x-checksum", string(resp.Trailers[0].Name), "trailers = %+v", resp.Trailers)
 }
 
 // TestClient_MessageOrderErrors checks the §4.1 ordering rules: DATA cannot
@@ -76,16 +78,16 @@ func TestClient_MessageOrderErrors(t *testing.T) {
 	for _, tc := range cases {
 		conn := &fakeConn{req: &fakeStream{recvChunks: tc.chunks, fin: true}}
 		client, err := NewClientFake(conn, nil)
-		if err != nil {
-			t.Fatal(err)
-		}
-		_, _, err = client.Do(context.Background(), &Request{Method: "GET", Scheme: "https", Authority: "e.com", Path: "/"})
-		if !errors.Is(err, ErrH3Control) {
-			t.Fatalf("%s: err = %v, want ErrH3Control (connection error)", tc.name, err)
-		}
-		if conn.closeCode != H3FrameUnexpected {
-			t.Fatalf("%s: close code = %#x, want H3_FRAME_UNEXPECTED", tc.name, conn.closeCode)
-		}
+		require.NoErrorf(t, err, "%s: NewClientFake over the fake transport", tc.name)
+
+		_, _, doErr := client.Do(context.Background(),
+			&Request{Method: "GET", Scheme: "https", Authority: "e.com", Path: "/"})
+
+		assert.ErrorIsf(t, doErr, ErrH3Control,
+			"%s: err = %v, want ErrH3Control (connection error) — an invalid frame "+
+				"sequence must kill the connection, not just the request", tc.name, doErr)
+		assert.Equalf(t, H3FrameUnexpected, conn.closeCode,
+			"%s: close code = %#x, want H3_FRAME_UNEXPECTED", tc.name, conn.closeCode)
 	}
 }
 
@@ -95,10 +97,12 @@ func TestClient_InterimWithoutFinal(t *testing.T) {
 	onexx := AppendHeaders(nil, encodeSection(hf(":status", "100")))
 	conn := &fakeConn{req: &fakeStream{recvChunks: [][]byte{onexx}, fin: true}}
 	client, err := NewClientFake(conn, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, _, err := client.Do(context.Background(), &Request{Method: "GET", Scheme: "https", Authority: "e.com", Path: "/"}); err != ErrH3Message {
-		t.Fatalf("1xx without final: err = %v, want ErrH3Message", err)
-	}
+	require.NoError(t, err, "NewClientFake over the fake transport")
+
+	_, _, doErr := client.Do(context.Background(),
+		&Request{Method: "GET", Scheme: "https", Authority: "e.com", Path: "/"})
+
+	assert.Equalf(t, ErrH3Message, doErr,
+		"1xx without final: err = %v, want ErrH3Message — a stream that ends after only "+
+			"an informational response carries no response for the caller to return", doErr)
 }

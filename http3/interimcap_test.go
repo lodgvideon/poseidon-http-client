@@ -1,6 +1,10 @@
 package http3
 
-import "testing"
+import (
+	"testing"
+
+	"github.com/stretchr/testify/assert"
+)
 
 // TestInterimCap_MatchesSiblings is a tripwire, not a behaviour test. See the
 // identical test in conn/ and http1/ for the full reasoning: the three
@@ -9,12 +13,14 @@ import "testing"
 // layering deliberately avoids, and so are pinned per package instead.
 func TestInterimCap_MatchesSiblings(t *testing.T) {
 	const agreedAcrossProtocols = 100
-	if maxInterimResponses != agreedAcrossProtocols {
-		t.Errorf("http3.maxInterimResponses = %d, want %d.\n"+
+
+	got := maxInterimResponses
+
+	assert.Equalf(t, agreedAcrossProtocols, got,
+		"http3.maxInterimResponses = %d, want %d.\n"+
 			"This cap is shared by contract with conn.maxInterimResponses "+
 			"(conn/handler.go) and http1.maxInterimResponses (http1/conn.go). "+
 			"If the new value is intended, change all three and update this test "+
 			"in all three packages — client.Do must behave identically on H1, H2 and H3.",
-			maxInterimResponses, agreedAcrossProtocols)
-	}
+		got, agreedAcrossProtocols)
 }

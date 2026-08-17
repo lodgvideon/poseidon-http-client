@@ -14,6 +14,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
 	"github.com/lodgvideon/poseidon-http-client/header"
 
 	"github.com/lodgvideon/poseidon-http-client/quic"
@@ -88,9 +91,7 @@ func dialServer(t *testing.T, addr string) (*Client, string) {
 		if err == nil {
 			break
 		}
-		if time.Now().After(deadline) {
-			t.Fatalf("Dial(%s): %v", addr, err)
-		}
+		require.Falsef(t, time.Now().After(deadline), "Dial(%s): %v", addr, err)
 		time.Sleep(500 * time.Millisecond)
 	}
 	// Exercise the graceful CONNECTION_CLOSE (RFC 9114 §8.1 H3_NO_ERROR) against
@@ -161,16 +162,13 @@ func findHeader(headers []header.Field, name string) (string, bool) {
 // TestInterop_GET performs a GET and asserts a 200 with a non-empty body.
 func TestInterop_GET(t *testing.T) {
 	forEachInteropServer(t, func(t *testing.T, client *Client, host string) {
-		resp, body, err := do(t, client, &Request{Method: "GET", Scheme: "https", Authority: host, Path: "/"})
-		if err != nil {
-			t.Fatalf("Do: %v", err)
-		}
-		if resp.Status != 200 {
-			t.Fatalf("status = %d, want 200", resp.Status)
-		}
-		if len(body) == 0 {
-			t.Fatal("GET / body is empty, want the server's canned response")
-		}
+		req := &Request{Method: "GET", Scheme: "https", Authority: host, Path: "/"}
+
+		resp, body, err := do(t, client, req)
+
+		require.NoError(t, err, "Do a plain GET against a live HTTP/3 server")
+		require.Equalf(t, 200, resp.Status, "status = %d, want 200", resp.Status)
+		assert.NotEmpty(t, body, "GET / body is empty, want the server's canned response")
 		t.Logf("GET / -> status=%d body=%q", resp.Status, string(body))
 	})
 }
@@ -192,19 +190,17 @@ func TestInteropChaCha_GET(t *testing.T) {
 		t.Skip("H3_INTEROP_CHACHA_ADDR unset; run via test/integration/http3/docker-compose.chacha.yml")
 	}
 	client, host := dialServer(t, addr)
+
 	resp, body, err := do(t, client, &Request{Method: "GET", Scheme: "https", Authority: host, Path: "/"})
-	if err != nil {
-		t.Fatalf("Do: %v", err)
-	}
-	if resp.Status != 200 {
-		t.Fatalf("status = %d, want 200", resp.Status)
-	}
-	if len(body) == 0 {
-		t.Fatal("GET / body is empty, want the server's canned response")
-	}
-	if cs := client.ConnectionState().CipherSuite; cs != tls.TLS_CHACHA20_POLY1305_SHA256 {
-		t.Fatalf("negotiated cipher suite = %#x, want TLS_CHACHA20_POLY1305_SHA256 (%#x)", cs, tls.TLS_CHACHA20_POLY1305_SHA256)
-	}
+	cipher := client.ConnectionState().CipherSuite
+
+	require.NoError(t, err, "Do over a ChaCha20-Poly1305-only connection")
+	require.Equalf(t, 200, resp.Status, "status = %d, want 200", resp.Status)
+	assert.NotEmpty(t, body, "GET / body is empty, want the server's canned response")
+	assert.Equalf(t, uint16(tls.TLS_CHACHA20_POLY1305_SHA256), cipher,
+		"negotiated cipher suite = %#x, want TLS_CHACHA20_POLY1305_SHA256 (%#x): only that "+
+			"suite proves the ChaCha packet-protection path ran on the wire",
+		cipher, tls.TLS_CHACHA20_POLY1305_SHA256)
 	t.Logf("ChaCha20 GET / -> status=%d, cipher=TLS_CHACHA20_POLY1305_SHA256, %d bytes", resp.Status, len(body))
 }
 
@@ -212,16 +208,17 @@ func TestInteropChaCha_GET(t *testing.T) {
 // accepts it (a malformed body framing would make the server reset the stream).
 func TestInterop_POST(t *testing.T) {
 	forEachInteropServer(t, func(t *testing.T, client *Client, host string) {
-		resp, _, err := do(t, client, &Request{
+		req := &Request{
 			Method: "POST", Scheme: "https", Authority: host, Path: "/",
 			Body: []byte("hello from a from-scratch http/3 client"),
-		})
-		if err != nil {
-			t.Fatalf("Do: %v", err)
 		}
-		if resp.Status != 200 {
-			t.Fatalf("status = %d, want 200", resp.Status)
-		}
+
+		resp, _, err := do(t, client, req)
+
+		require.NoError(t, err, "Do a POST with a DATA-framed body")
+		assert.Equalf(t, 200, resp.Status,
+			"status = %d, want 200: a malformed body framing makes the server reset the stream",
+			resp.Status)
 		t.Logf("POST / -> status=%d", resp.Status)
 	})
 }
@@ -231,20 +228,17 @@ func TestInterop_POST(t *testing.T) {
 // checks the declared Content-Length matches the reassembled length (A4).
 func TestInterop_LargeResponse(t *testing.T) {
 	forEachInteropServer(t, func(t *testing.T, client *Client, host string) {
-		resp, body, err := do(t, client, &Request{Method: "GET", Scheme: "https", Authority: host, Path: "/big.txt"})
-		if err != nil {
-			t.Fatalf("Do: %v", err)
-		}
-		if resp.Status != 200 {
-			t.Fatalf("status = %d, want 200", resp.Status)
-		}
 		want := []byte(strings.Repeat("0123456789abcdef", 1024))
-		if !bytes.Equal(body, want) {
-			t.Fatalf("large body mismatch: got %d bytes, want %d", len(body), len(want))
-		}
-		if cl, ok := findHeader(resp.Headers, "content-length"); !ok || cl != strconv.Itoa(len(want)) {
-			t.Fatalf("content-length = %q,%v, want %d (must match the reassembled body)", cl, ok, len(want))
-		}
+
+		resp, body, err := do(t, client, &Request{Method: "GET", Scheme: "https", Authority: host, Path: "/big.txt"})
+
+		require.NoError(t, err, "Do a GET whose response spans many datagrams")
+		require.Equalf(t, 200, resp.Status, "status = %d, want 200", resp.Status)
+		assert.Truef(t, bytes.Equal(body, want),
+			"large body mismatch: got %d bytes, want %d", len(body), len(want))
+		cl, ok := findHeader(resp.Headers, "content-length")
+		assert.Truef(t, ok && cl == strconv.Itoa(len(want)),
+			"content-length = %q,%v, want %d (must match the reassembled body)", cl, ok, len(want))
 		t.Logf("GET /big.txt -> status=%d, %d bytes, content-length matches", resp.Status, len(body))
 	})
 }
@@ -260,17 +254,15 @@ func TestInterop_LargeResponse(t *testing.T) {
 // docker-compose.yml).
 func TestInterop_HugeResponse(t *testing.T) {
 	forEachInteropServer(t, func(t *testing.T, client *Client, host string) {
-		resp, body, err := do(t, client, &Request{Method: "GET", Scheme: "https", Authority: host, Path: "/huge.txt"})
-		if err != nil {
-			t.Fatalf("Do: %v", err)
-		}
-		if resp.Status != 200 {
-			t.Fatalf("status = %d, want 200", resp.Status)
-		}
 		want := []byte(strings.Repeat("0123456789abcdef", 65536)) // 1 MiB
-		if !bytes.Equal(body, want) {
-			t.Fatalf("huge body mismatch: got %d bytes, want %d", len(body), len(want))
-		}
+
+		resp, body, err := do(t, client, &Request{Method: "GET", Scheme: "https", Authority: host, Path: "/huge.txt"})
+
+		require.NoError(t, err, "Do a GET that crosses the peer's key-update boundary")
+		require.Equalf(t, 200, resp.Status, "status = %d, want 200", resp.Status)
+		assert.Truef(t, bytes.Equal(body, want),
+			"huge body mismatch: got %d bytes, want %d — a client that dropped the "+
+				"post-key-update packets stalls here", len(body), len(want))
 		t.Logf("GET /huge.txt -> status=%d, %d bytes reassembled across the key-update boundary", resp.Status, len(body))
 	})
 }
@@ -281,24 +273,18 @@ func TestInterop_HugeResponse(t *testing.T) {
 func TestInterop_HEAD(t *testing.T) {
 	forEachInteropServer(t, func(t *testing.T, client *Client, host string) {
 		resp, body, err := do(t, client, &Request{Method: "HEAD", Scheme: "https", Authority: host, Path: "/"})
-		if err != nil {
-			t.Fatalf("Do(HEAD): %v", err)
-		}
-		if resp.Status != 200 {
-			t.Fatalf("status = %d, want 200", resp.Status)
-		}
-		if len(body) != 0 {
-			t.Fatalf("HEAD body = %d bytes, want 0", len(body))
-		}
+
+		require.NoError(t, err, "Do(HEAD): an absent body must not read as a Content-Length mismatch")
+		require.Equalf(t, 200, resp.Status, "status = %d, want 200", resp.Status)
+		assert.Emptyf(t, body, "HEAD body = %d bytes, want 0", len(body))
 		// The response must carry a Content-Length (both servers set it on HEAD),
 		// so this actually exercises the mismatch-tolerance: a non-zero declared
 		// length with an absent body must not be rejected as ErrH3Message. A future
 		// matrix server that legally omits CL on HEAD (RFC 9110 §9.3.2) would fail
 		// here loudly — never silently pass — and can be gated then.
 		cl, ok := findHeader(resp.Headers, "content-length")
-		if !ok || cl == "0" {
-			t.Fatalf("HEAD response should carry a non-zero Content-Length; headers=%v", resp.Headers)
-		}
+		require.Truef(t, ok && cl != "0",
+			"HEAD response should carry a non-zero Content-Length; headers=%v", resp.Headers)
 		t.Logf("HEAD / -> status=%d, content-length=%s, body empty", resp.Status, cl)
 	})
 }
@@ -317,22 +303,21 @@ func TestInterop_StatusCodes(t *testing.T) {
 	forEachInteropServer(t, func(t *testing.T, client *Client, host string) {
 		for _, tc := range cases {
 			path := "/status/" + strconv.Itoa(tc.code)
+
 			resp, body, err := do(t, client, &Request{Method: "GET", Scheme: "https", Authority: host, Path: path})
-			if err != nil {
-				t.Fatalf("Do(GET %s): %v", path, err)
-			}
-			if resp.Status != tc.code {
-				t.Fatalf("GET %s -> status %d, want %d", path, resp.Status, tc.code)
-			}
+
+			require.NoErrorf(t, err, "Do(GET %s)", path)
+			require.Equalf(t, tc.code, resp.Status,
+				"GET %s -> status %d, want %d: the status is application data and must pass through",
+				path, resp.Status, tc.code)
 			if tc.wantBody {
-				if len(body) == 0 {
-					t.Fatalf("GET %s -> empty body, want non-empty", path)
+				assert.NotEmptyf(t, body, "GET %s -> empty body, want non-empty", path)
+				if cl, ok := findHeader(resp.Headers, "content-length"); ok {
+					assert.Equalf(t, strconv.Itoa(len(body)), cl,
+						"GET %s -> content-length %s != body %d", path, cl, len(body))
 				}
-				if cl, ok := findHeader(resp.Headers, "content-length"); ok && cl != strconv.Itoa(len(body)) {
-					t.Fatalf("GET %s -> content-length %s != body %d", path, cl, len(body))
-				}
-			} else if len(body) != 0 {
-				t.Fatalf("GET %s -> %d-byte body, want empty (no-content status)", path, len(body))
+			} else {
+				assert.Emptyf(t, body, "GET %s -> %d-byte body, want empty (no-content status)", path, len(body))
 			}
 			t.Logf("GET %s -> status=%d, %d-byte body (passed through)", path, resp.Status, len(body))
 		}
@@ -353,14 +338,13 @@ func TestInterop_StatusCodes(t *testing.T) {
 func TestInterop_SequentialReuse(t *testing.T) {
 	forEachInteropServer(t, func(t *testing.T, client *Client, host string) {
 		const n = 300
+		req := &Request{Method: "GET", Scheme: "https", Authority: host, Path: "/"}
+
 		for i := 0; i < n; i++ {
-			resp, _, err := do(t, client, &Request{Method: "GET", Scheme: "https", Authority: host, Path: "/"})
-			if err != nil {
-				t.Fatalf("request %d/%d: %v", i+1, n, err)
-			}
-			if resp.Status != 200 {
-				t.Fatalf("request %d/%d: status %d, want 200", i+1, n, resp.Status)
-			}
+			resp, _, err := do(t, client, req)
+
+			require.NoErrorf(t, err, "request %d/%d: a client ignoring MAX_STREAMS fails here", i+1, n)
+			require.Equalf(t, 200, resp.Status, "request %d/%d: status %d, want 200", i+1, n, resp.Status)
 		}
 		t.Logf("%d sequential requests on one connection: all 200", n)
 	})
@@ -376,16 +360,15 @@ func TestInterop_SequentialReuse(t *testing.T) {
 func TestFault_ServerReset(t *testing.T) {
 	forEachInteropServer(t, func(t *testing.T, client *Client, host string) {
 		_, _, err := do(t, client, &Request{Method: "GET", Scheme: "https", Authority: host, Path: "/"})
+
 		var rst *StreamResetError
-		if !errors.As(err, &rst) {
-			t.Fatalf("Do = %v (%T), want *StreamResetError", err, err)
-		}
-		if rst.Code != H3RequestRejected {
-			t.Fatalf("reset code = %#x, want H3_REQUEST_REJECTED (%#x)", rst.Code, H3RequestRejected)
-		}
-		if !rst.Retryable() {
-			t.Fatal("a H3_REQUEST_REJECTED reset must be Retryable()")
-		}
+		require.Truef(t, errors.As(err, &rst),
+			"Do = %v (%T), want *StreamResetError — a reset must not read as a truncated success",
+			err, err)
+		assert.Equalf(t, H3RequestRejected, rst.Code,
+			"reset code = %#x, want H3_REQUEST_REJECTED (%#x)", rst.Code, H3RequestRejected)
+		assert.True(t, rst.Retryable(),
+			"a H3_REQUEST_REJECTED reset must be Retryable(): the server never processed the request")
 		t.Logf("server reset -> StreamResetError code=%#x retryable=%v", rst.Code, rst.Retryable())
 	})
 }
@@ -397,9 +380,10 @@ func TestFault_ServerReset(t *testing.T) {
 func expectConnError(t *testing.T, path string) {
 	forEachInteropServer(t, func(t *testing.T, client *Client, host string) {
 		_, _, err := do(t, client, &Request{Method: "GET", Scheme: "https", Authority: host, Path: path})
-		if !errors.Is(err, ErrH3Control) {
-			t.Fatalf("GET %s = %v (%T), want a connection error (ErrH3Control)", path, err, err)
-		}
+
+		assert.ErrorIsf(t, err, ErrH3Control,
+			"GET %s = %v (%T), want a connection error (ErrH3Control) — a corrupt frame "+
+				"sequence must not hang or return a partial response as success", path, err, err)
 		t.Logf("GET %s -> connection error, as required", path)
 	})
 }
@@ -458,16 +442,16 @@ func TestFault_QpackRequiredInsertCount(t *testing.T) {
 // genuinely exercised, not a body that fit in one go.
 func TestFault_StopSending(t *testing.T) {
 	forEachInteropServer(t, func(t *testing.T, client *Client, host string) {
-		resp, _, err := do(t, client, &Request{
+		req := &Request{
 			Method: "POST", Scheme: "https", Authority: host, Path: "/stop-sending",
 			Body: make([]byte, 2<<20),
-		})
-		if err != nil {
-			t.Fatalf("Do = %v, want the response read despite STOP_SENDING", err)
 		}
-		if resp.Status != 200 {
-			t.Fatalf("status = %d, want 200", resp.Status)
-		}
+
+		resp, _, err := do(t, client, req)
+
+		require.NoError(t, err, "Do must read the response despite STOP_SENDING: the "+
+			"stream's receive side is independent of the send side it aborted")
+		assert.Equalf(t, 200, resp.Status, "status = %d, want 200", resp.Status)
 		t.Logf("STOP_SENDING mid-body -> response still read, status=%d", resp.Status)
 	})
 }

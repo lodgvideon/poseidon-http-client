@@ -7,74 +7,72 @@ import (
 	"net"
 	"testing"
 	"time"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
+
+// loopbackPair returns an unconnected server socket on the loopback interface
+// and the quic.PacketConn adapter wrapping a client socket dialed to it. Both
+// are closed when the test ends.
+func loopbackPair(t *testing.T) (*net.UDPConn, *udpConn) {
+	t.Helper()
+	server, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	require.NoError(t, err, "listen on a loopback UDP socket")
+	t.Cleanup(func() { _ = server.Close() })
+
+	client, err := net.DialUDP("udp", nil, server.LocalAddr().(*net.UDPAddr))
+	require.NoError(t, err, "dial the loopback UDP socket")
+	t.Cleanup(func() { _ = client.Close() })
+
+	return server, &udpConn{c: client}
+}
 
 // TestUDPConn_Loopback checks the quic.PacketConn adapter moves datagrams both
 // ways over a real connected UDP socket.
 func TestUDPConn_Loopback(t *testing.T) {
-	server, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer server.Close()
-
-	client, err := net.DialUDP("udp", nil, server.LocalAddr().(*net.UDPAddr))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer client.Close()
-	uc := &udpConn{c: client}
-
-	if _, err := uc.Write([]byte("ping")); err != nil {
-		t.Fatal(err)
-	}
+	server, uc := loopbackPair(t)
 	buf := make([]byte, 64)
-	n, caddr, err := server.ReadFromUDP(buf)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if string(buf[:n]) != "ping" {
-		t.Fatalf("server received %q, want ping", buf[:n])
-	}
+	// Both reads are bounded so a datagram the adapter fails to move surfaces as
+	// the assertion below rather than parking until the package timeout.
+	require.NoError(t, server.SetReadDeadline(time.Now().Add(5*time.Second)), "bound the server read")
+	require.NoError(t, uc.SetReadDeadline(time.Now().Add(5*time.Second)), "bound the client read")
 
-	if _, err := server.WriteToUDP([]byte("pong"), caddr); err != nil {
-		t.Fatal(err)
-	}
-	n, err = uc.Read(buf)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if string(buf[:n]) != "pong" {
-		t.Fatalf("client received %q, want pong", buf[:n])
-	}
-	if err := uc.Close(); err != nil {
-		t.Fatalf("Close: %v", err)
-	}
+	_, writeErr := uc.Write([]byte("ping"))
+	n, caddr, serverReadErr := server.ReadFromUDP(buf)
+	gotPing := string(buf[:n])
+	_, serverWriteErr := server.WriteToUDP([]byte("pong"), caddr)
+	n, readErr := uc.Read(buf)
+	gotPong := string(buf[:n])
+	closeErr := uc.Close()
+
+	assert.NoError(t, writeErr, "udpConn.Write onto the connected socket")
+	assert.NoError(t, serverReadErr, "the server never received the datagram udpConn.Write sent")
+	assert.Equalf(t, "ping", gotPing,
+		"server received %q, want ping: the adapter must hand the payload to the socket "+
+			"unchanged, or every QUIC packet it sends is corrupt", gotPing)
+	assert.NoError(t, serverWriteErr, "the server answering on the 4-tuple the client's datagram opened")
+	assert.NoError(t, readErr, "udpConn.Read from the connected socket")
+	assert.Equalf(t, "pong", gotPong,
+		"client received %q, want pong: the adapter must surface the server's payload "+
+			"unchanged, or every QUIC packet it receives is corrupt", gotPong)
+	assert.NoError(t, closeErr, "Close must release the socket the QUIC engine owns")
 }
 
 // TestUDPConn_ReadDeadline verifies a stalled server surfaces a timeout error
 // rather than blocking forever.
 func TestUDPConn_ReadDeadline(t *testing.T) {
-	server, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer server.Close()
-	client, err := net.DialUDP("udp", nil, server.LocalAddr().(*net.UDPAddr))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer client.Close()
-	uc := &udpConn{c: client}
-	if err := uc.SetReadDeadline(time.Now().Add(50 * time.Millisecond)); err != nil {
-		t.Fatal(err)
-	}
+	_, uc := loopbackPair(t)
+	require.NoError(t, uc.SetReadDeadline(time.Now().Add(50*time.Millisecond)),
+		"arming the read deadline the QUIC engine bounds each read with (RFC 9002 §6.2)")
 
-	if _, err := uc.Read(make([]byte, 64)); err == nil {
-		t.Fatal("expected a read timeout error")
-	} else if ne, ok := errAsNet(err); !ok || !ne.Timeout() {
-		t.Fatalf("err = %v, want a net timeout", err)
-	}
+	_, err := uc.Read(make([]byte, 64))
+
+	require.Error(t, err, "expected a read timeout error: a read that never returns "+
+		"parks the QUIC reader goroutine, so no probe timeout can ever fire")
+	ne, ok := errAsNet(err)
+	require.Truef(t, ok, "err = %v, want a net timeout the engine can classify", err)
+	assert.Truef(t, ne.Timeout(), "err = %v, want a net timeout", err)
 }
 
 func errAsNet(err error) (net.Error, bool) {
@@ -85,25 +83,34 @@ func errAsNet(err error) (net.Error, bool) {
 // TestDial_BadAddress checks Dial reports an error for an unresolvable address
 // instead of panicking.
 func TestDial_BadAddress(t *testing.T) {
-	if _, err := Dial(context.Background(), "not-a-valid-addr", &tls.Config{ServerName: "x"}); err == nil {
-		t.Fatal("expected an error for an invalid address")
-	}
+	cfg := &tls.Config{ServerName: "x"}
+
+	_, err := Dial(context.Background(), "not-a-valid-addr", cfg)
+
+	assert.Error(t, err, "expected an error for an invalid address: a caller that gets "+
+		"neither an error nor a working connection has nothing to act on")
 }
 
+// TestH3TLSConfig checks what h3TLSConfig imposes on the caller's config
+// (RFC 9114 §3.1): the "h3" ALPN token and a TLS 1.3 floor, on a nil base as
+// well as on one naming a lower minimum, with the caller's ServerName preserved.
 func TestH3TLSConfig(t *testing.T) {
-	// A nil base yields a config with the h3 ALPN and TLS 1.3 floor.
-	if got := h3TLSConfig(nil); len(got.NextProtos) != 1 || got.NextProtos[0] != "h3" ||
-		got.MinVersion != tls.VersionTLS13 {
-		t.Fatalf("nil base = %+v", got)
-	}
-	// A lower MinVersion is bumped; ServerName is preserved.
-	got := h3TLSConfig(&tls.Config{ServerName: "host", MinVersion: tls.VersionTLS10})
-	if got.MinVersion != tls.VersionTLS13 {
-		t.Fatalf("MinVersion = %#x, want TLS 1.3", got.MinVersion)
-	}
-	if got.ServerName != "host" || got.NextProtos[0] != "h3" {
-		t.Fatalf("config = %+v", got)
-	}
+	base := &tls.Config{ServerName: "host", MinVersion: tls.VersionTLS10}
+
+	fromNil := h3TLSConfig(nil)
+	fromBase := h3TLSConfig(base)
+
+	require.NotNil(t, fromNil, "a nil base must still yield a usable config")
+	assert.Equalf(t, []string{"h3"}, fromNil.NextProtos,
+		"nil base = %+v: without the h3 ALPN token the peer cannot select HTTP/3", fromNil)
+	assert.Equalf(t, uint16(tls.VersionTLS13), fromNil.MinVersion,
+		"nil base = %+v: QUIC is defined over TLS 1.3 only (RFC 9001 §4.2)", fromNil)
+	assert.Equalf(t, uint16(tls.VersionTLS13), fromBase.MinVersion,
+		"MinVersion = %#x, want TLS 1.3: a caller's lower floor must be raised, not honoured",
+		fromBase.MinVersion)
+	assert.Equalf(t, "host", fromBase.ServerName,
+		"config = %+v: the caller's ServerName drives SNI and certificate verification", fromBase)
+	assert.Equalf(t, []string{"h3"}, fromBase.NextProtos, "config = %+v", fromBase)
 }
 
 // errPC is a quic.PacketConn whose Read always fails, so a handshake over it
@@ -117,10 +124,10 @@ func (p *errPC) Close() error                { p.closed = true; return nil }
 func TestDialConn_EstablishError(t *testing.T) {
 	pc := &errPC{}
 	cfg := h3TLSConfig(&tls.Config{ServerName: "example.com"})
-	if _, err := dialConn(context.Background(), pc, cfg); err == nil {
-		t.Fatal("expected dialConn to fail when the handshake read errors")
-	}
-	if !pc.closed {
-		t.Fatal("dialConn must close the PacketConn on failure")
-	}
+
+	_, err := dialConn(context.Background(), pc, cfg)
+
+	assert.Error(t, err, "expected dialConn to fail when the handshake read errors")
+	assert.True(t, pc.closed, "dialConn must close the PacketConn on failure: "+
+		"otherwise every failed dial leaks a UDP socket for the process's lifetime")
 }
