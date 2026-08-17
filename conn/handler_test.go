@@ -7,6 +7,8 @@ import (
 
 	"github.com/lodgvideon/poseidon-http-client/frame"
 	"github.com/lodgvideon/poseidon-http-client/hpack"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // fakeStreamMap is the bare interface handler.go needs from *Conn.
@@ -83,10 +85,8 @@ func encodeBlock(t *testing.T, fields []hpack.HeaderField) []byte {
 
 func TestHandler_OnHeaders_EndStream_PushesEventAndMarksRemoteEnd(t *testing.T) {
 	m := newFakeStreamMap()
-	dec := hpack.NewDecoder()
-	h := newConnHandler(m, dec)
+	h := newConnHandler(m, hpack.NewDecoder())
 	s := m.addStream(1)
-
 	block := encodeBlock(t, []hpack.HeaderField{
 		{Name: []byte(":status"), Value: []byte("200")},
 	})
@@ -96,25 +96,23 @@ func TestHandler_OnHeaders_EndStream_PushesEventAndMarksRemoteEnd(t *testing.T) 
 		Flags:    frame.FlagHeadersEndHeaders | frame.FlagHeadersEndStream,
 		StreamID: 1,
 	}
-	if err := h.OnHeaders(fh, frame.HeaderBlock(block), nil, 0); err != nil {
-		t.Fatalf("OnHeaders: %v", err)
-	}
+
+	err := h.OnHeaders(fh, frame.HeaderBlock(block), nil, 0)
+
+	require.NoErrorf(t, err, "OnHeaders")
 	select {
 	case e := <-s.events:
-		if e.Type != EventHeaders || !e.EndStream {
-			t.Fatalf("event = %+v", e)
-		}
-		if len(e.Headers) != 1 || string(e.Headers[0].Name) != ":status" {
-			t.Fatalf("headers = %+v", e.Headers)
-		}
+		assert.Equalf(t, EventHeaders, e.Type, "event = %+v", e)
+		assert.Truef(t, e.EndStream, "event = %+v", e)
+		require.Lenf(t, e.Headers, 1, "headers = %+v", e.Headers)
+		assert.Equalf(t, ":status", string(e.Headers[0].Name), "headers = %+v", e.Headers)
 	default:
-		t.Fatalf("no event pushed")
+		require.FailNow(t, "no event pushed")
 	}
 	s.mu.Lock()
-	if !s.remoteEnded {
-		t.Fatalf("remoteEnded not set")
-	}
+	remoteEnded := s.remoteEnded
 	s.mu.Unlock()
+	require.True(t, remoteEnded, "remoteEnded not set")
 }
 
 func TestHandler_OnData_PushesDataEvent(t *testing.T) {
@@ -122,21 +120,17 @@ func TestHandler_OnData_PushesDataEvent(t *testing.T) {
 	h := newConnHandler(m, hpack.NewDecoder())
 	s := m.addStream(1)
 	s.headersReceived = true // the response HEADERS have arrived; DATA is now valid body
-
 	fh := frame.FrameHeader{Type: frame.FrameData, Length: 5, StreamID: 1}
-	if err := h.OnData(fh, []byte("hello"), 0); err != nil {
-		t.Fatalf("OnData: %v", err)
-	}
+
+	err := h.OnData(fh, []byte("hello"), 0)
+
+	require.NoErrorf(t, err, "OnData")
 	select {
 	case e := <-s.events:
-		if e.Type != EventData {
-			t.Fatalf("type = %v", e.Type)
-		}
-		if !bytes.Equal(e.Data, []byte("hello")) {
-			t.Fatalf("data = %q", e.Data)
-		}
+		assert.Equalf(t, EventData, e.Type, "type = %v", e.Type)
+		assert.Truef(t, bytes.Equal(e.Data, []byte("hello")), "data = %q", e.Data)
 	default:
-		t.Fatalf("no event")
+		require.FailNow(t, "no event")
 	}
 }
 
@@ -145,13 +139,13 @@ func TestHandler_OnRSTStream_PushesEventReset(t *testing.T) {
 	h := newConnHandler(m, hpack.NewDecoder())
 	s := m.addStream(1)
 	fh := frame.FrameHeader{Type: frame.FrameRSTStream, StreamID: 1}
-	if err := h.OnRSTStream(fh, frame.ErrCodeCancel); err != nil {
-		t.Fatalf("OnRSTStream: %v", err)
-	}
+
+	err := h.OnRSTStream(fh, frame.ErrCodeCancel)
+
+	require.NoErrorf(t, err, "OnRSTStream")
 	e := <-s.events
-	if e.Type != EventReset || e.RSTCode != frame.ErrCodeCancel {
-		t.Fatalf("event = %+v", e)
-	}
+	assert.Equalf(t, EventReset, e.Type, "event = %+v", e)
+	assert.Equalf(t, frame.ErrCodeCancel, e.RSTCode, "event = %+v", e)
 }
 
 func TestHandler_OnPushPromise_ReturnsConnError(t *testing.T) {
@@ -159,29 +153,25 @@ func TestHandler_OnPushPromise_ReturnsConnError(t *testing.T) {
 	h := newConnHandler(m, hpack.NewDecoder())
 	m.addStream(1)
 	fh := frame.FrameHeader{Type: frame.FramePushPromise, StreamID: 1}
+
 	err := h.OnPushPromise(fh, 4, nil, 0)
-	if err == nil {
-		t.Fatalf("expected error")
-	}
+
+	require.Error(t, err, "expected error")
 	ce, ok := err.(*ConnError)
-	if !ok {
-		t.Fatalf("err type = %T, want *ConnError", err)
-	}
-	if ce.Code != frame.ErrCodeProtocolError {
-		t.Fatalf("code = %v", ce.Code)
-	}
+	require.Truef(t, ok, "err type = %T, want *ConnError", err)
+	require.Equalf(t, frame.ErrCodeProtocolError, ce.Code, "code = %v", ce.Code)
 }
 
 func TestHandler_OnOrigin_StoresOrigins(t *testing.T) {
 	m := newFakeStreamMap()
 	h := newConnHandler(m, hpack.NewDecoder())
 	origins := []string{"https://example.com", "https://cdn.example.com"}
-	if err := h.OnOrigin(frame.FrameHeader{}, origins); err != nil {
-		t.Fatalf("OnOrigin: %v", err)
-	}
-	if len(m.origins) != 2 || m.origins[0] != "https://example.com" {
-		t.Fatalf("origins = %v", m.origins)
-	}
+
+	err := h.OnOrigin(frame.FrameHeader{}, origins)
+
+	require.NoErrorf(t, err, "OnOrigin")
+	require.Lenf(t, m.origins, 2, "origins = %v", m.origins)
+	assert.Equalf(t, "https://example.com", m.origins[0], "origins = %v", m.origins)
 }
 
 func TestHandler_OnAltSvc_StoresEntries(t *testing.T) {
@@ -190,10 +180,10 @@ func TestHandler_OnAltSvc_StoresEntries(t *testing.T) {
 	entries := []frame.AltSvcEntry{
 		{Origin: "https://example.com", AltValue: `h2=":8080"`},
 	}
-	if err := h.OnAltSvc(frame.FrameHeader{}, entries); err != nil {
-		t.Fatalf("OnAltSvc: %v", err)
-	}
-	if len(m.altSvc) != 1 || m.altSvc[0].Origin != "https://example.com" {
-		t.Fatalf("altSvc = %v", m.altSvc)
-	}
+
+	err := h.OnAltSvc(frame.FrameHeader{}, entries)
+
+	require.NoErrorf(t, err, "OnAltSvc")
+	require.Lenf(t, m.altSvc, 1, "altSvc = %v", m.altSvc)
+	assert.Equalf(t, "https://example.com", m.altSvc[0].Origin, "altSvc = %v", m.altSvc)
 }

@@ -3,12 +3,14 @@ package conn
 import (
 	"context"
 	"crypto/tls"
-	"errors"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"testing"
 	"time"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // startDualProtoServer starts a TLS server that offers BOTH "h2" and
@@ -38,19 +40,15 @@ func startDualProtoServer(t *testing.T) (addr string, clientCfg *tls.Config) {
 func TestH1TLSDialer_NegotiatesHTTP11(t *testing.T) {
 	t.Parallel()
 	addr, cfg := startDualProtoServer(t)
-
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
 	nc, err := (&H1TLSDialer{Config: cfg}).Dial(ctx, addr)
-	if err != nil {
-		t.Fatalf("H1TLSDialer.Dial: %v", err)
-	}
-	defer func() { _ = nc.Close() }()
 
-	if got := NegotiatedProtocol(nc); got != "http/1.1" {
-		t.Fatalf("NegotiatedProtocol = %q, want %q", got, "http/1.1")
-	}
+	require.NoErrorf(t, err, "H1TLSDialer.Dial")
+	defer func() { _ = nc.Close() }()
+	got := NegotiatedProtocol(nc)
+	require.Equalf(t, "http/1.1", got, "NegotiatedProtocol = %q, want %q", got, "http/1.1")
 }
 
 // TestH1TLSDialer_KeepsExplicitNextProtos verifies a caller-supplied
@@ -60,18 +58,15 @@ func TestH1TLSDialer_KeepsExplicitNextProtos(t *testing.T) {
 	addr, cfg := startDualProtoServer(t)
 	cfg.NextProtos = []string{"http/1.1"}
 	cfg.MinVersion = 0 // exercise the MinVersion default branch
-
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
 	nc, err := (&H1TLSDialer{Config: cfg}).Dial(ctx, addr)
-	if err != nil {
-		t.Fatalf("H1TLSDialer.Dial: %v", err)
-	}
+
+	require.NoErrorf(t, err, "H1TLSDialer.Dial")
 	defer func() { _ = nc.Close() }()
-	if got := NegotiatedProtocol(nc); got != "http/1.1" {
-		t.Fatalf("NegotiatedProtocol = %q, want %q", got, "http/1.1")
-	}
+	got := NegotiatedProtocol(nc)
+	require.Equalf(t, "http/1.1", got, "NegotiatedProtocol = %q, want %q", got, "http/1.1")
 }
 
 // TestH1TLSDialer_RejectsH2InConfig verifies the dialer refuses a config whose
@@ -82,12 +77,12 @@ func TestH1TLSDialer_RejectsH2InConfig(t *testing.T) {
 		MinVersion: tls.VersionTLS12,
 		NextProtos: []string{"h2", "http/1.1"},
 	}}
+
 	// 203.0.113.0/24 is TEST-NET-3: a dial that reached the network would hang,
 	// so returning promptly is itself part of the assertion.
 	_, err := d.Dial(context.Background(), "203.0.113.1:443")
-	if !errors.Is(err, ErrALPNConflict) {
-		t.Fatalf("Dial error = %v, want ErrALPNConflict", err)
-	}
+
+	require.ErrorIsf(t, err, ErrALPNConflict, "Dial error = %v, want ErrALPNConflict", err)
 }
 
 // TestH1TLSDialer_NilConfig verifies the nil-Config path offers http/1.1 and
@@ -97,18 +92,17 @@ func TestH1TLSDialer_RejectsH2InConfig(t *testing.T) {
 func TestH1TLSDialer_NilConfig(t *testing.T) {
 	t.Parallel()
 	addr, _ := startDualProtoServer(t)
-
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
 	nc, err := (&H1TLSDialer{}).Dial(ctx, addr)
+
 	if err == nil {
 		_ = nc.Close()
-		t.Fatal("Dial succeeded against an untrusted cert, want verification failure")
+		require.FailNow(t, "Dial succeeded against an untrusted cert, want verification failure")
 	}
-	if errors.Is(err, ErrALPNConflict) || errors.Is(err, ErrALPNNotHTTP11) {
-		t.Fatalf("Dial error = %v, want a certificate error", err)
-	}
+	assert.NotErrorIsf(t, err, ErrALPNConflict, "Dial error = %v, want a certificate error", err)
+	assert.NotErrorIsf(t, err, ErrALPNNotHTTP11, "Dial error = %v, want a certificate error", err)
 }
 
 // TestH1TLSDialer_RejectsNonHTTP11Peer verifies a peer that selects a protocol
@@ -123,22 +117,20 @@ func TestH1TLSDialer_RejectsNonHTTP11Peer(t *testing.T) {
 	srv.TLS = &tls.Config{NextProtos: []string{"spdy/3", "http/1.1"}, MinVersion: tls.VersionTLS12}
 	srv.StartTLS()
 	t.Cleanup(srv.Close)
-
 	cfg := srv.Client().Transport.(*http.Transport).TLSClientConfig.Clone()
 	cfg.NextProtos = []string{"http/1.1", "spdy/3"}
-
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
 	nc, err := (&H1TLSDialer{Config: cfg}).Dial(ctx, srv.Listener.Addr().String())
+
 	if err == nil {
 		proto := NegotiatedProtocol(nc)
 		_ = nc.Close()
-		t.Fatalf("Dial succeeded with negotiated protocol %q, want ErrALPNNotHTTP11", proto)
+		require.FailNowf(t, "a non-http/1.1 peer was accepted",
+			"Dial succeeded with negotiated protocol %q, want ErrALPNNotHTTP11", proto)
 	}
-	if !errors.Is(err, ErrALPNNotHTTP11) {
-		t.Fatalf("Dial error = %v, want ErrALPNNotHTTP11", err)
-	}
+	require.ErrorIsf(t, err, ErrALPNNotHTTP11, "Dial error = %v, want ErrALPNNotHTTP11", err)
 }
 
 // TestTLSDialer_RejectsALPNWithoutH2 is the other half of the fix: TLSDialer
@@ -150,10 +142,10 @@ func TestTLSDialer_RejectsALPNWithoutH2(t *testing.T) {
 		MinVersion: tls.VersionTLS12,
 		NextProtos: []string{"http/1.1"},
 	}}
+
 	_, err := d.Dial(context.Background(), "203.0.113.1:443")
-	if !errors.Is(err, ErrALPNConflict) {
-		t.Fatalf("Dial error = %v, want ErrALPNConflict", err)
-	}
+
+	require.ErrorIsf(t, err, ErrALPNConflict, "Dial error = %v, want ErrALPNConflict", err)
 }
 
 // TestTLSDialer_AllowsALPNListContainingH2 verifies the guard only fires on a
@@ -162,18 +154,15 @@ func TestTLSDialer_AllowsALPNListContainingH2(t *testing.T) {
 	t.Parallel()
 	addr, cfg := startDualProtoServer(t)
 	cfg.NextProtos = []string{"http/1.1", "h2"}
-
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
 	nc, err := (&TLSDialer{Config: cfg}).Dial(ctx, addr)
-	if err != nil {
-		t.Fatalf("TLSDialer.Dial: %v", err)
-	}
+
+	require.NoErrorf(t, err, "TLSDialer.Dial")
 	defer func() { _ = nc.Close() }()
-	if got := NegotiatedProtocol(nc); got != "h2" {
-		t.Fatalf("NegotiatedProtocol = %q, want %q", got, "h2")
-	}
+	got := NegotiatedProtocol(nc)
+	require.Equalf(t, "h2", got, "NegotiatedProtocol = %q, want %q", got, "h2")
 }
 
 // TestProxyTLSDialer_RejectsALPNWithoutH2 verifies the proxy dialer carries the
@@ -181,17 +170,15 @@ func TestTLSDialer_AllowsALPNListContainingH2(t *testing.T) {
 func TestProxyTLSDialer_RejectsALPNWithoutH2(t *testing.T) {
 	t.Parallel()
 	u, err := url.Parse("http://127.0.0.1:1")
-	if err != nil {
-		t.Fatalf("parse: %v", err)
-	}
+	require.NoErrorf(t, err, "parse")
 	d := &ProxyTLSDialer{
 		ProxyURL:  u,
 		TLSConfig: &tls.Config{MinVersion: tls.VersionTLS12, NextProtos: []string{"http/1.1"}},
 	}
+
 	_, err = d.Dial(context.Background(), "example.com:443")
-	if !errors.Is(err, ErrALPNConflict) {
-		t.Fatalf("Dial error = %v, want ErrALPNConflict", err)
-	}
+
+	require.ErrorIsf(t, err, ErrALPNConflict, "Dial error = %v, want ErrALPNConflict", err)
 }
 
 // TestAssertsALPN_Values pins the ALPNAsserter answers the client's
@@ -208,17 +195,14 @@ func TestAssertsALPN_Values(t *testing.T) {
 		{"FlexDialer", &FlexDialer{}, ""},
 		{"ProxyTLSDialer", &ProxyTLSDialer{}, "h2"},
 	}
+
 	for _, tc := range cases {
 		a, ok := tc.d.(ALPNAsserter)
-		if !ok {
-			t.Fatalf("%s does not implement ALPNAsserter", tc.name)
-		}
-		if got := a.AssertsALPN(); got != tc.want {
-			t.Errorf("%s.AssertsALPN() = %q, want %q", tc.name, got, tc.want)
-		}
+		require.Truef(t, ok, "%s does not implement ALPNAsserter", tc.name)
+		assert.Equalf(t, tc.want, a.AssertsALPN(), "%s.AssertsALPN() = %q, want %q",
+			tc.name, a.AssertsALPN(), tc.want)
 	}
 	// PlaintextDialer deliberately makes no assertion at all.
-	if _, ok := Dialer(&PlaintextDialer{}).(ALPNAsserter); ok {
-		t.Error("PlaintextDialer implements ALPNAsserter; it should assert nothing")
-	}
+	_, isAsserter := Dialer(&PlaintextDialer{}).(ALPNAsserter)
+	assert.False(t, isAsserter, "PlaintextDialer implements ALPNAsserter; it should assert nothing")
 }

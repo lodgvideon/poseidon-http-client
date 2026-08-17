@@ -3,13 +3,14 @@ package conn
 import (
 	"bytes"
 	"context"
-	"errors"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/lodgvideon/poseidon-http-client/frame"
 	"github.com/lodgvideon/poseidon-http-client/hpack"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // TestOnGoAway_BlocksNewStream verifies that after a GOAWAY frame is
@@ -21,15 +22,13 @@ import (
 func TestOnGoAway_BlocksNewStream(t *testing.T) {
 	c := newGoAwayConn()
 	h := newConnHandler(c, hpack.NewDecoder())
-	if err := h.OnGoAway(frame.FrameHeader{}, 0, frame.ErrCodeNoError, nil); err != nil {
-		t.Fatalf("OnGoAway: %v", err)
-	}
-	if !c.goAwayReceived.Load() {
-		t.Fatalf("goAwayReceived flag not set")
-	}
-	if _, err := c.NewStream(context.Background()); !errors.Is(err, ErrGoAway) {
-		t.Fatalf("NewStream err = %v, want ErrGoAway", err)
-	}
+
+	err := h.OnGoAway(frame.FrameHeader{}, 0, frame.ErrCodeNoError, nil)
+
+	require.NoErrorf(t, err, "OnGoAway")
+	require.True(t, c.goAwayReceived.Load(), "goAwayReceived flag not set")
+	_, nsErr := c.NewStream(context.Background())
+	require.ErrorIsf(t, nsErr, ErrGoAway, "NewStream err = %v, want ErrGoAway", nsErr)
 }
 
 // TestOnGoAway_SurfacesPeerCodeAndLastStreamID is the gate on #570: the peer's
@@ -56,26 +55,20 @@ func TestOnGoAway_SurfacesPeerCodeAndLastStreamID(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			c := newGoAwayConn()
 			h := newConnHandler(c, hpack.NewDecoder())
-			if err := h.OnGoAway(frame.FrameHeader{}, tc.last, tc.code, nil); err != nil {
-				t.Fatalf("OnGoAway: %v", err)
-			}
+			require.NoErrorf(t, h.OnGoAway(frame.FrameHeader{}, tc.last, tc.code, nil), "OnGoAway")
 
 			_, err := c.NewStream(context.Background())
+
 			// The sentinel is still the contract for callers that only ask
 			// "was this a GOAWAY" — client/retry.go is one of them.
-			if !errors.Is(err, ErrGoAway) {
-				t.Fatalf("NewStream err = %v, want it to match ErrGoAway", err)
-			}
+			require.ErrorIsf(t, err, ErrGoAway, "NewStream err = %v, want it to match ErrGoAway", err)
 			var ge *GoAwayError
-			if !errors.As(err, &ge) {
-				t.Fatalf("NewStream err = %T (%v), want a *GoAwayError carrying the peer's reason", err, err)
-			}
-			if ge.Code != tc.code {
-				t.Errorf("Code = %v, want %v — the peer's reason was discarded", ge.Code, tc.code)
-			}
-			if ge.LastStreamID != tc.last {
-				t.Errorf("LastStreamID = %d, want %d", ge.LastStreamID, tc.last)
-			}
+			require.ErrorAsf(t, err, &ge,
+				"NewStream err = %T (%v), want a *GoAwayError carrying the peer's reason", err, err)
+			assert.Equalf(t, tc.code, ge.Code,
+				"Code = %v, want %v — the peer's reason was discarded", ge.Code, tc.code)
+			assert.Equalf(t, tc.last, ge.LastStreamID,
+				"LastStreamID = %d, want %d", ge.LastStreamID, tc.last)
 		})
 	}
 }
@@ -85,7 +78,6 @@ func TestOnGoAway_SurfacesPeerCodeAndLastStreamID(t *testing.T) {
 // above lastStreamID are reset with REFUSED_STREAM and evicted.
 func TestOnGoAway_StreamsAtOrBelowLastID_Survive(t *testing.T) {
 	c := newGoAwayConn()
-
 	keep := newStream(3, 8, c, 65535)
 	keep.id = 3
 	c.streams[3] = keep
@@ -97,25 +89,19 @@ func TestOnGoAway_StreamsAtOrBelowLastID_Survive(t *testing.T) {
 
 	c.onGoAwayReceived(3, frame.ErrCodeNoError)
 
-	// keep stays
-	if _, ok := c.streams[3]; !ok {
-		t.Fatalf("stream 3 evicted but should survive (id ≤ 3)")
-	}
-	if _, ok := c.streams[5]; ok {
-		t.Fatalf("stream 5 not evicted but should be (id > 3)")
-	}
-	if c.inflight != 1 {
-		t.Fatalf("inflight = %d, want 1", c.inflight)
-	}
-
+	_, keptOK := c.streams[3]
+	require.True(t, keptOK, "stream 3 evicted but should survive (id ≤ 3)")
+	_, droppedOK := c.streams[5]
+	require.False(t, droppedOK, "stream 5 not evicted but should be (id > 3)")
+	require.EqualValuesf(t, 1, c.inflight, "inflight = %d, want 1", c.inflight)
 	// Drop received an EventReset.
 	select {
 	case ev := <-drop.events:
-		if ev.Type != EventReset || ev.RSTCode != frame.ErrCodeRefusedStream {
-			t.Fatalf("drop got %+v, want EventReset(REFUSED_STREAM)", ev)
-		}
+		assert.Equalf(t, EventReset, ev.Type, "drop got %+v, want EventReset(REFUSED_STREAM)", ev)
+		assert.Equalf(t, frame.ErrCodeRefusedStream, ev.RSTCode,
+			"drop got %+v, want EventReset(REFUSED_STREAM)", ev)
 	case <-time.After(time.Second):
-		t.Fatalf("drop never got reset event")
+		require.FailNow(t, "drop never got reset event")
 	}
 }
 
@@ -142,29 +128,26 @@ func TestOnGoAway_WakesAcquireSendCredits(t *testing.T) {
 	s.id = 1
 	s.sendWindow = 65535
 	c.streams[1] = s
-
-	type result struct{ err error }
-	done := make(chan result, 1)
+	done := make(chan error, 1)
 	go func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
 		_, err := c.acquireSendCredits(ctx, s, s.gen.Load(), 100, 0)
-		done <- result{err}
+		done <- err
 	}()
-
 	time.Sleep(50 * time.Millisecond)
+
 	// lastStreamID 0 < stream 1: the peer never processed our HEADERS, so this
 	// stream is refused and the writer must stop, not wait for credit.
 	c.onGoAwayReceived(0, frame.ErrCodeNoError)
 
 	select {
-	case r := <-done:
-		if !errors.Is(r.err, ErrStreamClosed) {
-			t.Fatalf("acquireSendCredits returned %v, want ErrStreamClosed;\n"+
-				"the writer left for some reason other than the GOAWAY that refused its stream", r.err)
-		}
+	case err := <-done:
+		require.ErrorIsf(t, err, ErrStreamClosed,
+			"acquireSendCredits returned %v, want ErrStreamClosed;\n"+
+				"the writer left for some reason other than the GOAWAY that refused its stream", err)
 	case <-time.After(time.Second):
-		t.Fatalf("acquireSendCredits still parked 1s after a GOAWAY refused its stream;\n" +
+		require.FailNow(t, "acquireSendCredits still parked 1s after a GOAWAY refused its stream;\n"+
 			"the GOAWAY path did not broadcast on fcOutCond, so a blocked writer never re-checks (B.2.6)")
 	}
 }
@@ -174,16 +157,14 @@ func TestOnGoAway_WakesAcquireSendCredits(t *testing.T) {
 // is a no-op: no echo frame is written back to the peer.
 func TestOnPing_AckFrame_IsNoop(t *testing.T) {
 	var buf bytes.Buffer
-	fr := frame.NewFramer(&buf, bytes.NewReader([]byte{}))
 	c := newGoAwayConn()
-	c.fr = fr
+	c.fr = frame.NewFramer(&buf, bytes.NewReader([]byte{}))
 	h := newConnHandler(c, hpack.NewDecoder())
-	if err := h.OnPing(frame.FrameHeader{Flags: frame.FlagPingAck}, [8]byte{1, 2, 3, 4, 5, 6, 7, 8}); err != nil {
-		t.Fatalf("OnPing(ACK): %v", err)
-	}
-	if buf.Len() != 0 {
-		t.Fatalf("ACK echoed for ACK input: %d bytes", buf.Len())
-	}
+
+	err := h.OnPing(frame.FrameHeader{Flags: frame.FlagPingAck}, [8]byte{1, 2, 3, 4, 5, 6, 7, 8})
+
+	require.NoErrorf(t, err, "OnPing(ACK)")
+	require.Zerof(t, buf.Len(), "ACK echoed for ACK input: %d bytes", buf.Len())
 }
 
 // TestOnPing_NonAck_EchoesPayloadWithAckFlag verifies the RFC §6.7
@@ -191,31 +172,22 @@ func TestOnPing_AckFrame_IsNoop(t *testing.T) {
 // 8-byte opaque data.
 func TestOnPing_NonAck_EchoesPayloadWithAckFlag(t *testing.T) {
 	var buf bytes.Buffer
-	fr := frame.NewFramer(&buf, bytes.NewReader([]byte{}))
 	c := newGoAwayConn()
-	c.fr = fr
+	c.fr = frame.NewFramer(&buf, bytes.NewReader([]byte{}))
 	h := newConnHandler(c, hpack.NewDecoder())
 	payload := [8]byte{0xDE, 0xAD, 0xBE, 0xEF, 0xFA, 0xCE, 0xCA, 0xFE}
-	if err := h.OnPing(frame.FrameHeader{}, payload); err != nil {
-		t.Fatalf("OnPing: %v", err)
-	}
+
+	err := h.OnPing(frame.FrameHeader{}, payload)
+
+	require.NoErrorf(t, err, "OnPing")
 	got := parseFrameHeaders(t, buf.Bytes())
-	if len(got) != 1 {
-		t.Fatalf("frame count = %d, want 1", len(got))
-	}
-	if got[0].ftype != 0x6 { // PING
-		t.Fatalf("ftype = 0x%x, want 0x6 (PING)", got[0].ftype)
-	}
-	if got[0].flags&0x1 == 0 {
-		t.Fatalf("ACK flag not set")
-	}
-	if got[0].length != 8 {
-		t.Fatalf("PING length = %d, want 8", got[0].length)
-	}
+	require.Lenf(t, got, 1, "frame count = %d, want 1", len(got))
+	require.Equalf(t, byte(0x6), got[0].ftype, "ftype = 0x%x, want 0x6 (PING)", got[0].ftype)
+	require.NotZero(t, got[0].flags&0x1, "ACK flag not set")
+	require.EqualValuesf(t, 8, got[0].length, "PING length = %d, want 8", got[0].length)
 	gotPayload := buf.Bytes()[9:17]
-	if !bytes.Equal(gotPayload, payload[:]) {
-		t.Fatalf("payload = %x, want %x", gotPayload, payload)
-	}
+	assert.Truef(t, bytes.Equal(gotPayload, payload[:]),
+		"payload = %x, want %x", gotPayload, payload)
 }
 
 // newGoAwayConn builds a *Conn just enough for OnGoAway / OnPing /

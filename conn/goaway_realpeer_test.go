@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/lodgvideon/poseidon-http-client/header"
+	"github.com/stretchr/testify/require"
 )
 
 // TestConformance_RFC7540_Sec68_RealPeerGoAwayPartition pins RFC 7540 §6.8
@@ -33,17 +34,14 @@ func TestConformance_RFC7540_Sec68_RealPeerGoAwayPartition(t *testing.T) {
 	var started sync.WaitGroup
 	started.Add(N)
 	proceed := make(chan struct{})
-
 	srv, cfg := startH2TestServer(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		started.Done()
 		<-proceed // hold every stream open across the GOAWAY
 		w.WriteHeader(204)
 	}))
 	defer srv.Close()
-
 	c := dialServer(t, srv, cfg)
 	defer c.Close()
-
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
 
@@ -55,17 +53,18 @@ func TestConformance_RFC7540_Sec68_RealPeerGoAwayPartition(t *testing.T) {
 		s, err := c.NewStream(ctx)
 		if err != nil {
 			close(proceed)
-			t.Fatalf("NewStream %d: %v", i, err)
 		}
-		if err := s.SendHeaders(ctx, []header.Field{
+		require.NoErrorf(t, err, "NewStream %d", i)
+		err = s.SendHeaders(ctx, []header.Field{
 			{Name: []byte(":method"), Value: []byte("GET")},
 			{Name: []byte(":scheme"), Value: []byte("https")},
 			{Name: []byte(":authority"), Value: []byte("example.com")},
 			{Name: []byte(":path"), Value: []byte("/")},
-		}, true); err != nil {
+		}, true)
+		if err != nil {
 			close(proceed)
-			t.Fatalf("SendHeaders %d: %v", i, err)
 		}
+		require.NoErrorf(t, err, "SendHeaders %d", i)
 		streams = append(streams, s)
 	}
 
@@ -80,7 +79,7 @@ func TestConformance_RFC7540_Sec68_RealPeerGoAwayPartition(t *testing.T) {
 	case <-allStarted:
 	case <-time.After(10 * time.Second):
 		close(proceed)
-		t.Fatal("handlers did not all reach the server; streams were never concurrently in-flight")
+		require.FailNow(t, "handlers did not all reach the server; streams were never concurrently in-flight")
 	}
 
 	// Graceful shutdown: server emits GOAWAY(maxClientStreamID) and keeps the
@@ -97,7 +96,7 @@ func TestConformance_RFC7540_Sec68_RealPeerGoAwayPartition(t *testing.T) {
 	for !c.goAwayReceived.Load() {
 		if time.Now().After(deadline) {
 			close(proceed)
-			t.Fatal("no GOAWAY observed within 10s of srv.Shutdown")
+			require.FailNow(t, "no GOAWAY observed within 10s of srv.Shutdown")
 		}
 		time.Sleep(5 * time.Millisecond)
 	}
@@ -111,41 +110,38 @@ func TestConformance_RFC7540_Sec68_RealPeerGoAwayPartition(t *testing.T) {
 			maxSent = s.ID()
 		}
 	}
-	if last != maxSent {
-		t.Fatalf("peer GOAWAY lastStreamID = %d, want %d (= highest id we sent): the peer did not process all %d streams, so the partition below is not the one this test means to pin", last, maxSent, N)
-	}
+	require.Equalf(t, maxSent, last,
+		"peer GOAWAY lastStreamID = %d, want %d (= highest id we sent): the peer did not "+
+			"process all %d streams, so the partition below is not the one this test means to pin",
+		last, maxSent, N)
 
 	// Every stream is at or below the boundary, so every one must survive:
 	// still registered, not reset, and able to complete.
 	c.smu.Lock()
 	registered := len(c.streams)
 	c.smu.Unlock()
-	if registered != N {
-		t.Fatalf("registered streams = %d, want %d: GOAWAY(last=%d) evicted streams at or below its own lastStreamID, violating RFC 7540 §6.8", registered, N, last)
-	}
+	require.Equalf(t, N, registered,
+		"registered streams = %d, want %d: GOAWAY(last=%d) evicted streams at or below "+
+			"its own lastStreamID, violating RFC 7540 §6.8", registered, N, last)
 
 	close(proceed) // let the handlers respond
 
 	for i, s := range streams {
 		ev, err := s.Recv(ctx)
-		if err != nil {
-			t.Fatalf("stream %d (id=%d, lastStreamID=%d): Recv after GOAWAY: %v; §6.8 requires it to complete", i, s.ID(), last, err)
-		}
-		if ev.Type == EventReset {
-			t.Fatalf("stream %d (id=%d) reset with code %v after GOAWAY(last=%d); id <= lastStreamID must complete, not reset", i, s.ID(), ev.RSTCode, last)
-		}
-		if ev.Type != EventHeaders {
-			t.Fatalf("stream %d (id=%d): first event = %v, want EventHeaders", i, s.ID(), ev.Type)
-		}
+		require.NoErrorf(t, err, "stream %d (id=%d, lastStreamID=%d): Recv after GOAWAY; "+
+			"§6.8 requires it to complete", i, s.ID(), last)
+		require.NotEqualf(t, EventReset, ev.Type,
+			"stream %d (id=%d) reset with code %v after GOAWAY(last=%d); id <= lastStreamID "+
+				"must complete, not reset", i, s.ID(), ev.RSTCode, last)
+		require.Equalf(t, EventHeaders, ev.Type,
+			"stream %d (id=%d): first event = %v, want EventHeaders", i, s.ID(), ev.Type)
 		var status string
 		for _, f := range ev.Headers {
 			if string(f.Name) == ":status" {
 				status = string(f.Value)
 			}
 		}
-		if status != "204" {
-			t.Fatalf("stream %d (id=%d): status = %q, want 204", i, s.ID(), status)
-		}
+		require.Equalf(t, "204", status, "stream %d (id=%d): status = %q, want 204", i, s.ID(), status)
 	}
 
 	<-shutdownDone

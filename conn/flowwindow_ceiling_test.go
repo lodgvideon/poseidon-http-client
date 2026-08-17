@@ -1,10 +1,11 @@
 package conn
 
 import (
-	"errors"
 	"testing"
 
 	"github.com/lodgvideon/poseidon-http-client/frame"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // The RFC 7540 §6.9.1 ceiling used to be declared three times in this package,
@@ -18,9 +19,10 @@ import (
 
 // TestMaxFlowWindow_IsTheRFCCeiling pins the number, not a relation.
 func TestMaxFlowWindow_IsTheRFCCeiling(t *testing.T) {
-	if maxFlowWindow != 2147483647 {
-		t.Errorf("maxFlowWindow = %d, want 2147483647 (2^31-1, RFC 7540 §6.9.1)", maxFlowWindow)
-	}
+	got := maxFlowWindow
+
+	assert.EqualValuesf(t, 2147483647, got,
+		"maxFlowWindow = %d, want 2147483647 (2^31-1, RFC 7540 §6.9.1)", got)
 }
 
 // TestOnWindowUpdate_BoundaryIsExact drives the §6.9.1 path that used to read the
@@ -31,15 +33,19 @@ func TestOnWindowUpdate_BoundaryIsExact(t *testing.T) {
 	t.Run("connection window", func(t *testing.T) {
 		c := newGoAwayConn()
 		c.peerConnSendWindow = 1
+
 		// 1 + (2^31-2) == the ceiling exactly.
-		if err := c.onWindowUpdate(0, uint32(maxFlowWindow-1)); err != nil {
-			t.Fatalf("an increment landing exactly on the ceiling was rejected: %v", err)
-		}
+		atCeiling := c.onWindowUpdate(0, uint32(maxFlowWindow-1))
 		c.peerConnSendWindow = 1
-		err := c.onWindowUpdate(0, uint32(maxFlowWindow))
+		past := c.onWindowUpdate(0, uint32(maxFlowWindow))
+
+		require.NoErrorf(t, atCeiling,
+			"an increment landing exactly on the ceiling was rejected: %v", atCeiling)
 		var ce *ConnError
-		if !errors.As(err, &ce) || ce.Code != frame.ErrCodeFlowControlError {
-			t.Errorf("one past the ceiling gave %v, want a ConnError FLOW_CONTROL_ERROR", err)
+		if assert.ErrorAsf(t, past, &ce,
+			"one past the ceiling gave %v, want a ConnError FLOW_CONTROL_ERROR", past) {
+			assert.Equalf(t, frame.ErrCodeFlowControlError, ce.Code,
+				"one past the ceiling gave %v, want a ConnError FLOW_CONTROL_ERROR", past)
 		}
 	})
 
@@ -47,14 +53,18 @@ func TestOnWindowUpdate_BoundaryIsExact(t *testing.T) {
 		c := newGoAwayConn()
 		s := &Stream{id: 1, sendWindow: 1}
 		c.streams[1] = s
-		if err := c.onWindowUpdate(1, uint32(maxFlowWindow-1)); err != nil {
-			t.Fatalf("an increment landing exactly on the ceiling was rejected: %v", err)
-		}
+
+		atCeiling := c.onWindowUpdate(1, uint32(maxFlowWindow-1))
 		s.sendWindow = 1
-		err := c.onWindowUpdate(1, uint32(maxFlowWindow))
+		past := c.onWindowUpdate(1, uint32(maxFlowWindow))
+
+		require.NoErrorf(t, atCeiling,
+			"an increment landing exactly on the ceiling was rejected: %v", atCeiling)
 		var se *StreamError
-		if !errors.As(err, &se) || se.Code != frame.ErrCodeFlowControlError {
-			t.Errorf("one past the ceiling gave %v, want a StreamError FLOW_CONTROL_ERROR", err)
+		if assert.ErrorAsf(t, past, &se,
+			"one past the ceiling gave %v, want a StreamError FLOW_CONTROL_ERROR", past) {
+			assert.Equalf(t, frame.ErrCodeFlowControlError, se.Code,
+				"one past the ceiling gave %v, want a StreamError FLOW_CONTROL_ERROR", past)
 		}
 	})
 }
@@ -66,22 +76,24 @@ func TestApplyPeerSettings_InitialWindowBoundaryIsExact(t *testing.T) {
 	atCeiling.Pairs[0] = frame.SettingPair{
 		ID: frame.SettingInitialWindowSize, Value: uint32(maxFlowWindow),
 	}
-	c := newGoAwayConn()
-	if err := c.applyPeerSettings(atCeiling); err != nil {
-		t.Fatalf("SETTINGS_INITIAL_WINDOW_SIZE at exactly 2^31-1 was rejected: %v", err)
-	}
-
 	// One past it is not expressible in the 31-bit field as a larger legal value,
 	// so the peer has to send 2^31, which is where the check bites.
 	past := frame.SettingsParams{N: 1}
 	past.Pairs[0] = frame.SettingPair{
 		ID: frame.SettingInitialWindowSize, Value: uint32(maxFlowWindow) + 1,
 	}
-	c2 := newGoAwayConn()
-	err := c2.applyPeerSettings(past)
+
+	atErr := newGoAwayConn().applyPeerSettings(atCeiling)
+	pastErr := newGoAwayConn().applyPeerSettings(past)
+
+	require.NoErrorf(t, atErr,
+		"SETTINGS_INITIAL_WINDOW_SIZE at exactly 2^31-1 was rejected: %v", atErr)
 	var ce *ConnError
-	if !errors.As(err, &ce) || ce.Code != frame.ErrCodeFlowControlError {
-		t.Errorf("SETTINGS_INITIAL_WINDOW_SIZE one past the ceiling gave %v, "+
-			"want a ConnError FLOW_CONTROL_ERROR (§6.5.2)", err)
+	if assert.ErrorAsf(t, pastErr, &ce,
+		"SETTINGS_INITIAL_WINDOW_SIZE one past the ceiling gave %v, "+
+			"want a ConnError FLOW_CONTROL_ERROR (§6.5.2)", pastErr) {
+		assert.Equalf(t, frame.ErrCodeFlowControlError, ce.Code,
+			"SETTINGS_INITIAL_WINDOW_SIZE one past the ceiling gave %v, "+
+				"want a ConnError FLOW_CONTROL_ERROR (§6.5.2)", pastErr)
 	}
 }

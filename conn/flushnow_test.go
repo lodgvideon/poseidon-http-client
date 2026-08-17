@@ -8,6 +8,8 @@ import (
 	"time"
 
 	"github.com/lodgvideon/poseidon-http-client/frame"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // The control frames that must leave immediately — WINDOW_UPDATE, PING ACK,
@@ -65,9 +67,8 @@ func gcDeferFixture(t *testing.T) (wmu *sync.Mutex, b *writeBatcher, wb *bufio.W
 		if d == 1 {
 			break
 		}
-		if time.Now().After(deadline) {
-			t.Fatal("the writer never parked in commit; the fixture is not testing deferral")
-		}
+		require.Falsef(t, time.Now().After(deadline),
+			"the writer never parked in commit; the fixture is not testing deferral")
 		time.Sleep(time.Millisecond)
 	}
 
@@ -78,7 +79,7 @@ func gcDeferFixture(t *testing.T) (wmu *sync.Mutex, b *writeBatcher, wb *bufio.W
 		select {
 		case <-done:
 		case <-time.After(5 * time.Second):
-			t.Error("parked writer never released even by flushNowLocked")
+			assert.Fail(t, "parked writer never released even by flushNowLocked")
 		}
 	}
 }
@@ -114,9 +115,8 @@ func connDeferFixture(t *testing.T) (c *Conn, parked <-chan struct{}, release fu
 		if d == 1 {
 			break
 		}
-		if time.Now().After(deadline) {
-			t.Fatal("the writer never parked in commit; the fixture is not testing deferral")
-		}
+		require.Falsef(t, time.Now().After(deadline),
+			"the writer never parked in commit; the fixture is not testing deferral")
 		time.Sleep(time.Millisecond)
 	}
 
@@ -127,7 +127,7 @@ func connDeferFixture(t *testing.T) (c *Conn, parked <-chan struct{}, release fu
 		select {
 		case <-done:
 		case <-time.After(5 * time.Second):
-			t.Error("parked writer never released")
+			assert.Fail(t, "parked writer never released")
 		}
 	}
 }
@@ -153,20 +153,16 @@ func TestFlushNow_ReleasesDeferringWriter(t *testing.T) {
 	_, _ = wb.WriteString("PING") // the control frame that must leave now
 	err := b.flushNowLocked()
 	wmu.Unlock()
-	if err != nil {
-		t.Fatalf("flushNowLocked: %v", err)
-	}
 
+	require.NoErrorf(t, err, "flushNowLocked")
 	select {
 	case <-parked:
-		if *commitErr != nil {
-			t.Errorf("the released writer reported %v, want nil — its bytes were flushed", *commitErr)
-		}
+		assert.NoErrorf(t, *commitErr,
+			"the released writer reported %v, want nil — its bytes were flushed", *commitErr)
 	case <-time.After(2 * time.Second):
-		t.Fatal("the deferring writer was not released by the flush that carried its bytes; " +
+		require.FailNow(t, "the deferring writer was not released by the flush that carried its bytes; "+
 			"it is still waiting for some unrelated writer to commit")
 	}
-
 	// Released by THIS flush, not by falling through and flushing itself. The
 	// distinction is the whole convoy protocol: a waiter returns early only when
 	// seq reached the target it sampled. If seq never advances, every deferring
@@ -175,10 +171,9 @@ func TestFlushNow_ReleasesDeferringWriter(t *testing.T) {
 	wmu.Lock()
 	seq := b.seq
 	wmu.Unlock()
-	if seq != 1 {
-		t.Errorf("batcher seq = %d, want 1 — the flush did not record itself, so the "+
+	assert.EqualValuesf(t, 1, seq,
+		"batcher seq = %d, want 1 — the flush did not record itself, so the "+
 			"waiter was woken but had to flush again instead of returning", seq)
-	}
 }
 
 // TestFlushNow_ControlFrameWritersUseIt covers the call sites rather than the
@@ -204,15 +199,16 @@ func TestFlushNow_ControlFrameWritersUseIt(t *testing.T) {
 			c, parked, release := connDeferFixture(t)
 			defer release()
 
-			if err := tc.write(c); err != nil {
-				t.Fatalf("%s: %v", tc.name, err)
-			}
+			err := tc.write(c)
+
+			require.NoErrorf(t, err, "%s", tc.name)
 			select {
 			case <-parked:
 			case <-time.After(2 * time.Second):
-				t.Fatalf("%s did not release the writer deferring behind it — it flushed "+
-					"that writer's bytes to the socket and left it parked, which is what "+
-					"calling flushWrite instead of flushNow does", tc.name)
+				require.FailNowf(t, "the deferring writer was left parked",
+					"%s did not release the writer deferring behind it — it flushed "+
+						"that writer's bytes to the socket and left it parked, which is what "+
+						"calling flushWrite instead of flushNow does", tc.name)
 			}
 		})
 	}
@@ -232,14 +228,13 @@ func TestFlushNow_PlainFlushLeavesWriterParked(t *testing.T) {
 	wmu.Lock()
 	_, _ = wb.WriteString("PING")
 	// The pre-fix path: bytes go out, no seq, no broadcast.
-	if err := wb.Flush(); err != nil {
-		t.Fatalf("Flush: %v", err)
-	}
+	err := wb.Flush()
 	wmu.Unlock()
 
+	require.NoErrorf(t, err, "Flush")
 	select {
 	case <-parked:
-		t.Fatal("a plain flush released the deferring writer — then the gate above " +
+		require.FailNow(t, "a plain flush released the deferring writer — then the gate above "+
 			"cannot distinguish flushNowLocked from flushWrite and proves nothing")
 	case <-time.After(250 * time.Millisecond):
 		// Correct: still parked. release() frees it.
@@ -253,17 +248,14 @@ func TestFlushNow_DisabledBatcherStillFlushes(t *testing.T) {
 	sink := &countingSink{}
 	wb := bufio.NewWriterSize(sink, defaultWriteBufferSize)
 	b := newWriteBatcher(false, &sync.Mutex{}, wb, defaultWriteBufferSize/2)
+	_, werr := wb.WriteString("WINDOW_UPDATE")
+	require.NoErrorf(t, werr, "Write")
 
-	if _, err := wb.WriteString("WINDOW_UPDATE"); err != nil {
-		t.Fatalf("Write: %v", err)
-	}
-	if err := b.flushNowLocked(); err != nil {
-		t.Fatalf("flushNowLocked: %v", err)
-	}
-	if sink.writes != 1 {
-		t.Errorf("underlying writes = %d, want 1 — the frame did not reach the socket", sink.writes)
-	}
-	if b.seq != 0 {
-		t.Errorf("seq = %d, want 0 — a disabled batcher has no convoy to sequence", b.seq)
-	}
+	err := b.flushNowLocked()
+
+	require.NoErrorf(t, err, "flushNowLocked")
+	assert.EqualValuesf(t, 1, sink.writes,
+		"underlying writes = %d, want 1 — the frame did not reach the socket", sink.writes)
+	assert.EqualValuesf(t, 0, b.seq,
+		"seq = %d, want 0 — a disabled batcher has no convoy to sequence", b.seq)
 }
