@@ -15,6 +15,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
 	"github.com/lodgvideon/poseidon-http-client/conn"
 )
 
@@ -47,9 +50,7 @@ func dialGRPC(t *testing.T, srv *httptest.Server, cfg *tls.Config) *ClientConn {
 		Conn:      conn.ConnOptions{Dialer: &conn.TLSDialer{Config: cfg}},
 		Authority: "example.com",
 	})
-	if err != nil {
-		t.Fatalf("Dial: %v", err)
-	}
+	require.NoError(t, err, "Dial")
 	t.Cleanup(func() { _ = cc.Close() })
 	return cc
 }
@@ -105,28 +106,22 @@ func srvFinish(w http.ResponseWriter, code Code, msg string) {
 func TestIntegration_Unary_Echo(t *testing.T) {
 	srv, cfg := startGRPCServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		msg, err := srvReadMessage(r.Body)
-		if err != nil {
-			t.Errorf("server read: %v", err)
+		if !assert.NoError(t, err, "server read") {
 			return
 		}
 		srvBeginResponse(w)
-		if err := srvWriteMessage(w, append([]byte("echo:"), msg...)); err != nil {
-			t.Errorf("server write: %v", err)
-		}
+		assert.NoError(t, srvWriteMessage(w, append([]byte("echo:"), msg...)), "server write")
 		srvFinish(w, OK, "")
 	}))
 	defer srv.Close()
 	cc := dialGRPC(t, srv, cfg)
-
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
+
 	got, err := cc.Invoke(ctx, "/test.Svc/Echo", []byte("ping"), nil)
-	if err != nil {
-		t.Fatalf("Invoke: %v", err)
-	}
-	if string(got) != "echo:ping" {
-		t.Fatalf("response = %q", got)
-	}
+
+	require.NoError(t, err, "Invoke")
+	require.Equalf(t, "echo:ping", string(got), "response = %q", got)
 }
 
 // TestIntegration_Unary_RequestShape pins the request the client puts on the
@@ -150,46 +145,31 @@ func TestIntegration_Unary_RequestShape(t *testing.T) {
 	}))
 	defer srv.Close()
 	cc := dialGRPC(t, srv, cfg)
-
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	if _, err := cc.Invoke(ctx, "/pkg.Service/Method", []byte("x"), nil); err != nil {
-		t.Fatalf("Invoke: %v", err)
-	}
 
+	_, err := cc.Invoke(ctx, "/pkg.Service/Method", []byte("x"), nil)
+
+	require.NoError(t, err, "Invoke")
 	mu.Lock()
 	defer mu.Unlock()
-	if verb != "POST" {
-		t.Errorf("method = %q, want POST", verb)
-	}
-	if path != "/pkg.Service/Method" {
-		t.Errorf("path = %q", path)
-	}
-	if ct := seen.Get("Content-Type"); ct != "application/grpc" {
-		t.Errorf("content-type = %q", ct)
-	}
-	if te := seen.Get("Te"); te != "trailers" {
-		t.Errorf("te = %q, want trailers", te)
-	}
-	if ua := seen.Get("User-Agent"); ua != DefaultUserAgent {
-		t.Errorf("user-agent = %q", ua)
-	}
-	if ae := seen.Get("Grpc-Accept-Encoding"); ae != "identity" {
-		t.Errorf("grpc-accept-encoding = %q", ae)
-	}
+	assert.Equalf(t, "POST", verb, "method = %q, want POST", verb)
+	assert.Equalf(t, "/pkg.Service/Method", path, "path = %q", path)
+	assert.Equalf(t, "application/grpc", seen.Get("Content-Type"),
+		"content-type = %q", seen.Get("Content-Type"))
+	assert.Equalf(t, "trailers", seen.Get("Te"), "te = %q, want trailers", seen.Get("Te"))
+	assert.Equalf(t, DefaultUserAgent, seen.Get("User-Agent"),
+		"user-agent = %q", seen.Get("User-Agent"))
+	assert.Equalf(t, "identity", seen.Get("Grpc-Accept-Encoding"),
+		"grpc-accept-encoding = %q", seen.Get("Grpc-Accept-Encoding"))
 	// The context above carries a deadline, so grpc-timeout must be present
 	// and must parse back to something no longer than what remains.
 	to := seen.Get("Grpc-Timeout")
-	if to == "" {
-		t.Fatal("grpc-timeout absent although the call context had a deadline")
-	}
+	require.NotEmpty(t, to, "grpc-timeout absent although the call context had a deadline")
 	d, err := decodeTimeout(to)
-	if err != nil {
-		t.Fatalf("grpc-timeout %q: %v", to, err)
-	}
-	if d <= 0 || d > 6*time.Second {
-		t.Fatalf("grpc-timeout = %v, outside the 5s deadline that was set", d)
-	}
+	require.NoErrorf(t, err, "grpc-timeout %q", to)
+	require.Truef(t, d > 0 && d <= 6*time.Second,
+		"grpc-timeout = %v, outside the 5s deadline that was set", d)
 }
 
 func TestIntegration_Unary_NoDeadlineOmitsTimeout(t *testing.T) {
@@ -209,26 +189,22 @@ func TestIntegration_Unary_NoDeadlineOmitsTimeout(t *testing.T) {
 	defer srv.Close()
 	cc := dialGRPC(t, srv, cfg)
 
-	if _, err := cc.Invoke(context.Background(), "/t.S/M", []byte("x"), nil); err != nil {
-		t.Fatalf("Invoke: %v", err)
-	}
+	_, err := cc.Invoke(context.Background(), "/t.S/M", []byte("x"), nil)
+
+	require.NoError(t, err, "Invoke")
 	mu.Lock()
 	defer mu.Unlock()
-	if to != "" {
-		t.Fatalf("grpc-timeout = %q, want absent for a deadline-less context", to)
-	}
+	require.Emptyf(t, to, "grpc-timeout = %q, want absent for a deadline-less context", to)
 }
 
 func TestIntegration_ServerStreaming(t *testing.T) {
 	srv, cfg := startGRPCServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if _, err := srvReadMessage(r.Body); err != nil {
-			t.Errorf("server read: %v", err)
+		if _, err := srvReadMessage(r.Body); !assert.NoError(t, err, "server read") {
 			return
 		}
 		srvBeginResponse(w)
 		for i := 0; i < 3; i++ {
-			if err := srvWriteMessage(w, []byte(fmt.Sprintf("chunk-%d", i))); err != nil {
-				t.Errorf("server write: %v", err)
+			if err := srvWriteMessage(w, []byte(fmt.Sprintf("chunk-%d", i))); !assert.NoError(t, err, "server write") {
 				return
 			}
 		}
@@ -236,38 +212,26 @@ func TestIntegration_ServerStreaming(t *testing.T) {
 	}))
 	defer srv.Close()
 	cc := dialGRPC(t, srv, cfg)
-
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	s, err := cc.NewStream(ctx, "/test.Svc/Server", nil)
-	if err != nil {
-		t.Fatalf("NewStream: %v", err)
-	}
+	require.NoError(t, err, "NewStream")
 	defer func() { _ = s.Close() }()
-	if err := s.Send(ctx, []byte("go")); err != nil {
-		t.Fatalf("Send: %v", err)
-	}
-	if err := s.CloseSend(ctx); err != nil {
-		t.Fatalf("CloseSend: %v", err)
-	}
 
+	require.NoError(t, s.Send(ctx, []byte("go")), "Send")
+	require.NoError(t, s.CloseSend(ctx), "CloseSend")
 	var got []string
 	for {
 		msg, err := s.Recv(ctx)
 		if errors.Is(err, io.EOF) {
 			break
 		}
-		if err != nil {
-			t.Fatalf("Recv: %v", err)
-		}
+		require.NoError(t, err, "Recv")
 		got = append(got, string(msg))
 	}
-	if strings.Join(got, ",") != "chunk-0,chunk-1,chunk-2" {
-		t.Fatalf("messages = %v", got)
-	}
-	if s.Status().Code != OK {
-		t.Fatalf("status = %v", s.Status())
-	}
+
+	require.Equalf(t, "chunk-0,chunk-1,chunk-2", strings.Join(got, ","), "messages = %v", got)
+	require.Equalf(t, OK, s.Status().Code, "status = %v", s.Status())
 }
 
 // TestIntegration_EmptyServerStream covers a successful call that carries no
@@ -282,26 +246,18 @@ func TestIntegration_EmptyServerStream(t *testing.T) {
 	}))
 	defer srv.Close()
 	cc := dialGRPC(t, srv, cfg)
-
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	s, err := cc.NewStream(ctx, "/test.Svc/Empty", nil)
-	if err != nil {
-		t.Fatalf("NewStream: %v", err)
-	}
+	require.NoError(t, err, "NewStream")
 	defer func() { _ = s.Close() }()
-	if err := s.Send(ctx, []byte("x")); err != nil {
-		t.Fatalf("Send: %v", err)
-	}
-	if err := s.CloseSend(ctx); err != nil {
-		t.Fatalf("CloseSend: %v", err)
-	}
-	if _, err := s.Recv(ctx); !errors.Is(err, io.EOF) {
-		t.Fatalf("Recv = %v, want io.EOF", err)
-	}
-	if s.Status().Code != OK {
-		t.Fatalf("status = %v, want OK", s.Status())
-	}
+
+	require.NoError(t, s.Send(ctx, []byte("x")), "Send")
+	require.NoError(t, s.CloseSend(ctx), "CloseSend")
+	_, recvErr := s.Recv(ctx)
+
+	require.ErrorIsf(t, recvErr, io.EOF, "Recv = %v, want io.EOF", recvErr)
+	require.Equalf(t, OK, s.Status().Code, "status = %v, want OK", s.Status())
 }
 
 func TestIntegration_ClientStreaming(t *testing.T) {
@@ -312,46 +268,33 @@ func TestIntegration_ClientStreaming(t *testing.T) {
 			if errors.Is(err, io.EOF) {
 				break
 			}
-			if err != nil {
-				t.Errorf("server read: %v", err)
+			if !assert.NoError(t, err, "server read") {
 				return
 			}
 			total += len(msg)
 		}
 		srvBeginResponse(w)
-		if err := srvWriteMessage(w, []byte(fmt.Sprintf("%d", total))); err != nil {
-			t.Errorf("server write: %v", err)
-		}
+		assert.NoError(t, srvWriteMessage(w, []byte(fmt.Sprintf("%d", total))), "server write")
 		srvFinish(w, OK, "")
 	}))
 	defer srv.Close()
 	cc := dialGRPC(t, srv, cfg)
-
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	s, err := cc.NewStream(ctx, "/test.Svc/Client", nil)
-	if err != nil {
-		t.Fatalf("NewStream: %v", err)
-	}
+	require.NoError(t, err, "NewStream")
 	defer func() { _ = s.Close() }()
+
 	for i := 0; i < 4; i++ {
-		if err := s.Send(ctx, []byte("abcde")); err != nil {
-			t.Fatalf("Send %d: %v", i, err)
-		}
+		require.NoErrorf(t, s.Send(ctx, []byte("abcde")), "Send %d", i)
 	}
-	if err := s.CloseSend(ctx); err != nil {
-		t.Fatalf("CloseSend: %v", err)
-	}
+	require.NoError(t, s.CloseSend(ctx), "CloseSend")
 	msg, err := s.Recv(ctx)
-	if err != nil {
-		t.Fatalf("Recv: %v", err)
-	}
-	if string(msg) != "20" {
-		t.Fatalf("total = %q, want 20", msg)
-	}
-	if _, err := s.Recv(ctx); !errors.Is(err, io.EOF) {
-		t.Fatalf("second Recv = %v, want io.EOF", err)
-	}
+
+	require.NoError(t, err, "Recv")
+	require.Equalf(t, "20", string(msg), "total = %q, want 20", msg)
+	_, err = s.Recv(ctx)
+	require.ErrorIsf(t, err, io.EOF, "second Recv = %v, want io.EOF", err)
 }
 
 func TestIntegration_SendAfterCloseSend(t *testing.T) {
@@ -363,23 +306,20 @@ func TestIntegration_SendAfterCloseSend(t *testing.T) {
 	}))
 	defer srv.Close()
 	cc := dialGRPC(t, srv, cfg)
-
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	s, err := cc.NewStream(ctx, "/t.S/M", nil)
-	if err != nil {
-		t.Fatalf("NewStream: %v", err)
-	}
+	require.NoError(t, err, "NewStream")
 	defer func() { _ = s.Close() }()
-	if err := s.CloseSend(ctx); err != nil {
-		t.Fatalf("CloseSend: %v", err)
-	}
-	if err := s.CloseSend(ctx); err != nil {
-		t.Fatalf("second CloseSend = %v, want nil (idempotent)", err)
-	}
-	if err := s.Send(ctx, []byte("late")); !errors.Is(err, ErrSendClosed) {
-		t.Fatalf("Send after CloseSend = %v, want ErrSendClosed", err)
-	}
+
+	first := s.CloseSend(ctx)
+	second := s.CloseSend(ctx)
+	lateSend := s.Send(ctx, []byte("late"))
+
+	require.NoError(t, first, "CloseSend")
+	require.NoErrorf(t, second, "second CloseSend = %v, want nil (idempotent)", second)
+	require.ErrorIsf(t, lateSend, ErrSendClosed,
+		"Send after CloseSend = %v, want ErrSendClosed", lateSend)
 }
 
 // TestIntegration_Bidi_Concurrent is the acid test for the claim that
@@ -395,12 +335,10 @@ func TestIntegration_Bidi_Concurrent(t *testing.T) {
 			if errors.Is(err, io.EOF) {
 				break
 			}
-			if err != nil {
-				t.Errorf("server read: %v", err)
+			if !assert.NoError(t, err, "server read") {
 				return
 			}
-			if err := srvWriteMessage(w, append([]byte("re:"), msg...)); err != nil {
-				t.Errorf("server write: %v", err)
+			if err := srvWriteMessage(w, append([]byte("re:"), msg...)); !assert.NoError(t, err, "server write") {
 				return
 			}
 		}
@@ -408,13 +346,10 @@ func TestIntegration_Bidi_Concurrent(t *testing.T) {
 	}))
 	defer srv.Close()
 	cc := dialGRPC(t, srv, cfg)
-
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	s, err := cc.NewStream(ctx, "/test.Svc/Bidi", nil)
-	if err != nil {
-		t.Fatalf("NewStream: %v", err)
-	}
+	require.NoError(t, err, "NewStream")
 	defer func() { _ = s.Close() }()
 
 	sendErr := make(chan error, 1)
@@ -427,32 +362,22 @@ func TestIntegration_Bidi_Concurrent(t *testing.T) {
 		}
 		sendErr <- s.CloseSend(ctx)
 	}()
-
 	var got []string
 	for {
 		msg, err := s.Recv(ctx)
 		if errors.Is(err, io.EOF) {
 			break
 		}
-		if err != nil {
-			t.Fatalf("Recv after %d messages: %v", len(got), err)
-		}
+		require.NoErrorf(t, err, "Recv after %d messages", len(got))
 		got = append(got, string(msg))
 	}
-	if err := <-sendErr; err != nil {
-		t.Fatalf("send side: %v", err)
-	}
-	if len(got) != n {
-		t.Fatalf("received %d messages, want %d", len(got), n)
-	}
+
+	require.NoError(t, <-sendErr, "send side")
+	require.Lenf(t, got, n, "received %d messages, want %d", len(got), n)
 	for i, m := range got {
-		if want := fmt.Sprintf("re:m%d", i); m != want {
-			t.Fatalf("message %d = %q, want %q", i, m, want)
-		}
+		require.Equalf(t, fmt.Sprintf("re:m%d", i), m, "message %d = %q", i, m)
 	}
-	if s.Status().Code != OK {
-		t.Fatalf("status = %v", s.Status())
-	}
+	require.Equalf(t, OK, s.Status().Code, "status = %v", s.Status())
 }
 
 // TestIntegration_TrailersOnly is the shape most gRPC errors take: a single
@@ -469,20 +394,16 @@ func TestIntegration_TrailersOnly(t *testing.T) {
 	}))
 	defer srv.Close()
 	cc := dialGRPC(t, srv, cfg)
-
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
+
 	_, err := cc.Invoke(ctx, "/test.Svc/Missing", []byte("x"), nil)
+
 	var st *Status
-	if !errors.As(err, &st) {
-		t.Fatalf("Invoke error = %v (%T), want *Status", err, err)
-	}
-	if st.Code != NotFound {
-		t.Fatalf("code = %v, want NOT_FOUND", st.Code)
-	}
-	if st.Message != "user 142 not found" {
-		t.Fatalf("message = %q, want it percent-decoded", st.Message)
-	}
+	require.Truef(t, errors.As(err, &st), "Invoke error = %v (%T), want *Status", err, err)
+	require.Equalf(t, NotFound, st.Code, "code = %v, want NOT_FOUND", st.Code)
+	require.Equalf(t, "user 142 not found", st.Message,
+		"message = %q, want it percent-decoded", st.Message)
 }
 
 func TestIntegration_NonOKStatusInTrailers(t *testing.T) {
@@ -494,33 +415,24 @@ func TestIntegration_NonOKStatusInTrailers(t *testing.T) {
 	}))
 	defer srv.Close()
 	cc := dialGRPC(t, srv, cfg)
-
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	s, err := cc.NewStream(ctx, "/test.Svc/Denied", nil)
-	if err != nil {
-		t.Fatalf("NewStream: %v", err)
-	}
+	require.NoError(t, err, "NewStream")
 	defer func() { _ = s.Close() }()
-	if err := s.Send(ctx, []byte("x")); err != nil {
-		t.Fatalf("Send: %v", err)
-	}
-	if err := s.CloseSend(ctx); err != nil {
-		t.Fatalf("CloseSend: %v", err)
-	}
-	if msg, err := s.Recv(ctx); err != nil || string(msg) != "partial" {
-		t.Fatalf("first Recv = %q, %v", msg, err)
-	}
+
+	require.NoError(t, s.Send(ctx, []byte("x")), "Send")
+	require.NoError(t, s.CloseSend(ctx), "CloseSend")
+	msg, err := s.Recv(ctx)
+	require.NoErrorf(t, err, "first Recv = %q, %v", msg, err)
+	require.Equalf(t, "partial", string(msg), "first Recv = %q", msg)
+	_, terminalErr := s.Recv(ctx)
+
 	var st *Status
-	if _, err := s.Recv(ctx); !errors.As(err, &st) {
-		t.Fatalf("terminal Recv = %v, want *Status", err)
-	}
-	if st.Code != PermissionDenied || st.Message != "not your row" {
-		t.Fatalf("status = %+v", st)
-	}
-	if _, ok := findField(s.Trailer(), "grpc-status"); !ok {
-		t.Fatal("Trailer() does not expose grpc-status")
-	}
+	require.Truef(t, errors.As(terminalErr, &st), "terminal Recv = %v, want *Status", terminalErr)
+	require.Truef(t, st.Code == PermissionDenied && st.Message == "not your row", "status = %+v", st)
+	_, ok := findField(s.Trailer(), "grpc-status")
+	require.True(t, ok, "Trailer() does not expose grpc-status")
 }
 
 // TestIntegration_HTTPStatusMapping covers the case a proxy produces: an HTTP
@@ -531,17 +443,14 @@ func TestIntegration_HTTPStatusMapping(t *testing.T) {
 	}))
 	defer srv.Close()
 	cc := dialGRPC(t, srv, cfg)
-
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
+
 	_, err := cc.Invoke(ctx, "/test.Svc/Nope", []byte("x"), nil)
+
 	var st *Status
-	if !errors.As(err, &st) {
-		t.Fatalf("Invoke error = %v (%T), want *Status", err, err)
-	}
-	if st.Code != Unimplemented {
-		t.Fatalf("code = %v, want UNIMPLEMENTED for HTTP 404", st.Code)
-	}
+	require.Truef(t, errors.As(err, &st), "Invoke error = %v (%T), want *Status", err, err)
+	require.Equalf(t, Unimplemented, st.Code, "code = %v, want UNIMPLEMENTED for HTTP 404", st.Code)
 }
 
 // TestIntegration_MissingGRPCStatus pins that a 200 response that ends without
@@ -557,20 +466,17 @@ func TestIntegration_MissingGRPCStatus(t *testing.T) {
 	}))
 	defer srv.Close()
 	cc := dialGRPC(t, srv, cfg)
-
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
+
 	_, err := cc.Invoke(ctx, "/test.Svc/Sloppy", []byte("x"), nil)
+
 	var st *Status
-	if !errors.As(err, &st) {
-		t.Fatalf("Invoke error = %v (%T), want *Status", err, err)
-	}
+	require.Truef(t, errors.As(err, &st), "Invoke error = %v (%T), want *Status", err, err)
 	// The mapping table's 200 row is UNKNOWN, not INTERNAL: a truly successful
 	// response would have carried a grpc-status, so a 200 without one leaves
 	// the client with no idea what happened.
-	if st.Code != Unknown {
-		t.Fatalf("code = %v, want UNKNOWN", st.Code)
-	}
+	require.Equalf(t, Unknown, st.Code, "code = %v, want UNKNOWN", st.Code)
 }
 
 func TestIntegration_BadContentType(t *testing.T) {
@@ -583,14 +489,14 @@ func TestIntegration_BadContentType(t *testing.T) {
 	}))
 	defer srv.Close()
 	cc := dialGRPC(t, srv, cfg)
-
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
+
 	_, err := cc.Invoke(ctx, "/test.Svc/Html", []byte("x"), nil)
+
 	var st *Status
-	if !errors.As(err, &st) || st.Code != Internal {
-		t.Fatalf("Invoke error = %v, want INTERNAL for a non-gRPC content-type", err)
-	}
+	require.Truef(t, errors.As(err, &st) && st.Code == Internal,
+		"Invoke error = %v, want INTERNAL for a non-gRPC content-type", err)
 }
 
 func TestIntegration_ContentTypeSubtypeAccepted(t *testing.T) {
@@ -604,16 +510,13 @@ func TestIntegration_ContentTypeSubtypeAccepted(t *testing.T) {
 	}))
 	defer srv.Close()
 	cc := dialGRPC(t, srv, cfg)
-
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
+
 	got, err := cc.Invoke(ctx, "/test.Svc/Proto", []byte("x"), nil)
-	if err != nil {
-		t.Fatalf("Invoke: %v", err)
-	}
-	if string(got) != "ok" {
-		t.Fatalf("response = %q", got)
-	}
+
+	require.NoError(t, err, "Invoke")
+	require.Equalf(t, "ok", string(got), "response = %q", got)
 }
 
 func TestIntegration_MetadataRoundTrip(t *testing.T) {
@@ -629,42 +532,30 @@ func TestIntegration_MetadataRoundTrip(t *testing.T) {
 	}))
 	defer srv.Close()
 	cc := dialGRPC(t, srv, cfg)
-
 	md, err := AppendMetadata(nil, "x-request-id", []byte("req-7"))
-	if err != nil {
-		t.Fatalf("AppendMetadata: %v", err)
-	}
+	require.NoError(t, err, "AppendMetadata")
 	md, err = AppendMetadata(md, "trace-bin", []byte{0xde, 0xad})
-	if err != nil {
-		t.Fatalf("AppendMetadata: %v", err)
-	}
-
+	require.NoError(t, err, "AppendMetadata")
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
+
 	s, err := cc.NewStream(ctx, "/test.Svc/Meta", md)
-	if err != nil {
-		t.Fatalf("NewStream: %v", err)
-	}
+	require.NoError(t, err, "NewStream")
 	defer func() { _ = s.Close() }()
-	if err := s.Send(ctx, []byte("x")); err != nil {
-		t.Fatalf("Send: %v", err)
-	}
-	if err := s.CloseSend(ctx); err != nil {
-		t.Fatalf("CloseSend: %v", err)
-	}
+	require.NoError(t, s.Send(ctx, []byte("x")), "Send")
+	require.NoError(t, s.CloseSend(ctx), "CloseSend")
 	hdr, err := s.Header(ctx)
-	if err != nil {
-		t.Fatalf("Header: %v", err)
-	}
-	if v, ok, err := MetadataValue(hdr, "x-echo-id"); !ok || err != nil || string(v) != "req-7" {
-		t.Fatalf("echoed id = %q ok=%v err=%v", v, ok, err)
-	}
+
+	require.NoError(t, err, "Header")
+	v, ok, verr := MetadataValue(hdr, "x-echo-id")
+	require.Truef(t, ok && verr == nil && string(v) == "req-7",
+		"echoed id = %q ok=%v err=%v", v, ok, verr)
 	// The server echoed the base64 the client put on the wire back under a key
 	// that also ends in -bin, so reading it decodes and completes the round
 	// trip: the original bytes come back byte-for-byte.
-	if v, ok, err := MetadataValue(hdr, "x-echo-bin"); !ok || err != nil || string(v) != "\xde\xad" {
-		t.Fatalf("echoed binary = % x ok=%v err=%v, want de ad", v, ok, err)
-	}
+	v, ok, verr = MetadataValue(hdr, "x-echo-bin")
+	require.Truef(t, ok && verr == nil && string(v) == "\xde\xad",
+		"echoed binary = % x ok=%v err=%v, want de ad", v, ok, verr)
 }
 
 func TestIntegration_NewStream_RejectsBadMethod(t *testing.T) {
@@ -672,14 +563,15 @@ func TestIntegration_NewStream_RejectsBadMethod(t *testing.T) {
 	defer srv.Close()
 	cc := dialGRPC(t, srv, cfg)
 
-	if _, err := cc.NewStream(context.Background(), "test.Svc/M", nil); !errors.Is(err, ErrBadMethod) {
-		t.Fatalf("NewStream(no leading slash) = %v, want ErrBadMethod", err)
-	}
-	if _, err := cc.NewStream(context.Background(), "/t.S/M", []conn.HeaderField{
+	_, badMethodErr := cc.NewStream(context.Background(), "test.Svc/M", nil)
+	_, reservedErr := cc.NewStream(context.Background(), "/t.S/M", []conn.HeaderField{
 		{Name: []byte("content-type"), Value: []byte("text/plain")},
-	}); !errors.Is(err, ErrReservedMetadata) {
-		t.Fatalf("NewStream(reserved metadata) = %v, want ErrReservedMetadata", err)
-	}
+	})
+
+	require.ErrorIsf(t, badMethodErr, ErrBadMethod,
+		"NewStream(no leading slash) = %v, want ErrBadMethod", badMethodErr)
+	require.ErrorIsf(t, reservedErr, ErrReservedMetadata,
+		"NewStream(reserved metadata) = %v, want ErrReservedMetadata", reservedErr)
 }
 
 // TestIntegration_ContextCancelStopsRecv pins that cancelling the call context
@@ -695,30 +587,24 @@ func TestIntegration_ContextCancelStopsRecv(t *testing.T) {
 	defer srv.Close()
 	defer close(release)
 	cc := dialGRPC(t, srv, cfg)
-
 	ctx, cancel := context.WithCancel(context.Background())
 	s, err := cc.NewStream(ctx, "/test.Svc/Hang", nil)
-	if err != nil {
-		t.Fatalf("NewStream: %v", err)
-	}
+	require.NoError(t, err, "NewStream")
 	defer func() { _ = s.Close() }()
-	if err := s.Send(ctx, []byte("x")); err != nil {
-		t.Fatalf("Send: %v", err)
-	}
-	if err := s.CloseSend(ctx); err != nil {
-		t.Fatalf("CloseSend: %v", err)
-	}
+	require.NoError(t, s.Send(ctx, []byte("x")), "Send")
+	require.NoError(t, s.CloseSend(ctx), "CloseSend")
+
 	go func() {
 		time.Sleep(100 * time.Millisecond)
 		cancel()
 	}()
-	if _, err := s.Recv(ctx); !errors.Is(err, context.Canceled) {
-		t.Fatalf("Recv = %v, want context.Canceled", err)
-	}
+	_, recvErr := s.Recv(ctx)
+	_, secondErr := s.Recv(context.Background())
+
+	require.ErrorIsf(t, recvErr, context.Canceled, "Recv = %v, want context.Canceled", recvErr)
 	// The failure is sticky: a second Recv must not resume a broken stream.
-	if _, err := s.Recv(context.Background()); !errors.Is(err, context.Canceled) {
-		t.Fatalf("second Recv = %v, want the recorded context.Canceled", err)
-	}
+	require.ErrorIsf(t, secondErr, context.Canceled,
+		"second Recv = %v, want the recorded context.Canceled", secondErr)
 }
 
 // TestIntegration_ConcurrentStreams runs many calls over one ClientConn, which
@@ -726,8 +612,7 @@ func TestIntegration_ContextCancelStopsRecv(t *testing.T) {
 func TestIntegration_ConcurrentStreams(t *testing.T) {
 	srv, cfg := startGRPCServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		msg, err := srvReadMessage(r.Body)
-		if err != nil {
-			t.Errorf("server read: %v", err)
+		if !assert.NoError(t, err, "server read") {
 			return
 		}
 		srvBeginResponse(w)
@@ -736,12 +621,12 @@ func TestIntegration_ConcurrentStreams(t *testing.T) {
 	}))
 	defer srv.Close()
 	cc := dialGRPC(t, srv, cfg)
-
 	const n = 32
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
-	var wg sync.WaitGroup
 	errs := make(chan error, n)
+
+	var wg sync.WaitGroup
 	for i := 0; i < n; i++ {
 		wg.Add(1)
 		go func(i int) {
@@ -759,8 +644,9 @@ func TestIntegration_ConcurrentStreams(t *testing.T) {
 	}
 	wg.Wait()
 	close(errs)
+
 	for err := range errs {
-		t.Error(err)
+		assert.NoError(t, err, "a concurrent call on the shared connection failed")
 	}
 }
 
@@ -774,8 +660,7 @@ func TestIntegration_LargeMessageSpansFrames(t *testing.T) {
 	}
 	srv, cfg := startGRPCServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		msg, err := srvReadMessage(r.Body)
-		if err != nil {
-			t.Errorf("server read: %v", err)
+		if !assert.NoError(t, err, "server read") {
 			return
 		}
 		srvBeginResponse(w)
@@ -784,20 +669,15 @@ func TestIntegration_LargeMessageSpansFrames(t *testing.T) {
 	}))
 	defer srv.Close()
 	cc := dialGRPC(t, srv, cfg)
-
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
+
 	got, err := cc.Invoke(ctx, "/test.Svc/Big", payload, nil)
-	if err != nil {
-		t.Fatalf("Invoke: %v", err)
-	}
-	if len(got) != len(payload) {
-		t.Fatalf("len = %d, want %d", len(got), len(payload))
-	}
+
+	require.NoError(t, err, "Invoke")
+	require.Lenf(t, got, len(payload), "len = %d, want %d", len(got), len(payload))
 	for i := range got {
-		if got[i] != payload[i] {
-			t.Fatalf("byte %d = %d, want %d", i, got[i], payload[i])
-		}
+		require.Equalf(t, payload[i], got[i], "byte %d = %d, want %d", i, got[i], payload[i])
 	}
 }
 
@@ -811,7 +691,6 @@ func TestIntegration_MaxRecvMessageSize(t *testing.T) {
 		srvFinish(w, OK, "")
 	}))
 	defer srv.Close()
-
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	cc, err := Dial(ctx, srv.Listener.Addr().String(), Options{
@@ -819,14 +698,12 @@ func TestIntegration_MaxRecvMessageSize(t *testing.T) {
 		Authority:          "example.com",
 		MaxRecvMessageSize: 1024,
 	})
-	if err != nil {
-		t.Fatalf("Dial: %v", err)
-	}
+	require.NoError(t, err, "Dial")
 	defer func() { _ = cc.Close() }()
 
-	if _, err := cc.Invoke(ctx, "/test.Svc/Big", []byte("x"), nil); !errors.Is(err, ErrMessageTooLarge) {
-		t.Fatalf("Invoke = %v, want ErrMessageTooLarge", err)
-	}
+	_, err = cc.Invoke(ctx, "/test.Svc/Big", []byte("x"), nil)
+
+	require.ErrorIsf(t, err, ErrMessageTooLarge, "Invoke = %v, want ErrMessageTooLarge", err)
 }
 
 // TestIntegration_UnaryRejectsSecondMessage pins that Invoke does not silently
@@ -841,14 +718,14 @@ func TestIntegration_UnaryRejectsSecondMessage(t *testing.T) {
 	}))
 	defer srv.Close()
 	cc := dialGRPC(t, srv, cfg)
-
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
+
 	_, err := cc.Invoke(ctx, "/test.Svc/Chatty", []byte("x"), nil)
+
 	var st *Status
-	if !errors.As(err, &st) || st.Code != Internal {
-		t.Fatalf("Invoke = %v, want an INTERNAL status", err)
-	}
+	require.Truef(t, errors.As(err, &st) && st.Code == Internal,
+		"Invoke = %v, want an INTERNAL status", err)
 }
 
 // srvAnswerWithoutDraining writes a complete response and returns without ever
@@ -911,16 +788,13 @@ func TestConformance_RFC9113_Sec8_1_BenignResetKeepsResponse(t *testing.T) {
 	srv, cfg := startNoDrainServer(t, srvAnswerWithoutDraining(OK, ""))
 	defer srv.Close()
 	cc := dialGRPC(t, srv, cfg)
-
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
+
 	got, err := cc.Invoke(ctx, "/test.Svc/NoDrain", make([]byte, benignResetRequest), nil)
-	if err != nil {
-		t.Fatalf("Invoke = %q, %v; want the response the server already sent", got, err)
-	}
-	if string(got) != "answer" {
-		t.Fatalf("Invoke = %q, want %q", got, "answer")
-	}
+
+	require.NoErrorf(t, err, "Invoke = %q, %v; want the response the server already sent", got, err)
+	require.Equalf(t, "answer", string(got), "Invoke = %q, want %q", got, "answer")
 }
 
 // TestConformance_RFC9113_Sec8_1_BenignResetKeepsNonOKStatus is the other half: tolerating the
@@ -930,17 +804,15 @@ func TestConformance_RFC9113_Sec8_1_BenignResetKeepsNonOKStatus(t *testing.T) {
 	srv, cfg := startNoDrainServer(t, srvAnswerWithoutDraining(NotFound, "no such row"))
 	defer srv.Close()
 	cc := dialGRPC(t, srv, cfg)
-
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
+
 	_, err := cc.Invoke(ctx, "/test.Svc/NoDrain", make([]byte, benignResetRequest), nil)
+
 	var st *Status
-	if !errors.As(err, &st) {
-		t.Fatalf("Invoke error = %v (%T), want *Status", err, err)
-	}
-	if st.Code != NotFound || st.Message != "no such row" {
-		t.Fatalf("status = %v %q, want NOT_FOUND %q", st.Code, st.Message, "no such row")
-	}
+	require.Truef(t, errors.As(err, &st), "Invoke error = %v (%T), want *Status", err, err)
+	require.Truef(t, st.Code == NotFound && st.Message == "no such row",
+		"status = %v %q, want NOT_FOUND %q", st.Code, st.Message, "no such row")
 }
 
 // TestConformance_RFC9113_Sec8_1_CloseSendAfterBenignReset covers the same
@@ -957,13 +829,10 @@ func TestConformance_RFC9113_Sec8_1_CloseSendAfterBenignReset(t *testing.T) {
 	srv, cfg := startNoDrainServer(t, srvAnswerWithoutDraining(OK, ""))
 	defer srv.Close()
 	cc := dialGRPC(t, srv, cfg)
-
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	s, err := cc.NewStream(ctx, "/test.Svc/NoDrain", nil)
-	if err != nil {
-		t.Fatalf("NewStream: %v", err)
-	}
+	require.NoError(t, err, "NewStream")
 	defer func() { _ = s.Close() }()
 
 	// The benign reset can beat this first Send to the stream: the no-drain
@@ -972,32 +841,24 @@ func TestConformance_RFC9113_Sec8_1_CloseSendAfterBenignReset(t *testing.T) {
 	// case this test is about. Demanding the Send succeed made the test race
 	// the server (it flaked on loaded Linux CI). Either outcome is fine; the
 	// response is buffered before the reset and recoverable through Recv below.
-	if err := s.Send(ctx, []byte("x")); err != nil && !errors.Is(err, conn.ErrStreamClosed) {
-		t.Fatalf("Send: %v", err)
-	}
-	msg, err := s.Recv(ctx)
-	if err != nil {
-		t.Fatalf("Recv: %v", err)
-	}
-	if string(msg) != "answer" {
-		t.Fatalf("Recv = %q, want %q", msg, "answer")
-	}
-	if _, err := s.Recv(ctx); !errors.Is(err, io.EOF) {
-		t.Fatalf("second Recv = %v, want io.EOF", err)
-	}
-	if st := s.Status(); st.Code != OK {
-		t.Fatalf("status = %v, want OK", st.Code)
-	}
-	if err := s.CloseSend(ctx); err != nil {
-		t.Fatalf("CloseSend after a benign reset = %v, want nil", err)
-	}
+	sendErr := s.Send(ctx, []byte("x"))
+	msg, recvErr := s.Recv(ctx)
+	_, eofErr := s.Recv(ctx)
+	closeSendErr := s.CloseSend(ctx)
 	// The scope guard. Half-closing a stream the peer has torn down is a no-op
 	// and reporting it would make callers discard the response; delivering a
 	// MESSAGE to that stream is not, and must still fail. Widening
 	// benignHalfClose to cover Send passed the whole grpc suite before this.
-	if err := s.Send(ctx, []byte("late")); err == nil {
-		t.Fatal("Send after a benign reset = nil; a message that never reached the server must be an error")
-	}
+	lateSendErr := s.Send(ctx, []byte("late"))
+
+	require.Truef(t, sendErr == nil || errors.Is(sendErr, conn.ErrStreamClosed), "Send: %v", sendErr)
+	require.NoError(t, recvErr, "Recv")
+	require.Equalf(t, "answer", string(msg), "Recv = %q, want %q", msg, "answer")
+	require.ErrorIsf(t, eofErr, io.EOF, "second Recv = %v, want io.EOF", eofErr)
+	require.Equalf(t, OK, s.Status().Code, "status = %v, want OK", s.Status().Code)
+	require.NoErrorf(t, closeSendErr, "CloseSend after a benign reset = %v, want nil", closeSendErr)
+	require.Error(t, lateSendErr,
+		"Send after a benign reset = nil; a message that never reached the server must be an error")
 }
 
 // TestConformance_RFC9113_Sec8_1_SendAfterBenignResetStillFails is the scope
@@ -1015,13 +876,10 @@ func TestConformance_RFC9113_Sec8_1_SendAfterBenignResetStillFails(t *testing.T)
 	srv, cfg := startNoDrainServer(t, srvAnswerWithoutDraining(OK, ""))
 	defer srv.Close()
 	cc := dialGRPC(t, srv, cfg)
-
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	s, err := cc.NewStream(ctx, "/test.Svc/NoDrain", nil)
-	if err != nil {
-		t.Fatalf("NewStream: %v", err)
-	}
+	require.NoError(t, err, "NewStream")
 	defer func() { _ = s.Close() }()
 
 	// Drain to io.EOF without ever sending. EOF reports END_STREAM being
@@ -1029,13 +887,10 @@ func TestConformance_RFC9113_Sec8_1_SendAfterBenignResetStillFails(t *testing.T)
 	// says nothing about the stream being latched closed yet. Inferring that was
 	// the race in #709 — on a loaded runner the Send below reached a stream the
 	// reader had not torn down, and succeeded.
-	if _, err := s.Recv(ctx); err != nil {
-		t.Fatalf("Recv: %v", err)
-	}
-	if _, err := s.Recv(ctx); !errors.Is(err, io.EOF) {
-		t.Fatalf("second Recv = %v, want io.EOF", err)
-	}
-
+	_, firstErr := s.Recv(ctx)
+	require.NoError(t, firstErr, "Recv")
+	_, eofErr := s.Recv(ctx)
+	require.ErrorIsf(t, eofErr, io.EOF, "second Recv = %v, want io.EOF", eofErr)
 	// Wait for the reset itself, on the transport stream underneath — grpc's own
 	// Recv stopped at the trailers, so the reset event is still queued or still
 	// in flight, and this blocks until the reader delivers it.
@@ -1048,16 +903,14 @@ func TestConformance_RFC9113_Sec8_1_SendAfterBenignResetStillFails(t *testing.T)
 	// blocks on the mutex the reader still holds and sees closed the instant it
 	// is released. Waiting on EOF had no such ordering.
 	ev, err := s.s.Recv(ctx)
-	if err != nil {
-		t.Fatalf("waiting for the peer's RST_STREAM: %v", err)
-	}
-	if ev.Type != conn.EventReset {
-		t.Fatalf("stream event = %v, want EventReset (the benign reset that follows the trailers)", ev.Type)
-	}
+	require.NoError(t, err, "waiting for the peer's RST_STREAM")
+	require.Equalf(t, conn.EventReset, ev.Type,
+		"stream event = %v, want EventReset (the benign reset that follows the trailers)", ev.Type)
 
-	if err := s.Send(ctx, []byte("late")); err == nil {
-		t.Fatal("Send after a benign reset = nil; the message never reached the server")
-	}
+	lateSendErr := s.Send(ctx, []byte("late"))
+
+	require.Error(t, lateSendErr,
+		"Send after a benign reset = nil; the message never reached the server")
 }
 
 // srvNonOKWithGRPCStatus writes a non-200 response whose header block carries
@@ -1118,26 +971,22 @@ func TestConformance_GRPC_NonOKStatusCannotReportOK(t *testing.T) {
 			srv, cfg := startGRPCServer(t, srvNonOKWithGRPCStatus(tc.httpStatus, tc.grpcStatus, tc.trailersOnly, tc.body))
 			defer srv.Close()
 			cc := dialGRPC(t, srv, cfg)
-
 			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 			defer cancel()
 			s, err := cc.NewStream(ctx, "/test.Svc/M", nil)
-			if err != nil {
-				t.Fatalf("NewStream: %v", err)
-			}
+			require.NoError(t, err, "NewStream")
 			defer func() { _ = s.Close() }()
-			if err := s.CloseSend(ctx); err != nil {
-				t.Fatalf("CloseSend: %v", err)
-			}
+
+			require.NoError(t, s.CloseSend(ctx), "CloseSend")
 			for {
 				if _, rerr := s.Recv(ctx); rerr != nil {
 					break
 				}
 			}
-			if got := s.Status().Code; got != tc.wantCode {
-				t.Fatalf("status = %v, want %v (HTTP %d, grpc-status %q)",
-					got, tc.wantCode, tc.httpStatus, tc.grpcStatus)
-			}
+
+			require.Equalf(t, tc.wantCode, s.Status().Code,
+				"status = %v, want %v (HTTP %d, grpc-status %q)",
+				s.Status().Code, tc.wantCode, tc.httpStatus, tc.grpcStatus)
 		})
 	}
 }

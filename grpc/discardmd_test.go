@@ -7,6 +7,9 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
 	"github.com/lodgvideon/poseidon-http-client/conn"
 )
 
@@ -43,21 +46,16 @@ func TestDiscardMetadata_ErrorStatusStillArrives(t *testing.T) {
 		srvFinish(w, PermissionDenied, msg)
 	}))
 	defer srv.Close()
-
 	cc := dialGRPC(t, srv, cfg)
+
 	_, err := cc.Invoke(t.Context(), "/t.S/M", []byte("q"), nil)
 
 	var st *Status
-	if !errors.As(err, &st) {
-		t.Fatalf("Invoke error = %T %v, want *Status", err, err)
-	}
-	if st.Code != PermissionDenied {
-		t.Errorf("code = %v, want PermissionDenied", st.Code)
-	}
-	if st.Message != msg {
-		t.Errorf("message = %q, want %q — grpc-message is read from the live block and "+
+	require.Truef(t, errors.As(err, &st), "Invoke error = %T %v, want *Status", err, err)
+	assert.Equalf(t, PermissionDenied, st.Code, "code = %v, want PermissionDenied", st.Code)
+	assert.Equalf(t, msg, st.Message,
+		"message = %q, want %q — grpc-message is read from the live block and "+
 			"must be copied out of it before the block returns", st.Message, msg)
-	}
 }
 
 // TestDiscardMetadata_TrailersOnlyStillArrives covers the other block: a
@@ -72,17 +70,14 @@ func TestDiscardMetadata_TrailersOnlyStillArrives(t *testing.T) {
 		w.WriteHeader(http.StatusOK)
 	}))
 	defer srv.Close()
-
 	cc := dialGRPC(t, srv, cfg)
+
 	_, err := cc.Invoke(t.Context(), "/t.S/M", []byte("q"), nil)
 
 	var st *Status
-	if !errors.As(err, &st) {
-		t.Fatalf("Invoke error = %T %v, want *Status", err, err)
-	}
-	if st.Code != NotFound || st.Message != msg {
-		t.Errorf("Trailers-Only gave (%v, %q), want (NotFound, %q)", st.Code, st.Message, msg)
-	}
+	require.Truef(t, errors.As(err, &st), "Invoke error = %T %v, want *Status", err, err)
+	assert.Truef(t, st.Code == NotFound && st.Message == msg,
+		"Trailers-Only gave (%v, %q), want (NotFound, %q)", st.Code, st.Message, msg)
 }
 
 // TestDiscardMetadata_NonOKHTTPStillMaps covers the third path through
@@ -93,17 +88,13 @@ func TestDiscardMetadata_NonOKHTTPStillMaps(t *testing.T) {
 		w.WriteHeader(http.StatusServiceUnavailable)
 	}))
 	defer srv.Close()
-
 	cc := dialGRPC(t, srv, cfg)
+
 	_, err := cc.Invoke(t.Context(), "/t.S/M", []byte("q"), nil)
 
 	var st *Status
-	if !errors.As(err, &st) {
-		t.Fatalf("Invoke error = %T %v, want *Status", err, err)
-	}
-	if st.Code != Unavailable {
-		t.Errorf("503 mapped to %v, want Unavailable", st.Code)
-	}
+	require.Truef(t, errors.As(err, &st), "Invoke error = %T %v, want *Status", err, err)
+	assert.Equalf(t, Unavailable, st.Code, "503 mapped to %v, want Unavailable", st.Code)
 }
 
 // TestDiscardMetadata_HeaderAndTrailerAreNil pins the documented consequence, so
@@ -117,17 +108,14 @@ func TestDiscardMetadata_HeaderAndTrailerAreNil(t *testing.T) {
 		srvFinish(w, OK, "")
 	}))
 	defer srv.Close()
-
 	cc := dialGRPC(t, srv, cfg)
 	ctx := t.Context()
 
 	s, err := cc.NewStream(ctx, "/t.S/M", nil, DiscardMetadata())
-	if err != nil {
-		t.Fatalf("NewStream: %v", err)
-	}
+	require.NoError(t, err, "NewStream")
 	defer func() { _ = s.Close() }()
 	if err := s.SendLast(ctx, []byte("q")); err != nil && !benignSendLastErr(err) {
-		t.Fatalf("SendLast: %v", err)
+		require.NoError(t, err, "SendLast")
 	}
 	// Drain to the end so the trailer block has been handled.
 	for {
@@ -135,15 +123,12 @@ func TestDiscardMetadata_HeaderAndTrailerAreNil(t *testing.T) {
 			break
 		}
 	}
-	if h, _ := s.Header(ctx); h != nil {
-		t.Errorf("Header() returned %d fields under DiscardMetadata, want nil", len(h))
-	}
-	if tr := s.Trailer(); tr != nil {
-		t.Errorf("Trailer() returned %d fields under DiscardMetadata, want nil", len(tr))
-	}
-	if s.Status().Code != OK {
-		t.Errorf("status = %v, want OK", s.Status().Code)
-	}
+	hdr, _ := s.Header(ctx)
+	trl := s.Trailer()
+
+	assert.Nilf(t, hdr, "Header() returned %d fields under DiscardMetadata, want nil", len(hdr))
+	assert.Nilf(t, trl, "Trailer() returned %d fields under DiscardMetadata, want nil", len(trl))
+	assert.Equalf(t, OK, s.Status().Code, "status = %v, want OK", s.Status().Code)
 }
 
 // TestDiscardMetadata_ConcurrentStatusesDoNotCross is the gate for the hazard
@@ -164,12 +149,11 @@ func TestDiscardMetadata_ConcurrentStatusesDoNotCross(t *testing.T) {
 		srvFinish(w, PermissionDenied, "denied-for-"+marker)
 	}))
 	defer srv.Close()
-
 	cc := dialGRPC(t, srv, cfg)
 	ctx := t.Context()
-
 	const workers, perWorker = 8, 25
 	errs := make(chan error, workers*perWorker)
+
 	var wg sync.WaitGroup
 	wg.Add(workers)
 	for w := 0; w < workers; w++ {
@@ -197,16 +181,15 @@ func TestDiscardMetadata_ConcurrentStatusesDoNotCross(t *testing.T) {
 	}
 	wg.Wait()
 	close(errs)
+
 	n := 0
 	for err := range errs {
 		if n < 5 {
-			t.Error(err)
+			assert.NoError(t, err, "a concurrent DiscardMetadata call read a recycled block")
 		}
 		n++
 	}
-	if n > 5 {
-		t.Errorf("... and %d more", n-5)
-	}
+	assert.LessOrEqualf(t, n, 5, "... and %d more", n-5)
 }
 
 // TestDiscardMetadata_DefaultStillPopulates is the no-regression half: a stream
@@ -219,34 +202,28 @@ func TestDiscardMetadata_DefaultStillPopulates(t *testing.T) {
 		srvFinish(w, OK, "")
 	}))
 	defer srv.Close()
-
 	cc := dialGRPC(t, srv, cfg)
 	ctx := t.Context()
 
 	s, err := cc.NewStream(ctx, "/t.S/M", nil)
-	if err != nil {
-		t.Fatalf("NewStream: %v", err)
-	}
+	require.NoError(t, err, "NewStream")
 	defer func() { _ = s.Close() }()
 	if err := s.SendLast(ctx, []byte("q")); err != nil && !benignSendLastErr(err) {
-		t.Fatalf("SendLast: %v", err)
+		require.NoError(t, err, "SendLast")
 	}
 	hdr, err := s.Header(ctx)
-	if err != nil {
-		t.Fatalf("Header: %v", err)
-	}
-	if v, ok := findField(hdr, "x-served-by"); !ok || string(v) != "test" {
-		t.Errorf("x-served-by = %q (present=%v) — the default must still copy the header block",
-			v, ok)
-	}
+	require.NoError(t, err, "Header")
 	for {
 		if _, err := s.Recv(ctx); err != nil {
 			break
 		}
 	}
-	if s.Trailer() == nil {
-		t.Error("Trailer() is nil by default — the trailer block must still be copied")
-	}
+
+	v, ok := findField(hdr, "x-served-by")
+	assert.Truef(t, ok && string(v) == "test",
+		"x-served-by = %q (present=%v) — the default must still copy the header block", v, ok)
+	assert.NotNil(t, s.Trailer(),
+		"Trailer() is nil by default — the trailer block must still be copied")
 }
 
 // TestSendLast_AfterServerFinished pins the tolerance itself, deterministically.
@@ -265,15 +242,11 @@ func TestSendLast_AfterServerFinished(t *testing.T) {
 		close(done)
 	}))
 	defer srv.Close()
-
 	cc := dialGRPC(t, srv, cfg)
 	ctx := t.Context()
 	s, err := cc.NewStream(ctx, "/t.S/M", nil)
-	if err != nil {
-		t.Fatalf("NewStream: %v", err)
-	}
+	require.NoError(t, err, "NewStream")
 	defer func() { _ = s.Close() }()
-
 	<-done // the server has answered and finished; our stream is being retired
 	// Give the client's reader the chance to process END_STREAM, so the send below
 	// meets a stream the transport has already closed.
@@ -283,9 +256,10 @@ func TestSendLast_AfterServerFinished(t *testing.T) {
 		}
 	}
 
-	if err := s.SendLast(ctx, []byte("q")); err != nil && !benignSendLastErr(err) {
-		t.Fatalf("SendLast after the server finished returned %v — a send that loses "+
+	sendErr := s.SendLast(ctx, []byte("q"))
+
+	require.Truef(t, sendErr == nil || benignSendLastErr(sendErr),
+		"SendLast after the server finished returned %v — a send that loses "+
 			"this race is ordinary, and both layers have a sentinel for it: "+
-			"grpc.ErrStreamClosed and conn.ErrStreamClosed", err)
-	}
+			"grpc.ErrStreamClosed and conn.ErrStreamClosed", sendErr)
 }
