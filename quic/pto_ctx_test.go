@@ -5,6 +5,9 @@ import (
 	"net"
 	"testing"
 	"time"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // TestReadWithPTO_AlreadyCancelled: a context already done returns its error
@@ -16,9 +19,11 @@ func TestReadWithPTO_AlreadyCancelled(t *testing.T) {
 	c := &Conn{pc: client}
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	if _, err := c.readWithPTO(ctx, make([]byte, 64)); err != context.Canceled {
-		t.Fatalf("readWithPTO with cancelled ctx = %v, want context.Canceled", err)
-	}
+
+	_, err := c.readWithPTO(ctx, make([]byte, 64))
+
+	require.ErrorIsf(t, err, context.Canceled,
+		"readWithPTO with cancelled ctx = %v, want context.Canceled", err)
 }
 
 // TestReadWithPTO_CancelUnblocksRead: a cancel during a blocking read interrupts
@@ -35,13 +40,14 @@ func TestReadWithPTO_CancelUnblocksRead(t *testing.T) {
 		time.Sleep(20 * time.Millisecond)
 		cancel()
 	}()
+
 	start := time.Now()
-	if _, err := c.readWithPTO(ctx, make([]byte, 2048)); err != context.Canceled {
-		t.Fatalf("readWithPTO = %v, want context.Canceled", err)
-	}
-	if d := time.Since(start); d > 2*time.Second {
-		t.Fatalf("cancel took %v — the watchdog did not interrupt the read promptly", d)
-	}
+	_, err := c.readWithPTO(ctx, make([]byte, 2048))
+	elapsed := time.Since(start)
+
+	require.ErrorIsf(t, err, context.Canceled, "readWithPTO = %v, want context.Canceled", err)
+	assert.Lessf(t, elapsed, 2*time.Second,
+		"cancel took %v — the watchdog did not interrupt the read promptly", elapsed)
 }
 
 // TestReadWithPTO_CtxCancelNoPTOSpin: with data in flight (the PTO path armed), a
@@ -58,10 +64,10 @@ func TestReadWithPTO_CtxCancelNoPTOSpin(t *testing.T) {
 		time.Sleep(20 * time.Millisecond)
 		cancel()
 	}()
-	if _, err := c.readWithPTO(ctx, make([]byte, 2048)); err != context.Canceled {
-		t.Fatalf("readWithPTO = %v, want context.Canceled", err)
-	}
-	if c.ptoCount != 0 {
-		t.Fatalf("ptoCount = %d, a context cancel must not trigger a probe", c.ptoCount)
-	}
+
+	_, err := c.readWithPTO(ctx, make([]byte, 2048))
+
+	require.ErrorIsf(t, err, context.Canceled, "readWithPTO = %v, want context.Canceled", err)
+	assert.Zerof(t, c.ptoCount,
+		"ptoCount = %d, a context cancel must not trigger a probe", c.ptoCount)
 }
