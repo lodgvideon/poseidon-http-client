@@ -4,6 +4,8 @@ import (
 	"testing"
 
 	"github.com/lodgvideon/poseidon-http-client/header"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // Every header field delivered to a caller is a view into one shared byte
@@ -37,14 +39,12 @@ func TestCopyFieldsToBlock_AppendCannotReachTheNextField(t *testing.T) {
 	_ = append(copied[0].Value, "XXXXXXXXXXXXXXXX"...) //nolint:gocritic // the point is the side effect on the block
 
 	for i, want := range in {
-		if string(copied[i].Name) != string(want.Name) {
-			t.Errorf("field %d name = %q after a neighbour was appended to, want %q — the "+
+		assert.Equalf(t, string(want.Name), string(copied[i].Name),
+			"field %d name = %q after a neighbour was appended to, want %q — the "+
 				"append reached into the shared buffer", i, copied[i].Name, want.Name)
-		}
-		if string(copied[i].Value) != string(want.Value) {
-			t.Errorf("field %d value = %q after a neighbour was appended to, want %q",
-				i, copied[i].Value, want.Value)
-		}
+		assert.Equalf(t, string(want.Value), string(copied[i].Value),
+			"field %d value = %q after a neighbour was appended to, want %q",
+			i, copied[i].Value, want.Value)
 	}
 }
 
@@ -55,18 +55,17 @@ func TestCopyFieldsToBlock_CapacityIsClamped(t *testing.T) {
 		{Name: []byte("a"), Value: []byte("bb")},
 		{Name: []byte("ccc"), Value: []byte("dddd")},
 	}
+
 	blk := copyFieldsToBlock(in)
+
 	defer blk.Release()
 	copied := blk.Fields()
-
 	for i := range copied {
-		if got, want := cap(copied[i].Name), len(copied[i].Name); got != want {
-			t.Errorf("field %d Name has cap %d for len %d — an append would spill into the "+
-				"next field's bytes", i, got, want)
-		}
-		if got, want := cap(copied[i].Value), len(copied[i].Value); got != want {
-			t.Errorf("field %d Value has cap %d for len %d", i, got, want)
-		}
+		assert.Equalf(t, len(copied[i].Name), cap(copied[i].Name),
+			"field %d Name has cap %d for len %d — an append would spill into the "+
+				"next field's bytes", i, cap(copied[i].Name), len(copied[i].Name))
+		assert.Equalf(t, len(copied[i].Value), cap(copied[i].Value),
+			"field %d Value has cap %d for len %d", i, cap(copied[i].Value), len(copied[i].Value))
 	}
 }
 
@@ -78,16 +77,16 @@ func TestCopyFieldsToBlock_PreservesIndexing(t *testing.T) {
 		{Name: []byte("plain"), Value: []byte("1")},
 		{Name: []byte("sensitive"), Value: []byte("2"), Indexing: header.IndexNever},
 	}
+
 	blk := copyFieldsToBlock(in)
+
 	defer blk.Release()
 	copied := blk.Fields()
-
 	for i := range in {
-		if copied[i].Indexing != in[i].Indexing {
-			t.Errorf("field %d Indexing = %v, want %v — a never-indexed header that arrives "+
+		assert.Equalf(t, in[i].Indexing, copied[i].Indexing,
+			"field %d Indexing = %v, want %v — a never-indexed header that arrives "+
 				"without that mark can be re-emitted into a dynamic table",
-				i, copied[i].Indexing, in[i].Indexing)
-		}
+			i, copied[i].Indexing, in[i].Indexing)
 	}
 }
 
@@ -102,24 +101,23 @@ func TestCopyFieldsToBlock_CopiesTheBytes(t *testing.T) {
 
 	name[0] = 'Z'
 	value[0] = 'Z'
-	if string(copied[0].Name) != "k" || string(copied[0].Value) != "v" {
-		t.Errorf("got (%q, %q) after the source was overwritten, want (\"k\", \"v\") — the "+
-			"fields alias the decoder's scratch instead of the block",
-			copied[0].Name, copied[0].Value)
-	}
+
+	assert.Equalf(t, "k", string(copied[0].Name),
+		"got (%q, %q) after the source was overwritten, want (\"k\", \"v\") — the "+
+			"fields alias the decoder's scratch instead of the block", copied[0].Name, copied[0].Value)
+	assert.Equalf(t, "v", string(copied[0].Value),
+		"got (%q, %q) after the source was overwritten, want (\"k\", \"v\") — the "+
+			"fields alias the decoder's scratch instead of the block", copied[0].Name, copied[0].Value)
 }
 
 // TestCopyFieldsToBlock_Empty pins that no fields is not a special case for the
 // caller: it still gets a block it can give back.
 func TestCopyFieldsToBlock_Empty(t *testing.T) {
 	blk := copyFieldsToBlock(nil)
-	if blk == nil {
-		t.Fatal("no block returned for an empty field list; the caller has nothing to give back")
-	}
+
+	require.NotNil(t, blk, "no block returned for an empty field list; the caller has nothing to give back")
 	defer blk.Release()
-	if got := blk.Fields(); len(got) != 0 {
-		t.Errorf("got %d fields for an empty input", len(got))
-	}
+	assert.Emptyf(t, blk.Fields(), "got %d fields for an empty input", len(blk.Fields()))
 }
 
 // --- ownership -------------------------------------------------------------
@@ -136,12 +134,14 @@ func TestCopyFieldsToBlock_Empty(t *testing.T) {
 // per-caller bookkeeping this type exists to delete.
 func TestHeaderBlock_ReleaseIsNilSafe(t *testing.T) {
 	var b *HeaderBlock
-	b.Release()            // must not panic
-	if b.Fields() != nil { // and must stay readable
-		t.Error("a nil block returned non-nil Fields")
-	}
 	ev := StreamEvent{Type: EventData} // no block on this one
+
+	b.Release() // must not panic
 	ev.Release()
+
+	// == nil, not assert.Nil: the value is a []header.Field, and a reflective
+	// nil check would also pass for an empty non-nil slice.
+	assert.True(t, b.Fields() == nil, "a nil block returned non-nil Fields")
 }
 
 // TestStreamEvent_ReleaseTwiceIsNotADoublePut pins the one mistake the new API
@@ -153,12 +153,9 @@ func TestStreamEvent_ReleaseTwiceIsNotADoublePut(t *testing.T) {
 	ev := StreamEvent{Type: EventHeaders, Headers: blk.Fields(), Block: blk}
 
 	ev.Release()
-	if ev.Block != nil {
-		t.Error("Release left Block set — a second Release would put the same block twice")
-	}
-	if ev.Headers != nil {
-		t.Error("Release left Headers pointing into a block the pool now owns")
-	}
+
+	assert.True(t, ev.Block == nil, "Release left Block set — a second Release would put the same block twice")
+	assert.True(t, ev.Headers == nil, "Release left Headers pointing into a block the pool now owns")
 	ev.Release() // must be a no-op, not a second Put
 }
 
@@ -172,16 +169,14 @@ func TestHeaderBlock_ReleaseClearsTheFields(t *testing.T) {
 	blk := copyFieldsToBlock([]header.Field{
 		{Name: []byte("authorization"), Value: []byte("Bearer hunter2")},
 	})
+
 	blk.Release()
 
-	if n := len(blk.Fields()); n != 0 {
-		t.Fatalf("Fields still has length %d after Release", n)
-	}
+	require.Emptyf(t, blk.Fields(), "Fields still has length %d after Release", len(blk.Fields()))
 	for i, f := range blk.fields[:cap(blk.fields)] {
-		if f.Name != nil || f.Value != nil {
-			t.Errorf("parked fields[%d] still points at %q/%q — the last response's headers "+
+		assert.Truef(t, f.Name == nil && f.Value == nil,
+			"parked fields[%d] still points at %q/%q — the last response's headers "+
 				"are reachable from the pool", i, f.Name, f.Value)
-		}
 	}
 }
 
@@ -196,17 +191,19 @@ func TestHeaderBlock_ReleaseParksTheCapacity(t *testing.T) {
 		{Name: []byte("x-request-id"), Value: []byte("0123456789abcdef")},
 	})
 	bytesGrown, fieldsGrown := cap(blk.buf), cap(blk.fields)
-	if bytesGrown == 0 || fieldsGrown == 0 {
-		t.Fatalf("block has capacity %d/%d after a copy went into it", bytesGrown, fieldsGrown)
-	}
+	require.Truef(t, bytesGrown != 0 && fieldsGrown != 0,
+		"block has capacity %d/%d after a copy went into it", bytesGrown, fieldsGrown)
 
 	blk.Release()
 
-	if cap(blk.buf) < bytesGrown || cap(blk.fields) < fieldsGrown {
-		t.Errorf("block went into the pool with capacity %d/%d, want the %d/%d it grew to — "+
+	assert.GreaterOrEqualf(t, cap(blk.buf), bytesGrown,
+		"block went into the pool with capacity %d/%d, want the %d/%d it grew to — "+
 			"Release is nilling instead of truncating, so every header block regrows it",
-			cap(blk.buf), cap(blk.fields), bytesGrown, fieldsGrown)
-	}
+		cap(blk.buf), cap(blk.fields), bytesGrown, fieldsGrown)
+	assert.GreaterOrEqualf(t, cap(blk.fields), fieldsGrown,
+		"block went into the pool with capacity %d/%d, want the %d/%d it grew to — "+
+			"Release is nilling instead of truncating, so every header block regrows it",
+		cap(blk.buf), cap(blk.fields), bytesGrown, fieldsGrown)
 }
 
 // TestResetForPool_AbandonsQueuedBlocks is the invariant #577 had to preserve
@@ -224,17 +221,15 @@ func TestHeaderBlock_ReleaseParksTheCapacity(t *testing.T) {
 func TestResetForPool_AbandonsQueuedBlocks(t *testing.T) {
 	s := newStream(1, 4, &fakeStreamWriter{}, 65535)
 	blk := copyFieldsToBlock([]header.Field{{Name: []byte("k"), Value: []byte("v")}})
-	if !s.push(StreamEvent{Type: EventHeaders, Headers: blk.Fields(), Block: blk}) {
-		t.Fatal("push refused the event")
-	}
+	require.True(t, s.push(StreamEvent{Type: EventHeaders, Headers: blk.Fields(), Block: blk}),
+		"push refused the event")
 
 	s.mu.Lock()
 	s.resetForPoolLocked()
 	s.mu.Unlock()
 
-	if len(blk.Fields()) == 0 {
-		t.Error("resetForPoolLocked released a queued block. It was never delivered, so " +
-			"releasing it here adds a second return site for a buffer whose whole " +
+	assert.NotEmpty(t, blk.Fields(),
+		"resetForPoolLocked released a queued block. It was never delivered, so "+
+			"releasing it here adds a second return site for a buffer whose whole "+
 			"discipline is having exactly one")
-	}
 }

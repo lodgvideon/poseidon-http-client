@@ -4,7 +4,6 @@ import (
 	"context"
 	"crypto/tls"
 	"crypto/x509"
-	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -12,6 +11,8 @@ import (
 	"time"
 
 	"github.com/lodgvideon/poseidon-http-client/header"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func startH2TestServer(t *testing.T, h http.Handler) (*httptest.Server, *tls.Config) {
@@ -49,9 +50,7 @@ func dialServerOpts(t *testing.T, srv *httptest.Server, cfg *tls.Config, eventBu
 		Dialer:            &TLSDialer{Config: cfg},
 		StreamEventBuffer: eventBuf,
 	})
-	if err != nil {
-		t.Fatalf("Dial: %v", err)
-	}
+	require.NoErrorf(t, err, "Dial")
 	return c
 }
 
@@ -69,14 +68,11 @@ func drainBody(ctx context.Context, t *testing.T, s StreamRef) []byte {
 	var got []byte
 	for {
 		ev, err := s.Recv(ctx)
-		if err != nil {
-			t.Fatalf("Recv after %d bytes: %v", len(got), err)
-		}
-		if ev.Type == EventReset {
-			t.Fatalf("stream reset with code %d after %d bytes — not a short body; "+
+		require.NoErrorf(t, err, "Recv after %d bytes", len(got))
+		require.NotEqualf(t, EventReset, ev.Type,
+			"stream reset with code %d after %d bytes — not a short body; "+
 				"if this is RSTCode 8 (CANCEL) the event buffer overflowed and this "+
 				"test needs a larger StreamEventBuffer", ev.RSTCode, len(got))
-		}
 		if ev.Type == EventData {
 			got = append(got, ev.Data...)
 		}
@@ -93,46 +89,34 @@ func TestIntegration_EmptyGET(t *testing.T) {
 	defer srv.Close()
 	c := dialServer(t, srv, cfg)
 	defer c.Close()
-
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 	s, err := c.NewStream(ctx)
-	if err != nil {
-		t.Fatalf("NewStream: %v", err)
-	}
-	if err := s.SendHeaders(ctx, []header.Field{
+	require.NoErrorf(t, err, "NewStream")
+
+	err = s.SendHeaders(ctx, []header.Field{
 		{Name: []byte(":method"), Value: []byte("GET")},
 		{Name: []byte(":scheme"), Value: []byte("https")},
 		{Name: []byte(":authority"), Value: []byte("example.com")},
 		{Name: []byte(":path"), Value: []byte("/")},
-	}, true); err != nil {
-		t.Fatalf("SendHeaders: %v", err)
-	}
+	}, true)
+
+	require.NoErrorf(t, err, "SendHeaders")
 	ev, err := s.Recv(ctx)
-	if err != nil {
-		t.Fatalf("Recv: %v", err)
-	}
-	if ev.Type != EventHeaders {
-		t.Fatalf("type = %v", ev.Type)
-	}
+	require.NoErrorf(t, err, "Recv")
+	require.Equalf(t, EventHeaders, ev.Type, "type = %v", ev.Type)
 	var status string
 	for _, f := range ev.Headers {
 		if string(f.Name) == ":status" {
 			status = string(f.Value)
 		}
 	}
-	if status != "204" {
-		t.Fatalf("status = %q, want 204", status)
-	}
+	assert.Equalf(t, "204", status, "status = %q, want 204", status)
 	if !ev.EndStream {
 		// Empty 204 may close immediately or via separate end frame.
-		ev2, err := s.Recv(ctx)
-		if err != nil {
-			t.Fatalf("Recv 2: %v", err)
-		}
-		if !ev2.EndStream {
-			t.Fatalf("never observed END_STREAM")
-		}
+		ev2, err2 := s.Recv(ctx)
+		require.NoErrorf(t, err2, "Recv 2")
+		require.True(t, ev2.EndStream, "never observed END_STREAM")
 	}
 }
 
@@ -144,36 +128,30 @@ func TestIntegration_POST_1KB_Echo(t *testing.T) {
 	defer srv.Close()
 	c := dialServer(t, srv, cfg)
 	defer c.Close()
-
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 	s, err := c.NewStream(ctx)
-	if err != nil {
-		t.Fatalf("NewStream: %v", err)
-	}
+	require.NoErrorf(t, err, "NewStream")
 	body := make([]byte, 1024)
 	for i := range body {
 		body[i] = byte(i)
 	}
-	if err := s.SendHeaders(ctx, []header.Field{
+	require.NoErrorf(t, s.SendHeaders(ctx, []header.Field{
 		{Name: []byte(":method"), Value: []byte("POST")},
 		{Name: []byte(":scheme"), Value: []byte("https")},
 		{Name: []byte(":authority"), Value: []byte("example.com")},
 		{Name: []byte(":path"), Value: []byte("/echo")},
 		{Name: []byte("content-length"), Value: []byte("1024")},
-	}, false); err != nil {
-		t.Fatalf("SendHeaders: %v", err)
-	}
-	if err := s.SendData(ctx, body, true); err != nil {
-		t.Fatalf("SendData: %v", err)
-	}
+	}, false), "SendHeaders")
+
+	err = s.SendData(ctx, body, true)
+
+	require.NoErrorf(t, err, "SendData")
 	// Drain events until we see EndStream.
 	var got []byte
 	for {
-		ev, err := s.Recv(ctx)
-		if err != nil {
-			t.Fatalf("Recv: %v", err)
-		}
+		ev, rerr := s.Recv(ctx)
+		require.NoErrorf(t, rerr, "Recv")
 		if ev.Type == EventData {
 			got = append(got, ev.Data...)
 		}
@@ -181,9 +159,7 @@ func TestIntegration_POST_1KB_Echo(t *testing.T) {
 			break
 		}
 	}
-	if len(got) != len(body) {
-		t.Fatalf("echo len = %d, want %d", len(got), len(body))
-	}
+	require.Lenf(t, got, len(body), "echo len = %d, want %d", len(got), len(body))
 }
 
 func TestIntegration_ContextCancel_TearsDownStream(t *testing.T) {
@@ -195,36 +171,29 @@ func TestIntegration_ContextCancel_TearsDownStream(t *testing.T) {
 	defer srv.Close()
 	c := dialServer(t, srv, cfg)
 	defer c.Close()
-
 	outerCtx, outerCancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer outerCancel()
 	streamCtx, streamCancel := context.WithCancel(outerCtx)
 	defer streamCancel()
-
 	s, err := c.NewStream(outerCtx)
-	if err != nil {
-		t.Fatalf("NewStream: %v", err)
-	}
-	if err := s.SendHeaders(outerCtx, []header.Field{
+	require.NoErrorf(t, err, "NewStream")
+	require.NoErrorf(t, s.SendHeaders(outerCtx, []header.Field{
 		{Name: []byte(":method"), Value: []byte("GET")},
 		{Name: []byte(":scheme"), Value: []byte("https")},
 		{Name: []byte(":authority"), Value: []byte("example.com")},
 		{Name: []byte(":path"), Value: []byte("/never")},
-	}, true); err != nil {
-		t.Fatalf("SendHeaders: %v", err)
-	}
+	}, true), "SendHeaders")
 	go func() {
 		time.Sleep(100 * time.Millisecond)
 		streamCancel()
 	}()
-	if _, err := s.Recv(streamCtx); !errors.Is(err, context.Canceled) {
-		t.Fatalf("Recv err = %v, want context.Canceled", err)
-	}
+
+	_, recvErr := s.Recv(streamCtx)
+
+	require.ErrorIsf(t, recvErr, context.Canceled, "Recv err = %v, want context.Canceled", recvErr)
 	_ = s.Close() // sends RST_STREAM(CANCEL); subsequent NewStream should work
 	s2, err := c.NewStream(outerCtx)
-	if err != nil {
-		t.Fatalf("NewStream after cancel: %v", err)
-	}
+	require.NoErrorf(t, err, "NewStream after cancel")
 	_ = s2.Close()
 }
 
@@ -243,38 +212,29 @@ func TestConformance_RFC7540_Sec6_5_2_MaxFrameSize_FramerReadLimit(t *testing.T)
 		_, _ = w.Write(payload)
 	}))
 	defer srv.Close()
-
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-
 	c, err := Dial(ctx, srv.Listener.Addr().String(), ConnOptions{
 		Dialer:   &TLSDialer{Config: tlsCfg},
 		Settings: AdvertisedSettings{MaxFrameSize: 32768},
 	})
-	if err != nil {
-		t.Fatalf("Dial: %v", err)
-	}
+	require.NoErrorf(t, err, "Dial")
 	defer c.Close()
-
 	s, err := c.NewStream(ctx)
-	if err != nil {
-		t.Fatalf("NewStream: %v", err)
-	}
-	if err := s.SendHeaders(ctx, []header.Field{
+	require.NoErrorf(t, err, "NewStream")
+
+	err = s.SendHeaders(ctx, []header.Field{
 		{Name: []byte(":method"), Value: []byte("GET")},
 		{Name: []byte(":scheme"), Value: []byte("https")},
 		{Name: []byte(":authority"), Value: []byte("example.com")},
 		{Name: []byte(":path"), Value: []byte("/large")},
-	}, true); err != nil {
-		t.Fatalf("SendHeaders: %v", err)
-	}
+	}, true)
 
+	require.NoErrorf(t, err, "SendHeaders")
 	var received int
 	for {
-		ev, err := s.Recv(ctx)
-		if err != nil {
-			t.Fatalf("Recv: %v", err)
-		}
+		ev, rerr := s.Recv(ctx)
+		require.NoErrorf(t, rerr, "Recv")
 		if ev.Type == EventData {
 			received += len(ev.Data)
 		}
@@ -282,7 +242,5 @@ func TestConformance_RFC7540_Sec6_5_2_MaxFrameSize_FramerReadLimit(t *testing.T)
 			break
 		}
 	}
-	if received != bodySize {
-		t.Fatalf("received %d bytes, want %d", received, bodySize)
-	}
+	require.Equalf(t, bodySize, received, "received %d bytes, want %d", received, bodySize)
 }
