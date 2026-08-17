@@ -714,9 +714,8 @@ func TestConn_PushPromise_DeliveredToParentStream(t *testing.T) {
 
 // TestConn_PushPromise_DisabledReturnsProtocolError verifies that when
 // EnablePush is false, a PUSH_PROMISE triggers a connection error of type
-// PROTOCOL_ERROR (RFC 9113 §8.4: "A client that has set ENABLE_PUSH to 0 ...
-// MUST treat the receipt of a PUSH_PROMISE frame as a connection error of type
-// PROTOCOL_ERROR").
+// PROTOCOL_ERROR, which RFC 9113 §8.4 requires of a client that advertised
+// SETTINGS_ENABLE_PUSH=0.
 //
 // THIS TEST COULD NOT FAIL before this change. Its body was a Recv loop in
 // which every branch returned — an error returned, a reset returned, "any other
