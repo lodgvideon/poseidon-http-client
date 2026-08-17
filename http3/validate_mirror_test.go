@@ -1,6 +1,10 @@
 package http3
 
-import "testing"
+import (
+	"testing"
+
+	"github.com/stretchr/testify/assert"
+)
 
 // conn/validate.go and this package's validate.go claim to be deliberate
 // mirrors, "rule for rule". That claim went stale: HTTP/2 grew the
@@ -47,11 +51,12 @@ var mirrorCases = []struct {
 func TestValidateMirror_FieldValueMatchesTheHTTP2Table(t *testing.T) {
 	for _, tc := range mirrorCases {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := validFieldValue([]byte(tc.value)); got != tc.valid {
-				t.Errorf("%q: validFieldValue = %v, want %v — HTTP/2 answers %v for the same "+
+			got := validFieldValue([]byte(tc.value))
+
+			assert.Equalf(t, tc.valid, got,
+				"%q: validFieldValue = %v, want %v — HTTP/2 answers %v for the same "+
 					"bytes, and which servers work must not depend on which protocol "+
 					"negotiated", tc.value, got, tc.valid, tc.valid)
-			}
 		})
 	}
 }
@@ -65,14 +70,24 @@ func TestValidateMirror_FieldValueMatchesTheHTTP2Table(t *testing.T) {
 // §4.1.2 makes "the inclusion of invalid characters in field names or values"
 // malformed and says "Clients MUST NOT accept a malformed response."
 func TestConformance_RFC9114_Sec412_EdgeWhitespaceIsMalformed(t *testing.T) {
-	for _, v := range []string{" x", "x ", "\tx", "x\t", " ", "\t", " x "} {
-		if validFieldValue([]byte(v)) {
-			t.Errorf("%q accepted; a field value must not start or end with SP or HTAB", v)
-		}
+	malformed := []string{" x", "x ", "\tx", "x\t", " ", "\t", " x "}
+	legal := []string{"x", "a b", "a\tb", ""}
+
+	gotMalformed := make([]bool, len(malformed))
+	for i, v := range malformed {
+		gotMalformed[i] = validFieldValue([]byte(v))
 	}
-	for _, v := range []string{"x", "a b", "a\tb", ""} {
-		if !validFieldValue([]byte(v)) {
-			t.Errorf("%q rejected; SP and HTAB are legal BETWEEN field-vchars", v)
-		}
+	gotLegal := make([]bool, len(legal))
+	for i, v := range legal {
+		gotLegal[i] = validFieldValue([]byte(v))
+	}
+
+	for i, v := range malformed {
+		assert.Falsef(t, gotMalformed[i],
+			"%q accepted; a field value must not start or end with SP or HTAB", v)
+	}
+	for i, v := range legal {
+		assert.Truef(t, gotLegal[i],
+			"%q rejected; SP and HTAB are legal BETWEEN field-vchars", v)
 	}
 }

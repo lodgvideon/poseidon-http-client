@@ -16,6 +16,15 @@ import (
 // write race the reader's — an unsynchronised write to the same field. Resolving
 // it once at construction makes the field immutable, and this test is what would
 // have caught the lazy version: it fails under -race, not by asserting anything.
+//
+// Two consequences of that shape, both measured and tracked in #817: the test is
+// inert without -race (restoring the lazy cache passes 2/2 on a plain go test and
+// reports DATA RACE 2/2 under -race), and it records nothing about what it
+// exercised, so forcing newUDPConn's rc to nil — which makes both paths fall back
+// and never touch the shared field — leaves it green. No testify assertion is
+// added here for the same reason there was none before: the verdict comes from
+// the race detector, and giving the run something to count is the fix #817 asks
+// for, not a mechanical rewrite.
 func TestUDPConn_ConcurrentReadGROWriteGSO_NoRace(t *testing.T) {
 	srv, err := net.ListenPacket("udp", "127.0.0.1:0")
 	if err != nil {

@@ -3,6 +3,8 @@ package http3
 import (
 	"testing"
 
+	"github.com/stretchr/testify/require"
+
 	"github.com/lodgvideon/poseidon-http-client/header"
 	"github.com/lodgvideon/poseidon-http-client/qpack"
 )
@@ -24,9 +26,11 @@ func TestConformance_RFC9114_Sec42_PseudoHeaderValueValidation(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			if _, err := c.req.EncodeHeaders(&enc, nil, ^uint64(0)); err != ErrH3Message {
-				t.Fatalf("a pseudo-header with a forbidden octet: err = %v, want ErrH3Message", err)
-			}
+			_, err := c.req.EncodeHeaders(&enc, nil, ^uint64(0))
+
+			require.Equalf(t, ErrH3Message, err,
+				"a pseudo-header with a forbidden octet: err = %v, want ErrH3Message — an "+
+					"encoded CR/LF/NUL is a header-injection vector the peer reserializes", err)
 		})
 	}
 }
@@ -36,20 +40,24 @@ func TestConformance_RFC9114_Sec42_PseudoHeaderValueValidation(t *testing.T) {
 // either one satisfies the requirement (RFC 9114 §4.3.1).
 func TestConformance_RFC9114_Sec431_AuthorityRequired(t *testing.T) {
 	var enc qpack.Encoder
-
-	bad := &Request{Method: "GET", Scheme: "https", Path: "/"} // neither :authority nor Host
-	if _, err := bad.EncodeHeaders(&enc, nil, ^uint64(0)); err != ErrH3Message {
-		t.Fatalf("https without :authority or Host: err = %v, want ErrH3Message", err)
+	cases := []struct {
+		name string
+		req  *Request
+		want error
+	}{
+		{"without :authority or Host", &Request{Method: "GET", Scheme: "https", Path: "/"}, ErrH3Message},
+		{"with a Host header", &Request{Method: "GET", Scheme: "https", Path: "/", Headers: []header.Field{hf("host", "example.com")}}, nil},
+		{"with :authority", &Request{Method: "GET", Scheme: "https", Authority: "example.com", Path: "/"}, nil},
 	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			_, err := c.req.EncodeHeaders(&enc, nil, ^uint64(0))
 
-	withHost := &Request{Method: "GET", Scheme: "https", Path: "/", Headers: []header.Field{hf("host", "example.com")}}
-	if _, err := withHost.EncodeHeaders(&enc, nil, ^uint64(0)); err != nil {
-		t.Fatalf("https with a Host header: err = %v, want nil", err)
-	}
-
-	withAuthority := &Request{Method: "GET", Scheme: "https", Authority: "example.com", Path: "/"}
-	if _, err := withAuthority.EncodeHeaders(&enc, nil, ^uint64(0)); err != nil {
-		t.Fatalf("https with :authority: err = %v, want nil", err)
+			require.Equalf(t, c.want, err,
+				"https %s: err = %v, want %v — §4.3.1 makes the authority mandatory and "+
+					"satisfiable by EITHER carrier, so a client that refuses one of them "+
+					"refuses a conformant request", c.name, err, c.want)
+		})
 	}
 }
 
@@ -58,27 +66,33 @@ func TestConformance_RFC9114_Sec431_AuthorityRequired(t *testing.T) {
 // (an '@'), and if both a Host header and :authority are present they MUST carry the
 // same non-empty value.
 func TestConformance_RFC9114_Sec431_AuthorityUserinfoAndHostMatch(t *testing.T) {
-	var enc qpack.Encoder
-	enc2 := func() *qpack.Encoder { var e qpack.Encoder; return &e }
+	cases := []struct {
+		name string
+		req  *Request
+		want error
+	}{
+		{":authority with userinfo",
+			&Request{Method: "GET", Scheme: "https", Authority: "user@example.com", Path: "/"},
+			ErrH3Message},
+		{"Host != :authority",
+			&Request{Method: "GET", Scheme: "https", Authority: "a.com", Path: "/", Headers: []header.Field{hf("host", "b.com")}},
+			ErrH3Message},
+		{"empty Host header",
+			&Request{Method: "GET", Scheme: "https", Authority: "a.com", Path: "/", Headers: []header.Field{hf("host", "")}},
+			ErrH3Message},
+		{"Host == :authority",
+			&Request{Method: "GET", Scheme: "https", Authority: "a.com", Path: "/", Headers: []header.Field{hf("host", "a.com")}},
+			nil},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			var enc qpack.Encoder
 
-	// :authority carrying userinfo → malformed.
-	userinfo := &Request{Method: "GET", Scheme: "https", Authority: "user@example.com", Path: "/"}
-	if _, err := userinfo.EncodeHeaders(&enc, nil, ^uint64(0)); err != ErrH3Message {
-		t.Fatalf(":authority with userinfo: err = %v, want ErrH3Message", err)
-	}
-	// A Host header disagreeing with :authority → malformed.
-	mismatch := &Request{Method: "GET", Scheme: "https", Authority: "a.com", Path: "/", Headers: []header.Field{hf("host", "b.com")}}
-	if _, err := mismatch.EncodeHeaders(enc2(), nil, ^uint64(0)); err != ErrH3Message {
-		t.Fatalf("Host != :authority: err = %v, want ErrH3Message", err)
-	}
-	// An empty Host header → malformed.
-	emptyHost := &Request{Method: "GET", Scheme: "https", Authority: "a.com", Path: "/", Headers: []header.Field{hf("host", "")}}
-	if _, err := emptyHost.EncodeHeaders(enc2(), nil, ^uint64(0)); err != ErrH3Message {
-		t.Fatalf("empty Host header: err = %v, want ErrH3Message", err)
-	}
-	// A Host header equal to :authority → accepted.
-	same := &Request{Method: "GET", Scheme: "https", Authority: "a.com", Path: "/", Headers: []header.Field{hf("host", "a.com")}}
-	if _, err := same.EncodeHeaders(enc2(), nil, ^uint64(0)); err != nil {
-		t.Fatalf("Host == :authority: err = %v, want nil", err)
+			_, err := c.req.EncodeHeaders(&enc, nil, ^uint64(0))
+
+			require.Equalf(t, c.want, err,
+				"%s: err = %v, want %v — a client that lets these through hands the peer two "+
+					"disagreeing authorities to route on", c.name, err, c.want)
+		})
 	}
 }
