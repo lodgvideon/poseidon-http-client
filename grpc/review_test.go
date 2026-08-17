@@ -9,6 +9,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
 	"github.com/lodgvideon/poseidon-http-client/conn"
 )
 
@@ -29,21 +32,21 @@ func testBuildHeaders(cc *ClientConn, ctx context.Context, method string, md []c
 // every later call — long-lived exposure plus a compression-oracle target.
 func TestBuildHeaders_CredentialsMarkedSensitive(t *testing.T) {
 	cc := newClientConn(nil, Options{Authority: "example.com"}.defaulted(), false)
-
 	md := []conn.HeaderField{
 		{Name: []byte("authorization"), Value: []byte("Bearer secret-token")},
 		{Name: []byte("proxy-authorization"), Value: []byte("Basic zzz")},
 		{Name: []byte("cookie"), Value: []byte("session=abc")},
 		{Name: []byte("x-request-id"), Value: []byte("req-1")},
 	}
-	hdrs := testBuildHeaders(cc, context.Background(), "/t.S/M", md)
-
 	want := map[string]bool{
 		"authorization":       true,
 		"proxy-authorization": true,
 		"cookie":              true,
 		"x-request-id":        false,
 	}
+
+	hdrs := testBuildHeaders(cc, context.Background(), "/t.S/M", md)
+
 	seen := map[string]bool{}
 	for _, h := range hdrs {
 		n := string(h.Name)
@@ -51,14 +54,10 @@ func TestBuildHeaders_CredentialsMarkedSensitive(t *testing.T) {
 			continue
 		}
 		seen[n] = true
-		if h.Sensitive() != want[n] {
-			t.Errorf("%q Sensitive = %v, want %v", n, h.Sensitive(), want[n])
-		}
+		assert.Equalf(t, want[n], h.Sensitive(), "%q Sensitive = %v, want %v", n, h.Sensitive(), want[n])
 	}
 	for n := range want {
-		if !seen[n] {
-			t.Errorf("%q missing from the built header block", n)
-		}
+		assert.Truef(t, seen[n], "%q missing from the built header block", n)
 	}
 }
 
@@ -67,9 +66,12 @@ func TestBuildHeaders_CredentialsMarkedSensitive(t *testing.T) {
 func TestBuildHeaders_CallerSensitiveIsPreserved(t *testing.T) {
 	cc := newClientConn(nil, Options{Authority: "example.com"}.defaulted(), false)
 	md := []conn.HeaderField{{Name: []byte("x-api-key"), Value: []byte("k"), Indexing: conn.IndexNever}}
-	for _, h := range testBuildHeaders(cc, context.Background(), "/t.S/M", md) {
-		if string(h.Name) == "x-api-key" && !h.Sensitive() {
-			t.Fatal("caller-set Sensitive was cleared")
+
+	hdrs := testBuildHeaders(cc, context.Background(), "/t.S/M", md)
+
+	for _, h := range hdrs {
+		if string(h.Name) == "x-api-key" {
+			require.True(t, h.Sensitive(), "caller-set Sensitive was cleared")
 		}
 	}
 }
@@ -96,14 +98,14 @@ func TestEventBufferFor(t *testing.T) {
 		{"zero frame size uses the default", DefaultMaxMessageSize, 0,
 			(DefaultMaxMessageSize + eventBufferSlackBytes) / 16384},
 	}
+
 	for _, c := range cases {
 		got := eventBufferFor(c.maxMessage, c.frameSize)
-		if got != c.want {
-			t.Errorf("%s: eventBufferFor(%d, %d) = %d, want %d", c.name, c.maxMessage, c.frameSize, got, c.want)
-		}
-		if got > maxEventBuffer || got < minEventBuffer {
-			t.Errorf("%s: %d outside [%d, %d]", c.name, got, minEventBuffer, maxEventBuffer)
-		}
+
+		assert.Equalf(t, c.want, got, "%s: eventBufferFor(%d, %d) = %d, want %d",
+			c.name, c.maxMessage, c.frameSize, got, c.want)
+		assert.Truef(t, got <= maxEventBuffer && got >= minEventBuffer,
+			"%s: %d outside [%d, %d]", c.name, got, minEventBuffer, maxEventBuffer)
 	}
 }
 
@@ -114,16 +116,15 @@ func TestEventBufferFor_BytesStayBounded(t *testing.T) {
 	for _, frameSize := range []uint32{1 << 10, 16384, 1 << 20, 1 << 24} {
 		for _, msg := range []int{1024, DefaultMaxMessageSize, 1 << 30} {
 			slots := eventBufferFor(msg, frameSize)
+
 			bytes := uint64(slots) * uint64(frameSize)
 			ceiling := uint64(maxEventBufferBytes)
 			if fs := uint64(frameSize); fs*minEventBuffer > ceiling {
 				// The floor wins: never worse than conn's own default.
 				ceiling = fs * minEventBuffer
 			}
-			if bytes > ceiling {
-				t.Errorf("frame=%d msg=%d: %d slots pin %d bytes, past %d",
-					frameSize, msg, slots, bytes, ceiling)
-			}
+			assert.LessOrEqualf(t, bytes, ceiling, "frame=%d msg=%d: %d slots pin %d bytes, past %d",
+				frameSize, msg, slots, bytes, ceiling)
 		}
 	}
 }
@@ -132,15 +133,18 @@ func TestPseudoStatus_RejectsNonThreeDigit(t *testing.T) {
 	mk := func(v string) []conn.HeaderField {
 		return []conn.HeaderField{{Name: []byte(":status"), Value: []byte(v)}}
 	}
-	if got := pseudoStatus(mk("200")); got != 200 {
-		t.Fatalf("pseudoStatus(200) = %d", got)
-	}
 	// "000200" would read as 200 under an unbounded accumulator, and a long
 	// enough digit string would wrap back onto 200 outright.
-	for _, v := range []string{"000200", "18446744073709551816", "2000", "20", "", "2x0"} {
-		if got := pseudoStatus(mk(v)); got == 200 {
-			t.Errorf("pseudoStatus(%q) = 200 — a peer-chosen string was laundered into success", v)
-		}
+	bad := []string{"000200", "18446744073709551816", "2000", "20", "", "2x0"}
+
+	ok := pseudoStatus(mk("200"))
+
+	require.Equalf(t, 200, ok, "pseudoStatus(200) = %d", ok)
+	for _, v := range bad {
+		got := pseudoStatus(mk(v))
+
+		assert.NotEqualf(t, 200, got,
+			"pseudoStatus(%q) = 200 — a peer-chosen string was laundered into success", v)
 	}
 }
 
@@ -148,35 +152,30 @@ func TestDecodeMessage_StripsControlBytes(t *testing.T) {
 	// conn rejects raw CR/LF in a field value; percent-decoding runs after that
 	// check and would put them back, letting a peer forge a line in the
 	// caller's log or deliver ANSI escapes to an operator's terminal.
-	got := decodeMessage("benign%0A2026-07-31%20INFO%20login%20ok")
-	if strings.ContainsAny(got, "\r\n") {
-		t.Fatalf("decodeMessage kept a newline: %q", got)
-	}
-	if got := decodeMessage("esc%1B%5B31m"); strings.ContainsRune(got, 0x1b) {
-		t.Fatalf("decodeMessage kept an ESC: %q", got)
-	}
-	if got := decodeMessage("del%7F"); strings.ContainsRune(got, 0x7f) {
-		t.Fatalf("decodeMessage kept DEL: %q", got)
-	}
-	// Printable escapes still decode.
-	if got := decodeMessage("a%20b"); got != "a b" {
-		t.Fatalf("decodeMessage(a%%20b) = %q", got)
-	}
+	newline := decodeMessage("benign%0A2026-07-31%20INFO%20login%20ok")
+	esc := decodeMessage("esc%1B%5B31m")
+	del := decodeMessage("del%7F")
+	printable := decodeMessage("a%20b")
 	// A control byte sitting in the value verbatim, not behind an escape. conn
 	// rejects those upstream, so this cannot arrive over a live connection —
 	// but the guarantee decodeMessage offers has to hold on its own rather than
 	// by trusting a check in another package, and a fuzz seed reaches it
 	// directly.
-	if got := decodeMessage("a\x04b%20c"); strings.ContainsRune(got, 0x04) {
-		t.Fatalf("decodeMessage kept a raw control byte: %q", got)
-	}
-	if got := decodeMessage("plain\x1b[31m"); strings.ContainsRune(got, 0x1b) {
-		t.Fatalf("decodeMessage kept a raw ESC: %q", got)
-	}
+	rawControl := decodeMessage("a\x04b%20c")
+	rawEsc := decodeMessage("plain\x1b[31m")
+	plain := decodeMessage("ordinary message")
+
+	require.NotContainsf(t, newline, "\n", "decodeMessage kept a newline: %q", newline)
+	require.NotContainsf(t, newline, "\r", "decodeMessage kept a carriage return: %q", newline)
+	require.NotContainsf(t, esc, "\x1b", "decodeMessage kept an ESC: %q", esc)
+	require.NotContainsf(t, del, "\x7f", "decodeMessage kept DEL: %q", del)
+	// Printable escapes still decode.
+	require.Equalf(t, "a b", printable, "decodeMessage(a%%20b) = %q", printable)
+	require.NotContainsf(t, rawControl, "\x04",
+		"decodeMessage kept a raw control byte: %q", rawControl)
+	require.NotContainsf(t, rawEsc, "\x1b", "decodeMessage kept a raw ESC: %q", rawEsc)
 	// A value with neither escapes nor control bytes is returned untouched.
-	if got := decodeMessage("ordinary message"); got != "ordinary message" {
-		t.Fatalf("decodeMessage(plain) = %q", got)
-	}
+	require.Equalf(t, "ordinary message", plain, "decodeMessage(plain) = %q", plain)
 }
 
 func TestCloneFields_CapsFieldCount(t *testing.T) {
@@ -184,20 +183,22 @@ func TestCloneFields_CapsFieldCount(t *testing.T) {
 	for i := range src {
 		src[i] = conn.HeaderField{Name: []byte("k"), Value: []byte("v")}
 	}
+
 	got := cloneFields(src)
-	if len(got) != maxMetadataFields {
-		t.Fatalf("cloneFields kept %d fields, want the cap of %d", len(got), maxMetadataFields)
-	}
+
+	require.Lenf(t, got, maxMetadataFields,
+		"cloneFields kept %d fields, want the cap of %d", len(got), maxMetadataFields)
 }
 
 func TestCloneFields_CopiesOutOfTheSlab(t *testing.T) {
 	backing := []byte("nameVALUE")
 	src := []conn.HeaderField{{Name: backing[:4], Value: backing[4:]}}
+
 	got := cloneFields(src)
 	copy(backing, "XXXXXXXXX") // simulate the block being reused after release
-	if string(got[0].Name) != "name" || string(got[0].Value) != "VALUE" {
-		t.Fatalf("cloneFields aliased the block: %q / %q", got[0].Name, got[0].Value)
-	}
+
+	require.Truef(t, string(got[0].Name) == "name" && string(got[0].Value) == "VALUE",
+		"cloneFields aliased the block: %q / %q", got[0].Name, got[0].Value)
 }
 
 // TestStream_ClosedGuard pins that no method touches the underlying conn.Stream
@@ -212,31 +213,23 @@ func TestStream_ClosedGuard(t *testing.T) {
 	}))
 	defer srv.Close()
 	cc := dialGRPC(t, srv, cfg)
-
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	s, err := cc.NewStream(ctx, "/t.S/M", nil)
-	if err != nil {
-		t.Fatalf("NewStream: %v", err)
-	}
-	if err := s.Close(); err != nil {
-		t.Fatalf("Close: %v", err)
-	}
-	if err := s.Close(); err != nil {
-		t.Fatalf("second Close = %v, want nil (idempotent)", err)
-	}
-	if _, err := s.Recv(ctx); !errors.Is(err, ErrStreamClosed) {
-		t.Errorf("Recv after Close = %v, want ErrStreamClosed", err)
-	}
-	if _, err := s.Header(ctx); !errors.Is(err, ErrStreamClosed) {
-		t.Errorf("Header after Close = %v, want ErrStreamClosed", err)
-	}
-	if err := s.Send(ctx, []byte("x")); !errors.Is(err, ErrStreamClosed) {
-		t.Errorf("Send after Close = %v, want ErrStreamClosed", err)
-	}
-	if err := s.CloseSend(ctx); !errors.Is(err, ErrStreamClosed) {
-		t.Errorf("CloseSend after Close = %v, want ErrStreamClosed", err)
-	}
+	require.NoError(t, err, "NewStream")
+
+	require.NoError(t, s.Close(), "Close")
+	secondClose := s.Close()
+	_, recvErr := s.Recv(ctx)
+	_, headerErr := s.Header(ctx)
+	sendErr := s.Send(ctx, []byte("x"))
+	closeSendErr := s.CloseSend(ctx)
+
+	require.NoErrorf(t, secondClose, "second Close = %v, want nil (idempotent)", secondClose)
+	assert.ErrorIsf(t, recvErr, ErrStreamClosed, "Recv after Close = %v, want ErrStreamClosed", recvErr)
+	assert.ErrorIsf(t, headerErr, ErrStreamClosed, "Header after Close = %v, want ErrStreamClosed", headerErr)
+	assert.ErrorIsf(t, sendErr, ErrStreamClosed, "Send after Close = %v, want ErrStreamClosed", sendErr)
+	assert.ErrorIsf(t, closeSendErr, ErrStreamClosed, "CloseSend after Close = %v, want ErrStreamClosed", closeSendErr)
 }
 
 // TestStream_SendErrorIsSticky pins that a failed send latches. conn.writeData
@@ -251,40 +244,29 @@ func TestStream_SendErrorIsSticky(t *testing.T) {
 		srvFinish(w, OK, "")
 	}))
 	defer srv.Close()
-
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	cc, err := Dial(ctx, srv.Listener.Addr().String(), Options{
 		Conn:      conn.ConnOptions{Dialer: &conn.TLSDialer{Config: cfg}},
 		Authority: "example.com",
 	})
-	if err != nil {
-		t.Fatalf("Dial: %v", err)
-	}
+	require.NoError(t, err, "Dial")
 	s, err := cc.NewStream(ctx, "/t.S/M", nil)
-	if err != nil {
-		t.Fatalf("NewStream: %v", err)
-	}
+	require.NoError(t, err, "NewStream")
 	defer func() { _ = s.Close() }()
 
 	// Killing the connection makes every subsequent write fail.
-	if err := cc.Close(); err != nil {
-		t.Fatalf("Close: %v", err)
-	}
+	require.NoError(t, cc.Close(), "Close")
 	first := s.Send(ctx, []byte("one"))
-	if first == nil {
-		t.Fatal("Send on a closed connection succeeded")
-	}
 	second := s.Send(ctx, []byte("two"))
-	if second == nil {
-		t.Fatal("second Send succeeded after the first failed — framing would resynchronise onto garbage")
-	}
-	if !errors.Is(second, first) && second.Error() != first.Error() {
-		t.Fatalf("second Send = %v, want the latched %v", second, first)
-	}
-	if err := s.CloseSend(ctx); err == nil {
-		t.Fatal("CloseSend succeeded after a failed Send")
-	}
+	closeSendErr := s.CloseSend(ctx)
+
+	require.Error(t, first, "Send on a closed connection succeeded")
+	require.Error(t, second,
+		"second Send succeeded after the first failed — framing would resynchronise onto garbage")
+	require.Truef(t, errors.Is(second, first) || second.Error() == first.Error(),
+		"second Send = %v, want the latched %v", second, first)
+	require.Error(t, closeSendErr, "CloseSend succeeded after a failed Send")
 }
 
 // TestIntegration_NonOKStatusInHeaderBlock covers grpc-java's HTTP-error path:
@@ -302,22 +284,18 @@ func TestIntegration_NonOKStatusInHeaderBlock(t *testing.T) {
 	}))
 	defer srv.Close()
 	cc := dialGRPC(t, srv, cfg)
-
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
+
 	_, err := cc.Invoke(ctx, "/t.S/M", []byte("x"), nil)
+
 	var st *Status
-	if !errors.As(err, &st) {
-		t.Fatalf("Invoke error = %v (%T), want *Status", err, err)
-	}
+	require.Truef(t, errors.As(err, &st), "Invoke error = %v (%T), want *Status", err, err)
 	// Without the header-block lookup this would be INTERNAL, from the 400 row
 	// of the mapping table.
-	if st.Code != ResourceExhausted {
-		t.Fatalf("code = %v, want RESOURCE_EXHAUSTED from the server's own grpc-status", st.Code)
-	}
-	if st.Message != "quota exceeded" {
-		t.Fatalf("message = %q", st.Message)
-	}
+	require.Equalf(t, ResourceExhausted, st.Code,
+		"code = %v, want RESOURCE_EXHAUSTED from the server's own grpc-status", st.Code)
+	require.Equalf(t, "quota exceeded", st.Message, "message = %q", st.Message)
 }
 
 // TestIntegration_ResetStreamMapsToStatus exercises the RST_STREAM path end to
@@ -331,17 +309,14 @@ func TestIntegration_ResetStreamMapsToStatus(t *testing.T) {
 	}))
 	defer srv.Close()
 	cc := dialGRPC(t, srv, cfg)
-
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
+
 	_, err := cc.Invoke(ctx, "/t.S/M", []byte("x"), nil)
+
 	var st *Status
-	if !errors.As(err, &st) {
-		t.Fatalf("Invoke error = %v (%T), want *Status", err, err)
-	}
-	if st.Code == OK {
-		t.Fatal("a reset stream reported OK")
-	}
+	require.Truef(t, errors.As(err, &st), "Invoke error = %v (%T), want *Status", err, err)
+	require.NotEqual(t, OK, st.Code, "a reset stream reported OK")
 }
 
 // TestIntegration_RawMetadataIsValidated covers the path a caller reaches
@@ -350,7 +325,6 @@ func TestIntegration_RawMetadataIsValidated(t *testing.T) {
 	srv, cfg := startGRPCServer(t, http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
 	defer srv.Close()
 	cc := dialGRPC(t, srv, cfg)
-
 	cases := []struct {
 		name string
 		md   conn.HeaderField
@@ -363,11 +337,11 @@ func TestIntegration_RawMetadataIsValidated(t *testing.T) {
 		{"reserved", conn.HeaderField{Name: []byte("grpc-timeout"), Value: []byte("1S")}, ErrReservedMetadata},
 		{"pseudo", conn.HeaderField{Name: []byte(":path"), Value: []byte("/x")}, ErrInvalidMetadata},
 	}
+
 	for _, c := range cases {
 		_, err := cc.NewStream(context.Background(), "/t.S/M", []conn.HeaderField{c.md})
-		if !errors.Is(err, c.want) {
-			t.Errorf("%s: NewStream = %v, want %v", c.name, err, c.want)
-		}
+
+		assert.ErrorIsf(t, err, c.want, "%s: NewStream = %v, want %v", c.name, err, c.want)
 	}
 }
 
@@ -385,20 +359,16 @@ func TestIntegration_TruncatedTrailingMessage(t *testing.T) {
 	}))
 	defer srv.Close()
 	cc := dialGRPC(t, srv, cfg)
-
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
+
 	_, err := cc.Invoke(ctx, "/t.S/M", []byte("x"), nil)
+
 	var st *Status
-	if !errors.As(err, &st) {
-		t.Fatalf("Invoke error = %v (%T), want *Status", err, err)
-	}
-	if st.Code != Internal {
-		t.Fatalf("code = %v, want INTERNAL", st.Code)
-	}
-	if !strings.Contains(st.Message, "middle of a message") {
-		t.Fatalf("message = %q, want the truncation diagnosis", st.Message)
-	}
+	require.Truef(t, errors.As(err, &st), "Invoke error = %v (%T), want *Status", err, err)
+	require.Equalf(t, Internal, st.Code, "code = %v, want INTERNAL", st.Code)
+	require.Truef(t, strings.Contains(st.Message, "middle of a message"),
+		"message = %q, want the truncation diagnosis", st.Message)
 }
 
 // TestIntegration_TrailersOnlyNonOKWithoutStatus is the shape a draining proxy
@@ -411,17 +381,15 @@ func TestIntegration_TrailersOnlyNonOKWithoutStatus(t *testing.T) {
 	}))
 	defer srv.Close()
 	cc := dialGRPC(t, srv, cfg)
-
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
+
 	_, err := cc.Invoke(ctx, "/t.S/M", []byte("x"), nil)
+
 	var st *Status
-	if !errors.As(err, &st) {
-		t.Fatalf("Invoke error = %v (%T), want *Status", err, err)
-	}
-	if st.Code != Unavailable {
-		t.Fatalf("code = %v, want UNAVAILABLE for a 503 with no grpc-status", st.Code)
-	}
+	require.Truef(t, errors.As(err, &st), "Invoke error = %v (%T), want *Status", err, err)
+	require.Equalf(t, Unavailable, st.Code,
+		"code = %v, want UNAVAILABLE for a 503 with no grpc-status", st.Code)
 }
 
 // TestIntegration_InterimHeadersIgnored pins that a 1xx block does not get
@@ -436,25 +404,18 @@ func TestIntegration_InterimHeadersIgnored(t *testing.T) {
 	}))
 	defer srv.Close()
 	cc := dialGRPC(t, srv, cfg)
-
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
+
 	got, err := cc.Invoke(ctx, "/t.S/M", []byte("x"), nil)
-	if err != nil {
-		t.Fatalf("Invoke: %v", err)
-	}
-	if string(got) != "final" {
-		t.Fatalf("response = %q", got)
-	}
+
+	require.NoError(t, err, "Invoke")
+	require.Equalf(t, "final", string(got), "response = %q", got)
 }
 
 // TestNewClientConn_Validation covers the wrap-an-existing-connection entry
 // point, including that Close leaves a connection it does not own alone.
 func TestNewClientConn_Validation(t *testing.T) {
-	if _, err := NewClientConn(nil, Options{Authority: "example.com"}); err == nil {
-		t.Fatal("NewClientConn(nil) = nil error")
-	}
-
 	srv, cfg := startGRPCServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_, _ = srvReadMessage(r.Body)
 		srvBeginResponse(w)
@@ -462,38 +423,29 @@ func TestNewClientConn_Validation(t *testing.T) {
 		srvFinish(w, OK, "")
 	}))
 	defer srv.Close()
-
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	raw, err := conn.Dial(ctx, srv.Listener.Addr().String(), conn.ConnOptions{
 		Dialer:            &conn.TLSDialer{Config: cfg},
 		StreamEventBuffer: 64,
 	})
-	if err != nil {
-		t.Fatalf("conn.Dial: %v", err)
-	}
+	require.NoError(t, err, "conn.Dial")
 	defer func() { _ = raw.Close() }()
 
-	if _, err := NewClientConn(raw, Options{}); err == nil {
-		t.Fatal("NewClientConn without Authority = nil error")
-	}
+	_, nilConnErr := NewClientConn(nil, Options{Authority: "example.com"})
+	_, noAuthorityErr := NewClientConn(raw, Options{})
 	cc, err := NewClientConn(raw, Options{Authority: "example.com"})
-	if err != nil {
-		t.Fatalf("NewClientConn: %v", err)
-	}
-	if cc.Conn() != raw {
-		t.Fatal("Conn() did not return the wrapped connection")
-	}
-	if got, err := cc.Invoke(ctx, "/t.S/M", []byte("x"), nil); err != nil || string(got) != "ok" {
-		t.Fatalf("Invoke = %q, %v", got, err)
-	}
+
+	require.Error(t, nilConnErr, "NewClientConn(nil) = nil error")
+	require.Error(t, noAuthorityErr, "NewClientConn without Authority = nil error")
+	require.NoError(t, err, "NewClientConn")
+	require.Same(t, raw, cc.Conn(), "Conn() did not return the wrapped connection")
+	got, invokeErr := cc.Invoke(ctx, "/t.S/M", []byte("x"), nil)
+	require.NoErrorf(t, invokeErr, "Invoke = %q, %v", got, invokeErr)
+	require.Equalf(t, "ok", string(got), "Invoke = %q", got)
 	// Close must not touch a connection this ClientConn does not own.
-	if err := cc.Close(); err != nil {
-		t.Fatalf("Close: %v", err)
-	}
-	if !raw.IsAlive() {
-		t.Fatal("Close killed a connection the ClientConn does not own")
-	}
+	require.NoError(t, cc.Close(), "Close")
+	require.True(t, raw.IsAlive(), "Close killed a connection the ClientConn does not own")
 }
 
 // TestIntegration_MaxRecvMessageSizeCallOption pins that the per-call override
@@ -506,7 +458,6 @@ func TestIntegration_MaxRecvMessageSizeCallOption(t *testing.T) {
 		srvFinish(w, OK, "")
 	}))
 	defer srv.Close()
-
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	cc, err := Dial(ctx, srv.Listener.Addr().String(), Options{
@@ -514,19 +465,13 @@ func TestIntegration_MaxRecvMessageSizeCallOption(t *testing.T) {
 		Authority:          "example.com",
 		MaxRecvMessageSize: 1024,
 	})
-	if err != nil {
-		t.Fatalf("Dial: %v", err)
-	}
+	require.NoError(t, err, "Dial")
 	defer func() { _ = cc.Close() }()
 
-	if _, err := cc.Invoke(ctx, "/t.S/M", []byte("x"), nil); !errors.Is(err, ErrMessageTooLarge) {
-		t.Fatalf("connection limit not applied: %v", err)
-	}
-	got, err := cc.Invoke(ctx, "/t.S/M", []byte("x"), nil, MaxRecvMessageSize(1<<20))
-	if err != nil {
-		t.Fatalf("per-call override: %v", err)
-	}
-	if len(got) != 4096 {
-		t.Fatalf("len = %d, want 4096", len(got))
-	}
+	_, connLimitErr := cc.Invoke(ctx, "/t.S/M", []byte("x"), nil)
+	got, overrideErr := cc.Invoke(ctx, "/t.S/M", []byte("x"), nil, MaxRecvMessageSize(1<<20))
+
+	require.ErrorIsf(t, connLimitErr, ErrMessageTooLarge, "connection limit not applied: %v", connLimitErr)
+	require.NoError(t, overrideErr, "per-call override")
+	require.Lenf(t, got, 4096, "len = %d, want 4096", len(got))
 }
