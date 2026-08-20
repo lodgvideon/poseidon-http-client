@@ -120,6 +120,16 @@ func TestConformance_RFC9204_Sec45_DecodeErrors(t *testing.T) {
 		{"indexed_post_base", []byte{0x00, 0x00, 0x10}},
 		{"literal_post_base_name_ref", []byte{0x00, 0x00, 0x00}},
 		{"static_index_out_of_range", []byte{0x00, 0x00, 0xff, 0x24}}, // indexed idx 99
+		// The Name Reference twin of the case above (§4.5.3): a 4-bit-prefix index
+		// 0x50|15 = 0x5f then 99-15 = 84 (0x54), followed by an empty value literal.
+		// Index 99 is one past the last Appendix A row, and this guard is what stands
+		// between a peer-chosen index and a read one past staticNameB.
+		{"name_ref_static_index_out_of_range", []byte{0x00, 0x00, 0x5f, 0x54, 0x00}},
+		// A Huffman literal that does not decode, on the field-section path: a name
+		// reference to static index 0, then H=1, length 1, payload 0xff. Eight 1-bits
+		// are the leading bits of EOS and emit no symbol (RFC 7541 §5.2, reused by
+		// RFC 9204 §4.1.2), so the value is undecodable.
+		{"huffman_undecodable_value", []byte{0x00, 0x00, 0x50, 0x81, 0xff}},
 		{"truncated_value", []byte{0x00, 0x00, 0x50, 0x0b, 'e', 'x'}}, // says 11, has 2
 		{"missing_base_byte", []byte{0x00}},
 		{"empty_input", nil},

@@ -21,15 +21,22 @@ const sendAllocsPerDatagram = 1
 
 // sendAllocsPerDatagramSteadyState is what one datagram costs on a connection
 // whose packets are being acknowledged — every real connection. The §13.3 copy
-// comes off the free list a previous ACK returned it to, so it costs nothing;
-// the one allocation left is the sent-packet map churning as this loop deletes
-// and re-inserts the same packet number, which is an artefact of the harness
-// rather than of the send path.
+// comes off the free list a previous ACK returned it to, so the acknowledged
+// send path allocates nothing at all.
+//
+// It stood at 1 for a while, on the strength of the sent-packet map churning as
+// this loop deletes and re-inserts the same packet number. That allocation is no
+// longer observed: 0.00 per datagram, read off the gate itself by forcing its
+// limit to -1, on go1.26.6 linux/amd64 without -race. Leaving the constant at 1
+// left this gate tolerating a full allocation per datagram of regression before
+// it could fire — which is how it drifted in the first place, and exactly what
+// the two-sided form below prevents. Its cold sibling has been two-sided all
+// along, which is why the cold figure is still accurate (#856).
 //
 // Without the free list this is 2, so the gate below still catches the pooling
-// being removed. Measured directly: pool on, 1 alloc / 160 B; pool off, 2 allocs
-// / 208 B — the 48-byte difference is the retransmit copy.
-const sendAllocsPerDatagramSteadyState = 1
+// being removed. Measured directly when it was added: pool on, 1 alloc / 160 B;
+// pool off, 2 allocs / 208 B — the 48-byte difference is the retransmit copy.
+const sendAllocsPerDatagramSteadyState = 0
 
 // TestSendPath_AllocsPerDatagram pins the send path's allocation count.
 //
@@ -118,5 +125,15 @@ func TestSendPath_AllocsPerDatagramSteadyState(t *testing.T) {
 		t.Errorf("an acknowledged send path allocates %.2f times per datagram, want at most %d: "+
 			"the §13.3 retransmit copy is no longer coming off the free list",
 			got, sendAllocsPerDatagramSteadyState)
+	}
+	// The lower arm the cold gate has. It is unreachable while the constant is 0 —
+	// an allocation count cannot go below zero — and it is here so the pair stays
+	// symmetric: if the constant is ever raised to absorb a regression, this is
+	// what announces the day the regression is fixed instead of letting the slack
+	// be quietly re-absorbed. That is the drift this gate just came out of.
+	if got < sendAllocsPerDatagramSteadyState {
+		t.Errorf("an acknowledged send path allocates %.2f times per datagram, fewer than the "+
+			"recorded %d: the path improved — lower sendAllocsPerDatagramSteadyState to %.0f "+
+			"to lock the win in", got, sendAllocsPerDatagramSteadyState, got)
 	}
 }

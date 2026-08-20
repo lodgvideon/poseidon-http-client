@@ -3,6 +3,8 @@
 package integration_test
 
 import (
+	"bytes"
+	"compress/gzip"
 	"io"
 	"net/http"
 	"sort"
@@ -102,12 +104,27 @@ func registerFixtures(mux *http.ServeMux) {
 		}
 	})
 
+	// Real gzip, not a label. This handler used to declare Content-Encoding:
+	// gzip and then write plaintext, which is not a fixture a decoder can be
+	// tested against — a client that honoured the header failed with "gzip:
+	// invalid header" and one that ignored it passed. Measured against the live
+	// stack before this was changed: nginx, Undertow and nghttpx all serve a
+	// genuinely compressed body here, so the Go reference was the odd peer out
+	// and the only reason /gzip had no consumer anywhere in the suite (#896).
+	//
+	// 100 KiB of 'x' matches Undertow's handler and CONTRACT.md's "100KB body",
+	// which is what lets one cross-peer assertion read every peer: the payload
+	// compresses to a fraction of its length, so a decompressed body is longer
+	// than the octets that arrived on the wire and an undecompressed one is not.
 	mux.HandleFunc("/gzip", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/plain")
 		w.Header().Set("Content-Encoding", "gzip")
-		// Pre-compressed 100KB body would go here.
-		// For simplicity in Go reference, we send raw (server doesn't auto-gzip).
-		_, _ = io.WriteString(w, "gzip response")
+		zw := gzip.NewWriter(w)
+		chunk := bytes.Repeat([]byte("x"), 1024)
+		for i := 0; i < 100; i++ {
+			_, _ = zw.Write(chunk)
+		}
+		_ = zw.Close()
 	})
 
 	mux.HandleFunc("/trailers", func(w http.ResponseWriter, r *http.Request) {

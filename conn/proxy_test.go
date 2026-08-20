@@ -3,6 +3,7 @@ package conn
 import (
 	"bufio"
 	"context"
+	"encoding/base64"
 	"fmt"
 	"io"
 	"net"
@@ -136,57 +137,48 @@ func TestProxyDialer_Plaintext(t *testing.T) {
 		"echo = %q, want %q — the CONNECT tunnel did not carry the bytes end to end", buf, msg)
 }
 
+// TestProxyDialer_BasicAuth pins the credential itself, not the word "Basic".
+// The old assertion was strings.Contains(auth, "Basic"), which a dialer emitting
+// "Basic " and nothing else satisfies — truncated credentials, the username
+// without the password, a stale encoding — while the test built the URL with
+// url.UserPassword and never asserted those bytes arrived (#833). The
+// username-only form takes a separate branch that nothing exercised.
 func TestProxyDialer_BasicAuth(t *testing.T) {
-	proxyLn, err := net.Listen("tcp", "127.0.0.1:0")
-	require.NoError(t, err, "proxy listen")
-	defer proxyLn.Close()
+	for _, tc := range []struct {
+		name string
+		user *url.Userinfo
+		want string
+	}{
+		{"username and password", url.UserPassword("testuser", "testpass"), "testuser:testpass"},
+		{"username only", url.User("testuser"), "testuser"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			proxyURL, auth := rawProxy(t, "HTTP/1.1 200 OK\r\n\r\n")
+			proxyURL.User = tc.user
+			d := &ProxyDialer{ProxyURL: proxyURL}
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
 
-	receivedAuth := make(chan string, 1)
-	go func() {
-		c, err := proxyLn.Accept()
-		if err != nil {
-			return
-		}
-		defer c.Close()
-		c.SetDeadline(time.Now().Add(5 * time.Second))
+			tunnel, err := d.Dial(ctx, "target:443")
 
-		br := bufio.NewReader(c)
-		var authHeader string
-		for {
-			line, err := br.ReadString('\n')
-			if err != nil {
-				return
+			require.NoError(t, err, "Dial through the authenticating proxy")
+			t.Cleanup(func() { _ = tunnel.Close() })
+			var header string
+			select {
+			case header = <-auth:
+			case <-time.After(time.Second):
+				require.FailNow(t, "the proxy never saw a Proxy-Authorization header")
 			}
-			trimmed := strings.TrimSpace(line)
-			if strings.HasPrefix(trimmed, "Proxy-Authorization:") {
-				authHeader = trimmed
-			}
-			if trimmed == "" {
-				break
-			}
-		}
-		receivedAuth <- authHeader
-		fmt.Fprintf(c, "HTTP/1.1 200 OK\r\n\r\n")
-	}()
-
-	proxyURL := &url.URL{
-		Scheme: "http",
-		Host:   proxyLn.Addr().String(),
-		User:   url.UserPassword("testuser", "testpass"),
-	}
-	d := &ProxyDialer{ProxyURL: proxyURL}
-
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-
-	_, err = d.Dial(ctx, "target:443")
-
-	require.NoError(t, err, "Dial through the authenticating proxy")
-	select {
-	case auth := <-receivedAuth:
-		assert.Containsf(t, auth, "Basic", "auth = %q, want a Basic credential", auth)
-	case <-time.After(time.Second):
-		require.FailNow(t, "timeout waiting for auth header")
+			scheme, encoded, ok := strings.Cut(header, " ")
+			require.Truef(t, ok, "Proxy-Authorization = %q, want \"Basic <base64>\"", header)
+			assert.Equalf(t, "Basic", scheme, "auth scheme = %q, want Basic", scheme)
+			decoded, derr := base64.StdEncoding.DecodeString(encoded)
+			require.NoErrorf(t, derr, "credential %q is not valid base64", encoded)
+			assert.Equalf(t, tc.want, string(decoded),
+				"credential decoded to %q, want %q — a proxy that receives the username "+
+					"without the password answers 407, and the caller sees an unreachable "+
+					"target rather than a credential it got wrong", decoded, tc.want)
+		})
 	}
 }
 

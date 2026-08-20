@@ -59,6 +59,15 @@ func TestConformance_RFC9112_Sec6_3_ExtraOctetsAfterResponse(t *testing.T) {
 			"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n" + smuggled},
 		{"304 with nothing declared", "GET",
 			"HTTP/1.1 304 Not Modified\r\n\r\n" + smuggled},
+		// A 204 carrying an explicit zero Content-Length is deliberately NOT evicted
+		// by the §6.3 rule 1 framing check: the field is illegal there but declares
+		// no octets, so evicting on its presence would cost a connection on every
+		// request to the endpoints that answer 204 that way. This defer is the
+		// mechanism that decides it when octets ARE present — and the row used to
+		// sit in the rule-1 table, where it read as evidence for a check that never
+		// fired on it (#799).
+		{"204 with an explicit zero Content-Length", "GET",
+			"HTTP/1.1 204 No Content\r\nContent-Length: 0\r\n\r\n" + smuggled},
 		// A HEAD response must carry no body; bytes on the wire after its head are
 		// unsolicited even though Content-Length is legitimate there (§9.3.2).
 		{"HEAD that actually sent a body", "HEAD",

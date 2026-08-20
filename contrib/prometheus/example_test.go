@@ -25,7 +25,12 @@ func ExampleNewCollector() {
 	reg := prom.NewRegistry()
 	reg.MustRegister(poseidonprom.NewCollector(c))
 
-	http.Handle("/metrics", promhttp.HandlerFor(reg, promhttp.HandlerOpts{}))
+	// A mux of this example's own. http.DefaultServeMux is process-global and
+	// panics on a second registration of the same pattern, so two examples that
+	// both reached for it would take each other down the moment either grew an
+	// "// Output:" comment and started actually running.
+	mux := http.NewServeMux()
+	mux.Handle("/metrics", promhttp.HandlerFor(reg, promhttp.HandlerOpts{}))
 }
 
 // Pool state plus per-request series labelled by host, method and status.
@@ -44,7 +49,8 @@ func ExampleNewHookMetrics() {
 	reg.MustRegister(hm)
 	c.SetHooks(hm.Hooks())
 
-	http.Handle("/metrics", promhttp.HandlerFor(reg, promhttp.HandlerOpts{}))
+	mux := http.NewServeMux()
+	mux.Handle("/metrics", promhttp.HandlerFor(reg, promhttp.HandlerOpts{}))
 }
 
 // Several clients in one process are told apart by a const label rather

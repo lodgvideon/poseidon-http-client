@@ -131,3 +131,41 @@ func TestDialConn_EstablishError(t *testing.T) {
 	assert.True(t, pc.closed, "dialConn must close the PacketConn on failure: "+
 		"otherwise every failed dial leaks a UDP socket for the process's lifetime")
 }
+
+// TestH3TLSConfig_CurvePreferences pins h3TLSConfig's third decision, which
+// TestH3TLSConfig says nothing about: the single-Initial curve default is
+// installed when the caller named no curves, and a caller who named their own
+// keeps them (#795).
+//
+// Both directions matter, and a one-sided test is satisfied by a function that
+// always overwrites. Losing the default is not cosmetic: Go offers the
+// post-quantum X25519MLKEM768 key share by default (~1200 bytes), which pushes
+// the ClientHello past a single ~1200-byte Initial datagram, and this client does
+// not yet split a CRYPTO stream across Initial packets — so every handshake
+// against a peer that drops the fragment fails.
+func TestH3TLSConfig_CurvePreferences(t *testing.T) {
+	singleInitial := []tls.CurveID{tls.X25519, tls.CurveP256}
+	mine := []tls.CurveID{tls.CurveP384}
+	cases := []struct {
+		name string
+		base *tls.Config
+		want []tls.CurveID
+	}{
+		{"nil base", nil, singleInitial},
+		{"base naming no curves", &tls.Config{ServerName: "h"}, singleInitial},
+		{"base naming its own curves", &tls.Config{ServerName: "h", CurvePreferences: mine}, mine},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := h3TLSConfig(tc.base)
+
+			require.NotNil(t, got, "h3TLSConfig must always yield a usable config")
+			assert.Equalf(t, tc.want, got.CurvePreferences,
+				"CurvePreferences = %v, want %v.\n"+
+					"Without the default the ClientHello outgrows one Initial datagram and this "+
+					"client cannot split a CRYPTO stream across Initials, so the handshake never "+
+					"completes; overwriting a caller's own list silently discards their choice.",
+				got.CurvePreferences, tc.want)
+		})
+	}
+}

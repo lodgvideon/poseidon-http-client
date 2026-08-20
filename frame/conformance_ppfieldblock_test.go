@@ -52,3 +52,48 @@ func TestConformance_RFC9113_Sec6_10_PushPromiseBlockContinuation_Accepted(t *te
 	require.NoErrorf(t, err,
 		"CONTINUATION on the same stream: %v — a conformant spanning PUSH_PROMISE block must be accepted", err)
 }
+
+// TestConformance_RFC9113_Sec6_10_ContinuationOnDifferentStream_Rejected pins the
+// half of the continuity check that nothing reached (#781).
+//
+// checkFieldBlockContinuity refuses two distinct things in one condition — a
+// frame that is not a CONTINUATION, and a CONTINUATION on the wrong stream — and
+// every existing case drove the first. RFC 9113 §6.10 names them together: "A
+// receiver MUST treat the receipt of any other type of frame or a frame on a
+// different stream as a connection error (Section 5.4.1) of type PROTOCOL_ERROR."
+// With the stream-id half dropped, a peer that opened a field block on stream 1
+// and then sent a well-formed CONTINUATION on stream 3 was accepted, and the two
+// streams' header fragments were spliced into one HPACK block.
+//
+// Both block openers, because §6.10 is frame-type-agnostic and the continuity
+// state is set from two separate arms of trackFieldBlock: a HEADERS that opens a
+// block and a PUSH_PROMISE that opens one are different code paths to the same
+// rule.
+func TestConformance_RFC9113_Sec6_10_ContinuationOnDifferentStream_Rejected(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		open []byte
+	}{
+		{"block opened by HEADERS", frameBytes(1, FrameHeaders, 0, 1, []byte{0x82})},
+		{"block opened by PUSH_PROMISE", ppOpenBlock()},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			// Well-formed in every respect except the stream it names: END_HEADERS
+			// set, a valid fragment, and stream 3 instead of the stream 1 the open
+			// block belongs to.
+			cont := frameBytes(1, FrameContinuation, FlagContinuationEndHeaders, 3, []byte{0x82})
+			fr := NewFramer(nil, bytes.NewReader(append(tc.open, cont...)))
+			h := &recordingHandler{}
+			_, err := fr.ReadFrame(context.Background(), h)
+			require.NoError(t, err, "the frame that opens the field block")
+
+			_, err = fr.ReadFrame(context.Background(), h)
+
+			require.ErrorIsf(t, err, ErrContinuationExpected,
+				"CONTINUATION on stream 3 during a block open on stream 1: err = %v, want "+
+					"ErrContinuationExpected — accepting it splices two streams' field "+
+					"fragments into one HPACK block, which desynchronises the shared decoder "+
+					"for every stream on the connection", err)
+		})
+	}
+}

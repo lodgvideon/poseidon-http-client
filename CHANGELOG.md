@@ -7,7 +7,535 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Tests
+
+- **Eleven `http1` and `frame` coverage gaps from the #722 sweep, eight closed by
+  adding the missing case and three answered with a measurement instead.** The
+  eight: the three write-side stream-0 guards `frame`'s test file grew for
+  `WriteData` and never grew for `WritePriority`, `WritePushPromise` or
+  `WriteContinuation`; the WINDOW_UPDATE increment mask, the one of this codec's
+  three 31-bit payload masks whose doc comment claimed the parity and which
+  nothing asserted, plus the frame's stream id, which no test looked at at all —
+  writing every WINDOW_UPDATE on stream 0 refills the connection window while the
+  blocked stream stays at zero; both read-side length guards at their boundary
+  rather than comfortably past it, where a 7-octet GOAWAY indexes past a 7-octet
+  slice on peer-chosen input; a 1-octet ALTSVC payload, which is the only thing
+  between a peer's one-line frame and an index-out-of-range in the parser; the
+  §6.10 continuity check's "or a frame on a different stream" half, which would
+  otherwise splice two streams' field fragments into one HPACK block; the inbound
+  padded PUSH_PROMISE trace detail, whose outbound twin was already pinned; the
+  204 `Content-Length: 0` pooling exemption, whose absence let the reverted
+  evict-on-presence behaviour — a connection burned per `generate_204` — come
+  back for free; `WriteBody`'s condemn on a write that accepts every octet and
+  reports an error anyway, the `(len(p), err)` return a `*tls.Conn` produces and
+  the suite's fake conn cannot; three arms of `isConnectionManagedName` that had
+  no ordinary-header control, so every two-character caller header could have
+  been dropped from the wire silently; `HasResidue`'s reader-level check, the one
+  layer that sees an over-read when the socket below it is genuinely clean; and
+  `ProbeIdle`'s socket-level detection, asserted on the FIRST probe because the
+  existing polling loop is answered by the buffered short-circuit from its second
+  call onwards. Two fixtures were repaired rather than extended:
+  `TestFramer_FrameTooLargeOnRead` lowered the read limit before writing, so the
+  write failed and `ReadFrame` was never called (its property is now the boundary
+  test), and the rule-1 bodyless table appended a second response to every row,
+  which condemns a connection on its own — one row was decided entirely by that
+  and has moved to the test named for it. The three measurements: `ProbeIdle`'s
+  `Buffered()` short-circuit changes no verdict anywhere in its input partition
+  (`peekUnder` is `Peek(1)`, which returns from the buffer), so it is a fast path
+  that MASKS the socket check rather than a second detection; `WriteAltSvc`'s
+  local stream-id mask emits byte-identical frames with and without it, because
+  `WriteFrameHeader` masks every stream id already — what it really buys is a
+  trace line that agrees with the wire, which is what now pins it; and
+  `commitHeaderLine`'s `contentLen` writes are dead at any value, so the fix
+  there was the comment that mis-attributed RFC 9112 §6.3 rule 3 to that site
+  when `resolveContentLength`'s `respTE` early return is what implements it
+  (#778, #779, #780, #781, #782, #799, #811, #820, #824, #830, #831).
+
+- **The `client/integration_test` fault matrix was a diagonal, and three of its
+  tests could not observe the property they are named for.** Every one of the ten
+  Toxiproxy tests pinned one upstream constant, so a four-peer
+  cross-implementation suite injected faults into nginx and nothing else; the
+  proxy's upstream is now a parameter and all ten run as subtests against nginx,
+  Undertow and nghttpx, over h2 and over HTTP/1.1. The in-process Go reference
+  stays out and the reason is recorded in the peer table: Toxiproxy dials from
+  inside the compose network and there is no route back to a host-side ephemeral
+  port. That widening is what made the missing branch reachable — the HTTP/1.1
+  mid-body test rests its claim on Content-Length reconciliation, but over TLS a
+  cut socket surfaces as `io.ErrUnexpectedEOF`, so the RFC 9112 §6.3 rule 6 arm
+  it names was never executed and deleting that arm's error left it green. A
+  cleartext leg reaches a real `io.EOF`, and the new test requires the error to
+  carry the declared and received lengths, which only rule 6 produces.
+  `TestIT_GoHTTP_ConnectionReuse`, `TestIT_GoHTTP_MultipleRequests` and
+  `TestMatrix_ConnectionReuse` counted statuses, which a transport dialling per
+  request satisfies exactly as well as one reusing a connection; they count dials
+  now. The two `RequestHeaders` tests asserted a status and never that the header
+  arrived, and read it back off `/echo`'s `X-Echo-Headers`. Three fixtures had no
+  consumer at all: `/trailers` gains `Request.WantTrailers` coverage in both
+  directions on the one peer that emits a real trailer section, `/gzip` gains a
+  cross-peer decode assertion that reads the same on every peer (a body longer
+  than the octets received can only be a decompressed one) — the Go reference's
+  own handler had to start emitting gzip rather than labelling plaintext as gzip
+  — and `/never` gains the silent-peer case, which is a different state from
+  `/delay`: the failure must be a `context.DeadlineExceeded` and the connection
+  must survive it. Response sizes reach the 65535-byte connection window on every
+  peer, and the bodyless 204/304 class is tested over HTTP/1.1, where the client
+  has a rule 1 branch to get wrong; nghttpx is excluded there with the
+  measurement, because Undertow answers `/status/204` with a body and nghttpx
+  refuses to re-encode it (#892, #893, #894, #895, #896).
+
+- **Fourteen coverage gaps in `trace`, `contrib/prometheus`, `internal/bufx` and
+  `internal/bytesx`; eleven closed by adding the missing case, three refuted by
+  measurement.** Every varint in `bytesx` was decoded from a buffer trimmed to
+  exactly its own length, the opposite of the shape `quic` and `http3` produce —
+  a frame type, then a length, then hundreds of bytes still to come — so all
+  three multi-byte length guards could be weakened to equality tests and the
+  one-byte form made to report `len(b)`, with the suite green: under the first,
+  every multi-byte varint in every packet reads as incomplete and the parse
+  stalls forever. `trace`'s renderer had no case where a detail-gated field held
+  zero, so `last_stream=0` (a server refusing the connection without having
+  processed a stream) and `incr=0` (a PROTOCOL_ERROR WINDOW_UPDATE) could both
+  vanish from the log, and the nil-`Params` guard that stops a debug path
+  panicking the connection it was installed to observe could be deleted
+  unnoticed; the timestamp was cut off by the test helper before every
+  assertion, leaving its resolution pinned by nothing; and the writer error both
+  `Flush` and `Close` exist to return had no failing writer anywhere in the
+  package, hiding a `Close` reordering that leaks one flusher goroutine per
+  tracer. `contrib/prometheus` gained the degrade-rather-than-panic branch its
+  scrape goroutine depends on, the top-of-window histogram boundary — bracketed
+  from a distance at client buckets 8 and 40, so the term the bug drops was
+  always zero — `WithConstLabels` on `HookMetrics` and on every `Collector`
+  `Desc`, pinned through the duplicate-registration error a second client in one
+  process actually hits, `statusLabel`'s `Err`-beats-`Status` precedence, all
+  eighteen families at zero state rather than one gauge out of eighteen,
+  `MetricsSnapshot`'s no-caching contract, and a concurrent-observation test
+  with a single-goroutine control arm and a reported scrape count. `bufx` pinned
+  `GetReadBuf`'s documented length-0 postcondition and the `PutReadBuf(nil)`
+  guard, whose removal poisons the shared pool and panics an unrelated caller
+  that merely drew the entry, plus the reserved-bit-only input that separates
+  "clears the R bit" from "saturates at 0x7fffffff". Three sub-claims were
+  refuted with measurements rather than closed with tests: `sync.Pool` retention
+  at the `cap == min` boundary is unobservable, `WithDurationBuckets` has no
+  data path to `Collector` at all, and the uint helpers' callers all pass
+  exactly-width slices, so an out-of-window access is a panic the existing
+  vectors already trigger. `ExampleNewCollector` and `ExampleNewHookMetrics` no
+  longer share `http.DefaultServeMux`, and `applyCallOptions`' escape comment
+  now records what the allocation gate observes — the caller's `len(opts) > 0`
+  guard, not the `//go:noinline` directive beside it (#742, #743, #744, #749,
+  #750, #751, #752, #753, #758, #760, #761, #762, #763, #794).
+
+- **Twelve `http3` coverage gaps from the #722 sweep, most of them boundaries or
+  orderings that no fixture could reach.** Every cap was tested from the reject
+  side only, so any of them could tighten by one and stay green: the 1xx count cap,
+  the per-frame declared-length cap, the retained-total cap on both of
+  `dispatchFrame`'s arms, and `release`'s pooled-buffer cap — whose ACCEPT side is
+  the whole reason `frameBufPool` exists, and which could be reduced to "never
+  reuse a grown array" with the suite silent. Two orderings were named by tests
+  that could not observe them: `markDead`'s store-before-close, where a PARKED
+  observer never lands in a two-instruction window and a spinning one catches the
+  swap on the first run, and `Close`'s latch-before-cancel, invisible because the
+  fake latched its terminal error only in `CloseWithError` where `quic.Conn`
+  latches it in `Poll` too — so a graceful shutdown and a reader teardown that
+  tells the peer `H3_INTERNAL_ERROR` were indistinguishable. `sendAll`'s
+  zero-progress park had no fixture at all (the fake stream always made progress),
+  so losing it — a hot spin on a flow-control-blocked stream, same bytes on the
+  wire — was unobservable. Also: two of the three required-pseudo-header cases
+  were being rejected by the §4.3.1 authority rule rather than the rule they name;
+  an explicit `SETTINGS_MAX_FIELD_SECTION_SIZE` of 0 was never told apart from the
+  absent case, which §7.2.4.1 gives the opposite meaning; `h3TLSConfig`'s
+  single-Initial curve default was pinned in neither direction; and the UDP
+  offload race test asserted nothing and now skips honestly when the raw fd is
+  unavailable, reporting what it engaged. `DoStream` ignoring a DATA frame after
+  the trailer section, where buffered `Do` answers `H3_FRAME_UNEXPECTED`, is
+  recorded as a two-sided drift tripwire rather than decided (#773, #774, #786,
+  #795, #796, #797, #807, #808, #809, #815, #816, #817).
+
+- **Twelve `grpc` coverage gaps closed, three of them tests that named a
+  property they could not observe.** `TestIntegration_ResetStreamMapsToStatus`
+  asserted only "not OK", which `InvokeInto`'s empty-response guard produces on
+  its own, so the reset-code mapping was never checked through the wiring; the
+  RST arm is now driven through `NewStream`/`Recv` over six chosen codes, which
+  needed a mock peer able to send a reset code of the test's choosing —
+  net/http2's server only ever emits `INTERNAL_ERROR`, the same value every
+  unmapped code falls through to. `TestStream_SendErrorIsSticky` killed the whole
+  `ClientConn`, so every later call failed on its own and `sendErr` was never
+  read; the latch now has a test whose first send fails on an already-done
+  context with the connection provably still carrying traffic.
+  `TestInvokeInto_DrainDoesNotClobberTheResponse` never called `InvokeInto`.
+  Alongside them: `terminal()`'s status-before-truncation ordering, which needed
+  a peer that aborts mid-message *and* says why; `validContentType`'s delimiter,
+  which had no refusing case, so `application/grpc-web` read as gRPC; the
+  decoder's compact slide, whose 1 MiB ceiling the slide-less form also passed;
+  both empty-chunk guards; `MetadataValue`'s case-insensitivity; `InvokeInto`'s
+  `dst[:0]` error return; and two of the three places the pooled send vector is
+  cleared. Two fixtures were repaired rather than added to —
+  `TestStreamBufs_OversizeIsNotPooled` grew `dec.buf` where the pool reads
+  `dec.own`, and `TestStreamBufs_CloseIsTheOnlyReturn` checked fields that were
+  nil before the code under test ran. The streaming allocation gate gained the
+  absolute ceiling its unary sibling already carried, and
+  `TestIntegration_ContextCancelStopsRecv`'s second `Recv` is bounded, so losing
+  the receive latch now fails on that test's own assertion instead of burning the
+  whole test timeout. `appendTimeout`'s final clamp is recorded as unreachable by
+  construction rather than untested: no value a `time.Duration` can carry reaches
+  it (#788, #789, #790, #791, #792, #793, #803, #804, #805, #806, #812, #813).
+
+- **Seventeen `quic` coverage gaps from the #722 sweep, fifteen closed by adding
+  the missing case.** Every mutation those issues recorded survived the whole
+  `./quic/` suite twice and now dies twice: the §18.2 ack-delay limits, pinned
+  only from the reject side, so an endpoint refusing the largest legal
+  `ack_delay_exponent` or `max_ack_delay` a peer may advertise looked correct;
+  the 512-range reassembly cap, bracketed at 64 and ~515 and therefore free to
+  move by 8x in either direction; `permitInSpace`'s known/unknown frame
+  boundary, probed only at `0x30`, eighteen types past the edge, so `0x1f` and
+  `0x20` could be answered with the wrong transport error code; the 64-segment
+  GSO cap, which no fixture ever made the binding one (the byte cap filled
+  first, and quadrupling the segment cap changed nothing) even though exceeding
+  it is an `EINVAL` that drops the whole burst; `detectLost`'s RFC 9002 §6.1
+  precondition that a packet be sent prior to an acknowledged one, without which
+  the time threshold alone retransmits packets the peer has had no chance to
+  acknowledge; `maxPendingCtrl` at all three regrant sites, a peer-driven memory
+  bound no test reached; the receive-window grant threshold and the connection
+  flow-control limit, both tested comfortably inside and neither at its value;
+  `readCID`'s 20-byte connection-ID bound, whose only fixture was so short that
+  the truncation check rejected it and the bound never ran; the
+  at-most-one-Retry rule, for which the SCID rule was firing instead because the
+  fixture replayed the same packet; an ACK whose largest packet number was never
+  in flight, which without its guard feeds a two-millennia RTT sample into the
+  estimator; the stateless-reset token, matched over all sixteen bytes rather
+  than a prefix; `initial_max_streams_uni = 0`, the one equivalence class of the
+  §4.6 limit with no case; and the §10.3.1 deletion of a retired connection ID's
+  reset token, now gated directly instead of through the lookup scoping that was
+  masking it. `pto_ctx_test.go`'s three tests each asserted an error that a
+  second mechanism also produced — they now count `Read` calls, close the ~667 ms
+  anti-deadlock escape hatch that was being credited to the watchdog, and set
+  `handshakeConfirmed` so the "PTO path armed" premise those tests state is
+  actually true. The `max_idle_timeout` behaviour in #798 is **pinned, not
+  decided**: the new test writes down today's ladder — a 1 s advertised timeout
+  and a 46.08 s deadline at the last rung — so the open design question has to be
+  answered deliberately rather than drifted into. #839 is left open and
+  unchanged: its platform gate is a build-tagged `const`, so on Linux
+  `if groCanCoalesce` and `if true` are the same program after constant folding
+  and no Linux test can tell them apart, while the existing test does catch the
+  regression on `windows/amd64` — the gap is CI's OS matrix, not the test.
+  Separately, the steady-state send allocation gate was stale and one-sided,
+  admitting a full allocation per datagram of regression against a measured 0.00;
+  it is now 0 and two-sided like its cold sibling (#798, #827, #828, #836, #837,
+  #838, #839, #840, #842, #843, #844, #846, #847, #853, #854, #855, #856).
+
+- **Thirteen coverage gaps in the two header codecs, most of them boundaries
+  only ever tested past the limit.** `hpack` accepts a §6.3 Dynamic Table Size
+  Update, a §4.4 dynamic-table entry and a header list at exactly their limits
+  and refuses one past — but nothing sat ON any of those three comparisons, so
+  narrowing each to `>=` left the suite green while turning a conformant peer's
+  largest legal input into a connection error. `decodeInteger` carries two
+  independent §5.1 bounds and only the value one was tested: a run of
+  zero-payload continuation octets never grows the value, so the shift ceiling
+  is the only thing that can stop it, and relaxing that ceiling let the peer
+  decide how long the loop ran. Index 61 — the last static entry, the line
+  between the static and dynamic tables, wire-visible and shared with every peer
+  — was never decoded; and 53 of the 61 Appendix A rows were asserted by nothing
+  at all, so they are now checked against a second transcription taken from the
+  RFC text rather than generated from the table under test. In `qpack` the
+  static-index guard on the Literal-with-Name-Reference path had no test (its
+  Indexed twin does, and the same one-byte relaxation there is caught as a
+  panic); neither string reader had ever been handed a Huffman literal that
+  fails to decode, though the two map to different HTTP/3 connection error
+  codes; a SHRINKING Set Dynamic Table Capacity never evicted in any test;
+  `compactArena` was never invoked at all, leaving the arena a peer-driven
+  unbounded allocation with nothing gating it; the §7.1 N bit was pinned only on
+  the branch a secret is least likely to take, not on the literal-name form that
+  carries `x-api-key`; and three small encode contracts — the Required Insert
+  Count wraparound, the constructor's capacity clamp, the static name-only
+  tie-break — had no assertion behind them. Each issue's mutant survived the old
+  suite twice and dies against the new one twice (#755, #756, #757, #759, #765,
+  #766, #767, #768, #771, #772, #776, #777).
+
+  The pair filed as #764 was measured and closed rather than covered. The copies
+  guarding the arena-aliasing reads in Insert With Name Reference and Duplicate
+  are defence in depth, not a live requirement: a differential probe over 180,000
+  encoder instructions — 11,484 of them driving an insert that evicted the whole
+  table, 605 with the referenced entry at a non-zero arena offset — produced a
+  bit-identical digest with both copies removed, under `-race` and `GOGC=1`. The
+  only in-place arena mutation is the reset performed when the table empties, and
+  every destination it then writes lies at or below its source, so `copy`'s
+  memmove semantics keep the aliased read correct. The copies stay; the tests
+  that would have "proved" them are not written, because their mutants survive
+  before and after.
+
+- **Thirteen `conn` coverage gaps the #722 sweep filed, closed together.** Every
+  one carried a mutation that survived the whole package twice; ten are now
+  caught, two were already covered elsewhere, one is reported as the masked pair
+  it is. The flow-control decisions were only ever approached from a distance —
+  a 100-byte window overflowed with 200 bytes, a retroactive
+  INITIAL_WINDOW_SIZE delta parked far past 2^31-1 — so `limit`, `limit+1` and
+  the batching threshold's lower side are now driven at the edge; `deliverEnd`'s
+  `end` conjunct, `Stream.recv`'s `released` gate on each of the three close
+  exits that do **not** recycle, `streamRefundThreshold`'s floor of 1, the
+  CONTINUATION flood bound and `PaddingStrategy`'s `Min>0/Max==0` class all get
+  their first test. Three tests were repaired rather than added: the closewake
+  fixture polled a field its own Arrange block pinned, so its park detection was
+  a no-op behind a fixed 100 ms sleep; `TestStreamClose_IdempotentAfterRecycle`
+  never reached a recycled struct; and the `ConnOptions.WriteBufferSize` and TLS
+  1.2-floor tests asserted things that held whether or not the option reached
+  the code. `PaddingStrategy`'s `Min>0/Max==0` answer is **pinned** at the
+  current behaviour — disabled — rather than changed; the doc comment that
+  reads the other way is left for a separate change, since this batch touches
+  no non-test file (#800, #801, #802, #810, #814, #818, #819, #825, #826, #832,
+  #833, #834, #852).
+
+- **Twenty-two `client` coverage gaps closed, and thirty-eight tests that ran
+  nowhere given one policy.** The #722 sweep filed twenty-seven gaps against
+  `client`; every one was re-measured, and the mutation each names now dies where
+  it previously survived — among them the HTTP/1.1 pool's release-path eviction
+  (three sites masked each other, so all three could go at once unnoticed),
+  `serveWaiters`' FIFO promise, a double release with a caller parked,
+  `h3SpareStreamCapacity` counting dead and at-cap connections, both prune
+  helpers silently owing a queued caller its one reply, `defaultBackoff`'s
+  ±25% jitter (a constant passed), four of five `isHardStop` sentinels, `Random`
+  and `Hash` both satisfied by a constant pick, `Request.Timeout` during the dial
+  and during the body send, `Response.Reset` truncating the body, `Quantile`'s
+  `q < 0` clamp, the HTTP/1.1 close-observability gate (exact counts and reason,
+  as its HTTP/2 sibling already had), the buffered gzip/deflate response bodies,
+  two reset tests satisfied by `io.EOF`, the three-digit `:status` guard, a
+  pooled `compressingReader` handed to two requests, a managed pool reporting
+  `ErrNoAddresses` when every backend refused, and the send-tail body-source
+  failure the unused `errAfterN` fixture had been staged for. Two conformance
+  tests stopped self-disabling — their `t.Skipf` preconditions are now
+  assertions, so `conformance-gate` can no longer count a skip as coverage. The
+  thirty-eight end-to-end tests split across an unconditional `t.Skip` and an
+  unset build tag are now behind one `e2e_remote` tag and were run: all thirty-
+  eight pass, and doing so uncovered two assertions that could only ever fail
+  (`uint64` compared against `int64` counters) plus two that measured the remote
+  server's policy rather than this client. Five gaps closed as already covered or
+  as equivalent mutants, with the measurement rather than an opinion (#845, #848,
+  #850, #860, #861, #862, #863, #869, #870, #871, #873, #874, #875, #876, #877,
+  #878, #879, #882, #883, #884, #885, #886, #887, #888, #889, #900).
+
+- **Four boundary classes that were never asserted, two of them on peer bytes.**
+  `bufx.StripPadding` was never called with `padLen == len(raw)`, the first
+  illegal pad length; `bytesx.ReadVarint` never saw an 8-byte prefix truncated to
+  3–7 bytes, though the 2- and 4-byte guards were probed at theirs. Weakening
+  either guard by one leaves the whole suite green and turns a rejected frame
+  into a panic on attacker-supplied input — `raw[1:0]` in the first case, a read
+  of `b[7]` past a 7-byte slice in the second. Alongside them,
+  `bytesx.WriteVarint` was only ever handed an oversized `[8]byte`, so the tight
+  `VarintLen(v)` bound its contract states went unexercised, and
+  `header.Field.Sensitive()` had no case for an `IndexingMode` outside the
+  declared three — a value an importer can construct, since the type is an
+  exported `uint8` with no constructor. Every one of those mutations now dies;
+  the out-of-range mode is **pinned** at the current answer, `false`, not changed
+  (#741, #745, #746, #739).
+
+
+- **Six `client/coverage_test.go` tests could not fail; four of them were
+  measuring a fixture that did nothing.** Written to push line coverage past
+  90%, they reached their target lines and asserted nothing about them — one
+  conceded it in a trailing comment ("Just verifying no panic; branch coverage
+  is the goal") — so each passed identically against a correct implementation
+  and against one where the function under test did nothing (#859).
+
+  Three of them shared a "server resets the stream" fixture that asked the
+  `http.ResponseWriter` for an `http.Hijacker` and closed the raw conn.
+  net/http's HTTP/2 writer does not implement `http.Hijacker`, so the type
+  assertion always failed: nothing was hijacked, nothing was reset, and
+  `Recv`, `WaitTrailers` and `drainResponse`'s reset arms were exercised
+  against a clean 200 with an empty body. They now abort with
+  `http.ErrAbortHandler`, which puts a real `RST_STREAM(INTERNAL_ERROR)` on the
+  wire, and assert that the PEER'S code reaches the caller verbatim — the half
+  no sibling covers, and the one `Retryer` decides on (RFC 9113 §8.7).
+
+  Two more had false premises rather than weak assertions.
+  `TestPool_EvictDeadSilent_Via_Stats` closed the client and *then* called
+  `PoolStats`, which selects on `p.closedCh` and returns a zero `Stats` without
+  the actor running — `evictDeadSilent` was never reached. It now kills the
+  peer instead and pins both halves of "silent": `ConnsClosed` records the
+  eviction, `OnConnClose` stays quiet. `TestPool_HandleClose_GoAwayConn` used
+  `srv.Close()`, which drops the socket without a GOAWAY; the reason observed
+  was `CloseManual`, so the `CloseGoAway` branch it existed for had never once
+  executed. It now injects a real GOAWAY with `srv.Config.Shutdown` and closes
+  with the stream still in flight, which is what makes `handleClose` the
+  mechanism rather than `handleRelease`'s identical-looking copy.
+
+  Every event-shaped test gained a control arm that injects nothing and an
+  injection count read off the wire through a `trace.Tracer`, because a run in
+  which the peer never reset or never drained passes exactly like a real one.
+  `TestDNSResolver_Resolve_AllFilteredReturnsErrNoAddresses` was deleted: it
+  resolved a `.invalid` host, so the lookup FAILED and `Resolve` returned two
+  branches before the `ErrNoAddresses` it was named for, which
+  `TestResolve_SuccessfulEmpty_DoesNotServeStale` already asserts through the
+  internal `dnsLookup` seam.
+
+- **The H2 retention test now measures a quiet connection, which is what makes
+  its bound reachable at all.**
+  `TestIT_H2_StreamedDownload_RetentionStaysBounded` took its live-heap baseline
+  after `DoStream` returned — with the server already streaming 64 MiB. Two
+  things followed from that, and the second is the worse one.
+
+  It reset. conn's reader fills a stream's event channel whether or not anybody
+  is reading it, and `push` drops the frame and sends `RST_STREAM(CANCEL)` once
+  `StreamEventBuffer` (8 here) events are queued, so the two blocking GCs inside
+  the baseline were a window the reader could win. Measured: `GOMAXPROCS=1` loses
+  it 2 runs in 3, and Gremlins' coverage sweep — `go test ./...`, no `-race`,
+  every package at once — lost it twice out of twice on a 4-vCPU runner, both
+  times identically at “262141 of 67108864 bytes”, i.e. before the drain loop
+  had run once. It is not the flake it resembles: no CI path had ever run this
+  suite CPU-starved *and* without `-race` until the mutation gate did.
+
+  And when it did not reset, the baseline had absorbed up to `ltPipelineBytes` of
+  the very body being bounded, so `after - baseline` came out **negative** —
+  around −1.3 MiB against a 1 MiB bound — and the retention comparison, guarded
+  by `after > baseline`, was never evaluated. Cutting the bound to 64 KiB, well
+  under the real 134–196 KiB delta, leaves the old test green 3/3 and turns the
+  new one red 3/3.
+
+  The fixture now flushes the response headers and parks the handler on a
+  `release` channel that the test closes once the baseline is taken. Nothing is
+  in flight during the measurement; `ltEventBuf` and `ltRetentionBound` are
+  untouched, because widening the channel to buy scheduling slack would have
+  loosened the bound the test exists to assert. The delta is now positive, stable
+  and about an eighth of the bound, and `GOMAXPROCS=1` is 10/10.
+
+- **The mTLS rejection conformance test waits for the close instead of racing
+  it.** `TestConformance_RFC9001_Sec48_ListenerClosesOnRejectedClientCert` called
+  `Poll` once and required that one call to have observed the server's
+  `CONNECTION_CLOSE`. `Poll` is one step of the connection event loop, so `nil`
+  means "made progress", not "the peer closed", and nothing orders the client's
+  first `Poll` against the server's rejection — so on a loaded runner the poll won
+  and the `rfc` gate went red on unrelated pull requests (#785). It now polls
+  until a terminal error arrives, bounded by the same 5-second context, whose
+  expiry `Poll` returns — a silent server still fails, and with a truer message.
+  The assertions are unchanged.
+
+- **The suite is migrating to Arrange–Act–Assert with `testify` assertions, and
+  `header` is the first package through.** `CLAUDE.md` requires both of new and
+  edited tests; #722 tracks bringing the existing 2427 across, one issue per
+  package. `header/header_test.go` is converted in full — four tests, three
+  visible blocks each, `t.Errorf` mapped to `assert` and not to `require` so a run
+  reports every mismatch rather than the first, and each original failure message
+  carried over as `msgAndArgs`, because `testify` prints expected-vs-actual and
+  nothing about why the property matters.
+
+  **`github.com/stretchr/testify` v1.11.1 therefore enters `go.mod`.** Only
+  `_test.go` files import it, so it reaches no consumer binary, but it is a direct
+  requirement and does appear in an importer's module graph.
+
+  The rewrite was checked by mutation rather than by reading, since an assertion
+  that still passes but no longer catches is the failure mode a mass conversion
+  produces. Dropping the value length from `Field.Size`, moving `EntryOverhead`
+  off 32, pointing `Sensitive` at the wrong mode, and taking the zero value away
+  from `IndexIncremental` are each caught 2/2. A fifth, widening `Sensitive` to
+  `>=`, survives — a gap in the cases rather than in the conversion, filed as
+  #739. This entry covers the sweep; later batches do not each add one.
+
+- **A gRPC conformance test no longer infers a reset from `io.EOF`.**
+  `TestConformance_RFC9113_Sec8_1_SendAfterBenignResetStillFails` drained to
+  `io.EOF` and then sent, on the stated assumption that "the reset follows the
+  trailers on the wire, so the stream is latched closed by the time EOF is
+  reported". `io.EOF` reports END_STREAM being *consumed*; `RST_STREAM` is the
+  next frame, and nothing orders the two — so on a loaded runner the send reached
+  a stream the reader had not torn down yet, and succeeded (#709).
+
+  It now waits for `EventReset` on the transport stream underneath. That orders
+  the send for a concrete reason: `endWithReset` pushes the event and sets the
+  stream's closed flag inside one `s.mu` section, and `sendData` takes the same
+  mutex before testing that flag. The assertion is unchanged — a send after a
+  benign reset must still fail. Reproduced deterministically before fixing, by
+  delaying the reader's RST handling 50 ms: the old form fails 3/3 and the new
+  one passes 3/3, while both pass without the delay.
+
+- **The three remaining `pc.Write` sites in `quic` are gated against a failing
+  socket.** A datagram that never left the host is not a lost packet: loss is
+  self-healing, since the peer's missing ACK arms a PTO and the frame is resent,
+  so a swallowed local write error is the one send failure the transport cannot
+  repair, and it presents as a connection that simply waits. #674 gated
+  `conn_seal.go`'s and left the `failWritePC` fixture behind; the mutation
+  battery that found it deferred the rest under a one-round budget (#676).
+
+  All three propagate correctly today — these are the gates that keep them doing
+  so, since deleting any of the checks left the whole `quic` and `http3` suites
+  green. They sit where each site is actually observable, which is not uniform:
+  `flushBatch` (`gso.go`) through the `Stream.Send` path, `writeAppFrames`
+  (`send.go`) through `Stream.Reset`, and `flushControl` (`conn_recv.go`) through
+  nothing at all — its only non-test caller discards the error deliberately when
+  granting receive credit on the consumer's goroutine, so the gate is on the
+  return value and that caller's choice is left alone.
+
+- **Requests are now correlated with their own responses under concurrency, so
+  stream mixing can fail a test.** The suite checked that a response came back,
+  not that it was *this* request's response: every concurrent test fired the
+  identical `GET /healthz` and asserted only the status, so every reply was the
+  same two bytes and delivering stream A's response to stream B left both
+  assertions passing. The tests were structurally incapable of failing on mixing
+  (#651).
+
+  That matters more here than in most clients, because this one pools buffers and
+  decodes header blocks into reused storage — the failure mode is not a crash but
+  a response, or a header value, belonging to a neighbouring request, and nothing
+  above `conn/multistream_test.go` (10 streams, 13-byte bodies, below `client` and
+  the pool) could see it.
+
+  Two matrix tests give every in-flight request a distinct identity on both
+  channels a response can carry and make each prove it got its own back. Shown to
+  discriminate rather than merely to pass: with all responses sharing one body
+  buffer, the new test reports 119 mismatches across the four peers while both
+  pre-existing concurrency tests stay green; with one header set aliased across
+  streams, the header test reports 28 while the existing header tests stay green.
+
+- **`X-Echo-Headers` is implemented by every peer that claims it.**
+  `fixtures/CONTRACT.md` has specified it for `/echo` since it was written, and
+  only Undertow implemented it — repo-wide the string occurred exactly twice, the
+  contract line and that implementation, so no test had ever read a request header
+  back. Added to the Go fixture and to nginx; nghttpx inherits it from Undertow,
+  its origin.
+
+- **`conn/sendflow_test.go` compares the uploaded bytes, not their count.** It is
+  the one upload in the suite that crosses the send window, so it is chunked,
+  credited and reassembled across many DATA frames — and a length check passes
+  through all of that unchanged, which made the closest thing to an
+  upload-corruption detector unable to detect corruption.
+
+- **An interim-then-close request is now proven un-replayed end to end.**
+  `ErrServerClosedIdle` means no part of a response ever arrived, which is what
+  makes replaying safe; an interim response is the opposite, since `100 Continue`
+  is the server saying it has the request head and wants the body — the strongest
+  evidence available on that connection that it is acting on the request. `http1`
+  pinned the classification over a pipe and `client` pinned how the retry
+  classifier reads the error value, but neither drove the retry loop, so nothing
+  proved what happens to such a request in practice (#677).
+
+  Driven with GET rather than POST on purpose: `canRetry` refuses a non-idempotent
+  method outright, so a POST would be un-replayed for a reason unrelated to the
+  interim and the gate would pass with the classification broken. A control arm —
+  same fixture, same method, same `Retryer`, differing only in whether any part of
+  a response arrived — asserts the replay *does* happen there, without which the
+  gate is satisfied by a client that never retries anything.
+
+- **The TCP path now has the leak gate that guards HTTP/3.** The H3 soak exists
+  because receive-path resource exhaustion was a bug class here; the TCP path has
+  its own long-lived-connection state that nothing soaked — the stream registry,
+  the pooled `conn.Stream` free list, the pool's sweep — and its bug history is
+  that same shape (the pooled-stream reset class, the conn recycle race). A pooled
+  `Stream` keeping one field of the previous response is invisible to a
+  request-count assertion and shows up only as a footprint that grows with elapsed
+  load (#649).
+
+  `TestSoak_H2ConnStability` and `TestSoak_H2PoolConnStability` mirror the H3 pair
+  behind the same `soak` build tag, with a `make h2-soak` target against the
+  integration stack. Off the PR path, like `h3-soak`. Shown to discriminate: a
+  goroutine leaked per request takes the count from 101,906 to 307,929 and trips
+  the ceiling, and a retained-body heap leak trips the heap ceiling at the default
+  duration.
+
 ### Added
+
+- **The four RFC 9114 §8.1 error codes the constant block was missing** —
+  `H3GeneralProtocolError` (0x0101), `H3RequestIncomplete` (0x010d),
+  `H3ConnectError` (0x010f) and `H3VersionFallback` (0x0110). Thirteen of
+  §8.1's seventeen codes were defined, so `h3ErrorCodeName` returned `""` for the
+  other four and a peer sending one of them printed as a bare number. 0x010d had
+  a caller waiting: §4.1 requires it of a SERVER, and `poseidon-http-server` had
+  to spell the value out locally because this package is otherwise its single
+  source for every §8.1 code it sends. Additive only — nothing the client sends
+  or interprets changes (#775).
 
 - **Per-request load-test statistics on `client.RequestCompleteEvent`.** The
   event carried enough to count requests and time them end to end, and nothing
@@ -217,169 +745,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `APPLICATION_ERROR` values that no socket call ever returns, so a
   portable-looking `errors.Is` against them compiles and matches nothing. The
   Winsock codes are needed, which is why this is per-platform.
-
-### Tests
-
-- **The H2 retention test now measures a quiet connection, which is what makes
-  its bound reachable at all.**
-  `TestIT_H2_StreamedDownload_RetentionStaysBounded` took its live-heap baseline
-  after `DoStream` returned — with the server already streaming 64 MiB. Two
-  things followed from that, and the second is the worse one.
-
-  It reset. conn's reader fills a stream's event channel whether or not anybody
-  is reading it, and `push` drops the frame and sends `RST_STREAM(CANCEL)` once
-  `StreamEventBuffer` (8 here) events are queued, so the two blocking GCs inside
-  the baseline were a window the reader could win. Measured: `GOMAXPROCS=1` loses
-  it 2 runs in 3, and Gremlins' coverage sweep — `go test ./...`, no `-race`,
-  every package at once — lost it twice out of twice on a 4-vCPU runner, both
-  times identically at “262141 of 67108864 bytes”, i.e. before the drain loop
-  had run once. It is not the flake it resembles: no CI path had ever run this
-  suite CPU-starved *and* without `-race` until the mutation gate did.
-
-  And when it did not reset, the baseline had absorbed up to `ltPipelineBytes` of
-  the very body being bounded, so `after - baseline` came out **negative** —
-  around −1.3 MiB against a 1 MiB bound — and the retention comparison, guarded
-  by `after > baseline`, was never evaluated. Cutting the bound to 64 KiB, well
-  under the real 134–196 KiB delta, leaves the old test green 3/3 and turns the
-  new one red 3/3.
-
-  The fixture now flushes the response headers and parks the handler on a
-  `release` channel that the test closes once the baseline is taken. Nothing is
-  in flight during the measurement; `ltEventBuf` and `ltRetentionBound` are
-  untouched, because widening the channel to buy scheduling slack would have
-  loosened the bound the test exists to assert. The delta is now positive, stable
-  and about an eighth of the bound, and `GOMAXPROCS=1` is 10/10.
-
-- **The mTLS rejection conformance test waits for the close instead of racing
-  it.** `TestConformance_RFC9001_Sec48_ListenerClosesOnRejectedClientCert` called
-  `Poll` once and required that one call to have observed the server's
-  `CONNECTION_CLOSE`. `Poll` is one step of the connection event loop, so `nil`
-  means "made progress", not "the peer closed", and nothing orders the client's
-  first `Poll` against the server's rejection — so on a loaded runner the poll won
-  and the `rfc` gate went red on unrelated pull requests (#785). It now polls
-  until a terminal error arrives, bounded by the same 5-second context, whose
-  expiry `Poll` returns — a silent server still fails, and with a truer message.
-  The assertions are unchanged.
-
-- **The suite is migrating to Arrange–Act–Assert with `testify` assertions, and
-  `header` is the first package through.** `CLAUDE.md` requires both of new and
-  edited tests; #722 tracks bringing the existing 2427 across, one issue per
-  package. `header/header_test.go` is converted in full — four tests, three
-  visible blocks each, `t.Errorf` mapped to `assert` and not to `require` so a run
-  reports every mismatch rather than the first, and each original failure message
-  carried over as `msgAndArgs`, because `testify` prints expected-vs-actual and
-  nothing about why the property matters.
-
-  **`github.com/stretchr/testify` v1.11.1 therefore enters `go.mod`.** Only
-  `_test.go` files import it, so it reaches no consumer binary, but it is a direct
-  requirement and does appear in an importer's module graph.
-
-  The rewrite was checked by mutation rather than by reading, since an assertion
-  that still passes but no longer catches is the failure mode a mass conversion
-  produces. Dropping the value length from `Field.Size`, moving `EntryOverhead`
-  off 32, pointing `Sensitive` at the wrong mode, and taking the zero value away
-  from `IndexIncremental` are each caught 2/2. A fifth, widening `Sensitive` to
-  `>=`, survives — a gap in the cases rather than in the conversion, filed as
-  #739. This entry covers the sweep; later batches do not each add one.
-
-- **A gRPC conformance test no longer infers a reset from `io.EOF`.**
-  `TestConformance_RFC9113_Sec8_1_SendAfterBenignResetStillFails` drained to
-  `io.EOF` and then sent, on the stated assumption that "the reset follows the
-  trailers on the wire, so the stream is latched closed by the time EOF is
-  reported". `io.EOF` reports END_STREAM being *consumed*; `RST_STREAM` is the
-  next frame, and nothing orders the two — so on a loaded runner the send reached
-  a stream the reader had not torn down yet, and succeeded (#709).
-
-  It now waits for `EventReset` on the transport stream underneath. That orders
-  the send for a concrete reason: `endWithReset` pushes the event and sets the
-  stream's closed flag inside one `s.mu` section, and `sendData` takes the same
-  mutex before testing that flag. The assertion is unchanged — a send after a
-  benign reset must still fail. Reproduced deterministically before fixing, by
-  delaying the reader's RST handling 50 ms: the old form fails 3/3 and the new
-  one passes 3/3, while both pass without the delay.
-
-- **The three remaining `pc.Write` sites in `quic` are gated against a failing
-  socket.** A datagram that never left the host is not a lost packet: loss is
-  self-healing, since the peer's missing ACK arms a PTO and the frame is resent,
-  so a swallowed local write error is the one send failure the transport cannot
-  repair, and it presents as a connection that simply waits. #674 gated
-  `conn_seal.go`'s and left the `failWritePC` fixture behind; the mutation
-  battery that found it deferred the rest under a one-round budget (#676).
-
-  All three propagate correctly today — these are the gates that keep them doing
-  so, since deleting any of the checks left the whole `quic` and `http3` suites
-  green. They sit where each site is actually observable, which is not uniform:
-  `flushBatch` (`gso.go`) through the `Stream.Send` path, `writeAppFrames`
-  (`send.go`) through `Stream.Reset`, and `flushControl` (`conn_recv.go`) through
-  nothing at all — its only non-test caller discards the error deliberately when
-  granting receive credit on the consumer's goroutine, so the gate is on the
-  return value and that caller's choice is left alone.
-
-- **Requests are now correlated with their own responses under concurrency, so
-  stream mixing can fail a test.** The suite checked that a response came back,
-  not that it was *this* request's response: every concurrent test fired the
-  identical `GET /healthz` and asserted only the status, so every reply was the
-  same two bytes and delivering stream A's response to stream B left both
-  assertions passing. The tests were structurally incapable of failing on mixing
-  (#651).
-
-  That matters more here than in most clients, because this one pools buffers and
-  decodes header blocks into reused storage — the failure mode is not a crash but
-  a response, or a header value, belonging to a neighbouring request, and nothing
-  above `conn/multistream_test.go` (10 streams, 13-byte bodies, below `client` and
-  the pool) could see it.
-
-  Two matrix tests give every in-flight request a distinct identity on both
-  channels a response can carry and make each prove it got its own back. Shown to
-  discriminate rather than merely to pass: with all responses sharing one body
-  buffer, the new test reports 119 mismatches across the four peers while both
-  pre-existing concurrency tests stay green; with one header set aliased across
-  streams, the header test reports 28 while the existing header tests stay green.
-
-- **`X-Echo-Headers` is implemented by every peer that claims it.**
-  `fixtures/CONTRACT.md` has specified it for `/echo` since it was written, and
-  only Undertow implemented it — repo-wide the string occurred exactly twice, the
-  contract line and that implementation, so no test had ever read a request header
-  back. Added to the Go fixture and to nginx; nghttpx inherits it from Undertow,
-  its origin.
-
-- **`conn/sendflow_test.go` compares the uploaded bytes, not their count.** It is
-  the one upload in the suite that crosses the send window, so it is chunked,
-  credited and reassembled across many DATA frames — and a length check passes
-  through all of that unchanged, which made the closest thing to an
-  upload-corruption detector unable to detect corruption.
-
-- **An interim-then-close request is now proven un-replayed end to end.**
-  `ErrServerClosedIdle` means no part of a response ever arrived, which is what
-  makes replaying safe; an interim response is the opposite, since `100 Continue`
-  is the server saying it has the request head and wants the body — the strongest
-  evidence available on that connection that it is acting on the request. `http1`
-  pinned the classification over a pipe and `client` pinned how the retry
-  classifier reads the error value, but neither drove the retry loop, so nothing
-  proved what happens to such a request in practice (#677).
-
-  Driven with GET rather than POST on purpose: `canRetry` refuses a non-idempotent
-  method outright, so a POST would be un-replayed for a reason unrelated to the
-  interim and the gate would pass with the classification broken. A control arm —
-  same fixture, same method, same `Retryer`, differing only in whether any part of
-  a response arrived — asserts the replay *does* happen there, without which the
-  gate is satisfied by a client that never retries anything.
-
-- **The TCP path now has the leak gate that guards HTTP/3.** The H3 soak exists
-  because receive-path resource exhaustion was a bug class here; the TCP path has
-  its own long-lived-connection state that nothing soaked — the stream registry,
-  the pooled `conn.Stream` free list, the pool's sweep — and its bug history is
-  that same shape (the pooled-stream reset class, the conn recycle race). A pooled
-  `Stream` keeping one field of the previous response is invisible to a
-  request-count assertion and shows up only as a footprint that grows with elapsed
-  load (#649).
-
-  `TestSoak_H2ConnStability` and `TestSoak_H2PoolConnStability` mirror the H3 pair
-  behind the same `soak` build tag, with a `make h2-soak` target against the
-  integration stack. Off the PR path, like `h3-soak`. Shown to discriminate: a
-  goroutine leaked per request takes the count from 101,906 to 307,929 and trips
-  the ceiling, and a retained-body heap leak trips the heap ceiling at the default
-  duration.
 
 ### CI
 

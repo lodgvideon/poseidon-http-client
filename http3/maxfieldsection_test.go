@@ -79,6 +79,54 @@ func TestConformance_RFC9114_Sec422_ApplyMaxFieldSection(t *testing.T) {
 		assert.Equal(t, ^uint64(0), c.maxFieldSection.Load(),
 			"an absent SETTINGS_MAX_FIELD_SECTION_SIZE must leave the no-limit default")
 	})
+
+	// The third case a SETTINGS value has, and the one that was missing (#808):
+	// §7.2.4.1 gives this setting a default of unlimited, so ABSENT and an explicit
+	// 0 mean opposite things. Treating 0 as absent is a one-line change that the
+	// present/absent pair above cannot see.
+	t.Run("explicit zero", func(t *testing.T) {
+		var c Client
+		c.maxFieldSection.Store(^uint64(0))
+
+		c.applyServerSettings([]Setting{{ID: SettingMaxFieldSectionSize, Value: 0}})
+
+		assert.Equalf(t, uint64(0), c.maxFieldSection.Load(),
+			"maxFieldSection = %d, want 0: an explicit SETTINGS_MAX_FIELD_SECTION_SIZE of 0 "+
+				"is not the absent case — the peer accepts no field section at all, so it must "+
+				"not fall back to the no-limit default of §7.2.4.1",
+			c.maxFieldSection.Load())
+	})
+}
+
+// TestConformance_RFC9114_Sec422_ExplicitZeroRefusesEveryRequest wires the
+// explicit zero end to end: the value arrives on the SERVER'S control stream, not
+// through a hand-placed Store, and every request is then refused before it reaches
+// the wire (RFC 9114 §4.2.2, §7.2.4.1).
+//
+// TestConformance_RFC9114_Sec422_DoRefusesOversized does the enforcement half but
+// sets client.maxFieldSection.Store(10) by hand, so nothing joined the peer's
+// SETTINGS to the send path for the one value where "0" and "unset" diverge.
+func TestConformance_RFC9114_Sec422_ExplicitZeroRefusesEveryRequest(t *testing.T) {
+	server := &fakeStream{id: 3, recvChunks: [][]byte{serverControl([]Setting{{SettingMaxFieldSectionSize, 0}})}}
+	conn := &fakeConn{req: &fakeStream{}, acceptQ: []quicStream{server}}
+	client, err := NewClientFake(conn, nil)
+	require.NoError(t, err, "NewClientFake over the fake transport")
+	require.NoError(t, client.serviceControl(), "reading the server control stream")
+	require.Equalf(t, uint64(0), client.maxFieldSection.Load(),
+		"the peer's explicit 0 never reached maxFieldSection (got %d), so the Do below "+
+			"would be refused by the default limit rather than by the peer's",
+		client.maxFieldSection.Load())
+
+	_, _, doErr := client.Do(context.Background(),
+		&Request{Method: "GET", Scheme: "https", Authority: "h", Path: "/"})
+
+	assert.ErrorIsf(t, doErr, ErrFieldSectionTooLarge,
+		"Do = %v, want ErrFieldSectionTooLarge: a peer advertising a maximum field section "+
+			"of 0 accepts no request at all, and sending one anyway is the malformed request "+
+			"§4.2.2 exists to prevent", doErr)
+	assert.Emptyf(t, conn.req.sent,
+		"%d request bytes reached the wire despite the peer accepting no field section",
+		len(conn.req.sent))
 }
 
 // TestConformance_RFC9114_Sec422_DoRefusesOversized checks that the limit is

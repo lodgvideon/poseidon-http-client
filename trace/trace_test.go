@@ -2,6 +2,9 @@ package trace
 
 import (
 	"bytes"
+	"errors"
+	"io"
+	"regexp"
 	"strings"
 	"sync"
 	"testing"
@@ -9,6 +12,19 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+// timestampFormat is the shape appendFrameLine stamps every line with:
+// HH:MM:SS with six fractional digits. render throws the stamp away so the
+// per-case want strings do not depend on what time the test ran, which left
+// the format itself pinned by nothing — strings.Cut at the first space
+// succeeds for any prefix at all, so dropping the sub-second field, switching
+// to RFC3339 or emitting no stamp would all have shipped green.
+//
+// The resolution is the load-bearing part. This renders on a connection
+// carrying tens of thousands of frames per second: at second resolution a
+// whole second of frames shares one stamp and the ordering information the log
+// exists to convey is gone.
+var timestampFormat = regexp.MustCompile(`^\d{2}:\d{2}:\d{2}\.\d{6}$`)
 
 // render runs one FrameInfo through a TextTracer and returns the line with the
 // leading timestamp removed, so the assertions are about content rather than
@@ -24,8 +40,11 @@ func render(t *testing.T, info FrameInfo) string {
 
 	require.NoError(t, err, "Close is what flushes the buffered line; without it there is nothing to assert on")
 	line := strings.TrimSuffix(buf.String(), "\n")
-	_, rest, ok := strings.Cut(line, " ")
+	stamp, rest, ok := strings.Cut(line, " ")
 	require.Truef(t, ok, "line %q has no timestamp prefix", line)
+	require.Regexpf(t, timestampFormat, stamp,
+		"timestamp %q is not HH:MM:SS.microseconds; at coarser resolution a whole second of frames shares one stamp and the log stops saying which frame preceded which",
+		stamp)
 	return rest
 }
 
@@ -60,6 +79,58 @@ func TestTextTracer_RendersFrames(t *testing.T) {
 				ErrCode: 0, ErrCodeName: "NO_ERROR", LastStreamID: 7,
 			},
 			want: "h2 <- GOAWAY stream=0 len=8 last_stream=7 code=NO_ERROR",
+		},
+		{
+			// last_stream=0 is what a server sends when it refuses the
+			// connection without having processed any stream, and it is
+			// exactly the value a "print non-zero fields" renderer drops.
+			name: "GOAWAY refusing everything still prints last_stream=0",
+			info: FrameInfo{
+				Proto: ProtoH2, Dir: DirIn, TypeName: "GOAWAY", Length: 8,
+				Detail: DetailLastStreamID, LastStreamID: 0,
+			},
+			want: "h2 <- GOAWAY stream=0 len=8 last_stream=0",
+		},
+		{
+			// incr=0 is a PROTOCOL_ERROR under RFC 9113 §6.9 — the one
+			// WINDOW_UPDATE actually worth logging, and the one a
+			// non-zero-only renderer omits.
+			name: "WINDOW_UPDATE with a zero increment still prints incr=0",
+			info: FrameInfo{
+				Proto: ProtoH2, Dir: DirIn, TypeName: "WINDOW_UPDATE", Length: 4,
+				Detail: DetailIncrement, Increment: 0,
+			},
+			want: "h2 <- WINDOW_UPDATE stream=0 len=4 incr=0",
+		},
+		{
+			name: "PUSH_PROMISE with a zero promised id still prints promised=0",
+			info: FrameInfo{
+				Proto: ProtoH2, Dir: DirIn, TypeName: "PUSH_PROMISE", StreamID: 1, Length: 12,
+				Detail: DetailPromisedID, PromisedID: 0,
+			},
+			want: "h2 <- PUSH_PROMISE stream=1 len=12 promised=0",
+		},
+		{
+			// DetailParams set with no Params attached is an emitter bug.
+			// Params.All dereferences the pointer, so the guard in
+			// appendFrameLine is what stops a debug path from panicking the
+			// connection it was installed to observe.
+			name: "DetailParams with a nil Params renders without panicking",
+			info: FrameInfo{
+				Proto: ProtoH2, Dir: DirIn, TypeName: "SETTINGS", Length: 0,
+				Detail: DetailParams, Params: nil,
+			},
+			want: "h2 <- SETTINGS stream=0 len=0",
+		},
+		{
+			// An empty SETTINGS frame is legal and is how a peer acknowledges
+			// nothing in particular; the field must still appear, empty.
+			name: "DetailParams with an empty Params still prints the field",
+			info: FrameInfo{
+				Proto: ProtoH2, Dir: DirIn, TypeName: "SETTINGS", Length: 0,
+				Detail: DetailParams, Params: &Params{},
+			},
+			want: "h2 <- SETTINGS stream=0 len=0 params=",
 		},
 		{
 			name: "unnamed error code falls back to the number",
@@ -188,6 +259,87 @@ func TestTextTracer_DropsRatherThanBlocks(t *testing.T) {
 	assert.Containsf(t, buf.String(), "frames dropped (tracer backlog)",
 		"the flushed output does not report the %d dropped frames; a gap in a debug log that does not say it is a gap is worse than the missing lines",
 		dropped)
+}
+
+// errWriter fails every Write. Every other writer in this package's tests is a
+// bytes.Buffer or bench_test.go's countingWriter, neither of which can fail —
+// so the one piece of I/O the package performs, and the error both Flush and
+// Close exist to return, had no failing arm at all.
+type errWriter struct{ err error }
+
+func (w *errWriter) Write(p []byte) (int, error) { return 0, w.err }
+
+// newUndrainedTracer builds a TextTracer with no flusher goroutine, so nothing
+// drains the buffer behind the test's back and Flush is the only writer. The
+// same construction is used by TestTextTracer_DropsRatherThanBlocks and for the
+// same reason: with the 20 ms flusher running, whether a buffered line is still
+// there when the test looks is a race against a ticker.
+func newUndrainedTracer(w io.Writer) *TextTracer {
+	return &TextTracer{
+		w:        w,
+		buf:      make([]byte, 0, textLineHint),
+		spare:    make([]byte, 0, textLineHint),
+		stop:     make(chan struct{}),
+		finished: make(chan struct{}),
+	}
+}
+
+func TestTextTracer_FlushPropagatesTheWriterError(t *testing.T) {
+	sentinel := errors.New("write failed")
+	tr := newUndrainedTracer(&errWriter{err: sentinel})
+	tr.TraceFrame(FrameInfo{Proto: ProtoH2, Dir: DirOut, TypeName: "PING", Length: 8})
+
+	err := tr.Flush()
+
+	require.ErrorIsf(t, err, sentinel,
+		"Flush returned %v; it is what a caller reaches for after reproducing a bug and before reading the log, so a swallowed write error reads as \"the log is complete\" when the log is empty",
+		err)
+}
+
+// TestTextTracer_CloseStopsTheFlusherEvenWhenTheFinalWriteFails pins the
+// ordering inside Close: closeOnce runs BEFORE drain. Reordering them so a
+// failed final write returns early leaks the flusher goroutine — one per
+// tracer, forever — and every other test in this package stays green, because
+// none of them has a writer that can fail.
+//
+// The flusher is stood in for by a pre-closed finished channel rather than a
+// live goroutine: Close's observable effect is that it closed t.stop, and a
+// real flusher would only make whether the line is still buffered a race
+// against the 20 ms ticker.
+func TestTextTracer_CloseStopsTheFlusherEvenWhenTheFinalWriteFails(t *testing.T) {
+	sentinel := errors.New("write failed")
+	tr := newUndrainedTracer(&errWriter{err: sentinel})
+	close(tr.finished)
+	tr.TraceFrame(FrameInfo{Proto: ProtoH2, Dir: DirOut, TypeName: "PING", Length: 8})
+
+	err := tr.Close()
+
+	require.ErrorIsf(t, err, sentinel,
+		"Close returned %v, not the failing writer's error; Close is the last chance to learn the log was never written", err)
+	select {
+	case <-tr.stop:
+	default:
+		assert.Fail(t,
+			"Close reported the write error without stopping the flusher: closeOnce must run before drain, or a tracer over a broken writer leaks one goroutine per instance")
+	}
+}
+
+func TestTextTracer_CloseIsIdempotentWhenTheWriterFails(t *testing.T) {
+	sentinel := errors.New("write failed")
+	tr := NewTextTracer(&errWriter{err: sentinel})
+	// Close first, with nothing buffered: it stops the flusher and has nothing
+	// to write, so the line traced next is provably still there when the second
+	// Close drains it. Without that ordering the 20 ms flusher may drain first
+	// and discard the error, and the assertion below becomes a coin toss.
+	require.NoError(t, tr.Close(), "the first Close drains an empty buffer, so there is nothing to fail on")
+	tr.TraceFrame(FrameInfo{Proto: ProtoH2, Dir: DirOut, TypeName: "PING", Length: 8})
+
+	second, third := tr.Close(), tr.Close()
+
+	require.ErrorIsf(t, second, sentinel,
+		"the Close that carried a buffered line returned %v; a failing writer must reach the caller", second)
+	assert.NoErrorf(t, third,
+		"a third Close returned %v; with nothing left to write it must neither re-report the failure nor close an already-closed channel", third)
 }
 
 func TestTextTracer_CloseIsIdempotent(t *testing.T) {

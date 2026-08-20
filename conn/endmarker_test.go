@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/lodgvideon/poseidon-http-client/header"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -75,4 +76,37 @@ func TestStream_TerminalTrailersStillShedWhenFull(t *testing.T) {
 	s.mu.Unlock()
 	require.True(t, closed,
 		"a trailer block that could not be delivered must still shed the stream, not vanish")
+}
+
+// TestStream_NonTerminalEmptyDataStillShedsTheStream is the third row of the
+// decision table the two tests above cover between them: they pin the type
+// conjunct and the terminal case, and nothing drove end=false (#801).
+//
+// deliverEnd diverts a payload-free DATA frame out of band only when it is
+// TERMINAL. A peer may legally send a zero-length DATA without END_STREAM, and
+// OnData passes that flag straight through from the wire. Without the `end`
+// conjunct such a frame calls signalEnd() on a stream the peer has not ended —
+// the consumer sees a clean, complete response in the middle of a body — instead
+// of taking the ordinary overflow path.
+func TestStream_NonTerminalEmptyDataStillShedsTheStream(t *testing.T) {
+	w := &fakeStreamWriter{}
+	s := newStream(1, 1, w, 65535)
+	s.push(StreamEvent{Type: EventHeaders})
+	require.Equalf(t, cap(s.events), len(s.events),
+		"channel is %d/%d; the test needs it full", len(s.events), cap(s.events))
+
+	enqueued := s.deliverEnd(StreamEvent{Type: EventData}, false)
+
+	require.False(t, enqueued, "a payload-free DATA frame was enqueued into a full channel")
+	s.mu.Lock()
+	closed, remoteEnded := s.closed, s.remoteEnded
+	s.mu.Unlock()
+	assert.True(t, closed,
+		"a NON-terminal empty DATA frame that could not be delivered must shed the stream "+
+			"like any other undeliverable event, not be quietly absorbed")
+	assert.False(t, remoteEnded,
+		"remoteEnded was set for a frame the peer did not mark END_STREAM")
+	assert.False(t, s.endSignalled.Load(),
+		"signalEnd() ran for a frame the peer did not mark END_STREAM; the consumer would "+
+			"read a complete response with the rest of the body still to come")
 }

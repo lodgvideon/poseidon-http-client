@@ -422,7 +422,23 @@ func TestConformance_RFC9113_Sec8_1_CutUploadFailureIsNotRetryable(t *testing.T)
 			w.(http.Flusher).Flush()
 		}
 	}))
-	c := clientFor(t, addr)
+	// StreamEventBuffer: 1 rather than the default 8. The precondition this test
+	// needs is that conn sheds its own stream on event-buffer overflow, and with
+	// the default buffer that depended on the handler out-writing the consumer —
+	// a race the test then ABSORBED with a t.Skipf, so on any run where the
+	// response survived the clause below stopped being pinned, silently, while
+	// conformance-gate still counted the test as satisfied (#861). One slot
+	// overflows on the second frame, so the state is built rather than raced for,
+	// and a run that fails to build it is now a FAILURE of the fixture.
+	c, err := client.NewClient(client.ClientOptions{
+		Addr: addr,
+		ConnOpts: conn.ConnOptions{
+			Dialer:            &conn.TLSDialer{Config: &tls.Config{InsecureSkipVerify: true}},
+			StreamEventBuffer: 1,
+		},
+	})
+	require.NoError(t, err, "NewClient")
+	t.Cleanup(func() { _ = c.Close() })
 	r := c.Retryer(client.RetryOptions{
 		MaxAttempts: 3,
 		Backoff:     func(int) time.Duration { return 0 },
@@ -431,15 +447,16 @@ func TestConformance_RFC9113_Sec8_1_CutUploadFailureIsNotRetryable(t *testing.T)
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	var res client.Response
-	err := r.Do(ctx, &client.Request{
+	err = r.Do(ctx, &client.Request{
 		Method:   "DELETE",
 		Path:     "/resource",
 		Body:     make([]byte, benignResetRequest),
 		BodyMode: client.BodyBuffer,
 	}, &res)
-	if err == nil {
-		t.Skipf("the response survived the reset (status %d) — this test needs the event buffer to overflow", res.Status)
-	}
+	require.Errorf(t, err,
+		"the response survived the reset (status %d, %d bytes); this test needs the event "+
+			"buffer to overflow so the response is genuinely lost, and a run where it does "+
+			"not is a broken fixture, not a pass", res.Status, len(res.Body))
 
 	n := executions.Load()
 	require.Equalf(t, int32(1), n,
@@ -624,9 +641,15 @@ func TestConformance_RFC9113_Sec8_7_LocalOverflowIsNotRetried(t *testing.T) {
 		Body:     []byte("x"),
 		BodyMode: client.BodyBuffer,
 	}, &res)
-	if err == nil {
-		t.Skipf("the response fit after all (status %d, %d bytes) — this test needs the event buffer to overflow", res.Status, len(res.Body))
-	}
+	// A nil error means the fixture failed to build its own precondition: with
+	// StreamEventBuffer 1 the second response frame must overflow and conn must
+	// shed the stream. This was a t.Skipf, which made the test self-disabling —
+	// the day the buffer stops overflowing the §8.7 clause below stops being
+	// pinned, conformance-gate stays green, and nobody is told (#861).
+	require.Errorf(t, err,
+		"the response fit after all (status %d, %d bytes); this test needs the event "+
+			"buffer to overflow, and a run that cannot build that state is a broken "+
+			"fixture rather than a pass", res.Status, len(res.Body))
 
 	var sre *client.StreamResetError
 	if errors.As(err, &sre) && sre.Code == frame.ErrCodeRefusedStream {
