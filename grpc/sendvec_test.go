@@ -1,6 +1,7 @@
 package grpc
 
 import (
+	"bytes"
 	"errors"
 	"net/http"
 	"testing"
@@ -141,4 +142,56 @@ func TestSendVec_MessagesStillArriveIntact(t *testing.T) {
 			}
 		}
 	}
+}
+
+// TestSendVec_FusedOpenDoesNotRetainTheRequest is
+// TestSendVec_DoesNotRetainTheMessage's missing sibling. The unary path never
+// goes through writeMessage — openStream seats the vector itself, so the fused
+// HEADERS+DATA write is a second, independent site that has to drop the
+// reference again, and nothing covered it. Every unary call in the process goes
+// through this one.
+func TestSendVec_FusedOpenDoesNotRetainTheRequest(t *testing.T) {
+	cc := dialMockPeer(t, newMockGRPCPeer(t), nil)
+	co := callOptions{maxRecvMessageSize: cc.opts.MaxRecvMessageSize}
+	req := bytes.Repeat([]byte{'q'}, 1<<20)
+
+	s, err := cc.openStream(t.Context(), "/bench.Svc/Echo", nil, co, req, true)
+
+	require.NoError(t, err, "openStream(fuse)")
+	defer func() { _ = s.Close() }()
+	require.NotNil(t, s.bufs, "the fused open left no pooled scratch to inspect")
+	for i, v := range s.bufs.vec {
+		assert.Truef(t, v == nil,
+			"vec[%d] still points at %d bytes once the fused open returned — the "+
+				"scratch outlives the call and is pooled, so a stream parked between "+
+				"the open and the first Recv keeps the caller's whole request alive",
+			i, len(v))
+	}
+}
+
+// TestSendVec_ReleaseClearsTheVector covers the third and last site, and the
+// one that matters most: releaseBufs is what stops a finished RPC's message
+// staying reachable from a struct sitting in streamBufPool for the life of the
+// process.
+//
+// The fixture seats the vector by hand and leaves it seated, because the two
+// sites that clear it on the way out are exactly what this clear is a backstop
+// for — reach releaseBufs through a normal send and the field is already nil,
+// and the guard could be deleted with nothing to show for it. Same shape as
+// TestStreamBufs_OversizeIsNotPooled, which stages its outlier the same way.
+func TestSendVec_ReleaseClearsTheVector(t *testing.T) {
+	cc := dialMockPeer(t, newMockGRPCPeer(t), nil)
+	s, err := cc.NewStream(t.Context(), "/bench.Svc/Echo", nil)
+	require.NoError(t, err, "NewStream")
+	b := s.bufs
+	require.NotNil(t, b, "stream came up with no pooled scratch")
+	msg := bytes.Repeat([]byte{'m'}, 4096)
+	b.vec[0], b.vec[1] = []byte{0, 0, 0, 0x10, 0x00}, msg
+
+	_ = s.Close()
+
+	assert.Truef(t, b.vec[0] == nil && b.vec[1] == nil,
+		"Close parked a scratch in the pool still pointing at %d bytes of the "+
+			"caller's message — it stays reachable, and alive, for as long as that "+
+			"struct sits unclaimed", len(b.vec[1]))
 }
