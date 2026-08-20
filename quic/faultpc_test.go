@@ -6,6 +6,9 @@ import (
 	"testing"
 	"testing/synctest"
 	"time"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // In-process datagram loss, so loss recovery is an ordinary unit test instead of
@@ -142,20 +145,13 @@ func TestFaultPC_NoLoss_IsTheControl(t *testing.T) {
 		client, fp := withFaults(t, nil)
 		elapsed := time.Since(start)
 
-		if !client.handshakeComplete {
-			t.Fatal("handshake did not complete on a clean path")
-		}
+		require.True(t, client.handshakeComplete, "handshake did not complete on a clean path")
 		writes, drops := fp.counts()
-		if writes == 0 {
-			t.Fatal("the injector saw no writes — it is not on the client's datagram path")
-		}
-		if drops != 0 {
-			t.Fatalf("discarded %d datagrams with no predicate set", drops)
-		}
-		if elapsed != 0 {
-			t.Errorf("clean handshake consumed %v; with nothing lost there is no probe "+
-				"timeout to wait out, so it should cost no time at all", elapsed)
-		}
+		assert.NotZero(t, writes,
+			"the injector saw no writes — it is not on the client's datagram path")
+		assert.Zerof(t, drops, "discarded %d datagrams with no predicate set", drops)
+		assert.Zerof(t, elapsed, "clean handshake consumed %v; with nothing lost there is no probe "+
+			"timeout to wait out, so it should cost no time at all", elapsed)
 	})
 }
 
@@ -171,22 +167,15 @@ func TestConformance_RFC9002_Sec622_PTOBackoffFirstProbe(t *testing.T) {
 		client, fp := withFaults(t, dropNth(1))
 		elapsed := time.Since(start)
 
-		if !client.handshakeComplete {
-			t.Fatal("handshake did not complete after losing the first Initial")
-		}
+		require.True(t, client.handshakeComplete,
+			"handshake did not complete after losing the first Initial")
 		writes, drops := fp.counts()
-		if drops != 1 {
-			t.Fatalf("discarded %d datagrams, want exactly 1 — the injection did not "+
-				"happen as specified, so a pass here would mean nothing", drops)
-		}
-		if writes < 2 {
-			t.Fatalf("client wrote %d datagrams; recovering a lost Initial requires at "+
-				"least one retransmission", writes)
-		}
-		if want := 2 * kInitialRtt; elapsed != want {
-			t.Errorf("recovered after %v, want exactly %v (§6.2.2: the first probe "+
-				"timeout is 2*kInitialRtt before any RTT sample)", elapsed, want)
-		}
+		require.Equalf(t, 1, drops, "discarded %d datagrams, want exactly 1 — the injection did not "+
+			"happen as specified, so a pass here would mean nothing", drops)
+		assert.GreaterOrEqualf(t, writes, 2, "client wrote %d datagrams; recovering a lost Initial "+
+			"requires at least one retransmission", writes)
+		assert.Equalf(t, 2*kInitialRtt, elapsed, "recovered after %v, want exactly %v (§6.2.2: the "+
+			"first probe timeout is 2*kInitialRtt before any RTT sample)", elapsed, 2*kInitialRtt)
 	})
 }
 
@@ -201,20 +190,14 @@ func TestConformance_RFC9002_Sec622_PTOBackoffDoubles(t *testing.T) {
 		client, fp := withFaults(t, dropNth(1, 2))
 		elapsed := time.Since(start)
 
-		if !client.handshakeComplete {
-			t.Fatal("handshake did not complete after losing two Initials")
-		}
+		require.True(t, client.handshakeComplete,
+			"handshake did not complete after losing two Initials")
 		writes, drops := fp.counts()
-		if drops != 2 {
-			t.Fatalf("discarded %d datagrams, want exactly 2", drops)
-		}
-		if writes < 3 {
-			t.Fatalf("client wrote %d datagrams, want at least 3", writes)
-		}
-		if want := 6 * kInitialRtt; elapsed != want {
-			t.Errorf("recovered after %v, want exactly %v — one probe at 2*kInitialRtt "+
-				"plus a doubled second at 4*kInitialRtt", elapsed, want)
-		}
+		require.Equalf(t, 2, drops, "discarded %d datagrams, want exactly 2 — the injection did not "+
+			"happen as specified, so a pass here would mean nothing", drops)
+		assert.GreaterOrEqualf(t, writes, 3, "client wrote %d datagrams, want at least 3", writes)
+		assert.Equalf(t, 6*kInitialRtt, elapsed, "recovered after %v, want exactly %v — one probe at "+
+			"2*kInitialRtt plus a doubled second at 4*kInitialRtt", elapsed, 6*kInitialRtt)
 	})
 }
 
@@ -224,21 +207,17 @@ func TestConformance_RFC9002_Sec622_PTOBackoffDoubles(t *testing.T) {
 func TestFaultPC_ReadDeadlineIsHonoured(t *testing.T) {
 	rx := make(chan []byte) // never written to
 	fp := &faultPC{rx: rx, tx: make(chan []byte, 1)}
-
-	if _, ok := PacketConn(fp).(interface {
+	_, ok := PacketConn(fp).(interface {
 		SetReadDeadline(time.Time) error
-	}); !ok {
-		t.Fatal("faultPC does not expose SetReadDeadline, so readWithPTO would take " +
-			"the plain-Read path and never send a probe")
-	}
+	})
+	require.True(t, ok, "faultPC does not expose SetReadDeadline, so readWithPTO would take "+
+		"the plain-Read path and never send a probe")
+	require.NoError(t, fp.SetReadDeadline(time.Now().Add(20*time.Millisecond)), "SetReadDeadline")
 
-	if err := fp.SetReadDeadline(time.Now().Add(20 * time.Millisecond)); err != nil {
-		t.Fatalf("SetReadDeadline: %v", err)
-	}
-	if _, err := fp.Read(make([]byte, 16)); !isTimeout(err) {
-		t.Fatalf("Read past the deadline returned %v, which isTimeout rejects; the "+
-			"engine would treat it as a hard error instead of a probe trigger", err)
-	}
+	_, err := fp.Read(make([]byte, 16))
+
+	assert.Truef(t, isTimeout(err), "Read past the deadline returned %v, which isTimeout rejects; "+
+		"the engine would treat it as a hard error instead of a probe trigger", err)
 }
 
 // dropRange returns a predicate discarding writes from..to inclusive (1-based),
@@ -260,19 +239,14 @@ func TestConformance_RFC9002_Sec622_PTOBackoffBlackhole(t *testing.T) {
 		client, fp := withFaults(t, dropRange(1, 3))
 		elapsed := time.Since(start)
 
-		if !client.handshakeComplete {
-			t.Fatal("handshake did not complete after a three-datagram blackhole")
-		}
+		require.True(t, client.handshakeComplete,
+			"handshake did not complete after a three-datagram blackhole")
 		writes, drops := fp.counts()
-		if drops != 3 {
-			t.Fatalf("discarded %d datagrams, want exactly 3", drops)
-		}
-		if writes < 4 {
-			t.Fatalf("client wrote %d datagrams, want at least 4", writes)
-		}
-		if want := 14 * kInitialRtt; elapsed != want {
-			t.Errorf("recovered after %v, want exactly %v — 2+4+8 kInitialRtt, the sum of "+
-				"a doubling series rather than three equal waits", elapsed, want)
-		}
+		require.Equalf(t, 3, drops, "discarded %d datagrams, want exactly 3 — the injection did not "+
+			"happen as specified, so a pass here would mean nothing", drops)
+		assert.GreaterOrEqualf(t, writes, 4, "client wrote %d datagrams, want at least 4", writes)
+		assert.Equalf(t, 14*kInitialRtt, elapsed, "recovered after %v, want exactly %v — 2+4+8 "+
+			"kInitialRtt, the sum of a doubling series rather than three equal waits",
+			elapsed, 14*kInitialRtt)
 	})
 }

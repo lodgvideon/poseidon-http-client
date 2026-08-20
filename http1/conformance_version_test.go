@@ -3,6 +3,9 @@ package http1_test
 import (
 	"context"
 	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // TestConformance_RFC9110_Sec6_HigherMinorVersionStaysPersistent pins that a
@@ -28,17 +31,18 @@ func TestConformance_RFC9110_Sec6_HigherMinorVersionStaysPersistent(t *testing.T
 	for _, tc := range cases {
 		t.Run(tc.proto, func(t *testing.T) {
 			ex := wireExchange(t, "GET", tc.proto+" 200 OK\r\nContent-Length: 0\r\n\r\n")
-			if _, _, err := ex.ReadResponse(context.Background()); err != nil {
-				t.Fatalf("ReadResponse(%s): %v", tc.proto, err)
-			}
-			if _, done, err := ex.ReadBodyChunk(make([]byte, 8)); !done || err != nil {
-				t.Fatalf("body should end immediately (Content-Length 0): done=%v err=%v", done, err)
-			}
-			if got := ex.KeepAlive(); got != tc.wantKeepAlive {
-				t.Errorf("proto %s: KeepAlive() = %v, want %v — a higher minor of major 1 is "+
+			_, _, err := ex.ReadResponse(context.Background())
+			require.NoErrorf(t, err, "ReadResponse(%s): %v", tc.proto, err)
+
+			_, done, err := ex.ReadBodyChunk(make([]byte, 8))
+
+			require.Truef(t, done && err == nil,
+				"body should end immediately (Content-Length 0): done=%v err=%v", done, err)
+			got := ex.KeepAlive()
+			assert.Equalf(t, tc.wantKeepAlive, got,
+				"proto %s: KeepAlive() = %v, want %v — a higher minor of major 1 is "+
 					"processed as HTTP/1.1 (persistent); only HTTP/1.0 closes by default (RFC 9110 §6)",
-					tc.proto, got, tc.wantKeepAlive)
-			}
+				tc.proto, got, tc.wantKeepAlive)
 		})
 	}
 }

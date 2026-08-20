@@ -1,8 +1,10 @@
 package quic
 
 import (
-	"reflect"
 	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // ackDecoder reconstructs the set of acknowledged packet numbers from a parsed
@@ -40,9 +42,7 @@ func ackedSet(t *testing.T, pns []uint64) map[uint64]bool {
 	}
 	buf := a.appendACK(nil, 0)
 	dec := &ackDecoder{acked: map[uint64]bool{}}
-	if err := ParseFrames(buf, dec); err != nil {
-		t.Fatalf("ParseFrames(%x): %v", buf, err)
-	}
+	require.NoErrorf(t, ParseFrames(buf, dec), "ParseFrames(%x)", buf)
 	return dec.acked
 }
 
@@ -59,15 +59,16 @@ func TestAckTracker_RoundTrip(t *testing.T) {
 		{10, 11, 12, 0, 1, 5},   // three ranges, arbitrary order
 		{100, 101, 102, 100, 1}, // duplicate 100
 	}
+
 	for _, pns := range cases {
 		want := map[uint64]bool{}
 		for _, pn := range pns {
 			want[pn] = true
 		}
+
 		got := ackedSet(t, pns)
-		if !reflect.DeepEqual(got, want) {
-			t.Errorf("receive %v → acked %v, want %v", pns, got, want)
-		}
+
+		assert.Equalf(t, want, got, "receive %v → acked %v, want %v", pns, got, want)
 	}
 }
 
@@ -77,26 +78,21 @@ func TestAckTracker_RoundTrip(t *testing.T) {
 func TestAckTracker_BoundedRanges(t *testing.T) {
 	var a ackTracker
 	const n = 500
+
 	for i := uint64(0); i < n; i++ {
 		a.receive(i*2, true) // 0,2,4,… — every PN its own range, gaps never fill
 	}
-	if len(a.ranges) > maxAckRanges {
-		t.Fatalf("ranges = %d, want <= %d", len(a.ranges), maxAckRanges)
-	}
-	if l, ok := a.largest(); !ok || l != (n-1)*2 {
-		t.Fatalf("largest = %d,%v, want %d,true", l, ok, (n-1)*2)
-	}
 	buf := a.appendACK(nil, 0)
-	if len(buf) > 1200 {
-		t.Fatalf("ACK frame is %d bytes, must fit one datagram", len(buf))
-	}
+
+	require.LessOrEqualf(t, len(a.ranges), maxAckRanges,
+		"ranges = %d, want <= %d", len(a.ranges), maxAckRanges)
+	l, ok := a.largest()
+	require.Truef(t, ok, "largest = %d,%v, want %d,true", l, ok, uint64((n-1)*2))
+	assert.Equalf(t, uint64((n-1)*2), l, "largest = %d,%v, want %d,true", l, ok, uint64((n-1)*2))
+	require.LessOrEqualf(t, len(buf), 1200, "ACK frame is %d bytes, must fit one datagram", len(buf))
 	dec := &ackDecoder{acked: map[uint64]bool{}}
-	if err := ParseFrames(buf, dec); err != nil {
-		t.Fatalf("ParseFrames(%x): %v", buf, err)
-	}
-	if !dec.acked[(n-1)*2] {
-		t.Fatal("ACK frame must acknowledge the largest received packet")
-	}
+	require.NoErrorf(t, ParseFrames(buf, dec), "ParseFrames(%x)", buf)
+	assert.True(t, dec.acked[(n-1)*2], "ACK frame must acknowledge the largest received packet")
 }
 
 // TestAckTracker_SeenSpansWholeRange pins that seen() decides membership of a
@@ -126,12 +122,11 @@ func TestAckTracker_SeenSpansWholeRange(t *testing.T) {
 	for _, pn := range []uint64{6, 7, 5, 8, 4, 13, 12, 20} {
 		a.receive(pn, true)
 	}
-	if a.truncated {
-		t.Fatal("the fixture must not truncate: every want=false below is meant to be provably new")
-	}
-	if got, want := len(a.ranges), 3; got != want {
-		t.Fatalf("ranges = %v, want %d ranges ([20,20] [12,13] [4,8])", a.ranges, want)
-	}
+
+	require.False(t, a.truncated,
+		"the fixture must not truncate: every want=false below is meant to be provably new")
+	require.Lenf(t, a.ranges, 3, "ranges = %v, want %d ranges ([20,20] [12,13] [4,8])", a.ranges, 3)
+
 	for pn, want := range map[uint64]bool{
 		3:  false, // below every range, and nothing was discarded: provably new
 		4:  true,  // lower endpoint of the run
@@ -148,33 +143,43 @@ func TestAckTracker_SeenSpansWholeRange(t *testing.T) {
 		20: true,  // the singleton
 		21: false, // above the largest received
 	} {
-		if got := a.seen(pn); got != want {
-			t.Errorf("seen(%d) = %v, want %v (ranges %v)", pn, got, want, a.ranges)
-		}
+		assert.Equalf(t, want, a.seen(pn), "seen(%d) = %v, want %v (ranges %v)",
+			pn, a.seen(pn), want, a.ranges)
 	}
 }
 
 func TestAckTracker_PendingAndLargest(t *testing.T) {
 	var a ackTracker
-	if _, ok := a.largest(); ok || a.ackPending() {
-		t.Fatal("empty tracker should have no largest and no pending ack")
-	}
-	a.receive(3, false) // non-ack-eliciting: recorded but owes no ACK
-	if a.ackPending() {
-		t.Fatal("non-ack-eliciting packet should not make an ACK pending")
-	}
-	if l, ok := a.largest(); !ok || l != 3 {
-		t.Fatalf("largest = %d,%v, want 3,true", l, ok)
-	}
-	a.receive(5, true) // ack-eliciting
-	if !a.ackPending() {
-		t.Fatal("ack-eliciting packet should make an ACK pending")
-	}
-	if l, _ := a.largest(); l != 5 {
-		t.Fatalf("largest = %d, want 5", l)
-	}
-	_ = a.appendACK(nil, 0)
-	if a.ackPending() {
-		t.Fatal("appendACK should clear the pending flag")
-	}
+
+	t.Run("empty", func(t *testing.T) {
+		_, ok := a.largest()
+
+		require.Falsef(t, ok || a.ackPending(),
+			"empty tracker should have no largest and no pending ack")
+	})
+
+	t.Run("non-ack-eliciting", func(t *testing.T) {
+		a.receive(3, false) // recorded but owes no ACK
+
+		l, ok := a.largest()
+
+		assert.False(t, a.ackPending(), "non-ack-eliciting packet should not make an ACK pending")
+		require.Truef(t, ok, "largest = %d,%v, want 3,true", l, ok)
+		assert.Equalf(t, uint64(3), l, "largest = %d,%v, want 3,true", l, ok)
+	})
+
+	t.Run("ack-eliciting", func(t *testing.T) {
+		a.receive(5, true)
+
+		l, _ := a.largest()
+
+		assert.True(t, a.ackPending(), "ack-eliciting packet should make an ACK pending")
+		assert.Equalf(t, uint64(5), l, "largest = %d, want 5", l)
+	})
+
+	t.Run("appendACK-clears-pending", func(t *testing.T) {
+		_ = a.appendACK(nil, 0)
+
+		assert.False(t, a.ackPending(), "appendACK should clear the pending flag")
+	})
 }

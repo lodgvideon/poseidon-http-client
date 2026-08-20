@@ -1,6 +1,11 @@
 package quic
 
-import "testing"
+import (
+	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+)
 
 // ctrlCollector captures MAX_DATA / MAX_STREAM_DATA frames decoded from the
 // queued control bytes.
@@ -31,45 +36,34 @@ func (h *ctrlCollector) OnMaxData(maximum uint64) error {
 func TestConn_ReceiveFlowControl_GrantsCredit(t *testing.T) {
 	c := &Conn{peer: TransportParams{InitialMaxStreamsBidi: 1}, connRecvMax: DefaultConnRecvWindow}
 	s, err := c.OpenStream()
-	if err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, err, "open the stream the credit is granted on")
 	h := &connFrameHandler{c: c}
 	win := int(DefaultStreamRecvWindow)
 
 	// Fill the stream window exactly and consume it: raises the stream limit.
-	if err := h.OnStream(s.ID(), 0, false, make([]byte, win)); err != nil {
-		t.Fatal(err)
-	}
-	if got := len(s.Recv()); got != win {
-		t.Fatalf("consumed %d bytes, want %d", got, win)
-	}
-	if s.recvMax <= DefaultStreamRecvWindow {
-		t.Fatalf("stream recvMax = %d, want > %d", s.recvMax, DefaultStreamRecvWindow)
-	}
-
+	errFirst := h.OnStream(s.ID(), 0, false, make([]byte, win))
+	consumedFirst := len(s.Recv())
+	streamMaxAfterFirst := s.recvMax
 	// The raised limit admits another window; consuming it crosses the connection
 	// half-window and grants at the connection level too.
-	if err := h.OnStream(s.ID(), uint64(win), false, make([]byte, win)); err != nil {
-		t.Fatal(err)
-	}
-	if got := len(s.Recv()); got != win {
-		t.Fatalf("consumed %d bytes, want %d", got, win)
-	}
-	if c.connRecvMax <= DefaultConnRecvWindow {
-		t.Fatalf("conn recvMax = %d, want > %d", c.connRecvMax, DefaultConnRecvWindow)
-	}
-
+	errSecond := h.OnStream(s.ID(), uint64(win), false, make([]byte, win))
+	consumedSecond := len(s.Recv())
 	var col ctrlCollector
-	if err := ParseFrames(c.pendingCtrl, &col); err != nil {
-		t.Fatal(err)
-	}
-	if col.streamData[s.ID()] != s.recvMax {
-		t.Fatalf("MAX_STREAM_DATA = %d, want %d", col.streamData[s.ID()], s.recvMax)
-	}
-	if !col.dataSet || col.data != c.connRecvMax {
-		t.Fatalf("MAX_DATA = %d (set=%v), want %d", col.data, col.dataSet, c.connRecvMax)
-	}
+	parseErr := ParseFrames(c.pendingCtrl, &col)
+
+	require.NoError(t, errFirst, "a full window of data must be within the advertised limit")
+	require.Equalf(t, win, consumedFirst, "consumed %d bytes, want %d", consumedFirst, win)
+	require.Greaterf(t, streamMaxAfterFirst, DefaultStreamRecvWindow,
+		"stream recvMax = %d, want > %d", streamMaxAfterFirst, DefaultStreamRecvWindow)
+	require.NoError(t, errSecond, "the raised limit must admit a second window")
+	require.Equalf(t, win, consumedSecond, "consumed %d bytes, want %d", consumedSecond, win)
+	require.Greaterf(t, c.connRecvMax, DefaultConnRecvWindow,
+		"conn recvMax = %d, want > %d", c.connRecvMax, DefaultConnRecvWindow)
+	require.NoError(t, parseErr, "the queued control frames must decode")
+	assert.Equalf(t, s.recvMax, col.streamData[s.ID()],
+		"MAX_STREAM_DATA = %d, want %d", col.streamData[s.ID()], s.recvMax)
+	assert.Truef(t, col.dataSet && col.data == c.connRecvMax,
+		"MAX_DATA = %d (set=%v), want %d", col.data, col.dataSet, c.connRecvMax)
 }
 
 // TestConformance_RFC9000_Sec41_StreamFlowControlEnforced checks that stream data
@@ -77,16 +71,16 @@ func TestConn_ReceiveFlowControl_GrantsCredit(t *testing.T) {
 func TestConformance_RFC9000_Sec41_StreamFlowControlEnforced(t *testing.T) {
 	c := &Conn{peer: TransportParams{InitialMaxStreamsBidi: 1}, connRecvMax: DefaultConnRecvWindow}
 	s, err := c.OpenStream()
-	if err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, err, "open the stream the limit is enforced on")
 	h := &connFrameHandler{c: c}
-	if err := h.OnStream(s.ID(), 0, false, make([]byte, int(DefaultStreamRecvWindow)+1)); err != ErrFlowControl {
-		t.Fatalf("data past the stream limit = %v, want ErrFlowControl", err)
-	}
-	if code, ok := closeCodeFor(ErrFlowControl); !ok || code != ErrCodeFlowControlError {
-		t.Fatalf("closeCodeFor(ErrFlowControl) = %#x,%v, want FLOW_CONTROL_ERROR", code, ok)
-	}
+
+	overErr := h.OnStream(s.ID(), 0, false, make([]byte, int(DefaultStreamRecvWindow)+1))
+	code, ok := closeCodeFor(ErrFlowControl)
+
+	require.ErrorIsf(t, overErr, ErrFlowControl,
+		"data past the stream limit = %v, want ErrFlowControl", overErr)
+	assert.Truef(t, ok && code == ErrCodeFlowControlError,
+		"closeCodeFor(ErrFlowControl) = %#x,%v, want FLOW_CONTROL_ERROR", code, ok)
 }
 
 // TestConformance_RFC9000_Sec41_ConnFlowControlEnforced checks that data across
@@ -97,12 +91,13 @@ func TestConformance_RFC9000_Sec41_ConnFlowControlEnforced(t *testing.T) {
 	s1, _ := c.OpenStream()
 	s2, _ := c.OpenStream()
 	h := &connFrameHandler{c: c}
-	if err := h.OnStream(s1.ID(), 0, false, make([]byte, 200<<10)); err != nil {
-		t.Fatal(err)
-	}
-	if err := h.OnStream(s2.ID(), 0, false, make([]byte, 200<<10)); err != ErrFlowControl {
-		t.Fatalf("combined data past the connection limit = %v, want ErrFlowControl", err)
-	}
+
+	withinErr := h.OnStream(s1.ID(), 0, false, make([]byte, 200<<10))
+	overErr := h.OnStream(s2.ID(), 0, false, make([]byte, 200<<10))
+
+	require.NoError(t, withinErr, "the first stream stays inside the connection limit")
+	require.ErrorIsf(t, overErr, ErrFlowControl,
+		"combined data past the connection limit = %v, want ErrFlowControl", overErr)
 }
 
 // TestConn_FlowControl_RetransmitNoDoubleCount checks that re-delivered bytes (a
@@ -112,36 +107,30 @@ func TestConn_FlowControl_RetransmitNoDoubleCount(t *testing.T) {
 	c := &Conn{peer: TransportParams{InitialMaxStreamsBidi: 1}, connRecvMax: 300 << 10}
 	s, _ := c.OpenStream()
 	h := &connFrameHandler{c: c}
-	if err := h.OnStream(s.ID(), 0, false, make([]byte, 200<<10)); err != nil {
-		t.Fatal(err)
-	}
-	if err := h.OnStream(s.ID(), 0, false, make([]byte, 200<<10)); err != nil { // retransmission
-		t.Fatalf("retransmitted data must not re-count: %v", err)
-	}
-	if c.connRecvTotal != 200<<10 {
-		t.Fatalf("connRecvTotal = %d, want %d (retransmit counted once)", c.connRecvTotal, 200<<10)
-	}
+
+	firstErr := h.OnStream(s.ID(), 0, false, make([]byte, 200<<10))
+	retransErr := h.OnStream(s.ID(), 0, false, make([]byte, 200<<10)) // retransmission
+
+	require.NoError(t, firstErr, "the first delivery is within the connection limit")
+	require.NoErrorf(t, retransErr, "retransmitted data must not re-count: %v", retransErr)
+	assert.Equalf(t, uint64(200<<10), c.connRecvTotal,
+		"connRecvTotal = %d, want %d (retransmit counted once)", c.connRecvTotal, 200<<10)
 }
 
 func TestConn_ReceiveFlowControl_NoGrantBelowThreshold(t *testing.T) {
 	c := &Conn{peer: TransportParams{InitialMaxStreamsBidi: 1}, connRecvMax: DefaultConnRecvWindow}
 	s, err := c.OpenStream()
-	if err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, err, "open the stream the grant threshold is measured on")
 	h := &connFrameHandler{c: c}
-
 	small := int(DefaultStreamRecvWindow/2) - 1 // just under the half-window batch threshold
-	if err := h.OnStream(s.ID(), 0, false, make([]byte, small)); err != nil {
-		t.Fatal(err)
-	}
+
+	deliverErr := h.OnStream(s.ID(), 0, false, make([]byte, small))
 	s.Recv()
-	if len(c.pendingCtrl) != 0 {
-		t.Fatal("no credit grant expected below the half-window threshold")
-	}
-	if s.recvMax != DefaultStreamRecvWindow {
-		t.Fatalf("stream recvMax should be unchanged, got %d", s.recvMax)
-	}
+
+	require.NoError(t, deliverErr, "a sub-threshold delivery is within the advertised limit")
+	assert.Empty(t, c.pendingCtrl, "no credit grant expected below the half-window threshold")
+	assert.Equalf(t, DefaultStreamRecvWindow, s.recvMax,
+		"stream recvMax should be unchanged, got %d", s.recvMax)
 }
 
 // TestConformance_RFC9000_Sec133_NoCreditAfterFinalSize pins the §13.3 SHOULD that
@@ -165,37 +154,32 @@ func TestConformance_RFC9000_Sec133_NoCreditAfterFinalSize(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			c := &Conn{peer: TransportParams{InitialMaxStreamsBidi: 1}, connRecvMax: DefaultConnRecvWindow}
 			s, err := c.OpenStream()
-			if err != nil {
-				t.Fatal(err)
-			}
+			require.NoError(t, err, "open the stream whose final size becomes known")
 			h := &connFrameHandler{c: c}
-			if err := h.OnStream(s.ID(), 0, false, make([]byte, win)); err != nil {
-				t.Fatal(err)
-			}
-			if err := tc.close(h, s.ID()); err != nil {
-				t.Fatal(err)
-			}
+			require.NoError(t, h.OnStream(s.ID(), 0, false, make([]byte, win)),
+				"fill the window before the final size is settled")
+			require.NoError(t, tc.close(h, s.ID()), "settle the final size")
 			before := s.recvMax
+
 			s.Recv() // consuming a full window would normally advance the limit
-			if s.recvMax != before {
-				t.Fatalf("recvMax advanced %d -> %d after the final size was known", before, s.recvMax)
-			}
+
+			assert.Equalf(t, before, s.recvMax,
+				"recvMax advanced %d -> %d after the final size was known", before, s.recvMax)
 		})
 	}
 
 	// Control: without a FIN or reset the same consumption does advance the limit.
-	c := &Conn{peer: TransportParams{InitialMaxStreamsBidi: 1}, connRecvMax: DefaultConnRecvWindow}
-	s, err := c.OpenStream()
-	if err != nil {
-		t.Fatal(err)
-	}
-	h := &connFrameHandler{c: c}
-	if err := h.OnStream(s.ID(), 0, false, make([]byte, win)); err != nil {
-		t.Fatal(err)
-	}
-	before := s.recvMax
-	s.Recv()
-	if s.recvMax == before {
-		t.Fatal("control: an open stream did not advance recvMax, so the test proves nothing")
-	}
+	t.Run("control_open_stream", func(t *testing.T) {
+		c := &Conn{peer: TransportParams{InitialMaxStreamsBidi: 1}, connRecvMax: DefaultConnRecvWindow}
+		s, err := c.OpenStream()
+		require.NoError(t, err, "open the control stream, which never learns a final size")
+		h := &connFrameHandler{c: c}
+		require.NoError(t, h.OnStream(s.ID(), 0, false, make([]byte, win)), "fill the window")
+		before := s.recvMax
+
+		s.Recv()
+
+		assert.NotEqual(t, before, s.recvMax,
+			"control: an open stream did not advance recvMax, so the test proves nothing")
+	})
 }

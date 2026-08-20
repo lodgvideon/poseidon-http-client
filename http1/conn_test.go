@@ -1,7 +1,6 @@
 package http1_test
 
 import (
-	"bufio"
 	"context"
 	"fmt"
 	"net"
@@ -12,20 +11,21 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
 	"github.com/lodgvideon/poseidon-http-client/header"
 	"github.com/lodgvideon/poseidon-http-client/http1"
 )
 
-// roundTrip sends a single HTTP/1.1 request via http1.Exchange and returns
-// the response status code and body.
-func roundTrip(t *testing.T, srv *httptest.Server, method, path string, body string) (int, string) {
+// roundTrip sends a single bodyless HTTP/1.1 request via http1.Exchange and
+// returns the response status code and body.
+func roundTrip(t *testing.T, srv *httptest.Server, method, path string) (int, string) {
 	t.Helper()
 	nc, err := net.Dial("tcp", srv.Listener.Addr().String())
-	if err != nil {
-		t.Fatalf("dial: %v", err)
-	}
+	require.NoError(t, err, "dial")
 	c := http1.NewConn(nc)
-	defer func() { _ = c.Close() }()
+	t.Cleanup(func() { _ = c.Close() })
 
 	ex := c.NewExchange()
 	host := srv.Listener.Addr().String()
@@ -35,35 +35,19 @@ func roundTrip(t *testing.T, srv *httptest.Server, method, path string, body str
 		{Name: []byte(":authority"), Value: []byte(host)},
 		{Name: []byte(":scheme"), Value: []byte("http")},
 	}
-	if body != "" {
-		fields = append(fields, header.Field{
-			Name:  []byte("content-length"),
-			Value: []byte(strings.Repeat("x", len([]byte(body)))), // wrong; test will use chunked
-		})
-	}
 	ctx := context.Background()
-	endStream := body == ""
-	if err := ex.WriteRequest(ctx, fields, endStream); err != nil {
-		t.Fatalf("WriteRequest: %v", err)
-	}
-	if body != "" {
-		if err := ex.WriteBody(ctx, []byte(body), true); err != nil {
-			t.Fatalf("WriteBody: %v", err)
-		}
-	}
+	require.NoError(t, ex.WriteRequest(ctx, fields, true), "WriteRequest")
 
 	status, _, err := ex.ReadResponse(ctx)
-	if err != nil {
-		t.Fatalf("ReadResponse: %v", err)
-	}
+	require.NoError(t, err, "ReadResponse")
 	var sb strings.Builder
 	buf := make([]byte, 1024)
 	for {
-		n, done, err := ex.ReadBodyChunk(buf)
+		n, done, rerr := ex.ReadBodyChunk(buf)
 		if n > 0 {
 			sb.Write(buf[:n])
 		}
-		if done || err != nil {
+		if done || rerr != nil {
 			break
 		}
 	}
@@ -78,13 +62,10 @@ func TestHTTP1_GET_200(t *testing.T) {
 	}))
 	t.Cleanup(srv.Close)
 
-	status, body := roundTrip(t, srv, "GET", "/", "")
-	if status != 200 {
-		t.Fatalf("status = %d, want 200", status)
-	}
-	if body != "hello" {
-		t.Errorf("body = %q, want %q", body, "hello")
-	}
+	status, body := roundTrip(t, srv, "GET", "/")
+
+	require.Equalf(t, 200, status, "status = %d, want 200", status)
+	assert.Equalf(t, "hello", body, "body = %q, want %q", body, "hello")
 }
 
 // TestHTTP1_WriteRequest_SkipsHopByHopHeaders verifies that hop-by-hop and
@@ -101,14 +82,10 @@ func TestHTTP1_WriteRequest_SkipsHopByHopHeaders(t *testing.T) {
 		w.WriteHeader(200)
 	}))
 	t.Cleanup(srv.Close)
-
 	nc, err := net.Dial("tcp", srv.Listener.Addr().String())
-	if err != nil {
-		t.Fatalf("dial: %v", err)
-	}
+	require.NoError(t, err, "dial")
 	c := http1.NewConn(nc)
-	defer func() { _ = c.Close() }()
-
+	t.Cleanup(func() { _ = c.Close() })
 	ctx := context.Background()
 	ex := c.NewExchange()
 	host := srv.Listener.Addr().String()
@@ -124,22 +101,18 @@ func TestHTTP1_WriteRequest_SkipsHopByHopHeaders(t *testing.T) {
 		// Ordinary header — must pass through.
 		{Name: []byte("x-custom"), Value: []byte("present")},
 	}
-	if err := ex.WriteRequest(ctx, fields, true); err != nil {
-		t.Fatalf("WriteRequest: %v", err)
-	}
-	if _, _, err := ex.ReadResponse(ctx); err != nil {
-		t.Fatalf("ReadResponse: %v", err)
-	}
 
+	require.NoError(t, ex.WriteRequest(ctx, fields, true), "WriteRequest")
+
+	_, _, err = ex.ReadResponse(ctx)
+	require.NoError(t, err, "ReadResponse")
 	// The caller-supplied "connection: close" must not reach the server as a
 	// client-set close (Go's server only reports an explicit close token; our
 	// request omits it, so net/http manages keep-alive itself).
-	if v := <-gotConnection; strings.Contains(strings.ToLower(v), "close") {
-		t.Errorf("Connection header leaked through: %q", v)
-	}
-	if v := <-gotCustom; v != "present" {
-		t.Errorf("X-Custom = %q, want %q (ordinary header dropped)", v, "present")
-	}
+	conn := <-gotConnection
+	assert.NotContainsf(t, strings.ToLower(conn), "close", "Connection header leaked through: %q", conn)
+	custom := <-gotCustom
+	assert.Equalf(t, "present", custom, "X-Custom = %q, want %q (ordinary header dropped)", custom, "present")
 }
 
 func TestHTTP1_POST_Echo(t *testing.T) {
@@ -152,14 +125,10 @@ func TestHTTP1_POST_Echo(t *testing.T) {
 		_, _ = w.Write(buf[:n])
 	}))
 	t.Cleanup(srv.Close)
-
 	nc, err := net.Dial("tcp", srv.Listener.Addr().String())
-	if err != nil {
-		t.Fatalf("dial: %v", err)
-	}
+	require.NoError(t, err, "dial")
 	c := http1.NewConn(nc)
-	defer func() { _ = c.Close() }()
-
+	t.Cleanup(func() { _ = c.Close() })
 	ctx := context.Background()
 	ex := c.NewExchange()
 	host := srv.Listener.Addr().String()
@@ -171,36 +140,25 @@ func TestHTTP1_POST_Echo(t *testing.T) {
 		{Name: []byte(":scheme"), Value: []byte("http")},
 		// No content-length → chunked encoding.
 	}
-	if err := ex.WriteRequest(ctx, fields, false); err != nil {
-		t.Fatalf("WriteRequest: %v", err)
-	}
-	if err := ex.WriteBody(ctx, []byte(payload), true); err != nil {
-		t.Fatalf("WriteBody: %v", err)
-	}
+	require.NoError(t, ex.WriteRequest(ctx, fields, false), "WriteRequest")
+	require.NoError(t, ex.WriteBody(ctx, []byte(payload), true), "WriteBody")
 
-	status, headers, err := ex.ReadResponse(ctx)
-	if err != nil {
-		t.Fatalf("ReadResponse: %v", err)
-	}
-	if status != 201 {
-		t.Fatalf("status = %d, want 201", status)
-	}
-	_ = headers
+	status, _, err := ex.ReadResponse(ctx)
 
+	require.NoError(t, err, "ReadResponse")
+	require.Equalf(t, 201, status, "status = %d, want 201", status)
 	buf := make([]byte, 64)
 	var got string
 	for {
-		n, done, err := ex.ReadBodyChunk(buf)
+		n, done, rerr := ex.ReadBodyChunk(buf)
 		if n > 0 {
 			got += string(buf[:n])
 		}
-		if done || err != nil {
+		if done || rerr != nil {
 			break
 		}
 	}
-	if got != payload {
-		t.Errorf("body = %q, want %q", got, payload)
-	}
+	assert.Equalf(t, payload, got, "body = %q, want %q", got, payload)
 }
 
 func TestHTTP1_HEAD_NoBody(t *testing.T) {
@@ -212,13 +170,10 @@ func TestHTTP1_HEAD_NoBody(t *testing.T) {
 	}))
 	t.Cleanup(srv.Close)
 
-	status, body := roundTrip(t, srv, "HEAD", "/", "")
-	if status != 200 {
-		t.Fatalf("status = %d, want 200", status)
-	}
-	if body != "" {
-		t.Errorf("HEAD body = %q, want empty", body)
-	}
+	status, body := roundTrip(t, srv, "HEAD", "/")
+
+	require.Equalf(t, 200, status, "status = %d, want 200", status)
+	assert.Emptyf(t, body, "HEAD body = %q, want empty", body)
 }
 
 func TestHTTP1_404(t *testing.T) {
@@ -228,10 +183,9 @@ func TestHTTP1_404(t *testing.T) {
 	}))
 	t.Cleanup(srv.Close)
 
-	status, _ := roundTrip(t, srv, "GET", "/notfound", "")
-	if status != 404 {
-		t.Fatalf("status = %d, want 404", status)
-	}
+	status, _ := roundTrip(t, srv, "GET", "/notfound")
+
+	require.Equalf(t, 404, status, "status = %d, want 404", status)
 }
 
 func TestHTTP1_Chunked_Response(t *testing.T) {
@@ -247,10 +201,9 @@ func TestHTTP1_Chunked_Response(t *testing.T) {
 	}))
 	t.Cleanup(srv.Close)
 
-	_, body := roundTrip(t, srv, "GET", "/big", "")
-	if body != want {
-		t.Errorf("chunked body length = %d, want %d", len(body), len(want))
-	}
+	_, body := roundTrip(t, srv, "GET", "/big")
+
+	assert.Equalf(t, want, body, "chunked body length = %d, want %d", len(body), len(want))
 }
 
 func TestHTTP1_KeepAlive_TwoRequests(t *testing.T) {
@@ -261,14 +214,10 @@ func TestHTTP1_KeepAlive_TwoRequests(t *testing.T) {
 		_, _ = w.Write([]byte("ok"))
 	}))
 	t.Cleanup(srv.Close)
-
 	nc, err := net.Dial("tcp", srv.Listener.Addr().String())
-	if err != nil {
-		t.Fatalf("dial: %v", err)
-	}
+	require.NoError(t, err, "dial")
 	c := http1.NewConn(nc)
-	defer func() { _ = c.Close() }()
-
+	t.Cleanup(func() { _ = c.Close() })
 	ctx := context.Background()
 	host := srv.Listener.Addr().String()
 	fields := []header.Field{
@@ -280,27 +229,19 @@ func TestHTTP1_KeepAlive_TwoRequests(t *testing.T) {
 
 	for i := 0; i < 2; i++ {
 		ex := c.NewExchange()
-		if err := ex.WriteRequest(ctx, fields, true); err != nil {
-			t.Fatalf("req %d WriteRequest: %v", i, err)
-		}
-		status, _, err := ex.ReadResponse(ctx)
-		if err != nil {
-			t.Fatalf("req %d ReadResponse: %v", i, err)
-		}
-		if status != 200 {
-			t.Fatalf("req %d status = %d, want 200", i, status)
-		}
+		require.NoErrorf(t, ex.WriteRequest(ctx, fields, true), "req %d WriteRequest", i)
+		status, _, rerr := ex.ReadResponse(ctx)
+		require.NoErrorf(t, rerr, "req %d ReadResponse", i)
+		require.Equalf(t, 200, status, "req %d status = %d, want 200", i, status)
 		// Drain body.
 		buf := make([]byte, 64)
 		for {
-			_, done, err := ex.ReadBodyChunk(buf)
-			if done || err != nil {
+			_, done, derr := ex.ReadBodyChunk(buf)
+			if done || derr != nil {
 				break
 			}
 		}
-		if !ex.KeepAlive() {
-			t.Fatalf("req %d: expected keep-alive", i)
-		}
+		require.Truef(t, ex.KeepAlive(), "req %d: expected keep-alive", i)
 	}
 }
 
@@ -312,14 +253,10 @@ func TestHTTP1_ParseStatus(t *testing.T) {
 		w.WriteHeader(201)
 	}))
 	t.Cleanup(srv.Close)
-
 	nc, err := net.Dial("tcp", srv.Listener.Addr().String())
-	if err != nil {
-		t.Fatalf("dial: %v", err)
-	}
+	require.NoError(t, err, "dial")
 	c := http1.NewConn(nc)
-	defer func() { _ = c.Close() }()
-
+	t.Cleanup(func() { _ = c.Close() })
 	ctx := context.Background()
 	ex := c.NewExchange()
 	fields := []header.Field{
@@ -328,41 +265,32 @@ func TestHTTP1_ParseStatus(t *testing.T) {
 		{Name: []byte(":authority"), Value: []byte(srv.Listener.Addr().String())},
 		{Name: []byte(":scheme"), Value: []byte("http")},
 	}
-	_ = ex.WriteRequest(ctx, fields, true)
+	require.NoError(t, ex.WriteRequest(ctx, fields, true), "WriteRequest")
 
 	status, headers, err := ex.ReadResponse(ctx)
-	if err != nil {
-		t.Fatalf("ReadResponse: %v", err)
-	}
-	if status != 201 {
-		t.Fatalf("status = %d, want 201", status)
-	}
-	if len(headers) == 0 || string(headers[0].Name) != ":status" {
-		t.Fatalf("first header = %q, want :status", headers[0].Name)
-	}
-	if string(headers[0].Value) != "201" {
-		t.Fatalf("status header value = %q, want 201", headers[0].Value)
-	}
-	_ = bufio.NewReader(nil) // ensure bufio import used (it's in roundTrip)
+
+	require.NoError(t, err, "ReadResponse")
+	require.Equalf(t, 201, status, "status = %d, want 201", status)
+	require.NotEmpty(t, headers, "no headers returned; want :status first")
+	require.Equalf(t, ":status", string(headers[0].Name),
+		"first header = %q, want :status", headers[0].Name)
+	require.Equalf(t, "201", string(headers[0].Value),
+		"status header value = %q, want 201", headers[0].Value)
 }
 
 func TestHTTP1_IsAlive(t *testing.T) {
 	t.Parallel()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
 	t.Cleanup(srv.Close)
-
 	nc, err := net.Dial("tcp", srv.Listener.Addr().String())
-	if err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, err, "dial")
 	c := http1.NewConn(nc)
-	if !c.IsAlive() {
-		t.Fatal("expected IsAlive=true before close")
-	}
+
+	aliveBefore := c.IsAlive()
 	_ = c.Close()
-	if c.IsAlive() {
-		t.Fatal("expected IsAlive=false after close")
-	}
+
+	require.True(t, aliveBefore, "expected IsAlive=true before close")
+	require.False(t, c.IsAlive(), "expected IsAlive=false after close")
 }
 
 func TestHTTP1_204_NoBody(t *testing.T) {
@@ -372,13 +300,10 @@ func TestHTTP1_204_NoBody(t *testing.T) {
 	}))
 	t.Cleanup(srv.Close)
 
-	status, body := roundTrip(t, srv, "DELETE", "/item", "")
-	if status != 204 {
-		t.Fatalf("status = %d, want 204", status)
-	}
-	if body != "" {
-		t.Errorf("204 body = %q, want empty", body)
-	}
+	status, body := roundTrip(t, srv, "DELETE", "/item")
+
+	require.Equalf(t, 204, status, "status = %d, want 204", status)
+	assert.Emptyf(t, body, "204 body = %q, want empty", body)
 }
 
 // TestHTTP1_POST_EndStream verifies that WriteRequest adds "Content-Length: 0"
@@ -386,7 +311,6 @@ func TestHTTP1_204_NoBody(t *testing.T) {
 func TestHTTP1_POST_EndStream(t *testing.T) {
 	t.Parallel()
 	for _, method := range []string{"POST", "PUT", "PATCH"} {
-		method := method
 		t.Run(method, func(t *testing.T) {
 			t.Parallel()
 			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -398,14 +322,10 @@ func TestHTTP1_POST_EndStream(t *testing.T) {
 				w.WriteHeader(200)
 			}))
 			t.Cleanup(srv.Close)
-
 			nc, err := net.Dial("tcp", srv.Listener.Addr().String())
-			if err != nil {
-				t.Fatal(err)
-			}
+			require.NoError(t, err, "dial")
 			c := http1.NewConn(nc)
-			defer func() { _ = c.Close() }()
-
+			t.Cleanup(func() { _ = c.Close() })
 			ctx := context.Background()
 			ex := c.NewExchange()
 			fields := []header.Field{
@@ -414,16 +334,13 @@ func TestHTTP1_POST_EndStream(t *testing.T) {
 				{Name: []byte(":authority"), Value: []byte(srv.Listener.Addr().String())},
 				{Name: []byte(":scheme"), Value: []byte("http")},
 			}
-			if err := ex.WriteRequest(ctx, fields, true); err != nil {
-				t.Fatalf("WriteRequest: %v", err)
-			}
+			require.NoError(t, ex.WriteRequest(ctx, fields, true), "WriteRequest")
+
 			status, _, err := ex.ReadResponse(ctx)
-			if err != nil {
-				t.Fatalf("ReadResponse: %v", err)
-			}
-			if status != 200 {
-				t.Fatalf("status = %d, want 200 (missing Content-Length: 0 for %s)", status, method)
-			}
+
+			require.NoError(t, err, "ReadResponse")
+			require.Equalf(t, 200, status,
+				"status = %d, want 200 (missing Content-Length: 0 for %s)", status, method)
 		})
 	}
 }
@@ -438,14 +355,10 @@ func TestHTTP1_WriteBody_NonChunked(t *testing.T) {
 		_, _ = w.Write(buf[:n])
 	}))
 	t.Cleanup(srv.Close)
-
 	nc, err := net.Dial("tcp", srv.Listener.Addr().String())
-	if err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, err, "dial")
 	c := http1.NewConn(nc)
-	defer func() { _ = c.Close() }()
-
+	t.Cleanup(func() { _ = c.Close() })
 	ctx := context.Background()
 	ex := c.NewExchange()
 	fields := []header.Field{
@@ -456,20 +369,13 @@ func TestHTTP1_WriteBody_NonChunked(t *testing.T) {
 		{Name: []byte("content-length"), Value: []byte(strconv.Itoa(len(payload)))},
 	}
 	// endStream=false + content-length present → non-chunked body
-	if err := ex.WriteRequest(ctx, fields, false); err != nil {
-		t.Fatalf("WriteRequest: %v", err)
-	}
-	if err := ex.WriteBody(ctx, []byte(payload), false); err != nil {
-		t.Fatalf("WriteBody: %v", err)
-	}
+	require.NoError(t, ex.WriteRequest(ctx, fields, false), "WriteRequest")
+
+	require.NoError(t, ex.WriteBody(ctx, []byte(payload), false), "WriteBody")
 
 	status, _, err := ex.ReadResponse(ctx)
-	if err != nil {
-		t.Fatalf("ReadResponse: %v", err)
-	}
-	if status != 200 {
-		t.Fatalf("status = %d, want 200", status)
-	}
+	require.NoError(t, err, "ReadResponse")
+	require.Equalf(t, 200, status, "status = %d, want 200", status)
 	var got strings.Builder
 	buf := make([]byte, 64)
 	for {
@@ -479,9 +385,7 @@ func TestHTTP1_WriteBody_NonChunked(t *testing.T) {
 			break
 		}
 	}
-	if got.String() != payload {
-		t.Errorf("echo = %q, want %q", got.String(), payload)
-	}
+	assert.Equalf(t, payload, got.String(), "echo = %q, want %q", got.String(), payload)
 }
 
 // TestHTTP1_WriteBody_EmptyChunkNonFinal verifies WriteBody is a no-op when
@@ -494,14 +398,10 @@ func TestHTTP1_WriteBody_EmptyChunkNonFinal(t *testing.T) {
 		_, _ = w.Write(buf[:n])
 	}))
 	t.Cleanup(srv.Close)
-
 	nc, err := net.Dial("tcp", srv.Listener.Addr().String())
-	if err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, err, "dial")
 	c := http1.NewConn(nc)
-	defer func() { _ = c.Close() }()
-
+	t.Cleanup(func() { _ = c.Close() })
 	ctx := context.Background()
 	ex := c.NewExchange()
 	fields := []header.Field{
@@ -511,36 +411,25 @@ func TestHTTP1_WriteBody_EmptyChunkNonFinal(t *testing.T) {
 		{Name: []byte(":scheme"), Value: []byte("http")},
 		// No content-length → chunked
 	}
-	if err := ex.WriteRequest(ctx, fields, false); err != nil {
-		t.Fatalf("WriteRequest: %v", err)
-	}
-	// Empty non-final chunk — should be a no-op.
-	if err := ex.WriteBody(ctx, nil, false); err != nil {
-		t.Fatalf("WriteBody empty non-final: %v", err)
-	}
-	// Now send real data and finish.
-	if err := ex.WriteBody(ctx, []byte("ping"), true); err != nil {
-		t.Fatalf("WriteBody fin: %v", err)
-	}
+	require.NoError(t, ex.WriteRequest(ctx, fields, false), "WriteRequest")
 
+	// Empty non-final chunk — should be a no-op.
+	err = ex.WriteBody(ctx, nil, false)
+
+	require.NoError(t, err, "WriteBody empty non-final")
+	// Now send real data and finish.
+	require.NoError(t, ex.WriteBody(ctx, []byte("ping"), true), "WriteBody fin")
 	status, _, err := ex.ReadResponse(ctx)
-	if err != nil {
-		t.Fatalf("ReadResponse: %v", err)
-	}
-	if status != 200 {
-		t.Fatalf("status = %d, want 200", status)
-	}
+	require.NoError(t, err, "ReadResponse")
+	require.Equalf(t, 200, status, "status = %d, want 200", status)
 }
 
 // TestHTTP1_1xx_Response verifies that ReadResponse skips 100 Continue.
 func TestHTTP1_1xx_Response(t *testing.T) {
 	t.Parallel()
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, err, "listen")
 	t.Cleanup(func() { _ = ln.Close() })
-
 	go func() {
 		conn, aerr := ln.Accept()
 		if aerr != nil {
@@ -553,14 +442,10 @@ func TestHTTP1_1xx_Response(t *testing.T) {
 				"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok",
 		))
 	}()
-
 	nc, err := net.Dial("tcp", ln.Addr().String())
-	if err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, err, "dial")
 	c := http1.NewConn(nc)
-	defer func() { _ = c.Close() }()
-
+	t.Cleanup(func() { _ = c.Close() })
 	ctx := context.Background()
 	ex := c.NewExchange()
 	fields := []header.Field{
@@ -569,27 +454,20 @@ func TestHTTP1_1xx_Response(t *testing.T) {
 		{Name: []byte(":authority"), Value: []byte(ln.Addr().String())},
 		{Name: []byte(":scheme"), Value: []byte("http")},
 	}
-	if err := ex.WriteRequest(ctx, fields, true); err != nil {
-		t.Fatalf("WriteRequest: %v", err)
-	}
+	require.NoError(t, ex.WriteRequest(ctx, fields, true), "WriteRequest")
+
 	status, _, err := ex.ReadResponse(ctx)
-	if err != nil {
-		t.Fatalf("ReadResponse: %v", err)
-	}
-	if status != 200 {
-		t.Fatalf("status = %d, want 200 (100 not skipped)", status)
-	}
+
+	require.NoError(t, err, "ReadResponse")
+	require.Equalf(t, 200, status, "status = %d, want 200 (100 not skipped)", status)
 }
 
 // TestHTTP1_MalformedStatusLine verifies ReadResponse returns error on bad response.
 func TestHTTP1_MalformedStatusLine(t *testing.T) {
 	t.Parallel()
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, err, "listen")
 	t.Cleanup(func() { _ = ln.Close() })
-
 	go func() {
 		conn, aerr := ln.Accept()
 		if aerr != nil {
@@ -599,14 +477,10 @@ func TestHTTP1_MalformedStatusLine(t *testing.T) {
 		_, _ = conn.Read(make([]byte, 4096))
 		_, _ = conn.Write([]byte("BOGUS not-http\r\n\r\n"))
 	}()
-
 	nc, err := net.Dial("tcp", ln.Addr().String())
-	if err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, err, "dial")
 	c := http1.NewConn(nc)
-	defer func() { _ = c.Close() }()
-
+	t.Cleanup(func() { _ = c.Close() })
 	ctx := context.Background()
 	ex := c.NewExchange()
 	fields := []header.Field{
@@ -615,22 +489,19 @@ func TestHTTP1_MalformedStatusLine(t *testing.T) {
 		{Name: []byte(":authority"), Value: []byte(ln.Addr().String())},
 		{Name: []byte(":scheme"), Value: []byte("http")},
 	}
-	_ = ex.WriteRequest(ctx, fields, true)
+	require.NoError(t, ex.WriteRequest(ctx, fields, true), "WriteRequest")
+
 	_, _, err = ex.ReadResponse(ctx)
-	if err == nil {
-		t.Fatal("expected error for malformed status line, got nil")
-	}
+
+	require.Error(t, err, "expected error for malformed status line, got nil")
 }
 
 // TestHTTP1_ConnectionClose verifies read-until-close body path (contentLen==-1).
 func TestHTTP1_ConnectionClose(t *testing.T) {
 	t.Parallel()
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, err, "listen")
 	t.Cleanup(func() { _ = ln.Close() })
-
 	go func() {
 		conn, aerr := ln.Accept()
 		if aerr != nil {
@@ -643,14 +514,10 @@ func TestHTTP1_ConnectionClose(t *testing.T) {
 		))
 		_ = conn.Close()
 	}()
-
 	nc, err := net.Dial("tcp", ln.Addr().String())
-	if err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, err, "dial")
 	c := http1.NewConn(nc)
-	defer func() { _ = c.Close() }()
-
+	t.Cleanup(func() { _ = c.Close() })
 	ctx := context.Background()
 	ex := c.NewExchange()
 	fields := []header.Field{
@@ -659,16 +526,12 @@ func TestHTTP1_ConnectionClose(t *testing.T) {
 		{Name: []byte(":authority"), Value: []byte(ln.Addr().String())},
 		{Name: []byte(":scheme"), Value: []byte("http")},
 	}
-	if err := ex.WriteRequest(ctx, fields, true); err != nil {
-		t.Fatalf("WriteRequest: %v", err)
-	}
+	require.NoError(t, ex.WriteRequest(ctx, fields, true), "WriteRequest")
+
 	status, _, err := ex.ReadResponse(ctx)
-	if err != nil {
-		t.Fatalf("ReadResponse: %v", err)
-	}
-	if status != 200 {
-		t.Fatalf("status = %d, want 200", status)
-	}
+
+	require.NoError(t, err, "ReadResponse")
+	require.Equalf(t, 200, status, "status = %d, want 200", status)
 	var got strings.Builder
 	buf := make([]byte, 32)
 	for {
@@ -678,12 +541,8 @@ func TestHTTP1_ConnectionClose(t *testing.T) {
 			break
 		}
 	}
-	if got.String() != "hello" {
-		t.Errorf("body = %q, want %q", got.String(), "hello")
-	}
-	if ex.KeepAlive() {
-		t.Error("expected KeepAlive=false after connection-close body")
-	}
+	assert.Equalf(t, "hello", got.String(), "body = %q, want %q", got.String(), "hello")
+	assert.False(t, ex.KeepAlive(), "expected KeepAlive=false after connection-close body")
 }
 
 // TestHTTP1_WriteRequest_Deadline exercises the deadline context branch.
@@ -693,17 +552,12 @@ func TestHTTP1_WriteRequest_Deadline(t *testing.T) {
 		_, _ = w.Write([]byte("ok"))
 	}))
 	t.Cleanup(srv.Close)
-
 	nc, err := net.Dial("tcp", srv.Listener.Addr().String())
-	if err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, err, "dial")
 	c := http1.NewConn(nc)
-	defer func() { _ = c.Close() }()
-
+	t.Cleanup(func() { _ = c.Close() })
 	ctx, cancel := context.WithDeadline(context.Background(), time.Now().Add(5*time.Second))
 	defer cancel()
-
 	ex := c.NewExchange()
 	fields := []header.Field{
 		{Name: []byte(":method"), Value: []byte("GET")},
@@ -711,16 +565,13 @@ func TestHTTP1_WriteRequest_Deadline(t *testing.T) {
 		{Name: []byte(":authority"), Value: []byte(srv.Listener.Addr().String())},
 		{Name: []byte(":scheme"), Value: []byte("http")},
 	}
-	if err := ex.WriteRequest(ctx, fields, true); err != nil {
-		t.Fatalf("WriteRequest: %v", err)
-	}
+
+	err = ex.WriteRequest(ctx, fields, true)
+
+	require.NoError(t, err, "WriteRequest")
 	status, _, err := ex.ReadResponse(ctx)
-	if err != nil {
-		t.Fatalf("ReadResponse: %v", err)
-	}
-	if status != 200 {
-		t.Fatalf("status = %d, want 200", status)
-	}
+	require.NoError(t, err, "ReadResponse")
+	require.Equalf(t, 200, status, "status = %d, want 200", status)
 }
 
 // TestHTTP1_WriteBody_Deadline exercises the deadline context branch in WriteBody.
@@ -732,17 +583,12 @@ func TestHTTP1_WriteBody_Deadline(t *testing.T) {
 		_, _ = w.Write(buf[:n])
 	}))
 	t.Cleanup(srv.Close)
-
 	nc, err := net.Dial("tcp", srv.Listener.Addr().String())
-	if err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, err, "dial")
 	c := http1.NewConn(nc)
-	defer func() { _ = c.Close() }()
-
+	t.Cleanup(func() { _ = c.Close() })
 	ctx, cancel := context.WithDeadline(context.Background(), time.Now().Add(5*time.Second))
 	defer cancel()
-
 	ex := c.NewExchange()
 	fields := []header.Field{
 		{Name: []byte(":method"), Value: []byte("POST")},
@@ -751,30 +597,22 @@ func TestHTTP1_WriteBody_Deadline(t *testing.T) {
 		{Name: []byte(":scheme"), Value: []byte("http")},
 		// No content-length → chunked
 	}
-	if err := ex.WriteRequest(ctx, fields, false); err != nil {
-		t.Fatalf("WriteRequest: %v", err)
-	}
-	if err := ex.WriteBody(ctx, []byte("data"), true); err != nil {
-		t.Fatalf("WriteBody: %v", err)
-	}
+	require.NoError(t, ex.WriteRequest(ctx, fields, false), "WriteRequest")
+
+	err = ex.WriteBody(ctx, []byte("data"), true)
+
+	require.NoError(t, err, "WriteBody")
 	status, _, err := ex.ReadResponse(ctx)
-	if err != nil {
-		t.Fatalf("ReadResponse: %v", err)
-	}
-	if status != 200 {
-		t.Fatalf("status = %d, want 200", status)
-	}
+	require.NoError(t, err, "ReadResponse")
+	require.Equalf(t, 200, status, "status = %d, want 200", status)
 }
 
 // TestHTTP1_ChunkExtensions verifies chunk-extension stripping (e.g. "a;ext=foo").
 func TestHTTP1_ChunkExtensions(t *testing.T) {
 	t.Parallel()
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, err, "listen")
 	t.Cleanup(func() { _ = ln.Close() })
-
 	go func() {
 		conn, aerr := ln.Accept()
 		if aerr != nil {
@@ -789,14 +627,10 @@ func TestHTTP1_ChunkExtensions(t *testing.T) {
 				"0\r\n\r\n",
 		))
 	}()
-
 	nc, err := net.Dial("tcp", ln.Addr().String())
-	if err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, err, "dial")
 	c := http1.NewConn(nc)
-	defer func() { _ = c.Close() }()
-
+	t.Cleanup(func() { _ = c.Close() })
 	ctx := context.Background()
 	ex := c.NewExchange()
 	fields := []header.Field{
@@ -805,16 +639,12 @@ func TestHTTP1_ChunkExtensions(t *testing.T) {
 		{Name: []byte(":authority"), Value: []byte(ln.Addr().String())},
 		{Name: []byte(":scheme"), Value: []byte("http")},
 	}
-	if err := ex.WriteRequest(ctx, fields, true); err != nil {
-		t.Fatalf("WriteRequest: %v", err)
-	}
+	require.NoError(t, ex.WriteRequest(ctx, fields, true), "WriteRequest")
+
 	status, _, err := ex.ReadResponse(ctx)
-	if err != nil {
-		t.Fatalf("ReadResponse: %v", err)
-	}
-	if status != 200 {
-		t.Fatalf("status = %d, want 200", status)
-	}
+
+	require.NoError(t, err, "ReadResponse")
+	require.Equalf(t, 200, status, "status = %d, want 200", status)
 	var got strings.Builder
 	buf := make([]byte, 32)
 	for {
@@ -824,7 +654,5 @@ func TestHTTP1_ChunkExtensions(t *testing.T) {
 			break
 		}
 	}
-	if got.String() != "hello" {
-		t.Errorf("body = %q, want %q", got.String(), "hello")
-	}
+	assert.Equalf(t, "hello", got.String(), "body = %q, want %q", got.String(), "hello")
 }

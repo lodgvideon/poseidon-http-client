@@ -11,6 +11,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
 	"github.com/lodgvideon/poseidon-http-client/client"
 	"github.com/lodgvideon/poseidon-http-client/conn"
 	"github.com/lodgvideon/poseidon-http-client/frame"
@@ -107,9 +110,7 @@ func TestIntegration_ConnDeathMidBody_NoConcurrentCallerSeesCleanShortBody(t *te
 			NextProtos:         []string{"h2"},
 		}}},
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, err)
 	defer func() { _ = c.Close() }()
 
 	// Generous, and never meant to fire: the bound this test enforces is the
@@ -175,7 +176,7 @@ func TestIntegration_ConnDeathMidBody_NoConcurrentCallerSeesCleanShortBody(t *te
 		select {
 		case <-midBody:
 		case <-time.After(20 * time.Second):
-			t.Fatal("not every caller reached mid-body; the crossing was never set up")
+			require.Fail(t, "not every caller reached mid-body; the crossing was never set up")
 		}
 	}
 
@@ -190,32 +191,29 @@ func TestIntegration_ConnDeathMidBody_NoConcurrentCallerSeesCleanShortBody(t *te
 	select {
 	case <-done:
 	case <-time.After(15 * time.Second):
-		t.Fatal("callers still blocked 15s after the connection died: shutdownStreams did not reach every stream")
+		require.Fail(t, "callers still blocked 15s after the connection died: shutdownStreams did not reach every stream")
 	}
 
 	for i, o := range outcomes {
-		if o.setupErr != nil {
-			t.Fatalf("caller %d never reached the crossing: %v (read %d bytes)", i, o.setupErr, o.read)
-		}
+		require.Truef(t, o.setupErr == nil,
+			"caller %d never reached the crossing: %v (read %d bytes)", i, o.setupErr, o.read)
 		// The control for "the server actually spoke": a caller that never got
 		// a real response has no truncated body to be fooled about.
-		if o.status != http.StatusOK || o.read != chunkLen {
-			t.Fatalf("caller %d: status=%d read=%d, want 200 and %d bytes before the kill", i, o.status, o.read, chunkLen)
-		}
-		if o.err == nil {
-			t.Errorf("caller %d: Read returned nil error after the connection died; it holds a 200 and a truncated body and cannot tell", i)
+		require.Truef(t, o.status == http.StatusOK && o.read == chunkLen,
+			"caller %d: status=%d read=%d, want 200 and %d bytes before the kill", i, o.status, o.read, chunkLen)
+		if !assert.Truef(t, o.err != nil,
+			"caller %d: Read returned nil error after the connection died; it holds a 200 and a truncated body and cannot tell", i) {
 			continue
 		}
-		if errors.Is(o.err, io.EOF) || errors.Is(o.err, io.ErrUnexpectedEOF) {
-			t.Errorf("caller %d: Read returned %v after the connection died — a %d-byte body the server never finished now reads as complete", i, o.err, chunkLen)
+		if !assert.Falsef(t, errors.Is(o.err, io.EOF) || errors.Is(o.err, io.ErrUnexpectedEOF),
+			"caller %d: Read returned %v after the connection died — a %d-byte body the server never finished now reads as complete", i, o.err, chunkLen) {
 			continue
 		}
-		if errors.Is(o.err, context.DeadlineExceeded) || errors.Is(o.err, context.Canceled) {
-			t.Errorf("caller %d: terminated on its own context (%v), not on the connection's death; conn never woke it", i, o.err)
+		if !assert.Falsef(t, errors.Is(o.err, context.DeadlineExceeded) || errors.Is(o.err, context.Canceled),
+			"caller %d: terminated on its own context (%v), not on the connection's death; conn never woke it", i, o.err) {
 			continue
 		}
-		if !isTerminalConnDeath(o.err) {
-			t.Errorf("caller %d: Read returned %v, outside the terminal set conn delivers on connection death", i, o.err)
-		}
+		assert.Truef(t, isTerminalConnDeath(o.err),
+			"caller %d: Read returned %v, outside the terminal set conn delivers on connection death", i, o.err)
 	}
 }

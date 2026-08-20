@@ -4,6 +4,9 @@ import (
 	"context"
 	"testing"
 	"time"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // onePacketPC hands back a single prepared datagram on the first Read, then
@@ -34,18 +37,12 @@ func TestConn_Poll_DeliversStreamData(t *testing.T) {
 	dcid := []byte("polltest")
 	keys, _ := InitialKeys(dcid)
 	sealer, err := NewSealer(keys)
-	if err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, err)
 	opener, err := NewOpener(keys)
-	if err != nil {
-		t.Fatal(err)
-	}
-
+	require.NoError(t, err)
 	// A server 1-RTT (short-header) packet with a STREAM frame + FIN on stream 0.
 	frames := AppendStream(nil, 0, 0, true, []byte("response body"))
 	pkt := sealServerPacket(t, sealer, PacketShort, nil, nil, 0, frames)
-
 	pc := &onePacketPC{pkt: pkt}
 	c := &Conn{
 		pc:                pc,
@@ -55,24 +52,16 @@ func TestConn_Poll_DeliversStreamData(t *testing.T) {
 		peer:              TransportParams{InitialMaxStreamsBidi: 1},
 	}
 	c.keys.OneRTT = opener
-
 	s, err := c.OpenStream() // stream 0 — the one the server replies on
-	if err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, err)
 
-	if err := c.Poll(context.Background()); err != nil {
-		t.Fatalf("Poll: %v", err)
-	}
-	if got := string(s.Recv()); got != "response body" {
-		t.Fatalf("Recv = %q, want %q", got, "response body")
-	}
-	if !s.Finished() {
-		t.Fatal("stream should be finished")
-	}
-	if len(pc.written) == 0 {
-		t.Fatal("Poll should have flushed an ACK for the ack-eliciting packet")
-	}
+	err = c.Poll(context.Background())
+
+	require.NoErrorf(t, err, "Poll: %v", err)
+	got := string(s.Recv())
+	assert.Equalf(t, "response body", got, "Recv = %q, want %q", got, "response body")
+	assert.True(t, s.Finished(), "stream should be finished")
+	assert.NotEmpty(t, pc.written, "Poll should have flushed an ACK for the ack-eliciting packet")
 }
 
 // drainingPC hands back a queue of prepared datagrams, one per Read, then
@@ -108,14 +97,9 @@ func TestConn_Poll_DrainsBufferedBurst(t *testing.T) {
 	dcid := []byte("draintst")
 	keys, _ := InitialKeys(dcid)
 	sealer, err := NewSealer(keys)
-	if err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, err)
 	opener, err := NewOpener(keys)
-	if err != nil {
-		t.Fatal(err)
-	}
-
+	require.NoError(t, err)
 	// Four server 1-RTT packets carrying consecutive STREAM chunks on stream 0,
 	// the last with FIN — as they would arrive back-to-back in the socket.
 	chunks := []string{"aaaa", "bbbb", "cccc", "dddd"}
@@ -127,7 +111,6 @@ func TestConn_Poll_DrainsBufferedBurst(t *testing.T) {
 		pkts = append(pkts, sealServerPacket(t, sealer, PacketShort, nil, nil, uint64(i), frames))
 		off += uint64(len(ch))
 	}
-
 	pc := &drainingPC{pkts: pkts}
 	c := &Conn{
 		pc:                pc,
@@ -137,26 +120,17 @@ func TestConn_Poll_DrainsBufferedBurst(t *testing.T) {
 		peer:              TransportParams{InitialMaxStreamsBidi: 1},
 	}
 	c.keys.OneRTT = opener
-
 	s, err := c.OpenStream() // stream 0 — the one the server replies on
-	if err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, err)
 
-	if err := c.Poll(context.Background()); err != nil {
-		t.Fatalf("Poll: %v", err)
-	}
-	if got, want := string(s.Recv()), "aaaabbbbccccdddd"; got != want {
-		t.Fatalf("Recv = %q, want %q (a single Poll must drain the whole burst)", got, want)
-	}
-	if !s.Finished() {
-		t.Fatal("stream should be finished after draining the FIN packet")
-	}
-	if pc.i != len(pkts) {
-		t.Fatalf("drained %d of %d datagrams", pc.i, len(pkts))
-	}
+	err = c.Poll(context.Background())
+
+	require.NoErrorf(t, err, "Poll: %v", err)
+	got := string(s.Recv())
+	assert.Equalf(t, "aaaabbbbccccdddd", got,
+		"Recv = %q, want %q (a single Poll must drain the whole burst)", got, "aaaabbbbccccdddd")
+	assert.True(t, s.Finished(), "stream should be finished after draining the FIN packet")
+	assert.Equalf(t, len(pkts), pc.i, "drained %d of %d datagrams", pc.i, len(pkts))
 	// The whole burst is acknowledged with one flush, not one ACK per datagram.
-	if len(pc.written) != 1 {
-		t.Fatalf("wrote %d packets, want 1 (single batched ACK)", len(pc.written))
-	}
+	assert.Lenf(t, pc.written, 1, "wrote %d packets, want 1 (single batched ACK)", len(pc.written))
 }

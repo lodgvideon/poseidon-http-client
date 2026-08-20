@@ -7,6 +7,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
 	"github.com/lodgvideon/poseidon-http-client/header"
 )
 
@@ -51,18 +54,18 @@ func TestStream_CloseDuringTerminalDelivery_NoRace(t *testing.T) {
 		s, err := c.NewStream(ctx)
 		if err != nil {
 			cancel()
-			t.Fatalf("iteration %d: NewStream: %v", i, err)
+			require.NoErrorf(t, err, "iteration %d: NewStream", i)
 		}
 		// endStream=true: the send side is done before any response arrives, so
 		// remoteEnded alone decides bothEnded.
-		if err := s.SendHeaders(ctx, []header.Field{
+		if herr := s.SendHeaders(ctx, []header.Field{
 			{Name: []byte(":method"), Value: []byte("GET")},
 			{Name: []byte(":scheme"), Value: []byte("https")},
 			{Name: []byte(":authority"), Value: []byte("example.com")},
 			{Name: []byte(":path"), Value: []byte("/")},
-		}, true); err != nil {
+		}, true); herr != nil {
 			cancel()
-			t.Fatalf("iteration %d: SendHeaders: %v", i, err)
+			require.NoErrorf(t, herr, "iteration %d: SendHeaders", i)
 		}
 
 		// Close and drain race each other, both off the main goroutine, so the
@@ -120,22 +123,17 @@ func TestStream_CloseAfterDrain_StillRecycles(t *testing.T) {
 	defer cancel()
 
 	s, err := c.NewStream(ctx)
-	if err != nil {
-		t.Fatalf("NewStream: %v", err)
-	}
-	if err := s.SendHeaders(ctx, []header.Field{
+	require.NoError(t, err, "NewStream")
+	require.NoError(t, s.SendHeaders(ctx, []header.Field{
 		{Name: []byte(":method"), Value: []byte("GET")},
 		{Name: []byte(":scheme"), Value: []byte("https")},
 		{Name: []byte(":authority"), Value: []byte("example.com")},
 		{Name: []byte(":path"), Value: []byte("/")},
-	}, true); err != nil {
-		t.Fatalf("SendHeaders: %v", err)
-	}
+	}, true), "SendHeaders")
+
 	for {
-		ev, err := s.Recv(ctx)
-		if err != nil {
-			t.Fatalf("Recv: %v", err)
-		}
+		ev, rerr := s.Recv(ctx)
+		require.NoError(t, rerr, "Recv")
 		if ev.EndStream {
 			break
 		}
@@ -143,15 +141,9 @@ func TestStream_CloseAfterDrain_StillRecycles(t *testing.T) {
 	s.Stream().mu.Lock()
 	remoteEnded, localEnded := s.Stream().remoteEnded, s.Stream().localEnded
 	s.Stream().mu.Unlock()
-	if !remoteEnded {
-		t.Fatal("remoteEnded false after the consumer read END_STREAM — Close would send a needless CANCEL")
-	}
-	if !localEnded {
-		t.Fatal("localEnded false after SendHeaders(endStream=true)")
-	}
-	if err := s.Close(); err != nil {
-		t.Fatalf("Close: %v", err)
-	}
+	assert.True(t, remoteEnded, "remoteEnded false after the consumer read END_STREAM — Close would send a needless CANCEL")
+	assert.True(t, localEnded, "localEnded false after SendHeaders(endStream=true)")
+	assert.NoError(t, s.Close(), "Close after a clean drain must be a no-op, not an error")
 }
 
 // TestStream_RecycleUnderInFlightRecv_NoRace is the deterministic counterpart
@@ -190,17 +182,13 @@ func TestStream_RecycleUnderInFlightRecv_NoRace(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
 	s, err := c.NewStream(ctx)
-	if err != nil {
-		t.Fatalf("NewStream: %v", err)
-	}
-	if err := s.SendHeaders(ctx, []header.Field{
+	require.NoError(t, err, "NewStream")
+	require.NoError(t, s.SendHeaders(ctx, []header.Field{
 		{Name: []byte(":method"), Value: []byte("GET")},
 		{Name: []byte(":scheme"), Value: []byte("https")},
 		{Name: []byte(":authority"), Value: []byte("example.com")},
 		{Name: []byte(":path"), Value: []byte("/")},
-	}, true); err != nil {
-		t.Fatalf("SendHeaders: %v", err)
-	}
+	}, true), "SendHeaders")
 
 	// gotHeaders fires once the reader has consumed the header block, so the
 	// wait below is on an observed state rather than on a duration.
@@ -225,7 +213,7 @@ func TestStream_RecycleUnderInFlightRecv_NoRace(t *testing.T) {
 	select {
 	case <-gotHeaders:
 	case <-time.After(10 * time.Second):
-		t.Fatal("reader never saw the response headers")
+		require.FailNow(t, "reader never saw the response headers")
 	}
 	// One event consumed, none left: the next Recv is parked in the select.
 	time.Sleep(100 * time.Millisecond)
@@ -248,23 +236,19 @@ func TestStream_RecycleUnderInFlightRecv_NoRace(t *testing.T) {
 	s.Stream().mu.Lock()
 	pooled := s.Stream().w == nil
 	s.Stream().mu.Unlock()
-	if pooled {
-		t.Fatal("stream was reset for the pool while a reader was inside Recv")
-	}
+	require.False(t, pooled, "stream was reset for the pool while a reader was inside Recv")
 
 	// Release the reader; the recycle it is owed must then run.
 	readerCancel()
 	select {
 	case <-readerOut:
 	case <-time.After(10 * time.Second):
-		t.Fatal("reader never returned: the deferred recycle must not block it")
+		require.FailNow(t, "reader never returned: the deferred recycle must not block it")
 	}
 
 	// And the deferral must not lose the recycle: the last reader out owes it.
 	s.Stream().mu.Lock()
 	recycled := s.Stream().w == nil && s.Stream().id == 0
 	s.Stream().mu.Unlock()
-	if !recycled {
-		t.Fatal("deferred recycle never ran; the stream leaked out of the pool")
-	}
+	assert.True(t, recycled, "deferred recycle never ran; the stream leaked out of the pool")
 }

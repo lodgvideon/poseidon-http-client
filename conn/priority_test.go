@@ -11,6 +11,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
 	"github.com/lodgvideon/poseidon-http-client/frame"
 	"github.com/lodgvideon/poseidon-http-client/hpack"
 )
@@ -112,34 +115,23 @@ func TestFramer_WriteAndReadPriority(t *testing.T) {
 
 	// Client side: write preface, settings, then PRIORITY.
 	fr := frame.NewFramer(cli, cli)
-	if _, err := cli.Write([]byte(http2ClientPreface)); err != nil {
-		t.Fatalf("write preface: %v", err)
-	}
-	if err := fr.WriteSettings(frame.SettingsParams{}); err != nil {
-		t.Fatalf("WriteSettings: %v", err)
-	}
-	if err := fr.WritePriority(1, frame.Priority{StreamDep: 13, Exclusive: false, Weight: 200}); err != nil {
-		t.Fatalf("WritePriority: %v", err)
-	}
+
+	_, perr := cli.Write([]byte(http2ClientPreface))
+	require.NoError(t, perr, "write preface")
+	require.NoError(t, fr.WriteSettings(frame.SettingsParams{}), "WriteSettings")
+	require.NoError(t, fr.WritePriority(1, frame.Priority{StreamDep: 13, Exclusive: false, Weight: 200}),
+		"WritePriority")
 	// Give the server a moment to read.
 	_ = srv.Close()
 	<-done
 
 	capture.mu.Lock()
 	defer capture.mu.Unlock()
-	if len(capture.priorities) != 1 {
-		t.Fatalf("priorities captured = %d, want 1", len(capture.priorities))
-	}
+	require.Lenf(t, capture.priorities, 1, "priorities captured = %d, want 1", len(capture.priorities))
 	got := capture.priorities[0]
-	if got.StreamDep != 13 {
-		t.Errorf("StreamDep = %d, want 13", got.StreamDep)
-	}
-	if got.Weight != 200 {
-		t.Errorf("Weight = %d, want 200", got.Weight)
-	}
-	if capture.streamIDs[0] != 1 {
-		t.Errorf("streamID = %d, want 1", capture.streamIDs[0])
-	}
+	assert.Equalf(t, uint32(13), got.StreamDep, "StreamDep = %d, want 13", got.StreamDep)
+	assert.Equalf(t, uint8(200), got.Weight, "Weight = %d, want 200", got.Weight)
+	assert.Equalf(t, uint32(1), capture.streamIDs[0], "streamID = %d, want 1", capture.streamIDs[0])
 }
 
 // TestFramer_DispatchPriority_ExclusiveFlag verifies the exclusive bit.
@@ -181,19 +173,12 @@ func TestFramer_DispatchPriority_ExclusiveFlag(t *testing.T) {
 
 	capture.mu.Lock()
 	defer capture.mu.Unlock()
-	if len(capture.priorities) != 1 {
-		t.Fatalf("priorities = %d, want 1", len(capture.priorities))
-	}
+	require.Lenf(t, capture.priorities, 1, "priorities = %d, want 1", len(capture.priorities))
 	got := capture.priorities[0]
-	if !got.Exclusive {
-		t.Error("Exclusive = false, want true")
-	}
-	if got.StreamDep != 7 {
-		t.Errorf("StreamDep = %d, want 7 (masked)", got.StreamDep)
-	}
-	if got.Weight != 32 {
-		t.Errorf("Weight = %d, want 32", got.Weight)
-	}
+	assert.True(t, got.Exclusive, "Exclusive = false, want true: the high bit of the dependency word is E")
+	assert.Equalf(t, uint32(7), got.StreamDep,
+		"StreamDep = %d, want 7 — the E bit must be masked out of the dependency", got.StreamDep)
+	assert.Equalf(t, uint8(32), got.Weight, "Weight = %d, want 32", got.Weight)
 }
 
 // TestFramer_DispatchPriority_WrongLength verifies the framer rejects
@@ -224,11 +209,11 @@ func TestFramer_DispatchPriority_WrongLength(t *testing.T) {
 	select {
 	case <-done:
 	case <-time.After(2 * time.Second):
-		t.Fatal("server didn't finish")
+		require.FailNow(t, "server didn't finish")
 	}
-	if readErr == nil {
-		t.Error("expected error for wrong-length PRIORITY")
-	}
+
+	assert.Error(t, readErr,
+		"a PRIORITY frame whose length is not 5 must be rejected (RFC 7540 §6.3), not parsed")
 }
 
 // TestConn_HeadWithPriority_H2Server verifies that a real h2 server
@@ -245,9 +230,7 @@ func TestConn_HeadWithPriority_H2Server(t *testing.T) {
 
 	// Open a raw TLS conn to the h2 server.
 	rawConn, err := net.Dial("tcp", srv.Listener.Addr().String())
-	if err != nil {
-		t.Fatalf("dial: %v", err)
-	}
+	require.NoError(t, err, "dial")
 	defer rawConn.Close()
 
 	tlsConn := tls.Client(rawConn, &tls.Config{
@@ -255,27 +238,19 @@ func TestConn_HeadWithPriority_H2Server(t *testing.T) {
 		NextProtos:         []string{"h2"},
 		ServerName:         "example.com",
 	})
-	if err := tlsConn.Handshake(); err != nil {
-		t.Fatalf("TLS handshake: %v", err)
-	}
+	require.NoError(t, tlsConn.Handshake(), "TLS handshake")
 	defer tlsConn.Close()
 
 	// HTTP/2 handshake.
-	if _, err := tlsConn.Write([]byte(http2ClientPreface)); err != nil {
-		t.Fatalf("preface: %v", err)
-	}
+	_, perr := tlsConn.Write([]byte(http2ClientPreface))
+	require.NoError(t, perr, "preface")
 	fr := frame.NewFramer(tlsConn, tlsConn)
-	if err := fr.WriteSettings(frame.SettingsParams{}); err != nil {
-		t.Fatalf("WriteSettings: %v", err)
-	}
+	require.NoError(t, fr.WriteSettings(frame.SettingsParams{}), "WriteSettings")
 
 	// Read server SETTINGS, then ACK.
-	if _, err := fr.ReadFrame(context.Background(), noopHandler{}); err != nil {
-		t.Fatalf("read server settings: %v", err)
-	}
-	if err := fr.WriteSettingsAck(); err != nil {
-		t.Fatalf("WriteSettingsAck: %v", err)
-	}
+	_, serr := fr.ReadFrame(context.Background(), noopHandler{})
+	require.NoError(t, serr, "read server settings")
+	require.NoError(t, fr.WriteSettingsAck(), "WriteSettingsAck")
 
 	// Send HEADERS with PRIORITY embedded.
 	enc := hpack.NewEncoder()
@@ -287,32 +262,28 @@ func TestConn_HeadWithPriority_H2Server(t *testing.T) {
 	}
 	block := enc.EncodeBlock(nil, hdrs)
 	prio := &frame.Priority{StreamDep: 0, Exclusive: false, Weight: 200}
-	if err := fr.WriteHeaders(frame.WriteHeadersParams{
+
+	require.NoError(t, fr.WriteHeaders(frame.WriteHeadersParams{
 		StreamID:      1,
 		BlockFragment: block,
 		EndHeaders:    true,
 		EndStream:     true,
 		Priority:      prio,
-	}); err != nil {
-		t.Fatalf("WriteHeaders: %v", err)
-	}
+	}), "WriteHeaders with an embedded PRIORITY field")
 
 	// Use a status-capturing handler to read response.
 	var gotStatus int
 	statusHandler := &statusCaptureHandler{status: &gotStatus}
 	for i := 0; i < 5; i++ {
-		fh, err := fr.ReadFrame(context.Background(), statusHandler)
-		if err != nil {
-			t.Fatalf("ReadFrame[%d]: %v", i, err)
-		}
+		_, rerr := fr.ReadFrame(context.Background(), statusHandler)
+		require.NoErrorf(t, rerr, "ReadFrame[%d]", i)
 		if statusHandler.done {
 			break
 		}
-		_ = fh
 	}
-	if gotStatus != 200 {
-		t.Errorf("status = %d, want 200", gotStatus)
-	}
+
+	assert.Equalf(t, 200, gotStatus,
+		"status = %d, want 200 — a real h2 server must accept HEADERS carrying the PRIORITY field", gotStatus)
 }
 
 // statusCaptureHandler is a frame.Handler that records the :status

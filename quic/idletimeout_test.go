@@ -5,6 +5,9 @@ import (
 	"net"
 	"testing"
 	"time"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // TestConformance_RFC9000_Sec101_EffectiveIdleMin checks the effective idle
@@ -19,10 +22,12 @@ func TestConformance_RFC9000_Sec101_EffectiveIdleMin(t *testing.T) {
 		{0, 10 * s, 10 * s}, // we impose none → peer's
 		{0, 0, 0},           // neither → disabled
 	}
+
 	for _, c := range cases {
-		if got := effectiveIdle(c.local, c.peer); got != c.want {
-			t.Fatalf("effectiveIdle(%v, %v) = %v, want %v", c.local, c.peer, got, c.want)
-		}
+		got := effectiveIdle(c.local, c.peer)
+
+		assert.Equalf(t, c.want, got, "effectiveIdle(%v, %v) = %v, want %v",
+			c.local, c.peer, got, c.want)
 	}
 }
 
@@ -31,22 +36,17 @@ func TestConformance_RFC9000_Sec101_EffectiveIdleMin(t *testing.T) {
 // back, and that a zero value omits the parameter entirely (RFC 9000 §10.1, §18.2).
 func TestConformance_RFC9000_Sec101_AdvertiseAndParse(t *testing.T) {
 	enc := AppendTransportParams(nil, LocalTransportParams{MaxIdleTimeout: 30000, SourceConnectionID: []byte("cid")})
-	tp, err := ParseTransportParams(enc)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if tp.MaxIdleTimeout != 30*time.Second {
-		t.Fatalf("MaxIdleTimeout = %v, want 30s", tp.MaxIdleTimeout)
-	}
-
 	enc2 := AppendTransportParams(nil, LocalTransportParams{SourceConnectionID: []byte("cid")})
-	tp2, err := ParseTransportParams(enc2)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if tp2.MaxIdleTimeout != 0 {
-		t.Fatalf("absent max_idle_timeout must parse to 0, got %v", tp2.MaxIdleTimeout)
-	}
+
+	tp, err := ParseTransportParams(enc)
+	tp2, err2 := ParseTransportParams(enc2)
+
+	require.NoError(t, err, "ParseTransportParams with max_idle_timeout advertised")
+	require.NoError(t, err2, "ParseTransportParams with max_idle_timeout omitted")
+	assert.Equalf(t, 30*time.Second, tp.MaxIdleTimeout,
+		"MaxIdleTimeout = %v, want 30s (advertised in milliseconds, §18.2)", tp.MaxIdleTimeout)
+	assert.Zerof(t, tp2.MaxIdleTimeout,
+		"absent max_idle_timeout must parse to 0, got %v", tp2.MaxIdleTimeout)
 }
 
 // TestConformance_RFC9000_Sec101_IdleTimeoutOverflowCapped checks that an absurd
@@ -54,18 +54,16 @@ func TestConformance_RFC9000_Sec101_AdvertiseAndParse(t *testing.T) {
 // Duration when scaled to nanoseconds, so the effective timeout stays correct.
 func TestConformance_RFC9000_Sec101_IdleTimeoutOverflowCapped(t *testing.T) {
 	enc := AppendTransportParams(nil, LocalTransportParams{MaxIdleTimeout: 1 << 55}) // absurdly large ms
+
 	tp, err := ParseTransportParams(enc)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if tp.MaxIdleTimeout <= 0 {
-		t.Fatalf("a huge max_idle_timeout must stay positive after scaling, got %v", tp.MaxIdleTimeout)
-	}
+
+	require.NoError(t, err, "ParseTransportParams with an absurd max_idle_timeout")
+	assert.Positivef(t, tp.MaxIdleTimeout,
+		"a huge max_idle_timeout must stay positive after scaling, got %v", tp.MaxIdleTimeout)
 	// With our 30 s and the capped (effectively unbounded) peer value, the effective
 	// timeout is ours — not a wrapped-negative value.
-	if got := effectiveIdle(30*time.Second, tp.MaxIdleTimeout); got != 30*time.Second {
-		t.Fatalf("effectiveIdle = %v, want 30s", got)
-	}
+	assert.Equalf(t, 30*time.Second, effectiveIdle(30*time.Second, tp.MaxIdleTimeout),
+		"effectiveIdle = %v, want 30s", effectiveIdle(30*time.Second, tp.MaxIdleTimeout))
 }
 
 // TestConformance_RFC9000_Sec101_IdleFlooredByPTO checks that the idle timeout is
@@ -78,17 +76,14 @@ func TestConformance_RFC9000_Sec101_IdleFlooredByPTO(t *testing.T) {
 	c.lastActivity = base
 
 	dl, ok := c.idleDeadline()
-	if !ok {
-		t.Fatal("an advertised idle timeout should be in effect")
-	}
-	if want := base.Add(3 * c.ptoPeriod()); !dl.Equal(want) {
-		t.Fatalf("idleDeadline = %v, want %v (floored at 3×PTO)", dl, want)
-	}
-
 	c.localMaxIdle = 0
-	if _, ok := c.idleDeadline(); ok {
-		t.Fatal("no idle timeout should be in effect when neither endpoint advertises one")
-	}
+	_, okDisabled := c.idleDeadline()
+
+	require.True(t, ok, "an advertised idle timeout should be in effect")
+	assert.Truef(t, dl.Equal(base.Add(3*c.ptoPeriod())),
+		"idleDeadline = %v, want %v (floored at 3×PTO)", dl, base.Add(3*c.ptoPeriod()))
+	assert.False(t, okDisabled,
+		"no idle timeout should be in effect when neither endpoint advertises one")
 }
 
 // TestConformance_RFC9000_Sec101_IdleCloseWithDataInFlight checks that the idle
@@ -107,12 +102,10 @@ func TestConformance_RFC9000_Sec101_IdleCloseWithDataInFlight(t *testing.T) {
 	c.sent[spaceApp].onSent(0, past, true, nil) // an ack-eliciting packet in flight
 
 	_, err := c.readWithPTO(context.Background(), make([]byte, 64))
-	if err != ErrIdleTimeout {
-		t.Fatalf("readWithPTO = %v, want ErrIdleTimeout (idle close must fire even with data in flight)", err)
-	}
-	if !c.closed {
-		t.Fatal("the connection should be marked closed after an idle timeout")
-	}
+
+	assert.Equalf(t, ErrIdleTimeout, err,
+		"readWithPTO = %v, want ErrIdleTimeout (idle close must fire even with data in flight)", err)
+	assert.True(t, c.closed, "the connection should be marked closed after an idle timeout")
 }
 
 // TestConformance_RFC9000_Sec101_IdleClose checks that once the connection has
@@ -127,10 +120,7 @@ func TestConformance_RFC9000_Sec101_IdleClose(t *testing.T) {
 	c.lastActivity = time.Now().Add(-100 * time.Millisecond)
 
 	_, err := c.readWithPTO(context.Background(), make([]byte, 64))
-	if err != ErrIdleTimeout {
-		t.Fatalf("readWithPTO = %v, want ErrIdleTimeout", err)
-	}
-	if !c.closed {
-		t.Fatal("the connection should be marked closed after an idle timeout")
-	}
+
+	assert.Equalf(t, ErrIdleTimeout, err, "readWithPTO = %v, want ErrIdleTimeout", err)
+	assert.True(t, c.closed, "the connection should be marked closed after an idle timeout")
 }

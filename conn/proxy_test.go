@@ -10,6 +10,9 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // startProxyTest starts a fake HTTP proxy on a random port.
@@ -18,9 +21,7 @@ import (
 func startFakeProxy(t *testing.T, targetHandler func(net.Conn)) *url.URL {
 	t.Helper()
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("proxy listen: %v", err)
-	}
+	require.NoError(t, err, "proxy listen")
 
 	go func() {
 		for {
@@ -99,9 +100,7 @@ func handleProxyConn(t *testing.T, c net.Conn, targetHandler func(net.Conn)) {
 func TestProxyDialer_Plaintext(t *testing.T) {
 	// Start a target echo server.
 	targetLn, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, err, "target listen")
 	defer targetLn.Close()
 	go func() {
 		for {
@@ -122,31 +121,24 @@ func TestProxyDialer_Plaintext(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	conn, err := d.Dial(ctx, targetLn.Addr().String())
-	if err != nil {
-		t.Fatalf("Dial: %v", err)
-	}
-	defer conn.Close()
-
-	// Write and read back.
 	msg := []byte("hello through proxy")
-	if _, err := conn.Write(msg); err != nil {
-		t.Fatalf("write: %v", err)
-	}
 	buf := make([]byte, len(msg))
-	if _, err := io.ReadFull(conn, buf); err != nil {
-		t.Fatalf("read: %v", err)
-	}
-	if string(buf) != string(msg) {
-		t.Fatalf("echo = %q, want %q", buf, msg)
-	}
+
+	conn, err := d.Dial(ctx, targetLn.Addr().String())
+	require.NoError(t, err, "Dial through the CONNECT proxy")
+	defer conn.Close()
+	_, werr := conn.Write(msg)
+	require.NoError(t, werr, "write through the tunnel")
+	_, rerr := io.ReadFull(conn, buf)
+
+	require.NoError(t, rerr, "read back through the tunnel")
+	assert.Equalf(t, string(msg), string(buf),
+		"echo = %q, want %q — the CONNECT tunnel did not carry the bytes end to end", buf, msg)
 }
 
 func TestProxyDialer_BasicAuth(t *testing.T) {
 	proxyLn, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, err, "proxy listen")
 	defer proxyLn.Close()
 
 	receivedAuth := make(chan string, 1)
@@ -188,17 +180,13 @@ func TestProxyDialer_BasicAuth(t *testing.T) {
 	defer cancel()
 
 	_, err = d.Dial(ctx, "target:443")
-	if err != nil {
-		t.Fatalf("Dial: %v", err)
-	}
 
+	require.NoError(t, err, "Dial through the authenticating proxy")
 	select {
 	case auth := <-receivedAuth:
-		if !strings.Contains(auth, "Basic") {
-			t.Errorf("auth = %q, want Basic", auth)
-		}
+		assert.Containsf(t, auth, "Basic", "auth = %q, want a Basic credential", auth)
 	case <-time.After(time.Second):
-		t.Fatal("timeout waiting for auth header")
+		require.FailNow(t, "timeout waiting for auth header")
 	}
 }
 
@@ -208,16 +196,13 @@ func TestProxyDialer_NilURL(t *testing.T) {
 	defer cancel()
 
 	_, err := d.Dial(ctx, "target:443")
-	if err == nil {
-		t.Fatal("expected error for nil ProxyURL")
-	}
+
+	assert.Error(t, err, "a ProxyDialer with no ProxyURL must refuse rather than dial the target directly")
 }
 
 func TestProxyDialer_BadResponse(t *testing.T) {
 	proxyLn, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, err, "proxy listen")
 	defer proxyLn.Close()
 
 	go func() {
@@ -244,10 +229,9 @@ func TestProxyDialer_BadResponse(t *testing.T) {
 	defer cancel()
 
 	_, err = d.Dial(ctx, "target:443")
-	if err == nil {
-		t.Fatal("expected error for 407 response")
-	}
-	if !strings.Contains(err.Error(), "407") {
-		t.Fatalf("error = %q, want 407", err)
-	}
+
+	require.Error(t, err, "a non-200 CONNECT response must not be handed back as a working tunnel")
+	assert.Containsf(t, err.Error(), "407",
+		"error = %q, want the proxy's status carried through so the caller can tell auth failure "+
+			"from an unreachable target", err)
 }

@@ -3,6 +3,9 @@ package http1_test
 import (
 	"context"
 	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // smuggled is a complete, well-formed response an attacker appends after the
@@ -10,6 +13,21 @@ import (
 // NEXT request parses them as its own status line and gets a response the server
 // never sent for it, with err == nil.
 const smuggled = "HTTP/1.1 200 OK\r\nContent-Length: 3\r\n\r\npwn"
+
+// drainToDone reads the body to completion, requiring every chunk read to
+// succeed. It is the shared Act step of the pooling-verdict tests below.
+func drainToDone(t *testing.T, ex interface {
+	ReadBodyChunk([]byte) (int, bool, error)
+}) {
+	t.Helper()
+	for {
+		_, done, err := ex.ReadBodyChunk(make([]byte, 64))
+		require.NoError(t, err, "ReadBodyChunk")
+		if done {
+			return
+		}
+	}
+}
 
 // TestConformance_RFC9112_Sec6_3_ExtraOctetsAfterResponse pins that a connection
 // carrying octets left over after a complete response is not poolable, whatever
@@ -49,23 +67,15 @@ func TestConformance_RFC9112_Sec6_3_ExtraOctetsAfterResponse(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			ex := wireExchange(t, tc.method, tc.wire)
-			if _, _, err := ex.ReadResponse(context.Background()); err != nil {
-				t.Fatalf("ReadResponse: %v", err)
-			}
-			for {
-				_, done, err := ex.ReadBodyChunk(make([]byte, 64))
-				if err != nil {
-					t.Fatalf("ReadBodyChunk: %v", err)
-				}
-				if done {
-					break
-				}
-			}
-			if ex.KeepAlive() {
-				t.Error("KeepAlive() = true with octets still buffered after the response — " +
-					"the connection would be pooled with a peer-chosen response inside it, and " +
+			_, _, err := ex.ReadResponse(context.Background())
+			require.NoError(t, err, "ReadResponse")
+
+			drainToDone(t, ex)
+
+			assert.False(t, ex.KeepAlive(),
+				"KeepAlive() = true with octets still buffered after the response — "+
+					"the connection would be pooled with a peer-chosen response inside it, and "+
 					"the next request would parse those bytes as its own status line (RFC 9112 §6.3)")
-			}
 		})
 	}
 }
@@ -88,21 +98,12 @@ func TestConformance_RFC9112_Sec6_3_CleanResponseStaysPoolable(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			ex := wireExchange(t, tc.method, tc.wire)
-			if _, _, err := ex.ReadResponse(context.Background()); err != nil {
-				t.Fatalf("ReadResponse: %v", err)
-			}
-			for {
-				_, done, err := ex.ReadBodyChunk(make([]byte, 64))
-				if err != nil {
-					t.Fatalf("ReadBodyChunk: %v", err)
-				}
-				if done {
-					break
-				}
-			}
-			if !ex.KeepAlive() {
-				t.Error("KeepAlive() = false for a response with nothing left over, want true")
-			}
+			_, _, err := ex.ReadResponse(context.Background())
+			require.NoError(t, err, "ReadResponse")
+
+			drainToDone(t, ex)
+
+			assert.True(t, ex.KeepAlive(), "KeepAlive() = false for a response with nothing left over, want true")
 		})
 	}
 }
@@ -119,16 +120,16 @@ func TestConformance_RFC9112_Sec6_3_CleanResponseStaysPoolable(t *testing.T) {
 func TestConformance_RFC9112_Sec6_1_Http10TransferEncodingNotPoolable(t *testing.T) {
 	ex := wireExchange(t, "GET",
 		"HTTP/1.0 200 OK\r\nConnection: keep-alive\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nHELLO\r\n0\r\n\r\n")
-	if _, _, err := ex.ReadResponse(context.Background()); err != nil {
-		t.Fatalf("ReadResponse: %v", err)
-	}
-	if body := drainBody(t, ex); body != "HELLO" {
-		t.Errorf("body = %q, want %q — chunked is self-delimiting, so the caller still gets its bytes", body, "HELLO")
-	}
-	if ex.KeepAlive() {
-		t.Error("KeepAlive() = true for an HTTP/1.0 response carrying Transfer-Encoding, want false — " +
+	_, _, err := ex.ReadResponse(context.Background())
+	require.NoError(t, err, "ReadResponse")
+
+	body := drainBody(t, ex)
+
+	assert.Equalf(t, "HELLO", body,
+		"body = %q, want %q — chunked is self-delimiting, so the caller still gets its bytes", body, "HELLO")
+	assert.False(t, ex.KeepAlive(),
+		"KeepAlive() = true for an HTTP/1.0 response carrying Transfer-Encoding, want false — "+
 			"RFC 9112 §6.1 makes that framing faulty and requires closing the connection after it")
-	}
 }
 
 // TestConformance_RFC9112_Sec6_1_Http11TransferEncodingStaysPoolable is the
@@ -136,15 +137,13 @@ func TestConformance_RFC9112_Sec6_1_Http10TransferEncodingNotPoolable(t *testing
 func TestConformance_RFC9112_Sec6_1_Http11TransferEncodingStaysPoolable(t *testing.T) {
 	ex := wireExchange(t, "GET",
 		"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nHELLO\r\n0\r\n\r\n")
-	if _, _, err := ex.ReadResponse(context.Background()); err != nil {
-		t.Fatalf("ReadResponse: %v", err)
-	}
-	if body := drainBody(t, ex); body != "HELLO" {
-		t.Errorf("body = %q, want %q", body, "HELLO")
-	}
-	if !ex.KeepAlive() {
-		t.Error("KeepAlive() = false for HTTP/1.1 chunked, want true")
-	}
+	_, _, err := ex.ReadResponse(context.Background())
+	require.NoError(t, err, "ReadResponse")
+
+	body := drainBody(t, ex)
+
+	assert.Equalf(t, "HELLO", body, "body = %q, want %q", body, "HELLO")
+	assert.True(t, ex.KeepAlive(), "KeepAlive() = false for HTTP/1.1 chunked, want true")
 }
 
 // TestConformance_RFC9110_Sec7_6_1_ConnectionIsATokenList pins that the
@@ -171,15 +170,15 @@ func TestConformance_RFC9110_Sec7_6_1_ConnectionIsATokenList(t *testing.T) {
 			// flip it, which is exactly what the token-list rule decides.
 			ex := wireExchange(t, "GET",
 				"HTTP/1.0 200 OK\r\nConnection: "+tc.connection+"\r\nContent-Length: 5\r\n\r\nHELLO")
-			if _, _, err := ex.ReadResponse(context.Background()); err != nil {
-				t.Fatalf("ReadResponse: %v", err)
-			}
-			if body := drainBody(t, ex); body != "HELLO" {
-				t.Fatalf("body = %q, want %q", body, "HELLO")
-			}
-			if got := ex.KeepAlive(); got != tc.wantKeepAlive {
-				t.Errorf("Connection: %q → KeepAlive() = %v, want %v", tc.connection, got, tc.wantKeepAlive)
-			}
+			_, _, err := ex.ReadResponse(context.Background())
+			require.NoError(t, err, "ReadResponse")
+
+			body := drainBody(t, ex)
+
+			require.Equalf(t, "HELLO", body, "body = %q, want %q", body, "HELLO")
+			got := ex.KeepAlive()
+			assert.Equalf(t, tc.wantKeepAlive, got,
+				"Connection: %q → KeepAlive() = %v, want %v", tc.connection, got, tc.wantKeepAlive)
 		})
 	}
 }
@@ -201,11 +200,11 @@ func TestConformance_RFC9110_Sec7_6_1_ConnectionIsATokenList(t *testing.T) {
 // its own status line.
 func TestReadResponse_TruncatedHeaderBlockIsNotPoolable(t *testing.T) {
 	ex := wireExchange(t, "GET", "HTTP/1.1 200 OK\r\nX-Cut-Here: no blank line follows\r\n")
-	if _, _, err := ex.ReadResponse(context.Background()); err == nil {
-		t.Fatal("a header block ending without its blank line must report an error")
-	}
-	if ex.KeepAlive() {
-		t.Error("KeepAlive() = true after a truncated header block, want false — the " +
+
+	_, _, err := ex.ReadResponse(context.Background())
+
+	require.Error(t, err, "a header block ending without its blank line must report an error")
+	assert.False(t, ex.KeepAlive(),
+		"KeepAlive() = true after a truncated header block, want false — the "+
 			"block was cut at an unknown point, so the connection must not be reused")
-	}
 }

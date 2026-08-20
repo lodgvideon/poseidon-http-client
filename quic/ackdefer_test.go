@@ -4,6 +4,9 @@ import (
 	"context"
 	"testing"
 	"time"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // The bounded ACK-deferral suite (RFC 9000 §13.2.1). A 1-RTT ACK may be delayed up
@@ -32,16 +35,10 @@ func (h *frameSpy) OnStream(_, _ uint64, _ bool, data []byte) error {
 func decodeClientApp(t *testing.T, opener *Opener, dcid, pkt []byte, spy *frameSpy) {
 	t.Helper()
 	hdr, err := ParseHeader(pkt, len(dcid))
-	if err != nil {
-		t.Fatalf("ParseHeader: %v", err)
-	}
+	require.NoError(t, err, "ParseHeader")
 	_, _, payload, err := opener.Open(pkt, hdr.PNOffset, 0)
-	if err != nil {
-		t.Fatalf("Open: %v", err)
-	}
-	if err := ParseFrames(payload, spy); err != nil {
-		t.Fatalf("ParseFrames: %v", err)
-	}
+	require.NoError(t, err, "Open")
+	require.NoError(t, ParseFrames(payload, spy), "ParseFrames")
 }
 
 // ackDeferConn builds a post-handshake client Conn over pc with a fake clock and a
@@ -51,13 +48,9 @@ func ackDeferConn(t *testing.T, pc PacketConn, dcid []byte, clock func() time.Ti
 	t.Helper()
 	keys, _ := InitialKeys(dcid)
 	sealer, err := NewSealer(keys)
-	if err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, err)
 	opener, err := NewOpener(keys)
-	if err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, err)
 	c := &Conn{
 		pc:                pc,
 		dcid:              dcid,
@@ -83,27 +76,30 @@ func ackDeferConn(t *testing.T, pc PacketConn, dcid []byte, clock func() time.Ti
 func TestAckTracker_ImmediateTriggers(t *testing.T) {
 	t.Run("in-order-single-defers", func(t *testing.T) {
 		var a ackTracker
+
 		a.receive(0, true)
-		if a.immediate {
-			t.Fatal("a lone in-order ack-eliciting packet must not force an immediate ACK")
-		}
+
+		assert.False(t, a.immediate,
+			"a lone in-order ack-eliciting packet must not force an immediate ACK")
 	})
 	t.Run("second-ack-eliciting", func(t *testing.T) {
 		var a ackTracker
 		a.receive(0, true)
+
 		a.receive(1, true) // 2nd ack-eliciting since the last ACK
-		if !a.immediate {
-			t.Fatal("the 2nd ack-eliciting packet must force an immediate ACK (§13.2.1)")
-		}
+
+		assert.True(t, a.immediate,
+			"the 2nd ack-eliciting packet must force an immediate ACK (§13.2.1)")
 	})
 	t.Run("gap-above-top", func(t *testing.T) {
 		var a ackTracker
 		a.receive(0, true)
 		a.acked() // simulate a prior ACK: reset the deferral counters
+
 		a.receive(3, true)
-		if !a.immediate {
-			t.Fatal("an ack-eliciting packet leaving a gap above the top must ACK immediately (§13.2.1)")
-		}
+
+		assert.True(t, a.immediate,
+			"an ack-eliciting packet leaving a gap above the top must ACK immediately (§13.2.1)")
 	})
 	t.Run("reorder-below-top", func(t *testing.T) {
 		var a ackTracker
@@ -111,19 +107,21 @@ func TestAckTracker_ImmediateTriggers(t *testing.T) {
 			a.receive(pn, true)
 		}
 		a.acked() // reset the deferral counters
+
 		a.receive(2, true)
-		if !a.immediate {
-			t.Fatal("an ack-eliciting packet reordered below the top must ACK immediately (§13.2.1)")
-		}
+
+		assert.True(t, a.immediate,
+			"an ack-eliciting packet reordered below the top must ACK immediately (§13.2.1)")
 	})
 	t.Run("acked-resets-triggers", func(t *testing.T) {
 		var a ackTracker
 		a.receive(0, true)
 		a.receive(1, true)
+
 		a.acked()
-		if a.immediate || a.elicitCount != 0 || a.pending {
-			t.Fatalf("acked must clear pending/immediate/elicitCount, got %+v", a)
-		}
+
+		assert.Falsef(t, a.immediate || a.elicitCount != 0 || a.pending,
+			"acked must clear pending/immediate/elicitCount, got %+v", a)
 	})
 }
 
@@ -135,31 +133,26 @@ func TestConn_AckDefer_ImmediateOnOutOfOrder(t *testing.T) {
 	base := time.Unix(50000, 0)
 	pc := &drainingPC{}
 	c, opener := ackDeferConn(t, pc, dcid, func() time.Time { return base })
-
 	sealer := c.oneRTTSealer
 	// Two server 1-RTT STREAM packets on stream 0 with a gap at packet number 1.
 	pc.pkts = [][]byte{
 		sealServerPacket(t, sealer, PacketShort, nil, nil, 0, AppendStream(nil, 0, 0, false, []byte("a"))),
 		sealServerPacket(t, sealer, PacketShort, nil, nil, 2, AppendStream(nil, 0, 4, false, []byte("c"))),
 	}
-	if _, err := c.OpenStream(); err != nil {
-		t.Fatal(err)
-	}
+	_, err := c.OpenStream()
+	require.NoError(t, err)
 
-	if err := c.Poll(context.Background()); err != nil {
-		t.Fatalf("Poll: %v", err)
-	}
-	if len(pc.written) != 1 {
-		t.Fatalf("wrote %d datagrams, want 1 immediate ACK for the out-of-order burst", len(pc.written))
-	}
+	err = c.Poll(context.Background())
+
+	require.NoError(t, err, "Poll")
+	require.Lenf(t, pc.written, 1,
+		"wrote %d datagrams, want 1 immediate ACK for the out-of-order burst", len(pc.written))
 	spy := &frameSpy{}
 	decodeClientApp(t, opener, dcid, pc.written[0], spy)
-	if !spy.sawAck {
-		t.Fatal("the immediate datagram must carry an ACK frame")
-	}
-	if !c.ackDeadline.IsZero() || c.acks[spaceApp].pending {
-		t.Fatalf("an immediate ACK must leave no deferral armed: deadline=%v pending=%v", c.ackDeadline, c.acks[spaceApp].pending)
-	}
+	assert.True(t, spy.sawAck, "the immediate datagram must carry an ACK frame")
+	assert.Falsef(t, !c.ackDeadline.IsZero() || c.acks[spaceApp].pending,
+		"an immediate ACK must leave no deferral armed: deadline=%v pending=%v",
+		c.ackDeadline, c.acks[spaceApp].pending)
 }
 
 // TestConn_AckDefer_ImmediateOnSecondAckEliciting drives the receive path with two
@@ -170,27 +163,22 @@ func TestConn_AckDefer_ImmediateOnSecondAckEliciting(t *testing.T) {
 	base := time.Unix(51000, 0)
 	pc := &drainingPC{}
 	c, opener := ackDeferConn(t, pc, dcid, func() time.Time { return base })
-
 	sealer := c.oneRTTSealer
 	pc.pkts = [][]byte{
 		sealServerPacket(t, sealer, PacketShort, nil, nil, 0, AppendStream(nil, 0, 0, false, []byte("a"))),
 		sealServerPacket(t, sealer, PacketShort, nil, nil, 1, AppendStream(nil, 0, 1, false, []byte("b"))),
 	}
-	if _, err := c.OpenStream(); err != nil {
-		t.Fatal(err)
-	}
+	_, err := c.OpenStream()
+	require.NoError(t, err)
 
-	if err := c.Poll(context.Background()); err != nil {
-		t.Fatalf("Poll: %v", err)
-	}
-	if len(pc.written) != 1 {
-		t.Fatalf("wrote %d datagrams, want 1 immediate ACK on the 2nd ack-eliciting packet", len(pc.written))
-	}
+	err = c.Poll(context.Background())
+
+	require.NoError(t, err, "Poll")
+	require.Lenf(t, pc.written, 1,
+		"wrote %d datagrams, want 1 immediate ACK on the 2nd ack-eliciting packet", len(pc.written))
 	spy := &frameSpy{}
 	decodeClientApp(t, opener, dcid, pc.written[0], spy)
-	if !spy.sawAck {
-		t.Fatal("the immediate datagram must carry an ACK frame")
-	}
+	assert.True(t, spy.sawAck, "the immediate datagram must carry an ACK frame")
 }
 
 // TestConn_AckDefer_DefersLoneInOrder proves the core deferral: a single in-order
@@ -202,32 +190,27 @@ func TestConn_AckDefer_DefersLoneInOrder(t *testing.T) {
 	base := time.Unix(52000, 0)
 	pc := &drainingPC{}
 	c, _ := ackDeferConn(t, pc, dcid, func() time.Time { return base })
-
 	sealer := c.oneRTTSealer
 	pc.pkts = [][]byte{
 		sealServerPacket(t, sealer, PacketShort, nil, nil, 0, AppendStream(nil, 0, 0, false, []byte("resp"))),
 	}
-	if _, err := c.OpenStream(); err != nil {
-		t.Fatal(err)
-	}
+	_, err := c.OpenStream()
+	require.NoError(t, err)
 
-	if err := c.Poll(context.Background()); err != nil {
-		t.Fatalf("Poll: %v", err)
-	}
-	if len(pc.written) != 0 {
-		t.Fatalf("wrote %d datagrams, want 0 — a lone in-order ACK must be deferred, not flushed in the recv hold", len(pc.written))
-	}
-	if !c.acks[spaceApp].pending {
-		t.Fatal("the ACK must remain owed (pending) after deferral")
-	}
+	err = c.Poll(context.Background())
+
+	require.NoError(t, err, "Poll")
+	require.Emptyf(t, pc.written,
+		"wrote %d datagrams, want 0 — a lone in-order ACK must be deferred, not flushed in the recv hold",
+		len(pc.written))
+	assert.True(t, c.acks[spaceApp].pending, "the ACK must remain owed (pending) after deferral")
 	// Armed a slop short of the advertised max_ack_delay so alarm-firing delay stays
 	// inside the value the peer folds into its PTO (RFC 9000 §18.2).
-	if want := base.Add(defaultMaxAckDelay - ackAlarmSlop); !c.ackDeadline.Equal(want) {
-		t.Fatalf("ackDeadline = %v, want recv + max_ack_delay - slop = %v", c.ackDeadline, want)
-	}
-	if !c.ackDeadline.Before(base.Add(defaultMaxAckDelay)) {
-		t.Fatal("the ACK alarm must fire strictly inside the advertised max_ack_delay")
-	}
+	want := base.Add(defaultMaxAckDelay - ackAlarmSlop)
+	assert.Truef(t, c.ackDeadline.Equal(want),
+		"ackDeadline = %v, want recv + max_ack_delay - slop = %v", c.ackDeadline, want)
+	assert.True(t, c.ackDeadline.Before(base.Add(defaultMaxAckDelay)),
+		"the ACK alarm must fire strictly inside the advertised max_ack_delay")
 }
 
 // TestConn_AckDefer_PiggybackOnStream is the syscall-saving win and the datagrams/
@@ -239,39 +222,31 @@ func TestConn_AckDefer_PiggybackOnStream(t *testing.T) {
 	base := time.Unix(53000, 0)
 	pc := &drainingPC{}
 	c, opener := ackDeferConn(t, pc, dcid, func() time.Time { return base })
-
 	sealer := c.oneRTTSealer
 	pc.pkts = [][]byte{
 		sealServerPacket(t, sealer, PacketShort, nil, nil, 0, AppendStream(nil, 0, 0, false, []byte("resp"))),
 	}
 	s, err := c.OpenStream()
-	if err != nil {
-		t.Fatal(err)
-	}
-
+	require.NoError(t, err)
 	// Receive: the response defers an ACK (no datagram out yet).
-	if err := c.Poll(context.Background()); err != nil {
-		t.Fatalf("Poll: %v", err)
-	}
-	if len(pc.written) != 0 {
-		t.Fatalf("recv wrote %d datagrams, want 0 (ACK deferred)", len(pc.written))
-	}
+	require.NoError(t, c.Poll(context.Background()), "Poll")
+	require.Emptyf(t, pc.written, "recv wrote %d datagrams, want 0 (ACK deferred)", len(pc.written))
 
 	// Send: a request STREAM must carry the deferred ACK — one datagram, not two.
-	if _, err := s.Send([]byte("GET / HTTP/3"), true); err != nil {
-		t.Fatalf("Send: %v", err)
-	}
-	if len(pc.written) != 1 {
-		t.Fatalf("recv-then-send emitted %d datagrams, want 1 (ACK piggybacked on the STREAM packet)", len(pc.written))
-	}
+	_, err = s.Send([]byte("GET / HTTP/3"), true)
+
+	require.NoError(t, err, "Send")
+	require.Lenf(t, pc.written, 1,
+		"recv-then-send emitted %d datagrams, want 1 (ACK piggybacked on the STREAM packet)",
+		len(pc.written))
 	spy := &frameSpy{}
 	decodeClientApp(t, opener, dcid, pc.written[0], spy)
-	if !spy.sawAck || !spy.sawStream {
-		t.Fatalf("the STREAM datagram must carry BOTH a STREAM and the piggybacked ACK: ack=%v stream=%v", spy.sawAck, spy.sawStream)
-	}
-	if c.acks[spaceApp].pending || !c.ackDeadline.IsZero() {
-		t.Fatalf("piggyback must clear the owed ACK + deferral: pending=%v deadline=%v", c.acks[spaceApp].pending, c.ackDeadline)
-	}
+	assert.Truef(t, spy.sawAck && spy.sawStream,
+		"the STREAM datagram must carry BOTH a STREAM and the piggybacked ACK: ack=%v stream=%v",
+		spy.sawAck, spy.sawStream)
+	assert.Falsef(t, c.acks[spaceApp].pending || !c.ackDeadline.IsZero(),
+		"piggyback must clear the owed ACK + deferral: pending=%v deadline=%v",
+		c.acks[spaceApp].pending, c.ackDeadline)
 }
 
 // TestConn_AckDefer_TimerFallback proves the deferred ACK still fires within
@@ -285,7 +260,6 @@ func TestConn_AckDefer_TimerFallback(t *testing.T) {
 	clk := base
 	pc := &expiryPC{}
 	c, opener := ackDeferConn(t, pc, dcid, func() time.Time { return clk })
-
 	// Seed a deferred ACK for a lone in-order ack-eliciting packet with nothing in
 	// flight, so the loss/idle deadline is the far give-up bound and the ACK deadline
 	// is the binding constraint on the read.
@@ -296,35 +270,27 @@ func TestConn_AckDefer_TimerFallback(t *testing.T) {
 
 	// Before the deadline: an early wake must send nothing and must not probe.
 	clk = base.Add(10 * time.Millisecond)
-	if err := c.handleExpiry(clk, timeoutError{}); err != nil {
-		t.Fatalf("handleExpiry (pre-deadline) = %v, want nil", err)
-	}
-	if len(pc.writes) != 0 {
-		t.Fatalf("wrote %d datagrams before max_ack_delay, want 0", len(pc.writes))
-	}
-	if c.ptoCount != 0 {
-		t.Fatalf("ptoCount = %d, want 0 — an ACK-only wake must not provoke a PTO probe", c.ptoCount)
-	}
+	errEarly := c.handleExpiry(clk, timeoutError{})
+
+	require.NoErrorf(t, errEarly, "handleExpiry (pre-deadline) = %v, want nil", errEarly)
+	require.Emptyf(t, pc.writes, "wrote %d datagrams before max_ack_delay, want 0", len(pc.writes))
+	require.Zerof(t, c.ptoCount,
+		"ptoCount = %d, want 0 — an ACK-only wake must not provoke a PTO probe", c.ptoCount)
 
 	// At the deadline: the owed ACK must go out.
 	clk = base.Add(defaultMaxAckDelay)
-	if err := c.handleExpiry(clk, timeoutError{}); err != nil {
-		t.Fatalf("handleExpiry (at deadline) = %v, want nil (the ACK fires, connection stays up)", err)
-	}
-	if len(pc.writes) != 1 {
-		t.Fatalf("wrote %d datagrams at max_ack_delay, want 1 ACK", len(pc.writes))
-	}
+	errDue := c.handleExpiry(clk, timeoutError{})
+
+	require.NoErrorf(t, errDue,
+		"handleExpiry (at deadline) = %v, want nil (the ACK fires, connection stays up)", errDue)
+	require.Lenf(t, pc.writes, 1, "wrote %d datagrams at max_ack_delay, want 1 ACK", len(pc.writes))
 	spy := &frameSpy{}
 	decodeClientApp(t, opener, dcid, pc.writes[0], spy)
-	if !spy.sawAck {
-		t.Fatal("the timer-fired datagram must carry an ACK frame")
-	}
-	if c.acks[spaceApp].pending || !c.ackDeadline.IsZero() {
-		t.Fatalf("firing the ACK must clear the owed state: pending=%v deadline=%v", c.acks[spaceApp].pending, c.ackDeadline)
-	}
-	if c.ptoCount != 0 {
-		t.Fatalf("ptoCount = %d, want 0 after the ACK fired", c.ptoCount)
-	}
+	assert.True(t, spy.sawAck, "the timer-fired datagram must carry an ACK frame")
+	assert.Falsef(t, c.acks[spaceApp].pending || !c.ackDeadline.IsZero(),
+		"firing the ACK must clear the owed state: pending=%v deadline=%v",
+		c.acks[spaceApp].pending, c.ackDeadline)
+	assert.Zerof(t, c.ptoCount, "ptoCount = %d, want 0 after the ACK fired", c.ptoCount)
 }
 
 // TestConn_AckDefer_NotDeferredWithoutTimer checks the safety fallback: on a
@@ -348,17 +314,15 @@ func TestConn_AckDefer_NotDeferredWithoutTimer(t *testing.T) {
 		peer:        TransportParams{InitialMaxStreamsBidi: 1},
 	}
 	c.keys.OneRTT = opener
-	if _, err := c.OpenStream(); err != nil {
-		t.Fatal(err)
-	}
+	_, err := c.OpenStream()
+	require.NoError(t, err)
 
-	if err := c.Poll(context.Background()); err != nil {
-		t.Fatalf("Poll: %v", err)
-	}
-	if len(pc.written) != 1 {
-		t.Fatalf("wrote %d datagrams, want 1 — without a timer the ACK must be immediate, never deferred", len(pc.written))
-	}
-	if !c.ackDeadline.IsZero() {
-		t.Fatalf("no deferral must be armed on a deadline-less transport, got %v", c.ackDeadline)
-	}
+	err = c.Poll(context.Background())
+
+	require.NoError(t, err, "Poll")
+	require.Lenf(t, pc.written, 1,
+		"wrote %d datagrams, want 1 — without a timer the ACK must be immediate, never deferred",
+		len(pc.written))
+	assert.Truef(t, c.ackDeadline.IsZero(),
+		"no deferral must be armed on a deadline-less transport, got %v", c.ackDeadline)
 }

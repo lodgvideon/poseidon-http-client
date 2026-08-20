@@ -8,6 +8,8 @@ import (
 	"net/http"
 	"testing"
 	"time"
+
+	"github.com/stretchr/testify/require"
 )
 
 // nonRepeatingPattern returns n bytes where every position carries a distinct
@@ -73,9 +75,7 @@ func poolTestClient(t *testing.T, addr string) *Client {
 		Pool:      &PoolOptions{MaxConnsPerHost: 2, MaxStreamsPerConn: 10},
 		ConnOpts:  co,
 	})
-	if err != nil {
-		t.Fatalf("NewClient: %v", err)
-	}
+	require.NoError(t, err, "NewClient")
 	return c
 }
 
@@ -84,6 +84,7 @@ func assertPattern(t *testing.T, got, want []byte) {
 	if bytes.Equal(got, want) {
 		return
 	}
+
 	mismatch := -1
 	for i := 0; i < len(got) && i < len(want); i++ {
 		if got[i] != want[i] {
@@ -91,7 +92,9 @@ func assertPattern(t *testing.T, got, want []byte) {
 			break
 		}
 	}
-	t.Fatalf("streamed body corrupted: got %d bytes, want %d, first mismatch at index %d", len(got), len(want), mismatch)
+
+	require.Failf(t, "streamed body corrupted",
+		"got %d bytes, want %d, first mismatch at index %d", len(got), len(want), mismatch)
 }
 
 // TestBodyStream_MultiFrame_NoCorruption guards the responseBodyReader
@@ -109,9 +112,8 @@ func TestBodyStream_MultiFrame_NoCorruption(t *testing.T) {
 	defer cancel()
 
 	var resp Response
-	if err := c.Do(ctx, &Request{Method: "GET", Path: "/", BodyMode: BodyStream}, &resp); err != nil {
-		t.Fatalf("Do: %v", err)
-	}
+	err := c.Do(ctx, &Request{Method: "GET", Path: "/", BodyMode: BodyStream}, &resp)
+	require.NoError(t, err, "Do")
 	defer resp.BodyReader.Close()
 
 	got := make([]byte, 0, poolTotal)
@@ -122,10 +124,9 @@ func TestBodyStream_MultiFrame_NoCorruption(t *testing.T) {
 		if rerr == io.EOF {
 			break
 		}
-		if rerr != nil {
-			t.Fatalf("Read: %v", rerr)
-		}
+		require.NoError(t, rerr, "Read")
 	}
+
 	assertPattern(t, got, pattern)
 }
 
@@ -146,23 +147,21 @@ func TestStreamResponse_MultiFrame_NoCorruption(t *testing.T) {
 	defer cancel()
 
 	var sr StreamResponse
-	if err := c.DoStream(ctx, &Request{Method: "GET", Path: "/"}, &sr); err != nil {
-		t.Fatalf("DoStream: %v", err)
-	}
+	err := c.DoStream(ctx, &Request{Method: "GET", Path: "/"}, &sr)
+	require.NoError(t, err, "DoStream")
 	defer sr.Close()
 
 	got := make([]byte, 0, poolTotal)
 	for {
-		ev, err := sr.Recv(ctx)
-		if errors.Is(err, ErrStreamEnded) {
+		ev, rerr := sr.Recv(ctx)
+		if errors.Is(rerr, ErrStreamEnded) {
 			break
 		}
-		if err != nil {
-			t.Fatalf("Recv: %v", err)
-		}
+		require.NoError(t, rerr, "Recv")
 		if ev.Type == EventData {
 			got = append(got, ev.Data...) // copy out before the next Recv recycles curData
 		}
 	}
+
 	assertPattern(t, got, pattern)
 }

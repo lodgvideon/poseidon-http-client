@@ -7,6 +7,8 @@ import (
 	"context"
 	"testing"
 
+	"github.com/stretchr/testify/assert"
+
 	"github.com/lodgvideon/poseidon-http-client/frame"
 )
 
@@ -50,15 +52,17 @@ func TestWriteData_DoesNotAllocate(t *testing.T) {
 	payload := make([]byte, 4096)
 	gen := s.gen.Load()
 
+	// Plain t.Fatalf inside the closure, never require: testify reflects and
+	// allocates, and AllocsPerRun counts the whole process. The count assertion
+	// below is outside the measured body.
 	n := testing.AllocsPerRun(200, func() {
 		if err := c.writeData(ctx, s, gen, payload, false); err != nil {
 			t.Fatalf("writeData: %v", err)
 		}
 	})
-	if n != 0 {
-		t.Errorf("writeData allocates %.1f per call, want 0 — a one-element vector built "+
-			"per call would do exactly this", n)
-	}
+
+	assert.Zerof(t, n, "writeData allocates %.1f per call, want 0 — a one-element vector built "+
+		"per call would do exactly this", n)
 }
 
 // TestWriteDataV_DoesNotAllocate pins the same for the vectored entry point,
@@ -76,7 +80,6 @@ func TestWriteDataV_DoesNotAllocate(t *testing.T) {
 			t.Fatalf("writeDataV: %v", err)
 		}
 	})
-	if n != 0 {
-		t.Errorf("writeDataV allocates %.1f per call, want 0", n)
-	}
+
+	assert.Zerof(t, n, "writeDataV allocates %.1f per call, want 0", n)
 }

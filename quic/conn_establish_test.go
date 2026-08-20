@@ -6,6 +6,9 @@ import (
 	"errors"
 	"testing"
 	"time"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 var errPipeTimeout = errors.New("pipe read timeout")
@@ -75,9 +78,7 @@ func sealServerPacket(t *testing.T, s *Sealer, typ PacketType, dcid, scid []byte
 		hdr = append(hdr, byte(pn>>(8*uint(i))))
 	}
 	pkt, err := s.Seal(nil, hdr, pnOff, pnLen, pn, frames)
-	if err != nil {
-		t.Fatalf("sealServerPacket: %v", err)
-	}
+	require.NoErrorf(t, err, "sealServerPacket: %v", err)
 	return pkt
 }
 
@@ -88,14 +89,12 @@ func runServerHandshake(t *testing.T, pc PacketConn, cert tls.Certificate, tp, s
 	defer close(done)
 	buf := make([]byte, 2048)
 	n, err := pc.Read(buf)
-	if err != nil {
-		t.Errorf("server read: %v", err)
+	if !assert.NoError(t, err, "server read") {
 		return
 	}
 	dg := buf[:n]
 	hdr, err := ParseHeader(dg, 0)
-	if err != nil {
-		t.Errorf("server ParseHeader: %v", err)
+	if !assert.NoError(t, err, "server ParseHeader") {
 		return
 	}
 	clientDCID := append([]byte(nil), hdr.DCID...)
@@ -104,44 +103,38 @@ func runServerHandshake(t *testing.T, pc PacketConn, cert tls.Certificate, tp, s
 	serverInitial, _ := NewSealer(serverKeys)
 
 	_, _, payload, err := clientOpener.Open(dg, hdr.PNOffset, 0)
-	if err != nil {
-		t.Errorf("server open client Initial: %v", err)
+	if !assert.NoError(t, err, "server open client Initial") {
 		return
 	}
 	var ch cryptoFrameSink
-	if err := ParseFrames(payload, &ch); err != nil {
-		t.Errorf("server parse client frames: %v", err)
+	if !assert.NoError(t, ParseFrames(payload, &ch), "server parse client frames") {
 		return
 	}
 
 	shs := NewServerHandshake(&tls.Config{Certificates: []tls.Certificate{cert}}, tp)
 	ss := &serverSink{}
-	if err := shs.Start(context.Background()); err != nil {
-		t.Errorf("server Start: %v", err)
+	if !assert.NoError(t, shs.Start(context.Background()), "server Start") {
 		return
 	}
 	_ = shs.Pump(ss)
-	if err := shs.HandleCrypto(tls.QUICEncryptionLevelInitial, ch.data); err != nil {
-		t.Errorf("server HandleCrypto: %v", err)
+	if !assert.NoError(t, shs.HandleCrypto(tls.QUICEncryptionLevelInitial, ch.data), "server HandleCrypto") {
 		return
 	}
-	if err := shs.Pump(ss); err != nil {
-		t.Errorf("server Pump: %v", err)
+	if !assert.NoError(t, shs.Pump(ss), "server Pump") {
 		return
 	}
 
 	if len(ss.crypto[spaceInitial]) > 0 {
 		f := AppendCrypto(nil, 0, ss.crypto[spaceInitial])
-		if _, err := pc.Write(sealServerPacket(t, serverInitial, PacketInitial, nil, scid, 0, f)); err != nil {
-			t.Errorf("server write Initial: %v", err)
+		_, err := pc.Write(sealServerPacket(t, serverInitial, PacketInitial, nil, scid, 0, f))
+		if !assert.NoError(t, err, "server write Initial") {
 			return
 		}
 	}
 	if ss.handshakeSealer != nil && len(ss.crypto[spaceHandshake]) > 0 {
 		f := AppendCrypto(nil, 0, ss.crypto[spaceHandshake])
-		if _, err := pc.Write(sealServerPacket(t, ss.handshakeSealer, PacketHandshake, nil, scid, 0, f)); err != nil {
-			t.Errorf("server write Handshake: %v", err)
-		}
+		_, err := pc.Write(sealServerPacket(t, ss.handshakeSealer, PacketHandshake, nil, scid, 0, f))
+		assert.NoError(t, err, "server write Handshake")
 	}
 }
 
@@ -161,34 +154,25 @@ func TestConn_Establish_InMemory(t *testing.T) {
 	// initial_source_connection_id against it (RFC 9000 §7.3), so the server's
 	// transport parameters must carry the same value.
 	serverSCID := []byte{0xab, 0xcd, 0xef}
-
 	toServer := make(chan []byte, 16)
 	fromServer := make(chan []byte, 16)
 	clientPC := &chanPC{rx: fromServer, tx: toServer}
 	serverPC := &chanPC{rx: toServer, tx: fromServer}
-
 	client, err := NewConn(clientPC, &tls.Config{ServerName: "example.com", RootCAs: pool}, clientTP)
-	if err != nil {
-		t.Fatal(err)
-	}
-
+	require.NoError(t, err)
 	// The server echoes the client's first-Initial Destination Connection ID in
 	// original_destination_connection_id, which the client authenticates (§7.3).
 	serverTP := concat(clientTP,
 		tpBytes(tpInitialSourceConnectionID, serverSCID),
 		tpBytes(tpOriginalDestinationConnectionID, client.origDCID))
-
 	done := make(chan struct{})
 	go runServerHandshake(t, serverPC, cert, serverTP, serverSCID, done)
 
-	if err := client.Establish(context.Background()); err != nil {
-		t.Fatalf("client Establish: %v", err)
-	}
-	if !client.handshakeComplete {
-		t.Fatal("client handshake did not complete")
-	}
-	if client.keys.Handshake == nil || client.handshakeSealer == nil {
-		t.Fatal("client did not install Handshake keys")
-	}
+	err = client.Establish(context.Background())
+
+	require.NoErrorf(t, err, "client Establish: %v", err)
+	assert.True(t, client.handshakeComplete, "client handshake did not complete")
+	assert.Truef(t, client.keys.Handshake != nil, "client did not install Handshake keys")
+	assert.Truef(t, client.handshakeSealer != nil, "client did not install Handshake keys")
 	<-done
 }

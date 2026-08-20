@@ -6,6 +6,9 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // The PR 2c mandatory tests (docs/HTTP3_DESIGN.md §5): flushControl grants receive
@@ -22,13 +25,9 @@ func TestMux2c_FlushControlGrantsCreditOnRecv(t *testing.T) {
 	dcid := []byte("inv3test")
 	keys, _ := InitialKeys(dcid)
 	sealer, err := NewSealer(keys)
-	if err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, err, "NewSealer for the client's 1-RTT keys")
 	opener, err := NewOpener(keys)
-	if err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, err, "NewOpener to decrypt what the client writes")
 	pc := &capturePC{}
 	c := &Conn{
 		pc: pc, dcid: dcid, oneRTTSealer: sealer,
@@ -37,43 +36,30 @@ func TestMux2c_FlushControlGrantsCreditOnRecv(t *testing.T) {
 	}
 	c.keys.OneRTT = opener
 	s, err := c.OpenStream()
-	if err != nil {
-		t.Fatal(err)
-	}
-
+	require.NoError(t, err, "OpenStream for the stream the peer fills")
 	// Deliver just over half a per-stream window so consuming it crosses the grant
 	// threshold and queues a MAX_STREAM_DATA.
 	h := &connFrameHandler{c: c}
 	n := int(DefaultStreamRecvWindow/2) + 1
-	if err := h.OnStream(s.ID(), 0, false, make([]byte, n)); err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, h.OnStream(s.ID(), 0, false, make([]byte, n)), "deliver half a window")
 	before := len(pc.pkts)
-	if got := len(s.Recv()); got != n {
-		t.Fatalf("Recv = %d bytes, want %d", got, n)
-	}
-	if len(pc.pkts) == before {
-		t.Fatal("Recv must emit the MAX_STREAM_DATA grant immediately via flushControl (INV-3)")
-	}
 
+	got := len(s.Recv())
+
+	assert.Equalf(t, n, got, "Recv = %d bytes, want %d", got, n)
+	require.Greater(t, len(pc.pkts), before,
+		"Recv must emit the MAX_STREAM_DATA grant immediately via flushControl (INV-3)")
 	// The emitted datagram carries a MAX_STREAM_DATA raising this stream's limit.
 	col := &ctrlCollector{}
 	for _, pkt := range pc.pkts[before:] {
 		hdr, herr := ParseHeader(pkt, len(c.dcid)) // our sent short header carries our DCID
-		if herr != nil {
-			t.Fatalf("ParseHeader: %v", herr)
-		}
+		require.NoError(t, herr, "ParseHeader on the flushed datagram")
 		_, _, payload, oerr := opener.Open(pkt, hdr.PNOffset, 0)
-		if oerr != nil {
-			t.Fatalf("Open: %v", oerr)
-		}
-		if perr := ParseFrames(payload, col); perr != nil {
-			t.Fatalf("ParseFrames: %v", perr)
-		}
+		require.NoError(t, oerr, "Open the flushed datagram")
+		require.NoError(t, ParseFrames(payload, col), "ParseFrames on the flushed payload")
 	}
-	if col.streamData[s.ID()] == 0 {
-		t.Fatalf("flushed datagram carried no MAX_STREAM_DATA for stream %d", s.ID())
-	}
+	assert.NotZerof(t, col.streamData[s.ID()],
+		"flushed datagram carried no MAX_STREAM_DATA for stream %d", s.ID())
 }
 
 // TestMux2c_FlushControlPathResponsePadded proves BREAK3: a PATH_RESPONSE flushed
@@ -83,29 +69,21 @@ func TestMux2c_FlushControlPathResponsePadded(t *testing.T) {
 	dcid := []byte("pathtest")
 	keys, _ := InitialKeys(dcid)
 	sealer, err := NewSealer(keys)
-	if err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, err, "NewSealer for the client's 1-RTT keys")
 	pc := &capturePC{}
 	c := &Conn{pc: pc, dcid: dcid, oneRTTSealer: sealer}
-
 	h := &connFrameHandler{c: c}
 	var challenge [8]byte
-	if err := h.OnPathChallenge(&challenge); err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, h.OnPathChallenge(&challenge), "OnPathChallenge queues the response")
+
 	c.mu.Lock()
 	err = c.flushControl()
 	c.mu.Unlock()
-	if err != nil {
-		t.Fatalf("flushControl: %v", err)
-	}
-	if len(pc.pkts) != 1 {
-		t.Fatalf("flushControl wrote %d datagrams, want 1", len(pc.pkts))
-	}
-	if got := len(pc.pkts[0]); got < 1200 {
-		t.Fatalf("PATH_RESPONSE datagram = %d bytes, want >= 1200 (RFC 9000 §8.2.2)", got)
-	}
+
+	require.NoError(t, err, "flushControl")
+	require.Lenf(t, pc.pkts, 1, "flushControl wrote %d datagrams, want 1", len(pc.pkts))
+	assert.GreaterOrEqualf(t, len(pc.pkts[0]), 1200,
+		"PATH_RESPONSE datagram = %d bytes, want >= 1200 (RFC 9000 §8.2.2)", len(pc.pkts[0]))
 }
 
 // TestMux2c_LargeBodyCompletesViaCwndWake proves INV-5 end to end: a body larger
@@ -117,13 +95,9 @@ func TestMux2c_LargeBodyCompletesViaCwndWake(t *testing.T) {
 	dcid := []byte("cwndtest")
 	keys, _ := InitialKeys(dcid)
 	clientSealer, err := NewSealer(keys)
-	if err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, err, "NewSealer for the client's 1-RTT keys")
 	clientOpener, err := NewOpener(keys)
-	if err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, err, "NewOpener for the client's 1-RTT receive keys")
 
 	peer := newAckPeer(t, keys, dcid)
 	defer peer.close()
@@ -147,9 +121,7 @@ func TestMux2c_LargeBodyCompletesViaCwndWake(t *testing.T) {
 	c.keys.OneRTT = clientOpener
 
 	s, err := c.OpenStream()
-	if err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, err, "OpenStream for the 16 KiB body")
 
 	connCtx, connCancel := context.WithCancel(context.Background())
 	readerDone := make(chan struct{})
@@ -172,25 +144,21 @@ func TestMux2c_LargeBodyCompletesViaCwndWake(t *testing.T) {
 	sent := 0
 	for {
 		n, serr := s.Send(body[sent:], true)
-		if serr != nil {
-			t.Fatalf("Send at %d/%d: %v", sent, len(body), serr)
-		}
+		require.NoErrorf(t, serr, "Send at %d/%d", sent, len(body))
 		sent += n
 		if sent >= len(body) {
 			break
 		}
 		if n == 0 {
-			if werr := s.WaitSendable(sendCtx); werr != nil {
-				t.Fatalf("body stalled at %d/%d bytes: %v (the cwnd broadcast did not wake the sender)", sent, len(body), werr)
-			}
+			werr := s.WaitSendable(sendCtx)
+			require.NoErrorf(t, werr,
+				"body stalled at %d/%d bytes (the cwnd broadcast did not wake the sender)",
+				sent, len(body))
 		}
 	}
-	if sent != len(body) {
-		t.Fatalf("sent %d bytes, want %d", sent, len(body))
-	}
-	if !s.finSent {
-		t.Fatal("FIN not sent after the whole body")
-	}
+
+	assert.Equalf(t, len(body), sent, "sent %d bytes, want %d", sent, len(body))
+	assert.True(t, s.finSent, "FIN not sent after the whole body")
 
 	connCancel()
 	peer.close()
@@ -221,13 +189,9 @@ type ackPeer struct {
 func newAckPeer(t *testing.T, keys PacketKeys, dcid []byte) *ackPeer {
 	t.Helper()
 	sealer, err := NewSealer(keys)
-	if err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, err, "NewSealer for the in-memory ACK peer")
 	opener, err := NewOpener(keys)
-	if err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, err, "NewOpener for the in-memory ACK peer")
 	p := &ackPeer{
 		sealer:  sealer,
 		opener:  opener,

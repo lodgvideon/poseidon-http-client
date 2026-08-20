@@ -4,6 +4,9 @@ import (
 	"errors"
 	"fmt"
 	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // recHandler records each parsed frame as a formatted string for assertion.
@@ -58,21 +61,15 @@ func (r *recHandler) OnHandshakeDone() error { return r.add("handshakedone") }
 func parse(t *testing.T, payload []byte) []string {
 	t.Helper()
 	var r recHandler
-	if err := ParseFrames(payload, &r); err != nil {
-		t.Fatalf("ParseFrames(%x): %v", payload, err)
-	}
+	require.NoErrorf(t, ParseFrames(payload, &r), "ParseFrames(%x)", payload)
 	return r.log
 }
 
 func eq(t *testing.T, got, want []string) {
 	t.Helper()
-	if len(got) != len(want) {
-		t.Fatalf("got %d frames %v, want %d %v", len(got), got, len(want), want)
-	}
+	require.Lenf(t, got, len(want), "got %d frames %v, want %d %v", len(got), got, len(want), want)
 	for i := range want {
-		if got[i] != want[i] {
-			t.Errorf("frame %d = %q, want %q", i, got[i], want[i])
-		}
+		assert.Equalf(t, want[i], got[i], "frame %d = %q, want %q", i, got[i], want[i])
 	}
 }
 
@@ -124,7 +121,10 @@ func TestFrames_RoundTrip(t *testing.T) {
 		"handshakedone",
 		"padding 4",
 	}
-	eq(t, parse(t, b), want)
+
+	got := parse(t, b)
+
+	eq(t, got, want)
 }
 
 // TestConformance_RFC9000_Sec19_StreamFrame decodes a hand-built STREAM frame
@@ -132,7 +132,10 @@ func TestFrames_RoundTrip(t *testing.T) {
 func TestConformance_RFC9000_Sec19_StreamFrame(t *testing.T) {
 	// 0x0e | id=4 | offset=64 (0x4040) | len=3 | "abc"
 	in := []byte{0x0e, 0x04, 0x40, 0x40, 0x03, 'a', 'b', 'c'}
-	eq(t, parse(t, in), []string{"stream id=4 off=64 fin=false data=616263"})
+
+	got := parse(t, in)
+
+	eq(t, got, []string{"stream id=4 off=64 fin=false data=616263"})
 }
 
 // TestConformance_RFC9000_Sec193_AckFrame decodes a hand-built ACK frame with
@@ -140,7 +143,10 @@ func TestConformance_RFC9000_Sec19_StreamFrame(t *testing.T) {
 func TestConformance_RFC9000_Sec193_AckFrame(t *testing.T) {
 	// 0x02 | largest=10 | delay=0 | rangeCount=1 | firstRange=2 | gap=1 | len=3
 	in := []byte{0x02, 0x0a, 0x00, 0x01, 0x02, 0x01, 0x03}
-	eq(t, parse(t, in), []string{"ack largest=10 delay=0 first=2", "ackrange gap=1 len=3"})
+
+	got := parse(t, in)
+
+	eq(t, got, []string{"ack largest=10 delay=0 first=2", "ackrange gap=1 len=3"})
 }
 
 // TestConformance_RFC9000_Sec193_AckECN decodes the ECN variant (0x03) with its
@@ -148,16 +154,22 @@ func TestConformance_RFC9000_Sec193_AckFrame(t *testing.T) {
 func TestConformance_RFC9000_Sec193_AckECN(t *testing.T) {
 	// 0x03 | largest=5 | delay=0 | rangeCount=0 | firstRange=5 | ect0=1 ect1=2 ce=3
 	in := []byte{0x03, 0x05, 0x00, 0x00, 0x05, 0x01, 0x02, 0x03}
-	eq(t, parse(t, in), []string{"ack largest=5 delay=0 first=5", "ackecn 1 2 3"})
+
+	got := parse(t, in)
+
+	eq(t, got, []string{"ack largest=5 delay=0 first=5", "ackecn 1 2 3"})
 }
 
 // TestConformance_RFC9000_Sec1919_ConnectionClose decodes both the transport
 // (0x1c, with a Frame Type field) and application (0x1d, without) variants.
 func TestConformance_RFC9000_Sec1919_ConnectionClose(t *testing.T) {
 	transport := []byte{0x1c, 0x07, 0x08, 0x02, 'h', 'i'} // err=7 frametype=8 reason="hi"
-	eq(t, parse(t, transport), []string{"close app=false err=7 frametype=8 reason=hi"})
-	app := []byte{0x1d, 0x41, 0x00, 0x00} // err=0x100 (varint 0x4100), no reason
-	eq(t, parse(t, app), []string{"close app=true err=256 frametype=0 reason="})
+	app := []byte{0x1d, 0x41, 0x00, 0x00}                 // err=0x100 (varint 0x4100), no reason
+
+	gotTransport, gotApp := parse(t, transport), parse(t, app)
+
+	eq(t, gotTransport, []string{"close app=false err=7 frametype=8 reason=hi"})
+	eq(t, gotApp, []string{"close app=true err=256 frametype=0 reason="})
 }
 
 // TestConformance_RFC9000_Sec1915_NewConnectionID decodes a NEW_CONNECTION_ID
@@ -168,13 +180,20 @@ func TestConformance_RFC9000_Sec1915_NewConnectionID(t *testing.T) {
 	for i := 0; i < 16; i++ {
 		in = append(in, 0xab) // reset token
 	}
-	eq(t, parse(t, in), []string{"newcid seq=1 retire=0 cid=1122334455667788 token=abababababababababababababababab"})
+
+	got := parse(t, in)
+
+	eq(t, got, []string{"newcid seq=1 retire=0 cid=1122334455667788 token=abababababababababababababababab"})
 }
 
 // TestConformance_RFC9000_Sec191_Padding coalesces a run of zero bytes into one
 // PADDING report, then continues parsing (§19.1).
 func TestConformance_RFC9000_Sec191_Padding(t *testing.T) {
-	eq(t, parse(t, []byte{0x00, 0x00, 0x00, 0x01}), []string{"padding 3", "ping"})
+	in := []byte{0x00, 0x00, 0x00, 0x01}
+
+	got := parse(t, in)
+
+	eq(t, got, []string{"padding 3", "ping"})
 }
 
 func TestParseFrames_Malformed(t *testing.T) {
@@ -188,9 +207,10 @@ func TestParseFrames_Malformed(t *testing.T) {
 	}
 	for name, in := range cases {
 		t.Run(name, func(t *testing.T) {
-			if err := ParseFrames(in, nopFrameHandler{}); !errors.Is(err, ErrFrameEncoding) {
-				t.Fatalf("ParseFrames(%x) = %v, want ErrFrameEncoding", in, err)
-			}
+			err := ParseFrames(in, nopFrameHandler{})
+
+			assert.Truef(t, errors.Is(err, ErrFrameEncoding),
+				"ParseFrames(%x) = %v, want ErrFrameEncoding", in, err)
 		})
 	}
 }
@@ -198,9 +218,10 @@ func TestParseFrames_Malformed(t *testing.T) {
 func TestParseFrames_HandlerError(t *testing.T) {
 	boom := errors.New("boom")
 	h := errHandler{err: boom}
-	if err := ParseFrames([]byte{0x01}, h); !errors.Is(err, boom) {
-		t.Fatalf("err = %v, want boom", err)
-	}
+
+	err := ParseFrames([]byte{0x01}, h)
+
+	assert.Truef(t, errors.Is(err, boom), "err = %v, want boom", err)
 }
 
 type errHandler struct {
@@ -213,15 +234,22 @@ func (h errHandler) OnPing() error { return h.err }
 // TestParseStream_NoLength covers a STREAM frame without the LEN bit (data runs
 // to the end of the packet) and the OFF+FIN combination.
 func TestParseStream_NoLength(t *testing.T) {
-	// 0x08 = no OFF/LEN/FIN: id=4, data "hi" to end.
-	eq(t, parse(t, []byte{0x08, 0x04, 'h', 'i'}), []string{"stream id=4 off=0 fin=false data=6869"})
-	// 0x0d = OFF+FIN (no LEN): id=4, off=1, data "x" to end.
-	eq(t, parse(t, []byte{0x0d, 0x04, 0x01, 'x'}), []string{"stream id=4 off=1 fin=true data=78"})
+	noFlags := []byte{0x08, 0x04, 'h', 'i'} // no OFF/LEN/FIN: id=4, data "hi" to end
+	offFin := []byte{0x0d, 0x04, 0x01, 'x'} // OFF+FIN (no LEN): id=4, off=1, data "x" to end
+
+	gotNoFlags, gotOffFin := parse(t, noFlags), parse(t, offFin)
+
+	eq(t, gotNoFlags, []string{"stream id=4 off=0 fin=false data=6869"})
+	eq(t, gotOffFin, []string{"stream id=4 off=1 fin=true data=78"})
 }
 
 // TestConformance_RFC9000_Sec1917_PathChallenge decodes PATH_CHALLENGE (§19.17).
 func TestConformance_RFC9000_Sec1917_PathChallenge(t *testing.T) {
-	eq(t, parse(t, []byte{0x1a, 1, 2, 3, 4, 5, 6, 7, 8}), []string{"pathchallenge 0102030405060708"})
+	in := []byte{0x1a, 1, 2, 3, 4, 5, 6, 7, 8}
+
+	got := parse(t, in)
+
+	eq(t, got, []string{"pathchallenge 0102030405060708"})
 }
 
 func TestParseFrames_MoreMalformed(t *testing.T) {
@@ -246,9 +274,10 @@ func TestParseFrames_MoreMalformed(t *testing.T) {
 	}
 	for name, in := range cases {
 		t.Run(name, func(t *testing.T) {
-			if err := ParseFrames(in, nopFrameHandler{}); !errors.Is(err, ErrFrameEncoding) {
-				t.Fatalf("ParseFrames(%x) = %v, want ErrFrameEncoding", in, err)
-			}
+			err := ParseFrames(in, nopFrameHandler{})
+
+			assert.Truef(t, errors.Is(err, ErrFrameEncoding),
+				"ParseFrames(%x) = %v, want ErrFrameEncoding", in, err)
 		})
 	}
 }

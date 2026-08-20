@@ -4,21 +4,24 @@ import (
 	"context"
 	"testing"
 	"time"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestConn_PTOPeriod(t *testing.T) {
 	c := &Conn{}
-	if got := c.ptoPeriod(); got != 2*kInitialRtt {
-		t.Fatalf("pre-sample ptoPeriod = %v, want %v", got, 2*kInitialRtt)
-	}
+
+	preSample := c.ptoPeriod()
 	c.rtt.update(40*ms, 0) // smoothed=40ms, rttvar=20ms -> base = 40 + max(80,1) = 120ms
-	if got := c.ptoPeriod(); got != 120*ms {
-		t.Fatalf("ptoPeriod = %v, want 120ms", got)
-	}
+	sampled := c.ptoPeriod()
 	c.ptoCount = 2
-	if got, want := c.ptoPeriod(), 120*ms<<2; got != want {
-		t.Fatalf("backoff ptoPeriod = %v, want %v", got, want)
-	}
+	backedOff := c.ptoPeriod()
+
+	require.Equalf(t, 2*kInitialRtt, preSample,
+		"pre-sample ptoPeriod = %v, want %v", preSample, 2*kInitialRtt)
+	require.Equalf(t, 120*ms, sampled, "ptoPeriod = %v, want 120ms", sampled)
+	require.Equalf(t, 120*ms<<2, backedOff, "backoff ptoPeriod = %v, want %v", backedOff, 120*ms<<2)
 }
 
 // TestConn_OnPTO_QueuesProbe checks a probe timeout re-queues the oldest
@@ -33,18 +36,15 @@ func TestConn_OnPTO_QueuesProbe(t *testing.T) {
 
 	c.onPTO()
 
-	if c.ptoCount != 1 {
-		t.Fatalf("ptoCount = %d, want 1", c.ptoCount)
-	}
-	if len(c.retransQueue[spaceApp]) != 1 || string(c.retransQueue[spaceApp][0].data) != "oldest" {
-		t.Fatalf("probe queue = %+v, want the oldest packet's frame", c.retransQueue[spaceApp])
-	}
-	if _, ok := c.sent[spaceApp].packets[0]; ok {
-		t.Fatal("the probed (oldest) packet should be removed from flight")
-	}
-	if _, ok := c.sent[spaceApp].packets[1]; !ok {
-		t.Fatal("the newer packet should remain in flight")
-	}
+	require.Equalf(t, uint(1), c.ptoCount, "ptoCount = %d, want 1", c.ptoCount)
+	require.Lenf(t, c.retransQueue[spaceApp], 1,
+		"probe queue = %+v, want the oldest packet's frame", c.retransQueue[spaceApp])
+	require.Equalf(t, "oldest", string(c.retransQueue[spaceApp][0].data),
+		"probe queue = %+v, want the oldest packet's frame", c.retransQueue[spaceApp])
+	_, oldestStillInFlight := c.sent[spaceApp].packets[0]
+	assert.False(t, oldestStillInFlight, "the probed (oldest) packet should be removed from flight")
+	assert.Contains(t, c.sent[spaceApp].packets, uint64(1),
+		"the newer packet should remain in flight")
 }
 
 func TestConn_PTOCount_ResetOnAck(t *testing.T) {
@@ -52,10 +52,10 @@ func TestConn_PTOCount_ResetOnAck(t *testing.T) {
 	c := &Conn{now: func() time.Time { return base }}
 	c.ptoCount = 3
 	c.sent[spaceApp].onSent(5, base, true, nil)
+
 	c.onAckRange(spaceApp, 5, 5, 0, 0) // acknowledges an ack-eliciting packet
-	if c.ptoCount != 0 {
-		t.Fatalf("ptoCount = %d, want 0 after acknowledgement", c.ptoCount)
-	}
+
+	require.Zerof(t, c.ptoCount, "ptoCount = %d, want 0 after acknowledgement", c.ptoCount)
 }
 
 // TestConformance_RFC9002_Sec622_PTOCountResetOnKeyDiscard checks that discarding
@@ -63,10 +63,10 @@ func TestConn_PTOCount_ResetOnAck(t *testing.T) {
 // since the discard is forward progress (RFC 9002 §6.2.2, App. A.4).
 func TestConformance_RFC9002_Sec622_PTOCountResetOnKeyDiscard(t *testing.T) {
 	c := &Conn{ptoCount: 3}
+
 	c.discardSpace(spaceHandshake)
-	if c.ptoCount != 0 {
-		t.Fatalf("ptoCount = %d after discarding Handshake keys, want 0", c.ptoCount)
-	}
+
+	require.Zerof(t, c.ptoCount, "ptoCount = %d after discarding Handshake keys, want 0", c.ptoCount)
 }
 
 // deadlinePC times out on the first read (a simulated PTO expiry) then returns a
@@ -101,28 +101,17 @@ func TestConn_ReadWithPTO_ProbesOnTimeout(t *testing.T) {
 	base := time.Unix(3, 0)
 	ck, _ := InitialKeys([]byte("ptotest0"))
 	sealer, err := NewSealer(ck)
-	if err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, err, "build the 1-RTT sealer the probe is written with")
 	pc := &deadlinePC{datagram: []byte("later")}
 	c := &Conn{pc: pc, dcid: []byte("ptotest0"), oneRTTSealer: sealer, now: func() time.Time { return base }, handshakeConfirmed: true}
 	c.sent[spaceApp].onSent(0, base, true, streamFrame(0, 0, "req")) // in flight, probeable
 
 	buf := make([]byte, 64)
 	n, err := c.readWithPTO(context.Background(), buf)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if string(buf[:n]) != "later" {
-		t.Fatalf("read %q, want later", buf[:n])
-	}
-	if !pc.deadlineSet {
-		t.Fatal("a read deadline should have been set")
-	}
-	if pc.writes == 0 {
-		t.Fatal("a probe should have been written on the PTO timeout")
-	}
-	if c.ptoCount != 1 {
-		t.Fatalf("ptoCount = %d, want 1", c.ptoCount)
-	}
+
+	require.NoError(t, err, "readWithPTO should retry past the PTO expiry and deliver the datagram")
+	require.Equalf(t, "later", string(buf[:n]), "read %q, want later", buf[:n])
+	assert.True(t, pc.deadlineSet, "a read deadline should have been set")
+	assert.NotZero(t, pc.writes, "a probe should have been written on the PTO timeout")
+	assert.Equalf(t, uint(1), c.ptoCount, "ptoCount = %d, want 1", c.ptoCount)
 }

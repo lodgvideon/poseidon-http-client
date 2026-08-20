@@ -2,9 +2,10 @@ package quic
 
 import (
 	"math/rand"
-	"reflect"
 	"sort"
 	"testing"
+
+	"github.com/stretchr/testify/require"
 )
 
 // oracleTracker is the pre-#345 implementation, kept verbatim as a differential
@@ -46,13 +47,14 @@ func (a *oracleTracker) receive(pn uint64) {
 
 func compareTrackers(t *testing.T, label string, got *ackTracker, want *oracleTracker, seq []uint64) {
 	t.Helper()
-	if !reflect.DeepEqual(got.ranges, want.ranges) {
-		t.Fatalf("%s: ranges diverged\n got: %v\nwant: %v\nseq: %v", label, got.ranges, want.ranges, seq)
-	}
-	if got.truncated != want.truncated || got.lowWater != want.lowWater {
-		t.Fatalf("%s: truncation diverged: got (lowWater=%d truncated=%v), want (lowWater=%d truncated=%v)\nseq: %v",
-			label, got.lowWater, got.truncated, want.lowWater, want.truncated, seq)
-	}
+	require.Equalf(t, want.ranges, got.ranges,
+		"%s: ranges diverged\n got: %v\nwant: %v\nseq: %v", label, got.ranges, want.ranges, seq)
+	require.Equalf(t, want.truncated, got.truncated,
+		"%s: truncation diverged: got (lowWater=%d truncated=%v), want (lowWater=%d truncated=%v)\nseq: %v",
+		label, got.lowWater, got.truncated, want.lowWater, want.truncated, seq)
+	require.Equalf(t, want.lowWater, got.lowWater,
+		"%s: truncation diverged: got (lowWater=%d truncated=%v), want (lowWater=%d truncated=%v)\nseq: %v",
+		label, got.lowWater, got.truncated, want.lowWater, want.truncated, seq)
 }
 
 func runBoth(t *testing.T, label string, seq []uint64) {
@@ -85,6 +87,7 @@ func TestAckTracker_OrderedInsertMatchesOracle_Fixtures(t *testing.T) {
 		"wide gaps then bridge":     {0, 10, 20, 5, 15, 25},
 		"pn zero after high ranges": {1000, 1001, 0},
 	}
+
 	for name, seq := range cases {
 		t.Run(name, func(t *testing.T) { runBoth(t, name, seq) })
 	}
@@ -98,6 +101,7 @@ func TestAckTracker_OrderedInsertMatchesOracle_Truncation(t *testing.T) {
 	for i := uint64(0); i < uint64(maxAckRanges)*4; i++ {
 		seq = append(seq, i*2) // every other number: one range each, never merging
 	}
+
 	runBoth(t, "even-only", seq)
 
 	// Then arrive below the floor, and fill some holes, so ranges merge while
@@ -108,9 +112,11 @@ func TestAckTracker_OrderedInsertMatchesOracle_Truncation(t *testing.T) {
 		got.receive(pn, true)
 		want.receive(pn)
 	}
+
 	for _, pn := range []uint64{1, 3, 5, 7, 9, 200, 201, 0} {
 		got.receive(pn, true)
 		want.receive(pn)
+
 		compareTrackers(t, "post-truncation", &got, &want, []uint64{pn})
 	}
 }
@@ -126,12 +132,14 @@ func TestAckTracker_OrderedInsertMatchesOracle_Random(t *testing.T) {
 			for i := range seq {
 				seq[i] = uint64(rng.Int63n(int64(span)))
 			}
+
 			var got ackTracker
 			var want oracleTracker
 			for _, pn := range seq {
 				got.receive(pn, true)
 				want.receive(pn)
 			}
+
 			compareTrackers(t, "random", &got, &want, seq)
 		}
 	}
@@ -145,21 +153,19 @@ func TestAckTracker_OrderedInsertMatchesOracle_Random(t *testing.T) {
 func TestAckTracker_InsertKeepsInvariant(t *testing.T) {
 	rng := rand.New(rand.NewSource(7))
 	var a ackTracker
+
 	for i := 0; i < 5000; i++ {
 		a.receive(uint64(rng.Int63n(2000)), true)
+
 		for j := 1; j < len(a.ranges); j++ {
 			prev, cur := a.ranges[j-1], a.ranges[j]
-			if cur.hi >= prev.lo {
-				t.Fatalf("step %d: ranges overlap or touch: %v then %v (full: %v)", i, prev, cur, a.ranges)
-			}
-			if cur.hi+1 == prev.lo {
-				t.Fatalf("step %d: adjacent ranges left unmerged: %v then %v", i, prev, cur)
-			}
+			require.Lessf(t, cur.hi, prev.lo,
+				"step %d: ranges overlap or touch: %v then %v (full: %v)", i, prev, cur, a.ranges)
+			require.NotEqualf(t, prev.lo, cur.hi+1,
+				"step %d: adjacent ranges left unmerged: %v then %v", i, prev, cur)
 		}
 		for _, r := range a.ranges {
-			if r.lo > r.hi {
-				t.Fatalf("step %d: inverted range %v", i, r)
-			}
+			require.LessOrEqualf(t, r.lo, r.hi, "step %d: inverted range %v", i, r)
 		}
 	}
 }

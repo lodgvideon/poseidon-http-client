@@ -8,6 +8,9 @@ import (
 	"net"
 	"testing"
 	"time"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // genMutualCert returns a self-signed certificate valid for BOTH server and
@@ -30,9 +33,7 @@ func listenRequiringClientCert(t *testing.T, cert tls.Certificate, pool *x509.Ce
 		ClientAuth:   tls.RequireAndVerifyClientCert,
 		ClientCAs:    pool,
 	}, ServerTransportParams{MaxStreamsBidi: 16, MaxStreamsUni: 4})
-	if err != nil {
-		t.Fatalf("Listen: %v", err)
-	}
+	require.NoError(t, err, "Listen with RequireAndVerifyClientCert")
 	t.Cleanup(func() { _ = l.Close() })
 	return l
 }
@@ -42,9 +43,7 @@ func listenRequiringClientCert(t *testing.T, cert tls.Certificate, pool *x509.Ce
 func dialPresentingCert(t *testing.T, ctx context.Context, l *Listener, cert tls.Certificate, pool *x509.CertPool) (*Conn, error) {
 	t.Helper()
 	uc, err := net.DialUDP("udp", nil, l.Addr().(*net.UDPAddr))
-	if err != nil {
-		t.Fatalf("dial: %v", err)
-	}
+	require.NoError(t, err, "dial the listener over UDP")
 	t.Cleanup(func() { _ = uc.Close() })
 	clientTP := AppendTransportParams(nil, LocalTransportParams{
 		InitialMaxData:                1 << 20,
@@ -57,9 +56,7 @@ func dialPresentingCert(t *testing.T, ctx context.Context, l *Listener, cert tls
 		RootCAs:      pool,
 		Certificates: []tls.Certificate{cert},
 	}, clientTP)
-	if err != nil {
-		t.Fatalf("NewConn: %v", err)
-	}
+	require.NoError(t, err, "NewConn presenting the client certificate")
 	t.Cleanup(func() { _ = client.Close() })
 	return client, client.Establish(ctx)
 }
@@ -77,20 +74,15 @@ func TestListener_MutualTLSHandshakeCompletes(t *testing.T) {
 	l := listenRequiringClientCert(t, cert, pool)
 
 	client, err := dialPresentingCert(t, ctx, l, cert, pool)
-	if err != nil {
-		t.Fatalf("client Establish under RequireAndVerifyClientCert: %v", err)
-	}
-	sc, err := l.Accept(ctx)
-	if err != nil {
-		t.Fatalf("Accept under RequireAndVerifyClientCert: %v", err)
-	}
-	if !sc.isServer || !sc.handshakeComplete {
-		t.Fatalf("accepted conn: isServer=%v handshakeComplete=%v, want true/true",
-			sc.isServer, sc.handshakeComplete)
-	}
-	if !client.handshakeComplete {
-		t.Error("client handshake did not complete")
-	}
+	sc, aerr := l.Accept(ctx)
+
+	require.NoError(t, err, "client Establish under RequireAndVerifyClientCert")
+	require.NoError(t, aerr, "Accept under RequireAndVerifyClientCert")
+	require.NotNil(t, sc, "Accept returned no connection")
+	assert.Truef(t, sc.isServer && sc.handshakeComplete,
+		"accepted conn: isServer=%v handshakeComplete=%v, want true/true",
+		sc.isServer, sc.handshakeComplete)
+	assert.True(t, client.handshakeComplete, "client handshake did not complete")
 }
 
 // TestConformance_RFC9001_Sec48_ListenerClosesOnRejectedClientCert pins RFC 9001
@@ -115,12 +107,12 @@ func TestConformance_RFC9001_Sec48_ListenerClosesOnRejectedClientCert(t *testing
 	l := listenRequiringClientCert(t, cert, pool)
 
 	client, err := dialPresentingCert(t, ctx, l, cert, pool)
-	if err != nil {
-		t.Fatalf("client Establish: %v (a TLS 1.3 client completes on sending Finished)", err)
-	}
-
+	require.NoError(t, err, "client Establish (a TLS 1.3 client completes on sending Finished)")
 	pollCtx, pollCancel := context.WithTimeout(ctx, 5*time.Second)
 	defer pollCancel()
+	acceptCtx, acceptCancel := context.WithTimeout(ctx, 2*time.Second)
+	defer acceptCancel()
+
 	// Nothing orders the client's first Poll against the server's rejection: they
 	// are separate goroutines over a real UDP socket. Poll is one step of the
 	// connection event loop, so nil means "made progress", not "the peer closed".
@@ -130,28 +122,21 @@ func TestConformance_RFC9001_Sec48_ListenerClosesOnRejectedClientCert(t *testing
 	for perr == nil {
 		perr = client.Poll(pollCtx)
 	}
+	sc, aerr := l.Accept(acceptCtx)
 
 	var closed *PeerClosedError
-	if !errors.As(perr, &closed) {
-		t.Fatalf("client Poll = %v, want a *PeerClosedError carrying the server's CRYPTO_ERROR", perr)
-	}
-	if closed.App {
-		t.Errorf("CONNECTION_CLOSE is the application variant (0x1d); §4.8 requires the transport variant (0x1c)")
-	}
+	require.Truef(t, errors.As(perr, &closed),
+		"client Poll = %v, want a *PeerClosedError carrying the server's CRYPTO_ERROR", perr)
+	assert.False(t, closed.App,
+		"CONNECTION_CLOSE is the application variant (0x1d); §4.8 requires the transport variant (0x1c)")
 	// The alert byte is crypto/tls's choice (bad_certificate = 42 on go1.25.13),
 	// so the assertion is the range §4.8 reserves, not one toolchain's pick.
-	if closed.Code < ErrCodeCryptoBase || closed.Code > ErrCodeCryptoBase+0xff {
-		t.Errorf("close code = %#x, want CRYPTO_ERROR (%#x + a one-byte alert)", closed.Code, ErrCodeCryptoBase)
-	}
-	if closed.Code == ErrCodeCryptoBase {
-		t.Errorf("close code = %#x: alert 0 is close_notify, not a handshake failure", closed.Code)
-	}
+	assert.Truef(t, closed.Code >= ErrCodeCryptoBase && closed.Code <= ErrCodeCryptoBase+0xff,
+		"close code = %#x, want CRYPTO_ERROR (%#x + a one-byte alert)", closed.Code, ErrCodeCryptoBase)
+	assert.NotEqualf(t, ErrCodeCryptoBase, closed.Code,
+		"close code = %#x: alert 0 is close_notify, not a handshake failure", closed.Code)
 	t.Logf("client observed CRYPTO_ERROR %#x (alert %d)", closed.Code, closed.Code-ErrCodeCryptoBase)
-
 	// The rejection still stands: no connection is handed to the server's caller.
-	acceptCtx, acceptCancel := context.WithTimeout(ctx, 2*time.Second)
-	defer acceptCancel()
-	if sc, aerr := l.Accept(acceptCtx); aerr == nil {
-		t.Errorf("Accept returned a connection (%v) for a refused client certificate", sc != nil)
-	}
+	assert.Errorf(t, aerr,
+		"Accept returned a connection (%v) for a refused client certificate", sc != nil)
 }

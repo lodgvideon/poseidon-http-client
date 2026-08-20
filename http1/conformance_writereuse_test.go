@@ -14,6 +14,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
 	"github.com/lodgvideon/poseidon-http-client/header"
 	"github.com/lodgvideon/poseidon-http-client/http1"
 )
@@ -73,16 +76,15 @@ func TestConformance_RFC9112_Sec9_3_PartialWriteNotPoolable(t *testing.T) {
 	t.Run("head truncated", func(t *testing.T) {
 		nc := &halfDeadConn{okBytes: 12, resp: []byte(resp)}
 		ex := http1.NewConn(nc).NewExchange()
-		if err := ex.WriteRequest(context.Background(), reqCL("GET"), true); err == nil {
-			t.Fatal("WriteRequest = nil on a socket that failed mid-write")
-		}
-		if _, _, err := ex.ReadResponse(context.Background()); err == nil && ex.KeepAlive() {
-			t.Error("KeepAlive() = true after a truncated head; the peer has half a request " +
+
+		err := ex.WriteRequest(context.Background(), reqCL("GET"), true)
+
+		require.Error(t, err, "WriteRequest = nil on a socket that failed mid-write")
+		_, _, rerr := ex.ReadResponse(context.Background())
+		assert.Falsef(t, rerr == nil && ex.KeepAlive(),
+			"KeepAlive() = true after a truncated head; the peer has half a request "+
 				"and the next one would be appended to it")
-		}
-		if ex.KeepAlive() {
-			t.Error("KeepAlive() = true after a truncated head")
-		}
+		assert.False(t, ex.KeepAlive(), "KeepAlive() = true after a truncated head")
 	})
 
 	t.Run("body truncated", func(t *testing.T) {
@@ -93,17 +95,15 @@ func TestConformance_RFC9112_Sec9_3_PartialWriteNotPoolable(t *testing.T) {
 		fields := reqCL("POST", header.Field{
 			Name: []byte("content-length"), Value: []byte("5"),
 		})
-		if err := ex.WriteRequest(context.Background(), fields, false); err != nil {
-			t.Fatalf("WriteRequest: %v", err)
-		}
+		require.NoError(t, ex.WriteRequest(context.Background(), fields, false), "WriteRequest")
 		nc.okBytes = 2 // the body write now fails part-way
-		if err := ex.WriteBody(context.Background(), []byte("HELLO"), true); err == nil {
-			t.Fatal("WriteBody = nil on a socket that failed mid-write")
-		}
-		if ex.KeepAlive() {
-			t.Error("KeepAlive() = true after a truncated body; the peer is still counting " +
+
+		err := ex.WriteBody(context.Background(), []byte("HELLO"), true)
+
+		require.Error(t, err, "WriteBody = nil on a socket that failed mid-write")
+		assert.False(t, ex.KeepAlive(),
+			"KeepAlive() = true after a truncated body; the peer is still counting "+
 				"octets against the Content-Length this client declared")
-		}
 	})
 }
 
@@ -119,29 +119,24 @@ func TestConformance_RFC9112_Sec9_3_PartialWriteNotPoolable(t *testing.T) {
 func TestConformance_RFC9112_Sec9_3_AbandonedUploadNotPoolable(t *testing.T) {
 	srv, ex := bodyExchange(t, "HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n")
 	defer srv.Close()
-
 	fields := reqCL("POST", header.Field{
 		Name: []byte("content-length"), Value: []byte("5"),
 	})
-	if err := ex.WriteRequest(context.Background(), fields, false); err != nil {
-		t.Fatalf("WriteRequest: %v", err)
-	}
+	require.NoError(t, ex.WriteRequest(context.Background(), fields, false), "WriteRequest")
+
 	// Three of the five declared octets, then the caller gives up.
-	if err := ex.WriteBody(context.Background(), []byte("HEL"), false); err != nil {
-		t.Fatalf("WriteBody: %v", err)
-	}
+	require.NoError(t, ex.WriteBody(context.Background(), []byte("HEL"), false), "WriteBody")
+
 	// Reading the response is what makes this test say anything. A server may
 	// answer before it has consumed the body — 413, 401, a redirect — and that
 	// success is what sets keepAlive true. Without it KeepAlive() is false for
 	// the trivial reason that no response has been read, and the assertion below
 	// would hold with the under-run guard deleted.
-	if _, _, err := ex.ReadResponse(context.Background()); err != nil {
-		t.Fatalf("ReadResponse: %v", err)
-	}
-	if ex.KeepAlive() {
-		t.Error("KeepAlive() = true with 3 of 5 declared octets written — the peer is " +
+	_, _, err := ex.ReadResponse(context.Background())
+	require.NoError(t, err, "ReadResponse")
+	assert.False(t, ex.KeepAlive(),
+		"KeepAlive() = true with 3 of 5 declared octets written — the peer is "+
 			"waiting for two more and would read the next request's line as them")
-	}
 }
 
 // TestConformance_RFC9112_Sec9_3_CompleteUploadStillPoolable is the control. A
@@ -150,23 +145,18 @@ func TestConformance_RFC9112_Sec9_3_AbandonedUploadNotPoolable(t *testing.T) {
 func TestConformance_RFC9112_Sec9_3_CompleteUploadStillPoolable(t *testing.T) {
 	srv, ex := bodyExchange(t, "HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n")
 	defer srv.Close()
-
 	fields := reqCL("POST", header.Field{
 		Name: []byte("content-length"), Value: []byte("5"),
 	})
-	if err := ex.WriteRequest(context.Background(), fields, false); err != nil {
-		t.Fatalf("WriteRequest: %v", err)
-	}
-	if err := ex.WriteBody(context.Background(), []byte("HELLO"), true); err != nil {
-		t.Fatalf("WriteBody: %v", err)
-	}
-	if _, _, err := ex.ReadResponse(context.Background()); err != nil {
-		t.Fatalf("ReadResponse: %v", err)
-	}
-	if !ex.KeepAlive() {
-		t.Error("KeepAlive() = false after a complete, well-framed exchange — the under-run " +
+	require.NoError(t, ex.WriteRequest(context.Background(), fields, false), "WriteRequest")
+
+	require.NoError(t, ex.WriteBody(context.Background(), []byte("HELLO"), true), "WriteBody")
+
+	_, _, err := ex.ReadResponse(context.Background())
+	require.NoError(t, err, "ReadResponse")
+	assert.True(t, ex.KeepAlive(),
+		"KeepAlive() = false after a complete, well-framed exchange — the under-run "+
 			"guard is firing on a body that was fully written")
-	}
 }
 
 // bodyExchange gives an Exchange over a real socket whose peer drains whatever
@@ -176,9 +166,7 @@ func TestConformance_RFC9112_Sec9_3_CompleteUploadStillPoolable(t *testing.T) {
 func bodyExchange(t *testing.T, resp string) (net.Conn, *http1.Exchange) {
 	t.Helper()
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("Listen: %v", err)
-	}
+	require.NoError(t, err, "Listen")
 	t.Cleanup(func() { _ = ln.Close() })
 
 	go func() {
@@ -195,9 +183,7 @@ func bodyExchange(t *testing.T, resp string) (net.Conn, *http1.Exchange) {
 	}()
 
 	cli, err := net.Dial("tcp", ln.Addr().String())
-	if err != nil {
-		t.Fatalf("Dial: %v", err)
-	}
+	require.NoError(t, err, "Dial")
 	t.Cleanup(func() { _ = cli.Close() })
 	return cli, http1.NewConn(cli).NewExchange()
 }

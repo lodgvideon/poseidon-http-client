@@ -1,8 +1,9 @@
 package client
 
 import (
-	"errors"
 	"testing"
+
+	"github.com/stretchr/testify/require"
 
 	"github.com/lodgvideon/poseidon-http-client/conn"
 )
@@ -60,12 +61,12 @@ func TestConformance_RFC7540_Sec10_3_OutgoingRequestValueInjection_Rejected(t *t
 		t.Run(tc.name, func(t *testing.T) {
 			req := base()
 			tc.mut(req)
+
 			err := validateRequest(req)
-			if !errors.Is(err, ErrInvalidRequest) {
-				t.Fatalf("validateRequest = %v, want ErrInvalidRequest — a CR/LF/NUL "+
-					"request value is a splitting vector through a downgrading intermediary "+
-					"(RFC 7540 §10.3) and must never reach the encoder", err)
-			}
+
+			require.ErrorIs(t, err, ErrInvalidRequest,
+				"a CR/LF/NUL request value is a splitting vector through a downgrading "+
+					"intermediary (RFC 7540 §10.3) and must never reach the encoder")
 		})
 	}
 }
@@ -105,10 +106,11 @@ func TestConformance_RFC7540_Sec10_3_LegalOutgoingRequestValuesAccepted(t *testi
 		t.Run(tc.name, func(t *testing.T) {
 			req := &Request{Method: "GET", Path: "/"}
 			tc.mut(req)
-			if err := validateRequest(req); err != nil {
-				t.Fatalf("validateRequest = %v, want nil — §10.3 forbids only CR, LF and NUL, "+
-					"so this legal value must be accepted", err)
-			}
+
+			err := validateRequest(req)
+
+			require.NoError(t, err,
+				"§10.3 forbids only CR, LF and NUL, so this legal value must be accepted")
 		})
 	}
 }

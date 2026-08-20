@@ -2,9 +2,11 @@ package http1_test
 
 import (
 	"context"
-	"errors"
 	"strings"
 	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	"github.com/lodgvideon/poseidon-http-client/header"
 	"github.com/lodgvideon/poseidon-http-client/http1"
@@ -29,14 +31,14 @@ func TestConformance_RFC9110_Sec8_6_ContentLengthWithoutBodyRejected(t *testing.
 	for _, cl := range []string{"5", "1", "999999", " 7 "} {
 		t.Run(cl, func(t *testing.T) {
 			ex, capture := rawCapture(t)
+
 			err := ex.WriteRequest(context.Background(),
 				reqCL("GET", header.Field{Name: []byte("Content-Length"), Value: []byte(cl)}), true)
-			if !errors.Is(err, http1.ErrInvalidRequest) {
-				t.Fatalf("WriteRequest(endStream, Content-Length %q) err = %v, want ErrInvalidRequest (RFC 9110 §8.6)", cl, err)
-			}
-			if wire := capture(); wire != "" {
-				t.Errorf("a rejected request must put no bytes on the wire, got:\n%q", wire)
-			}
+
+			require.ErrorIsf(t, err, http1.ErrInvalidRequest,
+				"WriteRequest(endStream, Content-Length %q) err = %v, want ErrInvalidRequest (RFC 9110 §8.6)", cl, err)
+			wire := capture()
+			assert.Emptyf(t, wire, "a rejected request must put no bytes on the wire, got:\n%q", wire)
 		})
 	}
 }
@@ -54,16 +56,16 @@ func TestConformance_RFC9112_Sec6_1_DuplicateContentLengthRejected(t *testing.T)
 	for name, vals := range cases {
 		t.Run(name, func(t *testing.T) {
 			ex, capture := rawCapture(t)
+
 			err := ex.WriteRequest(context.Background(), reqCL("GET",
 				header.Field{Name: []byte("content-length"), Value: []byte(vals[0])},
 				header.Field{Name: []byte("Content-Length"), Value: []byte(vals[1])},
 			), true)
-			if !errors.Is(err, http1.ErrInvalidRequest) {
-				t.Fatalf("WriteRequest(two Content-Length) err = %v, want ErrInvalidRequest", err)
-			}
-			if wire := capture(); wire != "" {
-				t.Errorf("a rejected request must put no bytes on the wire, got:\n%q", wire)
-			}
+
+			require.ErrorIsf(t, err, http1.ErrInvalidRequest,
+				"WriteRequest(two Content-Length) err = %v, want ErrInvalidRequest", err)
+			wire := capture()
+			assert.Emptyf(t, wire, "a rejected request must put no bytes on the wire, got:\n%q", wire)
 		})
 	}
 }
@@ -76,31 +78,33 @@ func TestConformance_RFC9112_Sec6_1_DuplicateContentLengthRejected(t *testing.T)
 func TestConformance_RFC9110_Sec8_6_ContentLengthEmitGuardsAccept(t *testing.T) {
 	t.Run("single CL with body follows", func(t *testing.T) {
 		ex, capture := rawCapture(t)
+
 		err := ex.WriteRequest(context.Background(),
 			reqCL("POST", header.Field{Name: []byte("Content-Length"), Value: []byte("3")}), false)
-		if err != nil {
-			t.Fatalf("WriteRequest = %v, want nil", err)
-		}
-		if wire := capture(); !strings.Contains(strings.ToLower(wire), "content-length: 3\r\n") {
-			t.Errorf("want the single Content-Length on the wire, got:\n%q", wire)
-		}
+
+		require.NoErrorf(t, err, "WriteRequest = %v, want nil", err)
+		wire := capture()
+		assert.Containsf(t, strings.ToLower(wire), "content-length: 3\r\n",
+			"want the single Content-Length on the wire, got:\n%q", wire)
 	})
+
 	t.Run("explicit zero with no body", func(t *testing.T) {
 		ex, capture := rawCapture(t)
+
 		err := ex.WriteRequest(context.Background(),
 			reqCL("POST", header.Field{Name: []byte("Content-Length"), Value: []byte("0")}), true)
-		if err != nil {
-			t.Fatalf("WriteRequest(endStream, Content-Length 0) = %v, want nil", err)
-		}
+
+		require.NoErrorf(t, err, "WriteRequest(endStream, Content-Length 0) = %v, want nil", err)
 		wire := strings.ToLower(capture())
-		if strings.Count(wire, "content-length:") != 1 {
-			t.Errorf("want exactly one Content-Length line, got:\n%q", wire)
-		}
+		assert.Equalf(t, 1, strings.Count(wire, "content-length:"),
+			"want exactly one Content-Length line, got:\n%q", wire)
 	})
+
 	t.Run("bodyless no CL", func(t *testing.T) {
 		ex, _ := rawCapture(t)
-		if err := ex.WriteRequest(context.Background(), reqCL("GET"), true); err != nil {
-			t.Fatalf("WriteRequest = %v, want nil", err)
-		}
+
+		err := ex.WriteRequest(context.Background(), reqCL("GET"), true)
+
+		require.NoErrorf(t, err, "WriteRequest = %v, want nil", err)
 	})
 }

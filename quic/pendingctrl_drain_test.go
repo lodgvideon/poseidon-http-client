@@ -1,6 +1,11 @@
 package quic
 
-import "testing"
+import (
+	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+)
 
 // Draining pendingCtrl has two halves that must happen together: the frames go out,
 // and the queue is emptied. Only the first half was covered — mutating
@@ -17,7 +22,7 @@ import "testing"
 // flush wrote one datagram" is what the suite already did.
 
 // drainConn builds a 1-RTT-ready connection whose writes are captured, matching the
-// local fixture TestConformance_RFC9000_Sec822_PathResponsePaddedTo1200 uses.
+// local fixture pathRespConn builds.
 func drainConn() (*Conn, *capturePC) {
 	dcid := []byte("draintst")
 	keys, _ := InitialKeys(dcid)
@@ -34,23 +39,17 @@ func TestFlush_DrainsPendingCtrl(t *testing.T) {
 	c, pc := drainConn()
 	c.pendingCtrl = AppendMaxData(nil, 1000)
 
-	if err := c.flush(); err != nil {
-		t.Fatal(err)
-	}
-	if len(pc.pkts) != 1 {
-		t.Fatalf("first flush wrote %d datagrams, want 1", len(pc.pkts))
-	}
-	if len(c.pendingCtrl) != 0 {
-		t.Errorf("pendingCtrl still holds %d bytes after being flushed", len(c.pendingCtrl))
-	}
+	errFirst := c.flush()
+	queuedAfterFirst := len(c.pendingCtrl)
+	errSecond := c.flush()
 
-	if err := c.flush(); err != nil {
-		t.Fatal(err)
-	}
-	if len(pc.pkts) != 1 {
-		t.Fatalf("a second flush with nothing new queued wrote %d datagrams, want 1: "+
-			"the grants were re-sent because the queue was never emptied", len(pc.pkts))
-	}
+	require.NoError(t, errFirst, "first flush of the queued MAX_DATA grant")
+	require.NoError(t, errSecond, "second flush with nothing new queued")
+	assert.Zerof(t, queuedAfterFirst,
+		"pendingCtrl still holds %d bytes after being flushed", queuedAfterFirst)
+	assert.Lenf(t, pc.pkts, 1,
+		"two flushes wrote %d datagrams, want 1: the grants were re-sent because "+
+			"the queue was never emptied", len(pc.pkts))
 }
 
 // TestFlushControl_DrainsPendingCtrl pins the same half for the consumer-side
@@ -62,26 +61,16 @@ func TestFlushControl_DrainsPendingCtrl(t *testing.T) {
 	c.pendingCtrl = AppendMaxData(nil, 1000)
 
 	c.mu.Lock()
-	err := c.flushControl()
+	errFirst := c.flushControl()
+	queuedAfterFirst := len(c.pendingCtrl)
+	errSecond := c.flushControl()
 	c.mu.Unlock()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(pc.pkts) != 1 {
-		t.Fatalf("first flushControl wrote %d datagrams, want 1", len(pc.pkts))
-	}
-	if len(c.pendingCtrl) != 0 {
-		t.Errorf("pendingCtrl still holds %d bytes after being flushed", len(c.pendingCtrl))
-	}
 
-	c.mu.Lock()
-	err = c.flushControl()
-	c.mu.Unlock()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(pc.pkts) != 1 {
-		t.Fatalf("a second flushControl with nothing queued wrote %d datagrams, want 1: "+
-			"flushControl returns early only because the queue is empty", len(pc.pkts))
-	}
+	require.NoError(t, errFirst, "first flushControl of the queued MAX_DATA grant")
+	require.NoError(t, errSecond, "second flushControl with nothing queued")
+	assert.Zerof(t, queuedAfterFirst,
+		"pendingCtrl still holds %d bytes after being flushed", queuedAfterFirst)
+	assert.Lenf(t, pc.pkts, 1,
+		"two flushControls wrote %d datagrams, want 1: flushControl returns early "+
+			"only because the queue is empty", len(pc.pkts))
 }

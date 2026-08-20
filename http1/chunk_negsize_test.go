@@ -2,8 +2,9 @@ package http1_test
 
 import (
 	"context"
-	"errors"
 	"testing"
+
+	"github.com/stretchr/testify/require"
 
 	"github.com/lodgvideon/poseidon-http-client/http1"
 )
@@ -19,16 +20,13 @@ func TestReadChunkedChunk_NegativeSizeRejected(t *testing.T) {
 		"\r\n" +
 		"-1\r\n"
 	ex := wireExchange(t, "GET", resp)
-	if _, _, err := ex.ReadResponse(context.Background()); err != nil {
-		t.Fatalf("ReadResponse: %v", err)
-	}
-
+	_, _, err := ex.ReadResponse(context.Background())
+	require.NoError(t, err, "ReadResponse")
 	buf := make([]byte, 64)
 
 	var panicked bool
 	var n int
 	var done bool
-	var err error
 	func() {
 		defer func() {
 			if r := recover(); r != nil {
@@ -38,16 +36,12 @@ func TestReadChunkedChunk_NegativeSizeRejected(t *testing.T) {
 		n, done, err = ex.ReadBodyChunk(buf)
 	}()
 
-	if panicked {
-		t.Fatalf("ReadBodyChunk panicked on a negative chunk size; want a clean error")
-	}
-	if err == nil {
-		t.Fatalf("negative chunk size accepted (n=%d done=%v); want an error", n, done)
-	}
+	require.False(t, panicked,
+		"ReadBodyChunk panicked on a negative chunk size; want a clean error")
+	require.Errorf(t, err, "negative chunk size accepted (n=%d done=%v); want an error", n, done)
 	// errors.Is, not a substring of the message: matching the text leaves the
 	// documented caller contract (errors.Is against the sentinel) free to break
 	// while this test stays green.
-	if !errors.Is(err, http1.ErrInvalidChunkSize) {
-		t.Fatalf("negative chunk size: err = %v, want ErrInvalidChunkSize", err)
-	}
+	require.ErrorIsf(t, err, http1.ErrInvalidChunkSize,
+		"negative chunk size: err = %v, want ErrInvalidChunkSize", err)
 }

@@ -5,6 +5,8 @@ import (
 	"net"
 	"testing"
 	"time"
+
+	"github.com/stretchr/testify/require"
 )
 
 // TestConn_Shutdown_InflightReadIsSynchronized is a -race regression guard for
@@ -26,9 +28,7 @@ func TestConn_Shutdown_InflightReadIsSynchronized(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 	c, err := NewClientConn(ctx, cli, ConnOptions{}.defaulted())
-	if err != nil {
-		t.Fatalf("NewClientConn: %v", err)
-	}
+	require.NoError(t, err, "NewClientConn")
 
 	// One stream in flight, so Shutdown reaches the c.inflight decision instead
 	// of the no-inflight fast path.

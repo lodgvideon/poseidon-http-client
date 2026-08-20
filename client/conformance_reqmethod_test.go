@@ -2,8 +2,9 @@ package client
 
 import (
 	"bytes"
-	"errors"
 	"testing"
+
+	"github.com/stretchr/testify/require"
 
 	"github.com/lodgvideon/poseidon-http-client/conn"
 )
@@ -24,16 +25,18 @@ func TestConformance_RFC9110_Sec9_3_8_TRACEBodyRejected(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			req := &Request{Method: "GET", Path: "/"}
 			tc.mut(req)
-			if err := validateRequest(req); !errors.Is(err, ErrInvalidRequest) {
-				t.Fatalf("validateRequest = %v, want ErrInvalidRequest — a TRACE body must "+
-					"not be sent (RFC 9110 §9.3.8)", err)
-			}
+
+			err := validateRequest(req)
+
+			require.ErrorIs(t, err, ErrInvalidRequest,
+				"a TRACE body must not be sent (RFC 9110 §9.3.8)")
 		})
 	}
+
 	// Over-rejection guard: a bodyless TRACE is legal.
-	if err := validateRequest(&Request{Method: "TRACE", Path: "/"}); err != nil {
-		t.Fatalf("validateRequest(bodyless TRACE) = %v, want nil", err)
-	}
+	err := validateRequest(&Request{Method: "TRACE", Path: "/"})
+
+	require.NoError(t, err, "a bodyless TRACE is legal and must not be refused")
 }
 
 // TestConformance_RFC9110_Sec9_3_7_OptionsContentRequiresContentType pins that an
@@ -43,9 +46,10 @@ func TestConformance_RFC9110_Sec9_3_8_TRACEBodyRejected(t *testing.T) {
 // media type." Presence is the enforceable part; media-type validity stays the
 // caller's, and the general §8.3 SHOULD is not enforced.
 func TestConformance_RFC9110_Sec9_3_7_OptionsContentRequiresContentType(t *testing.T) {
-	if err := validateRequest(&Request{Method: "OPTIONS", Path: "/", Body: []byte("x")}); !errors.Is(err, ErrInvalidRequest) {
-		t.Fatalf("OPTIONS+content, no Content-Type = %v, want ErrInvalidRequest (RFC 9110 §9.3.7)", err)
-	}
+	err := validateRequest(&Request{Method: "OPTIONS", Path: "/", Body: []byte("x")})
+
+	require.ErrorIs(t, err, ErrInvalidRequest,
+		"OPTIONS with content and no Content-Type must be refused (RFC 9110 §9.3.7)")
 
 	accept := []struct {
 		name string
@@ -60,9 +64,9 @@ func TestConformance_RFC9110_Sec9_3_7_OptionsContentRequiresContentType(t *testi
 	}
 	for _, tc := range accept {
 		t.Run(tc.name, func(t *testing.T) {
-			if err := validateRequest(tc.req); err != nil {
-				t.Fatalf("validateRequest = %v, want nil", err)
-			}
+			err := validateRequest(tc.req)
+
+			require.NoError(t, err, "§9.3.7 binds only OPTIONS-with-content-and-no-Content-Type")
 		})
 	}
 }
@@ -78,19 +82,22 @@ func TestConformance_RFC9110_Sec9_3_7_OptionsContentRequiresContentType(t *testi
 func TestConformance_RFC9113_Sec8_3_1_HostHeaderRefused(t *testing.T) {
 	for _, v := range []string{"other.example.com", "", "example.com"} {
 		t.Run("host="+v, func(t *testing.T) {
-			err := validateRequest(&Request{
+			req := &Request{
 				Method: "GET", Path: "/", Authority: "example.com",
 				Headers: []conn.HeaderField{{Name: []byte("Host"), Value: []byte(v)}},
-			})
-			if !errors.Is(err, ErrInvalidRequest) {
-				t.Fatalf("validateRequest(host header %q) = %v, want ErrInvalidRequest", v, err)
 			}
+
+			err := validateRequest(req)
+
+			require.ErrorIsf(t, err, ErrInvalidRequest,
+				"validateRequest(host header %q) = %v, want ErrInvalidRequest", v, err)
 		})
 	}
+
 	// Over-rejection guard: the authority alone is how a caller sets the host.
-	if err := validateRequest(&Request{Method: "GET", Path: "/", Authority: "example.com"}); err != nil {
-		t.Fatalf("validateRequest(no host header) = %v, want nil", err)
-	}
+	err := validateRequest(&Request{Method: "GET", Path: "/", Authority: "example.com"})
+
+	require.NoError(t, err, "an authority with no host header is the supported way to set the host")
 }
 
 // TestConformance_RFC9110_Sec10_1_1_Expect100OnBodylessRefused pins that a
@@ -100,15 +107,18 @@ func TestConformance_RFC9113_Sec8_3_1_HostHeaderRefused(t *testing.T) {
 func TestConformance_RFC9110_Sec10_1_1_Expect100OnBodylessRefused(t *testing.T) {
 	for _, v := range []string{"100-continue", "100-Continue"} {
 		t.Run(v, func(t *testing.T) {
-			err := validateRequest(&Request{
+			req := &Request{
 				Method: "POST", Path: "/",
 				Headers: []conn.HeaderField{{Name: []byte("Expect"), Value: []byte(v)}},
-			})
-			if !errors.Is(err, ErrInvalidRequest) {
-				t.Fatalf("validateRequest(Expect: %s, no body) = %v, want ErrInvalidRequest", v, err)
 			}
+
+			err := validateRequest(req)
+
+			require.ErrorIsf(t, err, ErrInvalidRequest,
+				"validateRequest(Expect: %s, no body) = %v, want ErrInvalidRequest", v, err)
 		})
 	}
+
 	// Over-rejection guards: with content it is exactly what the expectation is
 	// for, and an unrelated Expect value is the caller's business.
 	accept := []*Request{
@@ -118,9 +128,9 @@ func TestConformance_RFC9110_Sec10_1_1_Expect100OnBodylessRefused(t *testing.T) 
 			Headers: []conn.HeaderField{{Name: []byte("Expect"), Value: []byte("other-extension")}}},
 	}
 	for _, req := range accept {
-		if err := validateRequest(req); err != nil {
-			t.Fatalf("validateRequest = %v, want nil", err)
-		}
+		err := validateRequest(req)
+
+		require.NoError(t, err, "§10.1.1 binds only 100-continue on a request with no content")
 	}
 }
 
@@ -133,17 +143,18 @@ func TestConformance_RFC9110_Sec4_2_4_AuthorityUserinfoRejected(t *testing.T) {
 	for _, auth := range []string{"user@example.com", "user:pass@example.com", "u@example.com:8443"} {
 		t.Run(auth, func(t *testing.T) {
 			err := validateRequest(&Request{Method: "GET", Path: "/", Authority: auth})
-			if !errors.Is(err, ErrInvalidRequest) {
-				t.Fatalf("validateRequest(Authority=%q) = %v, want ErrInvalidRequest "+
+
+			require.ErrorIsf(t, err, ErrInvalidRequest,
+				"validateRequest(Authority=%q) = %v, want ErrInvalidRequest "+
 					"(RFC 9110 §4.2.4, RFC 9112 §3.2)", auth, err)
-			}
 		})
 	}
+
 	// Over-rejection guard: a bare host[:port] has no '@' and must pass.
 	for _, auth := range []string{"example.com", "example.com:8443", "[::1]:443"} {
-		if err := validateRequest(&Request{Method: "GET", Path: "/", Authority: auth}); err != nil {
-			t.Fatalf("validateRequest(Authority=%q) = %v, want nil", auth, err)
-		}
+		err := validateRequest(&Request{Method: "GET", Path: "/", Authority: auth})
+
+		require.NoErrorf(t, err, "validateRequest(Authority=%q) = %v, want nil", auth, err)
 	}
 }
 
@@ -169,12 +180,14 @@ func TestConformance_RFC9110_Sec9_1_MethodAndTargetRejectControlBytes(t *testing
 		t.Run(tc.name, func(t *testing.T) {
 			req := &Request{Method: "GET", Path: "/"}
 			tc.mut(req)
-			if err := validateRequest(req); !errors.Is(err, ErrInvalidRequest) {
-				t.Fatalf("validateRequest = %v, want ErrInvalidRequest — a control byte in the "+
-					"method/target is malformed on an http1 downgrade (RFC 7540 §8.1.2.6)", err)
-			}
+
+			err := validateRequest(req)
+
+			require.ErrorIs(t, err, ErrInvalidRequest,
+				"a control byte in the method/target is malformed on an http1 downgrade (RFC 7540 §8.1.2.6)")
 		})
 	}
+
 	// Over-rejection guard: ordinary methods and targets (incl. query, %-encoding,
 	// and asterisk-form) must pass.
 	accept := []*Request{
@@ -184,8 +197,8 @@ func TestConformance_RFC9110_Sec9_1_MethodAndTargetRejectControlBytes(t *testing
 		{Method: "OPTIONS", Path: "*"},
 	}
 	for _, req := range accept {
-		if err := validateRequest(req); err != nil {
-			t.Fatalf("validateRequest(%s %s) = %v, want nil", req.Method, req.Path, err)
-		}
+		err := validateRequest(req)
+
+		require.NoErrorf(t, err, "validateRequest(%s %s) = %v, want nil", req.Method, req.Path, err)
 	}
 }

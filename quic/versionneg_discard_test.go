@@ -1,6 +1,11 @@
 package quic
 
-import "testing"
+import (
+	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+)
 
 // TestConformance_RFC9000_Sec62_DiscardingASpaceKeepsTheVNGuard pins that
 // discarding a packet-number space does not re-arm the Version Negotiation
@@ -29,9 +34,7 @@ func TestConformance_RFC9000_Sec62_DiscardingASpaceKeepsTheVNGuard(t *testing.T)
 	dcid, scid := []byte("clientci"), []byte("serverci")
 	vn := makeVN(dcid, scid, 0x6b3343cf) // no v1 offered: the abandon case
 	hdr, err := ParseHeader(vn, 0)
-	if err != nil {
-		t.Fatalf("ParseHeader: %v", err)
-	}
+	require.NoError(t, err, "ParseHeader of the Version Negotiation packet")
 
 	for _, tc := range []struct {
 		name    string
@@ -53,21 +56,19 @@ func TestConformance_RFC9000_Sec62_DiscardingASpaceKeepsTheVNGuard(t *testing.T)
 
 			// Sanity: the guard is closed before the discard, so a failure below is
 			// about the discard rather than about the fixture.
-			if c.shouldAbandonOnVN(vn, hdr) {
-				t.Fatal("the VN guard was already open before any space was discarded, " +
+			require.False(t, c.shouldAbandonOnVN(vn, hdr),
+				"the VN guard was already open before any space was discarded, "+
 					"so this test would not be measuring the discard")
-			}
 
 			for _, sp := range tc.discard {
 				c.discardSpace(sp)
 			}
 
-			if c.shouldAbandonOnVN(vn, hdr) {
-				t.Error("discarding a packet-number space re-opened the Version Negotiation " +
-					"abandon path.\nA VN carries no authentication of any kind and is " +
-					"evaluated before decryption, so this lets one spoofed datagram tear " +
+			assert.False(t, c.shouldAbandonOnVN(vn, hdr),
+				"discarding a packet-number space re-opened the Version Negotiation "+
+					"abandon path.\nA VN carries no authentication of any kind and is "+
+					"evaluated before decryption, so this lets one spoofed datagram tear "+
 					"down an established connection (RFC 9000 §6.2).")
-			}
 		})
 	}
 }
@@ -89,21 +90,17 @@ func TestDiscardSpace_ClearsWhatItShould(t *testing.T) {
 
 	c.discardSpace(spaceInitial)
 
-	if n := len(c.sent[spaceInitial].packets); n != 0 {
-		t.Errorf("sent packets = %d after discard, want 0: loss detection would keep "+
-			"timing packets that can never be acknowledged (RFC 9002 §6.4)", n)
-	}
-	if c.pendingCrypto[spaceInitial] != nil {
-		t.Error("pendingCrypto survived the discard: bytes queued for a space with no keys")
-	}
-	if c.retransQueue[spaceInitial] != nil {
-		t.Error("retransQueue survived the discard: frames queued for a space with no keys")
-	}
-	if c.keys.Initial != nil || c.initialSealer != nil {
-		t.Error("Initial keys survived the discard (RFC 9000 §4.9)")
-	}
-	if c.ptoCount != 0 {
-		t.Error("ptoCount survived the discard: a Handshake-space backoff would inflate " +
+	assert.Emptyf(t, c.sent[spaceInitial].packets,
+		"sent packets = %d after discard, want 0: loss detection would keep "+
+			"timing packets that can never be acknowledged (RFC 9002 §6.4)",
+		len(c.sent[spaceInitial].packets))
+	assert.Truef(t, c.pendingCrypto[spaceInitial] == nil,
+		"pendingCrypto survived the discard: bytes queued for a space with no keys")
+	assert.Truef(t, c.retransQueue[spaceInitial] == nil,
+		"retransQueue survived the discard: frames queued for a space with no keys")
+	assert.Truef(t, c.keys.Initial == nil && c.initialSealer == nil,
+		"Initial keys survived the discard (RFC 9000 §4.9)")
+	assert.Zero(t, c.ptoCount,
+		"ptoCount survived the discard: a Handshake-space backoff would inflate "+
 			"the Application space's first probe timeout (RFC 9002 §6.2.2)")
-	}
 }

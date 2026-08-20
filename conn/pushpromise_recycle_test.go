@@ -5,6 +5,9 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
 	"github.com/lodgvideon/poseidon-http-client/frame"
 	"github.com/lodgvideon/poseidon-http-client/hpack"
 )
@@ -51,35 +54,33 @@ func TestHandlePushPromise_RecycledParentIsNotAnnounced(t *testing.T) {
 
 	h := &connHandler{streams: c, dec: hpack.NewDecoder()}
 	enc := hpack.NewEncoder()
-	if err := h.handlePushPromiseBlock(1, 2, promiseBlock(enc, "/a.css")); err != nil {
-		t.Fatalf("handlePushPromiseBlock: %v", err)
-	}
 
+	err := h.handlePushPromiseBlock(1, 2, promiseBlock(enc, "/a.css"))
+
+	require.NoError(t, err, "handlePushPromiseBlock")
 	select {
 	case ev := <-parent.events:
-		if ev.Type == EventPushPromise {
-			t.Fatal("the recycled struct's new lifetime was announced a promise made to the previous one")
-		}
-		t.Fatalf("unexpected event %s on the new lifetime", ev.Type)
+		assert.NotEqualf(t, EventPushPromise, ev.Type,
+			"the recycled struct's new lifetime was announced a promise made to the previous one")
+		assert.Failf(t, "the new lifetime received an event", "unexpected event %s", ev.Type)
 	default:
 	}
 
 	// The promise could not be announced, so the promised stream must be refused.
-	if wire.Len() == 0 {
-		t.Fatal("no frame written; an undeliverable promise left stream 2 reserved and unreachable")
-	}
+	require.NotZerof(t, wire.Len(),
+		"no frame written; an undeliverable promise left stream 2 reserved and unreachable")
 	b := wire.Bytes()
 	ftype := b[3]
 	streamID := (uint32(b[5])<<24 | uint32(b[6])<<16 | uint32(b[7])<<8 | uint32(b[8])) &^ (1 << 31)
-	if ftype != 0x3 || streamID != 2 { // 0x3 = RST_STREAM
-		t.Fatalf("wrote frame type %#x on stream %d, want RST_STREAM (0x3) on the promised stream 2", ftype, streamID)
-	}
+	assert.Equalf(t, byte(0x3), ftype, // 0x3 = RST_STREAM
+		"wrote frame type %#x on stream %d, want RST_STREAM (0x3) on the promised stream 2", ftype, streamID)
+	assert.Equalf(t, uint32(2), streamID,
+		"wrote frame type %#x on stream %d, want RST_STREAM (0x3) on the promised stream 2", ftype, streamID)
 	// The code, not just the frame: two other paths in this handler also RST the
 	// promised stream (a failed reservation, a rejected promised request), so
 	// asserting only "an RST appeared" cannot tell them from this one. That weaker
 	// assertion passed with the id gate reverted.
 	code := uint32(b[9])<<24 | uint32(b[10])<<16 | uint32(b[11])<<8 | uint32(b[12])
-	if code != uint32(frame.ErrCodeRefusedStream) {
-		t.Fatalf("RST code = %d, want REFUSED_STREAM (%d)", code, frame.ErrCodeRefusedStream)
-	}
+	assert.Equalf(t, uint32(frame.ErrCodeRefusedStream), code,
+		"RST code = %d, want REFUSED_STREAM (%d)", code, frame.ErrCodeRefusedStream)
 }

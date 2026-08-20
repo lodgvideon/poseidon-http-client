@@ -20,6 +20,9 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
 	"github.com/lodgvideon/poseidon-http-client/header"
 	"github.com/lodgvideon/poseidon-http-client/http1"
 )
@@ -53,9 +56,7 @@ func requestHead(t *testing.T, method string, endStream bool, extra ...header.Fi
 	}, extra...)
 
 	ex := http1.NewConn(client).NewExchange()
-	if err := ex.WriteRequest(context.Background(), fields, endStream); err != nil {
-		t.Fatalf("WriteRequest: %v", err)
-	}
+	require.NoError(t, ex.WriteRequest(context.Background(), fields, endStream), "WriteRequest")
 	return <-headCh
 }
 
@@ -90,17 +91,17 @@ func TestConformance_RFC9112_Sec6_1_NoContentLengthWithTransferEncoding(t *testi
 		t.Run(spelling, func(t *testing.T) {
 			head := requestHead(t, "POST", false,
 				header.Field{Name: []byte(spelling), Value: []byte("5")})
+
 			low := strings.ToLower(head)
 			hasCL := strings.Contains(low, "content-length:")
 			hasTE := strings.Contains(low, "transfer-encoding:")
-			if hasCL && hasTE {
-				t.Errorf("this client emitted BOTH framing headers for a caller-supplied %q:\n%s\n"+
+
+			assert.Falsef(t, hasCL && hasTE,
+				"this client emitted BOTH framing headers for a caller-supplied %q:\n%s\n"+
 					"RFC 9112 §6.1 forbids a sender from doing this; the pair is the "+
 					"request-smuggling primitive of §11.2", spelling, head)
-			}
-			if !hasCL {
-				t.Errorf("the caller's Content-Length did not reach the wire at all:\n%s", head)
-			}
+			assert.Truef(t, hasCL,
+				"the caller's Content-Length did not reach the wire at all:\n%s", head)
 		})
 	}
 }
@@ -124,11 +125,13 @@ func TestConformance_RFC9112_Sec6_1_SingleContentLengthOnBodylessPost(t *testing
 		t.Run(method, func(t *testing.T) {
 			head := requestHead(t, method, true,
 				header.Field{Name: []byte("Content-Length"), Value: []byte("0")})
-			if n := countFieldLines(head, "content-length"); n != 1 {
-				t.Errorf("%d Content-Length field lines, want 1:\n%s\n"+
+
+			n := countFieldLines(head, "content-length")
+
+			assert.Equalf(t, 1, n,
+				"%d Content-Length field lines, want 1:\n%s\n"+
 					"the client must not append its own Content-Length: 0 when the "+
 					"caller already supplied one", n, head)
-			}
 		})
 	}
 }
@@ -139,7 +142,8 @@ func TestConformance_RFC9112_Sec6_1_SingleContentLengthOnBodylessPost(t *testing
 // against "fixing" the duplicate by dropping the header altogether.
 func TestConformance_RFC9112_Sec6_1_BodylessPostStillGetsContentLengthZero(t *testing.T) {
 	head := requestHead(t, "POST", true)
-	if !strings.Contains(strings.ToLower(head), "content-length: 0") {
-		t.Errorf("bodyless POST lost its Content-Length: 0:\n%s", head)
-	}
+
+	got := strings.ToLower(head)
+
+	assert.Containsf(t, got, "content-length: 0", "bodyless POST lost its Content-Length: 0:\n%s", head)
 }

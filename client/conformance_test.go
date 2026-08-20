@@ -1,7 +1,6 @@
 package client_test
 
 import (
-	"bytes"
 	"context"
 	"crypto/tls"
 	"errors"
@@ -15,6 +14,8 @@ import (
 	"testing/iotest"
 	"time"
 
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"golang.org/x/net/http2"
 
 	"github.com/lodgvideon/poseidon-http-client/client"
@@ -56,9 +57,8 @@ func TestConformance_RFC7540_Sec5_1_2_PoolGatesOnPeerMaxStreams(t *testing.T) {
 		<-release
 		w.WriteHeader(200)
 	}))
-	if err := http2.ConfigureServer(srv.Config, &http2.Server{MaxConcurrentStreams: serverMaxStr}); err != nil {
-		t.Fatalf("ConfigureServer: %v", err)
-	}
+	err := http2.ConfigureServer(srv.Config, &http2.Server{MaxConcurrentStreams: serverMaxStr})
+	require.NoError(t, err, "ConfigureServer")
 	srv.EnableHTTP2 = true
 	srv.StartTLS()
 	defer srv.Close()
@@ -76,9 +76,7 @@ func TestConformance_RFC7540_Sec5_1_2_PoolGatesOnPeerMaxStreams(t *testing.T) {
 			HealthCheckPeriod: time.Second,
 		},
 	})
-	if err != nil {
-		t.Fatalf("NewClient: %v", err)
-	}
+	require.NoError(t, err, "NewClient")
 	defer c.Close()
 
 	var wg sync.WaitGroup
@@ -103,21 +101,23 @@ func TestConformance_RFC7540_Sec5_1_2_PoolGatesOnPeerMaxStreams(t *testing.T) {
 	case <-allInflight:
 	case <-time.After(5 * time.Second):
 		close(release)
-		t.Fatalf("only %d/%d requests reached server within 5s — pool may be queueing instead of opening more conns", inflight.Load(), N)
+		require.Failf(t, "not every request reached the server",
+			"only %d/%d requests reached server within 5s — pool may be queueing instead of opening more conns", inflight.Load(), N)
 	}
 
 	// Snapshot stats while load is still pinned in handlers.
 	s := c.PoolStats()
 	if s.ActiveConns < expectedMin {
 		close(release)
-		t.Fatalf("ActiveConns = %d, want >= %d during %d-way load with peer MAX_CONCURRENT_STREAMS=%d", s.ActiveConns, expectedMin, N, peerCap)
+		require.Failf(t, "pool did not open extra conns to absorb the load",
+			"ActiveConns = %d, want >= %d during %d-way load with peer MAX_CONCURRENT_STREAMS=%d", s.ActiveConns, expectedMin, N, peerCap)
 	}
 
 	close(release)
 	wg.Wait()
 	close(errs)
 	for err := range errs {
-		t.Errorf("Do: %v", err)
+		assert.NoError(t, err, "Do")
 	}
 }
 
@@ -154,9 +154,7 @@ func TestConformance_RFC7540_Sec6_8_PoolEjectsDeadConnOnRelease(t *testing.T) {
 			DialBackoff:       10 * time.Millisecond,
 		},
 	})
-	if err != nil {
-		t.Fatalf("NewClient: %v", err)
-	}
+	require.NoError(t, err, "NewClient")
 	defer c.Close()
 
 	// Launch request in background; it will be in-flight while we trigger GOAWAY.
@@ -174,7 +172,7 @@ func TestConformance_RFC7540_Sec6_8_PoolEjectsDeadConnOnRelease(t *testing.T) {
 	case <-started:
 	case <-time.After(3 * time.Second):
 		close(proceed)
-		t.Fatal("request did not reach server handler")
+		require.Fail(t, "request did not reach server handler")
 	}
 
 	// Trigger graceful shutdown: server sends GOAWAY and waits for handlers
@@ -201,7 +199,7 @@ func TestConformance_RFC7540_Sec6_8_PoolEjectsDeadConnOnRelease(t *testing.T) {
 			t.Logf("request result after GOAWAY: %v (expected, conn may close before response)", err)
 		}
 	case <-time.After(5 * time.Second):
-		t.Fatal("request goroutine did not complete")
+		require.Fail(t, "request goroutine did not complete")
 	}
 
 	// KEY ASSERTION (RFC §6.8 pool contract): the dead conn must be evicted
@@ -216,7 +214,8 @@ func TestConformance_RFC7540_Sec6_8_PoolEjectsDeadConnOnRelease(t *testing.T) {
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
-	t.Fatalf("pool did not evict GOAWAY'd conn via release path; ActiveConns = %d (HealthCheckPeriod = 60s, so tick cannot be the cause)", c.PoolStats().ActiveConns)
+	require.Failf(t, "pool did not evict GOAWAY'd conn via release path",
+		"ActiveConns = %d (HealthCheckPeriod = 60s, so tick cannot be the cause)", c.PoolStats().ActiveConns)
 }
 
 func TestConformance_RFC7540_Sec6_8_PoolDrainsOnGoAway(t *testing.T) {
@@ -237,15 +236,12 @@ func TestConformance_RFC7540_Sec6_8_PoolDrainsOnGoAway(t *testing.T) {
 			DialBackoff:       10 * time.Millisecond,
 		},
 	})
-	if err != nil {
-		t.Fatalf("NewClient: %v", err)
-	}
+	require.NoError(t, err, "NewClient")
 	defer c.Close()
 
 	var _res client.Response
-	if err := c.Do(context.Background(), &client.Request{Method: "GET", Path: "/"}, &_res); err != nil {
-		t.Fatalf("first Do = %v", err)
-	}
+	err = c.Do(context.Background(), &client.Request{Method: "GET", Path: "/"}, &_res)
+	require.NoError(t, err, "first Do")
 
 	shCtx, shCancel := context.WithTimeout(context.Background(), 2*time.Second)
 	_ = srv.Config.Shutdown(shCtx)
@@ -258,7 +254,8 @@ func TestConformance_RFC7540_Sec6_8_PoolDrainsOnGoAway(t *testing.T) {
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
-	t.Fatalf("ActiveConns = %d, want 0 after peer shutdown", c.PoolStats().ActiveConns)
+	require.Failf(t, "pool did not drain after peer shutdown",
+		"ActiveConns = %d, want 0 after peer shutdown", c.PoolStats().ActiveConns)
 }
 
 // TestConformance_RFC7540_Sec8_1_BodyStream_EndStream checks RFC 7540 §8.1
@@ -281,19 +278,13 @@ func TestConformance_RFC7540_Sec8_1_BodyStream_EndStream(t *testing.T) {
 	defer cancel()
 
 	var res client.Response
-	if err := c.Do(ctx, &client.Request{Method: "GET", Path: "/", BodyMode: client.BodyStream}, &res); err != nil {
-		t.Fatalf("Do: %v", err)
-	}
+	err := c.Do(ctx, &client.Request{Method: "GET", Path: "/", BodyMode: client.BodyStream}, &res)
+	require.NoError(t, err, "Do")
 	got, err := io.ReadAll(res.BodyReader)
-	if err != nil {
-		t.Fatalf("ReadAll: %v", err)
-	}
-	if err := res.BodyReader.Close(); err != nil {
-		t.Fatalf("Close: %v", err)
-	}
-	if !bytes.Equal(got, payload) {
-		t.Fatalf("body = %q, want %q", got, payload)
-	}
+	require.NoError(t, err, "ReadAll")
+	require.NoError(t, res.BodyReader.Close(), "Close")
+
+	require.Equalf(t, payload, got, "body = %q, want %q", got, payload)
 	// Close returned without error — stream ended cleanly (END_STREAM
 	// received, no RST_STREAM sent). Confirms §8.1 half-close.
 }
@@ -353,15 +344,10 @@ func TestConformance_RFC9113_Sec8_1_BenignResetKeepsBufferedResponse(t *testing.
 		Body:     make([]byte, benignResetRequest),
 		BodyMode: client.BodyBuffer,
 	}, &res)
-	if err != nil {
-		t.Fatalf("Do = %v; want the response the server already sent", err)
-	}
-	if res.Status != 200 {
-		t.Fatalf("status = %d, want 200", res.Status)
-	}
-	if string(res.Body) != "answer" {
-		t.Fatalf("body = %q, want %q — the response must survive the benign reset intact", res.Body, "answer")
-	}
+	require.NoError(t, err, "Do; want the response the server already sent")
+	require.Equal(t, 200, res.Status, "response status")
+	require.Equalf(t, "answer", string(res.Body),
+		"body = %q, want %q — the response must survive the benign reset intact", res.Body, "answer")
 }
 
 // TestConformance_RFC9113_Sec8_1_RealResetStillFailsUpload is the
@@ -397,15 +383,13 @@ func TestConformance_RFC9113_Sec8_1_RealResetStillFailsUpload(t *testing.T) {
 		Body:     make([]byte, benignResetRequest),
 		BodyMode: client.BodyBuffer,
 	}, &res)
-	if err == nil {
-		t.Fatalf("Do = nil (status %d, body %q); want the peer's reset", res.Status, res.Body)
-	}
-	if !errors.Is(err, conn.ErrStreamClosed) {
-		t.Fatalf("Do error = %v (%T), want it to wrap conn.ErrStreamClosed", err, err)
-	}
+	require.Errorf(t, err, "Do = nil (status %d, body %q); want the peer's reset", res.Status, res.Body)
+	require.ErrorIsf(t, err, conn.ErrStreamClosed,
+		"Do error = %v (%T), want it to wrap conn.ErrStreamClosed", err, err)
 	var sre *client.StreamResetError
 	if errors.As(err, &sre) {
-		t.Fatalf("Do error = %v exposes *StreamResetError{%v}; the retry layer keys on that type and would replay the request", err, sre.Code)
+		require.Failf(t, "a failed upload surfaced *StreamResetError",
+			"Do error = %v exposes *StreamResetError{%v}; the retry layer keys on that type and would replay the request", err, sre.Code)
 	}
 }
 
@@ -456,9 +440,10 @@ func TestConformance_RFC9113_Sec8_1_CutUploadFailureIsNotRetryable(t *testing.T)
 	if err == nil {
 		t.Skipf("the response survived the reset (status %d) — this test needs the event buffer to overflow", res.Status)
 	}
-	if n := executions.Load(); n != 1 {
-		t.Fatalf("server executed the DELETE %d times, want 1: err = %v (%T) was classified as retryable", n, err, err)
-	}
+
+	n := executions.Load()
+	require.Equalf(t, int32(1), n,
+		"server executed the DELETE %d times, want 1: err = %v (%T) was classified as retryable", n, err, err)
 }
 
 // TestConformance_RFC9113_Sec8_1_BenignResetKeepsStreamedResponse is the
@@ -483,20 +468,13 @@ func TestConformance_RFC9113_Sec8_1_BenignResetKeepsStreamedResponse(t *testing.
 		Body:     make([]byte, benignResetRequest),
 		BodyMode: client.BodyStream,
 	}, &res)
-	if err != nil {
-		t.Fatalf("Do = %v; want the 413 the server already sent", err)
-	}
+	require.NoError(t, err, "Do; want the 413 the server already sent")
 	defer func() { _ = res.BodyReader.Close() }()
-	if res.Status != http.StatusRequestEntityTooLarge {
-		t.Fatalf("status = %d, want 413", res.Status)
-	}
+
+	require.Equal(t, http.StatusRequestEntityTooLarge, res.Status, "response status")
 	body, rerr := io.ReadAll(res.BodyReader)
-	if rerr != nil {
-		t.Fatalf("BodyReader read = %v, want io.EOF at once: the response ended on its HEADERS frame", rerr)
-	}
-	if len(body) != 0 {
-		t.Fatalf("body = %q, want empty", body)
-	}
+	require.NoError(t, rerr, "BodyReader read; want io.EOF at once: the response ended on its HEADERS frame")
+	require.Emptyf(t, body, "body = %q, want empty", body)
 }
 
 // TestConformance_RFC9113_Sec8_1_BenignResetDuringTrailers covers the second
@@ -532,12 +510,10 @@ func TestConformance_RFC9113_Sec8_1_BenignResetDuringTrailers(t *testing.T) {
 		BodyMode:   client.BodyBuffer,
 		Trailers:   []conn.HeaderField{{Name: []byte("x-checksum"), Value: []byte("deadbeef")}},
 	}, &res)
-	if err != nil {
-		t.Fatalf("Do = %v; want the response the server already sent", err)
-	}
-	if res.Status != 200 || string(res.Body) != "answer" {
-		t.Fatalf("status=%d body=%q, want 200 %q", res.Status, res.Body, "answer")
-	}
+	require.NoError(t, err, "Do; want the response the server already sent")
+	require.Equalf(t, 200, res.Status, "status=%d body=%q, want 200 %q", res.Status, res.Body, "answer")
+	require.Equalf(t, "answer", string(res.Body),
+		"status=%d body=%q, want 200 %q", res.Status, res.Body, "answer")
 }
 
 // resetRendezvousReader yields one small chunk, then blocks until the server
@@ -583,12 +559,11 @@ func TestConformance_RFC9113_Sec8_1_NonResetWriteFailureStillAborts(t *testing.T
 		BodyReader: iotest.ErrReader(sentinel),
 		BodyMode:   client.BodyBuffer,
 	}, &res)
-	if !errors.Is(err, sentinel) {
-		t.Fatalf("Do = %v (%T), want the body reader's own error", err, err)
-	}
-	if d := time.Since(start); d > 5*time.Second {
-		t.Fatalf("Do took %v — it waited for a response that was never coming", d)
-	}
+	d := time.Since(start)
+
+	require.ErrorIsf(t, err, sentinel, "Do = %v (%T), want the body reader's own error", err, err)
+	require.LessOrEqualf(t, d, 5*time.Second,
+		"Do took %v — it waited for a response that was never coming", d)
 }
 
 // TestConformance_RFC9113_Sec8_7_LocalOverflowIsNotRetried pins the code conn
@@ -633,9 +608,7 @@ func TestConformance_RFC9113_Sec8_7_LocalOverflowIsNotRetried(t *testing.T) {
 			StreamEventBuffer: 1,
 		},
 	})
-	if err != nil {
-		t.Fatalf("NewClient: %v", err)
-	}
+	require.NoError(t, err, "NewClient")
 	t.Cleanup(func() { _ = c.Close() })
 	r := c.Retryer(client.RetryOptions{
 		MaxAttempts: 3,
@@ -654,13 +627,14 @@ func TestConformance_RFC9113_Sec8_7_LocalOverflowIsNotRetried(t *testing.T) {
 	if err == nil {
 		t.Skipf("the response fit after all (status %d, %d bytes) — this test needs the event buffer to overflow", res.Status, len(res.Body))
 	}
+
 	var sre *client.StreamResetError
 	if errors.As(err, &sre) && sre.Code == frame.ErrCodeRefusedStream {
-		t.Fatalf("a locally-shed response reported REFUSED_STREAM, which promises the server never processed the request")
+		require.Fail(t, "a locally-shed response reported REFUSED_STREAM, which promises the server never processed the request")
 	}
-	if n := executions.Load(); n != 1 {
-		t.Fatalf("server executed the DELETE %d times, want 1: err = %v (%T) was classified as retryable", n, err, err)
-	}
+	n := executions.Load()
+	require.Equalf(t, int32(1), n,
+		"server executed the DELETE %d times, want 1: err = %v (%T) was classified as retryable", n, err, err)
 }
 
 // TestConformance_ChunkedResponseSurvivesAtDefaultConfig is #344 end to end, at
@@ -697,13 +671,12 @@ func TestConformance_ChunkedResponseSurvivesAtDefaultConfig(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	var res client.Response
-	if err := c.Do(ctx, &client.Request{
+	err := c.Do(ctx, &client.Request{
 		Method:   "GET",
 		Path:     "/chunked",
 		BodyMode: client.BodyStream,
-	}, &res); err != nil {
-		t.Fatalf("Do: %v", err)
-	}
+	}, &res)
+	require.NoError(t, err, "Do")
 	defer func() { _ = res.BodyReader.Close() }()
 
 	// Headers are in hand and nothing is reading the body: release the flood
@@ -712,10 +685,6 @@ func TestConformance_ChunkedResponseSurvivesAtDefaultConfig(t *testing.T) {
 	time.Sleep(250 * time.Millisecond)
 
 	body, err := io.ReadAll(res.BodyReader)
-	if err != nil {
-		t.Fatalf("read = %v after %d bytes; the server wrote the response in full", err, len(body))
-	}
-	if len(body) != chunks*chunkSize {
-		t.Fatalf("body = %d bytes, want %d", len(body), chunks*chunkSize)
-	}
+	require.NoErrorf(t, err, "read failed after %d bytes; the server wrote the response in full", len(body))
+	require.Lenf(t, body, chunks*chunkSize, "body = %d bytes, want %d", len(body), chunks*chunkSize)
 }
