@@ -9,6 +9,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
 	"github.com/lodgvideon/poseidon-http-client/http3"
 )
 
@@ -58,33 +61,34 @@ func TestH3Pool_Stats_Empty(t *testing.T) {
 	t.Parallel()
 	p := newH3Pool("h:443", nil, PoolOptions{MaxConnsPerHost: 2}, newH3FakeDialer().dial, nil, nil)
 	t.Cleanup(func() { _ = p.Close() })
-	if s := p.Stats(); s != (Stats{}) {
-		t.Fatalf("empty Stats = %+v, want zero", s)
-	}
+
+	s := p.Stats()
+
+	assert.Equal(t, Stats{}, s, "a pool that has dialed nothing must report zero, not a partial snapshot")
 }
 
 func TestH3Pool_Close_Idempotent(t *testing.T) {
 	t.Parallel()
 	p := newH3Pool("h:443", nil, PoolOptions{MaxConnsPerHost: 1}, newH3FakeDialer().dial, nil, nil)
-	if err := p.Close(); err != nil {
-		t.Fatalf("first Close = %v", err)
-	}
-	if err := p.Close(); err != nil {
-		t.Fatalf("second Close = %v", err)
-	}
+
+	first := p.Close()
+	second := p.Close()
+
+	assert.NoError(t, first, "first Close")
+	assert.NoError(t, second, "second Close must be a no-op, not an error a caller has to special-case")
 }
 
 func TestH3Pool_StatsAfterClose_ReturnsZero(t *testing.T) {
 	t.Parallel()
 	p := newH3Pool("h:443", nil, PoolOptions{MaxConnsPerHost: 1}, newH3FakeDialer().dial, nil, nil)
 	_ = p.Close()
-	if s := p.Stats(); s != (Stats{}) {
-		t.Fatalf("Stats after Close = %+v, want zero", s)
-	}
+
+	s := p.Stats()
 	_, err := p.acquire(context.Background())
-	if !errors.Is(err, ErrPoolClosed) {
-		t.Fatalf("acquire after Close = %v, want ErrPoolClosed", err)
-	}
+
+	assert.Equal(t, Stats{}, s, "Stats after Close must be zero, not the last live snapshot")
+	assert.Truef(t, errors.Is(err, ErrPoolClosed),
+		"acquire after Close = %v; a caller cannot tell a closed pool from a dial failure", err)
 }
 
 // TestH3Pool_DistributesStreamsAcrossConns is the core pooling behaviour: with
@@ -107,35 +111,25 @@ func TestH3Pool_DistributesStreamsAcrossConns(t *testing.T) {
 		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 		mc, err := p.acquire(ctx)
 		cancel()
-		if err != nil {
-			t.Fatalf("acquire[%d] = %v", i, err)
-		}
-		if mc.active != 1 {
-			t.Fatalf("acquire[%d] conn active = %d, want 1", i, mc.active)
-		}
-		if seen[mc.cl] {
-			t.Fatalf("acquire[%d] reused a conn already at its stream cap", i)
-		}
+		require.NoErrorf(t, err, "acquire[%d]", i)
+		require.Equalf(t, 1, mc.active, "acquire[%d] conn active count", i)
+		require.Falsef(t, seen[mc.cl], "acquire[%d] reused a conn already at its stream cap", i)
 		seen[mc.cl] = true
 		held = append(held, mc)
 	}
-
-	if got := d.count("h:443"); got != 3 {
-		t.Fatalf("dialed %d QUIC conns, want 3 (one per capped stream)", got)
-	}
-	s := p.Stats()
-	if s.ActiveConns != 3 || s.InFlightStreams != 3 {
-		t.Fatalf("Stats = %+v, want ActiveConns=3 InFlightStreams=3", s)
-	}
-
 	// A fourth acquire is at capacity (3 conns × 1 stream) and must block until a
 	// hold is released, proving the pool does not exceed MaxConnsPerHost.
 	ctx, cancel := context.WithTimeout(context.Background(), 150*time.Millisecond)
-	_, err := p.acquire(ctx)
+	_, fourthErr := p.acquire(ctx)
 	cancel()
-	if !errors.Is(err, context.DeadlineExceeded) {
-		t.Fatalf("fourth acquire at capacity = %v, want DeadlineExceeded (blocked)", err)
-	}
+
+	assert.Equal(t, 3, d.count("h:443"), "one QUIC conn per capped stream")
+	s := p.Stats()
+	assert.Equal(t, 3, s.ActiveConns, "Stats.ActiveConns with three streams held")
+	assert.Equal(t, 3, s.InFlightStreams, "Stats.InFlightStreams with three streams held")
+	assert.Truef(t, errors.Is(fourthErr, context.DeadlineExceeded),
+		"fourth acquire at capacity = %v, want DeadlineExceeded: the pool must block "+
+			"rather than exceed MaxConnsPerHost", fourthErr)
 
 	for _, mc := range held {
 		p.release(mc)
@@ -159,19 +153,18 @@ func TestH3Pool_ReusesConnUnderCap(t *testing.T) {
 		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 		mc, err := p.acquire(ctx)
 		cancel()
-		if err != nil {
-			t.Fatalf("acquire[%d] = %v", i, err)
-		}
+		require.NoErrorf(t, err, "acquire[%d]", i)
 		if i == 0 {
 			first = mc.cl
-		} else if mc.cl != first {
-			t.Fatalf("acquire[%d] used a new conn; want reuse of the single under-cap conn", i)
+		} else {
+			require.Samef(t, first, mc.cl,
+				"acquire[%d] used a new conn; want reuse of the single under-cap conn", i)
 		}
 		p.release(mc)
 	}
-	if got := d.count("h:443"); got != 1 {
-		t.Fatalf("dialed %d conns for 3 sequential under-cap acquires, want 1", got)
-	}
+
+	assert.Equal(t, 1, d.count("h:443"),
+		"three sequential under-cap acquires must share one conn, not dial per request")
 }
 
 // TestH3Pool_EvictsDeadConnOnRelease proves the release path (not the background
@@ -190,7 +183,6 @@ func TestH3Pool_EvictsDeadConnOnRelease(t *testing.T) {
 	}
 	hp := new(atomic.Pointer[Hooks])
 	hp.Store(hooks)
-
 	d := newH3FakeDialer()
 	p := newH3Pool("h:443", nil, PoolOptions{
 		MaxConnsPerHost:   2,
@@ -199,12 +191,10 @@ func TestH3Pool_EvictsDeadConnOnRelease(t *testing.T) {
 		DialBackoff:       10 * time.Millisecond,
 	}, d.dial, hp, nil)
 	t.Cleanup(func() { _ = p.Close() })
-
 	mc, err := p.acquire(context.Background())
-	if err != nil {
-		t.Fatalf("acquire: %v", err)
-	}
-	fake := mc.cl.(*fakeH3Client)
+	require.NoError(t, err, "acquire")
+	fake, ok := mc.cl.(*fakeH3Client)
+	require.Truef(t, ok, "pooled conn is %T, want *fakeH3Client", mc.cl)
 
 	// Simulate the QUIC connection dying, then release.
 	fake.kill()
@@ -212,21 +202,15 @@ func TestH3Pool_EvictsDeadConnOnRelease(t *testing.T) {
 
 	// The release path must evict (fire CloseDead) promptly.
 	deadline := time.Now().Add(3 * time.Second)
-	for time.Now().Before(deadline) {
-		if deadClosed.Load() == 1 {
-			break
-		}
+	for time.Now().Before(deadline) && deadClosed.Load() != 1 {
 		time.Sleep(10 * time.Millisecond)
 	}
-	if deadClosed.Load() != 1 {
-		t.Fatalf("OnConnClose(CloseDead) fired %d times, want 1 via release path", deadClosed.Load())
-	}
-	if got := atomic.LoadInt32(&fake.closes); got < 1 {
-		t.Fatalf("dead conn Close() called %d times, want >= 1", got)
-	}
-	if s := p.Stats(); s.ActiveConns != 0 {
-		t.Fatalf("ActiveConns = %d after dead-conn release, want 0", s.ActiveConns)
-	}
+	assert.EqualValues(t, 1, deadClosed.Load(),
+		"OnConnClose(CloseDead) did not fire once via the release path; with a 60s "+
+			"HealthCheckPeriod the tick cannot have been the evictor")
+	assert.GreaterOrEqual(t, atomic.LoadInt32(&fake.closes), int32(1),
+		"the dead conn was evicted but never closed")
+	assert.Equal(t, 0, p.Stats().ActiveConns, "ActiveConns after a dead-conn release")
 }
 
 // TestH3Pool_Close_ClosesAllConns verifies Close closes every pooled QUIC conn and
@@ -237,25 +221,20 @@ func TestH3Pool_Close_ClosesAllConns(t *testing.T) {
 	hooks := &Hooks{OnConnClose: func(ConnCloseEvent) { closes.Add(1) }}
 	hp := new(atomic.Pointer[Hooks])
 	hp.Store(hooks)
-
 	d := newH3FakeDialer()
 	p := newH3Pool("h:443", nil, PoolOptions{MaxConnsPerHost: 3, MaxStreamsPerConn: 1}, d.dial, hp, nil)
-
 	// Hold three streams so all three conns exist when Close runs.
 	for i := 0; i < 3; i++ {
-		if _, err := p.acquire(context.Background()); err != nil {
-			t.Fatalf("acquire[%d]: %v", i, err)
-		}
+		_, err := p.acquire(context.Background())
+		require.NoErrorf(t, err, "acquire[%d]", i)
 	}
+
 	_ = p.Close()
 
-	if got := closes.Load(); got != 3 {
-		t.Fatalf("OnConnClose fired %d times on Close, want 3", got)
-	}
-	for _, f := range d.all() {
-		if atomic.LoadInt32(&f.closes) != 1 {
-			t.Fatalf("a pooled conn Close() called %d times, want 1", f.closes)
-		}
+	assert.EqualValues(t, 3, closes.Load(), "OnConnClose must fire once per pooled conn on Close")
+	for i, f := range d.all() {
+		assert.EqualValuesf(t, 1, atomic.LoadInt32(&f.closes),
+			"pooled conn %d was closed the wrong number of times", i)
 	}
 }
 
@@ -271,20 +250,17 @@ func TestH3Pool_DialFailure_SetsBackoff(t *testing.T) {
 		DialBackoff:     500 * time.Millisecond,
 	}, d.dial, nil, nil)
 	t.Cleanup(func() { _ = p.Close() })
-
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 
-	if _, err := p.acquire(ctx); err == nil {
-		t.Fatal("first acquire should fail on dial error")
-	}
-	_, err := p.acquire(ctx)
-	if !errors.Is(err, ErrDialBackoff) {
-		t.Fatalf("second acquire = %v, want ErrDialBackoff", err)
-	}
-	if got := d.dials.Load(); got != 1 {
-		t.Fatalf("dial count = %d, want 1 (backoff suppressed the second)", got)
-	}
+	_, firstErr := p.acquire(ctx)
+	_, secondErr := p.acquire(ctx)
+
+	require.Error(t, firstErr, "the first acquire must fail on the dial error")
+	assert.Truef(t, errors.Is(secondErr, ErrDialBackoff),
+		"second acquire = %v, want ErrDialBackoff", secondErr)
+	assert.EqualValues(t, 1, d.dials.Load(),
+		"the backoff window did not suppress the second dial")
 }
 
 // --- end-to-end through Client ---
@@ -300,13 +276,9 @@ func newH3PoolTestClient(t *testing.T, pool PoolOptions, dialFn func(context.Con
 		TLSConfig: &tls.Config{ServerName: "h3.example"},
 		Pool:      &pool,
 	})
-	if err != nil {
-		t.Fatalf("NewClient(TransportH3Pool): %v", err)
-	}
+	require.NoError(t, err, "NewClient(TransportH3Pool)")
 	pt, ok := c.tr.(*h3PoolTransport)
-	if !ok {
-		t.Fatalf("transport is %T, want *h3PoolTransport", c.tr)
-	}
+	require.Truef(t, ok, "transport is %T, want *h3PoolTransport", c.tr)
 	pt.p.dialFn = dialFn
 	return c
 }
@@ -317,23 +289,23 @@ func TestH3PoolClient_Do_RoundTripAndReuse(t *testing.T) {
 	c := newH3PoolTestClient(t, PoolOptions{MaxConnsPerHost: 2, MaxStreamsPerConn: 4, HealthCheckPeriod: time.Second}, d.dial)
 	defer func() { _ = c.Close() }()
 
-	for i := 0; i < 3; i++ {
-		var resp Response
-		if err := c.Do(context.Background(), &Request{Method: "GET", Path: "/", BodyMode: BodyBuffer}, &resp); err != nil {
-			t.Fatalf("Do[%d]: %v", i, err)
-		}
-		if resp.Status != 200 || string(resp.Body) != "ok" {
-			t.Fatalf("Do[%d] resp = {%d %q}, want {200 ok}", i, resp.Status, resp.Body)
-		}
+	resps := make([]Response, 3)
+	for i := range resps {
+		require.NoErrorf(t,
+			c.Do(context.Background(), &Request{Method: "GET", Path: "/", BodyMode: BodyBuffer}, &resps[i]),
+			"Do[%d]", i)
+	}
+
+	for i, resp := range resps {
+		assert.Equalf(t, 200, resp.Status, "Do[%d] status", i)
+		assert.Equalf(t, "ok", string(resp.Body), "Do[%d] body", i)
 	}
 	// Sequential buffered requests release their stream immediately, so all three
 	// reuse the one under-cap conn.
-	if got := d.count("h3.example:443"); got != 1 {
-		t.Fatalf("dialed %d conns for 3 sequential requests, want 1 (reuse)", got)
-	}
-	if s := c.PoolStats(); s.ActiveConns != 1 {
-		t.Fatalf("PoolStats.ActiveConns = %d, want 1", s.ActiveConns)
-	}
+	assert.Equal(t, 1, d.count("h3.example:443"),
+		"three sequential requests dialed more than one conn: the stream was not "+
+			"released back to the under-cap conn")
+	assert.Equal(t, 1, c.PoolStats().ActiveConns, "PoolStats.ActiveConns")
 }
 
 // TestH3PoolClient_ConcurrentDo_DistributesAcrossConns fires more concurrent
@@ -350,7 +322,6 @@ func TestH3PoolClient_ConcurrentDo_DistributesAcrossConns(t *testing.T) {
 	var inflight atomic.Int32
 	allInflight := make(chan struct{})
 	var once sync.Once
-
 	dial := func(_ context.Context, _ string, _ *tls.Config) (h3Client, error) {
 		return &barrierH3Client{
 			resp:      &http3.Response{Status: 200},
@@ -385,14 +356,17 @@ func TestH3PoolClient_ConcurrentDo_DistributesAcrossConns(t *testing.T) {
 	case <-allInflight:
 	case <-time.After(5 * time.Second):
 		close(release)
-		t.Fatalf("only %d/%d requests reached the server; pool may be queueing instead of opening conns", inflight.Load(), n)
+		require.FailNowf(t, "the pool never got every request in flight",
+			"only %d/%d requests reached the server; the pool may be queueing instead "+
+				"of opening conns", inflight.Load(), n)
 	}
-
 	s := c.PoolStats()
 	if s.ActiveConns < 2 {
 		close(release)
-		t.Fatalf("ActiveConns = %d during %d-way load with cap %d; want >= 2 conns", s.ActiveConns, n, streamsPerConn)
 	}
+	require.GreaterOrEqualf(t, s.ActiveConns, 2,
+		"ActiveConns = %d during %d-way load with per-conn cap %d; one conn cannot "+
+			"carry them all", s.ActiveConns, n, streamsPerConn)
 	// Expect exactly ceil(n/streamsPerConn) = maxConns conns to absorb the load.
 	if s.ActiveConns != maxConns {
 		t.Logf("ActiveConns = %d (want %d); acceptable if >= 2", s.ActiveConns, maxConns)
@@ -402,7 +376,7 @@ func TestH3PoolClient_ConcurrentDo_DistributesAcrossConns(t *testing.T) {
 	wg.Wait()
 	close(errs)
 	for err := range errs {
-		t.Errorf("Do: %v", err)
+		assert.NoError(t, err, "Do under concurrent load")
 	}
 }
 
@@ -445,35 +419,31 @@ func (b *barrierH3Client) Close() error {
 
 func TestNewH3PoolClient_WiresTransport(t *testing.T) {
 	t.Parallel()
+
 	c, err := NewH3PoolClient("h3.example:443", &tls.Config{ServerName: "h3.example"},
 		PoolOptions{MaxConnsPerHost: 4, MaxStreamsPerConn: 8})
-	if err != nil {
-		t.Fatalf("NewH3PoolClient: %v", err)
-	}
+
+	require.NoError(t, err, "NewH3PoolClient")
 	defer func() { _ = c.Close() }()
 	pt, ok := c.tr.(*h3PoolTransport)
-	if !ok {
-		t.Fatalf("transport is %T, want *h3PoolTransport", c.tr)
-	}
-	if pt.p.addr != "h3.example:443" || pt.p.opts.MaxConnsPerHost != 4 {
-		t.Fatalf("h3Pool not wired: addr=%q maxConns=%d", pt.p.addr, pt.p.opts.MaxConnsPerHost)
-	}
+	require.Truef(t, ok, "transport is %T, want *h3PoolTransport", c.tr)
+	assert.Equal(t, "h3.example:443", pt.p.addr, "the pool was not wired with the dial address")
+	assert.Equal(t, 4, pt.p.opts.MaxConnsPerHost, "the pool did not receive the caller's PoolOptions")
 }
 
 func TestNewClient_H3Pool_RequiresPoolAndTLS(t *testing.T) {
 	t.Parallel()
-	// Missing Pool → rejected.
-	if _, err := NewClient(ClientOptions{
+
+	_, noPool := NewClient(ClientOptions{
 		Addr: "h:443", Transport: TransportH3Pool, TLSConfig: &tls.Config{ServerName: "h"},
-	}); !errors.Is(err, ErrInvalidPoolOptions) {
-		t.Fatalf("missing Pool err = %v, want ErrInvalidPoolOptions", err)
-	}
-	// Missing TLSConfig → rejected.
-	if _, err := NewClient(ClientOptions{
+	})
+	_, noTLS := NewClient(ClientOptions{
 		Addr: "h:443", Transport: TransportH3Pool, Pool: &PoolOptions{MaxConnsPerHost: 2},
-	}); err == nil {
-		t.Fatal("missing TLSConfig for TransportH3Pool = nil error, want failure")
-	}
+	})
+
+	assert.Truef(t, errors.Is(noPool, ErrInvalidPoolOptions),
+		"missing Pool err = %v, want ErrInvalidPoolOptions so a caller can classify it", noPool)
+	assert.Error(t, noTLS, "TransportH3Pool without a TLSConfig has nothing to dial with")
 }
 
 // TestConformance_RFC9114_Sec52_PoolEvictsGoAwayConn pins the pool half of the §5.2
@@ -491,35 +461,34 @@ func TestConformance_RFC9114_Sec52_PoolEvictsGoAwayConn(t *testing.T) {
 		{cl: gone, active: 0, streamCap: 10},
 		{cl: fresh, active: 1, streamCap: 10},
 	}
+	baseline := p.pickLeastLoaded(conns)
+	require.NotNil(t, baseline, "baseline: an idle conn must be selectable at all")
+	require.Same(t, gone, baseline.cl, "baseline: the least-loaded pick should be the idle conn")
 
-	if got := p.pickLeastLoaded(conns); got == nil || got.cl != gone {
-		t.Fatal("baseline: the least-loaded pick should be the idle conn")
-	}
 	atomic.StoreInt32(&gone.goaway, 1)
-	if got := p.pickLeastLoaded(conns); got == nil || got.cl != fresh {
-		t.Fatal("a GOAWAY'd conn must not be handed out for a new request")
-	}
+
+	afterGoAway := p.pickLeastLoaded(conns)
+	require.NotNil(t, afterGoAway, "a healthy conn was still available and must be picked")
+	assert.Same(t, fresh, afterGoAway.cl,
+		"a GOAWAY'd conn must not be handed out for a new request (RFC 9114 §5.2): "+
+			"reusing it turns a graceful shutdown into a retry loop")
 
 	// Two exchanges still in flight on it: the first release must NOT close it —
 	// the server has undertaken to finish what it already accepted.
 	rs := &h3RunState{conns: conns}
 	conns[0].active = 2
 	p.handleRelease(rs, h3ReleaseMsg{mc: conns[0]})
-	if len(rs.conns) != 2 {
-		t.Fatal("a GOAWAY'd conn with work still in flight must not be evicted")
-	}
-	if atomic.LoadInt32(&gone.closes) != 0 {
-		t.Fatal("a GOAWAY'd conn must not be closed under an in-flight request")
-	}
+	require.Len(t, rs.conns, 2, "a GOAWAY'd conn with work still in flight must not be evicted")
+	require.EqualValues(t, 0, atomic.LoadInt32(&gone.closes),
+		"a GOAWAY'd conn must not be closed under an in-flight request")
 
 	// The last one drains: now it has nothing left to do and is evicted.
 	p.handleRelease(rs, h3ReleaseMsg{mc: conns[0]})
-	if len(rs.conns) != 1 || rs.conns[0].cl != fresh {
-		t.Fatalf("drained GOAWAY'd conn not evicted: %d conns left", len(rs.conns))
-	}
-	if atomic.LoadInt32(&gone.closes) != 1 {
-		t.Fatalf("the drained GOAWAY'd conn should have been closed exactly once, got %d", atomic.LoadInt32(&gone.closes))
-	}
+
+	require.Len(t, rs.conns, 1, "a drained GOAWAY'd conn was not evicted")
+	assert.Same(t, fresh, rs.conns[0].cl, "the healthy conn must be the survivor")
+	assert.EqualValues(t, 1, atomic.LoadInt32(&gone.closes),
+		"the drained GOAWAY'd conn should have been closed exactly once")
 }
 
 // TestConformance_RFC9114_Sec52_PoolEvictsIdleGoAwayConn is the other half of the
@@ -534,16 +503,14 @@ func TestConformance_RFC9114_Sec52_PoolEvictsIdleGoAwayConn(t *testing.T) {
 	rs := &h3RunState{conns: []*h3ManagedConn{{cl: gone, active: 0, streamCap: 10}}}
 	atomic.StoreInt32(&gone.goaway, 1)
 
-	if got := h3CountLive(rs.conns); got != 0 {
-		t.Fatalf("h3CountLive = %d, want 0 — a GOAWAY'd conn must not hold the cap", got)
-	}
+	live := h3CountLive(rs.conns)
 	p.handleTick(rs)
-	if len(rs.conns) != 0 {
-		t.Fatalf("idle GOAWAY'd conn survived the health tick: %d conns", len(rs.conns))
-	}
-	if atomic.LoadInt32(&gone.closes) != 1 {
-		t.Fatalf("evicted conn closed %d times, want 1", atomic.LoadInt32(&gone.closes))
-	}
+
+	assert.Equal(t, 0, live,
+		"a GOAWAY'd conn must not hold the cap: counting it parks every acquire as a "+
+			"waiter with no dial started")
+	assert.Empty(t, rs.conns, "an idle GOAWAY'd conn survived the health tick")
+	assert.EqualValues(t, 1, atomic.LoadInt32(&gone.closes), "the evicted conn was not closed once")
 }
 
 // TestConformance_RFC9114_Sec52_GoAwayEvictionDialsForWaiter covers the case the
@@ -561,7 +528,6 @@ func TestConformance_RFC9114_Sec52_GoAwayEvictionDialsForWaiter(t *testing.T) {
 		return &barrierH3Client{}, nil
 	}
 	p := inertH3Pool(PoolOptions{MaxConnsPerHost: 1}, dialFn)
-
 	gone := &barrierH3Client{}
 	mc := &h3ManagedConn{cl: gone, active: 1, streamCap: 1}
 	rs := &h3RunState{
@@ -571,16 +537,17 @@ func TestConformance_RFC9114_Sec52_GoAwayEvictionDialsForWaiter(t *testing.T) {
 	atomic.StoreInt32(&gone.goaway, 1)
 
 	p.handleRelease(rs, h3ReleaseMsg{mc: mc})
-	if len(rs.conns) != 0 {
-		t.Fatalf("drained GOAWAY'd conn not evicted: %d conns", len(rs.conns))
-	}
-	if rs.inFlightDials != 1 {
-		t.Fatalf("inFlightDials = %d, want 1 — the parked waiter has nothing to be served by", rs.inFlightDials)
-	}
+
+	assert.Empty(t, rs.conns, "the drained GOAWAY'd conn was not evicted")
+	assert.Equalf(t, 1, rs.inFlightDials,
+		"inFlightDials = %d, want 1 — the parked waiter has nothing left to be served by",
+		rs.inFlightDials)
 	select {
 	case <-dialed:
 	case <-time.After(2 * time.Second):
-		t.Fatal("no replacement dial was started for the parked waiter")
+		assert.Fail(t, "no replacement dial was started for the parked waiter",
+			"handleAcquire does not run again for an already-parked request, and "+
+				"newH3Pool does not default AcquireTimeout, so this waiter hangs until Close")
 	}
 }
 
@@ -640,16 +607,14 @@ func TestH3Pool_DialFailureDoesNotStrandQueuedWaiters(t *testing.T) {
 		for i, w := range []h3AcquireReq{a, b} {
 			select {
 			case resp := <-w.reply:
-				if resp.err == nil {
-					t.Fatalf("waiter %d got a conn, want the dial error", i)
-				}
+				assert.Errorf(t, resp.err, "waiter %d got a conn, want the dial error", i)
 			default:
-				t.Fatalf("waiter %d left queued with no dial in flight", i)
+				assert.Failf(t, "a waiter was left queued with no dial in flight",
+					"waiter %d waits a whole HealthCheckPeriod while a fresh acquire in the "+
+						"same state is refused instantly", i)
 			}
 		}
-		if len(rs.waiters) != 0 {
-			t.Fatalf("%d waiters still queued", len(rs.waiters))
-		}
+		assert.Empty(t, rs.waiters, "waiters remained queued after every one was answered")
 	})
 
 	// An eviction that lands inside the dial backoff cannot dial. This used to
@@ -665,21 +630,18 @@ func TestH3Pool_DialFailureDoesNotStrandQueuedWaiters(t *testing.T) {
 
 		p.handleTick(rs)
 
-		if rs.inFlightDials != 0 {
-			t.Fatal("dialled inside the backoff window")
-		}
+		assert.Equal(t, 0, rs.inFlightDials, "the tick dialled inside the backoff window")
 		select {
 		case resp := <-w.reply:
-			if !errors.Is(resp.err, ErrDialBackoff) {
-				t.Fatalf("waiter got %v, want ErrDialBackoff — the answer handleAcquire "+
+			assert.Truef(t, errors.Is(resp.err, ErrDialBackoff),
+				"waiter got %v, want ErrDialBackoff — the answer handleAcquire "+
 					"already gives a new request in this exact state", resp.err)
-			}
 		default:
-			t.Fatal("waiter left parked for the next health tick, a whole HealthCheckPeriod away")
+			assert.Fail(t, "waiter left parked for the next health tick",
+				"that tick is a whole HealthCheckPeriod away, while handleAcquire refuses "+
+					"a fresh acquire in the identical state instantly")
 		}
-		if len(rs.waiters) != 0 {
-			t.Fatalf("%d waiters still queued after being answered", len(rs.waiters))
-		}
+		assert.Empty(t, rs.waiters, "waiters remained queued after being answered")
 	})
 
 	// The other half of what the subtest above used to cover, split out because it
@@ -703,13 +665,14 @@ func TestH3Pool_DialFailureDoesNotStrandQueuedWaiters(t *testing.T) {
 
 		p.handleTick(rs)
 
-		if rs.inFlightDials != 1 {
-			t.Fatalf("inFlightDials = %d with the backoff closed, want 1", rs.inFlightDials)
-		}
+		assert.Equalf(t, 1, rs.inFlightDials,
+			"inFlightDials = %d with the backoff closed, want 1: the tick's dial must be "+
+				"unconditional, not gated on the tick having just shrunk the pool",
+			rs.inFlightDials)
 		select {
 		case <-dialed:
 		case <-time.After(2 * time.Second):
-			t.Fatal("no dial started for the waiter once the backoff was closed")
+			assert.Fail(t, "no dial started for the waiter once the backoff was closed")
 		}
 	})
 }

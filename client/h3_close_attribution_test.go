@@ -5,6 +5,9 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // ————————————————————————————————————————————————————————————————
@@ -39,26 +42,20 @@ func TestH3Pool_Close_AttributesGoAway(t *testing.T) {
 	hp := new(atomic.Pointer[Hooks])
 	hp.Store(hooks)
 	metrics := &Metrics{}
-
 	d := newH3FakeDialer()
 	p := newH3Pool("h:443", nil, PoolOptions{
 		MaxConnsPerHost:   2,
 		MaxStreamsPerConn: 1,
 	}, d.dial, hp, metrics)
-
 	// Two conns: hold a stream on each so both are still pooled at Close, and
 	// so neither can be retired early — h3RetireReason only retires a
 	// going-away conn once it has drained.
 	for i := 0; i < 2; i++ {
-		if _, err := p.acquire(context.Background()); err != nil {
-			t.Fatalf("acquire[%d]: %v", i, err)
-		}
+		_, err := p.acquire(context.Background())
+		require.NoErrorf(t, err, "acquire[%d]", i)
 	}
-
 	conns := d.all()
-	if len(conns) != 2 {
-		t.Fatalf("dialed %d conns, want 2", len(conns))
-	}
+	require.Len(t, conns, 2, "two capped streams must have opened two conns")
 	// The peer sends GOAWAY on exactly one of them. The other is healthy, so the
 	// test also pins that a plain close is still CloseManual.
 	atomic.StoreInt32(&conns[0].goawayFlag, 1)
@@ -68,16 +65,13 @@ func TestH3Pool_Close_AttributesGoAway(t *testing.T) {
 	mu.Lock()
 	gotGoAway, gotManual := reasons[CloseGoAway], reasons[CloseManual]
 	mu.Unlock()
-
-	if gotGoAway != 1 {
-		t.Errorf("OnConnClose fired CloseGoAway %d times, want 1;\n"+
+	assert.Equalf(t, 1, gotGoAway,
+		"OnConnClose fired CloseGoAway %d times, want 1;\n"+
 			"handleClose reported a conn the peer had GOAWAY'd as an operator close", gotGoAway)
-	}
-	if gotManual != 1 {
-		t.Errorf("OnConnClose fired CloseManual %d times, want 1 (the healthy conn)", gotManual)
-	}
-	if got := metrics.Counters.GoAwaysReceived.Load(); got != 1 {
-		t.Errorf("GoAwaysReceived = %d, want 1;\n"+
-			"every other h3 eviction site counts a GOAWAY, so closing the pool must too", got)
-	}
+	assert.Equalf(t, 1, gotManual,
+		"OnConnClose fired CloseManual %d times, want 1 (the healthy conn)", gotManual)
+	assert.EqualValuesf(t, 1, metrics.Counters.GoAwaysReceived.Load(),
+		"GoAwaysReceived = %d, want 1;\n"+
+			"every other h3 eviction site counts a GOAWAY, so closing the pool must too",
+		metrics.Counters.GoAwaysReceived.Load())
 }

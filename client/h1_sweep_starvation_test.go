@@ -10,6 +10,9 @@ import (
 	"syscall"
 	"testing"
 	"time"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // ————————————————————————————————————————————————————————————————
@@ -47,10 +50,12 @@ type h1GatedConn struct {
 	net.Conn
 	gate    chan struct{} // closed by the test to let the probe finish
 	entered chan struct{} // closed by the conn when the probe first reads
+	probes  *atomic.Int64 // reads that actually reached this conn
 	once    sync.Once
 }
 
 func (c *h1GatedConn) Read(_ []byte) (int, error) {
+	c.probes.Add(1)
 	c.once.Do(func() { close(c.entered) })
 	<-c.gate
 	return 0, io.EOF // a peer that closed: ProbeIdle calls this dead
@@ -78,6 +83,7 @@ type h1GatedDialer struct {
 	held     []net.Conn
 	gate     chan struct{}
 	entered  chan struct{}
+	probes   atomic.Int64
 	dialFail atomic.Int32
 }
 
@@ -96,7 +102,7 @@ func (d *h1GatedDialer) Dial(_ context.Context, _ string) (net.Conn, error) {
 	d.mu.Lock()
 	d.held = append(d.held, nc)
 	d.mu.Unlock()
-	return &h1GatedConn{Conn: nc, gate: d.gate, entered: d.entered}, nil
+	return &h1GatedConn{Conn: nc, gate: d.gate, entered: d.entered, probes: &d.probes}, nil
 }
 
 func (d *h1GatedDialer) failFromNowOn() {
@@ -112,9 +118,7 @@ func TestH1Pool_DeadReservation_DoesNotStrandWaiter(t *testing.T) {
 	t.Parallel()
 
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("listen: %v", err)
-	}
+	require.NoError(t, err, "listen")
 	defer func() { _ = ln.Close() }()
 
 	// Accept and hold, so the sockets stay open and healthy. Nothing is ever
@@ -123,8 +127,8 @@ func TestH1Pool_DeadReservation_DoesNotStrandWaiter(t *testing.T) {
 	var srv []net.Conn
 	go func() {
 		for {
-			c, err := ln.Accept()
-			if err != nil {
+			c, aerr := ln.Accept()
+			if aerr != nil {
 				return
 			}
 			srvMu.Lock()
@@ -161,9 +165,7 @@ func TestH1Pool_DeadReservation_DoesNotStrandWaiter(t *testing.T) {
 
 	// One pooled conn, checked in, so the first sweep has something to reserve.
 	mc, err := p.acquire(ctx)
-	if err != nil {
-		t.Fatalf("seed acquire: %v", err)
-	}
+	require.NoError(t, err, "seed acquire")
 	p.release(mc, true)
 	for p.Stats().InFlightStreams != 0 {
 	}
@@ -175,31 +177,33 @@ func TestH1Pool_DeadReservation_DoesNotStrandWaiter(t *testing.T) {
 	select {
 	case <-d.entered:
 	case <-time.After(healthPeriod + 5*time.Second):
-		t.Fatal("the health sweep never probed the idle conn")
+		require.FailNow(t, "the health sweep never probed the idle conn",
+			"nothing is reserved, so no waiter can be queued against a reservation and "+
+				"the property under test is not expressible")
 	}
 
 	// A is queued against the reservation and gets NO dial of its own.
 	aDone := make(chan error, 1)
 	go func() {
-		_, err := p.acquire(ctx)
-		aDone <- err
+		_, aerr := p.acquire(ctx)
+		aDone <- aerr
 	}()
 
 	// B is beyond what the single reservation can cover, so it dials — and that
 	// failing dial is what puts the pool into backoff.
 	bDone := make(chan error, 1)
 	go func() {
-		_, err := p.acquire(ctx)
-		bDone <- err
+		_, berr := p.acquire(ctx)
+		bDone <- berr
 	}()
 
 	deadline := time.Now().Add(5 * time.Second)
 	for d.dialFail.Load() == 0 && time.Now().Before(deadline) {
 		time.Sleep(time.Millisecond)
 	}
-	if d.dialFail.Load() == 0 {
-		t.Fatal("the second acquire never triggered a dial")
-	}
+	require.Positive(t, d.dialFail.Load(),
+		"the second acquire never triggered a dial, so the pool never entered backoff "+
+			"and the state under test was never built")
 
 	// The probe now finds the reserved conn dead. handleSweepDone evicts it,
 	// leaving no live conn, no dial in flight, and a waiter with nothing left to
@@ -210,14 +214,15 @@ func TestH1Pool_DeadReservation_DoesNotStrandWaiter(t *testing.T) {
 	const bound = 500 * time.Millisecond
 	for i, ch := range []chan error{aDone, bDone} {
 		select {
-		case err := <-ch:
-			if err == nil {
-				t.Fatalf("acquire[%d] returned a conn from a pool with no live conns", i)
-			}
+		case aerr := <-ch:
+			assert.Errorf(t, aerr,
+				"acquire[%d] returned a conn from a pool with no live conns", i)
 		case <-time.After(bound):
-			t.Fatalf("acquire[%d] still queued %v after its reservation was evicted;\n"+
-				"handleSweepDone left it for the next health tick (%v away) while a fresh "+
-				"acquire would have been refused immediately", i, bound, healthPeriod)
+			require.FailNowf(t, "a waiter outlived its reservation",
+				"acquire[%d] still queued %v after its reservation was evicted;\n"+
+					"handleSweepDone left it for the next health tick (%v away) while a fresh "+
+					"acquire would have been refused immediately", i, bound, healthPeriod)
 		}
 	}
+	t.Logf("probes performed: %d, failed dials: %d", d.probes.Load(), d.dialFail.Load())
 }

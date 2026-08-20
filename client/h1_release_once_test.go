@@ -4,6 +4,8 @@ import (
 	"context"
 	"testing"
 	"time"
+
+	"github.com/stretchr/testify/require"
 )
 
 // Releasing an HTTP/1.1 exchange must happen exactly once however many times it
@@ -31,21 +33,19 @@ func TestH1SingleConn_ReleaseIsIdempotent(t *testing.T) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-
 	ex, _, _, _, err := s.openExchange(ctx)
-	if err != nil {
-		t.Fatalf("openExchange: %v", err)
-	}
+	require.NoError(t, err, "openExchange")
 	h1ex, ok := ex.(*h1Exchange)
-	if !ok {
-		t.Fatalf("openExchange returned %T, want *h1Exchange", ex)
-	}
+	require.Truef(t, ok, "openExchange returned %T, want *h1Exchange", ex)
 
 	h1ex.release(true)
-	// Without the guard this is "unlock of unlocked mutex" and takes the process
-	// with it, so there is nothing to assert afterwards — surviving IS the
-	// assertion.
 	h1ex.release(true)
+
+	// Without the guard the second release is "unlock of unlocked mutex" and
+	// takes the process with it, so there is nothing to assert afterwards —
+	// surviving IS the assertion.
+	require.True(t, h1ex.released.Load(),
+		"the exchange must be latched released after two releases")
 }
 
 // TestH1PoolTransport_ReleaseIsIdempotent covers the pooled path, where the
@@ -60,31 +60,25 @@ func TestH1PoolTransport_ReleaseIsIdempotent(t *testing.T) {
 	p := newH1Pool("h:80", newH1FakeDialer(), PoolOptions{MaxConnsPerHost: 1}, nil, nil)
 	defer func() { _ = p.Close() }()
 	pt := &h1PoolTransport{p: p}
-
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-
 	ex1, _, _, _, err := pt.openExchange(ctx)
-	if err != nil {
-		t.Fatalf("first openExchange: %v", err)
-	}
+	require.NoError(t, err, "first openExchange")
+
 	ex1.(*h1Exchange).release(true)
 	ex1.(*h1Exchange).release(true) // the second must be a no-op
 
 	// The slot really was freed — idempotent must not mean inert.
 	ex2, _, _, _, err := pt.openExchange(ctx)
-	if err != nil {
-		t.Fatalf("second openExchange after release: %v", err)
-	}
-
+	require.NoError(t, err, "second openExchange after release")
 	// ex2 still holds the pool's only connection, so this must not be served.
 	short, shortCancel := context.WithTimeout(context.Background(), 250*time.Millisecond)
 	defer shortCancel()
-	if _, _, _, _, oerr := pt.openExchange(short); oerr == nil {
-		t.Fatal("a third exchange was handed out while the only connection was " +
-			"checked out — the double release decremented the active count twice, " +
-			"so two exchanges now share one HTTP/1.1 socket")
-	}
+	_, _, _, _, oerr := pt.openExchange(short)
+	require.Error(t, oerr,
+		"a third exchange was handed out while the only connection was checked out — "+
+			"the double release decremented the active count twice, so two exchanges now "+
+			"share one HTTP/1.1 socket")
 	ex2.(*h1Exchange).release(true)
 }
 
@@ -100,27 +94,24 @@ func TestH1SingleConn_ReleaseStillFreesTheSlot(t *testing.T) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-
 	ex, _, _, _, err := s.openExchange(ctx)
-	if err != nil {
-		t.Fatalf("first openExchange: %v", err)
-	}
+	require.NoError(t, err, "first openExchange")
+
 	ex.(*h1Exchange).release(true)
 
-	done := make(chan struct{})
+	done := make(chan error, 1)
 	go func() {
-		defer close(done)
 		ex2, _, _, _, oerr := s.openExchange(ctx)
-		if oerr != nil {
-			t.Errorf("second openExchange: %v", oerr)
-			return
+		if oerr == nil {
+			ex2.(*h1Exchange).release(true)
 		}
-		ex2.(*h1Exchange).release(true)
+		done <- oerr
 	}()
 	select {
-	case <-done:
+	case oerr := <-done:
+		require.NoError(t, oerr, "second openExchange")
 	case <-time.After(5 * time.Second):
-		t.Fatal("the second openExchange blocked: release wrapped the slot away " +
-			"instead of freeing it")
+		require.FailNow(t, "the second openExchange blocked",
+			"release wrapped the slot away instead of freeing it")
 	}
 }

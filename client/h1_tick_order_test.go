@@ -6,6 +6,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/stretchr/testify/require"
 )
 
 // ————————————————————————————————————————————————————————————————
@@ -42,7 +44,6 @@ func TestH1Pool_Tick_SweepsIdleBeforeDead(t *testing.T) {
 		reasons[e.Reason]++
 		mu.Unlock()
 	}})
-
 	d := newH1FakeDialer()
 	p := newH1Pool("h:80", d, PoolOptions{
 		MaxConnsPerHost:   1,
@@ -52,13 +53,9 @@ func TestH1Pool_Tick_SweepsIdleBeforeDead(t *testing.T) {
 		IdleTimeout: time.Millisecond,
 	}, hp, nil)
 	defer func() { _ = p.Close() }()
-
 	mc, err := p.acquire(context.Background())
-	if err != nil {
-		t.Fatalf("acquire: %v", err)
-	}
+	require.NoError(t, err, "acquire")
 	p.release(mc, true)
-
 	// Wait for the actor to record the release BEFORE killing the conn. Doing
 	// it the other way round lets handleRelease's own IsAlive check evict the
 	// conn as CloseDead, so the tick would never be the evictor and the test
@@ -72,22 +69,21 @@ func TestH1Pool_Tick_SweepsIdleBeforeDead(t *testing.T) {
 	time.Sleep(5 * time.Millisecond)
 	_ = mc.c.Close()
 
+	var idle, dead int
 	deadline := time.Now().Add(3 * time.Second)
 	for time.Now().Before(deadline) {
 		mu.Lock()
-		idle, dead := reasons[CloseIdle], reasons[CloseDead]
+		idle, dead = reasons[CloseIdle], reasons[CloseDead]
 		mu.Unlock()
-		switch {
-		case idle == 1 && dead == 0:
-			return
-		case dead > 0:
-			t.Fatalf("a conn that was both idle-expired and closed was reported CloseDead;\n" +
-				"evictDead ran before evictIdle, so this pool now attributes like its siblings " +
-				"and probes conns it is about to discard")
+		if idle > 0 || dead > 0 {
+			break
 		}
 		time.Sleep(2 * time.Millisecond)
 	}
-	mu.Lock()
-	defer mu.Unlock()
-	t.Fatalf("no eviction observed within 3s: %v", reasons)
+	require.Zerof(t, dead,
+		"a conn that was both idle-expired and closed was reported CloseDead (idle=%d dead=%d);\n"+
+			"evictDead ran before evictIdle, so this pool now attributes like its siblings "+
+			"and probes conns it is about to discard", idle, dead)
+	require.Equalf(t, 1, idle,
+		"no idle eviction observed within 3s (idle=%d dead=%d)", idle, dead)
 }
