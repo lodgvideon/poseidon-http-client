@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -202,19 +203,49 @@ func shutdownGoReference() {
 // The client is automatically closed via t.Cleanup.
 func newTestClient(t *testing.T, srv *TestServer) *client.Client {
 	t.Helper()
+	addr, scheme, dialer := preferredLeg(srv)
+	return newTestClientAt(t, srv, addr, scheme, dialer)
+}
 
-	addr := srv.H2CAddr
-	scheme := "http"
-	var dialer conn.Dialer = &conn.PlaintextDialer{}
-
+// preferredLeg is newTestClient's target selection, split out so the counting
+// variant below aims at exactly the same peer address rather than a second
+// spelling of the same rule that could drift from it.
+func preferredLeg(srv *TestServer) (addr, scheme string, dialer conn.Dialer) {
+	addr = srv.H2CAddr
+	scheme = "http"
+	dialer = &conn.PlaintextDialer{}
 	if addr == "" {
 		// TLS mode
 		addr = srv.TLSAddr
 		scheme = "https"
 		dialer = &conn.TLSDialer{Config: tlsConfig()}
 	}
+	return addr, scheme, dialer
+}
 
-	return newTestClientAt(t, srv, addr, scheme, dialer)
+// newCountingTestClient is newTestClient with a completed-dial counter attached.
+//
+// It exists because "the connection was reused" is not observable from a
+// response: every reuse test in this suite asserted that N sequential requests
+// each came back 200, and a transport that dials a brand-new connection for
+// every single request satisfies that exactly as well as one that reuses a
+// single connection (#893). Counting dials is what tells the two apart, and it
+// is the same instrument toxiproxy_test.go already uses for its pooled fixtures.
+//
+// Only successful dials are counted. A failed dial establishes no connection, so
+// including it would make the count answer a different question than the one
+// every caller of this helper asks — how many connections did this client end up
+// with.
+func newCountingTestClient(t *testing.T, srv *TestServer, dials *atomic.Int64) *client.Client {
+	t.Helper()
+	addr, scheme, dialer := preferredLeg(srv)
+	// OnDial fires on the dialling goroutine, so the counter is atomic.
+	return newTestClientAt(t, srv, addr, scheme, dialer,
+		&client.Hooks{OnDial: func(ev client.DialEvent) {
+			if ev.Err == nil {
+				dials.Add(1)
+			}
+		}})
 }
 
 // newTestClientTLS is newTestClient pinned to the TLS leg.
@@ -231,9 +262,13 @@ func newTestClientTLS(t *testing.T, srv *TestServer) *client.Client {
 	return newTestClientAt(t, srv, srv.TLSAddr, "https", &conn.TLSDialer{Config: tlsConfig()})
 }
 
-func newTestClientAt(t *testing.T, srv *TestServer, addr, scheme string, dialer conn.Dialer) *client.Client {
+func newTestClientAt(t *testing.T, srv *TestServer, addr, scheme string, dialer conn.Dialer, hooks ...*client.Hooks) *client.Client {
 	t.Helper()
 
+	var h *client.Hooks
+	if len(hooks) > 0 {
+		h = hooks[0]
+	}
 	c, err := client.NewClient(client.ClientOptions{
 		Addr:          addr,
 		DefaultScheme: scheme,
@@ -241,6 +276,7 @@ func newTestClientAt(t *testing.T, srv *TestServer, addr, scheme string, dialer 
 			Dialer:            dialer,
 			StreamEventBuffer: 1024, // avoid event-channel overflow on large bodies
 		},
+		Hooks: h,
 	})
 	require.NoErrorf(t, err, "NewClient(%s): %v", srv.Kind, err)
 

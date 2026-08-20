@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -137,12 +138,18 @@ func TestIT_GoHTTP_ContextCancel(t *testing.T) {
 
 // ── Multiple sequential requests (reuse) ────────────────────────
 
+// TestIT_GoHTTP_MultipleRequests is the many-request half of the reuse pair, and
+// like TestIT_GoHTTP_ConnectionReuse below it counts dials rather than statuses:
+// twenty successful responses are equally consistent with twenty connections
+// (#893).
 func TestIT_GoHTTP_MultipleRequests(t *testing.T) {
+	const N = 20
 	srv := requireServer(t, ServerGoHTTP)
-	c := newTestClient(t, srv)
+	var dials atomic.Int64
+	c := newCountingTestClient(t, srv, &dials)
 
-	statuses := make([]int, 0, 20)
-	for i := 0; i < 20; i++ {
+	statuses := make([]int, 0, N)
+	for i := 0; i < N; i++ {
 		status, _ := doGET(t, c, "/healthz", false)
 		statuses = append(statuses, status)
 	}
@@ -150,6 +157,12 @@ func TestIT_GoHTTP_MultipleRequests(t *testing.T) {
 	for i, status := range statuses {
 		require.Equalf(t, 200, status, "req %d: status %d", i, status)
 	}
+	assert.EqualValuesf(t, 1, dials.Load(),
+		"%d sequential requests completed %d dials, want exactly 1.\n"+
+			"A transport that reconnects per request answers every one of them with a "+
+			"200, so the statuses above cannot tell reuse from a fresh connection each "+
+			"time - and reconnecting per request is a TLS handshake per request for a "+
+			"load generator", N, dials.Load())
 }
 
 // ── Concurrent requests ─────────────────────────────────────────
@@ -220,38 +233,152 @@ func TestIT_GoHTTP_ResponseHeaders(t *testing.T) {
 	require.Truef(t, foundCT, "response headers: content-type not found in %v", resp.Headers)
 }
 
+// TestIT_GoHTTP_RequestHeaders proves the caller-supplied header reached the
+// server, which is the only thing this test name has ever promised.
+//
+// It used to send the header to /healthz and assert nothing but the status, so a
+// client that dropped every Request.Headers entry on the floor kept it green
+// (#892). /echo is where the answer lives: CONTRACT.md has every peer return the
+// request headers it saw in X-Echo-Headers, and reading that back is a
+// single-request equivalence-class case of the property
+// TestMatrix_ConcurrentHeaderIdentity only covers under concurrency.
 func TestIT_GoHTTP_RequestHeaders(t *testing.T) {
 	srv := requireServer(t, ServerGoHTTP)
 	c := newTestClient(t, srv)
+	const name, value = "x-test-header", "poseidon-integration"
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
 	var resp client.Response
 	resp.Reset()
 	err := c.Do(ctx, &client.Request{
-		Method: "GET",
-		Path:   "/healthz",
+		Method:   "GET",
+		Path:     "/echo",
+		BodyMode: client.BodyBuffer,
 		Headers: []conn.HeaderField{
-			{Name: []byte("x-test-header"), Value: []byte("poseidon-integration")},
+			{Name: []byte(name), Value: []byte(value)},
 		},
 	}, &resp)
 
 	require.NoErrorf(t, err, "Do: %v", err)
 	require.Equalf(t, 200, resp.Status, "status: got %d, want 200", resp.Status)
+	echoed := findHeader(resp.Headers, "x-echo-headers")
+	require.NotEmpty(t, echoed, "no X-Echo-Headers on the response - CONTRACT.md "+
+		"specifies /echo returns the request headers there, so without it this test "+
+		"cannot see whether the header was sent at all")
+	assert.Truef(t, containsFold(echoed, name),
+		"the server never saw the header name %q; it echoed %q.\n"+
+			"A client that silently drops Request.Headers still answers 200 to every "+
+			"request, so the status this test used to assert is not evidence the header "+
+			"channel works", name, echoed)
+	assert.Truef(t, containsFold(echoed, value),
+		"the server saw the header name but not the value %q; it echoed %q.\n"+
+			"A name carried without its value is the same loss to a caller that sets "+
+			"an authorization or a routing header", value, echoed)
+}
+
+// TestIT_GoHTTP_Trailers is the trailer section's only consumer in this suite.
+//
+// /trailers has existed since the fixture contract was written and nothing read
+// it (#896), which left client.Request.WantTrailers and drainResponse's
+// conn.EventTrailers arm with no integration coverage at all. Both directions of
+// that decision are asserted here, because a one-sided test is satisfied by a
+// client that always surfaces trailers and equally by one that always drops them.
+//
+// Go net/http is the only peer in this matrix that emits a real trailer section,
+// measured against the live stack: nginx sends X-Trailer-Foo as an ordinary
+// response header (its fixture uses add_header), and Undertow - and so nghttpx,
+// which proxies it - drops the field it sets after the body entirely. Widening
+// this to the matrix would be testing three fixtures rather than the client.
+func TestIT_GoHTTP_Trailers(t *testing.T) {
+	srv := requireServer(t, ServerGoHTTP)
+	c := newTestClient(t, srv)
+
+	t.Run("wanted", func(t *testing.T) {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+
+		var resp client.Response
+		resp.Reset()
+		err := c.Do(ctx, &client.Request{
+			Method:       "GET",
+			Path:         "/trailers",
+			BodyMode:     client.BodyBuffer,
+			WantTrailers: true,
+		}, &resp)
+
+		require.NoErrorf(t, err, "Do GET /trailers: %v", err)
+		require.Equalf(t, 200, resp.Status, "status: got %d, want 200", resp.Status)
+		require.Equalf(t, "trailers", string(resp.Body),
+			"body: got %q, want %q - the trailer section must not eat the body", resp.Body, "trailers")
+		assert.Equalf(t, "bar", findHeader(resp.Trailers, "x-trailer-foo"),
+			"the trailer section did not reach the caller: Trailers=%v.\n"+
+				"A trailer HEADERS frame arrives after the end of the body and is the only "+
+				"channel a peer has for a checksum or a gRPC status, so a client that "+
+				"parses it and then drops it loses the result rather than the metadata",
+			resp.Trailers)
+		assert.Empty(t, findHeader(resp.Headers, "x-trailer-foo"),
+			"x-trailer-foo turned up among the response HEADERS as well as the "+
+				"trailers; a trailer folded into the header block is indistinguishable "+
+				"from one the peer sent before the body, which is the distinction "+
+				"RFC 9110 section 6.5.1 exists to keep")
+	})
+
+	t.Run("not wanted", func(t *testing.T) {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+
+		var resp client.Response
+		resp.Reset()
+		err := c.Do(ctx, &client.Request{
+			Method:   "GET",
+			Path:     "/trailers",
+			BodyMode: client.BodyBuffer,
+		}, &resp)
+
+		require.NoErrorf(t, err, "Do GET /trailers: %v", err)
+		require.Equalf(t, 200, resp.Status, "status: got %d, want 200", resp.Status)
+		assert.Emptyf(t, resp.Trailers,
+			"trailers were surfaced although WantTrailers is false: %v.\n"+
+				"The default path releases the trailer block back to the pool instead of "+
+				"copying it out, so a Response carrying trailers nobody asked for is a "+
+				"live reference into storage the next stream will decode into",
+			resp.Trailers)
+		assert.Equalf(t, "trailers", string(resp.Body),
+			"body: got %q, want %q - dropping the trailer section must not cost the body",
+			resp.Body, "trailers")
+	})
 }
 
 // ── Connection lifecycle ────────────────────────────────────────
 
+// TestIT_GoHTTP_ConnectionReuse asserts the second request was served by the
+// connection the first one established.
+//
+// It used to assert only that both requests returned 200, which is exactly as
+// true of a transport that dials twice (#893): forcing singleConn.acquireConn to
+// skip its cached connection left this test green. The dial count is the
+// observation that separates the two.
 func TestIT_GoHTTP_ConnectionReuse(t *testing.T) {
 	srv := requireServer(t, ServerGoHTTP)
-	c := newTestClient(t, srv)
+	var dials atomic.Int64
+	c := newCountingTestClient(t, srv, &dials)
 
 	// The first request establishes the connection; the second reuses it.
 	status1, _ := doGET(t, c, "/healthz", false)
+	afterFirst := dials.Load()
 	status2, _ := doGET(t, c, "/healthz", false)
 
 	require.Equalf(t, 200, status1, "first request: status %d", status1)
 	require.Equalf(t, 200, status2, "second request: status %d", status2)
+	require.EqualValuesf(t, 1, afterFirst,
+		"the first request completed %d dials, want exactly 1; without one established "+
+			"connection there is nothing for the second request to reuse and the "+
+			"assertion below would hold vacuously", afterFirst)
+	assert.EqualValuesf(t, 1, dials.Load(),
+		"the second request brought the dial count to %d, want it still at 1.\n"+
+			"It was served by a connection of its own, so this client is not reusing "+
+			"anything - and a 200 looks identical either way", dials.Load())
 }
 
 func TestIT_GoHTTP_ClientClose(t *testing.T) {
