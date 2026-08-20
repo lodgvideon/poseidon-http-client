@@ -1744,9 +1744,15 @@ Start ─┬─ Acquire ── (Connect ⊆ Acquire) ─┬─ TTFB ────
   in `Acquire` and a zero `Connect`.
 - `Latency - TTFB` is body transfer; `TTFB - Acquire` is server think time plus
   one network turn.
-- `TTFB` is 0 exactly when no response head arrived, which is also when `Status`
-  is 0. It is what JMeter calls *Latency*; this event's `Latency` is JMeter's
-  *elapsed*.
+- `TTFB` is 0 when no response head arrived. It is what JMeter calls *Latency*;
+  this event's `Latency` is JMeter's *elapsed*.
+- A failed attempt still reports what it managed to observe: if the head
+  arrived before the failure — a reset mid-body, a body over
+  `MaxResponseBodySize` — the event carries the server's `Status` and the
+  `BytesRecv` received so far alongside a non-nil `Err`. Likewise a managed
+  attempt that never got a connection still names the backend it failed
+  against in `RemoteAddr`; that field is empty only when no backend was picked
+  at all.
 
 `RemoteAddr` is the only place the managed transports expose which backend the
 `Selector` picked for a given request — `ClientOptions.Addr` is empty there.

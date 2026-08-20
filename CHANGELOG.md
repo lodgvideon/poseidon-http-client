@@ -35,6 +35,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the exported `Do`/`DoStream`. Both are unexported seams; the per-request
   allocation gates are unchanged at 6 (H2) and 4 (H1.1).
 
+  A failed attempt reports what it observed rather than zeroes: a response head
+  that arrived before a reset still carries its `Status` and `BytesRecv`, and a
+  managed attempt that never got a connection still names the backend it failed
+  against — `RemoteAddr` is empty only when no backend was picked at all. Those
+  are the attempts a load test most needs attributed, and zeroing them made a
+  503-then-reset indistinguishable from a request that never reached a server.
+
   Two JMeter per-sample columns are deliberately absent: `responseMessage`
   (HTTP/2 and HTTP/3 have no reason phrase and the HTTP/1.1 parser discards it)
   and byte counts including headers (`BytesSent`/`BytesRecv` stay payload-only;
