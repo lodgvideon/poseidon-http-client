@@ -5,10 +5,13 @@ import (
 	"errors"
 	"net"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/lodgvideon/poseidon-http-client/conn"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // TestPool_WaiterRescuedAfterLastConnEvicted pins the liveness property the H2
@@ -23,10 +26,14 @@ import (
 // against a server that was still dialable, and the waiter left only when
 // another request happened to arrive. A pool whose every worker is parked never
 // gets that request, so the worst case is a deadlock rather than a slow path.
+//
+// The fault is injected by hand (closing the conn out of band), so the test
+// asserts the injection actually landed — IsAlive true before, false after.
+// Without that, a run where Close silently no-ops passes exactly like a real
+// rescue, because the waiter would then be served from the still-live conn.
 func TestPool_WaiterRescuedAfterLastConnEvicted(t *testing.T) {
 	addrs, _, cleanup := startH2Servers(t, 1)
 	defer cleanup()
-
 	p := newPool(addrs[0].String(), newConnOpts(), PoolOptions{
 		MaxConnsPerHost:   1,
 		MaxStreamsPerConn: 1,
@@ -36,14 +43,10 @@ func TestPool_WaiterRescuedAfterLastConnEvicted(t *testing.T) {
 		HealthCheckPeriod: time.Hour,
 	}, nil, nil)
 	defer func() { _ = p.Close() }()
-
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
 	held, err := p.acquire(ctx)
-	if err != nil {
-		t.Fatalf("first acquire: %v", err)
-	}
-
+	require.NoError(t, err, "first acquire against a live H2 server")
 	// A second acquire parks: the one conn is at its one-stream cap.
 	parked := make(chan error, 1)
 	go func() {
@@ -53,31 +56,43 @@ func TestPool_WaiterRescuedAfterLastConnEvicted(t *testing.T) {
 		}
 		parked <- aerr
 	}()
-	if s := waitStats(p, func(s Stats) bool { return s.Waiters == 1 }, 5*time.Second); s.Waiters != 1 {
-		t.Fatalf("waiter never parked: %+v", s)
-	}
+	s := waitStats(p, func(s Stats) bool { return s.Waiters == 1 }, 5*time.Second)
+	require.Equalf(t, 1, s.Waiters, "waiter never parked: %+v", s)
+	require.True(t, held.c.IsAlive(),
+		"the conn was already dead before the fault was injected, so the rescue "+
+			"below would not be measuring the eviction path")
 
 	// Kill the connection out of band, then release the held stream. The
 	// release evicts the now-dead conn and the pool is left with a waiter and
 	// nothing to serve it from.
 	_ = held.c.Close()
+	require.False(t, held.c.IsAlive(),
+		"injection did not fire: the conn survived Close, so a pass here would only "+
+			"show the waiter being served from the still-live conn")
 	p.release(held)
 
 	select {
 	case aerr := <-parked:
-		if aerr != nil {
-			t.Fatalf("parked waiter = %v, want a rescued connection", aerr)
-		}
+		assert.NoErrorf(t, aerr, "parked waiter = %v, want a rescued connection", aerr)
 	case <-time.After(10 * time.Second):
-		s := waitStats(p, func(Stats) bool { return true }, time.Second)
-		t.Fatalf("parked waiter never rescued; pool sat at %+v with a dialable server", s)
+		st := waitStats(p, func(Stats) bool { return true }, time.Second)
+		require.Failf(t, "parked waiter never rescued",
+			"pool sat at %+v with a dialable server", st)
 	}
 }
 
-// refusingDialer fails every dial, which is what a downed host looks like.
-type refusingDialer struct{ err error }
+// refusingDialer fails every dial, which is what a downed host looks like. dials
+// counts what it was actually asked to do, so a test can prove the injection
+// fired rather than inferring it from an error that some other path produced.
+type refusingDialer struct {
+	err   error
+	dials atomic.Int32
+}
 
-func (d *refusingDialer) Dial(context.Context, string) (net.Conn, error) { return nil, d.err }
+func (d *refusingDialer) Dial(context.Context, string) (net.Conn, error) {
+	d.dials.Add(1)
+	return nil, d.err
+}
 
 // TestPool_DialFailureRefusesEveryQueuedWaiter pins the second half: when a dial
 // fails and the pool is in exactly the state that makes a NEW request
@@ -91,19 +106,20 @@ func (d *refusingDialer) Dial(context.Context, string) (net.Conn, error) { retur
 // tick-path dial at all, so it drained none.
 func TestPool_DialFailureRefusesEveryQueuedWaiter(t *testing.T) {
 	sentinel := errors.New("connect refused (synthetic)")
-	p := newPool("203.0.113.1:1", conn.ConnOptions{Dialer: &refusingDialer{err: sentinel}}, PoolOptions{
+	d := &refusingDialer{err: sentinel}
+	p := newPool("203.0.113.1:1", conn.ConnOptions{Dialer: d}, PoolOptions{
 		MaxConnsPerHost:   1,
 		MaxStreamsPerConn: 4,
 		HealthCheckPeriod: time.Hour, // no tick: the refusal must come from dial-done
 		DialBackoff:       time.Hour, // and the pool must stay in backoff afterwards
 	}, nil, nil)
 	defer func() { _ = p.Close() }()
-
 	const waiters = 3
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
 	errs := make(chan error, waiters)
 	var wg sync.WaitGroup
+
 	for i := 0; i < waiters; i++ {
 		wg.Add(1)
 		go func() {
@@ -115,30 +131,28 @@ func TestPool_DialFailureRefusesEveryQueuedWaiter(t *testing.T) {
 			errs <- aerr
 		}()
 	}
-
 	done := make(chan struct{})
 	go func() { wg.Wait(); close(done) }()
+
 	select {
 	case <-done:
 	case <-time.After(10 * time.Second):
 		s := waitStats(p, func(Stats) bool { return true }, time.Second)
-		t.Fatalf("queued waiters were not refused; pool sat at %+v", s)
+		require.Failf(t, "queued waiters were not refused", "pool sat at %+v", s)
 	}
-
 	close(errs)
 	n := 0
 	for aerr := range errs {
 		n++
-		if aerr == nil {
-			t.Fatal("an acquire succeeded against a dialer that refuses everything")
-		}
-		if !errors.Is(aerr, sentinel) && !errors.Is(aerr, ErrDialBackoff) {
-			t.Fatalf("acquire = %v, want the dial error or ErrDialBackoff", aerr)
-		}
+		require.Errorf(t, aerr, "an acquire succeeded against a dialer that refuses everything")
+		assert.Truef(t, errors.Is(aerr, sentinel) || errors.Is(aerr, ErrDialBackoff),
+			"acquire = %v, want the dial error or ErrDialBackoff — any other error means "+
+				"the waiter was refused for a reason this test is not pinning", aerr)
 	}
-	if n != waiters {
-		t.Fatalf("%d acquires returned, want %d", n, waiters)
-	}
+	assert.Equalf(t, waiters, n, "%d acquires returned, want %d", n, waiters)
+	assert.Positivef(t, d.dials.Load(),
+		"the refusing dialer was never called (%d dials), so the refusals came from "+
+			"somewhere other than the dial failure this test injects", d.dials.Load())
 }
 
 // TestPool_WaiterRescueRespectsMaxConns is the bound on the rescue. Waiters are
@@ -150,25 +164,20 @@ func TestPool_DialFailureRefusesEveryQueuedWaiter(t *testing.T) {
 func TestPool_WaiterRescueRespectsMaxConns(t *testing.T) {
 	addrs, _, cleanup := startH2Servers(t, 1)
 	defer cleanup()
-
 	p := newPool(addrs[0].String(), newConnOpts(), PoolOptions{
 		MaxConnsPerHost:   1,
 		MaxStreamsPerConn: 2,
 		HealthCheckPeriod: time.Hour,
 	}, nil, nil)
 	defer func() { _ = p.Close() }()
-
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
 	held := make([]*managedConn, 0, 2)
 	for i := 0; i < 2; i++ {
 		mc, err := p.acquire(ctx)
-		if err != nil {
-			t.Fatalf("acquire %d: %v", i, err)
-		}
+		require.NoErrorf(t, err, "acquire %d", i)
 		held = append(held, mc)
 	}
-
 	// Two more park: the single conn is at its stream cap.
 	parked := make(chan error, 2)
 	for i := 0; i < 2; i++ {
@@ -180,25 +189,23 @@ func TestPool_WaiterRescueRespectsMaxConns(t *testing.T) {
 			parked <- aerr
 		}()
 	}
-	if s := waitStats(p, func(s Stats) bool { return s.Waiters == 2 }, 5*time.Second); s.Waiters != 2 {
-		t.Fatalf("waiters never parked: %+v", s)
-	}
+	s := waitStats(p, func(s Stats) bool { return s.Waiters == 2 }, 5*time.Second)
+	require.Equalf(t, 2, s.Waiters, "waiters never parked: %+v", s)
 
 	// A release that frees a stream but evicts nothing: one waiter is served
 	// from the existing conn, and the pool must not have dialled for the other.
 	p.release(held[0])
+
 	select {
 	case aerr := <-parked:
-		if aerr != nil {
-			t.Fatalf("waiter served by the freed slot = %v", aerr)
-		}
+		require.NoErrorf(t, aerr, "waiter served by the freed slot = %v", aerr)
 	case <-time.After(10 * time.Second):
-		t.Fatal("freeing a stream did not serve a waiter")
+		require.Fail(t, "freeing a stream did not serve a waiter")
 	}
-	s := waitStats(p, func(s Stats) bool { return s.InFlightDials == 0 }, 2*time.Second)
-	if s.ActiveConns > 1 {
-		t.Fatalf("pool holds %d conns with MaxConnsPerHost=1: the rescue dial ignored the limit (%+v)", s.ActiveConns, s)
-	}
+	after := waitStats(p, func(s Stats) bool { return s.InFlightDials == 0 }, 2*time.Second)
+	assert.LessOrEqualf(t, after.ActiveConns, 1,
+		"pool holds %d conns with MaxConnsPerHost=1: the rescue dial ignored the limit (%+v)",
+		after.ActiveConns, after)
 	p.release(held[1])
 	<-parked
 }

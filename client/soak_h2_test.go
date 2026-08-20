@@ -12,6 +12,8 @@ import (
 	"time"
 
 	"github.com/lodgvideon/poseidon-http-client/conn"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // Soak test: the TCP path's sibling to the HTTP/3 pair in soak_test.go.
@@ -90,9 +92,8 @@ func runH2Soak(t *testing.T, c *Client, label string) {
 		if err := doGet(context.Background()); err == nil {
 			break
 		}
-		if time.Now().After(deadline) {
-			t.Fatalf("soak: %s never became reachable — is the integration stack up? (make it-up)", addr)
-		}
+		require.Falsef(t, time.Now().After(deadline),
+			"soak: %s never became reachable — is the integration stack up? (make it-up)", addr)
 		time.Sleep(500 * time.Millisecond)
 	}
 
@@ -166,25 +167,20 @@ func runH2Soak(t *testing.T, c *Client, label string) {
 		label, total, errs.Load(), rps, baseGoroutines, finalGoroutines,
 		float64(baseHeap)/(1<<20), float64(finalHeap)/(1<<20))
 
-	if total == 0 {
-		t.Fatal("soak: zero successful requests")
-	}
+	require.NotZero(t, total, "soak: zero successful requests")
 	// The load actually has to continue past the baseline, or the ceilings below are
 	// comparing a steady state against itself and would hold for a client that
 	// stopped working entirely after warmup.
-	if total <= baseReqs {
-		t.Fatalf("soak: no requests completed after the baseline (%d total, %d at baseline) — "+
+	require.Greaterf(t, total, baseReqs,
+		"soak: no requests completed after the baseline (%d total, %d at baseline) — "+
 			"the ceilings below would be comparing steady state against itself", total, baseReqs)
-	}
-	if errs.Load() > total/20 { // >5% error rate is a red flag
-		t.Errorf("soak: high error rate: %d errs / %d ok", errs.Load(), total)
-	}
+	assert.LessOrEqualf(t, errs.Load(), total/20, // >5% error rate is a red flag
+		"soak: high error rate: %d errs / %d ok", errs.Load(), total)
 	// Goroutine ceiling: steady state must not grow with elapsed load. A leak of one
 	// goroutine per request would be orders of magnitude past this slack.
-	if finalGoroutines > baseGoroutines+workers+16 {
-		t.Errorf("soak: goroutine growth suggests a leak: baseline %d, final %d (workers=%d)",
-			baseGoroutines, finalGoroutines, workers)
-	}
+	assert.LessOrEqualf(t, finalGoroutines, baseGoroutines+workers+16,
+		"soak: goroutine growth suggests a leak: baseline %d, final %d (workers=%d)",
+		baseGoroutines, finalGoroutines, workers)
 	// Heap ceiling: after a GC settle, live heap must return near the steady-state
 	// baseline. 2x + 8 MiB tolerates fragmentation without hiding unbounded growth.
 	//
@@ -195,10 +191,9 @@ func runH2Soak(t *testing.T, c *Client, label string) {
 	// at the 60s default the same leak reached 10.2 -> 50.5 MiB and failed. So a
 	// short run cannot exercise this ceiling, and a leak that survives one is not
 	// evidence the check is dead. Verify it at the default duration or longer.
-	if finalHeap > baseHeap*2+(8<<20) {
-		t.Errorf("soak: heap growth suggests a leak: baseline %.1fMiB, final %.1fMiB",
-			float64(baseHeap)/(1<<20), float64(finalHeap)/(1<<20))
-	}
+	assert.LessOrEqualf(t, finalHeap, baseHeap*2+(8<<20),
+		"soak: heap growth suggests a leak: baseline %.1fMiB, final %.1fMiB",
+		float64(baseHeap)/(1<<20), float64(finalHeap)/(1<<20))
 }
 
 // TestSoak_H2ConnStability soaks the single-connection HTTP/2 transport, where one
@@ -206,9 +201,7 @@ func runH2Soak(t *testing.T, c *Client, label string) {
 // list are reused for the whole run.
 func TestSoak_H2ConnStability(t *testing.T) {
 	c, err := NewSingleConnClient(soakH2Addr(), &conn.PlaintextDialer{})
-	if err != nil {
-		t.Fatalf("NewSingleConnClient(%s): %v", soakH2Addr(), err)
-	}
+	require.NoErrorf(t, err, "NewSingleConnClient(%s)", soakH2Addr())
 	t.Cleanup(func() { _ = c.Close() })
 	runH2Soak(t, c, "H2ConnStability")
 }
@@ -221,9 +214,7 @@ func TestSoak_H2PoolConnStability(t *testing.T) {
 	c, err := NewPoolClient(soakH2Addr(), &conn.PlaintextDialer{}, PoolOptions{
 		MaxConnsPerHost: 4,
 	})
-	if err != nil {
-		t.Fatalf("NewPoolClient(%s): %v", soakH2Addr(), err)
-	}
+	require.NoErrorf(t, err, "NewPoolClient(%s)", soakH2Addr())
 	t.Cleanup(func() { _ = c.Close() })
 	runH2Soak(t, c, "H2PoolConnStability")
 }

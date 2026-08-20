@@ -1,6 +1,10 @@
 package client
 
-import "testing"
+import (
+	"testing"
+
+	"github.com/stretchr/testify/assert"
+)
 
 // TestDefaultStreamEventBuffer pins the sizing and, more importantly, the
 // reason for its shape: the divisor is what stops a caller who raised
@@ -20,10 +24,11 @@ func TestDefaultStreamEventBuffer(t *testing.T) {
 		{"tiny frames hit the cap", 512, 64, "32 KiB"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := defaultStreamEventBuffer(tc.frameSize); got != tc.want {
-				t.Fatalf("defaultStreamEventBuffer(%d) = %d, want %d (retains %s per stream)",
-					tc.frameSize, got, tc.want, tc.retained)
-			}
+			got := defaultStreamEventBuffer(tc.frameSize)
+
+			assert.Equalf(t, tc.want, got,
+				"defaultStreamEventBuffer(%d) = %d, want %d (retains %s per stream)",
+				tc.frameSize, got, tc.want, tc.retained)
 		})
 	}
 }
@@ -32,7 +37,10 @@ func TestDefaultStreamEventBuffer(t *testing.T) {
 // exists for: the 10-event response from #344 must fit at the default.
 func TestDefaultStreamEventBuffer_CoversTheChunkedShape(t *testing.T) {
 	const eventsInTheReport = 10 // HEADERS + 8 flushed chunks + the END marker
-	if got := defaultStreamEventBuffer(0); got < eventsInTheReport {
-		t.Fatalf("default is %d slots; the reported response needs %d", got, eventsInTheReport)
-	}
+
+	got := defaultStreamEventBuffer(0)
+
+	assert.GreaterOrEqualf(t, got, eventsInTheReport,
+		"default is %d slots; the reported response needs %d — a caller draining promptly "+
+			"would still overflow the buffer and take an RST(CANCEL)", got, eventsInTheReport)
 }
