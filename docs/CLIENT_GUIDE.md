@@ -1757,7 +1757,9 @@ Start ─┬─ Acquire ── (Connect ⊆ Acquire) ─┬─ TTFB ────
 `RemoteAddr` is the only place the managed transports expose which backend the
 `Selector` picked for a given request — `ClientOptions.Addr` is empty there.
 `Proto` comes from the transport rather than from `TransportKind`, because
-`TransportALPN` does not know which protocol it is until the handshake.
+`TransportALPN` does not know which protocol it is until the handshake — and
+when an attempt fails before that handshake it reports `trace.ProtoUnknown`
+rather than the enum's zero value, which is `trace.ProtoH1`.
 
 Two JMeter per-sample columns have **no** equivalent here: `responseMessage`
 (HTTP/2 and HTTP/3 have no reason phrase, and the HTTP/1.1 parser discards it),

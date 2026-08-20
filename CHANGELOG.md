@@ -48,6 +48,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   an HPACK/QPACK-compressed header block is not comparable with JMeter's
   figure).
 
+- **`trace.ProtoUnknown`.** `trace.Protocol` starts its `iota` at `ProtoH1`, so
+  a zero value is indistinguishable from HTTP/1.1 — and `TransportALPN`, the one
+  transport that does not know its protocol until the handshake, reports on
+  attempts that never got there. Those now say `ProtoUnknown` rather than
+  claiming a negotiation that did not happen. Appended to the enum rather than
+  made the zero value, so no existing value is renumbered — which means a
+  producer must set the field deliberately on every path, failures included.
+
 - **`conn.ConnOptions.ReadBufferSize` and `conn.ConnOptions.StaticConnWindowSize`.**
   Two receive-path parameters could not be set from outside the package, and both
   are parameters a cross-library comparison has to pin before its numbers mean
