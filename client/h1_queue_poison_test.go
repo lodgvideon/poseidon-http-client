@@ -8,6 +8,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
 	"github.com/lodgvideon/poseidon-http-client/client"
 )
 
@@ -50,11 +53,8 @@ func TestConformance_RFC9112_Sec6_3_ResponseQueuePoisonNotPooled(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			ln, err := net.Listen("tcp", "127.0.0.1:0")
-			if err != nil {
-				t.Fatalf("Listen: %v", err)
-			}
+			require.NoError(t, err, "Listen")
 			defer ln.Close()
-
 			var accepted atomic.Int64
 			go func() {
 				for {
@@ -80,7 +80,6 @@ func TestConformance_RFC9112_Sec6_3_ResponseQueuePoisonNotPooled(t *testing.T) {
 					}(nc, n)
 				}
 			}()
-
 			c, err := client.NewH1PoolClient(
 				ln.Addr().String(),
 				h1clDialer(func(ctx context.Context, addr string) (net.Conn, error) {
@@ -89,11 +88,8 @@ func TestConformance_RFC9112_Sec6_3_ResponseQueuePoisonNotPooled(t *testing.T) {
 				client.PoolOptions{MaxConnsPerHost: 1},
 				client.WithDefaultScheme("http"),
 			)
-			if err != nil {
-				t.Fatalf("NewH1PoolClient: %v", err)
-			}
+			require.NoError(t, err, "NewH1PoolClient")
 			defer c.Close()
-
 			do := func(resp *client.Response) error {
 				ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 				defer cancel()
@@ -102,24 +98,18 @@ func TestConformance_RFC9112_Sec6_3_ResponseQueuePoisonNotPooled(t *testing.T) {
 			}
 
 			// Request 1 is legitimately fine: its own framing is valid.
-			var resp1 client.Response
-			if err := do(&resp1); err != nil {
-				t.Fatalf("request 1: Do = %v, want success — response 1 is well framed", err)
-			}
+			var resp1, resp2 client.Response
+			err1 := do(&resp1)
+			err2 := do(&resp2)
 
-			var resp2 client.Response
-			if err := do(&resp2); err != nil {
-				t.Fatalf("request 2: Do = %v, want success on a fresh connection", err)
-			}
-			if got := string(resp2.Body); got != "ok" {
-				t.Errorf("request 2: body = %q, want %q — anything else means the connection "+
-					"was pooled with the appended response still on it, and request 2 was "+
-					"handed a response the server never generated for it", got, "ok")
-			}
-			if n := accepted.Load(); n != 2 {
-				t.Errorf("accepted %d connections, want 2 — the poisoned connection was "+
-					"returned to the pool and reused", n)
-			}
+			require.NoError(t, err1, "request 1 must succeed — response 1 is well framed")
+			require.NoError(t, err2, "request 2 must succeed on a fresh connection")
+			assert.Equal(t, "ok", string(resp2.Body),
+				"request 2 got a body the server never generated for it: the connection was "+
+					"pooled with the appended response still on it")
+			assert.EqualValues(t, 2, accepted.Load(),
+				"the poisoned connection was returned to the pool and reused instead of "+
+					"being discarded")
 		})
 	}
 }
@@ -141,11 +131,8 @@ func TestConformance_RFC9112_Sec6_3_LatePoisonNotPooled(t *testing.T) {
 	const clean = "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok"
 
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("Listen: %v", err)
-	}
+	require.NoError(t, err, "Listen")
 	defer ln.Close()
-
 	var accepted atomic.Int64
 	go func() {
 		for {
@@ -173,7 +160,6 @@ func TestConformance_RFC9112_Sec6_3_LatePoisonNotPooled(t *testing.T) {
 			}(nc, n)
 		}
 	}()
-
 	c, err := client.NewH1PoolClient(
 		ln.Addr().String(),
 		h1clDialer(func(ctx context.Context, addr string) (net.Conn, error) {
@@ -182,11 +168,8 @@ func TestConformance_RFC9112_Sec6_3_LatePoisonNotPooled(t *testing.T) {
 		client.PoolOptions{MaxConnsPerHost: 1},
 		client.WithDefaultScheme("http"),
 	)
-	if err != nil {
-		t.Fatalf("NewH1PoolClient: %v", err)
-	}
+	require.NoError(t, err, "NewH1PoolClient")
 	defer c.Close()
-
 	do := func(resp *client.Response) error {
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
@@ -194,25 +177,18 @@ func TestConformance_RFC9112_Sec6_3_LatePoisonNotPooled(t *testing.T) {
 		return c.Do(ctx, &client.Request{Method: "GET", Path: "/", BodyMode: client.BodyBuffer}, resp)
 	}
 
-	var resp1 client.Response
-	if err := do(&resp1); err != nil {
-		t.Fatalf("request 1: Do = %v, want success", err)
-	}
+	var resp1, resp2 client.Response
+	err1 := do(&resp1)
 	// Long enough for the unsolicited response to land AND for the connection to
 	// pass the checkout-probe threshold.
 	time.Sleep(300 * time.Millisecond)
+	err2 := do(&resp2)
 
-	var resp2 client.Response
-	if err := do(&resp2); err != nil {
-		t.Fatalf("request 2: Do = %v, want success on a fresh connection", err)
-	}
-	if got := string(resp2.Body); got != "ok" {
-		t.Errorf("request 2: body = %q, want %q — the connection was reused with an "+
-			"unsolicited response waiting on it", got, "ok")
-	}
-	if n := accepted.Load(); n != 2 {
-		t.Errorf("accepted %d connections, want 2 — the poisoned connection was reused", n)
-	}
+	require.NoError(t, err1, "request 1")
+	require.NoError(t, err2, "request 2 must succeed on a fresh connection")
+	assert.Equal(t, "ok", string(resp2.Body),
+		"the connection was reused with an unsolicited response waiting on it")
+	assert.EqualValues(t, 2, accepted.Load(), "the poisoned connection was reused")
 }
 
 // TestConformance_RFC9112_Sec6_3_BufioBypassPoisonNotPooled pins the exact shape
@@ -235,11 +211,8 @@ func TestConformance_RFC9112_Sec6_3_BufioBypassPoisonNotPooled(t *testing.T) {
 	body := strings.Repeat("x", bodyLen)
 
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("Listen: %v", err)
-	}
+	require.NoError(t, err, "Listen")
 	defer ln.Close()
-
 	var accepted atomic.Int64
 	go func() {
 		for {
@@ -267,7 +240,6 @@ func TestConformance_RFC9112_Sec6_3_BufioBypassPoisonNotPooled(t *testing.T) {
 			}(nc, n)
 		}
 	}()
-
 	c, err := client.NewH1PoolClient(
 		ln.Addr().String(),
 		h1clDialer(func(ctx context.Context, addr string) (net.Conn, error) {
@@ -276,11 +248,8 @@ func TestConformance_RFC9112_Sec6_3_BufioBypassPoisonNotPooled(t *testing.T) {
 		client.PoolOptions{MaxConnsPerHost: 1},
 		client.WithDefaultScheme("http"),
 	)
-	if err != nil {
-		t.Fatalf("NewH1PoolClient: %v", err)
-	}
+	require.NoError(t, err, "NewH1PoolClient")
 	defer c.Close()
-
 	do := func(resp *client.Response) error {
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
@@ -288,23 +257,15 @@ func TestConformance_RFC9112_Sec6_3_BufioBypassPoisonNotPooled(t *testing.T) {
 		return c.Do(ctx, &client.Request{Method: "GET", Path: "/", BodyMode: client.BodyBuffer}, resp)
 	}
 
-	var resp1 client.Response
-	if err := do(&resp1); err != nil {
-		t.Fatalf("request 1: Do = %v, want success", err)
-	}
-	if len(resp1.Body) != bodyLen {
-		t.Fatalf("request 1: body length = %d, want %d", len(resp1.Body), bodyLen)
-	}
+	var resp1, resp2 client.Response
+	err1 := do(&resp1)
+	err2 := do(&resp2)
 
-	var resp2 client.Response
-	if err := do(&resp2); err != nil {
-		t.Fatalf("request 2: Do = %v, want success on a fresh connection", err)
-	}
-	if got := string(resp2.Body); got != "ok" {
-		t.Errorf("request 2: body = %q, want %q — the appended response bypassed the "+
-			"reader and the connection was pooled with it still on the socket", got, "ok")
-	}
-	if n := accepted.Load(); n != 2 {
-		t.Errorf("accepted %d connections, want 2 — the poisoned connection was reused", n)
-	}
+	require.NoError(t, err1, "request 1")
+	require.Len(t, resp1.Body, bodyLen, "request 1 body length")
+	require.NoError(t, err2, "request 2 must succeed on a fresh connection")
+	assert.Equal(t, "ok", string(resp2.Body),
+		"the appended response bypassed the reader and the connection was pooled with "+
+			"it still on the socket")
+	assert.EqualValues(t, 2, accepted.Load(), "the poisoned connection was reused")
 }

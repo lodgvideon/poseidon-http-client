@@ -7,6 +7,9 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // ————————————————————————————————————————————————————————————————
@@ -29,14 +32,31 @@ import (
 // ratio survives both being slow.
 //
 // What this test does NOT pin, and must not be read as pinning:
-//   - That the sweep runs at all. A pool that never probes anything passes
-//     this trivially. TestH1Pool_ProbeEvictsPeerClosedIdleConn is what covers
+//   - That the HEALTH SWEEP specifically runs. The reads counter below proves
+//     only that the pool touched the sockets at all — checkout-time residue
+//     peeks read them too — which rules out the degenerate "a pool that never
+//     looks at a socket passes trivially" case and nothing more.
+//     TestH1Pool_ProbeEvictsPeerClosedIdleConn is what covers the sweep's
 //     presence; the two travel together and deleting either leaves a hole.
 //   - That the probe runs on a separate goroutine. Probing concurrently ON the
 //     actor also keeps latency flat in n, and mutation-checking confirms this
 //     test cannot tell the two apart. Off-actor is a design choice — the actor
 //     does no I/O at all — that measured better, not one this test proves.
 // ————————————————————————————————————————————————————————————————
+
+// h1CountingConn forwards everything to the pipe half beneath it and counts the
+// reads the pool performs, so a run in which the pool never touched a socket can
+// be told apart from a real pass. Nothing else is intercepted: net.Pipe is not a
+// syscall.Conn, so no HasResidue fast path exists here to preserve.
+type h1CountingConn struct {
+	net.Conn
+	reads *atomic.Int64
+}
+
+func (c *h1CountingConn) Read(p []byte) (int, error) {
+	c.reads.Add(1)
+	return c.Conn.Read(p)
+}
 
 // h1IdleDialer hands out the client half of a net.Pipe whose peer half is never
 // written to and never closed. That is the expensive case for ProbeIdle: the
@@ -46,8 +66,9 @@ import (
 // closed peer would make Peek return immediately and erase the effect under
 // test.
 type h1IdleDialer struct {
-	mu   sync.Mutex
-	srvs []net.Conn
+	mu    sync.Mutex
+	srvs  []net.Conn
+	reads atomic.Int64
 }
 
 func (d *h1IdleDialer) Dial(_ context.Context, _ string) (net.Conn, error) {
@@ -55,7 +76,7 @@ func (d *h1IdleDialer) Dial(_ context.Context, _ string) (net.Conn, error) {
 	d.mu.Lock()
 	d.srvs = append(d.srvs, srv)
 	d.mu.Unlock()
-	return cli, nil
+	return &h1CountingConn{Conn: cli, reads: &d.reads}, nil
 }
 
 func (d *h1IdleDialer) dialCount() int {
@@ -73,12 +94,13 @@ func (d *h1IdleDialer) closeAll() {
 }
 
 // worstAcquireDuringSweeps fills a pool with nConns idle conns, then hammers
-// acquire/release for a fixed window and returns the worst latency observed.
+// acquire/release for a fixed window and returns the worst latency observed and
+// the number of socket reads the pool performed while doing it.
 //
 // HealthCheckPeriod is far shorter than one sweep takes, so ticks coalesce and
 // the pool is sweeping almost continuously — which is what makes the worst case
 // observable in a short test rather than once every 30s.
-func worstAcquireDuringSweeps(t *testing.T, nConns int) time.Duration {
+func worstAcquireDuringSweeps(t *testing.T, nConns int) (time.Duration, int64) {
 	t.Helper()
 
 	d := &h1IdleDialer{}
@@ -101,30 +123,27 @@ func worstAcquireDuringSweeps(t *testing.T, nConns int) time.Duration {
 	held := make([]*h1ManagedConn, 0, nConns)
 	for i := 0; i < nConns; i++ {
 		mc, err := p.acquire(ctx)
-		if err != nil {
-			t.Fatalf("acquire[%d] while filling the pool: %v", i, err)
-		}
+		require.NoErrorf(t, err, "acquire[%d] while filling the pool", i)
 		held = append(held, mc)
 	}
 	for _, mc := range held {
 		p.release(mc, true)
 	}
 
+	before := d.reads.Load()
 	var worst time.Duration
 	deadline := time.Now().Add(300 * time.Millisecond)
 	for time.Now().Before(deadline) {
 		start := time.Now()
 		mc, err := p.acquire(ctx)
 		elapsed := time.Since(start)
-		if err != nil {
-			t.Fatalf("acquire during sweeps: %v", err)
-		}
+		require.NoError(t, err, "acquire during sweeps")
 		p.release(mc, true)
 		if elapsed > worst {
 			worst = elapsed
 		}
 	}
-	return worst
+	return worst, d.reads.Load() - before
 }
 
 // TestH1Pool_HealthSweep_DoesNotScaleAcquireLatency pins that the health sweep
@@ -141,19 +160,28 @@ func TestH1Pool_HealthSweep_DoesNotScaleAcquireLatency(t *testing.T) {
 		largePool = 64
 	)
 
-	small := worstAcquireDuringSweeps(t, smallPool)
-	large := worstAcquireDuringSweeps(t, largePool)
+	small, smallReads := worstAcquireDuringSweeps(t, smallPool)
+	large, largeReads := worstAcquireDuringSweeps(t, largePool)
 
 	// A 32x difference in conn count must not buy a 32x difference in latency.
 	// The slack absorbs scheduler noise and keeps the bound meaningful when
 	// `small` is near zero; it is far below the effect being detected.
 	limit := 4*small + 20*time.Millisecond
-	if large > limit {
-		t.Fatalf("acquire latency scales with pool size: %d conns -> %v, %d conns -> %v (limit %v)\n"+
-			"the health sweep is serialising the pool: each idle conn costs one blocking ProbeIdle on the actor goroutine",
-			smallPool, small, largePool, large, limit)
-	}
-	t.Logf("worst acquire latency: %d conns = %v, %d conns = %v (limit %v)", smallPool, small, largePool, large, limit)
+	// Logged BEFORE the assertion, so the numbers survive a failure: a bound
+	// quoted without the measurement behind it is how a tolerance ends up
+	// passing with the mechanism it guards removed.
+	t.Logf("worst acquire latency: %d conns = %v (%d socket reads), %d conns = %v (%d socket reads), limit %v",
+		smallPool, small, smallReads, largePool, large, largeReads, limit)
+	require.Positive(t, smallReads,
+		"the pool never read a socket in the small arm: nothing was measured, and a "+
+			"pool that never probes anything satisfies the latency bound trivially")
+	require.Positive(t, largeReads,
+		"the pool never read a socket in the large arm: nothing was measured")
+	assert.LessOrEqualf(t, large, limit,
+		"acquire latency scales with pool size: %d conns -> %v, %d conns -> %v (limit %v)\n"+
+			"the health sweep is serialising the pool: each idle conn costs one blocking "+
+			"ProbeIdle on the actor goroutine",
+		smallPool, small, largePool, large, limit)
 }
 
 // TestH1Pool_HealthSweep_DoesNotDialOverAReservedConn pins the other half of the
@@ -197,28 +225,27 @@ func TestH1Pool_HealthSweep_DoesNotDialOverAReservedConn(t *testing.T) {
 
 	ctx := context.Background()
 	mc, err := p.acquire(ctx)
-	if err != nil {
-		t.Fatalf("first acquire: %v", err)
-	}
+	require.NoError(t, err, "first acquire")
 	releaseUnderActor(mc)
-	if got := d.dialCount(); got != 1 {
-		t.Fatalf("dials after one acquire = %d, want 1", got)
-	}
+	require.Equal(t, 1, d.dialCount(), "one acquire must produce exactly one dial")
 
 	// Strictly serial: never more than one conn checked out, so a correct pool
 	// reuses the same one forever.
+	acquires := 0
 	deadline := time.Now().Add(300 * time.Millisecond)
 	for time.Now().Before(deadline) {
 		mc, err := p.acquire(ctx)
-		if err != nil {
-			t.Fatalf("acquire during sweeps: %v", err)
-		}
+		require.NoError(t, err, "acquire during sweeps")
 		releaseUnderActor(mc)
+		acquires++
 	}
 
-	if got := d.dialCount(); got != 1 {
-		t.Fatalf("pool opened %d conns for a workload one conn can serve;\n"+
+	t.Logf("%d serial acquire/release cycles over 300ms produced %d dials (%d socket reads)",
+		acquires, d.dialCount(), d.reads.Load())
+	require.Positivef(t, acquires,
+		"no acquire completed inside the window, so no acquire could have landed mid-sweep")
+	assert.Equalf(t, 1, d.dialCount(),
+		"pool opened %d conns for a workload one conn can serve;\n"+
 			"an acquire arriving mid-sweep dialled over the conn the sweep had reserved "+
-			"instead of waiting the one probe deadline for it", got)
-	}
+			"instead of waiting the one probe deadline for it", d.dialCount())
 }
