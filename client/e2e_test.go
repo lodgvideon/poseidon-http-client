@@ -1,3 +1,28 @@
+//go:build e2e_remote
+
+// End-to-end tests against a real third-party HTTP/2 origin (www.google.com).
+//
+// BUILD-TAGGED, not skipped (#869). Every test in this file used to open with an
+// unconditional t.Skip, so all nine ran nowhere while still reading as coverage
+// to anyone scanning the package — 28 such skips across this file and
+// e2e_extended_test.go, next to eleven more behind the e2e_remote tag in
+// e2e_stress_test.go. Two policies for one kind of test, and the louder of the
+// two was the one that lied.
+//
+// They are now under the SAME tag the stress file already used, so the package
+// has one policy: `go test ./client/` reports no phantom skips, and
+// `go test -tags=e2e_remote ./client/` runs all thirty-nine against the live
+// internet. Verified by running them under the tag, not merely by compiling them.
+//
+// Why not repoint them at a local httptest origin, which would make them
+// always-on? Because what they would then assert — BodyStream versus BodyBuffer,
+// DoStream event pumping, connection reuse, Response.Reset reuse — is already
+// covered locally by integration_test.go, coverage_test.go and the h1/h3
+// integration suites. Duplicating that adds no mutation-killing power. What
+// these files uniquely give is interop with a FOREIGN HTTP/2 stack, and that
+// needs a foreign server. Wiring an opt-in workflow_dispatch job that sets the
+// tag is the remaining step and is left on #869 for the maintainer.
+
 package client_test
 
 import (
@@ -15,11 +40,6 @@ import (
 	"github.com/lodgvideon/poseidon-http-client/conn"
 	"github.com/lodgvideon/poseidon-http-client/hpack"
 )
-
-// Every test in this file opens with an unconditional t.Skip, so none of them
-// runs anywhere — see the tracking issue filed alongside the #723 sweep. The
-// helpers below are NOT dead: e2e_stress_test.go (//go:build e2e_remote) uses
-// them.
 
 // e2eClient creates a client connected to a real remote HTTP/2 server over TLS.
 func e2eClient(t *testing.T, host string) *client.Client {
@@ -63,8 +83,6 @@ func doGET(c *client.Client, ctx context.Context, path string, wantBody bool) (c
 // ---------- google.com ----------
 
 func TestE2E_Google_GET_Root(t *testing.T) {
-	t.Skip(e2eSkipReason)
-
 	c := e2eClient(t, "www.google.com")
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
@@ -79,8 +97,6 @@ func TestE2E_Google_GET_Root(t *testing.T) {
 }
 
 func TestE2E_Google_GET_404(t *testing.T) {
-	t.Skip(e2eSkipReason)
-
 	c := e2eClient(t, "www.google.com")
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
@@ -92,8 +108,6 @@ func TestE2E_Google_GET_404(t *testing.T) {
 }
 
 func TestE2E_Google_HEAD(t *testing.T) {
-	t.Skip(e2eSkipReason)
-
 	c := e2eClient(t, "www.google.com")
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
@@ -114,8 +128,6 @@ func TestE2E_Google_HEAD(t *testing.T) {
 // ---------- Connection reuse: 5 sequential requests ----------
 
 func TestE2E_Google_MultipleRequests_SameConn(t *testing.T) {
-	t.Skip(e2eSkipReason)
-
 	c := e2eClient(t, "www.google.com")
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
@@ -133,15 +145,17 @@ func TestE2E_Google_MultipleRequests_SameConn(t *testing.T) {
 	// property this test exists for, not the statuses above.
 	require.EqualValues(t, 1, snap.Counters.DialsAttempted,
 		"expected exactly 1 dial (conn reuse)")
-	require.GreaterOrEqualf(t, snap.Counters.RequestsStarted, uint64(5),
+	// int64, not uint64: CountersSnapshot fields come off atomic.Int64, and
+	// testify's GreaterOrEqual refuses to compare across types — it reported
+	// "Elements should be the same type" for 5 >= 5, i.e. this assertion could
+	// only ever FAIL. Found by running the file for the first time (#869).
+	require.GreaterOrEqualf(t, snap.Counters.RequestsStarted, int64(5),
 		"expected >=5 started, got %d", snap.Counters.RequestsStarted)
 }
 
 // ---------- Concurrent requests on single connection ----------
 
 func TestE2E_Google_ConcurrentRequests(t *testing.T) {
-	t.Skip(e2eSkipReason)
-
 	c := e2eClient(t, "www.google.com")
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
@@ -172,8 +186,6 @@ func TestE2E_Google_ConcurrentRequests(t *testing.T) {
 // ---------- Metrics ----------
 
 func TestE2E_Google_Metrics(t *testing.T) {
-	t.Skip(e2eSkipReason)
-
 	c := e2eClient(t, "www.google.com")
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
@@ -189,8 +201,6 @@ func TestE2E_Google_Metrics(t *testing.T) {
 // ---------- Headers round-trip ----------
 
 func TestE2E_Google_ResponseHeaders(t *testing.T) {
-	t.Skip(e2eSkipReason)
-
 	c := e2eClient(t, "www.google.com")
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
@@ -215,8 +225,6 @@ func TestE2E_Google_ResponseHeaders(t *testing.T) {
 // ---------- Large body (google returns ~80KB) ----------
 
 func TestE2E_Google_LargeBody(t *testing.T) {
-	t.Skip(e2eSkipReason)
-
 	c := e2eClient(t, "www.google.com")
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
@@ -233,8 +241,6 @@ func TestE2E_Google_LargeBody(t *testing.T) {
 // ---------- Repeated client usage (open/close cycle) ----------
 
 func TestE2E_Google_ClientCloseReopen(t *testing.T) {
-	t.Skip(e2eSkipReason)
-
 	const host = "www.google.com"
 
 	for i := range 3 {
