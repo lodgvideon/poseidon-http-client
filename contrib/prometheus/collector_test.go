@@ -15,15 +15,24 @@ import (
 var _ StatsSource = (*client.Client)(nil)
 
 // fakeSource is a StatsSource returning canned values.
+//
+// Both calls are counted. Counting only PoolStats proved the no-caching
+// property for one of the two things a scrape reads, and a collector that
+// cached the metrics snapshot would have reported stale counters forever with
+// the suite green.
 type fakeSource struct {
-	stats   client.Stats
-	metrics client.MetricsSnapshot
-	calls   int
+	stats        client.Stats
+	metrics      client.MetricsSnapshot
+	calls        int
+	metricsCalls int
 }
 
 func (f *fakeSource) PoolStats() client.Stats { f.calls++; return f.stats }
 
-func (f *fakeSource) MetricsSnapshot() client.MetricsSnapshot { return f.metrics }
+func (f *fakeSource) MetricsSnapshot() client.MetricsSnapshot {
+	f.metricsCalls++
+	return f.metrics
+}
 
 // gather registers c with a pedantic registry and returns the exposed
 // families by name. The pedantic registry validates that every metric
@@ -144,14 +153,66 @@ func TestCollector_H1PoolActiveConnsExposed(t *testing.T) {
 		"inflight streams: for HTTP/1.1 this equals the checked-out connection count, one exchange per connection")
 }
 
-// A single-conn transport, or a closed pool, yields the zero Stats. The
-// gauges must still be exposed, reading 0 — a disappearing series looks
-// like a broken exporter.
-func TestCollector_ZeroStatsStillExposesGauges(t *testing.T) {
+// zeroScalarFamilies is every gauge and every unlabelled counter Collector
+// publishes. responses_total is excluded because it carries two series under
+// one family name and singleValue insists on exactly one.
+var zeroScalarFamilies = []string{
+	"poseidon_pool_active_conns",
+	"poseidon_pool_inflight_streams",
+	"poseidon_pool_waiters",
+	"poseidon_pool_inflight_dials",
+	"poseidon_pool_addresses",
+	"poseidon_pool_draining_subpools",
+	"poseidon_requests_started_total",
+	"poseidon_requests_succeeded_total",
+	"poseidon_requests_errored_total",
+	"poseidon_retries_total",
+	"poseidon_dials_total",
+	"poseidon_dials_failed_total",
+	"poseidon_conns_closed_total",
+	"poseidon_goaways_received_total",
+}
+
+var zeroHistogramFamilies = []string{
+	"poseidon_request_duration_seconds",
+	"poseidon_dial_duration_seconds",
+	"poseidon_acquire_duration_seconds",
+}
+
+// A single-conn transport, a closed pool, or a client scraped before its first
+// request yields the zero Stats and the zero MetricsSnapshot. Every series must
+// still be exposed reading 0.
+//
+// The stated property — "a disappearing series looks like a broken exporter" —
+// applies to all eighteen families, not to the one gauge this used to check.
+// Suppressing a zero counter or a zero-count histogram is the natural
+// micro-optimisation to reach for and was invisible: the previous form asserted
+// only poseidon_pool_active_conns, and Describe-vs-Collect drift is checked by
+// containment, which an omitted metric satisfies.
+func TestCollector_ZeroStatsStillExposesEverySeries(t *testing.T) {
 	f := gather(t, NewCollector(&fakeSource{}))
 
-	assert.Equal(t, float64(0), singleValue(t, f, "poseidon_pool_active_conns"),
-		"active conns must still be exposed reading 0; a disappearing series looks like a broken exporter")
+	require.Lenf(t, f, len(zeroScalarFamilies)+len(zeroHistogramFamilies)+1,
+		"a zero-state scrape exposed %d families, want every one of the eighteen; got %v", len(f), familyNames(f))
+	for _, name := range zeroScalarFamilies {
+		assert.Equalf(t, float64(0), singleValue(t, f, name),
+			"%s must be exposed reading 0 before anything has happened; a series that only appears once it is non-zero reads to a dashboard as a broken exporter and to an alert as missing data", name)
+	}
+	for _, class := range []string{"2xx", "non2xx"} {
+		assert.Equalf(t, float64(0),
+			labelledValue(t, f, "poseidon_responses_total", map[string]string{"class": class}),
+			`poseidon_responses_total{class=%q} must be exposed reading 0; both classes exist from the first scrape or a rate() over them starts from nothing`, class)
+	}
+	for _, name := range zeroHistogramFamilies {
+		fam, ok := f[name]
+		require.Truef(t, ok, "histogram %q not exposed at zero state", name)
+		h := fam.GetMetric()[0].GetHistogram()
+		require.NotNilf(t, h, "%q is not a histogram", name)
+		assert.Equalf(t, uint64(0), h.GetSampleCount(),
+			"%s must be exposed with a zero sample count rather than omitted", name)
+		assert.Lenf(t, h.GetBucket(), MaxBucketExp-MinBucketExp+1,
+			"%s must publish its full boundary window even with nothing observed", name)
+	}
 }
 
 func TestCollector_Counters(t *testing.T) {
@@ -250,12 +311,14 @@ func TestCollector_ScrapeReadsTheClientEachTime(t *testing.T) {
 	src := &fakeSource{}
 	c := NewCollector(src)
 	gather(t, c)
-	first := src.calls
+	firstPool, firstMetrics := src.calls, src.metricsCalls
 
 	gather(t, c)
 
-	assert.Greaterf(t, src.calls, first,
+	assert.Greaterf(t, src.calls, firstPool,
 		"PoolStats called %d times across two scrapes; values must not be cached or every scrape after the first reports stale pool state", src.calls)
+	assert.Greaterf(t, src.metricsCalls, firstMetrics,
+		"MetricsSnapshot called %d times across two scrapes; a scrape reads two things from the client and caching either one republishes numbers that stopped moving", src.metricsCalls)
 }
 
 func TestCollector_NamespaceAndConstLabels(t *testing.T) {
@@ -278,6 +341,107 @@ func TestCollector_EmptyNamespaceLeavesNamesUnprefixed(t *testing.T) {
 	_, ok := f["pool_active_conns"]
 	assert.Truef(t, ok,
 		"an empty namespace must leave metric names unprefixed; got families %v", familyNames(f))
+}
+
+// emitted takes the one metric a send is expected to have queued, without
+// blocking. Collect owes the registry exactly one metric per Desc; a send that
+// queues none stalls the scrape, and asserting that with a bare receive would
+// report it as a test timeout rather than as this property failing.
+func emitted(t *testing.T, ch <-chan prom.Metric) prom.Metric {
+	t.Helper()
+
+	select {
+	case m := <-ch:
+		require.NotNil(t, m, "a nil metric reaches the registry as a nil-pointer dereference in the scrape goroutine")
+		return m
+	default:
+		require.FailNow(t, "nothing was emitted",
+			"every Desc must yield exactly one metric even when building it fails; a Collect that silently skips one leaves the registry waiting for a metric that never arrives")
+		return nil
+	}
+}
+
+// TestSend_LabelMismatchDegradesToInvalidMetric executes the branch the
+// collector's own Descs can never reach: they are internally consistent, so
+// every existing test takes the happy path and the deliberate degrade-rather-
+// than-panic decision was documented and unexecuted.
+//
+// It is not cosmetic. NewConstMetric's error is returned, not panicked, only
+// because send checks it; a panic here happens inside the scrape goroutine of
+// whatever HTTP handler is serving /metrics and takes the process down. A
+// registry turns the invalid metric into a gather error instead.
+func TestSend_LabelMismatchDegradesToInvalidMetric(t *testing.T) {
+	ch := make(chan prom.Metric, 1)
+	d := prom.NewDesc("degrade_send", "a Desc declaring one label", []string{"needed"}, nil)
+
+	send(ch, d, prom.GaugeValue, 1) // no value supplied for "needed"
+
+	// Non-blocking: send is synchronous and the channel is buffered, so
+	// whatever it emitted is already there. A bare receive would turn "emitted
+	// nothing" into a ten-minute hang and a nameless timeout instead of a
+	// failure that says which property broke.
+	m := emitted(t, ch)
+	assert.Error(t, m.Write(nil),
+		"a label/Desc mismatch must surface as an invalid metric the registry rejects, never as a panic in the scrape goroutine; a metrics endpoint is never worth the process")
+}
+
+func TestSendHistogram_LabelMismatchDegradesToInvalidMetric(t *testing.T) {
+	ch := make(chan prom.Metric, 1)
+	d := prom.NewDesc("degrade_histogram", "a Desc declaring one label", []string{"needed"}, nil)
+
+	sendHistogram(ch, d, client.HistogramSnapshot{}) // no value supplied for "needed"
+
+	m := emitted(t, ch)
+	assert.Error(t, m.Write(nil),
+		"NewConstHistogram has its own error path and it must degrade the same way send does; the two are reached by the same broken Desc and must not disagree about whether that is fatal")
+}
+
+// TestCollector_RegistrationCollidesUnlessConstLabelsDiffer pins both
+// directions of the decision a second client in one process runs into. The
+// positive half is the contract ExampleWithConstLabels documents — "several
+// clients in one process are told apart by a const label rather than by
+// separate registries" — and had no test at all; the negative half is the error
+// a user hits first, at startup, with a message that does not name the fix.
+//
+// A one-sided test here is satisfied by a registry that always says yes.
+func TestCollector_RegistrationCollidesUnlessConstLabelsDiffer(t *testing.T) {
+	t.Run("two collectors with the same names collide", func(t *testing.T) {
+		reg := prom.NewPedanticRegistry()
+		require.NoError(t, reg.Register(NewCollector(&fakeSource{})), "the first collector must register")
+
+		err := reg.Register(NewCollector(&fakeSource{}))
+
+		var already prom.AlreadyRegisteredError
+		assert.ErrorAsf(t, err, &already,
+			"registering a second unlabelled collector returned %v, want AlreadyRegisteredError: a caller has to be able to classify this without matching the message text", err)
+	})
+
+	t.Run("distinct const labels let both register", func(t *testing.T) {
+		reg := prom.NewPedanticRegistry()
+		require.NoError(t,
+			reg.Register(NewCollector(&fakeSource{}, WithConstLabels(prom.Labels{"target": "api"}))),
+			"the first labelled collector must register")
+
+		err := reg.Register(NewCollector(&fakeSource{}, WithConstLabels(prom.Labels{"target": "auth"})))
+
+		require.NoErrorf(t, err,
+			"a second collector distinguished by a const label was rejected (%v); that is the whole reason WithConstLabels exists, and it only works if EVERY Desc carries the labels — one that does not collides on its own", err)
+		_, gatherErr := reg.Gather()
+		assert.NoError(t, gatherErr,
+			"two labelled collectors registered but did not gather; a scrape that fails after a clean startup is worse than a startup that refuses")
+	})
+
+	t.Run("the same collector instance twice collides", func(t *testing.T) {
+		reg := prom.NewPedanticRegistry()
+		c := NewCollector(&fakeSource{})
+		require.NoError(t, reg.Register(c), "the first registration must succeed")
+
+		err := reg.Register(c)
+
+		var already prom.AlreadyRegisteredError
+		assert.ErrorAsf(t, err, &already,
+			"registering the same instance twice returned %v, want AlreadyRegisteredError: double registration in an init path must fail loudly rather than double-count", err)
+	})
 }
 
 func familyNames(f map[string]*dto.MetricFamily) []string {

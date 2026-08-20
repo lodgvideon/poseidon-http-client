@@ -62,6 +62,12 @@ func TestReadUint31(t *testing.T) {
 		{"zero", []byte{0x00, 0x00, 0x00, 0x00}, 0},
 		{"max_31bit", []byte{0x7f, 0xff, 0xff, 0xff}, 0x7fff_ffff},
 		{"r_bit_set_is_masked", []byte{0xff, 0xff, 0xff, 0xff}, 0x7fff_ffff},
+		// The reserved bit as the ONLY set bit. It is what separates "masks the
+		// R bit" from "saturates at 0x7fffffff": under a saturating reader the
+		// row above still yields 0x7fffffff and passes, while this one must
+		// yield 0 and would not. Nothing else in the table can tell the two
+		// apart.
+		{"r_bit_only_is_masked", []byte{0x80, 0x00, 0x00, 0x00}, 0},
 		{"stream_id_1", []byte{0x00, 0x00, 0x00, 0x01}, 1},
 	}
 	for _, tc := range cases {
@@ -86,6 +92,11 @@ func TestWriteUint31(t *testing.T) {
 		{"zero", 0, []byte{0x00, 0x00, 0x00, 0x00}},
 		{"max_31bit", 0x7fff_ffff, []byte{0x7f, 0xff, 0xff, 0xff}},
 		{"high_bit_cleared", 0xffff_ffff, []byte{0x7f, 0xff, 0xff, 0xff}},
+		// Same discriminator on the write side: 0xffffffff produces 7fffffff
+		// under both "clear the reserved bit" and "saturate", so only the input
+		// whose sole set bit IS the reserved one distinguishes them — it must
+		// write four zero bytes, not 7fffffff.
+		{"r_bit_only_writes_zero", 0x8000_0000, []byte{0x00, 0x00, 0x00, 0x00}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

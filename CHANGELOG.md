@@ -9,6 +9,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Tests
 
+- **Fourteen coverage gaps in `trace`, `contrib/prometheus`, `internal/bufx` and
+  `internal/bytesx`; eleven closed by adding the missing case, three refuted by
+  measurement.** Every varint in `bytesx` was decoded from a buffer trimmed to
+  exactly its own length, the opposite of the shape `quic` and `http3` produce —
+  a frame type, then a length, then hundreds of bytes still to come — so all
+  three multi-byte length guards could be weakened to equality tests and the
+  one-byte form made to report `len(b)`, with the suite green: under the first,
+  every multi-byte varint in every packet reads as incomplete and the parse
+  stalls forever. `trace`'s renderer had no case where a detail-gated field held
+  zero, so `last_stream=0` (a server refusing the connection without having
+  processed a stream) and `incr=0` (a PROTOCOL_ERROR WINDOW_UPDATE) could both
+  vanish from the log, and the nil-`Params` guard that stops a debug path
+  panicking the connection it was installed to observe could be deleted
+  unnoticed; the timestamp was cut off by the test helper before every
+  assertion, leaving its resolution pinned by nothing; and the writer error both
+  `Flush` and `Close` exist to return had no failing writer anywhere in the
+  package, hiding a `Close` reordering that leaks one flusher goroutine per
+  tracer. `contrib/prometheus` gained the degrade-rather-than-panic branch its
+  scrape goroutine depends on, the top-of-window histogram boundary — bracketed
+  from a distance at client buckets 8 and 40, so the term the bug drops was
+  always zero — `WithConstLabels` on `HookMetrics` and on every `Collector`
+  `Desc`, pinned through the duplicate-registration error a second client in one
+  process actually hits, `statusLabel`'s `Err`-beats-`Status` precedence, all
+  eighteen families at zero state rather than one gauge out of eighteen,
+  `MetricsSnapshot`'s no-caching contract, and a concurrent-observation test
+  with a single-goroutine control arm and a reported scrape count. `bufx` pinned
+  `GetReadBuf`'s documented length-0 postcondition and the `PutReadBuf(nil)`
+  guard, whose removal poisons the shared pool and panics an unrelated caller
+  that merely drew the entry, plus the reserved-bit-only input that separates
+  "clears the R bit" from "saturates at 0x7fffffff". Three sub-claims were
+  refuted with measurements rather than closed with tests: `sync.Pool` retention
+  at the `cap == min` boundary is unobservable, `WithDurationBuckets` has no
+  data path to `Collector` at all, and the uint helpers' callers all pass
+  exactly-width slices, so an out-of-window access is a panic the existing
+  vectors already trigger. `ExampleNewCollector` and `ExampleNewHookMetrics` no
+  longer share `http.DefaultServeMux`, and `applyCallOptions`' escape comment
+  now records what the allocation gate observes — the caller's `len(opts) > 0`
+  guard, not the `//go:noinline` directive beside it (#742, #743, #744, #749,
+  #750, #751, #752, #753, #758, #760, #761, #762, #763, #794).
+
 - **Twelve `grpc` coverage gaps closed, three of them tests that named a
   property they could not observe.** `TestIntegration_ResetStreamMapsToStatus`
   asserted only "not OK", which `InvokeInto`'s empty-response guard produces on

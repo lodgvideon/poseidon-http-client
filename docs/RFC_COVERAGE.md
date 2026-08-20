@@ -418,7 +418,7 @@ protection (RFC 9001) and the connection engine are later phases.
 
 | Section | Type        | Test |
 |---------|-------------|------|
-| §16     | Conformance | TestConformance_RFC9000_Sec16_VarintRoundTrip, TestConformance_RFC9000_Sec16_NonMinimalDecode, TestConformance_RFC9000_Sec16_IncompleteInput |
+| §16     | Conformance | TestConformance_RFC9000_Sec16_VarintRoundTrip, TestConformance_RFC9000_Sec16_NonMinimalDecode, TestConformance_RFC9000_Sec16_IncompleteInput, TestConformance_RFC9000_Sec16_DecodeWithTrailingBytes (decode from the front of a buffer that continues past the varint — the caller's shape; n must count only the field's own bytes) |
 | §16     | Roundtrip   | TestVarint_ExhaustiveRoundTrip |
 | §16     | Fuzz        | FuzzReadVarint (arbitrary bytes → never panic/over-read; a short input returns (0,0), a complete prefix decodes within the 62-bit space and re-encodes to itself) |
 | §19.3   | Conformance | TestConformance_RFC9000_Sec193_AckFrame, TestConformance_RFC9000_Sec193_AckECN |
