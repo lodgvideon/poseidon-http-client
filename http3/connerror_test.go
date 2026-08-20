@@ -119,3 +119,65 @@ func TestH3ConnError_RealPathCarriesTheCode(t *testing.T) {
 		})
 	}
 }
+
+// TestH3ErrorCodes_MatchTheSec81Registry pins the whole RFC 9114 §8.1 registry:
+// every one of the seventeen codes has a constant with the registered value, and
+// h3ErrorCodeName names it.
+//
+// The table used to define thirteen of the seventeen, so h3ErrorCodeName returned
+// "" for the other four and a peer sending one of them printed as a bare number.
+// Nothing noticed, because no test asked for a code the client does not itself
+// send — which is exactly the set a peer is free to send us (#775).
+//
+// Both halves are asserted from the same literal table, transcribed from §8.1, so
+// a constant defined with the wrong value fails on the value and a missing
+// h3ErrorCodeName case fails on the name.
+func TestH3ErrorCodes_MatchTheSec81Registry(t *testing.T) {
+	// RFC 9114 §8.1, in registry order. The wire values are the requirement: a
+	// constant that disagrees tells the peer something other than what its name says.
+	registry := []struct {
+		code uint64
+		name string
+	}{
+		{0x0100, "H3_NO_ERROR"},
+		{0x0101, "H3_GENERAL_PROTOCOL_ERROR"},
+		{0x0102, "H3_INTERNAL_ERROR"},
+		{0x0103, "H3_STREAM_CREATION_ERROR"},
+		{0x0104, "H3_CLOSED_CRITICAL_STREAM"},
+		{0x0105, "H3_FRAME_UNEXPECTED"},
+		{0x0106, "H3_FRAME_ERROR"},
+		{0x0107, "H3_EXCESSIVE_LOAD"},
+		{0x0108, "H3_ID_ERROR"},
+		{0x0109, "H3_SETTINGS_ERROR"},
+		{0x010a, "H3_MISSING_SETTINGS"},
+		{0x010b, "H3_REQUEST_REJECTED"},
+		{0x010c, "H3_REQUEST_CANCELLED"},
+		{0x010d, "H3_REQUEST_INCOMPLETE"},
+		{0x010e, "H3_MESSAGE_ERROR"},
+		{0x010f, "H3_CONNECT_ERROR"},
+		{0x0110, "H3_VERSION_FALLBACK"},
+	}
+	// The constants, in the same order. A code with no constant cannot be listed
+	// here at all, so the length check below is what catches an omission.
+	constants := []uint64{
+		H3NoError, H3GeneralProtocolError, H3InternalError, H3StreamCreationError,
+		H3ClosedCriticalStream, H3FrameUnexpected, H3FrameError, H3ExcessiveLoad,
+		H3IDError, H3SettingsErrorCode, H3MissingSettings, H3RequestRejected,
+		H3RequestCancelled, H3RequestIncomplete, H3MessageError, H3ConnectError,
+		H3VersionFallback,
+	}
+
+	require.Lenf(t, constants, len(registry),
+		"the package defines %d of §8.1's %d error codes; a code with no constant "+
+			"is one a caller cannot send and h3ErrorCodeName cannot name",
+		len(constants), len(registry))
+	for i, want := range registry {
+		assert.Equalf(t, want.code, constants[i],
+			"%s = %#x, want %#x — the constant's value is what reaches the peer",
+			want.name, constants[i], want.code)
+		assert.Equalf(t, want.name, h3ErrorCodeName(want.code),
+			"h3ErrorCodeName(%#x) = %q, want %q; without the case a peer's code is "+
+				"logged as a bare number and the reader has to look it up",
+			want.code, h3ErrorCodeName(want.code), want.name)
+	}
+}
