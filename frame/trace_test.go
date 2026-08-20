@@ -235,6 +235,46 @@ func TestFramer_TraceIn_ReportsReceivedFrames(t *testing.T) {
 		"GOAWAY detail = %b, want code and last-stream set", goaway.Detail)
 }
 
+// TestFramer_TraceIn_PaddedPushPromiseCarriesPromisedID is the INBOUND half of
+// the property the outbound table above already pins under the name "padded
+// PUSH_PROMISE still carries the promised id" (#782).
+//
+// That row drives WritePushPromise, which reports through writeHeader and hands
+// the tracer the promised id it encoded before the pad-length octet was written
+// — so it exercises the write side only. The read side is a different mechanism:
+// traceIn strips the leading pad-length octet itself so that fillDetail sees the
+// same logical payload, and nothing reached that line. Without the strip, a
+// received padded PUSH_PROMISE traces a PromisedID decoded from
+// {padLen, id[0], id[1], id[2]} — a plausible-looking wrong number in the frame
+// log, with no error anywhere to contradict it.
+//
+// The frame is built by a real peer Framer rather than by hand so that the pad
+// length, the flags and the wire order are the codec's own, not the test's idea
+// of them; the expectation is the same trace.FrameInfo shape the outbound row
+// asserts.
+func TestFramer_TraceIn_PaddedPushPromiseCarriesPromisedID(t *testing.T) {
+	var wire bytes.Buffer
+	peer := NewFramer(&wire, nil)
+	require.NoError(t, peer.WritePushPromise(3, 6, []byte{0x82}, true, 4), "peer PUSH_PROMISE")
+	rec := &recorder{}
+	f := tracedFramer(nil, bytes.NewReader(wire.Bytes()), rec)
+
+	_, err := f.ReadFrame(context.Background(), dropHandler{})
+
+	require.NoError(t, err, "ReadFrame")
+	got := rec.only(t)
+	assert.Equalf(t, "PUSH_PROMISE", got.TypeName, "traced %+v, want the padded PUSH_PROMISE", got)
+	assert.Equalf(t, trace.DirIn, got.Dir, "traced %+v, want direction in", got)
+	assert.Truef(t, got.Detail.Has(trace.DetailPromisedID),
+		"detail = %b, want DetailPromisedID — a PUSH_PROMISE whose promised id is "+
+			"not reported is the one field a push frame exists to carry", got.Detail)
+	assert.EqualValuesf(t, 6, got.PromisedID,
+		"PromisedID = %d, want 6 — the pad-length octet sits in front of the id on "+
+			"the wire (§6.6), so a reader that does not strip it decodes the pad "+
+			"length as the id's high byte and logs a stream that never existed",
+		got.PromisedID)
+}
+
 // TestFramer_TraceIn_ReportsFrameThatFailsDispatch is the reason the emit sits
 // ahead of validation. A frame log whose last line is missing exactly because
 // the frame was malformed omits the one event worth seeing.

@@ -2,6 +2,7 @@ package trace
 
 import (
 	"bytes"
+	"os"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -33,6 +34,19 @@ func TestParseCategories(t *testing.T) {
 		// under pressure, by someone who then believes what the log does not say.
 		{in: "framse", wantErr: true},
 		{in: "frames,nonsense", wantErr: true},
+		// The falsy spellings are an error, NOT a silent off. "1" and "true"
+		// are accepted as on, so flipping one to "0" is the obvious way to turn
+		// the knob back off without unsetting it — and it fails at startup
+		// instead. That is this package's stated rule ("a malformed value is an
+		// error, not a fallback to off") applied consistently, and the choice
+		// is pinned here rather than left to be rediscovered: silently
+		// selecting nothing for "0" is exactly the outcome ErrUnknownCategory
+		// exists to prevent, because the operator then reads an empty log as a
+		// quiet connection. Unset the variable to turn tracing off.
+		{in: "0", wantErr: true},
+		{in: "false", wantErr: true},
+		{in: "off", wantErr: true},
+		{in: "no", wantErr: true},
 	}
 
 	for _, tc := range tests {
@@ -45,6 +59,9 @@ func TestParseCategories(t *testing.T) {
 				require.ErrorIsf(t, err, ErrUnknownCategory,
 					"err = %v, want ErrUnknownCategory: a typo must fail at startup rather than quietly select nothing, because the person who typed it then reads the log and believes what it does not say",
 					err)
+				assert.Equalf(t, Category(0), got,
+					"categories = %b alongside the error, want 0: a caller that logs the error and carries on would then be tracing after a typo, the precise outcome ErrUnknownCategory exists to prevent",
+					got)
 				return
 			}
 			require.NoErrorf(t, err, "ParseCategories(%q) must parse", in)
@@ -56,6 +73,18 @@ func TestParseCategories(t *testing.T) {
 
 func TestFromEnv(t *testing.T) {
 	t.Run("unset yields no tracer", func(t *testing.T) {
+		// There is no t.Unsetenv, and this subtest used to rely on the variable
+		// being absent from the ambient environment — which it is in CI and is
+		// not for anyone who exports the knob while debugging the thing the
+		// knob is for. t.Setenv records the original state, including "was
+		// unset", and restores it in cleanup, so removing the variable
+		// afterwards is hermetic in both directions.
+		//
+		// Hygiene, not a hole: deleting the !ok guard in FromEnv outright
+		// survives this package's suite either way, because an unset variable
+		// reads as "" and ParseCategories("") selects nothing.
+		t.Setenv(EnvVar, "")
+		require.NoError(t, os.Unsetenv(EnvVar), "unset %s for this subtest", EnvVar)
 		var buf bytes.Buffer
 
 		tr, closer, err := FromEnv(&buf)
@@ -100,6 +129,22 @@ func TestFromEnv(t *testing.T) {
 			tr)
 		assert.Truef(t, closer == nil,
 			"streams alone produced a closer (%v)", closer)
+	})
+
+	// Set-but-empty is its own value class: LookupEnv reports ok, so the unset
+	// guard does not fire and the value has to be parsed and then rejected by
+	// the category gate. No test reached FromEnv with it before.
+	t.Run("set but empty yields no tracer", func(t *testing.T) {
+		t.Setenv(EnvVar, "")
+
+		tr, closer, err := FromEnv(&bytes.Buffer{})
+
+		require.NoErrorf(t, err, "%s= is empty, not malformed; an empty value selects nothing and must not fail at startup", EnvVar)
+		assert.Truef(t, tr == nil,
+			"tracer = %v, want nil with %s set to the empty string: the cost of tracing being off must be one nil check per frame, not a live tracer nobody asked for",
+			tr, EnvVar)
+		assert.Truef(t, closer == nil,
+			"closer = %v, want nil with %s set to the empty string", closer, EnvVar)
 	})
 
 	t.Run("a malformed value is an error, not off", func(t *testing.T) {

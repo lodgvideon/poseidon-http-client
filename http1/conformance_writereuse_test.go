@@ -61,6 +61,40 @@ func (c *halfDeadConn) SetReadDeadline(time.Time) error  { return nil }
 func (c *halfDeadConn) SetWriteDeadline(time.Time) error { return nil }
 func (c *halfDeadConn) SetDeadline(time.Time) error      { return nil }
 
+// fullWriteErrorConn accepts every octet and, once failing is set, reports an
+// error anyway — the (len(p), err) return io.Writer explicitly permits and that
+// a *tls.Conn produces when the record reached the kernel and the connection
+// then failed. It is the one shape halfDeadConn cannot make: that one returns a
+// nil error whenever it accepted the whole slice, so a caller counting octets
+// can always tell something went wrong.
+type fullWriteErrorConn struct {
+	net.Conn
+	failing bool
+	resp    []byte
+	off     int
+}
+
+func (c *fullWriteErrorConn) Write(p []byte) (int, error) {
+	if c.failing {
+		return len(p), errors.New("connection reset by peer")
+	}
+	return len(p), nil
+}
+
+func (c *fullWriteErrorConn) Read(p []byte) (int, error) {
+	if c.off >= len(c.resp) {
+		return 0, net.ErrClosed
+	}
+	n := copy(p, c.resp[c.off:])
+	c.off += n
+	return n, nil
+}
+
+func (c *fullWriteErrorConn) Close() error                     { return nil }
+func (c *fullWriteErrorConn) SetReadDeadline(time.Time) error  { return nil }
+func (c *fullWriteErrorConn) SetWriteDeadline(time.Time) error { return nil }
+func (c *fullWriteErrorConn) SetDeadline(time.Time) error      { return nil }
+
 // TestConformance_RFC9112_Sec9_3_PartialWriteNotPoolable pins that a socket
 // write failure condemns the connection.
 //
@@ -87,6 +121,15 @@ func TestConformance_RFC9112_Sec9_3_PartialWriteNotPoolable(t *testing.T) {
 		assert.False(t, ex.KeepAlive(), "KeepAlive() = true after a truncated head")
 	})
 
+	// The short-write case. It is NOT what pins WriteBody's own condemn, and the
+	// distinction is worth stating because the name suggests otherwise: three
+	// independent mechanisms make this assertion true. ex.keepAlive is still its
+	// zero value false (nothing calls ReadResponse here, and that is the only
+	// place it is set true); KeepAlive's abandoned-upload guard fires on its own
+	// because reqBodyWritten is 2 against a declared 5; and the condemn. Delete
+	// the condemn and the first two still hold it up (#820). What this row
+	// genuinely pins is that a short body write is refused and reported — the
+	// subtest below is the one that isolates the condemn.
 	t.Run("body truncated", func(t *testing.T) {
 		// Enough for the whole head, not enough for the body.
 		nc := &halfDeadConn{okBytes: 4096, resp: []byte(resp)}
@@ -104,6 +147,42 @@ func TestConformance_RFC9112_Sec9_3_PartialWriteNotPoolable(t *testing.T) {
 		assert.False(t, ex.KeepAlive(),
 			"KeepAlive() = true after a truncated body; the peer is still counting "+
 				"octets against the Content-Length this client declared")
+	})
+
+	// The case where WriteBody's condemn is the ONLY thing standing between the
+	// socket and the pool, and the one the suite never sent (#820).
+	//
+	// net.Conn permits a Write to return (len(p), err): every octet accepted and
+	// an error reported anyway. That is what a *tls.Conn reports when the record
+	// reached the kernel and the connection then failed, and halfDeadConn cannot
+	// produce it — it returns a nil error whenever n == len(p). On that path
+	// reqBodyWritten equals the declared Content-Length, so the abandoned-upload
+	// guard does not fire; the peer then answers, so ReadResponse sets keepAlive
+	// from respMinor and !condemned, so the zero-value route does not either.
+	//
+	// The error is genuinely ambiguous — the peer may or may not have the octets —
+	// and that ambiguity is the reason the connection cannot be reused: a pooled
+	// socket whose peer might be mid-body desynchronises the next request.
+	t.Run("body write errors after accepting every octet", func(t *testing.T) {
+		nc := &fullWriteErrorConn{resp: []byte(resp)}
+		ex := http1.NewConn(nc).NewExchange()
+		fields := reqCL("POST", header.Field{
+			Name: []byte("content-length"), Value: []byte("5"),
+		})
+		require.NoError(t, ex.WriteRequest(context.Background(), fields, false), "WriteRequest")
+		nc.failing = true // every octet still accepted, but the error is reported
+
+		err := ex.WriteBody(context.Background(), []byte("HELLO"), true)
+
+		require.Error(t, err, "WriteBody = nil on a socket that reported a write failure")
+		_, _, rerr := ex.ReadResponse(context.Background())
+		require.NoError(t, rerr, "ReadResponse — the peer answered, which is the point")
+		assert.False(t, ex.KeepAlive(),
+			"KeepAlive() = true after the socket reported an error on the body write. "+
+				"Every octet was accepted, so the under-run guard cannot see it, and the "+
+				"peer answered, so keepAlive was set from the response — the condemn on "+
+				"the write error is the only thing left, and without it this socket goes "+
+				"back into the pool")
 	})
 }
 

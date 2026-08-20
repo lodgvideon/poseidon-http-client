@@ -5,6 +5,7 @@ import (
 	"context"
 	"io"
 	"net"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -109,22 +110,50 @@ func TestWriteRequest_DropsConnectionManagedNamesInAnyCase(t *testing.T) {
 	}
 }
 
-// TestWriteRequest_KeepsOrdinaryHeaders is the control, and the lengths are
-// chosen deliberately: User-Agent is 10 bytes like "connection" and
-// "keep-alive", Referer is 7 like "upgrade", Date is 4 like "host". A skip that
-// compared lengths without comparing bytes would drop all three and still pass
-// the test above.
+// TestWriteRequest_KeepsOrdinaryHeaders is the control for the test above, and
+// the names are chosen for their LENGTHS because that is what
+// isConnectionManagedName switches on first: it compares len(name) and only
+// then folds the bytes, so an arm that dropped its byte comparison would
+// silently delete every caller header of that length while the managed-names
+// test above stayed green.
+//
+// One ordinary name per arm of that switch — which is why the table is keyed on
+// the managed name it guards. The switch has six arms and this covered three of
+// them (10, 7, 4). Lengths 2, 16 and 17 had no counterpart, so `case 2: return
+// true` in place of the fold on "te" was invisible to the whole package, and
+// every two-character request header a caller sent would have been dropped from
+// the wire with the suite green (#830). A new arm added without its control here
+// should now look wrong.
 func TestWriteRequest_KeepsOrdinaryHeaders(t *testing.T) {
-	fields := append(baseFields(),
-		header.Field{Name: []byte("User-Agent"), Value: []byte("poseidon")},
-		header.Field{Name: []byte("Referer"), Value: []byte("https://example.com/x")},
-		header.Field{Name: []byte("Date"), Value: []byte("Tue, 01 Jan 2030 00:00:00 GMT")},
-	)
+	for _, tc := range []struct {
+		managed string // the name this arm of the switch exists to skip
+		name    string // an ordinary caller header of exactly that length
+		value   string
+	}{
+		{"te", "dt", "2030-01-01"},
+		{"host", "Date", "Tue, 01 Jan 2030 00:00:00 GMT"},
+		{"upgrade", "Referer", "https://example.com/x"},
+		{"connection", "User-Agent", "poseidon"}, // and "keep-alive", same arm
+		{"proxy-connection", "X-Correlation-Id", "abc123"},
+		{"transfer-encoding", "X-Forwarded-Proto", "https"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			require.Lenf(t, tc.name, len(tc.managed),
+				"the control name %q must be exactly as long as the managed name %q it "+
+					"guards, or this row proves nothing about that arm of the switch",
+				tc.name, tc.managed)
+			fields := append(baseFields(),
+				header.Field{Name: []byte(tc.name), Value: []byte(tc.value)})
 
-	wire := writeOneRequest(t, fields)
+			wire := writeOneRequest(t, fields)
 
-	for _, want := range []string{"user-agent: poseidon", "referer: https://example.com/x", "date: Tue"} {
-		assert.Containsf(t, wire, want, "missing %q from the request head:\n%s", want, wire)
+			assert.Containsf(t, wire, strings.ToLower(tc.name)+": "+tc.value,
+				"%q (%d bytes, the length of %q) never reached the wire. This client "+
+					"skips the names it manages itself by length-then-bytes; an arm that "+
+					"stopped comparing the bytes drops every caller header of that length "+
+					"silently, and the request goes out missing a field the caller set.\n%s",
+				tc.name, len(tc.name), tc.managed, wire)
+		})
 	}
 }
 

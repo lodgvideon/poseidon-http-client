@@ -1,3 +1,5 @@
+//go:build e2e_remote
+
 package client_test
 
 import (
@@ -26,18 +28,13 @@ import (
 // POST, context cancel, concurrent mixed workloads.
 // ============================================================
 //
-// Every test in this file opens with an unconditional t.Skip, so none of them
-// runs anywhere — see the tracking issue filed alongside the #723 sweep. They
-// are kept compiling (and migrated to testify with the rest of the package) so
-// that whoever re-enables them inherits assertions rather than a rewrite.
-
-const e2eSkipReason = "E2E test against external service — disabled in local/CI environments without network access"
+// BUILD-TAGGED, not skipped — see the header of e2e_test.go for the policy and
+// the reasoning (#869). The nineteen tests here used to open with an
+// unconditional t.Skip.
 
 // ---------- BodyStream (io.ReadCloser) ----------
 
 func TestE2E_Google_BodyStream_GET(t *testing.T) {
-	t.Skip(e2eSkipReason)
-
 	c := e2eClient(t, "www.google.com")
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
@@ -69,8 +66,6 @@ func TestE2E_Google_BodyStream_GET(t *testing.T) {
 }
 
 func TestE2E_Google_BodyStream_Concurrent(t *testing.T) {
-	t.Skip(e2eSkipReason)
-
 	c := e2eClient(t, "www.google.com")
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
@@ -118,8 +113,6 @@ func TestE2E_Google_BodyStream_Concurrent(t *testing.T) {
 // ---------- DoStream (StreamResponse.Recv) ----------
 
 func TestE2E_Google_DoStream_GET(t *testing.T) {
-	t.Skip(e2eSkipReason)
-
 	c := e2eClient(t, "www.google.com")
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
@@ -159,8 +152,6 @@ func TestE2E_Google_DoStream_GET(t *testing.T) {
 }
 
 func TestE2E_Google_DoStream_Concurrent(t *testing.T) {
-	t.Skip(e2eSkipReason)
-
 	c := e2eClient(t, "www.google.com")
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
@@ -207,8 +198,6 @@ func TestE2E_Google_DoStream_Concurrent(t *testing.T) {
 // ---------- Mixed Do + DoStream on same connection ----------
 
 func TestE2E_Google_MixedDoAndDoStream(t *testing.T) {
-	t.Skip(e2eSkipReason)
-
 	c := e2eClient(t, "www.google.com")
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
@@ -272,8 +261,6 @@ func TestE2E_Google_MixedDoAndDoStream(t *testing.T) {
 // ---------- Pool transport ----------
 
 func TestE2E_Google_PoolTransport(t *testing.T) {
-	t.Skip(e2eSkipReason)
-
 	c, err := client.NewClient(client.ClientOptions{
 		Addr: net.JoinHostPort("www.google.com", "443"),
 		ConnOpts: conn.ConnOptions{
@@ -308,8 +295,6 @@ func TestE2E_Google_PoolTransport(t *testing.T) {
 }
 
 func TestE2E_Google_Pool_Concurrent(t *testing.T) {
-	t.Skip(e2eSkipReason)
-
 	c, err := client.NewClient(client.ClientOptions{
 		Addr: net.JoinHostPort("www.google.com", "443"),
 		ConnOpts: conn.ConnOptions{
@@ -359,8 +344,6 @@ func TestE2E_Google_Pool_Concurrent(t *testing.T) {
 // ---------- Cross-server: GitHub API ----------
 
 func TestE2E_GitHub_API_JSON(t *testing.T) {
-	t.Skip(e2eSkipReason)
-
 	c := e2eClient(t, "api.github.com")
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
@@ -391,8 +374,6 @@ func TestE2E_GitHub_API_JSON(t *testing.T) {
 }
 
 func TestE2E_GitHub_API_BodyStream(t *testing.T) {
-	t.Skip(e2eSkipReason)
-
 	c := e2eClient(t, "api.github.com")
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
@@ -421,8 +402,6 @@ func TestE2E_GitHub_API_BodyStream(t *testing.T) {
 // ---------- POST with body ----------
 
 func TestE2E_Google_POST_WithBody(t *testing.T) {
-	t.Skip(e2eSkipReason)
-
 	c := e2eClient(t, "www.google.com")
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
@@ -447,8 +426,6 @@ func TestE2E_Google_POST_WithBody(t *testing.T) {
 // ---------- Context cancellation ----------
 
 func TestE2E_Google_ContextCancel(t *testing.T) {
-	t.Skip(e2eSkipReason)
-
 	c := e2eClient(t, "www.google.com")
 	// Cancel context immediately.
 	ctx, cancel := context.WithCancel(context.Background())
@@ -461,8 +438,6 @@ func TestE2E_Google_ContextCancel(t *testing.T) {
 }
 
 func TestE2E_Google_ContextTimeout(t *testing.T) {
-	t.Skip(e2eSkipReason)
-
 	c := e2eClient(t, "www.google.com")
 	// 1ns timeout — request should expire.
 	ctx, cancel := context.WithTimeout(context.Background(), 1*time.Nanosecond)
@@ -479,8 +454,6 @@ func TestE2E_Google_ContextTimeout(t *testing.T) {
 // ---------- Large body via BodyStream (chunked read) ----------
 
 func TestE2E_Google_BodyStream_LargeBody(t *testing.T) {
-	t.Skip(e2eSkipReason)
-
 	c := e2eClient(t, "www.google.com")
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
@@ -513,8 +486,6 @@ func TestE2E_Google_BodyStream_LargeBody(t *testing.T) {
 // ---------- Cross-server: nghttp2.org (reference HTTP/2) ----------
 
 func TestE2E_Nghttp2_GET(t *testing.T) {
-	t.Skip(e2eSkipReason)
-
 	c := e2eClient(t, "nghttp2.org")
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
@@ -530,8 +501,6 @@ func TestE2E_Nghttp2_GET(t *testing.T) {
 }
 
 func TestE2E_Nghttp2_DoStream(t *testing.T) {
-	t.Skip(e2eSkipReason)
-
 	c := e2eClient(t, "nghttp2.org")
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
@@ -566,8 +535,6 @@ func TestE2E_Nghttp2_DoStream(t *testing.T) {
 // ---------- Conn stats ----------
 
 func TestE2E_Google_ConnStats(t *testing.T) {
-	t.Skip(e2eSkipReason)
-
 	c := e2eClient(t, "www.google.com")
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
@@ -575,17 +542,32 @@ func TestE2E_Google_ConnStats(t *testing.T) {
 	resp, err := doGET(c, ctx, "/", true)
 
 	require.NoError(t, err, "Do")
-	// BytesReceived should match body length (BodyMode=BodyBuffer → body buffered).
 	require.NotZero(t, resp.BytesReceived, "expected BytesReceived > 0")
-	assert.EqualValuesf(t, len(resp.Body), resp.BytesReceived,
-		"body=%d but BytesReceived=%d — mismatch", len(resp.Body), resp.BytesReceived)
+	require.NotEmpty(t, resp.Body, "BodyMode=BodyBuffer returned no body")
+	// BytesReceived counts DATA octets ON THE WIRE; resp.Body is what the caller
+	// gets after this client decodes content-encoding. The old assertion required
+	// them to be equal, which holds only for an unencoded response - run for the
+	// first time (#869) it was body=85414 against BytesReceived=28531, because
+	// www.google.com gzips. The equality is asserted only when the origin sent no
+	// content-encoding; the encoded case gets the property that does hold, namely
+	// fewer octets on the wire than after decoding.
+	enc, encoded := resp.HeaderString("content-encoding")
+	if !encoded || enc == "identity" {
+		assert.EqualValuesf(t, len(resp.Body), resp.BytesReceived,
+			"an unencoded response must account for every octet: body=%d, BytesReceived=%d",
+			len(resp.Body), resp.BytesReceived)
+		return
+	}
+	t.Logf("content-encoding=%q: wire=%d bytes, decoded=%d bytes", enc, resp.BytesReceived, len(resp.Body))
+	assert.Lessf(t, resp.BytesReceived, int64(len(resp.Body)),
+		"a %q-encoded response reported %d wire octets for %d decoded ones; BytesReceived "+
+			"is a wire counter and must not be charged the decoded size", enc,
+		resp.BytesReceived, len(resp.Body))
 }
 
 // ---------- Auto-redial: close conn, next request redials ----------
 
 func TestE2E_Google_AutoRedial(t *testing.T) {
-	t.Skip(e2eSkipReason)
-
 	c := e2eClient(t, "www.google.com")
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
@@ -613,8 +595,6 @@ func TestE2E_Google_AutoRedial(t *testing.T) {
 // ---------- Response.Reuse across multiple Do calls ----------
 
 func TestE2E_Google_ResponseReuse(t *testing.T) {
-	t.Skip(e2eSkipReason)
-
 	c := e2eClient(t, "www.google.com")
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
@@ -639,8 +619,6 @@ func TestE2E_Google_ResponseReuse(t *testing.T) {
 // ---------- Multiple status codes ----------
 
 func TestE2E_Google_VariousPaths(t *testing.T) {
-	t.Skip(e2eSkipReason)
-
 	c := e2eClient(t, "www.google.com")
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()

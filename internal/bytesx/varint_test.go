@@ -112,6 +112,41 @@ func TestConformance_RFC9000_Sec16_IncompleteInput(t *testing.T) {
 	}
 }
 
+// TestConformance_RFC9000_Sec16_DecodeWithTrailingBytes decodes each varint
+// from the FRONT of a buffer that continues past it — the only shape the
+// callers ever produce. quic and http3 read a frame type, then a length, then a
+// payload out of one packet or stream buffer with hundreds of bytes still to
+// come; nothing hands ReadVarint a slice trimmed to the varint it is about to
+// read.
+//
+// Every other decode in this suite does exactly that, so the length guards were
+// exercised only at len(b) == want (the case tables) and len(b) < want (the
+// incomplete-input table), never at len(b) > want — where "shorter than my
+// prefix claims" has to stay FALSE. Weakening any of the three guards to an
+// equality test, or making the one-byte form report len(b) instead of 1, is
+// invisible without this: under the first every multi-byte varint in every
+// packet decodes as incomplete and the parser stalls forever, under the second
+// a one-byte varint over-consumes and the rest of the packet is garbage.
+func TestConformance_RFC9000_Sec16_DecodeWithTrailingBytes(t *testing.T) {
+	// Non-zero, so a decoder that wrongly folded them in cannot come out with
+	// the right answer by accident, and eight of them, so even the widest
+	// varint is followed by a full extra word.
+	trailing := []byte{0xde, 0xad, 0xbe, 0xef, 0xde, 0xad, 0xbe, 0xef}
+
+	for _, tc := range varintCases {
+		t.Run(tc.name, func(t *testing.T) {
+			buf := append(append([]byte(nil), tc.enc...), trailing...)
+
+			v, n := ReadVarint(buf)
+
+			require.Equalf(t, tc.v, v,
+				"ReadVarint(%x) = %d with %d trailing bytes present, want %d: a decoder whose answer depends on what follows the field mis-reads every length, stream ID and offset in a real packet", buf, v, len(trailing), tc.v)
+			require.Equalf(t, len(tc.enc), n,
+				"ReadVarint(%x) consumed %d bytes, want %d: n is what the caller advances by, so consuming the trailing bytes swallows the next field and consuming none stalls the parse", buf, n, len(tc.enc))
+		})
+	}
+}
+
 // TestVarint_ExhaustiveRoundTrip round-trips a spread of values across all four
 // lengths (including every boundary ±1) through Write then Read.
 //

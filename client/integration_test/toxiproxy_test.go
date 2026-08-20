@@ -9,6 +9,8 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"regexp"
+	"strconv"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -44,16 +46,75 @@ const (
 	// largePath declares a Content-Length, which is what makes a truncated body
 	// detectable at all — and what makes silently accepting one dangerous.
 	largePath = "/large?bytes=65536"
-	// chunkedPath has NO Content-Length: over HTTP/1.1 nginx serves it
+	// chunkedPath has NO Content-Length: over HTTP/1.1 every peer here serves it
 	// Transfer-Encoding: chunked, so the only thing that says the body ended is
 	// the terminating zero-length chunk. Nothing above HTTP/1.1 has this shape —
 	// h2 and h3 both frame the end of a body explicitly.
 	chunkedPath = "/chunked"
 	toxiAPIAddr = "127.0.0.1:18474" // Toxiproxy control API
-	toxiTLSAddr = "127.0.0.1:18085" // h2 proxy listen port, upstream = nginx TLS
-	toxiH1Addr  = "127.0.0.1:18086" // http/1.1 proxy listen port, same upstream
-	nginxUp     = "172.30.0.10:8443"
+	toxiTLSAddr = "127.0.0.1:18085" // h2 proxy listen port
+	toxiH1Addr  = "127.0.0.1:18086" // http/1.1 proxy listen port
 )
+
+// faultPeer is one peer Toxiproxy can be put in front of, addressed from INSIDE
+// the compose network - Toxiproxy dials its upstream from the container.
+//
+// Every test in this file used to name one upstream constant, so the whole fault
+// axis of a four-peer cross-implementation suite was a diagonal through nginx
+// (#894). The properties here are peer-observable, not client-only: whether the
+// response head got through before the cut depends on the peer's write batching,
+// and a body with no Content-Length is framed differently by each of them - so
+// asking one implementation answers for one implementation.
+//
+// The in-process Go reference is absent and cannot be added. It listens on a
+// host-side ephemeral port while Toxiproxy runs inside the 172.30.0.0/24 bridge
+// network, which has no route back to the host on the Linux runner this suite's
+// CI job uses. The three peers below are the ones a container can reach.
+type faultPeer struct {
+	name string
+	// tlsUp serves h2 AND http/1.1 over TLS: the token is chosen per connection
+	// by the client, which is what makes one address carry both legs.
+	tlsUp string
+	// clearUp serves cleartext HTTP/1.1, or is empty when the peer has no
+	// cleartext port that answers the fixture set. nginx has an :8080 listener
+	// but it serves only /healthz, so there is nothing to truncate on it.
+	clearUp string
+}
+
+var faultPeers = []faultPeer{
+	{name: "nginx", tlsUp: "172.30.0.10:8443"},
+	{name: "undertow", tlsUp: "172.30.0.11:8443", clearUp: "172.30.0.11:8080"},
+	{name: "nghttpx", tlsUp: "172.30.0.12:8443", clearUp: "172.30.0.12:8080"},
+}
+
+// forEachFaultPeer runs fn as one subtest per peer.
+//
+// Subtests are sequential on purpose and must stay that way: the two listen ports
+// are shared, and each subtest re-points its proxy at its own upstream, so a
+// t.Parallel here would have one peer's toxic biting another peer's connection.
+func forEachFaultPeer(t *testing.T, fn func(t *testing.T, p faultPeer)) {
+	t.Helper()
+	for _, p := range faultPeers {
+		t.Run(p.name, func(t *testing.T) { fn(t, p) })
+	}
+}
+
+// forEachClearFaultPeer is forEachFaultPeer over the peers with a cleartext
+// HTTP/1.1 upstream, and asserts the set is not empty - it is discovered from a
+// table, and an empty loop passes.
+func forEachClearFaultPeer(t *testing.T, fn func(t *testing.T, p faultPeer)) {
+	t.Helper()
+	ran := 0
+	for _, p := range faultPeers {
+		if p.clearUp == "" {
+			continue
+		}
+		ran++
+		t.Run(p.name, func(t *testing.T) { fn(t, p) })
+	}
+	require.NotZero(t, ran, "no peer in faultPeers offers a cleartext HTTP/1.1 upstream, "+
+		"so this test ran nothing and would have passed on an empty loop")
+}
 
 // toxi drives the Toxiproxy control API over the repo's own H1 client.
 type toxi struct {
@@ -111,16 +172,21 @@ const (
 	proxyH1 = "poseidon-h1"
 )
 
-// proxy (re)creates the named proxy in front of nginx, listening on addr's port
-// inside the container, and removes it on cleanup.
-func (x *toxi) proxy(name, addr string) {
+// proxy (re)creates the named proxy in front of upstream, listening on addr's
+// port inside the container, and removes it on cleanup.
+//
+// The upstream is a parameter rather than a constant because that is the only
+// thing this file ever pinned to one peer (#894). DELETE-then-POST is what lets
+// the two listen ports be re-aimed per subtest instead of needing a published
+// port per (peer, protocol) pair.
+func (x *toxi) proxy(name, addr, upstream string) {
 	x.t.Helper()
 	_, port, err := net.SplitHostPort(addr)
 	require.NoErrorf(x.t, err, "proxy %q: bad listen addr %q: %v", name, addr, err)
 	_, _ = x.do("DELETE", "/proxies/"+name, "") // ignore: may not exist yet
 	_, err = x.do("POST", "/proxies", fmt.Sprintf(
-		`{"name":%q,"listen":"0.0.0.0:%s","upstream":%q,"enabled":true}`, name, port, nginxUp))
-	require.NoErrorf(x.t, err, "create proxy %q: %v", name, err)
+		`{"name":%q,"listen":"0.0.0.0:%s","upstream":%q,"enabled":true}`, name, port, upstream))
+	require.NoErrorf(x.t, err, "create proxy %q -> %s: %v", name, upstream, err)
 	x.t.Cleanup(func() { _, _ = x.do("DELETE", "/proxies/"+name, "") })
 }
 
@@ -190,15 +256,17 @@ func get(c *client.Client, path string) (int, int, error) {
 // a request failing, and a request can fail because the peer is simply broken,
 // so the same path must first be shown to work with no toxic installed.
 func TestIT_Toxi_ControlPathIsClean(t *testing.T) {
-	x := newToxi(t)
-	x.proxy(proxyH2, toxiTLSAddr)
-	c := h2Through(t, toxiTLSAddr)
+	forEachFaultPeer(t, func(t *testing.T, p faultPeer) {
+		x := newToxi(t)
+		x.proxy(proxyH2, toxiTLSAddr, p.tlsUp)
+		c := h2Through(t, toxiTLSAddr)
 
-	status, n, err := get(c, "/healthz")
+		status, n, err := get(c, "/healthz")
 
-	require.NoErrorf(t, err, "clean request through the proxy failed: %v", err)
-	require.Truef(t, status == 200 && n > 0,
-		"clean request: status=%d bodyLen=%d, want 200 and a non-empty body", status, n)
+		require.NoErrorf(t, err, "clean request through the proxy failed: %v", err)
+		require.Truef(t, status == 200 && n > 0,
+			"clean request: status=%d bodyLen=%d, want 200 and a non-empty body", status, n)
+	})
 }
 
 // TestIT_Toxi_LimitDataMidBody_IsNotASilentShortRead is the case the issue
@@ -207,69 +275,76 @@ func TestIT_Toxi_ControlPathIsClean(t *testing.T) {
 // mode that matters is not an error — it is a SUCCESS carrying a truncated
 // body, which a load generator would record as a good response.
 func TestIT_Toxi_LimitDataMidBody_IsNotASilentShortRead(t *testing.T) {
-	x := newToxi(t)
-	x.proxy(proxyH2, toxiTLSAddr)
+	forEachFaultPeer(t, func(t *testing.T, p faultPeer) {
+		x := newToxi(t)
+		x.proxy(proxyH2, toxiTLSAddr, p.tlsUp)
 
-	// Establish the full length first, so "short" is measured, not assumed.
-	full := h2Through(t, toxiTLSAddr)
-	_, wantLen, err := get(full, largePath)
-	if err != nil {
-		t.Skipf("no clean baseline for the large body through the proxy: %v", err)
-	}
-	if wantLen == 0 {
-		t.Skip("baseline body is empty; nothing to truncate")
-	}
+		// Establish the full length first, so "short" is measured, not assumed.
+		full := h2Through(t, toxiTLSAddr)
+		_, wantLen, err := get(full, largePath)
+		if err != nil {
+			t.Skipf("no clean baseline for the large body through the proxy: %v", err)
+		}
+		if wantLen == 0 {
+			t.Skip("baseline body is empty; nothing to truncate")
+		}
 
-	// Cut downstream partway into the body: enough bytes for the response head
-	// and some payload, fewer than the whole thing.
-	remove := x.addToxic(proxyH2, "half", "limit_data", "downstream",
-		fmt.Sprintf(`{"bytes":%d}`, wantLen/2))
-	defer remove()
+		// Cut downstream partway into the body: enough bytes for the response head
+		// and some payload, fewer than the whole thing.
+		remove := x.addToxic(proxyH2, "half", "limit_data", "downstream",
+			fmt.Sprintf(`{"bytes":%d}`, wantLen/2))
+		defer remove()
 
-	c := h2Through(t, toxiTLSAddr)
+		c := h2Through(t, toxiTLSAddr)
 
-	status, gotLen, err := get(c, largePath)
+		status, gotLen, err := get(c, largePath)
 
-	require.Falsef(t, err == nil && gotLen < wantLen,
-		"truncated response reported as success: status=%d, %d of %d bytes, err=nil.\n"+
-			"A caller cannot tell this from a complete response, which is exactly the "+
-			"failure a load generator must never record as a good result", status, gotLen, wantLen)
-	require.Errorf(t, err,
-		"no error and a full %d-byte body with limit_data at %d — the toxic did "+
-			"not bite, so this test proved nothing", gotLen, wantLen/2)
-	assert.NotContainsf(t, err.Error(), "context deadline exceeded",
-		"failed by timeout (%v); the connection is cut, so this should surface as "+
-			"a transport error rather than costing the caller the full deadline", err)
-	t.Logf("truncation surfaced as: %v (%d of %d bytes)", err, gotLen, wantLen)
+		require.Falsef(t, err == nil && gotLen < wantLen,
+			"truncated response reported as success: status=%d, %d of %d bytes, err=nil.\n"+
+				"A caller cannot tell this from a complete response, which is exactly the "+
+				"failure a load generator must never record as a good result", status, gotLen, wantLen)
+		require.Errorf(t, err,
+			"no error and a full %d-byte body with limit_data at %d — the toxic did "+
+				"not bite, so this test proved nothing", gotLen, wantLen/2)
+		assert.Lessf(t, gotLen, wantLen,
+			"errored but delivered the whole %d-byte body; the cut landed past the "+
+				"end of the body, so this is not the mid-body case it claims to be", gotLen)
+		assert.NotContainsf(t, err.Error(), "context deadline exceeded",
+			"failed by timeout (%v); the connection is cut, so this should surface as "+
+				"a transport error rather than costing the caller the full deadline", err)
+		t.Logf("truncation surfaced as: %v (%d of %d bytes)", err, gotLen, wantLen)
+	})
 }
 
 // TestIT_Toxi_ResetPeer_NextRequestIsNotPoisoned covers the reuse half, which a
 // single-request test cannot express: the damage shows up on request N+1, when
 // the pool hands out the connection the peer has just reset.
 func TestIT_Toxi_ResetPeer_NextRequestIsNotPoisoned(t *testing.T) {
-	x := newToxi(t)
-	x.proxy(proxyH2, toxiTLSAddr)
+	forEachFaultPeer(t, func(t *testing.T, p faultPeer) {
+		x := newToxi(t)
+		x.proxy(proxyH2, toxiTLSAddr, p.tlsUp)
 
-	c := h2Through(t, toxiTLSAddr)
-	_, _, err := get(c, "/healthz")
-	require.NoErrorf(t, err, "first request failed before any toxic was installed: %v", err)
+		c := h2Through(t, toxiTLSAddr)
+		_, _, err := get(c, "/healthz")
+		require.NoErrorf(t, err, "first request failed before any toxic was installed: %v", err)
 
-	// Reset the established connection, then take the toxic away again so the
-	// NEXT request has a clean path to a fresh connection. What is under test is
-	// whether the poisoned connection is evicted rather than reused.
-	remove := x.addToxic(proxyH2, "boom", "reset_peer", "downstream", `{"timeout":0}`)
-	_, _, errDuring := get(c, largePath)
-	remove()
-	// The pool must not hand the reset connection to this request.
-	status, n, err := get(c, "/healthz")
+		// Reset the established connection, then take the toxic away again so the
+		// NEXT request has a clean path to a fresh connection. What is under test is
+		// whether the poisoned connection is evicted rather than reused.
+		remove := x.addToxic(proxyH2, "boom", "reset_peer", "downstream", `{"timeout":0}`)
+		_, _, errDuring := get(c, largePath)
+		remove()
+		// The pool must not hand the reset connection to this request.
+		status, n, err := get(c, "/healthz")
 
-	require.Error(t, errDuring, "request during reset_peer succeeded; the toxic did not "+
-		"bite, so the eviction below would be untested")
-	require.NoErrorf(t, err, "request after the peer reset the connection failed: %v\n"+
-		"the damaged connection was handed to the next request instead of being "+
-		"evicted, so one peer RST poisons every later request on that pool entry", err)
-	require.Truef(t, status == 200 && n > 0,
-		"request after reset: status=%d bodyLen=%d, want 200 with a body", status, n)
+		require.Error(t, errDuring, "request during reset_peer succeeded; the toxic did not "+
+			"bite, so the eviction below would be untested")
+		require.NoErrorf(t, err, "request after the peer reset the connection failed: %v\n"+
+			"the damaged connection was handed to the next request instead of being "+
+			"evicted, so one peer RST poisons every later request on that pool entry", err)
+		require.Truef(t, status == 200 && n > 0,
+			"request after reset: status=%d bodyLen=%d, want 200 with a body", status, n)
+	})
 }
 
 // h2PoolThrough builds a POOLED h2 client of n connections pointed at the
@@ -347,8 +422,14 @@ func warmTo(t *testing.T, c *client.Client, n int) {
 // handleStats runs evictDeadSilent, so a metrics read would reap the corpses and
 // leave the pick with nothing to get wrong.
 func TestIT_Toxi_Outage_PoolDoesNotServeThePoisonedSibling(t *testing.T) {
+	forEachFaultPeer(t, func(t *testing.T, p faultPeer) {
+		testOutagePoolSkip(t, p)
+	})
+}
+
+func testOutagePoolSkip(t *testing.T, p faultPeer) {
 	x := newToxi(t)
-	x.proxy(proxyH2, toxiTLSAddr)
+	x.proxy(proxyH2, toxiTLSAddr, p.tlsUp)
 
 	var dials atomic.Int64
 	c := h2PoolThrough(t, toxiTLSAddr, 2, &dials)
@@ -451,17 +532,19 @@ func h1PoolThrough(t *testing.T, addr string, n int, dials *atomic.Int64) *clien
 // exchange. Both gates are unit-tested in conn/h1dial_test.go and
 // client/h1_alpn_test.go; what is new here is a real dual-protocol peer.
 func TestIT_ToxiH1_ControlPathIsClean(t *testing.T) {
-	x := newToxi(t)
-	x.proxy(proxyH1, toxiH1Addr)
+	forEachFaultPeer(t, func(t *testing.T, p faultPeer) {
+		x := newToxi(t)
+		x.proxy(proxyH1, toxiH1Addr, p.tlsUp)
 
-	var dials atomic.Int64
-	c := h1PoolThrough(t, toxiH1Addr, 1, &dials)
+		var dials atomic.Int64
+		c := h1PoolThrough(t, toxiH1Addr, 1, &dials)
 
-	status, n, err := get(c, "/healthz")
+		status, n, err := get(c, "/healthz")
 
-	require.NoErrorf(t, err, "clean HTTP/1.1 request through the proxy failed: %v", err)
-	require.Truef(t, status == 200 && n > 0,
-		"clean request: status=%d bodyLen=%d, want 200 and a non-empty body", status, n)
+		require.NoErrorf(t, err, "clean HTTP/1.1 request through the proxy failed: %v", err)
+		require.Truef(t, status == 200 && n > 0,
+			"clean request: status=%d bodyLen=%d, want 200 and a non-empty body", status, n)
+	})
 }
 
 // TestIT_ToxiH1_LimitDataMidBody_IsNotASilentShortRead is the h2 test of the
@@ -472,8 +555,14 @@ func TestIT_ToxiH1_ControlPathIsClean(t *testing.T) {
 // at EOF and reports what it has produces a 200 with a short body, which a load
 // generator records as a good response.
 func TestIT_ToxiH1_LimitDataMidBody_IsNotASilentShortRead(t *testing.T) {
+	forEachFaultPeer(t, func(t *testing.T, p faultPeer) {
+		testH1MidBodyCut(t, p)
+	})
+}
+
+func testH1MidBodyCut(t *testing.T, p faultPeer) {
 	x := newToxi(t)
-	x.proxy(proxyH1, toxiH1Addr)
+	x.proxy(proxyH1, toxiH1Addr, p.tlsUp)
 
 	var dials atomic.Int64
 
@@ -525,8 +614,14 @@ func TestIT_ToxiH1_LimitDataMidBody_IsNotASilentShortRead(t *testing.T) {
 // a decoder that treats EOF as end-of-body has nothing left to catch it — this
 // is the sharpest silent-short-read shape the stack has.
 func TestIT_ToxiH1_LimitDataMidChunked_IsNotASilentShortRead(t *testing.T) {
+	forEachFaultPeer(t, func(t *testing.T, p faultPeer) {
+		testH1MidChunkedCut(t, p)
+	})
+}
+
+func testH1MidChunkedCut(t *testing.T, p faultPeer) {
 	x := newToxi(t)
-	x.proxy(proxyH1, toxiH1Addr)
+	x.proxy(proxyH1, toxiH1Addr, p.tlsUp)
 
 	var dials atomic.Int64
 
@@ -576,8 +671,14 @@ func TestIT_ToxiH1_LimitDataMidChunked_IsNotASilentShortRead(t *testing.T) {
 // untouched and serve the request below with no dial at all, which is exactly
 // the state the fixture check at the bottom exists to reject.
 func TestIT_ToxiH1_CutConnectionIsNotReused(t *testing.T) {
+	forEachFaultPeer(t, func(t *testing.T, p faultPeer) {
+		testH1CutConnNotReused(t, p)
+	})
+}
+
+func testH1CutConnNotReused(t *testing.T, p faultPeer) {
 	x := newToxi(t)
-	x.proxy(proxyH1, toxiH1Addr)
+	x.proxy(proxyH1, toxiH1Addr, p.tlsUp)
 
 	var dials atomic.Int64
 	c := h1PoolThrough(t, toxiH1Addr, 1, &dials)
@@ -691,8 +792,14 @@ func assertStalledInTheResponseRead(t *testing.T, err error, elapsed, budget tim
 // promises "the request fails with context.DeadlineExceeded" and CLIENT_GUIDE
 // repeats it three times; over HTTP/2 it was true and only this leg disagreed.
 func TestIT_ToxiH1_StalledPeer_IsAContextDeadline(t *testing.T) {
+	forEachFaultPeer(t, func(t *testing.T, p faultPeer) {
+		testH1StalledPeerDeadline(t, p)
+	})
+}
+
+func testH1StalledPeerDeadline(t *testing.T, p faultPeer) {
 	x := newToxi(t)
-	x.proxy(proxyH1, toxiH1Addr)
+	x.proxy(proxyH1, toxiH1Addr, p.tlsUp)
 
 	var dials atomic.Int64
 	c := h1PoolThrough(t, toxiH1Addr, 1, &dials)
@@ -737,8 +844,14 @@ func TestIT_ToxiH1_StalledPeer_IsAContextDeadline(t *testing.T) {
 // any route other than isHardStop: a count of zero says the classifier
 // recognised this error itself.
 func TestIT_ToxiH1_StalledPeer_IsNotReplayed(t *testing.T) {
+	forEachFaultPeer(t, func(t *testing.T, p faultPeer) {
+		testH1StalledPeerNotReplayed(t, p)
+	})
+}
+
+func testH1StalledPeerNotReplayed(t *testing.T, p faultPeer) {
 	x := newToxi(t)
-	x.proxy(proxyH1, toxiH1Addr)
+	x.proxy(proxyH1, toxiH1Addr, p.tlsUp)
 
 	var dials atomic.Int64
 	c := h1PoolThrough(t, toxiH1Addr, 1, &dials)
@@ -801,4 +914,154 @@ func TestIT_ToxiH1_StalledPeer_IsNotReplayed(t *testing.T) {
 	assertStalledInTheResponseRead(t, err, elapsed, budget)
 
 	t.Logf("stalled retry stopped after %v with: %v", elapsed, err)
+}
+
+// ── the cleartext HTTP/1.1 leg ──────────────────────────────────────
+//
+// Everything above this line rides TLS, and that turned out to decide which
+// branch of the client a mid-body cut reaches (#895).
+//
+// TestIT_ToxiH1_LimitDataMidBody_IsNotASilentShortRead rests its claim on
+// Content-Length reconciliation - its own doc comment says the only thing
+// separating "the body ended" from "the socket ended" is that Content-Length
+// bytes were counted. That is RFC 9112 section 6.3 rule 6, the `err == io.EOF &&
+// !done` arm in http1/conn.go, and over TLS it is never reached: when Toxiproxy
+// cuts the socket inside a TLS record crypto/tls returns io.ErrUnexpectedEOF, not
+// io.EOF, so the guard is false and the failure leaves through the generic tail
+// return. Measured, not reasoned: over TLS the error is "unexpected EOF" on all
+// three peers, and deleting rule 6's error entirely left that test green.
+//
+// A cleartext socket returns a real io.EOF, so this leg is where the
+// reconciliation is the last thing standing between a short read and a reported
+// success. nginx is absent: its cleartext :8080 listener serves only /healthz, so
+// there is no declared-length body on it to truncate.
+
+// prematureEOFCounts matches the RFC 9112 section 6.3 rule 6 error, whose format
+// string lives at exactly one place in http1: the arm that fires when io.EOF
+// arrives before Content-Length bytes were counted.
+var prematureEOFCounts = regexp.MustCompile(`premature EOF: got (\d+) of (\d+) bytes`)
+
+// h1ClearPoolThrough is h1PoolThrough over a cleartext socket.
+//
+// conn.PlaintextDialer, not conn.H1TLSDialer, is the entire difference and the
+// entire point - see above. It asserts no ALPN protocol, which is correct rather
+// than lax: the same cleartext connection serves an h2c prior-knowledge peer and
+// a plain HTTP/1.1 one, and which is spoken is decided by the transport. This
+// client is built by NewH1PoolClient, so it is HTTP/1.1.
+func h1ClearPoolThrough(t *testing.T, addr string, n int, dials *atomic.Int64) *client.Client {
+	t.Helper()
+	c, err := client.NewH1PoolClient(addr, &conn.PlaintextDialer{},
+		client.PoolOptions{
+			MaxConnsPerHost:   n,
+			HealthCheckPeriod: time.Hour,
+		},
+		// OnDial fires on the dialling goroutine, so the counter is atomic.
+		client.WithHooks(&client.Hooks{OnDial: func(client.DialEvent) { dials.Add(1) }}),
+	)
+	require.NoErrorf(t, err, "NewH1PoolClient(cleartext pool of %d, %s): %v", n, addr, err)
+	t.Cleanup(func() { _ = c.Close() })
+	return c
+}
+
+// TestIT_ToxiH1Clear_ControlPathIsClean is this leg's control: every assertion
+// below is about a request failing, and a cleartext hop to a peer whose fixtures
+// this suite has only ever reached over TLS has to be shown to work first.
+func TestIT_ToxiH1Clear_ControlPathIsClean(t *testing.T) {
+	forEachClearFaultPeer(t, func(t *testing.T, p faultPeer) {
+		x := newToxi(t)
+		x.proxy(proxyH1, toxiH1Addr, p.clearUp)
+
+		var dials atomic.Int64
+		c := h1ClearPoolThrough(t, toxiH1Addr, 1, &dials)
+
+		status, n, err := get(c, "/healthz")
+
+		require.NoErrorf(t, err, "clean cleartext HTTP/1.1 request through the proxy failed: %v", err)
+		require.Truef(t, status == 200 && n > 0,
+			"clean request: status=%d bodyLen=%d, want 200 and a non-empty body", status, n)
+	})
+}
+
+// TestIT_ToxiH1Clear_LimitDataMidBody_IsRejectedByContentLength is the same
+// truncation as the TLS test, on the socket where rule 6 is the mechanism that
+// rejects it.
+//
+// The assertion names that mechanism rather than only demanding an error, which
+// is what the TLS test could not do: "premature EOF: got N of M bytes" is produced
+// at exactly one place in this codebase, and the declared length it reconciles
+// against has to be the one the clean baseline measured. An error carrying no
+// counts came from somewhere else - the generic tail, a dial failure, the
+// deadline - and would mean this test had wandered back off the branch it exists
+// for.
+func TestIT_ToxiH1Clear_LimitDataMidBody_IsRejectedByContentLength(t *testing.T) {
+	forEachClearFaultPeer(t, func(t *testing.T, p faultPeer) {
+		x := newToxi(t)
+		x.proxy(proxyH1, toxiH1Addr, p.clearUp)
+
+		var dials atomic.Int64
+
+		// Establish the full length first, so "short" is measured, not assumed.
+		full := h1ClearPoolThrough(t, toxiH1Addr, 1, &dials)
+		_, wantLen, err := get(full, largePath)
+		if err != nil {
+			t.Skipf("no clean baseline for the large body through the proxy: %v", err)
+		}
+		if wantLen == 0 {
+			t.Skip("baseline body is empty; nothing to truncate")
+		}
+
+		// The limit counts every byte the server sends, so half of a 64 KiB body
+		// lets the response head and roughly 32 KiB of payload through and closes
+		// the socket on the rest. The toxic is a byte counter, so the client cannot
+		// receive more than the limit however the two sides are scheduled.
+		remove := x.addToxic(proxyH1, "half", "limit_data", "downstream",
+			fmt.Sprintf(`{"bytes":%d}`, wantLen/2))
+		defer remove()
+
+		c := h1ClearPoolThrough(t, toxiH1Addr, 1, &dials)
+
+		status, gotLen, err := get(c, largePath)
+
+		require.Falsef(t, err == nil && gotLen < wantLen,
+			"truncated response reported as success: status=%d, %d of %d bytes, err=nil.\n"+
+				"A caller cannot tell this from a complete response, which is exactly the "+
+				"failure a load generator must never record as a good result", status, gotLen, wantLen)
+		require.Errorf(t, err,
+			"no error and a full %d-byte body with limit_data at %d — the toxic did "+
+				"not bite, so this test proved nothing", gotLen, wantLen/2)
+		assert.Lessf(t, gotLen, wantLen,
+			"errored but delivered the whole %d-byte body; the cut landed past the "+
+				"end of the body, so this is not the mid-body case it claims to be", gotLen)
+		// The counts are read out of the message rather than compared to gotLen.
+		// http1 reports what IT read, and the last partial read's bytes need not be
+		// the ones the caller was handed, so pinning the two to each other would be
+		// asserting a coincidence. What must hold is the declared length — that is
+		// the Content-Length the peer sent — and that the reconciliation found
+		// fewer bytes than it, which is the whole of rule 6.
+		m := prematureEOFCounts.FindStringSubmatch(err.Error())
+		require.NotNilf(t, m,
+			"the truncation was rejected as %v, which does not name the declared and "+
+				"received lengths.\n"+
+				"Over a cleartext socket the peer's close arrives as a real io.EOF, so RFC "+
+				"9112 section 6.3 rule 6 — Content-Length was not satisfied — is what must "+
+				"reject this, and it is the only thing in this codebase that reports both "+
+				"counts. An error without them came from the generic tail instead, and the "+
+				"reconciliation is untested however red this test can go", err)
+		got, _ := strconv.Atoi(m[1])
+		declared, _ := strconv.Atoi(m[2])
+		assert.Equalf(t, wantLen, declared,
+			"rule 6 reconciled against a declared length of %d, but the clean baseline "+
+				"through the same proxy was %d bytes; the two disagree, so this is not the "+
+				"body the toxic cut", declared, wantLen)
+		assert.Positivef(t, got,
+			"rule 6 reported %d bytes received, so nothing of the body arrived and this "+
+				"is a failure before the body rather than the mid-body case it claims", got)
+		assert.Lessf(t, got, declared,
+			"rule 6 reported %d of %d bytes received, which is not short — the branch "+
+				"fired on a complete body", got, declared)
+		assert.NotContainsf(t, err.Error(), "context deadline exceeded",
+			"failed by timeout (%v); the connection is cut, so this should surface as "+
+				"a transport error rather than costing the caller the full deadline", err)
+		t.Logf("cleartext truncation surfaced as: %v (status=%d, %d of %d bytes)", err, status, gotLen, wantLen)
+	})
 }
