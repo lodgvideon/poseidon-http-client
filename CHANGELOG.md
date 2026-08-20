@@ -9,6 +9,49 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Tests
 
+- **Seventeen `quic` coverage gaps from the #722 sweep, fifteen closed by adding
+  the missing case.** Every mutation those issues recorded survived the whole
+  `./quic/` suite twice and now dies twice: the §18.2 ack-delay limits, pinned
+  only from the reject side, so an endpoint refusing the largest legal
+  `ack_delay_exponent` or `max_ack_delay` a peer may advertise looked correct;
+  the 512-range reassembly cap, bracketed at 64 and ~515 and therefore free to
+  move by 8x in either direction; `permitInSpace`'s known/unknown frame
+  boundary, probed only at `0x30`, eighteen types past the edge, so `0x1f` and
+  `0x20` could be answered with the wrong transport error code; the 64-segment
+  GSO cap, which no fixture ever made the binding one (the byte cap filled
+  first, and quadrupling the segment cap changed nothing) even though exceeding
+  it is an `EINVAL` that drops the whole burst; `detectLost`'s RFC 9002 §6.1
+  precondition that a packet be sent prior to an acknowledged one, without which
+  the time threshold alone retransmits packets the peer has had no chance to
+  acknowledge; `maxPendingCtrl` at all three regrant sites, a peer-driven memory
+  bound no test reached; the receive-window grant threshold and the connection
+  flow-control limit, both tested comfortably inside and neither at its value;
+  `readCID`'s 20-byte connection-ID bound, whose only fixture was so short that
+  the truncation check rejected it and the bound never ran; the
+  at-most-one-Retry rule, for which the SCID rule was firing instead because the
+  fixture replayed the same packet; an ACK whose largest packet number was never
+  in flight, which without its guard feeds a two-millennia RTT sample into the
+  estimator; the stateless-reset token, matched over all sixteen bytes rather
+  than a prefix; `initial_max_streams_uni = 0`, the one equivalence class of the
+  §4.6 limit with no case; and the §10.3.1 deletion of a retired connection ID's
+  reset token, now gated directly instead of through the lookup scoping that was
+  masking it. `pto_ctx_test.go`'s three tests each asserted an error that a
+  second mechanism also produced — they now count `Read` calls, close the ~667 ms
+  anti-deadlock escape hatch that was being credited to the watchdog, and set
+  `handshakeConfirmed` so the "PTO path armed" premise those tests state is
+  actually true. The `max_idle_timeout` behaviour in #798 is **pinned, not
+  decided**: the new test writes down today's ladder — a 1 s advertised timeout
+  and a 46.08 s deadline at the last rung — so the open design question has to be
+  answered deliberately rather than drifted into. #839 is left open and
+  unchanged: its platform gate is a build-tagged `const`, so on Linux
+  `if groCanCoalesce` and `if true` are the same program after constant folding
+  and no Linux test can tell them apart, while the existing test does catch the
+  regression on `windows/amd64` — the gap is CI's OS matrix, not the test.
+  Separately, the steady-state send allocation gate was stale and one-sided,
+  admitting a full allocation per datagram of regression against a measured 0.00;
+  it is now 0 and two-sided like its cold sibling (#798, #827, #828, #836, #837,
+  #838, #839, #840, #842, #843, #844, #846, #847, #853, #854, #855, #856).
+
 - **Four boundary classes that were never asserted, two of them on peer bytes.**
   `bufx.StripPadding` was never called with `padLen == len(raw)`, the first
   illegal pad length; `bytesx.ReadVarint` never saw an 8-byte prefix truncated to
