@@ -332,20 +332,27 @@ type callOptions struct {
 // What works is keeping the address-taking out of the caller entirely and
 // skipping the call, so the zero-option path never reaches the escaping code.
 //
-// Two things keep the escape out of the caller, and they are ALTERNATIVES:
-// removing either one alone still measures 9 allocations per RPC, removing both
-// puts it back to 10. Measured, not reasoned — the escape-analysis output is not
-// a reliable guide here, since it reports three heap moves in a configuration
+// Two things keep the escape out of the caller, and only ONE of them is
+// observable. Measured, not reasoned — the escape-analysis output is not a
+// reliable guide here, since it reports three heap moves in a configuration
 // that allocates no more than the one that reports a single move.
 //
-//   - the directive below, so the compiler cannot inline this back into its
-//     callers and make their frame own the escaping copy;
 //   - the caller's len(opts) > 0 guard, so the zero-option path never reaches
-//     this function at all.
+//     this function at all. This is the load-bearing half: removing it puts
+//     Invoke above its allocation ceiling, and TestCallOptions_NoOptionsDoesNotAllocate
+//     and TestInvokeInto_AllocsPerCall both fail (mutation, caught 2/2).
+//   - the directive below, so the compiler cannot inline this back into its
+//     callers and make their frame own the escaping copy. Removing it alone
+//     leaves the measured count unchanged at 2.0 allocations per RPC with the
+//     whole suite green (mutation, survived 2/2). It is defensive and
+//     unmeasured, kept because it is free.
 //
-// Both are kept because each is cheap and the pair is what the gate measures;
-// dropping one would leave a change that looks harmless and is one edit away
-// from silently costing an allocation on every RPC.
+// An earlier version of this comment called the two ALTERNATIVES and put the
+// numbers at 9 against 10 allocations per RPC. Both were wrong: the counts
+// predate #577 and #578, which took the ceiling to 2, and the pair is not
+// interchangeable. Re-measured under #794 — see grpc/callopts_test.go, whose
+// own comment records the same result from the gate's side. Keep the directive,
+// but do not read its presence as something a test would notice going missing.
 //
 //go:noinline
 func applyCallOptions(co callOptions, opts []CallOption) callOptions {
