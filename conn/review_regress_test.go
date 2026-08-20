@@ -28,6 +28,15 @@ func TestStreamClose_IdempotentAfterRecycle(t *testing.T) {
 	s.mu.Lock()
 	s.localEnded = true
 	s.remoteEnded = true
+	// connDone is what makes Close recycle. bothEnded alone returns early —
+	// "markStreamDone hasn't run its eviction yet" — so w stays live, gen is
+	// unchanged, and the second Close reaches the same harmless early return
+	// whether or not the guard exists. That was this test's fixture, and
+	// replacing the CAS with an unconditional Store left the package green
+	// (#834). resetForPoolLocked does NOT clear released; only allocStream
+	// re-arms it, so a recycled-but-unclaimed struct is exactly the state the
+	// CAS protects.
+	s.connDone = true
 	s.mu.Unlock()
 
 	require.NoError(t, s.ref().Close(), "first Close")
