@@ -9,6 +9,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Tests
 
+- **The `client/integration_test` fault matrix was a diagonal, and three of its
+  tests could not observe the property they are named for.** Every one of the ten
+  Toxiproxy tests pinned one upstream constant, so a four-peer
+  cross-implementation suite injected faults into nginx and nothing else; the
+  proxy's upstream is now a parameter and all ten run as subtests against nginx,
+  Undertow and nghttpx, over h2 and over HTTP/1.1. The in-process Go reference
+  stays out and the reason is recorded in the peer table: Toxiproxy dials from
+  inside the compose network and there is no route back to a host-side ephemeral
+  port. That widening is what made the missing branch reachable — the HTTP/1.1
+  mid-body test rests its claim on Content-Length reconciliation, but over TLS a
+  cut socket surfaces as `io.ErrUnexpectedEOF`, so the RFC 9112 §6.3 rule 6 arm
+  it names was never executed and deleting that arm's error left it green. A
+  cleartext leg reaches a real `io.EOF`, and the new test requires the error to
+  carry the declared and received lengths, which only rule 6 produces.
+  `TestIT_GoHTTP_ConnectionReuse`, `TestIT_GoHTTP_MultipleRequests` and
+  `TestMatrix_ConnectionReuse` counted statuses, which a transport dialling per
+  request satisfies exactly as well as one reusing a connection; they count dials
+  now. The two `RequestHeaders` tests asserted a status and never that the header
+  arrived, and read it back off `/echo`'s `X-Echo-Headers`. Three fixtures had no
+  consumer at all: `/trailers` gains `Request.WantTrailers` coverage in both
+  directions on the one peer that emits a real trailer section, `/gzip` gains a
+  cross-peer decode assertion that reads the same on every peer (a body longer
+  than the octets received can only be a decompressed one) — the Go reference's
+  own handler had to start emitting gzip rather than labelling plaintext as gzip
+  — and `/never` gains the silent-peer case, which is a different state from
+  `/delay`: the failure must be a `context.DeadlineExceeded` and the connection
+  must survive it. Response sizes reach the 65535-byte connection window on every
+  peer, and the bodyless 204/304 class is tested over HTTP/1.1, where the client
+  has a rule 1 branch to get wrong; nghttpx is excluded there with the
+  measurement, because Undertow answers `/status/204` with a body and nghttpx
+  refuses to re-encode it (#892, #893, #894, #895, #896).
+
 - **Fourteen coverage gaps in `trace`, `contrib/prometheus`, `internal/bufx` and
   `internal/bytesx`; eleven closed by adding the missing case, three refuted by
   measurement.** Every varint in `bytesx` was decoded from a buffer trimmed to
