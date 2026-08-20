@@ -288,7 +288,8 @@ func TestRequestComplete_StatusSurvivesAFailureAfterTheHead(t *testing.T) {
 	t.Parallel()
 	srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(503)
-		w.(http.Flusher).Flush() // put the head on the wire before killing the stream
+		_, _ = w.Write([]byte("upstream unavailable"))
+		w.(http.Flusher).Flush() // put the head and body on the wire before killing the stream
 		panic(http.ErrAbortHandler)
 	}))
 	srv.EnableHTTP2 = true
@@ -314,6 +315,9 @@ func TestRequestComplete_StatusSurvivesAFailureAfterTheHead(t *testing.T) {
 	assert.Equalf(t, 503, e.Status,
 		"Status = %d on an attempt the server answered before resetting; reporting 0 here loses the server's own verdict and makes the sample look like it never arrived",
 		e.Status)
+	assert.Positivef(t, e.BytesRecv,
+		"BytesRecv = %d on an attempt that received %d bytes of body before the reset; a run that zeroes them under-reports what the server actually sent",
+		e.BytesRecv, len("upstream unavailable"))
 }
 
 // TestRequestComplete_NoBackendPickedLeavesAddrEmpty is the other side of that
