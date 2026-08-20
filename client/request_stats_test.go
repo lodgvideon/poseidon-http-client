@@ -6,6 +6,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"testing"
 	"time"
 
@@ -345,4 +346,51 @@ func TestRequestComplete_NoBackendPickedLeavesAddrEmpty(t *testing.T) {
 	require.Len(t, *events, 1, "a failed attempt is still one attempt, and still reports")
 	assert.Emptyf(t, (*events)[0].RemoteAddr,
 		"RemoteAddr = %q when no backend was picked, want empty", (*events)[0].RemoteAddr)
+}
+
+// TestRequestComplete_ExhaustedFailoverNamesTheLastBackend covers the other
+// managed failure path. A dial-only error does not return: the address is
+// marked tried and the loop looks for another, so the error surfaces from the
+// "no addresses left" branch further up, where the picked address is no longer
+// in scope. That branch had no test, and a mutation dropping the address there
+// survived the rest of this file.
+func TestRequestComplete_ExhaustedFailoverNamesTheLastBackend(t *testing.T) {
+	t.Parallel()
+	// A reserved-then-closed port: every dial to it fails fast, so the single
+	// backend is tried, marked, and the address set runs out.
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err, "reserve a port for the dead backend")
+	dead := hostPort(t, l.Addr().String())
+	require.NoError(t, l.Close(), "close the listener before the client dials it")
+	hooks, events := recordComplete()
+	c, err := client.NewClient(client.ClientOptions{
+		Transport: client.TransportManaged,
+		Resolver:  client.StaticResolver(dead),
+		ConnOpts:  conn.ConnOptions{Dialer: &conn.TLSDialer{Config: &tls.Config{InsecureSkipVerify: true}}},
+		Pool:      &client.PoolOptions{MaxConnsPerHost: 1, MaxStreamsPerConn: 4},
+		Hooks:     hooks,
+	})
+	require.NoError(t, err, "NewClient pointed at a dead backend")
+	defer c.Close()
+	var resp client.Response
+	resp.Reset()
+
+	err = c.Do(context.Background(), &client.Request{Method: "GET", Path: "/"}, &resp)
+
+	require.Error(t, err, "Do against a dead backend must fail")
+	require.Len(t, *events, 1, "a failed attempt is still one attempt, and still reports")
+	assert.Equalf(t, dead.String(), (*events)[0].RemoteAddr,
+		"RemoteAddr = %q after failover ran out of backends, want the last one tried (%q)",
+		(*events)[0].RemoteAddr, dead.String())
+}
+
+// hostPort splits a listener address into the Address the managed transports
+// resolve over.
+func hostPort(t *testing.T, addr string) client.Address {
+	t.Helper()
+	host, portStr, err := net.SplitHostPort(addr)
+	require.NoError(t, err, "split the listener address")
+	port, err := strconv.Atoi(portStr)
+	require.NoError(t, err, "parse the listener port")
+	return client.Address{Host: host, Port: port}
 }
