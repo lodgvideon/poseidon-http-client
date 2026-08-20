@@ -45,12 +45,45 @@ jobs:
         with:
           fetch-depth: 0
 
-      # Exit 10 means the efficacy floor in .gremlins.yaml was missed — mutants
-      # in this diff survived. The floor is set in that file and nowhere else
-      # because in v0.6.0 the --threshold-efficacy flag and the matching
+      # Gremlins scores an EMPTY mutant set as `Test efficacy: 0.00%` and exits
+      # 10, not as "no data" — so without this step the gate is red by
+      # construction on every pull request that touches no mutable Go code: docs,
+      # workflows, a test-only change, a dependabot go.mod bump. Measured on this
+      # workflow's own first green coverage run: `Killed: 0, Lived: 0, Not
+      # covered: 0` beside `Skipped: 4634`, then `ERROR: below
+      # efficacy-threshold`.
+      #
+      # The exclusion list is READ out of .gremlins.yaml rather than restated
+      # here, because the two directions of drift are not symmetric. A pattern
+      # added there and missed here lets a pointless run happen — loud, and it
+      # costs a minute. A pattern removed there and left here makes this step SKIP
+      # a job that had real mutants to run, and a skipped mutation gate is
+      # indistinguishable from a passed one. Only the first kind is affordable.
+      - name: Is there anything to mutate?
+        id: scope
+        run: |
+          set -euo pipefail
+          re="$RUNNER_TEMP/excluded.re"
+          awk "/^ *exclude-files:/{f=1;next} f&&/^ *- '/{sub(/^ *- '/,\"\");sub(/'.*/,\"\");print;next} f&&/^[^ #]/{f=0}" .gremlins.yaml > "$re"
+          # The same file set Gremlins would mutate: the merge-base diff that
+          # --diff walks, minus _test.go, which it never mutates, minus those.
+          mutable=$(git diff --name-only "origin/${{ github.base_ref }}...HEAD" | grep -E '\.go$' | grep -vE '_test\.go$' | grep -vE -f "$re" || true)
+          if [ -z "$mutable" ]; then
+            echo 'run=false' >> "$GITHUB_OUTPUT"
+            echo 'No mutable Go file in this diff, so there is nothing for Gremlins to run.' >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo 'run=true' >> "$GITHUB_OUTPUT"
+            echo 'Mutating:' >> "$GITHUB_STEP_SUMMARY"
+            echo "$mutable" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      # Exit 10 here means the efficacy floor in .gremlins.yaml was missed —
+      # mutants in this diff survived. The floor is set in that file and nowhere
+      # else because in v0.6.0 the --threshold-efficacy flag and the matching
       # GREMLINS_UNLEASH_* environment variable are both inert; do not "helpfully"
       # move it onto the command line, or this job stops being able to fail.
       - name: Mutation testing on the diff
+        if: steps.scope.outputs.run == 'true'
         run: make mutation MUTATION_DIFF=origin/${{ github.base_ref }}
 
   # The whole module, reported rather than gated — the same treatment nightly.yml

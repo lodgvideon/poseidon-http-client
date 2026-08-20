@@ -40,10 +40,14 @@ Read the run, do not skim it:
   the test, not to strengthen it into a test of something else.
 - **A new test whose mutant an existing test already catches should not be written.**
   Say so and drop it — and check before writing it, not after.
-- **A run that mutated nothing is not a pass.** Efficacy is
-  `KILLED / (KILLED + LIVED)`, so a diff touching only test files yields an empty
-  mutant set and exits 0. `Killed: 0` beside `Skipped: 4629` measured nothing; it
-  is this tool's version of `0 tests ran`.
+- **A run that mutated nothing is not a pass — and it does not exit 0 either.**
+  `Killed: 0` beside `Skipped: 4634` measured nothing; it is this tool's version
+  of `0 tests ran`. Gremlins reports `KILLED / (KILLED + LIVED)` over 0/0 as
+  `Test efficacy: 0.00%`, which is below any floor, so a diff touching only test
+  files **exits 10**. Measured on the gate's own first runs; `mutation.yml` has a
+  step that skips the job when the diff holds no mutable Go file, because
+  otherwise every docs, workflow, test-only and dependabot pull request fails a
+  gate that never ran.
 
 Two ways this tool reports a clean sheet it has not earned, both measured:
 
