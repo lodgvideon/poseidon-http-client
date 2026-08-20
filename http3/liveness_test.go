@@ -39,22 +39,41 @@ func TestAlive_FlagAgreesWithReaderDone(t *testing.T) {
 // then observe the connection as alive; storing after the close would allow
 // exactly that. Reporting death slightly EARLY is safe and documented, late is
 // the bug.
+//
+// The observer SPINS on a non-blocking receive rather than parking on the
+// channel. That is the whole test: the window the wrong order opens is two
+// instructions wide, and waking a PARKED goroutine takes microseconds, so 200
+// iterations of the parked form never landed inside it and the inverted order
+// passed 2/2 (#807). Spinning sees the close within nanoseconds, and the swap is
+// then caught on the first run.
 func TestAlive_FlagIsVisibleBeforeTheChannelCloses(t *testing.T) {
-	for i := 0; i < 200; i++ {
+	const iterations = 5000
+	for i := 0; i < iterations; i++ {
 		c := &Client{readerDone: make(chan struct{})}
+		started := make(chan struct{})
 		observed := make(chan bool, 1)
 		go func() {
-			<-c.readerDone
-			observed <- c.Alive()
+			close(started)
+			for {
+				select {
+				case <-c.readerDone:
+					observed <- c.Alive()
+					return
+				default:
+				}
+			}
 		}()
+		<-started // the observer is running, not merely created
 
 		c.markDead()
 
 		select {
 		case alive := <-observed:
 			require.Falsef(t, alive,
-				"iteration %d: a waiter woken by readerDone saw Alive() == true", i)
-		case <-time.After(2 * time.Second):
+				"iteration %d: a waiter woken by readerDone saw Alive() == true — markDead "+
+					"closed the channel before publishing the flag, so a pool woken by "+
+					"readerDone hands out a corpse", i)
+		case <-time.After(10 * time.Second):
 			require.FailNowf(t, "waiter never woke", "iteration %d", i)
 		}
 	}

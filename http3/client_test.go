@@ -4,9 +4,12 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"runtime"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -36,6 +39,20 @@ type fakeStream struct {
 	recvResetCode uint64 // the application error code carried by that RESET_STREAM
 	sendCap       int    // max bytes accepted per Send (0 = unlimited); models flow control
 	sendResetErr  bool   // Send returns quic.ErrStreamReset (models a received STOP_SENDING)
+	// sendStall is the number of Sends that make NO progress before the stream
+	// starts accepting bytes — a shut flow-control window, which sendCap cannot
+	// express because it always admits at least one byte. stallWakes makes each
+	// stalled Send signal ready, so a park on WaitSendable clears itself; leaving it
+	// false models a window that stays shut until the request ctx fires.
+	sendStall  int
+	stallWakes bool
+	// sendStalls and waitSendables are read by tests. They are deliberately
+	// DIFFERENT mechanisms: sendStalls counts the injection (zero-progress Sends
+	// actually performed) and waitSendables counts the behaviour under test (parks
+	// the send path made), so one mutation cannot zero both.
+	sendStalls    atomic.Int64
+	waitSendables atomic.Int64
+	waitReadables atomic.Int64
 
 	reset     bool // Reset was called
 	stopped   bool // StopSending was called
@@ -52,6 +69,19 @@ func (s *fakeStream) Send(data []byte, fin bool) (int, error) {
 	defer s.conn.mu.Unlock()
 	if s.sendResetErr {
 		return 0, quic.ErrStreamReset // the peer reset our send side (STOP_SENDING)
+	}
+	if s.sendStall > 0 {
+		// A zero-progress send: the peer's flow-control window is shut, so the
+		// stream accepts nothing at all and the caller must park rather than spin.
+		s.sendStall--
+		s.sendStalls.Add(1)
+		if s.stallWakes {
+			select {
+			case s.ready <- struct{}{}:
+			default:
+			}
+		}
+		return 0, nil
 	}
 	n := len(data)
 	if s.sendCap > 0 && n > s.sendCap {
@@ -122,6 +152,7 @@ func (s *fakeStream) RecvState() (finished, reset bool, code uint64) {
 // WaitReadable blocks until the reader signals progress, the request ctx is
 // cancelled, or the connection terminates (docs/HTTP3_DESIGN.md §3.3).
 func (s *fakeStream) WaitReadable(ctx context.Context) error {
+	s.waitReadables.Add(1)
 	select {
 	case <-s.ready:
 		return nil
@@ -132,9 +163,12 @@ func (s *fakeStream) WaitReadable(ctx context.Context) error {
 	}
 }
 
-// WaitSendable mirrors WaitReadable: the fake Send always makes progress when
-// there is data, so a park here only happens in the never-completing tests.
+// WaitSendable mirrors WaitReadable. A park here happens when Send made no
+// progress — sendStall models exactly that — and in the never-completing tests.
+// The call is counted so a test can tell a send path that PARKED from one that
+// span on Send, which is otherwise invisible: both put the same bytes on the wire.
 func (s *fakeStream) WaitSendable(ctx context.Context) error {
+	s.waitSendables.Add(1)
 	select {
 	case <-s.ready:
 		return nil
@@ -176,9 +210,41 @@ type fakeConn struct {
 	closeCode  uint64
 	closed     bool
 
-	done     chan struct{} // closed once by CloseWithError; models quic.Conn.done
-	closeErr error         // published before done is closed; models quic.Conn.closeErr
-	wake     chan struct{} // cap 1; wakes a parked Poll to re-deliver fed data
+	done       chan struct{} // closed once by terminate; models quic.Conn.done
+	closeErr   error         // published before done is closed; models quic.Conn.closeErr
+	terminated bool          // the terminal error is latched; models quic.Conn.terminated
+	wake       chan struct{} // cap 1; wakes a parked Poll to re-deliver fed data
+	// abrupt is closed by the first CloseWithError carrying anything other than
+	// H3_NO_ERROR — the reader's fatal() teardown rather than a graceful Close — so
+	// a test can wait for that teardown instead of racing it.
+	abrupt chan struct{}
+	// closeHook runs at the TOP of CloseWithError, before the lock, so a test can
+	// widen the window between two teardown paths that would otherwise race.
+	// Taking the lock first would deadlock it against the close it waits for. Set
+	// it before the client is constructed: the reader goroutine reads it.
+	closeHook func(code uint64)
+}
+
+// terminate latches the connection's terminal error and wakes everything parked on
+// it, exactly as quic.Conn.terminateLocked does — FIRST error wins and done closes
+// once. Both real teardown paths run through it: CloseWithError latches
+// quic.ErrConnClosed, and a Poll whose connection-lifetime ctx was cancelled
+// latches ctx.Err(). The fake used to latch only in CloseWithError, which is why
+// Client.Close's latch-before-cancel ordering was unobservable here (#786): with
+// the order reversed the reader's cancel is what reaches a parked Do, and the fake
+// answered ErrConnClosed either way.
+func (c *fakeConn) terminate(err error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.ensureInitLocked()
+	if c.terminated {
+		return
+	}
+	c.terminated = true
+	if c.closeErr == nil {
+		c.closeErr = err
+	}
+	close(c.done)
 }
 
 // ensureInitLocked lazily allocates the wake/close channels so tests can build a
@@ -189,6 +255,9 @@ func (c *fakeConn) ensureInitLocked() {
 	}
 	if c.wake == nil {
 		c.wake = make(chan struct{}, 1)
+	}
+	if c.abrupt == nil {
+		c.abrupt = make(chan struct{})
 	}
 }
 
@@ -277,6 +346,10 @@ func (c *fakeConn) Poll(ctx context.Context) error {
 	}
 	select {
 	case <-ctx.Done():
+		// ctx here is the connection-lifetime ctx, so its cancel IS the connection
+		// ending; quic.Conn.Poll latches it (terminateLocked) rather than merely
+		// returning it, and so must this.
+		c.terminate(ctx.Err())
 		return ctx.Err()
 	case <-done:
 		c.mu.Lock()
@@ -289,17 +362,19 @@ func (c *fakeConn) Poll(ctx context.Context) error {
 }
 
 func (c *fakeConn) CloseWithError(app bool, code uint64, _ string) error {
+	if h := c.closeHook; h != nil {
+		h(code) // before the lock: the hook may wait for another teardown to take it
+	}
+	c.terminate(quic.ErrConnClosed)
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	c.ensureInitLocked()
 	if c.closed {
 		return nil // idempotent: first close wins (mirrors quic.Conn)
 	}
 	c.closed, c.closeApp, c.closeCode = true, app, code
-	if c.closeErr == nil {
-		c.closeErr = quic.ErrConnClosed
+	if code != H3NoError {
+		close(c.abrupt) // guarded by c.closed above, so this happens at most once
 	}
-	close(c.done)
 	return nil
 }
 
@@ -720,4 +795,120 @@ func TestClient_Close(t *testing.T) {
 // the unexported newClient).
 func NewClientFake(conn quicConn, settings []Setting) (*Client, error) {
 	return newClient(conn, settings)
+}
+
+// sendAll has two distinct blocked cases and the fakes only ever expressed one.
+// A PARTIAL send (n > 0, short) is retried immediately and is covered by
+// TestClient_SendDrainsUnderFlowControl. A ZERO-progress send parks on
+// WaitSendable until a MAX_STREAM_DATA / MAX_DATA / cwnd / pacing wake arrives;
+// nothing reached it, because fakeStream.Send returned min(len(data), sendCap),
+// which is zero only for an empty write (#774).
+//
+// Losing the park is not a wrong-bytes bug — the same bytes still reach the wire —
+// it is a hot spin: a flow-control-blocked stream burns a core until the window
+// opens. So the assertion is on the PARK COUNT, and the injection is counted off a
+// different mechanism (the zero-progress Sends the fixture actually performed), so
+// one mutation cannot zero both.
+
+// TestClient_SendParksOnAShutWindow: a stream that accepts nothing must be waited
+// on, not spun on, and the request must still reach the wire byte-identical once
+// the window reopens.
+func TestClient_SendParksOnAShutWindow(t *testing.T) {
+	newRun := func(stall int) (*fakeStream, []byte, error) {
+		t.Helper()
+		req := &fakeStream{
+			recvChunks: [][]byte{AppendHeaders(nil, encodeSection(hf(":status", "200")))},
+			fin:        true,
+			sendStall:  stall,
+			stallWakes: true, // the reader's window grant, delivered as a ready signal
+		}
+		conn := &fakeConn{req: req}
+		client, err := NewClientFake(conn, nil)
+		require.NoErrorf(t, err, "stall=%d: NewClientFake over the fake transport", stall)
+		resp, _, doErr := client.Do(context.Background(),
+			&Request{Method: "GET", Scheme: "https", Authority: "example.com", Path: "/"})
+		var status []byte
+		if resp != nil {
+			status = []byte(strconv.Itoa(resp.Status))
+		}
+		return req, status, doErr
+	}
+	// Control arm: the identical request over a stream that never stalls. It fixes
+	// what the wire bytes must be, and shows that a run where the injection did not
+	// happen does not park — so the park below is caused by the stall, not by the
+	// fixture at large.
+	control, controlStatus, controlErr := newRun(0)
+
+	stalled, stalledStatus, stalledErr := newRun(1)
+
+	require.NoErrorf(t, controlErr, "control arm: Do = %v, want nil", controlErr)
+	require.NoErrorf(t, stalledErr, "Do = %v, want nil once the window reopens", stalledErr)
+	require.EqualValuesf(t, 1, stalled.sendStalls.Load(),
+		"the fixture performed %d zero-progress Sends, want 1: with none the run below "+
+			"proves nothing about the blocked path", stalled.sendStalls.Load())
+	require.EqualValuesf(t, 0, control.sendStalls.Load(),
+		"the control arm stalled %d times; it is supposed to be the un-injected run",
+		control.sendStalls.Load())
+	assert.EqualValuesf(t, 1, stalled.waitSendables.Load(),
+		"sendAll parked %d times on a stream that accepted nothing, want 1: without the "+
+			"park it spins on Send, burning a core until the peer's window opens — the same "+
+			"bytes reach the wire either way, so nothing else can tell",
+		stalled.waitSendables.Load())
+	assert.EqualValuesf(t, 0, control.waitSendables.Load(),
+		"the control arm parked %d times on a stream that always made progress; a park "+
+			"there means the count above is measuring the fixture, not the stall",
+		control.waitSendables.Load())
+	assert.Truef(t, bytes.Equal(stalled.sent, control.sent),
+		"the stalled run put %d bytes on the wire, the un-stalled run %d, and they differ: "+
+			"parking must not lose, duplicate or reorder a byte of the request",
+		len(stalled.sent), len(control.sent))
+	assert.Truef(t, stalled.finSent,
+		"the FIN rides the request's final byte (RFC 9114 §4.1); a parked send that never "+
+			"re-sent it leaves the server waiting for a request that is already complete")
+	assert.Truef(t, bytes.Equal(stalledStatus, controlStatus),
+		"the stalled run read status %q, the control %q", stalledStatus, controlStatus)
+}
+
+// TestClient_SendParkedOnAShutWindowHonoursCtxCancel is the cancel half, mirroring
+// TestClientDo_ContextCancelMidRequest on the SEND side: a Do parked in the send
+// path — not in WaitReadable — must still wake on ctx and abort the stream with
+// H3_REQUEST_CANCELLED (RFC 9114 §4.1, §8.1).
+func TestClient_SendParkedOnAShutWindowHonoursCtxCancel(t *testing.T) {
+	// stallWakes stays false: nothing reopens the window, so the only way out of
+	// the park is the ctx. A finite stall count keeps a send path that FAILS to
+	// park from looping forever — it drains the stalls and proceeds, and the park
+	// count below is what fails.
+	req := &fakeStream{sendStall: 64}
+	conn := &fakeConn{req: req}
+	client, err := NewClientFake(conn, nil)
+	require.NoError(t, err, "NewClientFake over the fake transport")
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() { // cancel once the send path is genuinely blocked, not before
+		deadline := time.Now().Add(5 * time.Second)
+		for req.sendStalls.Load() == 0 && time.Now().Before(deadline) {
+			runtime.Gosched()
+		}
+		cancel()
+	}()
+
+	_, _, doErr := client.Do(ctx, &Request{Method: "GET", Scheme: "https", Authority: "example.com", Path: "/"})
+
+	require.Positivef(t, req.sendStalls.Load(),
+		"the fixture never stalled a Send, so the request was never blocked and this run "+
+			"says nothing about a cancel in the send path")
+	assert.ErrorIsf(t, doErr, context.Canceled,
+		"Do = %v, want context.Canceled: a caller that cancels a request blocked on a shut "+
+			"flow-control window must get its own error back, not hang", doErr)
+	assert.Positivef(t, req.waitSendables.Load(),
+		"sendAll never parked (%d WaitSendable calls) on a stream that accepted nothing: it "+
+			"spun on Send instead, and a spin observes no ctx at all",
+		req.waitSendables.Load())
+	assert.Truef(t, req.reset,
+		"the abandoned request stream was not reset; the server keeps the exchange open and "+
+			"goes on sending into a stream nobody reads (RFC 9000 §3.5)")
+	assert.Equalf(t, H3RequestCancelled, req.resetCode,
+		"stream reset code %#x, want H3_REQUEST_CANCELLED (%#x): with any other code the "+
+			"peer cannot tell a cancelled request from a protocol failure",
+		req.resetCode, H3RequestCancelled)
 }

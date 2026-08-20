@@ -369,3 +369,68 @@ func TestFrameReader_OutsizedBufferIsNotPooled(t *testing.T) {
 			"draw %d: pool handed out a %d-byte array, over the %d cap", i, caps[i], maxPooledFrameBuf)
 	}
 }
+
+// TestFrameReader_PooledBufferIsCirculated is the positive mirror of
+// TestFrameReader_OutsizedBufferIsNotPooled: an array grown to a normal size is
+// put BACK, so the next acquirer starts from it. That is the property the pool
+// exists for — frameBufPool's doc comment measures a per-request array at roughly
+// four times the body's own size in growth chain — and only the REFUSING half of
+// release's two-way decision was pinned, so the pool could be reduced to "never
+// reuse a grown array" with the whole suite still green (#773).
+//
+// The boundary is covered on both sides, because release's guard is `>`: an array
+// of exactly maxPooledFrameBuf is within budget and must circulate, one byte over
+// must not. Each array is `make`d rather than grown into, since append rounds
+// capacity up to a size class and a buffer grown to maxPooledFrameBuf+1 bytes ends
+// up nowhere near the boundary under test.
+//
+// The assertion is on the pooled HEADER release hands back, not on what a later
+// acquire draws. Drawing is the obvious phrasing and it CANNOT be made reliable:
+// a GC empties a sync.Pool outright, and under -race — which is this repo's
+// default verification — Pool.Put deliberately drops one item in four on the
+// floor, so a draw-based sweep failed 11 runs in 20 with three subtests even with
+// the collector held off. The header is the same decision without the coin toss:
+// release either re-points it at the grown array (`*p = buf[:0]`, circulate) or
+// leaves it on the one Get handed out (drop).
+//
+// What that leaves untestable here is release dropping the Put entirely; nothing
+// observable distinguishes "returned to a pool that discarded it" from "never
+// returned". That is a property of sync.Pool under the race detector, not a gap
+// this fixture can close.
+func TestFrameReader_PooledBufferIsCirculated(t *testing.T) {
+	cases := []struct {
+		name     string
+		size     int
+		recycled bool
+	}{
+		{"a grown array well under the cap is circulated", 32 << 10, true},
+		{"an array of exactly maxPooledFrameBuf is circulated", maxPooledFrameBuf, true},
+		{"an array one byte over the cap is dropped", maxPooledFrameBuf + 1, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var fr FrameReader
+			fr.acquire()
+			pooled := fr.bufp // the header release will put back
+			require.NotNil(t, pooled, "acquire handed out no pooled array to release")
+			// Stand in for Feed's append having replaced the acquired array with a
+			// larger one — the array release chooses between recycling and dropping.
+			fr.buf = make([]byte, 0, tc.size)
+			grown := &fr.buf[:cap(fr.buf)][0]
+
+			fr.release()
+
+			// Read immediately: nothing else in this package draws from frameBufPool
+			// while a test runs, so the header is still the one release just put back.
+			carried := *pooled
+			recycled := cap(carried) > 0 && &carried[:cap(carried)][0] == grown
+			assert.Equalf(t, tc.recycled, recycled,
+				"array of cap %d went back into the pool = %v, want %v (the header now carries "+
+					"cap %d). Recycling a grown array is the whole point of frameBufPool: without "+
+					"it every response climbs a fresh growth chain from frameBufSize, measured at "+
+					"roughly four times the body's own size. Circulating one past the %d cap "+
+					"instead pins that footprint on every small request after it.",
+				tc.size, recycled, tc.recycled, cap(carried), maxPooledFrameBuf)
+		})
+	}
+}

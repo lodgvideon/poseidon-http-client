@@ -9,6 +9,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Tests
 
+- **Thirteen `http3` coverage gaps from the #722 sweep, twelve of them boundaries
+  or orderings that no fixture could reach.** Every cap was tested from the reject
+  side only, so any of them could tighten by one and stay green: the 1xx count cap,
+  the per-frame declared-length cap, the retained-total cap on both of
+  `dispatchFrame`'s arms, and `release`'s pooled-buffer cap — whose ACCEPT side is
+  the whole reason `frameBufPool` exists, and which could be reduced to "never
+  reuse a grown array" with the suite silent. Two orderings were named by tests
+  that could not observe them: `markDead`'s store-before-close, where a PARKED
+  observer never lands in a two-instruction window and a spinning one catches the
+  swap on the first run, and `Close`'s latch-before-cancel, invisible because the
+  fake latched its terminal error only in `CloseWithError` where `quic.Conn`
+  latches it in `Poll` too — so a graceful shutdown and a reader teardown that
+  tells the peer `H3_INTERNAL_ERROR` were indistinguishable. `sendAll`'s
+  zero-progress park had no fixture at all (the fake stream always made progress),
+  so losing it — a hot spin on a flow-control-blocked stream, same bytes on the
+  wire — was unobservable. Also: two of the three required-pseudo-header cases
+  were being rejected by the §4.3.1 authority rule rather than the rule they name;
+  an explicit `SETTINGS_MAX_FIELD_SECTION_SIZE` of 0 was never told apart from the
+  absent case, which §7.2.4.1 gives the opposite meaning; `h3TLSConfig`'s
+  single-Initial curve default was pinned in neither direction; and the UDP
+  offload race test asserted nothing and now skips honestly when the raw fd is
+  unavailable, reporting what it engaged. `DoStream` ignoring a DATA frame after
+  the trailer section, where buffered `Do` answers `H3_FRAME_UNEXPECTED`, is
+  recorded as a two-sided drift tripwire rather than decided (#773, #774, #786,
+  #795, #796, #797, #807, #808, #809, #815, #816, #817).
+
 - **Four boundary classes that were never asserted, two of them on peer bytes.**
   `bufx.StripPadding` was never called with `padLen == len(raw)`, the first
   illegal pad length; `bytesx.ReadVarint` never saw an 8-byte prefix truncated to

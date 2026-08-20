@@ -95,9 +95,15 @@ func TestConformance_RFC9114_Sec42_RequestValidation(t *testing.T) {
 		name string
 		req  *Request
 	}{
-		{"missing_method", &Request{Scheme: "https", Path: "/"}},
+		// Each case must be refused by the rule it NAMES. missing_method and
+		// missing_path carry an Authority for that reason: without one, an https
+		// request with no Host header is already refused by the §4.3.1 authority rule,
+		// so both cases stayed green with the required-pseudo-header guard deleted
+		// (#809). missing_scheme needs no authority — with Scheme "" the authority
+		// rule does not apply — and is the control that shows the fixture has teeth.
+		{"missing_method", &Request{Scheme: "https", Authority: "h", Path: "/"}},
 		{"missing_scheme", &Request{Method: "GET", Path: "/"}},
-		{"missing_path", &Request{Method: "GET", Scheme: "https"}},
+		{"missing_path", &Request{Method: "GET", Scheme: "https", Authority: "h"}},
 		{"uppercase_header", &Request{Method: "GET", Scheme: "https", Authority: "h", Path: "/", Headers: []header.Field{hf("X-Foo", "1")}}},
 		{"connection_specific", &Request{Method: "GET", Scheme: "https", Authority: "h", Path: "/", Headers: []header.Field{hf("connection", "keep-alive")}}},
 		{"crlf_value", &Request{Method: "GET", Scheme: "https", Authority: "h", Path: "/", Headers: []header.Field{hf("x-h", "a\r\nb")}}},

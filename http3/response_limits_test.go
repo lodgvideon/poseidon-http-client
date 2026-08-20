@@ -135,3 +135,106 @@ func TestClient_RejectsInterimFlood(t *testing.T) {
 		"Do = %v, want ErrResponseTooLarge — a 1xx costs no retained bytes, so only the "+
 			"count cap stands between a flood and unbounded memory", doErr)
 }
+
+// The caps above are all tested from the REJECT side. These three are the accept
+// side: a response landing exactly ON a limit is within budget and must be
+// admitted. Without them any of the guards can silently tighten by one byte — or
+// one interim response — and the suite stays green, so a conformant server that
+// happens to sit on the limit starts being refused with nothing failing (#796,
+// #815).
+
+// TestClient_AcceptsInterimAtTheCap: exactly maxInterimResponses informational
+// responses are legal. RFC 9114 §4.1 sets no limit on them; the cap is ours, and
+// a client that refuses AT the cap rejects a conformant server.
+func TestClient_AcceptsInterimAtTheCap(t *testing.T) {
+	var chunk []byte
+	for i := 0; i < maxInterimResponses; i++ { // exactly the cap, not one past
+		chunk = append(chunk, AppendHeaders(nil, encodeSection(hf(":status", "103")))...)
+	}
+	chunk = append(chunk, AppendHeaders(nil, encodeSection(hf(":status", "200")))...)
+	conn := &fakeConn{req: &fakeStream{recvChunks: [][]byte{chunk}, fin: true}}
+	client, err := NewClientFake(conn, nil)
+	require.NoError(t, err, "NewClientFake over the fake transport")
+
+	resp, _, doErr := client.Do(context.Background(),
+		&Request{Method: "GET", Scheme: "https", Authority: "example.com", Path: "/"})
+
+	require.NoErrorf(t, doErr,
+		"Do = %v, want nil: the cap must admit exactly maxInterimResponses (%d) 1xx "+
+			"responses — refusing at the cap rejects a server sending its hundredth "+
+			"legitimate 103 Early Hints", doErr, maxInterimResponses)
+	require.NotNil(t, resp, "Do returned no response alongside a nil error")
+	assert.Lenf(t, resp.Interim, maxInterimResponses,
+		"interim = %d, want %d: every informational response below the cap must be kept, "+
+			"not silently dropped", len(resp.Interim), maxInterimResponses)
+}
+
+// TestClient_AcceptsResponseExactlyAtCap: a response whose RETAINED bytes are
+// exactly maxResponseBytes is within the budget — the cap refuses a response
+// LARGER than it, not one equal to it.
+func TestClient_AcceptsResponseExactlyAtCap(t *testing.T) {
+	saved := maxResponseBytes
+	defer func() { maxResponseBytes = saved }()
+	payload := bytes.Repeat([]byte("x"), 100)
+	headers := AppendHeaders(nil, encodeSection(hf(":status", "200")))
+	_, hlen, _, perr := ParseFrameHeader(headers)
+	require.NoError(t, perr, "the fixture's own HEADERS frame must parse")
+	maxResponseBytes = hlen + uint64(len(payload)) // exactly the budget, not one under
+	data := AppendData(nil, payload)
+	conn := &fakeConn{req: &fakeStream{recvChunks: [][]byte{append(headers, data...)}, fin: true}}
+	client, err := NewClientFake(conn, nil)
+	require.NoError(t, err, "NewClientFake over the fake transport")
+
+	_, body, doErr := client.Do(context.Background(),
+		&Request{Method: "GET", Scheme: "https", Authority: "example.com", Path: "/"})
+
+	require.NoErrorf(t, doErr,
+		"Do = %v, want nil: a response retaining exactly maxResponseBytes (%d) is within "+
+			"budget, and a client that refuses it rejects a conformant server",
+		doErr, maxResponseBytes)
+	assert.Truef(t, bytes.Equal(body, payload),
+		"body = %d bytes, want %d", len(body), len(payload))
+}
+
+// TestClient_AcceptsHeaderSectionExactlyAtCap is the same boundary on the
+// FrameHeaders arm of dispatchFrame, which the body case never reaches.
+func TestClient_AcceptsHeaderSectionExactlyAtCap(t *testing.T) {
+	saved := maxResponseBytes
+	defer func() { maxResponseBytes = saved }()
+	headers := AppendHeaders(nil, encodeSection(hf(":status", "200")))
+	_, hlen, _, perr := ParseFrameHeader(headers)
+	require.NoError(t, perr, "the fixture's own HEADERS frame must parse")
+	maxResponseBytes = hlen // exactly the field section, nothing to spare
+	conn := &fakeConn{req: &fakeStream{recvChunks: [][]byte{headers}, fin: true}}
+	client, err := NewClientFake(conn, nil)
+	require.NoError(t, err, "NewClientFake over the fake transport")
+
+	resp, _, doErr := client.Do(context.Background(),
+		&Request{Method: "GET", Scheme: "https", Authority: "example.com", Path: "/"})
+
+	require.NoErrorf(t, doErr,
+		"Do = %v, want nil: a field section of exactly maxResponseBytes (%d) is within budget",
+		doErr, maxResponseBytes)
+	require.NotNil(t, resp, "Do returned no response alongside a nil error")
+	assert.Equalf(t, 200, resp.Status, "status = %d, want the 200 the fixture sent", resp.Status)
+}
+
+// TestFrameReader_AcceptsFrameExactlyAtCap is the per-frame twin of
+// TestFrameReader_OversizedFrameRefusedBeforeBuffering: a DECLARED length equal to
+// the reader's cap is within it, so the frame must be handed back rather than
+// refused (RFC 9114 places no per-frame size limit; the cap is ours).
+func TestFrameReader_AcceptsFrameExactlyAtCap(t *testing.T) {
+	payload := bytes.Repeat([]byte("y"), 64)
+	var r FrameReader
+	r.SetMaxFrameLen(uint64(len(payload)))
+	r.Feed(AppendData(nil, payload))
+
+	typ, got, err := r.ReadFrame()
+
+	require.NoErrorf(t, err,
+		"ReadFrame = %v, want the frame: a declared length EQUAL to the cap is within it — "+
+			"the cap refuses a frame LARGER than the budget, and one byte of tightening here "+
+			"makes the client reject a legal response", err)
+	assert.Equalf(t, FrameData, typ, "frame type = %#x, want DATA", typ)
+	assert.Equal(t, payload, got, "the payload the reader handed back")
+}
