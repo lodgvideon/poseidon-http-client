@@ -18,7 +18,7 @@ toolchain go1.25.13
 require github.com/lodgvideon/poseidon-http-client v0.0.0
 
 require (
-	golang.org/x/crypto v0.54.0 // indirect
+	golang.org/x/crypto v0.55.0 // indirect
 	golang.org/x/sys v0.47.0 // indirect
 )
 
