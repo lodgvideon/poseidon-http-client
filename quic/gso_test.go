@@ -254,6 +254,62 @@ func TestGSO_AddToBatch_RespectsCaps(t *testing.T) {
 	assert.Equalf(t, count, totalSegs, "segments across calls = %d, want %d", totalSegs, count)
 }
 
+// TestGSO_AddToBatch_SegmentCapBinds is the arm in which the 64-segment cap is
+// the one that decides.
+//
+// TestGSO_AddToBatch_RespectsCaps above feeds 1200-byte datagrams, and its own
+// comment does the arithmetic: 54*1200 = 64800 < 65535, so maxGSOBytes fills
+// first and b.n never reaches maxGSOSegments. Its `call.segs <= maxGSOSegments`
+// assertion is therefore satisfied by the BYTE cap — quadrupling the segment cap
+// left the whole suite green. With the segment cap effectively gone, a burst of
+// small datagrams builds a super-buffer of more than 64 segments, which sendmsg
+// with UDP_SEGMENT rejects with EINVAL on Linux: every datagram in the burst is
+// dropped, at the transport, with no retransmit to recover them. #838.
+//
+// 100-byte datagrams invert which cap binds: 64*100 = 6400, an order of
+// magnitude below maxGSOBytes. The reached-the-cap assertion is what keeps this
+// arm honest — without it, a change that made the batch flush early would leave
+// the test passing while measuring nothing.
+func TestGSO_AddToBatch_SegmentCapBinds(t *testing.T) {
+	pc := &recordGSOPC{}
+	c := &Conn{pc: pc}
+	b := c.newBatch()
+	const (
+		pktSize = 100 // 64*100 = 6400 bytes, far below maxGSOBytes
+		count   = 200 // > 3 full segment-capped batches
+	)
+	for i := 0; i < count; i++ {
+		require.NoErrorf(t, c.addToBatch(&b, make([]byte, pktSize)), "addToBatch %d", i)
+	}
+
+	err := c.flushBatch(&b)
+
+	require.NoError(t, err, "flushBatch after feeding past the segment cap")
+	assert.Equalf(t, count, pc.datagrams(),
+		"datagrams delivered = %d, want %d", pc.datagrams(), count)
+	maxSegs, totalSegs := 0, 0
+	for i, call := range pc.calls {
+		assert.LessOrEqualf(t, call.segs, maxGSOSegments,
+			"call %d carries %d segments, past the %d the kernel accepts — sendmsg would "+
+				"return EINVAL and the whole burst would be lost", i, call.segs, maxGSOSegments)
+		assert.Lessf(t, call.bytes, maxGSOBytes,
+			"call %d is %d bytes: the byte cap must NOT be what bounds this arm, or it "+
+				"measures the same thing as TestGSO_AddToBatch_RespectsCaps", i, call.bytes)
+		if call.segs > maxSegs {
+			maxSegs = call.segs
+		}
+		totalSegs += call.segs
+	}
+	assert.Equalf(t, maxGSOSegments, maxSegs,
+		"the fullest sendmsg carried %d segments, want exactly %d — the segment cap is "+
+			"not the binding one here, so this arm proves nothing about it", maxSegs, maxGSOSegments)
+	assert.GreaterOrEqualf(t, len(pc.calls), 4,
+		"WriteGSO calls = %d, want >=4 (200 datagrams at %d per batch)", len(pc.calls), maxGSOSegments)
+	assert.Equalf(t, count, totalSegs,
+		"segments across calls = %d, want %d — every datagram must still be delivered once",
+		totalSegs, count)
+}
+
 // TestGSO_SendGSOFallbackLoop exercises the transport primitive's degraded path:
 // SendGSO with a nil RawConn (no offload available) must write every datagram
 // individually to the fallback writer — the guarantee the non-Linux build and the

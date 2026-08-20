@@ -1,6 +1,8 @@
 package quic
 
 import (
+	"crypto/aes"
+	"crypto/cipher"
 	"encoding/hex"
 	"testing"
 
@@ -159,4 +161,75 @@ func TestConn_Retry_Discards(t *testing.T) {
 		assert.Equal(t, a4ODCID, hex.EncodeToString(c.dcid),
 			"a Retry after a server Initial must not change the connection ID")
 	})
+}
+
+// buildRetry assembles a Retry packet (RFC 9000 §17.2.5) whose integrity tag is
+// valid over odcid: long header with the Retry type bits, zero-length DCID, the
+// given SCID and token, then the AES-128-GCM tag over the Retry Pseudo-Packet
+// (RFC 9001 §5.8), computed with the package's own fixed key and nonce.
+func buildRetry(t *testing.T, odcid, scid, token []byte) []byte {
+	t.Helper()
+	body := []byte{0xf0, 0x00, 0x00, 0x00, 0x01, 0x00} // byte0, version 1, DCID len 0
+	body = append(body, byte(len(scid)))
+	body = append(body, scid...)
+	body = append(body, token...)
+
+	pseudo := append([]byte{byte(len(odcid))}, odcid...)
+	pseudo = append(pseudo, body...)
+	block, err := aes.NewCipher(retryKey[:])
+	require.NoError(t, err, "AES-128 cipher for the Retry integrity tag")
+	aead, err := cipher.NewGCM(block)
+	require.NoError(t, err, "GCM for the Retry integrity tag")
+	pkt := append(body, aead.Seal(nil, retryNonce[:], nil, pseudo)...)
+	require.True(t, verifyRetryIntegrity(odcid, pkt),
+		"the fixture Retry must verify against odcid %x, or the discard under test is "+
+			"the tag check rather than the rule being pinned", odcid)
+	return pkt
+}
+
+// TestConformance_RFC9000_Sec17252_SecondRetryDiscarded pins the at-most-one-Retry
+// rule with a fixture in which that rule is the ONLY one that can fire.
+//
+// TestConn_Retry_Discards/second_retry replays the SAME Retry packet. After the
+// first one is accepted, c.dcid has become that packet's SCID, so on the second
+// call the neighbouring discard rule on the same line — SCID equal to the current
+// DCID — already rejects it. Dropping the handledRetry term left the whole suite
+// green: two mechanisms satisfy the assertion and the one the test is named for
+// is never the one doing the work. #846.
+//
+// The second Retry below carries a DIFFERENT SCID and a tag that is valid over
+// the client's CURRENT connection ID, so every other discard rule passes it: the
+// token is non-empty, no server Initial has been processed, the SCID differs from
+// the DCID, and the integrity tag verifies. This is the off-path injection the
+// rule exists for — an attacker who forges a Retry after the legitimate one would
+// otherwise move the client's connection ID and re-derive its Initial keys.
+func TestConformance_RFC9000_Sec17252_SecondRetryDiscarded(t *testing.T) {
+	odcid := mustHex(t, a4ODCID)
+	client, _ := InitialKeys(odcid)
+	sealer, err := NewSealer(client)
+	require.NoError(t, err, "the client Initial sealer the Retry re-derives")
+	c := &Conn{dcid: append([]byte(nil), odcid...), initialSealer: sealer}
+	c.keys.Initial, err = NewOpener(client)
+	require.NoError(t, err, "the client Initial opener")
+	first := buildRetry(t, odcid, []byte{0xf0, 0x67, 0xa5, 0x50}, []byte("token"))
+	c.handleRetry(mustParse(t, first, 0), first)
+	require.True(t, c.handledRetry, "the first Retry must be accepted, or there is no second")
+	dcidAfterFirst := hex.EncodeToString(c.dcid)
+	tokenAfterFirst := string(c.retryToken)
+	sealerAfterFirst := c.initialSealer.iv
+	// Valid over the CURRENT dcid, a different SCID: every discard rule except the
+	// at-most-one rule lets this through.
+	second := buildRetry(t, c.dcid, []byte{0xde, 0xad, 0xbe, 0xef}, []byte("token2"))
+
+	c.handleRetry(mustParse(t, second, 0), second)
+
+	assert.Equalf(t, dcidAfterFirst, hex.EncodeToString(c.dcid),
+		"a second Retry moved the connection ID to %s: §17.2.5.2 lets a client process "+
+			"at most one, and without that an off-path forgery repoints the connection",
+		hex.EncodeToString(c.dcid))
+	assert.Equalf(t, tokenAfterFirst, string(c.retryToken),
+		"a second Retry replaced the stored token with %q", c.retryToken)
+	assert.Equalf(t, sealerAfterFirst, c.initialSealer.iv,
+		"a second Retry re-derived the Initial keys; every subsequent Initial would be "+
+			"sealed under keys the server did not choose")
 }

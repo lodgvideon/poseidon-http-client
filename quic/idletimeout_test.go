@@ -124,3 +124,76 @@ func TestConformance_RFC9000_Sec101_IdleClose(t *testing.T) {
 	assert.Equalf(t, ErrIdleTimeout, err, "readWithPTO = %v, want ErrIdleTimeout", err)
 	assert.True(t, c.closed, "the connection should be marked closed after an idle timeout")
 }
+
+// TestConn_IdleDeadline_RecedesWithPTOBackoff PINS what this package does today
+// with max_idle_timeout while something is in flight. It does not endorse it.
+//
+// Issue #798 reports that once a connection has an unacknowledged ack-eliciting
+// packet, max_idle_timeout can no longer close it — not late, but never — and
+// asks whether that is right. This test exists so that the answer, whichever it
+// turns out to be, has to be given deliberately: today's numbers are written down
+// here, and any change to the mechanism turns it red. Nothing here decides the
+// design question; that is open on #798, with measurements.
+//
+// The mechanism, which is what the assertions are on. RFC 9000 §10.1 floors the
+// idle period at three PTOs so a run of lost probes cannot idle-close a
+// connection that is merely suffering loss. idleDeadline applies that floor
+// against the CURRENT, backed-off PTO — ptoBase << ptoCount — so at the k'th
+// probe the clock stands ptoBase*(2^k - 1) past lastActivity while the deadline
+// has moved out to 3*ptoBase*2^k. The floor recedes faster than the clock
+// advances, so lossDetectionDeadline is the nearer of the two at EVERY rung and
+// handleExpiry's idle branch is never reached. With a 1s max_idle_timeout and a
+// 60ms base PTO the deadline at the last rung is 46.08s.
+//
+// RFC 9002 §6.2.1 states the intended relationship the other way round: "The
+// total length of time over which consecutive PTOs expire is limited by the idle
+// timeout." Whether the floor should be taken against ptoBase rather than
+// ptoPeriod, or the ladder bounded by the idle timeout, is exactly #798.
+func TestConn_IdleDeadline_RecedesWithPTOBackoff(t *testing.T) {
+	base := time.Unix(9200, 0)
+	now := base
+	c := &Conn{now: func() time.Time { return now }}
+	c.rtt.update(20*time.Millisecond, 0) // smoothed 20ms, rttvar 10ms -> ptoBase 60ms
+	c.localMaxIdle = time.Second
+	c.lastActivity = base
+	c.handshakeComplete = true  // no anti-deadlock probe: in-flight data is why the PTO runs
+	c.handshakeConfirmed = true // §6.2.1: the app space joins the PTO timer only once confirmed
+	c.sent[spaceApp].onSent(0, base, true, nil)
+	require.True(t, c.hasInFlight(),
+		"the fixture must hold an unacknowledged ack-eliciting packet, or no ladder runs")
+	ptoBase := c.ptoBase()
+	require.Equal(t, 60*time.Millisecond, ptoBase,
+		"the arithmetic below is anchored on a 60ms base PTO")
+
+	type rung struct{ idle, loss time.Duration }
+	ladder := make([]rung, 0, maxPTOBackoff+1)
+	haveIdle := make([]bool, 0, maxPTOBackoff+1)
+	for k := 0; k <= maxPTOBackoff; k++ {
+		c.ptoCount = uint(k)
+		now = base.Add(ptoBase * time.Duration((1<<k)-1)) // the clock at the k'th probe
+		idleDL, ok := c.idleDeadline()
+		lossDL, _ := c.lossDetectionDeadline()
+		ladder = append(ladder, rung{idle: idleDL.Sub(base), loss: lossDL.Sub(base)})
+		haveIdle = append(haveIdle, ok)
+	}
+
+	for k, r := range ladder {
+		assert.Truef(t, haveIdle[k], "rung %d: an advertised max_idle_timeout must be in effect", k)
+		assert.Lessf(t, r.loss, r.idle,
+			"rung %d: loss deadline +%v, idle deadline +%v. The idle deadline must stay "+
+				"the FARTHER of the two at every rung; if it ever became the nearer one "+
+				"the connection would idle-close mid-ladder, which is the behaviour "+
+				"#798 asks for and this package does not have",
+			k, r.loss, r.idle)
+	}
+	assert.Equalf(t, time.Second, ladder[0].idle,
+		"rung 0: idle deadline +%v, want the advertised 1s — three un-backed-off PTOs "+
+			"is 180ms, below the advertised value, so the floor does not bind yet",
+		ladder[0].idle)
+	assert.Equalf(t, 46080*time.Millisecond, ladder[maxPTOBackoff].idle,
+		"rung %d: idle deadline +%v, want +46.08s (3 x 60ms x 2^%d). That is 46 times "+
+			"the advertised max_idle_timeout of 1s, and it is a constant of the backoff "+
+			"ladder rather than a function of the negotiated value — the observation "+
+			"#798 is about",
+		maxPTOBackoff, ladder[maxPTOBackoff].idle, maxPTOBackoff)
+}
