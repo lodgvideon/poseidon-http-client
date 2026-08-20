@@ -9,6 +9,9 @@ import (
 	"sync/atomic"
 	"testing"
 
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
 	"github.com/lodgvideon/poseidon-http-client/conn"
 	"github.com/lodgvideon/poseidon-http-client/http3"
 )
@@ -133,13 +136,9 @@ func newH3TestClient(t *testing.T, fake *fakeH3Client, hooks *Hooks) *Client {
 		opts.Hooks = hooks
 	}
 	c, err := NewClient(opts)
-	if err != nil {
-		t.Fatalf("NewClient(TransportH3): %v", err)
-	}
+	require.NoError(t, err, "NewClient(TransportH3)")
 	sc, ok := c.tr.(*singleH3Conn)
-	if !ok {
-		t.Fatalf("transport is %T, want *singleH3Conn", c.tr)
-	}
+	require.Truef(t, ok, "transport is %T, want *singleH3Conn", c.tr)
 	sc.dialFn = func(context.Context, string, *tls.Config) (h3Client, error) { return fake, nil }
 	return c
 }
@@ -175,39 +174,29 @@ func TestH3_Do_BufferedRoundTrip(t *testing.T) {
 		BodyMode:  BodyBuffer,
 		Headers:   []conn.HeaderField{{Name: []byte("x-test"), Value: []byte("1")}},
 	}, &resp)
-	if err != nil {
-		t.Fatalf("Do: %v", err)
-	}
 
+	require.NoError(t, err, "Do")
 	// Pseudo-headers routed to typed http3.Request fields.
 	got := fake.gotReq
-	if got.Method != "GET" || got.Scheme != "https" || got.Authority != "h3.example" || got.Path != "/x" {
-		t.Fatalf("re-split pseudo-headers = {%q %q %q %q}, want {GET https h3.example /x}",
-			got.Method, got.Scheme, got.Authority, got.Path)
-	}
+	require.NotNil(t, got, "the transport never reached http3.Client.Do")
+	assert.Equal(t, "GET", got.Method, "re-split :method")
+	assert.Equal(t, "https", got.Scheme, "re-split :scheme")
+	assert.Equal(t, "h3.example", got.Authority, "re-split :authority")
+	assert.Equal(t, "/x", got.Path, "re-split :path")
 	// No pseudo-header leaked into the regular Headers slice; x-test survived.
 	for _, h := range got.Headers {
-		if len(h.Name) > 0 && h.Name[0] == ':' {
-			t.Fatalf("pseudo-header %q leaked into http3.Request.Headers", h.Name)
-		}
+		assert.Falsef(t, len(h.Name) > 0 && h.Name[0] == ':',
+			"pseudo-header %q leaked into http3.Request.Headers, where HTTP/3 has no place for it",
+			h.Name)
 	}
-	if !hasHeader(got.Headers, "x-test", "1") {
-		t.Fatalf("x-test header missing from http3.Request.Headers: %+v", got.Headers)
-	}
-
+	assert.Truef(t, hasHeader(got.Headers, "x-test", "1"),
+		"x-test header missing from http3.Request.Headers: %+v", got.Headers)
 	// Response synthesised back.
-	if resp.Status != 200 {
-		t.Fatalf("resp.Status = %d, want 200", resp.Status)
-	}
-	if string(resp.Body) != "hello h3" {
-		t.Fatalf("resp.Body = %q, want %q", resp.Body, "hello h3")
-	}
-	if !hasHeader(resp.Headers, "content-type", "text/plain") {
-		t.Fatalf("content-type header missing from resp.Headers: %+v", resp.Headers)
-	}
-	if resp.BytesReceived != int64(len("hello h3")) {
-		t.Fatalf("resp.BytesReceived = %d, want %d", resp.BytesReceived, len("hello h3"))
-	}
+	assert.Equal(t, 200, resp.Status, "synthesised status")
+	assert.Equal(t, "hello h3", string(resp.Body), "synthesised body")
+	assert.Truef(t, hasHeader(resp.Headers, "content-type", "text/plain"),
+		"content-type header missing from resp.Headers: %+v", resp.Headers)
+	assert.EqualValues(t, len("hello h3"), resp.BytesReceived, "resp.BytesReceived")
 }
 
 // TestH3_Do_RequestBody verifies SendData chunks are buffered into
@@ -224,15 +213,12 @@ func TestH3_Do_RequestBody(t *testing.T) {
 		BodyMode: BodyBuffer,
 		Body:     []byte("payload-bytes"),
 	}, &resp)
-	if err != nil {
-		t.Fatalf("Do: %v", err)
-	}
-	if string(fake.gotReq.Body) != "payload-bytes" {
-		t.Fatalf("http3.Request.Body = %q, want %q", fake.gotReq.Body, "payload-bytes")
-	}
-	if resp.Status != 201 {
-		t.Fatalf("resp.Status = %d, want 201", resp.Status)
-	}
+
+	require.NoError(t, err, "Do")
+	require.NotNil(t, fake.gotReq, "the transport never reached http3.Client.Do")
+	assert.Equal(t, "payload-bytes", string(fake.gotReq.Body),
+		"SendData chunks were not buffered into http3.Request.Body")
+	assert.Equal(t, 201, resp.Status, "resp.Status")
 }
 
 // TestH3Exchange_Synthesize_HeadersDataTrailers drives the exchange directly and
@@ -256,56 +242,38 @@ func TestH3Exchange_Synthesize_HeadersDataTrailers(t *testing.T) {
 		{Name: []byte(":path"), Value: []byte("/")},
 		{Name: []byte("accept"), Value: []byte("*/*")},
 	}
-	if err := ex.SendHeadersWithPriority(context.Background(), fields, true, nil); err != nil {
-		t.Fatalf("SendHeadersWithPriority: %v", err)
-	}
+	require.NoError(t, ex.SendHeadersWithPriority(context.Background(), fields, true, nil),
+		"SendHeadersWithPriority")
 	ctx := context.Background()
 
-	ev, err := ex.Recv(ctx)
-	if err != nil {
-		t.Fatalf("Recv#1: %v", err)
-	}
-	if ev.Type != conn.EventHeaders {
-		t.Fatalf("Recv#1 type = %s, want headers", ev.Type)
-	}
-	if len(ev.Headers) == 0 || string(ev.Headers[0].Name) != ":status" || string(ev.Headers[0].Value) != "200" {
-		t.Fatalf("Recv#1 first header = %+v, want :status=200 first", ev.Headers)
-	}
-	if !hasHeader(ev.Headers, "x-h", "v") {
-		t.Fatalf("Recv#1 missing x-h header: %+v", ev.Headers)
-	}
-	if ev.EndStream {
-		t.Fatal("Recv#1 EndStream = true, want false (data follows)")
-	}
+	ev1, err1 := ex.Recv(ctx)
+	ev2, err2 := ex.Recv(ctx)
+	ev3, err3 := ex.Recv(ctx)
+	_, err4 := ex.Recv(ctx)
 
-	ev, err = ex.Recv(ctx)
-	if err != nil {
-		t.Fatalf("Recv#2: %v", err)
-	}
-	if ev.Type != conn.EventData || string(ev.Data) != "body-bytes" {
-		t.Fatalf("Recv#2 = {%s %q}, want {data body-bytes}", ev.Type, ev.Data)
-	}
-	if ev.EndStream {
-		t.Fatal("Recv#2 EndStream = true, want false (trailers follow)")
-	}
+	require.NoError(t, err1, "Recv#1")
+	assert.Equal(t, conn.EventHeaders, ev1.Type, "Recv#1 type")
+	require.NotEmpty(t, ev1.Headers, "Recv#1 carried no header block")
+	assert.Equal(t, ":status", string(ev1.Headers[0].Name), "Recv#1 first header name: :status must lead")
+	assert.Equal(t, "200", string(ev1.Headers[0].Value), "Recv#1 :status value")
+	assert.Truef(t, hasHeader(ev1.Headers, "x-h", "v"), "Recv#1 missing x-h header: %+v", ev1.Headers)
+	assert.False(t, ev1.EndStream, "Recv#1 EndStream: data still follows")
 
-	ev, err = ex.Recv(ctx)
-	if err != nil {
-		t.Fatalf("Recv#3: %v", err)
-	}
-	if ev.Type != conn.EventTrailers || !hasHeader(ev.Headers, "x-t", "w") {
-		t.Fatalf("Recv#3 = {%s %+v}, want {trailers x-t=w}", ev.Type, ev.Headers)
-	}
-	if !ev.EndStream {
-		t.Fatal("Recv#3 EndStream = false, want true (final event)")
-	}
+	require.NoError(t, err2, "Recv#2")
+	assert.Equal(t, conn.EventData, ev2.Type, "Recv#2 type")
+	assert.Equal(t, "body-bytes", string(ev2.Data), "Recv#2 data")
+	assert.False(t, ev2.EndStream,
+		"Recv#2 EndStream: trailers follow, so the DATA event must not end the stream")
 
-	if _, err = ex.Recv(ctx); !errors.Is(err, conn.ErrStreamClosed) {
-		t.Fatalf("Recv#4 err = %v, want ErrStreamClosed", err)
-	}
-	if n := atomic.LoadInt32(&fake.doCalls); n != 1 {
-		t.Fatalf("http3.Client.Do called %d times, want exactly 1", n)
-	}
+	require.NoError(t, err3, "Recv#3")
+	assert.Equal(t, conn.EventTrailers, ev3.Type, "Recv#3 type")
+	assert.Truef(t, hasHeader(ev3.Headers, "x-t", "w"), "Recv#3 trailers = %+v, want x-t=w", ev3.Headers)
+	assert.True(t, ev3.EndStream, "Recv#3 EndStream: the trailer section is the final event")
+
+	assert.Truef(t, errors.Is(err4, conn.ErrStreamClosed),
+		"Recv#4 err = %v, want ErrStreamClosed", err4)
+	assert.EqualValues(t, 1, atomic.LoadInt32(&fake.doCalls),
+		"http3.Client.Do must be driven exactly once per exchange")
 }
 
 // TestH3_Do_ResponseTrailers checks trailers surface through drainResponse into
@@ -328,15 +296,12 @@ func TestH3_Do_ResponseTrailers(t *testing.T) {
 		BodyMode:     BodyBuffer,
 		WantTrailers: true,
 	}, &resp)
-	if err != nil {
-		t.Fatalf("Do: %v", err)
-	}
-	if string(resp.Body) != "data" {
-		t.Fatalf("resp.Body = %q, want %q", resp.Body, "data")
-	}
-	if !hasHeader(resp.Trailers, "grpc-status", "0") {
-		t.Fatalf("grpc-status trailer missing: %+v", resp.Trailers)
-	}
+
+	require.NoError(t, err, "Do")
+	assert.Equal(t, "data", string(resp.Body), "resp.Body")
+	assert.Truef(t, hasHeader(resp.Trailers, "grpc-status", "0"),
+		"grpc-status trailer missing: %+v — a gRPC caller reads its status from here",
+		resp.Trailers)
 }
 
 // TestH3_Do_ErrorPassthrough verifies a Do error is returned verbatim so a
@@ -348,19 +313,15 @@ func TestH3_Do_ErrorPassthrough(t *testing.T) {
 
 	var resp Response
 	err := c.Do(context.Background(), &Request{Method: "GET", Path: "/", BodyMode: BodyBuffer}, &resp)
-	if err == nil {
-		t.Fatal("Do err = nil, want *http3.StreamResetError")
-	}
+
+	require.Error(t, err, "Do must surface the transport error, not swallow it")
 	var sre *http3.StreamResetError
-	if !errors.As(err, &sre) {
-		t.Fatalf("Do err = %v (%T), want *http3.StreamResetError", err, err)
-	}
-	if !sre.Retryable() {
-		t.Fatal("StreamResetError.Retryable() = false, want true for H3_REQUEST_REJECTED")
-	}
-	if c.Metrics().Counters.RequestsErrored.Load() != 1 {
-		t.Fatalf("RequestsErrored = %d, want 1", c.Metrics().Counters.RequestsErrored.Load())
-	}
+	require.Truef(t, errors.As(err, &sre),
+		"Do err = %v (%T), want *http3.StreamResetError so the retry layer can classify it",
+		err, err)
+	assert.True(t, sre.Retryable(),
+		"StreamResetError.Retryable() = false, want true for H3_REQUEST_REJECTED")
+	assert.EqualValues(t, 1, c.Metrics().Counters.RequestsErrored.Load(), "RequestsErrored")
 }
 
 // TestH3_Do_MetricsAndHooks confirms the buffered H3 path drives the same
@@ -380,38 +341,25 @@ func TestH3_Do_MetricsAndHooks(t *testing.T) {
 	c := newH3TestClient(t, fake, hooks)
 
 	var resp Response
-	if err := c.Do(context.Background(), &Request{Method: "GET", Path: "/", BodyMode: BodyBuffer}, &resp); err != nil {
-		t.Fatalf("Do: %v", err)
-	}
+	doErr := c.Do(context.Background(), &Request{Method: "GET", Path: "/", BodyMode: BodyBuffer}, &resp)
+	closeErr := c.Close()
 
+	require.NoError(t, doErr, "Do")
 	m := c.Metrics()
-	if m.Counters.RequestsStarted.Load() != 1 || m.Counters.RequestsSucceeded.Load() != 1 || m.Counters.Responses2xx.Load() != 1 {
-		t.Fatalf("counters started=%d succeeded=%d 2xx=%d, want 1/1/1",
-			m.Counters.RequestsStarted.Load(), m.Counters.RequestsSucceeded.Load(), m.Counters.Responses2xx.Load())
-	}
-	if m.Counters.DialsAttempted.Load() != 1 {
-		t.Fatalf("DialsAttempted = %d, want 1", m.Counters.DialsAttempted.Load())
-	}
-	if dialN.Load() != 1 {
-		t.Fatalf("OnDial fired %d times, want 1", dialN.Load())
-	}
-	if completeN.Load() != 1 || gotStatus.Load() != 200 {
-		t.Fatalf("OnRequestComplete fired %d times (status %d), want 1 (status 200)", completeN.Load(), gotStatus.Load())
-	}
+	assert.EqualValues(t, 1, m.Counters.RequestsStarted.Load(), "RequestsStarted")
+	assert.EqualValues(t, 1, m.Counters.RequestsSucceeded.Load(), "RequestsSucceeded")
+	assert.EqualValues(t, 1, m.Counters.Responses2xx.Load(), "Responses2xx")
+	assert.EqualValues(t, 1, m.Counters.DialsAttempted.Load(), "DialsAttempted")
+	assert.EqualValues(t, 1, dialN.Load(), "OnDial")
+	assert.EqualValues(t, 1, completeN.Load(), "OnRequestComplete")
+	assert.EqualValues(t, 200, gotStatus.Load(), "OnRequestComplete status")
 
 	// Close fires OnConnClose + ConnsClosed and closes the underlying client.
-	if err := c.Close(); err != nil {
-		t.Fatalf("Close: %v", err)
-	}
-	if connCloseN.Load() != 1 {
-		t.Fatalf("OnConnClose fired %d times, want 1", connCloseN.Load())
-	}
-	if m.Counters.ConnsClosed.Load() != 1 {
-		t.Fatalf("ConnsClosed = %d, want 1", m.Counters.ConnsClosed.Load())
-	}
-	if n := atomic.LoadInt32(&fake.closes); n != 1 {
-		t.Fatalf("http3.Client.Close called %d times, want 1", n)
-	}
+	require.NoError(t, closeErr, "Close")
+	assert.EqualValues(t, 1, connCloseN.Load(), "OnConnClose on Close")
+	assert.EqualValues(t, 1, m.Counters.ConnsClosed.Load(), "ConnsClosed on Close")
+	assert.EqualValues(t, 1, atomic.LoadInt32(&fake.closes),
+		"Client.Close must close the underlying http3.Client exactly once")
 }
 
 // TestH3_RequestTrailers_Unsupported verifies request trailers are rejected on
@@ -429,59 +377,63 @@ func TestH3_RequestTrailers_Unsupported(t *testing.T) {
 		Body:     []byte("x"),
 		Trailers: []conn.HeaderField{{Name: []byte("x-trailer"), Value: []byte("v")}},
 	}, &resp)
-	if !errors.Is(err, ErrTrailersUnsupportedH3) {
-		t.Fatalf("Do err = %v, want ErrTrailersUnsupportedH3", err)
-	}
+
+	assert.Truef(t, errors.Is(err, ErrTrailersUnsupportedH3),
+		"Do err = %v, want ErrTrailersUnsupportedH3: silently dropping request trailers "+
+			"would ship an incomplete request", err)
 }
 
 // TestH3_SplitPseudoHeaders exercises splitPseudoHeaders directly, including the
 // unrecognised-pseudo-header rejection.
 func TestH3_SplitPseudoHeaders(t *testing.T) {
-	method, scheme, authority, path, regular, err := splitPseudoHeaders([]conn.HeaderField{
-		{Name: []byte(":method"), Value: []byte("PUT")},
-		{Name: []byte(":scheme"), Value: []byte("https")},
-		{Name: []byte(":authority"), Value: []byte("a:443")},
-		{Name: []byte(":path"), Value: []byte("/p")},
-		{Name: []byte("h1"), Value: []byte("v1")},
-		{Name: []byte("h2"), Value: []byte("v2")},
-	}, nil)
-	if err != nil {
-		t.Fatalf("splitPseudoHeaders: %v", err)
-	}
-	if method != "PUT" || scheme != "https" || authority != "a:443" || path != "/p" {
-		t.Fatalf("split = {%q %q %q %q}, want {PUT https a:443 /p}", method, scheme, authority, path)
-	}
-	if len(regular) != 2 || !hasHeader(regular, "h1", "v1") || !hasHeader(regular, "h2", "v2") {
-		t.Fatalf("regular = %+v, want [h1=v1 h2=v2]", regular)
-	}
+	t.Run("routes the four known pseudo-headers", func(t *testing.T) {
+		method, scheme, authority, path, regular, err := splitPseudoHeaders([]conn.HeaderField{
+			{Name: []byte(":method"), Value: []byte("PUT")},
+			{Name: []byte(":scheme"), Value: []byte("https")},
+			{Name: []byte(":authority"), Value: []byte("a:443")},
+			{Name: []byte(":path"), Value: []byte("/p")},
+			{Name: []byte("h1"), Value: []byte("v1")},
+			{Name: []byte("h2"), Value: []byte("v2")},
+		}, nil)
 
-	if _, _, _, _, _, err = splitPseudoHeaders([]conn.HeaderField{
-		{Name: []byte(":method"), Value: []byte("GET")},
-		{Name: []byte(":protocol"), Value: []byte("websocket")},
-	}, nil); !errors.Is(err, ErrInvalidRequest) {
-		t.Fatalf("unknown pseudo-header err = %v, want ErrInvalidRequest", err)
-	}
+		require.NoError(t, err, "splitPseudoHeaders")
+		assert.Equal(t, "PUT", method, ":method")
+		assert.Equal(t, "https", scheme, ":scheme")
+		assert.Equal(t, "a:443", authority, ":authority")
+		assert.Equal(t, "/p", path, ":path")
+		require.Lenf(t, regular, 2, "regular = %+v, want exactly the two non-pseudo fields", regular)
+		assert.Truef(t, hasHeader(regular, "h1", "v1"), "regular = %+v, want h1=v1 kept", regular)
+		assert.Truef(t, hasHeader(regular, "h2", "v2"), "regular = %+v, want h2=v2 kept", regular)
+	})
+
+	t.Run("rejects an unrecognised pseudo-header", func(t *testing.T) {
+		_, _, _, _, _, err := splitPseudoHeaders([]conn.HeaderField{
+			{Name: []byte(":method"), Value: []byte("GET")},
+			{Name: []byte(":protocol"), Value: []byte("websocket")},
+		}, nil)
+
+		assert.Truef(t, errors.Is(err, ErrInvalidRequest),
+			"unknown pseudo-header err = %v, want ErrInvalidRequest: silently forwarding "+
+				"one HTTP/3 has no mapping for would send a malformed request", err)
+	})
 }
 
 // TestNewClient_H3_RequiresTLSConfig checks the Dialer carve-out: TransportH3
 // needs a TLSConfig, not a conn.Dialer.
 func TestNewClient_H3_RequiresTLSConfig(t *testing.T) {
 	// No TLSConfig → rejected even without a Dialer.
-	if _, err := NewClient(ClientOptions{Addr: "h:443", Transport: TransportH3}); err == nil {
-		t.Fatal("NewClient(TransportH3) without TLSConfig = nil error, want failure")
-	}
+	_, noTLS := NewClient(ClientOptions{Addr: "h:443", Transport: TransportH3})
 	// With TLSConfig and no Dialer → accepted (Dialer carve-out).
 	c, err := NewClient(ClientOptions{
 		Addr:      "h:443",
 		Transport: TransportH3,
 		TLSConfig: &tls.Config{ServerName: "h"},
 	})
-	if err != nil {
-		t.Fatalf("NewClient(TransportH3) with TLSConfig: %v", err)
-	}
-	if _, ok := c.tr.(*singleH3Conn); !ok {
-		t.Fatalf("transport is %T, want *singleH3Conn", c.tr)
-	}
+
+	assert.Error(t, noTLS, "TransportH3 without a TLSConfig has nothing to dial with")
+	require.NoError(t, err, "NewClient(TransportH3) with a TLSConfig and no Dialer")
+	_, ok := c.tr.(*singleH3Conn)
+	assert.Truef(t, ok, "transport is %T, want *singleH3Conn", c.tr)
 	_ = c.Close()
 }
 
@@ -489,17 +441,14 @@ func TestNewClient_H3_RequiresTLSConfig(t *testing.T) {
 // TransportH3 client.
 func TestNewH3Client_WiresTransport(t *testing.T) {
 	c, err := NewH3Client("h3.example:443", &tls.Config{ServerName: "h3.example"}, WithDialBackoff(0))
-	if err != nil {
-		t.Fatalf("NewH3Client: %v", err)
-	}
+
+	require.NoError(t, err, "NewH3Client")
 	defer func() { _ = c.Close() }()
 	sc, ok := c.tr.(*singleH3Conn)
-	if !ok {
-		t.Fatalf("transport is %T, want *singleH3Conn", c.tr)
-	}
-	if sc.addr != "h3.example:443" || sc.tlsConfig == nil || sc.dialFn == nil {
-		t.Fatalf("singleH3Conn not wired: addr=%q tls=%v dialFn=%v", sc.addr, sc.tlsConfig != nil, sc.dialFn != nil)
-	}
+	require.Truef(t, ok, "transport is %T, want *singleH3Conn", c.tr)
+	assert.Equal(t, "h3.example:443", sc.addr, "singleH3Conn addr")
+	assert.NotNil(t, sc.tlsConfig, "singleH3Conn tlsConfig was not wired")
+	assert.NotNil(t, sc.dialFn, "singleH3Conn dialFn was not wired")
 }
 
 // TestH3_DoStream_Incremental drives Client.DoStream over the H3 transport and
@@ -514,38 +463,32 @@ func TestH3_DoStream_Incremental(t *testing.T) {
 	defer func() { _ = c.Close() }()
 
 	var sr StreamResponse
-	if err := c.DoStream(context.Background(), &Request{Method: "GET", Path: "/stream"}, &sr); err != nil {
-		t.Fatalf("DoStream: %v", err)
-	}
-	defer func() { _ = sr.Close() }()
-	if sr.Status != 200 {
-		t.Fatalf("status = %d, want 200", sr.Status)
-	}
-	if !hasHeader(sr.Headers, "content-type", "text/plain") {
-		t.Fatalf("headers missing content-type: %+v", sr.Headers)
+	err := c.DoStream(context.Background(), &Request{Method: "GET", Path: "/stream"}, &sr)
+	var got [][]byte
+	if err == nil {
+		defer func() { _ = sr.Close() }()
+		for {
+			ev, rerr := sr.Recv(context.Background())
+			require.NoError(t, rerr, "Recv")
+			if ev.Type == EventData && len(ev.Data) > 0 {
+				got = append(got, append([]byte(nil), ev.Data...))
+			}
+			if ev.EndStream {
+				break
+			}
+		}
 	}
 
-	var got [][]byte
-	for {
-		ev, err := sr.Recv(context.Background())
-		if err != nil {
-			t.Fatalf("Recv: %v", err)
-		}
-		if ev.Type == EventData && len(ev.Data) > 0 {
-			got = append(got, append([]byte(nil), ev.Data...))
-		}
-		if ev.EndStream {
-			break
-		}
-	}
+	require.NoError(t, err, "DoStream")
+	assert.Equal(t, 200, sr.Status, "the response head must arrive before the body")
+	assert.Truef(t, hasHeader(sr.Headers, "content-type", "text/plain"),
+		"headers missing content-type: %+v", sr.Headers)
 	want := [][]byte{[]byte("alpha"), []byte("beta"), []byte("gamma")}
-	if len(got) != len(want) {
-		t.Fatalf("got %d chunks, want %d (%q)", len(got), len(want), got)
-	}
+	require.Lenf(t, got, len(want),
+		"got %d chunks (%q), want %d: each DATA chunk must surface as its own event "+
+			"rather than being coalesced", len(got), got, len(want))
 	for i := range want {
-		if !bytes.Equal(got[i], want[i]) {
-			t.Fatalf("chunk %d = %q, want %q", i, got[i], want[i])
-		}
+		assert.Truef(t, bytes.Equal(got[i], want[i]), "chunk %d = %q, want %q", i, got[i], want[i])
 	}
 }
 
@@ -561,20 +504,16 @@ func TestH3_DoStream_Trailers(t *testing.T) {
 	}
 	c := newH3TestClient(t, fake, nil)
 	defer func() { _ = c.Close() }()
-
 	var sr StreamResponse
-	if err := c.DoStream(context.Background(), &Request{Method: "GET", Path: "/"}, &sr); err != nil {
-		t.Fatalf("DoStream: %v", err)
-	}
+	require.NoError(t,
+		c.DoStream(context.Background(), &Request{Method: "GET", Path: "/"}, &sr), "DoStream")
 	defer func() { _ = sr.Close() }()
 
 	tr, err := sr.WaitTrailers(context.Background())
-	if err != nil {
-		t.Fatalf("WaitTrailers: %v", err)
-	}
-	if !hasHeader(tr, "grpc-status", "0") {
-		t.Fatalf("trailers = %+v, want grpc-status=0", tr)
-	}
+
+	require.NoError(t, err, "WaitTrailers")
+	assert.Truef(t, hasHeader(tr, "grpc-status", "0"),
+		"trailers = %+v, want grpc-status=0 — a gRPC caller reads its status from here", tr)
 }
 
 // TestH3_DoStream_ResetError verifies a mid-body error from the http3 body reader
@@ -588,25 +527,21 @@ func TestH3_DoStream_ResetError(t *testing.T) {
 	}
 	c := newH3TestClient(t, fake, nil)
 	defer func() { _ = c.Close() }()
-
 	var sr StreamResponse
-	if err := c.DoStream(context.Background(), &Request{Method: "GET", Path: "/"}, &sr); err != nil {
-		t.Fatalf("DoStream: %v", err)
-	}
+	require.NoError(t,
+		c.DoStream(context.Background(), &Request{Method: "GET", Path: "/"}, &sr), "DoStream")
 	defer func() { _ = sr.Close() }()
 
 	// First Recv delivers the partial chunk; the second surfaces the reset error.
-	if _, err := sr.Recv(context.Background()); err != nil {
-		t.Fatalf("Recv#1: %v", err)
-	}
-	_, err := sr.Recv(context.Background())
+	_, firstErr := sr.Recv(context.Background())
+	_, secondErr := sr.Recv(context.Background())
+
+	require.NoError(t, firstErr, "Recv#1 must deliver the partial chunk")
 	var rse *http3.StreamResetError
-	if !errors.As(err, &rse) {
-		t.Fatalf("Recv#2 err = %v (%T), want *http3.StreamResetError", err, err)
-	}
-	if !rse.Retryable() {
-		t.Fatal("H3_REQUEST_REJECTED should be retryable")
-	}
+	require.Truef(t, errors.As(secondErr, &rse),
+		"Recv#2 err = %v (%T), want *http3.StreamResetError so the retry layer can "+
+			"classify a mid-body reset", secondErr, secondErr)
+	assert.True(t, rse.Retryable(), "H3_REQUEST_REJECTED should be retryable")
 }
 
 // TestH3_BodyStream_ReadIncremental drives Do with BodyMode=BodyStream over the H3
@@ -619,40 +554,31 @@ func TestH3_BodyStream_ReadIncremental(t *testing.T) {
 	}
 	c := newH3TestClient(t, fake, nil)
 	defer func() { _ = c.Close() }()
-
 	var resp Response
 	resp.Reset()
-	if err := c.Do(context.Background(), &Request{Method: "GET", Path: "/", BodyMode: BodyStream}, &resp); err != nil {
-		t.Fatalf("Do(BodyStream): %v", err)
-	}
-	if resp.BodyReader == nil {
-		t.Fatal("BodyReader is nil for BodyStream over H3")
-	}
+	require.NoError(t,
+		c.Do(context.Background(), &Request{Method: "GET", Path: "/", BodyMode: BodyStream}, &resp),
+		"Do(BodyStream)")
+	require.NotNil(t, resp.BodyReader, "BodyReader is nil for BodyStream over H3")
 
 	// One Read with a buffer large enough for a chunk pulls exactly one chunk from
 	// the underlying body — incremental, not the whole body at once.
 	buf := make([]byte, 64)
 	n, err := resp.BodyReader.Read(buf)
-	if err != nil && err != io.EOF {
-		t.Fatalf("first Read: %v", err)
-	}
-	if string(buf[:n]) != "one" {
-		t.Fatalf("first Read = %q, want %q (one chunk)", buf[:n], "one")
-	}
-	if fake.lastBody.idx != 1 {
-		t.Fatalf("underlying chunks pulled = %d after first Read, want 1 (incremental)", fake.lastBody.idx)
-	}
+	pulledAfterFirst := fake.lastBody.idx
+	rest, restErr := io.ReadAll(resp.BodyReader)
+	closeErr := resp.BodyReader.Close()
 
-	rest, err := io.ReadAll(resp.BodyReader)
 	if err != nil {
-		t.Fatalf("ReadAll: %v", err)
+		require.ErrorIs(t, err, io.EOF, "first Read")
 	}
-	if got := "one" + string(rest); got != "onetwothree" {
-		t.Fatalf("full body = %q, want %q", got, "onetwothree")
-	}
-	if err := resp.BodyReader.Close(); err != nil {
-		t.Fatalf("Close: %v", err)
-	}
+	assert.Equal(t, "one", string(buf[:n]), "the first Read must return exactly one chunk")
+	assert.Equalf(t, 1, pulledAfterFirst,
+		"underlying chunks pulled = %d after the first Read, want 1: the body was "+
+			"buffered whole rather than streamed", pulledAfterFirst)
+	require.NoError(t, restErr, "ReadAll")
+	assert.Equal(t, "onetwothree", "one"+string(rest), "the whole body must read back intact")
+	assert.NoError(t, closeErr, "Close")
 }
 
 // TestH3_BodyStream_UsesStreamingPath asserts the buffered Do path is NOT taken for
@@ -664,15 +590,13 @@ func TestH3_BodyStream_UsesStreamingPath(t *testing.T) {
 
 	var resp Response
 	resp.Reset()
-	if err := c.Do(context.Background(), &Request{Method: "GET", Path: "/", BodyMode: BodyStream}, &resp); err != nil {
-		t.Fatalf("Do(BodyStream): %v", err)
-	}
+	err := c.Do(context.Background(), &Request{Method: "GET", Path: "/", BodyMode: BodyStream}, &resp)
+
+	require.NoError(t, err, "Do(BodyStream)")
 	defer func() { _ = resp.BodyReader.Close() }()
 	// The streaming path leaves Response.Body empty; body arrives only via BodyReader.
-	if len(resp.Body) != 0 {
-		t.Fatalf("Response.Body = %q, want empty (streaming path)", resp.Body)
-	}
-	if fake.lastBody == nil {
-		t.Fatal("DoStream path not taken: lastBody is nil")
-	}
+	assert.Emptyf(t, resp.Body,
+		"Response.Body = %q, want empty: the streaming path must not pre-buffer", resp.Body)
+	assert.NotNil(t, fake.lastBody,
+		"DoStream path not taken: BodyStream fell through to the buffered Do")
 }

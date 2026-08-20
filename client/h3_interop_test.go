@@ -13,6 +13,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
 	"github.com/lodgvideon/poseidon-http-client/quic"
 )
 
@@ -63,6 +66,33 @@ func h3DialTimeout() time.Duration {
 	return 20 * time.Second
 }
 
+// h3InteropHost is the SNI/authority for a server address.
+func h3InteropHost(addr string) string {
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil {
+		return addr
+	}
+	return host
+}
+
+// h3InteropDoUntilUp issues req against c, retrying until the server is
+// listening (nginx is gated only on container start) or the dial budget runs
+// out. It returns the final error so the caller can assert on it.
+func h3InteropDoUntilUp(t *testing.T, c *Client, req *Request, resp *Response, per time.Duration) error {
+	t.Helper()
+	deadline := time.Now().Add(h3DialTimeout())
+	for {
+		resp.Reset()
+		ctx, cancel := context.WithTimeout(context.Background(), per)
+		err := c.Do(ctx, req, resp)
+		cancel()
+		if err == nil || time.Now().After(deadline) {
+			return err
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
+}
+
 // TestInterop_ClientH3_GetStatusBody drives a real HTTP/3 GET through the public
 // buffered Client.Do over TransportH3 against each configured live server, and
 // asserts the status + body come back and that metrics/hooks fire identically to
@@ -72,11 +102,7 @@ func TestInterop_ClientH3_GetStatusBody(t *testing.T) {
 	for _, srv := range h3InteropServers() {
 		srv := srv
 		t.Run(srv.name, func(t *testing.T) {
-			host, _, err := net.SplitHostPort(srv.addr)
-			if err != nil {
-				host = srv.addr
-			}
-
+			host := h3InteropHost(srv.addr)
 			var completed, gotStatus atomic.Int32
 			hooks := &Hooks{
 				OnRequestComplete: func(e RequestCompleteEvent) {
@@ -87,47 +113,28 @@ func TestInterop_ClientH3_GetStatusBody(t *testing.T) {
 			c, err := NewH3Client(srv.addr,
 				&tls.Config{ServerName: host, InsecureSkipVerify: true},
 				WithHooks(hooks))
-			if err != nil {
-				t.Fatalf("NewH3Client(%s): %v", srv.addr, err)
-			}
+			require.NoErrorf(t, err, "NewH3Client(%s)", srv.addr)
 			t.Cleanup(func() { _ = c.Close() })
 
-			// Retry the first request until the server is listening (nginx is
-			// gated only on container start).
 			var resp Response
-			deadline := time.Now().Add(h3DialTimeout())
-			for {
-				resp.Reset()
-				ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-				err = c.Do(ctx, &Request{
-					Method:    "GET",
-					Scheme:    "https",
-					Authority: host,
-					Path:      "/",
-					BodyMode:  BodyBuffer,
-				}, &resp)
-				cancel()
-				if err == nil {
-					break
-				}
-				if time.Now().After(deadline) {
-					t.Fatalf("Do(GET /): %v", err)
-				}
-				time.Sleep(500 * time.Millisecond)
-			}
+			err = h3InteropDoUntilUp(t, c, &Request{
+				Method:    "GET",
+				Scheme:    "https",
+				Authority: host,
+				Path:      "/",
+				BodyMode:  BodyBuffer,
+			}, &resp, 10*time.Second)
 
-			if resp.Status != 200 {
-				t.Fatalf("status = %d, want 200", resp.Status)
-			}
-			if len(resp.Body) == 0 {
-				t.Fatal("GET / body is empty, want the server's canned response")
-			}
-			if got := gotStatus.Load(); got != 200 || completed.Load() < 1 {
-				t.Fatalf("OnRequestComplete fired=%d status=%d, want >=1 with status 200", completed.Load(), got)
-			}
-			if c.Metrics().Counters.RequestsSucceeded.Load() < 1 {
-				t.Fatal("RequestsSucceeded counter did not increment")
-			}
+			require.NoError(t, err, "Do(GET /)")
+			assert.Equal(t, 200, resp.Status, "status from a live HTTP/3 server")
+			assert.NotEmpty(t, resp.Body, "GET / body is empty, want the server's canned response")
+			assert.GreaterOrEqual(t, completed.Load(), int32(1),
+				"OnRequestComplete never fired: the H3 buffered path must drive the same "+
+					"lifecycle hooks as H2")
+			assert.EqualValues(t, 200, gotStatus.Load(),
+				"OnRequestComplete reported the wrong status")
+			assert.GreaterOrEqual(t, c.Metrics().Counters.RequestsSucceeded.Load(), int64(1),
+				"RequestsSucceeded counter did not increment on the H3 path")
 			t.Logf("H3 GET / via client.Do -> status=%d bodylen=%d", resp.Status, len(resp.Body))
 		})
 	}
@@ -142,10 +149,7 @@ func TestInterop_ClientH3_BBR_HugeTransfer(t *testing.T) {
 	for _, srv := range h3InteropServers() {
 		srv := srv
 		t.Run(srv.name, func(t *testing.T) {
-			host, _, err := net.SplitHostPort(srv.addr)
-			if err != nil {
-				host = srv.addr
-			}
+			host := h3InteropHost(srv.addr)
 			c, err := NewClient(ClientOptions{
 				Addr:      srv.addr,
 				Transport: TransportH3,
@@ -154,41 +158,25 @@ func TestInterop_ClientH3_BBR_HugeTransfer(t *testing.T) {
 					quic.WithCongestionControl(quic.CCBBR),
 				},
 			})
-			if err != nil {
-				t.Fatalf("NewClient(H3+BBR): %v", err)
-			}
+			require.NoError(t, err, "NewClient(H3+BBR)")
 			t.Cleanup(func() { _ = c.Close() })
 
-			// Retry the first request until the server is listening.
 			var resp Response
-			deadline := time.Now().Add(h3DialTimeout())
-			for {
-				resp.Reset()
-				ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
-				err = c.Do(ctx, &Request{
-					Method:    "GET",
-					Scheme:    "https",
-					Authority: host,
-					Path:      "/huge.txt",
-					BodyMode:  BodyBuffer,
-				}, &resp)
-				cancel()
-				if err == nil {
-					break
-				}
-				if time.Now().After(deadline) {
-					t.Fatalf("Do(GET /huge.txt) with BBR: %v", err)
-				}
-				time.Sleep(500 * time.Millisecond)
-			}
-			if resp.Status != 200 {
-				t.Fatalf("status = %d, want 200", resp.Status)
-			}
+			err = h3InteropDoUntilUp(t, c, &Request{
+				Method:    "GET",
+				Scheme:    "https",
+				Authority: host,
+				Path:      "/huge.txt",
+				BodyMode:  BodyBuffer,
+			}, &resp, 20*time.Second)
+
+			require.NoError(t, err, "Do(GET /huge.txt) with BBR")
+			assert.Equal(t, 200, resp.Status, "status for the 1 MiB throughput fixture")
 			// huge.txt is the 1 MiB throughput fixture — a full BBR transfer must
 			// deliver all of it (hundreds of packets, enough to leave Startup).
-			if len(resp.Body) < 1<<20 {
-				t.Fatalf("body = %d bytes, want the full 1 MiB huge.txt (BBR transfer truncated?)", len(resp.Body))
-			}
+			assert.GreaterOrEqualf(t, len(resp.Body), 1<<20,
+				"body = %d bytes, want the full 1 MiB huge.txt (BBR transfer truncated?)",
+				len(resp.Body))
 			t.Logf("H3+BBR GET /huge.txt -> status=%d bodylen=%d", resp.Status, len(resp.Body))
 		})
 	}
