@@ -9,6 +9,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Tests
 
+- **Thirteen `conn` coverage gaps the #722 sweep filed, closed together.** Every
+  one carried a mutation that survived the whole package twice; ten are now
+  caught, two were already covered elsewhere, one is reported as the masked pair
+  it is. The flow-control decisions were only ever approached from a distance —
+  a 100-byte window overflowed with 200 bytes, a retroactive
+  INITIAL_WINDOW_SIZE delta parked far past 2^31-1 — so `limit`, `limit+1` and
+  the batching threshold's lower side are now driven at the edge; `deliverEnd`'s
+  `end` conjunct, `Stream.recv`'s `released` gate on each of the three close
+  exits that do **not** recycle, `streamRefundThreshold`'s floor of 1, the
+  CONTINUATION flood bound and `PaddingStrategy`'s `Min>0/Max==0` class all get
+  their first test. Three tests were repaired rather than added: the closewake
+  fixture polled a field its own Arrange block pinned, so its park detection was
+  a no-op behind a fixed 100 ms sleep; `TestStreamClose_IdempotentAfterRecycle`
+  never reached a recycled struct; and the `ConnOptions.WriteBufferSize` and TLS
+  1.2-floor tests asserted things that held whether or not the option reached
+  the code. `PaddingStrategy`'s `Min>0/Max==0` answer is **pinned** at the
+  current behaviour — disabled — rather than changed; the doc comment that
+  reads the other way is left for a separate change, since this batch touches
+  no non-test file (#800, #801, #802, #810, #814, #818, #819, #825, #826, #832,
+  #833, #834, #852).
+
 - **Four boundary classes that were never asserted, two of them on peer bytes.**
   `bufx.StripPadding` was never called with `padLen == len(raw)`, the first
   illegal pad length; `bytesx.ReadVarint` never saw an 8-byte prefix truncated to
