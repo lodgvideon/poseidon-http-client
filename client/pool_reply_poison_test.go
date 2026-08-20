@@ -7,6 +7,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/stretchr/testify/require"
 )
 
 // TestPool_ReplyChannelNotPoisonedUnderAbandonment is a regression test for
@@ -24,6 +26,12 @@ import (
 // concurrently with "victim" pools that queue waiters with cancelled contexts
 // and then Close — handleClose replies ErrPoolClosed into those abandoned
 // channels, which (pre-fix) would be recycled and poison an open pool.
+//
+// The three counters are load-bearing, not diagnostics. "No open pool saw
+// ErrPoolClosed" is also true of a run in which no healthy acquire ever
+// succeeded and no victim pool was ever churned — that run passes identically
+// while testing nothing. healthyOK is the control arm (the pools really are
+// serving), victimRounds and abandonedWaiters are the injection counts.
 func TestPool_ReplyChannelNotPoisonedUnderAbandonment(t *testing.T) {
 	addrs, _, cleanup := startH2Servers(t, 1)
 	defer cleanup()
@@ -43,6 +51,7 @@ func TestPool_ReplyChannelNotPoisonedUnderAbandonment(t *testing.T) {
 
 	stop := make(chan struct{})
 	var poisoned atomic.Bool
+	var healthyOK, victimRounds, abandonedWaiters atomic.Int64
 	var wg sync.WaitGroup
 
 	// Healthy acquirers on open pools — must never see ErrPoolClosed.
@@ -60,6 +69,7 @@ func TestPool_ReplyChannelNotPoisonedUnderAbandonment(t *testing.T) {
 				ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 				mc, err := p.acquire(ctx)
 				if err == nil {
+					healthyOK.Add(1)
 					p.release(mc)
 				} else if errors.Is(err, ErrPoolClosed) {
 					poisoned.Store(true)
@@ -98,6 +108,7 @@ func TestPool_ReplyChannelNotPoisonedUnderAbandonment(t *testing.T) {
 						wcancel()
 					}()
 					_, _ = vp.acquire(wctx)
+					abandonedWaiters.Add(1)
 					wcancel()
 				}()
 			}
@@ -108,6 +119,7 @@ func TestPool_ReplyChannelNotPoisonedUnderAbandonment(t *testing.T) {
 			occCancel()
 			_ = vp.Close()
 			wwg.Wait()
+			victimRounds.Add(1)
 		}
 	}()
 
@@ -115,8 +127,18 @@ func TestPool_ReplyChannelNotPoisonedUnderAbandonment(t *testing.T) {
 	close(stop)
 	wg.Wait()
 
-	if poisoned.Load() {
-		t.Fatal("healthy acquire on an open pool returned ErrPoolClosed: " +
+	t.Logf("control arm: %d healthy acquires served; injections fired: %d victim rounds, %d abandoned waiters",
+		healthyOK.Load(), victimRounds.Load(), abandonedWaiters.Load())
+	require.Positive(t, healthyOK.Load(),
+		"no healthy acquire ever succeeded, so 'no pool saw ErrPoolClosed' says nothing — "+
+			"the open pools were never serving in the first place")
+	require.Positive(t, victimRounds.Load(),
+		"no victim pool completed a churn round, so no ErrPoolClosed reply was ever "+
+			"generated and the poisoning path was never exercised")
+	require.Positive(t, abandonedWaiters.Load(),
+		"no waiter was ever abandoned, so no reply channel was recycled while the actor "+
+			"could still send on it — the race under test never had a chance to occur")
+	require.False(t, poisoned.Load(),
+		"healthy acquire on an open pool returned ErrPoolClosed: "+
 			"reply channel was poisoned by a recycled channel from another pool")
-	}
 }

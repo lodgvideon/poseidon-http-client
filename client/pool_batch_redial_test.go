@@ -7,6 +7,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
 	"github.com/lodgvideon/poseidon-http-client/conn"
 	"github.com/lodgvideon/poseidon-http-client/frame"
 )
@@ -70,9 +73,7 @@ func h2LiveConn(t *testing.T) *conn.Conn {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 	c, err := conn.NewClientConn(ctx, cli, conn.ConnOptions{})
-	if err != nil {
-		t.Fatalf("NewClientConn: %v", err)
-	}
+	require.NoError(t, err, "NewClientConn")
 	t.Cleanup(func() { _ = c.Close() })
 	return c
 }
@@ -95,16 +96,15 @@ func TestPool_EnsureDialForWaiters_DialsTheWholeBatchWhenEachConnTakesOne(t *tes
 	p := batchRedialPool(t, 1, 8)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-
 	rs := &runState{waiters: batchRedialWaiters(ctx, waiters)}
+
 	p.ensureDialForWaiters(rs)
 
-	if rs.inFlightDials != waiters {
-		t.Errorf("inFlightDials = %d after %d waiters were left with no connection, want %d.\n"+
+	assert.Equalf(t, waiters, rs.inFlightDials,
+		"inFlightDials = %d after %d waiters were left with no connection, want %d.\n"+
 			"One dial per call serialises them: each completes, serves a single waiter, and "+
 			"only then does the next start — %d sequential round trips.",
-			rs.inFlightDials, waiters, waiters, waiters)
-	}
+		rs.inFlightDials, waiters, waiters, waiters)
 }
 
 // TestPool_EnsureDialForWaiters_OneDialCoversAMultiplexedBatch is the control,
@@ -114,16 +114,15 @@ func TestPool_EnsureDialForWaiters_OneDialCoversAMultiplexedBatch(t *testing.T) 
 	p := batchRedialPool(t, 100, 8)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-
 	rs := &runState{waiters: batchRedialWaiters(ctx, 6)}
+
 	p.ensureDialForWaiters(rs)
 
-	if rs.inFlightDials != 1 {
-		t.Errorf("inFlightDials = %d for 6 waiters against a 100-stream connection, want 1.\n"+
+	assert.Equalf(t, 1, rs.inFlightDials,
+		"inFlightDials = %d for 6 waiters against a 100-stream connection, want 1.\n"+
 			"Copying h1's waiters-minus-coverage arithmetic opens a socket per waiter; "+
 			"evictIdle is disabled by default, so those sockets never go away.",
-			rs.inFlightDials)
-	}
+		rs.inFlightDials)
 }
 
 // TestPool_EnsureDialForWaiters_CountsSpareCapacityOnLiveConns pins that a
@@ -133,23 +132,21 @@ func TestPool_EnsureDialForWaiters_CountsSpareCapacityOnLiveConns(t *testing.T) 
 	p := batchRedialPool(t, 1, 8)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-
 	// Two live conns at cap 1: one idle (covers a waiter), one busy (does not).
 	idle := &managedConn{c: h2LiveConn(t), streamCap: 1, active: 0}
 	busy := &managedConn{c: h2LiveConn(t), streamCap: 1, active: 1}
-
 	rs := &runState{
 		conns:   []*managedConn{idle, busy},
 		waiters: batchRedialWaiters(ctx, 4),
 	}
+
 	p.ensureDialForWaiters(rs)
 
 	// 4 waiters, 1 covered by the idle conn -> 3 dials. Room allows it: cap 8,
 	// 2 live.
-	if rs.inFlightDials != 3 {
-		t.Errorf("inFlightDials = %d, want 3: 4 waiters minus the one the idle "+
+	assert.Equalf(t, 3, rs.inFlightDials,
+		"inFlightDials = %d, want 3: 4 waiters minus the one the idle "+
 			"connection can take", rs.inFlightDials)
-	}
 }
 
 // TestPool_EnsureDialForWaiters_StaysUnderMaxConnsPerHost pins the cap, which
@@ -158,14 +155,13 @@ func TestPool_EnsureDialForWaiters_StaysUnderMaxConnsPerHost(t *testing.T) {
 	p := batchRedialPool(t, 1, 3)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-
 	rs := &runState{waiters: batchRedialWaiters(ctx, 10)}
+
 	p.ensureDialForWaiters(rs)
 
-	if rs.inFlightDials != 3 {
-		t.Errorf("inFlightDials = %d for 10 waiters with MaxConnsPerHost 3, want 3",
-			rs.inFlightDials)
-	}
+	assert.Equalf(t, 3, rs.inFlightDials,
+		"inFlightDials = %d for 10 waiters with MaxConnsPerHost 3, want 3 — without the cap "+
+			"a large batch becomes a connection flood", rs.inFlightDials)
 }
 
 // TestPool_EnsureDialForWaiters_CountsDialsAlreadyInFlight pins that the batch
@@ -174,14 +170,13 @@ func TestPool_EnsureDialForWaiters_CountsDialsAlreadyInFlight(t *testing.T) {
 	p := batchRedialPool(t, 1, 8)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-
 	rs := &runState{waiters: batchRedialWaiters(ctx, 5), inFlightDials: 2}
+
 	p.ensureDialForWaiters(rs)
 
-	if rs.inFlightDials != 5 {
-		t.Errorf("inFlightDials = %d, want 5: two of the five waiters already had "+
+	assert.Equalf(t, 5, rs.inFlightDials,
+		"inFlightDials = %d, want 5: two of the five waiters already had "+
 			"a dial on the way", rs.inFlightDials)
-	}
 }
 
 // ── H3, the same three properties ───────────────────────────────
@@ -212,28 +207,26 @@ func TestH3Pool_DialForWaiters_DialsTheWholeBatchWhenEachConnTakesOne(t *testing
 	p := h3BatchPool(1, 8)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-
 	rs := &h3RunState{waiters: h3BatchWaiters(ctx, waiters)}
+
 	p.dialForWaiters(rs)
 
-	if rs.inFlightDials != waiters {
-		t.Errorf("inFlightDials = %d, want %d: with one caller per connection, "+
+	assert.Equalf(t, waiters, rs.inFlightDials,
+		"inFlightDials = %d, want %d: with one caller per connection, "+
 			"one dial per call is a %d-round-trip ramp", rs.inFlightDials, waiters, waiters)
-	}
 }
 
 func TestH3Pool_DialForWaiters_OneDialCoversAMultiplexedBatch(t *testing.T) {
 	p := h3BatchPool(100, 8)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-
 	rs := &h3RunState{waiters: h3BatchWaiters(ctx, 6)}
+
 	p.dialForWaiters(rs)
 
-	if rs.inFlightDials != 1 {
-		t.Errorf("inFlightDials = %d for 6 waiters against a 100-stream connection, want 1",
-			rs.inFlightDials)
-	}
+	assert.Equalf(t, 1, rs.inFlightDials,
+		"inFlightDials = %d for 6 waiters against a 100-stream connection, want 1",
+		rs.inFlightDials)
 }
 
 // TestH3Pool_DialForWaiters_ADrainedConnIsNotCoverage pins the one term that
@@ -246,19 +239,17 @@ func TestH3Pool_DialForWaiters_ADrainedConnIsNotCoverage(t *testing.T) {
 	p := h3BatchPool(1, 8)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-
 	drained := &barrierH3Client{}
 	atomic.StoreInt32(&drained.goaway, 1) // Alive, but refusing new requests
-
 	rs := &h3RunState{
 		conns:   []*h3ManagedConn{{cl: drained, streamCap: 4}},
 		waiters: h3BatchWaiters(ctx, 3),
 	}
+
 	p.dialForWaiters(rs)
 
-	if rs.inFlightDials != 3 {
-		t.Errorf("inFlightDials = %d, want 3: the drained connection's 4 idle stream "+
+	assert.Equalf(t, 3, rs.inFlightDials,
+		"inFlightDials = %d, want 3: the drained connection's 4 idle stream "+
 			"slots are not capacity, because §5.2 has it refusing every new request",
-			rs.inFlightDials)
-	}
+		rs.inFlightDials)
 }

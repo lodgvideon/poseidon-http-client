@@ -5,6 +5,9 @@ import (
 	"runtime"
 	"testing"
 	"time"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // Regression tests for the acquire/abandon slot leak shared by the H2 *Pool and
@@ -21,6 +24,11 @@ import (
 // Deterministic trigger below: hand the actor a request whose ctx is ALREADY
 // cancelled, so the coin is flipped on every iteration rather than only inside a
 // narrow race window. A small pool makes leaked slots starve it fast.
+//
+// EVERY test here reports two numbers it used to leave implicit: how many
+// injections actually fired, and how a control arm that injects nothing behaves.
+// Without them the run in which the cancellation never reached the pool passes
+// exactly like a real pass.
 
 // waitStats polls p.Stats() until want(s) holds or the deadline expires, and
 // returns the last snapshot. Releases and reclaims are asynchronous (the actor
@@ -65,7 +73,10 @@ func waitGoroutines(limit int, d time.Duration) int {
 	}
 }
 
-const abandonIters = 200
+const (
+	abandonIters = 200
+	controlIters = 20 // control arm: same loop, contexts NOT cancelled
+)
 
 // TestPool_AbandonedAcquire_DoesNotLeakStreamSlots drives abandonIters acquires
 // whose ctx is cancelled before the actor can serve them, then asserts the pool
@@ -92,47 +103,73 @@ func TestPool_AbandonedAcquire_DoesNotLeakStreamSlots(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	mc, err := p.acquire(ctx)
 	cancel()
-	if err != nil {
-		t.Fatalf("priming acquire: %v", err)
-	}
+	require.NoError(t, err, "priming acquire")
 	p.release(mc)
-	if s := waitStats(p, func(s Stats) bool { return s.InFlightStreams == 0 }, 2*time.Second); s.InFlightStreams != 0 {
-		t.Fatalf("priming release did not settle: %+v", s)
+	s := waitStats(p, func(s Stats) bool { return s.InFlightStreams == 0 }, 2*time.Second)
+	require.Zerof(t, s.InFlightStreams, "priming release did not settle: %+v", s)
+
+	// CONTROL ARM — identical loop, nothing injected. If these do not all
+	// succeed the fixture is broken and the injected arm below proves nothing.
+	controlOK := 0
+	for i := 0; i < controlIters; i++ {
+		cctx, ccancel := context.WithTimeout(context.Background(), 5*time.Second)
+		cmc, cerr := p.acquire(cctx)
+		ccancel()
+		if cerr == nil {
+			controlOK++
+			p.release(cmc)
+		}
 	}
+	require.Equalf(t, controlIters, controlOK,
+		"control arm: only %d of %d un-cancelled acquires succeeded — the fixture cannot "+
+			"serve a request at all, so the injected arm below would pass vacuously",
+		controlOK, controlIters)
+	s = waitStats(p, func(s Stats) bool { return s.InFlightStreams == 0 }, 2*time.Second)
+	require.Zerof(t, s.InFlightStreams, "control arm did not settle: %+v", s)
 
 	before := runtime.NumGoroutine()
 
+	// INJECTED ARM — every ctx is already cancelled.
+	served, refused := 0, 0
 	for i := 0; i < abandonIters; i++ {
 		actx, acancel := context.WithCancel(context.Background())
 		acancel() // already done: the actor must not strand a committed conn
 		amc, aerr := p.acquire(actx)
 		if aerr == nil {
 			// The reply won the caller's select; releasing is the caller's contract.
+			served++
 			p.release(amc)
+		} else {
+			refused++
 		}
 	}
 
-	if s := waitStats(p, func(s Stats) bool { return s.InFlightStreams == 0 }, 3*time.Second); s.InFlightStreams != 0 {
-		t.Fatalf("stream slots leaked by abandoned acquires: %+v (want InFlightStreams=0 after %d abandons)",
-			s, abandonIters)
-	}
-
+	t.Logf("injections fired: %d abandons (%d served, %d refused); control arm %d/%d",
+		served+refused, served, refused, controlOK, controlIters)
+	require.Equalf(t, abandonIters, served+refused,
+		"only %d of %d abandons were attempted", served+refused, abandonIters)
+	require.Positivef(t, refused,
+		"all %d already-cancelled acquires were served — the cancellation never reached "+
+			"the pool, so this test exercised the happy path and not the abandon race",
+		abandonIters)
+	s = waitStats(p, func(s Stats) bool { return s.InFlightStreams == 0 }, 3*time.Second)
+	require.Zerof(t, s.InFlightStreams,
+		"stream slots leaked by abandoned acquires: %+v (want InFlightStreams=0 after %d abandons)",
+		s, abandonIters)
 	// The pool must still be usable: a leaked slot starves it permanently.
 	ctx2, cancel2 := context.WithTimeout(context.Background(), 3*time.Second)
 	mc2, err2 := p.acquire(ctx2)
 	cancel2()
-	if err2 != nil {
-		t.Fatalf("normal acquire after %d abandons = %v, want success (pool starved by leaked slots)",
-			abandonIters, err2)
-	}
+	require.NoErrorf(t, err2,
+		"normal acquire after %d abandons = %v, want success (pool starved by leaked slots)",
+		abandonIters, err2)
 	p.release(mc2)
-
 	// Every reclaim goroutine must exit: the actor owes each accepted request
 	// exactly one reply, and reclaim blocks until it arrives.
-	if n := waitGoroutines(before+4, 3*time.Second); n > before+4 {
-		t.Errorf("goroutine leak after abandoned acquires: before=%d after=%d (want <= %d)",
-			before, n, before+4)
-	}
+	n := waitGoroutines(before+4, 3*time.Second)
+	assert.LessOrEqualf(t, n, before+4,
+		"goroutine leak after abandoned acquires: before=%d after=%d (want <= %d)",
+		before, n, before+4)
 }
 
 // TestH3Pool_AbandonedAcquire_DoesNotLeakStreamSlots is the H3 twin of
@@ -148,43 +185,65 @@ func TestH3Pool_AbandonedAcquire_DoesNotLeakStreamSlots(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	mc, err := p.acquire(ctx)
 	cancel()
-	if err != nil {
-		t.Fatalf("priming acquire: %v", err)
-	}
+	require.NoError(t, err, "priming acquire")
 	p.release(mc)
-	if s := waitH3Stats(p, func(s Stats) bool { return s.InFlightStreams == 0 }, 2*time.Second); s.InFlightStreams != 0 {
-		t.Fatalf("priming release did not settle: %+v", s)
+	s := waitH3Stats(p, func(s Stats) bool { return s.InFlightStreams == 0 }, 2*time.Second)
+	require.Zerof(t, s.InFlightStreams, "priming release did not settle: %+v", s)
+
+	// CONTROL ARM — nothing injected; must all succeed.
+	controlOK := 0
+	for i := 0; i < controlIters; i++ {
+		cctx, ccancel := context.WithTimeout(context.Background(), 5*time.Second)
+		cmc, cerr := p.acquire(cctx)
+		ccancel()
+		if cerr == nil {
+			controlOK++
+			p.release(cmc)
+		}
 	}
+	require.Equalf(t, controlIters, controlOK,
+		"control arm: only %d of %d un-cancelled acquires succeeded — the fixture cannot "+
+			"serve a request at all", controlOK, controlIters)
+	s = waitH3Stats(p, func(s Stats) bool { return s.InFlightStreams == 0 }, 2*time.Second)
+	require.Zerof(t, s.InFlightStreams, "control arm did not settle: %+v", s)
 
 	before := runtime.NumGoroutine()
 
+	served, refused := 0, 0
 	for i := 0; i < abandonIters; i++ {
 		actx, acancel := context.WithCancel(context.Background())
 		acancel()
 		amc, aerr := p.acquire(actx)
 		if aerr == nil {
+			served++
 			p.release(amc)
+		} else {
+			refused++
 		}
 	}
 
-	if s := waitH3Stats(p, func(s Stats) bool { return s.InFlightStreams == 0 }, 3*time.Second); s.InFlightStreams != 0 {
-		t.Fatalf("stream slots leaked by abandoned acquires: %+v (want InFlightStreams=0 after %d abandons)",
-			s, abandonIters)
-	}
-
+	t.Logf("injections fired: %d abandons (%d served, %d refused); control arm %d/%d",
+		served+refused, served, refused, controlOK, controlIters)
+	require.Equalf(t, abandonIters, served+refused,
+		"only %d of %d abandons were attempted", served+refused, abandonIters)
+	require.Positivef(t, refused,
+		"all %d already-cancelled acquires were served — the cancellation never reached the pool",
+		abandonIters)
+	s = waitH3Stats(p, func(s Stats) bool { return s.InFlightStreams == 0 }, 3*time.Second)
+	require.Zerof(t, s.InFlightStreams,
+		"stream slots leaked by abandoned acquires: %+v (want InFlightStreams=0 after %d abandons)",
+		s, abandonIters)
 	ctx2, cancel2 := context.WithTimeout(context.Background(), 3*time.Second)
 	mc2, err2 := p.acquire(ctx2)
 	cancel2()
-	if err2 != nil {
-		t.Fatalf("normal acquire after %d abandons = %v, want success (pool starved by leaked slots)",
-			abandonIters, err2)
-	}
+	require.NoErrorf(t, err2,
+		"normal acquire after %d abandons = %v, want success (pool starved by leaked slots)",
+		abandonIters, err2)
 	p.release(mc2)
-
-	if n := waitGoroutines(before+4, 3*time.Second); n > before+4 {
-		t.Errorf("goroutine leak after abandoned acquires: before=%d after=%d (want <= %d)",
-			before, n, before+4)
-	}
+	n := waitGoroutines(before+4, 3*time.Second)
+	assert.LessOrEqualf(t, n, before+4,
+		"goroutine leak after abandoned acquires: before=%d after=%d (want <= %d)",
+		before, n, before+4)
 }
 
 // TestPool_PrunedWaiter_IsStillReplied guards the exactly-one-reply invariant on
@@ -209,37 +268,37 @@ func TestPool_PrunedWaiter_IsStillReplied(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	held, err := p.acquire(ctx)
 	cancel()
-	if err != nil {
-		t.Fatalf("priming acquire: %v", err)
-	}
+	require.NoError(t, err, "priming acquire")
 	// held is NOT released: the pool's single slot stays occupied, so every
 	// acquire below is queued as a waiter rather than served.
 
 	before := runtime.NumGoroutine()
 
 	const waiters = 60
+	queued := 0
 	for i := 0; i < waiters; i++ {
 		actx, acancel := context.WithCancel(context.Background())
 		acancel()
-		if _, aerr := p.acquire(actx); aerr == nil {
-			t.Fatal("acquire succeeded while the pool's only slot was held")
-		}
+		_, aerr := p.acquire(actx)
+		require.Error(t, aerr, "acquire succeeded while the pool's only slot was held")
+		queued++
 	}
 
+	t.Logf("injections fired: %d waiters queued and abandoned against a fully held pool", queued)
+	require.Equalf(t, waiters, queued, "only %d of %d waiters were queued", queued, waiters)
 	// Several ticks' worth of grace for pruning to reply to every queued waiter
 	// and for each reclaim goroutine to receive it and exit.
-	if n := waitGoroutines(before+4, 3*time.Second); n > before+4 {
-		t.Errorf("reclaim goroutines hung on pruned waiters: before=%d after=%d (want <= %d)",
-			before, n, before+4)
-	}
-
+	n := waitGoroutines(before+4, 3*time.Second)
+	assert.LessOrEqualf(t, n, before+4,
+		"reclaim goroutines hung on pruned waiters: before=%d after=%d (want <= %d)",
+		before, n, before+4)
+	// CONTROL: with the slot released the same call must succeed, proving the
+	// refusals above came from the held slot and not from a dead pool.
 	p.release(held)
 	ctx2, cancel2 := context.WithTimeout(context.Background(), 3*time.Second)
 	mc2, err2 := p.acquire(ctx2)
 	cancel2()
-	if err2 != nil {
-		t.Fatalf("acquire after pruning = %v, want success", err2)
-	}
+	require.NoErrorf(t, err2, "acquire after pruning = %v, want success", err2)
 	p.release(mc2)
 }
 
@@ -256,32 +315,30 @@ func TestH3Pool_PrunedWaiter_IsStillReplied(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	held, err := p.acquire(ctx)
 	cancel()
-	if err != nil {
-		t.Fatalf("priming acquire: %v", err)
-	}
+	require.NoError(t, err, "priming acquire")
 
 	before := runtime.NumGoroutine()
 
 	const waiters = 60
+	queued := 0
 	for i := 0; i < waiters; i++ {
 		actx, acancel := context.WithCancel(context.Background())
 		acancel()
-		if _, aerr := p.acquire(actx); aerr == nil {
-			t.Fatal("acquire succeeded while the pool's only slot was held")
-		}
+		_, aerr := p.acquire(actx)
+		require.Error(t, aerr, "acquire succeeded while the pool's only slot was held")
+		queued++
 	}
 
-	if n := waitGoroutines(before+4, 3*time.Second); n > before+4 {
-		t.Errorf("reclaim goroutines hung on pruned waiters: before=%d after=%d (want <= %d)",
-			before, n, before+4)
-	}
-
+	t.Logf("injections fired: %d waiters queued and abandoned against a fully held pool", queued)
+	require.Equalf(t, waiters, queued, "only %d of %d waiters were queued", queued, waiters)
+	n := waitGoroutines(before+4, 3*time.Second)
+	assert.LessOrEqualf(t, n, before+4,
+		"reclaim goroutines hung on pruned waiters: before=%d after=%d (want <= %d)",
+		before, n, before+4)
 	p.release(held)
 	ctx2, cancel2 := context.WithTimeout(context.Background(), 3*time.Second)
 	mc2, err2 := p.acquire(ctx2)
 	cancel2()
-	if err2 != nil {
-		t.Fatalf("acquire after pruning = %v, want success", err2)
-	}
+	require.NoErrorf(t, err2, "acquire after pruning = %v, want success", err2)
 	p.release(mc2)
 }
