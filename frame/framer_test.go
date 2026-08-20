@@ -322,21 +322,14 @@ func TestFramer_DataStreamID0Rejected(t *testing.T) {
 	require.ErrorIsf(t, err, ErrInvalidStreamID, "err = %v, want ErrInvalidStreamID", err)
 }
 
-func TestFramer_FrameTooLargeOnRead(t *testing.T) {
-	fr, _ := newFramerWithBuffer()
-	fr.SetMaxReadFrameSize(2)
-
-	writeErr := fr.WriteData(1, false, []byte("hello"))
-
-	if writeErr != nil {
-		// write side may also reject when over its own limit; that's acceptable
-		require.ErrorIsf(t, writeErr, ErrFrameTooLarge, "write: %v", writeErr)
-		return
-	}
-	h := &recordingHandler{}
-	_, err := fr.ReadFrame(context.Background(), h)
-	require.ErrorIsf(t, err, ErrFrameTooLarge, "err = %v, want ErrFrameTooLarge", err)
-}
+// TestFramer_FrameTooLargeOnRead used to live here. It lowered the limit BEFORE
+// writing, and SetMaxReadFrameSize drives the same field the write sites check —
+// so the write always failed, the function returned at its `if writeErr != nil`
+// arm, and ReadFrame was never reached. Proof: with the read-side guard deleted
+// it survived on its own 2/2 while the rest of the package caught the same
+// mutation 2/2. The read-side property it named is now
+// TestConformance_RFC9113_Sec4_2_ReadFrameSizeBoundary, which sends the boundary
+// (#780).
 
 // === Bench gates ===
 

@@ -202,3 +202,49 @@ func TestConformance_RFC7838_Sec4_AltSvcWireFormat(t *testing.T) {
 		require.Truef(t, bytes.Equal(got, wantPayload), "payload = % x, want % x", got, wantPayload)
 	})
 }
+
+// TestFramer_AltSvc_PayloadTooShortForOriginLen sends the one payload length
+// nothing in this file ever sent: a single octet (#781).
+//
+// RFC 7838 §4 puts a uint16 Origin-Len at the front of the payload, so `payload[0]`
+// and `payload[1]` are read unconditionally once the empty-payload case is past.
+// The existing cases send length 0 (handled by the clear-all branch) and length 3
+// (long enough), which left the `len(payload) < 2` guard between an ALTSVC frame
+// a peer can send in one line and an index-out-of-range panic inside the frame
+// parser. This is the repo's peer-input shape: the guard is only worth having if
+// something proves the input reaches it.
+//
+// Both boundary values, because the guard is a boundary: 1 must be refused and 2
+// — Origin-Len present, origin empty, value empty — must be accepted. A guard
+// written `< 3` would look just as defensive and would drop a legal frame.
+func TestFramer_AltSvc_PayloadTooShortForOriginLen(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		payload  []byte
+		streamID uint32
+		wantErr  error
+	}{
+		{"one octet cannot hold Origin-Len", []byte{0x00}, 0, ErrProtocolError},
+		{"two octets are exactly Origin-Len", []byte{0x00, 0x00}, 1, nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			raw := frameBytes(uint32(len(tc.payload)), FrameAltSvc, 0, tc.streamID, tc.payload)
+			fr := NewFramer(nil, bytes.NewReader(raw))
+			h := &altSvcCaptureHandler{}
+
+			_, err := fr.ReadFrame(context.Background(), h)
+
+			if tc.wantErr == nil {
+				require.NoErrorf(t, err,
+					"a two-octet ALTSVC was refused (%v); it carries a complete Origin-Len "+
+						"of 0, which §4 makes a well-formed per-stream frame with an empty "+
+						"origin — refusing it would drop a legal frame", err)
+				return
+			}
+			require.ErrorIsf(t, err, tc.wantErr,
+				"a one-octet ALTSVC gave %v, want ErrProtocolError — the payload cannot "+
+					"hold the uint16 Origin-Len, and reading it anyway is an "+
+					"index-out-of-range on a frame any peer can send", err)
+		})
+	}
+}

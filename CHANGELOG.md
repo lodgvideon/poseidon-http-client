@@ -9,6 +9,48 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Tests
 
+- **Eleven `http1` and `frame` coverage gaps from the #722 sweep, eight closed by
+  adding the missing case and three answered with a measurement instead.** The
+  eight: the three write-side stream-0 guards `frame`'s test file grew for
+  `WriteData` and never grew for `WritePriority`, `WritePushPromise` or
+  `WriteContinuation`; the WINDOW_UPDATE increment mask, the one of this codec's
+  three 31-bit payload masks whose doc comment claimed the parity and which
+  nothing asserted, plus the frame's stream id, which no test looked at at all —
+  writing every WINDOW_UPDATE on stream 0 refills the connection window while the
+  blocked stream stays at zero; both read-side length guards at their boundary
+  rather than comfortably past it, where a 7-octet GOAWAY indexes past a 7-octet
+  slice on peer-chosen input; a 1-octet ALTSVC payload, which is the only thing
+  between a peer's one-line frame and an index-out-of-range in the parser; the
+  §6.10 continuity check's "or a frame on a different stream" half, which would
+  otherwise splice two streams' field fragments into one HPACK block; the inbound
+  padded PUSH_PROMISE trace detail, whose outbound twin was already pinned; the
+  204 `Content-Length: 0` pooling exemption, whose absence let the reverted
+  evict-on-presence behaviour — a connection burned per `generate_204` — come
+  back for free; `WriteBody`'s condemn on a write that accepts every octet and
+  reports an error anyway, the `(len(p), err)` return a `*tls.Conn` produces and
+  the suite's fake conn cannot; three arms of `isConnectionManagedName` that had
+  no ordinary-header control, so every two-character caller header could have
+  been dropped from the wire silently; `HasResidue`'s reader-level check, the one
+  layer that sees an over-read when the socket below it is genuinely clean; and
+  `ProbeIdle`'s socket-level detection, asserted on the FIRST probe because the
+  existing polling loop is answered by the buffered short-circuit from its second
+  call onwards. Two fixtures were repaired rather than extended:
+  `TestFramer_FrameTooLargeOnRead` lowered the read limit before writing, so the
+  write failed and `ReadFrame` was never called (its property is now the boundary
+  test), and the rule-1 bodyless table appended a second response to every row,
+  which condemns a connection on its own — one row was decided entirely by that
+  and has moved to the test named for it. The three measurements: `ProbeIdle`'s
+  `Buffered()` short-circuit changes no verdict anywhere in its input partition
+  (`peekUnder` is `Peek(1)`, which returns from the buffer), so it is a fast path
+  that MASKS the socket check rather than a second detection; `WriteAltSvc`'s
+  local stream-id mask emits byte-identical frames with and without it, because
+  `WriteFrameHeader` masks every stream id already — what it really buys is a
+  trace line that agrees with the wire, which is what now pins it; and
+  `commitHeaderLine`'s `contentLen` writes are dead at any value, so the fix
+  there was the comment that mis-attributed RFC 9112 §6.3 rule 3 to that site
+  when `resolveContentLength`'s `respTE` early return is what implements it
+  (#778, #779, #780, #781, #782, #799, #811, #820, #824, #830, #831).
+
 - **Twelve `grpc` coverage gaps closed, three of them tests that named a
   property they could not observe.** `TestIntegration_ResetStreamMapsToStatus`
   asserted only "not OK", which `InvokeInto`'s empty-response guard produces on

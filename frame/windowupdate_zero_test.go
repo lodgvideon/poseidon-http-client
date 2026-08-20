@@ -79,3 +79,45 @@ func TestWriteWindowUpdate_LegalIncrementRoundTrips(t *testing.T) {
 	require.NoErrorf(t, err, "read: %v", err)
 	assert.EqualValuesf(t, inc, h.winInc, "increment = %d, want %d", h.winInc, inc)
 }
+
+// TestWriteWindowUpdate_StreamIDDistinguishesConnectionFromStream pins the other
+// half of the frame, which nothing asserted at all (#779): a connection-level and
+// a stream-level WINDOW_UPDATE are protocol-distinct frames, and the only thing
+// that tells them apart is the stream id in the header.
+//
+// RFC 9113 §6.9: "In the former case, the frame's stream identifier indicates the
+// affected stream" — the credit lands on that stream's flow-control window, and
+// 0 means the connection's. Writing every WINDOW_UPDATE on stream 0 refills the
+// connection window while the stream that is actually blocked stays at zero, so
+// the peer stalls forever with credit it cannot spend. The round-trip tests above
+// read the increment back and never looked at the id, so that mutation was free.
+//
+// A table rather than one case, because the two ids are different equivalence
+// classes and both directions of the decision have to be shown: 0 must stay 0
+// (not be rewritten to some stream) and a non-zero id must survive (not be
+// flattened to 0).
+func TestWriteWindowUpdate_StreamIDDistinguishesConnectionFromStream(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		streamID uint32
+	}{
+		{"connection level", 0},
+		{"stream level", 7},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fr, _ := newFramerWithBuffer()
+			require.NoError(t, fr.WriteWindowUpdate(tc.streamID, 4096), "WriteWindowUpdate")
+			h := &recordingHandler{}
+
+			fh, err := fr.ReadFrame(context.Background(), h)
+
+			require.NoErrorf(t, err, "read: %v", err)
+			assert.Equalf(t, tc.streamID, fh.StreamID,
+				"stream id = %d, want %d — a WINDOW_UPDATE addressed to the wrong "+
+					"window credits a flow-control window the sender is not blocked on, "+
+					"and the blocked one never refills", fh.StreamID, tc.streamID)
+			assert.Equalf(t, tc.streamID, h.header.StreamID,
+				"handler saw stream id %d, want %d", h.header.StreamID, tc.streamID)
+		})
+	}
+}
