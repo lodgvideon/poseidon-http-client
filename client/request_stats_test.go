@@ -394,3 +394,37 @@ func hostPort(t *testing.T, addr string) client.Address {
 	require.NoError(t, err, "parse the listener port")
 	return client.Address{Host: host, Port: port}
 }
+
+// TestRequestComplete_UnnegotiatedProtoIsNotHTTP11 pins the one value in this
+// event that has a dangerous zero. trace.ProtoH1 is 0, so a transport that
+// fails before it knows the protocol reports HTTP/1.1 unless it says otherwise
+// — and TransportALPN, the one transport that genuinely does not know until the
+// handshake, is exactly where that happens.
+func TestRequestComplete_UnnegotiatedProtoIsNotHTTP11(t *testing.T) {
+	t.Parallel()
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err, "reserve a port to point the client at")
+	deadAddr := l.Addr().String()
+	require.NoError(t, l.Close(), "close the listener before the client dials it")
+	hooks, events := recordComplete()
+	c, err := client.NewClient(client.ClientOptions{
+		Transport: client.TransportALPN,
+		Addr:      deadAddr,
+		ConnOpts:  conn.ConnOptions{Dialer: &conn.FlexDialer{Config: &tls.Config{InsecureSkipVerify: true}}},
+		Hooks:     hooks,
+	})
+	require.NoError(t, err, "NewClient with an ALPN transport")
+	defer c.Close()
+	var resp client.Response
+	resp.Reset()
+
+	err = c.Do(context.Background(), &client.Request{Method: "GET", Path: "/"}, &resp)
+
+	require.Error(t, err, "Do against a closed port must fail")
+	require.Len(t, *events, 1, "a failed attempt is still one attempt, and still reports")
+	assert.Equalf(t, trace.ProtoUnknown, (*events)[0].Proto,
+		"Proto = %v on an ALPN attempt that never reached the handshake, want unknown — reporting h1 here invents a negotiation that did not happen and puts the failure in the wrong protocol's bucket",
+		(*events)[0].Proto)
+	assert.Equalf(t, deadAddr, (*events)[0].RemoteAddr,
+		"RemoteAddr = %q, want the address the ALPN dial failed against", (*events)[0].RemoteAddr)
+}

@@ -87,6 +87,12 @@ type exchangeStats struct {
 	// Proto is the wire protocol that carried the exchange. It is the
 	// transport's own answer rather than the Client's TransportKind because
 	// TransportALPN does not know which one it is until the handshake.
+	//
+	// Set it on EVERY return path, failures included. trace.ProtoH1 is 0, so a
+	// stats value that leaves this field alone does not report "unknown" — it
+	// reports HTTP/1.1, and a failed ALPN dial then arrives labelled as a
+	// protocol nothing negotiated. Use trace.ProtoUnknown when there is no
+	// answer yet.
 	Proto trace.Protocol
 	// RemoteAddr is the "host:port" the exchange went to. For the managed
 	// transports this is the address the Selector picked for THIS request, not

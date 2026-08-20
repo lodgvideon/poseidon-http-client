@@ -117,6 +117,10 @@ type RequestCompleteEvent struct {
 	// Proto is the wire protocol that carried the attempt. Worth recording
 	// even in a single-protocol run: TransportALPN picks it at the handshake,
 	// so it is not always the one the configuration implies.
+	//
+	// trace.ProtoUnknown means no protocol was ever settled — an ALPN transport
+	// whose dial or handshake failed. It is a distinct value rather than a zero
+	// one precisely so those attempts do not count as HTTP/1.1.
 	Proto trace.Protocol
 
 	// RemoteAddr is the "host:port" the attempt went to. For the managed

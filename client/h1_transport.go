@@ -489,7 +489,7 @@ func (a *alpnSingleConn) openExchange(ctx context.Context) (protoStream, pushLoo
 		a.mu.Lock()
 		if a.closed {
 			a.mu.Unlock()
-			return nil, nil, nil, exchangeStats{RemoteAddr: a.addr}, ErrClosed
+			return nil, nil, nil, exchangeStats{Proto: trace.ProtoUnknown, RemoteAddr: a.addr}, ErrClosed
 		}
 		if d := a.delegateLocked(); d != nil {
 			a.mu.Unlock()
@@ -506,7 +506,7 @@ func (a *alpnSingleConn) openExchange(ctx context.Context) (protoStream, pushLoo
 			case <-ch:
 				continue
 			case <-ctx.Done():
-				return nil, nil, nil, exchangeStats{RemoteAddr: a.addr}, ctx.Err()
+				return nil, nil, nil, exchangeStats{Proto: trace.ProtoUnknown, RemoteAddr: a.addr}, ctx.Err()
 			}
 		}
 		// Become the detector; release the lock for the long dial + handshake.
@@ -526,11 +526,11 @@ func (a *alpnSingleConn) openExchange(ctx context.Context) (protoStream, pushLoo
 			if d != nil {
 				_ = d.close()
 			}
-			return nil, nil, nil, exchangeStats{RemoteAddr: a.addr, Connect: detectTook}, ErrClosed
+			return nil, nil, nil, exchangeStats{Proto: trace.ProtoUnknown, RemoteAddr: a.addr, Connect: detectTook}, ErrClosed
 		}
 		if derr != nil {
 			a.mu.Unlock()
-			return nil, nil, nil, exchangeStats{RemoteAddr: a.addr, Connect: detectTook}, derr
+			return nil, nil, nil, exchangeStats{Proto: trace.ProtoUnknown, RemoteAddr: a.addr, Connect: detectTook}, derr
 		}
 		// Store the delegate by the protocol that was actually negotiated. Keyed
 		// on isH2, NOT on a "detected != ''" sentinel: conn.NegotiatedProtocol
