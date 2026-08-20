@@ -8,6 +8,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
 	"github.com/lodgvideon/poseidon-http-client/conn"
 )
 
@@ -54,15 +57,18 @@ func TestH1PoolTransport_OpenExchangeAllocs(t *testing.T) {
 
 	// Warm the pool so the dial is not in the measured region.
 	s, _, _, _, err := pt.openExchange(ctx)
-	if err != nil {
-		t.Fatalf("warm-up openExchange: %v", err)
-	}
+	require.NoError(t, err, "warm-up openExchange")
 	s.(*h1Exchange).release(true)
 
+	// NOTHING from testify may enter this closure, and no error is reported from
+	// inside it: AllocsPerRun is a process-wide count, and testify reflects and
+	// allocates. The loop error is parked and asserted below instead.
+	var loopErr error
 	n := testing.AllocsPerRun(200, func() {
 		ex, _, _, _, oerr := pt.openExchange(ctx)
 		if oerr != nil {
-			t.Fatalf("openExchange: %v", oerr)
+			loopErr = oerr
+			return
 		}
 		ex.(*h1Exchange).release(true)
 	})
@@ -74,15 +80,15 @@ func TestH1PoolTransport_OpenExchangeAllocs(t *testing.T) {
 	// Two-sided, as the H2 gate is: an improvement that nobody lowers the
 	// ceiling for is an improvement the next regression is free to spend.
 	const h1OpenExchangeAllocCeiling = 4
+
+	require.NoError(t, loopErr, "openExchange during measurement")
 	t.Logf("h1 openExchange + release: %.1f allocs", n)
-	if n > h1OpenExchangeAllocCeiling {
-		t.Errorf("h1 openExchange allocates %.1f per exchange, ceiling %d — the most "+
-			"likely cause is a closure back on the path; the release used to be one, "+
-			"and h1ManagedConn is the releaser precisely so none is built",
-			n, h1OpenExchangeAllocCeiling)
-	}
-	if n < h1OpenExchangeAllocCeiling {
-		t.Errorf("h1 openExchange allocates only %.1f, below the recorded %d — the path "+
-			"improved, lower h1OpenExchangeAllocCeiling to lock it in", n, h1OpenExchangeAllocCeiling)
-	}
+	assert.LessOrEqualf(t, n, float64(h1OpenExchangeAllocCeiling),
+		"h1 openExchange allocates %.1f per exchange, ceiling %d — the most likely "+
+			"cause is a closure back on the path; the release used to be one, and "+
+			"h1ManagedConn is the releaser precisely so none is built",
+		n, h1OpenExchangeAllocCeiling)
+	assert.GreaterOrEqualf(t, n, float64(h1OpenExchangeAllocCeiling),
+		"h1 openExchange allocates only %.1f, below the recorded %d — the path improved, "+
+			"lower h1OpenExchangeAllocCeiling to lock it in", n, h1OpenExchangeAllocCeiling)
 }

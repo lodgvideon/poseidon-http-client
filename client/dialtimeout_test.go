@@ -3,9 +3,11 @@ package client
 import (
 	"context"
 	"crypto/tls"
-	"errors"
 	"testing"
 	"time"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	"github.com/lodgvideon/poseidon-http-client/conn"
 )
@@ -31,7 +33,6 @@ func TestSingleConn_DialIsBoundedByDialTimeout(t *testing.T) {
 		metrics:     &Metrics{},
 		dialTimeout: 150 * time.Millisecond,
 	}
-
 	// Far longer than the dial timeout: if the bound is missing, this is what
 	// the dial waits for instead.
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
@@ -41,18 +42,14 @@ func TestSingleConn_DialIsBoundedByDialTimeout(t *testing.T) {
 	_, _, _, err := s.acquireConn(ctx)
 	elapsed := time.Since(start)
 
-	if err == nil {
-		t.Fatal("acquireConn against a black-hole host returned no error")
-	}
-	if elapsed > 5*time.Second {
-		t.Errorf("the dial ran for %v against a 150ms DialTimeout — it is bounded by the "+
+	require.Error(t, err, "acquireConn against a black-hole host returned no error")
+	assert.LessOrEqualf(t, elapsed, 5*time.Second,
+		"the dial ran for %v against a 150ms DialTimeout — it is bounded by the "+
 			"caller's context instead, so a black-hole host hangs Do for as long as the "+
 			"caller allows", elapsed)
-	}
-	if ctx.Err() != nil {
-		t.Error("the caller's context expired, so this measured the caller's deadline " +
+	assert.NoError(t, ctx.Err(),
+		"the caller's context expired, so this measured the caller's deadline "+
 			"rather than the dial timeout")
-	}
 }
 
 // TestSingleConn_ZeroDialTimeoutMeansDefault guards the hazard the fix
@@ -62,7 +59,6 @@ func TestSingleConn_DialIsBoundedByDialTimeout(t *testing.T) {
 func TestSingleConn_ZeroDialTimeoutMeansDefault(t *testing.T) {
 	srv := startOneH2Server(t)
 	defer srv.Close()
-
 	s := &singleConn{
 		addr:     srv.Listener.Addr().String(),
 		connOpts: newConnOpts(),
@@ -73,13 +69,10 @@ func TestSingleConn_ZeroDialTimeoutMeansDefault(t *testing.T) {
 	defer cancel()
 
 	c, _, _, err := s.acquireConn(ctx)
-	if err != nil {
-		t.Fatalf("acquireConn with a zero dialTimeout: %v — zero must mean the default, "+
-			"not an expired deadline", err)
-	}
-	if c == nil {
-		t.Fatal("acquireConn returned no connection and no error")
-	}
+
+	require.NoErrorf(t, err, "acquireConn with a zero dialTimeout — zero must mean the "+
+		"default, not an expired deadline")
+	require.NotNil(t, c, "acquireConn returned no connection and no error")
 	_ = s.close()
 }
 
@@ -91,18 +84,28 @@ func TestDialTimeoutOrDefault(t *testing.T) {
 	}{
 		{0, defaultDialTimeout},
 		{-time.Second, defaultDialTimeout},
+		{time.Nanosecond, time.Nanosecond},
 		{time.Second, time.Second},
 		{time.Hour, time.Hour},
 	}
+
 	for _, tc := range cases {
-		if got := dialTimeoutOrDefault(tc.in); got != tc.want {
-			t.Errorf("dialTimeoutOrDefault(%v) = %v, want %v", tc.in, got, tc.want)
-		}
+		got := dialTimeoutOrDefault(tc.in)
+
+		assert.Equalf(t, tc.want, got, "dialTimeoutOrDefault(%v) = %v, want %v",
+			tc.in, got, tc.want)
 	}
 }
 
 // TestSingleConn_DialTimeoutSurfacesAsAnError checks the failure the caller
 // actually sees, so the bound does not silently become a nil conn with no error.
+//
+// The *DialError wrapper is the contract, and it is asserted rather than logged:
+// the caller classifies a dial failure by that type, and the addr it carries is
+// what a load generator reports. Until this test was migrated the type check was
+// a t.Logf on a branch that could not be reached — errors.Is DOES see
+// context.DeadlineExceeded through DialError.Unwrap — so the test asserted
+// nothing beyond "err != nil", which the bound test above already asserts.
 func TestSingleConn_DialTimeoutSurfacesAsAnError(t *testing.T) {
 	s := &singleConn{
 		addr:        "black.hole:0",
@@ -110,13 +113,20 @@ func TestSingleConn_DialTimeoutSurfacesAsAnError(t *testing.T) {
 		metrics:     &Metrics{},
 		dialTimeout: 100 * time.Millisecond,
 	}
-	_, _, _, err := s.acquireConn(context.Background())
-	if err == nil {
-		t.Fatal("no error from a dial that timed out")
-	}
-	if !errors.Is(err, context.DeadlineExceeded) {
-		t.Logf("dial error is %v", err) // wrapped in a *DialError; the type is the contract
-	}
+
+	c, _, _, err := s.acquireConn(context.Background())
+
+	require.Error(t, err, "no error from a dial that timed out")
+	assert.Nil(t, c, "a dial that timed out must not also hand back a connection")
+	var de *DialError
+	require.ErrorAsf(t, err, &de,
+		"dial error is %v (%T); callers classify a dial failure by *DialError, so an "+
+			"unwrapped error makes the timeout indistinguishable from a request failure", err, err)
+	assert.Equal(t, s.addr, de.Addr,
+		"*DialError must name the address that failed, or the report says which host is black-holing")
+	assert.ErrorIs(t, err, context.DeadlineExceeded,
+		"the cause must survive the *DialError wrap, or a caller cannot tell a dial "+
+			"timeout from a refused connection")
 }
 
 // The bound above is pinned for the HTTP/2 single connection only, and the fix
@@ -134,7 +144,6 @@ func TestH1SingleConn_DialIsBoundedByDialTimeout(t *testing.T) {
 		metrics:     &Metrics{},
 		dialTimeout: 150 * time.Millisecond,
 	}
-
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
 
@@ -142,17 +151,13 @@ func TestH1SingleConn_DialIsBoundedByDialTimeout(t *testing.T) {
 	_, _, _, _, err := s.openExchange(ctx)
 	elapsed := time.Since(start)
 
-	if err == nil {
-		t.Fatal("openExchange against a black-hole host returned no error")
-	}
-	if elapsed > 5*time.Second {
-		t.Errorf("the dial ran for %v against a 150ms DialTimeout — it is bounded by the "+
+	require.Error(t, err, "openExchange against a black-hole host returned no error")
+	assert.LessOrEqualf(t, elapsed, 5*time.Second,
+		"the dial ran for %v against a 150ms DialTimeout — it is bounded by the "+
 			"caller's context instead", elapsed)
-	}
-	if ctx.Err() != nil {
-		t.Error("the caller's context expired, so this measured the caller's deadline " +
+	assert.NoError(t, ctx.Err(),
+		"the caller's context expired, so this measured the caller's deadline "+
 			"rather than the dial timeout")
-	}
 }
 
 // TestSingleH3Conn_DialIsBoundedByDialTimeout is the HTTP/3 sibling. It injects
@@ -168,7 +173,6 @@ func TestSingleH3Conn_DialIsBoundedByDialTimeout(t *testing.T) {
 			return nil, ctx.Err()
 		},
 	}
-
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
 
@@ -176,15 +180,11 @@ func TestSingleH3Conn_DialIsBoundedByDialTimeout(t *testing.T) {
 	_, derr := s.dial(ctx)
 	elapsed := time.Since(start)
 
-	if derr == nil {
-		t.Fatal("dial against a black-hole host returned no error")
-	}
-	if elapsed > 5*time.Second {
-		t.Errorf("the dial ran for %v against a 150ms DialTimeout — it is bounded by the "+
+	require.Error(t, derr, "dial against a black-hole host returned no error")
+	assert.LessOrEqualf(t, elapsed, 5*time.Second,
+		"the dial ran for %v against a 150ms DialTimeout — it is bounded by the "+
 			"caller's context instead", elapsed)
-	}
-	if ctx.Err() != nil {
-		t.Error("the caller's context expired, so this measured the caller's deadline " +
+	assert.NoError(t, ctx.Err(),
+		"the caller's context expired, so this measured the caller's deadline "+
 			"rather than the dial timeout")
-	}
 }

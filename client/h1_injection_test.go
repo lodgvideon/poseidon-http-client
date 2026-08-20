@@ -23,6 +23,9 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
 	"github.com/lodgvideon/poseidon-http-client/client"
 	"github.com/lodgvideon/poseidon-http-client/conn"
 )
@@ -66,13 +69,11 @@ func TestConformance_RFC9110_Sec5_5_ClientDo_HeaderValueCRLF_Refused(t *testing.
 		Addr:      srv.Listener.Addr().String(),
 		ConnOpts:  conn.ConnOptions{Dialer: &conn.PlaintextDialer{}},
 	})
-	if err != nil {
-		t.Fatalf("NewClient: %v", err)
-	}
+	require.NoError(t, err, "NewClient")
 	defer c.Close()
-
 	var resp client.Response
 	resp.Reset()
+
 	err = c.Do(context.Background(), &client.Request{
 		Method:   "GET",
 		Path:     "/",
@@ -82,14 +83,11 @@ func TestConformance_RFC9110_Sec5_5_ClientDo_HeaderValueCRLF_Refused(t *testing.
 		},
 	}, &resp)
 
-	if err == nil {
-		t.Errorf("Do accepted a request with CRLF in a header value (RFC 9110 §5.5)")
-	}
+	assert.Error(t, err, "Do accepted a request with CRLF in a header value (RFC 9110 §5.5)")
 	for _, name := range headersSeen() {
-		if strings.EqualFold(name, "X-Injected") {
-			t.Errorf("REQUEST SPLIT: origin received the injected field %q; headers seen: %v",
-				name, headersSeen())
-		}
+		assert.Falsef(t, strings.EqualFold(name, "X-Injected"),
+			"REQUEST SPLIT: origin received the injected field %q; headers seen: %v",
+			name, headersSeen())
 	}
 }
 
@@ -108,13 +106,11 @@ func TestConformance_RFC9110_Sec5_5_ClientDo_AuthorityCRLF_Refused(t *testing.T)
 		Addr:      srv.Listener.Addr().String(),
 		ConnOpts:  conn.ConnOptions{Dialer: &conn.PlaintextDialer{}},
 	})
-	if err != nil {
-		t.Fatalf("NewClient: %v", err)
-	}
+	require.NoError(t, err, "NewClient")
 	defer c.Close()
-
 	var resp client.Response
 	resp.Reset()
+
 	err = c.Do(context.Background(), &client.Request{
 		Method:    "GET",
 		Path:      "/",
@@ -122,13 +118,10 @@ func TestConformance_RFC9110_Sec5_5_ClientDo_AuthorityCRLF_Refused(t *testing.T)
 		BodyMode:  client.BodyBuffer,
 	}, &resp)
 
-	if err == nil {
-		t.Errorf("Do accepted a request with CRLF in :authority (RFC 9110 §5.5)")
-	}
+	assert.Error(t, err, "Do accepted a request with CRLF in :authority (RFC 9110 §5.5)")
 	for _, name := range headersSeen() {
-		if strings.EqualFold(name, "X-Injected") {
-			t.Errorf("REQUEST SPLIT via Authority: origin received %q", name)
-		}
+		assert.Falsef(t, strings.EqualFold(name, "X-Injected"),
+			"REQUEST SPLIT via Authority: origin received %q", name)
 	}
 }
 
@@ -144,24 +137,20 @@ func TestConformance_RFC9110_Sec5_5_ClientDo_LegalRequestUnaffected(t *testing.T
 		Addr:      srv.Listener.Addr().String(),
 		ConnOpts:  conn.ConnOptions{Dialer: &conn.PlaintextDialer{}},
 	})
-	if err != nil {
-		t.Fatalf("NewClient: %v", err)
-	}
+	require.NoError(t, err, "NewClient")
 	defer c.Close()
-
 	var resp client.Response
 	resp.Reset()
-	if err := c.Do(context.Background(), &client.Request{
+
+	err = c.Do(context.Background(), &client.Request{
 		Method:   "GET",
 		Path:     "/",
 		BodyMode: client.BodyBuffer,
 		Headers: []conn.HeaderField{
 			{Name: []byte("user-agent"), Value: []byte("poseidon/1.0 (test)")},
 		},
-	}, &resp); err != nil {
-		t.Fatalf("legal request refused: %v", err)
-	}
-	if resp.Status != 200 {
-		t.Errorf("status = %d, want 200", resp.Status)
-	}
+	}, &resp)
+
+	require.NoError(t, err, "legal request refused — the validator is over-rejecting")
+	assert.Equal(t, 200, resp.Status, "a legal request must round-trip unchanged")
 }

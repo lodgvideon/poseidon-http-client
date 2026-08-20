@@ -5,6 +5,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/require"
+
 	"github.com/lodgvideon/poseidon-http-client/http1"
 )
 
@@ -73,16 +75,17 @@ func TestH1EvictIdle_PeerSeesTheClose(t *testing.T) {
 	// Healthy and open, only stale: evictIdle tests lastUsed, never IsAlive.
 	idle := &h1ManagedConn{p: p, c: http1.NewConn(cli), lastUsed: time.Now().Add(-time.Second)}
 
-	if kept := p.evictIdle([]*h1ManagedConn{idle}); len(kept) != 0 {
-		t.Fatalf("evictIdle kept %d conns, want 0 — the fixture never reached the eviction path", len(kept))
-	}
+	kept := p.evictIdle([]*h1ManagedConn{idle})
 
+	// CONTROL: the fixture must actually have reached the eviction path.
+	require.Empty(t, kept, "evictIdle kept the conn — the fixture never reached the eviction path")
 	select {
 	case <-peerSaw:
 		// The blocked read returned: the socket is gone.
 	case <-time.After(5 * time.Second):
-		t.Fatal("peer never saw the connection close: evictIdle dropped the conn from the " +
-			"pool without closing its socket, so the descriptor and the conn's watchdog " +
-			"goroutine leak on every idle eviction while ConnsClosed still increments")
+		require.FailNow(t, "peer never saw the connection close",
+			"evictIdle dropped the conn from the pool without closing its socket, so the "+
+				"descriptor and the conn's watchdog goroutine leak on every idle eviction "+
+				"while ConnsClosed still increments")
 	}
 }

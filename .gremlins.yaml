@@ -1,0 +1,126 @@
+# Gremlins (https://gremlins.dev) is this module's mutation-testing standard:
+# mutants are produced by the tool, not written by hand. How a survivor is
+# triaged — hole vs equivalent mutant, and the narrow cases where a hand-written
+# mutation is still allowed — is in .claude/skills/reviewing-tests/SKILL.md.
+#
+# Run it with `make mutation` (diff-scoped) or `make mutation-full`. Both go
+# through Docker, and that is not a preference: on Windows Gremlins reports 0%
+# mutator coverage for every file in a subdirectory, because
+# internal/coverage/coverage.go maps a coverage profile's forward-slash path
+# through filepath.Rel and the separators stop matching. A native run here scores
+# 171638 mutants and 0 runnable, which looks like a clean sheet and is nothing of
+# the kind.
+#
+# This file is validated by https://gremlins.dev/schema/configuration.json.
+
+unleash:
+  # KILLED is the boring outcome and there are thousands of them; printing one
+  # line each buries the four statuses a human has to act on. Same filter
+  # Gremlins runs on itself.
+  output-statuses: lctr
+
+  # The efficacy floor, KILLED / (KILLED + LIVED). Exit 10 below it.
+  #
+  # It has to live HERE and nowhere else. In v0.6.0 a threshold set any other way
+  # is silently inert — measured on a module whose efficacy is 66.67%:
+  # `--threshold-efficacy 80` exits 0, `GREMLINS_UNLEASH_THRESHOLD_EFFICACY=80`
+  # exits 0, and only this key produces `ERROR: below efficacy-threshold` and
+  # exit 10. So the Makefile passes no threshold flag: a gate that cannot fail is
+  # worse than no gate, because it is believed.
+  #
+  # The cause narrows the rule usefully. internal/configuration.Get does
+  # `viper.Get(k).(T)` — a type ASSERTION — and Viper has no float64 case in its
+  # bound-pflag type switch, so it hands back the flag's string form, the
+  # assertion fails and the value silently becomes 0. The two thresholds are the
+  # only float64 flags Gremlins has, so they are the only inert ones: int, string
+  # and bool flags (--workers, --diff, --dry-run) bind correctly and do override
+  # this file.
+  #
+  # 80 is Gremlins' own figure for itself. The one real measurement here is a
+  # 133-line non-test diff at 100% efficacy over 5 mutants, which says the floor
+  # is not tight rather than that it is right; revisit once the nightly full run
+  # has a module-wide number.
+  #
+  # Note the comparison is `<=`, so this fails a run at exactly 80.00% — the
+  # floor means "above 80", not "at least 80".
+  threshold:
+    efficacy: 80
+    # mutant-coverage is deliberately NOT set. (KILLED+LIVED)/(+NOT_COVERED) was
+    # 60% on that same sample — two ARITHMETIC_BASE mutants in a new
+    # error-formatting path — and a gate that fails an otherwise well-tested
+    # change over the arithmetic inside an error string trains people to skip it.
+    # It is worth reading in the nightly report, not worth blocking a merge on.
+
+  # One worker, and a generous timeout coefficient, because a mutant's verdict
+  # has to mean something. The tests Gremlins re-runs per mutant start real
+  # peers — httptest servers, net.Pipe pairs, QUIC listeners — and are already
+  # timing-sensitive enough to flake on a loaded machine (TestHooks_*'s
+  # sub-millisecond latency assertion, the H2 retention test's reader deadline).
+  # Under parallel workers those tests fail for reasons that have nothing to do
+  # with the mutation, and a mutant that failed the suite by accident is scored
+  # KILLED. That inflates efficacy and hides exactly the survivors this is run
+  # to find, so the default CPU-count parallelism is the wrong trade here.
+  # `make mutation-full` overrides workers deliberately — see the Makefile.
+  workers: 1
+  timeout-coefficient: 3
+
+  # Everything that is not library code under test. Paths are module-relative
+  # with forward slashes, and the patterns are RE2 (no lookahead).
+  #
+  # Never pass -E/--exclude-files on the command line: a flag REPLACES this list
+  # rather than adding to it. Measured — `--dry-run -E '^quic/'` puts .claude
+  # back in scope and mutator coverage drops from 93.18% to 4.22%. That is also
+  # why the nightly full run is one job rather than a per-package matrix: every
+  # cell would have to restate this list, and the copy that drifts is the one
+  # that reports a green sheet over 70000 mutants in a worktree cache.
+  exclude-files:
+    # The agent plugin cache, and — via .claude/worktrees — dozens of complete
+    # git worktree checkouts of this same repository. 166752 of the 171638
+    # mutants a bare run finds live in here: 97% of the analysis, none of it
+    # this module's code.
+    - '^\.claude/'
+    # Runnable demos and doc artifacts. scripts/coverage-gate.sh drops them for
+    # the same reason: they have no tests, so every mutant is NOT COVERED noise.
+    - '^examples/'
+    # The Docker-driven integration harness and the quic-interop endpoint, whose
+    # tests are behind build tags and a compose stack Gremlins does not bring up.
+    - '^test/'
+    # Nested module with its own go.mod. The root `./...` never reaches it, so no
+    # coverage is ever gathered for it and every mutant would score NOT COVERED.
+    # Mutating it needs a separate run rooted at contrib/prometheus.
+    - '^contrib/'
+
+# Gremlins' default operator set. hpack/huffman_table.go is generated and is
+# NOT excluded, deliberately: the table shipped a wrong code for symbol 249
+# (#224), which is precisely the defect an ARITHMETIC_BASE mutant on a table
+# entry models, so it is the one generated file worth mutating here.
+#
+# The bitwise operators are off by default upstream and stay off until the
+# nightly full run has a baseline. They are the obvious next step for this
+# codebase — a frame-flag test suite that survives `Flags&FlagEndStream` being
+# inverted is not testing much — so enabling invert-bitwise and invert-bwassign
+# should be its own change, sized against measured survivor counts rather than
+# switched on blind.
+mutants:
+  arithmetic-base:
+    enabled: true
+  conditionals-boundary:
+    enabled: true
+  conditionals-negation:
+    enabled: true
+  increment-decrement:
+    enabled: true
+  invert-negatives:
+    enabled: true
+  invert-assignments:
+    enabled: false
+  invert-bitwise:
+    enabled: false
+  invert-bwassign:
+    enabled: false
+  invert-logical:
+    enabled: false
+  invert-loopctrl:
+    enabled: false
+  remove-self-assignments:
+    enabled: false

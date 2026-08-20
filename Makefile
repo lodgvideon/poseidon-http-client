@@ -1,4 +1,5 @@
 .PHONY: lint test test-race test-debug bench bench-alloc bench-gate fuzz-replay coverage coverage-gate tidy contrib-test
+.PHONY: mutation mutation-full mutation-dry
 .PHONY: it-up it-down it-logs it-test it-test-fast it-certs h3-interop h3-interop-loss h3-interop-reorder h3-interop-fault h3-interop-chacha h3-soak h2-soak
 .PHONY: qns-image qns-image-multi
 
@@ -94,6 +95,70 @@ bench-gate:
 # non-zero numbers.
 bench-alloc:
 	$(GO) test -tags allocbench -bench=. -benchmem -benchtime=300x -count=1 -run=^$$ ./http3
+
+# ── Mutation testing (Gremlins) ──────────────────────────────────
+# Gremlins generates the mutants; nobody edits a source file by hand to check
+# whether a test notices. Configuration and the exclusion list live in
+# .gremlins.yaml, triage rules in .claude/skills/reviewing-tests/SKILL.md.
+#
+# Always in Docker, and that is a correctness requirement rather than a
+# convenience: run natively on Windows and Gremlins reports 0% mutator coverage
+# for every file in a subdirectory (its coverage profile paths keep forward
+# slashes, the comparison goes through filepath), so a native run here scores
+# 171638 mutants, 0 runnable, and looks like a pass. The same tree in this image
+# scores 4318 runnable at 93.18% mutator coverage.
+GREMLINS_VERSION ?= 0.6.0
+GREMLINS_IMAGE   ?= gogremlins/gremlins:$(GREMLINS_VERSION)
+# The base a `make mutation` diff is taken against. Override for a PR against
+# something else: `make mutation MUTATION_DIFF=origin/release-0.9`.
+MUTATION_DIFF    ?= origin/main
+# No --threshold-efficacy flag here on purpose. In v0.6.0 both threshold flags
+# are silently inert: they are Gremlins' only float64 flags, and its config
+# accessor type-ASSERTS what Viper returns for a bound pflag, which for float64
+# is the string form. Measured — a module at 66.67% efficacy exits 0 against a
+# floor of 80 via the flag or the environment variable, and only the key in
+# .gremlins.yaml produces exit 10. The threshold lives there; passing it here
+# would look like a gate and be nothing of the kind.
+#
+# One volume for the module and build caches. It is mounted at /go rather than
+# at /go/pkg/mod because /go exists in the image as mode 1777, so a fresh volume
+# inherits that and the image's non-root user can write it; a volume mounted
+# straight onto the (absent) /go/pkg/mod is created root-owned and every `go`
+# command fails with "permission denied".
+GREMLINS_CACHE   ?= poseidon-gremlins-gopath
+# safe.directory via GIT_CONFIG_*: the bind-mounted tree is owned by a uid the
+# container does not have, and --diff shells out to git. Passing it as
+# environment keeps it out of the host's git config.
+GREMLINS_DOCKER = docker run --rm \
+	-v "$(CURDIR):/src" -w /src \
+	-v $(GREMLINS_CACHE):/go \
+	-e GOCACHE=/go/build-cache \
+	-e GIT_CONFIG_COUNT=1 -e GIT_CONFIG_KEY_0=safe.directory -e GIT_CONFIG_VALUE_0=/src \
+	$(GREMLINS_IMAGE) gremlins unleash
+
+# What CI runs on a pull request: only mutants inside the change. Cheap enough
+# to gate on, and it answers the question a review actually asks — do the tests
+# in this PR catch the code in this PR.
+mutation:
+	$(GREMLINS_DOCKER) --diff $(MUTATION_DIFF)
+
+# The whole module: 4318 runnable mutants is a survivor list to triage into
+# issues, not a pass/fail. The efficacy floor in .gremlins.yaml applies here too
+# and cannot be turned off per-run (see above), so CI marks this step
+# continue-on-error and keeps the report. Workers are raised here — the config pins
+# them to 1 so a gate cannot score a timing flake as KILLED, and that trade is
+# wrong for a run whose output a human reads line by line. --workers is an int
+# flag, so unlike the thresholds it really does override the config file; it is
+# spelled as a count rather than the documented `0` ("use every CPU") only
+# because 0 is indistinguishable from unset.
+MUTATION_WORKERS ?= 4
+mutation-full:
+	$(GREMLINS_DOCKER) --workers $(MUTATION_WORKERS) --output gremlins.json
+
+# Mutant inventory only, no tests run: ~40s, and the fastest way to check that
+# a .gremlins.yaml exclusion does what it says.
+mutation-dry:
+	$(GREMLINS_DOCKER) --dry-run
 
 # ── Docker integration test infra ────────────────────────────────
 DOCKER_COMPOSE ?= docker compose

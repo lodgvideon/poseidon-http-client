@@ -11,7 +11,6 @@
 package client_test
 
 import (
-	"bytes"
 	"context"
 	"crypto/tls"
 	"errors"
@@ -22,6 +21,9 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	"github.com/lodgvideon/poseidon-http-client/client"
 	"github.com/lodgvideon/poseidon-http-client/conn"
@@ -49,15 +51,11 @@ func TestStress_Pool_50ConcurrentRequests(t *testing.T) {
 			MaxConnsPerHost: 4,
 		},
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, err, "NewClient(pool)")
 	defer c.Close()
-
 	const n = 50
 	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 	defer cancel()
-
 	var wg sync.WaitGroup
 	var ok, fail atomic.Int64
 
@@ -69,15 +67,15 @@ func TestStress_Pool_50ConcurrentRequests(t *testing.T) {
 			go func(idx int) {
 				defer wg.Done()
 				var resp client.Response
-				err := c.Do(ctx, &client.Request{
+				derr := c.Do(ctx, &client.Request{
 					Method:   "GET",
 					Path:     "/",
 					Headers:  ua(),
 					BodyMode: client.BodyBuffer,
 				}, &resp)
-				if err != nil {
+				if derr != nil {
 					fail.Add(1)
-					t.Logf("[%d] error: %v", idx, err)
+					t.Logf("[%d] error: %v", idx, derr)
 					return
 				}
 				if resp.Status < 200 || resp.Status > 399 {
@@ -96,15 +94,8 @@ func TestStress_Pool_50ConcurrentRequests(t *testing.T) {
 		wg.Wait()
 	}
 
-	snap := c.MetricsSnapshot()
-	t.Logf("✓ pool stress: ok=%d fail=%d dials=%d started=%d succeeded=%d errored=%d",
-		ok.Load(), fail.Load(),
-		snap.Counters.DialsAttempted, snap.Counters.RequestsStarted,
-		snap.Counters.RequestsSucceeded, snap.Counters.RequestsErrored)
-
-	if ok.Load() < int64(n)*9/10 {
-		t.Fatalf("too many failures: ok=%d fail=%d out of %d", ok.Load(), fail.Load(), n)
-	}
+	require.GreaterOrEqualf(t, ok.Load(), int64(n)*9/10,
+		"too many failures: ok=%d fail=%d out of %d", ok.Load(), fail.Load(), n)
 }
 
 // ---------- Stress 2: 50 sequential requests, single conn ----------
@@ -112,7 +103,6 @@ func TestStress_Pool_50ConcurrentRequests(t *testing.T) {
 func TestStress_SingleConn_50Sequential(t *testing.T) {
 	c := e2eClient(t, "www.google.com")
 	defer c.Close()
-
 	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
 	defer cancel()
 
@@ -125,25 +115,15 @@ func TestStress_SingleConn_50Sequential(t *testing.T) {
 			Headers:  ua(),
 			BodyMode: client.BodyBuffer,
 		}, &resp)
-		if err != nil {
-			t.Fatalf("request %d: %v", i, err)
-		}
-		if resp.Status < 200 || resp.Status > 399 {
-			t.Fatalf("request %d: status %d", i, resp.Status)
-		}
+
+		require.NoErrorf(t, err, "request %d", i)
+		require.GreaterOrEqualf(t, resp.Status, 200, "request %d: status %d", i, resp.Status)
+		require.LessOrEqualf(t, resp.Status, 399, "request %d: status %d", i, resp.Status)
 	}
 
 	snap := c.MetricsSnapshot()
-	t.Logf("✓ 100 sequential: dials=%d started=%d succeeded=%d errored=%d",
-		snap.Counters.DialsAttempted, snap.Counters.RequestsStarted,
-		snap.Counters.RequestsSucceeded, snap.Counters.RequestsErrored)
-
-	if snap.Counters.RequestsSucceeded != 50 {
-		t.Errorf("expected 50 succeeded, got %d", snap.Counters.RequestsSucceeded)
-	}
-	if snap.Counters.RequestsErrored != 0 {
-		t.Errorf("expected 0 errored, got %d", snap.Counters.RequestsErrored)
-	}
+	assert.EqualValues(t, 50, snap.Counters.RequestsSucceeded, "expected 50 succeeded")
+	assert.EqualValues(t, 0, snap.Counters.RequestsErrored, "expected 0 errored")
 }
 
 // ---------- Stress 3: Mixed Do + DoStream + BodyStream interleaved ----------
@@ -151,10 +131,8 @@ func TestStress_SingleConn_50Sequential(t *testing.T) {
 func TestStress_MixedAPI_30Requests(t *testing.T) {
 	c := e2eClient(t, "www.google.com")
 	defer c.Close()
-
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
-
 	const n = 30
 	errCh := make(chan error, n)
 
@@ -192,13 +170,13 @@ func TestStress_MixedAPI_30Requests(t *testing.T) {
 					return
 				}
 				// Drain the body.
-				n, err := io.Copy(io.Discard, resp.BodyReader)
+				read, err := io.Copy(io.Discard, resp.BodyReader)
 				resp.BodyReader.Close()
 				if err != nil {
-					errCh <- fmt.Errorf("[%d] BodyStream drain: %w (read %d)", idx, err, n)
+					errCh <- fmt.Errorf("[%d] BodyStream drain: %w (read %d)", idx, err, read)
 					return
 				}
-				if n == 0 {
+				if read == 0 {
 					errCh <- fmt.Errorf("[%d] BodyStream: drained 0 bytes", idx)
 					return
 				}
@@ -218,12 +196,12 @@ func TestStress_MixedAPI_30Requests(t *testing.T) {
 				}
 				defer sr.Close()
 				for {
-					ev, err := sr.Recv(ctx)
-					if errors.Is(err, client.ErrStreamEnded) || (err == nil && ev.EndStream) {
+					ev, rerr := sr.Recv(ctx)
+					if errors.Is(rerr, client.ErrStreamEnded) || (rerr == nil && ev.EndStream) {
 						break
 					}
-					if err != nil {
-						errCh <- fmt.Errorf("[%d] Recv: %w", idx, err)
+					if rerr != nil {
+						errCh <- fmt.Errorf("[%d] Recv: %w", idx, rerr)
 						return
 					}
 				}
@@ -240,15 +218,7 @@ func TestStress_MixedAPI_30Requests(t *testing.T) {
 		}
 	}
 
-	snap := c.MetricsSnapshot()
-	t.Logf("✓ mixed API: n=%d fail=%d dials=%d started=%d succeeded=%d errored=%d",
-		n, failCount, snap.Counters.DialsAttempted,
-		snap.Counters.RequestsStarted, snap.Counters.RequestsSucceeded,
-		snap.Counters.RequestsErrored)
-
-	if failCount > n/10 {
-		t.Fatalf("too many failures: %d/%d", failCount, n)
-	}
+	require.LessOrEqualf(t, failCount, n/10, "too many failures: %d/%d", failCount, n)
 }
 
 // ---------- Stress 4: BodyStream — read body via io.ReadAll ----------
@@ -256,7 +226,6 @@ func TestStress_MixedAPI_30Requests(t *testing.T) {
 func TestStress_BodyStream_ReadAll(t *testing.T) {
 	c := e2iClient(t, "www.google.com")
 	defer c.Close()
-
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
@@ -267,24 +236,13 @@ func TestStress_BodyStream_ReadAll(t *testing.T) {
 		Headers:  ua(),
 		BodyMode: client.BodyStream,
 	}, &resp)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if resp.BodyReader == nil {
-		t.Fatal("expected BodyReader to be set with BodyStream=true")
-	}
 
+	require.NoError(t, err, "Do(BodyStream)")
+	require.NotNil(t, resp.BodyReader, "expected BodyReader to be set with BodyStream=true")
 	body, err := io.ReadAll(resp.BodyReader)
-	if err != nil {
-		resp.BodyReader.Close()
-		t.Fatalf("ReadAll: %v", err)
-	}
 	resp.BodyReader.Close()
-
-	if len(body) == 0 {
-		t.Fatal("read 0 bytes from BodyReader")
-	}
-	t.Logf("✓ BodyStream ReadAll: %d bytes via io.ReadAll", len(body))
+	require.NoError(t, err, "ReadAll")
+	assert.NotEmpty(t, body, "read 0 bytes from BodyReader")
 }
 
 // ---------- Stress 5: Rapid open/close cycles ----------
@@ -304,11 +262,8 @@ func TestStress_RapidOpenClose(t *testing.T) {
 		cancel()
 		c.Close()
 
-		if err != nil {
-			t.Fatalf("cycle %d: %v", i, err)
-		}
+		require.NoErrorf(t, err, "cycle %d", i)
 	}
-	t.Log("✓ 5 rapid open/close cycles passed")
 }
 
 // ---------- Stress 6: 20 concurrent BodyStream reads ----------
@@ -329,34 +284,30 @@ func TestStress_ConcurrentBodyStream(t *testing.T) {
 			MaxConnsPerHost: 4,
 		},
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, err, "NewClient(pool)")
 	defer c.Close()
-
 	const n = 20
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
-
 	errCh := make(chan error, n)
 	var totalRead atomic.Int64
 
 	for i := 0; i < n; i++ {
 		go func(idx int) {
 			var resp client.Response
-			err := c.Do(ctx, &client.Request{
+			derr := c.Do(ctx, &client.Request{
 				Method:   "GET",
 				Path:     "/",
 				Headers:  ua(),
 				BodyMode: client.BodyStream,
 			}, &resp)
-			if err != nil {
-				errCh <- fmt.Errorf("[%d] Do: %w", idx, err)
+			if derr != nil {
+				errCh <- fmt.Errorf("[%d] Do: %w", idx, derr)
 				return
 			}
 			if resp.BodyReader != nil {
-				n, _ := io.Copy(io.Discard, resp.BodyReader)
-				totalRead.Add(n)
+				read, _ := io.Copy(io.Discard, resp.BodyReader)
+				totalRead.Add(read)
 				resp.BodyReader.Close()
 			}
 			errCh <- nil
@@ -371,34 +322,26 @@ func TestStress_ConcurrentBodyStream(t *testing.T) {
 		}
 	}
 
-	snap := c.MetricsSnapshot()
-	t.Logf("✓ concurrent BodyStream: n=%d fail=%d dials=%d succeeded=%d errored=%d",
-		n, failCount, snap.Counters.DialsAttempted,
-		snap.Counters.RequestsSucceeded, snap.Counters.RequestsErrored)
-	if failCount > n/10 {
-		t.Fatalf("too many failures: %d/%d", failCount, n)
-	}
+	require.LessOrEqualf(t, failCount, n/10, "too many failures: %d/%d", failCount, n)
 }
 
-// ---------- Stress 7: Verify zero alloc on frame+hpack path ----------
-
-func TestStress_ZeroAlloc_FrameHpack(t *testing.T) {
-	// This is a sanity check that frame + hpack stay at 0 B/op.
-	// Run as a test so it appears in CI.
-	t.Log("frame + hpack benches confirmed 0 B/op, 0 allocs/op (see bench results)")
-	t.Log("✓ zero-alloc: frame layer 0/0, hpack layer 0/0")
-}
+// Stress 7 used to be TestStress_ZeroAlloc_FrameHpack, whose entire body was two
+// t.Log lines asserting that "frame + hpack benches confirmed 0 B/op". It could
+// not fail: it measured nothing and referenced results from elsewhere. The claim
+// it made is genuinely enforced, by .github/workflows/bench-gate.yml running
+// scripts/bench-gate.sh over ./frame ./hpack (and five more packages) and failing
+// on any non-zero B/op or allocs/op line. Removed rather than rewritten, because
+// a second, weaker copy of a real gate is worse than no copy.
 
 // ---------- Stress 8: Metrics consistency check ----------
 
 func TestStress_MetricsConsistency(t *testing.T) {
 	c := e2eClient(t, "www.google.com")
 	defer c.Close()
-
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-
 	const n = 10
+
 	var resp client.Response
 	for i := 0; i < n; i++ {
 		resp.Reset()
@@ -408,30 +351,15 @@ func TestStress_MetricsConsistency(t *testing.T) {
 			Headers:  ua(),
 			BodyMode: client.BodyBuffer,
 		}, &resp)
-		if err != nil {
-			t.Fatalf("request %d: %v", i, err)
-		}
+		require.NoErrorf(t, err, "request %d", i)
 	}
-
 	snap := c.MetricsSnapshot()
 
-	// started == succeeded + errored
-	if snap.Counters.RequestsStarted != snap.Counters.RequestsSucceeded+snap.Counters.RequestsErrored {
-		t.Errorf("metrics invariant broken: started=%d != succeeded=%d + errored=%d",
-			snap.Counters.RequestsStarted, snap.Counters.RequestsSucceeded, snap.Counters.RequestsErrored)
-	}
-
-	if snap.Counters.RequestsSucceeded != n {
-		t.Errorf("expected %d succeeded, got %d", n, snap.Counters.RequestsSucceeded)
-	}
-
-	if snap.Counters.RequestsErrored != 0 {
-		t.Errorf("expected 0 errored, got %d", snap.Counters.RequestsErrored)
-	}
-
-	t.Logf("✓ metrics consistency: started=%d succeeded=%d errored=%d dials=%d",
-		snap.Counters.RequestsStarted, snap.Counters.RequestsSucceeded,
-		snap.Counters.RequestsErrored, snap.Counters.DialsAttempted)
+	assert.Equal(t, snap.Counters.RequestsSucceeded+snap.Counters.RequestsErrored,
+		snap.Counters.RequestsStarted,
+		"metrics invariant broken: started must equal succeeded + errored")
+	assert.EqualValues(t, n, snap.Counters.RequestsSucceeded, "expected %d succeeded", n)
+	assert.EqualValues(t, 0, snap.Counters.RequestsErrored, "expected 0 errored")
 }
 
 // ---------- Stress 9: Pool — verify all conns used ----------
@@ -452,14 +380,10 @@ func TestStress_Pool_AllConnsUsed(t *testing.T) {
 			MaxConnsPerHost: 3,
 		},
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, err, "NewClient(pool)")
 	defer c.Close()
-
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
-
 	const n = 30
 	var wg sync.WaitGroup
 	var ok atomic.Int64
@@ -469,13 +393,13 @@ func TestStress_Pool_AllConnsUsed(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			var resp client.Response
-			err := c.Do(ctx, &client.Request{
+			derr := c.Do(ctx, &client.Request{
 				Method:   "GET",
 				Path:     "/",
 				Headers:  ua(),
 				BodyMode: client.BodyBuffer,
 			}, &resp)
-			if err == nil && resp.Status >= 200 && resp.Status <= 399 {
+			if derr == nil && resp.Status >= 200 && resp.Status <= 399 {
 				ok.Add(1)
 			}
 		}()
@@ -483,14 +407,12 @@ func TestStress_Pool_AllConnsUsed(t *testing.T) {
 	wg.Wait()
 
 	snap := c.MetricsSnapshot()
-	t.Logf("✓ pool all-conns: ok=%d/%d dials=%d (max=%d) succeeded=%d errored=%d",
-		ok.Load(), n, snap.Counters.DialsAttempted, 3,
+	t.Logf("pool all-conns: ok=%d/%d dials=%d (max=3) succeeded=%d errored=%d",
+		ok.Load(), n, snap.Counters.DialsAttempted,
 		snap.Counters.RequestsSucceeded, snap.Counters.RequestsErrored)
-
 	// Should have opened >1 conn for 30 concurrent requests with MaxConnsPerHost=3.
-	if snap.Counters.DialsAttempted < 2 {
-		t.Errorf("expected ≥2 dials for %d concurrent requests, got %d", n, snap.Counters.DialsAttempted)
-	}
+	assert.GreaterOrEqualf(t, snap.Counters.DialsAttempted, uint64(2),
+		"expected >=2 dials for %d concurrent requests, got %d", n, snap.Counters.DialsAttempted)
 }
 
 // ---------- Stress 10: Body content validation ----------
@@ -498,7 +420,6 @@ func TestStress_Pool_AllConnsUsed(t *testing.T) {
 func TestStress_BodyContentValidation(t *testing.T) {
 	c := e2eClient(t, "www.google.com")
 	defer c.Close()
-
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
@@ -513,32 +434,22 @@ func TestStress_BodyContentValidation(t *testing.T) {
 			Headers:  ua(),
 			BodyMode: client.BodyBuffer,
 		}, &resp)
-		if err != nil {
-			t.Fatalf("request %d: %v", i, err)
-		}
-		if resp.Status < 200 || resp.Status > 399 {
-			t.Fatalf("request %d: status %d", i, resp.Status)
-		}
-		if len(resp.Body) == 0 {
-			t.Fatalf("request %d: empty body", i)
-		}
+
+		require.NoErrorf(t, err, "request %d", i)
+		require.GreaterOrEqualf(t, resp.Status, 200, "request %d: status %d", i, resp.Status)
+		require.LessOrEqualf(t, resp.Status, 399, "request %d: status %d", i, resp.Status)
+		require.NotEmptyf(t, resp.Body, "request %d: empty body", i)
 		sizes = append(sizes, len(resp.Body))
 	}
 
-	// All sizes should be identical (same resource).
-	first := sizes[0]
+	// All sizes should be identical (same resource) — logged, not asserted:
+	// google serves robots.txt dynamically.
 	for i, s := range sizes {
-		if s != first {
-			t.Logf("  size[%d]=%d differs from first=%d (may be dynamic content)", i, s, first)
+		if s != sizes[0] {
+			t.Logf("  size[%d]=%d differs from first=%d (may be dynamic content)", i, s, sizes[0])
 		}
 	}
-
-	// Body should contain "User-agent" for robots.txt.
-	if !bytes.Contains(resp.Body, []byte("User-agent")) {
-		t.Fatal("robots.txt body missing 'User-agent'")
-	}
-
-	t.Logf("✓ body content: 5 requests, sizes=%v, contains 'User-agent'", sizes)
+	assert.Contains(t, string(resp.Body), "User-agent", "robots.txt body missing 'User-agent'")
 }
 
 // ---------- Stress 11: BodyStream nil Response returns error ----------
@@ -546,7 +457,6 @@ func TestStress_BodyContentValidation(t *testing.T) {
 func TestStress_BodyStream_NilResponseError(t *testing.T) {
 	c := e2iClient(t, "www.google.com")
 	defer c.Close()
-
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
@@ -557,10 +467,8 @@ func TestStress_BodyStream_NilResponseError(t *testing.T) {
 		Headers:  ua(),
 		BodyMode: client.BodyStream,
 	}, nil)
-	if err == nil {
-		t.Fatal("expected error when BodyStream=true with nil Response")
-	}
-	t.Logf("✓ BodyStream nil Response: got expected error: %v", err)
+
+	require.Error(t, err, "expected error when BodyStream=true with nil Response")
 }
 
 // e2iClient creates a single-conn client that returns Response with BodyStream support.
@@ -577,8 +485,6 @@ func e2iClient(t *testing.T, host string) *client.Client {
 			},
 		},
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
+	require.NoErrorf(t, err, "NewClient(%s)", host)
 	return c
 }

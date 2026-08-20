@@ -7,6 +7,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
 	"github.com/lodgvideon/poseidon-http-client/client"
 	"github.com/lodgvideon/poseidon-http-client/conn"
 )
@@ -44,9 +47,7 @@ type finPeer struct {
 func newFINPeer(t *testing.T, reapAfter time.Duration) *finPeer {
 	t.Helper()
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, err, "Listen")
 	p := &finPeer{ln: ln}
 	t.Cleanup(func() { _ = ln.Close() })
 
@@ -127,9 +128,8 @@ func runFINReuse(t *testing.T, c *client.Client) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	if err := doGet(ctx, r); err != nil {
-		t.Fatalf("first request failed before the connection was ever reaped: %v", err)
-	}
+	require.NoError(t, doGet(ctx, r),
+		"first request failed before the connection was ever reaped")
 	// Long enough for the FIN to arrive, short enough that the pool's 250ms
 	// probe gate stays shut.
 	time.Sleep(60 * time.Millisecond)
@@ -146,22 +146,21 @@ func TestIntegration_H1Pool_ServerReapsIdleConn_RequestIsReplayed(t *testing.T) 
 
 	c, err := client.NewH1PoolClient(peer.addr(), &conn.PlaintextDialer{},
 		client.PoolOptions{MaxConnsPerHost: 1})
-	if err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, err, "NewH1PoolClient")
 	defer c.Close()
 
 	err2 := runFINReuse(t, c)
-	if err2 != nil {
-		t.Fatalf("second request failed after the peer reaped the pooled connection: %v\n"+
-			"inside h1ProbeIdleAfter the pool hands the connection out unchecked by "+
-			"design, so recovery depends entirely on ErrServerClosedIdle reaching the "+
-			"Retryer and the request being replayed on a fresh connection", err2)
-	}
-	if got := peer.acceptedCount(); got < 2 {
-		t.Errorf("peer accepted %d connections, want at least 2 — the second request "+
-			"did not actually redial, so this passed without exercising the replay", got)
-	}
+
+	require.NoError(t, err2,
+		"second request failed after the peer reaped the pooled connection; inside "+
+			"h1ProbeIdleAfter the pool hands the connection out unchecked by design, so "+
+			"recovery depends entirely on ErrServerClosedIdle reaching the Retryer and the "+
+			"request being replayed on a fresh connection")
+	// CONTROL: without a redial the replay never happened and the assertion above
+	// is satisfied by a request that simply never met the reaped connection.
+	assert.GreaterOrEqual(t, peer.acceptedCount(), 2,
+		"peer accepted fewer than 2 connections — the second request did not actually "+
+			"redial, so this passed without exercising the replay")
 }
 
 // TestIntegration_H1SingleConn_ServerReapsIdleConn_RequestIsReplayed is the
@@ -173,18 +172,15 @@ func TestIntegration_H1SingleConn_ServerReapsIdleConn_RequestIsReplayed(t *testi
 	peer := newFINPeer(t, 10*time.Millisecond)
 
 	c, err := client.NewH1Client(peer.addr(), &conn.PlaintextDialer{})
-	if err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, err, "NewH1Client")
 	defer c.Close()
 
 	err2 := runFINReuse(t, c)
-	if err2 != nil {
-		t.Fatalf("second request failed after the peer reaped the connection: %v\n"+
-			"this transport never probes at checkout, so the replay is the only "+
-			"recovery there is", err2)
-	}
-	if got := peer.acceptedCount(); got < 2 {
-		t.Errorf("peer accepted %d connections, want at least 2 — no redial happened", got)
-	}
+
+	require.NoError(t, err2,
+		"second request failed after the peer reaped the connection; this transport never "+
+			"probes at checkout, so the replay is the only recovery there is")
+	// CONTROL: see the pooled sibling — no redial means no replay was exercised.
+	assert.GreaterOrEqual(t, peer.acceptedCount(), 2,
+		"peer accepted fewer than 2 connections — no redial happened")
 }

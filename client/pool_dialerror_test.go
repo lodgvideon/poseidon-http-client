@@ -8,6 +8,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/require"
+
 	"github.com/lodgvideon/poseidon-http-client/conn"
 )
 
@@ -23,7 +25,6 @@ import (
 func TestManagedPool_FailsOverOnFirstDialFailure(t *testing.T) {
 	addrs, _, cleanup := startH2Servers(t, 1)
 	defer cleanup()
-
 	dead := deadAddress(t)
 	live := addrs[0]
 	mp, err := newManagedPool(
@@ -34,9 +35,7 @@ func TestManagedPool_FailsOverOnFirstDialFailure(t *testing.T) {
 		PoolOptions{MaxConnsPerHost: 1, MaxStreamsPerConn: 4, HealthCheckPeriod: time.Hour},
 		nil, nil,
 	)
-	if err != nil {
-		t.Fatalf("newManagedPool: %v", err)
-	}
+	require.NoError(t, err, "newManagedPool")
 	defer mp.close()
 
 	// RoundRobin starts on the dead address, so the loop must reach the live
@@ -44,12 +43,10 @@ func TestManagedPool_FailsOverOnFirstDialFailure(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
 	c, release, _, err := mp.acquire(ctx)
-	if err != nil {
-		t.Fatalf("acquire = %v; a live second address was available, so the loop stopped on the dead one", err)
-	}
-	if c == nil {
-		t.Fatal("acquire returned no connection and no error")
-	}
+
+	require.NoErrorf(t, err,
+		"acquire = %v; a live second address was available, so the loop stopped on the dead one", err)
+	require.NotNil(t, c, "acquire returned no connection and no error")
 	release()
 }
 
@@ -69,33 +66,26 @@ func TestPool_DialFailureIsTypedForClassification(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	_, err := p.acquire(ctx)
-	if err == nil {
-		t.Fatal("acquire succeeded against a dialer that refuses everything")
-	}
+
+	require.Error(t, err, "acquire succeeded against a dialer that refuses everything")
 	var de *DialError
-	if !errors.As(err, &de) {
-		t.Fatalf("acquire error = %v (%T), want a *DialError: managed failover and the retry classifier both key on it", err, err)
-	}
-	if !errors.Is(err, sentinel) {
-		t.Fatalf("wrapping lost the cause: %v", err)
-	}
-	if !isDialOnlyErr(err) {
-		t.Fatal("isDialOnlyErr rejected a pool dial failure, so managed failover would abort on it")
-	}
+	require.Truef(t, errors.As(err, &de),
+		"acquire error = %v (%T), want a *DialError: managed failover and the retry classifier both key on it",
+		err, err)
+	require.ErrorIsf(t, err, sentinel, "wrapping lost the cause: %v", err)
+	require.True(t, isDialOnlyErr(err),
+		"isDialOnlyErr rejected a pool dial failure, so managed failover would abort on it")
 	// The retry classifier's view — this is the behaviour change the wrap
 	// carries with it, so it is asserted rather than left implicit.
-	if !builtinShouldRetry(err) {
-		t.Fatal("builtinShouldRetry rejected a pool dial failure; nothing was sent, so it is retryable")
-	}
+	require.True(t, builtinShouldRetry(err),
+		"builtinShouldRetry rejected a pool dial failure; nothing was sent, so it is retryable")
 }
 
 // deadAddress returns an Address nothing listens on.
 func deadAddress(t *testing.T) Address {
 	t.Helper()
 	l, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("listen: %v", err)
-	}
+	require.NoError(t, err, "listen")
 	ta := l.Addr().(*net.TCPAddr)
 	_ = l.Close()
 	return Address{Host: ta.IP.String(), Port: ta.Port}
@@ -116,18 +106,12 @@ func TestH3Pool_DialFailureIsTypedForClassification(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	if _, err := p.acquire(ctx); err == nil {
-		t.Fatal("acquire succeeded against a dialer that refuses everything")
-	} else {
-		var de *DialError
-		if !errors.As(err, &de) {
-			t.Fatalf("acquire error = %v (%T), want a *DialError", err, err)
-		}
-		if !errors.Is(err, sentinel) {
-			t.Fatalf("wrapping lost the cause: %v", err)
-		}
-		if !isDialOnlyErr(err) {
-			t.Fatal("isDialOnlyErr rejected an H3 pool dial failure, so managed failover would abort on it")
-		}
-	}
+	_, err := p.acquire(ctx)
+
+	require.Error(t, err, "acquire succeeded against a dialer that refuses everything")
+	var de *DialError
+	require.Truef(t, errors.As(err, &de), "acquire error = %v (%T), want a *DialError", err, err)
+	require.ErrorIsf(t, err, sentinel, "wrapping lost the cause: %v", err)
+	require.True(t, isDialOnlyErr(err),
+		"isDialOnlyErr rejected an H3 pool dial failure, so managed failover would abort on it")
 }

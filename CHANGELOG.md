@@ -205,6 +205,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Tests
 
+- **The H2 retention test now measures a quiet connection, which is what makes
+  its bound reachable at all.**
+  `TestIT_H2_StreamedDownload_RetentionStaysBounded` took its live-heap baseline
+  after `DoStream` returned — with the server already streaming 64 MiB. Two
+  things followed from that, and the second is the worse one.
+
+  It reset. conn's reader fills a stream's event channel whether or not anybody
+  is reading it, and `push` drops the frame and sends `RST_STREAM(CANCEL)` once
+  `StreamEventBuffer` (8 here) events are queued, so the two blocking GCs inside
+  the baseline were a window the reader could win. Measured: `GOMAXPROCS=1` loses
+  it 2 runs in 3, and Gremlins' coverage sweep — `go test ./...`, no `-race`,
+  every package at once — lost it twice out of twice on a 4-vCPU runner, both
+  times identically at “262141 of 67108864 bytes”, i.e. before the drain loop
+  had run once. It is not the flake it resembles: no CI path had ever run this
+  suite CPU-starved *and* without `-race` until the mutation gate did.
+
+  And when it did not reset, the baseline had absorbed up to `ltPipelineBytes` of
+  the very body being bounded, so `after - baseline` came out **negative** —
+  around −1.3 MiB against a 1 MiB bound — and the retention comparison, guarded
+  by `after > baseline`, was never evaluated. Cutting the bound to 64 KiB, well
+  under the real 134–196 KiB delta, leaves the old test green 3/3 and turns the
+  new one red 3/3.
+
+  The fixture now flushes the response headers and parks the handler on a
+  `release` channel that the test closes once the baseline is taken. Nothing is
+  in flight during the measurement; `ltEventBuf` and `ltRetentionBound` are
+  untouched, because widening the channel to buy scheduling slack would have
+  loosened the bound the test exists to assert. The delta is now positive, stable
+  and about an eighth of the bound, and `GOMAXPROCS=1` is 10/10.
+
 - **The mTLS rejection conformance test waits for the close instead of racing
   it.** `TestConformance_RFC9001_Sec48_ListenerClosesOnRejectedClientCert` called
   `Poll` once and required that one call to have observed the server's

@@ -12,6 +12,9 @@ head.txt
 base.txt
 diff.txt
 
+# Mutation report (`make mutation-full`); CI keeps it as a job artifact
+gremlins.json
+
 # Fuzz corpus: deliberately NOT ignored. Go's generated corpus lives in
 # $GOCACHE/fuzz, not here — the only thing `go test` writes under
 # testdata/fuzz/<Target>/ is a crasher, which MUST be committed: it is the

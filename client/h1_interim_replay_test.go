@@ -2,11 +2,13 @@ package client_test
 
 import (
 	"context"
-	"errors"
 	"net"
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	"github.com/lodgvideon/poseidon-http-client/client"
 	"github.com/lodgvideon/poseidon-http-client/conn"
@@ -40,9 +42,7 @@ type interimPeer struct {
 func newInterimPeer(t *testing.T, sendInterim bool) *interimPeer {
 	t.Helper()
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, err, "Listen")
 	p := &interimPeer{ln: ln, sendInterim: sendInterim}
 	t.Cleanup(func() { _ = ln.Close() })
 
@@ -100,9 +100,7 @@ func (p *interimPeer) addr() string { return p.ln.Addr().String() }
 func runReplayProbe(t *testing.T, addr string) error {
 	t.Helper()
 	c, err := client.NewH1Client(addr, &conn.PlaintextDialer{})
-	if err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, err, "NewH1Client")
 	defer c.Close()
 
 	r := client.NewRetryer(c, client.RetryOptions{
@@ -129,19 +127,14 @@ func TestIntegration_H1_InterimThenClose_IsNotReplayed(t *testing.T) {
 
 	err := runReplayProbe(t, peer.addr())
 
-	if err == nil {
-		t.Fatal("the request succeeded, but the peer never sent a final response")
-	}
-	if errors.Is(err, http1.ErrServerClosedIdle) {
-		t.Errorf("error is %v, want anything but ErrServerClosedIdle: the peer sent "+
-			"100 Continue before closing, so it had the request and had begun answering "+
-			"it, and that type is the licence to replay", err)
-	}
-	if got := peer.requestCount(); got != 1 {
-		t.Errorf("the peer received the request %d times, want exactly 1 — it answered "+
-			"with an interim, so it was already acting on the request, and a replay "+
-			"duplicates work it had begun", got)
-	}
+	require.Error(t, err, "the request succeeded, but the peer never sent a final response")
+	assert.NotErrorIsf(t, err, http1.ErrServerClosedIdle,
+		"error is %v, want anything but ErrServerClosedIdle: the peer sent 100 Continue "+
+			"before closing, so it had the request and had begun answering it, and that "+
+			"type is the licence to replay", err)
+	assert.Equal(t, 1, peer.requestCount(),
+		"the peer must receive the request exactly once — it answered with an interim, "+
+			"so it was already acting on the request, and a replay duplicates work it had begun")
 }
 
 // TestIntegration_H1_ClosedWithNoResponse_IsReplayed is the control, and without it
@@ -154,13 +147,10 @@ func TestIntegration_H1_ClosedWithNoResponse_IsReplayed(t *testing.T) {
 
 	err := runReplayProbe(t, peer.addr())
 
-	if err == nil {
-		t.Fatal("the request succeeded, but the peer never sent any response")
-	}
-	if got := peer.requestCount(); got < 2 {
-		t.Errorf("the peer received the request %d times, want at least 2 — nothing of a "+
-			"response ever arrived, which is the one H1 failure that is safe to replay, "+
-			"so this arm proves the retry path is reachable at all and the gate above is "+
-			"not passing merely because no request is ever retried", got)
-	}
+	require.Error(t, err, "the request succeeded, but the peer never sent any response")
+	assert.GreaterOrEqual(t, peer.requestCount(), 2,
+		"the peer must receive the request at least twice — nothing of a response ever "+
+			"arrived, which is the one H1 failure that is safe to replay, so this arm "+
+			"proves the retry path is reachable at all and the gate above is not passing "+
+			"merely because no request is ever retried")
 }

@@ -2,11 +2,14 @@ package client
 
 import (
 	"context"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"golang.org/x/net/http2"
 )
 
@@ -26,9 +29,7 @@ func statusOnlyServer(t *testing.T) string {
 	srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusNoContent)
 	}))
-	if err := http2.ConfigureServer(srv.Config, &http2.Server{}); err != nil {
-		t.Fatalf("ConfigureServer: %v", err)
-	}
+	require.NoError(t, http2.ConfigureServer(srv.Config, &http2.Server{}), "ConfigureServer")
 	srv.EnableHTTP2 = true
 	srv.StartTLS()
 	t.Cleanup(srv.Close)
@@ -39,29 +40,24 @@ func statusOnlyServer(t *testing.T) string {
 func TestStreamTarget_BodyStream_EndsOnHeaders(t *testing.T) {
 	addr := statusOnlyServer(t)
 	c, err := NewClient(ClientOptions{Addr: addr, ConnOpts: newConnOpts()})
-	if err != nil {
-		t.Fatalf("NewClient: %v", err)
-	}
+	require.NoError(t, err, "NewClient against the status-only server")
 	defer func() { _ = c.Close() }()
-
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-
 	var resp Response
-	if err := c.Do(ctx, &Request{Method: "GET", Path: "/", BodyMode: BodyStream}, &resp); err != nil {
-		t.Fatalf("Do: %v", err)
-	}
-	if resp.Status != 204 {
-		t.Fatalf("status = %d, want 204", resp.Status)
-	}
+	require.NoError(t, c.Do(ctx, &Request{Method: "GET", Path: "/", BodyMode: BodyStream}, &resp),
+		"Do with BodyMode=BodyStream against a 204")
+	require.Equalf(t, 204, resp.Status, "status = %d, want 204", resp.Status)
+	buf := make([]byte, 8)
+
 	// The read must report EOF immediately. Without the end-on-headers flag it
 	// waits for a DATA or trailer event that is never coming.
-	buf := make([]byte, 8)
 	n, rerr := resp.BodyReader.Read(buf)
-	if n != 0 || rerr == nil {
-		t.Errorf("Read = (%d, %v), want (0, io.EOF) — the body reader is waiting for an "+
-			"event a status-only response never sends", n, rerr)
-	}
+
+	assert.Zerof(t, n, "Read returned %d bytes from a status-only response", n)
+	assert.ErrorIsf(t, rerr, io.EOF,
+		"Read err = %v, want io.EOF — the body reader is waiting for an event a "+
+			"status-only response never sends", rerr)
 	_ = resp.BodyReader.Close()
 }
 
@@ -70,24 +66,18 @@ func TestStreamTarget_BodyStream_EndsOnHeaders(t *testing.T) {
 func TestStreamTarget_DoStream_EndsOnHeaders(t *testing.T) {
 	addr := statusOnlyServer(t)
 	c, err := NewClient(ClientOptions{Addr: addr, ConnOpts: newConnOpts()})
-	if err != nil {
-		t.Fatalf("NewClient: %v", err)
-	}
+	require.NoError(t, err, "NewClient against the status-only server")
 	defer func() { _ = c.Close() }()
-
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-
 	var sr StreamResponse
-	if err := c.DoStream(ctx, &Request{Method: "GET", Path: "/"}, &sr); err != nil {
-		t.Fatalf("DoStream: %v", err)
-	}
+
+	err = c.DoStream(ctx, &Request{Method: "GET", Path: "/"}, &sr)
+
+	require.NoError(t, err, "DoStream against a 204")
 	defer func() { _ = sr.Close() }()
-	if sr.Status != 204 {
-		t.Fatalf("status = %d, want 204", sr.Status)
-	}
-	if !sr.drained {
-		t.Error("StreamResponse is not marked drained after a status-only response; Recv " +
-			"would block on an event that never arrives")
-	}
+	require.Equalf(t, 204, sr.Status, "status = %d, want 204", sr.Status)
+	assert.True(t, sr.drained,
+		"StreamResponse is not marked drained after a status-only response; Recv would "+
+			"block on an event that never arrives")
 }

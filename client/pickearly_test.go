@@ -5,6 +5,9 @@ import (
 	"math/rand"
 	"testing"
 
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
 	"github.com/lodgvideon/poseidon-http-client/conn"
 	"github.com/lodgvideon/poseidon-http-client/http3"
 )
@@ -71,7 +74,6 @@ func TestPickLeastLoaded_ContractHolds(t *testing.T) {
 				streamCap: rng.Intn(4),
 			})
 		}
-
 		anyEligible, anyIdle, minActive := false, false, 1<<30
 		for _, mc := range conns {
 			if !h3Eligible(mc) {
@@ -87,21 +89,20 @@ func TestPickLeastLoaded_ContractHolds(t *testing.T) {
 		}
 
 		got := p.pickLeastLoaded(conns)
+
 		if got == nil {
-			if anyEligible {
-				t.Fatalf("trial %d: returned nil with an eligible connection present", trial)
-			}
+			require.Falsef(t, anyEligible,
+				"trial %d: returned nil with an eligible connection present", trial)
+			continue
+		}
+		require.Truef(t, h3Eligible(got), "trial %d: returned an ineligible connection", trial)
+		if anyIdle {
+			require.Zerof(t, got.active,
+				"trial %d: an idle connection existed but a busy one (active=%d) was returned",
+				trial, got.active)
 		} else {
-			if !h3Eligible(got) {
-				t.Fatalf("trial %d: returned an ineligible connection", trial)
-			}
-			if anyIdle && got.active != 0 {
-				t.Fatalf("trial %d: an idle connection existed but a busy one (active=%d) was returned",
-					trial, got.active)
-			}
-			if !anyIdle && got.active != minActive {
-				t.Fatalf("trial %d: returned active=%d, want the minimum %d", trial, got.active, minActive)
-			}
+			require.Equalf(t, minActive, got.active,
+				"trial %d: returned active=%d, want the minimum %d", trial, got.active, minActive)
 		}
 	}
 }
@@ -124,7 +125,6 @@ func TestPickLeastLoaded_H2ContractHolds(t *testing.T) {
 				streamCap: rng.Intn(4),
 			})
 		}
-
 		anyEligible, anyIdle, minActive := false, false, 1<<30
 		for _, mc := range conns {
 			if !h2Eligible(mc) {
@@ -140,20 +140,19 @@ func TestPickLeastLoaded_H2ContractHolds(t *testing.T) {
 		}
 
 		got := p.pickLeastLoaded(conns)
+
 		if got == nil {
-			if anyEligible {
-				t.Fatalf("trial %d: returned nil with an eligible connection present", trial)
-			}
+			require.Falsef(t, anyEligible,
+				"trial %d: returned nil with an eligible connection present", trial)
+			continue
+		}
+		require.Truef(t, h2Eligible(got), "trial %d: returned an ineligible connection", trial)
+		if anyIdle {
+			require.Zerof(t, got.active,
+				"trial %d: an idle connection existed but a busy one was returned", trial)
 		} else {
-			if !h2Eligible(got) {
-				t.Fatalf("trial %d: returned an ineligible connection", trial)
-			}
-			if anyIdle && got.active != 0 {
-				t.Fatalf("trial %d: an idle connection existed but a busy one was returned", trial)
-			}
-			if !anyIdle && got.active != minActive {
-				t.Fatalf("trial %d: returned active=%d, want the minimum %d", trial, got.active, minActive)
-			}
+			require.Equalf(t, minActive, got.active,
+				"trial %d: returned active=%d, want the minimum %d", trial, got.active, minActive)
 		}
 	}
 }
@@ -173,15 +172,13 @@ func TestPickLeastLoaded_RotatesAcrossIdleConns(t *testing.T) {
 	seen := map[*h3ManagedConn]int{}
 	for i := 0; i < len(conns); i++ {
 		got := p.pickLeastLoaded(conns)
-		if got == nil {
-			t.Fatalf("pick %d returned nil", i)
-		}
+		require.NotNilf(t, got, "pick %d returned nil", i)
 		seen[got]++
 	}
-	if len(seen) != len(conns) {
-		t.Errorf("four picks over four idle connections touched %d of them, want all %d — "+
+
+	assert.Lenf(t, seen, len(conns),
+		"four picks over four idle connections touched %d of them, want all %d — "+
 			"the cursor is not rotating", len(seen), len(conns))
-	}
 }
 
 // TestPickLeastLoaded_H2RotatesAcrossIdleConns is the same property for the
@@ -210,15 +207,13 @@ func TestPickLeastLoaded_H2RotatesAcrossIdleConns(t *testing.T) {
 	seen := map[*managedConn]int{}
 	for i := 0; i < len(conns); i++ {
 		got := p.pickLeastLoaded(conns)
-		if got == nil {
-			t.Fatalf("pick %d returned nil", i)
-		}
+		require.NotNilf(t, got, "pick %d returned nil", i)
 		seen[got]++
 	}
-	if len(seen) != len(conns) {
-		t.Errorf("four picks over four idle connections touched %d of them, want all %d — "+
+
+	assert.Lenf(t, seen, len(conns),
+		"four picks over four idle connections touched %d of them, want all %d — "+
 			"the cursor is not rotating", len(seen), len(conns))
-	}
 }
 
 // TestPickLeastLoaded_CursorSurvivesAShrinkingPool pins the modulus: the cursor
@@ -233,12 +228,13 @@ func TestPickLeastLoaded_CursorSurvivesAShrinkingPool(t *testing.T) {
 	for i := 0; i < 8; i++ {
 		p.pickLeastLoaded(big) // drive the cursor up
 	}
+
 	// The pool shrinks to one connection; the cursor is now larger than the slice.
 	small := big[:1]
-	if got := p.pickLeastLoaded(small); got != small[0] {
-		t.Fatalf("after the pool shrank, pick returned %p, want the only connection %p", got, small[0])
-	}
-	if got := p.pickLeastLoaded(nil); got != nil {
-		t.Errorf("pick over an empty pool returned %p, want nil", got)
-	}
+	gotSmall := p.pickLeastLoaded(small)
+	gotEmpty := p.pickLeastLoaded(nil)
+
+	require.Samef(t, small[0], gotSmall,
+		"after the pool shrank, pick returned %p, want the only connection %p", gotSmall, small[0])
+	assert.Truef(t, gotEmpty == nil, "pick over an empty pool returned %p, want nil", gotEmpty)
 }

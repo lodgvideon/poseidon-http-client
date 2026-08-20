@@ -9,6 +9,8 @@ import (
 
 	"github.com/lodgvideon/poseidon-http-client/conn"
 	"github.com/lodgvideon/poseidon-http-client/frame"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // These pin decisions inside the pools' periodic tick that no test detected.
@@ -18,6 +20,10 @@ import (
 // They gate the #364 unification. A generic tick body has to either preserve
 // each of these or drop it deliberately, and neither is possible while the
 // suite cannot tell the difference.
+//
+// Every test here calls the actor method directly and asserts on state the call
+// itself settles, so none of them is timing-shaped: there is no injection to
+// count and no tolerance to widen.
 
 // TestEvictIdle_KeepsConnWithActiveStreams pins evictIdle's `active == 0`
 // guard on the HTTP/2 pool.
@@ -43,9 +49,7 @@ func TestEvictIdle_KeepsConnWithActiveStreams(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 	c, err := conn.NewClientConn(ctx, cli, conn.ConnOptions{})
-	if err != nil {
-		t.Fatalf("NewClientConn: %v", err)
-	}
+	require.NoError(t, err, "NewClientConn against the in-memory H2 peer")
 	t.Cleanup(func() { _ = c.Close() })
 
 	p := newPool("ignored:0", newConnOpts(), PoolOptions{
@@ -55,18 +59,15 @@ func TestEvictIdle_KeepsConnWithActiveStreams(t *testing.T) {
 	t.Cleanup(func() { _ = p.Close() })
 
 	stale := time.Now().Add(-time.Second) // well past IdleTimeout
-
 	busy := &managedConn{c: c, active: 1, lastUsed: stale}
 	idle := &managedConn{c: c, active: 0, lastUsed: stale}
 
 	got := p.evictIdle([]*managedConn{busy, idle})
 
-	if len(got) != 1 {
-		t.Fatalf("evictIdle kept %d conns, want 1", len(got))
-	}
-	if got[0] != busy {
-		t.Fatal("evictIdle evicted the conn that still had active streams and kept the idle one")
-	}
+	require.Lenf(t, got, 1, "evictIdle kept %d conns, want 1", len(got))
+	assert.Same(t, busy, got[0],
+		"evictIdle evicted the conn that still had active streams and kept the idle one — "+
+			"a long-lived response or slow upload would be cut mid-flight")
 }
 
 // TestH3EvictIdle_KeepsConnWithActiveStreams is the HTTP/3 twin. Same guard,
@@ -80,18 +81,15 @@ func TestH3EvictIdle_KeepsConnWithActiveStreams(t *testing.T) {
 	t.Cleanup(func() { _ = p.Close() })
 
 	stale := time.Now().Add(-time.Second)
-
 	busy := &h3ManagedConn{cl: &fakeH3Client{}, active: 1, lastUsed: stale, streamCap: 10}
 	idle := &h3ManagedConn{cl: &fakeH3Client{}, active: 0, lastUsed: stale, streamCap: 10}
 
 	got := p.evictIdle([]*h3ManagedConn{busy, idle})
 
-	if len(got) != 1 {
-		t.Fatalf("evictIdle kept %d conns, want 1", len(got))
-	}
-	if got[0] != busy {
-		t.Fatal("evictIdle evicted the conn that still had active streams and kept the idle one")
-	}
+	require.Lenf(t, got, 1, "evictIdle kept %d conns, want 1", len(got))
+	assert.Same(t, busy, got[0],
+		"evictIdle evicted the conn that still had active streams and kept the idle one — "+
+			"the QUIC streams on it would be torn down mid-flight")
 }
 
 // TestHandleTick_DialsForStrandedWaiter pins ensureDialForWaiters inside the
@@ -113,7 +111,6 @@ func TestHandleTick_DialsForStrandedWaiter(t *testing.T) {
 		HealthCheckPeriod: time.Hour,
 	}, nil, nil)
 	t.Cleanup(func() { _ = p.Close() })
-
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	rs := &runState{
@@ -122,11 +119,10 @@ func TestHandleTick_DialsForStrandedWaiter(t *testing.T) {
 
 	p.handleTick(rs)
 
-	if rs.inFlightDials != 1 {
-		t.Fatalf("inFlightDials = %d after a tick with a stranded waiter, want 1 — "+
+	assert.Equalf(t, 1, rs.inFlightDials,
+		"inFlightDials = %d after a tick with a stranded waiter, want 1 — "+
 			"nothing re-enters the dial decision, so the waiter blocks until its ctx expires",
-			rs.inFlightDials)
-	}
+		rs.inFlightDials)
 }
 
 // TestH1HandleTick_DialsForStrandedWaiter is the HTTP/1.1 twin. Same call, same
@@ -137,7 +133,6 @@ func TestH1HandleTick_DialsForStrandedWaiter(t *testing.T) {
 		HealthCheckPeriod: time.Hour,
 	}, nil, nil)
 	t.Cleanup(func() { _ = p.Close() })
-
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	rs := &h1RunState{
@@ -146,7 +141,8 @@ func TestH1HandleTick_DialsForStrandedWaiter(t *testing.T) {
 
 	p.handleTick(rs)
 
-	if rs.inFlightDials != 1 {
-		t.Fatalf("inFlightDials = %d after a tick with a stranded waiter, want 1", rs.inFlightDials)
-	}
+	assert.Equalf(t, 1, rs.inFlightDials,
+		"inFlightDials = %d after a tick with a stranded waiter, want 1 — "+
+			"nothing re-enters the dial decision, so the waiter blocks until its ctx expires",
+		rs.inFlightDials)
 }

@@ -8,6 +8,9 @@ import (
 	"strconv"
 	"testing"
 
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
 	"github.com/lodgvideon/poseidon-http-client/client"
 	"github.com/lodgvideon/poseidon-http-client/conn"
 )
@@ -34,31 +37,26 @@ func startOneTLSServer(t *testing.T) (*httptest.Server, client.Address) {
 
 func TestNewClient_TransportManaged_Smoke(t *testing.T) {
 	t.Parallel()
+
 	srv, addr := startOneTLSServer(t)
 	c, err := client.NewClient(client.ClientOptions{
 		Transport: client.TransportManaged,
 		Resolver:  client.StaticResolver(addr),
 		ConnOpts:  conn.ConnOptions{Dialer: newTLSDialer(srv)},
 	})
-	if err != nil {
-		t.Fatalf("NewClient: %v", err)
-	}
+	require.NoError(t, err, "NewClient")
 	defer c.Close()
 
 	var resp client.Response
-	if err := c.Do(context.Background(), &client.Request{
-		Method: "GET",
-		Path:   "/",
-	}, &resp); err != nil {
-		t.Fatalf("Do: %v", err)
-	}
-	if resp.Status != 200 {
-		t.Errorf("status = %d, want 200", resp.Status)
-	}
+	err = c.Do(context.Background(), &client.Request{Method: "GET", Path: "/"}, &resp)
+
+	require.NoError(t, err, "Do")
+	assert.Equalf(t, 200, resp.Status, "status = %d, want 200", resp.Status)
 }
 
 func TestNewClient_TransportManaged_PoolStats(t *testing.T) {
 	t.Parallel()
+
 	srv, addr := startOneTLSServer(t)
 	c, err := client.NewClient(client.ClientOptions{
 		Transport: client.TransportManaged,
@@ -66,17 +64,14 @@ func TestNewClient_TransportManaged_PoolStats(t *testing.T) {
 		ConnOpts:  conn.ConnOptions{Dialer: newTLSDialer(srv)},
 		Pool:      &client.PoolOptions{MaxConnsPerHost: 2, MaxStreamsPerConn: 4},
 	})
-	if err != nil {
-		t.Fatalf("NewClient: %v", err)
-	}
+	require.NoError(t, err, "NewClient")
 	defer c.Close()
 
-	var _res client.Response
-	if err = c.Do(context.Background(), &client.Request{Method: "GET", Path: "/"}, &_res); err != nil {
-		t.Fatalf("Do: %v", err)
-	}
+	var res client.Response
+	require.NoError(t, c.Do(context.Background(), &client.Request{Method: "GET", Path: "/"}, &res), "Do")
 	st := c.PoolStats()
-	if st.ActiveConns < 1 {
-		t.Errorf("PoolStats.ActiveConns = %d after request, want >= 1", st.ActiveConns)
-	}
+
+	assert.GreaterOrEqualf(t, st.ActiveConns, 1,
+		"PoolStats.ActiveConns = %d after request, want >= 1 — a served request must be visible "+
+			"in the aggregate stats", st.ActiveConns)
 }

@@ -8,6 +8,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
 	"github.com/lodgvideon/poseidon-http-client/client"
 	"github.com/lodgvideon/poseidon-http-client/conn"
 )
@@ -93,9 +96,7 @@ func runGoAwayDrain(t *testing.T, mode goAwayDrainMode) {
 			DialBackoff:       10 * time.Millisecond,
 		},
 	})
-	if err != nil {
-		t.Fatalf("NewClient: %v", err)
-	}
+	require.NoError(t, err, "NewClient")
 	defer c.Close()
 
 	errs := make(chan error, N)
@@ -107,13 +108,13 @@ func runGoAwayDrain(t *testing.T, mode goAwayDrainMode) {
 			ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 			defer cancel()
 			var res client.Response
-			if err := c.Do(ctx, &client.Request{Method: "GET", Path: "/"}, &res); err != nil {
-				errs <- err
+			if derr := c.Do(ctx, &client.Request{Method: "GET", Path: "/"}, &res); derr != nil {
+				errs <- derr
 				return
 			}
-			if res.Status != 200 {
-				t.Errorf("status = %d, want 200", res.Status)
-			}
+			assert.Equal(t, 200, res.Status,
+				"a stream that drained below the peer's GOAWAY lastStreamID must carry the "+
+					"handler's real response, not a synthesised one")
 			errs <- nil
 		}()
 	}
@@ -127,7 +128,7 @@ func runGoAwayDrain(t *testing.T, mode goAwayDrainMode) {
 	case <-allStarted:
 	case <-time.After(10 * time.Second):
 		close(proceed)
-		t.Fatal("handlers did not all reach the server; requests were never concurrently in-flight")
+		require.FailNow(t, "handlers did not all reach the server; requests were never concurrently in-flight")
 	}
 
 	shutdownDone := make(chan struct{})
@@ -161,16 +162,13 @@ func runGoAwayDrain(t *testing.T, mode goAwayDrainMode) {
 	for err := range errs {
 		if err != nil {
 			failed++
-			t.Errorf("in-flight request died during graceful drain: %v", err)
+			assert.NoError(t, err, "in-flight request died during graceful drain")
 		}
 	}
-	if failed > 0 {
-		t.Fatalf("%d/%d streams below the peer's GOAWAY lastStreamID were killed by the pool; RFC 7540 §6.8 requires they complete", failed, N)
-	}
+	require.Zerof(t, failed,
+		"%d/%d streams below the peer's GOAWAY lastStreamID were killed by the pool; "+
+			"RFC 7540 §6.8 requires they complete", failed, N)
 
-	// CONTROL: prove a GOAWAY was actually received on this conn. Otherwise
-	// "all requests succeeded" is the trivially-true outcome of a test where
-	// Shutdown never reached the client, and the §6.8 path was never entered.
 	// CONTROL: prove a GOAWAY actually reached the pool on this conn. Without
 	// this, "all N requests succeeded" is the trivially-true result of a test
 	// where Shutdown never landed and the §6.8 drain path was never entered.
@@ -180,7 +178,7 @@ func runGoAwayDrain(t *testing.T, mode goAwayDrainMode) {
 	// counter is counting draining streams (it counted 4 here) or the same conn
 	// at two eviction sites, which makes it useless for alerting on peer
 	// restarts and flaky for any test asserting on it.
-	if got := c.MetricsSnapshot().Counters.GoAwaysReceived; got != 1 {
-		t.Fatalf("GoAwaysReceived = %d, want exactly 1 (one conn, one GOAWAY); 0 = the GOAWAY never reached the pool and this test asserted nothing", got)
-	}
+	require.EqualValues(t, 1, c.MetricsSnapshot().Counters.GoAwaysReceived,
+		"want exactly 1 GOAWAY (one conn, one GOAWAY); 0 = the GOAWAY never reached "+
+			"the pool and this test asserted nothing")
 }

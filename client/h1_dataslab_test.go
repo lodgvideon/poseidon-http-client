@@ -8,10 +8,12 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"reflect"
-	"strings"
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	"github.com/lodgvideon/poseidon-http-client/conn"
 )
@@ -30,11 +32,13 @@ func TestH1Exchange_HasNoInlineScratchBuffer(t *testing.T) {
 	// Generous: the struct is 3 words + 2 bools today. The bound is not a
 	// budget to spend, it is a tripwire on "somebody inlined an array again".
 	const maxSize = 128
-	if sz := reflect.TypeOf(h1Exchange{}).Size(); sz > maxSize {
-		t.Fatalf("h1Exchange is %d bytes, want <= %d — it is heap-allocated once per "+
-			"request, so an inline buffer here is a per-request cost. Scope scratch "+
-			"memory to the pooled connection or to conn's DATA-payload pool instead.", sz, maxSize)
-	}
+
+	sz := reflect.TypeOf(h1Exchange{}).Size()
+
+	assert.LessOrEqualf(t, sz, uintptr(maxSize),
+		"h1Exchange is %d bytes, want <= %d — it is heap-allocated once per request, so "+
+			"an inline buffer here is a per-request cost. Scope scratch memory to the "+
+			"pooled connection or to conn's DATA-payload pool instead.", sz, maxSize)
 }
 
 // h1PatternServer is the HTTP/1.1 twin of streamPatternServer: it flushes the
@@ -77,9 +81,7 @@ func h1PatternServer(t *testing.T, pattern []byte, chunk int) string {
 func h1RawServer(t *testing.T, respond func(net.Conn) error, keepAlive bool) string {
 	t.Helper()
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("listen: %v", err)
-	}
+	require.NoError(t, err, "listen")
 	t.Cleanup(func() { _ = ln.Close() })
 	go func() {
 		for {
@@ -120,9 +122,7 @@ func h1PoolTestClient(t *testing.T, addr string) *Client {
 		Pool:      &PoolOptions{MaxConnsPerHost: 2},
 		ConnOpts:  conn.ConnOptions{Dialer: &conn.PlaintextDialer{}},
 	})
-	if err != nil {
-		t.Fatalf("NewClient: %v", err)
-	}
+	require.NoError(t, err, "NewClient")
 	return c
 }
 
@@ -162,18 +162,17 @@ func TestIT_DataSlab_H1_Do_MultiChunk_PutExactlyOnce(t *testing.T) {
 	defer cancel()
 
 	var resp Response
-	if err := c.Do(ctx, &Request{Method: "GET", Path: "/", BodyMode: BodyBuffer}, &resp); err != nil {
-		t.Fatalf("Do: %v", err)
-	}
 
+	err := c.Do(ctx, &Request{Method: "GET", Path: "/", BodyMode: BodyBuffer}, &resp)
+
+	require.NoError(t, err, "Do over a multi-chunk body")
 	gets := led.check(t)
 	// Control 1: the ledger saw a sequence of slabs. Per-pointer accounting over a
 	// single Get degenerates to "one Get, one Put" and would pass against code
 	// with no per-chunk discipline at all.
-	if gets < 2 {
-		t.Fatalf("observed %d DATA slab Gets, want >= 2 — the ledger cannot "+
-			"distinguish per-chunk ownership from a single-chunk body", gets)
-	}
+	require.GreaterOrEqualf(t, gets, 2,
+		"observed %d DATA slab Gets, want >= 2 — the ledger cannot distinguish "+
+			"per-chunk ownership from a single-chunk body", gets)
 	// Control 2: the body survived being reassembled out of recycled buffers.
 	// Without this the ledger would pass just as well against a Recv that handed
 	// back one buffer every time and corrupted every response.
@@ -216,23 +215,22 @@ func TestIT_DataSlab_H1_TruncatedBody_PutExactlyOnce(t *testing.T) {
 	defer cancel()
 
 	var resp Response
-	err := c.Do(ctx, &Request{Method: "GET", Path: "/", BodyMode: BodyBuffer}, &resp)
-	if err == nil {
-		t.Fatal("Do succeeded on a body truncated short of its Content-Length; " +
-			"the error branch under test never ran")
-	}
-	if !strings.Contains(err.Error(), "premature EOF") {
-		t.Fatalf("Do error = %v, want a premature-EOF framing error — some other "+
-			"failure got here first and the Recv error branch may not have run", err)
-	}
 
+	err := c.Do(ctx, &Request{Method: "GET", Path: "/", BodyMode: BodyBuffer}, &resp)
+
+	require.Error(t, err, "Do succeeded on a body truncated short of its Content-Length; "+
+		"the error branch under test never ran")
+	// Name the mechanism: only a premature-EOF framing error proves h1Exchange.Recv's
+	// ERROR branch is what ran, rather than some earlier failure standing in for it.
+	require.ErrorContainsf(t, err, "premature EOF",
+		"Do error = %v, want a premature-EOF framing error — some other failure got "+
+			"here first and the Recv error branch may not have run", err)
 	gets := led.check(t)
 	// The undelivered Get is the point of the test: without it the run is just a
 	// shorter version of the multi-chunk test.
-	if gets < 2 {
-		t.Fatalf("observed %d DATA slab Gets, want >= 2 (several delivered chunks "+
-			"plus the undelivered one from the failing read)", gets)
-	}
+	require.GreaterOrEqualf(t, gets, 2,
+		"observed %d DATA slab Gets, want >= 2 (several delivered chunks plus the "+
+			"undelivered one from the failing read)", gets)
 }
 
 // TestH1_ConcurrentReuse_NoCrossRequestBleed is the dynamic twin of the ledger.
@@ -282,21 +280,24 @@ func TestH1_ConcurrentReuse_NoCrossRequestBleed(t *testing.T) {
 			for i := 0; i < perWorker; i++ {
 				var resp Response
 				resp.Reset()
+				// assert, never require: this runs off the test goroutine, where
+				// require's FailNow is illegal.
 				if err := c.Do(ctx, &Request{
 					Method: "GET", Path: "/" + string(marker), BodyMode: BodyBuffer,
 				}, &resp); err != nil {
-					t.Errorf("worker %d request %d: Do: %v", w, i, err)
+					assert.NoErrorf(t, err, "worker %d request %d: Do", w, i)
 					return
 				}
 				if len(resp.Body) != bodySize {
-					t.Errorf("worker %d request %d: body is %d bytes, want %d", w, i, len(resp.Body), bodySize)
+					assert.Lenf(t, resp.Body, bodySize, "worker %d request %d: wrong body length", w, i)
 					return
 				}
 				for j, b := range resp.Body {
 					if b != marker {
-						t.Errorf("worker %d request %d: body[%d] = %q, want %q — a pooled buffer "+
-							"was returned while still owned, so another request wrote over this "+
-							"response's bytes", w, i, j, b, marker)
+						assert.Equalf(t, marker, b,
+							"worker %d request %d: body[%d] = %q, want %q — a pooled buffer was "+
+								"returned while still owned, so another request wrote over this "+
+								"response's bytes", w, i, j, b, marker)
 						return
 					}
 				}
@@ -359,9 +360,7 @@ func TestH1_AllocatedBytesPerRequest(t *testing.T) {
 	var warm Response
 	for i := 0; i < 4; i++ {
 		warm.Reset()
-		if err := c.Do(ctx, req, &warm); err != nil {
-			t.Fatalf("warmup Do: %v", err)
-		}
+		require.NoError(t, c.Do(ctx, req, &warm), "warmup Do")
 	}
 
 	var failed error
@@ -377,17 +376,15 @@ func TestH1_AllocatedBytesPerRequest(t *testing.T) {
 			}
 		}
 	})
-	if failed != nil {
-		t.Fatalf("Do during measurement: %v", failed)
-	}
-	if res.N == 0 {
-		t.Fatal("benchmark performed no iterations; nothing was measured")
-	}
-	if got := res.AllocedBytesPerOp(); got > maxBytesPerOp {
-		t.Fatalf("H1 allocates %d bytes/request over %d requests, want <= %d — "+
-			"a per-request buffer of kilobyte scale is back on the H1 path "+
-			"(%d allocs/request)", got, res.N, maxBytesPerOp, res.AllocsPerOp())
-	} else {
-		t.Logf("H1: %d bytes/request, %d allocs/request over %d requests", got, res.AllocsPerOp(), res.N)
-	}
+	// Every assertion is OUTSIDE the measured closure above: testify reflects and
+	// allocates, and AllocedBytesPerOp is a process-wide TotalAlloc delta, so one
+	// require inside the benchmark body would be charged to the client.
+	require.NoError(t, failed, "Do during measurement")
+	require.NotZero(t, res.N, "benchmark performed no iterations; nothing was measured")
+	got := res.AllocedBytesPerOp()
+	assert.LessOrEqualf(t, got, int64(maxBytesPerOp),
+		"H1 allocates %d bytes/request over %d requests, want <= %d — a per-request "+
+			"buffer of kilobyte scale is back on the H1 path (%d allocs/request)",
+		got, res.N, maxBytesPerOp, res.AllocsPerOp())
+	t.Logf("H1: %d bytes/request, %d allocs/request over %d requests", got, res.AllocsPerOp(), res.N)
 }

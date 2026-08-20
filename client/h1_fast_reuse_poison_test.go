@@ -7,6 +7,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
 	"github.com/lodgvideon/poseidon-http-client/client"
 )
 
@@ -40,9 +43,7 @@ func poisonAfterFirstRead(t *testing.T, accepted *atomic.Int64) (string, func())
 	const clean = "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok"
 
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("Listen: %v", err)
-	}
+	require.NoError(t, err, "Listen")
 	t.Cleanup(func() { _ = ln.Close() })
 
 	release := make(chan struct{})
@@ -112,28 +113,27 @@ func TestConformance_RFC9112_Sec6_3_FastReusePoisonNotPooled_Pool(t *testing.T) 
 
 	c, err := client.NewH1PoolClient(addr, dialTCP(),
 		client.PoolOptions{MaxConnsPerHost: 1}, client.WithDefaultScheme("http"))
-	if err != nil {
-		t.Fatalf("NewH1PoolClient: %v", err)
-	}
+	require.NoError(t, err, "NewH1PoolClient")
 	defer c.Close()
 
 	var resp1 client.Response
-	if err := doOnce(t, c, &resp1); err != nil {
-		t.Fatalf("request 1: %v", err)
-	}
+	err1 := doOnce(t, c, &resp1)
 	poison()
-
 	var resp2 client.Response
-	if err := doOnce(t, c, &resp2); err != nil {
-		t.Fatalf("request 2: %v, want success on a fresh connection", err)
-	}
-	if got := string(resp2.Body); got != "ok" {
-		t.Errorf("request 2: body = %q, want %q — the connection was reused inside the "+
-			"probe threshold with an unsolicited response already on it", got, "ok")
-	}
-	if n := accepted.Load(); n != 2 {
-		t.Errorf("accepted %d connections, want 2 — the poisoned connection was reused", n)
-	}
+	err2 := doOnce(t, c, &resp2)
+
+	require.NoError(t, err1, "request 1")
+	// CONTROL: request 1 must have read the WELL-FRAMED response. If it did not,
+	// the poison landed before request 1 completed and nothing below means anything.
+	require.Equal(t, "HELLO", string(resp1.Body),
+		"request 1 did not read the well-framed response, so the injection did not land "+
+			"where this test needs it")
+	require.NoError(t, err2, "request 2: want success on a fresh connection")
+	assert.Equal(t, "ok", string(resp2.Body),
+		"request 2 body — the connection was reused inside the probe threshold with an "+
+			"unsolicited response already on it")
+	assert.EqualValues(t, 2, accepted.Load(),
+		"want 2 accepted connections — anything less means the poisoned connection was reused")
 }
 
 // TestConformance_RFC9112_Sec6_3_FastReusePoisonNotPooled_SingleConn pins the
@@ -148,26 +148,106 @@ func TestConformance_RFC9112_Sec6_3_FastReusePoisonNotPooled_SingleConn(t *testi
 	addr, poison := poisonAfterFirstRead(t, &accepted)
 
 	c, err := client.NewH1Client(addr, dialTCP(), client.WithDefaultScheme("http"))
-	if err != nil {
-		t.Fatalf("NewH1Client: %v", err)
-	}
+	require.NoError(t, err, "NewH1Client")
 	defer c.Close()
 
 	var resp1 client.Response
-	if err := doOnce(t, c, &resp1); err != nil {
-		t.Fatalf("request 1: %v", err)
-	}
+	err1 := doOnce(t, c, &resp1)
 	poison()
-
 	var resp2 client.Response
-	if err := doOnce(t, c, &resp2); err != nil {
-		t.Fatalf("request 2: %v, want success on a fresh connection", err)
-	}
-	if got := string(resp2.Body); got != "ok" {
-		t.Errorf("request 2: body = %q, want %q — the single-conn transport reused a "+
-			"connection with an unsolicited response waiting on it", got, "ok")
-	}
-	if n := accepted.Load(); n != 2 {
-		t.Errorf("accepted %d connections, want 2 — the poisoned connection was reused", n)
-	}
+	err2 := doOnce(t, c, &resp2)
+
+	require.NoError(t, err1, "request 1")
+	// CONTROL: see the pool test above — request 1 must have read the well-framed
+	// response, or the poison landed too early.
+	require.Equal(t, "HELLO", string(resp1.Body),
+		"request 1 did not read the well-framed response, so the poison landed too early")
+	require.NoError(t, err2, "request 2: want success on a fresh connection")
+	assert.Equal(t, "ok", string(resp2.Body),
+		"request 2 body — the single-conn transport reused a connection with an "+
+			"unsolicited response waiting on it")
+	assert.EqualValues(t, 2, accepted.Load(),
+		"want 2 accepted connections — anything less means the poisoned connection was reused")
+}
+
+// TestConformance_RFC9112_Sec6_3_FastReuse_ControlNoPoison_Pool is the control
+// arm for the two poison tests: same shape, nothing injected. It exists because
+// "accepted == 2" is evidence of eviction only if the pool would otherwise have
+// reused the connection — a pool that never reuses, or a peer that hangs up
+// after every response, satisfies "accepted == 2" while testing nothing. Here
+// the second request must run on connection 1.
+func TestConformance_RFC9112_Sec6_3_FastReuse_ControlNoPoison_Pool(t *testing.T) {
+	var accepted atomic.Int64
+	addr := cleanKeepAlivePeer(t, &accepted)
+
+	c, err := client.NewH1PoolClient(addr, dialTCP(),
+		client.PoolOptions{MaxConnsPerHost: 1}, client.WithDefaultScheme("http"))
+	require.NoError(t, err, "NewH1PoolClient")
+	defer c.Close()
+
+	var resp1, resp2 client.Response
+	err1 := doOnce(t, c, &resp1)
+	err2 := doOnce(t, c, &resp2)
+
+	require.NoError(t, err1, "request 1 against a clean keep-alive peer")
+	require.NoError(t, err2, "request 2 against a clean keep-alive peer")
+	assert.EqualValues(t, 1, accepted.Load(),
+		"the pool must reuse a clean connection inside the probe threshold; if it dials "+
+			"again here then \"accepted == 2\" in the poison tests proves nothing about eviction")
+}
+
+// TestConformance_RFC9112_Sec6_3_FastReuse_ControlNoPoison_SingleConn is the
+// single-connection control arm; see the pool one above for why it exists.
+func TestConformance_RFC9112_Sec6_3_FastReuse_ControlNoPoison_SingleConn(t *testing.T) {
+	var accepted atomic.Int64
+	addr := cleanKeepAlivePeer(t, &accepted)
+
+	c, err := client.NewH1Client(addr, dialTCP(), client.WithDefaultScheme("http"))
+	require.NoError(t, err, "NewH1Client")
+	defer c.Close()
+
+	var resp1, resp2 client.Response
+	err1 := doOnce(t, c, &resp1)
+	err2 := doOnce(t, c, &resp2)
+
+	require.NoError(t, err1, "request 1 against a clean keep-alive peer")
+	require.NoError(t, err2, "request 2 against a clean keep-alive peer")
+	assert.EqualValues(t, 1, accepted.Load(),
+		"the single-conn transport must reuse a clean connection; if it redials here then "+
+			"\"accepted == 2\" in the poison test proves nothing about eviction")
+}
+
+// cleanKeepAlivePeer answers every request on every connection with the same
+// well-framed keep-alive response and never closes. It is the no-injection twin
+// of poisonAfterFirstRead.
+func cleanKeepAlivePeer(t *testing.T, accepted *atomic.Int64) string {
+	t.Helper()
+	const clean = "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok"
+
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err, "Listen")
+	t.Cleanup(func() { _ = ln.Close() })
+
+	go func() {
+		for {
+			nc, aerr := ln.Accept()
+			if aerr != nil {
+				return
+			}
+			accepted.Add(1)
+			go func(nc net.Conn) {
+				defer nc.Close()
+				buf := make([]byte, 4096)
+				for {
+					if _, rerr := nc.Read(buf); rerr != nil {
+						return
+					}
+					if _, werr := nc.Write([]byte(clean)); werr != nil {
+						return
+					}
+				}
+			}(nc)
+		}
+	}()
+	return ln.Addr().String()
 }

@@ -5,6 +5,8 @@ import (
 	"crypto/tls"
 	"testing"
 	"time"
+
+	"github.com/stretchr/testify/require"
 )
 
 // The address-revive fix (#385) shipped to all three managed pools, but only the
@@ -59,39 +61,28 @@ func TestH1ManagedPool_AddressReAddedAfterRemoval(t *testing.T) {
 			res := newScriptedResolver(addrs)
 			mp, err := newH1ManagedPool(res, RoundRobin(), tc.mode,
 				newH1FakeDialer(), h1ManagedPoolOpts(), nil, nil)
-			if err != nil {
-				t.Fatalf("newH1ManagedPool: %v", err)
-			}
+			require.NoError(t, err, "newH1ManagedPool")
 			defer func() { _ = mp.close() }()
-
-			if got := waitActiveH1(mp, 2, 2*time.Second); got != 2 {
-				t.Fatalf("initial active = %d, want 2", got)
-			}
+			require.Equal(t, 2, waitActiveH1(mp, 2, 2*time.Second), "initial active set")
 			// Materialise the sub-pool so the removal has something to mark.
-			if s := mp.getOrCreateSubPool(addrs[0]); s == nil {
-				t.Fatal("getOrCreateSubPool nil for a live address")
-			}
+			require.NotNil(t, mp.getOrCreateSubPool(addrs[0]),
+				"getOrCreateSubPool nil for a live address")
 
 			res.push([]Address{addrs[1]})
-			if got := waitActiveH1(mp, 1, 2*time.Second); got != 1 {
-				t.Fatalf("after removal active = %d, want 1", got)
-			}
+			require.Equal(t, 1, waitActiveH1(mp, 1, 2*time.Second), "active set after removal")
 			res.push(addrs)
-			if got := waitActiveH1(mp, 2, 3*time.Second); got != 2 {
-				t.Fatalf("after re-add active = %d, want 2 — the address is blackholed", got)
-			}
-			if s := mp.getOrCreateSubPool(addrs[0]); s == nil {
-				t.Fatal("getOrCreateSubPool still refuses the re-added address")
-			}
 
+			require.Equalf(t, 2, waitActiveH1(mp, 2, 3*time.Second),
+				"after re-add active = %d, want 2 — the address is blackholed",
+				len(mp.snapshotActive()))
+			require.NotNil(t, mp.getOrCreateSubPool(addrs[0]),
+				"getOrCreateSubPool still refuses the re-added address")
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancel()
 			c, rel, _, err := mp.acquire(ctx)
-			if err != nil {
-				t.Fatalf("acquire after re-add: %v", err)
-			}
+			require.NoError(t, err, "acquire after re-add")
+			require.NotNil(t, c, "acquire after re-add returned a nil conn")
 			rel(true)
-			_ = c
 		})
 	}
 }
@@ -104,34 +95,25 @@ func TestH1ManagedPool_SingleAddressFlapDoesNotBlackhole(t *testing.T) {
 	res := newScriptedResolver(addrs)
 	mp, err := newH1ManagedPool(res, RoundRobin(), DrainLazy,
 		newH1FakeDialer(), h1ManagedPoolOpts(), nil, nil)
-	if err != nil {
-		t.Fatalf("newH1ManagedPool: %v", err)
-	}
+	require.NoError(t, err, "newH1ManagedPool")
 	defer func() { _ = mp.close() }()
-
-	if got := waitActiveH1(mp, 1, 2*time.Second); got != 1 {
-		t.Fatalf("initial active = %d, want 1", got)
-	}
-	if s := mp.getOrCreateSubPool(addrs[0]); s == nil {
-		t.Fatal("getOrCreateSubPool nil for the only address")
-	}
+	require.Equal(t, 1, waitActiveH1(mp, 1, 2*time.Second), "initial active set")
+	require.NotNil(t, mp.getOrCreateSubPool(addrs[0]),
+		"getOrCreateSubPool nil for the only address")
 
 	res.push([]Address{})
-	if got := waitActiveH1(mp, 0, 2*time.Second); got != 0 {
-		t.Fatalf("after removal active = %d, want 0", got)
-	}
+	require.Equal(t, 0, waitActiveH1(mp, 0, 2*time.Second), "active set after removal")
 	res.push(addrs)
-	if got := waitActiveH1(mp, 1, 3*time.Second); got != 1 {
-		t.Fatalf("after re-add active = %d, want 1 — a DNS flap blackholed the only address", got)
-	}
 
+	require.Equalf(t, 1, waitActiveH1(mp, 1, 3*time.Second),
+		"after re-add active = %d, want 1 — a DNS flap blackholed the only address",
+		len(mp.snapshotActive()))
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	if _, rel, _, err := mp.acquire(ctx); err != nil {
-		t.Fatalf("acquire after a single-address flap: %v", err)
-	} else {
-		rel(true)
-	}
+	c, rel, _, err := mp.acquire(ctx)
+	require.NoError(t, err, "acquire after a single-address flap")
+	require.NotNil(t, c, "acquire after a flap returned a nil conn")
+	rel(true)
 }
 
 // TestH3ManagedPool_AddressReAddedAfterRemoval is the HTTP/3 counterpart.
@@ -151,39 +133,30 @@ func TestH3ManagedPool_AddressReAddedAfterRemoval(t *testing.T) {
 				&tls.Config{ServerName: "h"},
 				PoolOptions{MaxConnsPerHost: 1, MaxStreamsPerConn: 4, HealthCheckPeriod: time.Second},
 				d.dial, nil, nil)
-			if err != nil {
-				t.Fatalf("newH3ManagedPool: %v", err)
-			}
+			require.NoError(t, err, "newH3ManagedPool")
 			defer func() { _ = mp.close() }()
 			res := mp.resolver.(*scriptedResolver)
-
-			if got := waitActiveH3(mp, 2, 2*time.Second); got != 2 {
-				t.Fatalf("initial active = %d, want 2", got)
-			}
-			if s := mp.getOrCreateSubPool(addrs[0]); s == nil {
-				t.Fatal("getOrCreateSubPool nil for a live address")
-			}
+			require.Equal(t, 2, waitActiveH3(mp, 2, 2*time.Second), "initial active set")
+			require.NotNil(t, mp.getOrCreateSubPool(addrs[0]),
+				"getOrCreateSubPool nil for a live address")
 
 			res.push([]Address{addrs[1]})
-			if got := waitActiveH3(mp, 1, 2*time.Second); got != 1 {
-				t.Fatalf("after removal active = %d, want 1", got)
-			}
+			require.Equal(t, 1, waitActiveH3(mp, 1, 2*time.Second), "active set after removal")
 			res.push(addrs)
-			if got := waitActiveH3(mp, 2, 3*time.Second); got != 2 {
-				t.Fatalf("after re-add active = %d, want 2 — the address is blackholed", got)
-			}
-			if s := mp.getOrCreateSubPool(addrs[0]); s == nil {
-				t.Fatal("getOrCreateSubPool still refuses the re-added address")
-			}
 
+			require.Equalf(t, 2, waitActiveH3(mp, 2, 3*time.Second),
+				"after re-add active = %d, want 2 — the address is blackholed",
+				len(mp.snapshotActive()))
+			require.NotNil(t, mp.getOrCreateSubPool(addrs[0]),
+				"getOrCreateSubPool still refuses the re-added address")
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancel()
 			c, rel, _, err := mp.acquire(ctx)
-			if err != nil {
-				t.Fatalf("acquire after re-add: %v", err)
-			}
+			require.NoError(t, err, "acquire after re-add")
+			// c is an interface (h3Client): require.NotNil would accept a typed
+			// nil through reflection, so compare against nil directly.
+			require.Truef(t, c != nil, "acquire after re-add returned a nil conn")
 			rel()
-			_ = c
 		})
 	}
 }
@@ -204,47 +177,28 @@ func TestH1ManagedPool_ReviveBeatsDrainWatcher(t *testing.T) {
 	res := newScriptedResolver(addrs)
 	mp, err := newH1ManagedPool(res, RoundRobin(), DrainGraceful,
 		newH1FakeDialer(), h1ManagedPoolOpts(), nil, nil)
-	if err != nil {
-		t.Fatalf("newH1ManagedPool: %v", err)
-	}
+	require.NoError(t, err, "newH1ManagedPool")
 	defer func() { _ = mp.close() }()
-
-	if got := waitActiveH1(mp, 1, 2*time.Second); got != 1 {
-		t.Fatalf("initial active = %d, want 1", got)
-	}
-
+	require.Equal(t, 1, waitActiveH1(mp, 1, 2*time.Second), "initial active set")
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	_, relHeld, _, err := mp.acquire(ctx) // hold it: the sub-pool must NOT be idle
-	if err != nil {
-		t.Fatalf("initial acquire: %v", err)
-	}
+	require.NoError(t, err, "initial acquire")
 	before := mp.getOrCreateSubPool(addrs[0])
-	if before == nil {
-		t.Fatal("no sub-pool for the live address")
-	}
+	require.NotNil(t, before, "no sub-pool for the live address")
 
 	res.push([]Address{})
-	if got := waitActiveH1(mp, 0, 2*time.Second); got != 0 {
-		t.Fatalf("after removal active = %d, want 0", got)
-	}
+	require.Equal(t, 0, waitActiveH1(mp, 0, 2*time.Second), "active set after removal")
 	time.Sleep(80 * time.Millisecond) // let the watcher poll and see the in-flight
-
 	res.push(addrs)
-	if got := waitActiveH1(mp, 1, 3*time.Second); got != 1 {
-		t.Fatalf("after re-add active = %d, want 1", got)
-	}
-
+	require.Equal(t, 1, waitActiveH1(mp, 1, 3*time.Second), "active set after re-add")
 	relHeld(true) // now it goes idle, with the address live again
 	time.Sleep(600 * time.Millisecond)
 
 	after := mp.getOrCreateSubPool(addrs[0])
-	if after == nil {
-		t.Fatal("drain watcher left the revived address unusable")
-	}
-	if after != before {
-		t.Fatal("drain watcher closed the revived sub-pool; the live address paid for a needless reconnect")
-	}
+	require.NotNil(t, after, "drain watcher left the revived address unusable")
+	require.Same(t, before, after,
+		"drain watcher closed the revived sub-pool; the live address paid for a needless reconnect")
 }
 
 func TestH3ManagedPool_ReviveBeatsDrainWatcher(t *testing.T) {
@@ -254,46 +208,27 @@ func TestH3ManagedPool_ReviveBeatsDrainWatcher(t *testing.T) {
 		&tls.Config{ServerName: "h"},
 		PoolOptions{MaxConnsPerHost: 1, MaxStreamsPerConn: 4, HealthCheckPeriod: time.Second},
 		d.dial, nil, nil)
-	if err != nil {
-		t.Fatalf("newH3ManagedPool: %v", err)
-	}
+	require.NoError(t, err, "newH3ManagedPool")
 	defer func() { _ = mp.close() }()
 	res := mp.resolver.(*scriptedResolver)
-
-	if got := waitActiveH3(mp, 1, 2*time.Second); got != 1 {
-		t.Fatalf("initial active = %d, want 1", got)
-	}
-
+	require.Equal(t, 1, waitActiveH3(mp, 1, 2*time.Second), "initial active set")
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	_, relHeld, _, err := mp.acquire(ctx)
-	if err != nil {
-		t.Fatalf("initial acquire: %v", err)
-	}
+	require.NoError(t, err, "initial acquire")
 	before := mp.getOrCreateSubPool(addrs[0])
-	if before == nil {
-		t.Fatal("no sub-pool for the live address")
-	}
+	require.NotNil(t, before, "no sub-pool for the live address")
 
 	res.push([]Address{})
-	if got := waitActiveH3(mp, 0, 2*time.Second); got != 0 {
-		t.Fatalf("after removal active = %d, want 0", got)
-	}
+	require.Equal(t, 0, waitActiveH3(mp, 0, 2*time.Second), "active set after removal")
 	time.Sleep(80 * time.Millisecond)
-
 	res.push(addrs)
-	if got := waitActiveH3(mp, 1, 3*time.Second); got != 1 {
-		t.Fatalf("after re-add active = %d, want 1", got)
-	}
-
+	require.Equal(t, 1, waitActiveH3(mp, 1, 3*time.Second), "active set after re-add")
 	relHeld()
 	time.Sleep(600 * time.Millisecond)
 
 	after := mp.getOrCreateSubPool(addrs[0])
-	if after == nil {
-		t.Fatal("drain watcher left the revived address unusable")
-	}
-	if after != before {
-		t.Fatal("drain watcher closed the revived sub-pool; the live address paid for a needless reconnect")
-	}
+	require.NotNil(t, after, "drain watcher left the revived address unusable")
+	require.Same(t, before, after,
+		"drain watcher closed the revived sub-pool; the live address paid for a needless reconnect")
 }

@@ -98,10 +98,38 @@ func ltLiveHeap() uint64 {
 // buffer, so anything the measurement sees growing is the client's, not the
 // server's. Writes are 1 MiB, far above ltMaxFrameSize, to force the server to
 // do the framing at the size we advertised rather than at our write boundaries.
-func ltH2Server(t *testing.T) string {
+//
+// The handler flushes the response headers and then parks until release is
+// closed, which is how a caller gets a quiet connection to measure against — up,
+// headers parsed, not one DATA frame in flight. That is not tidiness. conn's
+// reader fills the stream's event channel whether or not anybody is reading it,
+// and push() drops the frame and sends RST_STREAM(CANCEL) once ltEventBuf events
+// are queued (conn/stream.go), so every pause between DoStream returning and the
+// drain loop starting is a race the reader can win. ltLiveHeap's two blocking
+// GCs are exactly such a pause: measured, GOMAXPROCS=1 loses it 2 runs in 3, and
+// Gremlins' coverage sweep — go test ./... with no -race, every package at once
+// on a 4-vCPU runner — lost it twice out of twice, both times identically at
+// "262141 of 67108864 bytes", i.e. with the drain loop not yet run once.
+//
+// Parking the body removes that race instead of widening the channel: ltEventBuf
+// is what ltRetentionBound is derived from, so buying slack there would loosen
+// the very bound this test exists to assert.
+func ltH2Server(t *testing.T, release <-chan struct{}) string {
 	t.Helper()
-	srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(200)
+		// The flush is load-bearing: h2 holds HEADERS until the handler writes or
+		// returns, and this one is about to do neither. Without it DoStream never
+		// returns and nothing ever closes release.
+		if err := http.NewResponseController(w).Flush(); err != nil {
+			t.Errorf("flush the response headers: %v — without them DoStream never returns and nothing closes release", err)
+			return
+		}
+		select {
+		case <-release:
+		case <-r.Context().Done():
+			return
+		}
 		buf := make([]byte, 1<<20)
 		for sent := 0; sent < ltBodyBytes; sent += len(buf) {
 			if _, err := w.Write(buf); err != nil {
@@ -171,7 +199,8 @@ func ltH2Client(t *testing.T, addr string) *client.Client {
 //   - the sibling NonConsumerIsRefused test rules out the pipeline bound being
 //     absent altogether.
 func TestIT_H2_StreamedDownload_RetentionStaysBounded(t *testing.T) {
-	c := ltH2Client(t, ltH2Server(t))
+	release := make(chan struct{})
+	c := ltH2Client(t, ltH2Server(t, release))
 
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
@@ -185,9 +214,16 @@ func TestIT_H2_StreamedDownload_RetentionStaysBounded(t *testing.T) {
 		t.Fatalf("status = %d, want 200", sr.Status)
 	}
 
-	// Baseline after the connection is up and headers are parsed, so the delta
-	// measures the body transfer and not connection setup.
+	// Baseline with the connection up and the headers parsed, so the delta
+	// measures the body transfer and not connection setup — and with the server
+	// still parked, so it measures a connection with nothing in flight. The second
+	// half is not cosmetic: the body used to start flowing the moment DoStream
+	// returned, so this line ran with an unknown 0..ltEventBuf DATA frames already
+	// queued on the stream and the baseline quietly absorbed up to
+	// ltPipelineBytes of the very thing being bounded. See ltH2Server for the
+	// stream reset that same window kept causing.
 	baseline := ltLiveHeap()
+	close(release)
 
 	var consumed int64
 	var maxEvent int
