@@ -13,6 +13,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/lodgvideon/poseidon-http-client/conn"
+	"github.com/lodgvideon/poseidon-http-client/frame"
 )
 
 // testBuildHeaders borrows and returns a header scratch around buildHeaders the
@@ -474,4 +475,150 @@ func TestIntegration_MaxRecvMessageSizeCallOption(t *testing.T) {
 	require.ErrorIsf(t, connLimitErr, ErrMessageTooLarge, "connection limit not applied: %v", connLimitErr)
 	require.NoError(t, overrideErr, "per-call override")
 	require.Lenf(t, got, 4096, "len = %d, want 4096", len(got))
+}
+
+// TestReset_CodeReachesTheStatusThroughTheWiring pins pump's EventReset arm,
+// which TestIntegration_ResetStreamMapsToStatus above does not.
+//
+// That test's only assertion is "not OK", and "not OK" survives the mapping
+// being replaced by the constant OK: the call then ends with a bare io.EOF,
+// InvokeInto's empty-response guard turns that into an Internal status of its
+// own, errors.As still succeeds and the code is still not OK. The empty-response
+// guard covers for the missing mapping.
+//
+// Two things are different here. The call is driven through NewStream/Recv, so
+// no guard sits between the reset and the caller; and the peer sends a code of
+// the test's choosing, so the table is pinned THROUGH the wiring rather than
+// only in TestStatusFromRST's isolation. net/http2's server cannot do the
+// second part — the one reset a handler can force out of it is INTERNAL_ERROR,
+// which is also where every unmapped code lands, so it cannot tell
+// statusFromRST apart from a function returning the constant Internal.
+func TestReset_CodeReachesTheStatusThroughTheWiring(t *testing.T) {
+	cases := []struct {
+		name string
+		code frame.ErrCode
+		want Code
+	}{
+		{"ENHANCE_YOUR_CALM", frame.ErrCodeEnhanceYourCalm, ResourceExhausted},
+		{"CANCEL", frame.ErrCodeCancel, Canceled},
+		{"REFUSED_STREAM", frame.ErrCodeRefusedStream, Unavailable},
+		{"INADEQUATE_SECURITY", frame.ErrCodeInadequateSecurity, PermissionDenied},
+		{"INTERNAL_ERROR", frame.ErrCodeInternalError, Internal},
+		{"PROTOCOL_ERROR falls through to INTERNAL", frame.ErrCodeProtocolError, Internal},
+	}
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			peer := newMockGRPCPeer(t)
+			code := c.code
+			peer.resetAfterHeaders = &code
+			cc := dialMockPeer(t, peer, nil)
+			ctx := t.Context()
+			s, err := cc.NewStream(ctx, "/t.S/M", nil)
+			require.NoError(t, err, "NewStream")
+			defer func() { _ = s.Close() }()
+
+			_, recvErr := s.Recv(ctx)
+
+			var st *Status
+			require.Truef(t, errors.As(recvErr, &st),
+				"Recv = %v (%T), want a *Status — a reset whose code is not mapped "+
+					"ends the call with a bare io.EOF instead", recvErr, recvErr)
+			assert.Equalf(t, c.want, st.Code,
+				"RST_STREAM(%#x) surfaced as %v, want %v", uint32(c.code), st.Code, c.want)
+			assert.Equalf(t, c.want, s.Status().Code,
+				"Status() reports %v after RST_STREAM(%#x), want %v — the recorded "+
+					"status and the error a caller sees must be the same verdict",
+				s.Status().Code, uint32(c.code), c.want)
+			assert.Containsf(t, st.Message, fmt.Sprintf("HTTP/2 error code %d", uint32(c.code)),
+				"message = %q, want the peer's own reset code in it — without it a "+
+					"caller cannot tell which of the codes mapping to %v arrived",
+				st.Message, c.want)
+		})
+	}
+}
+
+// TestIntegration_TruncationDoesNotOverrideTheServersStatus is the combination
+// terminal()'s ordering comment is about, and the one nothing produced: a
+// non-OK status AND bytes left in the decoder, at the same time.
+//
+// TestIntegration_TruncatedTrailingMessage covers the truncation branch on its
+// own, but its server reports grpc-status 0, so status.Err() is nil and the
+// order of the two checks cannot matter. Swap them and every test still passes.
+//
+// The peer here aborts mid-message and says why. The truncation is a
+// CONSEQUENCE of that abort, so reporting it would replace a retriable
+// RESOURCE_EXHAUSTED with our own non-retriable INTERNAL — a caller with a
+// backoff policy keyed on the code would stop retrying a server that asked it
+// to slow down.
+func TestIntegration_TruncationDoesNotOverrideTheServersStatus(t *testing.T) {
+	srv, cfg := startGRPCServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = srvReadMessage(r.Body)
+		srvBeginResponse(w)
+		// Declares 10 bytes, delivers 2, then reports the abort in the trailer.
+		_, _ = w.Write([]byte{0, 0, 0, 0, 10, 'a', 'b'})
+		w.(http.Flusher).Flush()
+		srvFinish(w, ResourceExhausted, "over quota")
+	}))
+	defer srv.Close()
+	cc := dialGRPC(t, srv, cfg)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	_, err := cc.Invoke(ctx, "/t.S/M", []byte("x"), nil)
+
+	var st *Status
+	require.Truef(t, errors.As(err, &st), "Invoke error = %v (%T), want *Status", err, err)
+	require.Equalf(t, ResourceExhausted, st.Code,
+		"code = %v, want RESOURCE_EXHAUSTED — the peer's own diagnosis, not the "+
+			"INTERNAL our truncation check would report for the bytes its abort left behind",
+		st.Code)
+	assert.Equalf(t, "over quota", st.Message,
+		"message = %q, want the server's — reporting the truncation would replace it too", st.Message)
+}
+
+// TestStream_SendErrorLatchesWithTheConnectionIntact covers what
+// TestStream_SendErrorIsSticky above is named after but cannot reach.
+//
+// That test kills the whole ClientConn, so every later call fails on its own,
+// with the same error, and sendErr is never read: dropping the latch changes
+// nothing there. The latch is only observable when the first send fails while
+// the connection stays usable — otherwise "the second Send failed" has two
+// explanations and the test pins neither.
+//
+// A context that is already done gives exactly that. acquireSendCredits checks
+// ctx.Err() before it touches the wire, so the message never leaves and the
+// connection is not involved in the failure at all.
+func TestStream_SendErrorLatchesWithTheConnectionIntact(t *testing.T) {
+	cc := dialMockPeer(t, newMockGRPCPeer(t), nil)
+	ctx := t.Context()
+	s, err := cc.NewStream(ctx, "/bench.Svc/Echo", nil)
+	require.NoError(t, err, "NewStream")
+	defer func() { _ = s.Close() }()
+	dead, cancel := context.WithCancel(context.Background())
+	cancel() // done before the write starts, so nothing reaches the wire
+
+	first := s.Send(dead, []byte("one"))
+	second := s.Send(ctx, []byte("two"))
+	closeSendErr := s.CloseSend(ctx)
+	control, controlErr := cc.Invoke(ctx, "/bench.Svc/Echo", []byte("still alive"), nil)
+
+	require.Errorf(t, first, "Send on an already-cancelled context succeeded")
+	// The precondition the rest of this test rests on. Without it a broken
+	// connection would satisfy every check below with no latch at all — which is
+	// precisely how the sibling test came to pass without exercising one.
+	require.NoErrorf(t, controlErr,
+		"a fresh call on the same connection failed (%v): the first Send took the "+
+			"connection down with it, so the checks below no longer distinguish the "+
+			"latch from a dead transport", controlErr)
+	require.Equalf(t, "still alive", string(control),
+		"the control call echoed %q — the connection is not carrying traffic normally", control)
+	require.Errorf(t, second,
+		"second Send succeeded on a healthy connection after the first failed — a "+
+			"truncated message is on the wire and this one resynchronises the server onto garbage")
+	require.Truef(t, errors.Is(second, first) || second.Error() == first.Error(),
+		"second Send = %v, want the latched %v", second, first)
+	assert.Errorf(t, closeSendErr,
+		"CloseSend = nil after a failed Send: END_STREAM after a truncated message "+
+			"tells the server the garbage was the whole request")
 }

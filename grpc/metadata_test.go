@@ -200,3 +200,33 @@ func TestDecodeTimeout_Malformed(t *testing.T) {
 func encodeTimeout(d time.Duration) string {
 	return string(appendTimeout(nil, d))
 }
+
+// TestMetadataValue_KeyIsCaseInsensitive pins the read side of the rule
+// AppendMetadata already implements on the write side. gRPC metadata keys are
+// case-insensitive and travel on the wire lowercased, so a caller reading back
+// with the capitalisation they wrote must find the field they wrote.
+//
+// AppendMetadata's lowercasing is covered — TestAppendMetadata_TextAndBinary
+// passes "X-Request-Id" — and MetadataValue's was not. Losing it does not raise
+// an error: the lookup simply reads as absent, which is the fail-open shape
+// TestMetadataValue_MalformedBinaryIsNotAbsent guards against one door along.
+func TestMetadataValue_KeyIsCaseInsensitive(t *testing.T) {
+	md, err := AppendMetadata(nil, "X-Request-Id", []byte("abc"))
+	require.NoError(t, err, "AppendMetadata")
+	md, err = AppendMetadata(md, "Trace-Bin", []byte{0x00, 0xff, 0x10})
+	require.NoError(t, err, "AppendMetadata(-bin)")
+
+	text, textOK, textErr := MetadataValue(md, "X-Request-Id")
+	bin, binOK, binErr := MetadataValue(md, "TRACE-BIN")
+
+	require.NoErrorf(t, textErr, "MetadataValue(\"X-Request-Id\"): ok=%v", textOK)
+	require.Truef(t, textOK,
+		"MetadataValue(\"X-Request-Id\") read as absent — the key the caller wrote "+
+			"with no longer finds the field they wrote")
+	assert.Equalf(t, "abc", string(text), "value = %q", text)
+	require.NoErrorf(t, binErr, "MetadataValue(\"TRACE-BIN\"): ok=%v", binOK)
+	require.Truef(t, binOK, "MetadataValue(\"TRACE-BIN\") read as absent")
+	assert.Equalf(t, "\x00\xff\x10", string(bin),
+		"decoded = % x — the -bin suffix is matched on the lowercased key too, so a "+
+			"mixed-case one would hand the caller the base64 back verbatim", bin)
+}

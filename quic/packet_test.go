@@ -168,3 +168,79 @@ func BenchmarkAppendLongHeader(b *testing.B) {
 		_, _ = AppendLongHeader(dst[:0], PacketInitial, QUICVersion1, dcid, nil, nil, 4, 20)
 	}
 }
+
+// TestConformance_RFC9000_Sec172_ConnectionIDLengthBound pins readCID's 20-byte
+// limit with fixtures in which the limit is the ONLY thing that can decide.
+//
+// readCID rejects on `l > 20 || len(pkt)-p < l`, two mechanisms in one
+// condition. TestParseHeader_Malformed's "dcid_len_too_big" case looks like it
+// covers the first: a 6-byte packet declaring a 21-byte DCID. It does not — after
+// the 5-byte long-header prefix there are 0 bytes left, so the TRUNCATION check
+// rejects it and the 20-byte bound never runs. Deleting the bound outright left
+// the whole suite green, and so did widening it to 32.
+//
+// RFC 9000 §17.2 fixes the field at 20: "Values less than 1 and greater than 20
+// are invalid and MUST be treated as a connection error of type
+// FRAME_ENCODING_ERROR." Without the bound a peer's 21..255-byte connection ID is
+// accepted and handed on to routing and Initial-key derivation. #844.
+//
+// So each case below supplies EVERY declared connection-ID byte and a well-formed
+// remainder: the truncation half of the condition is false by construction, and
+// only the length bound is left to answer.
+func TestConformance_RFC9000_Sec172_ConnectionIDLengthBound(t *testing.T) {
+	// An Initial long header: byte0, version, DCID len + DCID, SCID len + SCID,
+	// token len, Length, then that many bytes of packet number + payload.
+	build := func(dcid, scid []byte) []byte {
+		pkt := []byte{0xc0, 0x00, 0x00, 0x00, 0x01}
+		pkt = append(pkt, byte(len(dcid)))
+		pkt = append(pkt, dcid...)
+		pkt = append(pkt, byte(len(scid)))
+		pkt = append(pkt, scid...)
+		pkt = append(pkt, 0x00, 0x08)              // token len 0, Length 8
+		return append(pkt, 1, 2, 3, 4, 5, 6, 7, 8) // packet number + payload
+	}
+	cid := func(n int) []byte {
+		b := make([]byte, n)
+		for i := range b {
+			b[i] = byte(0xa0 + i)
+		}
+		return b
+	}
+
+	t.Run("dcid_at_limit_20_parses", func(t *testing.T) {
+		want := cid(20)
+
+		h, err := ParseHeader(build(want, nil), 0)
+
+		require.NoErrorf(t, err, "a 20-byte DCID is the largest §17.2 permits and must "+
+			"parse; refusing it drops a conformant peer's packets: %v", err)
+		assert.Equalf(t, want, h.DCID, "DCID = %x, want %x", h.DCID, want)
+	})
+	t.Run("scid_at_limit_20_parses", func(t *testing.T) {
+		want := cid(20)
+
+		h, err := ParseHeader(build(nil, want), 0)
+
+		require.NoErrorf(t, err, "a 20-byte SCID must parse: %v", err)
+		assert.Equalf(t, want, h.SCID, "SCID = %x, want %x", h.SCID, want)
+	})
+	t.Run("dcid_one_past_limit_21_rejected", func(t *testing.T) {
+		pkt := build(cid(21), nil)
+
+		_, err := ParseHeader(pkt, 0)
+
+		require.Truef(t, errors.Is(err, ErrPacketEncoding),
+			"ParseHeader with a 21-byte DCID, all 21 bytes present = %v, want "+
+				"ErrPacketEncoding — an over-long connection ID reaches routing and "+
+				"Initial-key derivation", err)
+	})
+	t.Run("scid_one_past_limit_21_rejected", func(t *testing.T) {
+		pkt := build(nil, cid(21))
+
+		_, err := ParseHeader(pkt, 0)
+
+		require.Truef(t, errors.Is(err, ErrPacketEncoding),
+			"ParseHeader with a 21-byte SCID, all 21 bytes present = %v, want "+
+				"ErrPacketEncoding — the SCID runs through the same readCID", err)
+	})
+}

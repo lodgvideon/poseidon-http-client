@@ -119,6 +119,17 @@ func TestConn_Ping_CtxCancelledBeforeACK(t *testing.T) {
 
 	require.True(t, gotCtxErr,
 		"never observed context.DeadlineExceeded in 50 iterations with pre-expired ctx")
+	// gotCtxErr above is read off a different mechanism than this assertion, so
+	// one broken thing cannot satisfy both: it proves the cancelled arm really
+	// ran, and this proves the arm cleaned up after itself. Deleting the three
+	// lines that delete the waiter left the whole package green (#825).
+	c.pingMu.Lock()
+	left := len(c.pingWaiters)
+	c.pingMu.Unlock()
+	assert.Zerof(t, left,
+		"%d entries left in c.pingWaiters after 50 cancelled Pings; a waiter that outlives "+
+			"its Ping is an unbounded per-connection leak, on exactly the path a "+
+			"keepalive-heavy load generator takes most often", left)
 }
 
 func TestConn_Ping_AfterClose(t *testing.T) {

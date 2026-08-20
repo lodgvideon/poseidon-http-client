@@ -179,23 +179,98 @@ func TestDecoder_CompactPreservesContent(t *testing.T) {
 
 // TestDecoder_CompactBoundedWhilePartlyConsumed keeps the buffer permanently
 // half-drained, which is the state the slide exists to bound.
+//
+// Both halves of this fixture are load-bearing, and the first version got each
+// one wrong.
+//
+// The consumed prefix has to be MORE than half the buffer, or compact takes its
+// `off == len(own)` fast path and the slide never runs. Every iteration here
+// leaves a three-byte stub of the next message pending, so off is one whole
+// message against a buffer three bytes longer.
+//
+// And exactly one message may be delivered per message pushed. Pushing two and
+// draining one — what this test used to do — grows the pending region by a
+// message every iteration whether or not the slide exists, so the only ceiling
+// the correct code passes is one loose enough for the slide-less form to pass
+// too. That is why this used to assert 1 MiB and could not fail. Here the
+// steady state is one message plus a stub, so a few chunks separate the two:
+// with the slide the buffer stays around 520 bytes, without it it reaches 500
+// messages, ~259 kB.
 func TestDecoder_CompactBoundedWhilePartlyConsumed(t *testing.T) {
-	msg := bytes.Repeat([]byte("y"), 512)
+	const iters = 500
+	const stub = 3 // an incomplete prefix: enough to keep the region non-empty
+	one, err := AppendMessage(nil, bytes.Repeat([]byte("y"), 512))
+	require.NoError(t, err, "AppendMessage")
+	var wire []byte
+	for i := 0; i <= iters; i++ {
+		wire = append(wire, one...)
+	}
 	var d decoder
 
-	for i := 0; i < 500; i++ {
-		chunk, err := AppendMessage(nil, msg)
-		require.NoError(t, err, "AppendMessage")
-		// Two messages in, one message out: the pending region never empties.
-		d.Push(chunk)
-		d.Push(chunk)
+	// Prime with one whole message plus the head of the next.
+	d.Push(wire[:len(one)+stub])
+	cursor := len(one) + stub
+	for i := 0; i < iters; i++ {
 		_, ok, err := d.Next()
 		require.NoErrorf(t, err, "iteration %d: ok=%v err=%v", i, ok, err)
 		require.Truef(t, ok, "iteration %d: ok=%v err=%v", i, ok, err)
+		require.Equalf(t, stub, d.Pending(),
+			"iteration %d left %d bytes pending, want %d — the fixture must keep the "+
+				"buffer partly consumed, or compact takes its drained-exactly fast "+
+				"path and the slide is never reached", i, d.Pending(), stub)
+		// Completes the pending message and leaves a fresh stub behind it.
+		d.Push(wire[cursor : cursor+len(one)])
+		cursor += len(one)
 	}
 
-	require.LessOrEqualf(t, cap(d.buf), 1<<20,
-		"buffer grew to %d bytes while permanently half-consumed", cap(d.buf))
+	require.LessOrEqualf(t, cap(d.buf), 16*len(one),
+		"buffer grew to %d bytes while permanently partly consumed, want at most %d "+
+			"— the slide is not running, so a long-lived stream accumulates every "+
+			"chunk it has ever been handed", cap(d.buf), 16*len(one))
+}
+
+// TestDecoder_EmptyChunkIsNotBorrowed pins the first half of PushBorrowed's
+// guard. The borrow tests exercise its second half (d.Pending() != 0)
+// thoroughly and this half not at all.
+//
+// An empty DATA frame is legal on the wire and carries no message. Borrowing on
+// one would take ownership of the caller's slab in order to alias nothing —
+// and because a borrow only ends at the NEXT push, that slab would sit out of
+// circulation until a chunk carrying bytes arrived.
+func TestDecoder_EmptyChunkIsNotBorrowed(t *testing.T) {
+	var d decoder
+
+	borrowed := d.PushBorrowed(nil, nil)
+
+	require.Falsef(t, borrowed,
+		"PushBorrowed(nil) = true — a true return transfers slab ownership to the "+
+			"decoder, so an empty DATA frame would park a pooled buffer indefinitely")
+	assert.Falsef(t, d.borrowing,
+		"a refused borrow still armed the decoder: borrowing=%v", d.borrowing)
+}
+
+// TestDecoder_EmptyPushDoesNotEndABorrow pins the matching guard on Push, which
+// pump does reach: it falls back to Push whenever PushBorrowed declines, and an
+// empty ev.Data always declines.
+//
+// Ending the borrow there would not be wrong, it would be waste — the
+// undelivered remainder of the borrowed chunk copied into the decoder's own
+// buffer, and the slab handed back, on a frame that delivered nothing.
+func TestDecoder_EmptyPushDoesNotEndABorrow(t *testing.T) {
+	whole, err := AppendMessage(nil, []byte("borrowed"))
+	require.NoError(t, err, "AppendMessage")
+	var d decoder
+	require.True(t, d.PushBorrowed(whole, nil), "an empty decoder refused to borrow")
+
+	d.Push(nil)
+
+	require.Truef(t, d.borrowing,
+		"an empty DATA frame ended a live borrow — the undelivered remainder was "+
+			"copied into the decoder's own buffer for a chunk carrying no bytes")
+	msg, ok, err := d.Next()
+	require.NoErrorf(t, err, "Next = (ok=%v, err=%v)", ok, err)
+	require.Truef(t, ok, "Next = (ok=%v, err=%v)", ok, err)
+	assert.Equalf(t, "borrowed", string(msg), "message = %q after an empty push", msg)
 }
 
 func TestDecoder_Reset(t *testing.T) {

@@ -116,6 +116,19 @@ func TestRecvWindowTuner_UnsolicitedAckCannotGrowTheWindow(t *testing.T) {
 	}
 	assert.Equalf(t, before, c.connRecvTarget.Load(),
 		"connRecvTarget = %d after 100 unsolicited ACKs, want %d", c.connRecvTarget.Load(), before)
+	// The target is not the whole of "inert", and asserting only the target is
+	// how the guard came to be deletable with this test green (#852). An ACK
+	// that closes no sample falls through with sampleBytes == 0, so neither
+	// raise moves and the back-off doubles instead: a peer replaying the
+	// tuner's own PING ACK payload drives probeThreshold to maxProbeBytes and
+	// switches auto-tuning off for the life of the connection, having sent none
+	// of the DATA that would justify it.
+	assert.False(t, tn.sampling,
+		"an ACK with no sample outstanding opened one; the tuner now counts bytes against "+
+			"a round trip the peer chose the start of")
+	assert.EqualValuesf(t, minProbeBytes, tn.probeThreshold,
+		"probeThreshold = %d after 100 unsolicited ACKs, want %d — peer-controlled input "+
+			"must not be able to back the tuner off", tn.probeThreshold, minProbeBytes)
 
 	// Mid-sample: the peer ACKs immediately, before any DATA has been counted.
 	require.True(t, tn.onData(uint32(tn.probeThreshold)), "no sample opened")

@@ -80,3 +80,50 @@ func TestConformance_RFC9000_Sec124_FrameTypePermittedBySpace(t *testing.T) {
 	assert.True(t, h.c.handshakeConfirmed,
 		"HANDSHAKE_DONE in the 1-RTT space should still confirm the handshake")
 }
+
+// TestConformance_RFC9000_Sec124_UnknownFrameTypeBoundary probes permitInSpace's
+// known/unknown split AT its edge.
+//
+// permitInSpace answers an Initial- or Handshake-carried frame with one of two
+// different errors on one comparison, `typ > FrameHandshakeDone` (0x1e): above
+// it the type is unknown, and RFC 9000 §12.4: "An endpoint MUST treat the receipt
+// of a frame of unknown type as a connection error of type FRAME_ENCODING_ERROR."
+// At or below it the type is known but not permitted in the space, which §12.5
+// makes a PROTOCOL_VIOLATION.
+//
+// The suite's only unknown-type case was 0x30 — eighteen past the edge — so the
+// boundary itself decided nothing: it could move by several values with nothing
+// going red, and a peer sending 0x1f or 0x20 (the FIRST actually-unknown types)
+// in an Initial would then be answered with the wrong transport error code on the
+// wire. 0x1e is the last known type and must still be the §12.5 answer. #837.
+func TestConformance_RFC9000_Sec124_UnknownFrameTypeBoundary(t *testing.T) {
+	cases := []struct {
+		name string
+		typ  byte
+		want error
+	}{
+		{"0x1e_handshake_done_is_known", 0x1e, ErrProtocolViolation},
+		{"0x1f_first_unknown", 0x1f, ErrFrameEncoding},
+		{"0x20_unknown", 0x20, ErrFrameEncoding},
+		{"0x30_unknown", 0x30, ErrFrameEncoding},
+	}
+
+	for _, space := range []struct {
+		name string
+		sp   int
+	}{{"initial", spaceInitial}, {"handshake", spaceHandshake}} {
+		sp := space.sp
+		for _, tc := range cases {
+			t.Run(space.name+"_"+tc.name, func(t *testing.T) {
+				h := &connFrameHandler{c: &Conn{}, space: sp}
+
+				err := ParseFrames([]byte{tc.typ}, h)
+
+				assert.Truef(t, errors.Is(err, tc.want),
+					"space %d frame type %#x: ParseFrames = %v, want %v — §12.4 and §12.5 "+
+						"map to different transport error codes, and the peer sees which one",
+					sp, tc.typ, err, tc.want)
+			})
+		}
+	}
+}
