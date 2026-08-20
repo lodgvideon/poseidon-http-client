@@ -162,6 +162,9 @@ func TestRequestComplete_ReportsHTTP11(t *testing.T) {
 	assert.Equalf(t, trace.ProtoH1, e.Proto, "Proto = %v, want h1", e.Proto)
 	assert.Equalf(t, srv.Listener.Addr().String(), e.RemoteAddr, "RemoteAddr = %q, want the server's address", e.RemoteAddr)
 	assert.Positivef(t, e.TTFB, "TTFB = %v; the HTTP/1.1 path reports a first byte like the others", e.TTFB)
+	assert.Positivef(t, e.Connect,
+		"Connect = %v on the request that dialled; HTTP/1.1 keeps its own copy of the dial timing, so it can go missing here while the other two protocols still report it",
+		e.Connect)
 }
 
 // TestRequestComplete_FailedAttemptReportsNoFirstByte is the negative class.
