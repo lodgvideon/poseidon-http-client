@@ -126,3 +126,71 @@ func TestConformance_RFC9002_Sec53_AckDelayClampedToMax(t *testing.T) {
 	assert.Equalf(t, want, c.rtt.smoothedRTT,
 		"smoothed_rtt = %v, want %v (ACK Delay clamped to max_ack_delay 5ms)", c.rtt.smoothedRTT, want)
 }
+
+// TestConformance_RFC9000_Sec182_AckDelayParamBoundaries pins BOTH sides of the
+// two RFC 9000 §18.2 ack-delay limits, at the limit rather than comfortably
+// inside it.
+//
+// RFC 9000 §18.2, ack_delay_exponent: "Values above 20 are invalid."
+// RFC 9000 §18.2, max_ack_delay: "Values of 2^14 or greater are invalid."
+//
+// Both sentences name the largest LEGAL value as well as the smallest illegal
+// one, and only the illegal side was covered — here and, for the exponent, again
+// in fuzz_test.go. That pinned each bound from one direction: moving either limit
+// inward, so that a value a conformant peer is entitled to advertise is refused
+// with TRANSPORT_PARAMETER_ERROR, was invisible to the whole suite. An
+// over-rejecting endpoint fails to interoperate exactly as loudly as an
+// under-rejecting one. #827.
+//
+// The zero cases are their own equivalence class, not a third point on the
+// range: ParseTransportParams seeds the §18.2 defaults (3 and 25ms) before
+// reading anything, so an explicitly advertised 0 must survive to overwrite them
+// — "absent" and "zero" are different inputs with different correct answers.
+func TestConformance_RFC9000_Sec182_AckDelayParamBoundaries(t *testing.T) {
+	accepted := []struct {
+		name      string
+		params    []byte
+		wantExp   uint64
+		wantDelay time.Duration
+	}{
+		// ack_delay_exponent: 0 (explicit, not the default 3), and 20, the largest
+		// value §18.2 leaves legal.
+		{"exponent_zero", tpInt(tpAckDelayExponent, 0), 0, 25 * time.Millisecond},
+		{"exponent_at_limit_20", tpInt(tpAckDelayExponent, 20), 20, 25 * time.Millisecond},
+		// max_ack_delay: 0 (explicit, not the default 25ms), and 16383ms = 2^14-1,
+		// the largest value §18.2 leaves legal.
+		{"max_ack_delay_zero", tpInt(tpMaxAckDelay, 0), 3, 0},
+		{"max_ack_delay_at_limit_16383", tpInt(tpMaxAckDelay, 1<<14-1), 3, 16383 * time.Millisecond},
+	}
+	rejected := []struct {
+		name   string
+		params []byte
+	}{
+		{"exponent_one_past_limit_21", tpInt(tpAckDelayExponent, 21)},
+		{"max_ack_delay_one_past_limit_16384", tpInt(tpMaxAckDelay, 1<<14)},
+	}
+
+	for _, tc := range accepted {
+		t.Run(tc.name, func(t *testing.T) {
+			tp, err := ParseTransportParams(tc.params)
+
+			require.NoErrorf(t, err, "ParseTransportParams(%s) = %v; §18.2 leaves this value "+
+				"legal, and refusing it makes the handshake fail against a conformant peer", tc.name, err)
+			assert.Equalf(t, tc.wantExp, tp.AckDelayExponent,
+				"ack_delay_exponent = %d, want %d — a bound that has moved inward silently "+
+					"changes how every ACK Delay field is decoded", tp.AckDelayExponent, tc.wantExp)
+			assert.Equalf(t, tc.wantDelay, tp.MaxAckDelay,
+				"max_ack_delay = %v, want %v — this feeds the PTO period, so a wrong value "+
+					"mis-times every probe", tp.MaxAckDelay, tc.wantDelay)
+		})
+	}
+	for _, tc := range rejected {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := ParseTransportParams(tc.params)
+
+			assert.ErrorIsf(t, err, ErrTransportParameter,
+				"ParseTransportParams(%s) = %v, want ErrTransportParameter — one past the "+
+					"§18.2 limit must close the connection, not be silently accepted", tc.name, err)
+		})
+	}
+}

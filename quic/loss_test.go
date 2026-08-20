@@ -206,3 +206,49 @@ func TestConn_AckOnlyPacketNotRetransmittable(t *testing.T) {
 	assert.NotContains(t, c.sent[spaceApp].packets, uint64(0),
 		"the lost packet should still be removed from flight")
 }
+
+// TestConformance_RFC9002_Sec61_OnlyPacketsBeforeAnAckedOneAreLost pins
+// detectLost's eligibility precondition, which nothing in the suite exercised.
+//
+// RFC 9002 §6.1 makes it the FIRST of the two conditions a packet must meet to be
+// declared lost: "The packet is unacknowledged, in flight, and was sent prior to
+// an acknowledged packet." Without it the time threshold alone fires on any
+// merely-old packet — including one the peer has had no opportunity to
+// acknowledge — so an unlucky RTT sample turns every packet still in flight into
+// a spurious retransmission and a congestion-window cut.
+//
+// TestConformance_RFC9002_Sec612_EarliestLossTime is the only other fixture with
+// a packet above largestAckedPN, and it sends that packet at "now", so the time
+// threshold does not fire for it either way. Deleting the guard left the whole
+// suite green. #840.
+//
+// The fixture makes the guard the only thing that can spare pn 5: it is above the
+// largest acknowledged AND older than the loss delay, so the §6.1.2 time
+// threshold would otherwise take it.
+func TestConformance_RFC9002_Sec61_OnlyPacketsBeforeAnAckedOneAreLost(t *testing.T) {
+	base := time.Unix(900, 0)
+	c := &Conn{now: func() time.Time { return base }}
+	c.rtt.update(20*ms, 0) // lossDelay = 20ms*9/8 = 22.5ms
+	c.sent[spaceApp].onSent(0, base.Add(-50*ms), true, streamFrame(0, 0, "old"))
+	c.sent[spaceApp].onSent(1, base.Add(-50*ms), true, nil)
+	c.sent[spaceApp].ack(c, 1, 1) // largestAckedPN = 1
+	// Above the largest acknowledged, and 50ms old — past the 22.5ms threshold.
+	c.sent[spaceApp].onSent(5, base.Add(-50*ms), true, streamFrame(0, 5, "newer"))
+	require.Contains(t, c.sent[spaceApp].packets, uint64(5),
+		"the fixture must have pn 5 in flight, or there is nothing for the guard to spare")
+
+	c.detectLost(spaceApp)
+
+	assert.Containsf(t, c.sent[spaceApp].packets, uint64(5),
+		"pn 5 left flight: it is ABOVE the largest acknowledged, so §6.1's first "+
+			"condition is unmet and no threshold may declare it lost — the peer has "+
+			"not had the chance to acknowledge it")
+	require.Lenf(t, c.retransQueue[spaceApp], 1,
+		"retransQueue = %+v, want only pn 0 — pn 5 must not be retransmitted",
+		c.retransQueue[spaceApp])
+	assert.Zerof(t, c.retransQueue[spaceApp][0].offset,
+		"the queued frame is offset %d, want pn 0's offset 0",
+		c.retransQueue[spaceApp][0].offset)
+	assert.NotContains(t, c.sent[spaceApp].packets, uint64(0),
+		"pn 0 is below the largest acknowledged and past the time threshold: it must be lost")
+}

@@ -593,18 +593,38 @@ func TestIntegration_ContextCancelStopsRecv(t *testing.T) {
 	defer func() { _ = s.Close() }()
 	require.NoError(t, s.Send(ctx, []byte("x")), "Send")
 	require.NoError(t, s.CloseSend(ctx), "CloseSend")
+	// The second Recv gets a context of its own, and a bounded one. Its purpose
+	// is to observe the grpc-level latch, and the latch is read before pump is
+	// entered — so on healthy code this deadline is never approached. Without a
+	// deadline the same call, on a stream whose latch had been lost, would go
+	// back into pump and block on a server that is still holding the request
+	// open: the regression would surface as `panic: test timed out` minutes
+	// later instead of as this test's own assertion. That is how it surfaced the
+	// first time.
+	secondCtx, secondCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer secondCancel()
 
 	go func() {
 		time.Sleep(100 * time.Millisecond)
 		cancel()
 	}()
 	_, recvErr := s.Recv(ctx)
-	_, secondErr := s.Recv(context.Background())
+	_, secondErr := s.Recv(secondCtx)
 
 	require.ErrorIsf(t, recvErr, context.Canceled, "Recv = %v, want context.Canceled", recvErr)
 	// The failure is sticky: a second Recv must not resume a broken stream.
 	require.ErrorIsf(t, secondErr, context.Canceled,
 		"second Recv = %v, want the recorded context.Canceled", secondErr)
+	// Name the mechanism. errors.Is alone does not distinguish the grpc latch
+	// from conn re-reporting its own latched failure a second time, and conn
+	// does latch — so that assertion holds with Stream.fail removed entirely.
+	// Identity does distinguish them: fail stores one *Status and hands the same
+	// value back to every later Recv, whereas a fresh trip through pump builds a
+	// new one out of statusFromTransport.
+	require.Truef(t, secondErr == recvErr,
+		"second Recv returned a different error value (%v) from the first (%v) — it "+
+			"re-entered pump and re-derived the failure instead of reporting the "+
+			"one Stream.fail recorded", secondErr, recvErr)
 }
 
 // TestIntegration_ConcurrentStreams runs many calls over one ClientConn, which
