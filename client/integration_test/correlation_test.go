@@ -14,6 +14,7 @@ import (
 
 	"github.com/lodgvideon/poseidon-http-client/client"
 	"github.com/lodgvideon/poseidon-http-client/conn"
+	"github.com/stretchr/testify/assert"
 )
 
 // The suite checked that a response came back, not that it was THIS request's
@@ -41,7 +42,7 @@ import (
 // count (21 of 30 3006-byte bodies complete = 63126 bytes, then nothing). It is not
 // this client's defect: curl/nghttp2 1.59.0 fails the same way against the same
 // nginx, 29 of 30 requests dead, while go-http, Undertow and nghttpx all serve the
-// oversized load without complaint. Filed separately.
+// oversized load without complaint. Filed separately as #701.
 //
 // The body only has to be unique and long enough to make a mix unmistakable, so
 // sizing it under the window costs the test nothing — the mutation that crosses two
@@ -108,7 +109,9 @@ func TestMatrix_ConcurrentIdentity(t *testing.T) {
 			close(errs)
 
 			for err := range errs {
-				t.Error(err)
+				assert.NoError(t, err, "a concurrent request did not get its own response back — "+
+					"the client pools buffers and reuses header-decode storage, so a mix shows up "+
+					"as a neighbouring request's bytes rather than as a crash")
 			}
 		})
 	}
@@ -215,7 +218,9 @@ func TestMatrix_ConcurrentHeaderIdentity(t *testing.T) {
 			close(errs)
 
 			for err := range errs {
-				t.Error(err)
+				assert.NoError(t, err, "the header channel did not keep concurrent requests "+
+					"apart — header values are decoded into pooled, reused storage, so this is "+
+					"the channel most likely to alias one stream's value into another")
 			}
 		})
 	}
