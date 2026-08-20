@@ -50,6 +50,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   there was the comment that mis-attributed RFC 9112 §6.3 rule 3 to that site
   when `resolveContentLength`'s `respTE` early return is what implements it
   (#778, #779, #780, #781, #782, #799, #811, #820, #824, #830, #831).
+
 - **Fourteen coverage gaps in `trace`, `contrib/prometheus`, `internal/bufx` and
   `internal/bytesx`; eleven closed by adding the missing case, three refuted by
   measurement.** Every varint in `bytesx` was decoded from a buffer trimmed to
