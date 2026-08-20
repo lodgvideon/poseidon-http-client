@@ -3,18 +3,18 @@ package client
 import (
 	"context"
 	"crypto/tls"
-	"errors"
 	"io"
 	"log"
 	"net"
 	"net/http"
 	"net/http/httptest"
-	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/lodgvideon/poseidon-http-client/conn"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // h2TestServer starts an in-process HTTP/2 server and returns its address.
@@ -46,25 +46,24 @@ func TestResolve_SuccessfulEmpty_DoesNotServeStale(t *testing.T) {
 		return []net.IPAddr{}, nil // success, but empty
 	}}
 	r := newDNSResolverWithLookup("svc.local", 80, DNSOptions{TTL: time.Nanosecond}, fl)
-
 	tick := 0
 	clock := time.Unix(1_700_000_000, 0)
 	r.setNow(func() time.Time {
 		tick++
 		return clock.Add(time.Duration(tick) * 2 * time.Nanosecond)
 	})
-
-	if first, err := r.Resolve(context.Background()); err != nil || len(first) != 1 {
-		t.Fatalf("first Resolve = (%v, %v), want one address", first, err)
-	}
+	first, err := r.Resolve(context.Background())
+	require.NoError(t, err, "first Resolve must succeed to populate the cache")
+	require.Lenf(t, first, 1, "first Resolve = %v, want one address", first)
 
 	got, err := r.Resolve(context.Background())
-	if len(got) != 0 {
-		t.Fatalf("second Resolve returned stale %v; want empty on a successful-but-empty lookup", got)
-	}
-	if !errors.Is(err, ErrNoAddresses) {
-		t.Fatalf("second Resolve err = %v, want ErrNoAddresses", err)
-	}
+
+	assert.Emptyf(t, got,
+		"second Resolve returned the stale set %v; a service scaled to zero would keep "+
+			"receiving traffic to dead backends forever", got)
+	assert.ErrorIsf(t, err, ErrNoAddresses,
+		"second Resolve err = %v, want ErrNoAddresses — an authoritative empty answer is "+
+			"different from a lookup FAILURE, which does keep the stale set", err)
 }
 
 // TestWarmup_NoActiveLeak is a regression test: warmup acquired conns but never
@@ -79,7 +78,6 @@ func TestWarmup_NoActiveLeak(t *testing.T) {
 		HealthCheckPeriod: time.Hour,
 	}, nil, nil)
 	defer p.Close()
-
 	// Seed one live conn and release it, so warmup's acquire hits this existing
 	// conn instantly (returns it, active++) instead of racing a sub-50ms dial.
 	// This deterministically exercises the release path the fix added — a
@@ -87,9 +85,7 @@ func TestWarmup_NoActiveLeak(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	mc, err := p.acquire(ctx)
 	cancel()
-	if err != nil {
-		t.Fatalf("seed acquire: %v", err)
-	}
+	require.NoError(t, err, "seed acquire against a live server")
 	p.release(mc)
 
 	p.warmup(2)
@@ -98,13 +94,12 @@ func TestWarmup_NoActiveLeak(t *testing.T) {
 	// stream count must settle to 0; the leak (acquire without release) left it
 	// permanently > 0.
 	deadline := time.Now().Add(3 * time.Second)
-	for time.Now().Before(deadline) {
-		if p.Stats().InFlightStreams == 0 {
-			return
-		}
+	for time.Now().Before(deadline) && p.Stats().InFlightStreams != 0 {
 		time.Sleep(10 * time.Millisecond)
 	}
-	t.Fatalf("InFlightStreams never returned to 0 after warmup: %+v", p.Stats())
+	assert.Zerof(t, p.Stats().InFlightStreams,
+		"InFlightStreams never returned to 0 after warmup: %+v — a phantom active count "+
+			"blocks idle eviction and graceful drain forever", p.Stats())
 }
 
 // rgTrackedConn counts Close calls on a dialed transport connection.
@@ -150,7 +145,6 @@ func (d *rgTrackingDialer) Dial(ctx context.Context, addr string) (net.Conn, err
 func TestPoolClose_NoDialDoneLeak(t *testing.T) {
 	addr := h2TestServer(t, func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(200) })
 	inner := &conn.TLSDialer{Config: &tls.Config{InsecureSkipVerify: true}}
-
 	var dialedCt, closedCt atomic.Int32
 
 	for i := 0; i < 1000; i++ {
@@ -179,9 +173,14 @@ func TestPoolClose_NoDialDoneLeak(t *testing.T) {
 	for closedCt.Load() < dialedCt.Load() && time.Now().Before(deadline) {
 		time.Sleep(20 * time.Millisecond)
 	}
-	if d, c := dialedCt.Load(), closedCt.Load(); c < d {
-		t.Fatalf("conn leak: %d dialed but only %d Closed (%d leaked)", d, c, d-c)
-	}
+	d, c := dialedCt.Load(), closedCt.Load()
+	t.Logf("injections: 1000 close-during-dial races, %d conns dialled, %d Closed", d, c)
+	require.Positivef(t, d,
+		"no conn was dialled across 1000 iterations, so the close-during-dial path was "+
+			"never exercised and a zero leak count proves nothing")
+	assert.GreaterOrEqualf(t, c, d,
+		"conn leak: %d dialed but only %d Closed (%d leaked) — each leak strands a "+
+			"connection, its reader goroutine and its fd", d, c, d-c)
 }
 
 // TestBodyStream_DecompressFail_NoDoubleRelease is a regression test: when the
@@ -195,41 +194,30 @@ func TestBodyStream_DecompressFail_NoDoubleRelease(t *testing.T) {
 		w.WriteHeader(200)
 		_, _ = w.Write([]byte("not-a-valid-gzip-stream"))
 	})
-
 	c, err := NewClient(ClientOptions{
 		Addr:      addr,
 		Transport: TransportPool,
 		Pool:      &PoolOptions{MaxConnsPerHost: 2, MaxStreamsPerConn: 10},
 		ConnOpts:  insecureConnOpts(),
 	})
-	if err != nil {
-		t.Fatalf("NewClient: %v", err)
-	}
+	require.NoError(t, err, "NewClient against the bad-gzip server")
 	defer c.Close()
-
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
-
 	var resp Response
+
 	derr := c.Do(ctx, &Request{Method: "GET", Path: "/", BodyMode: BodyStream}, &resp)
-	if derr == nil {
-		t.Fatalf("Do = nil, want a decompression error")
-	}
+
+	require.Error(t, derr, "Do = nil, want a decompression error")
 	// Must be the decompression failure, not an unrelated dial/handshake error,
 	// so the test truly exercises the fixed newDecompressingReader error path.
-	if !strings.Contains(derr.Error(), "gzip") {
-		t.Fatalf("Do error = %q, want a gzip decompression failure", derr)
-	}
+	require.Containsf(t, derr.Error(), "gzip",
+		"Do error = %q, want a gzip decompression failure — any other error means this "+
+			"test is measuring a different path", derr)
 	// Translate a nil-deref panic (the unfixed stream-Close-after-recycle bug)
 	// into a clean failure so it cannot abort the whole package test binary.
-	func() {
-		defer func() {
-			if r := recover(); r != nil {
-				t.Fatalf("resp.Reset() panicked (stream Close-after-recycle): %v", r)
-			}
-		}()
-		resp.Reset()
-	}()
+	require.NotPanicsf(t, resp.Reset,
+		"resp.Reset() panicked (stream Close-after-recycle)")
 
 	// Exactly one net release. Poll a settle window asserting the active count
 	// NEVER goes negative (a double-release drives it to -1), then require it to
@@ -239,12 +227,12 @@ func TestBodyStream_DecompressFail_NoDoubleRelease(t *testing.T) {
 	// residual pool double-release once that panic is gone.
 	settle := time.Now().Add(1 * time.Second)
 	for time.Now().Before(settle) {
-		if n := c.PoolStats().InFlightStreams; n < 0 {
-			t.Fatalf("double-release: InFlightStreams went negative (%d)", n)
-		}
+		n := c.PoolStats().InFlightStreams
+		require.GreaterOrEqualf(t, n, 0,
+			"double-release: InFlightStreams went negative (%d); the conn was handed back "+
+				"twice and the pool's budget is now permanently inflated", n)
 		time.Sleep(20 * time.Millisecond)
 	}
-	if n := c.PoolStats().InFlightStreams; n != 0 {
-		t.Fatalf("InFlightStreams settled at %d, want 0", n)
-	}
+	assert.Zerof(t, c.PoolStats().InFlightStreams,
+		"InFlightStreams settled at %d, want 0", c.PoolStats().InFlightStreams)
 }

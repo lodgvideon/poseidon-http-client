@@ -13,6 +13,9 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // Soak test: sustained HTTP/3 load against a live interop server, asserting the
@@ -114,9 +117,7 @@ func TestSoak_H3ConnStability(t *testing.T) {
 
 	c, err := NewH3Client(addr,
 		&tls.Config{ServerName: host, InsecureSkipVerify: true}) //nolint:gosec // interop dials self-signed
-	if err != nil {
-		t.Fatalf("NewH3Client(%s): %v", addr, err)
-	}
+	require.NoErrorf(t, err, "NewH3Client(%s)", addr)
 	t.Cleanup(func() { _ = c.Close() })
 
 	doGet := func(ctx context.Context) error {
@@ -134,9 +135,8 @@ func TestSoak_H3ConnStability(t *testing.T) {
 		if err := doGet(context.Background()); err == nil {
 			break
 		}
-		if time.Now().After(deadline) {
-			t.Fatalf("soak: server %s never became reachable", addr)
-		}
+		require.Falsef(t, time.Now().After(deadline),
+			"soak: server %s never became reachable", addr)
 		time.Sleep(500 * time.Millisecond)
 	}
 
@@ -210,25 +210,20 @@ func TestSoak_H3ConnStability(t *testing.T) {
 		total, errs.Load(), rps, baseGoroutines, finalGoroutines,
 		float64(baseHeap)/(1<<20), float64(finalHeap)/(1<<20))
 
-	if total == 0 {
-		t.Fatal("soak: zero successful requests")
-	}
-	if errs.Load() > total/20 { // >5% error rate is a red flag
-		t.Errorf("soak: high error rate: %d errs / %d ok", errs.Load(), total)
-	}
+	require.NotZero(t, total, "soak: zero successful requests")
+	assert.LessOrEqualf(t, errs.Load(), total/20, // >5% error rate is a red flag
+		"soak: high error rate: %d errs / %d ok", errs.Load(), total)
 	// Goroutine ceiling: steady state should not grow with elapsed load. Allow
 	// slack for scheduler jitter and pool churn; a leak (one goroutine/req) would
 	// be orders of magnitude past this.
-	if finalGoroutines > baseGoroutines+workers+16 {
-		t.Errorf("soak: goroutine growth suggests a leak: baseline %d, final %d (workers=%d)",
-			baseGoroutines, finalGoroutines, workers)
-	}
+	assert.LessOrEqualf(t, finalGoroutines, baseGoroutines+workers+16,
+		"soak: goroutine growth suggests a leak: baseline %d, final %d (workers=%d)",
+		baseGoroutines, finalGoroutines, workers)
 	// Heap ceiling: after GC, live heap should return near the steady-state
 	// baseline. 2x + 8 MiB tolerates fragmentation without hiding unbounded growth.
-	if finalHeap > baseHeap*2+(8<<20) {
-		t.Errorf("soak: heap growth suggests a leak: baseline %.1fMiB, final %.1fMiB",
-			float64(baseHeap)/(1<<20), float64(finalHeap)/(1<<20))
-	}
+	assert.LessOrEqualf(t, finalHeap, baseHeap*2+(8<<20),
+		"soak: heap growth suggests a leak: baseline %.1fMiB, final %.1fMiB",
+		float64(baseHeap)/(1<<20), float64(finalHeap)/(1<<20))
 }
 
 // TestSoak_H3PoolConnStability is TestSoak_H3ConnStability's pooled twin: the same
@@ -265,9 +260,7 @@ func TestSoak_H3PoolConnStability(t *testing.T) {
 			MaxStreamsPerConn: maxStreams,
 			HealthCheckPeriod: time.Second,
 		})
-	if err != nil {
-		t.Fatalf("NewH3PoolClient(%s): %v", addr, err)
-	}
+	require.NoErrorf(t, err, "NewH3PoolClient(%s)", addr)
 	t.Cleanup(func() { _ = c.Close() })
 
 	doGet := func(ctx context.Context, timeout time.Duration) error {
@@ -285,9 +278,8 @@ func TestSoak_H3PoolConnStability(t *testing.T) {
 		if err := doGet(context.Background(), 10*time.Second); err == nil {
 			break
 		}
-		if time.Now().After(deadline) {
-			t.Fatalf("soak: server %s never became reachable", addr)
-		}
+		require.Falsef(t, time.Now().After(deadline),
+			"soak: server %s never became reachable", addr)
 		time.Sleep(500 * time.Millisecond)
 	}
 
@@ -368,27 +360,21 @@ func TestSoak_H3PoolConnStability(t *testing.T) {
 		total, errs.Load(), probes.Load(), rps, baseGoroutines, finalGoroutines,
 		float64(baseHeap)/(1<<20), float64(finalHeap)/(1<<20))
 
-	if total == 0 {
-		t.Fatal("soak: zero successful requests")
-	}
-	if probes.Load() == 0 {
-		t.Fatal("soak: no abandon probes ran — the acquire/abandon path was not exercised")
-	}
+	require.NotZero(t, total, "soak: zero successful requests")
+	require.NotZero(t, probes.Load(),
+		"soak: no abandon probes ran — the acquire/abandon path was not exercised")
 	// A leaked stream slot per abandon starves the pool and surfaces here first:
 	// the ordinary requests can no longer acquire and time out.
-	if errs.Load() > total/20 { // >5% error rate is a red flag
-		t.Errorf("soak: high error rate: %d errs / %d ok (pool starved by leaked slots?)",
-			errs.Load(), total)
-	}
+	assert.LessOrEqualf(t, errs.Load(), total/20, // >5% error rate is a red flag
+		"soak: high error rate: %d errs / %d ok (pool starved by leaked slots?)",
+		errs.Load(), total)
 	// Goroutine ceiling. Each abandoned acquire spawns a reclaim goroutine, but
 	// each is owed exactly one reply and exits on receiving it; a reply the actor
 	// owes and never sends would hang one per abandon and blow past this.
-	if finalGoroutines > baseGoroutines+workers+16 {
-		t.Errorf("soak: goroutine growth suggests a leak: baseline %d, final %d (workers=%d)",
-			baseGoroutines, finalGoroutines, workers)
-	}
-	if finalHeap > baseHeap*2+(8<<20) {
-		t.Errorf("soak: heap growth suggests a leak: baseline %.1fMiB, final %.1fMiB",
-			float64(baseHeap)/(1<<20), float64(finalHeap)/(1<<20))
-	}
+	assert.LessOrEqualf(t, finalGoroutines, baseGoroutines+workers+16,
+		"soak: goroutine growth suggests a leak: baseline %d, final %d (workers=%d)",
+		baseGoroutines, finalGoroutines, workers)
+	assert.LessOrEqualf(t, finalHeap, baseHeap*2+(8<<20),
+		"soak: heap growth suggests a leak: baseline %.1fMiB, final %.1fMiB",
+		float64(baseHeap)/(1<<20), float64(finalHeap)/(1<<20))
 }
