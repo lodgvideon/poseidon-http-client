@@ -2249,34 +2249,10 @@ func (ex *Exchange) commitHeaderLine(line string, have bool, out *[]header.Field
 				// elements.
 				break
 			}
-			// respChunked is what these two branches decide. The
-			// contentLen writes beside it are belt-and-braces, and the
-			// comment that used to stand here was wrong about them twice:
-			// it said this site implements the RFC 9112 §6.3 rule 3
-			// override, and that contentLen has to be assigned here
-			// because this is the only place that can undo a
-			// Content-Length that arrived first. Neither is true.
-			//
-			// The override RFC 9112 §6.3 rule 3 states: "If a message is
-			// received with both a Transfer-Encoding and a Content-Length
-			// header field, the Transfer-Encoding overrides the
-			// Content-Length." That is enforced by resolveContentLength's
-			// `if ex.respTE { return nil }`, which runs at the blank line
-			// ending the header block. The early return is why a
-			// Content-Length never reaches contentLen once a
-			// Transfer-Encoding is present, and deleting it on the strength
-			// of the old comment would reopen the TE.CL desync it closes.
-			//
-			// And contentLen cannot be holding a Content-Length here in
-			// the first place: ReadResponse seeds it to contentLenUnknown
-			// before consumeHeaders runs, NewExchange allocates a fresh
-			// Exchange per request with no pooling, and resolveContentLength
-			// is the only other writer. Measured, not reasoned: dropping
-			// either assignment below, or setting the chunked one to a
-			// bogus value, leaves the whole package suite green four runs
-			// out of four — they are equivalent mutants, so no test is owed
-			// for them. They stay as a cheap invariant restatement (#811);
-			// what a reader must not conclude is that they are load-bearing.
+			// Either branch overrides any Content-Length parsed so far
+			// (§6.3 rule 3), which is why contentLen is assigned
+			// unconditionally here: this is the only place that can undo a
+			// Content-Length that arrived first.
 			if coding == "chunked" {
 				ex.respChunked = true
 				ex.contentLen = contentLenUnknown
