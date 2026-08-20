@@ -40,6 +40,24 @@ type subPoolBackend[MC any] interface {
 }
 
 // coreSubPool wraps a per-address pool with the core's metadata.
+//
+// INVARIANT (#875): draining is a strict function of set membership, and
+// applySet is the only writer of it. applySet, under one mp.mu.Lock(), clears
+// draining for every address in the incoming set, sets it for every address of
+// the old mp.addrs absent from the incoming set, and then assigns mp.addrs. So
+// on exit from applySet: every address in mp.addrs has a non-draining sub-pool,
+// and every draining sub-pool's address is absent from mp.addrs.
+//
+// Three guards elsewhere are unreachable under that invariant and are kept as
+// defence-in-depth rather than deleted: snapshotActive's draining skip and
+// applySet's own `!s.draining` both iterate mp.addrs, where no draining sub-pool
+// can be; dropSubPool's `cur == s` identity check needs a delete-then-recreate
+// that no caller performs. They cost nothing and they are the seatbelt for
+// anyone adding a THIRD writer of draining — which is the change that breaks the
+// invariant. The sibling guard dropIfDraining's `!s.draining` re-check is NOT in
+// that category: it is reachable and load-bearing, protecting the revive-versus-
+// drain-watchdog race, and TestManagedPool_ReviveBeatsDrainWatcher goes red when
+// it is removed.
 type coreSubPool[P subPoolBackend[MC], MC any] struct {
 	p        P
 	addr     Address
