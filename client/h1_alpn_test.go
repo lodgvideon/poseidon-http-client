@@ -3,11 +3,13 @@ package client
 import (
 	"context"
 	"crypto/tls"
-	"errors"
 	"net/http"
 	"net/http/httptest"
 	"testing"
 	"time"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	"github.com/lodgvideon/poseidon-http-client/conn"
 )
@@ -43,24 +45,21 @@ func TestH1TLSDialer_PoolRequestOverDualProtoServer(t *testing.T) {
 	addr, cfg := startDualProtoTLSServer(t)
 
 	c, err := NewH1PoolClient(addr, &conn.H1TLSDialer{Config: cfg}, PoolOptions{MaxConnsPerHost: 2})
-	if err != nil {
-		t.Fatalf("NewH1PoolClient: %v", err)
-	}
+	require.NoError(t, err, "NewH1PoolClient")
 	defer func() { _ = c.Close() }()
-
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-
 	resp := &Response{}
-	if err := c.Do(ctx, GET("/"), resp); err != nil {
-		t.Fatalf("Do: %v", err)
-	}
-	if resp.Status != 200 {
-		t.Fatalf("status = %d, want 200", resp.Status)
-	}
-	if got, ok := resp.HeaderString("x-proto"); !ok || got != "HTTP/1.1" {
-		t.Fatalf("server served %q (present=%v), want HTTP/1.1", got, ok)
-	}
+
+	err = c.Do(ctx, GET("/"), resp)
+
+	require.NoError(t, err, "Do over a dual-protocol origin with the HTTP/1.1 dialer")
+	require.Equal(t, 200, resp.Status, "the exchange must complete, not fail on framing")
+	got, ok := resp.HeaderString("x-proto")
+	require.True(t, ok, "the origin did not echo x-proto, so the protocol it served is unknown")
+	assert.Equal(t, "HTTP/1.1", got,
+		"the origin served %q; an HTTP/1.1 transport that gets h2 writes HTTP/1.1 into an "+
+			"HTTP/2 connection and every request fails with \"read status line: EOF\"", got)
 }
 
 // TestNewClient_H1TransportRejectsH2Dialer verifies the pairing that produced
@@ -95,13 +94,13 @@ func TestNewClient_H1TransportRejectsH2Dialer(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			c, err := NewClient(tc.opts)
+
 			if err == nil {
 				_ = c.Close()
-				t.Fatal("NewClient accepted an h2-asserting dialer on an HTTP/1.1 transport")
 			}
-			if !errors.Is(err, ErrALPNProtocolMismatch) {
-				t.Fatalf("err = %v, want ErrALPNProtocolMismatch", err)
-			}
+			require.Error(t, err, "NewClient accepted an h2-asserting dialer on an HTTP/1.1 transport")
+			assert.ErrorIs(t, err, ErrALPNProtocolMismatch,
+				"the refusal must be classifiable as an ALPN mismatch, not an opaque option error")
 		})
 	}
 }
@@ -124,13 +123,13 @@ func TestNewClient_H2TransportRejectsH1Dialer(t *testing.T) {
 			opts.Pool = &PoolOptions{MaxConnsPerHost: 2}
 		}
 		c, err := NewClient(opts)
+
 		if err == nil {
 			_ = c.Close()
-			t.Fatalf("transport %d accepted an http/1.1-asserting dialer", kind)
 		}
-		if !errors.Is(err, ErrALPNProtocolMismatch) {
-			t.Fatalf("transport %d: err = %v, want ErrALPNProtocolMismatch", kind, err)
-		}
+		require.Errorf(t, err, "transport %d accepted an http/1.1-asserting dialer", kind)
+		assert.ErrorIsf(t, err, ErrALPNProtocolMismatch,
+			"transport %d: the refusal must be classifiable as an ALPN mismatch", kind)
 	}
 }
 
@@ -167,9 +166,10 @@ func TestNewClient_AcceptsUnassertedDialers(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			c, err := NewClient(tc.opts)
-			if err != nil {
-				t.Fatalf("NewClient: %v", err)
-			}
+
+			require.NoError(t, err,
+				"a dialer that asserts no protocol must stay usable; over-rejecting here "+
+					"breaks plaintext and flexible dialers that negotiate at dial time")
 			_ = c.Close()
 		})
 	}
@@ -185,21 +185,16 @@ func TestH1SingleConn_RefusesH2NegotiatedConn(t *testing.T) {
 
 	// FlexDialer offers h2 + http/1.1; the server prefers h2.
 	c, err := NewH1Client(addr, &conn.FlexDialer{Config: cfg})
-	if err != nil {
-		t.Fatalf("NewH1Client: %v", err)
-	}
+	require.NoError(t, err, "NewH1Client")
 	defer func() { _ = c.Close() }()
-
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
 	err = c.Do(ctx, GET("/"), &Response{})
-	if err == nil {
-		t.Fatal("Do succeeded over an h2-negotiated connection")
-	}
-	if !errors.Is(err, ErrALPNProtocolMismatch) {
-		t.Fatalf("err = %v, want ErrALPNProtocolMismatch", err)
-	}
+
+	require.Error(t, err, "Do succeeded over an h2-negotiated connection")
+	assert.ErrorIs(t, err, ErrALPNProtocolMismatch,
+		"the dial must fail naming the protocol rather than writing HTTP/1.1 into an HTTP/2 connection")
 }
 
 // TestH1Pool_RefusesH2NegotiatedConn is the same backstop on the pooled path.
@@ -208,19 +203,14 @@ func TestH1Pool_RefusesH2NegotiatedConn(t *testing.T) {
 	addr, cfg := startDualProtoTLSServer(t)
 
 	c, err := NewH1PoolClient(addr, &conn.FlexDialer{Config: cfg}, PoolOptions{MaxConnsPerHost: 2})
-	if err != nil {
-		t.Fatalf("NewH1PoolClient: %v", err)
-	}
+	require.NoError(t, err, "NewH1PoolClient")
 	defer func() { _ = c.Close() }()
-
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
 	err = c.Do(ctx, GET("/"), &Response{})
-	if err == nil {
-		t.Fatal("Do succeeded over an h2-negotiated connection")
-	}
-	if !errors.Is(err, ErrALPNProtocolMismatch) {
-		t.Fatalf("err = %v, want ErrALPNProtocolMismatch", err)
-	}
+
+	require.Error(t, err, "Do succeeded over an h2-negotiated connection")
+	assert.ErrorIs(t, err, ErrALPNProtocolMismatch,
+		"the pooled dial must fail naming the protocol rather than pooling an HTTP/2 connection")
 }
