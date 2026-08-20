@@ -3,6 +3,9 @@ package quic
 import (
 	"encoding/binary"
 	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // makeVN builds a Version Negotiation packet (RFC 9000 §17.2.1): long-header form,
@@ -28,9 +31,11 @@ func makeVN(dcid, scid []byte, versions ...uint32) []byte {
 func TestConformance_RFC9000_Sec62_VersionNegotiationAbandons(t *testing.T) {
 	c := &Conn{}
 	vn := makeVN([]byte("clientci"), []byte("serverci"), 0x6b3343cf, 0xff00001d) // QUIC v2 + a draft, no v1
-	if err := c.recvDatagram(vn); err != ErrVersionNegotiation {
-		t.Fatalf("recvDatagram(VN without v1) = %v, want ErrVersionNegotiation", err)
-	}
+
+	err := c.recvDatagram(vn)
+
+	assert.Truef(t, err == ErrVersionNegotiation,
+		"recvDatagram(VN without v1) = %v, want ErrVersionNegotiation", err)
 }
 
 // TestConformance_RFC9000_Sec62_VersionNegotiationDiscardExceptions checks the two
@@ -40,34 +45,26 @@ func TestConformance_RFC9000_Sec62_VersionNegotiationAbandons(t *testing.T) {
 func TestConformance_RFC9000_Sec62_VersionNegotiationDiscardExceptions(t *testing.T) {
 	dcid, scid := []byte("clientci"), []byte("serverci")
 
-	// A VN offering no common version is abandoned (the base case).
-	c := &Conn{}
 	vn := makeVN(dcid, scid, 0x6b3343cf)
 	hdr, err := ParseHeader(vn, 0)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !c.shouldAbandonOnVN(vn, hdr) {
-		t.Fatal("a VN offering no common version should be abandoned")
-	}
-
-	// Exception: it lists the client's own version (v1) → discarded.
+	require.NoError(t, err, "ParseHeader of the Version Negotiation packet")
 	vnV1 := makeVN(dcid, scid, QUICVersion1, 0x6b3343cf)
-	hdrV1, _ := ParseHeader(vnV1, 0)
-	if (&Conn{}).shouldAbandonOnVN(vnV1, hdrV1) {
-		t.Fatal("a VN listing v1 must be discarded, not abandoned")
-	}
-
-	// Exception: a server packet was already processed → discarded.
+	hdrV1, err := ParseHeader(vnV1, 0)
+	require.NoError(t, err, "ParseHeader of the v1-offering Version Negotiation packet")
 	c2 := &Conn{}
 	c2.haveRecv[spaceInitial] = true
-	if c2.shouldAbandonOnVN(vn, hdr) {
-		t.Fatal("a VN after a processed packet must be discarded, not abandoned")
-	}
-
-	// Exception: a Retry was already processed → discarded (RFC 9000 §17.2.5.2).
 	c3 := &Conn{handledRetry: true}
-	if c3.shouldAbandonOnVN(vn, hdr) {
-		t.Fatal("a VN after a processed Retry must be discarded, not abandoned")
-	}
+
+	// The base case, then each of the §6.2 / §17.2.5.2 exceptions.
+	abandonBase := (&Conn{}).shouldAbandonOnVN(vn, hdr)
+	abandonV1Offered := (&Conn{}).shouldAbandonOnVN(vnV1, hdrV1)
+	abandonAfterPacket := c2.shouldAbandonOnVN(vn, hdr)
+	abandonAfterRetry := c3.shouldAbandonOnVN(vn, hdr)
+
+	assert.True(t, abandonBase, "a VN offering no common version should be abandoned")
+	assert.False(t, abandonV1Offered, "a VN listing v1 must be discarded, not abandoned")
+	assert.False(t, abandonAfterPacket,
+		"a VN after a processed packet must be discarded, not abandoned")
+	assert.False(t, abandonAfterRetry,
+		"a VN after a processed Retry must be discarded, not abandoned")
 }

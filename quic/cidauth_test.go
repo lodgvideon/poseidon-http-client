@@ -1,6 +1,10 @@
 package quic
 
-import "testing"
+import (
+	"testing"
+
+	"github.com/stretchr/testify/assert"
+)
 
 // TestConformance_RFC9000_Sec73_InitialSCIDAuthenticated checks that the server's
 // initial_source_connection_id is authenticated against the source connection ID
@@ -18,23 +22,19 @@ func TestConformance_RFC9000_Sec73_InitialSCIDAuthenticated(t *testing.T) {
 	newConn := func() *Conn {
 		return &Conn{serverSCID: append([]byte(nil), scid...), origDCID: append([]byte(nil), odcid...)}
 	}
-
-	// Matching initial_source_connection_id → accepted.
-	if err := newConn().PeerTransportParameters(valid()); err != nil {
-		t.Fatalf("matching initial_source_connection_id: %v", err)
-	}
-
-	// Mismatched value → TRANSPORT_PARAMETER_ERROR.
+	// Mismatched value, and an absent parameter (params carry no 0x0f).
 	bad := AppendTransportParams(nil, LocalTransportParams{InitialMaxData: 1000, SourceConnectionID: []byte{0x99}})
 	bad = append(bad, tpBytes(tpOriginalDestinationConnectionID, odcid)...)
-	if err := newConn().PeerTransportParameters(bad); err != ErrTransportParameter {
-		t.Fatalf("mismatched initial_source_connection_id = %v, want ErrTransportParameter", err)
-	}
-
-	// Absent parameter (params carry no 0x0f) → TRANSPORT_PARAMETER_ERROR.
 	absent := appendTPInt(nil, tpInitialMaxData, 1000)
 	absent = append(absent, tpBytes(tpOriginalDestinationConnectionID, odcid)...)
-	if err := newConn().PeerTransportParameters(absent); err != ErrTransportParameter {
-		t.Fatalf("absent initial_source_connection_id = %v, want ErrTransportParameter", err)
-	}
+
+	matching := newConn().PeerTransportParameters(valid())
+	mismatched := newConn().PeerTransportParameters(bad)
+	missing := newConn().PeerTransportParameters(absent)
+
+	assert.NoErrorf(t, matching, "matching initial_source_connection_id: %v", matching)
+	assert.ErrorIsf(t, mismatched, ErrTransportParameter,
+		"mismatched initial_source_connection_id = %v, want ErrTransportParameter", mismatched)
+	assert.ErrorIsf(t, missing, ErrTransportParameter,
+		"absent initial_source_connection_id = %v, want ErrTransportParameter", missing)
 }

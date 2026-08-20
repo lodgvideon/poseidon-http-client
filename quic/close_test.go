@@ -7,6 +7,9 @@ import (
 	"io"
 	"testing"
 	"time"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // closePC records written datagrams and whether Close was called.
@@ -40,17 +43,11 @@ func (h *closeCapture) OnConnectionClose(app bool, code, _ uint64, reason []byte
 func closeTestSealerOpener(t *testing.T, seed byte) (*Sealer, *Opener) {
 	t.Helper()
 	k, err := KeysFromSecret(tls.TLS_AES_128_GCM_SHA256, bytes.Repeat([]byte{seed}, 32))
-	if err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, err)
 	s, err := NewSealer(k)
-	if err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, err)
 	o, err := NewOpener(k)
-	if err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, err)
 	return s, o
 }
 
@@ -62,20 +59,16 @@ func TestConn_CloseWithError_SendsAppConnectionClose(t *testing.T) {
 	pc := &closePC{}
 	c := &Conn{pc: pc, dcid: []byte("closetst"), oneRTTSealer: sealer}
 
-	if err := c.CloseWithError(true, 0x0100, "bye"); err != nil {
-		t.Fatalf("CloseWithError: %v", err)
-	}
-	if !c.closed || !pc.closed {
-		t.Fatalf("closed flags: conn=%v transport=%v, want both true", c.closed, pc.closed)
-	}
-	if len(pc.writes) != 1 {
-		t.Fatalf("wrote %d packets, want 1", len(pc.writes))
-	}
+	err := c.CloseWithError(true, 0x0100, "bye")
+
+	require.NoErrorf(t, err, "CloseWithError: %v", err)
+	require.Truef(t, c.closed && pc.closed,
+		"closed flags: conn=%v transport=%v, want both true", c.closed, pc.closed)
+	require.Lenf(t, pc.writes, 1, "wrote %d packets, want 1", len(pc.writes))
 	h := parseSealedClose(t, opener, c.dcid, pc.writes[0])
-	if !h.got || !h.app || h.code != 0x0100 || string(h.reason) != "bye" {
-		t.Fatalf("CONNECTION_CLOSE = got=%v app=%v code=%#x reason=%q, want true/true/0x0100/\"bye\"",
-			h.got, h.app, h.code, h.reason)
-	}
+	assert.Truef(t, h.got && h.app && h.code == 0x0100 && string(h.reason) == "bye",
+		"CONNECTION_CLOSE = got=%v app=%v code=%#x reason=%q, want true/true/0x0100/\"bye\"",
+		h.got, h.app, h.code, h.reason)
 }
 
 // TestConn_Close_Idempotent checks that a second Close (or a Close after the peer
@@ -84,11 +77,11 @@ func TestConn_Close_Idempotent(t *testing.T) {
 	sealer, _ := closeTestSealerOpener(t, 0x22)
 	pc := &closePC{}
 	c := &Conn{pc: pc, dcid: []byte("closetst"), oneRTTSealer: sealer}
+
 	_ = c.Close()
 	_ = c.Close()
-	if len(pc.writes) != 1 {
-		t.Fatalf("wrote %d packets across two Close calls, want 1", len(pc.writes))
-	}
+
+	assert.Lenf(t, pc.writes, 1, "wrote %d packets across two Close calls, want 1", len(pc.writes))
 }
 
 // TestConn_CloseWithError_DowngradesAppBeforeOneRTT checks RFC 9000 §10.2.3: an
@@ -99,13 +92,14 @@ func TestConn_CloseWithError_DowngradesAppBeforeOneRTT(t *testing.T) {
 	pc := &closePC{}
 	c := &Conn{pc: pc, dcid: []byte("closetst"), handshakeSealer: hsSealer}
 
-	if err := c.CloseWithError(true, 0x0100, "bye"); err != nil {
-		t.Fatalf("CloseWithError: %v", err)
-	}
+	err := c.CloseWithError(true, 0x0100, "bye")
+
+	require.NoErrorf(t, err, "CloseWithError: %v", err)
+	require.NotEmpty(t, pc.writes, "the downgraded close must still be written")
 	h := parseSealedClose(t, opener, c.dcid, pc.writes[0])
-	if !h.got || h.app || h.code != ErrCodeApplicationError {
-		t.Fatalf("downgrade = got=%v app=%v code=%#x, want true/false/APPLICATION_ERROR(0x0c)", h.got, h.app, h.code)
-	}
+	assert.Truef(t, h.got && !h.app && h.code == ErrCodeApplicationError,
+		"downgrade = got=%v app=%v code=%#x, want true/false/APPLICATION_ERROR(0x0c)",
+		h.got, h.app, h.code)
 }
 
 // TestConn_Fail_SendsCloseForProtocolError checks that fail signals a local
@@ -116,16 +110,13 @@ func TestConn_Fail_SendsCloseForProtocolError(t *testing.T) {
 	pc := &closePC{}
 	c := &Conn{pc: pc, dcid: []byte("closetst"), oneRTTSealer: sealer}
 
-	if err := c.fail(ErrFrameEncoding); err != ErrFrameEncoding {
-		t.Fatalf("fail returned %v, want ErrFrameEncoding", err)
-	}
-	if len(pc.writes) != 1 {
-		t.Fatalf("wrote %d packets, want 1 CONNECTION_CLOSE", len(pc.writes))
-	}
+	err := c.fail(ErrFrameEncoding)
+
+	require.ErrorIsf(t, err, ErrFrameEncoding, "fail returned %v, want ErrFrameEncoding", err)
+	require.Lenf(t, pc.writes, 1, "wrote %d packets, want 1 CONNECTION_CLOSE", len(pc.writes))
 	h := parseSealedClose(t, opener, c.dcid, pc.writes[0])
-	if !h.got || h.app || h.code != ErrCodeFrameEncodingError {
-		t.Fatalf("close = got=%v app=%v code=%#x, want true/false/FRAME_ENCODING_ERROR", h.got, h.app, h.code)
-	}
+	assert.Truef(t, h.got && !h.app && h.code == ErrCodeFrameEncodingError,
+		"close = got=%v app=%v code=%#x, want true/false/FRAME_ENCODING_ERROR", h.got, h.app, h.code)
 }
 
 // TestConn_Fail_NoCloseForIOError checks that a non-protocol error (I/O failure,
@@ -134,12 +125,13 @@ func TestConn_Fail_NoCloseForIOError(t *testing.T) {
 	sealer, _ := closeTestSealerOpener(t, 0x55)
 	pc := &closePC{}
 	c := &Conn{pc: pc, dcid: []byte("closetst"), oneRTTSealer: sealer}
-	if err := c.fail(io.EOF); err != io.EOF {
-		t.Fatalf("fail returned %v, want io.EOF", err)
-	}
-	if len(pc.writes) != 0 || pc.closed {
-		t.Fatalf("I/O error must not send a close or close the transport (writes=%d closed=%v)", len(pc.writes), pc.closed)
-	}
+
+	err := c.fail(io.EOF)
+
+	require.ErrorIsf(t, err, io.EOF, "fail returned %v, want io.EOF", err)
+	assert.Falsef(t, len(pc.writes) != 0 || pc.closed,
+		"I/O error must not send a close or close the transport (writes=%d closed=%v)",
+		len(pc.writes), pc.closed)
 }
 
 // oneShotPC yields one datagram then times out; writes and Close are captured.
@@ -169,17 +161,13 @@ func (p *oneShotPC) SetReadDeadline(time.Time) error { return nil }
 // and emit a CONNECTION_CLOSE with FRAME_ENCODING_ERROR (RFC 9000 §10.2).
 func TestConn_Poll_MalformedFrame_SendsConnectionClose(t *testing.T) {
 	k, err := KeysFromSecret(tls.TLS_AES_128_GCM_SHA256, bytes.Repeat([]byte{0x66}, 32))
-	if err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, err)
 	serverSealer, _ := NewSealer(k) // seals the server→client packet
 	clientOpener, _ := NewOpener(k) // client opens it
 	sendSealer, sendOpener := closeTestSealerOpener(t, 0x77)
-
 	// A CRYPTO frame whose declared length runs past the packet → ErrFrameEncoding.
 	badFrames := []byte{0x06, 0x00, 0x40, 0xFF}
 	badPkt := sealKP(t, serverSealer, nil, 0, false, badFrames)
-
 	pc := &oneShotPC{pkt: badPkt}
 	c := &Conn{
 		pc: pc, dcid: []byte("closetst"), oneRTTSealer: sendSealer,
@@ -187,18 +175,15 @@ func TestConn_Poll_MalformedFrame_SendsConnectionClose(t *testing.T) {
 	}
 	c.keys.OneRTT = clientOpener
 
-	if err := c.Poll(context.Background()); err != ErrFrameEncoding {
-		t.Fatalf("Poll = %v, want ErrFrameEncoding", err)
-	}
-	if !pc.closed {
-		t.Fatal("transport should be closed after a protocol violation")
-	}
+	err = c.Poll(context.Background())
+
+	require.ErrorIsf(t, err, ErrFrameEncoding, "Poll = %v, want ErrFrameEncoding", err)
+	require.True(t, pc.closed, "transport should be closed after a protocol violation")
+	require.NotEmpty(t, pc.writes, "a CONNECTION_CLOSE must have been written")
 	// The last written datagram is the CONNECTION_CLOSE (an ACK may precede it).
-	last := pc.writes[len(pc.writes)-1]
-	h := parseSealedClose(t, sendOpener, c.dcid, last)
-	if !h.got || h.code != ErrCodeFrameEncodingError {
-		t.Fatalf("expected FRAME_ENCODING_ERROR CONNECTION_CLOSE, got=%v code=%#x", h.got, h.code)
-	}
+	h := parseSealedClose(t, sendOpener, c.dcid, pc.writes[len(pc.writes)-1])
+	assert.Truef(t, h.got && h.code == ErrCodeFrameEncodingError,
+		"expected FRAME_ENCODING_ERROR CONNECTION_CLOSE, got=%v code=%#x", h.got, h.code)
 }
 
 // TestConn_Poll_MalformedHeader_Discarded checks that an unparseable packet
@@ -208,27 +193,20 @@ func TestConn_Poll_MalformedHeader_Discarded(t *testing.T) {
 	// Short-header first byte with the fixed bit clear → ParseHeader rejects it.
 	pc := &oneShotPC{pkt: []byte{0x00, 0x01, 0x02, 0x03}}
 	c := &Conn{pc: pc, dcid: []byte("closetst"), handshakeComplete: true, handshakeConfirmed: true}
-	if err := c.Poll(context.Background()); err != nil {
-		t.Fatalf("Poll on a malformed header = %v, want nil (packet discarded)", err)
-	}
-	if pc.closed {
-		t.Fatal("a malformed packet must not close the connection")
-	}
+
+	err := c.Poll(context.Background())
+
+	require.NoErrorf(t, err, "Poll on a malformed header = %v, want nil (packet discarded)", err)
+	assert.False(t, pc.closed, "a malformed packet must not close the connection")
 }
 
 func parseSealedClose(t *testing.T, opener *Opener, dcid, pkt []byte) closeCapture {
 	t.Helper()
 	hdr, err := ParseHeader(pkt, len(dcid))
-	if err != nil {
-		t.Fatalf("ParseHeader: %v", err)
-	}
+	require.NoError(t, err, "ParseHeader")
 	_, _, payload, err := opener.Open(pkt, hdr.PNOffset, 0)
-	if err != nil {
-		t.Fatalf("Open: %v", err)
-	}
+	require.NoError(t, err, "Open")
 	var h closeCapture
-	if err := ParseFrames(payload, &h); err != nil {
-		t.Fatalf("ParseFrames: %v", err)
-	}
+	require.NoError(t, ParseFrames(payload, &h), "ParseFrames")
 	return h
 }

@@ -24,6 +24,9 @@ import (
 	"context"
 	"testing"
 
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
 	"github.com/lodgvideon/poseidon-http-client/http1"
 )
 
@@ -37,9 +40,8 @@ func teFraming(t *testing.T, te string) (chunked, keepAlive bool, body string) {
 	t.Helper()
 	ex := wireExchange(t, "GET",
 		"HTTP/1.1 200 OK\r\nTransfer-Encoding: "+te+"\r\n\r\n5\r\nHELLO\r\n0\r\n\r\nLEFTOVER")
-	if _, _, err := ex.ReadResponse(context.Background()); err != nil {
-		t.Fatalf("ReadResponse for %q: %v", te, err)
-	}
+	_, _, err := ex.ReadResponse(context.Background())
+	require.NoErrorf(t, err, "ReadResponse for %q: %v", te, err)
 	body = readAllTolerant(ex)
 	return body == "HELLO", ex.KeepAlive(), body
 }
@@ -76,16 +78,14 @@ func TestConformance_RFC9112_Sec7_QuotedCommaIsNotAListDelimiter(t *testing.T) {
 	} {
 		t.Run(te, func(t *testing.T) {
 			chunked, keepAlive, body := teFraming(t, te)
-			if chunked {
-				t.Errorf("chunk-framed %q, but the quoted comma is parameter data, "+
+
+			assert.Falsef(t, chunked,
+				"chunk-framed %q, but the quoted comma is parameter data, "+
 					"not a list delimiter — chunked is not the final coding, so §6.3 "+
 					"rule 4 requires reading until close. Chunk framing leaves the "+
 					"rest of the response on a %v-poolable socket: response splitting",
-					te, keepAlive)
-			}
-			if body == "" {
-				t.Errorf("no body read for %q", te)
-			}
+				te, keepAlive)
+			assert.NotEmptyf(t, body, "no body read for %q", te)
 		})
 	}
 }
@@ -110,11 +110,11 @@ func TestConformance_RFC9112_Sec7_ChunkedFinalAfterParameters(t *testing.T) {
 	} {
 		t.Run(te, func(t *testing.T) {
 			chunked, _, body := teFraming(t, te)
-			if !chunked {
-				t.Errorf("did not chunk-frame %q, but chunked IS the final coding "+
+
+			assert.Truef(t, chunked,
+				"did not chunk-frame %q, but chunked IS the final coding "+
 					"(§6.3 rule 4); body=%q — a legitimate chunked response was "+
 					"truncated or misread", te, body)
-			}
 		})
 	}
 }
@@ -131,10 +131,11 @@ func TestConformance_RFC9112_Sec7_NonChunkedFinalReadsUntilClose(t *testing.T) {
 		"xchunked",
 	} {
 		t.Run(te, func(t *testing.T) {
-			if chunked, _, _ := teFraming(t, te); chunked {
-				t.Errorf("chunk-framed %q, but chunked is not its final coding; "+
+			chunked, _, _ := teFraming(t, te)
+
+			assert.Falsef(t, chunked,
+				"chunk-framed %q, but chunked is not its final coding; "+
 					"§6.3 rule 4 requires reading until the server closes", te)
-			}
 		})
 	}
 }

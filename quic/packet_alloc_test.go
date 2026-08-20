@@ -3,6 +3,9 @@ package quic
 import (
 	"reflect"
 	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func allocBenchKeys() PacketKeys {
@@ -23,13 +26,12 @@ func TestConnFrameHandler_ResetClearsEveryField(t *testing.T) {
 	h.sawAck = true
 	h.ackLow = 1234
 	h.priorInFlight = 5678
-
 	c := &Conn{}
+
 	h.reset(c, 2)
 
-	if h.c != c || h.space != 2 {
-		t.Fatalf("reset did not re-arm identity: c=%p space=%d", h.c, h.space)
-	}
+	require.Samef(t, c, h.c, "reset did not re-arm identity: c=%p", h.c)
+	require.Equalf(t, 2, h.space, "reset did not re-arm identity: space=%d", h.space)
 	v := reflect.ValueOf(h)
 	typ := v.Type()
 	for i := 0; i < v.NumField(); i++ {
@@ -38,9 +40,8 @@ func TestConnFrameHandler_ResetClearsEveryField(t *testing.T) {
 		case "c", "space", "nopFrameHandler":
 			continue // identity, set by reset; nopFrameHandler is stateless
 		}
-		if !v.Field(i).IsZero() {
-			t.Errorf("reset left %s non-zero (%v) — it will leak into the next packet", name, v.Field(i))
-		}
+		assert.Truef(t, v.Field(i).IsZero(),
+			"reset left %s non-zero (%v) — it will leak into the next packet", name, v.Field(i))
 	}
 }
 

@@ -4,6 +4,9 @@ import (
 	"bytes"
 	"encoding/hex"
 	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // RFC 9001 Appendix A known-answer vectors, keyed on the fixed client
@@ -21,9 +24,7 @@ const (
 func mustHexA2(t *testing.T, s string) []byte {
 	t.Helper()
 	b, err := hex.DecodeString(s)
-	if err != nil {
-		t.Fatalf("decode hex: %v", err)
-	}
+	require.NoErrorf(t, err, "decode hex: %v", err)
 	return b
 }
 
@@ -38,20 +39,18 @@ func TestConformance_RFC9001_AppA2_ClientInitial(t *testing.T) {
 
 	clientKeys, _ := InitialKeys(dcid)
 	sealer, err := NewSealer(clientKeys)
-	if err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, err)
+
 	pkt, err := buildInitialPacket(nil, sealer, dcid, nil, nil, 2, 4, 0, ch, 1200)
-	if err != nil {
-		t.Fatal(err)
-	}
+
+	require.NoError(t, err)
 	if !bytes.Equal(pkt, want) {
 		for i := range want {
-			if i >= len(pkt) || pkt[i] != want[i] {
-				t.Fatalf("A.2 packet differs at byte %d (len got=%d want=%d)", i, len(pkt), len(want))
-			}
+			require.Falsef(t, i >= len(pkt) || pkt[i] != want[i],
+				"A.2 packet differs at byte %d (len got=%d want=%d)", i, len(pkt), len(want))
 		}
-		t.Fatalf("A.2 packet length: got %d, want %d", len(pkt), len(want))
+		require.Failf(t, "A.2 packet length mismatch",
+			"A.2 packet length: got %d, want %d", len(pkt), len(want))
 	}
 }
 
@@ -63,20 +62,16 @@ func TestConformance_RFC9001_AppA3_ServerInitial(t *testing.T) {
 	dcid := mustHexA2(t, a2DCID)
 	_, serverKeys := InitialKeys(dcid)
 	opener, err := NewOpener(serverKeys)
-	if err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, err)
 	pkt := mustHexA2(t, a3Packet)
 	// pnOffset = 1 + 4(version) + 1 + 0(DCID) + 1 + 8(SCID) + 1(token) + 2(length).
 	const pnOffset = 18
+
 	pn, pnLen, payload, err := opener.Open(pkt, pnOffset, 0)
-	if err != nil {
-		t.Fatalf("open: %v", err)
-	}
-	if pn != 1 || pnLen != 2 {
-		t.Fatalf("pn=%d pnLen=%d, want 1/2", pn, pnLen)
-	}
-	if want := mustHexA2(t, a3Payload); !bytes.Equal(payload, want) {
-		t.Fatalf("decrypted payload: got %d bytes, want %d", len(payload), len(want))
-	}
+
+	require.NoErrorf(t, err, "open: %v", err)
+	assert.Falsef(t, pn != 1 || pnLen != 2, "pn=%d pnLen=%d, want 1/2", pn, pnLen)
+	want := mustHexA2(t, a3Payload)
+	assert.Truef(t, bytes.Equal(payload, want),
+		"decrypted payload: got %d bytes, want %d", len(payload), len(want))
 }

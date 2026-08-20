@@ -13,6 +13,9 @@ package http1_test
 import (
 	"context"
 	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // TestConformance_RFC9112_Sec6_3_Rule4_ChunkedNotFinalReadsUntilClose pins
@@ -30,15 +33,13 @@ func TestConformance_RFC9112_Sec6_3_Rule4_ChunkedNotFinalReadsUntilClose(t *test
 		"\r\n" +
 		"hello" // raw body, terminated by the server closing the connection
 	ex := wireExchange(t, "GET", resp)
-	if _, _, err := ex.ReadResponse(context.Background()); err != nil {
-		t.Fatalf("ReadResponse: %v", err)
-	}
-	if body := drainBody(t, ex); body != "hello" {
-		t.Errorf("body = %q, want %q (chunked is not the final coding)", body, "hello")
-	}
-	if ex.KeepAlive() {
-		t.Error("KeepAlive() = true after a read-until-close body, want false")
-	}
+	_, _, err := ex.ReadResponse(context.Background())
+	require.NoError(t, err, "ReadResponse")
+
+	body := drainBody(t, ex)
+
+	assert.Equalf(t, "hello", body, "body = %q, want %q (chunked is not the final coding)", body, "hello")
+	assert.False(t, ex.KeepAlive(), "KeepAlive() = true after a read-until-close body, want false")
 }
 
 // TestConformance_RFC9112_Sec6_3_Rule4_UnknownCodingReadsUntilClose pins the
@@ -53,12 +54,12 @@ func TestConformance_RFC9112_Sec6_3_Rule4_UnknownCodingReadsUntilClose(t *testin
 		"\r\n" +
 		"hello"
 	ex := wireExchange(t, "GET", resp)
-	if _, _, err := ex.ReadResponse(context.Background()); err != nil {
-		t.Fatalf("ReadResponse: %v", err)
-	}
-	if body := drainBody(t, ex); body != "hello" {
-		t.Errorf("body = %q, want %q (\"not-chunked\" is not the chunked coding)", body, "hello")
-	}
+	_, _, err := ex.ReadResponse(context.Background())
+	require.NoError(t, err, "ReadResponse")
+
+	body := drainBody(t, ex)
+
+	assert.Equalf(t, "hello", body, "body = %q, want %q (\"not-chunked\" is not the chunked coding)", body, "hello")
 }
 
 // TestConformance_RFC9112_Sec6_3_Rule3_ContentLengthFirst_TEOverrides pins
@@ -81,19 +82,18 @@ func TestConformance_RFC9112_Sec6_3_Rule3_ContentLengthFirst_TEOverrides(t *test
 		"\r\n" +
 		"helloEXTRA"
 	ex := wireExchange(t, "GET", resp)
-	if _, _, err := ex.ReadResponse(context.Background()); err != nil {
-		t.Fatalf("ReadResponse: %v", err)
-	}
+
+	_, _, err := ex.ReadResponse(context.Background())
+
+	require.NoError(t, err, "ReadResponse")
 	// Asserted before the body is drained on purpose: after the drain, the
 	// read-until-close EOF marks the conn dead anyway, so a post-drain check
 	// would pass with rule 4 deleted. Rule 4 must condemn the connection at
 	// header-parse time, on the two headers alone.
-	if ex.KeepAlive() {
-		t.Error("KeepAlive() = true for a TE+CL response head, want false (rule 4 MUST close)")
-	}
-	if body := drainBody(t, ex); body != "helloEXTRA" {
-		t.Errorf("body = %q, want %q (Transfer-Encoding overrides Content-Length)", body, "helloEXTRA")
-	}
+	assert.False(t, ex.KeepAlive(), "KeepAlive() = true for a TE+CL response head, want false (rule 4 MUST close)")
+	body := drainBody(t, ex)
+	assert.Equalf(t, "helloEXTRA", body,
+		"body = %q, want %q (Transfer-Encoding overrides Content-Length)", body, "helloEXTRA")
 }
 
 // TestConformance_RFC9112_Sec6_3_Rule3_TransferEncodingFirst_CLIgnored is the
@@ -108,19 +108,18 @@ func TestConformance_RFC9112_Sec6_3_Rule3_TransferEncodingFirst_CLIgnored(t *tes
 		"\r\n" +
 		"helloEXTRA"
 	ex := wireExchange(t, "GET", resp)
-	if _, _, err := ex.ReadResponse(context.Background()); err != nil {
-		t.Fatalf("ReadResponse: %v", err)
-	}
+
+	_, _, err := ex.ReadResponse(context.Background())
+
+	require.NoError(t, err, "ReadResponse")
 	// Asserted before the body is drained on purpose: after the drain, the
 	// read-until-close EOF marks the conn dead anyway, so a post-drain check
 	// would pass with rule 4 deleted. Rule 4 must condemn the connection at
 	// header-parse time, on the two headers alone.
-	if ex.KeepAlive() {
-		t.Error("KeepAlive() = true for a TE+CL response head, want false (rule 4 MUST close)")
-	}
-	if body := drainBody(t, ex); body != "helloEXTRA" {
-		t.Errorf("body = %q, want %q (a late Content-Length must not re-frame the body)", body, "helloEXTRA")
-	}
+	assert.False(t, ex.KeepAlive(), "KeepAlive() = true for a TE+CL response head, want false (rule 4 MUST close)")
+	body := drainBody(t, ex)
+	assert.Equalf(t, "helloEXTRA", body,
+		"body = %q, want %q (a late Content-Length must not re-frame the body)", body, "helloEXTRA")
 }
 
 // TestConformance_RFC9112_Sec6_3_Rule3_ChunkedPlusCLNotReusable pins the
@@ -141,13 +140,11 @@ func TestConformance_RFC9112_Sec6_3_Rule3_ChunkedPlusCLNotReusable(t *testing.T)
 		"5\r\nhello\r\n" +
 		"0\r\n\r\n"
 	ex := wireExchange(t, "GET", resp)
-	if _, _, err := ex.ReadResponse(context.Background()); err != nil {
-		t.Fatalf("ReadResponse: %v", err)
-	}
-	if body := drainBody(t, ex); body != "hello" {
-		t.Errorf("body = %q, want %q", body, "hello")
-	}
-	if ex.KeepAlive() {
-		t.Error("KeepAlive() = true for TE:chunked + CL, want false (rule 4 MUST close)")
-	}
+	_, _, err := ex.ReadResponse(context.Background())
+	require.NoError(t, err, "ReadResponse")
+
+	body := drainBody(t, ex)
+
+	assert.Equalf(t, "hello", body, "body = %q, want %q", body, "hello")
+	assert.False(t, ex.KeepAlive(), "KeepAlive() = true for TE:chunked + CL, want false (rule 4 MUST close)")
 }

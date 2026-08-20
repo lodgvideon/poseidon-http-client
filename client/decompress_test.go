@@ -11,6 +11,9 @@ import (
 	"net/http/httptest"
 	"testing"
 
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
 	"github.com/lodgvideon/poseidon-http-client/conn"
 )
 
@@ -27,9 +30,7 @@ func newDecompressTestClient(t *testing.T, handler http.Handler) (*Client, *http
 			Dialer: &conn.TLSDialer{Config: &tls.Config{InsecureSkipVerify: true}},
 		},
 	})
-	if err != nil {
-		t.Fatalf("NewClient: %v", err)
-	}
+	require.NoErrorf(t, err, "NewClient: %v", err)
 	return c, srv
 }
 
@@ -47,22 +48,19 @@ func TestDecompress_Gzip_Do(t *testing.T) {
 	}))
 	defer c.Close()
 	defer srv.Close()
-
 	var resp Response
-	if err := c.Do(context.Background(), &Request{
+
+	err := c.Do(context.Background(), &Request{
 		Method:   "GET",
 		Path:     "/",
 		BodyMode: BodyBuffer,
-	}, &resp); err != nil {
-		t.Fatalf("Do: %v", err)
-	}
+	}, &resp)
 
-	if !bytes.Equal(resp.Body, raw) {
-		t.Errorf("body mismatch: got %d bytes, want %d bytes", len(resp.Body), len(raw))
-	}
-	if resp.BytesReceived != int64(gzBuf.Len()) {
-		t.Errorf("BytesReceived = %d, want %d (wire bytes)", resp.BytesReceived, gzBuf.Len())
-	}
+	require.NoErrorf(t, err, "Do: %v", err)
+	assert.Truef(t, bytes.Equal(resp.Body, raw),
+		"body mismatch: got %d bytes, want %d bytes", len(resp.Body), len(raw))
+	assert.Equalf(t, int64(gzBuf.Len()), resp.BytesReceived,
+		"BytesReceived = %d, want %d (wire bytes)", resp.BytesReceived, gzBuf.Len())
 }
 
 func TestDecompress_Deflate_Do(t *testing.T) {
@@ -78,19 +76,17 @@ func TestDecompress_Deflate_Do(t *testing.T) {
 	}))
 	defer c.Close()
 	defer srv.Close()
-
 	var resp Response
-	if err := c.Do(context.Background(), &Request{
+
+	err := c.Do(context.Background(), &Request{
 		Method:   "GET",
 		Path:     "/",
 		BodyMode: BodyBuffer,
-	}, &resp); err != nil {
-		t.Fatalf("Do: %v", err)
-	}
+	}, &resp)
 
-	if !bytes.Equal(resp.Body, raw) {
-		t.Errorf("body mismatch: got %d bytes, want %d", len(resp.Body), len(raw))
-	}
+	require.NoErrorf(t, err, "Do: %v", err)
+	assert.Truef(t, bytes.Equal(resp.Body, raw),
+		"body mismatch: got %d bytes, want %d", len(resp.Body), len(raw))
 }
 
 func TestDecompress_Disabled(t *testing.T) {
@@ -100,20 +96,18 @@ func TestDecompress_Disabled(t *testing.T) {
 	}))
 	defer c.Close()
 	defer srv.Close()
-
 	var resp Response
-	if err := c.Do(context.Background(), &Request{
+
+	err := c.Do(context.Background(), &Request{
 		Method:               "GET",
 		Path:                 "/",
 		BodyMode:             BodyBuffer,
 		DisableDecompression: true,
-	}, &resp); err != nil {
-		t.Fatalf("Do: %v", err)
-	}
+	}, &resp)
 
-	if !bytes.Equal(resp.Body, raw) {
-		t.Errorf("body mismatch: got %q, want %q", resp.Body, raw)
-	}
+	require.NoErrorf(t, err, "Do: %v", err)
+	assert.Truef(t, bytes.Equal(resp.Body, raw),
+		"body mismatch: got %q, want %q", resp.Body, raw)
 }
 
 func TestDecompress_Identity_NoEncoding(t *testing.T) {
@@ -123,19 +117,17 @@ func TestDecompress_Identity_NoEncoding(t *testing.T) {
 	}))
 	defer c.Close()
 	defer srv.Close()
-
 	var resp Response
-	if err := c.Do(context.Background(), &Request{
+
+	err := c.Do(context.Background(), &Request{
 		Method:   "GET",
 		Path:     "/",
 		BodyMode: BodyBuffer,
-	}, &resp); err != nil {
-		t.Fatalf("Do: %v", err)
-	}
+	}, &resp)
 
-	if !bytes.Equal(resp.Body, raw) {
-		t.Errorf("body mismatch: got %q, want %q", resp.Body, raw)
-	}
+	require.NoErrorf(t, err, "Do: %v", err)
+	assert.Truef(t, bytes.Equal(resp.Body, raw),
+		"body mismatch: got %q, want %q", resp.Body, raw)
 }
 
 func TestDecompress_BodyStream_Gzip(t *testing.T) {
@@ -151,24 +143,20 @@ func TestDecompress_BodyStream_Gzip(t *testing.T) {
 	}))
 	defer c.Close()
 	defer srv.Close()
-
 	var resp Response
-	if err := c.Do(context.Background(), &Request{
+
+	err := c.Do(context.Background(), &Request{
 		Method:   "GET",
 		Path:     "/",
 		BodyMode: BodyStream,
-	}, &resp); err != nil {
-		t.Fatalf("Do: %v", err)
-	}
-	if resp.BodyReader == nil {
-		t.Fatal("BodyReader is nil")
-	}
+	}, &resp)
+	require.NoErrorf(t, err, "Do: %v", err)
+	require.True(t, resp.BodyReader != nil, "BodyReader is nil")
 	out, _ := io.ReadAll(resp.BodyReader)
 	resp.Reset()
 
-	if !bytes.Equal(out, raw) {
-		t.Errorf("decompressed mismatch: got %d bytes, want %d", len(out), len(raw))
-	}
+	assert.Truef(t, bytes.Equal(out, raw),
+		"decompressed mismatch: got %d bytes, want %d", len(out), len(raw))
 }
 
 func TestDecompress_AcceptEncodingSent(t *testing.T) {
@@ -179,8 +167,8 @@ func TestDecompress_AcceptEncodingSent(t *testing.T) {
 	}))
 	defer c.Close()
 	defer srv.Close()
-
 	var resp Response
+
 	_ = c.Do(context.Background(), &Request{
 		Method:   "GET",
 		Path:     "/",
@@ -190,9 +178,9 @@ func TestDecompress_AcceptEncodingSent(t *testing.T) {
 	// The client decodes gzip, deflate, br and zstd, so it advertises all
 	// four: advertising a subset would leave servers compressing with a
 	// coding we would have decoded for free.
-	if want := "gzip, deflate, br, zstd"; gotAcceptEncoding != want {
-		t.Errorf("Accept-Encoding = %q, want %q", gotAcceptEncoding, want)
-	}
+	want := "gzip, deflate, br, zstd"
+	assert.Equalf(t, want, gotAcceptEncoding,
+		"Accept-Encoding = %q, want %q", gotAcceptEncoding, want)
 }
 
 // TestDecompress_AcceptEncodingSuppressed pins that DisableDecompression stops
@@ -207,20 +195,18 @@ func TestDecompress_AcceptEncodingSuppressed(t *testing.T) {
 	}))
 	defer c.Close()
 	defer srv.Close()
-
 	var resp Response
-	if err := c.Do(context.Background(), &Request{
+
+	err := c.Do(context.Background(), &Request{
 		Method:               "GET",
 		Path:                 "/",
 		BodyMode:             BodyBuffer,
 		DisableDecompression: true,
-	}, &resp); err != nil {
-		t.Fatalf("Do: %v", err)
-	}
+	}, &resp)
 
-	if seen {
-		t.Errorf("Accept-Encoding = %q, want header absent under DisableDecompression", gotAcceptEncoding)
-	}
+	require.NoErrorf(t, err, "Do: %v", err)
+	assert.Falsef(t, seen,
+		"Accept-Encoding = %q, want header absent under DisableDecompression", gotAcceptEncoding)
 }
 
 func TestDecompress_CustomAcceptEncodingPreserved(t *testing.T) {
@@ -231,8 +217,8 @@ func TestDecompress_CustomAcceptEncodingPreserved(t *testing.T) {
 	}))
 	defer c.Close()
 	defer srv.Close()
-
 	var resp Response
+
 	_ = c.Do(context.Background(), &Request{
 		Method:   "GET",
 		Path:     "/",
@@ -242,9 +228,8 @@ func TestDecompress_CustomAcceptEncodingPreserved(t *testing.T) {
 		},
 	}, &resp)
 
-	if gotAcceptEncoding != "br, gzip;q=0.8" {
-		t.Errorf("Accept-Encoding = %q, want custom value", gotAcceptEncoding)
-	}
+	assert.Equalf(t, "br, gzip;q=0.8", gotAcceptEncoding,
+		"Accept-Encoding = %q, want custom value", gotAcceptEncoding)
 }
 
 // Unit tests for decompress functions without network.
@@ -270,9 +255,9 @@ func TestDetectEncoding(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := detectEncoding(tc.headers); got != tc.want {
-				t.Errorf("detectEncoding = %v, want %v", got, tc.want)
-			}
+			got := detectEncoding(tc.headers)
+
+			assert.Equalf(t, tc.want, got, "detectEncoding = %v, want %v", got, tc.want)
 		})
 	}
 }
@@ -285,12 +270,9 @@ func TestDecompressFully_Gzip(t *testing.T) {
 	gw.Close()
 
 	out, err := decompressFully(EncodingGzip, buf.Bytes(), DefaultMaxDecompressedSize)
-	if err != nil {
-		t.Fatalf("decompressFully: %v", err)
-	}
-	if !bytes.Equal(out, raw) {
-		t.Errorf("mismatch: got %q, want %q", out, raw)
-	}
+
+	require.NoErrorf(t, err, "decompressFully: %v", err)
+	assert.Truef(t, bytes.Equal(out, raw), "mismatch: got %q, want %q", out, raw)
 }
 
 func TestDecompressFully_Deflate(t *testing.T) {
@@ -301,23 +283,18 @@ func TestDecompressFully_Deflate(t *testing.T) {
 	zw.Close()
 
 	out, err := decompressFully(EncodingDeflate, buf.Bytes(), DefaultMaxDecompressedSize)
-	if err != nil {
-		t.Fatalf("decompressFully: %v", err)
-	}
-	if !bytes.Equal(out, raw) {
-		t.Errorf("mismatch: got %q, want %q", out, raw)
-	}
+
+	require.NoErrorf(t, err, "decompressFully: %v", err)
+	assert.Truef(t, bytes.Equal(out, raw), "mismatch: got %q, want %q", out, raw)
 }
 
 func TestDecompressFully_Identity(t *testing.T) {
 	raw := []byte("uncompressed")
+
 	out, err := decompressFully(EncodingIdentity, raw, DefaultMaxDecompressedSize)
-	if err != nil {
-		t.Fatalf("decompressFully: %v", err)
-	}
-	if !bytes.Equal(out, raw) {
-		t.Errorf("mismatch")
-	}
+
+	require.NoErrorf(t, err, "decompressFully: %v", err)
+	assert.True(t, bytes.Equal(out, raw), "mismatch")
 }
 
 func TestNewDecompressingReader_Gzip(t *testing.T) {
@@ -326,36 +303,32 @@ func TestNewDecompressingReader_Gzip(t *testing.T) {
 	gw := gzip.NewWriter(&buf)
 	gw.Write(raw)
 	gw.Close()
-
 	src := io.NopCloser(bytes.NewReader(buf.Bytes()))
+
 	dr, err := newDecompressingReader(EncodingGzip, src)
-	if err != nil {
-		t.Fatalf("newDecompressingReader: %v", err)
-	}
+	require.NoErrorf(t, err, "newDecompressingReader: %v", err)
 	out, _ := io.ReadAll(dr)
 	dr.Close()
-	if !bytes.Equal(out, raw) {
-		t.Errorf("mismatch: got %q, want %q", out, raw)
-	}
+
+	assert.Truef(t, bytes.Equal(out, raw), "mismatch: got %q, want %q", out, raw)
 }
 
 func TestNewDecompressingReader_NilSource(t *testing.T) {
 	dr, err := newDecompressingReader(EncodingGzip, nil)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if dr != nil {
-		t.Errorf("expected nil reader for nil source")
-	}
+
+	require.NoErrorf(t, err, "unexpected error: %v", err)
+	// dr is io.ReadCloser: assert.Nil would pass for an interface holding a
+	// nil pointer, which is exactly the value this test must reject.
+	assert.Truef(t, dr == nil, "expected nil reader for nil source")
 }
 
 func TestNewDecompressingReader_Identity(t *testing.T) {
 	src := io.NopCloser(bytes.NewReader([]byte("plain")))
+
 	dr, err := newDecompressingReader(EncodingIdentity, src)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if dr != src {
-		t.Errorf("expected same reader for identity encoding")
-	}
+
+	require.NoErrorf(t, err, "unexpected error: %v", err)
+	// Interface identity, not value equality: assert.Equal would pass for a
+	// different reader holding the same bytes.
+	assert.Truef(t, dr == src, "expected same reader for identity encoding")
 }

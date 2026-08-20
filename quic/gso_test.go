@@ -4,6 +4,9 @@ import (
 	"bytes"
 	"io"
 	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // gsoCall records one WriteGSO syscall: the segment size argument and the number
@@ -59,23 +62,16 @@ func reassembleBody(t *testing.T, c *Conn, opener *Opener, pkts [][]byte) []byte
 	h := &frameCollector{}
 	for i, pkt := range pkts {
 		hdr, err := ParseHeader(pkt, len(c.dcid))
-		if err != nil {
-			t.Fatalf("pkt %d ParseHeader: %v", i, err)
-		}
+		require.NoErrorf(t, err, "pkt %d ParseHeader", i)
 		_, _, payload, err := opener.Open(pkt, hdr.PNOffset, 0)
-		if err != nil {
-			t.Fatalf("pkt %d Open: %v", i, err)
-		}
-		if err := ParseFrames(payload, h); err != nil {
-			t.Fatalf("pkt %d ParseFrames: %v", i, err)
-		}
+		require.NoErrorf(t, err, "pkt %d Open", i)
+		require.NoErrorf(t, ParseFrames(payload, h), "pkt %d ParseFrames", i)
 	}
 	// STREAM frames arrive in send order (ascending offset); concatenate in place.
 	var body []byte
 	for _, s := range h.streams {
-		if int(s.offset) != len(body) {
-			t.Fatalf("gap: frame offset %d, reassembled %d bytes so far", s.offset, len(body))
-		}
+		require.Equalf(t, len(body), int(s.offset),
+			"gap: frame offset %d, reassembled %d bytes so far", s.offset, len(body))
 		body = append(body, s.data...)
 	}
 	return body
@@ -89,13 +85,9 @@ func gsoSendConn(t *testing.T, pc PacketConn) (*Conn, *Stream, *Opener) {
 	dcid := []byte("gsotest0")
 	keys, _ := InitialKeys(dcid)
 	sealer, err := NewSealer(keys)
-	if err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, err, "NewSealer for the send-side 1-RTT keys")
 	opener, err := NewOpener(keys)
-	if err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, err, "NewOpener to decrypt what the send path writes")
 	c := &Conn{
 		pc:           pc,
 		dcid:         dcid,
@@ -108,9 +100,7 @@ func gsoSendConn(t *testing.T, pc PacketConn) (*Conn, *Stream, *Opener) {
 		connMax: 1 << 40,
 	}
 	s, err := c.OpenStream()
-	if err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, err, "OpenStream for the body the batched send carries")
 	return c, s, opener
 }
 
@@ -130,32 +120,28 @@ func TestGSO_MultiDatagramBodyIsOneWriteGSO(t *testing.T) {
 	pc := &recordGSOPC{}
 	c, s, op := gsoSendConn(t, pc)
 	body := testBody(16 * 1024)
+
 	n, err := s.Send(body, true)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if n != len(body) {
-		t.Fatalf("sent %d, want %d", n, len(body))
-	}
-	if pc.datagrams() < 2 {
-		t.Fatalf("body did not split: %d datagrams", pc.datagrams())
-	}
-	if len(pc.calls) != 1 || pc.writeN != 0 {
-		t.Fatalf("syscalls = %d WriteGSO + %d Write, want exactly 1 WriteGSO (N datagrams -> 1 syscall)", len(pc.calls), pc.writeN)
-	}
+
+	require.NoError(t, err, "Send of a body larger than one datagram")
+	require.Equalf(t, len(body), n, "sent %d, want %d", n, len(body))
+	require.GreaterOrEqualf(t, pc.datagrams(), 2, "body did not split: %d datagrams", pc.datagrams())
+	require.Truef(t, len(pc.calls) == 1 && pc.writeN == 0,
+		"syscalls = %d WriteGSO + %d Write, want exactly 1 WriteGSO (N datagrams -> 1 syscall)",
+		len(pc.calls), pc.writeN)
 	seg := pc.calls[0].segSize
 	// GSO rule: every datagram but the last must be exactly segSize; the last <= segSize.
 	for i, pkt := range pc.pkts {
-		if i < len(pc.pkts)-1 && len(pkt) != seg {
-			t.Fatalf("datagram %d is %d bytes, want segSize %d (only the last may be shorter)", i, len(pkt), seg)
+		if i < len(pc.pkts)-1 {
+			assert.Lenf(t, pkt, seg,
+				"datagram %d is %d bytes, want segSize %d (only the last may be shorter)", i, len(pkt), seg)
 		}
-		if len(pkt) > seg {
-			t.Fatalf("datagram %d is %d bytes, exceeds segSize %d", i, len(pkt), seg)
-		}
+		assert.LessOrEqualf(t, len(pkt), seg,
+			"datagram %d is %d bytes, exceeds segSize %d", i, len(pkt), seg)
 	}
-	if got := reassembleBody(t, c, op, pc.pkts); !bytes.Equal(got, body) {
-		t.Fatalf("reassembled %d bytes, want %d — batched datagrams corrupt", len(got), len(body))
-	}
+	got := reassembleBody(t, c, op, pc.pkts)
+	assert.Truef(t, bytes.Equal(got, body),
+		"reassembled %d bytes, want %d — batched datagrams corrupt", len(got), len(body))
 }
 
 // TestGSO_FallbackNoGSOWriter proves the pre-GSO behavior is preserved: a
@@ -166,15 +152,14 @@ func TestGSO_FallbackNoGSOWriter(t *testing.T) {
 	pc := &capturePC{}
 	c, s, op := gsoSendConn(t, pc)
 	body := testBody(16 * 1024)
-	if _, err := s.Send(body, true); err != nil {
-		t.Fatal(err)
-	}
-	if len(pc.pkts) < 2 {
-		t.Fatalf("body did not split: %d writes", len(pc.pkts))
-	}
-	if got := reassembleBody(t, c, op, pc.pkts); !bytes.Equal(got, body) {
-		t.Fatalf("reassembled %d bytes, want %d", len(got), len(body))
-	}
+
+	_, err := s.Send(body, true)
+
+	require.NoError(t, err, "Send over a transport without WriteGSO")
+	require.GreaterOrEqualf(t, len(pc.pkts), 2, "body did not split: %d writes", len(pc.pkts))
+	got := reassembleBody(t, c, op, pc.pkts)
+	assert.Truef(t, bytes.Equal(got, body),
+		"reassembled %d bytes, want %d — the non-GSO path must produce the same packets", len(got), len(body))
 }
 
 // TestGSO_SameDatagramsFewerSyscalls sends one body through the GSO and the
@@ -184,23 +169,20 @@ func TestGSO_SameDatagramsFewerSyscalls(t *testing.T) {
 	body := testBody(20 * 1024)
 	capPC := &capturePC{}
 	_, sc, _ := gsoSendConn(t, capPC)
-	if _, err := sc.Send(body, true); err != nil {
-		t.Fatal(err)
-	}
 	gso := &recordGSOPC{}
 	_, sg, _ := gsoSendConn(t, gso)
-	if _, err := sg.Send(body, true); err != nil {
-		t.Fatal(err)
-	}
-	if gso.datagrams() != len(capPC.pkts) {
-		t.Fatalf("datagram count differs: GSO %d, non-GSO %d", gso.datagrams(), len(capPC.pkts))
-	}
-	if len(gso.calls) != 1 {
-		t.Fatalf("GSO syscalls = %d, want 1 (all datagrams in one sendmsg)", len(gso.calls))
-	}
-	if len(capPC.pkts) < 2 {
-		t.Fatalf("non-GSO writes = %d, expected the body to split into many", len(capPC.pkts))
-	}
+
+	_, plainErr := sc.Send(body, true)
+	_, gsoErr := sg.Send(body, true)
+
+	require.NoError(t, plainErr, "Send over the non-GSO transport")
+	require.NoError(t, gsoErr, "Send over the GSO transport")
+	assert.Equalf(t, len(capPC.pkts), gso.datagrams(),
+		"datagram count differs: GSO %d, non-GSO %d", gso.datagrams(), len(capPC.pkts))
+	assert.Lenf(t, gso.calls, 1,
+		"GSO syscalls = %d, want 1 (all datagrams in one sendmsg)", len(gso.calls))
+	assert.GreaterOrEqualf(t, len(capPC.pkts), 2,
+		"non-GSO writes = %d, expected the body to split into many", len(capPC.pkts))
 	t.Logf("writes/op: non-GSO=%d GSO=%d for %d datagrams", len(capPC.pkts), len(gso.calls), gso.datagrams())
 }
 
@@ -213,36 +195,27 @@ func TestGSO_AddToBatch_SplitsOnSizeChange(t *testing.T) {
 	c := &Conn{pc: pc}
 	b := c.newBatch()
 	add := func(n int) {
-		if err := c.addToBatch(&b, make([]byte, n)); err != nil {
-			t.Fatal(err)
-		}
+		require.NoErrorf(t, c.addToBatch(&b, make([]byte, n)), "addToBatch(%d)", n)
 	}
+
 	add(1200)
 	add(1200)
 	add(1200)
 	add(800) // shorter -> final segment of batch #1, flushes [1200,1200,1200,800]
 	add(1200)
 	add(1200) // batch #2, still open
-	if err := c.flushBatch(&b); err != nil {
-		t.Fatal(err)
-	}
-	if len(pc.calls) != 2 {
-		t.Fatalf("WriteGSO calls = %d, want 2", len(pc.calls))
-	}
-	if pc.calls[0].segs != 4 || pc.calls[0].segSize != 1200 {
-		t.Fatalf("call 0 = %+v, want 4 segs of segSize 1200", pc.calls[0])
-	}
-	if pc.calls[1].segs != 2 || pc.calls[1].segSize != 1200 {
-		t.Fatalf("call 1 = %+v, want 2 segs of segSize 1200", pc.calls[1])
-	}
+	err := c.flushBatch(&b)
+
+	require.NoError(t, err, "flushBatch of the still-open second batch")
+	require.Lenf(t, pc.calls, 2, "WriteGSO calls = %d, want 2", len(pc.calls))
+	assert.Equalf(t, gsoCall{segSize: 1200, segs: 4, bytes: 4400}, pc.calls[0],
+		"call 0 = %+v, want 4 segs of segSize 1200", pc.calls[0])
+	assert.Equalf(t, gsoCall{segSize: 1200, segs: 2, bytes: 2400}, pc.calls[1],
+		"call 1 = %+v, want 2 segs of segSize 1200", pc.calls[1])
 	wantSizes := []int{1200, 1200, 1200, 800, 1200, 1200}
-	if len(pc.pkts) != len(wantSizes) {
-		t.Fatalf("datagrams = %d, want %d", len(pc.pkts), len(wantSizes))
-	}
+	require.Lenf(t, pc.pkts, len(wantSizes), "datagrams = %d, want %d", len(pc.pkts), len(wantSizes))
 	for i, want := range wantSizes {
-		if len(pc.pkts[i]) != want {
-			t.Fatalf("datagram %d = %d bytes, want %d", i, len(pc.pkts[i]), want)
-		}
+		assert.Lenf(t, pc.pkts[i], want, "datagram %d = %d bytes, want %d", i, len(pc.pkts[i]), want)
 	}
 }
 
@@ -259,34 +232,26 @@ func TestGSO_AddToBatch_RespectsCaps(t *testing.T) {
 		count   = 200
 	)
 	for i := 0; i < count; i++ {
-		if err := c.addToBatch(&b, make([]byte, pktSize)); err != nil {
-			t.Fatal(err)
-		}
+		require.NoErrorf(t, c.addToBatch(&b, make([]byte, pktSize)), "addToBatch %d", i)
 	}
-	if err := c.flushBatch(&b); err != nil {
-		t.Fatal(err)
-	}
-	if pc.datagrams() != count {
-		t.Fatalf("datagrams delivered = %d, want %d", pc.datagrams(), count)
-	}
+
+	err := c.flushBatch(&b)
+
+	require.NoError(t, err, "flushBatch after feeding past both caps")
+	assert.Equalf(t, count, pc.datagrams(), "datagrams delivered = %d, want %d", pc.datagrams(), count)
 	// The byte cap (65535) binds before the 64-segment cap for 1200-byte datagrams
 	// (54*1200=64800 < 65535, 55*1200=66000 > 65535), so >=4 sendmsgs are needed.
-	if len(pc.calls) < 4 {
-		t.Fatalf("WriteGSO calls = %d, want >=4 (caps force multiple sendmsgs)", len(pc.calls))
-	}
+	assert.GreaterOrEqualf(t, len(pc.calls), 4,
+		"WriteGSO calls = %d, want >=4 (caps force multiple sendmsgs)", len(pc.calls))
 	totalSegs := 0
 	for i, call := range pc.calls {
-		if call.segs > maxGSOSegments {
-			t.Fatalf("call %d has %d segments, exceeds cap %d", i, call.segs, maxGSOSegments)
-		}
-		if call.bytes > maxGSOBytes {
-			t.Fatalf("call %d is %d bytes, exceeds cap %d", i, call.bytes, maxGSOBytes)
-		}
+		assert.LessOrEqualf(t, call.segs, maxGSOSegments,
+			"call %d has %d segments, exceeds cap %d", i, call.segs, maxGSOSegments)
+		assert.LessOrEqualf(t, call.bytes, maxGSOBytes,
+			"call %d is %d bytes, exceeds cap %d", i, call.bytes, maxGSOBytes)
 		totalSegs += call.segs
 	}
-	if totalSegs != count {
-		t.Fatalf("segments across calls = %d, want %d", totalSegs, count)
-	}
+	assert.Equalf(t, count, totalSegs, "segments across calls = %d, want %d", totalSegs, count)
 }
 
 // TestGSO_SendGSOFallbackLoop exercises the transport primitive's degraded path:
@@ -304,26 +269,17 @@ func TestGSO_SendGSOFallbackLoop(t *testing.T) {
 		buf[i] = byte(i)
 	}
 	n, err := SendGSO(nil, nil, w, buf, 100)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if n != len(buf) {
-		t.Fatalf("wrote %d, want %d", n, len(buf))
-	}
+
+	require.NoError(t, err, "SendGSO with a nil RawConn must fall back, not fail")
+	assert.Equalf(t, len(buf), n, "wrote %d, want %d", n, len(buf))
 	wantSizes := []int{100, 100, 100, 40}
-	if len(got) != len(wantSizes) {
-		t.Fatalf("segments = %d, want %d", len(got), len(wantSizes))
-	}
+	require.Lenf(t, got, len(wantSizes), "segments = %d, want %d", len(got), len(wantSizes))
 	var joined []byte
 	for i, seg := range got {
-		if len(seg) != wantSizes[i] {
-			t.Fatalf("segment %d = %d bytes, want %d", i, len(seg), wantSizes[i])
-		}
+		assert.Lenf(t, seg, wantSizes[i], "segment %d = %d bytes, want %d", i, len(seg), wantSizes[i])
 		joined = append(joined, seg...)
 	}
-	if !bytes.Equal(joined, buf) {
-		t.Fatal("fallback loop reordered or corrupted the buffer")
-	}
+	assert.True(t, bytes.Equal(joined, buf), "fallback loop reordered or corrupted the buffer")
 }
 
 // writerFunc adapts a function to io.Writer for the fallback-loop test.

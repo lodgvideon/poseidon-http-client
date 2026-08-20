@@ -5,6 +5,8 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/stretchr/testify/require"
+
 	"github.com/lodgvideon/poseidon-http-client/frame"
 	"github.com/lodgvideon/poseidon-http-client/hpack"
 )
@@ -84,12 +86,8 @@ func TestConn_PeerReset_ConcurrentCloseIsRaceFree(t *testing.T) {
 				inflight := c.inflight
 				_, registered := c.streams[tc.streamID]
 				c.smu.Unlock()
-				if inflight != 0 {
-					t.Fatalf("iter %d: inflight = %d, want 0 (slot leaked)", i, inflight)
-				}
-				if registered {
-					t.Fatalf("iter %d: stream still registered, want evicted", i)
-				}
+				require.Zerof(t, inflight, "iter %d: inflight = %d, want 0 (slot leaked)", i, inflight)
+				require.Falsef(t, registered, "iter %d: stream still registered, want evicted", i)
 			}
 		})
 	}

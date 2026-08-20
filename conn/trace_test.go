@@ -4,10 +4,12 @@ import (
 	"bytes"
 	"context"
 	"net/http"
-	"strings"
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	"github.com/lodgvideon/poseidon-http-client/header"
 	"github.com/lodgvideon/poseidon-http-client/trace"
@@ -64,67 +66,49 @@ func TestIntegration_Tracer_ObservesRealExchange(t *testing.T) {
 		Dialer: &TLSDialer{Config: cfg},
 		Tracer: rec,
 	})
-	if err != nil {
-		t.Fatalf("Dial: %v", err)
-	}
+	require.NoError(t, err, "Dial")
 	defer c.Close()
-
 	st, err := c.NewStream(ctx)
-	if err != nil {
-		t.Fatalf("NewStream: %v", err)
-	}
-	if err := st.SendHeaders(ctx, []header.Field{
+	require.NoError(t, err, "NewStream")
+
+	require.NoError(t, st.SendHeaders(ctx, []header.Field{
 		{Name: []byte(":method"), Value: []byte("GET")},
 		{Name: []byte(":scheme"), Value: []byte("https")},
 		{Name: []byte(":authority"), Value: []byte("example.com")},
 		{Name: []byte(":path"), Value: []byte("/")},
-	}, true); err != nil {
-		t.Fatalf("SendHeaders: %v", err)
-	}
-	if body := drainBody(ctx, t, st); !bytes.Contains(body, []byte("hello from the peer")) {
-		t.Fatalf("body = %q", body)
-	}
+	}, true), "SendHeaders")
+	body := drainBody(ctx, t, st)
+
+	require.Truef(t, bytes.Contains(body, []byte("hello from the peer")), "body = %q", body)
 
 	// The handshake SETTINGS we sent, with the parameters decoded.
 	settings, ok := rec.find(trace.DirOut, "SETTINGS")
-	if !ok {
-		t.Fatal("no outbound SETTINGS traced; the tracer was installed after the handshake")
-	}
-	if !settings.Detail.Has(trace.DetailParams) || settings.Params == nil {
-		t.Fatalf("outbound SETTINGS traced without parameters: %+v", settings)
-	}
+	require.True(t, ok, "no outbound SETTINGS traced; the tracer was installed after the handshake")
+	require.Truef(t, settings.Detail.Has(trace.DetailParams),
+		"outbound SETTINGS traced without the params detail bit: %+v", settings)
+	require.NotNilf(t, settings.Params, "outbound SETTINGS traced without parameters: %+v", settings)
 	var sawWindow bool
 	for _, p := range settings.Params.All() {
 		if p.Name == "INITIAL_WINDOW_SIZE" {
 			sawWindow = true
 		}
 	}
-	if !sawWindow {
-		t.Errorf("outbound SETTINGS params = %+v, want INITIAL_WINDOW_SIZE among them", settings.Params.All())
-	}
+	assert.Truef(t, sawWindow,
+		"outbound SETTINGS params = %+v, want INITIAL_WINDOW_SIZE among them", settings.Params.All())
 
 	// Our request, and the peer's answer to it.
 	req, ok := rec.find(trace.DirOut, "HEADERS")
-	if !ok {
-		t.Fatal("no outbound HEADERS traced")
-	}
-	if req.StreamID == 0 || !strings.Contains(req.FlagNames, "END_STREAM") {
-		t.Errorf("request HEADERS = %+v, want a non-zero stream with END_STREAM", req)
-	}
-	if _, ok := rec.find(trace.DirIn, "HEADERS"); !ok {
-		t.Error("no inbound HEADERS traced")
-	}
-	if _, ok := rec.find(trace.DirIn, "DATA"); !ok {
-		t.Error("no inbound DATA traced")
-	}
-	if _, ok := rec.find(trace.DirIn, "SETTINGS"); !ok {
-		t.Error("no inbound SETTINGS traced")
-	}
-
+	require.True(t, ok, "no outbound HEADERS traced")
+	assert.NotZerof(t, req.StreamID, "request HEADERS = %+v, want a non-zero stream", req)
+	assert.Containsf(t, req.FlagNames, "END_STREAM", "request HEADERS = %+v, want END_STREAM", req)
+	_, inHeaders := rec.find(trace.DirIn, "HEADERS")
+	assert.True(t, inHeaders, "no inbound HEADERS traced")
+	_, inData := rec.find(trace.DirIn, "DATA")
+	assert.True(t, inData, "no inbound DATA traced")
+	_, inSettings := rec.find(trace.DirIn, "SETTINGS")
+	assert.True(t, inSettings, "no inbound SETTINGS traced")
 	for _, info := range rec.snapshot() {
-		if info.Proto != trace.ProtoH2 {
-			t.Fatalf("frame traced as %v, want h2: %+v", info.Proto, info)
-		}
+		assert.Equalf(t, trace.ProtoH2, info.Proto, "frame traced as %v, want h2: %+v", info.Proto, info)
 	}
 }
 
@@ -146,26 +130,19 @@ func TestIntegration_Tracer_TextOutput(t *testing.T) {
 		Dialer: &TLSDialer{Config: cfg},
 		Tracer: tracer,
 	})
-	if err != nil {
-		t.Fatalf("Dial: %v", err)
-	}
+	require.NoError(t, err, "Dial")
 	st, err := c.NewStream(ctx)
-	if err != nil {
-		t.Fatalf("NewStream: %v", err)
-	}
-	if err := st.SendHeaders(ctx, []header.Field{
+	require.NoError(t, err, "NewStream")
+
+	require.NoError(t, st.SendHeaders(ctx, []header.Field{
 		{Name: []byte(":method"), Value: []byte("GET")},
 		{Name: []byte(":scheme"), Value: []byte("https")},
 		{Name: []byte(":authority"), Value: []byte("example.com")},
 		{Name: []byte(":path"), Value: []byte("/")},
-	}, true); err != nil {
-		t.Fatalf("SendHeaders: %v", err)
-	}
+	}, true), "SendHeaders")
 	drainBody(ctx, t, st)
 	c.Close()
-	if err := tracer.Close(); err != nil {
-		t.Fatalf("tracer Close: %v", err)
-	}
+	require.NoError(t, tracer.Close(), "tracer Close")
 
 	log := out.String()
 	for _, want := range []string{
@@ -175,14 +152,11 @@ func TestIntegration_Tracer_TextOutput(t *testing.T) {
 		"h2 <- HEADERS stream=1",
 		"h2 <- DATA stream=1",
 	} {
-		if !strings.Contains(log, want) {
-			t.Errorf("frame log does not contain %q\n---\n%s", want, log)
-		}
+		assert.Containsf(t, log, want, "frame log does not contain %q", want)
 	}
 	// The one thing the log must never contain: a header value. The framing
 	// layer only ever sees the compressed block, and this is what keeps it that
 	// way as the event struct grows.
-	if strings.Contains(log, "example.com") {
-		t.Errorf("frame log leaked a header value:\n%s", log)
-	}
+	assert.NotContains(t, log, "example.com",
+		"frame log leaked a header value: the framing layer only ever sees the compressed block")
 }

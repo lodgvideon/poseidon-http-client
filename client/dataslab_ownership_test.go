@@ -8,6 +8,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
 	"github.com/lodgvideon/poseidon-http-client/conn"
 )
 
@@ -109,15 +112,14 @@ func (l *slabLedger) check(t *testing.T) int {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	for _, e := range l.errs {
-		t.Error(e)
+		assert.Fail(t, e)
 	}
 	deliveries := 0
 	for p, g := range l.gets {
 		deliveries += g
-		if l.puts[p] != g {
-			t.Errorf("slab %p: Got %d time(s), Put %d time(s) — want exactly one Put per Get",
-				p, g, l.puts[p])
-		}
+		assert.Equalf(t, g, l.puts[p],
+			"slab %p: Got %d time(s), Put %d time(s) — want exactly one Put per Get",
+			p, g, l.puts[p])
 	}
 	return deliveries
 }
@@ -229,17 +231,15 @@ func TestIT_DataSlab_Do_MultiFrame_PutExactlyOnce(t *testing.T) {
 	defer cancel()
 
 	var resp Response
-	if err := c.Do(ctx, &Request{Method: "GET", Path: "/", BodyMode: BodyBuffer}, &resp); err != nil {
-		t.Fatalf("Do: %v", err)
-	}
+	err := c.Do(ctx, &Request{Method: "GET", Path: "/", BodyMode: BodyBuffer}, &resp)
 
+	require.NoError(t, err, "Do")
 	deliveries := led.check(t)
 	// Control 1: the response really was multi-frame, so the accounting saw a
 	// sequence of slabs rather than a single trivially-balanced one.
-	if deliveries < 2 {
-		t.Fatalf("observed %d DATA slab deliveries, want >= 2 — the ledger cannot "+
+	require.GreaterOrEqualf(t, deliveries, 2,
+		"observed %d DATA slab deliveries, want >= 2 — the ledger cannot "+
 			"distinguish per-frame ownership from a single-frame body", deliveries)
-	}
 	// Control 2: the server actually spoke and the body survived the recycling.
 	// Without this the whole test would pass just as well against a response
 	// that carried no DATA at all — except that Control 1 also fails then, and
@@ -273,20 +273,16 @@ func TestIT_DataSlab_DoStream_PutExactlyOnce(t *testing.T) {
 				const want = 3 // < slabFrames: the body is abandoned mid-stream
 				for i := 0; i < want; i++ {
 					ev, err := sr.Recv(ctx)
-					if err != nil {
-						t.Fatalf("Recv %d: %v", i, err)
-					}
-					if ev.Type != EventData {
-						t.Fatalf("Recv %d: type = %v, want EventData", i, ev.Type)
-					}
-					if ev.EndStream {
-						t.Fatalf("Recv %d ended the stream early; the body is not "+
-							"being abandoned mid-stream and the early-close path is untested", i)
-					}
+
+					require.NoErrorf(t, err, "Recv %d", i)
+					require.Equalf(t, EventData, ev.Type, "Recv %d: type = %v, want EventData", i, ev.Type)
+					require.Falsef(t, ev.EndStream, "Recv %d ended the stream early; the body is not "+
+						"being abandoned mid-stream and the early-close path is untested", i)
 				}
-				if err := sr.Close(); err != nil { // early close, mid-body
-					t.Fatalf("early Close: %v", err)
-				}
+
+				err := sr.Close() // early close, mid-body
+
+				require.NoError(t, err, "early Close")
 				return want
 			},
 		},
@@ -299,9 +295,7 @@ func TestIT_DataSlab_DoStream_PutExactlyOnce(t *testing.T) {
 					if errors.Is(err, ErrStreamEnded) {
 						return n
 					}
-					if err != nil {
-						t.Fatalf("Recv: %v", err)
-					}
+					require.NoError(t, err, "Recv")
 					if ev.Type == EventData {
 						n++
 					}
@@ -323,9 +317,8 @@ func TestIT_DataSlab_DoStream_PutExactlyOnce(t *testing.T) {
 			defer cancel()
 
 			var sr StreamResponse
-			if err := c.DoStream(ctx, &Request{Method: "GET", Path: "/"}, &sr); err != nil {
-				t.Fatalf("DoStream: %v", err)
-			}
+			err := c.DoStream(ctx, &Request{Method: "GET", Path: "/"}, &sr)
+			require.NoError(t, err, "DoStream")
 			// DoStream has consumed only HEADERS (header slabs, not DataSlab) by
 			// the time it returns, so no DATA delivery is missed by installing
 			// the tap here.
@@ -339,13 +332,11 @@ func TestIT_DataSlab_DoStream_PutExactlyOnce(t *testing.T) {
 			// Control 1: the ledger saw exactly the slabs the caller saw. A tap
 			// that silently missed deliveries would make "every slab Put once"
 			// vacuously true.
-			if deliveries != consumed {
-				t.Fatalf("ledger saw %d slab deliveries, the caller consumed %d EventData", deliveries, consumed)
-			}
+			require.Equalf(t, consumed, deliveries,
+				"ledger saw %d slab deliveries, the caller consumed %d EventData", deliveries, consumed)
 			// Control 2: more than one frame, for the same reason as the Do test.
-			if deliveries < 2 {
-				t.Fatalf("observed %d DATA slab deliveries, want >= 2", deliveries)
-			}
+			require.GreaterOrEqualf(t, deliveries, 2,
+				"observed %d DATA slab deliveries, want >= 2", deliveries)
 			if led.foreign != 0 {
 				t.Logf("note: %d Put(s) of slabs this test never received (cross-test pool traffic)", led.foreign)
 			}

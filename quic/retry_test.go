@@ -3,14 +3,15 @@ package quic
 import (
 	"encoding/hex"
 	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func mustHex(t *testing.T, s string) []byte {
 	t.Helper()
 	b, err := hex.DecodeString(s)
-	if err != nil {
-		t.Fatal(err)
-	}
+	require.NoErrorf(t, err, "decode the hex fixture %q", s)
 	return b
 }
 
@@ -27,19 +28,16 @@ const (
 func TestConformance_RFC9001_Sec58_RetryIntegrityKAT(t *testing.T) {
 	pkt := mustHex(t, a4RetryPacket)
 	odcid := mustHex(t, a4ODCID)
-	if !verifyRetryIntegrity(odcid, pkt) {
-		t.Fatal("A.4 Retry integrity tag should verify")
-	}
-	// A single flipped byte in the token invalidates the tag.
-	bad := append([]byte(nil), pkt...)
-	bad[16] ^= 0x01
-	if verifyRetryIntegrity(odcid, bad) {
-		t.Fatal("a tampered Retry must not verify")
-	}
-	// The wrong original DCID invalidates the tag.
-	if verifyRetryIntegrity(mustHex(t, "0000000000000000"), pkt) {
-		t.Fatal("a Retry must not verify against the wrong original DCID")
-	}
+	tampered := append([]byte(nil), pkt...)
+	tampered[16] ^= 0x01 // a single flipped byte in the token
+
+	kat := verifyRetryIntegrity(odcid, pkt)
+	tamperedOK := verifyRetryIntegrity(odcid, tampered)
+	wrongODCID := verifyRetryIntegrity(mustHex(t, "0000000000000000"), pkt)
+
+	require.True(t, kat, "A.4 Retry integrity tag should verify")
+	assert.False(t, tamperedOK, "a tampered Retry must not verify")
+	assert.False(t, wrongODCID, "a Retry must not verify against the wrong original DCID")
 }
 
 // TestConformance_RFC9000_Sec1725_RetryRekeysAndResends checks that a valid Retry
@@ -55,37 +53,25 @@ func TestConformance_RFC9000_Sec1725_RetryRekeysAndResends(t *testing.T) {
 	// Simulate the first Initial in flight, carrying the ClientHello CRYPTO.
 	c.sent[spaceInitial].onSent(0, c.clock(), true, &retransFrame{kind: retransCrypto, offset: 0, data: []byte("clienthello")})
 	c.bytesInFlight = 1200
-
 	hdr, err := ParseHeader(pkt, len(c.scid))
-	if err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, err, "parse the A.4 Retry header")
+
 	c.handleRetry(hdr, pkt)
 
-	if !c.handledRetry {
-		t.Fatal("handledRetry should be set after a valid Retry")
-	}
-	if got := hex.EncodeToString(c.dcid); got != "f067a5502a4262b5" {
-		t.Fatalf("dcid = %s, want the Retry SCID f067a5502a4262b5", got)
-	}
-	if got := hex.EncodeToString(c.retrySCID); got != "f067a5502a4262b5" {
-		t.Fatalf("retrySCID = %s, want the Retry SCID f067a5502a4262b5 (for §7.3 validation)", got)
-	}
-	if string(c.retryToken) != "token" {
-		t.Fatalf("retryToken = %q, want \"token\"", c.retryToken)
-	}
-	if len(c.sent[spaceInitial].packets) != 0 {
-		t.Fatal("the outstanding Initial should be abandoned")
-	}
-	if len(c.retransQueue[spaceInitial]) == 0 {
-		t.Fatal("the ClientHello should be re-queued for resend")
-	}
+	require.True(t, c.handledRetry, "handledRetry should be set after a valid Retry")
+	assert.Equalf(t, "f067a5502a4262b5", hex.EncodeToString(c.dcid),
+		"dcid = %s, want the Retry SCID f067a5502a4262b5", hex.EncodeToString(c.dcid))
+	assert.Equalf(t, "f067a5502a4262b5", hex.EncodeToString(c.retrySCID),
+		"retrySCID = %s, want the Retry SCID f067a5502a4262b5 (for §7.3 validation)",
+		hex.EncodeToString(c.retrySCID))
+	assert.Equalf(t, "token", string(c.retryToken), "retryToken = %q, want \"token\"", c.retryToken)
+	assert.Empty(t, c.sent[spaceInitial].packets, "the outstanding Initial should be abandoned")
+	assert.NotEmpty(t, c.retransQueue[spaceInitial], "the ClientHello should be re-queued for resend")
 	// The re-derived sealer must match keys derived from the new connection ID.
 	newClient, _ := InitialKeys(mustHex(t, "f067a5502a4262b5"))
 	want, _ := NewSealer(newClient)
-	if c.initialSealer.iv != want.iv {
-		t.Fatal("Initial keys should be re-derived from the new connection ID")
-	}
+	assert.Equal(t, want.iv, c.initialSealer.iv,
+		"Initial keys should be re-derived from the new connection ID")
 }
 
 // TestConformance_RFC9000_Sec17253_RetryResendCarriesToken checks that the
@@ -100,35 +86,26 @@ func TestConformance_RFC9000_Sec17253_RetryResendCarriesToken(t *testing.T) {
 	c := &Conn{pc: pc, dcid: append([]byte(nil), odcid...), initialSealer: sealer}
 	c.keys.Initial, _ = NewOpener(client)
 	c.sent[spaceInitial].onSent(0, c.clock(), true, &retransFrame{kind: retransCrypto, offset: 0, data: []byte("clienthello")})
-
 	hdr, _ := ParseHeader(pkt, 0)
+
 	c.handleRetry(hdr, pkt)
-	if err := c.flush(); err != nil {
-		t.Fatal(err)
-	}
-	if len(pc.writes) != 1 {
-		t.Fatalf("wrote %d packets, want 1 resent Initial", len(pc.writes))
-	}
+	flushErr := c.flush()
+
+	require.NoError(t, flushErr, "flush the Initial resent after the Retry")
+	require.Lenf(t, pc.writes, 1, "wrote %d packets, want 1 resent Initial", len(pc.writes))
 	rh, err := ParseHeader(pc.writes[0], 0)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if rh.Type != PacketInitial {
-		t.Fatalf("resent packet type = %v, want Initial", rh.Type)
-	}
-	if string(rh.Token) != "token" {
-		t.Fatalf("resent Initial token = %q, want \"token\"", rh.Token)
-	}
-	if len(pc.writes[0]) < InitialDatagramMinSize {
-		t.Fatalf("resent Initial datagram %d bytes, want >= %d (§14.1 padding)", len(pc.writes[0]), InitialDatagramMinSize)
-	}
+	require.NoError(t, err, "the resent packet must parse as a QUIC packet")
+	assert.Equalf(t, PacketInitial, rh.Type, "resent packet type = %v, want Initial", rh.Type)
+	assert.Equalf(t, "token", string(rh.Token), "resent Initial token = %q, want \"token\"", rh.Token)
+	assert.GreaterOrEqualf(t, len(pc.writes[0]), InitialDatagramMinSize,
+		"resent Initial datagram %d bytes, want >= %d (§14.1 padding)",
+		len(pc.writes[0]), InitialDatagramMinSize)
 	// The server unprotects the client's Initial with the CLIENT keys derived from
 	// the new connection ID — the ones the client sealed with.
 	newClient, _ := InitialKeys(mustHex(t, "f067a5502a4262b5"))
 	opener, _ := NewOpener(newClient)
-	if _, _, _, err := opener.Open(pc.writes[0][:rh.PacketLen], rh.PNOffset, 0); err != nil {
-		t.Fatalf("resent Initial should decrypt with the new keys: %v", err)
-	}
+	_, _, _, openErr := opener.Open(pc.writes[0][:rh.PacketLen], rh.PNOffset, 0)
+	assert.NoErrorf(t, openErr, "resent Initial should decrypt with the new keys: %v", openErr)
 }
 
 // TestConn_Retry_Discards checks the discard rules (RFC 9000 §17.2.5.2): a Retry
@@ -145,33 +122,41 @@ func TestConn_Retry_Discards(t *testing.T) {
 		return c
 	}
 
-	// Bad tag → ignored.
-	c := newConn()
-	bad := append([]byte(nil), pkt...)
-	bad[len(bad)-1] ^= 0x01
-	hdr, _ := ParseHeader(bad, 0)
-	c.handleRetry(hdr, bad)
-	if c.handledRetry || hex.EncodeToString(c.dcid) != a4ODCID {
-		t.Fatal("a Retry with a bad tag must be discarded")
-	}
+	t.Run("bad_integrity_tag", func(t *testing.T) {
+		c := newConn()
+		bad := append([]byte(nil), pkt...)
+		bad[len(bad)-1] ^= 0x01
+		hdr, _ := ParseHeader(bad, 0)
 
-	// Second Retry → ignored (at most one).
-	c = newConn()
-	hdr, _ = ParseHeader(pkt, 0)
-	c.handleRetry(hdr, pkt) // first, accepted
-	firstDCID := hex.EncodeToString(c.dcid)
-	c.handleRetry(hdr, pkt) // second, ignored
-	if hex.EncodeToString(c.dcid) != firstDCID {
-		t.Fatal("a second Retry must be discarded")
-	}
+		c.handleRetry(hdr, bad)
+
+		assert.False(t, c.handledRetry, "a Retry with a bad tag must be discarded")
+		assert.Equal(t, a4ODCID, hex.EncodeToString(c.dcid),
+			"a Retry with a bad tag must not change the connection ID")
+	})
+
+	t.Run("second_retry", func(t *testing.T) {
+		c := newConn()
+		hdr, _ := ParseHeader(pkt, 0)
+		c.handleRetry(hdr, pkt) // first, accepted
+		firstDCID := hex.EncodeToString(c.dcid)
+
+		c.handleRetry(hdr, pkt) // second, ignored
+
+		assert.Equal(t, firstDCID, hex.EncodeToString(c.dcid), "a second Retry must be discarded")
+	})
 
 	// A Retry after a server Initial has been processed (gotServerCID) → ignored,
 	// so an injected Retry cannot corrupt the adopted connection ID (§17.2.5.2).
-	c = newConn()
-	c.gotServerCID = true
-	hdr, _ = ParseHeader(pkt, 0)
-	c.handleRetry(hdr, pkt)
-	if c.handledRetry || hex.EncodeToString(c.dcid) != a4ODCID {
-		t.Fatal("a Retry after a server Initial must be discarded")
-	}
+	t.Run("after_server_initial", func(t *testing.T) {
+		c := newConn()
+		c.gotServerCID = true
+		hdr, _ := ParseHeader(pkt, 0)
+
+		c.handleRetry(hdr, pkt)
+
+		assert.False(t, c.handledRetry, "a Retry after a server Initial must be discarded")
+		assert.Equal(t, a4ODCID, hex.EncodeToString(c.dcid),
+			"a Retry after a server Initial must not change the connection ID")
+	})
 }

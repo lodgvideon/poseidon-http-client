@@ -6,6 +6,9 @@ package http1_test
 import (
 	"context"
 	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // TestConformance_RFC9110_Sec8_6_204UnparseableContentLengthRejected pins that a
@@ -29,16 +32,15 @@ func TestConformance_RFC9110_Sec8_6_204UnparseableContentLengthRejected(t *testi
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			ex := wireExchange(t, "GET", tc.wire)
+
 			_, _, err := ex.ReadResponse(context.Background())
-			if err == nil {
-				t.Fatal("unparseable Content-Length on a 204 accepted; the value cannot be " +
-					"trusted, so the response must be discarded, not framed by a 0 that only " +
-					"means the parse failed")
-			}
-			if ex.KeepAlive() {
-				t.Error("KeepAlive() = true after an unparseable Content-Length; the stream " +
+
+			require.Error(t, err, "unparseable Content-Length on a 204 accepted; the value cannot be "+
+				"trusted, so the response must be discarded, not framed by a 0 that only "+
+				"means the parse failed")
+			assert.False(t, ex.KeepAlive(),
+				"KeepAlive() = true after an unparseable Content-Length; the stream "+
 					"position is indeterminate and the connection must not be pooled")
-			}
 		})
 	}
 }
@@ -50,12 +52,12 @@ func TestConformance_RFC9110_Sec8_6_204NonZeroContentLengthNotPooled(t *testing.
 	// The declared 5 octets are never read, so they stay on the socket. Poolable
 	// would mean the next request parses "HELLO" as its status line.
 	ex := wireExchange(t, "GET", "HTTP/1.1 204 No Content\r\nContent-Length: 5\r\n\r\nHELLO")
-	if _, _, err := ex.ReadResponse(context.Background()); err != nil {
-		t.Fatalf("ReadResponse = %v; a non-zero Content-Length on a 204 is a framing hazard, "+
-			"not a parse error — the response head is well formed", err)
-	}
-	if ex.KeepAlive() {
-		t.Error("KeepAlive() = true for a 204 declaring a 5-octet body — those octets are " +
+
+	_, _, err := ex.ReadResponse(context.Background())
+
+	require.NoErrorf(t, err, "ReadResponse = %v; a non-zero Content-Length on a 204 is a framing hazard, "+
+		"not a parse error — the response head is well formed", err)
+	assert.False(t, ex.KeepAlive(),
+		"KeepAlive() = true for a 204 declaring a 5-octet body — those octets are "+
 			"unread on the socket and would poison the next request")
-	}
 }

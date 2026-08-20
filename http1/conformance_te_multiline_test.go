@@ -14,6 +14,9 @@ import (
 	"context"
 	"testing"
 
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
 	"github.com/lodgvideon/poseidon-http-client/http1"
 )
 
@@ -23,9 +26,8 @@ func teFramingLines(t *testing.T, lines string) (chunked bool, body string) {
 	t.Helper()
 	ex := wireExchange(t, "GET",
 		"HTTP/1.1 200 OK\r\n"+lines+"\r\n5\r\nhello\r\n0\r\n\r\nLEFTOVER")
-	if _, _, err := ex.ReadResponse(context.Background()); err != nil {
-		t.Fatalf("ReadResponse: %v", err)
-	}
+	_, _, err := ex.ReadResponse(context.Background())
+	require.NoError(t, err, "ReadResponse")
 	body = drainTolerant(ex)
 	return body == "hello", body
 }
@@ -85,15 +87,13 @@ func TestConformance_RFC9110_Sec5_3_RepeatedTELinesAreOneList(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			two, twoBody := teFramingLines(t, tc.twoLines)
 			one, _ := teFramingLines(t, tc.oneLine)
-			if two != one {
-				t.Errorf("two field lines and the equivalent one-line list disagree: "+
+
+			assert.Equalf(t, one, two,
+				"two field lines and the equivalent one-line list disagree: "+
 					"two-line chunked=%v, one-line chunked=%v — RFC 9110 §5.3 makes them "+
 					"the same message, so they must frame the same way (two-line body=%.40q)",
-					two, one, twoBody)
-			}
-			if two != tc.wantChunked {
-				t.Errorf("chunked=%v, want %v for:\n%s", two, tc.wantChunked, tc.twoLines)
-			}
+				two, one, twoBody)
+			assert.Equalf(t, tc.wantChunked, two, "chunked=%v, want %v for:\n%s", two, tc.wantChunked, tc.twoLines)
 		})
 	}
 }
@@ -111,13 +111,13 @@ func TestConformance_RFC9110_Sec5_3_EmptyTELineAloneStillPresent(t *testing.T) {
 	// Transfer-Encoding IS present; rule 4 frames the body by reading to close.
 	ex := wireExchange(t, "GET",
 		"HTTP/1.1 200 OK\r\nTransfer-Encoding: \r\nContent-Length: not-a-number\r\n\r\nhello")
-	if _, _, err := ex.ReadResponse(context.Background()); err != nil {
-		t.Errorf("ReadResponse err = %v, want nil — an empty Transfer-Encoding line still "+
-			"makes the field PRESENT, and RFC 9112 §6.3 rule 5 is scoped to a message "+
-			"received WITHOUT Transfer-Encoding", err)
-	}
-	if ex.KeepAlive() {
-		t.Error("KeepAlive() = true — rule 3: a message with both Transfer-Encoding and " +
+
+	_, _, err := ex.ReadResponse(context.Background())
+
+	assert.NoErrorf(t, err, "ReadResponse err = %v, want nil — an empty Transfer-Encoding line still "+
+		"makes the field PRESENT, and RFC 9112 §6.3 rule 5 is scoped to a message "+
+		"received WITHOUT Transfer-Encoding", err)
+	assert.False(t, ex.KeepAlive(),
+		"KeepAlive() = true — rule 3: a message with both Transfer-Encoding and "+
 			"Content-Length ought to be handled as an error, so the socket must not be reused")
-	}
 }

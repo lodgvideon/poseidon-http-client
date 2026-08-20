@@ -2,9 +2,11 @@ package quic
 
 import (
 	"context"
-	"errors"
 	"testing"
 	"time"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // expiryPC is a PacketConn whose Read always reports a timeout, simulating a
@@ -40,15 +42,12 @@ func TestConn_Poll_IdleTimeoutCloses(t *testing.T) {
 		lastActivity:      base.Add(-time.Hour), // long past the idle deadline
 	}
 
-	if err := c.Poll(context.Background()); err != ErrIdleTimeout {
-		t.Fatalf("Poll = %v, want ErrIdleTimeout on an elapsed idle deadline", err)
-	}
-	if !c.closed {
-		t.Fatal("the connection should be marked closed after an idle timeout")
-	}
-	if !pc.closed {
-		t.Fatal("idleClose should close the transport")
-	}
+	err := c.Poll(context.Background())
+
+	require.ErrorIsf(t, err, ErrIdleTimeout,
+		"Poll = %v, want ErrIdleTimeout on an elapsed idle deadline", err)
+	assert.True(t, c.closed, "the connection should be marked closed after an idle timeout")
+	assert.True(t, pc.closed, "idleClose should close the transport")
 }
 
 // TestConn_Poll_PTOProbeOnTimeout drives Poll into the expiry branch with an
@@ -60,9 +59,7 @@ func TestConn_Poll_PTOProbeOnTimeout(t *testing.T) {
 	dcid := []byte("expirypt")
 	keys, _ := InitialKeys(dcid)
 	sealer, err := NewSealer(keys)
-	if err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, err)
 	pc := &expiryPC{}
 	c := &Conn{
 		pc:                pc,
@@ -81,18 +78,13 @@ func TestConn_Poll_PTOProbeOnTimeout(t *testing.T) {
 	c.sendPN[spaceApp] = 10
 	c.sent[spaceApp].onSent(0, base, true, streamFrame(0, 0, "req"))
 
-	if err := c.Poll(context.Background()); err != nil {
-		t.Fatalf("Poll = %v, want nil (a PTO probe keeps the connection up)", err)
-	}
-	if c.ptoCount != 1 {
-		t.Fatalf("ptoCount = %d, want 1 after a PTO expiry", c.ptoCount)
-	}
-	if _, ok := c.sent[spaceApp].packets[0]; ok {
-		t.Fatal("the probed packet should be re-queued and removed from flight")
-	}
-	if len(pc.writes) == 0 {
-		t.Fatal("a probe packet should have been written on the PTO expiry")
-	}
+	err = c.Poll(context.Background())
+
+	require.NoErrorf(t, err, "Poll = %v, want nil (a PTO probe keeps the connection up)", err)
+	assert.EqualValuesf(t, 1, c.ptoCount, "ptoCount = %d, want 1 after a PTO expiry", c.ptoCount)
+	_, stillInFlight := c.sent[spaceApp].packets[0]
+	assert.False(t, stillInFlight, "the probed packet should be re-queued and removed from flight")
+	assert.NotEmpty(t, pc.writes, "a probe packet should have been written on the PTO expiry")
 }
 
 // TestConn_HandleExpiry_DeclaresLostOnLossTimer covers the loss-detection branch
@@ -108,15 +100,15 @@ func TestConn_HandleExpiry_DeclaresLostOnLossTimer(t *testing.T) {
 	c.sent[spaceApp].onSent(1, base.Add(-time.Second), true, nil)
 	c.sent[spaceApp].ack(c, 1, 1) // largestAckedPN=1, haveLargestAcked=true, removes pn 1
 
-	if err := c.handleExpiry(base, timeoutError{}); err != nil {
-		t.Fatalf("handleExpiry = %v, want nil (loss detected, connection stays up)", err)
-	}
-	if len(c.retransQueue[spaceApp]) != 1 || string(c.retransQueue[spaceApp][0].data) != "lost" {
-		t.Fatalf("retransQueue = %+v, want pn 0's frame re-queued as a retransmit", c.retransQueue[spaceApp])
-	}
-	if _, ok := c.sent[spaceApp].packets[0]; ok {
-		t.Fatal("the lost packet should be removed from flight")
-	}
+	err := c.handleExpiry(base, timeoutError{})
+
+	require.NoErrorf(t, err, "handleExpiry = %v, want nil (loss detected, connection stays up)", err)
+	require.Lenf(t, c.retransQueue[spaceApp], 1,
+		"retransQueue = %+v, want pn 0's frame re-queued as a retransmit", c.retransQueue[spaceApp])
+	assert.Equalf(t, "lost", string(c.retransQueue[spaceApp][0].data),
+		"retransQueue = %+v, want pn 0's frame re-queued as a retransmit", c.retransQueue[spaceApp])
+	_, stillInFlight := c.sent[spaceApp].packets[0]
+	assert.False(t, stillInFlight, "the lost packet should be removed from flight")
 }
 
 // TestConn_HandleExpiry_GivesUpWhenNothingToProbe covers the default branch: with
@@ -136,19 +128,15 @@ func TestConn_HandleExpiry_GivesUpWhenNothingToProbe(t *testing.T) {
 	c := &Conn{now: func() time.Time { return base }, handshakeComplete: true}
 
 	err := c.handleExpiry(base, sentinel)
-	if err == nil {
-		t.Fatal("handleExpiry = nil, want the give-up error that ends the connection")
-	}
-	if !errors.Is(err, ErrNoProgress) {
-		t.Fatalf("handleExpiry = %v, want an error matching ErrNoProgress", err)
-	}
-	if !errors.Is(err, sentinel) {
-		t.Fatalf("handleExpiry = %v, dropped the underlying read error (%v) a caller needs for diagnosis", err, sentinel)
-	}
-	if !isTimeout(err) {
-		t.Fatalf("handleExpiry = %v, which isTimeout rejects; the engine and any caller "+
+
+	require.Error(t, err, "handleExpiry = nil, want the give-up error that ends the connection")
+	assert.ErrorIsf(t, err, ErrNoProgress, "handleExpiry = %v, want an error matching ErrNoProgress", err)
+	assert.ErrorIsf(t, err, sentinel,
+		"handleExpiry = %v, dropped the underlying read error (%v) a caller needs for diagnosis",
+		err, sentinel)
+	assert.Truef(t, isTimeout(err),
+		"handleExpiry = %v, which isTimeout rejects; the engine and any caller "+
 			"asserting net.Error classify with a direct type assertion, so this must keep reporting Timeout()", err)
-	}
 }
 
 // TestConn_Poll_NoProgressReachesTheCaller is the end-to-end half: the give-up
@@ -169,13 +157,9 @@ func TestConn_Poll_NoProgressReachesTheCaller(t *testing.T) {
 	}
 
 	err := c.Poll(context.Background())
-	if !errors.Is(err, ErrNoProgress) {
-		t.Fatalf("Poll = %v, want an error matching ErrNoProgress", err)
-	}
-	if errors.Is(err, ErrIdleTimeout) {
-		t.Fatalf("Poll = %v, reported as an idle timeout; no idle timeout was negotiated and none elapsed", err)
-	}
-	if !isTimeout(err) {
-		t.Fatalf("Poll = %v, which isTimeout rejects", err)
-	}
+
+	assert.ErrorIsf(t, err, ErrNoProgress, "Poll = %v, want an error matching ErrNoProgress", err)
+	assert.NotErrorIsf(t, err, ErrIdleTimeout,
+		"Poll = %v, reported as an idle timeout; no idle timeout was negotiated and none elapsed", err)
+	assert.Truef(t, isTimeout(err), "Poll = %v, which isTimeout rejects", err)
 }

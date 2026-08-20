@@ -3,6 +3,9 @@ package http1_test
 import (
 	"context"
 	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // Two truncation positions that the existing suite steps over.
@@ -50,21 +53,18 @@ func TestConformance_RFC9112_Sec6_3_ChunkedEOFAtChunkBoundary(t *testing.T) {
 	ex := wireExchange(t, "GET",
 		"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n"+
 			"5\r\nHELLO\r\n") // one complete chunk, then EOF: no terminal 0-chunk
-	if _, _, err := ex.ReadResponse(context.Background()); err != nil {
-		t.Fatalf("ReadResponse: %v", err)
-	}
+	_, _, err := ex.ReadResponse(context.Background())
+	require.NoError(t, err, "ReadResponse")
 
 	n, err := readAll(t, ex)
-	if err == nil {
-		t.Fatalf("a chunked body cut at a chunk boundary reported complete after %d bytes; "+
-			"the terminal 0-chunk never arrived, so the caller cannot tell this from a "+
-			"whole response", n)
-	}
-	if ex.KeepAlive() {
-		t.Error("KeepAlive() = true after a truncated chunked body, want false — the " +
-			"stream position is indeterminate, so the connection must not be reused " +
+
+	require.Errorf(t, err, "a chunked body cut at a chunk boundary reported complete after %d bytes; "+
+		"the terminal 0-chunk never arrived, so the caller cannot tell this from a "+
+		"whole response", n)
+	assert.False(t, ex.KeepAlive(),
+		"KeepAlive() = true after a truncated chunked body, want false — the "+
+			"stream position is indeterminate, so the connection must not be reused "+
 			"(RFC 9112 §6.3 rule 6)")
-	}
 }
 
 // TestConformance_RFC9112_Sec6_3_ChunkedEOFAfterTerminalChunkIsComplete is the
@@ -76,17 +76,13 @@ func TestConformance_RFC9112_Sec6_3_ChunkedEOFAfterTerminalChunkIsComplete(t *te
 	ex := wireExchange(t, "GET",
 		"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n"+
 			"5\r\nHELLO\r\n0\r\n\r\n")
-	if _, _, err := ex.ReadResponse(context.Background()); err != nil {
-		t.Fatalf("ReadResponse: %v", err)
-	}
+	_, _, err := ex.ReadResponse(context.Background())
+	require.NoError(t, err, "ReadResponse")
 
 	n, err := readAll(t, ex)
-	if err != nil {
-		t.Fatalf("a complete chunked body reported an error after %d bytes: %v", n, err)
-	}
-	if n != 5 {
-		t.Errorf("read %d body bytes, want 5", n)
-	}
+
+	require.NoErrorf(t, err, "a complete chunked body reported an error after %d bytes: %v", n, err)
+	assert.Equalf(t, 5, n, "read %d body bytes, want 5", n)
 }
 
 // TestConformance_RFC9112_Sec6_3_IdentityFramedTruncationIsIndistinguishable
@@ -103,21 +99,16 @@ func TestConformance_RFC9112_Sec6_3_IdentityFramedTruncationIsIndistinguishable(
 	ex := wireExchange(t, "GET",
 		"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n\r\n"+
 			"partial")
-	if _, _, err := ex.ReadResponse(context.Background()); err != nil {
-		t.Fatalf("ReadResponse: %v", err)
-	}
+	_, _, err := ex.ReadResponse(context.Background())
+	require.NoError(t, err, "ReadResponse")
 
 	n, err := readAll(t, ex)
-	if err != nil {
-		t.Fatalf("a close-delimited body reported an error after %d bytes: %v\n"+
-			"§6.3 rule 7 makes the close the delimiter, so this is a COMPLETE response "+
-			"as far as the protocol can tell; erroring rejects valid responses", n, err)
-	}
-	if n != len("partial") {
-		t.Errorf("read %d body bytes, want %d", n, len("partial"))
-	}
-	if ex.KeepAlive() {
-		t.Error("KeepAlive() = true after a close-delimited body, want false — the " +
+
+	require.NoErrorf(t, err, "a close-delimited body reported an error after %d bytes: %v\n"+
+		"§6.3 rule 7 makes the close the delimiter, so this is a COMPLETE response "+
+		"as far as the protocol can tell; erroring rejects valid responses", n, err)
+	assert.Equalf(t, len("partial"), n, "read %d body bytes, want %d", n, len("partial"))
+	assert.False(t, ex.KeepAlive(),
+		"KeepAlive() = true after a close-delimited body, want false — the "+
 			"connection is the delimiter, so there is nothing left to reuse")
-	}
 }

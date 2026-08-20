@@ -14,6 +14,9 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
 	"github.com/lodgvideon/poseidon-http-client/header"
 	"github.com/lodgvideon/poseidon-http-client/http1"
 )
@@ -50,9 +53,7 @@ func wireExchange(t *testing.T, method, serverResponse string) *http1.Exchange {
 		{Name: []byte(":path"), Value: []byte("/")},
 		{Name: []byte(":authority"), Value: []byte("example.com")},
 	}
-	if err := ex.WriteRequest(context.Background(), fields, true); err != nil {
-		t.Fatalf("WriteRequest: %v", err)
-	}
+	require.NoError(t, ex.WriteRequest(context.Background(), fields, true), "WriteRequest")
 	return ex
 }
 
@@ -70,13 +71,12 @@ func TestConformance_RFC2616_Sec4_4_Rule3_ChunkedWinsContentLengthFirst(t *testi
 		"0\r\n\r\n"
 	ex := wireExchange(t, "GET", resp)
 	ctx := context.Background()
-	if _, _, err := ex.ReadResponse(ctx); err != nil {
-		t.Fatalf("ReadResponse: %v", err)
-	}
+	_, _, err := ex.ReadResponse(ctx)
+	require.NoError(t, err, "ReadResponse")
+
 	body := drainBody(t, ex)
-	if body != "hello" {
-		t.Errorf("body = %q, want %q", body, "hello")
-	}
+
+	assert.Equalf(t, "hello", body, "body = %q, want %q", body, "hello")
 }
 
 // TestConformance_RFC2616_Sec4_4_Rule3_ChunkedWinsTransferEncodingFirst verifies
@@ -92,13 +92,12 @@ func TestConformance_RFC2616_Sec4_4_Rule3_ChunkedWinsTransferEncodingFirst(t *te
 		"0\r\n\r\n"
 	ex := wireExchange(t, "GET", resp)
 	ctx := context.Background()
-	if _, _, err := ex.ReadResponse(ctx); err != nil {
-		t.Fatalf("ReadResponse: %v", err)
-	}
+	_, _, err := ex.ReadResponse(ctx)
+	require.NoError(t, err, "ReadResponse")
+
 	body := drainBody(t, ex)
-	if body != "world" {
-		t.Errorf("body = %q, want %q", body, "world")
-	}
+
+	assert.Equalf(t, "world", body, "body = %q, want %q", body, "world")
 }
 
 // TestConformance_RFC2616_Sec8_1_HTTP10DefaultClose verifies that an HTTP/1.0
@@ -112,12 +111,12 @@ func TestConformance_RFC2616_Sec8_1_HTTP10DefaultClose(t *testing.T) {
 		"\r\n"
 	ex := wireExchange(t, "GET", resp)
 	ctx := context.Background()
-	if _, _, err := ex.ReadResponse(ctx); err != nil {
-		t.Fatalf("ReadResponse: %v", err)
-	}
-	if ex.KeepAlive() {
-		t.Error("HTTP/1.0 response without Connection header: KeepAlive() = true, want false")
-	}
+
+	_, _, err := ex.ReadResponse(ctx)
+
+	require.NoError(t, err, "ReadResponse")
+	assert.False(t, ex.KeepAlive(),
+		"HTTP/1.0 response without Connection header: KeepAlive() = true, want false")
 }
 
 // TestConformance_RFC2616_Sec8_1_HTTP10KeepAliveHeader verifies that an
@@ -130,12 +129,11 @@ func TestConformance_RFC2616_Sec8_1_HTTP10KeepAliveHeader(t *testing.T) {
 		"\r\n"
 	ex := wireExchange(t, "GET", resp)
 	ctx := context.Background()
-	if _, _, err := ex.ReadResponse(ctx); err != nil {
-		t.Fatalf("ReadResponse: %v", err)
-	}
-	if !ex.KeepAlive() {
-		t.Error("HTTP/1.0 + Connection: keep-alive: KeepAlive() = false, want true")
-	}
+
+	_, _, err := ex.ReadResponse(ctx)
+
+	require.NoError(t, err, "ReadResponse")
+	assert.True(t, ex.KeepAlive(), "HTTP/1.0 + Connection: keep-alive: KeepAlive() = false, want true")
 }
 
 // TestConformance_RFC2616_Sec6_1_HTTP10StatusLineParsed verifies that the
@@ -149,13 +147,11 @@ func TestConformance_RFC2616_Sec6_1_HTTP10StatusLineParsed(t *testing.T) {
 		"ok"
 	ex := wireExchange(t, "GET", resp)
 	ctx := context.Background()
+
 	code, _, err := ex.ReadResponse(ctx)
-	if err != nil {
-		t.Fatalf("ReadResponse: %v", err)
-	}
-	if code != 201 {
-		t.Errorf("status = %d, want 201", code)
-	}
+
+	require.NoError(t, err, "ReadResponse")
+	assert.Equalf(t, 201, code, "status = %d, want 201", code)
 }
 
 // TestConformance_RFC2616_Sec10_3_5_304NoBody verifies that a 304 Not Modified
@@ -170,17 +166,14 @@ func TestConformance_RFC2616_Sec10_3_5_304NoBody(t *testing.T) {
 		"\r\n"
 	ex := wireExchange(t, "GET", resp)
 	ctx := context.Background()
-	if _, _, err := ex.ReadResponse(ctx); err != nil {
-		t.Fatalf("ReadResponse: %v", err)
-	}
+	_, _, err := ex.ReadResponse(ctx)
+	require.NoError(t, err, "ReadResponse")
 	buf := make([]byte, 16)
+
 	n, done, err := ex.ReadBodyChunk(buf)
-	if err != nil {
-		t.Fatalf("ReadBodyChunk: %v", err)
-	}
-	if n != 0 || !done {
-		t.Errorf("304: ReadBodyChunk = (%d, %v), want (0, true)", n, done)
-	}
+
+	require.NoError(t, err, "ReadBodyChunk")
+	assert.Truef(t, n == 0 && done, "304: ReadBodyChunk = (%d, %v), want (0, true)", n, done)
 }
 
 // TestConformance_RFC2616_Sec3_6_1_MultipleChunks verifies that multi-chunk
@@ -198,13 +191,12 @@ func TestConformance_RFC2616_Sec3_6_1_MultipleChunks(t *testing.T) {
 		"0\r\n\r\n"
 	ex := wireExchange(t, "GET", resp)
 	ctx := context.Background()
-	if _, _, err := ex.ReadResponse(ctx); err != nil {
-		t.Fatalf("ReadResponse: %v", err)
-	}
+	_, _, err := ex.ReadResponse(ctx)
+	require.NoError(t, err, "ReadResponse")
+
 	body := drainBody(t, ex)
-	if body != "foo bar!" {
-		t.Errorf("body = %q, want %q", body, "foo bar!")
-	}
+
+	assert.Equalf(t, "foo bar!", body, "body = %q, want %q", body, "foo bar!")
 }
 
 // TestConformance_RFC2616_Sec3_6_1_EmptyChunkedBody verifies that a response
@@ -217,17 +209,14 @@ func TestConformance_RFC2616_Sec3_6_1_EmptyChunkedBody(t *testing.T) {
 		"0\r\n\r\n"
 	ex := wireExchange(t, "GET", resp)
 	ctx := context.Background()
-	if _, _, err := ex.ReadResponse(ctx); err != nil {
-		t.Fatalf("ReadResponse: %v", err)
-	}
+	_, _, err := ex.ReadResponse(ctx)
+	require.NoError(t, err, "ReadResponse")
 	buf := make([]byte, 16)
+
 	n, done, err := ex.ReadBodyChunk(buf)
-	if err != nil {
-		t.Fatalf("ReadBodyChunk: %v", err)
-	}
-	if n != 0 || !done {
-		t.Errorf("empty chunked: ReadBodyChunk = (%d, %v), want (0, true)", n, done)
-	}
+
+	require.NoError(t, err, "ReadBodyChunk")
+	assert.Truef(t, n == 0 && done, "empty chunked: ReadBodyChunk = (%d, %v), want (0, true)", n, done)
 }
 
 // TestConformance_RFC2616_Sec14_23_HostHeaderInRequest verifies that the
@@ -254,7 +243,6 @@ func TestConformance_RFC2616_Sec14_23_HostHeaderInRequest(t *testing.T) {
 		// Write minimal response so client doesn't stall.
 		_, _ = server.Write([]byte("HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n"))
 	}()
-
 	c := http1.NewConn(client)
 	ex := c.NewExchange()
 	fields := []header.Field{
@@ -263,17 +251,14 @@ func TestConformance_RFC2616_Sec14_23_HostHeaderInRequest(t *testing.T) {
 		{Name: []byte(":authority"), Value: []byte("example.com")},
 	}
 	ctx := context.Background()
-	if err := ex.WriteRequest(ctx, fields, true); err != nil {
-		t.Fatalf("WriteRequest: %v", err)
-	}
 
+	err := ex.WriteRequest(ctx, fields, true)
+
+	require.NoError(t, err, "WriteRequest")
 	wire := <-got
-	if !strings.Contains(wire, "Host: example.com\r\n") {
-		t.Errorf("request wire missing Host header; got:\n%s", wire)
-	}
-	if !strings.HasPrefix(wire, "GET /resource HTTP/1.1\r\n") {
-		t.Errorf("request line wrong; got first line: %q", strings.SplitN(wire, "\n", 2)[0])
-	}
+	assert.Containsf(t, wire, "Host: example.com\r\n", "request wire missing Host header; got:\n%s", wire)
+	assert.Truef(t, strings.HasPrefix(wire, "GET /resource HTTP/1.1\r\n"),
+		"request line wrong; got first line: %q", strings.SplitN(wire, "\n", 2)[0])
 }
 
 // drainBody reads the full body from ex and returns it as a string.
@@ -286,9 +271,7 @@ func drainBody(t *testing.T, ex *http1.Exchange) string {
 		if n > 0 {
 			sb.Write(buf[:n])
 		}
-		if err != nil {
-			t.Fatalf("ReadBodyChunk: %v", err)
-		}
+		require.NoError(t, err, "ReadBodyChunk")
 		if done {
 			return sb.String()
 		}

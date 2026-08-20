@@ -7,6 +7,9 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
 	"github.com/lodgvideon/poseidon-http-client/frame"
 	"github.com/lodgvideon/poseidon-http-client/hpack"
 )
@@ -33,9 +36,9 @@ func TestWriteBufferSize_DefaultsAndClamps(t *testing.T) {
 		{"above the ceiling is lowered", maxWriteBufferSize + 1, maxWriteBufferSize},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := (ConnOptions{WriteBufferSize: tc.in}).defaulted().WriteBufferSize; got != tc.want {
-				t.Errorf("WriteBufferSize %d defaulted to %d, want %d", tc.in, got, tc.want)
-			}
+			got := (ConnOptions{WriteBufferSize: tc.in}).defaulted().WriteBufferSize
+
+			assert.Equalf(t, tc.want, got, "WriteBufferSize %d defaulted to %d, want %d", tc.in, got, tc.want)
 		})
 	}
 }
@@ -45,10 +48,9 @@ func TestWriteBufferSize_DefaultsAndClamps(t *testing.T) {
 // header, the coalescing the buffer exists for stops working and every frame
 // costs two writes again — the opposite of what a caller sets this for.
 func TestWriteBufferSize_FloorHoldsOneWholeFrame(t *testing.T) {
-	if minWriteBufferSize < int(frameSizeFloor)+9 {
-		t.Fatalf("minWriteBufferSize = %d cannot hold a %d-byte frame plus its 9-byte header",
-			minWriteBufferSize, frameSizeFloor)
-	}
+	assert.GreaterOrEqualf(t, minWriteBufferSize, int(frameSizeFloor)+9,
+		"minWriteBufferSize = %d cannot hold a %d-byte frame plus its 9-byte header",
+		minWriteBufferSize, frameSizeFloor)
 }
 
 // TestWriteBufferSize_SizesTheWriter pins that the option reaches the writer,
@@ -57,10 +59,10 @@ func TestWriteBufferSize_FloorHoldsOneWholeFrame(t *testing.T) {
 func TestWriteBufferSize_SizesTheWriter(t *testing.T) {
 	const want = 128 * 1024
 	opts := ConnOptions{WriteBufferSize: want}.defaulted()
+
 	wb := bufio.NewWriterSize(&countingSink{}, opts.WriteBufferSize)
-	if got := wb.Available(); got != want {
-		t.Errorf("buffered writer holds %d bytes, want %d", got, want)
-	}
+
+	assert.Equalf(t, want, wb.Available(), "buffered writer holds %d bytes, want %d", wb.Available(), want)
 }
 
 // TestGroupCommit_ConvoyThresholdTracksWriteBufferSize is the coupling the
@@ -74,13 +76,11 @@ func TestGroupCommit_ConvoyThresholdTracksWriteBufferSize(t *testing.T) {
 		opts := ConnOptions{WriteBufferSize: size, GroupCommit: true}.defaulted()
 		wb := bufio.NewWriterSize(&countingSink{}, opts.WriteBufferSize)
 		b := newWriteBatcher(true, &sync.Mutex{}, wb, opts.WriteBufferSize/2)
-		if want := opts.WriteBufferSize / 2; b.flushBytes != want {
-			t.Errorf("buffer %d: convoy threshold %d, want %d", size, b.flushBytes, want)
-		}
-		if b.flushBytes >= wb.Available() {
-			t.Errorf("buffer %d: convoy threshold %d is not below the auto-flush boundary %d",
-				size, b.flushBytes, wb.Available())
-		}
+		assert.Equalf(t, opts.WriteBufferSize/2, b.flushBytes,
+			"buffer %d: convoy threshold %d, want %d", size, b.flushBytes, opts.WriteBufferSize/2)
+		assert.Lessf(t, b.flushBytes, wb.Available(),
+			"buffer %d: convoy threshold %d is not below the auto-flush boundary %d",
+			size, b.flushBytes, wb.Available())
 	}
 }
 
@@ -118,24 +118,18 @@ func TestSendBatch_HonoursWriteBufferSize(t *testing.T) {
 				EndStream: true,
 			}
 		}
-		if err := c.SendBatch(context.Background(), batch); err != nil {
-			t.Fatalf("SendBatch at buffer %d: %v", bufSize, err)
-		}
+		require.NoErrorf(t, c.SendBatch(context.Background(), batch), "SendBatch at buffer %d", bufSize)
 		for i := range batch {
-			if batch[i].Err != nil {
-				t.Fatalf("buffer %d entry %d: %v", bufSize, i, batch[i].Err)
-			}
+			require.NoErrorf(t, batch[i].Err, "buffer %d entry %d", bufSize, i)
 		}
 		return sink.writes
 	}
 
 	small := writesFor(minWriteBufferSize)
 	large := writesFor(maxWriteBufferSize)
-	if large != 1 {
-		t.Errorf("a buffer large enough for the whole batch cost %d writes, want 1", large)
-	}
-	if small <= large {
-		t.Errorf("a %d-byte buffer cost %d writes and a %d-byte one cost %d; the option "+
+
+	assert.Equalf(t, 1, large, "a buffer large enough for the whole batch cost %d writes, want 1", large)
+	assert.Greaterf(t, small, large,
+		"a %d-byte buffer cost %d writes and a %d-byte one cost %d; the option "+
 			"is not reaching the write path", minWriteBufferSize, small, maxWriteBufferSize, large)
-	}
 }

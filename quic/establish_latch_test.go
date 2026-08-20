@@ -3,11 +3,12 @@ package quic
 import (
 	"context"
 	"crypto/tls"
-	"errors"
 	"sync"
 	"testing"
 	"testing/synctest"
 	"time"
+
+	"github.com/stretchr/testify/require"
 )
 
 // Establish's error paths and the single-close latch (#683).
@@ -64,23 +65,24 @@ func assertLatched(t *testing.T, c *Conn, want error, explain string) {
 	ctx, cancel := context.WithTimeout(context.Background(), latchBudget)
 	defer cancel()
 	start := time.Now()
+
 	_, got := c.OpenStreamContext(ctx)
+
 	// Elapsed time is the discriminator, not the error value: the latch may
 	// legitimately publish context.DeadlineExceeded — the bound expiring is one of
 	// the rows — which is exactly what a caller whose own ctx ran out also reads.
 	// Inside the bubble this is exact: a woken caller spends none of the budget, a
 	// parked one spends all of it, and neither costs real time.
-	if elapsed := time.Since(start); elapsed >= latchBudget {
-		t.Fatalf("a caller is still parked on the connection %v after Establish "+
+	elapsed := time.Since(start)
+	require.Lessf(t, elapsed, latchBudget,
+		"a caller is still parked on the connection %v after Establish "+
 			"returned %v — the abandoned handshake never latched terminateLocked, "+
 			"so c.done was never closed and c.hs.Close never ran (%s)",
-			elapsed, want, explain)
-	}
-	if !errors.Is(got, want) {
-		t.Fatalf("the terminated connection reports %v, want %v — the latch "+
+		elapsed, want, explain)
+	require.ErrorIsf(t, got, want,
+		"the terminated connection reports %v, want %v — the latch "+
 			"publishes closeErr before closing done, and first-error-wins means it "+
 			"must be the error that ended the handshake (%s)", got, want, explain)
-	}
 }
 
 // craftedPeerConn returns a client Conn plus the channel its transport reads
@@ -95,9 +97,7 @@ func craftedPeerConn(t *testing.T) (*Conn, chan []byte) {
 	tx := make(chan []byte, 8) // the ClientHello, and a CONNECTION_CLOSE if one is sent
 	c, err := NewConn(&chanPC{rx: rx, tx: tx}, &tls.Config{ServerName: "example.com", RootCAs: pool},
 		AppendTransportParams(nil, LocalTransportParams{InitialMaxData: 1 << 20}))
-	if err != nil {
-		t.Fatalf("NewConn: %v", err)
-	}
+	require.NoErrorf(t, err, "NewConn: %v", err)
 	return c, rx
 }
 
@@ -188,18 +188,20 @@ func TestConn_Establish_LatchesOnEveryErrorPath(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			synctest.Test(t, func(t *testing.T) {
 				c := tc.build(t)
+
 				err := c.Establish(context.Background())
-				if err == nil {
-					t.Fatalf("Establish succeeded; this row stages a failure, so a green "+
-						"handshake means the fixture stopped staging it (%s)", tc.explain)
+
+				require.Errorf(t, err, "Establish succeeded; this row stages a failure, so a green "+
+					"handshake means the fixture stopped staging it (%s)", tc.explain)
+				if tc.wantEstablish != nil {
+					require.ErrorIsf(t, err, tc.wantEstablish,
+						"Establish returned %v, want %v — the row is staging a "+
+							"different failure than it means to (%s)", err, tc.wantEstablish, tc.explain)
 				}
-				if tc.wantEstablish != nil && !errors.Is(err, tc.wantEstablish) {
-					t.Fatalf("Establish returned %v, want %v — the row is staging a "+
-						"different failure than it means to (%s)", err, tc.wantEstablish, tc.explain)
-				}
-				if tc.wantTimeout && !isTimeout(err) {
-					t.Fatalf("Establish returned %v, which isTimeout rejects — the row "+
-						"stages the bound expiring (%s)", err, tc.explain)
+				if tc.wantTimeout {
+					require.Truef(t, isTimeout(err),
+						"Establish returned %v, which isTimeout rejects — the row "+
+							"stages the bound expiring (%s)", err, tc.explain)
 				}
 				want := tc.wantLatched
 				if want == nil {
@@ -266,11 +268,12 @@ func TestConn_Poll_LatchesOnCtxCancel(t *testing.T) {
 				parent, cancel := context.WithCancel(context.Background())
 				defer cancel() // releases Poll's read watchdog before the bubble ends
 				c := blackholeConn(t)
+
 				err := c.Poll(&staggeredCtx{Context: parent, n: tc.skip})
-				if !errors.Is(err, context.Canceled) {
-					t.Fatalf("Poll returned %v, want context.Canceled — the row is not "+
+
+				require.ErrorIsf(t, err, context.Canceled,
+					"Poll returned %v, want context.Canceled — the row is not "+
 						"landing on %s (%s)", err, tc.name, tc.explain)
-				}
 				assertLatched(t, c, context.Canceled, tc.explain)
 			})
 		})
@@ -285,10 +288,11 @@ func TestConn_Poll_LatchesOnCtxCancel(t *testing.T) {
 func TestConn_Establish_LatchKeepsTheHandshakeError(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		c := blackholeConn(t, WithHandshakeTimeout(2*time.Second))
+
 		err := c.Establish(context.Background())
-		if err == nil {
-			t.Fatal("Establish succeeded against a blackhole; it can only end by running its bound out")
-		}
+
+		require.Error(t, err,
+			"Establish succeeded against a blackhole; it can only end by running its bound out")
 		_ = c.Close()
 		assertLatched(t, c, err,
 			"Close after a failed Establish must not overwrite the handshake's error with ErrConnClosed")

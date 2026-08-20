@@ -6,6 +6,9 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // TestStream_RecvAfterClose_RefusesInsteadOfRegistering covers the holder the
@@ -31,9 +34,9 @@ func TestStream_RecvAfterClose_RefusesInsteadOfRegistering(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
-	if ev, err := ref.Recv(ctx); err != nil || ev.Type != EventHeaders {
-		t.Fatalf("first Recv = %v, %v", ev.Type, err)
-	}
+	ev, err := ref.Recv(ctx)
+	require.NoError(t, err, "first Recv")
+	require.Equal(t, EventHeaders, ev.Type, "first Recv delivered the wrong event")
 
 	// The reader is now between calls. Close lands in the gap and, with
 	// connDone already set, pools the struct immediately.
@@ -42,24 +45,24 @@ func TestStream_RecvAfterClose_RefusesInsteadOfRegistering(t *testing.T) {
 	s.mu.Unlock()
 	_ = ref.Close()
 
-	start := time.Now()
 	rctx, rcancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer rcancel()
-	// The recycle retired this lifetime, so the handle is stale rather than
-	// merely closed. Either way the point of this test stands: it refuses
-	// immediately instead of registering and parking.
-	if _, err := ref.Recv(rctx); !errors.Is(err, ErrStaleStream) && !errors.Is(err, ErrStreamClosed) {
-		t.Fatalf("Recv after Close = %v, want ErrStaleStream or ErrStreamClosed", err)
-	}
-	if d := time.Since(start); d > time.Second {
-		t.Fatalf("Recv after Close took %v — it parked on the orphaned channel instead of refusing", d)
-	}
+	start := time.Now()
+	_, rerr := ref.Recv(rctx)
+	elapsed := time.Since(start)
 	s.mu.Lock()
 	ra := s.recvActive
 	s.mu.Unlock()
-	if ra != 0 {
-		t.Fatalf("recvActive = %d on a pooled struct; the next request to claim it would never be recycled", ra)
-	}
+
+	// The recycle retired this lifetime, so the handle is stale rather than
+	// merely closed. Either way the point of this test stands: it refuses
+	// immediately instead of registering and parking.
+	assert.Truef(t, errors.Is(rerr, ErrStaleStream) || errors.Is(rerr, ErrStreamClosed),
+		"Recv after Close = %v, want ErrStaleStream or ErrStreamClosed", rerr)
+	assert.Lessf(t, elapsed, time.Second,
+		"Recv after Close took %v — it parked on the orphaned channel instead of refusing", elapsed)
+	assert.Zerof(t, ra,
+		"recvActive = %d on a pooled struct; the next request to claim it would never be recycled", ra)
 }
 
 // TestStream_RecvAfterClose_ReallocIsRefused is the guarantee the previous
@@ -86,9 +89,8 @@ func TestStream_RecvAfterClose_ReallocIsRefused(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
-	if _, err := refA.Recv(ctx); err != nil {
-		t.Fatalf("first Recv: %v", err)
-	}
+	_, err := refA.Recv(ctx)
+	require.NoError(t, err, "first Recv")
 	s.mu.Lock()
 	s.connDone = true
 	s.mu.Unlock()
@@ -104,7 +106,9 @@ func TestStream_RecvAfterClose_ReallocIsRefused(t *testing.T) {
 
 	rctx, rcancel := context.WithTimeout(context.Background(), time.Second)
 	defer rcancel()
-	if _, err := refA.Recv(rctx); !errors.Is(err, ErrStaleStream) {
-		t.Fatalf("stale Recv = %v, want ErrStaleStream", err)
-	}
+	_, staleErr := refA.Recv(rctx)
+
+	assert.Truef(t, errors.Is(staleErr, ErrStaleStream),
+		"stale Recv = %v, want ErrStaleStream — a handle from the finished request must not "+
+			"reach the events of whichever request claimed the struct next", staleErr)
 }

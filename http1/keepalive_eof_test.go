@@ -8,6 +8,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/require"
+
 	"github.com/lodgvideon/poseidon-http-client/header"
 	"github.com/lodgvideon/poseidon-http-client/http1"
 )
@@ -27,43 +29,33 @@ func TestReadBodyChunk_CoalescedEOF_KeepAlive_NotReusable(t *testing.T) {
 	// HTTP/1.1 with no "Connection: close": header-derived keepAlive is true,
 	// so only the coalesced-EOF handling can flip it to false.
 	head := []byte(fmt.Sprintf("HTTP/1.1 200 OK\r\nContent-Length: %d\r\n\r\n", bodyLen))
-
 	nc := &coalescedEOFConn{head: head, body: body}
 	ex := http1.NewConn(nc).NewExchange()
 	ctx := context.Background()
-
-	if err := ex.WriteRequest(ctx, []header.Field{
+	require.NoError(t, ex.WriteRequest(ctx, []header.Field{
 		{Name: []byte(":method"), Value: []byte("GET")},
 		{Name: []byte(":path"), Value: []byte("/")},
 		{Name: []byte(":authority"), Value: []byte("example.com")},
-	}, true); err != nil {
-		t.Fatalf("WriteRequest: %v", err)
-	}
-	if _, _, err := ex.ReadResponse(ctx); err != nil {
-		t.Fatalf("ReadResponse: %v", err)
-	}
+	}, true), "WriteRequest")
+	_, _, err := ex.ReadResponse(ctx)
+	require.NoError(t, err, "ReadResponse")
 
 	buf := make([]byte, bodyLen)
 	total := 0
 	for {
-		n, done, err := ex.ReadBodyChunk(buf)
+		n, done, rerr := ex.ReadBodyChunk(buf)
 		total += n
-		if err != nil {
-			t.Fatalf("ReadBodyChunk: unexpected err=%v (after %d bytes)", err, total)
-		}
+		require.NoErrorf(t, rerr, "ReadBodyChunk: unexpected err=%v (after %d bytes)", rerr, total)
 		if done {
 			break
 		}
 	}
-	if total != bodyLen {
-		t.Fatalf("body length = %d, want %d", total, bodyLen)
-	}
-	if !nc.coalesced {
-		t.Fatalf("test premise not exercised: final bytes were not delivered coalesced with io.EOF")
-	}
-	if ex.KeepAlive() {
-		t.Fatalf("KeepAlive() = true after coalesced EOF; the socket is closed and must not be pooled")
-	}
+
+	require.Equalf(t, bodyLen, total, "body length = %d, want %d", total, bodyLen)
+	require.True(t, nc.coalesced,
+		"test premise not exercised: final bytes were not delivered coalesced with io.EOF")
+	require.False(t, ex.KeepAlive(),
+		"KeepAlive() = true after coalesced EOF; the socket is closed and must not be pooled")
 }
 
 // coalescedEOFConn serves the response head, then the whole body together with

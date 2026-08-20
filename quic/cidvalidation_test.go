@@ -1,6 +1,10 @@
 package quic
 
-import "testing"
+import (
+	"testing"
+
+	"github.com/stretchr/testify/assert"
+)
 
 // TestConformance_RFC9000_Sec73_ConnectionIDValidation checks the RFC 9000 §7.3
 // rules for the server's connection-ID transport parameters: the
@@ -32,19 +36,23 @@ func TestConformance_RFC9000_Sec73_ConnectionIDValidation(t *testing.T) {
 	}
 	wantErr := func(t *testing.T, params []byte, c *Conn) {
 		t.Helper()
-		if err := c.PeerTransportParameters(params); err != ErrTransportParameter {
-			t.Fatalf("PeerTransportParameters = %v, want ErrTransportParameter", err)
-		}
+
+		err := c.PeerTransportParameters(params)
+
+		assert.ErrorIsf(t, err, ErrTransportParameter,
+			"PeerTransportParameters = %v, want ErrTransportParameter", err)
 	}
 
 	// original_destination_connection_id: mandatory, must match.
 	t.Run("odcid-absent", func(t *testing.T) {
 		p := AppendTransportParams(nil, LocalTransportParams{InitialMaxData: 1000, SourceConnectionID: scid})
+
 		wantErr(t, p, noRetry())
 	})
 	t.Run("odcid-mismatch", func(t *testing.T) {
 		p := AppendTransportParams(nil, LocalTransportParams{InitialMaxData: 1000, SourceConnectionID: scid})
 		p = append(p, tpBytes(tpOriginalDestinationConnectionID, []byte("wrongdci"))...)
+
 		wantErr(t, p, noRetry())
 	})
 
@@ -53,9 +61,11 @@ func TestConformance_RFC9000_Sec73_ConnectionIDValidation(t *testing.T) {
 		wantErr(t, base(tpBytes(tpRetrySourceConnectionID, rscid)), noRetry())
 	})
 	t.Run("rscid-matching-after-retry", func(t *testing.T) {
-		if err := withRetry().PeerTransportParameters(base(tpBytes(tpRetrySourceConnectionID, rscid))); err != nil {
-			t.Fatalf("matching retry_source_connection_id after a Retry = %v, want nil", err)
-		}
+		params := base(tpBytes(tpRetrySourceConnectionID, rscid))
+
+		err := withRetry().PeerTransportParameters(params)
+
+		assert.NoErrorf(t, err, "matching retry_source_connection_id after a Retry = %v, want nil", err)
 	})
 	t.Run("rscid-absent-after-retry", func(t *testing.T) {
 		wantErr(t, base(), withRetry())

@@ -11,6 +11,8 @@ import (
 	"context"
 	"testing"
 
+	"github.com/stretchr/testify/assert"
+
 	"github.com/lodgvideon/poseidon-http-client/conn"
 	"github.com/lodgvideon/poseidon-http-client/frame"
 	"github.com/lodgvideon/poseidon-http-client/http3"
@@ -38,9 +40,11 @@ func TestConformance_RFC7540_Sec7_RetryOnInternalError(t *testing.T) {
 	// is the gating question. If this returns true, the Retryer
 	// will retry; if false, it will not.
 	sre := &StreamResetError{Code: frame.ErrCodeInternalError}
-	if !builtinShouldRetry(sre) {
-		t.Errorf("builtinShouldRetry(RST_STREAM(INTERNAL_ERROR)) = false; want true (transient per RFC 7540 §7)")
-	}
+
+	got := builtinShouldRetry(sre)
+
+	assert.True(t, got,
+		"builtinShouldRetry(RST_STREAM(INTERNAL_ERROR)) = false; want true (transient per RFC 7540 §7)")
 }
 
 // TestRepro_RetryOnEnhanceYourCalm_Behavior: ENHANCE_YOUR_CALM (11)
@@ -48,36 +52,42 @@ func TestConformance_RFC7540_Sec7_RetryOnInternalError(t *testing.T) {
 // and the client should retry.
 func TestConformance_RFC7540_Sec7_RetryOnEnhanceYourCalm(t *testing.T) {
 	sre := &StreamResetError{Code: frame.ErrCodeEnhanceYourCalm}
-	if !builtinShouldRetry(sre) {
-		t.Errorf("builtinShouldRetry(RST_STREAM(ENHANCE_YOUR_CALM)) = false; want true (rate limit, transient)")
-	}
+
+	got := builtinShouldRetry(sre)
+
+	assert.True(t, got,
+		"builtinShouldRetry(RST_STREAM(ENHANCE_YOUR_CALM)) = false; want true (rate limit, transient)")
 }
 
 // TestRepro_NoRetryOnProtocolError confirms the negative branch:
 // PROTOCOL_ERROR is non-transient and must NOT be retried.
 func TestConformance_RFC7540_Sec7_NoRetryOnProtocolError(t *testing.T) {
 	sre := &StreamResetError{Code: frame.ErrCodeProtocolError}
-	if builtinShouldRetry(sre) {
-		t.Errorf("builtinShouldRetry(RST_STREAM(PROTOCOL_ERROR)) = true; want false (likely a bug, not transient)")
-	}
+
+	got := builtinShouldRetry(sre)
+
+	assert.False(t, got,
+		"builtinShouldRetry(RST_STREAM(PROTOCOL_ERROR)) = true; want false (likely a bug, not transient)")
 }
 
 // TestRepro_NoRetryOnCancel confirms that CANCEL is not retried
 // (the peer cancelled; a retry would just be cancelled again).
 func TestConformance_RFC7540_Sec7_NoRetryOnCancel(t *testing.T) {
 	sre := &StreamResetError{Code: frame.ErrCodeCancel}
-	if builtinShouldRetry(sre) {
-		t.Errorf("builtinShouldRetry(RST_STREAM(CANCEL)) = true; want false (peer cancelled, do not retry)")
-	}
+
+	got := builtinShouldRetry(sre)
+
+	assert.False(t, got,
+		"builtinShouldRetry(RST_STREAM(CANCEL)) = true; want false (peer cancelled, do not retry)")
 }
 
 // TestRepro_RetryGoAway_StillRetries is a regression check: GOAWAY
 // retry is the original behavior; we must not regress it when
 // adding the INTERNAL_ERROR branch.
 func TestConformance_RFC7540_Sec6_8_RetryGoAway_StillRetries(t *testing.T) {
-	if !builtinShouldRetry(conn.ErrGoAway) {
-		t.Errorf("builtinShouldRetry(ErrGoAway) = false; want true (existing behavior)")
-	}
+	got := builtinShouldRetry(conn.ErrGoAway)
+
+	assert.True(t, got, "builtinShouldRetry(ErrGoAway) = false; want true (existing behavior)")
 }
 
 // TestConformance_RFC9114_Sec411_RetryOnRequestRejected: a server
@@ -87,9 +97,11 @@ func TestConformance_RFC7540_Sec6_8_RetryGoAway_StillRetries(t *testing.T) {
 // verbatim; builtinShouldRetry must classify it retryable via Retryable().
 func TestConformance_RFC9114_Sec411_RetryOnRequestRejected(t *testing.T) {
 	rst := &http3.StreamResetError{Code: http3.H3RequestRejected}
-	if !builtinShouldRetry(rst) {
-		t.Errorf("builtinShouldRetry(H3 reset H3_REQUEST_REJECTED) = false; want true (request not processed, §4.1.1)")
-	}
+
+	got := builtinShouldRetry(rst)
+
+	assert.True(t, got,
+		"builtinShouldRetry(H3 reset H3_REQUEST_REJECTED) = false; want true (request not processed, §4.1.1)")
 }
 
 // TestConformance_RFC9114_Sec411_NoRetryOnNonRejectedReset: a RESET_STREAM
@@ -98,9 +110,11 @@ func TestConformance_RFC9114_Sec411_RetryOnRequestRejected(t *testing.T) {
 // every code but H3_REQUEST_REJECTED, so builtinShouldRetry must not retry.
 func TestConformance_RFC9114_Sec411_NoRetryOnNonRejectedReset(t *testing.T) {
 	rst := &http3.StreamResetError{Code: http3.H3RequestCancelled}
-	if builtinShouldRetry(rst) {
-		t.Errorf("builtinShouldRetry(H3 reset H3_REQUEST_CANCELLED) = true; want false (may have had side effects)")
-	}
+
+	got := builtinShouldRetry(rst)
+
+	assert.False(t, got,
+		"builtinShouldRetry(H3 reset H3_REQUEST_CANCELLED) = true; want false (may have had side effects)")
 }
 
 // TestConformance_RFC9114_Sec52_RetryOnGoAway: http3.ErrGoAway means the
@@ -108,18 +122,18 @@ func TestConformance_RFC9114_Sec411_NoRetryOnNonRejectedReset(t *testing.T) {
 // the H3 analogue of conn.ErrGoAway, which is already retried. The request is
 // safe to retry on a fresh connection.
 func TestConformance_RFC9114_Sec52_RetryOnGoAway(t *testing.T) {
-	if !builtinShouldRetry(http3.ErrGoAway) {
-		t.Errorf("builtinShouldRetry(http3.ErrGoAway) = false; want true (server going away, request not processed)")
-	}
+	got := builtinShouldRetry(http3.ErrGoAway)
+
+	assert.True(t, got,
+		"builtinShouldRetry(http3.ErrGoAway) = false; want true (server going away, request not processed)")
 }
 
 // TestRepro_RetryContext_NotRetried is a regression check: ctx
 // errors must never be retried even with the broader predicate.
 func TestRetryer_ContextErrorsNotRetried(t *testing.T) {
-	if builtinShouldRetry(context.DeadlineExceeded) {
-		t.Errorf("builtinShouldRetry(ctx.DeadlineExceeded) = true; want false (hard stop)")
-	}
-	if builtinShouldRetry(context.Canceled) {
-		t.Errorf("builtinShouldRetry(ctx.Canceled) = true; want false (hard stop)")
-	}
+	deadline := builtinShouldRetry(context.DeadlineExceeded)
+	canceled := builtinShouldRetry(context.Canceled)
+
+	assert.False(t, deadline, "builtinShouldRetry(ctx.DeadlineExceeded) = true; want false (hard stop)")
+	assert.False(t, canceled, "builtinShouldRetry(ctx.Canceled) = true; want false (hard stop)")
 }

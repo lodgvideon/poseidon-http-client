@@ -6,6 +6,9 @@ import (
 	"os"
 	"testing"
 	"time"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // TestShutdown_DoesNotStrandAWriteDeadline is the regression for a GOAWAY whose
@@ -30,35 +33,25 @@ func TestShutdown_DoesNotStrandAWriteDeadline(t *testing.T) {
 
 	// One in-flight stream, so Shutdown drains rather than closing at once.
 	held, err := c.NewStream(ctx)
-	if err != nil {
-		t.Fatalf("NewStream: %v", err)
-	}
-	if err := held.SendHeaders(ctx, lgRequestFields("drain.local"), false); err != nil {
-		t.Fatalf("SendHeaders: %v", err)
-	}
-
+	require.NoError(t, err, "NewStream")
+	require.NoError(t, held.SendHeaders(ctx, lgRequestFields("drain.local"), false), "SendHeaders")
 	drained := make(chan struct{})
 	go func() {
 		_ = c.Shutdown(30 * time.Second)
 		close(drained)
 	}()
-
 	// Past the GOAWAY's own deadline by a wide margin.
 	time.Sleep(4 * closeGoAwayDeadline)
 
-	if err := held.SendData(ctx, make([]byte, 64), true); err != nil {
-		if errors.Is(err, os.ErrDeadlineExceeded) {
-			t.Fatalf("a send %v into a 30s graceful drain failed with the GOAWAY's own "+
-				"write deadline: %v", 4*closeGoAwayDeadline, err)
-		}
-		t.Fatalf("SendData during the drain: %v", err)
-	}
+	sendErr := held.SendData(ctx, make([]byte, 64), true)
 
+	assert.Falsef(t, errors.Is(sendErr, os.ErrDeadlineExceeded),
+		"a send %v into a 30s graceful drain failed with the GOAWAY's own "+
+			"write deadline: %v", 4*closeGoAwayDeadline, sendErr)
+	require.NoError(t, sendErr, "SendData during the drain")
 	for {
 		ev, rerr := held.Recv(ctx)
-		if rerr != nil {
-			t.Fatalf("Recv during the drain: %v", rerr)
-		}
+		require.NoError(t, rerr, "Recv during the drain")
 		ev.Release()
 		if ev.DataSlab != nil {
 			dataBufPool.Put(ev.DataSlab)
@@ -68,10 +61,9 @@ func TestShutdown_DoesNotStrandAWriteDeadline(t *testing.T) {
 		}
 	}
 	_ = held.Close()
-
 	select {
 	case <-drained:
 	case <-time.After(10 * time.Second):
-		t.Fatal("Shutdown did not return after its last stream completed")
+		assert.Fail(t, "Shutdown did not return after its last stream completed")
 	}
 }

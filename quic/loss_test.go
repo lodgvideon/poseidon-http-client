@@ -3,6 +3,9 @@ package quic
 import (
 	"testing"
 	"time"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // cryptoCollector captures the CRYPTO frame decoded off a retransmitted packet.
@@ -34,17 +37,16 @@ func TestConformance_RFC9002_Sec611_PacketThresholdLoss(t *testing.T) {
 		c.sent[spaceApp].onSent(pn, base, true, streamFrame(0, pn, "x"))
 	}
 	c.sent[spaceApp].ack(c, 3, 3) // acknowledge the largest; sets largestAckedPN=3
+
 	c.detectLost(spaceApp)
 
-	if len(c.retransQueue[spaceApp]) != 1 || c.retransQueue[spaceApp][0].offset != 0 {
-		t.Fatalf("retransQueue = %+v, want just pn 0", c.retransQueue[spaceApp])
-	}
-	if _, ok := c.sent[spaceApp].packets[0]; ok {
-		t.Fatal("pn 0 should be removed from flight")
-	}
-	if _, ok := c.sent[spaceApp].packets[1]; !ok {
-		t.Fatal("pn 1 is within the packet threshold and must stay in flight")
-	}
+	require.Lenf(t, c.retransQueue[spaceApp], 1,
+		"retransQueue = %+v, want just pn 0", c.retransQueue[spaceApp])
+	assert.Zerof(t, c.retransQueue[spaceApp][0].offset,
+		"retransQueue = %+v, want just pn 0", c.retransQueue[spaceApp])
+	assert.NotContains(t, c.sent[spaceApp].packets, uint64(0), "pn 0 should be removed from flight")
+	assert.Contains(t, c.sent[spaceApp].packets, uint64(1),
+		"pn 1 is within the packet threshold and must stay in flight")
 }
 
 // TestConformance_RFC9002_Sec612_TimeThresholdLoss: an old packet is lost by the
@@ -57,11 +59,11 @@ func TestConformance_RFC9002_Sec612_TimeThresholdLoss(t *testing.T) {
 	c.sent[spaceApp].onSent(0, base.Add(-50*ms), true, streamFrame(0, 0, "old"))
 	c.sent[spaceApp].onSent(1, base.Add(-50*ms), true, nil)
 	c.sent[spaceApp].ack(c, 1, 1) // largestAckedPN=1; removes pn 1 (mirrors real order)
+
 	c.detectLost(spaceApp)
 
-	if len(c.retransQueue[spaceApp]) != 1 {
-		t.Fatalf("pn 0 should be lost by the time threshold; queue = %+v", c.retransQueue[spaceApp])
-	}
+	assert.Lenf(t, c.retransQueue[spaceApp], 1,
+		"pn 0 should be lost by the time threshold; queue = %+v", c.retransQueue[spaceApp])
 }
 
 func TestConn_DetectLost_NoLossWithinThresholds(t *testing.T) {
@@ -71,14 +73,12 @@ func TestConn_DetectLost_NoLossWithinThresholds(t *testing.T) {
 	c.sent[spaceApp].onSent(0, base, true, streamFrame(0, 0, "x")) // sent "now"
 	c.sent[spaceApp].onSent(1, base, true, nil)
 	c.sent[spaceApp].ack(c, 1, 1)
+
 	c.detectLost(spaceApp)
 
-	if len(c.retransQueue[spaceApp]) != 0 {
-		t.Fatalf("no loss expected within both thresholds, got %+v", c.retransQueue[spaceApp])
-	}
-	if _, ok := c.sent[spaceApp].packets[0]; !ok {
-		t.Fatal("pn 0 should remain in flight")
-	}
+	assert.Emptyf(t, c.retransQueue[spaceApp],
+		"no loss expected within both thresholds, got %+v", c.retransQueue[spaceApp])
+	assert.Contains(t, c.sent[spaceApp].packets, uint64(0), "pn 0 should remain in flight")
 }
 
 // TestConn_DetectLost_PrunesAckedElicitWithoutLoss: a connection that never
@@ -101,25 +101,27 @@ func TestConn_DetectLost_PrunesAckedElicitWithoutLoss(t *testing.T) {
 		base,                   // equal → pruned (prune keeps strictly-after)
 		base.Add(time.Second),  // newer → kept
 	}
+
 	c.detectLost(spaceApp)
 
-	if n := len(c.retransQueue[spaceApp]); n != 0 {
-		t.Fatalf("no loss expected within thresholds; retransQueue has %d frames", n)
-	}
-	if got := c.sent[spaceApp].ackedElicit; len(got) != 1 || !got[0].Equal(base.Add(time.Second)) {
-		t.Fatalf("ackedElicit = %v, want only base+1s (pruned to the in-flight window)", got)
-	}
+	assert.Emptyf(t, c.retransQueue[spaceApp],
+		"no loss expected within thresholds; retransQueue has %d frames", len(c.retransQueue[spaceApp]))
+	got := c.sent[spaceApp].ackedElicit
+	require.Lenf(t, got, 1,
+		"ackedElicit = %v, want only base+1s (pruned to the in-flight window)", got)
+	assert.Truef(t, got[0].Equal(base.Add(time.Second)),
+		"ackedElicit = %v, want only base+1s (pruned to the in-flight window)", got)
 }
 
 func TestRTTStats_LossDelay(t *testing.T) {
 	var r rttStats
-	if r.lossDelay() != kGranularity {
-		t.Fatalf("zero-RTT lossDelay = %v, want %v (floor)", r.lossDelay(), kGranularity)
-	}
+
+	zeroRTT := r.lossDelay()
 	r.update(40*ms, 0)
-	if want := 40 * ms * 9 / 8; r.lossDelay() != want {
-		t.Fatalf("lossDelay = %v, want %v", r.lossDelay(), want)
-	}
+	sampled := r.lossDelay()
+
+	assert.Equalf(t, kGranularity, zeroRTT, "zero-RTT lossDelay = %v, want %v (floor)", zeroRTT, kGranularity)
+	assert.Equalf(t, 40*ms*9/8, sampled, "lossDelay = %v, want %v", sampled, 40*ms*9/8)
 }
 
 // TestConn_Retransmit_CryptoResendsBytesAtOffset checks a lost Initial CRYPTO
@@ -129,41 +131,27 @@ func TestConn_Retransmit_CryptoResendsBytesAtOffset(t *testing.T) {
 	dcid := []byte("losstst0")
 	ck, _ := InitialKeys(dcid)
 	sealer, err := NewSealer(ck)
-	if err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, err, "NewSealer for the Initial keys")
 	opener, err := NewOpener(ck)
-	if err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, err, "NewOpener to decrypt the retransmit")
 	pc := &capturePC{}
 	c := &Conn{pc: pc, dcid: dcid, initialSealer: sealer}
 	c.retransQueue[spaceInitial] = []retransFrame{{kind: retransCrypto, offset: 100, data: []byte("clienthello-bytes")}}
 
-	if err := c.flush(); err != nil {
-		t.Fatal(err)
-	}
-	if len(pc.pkts) != 1 {
-		t.Fatalf("expected 1 retransmit datagram, got %d", len(pc.pkts))
-	}
-	if len(pc.pkts[0]) < InitialDatagramMinSize {
-		t.Fatalf("Initial retransmit datagram = %d bytes, want >= %d (§14.1)", len(pc.pkts[0]), InitialDatagramMinSize)
-	}
+	err = c.flush()
+
+	require.NoError(t, err, "flush the queued CRYPTO retransmit")
+	require.Lenf(t, pc.pkts, 1, "expected 1 retransmit datagram, got %d", len(pc.pkts))
+	assert.GreaterOrEqualf(t, len(pc.pkts[0]), InitialDatagramMinSize,
+		"Initial retransmit datagram = %d bytes, want >= %d (§14.1)", len(pc.pkts[0]), InitialDatagramMinSize)
 	hdr, err := ParseHeader(pc.pkts[0], 0)
-	if err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, err, "ParseHeader on the retransmit")
 	_, _, payload, err := opener.Open(pc.pkts[0], hdr.PNOffset, 0)
-	if err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, err, "Open the retransmit")
 	var col cryptoCollector
-	if err := ParseFrames(payload, &col); err != nil {
-		t.Fatal(err)
-	}
-	if !col.seen || col.offset != 100 || string(col.data) != "clienthello-bytes" {
-		t.Fatalf("retransmitted CRYPTO = {off:%d data:%q}, want off 100 with original bytes", col.offset, col.data)
-	}
+	require.NoError(t, ParseFrames(payload, &col), "ParseFrames on the retransmit payload")
+	assert.Truef(t, col.seen && col.offset == 100 && string(col.data) == "clienthello-bytes",
+		"retransmitted CRYPTO = {off:%d data:%q}, want off 100 with original bytes", col.offset, col.data)
 }
 
 // TestConn_Retransmit_StreamResendsBytesAtOffsetAndFin checks a lost STREAM
@@ -171,32 +159,25 @@ func TestConn_Retransmit_CryptoResendsBytesAtOffset(t *testing.T) {
 // accounting.
 func TestConn_Retransmit_StreamResendsBytesAtOffsetAndFin(t *testing.T) {
 	c, s, pc, op := sendTestConn(t, 1<<20, 1<<20)
-	if _, err := s.Send([]byte("request body"), true); err != nil {
-		t.Fatal(err)
-	}
+	_, err := s.Send([]byte("request body"), true)
+	require.NoError(t, err, "the original Send whose packet is then declared lost")
 	beforeOffset, beforeConn := s.sendOffset, c.connSent
-
 	pc.pkts = nil                 // drop the original send; capture only the retransmit
 	c.sent[spaceApp].ack(c, 3, 3) // fake ACK of a higher pn -> largestAckedPN=3
 	c.detectLost(spaceApp)        // pn 0 lost by packet threshold
-	if err := c.flush(); err != nil {
-		t.Fatal(err)
-	}
-	if len(pc.pkts) != 1 {
-		t.Fatalf("expected 1 retransmit datagram, got %d", len(pc.pkts))
-	}
+
+	err = c.flush()
+
+	require.NoError(t, err, "flush the retransmit")
+	require.Lenf(t, pc.pkts, 1, "expected 1 retransmit datagram, got %d", len(pc.pkts))
 	h := collectFrames(t, c, op, pc)
-	if len(h.streams) != 1 {
-		t.Fatalf("expected 1 resent STREAM frame, got %d", len(h.streams))
-	}
+	require.Lenf(t, h.streams, 1, "expected 1 resent STREAM frame, got %d", len(h.streams))
 	f := h.streams[0]
-	if f.offset != 0 || !f.fin || string(f.data) != "request body" {
-		t.Fatalf("resent STREAM = {off:%d fin:%v data:%q}, want off 0 fin body", f.offset, f.fin, f.data)
-	}
-	if s.sendOffset != beforeOffset || c.connSent != beforeConn {
-		t.Fatalf("retransmit re-advanced accounting: sendOffset %d->%d connSent %d->%d",
-			beforeOffset, s.sendOffset, beforeConn, c.connSent)
-	}
+	assert.Truef(t, f.offset == 0 && f.fin && string(f.data) == "request body",
+		"resent STREAM = {off:%d fin:%v data:%q}, want off 0 fin body", f.offset, f.fin, f.data)
+	assert.Truef(t, s.sendOffset == beforeOffset && c.connSent == beforeConn,
+		"retransmit re-advanced accounting: sendOffset %d->%d connSent %d->%d",
+		beforeOffset, s.sendOffset, beforeConn, c.connSent)
 }
 
 func TestConn_Retransmit_AckedPacketNotResent(t *testing.T) {
@@ -204,10 +185,11 @@ func TestConn_Retransmit_AckedPacketNotResent(t *testing.T) {
 	c := &Conn{now: func() time.Time { return base }}
 	c.sent[spaceApp].onSent(0, base, true, streamFrame(0, 0, "x"))
 	c.sent[spaceApp].ack(c, 0, 5) // acknowledges pn 0 (removed) and sets largestAckedPN=5
+
 	c.detectLost(spaceApp)
-	if len(c.retransQueue[spaceApp]) != 0 {
-		t.Fatalf("an acknowledged packet must never be queued for resend, got %+v", c.retransQueue[spaceApp])
-	}
+
+	assert.Emptyf(t, c.retransQueue[spaceApp],
+		"an acknowledged packet must never be queued for resend, got %+v", c.retransQueue[spaceApp])
 }
 
 // TestConn_AckOnlyPacketNotRetransmittable: a lost ACK-only packet (no
@@ -217,11 +199,10 @@ func TestConn_AckOnlyPacketNotRetransmittable(t *testing.T) {
 	c := &Conn{now: func() time.Time { return base }}
 	c.sent[spaceApp].onSent(0, base, false, nil)
 	c.sent[spaceApp].ack(c, 3, 3)
+
 	c.detectLost(spaceApp)
-	if len(c.retransQueue[spaceApp]) != 0 {
-		t.Fatal("a lost ACK-only packet must not be retransmitted")
-	}
-	if _, ok := c.sent[spaceApp].packets[0]; ok {
-		t.Fatal("the lost packet should still be removed from flight")
-	}
+
+	assert.Empty(t, c.retransQueue[spaceApp], "a lost ACK-only packet must not be retransmitted")
+	assert.NotContains(t, c.sent[spaceApp].packets, uint64(0),
+		"the lost packet should still be removed from flight")
 }

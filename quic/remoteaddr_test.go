@@ -5,6 +5,9 @@ import (
 	"net"
 	"testing"
 	"time"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // addrlessPC is a PacketConn with no RemoteAddr method — the shape every
@@ -27,16 +30,14 @@ func TestConn_RemoteAddr_ServerRole(t *testing.T) {
 	client, sc := dialListener(t, ctx, l, pool)
 
 	got := sc.RemoteAddr()
-	if got == nil {
-		t.Fatal("server-role RemoteAddr = nil; an accepted connection knows its peer")
-	}
+
+	require.NotNil(t, got, "server-role RemoteAddr = nil; an accepted connection knows its peer")
 	// The peer of the accepted connection is exactly the client socket's local
 	// address. Comparing against it rather than merely asserting non-nil is what
 	// makes this fail if the listener ever hands over the wrong view.
 	clientLocal := client.pc.(*net.UDPConn).LocalAddr()
-	if got.String() != clientLocal.String() {
-		t.Fatalf("server-role RemoteAddr = %v, want the client's own address %v", got, clientLocal)
-	}
+	assert.Equalf(t, clientLocal.String(), got.String(),
+		"server-role RemoteAddr = %v, want the client's own address %v", got, clientLocal)
 }
 
 // TestConn_RemoteAddr_ClientRole checks the client side is unaffected and useful:
@@ -49,12 +50,10 @@ func TestConn_RemoteAddr_ClientRole(t *testing.T) {
 	client, _ := dialListener(t, ctx, l, pool)
 
 	got := client.RemoteAddr()
-	if got == nil {
-		t.Fatal("client-role RemoteAddr = nil; a dialled *net.UDPConn reports its peer")
-	}
-	if got.String() != l.Addr().String() {
-		t.Fatalf("client-role RemoteAddr = %v, want the dialled listener address %v", got, l.Addr())
-	}
+
+	require.NotNil(t, got, "client-role RemoteAddr = nil; a dialled *net.UDPConn reports its peer")
+	assert.Equalf(t, l.Addr().String(), got.String(),
+		"client-role RemoteAddr = %v, want the dialled listener address %v", got, l.Addr())
 }
 
 // TestConn_RemoteAddr_TransportWithoutAddr pins the documented fallback. Every
@@ -62,7 +61,11 @@ func TestConn_RemoteAddr_ClientRole(t *testing.T) {
 // rather than panicking is what keeps RemoteAddr callable on any Conn.
 func TestConn_RemoteAddr_TransportWithoutAddr(t *testing.T) {
 	c := &Conn{pc: addrlessPC{}, now: func() time.Time { return time.Unix(0, 0) }}
-	if got := c.RemoteAddr(); got != nil {
-		t.Fatalf("RemoteAddr = %v, want nil for a transport that cannot report one", got)
-	}
+
+	got := c.RemoteAddr()
+
+	// net.Addr is an interface: assert.Nil would also accept an interface holding a
+	// typed nil pointer, which `got == nil` correctly rejects.
+	assert.Truef(t, got == nil, "RemoteAddr = %v, want an untyped nil for a transport "+
+		"that cannot report one", got)
 }

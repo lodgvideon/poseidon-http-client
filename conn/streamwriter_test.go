@@ -5,6 +5,9 @@ import (
 	"context"
 	"testing"
 
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
 	"github.com/lodgvideon/poseidon-http-client/frame"
 )
 
@@ -26,20 +29,16 @@ func TestStreamWriter_EndStreamRetiresThroughTheInterface(t *testing.T) {
 	s.id = 1
 	s.sendWindow = 65535
 
-	if err := s.sendData(context.Background(), s.gen.Load(), []byte("x"), true); err != nil {
-		t.Fatalf("sendData: %v", err)
-	}
+	err := s.sendData(context.Background(), s.gen.Load(), []byte("x"), true)
 
+	require.NoError(t, err, "sendData")
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	if w.doneCalls != 1 {
-		t.Errorf("markStreamDone reached the writer %d times, want 1 — the retire used to "+
+	assert.Equalf(t, 1, w.doneCalls,
+		"markStreamDone reached the writer %d times, want 1 — the retire used to "+
 			"be a downcast, so a fake never saw it and the slot was never released in any "+
 			"test built on one", w.doneCalls)
-	}
-	if w.lastDoneID != 1 {
-		t.Errorf("markStreamDone got id %d, want 1", w.lastDoneID)
-	}
+	assert.Equalf(t, uint32(1), w.lastDoneID, "markStreamDone got id %d, want 1", w.lastDoneID)
 }
 
 // TestStreamWriter_NoRetireWithoutEndStream is the negative half: a send that
@@ -50,15 +49,13 @@ func TestStreamWriter_NoRetireWithoutEndStream(t *testing.T) {
 	s.id = 1
 	s.sendWindow = 65535
 
-	if err := s.sendData(context.Background(), s.gen.Load(), []byte("x"), false); err != nil {
-		t.Fatalf("sendData: %v", err)
-	}
+	err := s.sendData(context.Background(), s.gen.Load(), []byte("x"), false)
 
+	require.NoError(t, err, "sendData")
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	if w.doneCalls != 0 {
-		t.Errorf("markStreamDone fired %d times for a non-final DATA frame, want 0", w.doneCalls)
-	}
+	assert.Zerof(t, w.doneCalls,
+		"markStreamDone fired %d times for a non-final DATA frame, want 0", w.doneCalls)
 }
 
 // TestEndLocalAndRetire_ReadsIDUnderTheLock pins the discipline the helper
@@ -76,15 +73,12 @@ func TestEndLocalAndRetire_ReadsIDUnderTheLock(t *testing.T) {
 	s.mu.Lock()
 	ended := s.localEnded
 	s.mu.Unlock()
-	if !ended {
-		t.Error("endLocalAndRetire did not latch localEnded")
-	}
+	assert.True(t, ended, "endLocalAndRetire did not latch localEnded")
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	if w.lastDoneID != 7 {
-		t.Errorf("retired id %d, want 7 — the id must come from the same locked section "+
+	assert.Equalf(t, uint32(7), w.lastDoneID,
+		"retired id %d, want 7 — the id must come from the same locked section "+
 			"that set localEnded", w.lastDoneID)
-	}
 }
 
 // TestWriteRSTStreamID_NeedsNoStream pins the inverted primitive. rstStream used
@@ -96,10 +90,8 @@ func TestWriteRSTStreamID_NeedsNoStream(t *testing.T) {
 	var buf bytes.Buffer
 	c.fr = frame.NewFramer(&buf, nil)
 
-	if err := c.writeRSTStreamID(9, frame.ErrCodeRefusedStream); err != nil {
-		t.Fatalf("writeRSTStreamID: %v", err)
-	}
-	if buf.Len() == 0 {
-		t.Error("no RST_STREAM reached the wire")
-	}
+	err := c.writeRSTStreamID(9, frame.ErrCodeRefusedStream)
+
+	require.NoError(t, err, "writeRSTStreamID")
+	assert.NotZero(t, buf.Len(), "no RST_STREAM reached the wire")
 }

@@ -16,8 +16,10 @@ package http1_test
 
 import (
 	"context"
-	"errors"
 	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	"github.com/lodgvideon/poseidon-http-client/http1"
 )
@@ -50,22 +52,19 @@ func TestConformance_RFC9112_Sec7_1_InvalidChunkSizeRejected(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			ex := wireExchange(t, "GET", chunkedResp(tc.size))
-			if _, _, err := ex.ReadResponse(context.Background()); err != nil {
-				t.Fatalf("ReadResponse: %v", err)
-			}
+			_, _, err := ex.ReadResponse(context.Background())
+			require.NoError(t, err, "ReadResponse")
 			buf := make([]byte, 64)
-			_, _, err := ex.ReadBodyChunk(buf)
-			if err == nil {
-				t.Fatalf("chunk-size %q accepted; RFC 9112 §7.1: chunk-size = 1*HEXDIG", tc.size)
-			}
-			if !errors.Is(err, http1.ErrInvalidChunkSize) {
-				t.Errorf("error = %v, want it to wrap ErrInvalidChunkSize", err)
-			}
-			if ex.KeepAlive() {
-				t.Errorf("KeepAlive() = true after an unparseable chunk-size %q — the "+
+
+			_, _, err = ex.ReadBodyChunk(buf)
+
+			require.Errorf(t, err, "chunk-size %q accepted; RFC 9112 §7.1: chunk-size = 1*HEXDIG", tc.size)
+			assert.ErrorIsf(t, err, http1.ErrInvalidChunkSize,
+				"error = %v, want it to wrap ErrInvalidChunkSize", err)
+			assert.Falsef(t, ex.KeepAlive(),
+				"KeepAlive() = true after an unparseable chunk-size %q — the "+
 					"chunk boundary is unknown, so the stream position is "+
 					"indeterminate and this socket must not be pooled", tc.size)
-			}
 		})
 	}
 }
@@ -85,12 +84,12 @@ func TestConformance_RFC9112_Sec7_1_ValidChunkSizeAccepted(t *testing.T) {
 			ex := wireExchange(t, "GET",
 				"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n"+
 					tc.size+"\r\nhello\r\n0\r\n\r\n")
-			if _, _, err := ex.ReadResponse(context.Background()); err != nil {
-				t.Fatalf("ReadResponse: %v", err)
-			}
-			if body := drainBody(t, ex); body != tc.want {
-				t.Errorf("body = %q, want %q for chunk-size %q", body, tc.want, tc.size)
-			}
+			_, _, err := ex.ReadResponse(context.Background())
+			require.NoError(t, err, "ReadResponse")
+
+			body := drainBody(t, ex)
+
+			assert.Equalf(t, tc.want, body, "body = %q, want %q for chunk-size %q", body, tc.want, tc.size)
 		})
 	}
 }
@@ -120,12 +119,12 @@ func TestConformance_RFC9112_Sec7_1_HexDigitsAcceptedBothCases(t *testing.T) {
 			ex := wireExchange(t, "GET",
 				"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n"+
 					tc.size+"\r\n"+string(body)+"\r\n0\r\n\r\n")
-			if _, _, err := ex.ReadResponse(context.Background()); err != nil {
-				t.Fatalf("ReadResponse for chunk-size %q: %v", tc.size, err)
-			}
-			if got := drainBody(t, ex); len(got) != tc.want {
-				t.Errorf("read %d bytes for chunk-size %q, want %d", len(got), tc.size, tc.want)
-			}
+			_, _, err := ex.ReadResponse(context.Background())
+			require.NoErrorf(t, err, "ReadResponse for chunk-size %q: %v", tc.size, err)
+
+			got := drainBody(t, ex)
+
+			assert.Lenf(t, got, tc.want, "read %d bytes for chunk-size %q, want %d", len(got), tc.size, tc.want)
 		})
 	}
 }

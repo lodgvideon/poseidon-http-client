@@ -6,6 +6,9 @@ import (
 	"crypto/tls"
 	"io"
 	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // capturePacketConn records datagrams written to it; Read returns EOF.
@@ -27,54 +30,36 @@ func TestConn_SendInitialFlight(t *testing.T) {
 	_, pool := genServerCert(t)
 	pc := &capturePacketConn{}
 	c, err := NewConn(pc, &tls.Config{ServerName: "example.com", RootCAs: pool}, []byte{0x01, 0x02, 0x03})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := c.sendInitialFlight(context.Background()); err != nil {
-		t.Fatalf("sendInitialFlight: %v", err)
-	}
+	require.NoError(t, err)
 
-	if len(pc.written) != 1 {
-		t.Fatalf("wrote %d datagrams, want 1", len(pc.written))
-	}
+	err = c.sendInitialFlight(context.Background())
+
+	require.NoErrorf(t, err, "sendInitialFlight: %v", err)
+	require.Lenf(t, pc.written, 1, "wrote %d datagrams, want 1", len(pc.written))
 	dg := pc.written[0]
-	if len(dg) < InitialDatagramMinSize {
-		t.Fatalf("Initial datagram = %d bytes, want >= %d", len(dg), InitialDatagramMinSize)
-	}
-	if c.sendPN[spaceInitial] != 1 {
-		t.Fatalf("next Initial PN = %d, want 1", c.sendPN[spaceInitial])
-	}
+	assert.GreaterOrEqualf(t, len(dg), InitialDatagramMinSize,
+		"Initial datagram = %d bytes, want >= %d", len(dg), InitialDatagramMinSize)
+	assert.EqualValuesf(t, 1, c.sendPN[spaceInitial],
+		"next Initial PN = %d, want 1", c.sendPN[spaceInitial])
 
 	// Decrypt as the server would: the client seals its Initial with the client
 	// keys derived from the DCID the Conn chose.
 	client, _ := InitialKeys(c.dcid)
 	opener, err := NewOpener(client)
-	if err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, err)
 	h, err := ParseHeader(dg, 0)
-	if err != nil {
-		t.Fatalf("ParseHeader: %v", err)
-	}
-	if h.Type != PacketInitial || !bytes.Equal(h.DCID, c.dcid) {
-		t.Fatalf("header type=%d dcid=%x", h.Type, h.DCID)
-	}
+	require.NoErrorf(t, err, "ParseHeader: %v", err)
+	require.Equalf(t, PacketInitial, h.Type, "header type=%d dcid=%x", h.Type, h.DCID)
+	require.Truef(t, bytes.Equal(h.DCID, c.dcid), "header type=%d dcid=%x", h.Type, h.DCID)
 	_, _, payload, err := opener.Open(dg, h.PNOffset, 0)
-	if err != nil {
-		t.Fatalf("Open: %v", err)
-	}
+	require.NoErrorf(t, err, "Open: %v", err)
 	sink := &cryptoFrameSink{}
-	if err := ParseFrames(payload, sink); err != nil {
-		t.Fatalf("ParseFrames: %v", err)
-	}
-	if len(sink.data) == 0 {
-		t.Fatal("no CRYPTO (ClientHello) recovered from the Initial packet")
-	}
+	require.NoErrorf(t, ParseFrames(payload, sink), "ParseFrames")
+	require.NotEmpty(t, sink.data, "no CRYPTO (ClientHello) recovered from the Initial packet")
 	// The recovered CRYPTO must be a valid TLS handshake message start
 	// (ClientHello = handshake type 0x01).
-	if sink.data[0] != 0x01 {
-		t.Fatalf("first CRYPTO byte = %#x, want 0x01 (ClientHello)", sink.data[0])
-	}
+	assert.EqualValuesf(t, 0x01, sink.data[0],
+		"first CRYPTO byte = %#x, want 0x01 (ClientHello)", sink.data[0])
 }
 
 // TestConn_SendInitialFlight_Epilogue pins the bookkeeping the first Initial
@@ -89,57 +74,50 @@ func TestConn_SendInitialFlight_Epilogue(t *testing.T) {
 	_, pool := genServerCert(t)
 	pc := &capturePacketConn{}
 	c, err := NewConn(pc, &tls.Config{ServerName: "example.com", RootCAs: pool}, []byte{0x01, 0x02, 0x03})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := c.sendInitialFlight(context.Background()); err != nil {
-		t.Fatalf("sendInitialFlight: %v", err)
-	}
-	if len(pc.written) != 1 {
-		t.Fatalf("wrote %d datagrams, want 1", len(pc.written))
-	}
-	dg := pc.written[0]
+	require.NoError(t, err)
 
+	err = c.sendInitialFlight(context.Background())
+
+	require.NoErrorf(t, err, "sendInitialFlight: %v", err)
+	require.Lenf(t, pc.written, 1, "wrote %d datagrams, want 1", len(pc.written))
+	dg := pc.written[0]
 	rec, ok := c.sent[spaceInitial].packets[0]
-	if !ok {
-		t.Fatal("Initial packet 0 not recorded as sent; loss detection cannot see it")
-	}
-	if !rec.ackEliciting {
-		t.Error("Initial recorded as not ack-eliciting; a lost ClientHello would never be probed")
-	}
-	if !rec.hasFrame {
-		t.Fatal("Initial recorded with no retransmittable frame; a lost ClientHello could not be resent")
-	}
-	if rec.frame.kind != retransCrypto || rec.frame.offset != 0 {
-		t.Fatalf("retransmit descriptor kind=%v offset=%d, want retransCrypto at offset 0", rec.frame.kind, rec.frame.offset)
-	}
-	if len(rec.frame.data) == 0 {
-		t.Fatal("retransmit descriptor retained no CRYPTO bytes")
-	}
-	if rec.frame.data[0] != 0x01 {
-		t.Fatalf("retained CRYPTO starts %#x, want 0x01 (ClientHello)", rec.frame.data[0])
-	}
-	if rec.size != len(dg) || c.bytesInFlight != uint64(len(dg)) {
-		t.Errorf("in-flight accounting: rec.size=%d bytesInFlight=%d, want %d for both",
-			rec.size, c.bytesInFlight, len(dg))
-	}
-	if c.cryptoOffset[spaceInitial] != uint64(len(rec.frame.data)) {
-		t.Errorf("cryptoOffset = %d, want %d (one ClientHello past the start)",
-			c.cryptoOffset[spaceInitial], len(rec.frame.data))
-	}
-	if n := len(c.pendingCrypto[spaceInitial]); n != 0 {
-		t.Errorf("pendingCrypto = %d bytes, want drained; the ClientHello would be sent twice", n)
-	}
-	if c.sendPN[spaceInitial] != 1 {
-		t.Errorf("next Initial PN = %d, want 1", c.sendPN[spaceInitial])
-	}
+	require.True(t, ok, "Initial packet 0 not recorded as sent; loss detection cannot see it")
+	assert.True(t, rec.ackEliciting,
+		"Initial recorded as not ack-eliciting; a lost ClientHello would never be probed")
+	require.True(t, rec.hasFrame,
+		"Initial recorded with no retransmittable frame; a lost ClientHello could not be resent")
+	assert.Equalf(t, retransCrypto, rec.frame.kind,
+		"retransmit descriptor kind=%v offset=%d, want retransCrypto at offset 0",
+		rec.frame.kind, rec.frame.offset)
+	assert.Zerof(t, rec.frame.offset,
+		"retransmit descriptor kind=%v offset=%d, want retransCrypto at offset 0",
+		rec.frame.kind, rec.frame.offset)
+	require.NotEmpty(t, rec.frame.data, "retransmit descriptor retained no CRYPTO bytes")
+	assert.EqualValuesf(t, 0x01, rec.frame.data[0],
+		"retained CRYPTO starts %#x, want 0x01 (ClientHello)", rec.frame.data[0])
+	assert.Equalf(t, len(dg), rec.size,
+		"in-flight accounting: rec.size=%d bytesInFlight=%d, want %d for both",
+		rec.size, c.bytesInFlight, len(dg))
+	assert.EqualValuesf(t, len(dg), c.bytesInFlight,
+		"in-flight accounting: rec.size=%d bytesInFlight=%d, want %d for both",
+		rec.size, c.bytesInFlight, len(dg))
+	assert.EqualValuesf(t, len(rec.frame.data), c.cryptoOffset[spaceInitial],
+		"cryptoOffset = %d, want %d (one ClientHello past the start)",
+		c.cryptoOffset[spaceInitial], len(rec.frame.data))
+	assert.Emptyf(t, c.pendingCrypto[spaceInitial],
+		"pendingCrypto = %d bytes, want drained; the ClientHello would be sent twice",
+		len(c.pendingCrypto[spaceInitial]))
+	assert.EqualValuesf(t, 1, c.sendPN[spaceInitial],
+		"next Initial PN = %d, want 1", c.sendPN[spaceInitial])
 
 	// The retained CRYPTO must be a private copy, not an alias of the drained
 	// pendingCrypto backing array: the next TLS pump appends into that array, and
 	// a retransmission of this packet must still carry the original ClientHello.
 	want := append([]byte(nil), rec.frame.data...)
+
 	c.pendingCrypto[spaceInitial] = append(c.pendingCrypto[spaceInitial], bytes.Repeat([]byte{0xff}, len(want))...)
-	if !bytes.Equal(rec.frame.data, want) {
-		t.Error("retransmit CRYPTO aliases the pendingCrypto buffer; a resend would carry garbage")
-	}
+
+	assert.True(t, bytes.Equal(rec.frame.data, want),
+		"retransmit CRYPTO aliases the pendingCrypto buffer; a resend would carry garbage")
 }

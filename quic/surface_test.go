@@ -9,6 +9,9 @@ import (
 	"sort"
 	"strings"
 	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // TestExportedSurfaceDoesNotLeakUnexportedTypes is the guard the #478 surface
@@ -101,26 +104,23 @@ func TestExportedSurfaceDoesNotLeakUnexportedTypes(t *testing.T) {
 		}
 	}
 
-	if len(leaks) == 0 {
-		return
-	}
 	sort.Slice(leaks, func(i, j int) bool { return leaks[i].where < leaks[j].where })
 	var b strings.Builder
 	for _, l := range leaks {
 		b.WriteString("\n  " + l.where + " mentions unexported type " + l.typ)
 	}
-	t.Errorf("exported API names %d unexported type(s); a caller outside quic cannot "+
-		"declare these, only hold them by inference:%s\n\nEither export the type or "+
-		"unexport the function that mentions it.", len(leaks), b.String())
+
+	assert.Emptyf(t, leaks,
+		"exported API names %d unexported type(s); a caller outside quic cannot "+
+			"declare these, only hold them by inference:%s\n\nEither export the type or "+
+			"unexport the function that mentions it.", len(leaks), b.String())
 }
 
 // parsePackageFiles parses the package's non-test sources.
 func parsePackageFiles(t *testing.T, fset *token.FileSet) []*ast.File {
 	t.Helper()
 	entries, err := os.ReadDir(".")
-	if err != nil {
-		t.Fatalf("ReadDir: %v", err)
-	}
+	require.NoError(t, err, "ReadDir of the package directory")
 	out := make([]*ast.File, 0, len(entries))
 	for _, e := range entries {
 		name := e.Name()
@@ -128,14 +128,10 @@ func parsePackageFiles(t *testing.T, fset *token.FileSet) []*ast.File {
 			continue
 		}
 		f, err := parser.ParseFile(fset, filepath.Join(".", name), nil, parser.SkipObjectResolution)
-		if err != nil {
-			t.Fatalf("parse %s: %v", name, err)
-		}
+		require.NoErrorf(t, err, "parse %s", name)
 		out = append(out, f)
 	}
-	if len(out) == 0 {
-		t.Fatal("parsed no package files, so this test asserted nothing")
-	}
+	require.NotEmpty(t, out, "parsed no package files, so this test asserted nothing")
 	return out
 }
 

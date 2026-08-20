@@ -6,9 +6,11 @@ package http1_test
 
 import (
 	"context"
-	"errors"
 	"strings"
 	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	"github.com/lodgvideon/poseidon-http-client/http1"
 )
@@ -35,18 +37,16 @@ import (
 // written request-line.
 func TestConformance_RFC9112_Sec6_3_Rule2_ConnectRefused(t *testing.T) {
 	ex, capture := rawCapture(t)
+
 	err := ex.WriteRequest(context.Background(), reqCL("CONNECT"), true)
-	if err == nil {
-		t.Fatal("WriteRequest(CONNECT) = nil; a 2xx to CONNECT makes the connection a tunnel " +
-			"(RFC 9112 §6.3 rule 2) and this exchange cannot honour that")
-	}
-	if !errors.Is(err, http1.ErrInvalidRequest) {
-		t.Errorf("error = %v, want it to wrap ErrInvalidRequest so a caller can classify it", err)
-	}
-	if wire := capture(); wire != "" {
-		t.Errorf("bytes reached the wire: %q — the refusal must happen before any octet "+
-			"is written, or the peer sees a half-open tunnel request", wire)
-	}
+
+	require.Error(t, err, "WriteRequest(CONNECT) = nil; a 2xx to CONNECT makes the connection a tunnel "+
+		"(RFC 9112 §6.3 rule 2) and this exchange cannot honour that")
+	assert.ErrorIsf(t, err, http1.ErrInvalidRequest,
+		"error = %v, want it to wrap ErrInvalidRequest so a caller can classify it", err)
+	wire := capture()
+	assert.Emptyf(t, wire, "bytes reached the wire: %q — the refusal must happen before any octet "+
+		"is written, or the peer sees a half-open tunnel request", wire)
 }
 
 // TestConformance_RFC9112_Sec6_3_Rule2_OtherMethodsUnaffected is the control:
@@ -56,12 +56,13 @@ func TestConformance_RFC9112_Sec6_3_Rule2_OtherMethodsUnaffected(t *testing.T) {
 	for _, m := range []string{"GET", "POST", "OPTIONS", "CONNECTION", "XCONNECT", "connect"} {
 		t.Run(m, func(t *testing.T) {
 			ex, capture := rawCapture(t)
-			if err := ex.WriteRequest(context.Background(), reqCL(m), true); err != nil {
-				t.Fatalf("WriteRequest(%s) = %v, want it accepted — only the CONNECT token is refused", m, err)
-			}
-			if wire := capture(); !strings.HasPrefix(wire, m+" /") {
-				t.Errorf("wire = %q, want it to start with %q", wire, m+" /")
-			}
+
+			err := ex.WriteRequest(context.Background(), reqCL(m), true)
+
+			require.NoErrorf(t, err,
+				"WriteRequest(%s) = %v, want it accepted — only the CONNECT token is refused", m, err)
+			wire := capture()
+			assert.Truef(t, strings.HasPrefix(wire, m+" /"), "wire = %q, want it to start with %q", wire, m+" /")
 		})
 	}
 }

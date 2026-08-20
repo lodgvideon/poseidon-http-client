@@ -11,6 +11,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
 	"github.com/lodgvideon/poseidon-http-client/frame"
 	"github.com/lodgvideon/poseidon-http-client/header"
 )
@@ -40,9 +43,8 @@ func firstDiff(a, b []byte) int {
 func TestIntegration_LargePOST_RespectsPeerSendWindow(t *testing.T) {
 	const bodySize = 200 * 1024
 	body := make([]byte, bodySize)
-	if _, err := rand.Read(body); err != nil {
-		t.Fatalf("rand: %v", err)
-	}
+	_, rerr := rand.Read(body)
+	require.NoError(t, rerr, "rand")
 	srv, cfg := startH2TestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		got, _ := io.ReadAll(r.Body)
 		// Compare the bytes, not the count. The body is 200 KiB of rand.Read, and it
@@ -69,25 +71,19 @@ func TestIntegration_LargePOST_RespectsPeerSendWindow(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	s, err := c.NewStream(ctx)
-	if err != nil {
-		t.Fatalf("NewStream: %v", err)
-	}
-	if err := s.SendHeaders(ctx, []header.Field{
+	require.NoError(t, err, "NewStream")
+	require.NoError(t, s.SendHeaders(ctx, []header.Field{
 		{Name: []byte(":method"), Value: []byte("POST")},
 		{Name: []byte(":scheme"), Value: []byte("https")},
 		{Name: []byte(":authority"), Value: []byte("example.com")},
 		{Name: []byte(":path"), Value: []byte("/upload")},
-	}, false); err != nil {
-		t.Fatalf("SendHeaders: %v", err)
-	}
-	if err := s.SendData(ctx, body, true); err != nil {
-		t.Fatalf("SendData: %v", err)
-	}
+	}, false), "SendHeaders")
+
+	require.NoError(t, s.SendData(ctx, body, true), "SendData")
+
 	for {
-		ev, err := s.Recv(ctx)
-		if err != nil {
-			t.Fatalf("Recv: %v", err)
-		}
+		ev, recvErr := s.Recv(ctx)
+		require.NoError(t, recvErr, "Recv")
 		if ev.EndStream {
 			break
 		}
@@ -114,26 +110,23 @@ func TestConn_AcquireSendCredits_BlocksUntilWindowUpdate(t *testing.T) {
 		out <- result{n: n, err: err}
 	}()
 
+	// Control arm: with no credit granted the call must still be parked, or the
+	// release below proves nothing about the WINDOW_UPDATE.
 	select {
 	case r := <-out:
-		t.Fatalf("acquire returned without window update: n=%d err=%v", r.n, r.err)
+		require.FailNowf(t, "acquire returned without a window update",
+			"n=%d err=%v", r.n, r.err)
 	case <-time.After(50 * time.Millisecond):
 	}
 
-	if err := c.onWindowUpdate(0, 200); err != nil {
-		t.Fatalf("onWindowUpdate: %v", err)
-	}
+	require.NoError(t, c.onWindowUpdate(0, 200), "onWindowUpdate")
 
 	select {
 	case r := <-out:
-		if r.err != nil {
-			t.Fatalf("acquire err = %v", r.err)
-		}
-		if r.n != 100 {
-			t.Fatalf("acquire n = %d, want 100", r.n)
-		}
+		assert.NoErrorf(t, r.err, "acquire err = %v", r.err)
+		assert.Equalf(t, 100, r.n, "acquire n = %d, want 100", r.n)
 	case <-time.After(time.Second):
-		t.Fatalf("acquire did not return after window update")
+		assert.Fail(t, "acquire did not return after window update")
 	}
 }
 
@@ -156,11 +149,9 @@ func TestConn_AcquireSendCredits_HonorsCtxCancel(t *testing.T) {
 
 	select {
 	case err := <-out:
-		if !errors.Is(err, context.Canceled) {
-			t.Fatalf("err = %v, want context.Canceled", err)
-		}
+		assert.Truef(t, errors.Is(err, context.Canceled), "err = %v, want context.Canceled", err)
 	case <-time.After(time.Second):
-		t.Fatalf("acquire did not honor ctx cancel")
+		assert.Fail(t, "acquire did not honor ctx cancel")
 	}
 }
 
@@ -168,14 +159,13 @@ func TestConn_AcquireSendCredits_HonorsCtxCancel(t *testing.T) {
 // 2^31-1 cap on the connection send window.
 func TestConn_OnWindowUpdate_OverflowsConn_ReturnsConnError(t *testing.T) {
 	c := newOutFCConn(0, 1<<31-1)
-	if err := c.onWindowUpdate(0, 1); err == nil {
-		t.Fatalf("want ConnError, got nil")
-	} else {
-		var ce *ConnError
-		if !errors.As(err, &ce) || ce.Code != frame.ErrCodeFlowControlError {
-			t.Fatalf("err = %v, want ConnError(FLOW_CONTROL_ERROR)", err)
-		}
-	}
+
+	err := c.onWindowUpdate(0, 1)
+
+	var ce *ConnError
+	require.Truef(t, errors.As(err, &ce), "err = %v, want ConnError(FLOW_CONTROL_ERROR)", err)
+	assert.Equalf(t, frame.ErrCodeFlowControlError, ce.Code,
+		"err = %v, want FLOW_CONTROL_ERROR per RFC 7540 §6.9.1", err)
 }
 
 // TestConn_OnWindowUpdate_OverflowsStream_ReturnsStreamError covers
@@ -185,14 +175,13 @@ func TestConn_OnWindowUpdate_OverflowsStream_ReturnsStreamError(t *testing.T) {
 	s := newStream(3, 8, c, 65535)
 	s.sendWindow = 1<<31 - 1
 	c.streams[3] = s
-	if err := c.onWindowUpdate(3, 1); err == nil {
-		t.Fatalf("want StreamError, got nil")
-	} else {
-		var se *StreamError
-		if !errors.As(err, &se) || se.Code != frame.ErrCodeFlowControlError {
-			t.Fatalf("err = %v, want StreamError(FLOW_CONTROL_ERROR)", err)
-		}
-	}
+
+	err := c.onWindowUpdate(3, 1)
+
+	var se *StreamError
+	require.Truef(t, errors.As(err, &se), "err = %v, want StreamError(FLOW_CONTROL_ERROR)", err)
+	assert.Equalf(t, frame.ErrCodeFlowControlError, se.Code,
+		"err = %v, want FLOW_CONTROL_ERROR per RFC 7540 §6.9.1", err)
 }
 
 // TestConn_WriteData_ChunksByPeerMaxFrameSize verifies that a payload
@@ -221,26 +210,22 @@ func TestConn_WriteData_ChunksByPeerMaxFrameSize(t *testing.T) {
 	c.streams[1] = s
 
 	payload := make([]byte, 10000) // 3 chunks of 4096+4096+1808
-	if err := c.writeData(context.Background(), s, s.gen.Load(), payload, true); err != nil {
-		t.Fatalf("writeData: %v", err)
-	}
+
+	err := c.writeData(context.Background(), s, s.gen.Load(), payload, true)
+
+	require.NoError(t, err, "writeData")
 	frames := parseDataFrames(t, buf.Bytes())
-	if len(frames) != 3 {
-		t.Fatalf("data frames = %d, want 3", len(frames))
-	}
+	require.Lenf(t, frames, 3, "data frames = %d, want 3 (10000 bytes at a peer MAX_FRAME_SIZE of 4096)",
+		len(frames))
 	total := 0
 	for i, f := range frames {
 		total += int(f.length)
-		if i < len(frames)-1 && f.endStream {
-			t.Fatalf("intermediate frame %d carries END_STREAM", i)
+		if i < len(frames)-1 {
+			assert.Falsef(t, f.endStream, "intermediate frame %d carries END_STREAM", i)
 		}
 	}
-	if !frames[len(frames)-1].endStream {
-		t.Fatalf("final DATA frame missing END_STREAM")
-	}
-	if total != len(payload) {
-		t.Fatalf("total payload = %d, want %d", total, len(payload))
-	}
+	assert.True(t, frames[len(frames)-1].endStream, "final DATA frame missing END_STREAM")
+	assert.Equalf(t, len(payload), total, "total payload = %d, want %d", total, len(payload))
 }
 
 // newOutFCConn builds a *Conn wired only enough to exercise the

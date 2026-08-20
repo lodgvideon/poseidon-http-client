@@ -10,6 +10,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
 	"github.com/lodgvideon/poseidon-http-client/conn"
 )
 
@@ -24,9 +27,7 @@ func captureH1Request(t *testing.T, req *Request) []byte {
 	t.Helper()
 
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("listen: %v", err)
-	}
+	require.NoError(t, err, "listen")
 	defer func() { _ = ln.Close() }()
 
 	captured := make(chan []byte, 1)
@@ -47,28 +48,22 @@ func captureH1Request(t *testing.T, req *Request) []byte {
 		Addr:      ln.Addr().String(),
 		ConnOpts:  conn.ConnOptions{Dialer: &conn.PlaintextDialer{}},
 	})
-	if err != nil {
-		t.Fatalf("NewClient: %v", err)
-	}
+	require.NoError(t, err, "NewClient")
 	defer func() { _ = c.Close() }()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
 	var resp Response
-	if err := c.Do(ctx, req, &resp); err != nil {
-		t.Fatalf("Do: %v", err)
-	}
+	require.NoError(t, c.Do(ctx, req, &resp), "Do")
 
 	select {
 	case b := <-captured:
-		if b == nil {
-			t.Fatal("accept failed")
-		}
+		require.NotNil(t, b, "accept failed, so no wire bytes were captured")
 		// The listener port is ephemeral; normalise it so the goldens are stable.
 		return bytes.Replace(b, []byte("Host: "+ln.Addr().String()+"\r\n"), []byte("Host: %ADDR%\r\n"), 1)
 	case <-time.After(5 * time.Second):
-		t.Fatal("timed out waiting for captured request")
+		require.Fail(t, "timed out waiting for captured request")
 		return nil
 	}
 }
@@ -247,9 +242,10 @@ func TestCompress_Baseline_H1WireBytes(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			got := string(captureH1Request(t, tc.req()))
-			if got != tc.want {
-				t.Errorf("wire bytes changed.\n got: %q\nwant: %q", got, tc.want)
-			}
+
+			assert.Equalf(t, tc.want, got,
+				"wire bytes changed.\n got: %q\nwant: %q — these goldens were captured before "+
+					"Request.CompressBody existed and pin backward compatibility", got, tc.want)
 		})
 	}
 }

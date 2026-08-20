@@ -1,6 +1,10 @@
 package quic
 
-import "testing"
+import (
+	"testing"
+
+	"github.com/stretchr/testify/assert"
+)
 
 // groCapablePC implements both PacketConn and groReader.
 type groCapablePC struct{}
@@ -29,19 +33,17 @@ func (plainPC) Close() error                { return nil }
 // connections.
 func TestPollBufLen_MatchesPlatformCoalescing(t *testing.T) {
 	c := &Conn{pc: groCapablePC{}}
-	got := c.pollBufLen()
+	plain := &Conn{pc: plainPC{}} // no ReadGRO: always the single-datagram size
 	want := pollBufSize
 	if groCanCoalesce {
 		want = groReadBuffer
 	}
-	if got != want {
-		t.Fatalf("pollBufLen with a groReader transport = %d, want %d (groCanCoalesce=%v)",
-			got, want, groCanCoalesce)
-	}
 
-	// A transport without ReadGRO always gets the single-datagram size.
-	plain := &Conn{pc: plainPC{}}
-	if got := plain.pollBufLen(); got != pollBufSize {
-		t.Fatalf("pollBufLen with a plain transport = %d, want %d", got, pollBufSize)
-	}
+	got, gotPlain := c.pollBufLen(), plain.pollBufLen()
+
+	assert.Equalf(t, want, got,
+		"pollBufLen with a groReader transport = %d, want %d (groCanCoalesce=%v)",
+		got, want, groCanCoalesce)
+	assert.Equalf(t, pollBufSize, gotPlain,
+		"pollBufLen with a plain transport = %d, want %d", gotPlain, pollBufSize)
 }

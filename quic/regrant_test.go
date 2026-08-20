@@ -3,6 +3,9 @@ package quic
 import (
 	"testing"
 	"time"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // A credit grant is queued once and never retransmitted, and the limit it carries
@@ -26,19 +29,14 @@ func grantedStream(t *testing.T) (*Conn, *Stream, uint64) {
 	t.Helper()
 	c := &Conn{peer: TransportParams{InitialMaxStreamsBidi: 1}, connRecvMax: DefaultConnRecvWindow}
 	s, err := c.OpenStream()
-	if err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, err, "open the stream the grant is earned on")
 	h := &connFrameHandler{c: c}
-	if err := h.OnStream(s.ID(), 0, false, make([]byte, int(DefaultStreamRecvWindow))); err != nil {
-		t.Fatal(err)
-	}
-	if got := len(s.Recv()); got != int(DefaultStreamRecvWindow) {
-		t.Fatalf("consumed %d bytes, want %d", got, DefaultStreamRecvWindow)
-	}
-	if s.recvMax <= DefaultStreamRecvWindow {
-		t.Fatalf("no grant was queued: recvMax = %d", s.recvMax)
-	}
+	require.NoError(t, h.OnStream(s.ID(), 0, false, make([]byte, int(DefaultStreamRecvWindow))),
+		"deliver a full window so consuming it earns a grant")
+	require.Equalf(t, int(DefaultStreamRecvWindow), len(s.Recv()),
+		"the fixture must consume a full window, or no grant is queued")
+	require.Greaterf(t, s.recvMax, DefaultStreamRecvWindow,
+		"no grant was queued: recvMax = %d", s.recvMax)
 	staleLimit := DefaultStreamRecvWindow // what the peer still believes, the grant having been lost
 	c.pendingCtrl = c.pendingCtrl[:0]     // the grant's packet is lost
 	return c, s, staleLimit
@@ -57,18 +55,15 @@ func loseAPacket(t *testing.T, c *Conn) {
 	}
 	c.sent[spaceApp].ack(c, 3, 3)
 	c.detectLost(spaceApp)
-	if _, still := c.sent[spaceApp].packets[0]; still {
-		t.Fatal("the setup did not actually declare a packet lost")
-	}
+	require.NotContains(t, c.sent[spaceApp].packets, uint64(0),
+		"the setup did not actually declare a packet lost")
 }
 
 // queuedCtrl decodes whatever is sitting in pendingCtrl.
 func queuedCtrl(t *testing.T, c *Conn) ctrlCollector {
 	t.Helper()
 	var col ctrlCollector
-	if err := ParseFrames(c.pendingCtrl, &col); err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, ParseFrames(c.pendingCtrl, &col), "the queued control frames must decode")
 	return col
 }
 
@@ -78,21 +73,18 @@ func TestRegrant_StreamDataBlockedResendsCurrentLimit(t *testing.T) {
 	c, s, stale := grantedStream(t)
 	h := &connFrameHandler{c: c}
 
-	if err := h.OnStreamDataBlocked(s.ID(), stale); err != nil {
-		t.Fatalf("OnStreamDataBlocked: %v", err)
-	}
+	blockedErr := h.OnStreamDataBlocked(s.ID(), stale)
+
+	require.NoErrorf(t, blockedErr, "OnStreamDataBlocked: %v", blockedErr)
 	col := queuedCtrl(t, c)
 	got, ok := col.streamData[s.ID()]
-	if !ok {
-		t.Fatal("STREAM_DATA_BLOCKED at a stale limit queued no MAX_STREAM_DATA — the " +
-			"peer stays blocked at a limit we already moved past, and the transfer " +
-			"deadlocks: no data arrives, so nothing is consumed, so no further grant " +
-			"is ever produced")
-	}
-	if got != s.recvMax {
-		t.Errorf("re-sent MAX_STREAM_DATA = %d, want the CURRENT limit %d — resending "+
+	require.True(t, ok, "STREAM_DATA_BLOCKED at a stale limit queued no MAX_STREAM_DATA — the "+
+		"peer stays blocked at a limit we already moved past, and the transfer "+
+		"deadlocks: no data arrives, so nothing is consumed, so no further grant "+
+		"is ever produced")
+	assert.Equalf(t, s.recvMax, got,
+		"re-sent MAX_STREAM_DATA = %d, want the CURRENT limit %d — resending "+
 			"the value the peer already has leaves it exactly as stuck", got, s.recvMax)
-	}
 }
 
 // TestRegrant_StreamDataBlockedAtCurrentLimitIsQuiet is the bound. A peer blocked
@@ -104,13 +96,13 @@ func TestRegrant_StreamDataBlockedAtCurrentLimitIsQuiet(t *testing.T) {
 
 	for _, at := range []uint64{s.recvMax, s.recvMax + 1} {
 		c.pendingCtrl = c.pendingCtrl[:0]
-		if err := h.OnStreamDataBlocked(s.ID(), at); err != nil {
-			t.Fatalf("OnStreamDataBlocked(%d): %v", at, err)
-		}
-		if len(c.pendingCtrl) != 0 {
-			t.Errorf("STREAM_DATA_BLOCKED at %d (current limit %d) queued %d bytes, want none",
-				at, s.recvMax, len(c.pendingCtrl))
-		}
+
+		blockedErr := h.OnStreamDataBlocked(s.ID(), at)
+
+		require.NoErrorf(t, blockedErr, "OnStreamDataBlocked(%d): %v", at, blockedErr)
+		assert.Emptyf(t, c.pendingCtrl,
+			"STREAM_DATA_BLOCKED at %d (current limit %d) queued %d bytes, want none",
+			at, s.recvMax, len(c.pendingCtrl))
 	}
 }
 
@@ -122,13 +114,12 @@ func TestRegrant_StreamDataBlockedAfterFinIsQuiet(t *testing.T) {
 	h := &connFrameHandler{c: c}
 	s.recv.fin = true
 
-	if err := h.OnStreamDataBlocked(s.ID(), stale); err != nil {
-		t.Fatalf("OnStreamDataBlocked: %v", err)
-	}
-	if len(c.pendingCtrl) != 0 {
-		t.Errorf("queued %d bytes of credit for a stream whose final size is known, want none",
-			len(c.pendingCtrl))
-	}
+	blockedErr := h.OnStreamDataBlocked(s.ID(), stale)
+
+	require.NoErrorf(t, blockedErr, "OnStreamDataBlocked: %v", blockedErr)
+	assert.Emptyf(t, c.pendingCtrl,
+		"queued %d bytes of credit for a stream whose final size is known, want none",
+		len(c.pendingCtrl))
 }
 
 // TestRegrant_DataBlockedResendsCurrentLimit is the connection-level half. The
@@ -137,46 +128,34 @@ func TestRegrant_StreamDataBlockedAfterFinIsQuiet(t *testing.T) {
 func TestRegrant_DataBlockedResendsCurrentLimit(t *testing.T) {
 	c := &Conn{peer: TransportParams{InitialMaxStreamsBidi: 4}, connRecvMax: DefaultConnRecvWindow}
 	s, err := c.OpenStream()
-	if err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, err, "open the stream the connection grant is earned on")
 	h := &connFrameHandler{c: c}
 	win := int(DefaultStreamRecvWindow)
 	// Two windows of consumption crosses the connection half-window and grants.
 	for off := 0; off < 4; off++ {
-		if err := h.OnStream(s.ID(), uint64(off*win), false, make([]byte, win)); err != nil {
-			t.Fatalf("OnStream at window %d: %v", off, err)
-		}
-		if got := len(s.Recv()); got != win {
-			t.Fatalf("window %d: consumed %d bytes, want %d", off, got, win)
-		}
+		require.NoErrorf(t, h.OnStream(s.ID(), uint64(off*win), false, make([]byte, win)),
+			"OnStream at window %d", off)
+		require.Equalf(t, win, len(s.Recv()), "window %d: consumed the wrong number of bytes", off)
 	}
-	if c.connRecvMax <= DefaultConnRecvWindow {
-		t.Fatalf("no connection grant was queued: connRecvMax = %d", c.connRecvMax)
-	}
+	require.Greaterf(t, c.connRecvMax, DefaultConnRecvWindow,
+		"no connection grant was queued: connRecvMax = %d", c.connRecvMax)
 	stale := DefaultConnRecvWindow
 	c.pendingCtrl = c.pendingCtrl[:0] // the grant's packet is lost
 
-	if err := h.OnDataBlocked(stale); err != nil {
-		t.Fatalf("OnDataBlocked: %v", err)
-	}
+	staleErr := h.OnDataBlocked(stale)
 	col := queuedCtrl(t, c)
-	if !col.dataSet {
-		t.Fatal("DATA_BLOCKED at a stale limit queued no MAX_DATA — the peer stays " +
-			"blocked connection-wide and every stream on it stalls")
-	}
-	if col.data != c.connRecvMax {
-		t.Errorf("re-sent MAX_DATA = %d, want the CURRENT limit %d", col.data, c.connRecvMax)
-	}
-
-	// And the bound, on the same connection.
 	c.pendingCtrl = c.pendingCtrl[:0]
-	if err := h.OnDataBlocked(c.connRecvMax); err != nil {
-		t.Fatalf("OnDataBlocked at the current limit: %v", err)
-	}
-	if len(c.pendingCtrl) != 0 {
-		t.Errorf("DATA_BLOCKED at the current limit queued %d bytes, want none", len(c.pendingCtrl))
-	}
+	currentErr := h.OnDataBlocked(c.connRecvMax)
+
+	require.NoErrorf(t, staleErr, "OnDataBlocked: %v", staleErr)
+	require.True(t, col.dataSet, "DATA_BLOCKED at a stale limit queued no MAX_DATA — the peer stays "+
+		"blocked connection-wide and every stream on it stalls")
+	assert.Equalf(t, c.connRecvMax, col.data,
+		"re-sent MAX_DATA = %d, want the CURRENT limit %d", col.data, c.connRecvMax)
+	// And the bound, on the same connection.
+	require.NoErrorf(t, currentErr, "OnDataBlocked at the current limit: %v", currentErr)
+	assert.Emptyf(t, c.pendingCtrl,
+		"DATA_BLOCKED at the current limit queued %d bytes, want none", len(c.pendingCtrl))
 }
 
 // TestRegrant_LossEpisodeResendsCurrentLimit is the gate on the half that does not
@@ -196,14 +175,11 @@ func TestRegrant_LossEpisodeResendsCurrentLimit(t *testing.T) {
 
 	col := queuedCtrl(t, c)
 	got, ok := col.streamData[s.ID()]
-	if !ok {
-		t.Fatal("a loss episode queued no MAX_STREAM_DATA — a grant is sent once and " +
-			"never retransmitted, so the packet that carried it taking a drop leaves " +
-			"the peer permanently behind (RFC 9000 §13.3)")
-	}
-	if got != s.recvMax {
-		t.Errorf("re-sent MAX_STREAM_DATA = %d, want the CURRENT limit %d", got, s.recvMax)
-	}
+	require.True(t, ok, "a loss episode queued no MAX_STREAM_DATA — a grant is sent once and "+
+		"never retransmitted, so the packet that carried it taking a drop leaves "+
+		"the peer permanently behind (RFC 9000 §13.3)")
+	assert.Equalf(t, s.recvMax, got,
+		"re-sent MAX_STREAM_DATA = %d, want the CURRENT limit %d", got, s.recvMax)
 }
 
 // TestRegrant_LossEpisodeRepeatsUntilDelivered pins that the re-grant itself is
@@ -215,12 +191,14 @@ func TestRegrant_LossEpisodeRepeatsUntilDelivered(t *testing.T) {
 	for episode := 1; episode <= 3; episode++ {
 		c.pendingCtrl = c.pendingCtrl[:0] // the previous re-grant was lost too
 		c.sent[spaceApp] = sentSpace{}
+
 		loseAPacket(t, c)
+
 		col := queuedCtrl(t, c)
-		if got, ok := col.streamData[s.ID()]; !ok || got != s.recvMax {
-			t.Fatalf("loss episode %d re-sent %d (present=%v), want the current limit %d — "+
+		got, ok := col.streamData[s.ID()]
+		require.Truef(t, ok && got == s.recvMax,
+			"loss episode %d re-sent %d (present=%v), want the current limit %d — "+
 				"the retry must survive its own losses", episode, got, ok, s.recvMax)
-		}
 	}
 }
 
@@ -232,23 +210,19 @@ func TestRegrant_LossEpisodeQuietForUngrantedStreams(t *testing.T) {
 	h := &connFrameHandler{c: c}
 	for i := 0; i < 8; i++ {
 		s, err := c.OpenStream()
-		if err != nil {
-			t.Fatal(err)
-		}
+		require.NoError(t, err, "open one of the eight small-response streams")
 		// Well under the half-window that earns a grant.
-		if err := h.OnStream(s.ID(), 0, false, make([]byte, 1024)); err != nil {
-			t.Fatal(err)
-		}
+		require.NoError(t, h.OnStream(s.ID(), 0, false, make([]byte, 1024)),
+			"deliver a sub-threshold amount on the stream")
 		s.Recv()
 	}
 	c.pendingCtrl = c.pendingCtrl[:0]
 
 	loseAPacket(t, c)
 
-	if len(c.pendingCtrl) != 0 {
-		t.Errorf("a loss episode queued %d bytes for streams that never got a grant, want none",
-			len(c.pendingCtrl))
-	}
+	assert.Emptyf(t, c.pendingCtrl,
+		"a loss episode queued %d bytes for streams that never got a grant, want none",
+		len(c.pendingCtrl))
 }
 
 // TestRegrant_LossEpisodeDropsFinishedStreams pins that the tracking set does not
@@ -256,24 +230,18 @@ func TestRegrant_LossEpisodeQuietForUngrantedStreams(t *testing.T) {
 // again and must leave.
 func TestRegrant_LossEpisodeDropsFinishedStreams(t *testing.T) {
 	c, s, _ := grantedStream(t)
-	if len(c.grantedStreams) != 1 {
-		t.Fatalf("granted set holds %d streams, want 1", len(c.grantedStreams))
-	}
+	require.Lenf(t, c.grantedStreams, 1, "granted set holds %d streams, want 1", len(c.grantedStreams))
 	s.recv.fin = true
 
 	loseAPacket(t, c)
 
-	if _, still := c.grantedStreams[s.ID()]; still {
-		t.Error("a stream whose final size is known stayed in the granted set — the set " +
+	assert.NotContains(t, c.grantedStreams, s.ID(),
+		"a stream whose final size is known stayed in the granted set — the set "+
 			"would grow for the life of the connection")
-	}
 	var col ctrlCollector
-	if err := ParseFrames(c.pendingCtrl, &col); err != nil {
-		t.Fatal(err)
-	}
-	if _, sent := col.streamData[s.ID()]; sent {
-		t.Error("credit was re-sent for a stream that can receive no more data")
-	}
+	require.NoError(t, ParseFrames(c.pendingCtrl, &col), "the queued control frames must decode")
+	assert.NotContains(t, col.streamData, s.ID(),
+		"credit was re-sent for a stream that can receive no more data")
 }
 
 // TestRegrant_UnknownStreamIsQuiet covers the lookup miss: a STREAM_DATA_BLOCKED
@@ -286,10 +254,9 @@ func TestRegrant_UnknownStreamIsQuiet(t *testing.T) {
 
 	// A server-initiated unidirectional id (0x3) we have never seen: valid to
 	// receive, absent from the registry.
-	if err := h.OnStreamDataBlocked(0x3, 0); err != nil {
-		t.Fatalf("OnStreamDataBlocked for an unknown stream: %v", err)
-	}
-	if len(c.pendingCtrl) != 0 {
-		t.Errorf("queued %d bytes for a stream that does not exist, want none", len(c.pendingCtrl))
-	}
+	blockedErr := h.OnStreamDataBlocked(0x3, 0)
+
+	require.NoErrorf(t, blockedErr, "OnStreamDataBlocked for an unknown stream: %v", blockedErr)
+	assert.Emptyf(t, c.pendingCtrl,
+		"queued %d bytes for a stream that does not exist, want none", len(c.pendingCtrl))
 }
