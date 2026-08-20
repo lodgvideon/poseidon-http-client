@@ -7,6 +7,9 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
 	"github.com/lodgvideon/poseidon-http-client/conn"
 )
 
@@ -36,14 +39,13 @@ func TestConformance_RFC9110_Sec10_1_1_ExpectIdentifiedByToken(t *testing.T) {
 	for _, v := range refused {
 		t.Run("refuse "+v, func(t *testing.T) {
 			r := &Request{Method: "GET", Path: "/", Headers: []conn.HeaderField{hf("expect", v)}}
+
 			err := validateRequest(r)
-			if err == nil {
-				t.Fatalf("Expect: %q on a bodyless request accepted; a recipient reads the "+
-					"leading token and waits for content that never comes", v)
-			}
-			if !errors.Is(err, ErrInvalidRequest) {
-				t.Errorf("error = %v, want ErrInvalidRequest", err)
-			}
+
+			require.Errorf(t, err, "Expect: %q on a bodyless request accepted; a recipient reads the "+
+				"leading token and waits for content that never comes", v)
+			assert.Truef(t, errors.Is(err, ErrInvalidRequest),
+				"error = %v, want ErrInvalidRequest", err)
 		})
 	}
 
@@ -64,9 +66,9 @@ func TestConformance_RFC9110_Sec10_1_1_ExpectIdentifiedByToken(t *testing.T) {
 	}
 	for _, tc := range accepted {
 		t.Run("accept "+tc.name, func(t *testing.T) {
-			if err := validateRequest(tc.r); err != nil {
-				t.Errorf("validateRequest = %v, want nil", err)
-			}
+			err := validateRequest(tc.r)
+
+			assert.NoErrorf(t, err, "validateRequest = %v, want nil", err)
 		})
 	}
 }
@@ -101,13 +103,11 @@ func TestConformance_RFC9110_Sec8_6_UnverifiableContentLengthRefused(t *testing.
 	for _, tc := range refused {
 		t.Run("refuse "+tc.name, func(t *testing.T) {
 			err := validateRequest(tc.r)
-			if err == nil {
-				t.Fatal("accepted; the value goes to the wire with nothing reconciling it " +
-					"against the octets actually sent")
-			}
-			if !errors.Is(err, ErrInvalidRequest) {
-				t.Errorf("error = %v, want ErrInvalidRequest", err)
-			}
+
+			require.Error(t, err, "accepted; the value goes to the wire with nothing reconciling it "+
+				"against the octets actually sent")
+			assert.Truef(t, errors.Is(err, ErrInvalidRequest),
+				"error = %v, want ErrInvalidRequest", err)
 		})
 	}
 
@@ -131,9 +131,9 @@ func TestConformance_RFC9110_Sec8_6_UnverifiableContentLengthRefused(t *testing.
 	}
 	for _, tc := range accepted {
 		t.Run("accept "+tc.name, func(t *testing.T) {
-			if err := validateRequest(tc.r); err != nil {
-				t.Errorf("validateRequest = %v, want nil", err)
-			}
+			err := validateRequest(tc.r)
+
+			assert.NoErrorf(t, err, "validateRequest = %v, want nil", err)
 		})
 	}
 }
@@ -148,6 +148,7 @@ func TestConformance_RFC9110_Sec5_1_AcceptEncodingDedupFoldsCase(t *testing.T) {
 			req := &Request{Method: "GET", Path: "/",
 				Headers: []conn.HeaderField{hf(spelling, "br")}}
 			var sp []conn.HeaderField
+
 			out := buildHeaders(req, "example.com", "https", &sp)
 
 			n := 0
@@ -156,10 +157,8 @@ func TestConformance_RFC9110_Sec5_1_AcceptEncodingDedupFoldsCase(t *testing.T) {
 					n++
 				}
 			}
-			if n != 1 {
-				t.Errorf("%d accept-encoding field lines, want 1 — the caller asked for one "+
-					"and this client appended its own beside it", n)
-			}
+			assert.Equalf(t, 1, n, "%d accept-encoding field lines, want 1 — the caller asked for one "+
+				"and this client appended its own beside it", n)
 		})
 	}
 }
