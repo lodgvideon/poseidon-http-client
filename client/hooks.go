@@ -88,7 +88,14 @@ type RequestCompleteEvent struct {
 
 	// TTFB is the time from Start until the response head arrived: the status
 	// and headers, which is the first thing a server can send. Zero when no
-	// response head ever arrived, which is exactly when Status is 0 too.
+	// response head ever arrived.
+	//
+	// A non-zero TTFB does not imply a non-zero Status. The head can arrive and
+	// the attempt still fail — a reset mid-body, a body over
+	// MaxResponseBodySize — in which case Status carries what the server said
+	// and Err carries how it ended. Status stays 0 when the head itself could
+	// not be parsed, and on the streaming path when the failure was in that
+	// parse.
 	//
 	// It is what JMeter calls Latency and what this event calls TTFB, because
 	// this event already has a field named Latency meaning something else.

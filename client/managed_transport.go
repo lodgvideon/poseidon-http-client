@@ -17,10 +17,13 @@ type managedTransport struct {
 func (mt *managedTransport) openExchange(ctx context.Context) (protoStream, pushLookuper, releaser, exchangeStats, error) {
 	st := exchangeStats{Proto: trace.ProtoH2}
 	cn, release, addr, err := mt.mp.acquire(ctx)
+	// Before the error check: a request that failed against a specific backend
+	// still failed against THAT backend, and dropping the address on exactly
+	// those attempts loses the ones worth attributing.
+	st.RemoteAddr = addrString(addr)
 	if err != nil {
 		return nil, nil, nil, st, err
 	}
-	st.RemoteAddr = addr.String()
 	stream, serr := cn.NewStream(ctx)
 	if serr != nil {
 		release()

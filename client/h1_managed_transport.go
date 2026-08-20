@@ -24,10 +24,11 @@ type h1ManagedTransport struct {
 func (mt *h1ManagedTransport) openExchange(ctx context.Context) (protoStream, pushLookuper, releaser, exchangeStats, error) {
 	st := exchangeStats{Proto: trace.ProtoH1}
 	c, release, addr, err := mt.mp.acquire(ctx)
+	// Before the error check; see managedTransport.openExchange.
+	st.RemoteAddr = addrString(addr)
 	if err != nil {
 		return nil, nil, nil, st, err
 	}
-	st.RemoteAddr = addr.String()
 	// acquire already hands back a release func, and a func value boxes into
 	// h1Releaser for free, so nothing extra is built per exchange. Exactly-once —
 	// which protects the sub-pool's active count and hence its MaxConnsPerHost

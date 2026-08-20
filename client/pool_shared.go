@@ -129,6 +129,21 @@ func dialAttempt[C any](env dialEnv, dial func(context.Context) (C, error)) (C, 
 	return c, err
 }
 
+// addrString renders a picked Address for exchangeStats.RemoteAddr, and renders
+// the zero Address as the empty string rather than as ":0".
+//
+// managedCore.acquire returns a zero Address on the paths where no backend was
+// ever picked — an empty address set, or a Selector that refused — and
+// Address.String is net.JoinHostPort, which turns that into a plausible-looking
+// ":0". An empty RemoteAddr says "no backend was chosen"; ":0" says a backend
+// was, and names one that does not exist.
+func addrString(a Address) string {
+	if a.Host == "" && a.Port == 0 {
+		return ""
+	}
+	return a.String()
+}
+
 // defaultDialTimeout is the ceiling every transport puts on one dial attempt.
 // The three pools floor PoolOptions.DialTimeout at this value; the
 // single-connection transports use it when ClientOptions.DialTimeout is unset.

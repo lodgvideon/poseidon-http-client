@@ -136,6 +136,12 @@ func (mp *managedCore[P, MC, C, R]) acquire(ctx context.Context) (C, R, Address,
 	var zeroA Address
 	tried := make(map[string]struct{})
 	var lastErr error
+	var lastAddr Address
+	// lastAddr is the address the most recent failed attempt was made against.
+	// It is reported alongside the error so a failed managed request still says
+	// WHICH backend it failed against — the address is the whole reason this
+	// result exists, and a pool that times out under load is exactly the case
+	// worth attributing.
 	for {
 		set := mp.snapshotActive()
 		if len(tried) > 0 {
@@ -149,7 +155,7 @@ func (mp *managedCore[P, MC, C, R]) acquire(ctx context.Context) (C, R, Address,
 		}
 		if len(set) == 0 {
 			if lastErr != nil {
-				return zeroC, zeroR, zeroA, lastErr
+				return zeroC, zeroR, lastAddr, lastErr
 			}
 			return zeroC, zeroR, zeroA, ErrNoAddresses
 		}
@@ -172,9 +178,10 @@ func (mp *managedCore[P, MC, C, R]) acquire(ctx context.Context) (C, R, Address,
 			return mp.connOf(mc), mp.mkRelease(sub.p, mc), addr, nil
 		}
 		if !isDialOnlyErr(err) {
-			return zeroC, zeroR, zeroA, err
+			return zeroC, zeroR, addr, err
 		}
 		lastErr = err
+		lastAddr = addr
 		tried[addr.String()] = struct{}{}
 	}
 }

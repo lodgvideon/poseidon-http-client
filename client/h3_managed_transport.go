@@ -20,10 +20,11 @@ type h3ManagedTransport struct {
 func (mt *h3ManagedTransport) openExchange(ctx context.Context) (protoStream, pushLookuper, releaser, exchangeStats, error) {
 	st := exchangeStats{Proto: trace.ProtoH3}
 	cl, release, addr, err := mt.mp.acquire(ctx)
+	// Before the error check; see managedTransport.openExchange.
+	st.RemoteAddr = addrString(addr)
 	if err != nil {
 		return nil, nil, nil, st, err
 	}
-	st.RemoteAddr = addr.String()
 	return getH3Exchange(cl), nil, funcReleaser(release), st, nil
 }
 

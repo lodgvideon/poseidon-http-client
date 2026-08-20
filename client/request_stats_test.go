@@ -245,3 +245,100 @@ func TestRequestComplete_RetriedRequestNumbersItsAttempts(t *testing.T) {
 		"replay reported as attempt %d, want 1 — an unnumbered replay is indistinguishable from a separate request",
 		(*events)[1].Attempt)
 }
+
+// TestRequestComplete_ManagedFailureStillNamesTheBackend is the failure half of
+// TestRequestComplete_ReportsProtocolAndBackend. A managed client has no
+// configured Addr, so if the address is dropped when the acquire fails, the
+// attempts most worth attributing — a saturated pool, a backend that stopped
+// answering — are exactly the ones that arrive anonymous.
+func TestRequestComplete_ManagedFailureStillNamesTheBackend(t *testing.T) {
+	t.Parallel()
+	srv, addr, _ := startCountedTLSServer(t)
+	hooks, events := recordComplete()
+	c, err := client.NewClient(client.ClientOptions{
+		Transport: client.TransportManaged,
+		Resolver:  client.StaticResolver(addr),
+		ConnOpts:  conn.ConnOptions{Dialer: newTLSDialer(srv)},
+		Pool:      &client.PoolOptions{MaxConnsPerHost: 1, MaxStreamsPerConn: 4},
+		Hooks:     hooks,
+	})
+	require.NoError(t, err, "NewClient with a managed transport")
+	defer c.Close()
+	// A context that is already done makes the sub-pool acquire fail without a
+	// dial, deterministically, after the Selector has already picked.
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	var resp client.Response
+	resp.Reset()
+
+	err = c.Do(ctx, &client.Request{Method: "GET", Path: "/"}, &resp)
+
+	require.Error(t, err, "Do on a cancelled context must fail")
+	require.Len(t, *events, 1, "a failed attempt is still one attempt, and still reports")
+	assert.Equalf(t, addr.String(), (*events)[0].RemoteAddr,
+		"RemoteAddr = %q on a failed managed acquire, want the backend the Selector picked (%q)",
+		(*events)[0].RemoteAddr, addr.String())
+}
+
+// TestRequestComplete_StatusSurvivesAFailureAfterTheHead covers the case where
+// the two halves of one attempt disagree: the server answered, and the attempt
+// still failed. Zeroing Status there makes a 503-then-reset indistinguishable
+// from a request that never reached the server.
+func TestRequestComplete_StatusSurvivesAFailureAfterTheHead(t *testing.T) {
+	t.Parallel()
+	srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(503)
+		w.(http.Flusher).Flush() // put the head on the wire before killing the stream
+		panic(http.ErrAbortHandler)
+	}))
+	srv.EnableHTTP2 = true
+	srv.StartTLS()
+	defer srv.Close()
+	hooks, events := recordComplete()
+	c, err := client.NewClient(client.ClientOptions{
+		Addr:     srv.Listener.Addr().String(),
+		ConnOpts: conn.ConnOptions{Dialer: &conn.TLSDialer{Config: &tls.Config{InsecureSkipVerify: true}}},
+		Hooks:    hooks,
+	})
+	require.NoError(t, err, "NewClient against the aborting test server")
+	defer c.Close()
+	var resp client.Response
+	resp.Reset()
+
+	err = c.Do(context.Background(), &client.Request{Method: "GET", Path: "/x"}, &resp)
+
+	require.Error(t, err, "the server aborts the stream after the head, so Do must fail")
+	require.Len(t, *events, 1, "one attempt must produce exactly one completion event")
+	e := (*events)[0]
+	assert.Positivef(t, e.TTFB, "TTFB = %v; the head did arrive before the reset", e.TTFB)
+	assert.Equalf(t, 503, e.Status,
+		"Status = %d on an attempt the server answered before resetting; reporting 0 here loses the server's own verdict and makes the sample look like it never arrived",
+		e.Status)
+}
+
+// TestRequestComplete_NoBackendPickedLeavesAddrEmpty is the other side of that
+// decision. When no backend was ever chosen the field must be empty, not
+// net.JoinHostPort's rendering of the zero Address — ":0" reads as a backend
+// that was picked and names one that cannot exist.
+func TestRequestComplete_NoBackendPickedLeavesAddrEmpty(t *testing.T) {
+	t.Parallel()
+	hooks, events := recordComplete()
+	c, err := client.NewClient(client.ClientOptions{
+		Transport: client.TransportManaged,
+		Resolver:  client.StaticResolver(), // resolves to nothing
+		ConnOpts:  conn.ConnOptions{Dialer: &conn.TLSDialer{Config: &tls.Config{InsecureSkipVerify: true}}},
+		Pool:      &client.PoolOptions{MaxConnsPerHost: 1, MaxStreamsPerConn: 4},
+		Hooks:     hooks,
+	})
+	require.NoError(t, err, "NewClient with a resolver that returns no addresses")
+	defer c.Close()
+	var resp client.Response
+	resp.Reset()
+
+	err = c.Do(context.Background(), &client.Request{Method: "GET", Path: "/"}, &resp)
+
+	require.Error(t, err, "Do with no resolved backends must fail")
+	require.Len(t, *events, 1, "a failed attempt is still one attempt, and still reports")
+	assert.Emptyf(t, (*events)[0].RemoteAddr,
+		"RemoteAddr = %q when no backend was picked, want empty", (*events)[0].RemoteAddr)
+}

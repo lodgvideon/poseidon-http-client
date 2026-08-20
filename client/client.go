@@ -681,9 +681,19 @@ func (c *Client) doAttempt(ctx context.Context, req *Request, resp *Response, at
 
 	obs, err := c.do(ctx, req, resp)
 
+	// Reported whenever the response head arrived, not only on success. A
+	// stream that is reset after the server answered 503, or a body that
+	// overruns MaxResponseBodySize, still produced a status and some bytes, and
+	// a per-request record that zeroes both makes those attempts look like the
+	// ones that never reached the server at all.
+	//
+	// Reading resp on the error path does not contradict Do's "resp fields are
+	// undefined on error" contract, which binds the CALLER: these two fields
+	// were written by this package on its way to the failure, and Status is
+	// non-zero only if parseStatus succeeded.
 	var status int
 	var bytesRecv int64
-	if err == nil && resp != nil {
+	if resp != nil && (err == nil || !obs.headersAt.IsZero()) {
 		status = resp.Status
 		bytesRecv = resp.BytesReceived
 	}
