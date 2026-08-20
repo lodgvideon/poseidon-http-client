@@ -9,8 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Tests
 
-- **Thirteen `http3` coverage gaps from the #722 sweep, twelve of them boundaries
-  or orderings that no fixture could reach.** Every cap was tested from the reject
+- **Twelve `http3` coverage gaps from the #722 sweep, most of them boundaries or
+  orderings that no fixture could reach.** Every cap was tested from the reject
   side only, so any of them could tighten by one and stay green: the 1xx count cap,
   the per-frame declared-length cap, the retained-total cap on both of
   `dispatchFrame`'s arms, and `release`'s pooled-buffer cap — whose ACCEPT side is
@@ -51,6 +51,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (#741, #745, #746, #739).
 
 ### Added
+
+- **The four RFC 9114 §8.1 error codes the constant block was missing** —
+  `H3GeneralProtocolError` (0x0101), `H3RequestIncomplete` (0x010d),
+  `H3ConnectError` (0x010f) and `H3VersionFallback` (0x0110). Thirteen of
+  §8.1's seventeen codes were defined, so `h3ErrorCodeName` returned `""` for the
+  other four and a peer sending one of them printed as a bare number. 0x010d had
+  a caller waiting: §4.1 requires it of a SERVER, and `poseidon-http-server` had
+  to spell the value out locally because this package is otherwise its single
+  source for every §8.1 code it sends. Additive only — nothing the client sends
+  or interprets changes (#775).
 
 - **`conn.ConnOptions.ReadBufferSize` and `conn.ConnOptions.StaticConnWindowSize`.**
   Two receive-path parameters could not be set from outside the package, and both
