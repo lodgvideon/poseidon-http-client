@@ -141,12 +141,10 @@ func newKUConnChaCha(t *testing.T, readSecret, writeSecret []byte) *Conn {
 	}
 	c.keys.OneRTT = rop
 	c.oneRTTSealer = wsl
-	if err := c.initAppReadKU(suite, readSecret, rop.hp); err != nil {
-		t.Fatal(err)
-	}
-	if err := c.initAppWriteKU(suite, writeSecret, wsl.hp); err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, c.initAppReadKU(suite, readSecret, rop.hp),
+		"initAppReadKU(ChaCha20): the fixture cannot stage a key update without it")
+	require.NoError(t, c.initAppWriteKU(suite, writeSecret, wsl.hp),
+		"initAppWriteKU(ChaCha20): the fixture cannot stage a key update without it")
 	return c
 }
 
@@ -164,9 +162,7 @@ func serverGenChaCha(t *testing.T, readSecret []byte, n int) *Sealer {
 	require.NoError(t, err)
 	if n == 0 {
 		s, err := NewSealer(k)
-		if err != nil {
-			t.Fatal(err)
-		}
+		require.NoError(t, err, "NewSealer(ChaCha20, generation 0)")
 		return s
 	}
 	gen0, err := KeysFromSecret(suite, readSecret)

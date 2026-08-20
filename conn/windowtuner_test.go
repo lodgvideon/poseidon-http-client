@@ -254,9 +254,7 @@ func hasBDPPing(t *testing.T, b []byte) bool {
 		ftype, flags := b[3], b[4]
 		body := b[9 : 9+length]
 		if ftype == 0x6 && flags&0x1 == 0 { // PING, not ACK
-			if len(body) != 8 {
-				t.Fatalf("PING payload = %d bytes, want 8", len(body))
-			}
+			require.Lenf(t, body, 8, "PING payload = %d bytes, want 8", len(body))
 			if [8]byte(body) == bdpPingPayload {
 				return true
 			}
@@ -299,59 +297,47 @@ func TestConn_AutoTuneRecvWindow_ProbesAndTopsUpTheWindow(t *testing.T) {
 
 	// Enough DATA to open a sample, but under the 32 KiB refund threshold so
 	// this step emits the PING and nothing else.
-	if err := c.onDataReceived(s, minProbeBytes); err != nil {
-		t.Fatalf("onDataReceived: %v", err)
-	}
-	if !hasBDPPing(t, buf.Bytes()) {
-		t.Fatalf("no BDP PING after %d bytes of DATA, want one", minProbeBytes)
-	}
+	require.NoError(t, c.onDataReceived(s, minProbeBytes), "onDataReceived")
+	require.Truef(t, hasBDPPing(t, buf.Bytes()),
+		"no BDP PING after %d bytes of DATA, want one", minProbeBytes)
 
 	// Deliver the sample: three refund-threshold chunks while the PING is
 	// outstanding.
 	const sampleBytes = 3 * recvWindowRefundThreshold
 	for i := 0; i < 3; i++ {
-		if err := c.onDataReceived(s, recvWindowRefundThreshold); err != nil {
-			t.Fatalf("onDataReceived: %v", err)
-		}
+		require.NoErrorf(t, c.onDataReceived(s, recvWindowRefundThreshold),
+			"onDataReceived (sample chunk %d)", i)
 	}
 
 	// The ACK closes the sample. The target is twice what one round trip
 	// carried, which is under the 1 MiB ceiling this connection was given.
 	c.deliverPingAck(bdpPingPayload)
 	const wantTarget = 2 * sampleBytes
-	if got := c.connRecvTarget.Load(); got != wantTarget {
-		t.Fatalf("connRecvTarget = %d after the ACK, want %d", got, wantTarget)
-	}
-	if got := c.streamRecvTarget.Load(); got != wantTarget {
-		t.Fatalf("streamRecvTarget = %d after the ACK, want %d", got, wantTarget)
-	}
+	require.EqualValuesf(t, wantTarget, c.connRecvTarget.Load(),
+		"connRecvTarget = %d after the ACK, want %d", c.connRecvTarget.Load(), wantTarget)
+	require.EqualValuesf(t, wantTarget, c.streamRecvTarget.Load(),
+		"streamRecvTarget = %d after the ACK, want %d", c.streamRecvTarget.Load(), wantTarget)
 
 	// The peer only learns at the next refund, which must now top both windows
 	// up to the target rather than return the 32 KiB that were spent.
 	buf.Reset()
-	if err := c.onDataReceived(s, recvWindowRefundThreshold); err != nil {
-		t.Fatalf("onDataReceived: %v", err)
-	}
+	require.NoError(t, c.onDataReceived(s, recvWindowRefundThreshold), "onDataReceived")
+
 	updates := parseWindowUpdates(t, buf.Bytes())
-	if len(updates) != 2 {
-		t.Fatalf("WINDOW_UPDATE count = %d, want 2 (stream + conn)", len(updates))
-	}
+	require.Lenf(t, updates, 2, "WINDOW_UPDATE count = %d, want 2 (stream + conn)", len(updates))
 	for _, u := range updates {
-		if u.increment <= recvWindowRefundThreshold {
-			t.Errorf("WINDOW_UPDATE(stream %d) increment = %d, want more than the %d spent: "+
+		assert.Greaterf(t, u.increment, uint32(recvWindowRefundThreshold),
+			"WINDOW_UPDATE(stream %d) increment = %d, want more than the %d spent: "+
 				"the refund is still returning what was consumed rather than reaching the target",
-				u.streamID, u.increment, recvWindowRefundThreshold)
-		}
+			u.streamID, u.increment, recvWindowRefundThreshold)
 	}
-	if got := c.connRecvWindow; got != wantTarget {
-		t.Errorf("connRecvWindow = %d after the refund, want the target %d", got, wantTarget)
-	}
+	assert.EqualValuesf(t, wantTarget, c.connRecvWindow,
+		"connRecvWindow = %d after the refund, want the target %d", c.connRecvWindow, wantTarget)
 	s.mu.Lock()
 	streamWindow := s.recvWindow
 	s.mu.Unlock()
-	if streamWindow != wantTarget {
-		t.Errorf("stream recvWindow = %d after the refund, want the target %d", streamWindow, wantTarget)
-	}
+	assert.EqualValuesf(t, wantTarget, streamWindow,
+		"stream recvWindow = %d after the refund, want the target %d", streamWindow, wantTarget)
 }
 
 // TestIntegration_AutoTuneRecvWindow_RealPeerCompletes is the smoke test the
@@ -361,9 +347,8 @@ func TestConn_AutoTuneRecvWindow_ProbesAndTopsUpTheWindow(t *testing.T) {
 func TestIntegration_AutoTuneRecvWindow_RealPeerCompletes(t *testing.T) {
 	const bodySize = 3 << 20
 	body := make([]byte, bodySize)
-	if _, err := rand.Read(body); err != nil {
-		t.Fatalf("rand: %v", err)
-	}
+	_, rerr := rand.Read(body)
+	require.NoError(t, rerr, "rand")
 	srv, cfg := startH2TestServer(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("content-length", fmt.Sprintf("%d", len(body)))
 		_, _ = w.Write(body)
@@ -379,32 +364,25 @@ func TestIntegration_AutoTuneRecvWindow_RealPeerCompletes(t *testing.T) {
 		StreamEventBuffer:  512,
 		AutoTuneRecvWindow: true,
 	})
-	if err != nil {
-		t.Fatalf("Dial: %v", err)
-	}
+	require.NoError(t, err, "Dial")
 	defer func() { _ = c.Close() }()
 
 	s, err := c.NewStream(ctx)
-	if err != nil {
-		t.Fatalf("NewStream: %v", err)
-	}
-	if err := s.SendHeaders(ctx, []header.Field{
+	require.NoError(t, err, "NewStream")
+	require.NoError(t, s.SendHeaders(ctx, []header.Field{
 		{Name: []byte(":method"), Value: []byte("GET")},
 		{Name: []byte(":scheme"), Value: []byte("https")},
 		{Name: []byte(":authority"), Value: []byte("example.com")},
 		{Name: []byte(":path"), Value: []byte("/big")},
-	}, true); err != nil {
-		t.Fatalf("SendHeaders: %v", err)
-	}
+	}, true), "SendHeaders")
+
 	got := drainBody(ctx, t, s)
-	if len(got) != len(body) {
-		t.Fatalf("got %d bytes, want %d", len(got), len(body))
-	}
-	for i := range got {
-		if got[i] != body[i] {
-			t.Fatalf("body differs at byte %d", i)
-		}
-	}
+
+	require.Equalf(t, len(body), len(got), "got %d bytes, want %d", len(got), len(body))
+	require.Truef(t, bytes.Equal(got, body),
+		"the %d-byte download came back corrupted, first difference at offset %d: "+
+			"a tuned receive window must not change the bytes, only how many are in flight",
+		len(body), firstDiff(got, body))
 	t.Logf("after %d bytes: connRecvTarget=%d streamRecvTarget=%d (started at %d)",
 		bodySize, c.connRecvTarget.Load(), c.streamRecvTarget.Load(), connInitialRecvWindow)
 }
@@ -427,25 +405,21 @@ func TestIntegration_AutoTuneRecvWindow_OffLeavesTheWindowAlone(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	s, err := c.NewStream(ctx)
-	if err != nil {
-		t.Fatalf("NewStream: %v", err)
-	}
-	if err := s.SendHeaders(ctx, []header.Field{
+	require.NoError(t, err, "NewStream")
+	require.NoError(t, s.SendHeaders(ctx, []header.Field{
 		{Name: []byte(":method"), Value: []byte("GET")},
 		{Name: []byte(":scheme"), Value: []byte("https")},
 		{Name: []byte(":authority"), Value: []byte("example.com")},
 		{Name: []byte(":path"), Value: []byte("/big")},
-	}, true); err != nil {
-		t.Fatalf("SendHeaders: %v", err)
-	}
-	if got := drainBody(ctx, t, s); len(got) != len(body) {
-		t.Fatalf("got %d bytes, want %d", len(got), len(body))
-	}
-	if got := c.connRecvTarget.Load(); got != connInitialRecvWindow {
-		t.Errorf("connRecvTarget = %d with auto-tuning off, want it held at %d", got, connInitialRecvWindow)
-	}
-	if got := c.streamRecvTarget.Load(); got != c.opts.Settings.InitialWindowSize {
-		t.Errorf("streamRecvTarget = %d with auto-tuning off, want it held at %d",
-			got, c.opts.Settings.InitialWindowSize)
-	}
+	}, true), "SendHeaders")
+
+	got := drainBody(ctx, t, s)
+
+	require.Equalf(t, len(body), len(got), "got %d bytes, want %d", len(got), len(body))
+	assert.EqualValuesf(t, connInitialRecvWindow, c.connRecvTarget.Load(),
+		"connRecvTarget = %d with auto-tuning off, want it held at %d",
+		c.connRecvTarget.Load(), connInitialRecvWindow)
+	assert.Equalf(t, c.opts.Settings.InitialWindowSize, c.streamRecvTarget.Load(),
+		"streamRecvTarget = %d with auto-tuning off, want it held at %d",
+		c.streamRecvTarget.Load(), c.opts.Settings.InitialWindowSize)
 }

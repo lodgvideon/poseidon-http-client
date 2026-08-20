@@ -45,9 +45,12 @@ func mdServer(t *testing.T) *ClientConn {
 		w.Header().Set("x-served-by", "poseidon")
 		w.Header().Set("x-request-id", "req-0123456789")
 		srvBeginResponse(w)
-		if err := srvWriteMessage(w, []byte("pong")); err != nil {
-			t.Errorf("server write: %v", err)
-		}
+		// assert, not require: this runs on the server's handler goroutine, where
+		// testing forbids FailNow — require would Goexit the handler rather than
+		// fail the test.
+		assert.NoError(t, srvWriteMessage(w, []byte("pong")),
+			"the fixture could not write its response message, so what follows would "+
+				"be measuring an empty answer rather than a borrowed one")
 		w.Header().Set(http.TrailerPrefix+"x-trailer-note", "done-here")
 		srvFinish(w, OK, "")
 	}))

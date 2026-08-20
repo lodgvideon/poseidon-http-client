@@ -147,9 +147,7 @@ func TestConn_Establish_LatchesOnEveryErrorPath(t *testing.T) {
 				c, err := NewConn(&failWritePC{failOn: 1},
 					&tls.Config{ServerName: "example.com", RootCAs: pool},
 					AppendTransportParams(nil, LocalTransportParams{InitialMaxData: 1 << 20}))
-				if err != nil {
-					t.Fatalf("NewConn: %v", err)
-				}
+				require.NoErrorf(t, err, "NewConn: %v", err)
 				return c
 			},
 			wantEstablish: errSendFailed,

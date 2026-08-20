@@ -53,12 +53,17 @@ func TestIntegration_LargePOST_RespectsPeerSendWindow(t *testing.T) {
 		// flow-control off-by-one could reorder or duplicate content. A length check
 		// passes through all of that unchanged, which made this the closest thing to
 		// an upload-corruption detector that could not detect corruption (#651).
+		// assert, not require: this runs on the server's handler goroutine, where
+		// testing forbids FailNow — require would Goexit the handler rather than
+		// fail the test.
 		if !bytes.Equal(got, body) {
 			if len(got) != len(body) {
-				t.Errorf("server received %d bytes, want %d", len(got), len(body))
+				assert.Failf(t, "the upload did not arrive whole",
+					"server received %d bytes, want %d", len(got), len(body))
 			} else {
-				t.Errorf("server received %d bytes of the right length but the wrong content: "+
-					"first difference at offset %d", len(got), firstDiff(got, body))
+				assert.Failf(t, "the upload arrived corrupted",
+					"server received %d bytes of the right length but the wrong content: "+
+						"first difference at offset %d", len(got), firstDiff(got, body))
 			}
 		}
 		_, _ = w.Write([]byte("ok"))
