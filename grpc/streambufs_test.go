@@ -101,14 +101,29 @@ func TestStreamBufs_CloseIsTheOnlyReturn(t *testing.T) {
 	s, err := cc.NewStream(context.Background(), "/bench.Svc/Echo", nil)
 	require.NoError(t, err, "NewStream")
 	require.NotNil(t, s.bufs, "stream came up with no pooled buffers")
+	// Both buffers have to be non-nil going in, or the checks after Close hold
+	// whether or not the code nils anything. This test used to open a stream and
+	// close it having sent and received nothing: acquireBufs then takes its
+	// slices from a pooled pair whose own buffers may themselves be nil, so both
+	// fields were already nil before releaseBufs ran and stayed nil either way.
+	// Which pair sync.Pool hands back is not deterministic either, so the
+	// assertion was not merely weak, it was weak by luck. Growing them is what
+	// makes it an assertion. The decoder grows through Push, for the reason
+	// TestStreamBufs_ReleaseKeepsCapacity gives.
+	s.sendBuf = append(s.sendBuf[:0], bytes.Repeat([]byte{'x'}, 2048)...)
+	s.dec.Push(bytes.Repeat([]byte{'y'}, 4096))
+	require.NotEmpty(t, s.sendBuf, "the fixture did not grow the send buffer")
+	require.NotEmpty(t, s.dec.buf, "the fixture did not grow the decoder buffer")
 
 	_ = s.Close()
 	attachedAfterClose := s.bufs
 	_ = s.Close() // must be inert
 
 	assert.Nil(t, attachedAfterClose, "Close left the pooled pair attached")
-	assert.Truef(t, s.sendBuf == nil && s.dec.buf == nil,
-		"Close left this stream pointing at buffers it no longer owns")
+	assert.Truef(t, s.sendBuf == nil && s.dec.buf == nil && s.dec.own == nil,
+		"Close left this stream pointing at buffers it no longer owns: sendBuf %d, "+
+			"dec.buf %d, dec.own %d bytes — the pool has handed them on by now",
+		len(s.sendBuf), len(s.dec.buf), len(s.dec.own))
 }
 
 // TestStreamBufs_StaleStreamCannotReachThem is why the Stream struct itself is
@@ -154,8 +169,20 @@ func TestStreamBufs_OversizeIsNotPooled(t *testing.T) {
 	s, err := cc.NewStream(context.Background(), "/bench.Svc/Echo", nil)
 	require.NoError(t, err, "NewStream")
 	// Simulate the outlier directly: grow both buffers past the cap, then close.
+	//
+	// The decoder is grown through Push rather than by assigning dec.buf.
+	// releaseBufs hands the pool dec.OWN, and dec.buf is the field that moved
+	// when the borrow path landed — assigning it left this test measuring a
+	// buffer the cap check never sees, so the dec arm of the assertion below
+	// could not fail and `if cap(b.dec) > maxPooledStreamBuf` could be deleted
+	// outright with the suite still green. The send arm never had the problem.
+	// TestStreamBufs_ReleaseKeepsCapacity states the rule; this is the test that
+	// did not get the memo.
 	s.sendBuf = make([]byte, 0, maxPooledStreamBuf+1)
-	s.dec.buf = make([]byte, 0, maxPooledStreamBuf+1)
+	s.dec.Push(make([]byte, maxPooledStreamBuf+1))
+	require.Greaterf(t, cap(s.dec.own), maxPooledStreamBuf,
+		"the fixture grew dec.own to cap %d, want more than %d — the guard under "+
+			"test is never reached below that", cap(s.dec.own), maxPooledStreamBuf)
 	b := s.bufs
 
 	_ = s.Close()

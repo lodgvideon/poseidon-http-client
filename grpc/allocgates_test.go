@@ -88,6 +88,20 @@ func TestInvokeInto_AllocsPerCall(t *testing.T) {
 			"— lower unaryAllocCeiling to lock the win in", withCopy, unaryAllocCeiling)
 }
 
+// streamAllocCeiling is what one Recv costs per message on a server-streaming
+// call, and it is the streaming counterpart of unaryAllocCeiling above: the one
+// allocation is the fresh slice Recv hands the caller, which is the whole
+// difference between Recv and RecvInto. Everything under it — the decoder's
+// borrow of the DATA chunk, the pooled send and receive buffers, conn's own
+// per-frame accounting — is already allocation-free, so a second allocation
+// appearing here is a regression on the shared receive path rather than in the
+// copy Recv exists to make.
+//
+// Two directions, same reasoning as unaryAllocCeiling: above it something came
+// back, below it the path improved and the win is not locked in until this
+// drops.
+const streamAllocCeiling = 1
+
 // TestRecvInto_AllocsPerMessage is the gate. AllocsPerRun counts the whole
 // process, and the in-process mock peer allocates nothing per echoed frame, so
 // what is left is this package's own cost.
@@ -120,4 +134,25 @@ func TestRecvInto_AllocsPerMessage(t *testing.T) {
 	assert.Lessf(t, withReuse, withCopy,
 		"RecvInto allocates %.2f per message against Recv's %.2f — it is not reusing dst",
 		withReuse, withCopy)
+
+	// The absolute half, for the reason TestInvokeInto_AllocsPerCall gives above
+	// and this gate went without: the relative check passes on any regression
+	// that costs both forms the same. A decoder that copied each message out
+	// rather than returning a view into its own buffer costs one allocation on
+	// Recv AND on RecvInto — 1 -> 2 and 0 -> 1 — and the comparison above does
+	// not move a millimetre.
+	//
+	// Worth recording what it still cannot see, because #788's own reproduction
+	// reached for exactly that: disabling PushBorrowed costs a COPY per message,
+	// not an allocation. The decoder's own buffer is pooled and already grown, so
+	// the copy lands in memory it already has — measured 1.00/0.00 both with the
+	// borrow and without it. No allocation gate can catch that one. The
+	// borrow-ownership tests in borrow_test.go do, and that is the right place
+	// for it.
+	assert.LessOrEqualf(t, withCopy, float64(streamAllocCeiling),
+		"Recv allocates %.2f per message, ceiling %d — a per-message allocation "+
+			"came back on the shared receive path", withCopy, streamAllocCeiling)
+	assert.GreaterOrEqualf(t, withCopy, float64(streamAllocCeiling),
+		"Recv allocates only %.2f per message, below the recorded %d: the path "+
+			"improved — lower streamAllocCeiling to lock the win in", withCopy, streamAllocCeiling)
 }

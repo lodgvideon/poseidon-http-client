@@ -63,6 +63,17 @@ type mockGRPCPeer struct {
 	// a frame" apart from "they did not" — a distinction the byte counts cannot
 	// make, since the extra frame carries no payload.
 	dataFrames atomic.Int64
+	// resetAfterHeaders, when non-nil, makes the peer answer every request with
+	// the response header block followed by RST_STREAM carrying that code,
+	// instead of the echo. It is the only way to drive a CHOSEN RST_STREAM code
+	// through the client: net/http2's server picks its own, and the one shape a
+	// handler can force from it (http.ErrAbortHandler) is INTERNAL_ERROR — the
+	// same code every unmapped value already falls through to, so it cannot tell
+	// the mapping table apart from a constant.
+	//
+	// Set before the first Dial and never written again, so the read below needs
+	// no synchronisation.
+	resetAfterHeaders *frame.ErrCode
 }
 
 func newMockGRPCPeer(tb testing.TB) *mockGRPCPeer {
@@ -186,6 +197,12 @@ func (h *mockGRPCHandler) OnHeaders(fh frame.FrameHeader, _ frame.HeaderBlock, _
 	if err := h.sendHeaders(fh.StreamID); err != nil {
 		return err
 	}
+	if code := h.peer.resetAfterHeaders; code != nil {
+		if err := h.fr.WriteRSTStream(fh.StreamID, *code); err != nil {
+			return err
+		}
+		return h.bw.Flush()
+	}
 	if fh.Flags&frame.FlagHeadersEndStream != 0 {
 		return h.sendTrailers(fh.StreamID)
 	}
@@ -212,6 +229,11 @@ func (h *mockGRPCHandler) OnData(fh frame.FrameHeader, p []byte, _ uint8) error 
 		return nil
 	}
 	h.peer.dataFrames.Add(1)
+	if h.peer.resetAfterHeaders != nil {
+		// The stream is already reset; echoing onto it would be the protocol
+		// violation, not the test.
+		return nil
+	}
 	// The client's DATA payload is already a well-formed length-prefixed gRPC
 	// message (or a fragment of one), so echoing the bytes verbatim reproduces
 	// the request as the response with nothing allocated and nothing parsed.
