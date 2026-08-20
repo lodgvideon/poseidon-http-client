@@ -5,6 +5,9 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // ————————————————————————————————————————————————————————————————
@@ -42,7 +45,7 @@ func (w *closeWatch) next(t *testing.T, d time.Duration, what string) CloseReaso
 	case r := <-w.ch:
 		return r
 	case <-time.After(d):
-		t.Fatalf("no OnConnClose within %v: %s", d, what)
+		require.FailNowf(t, "no OnConnClose arrived", "within %v: %s", d, what)
 		return 0
 	}
 }
@@ -69,13 +72,9 @@ func TestH3Pool_Tick_AttributesGoAwayBeforeIdle(t *testing.T) {
 		IdleTimeout: time.Millisecond,
 	}, d.dial, hp, m)
 	defer func() { _ = p.Close() }()
-
 	mc, err := p.acquire(context.Background())
-	if err != nil {
-		t.Fatalf("acquire: %v", err)
-	}
+	require.NoError(t, err, "acquire")
 	p.release(mc)
-
 	// Wait for the actor to RECORD the release before arming the GOAWAY, and do
 	// it while the flag is still clear so this poll cannot evict anything.
 	//
@@ -86,24 +85,23 @@ func TestH3Pool_Tick_AttributesGoAwayBeforeIdle(t *testing.T) {
 	// was never the evictor.
 	for p.Stats().InFlightStreams != 0 {
 	}
-
 	conns := d.all()
-	if len(conns) != 1 {
-		t.Fatalf("dialed %d conns, want 1", len(conns))
-	}
+	require.Len(t, conns, 1, "one capped stream must have opened exactly one conn")
+
 	// The peer sends GOAWAY on a conn that is also about to qualify as idle.
 	// From here on nothing may call Stats: evictDeadSilent retires on the same
 	// predicate and would do the tick's job for it.
 	atomic.StoreInt32(&conns[0].goawayFlag, 1)
 	time.Sleep(5 * time.Millisecond) // past IdleTimeout
 
-	if got := w.next(t, 3*time.Second, "the tick never evicted the conn"); got != CloseGoAway {
-		t.Fatalf("conn reported %v, want CloseGoAway;\n"+
-			"a peer draining for a restart was attributed to local inactivity — evictIdle ran before evictDead", got)
-	}
-	if got := m.Counters.GoAwaysReceived.Load(); got != 1 {
-		t.Fatalf("GoAwaysReceived = %d, want 1", got)
-	}
+	got := w.next(t, 3*time.Second, "the tick never evicted the conn")
+	assert.Equalf(t, CloseGoAway, got,
+		"conn reported %v, want CloseGoAway;\n"+
+			"a peer draining for a restart was attributed to local inactivity — "+
+			"evictIdle ran before evictDead", got)
+	assert.EqualValues(t, 1, m.Counters.GoAwaysReceived.Load(),
+		"GoAwaysReceived did not move: the signal an operator watches for a rolling "+
+			"restart never fired")
 }
 
 // TestH3Pool_Tick_EvictsDeadConnStillCarryingStreams pins that h3's Dead arm is
@@ -127,20 +125,17 @@ func TestH3Pool_Tick_EvictsDeadConnStillCarryingStreams(t *testing.T) {
 		HealthCheckPeriod: 20 * time.Millisecond,
 	}, d.dial, hp, m)
 	defer func() { _ = p.Close() }()
-
 	// Hold the stream: the conn is checked out (active > 0) for the whole test,
 	// which is the state a mistaken active == 0 guard would protect.
-	if _, err := p.acquire(context.Background()); err != nil {
-		t.Fatalf("acquire: %v", err)
-	}
-
+	_, err := p.acquire(context.Background())
+	require.NoError(t, err, "acquire")
 	conns := d.all()
-	if len(conns) != 1 {
-		t.Fatalf("dialed %d conns, want 1", len(conns))
-	}
+	require.Len(t, conns, 1, "one acquire must have opened exactly one conn")
+
 	conns[0].kill() // the QUIC reader goroutine is gone
 
-	if got := w.next(t, 3*time.Second, "a dead conn with a live stream was kept in the pool"); got != CloseDead {
-		t.Fatalf("conn reported %v, want CloseDead", got)
-	}
+	got := w.next(t, 3*time.Second, "a dead conn with a live stream was kept in the pool")
+	assert.Equalf(t, CloseDead, got,
+		"conn reported %v, want CloseDead: a conn whose QUIC reader is gone must be "+
+			"evicted even while streams are still attached to it", got)
 }

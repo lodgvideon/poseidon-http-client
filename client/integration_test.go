@@ -15,6 +15,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
 	"github.com/lodgvideon/poseidon-http-client/client"
 	"github.com/lodgvideon/poseidon-http-client/conn"
 	"github.com/lodgvideon/poseidon-http-client/frame"
@@ -78,9 +81,7 @@ func clientFor(t *testing.T, addr string) *client.Client {
 			Dialer: &conn.TLSDialer{Config: &tls.Config{InsecureSkipVerify: true}},
 		},
 	})
-	if err != nil {
-		t.Fatalf("NewClient: %v", err)
-	}
+	require.NoError(t, err, "NewClient")
 	t.Cleanup(func() { _ = c.Close() })
 	return c
 }
@@ -90,17 +91,14 @@ func TestIntegration_Client_GET_Status200(t *testing.T) {
 		w.WriteHeader(200)
 	}))
 	c := clientFor(t, addr)
-
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
+
 	var res client.Response
 	err := c.Do(ctx, &client.Request{Method: "GET", Path: "/"}, &res)
-	if err != nil {
-		t.Fatalf("Do: %v", err)
-	}
-	if res.Status != 200 {
-		t.Fatalf("status = %d", res.Status)
-	}
+
+	require.NoError(t, err, "Do")
+	assert.Equal(t, 200, res.Status, "response status")
 }
 
 func TestIntegration_Client_POST_EchoBody(t *testing.T) {
@@ -110,25 +108,22 @@ func TestIntegration_Client_POST_EchoBody(t *testing.T) {
 		_, _ = w.Write(body)
 	}))
 	c := clientFor(t, addr)
-
 	want := []byte("hello integration")
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
+
 	var res client.Response
 	err := c.Do(ctx, &client.Request{
 		Method: "POST", Path: "/echo",
 		Body:     want,
 		BodyMode: client.BodyBuffer,
 	}, &res)
-	if err != nil {
-		t.Fatalf("Do: %v", err)
-	}
-	if res.Status != 200 {
-		t.Fatalf("status = %d", res.Status)
-	}
-	if !bytes.Equal(res.Body, want) {
-		t.Fatalf("body = %q, want %q", res.Body, want)
-	}
+
+	require.NoError(t, err, "Do")
+	assert.Equal(t, 200, res.Status, "response status")
+	assert.Truef(t, bytes.Equal(res.Body, want),
+		"echoed body = %q, want %q: the request body did not survive the round trip",
+		res.Body, want)
 }
 
 func TestIntegration_Client_POST_LargeBody_ChunkedUpload(t *testing.T) {
@@ -139,24 +134,22 @@ func TestIntegration_Client_POST_LargeBody_ChunkedUpload(t *testing.T) {
 		_, _ = w.Write(body)
 	}))
 	c := clientFor(t, addr)
-
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
+
 	var res client.Response
 	err := c.Do(ctx, &client.Request{
 		Method: "POST", Path: "/echo",
 		BodyReader: bytes.NewReader(want),
 		BodyMode:   client.BodyBuffer,
 	}, &res)
-	if err != nil {
-		t.Fatalf("Do: %v", err)
-	}
-	if res.Status != 200 {
-		t.Fatalf("status = %d", res.Status)
-	}
-	if !bytes.Equal(res.Body, want) {
-		t.Fatalf("body length %d, want %d", len(res.Body), len(want))
-	}
+
+	require.NoError(t, err, "Do")
+	assert.Equal(t, 200, res.Status, "response status")
+	assert.Lenf(t, res.Body, len(want),
+		"echoed body length = %d, want %d: a multi-frame upload lost or duplicated data",
+		len(res.Body), len(want))
+	assert.True(t, bytes.Equal(res.Body, want), "echoed body content differs from what was sent")
 }
 
 func TestIntegration_Client_ConcurrentRequests_OneClient(t *testing.T) {
@@ -164,10 +157,10 @@ func TestIntegration_Client_ConcurrentRequests_OneClient(t *testing.T) {
 		w.WriteHeader(200)
 	}))
 	c := clientFor(t, addr)
-
 	const N = 32
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
+
 	var wg sync.WaitGroup
 	errCh := make(chan error, N)
 	for i := 0; i < N; i++ {
@@ -186,10 +179,10 @@ func TestIntegration_Client_ConcurrentRequests_OneClient(t *testing.T) {
 	}
 	wg.Wait()
 	close(errCh)
+
 	for err := range errCh {
-		if err != nil {
-			t.Fatalf("concurrent Do failed: %v", err)
-		}
+		assert.NoError(t, err,
+			"a concurrent request failed: one HTTP/2 connection must multiplex all 32")
 	}
 }
 
@@ -198,7 +191,6 @@ func TestIntegration_ClientPool_ConcurrentRequests_MultipleConns(t *testing.T) {
 		time.Sleep(50 * time.Millisecond)
 		w.WriteHeader(http.StatusOK)
 	}))
-
 	c, err := client.NewClient(client.ClientOptions{
 		Addr: addr,
 		ConnOpts: conn.ConnOptions{
@@ -212,12 +204,10 @@ func TestIntegration_ClientPool_ConcurrentRequests_MultipleConns(t *testing.T) {
 			DialBackoff:       50 * time.Millisecond,
 		},
 	})
-	if err != nil {
-		t.Fatalf("NewClient = %v", err)
-	}
+	require.NoError(t, err, "NewClient")
 	defer c.Close()
-
 	const N = 24
+
 	var wg sync.WaitGroup
 	wg.Add(N)
 	errs := make(chan error, N)
@@ -227,8 +217,8 @@ func TestIntegration_ClientPool_ConcurrentRequests_MultipleConns(t *testing.T) {
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancel()
 			var res client.Response
-			if err := c.Do(ctx, &client.Request{Method: "GET", Path: "/"}, &res); err != nil {
-				errs <- err
+			if derr := c.Do(ctx, &client.Request{Method: "GET", Path: "/"}, &res); derr != nil {
+				errs <- derr
 				return
 			}
 			if res.Status != 200 {
@@ -238,14 +228,13 @@ func TestIntegration_ClientPool_ConcurrentRequests_MultipleConns(t *testing.T) {
 	}
 	wg.Wait()
 	close(errs)
-	for err := range errs {
-		t.Errorf("request err: %v", err)
-	}
 
-	s := c.PoolStats()
-	if s.ActiveConns < 2 {
-		t.Fatalf("ActiveConns = %d, want >= 2 (load did not spread)", s.ActiveConns)
+	for derr := range errs {
+		assert.NoError(t, derr, "request err under 24-way pooled load")
 	}
+	assert.GreaterOrEqualf(t, c.PoolStats().ActiveConns, 2,
+		"ActiveConns = %d, want >= 2: 24 requests at 4 streams per conn cannot fit on one, "+
+			"so the load did not spread", c.PoolStats().ActiveConns)
 }
 
 func TestIntegration_ClientPool_IdleEviction(t *testing.T) {
@@ -253,7 +242,6 @@ func TestIntegration_ClientPool_IdleEviction(t *testing.T) {
 		w.WriteHeader(200)
 	}))
 	defer srv.Close()
-
 	c, err := client.NewClient(client.ClientOptions{
 		Addr: addr,
 		ConnOpts: conn.ConnOptions{
@@ -268,34 +256,29 @@ func TestIntegration_ClientPool_IdleEviction(t *testing.T) {
 			DialBackoff:       10 * time.Millisecond,
 		},
 	})
-	if err != nil {
-		t.Fatalf("NewClient = %v", err)
-	}
+	require.NoError(t, err, "NewClient")
 	defer c.Close()
+	var res client.Response
+	require.NoError(t,
+		c.Do(context.Background(), &client.Request{Method: "GET", Path: "/"}, &res), "first Do")
+	require.Equal(t, 1, c.PoolStats().ActiveConns,
+		"the first request must leave exactly one conn in the pool for the tick to evict")
 
-	var _res1 client.Response
-	if err := c.Do(context.Background(), &client.Request{Method: "GET", Path: "/"}, &_res1); err != nil {
-		t.Fatalf("first Do = %v", err)
-	}
-	if got := c.PoolStats().ActiveConns; got != 1 {
-		t.Fatalf("after first req ActiveConns = %d, want 1", got)
-	}
-
+	// Nothing further is issued: the conn now ages past IdleTimeout.
 	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) {
-		if c.PoolStats().ActiveConns == 0 {
-			return
-		}
+	for time.Now().Before(deadline) && c.PoolStats().ActiveConns != 0 {
 		time.Sleep(50 * time.Millisecond)
 	}
-	t.Fatalf("idle eviction did not run; ActiveConns = %d", c.PoolStats().ActiveConns)
+
+	assert.Equalf(t, 0, c.PoolStats().ActiveConns,
+		"idle eviction did not run; ActiveConns = %d after %v idle at IdleTimeout=150ms",
+		c.PoolStats().ActiveConns, 2*time.Second)
 }
 
 func TestIntegration_ClientPool_GoAwayMidFlight_Replaces(t *testing.T) {
 	srv, addr := newTLSH2Server(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(200)
 	}))
-
 	c, err := client.NewClient(client.ClientOptions{
 		Addr: addr,
 		ConnOpts: conn.ConnOptions{
@@ -309,30 +292,27 @@ func TestIntegration_ClientPool_GoAwayMidFlight_Replaces(t *testing.T) {
 			DialBackoff:       10 * time.Millisecond,
 		},
 	})
-	if err != nil {
-		t.Fatalf("NewClient = %v", err)
-	}
+	require.NoError(t, err, "NewClient")
 	defer c.Close()
+	var res client.Response
+	require.NoError(t,
+		c.Do(context.Background(), &client.Request{Method: "GET", Path: "/"}, &res), "first Do")
 
-	var _res2 client.Response
-	if err := c.Do(context.Background(), &client.Request{Method: "GET", Path: "/"}, &_res2); err != nil {
-		t.Fatalf("first Do = %v", err)
-	}
-
+	// A graceful server shutdown sends GOAWAY on the pooled connection.
 	shCtx, shCancel := context.WithTimeout(context.Background(), 2*time.Second)
-	if err := srv.Config.Shutdown(shCtx); err != nil {
-		t.Logf("Shutdown returned %v (continuing)", err)
+	if serr := srv.Config.Shutdown(shCtx); serr != nil {
+		t.Logf("Shutdown returned %v (continuing)", serr)
 	}
 	shCancel()
 
 	deadline := time.Now().Add(3 * time.Second)
-	for time.Now().Before(deadline) {
-		if c.PoolStats().ActiveConns == 0 {
-			return
-		}
+	for time.Now().Before(deadline) && c.PoolStats().ActiveConns != 0 {
 		time.Sleep(50 * time.Millisecond)
 	}
-	t.Fatalf("ActiveConns = %d, want 0 after server shutdown", c.PoolStats().ActiveConns)
+	assert.Equalf(t, 0, c.PoolStats().ActiveConns,
+		"ActiveConns = %d after the server GOAWAY'd and shut down; a drained conn that "+
+			"stays in the pool wedges every later acquire at the cap",
+		c.PoolStats().ActiveConns)
 }
 
 func TestIntegration_Client_DoStream_LargeResponse(t *testing.T) {
@@ -360,26 +340,22 @@ func TestIntegration_Client_DoStream_LargeResponse(t *testing.T) {
 			StreamEventBuffer: 1024,
 		},
 	})
-	if err != nil {
-		t.Fatalf("NewClient: %v", err)
-	}
+	require.NoError(t, err, "NewClient")
 	t.Cleanup(func() { _ = c.Close() })
-
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 	var sr client.StreamResponse
-	if err := c.DoStream(ctx, &client.Request{Method: "GET", Path: "/"}, &sr); err != nil {
-		t.Fatalf("DoStream: %v", err)
-	}
+	require.NoError(t,
+		c.DoStream(ctx, &client.Request{Method: "GET", Path: "/"}, &sr), "DoStream")
 	defer sr.Close()
-	if sr.Status != 200 {
-		t.Fatalf("status = %d", sr.Status)
-	}
+
 	var got int
+	var recvErr error
 	for {
 		ev, err := sr.Recv(ctx)
 		if err != nil {
-			t.Fatalf("Recv: %v", err)
+			recvErr = err
+			break
 		}
 		if ev.Type == client.EventData {
 			got += len(ev.Data)
@@ -388,9 +364,11 @@ func TestIntegration_Client_DoStream_LargeResponse(t *testing.T) {
 			break
 		}
 	}
-	if got != total {
-		t.Fatalf("read %d, want %d", got, total)
-	}
+
+	require.NoError(t, recvErr, "Recv")
+	assert.Equal(t, 200, sr.Status, "response status")
+	assert.Equalf(t, total, got,
+		"read %d bytes of a %d-byte streamed response", got, total)
 }
 
 func TestDo_ResponseReuse(t *testing.T) {
@@ -402,30 +380,26 @@ func TestDo_ResponseReuse(t *testing.T) {
 	srv.EnableHTTP2 = true
 	srv.StartTLS()
 	defer srv.Close()
-
 	c, err := client.NewClient(client.ClientOptions{
 		Addr:     srv.Listener.Addr().String(),
 		ConnOpts: conn.ConnOptions{Dialer: &conn.TLSDialer{Config: &tls.Config{InsecureSkipVerify: true}}},
 	})
-	if err != nil {
-		t.Fatalf("NewClient: %v", err)
-	}
+	require.NoError(t, err, "NewClient")
 	defer c.Close()
 
-	var resp client.Response
 	const N = 5
+	var resp client.Response
 	var prevHdrCap int
 	for i := 0; i < N; i++ {
 		resp.Reset()
-		if err := c.Do(context.Background(), &client.Request{Method: "GET", Path: "/"}, &resp); err != nil {
-			t.Fatalf("Do[%d]: %v", i, err)
-		}
-		if resp.Status != 200 {
-			t.Fatalf("Do[%d]: status %d", i, resp.Status)
-		}
-		if i > 0 && cap(resp.Headers) < prevHdrCap {
-			t.Errorf("Headers backing array reallocated at iteration %d (cap went %d→%d)",
-				i, prevHdrCap, cap(resp.Headers))
+		require.NoErrorf(t,
+			c.Do(context.Background(), &client.Request{Method: "GET", Path: "/"}, &resp), "Do[%d]", i)
+		require.Equalf(t, 200, resp.Status, "Do[%d] status", i)
+		if i > 0 {
+			assert.GreaterOrEqualf(t, cap(resp.Headers), prevHdrCap,
+				"Headers backing array reallocated at iteration %d (cap went %d→%d): the "+
+					"whole point of reusing a Response is that steady-state requests stop "+
+					"allocating", i, prevHdrCap, cap(resp.Headers))
 		}
 		prevHdrCap = cap(resp.Headers)
 	}
@@ -439,27 +413,20 @@ func TestDoStream_SRReuse(t *testing.T) {
 	srv.EnableHTTP2 = true
 	srv.StartTLS()
 	defer srv.Close()
-
 	c, err := client.NewClient(client.ClientOptions{
 		Addr:     srv.Listener.Addr().String(),
 		ConnOpts: conn.ConnOptions{Dialer: &conn.TLSDialer{Config: &tls.Config{InsecureSkipVerify: true}}},
 	})
-	if err != nil {
-		t.Fatalf("NewClient: %v", err)
-	}
+	require.NoError(t, err, "NewClient")
 	defer c.Close()
 
 	var sr client.StreamResponse
 	for i := 0; i < 5; i++ {
-		if err := c.DoStream(context.Background(), &client.Request{Method: "GET", Path: "/"}, &sr); err != nil {
-			t.Fatalf("DoStream[%d]: %v", i, err)
-		}
-		if sr.Status != 200 {
-			t.Fatalf("DoStream[%d]: status %d", i, sr.Status)
-		}
-		if err := sr.Close(); err != nil {
-			t.Fatalf("Close[%d]: %v", i, err)
-		}
+		require.NoErrorf(t,
+			c.DoStream(context.Background(), &client.Request{Method: "GET", Path: "/"}, &sr),
+			"DoStream[%d]: a StreamResponse must be reusable across requests", i)
+		assert.Equalf(t, 200, sr.Status, "DoStream[%d] status", i)
+		require.NoErrorf(t, sr.Close(), "Close[%d]", i)
 	}
 }
 
@@ -470,31 +437,20 @@ func TestIntegration_Client_BodyStream_Small(t *testing.T) {
 		_, _ = w.Write(want)
 	}))
 	c := clientFor(t, addr)
-
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-
 	var res client.Response
-	err := c.Do(ctx, &client.Request{Method: "GET", Path: "/", BodyMode: client.BodyStream}, &res)
-	if err != nil {
-		t.Fatalf("Do: %v", err)
-	}
-	if res.Status != 200 {
-		t.Fatalf("status = %d", res.Status)
-	}
-	if res.BodyReader == nil {
-		t.Fatal("BodyReader is nil")
-	}
+	require.NoError(t,
+		c.Do(ctx, &client.Request{Method: "GET", Path: "/", BodyMode: client.BodyStream}, &res), "Do")
+	require.NotNil(t, res.BodyReader, "BodyReader is nil on the BodyStream path")
+
 	got, err := io.ReadAll(res.BodyReader)
-	if err != nil {
-		t.Fatalf("ReadAll: %v", err)
-	}
-	if err := res.BodyReader.Close(); err != nil {
-		t.Fatalf("Close: %v", err)
-	}
-	if !bytes.Equal(got, want) {
-		t.Fatalf("body = %q, want %q", got, want)
-	}
+	closeErr := res.BodyReader.Close()
+
+	assert.Equal(t, 200, res.Status, "response status")
+	require.NoError(t, err, "ReadAll")
+	require.NoError(t, closeErr, "Close")
+	assert.Truef(t, bytes.Equal(got, want), "streamed body = %q, want %q", got, want)
 }
 
 func TestIntegration_Client_BodyStream_Large(t *testing.T) {
@@ -513,28 +469,21 @@ func TestIntegration_Client_BodyStream_Large(t *testing.T) {
 			StreamEventBuffer: 128,
 		},
 	})
-	if err != nil {
-		t.Fatalf("NewClient: %v", err)
-	}
+	require.NoError(t, err, "NewClient")
 	t.Cleanup(func() { _ = c.Close() })
-
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-
 	var res client.Response
-	if err := c.Do(ctx, &client.Request{Method: "GET", Path: "/", BodyMode: client.BodyStream}, &res); err != nil {
-		t.Fatalf("Do: %v", err)
-	}
+	require.NoError(t,
+		c.Do(ctx, &client.Request{Method: "GET", Path: "/", BodyMode: client.BodyStream}, &res), "Do")
+
 	n, cerr := io.Copy(io.Discard, res.BodyReader)
-	if cerr != nil {
-		t.Fatalf("Copy: %v", cerr)
-	}
-	if err := res.BodyReader.Close(); err != nil {
-		t.Fatalf("Close: %v", err)
-	}
-	if n != int64(len(want)) {
-		t.Fatalf("read %d bytes, want %d", n, len(want))
-	}
+	closeErr := res.BodyReader.Close()
+
+	require.NoError(t, cerr, "Copy")
+	require.NoError(t, closeErr, "Close")
+	assert.EqualValuesf(t, len(want), n,
+		"read %d bytes of a %d-byte body through BodyReader", n, len(want))
 }
 
 func TestIntegration_Client_BodyStream_CloseEarly(t *testing.T) {
@@ -543,22 +492,22 @@ func TestIntegration_Client_BodyStream_CloseEarly(t *testing.T) {
 		_, _ = w.Write(bytes.Repeat([]byte("z"), 64*1024))
 	}))
 	c := clientFor(t, addr)
-
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-
 	var res client.Response
-	err := c.Do(ctx, &client.Request{Method: "GET", Path: "/", BodyMode: client.BodyStream}, &res)
-	if err != nil {
-		t.Fatalf("Do: %v", err)
-	}
+	require.NoError(t,
+		c.Do(ctx, &client.Request{Method: "GET", Path: "/", BodyMode: client.BodyStream}, &res), "Do")
+
 	buf := make([]byte, 1)
-	if _, err := res.BodyReader.Read(buf); err != nil && err != io.EOF {
-		t.Fatalf("Read: %v", err)
+	_, readErr := res.BodyReader.Read(buf)
+	closeErr := res.BodyReader.Close()
+
+	if readErr != nil {
+		require.ErrorIs(t, readErr, io.EOF, "Read")
 	}
-	if err := res.BodyReader.Close(); err != nil {
-		t.Fatalf("Close: %v", err)
-	}
+	assert.NoError(t, closeErr,
+		"abandoning a 64 KiB body after one byte must close cleanly, not error: this is "+
+			"the ordinary early-abort path")
 }
 
 func TestIntegration_Client_BodyStream_ResetForgot(t *testing.T) {
@@ -567,41 +516,62 @@ func TestIntegration_Client_BodyStream_ResetForgot(t *testing.T) {
 		_, _ = w.Write([]byte("abc"))
 	}))
 	c := clientFor(t, addr)
-
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-
 	var res client.Response
-	err := doWithRetry(t, c, ctx, &client.Request{Method: "GET", Path: "/", BodyMode: client.BodyStream}, &res)
-	if err != nil {
-		t.Fatalf("Do: %v", err)
-	}
+	require.NoError(t,
+		doWithRetry(t, c, ctx, &client.Request{Method: "GET", Path: "/", BodyMode: client.BodyStream}, &res),
+		"Do")
+	// Hold the reader: Reset nils the field either way, so the field alone cannot
+	// say whether Reset CLOSED it.
+	reader := res.BodyReader
+	require.NotNil(t, reader, "BodyReader is nil on the BodyStream path")
+
 	res.Reset() // must call BodyReader.Close() internally; no panic
+
+	// == nil on the interface, not assert.Nil: the latter reflects and would pass
+	// for a non-nil interface holding a nil *responseBodyReader.
+	assert.Truef(t, res.BodyReader == nil,
+		"Reset left BodyReader = %v; it must clear the field", res.BodyReader)
+	// A closed responseBodyReader latches `closed` and answers every later Read
+	// with (0, io.EOF). An UNCLOSED one still has "abc" waiting, so this is what
+	// tells "Reset closed it" apart from "Reset just dropped the pointer" —
+	// which is all the assertion here used to be able to see.
+	buf := make([]byte, 8)
+	n, err := reader.Read(buf)
+	assert.Equalf(t, 0, n,
+		"the abandoned body reader returned %d bytes (%q) after Reset: Reset dropped the "+
+			"BodyReader without closing it, so the stream and its pooled buffers leak",
+		n, buf[:n])
+	assert.ErrorIs(t, err, io.EOF, "a closed body reader must answer Read with io.EOF")
 }
 
 func TestIntegration_Client_POST_ContentLength_Header(t *testing.T) {
-	var gotCL string
+	gotCL := make(chan string, 1)
 	_, addr := newTLSH2Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		gotCL = r.Header.Get("Content-Length")
+		gotCL <- r.Header.Get("Content-Length")
 		w.WriteHeader(200)
 	}))
 	c := clientFor(t, addr)
-
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
+
 	var res client.Response
-	body := strings.NewReader("hello")
 	err := c.Do(ctx, &client.Request{
 		Method:        "POST",
 		Path:          "/",
-		BodyReader:    body,
+		BodyReader:    strings.NewReader("hello"),
 		ContentLength: 5,
 	}, &res)
-	if err != nil {
-		t.Fatalf("Do: %v", err)
-	}
-	if gotCL != "5" {
-		t.Fatalf("content-length = %q, want %q", gotCL, "5")
+
+	require.NoError(t, err, "Do")
+	select {
+	case cl := <-gotCL:
+		assert.Equal(t, "5", cl,
+			"the peer saw the wrong content-length: a streamed body needs the declared "+
+				"length emitted verbatim, or the server frames the request wrongly")
+	default:
+		assert.Fail(t, "the handler never ran, so no content-length was observed")
 	}
 }
 
@@ -610,9 +580,7 @@ func TestIntegration_Client_POST_ContentLength_Header(t *testing.T) {
 func newH2CServer(t *testing.T, h http.Handler) string {
 	t.Helper()
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("listen: %v", err)
-	}
+	require.NoError(t, err, "listen")
 	// HTTP/1.1 and cleartext HTTP/2 on one listener, as x/net's h2c.NewHandler
 	// used to do for us. That package is deprecated in favour of this field.
 	protos := new(http.Protocols)
@@ -633,10 +601,8 @@ func TestIntegration_Client_H2C_Do(t *testing.T) {
 		w.WriteHeader(200)
 		_, _ = io.WriteString(w, "h2c ok")
 	}))
-
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-
 	c, err := client.NewClient(client.ClientOptions{
 		Addr: addr,
 		ConnOpts: conn.ConnOptions{
@@ -644,17 +610,13 @@ func TestIntegration_Client_H2C_Do(t *testing.T) {
 		},
 		DefaultScheme: "http",
 	})
-	if err != nil {
-		t.Fatalf("NewClient: %v", err)
-	}
+	require.NoError(t, err, "NewClient")
 	t.Cleanup(func() { _ = c.Close() })
 
 	var res client.Response
 	err = c.Do(ctx, &client.Request{Method: "GET", Path: "/", BodyMode: client.BodyBuffer}, &res)
-	if err != nil {
-		t.Fatalf("Do: %v", err)
-	}
-	if res.Status != 200 {
-		t.Fatalf("status = %d, want 200", res.Status)
-	}
+
+	require.NoError(t, err, "Do over cleartext HTTP/2")
+	assert.Equal(t, 200, res.Status, "response status")
+	assert.Equal(t, "h2c ok", string(res.Body), "response body over h2c")
 }

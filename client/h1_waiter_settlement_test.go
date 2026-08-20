@@ -7,6 +7,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
 	"github.com/lodgvideon/poseidon-http-client/http1"
 )
 
@@ -95,13 +98,10 @@ func h1SettlePoolCap(t *testing.T, maxConns int) *h1Pool {
 // the state was terminal until the NEXT tick, a full HealthCheckPeriod away.
 func TestH1HandleTick_RefusesWaitersStrandedByTheLastConnGoing(t *testing.T) {
 	p := h1SettlePool(t)
-
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-
 	dead := h1SettleConn(t)
 	_ = dead.Close() // IsAlive() == false, so evictDead takes it inside the tick
-
 	w := h1SettleWaiter(ctx)
 	rs := &h1RunState{
 		conns:         []*h1ManagedConn{{c: dead}},
@@ -112,21 +112,15 @@ func TestH1HandleTick_RefusesWaitersStrandedByTheLastConnGoing(t *testing.T) {
 	p.handleTick(rs)
 
 	resp, got := h1SettleAnswer(w)
-	if !got {
-		t.Fatalf("the tick evicted the pool's last conn during dial backoff and left the waiter queued "+
+	require.Truef(t, got,
+		"the tick evicted the pool's last conn during dial backoff and left the waiter queued "+
 			"(waiters = %d); it now waits a full HealthCheckPeriod while a fresh acquire is "+
 			"refused instantly by handleAcquire's fast-refuse", len(rs.waiters))
-	}
-	if !errors.Is(resp.err, ErrDialBackoff) {
-		t.Fatalf("stranded waiter got %v, want ErrDialBackoff — the same answer handleAcquire "+
+	assert.Truef(t, errors.Is(resp.err, ErrDialBackoff),
+		"stranded waiter got %v, want ErrDialBackoff — the same answer handleAcquire "+
 			"gives a new request in this exact state", resp.err)
-	}
-	if resp.mc != nil {
-		t.Fatal("a refused waiter was also handed a conn")
-	}
-	if len(rs.waiters) != 0 {
-		t.Fatalf("waiters = %d after every one was answered, want 0", len(rs.waiters))
-	}
+	assert.Truef(t, resp.mc == nil, "a refused waiter was also handed a conn: %v", resp.mc)
+	assert.Empty(t, rs.waiters, "waiters remained queued after every one was answered")
 }
 
 // TestH1HandleRelease_RefusesWaitersStrandedByAConnectionClose pins #412 on the
@@ -139,10 +133,8 @@ func TestH1HandleTick_RefusesWaitersStrandedByTheLastConnGoing(t *testing.T) {
 // returns on backoff — and the queue is stranded exactly as in the tick case.
 func TestH1HandleRelease_RefusesWaitersStrandedByAConnectionClose(t *testing.T) {
 	p := h1SettlePool(t)
-
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-
 	mc := &h1ManagedConn{c: h1SettleConn(t), active: 1}
 	w := h1SettleWaiter(ctx)
 	rs := &h1RunState{
@@ -156,16 +148,12 @@ func TestH1HandleRelease_RefusesWaitersStrandedByAConnectionClose(t *testing.T) 
 	p.handleRelease(rs, h1ReleaseMsg{mc: mc, keepAlive: false})
 
 	resp, got := h1SettleAnswer(w)
-	if !got {
-		t.Fatalf("a keepAlive=false release evicted the pool's last conn during dial backoff and "+
+	require.Truef(t, got,
+		"a keepAlive=false release evicted the pool's last conn during dial backoff and "+
 			"left the waiter queued (waiters = %d) until the next health tick", len(rs.waiters))
-	}
-	if !errors.Is(resp.err, ErrDialBackoff) {
-		t.Fatalf("stranded waiter got %v, want ErrDialBackoff", resp.err)
-	}
-	if len(rs.waiters) != 0 {
-		t.Fatalf("waiters = %d after every one was answered, want 0", len(rs.waiters))
-	}
+	assert.Truef(t, errors.Is(resp.err, ErrDialBackoff),
+		"stranded waiter got %v, want ErrDialBackoff", resp.err)
+	assert.Empty(t, rs.waiters, "waiters remained queued after every one was answered")
 }
 
 // TestH1HandleDialDone_RefusesTheWaiterNoReservationCovers pins #413.
@@ -194,7 +182,6 @@ func TestH1HandleDialDone_RefusesTheWaiterNoReservationCovers(t *testing.T) {
 		p := h1SettlePool(t)
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
-
 		// A and B queued against the reservation with no dial of their own; C is
 		// past what it covers, so C is the acquire that dialled.
 		a, b, c := h1SettleWaiter(ctx), h1SettleWaiter(ctx), h1SettleWaiter(ctx)
@@ -207,32 +194,30 @@ func TestH1HandleDialDone_RefusesTheWaiterNoReservationCovers(t *testing.T) {
 		p.handleDialDone(rs, h1DialResult{err: dialErr})
 
 		resp, got := h1SettleAnswer(c)
-		if !got {
-			t.Fatal("nobody was refused, though one waiter was past every reservation")
-		}
-		if !errors.Is(resp.err, dialErr) {
-			t.Fatalf("refused waiter got %v, want the dial error", resp.err)
-		}
+		require.True(t, got,
+			"nobody was refused, though one waiter was past every reservation")
+		assert.Truef(t, errors.Is(resp.err, dialErr),
+			"refused waiter got %v, want the dial error", resp.err)
 		for _, tc := range []struct {
 			name string
 			w    h1AcquireReq
 		}{{"A", a}, {"B", b}} {
-			if _, answered := h1SettleAnswer(tc.w); answered {
-				t.Fatalf("waiter %s was refused a dial error, but the health sweep is holding a conn "+
+			_, answered := h1SettleAnswer(tc.w)
+			assert.Falsef(t, answered,
+				"waiter %s was refused a dial error, but the health sweep is holding a conn "+
 					"for it — serveWaiters drains from the front, so %s is served the moment "+
 					"handleSweepDone clears the reservation", tc.name, tc.name)
-			}
 		}
-		if len(rs.waiters) != 2 || rs.waiters[0].reply != a.reply || rs.waiters[1].reply != b.reply {
-			t.Fatalf("queue = %d waiters, want exactly [A B] still queued in arrival order", len(rs.waiters))
-		}
+		require.Lenf(t, rs.waiters, 2,
+			"queue = %d waiters, want exactly [A B] still queued in arrival order", len(rs.waiters))
+		assert.Equal(t, a.reply, rs.waiters[0].reply, "A must stay at the front: FIFO holds for SERVICE")
+		assert.Equal(t, b.reply, rs.waiters[1].reply, "B must stay behind A: FIFO holds for SERVICE")
 	})
 
 	t.Run("refuses nobody when every waiter is covered", func(t *testing.T) {
 		p := h1SettlePool(t)
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
-
 		// Both queued waiters have a reserved conn coming for them. The failed
 		// dial was started for a caller the reservations can absorb, so refusing
 		// anyone here refuses someone the pool is about to serve.
@@ -249,14 +234,12 @@ func TestH1HandleDialDone_RefusesTheWaiterNoReservationCovers(t *testing.T) {
 			name string
 			w    h1AcquireReq
 		}{{"A", a}, {"B", b}} {
-			if resp, answered := h1SettleAnswer(tc.w); answered {
-				t.Fatalf("waiter %s got %v; both waiters are covered by a reservation, so the dial "+
+			resp, answered := h1SettleAnswer(tc.w)
+			assert.Falsef(t, answered,
+				"waiter %s got %v; both waiters are covered by a reservation, so the dial "+
 					"error belongs to nobody in this queue", tc.name, resp.err)
-			}
 		}
-		if len(rs.waiters) != 2 {
-			t.Fatalf("waiters = %d, want both still queued", len(rs.waiters))
-		}
+		assert.Len(t, rs.waiters, 2, "both waiters must still be queued")
 	})
 }
 
@@ -282,7 +265,6 @@ func TestH1EnsureDialForWaiters_DialsForEveryUncoveredWaiter(t *testing.T) {
 		p := h1SettlePool(t)
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
-
 		// Three conns held by the sweep, three callers queued against them, and
 		// the probe comes back saying every one is dead.
 		reserved := []*h1ManagedConn{
@@ -305,35 +287,31 @@ func TestH1EnsureDialForWaiters_DialsForEveryUncoveredWaiter(t *testing.T) {
 			dead:   append([]*h1ManagedConn(nil), reserved...),
 		})
 
-		if rs.inFlightDials != 3 {
-			t.Fatalf("inFlightDials = %d for 3 waiters with nothing coming, want 3; "+
+		assert.Equalf(t, 3, rs.inFlightDials,
+			"inFlightDials = %d for 3 waiters with nothing coming, want 3; "+
 				"one dial per call serialises the batch into 3 round trips, and the "+
 				"acquires that queued against the reservation would each have dialled "+
 				"for themselves before #411", rs.inFlightDials)
-		}
 	})
 
 	t.Run("never dials past MaxConnsPerHost", func(t *testing.T) {
 		p := h1SettlePoolCap(t, 2)
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
-
 		rs := &h1RunState{
 			waiters: []h1AcquireReq{h1SettleWaiter(ctx), h1SettleWaiter(ctx), h1SettleWaiter(ctx)},
 		}
 
 		p.ensureDialForWaiters(rs)
 
-		if rs.inFlightDials != 2 {
-			t.Fatalf("inFlightDials = %d for 3 waiters at MaxConnsPerHost=2, want 2", rs.inFlightDials)
-		}
+		assert.Equalf(t, 2, rs.inFlightDials,
+			"inFlightDials = %d for 3 waiters at MaxConnsPerHost=2, want 2", rs.inFlightDials)
 	})
 
 	t.Run("a dial already in flight covers a waiter", func(t *testing.T) {
 		p := h1SettlePool(t)
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
-
 		// One waiter, one dial already on its way for it. A second socket would
 		// be surplus the pool never reclaims — nothing defaults IdleTimeout, so
 		// evictIdle is disabled and the count just ratchets towards the cap. Same
@@ -345,8 +323,7 @@ func TestH1EnsureDialForWaiters_DialsForEveryUncoveredWaiter(t *testing.T) {
 
 		p.ensureDialForWaiters(rs)
 
-		if rs.inFlightDials != 1 {
-			t.Fatalf("inFlightDials = %d for 1 waiter that already has a dial coming, want 1", rs.inFlightDials)
-		}
+		assert.Equalf(t, 1, rs.inFlightDials,
+			"inFlightDials = %d for 1 waiter that already has a dial coming, want 1", rs.inFlightDials)
 	})
 }

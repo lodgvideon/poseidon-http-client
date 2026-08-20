@@ -9,6 +9,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
 	"github.com/lodgvideon/poseidon-http-client/client"
 )
 
@@ -29,11 +32,8 @@ func TestConformance_RFC9112_Sec6_3_PoolFallthroughIsChecked(t *testing.T) {
 	const poison = "HTTP/1.1 418 I am a teapot\r\nContent-Length: 6\r\n\r\nPOISON"
 
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("Listen: %v", err)
-	}
+	require.NoError(t, err, "Listen")
 	defer ln.Close()
-
 	// One token per connection, sent after the poison write has RETURNED. The
 	// dialer below waits for it, so the octets are demonstrably on their way
 	// before the client ever inspects the connection.
@@ -63,7 +63,6 @@ func TestConformance_RFC9112_Sec6_3_PoolFallthroughIsChecked(t *testing.T) {
 			}(nc)
 		}
 	}()
-
 	dialer := h1clDialer(func(ctx context.Context, addr string) (net.Conn, error) {
 		nc, derr := (&net.Dialer{}).DialContext(ctx, "tcp", addr)
 		if derr != nil {
@@ -78,24 +77,20 @@ func TestConformance_RFC9112_Sec6_3_PoolFallthroughIsChecked(t *testing.T) {
 		time.Sleep(20 * time.Millisecond)
 		return nc, nil
 	})
-
 	c, err := client.NewH1PoolClient(ln.Addr().String(), dialer,
 		client.PoolOptions{MaxConnsPerHost: 1}, client.WithDefaultScheme("http"))
-	if err != nil {
-		t.Fatalf("NewH1PoolClient: %v", err)
-	}
+	require.NoError(t, err, "NewH1PoolClient")
 	defer c.Close()
 
 	var resp client.Response
 	err = doOnce(t, c, &resp)
-	if err == nil {
-		t.Fatalf("Do = nil with body %q — a connection carrying an unsolicited response "+
+
+	require.Errorf(t, err,
+		"Do succeeded with body %q — a connection carrying an unsolicited response "+
 			"was handed out unchecked", resp.Body)
-	}
-	if !errors.Is(err, client.ErrResidueOnAcquire) {
-		t.Errorf("error = %v, want ErrResidueOnAcquire so a caller can tell this apart "+
+	assert.Truef(t, errors.Is(err, client.ErrResidueOnAcquire),
+		"error = %v, want ErrResidueOnAcquire so a caller can tell this apart "+
 			"from an ordinary dial or transport failure", err)
-	}
 }
 
 // TestClient_Warmup_ConcurrentWithRequest pins that Warmup cannot disturb a live
@@ -115,11 +110,8 @@ func TestClient_Warmup_ConcurrentWithRequest(t *testing.T) {
 	const resp = "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok"
 
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("Listen: %v", err)
-	}
+	require.NoError(t, err, "Listen")
 	defer ln.Close()
-
 	go func() {
 		for {
 			nc, aerr := ln.Accept()
@@ -144,24 +136,19 @@ func TestClient_Warmup_ConcurrentWithRequest(t *testing.T) {
 			}(nc)
 		}
 	}()
-
 	c, err := client.NewH1Client(ln.Addr().String(), dialTCP(), client.WithDefaultScheme("http"))
-	if err != nil {
-		t.Fatalf("NewH1Client: %v", err)
-	}
+	require.NoError(t, err, "NewH1Client")
 	defer c.Close()
-
 	// Establish the connection so Warmup finds one to probe.
 	var first client.Response
-	if err := doOnce(t, c, &first); err != nil {
-		t.Fatalf("priming request: %v", err)
-	}
+	require.NoError(t, doOnce(t, c, &first), "priming request")
 
 	// A steady stream of requests with Warmup hammering alongside. Overlap has to
 	// be produced, not hoped for: warmup self-guards on an in-progress warmup, so
 	// a single concurrent pair mostly misses the window, and the server holds each
 	// response 20ms specifically to keep a reader parked on the connection.
 	var wg sync.WaitGroup
+	var warmups atomic.Int64
 	errs := make(chan error, 64)
 	stop := make(chan struct{})
 
@@ -170,18 +157,17 @@ func TestClient_Warmup_ConcurrentWithRequest(t *testing.T) {
 		defer wg.Done()
 		defer close(stop)
 		for i := 0; i < 40; i++ {
-			var resp client.Response
-			if err := doOnce(t, c, &resp); err != nil {
-				errs <- err
+			var r client.Response
+			if derr := doOnce(t, c, &r); derr != nil {
+				errs <- derr
 				return
 			}
-			if got := string(resp.Body); got != "ok" {
+			if got := string(r.Body); got != "ok" {
 				errs <- errors.New("body = " + got)
 				return
 			}
 		}
 	}()
-
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
@@ -192,15 +178,22 @@ func TestClient_Warmup_ConcurrentWithRequest(t *testing.T) {
 			default:
 			}
 			c.Warmup(1)
+			warmups.Add(1)
 			time.Sleep(time.Millisecond)
 		}
 	}()
-
 	wg.Wait()
 	close(errs)
+
+	// The injection count: with no concurrent Warmup calls at all this test would
+	// be 40 plain requests and would pass for nothing.
+	t.Logf("%d Warmup calls landed alongside 40 requests", warmups.Load())
+	require.Positive(t, warmups.Load(),
+		"no Warmup ever ran, so nothing was concurrent with the in-flight exchanges")
 	for err := range errs {
-		t.Errorf("request failed while Warmup ran concurrently: %v — Warmup must not "+
-			"touch a connection an exchange is using", err)
+		assert.NoErrorf(t, err,
+			"request failed while Warmup ran concurrently: %v — Warmup must not "+
+				"touch a connection an exchange is using", err)
 	}
 }
 
@@ -216,11 +209,8 @@ func TestConformance_RFC9110_Sec8_6_204WithZeroContentLengthStaysPoolable(t *tes
 	const resp = "HTTP/1.1 204 No Content\r\nContent-Length: 0\r\n\r\n"
 
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("Listen: %v", err)
-	}
+	require.NoError(t, err, "Listen")
 	defer ln.Close()
-
 	var accepted atomic.Int64
 	go func() {
 		for {
@@ -244,25 +234,22 @@ func TestConformance_RFC9110_Sec8_6_204WithZeroContentLengthStaysPoolable(t *tes
 			}(nc)
 		}
 	}()
-
 	c, err := client.NewH1PoolClient(ln.Addr().String(), dialTCP(),
 		client.PoolOptions{MaxConnsPerHost: 1}, client.WithDefaultScheme("http"))
-	if err != nil {
-		t.Fatalf("NewH1PoolClient: %v", err)
-	}
+	require.NoError(t, err, "NewH1PoolClient")
 	defer c.Close()
 
+	statuses := make([]int, 0, 5)
 	for i := 0; i < 5; i++ {
-		var resp client.Response
-		if err := doOnce(t, c, &resp); err != nil {
-			t.Fatalf("request %d: %v", i, err)
-		}
-		if resp.Status != 204 {
-			t.Fatalf("request %d: status = %d, want 204", i, resp.Status)
-		}
+		var r client.Response
+		require.NoErrorf(t, doOnce(t, c, &r), "request %d", i)
+		statuses = append(statuses, r.Status)
 	}
-	if n := accepted.Load(); n != 1 {
-		t.Errorf("accepted %d connections for 5 requests, want 1 — an explicit "+
-			"Content-Length: 0 on a 204 describes no body and must not evict", n)
+
+	for i, st := range statuses {
+		assert.Equalf(t, 204, st, "request %d status", i)
 	}
+	assert.EqualValues(t, 1, accepted.Load(),
+		"a connection was evicted per request: an explicit Content-Length: 0 on a 204 "+
+			"describes no body and must not evict")
 }
