@@ -2,7 +2,6 @@ package client
 
 import (
 	"crypto/tls"
-	"errors"
 	"go/ast"
 	"go/parser"
 	"go/token"
@@ -125,12 +124,11 @@ func TestNewClient_ValidationErrorsCarryTheirSentinel(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			c, err := NewClient(tc.opts)
-			if err == nil {
-				t.Fatalf("NewClient = %v, nil; want an error", c)
-			}
-			if !errors.Is(err, tc.want) {
-				t.Fatalf("NewClient error = %v\n  errors.Is(err, %v) = false; a caller classifying this error cannot tell it from a transport failure", err, tc.want)
-			}
+
+			require.Errorf(t, err, "NewClient = %v, nil; want an error", c)
+			require.ErrorIsf(t, err, tc.want,
+				"NewClient error = %v\n  errors.Is(err, %v) = false; a caller classifying this error cannot tell it from a transport failure",
+				err, tc.want)
 		})
 	}
 }

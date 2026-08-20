@@ -9,6 +9,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Tests
 
+- **The tail of the #722 AAA + `testify` sweep: the last 31 hand-rolled
+  assertions that sit outside a measured region.** Six files were partial
+  conversions — each already imported `testify` and each still carried
+  `t.Fatalf`/`t.Errorf` blocks: `conn/windowtuner_test.go` (22),
+  `quic/crypto_chacha_test.go` (3), `client/options_validation_test.go` (2),
+  `conn/sendflow_test.go` (2), `grpc/borrowmetadata_test.go` (1) and
+  `quic/establish_latch_test.go` (1). Every failure message was carried over as
+  `msgAndArgs` rather than dropped, since `testify` prints only
+  expected-versus-actual and this suite's messages are what say why the property
+  matters. Two of them stay `assert` on purpose and now say so in a comment: they
+  run on an `httptest` handler goroutine, where `testing` forbids `FailNow`, so
+  `require` there would `Goexit` the handler instead of failing the test. The
+  four remaining hand-rolled calls in `qpack/dynamic_test.go` are inside
+  `FuzzRequiredInsertCount` and `FuzzDynamicIndexResolution`, which the sweep
+  leaves alone; the audit had also attributed one to
+  `TestQPACK_RequiredInsertCount_Decode`, which is in fact already fully
+  converted. Nothing weakened: each file's converted tests were scored against a
+  source mutation twice before the conversion and twice after, and every verdict
+  and killer set is identical across the pair — including one row that survives
+  in both directions, `openerWithHP` dropping the un-rotated header-protection
+  key, which is a pre-existing gap in the key-update suite rather than anything
+  this change touched (#722).
+
 - **Eleven `http1` and `frame` coverage gaps from the #722 sweep, eight closed by
   adding the missing case and three answered with a measurement instead.** The
   eight: the three write-side stream-0 guards `frame`'s test file grew for
