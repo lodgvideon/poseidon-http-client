@@ -7,6 +7,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
 	"github.com/lodgvideon/poseidon-http-client/frame"
 )
 
@@ -120,25 +123,22 @@ func TestStream_EndWithReset_RefusesRecycledStruct(t *testing.T) {
 	s := newStream(5, 8, c, 65535)
 	recycleStream(s) // the struct is now pooled and its id is zero
 
-	if s.endWithReset(5, frame.ErrCodeNoError) {
-		t.Fatal("endWithReset accepted a stream id the struct no longer has")
-	}
-	if n := len(s.events); n != 0 {
-		t.Fatalf("delivered %d event(s) into a recycled struct's channel", n)
-	}
-	if s.closed || s.localEnded || s.remoteEnded {
-		t.Fatalf("recycled struct was re-ended: closed=%v local=%v remote=%v",
-			s.closed, s.localEnded, s.remoteEnded)
-	}
+	accepted := s.endWithReset(5, frame.ErrCodeNoError)
 
-	// The struct's next lifetime is unaffected and still works.
+	assert.False(t, accepted, "endWithReset accepted a stream id the struct no longer has")
+	assert.Emptyf(t, s.events, "delivered %d event(s) into a recycled struct's channel", len(s.events))
+	assert.Falsef(t, s.closed || s.localEnded || s.remoteEnded,
+		"recycled struct was re-ended: closed=%v local=%v remote=%v",
+		s.closed, s.localEnded, s.remoteEnded)
+
+	// The struct's next lifetime is unaffected and still works. Without this
+	// half, an endWithReset that refused everything would satisfy the above.
 	s.id = 7
-	if !s.endWithReset(7, frame.ErrCodeNoError) {
-		t.Fatal("endWithReset refused the current lifetime")
-	}
-	if n := len(s.events); n != 1 {
-		t.Fatalf("events = %d, want the one reset", n)
-	}
+
+	live := s.endWithReset(7, frame.ErrCodeNoError)
+
+	assert.True(t, live, "endWithReset refused the current lifetime")
+	assert.Lenf(t, s.events, 1, "events = %d, want the one reset", len(s.events))
 }
 
 // TestStream_PushOverflow_EmitsCancelEverywhere pins the error code on all
@@ -173,16 +173,11 @@ func TestStream_PushOverflow_EmitsCancelEverywhere(t *testing.T) {
 		w.mu.Lock()
 		calls, code := w.bestEffortRSTs, w.lastBestEffortC
 		w.mu.Unlock()
-		if calls == 0 {
-			t.Fatal("no RST_STREAM written after overflow")
-		}
-		if code != frame.ErrCodeCancel {
-			t.Fatalf("wire RST code = %v, want CANCEL", code)
-		}
+		require.NotZero(t, calls, "no RST_STREAM written after overflow")
+		assert.Equalf(t, frame.ErrCodeCancel, code, "wire RST code = %v, want CANCEL", code)
 		// The channel was still full, so the reset took the signal fallback.
-		if got := frame.ErrCode(s.resetCode.Load()); got != frame.ErrCodeCancel {
-			t.Fatalf("signalReset code = %v, want CANCEL", got)
-		}
+		assert.Equalf(t, frame.ErrCodeCancel, frame.ErrCode(s.resetCode.Load()),
+			"signalReset code = %v, want CANCEL", frame.ErrCode(s.resetCode.Load()))
 	})
 
 	// The channel-delivered branch cannot be reached on demand: pushLocked
@@ -209,9 +204,8 @@ func TestStream_PushOverflow_EmitsCancelEverywhere(t *testing.T) {
 					continue
 				}
 				delivered++
-				if ev.RSTCode != frame.ErrCodeCancel {
-					t.Fatalf("delivered reset code = %v, want CANCEL", ev.RSTCode)
-				}
+				require.Equalf(t, frame.ErrCodeCancel, ev.RSTCode,
+					"delivered reset code = %v, want CANCEL", ev.RSTCode)
 			}
 		}
 		if delivered == 0 {

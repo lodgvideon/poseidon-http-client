@@ -1,6 +1,10 @@
 package http1
 
-import "testing"
+import (
+	"testing"
+
+	"github.com/stretchr/testify/assert"
+)
 
 // TestStatusValue_IsSharedAndCapped pins the two properties that make the shared
 // status table safe to hand to a caller. This test is internal to the package
@@ -14,33 +18,29 @@ import "testing"
 func TestStatusValue_IsSharedAndCapped(t *testing.T) {
 	for _, code := range []int{100, 200, 204, 301, 404, 418, 500, 599, 999} {
 		v := statusValue(code)
+
 		want := string([]byte{byte('0' + code/100), byte('0' + (code/10)%10), byte('0' + code%10)})
-		if string(v) != want {
-			t.Errorf("statusValue(%d) = %q, want %q", code, v, want)
-		}
-		if cap(v) != 3 {
-			t.Errorf("statusValue(%d) has cap %d, want 3: an append by a consumer would "+
+		assert.Equalf(t, want, string(v), "statusValue(%d) = %q, want %q", code, v, want)
+		assert.Equalf(t, 3, cap(v),
+			"statusValue(%d) has cap %d, want 3: an append by a consumer would "+
 				"scribble over the next status code's digits in the shared table", code, cap(v))
-		}
 	}
 
 	// Two calls for the same code must hand back the same backing array — that is
 	// what makes it free — and adjacent codes must not collide.
 	a, b := statusValue(404), statusValue(404)
-	if &a[0] != &b[0] {
-		t.Error("statusValue(404) returned a fresh slice: the table is not being shared")
-	}
-	if string(statusValue(200)) == string(statusValue(201)) {
-		t.Error("adjacent status codes render identically")
-	}
+
+	assert.Same(t, &a[0], &b[0], "statusValue(404) returned a fresh slice: the table is not being shared")
+	assert.NotEqual(t, string(statusValue(200)), string(statusValue(201)),
+		"adjacent status codes render identically")
 
 	// Out of range falls back to the allocating path rather than indexing past the
 	// table. readStatusLine cannot produce these, but the bound is what makes that
 	// a fact about the caller rather than a load-bearing assumption here.
 	outOfRange := map[int]string{-1: "-1", 0: "0", 99: "99", 1000: "1000", 1 << 20: "1048576"}
 	for code, want := range outOfRange {
-		if got := string(statusValue(code)); got != want {
-			t.Errorf("statusValue(%d) = %q, want %q", code, got, want)
-		}
+		got := string(statusValue(code))
+
+		assert.Equalf(t, want, got, "statusValue(%d) = %q, want %q", code, got, want)
 	}
 }

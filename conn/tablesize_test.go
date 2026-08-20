@@ -3,6 +3,8 @@ package conn
 import (
 	"testing"
 
+	"github.com/stretchr/testify/assert"
+
 	"github.com/lodgvideon/poseidon-http-client/hpack"
 )
 
@@ -51,10 +53,11 @@ func TestConformance_RFC7541_Sec63_DecoderHonorsAdvertisedTableSize(t *testing.T
 	dec, s := decoderFor(advertised)
 
 	upd := appendTableSizeUpdate(nil, advertised)
-	if err := dec.DecodeBlock(upd, func(hpack.HeaderField) error { return nil }); err != nil {
-		t.Fatalf("a peer honouring our advertised SETTINGS_HEADER_TABLE_SIZE=%d was rejected: %v",
-			s.HeaderTableSize, err)
-	}
+
+	err := dec.DecodeBlock(upd, func(hpack.HeaderField) error { return nil })
+
+	assert.NoErrorf(t, err,
+		"a peer honouring our advertised SETTINGS_HEADER_TABLE_SIZE=%d was rejected", s.HeaderTableSize)
 }
 
 // TestConformance_RFC7541_Sec63_DecoderRejectsAboveAdvertised is the other half.
@@ -63,10 +66,11 @@ func TestConformance_RFC7541_Sec63_DecoderRejectsAboveAdvertised(t *testing.T) {
 	dec, s := decoderFor(4096)
 
 	upd := appendTableSizeUpdate(nil, s.HeaderTableSize+1)
-	if err := dec.DecodeBlock(upd, func(hpack.HeaderField) error { return nil }); err == nil {
-		t.Fatalf("an update to %d was accepted against an advertised limit of %d",
-			s.HeaderTableSize+1, s.HeaderTableSize)
-	}
+
+	err := dec.DecodeBlock(upd, func(hpack.HeaderField) error { return nil })
+
+	assert.Errorf(t, err, "an update to %d was accepted against an advertised limit of %d",
+		s.HeaderTableSize+1, s.HeaderTableSize)
 }
 
 // TestConn_DecoderTableSizeMatchesAdvertised covers every value a caller can
@@ -75,9 +79,10 @@ func TestConn_DecoderTableSizeMatchesAdvertised(t *testing.T) {
 	for _, advertised := range []uint32{0, 4096, 8192, 65536} {
 		dec, s := decoderFor(advertised)
 		upd := appendTableSizeUpdate(nil, s.HeaderTableSize)
-		if err := dec.DecodeBlock(upd, func(hpack.HeaderField) error { return nil }); err != nil {
-			t.Errorf("advertised=%d (defaulted to %d): peer update rejected: %v",
-				advertised, s.HeaderTableSize, err)
-		}
+
+		err := dec.DecodeBlock(upd, func(hpack.HeaderField) error { return nil })
+
+		assert.NoErrorf(t, err, "advertised=%d (defaulted to %d): peer update rejected",
+			advertised, s.HeaderTableSize)
 	}
 }

@@ -3,6 +3,8 @@ package quic
 import (
 	"fmt"
 	"testing"
+
+	"github.com/stretchr/testify/require"
 )
 
 // TestConformance_RFC9000_Sec1731_ReservedBitsProtocolViolation checks that a
@@ -20,7 +22,6 @@ func TestConformance_RFC9000_Sec1731_ReservedBitsProtocolViolation(t *testing.T)
 			keys, _ := InitialKeys(dcid)
 			sealer, _ := NewSealer(keys)
 			opener, _ := NewOpener(keys)
-
 			// Sealed so header protection masks the bit — the client reveals it
 			// again on decrypt, which is the only point the rule can be applied.
 			pnLen := 4
@@ -30,16 +31,14 @@ func TestConformance_RFC9000_Sec1731_ReservedBitsProtocolViolation(t *testing.T)
 				hdr = append(hdr, 0) // packet number 0
 			}
 			pkt, err := sealer.Seal(nil, hdr, pnOff, pnLen, 0, make([]byte, 20))
-			if err != nil {
-				t.Fatal(err)
-			}
-
+			require.NoError(t, err, "seal the fixture packet the reserved bit rides in")
 			c := &Conn{pc: &closePC{}, dcid: dcid, oneRTTSealer: sealer, handshakeComplete: true}
 			c.keys.OneRTT = opener
 
-			if err := c.recvDatagram(pkt); err != ErrProtocolViolation {
-				t.Fatalf("reserved bit %#02x: recvDatagram = %v, want ErrProtocolViolation", bit, err)
-			}
+			recvErr := c.recvDatagram(pkt)
+
+			require.ErrorIsf(t, recvErr, ErrProtocolViolation,
+				"reserved bit %#02x: recvDatagram = %v, want ErrProtocolViolation", bit, recvErr)
 		})
 	}
 }
@@ -60,7 +59,6 @@ func longHeaderReservedBit(t *testing.T, bit byte) {
 	_, serverKeys := InitialKeys(dcid) // the client opens server packets with the server keys
 	serverSealer, _ := NewSealer(serverKeys)
 	clientOpener, _ := NewOpener(serverKeys)
-
 	pnLen := 4
 	length := uint64(pnLen + 20 + 16)
 	hdr, pnOff := AppendLongHeader(nil, PacketInitial, QUICVersion1, dcid, []byte{0xaa}, nil, pnLen, length)
@@ -69,16 +67,14 @@ func longHeaderReservedBit(t *testing.T, bit byte) {
 		hdr = append(hdr, 0)
 	}
 	pkt, err := serverSealer.Seal(nil, hdr, pnOff, pnLen, 0, make([]byte, 20))
-	if err != nil {
-		t.Fatal(err)
-	}
-
+	require.NoError(t, err, "seal the fixture Initial the reserved bit rides in")
 	c := &Conn{pc: &closePC{}, dcid: dcid}
 	c.keys.Initial = clientOpener
 
-	if err := c.recvDatagram(pkt); err != ErrProtocolViolation {
-		t.Fatalf("recvDatagram = %v, want ErrProtocolViolation", err)
-	}
+	recvErr := c.recvDatagram(pkt)
+
+	require.ErrorIsf(t, recvErr, ErrProtocolViolation,
+		"reserved bit %#02x: recvDatagram = %v, want ErrProtocolViolation", bit, recvErr)
 }
 
 // TestConn_ReservedBitsZero_Accepted checks that a well-formed packet with zero
@@ -88,13 +84,12 @@ func TestConn_ReservedBitsZero_Accepted(t *testing.T) {
 	keys, _ := InitialKeys(dcid)
 	sealer, _ := NewSealer(keys)
 	opener, _ := NewOpener(keys)
-
 	// A normal short-header packet (reserved bits zero) carrying a PING.
 	pkt := sealServerPacket(t, sealer, PacketShort, nil, nil, 0, []byte{byte(FramePing)})
 	c := &Conn{pc: &closePC{}, dcid: dcid, oneRTTSealer: sealer, handshakeComplete: true}
 	c.keys.OneRTT = opener
 
-	if err := c.recvDatagram(pkt); err != nil {
-		t.Fatalf("recvDatagram of a valid packet = %v, want nil", err)
-	}
+	recvErr := c.recvDatagram(pkt)
+
+	require.NoErrorf(t, recvErr, "recvDatagram of a valid packet = %v, want nil", recvErr)
 }

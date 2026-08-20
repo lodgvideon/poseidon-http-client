@@ -6,6 +6,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
 	"github.com/lodgvideon/poseidon-http-client/frame"
 )
 
@@ -91,9 +94,8 @@ func TestHandshakeSettings_RoundTripsAgainstPipePeer(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 	peer, err := handshakeSettings(ctx, fr, func() error { return nil }, AdvertisedSettings{}.defaulted(), false)
-	if err != nil {
-		t.Fatalf("handshake: %v", err)
-	}
+
+	require.NoError(t, err, "handshake")
 	// Peer announced MaxConcurrentStreams=100; we should observe that.
 	var found bool
 	for i := 0; i < peer.N; i++ {
@@ -102,7 +104,6 @@ func TestHandshakeSettings_RoundTripsAgainstPipePeer(t *testing.T) {
 			found = true
 		}
 	}
-	if !found {
-		t.Fatalf("peer settings = %+v", peer)
-	}
+	assert.Truef(t, found, "peer settings = %+v, want MAX_CONCURRENT_STREAMS=100 among them — "+
+		"the handshake did not surface what the peer advertised", peer)
 }

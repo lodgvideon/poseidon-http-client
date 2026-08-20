@@ -15,6 +15,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
 	"github.com/lodgvideon/poseidon-http-client/client"
 	"github.com/lodgvideon/poseidon-http-client/conn"
 )
@@ -39,9 +42,7 @@ func TestConformance_ALPN_SilentH2PeerDoesNotWedgeClose(t *testing.T) {
 		Certificates: []tls.Certificate{cert},
 		NextProtos:   []string{"h2"},
 	})
-	if err != nil {
-		t.Fatalf("tls.Listen: %v", err)
-	}
+	require.NoError(t, err, "tls.Listen")
 	defer ln.Close()
 
 	var handshaken atomic.Int64
@@ -71,9 +72,7 @@ func TestConformance_ALPN_SilentH2PeerDoesNotWedgeClose(t *testing.T) {
 			}},
 		},
 	})
-	if err != nil {
-		t.Fatalf("NewClient: %v", err)
-	}
+	require.NoError(t, err, "NewClient")
 
 	// A request that will wedge in the SETTINGS handshake. We do not wait on it.
 	go func() {
@@ -85,14 +84,20 @@ func TestConformance_ALPN_SilentH2PeerDoesNotWedgeClose(t *testing.T) {
 	for handshaken.Load() == 0 && time.Now().Before(deadline) {
 		time.Sleep(5 * time.Millisecond)
 	}
+	// Without a completed ALPN handshake there is no wedge to contain, and a
+	// Close that returns promptly would say nothing at all — the fixture, not the
+	// code, would be what passed.
+	require.Positive(t, handshaken.Load(),
+		"peer never completed the TLS/ALPN handshake, so no request is wedged in detection")
 	time.Sleep(50 * time.Millisecond)
 
 	done := make(chan struct{})
 	go func() { _ = c.Close(); close(done) }()
+
 	select {
 	case <-done:
 	case <-time.After(3 * time.Second):
-		t.Fatal("Close() hung behind a request wedged in ALPN protocol detection — " +
+		require.Fail(t, "Close() hung behind a request wedged in ALPN protocol detection — "+
 			"the detection lock is held across the network handshake")
 	}
 }
@@ -108,9 +113,7 @@ func TestConformance_ALPN_SilentH2PeerDoesNotWedgeClose(t *testing.T) {
 // is now the detecting-channel sentinel, independent of the protocol string.
 func TestConformance_ALPN_ConcurrentFirstRequestsShareOneConn(t *testing.T) {
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("Listen: %v", err)
-	}
+	require.NoError(t, err, "Listen")
 	defer ln.Close()
 
 	var accepted atomic.Int64
@@ -148,9 +151,7 @@ func TestConformance_ALPN_ConcurrentFirstRequestsShareOneConn(t *testing.T) {
 			}),
 		},
 	})
-	if err != nil {
-		t.Fatalf("NewClient: %v", err)
-	}
+	require.NoError(t, err, "NewClient")
 	defer c.Close()
 
 	const n = 8
@@ -172,16 +173,15 @@ func TestConformance_ALPN_ConcurrentFirstRequestsShareOneConn(t *testing.T) {
 	close(start)
 	wg.Wait()
 	close(errs)
-	for err := range errs {
-		t.Errorf("request failed: %v", err)
-	}
 
+	for err := range errs {
+		assert.NoError(t, err, "a racing first request failed")
+	}
 	// The single-connection transport serialises requests onto one connection, so
 	// racing first requests must not dial more than once.
-	if got := accepted.Load(); got != 1 {
-		t.Errorf("accepted %d connections, want 1 — racing first requests each built "+
-			"their own delegate instead of sharing one (the proto=\"\" guard gap)", got)
-	}
+	assert.EqualValuesf(t, 1, accepted.Load(),
+		"accepted %d connections, want 1 — racing first requests each built their own "+
+			"delegate instead of sharing one (the proto=\"\" guard gap)", accepted.Load())
 }
 
 // alpnPlainDialer adapts a func to conn.Dialer.
@@ -195,9 +195,7 @@ func (f alpnPlainDialer) Dial(ctx context.Context, addr string) (net.Conn, error
 func alpnTestCert(t *testing.T) tls.Certificate {
 	t.Helper()
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-	if err != nil {
-		t.Fatalf("GenerateKey: %v", err)
-	}
+	require.NoError(t, err, "GenerateKey")
 	tmpl := &x509.Certificate{
 		SerialNumber: big.NewInt(1),
 		Subject:      pkix.Name{CommonName: "alpn-test"},
@@ -206,8 +204,6 @@ func alpnTestCert(t *testing.T) tls.Certificate {
 		IPAddresses:  []net.IP{net.ParseIP("127.0.0.1")},
 	}
 	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
-	if err != nil {
-		t.Fatalf("CreateCertificate: %v", err)
-	}
+	require.NoError(t, err, "CreateCertificate")
 	return tls.Certificate{Certificate: [][]byte{der}, PrivateKey: key}
 }

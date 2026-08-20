@@ -6,6 +6,9 @@ import (
 	"go/token"
 	"strings"
 	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // connCloseCodes is a registration point, and a registration point nobody is
@@ -85,31 +88,27 @@ var noCloseCode = map[string]string{
 // recorded as having none.
 func TestCloseCodeFor_EverySentinelIsClassified(t *testing.T) {
 	names := sentinelNamesInSource(t, "errors.go")
-	if len(names) == 0 {
-		t.Fatal("no sentinels found in errors.go — the parser found nothing, so this " +
-			"test would pass no matter what the source says")
-	}
-	t.Logf("%d sentinels declared in errors.go", len(names))
 
+	require.NotEmpty(t, names, "no sentinels found in errors.go — the parser found nothing, so this "+
+		"test would pass no matter what the source says")
+	t.Logf("%d sentinels declared in errors.go", len(names))
 	for _, name := range names {
 		sentinel, known := sentinelsByName[name]
-		if !known {
-			t.Errorf("%s is declared in errors.go but missing from sentinelsByName — add it, "+
-				"then decide whether it needs a transport error code in connCloseCodes", name)
+		if !assert.Truef(t, known,
+			"%s is declared in errors.go but missing from sentinelsByName — add it, "+
+				"then decide whether it needs a transport error code in connCloseCodes", name) {
 			continue
 		}
 		_, hasCode := closeCodeFor(sentinel)
 		_, excused := noCloseCode[name]
-		switch {
-		case hasCode && excused:
-			t.Errorf("%s is both in connCloseCodes and listed as having no code — one of "+
+		assert.Falsef(t, hasCode && excused,
+			"%s is both in connCloseCodes and listed as having no code — one of "+
 				"the two is wrong", name)
-		case !hasCode && !excused:
-			t.Errorf("%s has no transport error code and no recorded reason for not having "+
+		assert.Falsef(t, !hasCode && !excused,
+			"%s has no transport error code and no recorded reason for not having "+
 				"one. If the peer violated the protocol, add it to connCloseCodes; if it is "+
 				"local state or API misuse, add it to noCloseCode with why. Leaving it "+
 				"unclassified means a CONNECTION_CLOSE that carries no code.", name)
-		}
 	}
 
 	// The bridge must not rot in the other direction either: a sentinel deleted
@@ -118,10 +117,10 @@ func TestCloseCodeFor_EverySentinelIsClassified(t *testing.T) {
 	for _, n := range names {
 		inSource[n] = true
 	}
+
 	for name := range sentinelsByName {
-		if !inSource[name] {
-			t.Errorf("sentinelsByName lists %s, which errors.go no longer declares", name)
-		}
+		assert.Truef(t, inSource[name],
+			"sentinelsByName lists %s, which errors.go no longer declares", name)
 	}
 }
 
@@ -130,15 +129,15 @@ func TestCloseCodeFor_EverySentinelIsClassified(t *testing.T) {
 // and no entry mapping to the zero code (NO_ERROR is not a violation).
 func TestCloseCodeFor_TableIsConsistent(t *testing.T) {
 	seen := make(map[error]bool, len(connCloseCodes))
+
 	for _, e := range connCloseCodes {
-		if seen[e.err] {
-			t.Errorf("%v appears twice in connCloseCodes; the first entry wins and the "+
+		assert.Falsef(t, seen[e.err],
+			"%v appears twice in connCloseCodes; the first entry wins and the "+
 				"second is dead", e.err)
-		}
 		seen[e.err] = true
-		if e.code == ErrCodeNoError {
-			t.Errorf("%v maps to NO_ERROR, which says the peer did nothing wrong", e.err)
-		}
+
+		assert.NotEqualf(t, ErrCodeNoError, e.code,
+			"%v maps to NO_ERROR, which says the peer did nothing wrong", e.err)
 	}
 }
 
@@ -149,9 +148,7 @@ func TestCloseCodeFor_TableIsConsistent(t *testing.T) {
 func sentinelNamesInSource(t *testing.T, file string) []string {
 	t.Helper()
 	f, err := parser.ParseFile(token.NewFileSet(), file, nil, 0)
-	if err != nil {
-		t.Fatalf("parse %s: %v", file, err)
-	}
+	require.NoErrorf(t, err, "parse %s: %v", file, err)
 	var names []string
 	for _, decl := range f.Decls {
 		gen, ok := decl.(*ast.GenDecl)

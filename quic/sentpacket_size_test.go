@@ -3,6 +3,8 @@ package quic
 import (
 	"testing"
 	"unsafe"
+
+	"github.com/stretchr/testify/assert"
 )
 
 // maxInlineMapElem is the largest map element Go stores inline in the table.
@@ -34,12 +36,12 @@ const maxInlineMapElem = 128
 // existing padding, or accept an allocation per sent packet and say so here.
 func TestSentPacketStaysInlineInMap(t *testing.T) {
 	got := unsafe.Sizeof(sentPacket{})
-	if got > maxInlineMapElem {
-		t.Errorf("sizeof(sentPacket) = %d bytes, want <= %d.\n"+
+
+	assert.LessOrEqualf(t, got, uintptr(maxInlineMapElem),
+		"sizeof(sentPacket) = %d bytes, want <= %d.\n"+
 			"Above %d Go stores map elements out of line, so sentSpace.onSent "+
 			"allocates once per sent packet. See the measurements in this test's doc.",
-			got, maxInlineMapElem, maxInlineMapElem)
-	}
+		got, maxInlineMapElem, maxInlineMapElem)
 	t.Logf("sizeof(sentPacket) = %d bytes (limit %d, margin %d)",
 		got, maxInlineMapElem, int(maxInlineMapElem)-int(got))
 }
@@ -48,9 +50,9 @@ func TestSentPacketStaysInlineInMap(t *testing.T) {
 // sentPacket by value, so its own padding is charged to every sent packet.
 func TestRetransFrameSize(t *testing.T) {
 	got := unsafe.Sizeof(retransFrame{})
+
 	// 56 = 3x uint64 + a 24-byte slice header + kind and fin packed into the tail.
-	if got > 56 {
-		t.Errorf("sizeof(retransFrame) = %d bytes, want <= 56 — it is embedded in "+
+	assert.LessOrEqualf(t, got, uintptr(56),
+		"sizeof(retransFrame) = %d bytes, want <= 56 — it is embedded in "+
 			"sentPacket, which must stay under %d", got, maxInlineMapElem)
-	}
 }

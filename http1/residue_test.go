@@ -12,6 +12,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
 	"github.com/lodgvideon/poseidon-http-client/http1"
 )
 
@@ -22,9 +25,7 @@ import (
 func residuePair(t *testing.T) (*http1.Conn, net.Conn, net.Conn) {
 	t.Helper()
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("Listen: %v", err)
-	}
+	require.NoError(t, err, "Listen")
 	defer ln.Close()
 
 	type accepted struct {
@@ -38,13 +39,9 @@ func residuePair(t *testing.T) (*http1.Conn, net.Conn, net.Conn) {
 	}()
 
 	cli, err := net.Dial("tcp", ln.Addr().String())
-	if err != nil {
-		t.Fatalf("Dial: %v", err)
-	}
+	require.NoError(t, err, "Dial")
 	a := <-ch
-	if a.err != nil {
-		t.Fatalf("Accept: %v", a.err)
-	}
+	require.NoError(t, a.err, "Accept")
 	t.Cleanup(func() { _ = cli.Close(); _ = a.nc.Close() })
 	return http1.NewConn(cli), a.nc, cli
 }
@@ -68,9 +65,7 @@ func waitResidue(c *http1.Conn, want bool) bool {
 func selfSignedCert(t *testing.T) tls.Certificate {
 	t.Helper()
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-	if err != nil {
-		t.Fatalf("GenerateKey: %v", err)
-	}
+	require.NoError(t, err, "GenerateKey")
 	tmpl := &x509.Certificate{
 		SerialNumber: big.NewInt(1),
 		Subject:      pkix.Name{CommonName: "residue-test"},
@@ -79,9 +74,7 @@ func selfSignedCert(t *testing.T) tls.Certificate {
 		IPAddresses:  []net.IP{net.ParseIP("127.0.0.1")},
 	}
 	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
-	if err != nil {
-		t.Fatalf("CreateCertificate: %v", err)
-	}
+	require.NoError(t, err, "CreateCertificate")
 	return tls.Certificate{Certificate: [][]byte{der}, PrivateKey: key}
 }
 
@@ -90,11 +83,12 @@ func selfSignedCert(t *testing.T) tls.Certificate {
 // other test in this file.
 func TestHasResidue_QuietSocket(t *testing.T) {
 	c, _, _ := residuePair(t)
+
 	for i := 0; i < 50; i++ {
-		if c.HasResidue() {
-			t.Fatalf("HasResidue() = true on call %d for a quiet socket; every checkout "+
-				"would redial", i)
-		}
+		got := c.HasResidue()
+
+		require.Falsef(t, got, "HasResidue() = true on call %d for a quiet socket; every checkout "+
+			"would redial", i)
 	}
 }
 
@@ -102,13 +96,14 @@ func TestHasResidue_QuietSocket(t *testing.T) {
 // on: octets the peer sent that nobody has read.
 func TestHasResidue_UnsolicitedOctets(t *testing.T) {
 	c, peer, _ := residuePair(t)
-	if _, err := peer.Write([]byte("HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nPWNED")); err != nil {
-		t.Fatalf("peer write: %v", err)
-	}
-	if !waitResidue(c, true) {
-		t.Error("HasResidue() = false with a complete unsolicited response on the socket — " +
+	_, err := peer.Write([]byte("HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nPWNED"))
+	require.NoError(t, err, "peer write")
+
+	got := waitResidue(c, true)
+
+	assert.True(t, got,
+		"HasResidue() = false with a complete unsolicited response on the socket — "+
 			"this is the verdict that decides whether the next request reads it as its own")
-	}
 }
 
 // TestHasResidue_RepeatedCallsAreStable pins that asking does not change the
@@ -116,17 +111,15 @@ func TestHasResidue_UnsolicitedOctets(t *testing.T) {
 // or masked the evidence would make the second checkout disagree with the first.
 func TestHasResidue_RepeatedCallsAreStable(t *testing.T) {
 	c, peer, _ := residuePair(t)
-	if _, err := peer.Write([]byte("x")); err != nil {
-		t.Fatalf("peer write: %v", err)
-	}
-	if !waitResidue(c, true) {
-		t.Fatal("HasResidue() never saw the octet")
-	}
+	_, err := peer.Write([]byte("x"))
+	require.NoError(t, err, "peer write")
+	require.True(t, waitResidue(c, true), "HasResidue() never saw the octet")
+
 	for i := 0; i < 20; i++ {
-		if !c.HasResidue() {
-			t.Fatalf("HasResidue() = false on repeat call %d; the first call consumed or "+
-				"masked the evidence", i)
-		}
+		got := c.HasResidue()
+
+		require.Truef(t, got, "HasResidue() = false on repeat call %d; the first call consumed or "+
+			"masked the evidence", i)
 	}
 }
 
@@ -137,19 +130,18 @@ func TestHasResidue_RepeatedCallsAreStable(t *testing.T) {
 // unconditional deadline install was written to prevent.
 func TestHasResidue_LeavesConnUsable(t *testing.T) {
 	c, peer, cli := residuePair(t)
-	if c.HasResidue() {
-		t.Fatal("HasResidue() = true on a quiet socket")
-	}
+	require.False(t, c.HasResidue(), "HasResidue() = true on a quiet socket")
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
 		time.Sleep(20 * time.Millisecond)
 		_, _ = peer.Write([]byte("hello"))
 	}()
+
 	buf := make([]byte, 5)
-	if _, err := cli.Read(buf); err != nil {
-		t.Fatalf("read after HasResidue = %v; a deadline was left installed", err)
-	}
+	_, err := cli.Read(buf)
+
+	require.NoErrorf(t, err, "read after HasResidue = %v; a deadline was left installed", err)
 	<-done
 }
 
@@ -162,9 +154,7 @@ func TestHasResidue_LeavesConnUsable(t *testing.T) {
 func TestHasResidue_TLSQuietConn(t *testing.T) {
 	cert := selfSignedCert(t)
 	ln, err := tls.Listen("tcp", "127.0.0.1:0", &tls.Config{Certificates: []tls.Certificate{cert}})
-	if err != nil {
-		t.Fatalf("tls.Listen: %v", err)
-	}
+	require.NoError(t, err, "tls.Listen")
 	defer ln.Close()
 
 	srvDone := make(chan struct{})
@@ -186,23 +176,20 @@ func TestHasResidue_TLSQuietConn(t *testing.T) {
 		InsecureSkipVerify: true,
 		ClientSessionCache: tls.NewLRUClientSessionCache(4),
 	})
-	if err != nil {
-		t.Fatalf("tls.Dial: %v", err)
-	}
+	require.NoError(t, err, "tls.Dial")
 	defer tc.Close()
-	if err := tc.Handshake(); err != nil {
-		t.Fatalf("Handshake: %v", err)
-	}
-
+	require.NoError(t, tc.Handshake(), "Handshake")
 	c := http1.NewConn(tc)
+
 	// Long enough for tickets to land; the assertion is the verdict, not the wait.
 	deadline := time.Now().Add(500 * time.Millisecond)
 	for time.Now().Before(deadline) {
-		if c.HasResidue() {
-			t.Fatal("HasResidue() = true on a quiet TLS connection — post-handshake records " +
-				"(NewSessionTicket, KeyUpdate) are not application data, and evicting on them " +
+		got := c.HasResidue()
+
+		require.False(t, got,
+			"HasResidue() = true on a quiet TLS connection — post-handshake records "+
+				"(NewSessionTicket, KeyUpdate) are not application data, and evicting on them "+
 				"would redial against every TLS 1.3 origin")
-		}
 		time.Sleep(5 * time.Millisecond)
 	}
 }
@@ -214,9 +201,7 @@ func TestHasResidue_TLSQuietConn(t *testing.T) {
 func TestHasResidue_TLSUnsolicitedResponse(t *testing.T) {
 	cert := selfSignedCert(t)
 	ln, err := tls.Listen("tcp", "127.0.0.1:0", &tls.Config{Certificates: []tls.Certificate{cert}})
-	if err != nil {
-		t.Fatalf("tls.Listen: %v", err)
-	}
+	require.NoError(t, err, "tls.Listen")
 	defer ln.Close()
 
 	go func() {
@@ -234,15 +219,13 @@ func TestHasResidue_TLSUnsolicitedResponse(t *testing.T) {
 	tc, err := tls.Dial("tcp", ln.Addr().String(), &tls.Config{
 		InsecureSkipVerify: true,
 	})
-	if err != nil {
-		t.Fatalf("tls.Dial: %v", err)
-	}
+	require.NoError(t, err, "tls.Dial")
 	defer tc.Close()
-
 	c := http1.NewConn(tc)
-	if !waitResidue(c, true) {
-		t.Error("HasResidue() = false with an unsolicited response inside TLS")
-	}
+
+	got := waitResidue(c, true)
+
+	assert.True(t, got, "HasResidue() = false with an unsolicited response inside TLS")
 }
 
 // TestHasResidue_NoAllocations is the cost guard as an assertion rather than a
@@ -256,14 +239,16 @@ func TestHasResidue_TLSUnsolicitedResponse(t *testing.T) {
 // through to a peek whose timeout error is heap-allocated.
 func TestHasResidue_NoAllocations(t *testing.T) {
 	c, _, _ := residuePair(t)
-	if c.HasResidue() {
-		t.Fatal("HasResidue() = true on a quiet socket")
-	}
+	require.False(t, c.HasResidue(), "HasResidue() = true on a quiet socket")
+
+	// testify is deliberately ABSENT from this closure: AllocsPerRun measures the
+	// whole process, and require/assert reflect and allocate, so an assertion
+	// inside would be counted as part of what it is judging.
 	got := testing.AllocsPerRun(200, func() { _ = c.HasResidue() })
-	if got > 0 {
-		t.Errorf("HasResidue() allocates %.1f objects per call on a plain socket, want 0 — "+
+
+	assert.Zerof(t, got,
+		"HasResidue() allocates %.1f objects per call on a plain socket, want 0 — "+
 			"at one call per checkout this is one allocation per request", got)
-	}
 }
 
 // BenchmarkHasResidue is the cost guard. The whole reason this check can run on

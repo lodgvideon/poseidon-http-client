@@ -6,6 +6,9 @@ import (
 	"errors"
 	"testing"
 	"time"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // The two gates in this file cover the send path's outputs rather than its
@@ -68,24 +71,20 @@ func TestConn_SendPath_WriteErrorReachesCaller(t *testing.T) {
 	_, pool := genServerCert(t)
 	pc := &failWritePC{failOn: 1} // the ClientHello datagram
 	c, err := NewConn(pc, &tls.Config{ServerName: "example.com", RootCAs: pool}, []byte{0x01, 0x02, 0x03})
-	if err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, err, "NewConn against the fail-on-first-write transport")
 
 	err = c.Establish(context.Background())
-	if !errors.Is(err, errSendFailed) {
-		t.Fatalf("Establish = %v, want the transport's send error %v: the socket refused "+
+
+	assert.Truef(t, errors.Is(err, errSendFailed),
+		"Establish = %v, want the transport's send error %v: the socket refused "+
 			"the ClientHello and the caller was told something else, so a host that "+
 			"cannot send looks to the caller like a peer that will not answer",
-			err, errSendFailed)
-	}
-	if pc.writes != 1 {
-		t.Fatalf("transport saw %d writes, want 1 — the failing write is the one being "+
+		err, errSendFailed)
+	assert.Equalf(t, 1, pc.writes,
+		"transport saw %d writes, want 1 — the failing write is the one being "+
 			"gated, so a different count means this test proved something else", pc.writes)
-	}
-	if len(pc.written) != 0 {
-		t.Fatalf("%d datagrams were delivered; the only write was supposed to fail", len(pc.written))
-	}
+	assert.Emptyf(t, pc.written,
+		"%d datagrams were delivered; the only write was supposed to fail", len(pc.written))
 }
 
 // TestConn_SendPath_WriteErrorFixtureIsTheControl pins that failWritePC is
@@ -96,21 +95,17 @@ func TestConn_SendPath_WriteErrorFixtureIsTheControl(t *testing.T) {
 	_, pool := genServerCert(t)
 	pc := &failWritePC{} // failOn 0: never fail
 	c, err := NewConn(pc, &tls.Config{ServerName: "example.com", RootCAs: pool}, []byte{0x01, 0x02, 0x03})
-	if err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, err, "NewConn against the never-failing control transport")
 
 	err = c.Establish(context.Background())
-	if errors.Is(err, errSendFailed) {
-		t.Fatal("the fixture failed a write with no injection configured")
-	}
-	if !errors.Is(err, errNoResponse) {
-		t.Fatalf("Establish = %v, want the read to be what fails once the flight is sent", err)
-	}
-	if len(pc.written) != 1 {
-		t.Fatalf("delivered %d datagrams, want the 1 Initial flight — the fixture is not "+
+
+	assert.False(t, errors.Is(err, errSendFailed),
+		"the fixture failed a write with no injection configured")
+	assert.Truef(t, errors.Is(err, errNoResponse),
+		"Establish = %v, want the read to be what fails once the flight is sent", err)
+	assert.Lenf(t, pc.written, 1,
+		"delivered %d datagrams, want the 1 Initial flight — the fixture is not "+
 			"on the send path, so the gate above could not have observed anything", len(pc.written))
-	}
 }
 
 // TestConformance_RFC9002_Sec51_RTTSampleUsesRecordedSendTime pins the send
@@ -139,28 +134,21 @@ func TestConformance_RFC9002_Sec51_RTTSampleUsesRecordedSendTime(t *testing.T) {
 	_, pool := genServerCert(t)
 	pc := &capturePacketConn{}
 	c, err := NewConn(pc, &tls.Config{ServerName: "example.com", RootCAs: pool}, []byte{0x01, 0x02, 0x03})
-	if err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, err, "NewConn for the RTT-sample fixture")
 	c.now = func() time.Time { return now }
 
 	// The real send path: sendInitialFlight is an ordinary flush of the Initial
 	// space, so the ClientHello is sealed and recorded by sealPacket, at c.clock().
-	if err := c.sendInitialFlight(context.Background()); err != nil {
-		t.Fatalf("sendInitialFlight: %v", err)
-	}
-	if len(pc.written) != 1 {
-		t.Fatalf("wrote %d datagrams, want 1 — no packet was sealed, so nothing recorded "+
+	require.NoError(t, c.sendInitialFlight(context.Background()), "sendInitialFlight")
+	require.Lenf(t, pc.written, 1,
+		"wrote %d datagrams, want 1 — no packet was sealed, so nothing recorded "+
 			"a send time and this test cannot observe one", len(pc.written))
-	}
 
 	// One RTT later the peer acknowledges Initial packet 0, through the real frame
 	// parser and ACK handler.
 	now = base.Add(sampleRTT)
 	ack := AppendAck(nil, 0, 0, 0, nil)
-	if err := ParseFrames(ack, &connFrameHandler{c: c, space: spaceInitial}); err != nil {
-		t.Fatalf("ParseFrames(ACK): %v", err)
-	}
+	require.NoError(t, ParseFrames(ack, &connFrameHandler{c: c, space: spaceInitial}), "ParseFrames(ACK)")
 
 	// §5.3: the first sample initialises smoothed_rtt = latest_rtt and
 	// rttvar = latest_rtt/2. §6.2.1: PTO = smoothed_rtt + max(4*rttvar,
@@ -169,15 +157,15 @@ func TestConformance_RFC9002_Sec51_RTTSampleUsesRecordedSendTime(t *testing.T) {
 	// 3*50 ms out, not at some multiple of the epoch.
 	wantPTO := sampleRTT + 4*(sampleRTT/2)
 	dl, isLoss := c.lossDetectionDeadline()
-	if isLoss {
-		t.Fatal("a fully acknowledged flight must arm the probe timeout, not a loss timer")
-	}
-	if want := now.Add(wantPTO); !dl.Equal(want) {
-		t.Fatalf("probe armed for %v, want %v (%v after the ACK): a %v round trip must "+
+
+	require.False(t, isLoss,
+		"a fully acknowledged flight must arm the probe timeout, not a loss timer")
+	want := now.Add(wantPTO)
+	assert.Truef(t, dl.Equal(want),
+		"probe armed for %v, want %v (%v after the ACK): a %v round trip must "+
 			"produce a %v RTT sample, so the send time sealPacket recorded is not the "+
 			"instant the packet was sealed",
-			dl, want, wantPTO, sampleRTT, sampleRTT)
-	}
+		dl, want, wantPTO, sampleRTT, sampleRTT)
 }
 
 // TestConformance_RFC9002_Sec51_RTTSampleScalesWithSendTime is the discriminator
@@ -192,27 +180,22 @@ func TestConformance_RFC9002_Sec51_RTTSampleScalesWithSendTime(t *testing.T) {
 		_, pool := genServerCert(t)
 		pc := &capturePacketConn{}
 		c, err := NewConn(pc, &tls.Config{ServerName: "example.com", RootCAs: pool}, []byte{0x01, 0x02, 0x03})
-		if err != nil {
-			t.Fatal(err)
-		}
+		require.NoErrorf(t, err, "NewConn for the %v arm", rtt)
 		c.now = func() time.Time { return now }
-		if err := c.sendInitialFlight(context.Background()); err != nil {
-			t.Fatalf("sendInitialFlight: %v", err)
-		}
+		require.NoError(t, c.sendInitialFlight(context.Background()), "sendInitialFlight")
 		now = base.Add(rtt)
-		if err := ParseFrames(AppendAck(nil, 0, 0, 0, nil), &connFrameHandler{c: c, space: spaceInitial}); err != nil {
-			t.Fatalf("ParseFrames(ACK): %v", err)
-		}
+		require.NoError(t, ParseFrames(AppendAck(nil, 0, 0, 0, nil), &connFrameHandler{c: c, space: spaceInitial}),
+			"ParseFrames(ACK)")
 		dl, _ := c.lossDetectionDeadline()
 		return dl.Sub(now)
 	}
 
 	slow, fast := armedPTO(t, 80*time.Millisecond), armedPTO(t, 40*time.Millisecond)
-	if slow != 2*fast {
-		t.Fatalf("probe timeout on an 80 ms path = %v, on a 40 ms path = %v; the slower "+
+
+	assert.Equalf(t, 2*fast, slow,
+		"probe timeout on an 80 ms path = %v, on a 40 ms path = %v; the slower "+
 			"path must arm exactly twice the timeout, or the estimate is not derived "+
 			"from when the packet was actually sent", slow, fast)
-	}
 }
 
 // Compile-time proof the gate fixture really is a PacketConn: a Write signature

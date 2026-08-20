@@ -6,6 +6,9 @@ import (
 	"crypto/tls"
 	"testing"
 	"time"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // kuSuite is the AES-128-GCM suite used for the key-update tests.
@@ -18,21 +21,13 @@ const kuSuite = tls.TLS_AES_128_GCM_SHA256
 func newKUTestConn(t *testing.T, readSecret, writeSecret []byte) *Conn {
 	t.Helper()
 	rk, err := KeysFromSecret(kuSuite, readSecret)
-	if err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, err, "derive the client's 1-RTT read keys")
 	rop, err := NewOpener(rk)
-	if err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, err, "NewOpener for the client's read keys")
 	wk, err := KeysFromSecret(kuSuite, writeSecret)
-	if err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, err, "derive the client's 1-RTT write keys")
 	wsl, err := NewSealer(wk)
-	if err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, err, "NewSealer for the client's write keys")
 	c := &Conn{
 		dcid:               []byte("keyupdt0"),
 		handshakeComplete:  true,
@@ -41,12 +36,8 @@ func newKUTestConn(t *testing.T, readSecret, writeSecret []byte) *Conn {
 	}
 	c.keys.OneRTT = rop
 	c.oneRTTSealer = wsl
-	if err := c.initAppReadKU(kuSuite, readSecret, rop.hp); err != nil {
-		t.Fatal(err)
-	}
-	if err := c.initAppWriteKU(kuSuite, writeSecret, wsl.hp); err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, c.initAppReadKU(kuSuite, readSecret, rop.hp), "install the read key-update state")
+	require.NoError(t, c.initAppWriteKU(kuSuite, writeSecret, wsl.hp), "install the write key-update state")
 	return c
 }
 
@@ -60,28 +51,18 @@ func serverGen(t *testing.T, readSecret []byte, n int) *Sealer {
 		secret = quicKuSecret(sha256.New, secret)
 	}
 	k, err := KeysFromSecret(kuSuite, secret)
-	if err != nil {
-		t.Fatal(err)
-	}
+	require.NoErrorf(t, err, "derive the server's generation-%d keys", n)
 	if n == 0 {
 		s, err := NewSealer(k)
-		if err != nil {
-			t.Fatal(err)
-		}
+		require.NoError(t, err, "NewSealer for the server's generation-0 keys")
 		return s
 	}
 	gen0, err := KeysFromSecret(kuSuite, readSecret)
-	if err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, err, "derive generation 0 for its header-protection key")
 	hp0, err := NewSealer(gen0)
-	if err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, err, "NewSealer for generation 0's header protection")
 	s, err := sealerWithHP(k, hp0.hp)
-	if err != nil {
-		t.Fatal(err)
-	}
+	require.NoErrorf(t, err, "build the generation-%d sealer on generation 0's HP key", n)
 	return s
 }
 
@@ -98,9 +79,7 @@ func sealKP(t *testing.T, s *Sealer, dcid []byte, pn uint64, keyPhase bool, fram
 		hdr = append(hdr, byte(pn>>(8*uint(i))))
 	}
 	pkt, err := s.Seal(nil, hdr, pnOff, pnLen, pn, frames)
-	if err != nil {
-		t.Fatal(err)
-	}
+	require.NoErrorf(t, err, "seal a short-header packet at pn %d with key phase %v", pn, keyPhase)
 	return pkt
 }
 
@@ -115,42 +94,27 @@ func TestConformance_RFC9001_Sec62_KeyUpdateResponder(t *testing.T) {
 	writeSecret := bytes.Repeat([]byte{0x22}, 32)
 	c := newKUTestConn(t, readSecret, writeSecret)
 	s, err := c.OpenStream()
-	if err != nil {
-		t.Fatal(err)
-	}
-
+	require.NoError(t, err, "OpenStream for the stream the server writes on")
 	g0 := serverGen(t, readSecret, 0)
 	g1 := serverGen(t, readSecret, 1)
-
 	p0 := sealKP(t, g0, nil, 0, false, AppendStream(nil, 0, 0, false, []byte("aaaa")))
-	if err := c.recvDatagram(p0); err != nil {
-		t.Fatalf("recv phase-0: %v", err)
-	}
-	if c.ku.phase {
-		t.Fatal("key phase should still be 0 before any update")
-	}
-
 	p1 := sealKP(t, g1, nil, 1, true, AppendStream(nil, 0, 4, true, []byte("bbbb")))
-	if err := c.recvDatagram(p1); err != nil {
-		t.Fatalf("recv phase-1 (key update): %v", err)
-	}
-	if !c.ku.phase {
-		t.Fatal("key phase should have flipped to 1 after the update committed")
-	}
-	if !c.appSendPhase() {
-		t.Fatal("client send phase should have flipped so its ACKs use the new keys")
-	}
 
+	require.NoError(t, c.recvDatagram(p0), "recv phase-0")
+	phaseBefore := c.ku.phase
+	require.NoError(t, c.recvDatagram(p1), "recv phase-1 (key update)")
+
+	assert.False(t, phaseBefore, "key phase should still be 0 before any update")
+	assert.True(t, c.ku.phase, "key phase should have flipped to 1 after the update committed")
+	assert.True(t, c.appSendPhase(),
+		"client send phase should have flipped so its ACKs use the new keys")
 	var body []byte
 	for _, chunk := range [][]byte{s.Recv(), s.Recv()} {
 		body = append(body, chunk...)
 	}
-	if got := string(body); got != "aaaabbbb" {
-		t.Fatalf("reassembled %q across the key-update boundary, want %q", got, "aaaabbbb")
-	}
-	if !s.Finished() {
-		t.Fatal("stream should be finished")
-	}
+	assert.Equalf(t, "aaaabbbb", string(body),
+		"reassembled %q across the key-update boundary, want %q", string(body), "aaaabbbb")
+	assert.True(t, s.Finished(), "stream should be finished")
 }
 
 // TestConformance_RFC9001_Sec63_PrevKeysReordered checks that after committing a
@@ -164,53 +128,44 @@ func TestConformance_RFC9001_Sec63_PrevKeysReordered(t *testing.T) {
 	now := time.Unix(1000, 0)
 	c.now = func() time.Time { return now }
 	s, err := c.OpenStream()
-	if err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, err, "OpenStream for the stream the server writes on")
 	g0 := serverGen(t, readSecret, 0)
 	g1 := serverGen(t, readSecret, 1)
-
 	// phase 0 (pn 0), then a phase-1 update at pn 5 (boundary = 5).
-	if err := c.recvDatagram(sealKP(t, g0, nil, 0, false, AppendStream(nil, 0, 0, false, []byte("aaaa")))); err != nil {
-		t.Fatal(err)
-	}
-	if err := c.recvDatagram(sealKP(t, g1, nil, 5, true, AppendStream(nil, 0, 8, false, []byte("cccc")))); err != nil {
-		t.Fatal(err)
-	}
-	if !c.ku.phase || c.ku.boundary != 5 {
-		t.Fatalf("post-update: phase=%v boundary=%d, want phase=1 boundary=5", c.ku.phase, c.ku.boundary)
-	}
+	require.NoError(t, c.recvDatagram(sealKP(t, g0, nil, 0, false, AppendStream(nil, 0, 0, false, []byte("aaaa")))),
+		"recv the phase-0 packet")
+	require.NoError(t, c.recvDatagram(sealKP(t, g1, nil, 5, true, AppendStream(nil, 0, 8, false, []byte("cccc")))),
+		"recv the phase-1 update at pn 5")
+	require.Truef(t, c.ku.phase && c.ku.boundary == 5,
+		"post-update: phase=%v boundary=%d, want phase=1 boundary=5", c.ku.phase, c.ku.boundary)
 
 	// A reordered previous-generation (phase 0) packet at pn 2 fills the gap.
-	if err := c.recvDatagram(sealKP(t, g0, nil, 2, false, AppendStream(nil, 0, 4, false, []byte("bbbb")))); err != nil {
-		t.Fatal(err)
-	}
+	reordered := c.recvDatagram(sealKP(t, g0, nil, 2, false, AppendStream(nil, 0, 4, false, []byte("bbbb"))))
+
+	require.NoError(t, reordered, "a reordered prev-generation packet must not error")
 	var body []byte
 	for i := 0; i < 3; i++ {
 		body = append(body, s.Recv()...)
 	}
-	if got := string(body); got != "aaaabbbbcccc" {
-		t.Fatalf("reassembled %q, want %q (reordered prev-gen packet must decrypt)", got, "aaaabbbbcccc")
-	}
+	assert.Equalf(t, "aaaabbbbcccc", string(body),
+		"reassembled %q, want %q (reordered prev-gen packet must decrypt)", string(body), "aaaabbbbcccc")
 
 	// After the retention window, prev keys are dropped and a late old-gen packet
 	// no longer decrypts.
 	now = now.Add(10 * time.Second)
 	c.discardStaleKeys()
-	if c.ku.prev != nil {
-		t.Fatal("prev keys should be discarded after 3×PTO")
-	}
 	late := sealKP(t, g0, nil, 3, false, AppendStream(nil, 0, 12, false, []byte("dddd")))
-	if err := c.recvDatagram(late); err != nil {
-		t.Fatal(err)
-	}
+
+	lateErr := c.recvDatagram(late)
+
+	assert.Nil(t, c.ku.prev, "prev keys should be discarded after 3×PTO (§6.3)")
+	require.NoError(t, lateErr, "a late old-gen packet must be dropped silently, not error")
 	body = body[:0]
 	for i := 0; i < 3; i++ {
 		body = append(body, s.Recv()...)
 	}
-	if len(body) != 0 {
-		t.Fatalf("late old-gen packet after discard should be dropped, but delivered %q", body)
-	}
+	assert.Emptyf(t, body,
+		"late old-gen packet after discard should be dropped, but delivered %q", body)
 }
 
 // TestConformance_RFC9001_Sec64_ForgedPhaseBitBounded checks that packets with a
@@ -220,25 +175,23 @@ func TestConformance_RFC9001_Sec64_ForgedPhaseBitBounded(t *testing.T) {
 	readSecret := bytes.Repeat([]byte{0x55}, 32)
 	writeSecret := bytes.Repeat([]byte{0x66}, 32)
 	c := newKUTestConn(t, readSecret, writeSecret)
-	if _, err := c.OpenStream(); err != nil {
-		t.Fatal(err)
-	}
+	_, err := c.OpenStream()
+	require.NoError(t, err, "OpenStream for the stream the server writes on")
 	g0 := serverGen(t, readSecret, 0)
-
 	// Establish the current generation with a legitimate phase-0 packet.
-	if err := c.recvDatagram(sealKP(t, g0, nil, 0, false, AppendStream(nil, 0, 0, false, []byte("aaaa")))); err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, c.recvDatagram(sealKP(t, g0, nil, 0, false, AppendStream(nil, 0, 0, false, []byte("aaaa")))),
+		"recv the legitimate phase-0 packet")
+
 	// Forge phase-1 packets sealed with the WRONG (gen-0) keys: they trial-decrypt
 	// against the next generation, fail, and must be dropped without committing.
 	for i := 0; i < 8; i++ {
 		forged := sealKP(t, g0, nil, uint64(10+i), true, AppendStream(nil, 0, 4, false, []byte("xxxx")))
-		if err := c.recvDatagram(forged); err != nil {
-			t.Fatalf("forged packet must be skipped, not error: %v", err)
-		}
-		if c.ku.phase {
-			t.Fatal("a forged Key Phase bit must not trigger a key update")
-		}
+
+		err := c.recvDatagram(forged)
+
+		require.NoErrorf(t, err, "forged packet %d must be skipped, not error", i)
+		require.Falsef(t, c.ku.phase,
+			"a forged Key Phase bit must not trigger a key update (forged packet %d)", i)
 	}
 }
 
@@ -250,17 +203,15 @@ func TestConformance_RFC9001_Sec61_UpdateBeforeConfirmed(t *testing.T) {
 	writeSecret := bytes.Repeat([]byte{0x88}, 32)
 	c := newKUTestConn(t, readSecret, writeSecret)
 	c.handshakeConfirmed = false // TLS done but HANDSHAKE_DONE not yet received
-	if _, err := c.OpenStream(); err != nil {
-		t.Fatal(err)
-	}
+	_, err := c.OpenStream()
+	require.NoError(t, err, "OpenStream for the stream the server writes on")
 	g1 := serverGen(t, readSecret, 1)
+
 	// A well-formed phase-1 update packet must be dropped, not committed.
-	if err := c.recvDatagram(sealKP(t, g1, nil, 0, true, AppendStream(nil, 0, 0, false, []byte("aaaa")))); err != nil {
-		t.Fatal(err)
-	}
-	if c.ku.phase {
-		t.Fatal("a key update before handshake confirmation must not commit (§6.1)")
-	}
+	recvErr := c.recvDatagram(sealKP(t, g1, nil, 0, true, AppendStream(nil, 0, 0, false, []byte("aaaa"))))
+
+	require.NoError(t, recvErr, "the update must be dropped silently, not error")
+	assert.False(t, c.ku.phase, "a key update before handshake confirmation must not commit (§6.1)")
 }
 
 // TestKeyUpdate_QuicKuVector pins the key-update secret derivation (RFC 9001
@@ -268,15 +219,12 @@ func TestConformance_RFC9001_Sec61_UpdateBeforeConfirmed(t *testing.T) {
 // full-length and deterministic.
 func TestKeyUpdate_QuicKuVector(t *testing.T) {
 	secret := bytes.Repeat([]byte{0xab}, 32)
-	got := quicKuSecret(sha256.New, secret)
 	want := hkdfExpandLabel(sha256.New, secret, "quic ku", 32)
-	if !bytes.Equal(got, want) {
-		t.Fatal("quicKuSecret must equal HKDF-Expand-Label(secret, \"quic ku\", 32)")
-	}
-	if len(got) != 32 {
-		t.Fatalf("quic ku secret length = %d, want 32", len(got))
-	}
-	if bytes.Equal(got, secret) {
-		t.Fatal("ratcheted secret must differ from the input")
-	}
+
+	got := quicKuSecret(sha256.New, secret)
+
+	assert.Equal(t, want, got,
+		"quicKuSecret must equal HKDF-Expand-Label(secret, \"quic ku\", 32) — RFC 9001 §6.1")
+	assert.Lenf(t, got, 32, "quic ku secret length = %d, want 32 (Hash.length)", len(got))
+	assert.NotEqual(t, secret, got, "ratcheted secret must differ from the input")
 }

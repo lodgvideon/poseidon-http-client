@@ -5,6 +5,9 @@ package quic
 import (
 	"bytes"
 	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // flush built the frame payload for a STREAM-less packet from a nil slice, so the
@@ -27,7 +30,11 @@ import (
 // destination, so it is measuring a.extra and not the caller's nil.
 //
 // Behind !race for the reason the other allocation gates are: the detector allocates
-// as it instruments.
+// as it instruments. For the same reason no testify assertion may appear INSIDE the
+// measured closure — require/assert reflect over their arguments and box them into an
+// interface slice, and AllocsPerRun counts the whole process, so one call in there
+// would be charged to every iteration and the gate would be measuring the assertion
+// library. Every assertion below sits outside the measurement.
 
 // The transport here is bench_throughput_test.go's countingPC, which drops each
 // datagram instead of keeping it. That is not incidental: capturePC retains every
@@ -47,7 +54,6 @@ func TestFlush_StandaloneACKDoesNotAllocate(t *testing.T) {
 	c, _ := drainConn()
 	pc := &countingPC{}
 	c.pc = pc
-
 	var pn uint64
 	owe := func() {
 		// An ack-eliciting packet arrives, so an ACK is owed and immediately due. The
@@ -57,11 +63,8 @@ func TestFlush_StandaloneACKDoesNotAllocate(t *testing.T) {
 		c.acks[spaceApp].receive(pn, true)
 		c.acks[spaceApp].immediate = true
 	}
-
 	owe()
-	if err := c.flush(); err != nil { // warmup: grows the scratch
-		t.Fatal(err)
-	}
+	require.NoError(t, c.flush()) // warmup: grows the scratch
 	before := pc.datagrams.Load()
 
 	n := testing.AllocsPerRun(200, func() {
@@ -69,14 +72,11 @@ func TestFlush_StandaloneACKDoesNotAllocate(t *testing.T) {
 		_ = c.flush()
 	})
 
-	if pc.datagrams.Load() <= before {
-		t.Fatalf("flush wrote no further packets (%d then %d) — nothing was measured, "+
+	require.Greaterf(t, pc.datagrams.Load(), before,
+		"flush wrote no further packets (%d then %d) — nothing was measured, "+
 			"so a zero here would say only that the path never ran", before, pc.datagrams.Load())
-	}
-	if n != 0 {
-		t.Errorf("the standalone-ACK flush allocates %.2f objects per ACK, want 0 — the "+
-			"frame payload buffer is being grown from nil on every call", n)
-	}
+	assert.Zerof(t, n, "the standalone-ACK flush allocates %.2f objects per ACK, want 0 — the "+
+		"frame payload buffer is being grown from nil on every call", n)
 }
 
 // TestFlush_ScratchDoesNotCarryStaleFrames is the hazard the reuse buys, and the
@@ -104,39 +104,28 @@ func TestFlush_ScratchDoesNotCarryStaleFrames(t *testing.T) {
 	}
 	warm.acks[spaceApp].immediate = true
 	warm.pendingCtrl = AppendMaxData(nil, 1<<40) // a wide varint
-	if err := warm.flush(); err != nil {
-		t.Fatal(err)
-	}
-	if len(warmPC.pkts) != 1 {
-		t.Fatalf("warmup wrote %d packets, want 1", len(warmPC.pkts))
-	}
+	require.NoError(t, warm.flush())
+	require.Lenf(t, warmPC.pkts, 1, "warmup wrote %d packets, want 1", len(warmPC.pkts))
 	longLen := len(warm.ackScratch)
 
 	// The same connection now sends the smallest thing it can: one contiguous ACK.
 	warm.acks[spaceApp] = ackTracker{}
 	warm.acks[spaceApp].receive(100, true)
 	warm.acks[spaceApp].immediate = true
-	if err := warm.flush(); err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, warm.flush())
 	got := append([]byte(nil), warm.ackScratch...)
-
 	// A fresh connection sending only that small packet.
 	fresh, _ := drainConn()
 	fresh.acks[spaceApp].receive(100, true)
 	fresh.acks[spaceApp].immediate = true
-	if err := fresh.flush(); err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, fresh.flush())
 	want := fresh.ackScratch
 
-	if longLen <= len(want) {
-		t.Fatalf("the warmup payload was %d bytes and the short one is %d — the first has "+
+	require.Greaterf(t, longLen, len(want),
+		"the warmup payload was %d bytes and the short one is %d — the first has "+
 			"to be longer or there are no stale bytes for the second to expose", longLen, len(want))
-	}
-	if !bytes.Equal(got, want) {
-		t.Errorf("the frame payload built after a larger one differs from the same payload "+
+	assert.Truef(t, bytes.Equal(got, want),
+		"the frame payload built after a larger one differs from the same payload "+
 			"built fresh:\n got %x\nwant %x\nthe reused scratch leaked the earlier packet's "+
 			"frames", got, want)
-	}
 }

@@ -18,6 +18,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
 	"github.com/lodgvideon/poseidon-http-client/header"
 	"github.com/lodgvideon/poseidon-http-client/http1"
 )
@@ -59,35 +62,30 @@ func TestTrailerSectionStall_DoesNotSwallowDeadlineOrPoolConn(t *testing.T) {
 		_, _ = server.Write([]byte("HTTP/1.1 401 Unauthorized\r\nContent-Length: 3\r\n\r\nBAD"))
 		time.Sleep(200 * time.Millisecond)
 	}()
-
 	ctx, cancel := context.WithTimeout(context.Background(), 150*time.Millisecond)
 	defer cancel()
 	ex := http1.NewConn(client).NewExchange()
-	if err := ex.WriteRequest(ctx, getFields(), true); err != nil {
-		t.Fatalf("WriteRequest: %v", err)
-	}
-	if _, _, err := ex.ReadResponse(ctx); err != nil {
-		t.Fatalf("ReadResponse: %v", err)
-	}
+	require.NoError(t, ex.WriteRequest(ctx, getFields(), true), "WriteRequest")
+	_, _, err := ex.ReadResponse(ctx)
+	require.NoError(t, err, "ReadResponse")
 
 	buf := make([]byte, 64)
 	var lastErr error
 	for {
-		_, done, err := ex.ReadBodyChunk(buf)
-		lastErr = err
-		if err != nil || done {
+		_, done, rerr := ex.ReadBodyChunk(buf)
+		lastErr = rerr
+		if rerr != nil || done {
 			break
 		}
 	}
-	if lastErr == nil {
-		t.Error("ReadBodyChunk returned a nil error after the trailer read timed out — " +
+
+	assert.Error(t, lastErr,
+		"ReadBodyChunk returned a nil error after the trailer read timed out — "+
 			"the caller's deadline was swallowed and the response reported complete")
-	}
-	if ex.KeepAlive() {
-		t.Error("KeepAlive() = true after an unterminated trailer section: the stream " +
-			"position is indeterminate and the server's next bytes are still on the " +
+	assert.False(t, ex.KeepAlive(),
+		"KeepAlive() = true after an unterminated trailer section: the stream "+
+			"position is indeterminate and the server's next bytes are still on the "+
 			"socket, so the pool would hand them to the next request as a status line")
-	}
 }
 
 // TestTrailerSectionEOF_StillCompletesButNotPoolable is the other side, and the
@@ -97,16 +95,15 @@ func TestTrailerSectionStall_DoesNotSwallowDeadlineOrPoolConn(t *testing.T) {
 func TestTrailerSectionEOF_StillCompletesButNotPoolable(t *testing.T) {
 	ex := wireExchange(t, "GET",
 		"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n0\r\n")
-	if _, _, err := ex.ReadResponse(context.Background()); err != nil {
-		t.Fatalf("ReadResponse: %v", err)
-	}
-	if body := drainBody(t, ex); body != "hello" {
-		t.Errorf("body = %q, want %q — a server closing after the terminal chunk still "+
+	_, _, err := ex.ReadResponse(context.Background())
+	require.NoError(t, err, "ReadResponse")
+
+	body := drainBody(t, ex)
+
+	assert.Equalf(t, "hello", body,
+		"body = %q, want %q — a server closing after the terminal chunk still "+
 			"delivered a complete body; erroring here would fail a good response", body, "hello")
-	}
-	if ex.KeepAlive() {
-		t.Error("KeepAlive() = true after the server closed the connection, want false")
-	}
+	assert.False(t, ex.KeepAlive(), "KeepAlive() = true after the server closed the connection, want false")
 }
 
 // TestReadDeadline_DoesNotLeakToTheNextExchange pins that a read deadline
@@ -130,33 +127,25 @@ func TestReadDeadline_DoesNotLeakToTheNextExchange(t *testing.T) {
 		_, _ = server.Write([]byte("HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nhi"))
 		time.Sleep(100 * time.Millisecond)
 	}()
-
 	c := http1.NewConn(client)
-
 	ctx1, cancel1 := context.WithTimeout(context.Background(), 200*time.Millisecond)
 	defer cancel1()
 	ex1 := c.NewExchange()
-	if err := ex1.WriteRequest(ctx1, getFields(), true); err != nil {
-		t.Fatalf("exchange 1 WriteRequest: %v", err)
-	}
-	if _, _, err := ex1.ReadResponse(ctx1); err != nil {
-		t.Fatalf("exchange 1 ReadResponse: %v", err)
-	}
-	if body := drainBody(t, ex1); body != "ok" {
-		t.Fatalf("exchange 1 body = %q, want %q", body, "ok")
-	}
-
+	require.NoError(t, ex1.WriteRequest(ctx1, getFields(), true), "exchange 1 WriteRequest")
+	_, _, err := ex1.ReadResponse(ctx1)
+	require.NoError(t, err, "exchange 1 ReadResponse")
+	body := drainBody(t, ex1)
+	require.Equalf(t, "ok", body, "exchange 1 body = %q, want %q", body, "ok")
 	// Wait past exchange 1's deadline, then run one with none of its own.
 	time.Sleep(250 * time.Millisecond)
 	ex2 := c.NewExchange()
-	if err := ex2.WriteRequest(context.Background(), getFields(), true); err != nil {
-		t.Fatalf("exchange 2 WriteRequest: %v", err)
+	require.NoError(t, ex2.WriteRequest(context.Background(), getFields(), true), "exchange 2 WriteRequest")
+
+	_, _, err = ex2.ReadResponse(context.Background())
+
+	if err != nil && errors.Is(err, os.ErrDeadlineExceeded) {
+		t.Log("(confirmed: the failure is a deadline, inherited from exchange 1)")
 	}
-	if _, _, err := ex2.ReadResponse(context.Background()); err != nil {
-		t.Errorf("exchange 2 failed with no deadline of its own: %v\n"+
-			"exchange 1's read deadline is still installed on the pooled socket", err)
-		if errors.Is(err, os.ErrDeadlineExceeded) {
-			t.Log("(confirmed: the failure is a deadline, inherited from exchange 1)")
-		}
-	}
+	assert.NoErrorf(t, err, "exchange 2 failed with no deadline of its own: %v\n"+
+		"exchange 1's read deadline is still installed on the pooled socket", err)
 }

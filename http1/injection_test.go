@@ -20,11 +20,13 @@ package http1_test
 
 import (
 	"context"
-	"errors"
 	"net"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	"github.com/lodgvideon/poseidon-http-client/header"
 	"github.com/lodgvideon/poseidon-http-client/http1"
@@ -43,9 +45,7 @@ func rawCapture(t *testing.T) (*http1.Exchange, func() string) {
 	t.Helper()
 
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("listen: %v", err)
-	}
+	require.NoError(t, err, "listen")
 	t.Cleanup(func() { _ = ln.Close() })
 
 	got := make(chan string, 1)
@@ -71,9 +71,7 @@ func rawCapture(t *testing.T) (*http1.Exchange, func() string) {
 	}()
 
 	nc, err := net.Dial("tcp", ln.Addr().String())
-	if err != nil {
-		t.Fatalf("dial: %v", err)
-	}
+	require.NoError(t, err, "dial")
 	conn := http1.NewConn(nc)
 	t.Cleanup(func() { _ = conn.Close() })
 
@@ -113,20 +111,15 @@ func TestConformance_RFC9110_Sec5_5_HeaderValueCRLF_NotWritten(t *testing.T) {
 		Value: []byte("bob\r\nX-Injected: pwned\r\nX-Evil: yes"),
 	}), true)
 
-	// The wire is asserted before the error, and with Errorf rather than Fatalf,
+	// The wire is asserted before the error, and with assert rather than require,
 	// so that a regression reports the actual security failure (bytes on the
-	// socket) rather than only its proxy (a nil error). A Fatalf on the error
+	// socket) rather than only its proxy (a nil error). Aborting on the error
 	// here would short-circuit the assertion that matters.
 	wire := capture()
-	if strings.Contains(wire, "X-Injected") {
-		t.Errorf("REQUEST SPLIT: caller's header VALUE became a header FIELD.\nwire:\n%s", wire)
-	}
-	if wire != "" {
-		t.Errorf("nothing must reach the wire; got %d bytes:\n%s", len(wire), wire)
-	}
-	if !errors.Is(err, http1.ErrInvalidRequest) {
-		t.Errorf("WriteRequest err = %v, want ErrInvalidRequest", err)
-	}
+	assert.NotContainsf(t, wire, "X-Injected",
+		"REQUEST SPLIT: caller's header VALUE became a header FIELD.\nwire:\n%s", wire)
+	assert.Emptyf(t, wire, "nothing must reach the wire; got %d bytes:\n%s", len(wire), wire)
+	assert.ErrorIsf(t, err, http1.ErrInvalidRequest, "WriteRequest err = %v, want ErrInvalidRequest", err)
 }
 
 // TestConformance_RFC9110_Sec5_5_HeaderValueNUL_NotWritten covers the third
@@ -141,12 +134,9 @@ func TestConformance_RFC9110_Sec5_5_HeaderValueNUL_NotWritten(t *testing.T) {
 		Value: []byte("bob\x00admin"),
 	}), true)
 
-	if wire := capture(); wire != "" {
-		t.Errorf("nothing must reach the wire; got:\n%q", wire)
-	}
-	if !errors.Is(err, http1.ErrInvalidRequest) {
-		t.Errorf("WriteRequest err = %v, want ErrInvalidRequest", err)
-	}
+	wire := capture()
+	assert.Emptyf(t, wire, "nothing must reach the wire; got:\n%q", wire)
+	assert.ErrorIsf(t, err, http1.ErrInvalidRequest, "WriteRequest err = %v, want ErrInvalidRequest", err)
 }
 
 // TestConformance_RFC9110_Sec5_5_AuthorityCRLF_NotWritten covers the same rule
@@ -165,15 +155,9 @@ func TestConformance_RFC9110_Sec5_5_AuthorityCRLF_NotWritten(t *testing.T) {
 	}, true)
 
 	wire := capture()
-	if strings.Contains(wire, "X-Injected") {
-		t.Errorf("REQUEST SPLIT via :authority:\nwire:\n%s", wire)
-	}
-	if wire != "" {
-		t.Errorf("nothing must reach the wire; got:\n%s", wire)
-	}
-	if !errors.Is(err, http1.ErrInvalidRequest) {
-		t.Errorf("WriteRequest err = %v, want ErrInvalidRequest", err)
-	}
+	assert.NotContainsf(t, wire, "X-Injected", "REQUEST SPLIT via :authority:\nwire:\n%s", wire)
+	assert.Emptyf(t, wire, "nothing must reach the wire; got:\n%s", wire)
+	assert.ErrorIsf(t, err, http1.ErrInvalidRequest, "WriteRequest err = %v, want ErrInvalidRequest", err)
 }
 
 // TestConformance_RFC9110_Sec5_6_2_HeaderNameToken_NotWritten pins the name
@@ -198,12 +182,9 @@ func TestConformance_RFC9110_Sec5_6_2_HeaderNameToken_NotWritten(t *testing.T) {
 				Value: []byte("v"),
 			}), true)
 
-			if wire := capture(); wire != "" {
-				t.Errorf("nothing must reach the wire; got:\n%q", wire)
-			}
-			if !errors.Is(err, http1.ErrInvalidRequest) {
-				t.Errorf("WriteRequest err = %v, want ErrInvalidRequest", err)
-			}
+			wire := capture()
+			assert.Emptyf(t, wire, "nothing must reach the wire; got:\n%q", wire)
+			assert.ErrorIsf(t, err, http1.ErrInvalidRequest, "WriteRequest err = %v, want ErrInvalidRequest", err)
 		})
 	}
 }
@@ -241,12 +222,9 @@ func TestConformance_RFC9112_Sec3_RequestLine_NotWritten(t *testing.T) {
 				{Name: []byte(":authority"), Value: []byte("example.com")},
 			}, true)
 
-			if wire := capture(); wire != "" {
-				t.Errorf("nothing must reach the wire; got:\n%q", wire)
-			}
-			if !errors.Is(err, http1.ErrInvalidRequest) {
-				t.Errorf("WriteRequest err = %v, want ErrInvalidRequest", err)
-			}
+			wire := capture()
+			assert.Emptyf(t, wire, "nothing must reach the wire; got:\n%q", wire)
+			assert.ErrorIsf(t, err, http1.ErrInvalidRequest, "WriteRequest err = %v, want ErrInvalidRequest", err)
 		})
 	}
 }
@@ -271,17 +249,12 @@ func TestConformance_RFC9112_Sec3_2_EmptyAuthorityEmptyHost(t *testing.T) {
 		{Name: []byte(":path"), Value: []byte("/")},
 		{Name: []byte(":authority"), Value: []byte("")},
 	}, true)
-	if err != nil {
-		t.Fatalf("empty authority must be sent, not refused (RFC 9112 §3.2); err = %v", err)
-	}
 
+	require.NoErrorf(t, err,
+		"empty authority must be sent, not refused (RFC 9112 §3.2); err = %v", err)
 	wire := capture()
-	if !strings.Contains(wire, "Host: \r\n") {
-		t.Errorf("want an empty Host field value %q in:\n%q", "Host: \r\n", wire)
-	}
-	if !strings.HasPrefix(wire, "GET / HTTP/1.1\r\n") {
-		t.Errorf("request line malformed:\n%q", wire)
-	}
+	assert.Containsf(t, wire, "Host: \r\n", "want an empty Host field value %q in:\n%q", "Host: \r\n", wire)
+	assert.Truef(t, strings.HasPrefix(wire, "GET / HTTP/1.1\r\n"), "request line malformed:\n%q", wire)
 }
 
 // TestConformance_RFC9110_Sec5_5_LegalValuesUnaffected guards the other
@@ -297,10 +270,8 @@ func TestConformance_RFC9110_Sec5_5_LegalValuesUnaffected(t *testing.T) {
 		header.Field{Name: []byte("accept"), Value: []byte("text/html, application/json;q=0.9")},
 		header.Field{Name: []byte("x-tab"), Value: []byte("a\tb")},
 	), true)
-	if err != nil {
-		t.Fatalf("legal request refused: %v", err)
-	}
 
+	require.NoErrorf(t, err, "legal request refused: %v", err)
 	wire := capture()
 	for _, want := range []string{
 		"GET / HTTP/1.1\r\n",
@@ -309,8 +280,6 @@ func TestConformance_RFC9110_Sec5_5_LegalValuesUnaffected(t *testing.T) {
 		"accept: text/html, application/json;q=0.9\r\n",
 		"x-tab: a\tb\r\n",
 	} {
-		if !strings.Contains(wire, want) {
-			t.Errorf("missing %q in:\n%q", want, wire)
-		}
+		assert.Containsf(t, wire, want, "missing %q in:\n%q", want, wire)
 	}
 }

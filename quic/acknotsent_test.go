@@ -3,6 +3,9 @@ package quic
 import (
 	"testing"
 	"time"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // TestConformance_RFC9000_Sec131_AckForNeverSentPacket checks that an ACK whose
@@ -20,21 +23,22 @@ func TestConformance_RFC9000_Sec131_AckForNeverSentPacket(t *testing.T) {
 		return c
 	}
 
-	// Largest Acknowledged == sendPN (the next, not-yet-sent number) → violation.
-	if err := (&connFrameHandler{c: newConn(), space: spaceApp}).OnAck(2, 0, 0); err != ErrProtocolViolation {
-		t.Fatalf("OnAck(largest=2) with sendPN=2 = %v, want ErrProtocolViolation", err)
-	}
-	// A far-future Largest Acknowledged → violation.
-	if err := (&connFrameHandler{c: newConn(), space: spaceApp}).OnAck(999, 0, 0); err != ErrProtocolViolation {
-		t.Fatalf("OnAck(largest=999) = %v, want ErrProtocolViolation", err)
-	}
-	// The exact boundary: Largest == sendPN-1 (the highest we sent) is accepted.
-	if err := (&connFrameHandler{c: newConn(), space: spaceApp}).OnAck(1, 0, 1); err != nil {
-		t.Fatalf("OnAck(largest=1) with sendPN=2 = %v, want nil", err)
-	}
+	// Largest Acknowledged == sendPN (the next, not-yet-sent number), a far-future
+	// one, and the exact boundary Largest == sendPN-1 (the highest we sent).
+	atSendPN := (&connFrameHandler{c: newConn(), space: spaceApp}).OnAck(2, 0, 0)
+	farFuture := (&connFrameHandler{c: newConn(), space: spaceApp}).OnAck(999, 0, 0)
+	highestSent := (&connFrameHandler{c: newConn(), space: spaceApp}).OnAck(1, 0, 1)
+	code, ok := closeCodeFor(ErrProtocolViolation)
 
+	assert.ErrorIsf(t, atSendPN, ErrProtocolViolation,
+		"OnAck(largest=2) with sendPN=2 = %v, want ErrProtocolViolation", atSendPN)
+	assert.ErrorIsf(t, farFuture, ErrProtocolViolation,
+		"OnAck(largest=999) = %v, want ErrProtocolViolation", farFuture)
+	assert.NoErrorf(t, highestSent, "OnAck(largest=1) with sendPN=2 = %v, want nil", highestSent)
 	// ErrProtocolViolation maps to the PROTOCOL_VIOLATION transport code.
-	if code, ok := closeCodeFor(ErrProtocolViolation); !ok || code != ErrCodeProtocolViolation {
-		t.Fatalf("closeCodeFor(ErrProtocolViolation) = (%#x, %v), want (%#x, true)", code, ok, ErrCodeProtocolViolation)
-	}
+	require.Truef(t, ok, "closeCodeFor(ErrProtocolViolation) = (%#x, %v), want (%#x, true)",
+		code, ok, ErrCodeProtocolViolation)
+	assert.Equalf(t, ErrCodeProtocolViolation, code,
+		"closeCodeFor(ErrProtocolViolation) = (%#x, %v), want (%#x, true)",
+		code, ok, ErrCodeProtocolViolation)
 }

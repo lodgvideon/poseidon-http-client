@@ -24,10 +24,12 @@ package client
 
 import (
 	"context"
-	"errors"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	"github.com/lodgvideon/poseidon-http-client/conn"
 	"github.com/lodgvideon/poseidon-http-client/frame"
@@ -66,41 +68,43 @@ func forbiddenHeadersRepro() func(*frame.Framer) {
 	}
 }
 
+// forbiddenHeaderClient builds a client against the capture server above.
+func forbiddenHeaderClient(t *testing.T) *Client {
+	t.Helper()
+	d := &fakeDialer{srvAfter: forbiddenHeadersRepro()}
+	c, err := NewClient(ClientOptions{
+		Addr:     "fake:0",
+		ConnOpts: conn.ConnOptions{Dialer: d},
+	})
+	require.NoError(t, err, "NewClient")
+	t.Cleanup(func() { _ = c.Close() })
+	return c
+}
+
 // TestRepro_ForbiddenHeader_Connection_Behavior is the REPRO for
 // RFC 7540 §8.1.2.3 — sending "Connection" in regular headers.
 //
 // After hardening validateRequest, this test must fail with
 // ErrInvalidRequest. Today (pre-fix) it likely passes through.
 func TestConformance_RFC7540_Sec8_1_2_3_ForbidsConnection(t *testing.T) {
-	d := &fakeDialer{srvAfter: forbiddenHeadersRepro()}
-	c, err := NewClient(ClientOptions{
-		Addr:     "fake:0",
-		ConnOpts: conn.ConnOptions{Dialer: d},
-	})
-	if err != nil {
-		t.Fatalf("NewClient: %v", err)
-	}
-	defer c.Close()
-
+	c := forbiddenHeaderClient(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
+
 	var resp Response
-	err = c.Do(ctx, &Request{
+	err := c.Do(ctx, &Request{
 		Method: "GET", Path: "/",
 		Headers: []hpack.HeaderField{
 			{Name: []byte("connection"), Value: []byte("keep-alive")},
 		},
 	}, &resp)
+
 	// Hardened behavior: ErrInvalidRequest up front.
-	if err == nil {
-		t.Fatalf("Connection header was accepted; should be rejected per RFC 7540 §8.1.2.3 (status=%d)", resp.Status)
-	}
-	if !errors.Is(err, ErrInvalidRequest) {
-		t.Fatalf("expected ErrInvalidRequest for Connection header, got %v", err)
-	}
-	if !strings.Contains(strings.ToLower(err.Error()), "connection") {
-		t.Errorf("error should name the offending header: %v", err)
-	}
+	require.Errorf(t, err,
+		"Connection header was accepted; should be rejected per RFC 7540 §8.1.2.3 (status=%d)", resp.Status)
+	require.ErrorIs(t, err, ErrInvalidRequest, "expected ErrInvalidRequest for Connection header")
+	assert.Containsf(t, strings.ToLower(err.Error()), "connection",
+		"error should name the offending header: %v", err)
 }
 
 // TestRepro_ForbiddenHeader_TransferEncoding_Behavior is the REPRO for
@@ -110,31 +114,21 @@ func TestConformance_RFC7540_Sec8_1_2_3_ForbidsConnection(t *testing.T) {
 // Transfer-Encoding: chunked is a classic HTTP/1.1 request smuggling
 // payload: an HTTP/1.1→2 downgrade proxy can misinterpret it.
 func TestConformance_RFC7540_Sec8_1_2_3_ForbidsTransferEncoding(t *testing.T) {
-	d := &fakeDialer{srvAfter: forbiddenHeadersRepro()}
-	c, err := NewClient(ClientOptions{
-		Addr:     "fake:0",
-		ConnOpts: conn.ConnOptions{Dialer: d},
-	})
-	if err != nil {
-		t.Fatalf("NewClient: %v", err)
-	}
-	defer c.Close()
-
+	c := forbiddenHeaderClient(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
+
 	var resp Response
-	err = c.Do(ctx, &Request{
+	err := c.Do(ctx, &Request{
 		Method: "GET", Path: "/",
 		Headers: []hpack.HeaderField{
 			{Name: []byte("transfer-encoding"), Value: []byte("chunked")},
 		},
 	}, &resp)
-	if err == nil {
-		t.Fatalf("Transfer-Encoding header was accepted; should be rejected per RFC 7540 §8.1.2.3 (status=%d)", resp.Status)
-	}
-	if !errors.Is(err, ErrInvalidRequest) {
-		t.Fatalf("expected ErrInvalidRequest for Transfer-Encoding header, got %v", err)
-	}
+
+	require.Errorf(t, err,
+		"Transfer-Encoding header was accepted; should be rejected per RFC 7540 §8.1.2.3 (status=%d)", resp.Status)
+	require.ErrorIs(t, err, ErrInvalidRequest, "expected ErrInvalidRequest for Transfer-Encoding header")
 }
 
 // TestRepro_ForbiddenHeader_Upgrade_Behavior is the REPRO for
@@ -144,135 +138,87 @@ func TestConformance_RFC7540_Sec8_1_2_3_ForbidsTransferEncoding(t *testing.T) {
 // RFC 8441). Plain Upgrade header is meaningless on H2 and is a
 // downgrade-misread vector.
 func TestConformance_RFC7540_Sec8_1_2_3_ForbidsUpgrade(t *testing.T) {
-	d := &fakeDialer{srvAfter: forbiddenHeadersRepro()}
-	c, err := NewClient(ClientOptions{
-		Addr:     "fake:0",
-		ConnOpts: conn.ConnOptions{Dialer: d},
-	})
-	if err != nil {
-		t.Fatalf("NewClient: %v", err)
-	}
-	defer c.Close()
-
+	c := forbiddenHeaderClient(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
+
 	var resp Response
-	err = c.Do(ctx, &Request{
+	err := c.Do(ctx, &Request{
 		Method: "GET", Path: "/",
 		Headers: []hpack.HeaderField{
 			{Name: []byte("upgrade"), Value: []byte("h2c")},
 		},
 	}, &resp)
-	if err == nil {
-		t.Fatalf("Upgrade header was accepted; should be rejected per RFC 7540 §8.1.2.3 (status=%d)", resp.Status)
-	}
-	if !errors.Is(err, ErrInvalidRequest) {
-		t.Fatalf("expected ErrInvalidRequest for Upgrade header, got %v", err)
-	}
+
+	require.Errorf(t, err,
+		"Upgrade header was accepted; should be rejected per RFC 7540 §8.1.2.3 (status=%d)", resp.Status)
+	require.ErrorIs(t, err, ErrInvalidRequest, "expected ErrInvalidRequest for Upgrade header")
 }
 
 // TestRepro_ForbiddenHeader_KeepAlive_Behavior is the REPRO for
 // RFC 7540 §8.1.2.3 — sending "Keep-Alive" (HTTP/1.1 persistent-
 // connection signal; meaningless on H2).
 func TestConformance_RFC7540_Sec8_1_2_3_ForbidsKeepAlive(t *testing.T) {
-	d := &fakeDialer{srvAfter: forbiddenHeadersRepro()}
-	c, err := NewClient(ClientOptions{
-		Addr:     "fake:0",
-		ConnOpts: conn.ConnOptions{Dialer: d},
-	})
-	if err != nil {
-		t.Fatalf("NewClient: %v", err)
-	}
-	defer c.Close()
-
+	c := forbiddenHeaderClient(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
+
 	var resp Response
-	err = c.Do(ctx, &Request{
+	err := c.Do(ctx, &Request{
 		Method: "GET", Path: "/",
 		Headers: []hpack.HeaderField{
 			{Name: []byte("keep-alive"), Value: []byte("timeout=5")},
 		},
 	}, &resp)
-	if err == nil {
-		t.Fatalf("Keep-Alive header was accepted; should be rejected per RFC 7540 §8.1.2.3 (status=%d)", resp.Status)
-	}
-	if !errors.Is(err, ErrInvalidRequest) {
-		t.Fatalf("expected ErrInvalidRequest for Keep-Alive header, got %v", err)
-	}
+
+	require.Errorf(t, err,
+		"Keep-Alive header was accepted; should be rejected per RFC 7540 §8.1.2.3 (status=%d)", resp.Status)
+	require.ErrorIs(t, err, ErrInvalidRequest, "expected ErrInvalidRequest for Keep-Alive header")
 }
 
 // TestRepro_ForbiddenHeader_ProxyConnection_Behavior is the REPRO for
 // RFC 7540 §8.1.2.3 — sending "Proxy-Connection" (legacy proxy
 // keep-alive signal).
 func TestConformance_RFC7540_Sec8_1_2_3_ForbidsProxyConnection(t *testing.T) {
-	d := &fakeDialer{srvAfter: forbiddenHeadersRepro()}
-	c, err := NewClient(ClientOptions{
-		Addr:     "fake:0",
-		ConnOpts: conn.ConnOptions{Dialer: d},
-	})
-	if err != nil {
-		t.Fatalf("NewClient: %v", err)
-	}
-	defer c.Close()
-
+	c := forbiddenHeaderClient(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
+
 	var resp Response
-	err = c.Do(ctx, &Request{
+	err := c.Do(ctx, &Request{
 		Method: "GET", Path: "/",
 		Headers: []hpack.HeaderField{
 			{Name: []byte("proxy-connection"), Value: []byte("keep-alive")},
 		},
 	}, &resp)
-	if err == nil {
-		t.Fatalf("Proxy-Connection header was accepted; should be rejected per RFC 7540 §8.1.2.3 (status=%d)", resp.Status)
-	}
-	if !errors.Is(err, ErrInvalidRequest) {
-		t.Fatalf("expected ErrInvalidRequest for Proxy-Connection header, got %v", err)
-	}
+
+	require.Errorf(t, err,
+		"Proxy-Connection header was accepted; should be rejected per RFC 7540 §8.1.2.3 (status=%d)", resp.Status)
+	require.ErrorIs(t, err, ErrInvalidRequest, "expected ErrInvalidRequest for Proxy-Connection header")
 }
 
 // TestRepro_TE_Header_Only_Trailers is the REPRO for RFC 7540
 // §8.1.2.3 — "TE" is allowed ONLY if its value is exactly "trailers".
 // Any other value (including "trailers, gzip") is forbidden.
 func TestConformance_RFC7540_Sec8_1_2_3_TEOnlyTrailers(t *testing.T) {
-	d := &fakeDialer{srvAfter: forbiddenHeadersRepro()}
-	c, err := NewClient(ClientOptions{
-		Addr:     "fake:0",
-		ConnOpts: conn.ConnOptions{Dialer: d},
-	})
-	if err != nil {
-		t.Fatalf("NewClient: %v", err)
-	}
-	defer c.Close()
-
+	c := forbiddenHeaderClient(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 
-	// TE: gzip — must be rejected.
-	var resp1 Response
+	// TE: gzip — must be rejected. TE: trailers — MUST be allowed (used to
+	// signal trailer support). Both directions of the same decision.
+	var resp1, resp2 Response
 	err1 := c.Do(ctx, &Request{
 		Method: "GET", Path: "/",
-		Headers: []hpack.HeaderField{
-			{Name: []byte("te"), Value: []byte("gzip")},
-		},
+		Headers: []hpack.HeaderField{{Name: []byte("te"), Value: []byte("gzip")}},
 	}, &resp1)
-	if err1 == nil {
-		t.Errorf("TE: gzip was accepted; should be rejected per RFC 7540 §8.1.2.3 (status=%d)", resp1.Status)
-	} else if !errors.Is(err1, ErrInvalidRequest) {
-		t.Errorf("TE: gzip: expected ErrInvalidRequest, got %v", err1)
-	}
-
-	// TE: trailers — MUST be allowed (used to signal trailer support).
-	var resp2 Response
 	err2 := c.Do(ctx, &Request{
 		Method: "GET", Path: "/",
-		Headers: []hpack.HeaderField{
-			{Name: []byte("te"), Value: []byte("trailers")},
-		},
+		Headers: []hpack.HeaderField{{Name: []byte("te"), Value: []byte("trailers")}},
 	}, &resp2)
-	if err2 != nil {
-		t.Errorf("TE: trailers must be allowed (status=%d), got %v", resp2.Status, err2)
-	}
+
+	assert.Errorf(t, err1,
+		"TE: gzip was accepted; should be rejected per RFC 7540 §8.1.2.3 (status=%d)", resp1.Status)
+	assert.ErrorIs(t, err1, ErrInvalidRequest, "TE: gzip must be refused as an invalid request")
+	assert.NoErrorf(t, err2, "TE: trailers must be allowed (status=%d)", resp2.Status)
 }

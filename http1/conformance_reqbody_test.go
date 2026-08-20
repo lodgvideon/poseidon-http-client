@@ -2,9 +2,11 @@ package http1_test
 
 import (
 	"context"
-	"errors"
 	"strings"
 	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	"github.com/lodgvideon/poseidon-http-client/header"
 	"github.com/lodgvideon/poseidon-http-client/http1"
@@ -22,68 +24,65 @@ import (
 func TestConformance_RFC9110_Sec8_6_BodyMustMatchDeclaredContentLength(t *testing.T) {
 	t.Run("over-run refused before the excess reaches the wire", func(t *testing.T) {
 		ex, capture := rawCapture(t)
-		if err := ex.WriteRequest(context.Background(),
-			reqCL("POST", header.Field{Name: []byte("Content-Length"), Value: []byte("5")}), false); err != nil {
-			t.Fatalf("WriteRequest: %v", err)
-		}
+		require.NoError(t, ex.WriteRequest(context.Background(),
+			reqCL("POST", header.Field{Name: []byte("Content-Length"), Value: []byte("5")}), false),
+			"WriteRequest")
+
 		err := ex.WriteBody(context.Background(), []byte("0123456789"), true)
-		if !errors.Is(err, http1.ErrInvalidRequest) {
-			t.Fatalf("WriteBody(10 octets under Content-Length 5) = %v, want ErrInvalidRequest", err)
-		}
-		if wire := capture(); strings.Contains(wire, "0123456789") {
-			t.Errorf("the excess body reached the wire — the desync is already done:\n%q", wire)
-		}
+
+		require.ErrorIsf(t, err, http1.ErrInvalidRequest,
+			"WriteBody(10 octets under Content-Length 5) = %v, want ErrInvalidRequest", err)
+		wire := capture()
+		assert.NotContainsf(t, wire, "0123456789",
+			"the excess body reached the wire — the desync is already done:\n%q", wire)
 	})
 
 	t.Run("under-run refused at fin", func(t *testing.T) {
 		ex, _ := rawCapture(t)
-		if err := ex.WriteRequest(context.Background(),
-			reqCL("POST", header.Field{Name: []byte("Content-Length"), Value: []byte("5")}), false); err != nil {
-			t.Fatalf("WriteRequest: %v", err)
-		}
+		require.NoError(t, ex.WriteRequest(context.Background(),
+			reqCL("POST", header.Field{Name: []byte("Content-Length"), Value: []byte("5")}), false),
+			"WriteRequest")
+
 		err := ex.WriteBody(context.Background(), []byte("abc"), true)
-		if !errors.Is(err, http1.ErrInvalidRequest) {
-			t.Fatalf("WriteBody(3 octets under Content-Length 5, fin) = %v, want ErrInvalidRequest", err)
-		}
+
+		require.ErrorIsf(t, err, http1.ErrInvalidRequest,
+			"WriteBody(3 octets under Content-Length 5, fin) = %v, want ErrInvalidRequest", err)
 	})
 
 	t.Run("exact match accepted", func(t *testing.T) {
 		ex, capture := rawCapture(t)
-		if err := ex.WriteRequest(context.Background(),
-			reqCL("POST", header.Field{Name: []byte("Content-Length"), Value: []byte("5")}), false); err != nil {
-			t.Fatalf("WriteRequest: %v", err)
-		}
-		if err := ex.WriteBody(context.Background(), []byte("HELLO"), true); err != nil {
-			t.Fatalf("WriteBody(exact) = %v, want nil", err)
-		}
-		if wire := capture(); !strings.HasSuffix(wire, "HELLO") {
-			t.Errorf("body missing from the wire:\n%q", wire)
-		}
+		require.NoError(t, ex.WriteRequest(context.Background(),
+			reqCL("POST", header.Field{Name: []byte("Content-Length"), Value: []byte("5")}), false),
+			"WriteRequest")
+
+		err := ex.WriteBody(context.Background(), []byte("HELLO"), true)
+
+		require.NoErrorf(t, err, "WriteBody(exact) = %v, want nil", err)
+		wire := capture()
+		assert.Truef(t, strings.HasSuffix(wire, "HELLO"), "body missing from the wire:\n%q", wire)
 	})
 
 	t.Run("split writes summing to the declaration accepted", func(t *testing.T) {
 		ex, _ := rawCapture(t)
-		if err := ex.WriteRequest(context.Background(),
-			reqCL("POST", header.Field{Name: []byte("Content-Length"), Value: []byte("5")}), false); err != nil {
-			t.Fatalf("WriteRequest: %v", err)
-		}
-		if err := ex.WriteBody(context.Background(), []byte("HE"), false); err != nil {
-			t.Fatalf("WriteBody(part 1) = %v, want nil", err)
-		}
-		if err := ex.WriteBody(context.Background(), []byte("LLO"), true); err != nil {
-			t.Fatalf("WriteBody(part 2, fin) = %v, want nil", err)
-		}
+		require.NoError(t, ex.WriteRequest(context.Background(),
+			reqCL("POST", header.Field{Name: []byte("Content-Length"), Value: []byte("5")}), false),
+			"WriteRequest")
+
+		err1 := ex.WriteBody(context.Background(), []byte("HE"), false)
+		err2 := ex.WriteBody(context.Background(), []byte("LLO"), true)
+
+		require.NoErrorf(t, err1, "WriteBody(part 1) = %v, want nil", err1)
+		require.NoErrorf(t, err2, "WriteBody(part 2, fin) = %v, want nil", err2)
 	})
 
 	t.Run("chunked body is unaffected", func(t *testing.T) {
 		ex, _ := rawCapture(t)
 		// No Content-Length → chunked framing → nothing to reconcile against.
-		if err := ex.WriteRequest(context.Background(), reqCL("POST"), false); err != nil {
-			t.Fatalf("WriteRequest: %v", err)
-		}
-		if err := ex.WriteBody(context.Background(), []byte("any length at all"), true); err != nil {
-			t.Fatalf("WriteBody(chunked) = %v, want nil", err)
-		}
+		require.NoError(t, ex.WriteRequest(context.Background(), reqCL("POST"), false), "WriteRequest")
+
+		err := ex.WriteBody(context.Background(), []byte("any length at all"), true)
+
+		require.NoErrorf(t, err, "WriteBody(chunked) = %v, want nil", err)
 	})
 }
 
@@ -99,14 +98,14 @@ func TestConformance_RFC9110_Sec8_6_RequestContentLengthMustBe1DIGIT(t *testing.
 	for _, cl := range []string{"5, 10", "5,5", "+5", "-5", "abc", "5x", "", "0x5"} {
 		t.Run(cl, func(t *testing.T) {
 			ex, capture := rawCapture(t)
+
 			err := ex.WriteRequest(context.Background(),
 				reqCL("POST", header.Field{Name: []byte("Content-Length"), Value: []byte(cl)}), false)
-			if !errors.Is(err, http1.ErrInvalidRequest) {
-				t.Fatalf("WriteRequest(Content-Length %q) = %v, want ErrInvalidRequest", cl, err)
-			}
-			if wire := capture(); wire != "" {
-				t.Errorf("a rejected request must put no bytes on the wire, got:\n%q", wire)
-			}
+
+			require.ErrorIsf(t, err, http1.ErrInvalidRequest,
+				"WriteRequest(Content-Length %q) = %v, want ErrInvalidRequest", cl, err)
+			wire := capture()
+			assert.Emptyf(t, wire, "a rejected request must put no bytes on the wire, got:\n%q", wire)
 		})
 	}
 	// Over-rejection guard: a plain decimal, with or without surrounding OWS, is
@@ -114,10 +113,11 @@ func TestConformance_RFC9110_Sec8_6_RequestContentLengthMustBe1DIGIT(t *testing.
 	for _, cl := range []string{"5", " 5 ", "0"} {
 		t.Run("accepted "+cl, func(t *testing.T) {
 			ex, _ := rawCapture(t)
-			if err := ex.WriteRequest(context.Background(),
-				reqCL("POST", header.Field{Name: []byte("Content-Length"), Value: []byte(cl)}), false); err != nil {
-				t.Fatalf("WriteRequest(Content-Length %q) = %v, want nil", cl, err)
-			}
+
+			err := ex.WriteRequest(context.Background(),
+				reqCL("POST", header.Field{Name: []byte("Content-Length"), Value: []byte(cl)}), false)
+
+			require.NoErrorf(t, err, "WriteRequest(Content-Length %q) = %v, want nil", cl, err)
 		})
 	}
 }
@@ -135,9 +135,9 @@ func TestConformance_RFC9110_Sec8_6_RequestContentLengthMustBe1DIGIT(t *testing.
 // gone; deleting what remains fails this test.
 func TestConformance_RFC9112_Sec6_3_Rule6_PrematureEOFNotPoolable(t *testing.T) {
 	ex := wireExchange(t, "GET", "HTTP/1.1 200 OK\r\nContent-Length: 10\r\n\r\nHELLO")
-	if _, _, err := ex.ReadResponse(context.Background()); err != nil {
-		t.Fatalf("ReadResponse: %v", err)
-	}
+	_, _, rerr := ex.ReadResponse(context.Background())
+	require.NoError(t, rerr, "ReadResponse")
+
 	var err error
 	for {
 		var done bool
@@ -146,11 +146,9 @@ func TestConformance_RFC9112_Sec6_3_Rule6_PrematureEOFNotPoolable(t *testing.T) 
 			break
 		}
 	}
-	if err == nil {
-		t.Fatal("a body ending before Content-Length must report an error")
-	}
-	if ex.KeepAlive() {
-		t.Error("KeepAlive() = true after a premature EOF, want false — the stream " +
+
+	require.Error(t, err, "a body ending before Content-Length must report an error")
+	assert.False(t, ex.KeepAlive(),
+		"KeepAlive() = true after a premature EOF, want false — the stream "+
 			"position is indeterminate, so the connection must not be reused (RFC 9112 §6.3 rule 6)")
-	}
 }

@@ -1,6 +1,10 @@
 package quic
 
-import "testing"
+import (
+	"testing"
+
+	"github.com/stretchr/testify/assert"
+)
 
 // Stream-ID quadrants are relative to the endpoint reading them (RFC 9000 §2.1):
 // the low bit names the initiator, the second bit names directionality. Which
@@ -26,6 +30,14 @@ var quadrants = []struct {
 	{"server uni", 0x3},
 }
 
+// quadrantConn builds a Conn for role isServer with high-water marks set so the
+// ids under test count as already created: these tests are about the quadrant
+// check, not about never-opened streams.
+func quadrantConn(isServer bool) *connFrameHandler {
+	return &connFrameHandler{c: &Conn{isServer: isServer, localMaxStreamsUni: 100,
+		openedUni: 100, nextBidiStreamID: 1 << 20}}
+}
+
 // TestStreamRole_SendOnlyAndRecvOnly pins the two predicates directly, for both
 // roles, over all four quadrants. Bidirectional streams are neither: both
 // endpoints send on them.
@@ -39,19 +51,18 @@ func TestStreamRole_SendOnlyAndRecvOnly(t *testing.T) {
 		{"client", false, 0x2, 0x3},
 		{"server", true, 0x3, 0x2},
 	}
+
 	for _, tc := range cases {
-		c := &Conn{isServer: tc.isServer}
 		for _, q := range quadrants {
-			wantSend := q.id == tc.sendOnly
-			wantRecv := q.id == tc.recvOnly
-			if got := c.sendOnlyStream(q.id); got != wantSend {
-				t.Errorf("%s: sendOnlyStream(%s, id 0x%x) = %v, want %v",
-					tc.role, q.name, q.id, got, wantSend)
-			}
-			if got := c.recvOnlyStream(q.id); got != wantRecv {
-				t.Errorf("%s: recvOnlyStream(%s, id 0x%x) = %v, want %v",
-					tc.role, q.name, q.id, got, wantRecv)
-			}
+			c := &Conn{isServer: tc.isServer}
+			wantSend, wantRecv := q.id == tc.sendOnly, q.id == tc.recvOnly
+
+			gotSend, gotRecv := c.sendOnlyStream(q.id), c.recvOnlyStream(q.id)
+
+			assert.Equalf(t, wantSend, gotSend, "%s: sendOnlyStream(%s, id 0x%x) = %v, want %v",
+				tc.role, q.name, q.id, gotSend, wantSend)
+			assert.Equalf(t, wantRecv, gotRecv, "%s: recvOnlyStream(%s, id 0x%x) = %v, want %v",
+				tc.role, q.name, q.id, gotRecv, wantRecv)
 		}
 	}
 }
@@ -71,22 +82,20 @@ func TestConformance_RFC9000_Sec194_ResetStreamQuadrantIsRoleAware(t *testing.T)
 		{"client", false, 0x3, 0x2},
 		{"server", true, 0x2, 0x3},
 	}
-	for _, tc := range cases {
-		c := &Conn{isServer: tc.isServer, localMaxStreamsUni: 100,
-			// High-water marks so the ids below count as already created: this test
-			// is about the quadrant check, not about never-opened streams.
-			openedUni: 100, nextBidiStreamID: 1 << 20}
-		h := &connFrameHandler{c: c}
 
-		if err := h.OnResetStream(tc.legal, 0, 0); err == ErrStreamState {
-			t.Errorf("%s: RESET_STREAM on the peer's own uni stream (0x%x) rejected as "+
+	for _, tc := range cases {
+		h := quadrantConn(tc.isServer)
+
+		legalErr := h.OnResetStream(tc.legal, 0, 0)
+		illegalErr := h.OnResetStream(tc.illegal, 0, 0)
+
+		assert.NotErrorIsf(t, legalErr, ErrStreamState,
+			"%s: RESET_STREAM on the peer's own uni stream (0x%x) rejected as "+
 				"STREAM_STATE_ERROR — the peer is its sender and the frame is legal",
-				tc.role, tc.legal)
-		}
-		if err := h.OnResetStream(tc.illegal, 0, 0); err != ErrStreamState {
-			t.Errorf("%s: RESET_STREAM on our own uni stream (0x%x) = %v, want ErrStreamState "+
-				"— the peer has no send side there (RFC 9000 §19.4)", tc.role, tc.illegal, err)
-		}
+			tc.role, tc.legal)
+		assert.ErrorIsf(t, illegalErr, ErrStreamState,
+			"%s: RESET_STREAM on our own uni stream (0x%x) = %v, want ErrStreamState "+
+				"— the peer has no send side there (RFC 9000 §19.4)", tc.role, tc.illegal, illegalErr)
 	}
 }
 
@@ -103,21 +112,19 @@ func TestConformance_RFC9000_Sec195_StopSendingQuadrantIsRoleAware(t *testing.T)
 		{"client", false, 0x2, 0x3},
 		{"server", true, 0x3, 0x2},
 	}
-	for _, tc := range cases {
-		c := &Conn{isServer: tc.isServer, localMaxStreamsUni: 100,
-			// High-water marks so the ids below count as already created: this test
-			// is about the quadrant check, not about never-opened streams.
-			openedUni: 100, nextBidiStreamID: 1 << 20}
-		h := &connFrameHandler{c: c}
 
-		if err := h.OnStopSending(tc.legal, 0); err == ErrStreamState {
-			t.Errorf("%s: STOP_SENDING on our own uni stream (0x%x) rejected — we are its "+
+	for _, tc := range cases {
+		h := quadrantConn(tc.isServer)
+
+		legalErr := h.OnStopSending(tc.legal, 0)
+		illegalErr := h.OnStopSending(tc.illegal, 0)
+
+		assert.NotErrorIsf(t, legalErr, ErrStreamState,
+			"%s: STOP_SENDING on our own uni stream (0x%x) rejected — we are its "+
 				"sender, so the request is legal", tc.role, tc.legal)
-		}
-		if err := h.OnStopSending(tc.illegal, 0); err != ErrStreamState {
-			t.Errorf("%s: STOP_SENDING on a receive-only stream (0x%x) = %v, want "+
-				"ErrStreamState (RFC 9000 §19.5)", tc.role, tc.illegal, err)
-		}
+		assert.ErrorIsf(t, illegalErr, ErrStreamState,
+			"%s: STOP_SENDING on a receive-only stream (0x%x) = %v, want "+
+				"ErrStreamState (RFC 9000 §19.5)", tc.role, tc.illegal, illegalErr)
 	}
 }
 
@@ -133,21 +140,19 @@ func TestConformance_RFC9000_Sec1910_MaxStreamDataQuadrantIsRoleAware(t *testing
 		{"client", false, 0x2, 0x3},
 		{"server", true, 0x3, 0x2},
 	}
-	for _, tc := range cases {
-		c := &Conn{isServer: tc.isServer, localMaxStreamsUni: 100,
-			// High-water marks so the ids below count as already created: this test
-			// is about the quadrant check, not about never-opened streams.
-			openedUni: 100, nextBidiStreamID: 1 << 20}
-		h := &connFrameHandler{c: c}
 
-		if err := h.OnMaxStreamData(tc.legal, 1024); err == ErrStreamState {
-			t.Errorf("%s: MAX_STREAM_DATA on our own uni stream (0x%x) rejected — we send "+
+	for _, tc := range cases {
+		h := quadrantConn(tc.isServer)
+
+		legalErr := h.OnMaxStreamData(tc.legal, 1024)
+		illegalErr := h.OnMaxStreamData(tc.illegal, 1024)
+
+		assert.NotErrorIsf(t, legalErr, ErrStreamState,
+			"%s: MAX_STREAM_DATA on our own uni stream (0x%x) rejected — we send "+
 				"there and the credit applies to us", tc.role, tc.legal)
-		}
-		if err := h.OnMaxStreamData(tc.illegal, 1024); err != ErrStreamState {
-			t.Errorf("%s: MAX_STREAM_DATA on a receive-only stream (0x%x) = %v, want "+
-				"ErrStreamState (RFC 9000 §19.10)", tc.role, tc.illegal, err)
-		}
+		assert.ErrorIsf(t, illegalErr, ErrStreamState,
+			"%s: MAX_STREAM_DATA on a receive-only stream (0x%x) = %v, want "+
+				"ErrStreamState (RFC 9000 §19.10)", tc.role, tc.illegal, illegalErr)
 	}
 }
 
@@ -163,21 +168,19 @@ func TestConformance_RFC9000_Sec1913_StreamDataBlockedQuadrantIsRoleAware(t *tes
 		{"client", false, 0x3, 0x2},
 		{"server", true, 0x2, 0x3},
 	}
-	for _, tc := range cases {
-		c := &Conn{isServer: tc.isServer, localMaxStreamsUni: 100,
-			// High-water marks so the ids below count as already created: this test
-			// is about the quadrant check, not about never-opened streams.
-			openedUni: 100, nextBidiStreamID: 1 << 20}
-		h := &connFrameHandler{c: c}
 
-		if err := h.OnStreamDataBlocked(tc.legal, 0); err == ErrStreamState {
-			t.Errorf("%s: STREAM_DATA_BLOCKED on the peer's own uni stream (0x%x) rejected "+
+	for _, tc := range cases {
+		h := quadrantConn(tc.isServer)
+
+		legalErr := h.OnStreamDataBlocked(tc.legal, 0)
+		illegalErr := h.OnStreamDataBlocked(tc.illegal, 0)
+
+		assert.NotErrorIsf(t, legalErr, ErrStreamState,
+			"%s: STREAM_DATA_BLOCKED on the peer's own uni stream (0x%x) rejected "+
 				"— the peer is its sender", tc.role, tc.legal)
-		}
-		if err := h.OnStreamDataBlocked(tc.illegal, 0); err != ErrStreamState {
-			t.Errorf("%s: STREAM_DATA_BLOCKED on a stream only we send on (0x%x) = %v, want "+
-				"ErrStreamState (RFC 9000 §19.13)", tc.role, tc.illegal, err)
-		}
+		assert.ErrorIsf(t, illegalErr, ErrStreamState,
+			"%s: STREAM_DATA_BLOCKED on a stream only we send on (0x%x) = %v, want "+
+				"ErrStreamState (RFC 9000 §19.13)", tc.role, tc.illegal, illegalErr)
 	}
 }
 
@@ -195,23 +198,23 @@ func TestConformance_RFC9000_Sec46_UniStreamLimitIsRoleAware(t *testing.T) {
 		{"client", false, 0x3, 0x2},
 		{"server", true, 0x2, 0x3},
 	}
+
 	for _, tc := range cases {
 		c := &Conn{isServer: tc.isServer, localMaxStreamsUni: limit}
 
-		within := (limit-1)<<2 | tc.peerUni
-		beyond := limit<<2 | tc.peerUni
-		if c.exceedsUniStreamLimit(within) {
-			t.Errorf("%s: stream index %d of the peer's uni quadrant reported over a limit of %d",
-				tc.role, limit-1, limit)
-		}
-		if !c.exceedsUniStreamLimit(beyond) {
-			t.Errorf("%s: stream index %d of the peer's uni quadrant not reported over a "+
+		within := c.exceedsUniStreamLimit((limit-1)<<2 | tc.peerUni)
+		beyond := c.exceedsUniStreamLimit(limit<<2 | tc.peerUni)
+		ours := c.exceedsUniStreamLimit(limit<<2 | tc.ourUni)
+
+		assert.Falsef(t, within,
+			"%s: stream index %d of the peer's uni quadrant reported over a limit of %d",
+			tc.role, limit-1, limit)
+		assert.Truef(t, beyond,
+			"%s: stream index %d of the peer's uni quadrant not reported over a "+
 				"limit of %d (RFC 9000 §4.6)", tc.role, limit, limit)
-		}
 		// Our own quadrant is not governed by what we advertised to the peer.
-		if c.exceedsUniStreamLimit(limit<<2 | tc.ourUni) {
-			t.Errorf("%s: our own uni stream measured against the limit we advertised for "+
+		assert.Falsef(t, ours,
+			"%s: our own uni stream measured against the limit we advertised for "+
 				"the peer's streams", tc.role)
-		}
 	}
 }

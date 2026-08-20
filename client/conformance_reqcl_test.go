@@ -18,6 +18,9 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
 	"github.com/lodgvideon/poseidon-http-client/conn"
 )
 
@@ -53,15 +56,13 @@ func TestBuildHeaders_SingleContentLength(t *testing.T) {
 				Headers:       []conn.HeaderField{{Name: []byte(spelling), Value: []byte("5")}},
 			}
 			var sp []conn.HeaderField
+
 			got := contentLengths(buildHeaders(req, "x.test", "https", &sp))
-			if len(got) != 1 {
-				t.Fatalf("content-length fields = %v, want exactly one — two disagreeing "+
-					"values is the CL.CL desync (RFC 9112 §11.2), emitted by this library", got)
-			}
-			if got[0] != "10" {
-				t.Errorf("content-length = %q, want %q (Request.ContentLength governs how "+
-					"many body bytes are written, so it is the one that can be true)", got[0], "10")
-			}
+
+			require.Lenf(t, got, 1, "content-length fields = %v, want exactly one — two disagreeing "+
+				"values is the CL.CL desync (RFC 9112 §11.2), emitted by this library", got)
+			assert.Equalf(t, "10", got[0], "content-length = %q, want %q (Request.ContentLength governs how "+
+				"many body bytes are written, so it is the one that can be true)", got[0], "10")
 		})
 	}
 }
@@ -83,11 +84,12 @@ func TestBuildHeaders_CallerContentLengthKeptWithoutBody(t *testing.T) {
 		Headers: []conn.HeaderField{{Name: []byte("Content-Length"), Value: []byte("42")}},
 	}
 	var sp []conn.HeaderField
+
 	got := contentLengths(buildHeaders(req, "x.test", "https", &sp))
-	if len(got) != 1 || got[0] != "42" {
-		t.Errorf("content-length fields = %v, want exactly [\"42\"] — with no BodyReader "+
+
+	assert.Equalf(t, []string{"42"}, got,
+		"content-length fields = %v, want exactly [\"42\"] — with no BodyReader "+
 			"nothing managed is appended, so the caller's field must pass through unchanged", got)
-	}
 }
 
 // TestBuildHeaders_OtherHeadersUnaffected pins that the filter removes only
@@ -106,7 +108,9 @@ func TestBuildHeaders_OtherHeadersUnaffected(t *testing.T) {
 		},
 	}
 	var sp []conn.HeaderField
+
 	out := buildHeaders(req, "x.test", "https", &sp)
+
 	for _, want := range []string{"x-one", "x-two"} {
 		found := false
 		for i := range out {
@@ -114,11 +118,8 @@ func TestBuildHeaders_OtherHeadersUnaffected(t *testing.T) {
 				found = true
 			}
 		}
-		if !found {
-			t.Errorf("%q was dropped; the filter must remove only content-length", want)
-		}
+		assert.Truef(t, found, "%q was dropped; the filter must remove only content-length", want)
 	}
-	if got := contentLengths(out); len(got) != 1 || got[0] != "3" {
-		t.Errorf("content-length = %v, want [\"3\"]", got)
-	}
+	assert.Equalf(t, []string{"3"}, contentLengths(out),
+		"content-length = %v, want [\"3\"]", contentLengths(out))
 }

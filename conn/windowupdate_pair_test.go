@@ -5,6 +5,9 @@ import (
 	"bytes"
 	"testing"
 
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
 	"github.com/lodgvideon/poseidon-http-client/frame"
 )
 
@@ -49,15 +52,13 @@ const refundTripLen = recvWindowRefundThreshold
 func TestOnDataReceived_BothRefunds_OneWrite(t *testing.T) {
 	c, s, sink := wuPairConn(t)
 
-	if err := c.onDataReceived(s, refundTripLen); err != nil {
-		t.Fatalf("onDataReceived: %v", err)
-	}
+	err := c.onDataReceived(s, refundTripLen)
 
-	if sink.writes != 1 {
-		t.Errorf("socket writes = %d, want 1 — the stream and connection refunds went "+
+	require.NoError(t, err, "onDataReceived")
+	assert.Equalf(t, 1, sink.writes,
+		"socket writes = %d, want 1 — the stream and connection refunds went "+
 			"out in separate flushes, which on a single-stream download is every refund",
-			sink.writes)
-	}
+		sink.writes)
 }
 
 // TestOnDataReceived_BothRefunds_EmitsBoth is the control that keeps the gate
@@ -81,10 +82,9 @@ func TestOnDataReceived_BothRefunds_EmitsBoth(t *testing.T) {
 	s := &Stream{id: 1, recvWindow: 1 << 20}
 	c.streams[1] = s
 
-	if err := c.onDataReceived(s, refundTripLen); err != nil {
-		t.Fatalf("onDataReceived: %v", err)
-	}
+	err := c.onDataReceived(s, refundTripLen)
 
+	require.NoError(t, err, "onDataReceived")
 	ids := windowUpdateStreamIDs(t, sink.buf.Bytes())
 	var sawStream, sawConn bool
 	for _, id := range ids {
@@ -95,14 +95,12 @@ func TestOnDataReceived_BothRefunds_EmitsBoth(t *testing.T) {
 			sawStream = true
 		}
 	}
-	if !sawStream {
-		t.Errorf("no WINDOW_UPDATE for stream 1; got ids %v — the stream's window is "+
+	assert.Truef(t, sawStream,
+		"no WINDOW_UPDATE for stream 1; got ids %v — the stream's window is "+
 			"never replenished and the download stalls", ids)
-	}
-	if !sawConn {
-		t.Errorf("no WINDOW_UPDATE for the connection; got ids %v — the connection "+
+	assert.Truef(t, sawConn,
+		"no WINDOW_UPDATE for the connection; got ids %v — the connection "+
 			"window is never replenished and every stream stalls", ids)
-	}
 }
 
 // captureSink keeps the bytes so a test can decode the frames that were sent.
@@ -125,9 +123,8 @@ func windowUpdateStreamIDs(t *testing.T, b []byte) []uint32 {
 		length := int(b[0])<<16 | int(b[1])<<8 | int(b[2])
 		typ := b[3]
 		streamID := (uint32(b[5])<<24 | uint32(b[6])<<16 | uint32(b[7])<<8 | uint32(b[8])) &^ (1 << 31)
-		if len(b) < 9+length {
-			t.Fatalf("truncated frame: want %d payload bytes, have %d", length, len(b)-9)
-		}
+		require.GreaterOrEqualf(t, len(b), 9+length,
+			"truncated frame: want %d payload bytes, have %d", length, len(b)-9)
 		if typ == byte(frame.FrameWindowUpdate) {
 			ids = append(ids, streamID)
 		}

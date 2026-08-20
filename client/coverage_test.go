@@ -18,6 +18,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
 	"github.com/lodgvideon/poseidon-http-client/client"
 	"github.com/lodgvideon/poseidon-http-client/conn"
 	"github.com/lodgvideon/poseidon-http-client/frame"
@@ -35,9 +38,7 @@ func covClientFor(t *testing.T, addr string) *client.Client {
 			Dialer: &conn.TLSDialer{Config: &tls.Config{InsecureSkipVerify: true}},
 		},
 	})
-	if err != nil {
-		t.Fatalf("NewClient: %v", err)
-	}
+	require.NoErrorf(t, err, "NewClient")
 	t.Cleanup(func() { _ = c.Close() })
 	return c
 }
@@ -52,14 +53,12 @@ func TestClient_Metrics_ReturnsNonNil(t *testing.T) {
 		w.WriteHeader(200)
 	}))
 	c := covClientFor(t, addr)
+
 	m := c.Metrics()
-	if m == nil {
-		t.Fatal("Metrics() returned nil")
-	}
+
+	require.Truef(t, m != nil, "Metrics() returned nil")
 	// Verify same pointer is stable.
-	if c.Metrics() != m {
-		t.Fatal("Metrics() returned different pointer on second call")
-	}
+	require.Truef(t, c.Metrics() == m, "Metrics() returned different pointer on second call")
 }
 
 // ---------------------------------------------------------------------------
@@ -72,11 +71,12 @@ func TestClient_PoolStats_SingleConnReturnsZero(t *testing.T) {
 		w.WriteHeader(200)
 	}))
 	c := covClientFor(t, addr)
+
 	st := c.PoolStats()
+
 	// zero Stats expected for non-pool transport
-	if st.ActiveConns != 0 || st.InFlightStreams != 0 || st.Waiters != 0 {
-		t.Errorf("PoolStats on SingleConn = %+v, want zero", st)
-	}
+	assert.Truef(t, st.ActiveConns == 0 && st.InFlightStreams == 0 && st.Waiters == 0,
+		"PoolStats on SingleConn = %+v, want zero", st)
 }
 
 // ---------------------------------------------------------------------------
@@ -86,9 +86,10 @@ func TestClient_PoolStats_SingleConnReturnsZero(t *testing.T) {
 func TestCloseReason_String_Unknown(t *testing.T) {
 	t.Parallel()
 	r := client.CloseReason(99)
-	if got := r.String(); got != "unknown" {
-		t.Errorf("CloseReason(99).String() = %q, want \"unknown\"", got)
-	}
+
+	got := r.String()
+
+	assert.Equalf(t, "unknown", got, "CloseReason(99).String() = %q, want \"unknown\"", got)
 }
 
 // Exercise known values while we are here (avoids 0% on any label path).
@@ -104,9 +105,9 @@ func TestCloseReason_String_KnownValues(t *testing.T) {
 		{client.CloseManual, "manual"},
 	}
 	for _, tc := range cases {
-		if got := tc.r.String(); got != tc.want {
-			t.Errorf("CloseReason(%d).String() = %q, want %q", tc.r, got, tc.want)
-		}
+		got := tc.r.String()
+
+		assert.Equalf(t, tc.want, got, "CloseReason(%d).String() = %q, want %q", tc.r, got, tc.want)
 	}
 }
 
@@ -120,38 +121,29 @@ func TestHistogramSnapshot_Quantile_EdgeCases(t *testing.T) {
 	// Empty histogram returns 0 for any quantile.
 	var h client.Metrics // fresh zero Metrics → zero histogram inside
 	snap := h.Latency.Request.Snapshot()
-	if got := snap.Quantile(0.5); got != 0 {
-		t.Errorf("Quantile(0.5) on empty = %v, want 0", got)
-	}
-	if got := snap.Quantile(0); got != 0 {
-		t.Errorf("Quantile(0) on empty = %v, want 0", got)
-	}
-	if got := snap.Quantile(1); got != 0 {
-		t.Errorf("Quantile(1) on empty = %v, want 0", got)
-	}
+
+	gotHalfEmpty, gotZeroEmpty, gotOneEmpty := snap.Quantile(0.5), snap.Quantile(0), snap.Quantile(1)
+
+	assert.Zerof(t, gotHalfEmpty, "Quantile(0.5) on empty = %v, want 0", gotHalfEmpty)
+	assert.Zerof(t, gotZeroEmpty, "Quantile(0) on empty = %v, want 0", gotZeroEmpty)
+	assert.Zerof(t, gotOneEmpty, "Quantile(1) on empty = %v, want 0", gotOneEmpty)
 
 	// Single observation — p=0 and p=1 both land in bucket 0 (clamp to target=1).
 	h.Latency.Request.Observe(1 * time.Nanosecond) // bucket 0
 	snap = h.Latency.Request.Snapshot()
 
 	got0 := snap.Quantile(0)
-	if got0 == 0 {
-		t.Errorf("Quantile(0) on 1-obs histogram = 0, want non-zero bucket edge")
-	}
 	got1 := snap.Quantile(1)
-	if got1 == 0 {
-		t.Errorf("Quantile(1) on 1-obs histogram = 0, want non-zero bucket edge")
-	}
+
+	assert.NotZerof(t, got0, "Quantile(0) on 1-obs histogram = 0, want non-zero bucket edge")
+	assert.NotZerof(t, got1, "Quantile(1) on 1-obs histogram = 0, want non-zero bucket edge")
 
 	// Quantile clamping: negative → treated as 0; >1 → treated as 1.
 	gotNeg := snap.Quantile(-0.5)
-	if gotNeg != got0 {
-		t.Errorf("Quantile(-0.5) = %v, want same as Quantile(0) = %v", gotNeg, got0)
-	}
 	gotOver := snap.Quantile(1.5)
-	if gotOver != got1 {
-		t.Errorf("Quantile(1.5) = %v, want same as Quantile(1) = %v", gotOver, got1)
-	}
+
+	assert.Equalf(t, got0, gotNeg, "Quantile(-0.5) = %v, want same as Quantile(0) = %v", gotNeg, got0)
+	assert.Equalf(t, got1, gotOver, "Quantile(1.5) = %v, want same as Quantile(1) = %v", gotOver, got1)
 }
 
 // ---------------------------------------------------------------------------
@@ -178,19 +170,17 @@ func TestManagedPool_AllSubPoolsFail_LastErrReturned(t *testing.T) {
 			DialTimeout:     200 * time.Millisecond,
 		},
 	})
-	if err != nil {
-		t.Fatalf("NewClient: %v", err)
-	}
+	require.NoErrorf(t, err, "NewClient")
 	defer c.Close()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 	var resp client.Response
+
 	err = c.Do(ctx, &client.Request{Method: "GET", Path: "/"}, &resp)
+
 	// Should get a dial error (not ErrNoAddresses, since there was 1 address to try).
-	if err == nil {
-		t.Fatal("expected error from unreachable host, got nil")
-	}
+	require.Errorf(t, err, "expected error from unreachable host, got nil")
 	var de *client.DialError
 	if !errors.As(err, &de) {
 		t.Logf("got error (not a DialError): %v", err)
@@ -204,9 +194,8 @@ func TestManagedPool_AllSubPoolsFail_LastErrReturned(t *testing.T) {
 func TestDNSResolver_Constructor(t *testing.T) {
 	t.Parallel()
 	r := client.DNSResolver("localhost", 80, client.DNSOptions{TTL: 5 * time.Second})
-	if r == nil {
-		t.Fatal("DNSResolver returned nil")
-	}
+
+	require.Truef(t, r != nil, "DNSResolver returned nil")
 	// A Resolve call on localhost:80 should not panic even if DNS is weird.
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
@@ -268,15 +257,13 @@ func TestResponseBodyReader_Read_EventReset(t *testing.T) {
 		t.Logf("Do returned error on RST test: %v", err)
 		return
 	}
-	if resp.BodyReader == nil {
-		t.Fatal("expected BodyReader on BodyStream request")
-	}
+	require.Truef(t, resp.BodyReader != nil, "expected BodyReader on BodyStream request")
+
 	// Reading must eventually return an error (RST or io.EOF).
 	buf := make([]byte, 64)
 	_, readErr := resp.BodyReader.Read(buf)
-	if readErr == nil {
-		t.Error("expected error from Read after stream reset, got nil")
-	}
+
+	assert.Errorf(t, readErr, "expected error from Read after stream reset, got nil")
 	_ = resp.BodyReader.Close()
 }
 
@@ -294,9 +281,7 @@ func TestResponseBodyReader_Read_BodyBufferDrain(t *testing.T) {
 	defer cancel()
 	var resp client.Response
 	err := c.Do(ctx, &client.Request{Method: "GET", Path: "/", BodyMode: client.BodyStream}, &resp)
-	if err != nil {
-		t.Fatalf("Do: %v", err)
-	}
+	require.NoErrorf(t, err, "Do")
 	defer func() { _ = resp.BodyReader.Close() }()
 
 	// Read with a small buf to force the r.buf reuse path.
@@ -308,13 +293,10 @@ func TestResponseBodyReader_Read_BodyBufferDrain(t *testing.T) {
 		if err == io.EOF {
 			break
 		}
-		if err != nil {
-			t.Fatalf("Read error: %v", err)
-		}
+		require.NoErrorf(t, err, "Read error")
 	}
-	if total != len(body) {
-		t.Errorf("read %d bytes, want %d", total, len(body))
-	}
+
+	assert.Equalf(t, len(body), total, "read %d bytes, want %d", total, len(body))
 }
 
 // ---------------------------------------------------------------------------
@@ -380,10 +362,10 @@ func TestClient_Do_NewStream_Failure(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 	var resp client.Response
+
 	err := c.Do(ctx, &client.Request{Method: "GET", Path: "/"}, &resp)
-	if err == nil {
-		t.Fatal("expected error after Close, got nil")
-	}
+
+	require.Errorf(t, err, "expected error after Close, got nil")
 }
 
 // ---------------------------------------------------------------------------
@@ -401,10 +383,10 @@ func TestClient_DoStream_AcquireFailure(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 	var sr client.StreamResponse
+
 	err := c.DoStream(ctx, &client.Request{Method: "GET", Path: "/"}, &sr)
-	if err == nil {
-		t.Fatal("expected error after Close, got nil")
-	}
+
+	require.Errorf(t, err, "expected error after Close, got nil")
 }
 
 // ---------------------------------------------------------------------------
@@ -451,9 +433,8 @@ func TestClient_Do_WriteBodyReader_ReadError(t *testing.T) {
 		BodyReader:    &errReader{n: 0, err: injectedErr},
 		ContentLength: 100,
 	}, &resp)
-	if err == nil {
-		t.Fatal("expected error from read-error body, got nil")
-	}
+
+	require.Errorf(t, err, "expected error from read-error body, got nil")
 	if !strings.Contains(err.Error(), "read request body") && !strings.Contains(err.Error(), "injected") {
 		t.Logf("error (may not be read-body wrap on zero-byte reader): %v", err)
 	}
@@ -479,9 +460,8 @@ func TestClient_Do_WriteBodyReader_ReadError_AfterBytes(t *testing.T) {
 		BodyReader:    &errReader{n: 1, err: injectedErr},
 		ContentLength: 1024,
 	}, &resp)
-	if err == nil {
-		t.Fatal("expected error from mid-stream read error body, got nil")
-	}
+
+	require.Errorf(t, err, "expected error from mid-stream read error body, got nil")
 }
 
 // ---------------------------------------------------------------------------
@@ -535,29 +515,27 @@ func TestPool_MapAcquireErr_ContextCanceled(t *testing.T) {
 			AcquireTimeout:    5 * time.Second,
 		},
 	})
-	if err != nil {
-		t.Fatalf("NewClient: %v", err)
-	}
+	require.NoErrorf(t, err, "NewClient")
 	defer c.Close()
 
 	// Do one request to seed the pool with a conn.
 	ctx := context.Background()
 	var resp client.Response
-	if err := doWithRetry(t, c, ctx, &client.Request{Method: "GET", Path: "/"}, &resp); err != nil {
-		t.Fatalf("initial Do: %v", err)
-	}
+	err = doWithRetry(t, c, ctx, &client.Request{Method: "GET", Path: "/"}, &resp)
+	require.NoErrorf(t, err, "initial Do")
 
 	// Now cancel immediately — the acquire should fail with context.Canceled.
 	ctxCancel, cancel := context.WithCancel(context.Background())
 	cancel() // cancel before Do
 	var resp2 client.Response
+
 	err = c.Do(ctxCancel, &client.Request{Method: "GET", Path: "/"}, &resp2)
+
 	// The hedge this replaced ("acceptable variant") was unfounded: a context
 	// cancelled before Do is reported as context.Canceled every time. Measured
 	// stable over 25 iterations under -race before tightening.
-	if !errors.Is(err, context.Canceled) {
-		t.Fatalf("Do with an already-cancelled context = %v, want context.Canceled", err)
-	}
+	require.ErrorIsf(t, err, context.Canceled,
+		"Do with an already-cancelled context = %v, want context.Canceled", err)
 }
 
 // ---------------------------------------------------------------------------
@@ -581,18 +559,15 @@ func TestPool_EvictDeadSilent_Via_Stats(t *testing.T) {
 			MaxStreamsPerConn: 10,
 		},
 	})
-	if err != nil {
-		t.Fatalf("NewClient: %v", err)
-	}
+	require.NoErrorf(t, err, "NewClient")
 	defer c.Close()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	// Seed the pool.
 	var resp client.Response
-	if err := c.Do(ctx, &client.Request{Method: "GET", Path: "/"}, &resp); err != nil {
-		t.Fatalf("seeding Do: %v", err)
-	}
+	err = c.Do(ctx, &client.Request{Method: "GET", Path: "/"}, &resp)
+	require.NoErrorf(t, err, "seeding Do")
 	// Close the underlying client → conns go dead.
 	_ = c.Close()
 	// Stats triggers evictDeadSilent on the actor.
@@ -622,9 +597,7 @@ func TestPool_CountLive_IndirectCoverage(t *testing.T) {
 			MaxStreamsPerConn: 100,
 		},
 	})
-	if err != nil {
-		t.Fatalf("NewClient: %v", err)
-	}
+	require.NoErrorf(t, err, "NewClient")
 	defer c.Close()
 
 	// Issue two requests concurrently to spin up two conns, then call Stats.
@@ -643,9 +616,15 @@ func TestPool_CountLive_IndirectCoverage(t *testing.T) {
 		}
 	}
 	st := c.PoolStats()
-	if st.ActiveConns < 0 {
-		t.Errorf("ActiveConns = %d, want ≥ 0", st.ActiveConns)
-	}
+
+	// >= 1, not >= 0. ActiveConns is a count of live conns and is never
+	// negative, so the original ">= 0" was an assertion that could not fire:
+	// countLive could return anything, or not be reached at all, and this test
+	// stayed green. Two requests have just completed against a pool with
+	// MaxConnsPerHost=2 and no idle eviction configured, so at least one conn
+	// must still be live at this point.
+	assert.GreaterOrEqualf(t, st.ActiveConns, 1,
+		"ActiveConns = %d after two completed requests, want >= 1 — countLive is not seeing the pool's live conns", st.ActiveConns)
 }
 
 // ---------------------------------------------------------------------------
@@ -670,18 +649,16 @@ func TestManagedPool_Acquire_ContextCancel(t *testing.T) {
 			DialTimeout:     2 * time.Second,
 		},
 	})
-	if err != nil {
-		t.Fatalf("NewClient: %v", err)
-	}
+	require.NoErrorf(t, err, "NewClient")
 	defer c.Close()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
 	defer cancel()
 	var resp client.Response
+
 	err = c.Do(ctx, &client.Request{Method: "GET", Path: "/"}, &resp)
-	if err == nil {
-		t.Fatal("expected error from unreachable host with canceled ctx")
-	}
+
+	require.Errorf(t, err, "expected error from unreachable host with canceled ctx")
 }
 
 // ---------------------------------------------------------------------------
@@ -702,13 +679,12 @@ func TestRetryer_DoStream_RetryOnDialError(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	var sr client.StreamResponse
-	if err := r.DoStream(ctx, &client.Request{Method: "GET", Path: "/"}, &sr); err != nil {
-		t.Fatalf("DoStream: %v", err)
-	}
+
+	err := r.DoStream(ctx, &client.Request{Method: "GET", Path: "/"}, &sr)
+
+	require.NoErrorf(t, err, "DoStream")
 	defer func() { _ = sr.Close() }()
-	if sr.Status != 200 {
-		t.Errorf("Status = %d, want 200", sr.Status)
-	}
+	assert.Equalf(t, 200, sr.Status, "Status = %d, want 200", sr.Status)
 }
 
 // ---------------------------------------------------------------------------
@@ -722,13 +698,9 @@ func TestNewClient_TransportManaged_WithPoolOptions(t *testing.T) {
 		w.WriteHeader(200)
 	}))
 	host, portStr, err := net.SplitHostPort(addr)
-	if err != nil {
-		t.Fatalf("SplitHostPort: %v", err)
-	}
+	require.NoErrorf(t, err, "SplitHostPort")
 	port, err := strconv.Atoi(portStr)
-	if err != nil {
-		t.Fatalf("Atoi(%q): %v", portStr, err)
-	}
+	require.NoErrorf(t, err, "Atoi(%q)", portStr)
 
 	r := client.StaticResolver(client.Address{Host: host, Port: port})
 	c, err := client.NewClient(client.ClientOptions{
@@ -742,25 +714,20 @@ func TestNewClient_TransportManaged_WithPoolOptions(t *testing.T) {
 			MaxStreamsPerConn: 10,
 		},
 	})
-	if err != nil {
-		t.Fatalf("NewClient: %v", err)
-	}
+	require.NoErrorf(t, err, "NewClient")
 	defer c.Close()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	var resp client.Response
-	if err := c.Do(ctx, &client.Request{Method: "GET", Path: "/"}, &resp); err != nil {
-		t.Fatalf("Do: %v", err)
-	}
-	if resp.Status != 200 {
-		t.Errorf("Status = %d, want 200", resp.Status)
-	}
+
+	err = c.Do(ctx, &client.Request{Method: "GET", Path: "/"}, &resp)
+
+	require.NoErrorf(t, err, "Do")
+	assert.Equalf(t, 200, resp.Status, "Status = %d, want 200", resp.Status)
 	// Exercise PoolStats on managedTransport.
 	st := c.PoolStats()
-	if st.Addresses < 1 {
-		t.Errorf("Addresses = %d, want ≥ 1", st.Addresses)
-	}
+	assert.Truef(t, st.Addresses >= 1, "Addresses = %d, want ≥ 1", st.Addresses)
 }
 
 // ---------------------------------------------------------------------------
@@ -789,18 +756,16 @@ func TestManagedPool_Acquire_ErrNoAddressesWithLastErr(t *testing.T) {
 			DialTimeout:     200 * time.Millisecond,
 		},
 	})
-	if err != nil {
-		t.Fatalf("NewClient: %v", err)
-	}
+	require.NoErrorf(t, err, "NewClient")
 	defer c.Close()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	var resp client.Response
+
 	err = c.Do(ctx, &client.Request{Method: "GET", Path: "/"}, &resp)
-	if err == nil {
-		t.Fatal("expected error, got nil")
-	}
+
+	require.Errorf(t, err, "expected error, got nil")
 	// Should be a DialError from the last failed address (not ErrNoAddresses).
 	var de *client.DialError
 	if !errors.As(err, &de) {
@@ -822,9 +787,8 @@ func TestStreamResponse_Recv_AfterDrained(t *testing.T) {
 	defer cancel()
 
 	var sr client.StreamResponse
-	if err := c.DoStream(ctx, &client.Request{Method: "GET", Path: "/"}, &sr); err != nil {
-		t.Fatalf("DoStream: %v", err)
-	}
+	err := c.DoStream(ctx, &client.Request{Method: "GET", Path: "/"}, &sr)
+	require.NoErrorf(t, err, "DoStream")
 	defer func() { _ = sr.Close() }()
 
 	// Drain to EndStream.
@@ -843,10 +807,9 @@ func TestStreamResponse_Recv_AfterDrained(t *testing.T) {
 	}
 
 	// Second call after drained must return ErrStreamEnded.
-	_, err := sr.Recv(ctx)
-	if !errors.Is(err, client.ErrStreamEnded) {
-		t.Errorf("Recv after drained = %v, want ErrStreamEnded", err)
-	}
+	_, err = sr.Recv(ctx)
+
+	assert.ErrorIsf(t, err, client.ErrStreamEnded, "Recv after drained = %v, want ErrStreamEnded", err)
 }
 
 // ---------------------------------------------------------------------------
@@ -874,12 +837,9 @@ func TestClient_Do_DrainResponse_WithTrailers(t *testing.T) {
 		BodyMode:     client.BodyBuffer,
 		WantTrailers: true,
 	}, &resp)
-	if err != nil {
-		t.Fatalf("Do: %v", err)
-	}
-	if resp.Status != 200 {
-		t.Errorf("Status = %d, want 200", resp.Status)
-	}
+
+	require.NoErrorf(t, err, "Do")
+	assert.Equalf(t, 200, resp.Status, "Status = %d, want 200", resp.Status)
 }
 
 // ---------------------------------------------------------------------------
@@ -913,9 +873,7 @@ func TestPool_MapAcquireErr_AcquireTimeout(t *testing.T) {
 			AcquireTimeout: 200 * time.Millisecond,
 		},
 	})
-	if err != nil {
-		t.Fatalf("NewClient: %v", err)
-	}
+	require.NoErrorf(t, err, "NewClient")
 	defer c.Close()
 
 	ctx := context.Background()
@@ -931,17 +889,16 @@ func TestPool_MapAcquireErr_AcquireTimeout(t *testing.T) {
 
 	// Second request: pool at capacity, AcquireTimeout=1ms → ErrAcquireTimeout.
 	var resp2 client.Response
+
 	err = c.Do(ctx, &client.Request{Method: "GET", Path: "/"}, &resp2)
-	if !errors.Is(err, client.ErrAcquireTimeout) {
-		t.Fatalf("Do at pool capacity = %v, want ErrAcquireTimeout", err)
-	}
+
+	require.ErrorIsf(t, err, client.ErrAcquireTimeout, "Do at pool capacity = %v, want ErrAcquireTimeout", err)
 
 	// The first request must actually have held the slot. Without this the test
 	// can pass for the wrong reason: if it failed early the pool is idle, and
 	// whatever the second request returns says nothing about acquire timeouts.
-	if ferr := <-errCh; ferr != nil {
-		t.Fatalf("first request, which is supposed to occupy the only slot: %v", ferr)
-	}
+	ferr := <-errCh
+	require.NoErrorf(t, ferr, "first request, which is supposed to occupy the only slot")
 }
 
 // ---------------------------------------------------------------------------
@@ -986,9 +943,9 @@ func TestStreamResponse_WaitTrailers_EventReset(t *testing.T) {
 func TestStreamResetError_Error(t *testing.T) {
 	t.Parallel()
 	e := &client.StreamResetError{Code: frame.ErrCodeCancel}
-	if !strings.Contains(e.Error(), "stream reset") {
-		t.Errorf("StreamResetError.Error() = %q, want to contain 'stream reset'", e.Error())
-	}
+
+	assert.Containsf(t, e.Error(), "stream reset",
+		"StreamResetError.Error() = %q, want to contain 'stream reset'", e.Error())
 }
 
 // ---------------------------------------------------------------------------
@@ -1005,21 +962,18 @@ func TestSingleConn_Do_AfterClose_ErrClosed(t *testing.T) {
 	// First request succeeds to establish a conn.
 	ctx := context.Background()
 	var resp client.Response
-	if err := c.Do(ctx, &client.Request{Method: "GET", Path: "/"}, &resp); err != nil {
-		t.Fatalf("initial Do: %v", err)
-	}
+	err := c.Do(ctx, &client.Request{Method: "GET", Path: "/"}, &resp)
+	require.NoErrorf(t, err, "initial Do")
 
 	_ = c.Close()
 
 	// Second request should fail with ErrClosed (or wrapped).
 	var resp2 client.Response
-	err := c.Do(ctx, &client.Request{Method: "GET", Path: "/"}, &resp2)
-	if err == nil {
-		t.Fatal("expected error after Close, got nil")
-	}
-	if !errors.Is(err, client.ErrClosed) {
-		t.Fatalf("Do after Close = %v, want ErrClosed", err)
-	}
+
+	err = c.Do(ctx, &client.Request{Method: "GET", Path: "/"}, &resp2)
+
+	require.Errorf(t, err, "expected error after Close, got nil")
+	require.ErrorIsf(t, err, client.ErrClosed, "Do after Close = %v, want ErrClosed", err)
 }
 
 // ---------------------------------------------------------------------------
@@ -1054,15 +1008,13 @@ func TestResponseBodyReader_Read_EventReset_ViaBodyStream(t *testing.T) {
 		t.Logf("DoStream returned err (expected): %v", err)
 		return
 	}
-	if resp.BodyReader == nil {
-		t.Fatal("BodyReader is nil")
-	}
+	require.Truef(t, resp.BodyReader != nil, "BodyReader is nil")
 	defer func() { _ = resp.BodyReader.Close() }()
 	buf := make([]byte, 1024)
+
 	_, readErr := resp.BodyReader.Read(buf)
-	if readErr == nil {
-		t.Error("expected Read error after connection close, got nil")
-	}
+
+	assert.Errorf(t, readErr, "expected Read error after connection close, got nil")
 }
 
 // ---------------------------------------------------------------------------
@@ -1083,9 +1035,7 @@ func TestResponseBodyReader_Read_LargeBody_BufReuse(t *testing.T) {
 
 	var resp client.Response
 	err := c.Do(ctx, &client.Request{Method: "GET", Path: "/", BodyMode: client.BodyStream}, &resp)
-	if err != nil {
-		t.Fatalf("Do: %v", err)
-	}
+	require.NoErrorf(t, err, "Do")
 	defer func() { _ = resp.BodyReader.Close() }()
 
 	// Read in tiny chunks to exercise r.buf (leftover bytes) code path.
@@ -1097,13 +1047,10 @@ func TestResponseBodyReader_Read_LargeBody_BufReuse(t *testing.T) {
 		if rerr == io.EOF {
 			break
 		}
-		if rerr != nil {
-			t.Fatalf("Read: %v", rerr)
-		}
+		require.NoErrorf(t, rerr, "Read")
 	}
-	if total != bodySize {
-		t.Errorf("read %d bytes, want %d", total, bodySize)
-	}
+
+	assert.Equalf(t, bodySize, total, "read %d bytes, want %d", total, bodySize)
 }
 
 // ---------------------------------------------------------------------------
@@ -1124,23 +1071,14 @@ func TestClient_Do_BodyStream_SmallBody(t *testing.T) {
 
 	var resp client.Response
 	err := c.Do(ctx, &client.Request{Method: "GET", Path: "/", BodyMode: client.BodyStream}, &resp)
-	if err != nil {
-		t.Fatalf("Do with BodyStream: %v", err)
-	}
-	if resp.BodyReader == nil {
-		t.Fatal("BodyReader is nil")
-	}
+
+	require.NoErrorf(t, err, "Do with BodyStream")
+	require.Truef(t, resp.BodyReader != nil, "BodyReader is nil")
 	defer func() { _ = resp.BodyReader.Close() }()
-	if resp.Status != 200 {
-		t.Errorf("Status = %d, want 200", resp.Status)
-	}
+	assert.Equalf(t, 200, resp.Status, "Status = %d, want 200", resp.Status)
 	got, err := io.ReadAll(resp.BodyReader)
-	if err != nil {
-		t.Fatalf("ReadAll: %v", err)
-	}
-	if !bytes.Equal(got, want) {
-		t.Errorf("body = %q, want %q", got, want)
-	}
+	require.NoErrorf(t, err, "ReadAll")
+	assert.Equalf(t, want, got, "body = %q, want %q", got, want)
 }
 
 // ---------------------------------------------------------------------------
@@ -1162,12 +1100,9 @@ func TestResponseBodyReader_Read_PartialRead(t *testing.T) {
 	defer cancel()
 
 	var resp client.Response
-	if err := c.Do(ctx, &client.Request{Method: "GET", Path: "/", BodyMode: client.BodyStream}, &resp); err != nil {
-		t.Fatalf("Do: %v", err)
-	}
-	if resp.BodyReader == nil {
-		t.Fatal("BodyReader is nil")
-	}
+	err := c.Do(ctx, &client.Request{Method: "GET", Path: "/", BodyMode: client.BodyStream}, &resp)
+	require.NoErrorf(t, err, "Do")
+	require.Truef(t, resp.BodyReader != nil, "BodyReader is nil")
 	defer func() { _ = resp.BodyReader.Close() }()
 
 	// Read with a 2-byte buffer — forces spill-over in body.go's Read.
@@ -1179,13 +1114,10 @@ func TestResponseBodyReader_Read_PartialRead(t *testing.T) {
 		if err == io.EOF {
 			break
 		}
-		if err != nil {
-			t.Fatalf("Read: %v", err)
-		}
+		require.NoErrorf(t, err, "Read")
 	}
-	if !bytes.Equal(got, payload) {
-		t.Errorf("got %q, want %q", got, payload)
-	}
+
+	assert.Equalf(t, payload, got, "got %q, want %q", got, payload)
 }
 
 // ---------------------------------------------------------------------------
@@ -1208,9 +1140,8 @@ func TestStreamResponse_Recv_EventTrailers_EmptyTrailers(t *testing.T) {
 	defer cancel()
 
 	var sr client.StreamResponse
-	if err := c.DoStream(ctx, &client.Request{Method: "GET", Path: "/"}, &sr); err != nil {
-		t.Fatalf("DoStream: %v", err)
-	}
+	err := c.DoStream(ctx, &client.Request{Method: "GET", Path: "/"}, &sr)
+	require.NoErrorf(t, err, "DoStream")
 	defer func() { _ = sr.Close() }()
 
 	// Pump all events to cover the EventTrailers branch in Recv.
@@ -1249,9 +1180,10 @@ func TestRetryer_DoStream_NonIdempotent_NoRetry(t *testing.T) {
 	defer cancel()
 	// POST is non-idempotent → canRetry returns false → delegate directly.
 	var sr client.StreamResponse
-	if err := r.DoStream(ctx, &client.Request{Method: "POST", Path: "/"}, &sr); err != nil {
-		t.Fatalf("DoStream POST: %v", err)
-	}
+
+	err := r.DoStream(ctx, &client.Request{Method: "POST", Path: "/"}, &sr)
+
+	require.NoErrorf(t, err, "DoStream POST")
 	defer func() { _ = sr.Close() }()
 }
 
@@ -1266,9 +1198,7 @@ func TestManagedPool_GetOrCreateSubPool_AfterClose(t *testing.T) {
 	}))
 	host, portStr, _ := net.SplitHostPort(addr)
 	port, err := strconv.Atoi(portStr)
-	if err != nil {
-		t.Fatalf("Atoi(%q): %v", portStr, err)
-	}
+	require.NoErrorf(t, err, "Atoi(%q)", portStr)
 
 	r := client.StaticResolver(client.Address{Host: host, Port: port})
 	c, err := client.NewClient(client.ClientOptions{
@@ -1278,27 +1208,24 @@ func TestManagedPool_GetOrCreateSubPool_AfterClose(t *testing.T) {
 			Dialer: &conn.TLSDialer{Config: &tls.Config{InsecureSkipVerify: true}},
 		},
 	})
-	if err != nil {
-		t.Fatalf("NewClient: %v", err)
-	}
+	require.NoErrorf(t, err, "NewClient")
 
 	// Do one request to create the sub-pool.
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	var resp client.Response
-	if err := doWithRetry(t, c, ctx, &client.Request{Method: "GET", Path: "/"}, &resp); err != nil {
-		t.Fatalf("initial Do: %v", err)
-	}
+	err = doWithRetry(t, c, ctx, &client.Request{Method: "GET", Path: "/"}, &resp)
+	require.NoErrorf(t, err, "initial Do")
 
 	// Close the pool, then try again — should get an error.
 	_ = c.Close()
 
 	var resp2 client.Response
+
 	err = c.Do(ctx, &client.Request{Method: "GET", Path: "/"}, &resp2)
+
 	// After close, should get an error.
-	if err == nil {
-		t.Error("expected error after pool close, got nil")
-	}
+	assert.Errorf(t, err, "expected error after pool close, got nil")
 }
 
 // ---------------------------------------------------------------------------
@@ -1320,9 +1247,7 @@ func TestPool_Acquire_AfterClose_ErrPoolClosed(t *testing.T) {
 			MaxConnsPerHost: 1,
 		},
 	})
-	if err != nil {
-		t.Fatalf("NewClient: %v", err)
-	}
+	require.NoErrorf(t, err, "NewClient")
 	// Seed then close.
 	ctx := context.Background()
 	var resp client.Response
@@ -1330,10 +1255,11 @@ func TestPool_Acquire_AfterClose_ErrPoolClosed(t *testing.T) {
 	_ = c.Close()
 
 	var resp2 client.Response
+
 	err = c.Do(ctx, &client.Request{Method: "GET", Path: "/"}, &resp2)
-	if !errors.Is(err, client.ErrPoolClosed) {
-		t.Fatalf("Do after Close = %v, want ErrPoolClosed (the test is named for that sentinel and used to accept any error)", err)
-	}
+
+	require.ErrorIsf(t, err, client.ErrPoolClosed,
+		"Do after Close = %v, want ErrPoolClosed (the test is named for that sentinel and used to accept any error)", err)
 }
 
 // ---------------------------------------------------------------------------
@@ -1348,13 +1274,11 @@ func TestHashSelector_Pick_EmptyKey(t *testing.T) {
 	}
 	// keyFn that returns empty string → ErrNoAddresses.
 	h, err := client.Hash(func(_ client.PickContext) string { return "" })
-	if err != nil {
-		t.Fatalf("Hash: %v", err)
-	}
+	require.NoErrorf(t, err, "Hash")
+
 	_, err = h.Pick(addrs, client.PickContext{})
-	if !errors.Is(err, client.ErrNoAddresses) {
-		t.Errorf("Pick with empty key = %v, want ErrNoAddresses", err)
-	}
+
+	assert.ErrorIsf(t, err, client.ErrNoAddresses, "Pick with empty key = %v, want ErrNoAddresses", err)
 }
 
 func TestHashSelector_Pick_NonEmptyKey(t *testing.T) {
@@ -1364,18 +1288,15 @@ func TestHashSelector_Pick_NonEmptyKey(t *testing.T) {
 		{Host: "10.0.0.2", Port: 80},
 	}
 	h, err := client.Hash(func(_ client.PickContext) string { return "session-123" })
-	if err != nil {
-		t.Fatalf("Hash: %v", err)
-	}
+	require.NoErrorf(t, err, "Hash")
+
 	got, err := h.Pick(addrs, client.PickContext{})
-	if err != nil {
-		t.Fatalf("Pick: %v", err)
-	}
+	require.NoErrorf(t, err, "Pick")
+
 	// Same key must pick same address.
 	got2, _ := h.Pick(addrs, client.PickContext{})
-	if got.Host != got2.Host {
-		t.Errorf("Hash selector not deterministic: %s != %s", got.Host, got2.Host)
-	}
+
+	assert.Equalf(t, got.Host, got2.Host, "Hash selector not deterministic: %s != %s", got.Host, got2.Host)
 }
 
 // ---------------------------------------------------------------------------
@@ -1395,17 +1316,16 @@ func TestNewClient_DefaultScheme_H2C(t *testing.T) {
 			Dialer: &conn.TLSDialer{Config: &tls.Config{InsecureSkipVerify: true}},
 		},
 	})
-	if err != nil {
-		t.Fatalf("NewClient: %v", err)
-	}
+	require.NoErrorf(t, err, "NewClient")
 	defer c.Close()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	var resp client.Response
-	if err := c.Do(ctx, &client.Request{Method: "GET", Path: "/"}, &resp); err != nil {
-		t.Fatalf("Do: %v", err)
-	}
+
+	err = c.Do(ctx, &client.Request{Method: "GET", Path: "/"}, &resp)
+
+	require.NoErrorf(t, err, "Do")
 }
 
 // ---------------------------------------------------------------------------
@@ -1414,9 +1334,7 @@ func TestNewClient_DefaultScheme_H2C(t *testing.T) {
 
 func TestFrame_ErrCodeCancel_IsNonZero(t *testing.T) {
 	t.Parallel()
-	if frame.ErrCodeCancel == 0 {
-		t.Error("ErrCodeCancel should be non-zero")
-	}
+	assert.NotZerof(t, frame.ErrCodeCancel, "ErrCodeCancel should be non-zero")
 }
 
 // ---------------------------------------------------------------------------
@@ -1442,9 +1360,7 @@ func TestManagedPool_Acquire_SelectorPickError(t *testing.T) {
 	}))
 	host, portStr, _ := net.SplitHostPort(addr)
 	port, err := strconv.Atoi(portStr)
-	if err != nil {
-		t.Fatalf("Atoi(%q): %v", portStr, err)
-	}
+	require.NoErrorf(t, err, "Atoi(%q)", portStr)
 
 	r := client.StaticResolver(client.Address{Host: host, Port: port})
 	c, err := client.NewClient(client.ClientOptions{
@@ -1455,21 +1371,18 @@ func TestManagedPool_Acquire_SelectorPickError(t *testing.T) {
 			Dialer: &conn.TLSDialer{Config: &tls.Config{InsecureSkipVerify: true}},
 		},
 	})
-	if err != nil {
-		t.Fatalf("NewClient: %v", err)
-	}
+	require.NoErrorf(t, err, "NewClient")
 	defer c.Close()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 	var resp client.Response
+
 	err = c.Do(ctx, &client.Request{Method: "GET", Path: "/"}, &resp)
-	if err == nil {
-		t.Fatal("expected selector error, got nil")
-	}
-	if !errors.Is(err, errBrokenSelector) {
-		t.Fatalf("Do with a failing selector = %v, want it to wrap errBrokenSelector", err)
-	}
+
+	require.Errorf(t, err, "expected selector error, got nil")
+	require.ErrorIsf(t, err, errBrokenSelector,
+		"Do with a failing selector = %v, want it to wrap errBrokenSelector", err)
 }
 
 // ---------------------------------------------------------------------------
@@ -1495,9 +1408,7 @@ func TestManagedPool_Acquire_NonDialOnlyErr_ImmediateReturn(t *testing.T) {
 	defer close(release)
 	host, portStr, _ := net.SplitHostPort(addr)
 	port, err := strconv.Atoi(portStr)
-	if err != nil {
-		t.Fatalf("Atoi(%q): %v", portStr, err)
-	}
+	require.NoErrorf(t, err, "Atoi(%q)", portStr)
 
 	r := client.StaticResolver(client.Address{Host: host, Port: port})
 	c, err := client.NewClient(client.ClientOptions{
@@ -1516,9 +1427,7 @@ func TestManagedPool_Acquire_NonDialOnlyErr_ImmediateReturn(t *testing.T) {
 			AcquireTimeout: 100 * time.Millisecond,
 		},
 	})
-	if err != nil {
-		t.Fatalf("NewClient: %v", err)
-	}
+	require.NoErrorf(t, err, "NewClient")
 	defer c.Close()
 
 	// Fill the one slot.
@@ -1530,17 +1439,18 @@ func TestManagedPool_Acquire_NonDialOnlyErr_ImmediateReturn(t *testing.T) {
 	select {
 	case <-arrived:
 	case <-time.After(10 * time.Second):
-		t.Fatal("the first request never reached the server; nothing was holding the slot")
+		require.FailNow(t, "the first request never reached the server; nothing was holding the slot")
 	}
 
 	// Second acquire: ErrAcquireTimeout is NOT a dial-only error → immediate return.
 	ctxShort, cancel := context.WithTimeout(ctx, 2*time.Second)
 	defer cancel()
 	var resp2 client.Response
+
 	err = c.Do(ctxShort, &client.Request{Method: "GET", Path: "/"}, &resp2)
-	if !errors.Is(err, client.ErrAcquireTimeout) {
-		t.Fatalf("acquire against a held slot = %v, want ErrAcquireTimeout; the 1ms AcquireTimeout is not a dial-only error, so it must return at once", err)
-	}
+
+	require.ErrorIsf(t, err, client.ErrAcquireTimeout,
+		"acquire against a held slot = %v, want ErrAcquireTimeout; the 1ms AcquireTimeout is not a dial-only error, so it must return at once", err)
 }
 
 // ---------------------------------------------------------------------------
@@ -1556,19 +1466,18 @@ func TestHistogramSnapshot_Quantile_HighBucket(t *testing.T) {
 	snap := h.Latency.Request.Snapshot()
 
 	q50 := snap.Quantile(0.5)
-	if q50 == 0 {
-		t.Error("Quantile(0.5) on single 1s observation = 0, want non-zero")
-	}
 	q99 := snap.Quantile(0.99)
-	if q99 == 0 {
-		t.Error("Quantile(0.99) = 0, want non-zero")
-	}
-	// p > 1 clamped to 1.
+
+	assert.NotZerof(t, q50, "Quantile(0.5) on single 1s observation = 0, want non-zero")
+	assert.NotZerof(t, q99, "Quantile(0.99) = 0, want non-zero")
+
+	// p > 1 clamped to 1. This was an `if q2 != q99` whose body was EMPTY, so
+	// a Quantile that stopped clamping — or returned anything at all here —
+	// passed unremarked. With a single observation every quantile lands in the
+	// same bucket, so the clamp to p=1 is exactly "q2 equals q99".
 	q2 := snap.Quantile(2.0)
-	if q2 != q99 {
-		// q99 = q100 = same bucket since only 1 observation
-		_ = q2 // just check no panic
-	}
+	assert.Equalf(t, q99, q2,
+		"Quantile(2.0) = %v, want Quantile(0.99) = %v — p > 1 must clamp to 1 rather than run off the bucket array", q2, q99)
 }
 
 // ---------------------------------------------------------------------------
@@ -1586,9 +1495,8 @@ func TestStreamResponse_WaitTrailers_AlreadyDrained(t *testing.T) {
 	defer cancel()
 
 	var sr client.StreamResponse
-	if err := c.DoStream(ctx, &client.Request{Method: "GET", Path: "/"}, &sr); err != nil {
-		t.Fatalf("DoStream: %v", err)
-	}
+	err := c.DoStream(ctx, &client.Request{Method: "GET", Path: "/"}, &sr)
+	require.NoErrorf(t, err, "DoStream")
 	defer func() { _ = sr.Close() }()
 
 	// Drain fully.
@@ -1607,14 +1515,12 @@ func TestStreamResponse_WaitTrailers_AlreadyDrained(t *testing.T) {
 
 	// WaitTrailers on a fully drained stream with no trailers returns nil, nil.
 	trailers, err := sr.WaitTrailers(ctx)
-	if err != nil {
-		t.Errorf("WaitTrailers after drain = %v, want nil", err)
-	}
+
+	assert.NoErrorf(t, err, "WaitTrailers after drain = %v, want nil", err)
 	// A response that ends on its HEADERS carries no trailer section at all, so
 	// this is nil rather than an empty slice. The old comment allowed either.
-	if trailers != nil {
-		t.Fatalf("WaitTrailers on a stream with no trailer section = %#v, want nil", trailers)
-	}
+	require.Truef(t, trailers == nil,
+		"WaitTrailers on a stream with no trailer section = %#v, want nil", trailers)
 }
 
 // ---------------------------------------------------------------------------
@@ -1636,20 +1542,17 @@ func TestPoolTransport_Shutdown(t *testing.T) {
 		},
 		Pool: &client.PoolOptions{MaxConnsPerHost: 1},
 	})
-	if err != nil {
-		t.Fatalf("NewClient: %v", err)
-	}
+	require.NoErrorf(t, err, "NewClient")
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	var resp client.Response
-	if err := doWithRetry(t, c, ctx, &client.Request{Method: "GET", Path: "/"}, &resp); err != nil {
-		t.Fatalf("Do: %v", err)
-	}
+	err = doWithRetry(t, c, ctx, &client.Request{Method: "GET", Path: "/"}, &resp)
+	require.NoErrorf(t, err, "Do")
 
-	if err := c.Shutdown(500 * time.Millisecond); err != nil {
-		t.Fatalf("Shutdown: %v", err)
-	}
+	err = c.Shutdown(500 * time.Millisecond)
+
+	require.NoErrorf(t, err, "Shutdown")
 }
 
 // ---------------------------------------------------------------------------
@@ -1665,9 +1568,7 @@ func TestManagedTransport_Shutdown(t *testing.T) {
 	}))
 	host, portStr, _ := net.SplitHostPort(addr)
 	port, err := strconv.Atoi(portStr)
-	if err != nil {
-		t.Fatalf("Atoi: %v", err)
-	}
+	require.NoErrorf(t, err, "Atoi")
 
 	r := client.StaticResolver(client.Address{Host: host, Port: port})
 	c, err := client.NewClient(client.ClientOptions{
@@ -1677,22 +1578,19 @@ func TestManagedTransport_Shutdown(t *testing.T) {
 			Dialer: &conn.TLSDialer{Config: &tls.Config{InsecureSkipVerify: true}},
 		},
 	})
-	if err != nil {
-		t.Fatalf("NewClient: %v", err)
-	}
+	require.NoErrorf(t, err, "NewClient")
 
 	// Do one request so a sub-pool is created.
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	var resp client.Response
-	if err := doWithRetry(t, c, ctx, &client.Request{Method: "GET", Path: "/"}, &resp); err != nil {
-		t.Fatalf("Do: %v", err)
-	}
+	err = doWithRetry(t, c, ctx, &client.Request{Method: "GET", Path: "/"}, &resp)
+	require.NoErrorf(t, err, "Do")
+
+	err = c.Shutdown(500 * time.Millisecond)
 
 	// Shutdown should complete without error.
-	if err := c.Shutdown(500 * time.Millisecond); err != nil {
-		t.Fatalf("Shutdown: %v", err)
-	}
+	require.NoErrorf(t, err, "Shutdown")
 }
 
 // TestManagedTransport_Warmup verifies Client.Warmup on a managed transport
@@ -1704,9 +1602,7 @@ func TestManagedTransport_Warmup(t *testing.T) {
 	}))
 	host, portStr, _ := net.SplitHostPort(addr)
 	port, err := strconv.Atoi(portStr)
-	if err != nil {
-		t.Fatalf("Atoi: %v", err)
-	}
+	require.NoErrorf(t, err, "Atoi")
 
 	r := client.StaticResolver(client.Address{Host: host, Port: port})
 	c, err := client.NewClient(client.ClientOptions{
@@ -1716,9 +1612,7 @@ func TestManagedTransport_Warmup(t *testing.T) {
 			Dialer: &conn.TLSDialer{Config: &tls.Config{InsecureSkipVerify: true}},
 		},
 	})
-	if err != nil {
-		t.Fatalf("NewClient: %v", err)
-	}
+	require.NoErrorf(t, err, "NewClient")
 	defer c.Close()
 
 	// Warmup should not panic or error — it fires background dials.
@@ -1737,16 +1631,15 @@ func TestManagedTransport_Warmup(t *testing.T) {
 	for time.Now().Before(deadline) && c.PoolStats().ActiveConns < 1 {
 		time.Sleep(5 * time.Millisecond)
 	}
-	if got := c.PoolStats().ActiveConns; got != 1 {
-		t.Fatalf("ActiveConns after Warmup(2) = %d, want 1 (MaxConnsPerHost defaults to 1 here)", got)
-	}
+	got := c.PoolStats().ActiveConns
+	require.Equalf(t, 1, got,
+		"ActiveConns after Warmup(2) = %d, want 1 (MaxConnsPerHost defaults to 1 here)", got)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	var resp client.Response
-	if err := doWithRetry(t, c, ctx, &client.Request{Method: "GET", Path: "/"}, &resp); err != nil {
-		t.Fatalf("Do after warmup: %v", err)
-	}
+	err = doWithRetry(t, c, ctx, &client.Request{Method: "GET", Path: "/"}, &resp)
+	require.NoErrorf(t, err, "Do after warmup")
 }
 
 // ---------------------------------------------------------------------------
@@ -1763,12 +1656,9 @@ func TestClient_Do_BodyStream_NilResp(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	err := c.Do(ctx, &client.Request{Method: "GET", Path: "/", BodyMode: client.BodyStream}, nil)
-	if err == nil {
-		t.Fatal("expected error for BodyStream with nil *Response")
-	}
-	if !strings.Contains(err.Error(), "BodyStream") {
-		t.Fatalf("unexpected error: %v", err)
-	}
+
+	require.Errorf(t, err, "expected error for BodyStream with nil *Response")
+	require.Containsf(t, err.Error(), "BodyStream", "unexpected error: %v", err)
 }
 
 // ---------------------------------------------------------------------------
@@ -1794,12 +1684,9 @@ func TestClient_Do_GzipResponse(t *testing.T) {
 		Path:     "/",
 		BodyMode: client.BodyBuffer,
 	}, &resp)
-	if err != nil {
-		t.Fatalf("Do: %v", err)
-	}
-	if resp.Status != 200 {
-		t.Errorf("Status = %d, want 200", resp.Status)
-	}
+
+	require.NoErrorf(t, err, "Do")
+	assert.Equalf(t, 200, resp.Status, "Status = %d, want 200", resp.Status)
 }
 
 // TestClient_Do_GzipBodyStream covers the BodyStream decompression path.
@@ -1820,17 +1707,13 @@ func TestClient_Do_GzipBodyStream(t *testing.T) {
 		Path:     "/",
 		BodyMode: client.BodyStream,
 	}, &resp)
-	if err != nil {
-		t.Fatalf("Do BodyStream gzip: %v", err)
-	}
-	if resp.BodyReader == nil {
-		t.Fatal("expected BodyReader")
-	}
+
+	require.NoErrorf(t, err, "Do BodyStream gzip")
+	require.Truef(t, resp.BodyReader != nil, "expected BodyReader")
 	body, _ := io.ReadAll(resp.BodyReader)
 	_ = resp.BodyReader.Close()
-	if string(body) != "streaming compressed body" {
-		t.Fatalf("body = %q, want %q", body, "streaming compressed body")
-	}
+	require.Equalf(t, "streaming compressed body", string(body),
+		"body = %q, want %q", body, "streaming compressed body")
 }
 
 // TestClient_Do_DeflateResponse covers the EncodingDeflate path in
@@ -1852,12 +1735,9 @@ func TestClient_Do_DeflateResponse(t *testing.T) {
 		Path:     "/",
 		BodyMode: client.BodyBuffer,
 	}, &resp)
-	if err != nil {
-		t.Fatalf("Do deflate: %v", err)
-	}
-	if resp.Status != 200 {
-		t.Errorf("Status = %d, want 200", resp.Status)
-	}
+
+	require.NoErrorf(t, err, "Do deflate")
+	assert.Equalf(t, 200, resp.Status, "Status = %d, want 200", resp.Status)
 }
 
 // TestDecompressingReader_Read_AfterClose covers the d.dec==nil path in Read().
@@ -1874,19 +1754,16 @@ func TestDecompressingReader_Read_AfterClose(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	var resp client.Response
-	if err := c.Do(ctx, &client.Request{Method: "GET", Path: "/", BodyMode: client.BodyStream}, &resp); err != nil {
-		t.Fatalf("Do: %v", err)
-	}
-	if resp.BodyReader == nil {
-		t.Fatal("expected BodyReader")
-	}
+	err := c.Do(ctx, &client.Request{Method: "GET", Path: "/", BodyMode: client.BodyStream}, &resp)
+	require.NoErrorf(t, err, "Do")
+	require.Truef(t, resp.BodyReader != nil, "expected BodyReader")
 	_, _ = io.ReadAll(resp.BodyReader)
 	_ = resp.BodyReader.Close()
+
 	// dec is nil after Close; this hits the nil-dec path → io.EOF
 	n, err := resp.BodyReader.Read(make([]byte, 8))
-	if n != 0 || err != io.EOF {
-		t.Errorf("Read after Close = (%d, %v), want (0, io.EOF)", n, err)
-	}
+
+	assert.Truef(t, n == 0 && err == io.EOF, "Read after Close = (%d, %v), want (0, io.EOF)", n, err)
 }
 
 // TestClient_Do_BodyStream_RecvTimeout covers the s.Recv() error path in do()
@@ -1902,12 +1779,10 @@ func TestClient_Do_BodyStream_RecvTimeout(t *testing.T) {
 	defer cancel()
 	var resp client.Response
 	err := c.Do(ctx, &client.Request{Method: "GET", Path: "/", BodyMode: client.BodyStream}, &resp)
-	if err == nil {
-		t.Fatal("expected timeout error from BodyStream with unresponsive server")
-	}
-	if !errors.Is(err, context.DeadlineExceeded) {
-		t.Fatalf("BodyStream against an unresponsive server = %v, want context.DeadlineExceeded (an 80ms deadline against a 10s handler has no other way to end)", err)
-	}
+
+	require.Errorf(t, err, "expected timeout error from BodyStream with unresponsive server")
+	require.ErrorIsf(t, err, context.DeadlineExceeded,
+		"BodyStream against an unresponsive server = %v, want context.DeadlineExceeded (an 80ms deadline against a 10s handler has no other way to end)", err)
 }
 
 // TestClient_Do_DeflateBodyStream covers the EncodingDeflate path via BodyStream.
@@ -1928,17 +1803,13 @@ func TestClient_Do_DeflateBodyStream(t *testing.T) {
 		Path:     "/",
 		BodyMode: client.BodyStream,
 	}, &resp)
-	if err != nil {
-		t.Fatalf("Do DeflateBodyStream: %v", err)
-	}
-	if resp.BodyReader == nil {
-		t.Fatal("expected BodyReader")
-	}
+
+	require.NoErrorf(t, err, "Do DeflateBodyStream")
+	require.Truef(t, resp.BodyReader != nil, "expected BodyReader")
 	body, _ := io.ReadAll(resp.BodyReader)
 	_ = resp.BodyReader.Close()
-	if string(body) != "deflate stream body" {
-		t.Fatalf("body = %q, want %q", body, "deflate stream body")
-	}
+	require.Equalf(t, "deflate stream body", string(body),
+		"body = %q, want %q", body, "deflate stream body")
 }
 
 // ---------------------------------------------------------------------------
@@ -1954,9 +1825,7 @@ func TestManagedPool_Warmup_AfterFirstRequest(t *testing.T) {
 	}))
 	host, portStr, _ := net.SplitHostPort(addr)
 	port, err := strconv.Atoi(portStr)
-	if err != nil {
-		t.Fatalf("Atoi(%q): %v", portStr, err)
-	}
+	require.NoErrorf(t, err, "Atoi(%q)", portStr)
 
 	r := client.StaticResolver(client.Address{Host: host, Port: port})
 	c, err := client.NewClient(client.ClientOptions{
@@ -1970,9 +1839,7 @@ func TestManagedPool_Warmup_AfterFirstRequest(t *testing.T) {
 			MaxStreamsPerConn: 10,
 		},
 	})
-	if err != nil {
-		t.Fatalf("NewClient: %v", err)
-	}
+	require.NoErrorf(t, err, "NewClient")
 	defer c.Close()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -1980,9 +1847,8 @@ func TestManagedPool_Warmup_AfterFirstRequest(t *testing.T) {
 
 	// Make one request to force creation of the sub-pool.
 	var resp client.Response
-	if err := doWithRetry(t, c, ctx, &client.Request{Method: "GET", Path: "/"}, &resp); err != nil {
-		t.Fatalf("initial Do: %v", err)
-	}
+	err = doWithRetry(t, c, ctx, &client.Request{Method: "GET", Path: "/"}, &resp)
+	require.NoErrorf(t, err, "initial Do")
 
 	// Now call Warmup — subs is non-empty so the loop body runs (s.p.warmup(per)).
 	c.Warmup(2)
@@ -2000,9 +1866,8 @@ func TestManagedPool_Warmup_AfterFirstRequest(t *testing.T) {
 		}
 		time.Sleep(5 * time.Millisecond)
 	}
-	if got := c.PoolStats().ActiveConns; got != 2 {
-		t.Fatalf("ActiveConns after Warmup(2) = %d, want 2", got)
-	}
+	got := c.PoolStats().ActiveConns
+	require.Equalf(t, 2, got, "ActiveConns after Warmup(2) = %d, want 2", got)
 }
 
 // ---------------------------------------------------------------------------
@@ -2027,18 +1892,15 @@ func TestPool_HandleClose_GoAwayConn(t *testing.T) {
 			MaxStreamsPerConn: 10,
 		},
 	})
-	if err != nil {
-		t.Fatalf("NewClient: %v", err)
-	}
+	require.NoErrorf(t, err, "NewClient")
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
 	// Seed the pool with an active conn.
 	var resp client.Response
-	if err := doWithRetry(t, c, ctx, &client.Request{Method: "GET", Path: "/"}, &resp); err != nil {
-		t.Fatalf("seeding Do: %v", err)
-	}
+	err = doWithRetry(t, c, ctx, &client.Request{Method: "GET", Path: "/"}, &resp)
+	require.NoErrorf(t, err, "seeding Do")
 
 	// Close the httptest server — this causes the server to send GOAWAY.
 	srv.Close()

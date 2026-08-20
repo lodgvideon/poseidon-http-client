@@ -12,6 +12,9 @@ import (
 	"math/big"
 	"testing"
 	"time"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // genServerCert returns a self-signed certificate usable as a server identity,
@@ -30,9 +33,7 @@ func genServerCert(t *testing.T) (tls.Certificate, *x509.CertPool) {
 func genCertForUsage(t *testing.T, eku ...x509.ExtKeyUsage) (tls.Certificate, *x509.CertPool) {
 	t.Helper()
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-	if err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, err, "generate the fixture's signing key")
 	tmpl := &x509.Certificate{
 		SerialNumber:          big.NewInt(1),
 		Subject:               pkix.Name{CommonName: "example.com"},
@@ -45,13 +46,9 @@ func genCertForUsage(t *testing.T, eku ...x509.ExtKeyUsage) (tls.Certificate, *x
 		IsCA:                  true,
 	}
 	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
-	if err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, err, "self-sign the fixture certificate")
 	parsed, err := x509.ParseCertificate(der)
-	if err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, err, "re-parse the fixture certificate")
 	pool := x509.NewCertPool()
 	pool.AddCert(parsed)
 	return tls.Certificate{Certificate: [][]byte{der}, PrivateKey: key, Leaf: parsed}, pool
@@ -97,9 +94,7 @@ func deliverCrypto(t *testing.T, src *memSink, dst *TLSHandshake) {
 		tls.QUICEncryptionLevelApplication,
 	} {
 		if data := src.crypto[lvl]; len(data) > 0 {
-			if err := dst.HandleCrypto(lvl, data); err != nil {
-				t.Fatalf("HandleCrypto(%v): %v", lvl, err)
-			}
+			require.NoErrorf(t, dst.HandleCrypto(lvl, data), "HandleCrypto(%v)", lvl)
 			src.crypto[lvl] = nil
 		}
 	}
@@ -119,50 +114,36 @@ func TestTLSHandshake_InMemory(t *testing.T) {
 	server := NewServerHandshake(&tls.Config{Certificates: []tls.Certificate{cert}}, tp)
 
 	ctx := context.Background()
-	if err := client.Start(ctx); err != nil {
-		t.Fatal(err)
-	}
-	if err := server.Start(ctx); err != nil {
-		t.Fatal(err)
-	}
-
+	require.NoError(t, client.Start(ctx), "client TLSHandshake.Start")
+	require.NoError(t, server.Start(ctx), "server TLSHandshake.Start")
 	cSink, sSink := newMemSink(), newMemSink()
+
 	for round := 0; round < 20 && (!cSink.done || !sSink.done); round++ {
-		if err := client.Pump(cSink); err != nil {
-			t.Fatalf("client pump: %v", err)
-		}
+		require.NoErrorf(t, client.Pump(cSink), "client pump, round %d", round)
 		deliverCrypto(t, cSink, server)
-		if err := server.Pump(sSink); err != nil {
-			t.Fatalf("server pump: %v", err)
-		}
+		require.NoErrorf(t, server.Pump(sSink), "server pump, round %d", round)
 		deliverCrypto(t, sSink, client)
 	}
 
-	if !cSink.done || !sSink.done {
-		t.Fatalf("handshake did not complete: client=%v server=%v", cSink.done, sSink.done)
-	}
+	require.Truef(t, cSink.done && sSink.done,
+		"handshake did not complete: client=%v server=%v", cSink.done, sSink.done)
 	// Client's write secret == server's read secret (client→server direction).
-	if !bytes.Equal(cSink.appWrite, sSink.appRead) || len(cSink.appWrite) == 0 {
-		t.Fatalf("client write secret != server read secret")
-	}
-	if !bytes.Equal(cSink.appRead, sSink.appWrite) || len(cSink.appRead) == 0 {
-		t.Fatalf("client read secret != server write secret")
-	}
+	assert.NotEmpty(t, cSink.appWrite, "no client write secret was installed")
+	assert.True(t, bytes.Equal(cSink.appWrite, sSink.appRead),
+		"client write secret != server read secret")
+	assert.NotEmpty(t, cSink.appRead, "no client read secret was installed")
+	assert.True(t, bytes.Equal(cSink.appRead, sSink.appWrite),
+		"client read secret != server write secret")
 	// The shared secret + suite derive identical packet keys on both sides.
 	ck, err := KeysFromSecret(cSink.suite, cSink.appWrite)
-	if err != nil {
-		t.Fatalf("KeysFromSecret: %v", err)
-	}
+	require.NoError(t, err, "KeysFromSecret on the client side")
 	sk, err := KeysFromSecret(sSink.suite, sSink.appRead)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !bytes.Equal(ck.Key, sk.Key) || !bytes.Equal(ck.IV, sk.IV) || !bytes.Equal(ck.HP, sk.HP) {
-		t.Fatal("packet keys derived from the shared secret differ")
-	}
-	if got := client.ConnectionState().NegotiatedProtocol; got != "h3" {
-		t.Fatalf("ALPN = %q, want h3", got)
-	}
+	require.NoError(t, err, "KeysFromSecret on the server side")
+	assert.True(t,
+		bytes.Equal(ck.Key, sk.Key) && bytes.Equal(ck.IV, sk.IV) && bytes.Equal(ck.HP, sk.HP),
+		"packet keys derived from the shared secret differ")
+	assert.Equalf(t, "h3", client.ConnectionState().NegotiatedProtocol,
+		"ALPN = %q, want h3", client.ConnectionState().NegotiatedProtocol)
 }
 
 // TestKeysFromSecret_UnsupportedSuite rejects a suite with no defined QUIC header
@@ -170,7 +151,9 @@ func TestTLSHandshake_InMemory(t *testing.T) {
 // AES-GCM suites and ChaCha20-Poly1305 are supported and covered elsewhere.
 func TestKeysFromSecret_UnsupportedSuite(t *testing.T) {
 	const tlsAES128CCM8SHA256 = uint16(0x1305)
-	if _, err := KeysFromSecret(tlsAES128CCM8SHA256, make([]byte, 32)); err == nil {
-		t.Fatal("expected ErrCryptoSuite for an unsupported suite")
-	}
+
+	_, err := KeysFromSecret(tlsAES128CCM8SHA256, make([]byte, 32))
+
+	assert.Error(t, err, "expected ErrCryptoSuite for an unsupported suite (RFC 9001 §5.4.1 defines "+
+		"no header-protection scheme for it, so deriving keys would produce unusable ones)")
 }

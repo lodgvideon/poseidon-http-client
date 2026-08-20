@@ -1,8 +1,9 @@
 package quic
 
 import (
-	"errors"
 	"testing"
+
+	"github.com/stretchr/testify/assert"
 )
 
 // TestConformance_RFC9000_Sec7_5_CryptoTooManyGaps_ProtocolViolation pins that the
@@ -15,6 +16,7 @@ import (
 func TestConformance_RFC9000_Sec7_5_CryptoTooManyGaps_ProtocolViolation(t *testing.T) {
 	h := &connFrameHandler{c: &Conn{}}
 	var err error
+
 	// 1-byte CRYPTO frames at increasing even offsets; offset 0 is never sent, so
 	// nothing becomes contiguous and every frame adds a fresh retained range.
 	for i := 0; i <= maxRecvGapChunks+2; i++ {
@@ -22,8 +24,8 @@ func TestConformance_RFC9000_Sec7_5_CryptoTooManyGaps_ProtocolViolation(t *testi
 			break
 		}
 	}
-	if !errors.Is(err, ErrProtocolViolation) {
-		t.Fatalf("OnCrypto err = %v, want ErrProtocolViolation once retained CRYPTO ranges "+
+
+	assert.ErrorIsf(t, err, ErrProtocolViolation,
+		"OnCrypto err = %v, want ErrProtocolViolation once retained CRYPTO ranges "+
 			"exceed %d — the cap must protect the unwindowed CRYPTO stream too", err, maxRecvGapChunks)
-	}
 }

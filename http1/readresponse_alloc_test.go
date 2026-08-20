@@ -6,6 +6,9 @@ import (
 	"context"
 	"testing"
 
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
 	"github.com/lodgvideon/poseidon-http-client/http1"
 )
 
@@ -45,17 +48,17 @@ func TestReadResponse_AllocsPerExchange(t *testing.T) {
 	c := http1.NewConn(&replayConn{script: []byte(benchResponse)})
 	fields := benchRequestFields()
 	ctx := context.Background()
-
 	// One exchange outside the count, so nothing one-time is charged to the
 	// steady state.
 	ex := c.NewExchange()
-	if err := ex.WriteRequest(ctx, fields, true); err != nil {
-		t.Fatalf("WriteRequest: %v", err)
-	}
-	if _, _, err := ex.ReadResponse(ctx); err != nil {
-		t.Fatalf("ReadResponse: %v", err)
-	}
+	require.NoError(t, ex.WriteRequest(ctx, fields, true), "WriteRequest")
+	_, _, err := ex.ReadResponse(ctx)
+	require.NoError(t, err, "ReadResponse")
 
+	// testify is deliberately ABSENT from this closure: AllocsPerRun measures the
+	// whole process, and require/assert reflect and allocate, so an assertion here
+	// would be counted as part of what it is judging. The hand-rolled t.Fatalf is
+	// the only form that costs nothing when it does not fire.
 	got := testing.AllocsPerRun(2000, func() {
 		ex := c.NewExchange()
 		if err := ex.WriteRequest(ctx, fields, true); err != nil {
@@ -66,13 +69,11 @@ func TestReadResponse_AllocsPerExchange(t *testing.T) {
 		}
 	})
 
-	if int(got) > exchangeAllocCeiling {
-		t.Errorf("one exchange allocates %.0f, ceiling %d: a per-exchange allocation "+
+	assert.LessOrEqualf(t, int(got), exchangeAllocCeiling,
+		"one exchange allocates %.0f, ceiling %d: a per-exchange allocation "+
 			"came back on the HTTP/1.1 request/response hot path", got, exchangeAllocCeiling)
-	}
-	if int(got) < exchangeAllocCeiling {
-		t.Errorf("one exchange allocates %.0f, below the ceiling of %d: the path "+
+	assert.GreaterOrEqualf(t, int(got), exchangeAllocCeiling,
+		"one exchange allocates %.0f, below the ceiling of %d: the path "+
 			"improved — lower exchangeAllocCeiling to %.0f to lock the win in",
-			got, exchangeAllocCeiling, got)
-	}
+		got, exchangeAllocCeiling, got)
 }

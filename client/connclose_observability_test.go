@@ -9,6 +9,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
 	"github.com/lodgvideon/poseidon-http-client/conn"
 )
 
@@ -39,7 +42,6 @@ func newCloseRecorder() *closeRecorder {
 func TestSingleConn_CloseIsObservable(t *testing.T) {
 	srv := startOneH2Server(t)
 	defer srv.Close()
-
 	r := newCloseRecorder()
 	s := &singleConn{
 		addr:        srv.Listener.Addr().String(),
@@ -50,21 +52,17 @@ func TestSingleConn_CloseIsObservable(t *testing.T) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	if _, _, err := s.acquireConn(ctx); err != nil {
-		t.Fatalf("acquireConn: %v", err)
-	}
+	_, _, err := s.acquireConn(ctx)
+	require.NoError(t, err, "acquireConn")
+
 	_ = s.close()
 
-	if got := r.metrics.Counters.ConnsClosed.Load(); got != 1 {
-		t.Errorf("ConnsClosed = %d after closing a live conn, want 1 — an HTTP/2 "+
-			"single-conn teardown was invisible to the counter", got)
-	}
-	if len(r.events) != 1 {
-		t.Fatalf("OnConnClose fired %d times, want 1", len(r.events))
-	}
-	if r.events[0].Reason != CloseManual {
-		t.Errorf("Reason = %v, want CloseManual", r.events[0].Reason)
-	}
+	closed := r.metrics.Counters.ConnsClosed.Load()
+	assert.Equalf(t, int64(1), closed,
+		"ConnsClosed = %d after closing a live conn, want 1 — an HTTP/2 "+
+			"single-conn teardown was invisible to the counter", closed)
+	require.Lenf(t, r.events, 1, "OnConnClose fired %d times, want 1", len(r.events))
+	assert.Equalf(t, CloseManual, r.events[0].Reason, "Reason = %v, want CloseManual", r.events[0].Reason)
 }
 
 // TestH1SingleConn_CloseIsObservable is the HTTP/1.1 gate for the explicit
@@ -81,18 +79,14 @@ func TestH1SingleConn_CloseIsObservable(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	_, _, release, err := s.openExchange(ctx)
-	if err != nil {
-		t.Fatalf("openExchange: %v", err)
-	}
+	require.NoError(t, err, "openExchange")
 	release.release()
+
 	_ = s.close()
 
-	if got := r.metrics.Counters.ConnsClosed.Load(); got == 0 {
-		t.Error("ConnsClosed stayed 0 after an HTTP/1.1 single-conn teardown")
-	}
-	if len(r.events) == 0 {
-		t.Fatal("OnConnClose never fired for an HTTP/1.1 single-conn teardown")
-	}
+	assert.NotZero(t, r.metrics.Counters.ConnsClosed.Load(),
+		"ConnsClosed stayed 0 after an HTTP/1.1 single-conn teardown")
+	require.NotEmpty(t, r.events, "OnConnClose never fired for an HTTP/1.1 single-conn teardown")
 }
 
 // TestH1SingleConn_NotReusableIsObservable covers the case the issue calls out
@@ -110,7 +104,6 @@ func TestH1SingleConn_NotReusableIsObservable(t *testing.T) {
 		_, _ = w.Write([]byte("ok"))
 	}))
 	defer srv.Close()
-
 	var mu sync.Mutex
 	var reasons []CloseReason
 	c, err := NewClient(ClientOptions{
@@ -123,32 +116,26 @@ func TestH1SingleConn_NotReusableIsObservable(t *testing.T) {
 			mu.Unlock()
 		}},
 	})
-	if err != nil {
-		t.Fatalf("NewClient: %v", err)
-	}
+	require.NoError(t, err, "NewClient")
 	defer func() { _ = c.Close() }()
 
 	var resp Response
-	if err := c.Do(context.Background(), &Request{Method: "GET", Path: "/"}, &resp); err != nil {
-		t.Fatalf("Do: %v", err)
-	}
+	err = c.Do(context.Background(), &Request{Method: "GET", Path: "/"}, &resp)
 
+	require.NoError(t, err, "Do")
 	mu.Lock()
 	defer mu.Unlock()
-	for _, r := range reasons {
-		if r == CloseNotReusable {
-			return
-		}
-	}
-	t.Errorf("a Connection: close response produced reasons %v, none of them "+
-		"CloseNotReusable — the ordinary HTTP/1.1 churn is still invisible", reasons)
+	assert.Containsf(t, reasons, CloseNotReusable,
+		"a Connection: close response produced reasons %v, none of them "+
+			"CloseNotReusable — the ordinary HTTP/1.1 churn is still invisible", reasons)
 }
 
 // TestCloseReason_NotReusableHasALabel keeps the new value out of the "unknown"
 // bucket, which is where a metric label silently lands if String is not updated.
 func TestCloseReason_NotReusableHasALabel(t *testing.T) {
-	if got := CloseNotReusable.String(); got != "not-reusable" {
-		t.Errorf("CloseNotReusable.String() = %q, want %q — an unlabelled reason "+
+	got := CloseNotReusable.String()
+
+	assert.Equalf(t, "not-reusable", got,
+		"CloseNotReusable.String() = %q, want %q — an unlabelled reason "+
 			"aggregates into \"unknown\" on every dashboard", got, "not-reusable")
-	}
 }

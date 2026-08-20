@@ -5,6 +5,9 @@ import (
 	"context"
 	"crypto/tls"
 	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // TestAcceptInitial_RoundTrip builds a real client Initial with buildInitialPacket
@@ -19,30 +22,18 @@ func TestAcceptInitial_RoundTrip(t *testing.T) {
 
 	clientKeys, _ := InitialKeys(dcid)
 	sealer, err := NewSealer(clientKeys)
-	if err != nil {
-		t.Fatalf("NewSealer: %v", err)
-	}
+	require.NoError(t, err, "NewSealer with the client Initial keys")
 	pkt, err := buildInitialPacket(nil, sealer, dcid, scid, nil, 0, 4, 0, clientHello, InitialDatagramMinSize)
-	if err != nil {
-		t.Fatalf("buildInitialPacket: %v", err)
-	}
+	require.NoError(t, err, "buildInitialPacket")
 
 	ci, err := AcceptInitial(pkt)
-	if err != nil {
-		t.Fatalf("AcceptInitial: %v", err)
-	}
-	if !bytes.Equal(ci.DCID, dcid) {
-		t.Errorf("DCID = %x, want %x", ci.DCID, dcid)
-	}
-	if !bytes.Equal(ci.SCID, scid) {
-		t.Errorf("SCID = %x, want %x", ci.SCID, scid)
-	}
-	if len(ci.Token) != 0 {
-		t.Errorf("Token = %x, want empty", ci.Token)
-	}
-	if !bytes.Equal(ci.CryptoData, clientHello) {
-		t.Errorf("CryptoData = %q, want %q", ci.CryptoData, clientHello)
-	}
+
+	require.NoError(t, err, "AcceptInitial on a well-formed client Initial")
+	assert.Truef(t, bytes.Equal(ci.DCID, dcid), "DCID = %x, want %x", ci.DCID, dcid)
+	assert.Truef(t, bytes.Equal(ci.SCID, scid), "SCID = %x, want %x", ci.SCID, scid)
+	assert.Emptyf(t, ci.Token, "Token = %x, want empty", ci.Token)
+	assert.Truef(t, bytes.Equal(ci.CryptoData, clientHello),
+		"CryptoData = %q, want %q", ci.CryptoData, clientHello)
 }
 
 // TestAcceptInitial_NotInitial rejects a non-Initial packet (a 1-RTT short header)
@@ -50,21 +41,24 @@ func TestAcceptInitial_RoundTrip(t *testing.T) {
 func TestAcceptInitial_NotInitial(t *testing.T) {
 	t.Parallel()
 	// Short header: high bit clear (short form), fixed bit set.
-	if _, err := AcceptInitial([]byte{0x40, 0x00, 0x00, 0x00, 0x00}); err != ErrNotInitial {
-		t.Fatalf("AcceptInitial(short header) = %v, want ErrNotInitial", err)
-	}
+	shortHeader := []byte{0x40, 0x00, 0x00, 0x00, 0x00}
+
+	_, err := AcceptInitial(shortHeader)
+
+	assert.Truef(t, err == ErrNotInitial,
+		"AcceptInitial(short header) = %v, want ErrNotInitial", err)
 }
 
 // TestAcceptInitial_Malformed surfaces the decode error for inputs that are not
 // parseable packet headers.
 func TestAcceptInitial_Malformed(t *testing.T) {
 	t.Parallel()
-	if _, err := AcceptInitial(nil); err == nil {
-		t.Fatal("AcceptInitial(nil) = nil error, want a decode error")
-	}
-	if _, err := AcceptInitial([]byte{0xc0, 0x00, 0x00}); err == nil {
-		t.Fatal("AcceptInitial(truncated long header) = nil error, want a decode error")
-	}
+	_, errNil := AcceptInitial(nil)
+	_, errTruncated := AcceptInitial([]byte{0xc0, 0x00, 0x00})
+
+	assert.Error(t, errNil, "AcceptInitial(nil) = nil error, want a decode error")
+	assert.Error(t, errTruncated,
+		"AcceptInitial(truncated long header) = nil error, want a decode error")
 }
 
 // TestCryptoReassembler_OutOfOrderAndCap checks the reassembler stitches
@@ -72,18 +66,17 @@ func TestAcceptInitial_Malformed(t *testing.T) {
 func TestCryptoReassembler_OutOfOrderAndCap(t *testing.T) {
 	t.Parallel()
 	var c cryptoReassembler
-	if err := c.OnCrypto(6, []byte("world")); err != nil {
-		t.Fatalf("OnCrypto(6): %v", err)
-	}
-	if err := c.OnCrypto(0, []byte("hello ")); err != nil {
-		t.Fatalf("OnCrypto(0): %v", err)
-	}
-	if got := string(c.assembled()); got != "hello world" {
-		t.Errorf("assembled = %q, want %q", got, "hello world")
-	}
-	if err := c.OnCrypto(maxInitialCrypto, []byte{0x00}); err != ErrCryptoBufferExceeded {
-		t.Errorf("OnCrypto past cap = %v, want ErrCryptoBufferExceeded", err)
-	}
+
+	errHigh := c.OnCrypto(6, []byte("world")) // the later fragment arrives first
+	errLow := c.OnCrypto(0, []byte("hello "))
+	errPastCap := c.OnCrypto(maxInitialCrypto, []byte{0x00})
+
+	require.NoError(t, errHigh, "OnCrypto(6)")
+	require.NoError(t, errLow, "OnCrypto(0)")
+	assert.Equalf(t, "hello world", string(c.assembled()),
+		"assembled = %q, want %q", string(c.assembled()), "hello world")
+	assert.Truef(t, errPastCap == ErrCryptoBufferExceeded,
+		"OnCrypto past cap = %v, want ErrCryptoBufferExceeded", errPastCap)
 }
 
 // TestSealPacket_RoundTrip seals a CRYPTO-carrying packet in each of the long
@@ -96,13 +89,9 @@ func TestSealPacket_RoundTrip(t *testing.T) {
 	scid := []byte{0x01, 0x02, 0x03, 0x04} // the server's chosen SCID
 	_, serverKeys := InitialKeys([]byte{1, 2, 3, 4, 5, 6, 7, 8})
 	sealer, err := NewSealer(serverKeys)
-	if err != nil {
-		t.Fatalf("NewSealer: %v", err)
-	}
+	require.NoError(t, err, "NewSealer with the server Initial keys")
 	opener, err := NewOpener(serverKeys)
-	if err != nil {
-		t.Fatalf("NewOpener: %v", err)
-	}
+	require.NoError(t, err, "NewOpener with the server Initial keys")
 	crypto := []byte("server-handshake-flight-bytes")
 	payload := AppendCrypto(nil, 0, crypto)
 
@@ -116,30 +105,18 @@ func TestSealPacket_RoundTrip(t *testing.T) {
 	}
 	for _, tc := range cases {
 		pkt, err := SealPacket(nil, sealer, tc.typ, dcid, scid, nil, 7, 4, payload)
-		if err != nil {
-			t.Fatalf("SealPacket(%v): %v", tc.typ, err)
-		}
+
+		require.NoErrorf(t, err, "SealPacket(%v)", tc.typ)
 		hdr, err := ParseHeader(pkt, tc.dcidLen)
-		if err != nil {
-			t.Fatalf("ParseHeader(%v): %v", tc.typ, err)
-		}
-		if hdr.Type != tc.typ {
-			t.Errorf("type = %v, want %v", hdr.Type, tc.typ)
-		}
+		require.NoErrorf(t, err, "ParseHeader(%v)", tc.typ)
+		assert.Equalf(t, tc.typ, hdr.Type, "type = %v, want %v", hdr.Type, tc.typ)
 		pn, _, frames, err := opener.Open(pkt, hdr.PNOffset, 0)
-		if err != nil {
-			t.Fatalf("Open(%v): %v", tc.typ, err)
-		}
-		if pn != 7 {
-			t.Errorf("%v: pn = %d, want 7", tc.typ, pn)
-		}
+		require.NoErrorf(t, err, "Open(%v)", tc.typ)
+		assert.EqualValuesf(t, 7, pn, "%v: pn = %d, want 7", tc.typ, pn)
 		var cr cryptoReassembler
-		if err := ParseFrames(frames, &cr); err != nil {
-			t.Fatalf("ParseFrames(%v): %v", tc.typ, err)
-		}
-		if !bytes.Equal(cr.assembled(), crypto) {
-			t.Errorf("%v: crypto = %q, want %q", tc.typ, cr.assembled(), crypto)
-		}
+		require.NoErrorf(t, ParseFrames(frames, &cr), "ParseFrames(%v)", tc.typ)
+		assert.Truef(t, bytes.Equal(cr.assembled(), crypto),
+			"%v: crypto = %q, want %q", tc.typ, cr.assembled(), crypto)
 	}
 }
 
@@ -150,18 +127,15 @@ func TestSealPacket_PadsShortPayload(t *testing.T) {
 	_, keys := InitialKeys([]byte{1, 2, 3, 4, 5, 6, 7, 8})
 	sealer, _ := NewSealer(keys)
 	opener, _ := NewOpener(keys)
+
 	// One PING byte with a 1-byte packet number is under the 20-byte floor.
 	pkt, err := SealPacket(nil, sealer, PacketHandshake, []byte{9, 9, 9, 9}, []byte{8, 8}, nil, 0, 1, []byte{0x01})
-	if err != nil {
-		t.Fatalf("SealPacket: %v", err)
-	}
+
+	require.NoError(t, err, "SealPacket with a payload under the header-protection sample")
 	hdr, err := ParseHeader(pkt, 0)
-	if err != nil {
-		t.Fatalf("ParseHeader: %v", err)
-	}
-	if _, _, _, err := opener.Open(pkt, hdr.PNOffset, 0); err != nil {
-		t.Fatalf("Open padded packet: %v", err)
-	}
+	require.NoError(t, err, "ParseHeader of the padded packet")
+	_, _, _, err = opener.Open(pkt, hdr.PNOffset, 0)
+	assert.NoError(t, err, "Open padded packet: the pad must keep the packet openable")
 }
 
 // TestSealPacket_BadPNLen rejects an out-of-range packet-number length.
@@ -169,9 +143,11 @@ func TestSealPacket_BadPNLen(t *testing.T) {
 	t.Parallel()
 	_, keys := InitialKeys([]byte{1, 2, 3, 4, 5, 6, 7, 8})
 	sealer, _ := NewSealer(keys)
-	if _, err := SealPacket(nil, sealer, PacketHandshake, []byte{1}, []byte{2}, nil, 0, 5, []byte{0x01}); err != ErrPacketEncoding {
-		t.Fatalf("SealPacket(pnLen=5) = %v, want ErrPacketEncoding", err)
-	}
+
+	_, err := SealPacket(nil, sealer, PacketHandshake, []byte{1}, []byte{2}, nil, 0, 5, []byte{0x01})
+
+	assert.Truef(t, err == ErrPacketEncoding,
+		"SealPacket(pnLen=5) = %v, want ErrPacketEncoding", err)
 }
 
 // TestStartServerHandshake_FullHandshake drives a real client Conn against the
@@ -211,9 +187,7 @@ func setupServerConnWith(t *testing.T, wrap func(PacketConn) PacketConn) (*Conn,
 	}
 
 	client, err := NewConn(clientPC, &tls.Config{ServerName: "example.com", RootCAs: pool}, clientTP)
-	if err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, err, "NewConn for the client half of the handshake fixture")
 	// The server authenticates against the client's original DCID and advertises
 	// its own source CID (RFC 9000 §7.3).
 	serverTP := concat(clientTP,
@@ -240,24 +214,16 @@ func setupServerConnWith(t *testing.T, wrap func(PacketConn) PacketConn) (*Conn,
 		serverErr <- nil
 	}()
 
-	if err := client.Establish(context.Background()); err != nil {
-		t.Fatalf("client Establish: %v", err)
-	}
-	if !client.handshakeComplete {
-		t.Fatal("client handshake did not complete against StartServerHandshake")
-	}
-	if err := <-serverErr; err != nil { // publishes flight (happens-before)
-		t.Fatalf("server: %v", err)
-	}
-	if flight.HandshakeSealer == nil || flight.HandshakeOpener == nil {
-		t.Fatal("server did not install Handshake keys")
-	}
-	if len(flight.PeerTransportParams) == 0 {
-		t.Fatal("server did not capture the client's transport parameters")
-	}
-	if _, err := ParseTransportParams(flight.PeerTransportParams); err != nil {
-		t.Fatalf("captured client transport params do not parse: %v", err)
-	}
+	require.NoError(t, client.Establish(context.Background()), "client Establish")
+	require.True(t, client.handshakeComplete,
+		"client handshake did not complete against StartServerHandshake")
+	require.NoError(t, <-serverErr, "server side of the handshake") // publishes flight (happens-before)
+	require.True(t, flight.HandshakeSealer != nil && flight.HandshakeOpener != nil,
+		"server did not install Handshake keys")
+	require.NotEmpty(t, flight.PeerTransportParams,
+		"server did not capture the client's transport parameters")
+	_, err = ParseTransportParams(flight.PeerTransportParams)
+	require.NoError(t, err, "captured client transport params do not parse")
 
 	// The client sent its Handshake Finished during Establish; drain it and
 	// complete the server side.
@@ -271,24 +237,15 @@ drain:
 			break drain
 		}
 	}
-	if len(clientHS) == 0 {
-		t.Fatal("captured no client Handshake CRYPTO to complete the server")
-	}
-	if err := flight.HandleClientHandshake(clientHS); err != nil {
-		t.Fatalf("HandleClientHandshake: %v", err)
-	}
-	if !flight.Complete {
-		t.Fatal("server handshake did not complete")
-	}
-	if flight.AppSealer == nil || flight.AppOpener == nil {
-		t.Fatal("server did not install 1-RTT keys")
-	}
+	require.NotEmpty(t, clientHS, "captured no client Handshake CRYPTO to complete the server")
+	require.NoError(t, flight.HandleClientHandshake(clientHS), "HandleClientHandshake")
+	require.True(t, flight.Complete, "server handshake did not complete")
+	require.True(t, flight.AppSealer != nil && flight.AppOpener != nil,
+		"server did not install 1-RTT keys")
 
 	// Wrap the completed handshake into a connected server Conn.
 	sc, err := NewServerConn(&chanPC{rx: toServer, tx: fromServer}, flight, client.origDCID, client.scid)
-	if err != nil {
-		t.Fatalf("NewServerConn: %v", err)
-	}
+	require.NoError(t, err, "NewServerConn")
 	return client, sc, toServer, fromServer
 }
 
@@ -296,21 +253,13 @@ drain:
 // connection built from a completed handshake against a real client.
 func TestStartServerHandshake_FullHandshake(t *testing.T) {
 	client, sc, _, _ := setupServerConn(t)
-	if !client.handshakeComplete {
-		t.Fatal("client handshake did not complete")
-	}
-	if !sc.isServer {
-		t.Error("NewServerConn: isServer = false")
-	}
-	if sc.oneRTTSealer == nil || sc.keys.OneRTT == nil {
-		t.Error("NewServerConn: 1-RTT keys not installed")
-	}
-	if !sc.handshakeComplete {
-		t.Error("NewServerConn: handshakeComplete = false")
-	}
-	if sc.connMax == 0 {
-		t.Error("NewServerConn: connMax (peer InitialMaxData) not seeded")
-	}
+
+	require.True(t, client.handshakeComplete, "client handshake did not complete")
+	assert.True(t, sc.isServer, "NewServerConn: isServer = false")
+	assert.True(t, sc.oneRTTSealer != nil && sc.keys.OneRTT != nil,
+		"NewServerConn: 1-RTT keys not installed")
+	assert.True(t, sc.handshakeComplete, "NewServerConn: handshakeComplete = false")
+	assert.NotZero(t, sc.connMax, "NewServerConn: connMax (peer InitialMaxData) not seeded")
 }
 
 // TestServerConn_RequestResponseRoundTrip drives a full 1-RTT request/response
@@ -322,30 +271,20 @@ func TestServerConn_RequestResponseRoundTrip(t *testing.T) {
 	// sealer; the server decrypts it, accepts the request stream, and reads it.
 	req := AppendStream(nil, 0, 0, true, []byte("GET /"))
 	pkt, err := SealPacket(nil, client.oneRTTSealer, PacketShort, sc.scid, nil, nil, 0, 4, req)
-	if err != nil {
-		t.Fatalf("seal client 1-RTT request: %v", err)
-	}
+	require.NoError(t, err, "seal client 1-RTT request")
 	res, err := processDatagram(pkt, len(sc.scid), &sc.keys, func(PacketType) uint64 { return 0 }, &connFrameHandler{c: sc, space: spaceApp})
-	if err != nil {
-		t.Fatalf("server processDatagram: %v", err)
-	}
-	if res.Processed != 1 {
-		t.Fatalf("server processed %d packets, want 1 (%+v)", res.Processed, res)
-	}
+	require.NoError(t, err, "server processDatagram")
+	require.EqualValuesf(t, 1, res.Processed,
+		"server processed %d packets, want 1 (%+v)", res.Processed, res)
 	rs := sc.AcceptBidiStream()
-	if rs == nil || rs.ID() != 0 {
-		t.Fatalf("AcceptBidiStream = %v, want request stream 0", rs)
-	}
-	if got := string(rs.Recv()); got != "GET /" {
-		t.Fatalf("server read request %q, want %q", got, "GET /")
-	}
+	require.NotNil(t, rs, "AcceptBidiStream = nil, want request stream 0")
+	require.EqualValuesf(t, 0, rs.ID(), "AcceptBidiStream = stream %d, want request stream 0", rs.ID())
+	assert.Equal(t, "GET /", string(rs.Recv()), "the server must read back the request body")
 
 	// Response: the server writes on the request stream via its real send path; the
 	// client opens its side, decrypts the response, and reads it.
 	reqStream, err := client.OpenStream()
-	if err != nil {
-		t.Fatalf("client OpenStream: %v", err)
-	}
+	require.NoError(t, err, "client OpenStream")
 	for drained := false; !drained; { // clear any leftover handshake datagrams
 		select {
 		case <-fromServer:
@@ -353,20 +292,16 @@ func TestServerConn_RequestResponseRoundTrip(t *testing.T) {
 			drained = true
 		}
 	}
-	if _, err := rs.Send([]byte("200 OK"), true); err != nil {
-		t.Fatalf("server Send response: %v", err)
-	}
+	_, err = rs.Send([]byte("200 OK"), true)
+	require.NoError(t, err, "server Send response")
 	respDg := <-fromServer
 	rres, err := processDatagram(respDg, len(client.scid), &client.keys, func(PacketType) uint64 { return 0 }, &connFrameHandler{c: client, space: spaceApp})
-	if err != nil {
-		t.Fatalf("client processDatagram(response): %v", err)
-	}
-	if rres.Processed != 1 {
-		t.Fatalf("client processed %d response packets, want 1 (%+v)", rres.Processed, rres)
-	}
-	if got := string(reqStream.Recv()); got != "200 OK" {
-		t.Fatalf("client read response %q, want %q", got, "200 OK")
-	}
+
+	require.NoError(t, err, "client processDatagram(response)")
+	require.EqualValuesf(t, 1, rres.Processed,
+		"client processed %d response packets, want 1 (%+v)", rres.Processed, rres)
+	assert.Equal(t, "200 OK", string(reqStream.Recv()),
+		"the client must read back the response body the server sent")
 }
 
 // TestServerConn_AcceptsClientStreams checks a server connection accepts a
@@ -385,39 +320,31 @@ func TestServerConn_AcceptsClientStreams(t *testing.T) {
 	h := &connFrameHandler{c: c}
 
 	// Client-initiated bidi stream 0 is accepted as a request.
-	if err := h.OnStream(0, 0, false, []byte("request")); err != nil {
-		t.Fatalf("OnStream(client bidi 0): %v", err)
-	}
-	if c.streams[0] == nil {
-		t.Fatal("client bidi stream 0 was not created")
-	}
-	if c.streams[0].sendMax != 1<<20 {
-		t.Errorf("sendMax = %d, want %d (client bidi_local)", c.streams[0].sendMax, 1<<20)
-	}
-	if got := c.AcceptBidiStream(); got == nil || got.ID() != 0 {
-		t.Fatalf("AcceptBidiStream = %v, want stream 0", got)
-	}
-	if c.AcceptBidiStream() != nil {
-		t.Fatal("AcceptBidiStream returned an unexpected second stream")
-	}
-
+	errBidi := h.OnStream(0, 0, false, []byte("request"))
 	// Client-initiated uni stream 2 is accepted (control/QPACK).
-	if err := h.OnStream(2, 0, false, []byte{0x00}); err != nil {
-		t.Fatalf("OnStream(client uni 2): %v", err)
-	}
-	if got := c.AcceptUniStream(); got == nil || got.ID() != 2 {
-		t.Fatalf("AcceptUniStream = %v, want stream 2", got)
-	}
-
+	errUni := h.OnStream(2, 0, false, []byte{0x00})
 	// The server's own send-only stream (server uni, id 3) must reject inbound STREAM.
-	if err := h.OnStream(3, 0, false, []byte{0x00}); err != ErrStreamState {
-		t.Fatalf("OnStream(server uni 3) = %v, want ErrStreamState", err)
-	}
-
+	errOwnUni := h.OnStream(3, 0, false, []byte{0x00})
 	// A request stream past the advertised bidi limit is a STREAM_LIMIT_ERROR.
-	if err := h.OnStream(12, 0, false, []byte("x")); err != ErrTooManyBidiStreams {
-		t.Fatalf("OnStream(over-limit bidi 12) = %v, want ErrTooManyBidiStreams", err)
-	}
+	errOverLimit := h.OnStream(12, 0, false, []byte("x"))
+
+	require.NoError(t, errBidi, "OnStream(client bidi 0)")
+	require.NotNil(t, c.streams[0], "client bidi stream 0 was not created")
+	assert.EqualValuesf(t, 1<<20, c.streams[0].sendMax,
+		"sendMax = %d, want %d (client bidi_local)", c.streams[0].sendMax, 1<<20)
+	gotBidi := c.AcceptBidiStream()
+	require.NotNil(t, gotBidi, "AcceptBidiStream = nil, want stream 0")
+	assert.EqualValuesf(t, 0, gotBidi.ID(), "AcceptBidiStream = stream %d, want stream 0", gotBidi.ID())
+	assert.Truef(t, c.AcceptBidiStream() == nil,
+		"AcceptBidiStream returned an unexpected second stream")
+	require.NoError(t, errUni, "OnStream(client uni 2)")
+	gotUni := c.AcceptUniStream()
+	require.NotNil(t, gotUni, "AcceptUniStream = nil, want stream 2")
+	assert.EqualValuesf(t, 2, gotUni.ID(), "AcceptUniStream = stream %d, want stream 2", gotUni.ID())
+	assert.Truef(t, errOwnUni == ErrStreamState,
+		"OnStream(server uni 3) = %v, want ErrStreamState", errOwnUni)
+	assert.Truef(t, errOverLimit == ErrTooManyBidiStreams,
+		"OnStream(over-limit bidi 12) = %v, want ErrTooManyBidiStreams", errOverLimit)
 }
 
 // TestStreamIDsFollowRole pins role-aware stream-ID assignment (RFC 9000 §2.1): a
@@ -429,44 +356,29 @@ func TestStreamIDsFollowRole(t *testing.T) {
 	limits := TransportParams{InitialMaxStreamsUni: 3, InitialMaxStreamsBidi: 3}
 
 	server := &Conn{isServer: true, nextBidiStreamID: 1, peer: limits}
-	for _, want := range []uint64{3, 7, 11} {
-		s, err := server.OpenUniStream()
-		if err != nil {
-			t.Fatalf("server OpenUniStream: %v", err)
-		}
-		if s.ID() != want {
-			t.Errorf("server uni stream id = %d, want %d", s.ID(), want)
-		}
-	}
-	for _, want := range []uint64{1, 5, 9} {
-		s, err := server.OpenStream()
-		if err != nil {
-			t.Fatalf("server OpenStream: %v", err)
-		}
-		if s.ID() != want {
-			t.Errorf("server bidi stream id = %d, want %d", s.ID(), want)
-		}
-	}
-
 	client := &Conn{peer: limits} // isServer false, nextBidiStreamID 0
-	for _, want := range []uint64{2, 6, 10} {
-		s, err := client.OpenUniStream()
-		if err != nil {
-			t.Fatalf("client OpenUniStream: %v", err)
-		}
-		if s.ID() != want {
-			t.Errorf("client uni stream id = %d, want %d", s.ID(), want)
-		}
+
+	serverUni := openN(t, server.OpenUniStream, 3)
+	serverBidi := openN(t, server.OpenStream, 3)
+	clientUni := openN(t, client.OpenUniStream, 3)
+	clientBidi := openN(t, client.OpenStream, 3)
+
+	assert.Equal(t, []uint64{3, 7, 11}, serverUni, "server unidirectional stream IDs (§2.1)")
+	assert.Equal(t, []uint64{1, 5, 9}, serverBidi, "server bidirectional stream IDs (§2.1)")
+	assert.Equal(t, []uint64{2, 6, 10}, clientUni, "client unidirectional stream IDs (§2.1)")
+	assert.Equal(t, []uint64{0, 4, 8}, clientBidi, "client bidirectional stream IDs (§2.1)")
+}
+
+// openN opens n streams through open and returns their IDs in order.
+func openN(t *testing.T, open func() (*Stream, error), n int) []uint64 {
+	t.Helper()
+	ids := make([]uint64, 0, n)
+	for i := 0; i < n; i++ {
+		s, err := open()
+		require.NoErrorf(t, err, "opening stream %d of %d", i+1, n)
+		ids = append(ids, s.ID())
 	}
-	for _, want := range []uint64{0, 4, 8} {
-		s, err := client.OpenStream()
-		if err != nil {
-			t.Fatalf("client OpenStream: %v", err)
-		}
-		if s.ID() != want {
-			t.Errorf("client bidi stream id = %d, want %d", s.ID(), want)
-		}
-	}
+	return ids
 }
 
 // extractHandshakeCrypto walks the packets in a datagram, decrypts each Handshake

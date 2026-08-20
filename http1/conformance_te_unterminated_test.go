@@ -18,6 +18,9 @@ package http1_test
 import (
 	"context"
 	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // TestConformance_RFC9110_Sec10_1_4_UnterminatedQuotedTENotChunked pins that a
@@ -32,10 +35,10 @@ func TestConformance_RFC9110_Sec10_1_4_UnterminatedQuotedTENotChunked(t *testing
 		t.Run(te, func(t *testing.T) {
 			ex := wireExchange(t, "GET",
 				"HTTP/1.1 200 OK\r\nTransfer-Encoding: "+te+"\r\n\r\n5\r\nHELLO\r\n0\r\n\r\nLEFTOVER")
-			if _, _, err := ex.ReadResponse(context.Background()); err != nil {
-				t.Fatalf("ReadResponse: %v", err)
-			}
+			_, _, err := ex.ReadResponse(context.Background())
+			require.NoError(t, err, "ReadResponse")
 			buf := make([]byte, 512)
+
 			var body []byte
 			for {
 				n, done, e := ex.ReadBodyChunk(buf)
@@ -44,15 +47,14 @@ func TestConformance_RFC9110_Sec10_1_4_UnterminatedQuotedTENotChunked(t *testing
 					break
 				}
 			}
-			if string(body) == "HELLO" {
-				t.Errorf("chunk-framed a malformed Transfer-Encoding %q — an unterminated "+
+
+			assert.NotEqualf(t, "HELLO", string(body),
+				"chunk-framed a malformed Transfer-Encoding %q — an unterminated "+
 					"quoted-string is not a valid value, so the final coding cannot be "+
 					"trusted; the leftover bytes were left on the wire", te)
-			}
-			if ex.KeepAlive() {
-				t.Errorf("KeepAlive() = true for a malformed Transfer-Encoding %q — the body "+
+			assert.Falsef(t, ex.KeepAlive(),
+				"KeepAlive() = true for a malformed Transfer-Encoding %q — the body "+
 					"boundary is indeterminate, so the socket must not be pooled", te)
-			}
 		})
 	}
 }
@@ -65,13 +67,14 @@ func TestConformance_RFC9110_Sec10_1_4_TerminatedQuotedTEStillFrames(t *testing.
 	// list whose final coding is chunked.
 	ex := wireExchange(t, "GET",
 		"HTTP/1.1 200 OK\r\nTransfer-Encoding: gzip;a=\"x, y\", chunked\r\n\r\n5\r\nHELLO\r\n0\r\n\r\n")
-	if _, _, err := ex.ReadResponse(context.Background()); err != nil {
-		t.Fatalf("ReadResponse: %v", err)
-	}
-	if body := drainBody(t, ex); body != "HELLO" {
-		t.Errorf("body = %q, want %q — a terminated quoted parameter is legal and chunked "+
+	_, _, err := ex.ReadResponse(context.Background())
+	require.NoError(t, err, "ReadResponse")
+
+	body := drainBody(t, ex)
+
+	assert.Equalf(t, "HELLO", body,
+		"body = %q, want %q — a terminated quoted parameter is legal and chunked "+
 			"is still the final coding", body, "HELLO")
-	}
 }
 
 // TestConformance_RFC9110_Sec10_1_4_MalformedTENotResurrectedByKeepAlive pins
@@ -92,13 +95,13 @@ func TestConformance_RFC9110_Sec10_1_4_MalformedTENotResurrectedByKeepAlive(t *t
 	} {
 		t.Run(order.name, func(t *testing.T) {
 			ex := wireExchange(t, "GET", "HTTP/1.1 200 OK\r\n"+order.head+"\r\n5\r\nHELLO\r\n0\r\n\r\n")
-			if _, _, err := ex.ReadResponse(context.Background()); err != nil {
-				t.Fatalf("ReadResponse: %v", err)
-			}
-			if ex.KeepAlive() {
-				t.Error("KeepAlive() = true, want false — the body boundary is indeterminate, " +
+
+			_, _, err := ex.ReadResponse(context.Background())
+
+			require.NoError(t, err, "ReadResponse")
+			assert.False(t, ex.KeepAlive(),
+				"KeepAlive() = true, want false — the body boundary is indeterminate, "+
 					"so no Connection: keep-alive may put this socket back in the pool")
-			}
 		})
 	}
 }

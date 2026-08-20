@@ -7,6 +7,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
 	"github.com/lodgvideon/poseidon-http-client/frame"
 	"github.com/lodgvideon/poseidon-http-client/header"
 )
@@ -24,22 +27,21 @@ func TestStreamEventType_String(t *testing.T) {
 		{StreamEventType(99), "unknown"},
 	}
 	for _, c := range cases {
-		if got := c.t.String(); got != c.want {
-			t.Fatalf("%v: got %q, want %q", c.t, got, c.want)
-		}
+		got := c.t.String()
+
+		assert.Equalf(t, c.want, got, "%v: got %q, want %q", c.t, got, c.want)
 	}
 }
 
 func TestStreamEvent_TypeDispatch(t *testing.T) {
 	headers := []header.Field{{Name: []byte(":status"), Value: []byte("200")}}
 	e := StreamEvent{Type: EventHeaders, Headers: headers, EndStream: false}
-	if e.Type != EventHeaders || len(e.Headers) != 1 {
-		t.Fatalf("event = %+v", e)
-	}
 	r := StreamEvent{Type: EventReset, RSTCode: frame.ErrCodeCancel}
-	if r.Type != EventReset || r.RSTCode != frame.ErrCodeCancel {
-		t.Fatalf("reset event = %+v", r)
-	}
+
+	assert.Equalf(t, EventHeaders, e.Type, "event = %+v", e)
+	assert.Lenf(t, e.Headers, 1, "event = %+v", e)
+	assert.Equalf(t, EventReset, r.Type, "reset event = %+v", r)
+	assert.Equalf(t, frame.ErrCodeCancel, r.RSTCode, "reset event = %+v", r)
 }
 
 // fakeStreamWriter records what would have gone to the wire.
@@ -109,33 +111,28 @@ func newTestStream(buf int) (*Stream, *fakeStreamWriter) {
 
 func TestStream_ID(t *testing.T) {
 	s, _ := newTestStream(8)
-	if s.ID() != 1 {
-		t.Fatalf("ID = %d, want 1", s.ID())
-	}
+
+	assert.Equalf(t, uint32(1), s.ID(), "ID = %d, want 1", s.ID())
 }
 
 func TestStream_SendHeaders_DelegatesToWriter(t *testing.T) {
 	s, w := newTestStream(8)
+
 	err := s.ref().SendHeaders(context.Background(),
 		[]header.Field{{Name: []byte(":method"), Value: []byte("GET")}},
 		true)
-	if err != nil {
-		t.Fatalf("SendHeaders: %v", err)
-	}
-	if w.headerCalls != 1 {
-		t.Fatalf("headerCalls = %d, want 1", w.headerCalls)
-	}
+
+	require.NoError(t, err, "SendHeaders")
+	assert.Equalf(t, 1, w.headerCalls, "headerCalls = %d, want 1", w.headerCalls)
 }
 
 func TestStream_SendData_AfterEndStream_ReturnsErrStreamClosed(t *testing.T) {
 	s, _ := newTestStream(8)
-	if err := s.ref().SendHeaders(context.Background(), nil, true); err != nil {
-		t.Fatalf("SendHeaders: %v", err)
-	}
+	require.NoError(t, s.ref().SendHeaders(context.Background(), nil, true), "SendHeaders")
+
 	err := s.ref().SendData(context.Background(), []byte("x"), false)
-	if !errors.Is(err, ErrStreamClosed) {
-		t.Fatalf("SendData err = %v, want ErrStreamClosed", err)
-	}
+
+	assert.Truef(t, errors.Is(err, ErrStreamClosed), "SendData err = %v, want ErrStreamClosed", err)
 }
 
 func TestStream_Recv_ReturnsBufferedEvent(t *testing.T) {
@@ -144,37 +141,33 @@ func TestStream_Recv_ReturnsBufferedEvent(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
 	e, err := s.ref().Recv(ctx)
-	if err != nil {
-		t.Fatalf("Recv: %v", err)
-	}
-	if e.Type != EventHeaders || !e.EndStream {
-		t.Fatalf("event = %+v", e)
-	}
+
+	require.NoError(t, err, "Recv")
+	assert.Equalf(t, EventHeaders, e.Type, "event = %+v", e)
+	assert.Truef(t, e.EndStream, "event = %+v, want EndStream set", e)
 }
 
 func TestStream_Recv_BlocksUntilCancel(t *testing.T) {
 	s, _ := newTestStream(8)
 	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
 	defer cancel()
-	if _, err := s.ref().Recv(ctx); !errors.Is(err, context.DeadlineExceeded) {
-		t.Fatalf("Recv err = %v, want DeadlineExceeded", err)
-	}
+	_, err := s.ref().Recv(ctx)
+
+	assert.Truef(t, errors.Is(err, context.DeadlineExceeded),
+		"Recv err = %v, want DeadlineExceeded", err)
 }
 
 func TestStream_Close_SendsRSTOnce(t *testing.T) {
 	s, w := newTestStream(8)
-	if err := s.ref().Close(); err != nil {
-		t.Fatalf("Close 1: %v", err)
-	}
-	if err := s.ref().Close(); err != nil {
-		t.Fatalf("Close 2: %v", err)
-	}
-	if w.rstCalls != 1 {
-		t.Fatalf("rstCalls = %d, want exactly 1 (idempotent)", w.rstCalls)
-	}
-	if w.lastRSTCode != frame.ErrCodeCancel {
-		t.Fatalf("rst code = %v, want CANCEL", w.lastRSTCode)
-	}
+
+	first := s.ref().Close()
+	second := s.ref().Close()
+
+	require.NoError(t, first, "Close 1")
+	require.NoError(t, second, "Close 2")
+	rstCalls, code := w.rstSnapshot()
+	assert.Equalf(t, 1, rstCalls, "rstCalls = %d, want exactly 1 (idempotent)", rstCalls)
+	assert.Equalf(t, frame.ErrCodeCancel, code, "rst code = %v, want CANCEL", code)
 }
 
 func TestStream_Close_AfterEndStream_DoesNotSendRST(t *testing.T) {
@@ -184,14 +177,12 @@ func TestStream_Close_AfterEndStream_DoesNotSendRST(t *testing.T) {
 	// enqueues an event, and this test wants the flag and nothing else. Nothing
 	// else touches s yet, so the write needs no lock.
 	s.remoteEnded = true
-	if err := s.ref().SendHeaders(context.Background(), nil, true); err != nil {
-		t.Fatalf("SendHeaders: %v", err)
-	}
+	require.NoError(t, s.ref().SendHeaders(context.Background(), nil, true), "SendHeaders")
+
 	// Both directions ended -> Close is a no-op on the wire.
-	if err := s.ref().Close(); err != nil {
-		t.Fatalf("Close: %v", err)
-	}
-	if w.rstCalls != 0 {
-		t.Fatalf("rstCalls = %d, want 0 (already closed cleanly)", w.rstCalls)
-	}
+	err := s.ref().Close()
+
+	require.NoError(t, err, "Close")
+	rstCalls, _ := w.rstSnapshot()
+	assert.Zerof(t, rstCalls, "rstCalls = %d, want 0 (already closed cleanly)", rstCalls)
 }

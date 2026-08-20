@@ -6,11 +6,13 @@ import (
 	"errors"
 	"io"
 	"net"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	"github.com/lodgvideon/poseidon-http-client/conn"
 	"github.com/lodgvideon/poseidon-http-client/frame"
@@ -19,74 +21,82 @@ import (
 
 func TestValidateRequest_OK(t *testing.T) {
 	req := &Request{Method: "GET", Path: "/"}
-	if err := validateRequest(req); err != nil {
-		t.Fatalf("expected nil, got %v", err)
-	}
+
+	err := validateRequest(req)
+
+	require.NoError(t, err, "a bare GET / is the minimal valid request; rejecting it would refuse every caller")
 }
 
 func TestValidateRequest_NoMethod(t *testing.T) {
 	req := &Request{Path: "/"}
+
 	err := validateRequest(req)
-	if !errors.Is(err, ErrInvalidRequest) {
-		t.Fatalf("expected ErrInvalidRequest, got %v", err)
-	}
+
+	require.ErrorIs(t, err, ErrInvalidRequest, "expected ErrInvalidRequest for a request with no method")
 }
 
 func TestValidateRequest_NoPath(t *testing.T) {
 	req := &Request{Method: "GET"}
+
 	err := validateRequest(req)
-	if !errors.Is(err, ErrInvalidRequest) {
-		t.Fatalf("expected ErrInvalidRequest, got %v", err)
-	}
+
+	require.ErrorIs(t, err, ErrInvalidRequest, "expected ErrInvalidRequest for a request with no path")
 }
 
 func TestValidateRequest_WhitespacePaddedMethodRejected(t *testing.T) {
 	req := &Request{Method: " GET ", Path: "/"}
-	if err := validateRequest(req); !errors.Is(err, ErrInvalidRequest) {
-		t.Fatalf("expected ErrInvalidRequest, got %v", err)
-	}
+
+	err := validateRequest(req)
+
+	require.ErrorIs(t, err, ErrInvalidRequest, "expected ErrInvalidRequest for a padded method %q", req.Method)
 }
 
 func TestValidateRequest_WhitespacePaddedPathRejected(t *testing.T) {
 	req := &Request{Method: "GET", Path: " / "}
-	if err := validateRequest(req); !errors.Is(err, ErrInvalidRequest) {
-		t.Fatalf("expected ErrInvalidRequest, got %v", err)
-	}
+
+	err := validateRequest(req)
+
+	require.ErrorIs(t, err, ErrInvalidRequest, "expected ErrInvalidRequest for a padded path %q", req.Path)
 }
 
 func TestValidateRequest_WhitespaceOnlyMethodRejected(t *testing.T) {
 	req := &Request{Method: "   ", Path: "/"}
-	if err := validateRequest(req); !errors.Is(err, ErrInvalidRequest) {
-		t.Fatalf("expected ErrInvalidRequest, got %v", err)
-	}
+
+	err := validateRequest(req)
+
+	require.ErrorIs(t, err, ErrInvalidRequest, "expected ErrInvalidRequest for a whitespace-only method")
 }
 
 func TestValidateRequest_WhitespaceOnlyPathRejected(t *testing.T) {
 	req := &Request{Method: "GET", Path: "   "}
-	if err := validateRequest(req); !errors.Is(err, ErrInvalidRequest) {
-		t.Fatalf("expected ErrInvalidRequest, got %v", err)
-	}
+
+	err := validateRequest(req)
+
+	require.ErrorIs(t, err, ErrInvalidRequest, "expected ErrInvalidRequest for a whitespace-only path")
 }
 
 func TestValidateRequest_InternalWhitespaceMethodRejected(t *testing.T) {
 	req := &Request{Method: "GET POST", Path: "/"}
-	if err := validateRequest(req); !errors.Is(err, ErrInvalidRequest) {
-		t.Fatalf("expected ErrInvalidRequest, got %v", err)
-	}
+
+	err := validateRequest(req)
+
+	require.ErrorIs(t, err, ErrInvalidRequest, "expected ErrInvalidRequest for a method carrying an internal space")
 }
 
 func TestValidateRequest_InternalWhitespacePathRejected(t *testing.T) {
 	req := &Request{Method: "GET", Path: "/foo bar"}
-	if err := validateRequest(req); !errors.Is(err, ErrInvalidRequest) {
-		t.Fatalf("expected ErrInvalidRequest, got %v", err)
-	}
+
+	err := validateRequest(req)
+
+	require.ErrorIs(t, err, ErrInvalidRequest, "expected ErrInvalidRequest for a path carrying an internal space")
 }
 
 func TestValidateRequest_TabInMethodRejected(t *testing.T) {
 	req := &Request{Method: "GET\t", Path: "/"}
-	if err := validateRequest(req); !errors.Is(err, ErrInvalidRequest) {
-		t.Fatalf("expected ErrInvalidRequest, got %v", err)
-	}
+
+	err := validateRequest(req)
+
+	require.ErrorIs(t, err, ErrInvalidRequest, "expected ErrInvalidRequest for a method carrying a HTAB")
 }
 
 func TestValidateRequest_PseudoHeaderInRegular(t *testing.T) {
@@ -96,17 +106,18 @@ func TestValidateRequest_PseudoHeaderInRegular(t *testing.T) {
 			{Name: []byte(":authority"), Value: []byte("example.com")},
 		},
 	}
+
 	err := validateRequest(req)
-	if !errors.Is(err, ErrInvalidRequest) {
-		t.Fatalf("expected ErrInvalidRequest, got %v", err)
-	}
+
+	require.ErrorIs(t, err, ErrInvalidRequest,
+		"expected ErrInvalidRequest: a pseudo-header in the regular Headers slice would be emitted after "+
+			"the real pseudo-headers, which RFC 7540 §8.1.2.1 makes malformed")
 }
 
 func TestValidateRequest_NilRequest(t *testing.T) {
 	err := validateRequest(nil)
-	if !errors.Is(err, ErrInvalidRequest) {
-		t.Fatalf("expected ErrInvalidRequest, got %v", err)
-	}
+
+	require.ErrorIs(t, err, ErrInvalidRequest, "expected ErrInvalidRequest for a nil request, not a panic")
 }
 
 func TestParseStatus_Found(t *testing.T) {
@@ -115,16 +126,14 @@ func TestParseStatus_Found(t *testing.T) {
 		{Name: []byte("content-type"), Value: []byte("application/json")},
 	}
 	var rest []hpack.HeaderField
+
 	st, err := parseStatus(in, &rest)
-	if err != nil {
-		t.Fatalf("unexpected err: %v", err)
-	}
-	if st != 200 {
-		t.Fatalf("status = %d, want 200", st)
-	}
-	if len(rest) != 1 || string(rest[0].Name) != "content-type" {
-		t.Fatalf("regular headers wrong: %+v", rest)
-	}
+
+	require.NoError(t, err, "a well-formed :status must parse")
+	assert.Equal(t, 200, st, "status = %d, want 200", st)
+	require.Len(t, rest, 1, "regular headers wrong: %+v", rest)
+	assert.Equal(t, "content-type", string(rest[0].Name),
+		"the non-pseudo field must be handed back to the caller: %+v", rest)
 }
 
 func TestParseStatus_Missing(t *testing.T) {
@@ -132,9 +141,10 @@ func TestParseStatus_Missing(t *testing.T) {
 		{Name: []byte("content-type"), Value: []byte("application/json")},
 	}
 	var dst []hpack.HeaderField
-	if _, err := parseStatus(in, &dst); !errors.Is(err, ErrEmptyResponse) {
-		t.Fatalf("expected ErrEmptyResponse, got %v", err)
-	}
+
+	_, err := parseStatus(in, &dst)
+
+	require.ErrorIs(t, err, ErrEmptyResponse, "a response block with no :status is not a response")
 }
 
 func TestParseStatus_NotNumeric(t *testing.T) {
@@ -142,9 +152,10 @@ func TestParseStatus_NotNumeric(t *testing.T) {
 		{Name: []byte(":status"), Value: []byte("OK")},
 	}
 	var dst []hpack.HeaderField
-	if _, err := parseStatus(in, &dst); !errors.Is(err, ErrInvalidStatus) {
-		t.Fatalf("expected ErrInvalidStatus, got %v", err)
-	}
+
+	_, err := parseStatus(in, &dst)
+
+	require.ErrorIs(t, err, ErrInvalidStatus, "expected ErrInvalidStatus for a non-numeric :status")
 }
 
 func TestParseStatus_Negative(t *testing.T) {
@@ -152,9 +163,10 @@ func TestParseStatus_Negative(t *testing.T) {
 		{Name: []byte(":status"), Value: []byte("-1")},
 	}
 	var dst []hpack.HeaderField
-	if _, err := parseStatus(in, &dst); !errors.Is(err, ErrInvalidStatus) {
-		t.Fatalf("expected ErrInvalidStatus, got %v", err)
-	}
+
+	_, err := parseStatus(in, &dst)
+
+	require.ErrorIs(t, err, ErrInvalidStatus, "expected ErrInvalidStatus for a negative :status")
 }
 
 // --- Test helpers (singleConn / Do / DoStream) ---
@@ -251,25 +263,17 @@ func TestSingleConn_Acquire_LazyDial(t *testing.T) {
 	}}
 	sc := &singleConn{addr: "fake:0", connOpts: conn.ConnOptions{Dialer: d}, metrics: &Metrics{}}
 	defer sc.close()
-
-	if d.dialCount.Load() != 0 {
-		t.Fatalf("dial happened in constructor; count=%d", d.dialCount.Load())
-	}
-
+	require.EqualValues(t, 0, d.dialCount.Load(),
+		"dial happened in the constructor; the transport must dial lazily on first acquire")
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
-	c, release, err := sc.acquireConn(ctx)
-	if err != nil {
-		t.Fatalf("acquire: %v", err)
-	}
-	defer release()
 
-	if d.dialCount.Load() != 1 {
-		t.Fatalf("dial count = %d, want 1", d.dialCount.Load())
-	}
-	if !c.IsAlive() {
-		t.Fatal("acquired conn must be alive")
-	}
+	c, release, err := sc.acquireConn(ctx)
+
+	require.NoError(t, err, "acquire")
+	defer release()
+	assert.EqualValues(t, 1, d.dialCount.Load(), "dial count = %d, want 1", d.dialCount.Load())
+	assert.True(t, c.IsAlive(), "acquired conn must be alive")
 }
 
 func TestSingleConn_Acquire_ReusesAliveConn(t *testing.T) {
@@ -280,26 +284,18 @@ func TestSingleConn_Acquire_ReusesAliveConn(t *testing.T) {
 	}}
 	sc := &singleConn{addr: "fake:0", connOpts: conn.ConnOptions{Dialer: d}, metrics: &Metrics{}}
 	defer sc.close()
-
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 	c1, rel1, err := sc.acquireConn(ctx)
-	if err != nil {
-		t.Fatalf("first acquire: %v", err)
-	}
+	require.NoError(t, err, "first acquire")
 	rel1()
-	c2, rel2, err := sc.acquireConn(ctx)
-	if err != nil {
-		t.Fatalf("second acquire: %v", err)
-	}
-	defer rel2()
 
-	if c1 != c2 {
-		t.Fatal("expected reuse of the same conn")
-	}
-	if d.dialCount.Load() != 1 {
-		t.Fatalf("dial count = %d, want 1", d.dialCount.Load())
-	}
+	c2, rel2, err := sc.acquireConn(ctx)
+
+	require.NoError(t, err, "second acquire")
+	defer rel2()
+	assert.Same(t, c1, c2, "expected reuse of the same conn")
+	assert.EqualValues(t, 1, d.dialCount.Load(), "dial count = %d, want 1", d.dialCount.Load())
 }
 
 func TestSingleConn_Acquire_GoAwayTriggersRedial(t *testing.T) {
@@ -315,13 +311,10 @@ func TestSingleConn_Acquire_GoAwayTriggersRedial(t *testing.T) {
 	}}
 	sc := &singleConn{addr: "fake:0", connOpts: conn.ConnOptions{Dialer: d}, metrics: &Metrics{}}
 	defer sc.close()
-
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 	c1, rel1, err := sc.acquireConn(ctx)
-	if err != nil {
-		t.Fatalf("first acquire: %v", err)
-	}
+	require.NoError(t, err, "first acquire")
 	rel1()
 	// Wait for reader to mark goAwayReceived on c1.
 	deadline := time.Now().Add(1 * time.Second)
@@ -331,18 +324,15 @@ func TestSingleConn_Acquire_GoAwayTriggersRedial(t *testing.T) {
 		}
 		time.Sleep(5 * time.Millisecond)
 	}
+	require.False(t, c1.IsAlive(),
+		"peer GOAWAY was never observed on the first conn, so the redial below is not the one under test")
 
 	c2, rel2, err := sc.acquireConn(ctx)
-	if err != nil {
-		t.Fatalf("second acquire: %v", err)
-	}
+
+	require.NoError(t, err, "second acquire")
 	defer rel2()
-	if c1 == c2 {
-		t.Fatal("expected a fresh conn after GOAWAY")
-	}
-	if d.dialCount.Load() != 2 {
-		t.Fatalf("dial count = %d, want 2", d.dialCount.Load())
-	}
+	assert.NotSame(t, c1, c2, "expected a fresh conn after GOAWAY")
+	assert.EqualValues(t, 2, d.dialCount.Load(), "dial count = %d, want 2", d.dialCount.Load())
 }
 
 // failingDialer always errors.
@@ -365,18 +355,16 @@ func TestSingleConn_Backoff_RefusesWithinWindow(t *testing.T) {
 		metrics:  &Metrics{},
 	}
 	defer sc.close()
-
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
-	if _, _, err := sc.acquireConn(ctx); err == nil {
-		t.Fatal("first acquire must fail")
-	}
-	if _, _, err := sc.acquireConn(ctx); err == nil {
-		t.Fatal("second acquire must fail")
-	}
-	if got := d.dialCount.Load(); got != 1 {
-		t.Fatalf("dial count = %d, want 1 (backoff suppressed second)", got)
-	}
+
+	_, _, err1 := sc.acquireConn(ctx)
+	_, _, err2 := sc.acquireConn(ctx)
+
+	require.Error(t, err1, "first acquire must fail")
+	require.Error(t, err2, "second acquire must fail")
+	assert.EqualValues(t, 1, d.dialCount.Load(),
+		"dial count = %d, want 1 (backoff suppressed second)", d.dialCount.Load())
 }
 
 func TestSingleConn_Acquire_ConcurrentDial_OnlyOneDials(t *testing.T) {
@@ -387,11 +375,11 @@ func TestSingleConn_Acquire_ConcurrentDial_OnlyOneDials(t *testing.T) {
 	}}
 	sc := &singleConn{addr: "fake:0", connOpts: conn.ConnOptions{Dialer: d}, metrics: &Metrics{}}
 	defer sc.close()
-
 	const N = 16
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 	results := make(chan *conn.Conn, N)
+
 	for i := 0; i < N; i++ {
 		go func() {
 			c, _, err := sc.acquireConn(ctx)
@@ -402,19 +390,15 @@ func TestSingleConn_Acquire_ConcurrentDial_OnlyOneDials(t *testing.T) {
 			results <- c
 		}()
 	}
+
 	first := <-results
-	if first == nil {
-		t.Fatal("first acquire returned nil conn")
-	}
+	require.NotNil(t, first, "first acquire returned nil conn")
 	for i := 1; i < N; i++ {
-		got := <-results
-		if got != first {
-			t.Fatalf("goroutine %d got different conn", i)
-		}
+		assert.Samef(t, first, <-results,
+			"goroutine %d got different conn — the singleflight guard let a second dial through", i)
 	}
-	if got := d.dialCount.Load(); got != 1 {
-		t.Fatalf("dial count = %d, want exactly 1 (singleflight)", got)
-	}
+	assert.EqualValues(t, 1, d.dialCount.Load(),
+		"dial count = %d, want exactly 1 (singleflight)", d.dialCount.Load())
 }
 
 func TestSingleConn_Close_BlocksNewAcquires(t *testing.T) {
@@ -424,27 +408,22 @@ func TestSingleConn_Close_BlocksNewAcquires(t *testing.T) {
 		<-stopSrv
 	}}
 	sc := &singleConn{addr: "fake:0", connOpts: conn.ConnOptions{Dialer: d}, metrics: &Metrics{}}
-
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 	c, _, err := sc.acquireConn(ctx)
-	if err != nil {
-		t.Fatalf("acquire: %v", err)
-	}
-	_ = sc.close()
-	if c.IsAlive() {
-		t.Fatal("close must close underlying conn")
-	}
-	if _, _, err := sc.acquireConn(ctx); !errors.Is(err, ErrClosed) {
-		t.Fatalf("expected ErrClosed, got %v", err)
-	}
+	require.NoError(t, err, "acquire")
+
+	require.NoError(t, sc.close(), "close")
+
+	assert.False(t, c.IsAlive(), "close must close underlying conn")
+	_, _, err = sc.acquireConn(ctx)
+	assert.ErrorIs(t, err, ErrClosed, "an acquire after close must be refused with ErrClosed")
 }
 
 func TestNewClient_RejectsEmptyAddr(t *testing.T) {
 	_, err := NewClient(ClientOptions{ConnOpts: conn.ConnOptions{Dialer: &fakeDialer{}}})
-	if err == nil {
-		t.Fatal("expected error on empty addr")
-	}
+
+	require.Error(t, err, "expected error on empty addr")
 }
 
 func TestNewClient_RejectsWhitespaceAddr(t *testing.T) {
@@ -453,17 +432,15 @@ func TestNewClient_RejectsWhitespaceAddr(t *testing.T) {
 			Addr:     addr,
 			ConnOpts: conn.ConnOptions{Dialer: &fakeDialer{}},
 		})
-		if err == nil {
-			t.Fatalf("expected error for addr=%q", addr)
-		}
+
+		assert.Errorf(t, err, "expected error for addr=%q", addr)
 	}
 }
 
 func TestNewClient_RejectsNilDialer(t *testing.T) {
 	_, err := NewClient(ClientOptions{Addr: "fake:0"})
-	if err == nil {
-		t.Fatal("expected error on nil dialer")
-	}
+
+	require.Error(t, err, "expected error on nil dialer")
 }
 
 func TestClient_Close_Idempotent(t *testing.T) {
@@ -471,15 +448,13 @@ func TestClient_Close_Idempotent(t *testing.T) {
 		Addr:     "fake:0",
 		ConnOpts: conn.ConnOptions{Dialer: &fakeDialer{}},
 	})
-	if err != nil {
-		t.Fatalf("NewClient: %v", err)
-	}
-	if err := c.Close(); err != nil {
-		t.Fatalf("first Close: %v", err)
-	}
-	if err := c.Close(); err != nil {
-		t.Fatalf("second Close: %v", err)
-	}
+	require.NoError(t, err, "NewClient")
+
+	err1 := c.Close()
+	err2 := c.Close()
+
+	assert.NoError(t, err1, "first Close")
+	assert.NoError(t, err2, "second Close must be a no-op, not an error")
 }
 
 func TestClient_Do_AfterClose_ReturnsErrClosed(t *testing.T) {
@@ -487,41 +462,38 @@ func TestClient_Do_AfterClose_ReturnsErrClosed(t *testing.T) {
 		Addr:     "fake:0",
 		ConnOpts: conn.ConnOptions{Dialer: &fakeDialer{}},
 	})
-	if err != nil {
-		t.Fatalf("NewClient: %v", err)
-	}
+	require.NoError(t, err, "NewClient")
 	_ = c.Close()
 	ctx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
 	defer cancel()
-	var _res Response
-	if err := c.Do(ctx, &Request{Method: "GET", Path: "/"}, &_res); !errors.Is(err, ErrClosed) {
-		t.Fatalf("Do after Close = %v, want ErrClosed", err)
-	}
-	var _sr StreamResponse
-	if err := c.DoStream(ctx, &Request{Method: "GET", Path: "/"}, &_sr); !errors.Is(err, ErrClosed) {
-		t.Fatalf("DoStream after Close = %v, want ErrClosed", err)
-	}
+
+	var res Response
+	doErr := c.Do(ctx, &Request{Method: "GET", Path: "/"}, &res)
+	var sr StreamResponse
+	streamErr := c.DoStream(ctx, &Request{Method: "GET", Path: "/"}, &sr)
+
+	assert.ErrorIs(t, doErr, ErrClosed, "Do after Close must be ErrClosed, not a dial attempt")
+	assert.ErrorIs(t, streamErr, ErrClosed, "DoStream after Close must be ErrClosed, not a dial attempt")
 }
 
 func TestStreamResetError_Error_Format(t *testing.T) {
 	e := &StreamResetError{Code: frame.ErrCodeRefusedStream}
-	if !strings.Contains(e.Error(), "stream reset") {
-		t.Fatalf("error message = %q", e.Error())
-	}
+
+	msg := e.Error()
+
+	assert.Containsf(t, msg, "stream reset",
+		"error message = %q; a caller reading logs cannot tell this from a transport failure without it", msg)
 }
 
 func TestDialError_ErrorAndUnwrap(t *testing.T) {
 	inner := errors.New("boom")
 	e := &DialError{Addr: "fake:0", Err: inner}
-	if !strings.Contains(e.Error(), "fake:0") {
-		t.Fatalf("error missing addr: %q", e.Error())
-	}
-	if e.Unwrap() != inner {
-		t.Fatalf("Unwrap = %v, want %v", e.Unwrap(), inner)
-	}
-	if !errors.Is(e, inner) {
-		t.Fatal("errors.Is must walk through DialError.Unwrap")
-	}
+
+	msg := e.Error()
+
+	assert.Containsf(t, msg, "fake:0", "error missing addr: %q", msg)
+	assert.True(t, e.Unwrap() == inner, "Unwrap must return the wrapped error itself, not a copy")
+	assert.True(t, errors.Is(e, inner), "errors.Is must walk through DialError.Unwrap")
 }
 
 func TestStreamResponse_RecvAfterDrain_ReturnsErrStreamEnded(t *testing.T) {
@@ -530,23 +502,20 @@ func TestStreamResponse_RecvAfterDrain_ReturnsErrStreamEnded(t *testing.T) {
 		Addr:     "fake:0",
 		ConnOpts: conn.ConnOptions{Dialer: d},
 	})
-	if err != nil {
-		t.Fatalf("NewClient: %v", err)
-	}
+	require.NoError(t, err, "NewClient")
 	defer c.Close()
-
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 	var sr StreamResponse
-	if err := c.DoStream(ctx, &Request{Method: "GET", Path: "/"}, &sr); err != nil {
-		t.Fatalf("DoStream: %v", err)
-	}
+	require.NoError(t, c.DoStream(ctx, &Request{Method: "GET", Path: "/"}, &sr), "DoStream")
 	defer sr.Close()
+
+	_, err = sr.Recv(ctx)
+
 	// Server returned status=200 + END_STREAM in initial HEADERS, so
 	// drained==true. Recv must return ErrStreamEnded.
-	if _, err := sr.Recv(ctx); !errors.Is(err, ErrStreamEnded) {
-		t.Fatalf("Recv after drain = %v, want ErrStreamEnded", err)
-	}
+	assert.ErrorIs(t, err, ErrStreamEnded,
+		"a Recv on an already-drained stream must say so rather than block for events that cannot come")
 }
 
 func TestEventType_String(t *testing.T) {
@@ -557,10 +526,11 @@ func TestEventType_String(t *testing.T) {
 		EventReset:    "reset",
 		EventType(99): "unknown",
 	}
+
 	for et, want := range cases {
-		if got := et.String(); got != want {
-			t.Errorf("EventType(%d).String() = %q, want %q", et, got, want)
-		}
+		got := et.String()
+
+		assert.Equalf(t, want, got, "EventType(%d).String() = %q, want %q", et, got, want)
 	}
 }
 
@@ -582,11 +552,11 @@ func TestDeriveAuthority(t *testing.T) {
 		{":443", ":443"},
 		{":8080", ":8080"},
 	}
+
 	for _, tc := range cases {
 		got := deriveAuthority(tc.addr)
-		if got != tc.want {
-			t.Errorf("deriveAuthority(%q) = %q, want %q", tc.addr, got, tc.want)
-		}
+
+		assert.Equalf(t, tc.want, got, "deriveAuthority(%q) = %q, want %q", tc.addr, got, tc.want)
 	}
 }
 
@@ -752,20 +722,16 @@ func TestClient_Do_GET_NoBody_ReturnsStatus200(t *testing.T) {
 		Addr:     "fake:0",
 		ConnOpts: conn.ConnOptions{Dialer: d},
 	})
-	if err != nil {
-		t.Fatalf("NewClient: %v", err)
-	}
+	require.NoError(t, err, "NewClient")
 	defer c.Close()
-
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
+
 	var res Response
-	if err := c.Do(ctx, &Request{Method: "GET", Path: "/"}, &res); err != nil {
-		t.Fatalf("Do: %v", err)
-	}
-	if res.Status != 200 {
-		t.Fatalf("Status = %d, want 200", res.Status)
-	}
+	err = c.Do(ctx, &Request{Method: "GET", Path: "/"}, &res)
+
+	require.NoError(t, err, "Do")
+	assert.Equal(t, 200, res.Status, "Status = %d, want 200", res.Status)
 }
 
 // echoPOSTServer reads HEADERS + DATA frames until END_STREAM, then
@@ -816,31 +782,23 @@ func TestClient_Do_POST_BodyBytes(t *testing.T) {
 		Addr:     "fake:0",
 		ConnOpts: conn.ConnOptions{Dialer: d},
 	})
-	if err != nil {
-		t.Fatalf("NewClient: %v", err)
-	}
+	require.NoError(t, err, "NewClient")
 	defer c.Close()
-
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 	body := []byte("hello world")
+
 	var res Response
-	if err := c.Do(ctx, &Request{
+	err = c.Do(ctx, &Request{
 		Method: "POST", Path: "/echo",
 		Body:     body,
 		BodyMode: BodyBuffer,
-	}, &res); err != nil {
-		t.Fatalf("Do: %v", err)
-	}
-	if res.Status != 200 {
-		t.Fatalf("status = %d", res.Status)
-	}
-	if string(res.Body) != string(body) {
-		t.Fatalf("echoed body = %q, want %q", res.Body, body)
-	}
-	if string(captured) != string(body) {
-		t.Fatalf("server saw %q, want %q", captured, body)
-	}
+	}, &res)
+
+	require.NoError(t, err, "Do")
+	assert.Equal(t, 200, res.Status, "status = %d", res.Status)
+	assert.Equal(t, string(body), string(res.Body), "echoed body = %q, want %q", res.Body, body)
+	assert.Equal(t, string(body), string(captured), "server saw %q, want %q", captured, body)
 }
 
 // TestClient_Do_POST_BodyReader uses a small body to stay within a
@@ -855,30 +813,24 @@ func TestClient_Do_POST_BodyReader(t *testing.T) {
 		Addr:     "fake:0",
 		ConnOpts: conn.ConnOptions{Dialer: d},
 	})
-	if err != nil {
-		t.Fatalf("NewClient: %v", err)
-	}
+	require.NoError(t, err, "NewClient")
 	defer c.Close()
-
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
+
 	var res Response
-	if err := c.Do(ctx, &Request{
+	err = c.Do(ctx, &Request{
 		Method: "POST", Path: "/echo",
 		BodyReader: bytes.NewReader(want),
 		BodyMode:   BodyBuffer,
-	}, &res); err != nil {
-		t.Fatalf("Do: %v", err)
-	}
-	if res.Status != 200 {
-		t.Fatalf("status = %d", res.Status)
-	}
-	if !bytes.Equal(captured, want) {
-		t.Fatalf("server captured %d bytes, want %d", len(captured), len(want))
-	}
-	if !bytes.Equal(res.Body, want) {
-		t.Fatalf("echoed body length %d, want %d", len(res.Body), len(want))
-	}
+	}, &res)
+
+	require.NoError(t, err, "Do")
+	assert.Equal(t, 200, res.Status, "status = %d", res.Status)
+	assert.Truef(t, bytes.Equal(captured, want),
+		"server captured %d bytes, want %d", len(captured), len(want))
+	assert.Truef(t, bytes.Equal(res.Body, want),
+		"echoed body length %d, want %d", len(res.Body), len(want))
 }
 
 func TestClient_Do_BodyDiscard_DiscardsButCounts(t *testing.T) {
@@ -910,23 +862,18 @@ func TestClient_Do_BodyDiscard_DiscardsButCounts(t *testing.T) {
 		Addr:     "fake:0",
 		ConnOpts: conn.ConnOptions{Dialer: d},
 	})
-	if err != nil {
-		t.Fatalf("NewClient: %v", err)
-	}
+	require.NoError(t, err, "NewClient")
 	defer c.Close()
-
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
+
 	var res Response
-	if err := c.Do(ctx, &Request{Method: "GET", Path: "/"}, &res); err != nil {
-		t.Fatalf("Do: %v", err)
-	}
-	if res.Body != nil {
-		t.Fatalf("Body should be nil with BodyDiscard, got %v", res.Body)
-	}
-	if res.BytesReceived != int64(len(want)) {
-		t.Fatalf("BytesReceived = %d, want %d", res.BytesReceived, len(want))
-	}
+	err = c.Do(ctx, &Request{Method: "GET", Path: "/"}, &res)
+
+	require.NoError(t, err, "Do")
+	assert.Nil(t, res.Body, "Body should be nil with BodyDiscard, got %v", res.Body)
+	assert.EqualValues(t, len(want), res.BytesReceived,
+		"BytesReceived = %d, want %d — a discarded body is still counted", res.BytesReceived, len(want))
 }
 
 func TestClient_Do_WantTrailers_CapturesTrailers(t *testing.T) {
@@ -967,23 +914,20 @@ func TestClient_Do_WantTrailers_CapturesTrailers(t *testing.T) {
 		Addr:     "fake:0",
 		ConnOpts: conn.ConnOptions{Dialer: d},
 	})
-	if err != nil {
-		t.Fatalf("NewClient: %v", err)
-	}
+	require.NoError(t, err, "NewClient")
 	defer c.Close()
-
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
+
 	var res Response
-	if err := c.Do(ctx, &Request{
+	err = c.Do(ctx, &Request{
 		Method: "GET", Path: "/",
 		WantTrailers: true,
-	}, &res); err != nil {
-		t.Fatalf("Do: %v", err)
-	}
-	if len(res.Trailers) != 1 || string(res.Trailers[0].Name) != "grpc-status" {
-		t.Fatalf("trailers = %+v", res.Trailers)
-	}
+	}, &res)
+
+	require.NoError(t, err, "Do")
+	require.Lenf(t, res.Trailers, 1, "trailers = %+v", res.Trailers)
+	assert.Equalf(t, "grpc-status", string(res.Trailers[0].Name), "trailers = %+v", res.Trailers)
 }
 
 func TestClient_Do_StreamReset_ReturnsTypedError(t *testing.T) {
@@ -1005,22 +949,18 @@ func TestClient_Do_StreamReset_ReturnsTypedError(t *testing.T) {
 		Addr:     "fake:0",
 		ConnOpts: conn.ConnOptions{Dialer: d},
 	})
-	if err != nil {
-		t.Fatalf("NewClient: %v", err)
-	}
+	require.NoError(t, err, "NewClient")
 	defer c.Close()
-
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
-	var _res Response
-	err = c.Do(ctx, &Request{Method: "GET", Path: "/"}, &_res)
+
+	var res Response
+	err = c.Do(ctx, &Request{Method: "GET", Path: "/"}, &res)
+
 	var rs *StreamResetError
-	if !errors.As(err, &rs) {
-		t.Fatalf("expected *StreamResetError, got %v", err)
-	}
-	if rs.Code != frame.ErrCodeRefusedStream {
-		t.Fatalf("code = %v, want REFUSED_STREAM", rs.Code)
-	}
+	require.Truef(t, errors.As(err, &rs),
+		"expected *StreamResetError, got %v — a caller cannot classify a reset it cannot type-assert", err)
+	assert.Equal(t, frame.ErrCodeRefusedStream, rs.Code, "code = %v, want REFUSED_STREAM", rs.Code)
 }
 
 func TestClient_DoStream_RecvDataChunks(t *testing.T) {
@@ -1054,27 +994,18 @@ func TestClient_DoStream_RecvDataChunks(t *testing.T) {
 		Addr:     "fake:0",
 		ConnOpts: conn.ConnOptions{Dialer: d},
 	})
-	if err != nil {
-		t.Fatalf("NewClient: %v", err)
-	}
+	require.NoError(t, err, "NewClient")
 	defer c.Close()
-
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
+
 	var sr StreamResponse
-	if err := c.DoStream(ctx, &Request{Method: "GET", Path: "/"}, &sr); err != nil {
-		t.Fatalf("DoStream: %v", err)
-	}
+	require.NoError(t, c.DoStream(ctx, &Request{Method: "GET", Path: "/"}, &sr), "DoStream")
 	defer sr.Close()
-	if sr.Status != 200 {
-		t.Fatalf("status = %d", sr.Status)
-	}
 	var got [][]byte
 	for {
-		ev, err := sr.Recv(ctx)
-		if err != nil {
-			t.Fatalf("Recv: %v", err)
-		}
+		ev, rerr := sr.Recv(ctx)
+		require.NoError(t, rerr, "Recv")
 		if ev.Type == EventData {
 			cp := make([]byte, len(ev.Data))
 			copy(cp, ev.Data)
@@ -1084,13 +1015,11 @@ func TestClient_DoStream_RecvDataChunks(t *testing.T) {
 			break
 		}
 	}
-	if len(got) != 3 {
-		t.Fatalf("got %d chunks, want 3", len(got))
-	}
+
+	assert.Equal(t, 200, sr.Status, "status = %d", sr.Status)
+	require.Len(t, got, 3, "got %d chunks, want 3 — DATA frames were coalesced or dropped", len(got))
 	for i, want := range chunks {
-		if !bytes.Equal(got[i], want) {
-			t.Fatalf("chunk %d = %q, want %q", i, got[i], want)
-		}
+		assert.Truef(t, bytes.Equal(got[i], want), "chunk %d = %q, want %q", i, got[i], want)
 	}
 }
 
@@ -1135,30 +1064,23 @@ func TestClient_DoStream_CloseBeforeEnd_SendsRSTCancel(t *testing.T) {
 		Addr:     "fake:0",
 		ConnOpts: conn.ConnOptions{Dialer: d},
 	})
-	if err != nil {
-		t.Fatalf("NewClient: %v", err)
-	}
+	require.NoError(t, err, "NewClient")
 	defer c.Close()
-
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 	var sr StreamResponse
-	if err := c.DoStream(ctx, &Request{Method: "GET", Path: "/"}, &sr); err != nil {
-		t.Fatalf("DoStream: %v", err)
-	}
-	if _, err := sr.Recv(ctx); err != nil {
-		t.Fatalf("first Recv: %v", err)
-	}
-	if err := sr.Close(); err != nil {
-		t.Fatalf("Close: %v", err)
-	}
+	require.NoError(t, c.DoStream(ctx, &Request{Method: "GET", Path: "/"}, &sr), "DoStream")
+	_, err = sr.Recv(ctx)
+	require.NoError(t, err, "first Recv")
+
+	require.NoError(t, sr.Close(), "Close")
+
 	select {
 	case code := <-gotRST:
-		if code != frame.ErrCodeCancel {
-			t.Fatalf("RST code = %v, want CANCEL", code)
-		}
+		assert.Equal(t, frame.ErrCodeCancel, code,
+			"RST code = %v, want CANCEL — an undrained stream must be cancelled, not abandoned", code)
 	case <-time.After(2 * time.Second):
-		t.Fatal("server did not see RST_STREAM(CANCEL)")
+		assert.Fail(t, "server did not see RST_STREAM(CANCEL)")
 	}
 }
 
@@ -1207,29 +1129,27 @@ func TestConformance_RFC7540_Sec8_1_2_1_PseudoHeadersFirst(t *testing.T) {
 		Addr:     "fake:0",
 		ConnOpts: conn.ConnOptions{Dialer: d},
 	})
-	if err != nil {
-		t.Fatalf("NewClient: %v", err)
-	}
+	require.NoError(t, err, "NewClient")
 	defer c.Close()
-
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
-	var _res2 Response
-	if err := c.Do(ctx, &Request{
+
+	var res Response
+	err = c.Do(ctx, &Request{
 		Method: "GET", Path: "/",
 		Headers: []hpack.HeaderField{
 			{Name: []byte("x-trace-id"), Value: []byte("abc")},
 		},
-	}, &_res2); err != nil {
-		t.Fatalf("Do: %v", err)
-	}
+	}, &res)
+
+	require.NoError(t, err, "Do")
 	fields := <-captured
+	require.NotEmpty(t, fields, "the peer decoded no fields from the HEADERS block, so ordering is untested")
 	seenRegular := false
 	for _, f := range fields {
 		isPseudo := len(f.Name) > 0 && f.Name[0] == ':'
-		if isPseudo && seenRegular {
-			t.Fatalf("pseudo-header %q after regular: %+v", f.Name, fields)
-		}
+		assert.Falsef(t, isPseudo && seenRegular,
+			"pseudo-header %q after regular: %+v — RFC 7540 §8.1.2.1 makes such a block malformed", f.Name, fields)
 		if !isPseudo {
 			seenRegular = true
 		}
@@ -1238,55 +1158,53 @@ func TestConformance_RFC7540_Sec8_1_2_1_PseudoHeadersFirst(t *testing.T) {
 
 func TestClient_NewClient_Pool_RequiresPoolOptions(t *testing.T) {
 	t.Parallel()
+
 	_, err := NewClient(ClientOptions{
 		Addr:      "example.com:443",
 		ConnOpts:  conn.ConnOptions{Dialer: &conn.TLSDialer{}},
 		Transport: TransportPool,
 	})
-	if !errors.Is(err, ErrInvalidPoolOptions) {
-		t.Fatalf("err = %v, want ErrInvalidPoolOptions", err)
-	}
+
+	require.ErrorIs(t, err, ErrInvalidPoolOptions, "err = %v, want ErrInvalidPoolOptions", err)
 }
 
 func TestClient_NewClient_SingleConn_RejectsPoolOptions(t *testing.T) {
 	t.Parallel()
+
 	_, err := NewClient(ClientOptions{
 		Addr:      "example.com:443",
 		ConnOpts:  conn.ConnOptions{Dialer: &conn.TLSDialer{}},
 		Transport: TransportSingleConn,
 		Pool:      &PoolOptions{MaxConnsPerHost: 4},
 	})
-	if !errors.Is(err, ErrInvalidPoolOptions) {
-		t.Fatalf("err = %v, want ErrInvalidPoolOptions", err)
-	}
+
+	require.ErrorIs(t, err, ErrInvalidPoolOptions, "err = %v, want ErrInvalidPoolOptions", err)
 }
 
 func TestClient_NewClient_InvalidTransportKind(t *testing.T) {
 	t.Parallel()
+
 	_, err := NewClient(ClientOptions{
 		Addr:      "example.com:443",
 		ConnOpts:  conn.ConnOptions{Dialer: &conn.TLSDialer{}},
 		Transport: TransportKind(42),
 	})
-	if !errors.Is(err, ErrInvalidTransportKind) {
-		t.Fatalf("err = %v, want ErrInvalidTransportKind", err)
-	}
+
+	require.ErrorIs(t, err, ErrInvalidTransportKind, "err = %v, want ErrInvalidTransportKind", err)
 }
 
 func TestClient_NewClient_Pool_Constructs(t *testing.T) {
 	t.Parallel()
+
 	c, err := NewClient(ClientOptions{
 		Addr:      "example.com:443",
 		ConnOpts:  conn.ConnOptions{Dialer: &conn.TLSDialer{}},
 		Transport: TransportPool,
 		Pool:      &PoolOptions{MaxConnsPerHost: 2},
 	})
-	if err != nil {
-		t.Fatalf("NewClient = %v", err)
-	}
-	t.Cleanup(func() { _ = c.Close() })
 
-	if _, ok := c.tr.(*poolTransport); !ok {
-		t.Fatalf("tr type = %T, want *poolTransport", c.tr)
-	}
+	require.NoError(t, err, "NewClient")
+	t.Cleanup(func() { _ = c.Close() })
+	_, ok := c.tr.(*poolTransport)
+	assert.Truef(t, ok, "tr type = %T, want *poolTransport", c.tr)
 }

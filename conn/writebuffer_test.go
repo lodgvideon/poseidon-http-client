@@ -10,6 +10,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
 	"github.com/lodgvideon/poseidon-http-client/header"
 )
 
@@ -60,9 +63,8 @@ func (d *countingWriteDialer) Dial(ctx context.Context, addr string) (net.Conn, 
 func TestWriteBuffer_MultiChunkUpload_NoDeadlock(t *testing.T) {
 	const bodySize = 4 * 1024 * 1024 // 4 MiB — many WINDOW_UPDATE round-trips.
 	body := make([]byte, bodySize)
-	if _, err := rand.Read(body); err != nil {
-		t.Fatalf("rand: %v", err)
-	}
+	_, randErr := rand.Read(body)
+	require.NoError(t, randErr, "rand")
 
 	var got int64
 	srv, cfg := startH2TestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -112,16 +114,13 @@ func TestWriteBuffer_MultiChunkUpload_NoDeadlock(t *testing.T) {
 
 	select {
 	case err := <-done:
-		if err != nil {
-			t.Fatalf("multi-chunk upload failed: %v", err)
-		}
+		require.NoError(t, err, "multi-chunk upload failed")
 	case <-time.After(15 * time.Second):
-		t.Fatal("multi-chunk upload deadlocked: did not complete within 15s " +
+		require.FailNow(t, "multi-chunk upload deadlocked: did not complete within 15s "+
 			"(missed flush before acquireSendCredits?)")
 	}
-	if g := atomic.LoadInt64(&got); g != bodySize {
-		t.Fatalf("server received %d bytes, want %d", g, bodySize)
-	}
+	assert.EqualValuesf(t, bodySize, atomic.LoadInt64(&got),
+		"server received %d bytes, want %d", atomic.LoadInt64(&got), bodySize)
 }
 
 // TestWriteBuffer_FewerWriteSyscalls proves the send-path optimization: the
@@ -150,9 +149,7 @@ func TestWriteBuffer_FewerWriteSyscalls(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	c, err := Dial(ctx, srv.Listener.Addr().String(), ConnOptions{Dialer: dialer})
-	if err != nil {
-		t.Fatalf("Dial: %v", err)
-	}
+	require.NoError(t, err, "Dial")
 	defer c.Close()
 
 	const (
@@ -162,34 +159,26 @@ func TestWriteBuffer_FewerWriteSyscalls(t *testing.T) {
 	payload := make([]byte, chunk)
 
 	s, err := c.NewStream(ctx)
-	if err != nil {
-		t.Fatalf("NewStream: %v", err)
-	}
+	require.NoError(t, err, "NewStream")
 
 	// Snapshot after handshake + NewStream (which writes nothing — the id is
 	// deferred to SendHeaders), just before the request write path.
 	writesBefore := dialer.conn.writes.Load()
 	framesBefore := c.Stats().FramesSent
 
-	if err := s.SendHeaders(ctx, []header.Field{
+	require.NoError(t, s.SendHeaders(ctx, []header.Field{
 		{Name: []byte(":method"), Value: []byte("POST")},
 		{Name: []byte(":scheme"), Value: []byte("https")},
 		{Name: []byte(":authority"), Value: []byte("example.com")},
 		{Name: []byte(":path"), Value: []byte("/upload")},
-	}, false); err != nil {
-		t.Fatalf("SendHeaders: %v", err)
-	}
+	}, false), "SendHeaders")
 	for i := 0; i < nchunk; i++ {
 		last := i == nchunk-1
-		if err := s.SendData(ctx, payload, last); err != nil {
-			t.Fatalf("SendData %d: %v", i, err)
-		}
+		require.NoErrorf(t, s.SendData(ctx, payload, last), "SendData %d", i)
 	}
 	for {
 		ev, rerr := s.Recv(ctx)
-		if rerr != nil {
-			t.Fatalf("Recv: %v", rerr)
-		}
+		require.NoError(t, rerr, "Recv")
 		if ev.EndStream {
 			break
 		}
@@ -202,18 +191,14 @@ func TestWriteBuffer_FewerWriteSyscalls(t *testing.T) {
 	t.Logf("unbuffered baseline ~2 writes/frame = %d; buffered ~1/frame = %d",
 		2*framesDelta, framesDelta)
 
-	if framesDelta < nchunk {
-		t.Fatalf("frames sent = %d, want >= %d", framesDelta, nchunk)
-	}
+	require.GreaterOrEqualf(t, framesDelta, int64(nchunk),
+		"frames sent = %d, want >= %d", framesDelta, nchunk)
 	// Below the 2-per-frame unbuffered baseline: coalescing is working.
-	if writesDelta >= 2*framesDelta {
-		t.Fatalf("write coalescing ineffective: %d writes for %d frames (want < 2/frame)",
-			writesDelta, framesDelta)
-	}
+	assert.Lessf(t, writesDelta, 2*framesDelta,
+		"write coalescing ineffective: %d writes for %d frames (want < 2/frame)",
+		writesDelta, framesDelta)
 	// And it is ~1 write/frame (small slack for any concurrent control frame
 	// the reader goroutine flushes between the two snapshots).
-	if writesDelta > framesDelta+4 {
-		t.Fatalf("expected ~1 write/frame, got %d writes for %d frames",
-			writesDelta, framesDelta)
-	}
+	assert.LessOrEqualf(t, writesDelta, framesDelta+4,
+		"expected ~1 write/frame, got %d writes for %d frames", writesDelta, framesDelta)
 }

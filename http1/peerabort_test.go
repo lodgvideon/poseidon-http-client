@@ -2,11 +2,13 @@ package http1
 
 import (
 	"context"
-	"errors"
 	"net"
 	"os"
 	"testing"
 	"time"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	"github.com/lodgvideon/poseidon-http-client/header"
 )
@@ -58,9 +60,7 @@ func readResponseOver(t *testing.T, nc net.Conn) error {
 		{Name: []byte(":path"), Value: []byte("/")},
 		{Name: []byte(":authority"), Value: []byte("example.test")},
 	}
-	if err := ex.WriteRequest(context.Background(), fields, true); err != nil {
-		t.Fatalf("WriteRequest: %v", err)
-	}
+	require.NoError(t, ex.WriteRequest(context.Background(), fields, true), "WriteRequest")
 	_, _, err := ex.ReadResponse(context.Background())
 	return err
 }
@@ -70,20 +70,18 @@ func readResponseOver(t *testing.T, nc net.Conn) error {
 // that aborts rather than delivering EOF, must reach the retry classifier as the same
 // replayable failure.
 func TestErrServerClosedIdle_PeerAbortBeforeAnyByte(t *testing.T) {
-	err := readResponseOver(t, &abortConn{errno: testAbortErrno})
+	nc := &abortConn{errno: testAbortErrno}
 
-	if err == nil {
-		t.Fatal("ReadResponse returned no error after the peer aborted the connection")
-	}
-	if !errors.Is(err, ErrServerClosedIdle) {
-		t.Errorf("error is %v, want ErrServerClosedIdle — %v is how this platform reports a "+
+	err := readResponseOver(t, nc)
+
+	require.Error(t, err, "ReadResponse returned no error after the peer aborted the connection")
+	assert.ErrorIsf(t, err, ErrServerClosedIdle,
+		"error is %v, want ErrServerClosedIdle — %v is how this platform reports a "+
 			"keep-alive the peer has already destroyed, and without the type the retry "+
 			"classifier cannot tell it from a failure that may have been processed, so the "+
 			"one safely replayable H1 failure goes unretried here", err, testAbortErrno)
-	}
-	if !errors.Is(err, testAbortErrno) {
-		t.Errorf("error is %v; it should still wrap the underlying %v for diagnosis", err, testAbortErrno)
-	}
+	assert.ErrorIsf(t, err, testAbortErrno,
+		"error is %v; it should still wrap the underlying %v for diagnosis", err, testAbortErrno)
 }
 
 // TestErrServerClosedIdle_NotAfterAPartialResponse_PeerAbort is the boundary, and it
@@ -101,16 +99,14 @@ func TestErrServerClosedIdle_PeerAbortBeforeAnyByte(t *testing.T) {
 // them produce an abort.
 func TestErrServerClosedIdle_NotAfterAPartialResponse_PeerAbort(t *testing.T) {
 	nc := &partialThenAbortConn{sent: []byte("HTTP/1.1 20"), errno: testAbortErrno}
+
 	err := readResponseOver(t, nc)
 
-	if err == nil {
-		t.Fatal("ReadResponse returned no error on a response truncated by an abort")
-	}
-	if errors.Is(err, ErrServerClosedIdle) {
-		t.Errorf("a status line truncated by %v was classified as ErrServerClosedIdle — the "+
+	require.Error(t, err, "ReadResponse returned no error on a response truncated by an abort")
+	assert.NotErrorIsf(t, err, ErrServerClosedIdle,
+		"a status line truncated by %v was classified as ErrServerClosedIdle — the "+
 			"server had started answering, so it may have processed the request, and the "+
 			"caller would replay it", testAbortErrno)
-	}
 }
 
 // partialThenAbortConn writes part of a response and only then aborts.

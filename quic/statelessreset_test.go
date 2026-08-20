@@ -1,6 +1,11 @@
 package quic
 
-import "testing"
+import (
+	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+)
 
 // TestConformance_RFC9000_Sec103_StatelessResetTokenParsed checks that the peer's
 // stateless_reset_token transport parameter (0x02) is parsed as a 16-byte value,
@@ -10,19 +15,15 @@ func TestConformance_RFC9000_Sec103_StatelessResetTokenParsed(t *testing.T) {
 	copy(token[:], "fedcba9876543210")
 
 	tp, err := ParseTransportParams(tpBytes(tpStatelessResetToken, token[:]))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !tp.HaveStatelessResetToken {
-		t.Fatal("stateless_reset_token should be recorded as present")
-	}
-	if tp.StatelessResetToken != token {
-		t.Fatalf("token = %x, want %x", tp.StatelessResetToken, token)
-	}
+	_, errShort := ParseTransportParams(tpBytes(tpStatelessResetToken, token[:8]))
 
-	if _, err := ParseTransportParams(tpBytes(tpStatelessResetToken, token[:8])); err != ErrTransportParameter {
-		t.Fatalf("an 8-byte token: err = %v, want ErrTransportParameter", err)
-	}
+	require.NoError(t, err, "ParseTransportParams with a 16-byte stateless_reset_token")
+	assert.True(t, tp.HaveStatelessResetToken,
+		"stateless_reset_token should be recorded as present")
+	assert.Equalf(t, token, tp.StatelessResetToken,
+		"token = %x, want %x", tp.StatelessResetToken, token)
+	assert.Truef(t, errShort == ErrTransportParameter,
+		"an 8-byte token: err = %v, want ErrTransportParameter", errShort)
 }
 
 // TestConformance_RFC9000_Sec1031_StatelessResetDetected checks that a datagram
@@ -56,40 +57,40 @@ func TestConformance_RFC9000_Sec1031_StatelessResetDetected(t *testing.T) {
 	// The token bound to the CID in use (seq 0) detects a reset and closes the conn.
 	c := newConn()
 	c.registerResetToken(0, tok0)
-	if err := c.recvDatagram(resetPkt(tok0)); err != ErrStatelessReset {
-		t.Fatalf("in-use token: recvDatagram = %v, want ErrStatelessReset", err)
-	}
-	if !c.closed {
-		t.Fatal("a detected stateless reset must close the connection")
-	}
+
+	errInUse := c.recvDatagram(resetPkt(tok0))
+
+	assert.Truef(t, errInUse == ErrStatelessReset,
+		"in-use token: recvDatagram = %v, want ErrStatelessReset", errInUse)
+	assert.True(t, c.closed, "a detected stateless reset must close the connection")
 
 	// A NEW_CONNECTION_ID that retires seq 0 and switches the CID in use to seq 1:
 	// the retired seq-0 token MUST NOT be matched, but the new seq-1 token must be.
 	c2 := newConn()
 	c2.registerResetToken(0, tok0) // the handshake CID's token
-	if err := (&connFrameHandler{c: c2}).OnNewConnectionID(1, 1, []byte("newcid01"), &tok1); err != nil {
-		t.Fatalf("OnNewConnectionID: %v", err)
-	}
-	if c2.curCIDSeq != 1 {
-		t.Fatalf("expected a switch to CID seq 1, got seq %d", c2.curCIDSeq)
-	}
-	if err := c2.recvDatagram(resetPkt(tok0)); err != nil {
-		t.Fatalf("retired token: recvDatagram = %v, want nil (§10.3.1 MUST NOT check)", err)
-	}
-	if c2.closed {
-		t.Fatal("a retired CID's token must not trigger a stateless reset")
-	}
-	if err := c2.recvDatagram(resetPkt(tok1)); err != ErrStatelessReset {
-		t.Fatalf("in-use seq-1 token: recvDatagram = %v, want ErrStatelessReset", err)
-	}
+	require.NoError(t, (&connFrameHandler{c: c2}).OnNewConnectionID(1, 1, []byte("newcid01"), &tok1),
+		"OnNewConnectionID")
+	require.EqualValuesf(t, 1, c2.curCIDSeq,
+		"expected a switch to CID seq 1, got seq %d", c2.curCIDSeq)
+
+	errRetired := c2.recvDatagram(resetPkt(tok0))
+	closedByRetired := c2.closed
+	errSeq1 := c2.recvDatagram(resetPkt(tok1))
+
+	assert.NoErrorf(t, errRetired,
+		"retired token: recvDatagram = %v, want nil (§10.3.1 MUST NOT check)", errRetired)
+	assert.False(t, closedByRetired,
+		"a retired CID's token must not trigger a stateless reset")
+	assert.Truef(t, errSeq1 == ErrStatelessReset,
+		"in-use seq-1 token: recvDatagram = %v, want ErrStatelessReset", errSeq1)
 
 	// A datagram whose trailing bytes match no armed token is just dropped.
 	c3 := newConn()
 	c3.registerResetToken(0, tok0)
-	if err := c3.recvDatagram(resetPkt([16]byte{})); err != nil {
-		t.Fatalf("non-matching datagram: recvDatagram = %v, want nil", err)
-	}
-	if c3.closed {
-		t.Fatal("a non-matching undecryptable datagram must not close the connection")
-	}
+
+	errNoMatch := c3.recvDatagram(resetPkt([16]byte{}))
+
+	assert.NoErrorf(t, errNoMatch, "non-matching datagram: recvDatagram = %v, want nil", errNoMatch)
+	assert.False(t, c3.closed,
+		"a non-matching undecryptable datagram must not close the connection")
 }
