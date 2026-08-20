@@ -6,6 +6,9 @@ import (
 	"context"
 	"testing"
 	"time"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // openExchange runs on every request, and for a long time two of its four lines
@@ -26,6 +29,12 @@ import (
 // the first frame is written. Close is in the measured region because without it
 // the streams accumulate against the peer's concurrency cap and the loop dies of
 // "in-flight stream cap reached" rather than measuring anything.
+//
+// NOTE ON testify: the AllocsPerRun closure below deliberately keeps its
+// hand-rolled t.Fatalf. testify reflects and allocates, AllocsPerRun measures
+// the whole process, and this gate is two-sided on an exact count of 6 — one
+// assert inside the closure would destroy it. Every testify call in this file is
+// outside the measured region.
 func TestPoolTransport_OpenExchangeAllocs(t *testing.T) {
 	srv := startOneH2Server(t)
 	defer srv.Close()
@@ -43,15 +52,15 @@ func TestPoolTransport_OpenExchangeAllocs(t *testing.T) {
 
 	// Warm the pool so the dial is not in the measured region.
 	s, _, release, err := pt.openExchange(ctx)
-	if err != nil {
-		t.Fatalf("warm-up openExchange: %v", err)
-	}
+	require.NoError(t, err, "warm-up openExchange")
 	_ = s.Close()
 	release.release()
 
 	n := testing.AllocsPerRun(200, func() {
 		st, _, rel, oerr := pt.openExchange(ctx)
 		if oerr != nil {
+			// Hand-rolled on purpose: see the NOTE above. Inside the measured
+			// closure, testify's reflection would be counted as allocation.
 			t.Fatalf("openExchange: %v", oerr)
 		}
 		_ = st.Close()
@@ -81,14 +90,12 @@ func TestPoolTransport_OpenExchangeAllocs(t *testing.T) {
 	// Sixteen bytes per request is what that guard costs.
 	const openExchangeAllocCeiling = 6
 	t.Logf("openExchange + release: %.1f allocs", n)
-	if n > openExchangeAllocCeiling {
-		t.Errorf("openExchange allocates %.1f per request, ceiling %d — the most likely "+
+	assert.LessOrEqualf(t, n, float64(openExchangeAllocCeiling),
+		"openExchange allocates %.1f per request, ceiling %d — the most likely "+
 			"cause is a method value or a closure back on the path: `cn.LookupStream` as "+
 			"a value allocates on every evaluation, which is what pushLookuper removed",
-			n, openExchangeAllocCeiling)
-	}
-	if n < openExchangeAllocCeiling {
-		t.Errorf("openExchange allocates only %.1f, below the recorded %d — the path "+
+		n, openExchangeAllocCeiling)
+	assert.GreaterOrEqualf(t, n, float64(openExchangeAllocCeiling),
+		"openExchange allocates only %.1f, below the recorded %d — the path "+
 			"improved, lower openExchangeAllocCeiling to lock it in", n, openExchangeAllocCeiling)
-	}
 }

@@ -6,8 +6,10 @@ import (
 	"go/ast"
 	"go/parser"
 	"go/token"
-	"strings"
 	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	"github.com/lodgvideon/poseidon-http-client/conn"
 )
@@ -15,9 +17,9 @@ import (
 // TestNewClient_ValidationErrorsCarryTheirSentinel covers every error return in
 // NewClient's option validation and asserts each is classifiable with errors.Is.
 //
-// The sentinel differs per family and that is deliberate — Pool cross-field
+// The sentinel differs per family and that is deliberate вЂ” Pool cross-field
 // errors carry ErrInvalidPoolOptions, an unusable dialer carries
-// ErrALPNProtocolMismatch, an undefined kind carries ErrInvalidTransportKind —
+// ErrALPNProtocolMismatch, an undefined kind carries ErrInvalidTransportKind вЂ”
 // so this table pins WHICH one each path returns rather than only that some
 // error came back. The pre-existing tests for the first four rows asserted
 // `err != nil` and nothing more, which is exactly how three of them came to
@@ -150,9 +152,7 @@ var validationFuncs = map[string]bool{
 func TestNewClient_ValidationErrorsAlwaysWrap(t *testing.T) {
 	fset := token.NewFileSet()
 	file, err := parser.ParseFile(fset, "client.go", nil, 0)
-	if err != nil {
-		t.Fatalf("parse client.go: %v", err)
-	}
+	require.NoError(t, err, "parse client.go")
 
 	checked := 0
 	for _, decl := range file.Decls {
@@ -178,19 +178,17 @@ func TestNewClient_ValidationErrorsAlwaysWrap(t *testing.T) {
 				return true
 			}
 			checked++
-			if !strings.Contains(format.Value, "%w") {
-				t.Errorf("%s: fmt.Errorf in %s wraps no sentinel: %s\n  errors.Is cannot classify it; wrap ErrInvalidOptions (or the sentinel for its family)",
-					fset.Position(call.Pos()), fn.Name.Name, format.Value)
-			}
+			assert.Containsf(t, format.Value, "%w",
+				"%s: fmt.Errorf in %s wraps no sentinel: %s\n  errors.Is cannot classify it; wrap ErrInvalidOptions (or the sentinel for its family)",
+				fset.Position(call.Pos()), fn.Name.Name, format.Value)
 			return true
 		})
 	}
 
 	// Without this the test passes vacuously the day someone renames a function
 	// or moves validation to another file.
-	if checked < 8 {
-		t.Fatalf("inspected only %d fmt.Errorf calls across %v; the validation code moved and this guard is no longer looking at it",
-			checked, validationFuncs)
-	}
+	require.GreaterOrEqualf(t, checked, 8,
+		"inspected only %d fmt.Errorf calls across %v; the validation code moved and this guard is no longer looking at it",
+		checked, validationFuncs)
 	t.Logf("inspected %d fmt.Errorf calls in NewClient's validation path", checked)
 }

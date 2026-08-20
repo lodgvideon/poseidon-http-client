@@ -8,6 +8,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/require"
+
 	"github.com/lodgvideon/poseidon-http-client/conn"
 	"github.com/lodgvideon/poseidon-http-client/frame"
 )
@@ -50,9 +52,7 @@ func h2DeadConn(t *testing.T) *conn.Conn {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 	c, err := conn.NewClientConn(ctx, cli, conn.ConnOptions{})
-	if err != nil {
-		t.Fatalf("NewClientConn: %v", err)
-	}
+	require.NoError(t, err, "NewClientConn")
 	t.Cleanup(func() { _ = c.Close() })
 	_ = c.Close() // IsAlive() == false from here on
 	return c
@@ -79,21 +79,17 @@ func h2StrandWaiter(ctx context.Context) acquireReq {
 // assertRefusedWithBackoff checks the single reply a stranded waiter is owed.
 func assertRefusedWithBackoff(t *testing.T, err error, answered bool, mc any, left int, site string) {
 	t.Helper()
-	if !answered {
-		t.Fatalf("%s lost its last live conn during dial backoff and left the waiter queued "+
+	require.Truef(t, answered,
+		"%s lost its last live conn during dial backoff and left the waiter queued "+
 			"(waiters = %d); it now waits a full HealthCheckPeriod while a fresh acquire is "+
 			"refused instantly by handleAcquire's fast-refuse", site, left)
-	}
-	if !errors.Is(err, ErrDialBackoff) {
-		t.Fatalf("%s: stranded waiter got %v, want ErrDialBackoff — the same answer "+
+	require.ErrorIsf(t, err, ErrDialBackoff,
+		"%s: stranded waiter got %v, want ErrDialBackoff — the same answer "+
 			"handleAcquire gives a new request in this exact state", site, err)
-	}
-	if mc != nil {
-		t.Fatalf("%s: a refused waiter was also handed a conn", site)
-	}
-	if left != 0 {
-		t.Fatalf("%s: waiters = %d after every one was answered, want 0", site, left)
-	}
+	// mc is `any` holding a *managedConn / *h3ManagedConn: require.Nil accepts a
+	// typed nil through reflection, so compare the interface against nil.
+	require.Truef(t, mc == nil, "%s: a refused waiter was also handed a conn", site)
+	require.Zerof(t, left, "%s: waiters = %d after every one was answered, want 0", site, left)
 }
 
 // TestPool_HandleTick_RefusesWaitersStrandedByTheLastConnGoing — H2, tick path.
@@ -101,7 +97,6 @@ func TestPool_HandleTick_RefusesWaitersStrandedByTheLastConnGoing(t *testing.T) 
 	p := h2StrandPool(t)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-
 	w := h2StrandWaiter(ctx)
 	rs := &runState{
 		conns:         []*managedConn{{c: h2DeadConn(t)}},
@@ -136,7 +131,6 @@ func TestPool_HandleRelease_RefusesWaitersStrandedByTheLastConnGoing(t *testing.
 	p := h2StrandPool(t)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-
 	mc := &managedConn{c: h2DeadConn(t), active: 1}
 	w := h2StrandWaiter(ctx)
 	rs := &runState{
@@ -172,13 +166,10 @@ func TestH3Pool_HandleTick_RefusesWaitersStrandedByTheLastConnGoing(t *testing.T
 	}, nil)
 	// No t.Cleanup(p.Close): inertH3Pool never starts the actor, so Close would
 	// block forever on closedCh. The existing h3 white-box tests do the same.
-
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-
 	dead := &barrierH3Client{}
 	atomic.StoreInt32(&dead.dead, 1) // Alive() == false, so evictDead takes it
-
 	w := h3AcquireReq{ctx: ctx, reply: make(chan h3AcquireResp, 1)}
 	rs := &h3RunState{
 		conns:         []*h3ManagedConn{{cl: dead, streamCap: 10}},
@@ -220,14 +211,11 @@ func TestH3Pool_HandleRelease_RefusesWaitersStrandedByAGoAwayDrain(t *testing.T)
 	}, nil)
 	// No t.Cleanup(p.Close): inertH3Pool never starts the actor, so Close would
 	// block forever on closedCh. The existing h3 white-box tests do the same.
-
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-
 	gone := &barrierH3Client{}
 	atomic.StoreInt32(&gone.goaway, 1)
 	mc := &h3ManagedConn{cl: gone, active: 1, streamCap: 10}
-
 	w := h3AcquireReq{ctx: ctx, reply: make(chan h3AcquireResp, 1)}
 	rs := &h3RunState{
 		conns:         []*h3ManagedConn{mc},
@@ -264,7 +252,6 @@ func TestPool_HandleTick_FlushesWithADrainingConnStillInTheSlice(t *testing.T) {
 	p := h2StrandPool(t)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-
 	draining := &managedConn{c: h2DeadConn(t), active: 1}
 	w := h2StrandWaiter(ctx)
 	rs := &runState{
@@ -277,14 +264,13 @@ func TestPool_HandleTick_FlushesWithADrainingConnStillInTheSlice(t *testing.T) {
 
 	// Without this the test could pass for the wrong reason — an empty slice
 	// makes countLive and len(conns) agree, and the distinction goes untested.
-	if len(rs.conns) != 1 {
-		t.Fatalf("conns = %d after the tick, want the draining conn still there; "+
-			"evictDead's active == 0 guard is what puts this test in the countLive-only case", len(rs.conns))
-	}
-	if countLive(rs.conns) != 0 {
-		t.Fatalf("countLive = %d, want 0 — the draining conn must not read as capacity", countLive(rs.conns))
-	}
-
+	require.Lenf(t, rs.conns, 1,
+		"conns = %d after the tick, want the draining conn still there; "+
+			"evictDead's active == 0 guard is what puts this test in the countLive-only case",
+		len(rs.conns))
+	require.Zerof(t, countLive(rs.conns),
+		"countLive = %d, want 0 — the draining conn must not read as capacity",
+		countLive(rs.conns))
 	var (
 		resp     acquireResp
 		answered bool
@@ -311,14 +297,11 @@ func TestH3Pool_HandleTick_FlushesWithADrainingConnStillInTheSlice(t *testing.T)
 		HealthCheckPeriod: time.Hour,
 		DialBackoff:       time.Hour,
 	}, nil)
-
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-
 	gone := &barrierH3Client{}
 	atomic.StoreInt32(&gone.goaway, 1)
 	draining := &h3ManagedConn{cl: gone, active: 1, streamCap: 10}
-
 	w := h3AcquireReq{ctx: ctx, reply: make(chan h3AcquireResp, 1)}
 	rs := &h3RunState{
 		conns:         []*h3ManagedConn{draining},
@@ -328,13 +311,11 @@ func TestH3Pool_HandleTick_FlushesWithADrainingConnStillInTheSlice(t *testing.T)
 
 	p.handleTick(rs)
 
-	if len(rs.conns) != 1 {
-		t.Fatalf("conns = %d after the tick, want the draining conn still there", len(rs.conns))
-	}
-	if h3CountLive(rs.conns) != 0 {
-		t.Fatalf("h3CountLive = %d, want 0 — a GOAWAY'd conn must not read as capacity", h3CountLive(rs.conns))
-	}
-
+	require.Lenf(t, rs.conns, 1,
+		"conns = %d after the tick, want the draining conn still there", len(rs.conns))
+	require.Zerof(t, h3CountLive(rs.conns),
+		"h3CountLive = %d, want 0 — a GOAWAY'd conn must not read as capacity",
+		h3CountLive(rs.conns))
 	var (
 		resp     h3AcquireResp
 		answered bool
@@ -365,7 +346,8 @@ func TestH3Pool_HandleTick_FlushesWithADrainingConnStillInTheSlice(t *testing.T)
 // It is still load-bearing as a contract. Nothing-live with the backoff closed
 // means a dial is owed, not that the caller should be refused, and a future call
 // site reaching this state must not get the opposite answer. Calling it directly
-// is the only way to say so.
+// is the only way to say so — and it works: replacing the guard's condition with
+// `false` is CAUGHT 2/2 here while surviving every handler-level test.
 func TestFlushStrandedWaiters_KeepsTheQueueWhenTheBackoffIsClosed(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -380,19 +362,14 @@ func TestFlushStrandedWaiters_KeepsTheQueueWhenTheBackoffIsClosed(t *testing.T) 
 
 		p.flushStrandedWaiters(rs, ErrDialBackoff)
 
-		if len(rs.waiters) != 1 {
-			t.Fatalf("waiters = %d, want 1 — with the backoff closed this waiter is owed a "+
+		require.Lenf(t, rs.waiters, 1,
+			"waiters = %d, want 1 — with the backoff closed this waiter is owed a "+
 				"dial, not a refusal", len(rs.waiters))
-		}
-		if resp, answered := func() (acquireResp, bool) {
-			select {
-			case r := <-w.reply:
-				return r, true
-			default:
-				return acquireResp{}, false
-			}
-		}(); answered {
-			t.Fatalf("waiter refused with %v while the pool was free to dial for it", resp.err)
+		select {
+		case resp := <-w.reply:
+			require.Failf(t, "waiter refused while the pool was free to dial",
+				"waiter refused with %v while the pool was free to dial for it", resp.err)
+		default:
 		}
 	})
 
@@ -403,19 +380,14 @@ func TestFlushStrandedWaiters_KeepsTheQueueWhenTheBackoffIsClosed(t *testing.T) 
 
 		p.flushStrandedWaiters(rs, ErrDialBackoff)
 
-		if len(rs.waiters) != 1 {
-			t.Fatalf("waiters = %d, want 1 — with the backoff closed this waiter is owed a "+
+		require.Lenf(t, rs.waiters, 1,
+			"waiters = %d, want 1 — with the backoff closed this waiter is owed a "+
 				"dial, not a refusal", len(rs.waiters))
-		}
-		if resp, answered := func() (h3AcquireResp, bool) {
-			select {
-			case r := <-w.reply:
-				return r, true
-			default:
-				return h3AcquireResp{}, false
-			}
-		}(); answered {
-			t.Fatalf("waiter refused with %v while the pool was free to dial for it", resp.err)
+		select {
+		case resp := <-w.reply:
+			require.Failf(t, "waiter refused while the pool was free to dial",
+				"waiter refused with %v while the pool was free to dial for it", resp.err)
+		default:
 		}
 	})
 }
@@ -435,7 +407,6 @@ func TestPool_HandleDialDone_RefusesTheWaitersBehindTheFirst(t *testing.T) {
 	p := h2StrandPool(t)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-
 	sentinel := errors.New("connect refused (synthetic)")
 	a, b, c := h2StrandWaiter(ctx), h2StrandWaiter(ctx), h2StrandWaiter(ctx)
 	rs := &runState{waiters: []acquireReq{a, b, c}, inFlightDials: 1}
@@ -445,18 +416,15 @@ func TestPool_HandleDialDone_RefusesTheWaitersBehindTheFirst(t *testing.T) {
 	for i, w := range []acquireReq{a, b, c} {
 		select {
 		case resp := <-w.reply:
-			if resp.err == nil {
-				t.Fatalf("waiter %d got a conn from a pool with nothing live", i)
-			}
-			if !errors.Is(resp.err, sentinel) {
-				t.Fatalf("waiter %d got %v, want the dial error", i, resp.err)
-			}
+			require.Errorf(t, resp.err, "waiter %d got a conn from a pool with nothing live", i)
+			require.ErrorIsf(t, resp.err, sentinel,
+				"waiter %d got %v, want the dial error", i, resp.err)
 		default:
-			t.Fatalf("waiter %d left queued with nothing live and no dial in flight; it waits a "+
-				"full HealthCheckPeriod while a fresh acquire is refused instantly", i)
+			require.Failf(t, "waiter left queued",
+				"waiter %d left queued with nothing live and no dial in flight; it waits a "+
+					"full HealthCheckPeriod while a fresh acquire is refused instantly", i)
 		}
 	}
-	if len(rs.waiters) != 0 {
-		t.Fatalf("%d waiters still queued after every one was answered", len(rs.waiters))
-	}
+	require.Emptyf(t, rs.waiters,
+		"%d waiters still queued after every one was answered", len(rs.waiters))
 }

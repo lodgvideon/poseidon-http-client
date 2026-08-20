@@ -5,41 +5,39 @@ import (
 	"net/http"
 	"testing"
 	"time"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestEventNone_ZeroValue(t *testing.T) {
-	if EventNone != 0 {
-		t.Errorf("EventNone = %d, want 0", EventNone)
-	}
-	if EventNone.String() != "none" {
-		t.Errorf("EventNone.String() = %q, want none", EventNone.String())
-	}
 	var ev StreamEvent
-	if ev.Type != EventNone {
-		t.Errorf("zero StreamEvent.Type = %v, want EventNone", ev.Type)
-	}
+
+	got := ev.Type
+
+	assert.EqualValuesf(t, 0, EventNone,
+		"EventNone = %d, want 0 — the zero value of StreamEvent.Type must mean 'no event'", EventNone)
+	assert.Equalf(t, "none", EventNone.String(),
+		"EventNone.String() = %q, want none", EventNone.String())
+	assert.Equalf(t, EventNone, got,
+		"zero StreamEvent.Type = %v, want EventNone — a freshly allocated event must not "+
+			"read as a real one", got)
 }
 
 func TestClientRetryer_E2E(t *testing.T) {
 	c, err := NewSingleConnClient(status204Server(t), insecureDialer())
-	if err != nil {
-		t.Fatalf("NewSingleConnClient: %v", err)
-	}
+	require.NoError(t, err, "NewSingleConnClient")
 	defer c.Close()
-
 	r := c.Retryer(RetryOptions{MaxAttempts: 3})
-	if r == nil {
-		t.Fatal("Client.Retryer returned nil")
-	}
+	require.NotNil(t, r, "Client.Retryer returned nil")
+
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	var resp Response
-	if err := r.Do(ctx, GET("/"), &resp); err != nil {
-		t.Fatalf("Retryer.Do: %v", err)
-	}
-	if resp.Status != 204 {
-		t.Fatalf("status = %d, want 204", resp.Status)
-	}
+	err = r.Do(ctx, GET("/"), &resp)
+
+	require.NoError(t, err, "Retryer.Do")
+	assert.Equalf(t, 204, resp.Status, "status = %d, want 204", resp.Status)
 }
 
 func TestMetrics_StatusClassSplit(t *testing.T) {
@@ -51,32 +49,27 @@ func TestMetrics_StatusClassSplit(t *testing.T) {
 		w.WriteHeader(204)
 	})
 	c, err := NewSingleConnClient(addr, insecureDialer())
-	if err != nil {
-		t.Fatalf("NewSingleConnClient: %v", err)
-	}
+	require.NoError(t, err, "NewSingleConnClient")
 	defer c.Close()
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
 	var resp Response
 	resp.Reset()
-	if err := c.Do(ctx, GET("/"), &resp); err != nil { // 2xx
-		t.Fatalf("Do 2xx: %v", err)
-	}
+	require.NoError(t, c.Do(ctx, GET("/"), &resp), "Do 2xx")
 	resp.Reset()
-	if err := c.Do(ctx, GET("/bad"), &resp); err != nil { // non-2xx, still err==nil (idiomatic)
-		t.Fatalf("Do non-2xx: %v", err)
-	}
+	// non-2xx, still err==nil (idiomatic)
+	require.NoError(t, c.Do(ctx, GET("/bad"), &resp), "Do non-2xx")
 
 	snap := c.MetricsSnapshot()
-	if snap.Counters.Responses2xx != 1 {
-		t.Errorf("Responses2xx = %d, want 1", snap.Counters.Responses2xx)
-	}
-	if snap.Counters.ResponsesNon2xx != 1 {
-		t.Errorf("ResponsesNon2xx = %d, want 1", snap.Counters.ResponsesNon2xx)
-	}
+	assert.EqualValuesf(t, 1, snap.Counters.Responses2xx,
+		"Responses2xx = %d, want 1 — a load generator measuring real success rate needs the "+
+			"status split, not just 'got a response'", snap.Counters.Responses2xx)
+	assert.EqualValuesf(t, 1, snap.Counters.ResponsesNon2xx,
+		"ResponsesNon2xx = %d, want 1 — a 503 must not be counted as a success",
+		snap.Counters.ResponsesNon2xx)
 	// The split must sum to RequestsSucceeded (both requests completed).
-	if snap.Counters.RequestsSucceeded != 2 {
-		t.Errorf("RequestsSucceeded = %d, want 2", snap.Counters.RequestsSucceeded)
-	}
+	assert.EqualValuesf(t, 2, snap.Counters.RequestsSucceeded,
+		"RequestsSucceeded = %d, want 2 — Responses2xx + ResponsesNon2xx must equal it",
+		snap.Counters.RequestsSucceeded)
 }
