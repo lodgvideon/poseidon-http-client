@@ -95,6 +95,44 @@ func TestLog2Histogram_SlowObservationsCountedOnlyByInf(t *testing.T) {
 		"the last finite bucket must not claim an observation slower than its boundary")
 }
 
+// TestLog2Histogram_TopOfRangeBoundary sits on the edge of the published
+// window. The existing pair straddles it from a distance — client bucket 8 well
+// below, client bucket 40 well above — so the two exponents that actually
+// decide where the window ends, MaxBucketExp-1 (the last client bucket a finite
+// Prometheus bucket still counts) and MaxBucketExp (the first it must not),
+// were never observed.
+//
+// A demonstrated hole, not a theoretical one: stopping the cumulative
+// accumulation one exponent early leaves the whole suite green, because
+// TestLog2Histogram_CumulativeCountsAreExact does assert {MaxBucketExp, 6} but
+// puts its observations in buckets 10/20/30, so the term the bug drops is zero
+// and the assertion cannot see it.
+func TestLog2Histogram_TopOfRangeBoundary(t *testing.T) {
+	cases := []struct {
+		name         string
+		clientBucket int
+		wantLast     uint64
+	}{
+		{"last client bucket the top boundary counts", MaxBucketExp - 1, 1},
+		{"first client bucket past the top boundary", MaxBucketExp, 0},
+		{"top of the client's 64-entry array", 63, 0},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			s := snapshotWith(map[int]int64{tc.clientBucket: 1})
+
+			count, _, buckets := log2Histogram(s)
+
+			require.Equalf(t, uint64(1), count,
+				"an observation in client bucket %d must always reach the count; Prometheus derives +Inf from count minus the last finite bucket, so an observation missing from the count is invisible at every boundary", tc.clientBucket)
+			assert.Equalf(t, tc.wantLast, buckets[boundarySeconds(MaxBucketExp)],
+				"le(%d) counted %d observations from client bucket %d, want %d: the last finite bucket must include everything at or below its boundary and nothing above it, and this is the only pair of inputs that can tell those two failures apart",
+				MaxBucketExp, buckets[boundarySeconds(MaxBucketExp)], tc.clientBucket, tc.wantLast)
+		})
+	}
+}
+
 func TestLog2Histogram_EmptyIsAllZero(t *testing.T) {
 	snapshot := client.HistogramSnapshot{}
 
