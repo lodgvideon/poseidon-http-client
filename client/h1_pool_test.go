@@ -59,6 +59,12 @@ type h1FakeDialer struct {
 	dialErr error // if set, every dial fails with this error
 	dials   atomic.Int32
 
+	// dialDelay, if set, holds each dial open for that long before it resolves.
+	// A zero-latency dial makes any test about WAITERS racy: the pool answers
+	// and re-dials faster than the test's own goroutines can queue, so how many
+	// waiters are ever simultaneously queued is decided by the scheduler.
+	dialDelay time.Duration
+
 	// respFn returns the canned response for the reqIdx'th request served on the
 	// connIdx'th conn. nil → 200/"ok" with implicit HTTP/1.1 keep-alive.
 	respFn func(connIdx, reqIdx int) string
@@ -75,8 +81,18 @@ const h1OKResponse = "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok"
 const h1CloseResponse = "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok"
 
 // Dial implements conn.Dialer.
-func (d *h1FakeDialer) Dial(_ context.Context, addr string) (net.Conn, error) {
+func (d *h1FakeDialer) Dial(ctx context.Context, addr string) (net.Conn, error) {
 	d.dials.Add(1)
+	d.mu.Lock()
+	delay := d.dialDelay
+	d.mu.Unlock()
+	if delay > 0 {
+		select {
+		case <-time.After(delay):
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}
 	d.mu.Lock()
 	if d.dialErr != nil {
 		err := d.dialErr
@@ -512,28 +528,64 @@ func TestH1Pool_DialError_FailsAllQueuedWaiters(t *testing.T) {
 	t.Parallel()
 	d := newH1FakeDialer()
 	d.dialErr = fmt.Errorf("connection refused")
+	// A dial that resolves instantly makes this test racy in the one dimension it
+	// measures. MaxConnsPerHost=2 means only two dials run at once; with a
+	// zero-latency dialer the first two can fail, refuse their waiters and let
+	// handleAcquire start fresh dials for goroutines 3 and 4 before those ever sit
+	// in the queue together — so all four get answered and the missing fan-out is
+	// invisible. Measured: 3 catches in 6 mutation runs. Holding each dial open
+	// past the time it takes all n goroutines to enqueue makes the queue state the
+	// bug needs the state the test actually reaches.
+	d.dialDelay = 250 * time.Millisecond
 	p := newH1Pool("h:80", d, PoolOptions{
 		MaxConnsPerHost:   2,
 		HealthCheckPeriod: time.Hour,
 	}, nil, nil)
 	t.Cleanup(func() { _ = p.Close() })
 
-	const n = 4
+	// The two timeouts are deliberately an order of magnitude apart, and that is
+	// the whole detector. They used to be equal (5s each), which made this test
+	// catch the bug only when the scheduler happened to fire the collection
+	// deadline first: a stranded waiter eventually returns its OWN
+	// context.DeadlineExceeded, which is a non-nil error and satisfies the
+	// require.Error below just as well as the pool's refusal does. Measured over
+	// six mutation runs against the fix removed, it caught it three times.
+	//
+	// waiterBudget must therefore be far longer than collectBudget, so a waiter
+	// the pool has stranded CANNOT rescue itself inside the window: if the
+	// dial-done path does not answer all n, the collection deadline fires first
+	// and the test fails every time.
+	const (
+		n             = 4
+		waiterBudget  = 30 * time.Second
+		collectBudget = 3 * time.Second
+	)
 	errs := make(chan error, n)
+	var queued sync.WaitGroup
+	queued.Add(n)
 	for i := 0; i < n; i++ {
 		go func() {
-			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			ctx, cancel := context.WithTimeout(context.Background(), waiterBudget)
 			defer cancel()
+			queued.Done()
 			_, err := p.acquire(ctx)
 			errs <- err
 		}()
 	}
+	// CONTROL: every goroutine has entered acquire before the first dial can
+	// resolve, so all n are genuinely contending for the same failed dial.
+	queued.Wait()
 
-	deadline := time.After(5 * time.Second)
+	deadline := time.After(collectBudget)
 	for i := 0; i < n; i++ {
 		select {
 		case err := <-errs:
 			require.Error(t, err, "acquire against a downed host returned a connection")
+			// Name the mechanism: the refusal must come from the failed dial, not
+			// from the waiter's own context expiring while it sat queued.
+			require.NotErrorIsf(t, err, context.DeadlineExceeded,
+				"waiter %d got its own deadline (%v) rather than the pool's dial "+
+					"refusal — it was stranded, which is the bug this test exists for", i, err)
 		case <-deadline:
 			require.FailNowf(t, "queued acquires were stranded",
 				"only %d of %d queued acquires were answered; the rest were left for a "+
