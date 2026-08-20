@@ -5,6 +5,7 @@ import (
 	"strconv"
 	"testing"
 
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -73,6 +74,15 @@ func TestConformance_RFC9000_Sec16_NonMinimalDecode(t *testing.T) {
 
 // TestConformance_RFC9000_Sec16_IncompleteInput checks the streaming-parser
 // contract: input shorter than the first byte's length prefix returns (0, 0).
+//
+// The 2- and 4-byte rows sit one byte below their guard, which is where an
+// off-by-one becomes observable. The 8-byte guard needs the same treatment and
+// is a wider target, so every truncation length behind it is a row: past the
+// guard, binary.BigEndian.Uint64 reads b[7] unconditionally, so a guard weakened
+// to len(b) < 7 does not return a wrong value on a 7-byte input, it panics with
+// index out of range — on bytes a peer chose. Truncated inputs carry non-zero
+// tails so the "value must be 0" assertion cannot be satisfied by the input
+// happening to be zeroes.
 func TestConformance_RFC9000_Sec16_IncompleteInput(t *testing.T) {
 	for _, tc := range []struct {
 		name string
@@ -81,7 +91,13 @@ func TestConformance_RFC9000_Sec16_IncompleteInput(t *testing.T) {
 		{"empty", nil},
 		{"two_byte_prefix_one_byte", []byte{0x40}},
 		{"four_byte_prefix_three_bytes", []byte{0x80, 0x00, 0x40}},
+		{"eight_byte_prefix_one_byte", []byte{0xc1}},
 		{"eight_byte_prefix_two_bytes", []byte{0xc0, 0x00}},
+		{"eight_byte_prefix_three_bytes", []byte{0xc1, 0x02, 0x03}},
+		{"eight_byte_prefix_four_bytes", []byte{0xc1, 0x02, 0x03, 0x04}},
+		{"eight_byte_prefix_five_bytes", []byte{0xc1, 0x02, 0x03, 0x04, 0x05}},
+		{"eight_byte_prefix_six_bytes", []byte{0xc1, 0x02, 0x03, 0x04, 0x05, 0x06}},
+		{"eight_byte_prefix_seven_bytes", []byte{0xc1, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			in := tc.in
@@ -98,16 +114,27 @@ func TestConformance_RFC9000_Sec16_IncompleteInput(t *testing.T) {
 
 // TestVarint_ExhaustiveRoundTrip round-trips a spread of values across all four
 // lengths (including every boundary ±1) through Write then Read.
+//
+// The write goes into a buffer of exactly VarintLen(v) bytes. That is the tight
+// lower bound WriteVarint's contract states, and the one a caller sizing from
+// VarintLen actually hands it — but every other call site in this suite passes
+// buf[:] of a [8]byte, so all four branches get up to seven bytes of slack and a
+// write past the branch's own length is invisible: the assertions slice [:n], so
+// a stray byte beyond it is never compared and never faults. The oversized arm
+// runs alongside and must agree byte for byte, which keeps the separate property
+// that the encoding does not depend on the buffer being tight.
 func TestVarint_ExhaustiveRoundTrip(t *testing.T) {
 	vals := []uint64{0, 1, 62, 63, 64, 65, 16382, 16383, 16384, 16385,
 		(1 << 30) - 2, (1 << 30) - 1, 1 << 30, (1 << 30) + 1, MaxVarint - 1, MaxVarint}
 	for _, v := range vals {
 		t.Run(strconv.FormatUint(v, 10), func(t *testing.T) {
-			var buf [8]byte
 			wantLen := VarintLen(v)
+			tight := make([]byte, wantLen)
+			var loose [8]byte
 
-			n := WriteVarint(buf[:], v)
-			got, m := ReadVarint(buf[:n])
+			n := WriteVarint(tight, v)
+			looseN := WriteVarint(loose[:], v)
+			got, m := ReadVarint(tight)
 
 			require.Equalf(t, wantLen, n,
 				"WriteVarint(%d) must write exactly VarintLen(%d) bytes; when the two disagree a caller that reserved space from VarintLen either truncates the value or leaves a gap in the packet", v, v)
@@ -115,6 +142,8 @@ func TestVarint_ExhaustiveRoundTrip(t *testing.T) {
 				"round-trip of %d must recover the value; every QUIC frame length, stream ID and offset passes through this pair, so a value that survives encoding but not decoding is silent wire corruption", v)
 			require.Equalf(t, n, m,
 				"round-trip of %d must consume exactly the bytes the encoder wrote; a mismatch desynchronises the parse of everything after it", v)
+			assert.Equalf(t, tight, loose[:looseN],
+				"WriteVarint(%d) must emit the same bytes into a VarintLen-sized buffer as into an oversized one; a difference means the encoding depends on slack the contract never promised", v)
 		})
 	}
 }
