@@ -15,6 +15,7 @@ import (
 
 	"github.com/lodgvideon/poseidon-http-client/client"
 	"github.com/lodgvideon/poseidon-http-client/conn"
+	"github.com/stretchr/testify/require"
 )
 
 // ServerKind identifies which HTTP/2 server implementation is under test.
@@ -241,9 +242,7 @@ func newTestClientAt(t *testing.T, srv *TestServer, addr, scheme string, dialer 
 			StreamEventBuffer: 1024, // avoid event-channel overflow on large bodies
 		},
 	})
-	if err != nil {
-		t.Fatalf("NewClient(%s): %v", srv.Kind, err)
-	}
+	require.NoErrorf(t, err, "NewClient(%s): %v", srv.Kind, err)
 
 	t.Cleanup(func() {
 		_ = c.Close()
@@ -268,9 +267,7 @@ func doGET(t *testing.T, c *client.Client, path string, wantBody bool) (int, []b
 		Path:     path,
 		BodyMode: mode,
 	}, &resp)
-	if err != nil {
-		t.Fatalf("Do GET %s: %v", path, err)
-	}
+	require.NoErrorf(t, err, "Do GET %s: %v", path, err)
 	return resp.Status, resp.Body
 }
 

@@ -6,13 +6,14 @@ import (
 	"bytes"
 	"context"
 	"fmt"
-	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/lodgvideon/poseidon-http-client/client"
 	"github.com/lodgvideon/poseidon-http-client/conn"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // allReadyServers returns every server that passed healthcheck.
@@ -37,13 +38,11 @@ func TestMatrix_Healthz(t *testing.T) {
 	for _, srv := range allReadyServers(t) {
 		t.Run(srv.Kind.String(), func(t *testing.T) {
 			c := newTestClient(t, srv)
+
 			status, body := doGET(t, c, "/healthz", true)
-			if status != 200 {
-				t.Fatalf("status: got %d, want 200", status)
-			}
-			if string(body) != "ok" {
-				t.Fatalf("body: got %q, want %q", body, "ok")
-			}
+
+			require.Equalf(t, 200, status, "status: got %d, want 200", status)
+			require.Equalf(t, "ok", string(body), "body: got %q, want %q", body, "ok")
 		})
 	}
 }
@@ -65,40 +64,38 @@ func TestMatrix_TLS_Healthz(t *testing.T) {
 		tested++
 		t.Run(srv.Kind.String(), func(t *testing.T) {
 			c := newTestClientTLS(t, srv)
+			require.NotNil(t, c, "newTestClientTLS returned no client for a peer that "+
+				"advertises a TLS address, so this subtest would dereference nil rather "+
+				"than exercise ALPN")
+
 			status, body := doGET(t, c, "/healthz", true)
-			if status != 200 {
-				t.Fatalf("status: got %d, want 200", status)
-			}
-			if string(body) != "ok" {
-				t.Fatalf("body: got %q, want %q", body, "ok")
-			}
+
+			require.Equalf(t, 200, status, "status: got %d, want 200", status)
+			require.Equalf(t, "ok", string(body), "body: got %q, want %q", body, "ok")
 		})
 	}
-	if tested == 0 {
-		// With POSEIDON_IT_SKIP_REMOTE (make it-test-fast) only the in-process Go
-		// reference exists and it is h2c-only, so having nothing to test is the
-		// expected outcome rather than a failure. Without it, every TLS peer
-		// vanishing means the compose stack is not up and a silent pass would be
-		// the worst answer available.
-		if skipRemote {
-			t.Skip("POSEIDON_IT_SKIP_REMOTE: no TLS peers by design")
-		}
-		t.Fatal("no peer advertised a TLS address, so nothing here ran over TLS: " +
-			"this test would otherwise have passed without testing anything")
+
+	// With POSEIDON_IT_SKIP_REMOTE (make it-test-fast) only the in-process Go
+	// reference exists and it is h2c-only, so having nothing to test is the
+	// expected outcome rather than a failure. Without it, every TLS peer
+	// vanishing means the compose stack is not up and a silent pass would be
+	// the worst answer available.
+	if tested == 0 && skipRemote {
+		t.Skip("POSEIDON_IT_SKIP_REMOTE: no TLS peers by design")
 	}
+	require.NotZero(t, tested, "no peer advertised a TLS address, so nothing here ran over TLS: "+
+		"this test would otherwise have passed without testing anything")
 }
 
 func TestMatrix_Root(t *testing.T) {
 	for _, srv := range allReadyServers(t) {
 		t.Run(srv.Kind.String(), func(t *testing.T) {
 			c := newTestClient(t, srv)
+
 			status, body := doGET(t, c, "/", true)
-			if status != 200 {
-				t.Fatalf("status: got %d", status)
-			}
-			if len(body) == 0 {
-				t.Fatal("body: empty")
-			}
+
+			require.Equalf(t, 200, status, "status: got %d", status)
+			require.NotEmpty(t, body, "body: empty")
 		})
 	}
 }
@@ -113,9 +110,8 @@ func TestMatrix_StatusCodes(t *testing.T) {
 			for _, code := range codes {
 				t.Run(fmt.Sprintf("code_%d", code), func(t *testing.T) {
 					status, _ := doGET(t, c, fmt.Sprintf("/status/%d", code), false)
-					if status != code {
-						t.Fatalf("got %d, want %d", status, code)
-					}
+
+					require.Equalf(t, code, status, "got %d, want %d", status, code)
 				})
 			}
 		})
@@ -140,15 +136,11 @@ func TestMatrix_Echo(t *testing.T) {
 				Body:     payload,
 				BodyMode: client.BodyBuffer,
 			}, &resp)
-			if err != nil {
-				t.Fatalf("Do POST /echo: %v", err)
-			}
-			if resp.Status != 200 {
-				t.Fatalf("status: got %d", resp.Status)
-			}
-			if !bytes.Equal(resp.Body, payload) {
-				t.Fatalf("body: got %q, want %q", resp.Body, payload)
-			}
+
+			require.NoErrorf(t, err, "Do POST /echo: %v", err)
+			require.Equalf(t, 200, resp.Status, "status: got %d", resp.Status)
+			require.Truef(t, bytes.Equal(resp.Body, payload),
+				"body: got %q, want %q", resp.Body, payload)
 		})
 	}
 }
@@ -160,11 +152,15 @@ func TestMatrix_ConnectionReuse(t *testing.T) {
 	for _, srv := range allReadyServers(t) {
 		t.Run(srv.Kind.String(), func(t *testing.T) {
 			c := newTestClient(t, srv)
+
+			statuses := make([]int, 0, N)
 			for i := 0; i < N; i++ {
 				status, _ := doGET(t, c, "/healthz", false)
-				if status != 200 {
-					t.Fatalf("req %d/%d: status %d", i+1, N, status)
-				}
+				statuses = append(statuses, status)
+			}
+
+			for i, status := range statuses {
+				require.Equalf(t, 200, status, "req %d/%d: status %d", i+1, N, status)
 			}
 		})
 	}
@@ -206,7 +202,8 @@ func TestMatrix_Concurrent(t *testing.T) {
 			close(errs)
 
 			for err := range errs {
-				t.Error(err)
+				assert.NoError(t, err, "one of 30 requests multiplexed on a single "+
+					"connection to this peer failed")
 			}
 		})
 	}
@@ -219,14 +216,12 @@ func TestMatrix_ChunkedBody(t *testing.T) {
 		t.Run(srv.Kind.String(), func(t *testing.T) {
 			c := newTestClient(t, srv)
 			// 100 × 1KB chunks with 10ms delay = ~1s
-			status, body := doGET(t, c, "/chunked", true)
-			if status != 200 {
-				t.Fatalf("status: got %d", status)
-			}
 			expected := 100 * 1024
-			if len(body) != expected {
-				t.Fatalf("body length: got %d, want %d", len(body), expected)
-			}
+
+			status, body := doGET(t, c, "/chunked", true)
+
+			require.Equalf(t, 200, status, "status: got %d", status)
+			require.Lenf(t, body, expected, "body length: got %d, want %d", len(body), expected)
 		})
 	}
 }
@@ -238,13 +233,11 @@ func TestMatrix_LargeBody_32KB(t *testing.T) {
 	for _, srv := range allReadyServers(t) {
 		t.Run(srv.Kind.String(), func(t *testing.T) {
 			c := newTestClient(t, srv)
+
 			status, body := doGET(t, c, fmt.Sprintf("/large?bytes=%d", sz), true)
-			if status != 200 {
-				t.Fatalf("status: got %d", status)
-			}
-			if len(body) != sz {
-				t.Fatalf("body length: got %d, want %d", len(body), sz)
-			}
+
+			require.Equalf(t, 200, status, "status: got %d", status)
+			require.Lenf(t, body, sz, "body length: got %d, want %d", len(body), sz)
 		})
 	}
 }
@@ -255,13 +248,11 @@ func TestMatrix_Delay(t *testing.T) {
 	for _, srv := range allReadyServers(t) {
 		t.Run(srv.Kind.String(), func(t *testing.T) {
 			c := newTestClient(t, srv)
+
 			status, body := doGET(t, c, "/delay?ms=100", true)
-			if status != 200 {
-				t.Fatalf("status: got %d", status)
-			}
-			if !strings.Contains(string(body), "delayed") {
-				t.Fatalf("body: got %q", body)
-			}
+
+			require.Equalf(t, 200, status, "status: got %d", status)
+			require.Containsf(t, string(body), "delayed", "body: got %q", body)
 		})
 	}
 }
@@ -279,9 +270,8 @@ func TestMatrix_ContextCancel(t *testing.T) {
 				Method: "GET",
 				Path:   "/delay?ms=5000",
 			}, &resp)
-			if err == nil {
-				t.Fatal("expected timeout error, got nil")
-			}
+
+			require.Error(t, err, "expected timeout error, got nil")
 		})
 	}
 }
@@ -302,16 +292,11 @@ func TestMatrix_ResponseHeaders(t *testing.T) {
 				Path:     "/healthz",
 				BodyMode: client.BodyBuffer,
 			}, &resp)
-			if err != nil {
-				t.Fatalf("Do: %v", err)
-			}
-			if resp.Status != 200 {
-				t.Fatalf("status: got %d", resp.Status)
-			}
+
+			require.NoErrorf(t, err, "Do: %v", err)
+			require.Equalf(t, 200, resp.Status, "status: got %d", resp.Status)
 			// Every server should send at least content-type
-			if len(resp.Headers) == 0 {
-				t.Fatal("no response headers")
-			}
+			require.NotEmpty(t, resp.Headers, "no response headers")
 		})
 	}
 }
@@ -334,12 +319,9 @@ func TestMatrix_RequestHeaders(t *testing.T) {
 					{Name: []byte("x-matrix-test"), Value: []byte("cross-server")},
 				},
 			}, &resp)
-			if err != nil {
-				t.Fatalf("Do: %v", err)
-			}
-			if resp.Status != 200 {
-				t.Fatalf("status: got %d", resp.Status)
-			}
+
+			require.NoErrorf(t, err, "Do: %v", err)
+			require.Equalf(t, 200, resp.Status, "status: got %d", resp.Status)
 		})
 	}
 }
@@ -361,15 +343,11 @@ func TestMatrix_Metrics(t *testing.T) {
 				Path:     fmt.Sprintf("/large?bytes=%d", sz),
 				BodyMode: client.BodyBuffer,
 			}, &resp)
-			if err != nil {
-				t.Fatalf("Do: %v", err)
-			}
-			if resp.Status != 200 {
-				t.Fatalf("status: got %d", resp.Status)
-			}
-			if resp.BytesReceived < sz {
-				t.Fatalf("BytesReceived: got %d, want >= %d", resp.BytesReceived, sz)
-			}
+
+			require.NoErrorf(t, err, "Do: %v", err)
+			require.Equalf(t, 200, resp.Status, "status: got %d", resp.Status)
+			require.GreaterOrEqualf(t, resp.BytesReceived, int64(sz),
+				"BytesReceived: got %d, want >= %d", resp.BytesReceived, sz)
 		})
 	}
 }
