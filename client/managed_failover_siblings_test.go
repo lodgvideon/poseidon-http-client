@@ -8,6 +8,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/require"
+
 	"github.com/lodgvideon/poseidon-http-client/conn"
 )
 
@@ -37,12 +39,9 @@ func (d *h1FailFirstDialer) Dial(ctx context.Context, addr string) (net.Conn, er
 func TestH1ManagedPool_FailsOverOnFirstDialFailure(t *testing.T) {
 	addrs := h1Addrs(2)
 	dialer := &h1FailFirstDialer{inner: newH1FakeDialer(), failAddr: addrs[0].String()}
-
 	mp, err := newH1ManagedPool(StaticResolver(addrs...), RoundRobin(), DrainGraceful,
 		dialer, h1ManagedPoolOpts(), nil, nil)
-	if err != nil {
-		t.Fatalf("newH1ManagedPool: %v", err)
-	}
+	require.NoError(t, err, "newH1ManagedPool")
 	defer func() { _ = mp.close() }()
 
 	// RoundRobin starts on addrs[0] — the dead one — so the loop must reach
@@ -50,12 +49,10 @@ func TestH1ManagedPool_FailsOverOnFirstDialFailure(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
 	c, rel, err := mp.acquire(ctx)
-	if err != nil {
-		t.Fatalf("acquire = %v; a live second address was available, so the loop stopped on the dead one", err)
-	}
-	if c == nil {
-		t.Fatal("acquire returned no connection and no error")
-	}
+
+	require.NoErrorf(t, err,
+		"acquire = %v; a live second address was available, so the loop stopped on the dead one", err)
+	require.NotNil(t, c, "acquire returned no connection and no error")
 	rel(true)
 }
 
@@ -69,24 +66,21 @@ func TestH3ManagedPool_FailsOverOnFirstDialFailure(t *testing.T) {
 		}
 		return d.dial(ctx, addr, cfg)
 	}
-
 	mp, err := newH3ManagedPool(StaticResolver(addrs...), RoundRobin(), DrainGraceful,
 		&tls.Config{ServerName: "h"},
 		PoolOptions{MaxConnsPerHost: 1, MaxStreamsPerConn: 4, HealthCheckPeriod: time.Hour},
 		dialFn, nil, nil)
-	if err != nil {
-		t.Fatalf("newH3ManagedPool: %v", err)
-	}
+	require.NoError(t, err, "newH3ManagedPool")
 	defer func() { _ = mp.close() }()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
 	c, rel, err := mp.acquire(ctx)
-	if err != nil {
-		t.Fatalf("acquire = %v; a live second address was available, so the loop stopped on the dead one", err)
-	}
-	if c == nil {
-		t.Fatal("acquire returned no connection and no error")
-	}
+
+	require.NoErrorf(t, err,
+		"acquire = %v; a live second address was available, so the loop stopped on the dead one", err)
+	// c is an interface (h3Client): assert.NotNil would accept a typed nil
+	// through reflection, so compare against nil directly.
+	require.Truef(t, c != nil, "acquire returned no connection and no error")
 	rel()
 }

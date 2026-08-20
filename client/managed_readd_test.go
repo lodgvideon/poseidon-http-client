@@ -4,6 +4,8 @@ import (
 	"context"
 	"testing"
 	"time"
+
+	"github.com/stretchr/testify/require"
 )
 
 // waitActive polls snapshotActive until it holds want addresses or the deadline
@@ -43,50 +45,34 @@ func TestManagedPool_AddressReAddedAfterRemoval(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			addrs, _, cleanup := startH2Servers(t, 2)
 			defer cleanup()
-
 			res := newScriptedResolver([]Address{addrs[0], addrs[1]})
 			mp, err := newManagedPool(res, RoundRobin(), tc.mode, newConnOpts(),
 				PoolOptions{MaxConnsPerHost: 1, MaxStreamsPerConn: 4, HealthCheckPeriod: time.Second}, nil, nil)
-			if err != nil {
-				t.Fatalf("newManagedPool: %v", err)
-			}
+			require.NoError(t, err, "newManagedPool")
 			defer mp.close()
-
-			if got := waitActive(mp, 2, 2*time.Second); got != 2 {
-				t.Fatalf("initial active = %d, want 2", got)
-			}
-
+			require.Equal(t, 2, waitActive(mp, 2, 2*time.Second), "initial active set")
 			// Materialise a sub-pool for addrs[0] so the removal has something to
 			// mark draining — without this the registry entry never exists and the
 			// bug cannot show.
-			if s := mp.getOrCreateSubPool(addrs[0]); s == nil {
-				t.Fatal("getOrCreateSubPool returned nil for a live address")
-			}
+			require.NotNil(t, mp.getOrCreateSubPool(addrs[0]),
+				"getOrCreateSubPool returned nil for a live address")
 
 			// Flap: drop addrs[0], then bring it back.
 			res.push([]Address{addrs[1]})
-			if got := waitActive(mp, 1, 2*time.Second); got != 1 {
-				t.Fatalf("after removal active = %d, want 1", got)
-			}
+			require.Equal(t, 1, waitActive(mp, 1, 2*time.Second), "active set after removal")
 			res.push([]Address{addrs[0], addrs[1]})
 
-			if got := waitActive(mp, 2, 3*time.Second); got != 2 {
-				t.Fatalf("after re-add active = %d, want 2 — the re-added address is blackholed", got)
-			}
-			if s := mp.getOrCreateSubPool(addrs[0]); s == nil {
-				t.Fatal("getOrCreateSubPool still refuses the re-added address")
-			}
-
+			require.Equalf(t, 2, waitActive(mp, 2, 3*time.Second),
+				"after re-add active = %d, want 2 — the re-added address is blackholed",
+				len(mp.snapshotActive()))
+			require.NotNil(t, mp.getOrCreateSubPool(addrs[0]),
+				"getOrCreateSubPool still refuses the re-added address")
 			// And it must actually serve.
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancel()
 			c, release, err := mp.acquire(ctx)
-			if err != nil {
-				t.Fatalf("acquire after re-add: %v", err)
-			}
-			if c == nil {
-				t.Fatal("acquire returned a nil conn")
-			}
+			require.NoError(t, err, "acquire after re-add")
+			require.NotNil(t, c, "acquire returned a nil conn")
 			release()
 		})
 	}
@@ -98,39 +84,28 @@ func TestManagedPool_AddressReAddedAfterRemoval(t *testing.T) {
 func TestManagedPool_SingleAddressFlapDoesNotBlackhole(t *testing.T) {
 	addrs, _, cleanup := startH2Servers(t, 1)
 	defer cleanup()
-
 	res := newScriptedResolver([]Address{addrs[0]})
 	mp, err := newManagedPool(res, RoundRobin(), DrainLazy, newConnOpts(),
 		PoolOptions{MaxConnsPerHost: 1, MaxStreamsPerConn: 4, HealthCheckPeriod: time.Second}, nil, nil)
-	if err != nil {
-		t.Fatalf("newManagedPool: %v", err)
-	}
+	require.NoError(t, err, "newManagedPool")
 	defer mp.close()
-
-	if got := waitActive(mp, 1, 2*time.Second); got != 1 {
-		t.Fatalf("initial active = %d, want 1", got)
-	}
-	if s := mp.getOrCreateSubPool(addrs[0]); s == nil {
-		t.Fatal("getOrCreateSubPool nil for the only address")
-	}
+	require.Equal(t, 1, waitActive(mp, 1, 2*time.Second), "initial active set")
+	require.NotNil(t, mp.getOrCreateSubPool(addrs[0]),
+		"getOrCreateSubPool nil for the only address")
 
 	res.push([]Address{})
-	if got := waitActive(mp, 0, 2*time.Second); got != 0 {
-		t.Fatalf("after removal active = %d, want 0", got)
-	}
+	require.Equal(t, 0, waitActive(mp, 0, 2*time.Second), "active set after removal")
 	res.push([]Address{addrs[0]})
-	if got := waitActive(mp, 1, 3*time.Second); got != 1 {
-		t.Fatalf("after re-add active = %d, want 1 — a DNS flap blackholed the only address", got)
-	}
 
+	require.Equalf(t, 1, waitActive(mp, 1, 3*time.Second),
+		"after re-add active = %d, want 1 — a DNS flap blackholed the only address",
+		len(mp.snapshotActive()))
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	c, release, err := mp.acquire(ctx)
-	if err != nil {
-		t.Fatalf("acquire after single-address flap: %v", err)
-	}
+	require.NoError(t, err, "acquire after single-address flap")
+	require.NotNil(t, c, "acquire after a flap returned a nil conn")
 	release()
-	_ = c
 }
 
 // TestManagedPool_ReviveBeatsDrainWatcher guards the hazard the fix itself
@@ -148,70 +123,45 @@ func TestManagedPool_SingleAddressFlapDoesNotBlackhole(t *testing.T) {
 func TestManagedPool_ReviveBeatsDrainWatcher(t *testing.T) {
 	addrs, _, cleanup := startH2Servers(t, 1)
 	defer cleanup()
-
 	res := newScriptedResolver([]Address{addrs[0]})
 	mp, err := newManagedPool(res, RoundRobin(), DrainGraceful, newConnOpts(),
 		PoolOptions{MaxConnsPerHost: 1, MaxStreamsPerConn: 4, HealthCheckPeriod: time.Second}, nil, nil)
-	if err != nil {
-		t.Fatalf("newManagedPool: %v", err)
-	}
+	require.NoError(t, err, "newManagedPool")
 	defer mp.close()
-
-	if got := waitActive(mp, 1, 2*time.Second); got != 1 {
-		t.Fatalf("initial active = %d, want 1", got)
-	}
-
+	require.Equal(t, 1, waitActive(mp, 1, 2*time.Second), "initial active set")
 	// Hold a conn so the sub-pool is NOT idle while it drains.
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	held, releaseHeld, err := mp.acquire(ctx)
-	if err != nil {
-		t.Fatalf("initial acquire: %v", err)
-	}
-	if held == nil {
-		t.Fatal("initial acquire returned nil conn")
-	}
+	require.NoError(t, err, "initial acquire")
+	require.NotNil(t, held, "initial acquire returned nil conn")
 	before := mp.getOrCreateSubPool(addrs[0])
-	if before == nil {
-		t.Fatal("no sub-pool for the live address")
-	}
+	require.NotNil(t, before, "no sub-pool for the live address")
 
 	res.push([]Address{})
-	if got := waitActive(mp, 0, 2*time.Second); got != 0 {
-		t.Fatalf("after removal active = %d, want 0", got)
-	}
+	require.Equal(t, 0, waitActive(mp, 0, 2*time.Second), "active set after removal")
 	// Let the watcher poll at least once and observe the in-flight stream.
 	time.Sleep(80 * time.Millisecond)
-
 	res.push([]Address{addrs[0]})
-	if got := waitActive(mp, 1, 3*time.Second); got != 1 {
-		t.Fatalf("after re-add active = %d, want 1", got)
-	}
-
+	require.Equal(t, 1, waitActive(mp, 1, 3*time.Second), "active set after re-add")
 	// Now let it go idle. The watcher is still polling and will next see
 	// InFlightStreams == 0 — on a sub-pool whose address is live again.
 	releaseHeld()
 	time.Sleep(600 * time.Millisecond)
 
-	if got := len(mp.snapshotActive()); got != 1 {
-		t.Fatalf("drain watcher tore down a revived address: active = %d, want 1", got)
-	}
+	require.Lenf(t, mp.snapshotActive(), 1,
+		"drain watcher tore down a revived address: active = %d, want 1", len(mp.snapshotActive()))
 	// The sharp assertion. Liveness alone self-heals — a dropped sub-pool is
 	// silently recreated on the next getOrCreateSubPool — so it cannot see the
 	// damage. Identity can: the watcher must leave the revived sub-pool in
 	// place, not close it and force a fresh dial and TLS handshake against an
 	// address that never went away.
 	after := mp.getOrCreateSubPool(addrs[0])
-	if after == nil {
-		t.Fatal("drain watcher left the revived address unusable")
-	}
-	if after != before {
-		t.Fatal("drain watcher closed the revived sub-pool; the live address paid for a needless reconnect")
-	}
+	require.NotNil(t, after, "drain watcher left the revived address unusable")
+	require.Same(t, before, after,
+		"drain watcher closed the revived sub-pool; the live address paid for a needless reconnect")
 	c, release, err := mp.acquire(ctx)
-	if err != nil {
-		t.Fatalf("acquire after revive: %v", err)
-	}
+	require.NoError(t, err, "acquire after revive")
+	require.NotNil(t, c, "acquire after revive returned a nil conn")
 	release()
-	_ = c
 }

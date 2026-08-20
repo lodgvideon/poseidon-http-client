@@ -11,6 +11,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/require"
+
 	"github.com/lodgvideon/poseidon-http-client/client"
 	"github.com/lodgvideon/poseidon-http-client/conn"
 )
@@ -68,9 +70,9 @@ func startTLSAddr(t *testing.T) (*httptest.Server, client.Address) {
 
 func TestHooks_OnResolverUpdate(t *testing.T) {
 	t.Parallel()
+
 	_, a1 := startTLSAddr(t)
 	_, a2 := startTLSAddr(t)
-
 	res := newPushResolver([]client.Address{a1})
 	var updates atomic.Int32
 	var sawAdd atomic.Bool
@@ -81,7 +83,6 @@ func TestHooks_OnResolverUpdate(t *testing.T) {
 			}
 		},
 	}
-
 	c, err := client.NewClient(client.ClientOptions{
 		Transport: client.TransportManaged,
 		Resolver:  res,
@@ -89,18 +90,15 @@ func TestHooks_OnResolverUpdate(t *testing.T) {
 		ConnOpts:  conn.ConnOptions{Dialer: &conn.TLSDialer{Config: &tls.Config{InsecureSkipVerify: true}}},
 		Hooks:     hooks,
 	})
-	if err != nil {
-		t.Fatalf("NewClient: %v", err)
-	}
+	require.NoError(t, err, "NewClient")
 	defer c.Close()
 
 	res.push([]client.Address{a1, a2})
 	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) {
-		if sawAdd.Load() {
-			return
-		}
+	for time.Now().Before(deadline) && !sawAdd.Load() {
 		time.Sleep(20 * time.Millisecond)
 	}
-	t.Fatalf("OnResolverUpdate never observed addr2 added; updates fired = %d", updates.Load())
+
+	require.Truef(t, sawAdd.Load(),
+		"OnResolverUpdate never observed addr2 added; updates fired = %d", updates.Load())
 }

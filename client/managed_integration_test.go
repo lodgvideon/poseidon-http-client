@@ -2,13 +2,15 @@ package client_test
 
 import (
 	"context"
-	"errors"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
 	"sync/atomic"
 	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	"github.com/lodgvideon/poseidon-http-client/client"
 	"github.com/lodgvideon/poseidon-http-client/conn"
@@ -44,48 +46,35 @@ func TestTransportManaged_RoundRobin_DistributesDials(t *testing.T) {
 	t.Parallel()
 
 	srv1, addr1, cnt1 := startCountedTLSServer(t)
-	srv2, addr2, cnt2 := startCountedTLSServer(t)
-	srv3, addr3, cnt3 := startCountedTLSServer(t)
-
+	_, addr2, cnt2 := startCountedTLSServer(t)
+	_, addr3, cnt3 := startCountedTLSServer(t)
 	// All three servers share the same TLS config (all are httptest servers),
 	// but we need the dialer to trust each server's cert.  Use srv1's TLS
 	// config — in httptest all servers on the same process share the same
 	// self-signed root, so one dialer covers all.
-	dialer := newTLSDialer(srv1)
-	_ = srv2
-	_ = srv3
-
 	c, err := client.NewClient(client.ClientOptions{
 		Transport: client.TransportManaged,
 		Resolver:  client.StaticResolver(addr1, addr2, addr3),
 		Selector:  client.RoundRobin(),
-		ConnOpts:  conn.ConnOptions{Dialer: dialer},
+		ConnOpts:  conn.ConnOptions{Dialer: newTLSDialer(srv1)},
 		Pool:      &client.PoolOptions{MaxConnsPerHost: 1, MaxStreamsPerConn: 4},
 	})
-	if err != nil {
-		t.Fatalf("NewClient: %v", err)
-	}
+	require.NoError(t, err, "NewClient")
 	defer c.Close()
 
 	for i := 0; i < 9; i++ {
 		var resp client.Response
-		if err := doWithRetry(t, c, context.Background(), &client.Request{Method: "GET", Path: "/"}, &resp); err != nil {
-			t.Fatalf("Do(%d): %v", i, err)
-		}
-		if resp.Status != 200 {
-			t.Errorf("request %d: status = %d, want 200", i, resp.Status)
-		}
+		err := doWithRetry(t, c, context.Background(), &client.Request{Method: "GET", Path: "/"}, &resp)
+		require.NoErrorf(t, err, "Do(%d)", i)
+		assert.EqualValuesf(t, 200, resp.Status, "request %d: status = %d, want 200", i, resp.Status)
 	}
 
-	if cnt1.Load() < 1 {
-		t.Errorf("server1 got %d conns, want >= 1", cnt1.Load())
-	}
-	if cnt2.Load() < 1 {
-		t.Errorf("server2 got %d conns, want >= 1", cnt2.Load())
-	}
-	if cnt3.Load() < 1 {
-		t.Errorf("server3 got %d conns, want >= 1", cnt3.Load())
-	}
+	assert.GreaterOrEqualf(t, cnt1.Load(), int32(1),
+		"server1 got %d conns, want >= 1 — RoundRobin left an address unused", cnt1.Load())
+	assert.GreaterOrEqualf(t, cnt2.Load(), int32(1),
+		"server2 got %d conns, want >= 1 — RoundRobin left an address unused", cnt2.Load())
+	assert.GreaterOrEqualf(t, cnt3.Load(), int32(1),
+		"server3 got %d conns, want >= 1 — RoundRobin left an address unused", cnt3.Load())
 }
 
 // TestTransportManaged_MultiServer_AllReachable verifies that all four requests
@@ -94,33 +83,28 @@ func TestTransportManaged_MultiServer_AllReachable(t *testing.T) {
 	t.Parallel()
 
 	srv1, addr1 := startOneTLSServer(t)
-	srv2, addr2 := startOneTLSServer(t)
-
+	_, addr2 := startOneTLSServer(t)
 	// Both httptest servers share the same in-process TLS root; one dialer
 	// trusts both.
-	dialer := newTLSDialer(srv1)
-	_ = srv2
-
 	c, err := client.NewClient(client.ClientOptions{
 		Transport: client.TransportManaged,
 		Resolver:  client.StaticResolver(addr1, addr2),
 		Selector:  client.RoundRobin(),
-		ConnOpts:  conn.ConnOptions{Dialer: dialer},
+		ConnOpts:  conn.ConnOptions{Dialer: newTLSDialer(srv1)},
 	})
-	if err != nil {
-		t.Fatalf("NewClient: %v", err)
-	}
+	require.NoError(t, err, "NewClient")
 	defer c.Close()
 
+	statuses := make([]int, 0, 4)
 	for i := 0; i < 4; i++ {
 		var resp client.Response
-		if err := doWithRetry(t, c, context.Background(), &client.Request{Method: "GET", Path: "/"}, &resp); err != nil {
-			t.Fatalf("Do(%d): %v", i, err)
-		}
-		if resp.Status != 200 {
-			t.Errorf("request %d: status = %d, want 200", i, resp.Status)
-		}
+		err := doWithRetry(t, c, context.Background(), &client.Request{Method: "GET", Path: "/"}, &resp)
+		require.NoErrorf(t, err, "Do(%d)", i)
+		statuses = append(statuses, resp.Status)
 	}
+
+	assert.Equal(t, []int{200, 200, 200, 200}, statuses,
+		"every request must reach a healthy backend while both addresses are up")
 }
 
 // TestTransportManaged_Validation_MissingResolver asserts that NewClient
@@ -129,17 +113,16 @@ func TestTransportManaged_Validation_MissingResolver(t *testing.T) {
 	t.Parallel()
 
 	srv, _ := startOneTLSServer(t)
+
 	_, err := client.NewClient(client.ClientOptions{
 		Transport: client.TransportManaged,
 		Resolver:  nil,
 		ConnOpts:  conn.ConnOptions{Dialer: newTLSDialer(srv)},
 	})
-	if err == nil {
-		t.Fatal("NewClient: expected error, got nil")
-	}
-	if !errors.Is(err, client.ErrInvalidOptions) {
-		t.Errorf("NewClient error = %v, want errors.Is(err, ErrInvalidOptions)", err)
-	}
+
+	require.Error(t, err, "NewClient: expected error, got nil")
+	assert.ErrorIsf(t, err, client.ErrInvalidOptions,
+		"NewClient error = %v; a caller classifying this cannot tell it from a transport failure", err)
 }
 
 // TestTransportManaged_Validation_AddrConflict asserts that NewClient returns
@@ -149,18 +132,17 @@ func TestTransportManaged_Validation_AddrConflict(t *testing.T) {
 	t.Parallel()
 
 	srv, addr := startOneTLSServer(t)
+
 	_, err := client.NewClient(client.ClientOptions{
 		Transport: client.TransportManaged,
 		Addr:      "localhost:8080",
 		Resolver:  client.StaticResolver(addr),
 		ConnOpts:  conn.ConnOptions{Dialer: newTLSDialer(srv)},
 	})
-	if err == nil {
-		t.Fatal("NewClient: expected error, got nil")
-	}
-	if !errors.Is(err, client.ErrInvalidOptions) {
-		t.Errorf("NewClient error = %v, want errors.Is(err, ErrInvalidOptions)", err)
-	}
+
+	require.Error(t, err, "NewClient: expected error, got nil")
+	assert.ErrorIsf(t, err, client.ErrInvalidOptions,
+		"NewClient error = %v; a caller classifying this cannot tell it from a transport failure", err)
 }
 
 // TestTransportManaged_PoolStats_AddressCount verifies that PoolStats reports
@@ -169,29 +151,21 @@ func TestTransportManaged_PoolStats_AddressCount(t *testing.T) {
 	t.Parallel()
 
 	srv1, addr1 := startOneTLSServer(t)
-	srv2, addr2 := startOneTLSServer(t)
-
-	dialer := newTLSDialer(srv1)
-	_ = srv2
-
+	_, addr2 := startOneTLSServer(t)
 	c, err := client.NewClient(client.ClientOptions{
 		Transport: client.TransportManaged,
 		Resolver:  client.StaticResolver(addr1, addr2),
 		Selector:  client.RoundRobin(),
-		ConnOpts:  conn.ConnOptions{Dialer: dialer},
+		ConnOpts:  conn.ConnOptions{Dialer: newTLSDialer(srv1)},
 	})
-	if err != nil {
-		t.Fatalf("NewClient: %v", err)
-	}
+	require.NoError(t, err, "NewClient")
 	defer c.Close()
 
-	var _res client.Response
-	if err = c.Do(context.Background(), &client.Request{Method: "GET", Path: "/"}, &_res); err != nil {
-		t.Fatalf("Do: %v", err)
-	}
-
+	var res client.Response
+	require.NoError(t, c.Do(context.Background(), &client.Request{Method: "GET", Path: "/"}, &res), "Do")
 	st := c.PoolStats()
-	if st.Addresses != 2 {
-		t.Errorf("PoolStats.Addresses = %d, want 2", st.Addresses)
-	}
+
+	assert.Equalf(t, 2, st.Addresses,
+		"PoolStats.Addresses = %d, want 2 — the aggregate must report every resolved address, "+
+			"not only the ones that have been dialled", st.Addresses)
 }
