@@ -9,13 +9,14 @@ import (
 	"fmt"
 	"net"
 	"os"
-	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/lodgvideon/poseidon-http-client/client"
 	"github.com/lodgvideon/poseidon-http-client/conn"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // Fault injection on the TCP path (#552). The H1/H2 suite ran against nginx and
@@ -63,9 +64,7 @@ type toxi struct {
 func newToxi(t *testing.T) *toxi {
 	t.Helper()
 	c, err := client.NewH1Client(toxiAPIAddr, &conn.PlaintextDialer{})
-	if err != nil {
-		t.Fatalf("H1 client for the Toxiproxy API: %v", err)
-	}
+	require.NoErrorf(t, err, "H1 client for the Toxiproxy API: %v", err)
 	t.Cleanup(func() { _ = c.Close() })
 
 	x := &toxi{t: t, c: c}
@@ -117,14 +116,11 @@ const (
 func (x *toxi) proxy(name, addr string) {
 	x.t.Helper()
 	_, port, err := net.SplitHostPort(addr)
-	if err != nil {
-		x.t.Fatalf("proxy %q: bad listen addr %q: %v", name, addr, err)
-	}
+	require.NoErrorf(x.t, err, "proxy %q: bad listen addr %q: %v", name, addr, err)
 	_, _ = x.do("DELETE", "/proxies/"+name, "") // ignore: may not exist yet
-	if _, err := x.do("POST", "/proxies", fmt.Sprintf(
-		`{"name":%q,"listen":"0.0.0.0:%s","upstream":%q,"enabled":true}`, name, port, nginxUp)); err != nil {
-		x.t.Fatalf("create proxy %q: %v", name, err)
-	}
+	_, err = x.do("POST", "/proxies", fmt.Sprintf(
+		`{"name":%q,"listen":"0.0.0.0:%s","upstream":%q,"enabled":true}`, name, port, nginxUp))
+	require.NoErrorf(x.t, err, "create proxy %q: %v", name, err)
 	x.t.Cleanup(func() { _, _ = x.do("DELETE", "/proxies/"+name, "") })
 }
 
@@ -133,10 +129,8 @@ func (x *toxi) proxy(name, addr string) {
 // back on the same listen port.
 func (x *toxi) setEnabled(name string, on bool) {
 	x.t.Helper()
-	if _, err := x.do("POST", "/proxies/"+name,
-		fmt.Sprintf(`{"enabled":%t}`, on)); err != nil {
-		x.t.Fatalf("set proxy %q enabled=%t: %v", name, on, err)
-	}
+	_, err := x.do("POST", "/proxies/"+name, fmt.Sprintf(`{"enabled":%t}`, on))
+	require.NoErrorf(x.t, err, "set proxy %q enabled=%t: %v", name, on, err)
 }
 
 func (x *toxi) disable(name string) { x.t.Helper(); x.setEnabled(name, false) }
@@ -145,10 +139,9 @@ func (x *toxi) enable(name string)  { x.t.Helper(); x.setEnabled(name, true) }
 // addToxic installs a toxic and returns a function that removes it.
 func (x *toxi) addToxic(proxy, name, typ, stream, attrs string) func() {
 	x.t.Helper()
-	if _, err := x.do("POST", "/proxies/"+proxy+"/toxics", fmt.Sprintf(
-		`{"name":%q,"type":%q,"stream":%q,"attributes":%s}`, name, typ, stream, attrs)); err != nil {
-		x.t.Fatalf("add toxic %s/%s: %v", typ, name, err)
-	}
+	_, err := x.do("POST", "/proxies/"+proxy+"/toxics", fmt.Sprintf(
+		`{"name":%q,"type":%q,"stream":%q,"attributes":%s}`, name, typ, stream, attrs))
+	require.NoErrorf(x.t, err, "add toxic %s/%s: %v", typ, name, err)
 	return func() { _, _ = x.do("DELETE", "/proxies/"+proxy+"/toxics/"+name, "") }
 }
 
@@ -166,9 +159,7 @@ func h2Through(t *testing.T, addr string) *client.Client {
 			StreamEventBuffer: 1024,
 		},
 	})
-	if err != nil {
-		t.Fatalf("NewClient(%s): %v", addr, err)
-	}
+	require.NoErrorf(t, err, "NewClient(%s): %v", addr, err)
 	t.Cleanup(func() { _ = c.Close() })
 	return c
 }
@@ -201,15 +192,13 @@ func get(c *client.Client, path string) (int, int, error) {
 func TestIT_Toxi_ControlPathIsClean(t *testing.T) {
 	x := newToxi(t)
 	x.proxy(proxyH2, toxiTLSAddr)
-
 	c := h2Through(t, toxiTLSAddr)
+
 	status, n, err := get(c, "/healthz")
-	if err != nil {
-		t.Fatalf("clean request through the proxy failed: %v", err)
-	}
-	if status != 200 || n == 0 {
-		t.Fatalf("clean request: status=%d bodyLen=%d, want 200 and a non-empty body", status, n)
-	}
+
+	require.NoErrorf(t, err, "clean request through the proxy failed: %v", err)
+	require.Truef(t, status == 200 && n > 0,
+		"clean request: status=%d bodyLen=%d, want 200 and a non-empty body", status, n)
 }
 
 // TestIT_Toxi_LimitDataMidBody_IsNotASilentShortRead is the case the issue
@@ -238,21 +227,19 @@ func TestIT_Toxi_LimitDataMidBody_IsNotASilentShortRead(t *testing.T) {
 	defer remove()
 
 	c := h2Through(t, toxiTLSAddr)
+
 	status, gotLen, err := get(c, largePath)
 
-	if err == nil && gotLen < wantLen {
-		t.Fatalf("truncated response reported as success: status=%d, %d of %d bytes, err=nil.\n"+
+	require.Falsef(t, err == nil && gotLen < wantLen,
+		"truncated response reported as success: status=%d, %d of %d bytes, err=nil.\n"+
 			"A caller cannot tell this from a complete response, which is exactly the "+
 			"failure a load generator must never record as a good result", status, gotLen, wantLen)
-	}
-	if err == nil {
-		t.Fatalf("no error and a full %d-byte body with limit_data at %d — the toxic did "+
+	require.Errorf(t, err,
+		"no error and a full %d-byte body with limit_data at %d — the toxic did "+
 			"not bite, so this test proved nothing", gotLen, wantLen/2)
-	}
-	if strings.Contains(err.Error(), "context deadline exceeded") {
-		t.Errorf("failed by timeout (%v); the connection is cut, so this should surface as "+
+	assert.NotContainsf(t, err.Error(), "context deadline exceeded",
+		"failed by timeout (%v); the connection is cut, so this should surface as "+
 			"a transport error rather than costing the caller the full deadline", err)
-	}
 	t.Logf("truncation surfaced as: %v (%d of %d bytes)", err, gotLen, wantLen)
 }
 
@@ -264,9 +251,8 @@ func TestIT_Toxi_ResetPeer_NextRequestIsNotPoisoned(t *testing.T) {
 	x.proxy(proxyH2, toxiTLSAddr)
 
 	c := h2Through(t, toxiTLSAddr)
-	if _, _, err := get(c, "/healthz"); err != nil {
-		t.Fatalf("first request failed before any toxic was installed: %v", err)
-	}
+	_, _, err := get(c, "/healthz")
+	require.NoErrorf(t, err, "first request failed before any toxic was installed: %v", err)
 
 	// Reset the established connection, then take the toxic away again so the
 	// NEXT request has a clean path to a fresh connection. What is under test is
@@ -274,22 +260,16 @@ func TestIT_Toxi_ResetPeer_NextRequestIsNotPoisoned(t *testing.T) {
 	remove := x.addToxic(proxyH2, "boom", "reset_peer", "downstream", `{"timeout":0}`)
 	_, _, errDuring := get(c, largePath)
 	remove()
-
-	if errDuring == nil {
-		t.Fatal("request during reset_peer succeeded; the toxic did not bite, so the " +
-			"eviction below would be untested")
-	}
-
 	// The pool must not hand the reset connection to this request.
 	status, n, err := get(c, "/healthz")
-	if err != nil {
-		t.Fatalf("request after the peer reset the connection failed: %v\n"+
-			"the damaged connection was handed to the next request instead of being "+
-			"evicted, so one peer RST poisons every later request on that pool entry", err)
-	}
-	if status != 200 || n == 0 {
-		t.Fatalf("request after reset: status=%d bodyLen=%d, want 200 with a body", status, n)
-	}
+
+	require.Error(t, errDuring, "request during reset_peer succeeded; the toxic did not "+
+		"bite, so the eviction below would be untested")
+	require.NoErrorf(t, err, "request after the peer reset the connection failed: %v\n"+
+		"the damaged connection was handed to the next request instead of being "+
+		"evicted, so one peer RST poisons every later request on that pool entry", err)
+	require.Truef(t, status == 200 && n > 0,
+		"request after reset: status=%d bodyLen=%d, want 200 with a body", status, n)
 }
 
 // h2PoolThrough builds a POOLED h2 client of n connections pointed at the
@@ -323,9 +303,7 @@ func h2PoolThrough(t *testing.T, addr string, n int, dials *atomic.Int64) *clien
 		// OnDial fires on the dialling goroutine, so the counter is atomic.
 		Hooks: &client.Hooks{OnDial: func(client.DialEvent) { dials.Add(1) }},
 	})
-	if err != nil {
-		t.Fatalf("NewClient(pool of %d, %s): %v", n, addr, err)
-	}
+	require.NoErrorf(t, err, "NewClient(pool of %d, %s): %v", n, addr, err)
 	t.Cleanup(func() { _ = c.Close() })
 	return c
 }
@@ -343,8 +321,9 @@ func warmTo(t *testing.T, c *client.Client, n int) {
 			return
 		}
 		if !time.Now().Before(deadline) {
-			t.Fatalf("pool warmed to %d connections, want %d; without the second one "+
-				"there is no idle sibling to poison and the test below is vacuous", live, n)
+			require.Equalf(t, n, live, "pool warmed to %d connections, want %d; without the "+
+				"second one there is no idle sibling to poison and the test below is vacuous",
+				live, n)
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
@@ -375,9 +354,8 @@ func TestIT_Toxi_Outage_PoolDoesNotServeThePoisonedSibling(t *testing.T) {
 	c := h2PoolThrough(t, toxiTLSAddr, 2, &dials)
 	warmTo(t, c, 2)
 
-	if _, _, err := get(c, "/healthz"); err != nil {
-		t.Fatalf("first request failed on a healthy proxy: %v", err)
-	}
+	_, _, errFirst := get(c, "/healthz")
+	require.NoErrorf(t, errFirst, "first request failed on a healthy proxy: %v", errFirst)
 
 	// Disabling the proxy, not a toxic, and that is the lever this test turns on.
 	// Both reset_peer forms were measured against this fixture and neither works
@@ -398,15 +376,14 @@ func TestIT_Toxi_Outage_PoolDoesNotServeThePoisonedSibling(t *testing.T) {
 
 	// Nothing may read PoolStats from here on — see the doc comment.
 	before := dials.Load()
+
 	status, n, err := get(c, "/healthz")
-	if err != nil {
-		t.Fatalf("request after the peer dropped the pool's connections failed: %v\n"+
-			"a poisoned but idle sibling was handed out instead of being skipped, so one "+
-			"outage poisons later requests on a multi-connection pool", err)
-	}
-	if status != 200 || n == 0 {
-		t.Fatalf("request after the outage: status=%d bodyLen=%d, want 200 with a body", status, n)
-	}
+
+	require.NoErrorf(t, err, "request after the peer dropped the pool's connections failed: %v\n"+
+		"a poisoned but idle sibling was handed out instead of being skipped, so one "+
+		"outage poisons later requests on a multi-connection pool", err)
+	require.Truef(t, status == 200 && n > 0,
+		"request after the outage: status=%d bodyLen=%d, want 200 with a body", status, n)
 
 	// The fixture check, not a behaviour claim — and the reason the assertion
 	// above means anything. Both pooled connections were dropped and neither was
@@ -415,11 +392,10 @@ func TestIT_Toxi_Outage_PoolDoesNotServeThePoisonedSibling(t *testing.T) {
 	// dial is what says the pool really was offered a corpse and turned it down;
 	// no dial says the drop spared the sibling and the pool simply reused a
 	// healthy connection, which proves nothing about the skip.
-	if dials.Load() == before {
-		t.Fatal("the request after the outage was served without dialling, so the idle " +
-			"sibling survived it and no poisoned connection was ever offered to " +
+	require.NotEqual(t, before, dials.Load(),
+		"the request after the outage was served without dialling, so the idle "+
+			"sibling survived it and no poisoned connection was ever offered to "+
 			"pickLeastLoaded — this test proved nothing")
-	}
 }
 
 // ── the HTTP/1.1 leg ────────────────────────────────────────────────
@@ -461,9 +437,7 @@ func h1PoolThrough(t *testing.T, addr string, n int, dials *atomic.Int64) *clien
 		// OnDial fires on the dialling goroutine, so the counter is atomic.
 		client.WithHooks(&client.Hooks{OnDial: func(client.DialEvent) { dials.Add(1) }}),
 	)
-	if err != nil {
-		t.Fatalf("NewH1PoolClient(pool of %d, %s): %v", n, addr, err)
-	}
+	require.NoErrorf(t, err, "NewH1PoolClient(pool of %d, %s): %v", n, addr, err)
 	t.Cleanup(func() { _ = c.Close() })
 	return c
 }
@@ -482,13 +456,12 @@ func TestIT_ToxiH1_ControlPathIsClean(t *testing.T) {
 
 	var dials atomic.Int64
 	c := h1PoolThrough(t, toxiH1Addr, 1, &dials)
+
 	status, n, err := get(c, "/healthz")
-	if err != nil {
-		t.Fatalf("clean HTTP/1.1 request through the proxy failed: %v", err)
-	}
-	if status != 200 || n == 0 {
-		t.Fatalf("clean request: status=%d bodyLen=%d, want 200 and a non-empty body", status, n)
-	}
+
+	require.NoErrorf(t, err, "clean HTTP/1.1 request through the proxy failed: %v", err)
+	require.Truef(t, status == 200 && n > 0,
+		"clean request: status=%d bodyLen=%d, want 200 and a non-empty body", status, n)
 }
 
 // TestIT_ToxiH1_LimitDataMidBody_IsNotASilentShortRead is the h2 test of the
@@ -525,25 +498,22 @@ func TestIT_ToxiH1_LimitDataMidBody_IsNotASilentShortRead(t *testing.T) {
 	defer remove()
 
 	c := h1PoolThrough(t, toxiH1Addr, 1, &dials)
+
 	status, gotLen, err := get(c, largePath)
 
-	if err == nil && gotLen < wantLen {
-		t.Fatalf("truncated response reported as success: status=%d, %d of %d bytes, err=nil.\n"+
+	require.Falsef(t, err == nil && gotLen < wantLen,
+		"truncated response reported as success: status=%d, %d of %d bytes, err=nil.\n"+
 			"A caller cannot tell this from a complete response, which is exactly the "+
 			"failure a load generator must never record as a good result", status, gotLen, wantLen)
-	}
-	if err == nil {
-		t.Fatalf("no error and a full %d-byte body with limit_data at %d — the toxic did "+
+	require.Errorf(t, err,
+		"no error and a full %d-byte body with limit_data at %d — the toxic did "+
 			"not bite, so this test proved nothing", gotLen, wantLen/2)
-	}
-	if gotLen >= wantLen {
-		t.Errorf("errored but delivered the whole %d-byte body; the cut landed past the "+
+	assert.Lessf(t, gotLen, wantLen,
+		"errored but delivered the whole %d-byte body; the cut landed past the "+
 			"end of the body, so this is not the mid-body case it claims to be", gotLen)
-	}
-	if strings.Contains(err.Error(), "context deadline exceeded") {
-		t.Errorf("failed by timeout (%v); the connection is cut, so this should surface as "+
+	assert.NotContainsf(t, err.Error(), "context deadline exceeded",
+		"failed by timeout (%v); the connection is cut, so this should surface as "+
 			"a transport error rather than costing the caller the full deadline", err)
-	}
 	t.Logf("truncation surfaced as: %v (status=%d, %d of %d bytes)", err, status, gotLen, wantLen)
 }
 
@@ -574,26 +544,23 @@ func TestIT_ToxiH1_LimitDataMidChunked_IsNotASilentShortRead(t *testing.T) {
 	defer remove()
 
 	c := h1PoolThrough(t, toxiH1Addr, 1, &dials)
+
 	status, gotLen, err := get(c, chunkedPath)
 
-	if err == nil && gotLen < wantLen {
-		t.Fatalf("truncated chunked response reported as success: status=%d, %d of %d bytes.\n"+
+	require.Falsef(t, err == nil && gotLen < wantLen,
+		"truncated chunked response reported as success: status=%d, %d of %d bytes.\n"+
 			"With no Content-Length the missing terminating chunk is the only signal that "+
 			"the body did not finish; accepting the short read hands a load generator a "+
 			"result it cannot tell from a complete one", status, gotLen, wantLen)
-	}
-	if err == nil {
-		t.Fatalf("no error and a full %d-byte body with limit_data at %d — the toxic did "+
+	require.Errorf(t, err,
+		"no error and a full %d-byte body with limit_data at %d — the toxic did "+
 			"not bite, so this test proved nothing", gotLen, wantLen/2)
-	}
-	if gotLen >= wantLen {
-		t.Errorf("errored but delivered the whole %d-byte body; the cut landed past the "+
+	assert.Lessf(t, gotLen, wantLen,
+		"errored but delivered the whole %d-byte body; the cut landed past the "+
 			"end of the body, so this is not the mid-body case it claims to be", gotLen)
-	}
-	if strings.Contains(err.Error(), "context deadline exceeded") {
-		t.Errorf("failed by timeout (%v); the connection is cut, so this should surface as "+
+	assert.NotContainsf(t, err.Error(), "context deadline exceeded",
+		"failed by timeout (%v); the connection is cut, so this should surface as "+
 			"a transport error rather than costing the caller the full deadline", err)
-	}
 	t.Logf("chunked truncation surfaced as: %v (status=%d, %d of %d bytes)", err, status, gotLen, wantLen)
 }
 
@@ -615,9 +582,8 @@ func TestIT_ToxiH1_CutConnectionIsNotReused(t *testing.T) {
 	var dials atomic.Int64
 	c := h1PoolThrough(t, toxiH1Addr, 1, &dials)
 
-	if _, _, err := get(c, "/healthz"); err != nil {
-		t.Fatalf("first request failed before any toxic was installed: %v", err)
-	}
+	_, _, errFirst := get(c, "/healthz")
+	require.NoErrorf(t, errFirst, "first request failed before any toxic was installed: %v", errFirst)
 	afterFirst := dials.Load()
 
 	// Cut the exchange, then take the toxic away so the NEXT request has a clean
@@ -626,32 +592,25 @@ func TestIT_ToxiH1_CutConnectionIsNotReused(t *testing.T) {
 	remove := x.addToxic(proxyH1, "half", "limit_data", "downstream", `{"bytes":8192}`)
 	_, _, errDuring := get(c, largePath)
 	remove()
-
-	if errDuring == nil {
-		t.Fatal("request under limit_data succeeded; the toxic did not bite, so the " +
-			"reuse assertion below would be untested")
-	}
-
 	status, n, err := get(c, "/healthz")
-	if err != nil {
-		t.Fatalf("request after the peer cut the connection mid-body failed: %v\n"+
-			"the damaged connection was handed to the next request instead of being "+
-			"discarded, so one truncated response poisons every later request on that "+
-			"pool entry", err)
-	}
-	if status != 200 || n == 0 {
-		t.Fatalf("request after the cut: status=%d bodyLen=%d, want 200 with a body", status, n)
-	}
+
+	require.Error(t, errDuring, "request under limit_data succeeded; the toxic did not "+
+		"bite, so the reuse assertion below would be untested")
+	require.NoErrorf(t, err, "request after the peer cut the connection mid-body failed: %v\n"+
+		"the damaged connection was handed to the next request instead of being "+
+		"discarded, so one truncated response poisons every later request on that "+
+		"pool entry", err)
+	require.Truef(t, status == 200 && n > 0,
+		"request after the cut: status=%d bodyLen=%d, want 200 with a body", status, n)
 
 	// The fixture check, not a behaviour claim. The pool holds one connection and
 	// the cut killed it, so the request above can only have been served by a
 	// connection dialled afterwards. No new dial means the cut left the socket
 	// usable and the pool simply reused it, which says nothing about the discard.
-	if dials.Load() == afterFirst {
-		t.Fatal("the request after the cut was served without dialling, so the connection " +
-			"survived the truncation and no damaged conn was ever offered back to the " +
+	require.NotEqual(t, afterFirst, dials.Load(),
+		"the request after the cut was served without dialling, so the connection "+
+			"survived the truncation and no damaged conn was ever offered back to the "+
 			"pool — this test proved nothing")
-	}
 }
 
 // ── the stalled peer ────────────────────────────────────────────────
@@ -688,17 +647,14 @@ const stallForever = `{"timeout":0}`
 func warmH1(t *testing.T, c *client.Client, dials *atomic.Int64) {
 	t.Helper()
 	status, n, _, err := getWithin(c, "/healthz", 15*time.Second)
-	if err != nil {
-		t.Fatalf("warm-up request on a clean path failed: %v", err)
-	}
-	if status != 200 || n == 0 {
-		t.Fatalf("warm-up: status=%d bodyLen=%d, want 200 with a body", status, n)
-	}
-	if got := dials.Load(); got != 1 {
-		t.Fatalf("warm-up completed %d dials, want exactly 1; without one connection "+
-			"already established the toxic below stalls the TLS handshake instead of "+
-			"the response read", got)
-	}
+
+	require.NoErrorf(t, err, "warm-up request on a clean path failed: %v", err)
+	require.Truef(t, status == 200 && n > 0,
+		"warm-up: status=%d bodyLen=%d, want 200 with a body", status, n)
+	got := dials.Load()
+	require.EqualValuesf(t, 1, got, "warm-up completed %d dials, want exactly 1; without one "+
+		"connection already established the toxic below stalls the TLS handshake instead of "+
+		"the response read", got)
 }
 
 // assertStalledInTheResponseRead is the fixture check both stall tests need, and
@@ -712,18 +668,16 @@ func warmH1(t *testing.T, c *client.Client, dials *atomic.Int64) {
 // fixture before either assertion below was written.
 func assertStalledInTheResponseRead(t *testing.T, err error, elapsed, budget time.Duration) {
 	t.Helper()
-	if elapsed < budget {
-		t.Fatalf("failed after %v of a %v budget: %v\n"+
+	require.GreaterOrEqualf(t, elapsed, budget,
+		"failed after %v of a %v budget: %v\n"+
 			"a socket that sends nothing can only end the request when the budget does, "+
 			"so this failed for some other reason", elapsed, budget, err)
-	}
-	if !errors.Is(err, os.ErrDeadlineExceeded) {
-		t.Fatalf("failure carries no socket timeout: %v\n"+
+	require.Truef(t, errors.Is(err, os.ErrDeadlineExceeded),
+		"failure carries no socket timeout: %v\n"+
 			"the response read never blocked on an established connection — the same "+
 			"toxic stalls the TLS handshake when there is no warm connection, and that "+
 			"fails in the dialer, so the claim below would hold without http1 being "+
 			"reached at all", err)
-	}
 }
 
 // TestIT_ToxiH1_StalledPeer_IsAContextDeadline pins what a caller is told when
@@ -748,21 +702,20 @@ func TestIT_ToxiH1_StalledPeer_IsAContextDeadline(t *testing.T) {
 	defer remove()
 
 	const budget = 300 * time.Millisecond
-	status, n, elapsed, err := getWithin(c, "/healthz", budget)
-	if err == nil {
-		t.Fatalf("a request through a peer sending nothing succeeded: status=%d bodyLen=%d — "+
-			"the toxic did not bite, so this test proved nothing", status, n)
-	}
-	assertStalledInTheResponseRead(t, err, elapsed, budget)
 
-	if !errors.Is(err, context.DeadlineExceeded) {
-		t.Fatalf("a request that spent its whole %v budget on a silent peer failed with %v, "+
+	status, n, elapsed, err := getWithin(c, "/healthz", budget)
+
+	require.Errorf(t, err,
+		"a request through a peer sending nothing succeeded: status=%d bodyLen=%d — "+
+			"the toxic did not bite, so this test proved nothing", status, n)
+	assertStalledInTheResponseRead(t, err, elapsed, budget)
+	require.Truef(t, errors.Is(err, context.DeadlineExceeded),
+		"a request that spent its whole %v budget on a silent peer failed with %v, "+
 			"which is not a context.DeadlineExceeded.\n"+
 			"That is the error Request.Timeout and CLIENT_GUIDE both promise, and the one "+
 			"client.isHardStop reads to refuse a replay; an HTTP/1.1 stall reported only as "+
 			"a net.Error timeout looks transient to every caller that classifies it",
-			budget, err)
-	}
+		budget, err)
 	t.Logf("stall surfaced as: %v (after %v)", err, elapsed)
 }
 
@@ -826,23 +779,21 @@ func TestIT_ToxiH1_StalledPeer_IsNotReplayed(t *testing.T) {
 	}, &resp)
 	elapsed := time.Since(start)
 
-	if err == nil {
-		t.Fatalf("a retried request through a peer sending nothing succeeded: status=%d — "+
+	require.Errorf(t, err,
+		"a retried request through a peer sending nothing succeeded: status=%d — "+
 			"the toxic did not bite, so this test proved nothing", resp.Status)
-	}
 	// The claim goes first here, unlike the test above, because a replay changes
 	// which attempt's error comes back last: the second one dies in the dialer
 	// against the same stalled proxy, so the fixture check below would fire first
 	// and report the wrong thing about the right failure.
-	if got := consulted.Load(); got != 0 {
-		t.Fatalf("IsRetryable was asked about the error %d times, want 0 "+
-			"(the call took %v against a per-attempt budget of %v).\n"+
-			"A request that spent its whole budget is a hard stop, so shouldRetryErr "+
-			"must refuse it before the user predicate is reached. Asking a predicate "+
-			"written for net.Error timeouts hands it an exhausted budget dressed as a "+
-			"transient failure, and it replays the request against the same silent peer "+
-			"(err was: %v)", got, elapsed, budget, err)
-	}
+	got := consulted.Load()
+	require.EqualValuesf(t, 0, got, "IsRetryable was asked about the error %d times, want 0 "+
+		"(the call took %v against a per-attempt budget of %v).\n"+
+		"A request that spent its whole budget is a hard stop, so shouldRetryErr "+
+		"must refuse it before the user predicate is reached. Asking a predicate "+
+		"written for net.Error timeouts hands it an exhausted budget dressed as a "+
+		"transient failure, and it replays the request against the same silent peer "+
+		"(err was: %v)", got, elapsed, budget, err)
 	// After the claim, not before it — but it still has to run: a zero count also
 	// comes out of a request that never reached the response read at all, since
 	// the dialer's own timeout is a hard stop too and would short-circuit the
