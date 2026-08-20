@@ -67,10 +67,23 @@ func TestBuildHeaders_SingleContentLength(t *testing.T) {
 	}
 }
 
-// TestBuildHeaders_CallerContentLengthKeptWithoutBody is the over-rejection
-// guard: with no BodyReader there is no managed Content-Length to append, so a
-// caller-supplied one must survive untouched. Stripping it would silently change
-// requests that were already correct.
+// TestBuildHeaders_CallerContentLengthKeptWithoutBody is a WHITE-BOX unit test
+// of buildHeaders in isolation, and says so because its old rationale was
+// stale (#848).
+//
+// It used to be justified as an over-rejection guard protecting "requests that
+// were already correct". That request shape is no longer one this client
+// accepts: validateRequest refuses a caller-supplied Content-Length whenever
+// managesContentLength(r) is false, and for a request with neither Body nor
+// BodyReader it is false. buildHeaders has exactly one production call site,
+// inside do, downstream of both validateRequest gates — so no Do or DoStream
+// caller can reach it with this request, and a reader trusting the old comment
+// would conclude the opposite.
+//
+// The property is still worth pinning at this level: buildHeaders must not
+// strip a field it did not manage, whatever the layer above decides to accept.
+// The end-to-end half of the pair is
+// TestConformance_RFC9110_Sec8_6_BodylessCallerContentLengthRefusedByDo below.
 //
 // The witness value is a distinctive "42", not "0". buildHeaders' managed path
 // appends "Content-Length: 0" for a bodyless request that reaches it, so a "0"
@@ -90,6 +103,67 @@ func TestBuildHeaders_CallerContentLengthKeptWithoutBody(t *testing.T) {
 	assert.Equalf(t, []string{"42"}, got,
 		"content-length fields = %v, want exactly [\"42\"] — with no BodyReader "+
 			"nothing managed is appended, so the caller's field must pass through unchanged", got)
+}
+
+// TestConformance_RFC9110_Sec8_6_BodylessCallerContentLengthRefusedByDo is the
+// end-to-end half nothing in this file asserted (#848).
+//
+// RFC 9110 section 8.6 makes Content-Length a claim about the representation
+// being sent. A request with neither Body nor BodyReader sends none, so a
+// caller-supplied Content-Length is a claim this client cannot verify and
+// validateRequest refuses it — one layer ABOVE the buildHeaders unit test just
+// above, which is why that test's fixture is not a shape Do accepts.
+//
+// The refusal has to be classifiable: a caller that cannot tell ErrInvalidRequest
+// from a transport failure retries a request that will never succeed.
+func TestConformance_RFC9110_Sec8_6_BodylessCallerContentLengthRefusedByDo(t *testing.T) {
+	cases := []struct {
+		name string
+		req  *Request
+		want bool
+	}{
+		{"bodyless request with a caller Content-Length", &Request{
+			Method:  "POST",
+			Path:    "/",
+			Headers: []conn.HeaderField{hf("Content-Length", "42")},
+		}, false},
+		{"BodyReader with ContentLength 0 and a caller Content-Length", &Request{
+			Method:        "POST",
+			Path:          "/",
+			BodyReader:    strings.NewReader(""),
+			ContentLength: 0,
+			Headers:       []conn.HeaderField{hf("Content-Length", "42")},
+		}, false},
+		{"the same request without the caller field is accepted", &Request{
+			Method: "POST",
+			Path:   "/",
+		}, true},
+		{"a managed Content-Length is accepted", &Request{
+			Method:        "POST",
+			Path:          "/",
+			BodyReader:    strings.NewReader("abc"),
+			ContentLength: 3,
+		}, true},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			err := validateRequest(c.req)
+
+			if c.want {
+				assert.NoErrorf(t, err,
+					"validateRequest refused a request this client can verify: %v; over-"+
+						"rejection here breaks callers that were already correct", err)
+				return
+			}
+			require.Errorf(t, err,
+				"validateRequest accepted a caller Content-Length it cannot verify against "+
+					"any body; the field would go on the wire as a claim about a "+
+					"representation that is not being sent (RFC 9110 section 8.6)")
+			assert.ErrorIsf(t, err, ErrInvalidRequest,
+				"refusal = %v, want ErrInvalidRequest — a caller that cannot classify this "+
+					"retries a request that can never succeed", err)
+		})
+	}
 }
 
 // TestBuildHeaders_OtherHeadersUnaffected pins that the filter removes only

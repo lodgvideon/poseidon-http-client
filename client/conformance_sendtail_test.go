@@ -2,10 +2,15 @@ package client
 
 import (
 	"bytes"
+	"context"
+	"crypto/tls"
 	"errors"
 	"io"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -163,6 +168,12 @@ func TestConformance_RFC9110_Sec5_1_AcceptEncodingDedupFoldsCase(t *testing.T) {
 	}
 }
 
+// errBodySource is the sentinel errAfterN fails with, so a test can assert the
+// caller got THE READER'S OWN error rather than merely "an error". The two
+// existing read-error tests in coverage_test.go assert only err != nil, which a
+// framing failure, a reset or a deadline satisfies just as well.
+var errBodySource = errors.New("body source failed")
+
 // errAfterN is an io.Reader that yields n octets and then fails, standing in for
 // a body source that dies mid-upload.
 type errAfterN struct {
@@ -171,7 +182,7 @@ type errAfterN struct {
 
 func (r *errAfterN) Read(p []byte) (int, error) {
 	if r.n <= 0 {
-		return 0, errors.New("body source failed")
+		return 0, errBodySource
 	}
 	k := len(p)
 	if k > r.n {
@@ -185,3 +196,80 @@ func (r *errAfterN) Read(p []byte) (int, error) {
 }
 
 var _ io.Reader = (*errAfterN)(nil)
+
+// TestConformance_RFC9113_Sec8_1_BodySourceFailureAtTheSendTail is the test
+// errAfterN was staged for and never got (#863).
+//
+// This file is named for the request SEND TAIL — where the body finishes and
+// trailers go out — and held no send-tail test at all; errAfterN sat unreferenced,
+// kept alive from `unused` only by its own io.Reader assertion.
+//
+// The uncovered case is a body source that dies where the trailer section is
+// about to be written. The two nearby tests do not reach it:
+// TestClient_Do_WriteBodyReader_ReadError_AfterBytes asserts only err != nil, and
+// TestConformance_RFC9113_Sec8_1_BenignResetDuringTrailers covers a PEER reset
+// there, not a local source failure. Two properties, both unpinned:
+//
+//  1. the caller gets the reader's own error, not an opaque framing one — a load
+//     generator distinguishes "my body source broke" from "the peer went away"
+//     on exactly this, and they have different operational answers;
+//  2. the connection is not left half-open. A send abandoned mid-body must reset
+//     its own stream, so the NEXT request on the same connection still works.
+func TestConformance_RFC9113_Sec8_1_BodySourceFailureAtTheSendTail(t *testing.T) {
+	cases := []struct {
+		name     string
+		yield    int
+		trailers []conn.HeaderField
+	}{
+		{"dies before any octet, with trailers pending", 0,
+			[]conn.HeaderField{hf("x-checksum", "deadbeef")}},
+		{"dies mid-body, with trailers pending", 4096,
+			[]conn.HeaderField{hf("x-checksum", "deadbeef")}},
+		{"dies mid-body, no trailer section", 4096, nil},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				_, _ = io.Copy(io.Discard, r.Body)
+				w.WriteHeader(200)
+				_, _ = io.WriteString(w, "ok")
+			}))
+			srv.EnableHTTP2 = true
+			srv.StartTLS()
+			defer srv.Close()
+			cl, err := NewClient(ClientOptions{
+				Addr: srv.Listener.Addr().String(),
+				ConnOpts: conn.ConnOptions{
+					Dialer: &conn.TLSDialer{Config: &tls.Config{InsecureSkipVerify: true}},
+				},
+			})
+			require.NoError(t, err, "NewClient")
+			defer func() { _ = cl.Close() }()
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			var resp Response
+
+			err = cl.Do(ctx, &Request{
+				Method:        "POST",
+				Path:          "/upload",
+				BodyReader:    &errAfterN{n: c.yield},
+				ContentLength: int64(c.yield) + 1<<20, // more than the source will ever give
+				Trailers:      c.trailers,
+			}, &resp)
+
+			require.Error(t, err, "a request whose body source failed reported success")
+			assert.ErrorIsf(t, err, errBodySource,
+				"Do returned %v; the caller must be handed the body source's OWN error, or "+
+					"a broken file handle is indistinguishable from a peer that went away "+
+					"and the operator retries the wrong thing", err)
+			// The stream must have been cleaned up rather than left half-open:
+			// the next request on the same connection still completes.
+			var next Response
+			nerr := cl.Do(ctx, &Request{Method: "GET", Path: "/", BodyMode: BodyBuffer}, &next)
+			require.NoErrorf(t, nerr,
+				"the request after an abandoned upload failed with %v — the failed send left "+
+					"its stream open, so the connection is poisoned for every later caller", nerr)
+			assert.Equalf(t, 200, next.Status, "follow-up status = %d, want 200", next.Status)
+		})
+	}
+}

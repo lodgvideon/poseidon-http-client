@@ -327,40 +327,81 @@ func TestDNSResolver_Constructor(t *testing.T) {
 // body.go: responseBodyReader.Read — error and reset paths via BodyStream
 // ---------------------------------------------------------------------------
 
+// TestResponseBodyReader_Read_EventReset pins that a peer RST_STREAM reaches a
+// streaming caller AS A RESET, not as the ordinary end of the body (#900).
+//
+// The version this replaces asked the ResponseWriter for an http.Hijacker and
+// closed the raw conn. net/http's HTTP/2 ResponseWriter does not implement
+// http.Hijacker, so nothing was hijacked and nothing was reset: the handler
+// returned a clean 200 with an empty body and `assert.Error` was satisfied by
+// io.EOF. Measured against that exact fixture: `PROBE RESULT n=0 readErr=EOF`.
+// A responseBodyReader that returned io.EOF for every reset it saw passed it
+// unchanged — and a streaming caller tells "the body ended" from "the peer
+// killed the stream" on exactly this error, so conflating them turns a
+// truncated response into an apparently complete one.
+//
+// The abort=false arm is the control: same fixture, no reset, and the answer
+// must be io.EOF and NOT a reset. Without it the table is satisfied by a reader
+// that reports every end-of-body as a reset.
 func TestResponseBodyReader_Read_EventReset(t *testing.T) {
 	t.Parallel()
-	// Server sends 200 then resets the stream mid-body.
-	_, addr := newTLSH2Server(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		// Write headers, flush, then hijack and reset by closing conn abruptly.
-		w.WriteHeader(200)
-		if f, ok := w.(http.Flusher); ok {
-			f.Flush()
-		}
-		// Close the connection before sending the body — peer will RST.
-		if hj, ok := w.(http.Hijacker); ok {
-			cn, _, _ := hj.Hijack()
-			_ = cn.Close()
-		}
-	}))
-	c := covClientFor(t, addr)
-
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	var resp client.Response
-	err := c.Do(ctx, &client.Request{Method: "GET", Path: "/", BodyMode: client.BodyStream}, &resp)
-	if err != nil {
-		// It is acceptable to get an error on the initial headers path too.
-		t.Logf("Do returned error on RST test: %v", err)
-		return
+	cases := []struct {
+		name  string
+		abort bool
+	}{
+		{"peer resets the stream behind flushed headers", true},
+		{"peer ends the stream cleanly", false},
 	}
-	require.Truef(t, resp.BodyReader != nil, "expected BodyReader on BodyStream request")
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
+			addr, aborted := cov859ResetServer(t, c.abort)
+			tr := &cov859Tracer{}
+			cl := cov859TracedClient(t, addr, tr)
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			var resp client.Response
+			err := cl.Do(ctx, &client.Request{Method: "GET", Path: "/", BodyMode: client.BodyStream}, &resp)
+			require.NoErrorf(t, err, "Do: the headers are flushed before the abort, so they arrive")
+			require.Truef(t, resp.BodyReader != nil, "expected BodyReader on a BodyStream request")
+			defer func() { _ = resp.BodyReader.Close() }()
 
-	// Reading must eventually return an error (RST or io.EOF).
-	buf := make([]byte, 64)
-	_, readErr := resp.BodyReader.Read(buf)
+			buf := make([]byte, 64)
+			_, readErr := resp.BodyReader.Read(buf)
 
-	assert.Errorf(t, readErr, "expected error from Read after stream reset, got nil")
-	_ = resp.BodyReader.Close()
+			require.EqualValuesf(t, boolToInt(c.abort), aborted.Load(),
+				"the handler aborted %d times, want %d — with no abort there is no reset to "+
+					"observe and the assertion below would be measuring the fixture",
+				aborted.Load(), boolToInt(c.abort))
+			if !c.abort {
+				assert.ErrorIsf(t, readErr, io.EOF,
+					"a clean empty body read back %v, want io.EOF; reporting an ordinary end "+
+						"of stream as a reset would make every response look truncated", readErr)
+				assert.Zerof(t, tr.countIn("RST_STREAM"),
+					"the control arm saw a RST_STREAM on the wire, so it is not a control")
+				return
+			}
+			assert.Positivef(t, tr.countIn("RST_STREAM"),
+				"no RST_STREAM arrived from the peer, so whatever Read returned was not "+
+					"produced by the mechanism this test names")
+			var rst *client.StreamResetError
+			require.ErrorAsf(t, readErr, &rst,
+				"Read after a peer reset returned %v, want a *client.StreamResetError — "+
+					"io.EOF here is indistinguishable from a complete body", readErr)
+			assert.Equalf(t, frame.ErrCodeInternalError, rst.Code,
+				"reset code = %v, want INTERNAL_ERROR: the code is what Retryer classifies "+
+					"on, and a peer reset reported under the wrong code changes that decision",
+				rst.Code)
+		})
+	}
+}
+
+// boolToInt is the injection-count expectation for the control arm above.
+func boolToInt(b bool) int {
+	if b {
+		return 1
+	}
+	return 0
 }
 
 func TestResponseBodyReader_Read_BodyBufferDrain(t *testing.T) {
@@ -1243,40 +1284,42 @@ func TestSingleConn_Do_AfterClose_ErrClosed(t *testing.T) {
 // using BodyStream=true so we get a BodyReader.
 // ---------------------------------------------------------------------------
 
+// TestResponseBodyReader_Read_EventReset_ViaBodyStream is the sibling of
+// TestResponseBodyReader_Read_EventReset with response headers on the stream
+// (#900). It shared the same inert http.Hijacker fixture and was satisfied by
+// io.EOF for the same reason; see that test's comment for the measurement.
+//
+// It is kept separate rather than folded in because the header block changes
+// what the reader has buffered when the reset lands, which is the state the
+// EventReset arm's recycleDataLocked runs against.
 func TestResponseBodyReader_Read_EventReset_ViaBodyStream(t *testing.T) {
 	t.Parallel()
-	_, addr := newTLSH2Server(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("content-type", "text/plain")
-		w.WriteHeader(200)
-		if f, ok := w.(http.Flusher); ok {
-			f.Flush()
-		}
-		// Hijack and forcibly close the connection to trigger RST.
-		if hj, ok := w.(http.Hijacker); ok {
-			cn, _, _ := hj.Hijack()
-			_ = cn.Close()
-			return
-		}
-		// Fallback: just return without body.
-	}))
-	c := covClientFor(t, addr)
+	addr, aborted := cov859ResetServer(t, true)
+	tr := &cov859Tracer{}
+	c := cov859TracedClient(t, addr, tr)
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-
 	var resp client.Response
 	err := c.Do(ctx, &client.Request{Method: "GET", Path: "/", BodyMode: client.BodyStream}, &resp)
-	if err != nil {
-		// doStream may fail if the hijack races with header parsing.
-		t.Logf("DoStream returned err (expected): %v", err)
-		return
-	}
+	require.NoErrorf(t, err, "Do")
 	require.Truef(t, resp.BodyReader != nil, "BodyReader is nil")
 	defer func() { _ = resp.BodyReader.Close() }()
 	buf := make([]byte, 1024)
 
 	_, readErr := resp.BodyReader.Read(buf)
 
-	assert.Errorf(t, readErr, "expected Read error after connection close, got nil")
+	require.EqualValuesf(t, 1, aborted.Load(),
+		"the handler aborted %d times, want 1 — nothing reset the stream, so the "+
+			"assertion below would be measuring the fixture", aborted.Load())
+	assert.Positivef(t, tr.countIn("RST_STREAM"),
+		"no RST_STREAM arrived from the peer, so whatever Read returned was not produced "+
+			"by the mechanism this test names")
+	var rst *client.StreamResetError
+	require.ErrorAsf(t, readErr, &rst,
+		"Read after a peer reset returned %v, want a *client.StreamResetError — io.EOF "+
+			"here reports a killed stream as a complete body", readErr)
+	assert.Equalf(t, frame.ErrCodeInternalError, rst.Code,
+		"reset code = %v, want INTERNAL_ERROR", rst.Code)
 }
 
 // ---------------------------------------------------------------------------
@@ -1949,6 +1992,14 @@ func TestClient_Do_GzipResponse(t *testing.T) {
 
 	require.NoErrorf(t, err, "Do")
 	assert.Equalf(t, 200, resp.Status, "Status = %d, want 200", resp.Status)
+	// The bytes, not just the status (#860). Without this the test is satisfied
+	// by a decompressFully that hands back the still-compressed payload, an
+	// empty slice, or a truncated one — which is exactly what the sweep measured
+	// on the deflate twin below, where the buffered test passed under a mutation
+	// its streaming sibling caught.
+	assert.Equalf(t, "hello compressed", string(resp.Body),
+		"buffered gzip body = %q, want the decompressed payload; this is the one test "+
+			"named for the buffered decompression path", resp.Body)
 }
 
 // TestClient_Do_GzipBodyStream covers the BodyStream decompression path.
@@ -2000,6 +2051,11 @@ func TestClient_Do_DeflateResponse(t *testing.T) {
 
 	require.NoErrorf(t, err, "Do deflate")
 	assert.Equalf(t, 200, resp.Status, "Status = %d, want 200", resp.Status)
+	// See the gzip twin (#860). Measured: with deflate detection disabled in
+	// detectEncoding, this test passed twice while TestClient_Do_DeflateBodyStream
+	// went red — it was handed the raw zlib bytes and reported success.
+	assert.Equalf(t, "deflate compressed body", string(resp.Body),
+		"buffered deflate body = %q, want the decompressed payload", resp.Body)
 }
 
 // TestDecompressingReader_Read_AfterClose covers the d.dec==nil path in Read().

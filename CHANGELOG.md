@@ -142,6 +142,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   no non-test file (#800, #801, #802, #810, #814, #818, #819, #825, #826, #832,
   #833, #834, #852).
 
+- **Twenty-two `client` coverage gaps closed, and thirty-eight tests that ran
+  nowhere given one policy.** The #722 sweep filed twenty-seven gaps against
+  `client`; every one was re-measured, and the mutation each names now dies where
+  it previously survived — among them the HTTP/1.1 pool's release-path eviction
+  (three sites masked each other, so all three could go at once unnoticed),
+  `serveWaiters`' FIFO promise, a double release with a caller parked,
+  `h3SpareStreamCapacity` counting dead and at-cap connections, both prune
+  helpers silently owing a queued caller its one reply, `defaultBackoff`'s
+  ±25% jitter (a constant passed), four of five `isHardStop` sentinels, `Random`
+  and `Hash` both satisfied by a constant pick, `Request.Timeout` during the dial
+  and during the body send, `Response.Reset` truncating the body, `Quantile`'s
+  `q < 0` clamp, the HTTP/1.1 close-observability gate (exact counts and reason,
+  as its HTTP/2 sibling already had), the buffered gzip/deflate response bodies,
+  two reset tests satisfied by `io.EOF`, the three-digit `:status` guard, a
+  pooled `compressingReader` handed to two requests, a managed pool reporting
+  `ErrNoAddresses` when every backend refused, and the send-tail body-source
+  failure the unused `errAfterN` fixture had been staged for. Two conformance
+  tests stopped self-disabling — their `t.Skipf` preconditions are now
+  assertions, so `conformance-gate` can no longer count a skip as coverage. The
+  thirty-eight end-to-end tests split across an unconditional `t.Skip` and an
+  unset build tag are now behind one `e2e_remote` tag and were run: all thirty-
+  eight pass, and doing so uncovered two assertions that could only ever fail
+  (`uint64` compared against `int64` counters) plus two that measured the remote
+  server's policy rather than this client. Five gaps closed as already covered or
+  as equivalent mutants, with the measurement rather than an opinion (#845, #848,
+  #850, #860, #861, #862, #863, #869, #870, #871, #873, #874, #875, #876, #877,
+  #878, #879, #882, #883, #884, #885, #886, #887, #888, #889, #900).
+
 - **Four boundary classes that were never asserted, two of them on peer bytes.**
   `bufx.StripPadding` was never called with `padLen == len(raw)`, the first
   illegal pad length; `bytesx.ReadVarint` never saw an 8-byte prefix truncated to
