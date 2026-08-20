@@ -123,6 +123,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   guard, not the `//go:noinline` directive beside it (#742, #743, #744, #749,
   #750, #751, #752, #753, #758, #760, #761, #762, #763, #794).
 
+- **Twelve `http3` coverage gaps from the #722 sweep, most of them boundaries or
+  orderings that no fixture could reach.** Every cap was tested from the reject
+  side only, so any of them could tighten by one and stay green: the 1xx count cap,
+  the per-frame declared-length cap, the retained-total cap on both of
+  `dispatchFrame`'s arms, and `release`'s pooled-buffer cap — whose ACCEPT side is
+  the whole reason `frameBufPool` exists, and which could be reduced to "never
+  reuse a grown array" with the suite silent. Two orderings were named by tests
+  that could not observe them: `markDead`'s store-before-close, where a PARKED
+  observer never lands in a two-instruction window and a spinning one catches the
+  swap on the first run, and `Close`'s latch-before-cancel, invisible because the
+  fake latched its terminal error only in `CloseWithError` where `quic.Conn`
+  latches it in `Poll` too — so a graceful shutdown and a reader teardown that
+  tells the peer `H3_INTERNAL_ERROR` were indistinguishable. `sendAll`'s
+  zero-progress park had no fixture at all (the fake stream always made progress),
+  so losing it — a hot spin on a flow-control-blocked stream, same bytes on the
+  wire — was unobservable. Also: two of the three required-pseudo-header cases
+  were being rejected by the §4.3.1 authority rule rather than the rule they name;
+  an explicit `SETTINGS_MAX_FIELD_SECTION_SIZE` of 0 was never told apart from the
+  absent case, which §7.2.4.1 gives the opposite meaning; `h3TLSConfig`'s
+  single-Initial curve default was pinned in neither direction; and the UDP
+  offload race test asserted nothing and now skips honestly when the raw fd is
+  unavailable, reporting what it engaged. `DoStream` ignoring a DATA frame after
+  the trailer section, where buffered `Do` answers `H3_FRAME_UNEXPECTED`, is
+  recorded as a two-sided drift tripwire rather than decided (#773, #774, #786,
+  #795, #796, #797, #807, #808, #809, #815, #816, #817).
+
 - **Twelve `grpc` coverage gaps closed, three of them tests that named a
   property they could not observe.** `TestIntegration_ResetStreamMapsToStatus`
   asserted only "not OK", which `InvokeInto`'s empty-response guard produces on
@@ -500,6 +526,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   duration.
 
 ### Added
+
+- **The four RFC 9114 §8.1 error codes the constant block was missing** —
+  `H3GeneralProtocolError` (0x0101), `H3RequestIncomplete` (0x010d),
+  `H3ConnectError` (0x010f) and `H3VersionFallback` (0x0110). Thirteen of
+  §8.1's seventeen codes were defined, so `h3ErrorCodeName` returned `""` for the
+  other four and a peer sending one of them printed as a bare number. 0x010d had
+  a caller waiting: §4.1 requires it of a SERVER, and `poseidon-http-server` had
+  to spell the value out locally because this package is otherwise its single
+  source for every §8.1 code it sends. Additive only — nothing the client sends
+  or interprets changes (#775).
 
 - **`conn.ConnOptions.ReadBufferSize` and `conn.ConnOptions.StaticConnWindowSize`.**
   Two receive-path parameters could not be set from outside the package, and both

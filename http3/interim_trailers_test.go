@@ -7,6 +7,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/lodgvideon/poseidon-http-client/header"
 	"github.com/lodgvideon/poseidon-http-client/qpack"
 )
 
@@ -105,4 +106,55 @@ func TestClient_InterimWithoutFinal(t *testing.T) {
 	assert.Equalf(t, ErrH3Message, doErr,
 		"1xx without final: err = %v, want ErrH3Message — a stream that ends after only "+
 			"an informational response carries no response for the caller to return", doErr)
+}
+
+// TestDecodeTrailers_PseudoHeaderRuleIsSeparable makes the §4.3 rule TestDecodeTrailers
+// names testable on its own.
+//
+// DecodeTrailers refuses a trailer pseudo-header twice over: the explicit
+// `name[0] == ':'` check, and validFieldName, whose token alphabet has no ':' in
+// it. Either rule alone keeps TestDecodeTrailers green, so it cannot say which one
+// fired — and deleting the §4.3 rule it exists to pin left the suite green 2/2
+// (#797).
+//
+// Through the PUBLIC surface the two are redundant and no input can separate
+// them: every name a pseudo-header can have starts with ':', which validFieldName
+// refuses anyway. Removing the §4.3 rule is therefore an equivalent mutant today.
+// What is NOT equivalent is relaxing validFieldName — for uppercase interop, say —
+// which would quietly make §4.3's rule the only guard. So the mechanism is pinned
+// white-box, directly on the predicate, alongside the table of decode outcomes.
+func TestDecodeTrailers_PseudoHeaderRuleIsSeparable(t *testing.T) {
+	// The equivalence classes of a trailer field name: a response pseudo-header,
+	// a request pseudo-header, and an ordinary token.
+	cases := []struct {
+		name    string
+		field   header.Field
+		wantErr error
+	}{
+		{"response pseudo-header", hf(":status", "200"), ErrH3Message},
+		{"request pseudo-header", hf(":path", "/"), ErrH3Message},
+		{"ordinary token", hf("x-ok", "1"), nil},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var dec qpack.Decoder
+
+			_, _, err := DecodeTrailers(&dec, nil, encodeSection(tc.field))
+
+			assert.Equalf(t, tc.wantErr, err,
+				"DecodeTrailers with a %q trailer = %v, want %v — §4.3 admits no "+
+					"pseudo-header in a trailer section", tc.field.Name, err, tc.wantErr)
+		})
+	}
+
+	t.Run("validFieldName refuses a colon on its own", func(t *testing.T) {
+		got := validFieldName([]byte(":status"))
+
+		assert.Falsef(t, got,
+			"validFieldName(\":status\") = %v, want false. This is the SECOND of the two "+
+				"rules that reject a trailer pseudo-header, and while it holds, §4.3's own "+
+				"check is unobservable through DecodeTrailers. Relaxing the token alphabet "+
+				"to admit ':' makes §4.3's rule the only guard — which is fine, but it must "+
+				"be a decision, not a side effect nobody noticed.", got)
+	})
 }

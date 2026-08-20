@@ -244,3 +244,87 @@ func TestClient_DoStream_MatchesBufferedBody(t *testing.T) {
 		"streamed body = %q, want %q (buffered) — the two entry points must not disagree "+
 			"about the bytes a response carried", got, want)
 }
+
+// TestClient_DataAfterTrailers_PathsDiverge is a drift tripwire, not an
+// endorsement. The same bytes — HEADERS(:status 200) DATA HEADERS(trailer) DATA,
+// FIN — get two different answers depending on which entry point read them
+// (#816):
+//
+//   - buffered Do consumes every frame to end of stream, so dispatchFrame sees
+//     the DATA after the trailer section and makes it a connection error of type
+//     H3_FRAME_UNEXPECTED (RFC 9114 §4.1: nothing may follow the trailers);
+//   - DoStream never reaches that frame. BodyReader.Next checks
+//     `trailersSeen && !emittedTrailers` before reading another frame and finish()
+//     sets done, so the remaining buffered bytes are never parsed — the caller is
+//     told the body ended normally, the stream is not reset and the connection
+//     stays open. The §7.1 truncated-final-frame check recvStep performs is
+//     likewise skipped after trailers.
+//
+// A mutation cannot find this: both paths share dispatchFrame, so the RULE is well
+// covered and only the streaming path's REACHABILITY differs. What is recorded
+// here is the divergence itself, both halves, so neither can move in silence.
+// Whichever way #816 is decided — teach the streaming path to reject, or document
+// the shortcut as deliberate — this test goes red and has to be updated, which is
+// the point of writing it before the decision rather than after.
+func TestClient_DataAfterTrailers_PathsDiverge(t *testing.T) {
+	wire := func() []byte {
+		headers := AppendHeaders(nil, encodeSection(hf(":status", "200")))
+		data := AppendData(nil, []byte("payload"))
+		trailer := AppendHeaders(nil, encodeSection(hf("x-checksum", "abc")))
+		extra := AppendData(nil, []byte("after-trailers")) // illegal: nothing follows the trailers
+		return append(append(append(headers, data...), trailer...), extra...)
+	}
+	req := func() *Request {
+		return &Request{Method: "GET", Scheme: "https", Authority: "h", Path: "/"}
+	}
+
+	bufConn := &fakeConn{req: &fakeStream{recvChunks: [][]byte{wire()}, fin: true}}
+	bufClient, bufErr := NewClientFake(bufConn, []Setting{{SettingQPACKMaxTableCapacity, 0}})
+	require.NoError(t, bufErr, "NewClientFake over the fake transport")
+	_, _, bufDoErr := bufClient.Do(context.Background(), req())
+
+	streamConn := &fakeConn{req: &fakeStream{recvChunks: [][]byte{wire()}, fin: true}}
+	_, body := doStreamHead(t, streamConn, req())
+	defer func() { _ = body.Close() }()
+	var events []BodyEvent
+	var streamErr error
+	for i := 0; i < 8; i++ {
+		ev, err := body.Next(context.Background())
+		if err != nil {
+			streamErr = err
+			break
+		}
+		events = append(events, ev)
+		if ev.End {
+			break
+		}
+	}
+
+	// The buffered half is the RFC answer, and the one the sibling protocols give.
+	assert.ErrorIsf(t, bufDoErr, ErrH3Control,
+		"buffered Do = %v, want ErrH3Control: a frame after the trailer section is an "+
+			"invalid frame sequence, which §4.1 makes a connection error", bufDoErr)
+	assert.Equalf(t, H3FrameUnexpected, bufConn.closeCode,
+		"buffered close code = %#x, want H3_FRAME_UNEXPECTED (%#x)",
+		bufConn.closeCode, H3FrameUnexpected)
+	// The streaming half is TODAY'S answer, recorded so a change to it is visible.
+	// If this arm fails because the streaming path now rejects, that is #816 being
+	// fixed: assert ErrH3Control and H3FrameUnexpected here and delete this note.
+	require.NoErrorf(t, streamErr,
+		"DoStream err = %v. If this is now ErrH3Control the streaming path has been taught "+
+			"to reject bytes after the trailer section (#816) — update this arm to match the "+
+			"buffered one above rather than restoring the divergence", streamErr)
+	require.NotEmpty(t, events, "the streaming reader produced no events at all")
+	last := events[len(events)-1]
+	assert.Truef(t, last.End,
+		"DoStream ended with End=%v: today the trailer section ends the body and the "+
+			"remaining buffered bytes are never parsed", last.End)
+	assert.Lenf(t, last.Trailers, 1,
+		"trailers = %+v, want the one field the section carried", last.Trailers)
+	assert.Equalf(t, uint64(0), streamConn.closeCode,
+		"streaming close code = %#x, want 0: the divergence is that the connection is NOT "+
+			"closed on this path — recorded, not endorsed (#816)", streamConn.closeCode)
+	assert.Falsef(t, streamConn.req.reset,
+		"the streaming path reset the request stream; today it does not, and the buffered "+
+			"path is the one that treats these bytes as an error")
+}
