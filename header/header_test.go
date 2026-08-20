@@ -48,6 +48,18 @@ func TestEntryOverhead(t *testing.T) {
 // TestField_Sensitive covers the never-indexed mark, which is the one indexing
 // mode with a security meaning: it tells an intermediary it must not index the
 // field either and must preserve the representation when forwarding.
+//
+// The last two rows are the undeclared modes. IndexingMode is an exported uint8
+// with three constants, no constructor and no validation, so an importer can
+// write header.IndexingMode(3) without an unsafe conversion — the class is
+// reachable even though nothing in this repository constructs one. The answer
+// pinned here is the current behaviour, false: Sensitive() asks whether the
+// field is marked never-indexed, and a mode that is not IndexNever is not that
+// mark. Pinned rather than changed — a mode outside the declared three has no
+// caller today, and turning it into a panic or a true would be a behaviour
+// change nobody asked for. Without these rows the comparison widens from == to
+// >= with the whole suite green, which silently promotes every undeclared mode
+// to sensitive.
 func TestField_Sensitive(t *testing.T) {
 	for _, tc := range []struct {
 		name string
@@ -57,6 +69,8 @@ func TestField_Sensitive(t *testing.T) {
 		{"incremental", IndexIncremental, false},
 		{"without", IndexWithout, false},
 		{"never", IndexNever, true},
+		{"undeclared just past never", IndexingMode(3), false},
+		{"undeclared max uint8", IndexingMode(255), false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			f := Field{Indexing: tc.mode}

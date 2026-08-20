@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Tests
+
+- **Four boundary classes that were never asserted, two of them on peer bytes.**
+  `bufx.StripPadding` was never called with `padLen == len(raw)`, the first
+  illegal pad length; `bytesx.ReadVarint` never saw an 8-byte prefix truncated to
+  3–7 bytes, though the 2- and 4-byte guards were probed at theirs. Weakening
+  either guard by one leaves the whole suite green and turns a rejected frame
+  into a panic on attacker-supplied input — `raw[1:0]` in the first case, a read
+  of `b[7]` past a 7-byte slice in the second. Alongside them,
+  `bytesx.WriteVarint` was only ever handed an oversized `[8]byte`, so the tight
+  `VarintLen(v)` bound its contract states went unexercised, and
+  `header.Field.Sensitive()` had no case for an `IndexingMode` outside the
+  declared three — a value an importer can construct, since the type is an
+  exported `uint8` with no constructor. Every one of those mutations now dies;
+  the out-of-range mode is **pinned** at the current answer, `false`, not changed
+  (#741, #745, #746, #739).
+
 ### Added
 
 - **`conn.ConnOptions.ReadBufferSize` and `conn.ConnOptions.StaticConnWindowSize`.**
