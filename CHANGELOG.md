@@ -173,6 +173,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Tests
 
+- **Six `client/coverage_test.go` tests could not fail; four of them were
+  measuring a fixture that did nothing.** Written to push line coverage past
+  90%, they reached their target lines and asserted nothing about them — one
+  conceded it in a trailing comment ("Just verifying no panic; branch coverage
+  is the goal") — so each passed identically against a correct implementation
+  and against one where the function under test did nothing (#859).
+
+  Three of them shared a "server resets the stream" fixture that asked the
+  `http.ResponseWriter` for an `http.Hijacker` and closed the raw conn.
+  net/http's HTTP/2 writer does not implement `http.Hijacker`, so the type
+  assertion always failed: nothing was hijacked, nothing was reset, and
+  `Recv`, `WaitTrailers` and `drainResponse`'s reset arms were exercised
+  against a clean 200 with an empty body. They now abort with
+  `http.ErrAbortHandler`, which puts a real `RST_STREAM(INTERNAL_ERROR)` on the
+  wire, and assert that the PEER'S code reaches the caller verbatim — the half
+  no sibling covers, and the one `Retryer` decides on (RFC 9113 §8.7).
+
+  Two more had false premises rather than weak assertions.
+  `TestPool_EvictDeadSilent_Via_Stats` closed the client and *then* called
+  `PoolStats`, which selects on `p.closedCh` and returns a zero `Stats` without
+  the actor running — `evictDeadSilent` was never reached. It now kills the
+  peer instead and pins both halves of "silent": `ConnsClosed` records the
+  eviction, `OnConnClose` stays quiet. `TestPool_HandleClose_GoAwayConn` used
+  `srv.Close()`, which drops the socket without a GOAWAY; the reason observed
+  was `CloseManual`, so the `CloseGoAway` branch it existed for had never once
+  executed. It now injects a real GOAWAY with `srv.Config.Shutdown` and closes
+  with the stream still in flight, which is what makes `handleClose` the
+  mechanism rather than `handleRelease`'s identical-looking copy.
+
+  Every event-shaped test gained a control arm that injects nothing and an
+  injection count read off the wire through a `trace.Tracer`, because a run in
+  which the peer never reset or never drained passes exactly like a real one.
+  `TestDNSResolver_Resolve_AllFilteredReturnsErrNoAddresses` was deleted: it
+  resolved a `.invalid` host, so the lookup FAILED and `Resolve` returned two
+  branches before the `ErrNoAddresses` it was named for, which
+  `TestResolve_SuccessfulEmpty_DoesNotServeStale` already asserts through the
+  internal `dnsLookup` seam.
+
 - **The H2 retention test now measures a quiet connection, which is what makes
   its bound reachable at all.**
   `TestIT_H2_StreamedDownload_RetentionStaysBounded` took its live-heap baseline
