@@ -93,7 +93,7 @@ func TestDNSResolver_Resolve_HappyPath(t *testing.T) {
 	require.Lenf(t, got, 2, "Resolve = %v, want two addresses", got)
 	assert.Equal(t, "10.0.0.1", got[0].Host, "Resolve[0].Host = %q", got[0].Host)
 	assert.Equal(t, "10.0.0.2", got[1].Host, "Resolve[1].Host = %q", got[1].Host)
-	assert.Equalf(t, 8080, int(got[0].Port),
+	assert.Equalf(t, 8080, got[0].Port,
 		"Port = %d, want 8080 — the configured port must be carried onto every resolved IP",
 		got[0].Port)
 }

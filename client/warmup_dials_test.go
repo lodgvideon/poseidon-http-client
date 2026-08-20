@@ -3,6 +3,9 @@ package client
 import (
 	"testing"
 	"time"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // TestWarmup_ManagedPool_PreDialsBeforeAnyRequest is the regression test for the
@@ -16,18 +19,13 @@ import (
 func TestWarmup_ManagedPool_PreDialsBeforeAnyRequest(t *testing.T) {
 	addrs, counts, cleanup := startH2Servers(t, 2)
 	defer cleanup()
-
 	res := newScriptedResolver(addrs)
 	mp, err := newManagedPool(res, RoundRobin(), DrainGraceful, newConnOpts(),
 		PoolOptions{MaxConnsPerHost: 2, MaxStreamsPerConn: 8, HealthCheckPeriod: time.Second}, nil, nil)
-	if err != nil {
-		t.Fatalf("newManagedPool: %v", err)
-	}
+	require.NoError(t, err, "newManagedPool over two live servers")
 	defer mp.close()
-
-	if got := waitActive(mp, 2, 2*time.Second); got != 2 {
-		t.Fatalf("resolved %d addresses, want 2", got)
-	}
+	require.Equalf(t, 2, waitActive(mp, 2, 2*time.Second),
+		"the resolver did not settle on 2 addresses, so warmup has nothing to distribute over")
 
 	// No request has been issued. This is the state the bug lived in.
 	mp.warmup(4)
@@ -45,12 +43,15 @@ func TestWarmup_ManagedPool_PreDialsBeforeAnyRequest(t *testing.T) {
 		time.Sleep(10 * time.Millisecond)
 	}
 	d0, d1 := int(counts[0].Load()), int(counts[1].Load())
-	if d0+d1 == 0 {
-		t.Fatalf("Warmup opened nothing (server dials: %d, %d) — it pre-dialled zero connections", d0, d1)
-	}
-	if d0 == 0 || d1 == 0 {
-		t.Fatalf("Warmup skipped an address: dials = %d, %d; both resolved addresses must be warmed", d0, d1)
-	}
+	t.Logf("injections: warmup(4) before any request → server dials %d and %d", d0, d1)
+	require.NotZerof(t, d0+d1,
+		"Warmup opened nothing (server dials: %d, %d) — it pre-dialled zero connections", d0, d1)
+	assert.Positivef(t, d0,
+		"Warmup skipped the first address: dials = %d, %d; both resolved addresses must be warmed",
+		d0, d1)
+	assert.Positivef(t, d1,
+		"Warmup skipped the second address: dials = %d, %d; both resolved addresses must be warmed",
+		d0, d1)
 }
 
 // TestWarmup_Pool_OpensExactlyN pins the other half: a multiplexed pool opened
@@ -64,7 +65,6 @@ func TestWarmup_ManagedPool_PreDialsBeforeAnyRequest(t *testing.T) {
 func TestWarmup_Pool_OpensExactlyN(t *testing.T) {
 	addrs, counts, cleanup := startH2Servers(t, 1)
 	defer cleanup()
-
 	p := newPool(addrs[0].String(), newConnOpts(),
 		PoolOptions{MaxConnsPerHost: 3, MaxStreamsPerConn: 100, HealthCheckPeriod: time.Second}, nil, nil)
 	defer p.Close()
@@ -72,22 +72,23 @@ func TestWarmup_Pool_OpensExactlyN(t *testing.T) {
 	p.warmup(3)
 
 	deadline := time.Now().Add(5 * time.Second)
-	for time.Now().Before(deadline) {
-		if int(counts[0].Load()) >= 3 {
-			break
-		}
+	for time.Now().Before(deadline) && int(counts[0].Load()) < 3 {
 		time.Sleep(10 * time.Millisecond)
 	}
-	if got := int(counts[0].Load()); got != 3 {
-		t.Fatalf("warmup(3) opened %d conns, want 3 — a multiplexed pool cannot warm up via acquire+release", got)
-	}
+	first := int(counts[0].Load())
+	require.Equalf(t, 3, first,
+		"warmup(3) opened %d conns, want 3 — a multiplexed pool cannot warm up via "+
+			"acquire+release, because a released conn still has free stream slots", first)
 
 	// Idempotent: already at target, so no further dials.
 	p.warmup(3)
 	time.Sleep(300 * time.Millisecond)
-	if got := int(counts[0].Load()); got != 3 {
-		t.Fatalf("second warmup(3) opened more conns (%d); it must be a no-op at target", got)
-	}
+	second := int(counts[0].Load())
+	t.Logf("injections: warmup(3) opened %d conns, a second warmup(3) left it at %d",
+		first, second)
+	assert.Equalf(t, 3, second,
+		"second warmup(3) opened more conns (%d); it must be a no-op at target, or a "+
+			"periodic warmup call would grow the pool without bound", second)
 }
 
 // TestWarmup_Pool_RespectsMaxConnsPerHost pins that warmup cannot exceed the cap
@@ -96,16 +97,18 @@ func TestWarmup_Pool_OpensExactlyN(t *testing.T) {
 func TestWarmup_Pool_RespectsMaxConnsPerHost(t *testing.T) {
 	addrs, counts, cleanup := startH2Servers(t, 1)
 	defer cleanup()
-
 	p := newPool(addrs[0].String(), newConnOpts(),
 		PoolOptions{MaxConnsPerHost: 2, MaxStreamsPerConn: 100, HealthCheckPeriod: time.Second}, nil, nil)
 	defer p.Close()
 
 	p.warmup(10)
 	time.Sleep(1500 * time.Millisecond)
-	if got := int(counts[0].Load()); got != 2 {
-		t.Fatalf("warmup(10) opened %d conns with MaxConnsPerHost=2, want 2", got)
-	}
+
+	got := int(counts[0].Load())
+	t.Logf("injections: warmup(10) against MaxConnsPerHost=2 produced %d server dials", got)
+	assert.Equalf(t, 2, got,
+		"warmup(10) opened %d conns with MaxConnsPerHost=2, want 2 — a warmup that ignores "+
+			"the cap turns a bounded pool into an unbounded one", got)
 }
 
 // TestWarmup_SingleConn_IsRepeatable pins that Warmup on the H2 single-conn
@@ -120,34 +123,27 @@ func TestWarmup_Pool_RespectsMaxConnsPerHost(t *testing.T) {
 func TestWarmup_SingleConn_IsRepeatable(t *testing.T) {
 	srv := startOneH2Server(t)
 	defer srv.Close()
-
 	c, err := NewClient(ClientOptions{
 		Addr:      srv.Listener.Addr().String(),
 		Transport: TransportSingleConn,
 		ConnOpts:  newConnOpts(),
 	})
-	if err != nil {
-		t.Fatalf("NewClient: %v", err)
-	}
+	require.NoError(t, err, "NewClient on the single-conn transport")
 	defer func() { _ = c.Close() }()
-
 	sc, ok := c.tr.(*singleConn)
-	if !ok {
-		t.Fatalf("transport is %T, want *singleConn", c.tr)
-	}
+	require.Truef(t, ok, "transport is %T, want *singleConn", c.tr)
 
 	// First warmup: wait for the goroutine to finish by watching the latch clear.
 	sc.warmup(1)
-	if !waitLatchCleared(t, sc) {
-		t.Fatal("warmupCancel is still set after the first warmup finished — the goroutine " +
-			"never cleared it, so every later Warmup is a no-op and the 30s timer stays armed")
-	}
-
+	firstCleared := waitLatchCleared(t, sc)
 	// Second warmup must actually run: it can only do so if the latch was cleared.
 	sc.warmup(1)
-	if !waitLatchCleared(t, sc) {
-		t.Error("warmupCancel is still set after the second warmup")
-	}
+	secondCleared := waitLatchCleared(t, sc)
+
+	require.True(t, firstCleared,
+		"warmupCancel is still set after the first warmup finished — the goroutine never "+
+			"cleared it, so every later Warmup is a no-op and the 30s timer stays armed")
+	assert.True(t, secondCleared, "warmupCancel is still set after the second warmup")
 }
 
 // waitLatchCleared polls warmupCancel under the lock, since the goroutine clears
