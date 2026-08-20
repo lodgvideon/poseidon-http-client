@@ -9,6 +9,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Tests
 
+- **Twelve `grpc` coverage gaps closed, three of them tests that named a
+  property they could not observe.** `TestIntegration_ResetStreamMapsToStatus`
+  asserted only "not OK", which `InvokeInto`'s empty-response guard produces on
+  its own, so the reset-code mapping was never checked through the wiring; the
+  RST arm is now driven through `NewStream`/`Recv` over six chosen codes, which
+  needed a mock peer able to send a reset code of the test's choosing —
+  net/http2's server only ever emits `INTERNAL_ERROR`, the same value every
+  unmapped code falls through to. `TestStream_SendErrorIsSticky` killed the whole
+  `ClientConn`, so every later call failed on its own and `sendErr` was never
+  read; the latch now has a test whose first send fails on an already-done
+  context with the connection provably still carrying traffic.
+  `TestInvokeInto_DrainDoesNotClobberTheResponse` never called `InvokeInto`.
+  Alongside them: `terminal()`'s status-before-truncation ordering, which needed
+  a peer that aborts mid-message *and* says why; `validContentType`'s delimiter,
+  which had no refusing case, so `application/grpc-web` read as gRPC; the
+  decoder's compact slide, whose 1 MiB ceiling the slide-less form also passed;
+  both empty-chunk guards; `MetadataValue`'s case-insensitivity; `InvokeInto`'s
+  `dst[:0]` error return; and two of the three places the pooled send vector is
+  cleared. Two fixtures were repaired rather than added to —
+  `TestStreamBufs_OversizeIsNotPooled` grew `dec.buf` where the pool reads
+  `dec.own`, and `TestStreamBufs_CloseIsTheOnlyReturn` checked fields that were
+  nil before the code under test ran. The streaming allocation gate gained the
+  absolute ceiling its unary sibling already carried, and
+  `TestIntegration_ContextCancelStopsRecv`'s second `Recv` is bounded, so losing
+  the receive latch now fails on that test's own assertion instead of burning the
+  whole test timeout. `appendTimeout`'s final clamp is recorded as unreachable by
+  construction rather than untested: no value a `time.Duration` can carry reaches
+  it (#788, #789, #790, #791, #792, #793, #803, #804, #805, #806, #812, #813).
+
 - **Seventeen `quic` coverage gaps from the #722 sweep, fifteen closed by adding
   the missing case.** Every mutation those issues recorded survived the whole
   `./quic/` suite twice and now dies twice: the §18.2 ack-delay limits, pinned
@@ -67,171 +96,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the out-of-range mode is **pinned** at the current answer, `false`, not changed
   (#741, #745, #746, #739).
 
-### Added
-
-- **`conn.ConnOptions.ReadBufferSize` and `conn.ConnOptions.StaticConnWindowSize`.**
-  Two receive-path parameters could not be set from outside the package, and both
-  are parameters a cross-library comparison has to pin before its numbers mean
-  anything (#696).
-
-  `ReadBufferSize` is the counterpart to `WriteBufferSize`, replacing the
-  compile-time constant that sized the buffered reader. Its floor is a page rather
-  than the write side's frame-plus-header: a writer smaller than a frame cannot
-  coalesce the header with its payload so every frame costs two writes, while a
-  reader has no such cliff — `bufio` refills transparently — so a smaller buffer
-  costs syscalls in proportion rather than doubling them.
-
-  `StaticConnWindowSize` raises the connection-level receive window without
-  enabling the tuner. `SETTINGS_INITIAL_WINDOW_SIZE` cannot express this: it
-  governs per-stream windows only, and the connection window moves only by
-  `WINDOW_UPDATE` on stream 0, which previously only `AutoTuneRecvWindow` would
-  send — so a caller wanting a larger static window had to accept a tuner whose
-  algorithm, ceiling and probe policy are all its own. It matters outside
-  benchmarking too: one 65535-byte window per round trip for the whole connection
-  is about 6.5 MB/s at 10 ms RTT however fast the link is. Ignored when
-  `AutoTuneRecvWindow` is set, because one value written by two policies is the
-  state worth not having.
-
-  **Defaults are unchanged.** Zero on either field reproduces the previous
-  constants, and a connection that sets neither refunds exactly what it spent.
-
-- **`quic.Conn.RemoteAddr() net.Addr`.** A `Listener` knew every accepted
-  connection's peer address and kept it private, so nothing built on the server
-  role could learn it: an HTTP/3 server could not populate
-  `http.Request.RemoteAddr`, and any IP-keyed policy above it — per-client rate
-  limiting, allowlists, abuse logging — was blind. `Listener.Addr()` is the local
-  socket, and `tls.ClientHelloInfo.Conn` is nil under QUIC, so neither was a
-  substitute (#710).
-
-  Implemented as a type assertion on the connection's `PacketConn` rather than by
-  widening the `PacketConn` interface, which would have broken every in-memory
-  transport in the tree. `connPacketConn` — the listener's per-connection view of
-  its shared socket, and the only thing that knows the peer, since the shared
-  socket is unconnected — now answers it. The client role is unchanged and gets
-  the method for free: a `*net.UDPConn` from `net.DialUDP` already reports its
-  peer. A transport that cannot report one yields nil rather than panicking.
-
-  Documented as "the peer's address as last observed": connection migration
-  (RFC 9000 §9) is not implemented, so the value is fixed for the connection's
-  life today, and that wording keeps the door open.
-
-### Performance
-
-- **A standalone ACK no longer allocates.** `flush` built the frame payload for a
-  packet carrying no STREAM data from a nil slice, so the standalone-ACK path
-  allocated once per ACK on a lossless in-order connection and up to four times as
-  ACK ranges accumulate under loss — measured with `buildACK` from a nil
-  destination: 1.00 allocs/op at one and two ranges, 2.00 at six, 4.00 at twenty,
-  against 0.00 for a reused destination (#689).
-
-  This is a different site from the one #475 fixed beside it. That scratch is the
-  ACK Range section, which is empty when a single contiguous range is
-  acknowledged — which is why it measured 0.00 → 0.00 on a clean path and only paid
-  under loss. This one is the frame payload buffer, which has to exist for every
-  ACK however few ranges it carries, so it pays on the lossless path too. The
-  existing gate could not see it because it hands `buildACK` a pre-allocated
-  destination, so it measures the Range scratch and not the caller's `nil`.
-
-### Fixed
-
-- **`quic.ErrNoProgress`: giving up on an unresponsive peer is no longer reported
-  as a raw socket error.** When a read deadline expired with nothing left to do —
-  no packet in flight to probe, no loss timer due, no ACK owed, and either no idle
-  timeout in effect or the probe backoff exhausted — the receive path returned the
-  transport's own read error verbatim. A caller therefore received
-  `*net.OpError` ("read udp …: i/o timeout") out of `Do` and could not tell "the
-  peer went quiet" from "the socket broke" without matching on the message text
-  (#717).
-
-  That branch now reports `ErrNoProgress`, distinct from `ErrIdleTimeout`, which
-  means the negotiated `max_idle_timeout` elapsed (RFC 9000 §10.1) — a different
-  event that can be much later, or never, since a connection may negotiate no idle
-  timeout at all.
-
-  **Nothing that classified this error before stops working.** The value returned
-  still reports `Timeout() true` and unwraps to the original read error, so
-  `errors.As` into `net.Error` and `errors.Is(err, os.ErrDeadlineExceeded)` both
-  still succeed. That is why it is a small error type rather than a `fmt.Errorf`
-  wrap: the engine's own `isTimeout` classifies with a direct type assertion, not
-  `errors.As`, and a plain wrap would have silently changed what every caller doing
-  the same assertion sees.
-
-  Only the error surface is addressed. Whether that branch was reached correctly in
-  the incident that prompted the report is unreproduced and remains open on #717.
-
-- **Three `NewClient` option errors are classifiable again.** A missing or
-  whitespace-bearing `Addr`, a missing `ConnOpts.Dialer`, and a missing
-  `TLSConfig` on an HTTP/3 transport were built with a bare `fmt.Errorf` and
-  wrapped no sentinel at all, so the documented `errors.Is(err,
-  client.ErrInvalidOptions)` check missed them and a caller fell through to
-  whatever its generic branch was — treating an unusable configuration as a
-  transport failure. Their siblings in the same validation path already wrapped
-  it (#713).
-
-  Their messages change shape accordingly, from
-  `client: ClientOptions.Addr must be …` to
-  `client: invalid ClientOptions: Addr must be …`. Nothing in the tree matched on
-  the old text; `errors.Is` was always the supported check and now works.
-
-  `ErrInvalidOptions`' own doc comment said "internally inconsistent", which
-  never described these three — they are missing required fields — so it now
-  covers both, and names the three sibling sentinels (`ErrInvalidPoolOptions`,
-  `ErrALPNProtocolMismatch`, `ErrInvalidTransportKind`) that the other validation
-  paths return, since "any option was rejected" means testing for all four.
-  `docs/CLIENT_GUIDE.md` claimed this whole family "returns a wrapped sentinel
-  error" while quoting one of the three unwrapped messages verbatim; it now names
-  the sentinel per path and documents the HTTP/3 `TLSConfig` requirement it
-  omitted entirely.
-- **A `quic.Listener` that refuses a client's certificate now says so.** When the
-  server's TLS handshake failed — a rejected client certificate under
-  `ClientAuth: RequireAndVerifyClientCert` being the ordinary case — the listener
-  dropped the half-open connection without sending anything. The failure was
-  silent at both ends: `Accept` blocked forever, and the client's `Establish`
-  returned success, because a TLS 1.3 client is finished once it sends its own
-  Finished and never learns its certificate was refused. An operator saw clients
-  dial successfully and no requests arrive, with no error anywhere (#711).
-
-  The listener now seals a transport `CONNECTION_CLOSE` (0x1c) carrying
-  `CRYPTO_ERROR` — `0x0100` plus the TLS alert, per RFC 9001 §4.8 — into the
-  Handshake packet-number space before abandoning the connection, so the client
-  surfaces it from `Poll` as a `*PeerClosedError`. The mapping is `closeCodeFor`,
-  the one the client role already used from `Conn.fail`; only the server role had
-  no sender for it.
-
-  Scoped deliberately to the one abandonment where the peer has proved it holds
-  the Handshake keys. A malformed Initial still gets no reply, and a handshake
-  that fails before Handshake keys exist (an ALPN mismatch, say) is still silent —
-  that path needs an Initial-level close and is tracked in #715.
-
-  **mutual TLS itself was never broken**: a client presenting a certificate valid
-  for client authentication completes the handshake and is accepted, before this
-  change and after it.
-
-- **A server reaping an idle HTTP/1.1 keep-alive is now recognised on Windows,
-  so the request is replayed instead of failing.** `ErrServerClosedIdle` — the
-  one H1 failure `client`'s retry classifier is allowed to replay, because no
-  part of a response ever arrived — was raised only for `io.EOF`. HTTP/1.1 has
-  no protocol signal for a reaped keep-alive, so what the caller sees is
-  whatever the local stack reports for a socket the peer has already destroyed,
-  and that differs by platform: Linux delivers the queued FIN ahead of the RST
-  the next write provokes and the read ends in `io.EOF`, while Windows reports
-  `WSAECONNABORTED` and no EOF ever arrives. On Windows the classification
-  therefore never fired and the caller got a failed request where every other
-  platform transparently reused the connection — on both the pooled and the
-  single-connection transports, neither of which probes inside
-  `h1ProbeIdleAfter` by design, so replay is the only recovery there is (#684).
-
-  The guard's boundary is unchanged: `firstRead` and `readConsumedNothing` are
-  what carry "no part of a response arrived", and neither depends on the errno,
-  so an abort arriving after the server began answering is still not replayed.
-
-  Note for anyone writing a similar check: `syscall.ECONNRESET` and
-  `syscall.ECONNABORTED` are defined on Windows as synthetic
-  `APPLICATION_ERROR` values that no socket call ever returns, so a
-  portable-looking `errors.Is` against them compiles and matches nothing. The
-  Winsock codes are needed, which is why this is per-platform.
-
-### Tests
 
 - **Six `client/coverage_test.go` tests could not fail; four of them were
   measuring a fixture that did nothing.** Written to push line coverage past
@@ -431,6 +295,170 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   goroutine leaked per request takes the count from 101,906 to 307,929 and trips
   the ceiling, and a retained-body heap leak trips the heap ceiling at the default
   duration.
+
+### Added
+
+- **`conn.ConnOptions.ReadBufferSize` and `conn.ConnOptions.StaticConnWindowSize`.**
+  Two receive-path parameters could not be set from outside the package, and both
+  are parameters a cross-library comparison has to pin before its numbers mean
+  anything (#696).
+
+  `ReadBufferSize` is the counterpart to `WriteBufferSize`, replacing the
+  compile-time constant that sized the buffered reader. Its floor is a page rather
+  than the write side's frame-plus-header: a writer smaller than a frame cannot
+  coalesce the header with its payload so every frame costs two writes, while a
+  reader has no such cliff — `bufio` refills transparently — so a smaller buffer
+  costs syscalls in proportion rather than doubling them.
+
+  `StaticConnWindowSize` raises the connection-level receive window without
+  enabling the tuner. `SETTINGS_INITIAL_WINDOW_SIZE` cannot express this: it
+  governs per-stream windows only, and the connection window moves only by
+  `WINDOW_UPDATE` on stream 0, which previously only `AutoTuneRecvWindow` would
+  send — so a caller wanting a larger static window had to accept a tuner whose
+  algorithm, ceiling and probe policy are all its own. It matters outside
+  benchmarking too: one 65535-byte window per round trip for the whole connection
+  is about 6.5 MB/s at 10 ms RTT however fast the link is. Ignored when
+  `AutoTuneRecvWindow` is set, because one value written by two policies is the
+  state worth not having.
+
+  **Defaults are unchanged.** Zero on either field reproduces the previous
+  constants, and a connection that sets neither refunds exactly what it spent.
+
+- **`quic.Conn.RemoteAddr() net.Addr`.** A `Listener` knew every accepted
+  connection's peer address and kept it private, so nothing built on the server
+  role could learn it: an HTTP/3 server could not populate
+  `http.Request.RemoteAddr`, and any IP-keyed policy above it — per-client rate
+  limiting, allowlists, abuse logging — was blind. `Listener.Addr()` is the local
+  socket, and `tls.ClientHelloInfo.Conn` is nil under QUIC, so neither was a
+  substitute (#710).
+
+  Implemented as a type assertion on the connection's `PacketConn` rather than by
+  widening the `PacketConn` interface, which would have broken every in-memory
+  transport in the tree. `connPacketConn` — the listener's per-connection view of
+  its shared socket, and the only thing that knows the peer, since the shared
+  socket is unconnected — now answers it. The client role is unchanged and gets
+  the method for free: a `*net.UDPConn` from `net.DialUDP` already reports its
+  peer. A transport that cannot report one yields nil rather than panicking.
+
+  Documented as "the peer's address as last observed": connection migration
+  (RFC 9000 §9) is not implemented, so the value is fixed for the connection's
+  life today, and that wording keeps the door open.
+
+### Performance
+
+- **A standalone ACK no longer allocates.** `flush` built the frame payload for a
+  packet carrying no STREAM data from a nil slice, so the standalone-ACK path
+  allocated once per ACK on a lossless in-order connection and up to four times as
+  ACK ranges accumulate under loss — measured with `buildACK` from a nil
+  destination: 1.00 allocs/op at one and two ranges, 2.00 at six, 4.00 at twenty,
+  against 0.00 for a reused destination (#689).
+
+  This is a different site from the one #475 fixed beside it. That scratch is the
+  ACK Range section, which is empty when a single contiguous range is
+  acknowledged — which is why it measured 0.00 → 0.00 on a clean path and only paid
+  under loss. This one is the frame payload buffer, which has to exist for every
+  ACK however few ranges it carries, so it pays on the lossless path too. The
+  existing gate could not see it because it hands `buildACK` a pre-allocated
+  destination, so it measures the Range scratch and not the caller's `nil`.
+
+### Fixed
+
+- **`quic.ErrNoProgress`: giving up on an unresponsive peer is no longer reported
+  as a raw socket error.** When a read deadline expired with nothing left to do —
+  no packet in flight to probe, no loss timer due, no ACK owed, and either no idle
+  timeout in effect or the probe backoff exhausted — the receive path returned the
+  transport's own read error verbatim. A caller therefore received
+  `*net.OpError` ("read udp …: i/o timeout") out of `Do` and could not tell "the
+  peer went quiet" from "the socket broke" without matching on the message text
+  (#717).
+
+  That branch now reports `ErrNoProgress`, distinct from `ErrIdleTimeout`, which
+  means the negotiated `max_idle_timeout` elapsed (RFC 9000 §10.1) — a different
+  event that can be much later, or never, since a connection may negotiate no idle
+  timeout at all.
+
+  **Nothing that classified this error before stops working.** The value returned
+  still reports `Timeout() true` and unwraps to the original read error, so
+  `errors.As` into `net.Error` and `errors.Is(err, os.ErrDeadlineExceeded)` both
+  still succeed. That is why it is a small error type rather than a `fmt.Errorf`
+  wrap: the engine's own `isTimeout` classifies with a direct type assertion, not
+  `errors.As`, and a plain wrap would have silently changed what every caller doing
+  the same assertion sees.
+
+  Only the error surface is addressed. Whether that branch was reached correctly in
+  the incident that prompted the report is unreproduced and remains open on #717.
+
+- **Three `NewClient` option errors are classifiable again.** A missing or
+  whitespace-bearing `Addr`, a missing `ConnOpts.Dialer`, and a missing
+  `TLSConfig` on an HTTP/3 transport were built with a bare `fmt.Errorf` and
+  wrapped no sentinel at all, so the documented `errors.Is(err,
+  client.ErrInvalidOptions)` check missed them and a caller fell through to
+  whatever its generic branch was — treating an unusable configuration as a
+  transport failure. Their siblings in the same validation path already wrapped
+  it (#713).
+
+  Their messages change shape accordingly, from
+  `client: ClientOptions.Addr must be …` to
+  `client: invalid ClientOptions: Addr must be …`. Nothing in the tree matched on
+  the old text; `errors.Is` was always the supported check and now works.
+
+  `ErrInvalidOptions`' own doc comment said "internally inconsistent", which
+  never described these three — they are missing required fields — so it now
+  covers both, and names the three sibling sentinels (`ErrInvalidPoolOptions`,
+  `ErrALPNProtocolMismatch`, `ErrInvalidTransportKind`) that the other validation
+  paths return, since "any option was rejected" means testing for all four.
+  `docs/CLIENT_GUIDE.md` claimed this whole family "returns a wrapped sentinel
+  error" while quoting one of the three unwrapped messages verbatim; it now names
+  the sentinel per path and documents the HTTP/3 `TLSConfig` requirement it
+  omitted entirely.
+- **A `quic.Listener` that refuses a client's certificate now says so.** When the
+  server's TLS handshake failed — a rejected client certificate under
+  `ClientAuth: RequireAndVerifyClientCert` being the ordinary case — the listener
+  dropped the half-open connection without sending anything. The failure was
+  silent at both ends: `Accept` blocked forever, and the client's `Establish`
+  returned success, because a TLS 1.3 client is finished once it sends its own
+  Finished and never learns its certificate was refused. An operator saw clients
+  dial successfully and no requests arrive, with no error anywhere (#711).
+
+  The listener now seals a transport `CONNECTION_CLOSE` (0x1c) carrying
+  `CRYPTO_ERROR` — `0x0100` plus the TLS alert, per RFC 9001 §4.8 — into the
+  Handshake packet-number space before abandoning the connection, so the client
+  surfaces it from `Poll` as a `*PeerClosedError`. The mapping is `closeCodeFor`,
+  the one the client role already used from `Conn.fail`; only the server role had
+  no sender for it.
+
+  Scoped deliberately to the one abandonment where the peer has proved it holds
+  the Handshake keys. A malformed Initial still gets no reply, and a handshake
+  that fails before Handshake keys exist (an ALPN mismatch, say) is still silent —
+  that path needs an Initial-level close and is tracked in #715.
+
+  **mutual TLS itself was never broken**: a client presenting a certificate valid
+  for client authentication completes the handshake and is accepted, before this
+  change and after it.
+
+- **A server reaping an idle HTTP/1.1 keep-alive is now recognised on Windows,
+  so the request is replayed instead of failing.** `ErrServerClosedIdle` — the
+  one H1 failure `client`'s retry classifier is allowed to replay, because no
+  part of a response ever arrived — was raised only for `io.EOF`. HTTP/1.1 has
+  no protocol signal for a reaped keep-alive, so what the caller sees is
+  whatever the local stack reports for a socket the peer has already destroyed,
+  and that differs by platform: Linux delivers the queued FIN ahead of the RST
+  the next write provokes and the read ends in `io.EOF`, while Windows reports
+  `WSAECONNABORTED` and no EOF ever arrives. On Windows the classification
+  therefore never fired and the caller got a failed request where every other
+  platform transparently reused the connection — on both the pooled and the
+  single-connection transports, neither of which probes inside
+  `h1ProbeIdleAfter` by design, so replay is the only recovery there is (#684).
+
+  The guard's boundary is unchanged: `firstRead` and `readConsumedNothing` are
+  what carry "no part of a response arrived", and neither depends on the errno,
+  so an abort arriving after the server began answering is still not replayed.
+
+  Note for anyone writing a similar check: `syscall.ECONNRESET` and
+  `syscall.ECONNABORTED` are defined on Windows as synthetic
+  `APPLICATION_ERROR` values that no socket call ever returns, so a
+  portable-looking `errors.Is` against them compiles and matches nothing. The
+  Winsock codes are needed, which is why this is per-platform.
 
 ### CI
 

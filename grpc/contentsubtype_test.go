@@ -106,3 +106,52 @@ func TestContentSubtype_DefaultAllocatesNothingNew(t *testing.T) {
 		"the empty subtype built a fresh buffer instead of reusing the constant")
 	assert.NotContainsf(t, string(got), "+", "the empty subtype rendered %q", got)
 }
+
+// TestValidContentType_DelimiterIsEnforced is the refusing side of a decision
+// every other test takes from the accepting side.
+//
+// TestIntegration_BadContentType sends text/html, which fails the PREFIX;
+// TestContentSubtype_RoundTripsThroughTheReceiveCheck walks four subtypes that
+// are all accepted. Nothing sent a content-type that passes the prefix and must
+// still be refused — so the check was satisfied by a function that says yes to
+// anything beginning "application/grpc", and application/grpc-web, a real media
+// type that is NOT this protocol, would have been read as a gRPC response.
+func TestValidContentType_DelimiterIsEnforced(t *testing.T) {
+	cases := []struct {
+		ct   string
+		want bool
+	}{
+		// The delimiter is absent because the type ended.
+		{"application/grpc", true},
+		// The two delimiters the specification names.
+		{"application/grpc+proto", true},
+		{"application/grpc+json", true},
+		{"application/grpc;charset=utf-8", true},
+		// One character past the prefix, each a different way of not being a
+		// delimiter: a type continuation, a letter, a digit, whitespace.
+		{"application/grpc-web", false},
+		{"application/grpc-web+proto", false},
+		{"application/grpcfoo", false},
+		{"application/grpc2", false},
+		{"application/grpc ", false},
+		// Not this type at all, which is the only side already covered.
+		{"text/html", false},
+		{"application/json", false},
+	}
+
+	for _, c := range cases {
+		got := validContentType([]conn.HeaderField{
+			{Name: []byte("content-type"), Value: []byte(c.ct)},
+		})
+
+		assert.Equalf(t, c.want, got, "validContentType(%q) = %v, want %v", c.ct, got, c.want)
+	}
+	absent := validContentType([]conn.HeaderField{
+		{Name: []byte("x-other"), Value: []byte("application/grpc")},
+	})
+
+	assert.Falsef(t, absent,
+		"a response with no content-type at all was accepted — the field is "+
+			"mandatory, and treating its absence as a pass would make every check "+
+			"above skippable by omission")
+}
