@@ -15,6 +15,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -24,6 +25,7 @@ import (
 	"github.com/lodgvideon/poseidon-http-client/client"
 	"github.com/lodgvideon/poseidon-http-client/conn"
 	"github.com/lodgvideon/poseidon-http-client/frame"
+	"github.com/lodgvideon/poseidon-http-client/trace"
 )
 
 // ---------------------------------------------------------------------------
@@ -41,6 +43,108 @@ func covClientFor(t *testing.T, addr string) *client.Client {
 	require.NoErrorf(t, err, "NewClient")
 	t.Cleanup(func() { _ = c.Close() })
 	return c
+}
+
+// cov859Tracer counts inbound HTTP/2 frames by type name.
+//
+// It exists as an INJECTION COUNTER. The tests below assert properties that
+// only exist once a peer has reset a stream or sent GOAWAY, and a run where
+// the peer did neither passes exactly like a real one — which is how the
+// versions of these tests that this file used to hold stayed green against a
+// fixture that reset nothing. Counting the frame on the wire is independent of
+// every client-side mechanism under test, so it can say "the injection
+// happened" without borrowing the answer from the assertion it guards.
+type cov859Tracer struct {
+	mu sync.Mutex
+	in map[string]int
+}
+
+// TraceFrame implements trace.Tracer.
+func (tr *cov859Tracer) TraceFrame(fi trace.FrameInfo) {
+	if fi.Dir != trace.DirIn {
+		return
+	}
+	tr.mu.Lock()
+	defer tr.mu.Unlock()
+	if tr.in == nil {
+		tr.in = make(map[string]int)
+	}
+	tr.in[fi.TypeName]++
+}
+
+// countIn returns how many frames of the named type arrived from the peer.
+func (tr *cov859Tracer) countIn(name string) int {
+	tr.mu.Lock()
+	defer tr.mu.Unlock()
+	return tr.in[name]
+}
+
+// cov859ResetServer starts an HTTP/2 server that sends 200 plus a flush and
+// then, when abort is true, panics with http.ErrAbortHandler — which makes
+// net/http put a real RST_STREAM(INTERNAL_ERROR) on the wire behind the
+// headers it has already sent. abort=false is the control arm: same handler,
+// same clean 200, no reset. The returned counter is the server-side injection
+// count.
+//
+// The fixture the reset tests in this file used to share instead asked the
+// ResponseWriter for an http.Hijacker and closed the raw conn. net/http's
+// HTTP/2 ResponseWriter does not implement http.Hijacker, so
+// `hj, ok := w.(http.Hijacker)` was always ok==false: nothing was hijacked,
+// nothing was closed, nothing was reset, and all three "reset" tests ran
+// against an ordinary 200 with an empty body. Measured, not inferred — #859.
+func cov859ResetServer(t *testing.T, abort bool) (string, *atomic.Int32) {
+	t.Helper()
+	var aborted atomic.Int32
+	_, addr := newTLSH2Server(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(200)
+		if f, ok := w.(http.Flusher); ok {
+			f.Flush()
+		}
+		if !abort {
+			return
+		}
+		aborted.Add(1)
+		panic(http.ErrAbortHandler)
+	}))
+	return addr, &aborted
+}
+
+// cov859TracedClient builds a single-connection client wired to tr.
+func cov859TracedClient(t *testing.T, addr string, tr *cov859Tracer) *client.Client {
+	t.Helper()
+	c, err := client.NewClient(client.ClientOptions{
+		Addr:   addr,
+		Tracer: tr,
+		ConnOpts: conn.ConnOptions{
+			Dialer: &conn.TLSDialer{Config: &tls.Config{InsecureSkipVerify: true}},
+		},
+	})
+	require.NoErrorf(t, err, "NewClient")
+	t.Cleanup(func() { _ = c.Close() })
+	return c
+}
+
+// cov859CloseRecorder records OnConnClose events, which fire on the pool actor
+// goroutine and so need a lock the tests' own goroutine can read under.
+type cov859CloseRecorder struct {
+	mu     sync.Mutex
+	events []client.ConnCloseEvent
+}
+
+// hooks returns a Hooks set that records every close into r.
+func (r *cov859CloseRecorder) hooks() *client.Hooks {
+	return &client.Hooks{OnConnClose: func(e client.ConnCloseEvent) {
+		r.mu.Lock()
+		r.events = append(r.events, e)
+		r.mu.Unlock()
+	}}
+}
+
+// snapshot copies the events recorded so far.
+func (r *cov859CloseRecorder) snapshot() []client.ConnCloseEvent {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]client.ConnCloseEvent(nil), r.events...)
 }
 
 // ---------------------------------------------------------------------------
@@ -204,28 +308,20 @@ func TestDNSResolver_Constructor(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// resolver.go: Resolve error paths — empty result after PreferIPv4 filters
+// resolver.go: Resolve's authoritative-empty branch — covered elsewhere (#859)
+//
+// TestDNSResolver_Resolve_AllFilteredReturnsErrNoAddresses lived here. It was
+// named for `return nil, ErrNoAddresses` and could not reach it: it resolved a
+// .invalid host, so LookupIPAddr FAILED and Resolve returned two branches
+// earlier at `if err != nil`. It asserted nothing either way, and it put a
+// live DNS lookup in a unit suite.
+//
+// The branch is asserted by TestResolve_SuccessfulEmpty_DoesNotServeStale in
+// review_regress_test.go, which reaches it through the internal dnsLookup seam
+// — a fake returning a SUCCESSFUL empty answer — which this external test
+// package cannot construct. Verified by mutation: blanking that return leaves
+// the deleted test green and turns the sibling red.
 // ---------------------------------------------------------------------------
-
-func TestDNSResolver_Resolve_AllFilteredReturnsErrNoAddresses(t *testing.T) {
-	t.Parallel()
-	// Fake lookup that only returns IPv6, but PreferIPv4 is true → 0 addrs.
-	// We can only test this via newDNSResolverWithLookup (internal), so we
-	// exercise the public DNSResolver with a real DNS lookup that returns an
-	// error on a non-existent host to cover the "no cache, error" branch.
-	r := client.DNSResolver("this-hostname-should-not-exist-xyz.invalid", 80, client.DNSOptions{
-		TTL: 1 * time.Millisecond,
-	})
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
-	addrs, err := r.Resolve(ctx)
-	// On an airgapped/CI machine this will return a DNS error, which is the
-	// branch we want to exercise (no cache, error → return nil, err).
-	if err == nil && len(addrs) == 0 {
-		t.Log("resolve returned no addrs with nil err — acceptable on some systems")
-	}
-	// Just verifying no panic; branch coverage is the goal.
-}
 
 // ---------------------------------------------------------------------------
 // body.go: responseBodyReader.Read — error and reset paths via BodyStream
@@ -303,46 +399,75 @@ func TestResponseBodyReader_Read_BodyBufferDrain(t *testing.T) {
 // response.go: Recv — EventReset and spurious EventHeaders paths
 // ---------------------------------------------------------------------------
 
+// TestStreamResponse_Recv_EventReset pins that a peer RST_STREAM reaches the
+// caller as an EventReset carrying THE PEER'S code — not as an error, and not
+// as a code this client picked.
+//
+// The propagation is the half no sibling covers.
+// TestIT_H2_StreamedDownload_NonConsumerIsRefused also lands on Recv's
+// conn.EventReset arm, but on a reset conn FORGES locally (CANCEL, when the
+// caller falls behind the event buffer), so it passes just as well against a
+// Recv that hardcodes the code. Hardcoding is not hypothetical harm: Retryer
+// decides on the code, and a peer reset reported as REFUSED_STREAM claims the
+// server never processed the request (RFC 9113 §8.7) and gets it replayed.
+//
+// The control arm runs the identical handler minus the panic. It is here
+// because "no reset arrived" and "a reset arrived and was handled" used to
+// produce the same green: the previous fixture reset nothing at all (see
+// cov859ResetServer), so this test passed against a clean 200.
 func TestStreamResponse_Recv_EventReset(t *testing.T) {
 	t.Parallel()
-	_, addr := newTLSH2Server(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(200)
-		if f, ok := w.(http.Flusher); ok {
-			f.Flush()
-		}
-		if hj, ok := w.(http.Hijacker); ok {
-			cn, _, _ := hj.Hijack()
-			_ = cn.Close()
-		}
-	}))
-	c := covClientFor(t, addr)
-
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	var sr client.StreamResponse
-	err := c.DoStream(ctx, &client.Request{Method: "GET", Path: "/"}, &sr)
-	if err != nil {
-		t.Logf("DoStream returned initial error: %v", err)
-		return
+	tests := []struct {
+		name        string
+		abort       bool
+		wantType    client.EventType
+		wantCode    conn.ErrCode
+		wantResetIn int
+	}{
+		{
+			name: "peer_reset", abort: true,
+			wantType: client.EventReset, wantCode: frame.ErrCodeInternalError, wantResetIn: 1,
+		},
+		{
+			name: "control_no_reset", abort: false,
+			wantType: client.EventData, wantCode: 0, wantResetIn: 0,
+		},
 	}
-	defer func() { _ = sr.Close() }()
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			addr, aborted := cov859ResetServer(t, tt.abort)
+			tr := &cov859Tracer{}
+			c := cov859TracedClient(t, addr, tr)
+			ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+			defer cancel()
+			var sr client.StreamResponse
+			require.NoErrorf(t, c.DoStream(ctx, &client.Request{Method: "GET", Path: "/"}, &sr),
+				"DoStream: the handler sends headers and flushes BEFORE aborting, so the "+
+					"stream must open and the reset must arrive as an event on it")
+			defer func() { _ = sr.Close() }()
 
-	// Pump events until we hit EventReset or stream end.
-	for {
-		ev, err := sr.Recv(ctx)
-		if errors.Is(err, client.ErrStreamEnded) {
-			break
-		}
-		if err != nil {
-			t.Logf("Recv error (expected): %v", err)
-			break
-		}
-		if ev.Type == client.EventReset {
-			break
-		}
-		if ev.EndStream {
-			break
-		}
+			ev, err := sr.Recv(ctx)
+
+			require.NoErrorf(t, err,
+				"Recv = %v; a peer RST_STREAM is an EVENT on this API — surfacing it as an "+
+					"error instead hides ResetCode from every streaming caller", err)
+			// INJECTION COUNT. Everything below is vacuous without these two:
+			// a run where the peer never reset looks exactly like a real pass.
+			require.EqualValuesf(t, tt.wantResetIn, aborted.Load(),
+				"handler aborts = %d, want %d", aborted.Load(), tt.wantResetIn)
+			require.Equalf(t, tt.wantResetIn, tr.countIn("RST_STREAM"),
+				"inbound RST_STREAM frames = %d, want %d — counted on the wire, so it cannot "+
+					"be satisfied by the same code the assertions below test",
+				tr.countIn("RST_STREAM"), tt.wantResetIn)
+			assert.Equalf(t, tt.wantType, ev.Type,
+				"Recv event type = %v, want %v", ev.Type, tt.wantType)
+			assert.Equalf(t, tt.wantCode, ev.ResetCode,
+				"Recv ResetCode = %v, want %v — the peer's code must reach the caller "+
+					"verbatim; the retry layer decides on it", ev.ResetCode, tt.wantCode)
+			assert.Truef(t, ev.EndStream,
+				"EndStream = false on a %v event; both a reset and a clean final DATA frame "+
+					"end the stream, and a caller looping until EndStream would hang", ev.Type)
+		})
 	}
 }
 
@@ -472,26 +597,77 @@ func TestClient_Do_WriteBodyReader_ReadError_AfterBytes(t *testing.T) {
 // Instead, test the StreamResetError path through drainResponse.
 // ---------------------------------------------------------------------------
 
+// TestClient_Do_DrainResponse_StreamReset pins drainResponse's conn.EventReset
+// arm: a peer reset arriving after the response headers must fail Do with a
+// *StreamResetError carrying the peer's code — not succeed with the partial
+// 200 those headers already promised.
+//
+// Returning nil there is the dangerous mutant and a plausible one: the headers
+// HAVE arrived and resp.Status is already 200 by the time the reset lands, so
+// a "complete enough" reading of this arm hands the caller a truncated body
+// under a success status.
+//
+// The error's TYPE matters as much as its presence.
+// TestConformance_RFC9113_Sec8_1_RealResetStillFailsUpload asserts the other
+// side of the same coin — a reset that kills an UPLOAD must NOT surface as
+// *StreamResetError, because Retryer keys on that type and would replay work
+// the server already did — so the arm that does produce one needs its own gate.
 func TestClient_Do_DrainResponse_StreamReset(t *testing.T) {
 	t.Parallel()
-	// Server resets the stream before fully sending a response.
-	_, addr := newTLSH2Server(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(200)
-		if f, ok := w.(http.Flusher); ok {
-			f.Flush()
-		}
-		if hj, ok := w.(http.Hijacker); ok {
-			cn, _, _ := hj.Hijack()
-			_ = cn.Close()
-		}
-	}))
-	c := covClientFor(t, addr)
+	tests := []struct {
+		name        string
+		abort       bool
+		wantReset   bool
+		wantCode    conn.ErrCode
+		wantResetIn int
+	}{
+		{
+			name: "peer_reset", abort: true,
+			wantReset: true, wantCode: frame.ErrCodeInternalError, wantResetIn: 1,
+		},
+		{
+			name: "control_no_reset", abort: false,
+			wantReset: false, wantCode: 0, wantResetIn: 0,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			addr, aborted := cov859ResetServer(t, tt.abort)
+			tr := &cov859Tracer{}
+			c := cov859TracedClient(t, addr, tr)
+			ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+			defer cancel()
+			var resp client.Response
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	var resp client.Response
-	_ = c.Do(ctx, &client.Request{Method: "GET", Path: "/"}, &resp)
-	// We don't assert specific errors — just covering the path.
+			err := c.Do(ctx, &client.Request{Method: "GET", Path: "/"}, &resp)
+
+			// INJECTION COUNT first: everything below is vacuous without it.
+			require.EqualValuesf(t, tt.wantResetIn, aborted.Load(),
+				"handler aborts = %d, want %d", aborted.Load(), tt.wantResetIn)
+			require.Equalf(t, tt.wantResetIn, tr.countIn("RST_STREAM"),
+				"inbound RST_STREAM frames = %d, want %d", tr.countIn("RST_STREAM"), tt.wantResetIn)
+			var sre *client.StreamResetError
+			if !tt.wantReset {
+				assert.NoErrorf(t, err, "Do = %v on a clean 200; the control arm must succeed", err)
+				assert.Falsef(t, errors.As(err, &sre),
+					"Do reported a stream reset on a connection where no RST_STREAM was ever "+
+						"sent — then the reset arm is firing on something other than a reset")
+				return
+			}
+			require.Errorf(t, err,
+				"Do = nil with status %d and %d body bytes; the peer reset the stream after "+
+					"the headers, so a nil error hands the caller a truncated body under a "+
+					"success status", resp.Status, len(resp.Body))
+			require.Truef(t, errors.As(err, &sre),
+				"Do error = %v (%T), want a *StreamResetError — Retryer classifies on that "+
+					"type, and a reset it cannot recognise is a reset it cannot decide about",
+				err, err)
+			assert.Equalf(t, tt.wantCode, sre.Code,
+				"StreamResetError.Code = %v, want %v — the peer's code drives the retry "+
+					"decision (RFC 9113 §8.7), so it must be the peer's and not a placeholder",
+				sre.Code, tt.wantCode)
+		})
+	}
 }
 
 // ---------------------------------------------------------------------------
@@ -539,15 +715,35 @@ func TestPool_MapAcquireErr_ContextCanceled(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// pool.go: evictDeadSilent — path where dead conns are evicted silently
-// during Stats calls. We trigger this by closing the underlying conn.
+// pool.go: evictDeadSilent — a dead conn reaped by a metrics read
 // ---------------------------------------------------------------------------
 
+// TestPool_EvictDeadSilent_Via_Stats pins both halves of what "silent" means
+// on that path — the eviction is RECORDED in ConnsClosed and the OnConnClose
+// hook stays quiet — and it pins them by NAMING the mechanism rather than
+// hoping for it.
+//
+// Three sites can evict a dead conn, and two of them would satisfy a naive
+// "ActiveConns went to zero": handleTick -> evictDead and handleRelease ->
+// evict. Both are excluded here by construction. HealthCheckPeriod is ten
+// minutes, so no tick can fire inside the test; the seeding request has
+// already been released while the conn was still alive, so handleRelease
+// cannot run again. That leaves handleStats -> evictDeadSilent as the only
+// site that can move ActiveConns, and the zero hook count is what tells the
+// two apart: evictDead and evict both call notifyClose, evictDeadSilent
+// deliberately does not.
+//
+// This test used to close the CLIENT and then call PoolStats. That never
+// reached evictDeadSilent at all: Pool.Stats selects on p.closedCh, which is
+// already closed by then, and returns a zero Stats without the actor running.
+// The ConnsClosed increment it could have observed came from handleClose's
+// notifyClose(CloseManual) — a different function entirely (#859).
 func TestPool_EvictDeadSilent_Via_Stats(t *testing.T) {
 	t.Parallel()
-	_, addr := newTLSH2Server(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	srv, addr := newTLSH2Server(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(200)
 	}))
+	rec := &cov859CloseRecorder{}
 	c, err := client.NewClient(client.ClientOptions{
 		Addr:      addr,
 		Transport: client.TransportPool,
@@ -557,22 +753,53 @@ func TestPool_EvictDeadSilent_Via_Stats(t *testing.T) {
 		Pool: &client.PoolOptions{
 			MaxConnsPerHost:   2,
 			MaxStreamsPerConn: 10,
+			// Long enough that handleTick provably cannot fire inside this
+			// test, so evictDead is not a candidate for what we observe.
+			HealthCheckPeriod: 10 * time.Minute,
 		},
+		Hooks: rec.hooks(),
 	})
 	require.NoErrorf(t, err, "NewClient")
 	defer c.Close()
-
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
-	// Seed the pool.
 	var resp client.Response
-	err = c.Do(ctx, &client.Request{Method: "GET", Path: "/"}, &resp)
-	require.NoErrorf(t, err, "seeding Do")
-	// Close the underlying client → conns go dead.
-	_ = c.Close()
-	// Stats triggers evictDeadSilent on the actor.
-	st := c.PoolStats()
-	_ = st
+	require.NoErrorf(t, c.Do(ctx, &client.Request{Method: "GET", Path: "/"}, &resp), "seeding Do")
+	require.Equalf(t, 1, c.PoolStats().ActiveConns,
+		"ActiveConns = %d after one request, want 1 — without a live conn to kill there is "+
+			"nothing for this test to observe being evicted", c.PoolStats().ActiveConns)
+	require.Zerof(t, c.MetricsSnapshot().Counters.ConnsClosed,
+		"ConnsClosed = %d before the peer died; the delta below would not be attributable",
+		c.MetricsSnapshot().Counters.ConnsClosed)
+
+	srv.Close() // the peer dies; nothing client-side has noticed yet
+
+	var st client.Stats
+	polls := 0
+	deadline := time.Now().Add(15 * time.Second)
+	for time.Now().Before(deadline) {
+		polls++
+		st = c.PoolStats() // handleStats -> evictDeadSilent
+		if st.ActiveConns == 0 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	require.Zerof(t, st.ActiveConns,
+		"ActiveConns = %d after %d PoolStats() calls against a dead peer; the pool is "+
+			"reporting capacity it does not have, and acquire will keep handing it out",
+		st.ActiveConns, polls)
+	assert.EqualValuesf(t, 1, c.MetricsSnapshot().Counters.ConnsClosed,
+		"ConnsClosed = %d, want 1 — silent means no user CALLBACK, not no record. A conn "+
+			"killed out of band and first noticed by a metrics read is exactly the case an "+
+			"operator is scraping for, and it used to leave this counter at zero forever",
+		c.MetricsSnapshot().Counters.ConnsClosed)
+	assert.Emptyf(t, rec.snapshot(),
+		"OnConnClose fired %d time(s) from a metrics read: %+v. Firing a lifecycle callback "+
+			"out of Stats() is the thing this path is named for not doing — and it also "+
+			"means evictDead or evict did the eviction, not evictDeadSilent",
+		len(rec.snapshot()), rec.snapshot())
 }
 
 // ---------------------------------------------------------------------------
@@ -905,35 +1132,70 @@ func TestPool_MapAcquireErr_AcquireTimeout(t *testing.T) {
 // frame.ErrCode / StreamResetError via EventReset coverage
 // ---------------------------------------------------------------------------
 
+// TestStreamResponse_WaitTrailers_EventReset pins WaitTrailers' documented
+// answer on a reset stream: nil trailers and a NIL error.
+//
+// Both halves are load-bearing and both are mutable. The nil error is the
+// contract that a reset is not a WaitTrailers failure — callers are told to
+// use Recv to distinguish the cases — so returning the reset as an error here
+// would break every caller that treats a non-nil err as fatal. The nil SLICE
+// is the contract the doc comment spells out one paragraph further down: an
+// empty trailer section returns a non-nil empty slice, so nil-ness is how a
+// caller tells "trailers received, and there were none" from "no trailers".
+// A reset arm returning []conn.HeaderField{} would tell that caller the peer
+// sent an empty trailer section it never sent.
+//
+// The control arm ends the stream cleanly with no trailers. It reaches the
+// same (nil, nil) through WaitTrailers' ErrStreamEnded branch instead, which
+// is the point: it shows the assertions below are not simply reading off the
+// clean-end path, because the injection count differs and only the reset arm
+// moves when the EventReset arm is changed.
+//
+// Note for anyone mutating this: DELETING WaitTrailers' `case EventReset`
+// outright is an equivalent mutant. Recv sets sr.drained on that event, so the
+// next loop iteration takes ErrStreamEnded and returns the same (nil, nil).
+// The observable mutation is the RETURN VALUE, not the arm's existence.
 func TestStreamResponse_WaitTrailers_EventReset(t *testing.T) {
 	t.Parallel()
-	_, addr := newTLSH2Server(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(200)
-		if f, ok := w.(http.Flusher); ok {
-			f.Flush()
-		}
-		if hj, ok := w.(http.Hijacker); ok {
-			cn, _, _ := hj.Hijack()
-			_ = cn.Close()
-		}
-	}))
-	c := covClientFor(t, addr)
+	tests := []struct {
+		name        string
+		abort       bool
+		wantResetIn int
+	}{
+		{name: "peer_reset", abort: true, wantResetIn: 1},
+		{name: "control_clean_end", abort: false, wantResetIn: 0},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			addr, aborted := cov859ResetServer(t, tt.abort)
+			tr := &cov859Tracer{}
+			c := cov859TracedClient(t, addr, tr)
+			ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+			defer cancel()
+			var sr client.StreamResponse
+			require.NoErrorf(t, c.DoStream(ctx, &client.Request{Method: "GET", Path: "/"}, &sr),
+				"DoStream: headers precede the abort, so the stream must open")
+			defer func() { _ = sr.Close() }()
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	var sr client.StreamResponse
-	err := c.DoStream(ctx, &client.Request{Method: "GET", Path: "/"}, &sr)
-	if err != nil {
-		t.Logf("DoStream error on RST server: %v", err)
-		return
+			trailers, err := sr.WaitTrailers(ctx)
+
+			// INJECTION COUNT. A run in which the peer never reset passes the
+			// assertions below identically, so they mean nothing without this.
+			require.EqualValuesf(t, tt.wantResetIn, aborted.Load(),
+				"handler aborts = %d, want %d", aborted.Load(), tt.wantResetIn)
+			require.Equalf(t, tt.wantResetIn, tr.countIn("RST_STREAM"),
+				"inbound RST_STREAM frames = %d, want %d — counted on the wire, independent "+
+					"of the code under test", tr.countIn("RST_STREAM"), tt.wantResetIn)
+			assert.NoErrorf(t, err,
+				"WaitTrailers err = %v, want nil — a reset stream simply has no trailers; "+
+					"reporting it as an error makes every caller that treats err as fatal "+
+					"fail a request whose response body already arrived", err)
+			assert.Truef(t, trailers == nil,
+				"WaitTrailers trailers = %#v, want nil. A non-nil empty slice is this API's "+
+					"signal that the peer SENT an empty trailer section, so returning one "+
+					"here reports a trailer block that never existed", trailers)
+		})
 	}
-	defer func() { _ = sr.Close() }()
-	trailers, err := sr.WaitTrailers(ctx)
-	// Either nil trailers (reset case) or an error.
-	if err != nil {
-		t.Logf("WaitTrailers err (expected on RST): %v", err)
-	}
-	_ = trailers
 }
 
 // ---------------------------------------------------------------------------
@@ -1871,46 +2133,130 @@ func TestManagedPool_Warmup_AfterFirstRequest(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// pool.go: handleClose — GoAway path (pool.go:341-343)
-// Triggered when the pool is closed and a conn has received a peer GOAWAY.
+// pool.go: handleClose — the CloseGoAway attribution
 // ---------------------------------------------------------------------------
 
+// TestPool_HandleClose_GoAwayConn pins what a Client.Close during a peer's
+// graceful drain is REPORTED as. handleClose closes every conn it still holds;
+// one that has taken a GOAWAY must be attributed to the peer (CloseGoAway,
+// GoAwaysReceived++), not to the local Close. Getting that wrong is silent and
+// it is the whole reason the counter exists: a rolling restart of the backend
+// shows up on a dashboard as ordinary client-side shutdown.
+//
+// Three things about the shape of this test are deliberate.
+//
+// It closes the client with the request STILL PARKED in the handler. That is
+// what makes handleClose the mechanism rather than a lookalike: handleRelease
+// carries the identical `if GoAwayReceived() { reason = CloseGoAway }` block
+// and reaps the conn the moment its last stream is released, so a test that
+// lets the request finish first measures pool.go's release path and passes
+// against a handleClose whose GOAWAY branch has been deleted. With active > 0,
+// handleRelease's own `active == 0` guard rules it out, and a ten-minute
+// HealthCheckPeriod rules out evictDead. handleClose is then the only site
+// that can emit anything at all.
+//
+// The GOAWAY is injected with srv.Config.Shutdown, not srv.Close. Shutdown is
+// http.Server's graceful path and is what puts a GOAWAY on the wire; Close
+// tears the socket down without one. Measured: with srv.Close the reason
+// observed here was CloseManual — the branch this test was written for had
+// never once executed (#859).
+//
+// The control arm never shuts the peer down, so the same Close must report
+// CloseManual. Without it, an assertion that some event arrived with some
+// reason is satisfied by a handleClose that hardcodes one.
 func TestPool_HandleClose_GoAwayConn(t *testing.T) {
 	t.Parallel()
-	srv, addr := newTLSH2Server(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(200)
-	}))
+	tests := []struct {
+		name         string
+		peerGoesAway bool
+		wantReason   client.CloseReason
+		wantGoAwayIn int
+	}{
+		{name: "peer_goaway", peerGoesAway: true, wantReason: client.CloseGoAway, wantGoAwayIn: 1},
+		{name: "control_no_goaway", peerGoesAway: false, wantReason: client.CloseManual, wantGoAwayIn: 0},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			release := make(chan struct{})
+			var reached sync.WaitGroup
+			reached.Add(1)
+			var once sync.Once
+			srv, addr := newTLSH2Server(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				once.Do(reached.Done)
+				<-release
+				w.WriteHeader(200)
+			}))
+			tr := &cov859Tracer{}
+			rec := &cov859CloseRecorder{}
+			c, err := client.NewClient(client.ClientOptions{
+				Addr:      addr,
+				Transport: client.TransportPool,
+				Tracer:    tr,
+				ConnOpts: conn.ConnOptions{
+					Dialer: &conn.TLSDialer{Config: &tls.Config{InsecureSkipVerify: true}},
+				},
+				Pool: &client.PoolOptions{
+					MaxConnsPerHost:   1,
+					MaxStreamsPerConn: 10,
+					HealthCheckPeriod: 10 * time.Minute,
+				},
+				Hooks: rec.hooks(),
+			})
+			require.NoErrorf(t, err, "NewClient")
+			done := make(chan error, 1)
+			go func() {
+				ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+				defer cancel()
+				var resp client.Response
+				done <- c.Do(ctx, &client.Request{Method: "GET", Path: "/"}, &resp)
+			}()
+			reached.Wait() // the conn now carries one active stream
+			shutdownDone := make(chan struct{})
+			if tt.peerGoesAway {
+				go func() {
+					defer close(shutdownDone)
+					_ = srv.Config.Shutdown(context.Background())
+				}()
+				deadline := time.Now().Add(20 * time.Second)
+				for time.Now().Before(deadline) && tr.countIn("GOAWAY") == 0 {
+					time.Sleep(5 * time.Millisecond)
+				}
+			} else {
+				close(shutdownDone)
+			}
+			// INJECTION COUNT, read on the wire and BEFORE the act: a run in
+			// which Shutdown's GOAWAY never landed reaches handleClose with an
+			// ordinary conn and passes the control arm's assertions exactly.
+			require.Equalf(t, tt.wantGoAwayIn, tr.countIn("GOAWAY"),
+				"inbound GOAWAY frames = %d, want %d", tr.countIn("GOAWAY"), tt.wantGoAwayIn)
+			require.Zerof(t, c.MetricsSnapshot().Counters.GoAwaysReceived,
+				"GoAwaysReceived = %d before Close; the delta below must be handleClose's",
+				c.MetricsSnapshot().Counters.GoAwaysReceived)
 
-	c, err := client.NewClient(client.ClientOptions{
-		Addr:      addr,
-		Transport: client.TransportPool,
-		ConnOpts: conn.ConnOptions{
-			Dialer: &conn.TLSDialer{Config: &tls.Config{InsecureSkipVerify: true}},
-		},
-		Pool: &client.PoolOptions{
-			MaxConnsPerHost:   1,
-			MaxStreamsPerConn: 10,
-		},
-	})
-	require.NoErrorf(t, err, "NewClient")
+			closeErr := c.Close()
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
+			assert.NoErrorf(t, closeErr, "Client.Close = %v", closeErr)
+			events := rec.snapshot()
+			require.Lenf(t, events, 1,
+				"OnConnClose fired %d time(s): %+v. Exactly one conn existed and handleClose "+
+					"closed it once; a zero here means the conn was reaped before Close and "+
+					"this test observed some other pool path", len(events), events)
+			assert.Equalf(t, tt.wantReason, events[0].Reason,
+				"OnConnClose reason = %v, want %v — attributing a peer's GOAWAY to a local "+
+					"Close (or the reverse) makes a rolling backend restart indistinguishable "+
+					"from an ordinary client shutdown on a dashboard",
+				events[0].Reason, tt.wantReason)
+			assert.EqualValuesf(t, tt.wantGoAwayIn, c.MetricsSnapshot().Counters.GoAwaysReceived,
+				"GoAwaysReceived = %d, want %d — one conn, one GOAWAY; this counter and the "+
+					"reason above are set together and must agree",
+				c.MetricsSnapshot().Counters.GoAwaysReceived, tt.wantGoAwayIn)
 
-	// Seed the pool with an active conn.
-	var resp client.Response
-	err = doWithRetry(t, c, ctx, &client.Request{Method: "GET", Path: "/"}, &resp)
-	require.NoErrorf(t, err, "seeding Do")
-
-	// Close the httptest server — this causes the server to send GOAWAY.
-	srv.Close()
-
-	// Give the GOAWAY frame time to propagate to the client conn.
-	time.Sleep(100 * time.Millisecond)
-
-	// Close the client — pool.handleClose iterates conns, GoAwayReceived()
-	// returns true, so reason = CloseGoAway is set (the uncovered 2 stmts).
-	if err := c.Close(); err != nil {
-		t.Logf("Close: %v (error acceptable after server shutdown)", err)
+			close(release)
+			<-done
+			<-shutdownDone
+			if !tt.peerGoesAway {
+				srv.Close()
+			}
+		})
 	}
 }
