@@ -1,6 +1,7 @@
 package http3
 
 import (
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -48,18 +49,22 @@ func TestAlive_FlagAgreesWithReaderDone(t *testing.T) {
 // then caught on the first run.
 func TestAlive_FlagIsVisibleBeforeTheChannelCloses(t *testing.T) {
 	const iterations = 5000
+	var polls atomic.Int64 // evidence the observer really spun rather than parking
 	for i := 0; i < iterations; i++ {
 		c := &Client{readerDone: make(chan struct{})}
 		started := make(chan struct{})
 		observed := make(chan bool, 1)
 		go func() {
 			close(started)
+			n := int64(0)
 			for {
 				select {
 				case <-c.readerDone:
+					polls.Add(n)
 					observed <- c.Alive()
 					return
 				default:
+					n++ // the spin is the point; an empty default here trips SA5004
 				}
 			}
 		}()
@@ -77,4 +82,10 @@ func TestAlive_FlagIsVisibleBeforeTheChannelCloses(t *testing.T) {
 			require.FailNowf(t, "waiter never woke", "iteration %d", i)
 		}
 	}
+
+	t.Logf("%d iterations, %d observer polls total", iterations, polls.Load())
+	assert.Positivef(t, polls.Load(),
+		"the observer never polled once across %d iterations: it found readerDone already "+
+			"closed every time, so it observed the flag well after the window rather than "+
+			"inside it", iterations)
 }
