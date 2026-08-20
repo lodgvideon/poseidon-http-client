@@ -647,6 +647,18 @@ func TestSingleH3Conn_Backoff_RefusesWithinWindow(t *testing.T) {
 // class: with no backoff configured the suppression must not engage at all.
 // Without this case a condition that always suppresses looks identical to one
 // that suppresses correctly.
+//
+// Two CONDITIONALS_BOUNDARY mutants of that condition still survive these two
+// tests, and both are equivalent mutants rather than holes:
+//
+//   - `s.backoff > 0` -> `>= 0` changes nothing, because with backoff == 0 the
+//     third conjunct is `time.Since(...) < 0`, which is false anyway. The
+//     branch cannot be entered either way.
+//   - `time.Since(s.lastDialAt) < s.backoff` -> `<=` differs only when the
+//     elapsed time equals the window to the nanosecond.
+//
+// Do not chase them with a sleep-tuned test: it would assert on a clock, not on
+// behaviour.
 func TestSingleH3Conn_ZeroBackoff_RedialsImmediately(t *testing.T) {
 	var dials atomic.Int32
 	s := &singleH3Conn{
