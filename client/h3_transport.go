@@ -13,6 +13,7 @@ import (
 	"github.com/lodgvideon/poseidon-http-client/frame"
 	"github.com/lodgvideon/poseidon-http-client/http3"
 	"github.com/lodgvideon/poseidon-http-client/quic"
+	"github.com/lodgvideon/poseidon-http-client/trace"
 )
 
 // h3Client is the subset of *http3.Client the transport drives: a buffered Do
@@ -414,12 +415,14 @@ type singleH3Conn struct {
 // shared client and returns a fresh h3Exchange. pushLookup is nil (HTTP/3 server
 // push is disabled — the client never sends MAX_PUSH_ID) and release is a no-op
 // (the client is shared, like an H2 conn; the exchange holds no per-request slot).
-func (s *singleH3Conn) openExchange(ctx context.Context) (protoStream, pushLookuper, releaser, error) {
-	cl, err := s.acquireClient(ctx)
+func (s *singleH3Conn) openExchange(ctx context.Context) (protoStream, pushLookuper, releaser, exchangeStats, error) {
+	st := exchangeStats{Proto: trace.ProtoH3, RemoteAddr: s.addr}
+	cl, dialTook, err := s.acquireClient(ctx)
+	st.Connect = dialTook
 	if err != nil {
-		return nil, nil, nil, err
+		return nil, nil, nil, st, err
 	}
-	return getH3Exchange(cl), nil, noRelease, nil
+	return getH3Exchange(cl), nil, noRelease, st, nil
 }
 
 // acquireClient returns the cached h3Client, lazy-dialling one if needed. It
@@ -429,17 +432,22 @@ func (s *singleH3Conn) openExchange(ctx context.Context) (protoStream, pushLooku
 // auto-redialled here — a failed Do surfaces the error to the caller. For
 // automatic replacement of a dead connection, use TransportH3Pool, whose actor
 // evicts dead conns and dials fresh ones.
-func (s *singleH3Conn) acquireClient(ctx context.Context) (h3Client, error) {
+//
+// The second result is how long a dial THIS caller performed took — for HTTP/3
+// that spans the QUIC and TLS 1.3 handshakes, since they are the same flight.
+// It is zero for a reused client and for a caller that only waited out somebody
+// else's in-flight dial, as in singleConn.acquireConn.
+func (s *singleH3Conn) acquireClient(ctx context.Context) (h3Client, time.Duration, error) {
 	for {
 		s.mu.Lock()
 		if s.closed {
 			s.mu.Unlock()
-			return nil, ErrClosed
+			return nil, 0, ErrClosed
 		}
 		if s.cur != nil {
 			c := s.cur
 			s.mu.Unlock()
-			return c, nil
+			return c, 0, nil
 		}
 		if s.dialing != nil {
 			ch := s.dialing
@@ -448,19 +456,21 @@ func (s *singleH3Conn) acquireClient(ctx context.Context) (h3Client, error) {
 			case <-ch:
 				continue
 			case <-ctx.Done():
-				return nil, ctx.Err()
+				return nil, 0, ctx.Err()
 			}
 		}
 		if s.backoff > 0 && s.dialErr != nil && time.Since(s.lastDialAt) < s.backoff {
 			err := s.dialErr
 			s.mu.Unlock()
-			return nil, &DialError{Addr: s.addr, Err: fmt.Errorf("%w: %w", ErrRedialBackoff, err)}
+			return nil, 0, &DialError{Addr: s.addr, Err: fmt.Errorf("%w: %w", ErrRedialBackoff, err)}
 		}
 		s.dialing = make(chan struct{})
 		ch := s.dialing
 		s.mu.Unlock()
 
+		dialStart := time.Now()
 		cl, dialErr := s.dial(ctx)
+		dialTook := time.Since(dialStart)
 
 		s.mu.Lock()
 		s.lastDialAt = time.Now()
@@ -471,18 +481,18 @@ func (s *singleH3Conn) acquireClient(ctx context.Context) (h3Client, error) {
 				_ = cl.Close()
 			}
 			s.mu.Unlock()
-			return nil, ErrClosed
+			return nil, dialTook, ErrClosed
 		}
 		if dialErr != nil {
 			s.dialErr = dialErr
 			s.mu.Unlock()
-			return nil, &DialError{Addr: s.addr, Err: dialErr}
+			return nil, dialTook, &DialError{Addr: s.addr, Err: dialErr}
 		}
 		s.cur = cl
 		s.dialErr = nil
 		c := s.cur
 		s.mu.Unlock()
-		return c, nil
+		return c, dialTook, nil
 	}
 }
 
@@ -544,7 +554,7 @@ func (s *singleH3Conn) warmup(n int) {
 	s.warmupCancel = cancel
 	s.mu.Unlock()
 	go func() {
-		_, _ = s.acquireClient(ctx)
+		_, _, _ = s.acquireClient(ctx)
 		cancel()
 		s.mu.Lock()
 		s.warmupCancel = nil

@@ -268,7 +268,7 @@ func TestSingleConn_Acquire_LazyDial(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 
-	c, release, err := sc.acquireConn(ctx)
+	c, release, _, err := sc.acquireConn(ctx)
 
 	require.NoError(t, err, "acquire")
 	defer release()
@@ -286,11 +286,11 @@ func TestSingleConn_Acquire_ReusesAliveConn(t *testing.T) {
 	defer sc.close()
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
-	c1, rel1, err := sc.acquireConn(ctx)
+	c1, rel1, _, err := sc.acquireConn(ctx)
 	require.NoError(t, err, "first acquire")
 	rel1()
 
-	c2, rel2, err := sc.acquireConn(ctx)
+	c2, rel2, _, err := sc.acquireConn(ctx)
 
 	require.NoError(t, err, "second acquire")
 	defer rel2()
@@ -313,7 +313,7 @@ func TestSingleConn_Acquire_GoAwayTriggersRedial(t *testing.T) {
 	defer sc.close()
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
-	c1, rel1, err := sc.acquireConn(ctx)
+	c1, rel1, _, err := sc.acquireConn(ctx)
 	require.NoError(t, err, "first acquire")
 	rel1()
 	// Wait for reader to mark goAwayReceived on c1.
@@ -327,7 +327,7 @@ func TestSingleConn_Acquire_GoAwayTriggersRedial(t *testing.T) {
 	require.False(t, c1.IsAlive(),
 		"peer GOAWAY was never observed on the first conn, so the redial below is not the one under test")
 
-	c2, rel2, err := sc.acquireConn(ctx)
+	c2, rel2, _, err := sc.acquireConn(ctx)
 
 	require.NoError(t, err, "second acquire")
 	defer rel2()
@@ -358,8 +358,8 @@ func TestSingleConn_Backoff_RefusesWithinWindow(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 
-	_, _, err1 := sc.acquireConn(ctx)
-	_, _, err2 := sc.acquireConn(ctx)
+	_, _, _, err1 := sc.acquireConn(ctx)
+	_, _, _, err2 := sc.acquireConn(ctx)
 
 	require.Error(t, err1, "first acquire must fail")
 	require.Error(t, err2, "second acquire must fail")
@@ -382,7 +382,7 @@ func TestSingleConn_Acquire_ConcurrentDial_OnlyOneDials(t *testing.T) {
 
 	for i := 0; i < N; i++ {
 		go func() {
-			c, _, err := sc.acquireConn(ctx)
+			c, _, _, err := sc.acquireConn(ctx)
 			if err != nil {
 				results <- nil
 				return
@@ -410,13 +410,13 @@ func TestSingleConn_Close_BlocksNewAcquires(t *testing.T) {
 	sc := &singleConn{addr: "fake:0", connOpts: conn.ConnOptions{Dialer: d}, metrics: &Metrics{}}
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
-	c, _, err := sc.acquireConn(ctx)
+	c, _, _, err := sc.acquireConn(ctx)
 	require.NoError(t, err, "acquire")
 
 	require.NoError(t, sc.close(), "close")
 
 	assert.False(t, c.IsAlive(), "close must close underlying conn")
-	_, _, err = sc.acquireConn(ctx)
+	_, _, _, err = sc.acquireConn(ctx)
 	assert.ErrorIs(t, err, ErrClosed, "an acquire after close must be refused with ErrClosed")
 }
 

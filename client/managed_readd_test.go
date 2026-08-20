@@ -80,7 +80,7 @@ func TestManagedPool_AddressReAddedAfterRemoval(t *testing.T) {
 			// And it must actually serve.
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancel()
-			c, release, err := mp.acquire(ctx)
+			c, release, _, err := mp.acquire(ctx)
 			if err != nil {
 				t.Fatalf("acquire after re-add: %v", err)
 			}
@@ -125,7 +125,7 @@ func TestManagedPool_SingleAddressFlapDoesNotBlackhole(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	c, release, err := mp.acquire(ctx)
+	c, release, _, err := mp.acquire(ctx)
 	if err != nil {
 		t.Fatalf("acquire after single-address flap: %v", err)
 	}
@@ -164,7 +164,7 @@ func TestManagedPool_ReviveBeatsDrainWatcher(t *testing.T) {
 	// Hold a conn so the sub-pool is NOT idle while it drains.
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	held, releaseHeld, err := mp.acquire(ctx)
+	held, releaseHeld, _, err := mp.acquire(ctx)
 	if err != nil {
 		t.Fatalf("initial acquire: %v", err)
 	}
@@ -208,7 +208,7 @@ func TestManagedPool_ReviveBeatsDrainWatcher(t *testing.T) {
 	if after != before {
 		t.Fatal("drain watcher closed the revived sub-pool; the live address paid for a needless reconnect")
 	}
-	c, release, err := mp.acquire(ctx)
+	c, release, _, err := mp.acquire(ctx)
 	if err != nil {
 		t.Fatalf("acquire after revive: %v", err)
 	}

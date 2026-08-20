@@ -34,7 +34,7 @@ func TestH1ManagedPool_DrainLazy_RemovedAddress_RetainsSubPool(t *testing.T) {
 
 	// Seed both sub-pools so the removal has a live one to mark draining.
 	for i := 0; i < 2; i++ {
-		_, rel, err := mp.acquire(context.Background())
+		_, rel, _, err := mp.acquire(context.Background())
 		if err != nil {
 			t.Fatalf("seed acquire %d: %v", i, err)
 		}
@@ -86,7 +86,7 @@ func TestH3ManagedPool_DrainLazy_RemovedAddress_RetainsSubPool(t *testing.T) {
 	defer func() { _ = mp.close() }()
 
 	for i := 0; i < 2; i++ {
-		_, rel, err := mp.acquire(context.Background())
+		_, rel, _, err := mp.acquire(context.Background())
 		if err != nil {
 			t.Fatalf("seed acquire %d: %v", i, err)
 		}

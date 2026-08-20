@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/lodgvideon/poseidon-http-client/conn"
+	"github.com/lodgvideon/poseidon-http-client/trace"
 )
 
 // singleConn is the C.1 transport: at most one *conn.Conn per Client.
@@ -41,32 +42,40 @@ type singleConn struct {
 }
 
 // openExchange implements transport.openExchange.
-func (s *singleConn) openExchange(ctx context.Context) (protoStream, pushLookuper, releaser, error) {
-	cn, release, err := s.acquireConn(ctx)
+func (s *singleConn) openExchange(ctx context.Context) (protoStream, pushLookuper, releaser, exchangeStats, error) {
+	st := exchangeStats{Proto: trace.ProtoH2, RemoteAddr: s.addr}
+	cn, release, dialTook, err := s.acquireConn(ctx)
+	st.Connect = dialTook
 	if err != nil {
-		return nil, nil, nil, err
+		return nil, nil, nil, st, err
 	}
 	stream, serr := cn.NewStream(ctx)
 	if serr != nil {
 		release()
-		return nil, nil, nil, serr
+		return nil, nil, nil, st, serr
 	}
-	return stream, cn, funcReleaser(release), nil
+	return stream, cn, funcReleaser(release), st, nil
 }
 
 // acquireConn returns a healthy *conn.Conn and a no-op release func.
 // It handles lazy dial, in-flight dedup, and backoff suppression.
-func (s *singleConn) acquireConn(ctx context.Context) (*conn.Conn, func(), error) {
+//
+// The third result is how long a dial THIS caller performed took, and it is
+// zero on every other path — a reused connection, and a caller that merely
+// waited for somebody else's in-flight dial. That second case is deliberate:
+// the waiter did not establish the connection, so charging it a connect time
+// would report the same dial twice under two different requests.
+func (s *singleConn) acquireConn(ctx context.Context) (*conn.Conn, func(), time.Duration, error) {
 	for {
 		s.mu.Lock()
 		if s.closed {
 			s.mu.Unlock()
-			return nil, nil, ErrClosed
+			return nil, nil, 0, ErrClosed
 		}
 		if s.cur != nil && s.cur.IsAlive() {
 			c := s.cur
 			s.mu.Unlock()
-			return c, func() {}, nil
+			return c, func() {}, 0, nil
 		}
 		s.cur = nil
 		// If a dial is already in flight, wait for it and retry.
@@ -77,7 +86,7 @@ func (s *singleConn) acquireConn(ctx context.Context) (*conn.Conn, func(), error
 			case <-ch:
 				continue
 			case <-ctx.Done():
-				return nil, nil, ctx.Err()
+				return nil, nil, 0, ctx.Err()
 			}
 		}
 		// Backoff suppression after a recent failed dial.
@@ -85,7 +94,7 @@ func (s *singleConn) acquireConn(ctx context.Context) (*conn.Conn, func(), error
 			time.Since(s.lastDialAt) < s.backoff {
 			err := s.dialErr
 			s.mu.Unlock()
-			return nil, nil, &DialError{
+			return nil, nil, 0, &DialError{
 				Addr: s.addr,
 				Err:  fmt.Errorf("%w: %w", ErrRedialBackoff, err),
 			}
@@ -95,10 +104,12 @@ func (s *singleConn) acquireConn(ctx context.Context) (*conn.Conn, func(), error
 		ch := s.dialing
 		s.mu.Unlock()
 
+		dialStart := time.Now()
 		dialed, dialErr := dialObserved(ctx, s.addr, s.dialTimeout, s.metrics, s.hooksRef,
 			func(dctx context.Context) (*conn.Conn, error) {
 				return conn.Dial(dctx, s.addr, s.connOpts)
 			})
+		dialTook := time.Since(dialStart)
 
 		s.mu.Lock()
 		s.lastDialAt = time.Now()
@@ -109,18 +120,18 @@ func (s *singleConn) acquireConn(ctx context.Context) (*conn.Conn, func(), error
 				_ = dialed.Close()
 			}
 			s.mu.Unlock()
-			return nil, nil, ErrClosed
+			return nil, nil, dialTook, ErrClosed
 		}
 		if dialErr != nil {
 			s.dialErr = dialErr
 			s.mu.Unlock()
-			return nil, nil, &DialError{Addr: s.addr, Err: dialErr}
+			return nil, nil, dialTook, &DialError{Addr: s.addr, Err: dialErr}
 		}
 		s.cur = dialed
 		s.dialErr = nil
 		c := s.cur
 		s.mu.Unlock()
-		return c, func() {}, nil
+		return c, func() {}, dialTook, nil
 	}
 }
 
@@ -201,7 +212,7 @@ func (s *singleConn) warmup(n int) {
 	s.warmupCancel = cancel
 	s.mu.Unlock()
 	go func() {
-		_, _, _ = s.acquireConn(ctx)
+		_, _, _, _ = s.acquireConn(ctx)
 		// Release the timer and clear the latch, as the H1 and H3 single-conn
 		// transports do. Without this the field stays non-nil for the life of the
 		// client: a warmup whose dial failed can never be retried — the guard

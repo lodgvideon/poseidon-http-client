@@ -2,6 +2,7 @@ package client
 
 import (
 	"context"
+	"time"
 
 	"github.com/lodgvideon/poseidon-http-client/conn"
 )
@@ -44,29 +45,35 @@ type streamTarget interface {
 // incremental reader, wait for the final (non-1xx) response head, parse the
 // status, then hand the stream to the target.
 //
+// It returns when the response head arrived, which is the streaming path's
+// time-to-first-byte; the zero Time means none arrived. Reporting the instant
+// rather than a duration keeps the choice of what to measure it against with
+// the caller, which is the one holding the attempt's start time.
+//
 // On every error path it closes what it opened and releases the pool slot, so a
 // caller that gets an error owns nothing.
-func (c *Client) beginStreaming(ctx context.Context, s protoStream, rel releaser, sendCut error, target streamTarget) error {
+func (c *Client) beginStreaming(ctx context.Context, s protoStream, rel releaser, sendCut error, target streamTarget) (time.Time, error) {
 	rs, err := beginRespStream(ctx, s)
 	if err != nil {
 		_ = s.Close()
 		rel.release()
-		return preferSendCut(err, sendCut)
+		return time.Time{}, preferSendCut(err, sendCut)
 	}
 	ev, err := recvFinalHeaders(ctx, rs)
 	if err != nil {
 		_ = rs.Close()
 		rel.release()
-		return preferSendCut(err, sendCut)
+		return time.Time{}, preferSendCut(err, sendCut)
 	}
+	headersAt := time.Now()
 	status, perr := parseStatus(ev.Headers, target.headersOut())
 	if perr != nil {
 		_ = rs.Close()
 		rel.release()
-		return perr
+		return headersAt, perr
 	}
 	target.beginResponse(ctx, rs, rel, status, ev.Block, ev.EndStream)
-	return nil
+	return headersAt, nil
 }
 
 // headersOut implements streamTarget.

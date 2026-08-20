@@ -11,6 +11,7 @@ import (
 	"github.com/lodgvideon/poseidon-http-client/conn"
 	"github.com/lodgvideon/poseidon-http-client/frame"
 	"github.com/lodgvideon/poseidon-http-client/http1"
+	"github.com/lodgvideon/poseidon-http-client/trace"
 )
 
 // assertH1Conn rejects a freshly dialled connection whose ALPN protocol says the
@@ -232,7 +233,8 @@ type h1singleConn struct {
 // openExchange implements transport.openExchange for H1.1.
 // It acquires the connection and the in-flight slot, returns an h1Exchange
 // whose release function unlocks the slot and optionally recycles the conn.
-func (s *h1singleConn) openExchange(ctx context.Context) (protoStream, pushLookuper, releaser, error) {
+func (s *h1singleConn) openExchange(ctx context.Context) (protoStream, pushLookuper, releaser, exchangeStats, error) {
+	st := exchangeStats{Proto: trace.ProtoH1, RemoteAddr: s.addr}
 	// Acquire the single in-flight slot (serializes concurrent callers).
 	// We use a channel so context cancellation still works.
 	acquired := make(chan struct{})
@@ -248,13 +250,14 @@ func (s *h1singleConn) openExchange(ctx context.Context) (protoStream, pushLooku
 			<-acquired
 			s.inFlight.Unlock()
 		}()
-		return nil, nil, nil, ctx.Err()
+		return nil, nil, nil, st, ctx.Err()
 	}
 
-	nc, err := s.acquireConn(ctx)
+	nc, dialTook, err := s.acquireConn(ctx)
+	st.Connect = dialTook
 	if err != nil {
 		s.inFlight.Unlock()
-		return nil, nil, nil, err
+		return nil, nil, nil, st, err
 	}
 
 	ex := nc.NewExchange()
@@ -282,16 +285,21 @@ func (s *h1singleConn) openExchange(ctx context.Context) (protoStream, pushLooku
 		s.inFlight.Unlock()
 	}
 	h1ex := &h1Exchange{ex: ex, rel: h1ReleaseFunc(release)}
-	return h1ex, nil, noRelease, nil
+	return h1ex, nil, noRelease, st, nil
 }
 
 // acquireConn returns a healthy *http1.Conn, dialling if necessary.
-func (s *h1singleConn) acquireConn(ctx context.Context) (*http1.Conn, error) {
+//
+// The second result is how long a dial THIS caller performed took; it is zero
+// for a reused connection and for a caller that only waited out somebody
+// else's in-flight dial. See singleConn.acquireConn for why the waiter is not
+// charged.
+func (s *h1singleConn) acquireConn(ctx context.Context) (*http1.Conn, time.Duration, error) {
 	for {
 		s.mu.Lock()
 		if s.closed {
 			s.mu.Unlock()
-			return nil, ErrClosed
+			return nil, 0, ErrClosed
 		}
 		if s.cur != nil && s.cur.IsAlive() {
 			c := s.cur
@@ -308,7 +316,7 @@ func (s *h1singleConn) acquireConn(ctx context.Context) (*http1.Conn, error) {
 			// paid on every request rather than on an idle checkout.
 			if !c.HasResidue() {
 				s.mu.Unlock()
-				return c, nil
+				return c, 0, nil
 			}
 			// Unsolicited octets: this connection can no longer be framed. Drop it
 			// and dial a fresh one on the next turn of the loop.
@@ -326,13 +334,13 @@ func (s *h1singleConn) acquireConn(ctx context.Context) (*http1.Conn, error) {
 			case <-ch:
 				continue
 			case <-ctx.Done():
-				return nil, ctx.Err()
+				return nil, 0, ctx.Err()
 			}
 		}
 		if s.backoff > 0 && s.dialErr != nil && time.Since(s.lastDialAt) < s.backoff {
 			err := s.dialErr
 			s.mu.Unlock()
-			return nil, &DialError{Addr: s.addr, Err: fmt.Errorf("%w: %w", ErrRedialBackoff, err)}
+			return nil, 0, &DialError{Addr: s.addr, Err: fmt.Errorf("%w: %w", ErrRedialBackoff, err)}
 		}
 		s.dialing = make(chan struct{})
 		ch := s.dialing
@@ -340,6 +348,7 @@ func (s *h1singleConn) acquireConn(ctx context.Context) (*http1.Conn, error) {
 
 		// assertH1Conn runs inside the timed section: a peer that answered h2 has
 		// cost a real dial, so the hook must see that attempt fail.
+		dialStart := time.Now()
 		nc, dialErr := dialObserved(ctx, s.addr, s.dialTimeout, s.metrics, s.hooksRef,
 			func(dctx context.Context) (net.Conn, error) {
 				c, err := s.dialer.Dial(dctx, s.addr)
@@ -352,6 +361,7 @@ func (s *h1singleConn) acquireConn(ctx context.Context) (*http1.Conn, error) {
 				}
 				return c, nil
 			})
+		dialTook := time.Since(dialStart)
 
 		s.mu.Lock()
 		s.lastDialAt = time.Now()
@@ -362,19 +372,19 @@ func (s *h1singleConn) acquireConn(ctx context.Context) (*http1.Conn, error) {
 				_ = nc.Close()
 			}
 			s.mu.Unlock()
-			return nil, ErrClosed
+			return nil, dialTook, ErrClosed
 		}
 		if dialErr != nil {
 			s.dialErr = dialErr
 			s.mu.Unlock()
-			return nil, &DialError{Addr: s.addr, Err: dialErr}
+			return nil, dialTook, &DialError{Addr: s.addr, Err: dialErr}
 		}
 		hc := http1.NewConn(nc)
 		s.cur = hc
 		s.dialErr = nil
 		c := s.cur
 		s.mu.Unlock()
-		return c, nil
+		return c, dialTook, nil
 	}
 }
 
@@ -428,7 +438,7 @@ func (s *h1singleConn) warmup(n int) {
 		// Documented as idempotent and safe on an already-warm client, so it must
 		// be exactly that.
 		s.inFlight.Lock()
-		_, _ = s.acquireConn(ctx)
+		_, _, _ = s.acquireConn(ctx)
 		s.inFlight.Unlock()
 		cancel()
 		s.mu.Lock()
@@ -474,12 +484,12 @@ func (a *alpnSingleConn) delegate() transport {
 	return a.delegateLocked()
 }
 
-func (a *alpnSingleConn) openExchange(ctx context.Context) (protoStream, pushLookuper, releaser, error) {
+func (a *alpnSingleConn) openExchange(ctx context.Context) (protoStream, pushLookuper, releaser, exchangeStats, error) {
 	for {
 		a.mu.Lock()
 		if a.closed {
 			a.mu.Unlock()
-			return nil, nil, nil, ErrClosed
+			return nil, nil, nil, exchangeStats{RemoteAddr: a.addr}, ErrClosed
 		}
 		if d := a.delegateLocked(); d != nil {
 			a.mu.Unlock()
@@ -496,7 +506,7 @@ func (a *alpnSingleConn) openExchange(ctx context.Context) (protoStream, pushLoo
 			case <-ch:
 				continue
 			case <-ctx.Done():
-				return nil, nil, nil, ctx.Err()
+				return nil, nil, nil, exchangeStats{RemoteAddr: a.addr}, ctx.Err()
 			}
 		}
 		// Become the detector; release the lock for the long dial + handshake.
@@ -504,7 +514,9 @@ func (a *alpnSingleConn) openExchange(ctx context.Context) (protoStream, pushLoo
 		ch := a.detecting
 		a.mu.Unlock()
 
+		detectStart := time.Now()
 		d, isH2, derr := a.detectDelegate(ctx)
+		detectTook := time.Since(detectStart)
 
 		a.mu.Lock()
 		a.detecting = nil
@@ -514,11 +526,11 @@ func (a *alpnSingleConn) openExchange(ctx context.Context) (protoStream, pushLoo
 			if d != nil {
 				_ = d.close()
 			}
-			return nil, nil, nil, ErrClosed
+			return nil, nil, nil, exchangeStats{RemoteAddr: a.addr, Connect: detectTook}, ErrClosed
 		}
 		if derr != nil {
 			a.mu.Unlock()
-			return nil, nil, nil, derr
+			return nil, nil, nil, exchangeStats{RemoteAddr: a.addr, Connect: detectTook}, derr
 		}
 		// Store the delegate by the protocol that was actually negotiated. Keyed
 		// on isH2, NOT on a "detected != ''" sentinel: conn.NegotiatedProtocol
@@ -534,7 +546,14 @@ func (a *alpnSingleConn) openExchange(ctx context.Context) (protoStream, pushLoo
 		// Delegate the first exchange like any other: the delegate's own
 		// openExchange finds the connection we handed it as its current one, so
 		// there is no separate first-exchange path to keep in step with it.
-		return d.openExchange(ctx)
+		//
+		// The detection dial is added back on top: the delegate reuses the
+		// connection detection already established, so it reports no connect
+		// time of its own, and the one request that actually paid for the
+		// handshake would otherwise be the one that appears not to have.
+		ps, pl, rel, st, oerr := d.openExchange(ctx)
+		st.Connect += detectTook
+		return ps, pl, rel, st, oerr
 	}
 }
 

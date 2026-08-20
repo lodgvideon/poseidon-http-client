@@ -66,7 +66,7 @@ func TestDrainResponse_TrailerFlood_Bounded(t *testing.T) {
 	var resp Response
 	resp.Reset()
 	req := &Request{Method: "GET", Path: "/", WantTrailers: true}
-	err := drainResponse(context.Background(), nil, &scriptedStream{events: events},
+	_, err := drainResponse(context.Background(), nil, &scriptedStream{events: events},
 		req, &resp, nil, 1<<20, 1<<20)
 	if err != nil {
 		t.Fatalf("drainResponse: %v", err)
@@ -97,7 +97,7 @@ func TestDrainResponse_InterimHeaders_Dropped(t *testing.T) {
 	var resp Response
 	resp.Reset()
 	req := &Request{Method: "GET", Path: "/", BodyMode: BodyBuffer}
-	if err := drainResponse(context.Background(), nil, &scriptedStream{events: events},
+	if _, err := drainResponse(context.Background(), nil, &scriptedStream{events: events},
 		req, &resp, nil, 1<<20, 1<<20); err != nil {
 		t.Fatalf("drainResponse: %v", err)
 	}

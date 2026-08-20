@@ -86,7 +86,7 @@ func TestH1ManagedPool_AddressReAddedAfterRemoval(t *testing.T) {
 
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancel()
-			c, rel, err := mp.acquire(ctx)
+			c, rel, _, err := mp.acquire(ctx)
 			if err != nil {
 				t.Fatalf("acquire after re-add: %v", err)
 			}
@@ -127,7 +127,7 @@ func TestH1ManagedPool_SingleAddressFlapDoesNotBlackhole(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	if _, rel, err := mp.acquire(ctx); err != nil {
+	if _, rel, _, err := mp.acquire(ctx); err != nil {
 		t.Fatalf("acquire after a single-address flap: %v", err)
 	} else {
 		rel(true)
@@ -178,7 +178,7 @@ func TestH3ManagedPool_AddressReAddedAfterRemoval(t *testing.T) {
 
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancel()
-			c, rel, err := mp.acquire(ctx)
+			c, rel, _, err := mp.acquire(ctx)
 			if err != nil {
 				t.Fatalf("acquire after re-add: %v", err)
 			}
@@ -215,7 +215,7 @@ func TestH1ManagedPool_ReviveBeatsDrainWatcher(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	_, relHeld, err := mp.acquire(ctx) // hold it: the sub-pool must NOT be idle
+	_, relHeld, _, err := mp.acquire(ctx) // hold it: the sub-pool must NOT be idle
 	if err != nil {
 		t.Fatalf("initial acquire: %v", err)
 	}
@@ -266,7 +266,7 @@ func TestH3ManagedPool_ReviveBeatsDrainWatcher(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	_, relHeld, err := mp.acquire(ctx)
+	_, relHeld, _, err := mp.acquire(ctx)
 	if err != nil {
 		t.Fatalf("initial acquire: %v", err)
 	}

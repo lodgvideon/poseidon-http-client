@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/lodgvideon/poseidon-http-client/conn"
+	"github.com/lodgvideon/poseidon-http-client/trace"
 )
 
 // poolTransport adapts *Pool to the internal transport interface
@@ -32,20 +33,21 @@ func newPoolTransportFromPool(p *Pool) *poolTransport {
 // PoolOptions.HealthCheckPeriod (default 30s). Newly arriving acquires
 // also skip dead conns via pickLeastLoaded's IsAlive() guard, so a
 // transient dead conn won't be picked between ticks.
-func (pt *poolTransport) openExchange(ctx context.Context) (protoStream, pushLookuper, releaser, error) {
+func (pt *poolTransport) openExchange(ctx context.Context) (protoStream, pushLookuper, releaser, exchangeStats, error) {
+	st := exchangeStats{Proto: trace.ProtoH2, RemoteAddr: pt.p.addr}
 	mc, err := pt.p.acquire(ctx)
 	if err != nil {
-		return nil, nil, nil, err
+		return nil, nil, nil, st, err
 	}
 	cn := mc.c
 	stream, serr := cn.NewStream(ctx)
 	if serr != nil {
 		pt.p.release(mc)
-		return nil, nil, nil, serr
+		return nil, nil, nil, st, serr
 	}
 	// mc IS the releaser: it already exists on the heap and knows its pool,
 	// so no closure is built per request (#476).
-	return stream, cn, mc, nil
+	return stream, cn, mc, st, nil
 }
 
 // close implements transport.close. Idempotent.

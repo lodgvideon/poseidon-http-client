@@ -52,7 +52,7 @@ func TestSingleConn_CloseIsObservable(t *testing.T) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	_, _, err := s.acquireConn(ctx)
+	_, _, _, err := s.acquireConn(ctx)
 	require.NoError(t, err, "acquireConn")
 
 	_ = s.close()
@@ -78,7 +78,7 @@ func TestH1SingleConn_CloseIsObservable(t *testing.T) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	_, _, release, err := s.openExchange(ctx)
+	_, _, release, _, err := s.openExchange(ctx)
 	require.NoError(t, err, "openExchange")
 	release.release()
 

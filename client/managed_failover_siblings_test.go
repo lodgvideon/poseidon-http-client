@@ -49,7 +49,7 @@ func TestH1ManagedPool_FailsOverOnFirstDialFailure(t *testing.T) {
 	// addrs[1] within this single acquire.
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
-	c, rel, err := mp.acquire(ctx)
+	c, rel, _, err := mp.acquire(ctx)
 	if err != nil {
 		t.Fatalf("acquire = %v; a live second address was available, so the loop stopped on the dead one", err)
 	}
@@ -81,7 +81,7 @@ func TestH3ManagedPool_FailsOverOnFirstDialFailure(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
-	c, rel, err := mp.acquire(ctx)
+	c, rel, _, err := mp.acquire(ctx)
 	if err != nil {
 		t.Fatalf("acquire = %v; a live second address was available, so the loop stopped on the dead one", err)
 	}

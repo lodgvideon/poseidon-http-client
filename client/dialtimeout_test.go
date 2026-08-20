@@ -38,7 +38,7 @@ func TestSingleConn_DialIsBoundedByDialTimeout(t *testing.T) {
 	defer cancel()
 
 	start := time.Now()
-	_, _, err := s.acquireConn(ctx)
+	_, _, _, err := s.acquireConn(ctx)
 	elapsed := time.Since(start)
 
 	if err == nil {
@@ -72,7 +72,7 @@ func TestSingleConn_ZeroDialTimeoutMeansDefault(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	c, _, err := s.acquireConn(ctx)
+	c, _, _, err := s.acquireConn(ctx)
 	if err != nil {
 		t.Fatalf("acquireConn with a zero dialTimeout: %v — zero must mean the default, "+
 			"not an expired deadline", err)
@@ -110,7 +110,7 @@ func TestSingleConn_DialTimeoutSurfacesAsAnError(t *testing.T) {
 		metrics:     &Metrics{},
 		dialTimeout: 100 * time.Millisecond,
 	}
-	_, _, err := s.acquireConn(context.Background())
+	_, _, _, err := s.acquireConn(context.Background())
 	if err == nil {
 		t.Fatal("no error from a dial that timed out")
 	}
@@ -139,7 +139,7 @@ func TestH1SingleConn_DialIsBoundedByDialTimeout(t *testing.T) {
 	defer cancel()
 
 	start := time.Now()
-	_, _, _, err := s.openExchange(ctx)
+	_, _, _, _, err := s.openExchange(ctx)
 	elapsed := time.Since(start)
 
 	if err == nil {

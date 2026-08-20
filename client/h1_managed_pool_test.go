@@ -36,7 +36,7 @@ func TestH1ManagedPool_RoundRobin_DistributesAcrossAddresses(t *testing.T) {
 	// 9 sequential acquires — RoundRobin distributes 3-3-3 across the addresses.
 	for i := 0; i < 9; i++ {
 		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-		c, release, err := mp.acquire(ctx)
+		c, release, _, err := mp.acquire(ctx)
 		cancel()
 		if err != nil {
 			t.Fatalf("acquire[%d] = %v", i, err)
@@ -66,7 +66,7 @@ func TestH1ManagedPool_NoAddresses_ReturnsErrNoAddresses(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
-	if _, _, err := mp.acquire(ctx); err != ErrNoAddresses {
+	if _, _, _, err := mp.acquire(ctx); err != ErrNoAddresses {
 		t.Errorf("acquire err = %v, want ErrNoAddresses", err)
 	}
 }
@@ -107,7 +107,7 @@ func TestH1ManagedPool_DrainGraceful_RemovedAddress_KeepsInFlight(t *testing.T) 
 
 	// The first RoundRobin pick is deterministic (counter starts at zero), so
 	// this conn belongs to addrs[0] — the address removed below.
-	c0, rel0, err := mp.acquire(context.Background())
+	c0, rel0, _, err := mp.acquire(context.Background())
 	if err != nil {
 		t.Fatalf("acquire 0: %v", err)
 	}
@@ -127,7 +127,7 @@ func TestH1ManagedPool_DrainGraceful_RemovedAddress_KeepsInFlight(t *testing.T) 
 	}
 
 	// A new acquire must pick the surviving address only.
-	_, rel1, err := mp.acquire(context.Background())
+	_, rel1, _, err := mp.acquire(context.Background())
 	if err != nil {
 		t.Fatalf("acquire after remove: %v", err)
 	}
@@ -159,7 +159,7 @@ func TestH1ManagedPool_DrainHard_RemovedAddress_ClosesImmediately(t *testing.T) 
 	}
 	defer func() { _ = mp.close() }()
 
-	c0, rel0, err := mp.acquire(context.Background())
+	c0, rel0, _, err := mp.acquire(context.Background())
 	if err != nil {
 		t.Fatalf("acquire 0: %v", err)
 	}
@@ -193,7 +193,7 @@ func TestH1ManagedPool_StatsAggregation_SumsAcrossSubPools(t *testing.T) {
 
 	holds := make([]func(bool), 0, 3)
 	for i := 0; i < 3; i++ {
-		_, rel, err := mp.acquire(context.Background())
+		_, rel, _, err := mp.acquire(context.Background())
 		if err != nil {
 			t.Fatalf("acquire %d: %v", i, err)
 		}

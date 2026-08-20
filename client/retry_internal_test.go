@@ -130,6 +130,10 @@ type fakeDoer struct {
 	stream  []streamResult
 	calls   int
 	streams int
+	// attempts records the attempt number the loop passed on each call, in
+	// order. It is what proves a replay is reported as a replay rather than as
+	// a fresh request.
+	attempts []int
 }
 
 type doResult struct {
@@ -141,24 +145,26 @@ type streamResult struct {
 	err  error
 }
 
-func (f *fakeDoer) Do(_ context.Context, _ *Request, resp *Response) error {
+func (f *fakeDoer) doAttempt(_ context.Context, _ *Request, resp *Response, attempt int) error {
 	if f.calls >= len(f.results) {
 		f.t.Fatalf("unexpected Do call #%d (only %d results scripted)", f.calls, len(f.results))
 	}
 	r := f.results[f.calls]
 	f.calls++
+	f.attempts = append(f.attempts, attempt)
 	if r.resp != nil {
 		*resp = *r.resp
 	}
 	return r.err
 }
 
-func (f *fakeDoer) DoStream(_ context.Context, _ *Request, sr *StreamResponse) error {
+func (f *fakeDoer) doStreamAttempt(_ context.Context, _ *Request, sr *StreamResponse, attempt int) error {
 	if f.streams >= len(f.stream) {
 		f.t.Fatalf("unexpected DoStream call #%d (only %d results scripted)", f.streams, len(f.stream))
 	}
 	r := f.stream[f.streams]
 	f.streams++
+	f.attempts = append(f.attempts, attempt)
 	if r.resp != nil {
 		// Copy only exported fields — StreamResponse contains sync.Once (noCopy).
 		sr.Status = r.resp.Status

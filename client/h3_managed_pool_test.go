@@ -32,7 +32,7 @@ func TestH3ManagedPool_RoundRobin_DistributesAcrossAddresses(t *testing.T) {
 	// 9 sequential acquires — RoundRobin distributes 3-3-3 across the addresses.
 	for i := 0; i < 9; i++ {
 		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-		cl, release, err := mp.acquire(ctx)
+		cl, release, _, err := mp.acquire(ctx)
 		cancel()
 		if err != nil {
 			t.Fatalf("acquire[%d] = %v", i, err)
@@ -63,7 +63,7 @@ func TestH3ManagedPool_NoAddresses_ReturnsErrNoAddresses(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
-	if _, _, err := mp.acquire(ctx); err != ErrNoAddresses {
+	if _, _, _, err := mp.acquire(ctx); err != ErrNoAddresses {
 		t.Errorf("acquire err = %v, want ErrNoAddresses", err)
 	}
 }
@@ -106,7 +106,7 @@ func TestH3ManagedPool_DrainGraceful_RemovedAddress_KeepsInFlight(t *testing.T) 
 	defer func() { _ = mp.close() }()
 
 	// Acquire a conn for addr[0] and hold it in-flight.
-	cl0, rel0, err := mp.acquire(context.Background())
+	cl0, rel0, _, err := mp.acquire(context.Background())
 	if err != nil {
 		t.Fatalf("acquire 0: %v", err)
 	}
@@ -130,7 +130,7 @@ func TestH3ManagedPool_DrainGraceful_RemovedAddress_KeepsInFlight(t *testing.T) 
 	}
 
 	// New acquire must pick addr[1] only.
-	_, rel1, err := mp.acquire(context.Background())
+	_, rel1, _, err := mp.acquire(context.Background())
 	if err != nil {
 		t.Fatalf("acquire after remove: %v", err)
 	}
@@ -164,7 +164,7 @@ func TestH3ManagedPool_DrainHard_RemovedAddress_ClosesImmediately(t *testing.T) 
 	}
 	defer func() { _ = mp.close() }()
 
-	cl0, rel0, err := mp.acquire(context.Background())
+	cl0, rel0, _, err := mp.acquire(context.Background())
 	if err != nil {
 		t.Fatalf("acquire 0: %v", err)
 	}
@@ -199,7 +199,7 @@ func TestH3ManagedPool_StatsAggregation_SumsAcrossSubPools(t *testing.T) {
 
 	holds := make([]func(), 0, 3)
 	for i := 0; i < 3; i++ {
-		_, rel, err := mp.acquire(context.Background())
+		_, rel, _, err := mp.acquire(context.Background())
 		if err != nil {
 			t.Fatalf("acquire %d: %v", i, err)
 		}

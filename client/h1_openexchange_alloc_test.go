@@ -53,14 +53,14 @@ func TestH1PoolTransport_OpenExchangeAllocs(t *testing.T) {
 	defer cancel()
 
 	// Warm the pool so the dial is not in the measured region.
-	s, _, _, err := pt.openExchange(ctx)
+	s, _, _, _, err := pt.openExchange(ctx)
 	if err != nil {
 		t.Fatalf("warm-up openExchange: %v", err)
 	}
 	s.(*h1Exchange).release(true)
 
 	n := testing.AllocsPerRun(200, func() {
-		ex, _, _, oerr := pt.openExchange(ctx)
+		ex, _, _, _, oerr := pt.openExchange(ctx)
 		if oerr != nil {
 			t.Fatalf("openExchange: %v", oerr)
 		}

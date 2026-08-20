@@ -130,9 +130,10 @@ func (mp *managedCore[P, MC, C, R]) getOrCreateSubPool(addr Address) *coreSubPoo
 // the h3Client + release closure. On dial-only errors it iterates through the
 // remaining addresses (bounded by active set size).
 
-func (mp *managedCore[P, MC, C, R]) acquire(ctx context.Context) (C, R, error) {
+func (mp *managedCore[P, MC, C, R]) acquire(ctx context.Context) (C, R, Address, error) {
 	var zeroC C
 	var zeroR R
+	var zeroA Address
 	tried := make(map[string]struct{})
 	var lastErr error
 	for {
@@ -148,13 +149,13 @@ func (mp *managedCore[P, MC, C, R]) acquire(ctx context.Context) (C, R, error) {
 		}
 		if len(set) == 0 {
 			if lastErr != nil {
-				return zeroC, zeroR, lastErr
+				return zeroC, zeroR, zeroA, lastErr
 			}
-			return zeroC, zeroR, ErrNoAddresses
+			return zeroC, zeroR, zeroA, ErrNoAddresses
 		}
 		addr, err := mp.selector.Pick(set, PickContext{})
 		if err != nil {
-			return zeroC, zeroR, err
+			return zeroC, zeroR, zeroA, err
 		}
 		sub := mp.getOrCreateSubPool(addr)
 		if sub == nil {
@@ -163,10 +164,15 @@ func (mp *managedCore[P, MC, C, R]) acquire(ctx context.Context) (C, R, error) {
 		}
 		mc, err := sub.p.acquire(ctx)
 		if err == nil {
-			return mp.connOf(mc), mp.mkRelease(sub.p, mc), nil
+			// The address is returned rather than left inside the pool because
+			// it is the one fact a managed request cannot recover afterwards:
+			// which backend the Selector chose for THIS request. Without it a
+			// per-request record from a managed client cannot attribute a slow
+			// response to the backend that produced it.
+			return mp.connOf(mc), mp.mkRelease(sub.p, mc), addr, nil
 		}
 		if !isDialOnlyErr(err) {
-			return zeroC, zeroR, err
+			return zeroC, zeroR, zeroA, err
 		}
 		lastErr = err
 		tried[addr.String()] = struct{}{}

@@ -164,12 +164,12 @@ type slabTapTransport struct {
 	led *slabLedger
 }
 
-func (t *slabTapTransport) openExchange(ctx context.Context) (protoStream, pushLookuper, releaser, error) {
-	s, pushLookup, release, err := t.transport.openExchange(ctx)
+func (t *slabTapTransport) openExchange(ctx context.Context) (protoStream, pushLookuper, releaser, exchangeStats, error) {
+	s, pushLookup, release, st, err := t.transport.openExchange(ctx)
 	if err != nil {
-		return nil, nil, nil, err
+		return nil, nil, nil, st, err
 	}
-	return slabTapStream{protoStream: s, led: t.led}, pushLookup, release, nil
+	return slabTapStream{protoStream: s, led: t.led}, pushLookup, release, st, nil
 }
 
 type slabTapStream struct {

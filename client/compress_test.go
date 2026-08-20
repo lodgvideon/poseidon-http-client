@@ -706,11 +706,11 @@ func (d *countingDoer) record(req *Request) error {
 	return nil
 }
 
-func (d *countingDoer) Do(_ context.Context, req *Request, _ *Response) error {
+func (d *countingDoer) doAttempt(_ context.Context, req *Request, _ *Response, _ int) error {
 	return d.record(req)
 }
 
-func (d *countingDoer) DoStream(_ context.Context, req *Request, _ *StreamResponse) error {
+func (d *countingDoer) doStreamAttempt(_ context.Context, req *Request, _ *StreamResponse, _ int) error {
 	return d.record(req)
 }
 

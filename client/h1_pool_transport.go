@@ -3,6 +3,8 @@ package client
 import (
 	"context"
 	"time"
+
+	"github.com/lodgvideon/poseidon-http-client/trace"
 )
 
 // h1PoolTransport adapts *h1Pool to the internal transport interface consumed by
@@ -21,16 +23,17 @@ type h1PoolTransport struct {
 // http1.Exchange.KeepAlive() when the body ends, and Close passes false for every
 // error/abort path so a poisoned conn is discarded rather than pooled. This
 // mirrors how h1singleConn drives its in-flight slot.
-func (pt *h1PoolTransport) openExchange(ctx context.Context) (protoStream, pushLookuper, releaser, error) {
+func (pt *h1PoolTransport) openExchange(ctx context.Context) (protoStream, pushLookuper, releaser, exchangeStats, error) {
+	st := exchangeStats{Proto: trace.ProtoH1, RemoteAddr: pt.p.addr}
 	mc, err := pt.p.acquire(ctx)
 	if err != nil {
-		return nil, nil, nil, err
+		return nil, nil, nil, st, err
 	}
 	// mc IS the releaser: it already exists on the heap and knows its pool, so no
 	// closure is built per exchange (#476). Exactly-once — which protects the
 	// conn's active count and hence this pool's MaxConnsPerHost bound — is
 	// enforced by h1Exchange.release rather than by a per-exchange sync.Once.
-	return &h1Exchange{ex: mc.c.NewExchange(), rel: mc}, nil, noRelease, nil
+	return &h1Exchange{ex: mc.c.NewExchange(), rel: mc}, nil, noRelease, st, nil
 }
 
 // close implements transport.close. Idempotent.

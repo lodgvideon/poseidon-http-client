@@ -561,23 +561,47 @@ func (c *Client) PoolStats() Stats {
 	return Stats{}
 }
 
+// requestObservation is what one attempt learns on its way through the
+// transport that the entry point cannot see for itself.
+//
+// It travels by value from sendRequest up to Do/DoStream, which turn it into a
+// RequestCompleteEvent. Keeping it a value — no pointer to fill in — is what
+// keeps the per-request allocation count where the gates in
+// openexchange_alloc_test.go recorded it.
+type requestObservation struct {
+	// stats is what the transport reported about the exchange it opened.
+	stats exchangeStats
+	// acquire is how long openExchange took: queueing plus, when this attempt
+	// dialled, the dial.
+	acquire time.Duration
+	// headersAt is when the response head arrived. Zero when none did, which is
+	// what makes TTFB zero rather than a negative duration measured against an
+	// unset clock.
+	headersAt time.Time
+}
+
 // observeStart fires the OnRequestStart hook and increments RequestsStarted.
-func (c *Client) observeStart(req *Request, authority string) {
+func (c *Client) observeStart(req *Request, authority string, attempt int) {
 	if h := c.hooksPtr.Load(); h != nil && h.OnRequestStart != nil {
 		h.OnRequestStart(RequestStartEvent{
-			Method: req.Method, Path: req.Path, Authority: authority, Attempt: 0,
+			Method: req.Method, Path: req.Path, Authority: authority, Attempt: attempt,
 		})
 	}
 	c.metrics.Counters.RequestsStarted.Add(1)
 }
 
-// observeDone records latency, success/error counters, and fires
-// the OnRequestComplete hook.
-func (c *Client) observeDone(req *Request, authority string, status int, bytesSent, bytesRecv int64, err error, latency time.Duration) {
-	c.metrics.Latency.Request.Observe(latency)
-	if err == nil {
+// observeDone records latency, success/error counters, and fires the
+// OnRequestComplete hook.
+//
+// It takes the finished event rather than the dozen values inside it: the event
+// grew from six fields to fourteen, and a parameter list that long is the kind
+// that gets two of its time.Durations swapped without the compiler noticing.
+// The event is passed by value and only read here, so nothing escapes.
+func (c *Client) observeDone(ev RequestCompleteEvent) {
+	c.metrics.Latency.Request.Observe(ev.Latency)
+	if ev.Err == nil {
 		c.metrics.Counters.RequestsSucceeded.Add(1)
-		if status >= 200 && status < 300 {
+		if ev.Status >= 200 && ev.Status < 300 {
 			c.metrics.Counters.Responses2xx.Add(1)
 		} else {
 			c.metrics.Counters.ResponsesNon2xx.Add(1)
@@ -586,12 +610,28 @@ func (c *Client) observeDone(req *Request, authority string, status int, bytesSe
 		c.metrics.Counters.RequestsErrored.Add(1)
 	}
 	if h := c.hooksPtr.Load(); h != nil && h.OnRequestComplete != nil {
-		h.OnRequestComplete(RequestCompleteEvent{
-			Method: req.Method, Path: req.Path, Authority: authority,
-			Status: status, Err: err, Latency: latency,
-			BytesSent: bytesSent, BytesRecv: bytesRecv,
-			Attempt: 0,
-		})
+		h.OnRequestComplete(ev)
+	}
+}
+
+// completeEvent assembles the event for one finished attempt. start is when the
+// attempt began; latency is measured by the caller so that it covers everything
+// this function is about to read.
+func completeEvent(req *Request, authority string, attempt int, start time.Time,
+	latency time.Duration, status int, bytesRecv int64, err error, obs requestObservation,
+) RequestCompleteEvent {
+	var ttfb time.Duration
+	if !obs.headersAt.IsZero() {
+		ttfb = obs.headersAt.Sub(start)
+	}
+	return RequestCompleteEvent{
+		Method: req.Method, Path: req.Path, Authority: authority,
+		Status: status, Err: err,
+		Start: start, Latency: latency, TTFB: ttfb,
+		Acquire: obs.acquire, Connect: obs.stats.Connect,
+		Proto: obs.stats.Proto, RemoteAddr: obs.stats.RemoteAddr,
+		BytesSent: int64(len(req.Body)), BytesRecv: bytesRecv,
+		Attempt: attempt,
 	}
 }
 
@@ -602,6 +642,13 @@ func (c *Client) observeDone(req *Request, authority string, status int, bytesSe
 // On error, resp fields are undefined; call resp.Reset() before reuse regardless.
 // DoStream differs here: it resets its StreamResponse internally.
 func (c *Client) Do(ctx context.Context, req *Request, resp *Response) error {
+	return c.doAttempt(ctx, req, resp, 0)
+}
+
+// doAttempt is Do with the attempt number the Retryer is replaying under. Do
+// passes 0; every field of the resulting RequestCompleteEvent describes this
+// attempt alone.
+func (c *Client) doAttempt(ctx context.Context, req *Request, resp *Response, attempt int) error {
 	if err := validateRequest(req); err != nil {
 		return err
 	}
@@ -629,10 +676,10 @@ func (c *Client) Do(ctx context.Context, req *Request, resp *Response) error {
 	if authority == "" {
 		authority = c.authority
 	}
-	c.observeStart(req, authority)
+	c.observeStart(req, authority, attempt)
 	start := time.Now()
 
-	err = c.do(ctx, req, resp)
+	obs, err := c.do(ctx, req, resp)
 
 	var status int
 	var bytesRecv int64
@@ -640,7 +687,8 @@ func (c *Client) Do(ctx context.Context, req *Request, resp *Response) error {
 		status = resp.Status
 		bytesRecv = resp.BytesReceived
 	}
-	c.observeDone(req, authority, status, int64(len(req.Body)), bytesRecv, err, time.Since(start))
+	c.observeDone(completeEvent(req, authority, attempt, start, time.Since(start),
+		status, bytesRecv, err, obs))
 	return err
 }
 
@@ -648,8 +696,12 @@ func (c *Client) Do(ctx context.Context, req *Request, resp *Response) error {
 // writes the body and trailers, and returns the exchange ready for response
 // reading. On error the transport is released and no cleanup is needed.
 //
-// Returns (s, pushLookup, release, sendCut, err). pushLookup is non-nil only
-// for H2 transports and is passed to drainResponse to handle server push.
+// Returns (s, pushLookup, release, sendCut, obs, err). pushLookup is non-nil
+// only for H2 transports and is passed to drainResponse to handle server push.
+// obs carries what the transport reported plus how long the acquire took, and
+// is filled in even on the error paths — a request that died waiting for a
+// connection still spent that time, and a per-request record that dropped it
+// would under-report exactly the failures worth investigating.
 //
 // sendCut is non-nil when the upload was cut short by the peer closing the
 // stream and that failure was deliberately not treated as fatal (see the RFC
@@ -668,10 +720,12 @@ func (c *Client) Do(ctx context.Context, req *Request, resp *Response) error {
 // Avoids heap-escaping the implicit struct: escape analysis confirmed via
 // -gcflags=-m that returning fields by value keeps them on the stack
 // (verified 2026-06-15 for the H2 hot path).
-func (c *Client) sendRequest(ctx context.Context, req *Request) (s protoStream, pushLookup pushLookuper, rel releaser, sendCut error, err error) {
-	s, pushLookup, rel, err = c.tr.openExchange(ctx)
+func (c *Client) sendRequest(ctx context.Context, req *Request) (s protoStream, pushLookup pushLookuper, rel releaser, sendCut error, obs requestObservation, err error) {
+	openStart := time.Now()
+	s, pushLookup, rel, obs.stats, err = c.tr.openExchange(ctx)
+	obs.acquire = time.Since(openStart)
 	if err != nil {
-		return nil, nil, nil, nil, err
+		return nil, nil, nil, nil, obs, err
 	}
 
 	// Validate dynamic trailers before buildHeaders emits the Trailer
@@ -683,7 +737,7 @@ func (c *Client) sendRequest(ctx context.Context, req *Request) (s protoStream, 
 		if _, verr := resolveTrailers(req); verr != nil {
 			_ = s.Close()
 			rel.release()
-			return nil, nil, nil, nil, verr
+			return nil, nil, nil, nil, obs, verr
 		}
 	}
 
@@ -696,7 +750,7 @@ func (c *Client) sendRequest(ctx context.Context, req *Request) (s protoStream, 
 		hdrSlicePool.Put(sp)
 		_ = s.Close()
 		rel.release()
-		return nil, nil, nil, nil, err
+		return nil, nil, nil, nil, obs, err
 	}
 	*sp = (*sp)[:0]
 	hdrSlicePool.Put(sp)
@@ -731,7 +785,7 @@ func (c *Client) sendRequest(ctx context.Context, req *Request) (s protoStream, 
 			if !errors.Is(err, conn.ErrStreamClosed) {
 				_ = s.Close()
 				rel.release()
-				return nil, nil, nil, nil, err
+				return nil, nil, nil, nil, obs, err
 			}
 			sendCut = err
 		} else if trailers {
@@ -739,14 +793,14 @@ func (c *Client) sendRequest(ctx context.Context, req *Request) (s protoStream, 
 				if !errors.Is(err, conn.ErrStreamClosed) {
 					_ = s.Close()
 					rel.release()
-					return nil, nil, nil, nil, err
+					return nil, nil, nil, nil, obs, err
 				}
 				sendCut = err
 			}
 		}
 	}
 
-	return s, pushLookup, rel, sendCut, nil
+	return s, pushLookup, rel, sendCut, obs, nil
 }
 
 // preferSendCut picks which failure to report when the response path failed on
@@ -777,21 +831,24 @@ func preferSendCut(respErr, sendCut error) error {
 	return fmt.Errorf("%w (the upload was cut short and the response then failed: %s)", sendCut, respErr.Error())
 }
 
-// do is the inner request transport, without hook or metric wrapping.
-func (c *Client) do(ctx context.Context, req *Request, resp *Response) error {
-	s, pushLookup, release, sendCut, err := c.sendRequest(ctx, req)
+// do is the inner request transport, without hook or metric wrapping. The
+// observation it returns is complete whether or not the error is nil.
+func (c *Client) do(ctx context.Context, req *Request, resp *Response) (requestObservation, error) {
+	s, pushLookup, release, sendCut, obs, err := c.sendRequest(ctx, req)
 	if err != nil {
-		return err
+		return obs, err
 	}
 
 	if req.BodyMode == BodyStream {
 		if resp == nil {
 			_ = s.Close()
 			release.release()
-			return fmt.Errorf("client: BodyStream requires a non-nil *Response")
+			return obs, fmt.Errorf("client: BodyStream requires a non-nil *Response")
 		}
-		if err := c.beginStreaming(ctx, s, release, sendCut, resp); err != nil {
-			return err
+		headersAt, serr := c.beginStreaming(ctx, s, release, sendCut, resp)
+		obs.headersAt = headersAt
+		if serr != nil {
+			return obs, serr
 		}
 		if !req.DisableDecompression {
 			enc := detectEncoding(resp.Headers)
@@ -804,18 +861,19 @@ func (c *Client) do(ctx context.Context, req *Request, resp *Response) error {
 					// reference.
 					_ = resp.BodyReader.Close()
 					resp.BodyReader = nil
-					return derr
+					return obs, derr
 				}
 				resp.BodyReader = dr
 			}
 		}
-		return nil // release deferred to resp.BodyReader.Close()
+		return obs, nil // release deferred to resp.BodyReader.Close()
 	}
 
-	err = drainResponse(ctx, pushLookup, s, req, resp, c.pushHandler, c.maxDecompressedSize, c.maxResponseBodySize)
+	headersAt, err := drainResponse(ctx, pushLookup, s, req, resp, c.pushHandler, c.maxDecompressedSize, c.maxResponseBodySize)
+	obs.headersAt = headersAt
 	_ = s.Close()
 	release.release()
-	return preferSendCut(err, sendCut)
+	return obs, preferSendCut(err, sendCut)
 }
 
 // DoStream issues a request and returns once the initial HEADERS frame
@@ -826,6 +884,12 @@ func (c *Client) do(ctx context.Context, req *Request, resp *Response) error {
 // The caller may allocate StreamResponse once and reuse it across calls;
 // DoStream calls sr.reset() internally before populating fields.
 func (c *Client) DoStream(ctx context.Context, req *Request, sr *StreamResponse) error {
+	return c.doStreamAttempt(ctx, req, sr, 0)
+}
+
+// doStreamAttempt is DoStream with the attempt number the Retryer is replaying
+// under. See doAttempt.
+func (c *Client) doStreamAttempt(ctx context.Context, req *Request, sr *StreamResponse, attempt int) error {
 	if err := validateRequest(req); err != nil {
 		return err
 	}
@@ -854,10 +918,10 @@ func (c *Client) DoStream(ctx context.Context, req *Request, sr *StreamResponse)
 	if authority == "" {
 		authority = c.authority
 	}
-	c.observeStart(req, authority)
+	c.observeStart(req, authority, attempt)
 	start := time.Now()
 
-	err = c.doStream(ctx, req, sr)
+	obs, err := c.doStream(ctx, req, sr)
 
 	var status int
 	if err == nil {
@@ -865,19 +929,25 @@ func (c *Client) DoStream(ctx context.Context, req *Request, sr *StreamResponse)
 	}
 	// BytesRecv is 0 and Latency is time-to-headers: this fires when the headers
 	// have arrived and the caller has not read any body yet. See
-	// RequestCompleteEvent.BytesRecv for why the event stays here.
-	c.observeDone(req, authority, status, int64(len(req.Body)), 0, err, time.Since(start))
+	// RequestCompleteEvent.BytesRecv for why the event stays here. TTFB is
+	// reported all the same, and on this path it is the honest one — Latency
+	// here happens to measure the same instant, but only because the event
+	// fires early, not because the two mean the same thing.
+	c.observeDone(completeEvent(req, authority, attempt, start, time.Since(start),
+		status, 0, err, obs))
 	return err
 }
 
 // doStream is the inner streaming transport, without hook/metric wrapping.
-func (c *Client) doStream(ctx context.Context, req *Request, sr *StreamResponse) error {
-	s, _, release, sendCut, err := c.sendRequest(ctx, req)
+func (c *Client) doStream(ctx context.Context, req *Request, sr *StreamResponse) (requestObservation, error) {
+	s, _, release, sendCut, obs, err := c.sendRequest(ctx, req)
 	if err != nil {
-		return err
+		return obs, err
 	}
 
-	return c.beginStreaming(ctx, s, release, sendCut, sr)
+	headersAt, err := c.beginStreaming(ctx, s, release, sendCut, sr)
+	obs.headersAt = headersAt
+	return obs, err
 }
 
 // beginRespStream selects the incremental streaming reader for a protoStream,
@@ -1246,30 +1316,41 @@ func writeBodyReader(ctx context.Context, s protoStream, r io.Reader, endStream 
 // the stream resets, writing into resp in place.
 // pushLookup is non-nil for H2 connections and resolves push-promised stream IDs;
 // it is nil for H1.1 (which has no server push).
-func drainResponse(ctx context.Context, pushLookup pushLookuper, s protoStream, req *Request, resp *Response, h PushHandler, maxDecompressed, maxBody int64) error {
+func drainResponse(ctx context.Context, pushLookup pushLookuper, s protoStream, req *Request, resp *Response, h PushHandler, maxDecompressed, maxBody int64) (time.Time, error) {
 	var gotHeaders bool
 	var enc ContentEncoding
+	// headersAt is the response head's arrival time, returned so the caller can
+	// report time-to-first-byte. It stays zero when no head arrives, and the
+	// caller reads that as "no TTFB to report" rather than as an instant.
+	var headersAt time.Time
 	for {
 		ev, err := s.Recv(ctx)
 		if err != nil {
-			return err
+			return headersAt, err
 		}
 		switch ev.Type {
 		case conn.EventHeaders:
+			if !gotHeaders {
+				// Before handleHeadersEvent, which is what flips gotHeaders. A
+				// trailer block also arrives as EventHeaders on some paths, so
+				// the guard is what keeps this the FIRST head rather than the
+				// last thing that looked like one.
+				headersAt = time.Now()
+			}
 			done, perr := handleHeadersEvent(ev, req, resp, &gotHeaders, &enc)
 			if perr != nil {
-				return perr
+				return headersAt, perr
 			}
 			if done {
-				return nil
+				return headersAt, nil
 			}
 		case conn.EventData:
 			done, derr := handleDataEvent(ev, req, resp, enc, maxBody, maxDecompressed)
 			if derr != nil {
-				return derr
+				return headersAt, derr
 			}
 			if done {
-				return nil
+				return headersAt, nil
 			}
 		case conn.EventInterimHeaders:
 			// Informational 1xx (RFC 7540 §8.1). Client.Do surfaces only the
@@ -1294,10 +1375,10 @@ func drainResponse(ctx context.Context, pushLookup pushLookuper, s protoStream, 
 				ev.Release()
 			}
 			if ev.EndStream {
-				return nil
+				return headersAt, nil
 			}
 		case conn.EventReset:
-			return &StreamResetError{Code: ev.RSTCode}
+			return headersAt, &StreamResetError{Code: ev.RSTCode}
 		case conn.EventPushPromise:
 			if h != nil && pushLookup != nil && ev.PushStreamID > 0 {
 				if ps, ok := pushLookup.LookupStream(ev.PushStreamID); ok {
@@ -1394,7 +1475,7 @@ func handleDataEvent(ev conn.StreamEvent, req *Request, resp *Response, enc Cont
 // push handler with the result. Handles nested PUSH_PROMISE recursively.
 func drainPushedStream(ctx context.Context, pushLookup pushLookuper, h PushHandler, promisedHeaders []conn.HeaderField, s conn.StreamRef, maxDecompressed, maxBody int64) {
 	pr := &Response{}
-	derr := drainResponse(ctx, pushLookup, s, &Request{BodyMode: BodyBuffer}, pr, h, maxDecompressed, maxBody)
+	_, derr := drainResponse(ctx, pushLookup, s, &Request{BodyMode: BodyBuffer}, pr, h, maxDecompressed, maxBody)
 	_ = s.Close()
 	h(ctx, promisedHeaders, pr, derr)
 }
