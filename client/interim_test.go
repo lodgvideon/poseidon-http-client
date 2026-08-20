@@ -9,6 +9,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
 	"github.com/lodgvideon/poseidon-http-client/client"
 	"github.com/lodgvideon/poseidon-http-client/conn"
 )
@@ -48,9 +51,7 @@ func earlyHintsServer(t *testing.T, interim int, body string) *client.Client {
 			HealthCheckPeriod: time.Second,
 		},
 	})
-	if err != nil {
-		t.Fatalf("NewClient: %v", err)
-	}
+	require.NoError(t, err, "NewClient")
 	t.Cleanup(func() { _ = c.Close() })
 	return c
 }
@@ -64,26 +65,24 @@ func TestConformance_RFC7540_Sec8_1_InterimResponse_FinalStatusWins(t *testing.T
 	c := earlyHintsServer(t, 1, "the actual body")
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-
 	var resp client.Response
 	resp.Reset()
+
 	err := c.Do(ctx, &client.Request{
 		Method: "GET", Path: "/", BodyMode: client.BodyBuffer, WantTrailers: true,
 	}, &resp)
-	if err != nil {
-		t.Fatalf("Do: %v", err)
-	}
-	if resp.Status != 200 {
-		t.Errorf("Status = %d, want 200 (interim 1xx latched as final)", resp.Status)
-	}
-	if got := string(resp.Body); got != "the actual body" {
-		t.Errorf("Body = %q, want %q", got, "the actual body")
-	}
+
+	require.NoError(t, err, "Do")
+	assert.Equal(t, 200, resp.Status,
+		"an interim 1xx was latched as the final status; RFC 7540 §8.1 makes 1xx "+
+			"informational, so the caller must never see it as the answer")
+	assert.Equal(t, "the actual body", string(resp.Body), "response body")
 	// The real 200 header block must land in Headers, never in Trailers.
 	for _, f := range resp.Trailers {
-		if n := string(f.Name); n == ":status" || n == "content-type" {
-			t.Errorf("final response header %q delivered as a trailer", n)
-		}
+		n := string(f.Name)
+		assert.Falsef(t, n == ":status" || n == "content-type",
+			"final response header %q delivered as a trailer: trailers are HEADERS after "+
+				"a FINAL status, so the 200 block is not one", n)
 	}
 }
 
@@ -93,16 +92,10 @@ func TestConformance_RFC7540_Sec8_1_InterimResponse_DoStream(t *testing.T) {
 	c := earlyHintsServer(t, 1, "streamed body")
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-
 	var sr client.StreamResponse
-	if err := c.DoStream(ctx, &client.Request{Method: "GET", Path: "/"}, &sr); err != nil {
-		t.Fatalf("DoStream: %v", err)
-	}
+	require.NoError(t, c.DoStream(ctx, &client.Request{Method: "GET", Path: "/"}, &sr), "DoStream")
 	defer func() { _ = sr.Close() }()
 
-	if sr.Status != 200 {
-		t.Errorf("Status = %d, want 200 (interim 1xx latched as final)", sr.Status)
-	}
 	var body []byte
 	for {
 		ev, err := sr.Recv(ctx)
@@ -116,9 +109,10 @@ func TestConformance_RFC7540_Sec8_1_InterimResponse_DoStream(t *testing.T) {
 			break
 		}
 	}
-	if string(body) != "streamed body" {
-		t.Errorf("Body = %q, want %q", body, "streamed body")
-	}
+
+	assert.Equal(t, 200, sr.Status,
+		"an interim 1xx was latched as the final status on the DoStream path")
+	assert.Equal(t, "streamed body", string(body), "streamed response body")
 }
 
 // TestConformance_RFC7540_Sec8_1_InterimResponse_BodyReader pins the same §8.1
@@ -127,27 +121,19 @@ func TestConformance_RFC7540_Sec8_1_InterimResponse_BodyReader(t *testing.T) {
 	c := earlyHintsServer(t, 1, "reader body")
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-
 	var resp client.Response
 	resp.Reset()
-	err := c.Do(ctx, &client.Request{
-		Method: "GET", Path: "/", BodyMode: client.BodyStream,
-	}, &resp)
-	if err != nil {
-		t.Fatalf("Do: %v", err)
-	}
+	require.NoError(t,
+		c.Do(ctx, &client.Request{Method: "GET", Path: "/", BodyMode: client.BodyStream}, &resp),
+		"Do")
 	defer func() { _ = resp.BodyReader.Close() }()
 
-	if resp.Status != 200 {
-		t.Errorf("Status = %d, want 200 (interim 1xx latched as final)", resp.Status)
-	}
 	body, err := io.ReadAll(resp.BodyReader)
-	if err != nil {
-		t.Fatalf("ReadAll: %v", err)
-	}
-	if string(body) != "reader body" {
-		t.Errorf("Body = %q, want %q", body, "reader body")
-	}
+
+	assert.Equal(t, 200, resp.Status,
+		"an interim 1xx was latched as the final status on the BodyReader path")
+	require.NoError(t, err, "ReadAll")
+	assert.Equal(t, "reader body", string(body), "body read through Response.BodyReader")
 }
 
 // TestConformance_RFC7540_Sec8_1_InterimResponse_Flood pins that an unbounded
@@ -157,11 +143,12 @@ func TestConformance_RFC7540_Sec8_1_InterimResponse_Flood(t *testing.T) {
 	c := earlyHintsServer(t, 150, "never reached")
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-
 	var resp client.Response
 	resp.Reset()
+
 	err := c.Do(ctx, &client.Request{Method: "GET", Path: "/", BodyMode: client.BodyBuffer}, &resp)
-	if err == nil {
-		t.Fatalf("Do succeeded with Status=%d; want an error: a 1xx flood must be bounded", resp.Status)
-	}
+
+	assert.Errorf(t, err,
+		"Do succeeded with Status=%d; an unbounded 1xx flood must be refused rather "+
+			"than pumped forever — the peer controls how many it sends", resp.Status)
 }

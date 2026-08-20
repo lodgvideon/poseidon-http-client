@@ -10,6 +10,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
 	"github.com/lodgvideon/poseidon-http-client/client"
 	"github.com/lodgvideon/poseidon-http-client/conn"
 )
@@ -28,51 +31,45 @@ func newH2TestServer(t *testing.T) (*httptest.Server, string) {
 func TestHooks_OnRequestStartAndComplete(t *testing.T) {
 	t.Parallel()
 	_, addr := newH2TestServer(t)
-
 	var startN, completeN atomic.Int32
 	var lastStatus atomic.Int32
+	var startMethod, startPath atomic.Value
+	var badLatency atomic.Bool
 	hooks := &client.Hooks{
 		OnRequestStart: func(e client.RequestStartEvent) {
 			startN.Add(1)
-			if e.Method != "GET" || e.Path != "/x" {
-				t.Errorf("RequestStartEvent = %+v", e)
-			}
+			startMethod.Store(e.Method)
+			startPath.Store(e.Path)
 		},
 		OnRequestComplete: func(e client.RequestCompleteEvent) {
 			completeN.Add(1)
 			lastStatus.Store(int32(e.Status))
 			if e.Latency <= 0 {
-				t.Errorf("Latency = %v, want > 0", e.Latency)
+				badLatency.Store(true)
 			}
 		},
 	}
-
 	c, err := client.NewClient(client.ClientOptions{
 		Addr:     addr,
 		ConnOpts: conn.ConnOptions{Dialer: &conn.TLSDialer{Config: &tls.Config{InsecureSkipVerify: true}}},
 		Hooks:    hooks,
 	})
-	if err != nil {
-		t.Fatalf("NewClient: %v", err)
-	}
+	require.NoError(t, err, "NewClient")
 	defer c.Close()
 
 	var resp client.Response
-	if err := c.Do(context.Background(), &client.Request{Method: "GET", Path: "/x"}, &resp); err != nil {
-		t.Fatalf("Do: %v", err)
-	}
-	if resp.Status != 200 {
-		t.Errorf("status = %d, want 200", resp.Status)
-	}
-	if startN.Load() != 1 {
-		t.Errorf("OnRequestStart fired %d times, want 1", startN.Load())
-	}
-	if completeN.Load() != 1 {
-		t.Errorf("OnRequestComplete fired %d times, want 1", completeN.Load())
-	}
-	if lastStatus.Load() != 200 {
-		t.Errorf("complete event status = %d, want 200", lastStatus.Load())
-	}
+	err = c.Do(context.Background(), &client.Request{Method: "GET", Path: "/x"}, &resp)
+
+	require.NoError(t, err, "Do")
+	assert.Equal(t, 200, resp.Status, "response status")
+	assert.EqualValues(t, 1, startN.Load(), "OnRequestStart must fire exactly once per request")
+	assert.EqualValues(t, 1, completeN.Load(), "OnRequestComplete must fire exactly once per request")
+	assert.Equal(t, "GET", startMethod.Load(), "RequestStartEvent.Method")
+	assert.Equal(t, "/x", startPath.Load(), "RequestStartEvent.Path")
+	assert.EqualValues(t, 200, lastStatus.Load(), "RequestCompleteEvent.Status")
+	assert.False(t, badLatency.Load(),
+		"RequestCompleteEvent.Latency was not positive: a zero latency makes the hook "+
+			"useless for the timing it exists to report")
 }
 
 func TestHooks_NilSafe(t *testing.T) {
@@ -83,14 +80,15 @@ func TestHooks_NilSafe(t *testing.T) {
 		ConnOpts: conn.ConnOptions{Dialer: &conn.TLSDialer{Config: &tls.Config{InsecureSkipVerify: true}}},
 		// Hooks intentionally nil.
 	})
-	if err != nil {
-		t.Fatalf("NewClient: %v", err)
-	}
+	require.NoError(t, err, "NewClient")
 	defer c.Close()
-	var _hookRes client.Response
-	if err := c.Do(context.Background(), &client.Request{Method: "GET", Path: "/"}, &_hookRes); err != nil {
-		t.Fatalf("Do (nil hooks): %v", err)
-	}
+
+	var resp client.Response
+	err = c.Do(context.Background(), &client.Request{Method: "GET", Path: "/"}, &resp)
+
+	require.NoError(t, err,
+		"a client constructed with no Hooks must serve requests: every hook site has to "+
+			"nil-check rather than assume a Hooks value exists")
 }
 
 func TestHooks_SetHooksAfterNewClient(t *testing.T) {
@@ -100,55 +98,49 @@ func TestHooks_SetHooksAfterNewClient(t *testing.T) {
 		Addr:     addr,
 		ConnOpts: conn.ConnOptions{Dialer: &conn.TLSDialer{Config: &tls.Config{InsecureSkipVerify: true}}},
 	})
-	if err != nil {
-		t.Fatalf("NewClient: %v", err)
-	}
+	require.NoError(t, err, "NewClient")
 	defer c.Close()
-
 	var n atomic.Int32
 	c.SetHooks(&client.Hooks{
 		OnRequestComplete: func(client.RequestCompleteEvent) { n.Add(1) },
 	})
-	var _hookRes client.Response
-	if err := c.Do(context.Background(), &client.Request{Method: "GET", Path: "/"}, &_hookRes); err != nil {
-		t.Fatalf("Do: %v", err)
-	}
-	if n.Load() != 1 {
-		t.Errorf("OnRequestComplete after SetHooks fired %d times, want 1", n.Load())
-	}
+
+	var resp client.Response
+	err = c.Do(context.Background(), &client.Request{Method: "GET", Path: "/"}, &resp)
+
+	require.NoError(t, err, "Do")
+	assert.EqualValues(t, 1, n.Load(),
+		"hooks installed after construction did not take effect: SetHooks swaps the "+
+			"atomic pointer every hook site reads")
 }
 
 func TestHooks_DoStream_OnRequestStartAndComplete(t *testing.T) {
 	t.Parallel()
 	_, addr := newH2TestServer(t)
-
 	var startN, completeN atomic.Int32
 	hooks := &client.Hooks{
 		OnRequestStart:    func(client.RequestStartEvent) { startN.Add(1) },
 		OnRequestComplete: func(client.RequestCompleteEvent) { completeN.Add(1) },
 	}
-
 	c, err := client.NewClient(client.ClientOptions{
 		Addr:     addr,
 		ConnOpts: conn.ConnOptions{Dialer: &conn.TLSDialer{Config: &tls.Config{InsecureSkipVerify: true}}},
 		Hooks:    hooks,
 	})
-	if err != nil {
-		t.Fatalf("NewClient: %v", err)
-	}
+	require.NoError(t, err, "NewClient")
 	defer c.Close()
 
 	var sr client.StreamResponse
-	if err := c.DoStream(context.Background(), &client.Request{Method: "GET", Path: "/"}, &sr); err != nil {
-		t.Fatalf("DoStream: %v", err)
+	err = c.DoStream(context.Background(), &client.Request{Method: "GET", Path: "/"}, &sr)
+	if err == nil {
+		_ = sr.Close()
 	}
-	_ = sr.Close()
-	if startN.Load() != 1 {
-		t.Errorf("OnRequestStart fired %d times, want 1", startN.Load())
-	}
-	if completeN.Load() != 1 {
-		t.Errorf("OnRequestComplete fired %d times, want 1", completeN.Load())
-	}
+
+	require.NoError(t, err, "DoStream")
+	assert.EqualValues(t, 1, startN.Load(),
+		"OnRequestStart must fire on the streaming path too, not only on buffered Do")
+	assert.EqualValues(t, 1, completeN.Load(),
+		"OnRequestComplete must fire on the streaming path too, not only on buffered Do")
 }
 
 func TestHooks_OnRetry(t *testing.T) {
@@ -166,64 +158,60 @@ func TestHooks_OnRetry(t *testing.T) {
 	srv.StartTLS()
 	t.Cleanup(srv.Close)
 	addr := srv.Listener.Addr().String()
-
 	var retryN atomic.Int32
+	var lowAttempt atomic.Bool
 	hooks := &client.Hooks{
 		OnRetry: func(e client.RetryEvent) {
 			retryN.Add(1)
 			if e.Attempt < 1 {
-				t.Errorf("retry attempt = %d, want >= 1", e.Attempt)
+				lowAttempt.Store(true)
 			}
 		},
 	}
-
 	c, err := client.NewClient(client.ClientOptions{
 		Addr:     addr,
 		ConnOpts: conn.ConnOptions{Dialer: &conn.TLSDialer{Config: &tls.Config{InsecureSkipVerify: true}}},
 		Hooks:    hooks,
 	})
-	if err != nil {
-		t.Fatalf("NewClient: %v", err)
-	}
+	require.NoError(t, err, "NewClient")
 	defer c.Close()
-
 	r := client.NewRetryer(c, client.RetryOptions{
 		MaxAttempts: 3,
 		Backoff:     func(int) time.Duration { return 10 * time.Millisecond },
 		IsRetryable: func(_ error, resp *client.Response) bool { return resp != nil && resp.Status == 503 },
 	})
+
 	var resp client.Response
-	if err := r.Do(context.Background(), &client.Request{Method: "GET", Path: "/"}, &resp); err != nil {
-		t.Fatalf("Retryer.Do: %v", err)
-	}
-	if resp.Status != 200 {
-		t.Errorf("status = %d, want 200", resp.Status)
-	}
-	if retryN.Load() != 1 {
-		t.Errorf("OnRetry fired %d times, want 1", retryN.Load())
-	}
+	err = r.Do(context.Background(), &client.Request{Method: "GET", Path: "/"}, &resp)
+
+	require.NoError(t, err, "Retryer.Do")
+	assert.Equal(t, 200, resp.Status, "the retried request must return the second answer")
+	assert.EqualValues(t, 1, retryN.Load(),
+		"OnRetry must fire exactly once for one retried attempt")
+	assert.False(t, lowAttempt.Load(),
+		"RetryEvent.Attempt was below 1: the field numbers attempts from 1, so 0 tells "+
+			"a caller nothing about which try failed")
 }
 
 func TestHooks_OnDial(t *testing.T) {
 	t.Parallel()
 	_, addr := newH2TestServer(t)
-
 	var dialN atomic.Int32
+	var gotAddr atomic.Value
+	var badDuration atomic.Bool
+	var dialErr atomic.Value
 	hooks := &client.Hooks{
 		OnDial: func(e client.DialEvent) {
 			dialN.Add(1)
-			if e.Addr != addr {
-				t.Errorf("DialEvent.Addr = %q, want %q", e.Addr, addr)
-			}
+			gotAddr.Store(e.Addr)
 			if e.Duration <= 0 {
-				t.Errorf("Duration = %v, want > 0", e.Duration)
+				badDuration.Store(true)
 			}
 			if e.Err != nil {
-				t.Errorf("Err = %v, want nil", e.Err)
+				dialErr.Store(e.Err.Error())
 			}
 		},
 	}
-
 	c, err := client.NewClient(client.ClientOptions{
 		Addr:      addr,
 		ConnOpts:  conn.ConnOptions{Dialer: &conn.TLSDialer{Config: &tls.Config{InsecureSkipVerify: true}}},
@@ -231,24 +219,26 @@ func TestHooks_OnDial(t *testing.T) {
 		Transport: client.TransportPool,
 		Pool:      &client.PoolOptions{MaxConnsPerHost: 2},
 	})
-	if err != nil {
-		t.Fatalf("NewClient: %v", err)
-	}
+	require.NoError(t, err, "NewClient")
 	defer c.Close()
 
-	var _hookRes client.Response
-	if err := c.Do(context.Background(), &client.Request{Method: "GET", Path: "/"}, &_hookRes); err != nil {
-		t.Fatalf("Do: %v", err)
-	}
-	if dialN.Load() != 1 {
-		t.Errorf("OnDial fired %d times, want 1", dialN.Load())
-	}
+	var resp client.Response
+	err = c.Do(context.Background(), &client.Request{Method: "GET", Path: "/"}, &resp)
+
+	require.NoError(t, err, "Do")
+	assert.EqualValues(t, 1, dialN.Load(), "OnDial must fire once for the one conn opened")
+	assert.Equal(t, addr, gotAddr.Load(), "DialEvent.Addr")
+	assert.False(t, badDuration.Load(), "DialEvent.Duration was not positive")
+	// == nil, not assert.Nil: assert.Nil decides by reflection and would accept a
+	// typed nil stored in the interface, which is exactly the shape a hook that
+	// reports a (*someError)(nil) would produce.
+	assert.Truef(t, dialErr.Load() == nil,
+		"DialEvent.Err = %v on a dial that succeeded", dialErr.Load())
 }
 
 func TestHooks_OnConnClose_Idle(t *testing.T) {
 	t.Parallel()
 	_, addr := newH2TestServer(t)
-
 	var mu sync.Mutex
 	var closeEvents []client.ConnCloseEvent
 	hooks := &client.Hooks{
@@ -258,7 +248,6 @@ func TestHooks_OnConnClose_Idle(t *testing.T) {
 			mu.Unlock()
 		},
 	}
-
 	c, err := client.NewClient(client.ClientOptions{
 		Addr:      addr,
 		ConnOpts:  conn.ConnOptions{Dialer: &conn.TLSDialer{Config: &tls.Config{InsecureSkipVerify: true}}},
@@ -270,14 +259,13 @@ func TestHooks_OnConnClose_Idle(t *testing.T) {
 			HealthCheckPeriod: 25 * time.Millisecond,
 		},
 	})
-	if err != nil {
-		t.Fatalf("NewClient: %v", err)
-	}
+	require.NoError(t, err, "NewClient")
 	defer c.Close()
-	var _hookRes client.Response
-	if err := c.Do(context.Background(), &client.Request{Method: "GET", Path: "/"}, &_hookRes); err != nil {
-		t.Fatalf("Do: %v", err)
-	}
+	var resp client.Response
+	require.NoError(t,
+		c.Do(context.Background(), &client.Request{Method: "GET", Path: "/"}, &resp), "Do")
+
+	// The conn now sits idle past IdleTimeout; the health tick must evict it.
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
 		mu.Lock()
@@ -288,33 +276,26 @@ func TestHooks_OnConnClose_Idle(t *testing.T) {
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
+
 	mu.Lock()
 	defer mu.Unlock()
-	if len(closeEvents) == 0 {
-		t.Fatalf("OnConnClose never fired; expected at least 1 (idle eviction)")
-	}
-	if closeEvents[0].Reason != client.CloseIdle {
-		t.Errorf("close reason = %v, want CloseIdle", closeEvents[0].Reason)
-	}
-	if closeEvents[0].Addr != addr {
-		t.Errorf("close addr = %q, want %q", closeEvents[0].Addr, addr)
-	}
+	require.NotEmpty(t, closeEvents,
+		"OnConnClose never fired: the idle eviction an operator watches for is invisible")
+	assert.Equal(t, client.CloseIdle, closeEvents[0].Reason,
+		"an idle eviction must be attributed to idleness, not to another close reason")
+	assert.Equal(t, addr, closeEvents[0].Addr, "ConnCloseEvent.Addr")
 }
 
 func TestHooks_AllHooks_EndToEnd(t *testing.T) {
 	t.Parallel()
 	_, addr := newH2TestServer(t)
-
-	var (
-		startN, completeN, dialN, closeN atomic.Int32
-	)
+	var startN, completeN, dialN, closeN atomic.Int32
 	hooks := &client.Hooks{
 		OnRequestStart:    func(client.RequestStartEvent) { startN.Add(1) },
 		OnRequestComplete: func(client.RequestCompleteEvent) { completeN.Add(1) },
 		OnDial:            func(client.DialEvent) { dialN.Add(1) },
 		OnConnClose:       func(client.ConnCloseEvent) { closeN.Add(1) },
 	}
-
 	c, err := client.NewClient(client.ClientOptions{
 		Addr:      addr,
 		ConnOpts:  conn.ConnOptions{Dialer: &conn.TLSDialer{Config: &tls.Config{InsecureSkipVerify: true}}},
@@ -322,50 +303,32 @@ func TestHooks_AllHooks_EndToEnd(t *testing.T) {
 		Transport: client.TransportPool,
 		Pool:      &client.PoolOptions{MaxConnsPerHost: 1, MaxStreamsPerConn: 4, HealthCheckPeriod: time.Second},
 	})
-	if err != nil {
-		t.Fatalf("NewClient: %v", err)
-	}
+	require.NoError(t, err, "NewClient")
 
 	for i := 0; i < 5; i++ {
-		var _hookRes client.Response
-		if err := doWithRetry(t, c, context.Background(), &client.Request{Method: "GET", Path: "/"}, &_hookRes); err != nil {
-			t.Fatalf("Do[%d]: %v", i, err)
-		}
+		var resp client.Response
+		require.NoErrorf(t,
+			doWithRetry(t, c, context.Background(), &client.Request{Method: "GET", Path: "/"}, &resp),
+			"Do[%d]", i)
 	}
 	_ = c.Close()
 
-	if got := startN.Load(); got != 5 {
-		t.Errorf("OnRequestStart fired %d times, want 5", got)
-	}
-	if got := completeN.Load(); got != 5 {
-		t.Errorf("OnRequestComplete fired %d times, want 5", got)
-	}
-	if dialN.Load() != 1 {
-		t.Errorf("OnDial fired %d times, want 1", dialN.Load())
-	}
+	assert.EqualValues(t, 5, startN.Load(), "OnRequestStart across 5 requests")
+	assert.EqualValues(t, 5, completeN.Load(), "OnRequestComplete across 5 requests")
+	assert.EqualValues(t, 1, dialN.Load(),
+		"OnDial fired more than once: five requests over one pooled conn need one dial")
 	deadline := time.Now().Add(time.Second)
 	for time.Now().Before(deadline) && closeN.Load() == 0 {
 		time.Sleep(10 * time.Millisecond)
 	}
-	if closeN.Load() != 1 {
-		t.Errorf("OnConnClose fired %d times, want 1 (manual close)", closeN.Load())
-	}
+	assert.EqualValues(t, 1, closeN.Load(), "OnConnClose on the manual Close")
 
-	// Verify counters.
+	// The counters must agree with the hooks: two independent observers of the
+	// same events, so a discrepancy means one of them is wired to the wrong site.
 	snap := c.MetricsSnapshot()
-	if snap.Counters.RequestsStarted != 5 {
-		t.Errorf("RequestsStarted = %d, want 5", snap.Counters.RequestsStarted)
-	}
-	if snap.Counters.RequestsSucceeded != 5 {
-		t.Errorf("RequestsSucceeded = %d, want 5", snap.Counters.RequestsSucceeded)
-	}
-	if snap.Counters.DialsAttempted != 1 {
-		t.Errorf("DialsAttempted = %d, want 1", snap.Counters.DialsAttempted)
-	}
-	if snap.Counters.ConnsClosed != 1 {
-		t.Errorf("ConnsClosed = %d, want 1", snap.Counters.ConnsClosed)
-	}
-	if snap.Latency.Request.Count != 5 {
-		t.Errorf("Latency.Request.Count = %d, want 5", snap.Latency.Request.Count)
-	}
+	assert.EqualValues(t, 5, snap.Counters.RequestsStarted, "RequestsStarted")
+	assert.EqualValues(t, 5, snap.Counters.RequestsSucceeded, "RequestsSucceeded")
+	assert.EqualValues(t, 1, snap.Counters.DialsAttempted, "DialsAttempted")
+	assert.EqualValues(t, 1, snap.Counters.ConnsClosed, "ConnsClosed")
+	assert.EqualValues(t, 5, snap.Latency.Request.Count, "Latency.Request.Count")
 }

@@ -15,6 +15,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"golang.org/x/net/http2"
 
 	"github.com/lodgvideon/poseidon-http-client/client"
@@ -121,8 +123,9 @@ func ltH2Server(t *testing.T, release <-chan struct{}) string {
 		// The flush is load-bearing: h2 holds HEADERS until the handler writes or
 		// returns, and this one is about to do neither. Without it DoStream never
 		// returns and nothing ever closes release.
-		if err := http.NewResponseController(w).Flush(); err != nil {
-			t.Errorf("flush the response headers: %v — without them DoStream never returns and nothing closes release", err)
+		if !assert.NoError(t, http.NewResponseController(w).Flush(),
+			"flush the response headers — without them DoStream never returns and "+
+				"nothing closes release") {
 			return
 		}
 		select {
@@ -137,9 +140,7 @@ func ltH2Server(t *testing.T, release <-chan struct{}) string {
 			}
 		}
 	}))
-	if err := http2.ConfigureServer(srv.Config, &http2.Server{}); err != nil {
-		t.Fatalf("ConfigureServer: %v", err)
-	}
+	require.NoError(t, http2.ConfigureServer(srv.Config, &http2.Server{}), "ConfigureServer")
 	srv.EnableHTTP2 = true
 	srv.StartTLS()
 	t.Cleanup(srv.Close)
@@ -161,9 +162,7 @@ func ltH2Client(t *testing.T, addr string) *client.Client {
 			},
 		},
 	})
-	if err != nil {
-		t.Fatalf("NewClient: %v", err)
-	}
+	require.NoError(t, err, "NewClient")
 	t.Cleanup(func() { _ = c.Close() })
 	return c
 }
@@ -179,18 +178,24 @@ func ltH2Client(t *testing.T, addr string) *client.Client {
 // references the *conn.Stream at that point, so anything the receive path kept
 // per-stream is still reachable and still counted.
 //
+// NOTHING may allocate between `baseline` and `after` beyond the transfer under
+// measurement — that is why the drain loop below records its outcome in local
+// variables and every assertion runs after the second ltLiveHeap(). testify
+// reflects and builds a []interface{} per call, so an assertion inside the loop
+// would be charged to the client's retention.
+//
 // It is NOT sampled mid-transfer, and that is a real limitation rather than an
 // oversight: runtime.GC()'s stop-the-world pause is long enough that the caller
 // misses more than StreamEventBuffer frames, conn's push() drops them and
 // resets the stream (CANCEL), and the transfer dies before it can be
 // measured. So this test would not catch a receive path that ballooned during
-// the transfer and freed at END_STREAM. See the EventReset branch below.
+// the transfer and freed at END_STREAM. See the reset branch below.
 //
 // Controls, in order of what they rule out:
 //
 //   - consumed == ltBodyBytes rules out a flat heap that is flat because the
 //     server never really sent 64 MiB.
-//   - the EventReset branch rules out a "pass" on a transfer that conn killed
+//   - the reset branch rules out a "pass" on a transfer that conn killed
 //     rather than streamed.
 //   - maxEvent > 16384 rules out the peer having ignored our advertised
 //     MAX_FRAME_SIZE and fallen back to the RFC default; combined with
@@ -201,18 +206,12 @@ func ltH2Client(t *testing.T, addr string) *client.Client {
 func TestIT_H2_StreamedDownload_RetentionStaysBounded(t *testing.T) {
 	release := make(chan struct{})
 	c := ltH2Client(t, ltH2Server(t, release))
-
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
-
 	var sr client.StreamResponse
-	if err := c.DoStream(ctx, &client.Request{Method: "GET", Path: "/"}, &sr); err != nil {
-		t.Fatalf("DoStream: %v", err)
-	}
+	require.NoError(t, c.DoStream(ctx, &client.Request{Method: "GET", Path: "/"}, &sr), "DoStream")
 	defer sr.Close()
-	if sr.Status != 200 {
-		t.Fatalf("status = %d, want 200", sr.Status)
-	}
+	require.Equal(t, 200, sr.Status, "response status")
 
 	// Baseline with the connection up and the headers parsed, so the delta
 	// measures the body transfer and not connection setup — and with the server
@@ -224,21 +223,24 @@ func TestIT_H2_StreamedDownload_RetentionStaysBounded(t *testing.T) {
 	// stream reset that same window kept causing.
 	baseline := ltLiveHeap()
 	close(release)
-
 	var consumed int64
 	var maxEvent int
+	var recvErr error
+	var resetCode conn.ErrCode
+	sawReset := false
 	for {
 		ev, err := sr.Recv(ctx)
 		if err != nil {
-			t.Fatalf("Recv after %d bytes: %v", consumed, err)
+			recvErr = err
+			break
 		}
 		if ev.Type == client.EventReset {
 			// Not a silent break: conn resets a stream whose caller falls
 			// behind (CANCEL past StreamEventBuffer events). Treating that as
 			// a normal end would let this test "pass" on a transfer that was
 			// killed rather than streamed.
-			t.Fatalf("stream reset (%v) after %d of %d bytes — the caller fell behind the reader; nothing was measured",
-				ev.ResetCode, consumed, ltBodyBytes)
+			sawReset, resetCode = true, ev.ResetCode
+			break
 		}
 		if ev.Type != client.EventData {
 			if ev.EndStream {
@@ -254,28 +256,32 @@ func TestIT_H2_StreamedDownload_RetentionStaysBounded(t *testing.T) {
 			break
 		}
 	}
-
 	// Measured with the whole body consumed and sr — and through it the
 	// *conn.Stream — still alive.
 	after := ltLiveHeap()
 
-	if consumed != ltBodyBytes {
-		t.Fatalf("consumed = %d bytes, want %d — the transfer under measurement did not happen", consumed, ltBodyBytes)
-	}
-	if maxEvent <= 16384 {
-		t.Fatalf("largest DATA event = %d, want > 16384 (the RFC 7540 default): the peer did not honour the MAX_FRAME_SIZE=%d we advertised, so ltPipelineBytes is not derived from anything real",
-			maxEvent, ltMaxFrameSize)
-	}
-	if maxEvent > ltMaxFrameSize {
-		t.Fatalf("largest DATA event = %d, want <= advertised MAX_FRAME_SIZE %d", maxEvent, ltMaxFrameSize)
-	}
-
-	if after > baseline && after-baseline > ltRetentionBound {
-		t.Fatalf("after fully consuming %d MiB the stream still holds %d KiB, want <= %d KiB (%d-event channel x %d B frames, x4 slack): retention scales with body, not with the pipeline",
-			ltBodyBytes>>20, (after-baseline)/1024, ltRetentionBound/1024, ltEventBuf, ltMaxFrameSize)
-	}
+	require.NoErrorf(t, recvErr, "Recv after %d bytes", consumed)
+	require.Falsef(t, sawReset,
+		"stream reset (%v) after %d of %d bytes — the caller fell behind the reader; "+
+			"nothing was measured", resetCode, consumed, ltBodyBytes)
+	require.EqualValuesf(t, ltBodyBytes, consumed,
+		"consumed = %d bytes, want %d — the transfer under measurement did not happen",
+		consumed, ltBodyBytes)
+	require.Greaterf(t, maxEvent, 16384,
+		"largest DATA event = %d, want > 16384 (the RFC 7540 default): the peer did not "+
+			"honour the MAX_FRAME_SIZE=%d we advertised, so ltPipelineBytes is not derived "+
+			"from anything real", maxEvent, ltMaxFrameSize)
+	require.LessOrEqualf(t, maxEvent, ltMaxFrameSize,
+		"largest DATA event = %d, want <= advertised MAX_FRAME_SIZE %d", maxEvent, ltMaxFrameSize)
 	t.Logf("streamed %d MiB: live-heap delta after full consumption %+d KiB (bound %d KiB), largest DATA event %d B",
 		consumed>>20, (int64(after)-int64(baseline))/1024, ltRetentionBound/1024, maxEvent)
+	if after > baseline {
+		assert.LessOrEqualf(t, after-baseline, uint64(ltRetentionBound),
+			"after fully consuming %d MiB the stream still holds %d KiB, want <= %d KiB "+
+				"(%d-event channel x %d B frames, x4 slack): retention scales with body, "+
+				"not with the pipeline",
+			ltBodyBytes>>20, (after-baseline)/1024, ltRetentionBound/1024, ltEventBuf, ltMaxFrameSize)
+	}
 }
 
 // TestIT_H2_StreamedDownload_NonConsumerIsRefused is the control for
@@ -304,39 +310,35 @@ func TestIT_H2_StreamedDownload_NonConsumerIsRefused(t *testing.T) {
 			}
 		}
 	}))
-	if err := http2.ConfigureServer(srv.Config, &http2.Server{}); err != nil {
-		t.Fatalf("ConfigureServer: %v", err)
-	}
+	require.NoError(t, http2.ConfigureServer(srv.Config, &http2.Server{}), "ConfigureServer")
 	srv.EnableHTTP2 = true
 	srv.StartTLS()
 	defer srv.Close()
-
 	c := ltH2Client(t, strings.TrimPrefix(srv.URL, "https://"))
-
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-
 	var sr client.StreamResponse
-	if err := c.DoStream(ctx, &client.Request{Method: "GET", Path: "/"}, &sr); err != nil {
-		t.Fatalf("DoStream: %v", err)
-	}
+	require.NoError(t, c.DoStream(ctx, &client.Request{Method: "GET", Path: "/"}, &sr), "DoStream")
 	defer sr.Close()
 
 	// Consume nothing. Give the server a long window to push whatever it can.
 	time.Sleep(2 * time.Second)
 
 	got := served.Load()
-	if got >= ltBodyBytes {
-		t.Fatalf("server pushed the whole %d-byte body into a client that consumed nothing: no bound is enforced, and every retention number measured against this harness is worthless", got)
-	}
-	if got > ltRetentionBound {
-		t.Fatalf("server pushed %d bytes into a client that consumed nothing, want <= %d (%d-event channel x %d B frames, x4 slack)",
-			got, ltRetentionBound, ltEventBuf, ltMaxFrameSize)
-	}
-	if got <= ltStreamWindow {
-		t.Fatalf("server pushed only %d bytes, want > the advertised per-stream window %d: this test is meant to observe the event-channel bound, but something stopped the peer earlier — re-derive the bound before trusting it",
-			got, ltStreamWindow)
-	}
+	t.Logf("non-consumer absorbed %d bytes (%.0f KiB) of %d MiB; bound %d KiB, advertised stream window %d B",
+		got, float64(got)/1024, ltBodyBytes>>20, ltRetentionBound/1024, ltStreamWindow)
+	require.Lessf(t, got, int64(ltBodyBytes),
+		"server pushed the whole %d-byte body into a client that consumed nothing: no "+
+			"bound is enforced, and every retention number measured against this harness "+
+			"is worthless", got)
+	require.LessOrEqualf(t, got, int64(ltRetentionBound),
+		"server pushed %d bytes into a client that consumed nothing, want <= %d "+
+			"(%d-event channel x %d B frames, x4 slack)",
+		got, ltRetentionBound, ltEventBuf, ltMaxFrameSize)
+	require.Greaterf(t, got, int64(ltStreamWindow),
+		"server pushed only %d bytes, want > the advertised per-stream window %d: this "+
+			"test is meant to observe the event-channel bound, but something stopped the "+
+			"peer earlier — re-derive the bound before trusting it", got, ltStreamWindow)
 
 	// The caller learns about it as a reset, not as a stall. The code is CANCEL:
 	// the client shed a response it could not buffer, so REFUSED_STREAM's
@@ -346,18 +348,15 @@ func TestIT_H2_StreamedDownload_NonConsumerIsRefused(t *testing.T) {
 	defer rcancel()
 	for {
 		ev, err := sr.Recv(rctx)
-		if err != nil {
-			t.Fatalf("Recv: %v, want an EventReset to arrive", err)
-		}
+		require.NoError(t, err, "Recv: an EventReset must arrive rather than a stall")
 		if ev.Type == client.EventReset {
-			if ev.ResetCode != frame.ErrCodeCancel {
-				t.Fatalf("reset code = %v, want CANCEL", ev.ResetCode)
-			}
+			assert.Equal(t, frame.ErrCodeCancel, ev.ResetCode,
+				"the shed response must be CANCEL: REFUSED_STREAM promises the request went "+
+					"unprocessed (RFC 9113 §8.7), which would make the retry layer replay "+
+					"work the server already did")
 			break
 		}
 	}
-	t.Logf("non-consumer stopped after %d bytes (%.0f KiB) of %d MiB, via RST_STREAM(CANCEL); advertised stream window is %d B",
-		got, float64(got)/1024, ltBodyBytes>>20, ltStreamWindow)
 }
 
 // TestIT_H1_LargeDownload_StreamsAndDiscardsFlat covers the H1 half
@@ -395,7 +394,6 @@ func TestIT_H1_LargeDownload_StreamsAndDiscardsFlat(t *testing.T) {
 		}
 	}))
 	defer srv.Close()
-
 	c, err := client.NewClient(client.ClientOptions{
 		Transport: client.TransportH1SingleConn,
 		Addr:      srv.Listener.Addr().String(),
@@ -406,11 +404,8 @@ func TestIT_H1_LargeDownload_StreamsAndDiscardsFlat(t *testing.T) {
 		// question could be asked.
 		MaxResponseBodySize: 2 * ltBodyBytes,
 	})
-	if err != nil {
-		t.Fatalf("NewClient: %v", err)
-	}
+	require.NoError(t, err, "NewClient")
 	defer c.Close()
-
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 
@@ -426,36 +421,29 @@ func TestIT_H1_LargeDownload_StreamsAndDiscardsFlat(t *testing.T) {
 	// cheap, and the streamed-body drain is covered at a sane size by
 	// TestH1_BodyStream_Incremental.
 	var sr client.StreamResponse
-	if err := c.DoStream(ctx, &client.Request{Method: "GET", Path: "/"}, &sr); err != nil {
-		t.Fatalf("H1 DoStream: %v", err)
-	}
+	require.NoError(t, c.DoStream(ctx, &client.Request{Method: "GET", Path: "/"}, &sr), "H1 DoStream")
 	_ = sr.Close()
-
 	var streamed client.Response
-	if err := c.Do(ctx, &client.Request{Method: "GET", Path: "/", BodyMode: client.BodyStream}, &streamed); err != nil {
-		t.Fatalf("H1 Do(BodyStream): %v", err)
-	}
-	if streamed.BodyReader == nil {
-		t.Fatal("H1 Do(BodyStream) returned no BodyReader")
-	}
+	require.NoError(t,
+		c.Do(ctx, &client.Request{Method: "GET", Path: "/", BodyMode: client.BodyStream}, &streamed),
+		"H1 Do(BodyStream)")
+	require.NotNil(t, streamed.BodyReader, "H1 Do(BodyStream) returned no BodyReader")
 	first := make([]byte, 4096)
-	if _, err := io.ReadFull(streamed.BodyReader, first); err != nil {
-		t.Fatalf("read the first chunk of the streamed H1 body: %v", err)
-	}
+	_, err = io.ReadFull(streamed.BodyReader, first)
+	require.NoError(t, err, "read the first chunk of the streamed H1 body")
 	_ = streamed.BodyReader.Close()
 
 	// The one large-transfer shape H1 does support must not retain the body.
 	var resp client.Response
-	if err := c.Do(ctx, &client.Request{Method: "GET", Path: "/", BodyMode: client.BodyDiscard}, &resp); err != nil {
-		t.Fatalf("Do(BodyDiscard): %v", err)
-	}
+	err = c.Do(ctx, &client.Request{Method: "GET", Path: "/", BodyMode: client.BodyDiscard}, &resp)
 
-	if resp.BytesReceived != ltBodyBytes {
-		t.Fatalf("BytesReceived = %d, want %d — the transfer under measurement did not happen", resp.BytesReceived, ltBodyBytes)
-	}
-	if len(resp.Body) != 0 {
-		t.Fatalf("BodyDiscard retained %d body bytes, want 0", len(resp.Body))
-	}
+	require.NoError(t, err, "Do(BodyDiscard)")
+	require.EqualValuesf(t, ltBodyBytes, resp.BytesReceived,
+		"BytesReceived = %d, want %d — the transfer under measurement did not happen",
+		resp.BytesReceived, ltBodyBytes)
+	assert.Emptyf(t, resp.Body,
+		"BodyDiscard retained %d body bytes, want 0: the mode exists to count without keeping",
+		len(resp.Body))
 	t.Logf("H1 Do(BodyDiscard) counted %d MiB and retained %d body bytes",
 		resp.BytesReceived>>20, len(resp.Body))
 }
@@ -466,13 +454,11 @@ func TestIT_H1_LargeDownload_StreamsAndDiscardsFlat(t *testing.T) {
 func ltBreakingH1Peer(t *testing.T, declared, send int, rst bool) string {
 	t.Helper()
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("Listen: %v", err)
-	}
+	require.NoError(t, err, "Listen")
 	t.Cleanup(func() { _ = ln.Close() })
 	go func() {
-		nc, err := ln.Accept()
-		if err != nil {
+		nc, aerr := ln.Accept()
+		if aerr != nil {
 			return
 		}
 		defer nc.Close()
@@ -523,9 +509,7 @@ func TestIT_H1_MidBodyBreak_TruncationIsUnclassifiable(t *testing.T) {
 			Addr:      ltBreakingH1Peer(t, declared, sent, rst),
 			ConnOpts:  conn.ConnOptions{Dialer: &conn.PlaintextDialer{}},
 		})
-		if err != nil {
-			t.Fatalf("NewClient: %v", err)
-		}
+		require.NoError(t, err, "NewClient")
 		t.Cleanup(func() { _ = c.Close() })
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
@@ -537,53 +521,49 @@ func TestIT_H1_MidBodyBreak_TruncationIsUnclassifiable(t *testing.T) {
 	// assertTruncatedButPopulated covers half 1, which both breaks share.
 	assertTruncatedButPopulated := func(t *testing.T, resp client.Response, err error) {
 		t.Helper()
-		if err == nil {
-			t.Fatal("Do returned nil error for a body truncated at 100 of 1000 bytes")
-		}
-		if resp.Status != 200 {
-			t.Fatalf("resp.Status = %d, want 200 — a caller that trusts Status over err sees a complete 200", resp.Status)
-		}
-		if len(resp.Body) != sent {
-			t.Fatalf("len(resp.Body) = %d, want %d — the truncated prefix is handed back alongside the error", len(resp.Body), sent)
-		}
-		if resp.BytesReceived != sent {
-			t.Fatalf("resp.BytesReceived = %d, want %d", resp.BytesReceived, sent)
-		}
+		require.Error(t, err, "Do returned nil for a body truncated at 100 of 1000 bytes")
+		assert.Equal(t, 200, resp.Status,
+			"a caller that trusts Status over err sees a complete 200 for a truncated body")
+		assert.Lenf(t, resp.Body, sent,
+			"len(resp.Body) = %d, want %d — the truncated prefix is handed back alongside "+
+				"the error", len(resp.Body), sent)
+		assert.EqualValues(t, sent, resp.BytesReceived, "resp.BytesReceived")
 	}
 
 	t.Run("cleanFIN", func(t *testing.T) {
 		resp, err := run(t, false)
-		assertTruncatedButPopulated(t, resp, err)
 
+		assertTruncatedButPopulated(t, resp, err)
 		// Half 2: an untyped fmt.Errorf leaf. Unwrap()==nil is the load-bearing
 		// assertion — it is what proves there is no wrapped sentinel a caller
 		// could match on, and it is what a typed replacement would break.
 		want := fmt.Sprintf("http1: premature EOF: got %d of %d bytes", sent, declared)
-		if err.Error() != want {
-			t.Fatalf("err = %q, want %q", err.Error(), want)
-		}
-		if u := errors.Unwrap(err); u != nil {
-			t.Fatalf("errors.Unwrap(err) = %v, want nil: the premature-EOF error is an untyped fmt.Errorf leaf today. If this now wraps a sentinel, that is the improvement this test exists to make deliberate — update it.", u)
-		}
+		assert.Equal(t, want, err.Error(), "the premature-EOF message is pinned verbatim")
+		u := errors.Unwrap(err)
+		assert.Truef(t, u == nil,
+			"errors.Unwrap(err) = %v, want nil: the premature-EOF error is an untyped "+
+				"fmt.Errorf leaf today. If this now wraps a sentinel, that is the improvement "+
+				"this test exists to make deliberate — update it.", u)
 		var opErr *net.OpError
-		if errors.As(err, &opErr) {
-			t.Fatalf("err unexpectedly carries *net.OpError (%v); the clean-FIN and RST breaks are pinned as producing different error shapes", opErr)
-		}
+		assert.Falsef(t, errors.As(err, &opErr),
+			"err unexpectedly carries *net.OpError (%v); the clean-FIN and RST breaks are "+
+				"pinned as producing different error shapes", opErr)
 	})
 
 	t.Run("tcpRST", func(t *testing.T) {
 		resp, err := run(t, true)
-		assertTruncatedButPopulated(t, resp, err)
 
+		assertTruncatedButPopulated(t, resp, err)
 		// Half 2, other shape: the raw transport error, unwrapped and
 		// unannotated. The same application event as cleanFIN produces an error
 		// with nothing in common with it — not even a mention of truncation.
 		var opErr *net.OpError
-		if !errors.As(err, &opErr) {
-			t.Fatalf("err = %#v, want a *net.OpError: a reset mid-body surfaces the raw transport error today", err)
-		}
-		if strings.Contains(err.Error(), "premature EOF") {
-			t.Fatalf("err = %q now reports truncation; cleanFIN and tcpRST are pinned as NOT sharing a classification. Unifying them is the improvement this test exists to make deliberate — update it.", err.Error())
-		}
+		assert.Truef(t, errors.As(err, &opErr),
+			"err = %#v, want a *net.OpError: a reset mid-body surfaces the raw transport "+
+				"error today", err)
+		assert.NotContainsf(t, err.Error(), "premature EOF",
+			"err = %q now reports truncation; cleanFIN and tcpRST are pinned as NOT sharing "+
+				"a classification. Unifying them is the improvement this test exists to make "+
+				"deliberate — update it.", err.Error())
 	})
 }
