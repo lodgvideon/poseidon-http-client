@@ -51,13 +51,13 @@ func TestPoolTransport_OpenExchangeAllocs(t *testing.T) {
 	defer cancel()
 
 	// Warm the pool so the dial is not in the measured region.
-	s, _, release, err := pt.openExchange(ctx)
+	s, _, release, _, err := pt.openExchange(ctx)
 	require.NoError(t, err, "warm-up openExchange")
 	_ = s.Close()
 	release.release()
 
 	n := testing.AllocsPerRun(200, func() {
-		st, _, rel, oerr := pt.openExchange(ctx)
+		st, _, rel, _, oerr := pt.openExchange(ctx)
 		if oerr != nil {
 			// Hand-rolled on purpose: see the NOTE above. Inside the measured
 			// closure, testify's reflection would be counted as allocation.

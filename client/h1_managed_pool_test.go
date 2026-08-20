@@ -37,7 +37,7 @@ func TestH1ManagedPool_RoundRobin_DistributesAcrossAddresses(t *testing.T) {
 	// 9 sequential acquires — RoundRobin distributes 3-3-3 across the addresses.
 	for i := 0; i < 9; i++ {
 		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-		c, release, aerr := mp.acquire(ctx)
+		c, release, _, aerr := mp.acquire(ctx)
 		cancel()
 
 		require.NoErrorf(t, aerr, "acquire[%d]", i)
@@ -61,7 +61,7 @@ func TestH1ManagedPool_NoAddresses_ReturnsErrNoAddresses(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
 
-	_, _, aerr := mp.acquire(ctx)
+	_, _, _, aerr := mp.acquire(ctx)
 
 	// assert.Equal, not ErrorIs: the original compared with ==, and ErrorIs would
 	// also accept a wrapped value. Widening a sentinel check while "just" moving
@@ -96,7 +96,7 @@ func TestH1ManagedPool_DrainGraceful_RemovedAddress_KeepsInFlight(t *testing.T) 
 	defer func() { _ = mp.close() }()
 	// The first RoundRobin pick is deterministic (counter starts at zero), so
 	// this conn belongs to addrs[0] — the address removed below.
-	c0, rel0, err := mp.acquire(context.Background())
+	c0, rel0, _, err := mp.acquire(context.Background())
 	require.NoError(t, err, "acquire 0")
 
 	res.push([]Address{addrs[1]})
@@ -110,7 +110,7 @@ func TestH1ManagedPool_DrainGraceful_RemovedAddress_KeepsInFlight(t *testing.T) 
 	assert.True(t, c0.IsAlive(),
 		"in-flight conn closed during graceful drain — expected alive until release")
 	// A new acquire must pick the surviving address only.
-	_, rel1, err := mp.acquire(context.Background())
+	_, rel1, _, err := mp.acquire(context.Background())
 	require.NoError(t, err, "acquire after remove")
 	defer rel1(true)
 	// Releasing the held conn lets the drained sub-pool close and drop out.
@@ -132,7 +132,7 @@ func TestH1ManagedPool_DrainHard_RemovedAddress_ClosesImmediately(t *testing.T) 
 		newH1FakeDialer(), h1ManagedPoolOpts(), nil, nil)
 	require.NoError(t, err, "newH1ManagedPool")
 	defer func() { _ = mp.close() }()
-	c0, rel0, err := mp.acquire(context.Background())
+	c0, rel0, _, err := mp.acquire(context.Background())
 	require.NoError(t, err, "acquire 0")
 
 	// Remove addrs[0] (the deterministic first RoundRobin pick); DrainHard closes
@@ -154,7 +154,7 @@ func TestH1ManagedPool_StatsAggregation_SumsAcrossSubPools(t *testing.T) {
 	defer func() { _ = mp.close() }()
 	holds := make([]func(bool), 0, 3)
 	for i := 0; i < 3; i++ {
-		_, rel, aerr := mp.acquire(context.Background())
+		_, rel, _, aerr := mp.acquire(context.Background())
 		require.NoErrorf(t, aerr, "acquire %d", i)
 		holds = append(holds, rel)
 	}

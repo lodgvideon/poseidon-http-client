@@ -79,7 +79,7 @@ func TestH1ManagedPool_AddressReAddedAfterRemoval(t *testing.T) {
 				"getOrCreateSubPool still refuses the re-added address")
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancel()
-			c, rel, err := mp.acquire(ctx)
+			c, rel, _, err := mp.acquire(ctx)
 			require.NoError(t, err, "acquire after re-add")
 			require.NotNil(t, c, "acquire after re-add returned a nil conn")
 			rel(true)
@@ -110,7 +110,7 @@ func TestH1ManagedPool_SingleAddressFlapDoesNotBlackhole(t *testing.T) {
 		len(mp.snapshotActive()))
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	c, rel, err := mp.acquire(ctx)
+	c, rel, _, err := mp.acquire(ctx)
 	require.NoError(t, err, "acquire after a single-address flap")
 	require.NotNil(t, c, "acquire after a flap returned a nil conn")
 	rel(true)
@@ -151,7 +151,7 @@ func TestH3ManagedPool_AddressReAddedAfterRemoval(t *testing.T) {
 				"getOrCreateSubPool still refuses the re-added address")
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancel()
-			c, rel, err := mp.acquire(ctx)
+			c, rel, _, err := mp.acquire(ctx)
 			require.NoError(t, err, "acquire after re-add")
 			// c is an interface (h3Client): require.NotNil would accept a typed
 			// nil through reflection, so compare against nil directly.
@@ -182,7 +182,7 @@ func TestH1ManagedPool_ReviveBeatsDrainWatcher(t *testing.T) {
 	require.Equal(t, 1, waitActiveH1(mp, 1, 2*time.Second), "initial active set")
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	_, relHeld, err := mp.acquire(ctx) // hold it: the sub-pool must NOT be idle
+	_, relHeld, _, err := mp.acquire(ctx) // hold it: the sub-pool must NOT be idle
 	require.NoError(t, err, "initial acquire")
 	before := mp.getOrCreateSubPool(addrs[0])
 	require.NotNil(t, before, "no sub-pool for the live address")
@@ -214,7 +214,7 @@ func TestH3ManagedPool_ReviveBeatsDrainWatcher(t *testing.T) {
 	require.Equal(t, 1, waitActiveH3(mp, 1, 2*time.Second), "initial active set")
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	_, relHeld, err := mp.acquire(ctx)
+	_, relHeld, _, err := mp.acquire(ctx)
 	require.NoError(t, err, "initial acquire")
 	before := mp.getOrCreateSubPool(addrs[0])
 	require.NotNil(t, before, "no sub-pool for the live address")

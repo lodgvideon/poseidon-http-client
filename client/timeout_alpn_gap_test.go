@@ -81,7 +81,7 @@ func TestSingleConn_DialTimeoutBindsDuringTheTLSHandshake(t *testing.T) {
 	defer cancel()
 
 	start := time.Now()
-	_, _, err := s.acquireConn(ctx)
+	_, _, _, err := s.acquireConn(ctx)
 	elapsed := time.Since(start)
 
 	require.Error(t, err,
@@ -112,7 +112,7 @@ func TestH1SingleConn_DialTimeoutBindsDuringTheTLSHandshake(t *testing.T) {
 	defer cancel()
 
 	start := time.Now()
-	_, _, _, err := s.openExchange(ctx)
+	_, _, _, _, err := s.openExchange(ctx)
 	elapsed := time.Since(start)
 
 	require.Error(t, err, "openExchange against a silent TLS peer returned no error")

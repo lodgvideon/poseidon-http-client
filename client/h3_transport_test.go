@@ -8,6 +8,7 @@ import (
 	"io"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -599,4 +600,87 @@ func TestH3_BodyStream_UsesStreamingPath(t *testing.T) {
 		"Response.Body = %q, want empty: the streaming path must not pre-buffer", resp.Body)
 	assert.NotNil(t, fake.lastBody,
 		"DoStream path not taken: BodyStream fell through to the buffered Do")
+}
+
+// h3FailingDial returns a dialFn that always fails and counts its calls, so a
+// test can tell "the backoff window suppressed the redial" from "the redial
+// happened and failed again" — the two are the same error to the caller.
+func h3FailingDial(n *atomic.Int32) func(context.Context, string, *tls.Config) (h3Client, error) {
+	return func(context.Context, string, *tls.Config) (h3Client, error) {
+		n.Add(1)
+		return nil, errors.New("boom")
+	}
+}
+
+// TestSingleH3Conn_Backoff_RefusesWithinWindow is the HTTP/3 sibling of
+// TestSingleConn_Backoff_RefusesWithinWindow. The branch it covers — refuse a
+// redial while the backoff window is open — had no test on this transport, and
+// the mutation gate found it: four separate mutants of that one condition
+// survived the whole suite.
+func TestSingleH3Conn_Backoff_RefusesWithinWindow(t *testing.T) {
+	var dials atomic.Int32
+	s := &singleH3Conn{
+		addr:        "h3.example:443",
+		tlsConfig:   &tls.Config{ServerName: "h3.example"},
+		backoff:     500 * time.Millisecond,
+		dialTimeout: time.Second,
+		metrics:     &Metrics{},
+		dialFn:      h3FailingDial(&dials),
+	}
+	defer func() { _ = s.close() }()
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	_, _, err1 := s.acquireClient(ctx)
+	_, _, err2 := s.acquireClient(ctx)
+
+	require.Error(t, err1, "the first acquire dials and the dial fails")
+	require.Error(t, err2, "the second acquire fails too, inside the backoff window")
+	assert.EqualValues(t, 1, dials.Load(),
+		"dial count = %d, want 1 — the second acquire is inside the backoff window and must not reach the network; a client that redials on every request turns one dead backend into a dial storm",
+		dials.Load())
+	assert.ErrorIsf(t, err2, ErrRedialBackoff,
+		"second error = %v, want it to wrap ErrRedialBackoff so a caller can tell a suppressed redial from a fresh dial failure", err2)
+}
+
+// TestSingleH3Conn_ZeroBackoff_RedialsImmediately is the other equivalence
+// class: with no backoff configured the suppression must not engage at all.
+// Without this case a condition that always suppresses looks identical to one
+// that suppresses correctly.
+//
+// Two CONDITIONALS_BOUNDARY mutants of that condition still survive these two
+// tests, and both are equivalent mutants rather than holes:
+//
+//   - `s.backoff > 0` -> `>= 0` changes nothing, because with backoff == 0 the
+//     third conjunct is `time.Since(...) < 0`, which is false anyway. The
+//     branch cannot be entered either way.
+//   - `time.Since(s.lastDialAt) < s.backoff` -> `<=` differs only when the
+//     elapsed time equals the window to the nanosecond.
+//
+// Do not chase them with a sleep-tuned test: it would assert on a clock, not on
+// behaviour.
+func TestSingleH3Conn_ZeroBackoff_RedialsImmediately(t *testing.T) {
+	var dials atomic.Int32
+	s := &singleH3Conn{
+		addr:        "h3.example:443",
+		tlsConfig:   &tls.Config{ServerName: "h3.example"},
+		backoff:     0,
+		dialTimeout: time.Second,
+		metrics:     &Metrics{},
+		dialFn:      h3FailingDial(&dials),
+	}
+	defer func() { _ = s.close() }()
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	_, _, err1 := s.acquireClient(ctx)
+	_, _, err2 := s.acquireClient(ctx)
+
+	require.Error(t, err1, "the first acquire dials and the dial fails")
+	require.Error(t, err2, "the second acquire dials again and fails again")
+	assert.EqualValues(t, 2, dials.Load(),
+		"dial count = %d, want 2 — with no backoff configured the second acquire must dial rather than be refused from the cached error",
+		dials.Load())
+	assert.NotErrorIsf(t, err2, ErrRedialBackoff,
+		"second error = %v; with backoff disabled nothing should be suppressed", err2)
 }

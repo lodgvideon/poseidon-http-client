@@ -70,7 +70,7 @@ func TestManagedPool_AddressReAddedAfterRemoval(t *testing.T) {
 			// And it must actually serve.
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancel()
-			c, release, err := mp.acquire(ctx)
+			c, release, _, err := mp.acquire(ctx)
 			require.NoError(t, err, "acquire after re-add")
 			require.NotNil(t, c, "acquire returned a nil conn")
 			release()
@@ -102,7 +102,7 @@ func TestManagedPool_SingleAddressFlapDoesNotBlackhole(t *testing.T) {
 		len(mp.snapshotActive()))
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	c, release, err := mp.acquire(ctx)
+	c, release, _, err := mp.acquire(ctx)
 	require.NoError(t, err, "acquire after single-address flap")
 	require.NotNil(t, c, "acquire after a flap returned a nil conn")
 	release()
@@ -132,7 +132,7 @@ func TestManagedPool_ReviveBeatsDrainWatcher(t *testing.T) {
 	// Hold a conn so the sub-pool is NOT idle while it drains.
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	held, releaseHeld, err := mp.acquire(ctx)
+	held, releaseHeld, _, err := mp.acquire(ctx)
 	require.NoError(t, err, "initial acquire")
 	require.NotNil(t, held, "initial acquire returned nil conn")
 	before := mp.getOrCreateSubPool(addrs[0])
@@ -160,7 +160,7 @@ func TestManagedPool_ReviveBeatsDrainWatcher(t *testing.T) {
 	require.NotNil(t, after, "drain watcher left the revived address unusable")
 	require.Same(t, before, after,
 		"drain watcher closed the revived sub-pool; the live address paid for a needless reconnect")
-	c, release, err := mp.acquire(ctx)
+	c, release, _, err := mp.acquire(ctx)
 	require.NoError(t, err, "acquire after revive")
 	require.NotNil(t, c, "acquire after revive returned a nil conn")
 	release()

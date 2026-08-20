@@ -39,7 +39,7 @@ func TestSingleConn_DialIsBoundedByDialTimeout(t *testing.T) {
 	defer cancel()
 
 	start := time.Now()
-	_, _, err := s.acquireConn(ctx)
+	_, _, _, err := s.acquireConn(ctx)
 	elapsed := time.Since(start)
 
 	require.Error(t, err, "acquireConn against a black-hole host returned no error")
@@ -68,7 +68,7 @@ func TestSingleConn_ZeroDialTimeoutMeansDefault(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	c, _, err := s.acquireConn(ctx)
+	c, _, _, err := s.acquireConn(ctx)
 
 	require.NoErrorf(t, err, "acquireConn with a zero dialTimeout — zero must mean the "+
 		"default, not an expired deadline")
@@ -114,7 +114,7 @@ func TestSingleConn_DialTimeoutSurfacesAsAnError(t *testing.T) {
 		dialTimeout: 100 * time.Millisecond,
 	}
 
-	c, _, err := s.acquireConn(context.Background())
+	c, _, _, err := s.acquireConn(context.Background())
 
 	require.Error(t, err, "no error from a dial that timed out")
 	assert.Nil(t, c, "a dial that timed out must not also hand back a connection")
@@ -148,7 +148,7 @@ func TestH1SingleConn_DialIsBoundedByDialTimeout(t *testing.T) {
 	defer cancel()
 
 	start := time.Now()
-	_, _, _, err := s.openExchange(ctx)
+	_, _, _, _, err := s.openExchange(ctx)
 	elapsed := time.Since(start)
 
 	require.Error(t, err, "openExchange against a black-hole host returned no error")

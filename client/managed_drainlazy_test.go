@@ -35,7 +35,7 @@ func TestH1ManagedPool_DrainLazy_RemovedAddress_RetainsSubPool(t *testing.T) {
 	defer func() { _ = mp.close() }()
 	// Seed both sub-pools so the removal has a live one to mark draining.
 	for i := 0; i < 2; i++ {
-		_, rel, err := mp.acquire(context.Background())
+		_, rel, _, err := mp.acquire(context.Background())
 		require.NoErrorf(t, err, "seed acquire %d", i)
 		rel(true)
 	}
@@ -80,7 +80,7 @@ func TestH3ManagedPool_DrainLazy_RemovedAddress_RetainsSubPool(t *testing.T) {
 	require.NoError(t, err, "newH3ManagedPool")
 	defer func() { _ = mp.close() }()
 	for i := 0; i < 2; i++ {
-		_, rel, err := mp.acquire(context.Background())
+		_, rel, _, err := mp.acquire(context.Background())
 		require.NoErrorf(t, err, "seed acquire %d", i)
 		rel()
 	}

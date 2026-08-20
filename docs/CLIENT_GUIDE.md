@@ -1685,9 +1685,17 @@ type RequestCompleteEvent struct {
 	Method, Path, Authority string
 	Status                  int // 0 if no headers received
 	Err                     error
-	Latency                 time.Duration
-	BytesSent, BytesRecv    int64 // BytesSent = len(req.Body); BytesRecv = total DATA payload
-	Attempt                 int
+
+	Start      time.Time       // when this attempt began (after rate limiting)
+	Latency    time.Duration   // Start -> last byte (Do) / response head (DoStream)
+	TTFB       time.Duration   // Start -> response head; 0 if none arrived
+	Acquire    time.Duration   // Start -> exchange ready to send (pool queueing + own dial)
+	Connect    time.Duration   // the dial THIS attempt paid for; 0 on a reused conn
+	Proto      trace.Protocol  // h1 / h2 / h3, as negotiated
+	RemoteAddr string          // the backend this attempt went to
+
+	BytesSent, BytesRecv int64 // BytesSent = len(req.Body); BytesRecv = total DATA payload
+	Attempt              int   // 0 for a first try, >=1 under a Retryer
 }
 
 type RetryEvent struct {
@@ -1714,6 +1722,51 @@ type ResolverUpdateEvent struct {
 }
 ```
 
+One event is one **attempt**, not one logical request: under a `Retryer` a
+replayed request produces one event per try, each with its own `Attempt`,
+timings and outcome. That is what a load test wants — a retried request costs
+the server two responses whatever the caller was eventually handed.
+
+The timing fields nest, which is what makes them subtractable:
+
+```
+Start ─┬─ Acquire ── (Connect ⊆ Acquire) ─┬─ TTFB ─────────┬─ Latency
+       │                                  │                │
+       └─ waiting for a connection        └─ response head  └─ last byte
+```
+
+- `Acquire` is queueing: on a pooled transport it is how long the request waited
+  for a free connection, which is the number that moves when `MaxConnsPerHost`
+  is too low.
+- `Connect` is non-zero only on the attempt that actually dialled — the same
+  rule JMeter reports its `Connect` column under. The pooled transports dial in
+  their actor goroutine, so a request that waits for a pool dial sees that time
+  in `Acquire` and a zero `Connect`.
+- `Latency - TTFB` is body transfer; `TTFB - Acquire` is server think time plus
+  one network turn.
+- `TTFB` is 0 when no response head arrived. It is what JMeter calls *Latency*;
+  this event's `Latency` is JMeter's *elapsed*.
+- A failed attempt still reports what it managed to observe: if the head
+  arrived before the failure — a reset mid-body, a body over
+  `MaxResponseBodySize` — the event carries the server's `Status` and the
+  `BytesRecv` received so far alongside a non-nil `Err`. Likewise a managed
+  attempt that never got a connection still names the backend it failed
+  against in `RemoteAddr`; that field is empty only when no backend was picked
+  at all.
+
+`RemoteAddr` is the only place the managed transports expose which backend the
+`Selector` picked for a given request — `ClientOptions.Addr` is empty there.
+`Proto` comes from the transport rather than from `TransportKind`, because
+`TransportALPN` does not know which protocol it is until the handshake — and
+when an attempt fails before that handshake it reports `trace.ProtoUnknown`
+rather than the enum's zero value, which is `trace.ProtoH1`.
+
+Two JMeter per-sample columns have **no** equivalent here: `responseMessage`
+(HTTP/2 and HTTP/3 have no reason phrase, and the HTTP/1.1 parser discards it),
+and the byte counts including headers — `BytesSent`/`BytesRecv` are payload
+only, and over HTTP/2 and HTTP/3 the header block on the wire is HPACK/QPACK
+compressed, so it would not be comparable with JMeter's number anyway.
+
 `ConnCloseEvent.Reason` is a `CloseReason` enum with a stable lowercase
 `String()` suitable for metric labels:
 
@@ -1738,8 +1791,11 @@ hooks := &client.Hooks{
 		fmt.Printf("start %s %s (attempt %d)\n", e.Method, e.Path, e.Attempt)
 	},
 	OnRequestComplete: func(e client.RequestCompleteEvent) {
-		fmt.Printf("done %s %s status=%d sent=%d recv=%d in %s err=%v\n",
-			e.Method, e.Path, e.Status, e.BytesSent, e.BytesRecv, e.Latency, e.Err)
+		// One line per attempt — the shape a load-test result file wants.
+		fmt.Printf("%d %s %s %s status=%d proto=%s addr=%s ttfb=%s acquire=%s connect=%s elapsed=%s sent=%d recv=%d attempt=%d err=%v\n",
+			e.Start.UnixMilli(), e.Method, e.Path, e.Authority, e.Status,
+			e.Proto, e.RemoteAddr, e.TTFB, e.Acquire, e.Connect, e.Latency,
+			e.BytesSent, e.BytesRecv, e.Attempt, e.Err)
 	},
 	OnRetry: func(e client.RetryEvent) {
 		fmt.Printf("retry %s attempt=%d backoff=%s err=%v\n",

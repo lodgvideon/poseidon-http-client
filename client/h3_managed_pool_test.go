@@ -33,7 +33,7 @@ func TestH3ManagedPool_RoundRobin_DistributesAcrossAddresses(t *testing.T) {
 	// 9 sequential acquires — RoundRobin distributes 3-3-3 across the addresses.
 	for i := 0; i < 9; i++ {
 		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-		cl, release, aerr := mp.acquire(ctx)
+		cl, release, _, aerr := mp.acquire(ctx)
 		cancel()
 		require.NoErrorf(t, aerr, "acquire[%d]", i)
 		require.Truef(t, cl.Alive(), "acquire[%d] handed out a conn that is not alive", i)
@@ -57,7 +57,7 @@ func TestH3ManagedPool_NoAddresses_ReturnsErrNoAddresses(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
 
-	_, _, err = mp.acquire(ctx)
+	_, _, _, err = mp.acquire(ctx)
 
 	assert.Equal(t, ErrNoAddresses, err,
 		"an empty resolver set must be reported as ErrNoAddresses, not as a dial or "+
@@ -95,7 +95,7 @@ func TestH3ManagedPool_DrainGraceful_RemovedAddress_KeepsInFlight(t *testing.T) 
 	require.NoError(t, err, "newH3ManagedPool")
 	defer func() { _ = mp.close() }()
 	// Acquire a conn for addr[0] and hold it in-flight.
-	cl0, rel0, err := mp.acquire(context.Background())
+	cl0, rel0, _, err := mp.acquire(context.Background())
 	require.NoError(t, err, "acquire 0")
 	require.True(t, cl0.Alive(), "conn 0 must be alive before the drain begins")
 
@@ -111,7 +111,7 @@ func TestH3ManagedPool_DrainGraceful_RemovedAddress_KeepsInFlight(t *testing.T) 
 		"conn 0 closed during a graceful drain — a graceful drain must keep an in-flight "+
 			"conn until its holder releases it")
 	// New acquire must pick addr[1] only.
-	_, rel1, err := mp.acquire(context.Background())
+	_, rel1, _, err := mp.acquire(context.Background())
 	require.NoError(t, err, "acquire after remove")
 	defer rel1()
 
@@ -144,7 +144,7 @@ func TestH3ManagedPool_DrainHard_RemovedAddress_ClosesImmediately(t *testing.T) 
 		d.dial, nil, nil)
 	require.NoError(t, err, "newH3ManagedPool")
 	defer func() { _ = mp.close() }()
-	cl0, rel0, err := mp.acquire(context.Background())
+	cl0, rel0, _, err := mp.acquire(context.Background())
 	require.NoError(t, err, "acquire 0")
 
 	res.push([]Address{addrs[1]})
@@ -171,7 +171,7 @@ func TestH3ManagedPool_StatsAggregation_SumsAcrossSubPools(t *testing.T) {
 	defer func() { _ = mp.close() }()
 	holds := make([]func(), 0, 3)
 	for i := 0; i < 3; i++ {
-		_, rel, aerr := mp.acquire(context.Background())
+		_, rel, _, aerr := mp.acquire(context.Background())
 		require.NoErrorf(t, aerr, "acquire %d", i)
 		holds = append(holds, rel)
 	}

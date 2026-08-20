@@ -140,11 +140,11 @@ func TestH1Pool_DoubleRelease_WithAWaiterQueued_ServesExactlyOne(t *testing.T) {
 	pt := &h1PoolTransport{p: p}
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	ex1, _, _, err := pt.openExchange(ctx)
+	ex1, _, _, _, err := pt.openExchange(ctx)
 	require.NoError(t, err, "first openExchange")
 	parked := make(chan protoStream, 1)
 	go func() {
-		ex2, _, _, oerr := pt.openExchange(ctx)
+		ex2, _, _, _, oerr := pt.openExchange(ctx)
 		if oerr != nil {
 			close(parked)
 			return

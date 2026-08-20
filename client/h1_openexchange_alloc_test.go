@@ -56,7 +56,7 @@ func TestH1PoolTransport_OpenExchangeAllocs(t *testing.T) {
 	defer cancel()
 
 	// Warm the pool so the dial is not in the measured region.
-	s, _, _, err := pt.openExchange(ctx)
+	s, _, _, _, err := pt.openExchange(ctx)
 	require.NoError(t, err, "warm-up openExchange")
 	s.(*h1Exchange).release(true)
 
@@ -65,7 +65,7 @@ func TestH1PoolTransport_OpenExchangeAllocs(t *testing.T) {
 	// allocates. The loop error is parked and asserted below instead.
 	var loopErr error
 	n := testing.AllocsPerRun(200, func() {
-		ex, _, _, oerr := pt.openExchange(ctx)
+		ex, _, _, _, oerr := pt.openExchange(ctx)
 		if oerr != nil {
 			loopErr = oerr
 			return

@@ -42,7 +42,7 @@ func TestManagedPool_FailsOverOnFirstDialFailure(t *testing.T) {
 	// one inside this single acquire.
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
-	c, release, err := mp.acquire(ctx)
+	c, release, _, err := mp.acquire(ctx)
 
 	require.NoErrorf(t, err,
 		"acquire = %v; a live second address was available, so the loop stopped on the dead one", err)

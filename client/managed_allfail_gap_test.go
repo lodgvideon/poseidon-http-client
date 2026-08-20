@@ -60,7 +60,7 @@ func TestManagedPool_EveryAddressFailing_SurfacesTheDialErrorNotErrNoAddresses(t
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
 
-	_, _, err = mp.acquire(ctx)
+	_, _, _, err = mp.acquire(ctx)
 
 	require.Error(t, err, "acquire succeeded against three addresses that all refuse")
 	assert.ErrorIsf(t, err, errAllBackendsRefused,
@@ -82,7 +82,7 @@ func TestH1ManagedPool_EveryAddressFailing_SurfacesTheDialErrorNotErrNoAddresses
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
 
-	_, _, err = mp.acquire(ctx)
+	_, _, _, err = mp.acquire(ctx)
 
 	require.Error(t, err, "acquire succeeded against three addresses that all refuse")
 	assert.ErrorIsf(t, err, errAllBackendsRefused,
@@ -106,7 +106,7 @@ func TestH3ManagedPool_EveryAddressFailing_SurfacesTheDialErrorNotErrNoAddresses
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
 
-	_, _, err = mp.acquire(ctx)
+	_, _, _, err = mp.acquire(ctx)
 
 	require.Error(t, err, "acquire succeeded against three addresses that all refuse")
 	assert.ErrorIsf(t, err, errAllBackendsRefused,
@@ -132,7 +132,7 @@ func TestManagedPool_NoAddressesStillMeansErrNoAddresses(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	_, _, err = mp.acquire(ctx)
+	_, _, _, err = mp.acquire(ctx)
 
 	assert.ErrorIsf(t, err, ErrNoAddresses,
 		"an empty resolver set reported %v; with no address there is no dial error to "+

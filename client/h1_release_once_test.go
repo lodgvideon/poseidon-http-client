@@ -33,7 +33,7 @@ func TestH1SingleConn_ReleaseIsIdempotent(t *testing.T) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	ex, _, _, err := s.openExchange(ctx)
+	ex, _, _, _, err := s.openExchange(ctx)
 	require.NoError(t, err, "openExchange")
 	h1ex, ok := ex.(*h1Exchange)
 	require.Truef(t, ok, "openExchange returned %T, want *h1Exchange", ex)
@@ -62,19 +62,19 @@ func TestH1PoolTransport_ReleaseIsIdempotent(t *testing.T) {
 	pt := &h1PoolTransport{p: p}
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	ex1, _, _, err := pt.openExchange(ctx)
+	ex1, _, _, _, err := pt.openExchange(ctx)
 	require.NoError(t, err, "first openExchange")
 
 	ex1.(*h1Exchange).release(true)
 	ex1.(*h1Exchange).release(true) // the second must be a no-op
 
 	// The slot really was freed — idempotent must not mean inert.
-	ex2, _, _, err := pt.openExchange(ctx)
+	ex2, _, _, _, err := pt.openExchange(ctx)
 	require.NoError(t, err, "second openExchange after release")
 	// ex2 still holds the pool's only connection, so this must not be served.
 	short, shortCancel := context.WithTimeout(context.Background(), 250*time.Millisecond)
 	defer shortCancel()
-	_, _, _, oerr := pt.openExchange(short)
+	_, _, _, _, oerr := pt.openExchange(short)
 	require.Error(t, oerr,
 		"a third exchange was handed out while the only connection was checked out — "+
 			"the double release decremented the active count twice, so two exchanges now "+
@@ -94,14 +94,14 @@ func TestH1SingleConn_ReleaseStillFreesTheSlot(t *testing.T) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	ex, _, _, err := s.openExchange(ctx)
+	ex, _, _, _, err := s.openExchange(ctx)
 	require.NoError(t, err, "first openExchange")
 
 	ex.(*h1Exchange).release(true)
 
 	done := make(chan error, 1)
 	go func() {
-		ex2, _, _, oerr := s.openExchange(ctx)
+		ex2, _, _, _, oerr := s.openExchange(ctx)
 		if oerr == nil {
 			ex2.(*h1Exchange).release(true)
 		}

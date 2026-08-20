@@ -72,7 +72,7 @@ func TestPool_StatsAfterClose_ReturnsZero(t *testing.T) {
 	s := p.Stats()
 	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
 	defer cancel()
-	_, _, _, err := newPoolTransportFromPool(p).openExchange(ctx)
+	_, _, _, _, err := newPoolTransportFromPool(p).openExchange(ctx)
 
 	assert.Equalf(t, Stats{}, s, "Stats after Close = %+v, want zero", s)
 	assert.ErrorIsf(t, err, ErrPoolClosed,

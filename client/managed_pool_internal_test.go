@@ -88,7 +88,7 @@ func TestManagedPool_StaticResolver_RoundRobin_DistributesDials(t *testing.T) {
 	// 9 sequential acquires — RoundRobin distributes 3-3-3.
 	for i := 0; i < 9; i++ {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		c, release, err := mp.acquire(ctx)
+		c, release, _, err := mp.acquire(ctx)
 		cancel()
 		require.NoErrorf(t, err, "acquire[%d]", i)
 		require.True(t, c.IsAlive(), "conn not alive after acquire")
@@ -117,7 +117,7 @@ func TestManagedPool_NoAddresses_ReturnsErrNoAddresses(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
-	_, _, err = mp.acquire(ctx)
+	_, _, _, err = mp.acquire(ctx)
 
 	assert.ErrorIsf(t, err, ErrNoAddresses,
 		"acquire err = %v, want ErrNoAddresses — an empty resolver set must be reported as such, "+
@@ -202,7 +202,7 @@ func TestManagedPool_DrainGraceful_RemovedAddress_KeepsInFlight(t *testing.T) {
 	require.NoError(t, err, "newManagedPool")
 	defer mp.close()
 	// Acquire a conn for addr[0].
-	c0, rel0, err := mp.acquire(context.Background())
+	c0, rel0, _, err := mp.acquire(context.Background())
 	require.NoError(t, err, "acquire 0")
 	require.True(t, c0.IsAlive(), "conn 0 not alive")
 
@@ -217,7 +217,7 @@ func TestManagedPool_DrainGraceful_RemovedAddress_KeepsInFlight(t *testing.T) {
 	assert.True(t, c0.IsAlive(),
 		"conn 0 closed during graceful drain — expected alive until release")
 	// New acquire must pick addr[1] only.
-	c1, rel1, err := mp.acquire(context.Background())
+	c1, rel1, _, err := mp.acquire(context.Background())
 	require.NoError(t, err, "acquire after remove")
 	defer rel1()
 	require.NotNil(t, c1, "acquire after remove returned a nil conn")
@@ -248,7 +248,7 @@ func TestManagedPool_DrainHard_RemovedAddress_ClosesImmediately(t *testing.T) {
 		PoolOptions{MaxConnsPerHost: 1, MaxStreamsPerConn: 4, HealthCheckPeriod: time.Second}, nil, nil)
 	require.NoError(t, err, "newManagedPool")
 	defer mp.close()
-	c0, rel0, err := mp.acquire(context.Background())
+	c0, rel0, _, err := mp.acquire(context.Background())
 	require.NoError(t, err, "acquire 0")
 
 	res.push([]Address{addrs[1]})
@@ -276,7 +276,7 @@ func TestManagedPool_DrainLazy_RemovedAddress_RetainsSubPool(t *testing.T) {
 	defer mp.close()
 	// Seed both sub-pools by acquiring one conn each.
 	for i := 0; i < 2; i++ {
-		_, rel, err := mp.acquire(context.Background())
+		_, rel, _, err := mp.acquire(context.Background())
 		require.NoErrorf(t, err, "seed acquire %d", i)
 		rel()
 	}
@@ -296,7 +296,7 @@ func TestManagedPool_DrainLazy_RemovedAddress_RetainsSubPool(t *testing.T) {
 	// New acquires pick addr[1] only.
 	for i := 0; i < 4; i++ {
 		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-		_, rel, err := mp.acquire(ctx)
+		_, rel, _, err := mp.acquire(ctx)
 		cancel()
 		require.NoErrorf(t, err, "post-drain acquire %d", i)
 		rel()
@@ -367,7 +367,7 @@ func TestManagedPool_StatsAggregation_SumsAcrossSubPools(t *testing.T) {
 	// Seed each sub-pool with one conn.
 	holds := make([]func(), 0, 3)
 	for i := 0; i < 3; i++ {
-		_, rel, err := mp.acquire(context.Background())
+		_, rel, _, err := mp.acquire(context.Background())
 		require.NoErrorf(t, err, "acquire %d", i)
 		holds = append(holds, rel)
 	}
@@ -409,7 +409,7 @@ func TestManagedPool_Close_NoGoroutineLeak(t *testing.T) {
 			PoolOptions{MaxConnsPerHost: 1, MaxStreamsPerConn: 4, HealthCheckPeriod: time.Second}, nil, nil)
 		require.NoErrorf(t, err, "newManagedPool %d", i)
 		// Acquire once to force sub-pool creation and its background goroutines.
-		_, rel, err := mp.acquire(context.Background())
+		_, rel, _, err := mp.acquire(context.Background())
 		require.NoErrorf(t, err, "acquire %d", i)
 		rel()
 		require.NoErrorf(t, mp.close(), "close %d", i)

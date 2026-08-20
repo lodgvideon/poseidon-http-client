@@ -1,7 +1,11 @@
 // client/hooks.go
 package client
 
-import "time"
+import (
+	"time"
+
+	"github.com/lodgvideon/poseidon-http-client/trace"
+)
 
 // Hooks is an optional set of callbacks invoked on lifecycle events.
 // All fields are optional; nil hooks are skipped at zero cost.
@@ -52,11 +56,80 @@ type RequestStartEvent struct {
 }
 
 // RequestCompleteEvent carries metadata for OnRequestComplete.
+//
+// One event is one ATTEMPT, not one logical request: a Retryer that replays a
+// request produces one of these per try, each with its own Attempt, timings and
+// outcome. That is deliberate — a load test measures what actually crossed the
+// wire, and a retried request costs the server two responses whatever the
+// caller was eventually handed.
+//
+// The timing fields nest the way a load tool expects them to:
+//
+//	Start ─┬─ Acquire ── (Connect ⊆ Acquire) ─┬─ TTFB ─────────┬─ Latency
+//	       │                                  │                │
+//	       └─ waiting for a connection        └─ response head  └─ last byte
+//
+// Acquire covers everything before the request headers went out: waiting for a
+// pooled connection, and a dial when this attempt is the one that paid for it.
+// Connect is the dial inside that window, and is zero whenever the connection
+// was reused or dialled by somebody else — the same rule JMeter reports its
+// Connect column under. TTFB and Latency are measured from Start, so
+// Latency - TTFB is the body transfer and TTFB - Acquire is the server's
+// think time plus one network turn.
 type RequestCompleteEvent struct {
 	Method, Path, Authority string
 	Status                  int // 0 if no headers received
 	Err                     error
-	Latency                 time.Duration
+
+	// Start is when this attempt began — after rate limiting, before the
+	// transport was asked for a connection. It is wall-clock time, so a
+	// per-request record can be ordered against everything else in a run.
+	Start time.Time
+
+	// TTFB is the time from Start until the response head arrived: the status
+	// and headers, which is the first thing a server can send. Zero when no
+	// response head ever arrived.
+	//
+	// A non-zero TTFB does not imply a non-zero Status. The head can arrive and
+	// the attempt still fail — a reset mid-body, a body over
+	// MaxResponseBodySize — in which case Status carries what the server said
+	// and Err carries how it ended. Status stays 0 when the head itself could
+	// not be parsed, and on the streaming path when the failure was in that
+	// parse.
+	//
+	// It is what JMeter calls Latency and what this event calls TTFB, because
+	// this event already has a field named Latency meaning something else.
+	TTFB time.Duration
+
+	// Acquire is the time from Start until the transport handed back an
+	// exchange, ready for the request headers. On a pooled transport this is
+	// queueing: how long the request waited for a free connection, which is the
+	// number that moves when MaxConnsPerHost is too low.
+	Acquire time.Duration
+
+	// Connect is how long the dial this attempt paid for took, TLS included
+	// (and, over HTTP/3, the QUIC handshake). Zero on a reused connection, and
+	// zero for a request that merely waited out a dial somebody else started —
+	// including every pooled dial, which the pool actor performs on its own
+	// goroutine. Connect is always contained in Acquire.
+	Connect time.Duration
+
+	// Proto is the wire protocol that carried the attempt. Worth recording
+	// even in a single-protocol run: TransportALPN picks it at the handshake,
+	// so it is not always the one the configuration implies.
+	//
+	// trace.ProtoUnknown means no protocol was ever settled — an ALPN transport
+	// whose dial or handshake failed. It is a distinct value rather than a zero
+	// one precisely so those attempts do not count as HTTP/1.1.
+	Proto trace.Protocol
+
+	// RemoteAddr is the "host:port" the attempt went to. For the managed
+	// transports it is the backend the Selector picked for THIS attempt, which
+	// is the only place that fact is observable — it is what lets a per-request
+	// record blame the slow backend rather than the client.
+	RemoteAddr string
+
+	Latency time.Duration
 	// BytesSent is the request body payload size in bytes (len(req.Body)).
 	// It excludes HTTP/2 frame overhead and any trailer HEADERS frame.
 	//
@@ -72,7 +145,9 @@ type RequestCompleteEvent struct {
 	// would never be told the request finished at all. A streaming caller that
 	// needs the byte count owns it: it is doing the reading.
 	BytesSent, BytesRecv int64
-	Attempt              int
+	// Attempt is 0 for a first try and increments per replay. It is non-zero
+	// only under a Retryer; a bare Client.Do makes one attempt by definition.
+	Attempt int
 }
 
 // RetryEvent carries metadata for OnRetry.

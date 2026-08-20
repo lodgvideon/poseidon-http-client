@@ -47,6 +47,16 @@ const (
 	ProtoH3
 	// ProtoQUIC is the QUIC transport beneath HTTP/3 (RFC 9000).
 	ProtoQUIC
+	// ProtoUnknown is for a report about an exchange whose protocol was never
+	// settled — an ALPN transport whose dial failed before the handshake, say.
+	//
+	// It is appended rather than made the zero value, which is what it would be
+	// in a vacuum: ProtoH1 has been 0 since this type existed, and renumbering
+	// it would silently relabel every stored or transmitted value. The
+	// consequence is that a zero Protocol still reads as h1, so a producer of
+	// these has to set the field deliberately on every path — see
+	// client.exchangeStats.
+	ProtoUnknown
 )
 
 // String renders the protocol as its ALPN-style short name.
@@ -60,6 +70,8 @@ func (p Protocol) String() string {
 		return "h3"
 	case ProtoQUIC:
 		return "quic"
+	case ProtoUnknown:
+		return "?"
 	default:
 		return "?"
 	}

@@ -3,6 +3,8 @@ package client
 import (
 	"context"
 	"time"
+
+	"github.com/lodgvideon/poseidon-http-client/trace"
 )
 
 // h3PoolTransport adapts *h3Pool to the internal transport interface consumed by
@@ -25,14 +27,15 @@ type h3PoolTransport struct {
 // idle. The comment here used to claim the two behaved "exactly" alike; they do
 // not, and a reader unifying the two release paths needs to know which one they
 // are looking at.
-func (pt *h3PoolTransport) openExchange(ctx context.Context) (protoStream, pushLookuper, releaser, error) {
+func (pt *h3PoolTransport) openExchange(ctx context.Context) (protoStream, pushLookuper, releaser, exchangeStats, error) {
+	st := exchangeStats{Proto: trace.ProtoH3, RemoteAddr: pt.p.addr}
 	mc, err := pt.p.acquire(ctx)
 	if err != nil {
-		return nil, nil, nil, err
+		return nil, nil, nil, st, err
 	}
 
 	// mc IS the releaser, so no closure is built per request (#476).
-	return getH3Exchange(mc.cl), nil, mc, nil
+	return getH3Exchange(mc.cl), nil, mc, st, nil
 }
 
 // close implements transport.close. Idempotent.

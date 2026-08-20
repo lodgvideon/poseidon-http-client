@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/lodgvideon/poseidon-http-client/conn"
+	"github.com/lodgvideon/poseidon-http-client/trace"
 )
 
 // pushLookuper resolves a promised push id to the stream carrying it.
@@ -40,8 +41,13 @@ type transport interface {
 	// transports: s is a *h1Exchange and for H3 an *h3Exchange, and
 	// pushLookup is nil for both (neither has server push here).
 	//
+	// st reports what only the transport knows about the exchange it just
+	// opened — which protocol carried it, which address it went to, and whether
+	// this caller paid for a dial. It is returned by value so nothing escapes
+	// to the heap; see sendRequest for the same reasoning applied there.
+	//
 	// Errors include ErrClosed, ErrRedialBackoff, *DialError, and ctx errors.
-	openExchange(ctx context.Context) (s protoStream, pushLookup pushLookuper, rel releaser, err error)
+	openExchange(ctx context.Context) (s protoStream, pushLookup pushLookuper, rel releaser, st exchangeStats, err error)
 
 	// close prevents further exchange opens and closes any underlying
 	// conn(s). Idempotent.
@@ -58,6 +64,44 @@ type transport interface {
 	// block on per-dial success. n is capped at the underlying
 	// transport's MaxConnsPerHost.
 	warmup(n int)
+}
+
+// exchangeStats is the per-exchange fact set that lives below the Client and
+// cannot be recovered above it: the Client can time its own calls, but it
+// cannot see which of several resolved backends the selector picked, which
+// protocol an ALPN transport settled on, or whether the connection it was
+// handed had to be dialled first.
+//
+// Connect is non-zero only when THIS caller paid for the dial. The pooled
+// transports dial in their actor goroutine, on a context rooted at Background
+// so the dial outlives the request that triggered it — so a request that waits
+// for a pool dial sees that time in Acquire, and Connect stays zero. That is
+// the same rule JMeter reports connect time under: a sample that reuses a
+// connection has no connect time to report.
+//
+// It is a value type, copied out of openExchange and into
+// RequestCompleteEvent. Adding a pointer or a slice to it would put an
+// allocation on every request — see the alloc gates in
+// openexchange_alloc_test.go and h1_openexchange_alloc_test.go.
+type exchangeStats struct {
+	// Proto is the wire protocol that carried the exchange. It is the
+	// transport's own answer rather than the Client's TransportKind because
+	// TransportALPN does not know which one it is until the handshake.
+	//
+	// Set it on EVERY return path, failures included. trace.ProtoH1 is 0, so a
+	// stats value that leaves this field alone does not report "unknown" — it
+	// reports HTTP/1.1, and a failed ALPN dial then arrives labelled as a
+	// protocol nothing negotiated. Use trace.ProtoUnknown when there is no
+	// answer yet.
+	Proto trace.Protocol
+	// RemoteAddr is the "host:port" the exchange went to. For the managed
+	// transports this is the address the Selector picked for THIS request, not
+	// the client's configured Addr — which is empty there.
+	RemoteAddr string
+	// Connect is how long the dial this caller paid for took, including TLS
+	// (and, for HTTP/3, the QUIC handshake). Zero when the connection was
+	// reused or dialled by somebody else.
+	Connect time.Duration
 }
 
 // releaser hands an exchange's connection back to whatever owns it. It is an

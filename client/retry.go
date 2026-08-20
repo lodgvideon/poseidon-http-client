@@ -155,9 +155,15 @@ type RetryOptions struct {
 // retryDoer is the unexported seam Retryer drives. *Client satisfies
 // it implicitly. Tests inject a fake to drive the loop without a real
 // transport.
+//
+// The methods carry the attempt number rather than being the exported Do and
+// DoStream, because the attempt is a fact only the loop has and every
+// per-request record needs: without it the OnRequestComplete events for a
+// replayed request are indistinguishable from three separate requests that
+// happened to look alike.
 type retryDoer interface {
-	Do(ctx context.Context, req *Request, resp *Response) error
-	DoStream(ctx context.Context, req *Request, sr *StreamResponse) error
+	doAttempt(ctx context.Context, req *Request, resp *Response, attempt int) error
+	doStreamAttempt(ctx context.Context, req *Request, sr *StreamResponse, attempt int) error
 }
 
 // Retryer wraps a transport with bounded automatic retry.
@@ -269,7 +275,7 @@ func (r *Retryer) shouldRetryErr(err error) bool {
 // the request itself (non-idempotent / BodyReader / MaxAttempts<=1).
 func (r *Retryer) Do(ctx context.Context, req *Request, resp *Response) error {
 	if req == nil || !r.canRetry(req) {
-		return r.d.Do(ctx, req, resp)
+		return r.d.doAttempt(ctx, req, resp, 0)
 	}
 	// Encode the body once, above the loop, instead of re-encoding it on every
 	// attempt. The result is inert (see prepareCompressedRequest), so the
@@ -310,7 +316,7 @@ func (r *Retryer) doLoop(ctx context.Context, req *Request, resp *Response) erro
 				return err
 			}
 		}
-		err = r.d.Do(ctx, req, resp)
+		err = r.d.doAttempt(ctx, req, resp, attempt)
 		if err == nil {
 			if !r.userIsRetryable(nil, resp) {
 				return nil
@@ -340,7 +346,7 @@ func (r *Retryer) userIsRetryable(err error, resp *Response) bool {
 // response classification is the caller's concern.
 func (r *Retryer) DoStream(ctx context.Context, req *Request, sr *StreamResponse) error {
 	if req == nil || !r.canRetry(req) {
-		return r.d.DoStream(ctx, req, sr)
+		return r.d.doStreamAttempt(ctx, req, sr, 0)
 	}
 	// Encode once above the loop; see Do.
 	req, release, err := prepareCompressedRequest(req)
@@ -359,7 +365,7 @@ func (r *Retryer) DoStream(ctx context.Context, req *Request, sr *StreamResponse
 			}
 			sr.reset()
 		}
-		err = r.d.DoStream(ctx, req, sr)
+		err = r.d.doStreamAttempt(ctx, req, sr, attempt)
 		if err == nil {
 			return nil
 		}

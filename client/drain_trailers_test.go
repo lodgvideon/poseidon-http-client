@@ -70,7 +70,7 @@ func TestDrainResponse_TrailerFlood_Bounded(t *testing.T) {
 	resp.Reset()
 	req := &Request{Method: "GET", Path: "/", WantTrailers: true}
 
-	err := drainResponse(context.Background(), nil, &scriptedStream{events: events},
+	_, err := drainResponse(context.Background(), nil, &scriptedStream{events: events},
 		req, &resp, nil, 1<<20, 1<<20)
 
 	require.NoError(t, err, "drainResponse over a trailer flood must complete, not fail")
@@ -99,7 +99,7 @@ func TestDrainResponse_InterimHeaders_Dropped(t *testing.T) {
 	resp.Reset()
 	req := &Request{Method: "GET", Path: "/", BodyMode: BodyBuffer}
 
-	err := drainResponse(context.Background(), nil, &scriptedStream{events: events},
+	_, err := drainResponse(context.Background(), nil, &scriptedStream{events: events},
 		req, &resp, nil, 1<<20, 1<<20)
 
 	require.NoError(t, err, "drainResponse must pump past an interim block, not fail on it")
