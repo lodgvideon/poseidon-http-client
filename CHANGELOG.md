@@ -81,6 +81,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   it is now 0 and two-sided like its cold sibling (#798, #827, #828, #836, #837,
   #838, #839, #840, #842, #843, #844, #846, #847, #853, #854, #855, #856).
 
+- **Thirteen coverage gaps in the two header codecs, most of them boundaries
+  only ever tested past the limit.** `hpack` accepts a §6.3 Dynamic Table Size
+  Update, a §4.4 dynamic-table entry and a header list at exactly their limits
+  and refuses one past — but nothing sat ON any of those three comparisons, so
+  narrowing each to `>=` left the suite green while turning a conformant peer's
+  largest legal input into a connection error. `decodeInteger` carries two
+  independent §5.1 bounds and only the value one was tested: a run of
+  zero-payload continuation octets never grows the value, so the shift ceiling
+  is the only thing that can stop it, and relaxing that ceiling let the peer
+  decide how long the loop ran. Index 61 — the last static entry, the line
+  between the static and dynamic tables, wire-visible and shared with every peer
+  — was never decoded; and 53 of the 61 Appendix A rows were asserted by nothing
+  at all, so they are now checked against a second transcription taken from the
+  RFC text rather than generated from the table under test. In `qpack` the
+  static-index guard on the Literal-with-Name-Reference path had no test (its
+  Indexed twin does, and the same one-byte relaxation there is caught as a
+  panic); neither string reader had ever been handed a Huffman literal that
+  fails to decode, though the two map to different HTTP/3 connection error
+  codes; a SHRINKING Set Dynamic Table Capacity never evicted in any test;
+  `compactArena` was never invoked at all, leaving the arena a peer-driven
+  unbounded allocation with nothing gating it; the §7.1 N bit was pinned only on
+  the branch a secret is least likely to take, not on the literal-name form that
+  carries `x-api-key`; and three small encode contracts — the Required Insert
+  Count wraparound, the constructor's capacity clamp, the static name-only
+  tie-break — had no assertion behind them. Each issue's mutant survived the old
+  suite twice and dies against the new one twice (#755, #756, #757, #759, #765,
+  #766, #767, #768, #771, #772, #776, #777).
+
+  The pair filed as #764 was measured and closed rather than covered. The copies
+  guarding the arena-aliasing reads in Insert With Name Reference and Duplicate
+  are defence in depth, not a live requirement: a differential probe over 180,000
+  encoder instructions — 11,484 of them driving an insert that evicted the whole
+  table, 605 with the referenced entry at a non-zero arena offset — produced a
+  bit-identical digest with both copies removed, under `-race` and `GOGC=1`. The
+  only in-place arena mutation is the reset performed when the table empties, and
+  every destination it then writes lies at or below its source, so `copy`'s
+  memmove semantics keep the aliased read correct. The copies stay; the tests
+  that would have "proved" them are not written, because their mutants survive
+  before and after.
+
 - **Four boundary classes that were never asserted, two of them on peer bytes.**
   `bufx.StripPadding` was never called with `padLen == len(raw)`, the first
   illegal pad length; `bytesx.ReadVarint` never saw an 8-byte prefix truncated to
