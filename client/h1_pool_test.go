@@ -3,7 +3,6 @@ package client
 import (
 	"bufio"
 	"context"
-	"errors"
 	"fmt"
 	"net"
 	"strings"
@@ -11,6 +10,9 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	"github.com/lodgvideon/poseidon-http-client/conn"
 )
@@ -157,14 +159,7 @@ func (d *h1FakeDialer) conns(addr string) []*h1FakeConn {
 // release must wait for the actor rather than read immediately.
 func waitForH1(t *testing.T, cond func() bool, msg string) {
 	t.Helper()
-	deadline := time.Now().Add(3 * time.Second)
-	for time.Now().Before(deadline) {
-		if cond() {
-			return
-		}
-		time.Sleep(5 * time.Millisecond)
-	}
-	t.Fatal(msg)
+	require.Eventually(t, cond, 3*time.Second, 5*time.Millisecond, msg)
 }
 
 // mustAcquireH1 acquires one conn or fails the test.
@@ -173,9 +168,7 @@ func mustAcquireH1(t *testing.T, p *h1Pool) *h1ManagedConn {
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 	mc, err := p.acquire(ctx)
-	if err != nil {
-		t.Fatalf("acquire: %v", err)
-	}
+	require.NoError(t, err, "acquire")
 	return mc
 }
 
@@ -187,32 +180,34 @@ func TestH1Pool_Stats_Empty(t *testing.T) {
 	t.Parallel()
 	p := newH1Pool("h:80", newH1FakeDialer(), PoolOptions{MaxConnsPerHost: 2}, nil, nil)
 	t.Cleanup(func() { _ = p.Close() })
-	if s := p.Stats(); s != (Stats{}) {
-		t.Fatalf("empty Stats = %+v, want zero", s)
-	}
+
+	s := p.Stats()
+
+	require.Equal(t, Stats{}, s, "a pool that has never dialed must report zero, not a phantom conn")
 }
 
 func TestH1Pool_Close_Idempotent(t *testing.T) {
 	t.Parallel()
 	p := newH1Pool("h:80", newH1FakeDialer(), PoolOptions{MaxConnsPerHost: 1}, nil, nil)
-	if err := p.Close(); err != nil {
-		t.Fatalf("first Close = %v", err)
-	}
-	if err := p.Close(); err != nil {
-		t.Fatalf("second Close = %v", err)
-	}
+
+	err1 := p.Close()
+	err2 := p.Close()
+
+	require.NoError(t, err1, "first Close")
+	require.NoError(t, err2, "second Close must be a no-op, not an error")
 }
 
 func TestH1Pool_StatsAfterClose_ReturnsZero(t *testing.T) {
 	t.Parallel()
 	p := newH1Pool("h:80", newH1FakeDialer(), PoolOptions{MaxConnsPerHost: 1}, nil, nil)
 	_ = p.Close()
-	if s := p.Stats(); s != (Stats{}) {
-		t.Fatalf("Stats after Close = %+v, want zero", s)
-	}
-	if _, err := p.acquire(context.Background()); !errors.Is(err, ErrPoolClosed) {
-		t.Fatalf("acquire after Close = %v, want ErrPoolClosed", err)
-	}
+
+	s := p.Stats()
+	_, aerr := p.acquire(context.Background())
+
+	assert.Equal(t, Stats{}, s, "Stats after Close must be zero, not the pre-close snapshot")
+	assert.ErrorIs(t, aerr, ErrPoolClosed,
+		"acquire after Close must be classifiable as ErrPoolClosed, not a generic failure")
 }
 
 func TestH1Pool_ClosedPool_ClosesPooledConns(t *testing.T) {
@@ -224,9 +219,8 @@ func TestH1Pool_ClosedPool_ClosesPooledConns(t *testing.T) {
 	_ = p.Close()
 
 	for _, fc := range d.conns("h:80") {
-		if !fc.closed.Load() {
-			t.Fatalf("conn %d still open after pool Close", fc.idx)
-		}
+		assert.Truef(t, fc.closed.Load(),
+			"conn %d still open after pool Close — the descriptor leaks", fc.idx)
 	}
 }
 
@@ -247,18 +241,14 @@ func TestH1Pool_ExclusiveCheckout_ConcurrentRequestUsesSecondConn(t *testing.T) 
 	mc0 := mustAcquireH1(t, p)
 	mc1 := mustAcquireH1(t, p) // mc0 is still checked out
 
-	if mc0.c == mc1.c {
-		t.Fatal("second concurrent acquire reused the busy conn — HTTP/1.1 has no multiplexing")
-	}
-	if mc0.active != 1 || mc1.active != 1 {
-		t.Fatalf("active counts = %d/%d, want 1/1 (one exchange per conn)", mc0.active, mc1.active)
-	}
-	if got := d.count("h:80"); got != 2 {
-		t.Fatalf("dialed %d conns, want 2 (one per concurrent exchange)", got)
-	}
-	if s := p.Stats(); s.ActiveConns != 2 || s.InFlightStreams != 2 {
-		t.Fatalf("Stats = %+v, want ActiveConns=2 InFlightStreams=2", s)
-	}
+	require.NotSame(t, mc0.c, mc1.c,
+		"second concurrent acquire reused the busy conn — HTTP/1.1 has no multiplexing")
+	assert.Equal(t, 1, mc0.active, "conn 0 must carry exactly one exchange")
+	assert.Equal(t, 1, mc1.active, "conn 1 must carry exactly one exchange")
+	assert.Equal(t, 2, d.count("h:80"), "want one dial per concurrent exchange")
+	s := p.Stats()
+	assert.Equal(t, 2, s.ActiveConns, "Stats.ActiveConns must count both checked-out conns")
+	assert.Equal(t, 2, s.InFlightStreams, "Stats.InFlightStreams must count both exchanges")
 }
 
 // TestH1Pool_AtCap_ThirdAcquireWaitsThenProceeds pins the two rules that make the
@@ -279,9 +269,9 @@ func TestH1Pool_AtCap_ThirdAcquireWaitsThenProceeds(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 150*time.Millisecond)
 	_, err := p.acquire(ctx)
 	cancel()
-	if !errors.Is(err, context.DeadlineExceeded) {
-		t.Fatalf("third acquire at cap = %v, want DeadlineExceeded (must block, not serialize)", err)
-	}
+	require.ErrorIs(t, err, context.DeadlineExceeded,
+		"the third acquire at the cap must BLOCK until its own deadline, not serialize "+
+			"onto a busy conn and not exceed MaxConnsPerHost")
 
 	// Freeing a conn must hand it to a waiter.
 	got := make(chan *h1ManagedConn, 1)
@@ -302,19 +292,16 @@ func TestH1Pool_AtCap_ThirdAcquireWaitsThenProceeds(t *testing.T) {
 
 	select {
 	case mc := <-got:
-		if mc.c != mc0.c {
-			t.Fatal("waiter did not get the freed conn")
-		}
+		assert.Same(t, mc0.c, mc.c, "the waiter must be handed the conn that was just freed")
 		p.release(mc, true)
-	case err := <-bad:
-		t.Fatalf("waiter acquire = %v", err)
+	case werr := <-bad:
+		require.NoError(t, werr, "waiter acquire")
 	case <-time.After(3 * time.Second):
-		t.Fatal("waiter never proceeded after a conn was freed")
+		require.FailNow(t, "waiter never proceeded after a conn was freed")
 	}
 
-	if n := d.dials.Load(); n != 2 {
-		t.Fatalf("dials = %d, want 2 — the pool must never exceed MaxConnsPerHost", n)
-	}
+	assert.EqualValues(t, 2, d.dials.Load(),
+		"the pool must never dial past MaxConnsPerHost")
 }
 
 // TestH1Pool_AtCap_CtxCancelWhileWaiting_ReturnsCtxErr proves a waiter blocked at
@@ -338,12 +325,11 @@ func TestH1Pool_AtCap_CtxCancelWhileWaiting_ReturnsCtxErr(t *testing.T) {
 	cancel()
 
 	select {
-	case err := <-errCh:
-		if !errors.Is(err, context.Canceled) {
-			t.Fatalf("cancelled waiter = %v, want context.Canceled", err)
-		}
+	case werr := <-errCh:
+		assert.ErrorIs(t, werr, context.Canceled,
+			"a waiter blocked at the cap must observe its own cancellation")
 	case <-time.After(3 * time.Second):
-		t.Fatal("cancelled waiter hung instead of returning ctx.Err()")
+		require.FailNow(t, "cancelled waiter hung instead of returning ctx.Err()")
 	}
 }
 
@@ -364,11 +350,13 @@ func TestH1Pool_MaxStreamsPerConn_Ignored(t *testing.T) {
 	defer p.release(mc, true)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 150*time.Millisecond)
+
 	_, err := p.acquire(ctx)
 	cancel()
-	if !errors.Is(err, context.DeadlineExceeded) {
-		t.Fatalf("second acquire = %v, want DeadlineExceeded; MaxStreamsPerConn must not multiplex H1.1", err)
-	}
+
+	require.ErrorIs(t, err, context.DeadlineExceeded,
+		"MaxStreamsPerConn must not multiplex HTTP/1.1: the second acquire has to block "+
+			"on MaxConnsPerHost regardless of the stream cap")
 }
 
 // TestH1Pool_BoundedConcurrency_UnderLoad drives many concurrent checkouts and
@@ -392,15 +380,16 @@ func TestH1Pool_BoundedConcurrency_UnderLoad(t *testing.T) {
 			defer wg.Done()
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancel()
+			// assert, never require: this runs off the test goroutine, where
+			// require's FailNow is illegal.
 			mc, err := p.acquire(ctx)
 			if err != nil {
-				t.Errorf("acquire: %v", err)
+				assert.NoError(t, err, "acquire under load")
 				return
 			}
 			mu.Lock()
-			if held[mc] {
-				t.Error("pool handed one conn to two concurrent holders")
-			}
+			assert.Falsef(t, held[mc],
+				"pool handed one conn to two concurrent holders — exclusive checkout broken")
 			held[mc] = true
 			live++
 			if live > peak {
@@ -419,12 +408,11 @@ func TestH1Pool_BoundedConcurrency_UnderLoad(t *testing.T) {
 	}
 	wg.Wait()
 
-	if peak > maxConns {
-		t.Fatalf("peak concurrency = %d, want <= %d", peak, maxConns)
-	}
-	if n := d.count("h:80"); n > maxConns {
-		t.Fatalf("dialed %d conns, want <= %d", n, maxConns)
-	}
+	assert.LessOrEqualf(t, peak, maxConns,
+		"peak concurrent checkouts = %d, want <= %d — the cap did not bound concurrency",
+		peak, maxConns)
+	assert.LessOrEqualf(t, d.count("h:80"), maxConns,
+		"dialed more than %d conns — the pool exceeded MaxConnsPerHost", maxConns)
 }
 
 // ————————————————————————————————————————————————————————————————
@@ -444,12 +432,10 @@ func TestH1Pool_KeepAlive_ReusesConn(t *testing.T) {
 	mc1 := mustAcquireH1(t, p)
 	p.release(mc1, true)
 
-	if mc0.c != mc1.c {
-		t.Fatal("sequential keep-alive acquires used different conns; want reuse")
-	}
-	if n := d.dials.Load(); n != 1 {
-		t.Fatalf("dials = %d, want 1 (keep-alive must reuse)", n)
-	}
+	assert.Same(t, mc0.c, mc1.c,
+		"sequential keep-alive acquires used different conns; want reuse")
+	assert.EqualValues(t, 1, d.dials.Load(),
+		"keep-alive must reuse the pooled conn rather than dial again")
 }
 
 // TestH1Pool_NotKeepAlive_DiscardsConn proves a conn released with keepAlive=false
@@ -470,12 +456,10 @@ func TestH1Pool_NotKeepAlive_DiscardsConn(t *testing.T) {
 	mc1 := mustAcquireH1(t, p)
 	p.release(mc1, true)
 
-	if mc0.c == mc1.c {
-		t.Fatal("discarded conn was handed back out — poisoned conn returned to the pool")
-	}
-	if n := d.dials.Load(); n != 2 {
-		t.Fatalf("dials = %d, want 2 (discard must force a redial)", n)
-	}
+	require.NotSame(t, mc0.c, mc1.c,
+		"discarded conn was handed back out — a poisoned conn returned to the pool")
+	assert.EqualValues(t, 2, d.dials.Load(),
+		"a discard must force a redial rather than resurrect the dropped conn")
 	waitForH1(t, func() bool { return p.Stats().ActiveConns == 1 },
 		"discarded conn was never evicted from the pool")
 }
@@ -510,14 +494,9 @@ func TestH1Pool_IdleEviction(t *testing.T) {
 	mc := mustAcquireH1(t, p)
 	p.release(mc, true)
 
-	deadline := time.Now().Add(3 * time.Second)
-	for time.Now().Before(deadline) {
-		if p.Stats().ActiveConns == 0 {
-			return
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-	t.Fatalf("idle conn never evicted; Stats = %+v", p.Stats())
+	require.Eventually(t, func() bool { return p.Stats().ActiveConns == 0 },
+		3*time.Second, 10*time.Millisecond,
+		"idle conn never evicted past IdleTimeout on the health tick")
 }
 
 // TestH1Pool_DialError_FailsAllQueuedWaiters pins that a dial failure answers
@@ -554,12 +533,11 @@ func TestH1Pool_DialError_FailsAllQueuedWaiters(t *testing.T) {
 	for i := 0; i < n; i++ {
 		select {
 		case err := <-errs:
-			if err == nil {
-				t.Fatal("acquire against a downed host returned a connection")
-			}
+			require.Error(t, err, "acquire against a downed host returned a connection")
 		case <-deadline:
-			t.Fatalf("only %d of %d queued acquires were answered; the rest were left "+
-				"for a health-check tick", i, n)
+			require.FailNowf(t, "queued acquires were stranded",
+				"only %d of %d queued acquires were answered; the rest were left for a "+
+					"health-check tick", i, n)
 		}
 	}
 }
@@ -596,12 +574,10 @@ func TestH1Pool_WaiterServedAfterCloseEviction(t *testing.T) {
 	p.release(mc, false) // "Connection: close": evicted, pool now empty
 
 	select {
-	case err := <-got:
-		if err != nil {
-			t.Fatalf("queued waiter got %v, want a freshly dialled conn", err)
-		}
+	case werr := <-got:
+		require.NoError(t, werr, "queued waiter must get a freshly dialled conn")
 	case <-time.After(5 * time.Second):
-		t.Fatal("queued waiter was never served after the last conn was evicted — " +
+		require.FailNow(t, "queued waiter was never served after the last conn was evicted",
 			"the pool had no path back to dialling")
 	}
 }
@@ -630,12 +606,11 @@ func TestH1Pool_CheckoutProbeRejectsPeerClosedConn(t *testing.T) {
 	fc.closePeer()
 
 	mc2 := mustAcquireH1(t, p)
-	if mc2 == mc {
-		t.Fatal("checkout handed back the connection whose peer had closed it")
-	}
-	if n := d.dials.Load(); n < 2 {
-		t.Errorf("dials = %d, want a re-dial after the dead conn was rejected", n)
-	}
+
+	require.NotSame(t, mc, mc2,
+		"checkout handed back the connection whose peer had closed it")
+	assert.GreaterOrEqual(t, d.dials.Load(), int32(2),
+		"want a re-dial after the dead conn was rejected at checkout")
 }
 
 // TestH1Pool_ProbeEvictsPeerClosedIdleConn pins that the periodic maintenance
@@ -663,14 +638,10 @@ func TestH1Pool_ProbeEvictsPeerClosedIdleConn(t *testing.T) {
 	fc.closePeer()
 
 	// The next maintenance tick must probe the idle conn, see EOF, and evict it.
-	deadline := time.Now().Add(3 * time.Second)
-	for time.Now().Before(deadline) {
-		if p.Stats().ActiveConns == 0 {
-			return
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-	t.Fatalf("peer-closed idle conn never evicted by the probe; Stats = %+v", p.Stats())
+	require.Eventually(t, func() bool { return p.Stats().ActiveConns == 0 },
+		3*time.Second, 10*time.Millisecond,
+		"peer-closed idle conn never evicted by the probe (RFC 9112 §9.6: idle "+
+			"connections must be monitored for a closure signal)")
 }
 
 // ————————————————————————————————————————————————————————————————
@@ -689,9 +660,10 @@ func TestH1Pool_DialError_PropagatesAsDialError(t *testing.T) {
 	_, err := p.acquire(ctx)
 
 	var de *DialError
-	if !errors.As(err, &de) {
-		t.Fatalf("acquire with failing dial = %v, want *DialError", err)
-	}
+	require.ErrorAsf(t, err, &de,
+		"acquire with a failing dial returned %v; callers classify a dial failure by "+
+			"*DialError, so an unwrapped error is indistinguishable from a request failure", err)
+	assert.Equal(t, "h:80", de.Addr, "*DialError must name the address that failed")
 }
 
 // ————————————————————————————————————————————————————————————————
@@ -701,62 +673,59 @@ func TestH1Pool_DialError_PropagatesAsDialError(t *testing.T) {
 func TestNewH1Client_Construction(t *testing.T) {
 	t.Parallel()
 	c, err := NewH1Client("h:80", newH1FakeDialer())
-	if err != nil {
-		t.Fatalf("NewH1Client: %v", err)
-	}
+
+	require.NoError(t, err, "NewH1Client")
 	defer func() { _ = c.Close() }()
-	if _, ok := c.tr.(*h1singleConn); !ok {
-		t.Fatalf("transport is %T, want *h1singleConn", c.tr)
-	}
+	_, ok := c.tr.(*h1singleConn)
+	assert.Truef(t, ok, "transport is %T, want *h1singleConn", c.tr)
 }
 
 func TestNewH1PoolClient_Construction(t *testing.T) {
 	t.Parallel()
 	c, err := NewH1PoolClient("h:80", newH1FakeDialer(), PoolOptions{MaxConnsPerHost: 4})
-	if err != nil {
-		t.Fatalf("NewH1PoolClient: %v", err)
-	}
+
+	require.NoError(t, err, "NewH1PoolClient")
 	defer func() { _ = c.Close() }()
 	pt, ok := c.tr.(*h1PoolTransport)
-	if !ok {
-		t.Fatalf("transport is %T, want *h1PoolTransport", c.tr)
-	}
-	if pt.p.opts.MaxConnsPerHost != 4 {
-		t.Fatalf("MaxConnsPerHost = %d, want 4", pt.p.opts.MaxConnsPerHost)
-	}
+	require.Truef(t, ok, "transport is %T, want *h1PoolTransport", c.tr)
+	assert.Equal(t, 4, pt.p.opts.MaxConnsPerHost,
+		"the caller's MaxConnsPerHost must reach the pool, or the option is ignored")
 }
 
 func TestNewClient_H1Pool_Validation(t *testing.T) {
 	t.Parallel()
 	// Missing Pool → rejected (mirrors TransportPool / TransportH3Pool).
-	if _, err := NewClient(ClientOptions{
+	_, errNoPool := NewClient(ClientOptions{
 		Addr: "h:80", Transport: TransportH1Pool, ConnOpts: conn.ConnOptions{Dialer: newH1FakeDialer()},
-	}); !errors.Is(err, ErrInvalidPoolOptions) {
-		t.Fatalf("missing Pool = %v, want ErrInvalidPoolOptions", err)
-	}
+	})
 	// Missing Dialer → rejected (H1 dials via conn.Dialer, not TLSConfig).
-	if _, err := NewClient(ClientOptions{
+	_, errNoDialer := NewClient(ClientOptions{
 		Addr: "h:80", Transport: TransportH1Pool, Pool: &PoolOptions{MaxConnsPerHost: 1},
-	}); err == nil {
-		t.Fatal("missing Dialer = nil error, want failure")
-	}
+	})
+
+	assert.ErrorIs(t, errNoPool, ErrInvalidPoolOptions,
+		"a pooled transport with no PoolOptions must be refused at construction")
+	assert.Error(t, errNoDialer,
+		"an HTTP/1.1 pool with no Dialer must be refused: H1 dials via conn.Dialer, "+
+			"never via TLSConfig")
 }
 
 func TestNewClient_H1Managed_Validation(t *testing.T) {
 	t.Parallel()
 	// Missing Resolver → rejected.
-	if _, err := NewClient(ClientOptions{
+	_, errNoResolver := NewClient(ClientOptions{
 		Transport: TransportH1Managed, ConnOpts: conn.ConnOptions{Dialer: newH1FakeDialer()},
-	}); !errors.Is(err, ErrInvalidOptions) {
-		t.Fatalf("missing Resolver = %v, want ErrInvalidOptions", err)
-	}
+	})
 	// Addr set on a managed transport → rejected (Resolver owns addressing).
-	if _, err := NewClient(ClientOptions{
+	_, errAddrSet := NewClient(ClientOptions{
 		Addr: "h:80", Transport: TransportH1Managed, ConnOpts: conn.ConnOptions{Dialer: newH1FakeDialer()},
 		Resolver: StaticResolver(h1Addrs(1)...),
-	}); !errors.Is(err, ErrInvalidOptions) {
-		t.Fatalf("Addr with TransportH1Managed = %v, want ErrInvalidOptions", err)
-	}
+	})
+
+	assert.ErrorIs(t, errNoResolver, ErrInvalidOptions,
+		"a managed transport with no Resolver has no addresses and must be refused")
+	assert.ErrorIs(t, errAddrSet, ErrInvalidOptions,
+		"Addr and Resolver both set is ambiguous addressing and must be refused")
 }
 
 // TestTransportKind_ConstantValues pins the wire-order of the TransportKind iota
@@ -781,9 +750,8 @@ func TestTransportKind_ConstantValues(t *testing.T) {
 		{TransportH1Pool, 8, "TransportH1Pool"},
 		{TransportH1Managed, 9, "TransportH1Managed"},
 	} {
-		if int(tc.kind) != tc.want {
-			t.Errorf("%s = %d, want %d — constants must not be renumbered", tc.name, int(tc.kind), tc.want)
-		}
+		assert.Equalf(t, tc.want, int(tc.kind),
+			"%s must keep its value — constants must not be renumbered", tc.name)
 	}
 }
 
@@ -804,7 +772,10 @@ func TestH1Pool_DialBackoff_FastRefuses(t *testing.T) {
 
 	ctx2, cancel2 := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel2()
-	if _, err := p.acquire(ctx2); !errors.Is(err, ErrDialBackoff) {
-		t.Fatalf("acquire during backoff = %v, want ErrDialBackoff", err)
-	}
+
+	_, err := p.acquire(ctx2)
+
+	require.ErrorIs(t, err, ErrDialBackoff,
+		"a second acquire inside DialBackoff must fast-refuse rather than re-dial a "+
+			"host that just refused the connection")
 }
