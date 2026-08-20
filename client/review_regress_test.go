@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -102,11 +103,26 @@ func TestWarmup_NoActiveLeak(t *testing.T) {
 			"blocks idle eviction and graceful drain forever", p.Stats())
 }
 
-// rgTrackedConn counts Close calls on a dialed transport connection.
+// rgTrackedConn counts Close calls on a dialed transport connection, and
+// signals once the HTTP/2 handshake has visibly completed.
+//
+// handshook is closed on the first Read that returns bytes — the server SETTINGS
+// frame — at which point NewClientConn is about to succeed. That instant is the
+// one the leak needs; see closeDuringDial.
 type rgTrackedConn struct {
 	net.Conn
-	closed   atomic.Bool
-	closedCt *atomic.Int32
+	closed    atomic.Bool
+	closedCt  *atomic.Int32
+	once      sync.Once
+	handshook chan struct{}
+}
+
+func (c *rgTrackedConn) Read(b []byte) (int, error) {
+	n, err := c.Conn.Read(b)
+	if err == nil && n > 0 && c.handshook != nil {
+		c.once.Do(func() { close(c.handshook) })
+	}
+	return n, err
 }
 
 func (c *rgTrackedConn) Close() error {
@@ -116,11 +132,13 @@ func (c *rgTrackedConn) Close() error {
 	return c.Conn.Close()
 }
 
-// rgTrackingDialer wraps a Dialer and tallies dialed vs Closed conns.
+// rgTrackingDialer wraps a Dialer and tallies dialed vs Closed conns, threading
+// the handshake signal through to the conn it returns.
 type rgTrackingDialer struct {
-	inner    conn.Dialer
-	dialedCt *atomic.Int32
-	closedCt *atomic.Int32
+	inner     conn.Dialer
+	dialedCt  *atomic.Int32
+	closedCt  *atomic.Int32
+	handshook chan struct{}
 }
 
 func (d *rgTrackingDialer) Dial(ctx context.Context, addr string) (net.Conn, error) {
@@ -129,58 +147,138 @@ func (d *rgTrackingDialer) Dial(ctx context.Context, addr string) (net.Conn, err
 		return nil, err
 	}
 	d.dialedCt.Add(1)
-	return &rgTrackedConn{Conn: c, closedCt: d.closedCt}, nil
+	return &rgTrackedConn{Conn: c, closedCt: d.closedCt, handshook: d.handshook}, nil
 }
+
+// closeDuringDial runs iters pool lifecycles against addr and reports
+// (signals, dialed, closed).
+//
+// With inject=true each lifecycle waits for the HANDSHAKE signal before calling
+// Close. Where that signal sits is the whole design:
+//
+//   - Signalling when Dial RETURNS — or, as the old form did, sleeping a flat 1ms
+//     and hoping — is too early. dialAttempt cancels the dial context the moment
+//     closedCh closes, so NewClientConn then fails and conn.Dial closes the
+//     transport itself. That is a SECOND mechanism which keeps the tally balanced
+//     while the drain never runs at all. Measured with that placement: deleting
+//     the drain outright still left 50/50 conns Closed and this test green.
+//   - Signalling once the handshake has produced bytes is late enough that
+//     NewClientConn succeeds, so dialOne really does hand a live managedConn to
+//     the buffered dialDoneCh. That is the state the leak needs.
+//
+// Which of the two close paths then runs is a genuine select race inside the
+// actor and is not controllable from out here; the iteration count exists for
+// that residual race alone. Measured with the drain deleted: 300 lifecycles,
+// 300 handshakes, 300 dialled, 194 Closed, 106 leaked — the drain path is taken
+// on roughly a third of lifecycles, so 100 iterations puts the false-negative
+// near 1e-18.
+//
+// With inject=false the pool is closed having never been asked to dial. That is
+// the control arm: it must produce zero dials, which is what makes a non-zero
+// count in the injected arm attributable to the injection.
+func closeDuringDial(t *testing.T, addr string, iters int, inject bool) (signals int, dialed, closed int32) {
+	t.Helper()
+
+	inner := &conn.TLSDialer{Config: &tls.Config{InsecureSkipVerify: true}}
+	var dialedCt, closedCt atomic.Int32
+	for i := 0; i < iters; i++ {
+		td := &rgTrackingDialer{inner: inner, dialedCt: &dialedCt, closedCt: &closedCt}
+		if inject {
+			td.handshook = make(chan struct{})
+		}
+		p := newPool(addr, conn.ConnOptions{Dialer: td}, PoolOptions{
+			MaxConnsPerHost:   1,
+			HealthCheckPeriod: time.Hour,
+		}, nil, nil)
+		if !inject {
+			_ = p.Close()
+			continue
+		}
+		go func() {
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			if mc, err := p.acquire(ctx); err == nil {
+				p.release(mc)
+			}
+		}()
+		select {
+		case <-td.handshook:
+			signals++
+		case <-time.After(10 * time.Second):
+			// Fall through — the signal count the caller asserts reports it.
+		}
+		_ = p.Close()
+	}
+
+	// handleClose drains in-flight dials in a background goroutine, so a dialed
+	// conn may be Closed shortly after Close returns — allow a brief settle.
+	deadline := time.Now().Add(8 * time.Second)
+	for closedCt.Load() < dialedCt.Load() && time.Now().Before(deadline) {
+		time.Sleep(20 * time.Millisecond)
+	}
+	return signals, dialedCt.Load(), closedCt.Load()
+}
+
+// closeDuringDialIters covers the residual select race only. The old form ran
+// 1000 lifecycles because its injection also had to win a race against a flat
+// 1ms sleep just to dial at all; with the handshake pinned, every lifecycle
+// reaches the state and only the actor's choice of path is left to chance.
+const closeDuringDialIters = 100
 
 // TestPoolClose_NoDialDoneLeak is a regression test: a dial completing during
 // Pool.Close used to be orphaned in the buffered dialDoneCh (never Closed),
 // leaking the conn, its reader goroutine, and its fd. handleClose now drains
 // every in-flight dial, so every dialed conn is eventually Closed.
 //
-// The leak surfaces only on a probabilistic interleaving (dial result buffered,
-// actor selects closeCh before draining it), so this is a stress test — the
-// high iteration count drives the per-run false-negative toward zero. The fix's
-// correctness does not depend on the race: handleClose drains exactly the
-// captured in-flight-dial count regardless of timing.
+// The old form approximated the interleaving by sleeping a flat 1ms between
+// launching the acquire and calling Close, and hoping the TLS dial landed inside
+// it. On CI it never did: run 32336395551 reported "1000 close-during-dial
+// races, 0 conns dialled, 0 Closed" — a thousand lifecycles that closed pools
+// which had not dialled anything, so the regression path was not executed once.
+// Locally the same form lands 1 lifecycle in 50 unloaded and 0 in 50 under
+// GOMAXPROCS=1 with four CPU hogs, which is why it looked healthy here and was
+// vacuous there. The dialer now signals the completed handshake and this waits
+// for it.
 func TestPoolClose_NoDialDoneLeak(t *testing.T) {
 	addr := h2TestServer(t, func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(200) })
-	inner := &conn.TLSDialer{Config: &tls.Config{InsecureSkipVerify: true}}
-	var dialedCt, closedCt atomic.Int32
 
-	for i := 0; i < 1000; i++ {
-		td := &rgTrackingDialer{inner: inner, dialedCt: &dialedCt, closedCt: &closedCt}
-		p := newPool(addr, conn.ConnOptions{Dialer: td}, PoolOptions{
-			MaxConnsPerHost:   1,
-			HealthCheckPeriod: time.Hour,
-		}, nil, nil)
+	signals, dialed, closed := closeDuringDial(t, addr, closeDuringDialIters, true)
 
-		// Launch an acquire so a dialOne is in flight, then close while it is
-		// completing — exercising the dial-completes-during-close path.
-		go func() {
-			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-			defer cancel()
-			if mc, err := p.acquire(ctx); err == nil {
-				p.release(mc)
-			}
-		}()
-		time.Sleep(time.Millisecond)
-		_ = p.Close()
-	}
-
-	// handleClose drains in-flight dials in a background goroutine, so a dialed
-	// conn may be Closed shortly after Close returns — allow a brief settle.
-	deadline := time.Now().Add(3 * time.Second)
-	for closedCt.Load() < dialedCt.Load() && time.Now().Before(deadline) {
-		time.Sleep(20 * time.Millisecond)
-	}
-	d, c := dialedCt.Load(), closedCt.Load()
-	t.Logf("injections: 1000 close-during-dial races, %d conns dialled, %d Closed", d, c)
-	require.Positivef(t, d,
-		"no conn was dialled across 1000 iterations, so the close-during-dial path was "+
-			"never exercised and a zero leak count proves nothing")
-	assert.GreaterOrEqualf(t, c, d,
+	t.Logf("injections: %d/%d lifecycles closed against a completed handshake; %d conns dialled, %d Closed",
+		signals, closeDuringDialIters, dialed, closed)
+	require.Equalf(t, closeDuringDialIters, signals,
+		"only %d of %d lifecycles saw a completed handshake before Close; the rest closed a "+
+			"pool whose dial had not produced a conn, and cannot observe the leak this test "+
+			"exists for", signals, closeDuringDialIters)
+	require.GreaterOrEqualf(t, dialed, int32(closeDuringDialIters),
+		"%d conns dialled across %d injected lifecycles, want at least one each",
+		dialed, closeDuringDialIters)
+	assert.GreaterOrEqualf(t, closed, dialed,
 		"conn leak: %d dialed but only %d Closed (%d leaked) — each leak strands a "+
-			"connection, its reader goroutine and its fd", d, c, d-c)
+			"connection, its reader goroutine and its fd", dialed, closed, dialed-closed)
+}
+
+// TestPoolClose_NoDialInFlight_ControlArm is the control for the test above: the
+// same pools over the same server, closed WITHOUT the injection. It must dial
+// nothing at all.
+//
+// Without it, "dialed >= 100" in the injected arm is only a number; with it the
+// number is attributable to the injection, because the identical fixture
+// produces zero when the injection is withheld. It is also the arm that would
+// catch a fixture that had started dialling on its own, at which point the
+// injected arm would be counting dials it did not cause.
+func TestPoolClose_NoDialInFlight_ControlArm(t *testing.T) {
+	addr := h2TestServer(t, func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(200) })
+
+	signals, dialed, closed := closeDuringDial(t, addr, closeDuringDialIters, false)
+
+	t.Logf("injections (control, none performed): %d handshakes, %d conns dialled, %d Closed",
+		signals, dialed, closed)
+	assert.Zerof(t, signals, "the control arm performed %d injections; it must perform none", signals)
+	assert.Zerof(t, dialed,
+		"closing a pool that was never asked for a connection dialled %d conns — the "+
+			"injected arm's dial count would then not be attributable to its injection", dialed)
+	assert.Zerof(t, closed, "%d conns Closed in a run that dialled none", closed)
 }
 
 // TestBodyStream_DecompressFail_NoDoubleRelease is a regression test: when the
