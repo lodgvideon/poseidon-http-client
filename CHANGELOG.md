@@ -9,6 +9,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Tests
 
+- **Twelve `grpc` coverage gaps closed, three of them tests that named a
+  property they could not observe.** `TestIntegration_ResetStreamMapsToStatus`
+  asserted only "not OK", which `InvokeInto`'s empty-response guard produces on
+  its own, so the reset-code mapping was never checked through the wiring; the
+  RST arm is now driven through `NewStream`/`Recv` over six chosen codes, which
+  needed a mock peer able to send a reset code of the test's choosing —
+  net/http2's server only ever emits `INTERNAL_ERROR`, the same value every
+  unmapped code falls through to. `TestStream_SendErrorIsSticky` killed the whole
+  `ClientConn`, so every later call failed on its own and `sendErr` was never
+  read; the latch now has a test whose first send fails on an already-done
+  context with the connection provably still carrying traffic.
+  `TestInvokeInto_DrainDoesNotClobberTheResponse` never called `InvokeInto`.
+  Alongside them: `terminal()`'s status-before-truncation ordering, which needed
+  a peer that aborts mid-message *and* says why; `validContentType`'s delimiter,
+  which had no refusing case, so `application/grpc-web` read as gRPC; the
+  decoder's compact slide, whose 1 MiB ceiling the slide-less form also passed;
+  both empty-chunk guards; `MetadataValue`'s case-insensitivity; `InvokeInto`'s
+  `dst[:0]` error return; and two of the three places the pooled send vector is
+  cleared. Two fixtures were repaired rather than added to —
+  `TestStreamBufs_OversizeIsNotPooled` grew `dec.buf` where the pool reads
+  `dec.own`, and `TestStreamBufs_CloseIsTheOnlyReturn` checked fields that were
+  nil before the code under test ran. The streaming allocation gate gained the
+  absolute ceiling its unary sibling already carried, and
+  `TestIntegration_ContextCancelStopsRecv`'s second `Recv` is bounded, so losing
+  the receive latch now fails on that test's own assertion instead of burning the
+  whole test timeout. `appendTimeout`'s final clamp is recorded as unreachable by
+  construction rather than untested: no value a `time.Duration` can carry reaches
+  it (#788, #789, #790, #791, #792, #793, #803, #804, #805, #806, #812, #813).
+
 - **Four boundary classes that were never asserted, two of them on peer bytes.**
   `bufx.StripPadding` was never called with `padLen == len(raw)`, the first
   illegal pad length; `bytesx.ReadVarint` never saw an 8-byte prefix truncated to
