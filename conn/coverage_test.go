@@ -218,28 +218,45 @@ func TestConn_ShutdownStreams_ClosesOpenStreams(t *testing.T) {
 		"ranging over it would never see the stream end")
 }
 
-// TestConn_ShutdownStreams_EOF_ChannelClosed verifies that even with an
-// io.EOF reason the events channel is closed.
-func TestConn_ShutdownStreams_EOF_ChannelClosed(t *testing.T) {
+// TestConn_ShutdownStreams_FullBufferSignalsReset covers the other arm of
+// shutdownStreams' select.
+//
+// This used to be TestConn_ShutdownStreams_EOF_ChannelClosed, whose comment
+// promised "even with an io.EOF reason" for a function that takes no reason
+// argument — so it was the same equivalence partition as the test above,
+// sampled twice (#819). The partition that does exist is a stream whose event
+// channel is already full: the EventReset cannot be enqueued, so the teardown
+// has to reach the consumer through resetSignal instead, and without that a
+// caller parked in Recv learns nothing about the connection dying until its own
+// context expires.
+func TestConn_ShutdownStreams_FullBufferSignalsReset(t *testing.T) {
 	c := newGoAwayConn()
-	s := newStream(1, 8, c, 65535)
+	s := newStream(1, 1, c, 65535)
 	s.id = 1
 	c.streams[1] = s
+	s.push(StreamEvent{Type: EventHeaders})
+	require.Equalf(t, cap(s.events), len(s.events),
+		"channel is %d/%d; this test needs it full or it is a copy of the one above",
+		len(s.events), cap(s.events))
 
 	c.shutdownStreams()
 
-	done := make(chan struct{})
-	go func() {
-		for ev := range s.events {
-			_ = ev // drain
-		}
-		close(done)
-	}()
 	select {
-	case <-done:
-	case <-time.After(time.Second):
-		require.FailNow(t, "events channel not closed after EOF shutdown")
+	case <-s.resetSignal:
+	default:
+		require.FailNow(t, "resetSignal not closed for a stream whose event buffer was full; "+
+			"the teardown reached nobody and the consumer parks until its context expires")
 	}
+	assert.EqualValuesf(t, frame.ErrCodeInternalError, s.resetCode.Load(),
+		"resetCode = %d, want INTERNAL_ERROR — a teardown diagnosed locally is not a code "+
+			"the peer chose", s.resetCode.Load())
+	drained := 0
+	for range s.events {
+		drained++
+	}
+	assert.Equalf(t, 1, drained,
+		"drained %d events; the channel must still be closed behind the signal so a caller "+
+			"ranging over it ends", drained)
 }
 
 // ---------------------------------------------------------------------------
@@ -399,6 +416,9 @@ func TestHandler_OnContinuation_WrongPendingStream(t *testing.T) {
 	m.addStream(1)
 	m.addStream(3)
 	h.pendingStreamID = 1 // pending on stream 1
+	// Stream 1's half-read field block. Without it "the victim's buffer is
+	// unchanged" has nothing to be unchanged from.
+	h.pendingBuf = []byte{0x84}
 
 	fh := frame.FrameHeader{
 		Type:     frame.FrameContinuation,
@@ -408,7 +428,17 @@ func TestHandler_OnContinuation_WrongPendingStream(t *testing.T) {
 
 	err := h.OnContinuation(fh, []byte{0x82})
 
-	require.NoError(t, err, "OnContinuation wrong pending stream")
+	require.NoError(t, err,
+		"a CONTINUATION for a stream with no pending block is dropped, not an error")
+	// err == nil was the whole assertion, so "silently ignored" was unobservable:
+	// a handler that spliced stream 3's bytes into stream 1's half-read field
+	// block passed too (#819).
+	assert.Equalf(t, []byte{0x84}, h.pendingBuf,
+		"pendingBuf = %#v; the foreign stream's fragment was appended to the victim's "+
+			"block, which corrupts the very block stream 1 will be handed", h.pendingBuf)
+	assert.EqualValuesf(t, 1, h.pendingStreamID,
+		"pendingStreamID = %d, want 1 — a mismatched CONTINUATION must not steal the "+
+			"in-flight block", h.pendingStreamID)
 }
 
 // TestHandler_OnContinuation_Partial verifies that a CONTINUATION without
@@ -437,6 +467,11 @@ func TestHandler_OnContinuation_Partial(t *testing.T) {
 		require.FailNowf(t, "unexpected event after partial CONTINUATION", "%+v", ev)
 	default:
 	}
+	// "Appends to the pending buffer" was the behaviour named in the doc comment
+	// and never checked, so a handler that dropped the fragment passed (#819).
+	assert.Equalf(t, []byte{0x82, 0x84}, h.pendingBuf,
+		"pendingBuf = %#v, want the primed byte followed by this fragment; a dropped "+
+			"fragment desyncs the one decoder every stream shares", h.pendingBuf)
 }
 
 // ---------------------------------------------------------------------------
@@ -584,7 +619,15 @@ func TestConn_Ping_ReaderDoneClosesConn(t *testing.T) {
 	_, err = c.Ping(pingCtx)
 
 	require.Error(t, err, "Ping after reader exit: expected error, got nil")
-	// Accept either ErrConnClosed or "use of closed" transport error.
+	// "Any non-nil error" cannot tell the readerDone arm from a generic write
+	// failure or a timeout, which is the one distinction this test is named for
+	// (#819). Both spellings are legitimate — the readerDone arm and a write
+	// that failed on the already-closed transport race here — but a context
+	// deadline is not: that would mean Ping waited for an ACK from a connection
+	// it already knew was dead.
+	assert.NotErrorIsf(t, err, context.DeadlineExceeded,
+		"Ping = %v; a Ping issued after the reader loop exited must fail immediately, not "+
+			"wait out its context on a connection that can never answer", err)
 }
 
 // ---------------------------------------------------------------------------
@@ -642,11 +685,23 @@ func TestConn_WriteData_WithPadding(t *testing.T) {
 	err := c.writeData(context.Background(), s, s.gen.Load(), []byte("hi"), true)
 
 	require.NoError(t, err, "writeData with padding")
-	require.NotZero(t, buf.Len(), "expected DATA frame in output")
+	// buf.Len() != 0 was the whole assertion, which is exactly what the unpadded
+	// tests assert, so a writeData that ignored ConnOptions.Padding entirely
+	// passed this (#819).
+	frames := parseBlockFrames(t, buf.Bytes())
+	require.Lenf(t, frames, 1, "want one DATA frame, got %d", len(frames))
+	assert.NotZerof(t, frames[0].flags&byte(frame.FlagDataPadded),
+		"the DATA frame carries no PADDED flag, so the peer reads the padding as body")
+	assert.Equalf(t, 1+len("hi")+4, len(frames[0].payload),
+		"payload = %d bytes, want %d (pad-length octet + 2 data + 4 padding); a length equal "+
+			"to the data alone means the padding strategy never reached the write path",
+		len(frames[0].payload), 1+len("hi")+4)
 }
 
-// TestConn_WriteData_EmptyWithPadding covers the padLen > 0 branch inside the
-// empty-payload path (len(p)==0, endStream=true).
+// TestConn_WriteData_EmptyWithPadding pins the documented exception on that
+// path: "An empty payload ... carries no flow-controlled bytes and is sent
+// unpadded, so it needs no credit." The old assertion (buf.Len() != 0) could not
+// tell an unpadded terminal frame from a padded one (#819).
 func TestConn_WriteData_EmptyWithPadding(t *testing.T) {
 	t.Parallel()
 	c := newGoAwayConn()
@@ -661,13 +716,21 @@ func TestConn_WriteData_EmptyWithPadding(t *testing.T) {
 	err := c.writeData(context.Background(), s, s.gen.Load(), nil, true)
 
 	require.NoError(t, err, "writeData(empty,padding)")
-	require.NotZero(t, buf.Len(), "expected padded DATA frame bytes")
+	frames := parseBlockFrames(t, buf.Bytes())
+	require.Lenf(t, frames, 1, "want one DATA frame, got %d", len(frames))
+	assert.Zerof(t, frames[0].flags&byte(frame.FlagDataPadded),
+		"the terminal empty DATA frame is padded; padding it spends flow-control credit on "+
+			"a frame whose whole point is to carry none")
+	assert.Emptyf(t, frames[0].payload, "payload = %d bytes, want 0", len(frames[0].payload))
+	assert.NotZero(t, frames[0].flags&byte(frame.FlagDataEndStream),
+		"END_STREAM missing; without it this frame says nothing at all")
 }
 
 // TestStream_Push_Overflow_Integration exercises the overflow path via an
 // integration test: server sends many flushed DATA chunks faster than the
 // client drains its event buffer.
 func TestStream_Push_Overflow_Integration(t *testing.T) {
+	wrote := make(chan struct{})
 	srv, cfg := startH2TestServer(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		for i := 0; i < 20; i++ {
 			_, _ = w.Write(bytes.Repeat([]byte("x"), 64))
@@ -675,6 +738,7 @@ func TestStream_Push_Overflow_Integration(t *testing.T) {
 				f.Flush()
 			}
 		}
+		close(wrote)
 	}))
 	defer srv.Close()
 
@@ -700,12 +764,41 @@ func TestStream_Push_Overflow_Integration(t *testing.T) {
 	}, true)
 	require.NoError(t, err, "SendHeaders")
 
-	// Do NOT drain immediately — let the buffer fill, then read one event.
-	time.Sleep(200 * time.Millisecond)
+	// Do NOT drain: 21 events (HEADERS plus 20 flushed chunks) against a
+	// one-slot buffer, with nobody reading, is what makes the overflow certain
+	// rather than likely. Wait for the server to finish rather than sleeping.
+	select {
+	case <-wrote:
+	case <-ctx.Done():
+		require.FailNow(t, "the server never finished writing; the fixture never produced "+
+			"the overflow this test is named for")
+	}
 
-	recvCtx, recvCancel := context.WithTimeout(ctx, 500*time.Millisecond)
+	// The Recv result used to be discarded and nothing asserted, so the test's
+	// only failure mode was a panic and the overflow did not even have to happen
+	// (#819).
+	recvCtx, recvCancel := context.WithTimeout(ctx, 3*time.Second)
 	defer recvCancel()
-	_, _ = s.Recv(recvCtx)
+	var types []StreamEventType
+	var rstCode frame.ErrCode
+	for i := 0; i < 8; i++ {
+		ev, rerr := s.Recv(recvCtx)
+		if rerr != nil {
+			break
+		}
+		types = append(types, ev.Type)
+		if ev.Type == EventReset {
+			rstCode = ev.RSTCode
+			break
+		}
+	}
+
+	require.Containsf(t, types, EventReset,
+		"events were %v with no reset among them; a response the consumer could not keep up "+
+			"with has to be shed, not silently truncated", types)
+	assert.Equalf(t, frame.ErrCodeCancel, rstCode,
+		"reset code = %v, want CANCEL — RFC 9113 §8.7 makes REFUSED_STREAM a promise that "+
+			"nothing was processed, and a local buffer overflow promises no such thing", rstCode)
 }
 
 // ---------------------------------------------------------------------------
@@ -967,14 +1060,19 @@ func TestTLSDialer_ALPNFailure(t *testing.T) {
 	}}
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
-	_, err = d.Dial(ctx, ln.Addr().String())
+	c, err := d.Dial(ctx, ln.Addr().String())
 
-	// Deliberately NOT an assertion: anything other than ErrALPNFailed means the
-	// TLS stack refused the ALPN mismatch at handshake time, which this test
-	// cannot distinguish from the branch it wants to reach.
-	if err != ErrALPNFailed {
-		t.Skipf("TLS ALPN behaviour: err = %v (not ErrALPNFailed — skip)", err)
-	}
+	// Every outcome other than ErrALPNFailed used to become a t.Skipf, so a
+	// dialer that returned a nil error and a non-h2 connection was reported as a
+	// skip rather than a failure (#819). Which of the two refusals happens —
+	// ours, or the TLS stack's own no_application_protocol alert — is genuinely
+	// not this test's business; that the dial does not succeed is.
+	require.Errorf(t, err,
+		"the peer selected no ALPN protocol and the dial succeeded anyway; TLSDialer "+
+			"asserts h2, so a caller receives a connection it will speak HTTP/2 into")
+	assert.Truef(t, c == nil,
+		"Dial returned a connection alongside its error (%v); a caller that checks only the "+
+			"connection would use it", err)
 }
 
 // TestDial_DialError verifies that the top-level Dial returns the dialer's
@@ -1020,16 +1118,26 @@ func TestDial_NewClientConnError(t *testing.T) {
 // ":80" appended (covers the strings.Contains branch in ProxyDialer.Dial).
 func TestProxyDialer_NoPortInURL(t *testing.T) {
 	t.Parallel()
-	// Use an IP-only proxy URL — the Dial will try 127.0.0.1:80 which is
-	// connection-refused, covering the proxyAddr+":80" path.
-	d := &ProxyDialer{ProxyURL: &url.URL{Scheme: "http", Host: "127.0.0.1"}}
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	// RFC 6761 reserves ".invalid" as a name that never resolves, so the dial
+	// fails the same way on every machine. An IP-only 127.0.0.1 host was the
+	// earlier fixture and it is environment-dependent: whether port 80 is
+	// listening decides which error comes back, and on a host that answers it
+	// the assertion below would be about the wrong failure.
+	d := &ProxyDialer{ProxyURL: &url.URL{Scheme: "http", Host: "proxy.invalid"}}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
 	_, err := d.Dial(ctx, "example.com:443")
 
-	// We expect a connection error (port 80 refused), not a panic.
+	// "An error occurred" is also what a dialer that never appended the port
+	// produces — net.Dial refuses a bare host with "missing port" — so the
+	// address the dialer built has to appear in the message for this to be
+	// about the branch it names (#833). Dial wraps with the address it used,
+	// whatever the underlying failure, so this does not depend on which one.
 	require.Error(t, err, "expected connection error")
+	assert.Containsf(t, err.Error(), "proxy.invalid:80",
+		"error = %q, want the proxy address with the default port appended; a proxy URL "+
+			"without a port is an HTTP proxy on 80, not an address error", err)
 }
 
 // TestConn_Ping_ClosedConn verifies Ping returns ErrConnClosed immediately
@@ -1049,33 +1157,51 @@ func TestConn_Ping_ClosedConn(t *testing.T) {
 // markStreamDone — draining + inflight==0 path
 // ---------------------------------------------------------------------------
 
-// TestConn_MarkStreamDone_DrainsDone verifies that markStreamDone closes the
-// drainDone channel when draining is active and inflight drops to zero.
+// TestConn_MarkStreamDone_DrainsDone pins BOTH directions of the decision. Only
+// the inflight 1 -> 0 transition was exercised, so a markStreamDone that closed
+// drainDone unconditionally passed — and graceful shutdown would then cut off in
+// front of streams still on the wire (#819).
 func TestConn_MarkStreamDone_DrainsDone(t *testing.T) {
 	t.Parallel()
-	c := newGoAwayConn()
-	c.drainDone = make(chan struct{})
-	c.draining.Store(true)
+	for _, tc := range []struct {
+		name       string
+		inflight   uint32
+		wantClosed bool
+	}{
+		{"the last stream ending closes drainDone", 1, true},
+		{"a stream that is not the last leaves it open", 2, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c := newGoAwayConn()
+			c.drainDone = make(chan struct{})
+			c.draining.Store(true)
 
-	// Register stream 1 in a state where both sides have ended.
-	s := newStream(1, 8, &fakeStreamWriter{}, 65535)
-	s.id = 1
-	s.mu.Lock()
-	s.localEnded = true
-	s.remoteEnded = true
-	s.mu.Unlock()
-	c.smu.Lock()
-	c.streams[1] = s
-	c.smu.Unlock()
-	c.inflight = 1
+			// Register stream 1 in a state where both sides have ended.
+			s := newStream(1, 8, &fakeStreamWriter{}, 65535)
+			s.id = 1
+			s.mu.Lock()
+			s.localEnded = true
+			s.remoteEnded = true
+			s.mu.Unlock()
+			c.smu.Lock()
+			c.streams[1] = s
+			c.smu.Unlock()
+			c.inflight = tc.inflight
 
-	c.markStreamDone(1)
+			c.markStreamDone(1)
 
-	select {
-	case <-c.drainDone:
-		// expected
-	case <-time.After(time.Second):
-		require.FailNow(t, "drainDone not closed after markStreamDone")
+			closed := false
+			select {
+			case <-c.drainDone:
+				closed = true
+			default:
+			}
+			assert.Equalf(t, tc.wantClosed, closed,
+				"drainDone closed = %v with %d streams still in flight after this one ended; "+
+					"closing it early ends the drain in front of live streams, and never "+
+					"closing it makes Shutdown wait out its whole deadline",
+				closed, tc.inflight-1)
+		})
 	}
 }
 
