@@ -14,6 +14,7 @@ make tidy        # go mod tidy
 make lint        # golangci-lint v2.5
 make test-race   # go test -race ./... (default verification)
 make bench       # benches with bench-gate (see below — it is NOT just frame + hpack)
+make mutation    # Gremlins mutation testing on the diff vs origin/main
 ```
 
 Single-package iteration:
@@ -319,6 +320,32 @@ review is asked for. It carries the full bar in three passes: can the test fail 
 (mutate it and watch it go red), were its cases designed by a functional-testing
 technique — equivalence classes, boundary values, decision tables, state transitions,
 negative cases — or hand-picked, and only then the AAA/`testify` structure above.
+
+### Mutation testing = Gremlins, not hand-edited files
+
+[Gremlins](https://gremlins.dev) v0.6.0 generates the mutants. `make mutation`
+scopes to the diff (5 mutants and ~80s on a realistic 133-line change) and is what
+`mutation.yml` gates pull requests on at 80% efficacy; `make mutation-full` is the
+whole module — 4318 runnable, 93.18% mutator coverage — reported nightly, not gated.
+Config in [.gremlins.yaml](.gremlins.yaml).
+
+Three traps in v0.6.0, all measured — each one makes a run *look* clean:
+
+- **The efficacy threshold only works from `.gremlins.yaml`.** `--threshold-efficacy 80`
+  and `GREMLINS_UNLEASH_THRESHOLD_EFFICACY=80` both exit 0 against a module measured
+  at 66.67%; only the config key exits 10 — Gremlins type-asserts the value and Viper
+  returns a string for its two float64 flags. Never move a threshold to the CLI.
+- **Never run it natively on Windows.** Gremlins scores 0% mutator coverage for any
+  file in a subdirectory (upstream path-separator bug), i.e. 171638 mutants and 0
+  runnable. The `make` targets use Docker for this reason.
+- **Never pass `-E/--exclude-files` on the CLI.** It REPLACES the list in
+  `.gremlins.yaml` instead of extending it, putting `.claude/worktrees` — dozens of
+  checkouts of this repo — back in scope (coverage drops 93.18% → 4.22%).
+
+Hand-writing a mutation is allowed only where Gremlins has no operator for the
+property (semantic substitutions like #864's pooled `Get` → `make`), only after a
+Gremlins run, and the PR must name the missing operator. The `reviewing-tests`
+skill owns the rules.
 
 ## Tooling notes
 

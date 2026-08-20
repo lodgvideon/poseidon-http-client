@@ -1,0 +1,127 @@
+name: mutation
+
+# Mutation testing with Gremlins (https://gremlins.dev). Distinct from
+# nightly.yml, which fuzzes parsers: fuzzing looks for inputs nobody thought of,
+# this looks for ASSERTIONS nobody wrote. A suite can execute a line, cover it in
+# the report, and still not care what the line does — that is the gap here, and
+# #864 is the worked example.
+#
+# Both jobs shell out to the same `make` targets a developer runs locally, and
+# both therefore go through the pinned gogremlins/gremlins Docker image rather
+# than the official action. That is deliberate. A gate that fails a pull request
+# will be argued with, so "it passes on my machine" has to mean the same command,
+# the same tool version and the same config file — not a native binary here and
+# an action-installed one there. It also sidesteps the reason the Makefile uses
+# Docker at all: on Windows Gremlins scores 0% mutator coverage for any file in a
+# subdirectory, so a contributor checking a finding natively would see a clean
+# sheet and conclude CI was wrong.
+on:
+  pull_request:
+  schedule:
+    - cron: '0 4 * * *' # an hour after nightly.yml's fuzz matrix
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+jobs:
+  # Only the mutants inside the change. This is the whole reason mutation testing
+  # is affordable on a module this size: 4318 runnable mutants module-wide, but a
+  # realistic 133-line non-test diff produces 5 and completes in 80 seconds,
+  # coverage run included. It also asks the question a review asks — do the tests
+  # in this PR catch the code in this PR — rather than re-litigating the whole
+  # suite on every push.
+  diff:
+    name: diff gate
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      # fetch-depth: 0 is load-bearing, not hygiene. --diff resolves the base ref
+      # and walks to the merge base; against the default shallow clone the ref is
+      # absent, and a diff Gremlins cannot compute is an empty mutant set, which
+      # exits 0. This job would pass while testing nothing.
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      # Gremlins scores an EMPTY mutant set as `Test efficacy: 0.00%` and exits
+      # 10, not as "no data" — so without this step the gate is red by
+      # construction on every pull request that touches no mutable Go code: docs,
+      # workflows, a test-only change, a dependabot go.mod bump. Measured on this
+      # workflow's own first green coverage run: `Killed: 0, Lived: 0, Not
+      # covered: 0` beside `Skipped: 4634`, then `ERROR: below
+      # efficacy-threshold`.
+      #
+      # The exclusion list is READ out of .gremlins.yaml rather than restated
+      # here, because the two directions of drift are not symmetric. A pattern
+      # added there and missed here lets a pointless run happen — loud, and it
+      # costs a minute. A pattern removed there and left here makes this step SKIP
+      # a job that had real mutants to run, and a skipped mutation gate is
+      # indistinguishable from a passed one. Only the first kind is affordable.
+      - name: Is there anything to mutate?
+        id: scope
+        run: |
+          set -euo pipefail
+          re="$RUNNER_TEMP/excluded.re"
+          awk "/^ *exclude-files:/{f=1;next} f&&/^ *- '/{sub(/^ *- '/,\"\");sub(/'.*/,\"\");print;next} f&&/^[^ #]/{f=0}" .gremlins.yaml > "$re"
+          # The same file set Gremlins would mutate: the merge-base diff that
+          # --diff walks, minus _test.go, which it never mutates, minus those.
+          mutable=$(git diff --name-only "origin/${{ github.base_ref }}...HEAD" | grep -E '\.go$' | grep -vE '_test\.go$' | grep -vE -f "$re" || true)
+          if [ -z "$mutable" ]; then
+            echo 'run=false' >> "$GITHUB_OUTPUT"
+            echo 'No mutable Go file in this diff, so there is nothing for Gremlins to run.' >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo 'run=true' >> "$GITHUB_OUTPUT"
+            echo 'Mutating:' >> "$GITHUB_STEP_SUMMARY"
+            echo "$mutable" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      # Exit 10 here means the efficacy floor in .gremlins.yaml was missed —
+      # mutants in this diff survived. The floor is set in that file and nowhere
+      # else because in v0.6.0 the --threshold-efficacy flag and the matching
+      # GREMLINS_UNLEASH_* environment variable are both inert; do not "helpfully"
+      # move it onto the command line, or this job stops being able to fail.
+      - name: Mutation testing on the diff
+        if: steps.scope.outputs.run == 'true'
+        run: make mutation MUTATION_DIFF=origin/${{ github.base_ref }}
+
+  # The whole module, reported rather than gated — the same treatment nightly.yml
+  # gives fuzz findings, and for the same reason: a survivor needs a human to
+  # decide whether it is a hole or an equivalent mutant, and that decision does
+  # not belong in a 4am build's exit code.
+  #
+  # One job rather than a matrix by package, because a Gremlins run is scoped by
+  # exclusion patterns and a --exclude-files flag REPLACES the list in
+  # .gremlins.yaml instead of extending it. A per-package matrix would restate
+  # every exclusion in every cell, and the cell that drifts is the one that
+  # silently mutates .claude/worktrees — dozens of checkouts of this repo.
+  #
+  # The timeout is a first estimate, not a measurement: the dry run inventories
+  # 4318 runnable mutants in 40s, but nothing here has yet paid for a test run
+  # per mutant. Tighten it once a scheduled run has reported a real elapsed time.
+  full:
+    name: full module
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 330
+    steps:
+      - uses: actions/checkout@v7
+
+      # continue-on-error because the efficacy floor cannot be scoped to the diff
+      # job: .gremlins.yaml is the only place a threshold works, so it applies to
+      # this run too and a module-wide efficacy below 80 would fail the job. That
+      # verdict belongs to whoever triages the survivor list, not to a 4am build.
+      - name: Mutation testing on the whole module
+        continue-on-error: true
+        run: make mutation-full
+
+      # The survivor list is the deliverable. Without it the job's only output is
+      # a scrolled-away log, and the LIVED lines are what turn into issues.
+      - name: Upload mutation report
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: gremlins-report
+          path: gremlins.json
+          if-no-files-found: warn
