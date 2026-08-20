@@ -271,6 +271,10 @@ func TestProtocol_String(t *testing.T) {
 		{name: "h2", proto: ProtoH2, want: "h2"},
 		{name: "h3", proto: ProtoH3, want: "h3"},
 		{name: "quic", proto: ProtoQUIC, want: "quic"},
+		// Not folded into "undefined value": ProtoUnknown is a DEFINED value
+		// meaning "no protocol was settled", and rendering it as one of the
+		// real protocols is the failure it exists to prevent.
+		{name: "unknown", proto: ProtoUnknown, want: "?"},
 		{name: "undefined value", proto: Protocol(9), want: "?"},
 	}
 
