@@ -25,7 +25,15 @@ import (
 // it was broken.
 
 // closeRecorder captures OnConnClose events and the ConnsClosed counter.
+//
+// events is guarded: the hook is documented to fire wherever the close happens,
+// and on the pooled transports that is the pool actor's goroutine, not the
+// caller's. TestH1SingleConn_NotReusableIsObservable already takes a mutex for
+// exactly this; the two *_CloseIsObservable tests were relying on the hook
+// always firing on the calling goroutine, which is an assumption about the code
+// under test rather than a property of the fixture (#862).
 type closeRecorder struct {
+	mu      sync.Mutex
 	events  []ConnCloseEvent
 	metrics *Metrics
 	ref     *atomic.Pointer[Hooks]
@@ -34,8 +42,19 @@ type closeRecorder struct {
 func newCloseRecorder() *closeRecorder {
 	r := &closeRecorder{metrics: &Metrics{}}
 	r.ref = &atomic.Pointer[Hooks]{}
-	r.ref.Store(&Hooks{OnConnClose: func(e ConnCloseEvent) { r.events = append(r.events, e) }})
+	r.ref.Store(&Hooks{OnConnClose: func(e ConnCloseEvent) {
+		r.mu.Lock()
+		defer r.mu.Unlock()
+		r.events = append(r.events, e)
+	}})
 	return r
+}
+
+// snapshot returns a copy of the events recorded so far.
+func (r *closeRecorder) snapshot() []ConnCloseEvent {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]ConnCloseEvent(nil), r.events...)
 }
 
 // TestSingleConn_CloseIsObservable is the HTTP/2 gate.
@@ -61,8 +80,9 @@ func TestSingleConn_CloseIsObservable(t *testing.T) {
 	assert.Equalf(t, int64(1), closed,
 		"ConnsClosed = %d after closing a live conn, want 1 — an HTTP/2 "+
 			"single-conn teardown was invisible to the counter", closed)
-	require.Lenf(t, r.events, 1, "OnConnClose fired %d times, want 1", len(r.events))
-	assert.Equalf(t, CloseManual, r.events[0].Reason, "Reason = %v, want CloseManual", r.events[0].Reason)
+	ev := r.snapshot()
+	require.Lenf(t, ev, 1, "OnConnClose fired %d times, want 1", len(ev))
+	assert.Equalf(t, CloseManual, ev[0].Reason, "Reason = %v, want CloseManual", ev[0].Reason)
 }
 
 // TestH1SingleConn_CloseIsObservable is the HTTP/1.1 gate for the explicit
@@ -84,9 +104,21 @@ func TestH1SingleConn_CloseIsObservable(t *testing.T) {
 
 	_ = s.close()
 
-	assert.NotZero(t, r.metrics.Counters.ConnsClosed.Load(),
-		"ConnsClosed stayed 0 after an HTTP/1.1 single-conn teardown")
-	require.NotEmpty(t, r.events, "OnConnClose never fired for an HTTP/1.1 single-conn teardown")
+	// The H2 gate five lines above pins exact counts and the reason. This one
+	// asserted only "> 0" and never looked at the reason, so a teardown that
+	// fired the hook TWICE, or fired it with the wrong CloseReason, passed —
+	// and double-counted connection churn is precisely what a close-
+	// observability dashboard exists to surface (#862).
+	closed := r.metrics.Counters.ConnsClosed.Load()
+	assert.Equalf(t, int64(1), closed,
+		"ConnsClosed = %d after an HTTP/1.1 single-conn teardown, want exactly 1; a "+
+			"double count reads as churn that never happened", closed)
+	ev := r.snapshot()
+	require.Lenf(t, ev, 1,
+		"OnConnClose fired %d times for one teardown, want exactly 1", len(ev))
+	assert.Equalf(t, CloseManual, ev[0].Reason,
+		"Reason = %v, want CloseManual — an explicit close attributed as CloseDead or "+
+			"CloseNotReusable makes our own teardown look like peer-driven churn", ev[0].Reason)
 }
 
 // TestH1SingleConn_NotReusableIsObservable covers the case the issue calls out

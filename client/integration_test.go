@@ -371,11 +371,26 @@ func TestIntegration_Client_DoStream_LargeResponse(t *testing.T) {
 		"read %d bytes of a %d-byte streamed response", got, total)
 }
 
+// TestDo_ResponseReuse is the test Response.Reset exists for: Reset() then Do()
+// in a loop is the documented zero-alloc path for a load generator.
+//
+// Its handler used to write no body at all, so the property that matters most —
+// Reset truncating r.Body — was unobservable in the one test that should own it,
+// and deleting `r.Body = r.Body[:0]` from Reset left 22 integration tests green
+// (#888). A Body that is not truncated means every request appends to the
+// previous one: the caller reads the concatenation of every response so far, the
+// slice grows without bound for the life of the client, and the result looks
+// like a server bug.
+//
+// BodyMode is BodyBuffer for the same reason: BodyDiscard is the zero value, so
+// the loop never appended to resp.Body at all and Reset had nothing to truncate.
 func TestDo_ResponseReuse(t *testing.T) {
 	t.Parallel()
+	const body = "abc"
 	srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("x-test", "value")
 		w.WriteHeader(200)
+		_, _ = io.WriteString(w, body)
 	}))
 	srv.EnableHTTP2 = true
 	srv.StartTLS()
@@ -393,8 +408,17 @@ func TestDo_ResponseReuse(t *testing.T) {
 	for i := 0; i < N; i++ {
 		resp.Reset()
 		require.NoErrorf(t,
-			c.Do(context.Background(), &client.Request{Method: "GET", Path: "/"}, &resp), "Do[%d]", i)
+			c.Do(context.Background(), &client.Request{
+				Method: "GET", Path: "/", BodyMode: client.BodyBuffer,
+			}, &resp), "Do[%d]", i)
 		require.Equalf(t, 200, resp.Status, "Do[%d] status", i)
+		require.Equalf(t, body, string(resp.Body),
+			"Do[%d] body = %q, want %q — a reused Response that does not truncate its Body "+
+				"hands the caller every previous response concatenated onto this one",
+			i, resp.Body, body)
+		require.EqualValuesf(t, len(body), resp.BytesReceived,
+			"Do[%d] BytesReceived = %d, want %d: the counter is per-response, not cumulative",
+			i, resp.BytesReceived, len(body))
 		if i > 0 {
 			assert.GreaterOrEqualf(t, cap(resp.Headers), prevHdrCap,
 				"Headers backing array reallocated at iteration %d (cap went %d→%d): the "+
