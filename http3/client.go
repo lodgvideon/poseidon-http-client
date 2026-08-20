@@ -82,8 +82,6 @@ func h3ErrorCodeName(code uint64) string {
 	switch code {
 	case H3NoError:
 		return "H3_NO_ERROR"
-	case H3GeneralProtocolError:
-		return "H3_GENERAL_PROTOCOL_ERROR"
 	case H3InternalError:
 		return "H3_INTERNAL_ERROR"
 	case H3StreamCreationError:
@@ -106,41 +104,16 @@ func h3ErrorCodeName(code uint64) string {
 		return "H3_REQUEST_REJECTED"
 	case H3RequestCancelled:
 		return "H3_REQUEST_CANCELLED"
-	case H3RequestIncomplete:
-		return "H3_REQUEST_INCOMPLETE"
 	case H3MessageError:
 		return "H3_MESSAGE_ERROR"
-	case H3ConnectError:
-		return "H3_CONNECT_ERROR"
-	case H3VersionFallback:
-		return "H3_VERSION_FALLBACK"
 	}
 	return ""
 }
 
 // HTTP/3 error codes (RFC 9114 §8.1), carried in the QUIC application
 // CONNECTION_CLOSE frame.
-//
-// All seventeen codes §8.1 registers are defined, including the four this client
-// never sends itself, so the block matches the registry in one pass and
-// h3ErrorCodeName can name a peer's code instead of printing a bare number. Their
-// §8.1 definitions, quoted:
-//
-//   - H3_GENERAL_PROTOCOL_ERROR — RFC 9114 §8.1: "Peer violated protocol
-//     requirements in a way that does not match a more specific error code or
-//     endpoint declines to use the more specific error code." The honest code for
-//     a violation the more specific ones do not name.
-//   - H3_REQUEST_INCOMPLETE — RFC 9114 §8.1: "The client's stream terminated
-//     without containing a fully formed request." §4.1 requires it of a SERVER, so
-//     it is a server that sends it; this package is the single source of §8.1 codes
-//     for poseidon-http-server, which had to spell it out locally without this.
-//   - H3_CONNECT_ERROR — RFC 9114 §8.1: "The TCP connection established in
-//     response to a CONNECT request was reset or abnormally closed."
-//   - H3_VERSION_FALLBACK — RFC 9114 §8.1: "The requested operation cannot be
-//     served over HTTP/3. The peer should retry over HTTP/1.1."
 const (
 	H3NoError              uint64 = 0x0100 // H3_NO_ERROR
-	H3GeneralProtocolError uint64 = 0x0101 // H3_GENERAL_PROTOCOL_ERROR
 	H3InternalError        uint64 = 0x0102 // H3_INTERNAL_ERROR
 	H3StreamCreationError  uint64 = 0x0103 // H3_STREAM_CREATION_ERROR
 	H3ClosedCriticalStream uint64 = 0x0104 // H3_CLOSED_CRITICAL_STREAM
@@ -152,10 +125,7 @@ const (
 	H3MissingSettings      uint64 = 0x010a // H3_MISSING_SETTINGS
 	H3RequestRejected      uint64 = 0x010b // H3_REQUEST_REJECTED
 	H3RequestCancelled     uint64 = 0x010c // H3_REQUEST_CANCELLED
-	H3RequestIncomplete    uint64 = 0x010d // H3_REQUEST_INCOMPLETE
 	H3MessageError         uint64 = 0x010e // H3_MESSAGE_ERROR
-	H3ConnectError         uint64 = 0x010f // H3_CONNECT_ERROR
-	H3VersionFallback      uint64 = 0x0110 // H3_VERSION_FALLBACK
 
 	// QPACK error codes (RFC 9204 §6), carried in the same HTTP/3 CONNECTION_CLOSE.
 	// Aliases, not copies. The same three wire values were spelled out here and
