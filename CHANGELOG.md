@@ -9,6 +9,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Per-request load-test statistics on `client.RequestCompleteEvent`.** The
+  event carried enough to count requests and time them end to end, and nothing
+  else a load generator records per sample: it could not say when the attempt
+  started, when the first byte arrived, how long the request waited for a
+  connection, whether it paid for the dial, which protocol carried it, or which
+  backend answered. `Attempt` was declared and hard-coded to `0`, so a request
+  the `Retryer` replayed three times produced three events indistinguishable
+  from three unrelated requests.
+
+  Adds `Start`, `TTFB`, `Acquire`, `Connect`, `Proto` and `RemoteAddr`, and
+  fills in `Attempt` for real. The timings nest — `Connect` inside `Acquire`,
+  `Acquire` inside `TTFB`, `TTFB` inside `Latency` — so a report can subtract
+  them: `Latency - TTFB` is body transfer, `TTFB - Acquire` is server think time
+  plus a network turn, and `Acquire` alone is pool queueing.
+
+  `Connect` is charged only to the attempt that actually dialled, which is the
+  rule JMeter reports its connect column under; the pooled transports dial on
+  their actor goroutine, so a request waiting for a pool dial sees that time in
+  `Acquire` and a zero `Connect`. `RemoteAddr` is the only place a managed
+  client exposes which backend its `Selector` picked for a given request.
+
+  Internally the transports now return an `exchangeStats` **by value** from
+  `openExchange`, and `Retryer` drives `doAttempt`/`doStreamAttempt` rather than
+  the exported `Do`/`DoStream`. Both are unexported seams; the per-request
+  allocation gates are unchanged at 6 (H2) and 4 (H1.1).
+
+  Two JMeter per-sample columns are deliberately absent: `responseMessage`
+  (HTTP/2 and HTTP/3 have no reason phrase and the HTTP/1.1 parser discards it)
+  and byte counts including headers (`BytesSent`/`BytesRecv` stay payload-only;
+  an HPACK/QPACK-compressed header block is not comparable with JMeter's
+  figure).
+
 - **`conn.ConnOptions.ReadBufferSize` and `conn.ConnOptions.StaticConnWindowSize`.**
   Two receive-path parameters could not be set from outside the package, and both
   are parameters a cross-library comparison has to pin before its numbers mean
