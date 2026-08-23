@@ -79,8 +79,15 @@ func TestReadWithPTO_CancelUnblocksRead(t *testing.T) {
 			var cancels atomic.Int64
 			go func() {
 				time.Sleep(delay)
-				cancel()
+				// Count the injection BEFORE performing it, not after. cancel() is what
+				// unblocks readWithPTO, so the moment it runs the main goroutine is free
+				// to return from the read and reach the assertion below -- and it beat
+				// this goroutine to cancels.Add(1) on a loaded CI runner, reporting "the
+				// injection never happened" for an injection that had. Incrementing first
+				// is sound for what the counter means: nothing between the two lines can
+				// return early, so a counter of 1 still implies the cancel follows.
 				cancels.Add(1)
+				cancel()
 			}()
 
 			start := time.Now()
@@ -156,8 +163,10 @@ func TestReadWithPTO_CtxCancelNoPTOSpin(t *testing.T) {
 	var cancels atomic.Int64
 	go func() {
 		time.Sleep(20 * time.Millisecond)
-		cancel()
+		// Counted before it is performed, for the reason spelled out on the same
+		// pattern in TestReadWithPTO_CancelUnblocksRead above.
 		cancels.Add(1)
+		cancel()
 	}()
 
 	_, err := c.readWithPTO(ctx, make([]byte, 2048))
