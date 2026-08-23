@@ -63,12 +63,17 @@ func TestInvokeInto_DiscardsLength(t *testing.T) {
 // nothing pinned the buffer, and a caller looping on one buffer would be handed
 // an answer the client has just decided not to trust.
 //
-// A note for whoever reads conn.go's drain comment next. It says the reason for
-// reading with Recv rather than RecvInto(resp) is corruption — that a second
-// message would overwrite the answer about to be returned. It would, and it
-// would not matter: this path returns resp[:0] either way, so the overwritten
-// bytes are never read. The real difference is allocation, and #803 records
-// that the comment, not the code, is what needs correcting.
+// conn.go's drain comment used to say the reason for reading with Recv rather
+// than RecvInto(resp) is corruption of the answer about to be returned, and this
+// comment used to reply that it would not matter, because the path returns
+// resp[:0] either way and the overwritten bytes are never read. Both were wrong,
+// and #803 was filed on the second one.
+//
+// The overwrite lands in the CALLER'S dst array, which the caller still holds
+// after the call. The final assertion below is what pins it: with the drain
+// changed to RecvInto(resp[:0]) the buffer comes back holding the second
+// message's 'B'x64 where the first message's 'A'x64 belongs, 2 runs out of 2.
+// Without that assertion the substitution is invisible here.
 func TestInvokeInto_TwoMessageAnswerReturnsTheBufferEmpty(t *testing.T) {
 	srv, cfg := startGRPCServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_, _ = srvReadMessage(r.Body)
@@ -94,6 +99,8 @@ func TestInvokeInto_TwoMessageAnswerReturnsTheBufferEmpty(t *testing.T) {
 			"rejected answer into the next call", len(got), got, st.Code)
 	assert.Equalf(t, cap(buf), cap(got),
 		"returned capacity %d, want the caller's %d", cap(got), cap(buf))
+	assert.Equalf(t, bytes.Repeat([]byte{'A'}, 64), buf[:64],
+		"the caller's buffer holds %q, want the FIRST message", buf[:64])
 }
 
 // TestInvokeInto_MatchesInvoke pins that the two forms agree on the happy path,
