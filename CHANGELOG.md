@@ -714,6 +714,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Performance
 
+- **One HTTP/1.1 exchange costs 25 allocations instead of 30.**
+  `commitHeaderLine` built each header field as
+  `header.Field{Name: []byte(name), Value: []byte(value)}` — two allocations per
+  line, measured at 5.0 and 4.0 allocs/op of the benchmark's 30 with
+  `-memprofilerate=1` attributed to those two lines. Both are substrings of the
+  same logical field line, so they now share one backing array and cost 5.0
+  together (#630).
+
+  `BenchmarkReadResponse_Head` goes 30 → **25 allocs/op** and 1184 → 1176 B/op,
+  stable across five runs. The saving scales with header count: the benchmark's
+  fixture carries five headers, and a real response carrying ten or fifteen pays
+  proportionally more.
+
+  The three-index slice on `Name` is load-bearing rather than decoration — without
+  the cap, an `append` to a caller's `Name` would write into `Value`'s bytes
+  instead of copying, which is the defect #485 fixed on the push path's slab.
+  The slab is deliberately per-field and not one buffer for the whole block: a
+  growing shared slab reallocates mid-block, leaving the earlier fields pinning
+  the old array, and `http1` has no ownership handle like `conn`'s `HeaderBlock`
+  to hand a pooled one out behind.
+
+  `exchangeAllocCeiling` drops to 25 and its accounting comment is re-measured
+  rather than adjusted. The gate is two-sided, and was checked in both
+  directions: 24 fails (a regression came back) and 26 fails (the win was not
+  locked in).
+
+  Not touched, and worth recording so it is not hunted twice:
+  `asciiLowerHeaderName` still lowers in place, because
+  `http1/conn.go:1725-1735` documents that this is what keeps retained bytes ≤
+  bytes received — "which is what makes the header cap mean what it says. Found
+  by FuzzReadResponse." And `validFieldValue([]byte(value))` does not appear in
+  the profile at all: escape analysis already keeps that conversion off the heap.
+
 - **A standalone ACK no longer allocates.** `flush` built the frame payload for a
   packet carrying no STREAM data from a nil slice, so the standalone-ACK path
   allocated once per ACK on a lossless in-order connection and up to four times as

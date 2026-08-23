@@ -25,24 +25,42 @@ import (
 // http1 is outside the bench-gate's package list, so nothing else in the repo
 // reports this number and only this gate defends it.
 //
-// What the remaining thirty are, so nobody hunts for them twice. Measured with
-// -memprofilerate=1 over 2000 iterations, which is the only way to get exact
+// What the remaining twenty-five are, so nobody hunts for them twice. Measured
+// with -memprofilerate=1 over 2000 iterations, which is the only way to get exact
 // per-line counts: the default profile is SAMPLED at one object per 512 KB, and
 // its per-line figures are extrapolations that disagree with ReportAllocs.
 //
-//	17   consumeHeaders — the bulk, spread across commitHeaderLine, readLine,
-//	     asciiLowerHeaderName and validateFields, one group per header line
-//	 1   readLine for the status line
-//	 1   strings.SplitN(line, " ", 3) parsing that status line into three parts
-//	 1   make([]header.Field, 0, 12) — the field slice itself, which escapes to
+//	6.0  readLine — one string per line read, header lines and the status line
+//	5.0  commitHeaderLine — one slab per field, holding name and value together
+//	4.0  asciiLowerHeaderName — only for a header whose name arrives with
+//	     uppercase; lowering happens in place otherwise
+//	2.0  WriteRequest, 2.0 validateFields — the write half
+//	1.1  strings.SplitN(line, " ", 3) parsing the status line into three parts
+//	1.0  make([]header.Field, 0, 12) — the field slice itself, which escapes to
 //	     the caller through StreamEvent and so cannot be shared or pooled without
 //	     answering the ownership question #577 raises for conn
-//	~10  the write half and the framework around it
+//	     — plus the framework around the benchmark
 //
-// The three that are already gone were the synthesised :status field: the name
-// []byte(":status"), the strconv.Itoa string, and the []byte conversion of it.
-// They are now statusName and statusValue in conn.go, both allocation-free.
-const exchangeAllocCeiling = 30
+// Do not try to make that table sum to 25. The profile's own total runs about
+// five below ReportAllocs in both directions (24.2 against 30 before this
+// change, 21.2 against 25 after), because the two count different things —
+// ReportAllocs counts mallocgc, the profile counts what it sampled and
+// attributed. The table is for finding a site, not for arithmetic; the gate's
+// number is ReportAllocs and that is the one to trust.
+//
+// Five went in the #630 slab. commitHeaderLine built the field with
+// `Name: []byte(name), Value: []byte(value)`, measured at 5.0 and 4.0 allocs/op
+// on those two lines; both are substrings of the same logical line, so they now
+// share one backing array and cost 5.0 together.
+//
+// Three had gone before that: the synthesised :status field's name
+// []byte(":status"), the strconv.Itoa string and the []byte conversion of it.
+// They are statusName and statusValue in conn.go now, both allocation-free.
+//
+// The next one worth taking is readLine's 6.0. It is harder than it looks: the
+// string has to outlive the read because the NEXT line may be an obs-fold
+// continuation of it, so it cannot simply borrow the reader's buffer.
+const exchangeAllocCeiling = 25
 
 func TestReadResponse_AllocsPerExchange(t *testing.T) {
 	c := http1.NewConn(&replayConn{script: []byte(benchResponse)})
