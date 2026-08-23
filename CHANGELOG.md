@@ -37,6 +37,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Tests
 
+- **`http3`'s fake connection latches its close code in one critical section.**
+  `fakeConn.CloseWithError` called `terminate()`, which takes and *releases*
+  `c.mu`, and only then re-took the lock to check `c.closed` and record
+  `closeCode`. In that gap a second teardown could run the whole latch, so the
+  field reported whichever close acquired the lock second rather than which one
+  terminated first. The comment beside it claimed the shape mirrors `quic.Conn`;
+  it does not — `quic.Conn` does both under a single `c.mu`.
+
+  34 assertions across 11 files read that field to decide which error code the
+  code under test produced. Measured before the fix: 385 failures in 19,200
+  race-instrumented runs of the two RFC 9204 bound tests, every one reporting
+  `H3_INTERNAL_ERROR` where the typed QPACK code was expected.
+
+  #924 attributed the flake to a different mechanism — the reader goroutine
+  racing a hand-driven `serviceControl` loop over one chunk queue. It cannot:
+  that reader parks on its first iteration for the fixture in question, and its
+  only nil-returning wake path has no sender in the package. **No production
+  code changes**; `quic.Conn` has always closed atomically (#924).
+
 - **The GRO buffer-size gate can fail off Linux now, which is the only place its
   defect exists.** `TestPollBufLen_MatchesPlatformCoalescing` derived its own
   expectation from `groCanCoalesce` — the same compile-time constant `pollBufLen`
