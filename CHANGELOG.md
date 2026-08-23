@@ -67,6 +67,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   where the ratcheted opener is first used for real. Verified twice in each
   direction: `op.hp = hp` → `_ = hp` now fails this test alone, and passed it
   before.
+- **The gRPC unary drain now has a test that fails when the drain changes, and
+  `conn.go` states the right reason.**
+  `TestInvokeInto_TwoMessageAnswerReturnsTheBufferEmpty` already drove
+  `InvokeInto` — the first half of #803 was overtaken by a later rename and is
+  stale — but nothing pinned the property the code comment names, so substituting
+  the drain for `RecvInto(resp[:0])` passed 2 runs out of 2.
+
+  Both explanations were wrong, in opposite directions. `conn.go` said a second
+  message would overwrite "the answer this call is about to return"; it would not,
+  because that path returns `resp[:0]` alongside the status. The test comment
+  replied that the real difference is therefore only allocation; that is wrong
+  too. The overwrite lands in the **caller's** `dst` array, which the caller still
+  holds — so a loop reusing one buffer and inspecting it after an error reads the
+  message the client has just decided not to trust.
+
+  One assertion pins it, and it is measured rather than argued: under the
+  substitution the buffer comes back holding the second message's `B`x64 where the
+  first message's `A`x64 belongs, 2 runs out of 2. Both comments are rewritten to
+  say that.
 
 - **The tail of the #722 AAA + `testify` sweep: the last 31 hand-rolled
   assertions that sit outside a measured region.** Six files were partial

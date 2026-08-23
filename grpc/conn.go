@@ -767,9 +767,24 @@ func (cc *ClientConn) InvokeInto(ctx context.Context, method string, req, dst []
 	// two messages to a unary method is caught instead of silently truncated.
 	//
 	// Deliberately Recv, not RecvInto(resp): handing the response buffer to the
-	// drain would let a second message overwrite the answer this call is about
-	// to return. Recv allocates only when a message actually arrives, which is
-	// the error case.
+	// drain would let a second message land in the CALLER'S dst array.
+	//
+	// Be precise about what that costs, because the obvious reading is wrong in
+	// both directions. It is not the returned slice: this path returns resp[:0]
+	// alongside the status, so nothing the drain wrote is reachable through the
+	// return value. And it is not merely an allocation difference either, which
+	// is what #803 first concluded. It is dst itself — the caller still holds
+	// that buffer, and after RecvInto(resp[:0]) its bytes are the message the
+	// client has just decided not to trust, not the one it read. A caller
+	// looping unary calls on one buffer and inspecting it after an error would
+	// be reading the rejected message.
+	//
+	// Measured: with the drain changed to RecvInto(resp[:0]),
+	// TestInvokeInto_TwoMessageAnswerReturnsTheBufferEmpty finds 'B'x64 in the
+	// caller's buffer where the first message's 'A'x64 belongs, 2 runs out of 2.
+	//
+	// Recv also allocates only when a message actually arrives, which is this
+	// error case — but that is the smaller half of the reason, not the reason.
 	if _, err := s.Recv(ctx); !errors.Is(err, io.EOF) {
 		if err == nil {
 			return resp[:0], &Status{Code: Internal, Message: "unary method returned more than one message"}
