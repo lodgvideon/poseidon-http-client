@@ -9,6 +9,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Tests
 
+- **The GRO buffer-size gate can fail off Linux now, which is the only place its
+  defect exists.** `TestPollBufLen_MatchesPlatformCoalescing` derived its own
+  expectation from `groCanCoalesce` — the same compile-time constant `pollBufLen`
+  branches on — so on Linux, where the constant is true and where every `runs-on:`
+  in `.github/workflows/` is `ubuntu-24.04`, deleting the platform gate was
+  completely unobservable. The regression it names, a 64 KiB receive buffer per
+  connection on Windows, macOS and the BSDs where `RecvGRO` is a plain
+  single-datagram read, could not turn CI red (#839).
+
+  The decision moves into `pollBufLenFor(canCoalesce, isGROReader bool)`, which
+  takes the platform capability as an argument, and the test is now a decision
+  table over both booleans. The row that carries the property —
+  `{canCoalesce: false, isGROReader: true}` — is asserted from a Linux run.
+  `pollBufLen` keeps binding to it, so the method cannot drift away from the table.
+  Verified: mutating the gate to `if isGROReader` fails the new row and passed
+  before.
+
+- **The ChaCha20 key-update test now covers the un-rotated header-protection
+  key.** RFC 9001 §6 updates the AEAD key and IV on a key update and does not
+  update the HP key, so a ratcheted generation keeps generation 0's — which is the
+  whole reason `openerWithHP` exists. `TestChaCha20_KeyUpdateRoundTrip` drove one
+  phase-1 packet, and on the packet that *causes* the update the header is
+  unprotected by the current generation's key, before the phase is known. The next
+  generation's HP key was therefore never used, and dropping the override survived
+  this test while its AES twin caught it (#913).
+
+  A second phase-1 packet now arrives after the update has committed, which is
+  where the ratcheted opener is first used for real. Verified twice in each
+  direction: `op.hp = hp` → `_ = hp` now fails this test alone, and passed it
+  before.
+
 - **The tail of the #722 AAA + `testify` sweep: the last 31 hand-rolled
   assertions that sit outside a measured region.** Six files were partial
   conversions — each already imported `testify` and each still carried

@@ -191,16 +191,36 @@ func TestChaCha20_KeyUpdateRoundTrip(t *testing.T) {
 		AppendStream(nil, 0, 0, false, []byte("aaaa")))), "recv phase-0")
 	require.False(t, c.ku.phase, "key phase should still be 0 before any update")
 
-	err = c.recvDatagram(sealKP(t, g1, nil, 1, true, AppendStream(nil, 0, 4, true, []byte("bbbb"))))
-
+	err = c.recvDatagram(sealKP(t, g1, nil, 1, true, AppendStream(nil, 0, 4, false, []byte("bbbb"))))
 	require.NoErrorf(t, err, "recv phase-1 (key update): %v", err)
+	// The SECOND phase-1 packet is the one that exercises the un-rotated
+	// header-protection key, and it is why this test sends two.
+	//
+	// RFC 9001 §6 updates the AEAD key and IV on a key update and does NOT update
+	// the header-protection key, so every ratcheted generation keeps generation
+	// 0's HP key — that is what openerWithHP's `op.hp = hp` is for. On the packet
+	// that CAUSES the update, header protection has to come off before the key
+	// phase can be read, so it is the current (generation 0) opener's HP key that
+	// does it, and the next generation's HP key is never used. Only once the
+	// update has committed and the ratcheted opener has become current does a
+	// packet get its header unprotected with it. Without this second packet,
+	// dropping the override is invisible here: measured as a surviving mutant,
+	// caught only by TestConformance_RFC9001_Sec63_PrevKeysReordered elsewhere in
+	// the package (#913).
+	errAfter := c.recvDatagram(sealKP(t, g1, nil, 2, true, AppendStream(nil, 0, 8, true, []byte("cccc"))))
+
+	require.NoErrorf(t, errAfter,
+		"recv a second phase-1 packet after the update committed: %v — its header is unprotected "+
+			"with the ratcheted opener's HP key, which RFC 9001 §6 requires to still be "+
+			"generation 0's", errAfter)
 	assert.True(t, c.ku.phase, "key phase should have flipped to 1 after the update committed")
 	assert.True(t, c.appSendPhase(),
 		"client send phase should have flipped so its ACKs use the new keys")
 	var body []byte
-	for _, chunk := range [][]byte{s.Recv(), s.Recv()} {
+	for _, chunk := range [][]byte{s.Recv(), s.Recv(), s.Recv()} {
 		body = append(body, chunk...)
 	}
-	assert.Equalf(t, "aaaabbbb", string(body),
-		"reassembled %q across the ChaCha20 key-update boundary, want %q", string(body), "aaaabbbb")
+	assert.Equalf(t, "aaaabbbbcccc", string(body),
+		"reassembled %q across the ChaCha20 key-update boundary, want %q",
+		string(body), "aaaabbbbcccc")
 }
