@@ -37,6 +37,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Tests
 
+- **A CI flake in `quic`'s PTO cancel tests was the instrumentation, not the
+  timing.** `TestReadWithPTO_CancelUnblocksRead/200ms` failed on a loaded runner
+  with *"the injection never happened (0 cancels)"* — its own control arm firing.
+  The injecting goroutine did `cancel()` and then `cancels.Add(1)`, but `cancel()`
+  is what unblocks `readWithPTO`, so the moment it ran the main goroutine was free
+  to return from the read and reach the assertion before the counter was ever
+  incremented. The test then reported a missing injection for an injection that
+  had happened.
+
+  Both tests count before they inject now, which is sound for what the counter
+  means: nothing between the two statements can return early, so a counter of 1
+  still implies the cancel follows.
+
+  **Diagnosed by widening the window rather than by re-running**: one
+  `runtime.Gosched()` between the two statements reproduces the exact CI message
+  on all three subtests, and the same injection against the fixed order is green
+  40/40. The binary hash check (`go test -c -race -trimpath`) confirmed the flake
+  was not introduced by the branch it appeared on —
+  `e956504e…` on both `origin/main` and the branch. The sibling
+  `TestReadWithPTO_CtxCancelNoPTOSpin` carried the identical ordering and is fixed
+  with it, before it could flake too.
+
 - **The nightly fuzz matrix covers every target but one.** Eleven cells are
   added — `client` 4, `grpc` 3, `http1` 2, `hpack` 1, `quic` 1 — taking the
   matrix from 22 cells to 33. (#687's body says 19 targets are missing; that
