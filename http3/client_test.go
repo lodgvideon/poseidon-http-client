@@ -236,6 +236,15 @@ type fakeConn struct {
 func (c *fakeConn) terminate(err error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	c.terminateLocked(err)
+}
+
+// terminateLocked is terminate's body. Assumes c.mu is held, so CloseWithError can
+// latch the terminal error and the close code in ONE critical section the way
+// quic.Conn.closeWithErrorLocked does. The locking wrapper above has to survive:
+// fakeConn.Poll and client_ctx_test.go's pollHook both call terminate without
+// holding c.mu, and a locked-only form deadlocks them.
+func (c *fakeConn) terminateLocked(err error) {
 	c.ensureInitLocked()
 	if c.terminated {
 		return
@@ -365,9 +374,15 @@ func (c *fakeConn) CloseWithError(app bool, code uint64, _ string) error {
 	if h := c.closeHook; h != nil {
 		h(code) // before the lock: the hook may wait for another teardown to take it
 	}
-	c.terminate(quic.ErrConnClosed)
+	// One critical section, because two is a lost latch. quic.Conn does the
+	// terminate and the closed-check under a single c.mu (quic/close.go:84-105);
+	// taking the lock twice here leaves a gap in which the reader's fatal() can run
+	// the whole latch, so the first close no longer wins and closeCode reports
+	// whichever teardown got the lock second. 34 assertions across 11 files read
+	// that field (#924).
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	c.terminateLocked(quic.ErrConnClosed)
 	if c.closed {
 		return nil // idempotent: first close wins (mirrors quic.Conn)
 	}
