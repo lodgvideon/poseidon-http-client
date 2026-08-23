@@ -10,7 +10,6 @@ import (
 	"time"
 
 	"github.com/lodgvideon/poseidon-http-client/conn"
-	"github.com/lodgvideon/poseidon-http-client/frame"
 	"github.com/lodgvideon/poseidon-http-client/http3"
 	"github.com/lodgvideon/poseidon-http-client/quic"
 	"github.com/lodgvideon/poseidon-http-client/trace"
@@ -143,7 +142,7 @@ func (e *h3Exchange) SendHeaders(_ context.Context, _ []conn.HeaderField, _ bool
 // buildHeaders as ordinary HeaderField entries) back into the typed http3.Request
 // fields, routing the remaining fields to Request.Headers. endStream and the H2
 // priority hint are irrelevant to a buffered exchange and ignored.
-func (e *h3Exchange) SendHeadersWithPriority(_ context.Context, fields []conn.HeaderField, _ bool, _ *frame.Priority) error {
+func (e *h3Exchange) SendHeadersWithPriority(_ context.Context, fields []conn.HeaderField, _ bool, _ *conn.Priority) error {
 	method, scheme, authority, path, regular, err := splitPseudoHeaders(fields, e.regularScratch)
 	if err != nil {
 		return err
