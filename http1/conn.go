@@ -2291,9 +2291,26 @@ func (ex *Exchange) commitHeaderLine(line string, have bool, out *[]header.Field
 	}
 
 	if out != nil {
+		// One allocation per field, not two. name and value are substrings of the
+		// same logical line, so they can share one backing array: measured at
+		// 5.0 + 4.0 allocs/op of this benchmark's 30 (`-memprofilerate=1`,
+		// attributed to these two lines), and 5.0 after.
+		//
+		// The three-index slice on Name is load-bearing, not decoration. Without
+		// the cap, `append` to a caller's Name would write into Value's bytes
+		// instead of copying — the same defect #485 fixed on the push path's slab.
+		//
+		// Deliberately per-field rather than one slab for the whole block: a
+		// growing shared slab reallocates mid-block, which is safe but leaves the
+		// earlier fields pinning the old array, and http1 has no ownership handle
+		// like conn's HeaderBlock to hand a pooled one out behind. That is a
+		// separate question from this one.
+		buf := make([]byte, 0, len(name)+len(value))
+		buf = append(buf, name...)
+		buf = append(buf, value...)
 		*out = append(*out, header.Field{
-			Name:  []byte(name),
-			Value: []byte(value),
+			Name:  buf[:len(name):len(name)],
+			Value: buf[len(name):],
 		})
 	}
 	return nil
