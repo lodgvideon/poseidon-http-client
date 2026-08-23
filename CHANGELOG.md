@@ -37,6 +37,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Tests
 
+- **The `quic` allocation gates were never reached by CI.** The
+  "Allocation gates (not under -race)" step listed `./conn/ ./client/ ./grpc/
+  ./http1/` — `./quic/` was absent — and eight of quic's eleven `//go:build
+  !race` tests missed the `-run` pattern as well, so both of the failure modes
+  the step's own comment documents three times were live again, together, in the
+  one package `bench-gate` cannot cover either: that gate scans `Benchmark` lines
+  for `B/op`, and every quic benchmark that builds a `Conn` is env-skipped. So
+  nothing was watching `buildACK`, `onSent`, `flush` or `retransCopy`.
+
+  The package is listed and the pattern gains `Alloc` (which subsumes `Allocs`
+  and `DoesNotAllocate`), `Scratch`, `Retrans` and `StaleRanges`. Coverage was
+  verified by diffing the eleven `!race` names against the names `-v` actually
+  prints — the check all three earlier failures skipped, now written into the
+  comment.
+
+  **The widened step was made to fail before being trusted**: with `retransCopy`
+  mutated to bypass its free list, the command `main` runs today exits **0**,
+  while the new one goes red on three tests, one of which
+  (`TestRetransCopy_ReusesTheBufferItWasGiven`) is among the eight that no
+  pattern reached. Found while re-deriving #508 (#928).
+
 - **`http3`'s fake connection latches its close code in one critical section.**
   `fakeConn.CloseWithError` called `terminate()`, which takes and *releases*
   `c.mu`, and only then re-took the lock to check `c.closed` and record
