@@ -57,8 +57,24 @@ jobs:
       #      was added (#511). That one hit BOTH failure modes at once — the
       #      package was missing here AND its first name, ...CostsNoAllocations,
       #      did not match "Allocs" either. Renamed and listed.
+      #   4. ./quic/ was absent for all eleven of its !race tests, and eight of
+      #      the eleven missed the pattern as well — BOTH modes again, in the one
+      #      package bench-gate cannot cover either: bench-gate scans Benchmark
+      #      lines for B/op, and every quic benchmark that builds a Conn is
+      #      env-skipped, so nothing was watching buildACK, onSent, flush or
+      #      retransCopy. Found while re-deriving #508. The pattern gained Alloc
+      #      (which subsumes Allocs and DoesNotAllocate), Scratch, Retrans and
+      #      StaleRanges; verified by diffing the eleven !race names against the
+      #      names -v actually prints, which is the check the three failures
+      #      above all skipped:
+      #        comm -23 <(grep -l '//go:build !race' <pkg>/*_test.go \
+      #                    | xargs grep -hoE '^func Test[A-Za-z0-9_]+' \
+      #                    | sed 's/^func //' | sort) \
+      #                 <(go test -count=1 -v -run '<pattern>' ./<pkg>/ \
+      #                    | grep -oE '^=== RUN +Test[A-Za-z0-9_]+' | awk '{print $3}' | sort -u)
+      #      Empty output means every !race test in that package is reached.
       - name: Allocation gates (not under -race)
-        run: go test -count=1 -run 'Allocs|DoesNotAllocate|IsNotCopied|CallOptions' ./conn/ ./client/ ./grpc/ ./http1/
+        run: go test -count=1 -run 'Alloc|IsNotCopied|CallOptions|Scratch|Retrans|StaleRanges' ./conn/ ./client/ ./grpc/ ./http1/ ./quic/
       # http1 is RFC 9112 and http3 is RFC 9114; neither compresses headers, and
       # both used to import hpack — RFC 7541 — for nothing but the field struct.
       # The shared vocabulary lives in ./header now, and this keeps the edge from
