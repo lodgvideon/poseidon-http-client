@@ -139,8 +139,13 @@ GREMLINS_DOCKER = docker run --rm \
 # What CI runs on a pull request: only mutants inside the change. Cheap enough
 # to gate on, and it answers the question a review actually asks — do the tests
 # in this PR catch the code in this PR.
+#
+# It goes through scripts/mutation-gate.sh because Gremlins gives exit 10 two
+# meanings: mutants survived, and there were no mutants to run. That script
+# separates them and reinterprets nothing else — read its header before changing
+# it, the failure mode of getting this wrong is a gate that cannot fail.
 mutation:
-	$(GREMLINS_DOCKER) --diff $(MUTATION_DIFF)
+	@./scripts/mutation-gate.sh $(GREMLINS_DOCKER) --diff $(MUTATION_DIFF)
 
 # The whole module: 4318 runnable mutants is a survivor list to triage into
 # issues, not a pass/fail. The efficacy floor in .gremlins.yaml applies here too
