@@ -771,6 +771,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### CI
 
+- **The mutation diff gate no longer fails a pull request whose changed lines
+  hold no mutant.** Gremlins scores an empty mutant set as `Test efficacy:
+  0.00%` and exits 10, which is indistinguishable from "mutants in your diff
+  survived". #903 was merged red on exactly that: its only non-test change was
+  four `const` declarations and four `case X: return "STRING"` arms, and no
+  Gremlins operator applies to either (#905).
+
+  `mutation.yml`'s existing step already skipped a diff that touches no mutable
+  *file*, and it stays — it is also what keeps the shallow-clone hole closed.
+  This is the case that filter cannot see, where the file is mutable and its
+  changed lines are not. `scripts/mutation-gate.sh` now wraps the Gremlins
+  invocation and reinterprets **only** exit 10, and **only** when the run printed
+  `Killed: 0, Lived: 0`. Every other status passes through untouched, and an
+  exit 10 whose output carries no summary line keeps the failure rather than
+  being read as an empty set — so a change in Gremlins' output format breaks the
+  build loudly instead of quietly turning the gate into a pass.
+
+  Verified against the real tool on three arms, and the script's decision table
+  exercised directly: a `const`-only diff now exits 0 where it exited 10; a diff
+  carrying one surviving `CONDITIONALS_BOUNDARY` mutant (`Killed: 1, Lived: 1`,
+  efficacy 50%) still exits 10; a fully-killed diff still exits 0. The fix is in
+  the Makefile rather than the workflow so that `make mutation` locally and the
+  CI job give the same verdict, which is the reason both already shell out to the
+  same target.
+
 - **The nightly mutation-fuzz matrix now covers every `http3` and `qpack` parser.**
   The module has 34 `Fuzz` targets and the matrix listed 15. The other 19 were not
   unrun — ordinary CI replays their seed corpus — but nothing mutated them, so they
