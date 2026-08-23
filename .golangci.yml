@@ -11,6 +11,12 @@ run:
     - integration
     - interop
     - poseidondebug
+    # These three were absent, so the six files behind them were never
+    # type-checked and the job was green over them and always would have been —
+    # the same shape as the h2c.NewHandler the note above describes (#705).
+    - soak
+    - e2e_remote
+    - allocbench
 
 linters:
   default: none

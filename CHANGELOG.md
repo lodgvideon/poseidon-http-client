@@ -796,6 +796,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   CI job give the same verdict, which is the reason both already shell out to the
   same target.
 
+- **`make lint` runs again on a current Go toolchain.** golangci-lint v2.5.0 is
+  built against go1.25 and panics on source the local toolchain compiles as 1.26
+  — `panic: file requires newer Go version go1.26` out of
+  `goanalysis/runner_loadingpackage.go` — so the target was unrunnable for anyone
+  not pinned to an older release. `GOTOOLCHAIN` is now set on the linter
+  invocations only (#699).
+
+  Scoping matters here and is the whole content of the fix: the same recipe runs
+  `go vet ./...` and the nested-module leg, and `ci.yml` pins a job to
+  `GOTOOLCHAIN: local` precisely to assert vet runs under the newer release. A
+  recipe-wide export would move vet back to 1.25 and leave that job asserting
+  nothing.
+
+- **Lint now type-checks the six files behind `soak`, `e2e_remote` and
+  `allocbench`.** None of the three tags was in `.golangci.yml`, so
+  golangci-lint reported "build constraints exclude all Go files" for them and
+  then printed `0 issues.` — green over those files, and always would have been.
+  It is the same defect the config's own note already records for the
+  integration harness (#705).
+
+  Measured rather than assumed: with the three tags added the run goes from
+  `0 issues.` to exactly two, both `nolintlint` in `client/soak_test.go`
+  reporting `//nolint:gosec` directives that are unused because G402 is already
+  disabled for this repo. Those two directives are removed here and the run is
+  back to `0 issues.`. Nothing else was hiding — the hypothesis that an
+  uncompiled lint scope had accumulated real debt does not survive the
+  measurement.
+
 - **The nightly mutation-fuzz matrix now covers every `http3` and `qpack` parser.**
   The module has 34 `Fuzz` targets and the matrix listed 15. The other 19 were not
   unrun — ordinary CI replays their seed corpus — but nothing mutated them, so they
