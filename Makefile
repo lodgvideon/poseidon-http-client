@@ -24,11 +24,23 @@ tidy:
 	$(GO) mod tidy
 	@for m in $(NESTED_MODULES); do $(GO) -C $$m mod tidy; done
 
+# golangci-lint v2.5.0 is built against go1.25 and panics outright on source
+# the local toolchain compiles as 1.26 — `panic: file requires newer Go version
+# go1.26` out of goanalysis/runner_loadingpackage.go — so `make lint` is
+# unrunnable for anyone on a current Go (#699).
+#
+# The pin is scoped to the linter invocations and deliberately NOT exported for
+# the whole recipe. `go vet` above has to keep using the local toolchain:
+# ci.yml pins a job to `GOTOOLCHAIN: local` precisely to assert vet runs under
+# the newer release, and a recipe-wide export would quietly move it back to
+# 1.25 and leave that job asserting nothing.
+GOLANGCI_TOOLCHAIN ?= go1.25.13
+
 lint:
 	$(GO) vet ./...
-	$(GOLANGCI_LINT) run
+	GOTOOLCHAIN=$(GOLANGCI_TOOLCHAIN) $(GOLANGCI_LINT) run
 	@for m in $(NESTED_MODULES); do \
-		$(GO) -C $$m vet ./... && (cd $$m && $(GOLANGCI_LINT) run); \
+		$(GO) -C $$m vet ./... && (cd $$m && GOTOOLCHAIN=$(GOLANGCI_TOOLCHAIN) $(GOLANGCI_LINT) run); \
 	done
 
 # Test the contrib modules twice: once against the released parent pinned in

@@ -116,7 +116,7 @@ func TestSoak_H3ConnStability(t *testing.T) {
 	t.Logf("soak: server=%s addr=%s duration=%s workers=%d", name, addr, dur, workers)
 
 	c, err := NewH3Client(addr,
-		&tls.Config{ServerName: host, InsecureSkipVerify: true}) //nolint:gosec // interop dials self-signed
+		&tls.Config{ServerName: host, InsecureSkipVerify: true})
 	require.NoErrorf(t, err, "NewH3Client(%s)", addr)
 	t.Cleanup(func() { _ = c.Close() })
 
@@ -254,7 +254,7 @@ func TestSoak_H3PoolConnStability(t *testing.T) {
 		name, addr, dur, workers, maxConns, maxStreams)
 
 	c, err := NewH3PoolClient(addr,
-		&tls.Config{ServerName: host, InsecureSkipVerify: true}, //nolint:gosec // interop dials self-signed
+		&tls.Config{ServerName: host, InsecureSkipVerify: true},
 		PoolOptions{
 			MaxConnsPerHost:   maxConns,
 			MaxStreamsPerConn: maxStreams,
