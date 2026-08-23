@@ -6,7 +6,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/lodgvideon/poseidon-http-client/frame"
+	"github.com/lodgvideon/poseidon-http-client/conn"
 )
 
 // Code is a gRPC status code, as carried in the grpc-status trailer.
@@ -147,15 +147,15 @@ func statusFromHTTP(httpStatus int) Code {
 
 // statusFromRST maps an HTTP/2 RST_STREAM error code to a gRPC code. A reset
 // stream never carries trailers, so this is the only status the caller gets.
-func statusFromRST(code frame.ErrCode) Code {
+func statusFromRST(code conn.ErrCode) Code {
 	switch code {
-	case frame.ErrCodeRefusedStream:
+	case conn.ErrCodeRefusedStream:
 		return Unavailable
-	case frame.ErrCodeCancel:
+	case conn.ErrCodeCancel:
 		return Canceled
-	case frame.ErrCodeEnhanceYourCalm:
+	case conn.ErrCodeEnhanceYourCalm:
 		return ResourceExhausted
-	case frame.ErrCodeInadequateSecurity:
+	case conn.ErrCodeInadequateSecurity:
 		return PermissionDenied
 	default:
 		return Internal

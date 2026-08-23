@@ -75,6 +75,26 @@ jobs:
               exit 1
             fi
           done
+
+      # The same rule one layer up. `client` is the public API and `grpc` is a
+      # separate entry point; neither is an HTTP/2 codec consumer. They named
+      # frame.Priority and frame.ErrCode* anyway, so an HTTP/1.1 or HTTP/3 caller
+      # had to import the HTTP/2 frame package to spell a parameter type — the
+      # public client.Request.Priority field among them. conn/aliases.go carries
+      # the bindings now and says so in its header comment (#714).
+      #
+      # DIRECT imports again, for the same reason as above: `client` reaches frame
+      # transitively through conn, which is the layering working, not a skip. Test
+      # files are out of scope — .Imports excludes them, and a test that reaches
+      # for the codec directly is testing the codec.
+      - name: client and grpc do not import frame
+        run: |
+          for pkg in ./client ./grpc; do
+            if go list -f '{{join .Imports " "}}' "$pkg" | grep -q 'poseidon-http-client/frame'; then
+              echo "$pkg imports frame directly; the re-exports live in conn/aliases.go" >&2
+              exit 1
+            fi
+          done
       # Keep the opt-in debug build (-tags poseidondebug) compilable so the
       # leak detector can't bitrot. Compile + vet only — its finalizer/GC tests
       # have non-deterministic timing, so they run via `make test-debug`.

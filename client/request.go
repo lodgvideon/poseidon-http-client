@@ -9,7 +9,6 @@ import (
 	"unicode"
 
 	"github.com/lodgvideon/poseidon-http-client/conn"
-	"github.com/lodgvideon/poseidon-http-client/frame"
 )
 
 // Request describes one HTTP/2 request. Required fields: Method, Path.
@@ -118,7 +117,7 @@ type Request struct {
 	// images). StreamDep=0 means root stream (no parent). Weight
 	// must be 1..256 (RFC 7540 §5.3.4). Use Exclusive=true to make
 	// this stream the sole dependent of its parent.
-	Priority *frame.Priority
+	Priority *conn.Priority
 
 	// Timeout is the per-request deadline. When > 0, the client
 	// derives a sub-context from ctx with this timeout. When the

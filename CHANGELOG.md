@@ -7,6 +7,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **`client` and `grpc` no longer import the HTTP/2 frame codec.**
+  `conn/aliases.go` has said since it was written that it exists "so the client
+  package can avoid importing frame and hpack directly, keeping conn as the single
+  dependency surface", and that had drifted: `client` named `frame.Priority` in
+  four places — including the **public** `Request.Priority` field — and `grpc`
+  named `frame.ErrCode` and four of its constants. So a caller using HTTP/1.1 or
+  HTTP/3 had to import the HTTP/2 frame package to spell a parameter type (#714).
+
+  Five bindings are added to `conn/aliases.go` — `Priority`,
+  `ErrCodeInternalError`, `ErrCodeCancel`, `ErrCodeEnhanceYourCalm`,
+  `ErrCodeInadequateSecurity` — and the six production sites now use them.
+  **Nothing breaks and no caller has to migrate:** a Go type alias is an identical
+  type, so `client.Request{Priority: &frame.Priority{...}}` still compiles exactly
+  as before, as does passing `conn.Priority`.
+
+  A CI step keeps the edge from returning, modelled on the `hpack` one that has
+  guarded the same shape at the layer below since #492. It checks **direct**
+  imports for the same reason that one does: `client` still reaches `frame`
+  transitively through `conn`, which is the layering working rather than a skip.
+  The step was verified to discriminate — it passes on this tree and fails on
+  `main`.
+
+  This is the `conn` half of #714 only. The `http3/aliases.go` half is
+  deliberately not here: it would add three exports to a package #479 is an open
+  ticket about shrinking.
+
 ### Tests
 
 - **The tail of the #722 AAA + `testify` sweep: the last 31 hand-rolled

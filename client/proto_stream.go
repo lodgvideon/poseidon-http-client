@@ -4,7 +4,6 @@ import (
 	"context"
 
 	"github.com/lodgvideon/poseidon-http-client/conn"
-	"github.com/lodgvideon/poseidon-http-client/frame"
 )
 
 // protoStream is the protocol-agnostic unit of one HTTP request/response
@@ -24,7 +23,7 @@ type protoStream interface {
 
 	// SendHeadersWithPriority is like SendHeaders but carries optional H2
 	// PRIORITY data. H1.1 implementations ignore prio.
-	SendHeadersWithPriority(ctx context.Context, fields []conn.HeaderField, endStream bool, prio *frame.Priority) error
+	SendHeadersWithPriority(ctx context.Context, fields []conn.HeaderField, endStream bool, prio *conn.Priority) error
 
 	// SendData sends a body chunk. endStream=true marks the final chunk.
 	SendData(ctx context.Context, p []byte, endStream bool) error

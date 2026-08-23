@@ -9,7 +9,6 @@ import (
 	"time"
 
 	"github.com/lodgvideon/poseidon-http-client/conn"
-	"github.com/lodgvideon/poseidon-http-client/frame"
 	"github.com/lodgvideon/poseidon-http-client/http1"
 	"github.com/lodgvideon/poseidon-http-client/trace"
 )
@@ -118,7 +117,7 @@ func (e *h1Exchange) SendHeaders(_ context.Context, _ []conn.HeaderField, _ bool
 	return ErrTrailersUnsupportedH1
 }
 
-func (e *h1Exchange) SendHeadersWithPriority(ctx context.Context, fields []conn.HeaderField, endStream bool, _ *frame.Priority) error {
+func (e *h1Exchange) SendHeadersWithPriority(ctx context.Context, fields []conn.HeaderField, endStream bool, _ *conn.Priority) error {
 	return e.ex.WriteRequest(ctx, fields, endStream)
 }
 

@@ -10,7 +10,6 @@ import (
 	"time"
 
 	"github.com/lodgvideon/poseidon-http-client/conn"
-	"github.com/lodgvideon/poseidon-http-client/frame"
 	"github.com/lodgvideon/poseidon-http-client/http1"
 	"github.com/lodgvideon/poseidon-http-client/http3"
 )
@@ -44,8 +43,8 @@ func builtinShouldRetry(err error) bool {
 	if errors.As(err, &sre) {
 		switch sre.Code {
 		case conn.ErrCodeRefusedStream,
-			frame.ErrCodeInternalError,
-			frame.ErrCodeEnhanceYourCalm:
+			conn.ErrCodeInternalError,
+			conn.ErrCodeEnhanceYourCalm:
 			// Transient per RFC 7540 §7:
 			//   REFUSED_STREAM (§8.1.4) — server did not process the
 			//     request; safe to retry.
