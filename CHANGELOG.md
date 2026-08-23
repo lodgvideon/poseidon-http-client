@@ -37,6 +37,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Tests
 
+- **The nightly fuzz matrix covers every target but one.** Eleven cells are
+  added — `client` 4, `grpc` 3, `http1` 2, `hpack` 1, `quic` 1 — taking the
+  matrix from 22 cells to 33. (#687's body says 19 targets are missing; that
+  number predates its own first slice, which shipped in #704. The real figure at
+  `4b42db8` was 12.)
+
+  Each was fuzzed 30s locally before being listed, per the precedent #704 set,
+  and **two of the twelve failed on first contact** — which is the staging
+  argument in #687 working rather than failing:
+
+  - `FuzzReadResponse_ValidRoundTrip` failed twice in a minute, on `0: \x00` and
+    on `": 0`. Both were fixture defects: the target characterised "valid" with
+    blocklists — `":\r\n \t"` for the name, `"\r\n"` for the value — against
+    grammars RFC 9110 defines *positively*, so it reported correct rejections as
+    parser bugs. A blocklist of a token grammar is wrong by construction: it can
+    only enumerate the invalid characters someone thought of. Replaced with
+    `isToken` (§5.6.2 `1*tchar`) and `isFieldValue` (§5.5 field-vchar / SP /
+    HTAB) allowlists; 6.66M execs over 120s clean afterwards.
+  - `FuzzReadResponse` fails in one second on `HTTP/1.0 000 0000`, and that one
+    is **not** a fixture defect — the test and `parseStatusCode` hold two
+    different rules about a final status below 200, and `ReadResponse` returns
+    `(0, nil)` for it, colliding with the value it returns on every error path.
+    That cell is deliberately held out of the matrix and tracked in #931; it is
+    the only target the matrix does not name.
+
+  No production code changed.
+
 - **The `quic` allocation gates were never reached by CI.** The
   "Allocation gates (not under -race)" step listed `./conn/ ./client/ ./grpc/
   ./http1/` — `./quic/` was absent — and eight of quic's eleven `//go:build

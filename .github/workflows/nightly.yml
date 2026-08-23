@@ -61,12 +61,10 @@ jobs:
             target: FuzzParseSettings
           # The rest of http3's peer-facing parsers. This package and qpack are the
           # two sitting closest to unauthenticated peer bytes that the matrix
-          # under-covered relative to quic and frame (#687), so they are the first
-          # slice of the 19 targets whose seed corpus CI replays but which nothing
-          # was mutating. Deliberately staged: the remaining 12 (client 4, grpc 3,
-          # http1 3, hpack 1, quic 1) are further from peer input and wait until
-          # these have run a while, because a target that finds something at 3am
-          # needs someone to triage it.
+          # under-covered relative to quic and frame (#687), so they were the first
+          # slice of the targets whose seed corpus CI replays but which nothing was
+          # mutating. The remaining ones follow at the end of this list; only
+          # http1's FuzzReadResponse is still held back, and #931 says why.
           - pkg: ./http3
             target: FuzzParseFrameHeader
           - pkg: ./http3
@@ -86,6 +84,36 @@ jobs:
             target: FuzzAcceptInitial
           - pkg: ./quic
             target: FuzzParseTransportParams
+          # The second and final slice (#687). Every one of these was fuzzed 30s
+          # locally before being listed, which is how two of them turned out not to
+          # be listable as they stood — see the commit body. The staging argument
+          # was that a target finding something at 3am needs an owner; it found
+          # something in one second instead, which is the argument working.
+          - pkg: ./client
+            target: FuzzCompressBody
+          - pkg: ./client
+            target: FuzzCompressStream
+          - pkg: ./client
+            target: FuzzDecompressFully
+          - pkg: ./client
+            target: FuzzDecompressStream
+          - pkg: ./grpc
+            target: FuzzDecoder
+          - pkg: ./grpc
+            target: FuzzResponseFields
+          - pkg: ./grpc
+            target: FuzzBinMetadata
+          - pkg: ./http1
+            target: FuzzReadChunkedBody
+          - pkg: ./http1
+            target: FuzzReadResponse_ValidRoundTrip
+          - pkg: ./hpack
+            target: FuzzHPACKDecode_PersistentDecoder
+          # Stays on a Linux runner: quic/grocmsg_linux_test.go is //go:build linux,
+          # and the guard step below fails the job loudly if the target ever stops
+          # resolving rather than silently fuzzing nothing.
+          - pkg: ./quic
+            target: FuzzParseGROSegmentSize
     steps:
       - uses: actions/checkout@v7
 

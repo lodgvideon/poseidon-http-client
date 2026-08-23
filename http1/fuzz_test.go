@@ -183,6 +183,41 @@ func FuzzReadChunkedBody(f *testing.F) {
 	})
 }
 
+// isToken reports whether s is RFC 9110 §5.6.2 `token = 1*tchar`, the grammar a
+// field name must satisfy. Written out as the allowlist the RFC states rather
+// than as "everything except the delimiters I remembered": the separators are
+// DQUOTE and "(),/:;<=>?@[\]{}" plus CTLs and SP, and a guard that lists them by
+// hand is one omission away from calling a rejected response a parser bug.
+func isToken(s string) bool {
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		switch {
+		case 'a' <= c && c <= 'z', 'A' <= c && c <= 'Z', '0' <= c && c <= '9':
+		case strings.IndexByte("!#$%&'*+-.^_`|~", c) >= 0:
+		default:
+			return false
+		}
+	}
+	return len(s) > 0
+}
+
+// isFieldValue reports whether s is RFC 9110 §5.5 field content: field-vchar is
+// VCHAR (0x21-0x7E) or obs-text (0x80-0xFF), with SP and HTAB allowed between.
+// Callers trim first, so leading and trailing whitespace is not this function's
+// business. NUL, CR, LF and the other CTLs are all outside it.
+func isFieldValue(s string) bool {
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if c == ' ' || c == '\t' {
+			continue
+		}
+		if c < 0x21 || c == 0x7F {
+			return false
+		}
+	}
+	return true
+}
+
 // FuzzReadResponse_ValidRoundTrip builds a well-formed response out of the
 // fuzzer's bytes and asserts it parses back byte-for-byte. The other targets
 // prove hostile input is refused; this one proves the caps did not make the
@@ -207,10 +242,16 @@ func FuzzReadResponse_ValidRoundTrip(f *testing.F) {
 		}
 		name = strings.ToLower(strings.TrimSpace(name))
 		value = strings.TrimSpace(value)
-		if name == "" || strings.ContainsAny(name, ":\r\n \t") {
-			t.Skip()
-		}
-		if strings.ContainsAny(value, "\r\n") {
+		// ALLOWLISTS, not blocklists, and the distinction is the whole point.
+		// The first time this target was ever fuzzed it failed twice in a
+		// minute, both times because it declared input valid that the RFC does
+		// not: `0: \x00` (NUL is not field-vchar) and `": 0` (a double quote is
+		// not a tchar). The old guards excluded ":\r\n \t" from the name and
+		// "\r\n" from the value — blocklists, against grammars RFC 9110 defines
+		// positively. A blocklist of a token grammar is wrong by construction:
+		// it can only ever enumerate the invalid characters someone happened to
+		// think of, and every one it misses is reported as a parser bug.
+		if name == "" || !isToken(name) || !isFieldValue(value) {
 			t.Skip()
 		}
 		// Stay inside the documented per-line bound; over-long lines are the
