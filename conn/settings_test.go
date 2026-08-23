@@ -93,7 +93,7 @@ func TestHandshakeSettings_RoundTripsAgainstPipePeer(t *testing.T) {
 	fr := frame.NewFramer(cli, cli)
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
-	peer, err := handshakeSettings(ctx, fr, func() error { return nil }, AdvertisedSettings{}.defaulted(), false)
+	peer, _, err := handshakeSettings(ctx, fr, func() error { return nil }, AdvertisedSettings{}.defaulted(), false)
 
 	require.NoError(t, err, "handshake")
 	// Peer announced MaxConcurrentStreams=100; we should observe that.

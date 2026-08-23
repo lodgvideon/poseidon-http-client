@@ -56,8 +56,9 @@ func soakH2Addr() string {
 
 // soakH2Path is the endpoint driven under load. /healthz on purpose: a two-byte
 // response keeps the wire cheap so the run is bounded by client work rather than by
-// the peer, and it stays clear of the 65535-byte connection-window budget that
-// bounds concurrent request bodies against nginx (#701).
+// the peer. It used to also cite a 65535-byte budget on concurrent request bodies
+// against nginx; that was never a peer budget, it was this client dropping the
+// connection-level WINDOW_UPDATE nginx sends during the SETTINGS exchange (#701).
 const soakH2Path = "/healthz"
 
 // runH2Soak drives continuous concurrent GETs through c for POSEIDON_SOAK_DURATION

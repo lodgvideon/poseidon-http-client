@@ -32,22 +32,24 @@ import (
 // These give every in-flight request a distinct identity on both channels a response
 // can carry — the body and a header — and make each one prove it got its own back.
 
-// idBodySize keeps N concurrent in-flight request bodies inside the 65535-byte
-// connection-level send window that RFC 9113 §6.9.2 mandates at handshake.
+// idBodySize is large enough that N concurrent in-flight request bodies exceed the
+// 65535-byte connection-level send window RFC 9113 §6.9.2 fixes at handshake —
+// 30 × 3006 = 90180 — which is the point.
 //
-// This is a peer constraint, not a client one, and it was measured rather than
-// guessed. nginx stops granting connection-level credit once concurrent request
-// bodies fill that window, and every request still in flight then stalls forever;
-// the cutoff tracks total bytes crossing 65535 exactly and is independent of stream
-// count (21 of 30 3006-byte bodies complete = 63126 bytes, then nothing). It is not
-// this client's defect: curl/nghttp2 1.59.0 fails the same way against the same
-// nginx, 29 of 30 requests dead, while go-http, Undertow and nghttpx all serve the
-// oversized load without complaint. Filed separately as #701.
+// It was 1500 for a while, on the belief that the overflow was a peer constraint:
+// nginx appeared to stop granting connection-level credit, 21 of 30 bodies landed
+// (63126 bytes) and the rest hung forever, and curl was reported to fail the same
+// way. That reading was wrong twice over. The re-run of the curl leg passes 30/30
+// against the same pinned image, and a frame trace showed nginx granting the whole
+// 2^31-1 immediately after its SETTINGS — before the client's first HEADERS. The
+// client discarded that WINDOW_UPDATE because it arrived while `settingsRecorder`
+// was still the frame handler, so its own send window stayed at 65535 forever
+// (#701).
 //
-// The body only has to be unique and long enough to make a mix unmistakable, so
-// sizing it under the window costs the test nothing — the mutation that crosses two
-// responses is still caught, which was re-confirmed at this size.
-const idBodySize = 1500
+// So the size is back above the window deliberately: it is the cheapest end-to-end
+// guard that the handshake credit survives, against a real peer that actually sends
+// one. conn/handshake_windowupdate_test.go pins the mechanism.
+const idBodySize = 3006
 
 // idBody builds this request's unique body: self-describing, so a failure message
 // can name the request the bytes actually came from rather than only reporting that

@@ -332,10 +332,17 @@ func NewClientConn(ctx context.Context, transport net.Conn, opts ConnOptions) (*
 	// RFC 7540 §10.5.1); the Framer/handler byte caps only bound the compressed
 	// block. opts is defaulted, so this is non-zero unless the caller opted out.
 	applyDecoderSettings(c.dec, opts.Settings)
-	peer, err := handshakeSettings(ctx, c.fr, c.flushWrite, opts.Settings, opts.EnablePush)
+	peer, connWindowIncr, err := handshakeSettings(ctx, c.fr, c.flushWrite, opts.Settings, opts.EnablePush)
 	if err != nil {
 		_ = transport.Close()
 		return nil, err
+	}
+	if connWindowIncr > 0 {
+		if int64(c.peerConnSendWindow)+int64(connWindowIncr) > maxFlowWindow {
+			_ = transport.Close()
+			return nil, &ConnError{Code: frame.ErrCodeFlowControlError, Reason: "WINDOW_UPDATE overflowed connection send window during handshake"}
+		}
+		c.peerConnSendWindow += int32(connWindowIncr)
 	}
 	c.psMu.Lock()
 	c.peerSettings = peer

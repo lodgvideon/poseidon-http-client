@@ -23,39 +23,39 @@ import (
 // sits in the buffer and a peer that waits for the client preface before
 // responding would deadlock. It is invoked again after our SETTINGS ACK so
 // the peer observes it promptly.
-func handshakeSettings(ctx context.Context, fr *frame.Framer, flush func() error, advertised AdvertisedSettings, enablePush bool) (frame.SettingsParams, error) {
+func handshakeSettings(ctx context.Context, fr *frame.Framer, flush func() error, advertised AdvertisedSettings, enablePush bool) (frame.SettingsParams, uint64, error) {
 	if err := fr.WriteClientPreface(); err != nil {
-		return frame.SettingsParams{}, err
+		return frame.SettingsParams{}, 0, err
 	}
 	myParams := encodeAdvertised(advertised, enablePush)
 	if err := fr.WriteSettings(myParams); err != nil {
-		return frame.SettingsParams{}, err
+		return frame.SettingsParams{}, 0, err
 	}
 	// Flush the preface + our SETTINGS to the wire before blocking on the
 	// server's SETTINGS below.
 	if err := flush(); err != nil {
-		return frame.SettingsParams{}, err
+		return frame.SettingsParams{}, 0, err
 	}
 
 	rec := &settingsRecorder{}
 	for !rec.peerSeen {
 		if err := readOne(ctx, fr, rec); err != nil {
-			return frame.SettingsParams{}, err
+			return frame.SettingsParams{}, 0, err
 		}
 	}
 	if err := fr.WriteSettingsAck(); err != nil {
-		return frame.SettingsParams{}, err
+		return frame.SettingsParams{}, 0, err
 	}
 	// Flush our SETTINGS ACK so the peer sees it promptly.
 	if err := flush(); err != nil {
-		return frame.SettingsParams{}, err
+		return frame.SettingsParams{}, 0, err
 	}
 	for !rec.ackSeen {
 		if err := readOne(ctx, fr, rec); err != nil {
-			return frame.SettingsParams{}, err
+			return frame.SettingsParams{}, 0, err
 		}
 	}
-	return rec.peer, nil
+	return rec.peer, rec.connWindowIncr, nil
 }
 
 func readOne(ctx context.Context, fr *frame.Framer, h frame.Handler) error {
@@ -115,6 +115,10 @@ type settingsRecorder struct {
 	peer     frame.SettingsParams
 	peerSeen bool
 	ackSeen  bool
+	// connWindowIncr is the connection-level credit the peer granted before its
+	// SETTINGS ACK. Recorded rather than applied here because the recorder has no
+	// Conn; NewClientConn adds it to peerConnSendWindow once the handshake returns.
+	connWindowIncr uint64
 }
 
 // prefaceGuard rejects a frame received before the server's connection preface.
@@ -179,9 +183,17 @@ func (r *settingsRecorder) OnGoAway(frame.FrameHeader, uint32, frame.ErrCode, []
 	return r.prefaceGuard()
 }
 
-// OnWindowUpdate implements frame.Handler.
-func (r *settingsRecorder) OnWindowUpdate(frame.FrameHeader, uint32) error {
-	return r.prefaceGuard()
+// OnWindowUpdate implements frame.Handler. A connection-level WINDOW_UPDATE
+// arriving here is REAL CREDIT and must not be dropped: nginx sends one
+// immediately after its SETTINGS, i.e. inside the SETTINGS-ACK wait below.
+func (r *settingsRecorder) OnWindowUpdate(fh frame.FrameHeader, increment uint32) error {
+	if err := r.prefaceGuard(); err != nil {
+		return err
+	}
+	if fh.StreamID == 0 {
+		r.connWindowIncr += uint64(increment)
+	}
+	return nil
 }
 
 // OnContinuation implements frame.Handler.

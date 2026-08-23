@@ -404,11 +404,12 @@ func TestMatrix_Metrics(t *testing.T) {
 // pair is the test; either size alone is satisfied by a client that refunds and
 // by one that never has to.
 //
-// This is the RESPONSE direction. Request bodies near the same boundary are
-// deliberately avoided: nginx stops granting connection-level credit once
-// concurrent request bodies fill the window and every in-flight request then
-// stalls, which is #701 and not this client. Measured before this test was
-// written - all four peers serve both sizes below without complaint.
+// This is the RESPONSE direction. The request direction at the same boundary is
+// covered by TestMatrix_ConcurrentIdentity, whose bodies now total 90180 bytes
+// across 30 concurrent streams. Both halves were once believed to be blocked by a
+// peer property of nginx; that turned out to be this client discarding the
+// connection-level WINDOW_UPDATE nginx sends during the SETTINGS exchange (#701),
+// and the earlier note here stating it as a measured peer constraint was wrong.
 func TestMatrix_LargeBody_AtTheConnectionWindow(t *testing.T) {
 	sizes := []int{65535, 65536}
 	for _, srv := range allReadyServers(t) {
