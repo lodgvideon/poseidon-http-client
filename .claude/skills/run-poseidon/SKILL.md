@@ -61,10 +61,11 @@ everything else, including the output, is the same.
 ## Platforms
 
 - **Linux** — the driver is a plain bash script with no Windows dependency.
-  Verified on Ubuntu 24.04 / GNU userland (that is what WSL is), both against a
-  `/mnt/c` checkout and a native-filesystem clone. Needs: bash, Go (the
-  version `go.mod` pins), golangci-lint v2.5 for `lint`, python3 for the RFC
-  quote check, Docker for `mutation` and `h3`.
+  Verified on Ubuntu / GNU userland against a native-filesystem clone (LF tree,
+  outside `/mnt`): `env`, `smoke` 7/7, `build`, `lint` 0 issues, `alloc`,
+  `conformance` all green, and the run left the tree clean. Needs: bash, Go
+  (the version `go.mod` pins), golangci-lint v2.5 for `lint`, python3 for the
+  RFC quote check, Docker for `mutation` and `h3`.
 - **macOS** — same commands; **not run on a macOS host** during this skill's
   construction, so treat it as portable-by-construction rather than verified.
   The two BSD-userland differences that would have broken it are handled in the

@@ -108,7 +108,11 @@ cmd_env() {
   printf '   cpus:          %s\n' "$(cpu_count)"
   local crlf
   crlf="$(find . -name '*.go' -not -path './.claude/*' -print0 | xargs -0 file | grep -c CRLF)"
-  printf '   CRLF .go files: %s (gofmt reports every one of them as unformatted; `lint` works around it)\n' "$crlf"
+  if [ "$crlf" -gt 0 ]; then
+    printf '   CRLF .go files: %s — gofmt reports every one as unformatted; `lint` works around it\n' "$crlf"
+  else
+    printf '   CRLF .go files: 0 — LF tree, nothing for the lint snapshot to fix up\n'
+  fi
 }
 
 # ---------------------------------------------------------------- smoke
