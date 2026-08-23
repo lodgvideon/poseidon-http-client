@@ -48,10 +48,24 @@ func (c *Conn) pollBufLen() int {
 	// 64 KiB buffer instead of 2 KiB on Windows, macOS and the BSDs: 32x the
 	// memory, for a coalescing that cannot happen. On a pooled load generator
 	// that is the difference between ~2 MB and ~64 MB at a thousand connections.
-	if groCanCoalesce {
-		if _, ok := c.pc.(groReader); ok {
-			return groReadBuffer
-		}
+	_, isGROReader := c.pc.(groReader)
+	return pollBufLenFor(groCanCoalesce, isGROReader)
+}
+
+// pollBufLenFor is the buffer-size decision itself, taking the platform
+// capability as an argument rather than reading the build-tagged constant.
+//
+// That split exists for the test, and it is not ceremony. groCanCoalesce is a
+// compile-time constant, so on Linux — where it is true, and where every
+// `runs-on:` in .github/workflows/ is ubuntu-24.04 — deleting the gate above is
+// completely unobservable: a test that derives its own expectation from
+// groCanCoalesce agrees with the mutated code just as happily as with the real
+// one. The regression this guards, a 64 KiB buffer per connection on Windows,
+// macOS and the BSDs, could not turn CI red (#839). Passing the capability in
+// lets the off-Linux row be asserted from a Linux run.
+func pollBufLenFor(canCoalesce, isGROReader bool) int {
+	if canCoalesce && isGROReader {
+		return groReadBuffer
 	}
 	return pollBufSize
 }
