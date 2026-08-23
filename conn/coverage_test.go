@@ -1319,7 +1319,7 @@ func TestHandshakeSettings_WriteClientPrefaceError(t *testing.T) {
 	t.Parallel()
 	fr := frame.NewFramer(errWriter{}, bytes.NewReader(nil))
 
-	_, err := handshakeSettings(context.Background(), fr, func() error { return nil }, AdvertisedSettings{}, false)
+	_, _, err := handshakeSettings(context.Background(), fr, func() error { return nil }, AdvertisedSettings{}, false)
 
 	require.Error(t, err, "expected error from failed WriteClientPreface")
 }

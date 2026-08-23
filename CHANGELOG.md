@@ -7,6 +7,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **A connection-level `WINDOW_UPDATE` arriving during the SETTINGS exchange was
+  discarded, capping every such connection at 65535 outbound bytes forever.**
+  `handshakeSettings` reads frames through `settingsRecorder` until the peer's
+  SETTINGS ACK, and that recorder's `OnWindowUpdate` returned `prefaceGuard()` —
+  accepting the frame and throwing the increment away. The recorder exists to
+  reject frames sent *before* the peer's SETTINGS; after that point "do not
+  reject" had been implemented as "return nil", which is not "apply".
+
+  nginx sends its connection-window raise immediately after its SETTINGS, i.e.
+  inside exactly that interval, and grants the whole 2³¹−1 in one frame — so
+  there is no later `WINDOW_UPDATE` to recover from a dropped one. Traced against
+  the pinned fixture: the peer credited the connection at `.709745`, before the
+  client's first HEADERS at `.709795`, and the client still wrote **exactly
+  65535 bytes** — 21 whole 3006-byte bodies plus a 2409-byte remainder — then
+  parked 8 streams in `acquireSendCredits` with their HEADERS sent and no DATA.
+  Thirty concurrent POSTs finished 21 of 30 after a 10-second timeout; they now
+  finish 30 of 30 in 5 ms, and 60 × 3006 (180360 bytes, 2.75× the old ceiling)
+  in 7 ms.
+
+  This was filed as a peer property of nginx and is not one (#701). The other
+  peers in the matrix pass only because they extend credit as they read, long
+  after the recorder is gone. `idBodySize` in the concurrency-identity
+  integration test goes back to 3006, so 30 concurrent bodies total 90180 bytes
+  and the nginx leg becomes an end-to-end guard on this: it fails against a
+  build that drops the increment. Three comments that recorded the disproved
+  mechanism as measured fact are corrected.
+
+  Still open, deliberately not bundled: every other `settingsRecorder` handler
+  swallows its frame the same way once the peer's SETTINGS has arrived — a
+  GOAWAY in that window is dropped and the client proceeds as if the connection
+  were healthy.
+
 ### Changed
 
 - **`client` and `grpc` no longer import the HTTP/2 frame codec.**
