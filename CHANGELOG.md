@@ -71,6 +71,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Tests
 
+- **The two RFC 9204 stream-bound tests now assert the error code on the value the
+  production path returned, not only on the fixture's latch.** `connError` builds its
+  `*H3ConnError` on the calling goroutine, so that value pins the code regardless of
+  what any other teardown does; `conn.closeCode` pins that the same code reached the
+  wire. Neither subsumes the other, and `errors.Is(err, ErrH3Control)` pins neither —
+  `H3ConnError.Is` matches every code. Verified by splitting them: a build that returns
+  the wrong code but closes with the right one reddens only the new assertion, and the
+  reverse reddens only the old one.
+
+  This is the residue of #924, whose flake was fixed in #929. Re-measured on `a9c1048`:
+  the 24x800 harness that produced **385 failures in 19,200 race-instrumented runs**
+  before the fix now produces **0**. Both tests also gain the
+  `docs/RFC_COVERAGE.md` rows the RFC trace policy requires and neither had.
+
 - **A CI flake in `quic`'s PTO cancel tests was the instrumentation, not the
   timing.** `TestReadWithPTO_CancelUnblocksRead/200ms` failed on a loaded runner
   with *"the injection never happened (0 cancels)"* — its own control arm firing.
