@@ -75,6 +75,15 @@ func TestConformance_RFC9204_Sec42_EncoderStreamDribbleBounded(t *testing.T) {
 	// §6 scopes QPACK_ENCODER_STREAM_ERROR to "failed to interpret an encoder
 	// instruction". Refusing an unbounded resource commitment is H3_EXCESSIVE_LOAD
 	// (RFC 9114 §8.1), the same code the control stream's frame cap already uses.
+	// Both halves, and they are not the same check. connError builds the H3ConnError
+	// on THIS goroutine, so the returned value pins the code the production path chose;
+	// conn.closeCode pins that the same code reached the wire. ErrorIs against
+	// ErrH3Control pins neither — H3ConnError.Is matches every code (client.go:78) —
+	// so dropping either of these would leave the test naming a code it never checks.
+	var ce *H3ConnError
+	require.ErrorAsf(t, serr, &ce, "serviceControl = %v, want a typed *H3ConnError", serr)
+	assert.Equalf(t, H3ExcessiveLoad, ce.Code,
+		"returned error carries %#x, want H3_EXCESSIVE_LOAD (%#x)", ce.Code, H3ExcessiveLoad)
 	assert.Equalf(t, H3ExcessiveLoad, conn.closeCode,
 		"close code = %#x, want H3_EXCESSIVE_LOAD (%#x)", conn.closeCode, H3ExcessiveLoad)
 }
@@ -136,6 +145,13 @@ func TestConformance_RFC9204_Sec44_DecoderStreamTailIsSelfBounding(t *testing.T)
 	assert.ErrorIsf(t, serr, ErrH3Control,
 		"serviceControl = %v, want ErrH3Control: a never-ending prefix integer must be "+
 			"a typed error, not an ever-growing buffer (tail %d bytes)", serr, len(client.qpackDecBuf))
+	// See the encoder-stream test above for why both the returned error and the
+	// latched close code are asserted rather than either alone.
+	var ce *H3ConnError
+	require.ErrorAsf(t, serr, &ce, "serviceControl = %v, want a typed *H3ConnError", serr)
+	assert.Equalf(t, H3QpackDecoderStreamError, ce.Code,
+		"returned error carries %#x, want QPACK_DECODER_STREAM_ERROR (%#x)",
+		ce.Code, H3QpackDecoderStreamError)
 	assert.Equalf(t, H3QpackDecoderStreamError, conn.closeCode,
 		"close code = %#x, want QPACK_DECODER_STREAM_ERROR (%#x): an integer the decoder "+
 			"cannot interpret is a decode failure (RFC 9204 §6), not excessive load",
