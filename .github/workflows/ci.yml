@@ -111,6 +111,25 @@ jobs:
               exit 1
             fi
           done
+
+      # The third cross-package invariant, and the only one that is not about
+      # imports. maxInterimResponses is a PEER-INPUT bound spelled once per stack:
+      # every 1xx block is decoded and handed to the caller, so a stack whose bound
+      # drifts upward is the stack a hostile peer gets more work out of.
+      #
+      # Each package already has a TestInterimCap_MatchesSiblings tripwire, and
+      # those stay — they run under a bare `go test ./...` where no CI script does,
+      # and they pin the VALUE 100, which a script comparing the three to each other
+      # cannot. What they cannot catch is a COORDINATED single-package edit: change
+      # the constant and that package's own tripwire together and the suite is fully
+      # green while the three stacks disagree. This checks all six numbers at once.
+      #
+      # Here rather than in conformance-gate.yml: this is not an RFC-conformance
+      # question, and that workflow is pull_request-only while ci.yml also runs on
+      # push (#923).
+      - name: The three stacks agree on maxInterimResponses
+        run: python3 scripts/interim-cap-gate.py
+
       # Keep the opt-in debug build (-tags poseidondebug) compilable so the
       # leak detector can't bitrot. Compile + vet only — its finalizer/GC tests
       # have non-deterministic timing, so they run via `make test-debug`.

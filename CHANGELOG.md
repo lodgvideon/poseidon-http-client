@@ -71,6 +71,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Tests
 
+- **A CI gate pins that the three protocol stacks agree on `maxInterimResponses`.**
+  It is a peer-input bound spelled once per stack — every 1xx block is decoded and
+  handed to the caller, so a stack whose bound drifts upward is the stack a hostile
+  peer gets more work out of.
+
+  #923 says "there is no test" and "change one and nothing fails"; both are false.
+  Each package carries a `TestInterimCap_MatchesSiblings` tripwire, and a `go test
+  -overlay` run with one declaration changed 100 → 101 reddens that package. Those
+  tripwires stay: they run under a bare `go test ./...` where no CI script does, and
+  they pin the **value** 100, which a script comparing the three to each other cannot.
+
+  The hole that is real is a **coordinated single-package edit** — the constant plus
+  that package's own tripwire — which diverges from the other two with a fully green
+  suite. `scripts/interim-cap-gate.py` checks all six numbers at once and asserts the
+  site count is exactly three, so a rename cannot make "all values agree" vacuously
+  true. Proved to discriminate on four arms: control 0, one stack drifting 1, the
+  coordinated edit 1, and a rename leaving two sites 1 (#923).
+
 - **The two RFC 9204 stream-bound tests now assert the error code on the value the
   production path returned, not only on the fixture's latch.** `connError` builds its
   `*H3ConnError` on the calling goroutine, so that value pins the code regardless of
