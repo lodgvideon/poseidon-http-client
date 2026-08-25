@@ -9,6 +9,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A handshake TLS refuses before Handshake keys exist is no longer silent.**
+  `Listener.handshake` abandoned on `StartServerHandshake` returning an error —
+  no overlapping ALPN, no mutually supported version or cipher, a `GetCertificate`
+  error for an unknown SNI — sending nothing and recording nothing. #711 fixed the
+  case where the refusal happens *after* the client's Handshake flight arrives, but
+  it seals with `ServerFlight.HandshakeSealer`, and on this path there is no
+  `*ServerFlight` at all.
+
+  `initialCloseDatagram` derives the Initial keys again from the client's DCID —
+  RFC 9001 §5.2 makes them a pure function of it — and seals a CONNECTION_CLOSE
+  carrying the CRYPTO_ERROR §4.8 prescribes. `StartServerHandshake` is untouched;
+  #715 had budgeted for restructuring its error returns, which turned out to be
+  unnecessary.
+
+  Measured against a real listener: a client offering only `hq-interop` to an `h3`
+  listener saw `Establish` return after a **4-second deadline** with the server
+  silent, and now sees it return in **2.3 ms**. The packet number is 0, not a copy
+  of `handshakeClosePN`: nothing was sent in this space, so 0 is free.
+
+  The client still reports the generic `ErrHandshakeClosed` rather than the code the
+  server sent — `OnConnectionClose` sets `c.closed` without latching anything, so
+  the CRYPTO_ERROR is dropped at that surface. Filed separately rather than bundled;
+  the code the listener actually puts on the wire is asserted directly instead.
+
+  Two rationale rows in `docs/rfc-analysis/RFC9000_QUIC_TRANSPORT_FACTS.md` reasoned
+  that RFC 9000 §8.1's anti-amplification limit is "not applicable to quic/ client".
+  Sending the first server-role byte to an unvalidated peer makes both newly
+  relevant; the measured ratio is about 0.035 against a 1200-byte Initial, so the
+  limit does not bind, and the rows now say that instead (#715).
+
 - **A connection-level `WINDOW_UPDATE` arriving during the SETTINGS exchange was
   discarded, capping every such connection at 65535 outbound bytes forever.**
   `handshakeSettings` reads frames through `settingsRecorder` until the peer's
