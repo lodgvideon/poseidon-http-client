@@ -1,4 +1,4 @@
-// Package client — managedCore: the address fan-out shared by the HTTP/1.1,
+// ManagedCore: the address fan-out shared by the HTTP/1.1,
 // HTTP/2 and HTTP/3 managed pools (issue #364).
 //
 // The three managed pools measured 96.5-97.2% identical: 11 of 16 functions were
@@ -8,8 +8,8 @@
 // three differences supplied as type arguments and closures.
 //
 // Each protocol is a type ALIAS of an instantiation, not a wrapper struct. That
-// is load-bearing for reviewability: the pinned behaviour tests reach into mp.mu,
-// mp.subPools, mp.drainMode, mp.resolver and mp.tickerPeriod across ~20 sites, and
+// is load-bearing for reviewability: the pinned behaviour tests reach into mp.Mu,
+// mp.SubPools, mp.drainMode, mp.resolver and mp.tickerPeriod across ~20 sites, and
 // an alias keeps every one of them compiling untouched. A refactor whose evaluator
 // had to be edited to accept it would be self-certifying.
 //
@@ -18,7 +18,8 @@
 // load-bearing ones — h1's opposite tick eviction order, h3's active==0 retire
 // guard, exclusive checkout versus multiplexing. A generic core there would be
 // mostly special cases wearing a shared signature.
-package client
+
+package poolcore
 
 import (
 	"context"
@@ -26,23 +27,25 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/lodgvideon/poseidon-http-client/pool"
 )
 
-// subPoolBackend is what the core needs from a per-address pool. Deliberately
+// SubPoolBackend is what the core needs from a per-address pool. Deliberately
 // small: acquire for the failover loop, and the three the drain/stats/warmup
 // paths call. release is NOT here — its signature differs per protocol, so it is
 // supplied to the core as the mkRelease closure instead.
-type subPoolBackend[MC any] interface {
-	acquire(ctx context.Context) (MC, error)
+type SubPoolBackend[MC any] interface {
+	Acquire(ctx context.Context) (MC, error)
 	Stats() Stats
 	Close() error
-	warmup(n int)
+	Warmup(n int)
 }
 
-// coreSubPool wraps a per-address pool with the core's metadata.
+// CoreSubPool wraps a per-address pool with the core's metadata.
 //
 // INVARIANT (#875): draining is a strict function of set membership, and
-// applySet is the only writer of it. applySet, under one mp.mu.Lock(), clears
+// applySet is the only writer of it. applySet, under one mp.Mu.Lock(), clears
 // draining for every address in the incoming set, sets it for every address of
 // the old mp.addrs absent from the incoming set, and then assigns mp.addrs. So
 // on exit from applySet: every address in mp.addrs has a non-draining sub-pool,
@@ -58,47 +61,49 @@ type subPoolBackend[MC any] interface {
 // that category: it is reachable and load-bearing, protecting the revive-versus-
 // drain-watchdog race, and TestManagedPool_ReviveBeatsDrainWatcher goes red when
 // it is removed.
-type coreSubPool[P subPoolBackend[MC], MC any] struct {
+type CoreSubPool[P SubPoolBackend[MC], MC any] struct {
 	p        P
 	addr     Address
 	draining bool
 }
 
-// managedCore fans Acquire across per-address sub-pools driven by a Resolver and
+// ManagedCore fans Acquire across per-address sub-pools driven by a Resolver and
 // Selector. Goroutine-safe.
 //
 // P is the sub-pool, MC its managed-conn record, C the connection handed to the
 // caller and R the release closure's shape (func() for H2/H3, func(keepAlive bool)
 // for H1, whose checkout is exclusive).
-type managedCore[P subPoolBackend[MC], MC any, C any, R any] struct {
+type ManagedCore[P SubPoolBackend[MC], MC any, C any, R any] struct {
 	resolver  Resolver
 	selector  Selector
 	drainMode DrainMode
 	poolOpts  PoolOptions
 
-	hooksRef *atomic.Pointer[Hooks]
-	metrics  *Metrics
+	obs pool.Observer
+	rec pool.Recorder
 
 	// The three measured differences, injected rather than branched on.
 	newSub    func(key string) P
 	connOf    func(MC) C
 	mkRelease func(P, MC) R
 
-	mu       sync.RWMutex
+	Mu       sync.RWMutex
 	addrs    []Address
-	subPools map[string]*coreSubPool[P, MC] // keyed by Address.String()
+	SubPools map[string]*CoreSubPool[P, MC] // keyed by Address.String()
 
 	closeOnce    sync.Once
 	closed       chan struct{}
 	tickerPeriod atomic.Int64 // nanoseconds; 0 → defaultManagedPoolTickerPeriod; test seam
 }
 
-func (mp *managedCore[P, MC, C, R]) snapshotActive() []Address {
-	mp.mu.RLock()
-	defer mp.mu.RUnlock()
+// SnapshotActive returns a copy of the current active address set, taken
+// under the read lock so a caller can range over it without holding one.
+func (mp *ManagedCore[P, MC, C, R]) SnapshotActive() []Address {
+	mp.Mu.RLock()
+	defer mp.Mu.RUnlock()
 	out := make([]Address, 0, len(mp.addrs))
 	for _, a := range mp.addrs {
-		if s, ok := mp.subPools[a.String()]; ok && s.draining {
+		if s, ok := mp.SubPools[a.String()]; ok && s.draining {
 			continue
 		}
 		out = append(out, a)
@@ -106,16 +111,15 @@ func (mp *managedCore[P, MC, C, R]) snapshotActive() []Address {
 	return out
 }
 
-// getOrCreateSubPool returns the sub-pool for addr, creating it lazily under the
+// GetOrCreateSubPool returns the sub-pool for addr, creating it lazily under the
 // write lock if absent. Returns nil if the pool is closed or the sub-pool is
 // draining (TOCTOU guard for acquire failover).
-
-func (mp *managedCore[P, MC, C, R]) getOrCreateSubPool(addr Address) *coreSubPool[P, MC] {
+func (mp *ManagedCore[P, MC, C, R]) GetOrCreateSubPool(addr Address) *CoreSubPool[P, MC] {
 	key := addr.String()
-	mp.mu.RLock()
-	s, ok := mp.subPools[key]
+	mp.Mu.RLock()
+	s, ok := mp.SubPools[key]
 	isDraining := ok && s.draining
-	mp.mu.RUnlock()
+	mp.Mu.RUnlock()
 	if ok && !isDraining {
 		return s
 	}
@@ -123,32 +127,31 @@ func (mp *managedCore[P, MC, C, R]) getOrCreateSubPool(addr Address) *coreSubPoo
 		return nil
 	}
 
-	mp.mu.Lock()
-	defer mp.mu.Unlock()
+	mp.Mu.Lock()
+	defer mp.Mu.Unlock()
 	select {
 	case <-mp.closed:
 		return nil
 	default:
 	}
-	if s, ok := mp.subPools[key]; ok {
+	if s, ok := mp.SubPools[key]; ok {
 		if s.draining {
 			return nil
 		}
 		return s
 	}
-	s = &coreSubPool[P, MC]{
+	s = &CoreSubPool[P, MC]{
 		p:    mp.newSub(key),
 		addr: addr,
 	}
-	mp.subPools[key] = s
+	mp.SubPools[key] = s
 	return s
 }
 
-// acquire picks an address via Selector, acquires from its sub-pool, and returns
-// the h3Client + release closure. On dial-only errors it iterates through the
+// Acquire picks an address via Selector, acquires from its sub-pool, and returns
+// the protocol connection plus its release handle. On dial-only errors it iterates through the
 // remaining addresses (bounded by active set size).
-
-func (mp *managedCore[P, MC, C, R]) acquire(ctx context.Context) (C, R, Address, error) {
+func (mp *ManagedCore[P, MC, C, R]) Acquire(ctx context.Context) (C, R, Address, error) {
 	var zeroC C
 	var zeroR R
 	var zeroA Address
@@ -161,7 +164,7 @@ func (mp *managedCore[P, MC, C, R]) acquire(ctx context.Context) (C, R, Address,
 	// result exists, and a pool that times out under load is exactly the case
 	// worth attributing.
 	for {
-		set := mp.snapshotActive()
+		set := mp.SnapshotActive()
 		if len(tried) > 0 {
 			pruned := set[:0]
 			for _, a := range set {
@@ -181,12 +184,12 @@ func (mp *managedCore[P, MC, C, R]) acquire(ctx context.Context) (C, R, Address,
 		if err != nil {
 			return zeroC, zeroR, zeroA, err
 		}
-		sub := mp.getOrCreateSubPool(addr)
+		sub := mp.GetOrCreateSubPool(addr)
 		if sub == nil {
 			tried[addr.String()] = struct{}{}
 			continue
 		}
-		mc, err := sub.p.acquire(ctx)
+		mc, err := sub.p.Acquire(ctx)
 		if err == nil {
 			// The address is returned rather than left inside the pool because
 			// it is the one fact a managed request cannot recover afterwards:
@@ -195,7 +198,7 @@ func (mp *managedCore[P, MC, C, R]) acquire(ctx context.Context) (C, R, Address,
 			// response to the backend that produced it.
 			return mp.connOf(mc), mp.mkRelease(sub.p, mc), addr, nil
 		}
-		if !isDialOnlyErr(err) {
+		if !IsDialOnlyErr(err) {
 			return zeroC, zeroR, addr, err
 		}
 		lastErr = err
@@ -204,11 +207,10 @@ func (mp *managedCore[P, MC, C, R]) acquire(ctx context.Context) (C, R, Address,
 	}
 }
 
-// run is the Watch consumer goroutine. Subscribes to Resolver.Watch and applies
-// address-set updates until the h3ManagedPool is closed. Falls back to ticker mode
+// Run is the Watch consumer goroutine. Subscribes to Resolver.Watch and applies
+// address-set updates until the pool is closed. Falls back to ticker mode
 // when Watch returns ErrWatchUnsupported.
-
-func (mp *managedCore[P, MC, C, R]) run() {
+func (mp *ManagedCore[P, MC, C, R]) Run() {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	go func() {
@@ -237,8 +239,7 @@ func (mp *managedCore[P, MC, C, R]) run() {
 
 // runTicker polls Resolver.Resolve at tickerPeriod cadence and applies the result
 // as if it were a Watch update.
-
-func (mp *managedCore[P, MC, C, R]) runTicker(ctx context.Context) {
+func (mp *ManagedCore[P, MC, C, R]) runTicker(ctx context.Context) {
 	period := time.Duration(mp.tickerPeriod.Load())
 	if period <= 0 {
 		period = defaultManagedPoolTickerPeriod
@@ -259,20 +260,19 @@ func (mp *managedCore[P, MC, C, R]) runTicker(ctx context.Context) {
 	}
 }
 
-// stats aggregates Stats across all sub-pools (active and draining).
-
-func (mp *managedCore[P, MC, C, R]) stats() Stats {
-	mp.mu.RLock()
-	pools := make([]P, 0, len(mp.subPools))
+// Stats aggregates Stats across all sub-pools (active and draining).
+func (mp *ManagedCore[P, MC, C, R]) Stats() Stats {
+	mp.Mu.RLock()
+	pools := make([]P, 0, len(mp.SubPools))
 	var drainingCount int
-	for _, s := range mp.subPools {
+	for _, s := range mp.SubPools {
 		pools = append(pools, s.p)
 		if s.draining {
 			drainingCount++
 		}
 	}
 	addrCount := len(mp.addrs)
-	mp.mu.RUnlock()
+	mp.Mu.RUnlock()
 
 	var out Stats
 	out.Addresses = addrCount
@@ -290,9 +290,8 @@ func (mp *managedCore[P, MC, C, R]) stats() Stats {
 // applySet diffs old vs new active address set. Additions are no-ops (sub-pools
 // dial lazily on Acquire). Removals mark sub-pools as draining and dispatch drain
 // logic. Fires OnResolverUpdate when the set changes.
-
-func (mp *managedCore[P, MC, C, R]) applySet(next []Address) {
-	mp.mu.Lock()
+func (mp *ManagedCore[P, MC, C, R]) applySet(next []Address) {
+	mp.Mu.Lock()
 	prev := make(map[string]struct{}, len(mp.addrs))
 	for _, a := range mp.addrs {
 		prev[a.String()] = struct{}{}
@@ -301,7 +300,7 @@ func (mp *managedCore[P, MC, C, R]) applySet(next []Address) {
 	for _, a := range next {
 		nextSet[a.String()] = struct{}{}
 	}
-	var toDrain []*coreSubPool[P, MC]
+	var toDrain []*CoreSubPool[P, MC]
 	added := make([]Address, 0, len(next))
 	removed := make([]Address, 0, len(mp.addrs))
 	for _, a := range next {
@@ -317,7 +316,7 @@ func (mp *managedCore[P, MC, C, R]) applySet(next []Address) {
 		// is safe against a DrainGraceful watchDrain still polling this
 		// sub-pool: that goroutine re-checks draining before dropping, and
 		// dropSubPool only deletes the registry entry it was called for.
-		if s, ok := mp.subPools[a.String()]; ok && s.draining {
+		if s, ok := mp.SubPools[a.String()]; ok && s.draining {
 			s.draining = false
 		}
 	}
@@ -326,32 +325,27 @@ func (mp *managedCore[P, MC, C, R]) applySet(next []Address) {
 			continue
 		}
 		removed = append(removed, a)
-		if s, ok := mp.subPools[a.String()]; ok && !s.draining {
+		if s, ok := mp.SubPools[a.String()]; ok && !s.draining {
 			s.draining = true
 			toDrain = append(toDrain, s)
 		}
 	}
 	mp.addrs = append(mp.addrs[:0:0], next...)
 	total := len(next)
-	mp.mu.Unlock()
+	mp.Mu.Unlock()
 
 	for _, s := range toDrain {
 		mp.beginDrain(s)
 	}
 	if len(added) > 0 || len(removed) > 0 {
-		if hr := mp.hooksRef; hr != nil {
-			if h := hr.Load(); h != nil && h.OnResolverUpdate != nil {
-				h.OnResolverUpdate(ResolverUpdateEvent{
-					Added: added, Removed: removed, Total: total,
-				})
-			}
-		}
+		mp.obs.OnResolverUpdate(ResolverUpdateEvent{
+			Added: added, Removed: removed, Total: total,
+		})
 	}
 }
 
 // beginDrain dispatches per-mode drain logic for a removed sub-pool.
-
-func (mp *managedCore[P, MC, C, R]) beginDrain(s *coreSubPool[P, MC]) {
+func (mp *ManagedCore[P, MC, C, R]) beginDrain(s *CoreSubPool[P, MC]) {
 	switch mp.drainMode {
 	case DrainHard:
 		mp.dropSubPool(s, true)
@@ -364,8 +358,7 @@ func (mp *managedCore[P, MC, C, R]) beginDrain(s *coreSubPool[P, MC]) {
 
 // watchDrain polls the sub-pool's Stats with exponential back-off. Once
 // InFlightStreams == 0 it closes and removes the sub-pool from the registry.
-
-func (mp *managedCore[P, MC, C, R]) watchDrain(s *coreSubPool[P, MC]) {
+func (mp *ManagedCore[P, MC, C, R]) watchDrain(s *CoreSubPool[P, MC]) {
 	const (
 		drainPollInit = 20 * time.Millisecond
 		drainPollMax  = 5 * time.Second
@@ -395,16 +388,15 @@ func (mp *managedCore[P, MC, C, R]) watchDrain(s *coreSubPool[P, MC]) {
 }
 
 // dropSubPool removes s from the registry and optionally closes it.
-
-func (mp *managedCore[P, MC, C, R]) dropSubPool(s *coreSubPool[P, MC], doClose bool) {
-	mp.mu.Lock()
+func (mp *ManagedCore[P, MC, C, R]) dropSubPool(s *CoreSubPool[P, MC], doClose bool) {
+	mp.Mu.Lock()
 	// Identity-checked: deleting by key alone would remove whatever sub-pool
 	// currently holds this address, which after a remove/re-add flap is a
 	// different, live one.
-	if cur, ok := mp.subPools[s.addr.String()]; ok && cur == s {
-		delete(mp.subPools, s.addr.String())
+	if cur, ok := mp.SubPools[s.addr.String()]; ok && cur == s {
+		delete(mp.SubPools, s.addr.String())
 	}
-	mp.mu.Unlock()
+	mp.Mu.Unlock()
 	if doClose {
 		_ = s.p.Close()
 	}
@@ -417,55 +409,52 @@ func (mp *managedCore[P, MC, C, R]) dropSubPool(s *coreSubPool[P, MC], doClose b
 // The check and the delete are under one lock deliberately. A watcher that
 // tested "still draining?" and then called an unguarded drop would leave a
 // window for applySet to revive the address in between, and the drop would
-// close a sub-pool serving a live address.
-
-func (mp *managedCore[P, MC, C, R]) dropIfDraining(s *coreSubPool[P, MC]) bool {
-	mp.mu.Lock()
-	cur, ok := mp.subPools[s.addr.String()]
+// Close a sub-pool serving a live address.
+func (mp *ManagedCore[P, MC, C, R]) dropIfDraining(s *CoreSubPool[P, MC]) bool {
+	mp.Mu.Lock()
+	cur, ok := mp.SubPools[s.addr.String()]
 	if !ok || cur != s || !s.draining {
-		mp.mu.Unlock()
+		mp.Mu.Unlock()
 		return false
 	}
-	delete(mp.subPools, s.addr.String())
-	mp.mu.Unlock()
+	delete(mp.SubPools, s.addr.String())
+	mp.Mu.Unlock()
 	_ = s.p.Close()
 	return true
 }
 
-// close stops the h3ManagedPool and closes every sub-pool. Idempotent.
-
-func (mp *managedCore[P, MC, C, R]) close() error {
+// Close stops the pool and closes every sub-pool. Idempotent.
+func (mp *ManagedCore[P, MC, C, R]) Close() error {
 	mp.closeOnce.Do(func() {
 		close(mp.closed)
-		mp.mu.Lock()
-		defer mp.mu.Unlock()
-		for _, s := range mp.subPools {
+		mp.Mu.Lock()
+		defer mp.Mu.Unlock()
+		for _, s := range mp.SubPools {
 			_ = s.p.Close()
 		}
-		mp.subPools = nil
+		mp.SubPools = nil
 		mp.addrs = nil
 	})
 	return nil
 }
 
-// warmup pre-dials up to n conns distributed across the current set of resolved
+// Warmup pre-dials up to n conns distributed across the current set of resolved
 // addresses. n is capped at MaxConnsPerHost per sub-pool.
-
-func (mp *managedCore[P, MC, C, R]) warmup(n int) {
+func (mp *ManagedCore[P, MC, C, R]) Warmup(n int) {
 	if n <= 0 {
 		return
 	}
-	// Build the sub-pools from the resolved ADDRESS set, not from mp.subPools.
+	// Build the sub-pools from the resolved ADDRESS set, not from mp.SubPools.
 	// subPools is populated lazily by getOrCreateSubPool, on the first acquire for an
 	// address — so on a freshly constructed pool it is empty, this used to take
 	// the len(subs)==0 early return, and Warmup pre-dialled nothing at all. The
 	// whole point of a warmup is to run before the first request.
-	mp.mu.RLock()
+	mp.Mu.RLock()
 	addrs := append([]Address(nil), mp.addrs...)
-	mp.mu.RUnlock()
-	subs := make([]*coreSubPool[P, MC], 0, len(addrs))
+	mp.Mu.RUnlock()
+	subs := make([]*CoreSubPool[P, MC], 0, len(addrs))
 	for _, a := range addrs {
-		if s := mp.getOrCreateSubPool(a); s != nil {
+		if s := mp.GetOrCreateSubPool(a); s != nil {
 			subs = append(subs, s)
 		}
 	}
@@ -474,6 +463,93 @@ func (mp *managedCore[P, MC, C, R]) warmup(n int) {
 	}
 	per := (n + len(subs) - 1) / len(subs)
 	for _, s := range subs {
-		s.p.warmup(per)
+		s.p.Warmup(per)
 	}
+}
+
+// CoreConfig is everything a ManagedCore needs at construction. The three
+// function fields are the only places the HTTP/1.1, HTTP/2 and HTTP/3 managed
+// pools actually differ; everything above them was byte-identical in all three.
+type CoreConfig[P SubPoolBackend[MC], MC any, C any, R any] struct {
+	Resolver  Resolver
+	Selector  Selector
+	DrainMode DrainMode
+	PoolOpts  PoolOptions
+	Obs       pool.Observer
+	Rec       pool.Recorder
+
+	// NewSub builds the per-address sub-pool for key.
+	//
+	// Its closure must capture the SAME Recorder this config carries. Each
+	// pool constructor substitutes a fresh recorder for a nil one, so letting
+	// every sub-pool default independently would under-count the caller's
+	// metrics with the whole suite green.
+	NewSub func(key string) P
+	// ConnOf extracts the protocol connection from a sub-pool's record.
+	ConnOf func(MC) C
+	// MkRelease builds the release handle handed back with an acquire.
+	MkRelease func(P, MC) R
+}
+
+// NewCore builds a ManagedCore and seeds it with the resolver's current answer,
+// without starting its goroutine — the caller starts Run when it is ready. It
+// reports the resolver's error only when that answer is also empty, so a
+// partially failing resolver still produces a usable pool.
+func NewCore[P SubPoolBackend[MC], MC any, C any, R any](cfg CoreConfig[P, MC, C, R]) (*ManagedCore[P, MC, C, R], error) {
+	if cfg.Selector == nil {
+		cfg.Selector = RoundRobin()
+	}
+	if cfg.Obs == nil {
+		cfg.Obs = pool.NopObserver{}
+	}
+	if cfg.Rec == nil {
+		cfg.Rec = pool.NopRecorder{}
+	}
+	mp := &ManagedCore[P, MC, C, R]{
+		resolver:  cfg.Resolver,
+		selector:  cfg.Selector,
+		drainMode: cfg.DrainMode,
+		poolOpts:  cfg.PoolOpts,
+		obs:       cfg.Obs,
+		rec:       cfg.Rec,
+		newSub:    cfg.NewSub,
+		connOf:    cfg.ConnOf,
+		mkRelease: cfg.MkRelease,
+		SubPools:  make(map[string]*CoreSubPool[P, MC]),
+		closed:    make(chan struct{}),
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	addrs, err := cfg.Resolver.Resolve(ctx)
+	if err != nil && len(addrs) == 0 {
+		return nil, err
+	}
+	mp.addrs = addrs
+	return mp, nil
+}
+
+// SetTickerPeriod overrides the sweep interval. A test seam: it must be called
+// before Run, which is the only reader that latches it.
+func (mp *ManagedCore[P, MC, C, R]) SetTickerPeriod(d time.Duration) {
+	mp.tickerPeriod.Store(int64(d))
+}
+
+// The accessors below are the read seams the per-protocol managed pools' tests
+// use. They exist rather than exported fields because every one of these is
+// guarded state: mu covers addrs and subPools, and handing a test the mutex
+// would make the locking discipline the test's problem.
+
+// Resolver returns the resolver this core was built with.
+func (mp *ManagedCore[P, MC, C, R]) Resolver() Resolver { return mp.resolver }
+
+// DrainMode returns the drain mode this core was built with.
+func (mp *ManagedCore[P, MC, C, R]) DrainMode() DrainMode { return mp.drainMode }
+
+// HasSubPool reports whether a sub-pool is currently registered for key, which
+// is Address.String() of the address it serves.
+func (mp *ManagedCore[P, MC, C, R]) HasSubPool(key string) bool {
+	mp.Mu.RLock()
+	defer mp.Mu.RUnlock()
+	_, ok := mp.SubPools[key]
+	return ok
 }

@@ -32,10 +32,10 @@ func TestH1ManagedPool_DrainLazy_RemovedAddress_RetainsSubPool(t *testing.T) {
 		PoolOptions{MaxConnsPerHost: 1, HealthCheckPeriod: 100 * time.Millisecond},
 		nil, nil)
 	require.NoError(t, err, "newH1ManagedPool")
-	defer func() { _ = mp.close() }()
+	defer func() { _ = mp.Close() }()
 	// Seed both sub-pools so the removal has a live one to mark draining.
 	for i := 0; i < 2; i++ {
-		_, rel, _, err := mp.acquire(context.Background())
+		_, rel, _, err := mp.Acquire(context.Background())
 		require.NoErrorf(t, err, "seed acquire %d", i)
 		rel(true)
 	}
@@ -43,18 +43,18 @@ func TestH1ManagedPool_DrainLazy_RemovedAddress_RetainsSubPool(t *testing.T) {
 	res.push([]Address{addrs[1]})
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
-		if len(mp.snapshotActive()) == 1 {
+		if len(mp.SnapshotActive()) == 1 {
 			break
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
 
-	require.Lenf(t, mp.snapshotActive(), 1,
-		"active set = %d after removal, want 1", len(mp.snapshotActive()))
+	require.Lenf(t, mp.SnapshotActive(), 1,
+		"active set = %d after removal, want 1", len(mp.SnapshotActive()))
 	// The point: DrainLazy retains. DrainHard is what drops immediately.
-	mp.mu.RLock()
-	_, present := mp.subPools[addrs[0].String()]
-	mp.mu.RUnlock()
+	mp.Mu.RLock()
+	_, present := mp.SubPools[addrs[0].String()]
+	mp.Mu.RUnlock()
 	assert.True(t, present,
 		"DrainLazy dropped the sub-pool immediately; that is DrainHard's behaviour")
 }
@@ -78,9 +78,9 @@ func TestH3ManagedPool_DrainLazy_RemovedAddress_RetainsSubPool(t *testing.T) {
 		PoolOptions{MaxConnsPerHost: 1, MaxStreamsPerConn: 4, HealthCheckPeriod: 100 * time.Millisecond},
 		d.dial, nil, nil)
 	require.NoError(t, err, "newH3ManagedPool")
-	defer func() { _ = mp.close() }()
+	defer func() { _ = mp.Close() }()
 	for i := 0; i < 2; i++ {
-		_, rel, _, err := mp.acquire(context.Background())
+		_, rel, _, err := mp.Acquire(context.Background())
 		require.NoErrorf(t, err, "seed acquire %d", i)
 		rel()
 	}
@@ -88,17 +88,17 @@ func TestH3ManagedPool_DrainLazy_RemovedAddress_RetainsSubPool(t *testing.T) {
 	res.push([]Address{addrs[1]})
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
-		if len(mp.snapshotActive()) == 1 {
+		if len(mp.SnapshotActive()) == 1 {
 			break
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
 
-	require.Lenf(t, mp.snapshotActive(), 1,
-		"active set = %d after removal, want 1", len(mp.snapshotActive()))
-	mp.mu.RLock()
-	_, present := mp.subPools[addrs[0].String()]
-	mp.mu.RUnlock()
+	require.Lenf(t, mp.SnapshotActive(), 1,
+		"active set = %d after removal, want 1", len(mp.SnapshotActive()))
+	mp.Mu.RLock()
+	_, present := mp.SubPools[addrs[0].String()]
+	mp.Mu.RUnlock()
 	assert.True(t, present,
 		"DrainLazy dropped the sub-pool immediately; that is DrainHard's behaviour")
 }

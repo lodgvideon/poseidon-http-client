@@ -233,7 +233,7 @@ func TestHooks_OnDial(t *testing.T) {
 	// typed nil stored in the interface, which is exactly the shape a hook that
 	// reports a (*someError)(nil) would produce.
 	assert.Truef(t, dialErr.Load() == nil,
-		"DialEvent.Err = %v on a dial that succeeded", dialErr.Load())
+		"DialEvent.err = %v on a dial that succeeded", dialErr.Load())
 }
 
 func TestHooks_OnConnClose_Idle(t *testing.T) {

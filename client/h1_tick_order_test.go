@@ -53,7 +53,7 @@ func TestH1Pool_Tick_SweepsIdleBeforeDead(t *testing.T) {
 		IdleTimeout: time.Millisecond,
 	}, hp, nil)
 	defer func() { _ = p.Close() }()
-	mc, err := p.acquire(context.Background())
+	mc, err := p.Acquire(context.Background())
 	require.NoError(t, err, "acquire")
 	p.release(mc, true)
 	// Wait for the actor to record the release BEFORE killing the conn. Doing

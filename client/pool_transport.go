@@ -34,15 +34,15 @@ func newPoolTransportFromPool(p *Pool) *poolTransport {
 // also skip dead conns via pickLeastLoaded's IsAlive() guard, so a
 // transient dead conn won't be picked between ticks.
 func (pt *poolTransport) openExchange(ctx context.Context) (protoStream, pushLookuper, releaser, exchangeStats, error) {
-	st := exchangeStats{Proto: trace.ProtoH2, RemoteAddr: pt.p.addr}
-	mc, err := pt.p.acquire(ctx)
+	st := exchangeStats{Proto: trace.ProtoH2, RemoteAddr: pt.p.Addr}
+	mc, err := pt.p.Acquire(ctx)
 	if err != nil {
 		return nil, nil, nil, st, err
 	}
-	cn := mc.c
+	cn := mc.C
 	stream, serr := cn.NewStream(ctx)
 	if serr != nil {
-		pt.p.release(mc)
+		pt.p.Release(mc)
 		return nil, nil, nil, st, serr
 	}
 	// mc IS the releaser: it already exists on the heap and knows its pool,
@@ -66,5 +66,5 @@ func (pt *poolTransport) shutdown(gracefulTimeout time.Duration) error {
 // warmup implements transport.warmup. Pre-dials up to n conns into
 // the pool. Errors are recorded via the pool's OnDial hook.
 func (pt *poolTransport) warmup(n int) {
-	pt.p.warmup(n)
+	pt.p.Warmup(n)
 }

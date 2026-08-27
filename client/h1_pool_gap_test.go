@@ -289,7 +289,7 @@ func TestH1Pool_CloseDuringHealthSweep_ClosesEachConnExactlyOnce(t *testing.T) {
 		MaxConnsPerHost:   2,
 		HealthCheckPeriod: 20 * time.Millisecond,
 	}, tl.ref, tl.metrics)
-	mc, err := p.acquire(context.Background())
+	mc, err := p.Acquire(context.Background())
 	require.NoError(t, err, "seed acquire")
 	p.release(mc, true)
 	select {

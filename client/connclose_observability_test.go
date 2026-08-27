@@ -100,7 +100,7 @@ func TestH1SingleConn_CloseIsObservable(t *testing.T) {
 	defer cancel()
 	_, _, release, _, err := s.openExchange(ctx)
 	require.NoError(t, err, "openExchange")
-	release.release()
+	release.Release()
 
 	_ = s.close()
 

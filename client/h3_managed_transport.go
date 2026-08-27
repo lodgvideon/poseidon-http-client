@@ -19,7 +19,7 @@ type h3ManagedTransport struct {
 // disabled).
 func (mt *h3ManagedTransport) openExchange(ctx context.Context) (protoStream, pushLookuper, releaser, exchangeStats, error) {
 	st := exchangeStats{Proto: trace.ProtoH3}
-	cl, release, addr, err := mt.mp.acquire(ctx)
+	cl, release, addr, err := mt.mp.Acquire(ctx)
 	// Before the error check; see managedTransport.openExchange.
 	st.RemoteAddr = addrString(addr)
 	if err != nil {
@@ -30,17 +30,17 @@ func (mt *h3ManagedTransport) openExchange(ctx context.Context) (protoStream, pu
 
 // close implements transport.close. Idempotent.
 func (mt *h3ManagedTransport) close() error {
-	return mt.mp.close()
+	return mt.mp.Close()
 }
 
 // shutdown implements transport.shutdown. Closes the underlying managed pool.
 func (mt *h3ManagedTransport) shutdown(gracefulTimeout time.Duration) error {
 	_ = gracefulTimeout
-	return mt.mp.close()
+	return mt.mp.Close()
 }
 
 // warmup implements transport.warmup. Fans out pre-dial across the current set of
 // resolved addresses.
 func (mt *h3ManagedTransport) warmup(n int) {
-	mt.mp.warmup(n)
+	mt.mp.Warmup(n)
 }

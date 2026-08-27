@@ -56,20 +56,20 @@ func (c *Client) beginStreaming(ctx context.Context, s protoStream, rel releaser
 	rs, err := beginRespStream(ctx, s)
 	if err != nil {
 		_ = s.Close()
-		rel.release()
+		rel.Release()
 		return time.Time{}, preferSendCut(err, sendCut)
 	}
 	ev, err := recvFinalHeaders(ctx, rs)
 	if err != nil {
 		_ = rs.Close()
-		rel.release()
+		rel.Release()
 		return time.Time{}, preferSendCut(err, sendCut)
 	}
 	headersAt := time.Now()
 	status, perr := parseStatus(ev.Headers, target.headersOut())
 	if perr != nil {
 		_ = rs.Close()
-		rel.release()
+		rel.Release()
 		return headersAt, perr
 	}
 	target.beginResponse(ctx, rs, rel, status, ev.Block, ev.EndStream)

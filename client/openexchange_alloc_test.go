@@ -54,7 +54,7 @@ func TestPoolTransport_OpenExchangeAllocs(t *testing.T) {
 	s, _, release, _, err := pt.openExchange(ctx)
 	require.NoError(t, err, "warm-up openExchange")
 	_ = s.Close()
-	release.release()
+	release.Release()
 
 	n := testing.AllocsPerRun(200, func() {
 		st, _, rel, _, oerr := pt.openExchange(ctx)
@@ -64,7 +64,7 @@ func TestPoolTransport_OpenExchangeAllocs(t *testing.T) {
 			t.Fatalf("openExchange: %v", oerr)
 		}
 		_ = st.Close()
-		rel.release()
+		rel.Release()
 	})
 
 	// Lower this when the number improves, as the other absolute gates in this

@@ -80,7 +80,18 @@ var (
 	ErrNoAddresses = pool.ErrNoAddresses
 	// ErrNilKeyFn is returned by Hash when keyFn is nil.
 	ErrNilKeyFn = pool.ErrNilKeyFn
+	// ErrPoolClosed is returned by Pool operations after Close.
+	ErrPoolClosed = pool.ErrPoolClosed
+	// ErrAcquireTimeout is returned when PoolOptions.AcquireTimeout elapses
+	// before capacity becomes available.
+	ErrAcquireTimeout = pool.ErrAcquireTimeout
+	// ErrDialBackoff is returned when a recent dial failure on the pool is
+	// still within the DialBackoff window.
+	ErrDialBackoff = pool.ErrDialBackoff
 )
+
+// DialError wraps the underlying dial error and the address that failed.
+type DialError = pool.DialError
 
 // StaticResolver returns a Resolver serving a fixed address set.
 func StaticResolver(addrs ...Address) Resolver { return pool.StaticResolver(addrs...) }

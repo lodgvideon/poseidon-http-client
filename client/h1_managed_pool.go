@@ -7,17 +7,12 @@
 package client
 
 import (
-	"context"
 	"sync/atomic"
 
 	"github.com/lodgvideon/poseidon-http-client/conn"
 	"github.com/lodgvideon/poseidon-http-client/http1"
+	"github.com/lodgvideon/poseidon-http-client/internal/poolcore"
 )
-
-// h1SubPoolState is the HTTP/1.1 instantiation of the core's per-address record.
-// An alias, not a wrapper: the pinned behaviour tests index mp.subPools and read
-// these fields directly.
-type h1SubPoolState = coreSubPool[*h1Pool, *h1ManagedConn]
 
 // h1ManagedPool fans Acquire across per-address HTTP/1.1 sub-pools driven by a
 // Resolver and Selector. Goroutine-safe.
@@ -42,7 +37,7 @@ func newH1ManagedPool(r Resolver, s Selector, dm DrainMode, dialer conn.Dialer, 
 	if err != nil {
 		return nil, err
 	}
-	go mp.run()
+	go mp.Run()
 	return mp, nil
 }
 
@@ -50,40 +45,21 @@ func newH1ManagedPool(r Resolver, s Selector, dm DrainMode, dialer conn.Dialer, 
 // its background goroutine. Tests that need to configure fields (e.g.
 // tickerPeriod) before the goroutine reads them call this and start it themselves.
 func buildH1ManagedPool(r Resolver, s Selector, dm DrainMode, dialer conn.Dialer, po PoolOptions, hooksRef *atomic.Pointer[Hooks], metrics *Metrics) (*h1ManagedPool, error) {
-	if s == nil {
-		s = RoundRobin()
-	}
-	if metrics == nil {
-		metrics = &Metrics{}
-	}
-	mp := &h1ManagedPool{
-		resolver:  r,
-		selector:  s,
-		drainMode: dm,
-		poolOpts:  po,
-		hooksRef:  hooksRef,
-		metrics:   metrics,
-		subPools:  make(map[string]*h1SubPoolState),
-		closed:    make(chan struct{}),
+	return poolcore.NewCore(poolcore.CoreConfig[*h1Pool, *h1ManagedConn, *http1.Conn, func(bool)]{
+		Resolver: r, Selector: s, DrainMode: dm, PoolOpts: po,
+		Obs: observerFor(hooksRef), Rec: recorderFor(metrics),
 
 		// The three measured differences, as closures rather than branches.
-		// metrics is captured deliberately: newH1Pool defaults a nil *Metrics to a
-		// fresh struct of its own, so letting each sub-pool default independently
-		// would under-count Client.Metrics() with the whole suite green.
-		newSub: func(key string) *h1Pool {
+		// metrics is captured deliberately: newH1Pool defaults a nil *Metrics to
+		// a fresh struct of its own, so letting each sub-pool default
+		// independently would under-count Client.Metrics() with the whole suite
+		// green.
+		NewSub: func(key string) *h1Pool {
 			return newH1Pool(key, dialer, po, hooksRef, metrics)
 		},
-		connOf: func(mc *h1ManagedConn) *http1.Conn { return mc.c },
-		mkRelease: func(p *h1Pool, mc *h1ManagedConn) func(keepAlive bool) {
+		ConnOf: func(mc *h1ManagedConn) *http1.Conn { return mc.c },
+		MkRelease: func(p *h1Pool, mc *h1ManagedConn) func(bool) {
 			return func(keepAlive bool) { p.release(mc, keepAlive) }
 		},
-	}
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	addrs, err := r.Resolve(ctx)
-	if err != nil && len(addrs) == 0 {
-		return nil, err
-	}
-	mp.addrs = addrs
-	return mp, nil
+	})
 }

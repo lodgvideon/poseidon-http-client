@@ -36,13 +36,13 @@ func TestManagedPool_FailsOverOnFirstDialFailure(t *testing.T) {
 		nil, nil,
 	)
 	require.NoError(t, err, "newManagedPool")
-	defer mp.close()
+	defer mp.Close()
 
 	// RoundRobin starts on the dead address, so the loop must reach the live
 	// one inside this single acquire.
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
-	c, release, _, err := mp.acquire(ctx)
+	c, release, _, err := mp.Acquire(ctx)
 
 	require.NoErrorf(t, err,
 		"acquire = %v; a live second address was available, so the loop stopped on the dead one", err)
@@ -65,7 +65,7 @@ func TestPool_DialFailureIsTypedForClassification(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	_, err := p.acquire(ctx)
+	_, err := p.Acquire(ctx)
 
 	require.Error(t, err, "acquire succeeded against a dialer that refuses everything")
 	var de *DialError
@@ -106,7 +106,7 @@ func TestH3Pool_DialFailureIsTypedForClassification(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	_, err := p.acquire(ctx)
+	_, err := p.Acquire(ctx)
 
 	require.Error(t, err, "acquire succeeded against a dialer that refuses everything")
 	var de *DialError

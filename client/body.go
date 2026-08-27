@@ -172,7 +172,7 @@ func (r *responseBodyReader) Close() error {
 		// afterwards sees closed and hands its own slab straight back.
 		r.recycleDataLocked()
 		r.mu.Unlock()
-		r.release.release()
+		r.release.Release()
 	})
 	return err
 }

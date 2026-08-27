@@ -555,7 +555,7 @@ func (p *h1Pool) pickIdle(conns []*h1ManagedConn) *h1ManagedConn {
 
 // dialEnv snapshots what dialAttempt needs from this pool.
 func (p *h1Pool) dialEnv() dialEnv {
-	return dialEnv{closedCh: p.closedCh, timeout: p.opts.DialTimeout, addr: p.addr, metrics: p.metrics, hooksRef: p.hooksRef}
+	return dialEnv{ClosedCh: p.closedCh, Timeout: p.opts.DialTimeout, Addr: p.addr, Rec: recorderFor(p.metrics), Obs: observerFor(p.hooksRef)}
 }
 
 // dialOne dials one conn and delivers it to the actor. The ALPN assertion runs
@@ -891,7 +891,7 @@ func h1PruneExpiredWaiters(ws []h1AcquireReq) []h1AcquireReq {
 // It is what closes the response-queue poisoning that the completion-time check
 // structurally cannot see: octets that arrive AFTER a response was fully read
 // are not in the reader, so only asking the socket at checkout finds them.
-func (p *h1Pool) acquire(ctx context.Context) (*h1ManagedConn, error) {
+func (p *h1Pool) Acquire(ctx context.Context) (*h1ManagedConn, error) {
 	// Bounded: each rejected connection is evicted, so the pool cannot hand out
 	// the same bad one twice, and one extra attempt per possible conn is enough.
 	for attempt := 0; attempt <= p.opts.MaxConnsPerHost; attempt++ {
@@ -1034,7 +1034,7 @@ const h1WarmupProbeTimeout = 50 * time.Millisecond
 // directly on actor state, while this pool warms through acquire on purpose, to
 // get exclusive checkout. Calling acquire from inside the actor would deadlock
 // against the actor that serves it.
-func (p *h1Pool) warmup(n int) {
+func (p *h1Pool) Warmup(n int) {
 	if n <= 0 {
 		return
 	}
@@ -1072,7 +1072,7 @@ func (p *h1Pool) warmupDials(n int) {
 		default:
 		}
 		ctx, cancel := context.WithTimeout(context.Background(), h1WarmupProbeTimeout)
-		mc, err := p.acquire(ctx)
+		mc, err := p.Acquire(ctx)
 		cancel()
 		if err != nil {
 			continue // dial still in flight or failed; it surfaces via OnDial

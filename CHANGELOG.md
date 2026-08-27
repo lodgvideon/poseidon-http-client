@@ -105,6 +105,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   This is the vocabulary only. The machinery — `Pool`, `managedCore` and the dial
   helpers — follows in its own change.
 
+- **The pool machinery moved to `internal/poolcore`.** `Pool`, the managed
+  address fan-out and the dial helpers all left `client`; the names the
+  transports and the three pools used are aliases now, so their call sites are
+  unchanged. `internal/` means the exported identifiers there are module-private
+  — the public API is the same size it was.
+
+  Observability crosses the new boundary as two interfaces, `pool.Observer` and
+  `pool.Recorder`, rather than as `Hooks` and `Metrics`. **The adapters allocate
+  nothing:** they are defined types over the existing ones, so `observerFor` and
+  `recorderFor` are pointer conversions and a nil becomes a zero-size nop. That
+  matters because one of them is on the acquire path —
+  `TestPoolTransport_OpenExchangeAllocs` drives a real pool through it and is
+  part of the CI allocation gate.
+
+  Two consequences worth knowing. An interface with an unexported method cannot
+  be satisfied from another package, so `releaser.release` became
+  `releaser.Release` and the sub-pool contract's `acquire`/`warmup` became
+  `Acquire`/`Warmup`; the semantics are untouched. And the identical
+  construction body the HTTP/1.1, HTTP/2 and HTTP/3 managed pools each carried
+  is now one `poolcore.NewCore` over a config — the three closures that were the
+  only measured difference between them stay per-protocol, which is the same
+  split `pool_shared.go` argues for.
+
+  The tests split along the same line: six files that only ever drove the
+  HTTP/2 pool moved with it, while the seven sibling-parity files stayed in
+  `client`, because their value is comparing all three pools in one table and
+  splitting them would destroy exactly the property they exist to catch. Those
+  drive the HTTP/2 actor directly, so `poolcore` exports its handlers and
+  message types for them — module-private, and the actor-ownership rule its
+  comments describe is now carried by review rather than by the compiler.
+
 - **`PickContext.Request` is removed.** It was documented as "the in-flight
   request if Pick is called from the Acquire path" and was never populated: the
   sole production caller passes the zero `PickContext` (`managed_core.go:180`).

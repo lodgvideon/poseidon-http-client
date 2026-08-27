@@ -114,7 +114,7 @@ type releaser interface {
 	// release returns the exchange's connection. It MUST be called exactly
 	// once, when the exchange is fully drained or has errored, and is safe to
 	// call from any goroutine.
-	release()
+	Release()
 }
 
 // noopReleaser is for transports that own their connection for their whole
@@ -122,7 +122,7 @@ type releaser interface {
 // converts to an interface without allocating, so noRelease is free to return.
 type noopReleaser struct{}
 
-func (noopReleaser) release() {}
+func (noopReleaser) Release() {}
 
 // noRelease is the shared value every no-op site returns.
 var noRelease releaser = noopReleaser{}
@@ -134,4 +134,4 @@ var noRelease releaser = noopReleaser{}
 // acquire helper's signature.
 type funcReleaser func()
 
-func (f funcReleaser) release() { f() }
+func (f funcReleaser) Release() { f() }

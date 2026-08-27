@@ -12,7 +12,7 @@ import (
 	"github.com/lodgvideon/poseidon-http-client/http3"
 )
 
-// pickLeastLoaded no longer scans the whole pool: it starts at a rotating cursor
+// PickLeastLoaded no longer scans the whole pool: it starts at a rotating cursor
 // and returns the first idle connection it meets, falling back to a full sweep
 // for the true minimum when nothing is idle.
 //
@@ -44,7 +44,7 @@ func h3Eligible(mc *h3ManagedConn) bool {
 }
 
 func h2Eligible(mc *managedConn) bool {
-	return mc.c.IsAlive() && mc.active < mc.streamCap
+	return mc.C.IsAlive() && mc.Active < mc.StreamCap
 }
 
 // TestPickLeastLoaded_ContractHolds is the property set, checked on 3,000
@@ -120,9 +120,9 @@ func TestPickLeastLoaded_H2ContractHolds(t *testing.T) {
 		conns := make([]*managedConn, 0, n)
 		for i := 0; i < n; i++ {
 			conns = append(conns, &managedConn{
-				c:         &conn.Conn{}, // hand-built: reads alive
-				active:    rng.Intn(4),
-				streamCap: rng.Intn(4),
+				C:         &conn.Conn{}, // hand-built: reads alive
+				Active:    rng.Intn(4),
+				StreamCap: rng.Intn(4),
 			})
 		}
 		anyEligible, anyIdle, minActive := false, false, 1<<30
@@ -131,15 +131,15 @@ func TestPickLeastLoaded_H2ContractHolds(t *testing.T) {
 				continue
 			}
 			anyEligible = true
-			if mc.active == 0 {
+			if mc.Active == 0 {
 				anyIdle = true
 			}
-			if mc.active < minActive {
-				minActive = mc.active
+			if mc.Active < minActive {
+				minActive = mc.Active
 			}
 		}
 
-		got := p.pickLeastLoaded(conns)
+		got := p.PickLeastLoaded(conns)
 
 		if got == nil {
 			require.Falsef(t, anyEligible,
@@ -148,11 +148,11 @@ func TestPickLeastLoaded_H2ContractHolds(t *testing.T) {
 		}
 		require.Truef(t, h2Eligible(got), "trial %d: returned an ineligible connection", trial)
 		if anyIdle {
-			require.Zerof(t, got.active,
+			require.Zerof(t, got.Active,
 				"trial %d: an idle connection existed but a busy one was returned", trial)
 		} else {
-			require.Equalf(t, minActive, got.active,
-				"trial %d: returned active=%d, want the minimum %d", trial, got.active, minActive)
+			require.Equalf(t, minActive, got.Active,
+				"trial %d: returned Active=%d, want the minimum %d", trial, got.Active, minActive)
 		}
 	}
 }
@@ -183,8 +183,8 @@ func TestPickLeastLoaded_RotatesAcrossIdleConns(t *testing.T) {
 
 // TestPickLeastLoaded_H2RotatesAcrossIdleConns is the same property for the
 // HTTP/2 pool, which had no rotation test at all: pinning the cursor assignment
-// in Pool.pickLeastLoaded left the whole client package green, while the same
-// mutation in h3Pool.pickLeastLoaded failed the test above (#655).
+// in Pool.PickLeastLoaded left the whole client package green, while the same
+// mutation in h3Pool.PickLeastLoaded failed the test above (#655).
 //
 // A frozen cursor still satisfies "return an idle connection when one exists",
 // which is all TestPickLeastLoaded_H2ContractHolds asserts, so the contract test
@@ -194,19 +194,19 @@ func TestPickLeastLoaded_RotatesAcrossIdleConns(t *testing.T) {
 // Only the fixture differs from the H3 twin: h3ManagedConn holds a mockable
 // h3Client, managedConn holds a concrete *conn.Conn whose liveness flags are
 // unexported, so a hand-built one reads alive — the same trick the H2 contract
-// test uses. What is asserted is what pickLeastLoaded's caller sees, the
+// test uses. What is asserted is what PickLeastLoaded's caller sees, the
 // connections it hands back, not p.pickCursor: the cursor is how the spread is
 // implemented, the spread is what is promised.
 func TestPickLeastLoaded_H2RotatesAcrossIdleConns(t *testing.T) {
 	p := &Pool{}
 	conns := make([]*managedConn, 4)
 	for i := range conns {
-		conns[i] = &managedConn{c: &conn.Conn{}, streamCap: 8}
+		conns[i] = &managedConn{C: &conn.Conn{}, StreamCap: 8}
 	}
 
 	seen := map[*managedConn]int{}
 	for i := 0; i < len(conns); i++ {
-		got := p.pickLeastLoaded(conns)
+		got := p.PickLeastLoaded(conns)
 		require.NotNilf(t, got, "pick %d returned nil", i)
 		seen[got]++
 	}

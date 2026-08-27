@@ -1,6 +1,9 @@
 package pool
 
-import "errors"
+import (
+	"errors"
+	"fmt"
+)
 
 // Sentinel errors returned by the resolution and selection vocabulary.
 //
@@ -21,4 +24,33 @@ var (
 
 	// ErrNilKeyFn is returned by Hash when keyFn is nil.
 	ErrNilKeyFn = errors.New("client: Hash selector requires a non-nil keyFn")
+)
+
+// DialError wraps the underlying dial error and the address that
+// failed. Returned from Do/DoStream when the lazy dial fails.
+type DialError struct {
+	Addr string
+	Err  error
+}
+
+// Error implements the error interface.
+func (e *DialError) Error() string {
+	return fmt.Sprintf("client: dial %s: %v", e.Addr, e.Err)
+}
+
+// Unwrap exposes the underlying error for errors.Is / errors.As.
+func (e *DialError) Unwrap() error { return e.Err }
+
+// Pool-related errors.
+var (
+	// ErrPoolClosed is returned by Pool operations after Close.
+	ErrPoolClosed = errors.New("client: pool closed")
+
+	// ErrAcquireTimeout is returned when Options.AcquireTimeout
+	// elapses before capacity becomes available.
+	ErrAcquireTimeout = errors.New("client: acquire timeout")
+
+	// ErrDialBackoff is returned when a recent dial failure on the
+	// pool is still within the DialBackoff window.
+	ErrDialBackoff = errors.New("client: dial backoff active")
 )

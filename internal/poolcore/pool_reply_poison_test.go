@@ -1,4 +1,4 @@
-package client
+package poolcore
 
 import (
 	"context"
@@ -41,7 +41,7 @@ func TestPool_ReplyChannelNotPoisonedUnderAbandonment(t *testing.T) {
 	const openPools = 8
 	open := make([]*Pool, openPools)
 	for i := range open {
-		open[i] = newPool(addr, co, PoolOptions{MaxConnsPerHost: 4, MaxStreamsPerConn: 50}, nil, nil)
+		open[i] = New(addr, co, PoolOptions{MaxConnsPerHost: 4, MaxStreamsPerConn: 50}, nil, nil)
 	}
 	defer func() {
 		for _, p := range open {
@@ -67,10 +67,10 @@ func TestPool_ReplyChannelNotPoisonedUnderAbandonment(t *testing.T) {
 				default:
 				}
 				ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-				mc, err := p.acquire(ctx)
+				mc, err := p.Acquire(ctx)
 				if err == nil {
 					healthyOK.Add(1)
-					p.release(mc)
+					p.Release(mc)
 				} else if errors.Is(err, ErrPoolClosed) {
 					poisoned.Store(true)
 					cancel()
@@ -93,9 +93,9 @@ func TestPool_ReplyChannelNotPoisonedUnderAbandonment(t *testing.T) {
 				return
 			default:
 			}
-			vp := newPool(addr, co, PoolOptions{MaxConnsPerHost: 1, MaxStreamsPerConn: 1}, nil, nil)
+			vp := New(addr, co, PoolOptions{MaxConnsPerHost: 1, MaxStreamsPerConn: 1}, nil, nil)
 			occCtx, occCancel := context.WithTimeout(context.Background(), time.Second)
-			mc, err := vp.acquire(occCtx)
+			mc, err := vp.Acquire(occCtx)
 
 			var wwg sync.WaitGroup
 			for k := 0; k < 8; k++ {
@@ -107,14 +107,14 @@ func TestPool_ReplyChannelNotPoisonedUnderAbandonment(t *testing.T) {
 						time.Sleep(time.Millisecond)
 						wcancel()
 					}()
-					_, _ = vp.acquire(wctx)
+					_, _ = vp.Acquire(wctx)
 					abandonedWaiters.Add(1)
 					wcancel()
 				}()
 			}
 			time.Sleep(2 * time.Millisecond)
 			if err == nil {
-				vp.release(mc)
+				vp.Release(mc)
 			}
 			occCancel()
 			_ = vp.Close()

@@ -164,7 +164,7 @@ func TestH1Pool_DeadReservation_DoesNotStrandWaiter(t *testing.T) {
 	ctx := context.Background()
 
 	// One pooled conn, checked in, so the first sweep has something to reserve.
-	mc, err := p.acquire(ctx)
+	mc, err := p.Acquire(ctx)
 	require.NoError(t, err, "seed acquire")
 	p.release(mc, true)
 	for p.Stats().InFlightStreams != 0 {
@@ -185,7 +185,7 @@ func TestH1Pool_DeadReservation_DoesNotStrandWaiter(t *testing.T) {
 	// A is queued against the reservation and gets NO dial of its own.
 	aDone := make(chan error, 1)
 	go func() {
-		_, aerr := p.acquire(ctx)
+		_, aerr := p.Acquire(ctx)
 		aDone <- aerr
 	}()
 
@@ -193,7 +193,7 @@ func TestH1Pool_DeadReservation_DoesNotStrandWaiter(t *testing.T) {
 	// failing dial is what puts the pool into backoff.
 	bDone := make(chan error, 1)
 	go func() {
-		_, berr := p.acquire(ctx)
+		_, berr := p.Acquire(ctx)
 		bDone <- berr
 	}()
 

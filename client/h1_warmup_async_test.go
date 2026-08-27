@@ -38,7 +38,7 @@ func TestH1Warmup_ReturnsImmediately(t *testing.T) {
 	defer func() { _ = p.Close() }()
 
 	start := time.Now()
-	p.warmup(conns)
+	p.Warmup(conns)
 	elapsed := time.Since(start)
 
 	// Even one probe timeout is 50ms; the old shape paid that per connection.
@@ -69,7 +69,7 @@ func TestH1Warmup_StillDials(t *testing.T) {
 	p := newH1Pool(srv.Listener.Addr().String(), &conn.PlaintextDialer{}, PoolOptions{MaxConnsPerHost: conns}, nil, nil)
 	defer func() { _ = p.Close() }()
 
-	p.warmup(conns)
+	p.Warmup(conns)
 
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) && p.Stats().ActiveConns < conns {
@@ -87,7 +87,7 @@ func TestH1Warmup_StillDials(t *testing.T) {
 func TestH1Warmup_StopsWhenThePoolCloses(t *testing.T) {
 	d := &hangingDialer{release: make(chan struct{}), dialStarted: make(chan struct{})}
 	p := newH1Pool("black.hole:0", d, PoolOptions{MaxConnsPerHost: 32}, nil, nil)
-	p.warmup(32)
+	p.Warmup(32)
 	// Close must land with the warm-up genuinely in flight, or this measures
 	// nothing: wait for the first dial rather than sleeping a guessed interval.
 	select {

@@ -122,7 +122,7 @@ func worstAcquireDuringSweeps(t *testing.T, nConns int) (time.Duration, int64) {
 	// pool to dial nConns rather than reusing one: checkout is exclusive.
 	held := make([]*h1ManagedConn, 0, nConns)
 	for i := 0; i < nConns; i++ {
-		mc, err := p.acquire(ctx)
+		mc, err := p.Acquire(ctx)
 		require.NoErrorf(t, err, "acquire[%d] while filling the pool", i)
 		held = append(held, mc)
 	}
@@ -135,7 +135,7 @@ func worstAcquireDuringSweeps(t *testing.T, nConns int) (time.Duration, int64) {
 	deadline := time.Now().Add(300 * time.Millisecond)
 	for time.Now().Before(deadline) {
 		start := time.Now()
-		mc, err := p.acquire(ctx)
+		mc, err := p.Acquire(ctx)
 		elapsed := time.Since(start)
 		require.NoError(t, err, "acquire during sweeps")
 		p.release(mc, true)
@@ -224,7 +224,7 @@ func TestH1Pool_HealthSweep_DoesNotDialOverAReservedConn(t *testing.T) {
 	}
 
 	ctx := context.Background()
-	mc, err := p.acquire(ctx)
+	mc, err := p.Acquire(ctx)
 	require.NoError(t, err, "first acquire")
 	releaseUnderActor(mc)
 	require.Equal(t, 1, d.dialCount(), "one acquire must produce exactly one dial")
@@ -234,7 +234,7 @@ func TestH1Pool_HealthSweep_DoesNotDialOverAReservedConn(t *testing.T) {
 	acquires := 0
 	deadline := time.Now().Add(300 * time.Millisecond)
 	for time.Now().Before(deadline) {
-		mc, err := p.acquire(ctx)
+		mc, err := p.Acquire(ctx)
 		require.NoError(t, err, "acquire during sweeps")
 		releaseUnderActor(mc)
 		acquires++

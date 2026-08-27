@@ -1,4 +1,4 @@
-package client
+package poolcore
 
 import (
 	"context"
@@ -16,7 +16,7 @@ import (
 // ————————————————————————————————————————————————————————————————
 // A warmup must not defeat the backoff a failing peer earned.
 //
-// handleWarmup carries an inDialBackoff check with that comment against it,
+// handleWarmup carries an InDialBackoff check with that comment against it,
 // and deleting the check passed the entire client suite. Without it, warming a
 // pool whose peer is down fans out MaxConnsPerHost dials at once — the exact
 // stampede the backoff exists to prevent. warmup is also the entry point a
@@ -64,12 +64,12 @@ const warmupBackoffWindow = 200 * time.Millisecond
 // InFlightDials. The returned count is the number of dials the arming step
 // actually performed — one, or the backoff was never armed and neither test
 // below is measuring what it claims.
-func armBackoffPool(t *testing.T) (*Pool, *blockingRefusingDialer, *Metrics) {
+func armBackoffPool(t *testing.T) (*Pool, *blockingRefusingDialer, *countingRecorder) {
 	t.Helper()
 
-	m := &Metrics{}
+	m := &countingRecorder{}
 	d := &blockingRefusingDialer{release: make(chan struct{})}
-	p := newPool("warmup.test:443", conn.ConnOptions{Dialer: d}, PoolOptions{
+	p := New("warmup.test:443", conn.ConnOptions{Dialer: d}, PoolOptions{
 		MaxConnsPerHost: 4,
 		DialBackoff:     warmupBackoffWindow,
 		DialTimeout:     5 * time.Second,
@@ -80,12 +80,12 @@ func armBackoffPool(t *testing.T) (*Pool, *blockingRefusingDialer, *Metrics) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	_, err := p.acquire(ctx)
+	_, err := p.Acquire(ctx)
 	require.Error(t, err, "acquire against a refusing dialer succeeded")
-	require.Equalf(t, int64(1), m.Counters.DialsAttempted.Load(),
+	require.Equalf(t, int64(1), m.DialsAttempted.Load(),
 		"DialsAttempted after the arming acquire = %d, want 1 — without exactly one "+
 			"failed dial the backoff window is not open and neither arm measures it",
-		m.Counters.DialsAttempted.Load())
+		m.DialsAttempted.Load())
 
 	d.blocking.Store(true)
 	return p, d, m
@@ -95,12 +95,12 @@ func armBackoffPool(t *testing.T) (*Pool, *blockingRefusingDialer, *Metrics) {
 // window, warmup must start nothing.
 func TestPool_Warmup_DoesNotDefeatDialBackoff(t *testing.T) {
 	p, _, m := armBackoffPool(t)
-	armed := m.Counters.DialsAttempted.Load()
+	armed := m.DialsAttempted.Load()
 
 	// warmupCh is unbuffered, so warmup returns once the actor has taken the
 	// message; the actor is single-threaded, so the Stats round-trip after it
 	// cannot be served until handleWarmup has returned. A barrier, not a sleep.
-	p.warmup(4)
+	p.Warmup(4)
 	s := p.Stats()
 
 	t.Logf("injections: arming dials=%d, warmup requested=4, InFlightDials after warmup=%d",
@@ -117,18 +117,18 @@ func TestPool_Warmup_DoesNotDefeatDialBackoff(t *testing.T) {
 // the far weaker "warmup never dials".
 func TestPool_Warmup_DialsOnceBackoffExpires(t *testing.T) {
 	p, d, m := armBackoffPool(t)
-	armed := m.Counters.DialsAttempted.Load()
+	armed := m.DialsAttempted.Load()
 	close(d.release)
 	d.blocking.Store(false)
 	time.Sleep(warmupBackoffWindow + 100*time.Millisecond)
 
-	p.warmup(4)
+	p.Warmup(4)
 	_ = p.Stats() // barrier: handleWarmup has run by the time this returns
 
 	var got int64
 	deadline := time.Now().Add(3 * time.Second)
 	for time.Now().Before(deadline) {
-		if got = m.Counters.DialsAttempted.Load(); got > armed {
+		if got = m.DialsAttempted.Load(); got > armed {
 			break
 		}
 		time.Sleep(5 * time.Millisecond)

@@ -11,7 +11,7 @@ import (
 // TestWarmup_ManagedPool_PreDialsBeforeAnyRequest is the regression test for the
 // half of #399 that opened nothing at all.
 //
-// managedPool.warmup iterated mp.subPools, which getOrCreateSubPool fills lazily
+// managedPool.warmup iterated mp.SubPools, which getOrCreateSubPool fills lazily
 // on the first acquire — so on a freshly constructed pool it was empty, warmup
 // took its len(subs)==0 early return, and Warmup pre-dialled zero connections.
 // The whole point of a warmup is to run before the first request, which is
@@ -23,12 +23,12 @@ func TestWarmup_ManagedPool_PreDialsBeforeAnyRequest(t *testing.T) {
 	mp, err := newManagedPool(res, RoundRobin(), DrainGraceful, newConnOpts(),
 		PoolOptions{MaxConnsPerHost: 2, MaxStreamsPerConn: 8, HealthCheckPeriod: time.Second}, nil, nil)
 	require.NoError(t, err, "newManagedPool over two live servers")
-	defer mp.close()
+	defer mp.Close()
 	require.Equalf(t, 2, waitActive(mp, 2, 2*time.Second),
 		"the resolver did not settle on 2 addresses, so warmup has nothing to distribute over")
 
 	// No request has been issued. This is the state the bug lived in.
-	mp.warmup(4)
+	mp.Warmup(4)
 
 	// Wait for BOTH addresses, not for a total of two. The loop used to break on
 	// counts[0]+counts[1] >= 2 and then assert each was non-zero, so a run where
@@ -69,7 +69,7 @@ func TestWarmup_Pool_OpensExactlyN(t *testing.T) {
 		PoolOptions{MaxConnsPerHost: 3, MaxStreamsPerConn: 100, HealthCheckPeriod: time.Second}, nil, nil)
 	defer p.Close()
 
-	p.warmup(3)
+	p.Warmup(3)
 
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) && int(counts[0].Load()) < 3 {
@@ -81,7 +81,7 @@ func TestWarmup_Pool_OpensExactlyN(t *testing.T) {
 			"acquire+release, because a released conn still has free stream slots", first)
 
 	// Idempotent: already at target, so no further dials.
-	p.warmup(3)
+	p.Warmup(3)
 	time.Sleep(300 * time.Millisecond)
 	second := int(counts[0].Load())
 	t.Logf("injections: warmup(3) opened %d conns, a second warmup(3) left it at %d",
@@ -101,7 +101,7 @@ func TestWarmup_Pool_RespectsMaxConnsPerHost(t *testing.T) {
 		PoolOptions{MaxConnsPerHost: 2, MaxStreamsPerConn: 100, HealthCheckPeriod: time.Second}, nil, nil)
 	defer p.Close()
 
-	p.warmup(10)
+	p.Warmup(10)
 	time.Sleep(1500 * time.Millisecond)
 
 	got := int(counts[0].Load())

@@ -51,7 +51,7 @@ func TestH3Pool_Close_AttributesGoAway(t *testing.T) {
 	// so neither can be retired early — h3RetireReason only retires a
 	// going-away conn once it has drained.
 	for i := 0; i < 2; i++ {
-		_, err := p.acquire(context.Background())
+		_, err := p.Acquire(context.Background())
 		require.NoErrorf(t, err, "acquire[%d]", i)
 	}
 	conns := d.all()
