@@ -1,4 +1,4 @@
-package client
+package pool
 
 import (
 	"math/rand"
@@ -112,11 +112,12 @@ func TestRandom_EmptySet_ErrNoAddresses(t *testing.T) {
 func TestHash_Deterministic(t *testing.T) {
 	t.Parallel()
 	set := []Address{{Host: "a"}, {Host: "b"}, {Host: "c"}}
-	s, err := Hash(func(pc PickContext) string { return pc.Request.Path })
+	key := "/x"
+	s, err := Hash(func(PickContext) string { return key })
 	require.NoError(t, err, "Hash with a non-nil key function")
 
-	first, err1 := s.Pick(set, PickContext{Request: &Request{Path: "/x"}})
-	second, err2 := s.Pick(set, PickContext{Request: &Request{Path: "/x"}})
+	first, err1 := s.Pick(set, PickContext{})
+	second, err2 := s.Pick(set, PickContext{})
 
 	require.NoError(t, err1, "first Pick")
 	require.NoError(t, err2, "second Pick")

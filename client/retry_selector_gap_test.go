@@ -176,12 +176,14 @@ func TestRandom_SpreadsAcrossTheSet(t *testing.T) {
 func TestHash_DifferentKeysReachDifferentAddresses(t *testing.T) {
 	t.Parallel()
 	set := []Address{{Host: "a"}, {Host: "b"}, {Host: "c"}}
-	s, err := Hash(func(pc PickContext) string { return pc.Request.Path })
+	var key string
+	s, err := Hash(func(PickContext) string { return key })
 	require.NoError(t, err, "Hash with a non-nil key function")
 
 	seen := map[string]int{}
 	for i := range 200 {
-		a, perr := s.Pick(set, PickContext{Request: &Request{Path: fmt.Sprintf("/key/%d", i)}})
+		key = fmt.Sprintf("/key/%d", i)
+		a, perr := s.Pick(set, PickContext{})
 		require.NoErrorf(t, perr, "Pick %d", i)
 		seen[a.Host]++
 	}
