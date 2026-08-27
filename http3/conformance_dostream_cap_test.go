@@ -17,31 +17,39 @@ import (
 // frame, not the whole body). The buffered Do path, which does retain the body,
 // stays capped.
 func TestConformance_DoStream_StreamedBodyNotCappedByRetainedLimit(t *testing.T) {
-	c := &Client{}
+	// An explicit small cap, not the 128 MiB default: the boundary is what this
+	// test is about, and a Client{} left zero would be capped at the default, so
+	// "already near the cap" would mean allocating a fixture near 128 MiB.
+	const capBytes = 4096
+	c := &Client{maxResponseBytes: capBytes}
 	var streamed int
 	rb := &respBuilder{
 		resp:   &Response{Status: 200},
 		onData: func(p []byte) error { streamed += len(p); return nil },
-		total:  maxResponseBytes - 10, // already near the retained cap
+		total:  capBytes - 10, // already near the retained cap
 	}
 
-	// A DATA frame that would push rb.total past maxResponseBytes if it were
+	// A DATA frame that would push rb.total past the cap if it were
 	// counted — but on the streaming path it is handed off, not retained.
 	err := c.dispatchFrame(rb, FrameData, make([]byte, 1000))
 
 	require.NoErrorf(t, err,
 		"dispatchFrame(streaming DATA past the retained cap) = %v, want nil — a "+
-			"handed-off chunk is not retained and must not count toward maxResponseBytes", err)
+			"handed-off chunk is not retained and must not count toward the retained cap", err)
 	assert.Equalf(t, 1000, streamed,
 		"streamed = %d bytes, want 1000 handed to the BodyReader", streamed)
 }
 
 // TestConformance_Do_BufferedBodyStillCapped is the guard for the other half: the
 // buffered Do path (onData nil) accumulates the body in memory, so it must stay
-// capped at maxResponseBytes.
+// capped at the configured limit.
 func TestConformance_Do_BufferedBodyStillCapped(t *testing.T) {
-	c := &Client{}
-	rb := &respBuilder{resp: &Response{Status: 200}, total: maxResponseBytes - 10} // onData nil: buffered
+	// Explicit, for the reason given in the streaming test above — and here it also
+	// keeps the assertion honest: with a zero cap every response is "too large",
+	// so this test would pass against a Client that read the cap from nowhere.
+	const capBytes = 4096
+	c := &Client{maxResponseBytes: capBytes}
+	rb := &respBuilder{resp: &Response{Status: 200}, total: capBytes - 10} // onData nil: buffered
 
 	err := c.dispatchFrame(rb, FrameData, make([]byte, 1000))
 

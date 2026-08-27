@@ -172,15 +172,34 @@ const (
 // as empty frames that add no bytes — cannot exhaust memory.
 const maxInterimResponses = 100
 
-// maxResponseBytes bounds a whole response the client buffers in memory: it is
-// both the per-frame declared-length cap (a single HEADERS, trailer, or DATA frame
-// past it is refused before its payload is buffered — RFC 9114 places no per-frame
-// size limit, so the request stream otherwise had none) and the cumulative cap on
-// the header, body, trailer, and 1xx payloads retained together. One limit keeps
-// the two consistent: a single DATA frame up to the whole budget is accepted, but
-// the retained total cannot exceed it. A var, not a const, so a test can exercise
-// the limit without buffering hundreds of megabytes.
-var maxResponseBytes uint64 = 1 << 27 // 128 MiB
+// defaultMaxResponseBytes bounds a whole response the client buffers in memory: it
+// is both the per-frame declared-length cap (a single HEADERS, trailer, or DATA
+// frame past it is refused before its payload is buffered — RFC 9114 places no
+// per-frame size limit, so the request stream otherwise had none) and the
+// cumulative cap on the header, body, trailer, and 1xx payloads retained together.
+// One limit keeps the two consistent: a single DATA frame up to the whole budget
+// is accepted, but the retained total cannot exceed it.
+//
+// It is the default, not the value: WithMaxResponseBytes overrides it per Client.
+// A load generator pulling many concurrent large responses wants it lower, and a
+// caller expecting one enormous body wants it higher; 128 MiB is only a sane
+// middle, and it used to be a package var that a test mutated in place (#712).
+const defaultMaxResponseBytes uint64 = 1 << 27 // 128 MiB
+
+// responseByteCap is the limit this Client enforces. A zero field means the
+// default, so a hand-built Client{} caps at 128 MiB rather than at zero.
+//
+// That is not a convenience. Reading the field raw would make every
+// TestConformance_* that builds a Client by hand assert against a cap of 0, where
+// "the retained total exceeded the cap" is true for any response at all — the
+// tests would stay green while testing nothing. Resolving here makes the
+// zero value correct by construction instead of by everyone remembering.
+func (c *Client) responseByteCap() uint64 {
+	if c.maxResponseBytes == 0 {
+		return defaultMaxResponseBytes
+	}
+	return c.maxResponseBytes
+}
 
 // ErrResponseTooLarge is returned by Do when a response exceeds a client buffering
 // limit — a single frame or the retained total past maxResponseBytes, or the
@@ -259,6 +278,10 @@ func (c *Client) ConnectionState() tls.ConnectionState {
 // encMu (both leaf locks never nested with c.mu). Client is safe for concurrent use.
 type Client struct {
 	conn quicConn
+
+	// maxResponseBytes is the caller's WithMaxResponseBytes, or 0 for the default.
+	// Read through responseByteCap, never directly.
+	maxResponseBytes uint64
 
 	// Connection lifecycle. The reader goroutine runs Poll + serviceControl on
 	// connCtx until the connection terminates; Close cancels connCtx and waits on
@@ -404,14 +427,14 @@ type uniStream struct {
 // first SETTINGS frame (RFC 9114 §6.2.1). The connection's handshake must already
 // have completed.
 func NewClient(conn *quic.Conn, settings []Setting) (*Client, error) {
-	return newClient(connAdapter{conn}, settings)
+	return newClient(connAdapter{conn}, settings, clientConfig{})
 }
 
-func newClient(conn quicConn, settings []Setting) (*Client, error) {
+func newClient(conn quicConn, settings []Setting, cfg clientConfig) (*Client, error) {
 	if err := validateSettings(settings); err != nil {
 		return nil, err
 	}
-	c := &Client{conn: conn, readerDone: make(chan struct{})}
+	c := &Client{conn: conn, readerDone: make(chan struct{}), maxResponseBytes: cfg.maxResponseBytes}
 	c.maxFieldSection.Store(^uint64(0)) // no limit until the peer's SETTINGS arrive
 	c.goaway.Store(^uint64(0))          // "none" until a real GOAWAY lands (§5.2)
 	// The shared dynamic table's maximum capacity is the SETTINGS_QPACK_MAX_TABLE_
@@ -1115,7 +1138,7 @@ func (c *Client) roundTrip(ctx context.Context, stream quicStream, req *Request)
 	// TestRespBuilder_BodyDoesNotAliasReaderBuffer and TestClient_PooledFrameBuffer.
 	fr.acquire()
 	defer fr.release()
-	fr.SetMaxFrameLen(maxResponseBytes) // refuse a frame larger than the whole budget before buffering it
+	fr.SetMaxFrameLen(c.responseByteCap()) // refuse a frame larger than the whole budget before buffering it
 	rb := respBuilder{dec: &dec, streamID: stream.ID(), ctx: ctx}
 	// On any abort of a stream that referenced the dynamic table, notify the encoder
 	// (RFC 9204 §4.4.2). refDynamic is set when a decoded section resolved a dynamic
@@ -1236,7 +1259,7 @@ func (c *Client) dispatchFrame(rb *respBuilder, typ uint64, payload []byte) erro
 			return c.connError(H3FrameUnexpected)
 		}
 		rb.total += uint64(len(payload))
-		if rb.total > maxResponseBytes {
+		if rb.total > c.responseByteCap() {
 			return ErrResponseTooLarge // retained header/body/trailer bytes over the cap
 		}
 		if rb.resp == nil {
@@ -1302,7 +1325,7 @@ func (c *Client) dispatchFrame(rb *respBuilder, typ uint64, payload []byte) erro
 		// Buffered path (Do): the body accumulates in rb.body, so it is capped
 		// alongside the retained header and trailer bytes.
 		rb.total += uint64(len(payload))
-		if rb.total > maxResponseBytes {
+		if rb.total > c.responseByteCap() {
 			return ErrResponseTooLarge
 		}
 		if rb.body == nil {

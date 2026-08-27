@@ -34,7 +34,7 @@ func (c *Client) roundTripStream(ctx context.Context, stream quicStream, req *Re
 	// the caller that is waiting on it.
 	br.rb.ctx = ctx // bounds a blocked pre-head HEADERS decode (§2.1.3, Q4)
 	br.rb.onData = br.stashData
-	br.fr.SetMaxFrameLen(maxResponseBytes)
+	br.fr.SetMaxFrameLen(c.responseByteCap())
 	// If an interim/final HEADERS referenced the dynamic table before a pre-head
 	// error aborts the stream, notify the encoder (RFC 9204 §4.4.2). Once the head
 	// is returned the BodyReader owns this (BodyReader.abort).

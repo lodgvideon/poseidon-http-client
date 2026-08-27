@@ -147,6 +147,16 @@ type ClientOptions struct {
 	// control. Ignored by the H1/H2 transports, which do not dial QUIC.
 	H3ConnOptions []quic.ConnOption
 
+	// H3MaxResponseBytes bounds the bytes one HTTP/3 response may retain in
+	// memory — the per-frame declared-length cap and the cumulative cap on
+	// header, body, trailer and 1xx payloads held together. Exceeding it fails
+	// the request with an http3 ErrResponseTooLarge.
+	//
+	// Zero selects the package default (128 MiB). That default is generous for a
+	// load generator holding many large responses at once, which is why it became
+	// configurable (#712). Ignored by the H1/H2 transports.
+	H3MaxResponseBytes uint64
+
 	// DialBackoff suppresses repeated dial attempts within this window
 	// after a failed dial. Zero disables suppression (immediate retry).
 	// Used by TransportSingleConn. For TransportPool see PoolOptions.DialBackoff.
@@ -476,20 +486,20 @@ func buildTransport(opts ClientOptions, hooksPtr *atomic.Pointer[Hooks], metrics
 			tlsConfig:   opts.TLSConfig,
 			backoff:     opts.DialBackoff,
 			dialTimeout: dialTimeoutOrDefault(opts.DialTimeout),
-			dialFn:      makeH3DialFn(opts.H3ConnOptions),
+			dialFn:      makeH3DialFn(h3Options(opts)),
 			hooksRef:    hooksPtr,
 			metrics:     metrics,
 		}, nil
 	case TransportH3Pool:
 		return &h3PoolTransport{
-			p: newH3Pool(opts.Addr, opts.TLSConfig, *opts.Pool, makeH3DialFn(opts.H3ConnOptions), hooksPtr, metrics),
+			p: newH3Pool(opts.Addr, opts.TLSConfig, *opts.Pool, makeH3DialFn(h3Options(opts)), hooksPtr, metrics),
 		}, nil
 	case TransportH3Managed:
 		po := PoolOptions{}
 		if opts.Pool != nil {
 			po = *opts.Pool
 		}
-		mp, err := newH3ManagedPool(opts.Resolver, opts.Selector, opts.DrainMode, opts.TLSConfig, po, makeH3DialFn(opts.H3ConnOptions), hooksPtr, metrics)
+		mp, err := newH3ManagedPool(opts.Resolver, opts.Selector, opts.DrainMode, opts.TLSConfig, po, makeH3DialFn(h3Options(opts)), hooksPtr, metrics)
 		if err != nil {
 			return nil, err
 		}
