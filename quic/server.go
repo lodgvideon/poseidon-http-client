@@ -341,6 +341,51 @@ func (f *ServerFlight) HandleClientHandshake(cryptoData []byte) error {
 // the peer as a duplicate.
 const handshakeClosePN = 1
 
+// initialClosePN is the Initial packet number a close is sent under when the
+// handshake is refused before any server packet has gone out. Nothing was sent in
+// this space, so 0 is free — unlike handshakeClosePN, which is 1 precisely because
+// the server flight already spent 0. Copying that constant here would leave a gap
+// the peer has to tolerate for no reason.
+const initialClosePN = 0
+
+// initialCloseDatagram seals a CONNECTION_CLOSE in the INITIAL space reporting a
+// handshake that TLS refused before Handshake keys existed — no overlapping ALPN,
+// no shared version or cipher suite, a GetCertificate error for an unknown SNI.
+// It returns nil when err is not a connection error to signal.
+//
+// ServerFlight.closeDatagram cannot serve this path: it seals with
+// f.HandshakeSealer, and on this path there is no *ServerFlight at all —
+// StartServerHandshake builds its Initial sealer internally and discards it on
+// every error return. Deriving the keys again from ci.DCID is cheap (RFC 9001 §5.2
+// makes them a pure function of it) and leaves StartServerHandshake untouched.
+//
+// AMPLIFICATION: this is the first and only packet the listener sends to an
+// address it has not validated, so RFC 9000 §8.1's 3x limit applies. A client
+// Initial is at least 1200 bytes and this datagram is ~42, a ratio of about 0.035,
+// so the limit is nowhere near binding — but no budget counter exists on this path,
+// which is why the reasoning is written down rather than measured at runtime.
+//
+// A ClientHello that does not parse is a different case and stays silent:
+// AcceptInitial failing means there may be no usable connection ID to address a
+// reply to. This is only for a ClientHello that parsed and was then refused.
+func initialCloseDatagram(ci *ClientInitial, scid []byte, err error) []byte {
+	code, ok := closeCodeFor(err)
+	if !ok {
+		return nil
+	}
+	_, serverKeys := InitialKeys(ci.DCID)
+	sealer, sealErr := NewSealer(serverKeys)
+	if sealErr != nil {
+		return nil
+	}
+	frames := AppendConnectionClose(nil, false, code, 0, nil)
+	dg, sealErr := SealPacket(nil, sealer, PacketInitial, ci.SCID, scid, nil, initialClosePN, 4, frames)
+	if sealErr != nil {
+		return nil
+	}
+	return dg
+}
+
 // closeDatagram seals a CONNECTION_CLOSE reporting err to the client, addressed
 // to dcid (the client's source connection ID), or returns nil when there is
 // nothing to send: an error that is not a connection error to signal, or a

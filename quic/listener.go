@@ -332,6 +332,18 @@ func (l *Listener) handshake(initial []byte, remote *net.UDPAddr) {
 	tp := AppendServerTransportParams(nil, l.tp, scid, ci.DCID)
 	flight, err := StartServerHandshake(ci, l.tls, tp, scid)
 	if err != nil {
+		// TLS refused the ClientHello — no overlapping ALPN, no shared version or
+		// cipher, a GetCertificate error. RFC 9001 §4.8 makes that a CRYPTO_ERROR to
+		// be signalled, and it does not distinguish these operational causes from a
+		// rejected client certificate, which #711 already reports. Before this, both
+		// sides were silent: Accept blocked until its deadline while the client's
+		// Establish returned an uninformative timeout (#715).
+		//
+		// The write goes straight to l.sock: pc is not created until below, so there
+		// is no per-connection transport to send through yet.
+		if dg := initialCloseDatagram(ci, scid, err); dg != nil {
+			_, _ = l.sock.WriteToUDP(dg, remote)
+		}
 		return
 	}
 
