@@ -15,7 +15,7 @@ import (
 func TestClient_RejectsOversizedResponseFrame(t *testing.T) {
 	// Only the frame header is needed — the cap fires on the declared length before
 	// any payload is buffered, so this allocates nothing large.
-	huge := AppendFrameHeader(nil, FrameHeaders, maxResponseBytes+1)
+	huge := AppendFrameHeader(nil, FrameHeaders, defaultMaxResponseBytes+1)
 	conn := &fakeConn{req: &fakeStream{recvChunks: [][]byte{huge}, fin: true}}
 	client, err := NewClientFake(conn, nil)
 	require.NoError(t, err, "NewClientFake over the fake transport")
@@ -46,7 +46,7 @@ func TestClient_RejectsOversizedResponseFrame(t *testing.T) {
 // deliver the payload. Hence a direct test at this level.
 func TestFrameReader_OversizedFrameRefusedBeforeBuffering(t *testing.T) {
 	var r FrameReader
-	r.SetMaxFrameLen(maxResponseBytes)
+	r.SetMaxFrameLen(defaultMaxResponseBytes)
 	// A frame header declaring 2^40 bytes, then a dribble of payload that will never
 	// reach the declared length.
 	r.Feed(AppendFrameHeader(nil, FrameData, 1<<40))
@@ -77,14 +77,12 @@ func TestFrameReader_OversizedFrameRefusedBeforeBuffering(t *testing.T) {
 // the whole budget is accepted — the per-frame cap must not be tighter than the
 // total cap (RFC 9114 places no per-frame size limit on DATA).
 func TestClient_AcceptsLargeSingleDataFrame(t *testing.T) {
-	saved := maxResponseBytes
-	maxResponseBytes = 4096
-	defer func() { maxResponseBytes = saved }()
+	const capBytes = 4096
 	payload := bytes.Repeat([]byte("x"), 4000) // one DATA frame, comfortably under the cap
 	headers := AppendHeaders(nil, encodeSection(hf(":status", "200")))
 	data := AppendData(nil, payload)
 	conn := &fakeConn{req: &fakeStream{recvChunks: [][]byte{append(headers, data...)}, fin: true}}
-	client, err := NewClientFake(conn, nil)
+	client, err := NewClientFakeWithOptions(conn, nil, WithMaxResponseBytes(capBytes))
 	require.NoError(t, err, "NewClientFake over the fake transport")
 	req := &Request{Method: "GET", Scheme: "https", Authority: "example.com", Path: "/"}
 
@@ -98,14 +96,12 @@ func TestClient_AcceptsLargeSingleDataFrame(t *testing.T) {
 // exceed the budget abort the request, even when each frame is under the per-frame
 // cap.
 func TestClient_RejectsOversizedResponseTotal(t *testing.T) {
-	saved := maxResponseBytes
-	maxResponseBytes = 8
-	defer func() { maxResponseBytes = saved }()
+	const capBytes = 8
 	headers := AppendHeaders(nil, encodeSection(hf(":status", "200")))
 	d1 := AppendData(nil, []byte("012345")) // 6 bytes, under the 8-byte per-frame cap
 	d2 := AppendData(nil, []byte("678901")) // 6 more → cumulative over the cap
 	conn := &fakeConn{req: &fakeStream{recvChunks: [][]byte{append(append(headers, d1...), d2...)}, fin: true}}
-	client, err := NewClientFake(conn, nil)
+	client, err := NewClientFakeWithOptions(conn, nil, WithMaxResponseBytes(capBytes))
 	require.NoError(t, err, "NewClientFake over the fake transport")
 	req := &Request{Method: "GET", Scheme: "https", Authority: "example.com", Path: "/"}
 
@@ -170,28 +166,26 @@ func TestClient_AcceptsInterimAtTheCap(t *testing.T) {
 }
 
 // TestClient_AcceptsResponseExactlyAtCap: a response whose RETAINED bytes are
-// exactly maxResponseBytes is within the budget — the cap refuses a response
+// exactly the configured cap is within the budget — the cap refuses a response
 // LARGER than it, not one equal to it.
 func TestClient_AcceptsResponseExactlyAtCap(t *testing.T) {
-	saved := maxResponseBytes
-	defer func() { maxResponseBytes = saved }()
 	payload := bytes.Repeat([]byte("x"), 100)
 	headers := AppendHeaders(nil, encodeSection(hf(":status", "200")))
 	_, hlen, _, perr := ParseFrameHeader(headers)
 	require.NoError(t, perr, "the fixture's own HEADERS frame must parse")
-	maxResponseBytes = hlen + uint64(len(payload)) // exactly the budget, not one under
+	capBytes := hlen + uint64(len(payload)) // exactly the budget, not one under
 	data := AppendData(nil, payload)
 	conn := &fakeConn{req: &fakeStream{recvChunks: [][]byte{append(headers, data...)}, fin: true}}
-	client, err := NewClientFake(conn, nil)
+	client, err := NewClientFakeWithOptions(conn, nil, WithMaxResponseBytes(capBytes))
 	require.NoError(t, err, "NewClientFake over the fake transport")
 
 	_, body, doErr := client.Do(context.Background(),
 		&Request{Method: "GET", Scheme: "https", Authority: "example.com", Path: "/"})
 
 	require.NoErrorf(t, doErr,
-		"Do = %v, want nil: a response retaining exactly maxResponseBytes (%d) is within "+
+		"Do = %v, want nil: a response retaining exactly the cap (%d) is within "+
 			"budget, and a client that refuses it rejects a conformant server",
-		doErr, maxResponseBytes)
+		doErr, capBytes)
 	assert.Truef(t, bytes.Equal(body, payload),
 		"body = %d bytes, want %d", len(body), len(payload))
 }
@@ -199,22 +193,20 @@ func TestClient_AcceptsResponseExactlyAtCap(t *testing.T) {
 // TestClient_AcceptsHeaderSectionExactlyAtCap is the same boundary on the
 // FrameHeaders arm of dispatchFrame, which the body case never reaches.
 func TestClient_AcceptsHeaderSectionExactlyAtCap(t *testing.T) {
-	saved := maxResponseBytes
-	defer func() { maxResponseBytes = saved }()
 	headers := AppendHeaders(nil, encodeSection(hf(":status", "200")))
 	_, hlen, _, perr := ParseFrameHeader(headers)
 	require.NoError(t, perr, "the fixture's own HEADERS frame must parse")
-	maxResponseBytes = hlen // exactly the field section, nothing to spare
+	capBytes := hlen // exactly the field section, nothing to spare
 	conn := &fakeConn{req: &fakeStream{recvChunks: [][]byte{headers}, fin: true}}
-	client, err := NewClientFake(conn, nil)
+	client, err := NewClientFakeWithOptions(conn, nil, WithMaxResponseBytes(capBytes))
 	require.NoError(t, err, "NewClientFake over the fake transport")
 
 	resp, _, doErr := client.Do(context.Background(),
 		&Request{Method: "GET", Scheme: "https", Authority: "example.com", Path: "/"})
 
 	require.NoErrorf(t, doErr,
-		"Do = %v, want nil: a field section of exactly maxResponseBytes (%d) is within budget",
-		doErr, maxResponseBytes)
+		"Do = %v, want nil: a field section of exactly the cap (%d) is within budget",
+		doErr, capBytes)
 	require.NotNil(t, resp, "Do returned no response alongside a nil error")
 	assert.Equalf(t, 200, resp.Status, "status = %d, want the 200 the fixture sent", resp.Status)
 }
