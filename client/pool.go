@@ -32,61 +32,6 @@ var statsReplyPool = sync.Pool{
 	New: func() any { return make(chan Stats, 1) },
 }
 
-// PoolOptions configures the per-host connection pool.
-//
-// Defaults are applied by the pool constructors, not by NewClient, and they
-// cover four of the seven fields: MaxConnsPerHost, HealthCheckPeriod,
-// DialBackoff and DialTimeout. MaxStreamsPerConn, IdleTimeout and
-// AcquireTimeout are defaulted NOWHERE, so a zero there is load-bearing: it
-// disables idle eviction and leaves an acquire with no bound of its own. This
-// comment used to say every zero value was replaced, and at NewClient, which
-// is why the disabled-by-default half of the surface is easy to miss.
-type PoolOptions struct {
-	// MaxConnsPerHost caps live connections in this pool.
-	// 0 → 1 (effectively single-conn).
-	MaxConnsPerHost int
-
-	// MaxStreamsPerConn is the soft cap on concurrent streams the
-	// pool will assign to one connection. Effective cap is
-	// min(this, peer SETTINGS_MAX_CONCURRENT_STREAMS) where the
-	// peer value is observed via (*conn.Conn).PeerMaxConcurrentStreams.
-	// 0 → use peer value (or local defaultMaxConcurrentStreams if peer unbounded).
-	MaxStreamsPerConn int
-
-	// IdleTimeout closes a conn that has been idle (active==0)
-	// longer than this duration. 0 → never close on idle.
-	IdleTimeout time.Duration
-
-	// HealthCheckPeriod is the actor's tick interval for idle and
-	// health-check sweeps. 0 → 30 * time.Second.
-	HealthCheckPeriod time.Duration
-
-	// DialBackoff refuses new dials within this window after a
-	// dial failure on this pool. 0 → 1 * time.Second.
-	DialBackoff time.Duration
-
-	// AcquireTimeout bounds how long Acquire waits for capacity.
-	// 0 → governed by ctx only.
-	AcquireTimeout time.Duration
-
-	// DialTimeout bounds how long a single dial attempt may block in
-	// conn.Dial. Without this bound a dial against a black-hole host
-	// hangs the dialOne goroutine indefinitely, leaking it across
-	// pool.Close. 0 → 30 * time.Second default.
-	DialTimeout time.Duration
-}
-
-// Stats is a snapshot of pool state.
-type Stats struct {
-	ActiveConns     int
-	InFlightStreams int
-	Waiters         int
-	InFlightDials   int
-	// Populated by managedPool.Stats(); zero for single-address pools.
-	Addresses        int // number of addresses in the current resolved set
-	DrainingSubpools int // sub-pools currently draining (removed from resolver set)
-}
-
 // managedConn is the actor's per-conn record. Its MUTABLE fields — active,
 // lastUsed, streamCap and the rest — are owned by the actor goroutine and
 // must not be read or written anywhere else.

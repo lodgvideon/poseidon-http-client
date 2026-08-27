@@ -15,27 +15,6 @@ import (
 // Resolver does not support Watch (returns ErrWatchUnsupported).
 const defaultManagedPoolTickerPeriod = 30 * time.Second
 
-// DrainMode governs sub-pool lifecycle when an address is removed
-// from the resolver's set.
-type DrainMode int
-
-const (
-	// DrainGraceful refuses new acquires on the removed sub-pool;
-	// existing in-flight requests complete naturally; sub-pool closes
-	// when its active stream count reaches zero.
-	DrainGraceful DrainMode = iota
-	// DrainHard closes every conn in the removed sub-pool immediately;
-	// in-flight streams surface as RST_STREAM(CANCEL).
-	DrainHard
-	// DrainLazy refuses new acquires and leaves closing to idle eviction, which
-	// means PoolOptions.IdleTimeout decides whether the conns ever close at all.
-	// That field defaults to 0, documented as "never close on idle" — so under
-	// default options DrainLazy's removed sub-pool keeps its connections open
-	// for the life of the pool, and "eventual" never arrives. Set IdleTimeout,
-	// or use DrainGraceful, which closes once the sub-pool goes idle regardless.
-	DrainLazy
-)
-
 // subPoolState is the HTTP/2 instantiation of the core's per-address record.
 // An alias, not a wrapper: the pinned behaviour tests index mp.subPools and read
 // these fields directly.

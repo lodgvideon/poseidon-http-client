@@ -1,4 +1,4 @@
-package client
+package pool
 
 import (
 	"context"
@@ -276,4 +276,38 @@ func TestDNSResolver_Watch_NoEmitOnUnchangedSet(t *testing.T) {
 	assert.Falsef(t, gotExtra,
 		"unexpected second emit on an unchanged set: %v — every consumer would rebuild its "+
 			"connection set on each tick", extra)
+}
+
+// TestResolve_SuccessfulEmpty_DoesNotServeStale is a regression test for
+// stale-masking: a SUCCESSFUL DNS lookup returning zero addresses used to be
+// reported as the stale cached set, so a service scaled to zero kept receiving
+// traffic to dead backends forever. The authoritative empty result must now
+// propagate (cache cleared, ErrNoAddresses), not the stale set.
+func TestResolve_SuccessfulEmpty_DoesNotServeStale(t *testing.T) {
+	var attempt atomic.Int32
+	fl := &fakeLookup{fn: func(_ string) ([]net.IPAddr, error) {
+		if attempt.Add(1) == 1 {
+			return []net.IPAddr{{IP: net.ParseIP("10.0.0.1")}}, nil
+		}
+		return []net.IPAddr{}, nil // success, but empty
+	}}
+	r := newDNSResolverWithLookup("svc.local", 80, DNSOptions{TTL: time.Nanosecond}, fl)
+	tick := 0
+	clock := time.Unix(1_700_000_000, 0)
+	r.setNow(func() time.Time {
+		tick++
+		return clock.Add(time.Duration(tick) * 2 * time.Nanosecond)
+	})
+	first, err := r.Resolve(context.Background())
+	require.NoError(t, err, "first Resolve must succeed to populate the cache")
+	require.Lenf(t, first, 1, "first Resolve = %v, want one address", first)
+
+	got, err := r.Resolve(context.Background())
+
+	assert.Emptyf(t, got,
+		"second Resolve returned the stale set %v; a service scaled to zero would keep "+
+			"receiving traffic to dead backends forever", got)
+	assert.ErrorIsf(t, err, ErrNoAddresses,
+		"second Resolve err = %v, want ErrNoAddresses — an authoritative empty answer is "+
+			"different from a lookup FAILURE, which does keep the stale set", err)
 }

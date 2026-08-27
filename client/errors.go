@@ -115,16 +115,6 @@ var (
 	// ClientOptions.Transport is not a defined TransportKind.
 	ErrInvalidTransportKind = errors.New("client: invalid transport kind")
 
-	// ErrWatchUnsupported is returned by a Resolver.Watch implementation
-	// that does not support push-style updates. The managedPool falls
-	// back to a ticker around Resolve when it sees this error.
-	ErrWatchUnsupported = errors.New("client: resolver does not support Watch")
-
-	// ErrNoAddresses is returned when a Resolver yields zero addresses
-	// AND has no cached set to fall back on, or when a Selector receives
-	// an empty candidate set.
-	ErrNoAddresses = errors.New("client: resolver returned no addresses")
-
 	// ErrInvalidOptions is returned by NewClient when ClientOptions are
 	// internally inconsistent (e.g. both Addr and Resolver supplied) or are
 	// missing a field the chosen transport requires (Addr, ConnOpts.Dialer,
@@ -142,9 +132,6 @@ var (
 	// decompressed) exceeds the configured maximum size, preventing
 	// memory-exhaustion attacks such as gzip bombs.
 	ErrBodyTooLarge = errors.New("client: response body exceeds maximum size")
-
-	// ErrNilKeyFn is returned by Hash when keyFn is nil.
-	ErrNilKeyFn = errors.New("client: Hash selector requires a non-nil keyFn")
 
 	// ErrTrailersUnsupportedH1 is returned when a request carrying trailers
 	// is sent over an HTTP/1.1 connection. HTTP/1.1 request trailers require

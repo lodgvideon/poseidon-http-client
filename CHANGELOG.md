@@ -104,6 +104,57 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **The connection pool's vocabulary moved out of `client` into a new public
+  `pool` package.** Nothing in it was ever HTTP-specific: a pool trades in
+  connection liveness and the peer's concurrent-stream limit, which HTTP/2,
+  HTTP/3 and gRPC-over-HTTP/2 all have and none define differently. It lived in
+  `client` only because that is where it was written, and `grpc` now needs the
+  same pooling (#940) and the same connection-lifecycle observability (#941).
+
+  `grpc` cannot get there by importing `client`: that links retry, compression,
+  HTTP/1.1 and the whole HTTP/3 + QUIC stack into a gRPC-only binary — #915
+  measures 577,536 bytes for the HTTP/3 arms alone — and falsifies the dependency
+  order `grpc/doc.go` states. The reasoning and the three rejected alternatives
+  are in `docs/adr/0001-connection-pooling-lives-outside-client.md`.
+
+  `Address`, `Resolver`, `Selector`, `PickContext`, `DNSOptions`, `PoolOptions`
+  (as `pool.Options`), `Stats`, `DrainMode`, `CloseReason` and the three
+  connection-lifecycle events move. **Nothing breaks and no caller has to
+  migrate:** every name is aliased back into `client`, and a Go type alias is an
+  identical type, so `client.Address` and `pool.Address` are one type and a
+  `Resolver` written against either satisfies both.
+
+  `Hooks` and `Metrics` deliberately stay in `client`. A pool touches only the
+  connection third of them — 3 of `Hooks`' 6 fields, 4 of `Counters`' 10 and 2 of
+  `Latency`' 3 — and consumes that through two narrow interfaces, so the neutral
+  package does not end up owning `Method`, `Path` and `StatusCode`.
+
+  A CI step keeps `grpc` from importing `client`, in the family of the `hpack` and
+  `frame` ones (#492, #714). It was verified to discriminate: it passes on this
+  tree and fires when an import of `client` is added to `grpc`.
+
+  This is the vocabulary only. The machinery — `Pool`, `managedCore` and the dial
+  helpers — follows in its own change.
+
+- **`PickContext.Request` is removed.** It was documented as "the in-flight
+  request if Pick is called from the Acquire path" and was never populated: the
+  sole production caller passes the zero `PickContext` (`managed_core.go:180`).
+  Because a `Pick` that returns an error aborts the whole acquire, that made
+  `client.Hash` unusable on the only path that calls a `Selector` — a key function
+  reading the field dereferenced nil, and a defensive one returned `""`, which
+  `hashSel.Pick` answers with `ErrNoAddresses`, failing every request. The
+  package's own `ExampleHash` was the defensive spelling, so the documented
+  example built a client where every request fails and printed
+  `hash selector ready` without issuing one.
+
+  The field is gone rather than neutralised, because keeping it would advertise a
+  hint the selector never receives; `PickContext` stays a struct so a hint that IS
+  wired through can be added without changing `Selector`'s signature. `ExampleHash`
+  now keys on caller-owned state, which is the shape a load generator wants
+  anyway. Whether the selector should see the request at all is a separate design
+  question — it has to answer what a retry sees and what warmup passes when there
+  is no request — and is filed on its own.
+
 - **`client` and `grpc` no longer import the HTTP/2 frame codec.**
   `conn/aliases.go` has said since it was written that it exists "so the client
   package can avoid importing frame and hpack directly, keeping conn as the single

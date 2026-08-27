@@ -112,6 +112,23 @@ jobs:
             fi
           done
 
+      # The pooling edge, and the reason ./pool exists at all. grpc must reach the
+      # connection pool without linking the HTTP client: a gRPC-only binary that
+      # imports client links retry, compression, HTTP/1.1 and the whole HTTP/3 +
+      # QUIC stack — #915 measures 577,536 bytes for the HTTP/3 arms alone. The
+      # neutral vocabulary is ./pool and the machinery is ./internal/poolcore, and
+      # client keeps every moved name as an alias, so the separation cost no public
+      # API. See docs/adr/0001-connection-pooling-lives-outside-client.md.
+      #
+      # DIRECT imports again, and test files are out of scope, for the same reasons
+      # the two steps above give.
+      - name: grpc does not import client
+        run: |
+          if go list -f '{{join .Imports " "}}' ./grpc | grep -q 'poseidon-http-client/client'; then
+            echo "grpc imports client directly; the pooling vocabulary is in ./pool (docs/adr/0001)" >&2
+            exit 1
+          fi
+
       # The third cross-package invariant, and the only one that is not about
       # imports. maxInterimResponses is a PEER-INPUT bound spelled once per stack:
       # every 1xx block is decoded and handed to the caller, so a stack whose bound

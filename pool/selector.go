@@ -1,4 +1,4 @@
-package client
+package pool
 
 import (
 	"hash"
@@ -15,13 +15,17 @@ type Selector interface {
 	Pick(set []Address, pc PickContext) (Address, error)
 }
 
-// PickContext carries optional hints to the Selector. All fields are
-// optional; the zero value is valid.
-type PickContext struct {
-	// Request is the in-flight request if Pick is called from the
-	// Acquire path. May be nil.
-	Request *Request
-}
+// PickContext carries per-pick hints to the Selector.
+//
+// It is empty. It used to carry the in-flight *client.Request, but nothing ever
+// populated it: the only caller on the acquire path passes the zero value, so a
+// keyFn reading that field either dereferenced nil or returned "" and failed
+// every acquire with ErrNoAddresses. The field is gone rather than neutralised,
+// because keeping it would advertise a hint the selector never receives.
+//
+// It stays a struct so a hint that IS wired through can be added without
+// changing Selector's signature.
+type PickContext struct{}
 
 // roundRobin rotates through the set via an atomic counter.
 type roundRobin struct {

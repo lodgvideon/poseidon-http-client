@@ -105,16 +105,14 @@ func ExampleDNSResolver() {
 	fmt.Println(resp.Status)
 }
 
-// ExampleHash pins each key to a backend for session affinity. The key
-// function derives a string from the request (here, the path); Hash returns an
-// error only when the key function is nil.
+// ExampleHash pins each key to a backend for session affinity. PickContext is
+// empty, so the key comes from the caller's own state rather than from the
+// in-flight request — here the virtual user this client drives, which is the
+// shape a load generator wants: every call from one VU lands on one backend.
+// Hash returns an error only when the key function is nil.
 func ExampleHash() {
-	sel, err := client.Hash(func(pc client.PickContext) string {
-		if pc.Request != nil {
-			return pc.Request.Path
-		}
-		return ""
-	})
+	vu := "user-42"
+	sel, err := client.Hash(func(client.PickContext) string { return vu })
 	if err != nil {
 		log.Fatal(err)
 	}
