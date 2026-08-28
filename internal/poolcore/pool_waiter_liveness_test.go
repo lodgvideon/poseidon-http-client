@@ -1,4 +1,4 @@
-package client
+package poolcore
 
 import (
 	"context"
@@ -34,7 +34,7 @@ import (
 func TestPool_WaiterRescuedAfterLastConnEvicted(t *testing.T) {
 	addrs, _, cleanup := startH2Servers(t, 1)
 	defer cleanup()
-	p := newPool(addrs[0].String(), newConnOpts(), PoolOptions{
+	p := New(addrs[0].String(), newConnOpts(), PoolOptions{
 		MaxConnsPerHost:   1,
 		MaxStreamsPerConn: 1,
 		// No tick: the rescue must come from the release path, not from
@@ -45,31 +45,31 @@ func TestPool_WaiterRescuedAfterLastConnEvicted(t *testing.T) {
 	defer func() { _ = p.Close() }()
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
-	held, err := p.acquire(ctx)
+	held, err := p.Acquire(ctx)
 	require.NoError(t, err, "first acquire against a live H2 server")
 	// A second acquire parks: the one conn is at its one-stream cap.
 	parked := make(chan error, 1)
 	go func() {
-		mc, aerr := p.acquire(ctx)
+		mc, aerr := p.Acquire(ctx)
 		if aerr == nil {
-			p.release(mc)
+			p.Release(mc)
 		}
 		parked <- aerr
 	}()
 	s := waitStats(p, func(s Stats) bool { return s.Waiters == 1 }, 5*time.Second)
 	require.Equalf(t, 1, s.Waiters, "waiter never parked: %+v", s)
-	require.True(t, held.c.IsAlive(),
+	require.True(t, held.C.IsAlive(),
 		"the conn was already dead before the fault was injected, so the rescue "+
 			"below would not be measuring the eviction path")
 
 	// Kill the connection out of band, then release the held stream. The
 	// release evicts the now-dead conn and the pool is left with a waiter and
 	// nothing to serve it from.
-	_ = held.c.Close()
-	require.False(t, held.c.IsAlive(),
+	_ = held.C.Close()
+	require.False(t, held.C.IsAlive(),
 		"injection did not fire: the conn survived Close, so a pass here would only "+
 			"show the waiter being served from the still-live conn")
-	p.release(held)
+	p.Release(held)
 
 	select {
 	case aerr := <-parked:
@@ -107,7 +107,7 @@ func (d *refusingDialer) Dial(context.Context, string) (net.Conn, error) {
 func TestPool_DialFailureRefusesEveryQueuedWaiter(t *testing.T) {
 	sentinel := errors.New("connect refused (synthetic)")
 	d := &refusingDialer{err: sentinel}
-	p := newPool("203.0.113.1:1", conn.ConnOptions{Dialer: d}, PoolOptions{
+	p := New("203.0.113.1:1", conn.ConnOptions{Dialer: d}, PoolOptions{
 		MaxConnsPerHost:   1,
 		MaxStreamsPerConn: 4,
 		HealthCheckPeriod: time.Hour, // no tick: the refusal must come from dial-done
@@ -124,9 +124,9 @@ func TestPool_DialFailureRefusesEveryQueuedWaiter(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			mc, aerr := p.acquire(ctx)
+			mc, aerr := p.Acquire(ctx)
 			if aerr == nil {
-				p.release(mc)
+				p.Release(mc)
 			}
 			errs <- aerr
 		}()
@@ -164,7 +164,7 @@ func TestPool_DialFailureRefusesEveryQueuedWaiter(t *testing.T) {
 func TestPool_WaiterRescueRespectsMaxConns(t *testing.T) {
 	addrs, _, cleanup := startH2Servers(t, 1)
 	defer cleanup()
-	p := newPool(addrs[0].String(), newConnOpts(), PoolOptions{
+	p := New(addrs[0].String(), newConnOpts(), PoolOptions{
 		MaxConnsPerHost:   1,
 		MaxStreamsPerConn: 2,
 		HealthCheckPeriod: time.Hour,
@@ -172,9 +172,9 @@ func TestPool_WaiterRescueRespectsMaxConns(t *testing.T) {
 	defer func() { _ = p.Close() }()
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
-	held := make([]*managedConn, 0, 2)
+	held := make([]*ManagedConn, 0, 2)
 	for i := 0; i < 2; i++ {
-		mc, err := p.acquire(ctx)
+		mc, err := p.Acquire(ctx)
 		require.NoErrorf(t, err, "acquire %d", i)
 		held = append(held, mc)
 	}
@@ -182,9 +182,9 @@ func TestPool_WaiterRescueRespectsMaxConns(t *testing.T) {
 	parked := make(chan error, 2)
 	for i := 0; i < 2; i++ {
 		go func() {
-			mc, aerr := p.acquire(ctx)
+			mc, aerr := p.Acquire(ctx)
 			if aerr == nil {
-				p.release(mc)
+				p.Release(mc)
 			}
 			parked <- aerr
 		}()
@@ -194,7 +194,7 @@ func TestPool_WaiterRescueRespectsMaxConns(t *testing.T) {
 
 	// A release that frees a stream but evicts nothing: one waiter is served
 	// from the existing conn, and the pool must not have dialled for the other.
-	p.release(held[0])
+	p.Release(held[0])
 
 	select {
 	case aerr := <-parked:
@@ -206,6 +206,6 @@ func TestPool_WaiterRescueRespectsMaxConns(t *testing.T) {
 	assert.LessOrEqualf(t, after.ActiveConns, 1,
 		"pool holds %d conns with MaxConnsPerHost=1: the rescue dial ignored the limit (%+v)",
 		after.ActiveConns, after)
-	p.release(held[1])
+	p.Release(held[1])
 	<-parked
 }

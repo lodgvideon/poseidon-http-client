@@ -558,15 +558,15 @@ func (c *Client) PoolStats() Stats {
 	case *poolTransport:
 		return t.p.Stats()
 	case *managedTransport:
-		return t.mp.stats()
+		return t.mp.Stats()
 	case *h3PoolTransport:
 		return t.p.Stats()
 	case *h3ManagedTransport:
-		return t.mp.stats()
+		return t.mp.Stats()
 	case *h1PoolTransport:
 		return t.p.Stats()
 	case *h1ManagedTransport:
-		return t.mp.stats()
+		return t.mp.Stats()
 	}
 	return Stats{}
 }
@@ -756,7 +756,7 @@ func (c *Client) sendRequest(ctx context.Context, req *Request) (s protoStream, 
 	if hasTrailers(req) {
 		if _, verr := resolveTrailers(req); verr != nil {
 			_ = s.Close()
-			rel.release()
+			rel.Release()
 			return nil, nil, nil, nil, obs, verr
 		}
 	}
@@ -769,7 +769,7 @@ func (c *Client) sendRequest(ctx context.Context, req *Request) (s protoStream, 
 		*sp = (*sp)[:0]
 		hdrSlicePool.Put(sp)
 		_ = s.Close()
-		rel.release()
+		rel.Release()
 		return nil, nil, nil, nil, obs, err
 	}
 	*sp = (*sp)[:0]
@@ -804,7 +804,7 @@ func (c *Client) sendRequest(ctx context.Context, req *Request) (s protoStream, 
 		if err = writeRequestBody(ctx, s, req, !trailers); err != nil {
 			if !errors.Is(err, conn.ErrStreamClosed) {
 				_ = s.Close()
-				rel.release()
+				rel.Release()
 				return nil, nil, nil, nil, obs, err
 			}
 			sendCut = err
@@ -812,7 +812,7 @@ func (c *Client) sendRequest(ctx context.Context, req *Request) (s protoStream, 
 			if err = writeRequestTrailers(ctx, s, req); err != nil {
 				if !errors.Is(err, conn.ErrStreamClosed) {
 					_ = s.Close()
-					rel.release()
+					rel.Release()
 					return nil, nil, nil, nil, obs, err
 				}
 				sendCut = err
@@ -862,7 +862,7 @@ func (c *Client) do(ctx context.Context, req *Request, resp *Response) (requestO
 	if req.BodyMode == BodyStream {
 		if resp == nil {
 			_ = s.Close()
-			release.release()
+			release.Release()
 			return obs, fmt.Errorf("client: BodyStream requires a non-nil *Response")
 		}
 		headersAt, serr := c.beginStreaming(ctx, s, release, sendCut, resp)
@@ -892,7 +892,7 @@ func (c *Client) do(ctx context.Context, req *Request, resp *Response) (requestO
 	headersAt, err := drainResponse(ctx, pushLookup, s, req, resp, c.pushHandler, c.maxDecompressedSize, c.maxResponseBodySize)
 	obs.headersAt = headersAt
 	_ = s.Close()
-	release.release()
+	release.Release()
 	return obs, preferSendCut(err, sendCut)
 }
 

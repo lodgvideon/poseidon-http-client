@@ -29,7 +29,7 @@ type h3PoolTransport struct {
 // are looking at.
 func (pt *h3PoolTransport) openExchange(ctx context.Context) (protoStream, pushLookuper, releaser, exchangeStats, error) {
 	st := exchangeStats{Proto: trace.ProtoH3, RemoteAddr: pt.p.addr}
-	mc, err := pt.p.acquire(ctx)
+	mc, err := pt.p.Acquire(ctx)
 	if err != nil {
 		return nil, nil, nil, st, err
 	}
@@ -52,5 +52,5 @@ func (pt *h3PoolTransport) shutdown(gracefulTimeout time.Duration) error {
 
 // warmup implements transport.warmup. Pre-dials up to n QUIC conns into the pool.
 func (pt *h3PoolTransport) warmup(n int) {
-	pt.p.warmup(n)
+	pt.p.Warmup(n)
 }

@@ -489,7 +489,7 @@ func (p *h3Pool) refreshStreamCap(mc *h3ManagedConn) {
 
 // dialEnv snapshots what dialAttempt needs from this pool.
 func (p *h3Pool) dialEnv() dialEnv {
-	return dialEnv{closedCh: p.closedCh, timeout: p.opts.DialTimeout, addr: p.addr, metrics: p.metrics, hooksRef: p.hooksRef}
+	return dialEnv{ClosedCh: p.closedCh, Timeout: p.opts.DialTimeout, Addr: p.addr, Rec: recorderFor(p.metrics), Obs: observerFor(p.hooksRef)}
 }
 
 // dialOne dials one conn and delivers it to the actor.
@@ -740,7 +740,7 @@ func h3PruneExpiredWaiters(ws []h3AcquireReq) []h3AcquireReq {
 // acquire requests an h3ManagedConn from the actor. The returned mc's active count
 // has already been incremented by the actor. Caller MUST eventually call
 // p.release(mc).
-func (p *h3Pool) acquire(ctx context.Context) (*h3ManagedConn, error) {
+func (p *h3Pool) Acquire(ctx context.Context) (*h3ManagedConn, error) {
 	start := time.Now()
 	acquireTimeoutActive := false
 	if p.opts.AcquireTimeout > 0 {
@@ -807,7 +807,7 @@ func (p *h3Pool) release(mc *h3ManagedConn) {
 
 // warmup pre-dials up to n conns in the background. Idempotent. n is capped at
 // MaxConnsPerHost. Returns immediately; dial errors surface via the OnDial hook.
-func (p *h3Pool) warmup(n int) {
+func (p *h3Pool) Warmup(n int) {
 	if n <= 0 {
 		return
 	}
@@ -840,4 +840,4 @@ func (p *h3Pool) handleWarmup(rs *h3RunState, n int) {
 }
 
 // release implements releaser: it hands this conn back to its pool.
-func (mc *h3ManagedConn) release() { mc.p.release(mc) }
+func (mc *h3ManagedConn) Release() { mc.p.release(mc) }

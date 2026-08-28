@@ -84,7 +84,7 @@ func TestH3Pool_StatsAfterClose_ReturnsZero(t *testing.T) {
 	_ = p.Close()
 
 	s := p.Stats()
-	_, err := p.acquire(context.Background())
+	_, err := p.Acquire(context.Background())
 
 	assert.Equal(t, Stats{}, s, "Stats after Close must be zero, not the last live snapshot")
 	assert.Truef(t, errors.Is(err, ErrPoolClosed),
@@ -109,7 +109,7 @@ func TestH3Pool_DistributesStreamsAcrossConns(t *testing.T) {
 	seen := map[h3Client]bool{}
 	for i := 0; i < 3; i++ {
 		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-		mc, err := p.acquire(ctx)
+		mc, err := p.Acquire(ctx)
 		cancel()
 		require.NoErrorf(t, err, "acquire[%d]", i)
 		require.Equalf(t, 1, mc.active, "acquire[%d] conn active count", i)
@@ -120,7 +120,7 @@ func TestH3Pool_DistributesStreamsAcrossConns(t *testing.T) {
 	// A fourth acquire is at capacity (3 conns × 1 stream) and must block until a
 	// hold is released, proving the pool does not exceed MaxConnsPerHost.
 	ctx, cancel := context.WithTimeout(context.Background(), 150*time.Millisecond)
-	_, fourthErr := p.acquire(ctx)
+	_, fourthErr := p.Acquire(ctx)
 	cancel()
 
 	assert.Equal(t, 3, d.count("h:443"), "one QUIC conn per capped stream")
@@ -151,7 +151,7 @@ func TestH3Pool_ReusesConnUnderCap(t *testing.T) {
 	var first h3Client
 	for i := 0; i < 3; i++ {
 		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-		mc, err := p.acquire(ctx)
+		mc, err := p.Acquire(ctx)
 		cancel()
 		require.NoErrorf(t, err, "acquire[%d]", i)
 		if i == 0 {
@@ -191,7 +191,7 @@ func TestH3Pool_EvictsDeadConnOnRelease(t *testing.T) {
 		DialBackoff:       10 * time.Millisecond,
 	}, d.dial, hp, nil)
 	t.Cleanup(func() { _ = p.Close() })
-	mc, err := p.acquire(context.Background())
+	mc, err := p.Acquire(context.Background())
 	require.NoError(t, err, "acquire")
 	fake, ok := mc.cl.(*fakeH3Client)
 	require.Truef(t, ok, "pooled conn is %T, want *fakeH3Client", mc.cl)
@@ -225,7 +225,7 @@ func TestH3Pool_Close_ClosesAllConns(t *testing.T) {
 	p := newH3Pool("h:443", nil, PoolOptions{MaxConnsPerHost: 3, MaxStreamsPerConn: 1}, d.dial, hp, nil)
 	// Hold three streams so all three conns exist when Close runs.
 	for i := 0; i < 3; i++ {
-		_, err := p.acquire(context.Background())
+		_, err := p.Acquire(context.Background())
 		require.NoErrorf(t, err, "acquire[%d]", i)
 	}
 
@@ -253,8 +253,8 @@ func TestH3Pool_DialFailure_SetsBackoff(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 
-	_, firstErr := p.acquire(ctx)
-	_, secondErr := p.acquire(ctx)
+	_, firstErr := p.Acquire(ctx)
+	_, secondErr := p.Acquire(ctx)
 
 	require.Error(t, firstErr, "the first acquire must fail on the dial error")
 	assert.Truef(t, errors.Is(secondErr, ErrDialBackoff),

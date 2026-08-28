@@ -1,4 +1,4 @@
-package client
+package poolcore
 
 import (
 	"context"
@@ -18,7 +18,7 @@ import (
 func TestPool_Stats_Empty(t *testing.T) {
 	t.Parallel()
 
-	p := newPool("ignored:0", conn.ConnOptions{}, PoolOptions{MaxConnsPerHost: 2}, nil, nil)
+	p := New("ignored:0", conn.ConnOptions{}, PoolOptions{MaxConnsPerHost: 2}, nil, nil)
 	t.Cleanup(func() { _ = p.Close() })
 
 	s := p.Stats()
@@ -31,7 +31,7 @@ func TestPool_Stats_Empty(t *testing.T) {
 func TestPool_Close_Idempotent(t *testing.T) {
 	t.Parallel()
 
-	p := newPool("ignored:0", conn.ConnOptions{}, PoolOptions{MaxConnsPerHost: 1}, nil, nil)
+	p := New("ignored:0", conn.ConnOptions{}, PoolOptions{MaxConnsPerHost: 1}, nil, nil)
 
 	first := p.Close()
 	second := p.Close()
@@ -43,7 +43,7 @@ func TestPool_Close_Idempotent(t *testing.T) {
 func TestPool_Stats_Concurrent(t *testing.T) {
 	t.Parallel()
 
-	p := newPool("ignored:0", conn.ConnOptions{}, PoolOptions{MaxConnsPerHost: 4}, nil, nil)
+	p := New("ignored:0", conn.ConnOptions{}, PoolOptions{MaxConnsPerHost: 4}, nil, nil)
 	t.Cleanup(func() { _ = p.Close() })
 	const N = 64
 	var wg sync.WaitGroup
@@ -66,13 +66,13 @@ func TestPool_Stats_Concurrent(t *testing.T) {
 func TestPool_StatsAfterClose_ReturnsZero(t *testing.T) {
 	t.Parallel()
 
-	p := newPool("ignored:0", conn.ConnOptions{}, PoolOptions{MaxConnsPerHost: 1}, nil, nil)
+	p := New("ignored:0", conn.ConnOptions{}, PoolOptions{MaxConnsPerHost: 1}, nil, nil)
 	_ = p.Close()
 
 	s := p.Stats()
 	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
 	defer cancel()
-	_, _, _, _, err := newPoolTransportFromPool(p).openExchange(ctx)
+	_, err := p.Acquire(ctx)
 
 	assert.Equalf(t, Stats{}, s, "Stats after Close = %+v, want zero", s)
 	assert.ErrorIsf(t, err, ErrPoolClosed,
@@ -80,84 +80,84 @@ func TestPool_StatsAfterClose_ReturnsZero(t *testing.T) {
 			"closed pool from a transport failure", err)
 }
 
-// --- effectiveStreamCap ---
+// --- EffectiveStreamCap ---
 
 func TestEffectiveStreamCap_BothUnbounded(t *testing.T) {
 	t.Parallel()
 
-	got := effectiveStreamCap(0, 0)
+	got := EffectiveStreamCap(0, 0)
 
 	assert.Equalf(t, 100, got,
-		"effectiveStreamCap(0,0) = %d, want 100 — with neither side declaring a cap the "+
+		"EffectiveStreamCap(0,0) = %d, want 100 — with neither side declaring a cap the "+
 			"pool must fall back to the documented default", got)
 }
 
 func TestEffectiveStreamCap_LocalOnly(t *testing.T) {
 	t.Parallel()
 
-	got := effectiveStreamCap(50, 0)
+	got := EffectiveStreamCap(50, 0)
 
-	assert.Equalf(t, 50, got, "effectiveStreamCap(50,0) = %d, want 50", got)
+	assert.Equalf(t, 50, got, "EffectiveStreamCap(50,0) = %d, want 50", got)
 }
 
 func TestEffectiveStreamCap_PeerOnly(t *testing.T) {
 	t.Parallel()
 
-	got := effectiveStreamCap(0, 30)
+	got := EffectiveStreamCap(0, 30)
 
-	assert.Equalf(t, 30, got, "effectiveStreamCap(0,30) = %d, want 30", got)
+	assert.Equalf(t, 30, got, "EffectiveStreamCap(0,30) = %d, want 30", got)
 }
 
 func TestEffectiveStreamCap_PeerLower(t *testing.T) {
 	t.Parallel()
 
-	got := effectiveStreamCap(100, 2)
+	got := EffectiveStreamCap(100, 2)
 
 	assert.Equalf(t, 2, got,
-		"effectiveStreamCap(100,2) = %d, want 2 (peer cap) — exceeding the peer's "+
+		"EffectiveStreamCap(100,2) = %d, want 2 (peer cap) — exceeding the peer's "+
 			"MAX_CONCURRENT_STREAMS is a protocol error", got)
 }
 
 func TestEffectiveStreamCap_LocalLower(t *testing.T) {
 	t.Parallel()
 
-	got := effectiveStreamCap(10, 100)
+	got := EffectiveStreamCap(10, 100)
 
-	assert.Equalf(t, 10, got, "effectiveStreamCap(10,100) = %d, want 10 (local cap)", got)
+	assert.Equalf(t, 10, got, "EffectiveStreamCap(10,100) = %d, want 10 (local cap)", got)
 }
 
-// --- inDialBackoff ---
+// --- InDialBackoff ---
 
 func TestInDialBackoff_WithinWindow(t *testing.T) {
 	t.Parallel()
 
-	got := inDialBackoff(time.Now(), 1*time.Second)
+	got := InDialBackoff(time.Now(), 1*time.Second)
 
-	assert.True(t, got, "inDialBackoff should return true for fresh error within window")
+	assert.True(t, got, "InDialBackoff should return true for fresh error within window")
 }
 
 func TestInDialBackoff_AfterWindow(t *testing.T) {
 	t.Parallel()
 
-	got := inDialBackoff(time.Now().Add(-10*time.Second), 1*time.Millisecond)
+	got := InDialBackoff(time.Now().Add(-10*time.Second), 1*time.Millisecond)
 
-	assert.False(t, got, "inDialBackoff should return false after window expired")
+	assert.False(t, got, "InDialBackoff should return false after window expired")
 }
 
 func TestInDialBackoff_ZeroLastErr(t *testing.T) {
 	t.Parallel()
 
-	got := inDialBackoff(time.Time{}, 1*time.Second)
+	got := InDialBackoff(time.Time{}, 1*time.Second)
 
-	assert.False(t, got, "inDialBackoff should return false when lastErrAt is zero")
+	assert.False(t, got, "InDialBackoff should return false when lastErrAt is zero")
 }
 
 func TestInDialBackoff_ZeroWindow(t *testing.T) {
 	t.Parallel()
 
-	got := inDialBackoff(time.Now(), 0)
+	got := InDialBackoff(time.Now(), 0)
 
-	assert.False(t, got, "inDialBackoff should return false when window is 0")
+	assert.False(t, got, "InDialBackoff should return false when window is 0")
 }
 
 // --- acquire context-cancel paths ---
@@ -165,12 +165,12 @@ func TestInDialBackoff_ZeroWindow(t *testing.T) {
 func TestPool_AcquireCtxCanceledBeforeSend(t *testing.T) {
 	t.Parallel()
 
-	p := newPool("ignored:0", conn.ConnOptions{}, PoolOptions{MaxConnsPerHost: 1}, nil, nil)
+	p := New("ignored:0", conn.ConnOptions{}, PoolOptions{MaxConnsPerHost: 1}, nil, nil)
 	t.Cleanup(func() { _ = p.Close() })
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel() // cancel before acquire
 
-	_, err := p.acquire(ctx)
+	_, err := p.Acquire(ctx)
 
 	assert.ErrorIsf(t, err, context.Canceled, "acquire = %v, want context.Canceled", err)
 }
@@ -178,11 +178,11 @@ func TestPool_AcquireCtxCanceledBeforeSend(t *testing.T) {
 func TestPool_AcquireClosedChBeforeSend(t *testing.T) {
 	t.Parallel()
 
-	p := newPool("ignored:0", conn.ConnOptions{}, PoolOptions{MaxConnsPerHost: 1}, nil, nil)
+	p := New("ignored:0", conn.ConnOptions{}, PoolOptions{MaxConnsPerHost: 1}, nil, nil)
 	// Close the pool before acquire so closedCh fires.
 	_ = p.Close()
 
-	_, err := p.acquire(context.Background())
+	_, err := p.Acquire(context.Background())
 
 	assert.ErrorIsf(t, err, ErrPoolClosed, "acquire = %v, want ErrPoolClosed", err)
 }
@@ -194,7 +194,7 @@ func TestPool_AcquireTimeout(t *testing.T) {
 	// Use a pool with an always-failing dialer so it never provides a conn.
 	// AcquireTimeout is short so the wait-for-reply path times out.
 	fd := &failingDialer{err: errors.New("no connect")}
-	p := newPool("fake:0", conn.ConnOptions{Dialer: fd}, PoolOptions{
+	p := New("fake:0", conn.ConnOptions{Dialer: fd}, PoolOptions{
 		MaxConnsPerHost: 1,
 		AcquireTimeout:  20 * time.Millisecond,
 		DialBackoff:     10 * time.Millisecond,
@@ -206,12 +206,12 @@ func TestPool_AcquireTimeout(t *testing.T) {
 	// First acquire: dial is attempted, actor returns dial error via replyAcquire.
 	// The dialer wraps with conn.Dial wrapping → expect non-nil error,
 	// not necessarily a known sentinel.
-	_, err1 := p.acquire(ctx)
+	_, err1 := p.Acquire(ctx)
 	// Second acquire: within DialBackoff window with no live conns →
 	// ErrDialBackoff; if scheduling delays the reply past AcquireTimeout
 	// the actor's reply path loses the race and the caller observes
 	// ErrAcquireTimeout. Both are valid.
-	_, err2 := p.acquire(ctx)
+	_, err2 := p.Acquire(ctx)
 
 	require.Error(t, err1, "first acquire should fail against an always-failing dialer, got nil")
 	assert.Truef(t, errors.Is(err2, ErrDialBackoff) || errors.Is(err2, ErrAcquireTimeout),
@@ -229,29 +229,29 @@ func TestPruneExpiredWaiters_DropsCancelledKeepsLive(t *testing.T) {
 	// Every waiter carries the cap-1 reply channel acquire gives it: a pruned
 	// waiter is still owed exactly one reply (its caller's reclaim goroutine is
 	// blocked on it), and a live one must not be replied to.
-	in := []acquireReq{
-		{ctx: live, reply: make(chan acquireResp, 1)},
-		{ctx: dead, reply: make(chan acquireResp, 1)},
-		{ctx: live, reply: make(chan acquireResp, 1)},
-		{ctx: dead, reply: make(chan acquireResp, 1)},
+	in := []AcquireReq{
+		{Ctx: live, Reply: make(chan AcquireResp, 1)},
+		{Ctx: dead, Reply: make(chan AcquireResp, 1)},
+		{Ctx: live, Reply: make(chan AcquireResp, 1)},
+		{Ctx: dead, Reply: make(chan AcquireResp, 1)},
 	}
-	dropped := []acquireReq{in[1], in[3]}
+	dropped := []AcquireReq{in[1], in[3]}
 
 	out := pruneExpiredWaiters(in)
 
 	require.Lenf(t, out, 2, "len(out) = %d, want 2", len(out))
 	for i, w := range out {
 		select {
-		case <-w.ctx.Done():
+		case <-w.Ctx.Done():
 			require.Failf(t, "live waiter dropped", "out[%d] ctx unexpectedly done", i)
 		default:
 		}
-		assert.Emptyf(t, w.reply, "out[%d]: live waiter was replied to by pruning", i)
+		assert.Emptyf(t, w.Reply, "out[%d]: live waiter was replied to by pruning", i)
 	}
 	for i, w := range dropped {
 		select {
-		case resp := <-w.reply:
-			assert.Errorf(t, resp.err, "dropped[%d] reply err = nil, want ctx error", i)
+		case resp := <-w.Reply:
+			assert.Errorf(t, resp.Err, "dropped[%d] reply err = nil, want ctx error", i)
 		default:
 			assert.Failf(t, "pruned waiter got no reply",
 				"dropped[%d] got no reply: its reclaim goroutine would hang forever", i)
@@ -263,7 +263,7 @@ func TestPruneExpiredWaiters_EmptyAndAllLive(t *testing.T) {
 	t.Parallel()
 
 	live := context.Background()
-	in := []acquireReq{{ctx: live}, {ctx: live}}
+	in := []AcquireReq{{Ctx: live}, {Ctx: live}}
 
 	fromNil := pruneExpiredWaiters(nil)
 	fromLive := pruneExpiredWaiters(in)
@@ -300,7 +300,7 @@ func TestPool_DialTimeout_FiresOnHangingDial(t *testing.T) {
 	t.Parallel()
 
 	hd := &hangingDialer{release: make(chan struct{})}
-	p := newPool("fake:0", conn.ConnOptions{Dialer: hd}, PoolOptions{
+	p := New("fake:0", conn.ConnOptions{Dialer: hd}, PoolOptions{
 		MaxConnsPerHost: 1,
 		DialTimeout:     50 * time.Millisecond,
 		DialBackoff:     1 * time.Millisecond,
@@ -313,7 +313,7 @@ func TestPool_DialTimeout_FiresOnHangingDial(t *testing.T) {
 	defer cancel()
 
 	start := time.Now()
-	_, err := p.acquire(ctx)
+	_, err := p.Acquire(ctx)
 	elapsed := time.Since(start)
 
 	require.Error(t, err, "expected dial-timeout error, got nil")
@@ -327,7 +327,7 @@ func TestPool_DialTimeout_FiresOnHangingDial(t *testing.T) {
 func TestPool_DialTimeout_DefaultedTo30s(t *testing.T) {
 	t.Parallel()
 
-	p := newPool("ignored:0", conn.ConnOptions{}, PoolOptions{MaxConnsPerHost: 1}, nil, nil)
+	p := New("ignored:0", conn.ConnOptions{}, PoolOptions{MaxConnsPerHost: 1}, nil, nil)
 	t.Cleanup(func() { _ = p.Close() })
 
 	got := p.opts.DialTimeout
@@ -346,7 +346,7 @@ func TestPool_DialOne_PoolCloseCancelsHangingDial(t *testing.T) {
 		release:     make(chan struct{}),
 		dialStarted: make(chan struct{}),
 	}
-	p := newPool("fake:0", conn.ConnOptions{Dialer: hd}, PoolOptions{
+	p := New("fake:0", conn.ConnOptions{Dialer: hd}, PoolOptions{
 		MaxConnsPerHost: 1,
 		// Long DialTimeout so we know cancellation came from Close,
 		// not the timeout.
@@ -355,7 +355,7 @@ func TestPool_DialOne_PoolCloseCancelsHangingDial(t *testing.T) {
 	// Trigger a dial via acquire in a goroutine so the actor calls dialOne.
 	acqErr := make(chan error, 1)
 	go func() {
-		_, err := p.acquire(context.Background())
+		_, err := p.Acquire(context.Background())
 		acqErr <- err
 	}()
 	// Wait until the dial is actually in progress before closing the pool.
@@ -389,11 +389,11 @@ func TestPool_DialOne_PoolCloseCancelsHangingDial(t *testing.T) {
 func TestPool_Release_NilMC_NoOp(t *testing.T) {
 	t.Parallel()
 
-	p := newPool("ignored:0", conn.ConnOptions{}, PoolOptions{MaxConnsPerHost: 1}, nil, nil)
+	p := New("ignored:0", conn.ConnOptions{}, PoolOptions{MaxConnsPerHost: 1}, nil, nil)
 	t.Cleanup(func() { _ = p.Close() })
 
 	// Must not panic or block.
-	require.NotPanics(t, func() { p.release(nil) },
+	require.NotPanics(t, func() { p.Release(nil) },
 		"release(nil) must be a no-op: callers release unconditionally on error paths")
 
 	assert.Equal(t, Stats{}, p.Stats(), "a nil release must not change pool state")
@@ -404,20 +404,20 @@ func TestPool_Release_NilMC_NoOp(t *testing.T) {
 func TestPool_Release_PoolClosed_NoDeadlock(t *testing.T) {
 	t.Parallel()
 
-	p := newPool("ignored:0", conn.ConnOptions{}, PoolOptions{MaxConnsPerHost: 1}, nil, nil)
+	p := New("ignored:0", conn.ConnOptions{}, PoolOptions{MaxConnsPerHost: 1}, nil, nil)
 	_ = p.Close()
-	// Synthesise a managedConn with a real *conn.Conn placeholder (nil).
+	// Synthesise a ManagedConn with a real *conn.Conn placeholder (nil).
 	// release(mc, nil) when pool is already closed must take closedCh branch.
 	// We can't build a valid *conn.Conn without dialing, but release only reads
-	// mc.active/mc.lastUsed inside the actor — and the actor is already gone.
+	// mc.Active/mc.LastUsed inside the actor — and the actor is already gone.
 	// Passing a non-nil mc with a nil inner c is fine here since the actor never
 	// runs again.
-	mc := &managedConn{}
+	mc := &ManagedConn{}
 
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		p.release(mc)
+		p.Release(mc)
 	}()
 
 	select {
@@ -438,7 +438,7 @@ func TestPool_DialOne_PoolClosedBeforeResult(t *testing.T) {
 	// dialDoneCh but must fall through to the closedCh select arm instead.
 	stopSrv := make(chan struct{})
 	d := &fakeDialer{srvAfter: func(*frame.Framer) { <-stopSrv }}
-	p := newPool("fake:0", conn.ConnOptions{Dialer: d}, PoolOptions{MaxConnsPerHost: 2}, nil, nil)
+	p := New("fake:0", conn.ConnOptions{Dialer: d}, PoolOptions{MaxConnsPerHost: 2}, nil, nil)
 	// Close the pool immediately so closedCh is closed.
 	_ = p.Close()
 	close(stopSrv)
@@ -463,7 +463,7 @@ func TestPool_Evict_RemovesTarget(t *testing.T) {
 	t.Parallel()
 
 	// Build a tiny pool but exercise evict directly without a live *conn.Conn.
-	// We need a real *conn.Conn for evict because it calls mc.c.Close().
+	// We need a real *conn.Conn for evict because it calls mc.C.Close().
 	// Use net.Pipe + NewClientConn so we get a real conn object we can close.
 	cli, srv := net.Pipe()
 	defer srv.Close()
@@ -479,16 +479,16 @@ func TestPool_Evict_RemovesTarget(t *testing.T) {
 	c, err := conn.NewClientConn(ctx, cli, conn.ConnOptions{})
 	require.NoError(t, err, "NewClientConn")
 	t.Cleanup(func() { _ = c.Close() })
-	p := newPool("ignored:0", conn.ConnOptions{}, PoolOptions{MaxConnsPerHost: 2}, nil, nil)
+	p := New("ignored:0", conn.ConnOptions{}, PoolOptions{MaxConnsPerHost: 2}, nil, nil)
 	t.Cleanup(func() { _ = p.Close() })
-	mc1 := &managedConn{c: c}
-	mc2 := &managedConn{c: c} // same underlying conn — just testing slice logic
+	mc1 := &ManagedConn{C: c}
+	mc2 := &ManagedConn{C: c} // same underlying conn — just testing slice logic
 
-	result := p.evict([]*managedConn{mc1, mc2}, mc1, CloseDead)
+	result := p.evict([]*ManagedConn{mc1, mc2}, mc1, CloseDead)
 
 	require.Lenf(t, result, 1, "evict result len = %d, want 1", len(result))
 	assert.Same(t, mc2, result[0],
-		"evict should keep the other managedConn — removing the wrong entry would close a "+
+		"evict should keep the other ManagedConn — removing the wrong entry would close a "+
 			"live conn and leave the dead one in the pool")
 }
 
@@ -502,25 +502,25 @@ func TestPool_Evict_RemovesTarget(t *testing.T) {
 func TestPool_ReplyAcquire_DeliversEvenWhenCtxCancelled(t *testing.T) {
 	t.Parallel()
 
-	p := newPool("ignored:0", conn.ConnOptions{}, PoolOptions{MaxConnsPerHost: 1}, nil, nil)
+	p := New("ignored:0", conn.ConnOptions{}, PoolOptions{MaxConnsPerHost: 1}, nil, nil)
 	t.Cleanup(func() { _ = p.Close() })
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel() // already cancelled
-	reply := make(chan acquireResp, 1)
-	req := acquireReq{ctx: ctx, reply: reply}
-	mc := &managedConn{active: 1}
+	reply := make(chan AcquireResp, 1)
+	req := AcquireReq{Ctx: ctx, Reply: reply}
+	mc := &ManagedConn{Active: 1}
 
-	p.replyAcquire(req, mc, nil) // must not block, must not touch mc.active
+	p.replyAcquire(req, mc, nil) // must not block, must not touch mc.Active
 
 	select {
 	case resp := <-reply:
-		assert.Samef(t, mc, resp.mc, "reply mc = %p, want %p", resp.mc, mc)
+		assert.Samef(t, mc, resp.Mc, "reply mc = %p, want %p", resp.Mc, mc)
 	default:
 		assert.Fail(t, "replyAcquire delivered nothing to an abandoned caller",
 			"the committed mc is stranded and its slot leaked")
 	}
-	assert.Equalf(t, 1, mc.active,
-		"mc.active = %d, want 1 (the reclaiming caller releases, not the actor)", mc.active)
+	assert.Equalf(t, 1, mc.Active,
+		"mc.Active = %d, want 1 (the reclaiming caller releases, not the actor)", mc.Active)
 }
 
 // --- run: dialDone error with no waiters ---
@@ -529,7 +529,7 @@ func TestPool_DialFailure_NoWaiters_SetsBackoff(t *testing.T) {
 	t.Parallel()
 
 	fd := &failingDialer{err: errors.New("connection refused")}
-	p := newPool("fake:0", conn.ConnOptions{Dialer: fd}, PoolOptions{
+	p := New("fake:0", conn.ConnOptions{Dialer: fd}, PoolOptions{
 		MaxConnsPerHost: 1,
 		DialBackoff:     500 * time.Millisecond,
 	}, nil, nil)
@@ -538,9 +538,9 @@ func TestPool_DialFailure_NoWaiters_SetsBackoff(t *testing.T) {
 	defer cancel()
 
 	// First acquire: triggers a dial, waiter queued, dial fails → waiter gets error.
-	_, err := p.acquire(ctx)
+	_, err := p.Acquire(ctx)
 	// Second acquire within backoff window → ErrDialBackoff (no new dial).
-	_, err2 := p.acquire(ctx)
+	_, err2 := p.Acquire(ctx)
 
 	require.Error(t, err, "expected dial error, got nil")
 	assert.ErrorIsf(t, err2, ErrDialBackoff, "second acquire = %v, want ErrDialBackoff", err2)

@@ -42,13 +42,13 @@ func TestH1ManagedPool_FailsOverOnFirstDialFailure(t *testing.T) {
 	mp, err := newH1ManagedPool(StaticResolver(addrs...), RoundRobin(), DrainGraceful,
 		dialer, h1ManagedPoolOpts(), nil, nil)
 	require.NoError(t, err, "newH1ManagedPool")
-	defer func() { _ = mp.close() }()
+	defer func() { _ = mp.Close() }()
 
 	// RoundRobin starts on addrs[0] — the dead one — so the loop must reach
 	// addrs[1] within this single acquire.
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
-	c, rel, _, err := mp.acquire(ctx)
+	c, rel, _, err := mp.Acquire(ctx)
 
 	require.NoErrorf(t, err,
 		"acquire = %v; a live second address was available, so the loop stopped on the dead one", err)
@@ -71,11 +71,11 @@ func TestH3ManagedPool_FailsOverOnFirstDialFailure(t *testing.T) {
 		PoolOptions{MaxConnsPerHost: 1, MaxStreamsPerConn: 4, HealthCheckPeriod: time.Hour},
 		dialFn, nil, nil)
 	require.NoError(t, err, "newH3ManagedPool")
-	defer func() { _ = mp.close() }()
+	defer func() { _ = mp.Close() }()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
-	c, rel, _, err := mp.acquire(ctx)
+	c, rel, _, err := mp.Acquire(ctx)
 
 	require.NoErrorf(t, err,
 		"acquire = %v; a live second address was available, so the loop stopped on the dead one", err)

@@ -25,7 +25,7 @@ import (
 // itself settles, so none of them is timing-shaped: there is no injection to
 // count and no tolerance to widen.
 
-// TestEvictIdle_KeepsConnWithActiveStreams pins evictIdle's `active == 0`
+// TestEvictIdle_KeepsConnWithActiveStreams pins EvictIdle's `active == 0`
 // guard on the HTTP/2 pool.
 //
 // Without it, a connection idle past IdleTimeout is closed even while it is
@@ -35,7 +35,7 @@ import (
 //
 // Deleting `mc.active == 0 &&` from pool.go left the suite green.
 func TestEvictIdle_KeepsConnWithActiveStreams(t *testing.T) {
-	// evictIdle closes what it evicts, so the idle conn needs a real *conn.Conn.
+	// EvictIdle closes what it evicts, so the idle conn needs a real *conn.Conn.
 	cli, srv := net.Pipe()
 	defer srv.Close()
 	stopSrv := make(chan struct{})
@@ -59,14 +59,14 @@ func TestEvictIdle_KeepsConnWithActiveStreams(t *testing.T) {
 	t.Cleanup(func() { _ = p.Close() })
 
 	stale := time.Now().Add(-time.Second) // well past IdleTimeout
-	busy := &managedConn{c: c, active: 1, lastUsed: stale}
-	idle := &managedConn{c: c, active: 0, lastUsed: stale}
+	busy := &managedConn{C: c, Active: 1, LastUsed: stale}
+	idle := &managedConn{C: c, Active: 0, LastUsed: stale}
 
-	got := p.evictIdle([]*managedConn{busy, idle})
+	got := p.EvictIdle([]*managedConn{busy, idle})
 
-	require.Lenf(t, got, 1, "evictIdle kept %d conns, want 1", len(got))
+	require.Lenf(t, got, 1, "EvictIdle kept %d conns, want 1", len(got))
 	assert.Same(t, busy, got[0],
-		"evictIdle evicted the conn that still had active streams and kept the idle one — "+
+		"EvictIdle evicted the conn that still had active streams and kept the idle one — "+
 			"a long-lived response or slow upload would be cut mid-flight")
 }
 
@@ -86,13 +86,13 @@ func TestH3EvictIdle_KeepsConnWithActiveStreams(t *testing.T) {
 
 	got := p.evictIdle([]*h3ManagedConn{busy, idle})
 
-	require.Lenf(t, got, 1, "evictIdle kept %d conns, want 1", len(got))
+	require.Lenf(t, got, 1, "EvictIdle kept %d conns, want 1", len(got))
 	assert.Same(t, busy, got[0],
-		"evictIdle evicted the conn that still had active streams and kept the idle one — "+
+		"EvictIdle evicted the conn that still had active streams and kept the idle one — "+
 			"the QUIC streams on it would be torn down mid-flight")
 }
 
-// TestHandleTick_DialsForStrandedWaiter pins ensureDialForWaiters inside the
+// TestHandleTick_DialsForStrandedWaiter pins EnsureDialForWaiters inside the
 // HTTP/2 tick. Deleting that call from Pool.handleTick left the suite green.
 //
 // The state it exists to escape is {no live conns, no in-flight dials, queued
@@ -113,16 +113,16 @@ func TestHandleTick_DialsForStrandedWaiter(t *testing.T) {
 	t.Cleanup(func() { _ = p.Close() })
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	rs := &runState{
-		waiters: []acquireReq{{ctx: ctx, reply: make(chan acquireResp, 1)}},
+	rs := &RunState{
+		Waiters: []AcquireReq{{Ctx: ctx, Reply: make(chan AcquireResp, 1)}},
 	}
 
-	p.handleTick(rs)
+	p.HandleTick(rs)
 
-	assert.Equalf(t, 1, rs.inFlightDials,
+	assert.Equalf(t, 1, rs.InFlightDials,
 		"inFlightDials = %d after a tick with a stranded waiter, want 1 — "+
 			"nothing re-enters the dial decision, so the waiter blocks until its ctx expires",
-		rs.inFlightDials)
+		rs.InFlightDials)
 }
 
 // TestH1HandleTick_DialsForStrandedWaiter is the HTTP/1.1 twin. Same call, same

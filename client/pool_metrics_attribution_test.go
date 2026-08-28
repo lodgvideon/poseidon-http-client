@@ -38,11 +38,11 @@ func TestPool_StatsEvictionIsCounted(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	mc, err := p.acquire(ctx)
+	mc, err := p.Acquire(ctx)
 	require.NoError(t, err, "acquire")
-	p.release(mc)
+	p.Release(mc)
 	// release is asynchronous. Without waiting for the actor to process it, the
-	// kill below can land first and handleRelease evicts through evict(), which
+	// kill below can land first and HandleRelease evicts through evict(), which
 	// counts — so the test would pass without ever reaching the Stats path it
 	// exists to cover. Stats() is a round trip through the same actor, so one
 	// call is the barrier.
@@ -54,7 +54,7 @@ func TestPool_StatsEvictionIsCounted(t *testing.T) {
 		m.Counters.ConnsClosed.Load())
 
 	// Kill it out of band, then observe it only through Stats().
-	_ = mc.c.Close()
+	_ = mc.C.Close()
 	s = waitStats(p, func(s Stats) bool { return s.ActiveConns == 0 }, 5*time.Second)
 
 	require.Zerof(t, s.ActiveConns, "the dead conn was not reaped by the Stats path: %+v", s)
@@ -87,9 +87,9 @@ func TestPool_TickAttributesGoAwayBeforeIdle(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	mc, err := p.acquire(ctx)
+	mc, err := p.Acquire(ctx)
 	require.NoError(t, err, "acquire")
-	p.release(mc)
+	p.Release(mc)
 
 	// A real GOAWAY: the server shuts down gracefully.
 	shut, shutCancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -148,7 +148,7 @@ func TestH1Pool_StatsEvictionIsCounted(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	mc, err := p.acquire(ctx)
+	mc, err := p.Acquire(ctx)
 	require.NoError(t, err, "acquire")
 	p.release(mc, true)
 	// Barrier, for the reason spelled out in the H2 sibling: release is

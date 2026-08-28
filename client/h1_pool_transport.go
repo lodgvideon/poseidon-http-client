@@ -25,7 +25,7 @@ type h1PoolTransport struct {
 // mirrors how h1singleConn drives its in-flight slot.
 func (pt *h1PoolTransport) openExchange(ctx context.Context) (protoStream, pushLookuper, releaser, exchangeStats, error) {
 	st := exchangeStats{Proto: trace.ProtoH1, RemoteAddr: pt.p.addr}
-	mc, err := pt.p.acquire(ctx)
+	mc, err := pt.p.Acquire(ctx)
 	if err != nil {
 		return nil, nil, nil, st, err
 	}
@@ -50,5 +50,5 @@ func (pt *h1PoolTransport) shutdown(gracefulTimeout time.Duration) error {
 
 // warmup implements transport.warmup. Pre-dials up to n conns into the pool.
 func (pt *h1PoolTransport) warmup(n int) {
-	pt.p.warmup(n)
+	pt.p.Warmup(n)
 }

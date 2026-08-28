@@ -72,7 +72,7 @@ func TestH3Pool_Tick_AttributesGoAwayBeforeIdle(t *testing.T) {
 		IdleTimeout: time.Millisecond,
 	}, d.dial, hp, m)
 	defer func() { _ = p.Close() }()
-	mc, err := p.acquire(context.Background())
+	mc, err := p.Acquire(context.Background())
 	require.NoError(t, err, "acquire")
 	p.release(mc)
 	// Wait for the actor to RECORD the release before arming the GOAWAY, and do
@@ -127,7 +127,7 @@ func TestH3Pool_Tick_EvictsDeadConnStillCarryingStreams(t *testing.T) {
 	defer func() { _ = p.Close() }()
 	// Hold the stream: the conn is checked out (active > 0) for the whole test,
 	// which is the state a mistaken active == 0 guard would protect.
-	_, err := p.acquire(context.Background())
+	_, err := p.Acquire(context.Background())
 	require.NoError(t, err, "acquire")
 	conns := d.all()
 	require.Len(t, conns, 1, "one acquire must have opened exactly one conn")

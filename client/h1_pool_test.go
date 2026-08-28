@@ -183,7 +183,7 @@ func mustAcquireH1(t *testing.T, p *h1Pool) *h1ManagedConn {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
-	mc, err := p.acquire(ctx)
+	mc, err := p.Acquire(ctx)
 	require.NoError(t, err, "acquire")
 	return mc
 }
@@ -219,7 +219,7 @@ func TestH1Pool_StatsAfterClose_ReturnsZero(t *testing.T) {
 	_ = p.Close()
 
 	s := p.Stats()
-	_, aerr := p.acquire(context.Background())
+	_, aerr := p.Acquire(context.Background())
 
 	assert.Equal(t, Stats{}, s, "Stats after Close must be zero, not the pre-close snapshot")
 	assert.ErrorIs(t, aerr, ErrPoolClosed,
@@ -283,7 +283,7 @@ func TestH1Pool_AtCap_ThirdAcquireWaitsThenProceeds(t *testing.T) {
 
 	// At cap with both conns busy: the third acquire must block.
 	ctx, cancel := context.WithTimeout(context.Background(), 150*time.Millisecond)
-	_, err := p.acquire(ctx)
+	_, err := p.Acquire(ctx)
 	cancel()
 	require.ErrorIs(t, err, context.DeadlineExceeded,
 		"the third acquire at the cap must BLOCK until its own deadline, not serialize "+
@@ -295,7 +295,7 @@ func TestH1Pool_AtCap_ThirdAcquireWaitsThenProceeds(t *testing.T) {
 	go func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 		defer cancel()
-		mc, err := p.acquire(ctx)
+		mc, err := p.Acquire(ctx)
 		if err != nil {
 			bad <- err
 			return
@@ -334,7 +334,7 @@ func TestH1Pool_AtCap_CtxCancelWhileWaiting_ReturnsCtxErr(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	errCh := make(chan error, 1)
 	go func() {
-		_, err := p.acquire(ctx)
+		_, err := p.Acquire(ctx)
 		errCh <- err
 	}()
 	time.Sleep(30 * time.Millisecond) // let the waiter enqueue
@@ -367,7 +367,7 @@ func TestH1Pool_MaxStreamsPerConn_Ignored(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 150*time.Millisecond)
 
-	_, err := p.acquire(ctx)
+	_, err := p.Acquire(ctx)
 	cancel()
 
 	require.ErrorIs(t, err, context.DeadlineExceeded,
@@ -398,7 +398,7 @@ func TestH1Pool_BoundedConcurrency_UnderLoad(t *testing.T) {
 			defer cancel()
 			// assert, never require: this runs off the test goroutine, where
 			// require's FailNow is illegal.
-			mc, err := p.acquire(ctx)
+			mc, err := p.Acquire(ctx)
 			if err != nil {
 				assert.NoError(t, err, "acquire under load")
 				return
@@ -568,7 +568,7 @@ func TestH1Pool_DialError_FailsAllQueuedWaiters(t *testing.T) {
 			ctx, cancel := context.WithTimeout(context.Background(), waiterBudget)
 			defer cancel()
 			queued.Done()
-			_, err := p.acquire(ctx)
+			_, err := p.Acquire(ctx)
 			errs <- err
 		}()
 	}
@@ -618,7 +618,7 @@ func TestH1Pool_WaiterServedAfterCloseEviction(t *testing.T) {
 	go func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		_, err := p.acquire(ctx)
+		_, err := p.Acquire(ctx)
 		got <- err
 	}()
 	time.Sleep(100 * time.Millisecond) // let the second acquire queue as a waiter
@@ -709,7 +709,7 @@ func TestH1Pool_DialError_PropagatesAsDialError(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
-	_, err := p.acquire(ctx)
+	_, err := p.Acquire(ctx)
 
 	var de *DialError
 	require.ErrorAsf(t, err, &de,
@@ -819,13 +819,13 @@ func TestH1Pool_DialBackoff_FastRefuses(t *testing.T) {
 	t.Cleanup(func() { _ = p.Close() })
 
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-	_, _ = p.acquire(ctx) // seeds lastDialErrAt
+	_, _ = p.Acquire(ctx) // seeds lastDialErrAt
 	cancel()
 
 	ctx2, cancel2 := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel2()
 
-	_, err := p.acquire(ctx2)
+	_, err := p.Acquire(ctx2)
 
 	require.ErrorIs(t, err, ErrDialBackoff,
 		"a second acquire inside DialBackoff must fast-refuse rather than re-dial a "+

@@ -99,12 +99,12 @@ func TestPool_AbandonedAcquire_DoesNotLeakStreamSlots(t *testing.T) {
 	defer func() { _ = p.Close() }()
 
 	// Prime: get one live conn into the pool so every abandoned acquire below
-	// hits the pickLeastLoaded happy path (the one that increments active).
+	// hits the PickLeastLoaded happy path (the one that increments active).
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	mc, err := p.acquire(ctx)
+	mc, err := p.Acquire(ctx)
 	cancel()
 	require.NoError(t, err, "priming acquire")
-	p.release(mc)
+	p.Release(mc)
 	s := waitStats(p, func(s Stats) bool { return s.InFlightStreams == 0 }, 2*time.Second)
 	require.Zerof(t, s.InFlightStreams, "priming release did not settle: %+v", s)
 
@@ -113,11 +113,11 @@ func TestPool_AbandonedAcquire_DoesNotLeakStreamSlots(t *testing.T) {
 	controlOK := 0
 	for i := 0; i < controlIters; i++ {
 		cctx, ccancel := context.WithTimeout(context.Background(), 5*time.Second)
-		cmc, cerr := p.acquire(cctx)
+		cmc, cerr := p.Acquire(cctx)
 		ccancel()
 		if cerr == nil {
 			controlOK++
-			p.release(cmc)
+			p.Release(cmc)
 		}
 	}
 	require.Equalf(t, controlIters, controlOK,
@@ -134,11 +134,11 @@ func TestPool_AbandonedAcquire_DoesNotLeakStreamSlots(t *testing.T) {
 	for i := 0; i < abandonIters; i++ {
 		actx, acancel := context.WithCancel(context.Background())
 		acancel() // already done: the actor must not strand a committed conn
-		amc, aerr := p.acquire(actx)
+		amc, aerr := p.Acquire(actx)
 		if aerr == nil {
 			// The reply won the caller's select; releasing is the caller's contract.
 			served++
-			p.release(amc)
+			p.Release(amc)
 		} else {
 			refused++
 		}
@@ -158,12 +158,12 @@ func TestPool_AbandonedAcquire_DoesNotLeakStreamSlots(t *testing.T) {
 		s, abandonIters)
 	// The pool must still be usable: a leaked slot starves it permanently.
 	ctx2, cancel2 := context.WithTimeout(context.Background(), 3*time.Second)
-	mc2, err2 := p.acquire(ctx2)
+	mc2, err2 := p.Acquire(ctx2)
 	cancel2()
 	require.NoErrorf(t, err2,
 		"normal acquire after %d abandons = %v, want success (pool starved by leaked slots)",
 		abandonIters, err2)
-	p.release(mc2)
+	p.Release(mc2)
 	// Every reclaim goroutine must exit: the actor owes each accepted request
 	// exactly one reply, and reclaim blocks until it arrives.
 	n := waitGoroutines(before+4, 3*time.Second)
@@ -183,7 +183,7 @@ func TestH3Pool_AbandonedAcquire_DoesNotLeakStreamSlots(t *testing.T) {
 	defer func() { _ = p.Close() }()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	mc, err := p.acquire(ctx)
+	mc, err := p.Acquire(ctx)
 	cancel()
 	require.NoError(t, err, "priming acquire")
 	p.release(mc)
@@ -194,7 +194,7 @@ func TestH3Pool_AbandonedAcquire_DoesNotLeakStreamSlots(t *testing.T) {
 	controlOK := 0
 	for i := 0; i < controlIters; i++ {
 		cctx, ccancel := context.WithTimeout(context.Background(), 5*time.Second)
-		cmc, cerr := p.acquire(cctx)
+		cmc, cerr := p.Acquire(cctx)
 		ccancel()
 		if cerr == nil {
 			controlOK++
@@ -213,7 +213,7 @@ func TestH3Pool_AbandonedAcquire_DoesNotLeakStreamSlots(t *testing.T) {
 	for i := 0; i < abandonIters; i++ {
 		actx, acancel := context.WithCancel(context.Background())
 		acancel()
-		amc, aerr := p.acquire(actx)
+		amc, aerr := p.Acquire(actx)
 		if aerr == nil {
 			served++
 			p.release(amc)
@@ -234,7 +234,7 @@ func TestH3Pool_AbandonedAcquire_DoesNotLeakStreamSlots(t *testing.T) {
 		"stream slots leaked by abandoned acquires: %+v (want InFlightStreams=0 after %d abandons)",
 		s, abandonIters)
 	ctx2, cancel2 := context.WithTimeout(context.Background(), 3*time.Second)
-	mc2, err2 := p.acquire(ctx2)
+	mc2, err2 := p.Acquire(ctx2)
 	cancel2()
 	require.NoErrorf(t, err2,
 		"normal acquire after %d abandons = %v, want success (pool starved by leaked slots)",
@@ -266,7 +266,7 @@ func TestPool_PrunedWaiter_IsStillReplied(t *testing.T) {
 	defer func() { _ = p.Close() }()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	held, err := p.acquire(ctx)
+	held, err := p.Acquire(ctx)
 	cancel()
 	require.NoError(t, err, "priming acquire")
 	// held is NOT released: the pool's single slot stays occupied, so every
@@ -279,7 +279,7 @@ func TestPool_PrunedWaiter_IsStillReplied(t *testing.T) {
 	for i := 0; i < waiters; i++ {
 		actx, acancel := context.WithCancel(context.Background())
 		acancel()
-		_, aerr := p.acquire(actx)
+		_, aerr := p.Acquire(actx)
 		require.Error(t, aerr, "acquire succeeded while the pool's only slot was held")
 		queued++
 	}
@@ -294,12 +294,12 @@ func TestPool_PrunedWaiter_IsStillReplied(t *testing.T) {
 		before, n, before+4)
 	// CONTROL: with the slot released the same call must succeed, proving the
 	// refusals above came from the held slot and not from a dead pool.
-	p.release(held)
+	p.Release(held)
 	ctx2, cancel2 := context.WithTimeout(context.Background(), 3*time.Second)
-	mc2, err2 := p.acquire(ctx2)
+	mc2, err2 := p.Acquire(ctx2)
 	cancel2()
 	require.NoErrorf(t, err2, "acquire after pruning = %v, want success", err2)
-	p.release(mc2)
+	p.Release(mc2)
 }
 
 // TestH3Pool_PrunedWaiter_IsStillReplied is the H3 twin of
@@ -313,7 +313,7 @@ func TestH3Pool_PrunedWaiter_IsStillReplied(t *testing.T) {
 	defer func() { _ = p.Close() }()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	held, err := p.acquire(ctx)
+	held, err := p.Acquire(ctx)
 	cancel()
 	require.NoError(t, err, "priming acquire")
 
@@ -324,7 +324,7 @@ func TestH3Pool_PrunedWaiter_IsStillReplied(t *testing.T) {
 	for i := 0; i < waiters; i++ {
 		actx, acancel := context.WithCancel(context.Background())
 		acancel()
-		_, aerr := p.acquire(actx)
+		_, aerr := p.Acquire(actx)
 		require.Error(t, aerr, "acquire succeeded while the pool's only slot was held")
 		queued++
 	}
@@ -337,7 +337,7 @@ func TestH3Pool_PrunedWaiter_IsStillReplied(t *testing.T) {
 		before, n, before+4)
 	p.release(held)
 	ctx2, cancel2 := context.WithTimeout(context.Background(), 3*time.Second)
-	mc2, err2 := p.acquire(ctx2)
+	mc2, err2 := p.Acquire(ctx2)
 	cancel2()
 	require.NoErrorf(t, err2, "acquire after pruning = %v, want success", err2)
 	p.release(mc2)

@@ -50,12 +50,12 @@ func TestWarmup_NoActiveLeak(t *testing.T) {
 	// This deterministically exercises the release path the fix added — a
 	// timed-out acquire would leave nothing to leak and pass on buggy code too.
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	mc, err := p.acquire(ctx)
+	mc, err := p.Acquire(ctx)
 	cancel()
 	require.NoError(t, err, "seed acquire against a live server")
-	p.release(mc)
+	p.Release(mc)
 
-	p.warmup(2)
+	p.Warmup(2)
 
 	// With a conn already established and no outstanding request, the active
 	// stream count must settle to 0; the leak (acquire without release) left it
@@ -163,8 +163,8 @@ func closeDuringDial(t *testing.T, addr string, iters int, inject bool) (signals
 		go func() {
 			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 			defer cancel()
-			if mc, err := p.acquire(ctx); err == nil {
-				p.release(mc)
+			if mc, err := p.Acquire(ctx); err == nil {
+				p.Release(mc)
 			}
 		}()
 		select {

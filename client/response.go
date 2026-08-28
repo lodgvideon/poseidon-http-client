@@ -415,7 +415,7 @@ func (sr *StreamResponse) Close() error {
 		sr.recycleData()
 		sr.mu.Unlock()
 		if sr.release != nil {
-			sr.release.release()
+			sr.release.Release()
 		}
 	})
 	return closeErr

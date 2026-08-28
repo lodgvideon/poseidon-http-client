@@ -23,7 +23,7 @@ type h1ManagedTransport struct {
 // the exchange completes.
 func (mt *h1ManagedTransport) openExchange(ctx context.Context) (protoStream, pushLookuper, releaser, exchangeStats, error) {
 	st := exchangeStats{Proto: trace.ProtoH1}
-	c, release, addr, err := mt.mp.acquire(ctx)
+	c, release, addr, err := mt.mp.Acquire(ctx)
 	// Before the error check; see managedTransport.openExchange.
 	st.RemoteAddr = addrString(addr)
 	if err != nil {
@@ -39,18 +39,18 @@ func (mt *h1ManagedTransport) openExchange(ctx context.Context) (protoStream, pu
 
 // close implements transport.close. Idempotent.
 func (mt *h1ManagedTransport) close() error {
-	return mt.mp.close()
+	return mt.mp.Close()
 }
 
 // shutdown implements transport.shutdown. HTTP/1.1 has no in-band graceful drain,
 // so shutdown closes the underlying managed pool.
 func (mt *h1ManagedTransport) shutdown(gracefulTimeout time.Duration) error {
 	_ = gracefulTimeout
-	return mt.mp.close()
+	return mt.mp.Close()
 }
 
 // warmup implements transport.warmup. Fans out pre-dial across the current set of
 // resolved addresses.
 func (mt *h1ManagedTransport) warmup(n int) {
-	mt.mp.warmup(n)
+	mt.mp.Warmup(n)
 }

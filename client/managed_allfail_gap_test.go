@@ -56,11 +56,11 @@ func TestManagedPool_EveryAddressFailing_SurfacesTheDialErrorNotErrNoAddresses(t
 		nil, nil,
 	)
 	require.NoError(t, err, "newManagedPool")
-	defer mp.close()
+	defer mp.Close()
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
 
-	_, _, _, err = mp.acquire(ctx)
+	_, _, _, err = mp.Acquire(ctx)
 
 	require.Error(t, err, "acquire succeeded against three addresses that all refuse")
 	assert.ErrorIsf(t, err, errAllBackendsRefused,
@@ -78,11 +78,11 @@ func TestH1ManagedPool_EveryAddressFailing_SurfacesTheDialErrorNotErrNoAddresses
 	mp, err := newH1ManagedPool(StaticResolver(addrs...), RoundRobin(), DrainGraceful,
 		allFailDialer{}, h1ManagedPoolOpts(), nil, nil)
 	require.NoError(t, err, "newH1ManagedPool")
-	defer func() { _ = mp.close() }()
+	defer func() { _ = mp.Close() }()
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
 
-	_, _, _, err = mp.acquire(ctx)
+	_, _, _, err = mp.Acquire(ctx)
 
 	require.Error(t, err, "acquire succeeded against three addresses that all refuse")
 	assert.ErrorIsf(t, err, errAllBackendsRefused,
@@ -102,11 +102,11 @@ func TestH3ManagedPool_EveryAddressFailing_SurfacesTheDialErrorNotErrNoAddresses
 		PoolOptions{MaxConnsPerHost: 1, MaxStreamsPerConn: 4, HealthCheckPeriod: time.Hour},
 		dialFn, nil, nil)
 	require.NoError(t, err, "newH3ManagedPool")
-	defer func() { _ = mp.close() }()
+	defer func() { _ = mp.Close() }()
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
 
-	_, _, _, err = mp.acquire(ctx)
+	_, _, _, err = mp.Acquire(ctx)
 
 	require.Error(t, err, "acquire succeeded against three addresses that all refuse")
 	assert.ErrorIsf(t, err, errAllBackendsRefused,
@@ -128,11 +128,11 @@ func TestManagedPool_NoAddressesStillMeansErrNoAddresses(t *testing.T) {
 		nil, nil,
 	)
 	require.NoError(t, err, "newManagedPool")
-	defer mp.close()
+	defer mp.Close()
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	_, _, _, err = mp.acquire(ctx)
+	_, _, _, err = mp.Acquire(ctx)
 
 	assert.ErrorIsf(t, err, ErrNoAddresses,
 		"an empty resolver set reported %v; with no address there is no dial error to "+

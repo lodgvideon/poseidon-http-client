@@ -32,12 +32,12 @@ func TestH1ManagedPool_RoundRobin_DistributesAcrossAddresses(t *testing.T) {
 	mp, err := newH1ManagedPool(StaticResolver(addrs...), RoundRobin(), DrainGraceful,
 		d, h1ManagedPoolOpts(), nil, nil)
 	require.NoError(t, err, "newH1ManagedPool")
-	defer func() { _ = mp.close() }()
+	defer func() { _ = mp.Close() }()
 
 	// 9 sequential acquires — RoundRobin distributes 3-3-3 across the addresses.
 	for i := 0; i < 9; i++ {
 		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-		c, release, _, aerr := mp.acquire(ctx)
+		c, release, _, aerr := mp.Acquire(ctx)
 		cancel()
 
 		require.NoErrorf(t, aerr, "acquire[%d]", i)
@@ -57,11 +57,11 @@ func TestH1ManagedPool_NoAddresses_ReturnsErrNoAddresses(t *testing.T) {
 	mp, err := newH1ManagedPool(StaticResolver(), RoundRobin(), DrainGraceful,
 		newH1FakeDialer(), h1ManagedPoolOpts(), nil, nil)
 	require.NoError(t, err, "newH1ManagedPool")
-	defer func() { _ = mp.close() }()
+	defer func() { _ = mp.Close() }()
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
 
-	_, _, _, aerr := mp.acquire(ctx)
+	_, _, _, aerr := mp.Acquire(ctx)
 
 	// assert.Equal, not ErrorIs: the original compared with ==, and ErrorIs would
 	// also accept a wrapped value. Widening a sentinel check while "just" moving
@@ -77,11 +77,11 @@ func TestH1ManagedPool_Watch_AddedAddress_PickedUp(t *testing.T) {
 	mp, err := newH1ManagedPool(res, RoundRobin(), DrainGraceful,
 		newH1FakeDialer(), h1ManagedPoolOpts(), nil, nil)
 	require.NoError(t, err, "newH1ManagedPool")
-	defer func() { _ = mp.close() }()
+	defer func() { _ = mp.Close() }()
 
 	res.push([]Address{addrs[0], addrs[1], addrs[2]})
 
-	assert.Eventually(t, func() bool { return len(mp.snapshotActive()) == 3 },
+	assert.Eventually(t, func() bool { return len(mp.SnapshotActive()) == 3 },
 		2*time.Second, 10*time.Millisecond,
 		"active set never grew to 3 — a resolver update that adds an address was not picked up")
 }
@@ -93,33 +93,30 @@ func TestH1ManagedPool_DrainGraceful_RemovedAddress_KeepsInFlight(t *testing.T) 
 	mp, err := newH1ManagedPool(res, RoundRobin(), DrainGraceful,
 		newH1FakeDialer(), h1ManagedPoolOpts(), nil, nil)
 	require.NoError(t, err, "newH1ManagedPool")
-	defer func() { _ = mp.close() }()
+	defer func() { _ = mp.Close() }()
 	// The first RoundRobin pick is deterministic (counter starts at zero), so
 	// this conn belongs to addrs[0] — the address removed below.
-	c0, rel0, _, err := mp.acquire(context.Background())
+	c0, rel0, _, err := mp.Acquire(context.Background())
 	require.NoError(t, err, "acquire 0")
 
 	res.push([]Address{addrs[1]})
 
 	// CONTROL: the removal must actually have landed, or "the conn is still
 	// alive" below is the trivially-true state of a pool nothing happened to.
-	require.Eventually(t, func() bool { return len(mp.snapshotActive()) == 1 },
+	require.Eventually(t, func() bool { return len(mp.SnapshotActive()) == 1 },
 		2*time.Second, 10*time.Millisecond,
 		"the removed address never left the active set, so no drain was ever started")
 	// The in-flight conn must survive a graceful drain until it is released.
 	assert.True(t, c0.IsAlive(),
 		"in-flight conn closed during graceful drain — expected alive until release")
 	// A new acquire must pick the surviving address only.
-	_, rel1, _, err := mp.acquire(context.Background())
+	_, rel1, _, err := mp.Acquire(context.Background())
 	require.NoError(t, err, "acquire after remove")
 	defer rel1(true)
 	// Releasing the held conn lets the drained sub-pool close and drop out.
 	rel0(true)
 	assert.Eventually(t, func() bool {
-		mp.mu.RLock()
-		_, present := mp.subPools[addrs[0].String()]
-		mp.mu.RUnlock()
-		return !present
+		return !mp.HasSubPool(addrs[0].String())
 	}, 3*time.Second, 20*time.Millisecond,
 		"sub-pool for the drained address is still present after release; expected close+evict")
 }
@@ -131,8 +128,8 @@ func TestH1ManagedPool_DrainHard_RemovedAddress_ClosesImmediately(t *testing.T) 
 	mp, err := newH1ManagedPool(res, RoundRobin(), DrainHard,
 		newH1FakeDialer(), h1ManagedPoolOpts(), nil, nil)
 	require.NoError(t, err, "newH1ManagedPool")
-	defer func() { _ = mp.close() }()
-	c0, rel0, _, err := mp.acquire(context.Background())
+	defer func() { _ = mp.Close() }()
+	c0, rel0, _, err := mp.Acquire(context.Background())
 	require.NoError(t, err, "acquire 0")
 
 	// Remove addrs[0] (the deterministic first RoundRobin pick); DrainHard closes
@@ -151,15 +148,15 @@ func TestH1ManagedPool_StatsAggregation_SumsAcrossSubPools(t *testing.T) {
 	mp, err := newH1ManagedPool(StaticResolver(addrs...), RoundRobin(), DrainGraceful,
 		newH1FakeDialer(), h1ManagedPoolOpts(), nil, nil)
 	require.NoError(t, err, "newH1ManagedPool")
-	defer func() { _ = mp.close() }()
+	defer func() { _ = mp.Close() }()
 	holds := make([]func(bool), 0, 3)
 	for i := 0; i < 3; i++ {
-		_, rel, _, aerr := mp.acquire(context.Background())
+		_, rel, _, aerr := mp.Acquire(context.Background())
 		require.NoErrorf(t, aerr, "acquire %d", i)
 		holds = append(holds, rel)
 	}
 
-	st := mp.stats()
+	st := mp.Stats()
 
 	assert.Equal(t, 3, st.ActiveConns,
 		"stats must sum ActiveConns across every sub-pool, not report one of them")
@@ -176,8 +173,8 @@ func TestH1ManagedPool_Close_Idempotent(t *testing.T) {
 		newH1FakeDialer(), h1ManagedPoolOpts(), nil, nil)
 	require.NoError(t, err, "newH1ManagedPool")
 
-	err1 := mp.close()
-	err2 := mp.close()
+	err1 := mp.Close()
+	err2 := mp.Close()
 
 	require.NoError(t, err1, "first close")
 	require.NoError(t, err2, "second close must be a no-op, not an error")
@@ -217,6 +214,6 @@ func TestNewManagedH1Client_Construction(t *testing.T) {
 	mt, ok := c.tr.(*h1ManagedTransport)
 
 	require.Truef(t, ok, "transport is %T, want *h1ManagedTransport", c.tr)
-	assert.Equal(t, DrainHard, mt.mp.drainMode,
+	assert.Equal(t, DrainHard, mt.mp.DrainMode(),
 		"WithDrainMode must reach the managed pool, or the option is silently ignored")
 }

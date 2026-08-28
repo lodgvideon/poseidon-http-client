@@ -1,4 +1,4 @@
-package client
+package poolcore
 
 import (
 	"context"
@@ -74,7 +74,7 @@ func TestManagedPool_StaticResolver_RoundRobin_DistributesDials(t *testing.T) {
 
 	addrs, counts, cleanup := startH2Servers(t, 3)
 	defer cleanup()
-	mp, err := newManagedPool(
+	mp, err := NewManagedPool(
 		StaticResolver(addrs...),
 		RoundRobin(),
 		DrainGraceful,
@@ -82,13 +82,13 @@ func TestManagedPool_StaticResolver_RoundRobin_DistributesDials(t *testing.T) {
 		PoolOptions{MaxConnsPerHost: 1, MaxStreamsPerConn: 4, HealthCheckPeriod: time.Second},
 		nil, nil,
 	)
-	require.NoError(t, err, "newManagedPool")
-	defer mp.close()
+	require.NoError(t, err, "NewManagedPool")
+	defer mp.Close()
 
 	// 9 sequential acquires — RoundRobin distributes 3-3-3.
 	for i := 0; i < 9; i++ {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		c, release, _, err := mp.acquire(ctx)
+		c, release, _, err := mp.Acquire(ctx)
 		cancel()
 		require.NoErrorf(t, err, "acquire[%d]", i)
 		require.True(t, c.IsAlive(), "conn not alive after acquire")
@@ -104,7 +104,7 @@ func TestManagedPool_StaticResolver_RoundRobin_DistributesDials(t *testing.T) {
 func TestManagedPool_NoAddresses_ReturnsErrNoAddresses(t *testing.T) {
 	t.Parallel()
 
-	mp, err := newManagedPool(
+	mp, err := NewManagedPool(
 		StaticResolver(), // empty
 		RoundRobin(),
 		DrainGraceful,
@@ -112,12 +112,12 @@ func TestManagedPool_NoAddresses_ReturnsErrNoAddresses(t *testing.T) {
 		PoolOptions{MaxConnsPerHost: 1},
 		nil, nil,
 	)
-	require.NoError(t, err, "newManagedPool")
-	defer mp.close()
+	require.NoError(t, err, "NewManagedPool")
+	defer mp.Close()
 
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
-	_, _, _, err = mp.acquire(ctx)
+	_, _, _, err = mp.Acquire(ctx)
 
 	assert.ErrorIsf(t, err, ErrNoAddresses,
 		"acquire err = %v, want ErrNoAddresses — an empty resolver set must be reported as such, "+
@@ -173,22 +173,22 @@ func TestManagedPool_Watch_AddedAddress_PickedUp(t *testing.T) {
 	addrs, _, cleanup := startH2Servers(t, 3)
 	defer cleanup()
 	res := newScriptedResolver([]Address{addrs[0]})
-	mp, err := newManagedPool(res, RoundRobin(), DrainGraceful, newConnOpts(),
+	mp, err := NewManagedPool(res, RoundRobin(), DrainGraceful, newConnOpts(),
 		PoolOptions{MaxConnsPerHost: 1, MaxStreamsPerConn: 4, HealthCheckPeriod: time.Second}, nil, nil)
-	require.NoError(t, err, "newManagedPool")
-	defer mp.close()
+	require.NoError(t, err, "NewManagedPool")
+	defer mp.Close()
 
-	// Push expanded set; managedPool's Watch consumer must pick it up.
+	// Push expanded set; ManagedPool's Watch consumer must pick it up.
 	res.push([]Address{addrs[0], addrs[1], addrs[2]})
 	// Wait briefly for the Watch goroutine to apply the update.
 	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) && len(mp.snapshotActive()) != 3 {
+	for time.Now().Before(deadline) && len(mp.SnapshotActive()) != 3 {
 		time.Sleep(10 * time.Millisecond)
 	}
 
-	assert.Lenf(t, mp.snapshotActive(), 3,
+	assert.Lenf(t, mp.SnapshotActive(), 3,
 		"active set never grew to 3; got %d — a Watch update that adds addresses was dropped",
-		len(mp.snapshotActive()))
+		len(mp.SnapshotActive()))
 }
 
 func TestManagedPool_DrainGraceful_RemovedAddress_KeepsInFlight(t *testing.T) {
@@ -197,19 +197,19 @@ func TestManagedPool_DrainGraceful_RemovedAddress_KeepsInFlight(t *testing.T) {
 	addrs, _, cleanup := startH2Servers(t, 2)
 	defer cleanup()
 	res := newScriptedResolver(addrs)
-	mp, err := newManagedPool(res, RoundRobin(), DrainGraceful, newConnOpts(),
+	mp, err := NewManagedPool(res, RoundRobin(), DrainGraceful, newConnOpts(),
 		PoolOptions{MaxConnsPerHost: 1, MaxStreamsPerConn: 4, HealthCheckPeriod: time.Second}, nil, nil)
-	require.NoError(t, err, "newManagedPool")
-	defer mp.close()
+	require.NoError(t, err, "NewManagedPool")
+	defer mp.Close()
 	// Acquire a conn for addr[0].
-	c0, rel0, _, err := mp.acquire(context.Background())
+	c0, rel0, _, err := mp.Acquire(context.Background())
 	require.NoError(t, err, "acquire 0")
 	require.True(t, c0.IsAlive(), "conn 0 not alive")
 
 	// Remove addr[0] from the resolver set.
 	res.push([]Address{addrs[1]})
 	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) && len(mp.snapshotActive()) != 1 {
+	for time.Now().Before(deadline) && len(mp.SnapshotActive()) != 1 {
 		time.Sleep(10 * time.Millisecond)
 	}
 
@@ -217,7 +217,7 @@ func TestManagedPool_DrainGraceful_RemovedAddress_KeepsInFlight(t *testing.T) {
 	assert.True(t, c0.IsAlive(),
 		"conn 0 closed during graceful drain — expected alive until release")
 	// New acquire must pick addr[1] only.
-	c1, rel1, _, err := mp.acquire(context.Background())
+	c1, rel1, _, err := mp.Acquire(context.Background())
 	require.NoError(t, err, "acquire after remove")
 	defer rel1()
 	require.NotNil(t, c1, "acquire after remove returned a nil conn")
@@ -226,9 +226,9 @@ func TestManagedPool_DrainGraceful_RemovedAddress_KeepsInFlight(t *testing.T) {
 	deadline = time.Now().Add(2 * time.Second)
 	present := true
 	for time.Now().Before(deadline) {
-		mp.mu.RLock()
-		_, present = mp.subPools[addrs[0].String()]
-		mp.mu.RUnlock()
+		mp.Mu.RLock()
+		_, present = mp.SubPools[addrs[0].String()]
+		mp.Mu.RUnlock()
 		if !present {
 			break
 		}
@@ -244,11 +244,11 @@ func TestManagedPool_DrainHard_RemovedAddress_ClosesImmediately(t *testing.T) {
 	addrs, _, cleanup := startH2Servers(t, 2)
 	defer cleanup()
 	res := newScriptedResolver(addrs)
-	mp, err := newManagedPool(res, RoundRobin(), DrainHard, newConnOpts(),
+	mp, err := NewManagedPool(res, RoundRobin(), DrainHard, newConnOpts(),
 		PoolOptions{MaxConnsPerHost: 1, MaxStreamsPerConn: 4, HealthCheckPeriod: time.Second}, nil, nil)
-	require.NoError(t, err, "newManagedPool")
-	defer mp.close()
-	c0, rel0, _, err := mp.acquire(context.Background())
+	require.NoError(t, err, "NewManagedPool")
+	defer mp.Close()
+	c0, rel0, _, err := mp.Acquire(context.Background())
 	require.NoError(t, err, "acquire 0")
 
 	res.push([]Address{addrs[1]})
@@ -270,13 +270,13 @@ func TestManagedPool_DrainLazy_RemovedAddress_RetainsSubPool(t *testing.T) {
 	addrs, _, cleanup := startH2Servers(t, 2)
 	defer cleanup()
 	res := newScriptedResolver(addrs)
-	mp, err := newManagedPool(res, RoundRobin(), DrainLazy, newConnOpts(),
+	mp, err := NewManagedPool(res, RoundRobin(), DrainLazy, newConnOpts(),
 		PoolOptions{MaxConnsPerHost: 1, MaxStreamsPerConn: 4, HealthCheckPeriod: 100 * time.Millisecond}, nil, nil)
-	require.NoError(t, err, "newManagedPool")
-	defer mp.close()
+	require.NoError(t, err, "NewManagedPool")
+	defer mp.Close()
 	// Seed both sub-pools by acquiring one conn each.
 	for i := 0; i < 2; i++ {
-		_, rel, _, err := mp.acquire(context.Background())
+		_, rel, _, err := mp.Acquire(context.Background())
 		require.NoErrorf(t, err, "seed acquire %d", i)
 		rel()
 	}
@@ -284,19 +284,19 @@ func TestManagedPool_DrainLazy_RemovedAddress_RetainsSubPool(t *testing.T) {
 	res.push([]Address{addrs[1]})
 	// Wait for applySet to run.
 	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) && len(mp.snapshotActive()) != 1 {
+	for time.Now().Before(deadline) && len(mp.SnapshotActive()) != 1 {
 		time.Sleep(10 * time.Millisecond)
 	}
 
 	// DrainLazy: sub-pool must still be in map (not dropped immediately).
-	mp.mu.RLock()
-	_, present := mp.subPools[addrs[0].String()]
-	mp.mu.RUnlock()
+	mp.Mu.RLock()
+	_, present := mp.SubPools[addrs[0].String()]
+	mp.Mu.RUnlock()
 	assert.True(t, present, "DrainLazy: sub-pool dropped immediately, expected retained")
 	// New acquires pick addr[1] only.
 	for i := 0; i < 4; i++ {
 		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-		_, rel, _, err := mp.acquire(ctx)
+		_, rel, _, err := mp.Acquire(ctx)
 		cancel()
 		require.NoErrorf(t, err, "post-drain acquire %d", i)
 		rel()
@@ -335,24 +335,24 @@ func TestManagedPool_WatchUnsupported_FallsBackToTicker(t *testing.T) {
 	defer cleanup()
 	res := &noWatchResolver{}
 	res.set([]Address{addrs[0]})
-	// Use buildManagedPool so we can set the test seam before the
+	// Use BuildManagedPool so we can set the test seam before the
 	// background goroutine starts reading tickerPeriod.
-	mp, err := buildManagedPool(res, RoundRobin(), DrainGraceful, newConnOpts(),
+	mp, err := BuildManagedPool(res, RoundRobin(), DrainGraceful, newConnOpts(),
 		PoolOptions{MaxConnsPerHost: 1, MaxStreamsPerConn: 4, HealthCheckPeriod: time.Second}, nil, nil)
-	require.NoError(t, err, "buildManagedPool")
+	require.NoError(t, err, "BuildManagedPool")
 	mp.tickerPeriod.Store(int64(25 * time.Millisecond)) // test seam set before run
-	go mp.run()
-	defer mp.close()
+	go mp.Run()
+	defer mp.Close()
 
 	res.set(addrs) // expand set
 	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) && len(mp.snapshotActive()) != 2 {
+	for time.Now().Before(deadline) && len(mp.SnapshotActive()) != 2 {
 		time.Sleep(10 * time.Millisecond)
 	}
 
-	assert.Lenf(t, mp.snapshotActive(), 2,
+	assert.Lenf(t, mp.SnapshotActive(), 2,
 		"ticker mode never picked up the new address; active = %d — a Resolver without Watch "+
-			"must still track the address set", len(mp.snapshotActive()))
+			"must still track the address set", len(mp.SnapshotActive()))
 }
 
 func TestManagedPool_StatsAggregation_SumsAcrossSubPools(t *testing.T) {
@@ -360,19 +360,19 @@ func TestManagedPool_StatsAggregation_SumsAcrossSubPools(t *testing.T) {
 
 	addrs, _, cleanup := startH2Servers(t, 3)
 	defer cleanup()
-	mp, err := newManagedPool(StaticResolver(addrs...), RoundRobin(), DrainGraceful, newConnOpts(),
+	mp, err := NewManagedPool(StaticResolver(addrs...), RoundRobin(), DrainGraceful, newConnOpts(),
 		PoolOptions{MaxConnsPerHost: 1, MaxStreamsPerConn: 4, HealthCheckPeriod: time.Second}, nil, nil)
-	require.NoError(t, err, "newManagedPool")
-	defer mp.close()
+	require.NoError(t, err, "NewManagedPool")
+	defer mp.Close()
 	// Seed each sub-pool with one conn.
 	holds := make([]func(), 0, 3)
 	for i := 0; i < 3; i++ {
-		_, rel, _, err := mp.acquire(context.Background())
+		_, rel, _, err := mp.Acquire(context.Background())
 		require.NoErrorf(t, err, "acquire %d", i)
 		holds = append(holds, rel)
 	}
 
-	st := mp.stats()
+	st := mp.Stats()
 
 	assert.Equalf(t, 3, st.ActiveConns,
 		"ActiveConns = %d, want 3 — stats must SUM across sub-pools, not report one of them",
@@ -388,7 +388,7 @@ func TestManagedPool_StatsAggregation_SumsAcrossSubPools(t *testing.T) {
 //
 // This test previously created a single pool and allowed `after <= before+2`.
 // That tolerance was exactly the size of the leak it exists to catch: making
-// managedCore.run's cancel goroutine never fire strands run() plus its watcher
+// ManagedCore.run's cancel goroutine never fire strands run() plus its watcher
 // — about two goroutines — and the test passed 2/2 under that mutation. Scaling
 // to poolCount pools scales the leak with it (~2*poolCount) while the noise
 // from other t.Parallel tests in this package stays constant, so the tolerance
@@ -405,14 +405,14 @@ func TestManagedPool_Close_NoGoroutineLeak(t *testing.T) {
 	before := runtime.NumGoroutine()
 
 	for i := 0; i < poolCount; i++ {
-		mp, err := newManagedPool(StaticResolver(addrs...), RoundRobin(), DrainGraceful, newConnOpts(),
+		mp, err := NewManagedPool(StaticResolver(addrs...), RoundRobin(), DrainGraceful, newConnOpts(),
 			PoolOptions{MaxConnsPerHost: 1, MaxStreamsPerConn: 4, HealthCheckPeriod: time.Second}, nil, nil)
-		require.NoErrorf(t, err, "newManagedPool %d", i)
+		require.NoErrorf(t, err, "NewManagedPool %d", i)
 		// Acquire once to force sub-pool creation and its background goroutines.
-		_, rel, _, err := mp.acquire(context.Background())
+		_, rel, _, err := mp.Acquire(context.Background())
 		require.NoErrorf(t, err, "acquire %d", i)
 		rel()
-		require.NoErrorf(t, mp.close(), "close %d", i)
+		require.NoErrorf(t, mp.Close(), "close %d", i)
 	}
 
 	// Allow goroutines up to 2s to wind down after close.

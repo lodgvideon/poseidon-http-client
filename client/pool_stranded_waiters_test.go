@@ -19,11 +19,11 @@ import (
 // way h1Pool did before #412.
 //
 // {no live conns, no in-flight dials, waiters queued, dial backoff open} is
-// terminal. ensureDialForWaiters / dialForWaiters returns on the backoff check,
+// terminal. EnsureDialForWaiters / dialForWaiters returns on the backoff check,
 // so nothing re-enters the decision until the next tick — a whole
 // HealthCheckPeriod — while a FRESH acquire arriving an instant later is
 // refused immediately by handleAcquire's fast-refuse on the same three
-// conditions. Both pools refuse that state in handleDialDone and nowhere else,
+// conditions. Both pools refuse that state in HandleDialDone and nowhere else,
 // so it is reachable through eviction but not answerable there.
 //
 // What does NOT port from #424: the back-of-queue refusal (#413). It exists on
@@ -60,7 +60,7 @@ func h2DeadConn(t *testing.T) *conn.Conn {
 
 // h2StrandPool builds an H2 pool whose timing knobs are all far longer than the
 // test: HealthCheckPeriod is the interval the bug makes a waiter wait, and
-// DialBackoff is what keeps ensureDialForWaiters from rescuing it.
+// DialBackoff is what keeps EnsureDialForWaiters from rescuing it.
 func h2StrandPool(t *testing.T) *Pool {
 	t.Helper()
 	p := newPool("127.0.0.1:1", newConnOpts(), PoolOptions{
@@ -72,8 +72,8 @@ func h2StrandPool(t *testing.T) *Pool {
 	return p
 }
 
-func h2StrandWaiter(ctx context.Context) acquireReq {
-	return acquireReq{ctx: ctx, reply: make(chan acquireResp, 1)}
+func h2StrandWaiter(ctx context.Context) AcquireReq {
+	return AcquireReq{Ctx: ctx, Reply: make(chan AcquireResp, 1)}
 }
 
 // assertRefusedWithBackoff checks the single reply a stranded waiter is owed.
@@ -98,32 +98,32 @@ func TestPool_HandleTick_RefusesWaitersStrandedByTheLastConnGoing(t *testing.T) 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	w := h2StrandWaiter(ctx)
-	rs := &runState{
-		conns:         []*managedConn{{c: h2DeadConn(t)}},
-		waiters:       []acquireReq{w},
-		lastDialErrAt: time.Now(), // a dial failed a moment ago: backoff is open
+	rs := &RunState{
+		Conns:         []*managedConn{{C: h2DeadConn(t)}},
+		Waiters:       []AcquireReq{w},
+		LastDialErrAt: time.Now(), // a dial failed a moment ago: backoff is open
 	}
 
-	p.handleTick(rs)
+	p.HandleTick(rs)
 
 	var (
-		resp     acquireResp
+		resp     AcquireResp
 		answered bool
 	)
 	select {
-	case resp = <-w.reply:
+	case resp = <-w.Reply:
 		answered = true
 	default:
 	}
 	var got any
-	if resp.mc != nil {
-		got = resp.mc
+	if resp.Mc != nil {
+		got = resp.Mc
 	}
-	assertRefusedWithBackoff(t, resp.err, answered, got, len(rs.waiters), "Pool.handleTick")
+	assertRefusedWithBackoff(t, resp.Err, answered, got, len(rs.Waiters), "Pool.HandleTick")
 }
 
 // TestPool_HandleRelease_RefusesWaitersStrandedByTheLastConnGoing — H2, release
-// path. handleRelease is the pool's ONLY eviction site for a conn still
+// path. HandleRelease is the pool's ONLY eviction site for a conn still
 // carrying traffic (evictDead and evictDeadSilent both defer to it), so it is
 // where a GOAWAY'd conn is finally reaped after RFC 7540 §6.8's drain — the
 // ordinary way this pool loses its last conn, not an error path.
@@ -131,30 +131,30 @@ func TestPool_HandleRelease_RefusesWaitersStrandedByTheLastConnGoing(t *testing.
 	p := h2StrandPool(t)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	mc := &managedConn{c: h2DeadConn(t), active: 1}
+	mc := &managedConn{C: h2DeadConn(t), Active: 1}
 	w := h2StrandWaiter(ctx)
-	rs := &runState{
-		conns:         []*managedConn{mc},
-		waiters:       []acquireReq{w},
-		lastDialErrAt: time.Now(),
+	rs := &RunState{
+		Conns:         []*managedConn{mc},
+		Waiters:       []AcquireReq{w},
+		LastDialErrAt: time.Now(),
 	}
 
-	p.handleRelease(rs, releaseMsg{mc: mc})
+	p.HandleRelease(rs, ReleaseMsg{Mc: mc})
 
 	var (
-		resp     acquireResp
+		resp     AcquireResp
 		answered bool
 	)
 	select {
-	case resp = <-w.reply:
+	case resp = <-w.Reply:
 		answered = true
 	default:
 	}
 	var got any
-	if resp.mc != nil {
-		got = resp.mc
+	if resp.Mc != nil {
+		got = resp.Mc
 	}
-	assertRefusedWithBackoff(t, resp.err, answered, got, len(rs.waiters), "Pool.handleRelease")
+	assertRefusedWithBackoff(t, resp.Err, answered, got, len(rs.Waiters), "Pool.HandleRelease")
 }
 
 // TestH3Pool_HandleTick_RefusesWaitersStrandedByTheLastConnGoing — H3, tick path.
@@ -197,7 +197,7 @@ func TestH3Pool_HandleTick_RefusesWaitersStrandedByTheLastConnGoing(t *testing.T
 
 // TestH3Pool_HandleRelease_RefusesWaitersStrandedByAGoAwayDrain — H3, release
 // path, driven the way RFC 9114 §5.2 says it happens: the conn is GOAWAY'd and
-// draining, pickLeastLoaded has already stopped offering it, and its last
+// draining, PickLeastLoaded has already stopped offering it, and its last
 // in-flight exchange releasing is what finally retires it.
 //
 // This is also the case where h3CountLive == 0 while len(conns) == 1 on entry —
@@ -242,9 +242,9 @@ func TestH3Pool_HandleRelease_RefusesWaitersStrandedByAGoAwayDrain(t *testing.T)
 }
 
 // TestPool_HandleTick_FlushesWithADrainingConnStillInTheSlice pins the choice of
-// countLive over len(conns) on the H2 pool.
+// CountLive over len(conns) on the H2 pool.
 //
-// evictDead defers a dead conn that still has streams to handleRelease, so the
+// evictDead defers a dead conn that still has streams to HandleRelease, so the
 // tick can and does leave one in the slice. It is not capacity: draining streams
 // can never serve a waiter, and the conn is never picked again. A flush keyed on
 // len(conns) would sit on the queue until that last stream happened to end.
@@ -252,40 +252,40 @@ func TestPool_HandleTick_FlushesWithADrainingConnStillInTheSlice(t *testing.T) {
 	p := h2StrandPool(t)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	draining := &managedConn{c: h2DeadConn(t), active: 1}
+	draining := &managedConn{C: h2DeadConn(t), Active: 1}
 	w := h2StrandWaiter(ctx)
-	rs := &runState{
-		conns:         []*managedConn{draining},
-		waiters:       []acquireReq{w},
-		lastDialErrAt: time.Now(),
+	rs := &RunState{
+		Conns:         []*managedConn{draining},
+		Waiters:       []AcquireReq{w},
+		LastDialErrAt: time.Now(),
 	}
 
-	p.handleTick(rs)
+	p.HandleTick(rs)
 
 	// Without this the test could pass for the wrong reason — an empty slice
-	// makes countLive and len(conns) agree, and the distinction goes untested.
-	require.Lenf(t, rs.conns, 1,
+	// makes CountLive and len(conns) agree, and the distinction goes untested.
+	require.Lenf(t, rs.Conns, 1,
 		"conns = %d after the tick, want the draining conn still there; "+
-			"evictDead's active == 0 guard is what puts this test in the countLive-only case",
-		len(rs.conns))
-	require.Zerof(t, countLive(rs.conns),
-		"countLive = %d, want 0 — the draining conn must not read as capacity",
-		countLive(rs.conns))
+			"evictDead's active == 0 guard is what puts this test in the CountLive-only case",
+		len(rs.Conns))
+	require.Zerof(t, CountLive(rs.Conns),
+		"CountLive = %d, want 0 — the draining conn must not read as capacity",
+		CountLive(rs.Conns))
 	var (
-		resp     acquireResp
+		resp     AcquireResp
 		answered bool
 	)
 	select {
-	case resp = <-w.reply:
+	case resp = <-w.Reply:
 		answered = true
 	default:
 	}
 	var got any
-	if resp.mc != nil {
-		got = resp.mc
+	if resp.Mc != nil {
+		got = resp.Mc
 	}
-	assertRefusedWithBackoff(t, resp.err, answered, got, len(rs.waiters),
-		"Pool.handleTick with a draining conn")
+	assertRefusedWithBackoff(t, resp.Err, answered, got, len(rs.Waiters),
+		"Pool.HandleTick with a draining conn")
 }
 
 // TestH3Pool_HandleTick_FlushesWithADrainingConnStillInTheSlice is the H3 twin.
@@ -336,7 +336,7 @@ func TestH3Pool_HandleTick_FlushesWithADrainingConnStillInTheSlice(t *testing.T)
 // TestFlushStrandedWaiters_KeepsTheQueueWhenTheBackoffIsClosed pins the guard
 // that both pools' flush carries for a reason the handlers cannot demonstrate.
 //
-// Through any call site the state is unreachable: ensureDialForWaiters /
+// Through any call site the state is unreachable: EnsureDialForWaiters /
 // dialForWaiters would have started a dial (nothing live and nothing in flight
 // is below any cap, and the backoff is what stops it), so inFlightDials would be
 // non-zero and the flush would return one check earlier. Deleting the guard is
@@ -358,17 +358,17 @@ func TestFlushStrandedWaiters_KeepsTheQueueWhenTheBackoffIsClosed(t *testing.T) 
 	t.Run("h2", func(t *testing.T) {
 		p := h2StrandPool(t)
 		w := h2StrandWaiter(ctx)
-		rs := &runState{waiters: []acquireReq{w}, lastDialErrAt: expired}
+		rs := &RunState{Waiters: []AcquireReq{w}, LastDialErrAt: expired}
 
-		p.flushStrandedWaiters(rs, ErrDialBackoff)
+		p.FlushStrandedWaiters(rs, ErrDialBackoff)
 
-		require.Lenf(t, rs.waiters, 1,
+		require.Lenf(t, rs.Waiters, 1,
 			"waiters = %d, want 1 — with the backoff closed this waiter is owed a "+
-				"dial, not a refusal", len(rs.waiters))
+				"dial, not a refusal", len(rs.Waiters))
 		select {
-		case resp := <-w.reply:
+		case resp := <-w.Reply:
 			require.Failf(t, "waiter refused while the pool was free to dial",
-				"waiter refused with %v while the pool was free to dial for it", resp.err)
+				"waiter refused with %v while the pool was free to dial for it", resp.Err)
 		default:
 		}
 	})
@@ -399,9 +399,9 @@ func TestFlushStrandedWaiters_KeepsTheQueueWhenTheBackoffIsClosed(t *testing.T) 
 //
 // TestPool_DialFailureRefusesEveryQueuedWaiter is the existing cover, and it is
 // a coin flip: refusingDialer fails instantly, so whether waiters 2 and 3 reach
-// acquireCh before handleDialDone runs decides whether they are refused by the
+// acquireCh before HandleDialDone runs decides whether they are refused by the
 // flush under test or by handleAcquire's fast-refuse on arrival. Measured —
-// deleting the flush from handleDialDone made it FAIL on one run and PASS on the
+// deleting the flush from HandleDialDone made it FAIL on one run and PASS on the
 // next, same code both times.
 func TestPool_HandleDialDone_RefusesTheWaitersBehindTheFirst(t *testing.T) {
 	p := h2StrandPool(t)
@@ -409,22 +409,22 @@ func TestPool_HandleDialDone_RefusesTheWaitersBehindTheFirst(t *testing.T) {
 	defer cancel()
 	sentinel := errors.New("connect refused (synthetic)")
 	a, b, c := h2StrandWaiter(ctx), h2StrandWaiter(ctx), h2StrandWaiter(ctx)
-	rs := &runState{waiters: []acquireReq{a, b, c}, inFlightDials: 1}
+	rs := &RunState{Waiters: []AcquireReq{a, b, c}, InFlightDials: 1}
 
-	p.handleDialDone(rs, dialResult{err: sentinel})
+	p.HandleDialDone(rs, DialResult{Err: sentinel})
 
-	for i, w := range []acquireReq{a, b, c} {
+	for i, w := range []AcquireReq{a, b, c} {
 		select {
-		case resp := <-w.reply:
-			require.Errorf(t, resp.err, "waiter %d got a conn from a pool with nothing live", i)
-			require.ErrorIsf(t, resp.err, sentinel,
-				"waiter %d got %v, want the dial error", i, resp.err)
+		case resp := <-w.Reply:
+			require.Errorf(t, resp.Err, "waiter %d got a conn from a pool with nothing live", i)
+			require.ErrorIsf(t, resp.Err, sentinel,
+				"waiter %d got %v, want the dial error", i, resp.Err)
 		default:
 			require.Failf(t, "waiter left queued",
 				"waiter %d left queued with nothing live and no dial in flight; it waits a "+
 					"full HealthCheckPeriod while a fresh acquire is refused instantly", i)
 		}
 	}
-	require.Emptyf(t, rs.waiters,
-		"%d waiters still queued after every one was answered", len(rs.waiters))
+	require.Emptyf(t, rs.Waiters,
+		"%d Waiters still queued after every one was answered", len(rs.Waiters))
 }

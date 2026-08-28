@@ -119,10 +119,10 @@ func TestCompress_DoubleRelease_DoesNotHandOneReaderToTwoRequests(t *testing.T) 
 
 	first, err := getCompressingReader(EncodingGzip, bytes.NewReader([]byte("FIRST")))
 	require.NoError(t, err, "first reader out of the pool")
-	defer first.release()
+	defer first.Release()
 	second, err := getCompressingReader(EncodingGzip, bytes.NewReader([]byte("SECOND")))
 	require.NoError(t, err, "second reader out of the pool")
-	defer second.release()
+	defer second.Release()
 
 	require.NotSamef(t, first, second,
 		"two concurrent requests were handed the SAME *compressingReader (%p); the double "+

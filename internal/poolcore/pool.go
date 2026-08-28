@@ -1,13 +1,14 @@
-// Package client — pool transport (Phase C.2).
-package client
+// pool transport (Phase C.2).
+
+package poolcore
 
 import (
 	"context"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/lodgvideon/poseidon-http-client/conn"
+	"github.com/lodgvideon/poseidon-http-client/pool"
 )
 
 // defaultMaxConcurrentStreams is the effective concurrent-stream cap when
@@ -21,7 +22,7 @@ const defaultMaxConcurrentStreams = 100
 // on every acquire call. Channels are drained before being returned so
 // the next caller always starts with an empty channel.
 var replyPool = sync.Pool{
-	New: func() any { return make(chan acquireResp, 1) },
+	New: func() any { return make(chan AcquireResp, 1) },
 }
 
 // statsReplyPool recycles buffered Stats reply channels for the same
@@ -32,7 +33,7 @@ var statsReplyPool = sync.Pool{
 	New: func() any { return make(chan Stats, 1) },
 }
 
-// managedConn is the actor's per-conn record. Its MUTABLE fields — active,
+// ManagedConn is the actor's per-conn record. Its MUTABLE fields — active,
 // lastUsed, streamCap and the rest — are owned by the actor goroutine and
 // must not be read or written anywhere else.
 //
@@ -42,44 +43,44 @@ var statsReplyPool = sync.Pool{
 // the whole record was NEVER touched outside the actor, which is not true of
 // that field and would send anyone unifying these pools looking for a lock
 // that is not needed — or hiding a field the transport requires.
-type managedConn struct {
-	c        *conn.Conn
-	active   int
-	lastUsed time.Time
+type ManagedConn struct {
+	C        *conn.Conn
+	Active   int
+	LastUsed time.Time
 
 	// p is the owning pool, so this struct can BE the releaser rather than
 	// having one built around it per request (#476).
 	p *Pool
 
-	// streamCap caches effectiveStreamCap(local, peer). Computed when the
+	// streamCap caches EffectiveStreamCap(local, peer). Computed when the
 	// dial completes and refreshed on every health-check tick so peer
 	// SETTINGS_MAX_CONCURRENT_STREAMS changes are picked up. Without this
-	// cache, pickLeastLoaded would take c.psMu.RLock() for every conn on
+	// cache, PickLeastLoaded would take c.psMu.RLock() for every conn on
 	// every acquire.
-	streamCap int
+	StreamCap int
 }
 
-// acquireReq is sent on Pool.acquireCh. The actor replies on reply.
-type acquireReq struct {
-	ctx   context.Context
-	reply chan acquireResp
+// AcquireReq is sent on Pool.acquireCh. The actor replies on reply.
+type AcquireReq struct {
+	Ctx   context.Context
+	Reply chan AcquireResp
 }
 
-// acquireResp carries the reply from the actor for an acquireReq.
-type acquireResp struct {
-	mc  *managedConn
-	err error
+// AcquireResp carries the reply from the actor for an AcquireReq.
+type AcquireResp struct {
+	Mc  *ManagedConn
+	Err error
 }
 
-// releaseMsg is sent on Pool.releaseCh after a request completes.
-type releaseMsg struct {
-	mc *managedConn
+// ReleaseMsg is sent on Pool.releaseCh after a request completes.
+type ReleaseMsg struct {
+	Mc *ManagedConn
 }
 
-// dialResult is sent by a dial helper goroutine on Pool.dialDoneCh.
-type dialResult struct {
-	mc  *managedConn
-	err error
+// DialResult is sent by a dial helper goroutine on Pool.dialDoneCh.
+type DialResult struct {
+	Mc  *ManagedConn
+	Err error
 }
 
 // Pool is a per-host connection pool. Construct via NewClient with
@@ -87,18 +88,18 @@ type dialResult struct {
 type Pool struct {
 	opts     PoolOptions
 	connOpts conn.ConnOptions
-	addr     string
+	Addr     string
 
-	// pickCursor rotates where pickLeastLoaded starts, so consecutive requests
+	// pickCursor rotates where PickLeastLoaded starts, so consecutive requests
 	// land on different idle connections instead of piling onto the first.
 	// Actor-owned: every pick runs on the pool goroutine.
 	pickCursor int
 
 	// channels
-	acquireCh  chan acquireReq
-	releaseCh  chan releaseMsg
+	acquireCh  chan AcquireReq
+	releaseCh  chan ReleaseMsg
 	warmupCh   chan int
-	dialDoneCh chan dialResult
+	dialDoneCh chan DialResult
 	statsCh    chan chan Stats
 	closeCh    chan struct{}
 	closedCh   chan struct{}
@@ -106,15 +107,21 @@ type Pool struct {
 	// closeOnce guards closeCh from double-close.
 	closeOnce sync.Once
 
-	// hooksRef points at Client.hooks; nil-safe via Load. metrics is
-	// shared with Client and other pools (managed sub-pools).
-	hooksRef *atomic.Pointer[Hooks]
-	metrics  *Metrics
+	// obs and rec are the caller's observability, narrowed to the connection
+	// events a pool can raise. Both are installed once and are never nil — New
+	// substitutes a nop — so the reporting call sites carry no check. An
+	// implementation whose underlying callbacks can be swapped at runtime reads
+	// them per call; that is the adapter's problem, not this pool's.
+	//
+	// Both are shared with the owning client and, for a managed pool, with
+	// every sibling sub-pool: the counts are the client's, not this pool's.
+	obs pool.Observer
+	rec pool.Recorder
 }
 
-// newPool constructs a Pool and starts its actor goroutine. Internal:
-// callers go through NewClient.
-func newPool(addr string, connOpts conn.ConnOptions, opts PoolOptions, hooksRef *atomic.Pointer[Hooks], metrics *Metrics) *Pool {
+// New constructs a Pool and starts its actor goroutine. Callers reach it
+// through client.NewClient or the gRPC channel, never directly.
+func New(addr string, connOpts conn.ConnOptions, opts PoolOptions, obs pool.Observer, rec pool.Recorder) *Pool {
 	if opts.MaxConnsPerHost <= 0 {
 		opts.MaxConnsPerHost = 1
 	}
@@ -127,22 +134,25 @@ func newPool(addr string, connOpts conn.ConnOptions, opts PoolOptions, hooksRef 
 	if opts.DialTimeout <= 0 {
 		opts.DialTimeout = 30 * time.Second
 	}
-	if metrics == nil {
-		metrics = &Metrics{}
+	if rec == nil {
+		rec = pool.NopRecorder{}
+	}
+	if obs == nil {
+		obs = pool.NopObserver{}
 	}
 	p := &Pool{
 		opts:       opts,
 		connOpts:   connOpts,
-		addr:       addr,
-		acquireCh:  make(chan acquireReq),
-		releaseCh:  make(chan releaseMsg, 16),
+		Addr:       addr,
+		acquireCh:  make(chan AcquireReq),
+		releaseCh:  make(chan ReleaseMsg, 16),
 		warmupCh:   make(chan int),
-		dialDoneCh: make(chan dialResult, 4),
+		dialDoneCh: make(chan DialResult, 4),
 		statsCh:    make(chan chan Stats),
 		closeCh:    make(chan struct{}),
 		closedCh:   make(chan struct{}),
-		hooksRef:   hooksRef,
-		metrics:    metrics,
+		obs:        obs,
+		rec:        rec,
 	}
 	go p.run()
 	return p
@@ -184,22 +194,22 @@ func (p *Pool) Stats() Stats {
 	return stats
 }
 
-// runState holds the mutable loop-local state of Pool.run. Kept in a
+// RunState holds the mutable loop-local state of Pool.run. Kept in a
 // struct so extracted handlers can receive it without the caller
 // unpacking/packing individual variables on every iteration.
-type runState struct {
-	conns         []*managedConn
-	waiters       []acquireReq
-	inFlightDials int
-	lastDialErrAt time.Time
+type RunState struct {
+	Conns         []*ManagedConn
+	Waiters       []AcquireReq
+	InFlightDials int
+	LastDialErrAt time.Time
 }
 
-// run is the actor loop. It owns every field of runState — conns, waiters,
+// Run is the actor loop. It owns every field of RunState — conns, waiters,
 // inFlightDials, lastDialErrAt — which live there and not on Pool, and which no
 // other goroutine reads or writes.
 func (p *Pool) run() {
 	defer close(p.closedCh)
-	rs := &runState{}
+	rs := &RunState{}
 	tick := time.NewTicker(p.opts.HealthCheckPeriod)
 	defer tick.Stop()
 
@@ -208,15 +218,15 @@ func (p *Pool) run() {
 		case req := <-p.acquireCh:
 			p.handleAcquire(rs, req)
 		case msg := <-p.releaseCh:
-			p.handleRelease(rs, msg)
+			p.HandleRelease(rs, msg)
 		case n := <-p.warmupCh:
 			p.handleWarmup(rs, n)
 		case dr := <-p.dialDoneCh:
-			p.handleDialDone(rs, dr)
+			p.HandleDialDone(rs, dr)
 		case respCh := <-p.statsCh:
 			p.handleStats(rs, respCh)
 		case <-tick.C:
-			p.handleTick(rs)
+			p.HandleTick(rs)
 		case <-p.closeCh:
 			p.handleClose(rs)
 			return
@@ -226,32 +236,32 @@ func (p *Pool) run() {
 
 // handleAcquire tries to serve the request from an existing conn.
 // If no live capacity exists it decides between dial / queue / fast-refuse.
-func (p *Pool) handleAcquire(rs *runState, req acquireReq) {
-	mc := p.pickLeastLoaded(rs.conns)
+func (p *Pool) handleAcquire(rs *RunState, req AcquireReq) {
+	mc := p.PickLeastLoaded(rs.Conns)
 	if mc != nil {
-		mc.active++
-		mc.lastUsed = time.Now()
+		mc.Active++
+		mc.LastUsed = time.Now()
 		p.replyAcquire(req, mc, nil)
 		return
 	}
-	liveConns := countLive(rs.conns)
-	atCap := liveConns+rs.inFlightDials >= p.opts.MaxConnsPerHost
-	inBackoff := inDialBackoff(rs.lastDialErrAt, p.opts.DialBackoff)
+	liveConns := CountLive(rs.Conns)
+	atCap := liveConns+rs.InFlightDials >= p.opts.MaxConnsPerHost
+	inBackoff := InDialBackoff(rs.LastDialErrAt, p.opts.DialBackoff)
 
 	if !atCap && !inBackoff {
-		rs.inFlightDials++
+		rs.InFlightDials++
 		go p.dialOne()
-		rs.waiters = append(rs.waiters, req)
+		rs.Waiters = append(rs.Waiters, req)
 		return
 	}
-	if inBackoff && liveConns == 0 && rs.inFlightDials == 0 {
+	if inBackoff && liveConns == 0 && rs.InFlightDials == 0 {
 		p.replyAcquire(req, nil, ErrDialBackoff)
 		return
 	}
-	rs.waiters = append(rs.waiters, req)
+	rs.Waiters = append(rs.Waiters, req)
 }
 
-// ensureDialForWaiters starts a dial when queued waiters have nothing left to
+// EnsureDialForWaiters starts a dial when queued waiters have nothing left to
 // wait for.
 //
 // serveWaiters can only hand out capacity that already exists, and eviction
@@ -281,7 +291,7 @@ func (p *Pool) handleAcquire(rs *runState, req acquireReq) {
 // a port. h1 carries one caller per connection, so "waiters minus coverage" is
 // the dial count. Here a connection covers streamCap waiters, so that expression
 // opens a socket per waiter for a batch one connection could serve. Nothing in
-// this repo defaults IdleTimeout, so evictIdle is off and a surplus socket
+// this repo defaults IdleTimeout, so EvictIdle is off and a surplus socket
 // ratchets to the cap and stays — the serial ramp would be traded for permanent
 // over-allocation.
 //
@@ -295,68 +305,68 @@ func (p *Pool) handleAcquire(rs *runState, req acquireReq) {
 // exist yet has no SETTINGS. A peer advertising fewer streams than we asked for
 // leaves the batch short, and the next call through this path re-dials for
 // whoever is still queued.
-func (p *Pool) ensureDialForWaiters(rs *runState) {
-	if len(rs.waiters) == 0 {
+func (p *Pool) EnsureDialForWaiters(rs *RunState) {
+	if len(rs.Waiters) == 0 {
 		return
 	}
-	room := p.opts.MaxConnsPerHost - countLive(rs.conns) - rs.inFlightDials
+	room := p.opts.MaxConnsPerHost - CountLive(rs.Conns) - rs.InFlightDials
 	if room <= 0 {
 		return
 	}
-	if inDialBackoff(rs.lastDialErrAt, p.opts.DialBackoff) {
+	if InDialBackoff(rs.LastDialErrAt, p.opts.DialBackoff) {
 		return
 	}
-	perConn := effectiveStreamCap(p.opts.MaxStreamsPerConn, 0)
-	uncovered := len(rs.waiters) - spareStreamCapacity(rs.conns) - rs.inFlightDials*perConn
+	perConn := EffectiveStreamCap(p.opts.MaxStreamsPerConn, 0)
+	uncovered := len(rs.Waiters) - SpareStreamCapacity(rs.Conns) - rs.InFlightDials*perConn
 	if uncovered <= 0 {
 		return
 	}
 	need := (uncovered + perConn - 1) / perConn // round up: a partial batch still needs a conn
 	for n := min(need, room); n > 0; n-- {
-		rs.inFlightDials++
+		rs.InFlightDials++
 		go p.dialOne()
 	}
 }
 
-// spareStreamCapacity is how many more callers the live connections can take
+// SpareStreamCapacity is how many more callers the live connections can take
 // right now — the coverage a queued waiter already has, and so the part of the
 // queue that needs no new socket.
 //
-// Matches pickLeastLoaded's admission test (alive, and active below streamCap)
+// Matches PickLeastLoaded's admission test (alive, and active below streamCap)
 // so this cannot count capacity serveWaiters would then refuse to use.
-func spareStreamCapacity(conns []*managedConn) int {
+func SpareStreamCapacity(conns []*ManagedConn) int {
 	n := 0
 	for _, mc := range conns {
-		if !mc.c.IsAlive() {
+		if !mc.C.IsAlive() {
 			continue
 		}
-		if spare := mc.streamCap - mc.active; spare > 0 {
+		if spare := mc.StreamCap - mc.Active; spare > 0 {
 			n += spare
 		}
 	}
 	return n
 }
 
-// flushStrandedWaiters refuses every queued waiter when the pool holds nothing
+// FlushStrandedWaiters refuses every queued waiter when the pool holds nothing
 // that could ever serve them: no live conn, no dial in flight, and an open dial
-// backoff window that stops ensureDialForWaiters from starting one.
+// backoff window that stops EnsureDialForWaiters from starting one.
 //
-// It is the counterpart to ensureDialForWaiters and belongs immediately after
-// every call to it. That pairing is the invariant: ensureDialForWaiters gives a
+// It is the counterpart to EnsureDialForWaiters and belongs immediately after
+// every call to it. That pairing is the invariant: EnsureDialForWaiters gives a
 // queued caller something to wait FOR, and this one says so when there is
 // nothing. handleAcquire fast-refuses a FRESH request on these same three
 // conditions, so leaving the state queued is a priority inversion rather than a
 // slow path — the caller arriving an instant later is served an immediate
 // ErrDialBackoff while the already-queued one waits a full HealthCheckPeriod.
 //
-// It used to be written out inline in handleDialDone alone, which made the state
-// answerable only when a DIAL produced it. handleRelease and handleTick reach it
-// by EVICTION and had no copy (#425). handleRelease is this pool's only eviction
+// It used to be written out inline in HandleDialDone alone, which made the state
+// answerable only when a DIAL produced it. HandleRelease and HandleTick reach it
+// by EVICTION and had no copy (#425). HandleRelease is this pool's only eviction
 // site for a conn still carrying traffic, so it is where a GOAWAY'd conn is
 // finally reaped after RFC 7540 §6.8's drain — the ordinary way the last conn
 // goes, not an error path.
 //
-// countLive, not len(conns), is the right test and the two differ here: a
+// CountLive, not len(conns), is the right test and the two differ here: a
 // GOAWAY'd conn still draining is deliberately not live, because draining
 // streams can never become capacity for a waiter — such a conn is evicted once
 // its last stream ends and is never picked again. So this can fire with conns
@@ -365,31 +375,31 @@ func spareStreamCapacity(conns []*managedConn) int {
 // Waiters are per-STREAM in this pool, so one flush can refuse a large queue at
 // once. Same semantics as the h1 sibling's, and better than the hang.
 //
-// Deliberately not called from handleStats, for the reason ensureDialForWaiters
+// Deliberately not called from handleStats, for the reason EnsureDialForWaiters
 // is not: that path only removes conns which were already not live, so it cannot
 // create the state.
-func (p *Pool) flushStrandedWaiters(rs *runState, err error) {
-	if len(rs.waiters) == 0 || rs.inFlightDials > 0 {
+func (p *Pool) FlushStrandedWaiters(rs *RunState, err error) {
+	if len(rs.Waiters) == 0 || rs.InFlightDials > 0 {
 		return
 	}
-	if countLive(rs.conns) > 0 {
+	if CountLive(rs.Conns) > 0 {
 		return
 	}
-	if !inDialBackoff(rs.lastDialErrAt, p.opts.DialBackoff) {
+	if !InDialBackoff(rs.LastDialErrAt, p.opts.DialBackoff) {
 		// Nothing live and nothing in flight with the backoff closed means the
-		// preceding ensureDialForWaiters started a dial, so inFlightDials would
+		// preceding EnsureDialForWaiters started a dial, so inFlightDials would
 		// not be zero and this would be unreachable. Tested anyway, so each call
 		// site is correct on its own terms rather than by virtue of what runs
 		// before it.
 		return
 	}
-	for _, w := range rs.waiters {
+	for _, w := range rs.Waiters {
 		p.replyAcquire(w, nil, err)
 	}
-	rs.waiters = nil
+	rs.Waiters = nil
 }
 
-// handleRelease decrements the conn's active count and evicts it once the
+// HandleRelease decrements the conn's active count and evicts it once the
 // underlying connection is no longer alive AND the stream just released was its
 // last. This is the pool's only eviction site for a conn still carrying
 // traffic — evictDead and evictDeadSilent both defer to it — so it is where a
@@ -399,31 +409,31 @@ func (p *Pool) flushStrandedWaiters(rs *runState, err error) {
 // rather than of streams: without it every release on a GOAWAY'd conn
 // incremented, so one GOAWAY on a conn with 4 draining streams counted 4 —
 // while its sibling ConnsClosed, fired from evict, counted 1.
-func (p *Pool) handleRelease(rs *runState, msg releaseMsg) {
-	msg.mc.active--
-	msg.mc.lastUsed = time.Now()
-	if !msg.mc.c.IsAlive() && msg.mc.active == 0 {
+func (p *Pool) HandleRelease(rs *RunState, msg ReleaseMsg) {
+	msg.Mc.Active--
+	msg.Mc.LastUsed = time.Now()
+	if !msg.Mc.C.IsAlive() && msg.Mc.Active == 0 {
 		reason := CloseDead
-		if msg.mc.c.GoAwayReceived() {
+		if msg.Mc.C.GoAwayReceived() {
 			reason = CloseGoAway
-			p.metrics.Counters.GoAwaysReceived.Add(1)
+			p.rec.GoAwayReceived()
 		}
-		rs.conns = p.evict(rs.conns, msg.mc, reason)
+		rs.Conns = p.evict(rs.Conns, msg.Mc, reason)
 	}
-	rs.waiters = p.serveWaiters(rs.conns, rs.waiters)
-	p.ensureDialForWaiters(rs)
+	rs.Waiters = p.serveWaiters(rs.Conns, rs.Waiters)
+	p.EnsureDialForWaiters(rs)
 	// That eviction can have been the pool's last live conn — this is where a
 	// GOAWAY'd conn is reaped after its drain — leaving waiters queued behind
 	// capacity that no longer exists.
-	p.flushStrandedWaiters(rs, ErrDialBackoff)
+	p.FlushStrandedWaiters(rs, ErrDialBackoff)
 }
 
-// handleDialDone processes a completed dial: on success the conn
+// HandleDialDone processes a completed dial: on success the conn
 // enters the pool; on failure the first waiter receives the error.
-func (p *Pool) handleDialDone(rs *runState, dr dialResult) {
-	rs.inFlightDials--
-	if dr.err != nil {
-		rs.lastDialErrAt = time.Now()
+func (p *Pool) HandleDialDone(rs *RunState, dr DialResult) {
+	rs.InFlightDials--
+	if dr.Err != nil {
+		rs.LastDialErrAt = time.Now()
 		// FRONT of the queue, unlike the HTTP/1.1 pool, which refuses the BACK
 		// behind a reserved-idle guard (h1_pool.go). Not an oversight on either
 		// side: under exclusive checkout a front waiter may already be covered by
@@ -432,10 +442,10 @@ func (p *Pool) handleDialDone(rs *runState, dr dialResult) {
 		// waiter is waiting on capacity rather than on one specific conn, and the
 		// arrival order the rest of the queue assumes is preserved by taking the
 		// head. Stated here because the difference is invisible from either file.
-		if len(rs.waiters) > 0 {
-			req := rs.waiters[0]
-			rs.waiters = rs.waiters[1:]
-			p.replyAcquire(req, nil, dr.err)
+		if len(rs.Waiters) > 0 {
+			req := rs.Waiters[0]
+			rs.Waiters = rs.Waiters[1:]
+			p.replyAcquire(req, nil, dr.Err)
 		}
 		// The waiters behind that one must not be left to a health-check tick.
 		// Either start another dial, or — when the pool is in exactly the state
@@ -447,35 +457,35 @@ func (p *Pool) handleDialDone(rs *runState, dr dialResult) {
 		// was closed.
 		//
 		// This used to add "H2 has no tick-path dial at all, so it drains none",
-		// which stopped being true once handleTick grew its ensureDialForWaiters
+		// which stopped being true once HandleTick grew its EnsureDialForWaiters
 		// call (pinned by TestHandleTick_DialsForStrandedWaiter).
 		//
-		// See flushStrandedWaiters for why countLive rather than len(conns), and
+		// See FlushStrandedWaiters for why CountLive rather than len(conns), and
 		// for what per-STREAM waiters mean when a whole queue is refused at once.
-		p.ensureDialForWaiters(rs)
-		p.flushStrandedWaiters(rs, dr.err)
+		p.EnsureDialForWaiters(rs)
+		p.FlushStrandedWaiters(rs, dr.Err)
 		return
 	}
-	p.refreshStreamCap(dr.mc)
-	rs.conns = append(rs.conns, dr.mc)
-	rs.waiters = p.serveWaiters(rs.conns, rs.waiters)
-	p.ensureDialForWaiters(rs)
+	p.refreshStreamCap(dr.Mc)
+	rs.Conns = append(rs.Conns, dr.Mc)
+	rs.Waiters = p.serveWaiters(rs.Conns, rs.Waiters)
+	p.EnsureDialForWaiters(rs)
 }
 
 // handleStats evicts dead conns silently and reports a snapshot.
-func (p *Pool) handleStats(rs *runState, respCh chan<- Stats) {
-	rs.conns = p.evictDeadSilent(rs.conns)
+func (p *Pool) handleStats(rs *RunState, respCh chan<- Stats) {
+	rs.Conns = p.evictDeadSilent(rs.Conns)
 	respCh <- Stats{
-		ActiveConns:     len(rs.conns),
-		InFlightStreams: sumActive(rs.conns),
-		Waiters:         len(rs.waiters),
-		InFlightDials:   rs.inFlightDials,
+		ActiveConns:     len(rs.Conns),
+		InFlightStreams: sumActive(rs.Conns),
+		Waiters:         len(rs.Waiters),
+		InFlightDials:   rs.InFlightDials,
 	}
 }
 
-// handleTick runs periodic maintenance: idle eviction, dead
+// HandleTick runs periodic maintenance: idle eviction, dead
 // eviction, stream-cap refresh, and waiter expiry.
-func (p *Pool) handleTick(rs *runState) {
+func (p *Pool) HandleTick(rs *RunState) {
 	// Dead before idle. Whichever sweep reaches a conn first decides what
 	// killed it, and a conn the peer GOAWAY'd is very often also idle — it
 	// stopped taking new streams. Reaping it as CloseIdle attributes a peer's
@@ -485,12 +495,12 @@ func (p *Pool) handleTick(rs *runState) {
 	//
 	// The HTTP/1.1 pool deliberately keeps the opposite order: its evictDead
 	// runs a bounded socket probe per conn on the actor goroutine, so probing
-	// conns that evictIdle would have discarded for free would stall every
+	// conns that EvictIdle would have discarded for free would stall every
 	// acquire and release for up to MaxConnsPerHost probes per tick — and h1
 	// has no GOAWAY, so there is nothing to attribute.
-	rs.conns = p.evictDead(rs.conns)
-	rs.conns = p.evictIdle(rs.conns)
-	for _, mc := range rs.conns {
+	rs.Conns = p.evictDead(rs.Conns)
+	rs.Conns = p.EvictIdle(rs.Conns)
+	for _, mc := range rs.Conns {
 		p.refreshStreamCap(mc)
 	}
 	// Serving before dialing is H2-specific. Per-conn capacity is dynamic here:
@@ -498,45 +508,45 @@ func (p *Pool) handleTick(rs *runState) {
 	// able to serve waiters that had nothing to wait for a moment ago, and no
 	// other tick path offers them. Dialing first would open a connection the
 	// pool did not need.
-	rs.waiters = p.serveWaiters(rs.conns, rs.waiters)
-	rs.waiters = pruneExpiredWaiters(rs.waiters)
-	p.ensureDialForWaiters(rs)
+	rs.Waiters = p.serveWaiters(rs.Conns, rs.Waiters)
+	rs.Waiters = pruneExpiredWaiters(rs.Waiters)
+	p.EnsureDialForWaiters(rs)
 	// Either eviction above can take the last live conn while waiters queued
-	// behind a full pool are still here, and ensureDialForWaiters returns without
+	// behind a full pool are still here, and EnsureDialForWaiters returns without
 	// rescuing them whenever a dial backoff is open. Nothing else looks at the
 	// queue until the NEXT tick, a whole HealthCheckPeriod away.
-	p.flushStrandedWaiters(rs, ErrDialBackoff)
+	p.FlushStrandedWaiters(rs, ErrDialBackoff)
 }
 
 // handleClose drains waiters and shuts down all connections.
-func (p *Pool) handleClose(rs *runState) {
-	for _, w := range rs.waiters {
+func (p *Pool) handleClose(rs *RunState) {
+	for _, w := range rs.Waiters {
 		p.replyAcquire(w, nil, ErrPoolClosed)
 	}
-	rs.waiters = nil
+	rs.Waiters = nil
 	// Drain every in-flight dial asynchronously so Close returns promptly even
 	// with a hung dial (the watchdog cancels it once closedCh closes, right
 	// after this returns). Each outstanding dialOne delivers exactly one
 	// result; Closing any completed conn here keeps it from being orphaned in
 	// the buffered dialDoneCh (a conn + reader-goroutine + fd leak).
-	if n := rs.inFlightDials; n > 0 {
-		rs.inFlightDials = 0
+	if n := rs.InFlightDials; n > 0 {
+		rs.InFlightDials = 0
 		go func() {
 			for i := 0; i < n; i++ {
-				if dr := <-p.dialDoneCh; dr.mc != nil {
-					_ = dr.mc.c.Close()
+				if dr := <-p.dialDoneCh; dr.Mc != nil {
+					_ = dr.Mc.C.Close()
 					p.notifyClose(CloseManual)
 				}
 			}
 		}()
 	}
-	for _, mc := range rs.conns {
+	for _, mc := range rs.Conns {
 		reason := CloseManual
-		if mc.c.GoAwayReceived() {
+		if mc.C.GoAwayReceived() {
 			reason = CloseGoAway
-			p.metrics.Counters.GoAwaysReceived.Add(1)
+			p.rec.GoAwayReceived()
 		}
-		_ = mc.c.Close()
+		_ = mc.C.Close()
 		p.notifyClose(reason)
 	}
 }
@@ -544,100 +554,100 @@ func (p *Pool) handleClose(rs *runState) {
 // replyAcquire delivers the single reply owed to req. The send never blocks:
 // reply is a cap-1 channel used by exactly one request, and the actor sends
 // exactly one reply per request it accepts (happy path, serveWaiters,
-// handleDialDone, pruneExpiredWaiters, or handleClose).
+// HandleDialDone, pruneExpiredWaiters, or handleClose).
 //
-// This must NOT race the send against req.ctx.Done(). When a caller has given up
+// This must NOT race the send against req.Ctx.Done(). When a caller has given up
 // AND its buffered reply channel is still writable, both cases are ready and Go
 // picks at random; picking the send strands an mc whose active count the actor
-// has already incremented in a channel nobody reads, so mc.active-- never runs
+// has already incremented in a channel nobody reads, so mc.Active-- never runs
 // and the stream slot is leaked for the life of the conn. Abandoning callers
 // reclaim through acquire's reclaim goroutine instead — the only handoff that
 // cannot drop a committed conn.
-func (p *Pool) replyAcquire(req acquireReq, mc *managedConn, err error) {
-	req.reply <- acquireResp{mc: mc, err: err}
+func (p *Pool) replyAcquire(req AcquireReq, mc *ManagedConn, err error) {
+	req.Reply <- AcquireResp{Mc: mc, Err: err}
 }
 
 // reclaim consumes the reply owed to an abandoned acquire and returns any conn
 // the actor committed to it. Spawned only once the actor has accepted the
 // request, at which point exactly one reply is guaranteed, so this receive
 // always completes and the goroutine always exits.
-func (p *Pool) reclaim(reply chan acquireResp) {
-	if resp := <-reply; resp.mc != nil {
-		p.release(resp.mc)
+func (p *Pool) reclaim(reply chan AcquireResp) {
+	if resp := <-reply; resp.Mc != nil {
+		p.Release(resp.Mc)
 	}
 }
 
-// pickLeastLoaded returns the live, under-cap mc with smallest active
+// PickLeastLoaded returns the live, under-cap mc with smallest active
 // count, or nil if none qualifies.
 //
-// Reads mc.streamCap (cached) instead of taking c.psMu.RLock() per call.
+// Reads mc.StreamCap (cached) instead of taking c.psMu.RLock() per call.
 // The cache is refreshed in the dialDoneCh handler and on every tick.
 // It stops at the first idle connection, which is exactly what a full scan would
 // return: zero is the smallest possible active count and the comparison is
 // strict, so ties already go to the earliest connection in the slice. See the H3
 // twin in h3_pool.go — the same loop, the same reasoning, and #448 for the
 // profile that motivated it.
-func (p *Pool) pickLeastLoaded(conns []*managedConn) *managedConn {
+func (p *Pool) PickLeastLoaded(conns []*ManagedConn) *ManagedConn {
 	n := len(conns)
 	if n == 0 {
 		return nil
 	}
 	start := p.pickCursor % n
-	var best *managedConn
+	var best *ManagedConn
 	for k := 0; k < n; k++ {
 		mc := conns[(start+k)%n]
-		if !mc.c.IsAlive() {
+		if !mc.C.IsAlive() {
 			continue
 		}
-		if mc.active >= mc.streamCap {
+		if mc.Active >= mc.StreamCap {
 			continue
 		}
-		if mc.active == 0 {
+		if mc.Active == 0 {
 			p.pickCursor = (start + k + 1) % n
 			return mc
 		}
-		if best == nil || mc.active < best.active {
+		if best == nil || mc.Active < best.Active {
 			best = mc
 		}
 	}
 	return best
 }
 
-// refreshStreamCap recomputes mc.streamCap from the conn's current peer
+// refreshStreamCap recomputes mc.StreamCap from the conn's current peer
 // SETTINGS_MAX_CONCURRENT_STREAMS. Called by the actor on dial completion
 // and on each tick.
-func (p *Pool) refreshStreamCap(mc *managedConn) {
-	mc.streamCap = effectiveStreamCap(p.opts.MaxStreamsPerConn, mc.c.PeerMaxConcurrentStreams())
+func (p *Pool) refreshStreamCap(mc *ManagedConn) {
+	mc.StreamCap = EffectiveStreamCap(p.opts.MaxStreamsPerConn, mc.C.PeerMaxConcurrentStreams())
 }
 
-// dialEnv snapshots what dialAttempt needs from this pool.
-func (p *Pool) dialEnv() dialEnv {
-	return dialEnv{closedCh: p.closedCh, timeout: p.opts.DialTimeout, addr: p.addr, metrics: p.metrics, hooksRef: p.hooksRef}
+// DialEnv snapshots what DialAttempt needs from this pool.
+func (p *Pool) DialEnv() DialEnv {
+	return DialEnv{ClosedCh: p.closedCh, Timeout: p.opts.DialTimeout, Addr: p.Addr, Rec: p.rec, Obs: p.obs}
 }
 
 // dialOne dials one conn and delivers it to the actor. Always delivers:
 // handleClose's drainer receives this and closes the conn if the pool shut
 // down before it could be pooled, so it is never orphaned.
 func (p *Pool) dialOne() {
-	c, err := dialAttempt(p.dialEnv(), func(ctx context.Context) (*conn.Conn, error) {
-		return conn.Dial(ctx, p.addr, p.connOpts)
+	c, err := DialAttempt(p.DialEnv(), func(ctx context.Context) (*conn.Conn, error) {
+		return conn.Dial(ctx, p.Addr, p.connOpts)
 	})
 	if err != nil {
-		p.dialDoneCh <- dialResult{err: &DialError{Addr: p.addr, Err: err}}
+		p.dialDoneCh <- DialResult{Err: &DialError{Addr: p.Addr, Err: err}}
 		return
 	}
-	p.dialDoneCh <- dialResult{mc: &managedConn{c: c, lastUsed: time.Now(), p: p}}
+	p.dialDoneCh <- DialResult{Mc: &ManagedConn{C: c, LastUsed: time.Now(), p: p}}
 }
 
 // serveWaiters hands as many waiters as possible a live mc.
-func (p *Pool) serveWaiters(conns []*managedConn, waiters []acquireReq) []acquireReq {
+func (p *Pool) serveWaiters(conns []*ManagedConn, waiters []AcquireReq) []AcquireReq {
 	for len(waiters) > 0 {
-		mc := p.pickLeastLoaded(conns)
+		mc := p.PickLeastLoaded(conns)
 		if mc == nil {
 			return waiters
 		}
-		mc.active++
-		mc.lastUsed = time.Now()
+		mc.Active++
+		mc.LastUsed = time.Now()
 		req := waiters[0]
 		waiters = waiters[1:]
 		p.replyAcquire(req, mc, nil)
@@ -647,15 +657,15 @@ func (p *Pool) serveWaiters(conns []*managedConn, waiters []acquireReq) []acquir
 
 // notifyClose increments ConnsClosed and fires OnConnClose.
 func (p *Pool) notifyClose(reason CloseReason) {
-	notifyConnClose(p.addr, reason, p.metrics, p.hooksRef)
+	NotifyConnClose(p.Addr, reason, p.obs, p.rec)
 }
 
 // evict removes target from conns, notifies close, and closes the conn.
-func (p *Pool) evict(conns []*managedConn, target *managedConn, reason CloseReason) []*managedConn {
+func (p *Pool) evict(conns []*ManagedConn, target *ManagedConn, reason CloseReason) []*ManagedConn {
 	out := conns[:0]
 	for _, mc := range conns {
 		if mc == target {
-			_ = mc.c.Close()
+			_ = mc.C.Close()
 			p.notifyClose(reason)
 			continue
 		}
@@ -664,16 +674,16 @@ func (p *Pool) evict(conns []*managedConn, target *managedConn, reason CloseReas
 	return out
 }
 
-// evictIdle removes conns idle past PoolOptions.IdleTimeout.
-func (p *Pool) evictIdle(conns []*managedConn) []*managedConn {
+// EvictIdle removes conns idle past PoolOptions.IdleTimeout.
+func (p *Pool) EvictIdle(conns []*ManagedConn) []*ManagedConn {
 	if p.opts.IdleTimeout <= 0 {
 		return conns
 	}
 	now := time.Now()
 	out := conns[:0]
 	for _, mc := range conns {
-		if mc.active == 0 && now.Sub(mc.lastUsed) > p.opts.IdleTimeout {
-			_ = mc.c.Close()
+		if mc.Active == 0 && now.Sub(mc.LastUsed) > p.opts.IdleTimeout {
+			_ = mc.C.Close()
 			p.notifyClose(CloseIdle)
 			continue
 		}
@@ -683,7 +693,7 @@ func (p *Pool) evictIdle(conns []*managedConn) []*managedConn {
 }
 
 // evictDead removes conns whose IsAlive returns false AND that have no
-// in-flight streams, mirroring evictIdle's active==0 guard.
+// in-flight streams, mirroring EvictIdle's active==0 guard.
 //
 // The guard is load-bearing, not tidiness. IsAlive() is false the moment a
 // GOAWAY lands, but RFC 7540 §6.8 says streams at or below the GOAWAY's
@@ -694,19 +704,19 @@ func (p *Pool) evictIdle(conns []*managedConn) []*managedConn {
 //
 // A conn that is dead rather than draining loses nothing by waiting: its reader
 // is gone and shutdownStreams has already reset every stream on it, so each
-// release arrives promptly and handleRelease evicts. Either way pickLeastLoaded
-// skips it (not IsAlive) and countLive excludes it, so while it lingers it can
+// Release arrives promptly and HandleRelease evicts. Either way PickLeastLoaded
+// skips it (not IsAlive) and CountLive excludes it, so while it lingers it can
 // neither take new streams nor block a redial.
-func (p *Pool) evictDead(conns []*managedConn) []*managedConn {
+func (p *Pool) evictDead(conns []*ManagedConn) []*ManagedConn {
 	out := conns[:0]
 	for _, mc := range conns {
-		if !mc.c.IsAlive() && mc.active == 0 {
+		if !mc.C.IsAlive() && mc.Active == 0 {
 			reason := CloseDead
-			if mc.c.GoAwayReceived() {
+			if mc.C.GoAwayReceived() {
 				reason = CloseGoAway
-				p.metrics.Counters.GoAwaysReceived.Add(1)
+				p.rec.GoAwayReceived()
 			}
-			_ = mc.c.Close()
+			_ = mc.C.Close()
 			p.notifyClose(reason)
 			continue
 		}
@@ -732,14 +742,14 @@ func (p *Pool) evictDead(conns []*managedConn) []*managedConn {
 // guard a metrics scrape that happened to land during a peer's graceful drain
 // would close the conn out from under its own in-flight requests. Observability
 // must not be able to fail a request.
-func (p *Pool) evictDeadSilent(conns []*managedConn) []*managedConn {
+func (p *Pool) evictDeadSilent(conns []*ManagedConn) []*ManagedConn {
 	out := conns[:0]
 	for _, mc := range conns {
-		if !mc.c.IsAlive() && mc.active == 0 {
-			_ = mc.c.Close()
-			p.metrics.Counters.ConnsClosed.Add(1)
-			if mc.c.GoAwayReceived() {
-				p.metrics.Counters.GoAwaysReceived.Add(1)
+		if !mc.C.IsAlive() && mc.Active == 0 {
+			_ = mc.C.Close()
+			p.rec.ConnClosed()
+			if mc.C.GoAwayReceived() {
+				p.rec.GoAwayReceived()
 			}
 			continue
 		}
@@ -749,26 +759,26 @@ func (p *Pool) evictDeadSilent(conns []*managedConn) []*managedConn {
 }
 
 // sumActive sums active stream counts across conns.
-func sumActive(conns []*managedConn) int {
+func sumActive(conns []*ManagedConn) int {
 	n := 0
 	for _, mc := range conns {
-		n += mc.active
+		n += mc.Active
 	}
 	return n
 }
 
-// countLive returns the number of conns whose underlying *conn.Conn reports
+// CountLive returns the number of conns whose underlying *conn.Conn reports
 // IsAlive(). The actor uses it wherever a decision turns on capacity that
 // still exists -- the at-cap test in handleAcquire, the dial-for-waiters
-// guard, and the terminal-state check in handleDialDone -- so that a stale
+// guard, and the terminal-state check in HandleDialDone -- so that a stale
 // dead-but-not-yet-evicted entry cannot stand in for usable capacity.
 //
 // It used to name a function called canDial, which does not exist anywhere in
 // the repo.
-func countLive(conns []*managedConn) int {
+func CountLive(conns []*ManagedConn) int {
 	n := 0
 	for _, mc := range conns {
-		if mc.c.IsAlive() {
+		if mc.C.IsAlive() {
 			n++
 		}
 	}
@@ -782,12 +792,12 @@ func countLive(conns []*managedConn) int {
 // reclaim goroutine is blocked waiting for exactly one value, so dropping the
 // waiter silently would hang that goroutine forever. The send cannot block
 // (cap-1 channel, single use).
-func pruneExpiredWaiters(ws []acquireReq) []acquireReq {
+func pruneExpiredWaiters(ws []AcquireReq) []AcquireReq {
 	out := ws[:0]
 	for _, w := range ws {
 		select {
-		case <-w.ctx.Done():
-			w.reply <- acquireResp{err: w.ctx.Err()}
+		case <-w.Ctx.Done():
+			w.Reply <- AcquireResp{Err: w.Ctx.Err()}
 		default:
 			out = append(out, w)
 		}
@@ -795,14 +805,14 @@ func pruneExpiredWaiters(ws []acquireReq) []acquireReq {
 	return out
 }
 
-// acquire requests a managedConn from the actor. The returned mc's
+// Acquire requests a ManagedConn from the actor. The returned mc's
 // active count has already been incremented by the actor. Caller MUST
-// eventually call p.release(mc).
-func (p *Pool) acquire(ctx context.Context) (*managedConn, error) {
+// eventually call p.Release(mc).
+func (p *Pool) Acquire(ctx context.Context) (*ManagedConn, error) {
 	start := time.Now()
 	// Merge AcquireTimeout into ctx so that ctx.Done() fires on ALL abandonment
 	// paths, including AcquireTimeout: the reclaim handoff below and the actor's
-	// waiter pruning are both keyed on req.ctx.
+	// waiter pruning are both keyed on req.Ctx.
 	acquireTimeoutActive := false
 	if p.opts.AcquireTimeout > 0 {
 		deadline := time.Now().Add(p.opts.AcquireTimeout)
@@ -816,7 +826,7 @@ func (p *Pool) acquire(ctx context.Context) (*managedConn, error) {
 		defer cancel()
 	}
 
-	reply := replyPool.Get().(chan acquireResp)
+	reply := replyPool.Get().(chan AcquireResp)
 	// recycle returns the reply channel to replyPool. It is ONLY safe to
 	// call when the actor can no longer send on reply — otherwise a late
 	// send from the actor would poison the channel for its next user
@@ -838,7 +848,7 @@ func (p *Pool) acquire(ctx context.Context) (*managedConn, error) {
 		replyPool.Put(reply)
 	}
 
-	req := acquireReq{ctx: ctx, reply: reply}
+	req := AcquireReq{Ctx: ctx, Reply: reply}
 
 	// Send the request to the actor.
 	select {
@@ -846,7 +856,7 @@ func (p *Pool) acquire(ctx context.Context) (*managedConn, error) {
 		// The actor now owns req and owes it exactly one reply.
 	case <-ctx.Done():
 		recycle() // actor never received req — safe to recycle
-		return nil, mapAcquireErr(ctx, acquireTimeoutActive)
+		return nil, MapAcquireErr(ctx, acquireTimeoutActive)
 	case <-p.closedCh:
 		recycle() // actor never received req — safe to recycle
 		return nil, ErrPoolClosed
@@ -856,10 +866,10 @@ func (p *Pool) acquire(ctx context.Context) (*managedConn, error) {
 	select {
 	case resp := <-reply:
 		recycle() // consumed the actor's single send — safe to recycle
-		if resp.err == nil {
-			p.metrics.Latency.Acquire.Observe(time.Since(start))
+		if resp.Err == nil {
+			p.rec.ObserveAcquire(time.Since(start))
 		}
-		return resp.mc, resp.err
+		return resp.Mc, resp.Err
 	case <-ctx.Done():
 		// Both this case and the reply case can be ready at once (the actor may
 		// have just committed a conn to us); Go would pick between them at random.
@@ -867,63 +877,63 @@ func (p *Pool) acquire(ctx context.Context) (*managedConn, error) {
 		// are abandoning goes back to the pool instead of being stranded.
 		// reclaim owns the channel from here — do NOT recycle.
 		go p.reclaim(reply)
-		return nil, mapAcquireErr(ctx, acquireTimeoutActive)
+		return nil, MapAcquireErr(ctx, acquireTimeoutActive)
 	case <-p.closedCh:
 		go p.reclaim(reply)
 		return nil, ErrPoolClosed
 	}
 }
 
-// mapAcquireErr converts ctx.Err() to the right sentinel. If the
+// MapAcquireErr converts ctx.Err() to the right sentinel. If the
 // deadline was introduced by AcquireTimeout (not the caller's own ctx),
 // we return ErrAcquireTimeout to distinguish it from context.Canceled or
 // a caller-supplied context.DeadlineExceeded.
-func mapAcquireErr(ctx context.Context, acquireTimeoutActive bool) error {
+func MapAcquireErr(ctx context.Context, acquireTimeoutActive bool) error {
 	if acquireTimeoutActive && ctx.Err() == context.DeadlineExceeded {
 		return ErrAcquireTimeout
 	}
 	return ctx.Err()
 }
 
-// release returns mc to the actor.
+// Release returns mc to the actor.
 //
-// It carries no request error. handleRelease re-checks IsAlive
+// It carries no request error. HandleRelease re-checks IsAlive
 // unconditionally, which is strictly the safer rule: it catches a conn that
 // died under a request that SUCCEEDED, and it does not evict a healthy conn
 // merely because one request on it failed. The parameter used to be here and
 // the actor never read it, while this comment claimed the opposite — so anyone
 // reasoning about eviction from the signature was reasoning about behaviour
 // that did not exist.
-func (p *Pool) release(mc *managedConn) {
+func (p *Pool) Release(mc *ManagedConn) {
 	if mc == nil {
 		return
 	}
 	select {
-	case p.releaseCh <- releaseMsg{mc: mc}:
+	case p.releaseCh <- ReleaseMsg{Mc: mc}:
 	case <-p.closedCh:
 		// Pool already closed: the actor is gone and won't process this
 		// release, so close the conn directly rather than dropping it (a leak).
 		// conn.Close is idempotent if handleClose already closed it.
-		if mc.c != nil {
-			_ = mc.c.Close()
+		if mc.C != nil {
+			_ = mc.C.Close()
 		}
 	}
 }
 
-// inDialBackoff reports whether a previous dial error is still within
+// InDialBackoff reports whether a previous dial error is still within
 // the configured DialBackoff window. Returns false if no previous error
 // or if window <= 0.
-func inDialBackoff(lastErrAt time.Time, window time.Duration) bool {
+func InDialBackoff(lastErrAt time.Time, window time.Duration) bool {
 	if lastErrAt.IsZero() || window <= 0 {
 		return false
 	}
 	return time.Since(lastErrAt) < window
 }
 
-// effectiveStreamCap computes min(localCap, peerCap). Either may be
+// EffectiveStreamCap computes min(localCap, peerCap). Either may be
 // zero meaning "unbounded". Returns defaultMaxConcurrentStreams if both
 // are unbounded.
-func effectiveStreamCap(localCap, peerCap int) int {
+func EffectiveStreamCap(localCap, peerCap int) int {
 	if localCap <= 0 && peerCap <= 0 {
 		return defaultMaxConcurrentStreams
 	}
@@ -939,10 +949,10 @@ func effectiveStreamCap(localCap, peerCap int) int {
 	return localCap
 }
 
-// warmup pre-dials up to n conns in the background. Idempotent.
+// Warmup pre-dials up to n conns in the background. Idempotent.
 // n is capped at MaxConnsPerHost. Returns immediately; dial errors
 // are surfaced via the OnDial hook.
-func (p *Pool) warmup(n int) {
+func (p *Pool) Warmup(n int) {
 	if n <= 0 {
 		return
 	}
@@ -958,29 +968,29 @@ func (p *Pool) warmup(n int) {
 // request to serve.
 //
 // It cannot be expressed as a loop of acquire+release, which is what it used to
-// be. This pool multiplexes: pickLeastLoaded returns any conn with a free stream
+// be. This pool multiplexes: PickLeastLoaded returns any conn with a free stream
 // slot, so the second acquire reuses the conn the first one just released and
 // the pool opens exactly ONE connection no matter what n is. Holding the conns
 // instead does not help either — a held conn still has free stream slots — which
 // is why the fix h1Pool.warmup uses (hold, then release together) does not port
 // here. h1 checks out its connection exclusively; this one does not.
-func (p *Pool) handleWarmup(rs *runState, n int) {
+func (p *Pool) handleWarmup(rs *RunState, n int) {
 	target := n
 	if target > p.opts.MaxConnsPerHost {
 		target = p.opts.MaxConnsPerHost
 	}
-	need := target - countLive(rs.conns) - rs.inFlightDials
+	need := target - CountLive(rs.Conns) - rs.InFlightDials
 	if need <= 0 {
 		return
 	}
-	if inDialBackoff(rs.lastDialErrAt, p.opts.DialBackoff) {
+	if InDialBackoff(rs.LastDialErrAt, p.opts.DialBackoff) {
 		return // a warmup must not defeat the backoff a failing peer earned
 	}
 	for i := 0; i < need; i++ {
-		rs.inFlightDials++
+		rs.InFlightDials++
 		go p.dialOne()
 	}
 }
 
-// release implements releaser: it hands this conn back to its pool.
-func (mc *managedConn) release() { mc.p.release(mc) }
+// Release implements releaser: it hands this conn back to its pool.
+func (mc *ManagedConn) Release() { mc.p.Release(mc) }

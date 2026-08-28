@@ -315,7 +315,7 @@ func (c *compressingReader) Read(p []byte) (int, error) {
 // release returns the reader and its encoder to their pools. Idempotent: a
 // second call is a no-op, so a double release cannot hand one encoder to two
 // requests at once.
-func (c *compressingReader) release() {
+func (c *compressingReader) Release() {
 	if c.w == nil {
 		return
 	}
@@ -458,7 +458,7 @@ func prepareCompressedRequest(req *Request) (eff *Request, release func(), err e
 		}
 		eff.BodyReader = cr
 		eff.Headers = compressedHeaders(req.Headers, token, -1)
-		return eff, cr.release, nil
+		return eff, cr.Release, nil
 	}
 
 	body, berr := compressBody(req.CompressBody, req.Body)
