@@ -105,7 +105,15 @@ func TestReclaim_ReturnsAConnTheAbandonedAcquireStillOwed(t *testing.T) {
 	t.Run("a conn in the abandoned reply is released", func(t *testing.T) {
 		t.Parallel()
 		p := testPool(t, PoolOptions{MaxConnsPerHost: 2})
-		mc := &ManagedConn{C: dialFakeConn(t), Active: 1, StreamCap: 4}
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		// The conn has to come FROM the pool: a hand-built one is not in the
+		// actor's state, so releasing it changes no number this test could read
+		// and the assertion would hold whether or not reclaim did its job.
+		mc, err := p.Acquire(ctx)
+		require.NoError(t, err, "acquire against the in-process fake server")
+		require.Equalf(t, 1, p.Stats().InFlightStreams,
+			"the fixture must start with the stream charged, or nothing below is measured")
 		reply := make(chan AcquireResp, 1)
 		reply <- AcquireResp{Mc: mc}
 
