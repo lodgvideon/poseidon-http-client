@@ -124,8 +124,16 @@ func TestStaticResolver_WatchDeliversTheSetOnce(t *testing.T) {
 	got, ok := <-ch
 	require.True(t, ok, "Watch closed its channel without delivering the initial set")
 	assert.Equal(t, addrs, got, "Watch must deliver the set the resolver was built with")
-	_, ok = <-ch
-	assert.False(t, ok,
-		"Watch must close after the only update a static set will ever have; leaving it open "+
-			"parks the pool's watch goroutine forever")
+	// A bounded receive, not a bare one: a Watch that never closes would other-
+	// wise hang here and report itself as a package timeout ten minutes later
+	// instead of as this assertion.
+	select {
+	case _, ok = <-ch:
+		assert.False(t, ok,
+			"Watch delivered a second update for a set that cannot change")
+	case <-time.After(2 * time.Second):
+		assert.Fail(t,
+			"Watch neither closed nor delivered again; leaving the channel open parks the "+
+				"pool's watch goroutine for the life of the process")
+	}
 }
