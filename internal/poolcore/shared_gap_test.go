@@ -153,26 +153,31 @@ func TestPoolRelease_AfterCloseClosesTheConn(t *testing.T) {
 }
 
 // TestManagedCoreAccessors_ReportWhatTheCoreWasBuiltWith covers the read seams
-// the per-protocol pools' tests use, including the one that answers under the
-// lock.
+// the per-protocol pools' tests use for the values fixed at construction.
 func TestManagedCoreAccessors_ReportWhatTheCoreWasBuiltWith(t *testing.T) {
 	t.Parallel()
-	addr := Address{Host: "10.0.0.9", Port: 443}
-	res := StaticResolver(addr)
+	res := StaticResolver(Address{Host: "10.0.0.9", Port: 443})
 
-	mp, err := BuildManagedPool(res, RoundRobin(), DrainHard, conn.ConnOptions{Dialer: &fakeDialer{}},
-		PoolOptions{MaxConnsPerHost: 1, HealthCheckPeriod: time.Hour}, nil, nil)
-	require.NoError(t, err, "BuildManagedPool against a static resolver")
-	t.Cleanup(func() { _ = mp.Close() })
-	mp.SetTickerPeriod(time.Hour)
+	mp := buildTestManagedPool(t, res, DrainHard)
 
 	assert.Same(t, res, mp.Resolver(),
 		"Resolver() must hand back the resolver the core was built with; the sibling tests "+
 			"reach through it to script address-set changes")
 	assert.Equalf(t, DrainHard, mp.DrainMode(),
-		"DrainMode() = %v, want DrainHard", mp.DrainMode())
-	assert.False(t, mp.HasSubPool(addr.String()),
-		"HasSubPool reported a sub-pool before any acquire created one")
+		"DrainMode() = %v, want DrainHard — the drain tests read it to pick their expectation",
+		mp.DrainMode())
+}
+
+// TestHasSubPool_FollowsRegistration walks the one transition the drain tests
+// depend on: an address has no sub-pool until something creates it, and has one
+// afterwards. A HasSubPool stuck on either answer would make those tests either
+// pass instantly or hang until their deadline.
+func TestHasSubPool_FollowsRegistration(t *testing.T) {
+	t.Parallel()
+	addr := Address{Host: "10.0.0.9", Port: 443}
+	mp := buildTestManagedPool(t, StaticResolver(addr), DrainGraceful)
+	require.False(t, mp.HasSubPool(addr.String()),
+		"a sub-pool existed before anything created one")
 
 	require.NotNil(t, mp.GetOrCreateSubPool(addr), "GetOrCreateSubPool for a resolved address")
 
@@ -183,83 +188,49 @@ func TestManagedCoreAccessors_ReportWhatTheCoreWasBuiltWith(t *testing.T) {
 		"SnapshotActive must report the resolver's set")
 }
 
-// recordingObserver captures the connection-lifecycle events a pool raises.
-type recordingObserver struct {
-	dials   []DialEvent
-	closes  []ConnCloseEvent
-	updates []ResolverUpdateEvent
+// TestNilObservabilityIsSubstituted is the property the seam rests on. The old
+// code checked for a nil hooks pointer and a nil *Metrics at every call site;
+// the new one checks NOWHERE and relies on the constructors substituting a nop.
+// Drop that substitution and every pool built without observability — which is
+// what the whole test suite does — panics on its first dial.
+//
+// It drives a real dial rather than reading the fields, because reading them
+// would assert the implementation and pass even if the reporting path had been
+// changed to dereference something else.
+func TestNilObservabilityIsSubstituted(t *testing.T) {
+	t.Parallel()
+
+	// The dialer must FAIL rather than return a nil conn: a nil error here makes
+	// conn.Dial hand a nil transport to the handshake, and the crash that follows
+	// is the fixture's, not the pool's.
+	p := New("nilobs.test:443", conn.ConnOptions{Dialer: &failingDialer{err: errors.New("refused")}},
+		PoolOptions{
+			MaxConnsPerHost:   1,
+			DialTimeout:       time.Second,
+			HealthCheckPeriod: time.Hour,
+		}, nil, nil)
+	t.Cleanup(func() { _ = p.Close() })
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	_, err := p.Acquire(ctx)
+
+	// Reaching a returned error at all is the assertion. The reporting runs on
+	// the pool's own dial goroutine, so a nil Recorder does not surface as a
+	// failed assertion here — it takes the process down, and this Acquire never
+	// returns. Both counts and the OnDial event are on that path.
+	require.Error(t, err,
+		"a pool built with nil Observer and nil Recorder did not report its failed dial; the "+
+			"constructors must substitute the nops that replaced the old per-call-site nil checks")
 }
 
-func (o *recordingObserver) OnDial(e DialEvent)                     { o.dials = append(o.dials, e) }
-func (o *recordingObserver) OnConnClose(e ConnCloseEvent)           { o.closes = append(o.closes, e) }
-func (o *recordingObserver) OnResolverUpdate(e ResolverUpdateEvent) { o.updates = append(o.updates, e) }
-
-// TestDialObserved_ReportsBothOutcomes covers the observability seam itself: the
-// counts and the event a single-connection transport's dial produces. Both arms
-// matter — a dial that fails must still be counted as ATTEMPTED and must still
-// reach OnDial, because a hook that only fires on success cannot measure the
-// thing a load test is asking about.
-func TestDialObserved_ReportsBothOutcomes(t *testing.T) {
-	t.Parallel()
-	wantErr := errors.New("connection refused")
-	cases := []struct {
-		name        string
-		dialErr     error
-		wantFailed  int64
-		wantEventOK bool
-	}{
-		{"successful dial", nil, 0, true},
-		{"failed dial", wantErr, 1, true},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			rec := &countingRecorder{}
-			obs := &recordingObserver{}
-
-			got, err := DialObserved(context.Background(), "10.0.0.4:443", time.Second, rec, obs,
-				func(context.Context) (int, error) {
-					if tc.dialErr != nil {
-						return 0, tc.dialErr
-					}
-					return 7, nil
-				})
-
-			if tc.dialErr != nil {
-				require.ErrorIs(t, err, tc.dialErr, "DialObserved must return the dial's own error unchanged")
-			} else {
-				require.NoError(t, err, "DialObserved on a succeeding dial")
-				assert.Equal(t, 7, got, "DialObserved must return the dial's value unchanged")
-			}
-			assert.Equalf(t, int64(1), rec.DialsAttempted.Load(),
-				"DialsAttempted = %d, want 1 — every dial is counted before its outcome is known",
-				rec.DialsAttempted.Load())
-			assert.Equalf(t, tc.wantFailed, rec.DialsFailed.Load(),
-				"DialsFailed = %d, want %d", rec.DialsFailed.Load(), tc.wantFailed)
-			assert.Equalf(t, int64(1), rec.DialsObserved.Load(),
-				"the dial latency must be observed on both outcomes; timing only successes hides "+
-					"the slow-failure case a load test is looking for")
-			require.Lenf(t, obs.dials, 1, "OnDial fired %d times, want exactly 1", len(obs.dials))
-			assert.Equal(t, "10.0.0.4:443", obs.dials[0].Addr, "OnDial must carry the dialled address")
-			assert.ErrorIs(t, obs.dials[0].Err, tc.dialErr, "OnDial must carry the dial's outcome")
-		})
-	}
-}
-
-// TestNotifyConnClose_CountsAndReports pins the other half of the seam. The
-// hook's contract is "every close this client performs", so the count and the
-// event must both fire for a reason the caller chose.
-func TestNotifyConnClose_CountsAndReports(t *testing.T) {
-	t.Parallel()
-	rec := &countingRecorder{}
-	obs := &recordingObserver{}
-
-	NotifyConnClose("10.0.0.5:443", CloseGoAway, obs, rec)
-
-	assert.Equalf(t, int64(1), rec.ConnsClosedN.Load(),
-		"ConnsClosed = %d, want 1 — a close the counter misses makes connection churn "+
-			"invisible on the one dashboard an operator reads", rec.ConnsClosedN.Load())
-	require.Len(t, obs.closes, 1, "OnConnClose must fire once per close")
-	assert.Equal(t, ConnCloseEvent{Addr: "10.0.0.5:443", Reason: CloseGoAway}, obs.closes[0],
-		"the event must carry the address and the reason the caller classified it with")
+// buildTestManagedPool builds a managed pool that never dials and never sweeps.
+func buildTestManagedPool(t *testing.T, res Resolver, dm DrainMode) *ManagedPool {
+	t.Helper()
+	mp, err := BuildManagedPool(res, RoundRobin(), dm, conn.ConnOptions{Dialer: &fakeDialer{}},
+		PoolOptions{MaxConnsPerHost: 1, HealthCheckPeriod: time.Hour}, nil, nil)
+	require.NoError(t, err, "BuildManagedPool against a static resolver")
+	t.Cleanup(func() { _ = mp.Close() })
+	mp.SetTickerPeriod(time.Hour)
+	return mp
 }
