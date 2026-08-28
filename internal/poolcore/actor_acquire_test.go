@@ -211,6 +211,40 @@ func TestNewCore_DefaultsAndThePartialResolveRule(t *testing.T) {
 	})
 }
 
+// TestNewCore_SubstitutesNilObservabilityItself pins NewCore's OWN guards
+// rather than BuildManagedPool's. The HTTP/2 constructor substitutes the nops
+// before it calls NewCore, so going through it leaves these branches
+// unreachable — and a constructor other callers reach directly (the HTTP/1.1
+// and HTTP/3 managed pools do, and the gRPC channel will) must not depend on
+// its caller having done the work.
+func TestNewCore_SubstitutesNilObservabilityItself(t *testing.T) {
+	t.Parallel()
+	co := conn.ConnOptions{Dialer: &fakeDialer{}}
+	po := PoolOptions{MaxConnsPerHost: 1, HealthCheckPeriod: time.Hour}
+
+	mp, err := NewCore(CoreConfig[*Pool, *ManagedConn, *conn.Conn, func()]{
+		Resolver: StaticResolver(Address{Host: "10.0.0.2", Port: 443}),
+		PoolOpts: po,
+		NewSub:   func(key string) *Pool { return New(key, co, po, nil, nil) },
+		ConnOf:   func(mc *ManagedConn) *conn.Conn { return mc.C },
+		MkRelease: func(p *Pool, mc *ManagedConn) func() {
+			return func() { p.Release(mc) }
+		},
+	})
+
+	require.NoError(t, err, "NewCore with a nil Selector, Observer and Recorder")
+	t.Cleanup(func() { _ = mp.Close() })
+	require.NotNil(t, mp.obs, "NewCore left Obs nil; its own reporting path has no nil check")
+	require.NotNil(t, mp.rec, "NewCore left Rec nil; its own reporting path has no nil check")
+	// NotNil alone would accept an interface holding a typed nil, so the
+	// substitutes are exercised rather than merely inspected.
+	assert.NotPanics(t, func() {
+		mp.obs.OnResolverUpdate(ResolverUpdateEvent{Total: 1})
+		mp.rec.ConnClosed()
+	}, "the substituted observability panicked when called")
+	assert.NotNil(t, mp.selector, "NewCore left Selector nil; Acquire calls Pick unguarded")
+}
+
 // TestDefaultsAreTheDocumentedThirtySeconds pins the two timing constants to
 // their values rather than to themselves. Every transport floors its dial
 // timeout at the first and every managed pool sweeps on the second, so a change
