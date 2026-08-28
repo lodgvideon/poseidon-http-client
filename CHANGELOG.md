@@ -7,6 +7,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **The HTTP/3 response-size cap is configurable.** `maxResponseBytes` was a
+  package `var` — 128 MiB, reachable from a test in the same package and from
+  nowhere else — and it bounds the bytes ONE response retains. For a load
+  generator that is headroom per in-flight request, so many concurrent large
+  responses reserve a great deal of it (#712).
+
+  `http3.WithMaxResponseBytes(n)` sets it per client, and
+  `client.ClientOptions.H3MaxResponseBytes` carries it through the three HTTP/3
+  transports. Zero keeps the 128 MiB default, so nothing changes for a caller
+  that sets neither.
+
+  **`http3.Dial`'s variadic changes type**: it took `...quic.ConnOption` and now
+  takes `...http3.Option`. Wrap existing QUIC options in
+  `http3.WithConnOptions(...)`. Two call sites existed in-tree; one variadic
+  carries both levels because Go allows only one, and a second constructor for
+  the other kind would be two doors onto one object.
+
+  A zero-value `Client{}` still caps at the default rather than at zero. That is
+  not a convenience: reading the field raw would make every test that builds a
+  `Client` by hand assert against a cap of 0, where "the retained total exceeded
+  the cap" is true for any response at all — the tests would stay green while
+  testing nothing.
+
+  Four tests that set the old package var and restored it with `defer` now
+  configure the client through the option instead, which is the same coverage
+  without the global mutation. Both halves of the plumbing were made to fail:
+  a read path that ignores the field reddens the http3 tests, and dropping the
+  translation in `client` reddens the client ones.
+
 ### Fixed
 
 - **A handshake TLS refuses before Handshake keys exist is no longer silent.**

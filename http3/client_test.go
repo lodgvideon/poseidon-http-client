@@ -809,7 +809,14 @@ func TestClient_Close(t *testing.T) {
 // NewClientFake constructs a Client over a fake quicConn (test-only shim around
 // the unexported newClient).
 func NewClientFake(conn quicConn, settings []Setting) (*Client, error) {
-	return newClient(conn, settings)
+	return newClient(conn, settings, clientConfig{})
+}
+
+// NewClientFakeWithOptions is NewClientFake for a test that needs the Client
+// configured the way Dial would configure it — the option path, not a field poked
+// after construction, so it exercises what a caller actually gets.
+func NewClientFakeWithOptions(conn quicConn, settings []Setting, opts ...Option) (*Client, error) {
+	return newClient(conn, settings, apply(opts))
 }
 
 // sendAll has two distinct blocked cases and the fakes only ever expressed one.

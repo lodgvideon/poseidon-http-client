@@ -61,7 +61,7 @@ func feedResponse(b *testing.B, wire []byte, wantBody, burst int, pooled bool) {
 		if pooled {
 			fr.acquire()
 		}
-		fr.SetMaxFrameLen(maxResponseBytes)
+		fr.SetMaxFrameLen(defaultMaxResponseBytes)
 		rb := &respBuilder{resp: &Response{Status: 200}} // onData nil: the buffered Do path
 		for off := 0; off < len(wire); off += burst {
 			end := off + burst

@@ -2319,7 +2319,42 @@ if err := c.Do(context.Background(), req, &resp); err != nil {
 // resp.Body holds raw (still-compressed) bytes; resp.BytesReceived == len(resp.Body).
 ```
 
-### 9. Congestion control on HTTP/3 (NewReno vs BBR)
+### 9. Bounding what one HTTP/3 response retains
+
+An HTTP/3 response is capped at **128 MiB** of retained bytes by default — the
+per-frame declared length, and the header, body, trailer and 1xx payloads held
+together. Past it the request fails with `http3.ErrResponseTooLarge`.
+
+For a load generator that default is generous: it is headroom *per in-flight
+request*, so many concurrent large responses reserve a great deal of it. Set the
+ceiling to what your responses actually are:
+
+```go
+c, err := client.NewClient(client.ClientOptions{
+	Transport: client.TransportH3,
+	Addr:      "example.com:443",
+	TLSConfig: &tls.Config{ServerName: "example.com"},
+	// Zero means the 128 MiB default; this is per response, not per client.
+	// Ignored by the H1/H2 transports.
+	H3MaxResponseBytes: 4 << 20, // 4 MiB
+})
+```
+
+Two things worth knowing before you lower it:
+
+- **`DoStream` is barely affected.** A chunk handed to the `BodyReader` is not
+  retained, so it does not count toward the cumulative half. Only the per-frame
+  cap applies there, because a frame is buffered before it can be handed off. A
+  streamed download of an arbitrarily large body works under a small cap; a
+  buffered `Do` of the same body does not.
+- **Set it above your largest expected field section.** The cap covers headers
+  too, so a value below a server's response headers fails every request against
+  it, not just the large ones.
+
+At the `http3` layer the same setting is `http3.WithMaxResponseBytes(n)` passed
+to `http3.Dial`.
+
+### 10. Congestion control on HTTP/3 (NewReno vs BBR)
 
 HTTP/3 connections use NewReno (RFC 9002 §7) by default. BBR is opt-in, per
 client, through `H3ConnOptions`:
@@ -2365,7 +2400,7 @@ the matrix and its two arithmetic gates (`scripts/cc-scale-check.sh`,
 `scripts/cc-ratio-check.sh`) exist so the question can be answered rather than
 argued.
 
-### 10. Error model
+### 11. Error model
 
 The client exposes sentinel errors (compare with `errors.Is`) and two typed
 error structs (inspect with `errors.As`).

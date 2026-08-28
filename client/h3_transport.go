@@ -11,7 +11,6 @@ import (
 
 	"github.com/lodgvideon/poseidon-http-client/conn"
 	"github.com/lodgvideon/poseidon-http-client/http3"
-	"github.com/lodgvideon/poseidon-http-client/quic"
 	"github.com/lodgvideon/poseidon-http-client/trace"
 )
 
@@ -49,17 +48,31 @@ func h3DialFn(ctx context.Context, addr string, tlsConfig *tls.Config) (h3Client
 	return cl, nil
 }
 
-// makeH3DialFn returns an h3 dial function that forwards connOpts to every QUIC
-// connection it dials (http3.Dial). ClientOptions.H3ConnOptions flow through here,
-// so a client configured with quic.WithCongestionControl(quic.CCBBR) dials BBR
-// connections. With no options it is exactly h3DialFn, so the default path (and
-// the tests that pin it) are unchanged.
-func makeH3DialFn(connOpts []quic.ConnOption) func(context.Context, string, *tls.Config) (h3Client, error) {
-	if len(connOpts) == 0 {
+// h3Options translates the HTTP/3 knobs on ClientOptions into the option values
+// http3.Dial takes. One place, so a new knob is added here rather than at each of
+// the three transports that dial.
+func h3Options(opts ClientOptions) []http3.Option {
+	var out []http3.Option
+	if len(opts.H3ConnOptions) > 0 {
+		out = append(out, http3.WithConnOptions(opts.H3ConnOptions...))
+	}
+	if opts.H3MaxResponseBytes > 0 {
+		out = append(out, http3.WithMaxResponseBytes(opts.H3MaxResponseBytes))
+	}
+	return out
+}
+
+// makeH3DialFn returns an h3 dial function that forwards opts to every HTTP/3
+// connection it dials. ClientOptions.H3ConnOptions and H3MaxResponseBytes flow
+// through here, so a client configured with quic.WithCongestionControl(quic.CCBBR)
+// dials BBR connections. With no options it is exactly h3DialFn, so the default
+// path (and the tests that pin it) are unchanged.
+func makeH3DialFn(opts []http3.Option) func(context.Context, string, *tls.Config) (h3Client, error) {
+	if len(opts) == 0 {
 		return h3DialFn
 	}
 	return func(ctx context.Context, addr string, tlsConfig *tls.Config) (h3Client, error) {
-		cl, err := http3.Dial(ctx, addr, tlsConfig, connOpts...)
+		cl, err := http3.Dial(ctx, addr, tlsConfig, opts...)
 		if err != nil {
 			return nil, err
 		}
