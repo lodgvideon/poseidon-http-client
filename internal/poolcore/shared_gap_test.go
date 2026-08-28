@@ -11,6 +11,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/lodgvideon/poseidon-http-client/conn"
+	"github.com/lodgvideon/poseidon-http-client/frame"
 )
 
 // TestAddrString_ZeroAddressRendersEmpty covers the distinction AddrString
@@ -233,4 +234,151 @@ func buildTestManagedPool(t *testing.T, res Resolver, dm DrainMode) *ManagedPool
 	t.Cleanup(func() { _ = mp.Close() })
 	mp.SetTickerPeriod(time.Hour)
 	return mp
+}
+
+// recordingObserver captures the connection-lifecycle events a pool raises.
+type recordingObserver struct {
+	dials   []DialEvent
+	closes  []ConnCloseEvent
+	updates []ResolverUpdateEvent
+}
+
+func (o *recordingObserver) OnDial(e DialEvent)                     { o.dials = append(o.dials, e) }
+func (o *recordingObserver) OnConnClose(e ConnCloseEvent)           { o.closes = append(o.closes, e) }
+func (o *recordingObserver) OnResolverUpdate(e ResolverUpdateEvent) { o.updates = append(o.updates, e) }
+
+// TestDialObserved_ReportsBothOutcomes covers the observability seam itself: the
+// counts and the event a single-connection transport's dial produces. Both arms
+// matter — a dial that fails must still be counted as ATTEMPTED and must still
+// reach OnDial, because a hook that only fires on success cannot measure the
+// thing a load test is asking about.
+func TestDialObserved_ReportsBothOutcomes(t *testing.T) {
+	t.Parallel()
+	wantErr := errors.New("connection refused")
+	cases := []struct {
+		name       string
+		dialErr    error
+		wantFailed int64
+	}{
+		{"successful dial", nil, 0},
+		{"failed dial", wantErr, 1},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			rec := &countingRecorder{}
+			obs := &recordingObserver{}
+
+			got, err := DialObserved(context.Background(), "10.0.0.4:443", time.Second, rec, obs,
+				func(context.Context) (int, error) {
+					if tc.dialErr != nil {
+						return 0, tc.dialErr
+					}
+					return 7, nil
+				})
+
+			if tc.dialErr != nil {
+				require.ErrorIs(t, err, tc.dialErr, "DialObserved must return the dial's own error unchanged")
+			} else {
+				require.NoError(t, err, "DialObserved on a succeeding dial")
+				assert.Equal(t, 7, got, "DialObserved must return the dial's value unchanged")
+			}
+			assert.Equalf(t, int64(1), rec.DialsAttempted.Load(),
+				"DialsAttempted = %d, want 1 — every dial is counted before its outcome is known",
+				rec.DialsAttempted.Load())
+			assert.Equalf(t, tc.wantFailed, rec.DialsFailed.Load(),
+				"DialsFailed = %d, want %d", rec.DialsFailed.Load(), tc.wantFailed)
+			assert.Equalf(t, int64(1), rec.DialsObserved.Load(),
+				"the dial latency must be observed on both outcomes; timing only successes hides "+
+					"the slow-failure case a load test is looking for")
+			require.Lenf(t, obs.dials, 1, "OnDial fired %d times, want exactly 1", len(obs.dials))
+			assert.Equal(t, "10.0.0.4:443", obs.dials[0].Addr, "OnDial must carry the dialled address")
+			assert.ErrorIs(t, obs.dials[0].Err, tc.dialErr, "OnDial must carry the dial's outcome")
+		})
+	}
+}
+
+// TestNotifyConnClose_CountsAndReports pins the other half of the seam. The
+// hook's contract is "every close this client performs", so the count and the
+// event must both fire for a reason the caller chose.
+func TestNotifyConnClose_CountsAndReports(t *testing.T) {
+	t.Parallel()
+	rec := &countingRecorder{}
+	obs := &recordingObserver{}
+
+	NotifyConnClose("10.0.0.5:443", CloseGoAway, obs, rec)
+
+	assert.Equalf(t, int64(1), rec.ConnsClosedN.Load(),
+		"ConnsClosed = %d, want 1 — a close the counter misses makes connection churn "+
+			"invisible on the one dashboard an operator reads", rec.ConnsClosedN.Load())
+	require.Len(t, obs.closes, 1, "OnConnClose must fire once per close")
+	assert.Equal(t, ConnCloseEvent{Addr: "10.0.0.5:443", Reason: CloseGoAway}, obs.closes[0],
+		"the event must carry the address and the reason the caller classified it with")
+}
+
+// TestSpareStreamCapacity_SumsOnlyLiveHeadroom pins the arithmetic the actor
+// uses to decide whether a waiter can be served without dialling. Two properties
+// have to hold together: a dead conn contributes nothing however much nominal
+// capacity it has, and a conn at or past its cap contributes nothing rather than
+// a negative that would cancel out a live sibling's headroom.
+func TestSpareStreamCapacity_SumsOnlyLiveHeadroom(t *testing.T) {
+	t.Parallel()
+	live := dialFakeConn(t)
+	dead := dialFakeConn(t)
+	require.NoError(t, dead.Close(), "close the conn that stands in for a dead one")
+	// The fixtures decide this test's verdict, so they are checked before use: a
+	// "dead" conn that still reads as alive would make every case below pass for
+	// the wrong reason.
+	require.True(t, live.IsAlive(), "the live fixture does not read as alive")
+	require.False(t, dead.IsAlive(), "the dead fixture still reads as alive")
+
+	cases := []struct {
+		name  string
+		conns []*ManagedConn
+		want  int
+	}{
+		{"no conns", nil, 0},
+		{"idle conn contributes its whole cap", []*ManagedConn{{C: live, StreamCap: 8}}, 8},
+		{"partly used conn contributes the remainder", []*ManagedConn{{C: live, StreamCap: 8, Active: 3}}, 5},
+		{"conn exactly at its cap contributes nothing", []*ManagedConn{{C: live, StreamCap: 8, Active: 8}}, 0},
+		{
+			"conn past its cap contributes nothing, not a negative",
+			[]*ManagedConn{{C: live, StreamCap: 8, Active: 11}, {C: live, StreamCap: 4}},
+			4,
+		},
+		{"dead conn contributes nothing", []*ManagedConn{{C: dead, StreamCap: 8}}, 0},
+		{
+			"a dead conn does not hide a live sibling's headroom",
+			[]*ManagedConn{{C: dead, StreamCap: 8}, {C: live, StreamCap: 6, Active: 2}},
+			4,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			got := SpareStreamCapacity(tc.conns)
+
+			assert.Equalf(t, tc.want, got,
+				"SpareStreamCapacity = %d, want %d — overcounting dials a connection the pool "+
+					"did not need, undercounting strands a waiter behind capacity that exists",
+				got, tc.want)
+		})
+	}
+}
+
+// dialFakeConn returns a real, handshaken conn over an in-process pipe. A
+// hand-built &conn.Conn{} is not a substitute: it reads as alive, but Close
+// dereferences the writer a dial would have installed.
+func dialFakeConn(t *testing.T) *conn.Conn {
+	t.Helper()
+	stop := make(chan struct{})
+	t.Cleanup(func() { close(stop) })
+	d := &fakeDialer{srvAfter: func(*frame.Framer) { <-stop }}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	c, err := conn.Dial(ctx, "spare.test:443", conn.ConnOptions{Dialer: d})
+	require.NoError(t, err, "dial the in-process fake server")
+	t.Cleanup(func() { _ = c.Close() })
+	return c
 }
