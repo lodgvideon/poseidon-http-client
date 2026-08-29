@@ -77,7 +77,7 @@ func TestHandleRelease_CountsAGoAwayAsItsOwnReason(t *testing.T) {
 	rec := &countingRecorder{}
 	obs := &recordingObserver{}
 	p := New("goaway.test:443", conn.ConnOptions{Dialer: &fakeDialer{}},
-		PoolOptions{MaxConnsPerHost: 2, HealthCheckPeriod: time.Hour}, obs, rec)
+		PoolOptions{MaxConnsPerHost: 2, HealthCheckPeriod: time.Hour}, obs, rec, nil)
 	t.Cleanup(func() { _ = p.Close() })
 	mc := &ManagedConn{C: deadConn(t), Active: 1}
 	rs := RunState{Conns: []*ManagedConn{mc}}
@@ -146,7 +146,7 @@ func TestEvictDeadSilent_ReapsWithoutFiringHooks(t *testing.T) {
 	rec := &countingRecorder{}
 	obs := &recordingObserver{}
 	p := New("silent.test:443", conn.ConnOptions{Dialer: &fakeDialer{}},
-		PoolOptions{MaxConnsPerHost: 4, HealthCheckPeriod: time.Hour}, obs, rec)
+		PoolOptions{MaxConnsPerHost: 4, HealthCheckPeriod: time.Hour}, obs, rec, nil)
 	t.Cleanup(func() { _ = p.Close() })
 	live := &ManagedConn{C: dialFakeConn(t)}
 	busy := &ManagedConn{C: deadConn(t), Active: 1}
@@ -177,7 +177,7 @@ func TestAcquire_TimesOnlyTheAcquiresThatSucceeded(t *testing.T) {
 		t.Parallel()
 		rec := &countingRecorder{}
 		p := New("acq.test:443", conn.ConnOptions{Dialer: &fakeDialer{}},
-			PoolOptions{MaxConnsPerHost: 1, HealthCheckPeriod: time.Hour}, nil, rec)
+			PoolOptions{MaxConnsPerHost: 1, HealthCheckPeriod: time.Hour}, nil, rec, nil)
 		t.Cleanup(func() { _ = p.Close() })
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
@@ -196,7 +196,7 @@ func TestAcquire_TimesOnlyTheAcquiresThatSucceeded(t *testing.T) {
 		rec := &countingRecorder{}
 		p := New("acqfail.test:443", conn.ConnOptions{Dialer: &failingDialer{err: errors.New("refused")}},
 			PoolOptions{MaxConnsPerHost: 1, DialTimeout: time.Second, HealthCheckPeriod: time.Hour},
-			nil, rec)
+			nil, rec, nil)
 		t.Cleanup(func() { _ = p.Close() })
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()

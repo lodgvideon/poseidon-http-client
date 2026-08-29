@@ -44,7 +44,29 @@ var statsReplyPool = sync.Pool{
 // that field and would send anyone unifying these pools looking for a lock
 // that is not needed — or hiding a field the transport requires.
 type ManagedConn struct {
-	C        *conn.Conn
+	C *conn.Conn
+
+	// Typed is what New's wrap function built from C, or nil when the pool was
+	// constructed without one. It is set once, when the dial completes, and is
+	// never recomputed: a wrapper over this connection is fixed for the
+	// connection's life, so rebuilding one per Acquire would allocate on the hot
+	// path for a value that cannot have changed.
+	//
+	// This package stores it and hands it back, and does nothing else with it —
+	// no type assertion here, ever. The one assertion that recovers the concrete
+	// type belongs to the consuming package, in a single helper. That
+	// confinement is the whole reason this is `any` rather than a type
+	// parameter: making it one would put ManagedConn's EXISTING C field under a
+	// type argument that every struct literal in this package's tests and every
+	// mc.C call site in pool.go would then have to spell, for machinery that
+	// does not differ per wrapped type. See
+	// docs/adr/0002-poolcore-stays-non-generic-typed-any-boundary.md.
+	//
+	// Eviction closes C and NEVER Typed. A wrapper over a connection it does not
+	// own has a deliberately no-op Close, so tearing down through it would leave
+	// the socket open with nothing left holding it.
+	Typed any
+
 	Active   int
 	LastUsed time.Time
 
@@ -90,6 +112,12 @@ type Pool struct {
 	connOpts conn.ConnOptions
 	Addr     string
 
+	// wrap builds the value dialOne stores in ManagedConn.Typed, or is nil when
+	// this pool hands out raw connections only — which is every caller in
+	// client. Installed once by New and read only by dialOne, so a pool built
+	// without one costs a nil check per dial and nothing else.
+	wrap func(*conn.Conn) (any, error)
+
 	// pickCursor rotates where PickLeastLoaded starts, so consecutive requests
 	// land on different idle connections instead of piling onto the first.
 	// Actor-owned: every pick runs on the pool goroutine.
@@ -121,7 +149,14 @@ type Pool struct {
 
 // New constructs a Pool and starts its actor goroutine. Callers reach it
 // through client.NewClient or the gRPC channel, never directly.
-func New(addr string, connOpts conn.ConnOptions, opts PoolOptions, obs pool.Observer, rec pool.Recorder) *Pool {
+//
+// wrap is optional. When non-nil it runs once per successful dial and what it
+// returns is stored on ManagedConn.Typed for the caller to recover; when it
+// returns an error the whole dial attempt is treated as failed. Pass nil to
+// pool raw connections, which is what every caller in client does.
+func New(addr string, connOpts conn.ConnOptions, opts PoolOptions,
+	obs pool.Observer, rec pool.Recorder, wrap func(*conn.Conn) (any, error),
+) *Pool {
 	if opts.MaxConnsPerHost <= 0 {
 		opts.MaxConnsPerHost = 1
 	}
@@ -153,6 +188,7 @@ func New(addr string, connOpts conn.ConnOptions, opts PoolOptions, obs pool.Obse
 		closedCh:   make(chan struct{}),
 		obs:        obs,
 		rec:        rec,
+		wrap:       wrap,
 	}
 	go p.run()
 	return p
@@ -628,6 +664,9 @@ func (p *Pool) DialEnv() DialEnv {
 // dialOne dials one conn and delivers it to the actor. Always delivers:
 // handleClose's drainer receives this and closes the conn if the pool shut
 // down before it could be pooled, so it is never orphaned.
+//
+// A non-nil wrap runs here — once per connection, on the goroutine that dialled
+// it, never on the actor and never per Acquire.
 func (p *Pool) dialOne() {
 	c, err := DialAttempt(p.DialEnv(), func(ctx context.Context) (*conn.Conn, error) {
 		return conn.Dial(ctx, p.Addr, p.connOpts)
@@ -636,7 +675,15 @@ func (p *Pool) dialOne() {
 		p.dialDoneCh <- DialResult{Err: &DialError{Addr: p.Addr, Err: err}}
 		return
 	}
-	p.dialDoneCh <- DialResult{Mc: &ManagedConn{C: c, LastUsed: time.Now(), p: p}}
+	var typed any
+	if p.wrap != nil {
+		typed, err = p.wrap(c)
+		if err != nil {
+			p.dialDoneCh <- DialResult{Err: &DialError{Addr: p.Addr, Err: err}}
+			return
+		}
+	}
+	p.dialDoneCh <- DialResult{Mc: &ManagedConn{C: c, Typed: typed, LastUsed: time.Now(), p: p}}
 }
 
 // serveWaiters hands as many waiters as possible a live mc.

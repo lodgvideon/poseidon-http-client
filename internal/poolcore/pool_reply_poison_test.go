@@ -41,7 +41,7 @@ func TestPool_ReplyChannelNotPoisonedUnderAbandonment(t *testing.T) {
 	const openPools = 8
 	open := make([]*Pool, openPools)
 	for i := range open {
-		open[i] = New(addr, co, PoolOptions{MaxConnsPerHost: 4, MaxStreamsPerConn: 50}, nil, nil)
+		open[i] = New(addr, co, PoolOptions{MaxConnsPerHost: 4, MaxStreamsPerConn: 50}, nil, nil, nil)
 	}
 	defer func() {
 		for _, p := range open {
@@ -93,7 +93,7 @@ func TestPool_ReplyChannelNotPoisonedUnderAbandonment(t *testing.T) {
 				return
 			default:
 			}
-			vp := New(addr, co, PoolOptions{MaxConnsPerHost: 1, MaxStreamsPerConn: 1}, nil, nil)
+			vp := New(addr, co, PoolOptions{MaxConnsPerHost: 1, MaxStreamsPerConn: 1}, nil, nil, nil)
 			occCtx, occCancel := context.WithTimeout(context.Background(), time.Second)
 			mc, err := vp.Acquire(occCtx)
 

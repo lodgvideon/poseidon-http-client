@@ -75,7 +75,7 @@ func armBackoffPool(t *testing.T) (*Pool, *blockingRefusingDialer, *countingReco
 		DialTimeout:     5 * time.Second,
 		// Far away: a tick dials for waiters and would muddy the counts.
 		HealthCheckPeriod: time.Hour,
-	}, nil, m)
+	}, nil, m, nil)
 	t.Cleanup(func() { _ = p.Close() })
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)

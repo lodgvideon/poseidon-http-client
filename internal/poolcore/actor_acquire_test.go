@@ -126,7 +126,7 @@ func TestEvictDead_ReapsAndAttributes(t *testing.T) {
 	rec := &countingRecorder{}
 	obs := &recordingObserver{}
 	p := New("evict.test:443", conn.ConnOptions{Dialer: &fakeDialer{}},
-		PoolOptions{MaxConnsPerHost: 4, HealthCheckPeriod: time.Hour}, obs, rec)
+		PoolOptions{MaxConnsPerHost: 4, HealthCheckPeriod: time.Hour}, obs, rec, nil)
 	t.Cleanup(func() { _ = p.Close() })
 	live := &ManagedConn{C: dialFakeConn(t)}
 	busy := &ManagedConn{C: deadConn(t), Active: 1}
@@ -225,7 +225,7 @@ func TestNewCore_SubstitutesNilObservabilityItself(t *testing.T) {
 	mp, err := NewCore(CoreConfig[*Pool, *ManagedConn, *conn.Conn, func()]{
 		Resolver: StaticResolver(Address{Host: "10.0.0.2", Port: 443}),
 		PoolOpts: po,
-		NewSub:   func(key string) *Pool { return New(key, co, po, nil, nil) },
+		NewSub:   func(key string) *Pool { return New(key, co, po, nil, nil, nil) },
 		ConnOf:   func(mc *ManagedConn) *conn.Conn { return mc.C },
 		MkRelease: func(p *Pool, mc *ManagedConn) func() {
 			return func() { p.Release(mc) }
