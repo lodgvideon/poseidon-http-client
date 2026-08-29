@@ -41,7 +41,7 @@ func TestPool_WaiterRescuedAfterLastConnEvicted(t *testing.T) {
 		// maintenance. A tick-only fix would still hang a pool configured
 		// with a long HealthCheckPeriod.
 		HealthCheckPeriod: time.Hour,
-	}, nil, nil)
+	}, nil, nil, nil)
 	defer func() { _ = p.Close() }()
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
@@ -112,7 +112,7 @@ func TestPool_DialFailureRefusesEveryQueuedWaiter(t *testing.T) {
 		MaxStreamsPerConn: 4,
 		HealthCheckPeriod: time.Hour, // no tick: the refusal must come from dial-done
 		DialBackoff:       time.Hour, // and the pool must stay in backoff afterwards
-	}, nil, nil)
+	}, nil, nil, nil)
 	defer func() { _ = p.Close() }()
 	const waiters = 3
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
@@ -168,7 +168,7 @@ func TestPool_WaiterRescueRespectsMaxConns(t *testing.T) {
 		MaxConnsPerHost:   1,
 		MaxStreamsPerConn: 2,
 		HealthCheckPeriod: time.Hour,
-	}, nil, nil)
+	}, nil, nil, nil)
 	defer func() { _ = p.Close() }()
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()

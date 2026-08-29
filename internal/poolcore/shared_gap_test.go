@@ -143,7 +143,7 @@ func TestPoolRelease_AfterCloseClosesTheConn(t *testing.T) {
 	p := New("release.test:443", conn.ConnOptions{Dialer: &fakeDialer{}}, PoolOptions{
 		MaxConnsPerHost:   1,
 		HealthCheckPeriod: time.Hour,
-	}, nil, nil)
+	}, nil, nil, nil)
 	require.NoError(t, p.Close(), "Close on a pool that never dialled")
 
 	p.Release(&ManagedConn{}) // C is nil: the nil guard inside must hold
@@ -209,7 +209,7 @@ func TestNilObservabilityIsSubstituted(t *testing.T) {
 			MaxConnsPerHost:   1,
 			DialTimeout:       time.Second,
 			HealthCheckPeriod: time.Hour,
-		}, nil, nil)
+		}, nil, nil, nil)
 	t.Cleanup(func() { _ = p.Close() })
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()

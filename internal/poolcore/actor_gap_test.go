@@ -17,7 +17,7 @@ func testPool(t *testing.T, opts PoolOptions) *Pool {
 	if opts.HealthCheckPeriod == 0 {
 		opts.HealthCheckPeriod = time.Hour
 	}
-	p := New("actor.test:443", conn.ConnOptions{Dialer: &fakeDialer{}}, opts, nil, nil)
+	p := New("actor.test:443", conn.ConnOptions{Dialer: &fakeDialer{}}, opts, nil, nil, nil)
 	t.Cleanup(func() { _ = p.Close() })
 	return p
 }

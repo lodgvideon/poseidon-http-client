@@ -51,7 +51,7 @@ func BuildManagedPool(r Resolver, s Selector, dm DrainMode, co conn.ConnOptions,
 	}
 	return NewCore(CoreConfig[*Pool, *ManagedConn, *conn.Conn, func()]{
 		Resolver: r, Selector: s, DrainMode: dm, PoolOpts: po, Obs: obs, Rec: rec,
-		NewSub: func(key string) *Pool { return New(key, co, po, obs, rec) },
+		NewSub: func(key string) *Pool { return New(key, co, po, obs, rec, nil) },
 		ConnOf: func(mc *ManagedConn) *conn.Conn { return mc.C },
 		MkRelease: func(p *Pool, mc *ManagedConn) func() {
 			return func() { p.Release(mc) }

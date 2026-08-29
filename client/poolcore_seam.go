@@ -47,7 +47,10 @@ var (
 func newPool(addr string, connOpts conn.ConnOptions, opts PoolOptions,
 	hooksRef *atomic.Pointer[Hooks], metrics *Metrics,
 ) *Pool {
-	return poolcore.New(addr, connOpts, opts, observerFor(hooksRef), recorderFor(metrics))
+	// nil wrap: this client pools raw *conn.Conn. The parameter is there for a
+	// consumer that pools its own wrapper over one — see
+	// docs/adr/0002-poolcore-stays-non-generic-typed-any-boundary.md.
+	return poolcore.New(addr, connOpts, opts, observerFor(hooksRef), recorderFor(metrics), nil)
 }
 
 func newManagedPool(r Resolver, s Selector, dm DrainMode, co conn.ConnOptions, po PoolOptions,
