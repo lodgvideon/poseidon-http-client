@@ -11,12 +11,11 @@ import (
 // way a conn.Dialer is checked for conn.ALPNAsserter, falling back to the
 // plain Dial(ctx, addr string) when a dialer does not implement it.
 //
-// Only consulted on managed transports, where a Selector actually picks an
-// Address (client.h1Pool under TransportH1Managed, internal/poolcore.Pool
-// under the HTTP/2 TransportManaged). Non-managed transports dial a
-// caller-supplied address with no Resolver involved and never construct an
-// Address to offer, so DialAddress is never called there. HTTP/3 transports
-// do not use this Dialer abstraction at all.
+// Only consulted by the managed transports (TransportH1Managed,
+// TransportManaged), where a Selector picks the Address. Non-managed
+// transports dial a caller-supplied address with no Resolver involved and
+// never construct an Address to offer, so DialAddress is never called
+// there. HTTP/3 transports do not use this Dialer abstraction at all.
 //
 // A caller implementing DialAddress must treat addr.Attributes as read-only:
 // it is the same map instance the Resolver/Selector hold, not a copy.
@@ -36,6 +35,7 @@ type Dialer interface {
 // capability so a caller-configured dialer receives the resolver's Address
 // (Attributes included) instead of a flattened string. Falls back to
 // d.Dial(ctx, resolved.String()) when d does not implement AddressDialer.
+// d must be non-nil.
 func DialResolved(ctx context.Context, d Dialer, resolved Address) (net.Conn, error) {
 	if ad, ok := d.(AddressDialer); ok {
 		return ad.DialAddress(ctx, resolved)
