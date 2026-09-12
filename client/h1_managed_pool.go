@@ -70,20 +70,24 @@ func buildH1ManagedPool(r Resolver, s Selector, dm DrainMode, dialer conn.Dialer
 // newH1SubPool builds the managed sub-pool for resolved: a sub-pool whose
 // dial offers the resolver's Address (Attributes included) to a
 // pool.AddressDialer, falling back to the plain string Dial otherwise
-// (#943). A nil dialer is left alone — it cannot implement the capability.
+// (#943). A nil dialer is left alone: pool.DialResolved requires a non-nil
+// Dialer, and leaving nil unwrapped keeps the resulting panic at its
+// original site (h1Pool.dialOne's p.dialer.Dial call) instead of relocating
+// it inside this closure.
 //
-// The wrap hides any capability interface the caller's dialer implements
-// (conn.ALPNAsserter today) behind a plain DialerFunc. Safe because the only
-// consumer, client.validateDialerALPN, runs at NewClient time on the
-// original dialer — a future capability checked at dial time would need to
-// be re-exposed here too.
+// wrapped, not dialer, is what h1Pool actually dials with. Building the
+// wrapped value into its own variable — rather than reassigning dialer and
+// closing over it — means the closure always closes over the one dialer
+// value that exists for the life of this function; there is no reassigned
+// parameter for a future copy of this pattern to accidentally capture.
 func newH1SubPool(resolved Address, dialer conn.Dialer, po PoolOptions,
 	hooksRef *atomic.Pointer[Hooks], metrics *Metrics,
 ) *h1Pool {
-	if base := dialer; base != nil {
-		dialer = conn.DialerFunc(func(ctx context.Context, addr string) (net.Conn, error) {
-			return pool.DialResolved(ctx, base, resolved)
+	wrapped := dialer
+	if dialer != nil {
+		wrapped = conn.DialerFunc(func(ctx context.Context, _ string) (net.Conn, error) {
+			return pool.DialResolved(ctx, dialer, resolved)
 		})
 	}
-	return newH1Pool(resolved.String(), dialer, po, hooksRef, metrics)
+	return newH1Pool(resolved.String(), wrapped, po, hooksRef, metrics)
 }
