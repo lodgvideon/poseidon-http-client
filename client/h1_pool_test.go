@@ -170,6 +170,75 @@ func (d *h1FakeDialer) conns(addr string) []*h1FakeConn {
 	return append([]*h1FakeConn(nil), d.byAddr[addr]...)
 }
 
+// h1FakeAddressDialer wraps h1FakeDialer to additionally implement
+// pool.AddressDialer, recording the Address each DialAddress call received so
+// a test can assert what the resolver's Attributes looked like by the time
+// they reached the dialer.
+type h1FakeAddressDialer struct {
+	*h1FakeDialer
+	mu       sync.Mutex
+	gotAddrs []Address
+}
+
+func newH1FakeAddressDialer() *h1FakeAddressDialer {
+	return &h1FakeAddressDialer{h1FakeDialer: newH1FakeDialer()}
+}
+
+// DialAddress implements pool.AddressDialer, recording addr and then dialing
+// addr.String() through the embedded fake exactly as Dial would.
+func (d *h1FakeAddressDialer) DialAddress(ctx context.Context, addr Address) (net.Conn, error) {
+	d.mu.Lock()
+	d.gotAddrs = append(d.gotAddrs, addr)
+	d.mu.Unlock()
+	return d.Dial(ctx, addr.String())
+}
+
+// addresses returns a copy of the Addresses seen by DialAddress so far.
+func (d *h1FakeAddressDialer) addresses() []Address {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return append([]Address(nil), d.gotAddrs...)
+}
+
+var _ AddressDialer = (*h1FakeAddressDialer)(nil)
+
+func TestNewH1SubPool_PrefersAddressDialer(t *testing.T) {
+	t.Parallel()
+	addr := Address{Host: "10.0.0.9", Port: 9443, Attributes: map[string]string{"zone": "us-east-1a"}}
+	d := newH1FakeAddressDialer()
+	p := newH1SubPool(addr, d, PoolOptions{MaxConnsPerHost: 1}, nil, nil)
+	defer func() { _ = p.Close() }()
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	mc, err := p.Acquire(ctx)
+	require.NoError(t, err, "Acquire")
+	p.release(mc, true)
+
+	got := d.addresses()
+	require.Lenf(t, got, 1, "DialAddress call count = %d, want 1", len(got))
+	assert.Equalf(t, addr, got[0],
+		"DialAddress got Address = %+v, want %+v — Attributes must survive the managed dial path", got[0], addr)
+}
+
+func TestNewH1Pool_NeverWrapsForAddressDialer(t *testing.T) {
+	t.Parallel()
+	d := newH1FakeAddressDialer()
+	p := newH1Pool("10.0.0.9:9443", d, PoolOptions{MaxConnsPerHost: 1}, nil, nil)
+	defer func() { _ = p.Close() }()
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	mc, err := p.Acquire(ctx)
+	require.NoError(t, err, "Acquire")
+	p.release(mc, true)
+
+	assert.Emptyf(t, d.addresses(),
+		"DialAddress was called on a pool built by the plain newH1Pool constructor — only newH1SubPool may wrap a dialer for AddressDialer")
+	assert.Equalf(t, int32(1), d.dials.Load(),
+		"plain Dial call count = %d, want exactly 1 — the non-managed constructor must never wrap the dialer", d.dials.Load())
+}
+
 // waitForH1 polls cond until it holds or the deadline expires. The pool actor
 // applies releases and evictions asynchronously, so state assertions that follow a
 // release must wait for the actor rather than read immediately.

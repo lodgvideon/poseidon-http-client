@@ -7,11 +7,14 @@
 package client
 
 import (
+	"context"
+	"net"
 	"sync/atomic"
 
 	"github.com/lodgvideon/poseidon-http-client/conn"
 	"github.com/lodgvideon/poseidon-http-client/http1"
 	"github.com/lodgvideon/poseidon-http-client/internal/poolcore"
+	"github.com/lodgvideon/poseidon-http-client/pool"
 )
 
 // h1ManagedPool fans Acquire across per-address HTTP/1.1 sub-pools driven by a
@@ -55,11 +58,32 @@ func buildH1ManagedPool(r Resolver, s Selector, dm DrainMode, dialer conn.Dialer
 		// independently would under-count Client.Metrics() with the whole suite
 		// green.
 		NewSub: func(addr Address) *h1Pool {
-			return newH1Pool(addr.String(), dialer, po, hooksRef, metrics)
+			return newH1SubPool(addr, dialer, po, hooksRef, metrics)
 		},
 		ConnOf: func(mc *h1ManagedConn) *http1.Conn { return mc.c },
 		MkRelease: func(p *h1Pool, mc *h1ManagedConn) func(bool) {
 			return func(keepAlive bool) { p.release(mc, keepAlive) }
 		},
 	})
+}
+
+// newH1SubPool builds the managed sub-pool for resolved: a sub-pool whose
+// dial offers the resolver's Address (Attributes included) to a
+// pool.AddressDialer, falling back to the plain string Dial otherwise
+// (#943). A nil dialer is left alone — it cannot implement the capability.
+//
+// The wrap hides any capability interface the caller's dialer implements
+// (conn.ALPNAsserter today) behind a plain DialerFunc. Safe because the only
+// consumer, client.validateDialerALPN, runs at NewClient time on the
+// original dialer — a future capability checked at dial time would need to
+// be re-exposed here too.
+func newH1SubPool(resolved Address, dialer conn.Dialer, po PoolOptions,
+	hooksRef *atomic.Pointer[Hooks], metrics *Metrics,
+) *h1Pool {
+	if base := dialer; base != nil {
+		dialer = conn.DialerFunc(func(ctx context.Context, addr string) (net.Conn, error) {
+			return pool.DialResolved(ctx, base, resolved)
+		})
+	}
+	return newH1Pool(resolved.String(), dialer, po, hooksRef, metrics)
 }
