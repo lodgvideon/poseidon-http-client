@@ -4,7 +4,9 @@
 package poolcore
 
 import (
+	"context"
 	"errors"
+	"net"
 	"time"
 
 	"github.com/lodgvideon/poseidon-http-client/conn"
@@ -51,12 +53,38 @@ func BuildManagedPool(r Resolver, s Selector, dm DrainMode, co conn.ConnOptions,
 	}
 	return NewCore(CoreConfig[*Pool, *ManagedConn, *conn.Conn, func()]{
 		Resolver: r, Selector: s, DrainMode: dm, PoolOpts: po, Obs: obs, Rec: rec,
-		NewSub: func(addr Address) *Pool { return New(addr.String(), co, po, obs, rec, nil) },
+		NewSub: func(addr Address) *Pool { return newSubPool(addr, co, po, obs, rec) },
 		ConnOf: func(mc *ManagedConn) *conn.Conn { return mc.C },
 		MkRelease: func(p *Pool, mc *ManagedConn) func() {
 			return func() { p.Release(mc) }
 		},
 	})
+}
+
+// newSubPool builds the managed sub-pool for resolved: a sub-pool whose
+// dial offers the resolver's Address (Attributes included) to a
+// pool.AddressDialer, falling back to the plain string Dial otherwise
+// (#943). A nil Dialer is left alone: pool.DialResolved requires a non-nil
+// Dialer, and leaving nil unwrapped keeps conn.Dial's own nil-Dialer
+// default (&TLSDialer{}) in effect instead of bypassing it.
+//
+// wrapped, not co, is what gets passed on. Copying co into wrapped and
+// mutating only wrapped.Dialer — rather than reassigning co.Dialer itself —
+// means the closure below always closes over the one co.Dialer value that
+// exists for the life of this function; there is no reassigned field for a
+// future copy of this pattern to accidentally capture (see newH1SubPool,
+// the H1 twin of this function, for the bug this shape structurally rules
+// out).
+func newSubPool(resolved Address, co conn.ConnOptions, po PoolOptions,
+	obs pool.Observer, rec pool.Recorder,
+) *Pool {
+	wrapped := co
+	if co.Dialer != nil {
+		wrapped.Dialer = conn.DialerFunc(func(ctx context.Context, _ string) (net.Conn, error) {
+			return pool.DialResolved(ctx, co.Dialer, resolved)
+		})
+	}
+	return New(resolved.String(), wrapped, po, obs, rec, nil)
 }
 
 // IsDialOnlyErr reports whether err means "this backend could not be reached"

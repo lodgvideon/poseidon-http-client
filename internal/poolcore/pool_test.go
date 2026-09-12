@@ -13,6 +13,7 @@ import (
 
 	"github.com/lodgvideon/poseidon-http-client/conn"
 	"github.com/lodgvideon/poseidon-http-client/frame"
+	"github.com/lodgvideon/poseidon-http-client/pool"
 )
 
 func TestPool_Stats_Empty(t *testing.T) {
@@ -547,4 +548,75 @@ func TestPool_DialFailure_NoWaiters_SetsBackoff(t *testing.T) {
 	assert.EqualValuesf(t, 1, fd.dialCount.Load(),
 		"dial count = %d, want 1 (backoff suppressed second) — without the backoff a dead "+
 			"target is hammered once per acquire", fd.dialCount.Load())
+}
+
+// fakeAddressDialer wraps fakeDialer (helpers_test.go) to additionally
+// implement pool.AddressDialer, recording the Address each DialAddress call
+// received.
+type fakeAddressDialer struct {
+	*fakeDialer
+	mu       sync.Mutex
+	gotAddrs []Address
+}
+
+func newFakeAddressDialer(t *testing.T) *fakeAddressDialer {
+	t.Helper()
+	return &fakeAddressDialer{fakeDialer: liveDialer(t)}
+}
+
+// DialAddress implements pool.AddressDialer, recording addr and then dialing
+// addr.String() through the embedded fake exactly as Dial would.
+func (d *fakeAddressDialer) DialAddress(ctx context.Context, addr Address) (net.Conn, error) {
+	d.mu.Lock()
+	d.gotAddrs = append(d.gotAddrs, addr)
+	d.mu.Unlock()
+	return d.Dial(ctx, addr.String())
+}
+
+// addresses returns a copy of the Addresses seen by DialAddress so far.
+func (d *fakeAddressDialer) addresses() []Address {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return append([]Address(nil), d.gotAddrs...)
+}
+
+var _ pool.AddressDialer = (*fakeAddressDialer)(nil)
+
+func TestNewSubPool_PrefersAddressDialer(t *testing.T) {
+	t.Parallel()
+	addr := Address{Host: "10.0.0.9", Port: 9443, Attributes: map[string]string{"zone": "us-east-1a"}}
+	d := newFakeAddressDialer(t)
+	p := newSubPool(addr, conn.ConnOptions{Dialer: d},
+		PoolOptions{MaxConnsPerHost: 1, HealthCheckPeriod: time.Hour}, nil, nil)
+	t.Cleanup(func() { _ = p.Close() })
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	mc, err := p.Acquire(ctx)
+	require.NoError(t, err, "Acquire")
+	p.Release(mc)
+
+	got := d.addresses()
+	require.Lenf(t, got, 1, "DialAddress call count = %d, want 1", len(got))
+	assert.Equalf(t, addr, got[0],
+		"DialAddress got Address = %+v, want %+v — Attributes must survive the managed dial path", got[0], addr)
+}
+
+func TestNewPool_NeverWrapsForAddressDialer(t *testing.T) {
+	t.Parallel()
+	d := newFakeAddressDialer(t)
+	p := New("10.0.0.9:9443", conn.ConnOptions{Dialer: d},
+		PoolOptions{MaxConnsPerHost: 1, HealthCheckPeriod: time.Hour}, nil, nil, nil)
+	t.Cleanup(func() { _ = p.Close() })
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	mc, err := p.Acquire(ctx)
+	require.NoError(t, err, "Acquire")
+	p.Release(mc)
+
+	assert.Emptyf(t, d.addresses(),
+		"DialAddress was called on a pool built by the plain New constructor — only newSubPool may wrap a dialer for AddressDialer")
+	assert.Equalf(t, int32(1), d.dialCount.Load(),
+		"plain Dial call count = %d, want exactly 1 — the non-managed constructor must never wrap the dialer", d.dialCount.Load())
 }
