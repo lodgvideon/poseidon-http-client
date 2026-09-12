@@ -34,7 +34,13 @@ jobs:
           go-version-file: 'go.mod'
           cache: true
       - name: Install govulncheck
-        run: go install golang.org/x/vuln/cmd/govulncheck@latest
+        # Pinned, not @latest: golang.org/x/vuln@v1.8.0 (2026-09-08) raised its
+        # own go.mod floor to go 1.26.0, and setup-go above pins this job to
+        # go.mod's toolchain (currently 1.25.13), so @latest breaks this job
+        # the moment upstream ships a release needing a newer Go than we pin -
+        # independent of any change in this repo. v1.7.0 still only requires
+        # go 1.25.0. Bump deliberately in step with the pinned Go version.
+        run: go install golang.org/x/vuln/cmd/govulncheck@v1.7.0
       - name: Scan for reachable known vulnerabilities
         run: govulncheck ./...
 
