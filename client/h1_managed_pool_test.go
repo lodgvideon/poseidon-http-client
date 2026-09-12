@@ -217,3 +217,26 @@ func TestNewManagedH1Client_Construction(t *testing.T) {
 	assert.Equal(t, DrainHard, mt.mp.DrainMode(),
 		"WithDrainMode must reach the managed pool, or the option is silently ignored")
 }
+
+func TestH1ManagedPool_Acquire_DialerReceivesResolverAttributes(t *testing.T) {
+	t.Parallel()
+	addr := Address{Host: "10.0.0.7", Port: 8080, Attributes: map[string]string{"zone": "us-west-2a", "weight": "10"}}
+	d := newH1FakeAddressDialer()
+	mp, err := newH1ManagedPool(StaticResolver(addr), RoundRobin(), DrainGraceful,
+		d, h1ManagedPoolOpts(), nil, nil)
+	require.NoError(t, err, "newH1ManagedPool")
+	defer func() { _ = mp.Close() }()
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	c, release, gotAddr, aerr := mp.Acquire(ctx)
+	require.NoError(t, aerr, "Acquire")
+	require.True(t, c.IsAlive(), "Acquire handed back a dead conn")
+	release(true)
+
+	assert.Equalf(t, addr, gotAddr, "Acquire's own returned Address = %+v, want %+v", gotAddr, addr)
+	got := d.addresses()
+	require.Lenf(t, got, 1, "DialAddress call count = %d, want 1", len(got))
+	assert.Equalf(t, addr, got[0],
+		"DialAddress got Address = %+v, want %+v — a managed client's custom AddressDialer must see the resolver's Attributes, not just host:port", got[0], addr)
+}
