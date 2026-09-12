@@ -4,7 +4,7 @@
 
 **Goal:** Let a *managed* transport's dialer receive the full resolver `Address` (host, port, and `Attributes`) instead of a flattened `"host:port"` string, via an optional `AddressDialer` capability interface that falls back to the plain `Dialer` when a dialer does not implement it. Closes [#943](https://github.com/lodgvideon/poseidon-http-client/issues/943).
 
-**Architecture:** Add `pool.AddressDialer` — mirroring `conn.ALPNAsserter`'s capability-check idiom — plus a small `pool.Dial` helper that prefers it. Thread the resolver's `Address` from `internal/poolcore.ManagedCore.GetOrCreateSubPool` (the one place in the whole call graph where it is alive today before being flattened to a string key) down into the two sub-pool types that actually hold a `conn.Dialer`: `client.h1Pool` (under `TransportH1Managed`) and `internal/poolcore.Pool` (under the HTTP/2 `TransportManaged`). Reuse `conn.DialerFunc` (landed on this branch moments ago, #942) to bridge the H2 case, where the dial happens inside `conn.Dial` rather than at a bare `dialer.Dial(...)` call site.
+**Architecture:** Add `pool.AddressDialer` — mirroring `conn.ALPNAsserter`'s capability-check idiom — plus a small `pool.DialResolved` helper that prefers it. Wrap the resolver's `Address` into the dialer **once, at sub-pool construction time**, for the two sub-pool types that actually hold a `conn.Dialer`: `client.h1Pool` (via a new `newH1SubPool` constructor, under `TransportH1Managed`) and `internal/poolcore.Pool` (via a new `newSubPool` constructor, under the HTTP/2 `TransportManaged`). Building the wrapper with `conn.DialerFunc` (landed on this branch moments ago, #942) means neither sub-pool's own dial method (`dialOne`) changes at all — whether a dial offers `AddressDialer` is decided once, when the sub-pool is built for a specific address, not re-decided on every dial.
 
 **Tech Stack:** Go, testify (`require`/`assert`), the repo's existing `net.Pipe`-based dialer fakes (`h1FakeDialer`, `fakeDialer`).
 
@@ -17,14 +17,14 @@
 
 ## Explicitly out of scope
 
-- **Non-managed transports** (`TransportH1SingleConn`, `TransportH1Pool`, `TransportSingleConn`, `TransportPool`, `TransportALPN`). None of them ever construct a resolver `Address` — their address is a caller-supplied string from `ClientOptions.Addr` with no `Resolver`/`Selector` in the picture at all. Zero files in this group are touched; a custom dialer implementing `AddressDialer` simply never gets `DialAddress` called on these transports, because there is nothing genuine to offer it.
+- **Non-managed transports** (`TransportH1SingleConn`, `TransportH1Pool`, `TransportSingleConn`, `TransportPool`, `TransportALPN`). None of them ever construct a resolver `Address` — their address is a caller-supplied string from `ClientOptions.Addr` with no `Resolver`/`Selector` in the picture at all. A plain `newH1Pool`/`New` pool is never routed through the new `newH1SubPool`/`newSubPool` constructors, so a custom dialer implementing `AddressDialer` is simply never wrapped, and `DialAddress` is never called on these transports — not because of a runtime check, but because the wrapping code never runs on that path at all.
 - **HTTP/3** (`TransportH3`, `TransportH3Pool`, `TransportH3Managed`). All three dial through a distinct `func(ctx, string, *tls.Config) (h3Client, error)` shape, never through `conn.Dialer` — there is no seam to check `AddressDialer` against. `client/h3_managed_pool.go`'s `NewSub` closure gets a mechanical signature update in Task 3 (to keep the shared generic core compiling) but no new behavior.
 - **Attempt-number / retry-count reaching the dialer**, and any `context.WithValue`-based propagation — the issue's own hedged, secondary ask ("would cover the retry case too"). Two independent reasons to defer it rather than bolt it on here: (1) the attempt counter that already exists (`retryDoer.doAttempt(ctx, req, resp, attempt int)`, `client/retry.go:154-166`) is used only for observability and stops at `Client.doAttempt`/`doStreamAttempt` — it never reaches `sendRequest`, `openExchange`, or any dial call, so wiring it through means widening `openExchange`'s signature on every transport, a materially larger and separate change; (2) there is currently **zero** use of `context.WithValue` anywhere in this codebase — introducing it here would be a first-of-its-kind pattern against the codebase's own explicit-parameter style (e.g. `PickContext` is a plain struct, not a context value), which deserves its own design discussion, not a rider on this issue. Recommend filing a follow-up issue.
 - A pre-existing documentation drift noticed during research — `docs/CLIENT_GUIDE.md`'s Selectors section (~line 1543-1553) still shows `PickContext{Request *Request}`, but `pool/selector.go` has since made `PickContext` an empty struct. Unrelated to #943; flagged to the user separately rather than fixed here.
 
 ---
 
-### Task 1: `pool.AddressDialer` interface and `pool.Dial` helper
+### Task 1: `pool.Dialer`, `pool.AddressDialer`, `pool.DialResolved`
 
 **Files:**
 - Create: `pool/dialer.go`
@@ -45,6 +45,16 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// stubConn returns a net.Conn that is never read from or written to. These
+// tests assert only WHICH conn value came back from DialResolved, so the pipe
+// exists to produce a distinguishable, closeable net.Conn and nothing else.
+func stubConn(t *testing.T) net.Conn {
+	t.Helper()
+	c, peer := net.Pipe()
+	t.Cleanup(func() { _ = c.Close(); _ = peer.Close() })
+	return c
+}
+
 // fakeDialer implements only the plain Dial method.
 type fakeDialer struct {
 	conn net.Conn
@@ -59,88 +69,73 @@ func (d *fakeDialer) Dial(_ context.Context, _ string) (net.Conn, error) {
 // DialAddress call so a test can assert what it received.
 type fakeAddressDialer struct {
 	fakeDialer
-	addrCalls []Address
-	addrConn  net.Conn
-	addrErr   error
+	gotAddrs    []Address
+	addressConn net.Conn
+	addressErr  error
 }
 
 func (d *fakeAddressDialer) DialAddress(_ context.Context, addr Address) (net.Conn, error) {
-	d.addrCalls = append(d.addrCalls, addr)
-	return d.addrConn, d.addrErr
+	d.gotAddrs = append(d.gotAddrs, addr)
+	return d.addressConn, d.addressErr
 }
 
 var _ AddressDialer = (*fakeAddressDialer)(nil)
 
-func TestDial_PrefersAddressDialerWhenResolvedGiven(t *testing.T) {
+func TestDialResolved_PrefersAddressDialerWhenImplemented(t *testing.T) {
 	t.Parallel()
-	pipeClient, pipeServer := net.Pipe()
-	defer func() { _ = pipeClient.Close(); _ = pipeServer.Close() }()
+	want := stubConn(t)
 	resolved := Address{Host: "10.0.0.5", Port: 8443, Attributes: map[string]string{"zone": "us-west-2a"}}
-	d := &fakeAddressDialer{addrConn: pipeClient}
+	d := &fakeAddressDialer{addressConn: want}
 
-	got, err := Dial(context.Background(), d, &resolved, "10.0.0.5:8443")
+	got, err := DialResolved(context.Background(), d, resolved)
 
-	require.NoError(t, err, "Dial")
-	require.Lenf(t, d.addrCalls, 1, "DialAddress call count = %d, want 1", len(d.addrCalls))
-	assert.Equalf(t, resolved, d.addrCalls[0],
-		"DialAddress got Address = %+v, want %+v — Attributes must pass through unchanged", d.addrCalls[0], resolved)
-	assert.Samef(t, pipeClient, got, "Dial = %v, want the AddressDialer path's conn unchanged", got)
+	require.NoError(t, err, "DialResolved")
+	require.Lenf(t, d.gotAddrs, 1, "DialAddress call count = %d, want 1", len(d.gotAddrs))
+	assert.Equalf(t, resolved, d.gotAddrs[0],
+		"DialAddress got Address = %+v, want %+v — Attributes must pass through unchanged", d.gotAddrs[0], resolved)
+	assert.Samef(t, want, got, "DialResolved = %v, want the AddressDialer path's conn unchanged", got)
 }
 
-func TestDial_FallsBackToPlainDialWhenResolvedIsNil(t *testing.T) {
+func TestDialResolved_FallsBackWhenDialerLacksCapability(t *testing.T) {
 	t.Parallel()
-	pipeClient, pipeServer := net.Pipe()
-	defer func() { _ = pipeClient.Close(); _ = pipeServer.Close() }()
-	d := &fakeAddressDialer{fakeDialer: fakeDialer{conn: pipeClient}}
-
-	got, err := Dial(context.Background(), d, nil, "10.0.0.5:8443")
-
-	require.NoError(t, err, "Dial")
-	assert.Emptyf(t, d.addrCalls, "Dial called DialAddress with a nil resolved Address")
-	assert.Samef(t, pipeClient, got, "Dial = %v, want the plain Dial path's conn unchanged", got)
-}
-
-func TestDial_FallsBackToPlainDialWhenDialerLacksAddressDialer(t *testing.T) {
-	t.Parallel()
-	pipeClient, pipeServer := net.Pipe()
-	defer func() { _ = pipeClient.Close(); _ = pipeServer.Close() }()
+	want := stubConn(t)
 	resolved := Address{Host: "10.0.0.5", Port: 8443}
-	d := &fakeDialer{conn: pipeClient} // implements Dial only
+	d := &fakeDialer{conn: want} // implements Dial only
 
-	got, err := Dial(context.Background(), d, &resolved, "10.0.0.5:8443")
+	got, err := DialResolved(context.Background(), d, resolved)
 
-	require.NoError(t, err, "Dial")
-	assert.Samef(t, pipeClient, got, "Dial = %v, want the plain Dial path's conn unchanged", got)
+	require.NoError(t, err, "DialResolved")
+	assert.Samef(t, want, got, "DialResolved = %v, want the plain Dial path's conn unchanged", got)
 }
 
-func TestDial_PropagatesAddressDialerError(t *testing.T) {
+func TestDialResolved_PropagatesAddressDialerError(t *testing.T) {
 	t.Parallel()
 	wantErr := errors.New("dial refused")
 	resolved := Address{Host: "10.0.0.5", Port: 8443}
-	d := &fakeAddressDialer{addrErr: wantErr}
+	d := &fakeAddressDialer{addressErr: wantErr}
 
-	got, err := Dial(context.Background(), d, &resolved, "10.0.0.5:8443")
+	got, err := DialResolved(context.Background(), d, resolved)
 
-	assert.Samef(t, wantErr, err, "Dial error = %v, want the AddressDialer path's error unchanged", err)
-	assert.Nilf(t, got, "Dial conn = %v, want nil on error", got)
+	assert.Samef(t, wantErr, err, "DialResolved error = %v, want the AddressDialer path's error unchanged", err)
+	assert.Nilf(t, got, "DialResolved conn = %v, want nil on error", got)
 }
 
-func TestDial_PropagatesPlainDialError(t *testing.T) {
+func TestDialResolved_PropagatesPlainDialError(t *testing.T) {
 	t.Parallel()
 	wantErr := errors.New("dial refused")
 	d := &fakeDialer{err: wantErr}
 
-	got, err := Dial(context.Background(), d, nil, "10.0.0.5:8443")
+	got, err := DialResolved(context.Background(), d, Address{Host: "10.0.0.5", Port: 8443})
 
-	assert.Samef(t, wantErr, err, "Dial error = %v, want the plain Dial path's error unchanged", err)
-	assert.Nilf(t, got, "Dial conn = %v, want nil on error", got)
+	assert.Samef(t, wantErr, err, "DialResolved error = %v, want the plain Dial path's error unchanged", err)
+	assert.Nilf(t, got, "DialResolved conn = %v, want nil on error", got)
 }
 ```
 
 - [ ] **Step 2: Run the tests to verify they fail**
 
-Run: `go test ./pool/... -run TestDial -v`
-Expected: FAIL to compile — `undefined: AddressDialer`, `undefined: Dial`.
+Run: `go test ./pool/... -run TestDialResolved -v`
+Expected: FAIL to compile — `undefined: AddressDialer`, `undefined: DialResolved`.
 
 - [ ] **Step 3: Implement `pool/dialer.go`**
 
@@ -171,38 +166,40 @@ type AddressDialer interface {
 	DialAddress(ctx context.Context, addr Address) (net.Conn, error)
 }
 
-// baseDialer is the plain-string Dial method every conn.Dialer satisfies.
-// Declared locally, structurally, so this package does not need to import
-// conn to type-check against it.
-type baseDialer interface {
+// Dialer is the plain-string dial contract every conn.Dialer satisfies. It is
+// declared here structurally, rather than imported, so this package does not
+// depend on conn; conn.Dialer and any custom dialer satisfy it without
+// naming it.
+type Dialer interface {
 	Dial(ctx context.Context, addr string) (net.Conn, error)
 }
 
-// Dial dials addr using d, preferring d's AddressDialer capability when
-// resolved is non-nil and d implements it, so a caller-configured dialer
-// receives the resolver's Address (Attributes included) instead of a
-// flattened string. Falls back to d.Dial(ctx, addr) when resolved is nil (no
-// resolver in play) or d does not implement AddressDialer.
-func Dial(ctx context.Context, d baseDialer, resolved *Address, addr string) (net.Conn, error) {
-	if resolved != nil {
-		if ad, ok := d.(AddressDialer); ok {
-			return ad.DialAddress(ctx, *resolved)
-		}
+// DialResolved dials resolved using d, preferring d's AddressDialer
+// capability so a caller-configured dialer receives the resolver's Address
+// (Attributes included) instead of a flattened string. Falls back to
+// d.Dial(ctx, resolved.String()) when d does not implement AddressDialer.
+func DialResolved(ctx context.Context, d Dialer, resolved Address) (net.Conn, error) {
+	if ad, ok := d.(AddressDialer); ok {
+		return ad.DialAddress(ctx, resolved)
 	}
-	return d.Dial(ctx, addr)
+	return d.Dial(ctx, resolved.String())
 }
 ```
 
 - [ ] **Step 4: Run the tests to verify they pass**
 
-Run: `go test ./pool/... -run TestDial -v`
-Expected: PASS (5 tests).
+Run: `go test ./pool/... -run TestDialResolved -v`
+Expected: PASS (4 tests).
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 5: Review the new tests**
+
+Run the `reviewing-tests` skill over the four tests added in this task (mutate each assertion and confirm it goes red; check the case set against equivalence classes — capability present/absent crossed with success/error — rather than hand-picked; confirm AAA + require/assert placement).
+
+- [ ] **Step 6: Commit**
 
 ```bash
 git add pool/dialer.go pool/dialer_test.go
-git commit -m "feat(pool): add AddressDialer capability + Dial helper"
+git commit -m "feat(pool): add AddressDialer capability + DialResolved helper"
 ```
 
 ---
@@ -213,6 +210,8 @@ git commit -m "feat(pool): add AddressDialer capability + Dial helper"
 - Modify: `client/pool_vocab.go`
 
 `pool` is not in the documented public-package list (`client`, `conn`, `frame`, `grpc`, `hpack`, `http1`, `http3`, `quic`, `qpack`, `trace`); `client` re-exports the resolver vocabulary via type aliases instead. `AddressDialer` needs the same treatment so a caller programs against `client.AddressDialer`, not `pool.AddressDialer`.
+
+`pool.Dialer` (Task 1) is deliberately **not** aliased here: `client`'s documented convention (`docs/CLIENT_GUIDE.md`) already points callers at `conn.Dialer` for anything dialer-shaped, and a second `client.Dialer` name for a structurally-identical-but-different type would be a pun a reader has to untangle, not a convenience.
 
 - [ ] **Step 1: Add the alias**
 
@@ -255,7 +254,7 @@ git commit -m "feat(client): expose AddressDialer as public API"
 - Modify: `client/h3_managed_pool.go`
 - Modify: `internal/poolcore/actor_acquire_test.go`
 
-`ManagedCore.GetOrCreateSubPool(addr Address)` (`internal/poolcore/managed_core.go:117-149`) is the one place the resolver's `Address` is alive before being reduced to a string key — but it currently hands only the string to `mp.newSub`. This task widens `newSub`'s signature so the `Address` survives one hop further; it adds no new behavior yet; the two closures that will actually use it start out ignoring the new parameter (`_ Address`) so this step compiles cleanly and every existing test keeps passing unchanged. All five call sites below share one generic type parameter, so all five must move together or the module fails to build.
+`ManagedCore.GetOrCreateSubPool(addr Address)` (`internal/poolcore/managed_core.go:117-149`) is the one place the resolver's `Address` is alive before being reduced to a string key — but it currently hands only the string to `mp.newSub`. This task changes `newSub` to take the `Address` **instead of** the string (not in addition to it — the string is always `addr.String()`, so keeping both would just be the same value spelled two ways). Each closure now derives its own key string inline. This is a pure signature change: every closure below produces byte-identical output to before, so there is no new behavior and no red-then-green cycle — the existing suite passing unchanged **is** the verification. All five call sites share one generic type parameter, so all five must move together or the module fails to build.
 
 - [ ] **Step 1: Widen the generic core**
 
@@ -263,7 +262,7 @@ In `internal/poolcore/managed_core.go`, change the `ManagedCore` struct field (a
 
 ```go
 	// The three measured differences, injected rather than branched on.
-	newSub    func(key string, addr Address) P
+	newSub    func(addr Address) P
 	connOf    func(MC) C
 	mkRelease func(P, MC) R
 ```
@@ -271,34 +270,35 @@ In `internal/poolcore/managed_core.go`, change the `ManagedCore` struct field (a
 Change the `CoreConfig` struct field and its doc comment (around line 480-487):
 
 ```go
-	// NewSub builds the per-address sub-pool for key. addr is the same
-	// Address key was derived from (key == addr.String()), still carrying
-	// Attributes — passed through so a sub-pool that holds a conn.Dialer can
-	// offer it to a pool.AddressDialer at dial time (#943). A sub-pool with
-	// no conn.Dialer of its own (h3Pool) ignores it.
+	// NewSub builds the sub-pool for one resolved address. addr still
+	// carries Attributes, so a sub-pool holding a conn.Dialer can offer them
+	// to a pool.AddressDialer at dial time (#943); a sub-pool with no
+	// conn.Dialer of its own (h3Pool) uses only addr.String().
 	//
 	// Its closure must capture the SAME Recorder this config carries. Each
 	// pool constructor substitutes a fresh recorder for a nil one, so letting
 	// every sub-pool default independently would under-count the caller's
 	// metrics with the whole suite green.
-	NewSub func(key string, addr Address) P
+	NewSub func(addr Address) P
 ```
 
 Change the call site inside `GetOrCreateSubPool` (around line 143-146):
 
 ```go
 	s = &CoreSubPool[P, MC]{
-		p:    mp.newSub(key, addr),
+		p:    mp.newSub(addr),
 		addr: addr,
 	}
 ```
+
+(`key` is still computed just above, for the map lookup and insert — untouched.)
 
 - [ ] **Step 2: Update the H2 managed-pool closure**
 
 In `internal/poolcore/managed_pool.go`, change:
 
 ```go
-		NewSub: func(key string, _ Address) *Pool { return New(key, co, po, obs, rec, nil) },
+		NewSub: func(addr Address) *Pool { return New(addr.String(), co, po, obs, rec, nil) },
 ```
 
 - [ ] **Step 3: Update the H1 managed-pool closure**
@@ -306,22 +306,24 @@ In `internal/poolcore/managed_pool.go`, change:
 In `client/h1_managed_pool.go`, change:
 
 ```go
-		NewSub: func(key string, _ Address) *h1Pool {
-			return newH1Pool(key, dialer, po, hooksRef, metrics)
+		NewSub: func(addr Address) *h1Pool {
+			return newH1Pool(addr.String(), dialer, po, hooksRef, metrics)
 		},
 ```
 
-- [ ] **Step 4: Update the H3 managed-pool closure (permanently unused parameter)**
+(Task 4 changes this again, to call a new `newH1SubPool` instead.)
+
+- [ ] **Step 4: Update the H3 managed-pool closure**
 
 In `client/h3_managed_pool.go`, change:
 
 ```go
-			// addr is ignored: h3Pool dials through dialFn (a plain
-			// func(ctx, string, *tls.Config)), not conn.Dialer, so it has no
-			// AddressDialer seam to offer it to (#943 scoped AddressDialer to
-			// the H1/H2 managed pools only).
-			NewSub: func(key string, _ Address) *h3Pool {
-				return newH3Pool(key, tlsConfig, po, dialFn, hooksRef, metrics)
+			// Only addr.String() is used: h3Pool dials through dialFn (a
+			// plain func(ctx, string, *tls.Config)), not conn.Dialer, so
+			// there is no AddressDialer seam to offer the Attributes to
+			// (#943 scoped AddressDialer to the H1/H2 managed pools only).
+			NewSub: func(addr Address) *h3Pool {
+				return newH3Pool(addr.String(), tlsConfig, po, dialFn, hooksRef, metrics)
 			},
 ```
 
@@ -330,7 +332,7 @@ In `client/h3_managed_pool.go`, change:
 In `internal/poolcore/actor_acquire_test.go`, change (around line 228):
 
 ```go
-		NewSub:   func(key string, _ Address) *Pool { return New(key, co, po, nil, nil, nil) },
+		NewSub:   func(addr Address) *Pool { return New(addr.String(), co, po, nil, nil, nil) },
 ```
 
 - [ ] **Step 6: Verify the whole module still builds and every existing test still passes**
@@ -339,14 +341,14 @@ Run: `go build ./...`
 Expected: clean (a mismatched `NewSub` signature anywhere would fail generic type inference at compile time).
 
 Run: `go test ./client/... ./internal/poolcore/... -count=1 -race`
-Expected: PASS, identical to before this task — this step is a pure signature refactor, not new behavior, so there is no new red-then-green cycle; the existing suite passing unchanged **is** the verification.
+Expected: PASS, identical to before this task.
 
 - [ ] **Step 7: Commit**
 
 ```bash
 git add internal/poolcore/managed_core.go internal/poolcore/managed_pool.go \
   client/h1_managed_pool.go client/h3_managed_pool.go internal/poolcore/actor_acquire_test.go
-git commit -m "refactor(poolcore): thread resolved Address into NewSub"
+git commit -m "refactor(poolcore): pass the resolved Address itself to NewSub"
 ```
 
 ---
@@ -354,9 +356,10 @@ git commit -m "refactor(poolcore): thread resolved Address into NewSub"
 ### Task 4: Wire `AddressDialer` into the H1 managed pool
 
 **Files:**
-- Modify: `client/h1_pool.go`
 - Modify: `client/h1_managed_pool.go`
 - Test: `client/h1_pool_test.go`
+
+The capability is wired **once, when a sub-pool is constructed for a specific address** — not on every dial. `client/h1_pool.go` (in particular `h1Pool.dialOne`) is not touched by this task at all: a managed sub-pool's `dialer` field already *is* the wrapped dialer by the time `dialOne` ever runs.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -393,129 +396,115 @@ func (d *h1FakeAddressDialer) addresses() []Address {
 	return append([]Address(nil), d.gotAddrs...)
 }
 
-func TestH1Pool_Acquire_PrefersAddressDialerWhenManaged(t *testing.T) {
+var _ AddressDialer = (*h1FakeAddressDialer)(nil)
+
+func TestNewH1SubPool_PrefersAddressDialer(t *testing.T) {
 	t.Parallel()
 	addr := Address{Host: "10.0.0.9", Port: 9443, Attributes: map[string]string{"zone": "us-east-1a"}}
 	d := newH1FakeAddressDialer()
-	p := newH1Pool(addr.String(), d, PoolOptions{MaxConnsPerHost: 1}, nil, nil)
-	p.address = &addr
+	p := newH1SubPool(addr, d, PoolOptions{MaxConnsPerHost: 1}, nil, nil)
 	defer func() { _ = p.Close() }()
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 
 	mc, err := p.Acquire(ctx)
-
 	require.NoError(t, err, "Acquire")
 	p.release(mc, true)
+
 	got := d.addresses()
 	require.Lenf(t, got, 1, "DialAddress call count = %d, want 1", len(got))
 	assert.Equalf(t, addr, got[0],
 		"DialAddress got Address = %+v, want %+v — Attributes must survive the managed dial path", got[0], addr)
 }
 
-func TestH1Pool_Acquire_NonManagedNeverCallsDialAddress(t *testing.T) {
+func TestNewH1Pool_NeverWrapsForAddressDialer(t *testing.T) {
 	t.Parallel()
 	d := newH1FakeAddressDialer()
 	p := newH1Pool("10.0.0.9:9443", d, PoolOptions{MaxConnsPerHost: 1}, nil, nil)
-	// p.address is left nil, exactly as newH1Pool leaves it for the
-	// non-managed construction path (NewH1PoolClient / TransportH1Pool).
 	defer func() { _ = p.Close() }()
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 
 	mc, err := p.Acquire(ctx)
-
 	require.NoError(t, err, "Acquire")
 	p.release(mc, true)
+
 	assert.Emptyf(t, d.addresses(),
-		"DialAddress was called on a non-managed pool with no resolved Address — p.address must stay nil outside the managed path")
+		"DialAddress was called on a pool built by the plain newH1Pool constructor — only newH1SubPool may wrap a dialer for AddressDialer")
 	assert.Equalf(t, int32(1), d.h1FakeDialer.dials.Load(),
-		"plain Dial call count = %d, want exactly 1 — the non-managed path must keep using the string form", d.h1FakeDialer.dials.Load())
+		"plain Dial call count = %d, want exactly 1 — the non-managed constructor must never wrap the dialer", d.h1FakeDialer.dials.Load())
 }
 ```
 
 - [ ] **Step 2: Run the tests to verify they fail**
 
-Run: `go test ./client/... -run TestH1Pool_Acquire_.*AddressDialer -v`
-Expected: FAIL to compile — `p.address undefined (type *h1Pool has no field or method address)`.
+Run: `go test ./client/... -run 'TestNewH1SubPool_PrefersAddressDialer|TestNewH1Pool_NeverWrapsForAddressDialer' -v`
+Expected: FAIL to compile — `undefined: newH1SubPool`.
 
 - [ ] **Step 3: Implement**
 
-In `client/h1_pool.go`, add the `pool` import:
+In `client/h1_managed_pool.go`, add the `context`, `net`, and `pool` imports:
 
 ```go
 import (
-	"net"
-	"sync"
-	"sync/atomic"
-	"time"
-
 	"context"
+	"net"
+	"sync/atomic"
 
 	"github.com/lodgvideon/poseidon-http-client/conn"
 	"github.com/lodgvideon/poseidon-http-client/http1"
+	"github.com/lodgvideon/poseidon-http-client/internal/poolcore"
 	"github.com/lodgvideon/poseidon-http-client/pool"
 )
 ```
 
-Add the `address` field to the `h1Pool` struct:
+Add `newH1SubPool`, and switch `NewSub` to call it instead of `newH1Pool` directly:
 
 ```go
-type h1Pool struct {
-	opts PoolOptions
-	addr string
-	// address is the resolver Address addr was derived from (addr ==
-	// address.String()), set only when this pool is a managed sub-pool (see
-	// h1_managed_pool.go's NewSub). nil for a pool built directly on a
-	// caller-supplied address (NewH1PoolClient / TransportH1Pool), which has
-	// no Resolver in play and nothing but the string to offer.
-	address *Address
-
-	// dialer establishes the underlying transport (TCP, or TLS whose ALPN does
-	// not assert "h2"). It is the test seam: tests pass a fake conn.Dialer, so no
-	// live server is required.
-	dialer conn.Dialer
+// newH1SubPool builds the managed sub-pool for resolved: a sub-pool whose
+// dial offers the resolver's Address (Attributes included) to a
+// pool.AddressDialer, falling back to the plain string Dial otherwise
+// (#943). A nil dialer is left alone — it cannot implement the capability.
+//
+// The wrap hides any capability interface the caller's dialer implements
+// (conn.ALPNAsserter today) behind a plain DialerFunc. Safe because the only
+// consumer, client.validateDialerALPN, runs at NewClient time on the
+// original dialer — a future capability checked at dial time would need to
+// be re-exposed here too.
+func newH1SubPool(resolved Address, dialer conn.Dialer, po PoolOptions,
+	hooksRef *atomic.Pointer[Hooks], metrics *Metrics,
+) *h1Pool {
+	if base := dialer; base != nil {
+		dialer = conn.DialerFunc(func(ctx context.Context, addr string) (net.Conn, error) {
+			return pool.DialResolved(ctx, base, resolved)
+		})
+	}
+	return newH1Pool(resolved.String(), dialer, po, hooksRef, metrics)
+}
 ```
 
-Change `dialOne`'s dial call:
-
 ```go
-func (p *h1Pool) dialOne() {
-	nc, err := dialAttempt(p.dialEnv(), func(ctx context.Context) (net.Conn, error) {
-		nc, derr := pool.Dial(ctx, p.dialer, p.address, p.addr)
-		if derr != nil {
-			return nil, derr
-		}
-		if aerr := assertH1Conn(nc); aerr != nil {
-			_ = nc.Close()
-			return nil, aerr
-		}
-		return nc, nil
-	})
-```
-
-In `client/h1_managed_pool.go`, populate `address` on the managed path:
-
-```go
-		NewSub: func(key string, addr Address) *h1Pool {
-			p := newH1Pool(key, dialer, po, hooksRef, metrics)
-			p.address = &addr
-			return p
+		NewSub: func(addr Address) *h1Pool {
+			return newH1SubPool(addr, dialer, po, hooksRef, metrics)
 		},
 ```
 
 - [ ] **Step 4: Run the tests to verify they pass**
 
-Run: `go test ./client/... -run TestH1Pool_Acquire_.*AddressDialer -v`
+Run: `go test ./client/... -run 'TestNewH1SubPool_PrefersAddressDialer|TestNewH1Pool_NeverWrapsForAddressDialer' -v`
 Expected: PASS.
 
 Run: `go test ./client/... -count=1 -race`
 Expected: PASS (full package regression, including the pre-existing `TestH1ManagedPool_*` suite).
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 5: Review the new tests**
+
+Run the `reviewing-tests` skill over the two tests added in this task.
+
+- [ ] **Step 6: Commit**
 
 ```bash
-git add client/h1_pool.go client/h1_managed_pool.go client/h1_pool_test.go
+git add client/h1_managed_pool.go client/h1_pool_test.go
 git commit -m "feat(client): prefer AddressDialer on the H1 managed pool"
 ```
 
@@ -524,9 +513,10 @@ git commit -m "feat(client): prefer AddressDialer on the H1 managed pool"
 ### Task 5: Wire `AddressDialer` into the H2 managed pool
 
 **Files:**
-- Modify: `internal/poolcore/pool.go`
 - Modify: `internal/poolcore/managed_pool.go`
 - Test: `internal/poolcore/pool_test.go`
+
+Same shape as Task 4: the capability is wired once, at sub-pool construction. `internal/poolcore/pool.go` (`Pool.dialOne`) is not touched at all.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -563,63 +553,82 @@ func (d *fakeAddressDialer) addresses() []Address {
 	return append([]Address(nil), d.gotAddrs...)
 }
 
-func TestPool_DialOne_PrefersAddressDialerWhenManaged(t *testing.T) {
+var _ pool.AddressDialer = (*fakeAddressDialer)(nil)
+
+func TestNewSubPool_PrefersAddressDialer(t *testing.T) {
 	t.Parallel()
 	addr := Address{Host: "10.0.0.9", Port: 9443, Attributes: map[string]string{"zone": "us-east-1a"}}
 	d := newFakeAddressDialer(t)
-	p := New(addr.String(), conn.ConnOptions{Dialer: d},
-		PoolOptions{MaxConnsPerHost: 1, HealthCheckPeriod: time.Hour}, nil, nil, nil)
-	p.address = &addr
+	p := newSubPool(addr, conn.ConnOptions{Dialer: d},
+		PoolOptions{MaxConnsPerHost: 1, HealthCheckPeriod: time.Hour}, nil, nil)
 	t.Cleanup(func() { _ = p.Close() })
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
 	mc, err := p.Acquire(ctx)
-
 	require.NoError(t, err, "Acquire")
 	p.Release(mc)
+
 	got := d.addresses()
 	require.Lenf(t, got, 1, "DialAddress call count = %d, want 1", len(got))
 	assert.Equalf(t, addr, got[0],
 		"DialAddress got Address = %+v, want %+v — Attributes must survive the managed dial path", got[0], addr)
 }
 
-func TestPool_DialOne_NonManagedNeverCallsDialAddress(t *testing.T) {
+func TestNewPool_NeverWrapsForAddressDialer(t *testing.T) {
 	t.Parallel()
 	d := newFakeAddressDialer(t)
 	p := New("10.0.0.9:9443", conn.ConnOptions{Dialer: d},
 		PoolOptions{MaxConnsPerHost: 1, HealthCheckPeriod: time.Hour}, nil, nil, nil)
-	// p.address is left nil, exactly as New leaves it for a pool built
-	// outside the managed path.
 	t.Cleanup(func() { _ = p.Close() })
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
 	mc, err := p.Acquire(ctx)
-
 	require.NoError(t, err, "Acquire")
 	p.Release(mc)
+
 	assert.Emptyf(t, d.addresses(),
-		"DialAddress was called on a non-managed pool with no resolved Address — p.address must stay nil outside the managed path")
+		"DialAddress was called on a pool built by the plain New constructor — only newSubPool may wrap a dialer for AddressDialer")
 	assert.Equalf(t, int32(1), d.fakeDialer.dialCount.Load(),
-		"plain Dial call count = %d, want exactly 1 — the non-managed path must keep using the string form", d.fakeDialer.dialCount.Load())
+		"plain Dial call count = %d, want exactly 1 — the non-managed constructor must never wrap the dialer", d.fakeDialer.dialCount.Load())
 }
 ```
 
-- [ ] **Step 2: Run the tests to verify they fail**
-
-Run: `go test ./internal/poolcore/... -run TestPool_DialOne_.*AddressDialer -v`
-Expected: FAIL to compile — `p.address undefined (type *Pool has no field or method address)`.
-
-- [ ] **Step 3: Implement**
-
-In `internal/poolcore/pool.go`, add the `net` import:
+This test file is in package `poolcore`, which has `Address` bare via its own `internal/poolcore/vocab.go` alias but does not currently import `pool` in this file — add it:
 
 ```go
 import (
 	"context"
+	"errors"
 	"net"
 	"sync"
+	"testing"
+	"time"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
+	"github.com/lodgvideon/poseidon-http-client/conn"
+	"github.com/lodgvideon/poseidon-http-client/frame"
+	"github.com/lodgvideon/poseidon-http-client/pool"
+)
+```
+
+- [ ] **Step 2: Run the tests to verify they fail**
+
+Run: `go test ./internal/poolcore/... -run 'TestNewSubPool_PrefersAddressDialer|TestNewPool_NeverWrapsForAddressDialer' -v`
+Expected: FAIL to compile — `undefined: newSubPool`.
+
+- [ ] **Step 3: Implement**
+
+In `internal/poolcore/managed_pool.go`, add the `context` and `net` imports:
+
+```go
+import (
+	"context"
+	"errors"
+	"net"
 	"time"
 
 	"github.com/lodgvideon/poseidon-http-client/conn"
@@ -627,72 +636,52 @@ import (
 )
 ```
 
-Add the `address` field to the `Pool` struct (immediately after the existing `Addr` field, around line 113):
+Add `newSubPool`, and switch `NewSub` to call it instead of `New` directly:
 
 ```go
-type Pool struct {
-	opts     PoolOptions
-	connOpts conn.ConnOptions
-	Addr     string
-	// address is the resolver Address Addr was derived from (Addr ==
-	// address.String()), set only when this pool is a managed sub-pool (see
-	// managed_pool.go's NewSub). nil for a pool built directly on a
-	// caller-supplied address, which has no Resolver in play and nothing but
-	// the string to offer.
-	address *Address
-```
-
-Change `dialOne` (lines 664-673) to prefer `AddressDialer` only when a resolved `Address` is present — the `if p.address != nil` guard means a non-managed pool's `conn.ConnOptions` (and its own nil-`Dialer`-defaults-to-`TLSDialer` behavior inside `conn.Dial`) is left completely untouched:
-
-```go
-func (p *Pool) dialOne() {
-	c, err := DialAttempt(p.DialEnv(), func(ctx context.Context) (*conn.Conn, error) {
-		opts := p.connOpts
-		if p.address != nil {
-			opts.Dialer = conn.DialerFunc(func(dctx context.Context, addr string) (net.Conn, error) {
-				return pool.Dial(dctx, p.connOpts.Dialer, p.address, addr)
-			})
-		}
-		return conn.Dial(ctx, p.Addr, opts)
-	})
-	if err != nil {
-		p.dialDoneCh <- DialResult{Err: &DialError{Addr: p.Addr, Err: err}}
-		return
+// newSubPool builds the managed sub-pool for resolved: a sub-pool whose
+// dial offers the resolver's Address (Attributes included) to a
+// pool.AddressDialer, falling back to the plain string Dial otherwise
+// (#943). A nil Dialer is left alone — it cannot implement the capability,
+// and conn.Dial applies its own default in that case.
+//
+// The wrap hides any capability interface the caller's dialer implements
+// (conn.ALPNAsserter today) behind a plain DialerFunc. Safe because the only
+// consumer, client.validateDialerALPN, runs at NewClient time on the
+// original dialer — a future capability checked at dial time would need to
+// be re-exposed here too.
+func newSubPool(resolved Address, co conn.ConnOptions, po PoolOptions,
+	obs pool.Observer, rec pool.Recorder,
+) *Pool {
+	if base := co.Dialer; base != nil {
+		co.Dialer = conn.DialerFunc(func(ctx context.Context, addr string) (net.Conn, error) {
+			return pool.DialResolved(ctx, base, resolved)
+		})
 	}
-	var typed any
-	if p.wrap != nil {
-		typed, err = p.wrap(c)
-		if err != nil {
-			p.dialDoneCh <- DialResult{Err: &DialError{Addr: p.Addr, Err: err}}
-			return
-		}
-	}
-	p.dialDoneCh <- DialResult{Mc: &ManagedConn{C: c, Typed: typed, LastUsed: time.Now(), p: p}}
+	return New(resolved.String(), co, po, obs, rec, nil)
 }
 ```
 
-In `internal/poolcore/managed_pool.go`, populate `address` on the managed path:
-
 ```go
-		NewSub: func(key string, addr Address) *Pool {
-			p := New(key, co, po, obs, rec, nil)
-			p.address = &addr
-			return p
-		},
+		NewSub: func(addr Address) *Pool { return newSubPool(addr, co, po, obs, rec) },
 ```
 
 - [ ] **Step 4: Run the tests to verify they pass**
 
-Run: `go test ./internal/poolcore/... -run TestPool_DialOne_.*AddressDialer -v`
+Run: `go test ./internal/poolcore/... -run 'TestNewSubPool_PrefersAddressDialer|TestNewPool_NeverWrapsForAddressDialer' -v`
 Expected: PASS.
 
 Run: `go test ./internal/poolcore/... -count=1 -race`
 Expected: PASS (full package regression).
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 5: Review the new tests**
+
+Run the `reviewing-tests` skill over the two tests added in this task.
+
+- [ ] **Step 6: Commit**
 
 ```bash
-git add internal/poolcore/pool.go internal/poolcore/managed_pool.go internal/poolcore/pool_test.go
+git add internal/poolcore/managed_pool.go internal/poolcore/pool_test.go
 git commit -m "feat(poolcore): prefer AddressDialer on the H2 managed pool"
 ```
 
@@ -703,7 +692,7 @@ git commit -m "feat(poolcore): prefer AddressDialer on the H2 managed pool"
 **Files:**
 - Test: `client/h1_managed_pool_test.go`
 
-Tasks 4 and 5 each unit-test one protocol's `dialOne` in isolation. This task proves the whole chain a real caller depends on: a `Resolver` that attaches `Attributes`, through `Selector.Pick`, through the generic `ManagedCore`, into a custom `client.AddressDialer`. One protocol (H1) is enough — both protocols share the *same* `ManagedCore.GetOrCreateSubPool`/`Acquire` and the *same* `pool.Dial` helper (already exhaustively unit-tested in Task 1), so re-proving that shared machinery a second time end-to-end for H2 would be duplicate coverage of code this plan does not fork per protocol.
+Tasks 4 and 5 each unit-test one protocol's sub-pool constructor in isolation. This task proves the whole chain a real caller depends on: a `Resolver` that attaches `Attributes`, through `Selector.Pick`, through the generic `ManagedCore`, into a custom `client.AddressDialer`. One protocol (H1) is enough — both protocols share the *same* `ManagedCore.GetOrCreateSubPool`/`Acquire` and the *same* `pool.DialResolved` helper (already exhaustively unit-tested in Task 1), so re-proving that shared machinery a second time end-to-end for H2 would be duplicate coverage of code this plan does not fork per protocol.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -722,10 +711,10 @@ func TestH1ManagedPool_Acquire_DialerReceivesResolverAttributes(t *testing.T) {
 	defer cancel()
 
 	c, release, gotAddr, aerr := mp.Acquire(ctx)
-
 	require.NoError(t, aerr, "Acquire")
 	require.True(t, c.IsAlive(), "Acquire handed back a dead conn")
 	release(true)
+
 	assert.Equalf(t, addr, gotAddr, "Acquire's own returned Address = %+v, want %+v", gotAddr, addr)
 	got := d.addresses()
 	require.Lenf(t, got, 1, "DialAddress call count = %d, want 1", len(got))
@@ -737,9 +726,13 @@ func TestH1ManagedPool_Acquire_DialerReceivesResolverAttributes(t *testing.T) {
 - [ ] **Step 2: Run the test to verify it passes**
 
 Run: `go test ./client/... -run TestH1ManagedPool_Acquire_DialerReceivesResolverAttributes -v`
-Expected: PASS immediately — Tasks 1-5 already implement the behavior this test exercises, so there is no red phase here. That is intentional: Tasks 4 and 5 each pin one protocol's `dialOne` in isolation with a hand-built `Address`; this test is the end-to-end proof that the real path a caller depends on — `Resolver` → `Selector.Pick` → `ManagedCore` → sub-pool → dialer — carries `Attributes` all the way through, which no unit test in Tasks 4-5 exercises by itself. If it fails here, a wiring step in Task 3 or 4 was missed.
+Expected: PASS immediately — Tasks 1-5 already implement the behavior this test exercises, so there is no red phase here. That is intentional: Tasks 4 and 5 each pin one protocol's sub-pool constructor in isolation; this test is the end-to-end proof that the real path a caller depends on — `Resolver` → `Selector.Pick` → `ManagedCore` → `newH1SubPool` → dialer — carries `Attributes` all the way through, which no unit test in Tasks 4-5 exercises by itself. If it fails here, a wiring step in Task 4 was missed.
 
-- [ ] **Step 3: Commit**
+- [ ] **Step 3: Review the new test**
+
+Run the `reviewing-tests` skill over the test added in this task.
+
+- [ ] **Step 4: Commit**
 
 ```bash
 git add client/h1_managed_pool_test.go
@@ -759,17 +752,25 @@ git commit -m "test(client): pin resolver Attributes reaching a custom AddressDi
 In the `### Dialers (`ConnOpts.Dialer`)` section, immediately after the existing `**Dialer/transport pairing is checked.**` paragraph (the one ending "...instead of `http1: read status line: EOF` on every exchange."), add:
 
 ```markdown
-**Managed transports offer the resolved Address, if your dialer wants it.** A dialer may additionally implement `client.AddressDialer` (`DialAddress(ctx, addr client.Address) (net.Conn, error)`) to receive the `Address` a `Selector` picked — host, port, and any `Attributes` the `Resolver` attached (availability zone, weight class, …) — instead of a flattened `"host:port"` string. `TransportH1Managed` and the HTTP/2 `TransportManaged` check for it on every dial and prefer `DialAddress` over `Dial` when it is implemented; `Dial` is still called for a dialer that does not implement `AddressDialer`, so existing dialers keep working unchanged. `Attributes` is the same map instance the `Resolver`/`Selector` hold — treat it as read-only.
+**Managed transports offer the resolved Address, if your dialer wants it.** A dialer may additionally implement `client.AddressDialer` (`DialAddress(ctx, addr client.Address) (net.Conn, error)`) to receive the `Address` a `Selector` picked — host, port, and any `Attributes` the `Resolver` attached (availability zone, weight class, …) — instead of a flattened `"host:port"` string. `TransportH1Managed` and the HTTP/2 `TransportManaged` check for it once, when a sub-pool is built for a resolved address, and prefer `DialAddress` over `Dial` for every dial that sub-pool makes when it is implemented; `Dial` is still called for a dialer that does not implement `AddressDialer`, so existing dialers keep working unchanged. `Attributes` is the same map instance the `Resolver`/`Selector` hold — treat it as read-only.
 
 Non-managed transports (`TransportH1SingleConn`, `TransportH1Pool`, `TransportSingleConn`, `TransportPool`, `TransportALPN`) have no `Resolver` in the picture and never construct an `Address` to offer, so `DialAddress` is never called on them even if the configured dialer implements it — they always call `Dial`. HTTP/3 transports do not use `conn.Dialer` at all and are unaffected.
 ```
 
 - [ ] **Step 2: Update `CHANGELOG.md`**
 
-In the `## [Unreleased]` → `### Added` section, insert as the new first bullet (above the `conn.DialerFunc` entry):
+In the `## [Unreleased]` → `### Added` section, insert as the new first bullet (above the `conn.DialerFunc` entry), wrapped to match the surrounding entries:
 
 ```markdown
-- **A managed transport's dialer can receive the resolver's Address, Attributes included.** `client.AddressDialer` (`DialAddress(ctx, addr client.Address) (net.Conn, error)`) is an optional capability a `Dialer` implements to receive the `Selector`-picked `Address` — host, port, and `Attributes` — instead of a flattened `"host:port"` string. Checked the same way `conn.ALPNAsserter` is, on `TransportH1Managed` and the HTTP/2 `TransportManaged`; falls back to `Dial` when a dialer does not implement it, so nothing changes for existing dialers. Non-managed transports and HTTP/3 have no resolved `Address` to offer and are unaffected (#943).
+- **A managed transport's dialer can receive the resolver's Address,
+  Attributes included.** `client.AddressDialer` (`DialAddress(ctx, addr
+  client.Address) (net.Conn, error)`) is an optional capability a `Dialer`
+  implements to receive the `Selector`-picked `Address` — host, port, and
+  `Attributes` — instead of a flattened `"host:port"` string. Checked the
+  same way `conn.ALPNAsserter` is, on `TransportH1Managed` and the HTTP/2
+  `TransportManaged`; falls back to `Dial` when a dialer does not implement
+  it, so nothing changes for existing dialers. Non-managed transports and
+  HTTP/3 have no resolved `Address` to offer and are unaffected (#943).
 
 ```
 
