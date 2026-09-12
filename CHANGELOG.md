@@ -9,6 +9,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **A managed transport's dialer can receive the resolver's Address,
+  Attributes included.** `client.AddressDialer` (`DialAddress(ctx, addr
+  client.Address) (net.Conn, error)`) is an optional capability a `Dialer`
+  implements to receive the `Selector`-picked `Address` — host, port, and
+  `Attributes` — instead of a flattened `"host:port"` string. Checked the
+  same way `conn.ALPNAsserter` is, on `TransportH1Managed` and the HTTP/2
+  `TransportManaged`; falls back to `Dial` when a dialer does not implement
+  it, so nothing changes for existing dialers. Non-managed transports and
+  HTTP/3 have no resolved `Address` to offer and are unaffected (#943).
+
 - **`conn.DialerFunc` adapts a plain function to `Dialer`.** Mirrors
   `http.HandlerFunc`: `conn.DialerFunc(func(ctx context.Context, addr string)
   (net.Conn, error) { ... })` now satisfies `conn.Dialer` without a
