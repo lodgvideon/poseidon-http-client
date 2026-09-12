@@ -176,7 +176,7 @@ func (d *h1FakeDialer) conns(addr string) []*h1FakeConn {
 // they reached the dialer.
 type h1FakeAddressDialer struct {
 	*h1FakeDialer
-	mu       sync.Mutex
+	addrMu   sync.Mutex
 	gotAddrs []Address
 }
 
@@ -187,16 +187,16 @@ func newH1FakeAddressDialer() *h1FakeAddressDialer {
 // DialAddress implements pool.AddressDialer, recording addr and then dialing
 // addr.String() through the embedded fake exactly as Dial would.
 func (d *h1FakeAddressDialer) DialAddress(ctx context.Context, addr Address) (net.Conn, error) {
-	d.mu.Lock()
+	d.addrMu.Lock()
 	d.gotAddrs = append(d.gotAddrs, addr)
-	d.mu.Unlock()
+	d.addrMu.Unlock()
 	return d.Dial(ctx, addr.String())
 }
 
 // addresses returns a copy of the Addresses seen by DialAddress so far.
 func (d *h1FakeAddressDialer) addresses() []Address {
-	d.mu.Lock()
-	defer d.mu.Unlock()
+	d.addrMu.Lock()
+	defer d.addrMu.Unlock()
 	return append([]Address(nil), d.gotAddrs...)
 }
 
