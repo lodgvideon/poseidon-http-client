@@ -83,7 +83,7 @@ type ManagedCore[P SubPoolBackend[MC], MC any, C any, R any] struct {
 	rec pool.Recorder
 
 	// The three measured differences, injected rather than branched on.
-	newSub    func(key string) P
+	newSub    func(addr Address) P
 	connOf    func(MC) C
 	mkRelease func(P, MC) R
 
@@ -141,7 +141,7 @@ func (mp *ManagedCore[P, MC, C, R]) GetOrCreateSubPool(addr Address) *CoreSubPoo
 		return s
 	}
 	s = &CoreSubPool[P, MC]{
-		p:    mp.newSub(key),
+		p:    mp.newSub(addr),
 		addr: addr,
 	}
 	mp.SubPools[key] = s
@@ -478,13 +478,16 @@ type CoreConfig[P SubPoolBackend[MC], MC any, C any, R any] struct {
 	Obs       pool.Observer
 	Rec       pool.Recorder
 
-	// NewSub builds the per-address sub-pool for key.
+	// NewSub builds the sub-pool for one resolved address. addr still
+	// carries Attributes, so a sub-pool holding a conn.Dialer can offer them
+	// to a pool.AddressDialer at dial time (#943); a sub-pool with no
+	// conn.Dialer of its own (h3Pool) uses only addr.String().
 	//
 	// Its closure must capture the SAME Recorder this config carries. Each
 	// pool constructor substitutes a fresh recorder for a nil one, so letting
 	// every sub-pool default independently would under-count the caller's
 	// metrics with the whole suite green.
-	NewSub func(key string) P
+	NewSub func(addr Address) P
 	// ConnOf extracts the protocol connection from a sub-pool's record.
 	ConnOf func(MC) C
 	// MkRelease builds the release handle handed back with an acquire.
