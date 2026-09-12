@@ -430,3 +430,26 @@ func TestManagedPool_Close_NoGoroutineLeak(t *testing.T) {
 			"does not stop its own goroutines on close leaks one set per pool",
 		before, after, before+tolerance, poolCount)
 }
+
+func TestManagedPool_Acquire_DialerReceivesResolverAttributes(t *testing.T) {
+	t.Parallel()
+	addr := Address{Host: "10.0.0.7", Port: 8080, Attributes: map[string]string{"zone": "us-west-2a", "weight": "10"}}
+	d := newFakeAddressDialer(t)
+	mp, err := NewManagedPool(StaticResolver(addr), RoundRobin(), DrainGraceful,
+		conn.ConnOptions{Dialer: d}, PoolOptions{MaxConnsPerHost: 1, HealthCheckPeriod: time.Hour}, nil, nil)
+	require.NoError(t, err, "NewManagedPool")
+	defer mp.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	c, release, gotAddr, aerr := mp.Acquire(ctx)
+	require.NoError(t, aerr, "Acquire")
+	require.True(t, c.IsAlive(), "Acquire handed back a dead conn")
+	release()
+
+	assert.Equalf(t, addr, gotAddr, "Acquire's own returned Address = %+v, want %+v", gotAddr, addr)
+	got := d.addresses()
+	require.Lenf(t, got, 1, "DialAddress call count = %d, want 1", len(got))
+	assert.Equalf(t, addr, got[0],
+		"DialAddress got Address = %+v, want %+v — a managed client's custom AddressDialer must see the resolver's Attributes, not just host:port", got[0], addr)
+}
