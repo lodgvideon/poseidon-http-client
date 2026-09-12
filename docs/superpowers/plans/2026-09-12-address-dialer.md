@@ -691,10 +691,13 @@ git commit -m "feat(poolcore): prefer AddressDialer on the H2 managed pool"
 
 **Files:**
 - Test: `client/h1_managed_pool_test.go`
+- Test: `internal/poolcore/managed_pool_internal_test.go`
 
-Tasks 4 and 5 each unit-test one protocol's sub-pool constructor in isolation. This task proves the whole chain a real caller depends on: a `Resolver` that attaches `Attributes`, through `Selector.Pick`, through the generic `ManagedCore`, into a custom `client.AddressDialer`. One protocol (H1) is enough — both protocols share the *same* `ManagedCore.GetOrCreateSubPool`/`Acquire` and the *same* `pool.DialResolved` helper (already exhaustively unit-tested in Task 1), so re-proving that shared machinery a second time end-to-end for H2 would be duplicate coverage of code this plan does not fork per protocol.
+> **Scope note (revised during Task 5's code-quality review):** originally scoped to H1 only, on the theory that both protocols share the same `ManagedCore`/`pool.DialResolved` machinery so one end-to-end proof would do. That reasoning had a gap: Tasks 4 and 5 each unit-test one protocol's *sub-pool constructor* (`newH1SubPool`/`newSubPool`) directly, called with a hand-built `Address` — neither exercises the one-line `NewSub` closure inside `newH1ManagedPool`/`BuildManagedPool` that wires that constructor up for real. Reverting just that closure back to calling `newH1Pool`/`New` directly (dropping the #943 wiring) would leave every existing test, Tasks 4-5's included, green. The shared machinery isn't what was at risk — each protocol's *own* `NewSub` closure is, and that's exactly what Tasks 4-5's unit tests bypass. Widened to cover both protocols.
 
-- [ ] **Step 1: Write the failing test**
+This task proves the whole chain a real caller depends on: a `Resolver` that attaches `Attributes`, through `Selector.Pick`, through the generic `ManagedCore`, into a custom `AddressDialer` — for both H1 (`client.AddressDialer` via `newH1ManagedPool`) and H2 (`pool.AddressDialer` via `BuildManagedPool`/`NewManagedPool`).
+
+- [ ] **Step 1: Write the failing H1 test**
 
 Append to `client/h1_managed_pool_test.go`:
 
@@ -723,20 +726,52 @@ func TestH1ManagedPool_Acquire_DialerReceivesResolverAttributes(t *testing.T) {
 }
 ```
 
-- [ ] **Step 2: Run the test to verify it passes**
+- [ ] **Step 2: Write the failing H2 test**
+
+Append to `internal/poolcore/managed_pool_internal_test.go`:
+
+```go
+func TestManagedPool_Acquire_DialerReceivesResolverAttributes(t *testing.T) {
+	t.Parallel()
+	addr := Address{Host: "10.0.0.7", Port: 8080, Attributes: map[string]string{"zone": "us-west-2a", "weight": "10"}}
+	d := newFakeAddressDialer(t)
+	mp, err := NewManagedPool(StaticResolver(addr), RoundRobin(), DrainGraceful,
+		conn.ConnOptions{Dialer: d}, PoolOptions{MaxConnsPerHost: 1, HealthCheckPeriod: time.Hour}, nil, nil)
+	require.NoError(t, err, "NewManagedPool")
+	defer mp.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	c, release, gotAddr, aerr := mp.Acquire(ctx)
+	require.NoError(t, aerr, "Acquire")
+	require.True(t, c.IsAlive(), "Acquire handed back a dead conn")
+	release()
+
+	assert.Equalf(t, addr, gotAddr, "Acquire's own returned Address = %+v, want %+v", gotAddr, addr)
+	got := d.addresses()
+	require.Lenf(t, got, 1, "DialAddress call count = %d, want 1", len(got))
+	assert.Equalf(t, addr, got[0],
+		"DialAddress got Address = %+v, want %+v — a managed client's custom AddressDialer must see the resolver's Attributes, not just host:port", got[0], addr)
+}
+```
+
+`fakeAddressDialer` / `newFakeAddressDialer` (`internal/poolcore/pool_test.go`) and `StaticResolver` (`internal/poolcore/vocab.go`, forwarding `pool.StaticResolver`) already exist in this package — Task 5 added the fake, so no new fixture is needed here. `newFakeAddressDialer(t)` wraps `liveDialer(t)`, which completes a real (faked-over-`net.Pipe`) H2 handshake via `runFakeH2Server`, so `Acquire` genuinely dials rather than stubbing the conn away.
+
+- [ ] **Step 3: Run both tests to verify they pass**
 
 Run: `go test ./client/... -run TestH1ManagedPool_Acquire_DialerReceivesResolverAttributes -v`
-Expected: PASS immediately — Tasks 1-5 already implement the behavior this test exercises, so there is no red phase here. That is intentional: Tasks 4 and 5 each pin one protocol's sub-pool constructor in isolation; this test is the end-to-end proof that the real path a caller depends on — `Resolver` → `Selector.Pick` → `ManagedCore` → `newH1SubPool` → dialer — carries `Attributes` all the way through, which no unit test in Tasks 4-5 exercises by itself. If it fails here, a wiring step in Task 4 was missed.
+Run: `go test ./internal/poolcore/... -run TestManagedPool_Acquire_DialerReceivesResolverAttributes -v`
+Expected: PASS immediately for both — Tasks 1-5 already implement the behavior these tests exercise, so there is no red phase here. That is intentional: Tasks 4 and 5 each pin one protocol's sub-pool constructor in isolation, bypassing the managed-pool's own `NewSub` closure; these are the end-to-end proof that the real path a caller depends on — `Resolver` → `Selector.Pick` → `ManagedCore` → the protocol's `NewSub` closure → dialer — carries `Attributes` all the way through for both protocols. If either fails, a wiring step in Task 4 (H1) or Task 5 (H2) was missed.
 
-- [ ] **Step 3: Review the new test**
+- [ ] **Step 4: Review the new tests**
 
-Run the `reviewing-tests` skill over the test added in this task.
+Run the `reviewing-tests` skill over both tests added in this task.
 
-- [ ] **Step 4: Commit**
+- [ ] **Step 5: Commit**
 
 ```bash
-git add client/h1_managed_pool_test.go
-git commit -m "test(client): pin resolver Attributes reaching a custom AddressDialer"
+git add client/h1_managed_pool_test.go internal/poolcore/managed_pool_internal_test.go
+git commit -m "test(client,poolcore): pin resolver Attributes reaching a custom AddressDialer"
 ```
 
 ---
