@@ -718,7 +718,8 @@ func TestH1ManagedPool_Acquire_DialerReceivesResolverAttributes(t *testing.T) {
 	require.True(t, c.IsAlive(), "Acquire handed back a dead conn")
 	release(true)
 
-	assert.Equalf(t, addr, gotAddr, "Acquire's own returned Address = %+v, want %+v", gotAddr, addr)
+	assert.Equalf(t, addr, gotAddr, "Acquire's own returned Address = %+v, want %+v — a caller doing "+
+		"per-address bookkeeping off Acquire's own return must see the same Attributes the dialer got", gotAddr, addr)
 	got := d.addresses()
 	require.Lenf(t, got, 1, "DialAddress call count = %d, want 1", len(got))
 	assert.Equalf(t, addr, got[0],
@@ -747,7 +748,8 @@ func TestManagedPool_Acquire_DialerReceivesResolverAttributes(t *testing.T) {
 	require.True(t, c.IsAlive(), "Acquire handed back a dead conn")
 	release()
 
-	assert.Equalf(t, addr, gotAddr, "Acquire's own returned Address = %+v, want %+v", gotAddr, addr)
+	assert.Equalf(t, addr, gotAddr, "Acquire's own returned Address = %+v, want %+v — a caller doing "+
+		"per-address bookkeeping off Acquire's own return must see the same Attributes the dialer got", gotAddr, addr)
 	got := d.addresses()
 	require.Lenf(t, got, 1, "DialAddress call count = %d, want 1", len(got))
 	assert.Equalf(t, addr, got[0],
