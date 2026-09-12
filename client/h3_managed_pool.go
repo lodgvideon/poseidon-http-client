@@ -46,8 +46,12 @@ func buildH3ManagedPool(r Resolver, s Selector, dm DrainMode, tlsConfig *tls.Con
 		// must share the SAME *Metrics, and newH3Pool defaults a nil one to its
 		// own fresh struct — which would silently under-count Client.Metrics()
 		// with the whole suite green.
-		NewSub: func(key string) *h3Pool {
-			return newH3Pool(key, tlsConfig, po, dialFn, hooksRef, metrics)
+		// Only addr.String() is used: h3Pool dials through dialFn (a
+		// plain func(ctx, string, *tls.Config)), not conn.Dialer, so
+		// there is no AddressDialer seam to offer the Attributes to
+		// (#943 scoped AddressDialer to the H1/H2 managed pools only).
+		NewSub: func(addr Address) *h3Pool {
+			return newH3Pool(addr.String(), tlsConfig, po, dialFn, hooksRef, metrics)
 		},
 		ConnOf: func(mc *h3ManagedConn) h3Client { return mc.cl },
 		MkRelease: func(p *h3Pool, mc *h3ManagedConn) func() {

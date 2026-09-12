@@ -54,8 +54,8 @@ func buildH1ManagedPool(r Resolver, s Selector, dm DrainMode, dialer conn.Dialer
 		// a fresh struct of its own, so letting each sub-pool default
 		// independently would under-count Client.Metrics() with the whole suite
 		// green.
-		NewSub: func(key string) *h1Pool {
-			return newH1Pool(key, dialer, po, hooksRef, metrics)
+		NewSub: func(addr Address) *h1Pool {
+			return newH1Pool(addr.String(), dialer, po, hooksRef, metrics)
 		},
 		ConnOf: func(mc *h1ManagedConn) *http1.Conn { return mc.c },
 		MkRelease: func(p *h1Pool, mc *h1ManagedConn) func(bool) {
