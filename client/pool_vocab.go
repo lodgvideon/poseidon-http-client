@@ -14,6 +14,10 @@ import (
 // Address is one resolved backend endpoint.
 type Address = pool.Address
 
+// AddressDialer is implemented by a Dialer that wants the resolver's full
+// Address instead of a flattened "host:port" string.
+type AddressDialer = pool.AddressDialer
+
 // Resolver discovers backend addresses for a logical service.
 type Resolver = pool.Resolver
 
