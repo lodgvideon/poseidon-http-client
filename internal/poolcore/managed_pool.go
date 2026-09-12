@@ -68,13 +68,20 @@ func BuildManagedPool(r Resolver, s Selector, dm DrainMode, co conn.ConnOptions,
 // Dialer, and leaving nil unwrapped keeps conn.Dial's own nil-Dialer
 // default (&TLSDialer{}) in effect instead of bypassing it.
 //
+// The wrap hides any capability interface the caller's dialer implements
+// (conn.ALPNAsserter today) behind a plain DialerFunc. Safe because the only
+// consumer, client.validateDialerALPN, runs at NewClient time on the
+// original dialer — a future capability checked at dial time would need to
+// be re-exposed here too.
+//
 // wrapped, not co, is what gets passed on. Copying co into wrapped and
 // mutating only wrapped.Dialer — rather than reassigning co.Dialer itself —
 // means the closure below always closes over the one co.Dialer value that
-// exists for the life of this function; there is no reassigned field for a
-// future copy of this pattern to accidentally capture (see newH1SubPool,
-// the H1 twin of this function, for the bug this shape structurally rules
-// out).
+// exists for the life of this function: reassign co.Dialer instead and a
+// future copy of this pattern that closes over the reassigned field dials
+// itself, an unrecoverable fatal error: stack overflow, not a catchable
+// panic (the H1 twin of this function, newH1SubPool, hit the bare-variable
+// version of this same hazard during review).
 func newSubPool(resolved Address, co conn.ConnOptions, po PoolOptions,
 	obs pool.Observer, rec pool.Recorder,
 ) *Pool {

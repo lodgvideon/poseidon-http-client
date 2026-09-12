@@ -555,7 +555,7 @@ func TestPool_DialFailure_NoWaiters_SetsBackoff(t *testing.T) {
 // received.
 type fakeAddressDialer struct {
 	*fakeDialer
-	mu       sync.Mutex
+	addrMu   sync.Mutex
 	gotAddrs []Address
 }
 
@@ -567,16 +567,16 @@ func newFakeAddressDialer(t *testing.T) *fakeAddressDialer {
 // DialAddress implements pool.AddressDialer, recording addr and then dialing
 // addr.String() through the embedded fake exactly as Dial would.
 func (d *fakeAddressDialer) DialAddress(ctx context.Context, addr Address) (net.Conn, error) {
-	d.mu.Lock()
+	d.addrMu.Lock()
 	d.gotAddrs = append(d.gotAddrs, addr)
-	d.mu.Unlock()
+	d.addrMu.Unlock()
 	return d.Dial(ctx, addr.String())
 }
 
 // addresses returns a copy of the Addresses seen by DialAddress so far.
 func (d *fakeAddressDialer) addresses() []Address {
-	d.mu.Lock()
-	defer d.mu.Unlock()
+	d.addrMu.Lock()
+	defer d.addrMu.Unlock()
 	return append([]Address(nil), d.gotAddrs...)
 }
 
