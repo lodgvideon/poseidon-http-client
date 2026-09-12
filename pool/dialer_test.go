@@ -20,13 +20,16 @@ func stubConn(t *testing.T) net.Conn {
 	return c
 }
 
-// fakeDialer implements only the plain Dial method.
+// fakeDialer implements only the plain Dial method, recording every addr it
+// receives so a test can assert what was actually dialed.
 type fakeDialer struct {
-	conn net.Conn
-	err  error
+	conn     net.Conn
+	err      error
+	gotAddrs []string
 }
 
-func (d *fakeDialer) Dial(_ context.Context, _ string) (net.Conn, error) {
+func (d *fakeDialer) Dial(_ context.Context, addr string) (net.Conn, error) {
+	d.gotAddrs = append(d.gotAddrs, addr)
 	return d.conn, d.err
 }
 
@@ -70,6 +73,26 @@ func TestDialResolved_FallsBackWhenDialerLacksCapability(t *testing.T) {
 	got, err := DialResolved(context.Background(), d, resolved)
 
 	require.NoError(t, err, "DialResolved")
+	assert.Equalf(t, []string{"10.0.0.5:8443"}, d.gotAddrs,
+		"Dial got addrs = %v, want exactly one call with the flattened Address", d.gotAddrs)
+	assert.Samef(t, want, got, "DialResolved = %v, want the plain Dial path's conn unchanged", got)
+}
+
+// TestDialResolved_FlattensIPv6AddressCorrectly pins the fallback path's use
+// of Address.String() (net.JoinHostPort) rather than a naive "Host:Port"
+// concatenation — an IPv6 literal needs bracketing or the flattened string is
+// ambiguous with the port separator.
+func TestDialResolved_FlattensIPv6AddressCorrectly(t *testing.T) {
+	t.Parallel()
+	want := stubConn(t)
+	resolved := Address{Host: "2001:db8::1", Port: 8443}
+	d := &fakeDialer{conn: want}
+
+	got, err := DialResolved(context.Background(), d, resolved)
+
+	require.NoError(t, err, "DialResolved")
+	assert.Equalf(t, []string{"[2001:db8::1]:8443"}, d.gotAddrs,
+		"Dial got addrs = %v, want the IPv6 host bracketed by net.JoinHostPort", d.gotAddrs)
 	assert.Samef(t, want, got, "DialResolved = %v, want the plain Dial path's conn unchanged", got)
 }
 
@@ -88,9 +111,10 @@ func TestDialResolved_PropagatesAddressDialerError(t *testing.T) {
 func TestDialResolved_PropagatesPlainDialError(t *testing.T) {
 	t.Parallel()
 	wantErr := errors.New("dial refused")
+	resolved := Address{Host: "10.0.0.5", Port: 8443}
 	d := &fakeDialer{err: wantErr}
 
-	got, err := DialResolved(context.Background(), d, Address{Host: "10.0.0.5", Port: 8443})
+	got, err := DialResolved(context.Background(), d, resolved)
 
 	assert.Samef(t, wantErr, err, "DialResolved error = %v, want the plain Dial path's error unchanged", err)
 	assert.Nilf(t, got, "DialResolved conn = %v, want nil on error", got)
