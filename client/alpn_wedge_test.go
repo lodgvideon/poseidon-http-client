@@ -146,7 +146,7 @@ func TestConformance_ALPN_ConcurrentFirstRequestsShareOneConn(t *testing.T) {
 		Transport:     client.TransportALPN,
 		DefaultScheme: "http",
 		ConnOpts: conn.ConnOptions{
-			Dialer: alpnPlainDialer(func(ctx context.Context, addr string) (net.Conn, error) {
+			Dialer: conn.DialerFunc(func(ctx context.Context, addr string) (net.Conn, error) {
 				return (&net.Dialer{}).DialContext(ctx, "tcp", addr)
 			}),
 		},
@@ -182,13 +182,6 @@ func TestConformance_ALPN_ConcurrentFirstRequestsShareOneConn(t *testing.T) {
 	assert.EqualValuesf(t, 1, accepted.Load(),
 		"accepted %d connections, want 1 — racing first requests each built their own "+
 			"delegate instead of sharing one (the proto=\"\" guard gap)", accepted.Load())
-}
-
-// alpnPlainDialer adapts a func to conn.Dialer.
-type alpnPlainDialer func(context.Context, string) (net.Conn, error)
-
-func (f alpnPlainDialer) Dial(ctx context.Context, addr string) (net.Conn, error) {
-	return f(ctx, addr)
 }
 
 // alpnTestCert mints a throwaway certificate for the TLS case above.

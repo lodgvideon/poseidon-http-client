@@ -41,7 +41,7 @@ func TestH1_ContentLength_DataEOFCoalesced(t *testing.T) {
 	c, err := client.NewClient(client.ClientOptions{
 		Transport: client.TransportH1SingleConn,
 		Addr:      "fake:0",
-		ConnOpts: conn.ConnOptions{Dialer: h1eofDialer(func(_ context.Context, _ string) (net.Conn, error) {
+		ConnOpts: conn.ConnOptions{Dialer: conn.DialerFunc(func(_ context.Context, _ string) (net.Conn, error) {
 			return mc, nil
 		})},
 	})
@@ -63,10 +63,6 @@ func TestH1_ContentLength_DataEOFCoalesced(t *testing.T) {
 	require.NoError(t, derr, "final bytes arriving with io.EOF must not be dropped")
 	assert.Len(t, resp.Body, bodyLen, "body truncated: the coalesced final read was discarded")
 }
-
-type h1eofDialer func(ctx context.Context, addr string) (net.Conn, error)
-
-func (f h1eofDialer) Dial(ctx context.Context, addr string) (net.Conn, error) { return f(ctx, addr) }
 
 // h1eofConn returns the response head, then the entire body together with
 // io.EOF in one Read call, deterministically reproducing the coalesced-EOF

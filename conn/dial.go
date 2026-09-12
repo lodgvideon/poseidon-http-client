@@ -12,6 +12,13 @@ type Dialer interface {
 	Dial(ctx context.Context, addr string) (net.Conn, error)
 }
 
+// DialerFunc adapts a plain function to the Dialer interface, the way
+// http.HandlerFunc adapts a function to http.Handler.
+type DialerFunc func(ctx context.Context, addr string) (net.Conn, error)
+
+// Dial calls f(ctx, addr).
+func (f DialerFunc) Dial(ctx context.Context, addr string) (net.Conn, error) { return f(ctx, addr) }
+
 // ALPNAsserter is implemented by Dialers that only ever return connections
 // speaking one application protocol, so a caller can check the pairing before
 // the first byte is written. AssertsALPN returns the ALPN token the dialer

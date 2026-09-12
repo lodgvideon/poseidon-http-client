@@ -2,6 +2,7 @@ package conn
 
 import (
 	"context"
+	"errors"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -9,6 +10,7 @@ import (
 	"time"
 
 	"github.com/lodgvideon/poseidon-http-client/header"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -130,4 +132,49 @@ func TestFlexDialer_PrependProtos(t *testing.T) {
 	proto := NegotiatedProtocol(nc)
 	require.Containsf(t, []string{"h2", "http/1.1"}, proto,
 		"NegotiatedProtocol = %q, want h2 or http/1.1", proto)
+}
+
+// var _ Dialer = DialerFunc(nil) pins the property the adapter exists for.
+var _ Dialer = DialerFunc(nil)
+
+// TestDialerFunc_Dial verifies DialerFunc.Dial forwards ctx and addr to the
+// wrapped function unchanged and returns exactly what that function returns.
+func TestDialerFunc_Dial(t *testing.T) {
+	t.Run("success", func(t *testing.T) {
+		pipeClient, pipeServer := net.Pipe()
+		defer func() { _ = pipeClient.Close(); _ = pipeServer.Close() }()
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		var gotSameCtx bool
+		var gotAddr string
+		calls := 0
+		f := DialerFunc(func(dialCtx context.Context, addr string) (net.Conn, error) {
+			calls++
+			gotSameCtx = dialCtx == ctx
+			gotAddr = addr
+			return pipeClient, nil
+		})
+
+		gotConn, gotErr := f.Dial(ctx, "example.test:443")
+
+		require.NoErrorf(t, gotErr, "DialerFunc.Dial")
+		assert.Samef(t, pipeClient, gotConn,
+			"DialerFunc.Dial = %v, want the wrapped function's conn unchanged", gotConn)
+		assert.Equalf(t, 1, calls, "wrapped function called %d times, want exactly 1", calls)
+		assert.Truef(t, gotSameCtx, "DialerFunc.Dial must forward ctx unchanged")
+		assert.Equalf(t, "example.test:443", gotAddr, "DialerFunc.Dial must forward addr unchanged")
+	})
+
+	t.Run("failure", func(t *testing.T) {
+		wantErr := errors.New("dial refused")
+		f := DialerFunc(func(context.Context, string) (net.Conn, error) {
+			return nil, wantErr
+		})
+
+		gotConn, gotErr := f.Dial(context.Background(), "example.test:443")
+
+		assert.Nilf(t, gotConn, "DialerFunc.Dial conn = %v, want nil on failure", gotConn)
+		assert.Samef(t, wantErr, gotErr,
+			"DialerFunc.Dial = %v, want the wrapped function's error unchanged", gotErr)
+	})
 }

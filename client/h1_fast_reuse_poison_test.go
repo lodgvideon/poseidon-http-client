@@ -11,6 +11,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/lodgvideon/poseidon-http-client/client"
+	"github.com/lodgvideon/poseidon-http-client/conn"
 )
 
 // The two checkout paths that reuse an HTTP/1.1 connection, both tested against
@@ -97,8 +98,8 @@ func doOnce(t *testing.T, c *client.Client, resp *client.Response) error {
 	return c.Do(ctx, &client.Request{Method: "GET", Path: "/", BodyMode: client.BodyBuffer}, resp)
 }
 
-func dialTCP() h1clDialer {
-	return h1clDialer(func(ctx context.Context, addr string) (net.Conn, error) {
+func dialTCP() conn.DialerFunc {
+	return conn.DialerFunc(func(ctx context.Context, addr string) (net.Conn, error) {
 		return (&net.Dialer{}).DialContext(ctx, "tcp", addr)
 	})
 }
