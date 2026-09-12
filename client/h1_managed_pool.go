@@ -75,11 +75,19 @@ func buildH1ManagedPool(r Resolver, s Selector, dm DrainMode, dialer conn.Dialer
 // original site (h1Pool.dialOne's p.dialer.Dial call) instead of relocating
 // it inside this closure.
 //
+// The wrap hides any capability interface the caller's dialer implements
+// (conn.ALPNAsserter today) behind a plain DialerFunc. Safe because the only
+// consumer, client.validateDialerALPN, runs at NewClient time on the
+// original dialer — a future capability checked at dial time would need to
+// be re-exposed here too.
+//
 // wrapped, not dialer, is what h1Pool actually dials with. Building the
 // wrapped value into its own variable — rather than reassigning dialer and
 // closing over it — means the closure always closes over the one dialer
-// value that exists for the life of this function; there is no reassigned
-// parameter for a future copy of this pattern to accidentally capture.
+// value that exists for the life of this function: reassign dialer instead
+// and a future copy of this pattern that closes over the reassigned
+// variable dials itself, an unrecoverable fatal error: stack overflow, not
+// a catchable panic.
 func newH1SubPool(resolved Address, dialer conn.Dialer, po PoolOptions,
 	hooksRef *atomic.Pointer[Hooks], metrics *Metrics,
 ) *h1Pool {
