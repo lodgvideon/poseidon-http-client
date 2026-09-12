@@ -9,6 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`conn.DialerFunc` adapts a plain function to `Dialer`.** Mirrors
+  `http.HandlerFunc`: `conn.DialerFunc(func(ctx context.Context, addr string)
+  (net.Conn, error) { ... })` now satisfies `conn.Dialer` without a
+  caller-declared named type. The test suite's own local ad-hoc adapters
+  (service-discovery and local-dial stand-ins repeated across several `client`
+  tests) are replaced with it (#942).
+
 - **The HTTP/3 response-size cap is configurable.** `maxResponseBytes` was a
   package `var` — 128 MiB, reachable from a test in the same package and from
   nowhere else — and it bounds the bytes ONE response retains. For a load

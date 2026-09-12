@@ -93,7 +93,7 @@ func TestConformance_RFC9112_Sec6_3_Rule5_PoisonedConnNotPooled(t *testing.T) {
 
 	c, err := client.NewH1PoolClient(
 		ln.Addr().String(),
-		h1clDialer(func(ctx context.Context, addr string) (net.Conn, error) {
+		conn.DialerFunc(func(ctx context.Context, addr string) (net.Conn, error) {
 			return (&net.Dialer{}).DialContext(ctx, "tcp", addr)
 		}),
 		client.PoolOptions{MaxConnsPerHost: 1},
@@ -130,9 +130,3 @@ func TestConformance_RFC9112_Sec6_3_Rule5_PoisonedConnNotPooled(t *testing.T) {
 		"want 2 accepted connections — anything less means the connection poisoned by the "+
 			"conflicting Content-Length was returned to the pool and reused")
 }
-
-type h1clDialer func(ctx context.Context, addr string) (net.Conn, error)
-
-func (f h1clDialer) Dial(ctx context.Context, addr string) (net.Conn, error) { return f(ctx, addr) }
-
-var _ conn.Dialer = h1clDialer(nil)

@@ -13,6 +13,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/lodgvideon/poseidon-http-client/client"
+	"github.com/lodgvideon/poseidon-http-client/conn"
 )
 
 // TestConformance_RFC9112_Sec6_3_PoolFallthroughIsChecked pins that the pool
@@ -63,7 +64,7 @@ func TestConformance_RFC9112_Sec6_3_PoolFallthroughIsChecked(t *testing.T) {
 			}(nc)
 		}
 	}()
-	dialer := h1clDialer(func(ctx context.Context, addr string) (net.Conn, error) {
+	dialer := conn.DialerFunc(func(ctx context.Context, addr string) (net.Conn, error) {
 		nc, derr := (&net.Dialer{}).DialContext(ctx, "tcp", addr)
 		if derr != nil {
 			return nil, derr

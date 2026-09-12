@@ -12,6 +12,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/lodgvideon/poseidon-http-client/client"
+	"github.com/lodgvideon/poseidon-http-client/conn"
 )
 
 // TestConformance_RFC9112_Sec6_3_ResponseQueuePoisonNotPooled is the payoff
@@ -82,7 +83,7 @@ func TestConformance_RFC9112_Sec6_3_ResponseQueuePoisonNotPooled(t *testing.T) {
 			}()
 			c, err := client.NewH1PoolClient(
 				ln.Addr().String(),
-				h1clDialer(func(ctx context.Context, addr string) (net.Conn, error) {
+				conn.DialerFunc(func(ctx context.Context, addr string) (net.Conn, error) {
 					return (&net.Dialer{}).DialContext(ctx, "tcp", addr)
 				}),
 				client.PoolOptions{MaxConnsPerHost: 1},
@@ -162,7 +163,7 @@ func TestConformance_RFC9112_Sec6_3_LatePoisonNotPooled(t *testing.T) {
 	}()
 	c, err := client.NewH1PoolClient(
 		ln.Addr().String(),
-		h1clDialer(func(ctx context.Context, addr string) (net.Conn, error) {
+		conn.DialerFunc(func(ctx context.Context, addr string) (net.Conn, error) {
 			return (&net.Dialer{}).DialContext(ctx, "tcp", addr)
 		}),
 		client.PoolOptions{MaxConnsPerHost: 1},
@@ -242,7 +243,7 @@ func TestConformance_RFC9112_Sec6_3_BufioBypassPoisonNotPooled(t *testing.T) {
 	}()
 	c, err := client.NewH1PoolClient(
 		ln.Addr().String(),
-		h1clDialer(func(ctx context.Context, addr string) (net.Conn, error) {
+		conn.DialerFunc(func(ctx context.Context, addr string) (net.Conn, error) {
 			return (&net.Dialer{}).DialContext(ctx, "tcp", addr)
 		}),
 		client.PoolOptions{MaxConnsPerHost: 1},
