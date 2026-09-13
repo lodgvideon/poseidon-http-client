@@ -7,8 +7,6 @@
 package client
 
 import (
-	"context"
-	"net"
 	"sync/atomic"
 
 	"github.com/lodgvideon/poseidon-http-client/conn"
@@ -67,35 +65,13 @@ func buildH1ManagedPool(r Resolver, s Selector, dm DrainMode, dialer conn.Dialer
 	})
 }
 
-// newH1SubPool builds the managed sub-pool for resolved: a sub-pool whose
-// dial offers the resolver's Address (Attributes included) to a
-// pool.AddressDialer, falling back to the plain string Dial otherwise
-// (#943). A nil dialer is left alone: pool.DialResolved requires a non-nil
-// Dialer, and leaving nil unwrapped keeps the resulting panic at its
-// original site (h1Pool.dialOne's p.dialer.Dial call) instead of relocating
-// it inside this closure.
-//
-// The wrap hides any capability interface the caller's dialer implements
-// (conn.ALPNAsserter today) behind a plain DialerFunc. Safe because the only
-// consumer, client.validateDialerALPN, runs at NewClient time on the
-// original dialer — a future capability checked at dial time would need to
-// be re-exposed here too.
-//
-// wrapped, not dialer, is what h1Pool actually dials with. Building the
-// wrapped value into its own variable — rather than reassigning dialer and
-// closing over it — means the closure always closes over the one dialer
-// value that exists for the life of this function: reassign dialer instead
-// and a future copy of this pattern that closes over the reassigned
-// variable dials itself, an unrecoverable fatal error: stack overflow, not
-// a catchable panic.
+// newH1SubPool builds the managed sub-pool for resolved, wrapping dialer
+// once so every dial it makes offers resolved to a pool.AddressDialer when
+// dialer implements it (#943); see pool.WrapForAddressDialer for the
+// wrap-or-passthrough logic itself, shared with the HTTP/2 managed pool's
+// equivalent (internal/poolcore/managed_pool.go's newSubPool).
 func newH1SubPool(resolved Address, dialer conn.Dialer, po PoolOptions,
 	hooksRef *atomic.Pointer[Hooks], metrics *Metrics,
 ) *h1Pool {
-	wrapped := dialer
-	if dialer != nil {
-		wrapped = conn.DialerFunc(func(ctx context.Context, _ string) (net.Conn, error) {
-			return pool.DialResolved(ctx, dialer, resolved)
-		})
-	}
-	return newH1Pool(resolved.String(), wrapped, po, hooksRef, metrics)
+	return newH1Pool(resolved.String(), pool.WrapForAddressDialer(dialer, resolved), po, hooksRef, metrics)
 }

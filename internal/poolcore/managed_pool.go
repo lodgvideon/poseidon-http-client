@@ -4,9 +4,7 @@
 package poolcore
 
 import (
-	"context"
 	"errors"
-	"net"
 	"time"
 
 	"github.com/lodgvideon/poseidon-http-client/conn"
@@ -61,36 +59,16 @@ func BuildManagedPool(r Resolver, s Selector, dm DrainMode, co conn.ConnOptions,
 	})
 }
 
-// newSubPool builds the managed sub-pool for resolved: a sub-pool whose
-// dial offers the resolver's Address (Attributes included) to a
-// pool.AddressDialer, falling back to the plain string Dial otherwise
-// (#943). A nil Dialer is left alone: pool.DialResolved requires a non-nil
-// Dialer, and leaving nil unwrapped keeps conn.Dial's own nil-Dialer
-// default (&TLSDialer{}) in effect instead of bypassing it.
-//
-// The wrap hides any capability interface the caller's dialer implements
-// (conn.ALPNAsserter today) behind a plain DialerFunc. Safe because the only
-// consumer, client.validateDialerALPN, runs at NewClient time on the
-// original dialer — a future capability checked at dial time would need to
-// be re-exposed here too.
-//
-// wrapped, not co, is what gets passed on. Copying co into wrapped and
-// mutating only wrapped.Dialer — rather than reassigning co.Dialer itself —
-// means the closure below always closes over the one co.Dialer value that
-// exists for the life of this function: reassign co.Dialer instead and a
-// future copy of this pattern that closes over the reassigned field dials
-// itself, an unrecoverable fatal error: stack overflow, not a catchable
-// panic (the H1 twin of this function, newH1SubPool, hit the bare-variable
-// version of this same hazard during review).
+// newSubPool builds the managed sub-pool for resolved, wrapping co.Dialer
+// once so every dial it makes offers resolved to a pool.AddressDialer when
+// co.Dialer implements it (#943); see pool.WrapForAddressDialer for the
+// wrap-or-passthrough logic itself, shared with the HTTP/1.1 managed pool's
+// equivalent (client/h1_managed_pool.go's newH1SubPool).
 func newSubPool(resolved Address, co conn.ConnOptions, po PoolOptions,
 	obs pool.Observer, rec pool.Recorder,
 ) *Pool {
 	wrapped := co
-	if co.Dialer != nil {
-		wrapped.Dialer = conn.DialerFunc(func(ctx context.Context, _ string) (net.Conn, error) {
-			return pool.DialResolved(ctx, co.Dialer, resolved)
-		})
-	}
+	wrapped.Dialer = pool.WrapForAddressDialer(co.Dialer, resolved)
 	return New(resolved.String(), wrapped, po, obs, rec, nil)
 }
 
