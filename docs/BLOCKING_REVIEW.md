@@ -25,6 +25,37 @@
 | **F8** | Rate limiter | глобальный мьютекс + `time.After` на каждого ждущего | thundering herd | **P2** |
 | **F9** | Managed pool / resolver | `RWMutex` + 2 аллокации на запрос | cache-line contention | **P3** |
 
+### Заведённые issue
+
+Каждая находка ниже заведена отдельным тикетом; этот документ — их общий контекст.
+Родительский тикет — [#694](https://github.com/lodgvideon/poseidon-http-client/issues/694)
+(«measure contention the way allocations are measured»), на пункты 1–3 которого
+этот обзор и отвечает.
+
+| Поток | Issue |
+|---|---|
+| F1 — `wmu` сквозь `write(2)`, per-frame flush | [#956](https://github.com/lodgvideon/poseidon-http-client/issues/956) |
+| F1 — `SendBatch` недостижим из `client.Do` | [#957](https://github.com/lodgvideon/poseidon-http-client/issues/957) |
+| F6 — `quic.Stream.Send` держит `conn.mu` на весь payload | [#958](https://github.com/lodgvideon/poseidon-http-client/issues/958) `bug` |
+| F3 — `Broadcast` на каждый per-stream WINDOW_UPDATE | [#959](https://github.com/lodgvideon/poseidon-http-client/issues/959) |
+| F4 — актор пула, 9.6 мкс/запрос | [#961](https://github.com/lodgvideon/poseidon-http-client/issues/961) |
+| F5 — watchdog http1 на каждый чанк | [#962](https://github.com/lodgvideon/poseidon-http-client/issues/962) |
+| F8 — rate limiter: herd + мёртвый `rl.cond` | [#963](https://github.com/lodgvideon/poseidon-http-client/issues/963) |
+| F7 — `encMu` над `quic.Conn.mu` и `sendto` | [#964](https://github.com/lodgvideon/poseidon-http-client/issues/964) |
+| F2 — переполнение канала событий без метрики | [#965](https://github.com/lodgvideon/poseidon-http-client/issues/965) |
+| F9 — аллокации в managed `Acquire` | [#967](https://github.com/lodgvideon/poseidon-http-client/issues/967) |
+| Предусловие — три недостающих бенчмарка | [#966](https://github.com/lodgvideon/poseidon-http-client/issues/966) |
+
+Два шага из дорожной карты сознательно **не** заведены:
+
+- **F1.3 (GroupCommit по умолчанию)** — [#360](https://github.com/lodgvideon/poseidon-http-client/issues/360)
+  уже закрыт этим решением после замеров p99 на смешанном DATA+HEADERS трафике.
+  Переоткрывать вопрос имеет смысл только после #956.
+- **F4.3/F4.4 (шардирование и слияние трёх акторов)** —
+  [#949](https://github.com/lodgvideon/poseidon-http-client/issues/949) уже владеет
+  вопросом, сходятся ли три пула, и на него надо ответить прежде, чем оптимизировать
+  каждый трижды.
+
 **Главный вывод.** Узкое место одно и оно уже измерено и уже решено —
 но решение недоступно из публичного API. `conn.SendBatch` (батч из 32 запросов
 под одним взятием `wmu`) даёт **7.3× по латентности и 23× по числу write-syscall'ов**
