@@ -1516,13 +1516,9 @@ func newDNSManagedClient() (*client.Client, error) {
 		PreferIPv4: true,
 		// Resolver: net.DefaultResolver, // optional
 	})
-	sel, err := client.Hash(func(pc client.PickContext) string {
-		// Sticky routing by request path; nil-safe.
-		if pc.Request != nil {
-			return pc.Request.Path
-		}
-		return ""
-	})
+	// Sticky routing keyed on caller-owned state (e.g. a tenant or session ID).
+	shardKey := "tenant-42"
+	sel, err := client.Hash(func(client.PickContext) string { return shardKey })
 	if err != nil {
 		return nil, err
 	}
@@ -1551,9 +1547,7 @@ type Selector interface {
 	Pick(set []Address, pc PickContext) (Address, error)
 }
 
-type PickContext struct {
-	Request *Request // the in-flight request when Pick runs on the acquire path; may be nil
-}
+type PickContext struct{} // empty today; kept as a struct so a future hint can be added without changing Selector's signature
 ```
 
 All built-in selectors are goroutine-safe and return `ErrNoAddresses` on an
@@ -1572,13 +1566,9 @@ rr := client.RoundRobin()
 // Random with explicit RNG:
 rnd := client.Random(rand.New(rand.NewSource(42)))
 
-// Consistent hashing keyed on an authority/header — note the error return:
-hsel, err := client.Hash(func(pc client.PickContext) string {
-	if pc.Request == nil {
-		return "" // → Pick returns ErrNoAddresses
-	}
-	return pc.Request.Authority
-})
+// Consistent hashing keyed on caller-owned state (e.g. an authority or header value) — note the error return:
+authority := "api.example.com"
+hsel, err := client.Hash(func(client.PickContext) string { return authority })
 if err != nil {
 	log.Fatal(err) // ErrNilKeyFn
 }
