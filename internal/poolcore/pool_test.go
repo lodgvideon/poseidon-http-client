@@ -620,3 +620,15 @@ func TestNewPool_NeverWrapsForAddressDialer(t *testing.T) {
 	assert.Equalf(t, int32(1), d.dialCount.Load(),
 		"plain Dial call count = %d, want exactly 1 — the non-managed constructor must never wrap the dialer", d.dialCount.Load())
 }
+
+func TestNewSubPool_NilDialerLeftUnwrapped(t *testing.T) {
+	t.Parallel()
+	addr := Address{Host: "10.0.0.9", Port: 9443}
+
+	p := newSubPool(addr, conn.ConnOptions{}, PoolOptions{MaxConnsPerHost: 1, HealthCheckPeriod: time.Hour}, nil, nil)
+	t.Cleanup(func() { _ = p.Close() })
+
+	assert.Nilf(t, p.connOpts.Dialer, "newSubPool(addr, conn.ConnOptions{}, ...) left p.connOpts.Dialer = %v, "+
+		"want nil — a nil Dialer must not be wrapped, so conn.Dial's own default (&conn.TLSDialer{}) "+
+		"stays in effect instead of being bypassed", p.connOpts.Dialer)
+}

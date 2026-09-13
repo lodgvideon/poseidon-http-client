@@ -239,6 +239,18 @@ func TestNewH1Pool_NeverWrapsForAddressDialer(t *testing.T) {
 		"plain Dial call count = %d, want exactly 1 — the non-managed constructor must never wrap the dialer", d.dials.Load())
 }
 
+func TestNewH1SubPool_NilDialerLeftUnwrapped(t *testing.T) {
+	t.Parallel()
+	addr := Address{Host: "10.0.0.9", Port: 9443}
+
+	p := newH1SubPool(addr, nil, PoolOptions{MaxConnsPerHost: 1}, nil, nil)
+	defer func() { _ = p.Close() }()
+
+	assert.Nilf(t, p.dialer, "newH1SubPool(addr, nil, ...) left p.dialer = %v, want nil — "+
+		"a nil dialer must not be wrapped, so the pre-existing nil-dialer panic stays at "+
+		"h1Pool.dialOne's original call site instead of relocating inside the wrapping closure", p.dialer)
+}
+
 // waitForH1 polls cond until it holds or the deadline expires. The pool actor
 // applies releases and evictions asynchronously, so state assertions that follow a
 // release must wait for the actor rather than read immediately.
