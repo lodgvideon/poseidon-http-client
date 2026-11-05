@@ -1,0 +1,103 @@
+{
+  "scope": [
+    "hpack/dynamic_index.go",
+    "hpack/dynamic_table.go",
+    "hpack/encoder.go"
+  ],
+  "checksums": {
+    "hpack/dynamic_index.go": {
+      "sha256": "bb4b2ff925f43fd3eca4ae7b1c846d0ab4aa26d1670901b15fe6fcb614ff12a6",
+      "matches_current_checkout": true
+    },
+    "hpack/dynamic_table.go": {
+      "sha256": "45cbd25509ec9ffb827afd4bb3789125dbefc66f1b68c0447744a08a1ffa0a31",
+      "matches_current_checkout": true
+    },
+    "hpack/encoder.go": {
+      "sha256": "c470069c8a579e95b713d9bc7104a783365b2beb19593a910d214f6d1e4f1893",
+      "matches_current_checkout": true
+    },
+    "hpack/dynamic_index_test.go": {
+      "sha256": "5444879b5e3d9ec6ee89ca5bf33dc28477cf01f7c93446763e9756b657fac2de",
+      "matches_current_checkout": true
+    }
+  },
+  "coverage": {
+    "package_percent": 97.5,
+    "all_changed_functions_percent": 100.0
+  },
+  "crapper": {
+    "full_file_exit_code": 2,
+    "max_changed_function_crap": 8.0,
+    "only_threshold_failure": "Encoder.writeFieldAlreadyFlushedSize: CRAP 12, unchanged"
+  },
+  "dryer": {
+    "threshold": 0.8,
+    "pairs": 1,
+    "new_changed_pairs": 0,
+    "only_pair": "SetMaxDynamicTableSize and SetMaxDynamicTableSizeLimit: score 1.0, both unchanged"
+  },
+  "verified_unchanged_functions": {
+    "writeFieldAlreadyFlushedSize": true,
+    "SetMaxDynamicTableSize": true,
+    "SetMaxDynamicTableSizeLimit": true
+  },
+  "mutator": {
+    "mode": "actual local mutator run; separate from Gremlins CI gate",
+    "inventory_sites_by_file": {
+      "hpack/dynamic_index.go": 31,
+      "hpack/dynamic_table.go": 71,
+      "hpack/encoder.go": 21
+    },
+    "inventory_total_sites": 123,
+    "executed_scope": [
+      "hpack/dynamic_index.go"
+    ],
+    "test_command": "go test ./hpack -run TestEncoderDynamicLookup -count=1",
+    "tests_executed_against_mutants": true,
+    "coverage_import_note": "mutator did not recognize coverage.out; --no-coverage forced every site. Go/crapper independently verified coverage.",
+    "before_boundary_tests": {
+      "executed": 31,
+      "killed": 23,
+      "survived": 8,
+      "percent": 74.2,
+      "exit_code": 3
+    },
+    "after_boundary_tests": {
+      "executed": 31,
+      "killed": 29,
+      "survived": 2,
+      "percent": 93.5,
+      "exit_code": 3
+    },
+    "survivors": [
+      {
+        "line": 48,
+        "mutation": "newest reset 0 -> 1",
+        "assessment": "changes the arbitrary absolute ID origin; relative indices unchanged"
+      },
+      {
+        "line": 67,
+        "mutation": "pair candidate index final 1 -> 0",
+        "assessment": "candidate is one entry newer than newest matching pair; validation rejects it and linear fallback preserves output, with performance cost"
+      }
+    ],
+    "gremlins": "not verified; parent reported Docker storage/mount blockage"
+  },
+  "snapshot": "lazy index map initialization",
+  "added_boundary_test": {
+    "file": "hpack/dynamic_index_test.go",
+    "function": "TestEncoderDynamicLookup_EmptyFields",
+    "cases": [
+      "newest empty pair",
+      "older empty pair",
+      "empty pair after forced hash collision"
+    ],
+    "verification": [
+      "targeted lookup tests pass",
+      "entire hpack tests pass",
+      "six additional generated mutants killed"
+    ],
+    "review": "reviewing-tests skill: boundary partitions, AAA, testify, t.Parallel; Gremlins unavailable"
+  }
+}

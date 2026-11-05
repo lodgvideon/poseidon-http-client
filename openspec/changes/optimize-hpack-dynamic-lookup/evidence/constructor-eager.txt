@@ -1,0 +1,9 @@
+goos: darwin
+goarch: arm64
+pkg: github.com/lodgvideon/poseidon-http-client/hpack
+cpu: Apple M4 Pro
+BenchmarkEncoder_DynamicConstructor-12    	  113505	      1171 ns/op	    7888 B/op	      13 allocs/op
+BenchmarkEncoder_DynamicConstructor-12    	  133500	      1045 ns/op	    7888 B/op	      13 allocs/op
+BenchmarkEncoder_DynamicConstructor-12    	  129913	       987.1 ns/op	    7888 B/op	      13 allocs/op
+PASS
+ok  	github.com/lodgvideon/poseidon-http-client/hpack	1.156s

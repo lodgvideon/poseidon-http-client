@@ -1,0 +1,46 @@
+go vet ./...
+GOTOOLCHAIN=local golangci-lint run
+client/retry.go:44:3: missing cases in switch of type frame.ErrCode: frame.ErrCodeNoError, frame.ErrCodeProtocolError, frame.ErrCodeFlowControlError, frame.ErrCodeSettingsTimeout, frame.ErrCodeStreamClosed, frame.ErrCodeFrameSizeError, frame.ErrCodeCancel, frame.ErrCodeCompressionError, frame.ErrCodeConnectError, frame.ErrCodeInadequateSecurity, frame.ErrCodeHTTP11Required (exhaustive)
+		switch sre.Code {
+		^
+conn/conn.go:360:2: G118: Goroutine uses context.Background/TODO while request-scoped context is available (gosec)
+	go c.readerLoop()
+	^
+conn/conn.go:362:3: G118: Goroutine uses context.Background/TODO while request-scoped context is available (gosec)
+		go c.keepaliveLoop(opts.KeepaliveInterval)
+		^
+quic/retry.go:40:19: G407: Use of hardcoded IV/nonce for encryption by passing hardcoded slice/array by passing hardcoded global (gosec)
+	want := aead.Seal(nil, retryNonce[:], nil, pseudo) // empty plaintext → the 16-byte tag
+	                 ^
+client/conformance_forbidden_headers_test.go:49:8: Consider preallocating captured with capacity len(capH.headers) (prealloc)
+			var captured []capturedHeaders
+			    ^
+client/conformance_protocol_method_test.go:43:8: Consider preallocating handled with capacity len(capH.headers) (prealloc)
+			var handled []capturedHeaders
+			    ^
+conn/conformance_pushfields_test.go:21:2: Consider preallocating fields with capacity 4 + len(extra) (prealloc)
+	fields := []hpack.HeaderField{
+	^
+conn/fuzz_test.go:22:2: Consider preallocating hdr with capacity 9 + len(block) (prealloc)
+	hdr := make([]byte, 9)
+	^
+frame/conformance_test.go:14:2: Consider preallocating hdr with capacity FrameHeaderSize + len(payload) (prealloc)
+	hdr := make([]byte, FrameHeaderSize)
+	^
+http1/injection_test.go:83:2: Consider preallocating base with capacity 3 + len(extra) (prealloc)
+	base := []header.Field{
+	^
+http3/qpack_stream_bounds_test.go:217:2: Consider preallocating chunks with capacity 1 + len(instr) (prealloc)
+	chunks := [][]byte{qpackUniStream(StreamTypeQPACKEncoder)}
+	^
+quic/retry_test.go:172:2: Consider preallocating body (prealloc)
+	body := []byte{0xf0, 0x00, 0x00, 0x00, 0x01, 0x00} // byte0, version 1, DCID len 0
+	^
+quic/versionneg_test.go:14:2: Consider preallocating pkt with capacity 6 + len(dcid) + 1 + len(scid) + len(b)*len(versions) (prealloc)
+	pkt := []byte{0x80}           // long-header form (the remaining bits are unused in a VN)
+	^
+13 issues:
+* exhaustive: 1
+* gosec: 3
+* prealloc: 9
+make: *** [lint] Error 1
