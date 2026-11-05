@@ -1,7 +1,5 @@
 package hpack
 
-import "bytes"
-
 // Encoder encodes HPACK header blocks. Holds a dynamic table per HTTP/2
 // connection. NOT goroutine-safe.
 //
@@ -53,8 +51,10 @@ type Encoder struct {
 // NewEncoder returns a fresh HPACK encoder with the default dynamic
 // table size of 4096 octets (RFC 7541).
 func NewEncoder() *Encoder {
+	dt := newDynamicTable(defaultMaxDynamicTableSize)
+	dt.index = newDynamicTableIndex()
 	return &Encoder{
-		dt:          newDynamicTable(defaultMaxDynamicTableSize),
+		dt:          dt,
 		peerMaxSize: defaultMaxDynamicTableSize,
 		callerLimit: defaultMaxDynamicTableSize,
 		localLimit:  defaultMaxDynamicTableSize,
@@ -189,18 +189,5 @@ func (e *Encoder) writeFieldAlreadyFlushedSize(dst, name, value []byte, mode Ind
 }
 
 func (e *Encoder) dynamicLookup(name, value []byte) (uint64, bool) {
-	var nameOnly uint64
-	for i := 1; i <= e.dt.len(); i++ {
-		n, v := e.dt.at(i)
-		if !bytes.Equal(n, name) {
-			continue
-		}
-		if bytes.Equal(v, value) {
-			return uint64(i), true
-		}
-		if nameOnly == 0 {
-			nameOnly = uint64(i)
-		}
-	}
-	return nameOnly, false
+	return e.dt.index.lookup(e.dt, name, value)
 }

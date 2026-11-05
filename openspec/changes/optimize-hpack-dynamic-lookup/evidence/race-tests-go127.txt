@@ -1,0 +1,21 @@
+ok  	github.com/lodgvideon/poseidon-http-client/client	74.658s
+ok  	github.com/lodgvideon/poseidon-http-client/conn	11.967s
+?   	github.com/lodgvideon/poseidon-http-client/examples/grpc	[no test files]
+?   	github.com/lodgvideon/poseidon-http-client/examples/h2gen	[no test files]
+?   	github.com/lodgvideon/poseidon-http-client/examples/http1	[no test files]
+?   	github.com/lodgvideon/poseidon-http-client/examples/http2	[no test files]
+?   	github.com/lodgvideon/poseidon-http-client/examples/http3	[no test files]
+?   	github.com/lodgvideon/poseidon-http-client/examples/loadgen	[no test files]
+ok  	github.com/lodgvideon/poseidon-http-client/frame	3.523s
+ok  	github.com/lodgvideon/poseidon-http-client/grpc	9.420s
+ok  	github.com/lodgvideon/poseidon-http-client/header	4.744s
+ok  	github.com/lodgvideon/poseidon-http-client/hpack	5.245s
+ok  	github.com/lodgvideon/poseidon-http-client/http1	21.131s
+ok  	github.com/lodgvideon/poseidon-http-client/http3	6.816s
+ok  	github.com/lodgvideon/poseidon-http-client/internal/bufx	3.867s
+ok  	github.com/lodgvideon/poseidon-http-client/internal/bytesx	1.810s
+ok  	github.com/lodgvideon/poseidon-http-client/internal/poolcore	5.511s
+ok  	github.com/lodgvideon/poseidon-http-client/pool	2.729s
+ok  	github.com/lodgvideon/poseidon-http-client/qpack	5.001s
+ok  	github.com/lodgvideon/poseidon-http-client/quic	12.201s
+ok  	github.com/lodgvideon/poseidon-http-client/trace	4.131s

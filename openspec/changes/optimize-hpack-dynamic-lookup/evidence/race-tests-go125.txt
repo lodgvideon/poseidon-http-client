@@ -1,0 +1,2 @@
+ok  	github.com/lodgvideon/poseidon-http-client/hpack	1.503s
+ok  	github.com/lodgvideon/poseidon-http-client/conn	10.713s

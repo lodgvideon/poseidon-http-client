@@ -38,6 +38,7 @@ type dynamicTable struct {
 
 	maxSize uint32 // current SETTINGS_HEADER_TABLE_SIZE limit
 	size    uint32 // sum of entry sizes (RFC §4.1)
+	index   *dynamicTableIndex
 }
 
 func newDynamicTable(maxSize uint32) *dynamicTable {
@@ -99,6 +100,9 @@ func (d *dynamicTable) add(name, value []byte) {
 	d.entries[pos] = dynEntry{nameOff, uint32(len(name)), valueOff, uint32(len(value))}
 	d.count++
 	d.size += es
+	if d.index != nil {
+		d.index.add(name, value)
+	}
 
 	if uint32(len(d.arena)) > d.used*2 && d.count > 0 {
 		d.compactArena()
@@ -129,6 +133,10 @@ func (d *dynamicTable) evictOldest() {
 		return
 	}
 	e := d.entries[d.head]
+	if d.index != nil {
+		name, value := d.at(d.count)
+		d.index.remove(name, value, d.count)
+	}
 	d.size -= e.nameLen + e.valueLen + entryOverhead
 	d.used -= e.nameLen + e.valueLen
 	d.head = (d.head + 1) % len(d.entries)
@@ -139,6 +147,9 @@ func (d *dynamicTable) evictOldest() {
 }
 
 func (d *dynamicTable) clear() {
+	if d.index != nil {
+		d.index.clear()
+	}
 	d.head = 0
 	d.count = 0
 	d.entries = d.entries[:0]

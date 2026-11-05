@@ -1,0 +1,45 @@
+Wrote /private/tmp/poseidon-hpack-quality/project/.metrics/mutate/github.com/lodgvideon/poseidon-http-client/hpack.edn
+Wrote /private/tmp/poseidon-hpack-quality/project/.metrics/mutate/github.com/lodgvideon/poseidon-http-client/hpack.dynamicTable.edn
+Wrote /private/tmp/poseidon-hpack-quality/project/.metrics/mutate/github.com/lodgvideon/poseidon-http-client/hpack.dynamicTableIndex.edn
+KILLED    hpack/dynamic_index.go:24 == -> !=
+KILLED    hpack/dynamic_index.go:30 0 -> 1
+KILLED    hpack/dynamic_index.go:35 - -> +
+KILLED    hpack/dynamic_index.go:35 + -> -
+KILLED    hpack/dynamic_index.go:35 1 -> 0
+KILLED    hpack/dynamic_index.go:37 0 -> 1
+KILLED    hpack/dynamic_index.go:37 == -> !=
+KILLED    hpack/dynamic_index.go:38 0 -> 1
+KILLED    hpack/dynamic_index.go:40 == -> !=
+SURVIVED  hpack/dynamic_index.go:48 0 -> 1
+KILLED    hpack/dynamic_index.go:54 delete !
+KILLED    hpack/dynamic_index.go:55 0 -> 1
+KILLED    hpack/dynamic_index.go:55 false -> true
+KILLED    hpack/dynamic_index.go:57 - -> +
+KILLED    hpack/dynamic_index.go:57 + -> -
+KILLED    hpack/dynamic_index.go:57 1 -> 0
+KILLED    hpack/dynamic_index.go:59 delete !
+KILLED    hpack/dynamic_index.go:63 true -> false
+KILLED    hpack/dynamic_index.go:67 - -> +
+KILLED    hpack/dynamic_index.go:67 + -> -
+SURVIVED  hpack/dynamic_index.go:67 1 -> 0
+KILLED    hpack/dynamic_index.go:69 && -> ||
+KILLED    hpack/dynamic_index.go:70 true -> false
+KILLED    hpack/dynamic_index.go:74 false -> true
+KILLED    hpack/dynamic_index.go:79 1 -> 0
+KILLED    hpack/dynamic_index.go:79 <= -> <
+KILLED    hpack/dynamic_index.go:81 delete !
+KILLED    hpack/dynamic_index.go:85 true -> false
+KILLED    hpack/dynamic_index.go:87 == -> !=
+KILLED    hpack/dynamic_index.go:87 0 -> 1
+KILLED    hpack/dynamic_index.go:91 false -> true
+Function             Namespace                                                           Killed  Survived  Uncovered  Sites   Score
+-----------------------------------------------------------------------------------------------------------------------------------
+hashes               github.com/lodgvideon/poseidon-http-client/hpack.dynamicTableIndex       0         0          0      0    n/a
+newDynamicTableIndex github.com/lodgvideon/poseidon-http-client/hpack                         0         0          0      0    n/a
+clear                github.com/lodgvideon/poseidon-http-client/hpack.dynamicTableIndex       0         1          0      1   0.0%
+lookup               github.com/lodgvideon/poseidon-http-client/hpack.dynamicTableIndex      13         1          0     14  92.9%
+add                  github.com/lodgvideon/poseidon-http-client/hpack.dynamicTableIndex       2         0          0      2 100.0%
+lookupAfterCollision github.com/lodgvideon/poseidon-http-client/hpack.dynamicTable            7         0          0      7 100.0%
+remove               github.com/lodgvideon/poseidon-http-client/hpack.dynamicTableIndex       7         0          0      7 100.0%
+-----------------------------------------------------------------------------------------------------------------------------------
+Total                                                                                        29         2          0     31   93.5%
