@@ -106,12 +106,6 @@ type connHandler struct {
 	streams connOps
 	dec     *hpack.Decoder
 
-	// scratch holds a slice of decoded HeaderField values for the current
-	// header block. Reused across blocks; the contract is that
-	// stream.push hands the slice to the consumer and the consumer must
-	// not retain it past the next Recv (see spec §4.1).
-	scratch []hpack.HeaderField
-
 	// pendingHeaderBlock buffers HEADERS+CONTINUATION fragments of the
 	// in-flight stream until END_HEADERS arrives. The block is classified
 	// (final / informational / trailers) only once it is complete and
@@ -144,7 +138,6 @@ func newConnHandler(streams connOps, dec *hpack.Decoder) *connHandler {
 	return &connHandler{
 		streams:        streams,
 		dec:            dec,
-		scratch:        make([]hpack.HeaderField, 0, 16),
 		maxHeaderBytes: defaultMaxHeaderBytes,
 	}
 }
@@ -364,14 +357,14 @@ func isInformationalStatus(fields []hpack.HeaderField) bool {
 // is not a complete response (RFC 7230 §3.3, RFC 9113 §8.1 states this
 // explicitly), and admitting it would end the stream with no final status —
 // silently yielding a 1xx as the caller's result.
-func (h *connHandler) classifyHeaderBlock(s *Stream, endStream bool) (StreamEventType, error) {
+func (h *connHandler) classifyHeaderBlock(s *Stream, fields []hpack.HeaderField, endStream bool) (StreamEventType, error) {
 	if s.headersReceived {
 		if !endStream {
 			return 0, &StreamError{StreamID: s.id, Code: frame.ErrCodeProtocolError}
 		}
 		return EventTrailers, nil
 	}
-	if isInformationalStatus(h.scratch) {
+	if isInformationalStatus(fields) {
 		if endStream {
 			return 0, &StreamError{StreamID: s.id, Code: frame.ErrCodeProtocolError}
 		}
@@ -385,8 +378,8 @@ func (h *connHandler) classifyHeaderBlock(s *Stream, endStream bool) (StreamEven
 	// Capture the final response's status and Content-Length declaration for the
 	// END_STREAM check. Only the final block declares the body's length; a 1xx or
 	// a trailer block does not, and both are handled above.
-	s.respStatus = numericStatus(h.scratch)
-	s.clDeclared, s.clPresent, s.clValid = responseContentLength(h.scratch)
+	s.respStatus = numericStatus(fields)
+	s.clDeclared, s.clPresent, s.clValid = responseContentLength(fields)
 	return EventHeaders, nil
 }
 
@@ -431,24 +424,34 @@ func (h *connHandler) checkContentLength(s *Stream) error {
 	return nil
 }
 
-func (h *connHandler) emitHeaderBlock(s *Stream, hb []byte, endStream bool) error {
-	h.scratch = h.scratch[:0]
+func (h *connHandler) decodeHeaderBlock(hb []byte) (*HeaderBlock, error) {
+	blk := acquireHeaderBlock()
 	err := h.dec.DecodeBlock(hb, func(f hpack.HeaderField) error {
-		h.scratch = append(h.scratch, f)
+		blk.appendField(f)
 		return nil
 	})
 	if err != nil {
-		return headerDecodeConnError(err)
+		blk.Release()
+		return nil, headerDecodeConnError(err)
 	}
+	return blk, nil
+}
+
+func (h *connHandler) emitHeaderBlock(s *Stream, hb []byte, endStream bool) error {
+	blk, err := h.decodeHeaderBlock(hb)
+	if err != nil {
+		return err
+	}
+	defer func() { blk.Release() }()
 	// Every decoded field is checked here, and here only: this is the one place
 	// an HPACK block becomes fields the caller sees, so a rule applied here
 	// cannot be walked around by a later path. See conn/validate.go for what
 	// RFC 7540 §10.3 and §8.1.2.2 require and why they bind a client and not
 	// only an intermediary.
-	if verr := h.validateResponseFields(s); verr != nil {
+	if verr := h.validateResponseFields(s, blk.fields); verr != nil {
 		return verr
 	}
-	evType, cerr := h.classifyHeaderBlock(s, endStream)
+	evType, cerr := h.classifyHeaderBlock(s, blk.fields, endStream)
 	if cerr != nil {
 		return cerr
 	}
@@ -467,17 +470,14 @@ func (h *connHandler) emitHeaderBlock(s *Stream, hb []byte, endStream bool) erro
 	// One pooled block for the whole header block: the bytes and the fields
 	// viewing them. Ownership transfers to the consumer, which gives it back
 	// with StreamEvent.Release.
-	blk := copyFieldsToBlock(h.scratch)
 	// Delivered and marked ended in one s.mu section — see Stream.deliverEnd.
-	if !s.deliverEnd(StreamEvent{
+	if s.deliverEnd(StreamEvent{
 		Type:      evType,
 		Headers:   blk.fields,
 		Block:     blk,
 		EndStream: endStream,
 	}, endStream) {
-		// push dropped the event (channel overflow); nobody was delivered it, so
-		// this is still the only owner.
-		blk.Release()
+		blk = nil
 	}
 	if endStream {
 		h.streams.markStreamDone(streamID)
@@ -610,13 +610,11 @@ func (h *connHandler) handlePushPromiseBlock(parentStreamID, promisedStreamID ui
 	// one desynchronizes the decoder for every later block on the
 	// connection. Both survivable outcomes below — a vanished parent and a
 	// refused promise — return nil and keep reading, so neither may skip it.
-	h.scratch = h.scratch[:0]
-	if err := h.dec.DecodeBlock(hb, func(f hpack.HeaderField) error {
-		h.scratch = append(h.scratch, f)
-		return nil
-	}); err != nil {
-		return headerDecodeConnError(err)
+	blk, err := h.decodeHeaderBlock(hb)
+	if err != nil {
+		return err
 	}
+	defer func() { blk.Release() }()
 
 	// Validate and record the promised id first (RFC 9113 §6.6): an illegal id is
 	// a connection error PROTOCOL_ERROR, and recording a legal one advances
@@ -636,7 +634,7 @@ func (h *connHandler) handlePushPromiseBlock(parentStreamID, promisedStreamID ui
 	// like the ErrPushRefused path below — so the promised stream is reset and
 	// nothing is reserved or delivered. Done before reservePushedStream so there
 	// is no half-reserved stream to unwind on the malformed path.
-	if !validatePromisedRequestFields(h.scratch) {
+	if !validatePromisedRequestFields(blk.fields) {
 		_ = h.streams.rstStream(promisedStreamID, frame.ErrCodeProtocolError)
 		return nil
 	}
@@ -673,7 +671,7 @@ func (h *connHandler) handlePushPromiseBlock(parentStreamID, promisedStreamID ui
 	// is not authoritative for. This is a stream-level refusal — the connection
 	// and the parent stream survive — done before reservePushedStream so no
 	// stream is half-reserved on the refusal path.
-	if !h.validatePushedRequest(parent) {
+	if !h.validatePushedRequest(parent, blk.fields) {
 		_ = h.streams.rstStream(promisedStreamID, frame.ErrCodeProtocolError)
 		return nil
 	}
@@ -687,21 +685,18 @@ func (h *connHandler) handlePushPromiseBlock(parentStreamID, promisedStreamID ui
 	pushed, err := h.streams.reservePushedStream(promisedStreamID)
 	if err != nil {
 		_ = h.streams.rstStream(promisedStreamID, frame.ErrCodeRefusedStream)
-		//nolint:nilerr // Refusing the promised stream IS the handling; returning
+		// Refusing the promised stream IS the handling; returning
 		// err here would propagate to the reader loop and tear down the
 		// connection over a stream-level refusal.
 		return nil
 	}
 
-	blk := copyFieldsToBlock(h.scratch)
-
 	// Deliver the push event on the parent stream, gated on it still being the
 	// stream looked up above. A *Stream is pooled and the work between that
-	// lookup and here — reserving the promised stream, taking a block from the
-	// pool, copying every header field — is a window in which the application
-	// can finish the parent request, Close it, and a fresh NewStream can claim
-	// the struct. An ungated push would then announce this promise to whichever
-	// request now owns it.
+	// lookup and here — reserving the promised stream — is a window in which
+	// the application can finish the parent request, Close it, and a fresh
+	// NewStream can claim the struct. An ungated push would then announce this
+	// promise to whichever request now owns it.
 	//
 	// If the parent is gone the promise cannot be announced to anyone, so the
 	// promised stream is refused rather than left reserved and unreachable —
@@ -713,15 +708,15 @@ func (h *connHandler) handlePushPromiseBlock(parentStreamID, promisedStreamID ui
 		PushStreamID: promisedStreamID,
 		Block:        blk,
 	}) {
-		blk.Release()
 		_ = h.streams.rstStream(promisedStreamID, frame.ErrCodeRefusedStream)
 		return nil
 	}
+	blk = nil
 	_ = pushed // stream registered; subsequent HEADERS/DATA frames find it
 	return nil
 }
 
-// validatePushedRequest checks the decoded promised request (in h.scratch)
+// validatePushedRequest checks the decoded promised request fields
 // against RFC 9113 §8.4: the :method must be safe and cacheable (GET/HEAD), the
 // promise must not indicate request content, and the :authority must be one the
 // server is authoritative for — matching the request that triggered the push
@@ -730,18 +725,18 @@ func (h *connHandler) handlePushPromiseBlock(parentStreamID, promisedStreamID ui
 // It takes the parent stream rather than its authority so the comparison can
 // happen behind the stream's own mutex: the parent is pooled, and a slice of its
 // buffer handed out here would outlive the lock that protects it.
-func (h *connHandler) validatePushedRequest(parent *Stream) bool {
+func (h *connHandler) validatePushedRequest(parent *Stream, fields []hpack.HeaderField) bool {
 	var method, authority []byte
-	for i := range h.scratch {
-		switch string(h.scratch[i].Name) {
+	for i := range fields {
+		switch string(fields[i].Name) {
 		case ":method":
-			method = h.scratch[i].Value
+			method = fields[i].Value
 		case ":authority":
-			authority = h.scratch[i].Value
+			authority = fields[i].Value
 		case "content-length":
 			// A promise that indicates request content is refused; only an
 			// explicit zero is tolerated (a bodyless GET/HEAD may carry it).
-			if n, ok := parseDecimalDigits(h.scratch[i].Value); !ok || n != 0 {
+			if n, ok := parseDecimalDigits(fields[i].Value); !ok || n != 0 {
 				return false
 			}
 		}
@@ -820,7 +815,7 @@ var _ frame.Handler = (*connHandler)(nil)
 //
 // §8.1.2.6 is explicit about the direction that applies to us: "Clients MUST NOT
 // accept a malformed response." This path accepted every one of these until now.
-func (h *connHandler) validateResponseFields(s *Stream) error {
+func (h *connHandler) validateResponseFields(s *Stream, fields []hpack.HeaderField) error {
 	streamErr := func() error { return &StreamError{StreamID: s.id, Code: frame.ErrCodeProtocolError} }
 
 	// classifyHeaderBlock sets headersReceived only after a FINAL header block,
@@ -834,8 +829,8 @@ func (h *connHandler) validateResponseFields(s *Stream) error {
 	// catching up.
 	isTrailer := s.headersReceived
 	sawRegular, sawStatus := false, false
-	for i := range h.scratch {
-		name, value := h.scratch[i].Name, h.scratch[i].Value
+	for i := range fields {
+		name, value := fields[i].Name, fields[i].Value
 		if len(name) > 0 && name[0] == ':' {
 			// §8.1.2.1: "All pseudo-header fields MUST appear in the header block
 			// before regular header fields. Any request or response that contains

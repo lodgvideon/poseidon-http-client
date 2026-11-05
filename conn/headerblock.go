@@ -49,6 +49,12 @@ var headerBlockPool = sync.Pool{
 	},
 }
 
+func acquireHeaderBlock() *HeaderBlock {
+	b, _ := headerBlockPool.Get().(*HeaderBlock)
+	b.buf, b.fields = b.buf[:0], b.fields[:0]
+	return b
+}
+
 // copyFieldsToBlock copies fields into a pooled block and returns it. The
 // returned block's Fields are the caller's to deliver; Release returns
 // everything.
@@ -71,8 +77,7 @@ var headerBlockPool = sync.Pool{
 // field keeps its own array alive — but one block in one array is what makes the
 // clamp above easy to check.
 func copyFieldsToBlock(fields []header.Field) *HeaderBlock {
-	b, _ := headerBlockPool.Get().(*HeaderBlock)
-	b.buf, b.fields = b.buf[:0], b.fields[:0]
+	b := acquireHeaderBlock()
 
 	n := 0
 	for i := range fields {
@@ -82,18 +87,39 @@ func copyFieldsToBlock(fields []header.Field) *HeaderBlock {
 	b.fields = slices.Grow(b.fields, len(fields))
 
 	for _, f := range fields {
-		nameOff := len(b.buf)
-		b.buf = append(b.buf, f.Name...)
-		valOff := len(b.buf)
-		b.buf = append(b.buf, f.Value...)
-		endOff := len(b.buf)
-		b.fields = append(b.fields, header.Field{
-			Name:     b.buf[nameOff:valOff:valOff],
-			Value:    b.buf[valOff:endOff:endOff],
-			Indexing: f.Indexing,
-		})
+		b.appendField(f)
 	}
 	return b
+}
+
+func (b *HeaderBlock) appendField(f header.Field) {
+	capacity := cap(b.buf)
+	b.buf = slices.Grow(b.buf, len(f.Name)+len(f.Value))
+	if cap(b.buf) != capacity {
+		b.rebindFields()
+	}
+	nameOff := len(b.buf)
+	b.buf = append(b.buf, f.Name...)
+	valOff := len(b.buf)
+	b.buf = append(b.buf, f.Value...)
+	endOff := len(b.buf)
+	b.fields = append(b.fields, header.Field{
+		Name:     b.buf[nameOff:valOff:valOff],
+		Value:    b.buf[valOff:endOff:endOff],
+		Indexing: f.Indexing,
+	})
+}
+
+func (b *HeaderBlock) rebindFields() {
+	nameOff := 0
+	for i := range b.fields {
+		f := &b.fields[i]
+		valOff := nameOff + len(f.Name)
+		endOff := valOff + len(f.Value)
+		f.Name = b.buf[nameOff:valOff:valOff]
+		f.Value = b.buf[valOff:endOff:endOff]
+		nameOff = endOff
+	}
 }
 
 // NewHeaderBlock copies fields into a pooled block, for a caller synthesising a
